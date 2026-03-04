@@ -86,6 +86,7 @@ export class BuildingShadowsEffect extends EffectBase {
       quality: 80,
       sunLatitude: 0.03,
       blurStrength: 0.3,
+      debugDisplayMode: 'shadow',
       // High-level blur control (0 = hard edge, 1 = very soft)
       penumbraRadiusNear: 0.0,
       penumbraRadiusFar: 0.06,
@@ -156,7 +157,7 @@ export class BuildingShadowsEffect extends EffectBase {
           name: 'main',
           label: 'Building Shadows',
           type: 'inline',
-          parameters: ['opacity', 'length', 'quality', 'blurStrength', 'sunriseTime', 'sunsetTime']
+          parameters: ['opacity', 'length', 'quality', 'blurStrength', 'sunriseTime', 'sunsetTime', 'debugDisplayMode']
         }
       ],
       parameters: {
@@ -207,6 +208,15 @@ export class BuildingShadowsEffect extends EffectBase {
           max: 24.0,
           step: 0.1,
           default: 18.0
+        },
+        debugDisplayMode: {
+          type: 'select',
+          label: 'Debug Display',
+          options: {
+            shadow: 'Shadow (Baked)',
+            outdoors: 'Raw Outdoors Mask'
+          },
+          default: 'shadow'
         }
       }
     };
@@ -222,8 +232,9 @@ export class BuildingShadowsEffect extends EffectBase {
     // Renders a full-UV quad (0..1) to generate the shadow map
     this.bakeScene = new THREE.Scene();
     // Orthographic camera covering 0..1 in X and Y
-    // left=0, right=1, top=1, bottom=0, near=0, far=1
-    this.bakeCamera = new THREE.OrthographicCamera(0, 1, 1, 0, 0, 1);
+    // IMPORTANT: Use Y-up (bottom=0, top=1) to match Three.js world coordinates
+    // The baseMesh has scale.y=-1 to flip from Foundry Y-down to Three.js Y-up
+    this.bakeCamera = new THREE.OrthographicCamera(0, 1, 0, 1, 0, 1);
     
     // Raymarching Material (Expensive)
     this.bakeMaterial = new THREE.ShaderMaterial({
@@ -257,7 +268,10 @@ export class BuildingShadowsEffect extends EffectBase {
         varying vec2 vUv;
 
         bool inBounds(vec2 uv) {
-          return uv.x >= 0.0 && uv.x <= 1.0 && uv.y >= 0.0 && uv.y <= 1.0;
+          // vUv here is already in scene-UV space [0..1] matching the authored outdoors mask.
+          // Use a small inset to avoid edge-smear from linear filtering on ClampToEdge.
+          const float eps = 0.0005;
+          return uv.x >= eps && uv.x <= 1.0 - eps && uv.y >= eps && uv.y <= 1.0 - eps;
         }
 
         void main() {
@@ -356,6 +370,12 @@ export class BuildingShadowsEffect extends EffectBase {
     // PlaneGeometry defaults to 1x1 centered at 0,0
     this.bakeQuad = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), this.bakeMaterial);
     this.bakeQuad.position.set(0.5, 0.5, 0); // Move center to 0.5,0.5 so it spans 0..1
+    // IMPORTANT: The scene base plane uses scale.y=-1 to map Foundry's Y-down
+    // coordinates into Three.js Y-up world space while keeping flipY=false.
+    // That means world position → vUv mapping is vertically flipped.
+    // We must apply the same geometry flip here, otherwise the baked shadow
+    // map will be mirrored/misaligned when projected back onto the base plane.
+    this.bakeQuad.scale.y = -1;
     this.bakeScene.add(this.bakeQuad);
 
     // 2. Create Display Environment (Screen Space Render)
@@ -394,10 +414,24 @@ export class BuildingShadowsEffect extends EffectBase {
     }
 
     // Create the world-pinned mesh for display
+    // IMPORTANT: baseMesh has scale.y=-1 to flip from Foundry Y-down to Three.js Y-up
+    // We must copy this transform exactly to align the shadow with the world
     this.shadowMesh = new THREE.Mesh(this.baseMesh.geometry, this.displayMaterial);
     this.shadowMesh.position.copy(this.baseMesh.position);
     this.shadowMesh.rotation.copy(this.baseMesh.rotation);
-    this.shadowMesh.scale.copy(this.baseMesh.scale);
+    this.shadowMesh.scale.copy(this.baseMesh.scale); // Includes Y-flip
+
+    // Ensure the display material map matches the selected debug mode.
+    // Default is the baked shadow map; debug mode can show the raw outdoors mask.
+    if (this.displayMaterial) {
+      const mode = String(this.params?.debugDisplayMode ?? 'shadow');
+      if (mode === 'outdoors') {
+        this.displayMaterial.map = this.outdoorsMask;
+      } else if (this.worldShadowTarget) {
+        this.displayMaterial.map = this.worldShadowTarget.texture;
+      }
+      this.displayMaterial.needsUpdate = true;
+    }
 
     this.shadowScene.add(this.shadowMesh);
   }
@@ -576,7 +610,10 @@ export class BuildingShadowsEffect extends EffectBase {
         
         // Bind the new texture to display material
         if (this.displayMaterial) {
-          this.displayMaterial.map = this.worldShadowTarget.texture;
+          const mode = String(this.params?.debugDisplayMode ?? 'shadow');
+          this.displayMaterial.map = (mode === 'outdoors')
+            ? (this.outdoorsMask || this.worldShadowTarget.texture)
+            : this.worldShadowTarget.texture;
           this.displayMaterial.needsUpdate = true;
         }
       }
@@ -595,6 +632,22 @@ export class BuildingShadowsEffect extends EffectBase {
     // --- PASS 2: RENDER SCREEN SPACE SHADOWS ---
     // Render world-pinned shadow mesh (sampling baked texture) into screen-space target
     if (this.shadowTarget) {
+      // Keep display material's map in sync even if we're not baking this frame.
+      if (this.displayMaterial) {
+        const mode = String(this.params?.debugDisplayMode ?? 'shadow');
+        if (mode === 'outdoors') {
+          if (this.displayMaterial.map !== this.outdoorsMask && this.outdoorsMask) {
+            this.displayMaterial.map = this.outdoorsMask;
+            this.displayMaterial.needsUpdate = true;
+          }
+        } else if (mode === 'shadow') {
+          if (this.worldShadowTarget && this.displayMaterial.map !== this.worldShadowTarget.texture) {
+            this.displayMaterial.map = this.worldShadowTarget.texture;
+            this.displayMaterial.needsUpdate = true;
+          }
+        }
+      }
+
       renderer.setRenderTarget(this.shadowTarget);
       renderer.setClearColor(0xffffff, 1);
       renderer.clear();

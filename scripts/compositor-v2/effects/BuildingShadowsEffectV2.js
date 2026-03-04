@@ -1,40 +1,8 @@
 /**
- * @fileoverview BuildingShadowsEffectV2 — V2 building shadow bake pass.
- *
- * Generates a greyscale shadow-factor texture (1.0 = fully lit, 0.0 = fully
- * shadowed) from a union of all _Outdoors masks up to and including the
- * currently viewed floor. The union mask represents the combined silhouette
- * of every structure visible from the active viewing level, so upper-floor
- * building footprints naturally extend ground-floor shadows.
- *
- * ## Algorithm (matches V1 BuildingShadowsEffect)
- * The bake shader UV-space raymarches along the sun direction from each pixel.
- * Black pixels in the mask (= indoor / building interior) are occluders.
- * If any step along the ray hits a black pixel, the current pixel is in shadow.
- * Output: shadow factor stored in a fixed-resolution RT (1.0 = lit, 0.0 = shadowed).
- *
- * ## Multi-floor shadow extension
- * A union of all floor masks (0..maxFloorIndex) is computed on the CPU via
- * Canvas 2D `ctx.globalCompositeOperation = 'lighten'` (max per channel).
- * This is only rebuilt on floor change, not every frame.
- * The bake shader receives `uFloorCount` and `uFloorHeightShadowScale` to
- * scale shadow length proportionally, simulating taller structures.
- *
- * ## V2 simplification over V1
- * V1 required a world-pinned display mesh to project the baked texture back
- * into screen space (because V1 LightingEffect didn't know scene bounds).
- * V2 LightingEffectV2 receives the bake RT directly and uses `uSceneBounds`
- * to remap screen UV → scene UV inline in the compose shader.
- * No display mesh, no screen-space shadowTarget RT needed.
- *
- * ## Integration
- * - Subscribes to `OutdoorsMaskProviderV2` for per-floor canvases.
- * - `onFloorChange(maxFloorIndex)` triggers union rebuild + rebake.
- * - `setSunAngles(azimuthDeg, elevationDeg)` receives sun state from
- *   `SkyColorEffectV2` (single source of truth for sun direction).
- * - `get shadowFactorTexture()` exposes the bake RT texture for
- *   `LightingEffectV2.render()`.
- *
+ * @fileoverview Building Shadows Effect V2 (adapted from V1)
+ * Generates directional ground-plane shadows from the _Outdoors mask
+ * (white = outdoors, black = indoors/buildings) by smearing indoor
+ * regions along a sun-driven direction.
  * @module compositor-v2/effects/BuildingShadowsEffectV2
  */
 
@@ -42,181 +10,277 @@ import { createLogger } from '../../core/log.js';
 import { weatherController } from '../../core/WeatherController.js';
 import { getFoundryTimePhaseHours } from '../../core/foundry-time-phases.js';
 
-const log = createLogger('BuildingShadowsEffectV2');
+const log = createLogger('BuildingShadowsEffect');
 
-// Resolution of the union mask canvas and the bake RT.
-// 1024 is sufficient — shadow shapes are large-scale; blurry penumbra hides aliasing.
-const BAKE_SIZE = 1024;
-
-// ─── BuildingShadowsEffectV2 ─────────────────────────────────────────────────
-
+/**
+ * Building Shadows Effect V2 (adapted from V1).
+ *
+ * - Uses the _Outdoors luminance mask as a building/ground classifier.
+ * - Treats dark (indoor) regions as occluders that cast a shadow onto
+ *   nearby outdoor pixels.
+ * - The shadow is produced by raymarching backwards along the sun
+ *   direction in screen space and checking for indoor pixels.
+ * 
+ * Performance Optimization:
+ * - Implements "World Space Caching".
+ * - The expensive raymarching shader is rendered only when conditions change (time, params)
+ *   into a persistent World Space texture (worldShadowTarget).
+ * - The per-frame render pass simply samples this cached texture onto the screen-aligned mesh.
+ * - This reduces per-frame cost from 64 texture fetches/math ops to 1 texture fetch.
+ */
 export class BuildingShadowsEffectV2 {
   constructor() {
-    /** @type {boolean} Whether initialize() has been called */
-    this._initialized = false;
-
     /**
-     * Reference to OutdoorsMaskProviderV2. Set by setOutdoorsMaskProvider().
-     * @type {import('./OutdoorsMaskProviderV2.js').OutdoorsMaskProviderV2|null}
+     * Per-floor cached state. Keyed by FloorBand.key. Populated lazily by
+     * bindFloorMasks(). Holds per-floor bakeTarget render targets and
+     * the outdoors mask texture used to drive shadow generation.
+     * @type {Map<string, object>}
      */
-    this._outdoorsMaskProvider = null;
+    this._floorStates = new Map();
 
-    // ── Union mask ──────────────────────────────────────────────────────
-    /** @type {HTMLCanvasElement|null} CPU union canvas */
-    this._unionCanvas = null;
-    /** @type {CanvasRenderingContext2D|null} */
-    this._unionCtx = null;
-    /** @type {THREE.CanvasTexture|null} */
-    this._unionTexture = null;
+    /** @type {THREE.ShaderMaterial|null} */
+    this.bakeMaterial = null; // The expensive raymarcher
 
-    /** @type {HTMLCanvasElement|null} CPU receiver (active floor) canvas */
-    this._receiverCanvas = null;
-    /** @type {CanvasRenderingContext2D|null} */
-    this._receiverCtx = null;
-    /** @type {THREE.CanvasTexture|null} */
-    this._receiverTexture = null;
+    /** @type {THREE.MeshBasicMaterial|null} */
+    this.displayMaterial = null; // The cheap sampler
 
-    // ── Bake pass ───────────────────────────────────────────────────────
-    /** @type {THREE.WebGLRenderTarget|null} Fixed-res shadow factor RT */
-    this._bakeRT = null;
-    /** @type {THREE.ShaderMaterial|null} UV-space raymarcher */
-    this._bakeMaterial = null;
+    /** @type {THREE.Mesh|null} */
+    this.baseMesh = null;
+
     /** @type {THREE.Scene|null} */
-    this._bakeScene = null;
-    /** @type {THREE.OrthographicCamera|null} Covers 0..1 in X and Y */
-    this._bakeCamera = null;
-    /** @type {THREE.Mesh|null} Fullscreen quad for bake */
-    this._bakeQuad = null;
+    this.shadowScene = null; // World-pinned shadow mesh scene
+    /** @type {THREE.Mesh|null} */
+    this.shadowMesh = null;
 
-    // ── State tracking ──────────────────────────────────────────────────
-    /** @type {boolean} Whether a bake is needed this frame */
-    this._needsBake = true;
-    /** @type {string} Hash of last bake inputs to detect changes */
-    this._lastBakeHash = '';
-    /** @type {number} Active max floor index */
-    this._maxFloorIndex = 0;
+    /** @type {THREE.WebGLRenderTarget|null} */
+    this.shadowTarget = null;   // Final building shadow factor texture (Screen Space)
 
-    /** @type {number} Incremented whenever the union canvas is rebuilt */
-    this._unionRevision = 0;
+    /** @type {THREE.WebGLRenderTarget|null} */
+    this.worldShadowTarget = null; // Cached baked shadow map (World Space)
 
-    // ── Sun direction ───────────────────────────────────────────────────
-    /** @type {number} Sun azimuth in degrees (from SkyColorEffectV2) */
-    this._sunAzimuthDeg = 180;
-    /** @type {number} Sun elevation in degrees (from SkyColorEffectV2) */
-    this._sunElevationDeg = 45;
-    /** @type {THREE.Vector2|null} Derived UV-space sun direction */
-    this._sunDir = null;
-    /** @type {number} Time intensity scalar [0..1] (0 = night, 1 = peak shadow hour) */
-    this._timeIntensity = 1.0;
+    /** @type {THREE.Scene|null} */
+    this.bakeScene = null;
+    /** @type {THREE.Camera|null} */
+    this.bakeCamera = null;
+    /** @type {THREE.Mesh|null} */
+    this.bakeQuad = null;
+
+    /** @type {THREE.Texture|null} */
+    this.outdoorsMask = null;   // _Outdoors mask (bright outside, dark indoors)
+
+    /** @type {THREE.Vector2|null} */
+    this.sunDir = null; // Screen-space sun direction, driven by TimeManager
 
     this.params = {
       enabled: true,
       opacity: 0.75,
       length: 0.06,
       quality: 80,
-      sunLatitude: 0.5,
+      sunLatitude: 0.03,
       blurStrength: 0.3,
-      floorHeightShadowScale: 0.5,
-      sunriseTime: 8.0,
-      sunsetTime: 18.0,
-      // Derived penumbra params (computed from blurStrength in update())
+      // High-level blur control (0 = hard edge, 1 = very soft)
       penumbraRadiusNear: 0.0,
       penumbraRadiusFar: 0.06,
       penumbraSamples: 3,
       penumbraExponent: 1.0,
+      sunriseTime: 8.0,
+      sunsetTime: 18.0
+    };
+
+    this.needsBake = true;
+    this.lastBakeHash = '';
+
+    /** @type {function|null} Unsubscribe from EffectMaskRegistry */
+    this._registryUnsub = null;
+
+    /** @type {import('./OutdoorsMaskProviderV2.js').OutdoorsMaskProviderV2|null} */
+    this._outdoorsMaskProvider = null;
+
+    /** @type {THREE.WebGLRenderer|null} */
+    this.renderer = null;
+    /** @type {THREE.Scene|null} */
+    this.mainScene = null;
+    /** @type {THREE.Camera|null} */
+    this.mainCamera = null;
+
+    // One-shot diagnostics to pinpoint invisibility regressions.
+    this._dbgLoggedOnce = false;
+    this._dbgBakedOnce = false;
+
+    // Bump this to force a rebake when shader sampling conventions change.
+    this._bakeVersion = 4;
+  }
+
+
+  /**
+   * Set OutdoorsMaskProviderV2 for V2 integration
+   * @param {import('./OutdoorsMaskProviderV2.js').OutdoorsMaskProviderV2} provider
+   */
+  setOutdoorsMaskProvider(provider) {
+    this._outdoorsMaskProvider = provider;
+    // Subscribe to provider changes
+    provider.subscribe(() => {
+      // Update outdoors mask when provider updates
+      this.outdoorsMask = provider.texture;
+      if (this.outdoorsMask && this.renderer && this.mainScene && this.mainCamera) {
+        this._createShadowMesh();
+        this.needsBake = true;
+      }
+    });
+  }
+
+  /**
+   * Set base mesh for world-pinned projection (V2 integration)
+   * @param {THREE.Mesh} baseMesh
+   */
+  setBaseMesh(baseMesh) {
+    this.baseMesh = baseMesh;
+    
+    // Get _Outdoors mask from provider if available
+    if (this._outdoorsMaskProvider) {
+      this.outdoorsMask = this._outdoorsMaskProvider.texture;
+    }
+
+    // If initialize() has already run and we have a mask, build the shadow mesh
+    if (this.outdoorsMask && this.renderer) {
+      this._createShadowMesh();
+      this.needsBake = true;
+    }
+  }
+
+  /**
+   * Get shadow factor texture for LightingEffectV2 integration
+   * @returns {THREE.Texture|null}
+   */
+  get shadowFactorTexture() {
+    // LightingEffectV2 samples building shadows in scene-UV space (world-stable)
+    // using uBldSceneOrigin/uBldSceneSize reconstruction. Therefore we must
+    // provide the UV-space baked texture, NOT the screen-space projection.
+    return this.worldShadowTarget?.texture || null;
+  }
+
+  /**
+   * Subscribe to the EffectMaskRegistry for 'outdoors' mask updates.
+   * @param {import('../assets/EffectMaskRegistry.js').EffectMaskRegistry} registry
+   */
+  connectToRegistry(registry) {
+    if (this._registryUnsub) { this._registryUnsub(); this._registryUnsub = null; }
+    this._registryUnsub = registry.subscribe('outdoors', (texture) => {
+      this.outdoorsMask = texture;
+      if (!texture) return;
+      if (this.renderer && this.mainScene && this.mainCamera) {
+        this._createShadowMesh();
+        this.needsBake = true;
+      }
+    });
+  }
+
+  /**
+   * UI control schema for Tweakpane
+   */
+  static getControlSchema() {
+    return {
+      enabled: true,
+      groups: [
+        {
+          name: 'main',
+          label: 'Building Shadows',
+          type: 'inline',
+          parameters: ['opacity', 'length', 'quality', 'blurStrength', 'sunriseTime', 'sunsetTime']
+        }
+      ],
+      parameters: {
+        opacity: {
+          type: 'slider',
+          label: 'Shadow Opacity',
+          min: 0.0,
+          max: 1.0,
+          step: 0.01,
+          default: 0.75
+        },
+        length: {
+          type: 'slider',
+          label: 'Shadow Length',
+          min: 0.0,
+          max: 0.3,
+          step: 0.005,
+          default: 0.06
+        },
+        quality: {
+          type: 'slider',
+          label: 'Quality (Samples)',
+          min: 8,
+          max: 128,
+          step: 1,
+          default: 80
+        },
+        blurStrength: {
+          type: 'slider',
+          label: 'Blur Strength',
+          min: 0.0,
+          max: 2.0,
+          step: 0.05,
+          default: 0.3
+        },
+        sunriseTime: {
+          type: 'slider',
+          label: 'Sunrise Time',
+          min: 0.0,
+          max: 24.0,
+          step: 0.1,
+          default: 8.0
+        },
+        sunsetTime: {
+          type: 'slider',
+          label: 'Sunset Time',
+          min: 0.0,
+          max: 24.0,
+          step: 0.1,
+          default: 18.0
+        }
+      }
     };
   }
 
-  // ── Lifecycle ─────────────────────────────────────────────────────────
-
-  /**
-   * Initialize GPU resources.
-   * @param {THREE.WebGLRenderer} renderer
-   */
-  initialize(renderer) {
+  initialize(renderer, scene = null, camera = null) {
     const THREE = window.THREE;
-    if (!THREE || !renderer) return;
+    this.renderer = renderer;
+    this.mainScene = scene;
+    this.mainCamera = camera;
 
-    this._renderer = renderer;
-    this._sunDir = new THREE.Vector2(0, -1);
-
-    // ── CPU canvases (updated on floor change) ─────────────────────────
-    this._unionCanvas = document.createElement('canvas');
-    this._unionCanvas.width  = BAKE_SIZE;
-    this._unionCanvas.height = BAKE_SIZE;
-    this._unionCtx = this._unionCanvas.getContext('2d');
-
-    // Initialise union canvas to all-black (= no outdoor floor masks yet).
-    if (this._unionCtx) {
-      this._unionCtx.fillStyle = '#000';
-      this._unionCtx.fillRect(0, 0, BAKE_SIZE, BAKE_SIZE);
-    }
-
-    this._unionTexture = new THREE.CanvasTexture(this._unionCanvas);
-    this._unionTexture.flipY = false;
-    this._unionTexture.minFilter = THREE.LinearFilter;
-    this._unionTexture.magFilter = THREE.LinearFilter;
-    this._unionTexture.generateMipmaps = false;
-
-    // Receiver canvas (active floor only): gates where shadows are allowed to appear.
-    this._receiverCanvas = document.createElement('canvas');
-    this._receiverCanvas.width  = BAKE_SIZE;
-    this._receiverCanvas.height = BAKE_SIZE;
-    this._receiverCtx = this._receiverCanvas.getContext('2d');
-
-    this._receiverTexture = new THREE.CanvasTexture(this._receiverCanvas);
-    this._receiverTexture.flipY = false;
-    this._receiverTexture.minFilter = THREE.LinearFilter;
-    this._receiverTexture.magFilter = THREE.LinearFilter;
-    this._receiverTexture.generateMipmaps = false;
-
-    // ── Bake RT ────────────────────────────────────────────────────────
-    this._bakeRT = new THREE.WebGLRenderTarget(BAKE_SIZE, BAKE_SIZE, {
-      minFilter: THREE.LinearFilter,
-      magFilter: THREE.LinearFilter,
-      format: THREE.RGBAFormat,
-      type: THREE.UnsignedByteType,
-      wrapS: THREE.ClampToEdgeWrapping,
-      wrapT: THREE.ClampToEdgeWrapping,
-      depthBuffer: false,
-      stencilBuffer: false,
-    });
-    // Clear to white (= fully lit) so the shadow is invisible before first bake.
-    renderer.setRenderTarget(this._bakeRT);
-    renderer.setClearColor(0xffffff, 1);
-    renderer.clear();
-    renderer.setRenderTarget(null);
-
-    // ── Bake material (UV-space raymarcher) ────────────────────────────
-    // Verbatim from V1 BuildingShadowsEffect.bakeMaterial, extended with
-    // uFloorCount / uFloorHeightShadowScale for multi-floor shadow length scaling.
-    this._bakeMaterial = new THREE.ShaderMaterial({
+    // 1. Create Bake Environment (World Space Cache)
+    // Renders a full-UV quad (0..1) to generate the shadow map
+    this.bakeScene = new THREE.Scene();
+    // Orthographic camera covering 0..1 in X and Y
+    // IMPORTANT: Match V1's proven bake mapping:
+    // Use Y-up (bottom=0, top=1). The base plane uses scale.y=-1 to map
+    // Foundry Y-down into Three Y-up; the bake quad applies the same flip.
+    this.bakeCamera = new THREE.OrthographicCamera(0, 1, 0, 1, 0, 1);
+    
+    // Raymarching Material (Expensive)
+    this.bakeMaterial = new THREE.ShaderMaterial({
       uniforms: {
-        // Occluder mask: multi-floor union (black=indoor/building, white=outdoor)
-        tOccluderOutdoors: { value: this._unionTexture },
-        // Receiver mask: active floor outdoors (black=indoor, white=outdoor)
-        tReceiverOutdoors: { value: this._receiverTexture },
-        uSunDir: { value: this._sunDir },
-        uLength: { value: this.params.length },
-        uSampleCount: { value: this.params.quality },
-        uPenumbraRadiusNear:  { value: 0.0 },
-        uPenumbraRadiusFar:   { value: 0.06 },
-        uPenumbraSamples:     { value: 3 },
-        uPenumbraExponent:    { value: 1.0 },
-        // Multi-floor shadow length scaling.
-        uFloorCount:              { value: 1.0 },
-        uFloorHeightShadowScale:  { value: 0.5 },
+        tOutdoors: { value: null },
+        uLength: { value: 0.05 },
+        uSampleCount: { value: 24 },
+        uSunDir: { value: new THREE.Vector2(0, 1) },
+        uPenumbraRadiusNear: { value: 0 },
+        uPenumbraRadiusFar: { value: 0.06 },
+        uPenumbraSamples: { value: 3 },
+        uPenumbraExponent: { value: 1 }
       },
-      vertexShader: /* glsl */`
+      vertexShader: `
         varying vec2 vUv;
         void main() {
+          // Match V1: author vUv directly from geometry UVs.
+          // The bake quad is flipped (scale.y=-1) so the rendered result matches
+          // the base plane's Y flip exactly.
           vUv = uv;
           gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
         }
       `,
-      fragmentShader: /* glsl */`
-        uniform sampler2D tOccluderOutdoors;
-        uniform sampler2D tReceiverOutdoors;
+      fragmentShader: `
+        uniform sampler2D tOutdoors;
         uniform float uLength;
         uniform float uSampleCount;
         uniform vec2 uSunDir;
@@ -224,53 +288,64 @@ export class BuildingShadowsEffectV2 {
         uniform float uPenumbraRadiusFar;
         uniform float uPenumbraSamples;
         uniform float uPenumbraExponent;
-        uniform float uFloorCount;
-        uniform float uFloorHeightShadowScale;
 
         varying vec2 vUv;
 
+        float outdoorsValue(vec2 uv) {
+          vec4 c = texture2D(tOutdoors, uv);
+          float luma = dot(c.rgb, vec3(0.2126, 0.7152, 0.0722));
+          // Some authored masks encode the signal in alpha (or have premult quirks).
+          // Using max() keeps the common RGB-luma path intact while allowing
+          // alpha-only masks to function.
+          return max(luma, c.a);
+        }
+
         bool inBounds(vec2 uv) {
-          return uv.x >= 0.0 && uv.x <= 1.0 && uv.y >= 0.0 && uv.y <= 1.0;
+          // Use a small inset to avoid edge-smear from linear filtering on ClampToEdge.
+          const float eps = 0.0005;
+          return uv.x >= eps && uv.x <= 1.0 - eps && uv.y >= eps && uv.y <= 1.0 - eps;
         }
 
         void main() {
-          // ── Bug fix: shadows only fall on outdoor pixels ──────────────
-          // If the current pixel is already indoors (black in the mask), do NOT
-          // apply a building shadow here. Indoor darkness is handled by the
-          // ambient/darkness system, not building shadows. Without this check,
-          // indoor areas were being double-darkened.
-          vec3 selfColor = texture2D(tReceiverOutdoors, vUv).rgb;
-          float selfOutdoors = dot(selfColor, vec3(0.2126, 0.7152, 0.0722));
+          // Normalize sun direction in UV space.
+          // We sample the outdoors mask in Foundry-space UVs (Y-down) via uvMask.
+          // Flip Y so the march direction matches the mask's coordinate system.
+          vec2 dir = normalize(vec2(uSunDir.x, -uSunDir.y));
+          float samples = max(uSampleCount, 1.0);
+
+          // OutdoorsMaskProviderV2 composites into a Foundry-space canvas (Y-down, flipY=false).
+          // The bake quad is geometry-flipped (scale.y=-1) to match the base plane.
+          // That flip also mirrors the interpolated vUv relative to the 2D canvas.
+          // So we flip V when sampling the canvas-authored mask.
+          vec2 uvMask = vec2(vUv.x, 1.0 - vUv.y);
+
+          // Mask rule: interiors (indoors/buildings) should never be darkened by
+          // building shadows. Only outdoor pixels receive shadows cast from nearby
+          // indoor occluders.
+          float selfOutdoors = outdoorsValue(uvMask);
           if (selfOutdoors < 0.5) {
-            // Pixel is indoors — return fully lit (no shadow applied).
             gl_FragColor = vec4(1.0, 1.0, 1.0, 1.0);
             return;
           }
 
-          // Multi-floor shadow length: each additional floor adds uFloorHeightShadowScale
-          // fraction of the base length, simulating a taller structure.
-          float heightScale = 1.0 + max(uFloorCount - 1.0, 0.0) * uFloorHeightShadowScale;
-          float effectiveLength = uLength * heightScale;
-
-          vec2 dir = normalize(uSunDir);
-          float samples = max(uSampleCount, 1.0);
-
-          // Perpendicular direction for penumbra spread.
+          // Direction perpendicular to the shadow, used for penumbra
           vec2 perp = normalize(vec2(-dir.y, dir.x));
           float penumbraCount = max(uPenumbraSamples, 1.0);
 
+          // Accumulate occlusion along the ray
           float totalOcclusion = 0.0;
           float totalWeight = 0.0;
 
-          // MAX_STEPS must be a compile-time constant for GLSL loop unrolling.
-          // Actual sample count is clamped by the 'samples' uniform at runtime.
-          const int MAX_STEPS = 128;
+          const int MAX_STEPS = 64;
           for (int i = 0; i < MAX_STEPS; i++) {
             float fi = float(i);
+            // Avoid early-break loops with gradient instructions (texture sampling)
+            // to keep derivatives well-defined across fragments.
             if (fi >= samples) continue;
 
             float t = (samples > 1.0) ? (fi / (samples - 1.0)) : 0.0;
-            vec2 baseUv = vUv + dir * (t * effectiveLength);
+            // March against the sun direction to look "up-sun" for occluders.
+            vec2 baseUv = uvMask - dir * (t * uLength);
 
             if (!inBounds(baseUv)) continue;
 
@@ -280,189 +355,156 @@ export class BuildingShadowsEffectV2 {
             float occlusion = 0.0;
             float weightSum = 0.0;
 
-            const int MAX_PENUMBRA = 16;
-            int taps = int(clamp(penumbraCount, 1.0, float(MAX_PENUMBRA)));
+            int maxPenumbra = 16;
+            int taps = int(clamp(penumbraCount, 1.0, float(maxPenumbra)));
 
+            // If radius is tiny or taps is 1, single sample
             if (taps <= 1 || radius <= 1e-5) {
-              // Single centre sample — fast path.
-              vec3 col = texture2D(tOccluderOutdoors, baseUv).rgb;
-              float outdoors = dot(col, vec3(0.2126, 0.7152, 0.0722));
-              float occ = 1.0 - step(0.5, outdoors); // 1 when indoor/building
-              weightSum  = 1.0;
+              float outdoors = outdoorsValue(baseUv);
+              occlusion = (outdoors < 0.5) ? 1.0 : 0.0; // Indoor = Occluder
+              weightSum = 1.0;
             } else {
-              // Penumbra: spread taps perpendicular to shadow direction.
-              for (int j = 0; j < MAX_PENUMBRA; j++) {
+              // Penumbra blur
+              for (int j = 0; j < maxPenumbra; j++) {
+                // Avoid early-break for the same reason as the outer loop.
                 if (j >= taps) continue;
+
                 float fj = float(j);
                 float halfCount = (float(taps) - 1.0) * 0.5;
                 float offsetIndex = fj - halfCount;
+
                 float norm = (halfCount > 0.0) ? (offsetIndex / halfCount) : 0.0;
                 float w = 1.0 - abs(norm);
 
                 vec2 sampleUv = baseUv + perp * (norm * radius);
+
                 float outdoors = 1.0;
                 if (inBounds(sampleUv)) {
-                  vec3 sampleColor = texture2D(tOccluderOutdoors, sampleUv).rgb;
-                  outdoors = dot(sampleColor, vec3(0.2126, 0.7152, 0.0722));
+                  outdoors = outdoorsValue(sampleUv);
                 }
+
                 float indoor = (outdoors < 0.5) ? 1.0 : 0.0;
                 occlusion += indoor * w;
                 weightSum += w;
               }
             }
 
-            if (weightSum > 0.0) occlusion /= weightSum;
+            if (weightSum > 0.0) {
+              occlusion /= weightSum;
+            }
 
             float distanceWeight = pow(t, max(0.001, uPenumbraExponent));
-            totalOcclusion += occlusion * distanceWeight;
-            totalWeight    += distanceWeight;
+            float contrib = occlusion * distanceWeight;
+            totalOcclusion += contrib;
+            totalWeight += distanceWeight;
           }
 
-          float avgOcclusion = (totalWeight > 0.0)
-            ? clamp(totalOcclusion / totalWeight, 0.0, 1.0)
-            : 0.0;
+          float avgOcclusion = 0.0;
+          if (totalWeight > 0.0) {
+            avgOcclusion = clamp(totalOcclusion / totalWeight, 0.0, 1.0);
+          }
 
-          // Output shadow factor: 1.0 = lit, 0.0 = shadowed.
-          // Opacity is applied by LightingEffectV2, not here.
+          // Output raw light factor (1.0 = Fully Lit, 0.0 = Fully Shadowed)
+          // We do NOT apply opacity here. Opacity is handled by LightingEffect composition.
           float shadowFactor = 1.0 - avgOcclusion;
+
           gl_FragColor = vec4(shadowFactor, shadowFactor, shadowFactor, 1.0);
         }
       `,
-      transparent: false,
+      transparent: false
     });
 
-    // Bind the union texture to the bake material once — updates are driven by
-    // _unionTexture.needsUpdate = true after _rebuildUnionMask().
-    this._bakeMaterial.uniforms.tOccluderOutdoors.value = this._unionTexture;
-    this._bakeMaterial.uniforms.tReceiverOutdoors.value = this._receiverTexture;
+    // Bake Quad (0..1 in UVs)
+    // PlaneGeometry defaults to 1x1 centered at 0,0
+    this.bakeQuad = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), this.bakeMaterial);
+    this.bakeQuad.position.set(0.5, 0.5, 0); // Move center to 0.5,0.5 so it spans 0..1
+    // Match V1: apply the same geometry flip as the world base plane (scale.y=-1).
+    // This keeps the baked texture aligned with world space when sampled later.
+    this.bakeQuad.scale.y = -1;
+    this.bakeScene.add(this.bakeQuad);
 
-    // ── Bake scene (orthographic, covers UV 0..1) ──────────────────────
-    // left=0, right=1, top=1, bottom=0, near=0, far=1
-    this._bakeScene  = new THREE.Scene();
-    this._bakeCamera = new THREE.OrthographicCamera(0, 1, 1, 0, 0, 1);
-    this._bakeQuad   = new THREE.Mesh(
-      new THREE.PlaneGeometry(1, 1),
-      this._bakeMaterial
-    );
-    // PlaneGeometry is centred at 0; shift to 0.5 so it spans 0..1.
-    this._bakeQuad.position.set(0.5, 0.5, 0);
-    this._bakeScene.add(this._bakeQuad);
+    // 2. Create Display Environment (Screen Space Render)
+    this.shadowScene = new THREE.Scene();
 
-    this._initialized = true;
-    log.info(`BuildingShadowsEffectV2 initialized (bake size: ${BAKE_SIZE}×${BAKE_SIZE})`);
-  }
-
-  // ── Inputs ────────────────────────────────────────────────────────────
-
-  /**
-   * Register the OutdoorsMaskProviderV2 so this effect can read per-floor canvases.
-   * Call once from FloorCompositor.initialize() after the provider is created.
-   * @param {import('./OutdoorsMaskProviderV2.js').OutdoorsMaskProviderV2} provider
-   */
-  setOutdoorsMaskProvider(provider) {
-    this._outdoorsMaskProvider = provider;
-    // Subscribe so we rebuild the union when the provider re-populates
-    // (e.g. on scene reload). Fires immediately with the current state.
-    provider.subscribe(() => {
-      let idx = this._maxFloorIndex;
-      try {
-        // Prefer provider's active floor index (authoritative for which outdoors
-        // mask is currently selected).
-        const pIdx = Number(provider?.activeFloorIndex);
-        if (Number.isFinite(pIdx)) idx = pIdx;
-      } catch (_) {}
-      this._maxFloorIndex = idx;
-      this._rebuildMasks(idx);
-      this._needsBake = true;
+    // Simple material to sample the baked world texture
+    this.displayMaterial = new THREE.MeshBasicMaterial({
+      map: null, // Will be bound to worldShadowTarget.texture
+      transparent: true,
+      opacity: 1.0, // We rely on LightingEffect.uBuildingShadowOpacity
+      blending: THREE.NoBlending 
     });
+
+    if (this.baseMesh && this.outdoorsMask) {
+      this._createShadowMesh();
+      this.needsBake = true;
+    }
+
+    log.info('BuildingShadowsEffect initialized with World Space Caching');
   }
 
-  /**
-   * Receive sun angles from SkyColorEffectV2 — the single source of truth for
-   * sun direction across all V2 effects.
-   *
-   * Azimuth: degrees clockwise from north (0 = north, 90 = east, 180 = south, 270 = west).
-   * Elevation: degrees above horizon (0 = horizon, 90 = zenith).
-   *
-   * @param {number} azimuthDeg
-   * @param {number} elevationDeg
-   */
-  setSunAngles(azimuthDeg, elevationDeg) {
-    if (this._sunAzimuthDeg === azimuthDeg && this._sunElevationDeg === elevationDeg) return;
-    this._sunAzimuthDeg   = azimuthDeg;
-    this._sunElevationDeg = elevationDeg;
-    // Sun direction will be recomputed in update().
+  _createShadowMesh() {
+    const THREE = window.THREE;
+    if (!THREE || !this.baseMesh || !this.outdoorsMask) return;
+
+    // Dispose previous mesh/material if rebuilding
+    if (this.shadowMesh && this.shadowScene) {
+      this.shadowScene.remove(this.shadowMesh);
+      this.shadowMesh.geometry.dispose();
+      this.shadowMesh = null;
+    }
+
+    // Update the bake material input
+    if (this.bakeMaterial) {
+      this.bakeMaterial.uniforms.tOutdoors.value = this.outdoorsMask;
+    }
+
+    // Create the world-pinned mesh for display
+    this.shadowMesh = new THREE.Mesh(this.baseMesh.geometry, this.displayMaterial);
+    this.shadowMesh.position.copy(this.baseMesh.position);
+    this.shadowMesh.rotation.copy(this.baseMesh.rotation);
+    this.shadowMesh.scale.copy(this.baseMesh.scale);
+
+    // Ensure the shadow mesh is visible to cameras even when FloorCompositor
+    // is rendering with floor-isolated layer masks.
+    this.shadowMesh.layers.set(0);
+
+    this.shadowScene.add(this.shadowMesh);
   }
 
-  /**
-   * Notify the effect that the active floor has changed.
-   * Triggers a union mask rebuild (which forces a rebake).
-   * @param {number} maxFloorIndex
-   */
-  onFloorChange(maxFloorIndex) {
-    // Do NOT early-return on same index — the provider may have re-populated
-    // (e.g. scene reload on floor 0) and the union mask needs rebuilding.
-    let safeMax = Number.isFinite(maxFloorIndex) ? maxFloorIndex : 0;
-    // Defensive fallback: if the caller can't provide a finite floor index,
-    // but the outdoors provider has authored upper-floor masks, prefer the
-    // highest available floor so the effect doesn't appear stuck on floor 0.
-    try {
-      const prov = this._outdoorsMaskProvider;
-      if (prov && typeof prov.getAvailableFloorIndices === 'function') {
-        const avail = prov.getAvailableFloorIndices();
-        if (avail.length > 0) {
-          const highest = avail[avail.length - 1];
-          if (!Number.isFinite(maxFloorIndex)) {
-            safeMax = highest;
-          }
-        }
-      }
-    } catch (_) {}
+  onResize(width, height) {
+    const THREE = window.THREE;
+    if (!width || !height || !THREE) return;
 
-    this._maxFloorIndex = safeMax;
-    this._rebuildMasks(safeMax);
-    this._needsBake = true;
+    if (!this.shadowTarget) {
+      this.shadowTarget = new THREE.WebGLRenderTarget(width, height, {
+        minFilter: THREE.LinearFilter,
+        magFilter: THREE.LinearFilter,
+        format: THREE.RGBAFormat,
+        type: THREE.UnsignedByteType
+      });
+    } else {
+      this.shadowTarget.setSize(width, height);
+    }
   }
 
-  // ── Output ────────────────────────────────────────────────────────────
-
-  /**
-   * The bake RT's texture: greyscale shadow factor (1.0=lit, 0.0=shadowed).
-   * Null if initialize() hasn't been called yet.
-   * Fed directly into LightingEffectV2's compose shader via tBuildingShadow.
-   * @type {THREE.Texture|null}
-   */
-  get shadowFactorTexture() {
-    return this._bakeRT?.texture ?? null;
+  setInputTexture(texture) {
+    // No-op; this effect uses the outdoors mask rather than the scene color.
+    this.inputTexture = texture;
   }
 
-  // ── Per-frame update ──────────────────────────────────────────────────
-
-  /**
-   * Compute sun direction, time intensity, penumbra, and decide if a rebake
-   * is needed. Call once per frame from FloorCompositor.render().
-   * @param {{ elapsed: number, delta: number }} timeInfo
-   */
   update(timeInfo) {
-    if (!this._initialized || !this.params.enabled) return;
+    if (!this.params.enabled) return;
 
     const THREE = window.THREE;
     if (!THREE) return;
 
-    // ── Sun direction from azimuth / elevation ─────────────────────────
-    // Match V1 BuildingShadowsEffect sun direction convention exactly:
-    //   x = -sin(azimuth),  y = -cos(azimuth) * sunLatitude
-    // V1 drives azimuth from a time-of-day sweep; we receive it already
-    // converted from SkyColorEffectV2. Convert from degrees to the V1 azimuth
-    // (which is a half-orbit sweep: noon=0, sunrise=−π/2, sunset=+π/2).
-    // SkyColorEffectV2 exposes azimuthDeg as 0=east, 90=south convention.
-    // We use the same simplified formula as V1 for consistency.
+    // 1. Update Time & Sun Direction
     let hour = 12.0;
     try {
       if (weatherController && typeof weatherController.timeOfDay === 'number') {
         hour = weatherController.timeOfDay;
       }
-    } catch (_) {}
+    } catch (e) { /* default */ }
 
     const isFoundryLinked = window.MapShine?.controlPanel?.controlState?.linkTimeToFoundry === true;
     const phaseHours = isFoundryLinked ? getFoundryTimePhaseHours() : null;
@@ -475,244 +517,296 @@ export class BuildingShadowsEffectV2 {
 
     const t = (hour % 24.0) / 24.0;
     const azimuth = (t - 0.5) * Math.PI;
+    const x = -Math.sin(azimuth);
     const lat = Math.max(0.0, Math.min(1.0, this.params.sunLatitude ?? 0.5));
-    const sunX = -Math.sin(azimuth);
-    const sunY = -Math.cos(azimuth) * lat;
+    const y = -Math.cos(azimuth) * lat;
 
-    if (this._sunDir) this._sunDir.set(sunX, sunY);
+    if (!this.sunDir) {
+      this.sunDir = new THREE.Vector2(x, y);
+    } else {
+      this.sunDir.set(x, y);
+    }
 
-    // ── Time intensity ─────────────────────────────────────────────────
-    const safeHour  = ((hour % 24.0) + 24.0) % 24.0;
+    const safeHour = ((hour % 24.0) + 24.0) % 24.0;
     const dayLength = ((sunset - sunrise) + 24.0) % 24.0;
     let timeIntensity = 0.0;
 
     if (dayLength > 0.01) {
       const phase = ((safeHour - sunrise) + 24.0) % 24.0;
+
+      // Core daytime lobe: symmetric peak at sunrise/sunset, minimum at midday.
       if (phase >= 0.0 && phase <= dayLength) {
         const u = phase / dayLength;
         const edge = Math.abs(2.0 * u - 1.0);
         timeIntensity = Math.pow(edge, 0.5);
       } else {
-        const fadeHours = 1.5;
+        // Extended fade region outside [sunrise, sunset] to avoid a hard cutoff.
+        const fadeHours = 1.5; // Duration of pre-dawn / post-dusk fade in hours.
+
+        // Pre-dawn: from (sunrise - fadeHours) up to sunrise.
         const preDawnDelta = ((sunrise - safeHour) + 24.0) % 24.0;
         if (preDawnDelta > 0.0 && preDawnDelta < fadeHours) {
-          timeIntensity = Math.pow(1.0 - (preDawnDelta / fadeHours), 0.5);
+          const tFade = 1.0 - (preDawnDelta / fadeHours);
+          timeIntensity = Math.pow(Math.max(0.0, tFade), 0.5);
         }
+
+        // Post-dusk: from sunset out to (sunset + fadeHours).
         const postDuskDelta = ((safeHour - sunset) + 24.0) % 24.0;
         if (postDuskDelta > 0.0 && postDuskDelta < fadeHours) {
-          const tail = Math.pow(1.0 - (postDuskDelta / fadeHours), 0.5);
+          const tFade = 1.0 - (postDuskDelta / fadeHours);
+          const tail = Math.pow(Math.max(0.0, tFade), 0.5);
+          // If both regions somehow overlap, keep the stronger contribution.
           timeIntensity = Math.max(timeIntensity, tail);
         }
       }
     } else {
       timeIntensity = 1.0;
     }
-    this._timeIntensity = timeIntensity;
 
-    // ── Penumbra params from blurStrength ──────────────────────────────
-    const blur = Math.max(0.0, Math.min(1.0, this.params.blurStrength ?? 0.3));
+    this.timeIntensity = timeIntensity;
+
+    // 2. Derive Penumbra Params
+    const blur = Math.max(0.0, Math.min(1.0, this.params.blurStrength ?? 0.5));
     this.params.penumbraRadiusNear = 0.0;
-    this.params.penumbraRadiusFar  = 0.02 + blur * 0.18;
-    this.params.penumbraSamples    = Math.max(1, Math.min(9, Math.round(1 + blur * 8)));
-    this.params.penumbraExponent   = 0.5 + blur * 2.0;
+    this.params.penumbraRadiusFar = 0.02 + blur * 0.18;
+    const minTaps = 1;
+    const maxTaps = 9;
+    const taps = Math.round(minTaps + blur * (maxTaps - minTaps));
+    this.params.penumbraSamples = Math.max(1, Math.min(9, taps));
+    this.params.penumbraExponent = 0.5 + blur * 2.0;
 
-    // ── Check if bake is needed ────────────────────────────────────────
-    const timeScale = 0.5 + 0.5 * THREE.MathUtils.clamp(timeIntensity, 0.0, 1.0);
-    const effectiveLength = this.params.length * timeScale;
-
+    // 3. Check if Bake is Needed
+    // Construct a hash of all parameters that affect the shadow shape
+    // (Opacity is NOT included as it's applied in composition)
     const bakeState = {
-      sunX: sunX.toFixed(4),
-      sunY: sunY.toFixed(4),
-      length: effectiveLength.toFixed(5),
+      v: this._bakeVersion,
+      sunX: x.toFixed(4),
+      sunY: y.toFixed(4),
+      length: this.params.length,
       quality: this.params.quality,
-      pNear:   this.params.penumbraRadiusNear,
-      pFar:    this.params.penumbraRadiusFar.toFixed(4),
+      pNear: this.params.penumbraRadiusNear,
+      pFar: this.params.penumbraRadiusFar,
       pSamples: this.params.penumbraSamples,
-      pExp:    this.params.penumbraExponent.toFixed(3),
-      floors:  this._maxFloorIndex,
-      hScale:  this.params.floorHeightShadowScale,
-      // NOTE: uuid does not change when the canvas content changes.
-      // Use an explicit revision counter so floor changes always invalidate.
-      unionRev: this._unionRevision,
-      maskSet: this._unionTexture?.uuid ?? 'none',
+      pExp: this.params.penumbraExponent,
+      maskId: this.outdoorsMask ? this.outdoorsMask.uuid : 'null'
     };
-    const hash = JSON.stringify(bakeState);
-    if (hash !== this._lastBakeHash) {
-      this._needsBake = true;
-      this._lastBakeHash = hash;
+    const currentHash = JSON.stringify(bakeState);
+
+    if (currentHash !== this.lastBakeHash) {
+      this.needsBake = true;
+      this.lastBakeHash = currentHash;
     }
 
-    // ── Push uniforms when a bake is scheduled ─────────────────────────
-    if (this._needsBake && this._bakeMaterial) {
-      const u = this._bakeMaterial.uniforms;
-      u.uLength.value             = effectiveLength;
-      u.uSampleCount.value        = this.params.quality;
-      u.uSunDir.value.copy(this._sunDir);
+    // Update Bake Material Uniforms
+    if (this.needsBake && this.bakeMaterial) {
+      const u = this.bakeMaterial.uniforms;
+      const timeScale = (typeof this.timeIntensity === 'number')
+        ? (0.5 + 0.5 * THREE.MathUtils.clamp(this.timeIntensity, 0.0, 1.0))
+        : 1.0;
+      const effectiveLength = this.params.length * timeScale;
+
+      u.uLength.value = effectiveLength;
+      u.uSampleCount.value = this.params.quality;
+      u.uSunDir.value.copy(this.sunDir);
       u.uPenumbraRadiusNear.value = this.params.penumbraRadiusNear;
-      u.uPenumbraRadiusFar.value  = this.params.penumbraRadiusFar;
-      u.uPenumbraSamples.value    = this.params.penumbraSamples;
-      u.uPenumbraExponent.value   = this.params.penumbraExponent;
-      u.uFloorCount.value         = this._maxFloorIndex + 1;
-      u.uFloorHeightShadowScale.value = this.params.floorHeightShadowScale;
+      u.uPenumbraRadiusFar.value = this.params.penumbraRadiusFar;
+      u.uPenumbraSamples.value = this.params.penumbraSamples;
+      u.uPenumbraExponent.value = this.params.penumbraExponent;
     }
   }
 
-  // ── Render ────────────────────────────────────────────────────────────
+  render(renderer, scene = null, camera = null) {
+    if (!this.params.enabled) return;
 
-  /**
-   * Execute the bake pass if needed. Call once per frame after update().
-   * @param {THREE.WebGLRenderer} renderer
-   */
-  render(renderer) {
-    if (!this._initialized || !this.params.enabled) return;
-    if (!this._needsBake) return;
-    if (!this._bakeScene || !this._bakeCamera || !this._bakeRT) return;
+    const THREE = window.THREE;
+    if (!THREE) return;
 
-    const prevTarget = renderer.getRenderTarget();
-    const prevAutoClear = renderer.autoClear;
+    // Allow V2 compositor to supply the active camera/scene each frame.
+    if (camera) this.mainCamera = camera;
+    if (scene) this.mainScene = scene;
+    if (!this.mainCamera || !this.shadowScene) return;
 
-    renderer.setRenderTarget(this._bakeRT);
-    renderer.setClearColor(0xffffff, 1); // Default: fully lit
-    renderer.autoClear = true;
-    renderer.render(this._bakeScene, this._bakeCamera);
+    if (!this._dbgLoggedOnce) {
+      this._dbgLoggedOnce = true;
+      try {
+        const hasMask = !!this.outdoorsMask;
+        const bakeTex = this.bakeMaterial?.uniforms?.tOutdoors?.value;
+        log.info('BuildingShadowsEffectV2 first render:',
+          'enabled', !!this.params?.enabled,
+          '| outdoorsMask', hasMask ? (this.outdoorsMask?.uuid || 'ok') : 'null',
+          '| bakeUniform.tOutdoors', bakeTex ? (bakeTex?.uuid || 'ok') : 'null',
+          '| needsBake', !!this.needsBake
+        );
+      } catch (_) {}
+    }
 
-    renderer.autoClear = prevAutoClear;
-    renderer.setRenderTarget(prevTarget);
+    // Ensure targets
+    const size = new THREE.Vector2();
+    renderer.getDrawingBufferSize(size);
+    if (!this.shadowTarget) {
+      this.onResize(size.x, size.y);
+    }
 
-    this._needsBake = false;
-    log.info(`BuildingShadowsEffectV2: baked shadow map (floors≤${this._maxFloorIndex}, unionRev=${this._unionRevision})`);
-  }
+    const previousTarget = renderer.getRenderTarget();
 
-  // ── Private ───────────────────────────────────────────────────────────
+    // --- PASS 1: BAKE WORLD SHADOWS (Only if needed) ---
+    if (this.needsBake && this.bakeScene && this.bakeCamera) {
+      if (!this.worldShadowTarget) {
+        // Use a fixed high resolution for the world shadow map
+        const BAKE_SIZE = 2048; 
+        this.worldShadowTarget = new THREE.WebGLRenderTarget(BAKE_SIZE, BAKE_SIZE, {
+          minFilter: THREE.LinearFilter,
+          magFilter: THREE.LinearFilter,
+          format: THREE.RGBAFormat,
+          type: THREE.UnsignedByteType,
+          wrapS: THREE.ClampToEdgeWrapping,
+          wrapT: THREE.ClampToEdgeWrapping
+        });
+        
+        // Bind the new texture to display material
+        if (this.displayMaterial) {
+          this.displayMaterial.map = this.worldShadowTarget.texture;
+          this.displayMaterial.needsUpdate = true;
+        }
+      }
 
-  /**
-   * Union-composite all _Outdoors floor canvases up to and including maxFloorIndex.
-   * Uses Canvas 2D `lighten` compositing (max per channel) so the union of
-   * all floor masks produces a single mask covering all structures.
-   *
-   * Runs only on floor change — not every frame.
-   *
-   * @param {number} maxFloorIndex
-   * @private
-   */
-  _rebuildUnionMask(maxFloorIndex) {
-    // Deprecated: kept for compatibility with any external call sites.
-    this._rebuildMasks(maxFloorIndex);
-  }
+      renderer.setRenderTarget(this.worldShadowTarget);
+      renderer.setClearColor(0xffffff, 1); // Default to Lit
+      renderer.clear();
+      renderer.render(this.bakeScene, this.bakeCamera);
 
-  /**
-   * Rebuild both:
-   * - occluder union mask (floors <= active)
-   * - receiver mask (active floor only)
-   *
-   * This mirrors how Water/Specular distinguish "current floor application"
-   * from multi-floor occlusion.
-   *
-   * @param {number} activeFloorIndex
-   * @private
-   */
-  _rebuildMasks(activeFloorIndex) {
-    if (!this._unionCtx || !this._unionCanvas) return;
-    if (!this._receiverCtx || !this._receiverCanvas) return;
-
-    const ctx = this._unionCtx;
-    const w = BAKE_SIZE;
-    const h = BAKE_SIZE;
-
-    // Fill with black (= all indoor, no shadow casters). Floor masks paint white.
-    ctx.globalCompositeOperation = 'source-over';
-    ctx.fillStyle = '#000';
-    ctx.fillRect(0, 0, w, h);
-
-    // Union all floors ≤ activeFloorIndex via 'lighten' (= per-channel max).
-    // Iterate only floors that actually have authored canvases to avoid silent
-    // no-ops when floors are sparse and to avoid Infinity loops.
-    const usedFloors = [];
-    if (this._outdoorsMaskProvider) {
-      const available = (typeof this._outdoorsMaskProvider.getAvailableFloorIndices === 'function')
-        ? this._outdoorsMaskProvider.getAvailableFloorIndices()
-        : [];
-      for (const fi of available) {
-        if (!Number.isFinite(fi)) continue;
-        if (fi > activeFloorIndex) continue;
-        const cv = this._outdoorsMaskProvider.getFloorCanvas(fi);
-        if (!cv) continue;
+      if (!this._dbgBakedOnce) {
+        this._dbgBakedOnce = true;
         try {
-          ctx.globalCompositeOperation = 'lighten';
-          ctx.drawImage(cv, 0, 0, w, h);
-          usedFloors.push(fi);
-        } catch (err) {
-          log.warn(`BuildingShadowsEffectV2: failed to draw floor ${fi} canvas:`, err);
-        }
-      }
-    }
+          // Sample multiple pixels from the baked RT.
+          // NOTE: The shader intentionally outputs 1.0 (white) for indoor pixels,
+          // so the center sample can be a false negative if it lands indoors.
+          const w = this.worldShadowTarget.width;
+          const h = this.worldShadowTarget.height;
+          const px = new Uint8Array(4);
 
-    // Reset composite operation.
-    ctx.globalCompositeOperation = 'source-over';
+          const taps = [
+            { name: 'c',  u: 0.50, v: 0.50 },
+            { name: 'l',  u: 0.25, v: 0.50 },
+            { name: 'r',  u: 0.75, v: 0.50 },
+            { name: 't',  u: 0.50, v: 0.75 },
+            { name: 'b',  u: 0.50, v: 0.25 },
+            { name: 'tl', u: 0.10, v: 0.90 },
+            { name: 'tr', u: 0.90, v: 0.90 },
+            { name: 'bl', u: 0.10, v: 0.10 },
+            { name: 'br', u: 0.90, v: 0.10 },
+          ];
 
-    // Receiver mask: active floor only.
-    const rctx = this._receiverCtx;
-    rctx.globalCompositeOperation = 'source-over';
-    rctx.fillStyle = '#000';
-    rctx.fillRect(0, 0, w, h);
-    let receiverFloor = null;
-    try {
-      const cv = this._outdoorsMaskProvider?.getFloorCanvas?.(activeFloorIndex) ?? null;
-      if (cv) {
-        rctx.drawImage(cv, 0, 0, w, h);
-        receiverFloor = activeFloorIndex;
-      } else {
-        // Fallback: best-available lower floor.
-        const avail = this._outdoorsMaskProvider?.getAvailableFloorIndices?.() ?? [];
-        const best = avail.filter(n => Number.isFinite(n) && n <= activeFloorIndex).pop();
-        if (Number.isFinite(best)) {
-          const cv2 = this._outdoorsMaskProvider?.getFloorCanvas?.(best) ?? null;
-          if (cv2) {
-            rctx.drawImage(cv2, 0, 0, w, h);
-            receiverFloor = best;
+          /** @type {Record<string, number[]>} */
+          const samples = {};
+          let minR = 255;
+          let maxR = 0;
+
+          for (const t of taps) {
+            const x = Math.max(0, Math.min(w - 1, Math.floor(w * t.u)));
+            const y = Math.max(0, Math.min(h - 1, Math.floor(h * t.v)));
+            renderer.readRenderTargetPixels(this.worldShadowTarget, x, y, 1, 1, px);
+            samples[t.name] = [px[0], px[1], px[2], px[3]];
+            minR = Math.min(minR, px[0]);
+            maxR = Math.max(maxR, px[0]);
           }
+
+          log.info('BuildingShadowsEffectV2 bake samples RGBA:', samples, '| minR', minR, '| maxR', maxR);
+        } catch (e) {
+          try { log.warn('BuildingShadowsEffectV2 bake sample failed:', e); } catch (_) {}
         }
       }
-    } catch (_) {}
 
-    // Notify GPU that the canvas content has changed.
-    if (this._unionTexture) {
-      this._unionTexture.needsUpdate = true;
-    }
-    if (this._receiverTexture) {
-      this._receiverTexture.needsUpdate = true;
+      this.needsBake = false;
+      
+      // Log strictly for debugging, maybe remove later
+      // log.debug('Baked Building Shadows');
     }
 
-    // Bump revision so update()'s bake hash always invalidates after a rebuild.
-    this._unionRevision++;
-    log.info(`BuildingShadowsEffectV2: rebuilt masks (receiver=${receiverFloor ?? 'none'}, occluders≤${activeFloorIndex} using [${usedFloors.join(', ')}], unionRev=${this._unionRevision})`);
+    // --- PASS 2: RENDER SCREEN SPACE SHADOWS ---
+    // Render world-pinned shadow mesh (sampling baked texture) into screen-space target
+    if (this.shadowTarget) {
+      const prevLayerMask = this.mainCamera.layers.mask;
+      this.mainCamera.layers.enable(0);
+      renderer.setRenderTarget(this.shadowTarget);
+      renderer.setClearColor(0xffffff, 1);
+      renderer.clear();
+      renderer.render(this.shadowScene, this.mainCamera);
+      this.mainCamera.layers.mask = prevLayerMask;
+    }
+
+    renderer.setRenderTarget(previousTarget);
   }
 
-  // ── Disposal ──────────────────────────────────────────────────────────
+  /**
+   * Bind floor-specific mask data before a floor's render pass.
+   * @param {object} bundle - Mask bundle for this floor
+   * @param {string} floorKey - Stable floor key from FloorBand.key
+   */
+  bindFloorMasks(bundle, floorKey) {
+    if (!bundle) return;
+
+    // Retrieve the outdoors mask from the floor bundle.
+    const maskEntry = bundle.masks?.find(m => m.id === 'outdoors' || m.type === 'outdoors');
+    const floorMaskTex = maskEntry?.texture ?? null;
+
+    // Restore from cache if available and mask hasn't changed.
+    const cached = this._floorStates.get(floorKey);
+    if (cached) {
+      if (cached.outdoorsMask === floorMaskTex) {
+        this.outdoorsMask = cached.outdoorsMask;
+        return;
+      }
+      // Mask reference changed (e.g. recomposed) — fall through to rebind.
+    }
+
+    // First visit or mask changed: bind and schedule a rebake.
+    this.outdoorsMask = floorMaskTex;
+    if (floorMaskTex && this.renderer && this.mainScene && this.mainCamera) {
+      this._createShadowMesh();
+      this.needsBake = true;
+    }
+    this._floorStates.set(floorKey, { outdoorsMask: floorMaskTex });
+  }
+
+  /**
+   * Release the cached state for a specific floor.
+   * The floor state only holds a reference to the registry-owned outdoors mask
+   * texture — there are no owned GPU resources to dispose here.
+   * @param {string} floorKey
+   */
+  disposeFloorState(floorKey) {
+    this._floorStates.delete(floorKey);
+  }
 
   dispose() {
-    if (this._bakeRT) {
-      this._bakeRT.dispose();
-      this._bakeRT = null;
+    for (const key of this._floorStates.keys()) {
+      this.disposeFloorState(key);
     }
-    if (this._bakeMaterial) {
-      this._bakeMaterial.dispose();
-      this._bakeMaterial = null;
+    this._floorStates.clear();
+    if (this._registryUnsub) { this._registryUnsub(); this._registryUnsub = null; }
+    if (this.shadowTarget) {
+      this.shadowTarget.dispose();
+      this.shadowTarget = null;
     }
-    if (this._bakeQuad) {
-      this._bakeQuad.geometry.dispose();
-      this._bakeQuad = null;
+    if (this.worldShadowTarget) {
+      this.worldShadowTarget.dispose();
+      this.worldShadowTarget = null;
     }
-    if (this._unionTexture) {
-      this._unionTexture.dispose();
-      this._unionTexture = null;
+    if (this.bakeMaterial) {
+      this.bakeMaterial.dispose();
+      this.bakeMaterial = null;
     }
-    this._unionCanvas = null;
-    this._unionCtx = null;
-    this._bakeScene = null;
-    this._bakeCamera = null;
-    this._outdoorsMaskProvider = null;
-    this._initialized = false;
-    log.info('BuildingShadowsEffectV2 disposed');
+    if (this.displayMaterial) {
+      this.displayMaterial.dispose();
+      this.displayMaterial = null;
+    }
+    if (this.shadowMesh && this.shadowScene) {
+      this.shadowScene.remove(this.shadowMesh);
+      this.shadowMesh = null;
+    }
+    this.shadowScene = null;
+    this.bakeScene = null;
+    log.info('BuildingShadowsEffect disposed');
   }
 }

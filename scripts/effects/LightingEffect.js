@@ -2174,9 +2174,14 @@ export class LightingEffect extends EffectBase {
       const building = window.MapShine?.buildingShadowsEffect;
       if (building && building.params && building.enabled && building.shadowTarget) {
         const baseOpacity = building.params.opacity ?? 0.0;
-        const ti = (typeof building.timeIntensity === 'number')
-          ? THREE.MathUtils.clamp(building.timeIntensity, 0.0, 1.0)
-          : 1.0;
+        const debugMode = String(building.params.debugDisplayMode ?? 'shadow');
+        // Debug display modes are intended to visualize the bound texture
+        // (raw outdoors mask or baked shadow map). Do not fade to zero at midday.
+        const ti = (debugMode !== 'shadow')
+          ? 1.0
+          : ((typeof building.timeIntensity === 'number')
+            ? THREE.MathUtils.clamp(building.timeIntensity, 0.0, 1.0)
+            : 1.0);
         u.uBuildingShadowOpacity.value = baseOpacity * ti;
       } else {
         u.uBuildingShadowOpacity.value = 0.0;

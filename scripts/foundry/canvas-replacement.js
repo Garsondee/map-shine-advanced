@@ -3814,6 +3814,18 @@ async function createThreeCanvas(scene) {
     rendererCanvas.style.backgroundColor = sceneBgColorStr;
 
     threeCanvas = rendererCanvas; // Update reference
+    
+    // CRITICAL (V2): Update InteractionManager's canvas element reference.
+    // InteractionManager was initialized with the placeholder canvas, but we just
+    // replaced it with renderer.domElement. If we don't update the reference,
+    // all coordinate transformations (getBoundingClientRect) will use the detached
+    // placeholder, causing zoom offset and token selection failures.
+    if (interactionManager) {
+      interactionManager.canvasElement = rendererCanvas;
+      // Force canvas rect cache refresh so the next interaction uses correct bounds.
+      interactionManager._getCanvasRectCached?.(true);
+    }
+    
     const rect = threeCanvas.getBoundingClientRect();
     // Avoid setSize() overwriting our CSS sizing (width/height=100%).
     // If updateStyle=true, three will set style width/height to fixed pixel values,
@@ -4296,7 +4308,15 @@ async function createThreeCanvas(scene) {
     _setCreateThreeCanvasProgress('scene.managers.lightweightBatch.construct');
     console.log('[Map Shine Advanced: Loading] ▶ Manager: Lightweight batch (Door, Drawing, Note, Template, LightIcon, EnhancedLightIcon, MapPoints)');
 
-    doorMeshManager = new DoorMeshManager(threeScene, sceneComposer.camera);
+    if (!sceneComposer) {
+      throw new Error('createThreeCanvas: SceneComposer was null after initialize(); aborting manager init');
+    }
+
+    // Use the camera returned by SceneComposer.initialize() rather than reading
+    // from the sceneComposer instance. During recovery/context-loss pathways the
+    // global sceneComposer ref can be cleared while the local `camera` is still
+    // valid for this init phase.
+    doorMeshManager = new DoorMeshManager(threeScene, camera);
     drawingManager = new DrawingManager(threeScene);
     noteManager = new NoteManager(threeScene);
     templateManager = new TemplateManager(threeScene);
@@ -4837,6 +4857,11 @@ async function createThreeCanvas(scene) {
         }, 'v2.registerSpecularUI', Severity.COSMETIC);
 
         safeCall(() => {
+          uiManager.registerEffect('fluid', 'Fluid',
+            FluidEffect.getControlSchema(), _makeV2Callback('_fluidEffect'), 'surface');
+        }, 'v2.registerFluidUI', Severity.COSMETIC);
+
+        safeCall(() => {
           uiManager.registerEffect('sky-color', 'Sky Color',
             SkyColorEffect.getControlSchema(), _makeV2Callback('_skyColorEffect'), 'global');
         }, 'v2.registerSkyColorUI', Severity.COSMETIC);
@@ -5120,10 +5145,8 @@ async function createThreeCanvas(scene) {
           );
         }, 'v2.registerCloudUI', Severity.COSMETIC);
 
-        // Overhead shadows: uses V1 schema (opacity, length, softness) but routes
-        // to _overheadShadowEffect on FloorCompositor. Only core params are wired
-        // (opacity, length, softness, enabled) — V1-only passes (fluid, tile projection,
-        // indoor shadow) have no V2 equivalent yet and are silently ignored.
+        // Overhead shadows: uses V1 schema but routes to _overheadShadowEffect on FloorCompositor.
+        // V2 now supports indoor shadow projection from _Outdoors mask (indoorShadowEnabled, etc.).
         safeCall(() => {
           uiManager.registerEffect(
             'overhead-shadows', 'Overhead Shadows',
@@ -5131,7 +5154,15 @@ async function createThreeCanvas(scene) {
           );
         }, 'v2.registerOverheadShadowsUI', Severity.COSMETIC);
 
-        log.info('V2: registered effect controls (Lighting, Specular, SkyColor, WindowLight, Fire, WaterSplashes, Bloom, ColorCorrection, FilmGrain, Sharpen, Fog, Water, Cloud, OverheadShadows)');
+        // Building shadows: uses V1 schema but routes to _buildingShadowEffect on FloorCompositor.
+        safeCall(() => {
+          uiManager.registerEffect(
+            'building-shadows', 'Building Shadows',
+            BuildingShadowsEffect.getControlSchema(), _makeV2Callback('_buildingShadowEffect'), 'global'
+          );
+        }, 'v2.registerBuildingShadowsUI', Severity.COSMETIC);
+
+        log.info('V2: registered effect controls (Lighting, Specular, SkyColor, WindowLight, Fire, WaterSplashes, Bloom, ColorCorrection, FilmGrain, Sharpen, Fog, Water, Cloud, OverheadShadows, BuildingShadows)');
 
         log.info('V2: UI initialized');
       }, 'initializeUI(V2)', Severity.DEGRADED);

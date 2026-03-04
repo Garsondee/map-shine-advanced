@@ -169,32 +169,55 @@ export class OutdoorsMaskProviderV2 {
     // Dispose previous state on re-populate
     this._disposeAll();
 
-    const tileDocs = canvas?.scene?.tiles?.contents ?? [];
-    if (tileDocs.length === 0) {
-      log.info('OutdoorsMaskProviderV2: no tiles in scene');
-      this._notifyConsumers();
-      return;
-    }
-
     const floors = window.MapShine?.floorStack?.getFloors() ?? [];
 
     // ── Step 1: Discover _Outdoors masks ─────────────────────────────────
     const tileEntries = [];
+
+    // Check scene background first (floor 0)
+    const bgSrc = canvas?.scene?.background?.src ?? foundrySceneData?.background?.src ?? '';
+    if (bgSrc) {
+      const dotIdx = bgSrc.lastIndexOf('.');
+      const basePath = dotIdx > 0 ? bgSrc.substring(0, dotIdx) : bgSrc;
+      log.info(`OutdoorsMaskProviderV2: checking background: ${basePath}`);
+      const result = await probeMaskFile(basePath, '_Outdoors');
+      if (result?.path) {
+        log.info(`OutdoorsMaskProviderV2: found background _Outdoors mask: ${result.path}`);
+        tileEntries.push({
+          tileDoc: { x: 0, y: 0, width: canvas?.scene?.width ?? 0, height: canvas?.scene?.height ?? 0 },
+          maskPath: result.path,
+          floorIndex: 0, // Background is always floor 0
+        });
+      }
+    }
+
+    // Check tiles
+    const tileDocs = canvas?.scene?.tiles?.contents ?? [];
+    log.info(`OutdoorsMaskProviderV2: checking ${tileDocs.length} tiles for _Outdoors masks`);
+    let checkedCount = 0;
     for (const tileDoc of tileDocs) {
       const src = tileDoc?.texture?.src ?? tileDoc?.img ?? '';
-      if (!src) continue;
+      if (!src) {
+        log.debug(`OutdoorsMaskProviderV2: tile has no src, skipping`);
+        continue;
+      }
       const dotIdx = src.lastIndexOf('.');
       const basePath = dotIdx > 0 ? src.substring(0, dotIdx) : src;
+      checkedCount++;
 
+      log.debug(`OutdoorsMaskProviderV2: probing tile ${checkedCount}/${tileDocs.length}: ${basePath}`);
       const result = await probeMaskFile(basePath, '_Outdoors');
+      log.debug(`OutdoorsMaskProviderV2: probeMaskFile result:`, result);
       if (!result?.path) continue;
 
+      log.info(`OutdoorsMaskProviderV2: found _Outdoors mask: ${result.path}`);
       tileEntries.push({
         tileDoc,
         maskPath: result.path,
         floorIndex: this._resolveFloorIndex(tileDoc, floors),
       });
     }
+    log.info(`OutdoorsMaskProviderV2: checked background + ${checkedCount} tiles, found ${tileEntries.length} _Outdoors masks`);
 
     if (tileEntries.length === 0) {
       log.info('OutdoorsMaskProviderV2: no _Outdoors masks found in scene');
@@ -368,8 +391,10 @@ export class OutdoorsMaskProviderV2 {
     if (!ctx) { log.warn('_compositeFloorMask: 2D context unavailable'); return null; }
     // Keep ctx.globalCompositeOperation as 'source-over' for tile drawing.
 
-    // Fill with black (= fully indoors). Outdoors tiles paint white (= outdoors).
-    ctx.fillStyle = '#000';
+    // Fill with white (= fully outdoors). Mask tiles should carve indoor/building
+    // regions (black) on top of this, matching the effect contract:
+    // white = outdoors, black = indoors/buildings.
+    ctx.fillStyle = '#fff';
     ctx.fillRect(0, 0, cvW, cvH);
 
     for (const { entry, img } of validPairs) {

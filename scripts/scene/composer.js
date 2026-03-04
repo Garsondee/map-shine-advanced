@@ -864,6 +864,19 @@ export class SceneComposer {
   createBasePlane(texture) {
     const THREE = window.THREE;
 
+    // Defensive: during WebGL context loss / recovery or stale scene init aborts,
+    // the composer can be disposed while initialize() is still unwinding.
+    // Ensure we always have a valid scene before adding meshes.
+    if (!this.scene) {
+      try {
+        this.scene = new THREE.Scene();
+        log.warn('SceneComposer.createBasePlane: scene was null; recreated THREE.Scene defensively');
+      } catch (_) {
+        // If THREE is unavailable, we can't proceed safely.
+        return;
+      }
+    }
+
     // Get texture dimensions (or use scene dimensions for blank maps)
     const imgWidth = texture?.image?.width || this.foundrySceneData.sceneWidth;
     const imgHeight = texture?.image?.height || this.foundrySceneData.sceneHeight;

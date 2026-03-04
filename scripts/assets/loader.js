@@ -490,8 +490,10 @@ export async function probeMaskFile(basePath, suffix, options = {}) {
       // FilePicker returned nothing (player client, permissions issue, hosted server, etc.).
       // All masks probed via this function are optional. Rather than spamming HEAD requests
       // for every format (causing 404 console noise), accept that the mask isn't available.
-      // Cache negative result to prevent repeated FilePicker attempts.
-      _probeMaskNegativeCache.set(cacheKey, null);
+      // IMPORTANT: Do NOT negative-cache this outcome. An empty file list can mean
+      // the client cannot browse the directory (permissions) or the FilePicker
+      // backend returned incomplete data transiently. If we cache null here,
+      // mask discovery can become permanently broken for the session.
       return null;
     }
     const maskFile = findMaskInFiles(availableFiles, basePath, suffix);

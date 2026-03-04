@@ -80,6 +80,9 @@ export class LightingEffectV2 {
     /** @type {Array<{hook: string, id: number}>} */
     this._hookIds = [];
 
+    // One-shot diagnostic to trace why building shadows might be invisible.
+    this._dbgLoggedBuildingShadowOnce = false;
+
     /** @type {THREE.Vector2|null} Reusable size vector */
     this._sizeVec = null;
   }
@@ -138,6 +141,9 @@ export class LightingEffectV2 {
         tBuildingShadow:     { value: null },
         uHasBuildingShadow:  { value: 0 },
         uBuildingShadowOpacity: { value: 0.75 },
+        // Foundry canvas dimensions (includes padding). Matches CloudEffectV2.
+        // Used to convert Three world Y-up into Foundry world Y-down.
+        uSceneDimensions: { value: new THREE.Vector2(1, 1) },
         // Overhead shadow: per-frame screen-space shadow from OverheadShadowsEffectV2.
         // Sampled directly at vUv (screen-space RT). Dims ambient only.
         tOverheadShadow:     { value: null },
@@ -151,6 +157,14 @@ export class LightingEffectV2 {
         // uSceneOrigin/Size: scene rect origin + size in Foundry world coords (pixels).
         uBldViewBoundsMin: { value: new THREE.Vector2(0, 0) },
         uBldViewBoundsMax: { value: new THREE.Vector2(1, 1) },
+        // Four world-space corners (XY) of the camera frustum at the ground plane.
+        // Needed because the ground-plane footprint may not be axis-aligned.
+        // Corner mapping follows vUv: (0,0)=bottom-left, (1,0)=bottom-right,
+        // (0,1)=top-left, (1,1)=top-right.
+        uBldViewCorner00: { value: new THREE.Vector2(0, 0) },
+        uBldViewCorner10: { value: new THREE.Vector2(1, 0) },
+        uBldViewCorner01: { value: new THREE.Vector2(0, 1) },
+        uBldViewCorner11: { value: new THREE.Vector2(1, 1) },
         uBldSceneOrigin:   { value: new THREE.Vector2(0, 0) },
         uBldSceneSize:     { value: new THREE.Vector2(1, 1) },
         uDarknessLevel:      { value: 0.0 },
@@ -178,8 +192,13 @@ export class LightingEffectV2 {
         uniform sampler2D tBuildingShadow;
         uniform float uHasBuildingShadow;
         uniform float uBuildingShadowOpacity;
+        uniform vec2  uSceneDimensions;
         uniform vec2 uBldViewBoundsMin;
         uniform vec2 uBldViewBoundsMax;
+        uniform vec2 uBldViewCorner00;
+        uniform vec2 uBldViewCorner10;
+        uniform vec2 uBldViewCorner01;
+        uniform vec2 uBldViewCorner11;
         uniform vec2 uBldSceneOrigin;
         uniform vec2 uBldSceneSize;
         uniform sampler2D tOverheadShadow;
@@ -251,20 +270,22 @@ export class LightingEffectV2 {
           // normalise by scene rect to get scene UV (0..1 = scene rect).
           // This matches CloudEffectV2's uViewBoundsMin/Max approach exactly.
           if (uHasBuildingShadow > 0.5) {
-            // Reconstruct world XY at this fragment.
-            vec2 worldXY = mix(uBldViewBoundsMin, uBldViewBoundsMax, vUv);
-            // Convert Foundry world Y: Foundry is Y-down, Three.js is Y-up.
-            // The bake mask uses Foundry Y-down space, so flip Y back.
-            // uBldViewBoundsMin/Max are in Three.js Y-up coords; convert to Foundry:
-            //   foundryY = sceneOrigin.y + sceneSize.y - (worldXY.y - sceneOrigin.y)
-            // But since the mask UV just needs 0..1 within the scene rect, and the
-            // scene rect is symmetric, we can derive directly:
-            float sceneUvX = (worldXY.x - uBldSceneOrigin.x) / uBldSceneSize.x;
-            // Y: Three world Y increases upward; Foundry scene rect Y increases downward.
-            // The bake canvas is Foundry-space (flipY=false), so invert Y for scene UV.
-            float sceneUvY = 1.0 - (worldXY.y - uBldSceneOrigin.y) / uBldSceneSize.y;
-            vec2 sceneUv = clamp(vec2(sceneUvX, sceneUvY), 0.0, 1.0);
-            float bldShadow = clamp(texture2D(tBuildingShadow, sceneUv).r, 0.0, 1.0);
+            // Reconstruct world XY at this fragment using bilinear interpolation
+            // over the four ground-plane frustum corners.
+            vec2 w0 = mix(uBldViewCorner00, uBldViewCorner10, vUv.x);
+            vec2 w1 = mix(uBldViewCorner01, uBldViewCorner11, vUv.x);
+            vec2 worldXY = mix(w0, w1, vUv.y);
+            // Convert Three world → Foundry scene UV (verbatim contract used by CloudEffectV2).
+            float foundryX = worldXY.x;
+            float foundryY = uSceneDimensions.y - worldXY.y;
+            vec2 sceneUvFoundry = (vec2(foundryX, foundryY) - uBldSceneOrigin) / max(uBldSceneSize, vec2(1e-5));
+            sceneUvFoundry = clamp(sceneUvFoundry, 0.0, 1.0);
+
+            // Building shadow texture is a WebGLRenderTarget (Y-up). Convert Foundry Y-down
+            // scene UV into render-target UV.
+            vec2 sceneUvThree = vec2(sceneUvFoundry.x, 1.0 - sceneUvFoundry.y);
+            float bldShadow = clamp(texture2D(tBuildingShadow, sceneUvThree).r, 0.0, 1.0);
+
             // Blend: 1.0 = shadow has full effect, 0.0 = no effect.
             float shadowMix = mix(1.0, bldShadow, uBuildingShadowOpacity);
             // Apply only to ambient contribution; dynamic lights punch through.
@@ -584,7 +605,7 @@ export class LightingEffectV2 {
    * @param {THREE.Texture|null} [overheadShadowTexture=null] - Screen-space shadow
    *   factor from OverheadShadowsEffectV2 (1.0=lit, 0.0=shadowed). Sampled at vUv.
    */
-  render(renderer, camera, sceneRT, outputRT, windowLightScene = null, cloudShadowTexture = null, buildingShadowTexture = null, overheadShadowTexture = null) {
+  render(renderer, camera, sceneRT, outputRT, windowLightScene = null, cloudShadowTexture = null, buildingShadowTexture = null, overheadShadowTexture = null, buildingShadowOpacity = 0.75) {
     if (!this._initialized || !this._enabled || !sceneRT) return;
     if (!this._lightRT || !this._darknessRT || !this._composeMaterial) return;
 
@@ -666,7 +687,21 @@ export class LightingEffectV2 {
     if (buildingShadowTexture) {
       cu.tBuildingShadow.value    = buildingShadowTexture;
       cu.uHasBuildingShadow.value = 1;
-      cu.uBuildingShadowOpacity.value = 0.75; // driven from params when wired
+      const op = Number.isFinite(Number(buildingShadowOpacity))
+        ? Math.max(0.0, Math.min(1.0, Number(buildingShadowOpacity)))
+        : 0.75;
+      cu.uBuildingShadowOpacity.value = op;
+
+      if (!this._dbgLoggedBuildingShadowOnce) {
+        this._dbgLoggedBuildingShadowOnce = true;
+        try {
+          log.info('LightingEffectV2 building shadow bind:',
+            'tex', buildingShadowTexture?.uuid || 'ok',
+            '| opacity', op,
+            '| has', cu.uHasBuildingShadow.value
+          );
+        } catch (_) {}
+      }
       // World-stable UV reconstruction — same approach as CloudEffectV2:
       // Pass camera frustum world-space corners + scene rect so the fragment
       // shader can reconstruct world XY and convert to scene UV per-pixel.
@@ -677,25 +712,69 @@ export class LightingEffectV2 {
         const cam = camera;
         if (cam && dims) {
           let vMinX = 0, vMinY = 0, vMaxX = 1, vMaxY = 1;
+          // Default corners derived from min/max (orthographic / fallback).
+          let c00x = 0, c00y = 0, c10x = 1, c10y = 0, c01x = 0, c01y = 1, c11x = 1, c11y = 1;
           if (cam.isOrthographicCamera) {
             vMinX = cam.position.x + cam.left   / cam.zoom;
             vMinY = cam.position.y + cam.bottom / cam.zoom;
             vMaxX = cam.position.x + cam.right  / cam.zoom;
             vMaxY = cam.position.y + cam.top    / cam.zoom;
+
+            c00x = vMinX; c00y = vMinY;
+            c10x = vMaxX; c10y = vMinY;
+            c01x = vMinX; c01y = vMaxY;
+            c11x = vMaxX; c11y = vMaxY;
           } else {
-            const groundZ = sc?.groundZ ?? 0;
-            const dist = Math.max(1e-3, Math.abs((cam.position?.z ?? 0) - groundZ));
-            const fovRad = (Number(cam.fov) || 60) * Math.PI / 180;
-            const halfH = dist * Math.tan(fovRad * 0.5);
-            const aspect = Number(cam.aspect) || 1;
-            const halfW = halfH * aspect;
-            vMinX = cam.position.x - halfW;
-            vMaxX = cam.position.x + halfW;
-            vMinY = cam.position.y - halfH;
-            vMaxY = cam.position.y + halfH;
+            // Perspective camera: compute stable bounds at the ground plane using
+            // NDC unprojection (same approach as WaterEffectV2). This avoids any
+            // mismatch between FOV/aspect assumptions and the camera projection.
+            const THREE = window.THREE;
+            const groundZ = sc?.basePlaneMesh?.position?.z ?? (sc?.groundZ ?? 0);
+            if (THREE) {
+              const ndc = new THREE.Vector3();
+              const world = new THREE.Vector3();
+              const dir = new THREE.Vector3();
+              let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+
+              // Map NDC corners to our vUv corner convention:
+              // (-1,-1) -> (0,0), (1,-1)->(1,0), (-1,1)->(0,1), (1,1)->(1,1)
+              const corners = [
+                { ndcX: -1, ndcY: -1, key: '00' },
+                { ndcX:  1, ndcY: -1, key: '10' },
+                { ndcX: -1, ndcY:  1, key: '01' },
+                { ndcX:  1, ndcY:  1, key: '11' },
+              ];
+
+              for (const c of corners) {
+                ndc.set(c.ndcX, c.ndcY, 0.5);
+                world.copy(ndc).unproject(cam);
+                dir.copy(world).sub(cam.position);
+                const dz = dir.z;
+                if (Math.abs(dz) < 1e-6) continue;
+                const t = (groundZ - cam.position.z) / dz;
+                if (!Number.isFinite(t) || t <= 0) continue;
+                const ix = cam.position.x + dir.x * t;
+                const iy = cam.position.y + dir.y * t;
+                if (ix < minX) minX = ix; if (iy < minY) minY = iy;
+                if (ix > maxX) maxX = ix; if (iy > maxY) maxY = iy;
+
+                if (c.key === '00') { c00x = ix; c00y = iy; }
+                else if (c.key === '10') { c10x = ix; c10y = iy; }
+                else if (c.key === '01') { c01x = ix; c01y = iy; }
+                else if (c.key === '11') { c11x = ix; c11y = iy; }
+              }
+
+              if (minX !== Infinity) {
+                vMinX = minX; vMinY = minY; vMaxX = maxX; vMaxY = maxY;
+              }
+            }
           }
           cu.uBldViewBoundsMin.value.set(vMinX, vMinY);
           cu.uBldViewBoundsMax.value.set(vMaxX, vMaxY);
+          cu.uBldViewCorner00.value.set(c00x, c00y);
+          cu.uBldViewCorner10.value.set(c10x, c10y);
+          cu.uBldViewCorner01.value.set(c01x, c01y);
+          cu.uBldViewCorner11.value.set(c11x, c11y);
           // Scene rect in Foundry world coords (Y-down). The bake canvas is
           // authored in this space (see OutdoorsMaskProviderV2: flipY=false).
           // Three.js camera Y is also world-space Y (matching Foundry scene coords
@@ -705,6 +784,10 @@ export class LightingEffectV2 {
           cu.uBldSceneSize.value.set(
             sr.width  ?? dims.sceneWidth  ?? 1,
             sr.height ?? dims.sceneHeight ?? 1
+          );
+          cu.uSceneDimensions.value.set(
+            dims.width  ?? 1,
+            dims.height ?? 1
           );
         }
       } catch (_) {}

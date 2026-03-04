@@ -658,6 +658,15 @@ export class FloorRenderBus {
     mesh.frustumCulled = false;
     mesh.userData = mesh.userData || {};
     mesh.userData.isOverhead = isOverhead;
+
+    // Layer conventions:
+    // - Layer 0: normal bus rendering (FloorCompositor camera enables it)
+    // - Layer 20: roof capture pass for OverheadShadowsEffectV2
+    mesh.layers.set(0);
+    if (isOverhead) {
+      mesh.layers.enable(20);
+    }
+
     mesh.position.set(cx, cy, z);
     mesh.rotation.z = rotation;
     // renderOrder controls visual stacking: lower = behind, higher = in front.

@@ -17,7 +17,7 @@ import { LightningEffectV2 } from '../compositor-v2/effects/LightningEffectV2.js
 import { MaskManager } from '../masks/MaskManager.js';
 import { ParticleSystem } from '../particles/ParticleSystem.js';
 import { DustMotesEffect } from '../particles/DustMotesEffect.js';
-// Effect wiring â€” tables, helpers, and re-exported effect classes (for static getControlSchema() calls)
+// Effect wiring ->-> tables, helpers, and re-exported effect classes (for static getControlSchema() calls)
 import {
   getIndependentEffectDefs,
   registerAllCapabilities,
@@ -160,7 +160,7 @@ let threeCanvas = null;
 /** @type {boolean} */
 let isMapMakerMode = false;
 
-// â”€â”€ Recovery mode flag â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ->->->-> Recovery mode flag ->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->
 // Set to true when Canvas.draw() completes but canvasReady never fired
 // (Foundry returned early due to an error like a missing tile texture).
 // When active, createThreeCanvas skips the strict _waitForFoundryCanvasReady
@@ -168,7 +168,7 @@ let isMapMakerMode = false;
 // canvas with Three.js anyway, so a partially-drawn Foundry canvas is fine.
 let _msaRecoveryMode = false;
 
-// â”€â”€ Missing texture tracking + cleanup (safe boot) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ->->->-> Missing texture tracking + cleanup (safe boot) ->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->
 // When Foundry/PIXI hangs on a missing/corrupt asset, our safe texture boot
 // returns a placeholder to avoid stalling canvas init. However, the scene
 // document may still reference the missing file, so future loads will keep
@@ -316,17 +316,17 @@ function _isCrisisNuclearBypassEnabled() {
   return false;
 }
 
-// â”€â”€ Scene data cleaning â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ->->->-> Scene data cleaning ->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->
 // Activated by: localStorage.setItem('msa-clean-scenes', '1')
 // When active, every MSA-enabled scene has its flags.map-shine-advanced
 // data wiped on load. MSA is skipped for that load cycle. The wipe is
-// permanent â€” the scene becomes a vanilla Foundry scene. Re-enable MSA
+// permanent ->-> the scene becomes a vanilla Foundry scene. Re-enable MSA
 // per-scene afterwards via the scene config UI.
 //
 // Also provides console commands:
-//   MapShine.cleanScene()           â€” clean current viewed scene
-//   MapShine.cleanScene('sceneId')  â€” clean a specific scene
-//   MapShine.cleanAllScenes()       â€” clean every scene in the world
+//   MapShine.cleanScene()           ->-> clean current viewed scene
+//   MapShine.cleanScene('sceneId')  ->-> clean a specific scene
+//   MapShine.cleanAllScenes()       ->-> clean every scene in the world
 
 /** Scene IDs cleaned this session (runtime guard for canvasReady). */
 const _cleanedSceneIds = new Set();
@@ -337,7 +337,7 @@ function _isSceneCleanModeEnabled() {
 
 /**
  * Strip ALL map-shine-advanced flags from a scene document.
- * The update is async / fire-and-forget â€” it persists to the DB in the
+ * The update is async / fire-and-forget ->-> it persists to the DB in the
  * background. Returns true if the wipe was initiated.
  * @param {object} scene - A Foundry Scene document
  * @param {string} [reason] - Reason logged to console
@@ -348,7 +348,7 @@ function _cleanSceneMSAFlags(scene, reason = 'auto-clean') {
     if (!scene?.id) return false;
     const msaFlags = scene?.flags?.['map-shine-advanced'];
     if (!msaFlags || Object.keys(msaFlags).length === 0) {
-      console.log(`MapShine cleanScene: ${scene.name ?? scene.id} â€” no MSA flags to clean`);
+      console.log(`MapShine cleanScene: ${scene.name ?? scene.id} -- no MSA flags to clean`);
       return false;
     }
     const flagKeys = Object.keys(msaFlags);
@@ -386,7 +386,7 @@ let foundryStateSnapshot = null;
 /** @type {string|null} */
 let _msaRecoveryReason = null;
 
-// â”€â”€ Loading Progress Diagnostics â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ->->->-> Loading Progress Diagnostics ->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->
 // Used to attribute createThreeCanvas hard timeouts to a specific init step.
 let _createThreeCanvasProgress = {
   step: 'not-started',
@@ -767,7 +767,7 @@ export function initialize() {
     return true;
   }
 
-  // â”€â”€ Expose scene cleaning commands on window.MapShine â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ->->->-> Expose scene cleaning commands on window.MapShine ->->->->->->->->->->->->->->->->->->->->->->->->->->
   // Available immediately so GMs can run them from the browser console
   // even if the rest of initialization fails or hangs.
   try {
@@ -827,7 +827,7 @@ export function initialize() {
       }
     };
 
-    console.log('MapShine: scene cleaning commands available â€” MapShine.cleanScene(), MapShine.cleanAllScenes(), MapShine.setAutoClean()');
+    console.log('MapShine: scene cleaning commands available -- MapShine.cleanScene(), MapShine.cleanAllScenes(), MapShine.setAutoClean()');
   } catch (_) {}
 
   try {
@@ -1030,8 +1030,8 @@ export function initialize() {
           return;
         }
 
-        // â”€â”€ PIXI config adjustments for Map Shine â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-        // Disable antialiasing on the PIXI canvas â€” Map Shine renders via
+        // ->->->-> PIXI config adjustments for Map Shine ->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->
+        // Disable antialiasing on the PIXI canvas ->-> Map Shine renders via
         // Three.js and only needs PIXI for transparent overlay / input.
         // This is a safe, minor GPU-pressure reduction.
         //
@@ -1040,7 +1040,7 @@ export function initialize() {
         // cause synchronous driver hangs during texture upload and freeze
         // the event loop entirely (hard freeze at 0%).
         //
-        // Do NOT set autoDensity=false â€” PIXI v8 relies on it for correct
+        // Do NOT set autoDensity=false ->-> PIXI v8 relies on it for correct
         // canvas element sizing. Overriding it can break layout.
         try { config.antialias = false; } catch (_) {}
         try {
@@ -1053,7 +1053,7 @@ export function initialize() {
         } catch (_) {
         }
 
-        // â”€â”€ Scene data diagnostics: log flag sizes + background info â”€â”€
+        // ->->->-> Scene data diagnostics: log flag sizes + background info ->->->->
         try {
           const bgSrc = scene?.background?.src ?? scene?.img ?? null;
           const sceneFlags = scene?.flags ?? {};
@@ -1085,7 +1085,7 @@ export function initialize() {
         } catch (flagErr) {
         }
 
-        // â”€â”€ Transparency config (diagnostic) â”€â”€
+        // ->->->-> Transparency config (diagnostic) ->->->->
         // Foundry v13 uses PIXI v8. PIXI v8 does NOT use the old `transparent:true` option;
         // it primarily uses `backgroundAlpha` and `backgroundColor`.
         // Empirically, setting `config.transparent=true` appears to correlate with a hard
@@ -1396,7 +1396,7 @@ export function initialize() {
 
       // Compositor V2: reassign sprites to floor layers after floor bands rebuild.
       // This is a no-op if floor bands haven't changed (assignTileToFloor checks
-      // previous assignment). Cheap â€” just layer mask bit operations, no GPU work.
+      // previous assignment). Cheap ->-> just layer mask bit operations, no GPU work.
       safeCall(() => {
         const flm = window.MapShine?.floorLayerManager;
         const tm = window.MapShine?.tileManager;
@@ -1483,14 +1483,14 @@ export function initialize() {
   }
 }
 
-// â”€â”€ diagnostic diagnostic: track outstanding fetch/image requests â”€â”€
+// ->->->-> diagnostic diagnostic: track outstanding fetch/image requests ->->->->
 // Installed once globally so we can see what Foundry is waiting on.
 function _installNetworkDiagnostics() {
   if (globalThis.__msaCrisisNetworkDiag) return globalThis.__msaCrisisNetworkDiag;
 
   const diag = {
-    pendingFetches: new Map(),  // id â†’ { url, startMs }
-    pendingImages: new Map(),   // id â†’ { src, startMs }
+    pendingFetches: new Map(),  // id ->-> { url, startMs }
+    pendingImages: new Map(),   // id ->-> { src, startMs }
     _fetchId: 0,
     _imgId: 0,
   };
@@ -1656,13 +1656,13 @@ function _installFoundryTextureLoaderTrace() {
           }
         } catch (_) {}
 
-        // â”€â”€ Heartbeat: fires OUTSIDE Foundry's collapsed console group â”€â”€
+        // ->->->-> Heartbeat: fires OUTSIDE Foundry's collapsed console group ->->->->
         // If heartbeats stop appearing, the event loop is synchronously blocked.
         // If they keep appearing but loading never resolves, it's an async hang.
         const loadT0 = performance?.now?.() ?? Date.now();
         let _hbCount = 0;
         let _hbId = null;
-        const _assetTracker = new Map(); // src â†’ t0
+        const _assetTracker = new Map(); // src ->-> t0
         try {
           _hbId = setInterval(() => {
             try {
@@ -1674,7 +1674,7 @@ function _installFoundryTextureLoaderTrace() {
           }, 3000);
         } catch (_) {}
 
-        // â”€â”€ Per-asset tracking via loadTexture monkey-patch â”€â”€
+        // ->->->-> Per-asset tracking via loadTexture monkey-patch ->->->->
         // Foundry's load() loop calls this.loadTexture(src) for each asset.
         // NOTE: These logs appear INSIDE Foundry's collapsed console group
         // ("Loading 56 Assets"). Expand that group to see them.
@@ -1736,14 +1736,14 @@ function _installFoundryTextureLoaderTrace() {
           } else {
           }
         } catch (installErr) {
-          // Do NOT swallow silently â€” this is critical diagnostic info
+          // Do NOT swallow silently ->-> this is critical diagnostic info
         }
 
-        // â”€â”€ Call original load() and track sync vs async â”€â”€
+        // ->->->-> Call original load() and track sync vs async ->->->->
         const SAFETY_TIMEOUT_MS = _safeTextureBoot ? 20000 : 60000;
         let safetyTimerId = null;
         try {
-          // Call original â€” sync phase creates all loadTexture promises, then awaits
+          // Call original ->-> sync phase creates all loadTexture promises, then awaits
           const loadPromise = original(sources, options);
           // If we reach here, the synchronous phase of original() completed.
           // The event loop is NOT blocked by the synchronous init.
@@ -1968,14 +1968,14 @@ function installCanvasDrawWrapper() {
       } catch (_) {
       }
 
-      // â”€â”€ Diagnostic state poller: logs canvas internals every 2s while draw is pending â”€â”€
+      // ->->->-> Diagnostic state poller: logs canvas internals every 2s while draw is pending ->->->->
       let _pollerId = null;
       let _pollCount = 0;
       const _hangTimerIds = [];
       try {
         const sceneName = this?.scene?.name ?? (args?.[0]?.name ?? null);
 
-        // Periodic state poller â€” fires every 2s and dumps full canvas state
+        // Periodic state poller ->-> fires every 2s and dumps full canvas state
         _pollerId = setInterval(() => {
           _pollCount++;
           try {
@@ -2031,14 +2031,14 @@ function installCanvasDrawWrapper() {
         } catch (_) {
         }
 
-        // â”€â”€ Hang watchdog â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        // ->->->-> Hang watchdog ->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->
         // Some scenes can cause Foundry's Canvas.draw() promise to never
         // resolve (e.g. an internal group draw awaiting a stalled texture
         // decode or a third-party module hook deadlock). When that happens
         // the whole enable flow deadlocks because our wrapper awaits it.
         //
         // For MSA-enabled scenes, we can safely recover by initializing Map
-        // Shine anyway â€” we replace the Foundry canvas with Three.js.
+        // Shine anyway ->-> we replace the Foundry canvas with Three.js.
         const sceneForHangCheck = canvas?.scene ?? this?.scene ?? (args?.[0] ?? null);
         const isMsaEnabledForHangCheck = sceneForHangCheck ? sceneSettings.isEnabled(sceneForHangCheck) : false;
         const HANG_TIMEOUT_MS = 8000;
@@ -2059,7 +2059,7 @@ function installCanvasDrawWrapper() {
 
           if (isMsaEnabledForHangCheck && !_canvasReadyFiredThisDraw) {
             try {
-              console.warn('MapShine: Canvas.draw() appears hung â€” forcing recovery init via onCanvasReady (recovery mode)');
+              console.warn('MapShine: Canvas.draw() appears hung -- forcing recovery init via onCanvasReady (recovery mode)');
             } catch (_) {}
 
             _msaRecoveryMode = true;
@@ -2073,7 +2073,7 @@ function installCanvasDrawWrapper() {
           }
 
           // If not enabled (or canvasReady already fired), just let Foundry
-          // keep waiting â€” we don't want to change behavior for vanilla scenes.
+          // keep waiting ->-> we don't want to change behavior for vanilla scenes.
           const result = await drawPromise;
           return result;
         }
@@ -2088,10 +2088,10 @@ function installCanvasDrawWrapper() {
         } catch (_) {
         }
 
-        // â”€â”€ Recover from silent canvasReady skip â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        // ->->->-> Recover from silent canvasReady skip ->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->
         // Foundry's Canvas.#draw() catches errors from individual canvas
         // group draws (e.g. a tile referencing a missing texture throws
-        // "Invalid Asset") and returns early â€” canvasReady is never called.
+        // "Invalid Asset") and returns early ->-> canvasReady is never called.
         // Map Shine never gets to initialize, so the scene appears as
         // "not enabled" even though the flag is correctly set.
         //
@@ -2103,7 +2103,7 @@ function installCanvasDrawWrapper() {
             const isMsaEnabled = scene ? sceneSettings.isEnabled(scene) : false;
             console.warn(`MapShine: Canvas.draw() completed but canvasReady never fired (Foundry returned early due to a draw error). MSA-enabled=${isMsaEnabled}`);
             if (isMsaEnabled) {
-              console.warn('MapShine: Manually triggering onCanvasReady to recover â€” Map Shine replaces the Foundry canvas anyway, so partial Foundry draw state is acceptable.');
+              console.warn('MapShine: Manually triggering onCanvasReady to recover -- Map Shine replaces the Foundry canvas anyway, so partial Foundry draw state is acceptable.');
               _msaRecoveryMode = true;
               // Use setTimeout(0) so any remaining Foundry post-draw cleanup
               // can complete before we start Map Shine initialization.
@@ -2127,7 +2127,7 @@ function installCanvasDrawWrapper() {
         } catch (_) {
         }
 
-        // â”€â”€ Recover from thrown errors for MSA-enabled scenes â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        // ->->->-> Recover from thrown errors for MSA-enabled scenes ->->->->->->->->->->->->->->->->->->->->->->->->->->
         // If Canvas.draw() actually throws (rather than returning early),
         // still attempt to initialize Map Shine. We replace the Foundry
         // canvas with Three.js anyway, so a failed Foundry draw is fine.
@@ -2135,7 +2135,7 @@ function installCanvasDrawWrapper() {
           const scene = canvas?.scene ?? this?.scene ?? null;
           const isMsaEnabled = scene ? sceneSettings.isEnabled(scene) : false;
           if (isMsaEnabled) {
-            console.warn('MapShine: Canvas.draw() threw, but scene is MSA-enabled â€” attempting recovery via onCanvasReady');
+            console.warn('MapShine: Canvas.draw() threw, but scene is MSA-enabled -- attempting recovery via onCanvasReady');
             _msaRecoveryMode = true;
             setTimeout(() => {
               try {
@@ -2277,7 +2277,7 @@ function installCanvasTransitionWrapper() {
       return result;
     };
 
-    // XM-3: Prefer libWrapper if available â€” ensures correct chaining with
+    // XM-3: Prefer libWrapper if available ->-> ensures correct chaining with
     // other modules that also wrap Canvas.tearDown (e.g. scene-packer, etc.)
     if (typeof globalThis.libWrapper === 'function' || globalThis.libWrapper?.register) {
       try {
@@ -2383,12 +2383,12 @@ async function waitForThreeFrames(
   const startThreeFrame = renderer?.info?.render?.frame;
   const startLoopFrame = typeof renderLoop?.getFrameCount === 'function' ? renderLoop.getFrameCount() : 0;
 
-  _dlp.event(`waitFrames: start â€” threeFrame=${startThreeFrame}, loopFrame=${startLoopFrame}, ` +
+  _dlp.event(`waitFrames: start ->-> threeFrame=${startThreeFrame}, loopFrame=${startLoopFrame}, ` +
     `need ${minFrames} frames, ${stableCallsFrames} stable calls, ${minDelayMs}ms delay, timeout=${timeoutMs}ms`);
 
   // Heartbeat: fires every 2s to prove the event loop is alive.
   // If the event loop is blocked (e.g. by synchronous shader compilation),
-  // no heartbeat events will appear â€” confirming the block.
+  // no heartbeat events will appear ->-> confirming the block.
   let heartbeatCount = 0;
   const heartbeatId = setInterval(() => {
     heartbeatCount++;
@@ -2396,7 +2396,7 @@ async function waitForThreeFrames(
     const curFrame = renderer?.info?.render?.frame;
     const curLoop = typeof renderLoop?.getFrameCount === 'function' ? renderLoop.getFrameCount() : '?';
     const curCalls = renderer?.info?.render?.calls;
-    _dlp.event(`waitFrames: heartbeat #${heartbeatCount} at +${elapsed}ms â€” ` +
+    _dlp.event(`waitFrames: heartbeat #${heartbeatCount} at +${elapsed}ms ->-> ` +
       `threeFrame=${curFrame}, loopFrame=${curLoop}, calls=${curCalls}`);
   }, 2000);
 
@@ -2412,7 +2412,7 @@ async function waitForThreeFrames(
       // deadlock the loading sequence. Treat this as a soft success so loading
       // can proceed; the RenderLoop will resume drawing when the context restores.
       if (_threeContextLost) {
-        _dlp.event(`waitFrames: RESOLVED early â€” WebGL context lost at +${(now - startTime).toFixed(0)}ms`, 'warn');
+        _dlp.event(`waitFrames: RESOLVED early ->-> WebGL context lost at +${(now - startTime).toFixed(0)}ms`, 'warn');
         return true;
       }
       const currentThreeFrame = renderer?.info?.render?.frame;
@@ -2435,13 +2435,13 @@ async function waitForThreeFrames(
 
       // Log detailed state on first few iterations and when conditions are close to met
       if (iterations <= 3 || (meetsDelay && (meetsFrames || meetsCalls))) {
-        _dlp.event(`waitFrames: iter=${iterations} +${(now - startTime).toFixed(0)}ms â€” ` +
+        _dlp.event(`waitFrames: iter=${iterations} +${(now - startTime).toFixed(0)}ms ->-> ` +
           `frames=${framesAdvanced}/${minFrames}, calls=${calls}, stable=${callsStable}/${stableCallsFrames}, ` +
           `delay=${meetsDelay}, hidden=${!!isHidden}`);
       }
 
       if (meetsDelay && meetsFrames && meetsCalls) {
-        _dlp.event(`waitFrames: RESOLVED after ${iterations} iterations, ${(now - startTime).toFixed(0)}ms â€” ` +
+        _dlp.event(`waitFrames: RESOLVED after ${iterations} iterations, ${(now - startTime).toFixed(0)}ms ->-> ` +
           `frames=${framesAdvanced}, stable=${callsStable}`);
         return true;
       }
@@ -2458,7 +2458,7 @@ async function waitForThreeFrames(
     }
 
     const elapsed = (performance.now() - startTime).toFixed(0);
-    _dlp.event(`waitFrames: TIMED OUT after ${iterations} iterations, ${elapsed}ms â€” ` +
+    _dlp.event(`waitFrames: TIMED OUT after ${iterations} iterations, ${elapsed}ms ->-> ` +
       `threeFrame=${renderer?.info?.render?.frame}, loopFrame=${typeof renderLoop?.getFrameCount === 'function' ? renderLoop.getFrameCount() : '?'}`, 'warn');
     return false;
   } finally {
@@ -2668,7 +2668,7 @@ async function onCanvasReady(canvas) {
     });
   }, 'hook.canvasReady.breadcrumb', Severity.COSMETIC);
 
-  // Clear the tearDown safety net timer â€” canvasReady fired, so the overlay
+  // Clear the tearDown safety net timer ->-> canvasReady fired, so the overlay
   // will be handled by the normal flow below (or dismissed for null scenes).
   if (_overlayDismissSafetyTimerId !== null) {
     clearTimeout(_overlayDismissSafetyTimerId);
@@ -2682,7 +2682,7 @@ async function onCanvasReady(canvas) {
       const n = String(89).padStart(3, '0');
     } catch (_) {
     }
-    log.debug('onCanvasReady called with no active scene â€” dismissing overlay');
+    log.debug('onCanvasReady called with no active scene ->-> dismissing overlay');
     // Dismiss the loading overlay even though there's no scene to draw.
     // Without this, the overlay can get stuck if canvasReady fires with null
     // (e.g. edge cases during blank canvas transitions or other module interactions).
@@ -3013,7 +3013,7 @@ function onCanvasTearDown(canvas) {
   // visible after 10 seconds and there's no active scene or loading in
   // progress, force-dismiss it. This catches rare edge cases where the
   // queueMicrotask in the tearDown wrapper (Layer 1) or the onCanvasReady
-  // null-scene handler (Layer 2) didn't fire â€” e.g. errors during draw,
+  // null-scene handler (Layer 2) didn't fire ->-> e.g. errors during draw,
   // unexpected module interactions, or network-induced stalls.
   // Clear any previous safety timer to avoid stacking.
   if (_overlayDismissSafetyTimerId !== null) {
@@ -3025,7 +3025,7 @@ function onCanvasTearDown(canvas) {
       // Only dismiss if the canvas is genuinely idle with no scene.
       // If a new scene is loading or already loaded, canvasReady will handle it.
       if (!canvas?.scene && !canvas?.loading) {
-        log.warn('Overlay safety net triggered â€” forcing overlay dismissal (no scene loaded after 10s)');
+        log.warn('Overlay safety net triggered ->-> forcing overlay dismissal (no scene loaded after 10s)');
         safeCall(() => loadingOverlay.fadeIn(300).catch(() => {}), 'overlay.safetyNet', Severity.COSMETIC);
       }
     } catch (_) { /* guard against unexpected state */ }
@@ -3129,11 +3129,11 @@ async function createThreeCanvas(scene) {
   }
 
   _setCreateThreeCanvasProgress('entered');
-  console.log(' â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•');
+  console.log(' ->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->');
   console.log(' Scene load started:', scene?.name ?? 'unknown');
-  console.log(' â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•');
+  console.log(' ->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->');
 
-  // Periodic progress heartbeat â€” helps diagnose stalls even when the loading
+  // Periodic progress heartbeat ->-> helps diagnose stalls even when the loading
   // overlay UI is frozen or before the hard timeout fires.
   let _progressHeartbeatId = null;
   try {
@@ -3195,9 +3195,9 @@ async function createThreeCanvas(scene) {
   if (isDebugLoad) dlp.begin('cleanup', 'cleanup');
   _setCreateThreeCanvasProgress('cleanup');
   // Cleanup existing canvas if present
-  console.log(' â–¶ Step: cleanup (destroyThreeCanvas)');
+  console.log(' -> Step: cleanup (destroyThreeCanvas)');
   destroyThreeCanvas();
-  console.log(' âœ” Step: cleanup DONE');
+  console.log(' -> Step: cleanup DONE');
   // Retry ambient sound patch at scene init time in case early init occurred
   // before CONFIG ambient sound classes were fully available.
   installAmbientSoundAudibilityPatch();
@@ -3258,10 +3258,10 @@ async function createThreeCanvas(scene) {
     const canvasOk = await safeCallAsync(async () => {
       // In recovery mode (Foundry's draw failed early due to e.g. a missing
       // tile texture), canvas.ready will be false and layers may be partial.
-      // Map Shine replaces the canvas with Three.js so this is acceptable â€”
+      // Map Shine replaces the canvas with Three.js so this is acceptable ->->
       // skip the strict readiness check and proceed.
       if (_msaRecoveryMode) {
-        log.warn('Recovery mode active â€” skipping strict Foundry canvas readiness check');
+        log.warn('Recovery mode active ->-> skipping strict Foundry canvas readiness check');
         return true;
       }
       const ok = await _waitForFoundryCanvasReady({ timeoutMs: 15000 });
@@ -3337,7 +3337,7 @@ async function createThreeCanvas(scene) {
     // Create new canvas element
     if (isDebugLoad) dlp.begin('canvas.create', 'setup');
     _setCreateThreeCanvasProgress('canvas.create');
-    console.log(' â–¶ Step: canvas.create');
+    console.log(' -> Step: canvas.create');
 
     // Hard safety: ensure we never end up with multiple MapShine canvases.
     // A stale canvas can retain the first rendered frame and appear as a
@@ -3438,13 +3438,13 @@ async function createThreeCanvas(scene) {
     // Insert our canvas as a sibling, right after the PIXI canvas
     pixiCanvas.parentElement.insertBefore(threeCanvas, pixiCanvas.nextSibling);
     if (isDebugLoad) dlp.end('canvas.create');
-    console.log(' âœ” Step: canvas.create DONE');
+    console.log(' -> Step: canvas.create DONE');
     log.debug('Three.js canvas created and attached as sibling to PIXI canvas');
 
     // Get renderer from global state and attach its canvas
     if (isDebugLoad) dlp.begin('renderer.attach', 'setup');
     _setCreateThreeCanvasProgress('renderer.attach');
-    console.log(' â–¶ Step: renderer.attach');
+    console.log(' -> Step: renderer.attach');
     renderer = mapShine.renderer;
     const rendererCanvas = renderer.domElement;
 
@@ -3523,7 +3523,7 @@ async function createThreeCanvas(scene) {
           }, 'autoSafeMode.renderResolution', Severity.DEGRADED);
 
           safeCall(() => {
-            const msg = 'WebGL reset detected â€” entering Safe Mode (reduced effects)';
+            const msg = 'WebGL reset detected ->-> entering Safe Mode (reduced effects)';
             loadingOverlay.setStage?.('final', 1.0, msg, { immediate: true });
             loadingOverlay.fadeIn?.(300)?.catch?.(() => {});
             globalThis.ui?.notifications?.warn?.(msg);
@@ -3568,7 +3568,7 @@ async function createThreeCanvas(scene) {
     }, 'registerWebGLContextHandlers', Severity.DEGRADED);
 
     if (isDebugLoad) dlp.end('renderer.attach');
-    console.log(' âœ” Step: renderer.attach DONE');
+    console.log(' -> Step: renderer.attach DONE');
 
     // Ensure regions outside the Foundry world bounds remain black; padded region is covered by a background plane
     if (renderer.setClearColor) {
@@ -3579,8 +3579,8 @@ async function createThreeCanvas(scene) {
     _sectionStart('sceneComposer.initialize');
     if (isDebugLoad) dlp.begin('sceneComposer.initialize', 'texture');
     _setCreateThreeCanvasProgress('sceneComposer.initialize');
-    dlp.event('sceneComposer: BEGIN â€” loading masks + textures');
-    console.log(' â–¶ Step: sceneComposer.initialize (loading masks + textures)');
+    dlp.event('sceneComposer: BEGIN ->-> loading masks + textures');
+    console.log(' -> Step: sceneComposer.initialize (loading masks + textures)');
 
     sceneComposer = new SceneComposer();
     if (doLoadProfile) safeCall(() => lp.begin('sceneComposer.initialize'), 'lp.begin', Severity.COSMETIC);
@@ -3600,8 +3600,8 @@ async function createThreeCanvas(scene) {
     );
     if (doLoadProfile) safeCall(() => lp.end('sceneComposer.initialize'), 'lp.end', Severity.COSMETIC);
     if (isDebugLoad) dlp.end('sceneComposer.initialize', { masks: bundle?.masks?.length ?? 0 });
-    dlp.event(`sceneComposer: DONE â€” ${bundle?.masks?.length ?? 0} masks loaded`);
-    console.log(' âœ” Step: sceneComposer.initialize DONE (' + (bundle?.masks?.length ?? 0) + ' masks)');
+    dlp.event(`sceneComposer: DONE ->-> ${bundle?.masks?.length ?? 0} masks loaded`);
+    console.log(' -> Step: sceneComposer.initialize DONE (' + (bundle?.masks?.length ?? 0) + ' masks)');
     _sectionEnd('sceneComposer.initialize');
 
     // Capture asset cache stats for the debug profiler
@@ -3613,11 +3613,11 @@ async function createThreeCanvas(scene) {
           'Bundles cached': cs.size,
           'Cache hits': cs.hits,
           'Cache misses': cs.misses,
-          'Hit rate': cs.hitRate || 'â€”',
+          'Hit rate': cs.hitRate || '->->',
           'Bundle keys': cs.bundles.length > 0 ? cs.bundles.map(k => k.split('/').pop()).join(', ') : '(empty)',
           'Note': isFirstLoad
-            ? 'First load â€” MISS is expected. Cache is in-memory only (survives scene transitions, not page reloads). Switch scenes and return to test cache HIT.'
-            : 'Return visit â€” cache should HIT if masks are still valid.'
+            ? 'First load ->-> MISS is expected. Cache is in-memory only (survives scene transitions, not page reloads). Switch scenes and return to test cache HIT.'
+            : 'Return visit ->-> cache should HIT if masks are still valid.'
         });
         // Log bundle mask details
         if (bundle?.masks?.length) {
@@ -3629,14 +3629,14 @@ async function createThreeCanvas(scene) {
             return `${m.id} ${w}x${h} ${cs}`;
           });
           dlp.addDiagnostic('Scene Bundle', {
-            'Base path': bundle.basePath || 'â€”',
+            'Base path': bundle.basePath || '->->',
             'Mask count': bundle.masks.length,
             'Masks': maskInfo.join(' | ')
           });
         }
       }, 'dlp.cacheStats', Severity.COSMETIC);
 
-      // GPU / renderer diagnostics â€” static hardware info captured early.
+      // GPU / renderer diagnostics ->-> static hardware info captured early.
       // Dynamic counts (programs, textures, materials) are in the Resource
       // Snapshot and shader compile event log (captured after effects init).
       safeCall(() => {
@@ -3670,7 +3670,7 @@ async function createThreeCanvas(scene) {
     _sectionStart('gpu.textureWarmup');
     if (isDebugLoad) dlp.begin('gpu.textureWarmup', 'texture');
     _setCreateThreeCanvasProgress('gpu.textureWarmup');
-    console.log(' â–¶ Step: gpu.textureWarmup');
+    console.log(' -> Step: gpu.textureWarmup');
     safeCall(() => {
       const warmupResult = warmupBundleTextures(renderer, bundle, (uploaded, total) => {
         safeCall(() => loadingOverlay.setStage('assets.load', 1.0, `GPU upload ${uploaded}/${total}...`, { keepAuto: true }), 'overlay.gpuWarmup', Severity.COSMETIC);
@@ -3680,22 +3680,22 @@ async function createThreeCanvas(scene) {
       }
     }, 'gpu.textureWarmup', Severity.DEGRADED);
     if (isDebugLoad) dlp.end('gpu.textureWarmup');
-    console.log(' âœ” Step: gpu.textureWarmup DONE');
+    console.log(' -> Step: gpu.textureWarmup DONE');
     _sectionEnd('gpu.textureWarmup');
 
     // CRITICAL: Expose sceneComposer early so effects can access groundZ during initialization
     mapShine.sceneComposer = sceneComposer;
 
     // V2: MaskManager, WeatherController roof map, and EffectMaskRegistry are
-    // all V1 mask infrastructure. V2 renders raw geometry only â€” skip.
+    // all V1 mask infrastructure. V2 renders raw geometry only ->-> skip.
 
     // Step 2: Initialize effect composer
-    console.log(' â–¶ Step: effectComposer.initialize');
+    console.log(' -> Step: effectComposer.initialize');
     if (isDebugLoad) dlp.begin('effectComposer.initialize', 'setup');
     effectComposer = new EffectComposer(renderer, threeScene, camera);
     effectComposer.initialize(mapShine.capabilities);
     if (isDebugLoad) dlp.end('effectComposer.initialize');
-    console.log(' âœ” Step: effectComposer.initialize DONE');
+    console.log(' -> Step: effectComposer.initialize DONE');
 
     // Ensure TimeManager immediately matches Foundry's current pause state.
     safeCall(() => {
@@ -3703,11 +3703,11 @@ async function createThreeCanvas(scene) {
       effectComposer.getTimeManager()?.setFoundryPaused?.(paused, 0);
     }, 'timeManager.syncPause', Severity.COSMETIC);
 
-    log.info('Compositor V2 active â€” skipping legacy effect construction, masks, and pre-warming');
+    log.info('Compositor V2 active ->-> skipping legacy effect construction, masks, and pre-warming');
     dlp.event('effect pipeline: legacy V1 paths bypassed');
 
     // Initialize module-wide depth pass manager.
-    // V2: Depth passes are not used â€” FloorCompositor renders MeshBasicMaterial only.
+    // V2: Depth passes are not used ->-> FloorCompositor renders MeshBasicMaterial only.
 
     safeCall(() => {
       loadingOverlay.setStage('effects.core', 0.0, 'Initializing effects...', { immediate: true, keepAuto: true });
@@ -3729,11 +3729,11 @@ async function createThreeCanvas(scene) {
     // V2: WeatherController is pure state data (wind, precipitation, cloud cover, wetness).
     //     CloudEffectV2 and WaterEffectV2 read it directly, so it must be initialized in
     //     both modes. The EffectComposer updatable registration is V1-only because V2
-    //     drives WeatherController updates via FloorCompositor â†’ WeatherParticlesV2.
+    //     drives WeatherController updates via FloorCompositor ->-> WeatherParticlesV2.
     if (isDebugLoad) dlp.begin('weatherController.initialize', 'weather');
-    console.log(' â–¶ Step: weatherController.initialize');
+    console.log(' -> Step: weatherController.initialize');
     await weatherController.initialize();
-    console.log(' âœ” Step: weatherController.initialize DONE');
+    console.log(' -> Step: weatherController.initialize DONE');
     if (isDebugLoad) dlp.end('weatherController.initialize');
 
 
@@ -3749,7 +3749,7 @@ async function createThreeCanvas(scene) {
     _sectionStart('effectInit');
     const effectMap = new Map();
 
-    dlp.event('effectInit: SKIPPED â€” V2 compositor owns post pipeline');
+    dlp.event('effectInit: SKIPPED ->-> V2 compositor owns post pipeline');
     _sectionEnd('effectInit');
 
       // V2: Eagerly initialize FloorCompositor and warm up shaders NOW during
@@ -3775,7 +3775,7 @@ async function createThreeCanvas(scene) {
       
       // Force-create the FloorCompositor. This is synchronous and can be expensive
       // (creates render targets, registers hooks, syncs lights). Wrap in safeCall
-      // but don't await it â€” we just need the compositor instance created.
+      // but don't await it ->-> we just need the compositor instance created.
       let fc = null;
       safeCall(() => {
         fc = effectComposer._getFloorCompositorV2();
@@ -3790,13 +3790,13 @@ async function createThreeCanvas(scene) {
       // certain GPU/driver combinations (observed: NVIDIA on Windows).
       if (fc) {
         log.info('V2 FloorCompositor: skipping shader warmup (will compile lazily on first render)');
-        console.log('   warmup: skipped â€” shaders will compile lazily');
+        console.log('   warmup: skipped ->-> shaders will compile lazily');
       }
       
       log.info('[loading] V2 FloorCompositor warmup DONE');
       if (isDebugLoad) dlp.end('v2.floorCompositor.warmup');
 
-      // Advance progress through the stages that V2 skips (effects.core â†’ deps â†’ wire).
+      // Advance progress through the stages that V2 skips (effects.core ->-> deps ->-> wire).
       // Each transition yields to the browser so the progress bar can repaint.
       // Without these yields, the main thread runs synchronously from 30% to 60%
       // and the user sees the bar frozen at 30% for the entire duration.
@@ -3816,14 +3816,14 @@ async function createThreeCanvas(scene) {
         loadingOverlay.setStage('effects.wire', 1.0, 'Wiring skipped (V2)', { keepAuto: true });
       }, 'overlay.v2SkipWire', Severity.COSMETIC);
       await new Promise(r => setTimeout(r, 0)); // yield so browser paints 60%
-      console.log('   V2 yield 3/3 done â€” exiting V2 warmup block');
+      console.log('   V2 yield 3/3 done ->-> exiting V2 warmup block');
 
 
     // Step 4a: Initialize token manager
     // V2: TokenManager is required for token rendering + interaction parity.
     if (isDebugLoad) dlp.begin('manager.TokenManager.init', 'manager');
     _setCreateThreeCanvasProgress('scene.managers.tokens.init');
-    console.log(' â–¶ Manager: TokenManager');
+    console.log(' -> Manager: TokenManager');
     if (tokenManager) {
       safeDispose(() => tokenManager.dispose(), 'tokenManager.dispose(reinit)');
       tokenManager = null;
@@ -3833,7 +3833,7 @@ async function createThreeCanvas(scene) {
     tokenManager.initialize();
     if (window.MapShine) window.MapShine.tokenManager = tokenManager;
     if (isDebugLoad) dlp.end('manager.TokenManager.init');
-    console.log(' âœ” Manager: TokenManager DONE');
+    console.log(' -> Manager: TokenManager DONE');
 
     // CRITICAL: Expose managers on window.MapShine so other subsystems
     // (e.g. TokenManager.updateSpriteVisibility) can check VC state.
@@ -3858,23 +3858,23 @@ async function createThreeCanvas(scene) {
     // presence scenes, water occluder) is skipped.
     if (isDebugLoad) dlp.begin('manager.TileManager.init', 'manager');
     _setCreateThreeCanvasProgress('scene.managers.tiles.init');
-    console.log(' â–¶ Manager: TileManager');
-    console.log('   â–¸ TileManager: constructor...');
+    console.log(' -> Manager: TileManager');
+    console.log('   -> TileManager: constructor...');
     tileManager = new TileManager(threeScene);
-    console.log('   â–¸ TileManager: constructor DONE');
+    console.log('   -> TileManager: constructor DONE');
     effectComposer.addUpdatable(tileManager); // Register for occlusion updates
     if (isDebugLoad) dlp.end('manager.TileManager.syncAll');
-    console.log(' âœ” Manager: TileManager DONE (synced)');
+    console.log(' -> Manager: TileManager DONE (synced)');
     log.info('Tile manager initialized and synced');
     // Yield after tile sync so fire-and-forget texture fetches can start and
     // the browser can repaint the progress bar.
     _setCreateThreeCanvasProgress('scene.managers.yield.afterTiles');
     await new Promise(r => setTimeout(r, 0));
 
-    // Step 4b.0: Initialize FloorStack â€” derives per-floor elevation bands from
+    // Step 4b.0: Initialize FloorStack ->-> derives per-floor elevation bands from
     // the LevelsImportSnapshot and provides the setFloorVisible() API used by
     // the per-floor render loop (Phase 2) and depth captures.
-    // KEEP for V2 â€” FloorStack is essential for floor band discovery.
+    // KEEP for V2 ->-> FloorStack is essential for floor band discovery.
     _setCreateThreeCanvasProgress('scene.managers.floorStack.init');
     floorStack = new FloorStack();
     floorStack.setManagers(tileManager, tokenManager);
@@ -3886,7 +3886,7 @@ async function createThreeCanvas(scene) {
     log.info('FloorStack initialized');
 
     // Step 4b.0.1: Initialize FloorLayerManager (Compositor V2).
-    // KEEP for V2 â€” essential for assigning tiles to floor layers.
+    // KEEP for V2 ->-> essential for assigning tiles to floor layers.
     _setCreateThreeCanvasProgress('scene.managers.floorLayerManager.init');
     const floorLayerManager = new FloorLayerManager();
     floorLayerManager.setFloorStack(floorStack);
@@ -3894,27 +3894,27 @@ async function createThreeCanvas(scene) {
     log.info('FloorLayerManager initialized');
 
     // Step 4b.1: Initialize tile motion runtime manager
-    // V2: Tile motion (animated tiles) is not needed for raw geometry â€” skip.
+    // V2: Tile motion (animated tiles) is not needed for raw geometry ->-> skip.
 
     safeCall(() => loadingOverlay.setStage('scene.sync', 0.35, 'Syncing tiles...', { keepAuto: true }), 'overlay.tiles', Severity.COSMETIC);
 
-    // V2: SurfaceRegistry is effect infrastructure â€” skip.
+    // V2: SurfaceRegistry is effect infrastructure ->-> skip.
 
     // Step 4c: Initialize wall manager
     if (isDebugLoad) dlp.begin('manager.WallManager.init', 'manager');
     _setCreateThreeCanvasProgress('scene.managers.walls.init');
-    console.log(' â–¶ Manager: WallManager');
+    console.log(' -> Manager: WallManager');
     wallManager = new WallManager(threeScene);
     wallManager.initialize();
     if (isDebugLoad) dlp.end('manager.WallManager.init');
-    console.log(' âœ” Manager: WallManager DONE');
+    console.log(' -> Manager: WallManager DONE');
     // Sync happens in initialize
     log.info('Wall manager initialized');
 
     // Step 4d: Initialize token movement manager (movement styles + path policies)
     if (isDebugLoad) dlp.begin('manager.TokenMovement.init', 'manager');
     _setCreateThreeCanvasProgress('scene.managers.tokenMovement.init');
-    console.log(' â–¶ Manager: TokenMovementManager');
+    console.log(' -> Manager: TokenMovementManager');
     if (tokenMovementManager) {
       safeDispose(() => {
         effectComposer?.removeUpdatable?.(tokenMovementManager);
@@ -3927,19 +3927,19 @@ async function createThreeCanvas(scene) {
     effectComposer.addUpdatable(tokenMovementManager);
     if (window.MapShine) window.MapShine.tokenMovementManager = tokenMovementManager;
     if (isDebugLoad) dlp.end('manager.TokenMovement.init');
-    console.log(' âœ” Manager: TokenMovementManager DONE');
+    console.log(' -> Manager: TokenMovementManager DONE');
     log.info('Token movement manager initialized');
 
     safeCall(() => loadingOverlay.setStage('scene.sync', 0.55, 'Syncing walls...', { keepAuto: true }), 'overlay.walls', Severity.COSMETIC);
 
     // P1.3: Parallel initialization of independent lightweight managers.
-    // These managers only create THREE objects and register Foundry hooks â€” they
+    // These managers only create THREE objects and register Foundry hooks ->-> they
     // don't depend on each other or on tokens/tiles/walls, so it's safe to run
     // them concurrently. MapPointsManager is async and included in the batch.
     safeCall(() => loadingOverlay.setStage('scene.sync', 0.7, 'Syncing remaining objects...', { keepAuto: true }), 'overlay.remaining', Severity.COSMETIC);
 
     _setCreateThreeCanvasProgress('scene.managers.lightweightBatch.construct');
-    console.log(' â–¶ Manager: Lightweight batch (Door, Drawing, Note, Template, LightIcon, EnhancedLightIcon, MapPoints)');
+    console.log(' -> Manager: Lightweight batch (Door, Drawing, Note, Template, LightIcon, EnhancedLightIcon, MapPoints)');
 
     if (!sceneComposer) {
       // This can happen if the scene load session becomes stale (scene switch)
@@ -3995,25 +3995,25 @@ async function createThreeCanvas(scene) {
 
     effectComposer.addUpdatable(doorMeshManager);
     if (window.MapShine) window.MapShine.doorMeshManager = doorMeshManager;
-    console.log(' âœ” Manager: Lightweight batch DONE');
+    console.log(' -> Manager: Lightweight batch DONE');
     log.info('Parallel manager batch initialized (Door, Drawing, Note, Template, LightIcon, EnhancedLightIcon, MapPoints)');
 
     // Wire map points to particle effects (fire, candle flame, smelly flies, etc.)
-    // V2: No particle effects â€” skip wiring.
+    // V2: No particle effects ->-> skip wiring.
 
     // Step 4i: Initialize physics ropes (rope/chain map points)
-    // V2: Ropes are visual effects â€” skip.
+    // V2: Ropes are visual effects ->-> skip.
 
     // Step 5: Initialize interaction manager (Selection, Drag/Drop)
-    // KEEP for V2 â€” user interaction is essential.
+    // KEEP for V2 ->-> user interaction is essential.
     if (isDebugLoad) dlp.begin('manager.Interaction.init', 'manager');
     _setCreateThreeCanvasProgress('scene.managers.interaction.init');
-    console.log(' â–¶ Manager: InteractionManager');
+    console.log(' -> Manager: InteractionManager');
     interactionManager = new InteractionManager(threeCanvas, sceneComposer, tokenManager, tileManager, wallManager, lightIconManager);
     interactionManager.initialize();
     effectComposer.addUpdatable(interactionManager); // Register for updates (HUD positioning)
     if (isDebugLoad) dlp.end('manager.Interaction.init');
-    console.log(' âœ” Manager: InteractionManager DONE');
+    console.log(' -> Manager: InteractionManager DONE');
     log.info('Interaction manager initialized');
 
     // Wire token movement hook for ash disturbance.
@@ -4108,7 +4108,7 @@ async function createThreeCanvas(scene) {
     // This eliminates bidirectional sync issues and race conditions.
     if (isDebugLoad) dlp.begin('manager.CameraFollower.init', 'manager');
     _setCreateThreeCanvasProgress('scene.managers.cameraFollower.init');
-    console.log(' â–¶ Manager: CameraFollower');
+    console.log(' -> Manager: CameraFollower');
     cameraFollower = new CameraFollower({ sceneComposer });
     cameraFollower.initialize();
     effectComposer.addUpdatable(cameraFollower); // Per-frame sync
@@ -4118,7 +4118,7 @@ async function createThreeCanvas(scene) {
       }
     }, 'exposeLevelNavigationController', Severity.COSMETIC);
     if (isDebugLoad) dlp.end('manager.CameraFollower.init');
-    console.log(' âœ” Manager: CameraFollower DONE');
+    console.log(' -> Manager: CameraFollower DONE');
     log.info('Camera follower initialized - Three.js follows PIXI');
 
     // Step 6.05: Compact level navigator overlay (always visible on levels-enabled scenes).
@@ -4188,7 +4188,7 @@ async function createThreeCanvas(scene) {
     log.info('Cinematic camera manager initialized');
 
     // BASELINE: Skip ControlsIntegration (V1 component causing crashes in V2 mode)
-    console.log(' â–¶ Manager: ControlsIntegration SKIPPED (V2 baseline)');
+    console.log(' -> Manager: ControlsIntegration SKIPPED (V2 baseline)');
     controlsIntegration = null;
     log.info('Controls integration SKIPPED (V2 baseline mode)');
 
@@ -4218,7 +4218,7 @@ async function createThreeCanvas(scene) {
       install('renderSceneControls');
     }, 'pixiSuppress.installHooks', Severity.COSMETIC);
 
-    dlp.event('sceneSync: DONE â€” entering finalization');
+    dlp.event('sceneSync: DONE ->-> entering finalization');
     _sectionEnd('sceneSync');
     _sectionStart('finalization');
     safeCall(() => {
@@ -4244,28 +4244,28 @@ async function createThreeCanvas(scene) {
     // Step 7.5: Progressive shader warmup.
     //
     // When V2 compositor is active, all effect shaders are bypassed at runtime.
-    // V2 uses MeshBasicMaterial only â€” no custom shaders to warm up.
+    // V2 uses MeshBasicMaterial only ->-> no custom shaders to warm up.
     // Skip the full progressive warmup to avoid compiling 30+ unused shaders.
     _sectionStart('gpu.shaderCompile');
     if (isDebugLoad) dlp.begin('gpu.shaderCompile', 'gpu');
     {
       // V2 compositor is always-on. Legacy V1 progressive shader warmup has been removed.
       safeCall(() => loadingOverlay.setStage('final', 0.9, 'Shaders ready...', { keepAuto: true }), 'overlay.shaderCompile', Severity.COSMETIC);
-      dlp.event('gpu.shaderCompile: SKIPPED â€” V2 compositor active');
+      dlp.event('gpu.shaderCompile: SKIPPED ->-> V2 compositor active');
       log.info('Shader warmup skipped: V2 compositor active');
     }
     if (isDebugLoad) dlp.end('gpu.shaderCompile');
     _sectionEnd('gpu.shaderCompile');
 
     // Step 8: Start render loop
-    console.log(' â–¶ Step: renderLoop.start');
+    console.log(' -> Step: renderLoop.start');
     renderLoop = new RenderLoop(renderer, threeScene, camera, effectComposer);
     renderLoop.start();
-    console.log(' âœ” Step: renderLoop.start DONE');
+    console.log(' -> Step: renderLoop.start DONE');
     // Update ModeManager with the now-created renderLoop reference
     if (modeManager) modeManager._deps.renderLoop = renderLoop;
 
-    dlp.event('renderLoop: STARTED â€” first rAF frame queued');
+    dlp.event('renderLoop: STARTED ->-> first rAF frame queued');
     log.info('Render loop started');
 
     // Step 8.5: Set up resize handling via extracted ResizeHandler
@@ -4357,7 +4357,7 @@ async function createThreeCanvas(scene) {
     _sectionStart('fin.initializeUI');
     if (isDebugLoad) dlp.begin('fin.initializeUI', 'finalize');
     _setCreateThreeCanvasProgress('initializeUI');
-    console.log(' â–¶ Step: initializeUI');
+    console.log(' -> Step: initializeUI');
     await safeCallAsync(async () => {
       if (session.isStale()) return;
 
@@ -4389,14 +4389,14 @@ async function createThreeCanvas(scene) {
           safeCall(() => cameraPanel.setCinematicManager(cinematicCameraManager), 'cameraPanel.sync', Severity.COSMETIC);
         }
 
-        // Levels Authoring Dialog (GM only) â€” required to validate tile floor assignments.
+        // Levels Authoring Dialog (GM only) ->-> required to validate tile floor assignments.
         if (!levelsAuthoring && game.user?.isGM) {
           levelsAuthoring = new LevelsAuthoringDialog();
           levelsAuthoring.initialize();
           safeCall(() => { if (window.MapShine) window.MapShine.levelsAuthoring = levelsAuthoring; }, 'exposeLevelsAuthoring', Severity.COSMETIC);
         }
 
-        // â”€â”€ Register V2 effect controls in Tweakpane â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        // ->->->-> Register V2 effect controls in Tweakpane ->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->
         // V1 effects are NOT constructed in V2 mode, but we still need UI
         // controls for the V2 post-processing effects on FloorCompositor.
         // Schemas come from V1 static getControlSchema() (classes are imported).
@@ -5000,21 +5000,21 @@ async function createThreeCanvas(scene) {
 
         log.info('V2: UI initialized');
     }, 'initializeUI', Severity.DEGRADED);
-    console.log(' âœ” Step: initializeUI DONE');
+    console.log(' -> Step: initializeUI DONE');
     if (isDebugLoad) dlp.end('fin.initializeUI');
     _sectionEnd('fin.initializeUI');
 
-    console.log(' â–¶ Step: overlay.finalProgress');
+    console.log(' -> Step: overlay.finalProgress');
     // Only begin fading-in once we have proof that Three has actually rendered.
     // This prevents the overlay from fading out during shader compilation / first-frame stutter.
     safeCall(() => {
       loadingOverlay.setStage('final', 0.4, 'Finalizing...', { keepAuto: true });
       loadingOverlay.startAutoProgress(0.995, 0.008);
     }, 'overlay.finalProgress', Severity.COSMETIC);
-    console.log(' âœ” Step: overlay.finalProgress DONE');
+    console.log(' -> Step: overlay.finalProgress DONE');
 
     // P1.2: Wait for all effects to be ready before fading overlay
-    // V2: No effects registered â€” skip readiness wait entirely.
+    // V2: No effects registered ->-> skip readiness wait entirely.
 
     // P1.3: Tile loading is NON-BLOCKING.
     // Tiles load in the background and appear when their fetch/decode completes.
@@ -5023,13 +5023,13 @@ async function createThreeCanvas(scene) {
     //   2. During the await, Foundry's PIXI render loop starves setTimeout callbacks
     //      (10s timer fires 46s late), making any timeout mechanism unreliable
     //   3. Overhead/decorative tiles are not required for an interactive scene
-    // The tile textures will pop in when ready â€” this is acceptable vs a 60s stall.
+    // The tile textures will pop in when ready ->-> this is acceptable vs a 60s stall.
     _sectionStart('fin.waitForTiles');
     safeCall(() => loadingOverlay.setStage('final', 0.50, 'Preparing tiles...', { keepAuto: true }), 'overlay.prepareTiles', Severity.COSMETIC);
     {
       const pendingAll = tileManager?._initialLoad?.pendingAll ?? 0;
       const totalTracked = tileManager?._initialLoad?.trackedIds?.size ?? 0;
-      dlp.event(`fin.waitForTiles: SKIPPED (non-blocking) â€” ${pendingAll} tile(s) loading in background`);
+      dlp.event(`fin.waitForTiles: SKIPPED (non-blocking) ->-> ${pendingAll} tile(s) loading in background`);
       if (isDebugLoad) {
         dlp.begin('fin.waitForTiles', 'finalize', { pending: pendingAll, tracked: totalTracked });
         dlp.end('fin.waitForTiles', { pendingAfter: pendingAll, skipped: true });
@@ -5051,7 +5051,7 @@ async function createThreeCanvas(scene) {
 
     // With shaders pre-compiled (Step 7.5), the first render frame should be
     // fast (~10-50ms). We only need 3 stable frames to confirm the renderer is
-    // healthy â€” down from 6 frames / 12s timeout when compilation happened here.
+    // healthy ->-> down from 6 frames / 12s timeout when compilation happened here.
     //
     // BULLET-PROOF DESIGN: previous versions used dlp.event() inside the
     // setTimeout callback. If dlp.event() threw, the resolve callback was
@@ -5059,22 +5059,22 @@ async function createThreeCanvas(scene) {
     //   1. Timeout promise resolves FIRST, before any logging
     //   2. framePromise has .catch() so rejections don't propagate
     //   3. Outer try/catch ensures _sectionEnd is always called
-    console.log(' â–¶ Step: waitForThreeFrames');
+    console.log(' -> Step: waitForThreeFrames');
     _sectionStart('fin.waitForThreeFrames');
     if (isDebugLoad) dlp.begin('fin.waitForThreeFrames', 'finalize');
     _setCreateThreeCanvasProgress('waitForThreeFrames');
-    console.log(' âœ” Step: waitForThreeFrames SKIPPED (V2)');
+    console.log(' -> Step: waitForThreeFrames SKIPPED (V2)');
     try { dlp.event('fin.waitForThreeFrames: SKIPPED (V2)', 'warn'); } catch (_) {}
     if (isDebugLoad) { try { dlp.end('fin.waitForThreeFrames', { skipped: true, v2: true }); } catch (_) {} }
     _sectionEnd('fin.waitForThreeFrames');
 
-    // V2: Time-of-day drives lighting/sky/shadow effects â€” skip.
+    // V2: Time-of-day drives lighting/sky/shadow effects ->-> skip.
 
     // Floor pre-loading (V2): assign tiles to floor layers.
     if (isDebugLoad) dlp.begin('fin.preloadAllFloors', 'finalize');
     safeCall(() => loadingOverlay.setStage('final', 0.85, 'Pre-loading floors...', { keepAuto: true }), 'overlay.preloadFloors', Severity.COSMETIC);
     _setCreateThreeCanvasProgress('preloadAllFloors');
-    console.log(' â–¶ Step: preloadAllFloors');
+    console.log(' -> Step: preloadAllFloors');
 
     safeCall(() => {
       const flm = window.MapShine?.floorLayerManager;
@@ -5082,15 +5082,15 @@ async function createThreeCanvas(scene) {
       const tkm = window.MapShine?.tokenManager;
       if (flm && tm) {
         flm.reassignAllLayers(tm, tkm);
-        log.info('V2: FloorLayerManager â€” all sprites assigned to floor layers');
+        log.info('V2: FloorLayerManager ->-> all sprites assigned to floor layers');
         // FloorRenderBus repopulates lazily on first render frame from tile docs.
       }
     }, 'v2.floorLayerAssignment', Severity.DEGRADED);
-    console.log(' âœ” Step: preloadAllFloors DONE');
+    console.log(' -> Step: preloadAllFloors DONE');
     if (isDebugLoad) dlp.end('fin.preloadAllFloors');
 
     _sectionStart('fin.fadeIn');
-    dlp.event('fin.fadeIn: loading pipeline complete â€” preparing overlay transition');
+    dlp.event('fin.fadeIn: loading pipeline complete ->-> preparing overlay transition');
     _setCreateThreeCanvasProgress('fadeIn');
 
     // Debug loading mode: capture resource snapshot, generate the full log,
@@ -5104,7 +5104,7 @@ async function createThreeCanvas(scene) {
       safeCall(() => loadingOverlay.setDebugLog(fullLog), 'dlp.setFullLog', Severity.COSMETIC);
 
       const elapsed = loadingOverlay.getElapsedSeconds();
-      const readyMsg = elapsed > 0 ? `Debug load complete (${elapsed.toFixed(1)}s) â€” review log below` : 'Debug load complete â€” review log below';
+      const readyMsg = elapsed > 0 ? `Debug load complete (${elapsed.toFixed(1)}s) ->-> review log below` : 'Debug load complete ->-> review log below';
       safeCall(() => loadingOverlay.setStage('final', 1.0, readyMsg, { immediate: true }), 'overlay.debugReady', Severity.COSMETIC);
 
       // Auto-dismiss the overlay in debug mode.
@@ -5126,7 +5126,7 @@ async function createThreeCanvas(scene) {
       // Expose the profiler on window.MapShine for console access
       if (window.MapShine) window.MapShine.debugLoadingProfiler = dlp;
     } else {
-      console.log(' â–¶ Step: overlay.fadeIn');
+      console.log(' -> Step: overlay.fadeIn');
       await safeCallAsync(async () => {
         const elapsed = loadingOverlay.getElapsedSeconds();
         const readyMsg = elapsed > 0 ? `Ready! (${elapsed.toFixed(1)}s)` : 'Ready!';
@@ -5137,16 +5137,16 @@ async function createThreeCanvas(scene) {
           new Promise(resolve => setTimeout(resolve, 5000))
         ]);
       }, 'overlay.fadeIn', Severity.COSMETIC);
-      console.log(' âœ” Step: overlay.fadeIn DONE');
+      console.log(' -> Step: overlay.fadeIn DONE');
     }
 
     _sectionEnd('fin.fadeIn');
     _sectionEnd('finalization');
     _sectionEnd('total');
     _logSectionTimings();
-    console.log(' â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•');
+    console.log(' ->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->');
     console.log(' Scene load COMPLETE:', scene?.name ?? 'unknown');
-    console.log(' â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•');
+    console.log(' ->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->');
 
     // Mark the load session as successfully completed (records duration).
     session.finish();
@@ -5596,10 +5596,10 @@ function destroyThreeCanvas() {
   }
 
   // NOTE: We intentionally do NOT clear the asset cache here.
-  // The cache maps basePath â†’ loaded bundle (textures + masks). Clearing it
+  // The cache maps basePath ->-> loaded bundle (textures + masks). Clearing it
   // on every scene transition makes the cache permanently useless (0% hit rate).
   // The cache is checked at the start of loadAssetBundle() and only reused if
-  // all critical masks are present. Stale entries are harmless â€” they just hold
+  // all critical masks are present. Stale entries are harmless ->-> they just hold
   // references to disposed textures, which loadAssetBundle's validation will
   // detect and re-probe. Explicit cache clearing is still available via
   // clearAssetCache() for manual use or memory pressure scenarios.
@@ -5609,7 +5609,7 @@ function destroyThreeCanvas() {
   // but its active WebGL context competes with PIXI's context during the next
   // scene load. Browsers have a low limit on concurrent WebGL contexts (typically
   // 8-16, sometimes as few as 2-3 under GPU pressure). If the limit is exceeded,
-  // the browser loses a context â€” and if PIXI's context is the one lost, Foundry's
+  // the browser loses a context ->-> and if PIXI's context is the one lost, Foundry's
   // TextureLoader.load() hangs forever because textures can't be uploaded.
   //
   // By disposing here, we free the GPU context slot before Foundry creates its
@@ -5674,7 +5674,7 @@ export async function resetScene(options = undefined) {
 
     const prevMapMakerMode = !!(modeManager?.isMapMakerMode ?? isMapMakerMode);
 
-    safeCall(() => ui?.notifications?.info?.('Map Shine: Resetting scene (rebuilding Three.js)â€¦'), 'resetScene.notify', Severity.COSMETIC);
+    safeCall(() => ui?.notifications?.info?.('Map Shine: Resetting scene (rebuilding Three.js)->'), 'resetScene.notify', Severity.COSMETIC);
 
     safeCall(() => {
       const w = window.MapShine?.waterEffect;
@@ -5868,7 +5868,31 @@ function _enforceGameplayPixiSuppression() {
     if (isMapMakerMode) return;
     const activeControl = String(ui?.controls?.control?.name || ui?.controls?.activeControl || '').toLowerCase();
     const activeTool = String(ui?.controls?.tool?.name || ui?.controls?.activeTool || '').toLowerCase();
+    const inputRouter =
+      window.MapShine?.inputRouter ||
+      window.mapShine?.inputRouter ||
+      controlsIntegration?.inputRouter ||
+      null;
+    const tokenEditContext =
+      activeControl === 'tokens' &&
+      (activeTool === '' || activeTool === 'select' || activeTool === 'target' || activeTool === 'ruler');
+    const pixiEditContext =
+      tokenEditContext ||
+      activeControl === 'walls' ||
+      activeControl === 'lighting' ||
+      activeTool === 'walls' ||
+      activeTool === 'terrain' ||
+      activeTool === 'invisible' ||
+      activeTool === 'ethereal' ||
+      activeTool === 'doors' ||
+      activeTool === 'secret' ||
+      activeTool === 'window' ||
+      activeTool === 'light';
+    const shouldPixiReceiveInput = inputRouter
+      ? !!inputRouter.shouldPixiReceiveInput?.()
+      : pixiEditContext;
     const needsEditorOverlay =
+      shouldPixiReceiveInput ||
       !!window.MapShine?.__forcePixiEditorOverlay ||
       !!canvas?.walls?.active ||
       !!canvas?.lighting?.active ||
@@ -5884,12 +5908,13 @@ function _enforceGameplayPixiSuppression() {
 
     if (needsEditorOverlay) {
       const pixiCanvas = canvas.app?.view;
+      const threeCanvas = document.getElementById('map-shine-canvas');
       if (pixiCanvas) {
         pixiCanvas.style.display = '';
         pixiCanvas.style.visibility = 'visible';
         pixiCanvas.style.opacity = '1';
         pixiCanvas.style.zIndex = '10';
-        pixiCanvas.style.pointerEvents = 'auto';
+        pixiCanvas.style.pointerEvents = shouldPixiReceiveInput ? 'auto' : 'none';
       }
 
       const board = document.getElementById('board');
@@ -5898,7 +5923,11 @@ function _enforceGameplayPixiSuppression() {
         board.style.visibility = 'visible';
         board.style.opacity = '1';
         board.style.zIndex = '10';
-        board.style.pointerEvents = 'auto';
+        board.style.pointerEvents = shouldPixiReceiveInput ? 'auto' : 'none';
+      }
+
+      if (threeCanvas) {
+        threeCanvas.style.pointerEvents = shouldPixiReceiveInput ? 'none' : 'auto';
       }
       return;
     }
@@ -6272,17 +6301,16 @@ function updateInputMode() {
     // Wait, TokenManager syncs tokens. If we hide TokenLayer, we can't select tokens via PIXI.
     // InteractionManager handles 3D selection.
     
-    // So we ONLY need PIXI input if we are on an "Edit" layer that still
-    // relies on Foundry's native PIXI interaction (sounds, templates, etc.).
-    // Wall editing is handled entirely in Three.js, so WallsLayer is
-    // intentionally *excluded* here. That way, while in wall placement mode
-    // the Three.js canvas continues to receive input and camera panning
-    // remains available.
+    // Use PIXI for Foundry-native edit workflows.
     const editLayers = [
-      // NOTE: LightingLayer is intentionally *not* included here. In Gameplay
-      // Mode we handle light placement directly in the Three.js interaction
-      // system, so PIXI should not reclaim pointerEvents when the Lighting
-      // controls are active.
+      'TokenLayer',
+      'TokensLayer',
+      'tokens',
+      'WallsLayer',
+      'WallLayer',
+      'walls',
+      'LightingLayer',
+      'lighting',
       'SoundsLayer',
       'TemplateLayer',
       'DrawingsLayer',
@@ -6302,13 +6330,18 @@ function updateInputMode() {
       const finalLayerName = String(finalLayerObj?.options?.name || finalLayerObj?.name || '').toLowerCase();
       const finalLayerCtor = String(finalLayerObj?.constructor?.name || '').toLowerCase();
       const finalControl = String(ui?.controls?.control?.name || ui?.controls?.activeControl || '').toLowerCase();
+      const finalTool = String(ui?.controls?.tool?.name || ui?.controls?.activeTool || '').toLowerCase();
+      const threeCanvasEl = document.getElementById('map-shine-canvas');
       const isFinalLayer = (name) => {
         const normalized = String(name || '').toLowerCase();
         return (finalLayerName === normalized) || (finalLayerCtor === normalized) || (finalControl === normalized);
       };
       const isLightingFinal = !!canvas?.lighting?.active || isFinalLayer('lightinglayer') || isFinalLayer('lighting');
       const isWallsFinal = !!canvas?.walls?.active || isFinalLayer('wallslayer') || isFinalLayer('walllayer') || isFinalLayer('walls');
-      const isEditMode = editLayers.some((l) => isFinalLayer(l)) || (v2Active && isLightingFinal);
+      const isTokensFinal = isFinalLayer('tokenlayer') || isFinalLayer('tokenslayer') || isFinalLayer('tokens');
+      const isTokenEditTool = !finalTool || finalTool === 'select' || finalTool === 'target' || finalTool === 'ruler';
+      const isTokenEditFinal = isTokensFinal && isTokenEditTool;
+      const isEditMode = editLayers.some((l) => isFinalLayer(l)) || isLightingFinal || isWallsFinal || isTokenEditFinal;
 
       // Drive Three.js light icon visibility from a single source of truth.
       // In Gameplay mode (Three.js active), show light icons only when the
@@ -6333,9 +6366,20 @@ function updateInputMode() {
 
       if (isEditMode) {
         pixiCanvas.style.pointerEvents = 'auto';
+        const board = document.getElementById('board');
+        if (board && board.tagName === 'CANVAS') {
+          board.style.display = '';
+          board.style.visibility = 'visible';
+          board.style.opacity = '1';
+          board.style.pointerEvents = 'auto';
+        }
+        if (threeCanvasEl) threeCanvasEl.style.pointerEvents = 'none';
         log.debug(`Input Mode: PIXI (Edit: ${finalLayerCtor || finalLayerName})`);
       } else {
         pixiCanvas.style.pointerEvents = 'none'; // Pass through to Three.js
+        const board = document.getElementById('board');
+        if (board && board.tagName === 'CANVAS') board.style.pointerEvents = 'none';
+        if (threeCanvasEl) threeCanvasEl.style.pointerEvents = 'auto';
         log.debug(`Input Mode: THREE.js (Gameplay: ${finalLayerCtor || finalLayerName})`);
       }
     }, 0);

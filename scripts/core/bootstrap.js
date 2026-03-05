@@ -117,7 +117,7 @@ export async function bootstrap(options = {}) {
 
     _msaCrisisLog(74, 'bootstrap: state.renderer + state.rendererType assigned');
 
-    // Step 4.5: Initialize Game System Manager (non-fatal â€” rendering works without it)
+    // Step 4.5: Initialize Game System Manager (non-fatal -- rendering works without it)
     _msaCrisisLog(75, 'bootstrap: creating GameSystemManager');
     try {
       logger.info('Initializing game system manager...');
@@ -125,8 +125,8 @@ export async function bootstrap(options = {}) {
       state.gameSystem.initialize();
       _msaCrisisLog(76, 'bootstrap: GameSystemManager initialized');
     } catch (gsErr) {
-      logger.warn('GameSystemManager failed to initialize â€” game-system features disabled', gsErr);
-      _msaCrisisLog(76, `bootstrap: GameSystemManager failed (${gsErr?.message ?? 'unknown'}) â€” continuing`);
+      logger.warn('GameSystemManager failed to initialize -- game-system features disabled', gsErr);
+      _msaCrisisLog(76, `bootstrap: GameSystemManager failed (${gsErr?.message ?? 'unknown'}) -- continuing`);
     }
 
     // Step 5: Create minimal scene (if not skipped)

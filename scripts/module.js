@@ -166,7 +166,7 @@ try {
 } catch (_) {
 }
 
-// â”€â”€ diagnostic kill-switch cleanup â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// -- diagnostic kill-switch cleanup --
 // These localStorage flags were temporary debugging measures during the
 // 0%/98% load-stall investigation. They are now treated as deprecated and
 // are forcibly cleared on startup so they cannot silently break rendering.
@@ -356,7 +356,7 @@ Hooks.once('init', async function() {
   }
 
   // Register keybindings SYNCHRONOUSLY before any await. Foundry's hook system
-  // does not await async handlers â€” after the first yield, Foundry considers the
+  // does not await async handlers -- after the first yield, Foundry considers the
   // init phase complete and rejects late keybinding registrations with:
   // "You cannot register a Keybinding after the init hook"
   try {
@@ -405,7 +405,7 @@ Hooks.once('init', async function() {
 
   try {
     _msaCrisisLog(18, 'init: loadingOverlay.showBlack() about to run');
-    loadingOverlay.showBlack('Initializingâ€¦');
+    loadingOverlay.showBlack('Initializing...');
     _msaCrisisLog(19, 'init: loadingOverlay.showBlack() completed');
   } catch (e) {
     console.warn('Map Shine: failed to initialize loading overlay', e);
@@ -413,7 +413,7 @@ Hooks.once('init', async function() {
   }
 
 
-  console.log("%c GNU Terry Pratchett %c \nâ€œA man is not dead while his name is still spoken.â€",
+  console.log("%c GNU Terry Pratchett %c \n\"A man is not dead while his name is still spoken.\"",
   "background: #313131ff; color: #FFD700; font-weight: bold; padding: 4px 8px; border-radius: 4px;",
   "color: #888; font-style: italic;"
 );
@@ -818,14 +818,14 @@ Hooks.once('ready', async function() {
   }
 
   try {
-    _msaCrisisLog(45, 'ready: loadingOverlay.setMessage(Preparing rendererâ€¦) about to run');
-    loadingOverlay.setMessage('Preparing rendererâ€¦');
+    _msaCrisisLog(45, 'ready: loadingOverlay.setMessage(Preparing renderer...) about to run');
+    loadingOverlay.setMessage('Preparing renderer...');
     _msaCrisisLog(46, 'ready: loadingOverlay.setMessage completed');
   } catch (e) {
     console.warn('Map Shine: failed to update loading overlay', e);
     _msaCrisisLog(47, 'ready: loadingOverlay.setMessage threw');
   }
-  // Run bootstrap sequence â€” wrapped in try/catch so a failed import (e.g.
+  // Run bootstrap sequence -- wrapped in try/catch so a failed import (e.g.
   // game-system.js 404) doesn't silently hang createThreeCanvas forever.
   _msaCrisisLog(48, 'ready: importing bootstrap + LoadingScreenManager');
   let bootstrap = null;
@@ -840,7 +840,7 @@ Hooks.once('ready', async function() {
     _msaCrisisLog(49, 'ready: bootstrap + LoadingScreenManager imports resolved');
   } catch (importErr) {
     console.error('Map Shine: failed to import bootstrap or LoadingScreenManager', importErr);
-    _msaCrisisLog(49, `ready: import FAILED (${importErr?.message ?? 'unknown'}) â€” marking bootstrapComplete`);
+    _msaCrisisLog(49, `ready: import FAILED (${importErr?.message ?? 'unknown'}) -- marking bootstrapComplete`);
     MapShine.bootstrapComplete = true;
     MapShine.bootstrapError = importErr?.message ?? 'import failed';
     return; // nothing more we can do without bootstrap
@@ -852,7 +852,7 @@ Hooks.once('ready', async function() {
     state = await bootstrap({ verbose: false });
   } catch (bootstrapErr) {
     console.error('Map Shine: failed to run bootstrap', bootstrapErr);
-    _msaCrisisLog(51, `ready: bootstrap FAILED (${bootstrapErr?.message ?? 'unknown'}) â€” marking bootstrapComplete`);
+    _msaCrisisLog(51, `ready: bootstrap FAILED (${bootstrapErr?.message ?? 'unknown'}) -- marking bootstrapComplete`);
     MapShine.bootstrapComplete = true;
     MapShine.bootstrapError = bootstrapErr?.message ?? 'bootstrap failed';
     return; // nothing more we can do without bootstrap
@@ -894,7 +894,7 @@ Hooks.once('ready', async function() {
   try {
     if (!canvas?.scene) {
       _msaCrisisLog(57, 'ready: no active canvas.scene; dismissing loading overlay');
-      info('No active scene â€” dismissing loading overlay');
+      info('No active scene -- dismissing loading overlay');
       loadingOverlay.fadeIn(500).catch(() => {});
       _msaCrisisLog(58, 'ready: loadingOverlay.fadeIn(500) invoked for no-scene case');
     }

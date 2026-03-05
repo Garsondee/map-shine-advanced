@@ -22,7 +22,7 @@ let _lpSeq = 0;
 // <1.0 = flatter perspective (more orthographic-feeling)
 // >1.0 = more exaggerated perspective
 // NOTE: Values very far from 1.0 can introduce slight desync vs PIXI; small tweaks
-// like 0.9â€“0.95 are usually safe. Adjust to taste.
+// like 0.9-0.95 are usually safe. Adjust to taste.
 const PERSPECTIVE_STRENGTH = 1.0;
 
 /**
@@ -68,7 +68,7 @@ export class SceneComposer {
     this._lastMaskBasePath = null;
 
     /**
-     * Per-tile mask compositor â€” composes per-tile suffix masks into
+     * Per-tile mask compositor -- composes per-tile suffix masks into
      * scene-space render targets (GPU) or canvases (CPU fallback).
      * Replaces the single-tile mask selection logic for multi-tile and
      * multi-floor scenes. The GPU compositor caches render targets per
@@ -227,13 +227,13 @@ export class SceneComposer {
       return elev >= bandBottom && elev < bandTop;
     }
 
-    // No elevation data â€” include by default (fail open).
+    // No elevation data -- include by default (fail open).
     return true;
   }
 
   // _getActiveLevelTiles, _getLargeSceneMaskTiles, _computeSceneMaskCompositeLayout,
   // _buildCompositeSceneMasks, _buildCompositeSceneAlbedo, rebuildMasksForActiveLevel,
-  // and preloadMasksForAllLevels removed â€” now owned by GpuSceneMaskCompositor.
+  // and preloadMasksForAllLevels removed -- now owned by GpuSceneMaskCompositor.
   // See scripts/masks/GpuSceneMaskCompositor.js composeFloor() / preloadAllFloors().
 
   /**
@@ -248,7 +248,7 @@ export class SceneComposer {
     return this._sceneMaskCompositor?._getLargeSceneMaskTiles?.(foundryScene, levelContext) ?? [];
   }
 
-  // â”€â”€ Removed legacy methods (now in GpuSceneMaskCompositor) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // -- Removed legacy methods (now in GpuSceneMaskCompositor) --
   // _getActiveLevelTilesBody, _getLargeSceneMaskTilesBody, _computeSceneMaskCompositeLayout,
   // _getFullSceneMaskTileBasePaths, _buildUnionMaskForBasePaths, _buildCompositeSceneMasks,
   // _buildCompositeSceneAlbedo, rebuildMasksForActiveLevel, preloadMasksForAllLevels
@@ -304,7 +304,7 @@ export class SceneComposer {
       if (!Array.isArray(candidates) || candidates.length === 0) {
         // Fallback: choose the largest visible tile in the scene.
         // Some scenes (especially with non-square grid geometry) may temporarily
-        // fail our â€œsceneRect-alignedâ€ heuristic due to fractional offsets.
+        // fail our "sceneRect-aligned" heuristic due to fractional offsets.
         let tiles = canvas?.scene?.tiles ?? foundryScene?.tiles ?? null;
         if (tiles && typeof tiles.size === 'number' && tiles.size === 0) tiles = foundryScene?.tiles ?? null;
 
@@ -1087,7 +1087,7 @@ export class SceneComposer {
     this.cameraDistance = CAMERA_HEIGHT;
     this.baseDistance = CAMERA_HEIGHT;
 
-    log.info(`Perspective camera setup (FOV zoom): height=${CAMERA_HEIGHT}, groundZ=${groundZ}, distance=${distanceToGround}, baseFOV=${baseFovDegrees.toFixed(2)}Â°, center (${centerX}, ${centerY}), viewport ${viewportWidth}x${viewportHeight}`);
+    log.info(`Perspective camera setup (FOV zoom): height=${CAMERA_HEIGHT}, groundZ=${groundZ}, distance=${distanceToGround}, baseFOV=${baseFovDegrees.toFixed(2)} deg, center (${centerX}, ${centerY}), viewport ${viewportWidth}x${viewportHeight}`);
   }
 
   /**
@@ -1133,7 +1133,7 @@ export class SceneComposer {
     this.baseViewportWidth = viewportWidth;
     this.baseViewportHeight = viewportHeight;
 
-    log.debug(`Camera resized: ${viewportWidth}x${viewportHeight}, FOV=${this.camera.fov.toFixed(2)}Â°`);
+    log.debug(`Camera resized: ${viewportWidth}x${viewportHeight}, FOV=${this.camera.fov.toFixed(2)} deg`);
   }
 
   /**
@@ -1233,7 +1233,7 @@ export class SceneComposer {
     this.camera.fov = newFov;
     this.camera.updateProjectionMatrix();
 
-    log.debug(`Camera zoom: ${newZoom.toFixed(3)} (FOV=${newFov.toFixed(2)}Â°, limits: ${limits.min.toFixed(3)}-${limits.max.toFixed(3)})`);
+    log.debug(`Camera zoom: ${newZoom.toFixed(3)} (FOV=${newFov.toFixed(2)} deg, limits: ${limits.min.toFixed(3)}-${limits.max.toFixed(3)})`);
   }
 
   /**

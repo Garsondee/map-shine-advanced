@@ -42,6 +42,8 @@ const DOOR_STYLES = Object.freeze({
 // and high renderOrder values per floor. Keep door meshes late in transparent
 // sorting so they are drawn on top of floor albedo instead of being overdrawn.
 const DOOR_RENDER_ORDER = 250000;
+const DOOR_BASE_Z_V1 = 1.0;
+const DOOR_BASE_Z_V2 = 1004.0;
 
 /**
  * Represents a single animated door mesh in THREE.js
@@ -115,6 +117,8 @@ class DoorMesh {
    */
   _getWallEndpoints() {
     const c = this.wallDoc.c;
+    // Door meshes are rendered in world-space Y-up coordinates. Wall documents
+    // provide Foundry canvas Y-down endpoints, so we must convert here.
     const a = Coordinates.toWorld(c[0], c[1]);
     const b = Coordinates.toWorld(c[2], c[3]);
     return { a, b };
@@ -299,7 +303,12 @@ class DoorMesh {
     
     // Apply to mesh
     const groundZ = window.MapShine?.sceneComposer?.groundZ ?? 0;
-    this.mesh.position.set(x, y, groundZ + 1.0); // Slightly above ground
+    const busScene = window.MapShine?.effectComposer?._floorCompositorV2?._renderBus?._scene ?? null;
+    // V2 bus uses absolute world Z values around 1000 (not ground-relative).
+    // Adding groundZ here can push doors behind the camera (e.g. z=2004 with
+    // camera at z=2000), making them fully invisible.
+    const z = busScene ? DOOR_BASE_Z_V2 : (groundZ + DOOR_BASE_Z_V1);
+    this.mesh.position.set(x, y, z);
     this.mesh.rotation.z = rotation;
     this.mesh.scale.set(scaleX, scaleY, 1);
     this.mesh.material.opacity = alpha;
@@ -504,8 +513,28 @@ export class DoorMeshManager {
   _hasDoorMesh(doc) {
     if (doc.door === CONST.WALL_DOOR_TYPES.NONE) return false;
     const animation = doc.animation;
-    if (!animation) return false;
-    return !!(animation.type && animation.texture);
+    if (animation?.type && animation?.texture) return true;
+    // Fallback: standard Foundry doors without custom animation still get a
+    // visible mesh/icon in V2 so door graphics are not missing.
+    return !!this._getFallbackDoorIconPath(doc);
+  }
+
+  /**
+   * Resolve Foundry control icon path for non-animated doors.
+   * @param {WallDocument} doc
+   * @returns {string}
+   */
+  _getFallbackDoorIconPath(doc) {
+    const icons = CONFIG?.controlIcons;
+    if (!icons) return '';
+    const ds = doc?.ds;
+    const type = doc?.door;
+    if (type === CONST.WALL_DOOR_TYPES.SECRET && ds === CONST.WALL_DOOR_STATES.CLOSED) {
+      return icons.doorSecret || '';
+    }
+    if (ds === CONST.WALL_DOOR_STATES.LOCKED) return icons.doorLocked || '';
+    if (ds === CONST.WALL_DOOR_STATES.OPEN) return icons.doorOpen || '';
+    return icons.doorClosed || '';
   }
   
   /**
@@ -518,8 +547,8 @@ export class DoorMeshManager {
     
     if (!this._hasDoorMesh(doc)) return;
     
-    const animation = doc.animation;
-    const textureSrc = animation.texture;
+    const animation = doc.animation || {};
+    const textureSrc = animation.texture || this._getFallbackDoorIconPath(doc);
     
     try {
       // Load texture (with caching)
@@ -618,6 +647,12 @@ export class DoorMeshManager {
     
     // Check if door state changed
     if ('ds' in changes && meshSet) {
+      // For fallback non-animated doors, state changes imply icon texture
+      // changes (open/closed/locked), so rebuild meshes.
+      if (!doc?.animation?.texture) {
+        this._createDoorMeshes(doc);
+        return;
+      }
       const isOpen = doc.ds === CONST.WALL_DOOR_STATES.OPEN;
       for (const doorMesh of meshSet) {
         doorMesh.animate(isOpen);
@@ -670,6 +705,16 @@ export class DoorMeshManager {
    * @param {Object} timeInfo - Time info from TimeManager
    */
   update(timeInfo) {
+    // V2 self-heal: ensure door meshes are attached to FloorRenderBus scene.
+    // Lifecycle ordering can create meshes before V2 bus exists; in that case,
+    // doors get stranded in the main scene and never render in V2.
+    try {
+      const busScene = window.MapShine?.effectComposer?._floorCompositorV2?._renderBus?._scene ?? null;
+      if (busScene && this.scene !== busScene) {
+        this.setScene(busScene);
+      }
+    } catch (_) {}
+
     this._updateGlobalTint();
     for (const meshSet of this.doorMeshes.values()) {
       for (const doorMesh of meshSet) {

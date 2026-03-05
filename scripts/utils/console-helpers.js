@@ -20,16 +20,16 @@ export const consoleHelpers = {
    * Checks for common issues that break the effect
    */
   async diagnoseSpecular() {
-    console.group('ðŸ” Map Shine Specular Diagnostics');
+    console.group('[DIAG] Map Shine Specular Diagnostics');
     
     const effect = window.MapShine?.specularEffect;
     if (!effect) {
-      console.error('âŒ Specular effect not found');
+      console.error('[ERROR] Specular effect not found');
       console.groupEnd();
       return;
     }
 
-    console.log('âœ… Specular effect found');
+    console.log('[OK] Specular effect found');
     
     // Check enabled state
     console.log(`Enabled: ${effect.enabled}`);
@@ -38,32 +38,32 @@ export const consoleHelpers = {
     const { getSpecularEffectiveState } = await import('../ui/parameter-validator.js');
     const effectiveState = getSpecularEffectiveState(effect.params);
     if (!effectiveState.effective) {
-      console.warn('âš ï¸ Effect is ineffective:', effectiveState.reasons);
+      console.warn('[WARN] Effect is ineffective:', effectiveState.reasons);
     } else {
-      console.log('âœ… Effect is active and functional');
+      console.log('[OK] Effect is active and functional');
     }
     
     // Check material
     if (!effect.material) {
-      console.error('âŒ Material is null');
+      console.error('[ERROR] Material is null');
       console.groupEnd();
       return;
     }
-    console.log('âœ… Material exists');
+    console.log('[OK] Material exists');
     
     // Check validation status
     const validation = effect.getValidationStatus();
     if (!validation.valid) {
-      console.error('âŒ Validation failed:', validation.errors);
+      console.error('[ERROR] Validation failed:', validation.errors);
     } else {
-      console.log('âœ… Validation passed');
+      console.log('[OK] Validation passed');
     }
     
     // Check parameters
     console.group('Parameters');
     for (const [key, value] of Object.entries(effect.params)) {
       const isValid = typeof value === 'number' ? Number.isFinite(value) : true;
-      const icon = isValid ? 'âœ…' : 'âŒ';
+      const icon = isValid ? '[OK]' : '[ERROR]';
       console.log(`${icon} ${key}: ${value}`);
     }
     console.groupEnd();
@@ -83,13 +83,13 @@ export const consoleHelpers = {
     for (const name of criticalUniforms) {
       const uniform = effect.material.uniforms[name];
       if (!uniform) {
-        console.error(`âŒ ${name}: MISSING`);
+        console.error(`[ERROR] ${name}: MISSING`);
         continue;
       }
       
       const value = uniform.value;
       const isValid = typeof value === 'number' ? Number.isFinite(value) : value !== null;
-      const icon = isValid ? 'âœ…' : 'âŒ';
+      const icon = isValid ? '[OK]' : '[ERROR]';
       console.log(`${icon} ${name}: ${value}`);
     }
     console.groupEnd();
@@ -99,11 +99,11 @@ export const consoleHelpers = {
     const issues = [];
     
     if (effect.params.stripeEnabled && effect.params.stripe1Frequency === 0) {
-      issues.push('âš ï¸ Stripe 1 frequency is 0 (will cause NaN)');
+      issues.push('[WARN] Stripe 1 frequency is 0 (will cause NaN)');
     }
     
     if (effect.params.stripe1Width < 0.01) {
-      issues.push('âš ï¸ Stripe 1 width very small (may cause aliasing)');
+      issues.push('[WARN] Stripe 1 width very small (may cause aliasing)');
     }
     
     const totalIntensity = 
@@ -112,18 +112,18 @@ export const consoleHelpers = {
       (effect.params.stripe3Enabled ? effect.params.stripe3Intensity : 0);
     
     if (totalIntensity > 3.0) {
-      issues.push(`âš ï¸ Total stripe intensity very high (${totalIntensity.toFixed(2)})`);
+      issues.push(`[WARN] Total stripe intensity very high (${totalIntensity.toFixed(2)})`);
     }
     
     if (issues.length === 0) {
-      console.log('âœ… No obvious issues detected');
+      console.log('[OK] No obvious issues detected');
     } else {
       issues.forEach(issue => console.warn(issue));
     }
     console.groupEnd();
     
     // Suggestions
-    console.group('ðŸ’¡ Suggestions');
+    console.group('[TIPS] Suggestions');
     if (!validation.valid || issues.length > 0) {
       console.log('Try resetting to defaults:');
       console.log('  MapShine.debug.resetSpecular()');
@@ -149,9 +149,9 @@ export const consoleHelpers = {
       return;
     }
     
-    console.log('ðŸ”„ Resetting specular effect to defaults...');
+    console.log('[ACTION] Resetting specular effect to defaults...');
     uiManager.resetEffectToDefaults('specular');
-    console.log('âœ… Reset complete');
+    console.log('[OK] Reset complete');
   },
 
   /**
@@ -171,7 +171,7 @@ export const consoleHelpers = {
     // Copy to clipboard if available
     if (navigator.clipboard) {
       navigator.clipboard.writeText(json);
-      console.log('âœ… Copied to clipboard');
+      console.log('[OK] Copied to clipboard');
     }
     
     return effect.params;
@@ -190,7 +190,7 @@ export const consoleHelpers = {
       return;
     }
     
-    console.log('ðŸ“¥ Importing parameters...');
+    console.log('[ACTION] Importing parameters...');
     
     for (const [key, value] of Object.entries(params)) {
       if (effect.params[key] !== undefined) {
@@ -208,14 +208,14 @@ export const consoleHelpers = {
       }
     }
     
-    console.log('âœ… Import complete');
+    console.log('[OK] Import complete');
   },
 
   /**
    * Show validation report for all effects
    */
   async validateAll() {
-    console.group('ðŸ” Validation Report');
+    console.group('[DIAG] Validation Report');
     
     const uiManager = window.MapShine?.uiManager;
     if (!uiManager) {
@@ -233,7 +233,7 @@ export const consoleHelpers = {
         effectData.schema
       );
       
-      const icon = validation.valid ? 'âœ…' : 'âŒ';
+      const icon = validation.valid ? '[OK]' : '[ERROR]';
       console.log(`${icon} ${effectId}`);
       
       if (!validation.valid) {
@@ -263,7 +263,7 @@ export const consoleHelpers = {
       return;
     }
     
-    console.log(`ðŸ” Monitoring shader for ${duration}ms...`);
+    console.log(`[DIAG] Monitoring shader for ${duration}ms...`);
     
     const { ShaderValidator } = await import('../core/shader-validator.js');
     
@@ -282,7 +282,7 @@ export const consoleHelpers = {
     
     setTimeout(() => {
       clearInterval(interval);
-      console.log(`âœ… Monitoring complete: ${checkCount} checks, ${errorCount} errors`);
+      console.log(`[OK] Monitoring complete: ${checkCount} checks, ${errorCount} errors`);
       
       if (errorCount > 0) {
         console.warn('Shader has validation errors - try resetting to defaults');
@@ -299,12 +299,12 @@ export const consoleHelpers = {
    */
   async diagnoseFloorRendering() {
     const ms = window.MapShine;
-    const sep = 'â”€'.repeat(60);
+    const sep = '-'.repeat(60);
 
-    console.group('ðŸ—ºï¸  MapShine Floor Rendering Diagnostics');
+    console.group('[DIAG] MapShine Floor Rendering Diagnostics');
     console.log(sep);
 
-    // â”€â”€ 1. Floor loop gate â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ->->->-> 1. Floor loop gate ->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->
     console.group('1. Floor Loop Gate');
     const floorStack = ms?.floorStack ?? null;
     const composer   = ms?.sceneComposer ?? null;
@@ -316,41 +316,41 @@ export const consoleHelpers = {
       loopEnabled = game?.settings?.get?.('map-shine-advanced', 'experimentalFloorRendering') ?? false;
     } catch (_) {}
 
-    console.log(`experimentalFloorRendering setting : ${loopEnabled ? 'âœ… true' : 'âŒ false'}`);
-    console.log(`FloorStack available               : ${floorStack  ? 'âœ…' : 'âŒ null'}`);
-    console.log(`GpuSceneMaskCompositor available   : ${compositor  ? 'âœ…' : 'âŒ null'}`);
-    console.log(`EffectComposer available            : ${effectComp  ? 'âœ…' : 'âŒ null'}`);
-    console.log(`Floor loop would run               : ${(loopEnabled && !!floorStack) ? 'âœ… YES' : 'âŒ NO'}`);
+    console.log(`experimentalFloorRendering setting : ${loopEnabled ? '[OK] true' : '[ERROR] false'}`);
+    console.log(`FloorStack available               : ${floorStack  ? '[OK]' : '[ERROR] null'}`);
+    console.log(`GpuSceneMaskCompositor available   : ${compositor  ? '[OK]' : '[ERROR] null'}`);
+    console.log(`EffectComposer available            : ${effectComp  ? '[OK]' : '[ERROR] null'}`);
+    console.log(`Floor loop would run               : ${(loopEnabled && !!floorStack) ? '[OK] YES' : '[ERROR] NO'}`);
     console.groupEnd();
     console.log(sep);
 
-    // â”€â”€ 2. FloorStack â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ->->->-> 2. FloorStack ->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->
     console.group('2. FloorStack');
     if (!floorStack) {
-      console.warn('âš ï¸  FloorStack not available â€” floor loop cannot run');
+      console.warn('[WARN] FloorStack not available -- floor loop cannot run');
     } else {
       const allFloors     = floorStack.getFloors?.() ?? [];
       const visibleFloors = floorStack.getVisibleFloors?.() ?? [];
       const activeFloor   = floorStack.getActiveFloor?.() ?? null;
 
       console.log(`Total floors   : ${allFloors.length}`);
-      console.log(`Active floor   : ${activeFloor ? `index=${activeFloor.index}  [${activeFloor.elevationMin}â€“${activeFloor.elevationMax}]  compositorKey="${activeFloor.compositorKey}"` : 'null'}`);
+      console.log(`Active floor   : ${activeFloor ? `index=${activeFloor.index}  [${activeFloor.elevationMin}-${activeFloor.elevationMax}]  compositorKey="${activeFloor.compositorKey}"` : 'null'}`);
       console.log(`Visible floors : ${visibleFloors.length}  (rendered this frame)`);
       console.group('All floor bands');
       for (const f of allFloors) {
-        const isActive  = f.isActive ? ' â† ACTIVE' : '';
+        const isActive  = f.isActive ? ' <- ACTIVE' : '';
         const isVisible = visibleFloors.some(v => v.index === f.index) ? ' (visible)' : '';
-        console.log(`  [${f.index}] elev ${f.elevationMin}â€“${f.elevationMax}  key="${f.key}"  compositorKey="${f.compositorKey}"${isActive}${isVisible}`);
+        console.log(`  [${f.index}] elev ${f.elevationMin}-${f.elevationMax}  key="${f.key}"  compositorKey="${f.compositorKey}"${isActive}${isVisible}`);
       }
       console.groupEnd();
     }
     console.groupEnd();
     console.log(sep);
 
-    // â”€â”€ 3. GpuSceneMaskCompositor _floorMeta â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ->->->-> 3. GpuSceneMaskCompositor _floorMeta ->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->
     console.group('3. GpuSceneMaskCompositor _floorMeta Cache');
     if (!compositor) {
-      console.warn('âš ï¸  Compositor not available');
+      console.warn('[WARN] Compositor not available');
     } else {
       const floorMeta = compositor._floorMeta;
       console.log(`_floorMeta entries : ${floorMeta?.size ?? 0}`);
@@ -363,24 +363,24 @@ export const consoleHelpers = {
         for (const [key, meta] of floorMeta.entries()) {
           const types = (meta?.masks ?? []).map(m => m?.type || m?.id || '?').join(', ');
           const bp    = meta?.basePath ?? 'null';
-          console.log(`  "${key}" â†’ masks: [${types}]   basePath: "${bp}"`);
+          console.log(`  "${key}" -> masks: [${types}]   basePath: "${bp}"`);
         }
         console.groupEnd();
       } else {
-        console.warn('  âš ï¸  _floorMeta is EMPTY â€” all bindFloorMasks() calls will receive null bundles');
+        console.warn('  [WARN] _floorMeta is EMPTY -- all bindFloorMasks() calls will receive null bundles');
       }
 
       // Test compositorKey alignment against FloorStack
       if (floorStack) {
-        console.group('compositorKey â†” _floorMeta alignment (critical)');
+        console.group('compositorKey <-> _floorMeta alignment (critical)');
         const allFloors = floorStack.getFloors?.() ?? [];
         for (const f of allFloors) {
           const found = floorMeta?.get(f.compositorKey);
           if (found) {
             const types = (found.masks ?? []).map(m => m?.type || m?.id || '?').join(', ');
-            console.log(`  âœ… floor[${f.index}] compositorKey="${f.compositorKey}" â†’ FOUND  [${types}]`);
+            console.log(`  [OK] floor[${f.index}] compositorKey="${f.compositorKey}" -> FOUND  [${types}]`);
           } else {
-            console.error(`  âŒ floor[${f.index}] compositorKey="${f.compositorKey}" â†’ NOT IN _floorMeta â€” effects will receive null bundle!`);
+            console.error(`  [ERROR] floor[${f.index}] compositorKey="${f.compositorKey}" -> NOT IN _floorMeta -- effects will receive null bundle!`);
           }
         }
         console.groupEnd();
@@ -389,7 +389,7 @@ export const consoleHelpers = {
     console.groupEnd();
     console.log(sep);
 
-    // â”€â”€ 4. Scene background & tiles â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ->->->-> 4. Scene background & tiles ->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->
     console.group('4. Scene Tiles & Background');
     const scene = canvas?.scene;
     const bgSrc = scene?.background?.src || scene?.img || null;
@@ -429,18 +429,18 @@ export const consoleHelpers = {
         const w = t?.width ?? '?';
         const h = t?.height ?? '?';
         const hidden = t?.hidden ? ' [hidden]' : '';
-        console.log(`  elev=${elev}  ${w}Ã—${h}  ${levelsInfo}${hidden}  "${src}"`);
+        console.log(`  elev=${elev}  ${w}x${h}  ${levelsInfo}${hidden}  "${src}"`);
       }
       console.groupEnd();
     }
     console.groupEnd();
     console.log(sep);
 
-    // â”€â”€ 5. Effect registry masks â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ->->->-> 5. Effect registry masks ->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->
     console.group('5. EffectMaskRegistry (active floor masks)');
     const registry = ms?.effectMaskRegistry ?? null;
     if (!registry) {
-      console.warn('âš ï¸  effectMaskRegistry not available');
+      console.warn('[WARN] effectMaskRegistry not available');
     } else {
       // Registry stores slots: Map<type, MaskSlot{texture, floorKey, source}>
       const slots = registry._slots ?? null;
@@ -456,7 +456,7 @@ export const consoleHelpers = {
         for (const [type, slot] of slots.entries()) {
           const tex    = slot?.texture ?? null;
           const hasTex = !!tex;
-          const size   = (tex?.image?.width && tex?.image?.height) ? `${tex.image.width}Ã—${tex.image.height}` : 'no image';
+          const size   = (tex?.image?.width && tex?.image?.height) ? `${tex.image.width}x${tex.image.height}` : 'no image';
           const fk     = slot?.floorKey ?? 'null';
           const src    = slot?.source   ?? '?';
           const policy = getPolicy(type);
@@ -464,26 +464,26 @@ export const consoleHelpers = {
           // Flag when a preserved mask belongs to a DIFFERENT floor than the active one.
           const crossFloor = preserve && hasTex && activeCompKey && fk && fk !== 'null' && fk !== activeCompKey;
           if (crossFloor) crossFloorCount++;
-          const crossTag = crossFloor ? '  âš ï¸ CROSS-FLOOR (preserved from floor "' + fk + '")' : '';
+          const crossTag = crossFloor ? '  [WARN] CROSS-FLOOR (preserved from floor "' + fk + '")' : '';
           const preserveTag = preserve ? '  [preserveAcrossFloors]' : '';
-          console.log(`  ${hasTex ? 'âœ…' : 'âŒ'} ${type.padEnd(20)} texture=${hasTex ? size : 'null'}  floorKey="${fk}"  source=${src}${preserveTag}${crossTag}`);
+          console.log(`  ${hasTex ? '[OK]' : '[ERROR]'} ${type.padEnd(20)} texture=${hasTex ? size : 'null'}  floorKey="${fk}"  source=${src}${preserveTag}${crossTag}`);
         }
         if (crossFloorCount > 0) {
-          console.warn(`  âš ï¸  ${crossFloorCount} mask(s) are PRESERVED from a different floor. This is intentional for water (post-FX)`);
+          console.warn(`  [WARN] ${crossFloorCount} mask(s) are PRESERVED from a different floor. This is intentional for water (post-FX)`);
           console.warn(`     but a bug for specular/roughness/normal (should clear per-floor). Check preserveAcrossFloors policies.`);
         }
       } else {
-        console.log('  (_slots not accessible â€” registry:', registry, ')');
+        console.log('  (_slots not accessible -- registry:', registry, ')');
       }
     }
     console.groupEnd();
     console.log(sep);
 
-    // â”€â”€ 6. Floor-scoped effects â€” current mask bindings â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-    console.group('6. Floor-scoped Effects â€” Current Mask Bindings');
+    // ->->->-> 6. Floor-scoped effects ->-> current mask bindings ->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->
+    console.group('6. Floor-scoped Effects -- Current Mask Bindings');
     const ec = effectComp;
     if (!ec) {
-      console.warn('âš ï¸  EffectComposer not available');
+      console.warn('[WARN] EffectComposer not available');
     } else {
       // EffectComposer stores effects in this.effects (Map<id, EffectBase>)
       const effectsMap = ec.effects instanceof Map ? ec.effects : null;
@@ -507,57 +507,57 @@ export const consoleHelpers = {
         const bound   = maskFields.filter(f => eff[f] !== undefined).map(f => {
           const tex = eff[f];
           if (!tex) return `${f}=null`;
-          const sz  = (tex?.image?.width && tex?.image?.height) ? `${tex.image.width}Ã—${tex.image.height}` : 'loaded';
+          const sz  = (tex?.image?.width && tex?.image?.height) ? `${tex.image.width}x${tex.image.height}` : 'loaded';
           return `${f}=${sz}`;
         });
         const floorStates = eff._floorStates?.size !== undefined ? `  _floorStates.size=${eff._floorStates.size}` : '';
-        console.log(`  ${hasBind ? 'âœ…' : 'âš ï¸ '} ${eff.id.padEnd(28)} enabled=${String(enabled).padEnd(5)} ${bound.join('  ')}${floorStates}`);
+        console.log(`  ${hasBind ? '[OK]' : '[WARN]'} ${eff.id.padEnd(28)} enabled=${String(enabled).padEnd(5)} ${bound.join('  ')}${floorStates}`);
       }
       console.groupEnd();
 
       console.group('Global-scoped effects');
       for (const eff of globalEffects) {
-        console.log(`  âœ… ${eff.id}`);
+        console.log(`  [OK] ${eff.id}`);
       }
       console.groupEnd();
     }
     console.groupEnd();
     console.log(sep);
 
-    // â”€â”€ 7. Visible floor bundle test â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ->->->-> 7. Visible floor bundle test ->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->
     const CORE_MASK_TYPES = ['water','fire','specular','roughness','normal',
                              'windows','structural','outdoors','dust','ash',
                              'iridescence','prism','tree','bush','fluid'];
     console.group('7. Per-Floor Bundle Test (what the render loop would get)');
     if (!floorStack || !compositor) {
-      console.warn('âš ï¸  FloorStack or compositor not available');
+      console.warn('[WARN] FloorStack or compositor not available');
     } else {
       const visible = floorStack.getVisibleFloors?.() ?? [];
-      if (visible.length === 0) console.warn('âš ï¸  No visible floors');
+      if (visible.length === 0) console.warn('[WARN] No visible floors');
       for (const f of visible) {
         const bundle = compositor._floorMeta?.get(f.compositorKey) ?? null;
         if (bundle) {
           const types = (bundle.masks ?? []).map(m => m?.type || m?.id || '?');
           const missing = CORE_MASK_TYPES.filter(t => !types.includes(t));
-          console.log(`  âœ… floor[${f.index}] key="${f.compositorKey}" â†’ [${types.join(', ')}]` +
+          console.log(`  [OK] floor[${f.index}] key="${f.compositorKey}" -> [${types.join(', ')}]` +
             (missing.length ? `  |  absent: [${missing.join(', ')}]` : '  (all core masks present)'));
         } else {
-          console.error(`  âŒ floor[${f.index}] key="${f.compositorKey}" â†’ bundle is NULL`);
-          console.error(`     â†³ preloadAllFloors() hasn't cached this floor yet, or composeFloor() returned null.`);
-          console.error(`     â†³ Effects will keep the previous floor's masks â€” likely rendering the wrong content.`);
+          console.error(`  [ERROR] floor[${f.index}] key="${f.compositorKey}" -> bundle is NULL`);
+          console.error(`     -> preloadAllFloors() hasn't cached this floor yet, or composeFloor() returned null.`);
+          console.error(`     -> Effects will keep the previous floor's masks -- likely rendering the wrong content.`);
         }
       }
     }
     console.groupEnd();
     console.log(sep);
 
-    // â”€â”€ 7b. Per-effect _floorStates cache contents â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ->->->-> 7b. Per-effect _floorStates cache contents ->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->
     console.group('7b. Per-Effect _floorStates Cache (what each effect has seen per floor)');
     if (effectComp?.effects instanceof Map) {
       const allEffects = [...effectComp.effects.values()];
       const floorEffects = allEffects.filter(e => e._floorStates instanceof Map && e._floorStates.size > 0);
       if (floorEffects.length === 0) {
-        console.warn('âš ï¸  No effects have populated _floorStates â€” bindFloorMasks may not be running (check experimentalFloorRendering setting)');
+        console.warn('[WARN] No effects have populated _floorStates -- bindFloorMasks may not be running (check experimentalFloorRendering setting)');
       }
       for (const eff of floorEffects) {
         const entries = [...eff._floorStates.entries()];
@@ -565,7 +565,7 @@ export const consoleHelpers = {
           const maskSummary = Object.entries(v)
             .map(([field, val]) => {
               if (val === null) return `${field}=null`;
-              if (val && typeof val === 'object' && val.image) return `${field}=${val.image.width}Ã—${val.image.height}`;
+              if (val && typeof val === 'object' && val.image) return `${field}=${val.image.width}x${val.image.height}`;
               return `${field}=${String(val).substring(0, 20)}`;
             }).join(', ');
           return `      "${k}": {${maskSummary}}`;
@@ -576,7 +576,7 @@ export const consoleHelpers = {
     console.groupEnd();
     console.log(sep);
 
-    // â”€â”€ 8. Summary â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ->->->-> 8. Summary ->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->
     console.group('8. Summary / Likely Issues');
     if (compositor && floorStack) {
       const visible    = floorStack.getVisibleFloors?.() ?? [];
@@ -585,16 +585,16 @@ export const consoleHelpers = {
 
       if (nullFloors.length > 0) {
         issueCount++;
-        console.error(`âŒ ${nullFloors.length} visible floor(s) have no cached bundle:`);
+        console.error(`[ERROR] ${nullFloors.length} visible floor(s) have no cached bundle:`);
         for (const f of nullFloors) {
-          console.error(`   floor[${f.index}] "${f.compositorKey}" â€” effects will render with stale cross-floor masks.`);
+          console.error(`   floor[${f.index}] "${f.compositorKey}" -- effects will render with stale cross-floor masks.`);
         }
-        console.error('   â†’ Run preloadAllFloors() or wait for it to complete after scene load.');
+        console.error('   -> Run preloadAllFloors() or wait for it to complete after scene load.');
       }
 
       // Check for effects with empty _floorStates (bind loop may not be running).
       // Post-processing effects are intentionally excluded from the floor loop's
-      // bindFloorMasks calls â€” they use connectToRegistry() instead â€” so having
+      // bindFloorMasks calls ->-> they use connectToRegistry() instead ->-> so having
       // _floorStates.size=0 is CORRECT for them (water, lighting, etc.).
       if (effectComp?.effects instanceof Map) {
         let postProcessingOrder = Infinity;
@@ -604,16 +604,16 @@ export const consoleHelpers = {
         } catch (_) {}
         const bindable = [...effectComp.effects.values()].filter(e => {
           if (typeof e.bindFloorMasks !== 'function') return false;
-          // Exclude post-processing effects â€” they use connectToRegistry, not bindFloorMasks.
+          // Exclude post-processing effects ->-> they use connectToRegistry, not bindFloorMasks.
           const layerOrder = e.layer?.order ?? -Infinity;
           return layerOrder < postProcessingOrder;
         });
         const neverBound = bindable.filter(e => e._floorStates instanceof Map && e._floorStates.size === 0);
         if (neverBound.length > 0) {
           issueCount++;
-          console.warn(`âš ï¸  ${neverBound.length} scene-layer bindable effect(s) have empty _floorStates:`);
+          console.warn(`  ${neverBound.length} scene-layer bindable effect(s) have empty _floorStates:`);
           console.warn('   ' + neverBound.map(e => e.id).join(', '));
-          console.warn('   â†’ Check experimentalFloorRendering setting and that preloadAllFloors completed.');
+          console.warn('   ->-> Check experimentalFloorRendering setting and that preloadAllFloors completed.');
         }
       }
 
@@ -624,12 +624,12 @@ export const consoleHelpers = {
         const types = (bundle.masks ?? []).map(m => m?.type || m?.id || '?');
         const criticalAbsent = ['specular','windows','water','fire'].filter(t => !types.includes(t));
         if (criticalAbsent.length > 0) {
-          console.info(`â„¹ï¸  floor[${f.index}] "${f.compositorKey}" is missing: [${criticalAbsent.join(', ')}]`);
-          console.info(`   â†’ These effects will be disabled/null for this floor's render pass (expected if the map has no such mask files).`);
+          console.info(`->  floor[${f.index}] "${f.compositorKey}" is missing: [${criticalAbsent.join(', ')}]`);
+          console.info(`   ->-> These effects will be disabled/null for this floor's render pass (expected if the map has no such mask files).`);
         }
       }
 
-      // â”€â”€ Foam floor-key guard status â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+      // ->->->-> Foam floor-key guard status ->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->
       // WeatherParticles suppresses water-driven foam when the registry's water
       // floorKey doesn't match the active compositor floor.
       try {
@@ -640,19 +640,19 @@ export const consoleHelpers = {
         const waterTex = waterSlot?.texture ?? null;
         if (activeKey && waterTex) {
           if (waterFloorKey && waterFloorKey !== activeKey) {
-            console.warn(`âš ï¸  FOAM GUARD ACTIVE: water mask is from floor "${waterFloorKey}" but active floor is "${activeKey}"`);
-            console.warn(`   â†’ WeatherParticles foam/splash suppressed on this floor (correct â€” avoids cross-floor spawn positions).`);
-            console.warn(`   â†’ The 2D water post-FX shader still runs (preserveAcrossFloors=true for water is intentional for post-FX).`);
+            console.warn(`  FOAM GUARD ACTIVE: water mask is from floor "${waterFloorKey}" but active floor is "${activeKey}"`);
+            console.warn(`   ->-> WeatherParticles foam/splash suppressed on this floor (correct ->-> avoids cross-floor spawn positions).`);
+            console.warn(`   ->-> The 2D water post-FX shader still runs (preserveAcrossFloors=true for water is intentional for post-FX).`);
             issueCount++; // not an error, but worth highlighting
           } else {
-            console.log(`âœ… Foam floor-key guard: water floorKey="${waterFloorKey}" matches active floor "${activeKey}" â€” foam active.`);
+            console.log(`-> Foam floor-key guard: water floorKey="${waterFloorKey}" matches active floor "${activeKey}" ->-> foam active.`);
           }
         } else if (activeKey && !waterTex) {
-          console.log(`â„¹ï¸  Foam: no water mask on active floor "${activeKey}" â€” foam/splash disabled (correct).`);
+          console.log(`->  Foam: no water mask on active floor "${activeKey}" ->-> foam/splash disabled (correct).`);
         }
       } catch (_) {}
 
-      // â”€â”€ Fire GPU readback Y-flip check â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+      // ->->->-> Fire GPU readback Y-flip check ->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->
       // When fire mask comes from the GPU compositor (RT texture, no .src),
       // _generatePoints uses the GPU path with gpuFlipY=true to correct the
       // bottom-to-top WebGL readPixels row order.
@@ -671,13 +671,13 @@ export const consoleHelpers = {
             const fireEntry = bundle?.masks?.find(m => m.type === 'fire' || m.id === 'fire');
             const fireTex = fireEntry?.texture ?? null;
             const isRT = fireTex?.image != null && !fireTex?.image?.src;
-            console.log(`â„¹ï¸  Fire mask source for floor "${fireFloorKey}": ${isRT ? 'GPU compositor RT (gpuFlipY=true applied)' : 'bundle/image file (no flip needed)'}`);
+            console.log(`->  Fire mask source for floor "${fireFloorKey}": ${isRT ? 'GPU compositor RT (gpuFlipY=true applied)' : 'bundle/image file (no flip needed)'}`);
           }
         }
       } catch (_) {}
 
       if (issueCount === 0) {
-        console.log(`âœ… All ${visible.length} visible floor(s) have cached bundles. Check 7b for per-effect state.`);
+        console.log(`-> All ${visible.length} visible floor(s) have cached bundles. Check 7b for per-effect state.`);
       }
     }
     console.groupEnd();
@@ -695,11 +695,11 @@ export const consoleHelpers = {
    */
   async diagnoseFloorDeepdive() {
     const ms  = window.MapShine;
-    const sep = 'â”€'.repeat(60);
+    const sep = '->->'.repeat(60);
     const ftx = (tex) => {
-      if (!tex) return 'âŒ null';
-      if (tex.image?.width) return `âœ… ${tex.image.width}Ã—${tex.image.height}`;
-      return 'âœ… loaded(no dims)';
+      if (!tex) return ' null';
+      if (tex.image?.width) return `-> ${tex.image.width}--${tex.image.height}`;
+      return '-> loaded(no dims)';
     };
     const compositor = ms?.sceneComposer?._sceneMaskCompositor ?? null;
     const effectComp = ms?.effectComposer ?? null;
@@ -708,28 +708,28 @@ export const consoleHelpers = {
     const specEff    = ms?.specularEffect ?? effectComp?.effects?.get?.('specular') ?? null;
     const tm         = ms?.tileManager ?? null;
 
-    console.group('ðŸ”¬ MapShine Floor Deep-Dive Diagnostics');
+    console.group('-> MapShine Floor Deep-Dive Diagnostics');
     console.log(sep);
 
-    // â”€â”€ A. _floorCache GPU RTs vs _floorMeta bundle handles â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ->->->-> A. _floorCache GPU RTs vs _floorMeta bundle handles ->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->
     // _floorMeta  = bundle metadata (file textures OR RT handles from compose())
     // _floorCache = WebGLRenderTargets produced ONLY by compose() GPU path
-    // getBelowFloorTexture() ONLY reads _floorCache â€” NOT _floorMeta.
+    // getBelowFloorTexture() ONLY reads _floorCache ->-> NOT _floorMeta.
     // If ground floor specular came from the file-based fallback (loadAssetBundle),
-    // _floorCache["0:10"] never has specular â†’ getBelowFloorTexture returns null.
+    // _floorCache["0:10"] never has specular ->-> getBelowFloorTexture returns null.
     console.group('A. _floorCache GPU RTs vs _floorMeta Bundles');
     if (!compositor) {
-      console.warn('âš ï¸  compositor not available');
+      console.warn('  compositor not available');
     } else {
       const fc    = compositor._floorCache ?? new Map();
       const fmeta = compositor._floorMeta  ?? new Map();
       console.log(`_floorMeta entries  : ${fmeta.size}  (file-based OR GPU RT handles)`);
-      console.log(`_floorCache entries : ${fc.size}  (GPU RTs only â€” getBelowFloorTexture reads here)`);
+      console.log(`_floorCache entries : ${fc.size}  (GPU RTs only ->-> getBelowFloorTexture reads here)`);
       console.log(`_activeFloorKey     : "${compositor._activeFloorKey ?? 'null'}"`);
       console.log(`_belowFloorKey      : "${compositor._belowFloorKey  ?? 'null'}"`);
       const belowSpec = compositor.getBelowFloorTexture?.('specular') ?? null;
       console.log(`getBelowFloorTexture('specular') : ${ftx(belowSpec)}`);
-      if (!belowSpec) console.warn('  âš ï¸  null â†’ ground-floor specular NOT visible through first-floor gaps (tBelowSpecularMap=null)');
+      if (!belowSpec) console.warn('    null ->-> ground-floor specular NOT visible through first-floor gaps (tBelowSpecularMap=null)');
       for (const [fk, meta] of fmeta.entries()) {
         const rtMap        = fc.get(fk);
         const rtTypes      = rtMap ? [...rtMap.keys()].join(', ') : '(no GPU RTs)';
@@ -737,18 +737,18 @@ export const consoleHelpers = {
         const specInBundle = (meta?.masks ?? []).some(m => m.id === 'specular' || m.type === 'specular');
         const specInCache  = !!rtMap?.has('specular');
         const specTag = specInBundle
-          ? (specInCache ? 'âœ… spec in both' : 'âš ï¸  spec in _floorMeta ONLY â†’ getBelowFloor=null!')
-          : 'â—‹ no specular';
+          ? (specInCache ? '-> spec in both' : '  spec in _floorMeta ONLY ->-> getBelowFloor=null!')
+          : '---> no specular';
         console.log(`  "${fk}"  bundle:[${bundleTypes}]  |  RT:[${rtTypes}]  |  ${specTag}`);
       }
     }
     console.groupEnd();
     console.log(sep);
 
-    // â”€â”€ B. Floor loop simulation â€” per-pass bandBottom guard prediction â”€â”€â”€â”€â”€â”€â”€â”€
+    // ->->->-> B. Floor loop simulation ->-> per-pass bandBottom guard prediction ->->->->->->->->->->->->->->->->
     console.group('B. Floor Loop Simulation (what bindFloorMasks sets per pass)');
     if (!floorStack || !compositor) {
-      console.warn('âš ï¸  FloorStack or compositor not available');
+      console.warn('  FloorStack or compositor not available');
     } else {
       const visible = floorStack.getVisibleFloors?.() ?? [];
       console.log(`Visible floors in loop: ${visible.length}`);
@@ -758,7 +758,7 @@ export const consoleHelpers = {
         const isBase      = Number.isFinite(bandBottom) && bandBottom <= 0;
         console.group(`floor[${f.index}]  key="${f.compositorKey}"  isBaseMeshFloor=${isBase}`);
         if (!bundle) {
-          console.error('  âŒ bundle NULL â†’ stale masks used');
+          console.error('   bundle NULL ->-> stale masks used');
           console.groupEnd(); continue;
         }
         const se = bundle.masks?.find(m => m.id === 'specular'  || m.type === 'specular');
@@ -766,8 +766,8 @@ export const consoleHelpers = {
         const ne = bundle.masks?.find(m => m.id === 'normal'    || m.type === 'normal');
         console.log(`  bundle: [${(bundle.masks ?? []).map(m => m.id || m.type).join(', ')}]`);
         console.log(`  bundleSpecular=${ftx(se?.texture)}  bundleRoughness=${ftx(re?.texture)}`);
-        console.log(`  â†’ this.material.uSpecularMap  â† ${isBase ? ftx(se?.texture) + (se?.texture ? '' : ' (fallback_black)') : 'fallback_black [upper-floor guard]'}`);
-        console.log(`  â†’ this.material.uRoughnessMap â† ${isBase ? ftx(re?.texture) + (re?.texture ? '' : ' (fallback_black)') : 'fallback_black [upper-floor guard]'}`);
+        console.log(`  ->-> this.material.uSpecularMap  -> ${isBase ? ftx(se?.texture) + (se?.texture ? '' : ' (fallback_black)') : 'fallback_black [upper-floor guard]'}`);
+        console.log(`  ->-> this.material.uRoughnessMap -> ${isBase ? ftx(re?.texture) + (re?.texture ? '' : ' (fallback_black)') : 'fallback_black [upper-floor guard]'}`);
         const cached = specEff?._floorStates?.get(f.compositorKey);
         console.log(`  _floorStates: ${cached ? 'HIT spec=' + ftx(cached.specularMask) : 'MISS (will re-search bundle)'}`);
         console.groupEnd();
@@ -776,14 +776,14 @@ export const consoleHelpers = {
     console.groupEnd();
     console.log(sep);
 
-    // â”€â”€ C. SpecularEffect material uniforms RIGHT NOW â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ->->->-> C. SpecularEffect material uniforms RIGHT NOW ->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->
     console.group('C. SpecularEffect Uniform Snapshot (current state after last floor pass)');
     if (!specEff) {
-      console.warn('âš ï¸  specularEffect not found');
+      console.warn('  specularEffect not found');
     } else {
       const mat = specEff.material;
       if (!mat?.uniforms) {
-        console.error('âŒ specEff.material or uniforms missing');
+        console.error(' specEff.material or uniforms missing');
       } else {
         const u = mat.uniforms;
         console.log(`uSpecularMap         : ${ftx(u.uSpecularMap?.value)}`);
@@ -794,7 +794,7 @@ export const consoleHelpers = {
         console.log(`uEffectEnabled       : ${u.uEffectEnabled?.value}`);
         const fb = specEff._fallbackBlack;
         if (u.uSpecularMap?.value && fb && u.uSpecularMap.value === fb) {
-          console.log('  (uSpecularMap = fallback_black â€” no specular for last bound floor, correct for upper-floor guard)');
+          console.log('  (uSpecularMap = fallback_black ->-> no specular for last bound floor, correct for upper-floor guard)');
         }
       }
       // _floorStates cache
@@ -810,17 +810,17 @@ export const consoleHelpers = {
         for (const [tid, ent] of overlays.entries()) {
           const cm    = ent.colorMesh;
           const cSpec = cm?.material?.uniforms?.uSpecularMap?.value ?? null;
-          console.log(`  â€¦${tid.slice(-8)}: colorMesh.vis=${cm?.visible ?? '?'}  occluder.vis=${ent.occluderMesh?.visible ?? '?'}  specular=${ftx(cSpec)}`);
+          console.log(`  ->${tid.slice(-8)}: colorMesh.vis=${cm?.visible ?? '?'}  occluder.vis=${ent.occluderMesh?.visible ?? '?'}  specular=${ftx(cSpec)}`);
         }
       } else {
-        console.warn('  âš ï¸  No tile overlays â€” upper floor tiles have no per-tile specular mesh!');
+        console.warn('    No tile overlays ->-> upper floor tiles have no per-tile specular mesh!');
       }
       // Is basePlaneMesh using the PBR shader?
       const bp = composer?.basePlaneMesh ?? null;
       if (bp) {
         const same = bp.material === specEff.material;
         console.log(`basePlaneMesh.material === specEff.material : ${same}`);
-        if (!same) console.error('  âŒ PBR shader is NOT on the ground plane! Ground floor specular completely broken.');
+        if (!same) console.error('   PBR shader is NOT on the ground plane! Ground floor specular completely broken.');
         console.log(`basePlaneMesh.visible : ${bp.visible}`);
         if (bp.material?.uniforms) {
           const bu = bp.material.uniforms;
@@ -832,12 +832,12 @@ export const consoleHelpers = {
     console.groupEnd();
     console.log(sep);
 
-    // â”€â”€ D. TileManager _tileEffectMasks (compositor per-tile source data) â”€â”€â”€â”€â”€â”€
+    // ->->->-> D. TileManager _tileEffectMasks (compositor per-tile source data) ->->->->->->->->->->->->
     // Empty map (size=0) = "empty-cache poison" bug: first probe cached no masks,
-    // so preloadAllFloors skips the tile permanently â†’ upper floor masks missing.
+    // so preloadAllFloors skips the tile permanently ->-> upper floor masks missing.
     console.group('D. TileManager _tileEffectMasks (per-tile cached effect masks)');
     if (!tm) {
-      console.warn('âš ï¸  tileManager not available');
+      console.warn('  tileManager not available');
     } else {
       const tem = tm._tileEffectMasks;
       if (!(tem instanceof Map)) {
@@ -849,18 +849,18 @@ export const consoleHelpers = {
           if (!(mm instanceof Map)) continue;
           if (mm.size === 0) {
             emptyCount++;
-            console.warn(`  âš ï¸  tile[â€¦${tileId.slice(-8)}]: EMPTY (0 masks) â€” compositor skips this tile!`);
+            console.warn(`    tile[->${tileId.slice(-8)}]: EMPTY (0 masks) ->-> compositor skips this tile!`);
           } else {
             const types = [...mm.entries()].map(([k, v]) => {
               const w = v?.texture?.image?.width ?? '?';
               const h = v?.texture?.image?.height ?? '?';
-              return `${k}(${w}Ã—${h})`;
+              return `${k}(${w}--${h})`;
             }).join(', ');
-            console.log(`  âœ… tile[â€¦${tileId.slice(-8)}]: [${types}]`);
+            console.log(`  -> tile[->${tileId.slice(-8)}]: [${types}]`);
           }
         }
         if (emptyCount > 0) {
-          console.error(`  âŒ ${emptyCount} tile(s) have empty mask caches â€” run preloadAllFloors() again or reload scene`);
+          console.error(`   ${emptyCount} tile(s) have empty mask caches ->-> run preloadAllFloors() again or reload scene`);
         }
       }
       // _tileSpecularMaskCache for SpecularEffect.loadTileMask path
@@ -868,25 +868,25 @@ export const consoleHelpers = {
       if (tsc instanceof Map) {
         console.log(`  _tileSpecularMaskCache: ${tsc.size} tile(s)`);
         for (const [k, v] of tsc.entries()) {
-          console.log(`    â€¦${k.slice(-8)}: ${ftx(v)}`);
+          console.log(`    ->${k.slice(-8)}: ${ftx(v)}`);
         }
       }
     }
     console.groupEnd();
     console.log(sep);
 
-    // â”€â”€ E. FloorStack object visibility â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ->->->-> E. FloorStack object visibility ->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->
     console.group('E. FloorStack floor object counts');
     if (!floorStack) {
-      console.warn('âš ï¸  FloorStack not available');
+      console.warn('  FloorStack not available');
     } else {
       const floors  = floorStack.getFloors?.() ?? [];
       const visible = floorStack.getVisibleFloors?.() ?? [];
       for (const f of floors) {
         const objCount = f.objects?.size ?? f.objects?.length ?? f._objects?.size ?? f._objects?.length ?? '?';
         const isVis    = visible.some(v => v.index === f.index);
-        const isActive = f.isActive ? ' â† ACTIVE' : '';
-        console.log(`  floor[${f.index}]  [${f.elevationMin}â€“${f.elevationMax}]  objects=${objCount}${isActive}${isVis ? ' (visible in loop)' : ''}`);
+        const isActive = f.isActive ? ' -> ACTIVE' : '';
+        console.log(`  floor[${f.index}]  [${f.elevationMin}->->${f.elevationMax}]  objects=${objCount}${isActive}${isVis ? ' (visible in loop)' : ''}`);
       }
       // Count scene objects with levelsHidden userData
       let levelsHiddenN = 0, levelsTaggedN = 0;
@@ -902,10 +902,10 @@ export const consoleHelpers = {
     console.groupEnd();
     console.log(sep);
 
-    // â”€â”€ F. Upper floor load summary â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ->->->-> F. Upper floor load summary ->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->
     console.group('F. Upper Floor Load Diagnosis');
     if (!compositor) {
-      console.warn('âš ï¸  compositor not available');
+      console.warn('  compositor not available');
     } else {
       const fc    = compositor._floorCache ?? new Map();
       const fmeta = compositor._floorMeta  ?? new Map();
@@ -913,16 +913,16 @@ export const consoleHelpers = {
       const allBands = floorStack ? (floorStack.getFloors?.() ?? []).map(f => f.compositorKey) : [];
       const missing  = allBands.filter(k => !fmeta.has(k));
       console.log(`Expected floor bands : ${allBands.join(', ') || '(unknown)'}`);
-      console.log(`_floorMeta populated : ${fmeta.size} / ${allBands.length}  ${missing.length ? 'âš ï¸  missing: ' + missing.join(', ') : 'âœ… all cached'}`);
+      console.log(`_floorMeta populated : ${fmeta.size} / ${allBands.length}  ${missing.length ? '  missing: ' + missing.join(', ') : '-> all cached'}`);
       console.log(`_floorCache RTs      : ${fc.size} floor(s) have GPU RTs`);
       console.log(`LRU eviction order   : [${lru.join(', ')}]`);
       // Identify which floors have _floorMeta but NO _floorCache
       const metaOnlyFloors = [...fmeta.keys()].filter(k => !fc.has(k));
       if (metaOnlyFloors.length > 0) {
-        console.warn(`  âš ï¸  Floors in _floorMeta but NO GPU RTs: [${metaOnlyFloors.join(', ')}]`);
-        console.warn(`     â†’ These floors came from file-based fallback, not GPU compose().`);
-        console.warn(`     â†’ getBelowFloorTexture() returns null for these floors.`);
-        console.warn(`     â†’ Fix: getBelowFloorTexture() must also read _floorMeta bundle textures.`);
+        console.warn(`    Floors in _floorMeta but NO GPU RTs: [${metaOnlyFloors.join(', ')}]`);
+        console.warn(`     ->-> These floors came from file-based fallback, not GPU compose().`);
+        console.warn(`     ->-> getBelowFloorTexture() returns null for these floors.`);
+        console.warn(`     ->-> Fix: getBelowFloorTexture() must also read _floorMeta bundle textures.`);
       }
       // Tile count per floor band
       const sc = canvas?.scene;
@@ -948,12 +948,12 @@ export const consoleHelpers = {
     console.log(sep);
 
     console.log('Deep-dive complete. Key question: is Section A showing spec-in-_floorMeta-only?');
-    console.log('If yes, getBelowFloorTexture always returns null â†’ ground specular invisible through gaps.');
+    console.log('If yes, getBelowFloorTexture always returns null ->-> ground specular invisible through gaps.');
     console.groupEnd();
   },
 
   /**
-   * Quick mask binding snapshot â€” shows what texture each floor-scoped
+   * Quick mask binding snapshot ->-> shows what texture each floor-scoped
    * effect currently has bound for each mask type.
    * Usage: MapShine.debug.diagnoseFloorMasks()
    */
@@ -968,7 +968,7 @@ export const consoleHelpers = {
                         'windowMask','outdoorsMask','fireMask','dustMask',
                         'structuralMask','iridescenceMask','prismMask','treeMask'];
 
-    console.group('ðŸ—ºï¸  Floor-Scoped Effect Mask Bindings');
+    console.group('--  Floor-Scoped Effect Mask Bindings');
     for (const eff of effectsMap.values()) {
       if (eff.floorScope === 'global') continue;
       const present = maskFields.filter(f => eff[f] !== undefined);
@@ -977,8 +977,8 @@ export const consoleHelpers = {
       console.group(`${eff.id} (enabled=${eff.enabled ?? eff._enabled})`);
       for (const f of present) {
         const tex = eff[f];
-        const info = !tex ? 'âŒ null'
-          : (tex.image?.width ? `âœ… ${tex.image.width}Ã—${tex.image.height}` : 'âœ… (no image dims)');
+        const info = !tex ? ' null'
+          : (tex.image?.width ? `-> ${tex.image.width}--${tex.image.height}` : '-> (no image dims)');
         console.log(`  ${f.padEnd(22)} ${info}`);
       }
       if (eff._floorStates?.size !== undefined) {
@@ -994,9 +994,9 @@ export const consoleHelpers = {
    */
   help() {
     console.log(`
-â•”â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•—
-â•‘   Map Shine Advanced - Debug Helpers      â•‘
-â•šâ•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->--
+->->   Map Shine Advanced - Debug Helpers      ->->
+->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->
 
 Available commands (access via MapShine.debug):
 
@@ -1100,7 +1100,7 @@ export function installConsoleHelpers() {
       }
     };
     
-    // Water occluder diagnostic â€” call MapShine.debugWaterOccluder() in the browser console
+    // Water occluder diagnostic ->-> call MapShine.debugWaterOccluder() in the browser console
     // to dump the actual runtime state of all blocker meshes and the occluder RT.
     window.MapShine.debugWaterOccluder = () => {
       const tm = window.MapShine?.tileManager;
@@ -1166,7 +1166,7 @@ export function installConsoleHelpers() {
       return rows;
     };
 
-    // â”€â”€ Water flooding root-cause diagnostic â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ->->->-> Water flooding root-cause diagnostic ->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->
     // Call MapShine.diagWater() in the browser console while the flooding is
     // visible. It reads the actual runtime state of every system involved in
     // cross-floor water suppression and prints a clear pass/fail for each one.
@@ -1179,18 +1179,18 @@ export function installConsoleHelpers() {
 
       console.group('=== Water Flooding Diagnostic ===');
 
-      // â”€â”€ 1. Floor stack â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+      // ->->->-> 1. Floor stack ->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->
       console.group('1. Floor stack');
       const activeFloor = fs?.getActiveFloor?.() ?? null;
       const allFloors   = fs?.getAllFloors?.()   ?? [];
-      console.log('floorStack:', fs ?? 'NULL â€” floorStack not on window.MapShine');
+      console.log('floorStack:', fs ?? 'NULL ->-> floorStack not on window.MapShine');
       console.log('activeFloor:', activeFloor);
       console.log('activeFloor.index:', activeFloor?.index ?? 'N/A');
       console.log('activeFloor.compositorKey:', activeFloor?.compositorKey ?? 'N/A');
       console.log('all floors:', allFloors.map(f => `index=${f.index} key=${f.compositorKey}`));
       console.groupEnd();
 
-      // â”€â”€ 2. Floor ID texture â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+      // ->->->-> 2. Floor ID texture ->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->
       console.group('2. Floor ID texture (compositor.floorIdTarget)');
       const floorIdTarget = comp?.floorIdTarget ?? null;
       console.log('compositor:', comp ?? 'NULL');
@@ -1198,7 +1198,7 @@ export function installConsoleHelpers() {
       console.log('floorIdTarget.texture:', floorIdTarget?.texture ?? 'NULL');
       if (floorIdTarget) {
         console.log('  size:', floorIdTarget.width, 'x', floorIdTarget.height);
-        // GPU readback â€” sample a 4x4 grid to see what values are actually in the texture
+        // GPU readback ->-> sample a 4x4 grid to see what values are actually in the texture
         try {
           const renderer = ms?.renderer;
           if (renderer) {
@@ -1210,22 +1210,22 @@ export function installConsoleHelpers() {
             renderer.readRenderTargetPixels(floorIdTarget, Math.floor(w/2), Math.floor(h/2), 1, 1, buf);
             renderer.setRenderTarget(prev);
             console.log('  center pixel RGBA:', buf[0], buf[1], buf[2], buf[3],
-              'â†’ floor index =', Math.round(buf[0] / 255 * 255));
+              '->-> floor index =', Math.round(buf[0] / 255 * 255));
           }
         } catch (e) { console.warn('  readback failed:', e); }
       } else {
-        console.warn('  floorIdTarget is NULL â€” floor ID gate is DISABLED (uHasFloorIdTex=0)');
+        console.warn('  floorIdTarget is NULL ->-> floor ID gate is DISABLED (uHasFloorIdTex=0)');
       }
       console.groupEnd();
 
-      // â”€â”€ 3. WaterEffectV2 uniforms â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+      // ->->->-> 3. WaterEffectV2 uniforms ->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->
       console.group('3. WaterEffectV2 uniforms');
       const wu = we?._material?.uniforms;
       if (!wu) {
         console.warn('WaterEffectV2 material not ready');
       } else {
-        console.log('uHasFloorIdTex:', wu.uHasFloorIdTex?.value, wu.uHasFloorIdTex?.value > 0.5 ? 'âœ…' : 'âŒ GATE DISABLED');
-        console.log('uActiveFloorIndex:', wu.uActiveFloorIndex?.value, 'â†’ floor index =', Math.round((wu.uActiveFloorIndex?.value ?? 0) * 255));
+        console.log('uHasFloorIdTex:', wu.uHasFloorIdTex?.value, wu.uHasFloorIdTex?.value > 0.5 ? '->' : ' GATE DISABLED');
+        console.log('uActiveFloorIndex:', wu.uActiveFloorIndex?.value, '->-> floor index =', Math.round((wu.uActiveFloorIndex?.value ?? 0) * 255));
         console.log('tFloorIdTex:', wu.tFloorIdTex?.value ?? 'NULL');
         console.log('uHasWaterData:', wu.uHasWaterData?.value);
         console.log('uHasWaterOccluderAlpha:', wu.uHasWaterOccluderAlpha?.value);
@@ -1234,20 +1234,20 @@ export function installConsoleHelpers() {
       }
       console.groupEnd();
 
-      // â”€â”€ 4. DistortionManager apply uniforms â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+      // ->->->-> 4. DistortionManager apply uniforms ->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->
       console.group('4. DistortionManager apply uniforms');
       const au = dm?.applyMaterial?.uniforms;
       if (!au) {
         console.warn('DistortionManager applyMaterial not ready');
       } else {
-        console.log('uHasFloorIdTex:', au.uHasFloorIdTex?.value, au.uHasFloorIdTex?.value > 0.5 ? 'âœ…' : 'âŒ GATE DISABLED');
-        console.log('uActiveFloorIndex:', au.uActiveFloorIndex?.value, 'â†’ floor index =', Math.round((au.uActiveFloorIndex?.value ?? 0) * 255));
+        console.log('uHasFloorIdTex:', au.uHasFloorIdTex?.value, au.uHasFloorIdTex?.value > 0.5 ? '->' : ' GATE DISABLED');
+        console.log('uActiveFloorIndex:', au.uActiveFloorIndex?.value, '->-> floor index =', Math.round((au.uActiveFloorIndex?.value ?? 0) * 255));
         console.log('tFloorIdTex:', au.tFloorIdTex?.value ?? 'NULL');
         console.log('uHasWaterOccluderAlpha:', au.uHasWaterOccluderAlpha?.value);
       }
       console.groupEnd();
 
-      // â”€â”€ 5. Compositor floor cache â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+      // ->->->-> 5. Compositor floor cache ->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->
       console.group('5. Compositor floor cache');
       if (!comp) {
         console.warn('compositor not found at sceneComposer._sceneMaskCompositor');
@@ -1262,13 +1262,13 @@ export function installConsoleHelpers() {
       }
       console.groupEnd();
 
-      // â”€â”€ 6. activeLevelContext â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+      // ->->->-> 6. activeLevelContext ->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->
       console.group('6. activeLevelContext');
       console.log('window.MapShine.activeLevelContext:', ms?.activeLevelContext);
       console.groupEnd();
 
       console.groupEnd();
-      console.log('ðŸ“‹ Copy the above and paste it into the issue tracker.');
+      console.log('->-> Copy the above and paste it into the issue tracker.');
     };
 
     // Shortcut to visualize the water occluder RT in WaterEffectV2 (debug view 8 = waterOccluder)
@@ -1280,7 +1280,7 @@ export function installConsoleHelpers() {
     };
 
     log.info('Console helpers installed: MapShine.debug');
-    console.log('ðŸ’¡ Type MapShine.debug.help() for debugging commands');
-    console.log('ðŸ’¡ Type MapShine.showOccluderDebug(8) to visualize tWaterOccluderAlpha');
+    console.log('-> Type MapShine.debug.help() for debugging commands');
+    console.log('-> Type MapShine.showOccluderDebug(8) to visualize tWaterOccluderAlpha');
   }
 }

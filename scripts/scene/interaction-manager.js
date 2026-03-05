@@ -2522,7 +2522,12 @@ export class InteractionManager {
         // conflicts when PIXI tools are active, but we *override* this
         // for the Tokens layer so gameplay clicks are never blocked.
         const mapShine = window.MapShine || window.mapShine;
-        const inputRouter = mapShine?.inputRouter;
+        const inputRouter =
+          mapShine?.inputRouter ||
+          window.mapShine?.inputRouter ||
+          window.MapShine?.controlsIntegration?.inputRouter ||
+          window.mapShine?.controlsIntegration?.inputRouter ||
+          null;
         const routerLayerMeta = this._getActiveLayerMeta();
         const routerActiveLayerName = routerLayerMeta.optionsName || routerLayerMeta.name || routerLayerMeta.ctor;
         const activeTool = ui?.controls?.tool?.name ?? game.activeTool;
@@ -2539,50 +2544,39 @@ export class InteractionManager {
         const isTokenLayerName = routerActiveLayerName === 'tokenlayer' || routerActiveLayerName === 'tokenslayer' || routerActiveLayerName === 'tokens';
         const isTokenSelectTool = activeTool === 'select' || !activeTool;
         const shouldOverrideRouter = isTokenLayerName && isTokenSelectTool;
+        const activeControl = String(ui?.controls?.control?.name ?? ui?.controls?.activeControl ?? '').toLowerCase();
+        const normalizedTool = String(activeTool || '').toLowerCase();
+        const pixiOwnedContextWithoutRouter =
+          (activeControl === 'tokens' && (!normalizedTool || normalizedTool === 'select' || normalizedTool === 'target' || normalizedTool === 'ruler')) ||
+          activeControl === 'walls' ||
+          activeControl === 'lighting' ||
+          normalizedTool === 'walls' ||
+          normalizedTool === 'terrain' ||
+          normalizedTool === 'invisible' ||
+          normalizedTool === 'ethereal' ||
+          normalizedTool === 'doors' ||
+          normalizedTool === 'secret' ||
+          normalizedTool === 'window' ||
+          normalizedTool === 'light';
         
         if (inputRouter && !inputRouter.shouldThreeReceiveInput()) {
-          let allowOverride = shouldOverrideRouter;
+          log.debug('onPointerDown BLOCKED by InputRouter (PIXI mode active)', {
+            currentMode: inputRouter.currentMode,
+            isTokenLayerName,
+            isTokenSelectTool,
+            shouldOverrideRouter,
+            activeTool
+          });
+          return;
+        }
 
-          // If the router is in PIXI mode (common on LightingLayer), we still want
-          // Three.js to be able to select Three-rendered light icons.
-          if (!allowOverride) {
-            safeCall(() => {
-              const camera = this.sceneComposer?.camera;
-              if (camera) {
-                this.updateMouseCoords(event);
-                this.raycaster.setFromCamera(this.mouse, camera);
-
-                // Check enhanced lights (MapShine)
-                const enhancedLightIconManager = window.MapShine?.enhancedLightIconManager;
-                const enhancedIcons = enhancedLightIconManager ? Array.from(enhancedLightIconManager.lights.values()) : [];
-                const hitEnhanced = enhancedIcons.length > 0 ? this.raycaster.intersectObjects(enhancedIcons, false) : [];
-
-                // Check Foundry lights (Three icon sprites)
-                const foundryIcons = (this.lightIconManager && this.lightIconManager.lights)
-                  ? Array.from(this.lightIconManager.lights.values())
-                  : [];
-                const hitFoundry = foundryIcons.length > 0 ? this.raycaster.intersectObjects(foundryIcons, false) : [];
-
-                if (hitEnhanced.length > 0 || hitFoundry.length > 0) {
-                  allowOverride = true;
-                  log.debug('onPointerDown overriding InputRouter block for Three.js light icon click');
-                  safeCall(() => { event.preventDefault(); event.stopPropagation(); event.stopImmediatePropagation?.(); }, 'pointerDown.consumeForLight', Severity.COSMETIC);
-                  safeCall(() => inputRouter.forceThree?.('InteractionManager light click'), 'pointerDown.forceThreeLight', Severity.DEGRADED);
-                }
-              }
-            }, 'pointerDown.lightOverrideCheck', Severity.COSMETIC);
-          }
-
-          if (allowOverride) {
-            if (shouldOverrideRouter) {
-              log.debug('onPointerDown overriding InputRouter block on Tokens layer; forcing THREE mode');
-              safeCall(() => inputRouter.forceThree?.('InteractionManager token click'), 'pointerDown.forceThreeToken', Severity.DEGRADED);
-            }
-            // Fall through and continue handling the click.
-          } else {
-            log.debug('onPointerDown BLOCKED by InputRouter (PIXI mode active)');
-            return;
-          }
+        if (!inputRouter && pixiOwnedContextWithoutRouter) {
+          log.debug('onPointerDown BLOCKED: no InputRouter and active context is PIXI-owned', {
+            activeControl,
+            activeTool: normalizedTool,
+            activeLayer: routerActiveLayerName
+          });
+          return;
         }
 
         log.debug('onPointerDown received', {
@@ -2785,12 +2779,23 @@ export class InteractionManager {
             }
 
             // Raycast against tokens for HUD
-            const tokenIntersects = this.raycaster.intersectObjects(tokenSprites, false);
+            const tokenIntersects = this.raycaster.intersectObjects(tokenSprites, true);
             log.debug('onPointerDown right-click tokenIntersects', { count: tokenIntersects.length });
             if (tokenIntersects.length > 0) {
-                const hit = tokenIntersects[0];
-                const sprite = hit.object;
-                const tokenDoc = sprite.userData.tokenDoc;
+                let sprite = null;
+                let tokenDoc = null;
+                for (const hit of tokenIntersects) {
+                  let candidate = hit.object;
+                  while (candidate && !candidate.userData?.tokenDoc) candidate = candidate.parent;
+                  if (candidate?.userData?.tokenDoc) {
+                    sprite = candidate;
+                    tokenDoc = candidate.userData.tokenDoc;
+                    break;
+                  }
+                }
+                if (!tokenDoc) {
+                  log.debug('Right click down: token ray hit child meshes but no tokenDoc parent found');
+                } else {
 
                 log.debug(`Right click down on token: ${tokenDoc.name} (${tokenDoc.id})`);
 
@@ -2806,6 +2811,7 @@ export class InteractionManager {
                 event.preventDefault();
                 event.stopPropagation();
                 return;
+                }
             } else {
                 const selectedTokenDocs = this._getSelectedTokenDocs();
                 const selectedTokenDoc = selectedTokenDocs[0] || null;
@@ -3115,7 +3121,7 @@ export class InteractionManager {
           this.raycaster.layers.enable(OVERLAY_THREE_LAYER);
         }, 'pointerDown.tokenRayLayers', Severity.COSMETIC);
 
-        const intersects = this.raycaster.intersectObjects(tokenSprites, false);
+        const intersects = this.raycaster.intersectObjects(tokenSprites, true);
 
         safeCall(() => { if (typeof prevTokenRayMask === 'number' && this.raycaster.layers) this.raycaster.layers.mask = prevTokenRayMask; }, 'pointerDown.restoreTokenRayLayers', Severity.COSMETIC);
 
@@ -3123,9 +3129,23 @@ export class InteractionManager {
 
         if (intersects.length > 0) {
           // Hit something
-          const hit = intersects[0];
-          const sprite = hit.object;
-          const tokenDoc = sprite.userData.tokenDoc;
+          let hit = null;
+          let sprite = null;
+          let tokenDoc = null;
+          for (const candidateHit of intersects) {
+            let candidate = candidateHit.object;
+            while (candidate && !candidate.userData?.tokenDoc) candidate = candidate.parent;
+            if (candidate?.userData?.tokenDoc) {
+              hit = candidateHit;
+              sprite = candidate;
+              tokenDoc = candidate.userData.tokenDoc;
+              break;
+            }
+          }
+
+          if (!tokenDoc) {
+            log.debug('onPointerDown left-click token ray hit child meshes but no tokenDoc parent found; treating as empty click');
+          } else {
           
           // Close HUD if clicking on a different token
           if (this.openHudTokenId && this.openHudTokenId !== tokenDoc.id) {
@@ -3190,6 +3210,7 @@ export class InteractionManager {
               }
             }
           }, 'pointerDown.autoSwitchLevel', Severity.COSMETIC);
+          }
           
         } else {
           if (clickToMoveButton === 0) {

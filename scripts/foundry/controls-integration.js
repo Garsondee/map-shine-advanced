@@ -85,6 +85,9 @@ export class ControlsIntegration {
      * @type {boolean}
      */
     this._wallsAreTransparent = false;
+
+    /** @type {number} */
+    this._interactionSnapshotSeq = 0;
   }
 
   _getActiveLayerMeta() {
@@ -151,7 +154,6 @@ export class ControlsIntegration {
           board.style.visibility = 'visible';
           board.style.opacity = '1';
           board.style.zIndex = '10';
-          board.style.pointerEvents = pixiCanvas.style.pointerEvents || 'none';
         }
       }
 
@@ -166,6 +168,57 @@ export class ControlsIntegration {
     }
   }
 
+  _reassertInputOwnership(reason = '') {
+    try {
+      if (!this.inputRouter || this.state !== IntegrationState.ACTIVE) return;
+      const mode = this.inputRouter.determineMode();
+      this.inputRouter.setMode(mode, `controlsIntegration.reassert${reason ? `:${reason}` : ''}`);
+    } catch (_) {
+      // Best-effort ownership reassertion
+    }
+  }
+
+  _logInteractionSnapshot(trigger, extra = undefined) {
+    try {
+      const msUpper = window.MapShine || null;
+      const msLower = window.mapShine || null;
+      const routerUpper = msUpper?.inputRouter || null;
+      const routerLower = msLower?.inputRouter || null;
+      const routerCi = this.inputRouter || null;
+      const resolvedRouter = routerUpper || routerLower || routerCi || null;
+
+      const pixiCanvas = canvas?.app?.view;
+      const board = document.getElementById('board');
+      const threeCanvas = document.getElementById('map-shine-canvas');
+      const activeControl = String(ui?.controls?.control?.name || ui?.controls?.activeControl || '').toLowerCase();
+      const activeTool = String(ui?.controls?.tool?.name || ui?.controls?.activeTool || '').toLowerCase();
+
+      this._interactionSnapshotSeq += 1;
+      log.warn(`[InputSnapshot #${this._interactionSnapshotSeq}] ${trigger}`, {
+        mode: resolvedRouter?.currentMode,
+        shouldThree: resolvedRouter?.shouldThreeReceiveInput?.(),
+        shouldPixi: resolvedRouter?.shouldPixiReceiveInput?.(),
+        control: activeControl,
+        tool: activeTool,
+        wallsActive: !!canvas?.walls?.active,
+        lightingActive: !!canvas?.lighting?.active,
+        forceOverlay: !!window.MapShine?.__forcePixiEditorOverlay,
+        pixiPE: pixiCanvas?.style?.pointerEvents,
+        boardPE: board?.style?.pointerEvents,
+        threePE: threeCanvas?.style?.pointerEvents,
+        hasRouterUpper: !!routerUpper,
+        hasRouterLower: !!routerLower,
+        hasRouterCi: !!routerCi,
+        sameUpperLower: !!routerUpper && !!routerLower ? routerUpper === routerLower : null,
+        sameUpperCi: !!routerUpper && !!routerCi ? routerUpper === routerCi : null,
+        sameLowerCi: !!routerLower && !!routerCi ? routerLower === routerCi : null,
+        extra
+      });
+    } catch (_) {
+      // Best-effort diagnostics
+    }
+  }
+
   /**
    * When ControlsIntegration is active, canvas-replacement's legacy input mode
    * arbiter does not run its light-gizmo visibility updates. We replicate the
@@ -177,11 +230,10 @@ export class ControlsIntegration {
       if (!canvas?.ready) return;
 
       const isMapMakerMode = !!window.MapShine?.isMapMakerMode;
-      const v2Active = !!window.MapShine?.__v2Active;
 
-      // V2 renders through FloorCompositor and does not include legacy
-      // Three-based editor icon managers in its draw path.
-      const showLighting = this._isLightingContextActive() && !isMapMakerMode && !v2Active;
+      // Lighting interactions are Three-driven in gameplay. Keep Three light
+      // gizmos available whenever lighting context is active.
+      const showLighting = this._isLightingContextActive() && !isMapMakerMode;
 
       const lightIconManager = window.MapShine?.lightIconManager;
       if (lightIconManager?.setVisibility) {
@@ -286,6 +338,18 @@ export class ControlsIntegration {
       // Initial state sync
       this.layerVisibility.update();
       this.inputRouter.autoUpdate();
+
+      // Keep global diagnostics/runtime lookups in sync even when ControlsIntegration
+      // initializes after initial manager exposure.
+      const globalMs = window.MapShine || window.mapShine;
+      if (globalMs) {
+        globalMs.inputRouter = this.inputRouter;
+        globalMs.layerVisibility = this.layerVisibility;
+        globalMs.controlsIntegration = this;
+      }
+
+      this._logInteractionSnapshot('initialize.postAutoUpdate');
+      setTimeout(() => this._reassertInputOwnership('initialize'), 25);
 
       // Keep Three.js light gizmos in sync with the active layer/tool.
       this._updateThreeGizmoVisibility();
@@ -784,6 +848,10 @@ export class ControlsIntegration {
           this._updateWallsVisualState();
           this._updateThreeGizmoVisibility();
           this._applyPixiEditorOverlayGate();
+          this._logInteractionSnapshot('activateCanvasLayer.postUpdate', {
+            layerCtor: layer?.constructor?.name || null
+          });
+          setTimeout(() => this._reassertInputOwnership('activateCanvasLayer'), 25);
         } catch (error) {
           this.handleError(error, 'activateCanvasLayer');
         }
@@ -802,12 +870,25 @@ export class ControlsIntegration {
           this._updateWallsVisualState();
           this._updateThreeGizmoVisibility();
           this._applyPixiEditorOverlayGate();
+          this._logInteractionSnapshot('renderSceneControls.postUpdate');
+          setTimeout(() => this._reassertInputOwnership('renderSceneControls'), 25);
         } catch (error) {
           this.handleError(error, 'renderSceneControls');
         }
       }, 0);
     });
     this._hookIds.push({ name: 'renderSceneControls', id: controlsHookId });
+
+    const modeChangeHookId = Hooks.on('mapShineInputModeChange', (payload) => {
+      if (this.state !== IntegrationState.ACTIVE) return;
+      this._logInteractionSnapshot('mapShineInputModeChange', {
+        mode: payload?.mode,
+        reason: payload?.reason,
+        layer: payload?.layer,
+        tool: payload?.tool
+      });
+    });
+    this._hookIds.push({ name: 'mapShineInputModeChange', id: modeChangeHookId });
 
     // Canvas pan - CameraFollower handles sync automatically each frame
     // This hook is kept for potential future use but does nothing currently

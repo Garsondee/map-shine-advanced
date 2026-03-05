@@ -18,6 +18,9 @@ const LEGACY_MODULE_ID = 'map-shine';
 /** Current data version for migration tracking */
 const CURRENT_VERSION = 2;
 
+/** Default level-binding mode for legacy/backward-compatible map point groups. */
+const DEFAULT_LEVEL_BINDING_MODE = 'all-levels';
+
 /**
  * Effect target options - maps effect keys to display names
  * Must remain backwards compatible with v1.x
@@ -52,6 +55,19 @@ export const EFFECT_SOURCE_OPTIONS = {
  */
 
 /**
+ * @typedef {Object} LevelBinding
+ * @property {'locked'|'all-levels'} mode - Whether this group is level-locked or globally visible
+ * @property {number|null} bottom - Inclusive bottom elevation when mode='locked'
+ * @property {number|null} top - Inclusive top elevation when mode='locked'
+ * @property {string|null} floorKey - Optional stable floor identifier
+ */
+
+/**
+ * @typedef {Object} MapPointMetadata
+ * @property {LevelBinding} levelBinding - Level ownership/visibility contract
+ */
+
+/**
  * @typedef {Object} MapPointGroup
  * @property {string} id - Unique identifier
  * @property {string} label - Display name
@@ -63,7 +79,7 @@ export const EFFECT_SOURCE_OPTIONS = {
  * @property {string} effectTarget - Effect key (e.g., 'lightning', 'candleFlame')
  * @property {EmissionSettings} emission - Emission settings
  * @property {number} [version] - Data version for migration
- * @property {Object} [metadata] - Additional metadata
+ * @property {MapPointMetadata} [metadata] - Additional metadata (includes level-binding)
  * @property {string} [ropeType] - Rope preset type (for rope groups)
  * @property {string} [texturePath] - Custom texture path (for rope groups)
  * @property {number} [segmentLength] - Rope segment length
@@ -143,6 +159,134 @@ export class MapPointsManager {
       return false;
     }
     return false;
+  }
+
+  /**
+   * @returns {LevelBinding}
+   * @private
+   */
+  _getDefaultLevelBinding() {
+    return {
+      mode: DEFAULT_LEVEL_BINDING_MODE,
+      bottom: null,
+      top: null,
+      floorKey: null,
+    };
+  }
+
+  /**
+   * Normalize level-binding payload into a stable, serializable shape.
+   * Legacy groups default to mode='all-levels' to preserve existing behavior.
+   * @param {any} raw
+   * @returns {LevelBinding}
+   * @private
+   */
+  _normalizeLevelBinding(raw) {
+    const fallback = this._getDefaultLevelBinding();
+    if (!raw || typeof raw !== 'object') return fallback;
+
+    const mode = (raw.mode === 'locked' || raw.mode === 'all-levels')
+      ? raw.mode
+      : fallback.mode;
+    const bottom = Number.isFinite(raw.bottom) ? Number(raw.bottom) : null;
+    const top = Number.isFinite(raw.top) ? Number(raw.top) : null;
+    const floorKey = (typeof raw.floorKey === 'string' && raw.floorKey.length > 0)
+      ? raw.floorKey
+      : null;
+
+    return { mode, bottom, top, floorKey };
+  }
+
+  /**
+   * @param {any} metadata
+   * @returns {MapPointMetadata}
+   * @private
+   */
+  _normalizeMetadata(metadata) {
+    const normalized = (metadata && typeof metadata === 'object' && !Array.isArray(metadata))
+      ? { ...metadata }
+      : {};
+    normalized.levelBinding = this._normalizeLevelBinding(normalized.levelBinding);
+    return normalized;
+  }
+
+  /**
+   * @param {any} metadata
+   * @returns {boolean}
+   * @private
+   */
+  _requiresLevelBindingMigration(metadata) {
+    const lb = metadata?.levelBinding;
+    if (!lb || typeof lb !== 'object') return true;
+    if (lb.mode !== 'locked' && lb.mode !== 'all-levels') return true;
+    if (lb.bottom !== null && !Number.isFinite(lb.bottom)) return true;
+    if (lb.top !== null && !Number.isFinite(lb.top)) return true;
+    if (lb.floorKey !== null && typeof lb.floorKey !== 'string') return true;
+    return false;
+  }
+
+  /**
+   * Build normalized metadata using the provided level context.
+   * When no valid context exists, falls back to all-levels behavior.
+   * @param {any} context
+   * @returns {MapPointMetadata}
+   */
+  buildMetadataFromLevelContext(context = null) {
+    const ctx = context ?? window.MapShine?.activeLevelContext ?? null;
+    const bottom = Number(ctx?.bottom);
+    const top = Number(ctx?.top);
+    const hasRange = Number.isFinite(bottom) && Number.isFinite(top);
+    const floorKey = (typeof ctx?.levelId === 'string' && ctx.levelId.length > 0)
+      ? ctx.levelId
+      : null;
+
+    const levelBinding = hasRange
+      ? {
+          mode: 'locked',
+          bottom: Math.min(bottom, top),
+          top: Math.max(bottom, top),
+          floorKey,
+        }
+      : this._getDefaultLevelBinding();
+
+    return this._normalizeMetadata({ levelBinding });
+  }
+
+  /**
+   * @param {MapPointGroup} group
+   * @param {any} context
+   * @returns {boolean}
+   * @private
+   */
+  _groupMatchesLevelContext(group, context = null) {
+    if (!group || typeof group !== 'object') return false;
+
+    const ctx = context ?? window.MapShine?.activeLevelContext ?? null;
+    if (!ctx) return true;
+    // Single-level/no-level scenes should keep legacy behavior.
+    if ((ctx.count ?? 0) <= 1) return true;
+
+    const binding = this._normalizeLevelBinding(group?.metadata?.levelBinding);
+    if (binding.mode !== 'locked') return true;
+
+    const ctxLevelId = (typeof ctx?.levelId === 'string' && ctx.levelId.length > 0) ? ctx.levelId : null;
+    if (binding.floorKey && ctxLevelId) {
+      return binding.floorKey === ctxLevelId;
+    }
+
+    const b0 = Number(binding.bottom);
+    const t0 = Number(binding.top);
+    const b1 = Number(ctx?.bottom);
+    const t1 = Number(ctx?.top);
+    if (Number.isFinite(b0) && Number.isFinite(t0) && Number.isFinite(b1) && Number.isFinite(t1)) {
+      const min0 = Math.min(b0, t0);
+      const max0 = Math.max(b0, t0);
+      const min1 = Math.min(b1, t1);
+      const max1 = Math.max(b1, t1);
+      return !(max0 < min1 || min0 > max1);
+    }
+
+    return true;
   }
 
   /**
@@ -239,6 +383,7 @@ export class MapPointsManager {
 
         const migratedGroup = this.migrateGroup(group);
         migratedGroup.id = id;
+        migratedGroup.metadata = this._normalizeMetadata(migratedGroup.metadata);
 
         if (!Array.isArray(migratedGroup.points)) migratedGroup.points = [];
         migratedGroup.points = migratedGroup.points
@@ -255,6 +400,7 @@ export class MapPointsManager {
           });
 
         if (migratedGroup.version !== (group.version ?? 0)) needsMigration = true;
+        if (this._requiresLevelBindingMigration(group.metadata)) needsMigration = true;
         if (!migratedGroup.type || !['point', 'line', 'area', 'rope'].includes(migratedGroup.type)) {
           migratedGroup.type = 'point';
           needsMigration = true;
@@ -306,13 +452,16 @@ export class MapPointsManager {
           falloff: { enabled: false, strength: 0.5 }
         },
         version: CURRENT_VERSION,
-        metadata: {}
+        metadata: this._normalizeMetadata({})
       };
     }
 
     // Already v2+
     if ((group.version ?? 0) >= CURRENT_VERSION) {
-      return group;
+      return {
+        ...group,
+        metadata: this._normalizeMetadata(group.metadata),
+      };
     }
 
     // v1.x -> v2 migration
@@ -324,7 +473,7 @@ export class MapPointsManager {
       version: CURRENT_VERSION,
       
       // Add metadata container for future use
-      metadata: group.metadata || {},
+      metadata: this._normalizeMetadata(group.metadata || {}),
       
       // Ensure emission settings exist with defaults
       emission: group.emission || {
@@ -444,6 +593,17 @@ export class MapPointsManager {
   }
 
   /**
+   * Get effect-source groups that match the active/provided level context.
+   * @param {string} effectTarget - Effect key (e.g., 'lightning')
+   * @param {any} [context=null] - Optional level context override
+   * @returns {MapPointGroup[]}
+   */
+  getGroupsByEffectForContext(effectTarget, context = null) {
+    const groups = this.getGroupsByEffect(effectTarget);
+    return groups.filter((group) => this._groupMatchesLevelContext(group, context));
+  }
+
+  /**
    * Get all points for a specific effect, flattened from all matching groups
    * @param {string} effectTarget - Effect key
    * @returns {MapPoint[]}
@@ -458,6 +618,25 @@ export class MapPointsManager {
       }
     }
     
+    return points;
+  }
+
+  /**
+   * Get flattened points for an effect, filtered by level context.
+   * @param {string} effectTarget - Effect key
+   * @param {any} [context=null] - Optional level context override
+   * @returns {MapPoint[]}
+   */
+  getPointsForEffectForContext(effectTarget, context = null) {
+    const groups = this.getGroupsByEffectForContext(effectTarget, context);
+    const points = [];
+
+    for (const group of groups) {
+      if (group.points && Array.isArray(group.points)) {
+        points.push(...group.points);
+      }
+    }
+
     return points;
   }
 
@@ -547,6 +726,32 @@ export class MapPointsManager {
       });
     }
     
+    return areas;
+  }
+
+  /**
+   * Get area polygons for an effect filtered by level context.
+   * @param {string} effectTarget - Effect key
+   * @param {any} [context=null] - Optional level context override
+   * @returns {AreaPolygon[]}
+   */
+  getAreasForEffectForContext(effectTarget, context = null) {
+    const groups = this.getGroupsByEffectForContext(effectTarget, context);
+    const areas = [];
+
+    for (const group of groups) {
+      if (group.type !== 'area' || !group.points || group.points.length < 3) {
+        continue;
+      }
+
+      areas.push({
+        groupId: group.id,
+        points: group.points,
+        emission: group.emission,
+        bounds: this._computeBounds(group.points)
+      });
+    }
+
     return areas;
   }
 
@@ -705,6 +910,7 @@ export class MapPointsManager {
           intensity: 1.0,
           falloff: { enabled: false, strength: 0.5 }
         },
+        metadata: groupData.metadata ?? this.buildMetadataFromLevelContext(),
         ...groupData
       });
 
@@ -764,7 +970,9 @@ export class MapPointsManager {
 
       const prev = group;
       const updatedGroup = { ...group, ...updates };
-      this.groups.set(id, updatedGroup);
+      const normalizedGroup = this.migrateGroup({ ...updatedGroup, id });
+      normalizedGroup.id = id;
+      this.groups.set(id, normalizedGroup);
 
       const ok = await this._saveToSceneNow();
       if (!ok) {
@@ -775,7 +983,7 @@ export class MapPointsManager {
       this.notifyListeners();
 
       log.debug(`Updated map point group: ${id}`);
-      return updatedGroup;
+      return normalizedGroup;
     });
   }
 

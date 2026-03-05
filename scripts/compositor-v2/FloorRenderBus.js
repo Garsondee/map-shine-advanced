@@ -299,7 +299,7 @@ export class FloorRenderBus {
     }
     this._tiles.clear();
     
-    // Remove background meshes and effect overlays, but preserve tokens.
+    // Remove background meshes and effect overlays, but preserve tokens/doors.
     // Tokens are added by TokenManager and should not be destroyed when
     // repopulating tiles. Only remove objects with tileId starting with '__'
     // (background planes, effect overlays) that are not tracked in _tiles.
@@ -316,6 +316,12 @@ export class FloorRenderBus {
       if (type === 'token') {
         tokenCount++;
         log.info(`[V2 DEBUG] Preserving token: ${name} (type=${type})`);
+        continue;
+      }
+      // Preserve door meshes managed by DoorMeshManager.
+      if (type === 'doorMesh') {
+        tokenCount++;
+        log.info(`[V2 DEBUG] Preserving door mesh: ${name} (type=${type})`);
         continue;
       }
       // Preserve particle systems and other effect objects

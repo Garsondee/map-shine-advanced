@@ -572,11 +572,9 @@ export class SpecularEffectV2 {
 
     // ── Cloud shadow texture ──────────────────────────────────────────────
     // V2: CloudEffectV2 lives under EffectComposer._floorCompositorV2.
-    // V1: CloudEffect publishes window.MapShine.cloudEffect.
     try {
       const v2Cloud = window.MapShine?.effectComposer?._floorCompositorV2?._cloudEffect;
-      const v1Cloud = window.MapShine?.cloudEffect;
-      const cloud = v2Cloud ?? v1Cloud;
+      const cloud = v2Cloud;
       const cloudTex = (cloud?.enabled)
         ? (cloud.cloudShadowTexture ?? cloud.cloudShadowTarget?.texture ?? null)
         : null;

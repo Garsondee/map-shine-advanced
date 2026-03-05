@@ -993,6 +993,7 @@ export class SmellyFliesEffect {
     
     /** @type {MapPointsManager} */
     this.mapPointsManager = null;
+    this._activeLevelContext = null;
     
     /** @type {Object} */
     this.params = { ...DEFAULT_FLY_CONFIG };
@@ -1212,6 +1213,15 @@ export class SmellyFliesEffect {
     }
   }
 
+  setActiveLevelContext(context = null) {
+    this._activeLevelContext = context ?? window.MapShine?.activeLevelContext ?? null;
+    this._queueRebuildSystems();
+  }
+
+  onFloorChange(_maxFloorIndex) {
+    this.setActiveLevelContext(window.MapShine?.activeLevelContext ?? null);
+  }
+
   _queueRebuildSystems() {
     if (this._rebuildQueued) return;
     this._rebuildQueued = true;
@@ -1293,10 +1303,14 @@ export class SmellyFliesEffect {
     }
     
     // Get all smellyFlies areas
-    const areas = this.mapPointsManager.getAreasForEffect('smellyFlies');
+    const areas = (typeof this.mapPointsManager.getAreasForEffectForContext === 'function')
+      ? this.mapPointsManager.getAreasForEffectForContext('smellyFlies', this._activeLevelContext)
+      : this.mapPointsManager.getAreasForEffect('smellyFlies');
     
     // Also support point groups (single spawn location)
-    const pointGroups = this.mapPointsManager.getGroupsByEffect('smellyFlies')
+    const pointGroups = (typeof this.mapPointsManager.getGroupsByEffectForContext === 'function'
+      ? this.mapPointsManager.getGroupsByEffectForContext('smellyFlies', this._activeLevelContext)
+      : this.mapPointsManager.getGroupsByEffect('smellyFlies'))
       .filter(g => g.type === 'point' && g.points && g.points.length > 0);
     
     log.info(`Creating fly systems: ${areas.length} areas, ${pointGroups.length} point groups`);

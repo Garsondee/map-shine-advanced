@@ -57,6 +57,13 @@ const GROUND_Z = 1000;
 const BUCKET_SIZE = 2000;
 
 const FIRE_MASK_FORMATS = ['webp', 'png', 'jpg', 'jpeg'];
+const REBUILD_PARAM_KEYS = [
+  'fireSizeMin', 'fireSizeMax', 'fireLifeMin', 'fireLifeMax',
+  'emberSizeMin', 'emberSizeMax', 'emberLifeMin', 'emberLifeMax',
+  'smokeEnabled', 'smokeSizeMin', 'smokeSizeMax', 'smokeLifeMin', 'smokeLifeMax',
+  'smokeSizeGrowth', 'smokeSizeOverLife',
+];
+const REBUILD_PARAM_SET = new Set(REBUILD_PARAM_KEYS);
 
 // ─── FireEffectV2 ────────────────────────────────────────────────────────────
 
@@ -96,6 +103,14 @@ export class FireEffectV2 {
     this._emberTexture = null;
     /** @type {Promise<void>|null} Resolves when sprite textures are loaded */
     this._texturesReady = null;
+    /** @type {object|null} Last foundrySceneData used to populate systems */
+    this._lastPopulateSceneData = null;
+    /** @type {string} Last structural settings signature used for built systems */
+    this._structuralSignature = '';
+    /** @type {Promise<void>|null} In-flight async rebuild promise */
+    this._rebuildInFlight = null;
+    /** @type {boolean} Whether another rebuild should run after current one */
+    this._rebuildQueued = false;
 
     // Effect parameters — same defaults as V1 for visual parity.
     this.params = {
@@ -127,7 +142,8 @@ export class FireEffectV2 {
       indoorLifeScale: 0.7,
       indoorTimeScale: 0.2,
       flamePeakOpacity: 0.9,
-      coreEmission: 0.7,
+      coreEmission: 2.5,
+      flameBrightnessFloor: 0.75,
       emberEmission: 2.0,
       emberPeakOpacity: 0.9,
       smokeEnabled: true,
@@ -139,6 +155,7 @@ export class FireEffectV2 {
       smokeSizeMin: 183,
       smokeSizeMax: 400,
       smokeSizeGrowth: 10,
+      smokeSizeOverLife: 10,
       smokeLifeMin: 7,
       smokeLifeMax: 15,
       smokeUpdraft: 8.8,
@@ -162,16 +179,31 @@ export class FireEffectV2 {
     }
   }
 
+  /**
+   * Apply a runtime parameter change coming from the UI callback bridge.
+   * Structural parameters trigger a full particle-system rebuild; dynamic
+   * parameters continue to update live in _updateSystemParams/behaviors.
+   * @param {string} paramId
+   * @param {*} value
+   */
+  applyParamChange(paramId, value) {
+    if (!this.params || !Object.prototype.hasOwnProperty.call(this.params, paramId)) return;
+    this.params[paramId] = value;
+    if (REBUILD_PARAM_SET.has(paramId)) {
+      this._queueRebuild();
+    }
+  }
+
   // ── UI schema (moved from V1 FireSparksEffect) ───────────────────────────
 
   static getControlSchema() {
     return {
       enabled: true,
       groups: [
-        { name: 'flames', label: 'Flames', type: 'folder', expanded: false, parameters: ['globalFireRate', 'fireHeight', 'fireTemperature', 'flamePeakOpacity', 'coreEmission', 'fireSizeMin', 'fireSizeMax', 'fireLifeMin', 'fireLifeMax', 'fireSpinEnabled', 'fireSpinSpeedMin', 'fireSpinSpeedMax', 'fireUpdraft', 'fireCurlStrength'] },
+        { name: 'flames', label: 'Flames', type: 'folder', expanded: false, parameters: ['globalFireRate', 'fireHeight', 'fireTemperature', 'flamePeakOpacity', 'coreEmission', 'flameBrightnessFloor', 'fireSizeMin', 'fireSizeMax', 'fireLifeMin', 'fireLifeMax', 'fireSpinEnabled', 'fireSpinSpeedMin', 'fireSpinSpeedMax', 'fireUpdraft', 'fireCurlStrength'] },
         { name: 'flame-texture', label: 'Flame Texture', type: 'folder', expanded: false, parameters: ['flameTextureOpacity', 'flameTextureBrightness', 'flameTextureScaleX', 'flameTextureScaleY', 'flameTextureOffsetX', 'flameTextureOffsetY', 'flameTextureRotation', 'flameTextureFlipX', 'flameTextureFlipY'] },
         { name: 'embers', label: 'Embers', type: 'folder', expanded: false, parameters: ['emberRate', 'emberEmission', 'emberPeakOpacity', 'emberSizeMin', 'emberSizeMax', 'emberLifeMin', 'emberLifeMax', 'emberUpdraft', 'emberCurlStrength'] },
-        { name: 'smoke', label: 'Smoke', type: 'folder', expanded: true, parameters: ['smokeEnabled', 'smokeRatio', 'smokeOpacity', 'smokeColorWarmth', 'smokeColorBrightness', 'smokeDarknessResponse', 'smokeAlphaStart', 'smokeAlphaPeak', 'smokeAlphaEnd', 'smokeSizeMin', 'smokeSizeMax', 'smokeSizeGrowth', 'smokeLifeMin', 'smokeLifeMax', 'smokeUpdraft', 'smokeTurbulence', 'smokeWindInfluence'] },
+        { name: 'smoke', label: 'Smoke', type: 'folder', expanded: true, parameters: ['smokeEnabled', 'smokeRatio', 'smokeOpacity', 'smokeColorWarmth', 'smokeColorBrightness', 'smokeDarknessResponse', 'smokeAlphaStart', 'smokeAlphaPeak', 'smokeAlphaEnd', 'smokeSizeMin', 'smokeSizeMax', 'smokeSizeOverLife', 'smokeLifeMin', 'smokeLifeMax', 'smokeUpdraft', 'smokeTurbulence', 'smokeWindInfluence'] },
         { name: 'environment', label: 'Environment', type: 'folder', expanded: false, parameters: ['windInfluence', 'timeScale', 'lightIntensity', 'indoorLifeScale', 'indoorTimeScale', 'weatherPrecipKill', 'weatherWindKill'] },
         { name: 'heat-distortion', label: 'Heat Distortion', type: 'folder', expanded: false, parameters: ['heatDistortionEnabled', 'heatDistortionIntensity', 'heatDistortionFrequency', 'heatDistortionSpeed'] }
       ],
@@ -181,7 +213,8 @@ export class FireEffectV2 {
         fireHeight: { type: 'slider', label: 'Height', min: 1.0, max: 600.0, step: 1.0, default: 10.0 },
         fireTemperature: { type: 'slider', label: 'Temperature', min: 0.0, max: 1.0, step: 0.05, default: 0.5 },
         flamePeakOpacity: { type: 'slider', label: 'Peak Opacity', min: 0.0, max: 1.0, step: 0.01, default: 0.9 },
-        coreEmission: { type: 'slider', label: 'Core Emission (HDR)', min: 0.5, max: 5.0, step: 0.1, default: 0.7 },
+        coreEmission: { type: 'slider', label: 'Core Emission (HDR)', min: 0.5, max: 5.0, step: 0.1, default: 2.5 },
+        flameBrightnessFloor: { type: 'slider', label: 'Mask Brightness Floor', min: 0.0, max: 1.5, step: 0.01, default: 0.75 },
         fireSizeMin: { type: 'slider', label: 'Size Min', min: 1.0, max: 150.0, step: 1.0, default: 19 },
         fireSizeMax: { type: 'slider', label: 'Size Max', min: 1.0, max: 200.0, step: 1.0, default: 170 },
         fireLifeMin: { type: 'slider', label: 'Life Min (s)', min: 0.1, max: 6.0, step: 0.05, default: 1.35 },
@@ -217,12 +250,13 @@ export class FireEffectV2 {
         smokeDarknessResponse: { type: 'slider', label: 'Darkness Response', min: 0.0, max: 1.0, step: 0.01, default: 0.8 },
         smokeSizeMin: { type: 'slider', label: 'Size Min', min: 1.0, max: 200.0, step: 1.0, default: 183 },
         smokeSizeMax: { type: 'slider', label: 'Size Max', min: 1.0, max: 400.0, step: 1.0, default: 400 },
-        smokeSizeGrowth: { type: 'slider', label: 'Size Growth', min: 1.0, max: 10.0, step: 0.1, default: 10 },
+        smokeSizeGrowth: { type: 'slider', label: 'Size Growth (Legacy)', min: 1.0, max: 10.0, step: 0.1, default: 10, hidden: true },
+        smokeSizeOverLife: { type: 'slider', label: 'Size Over Life', min: 1.0, max: 10.0, step: 0.1, default: 10 },
         smokeLifeMin: { type: 'slider', label: 'Life Min (s)', min: 0.1, max: 10.0, step: 0.1, default: 7 },
         smokeLifeMax: { type: 'slider', label: 'Life Max (s)', min: 0.1, max: 15.0, step: 0.1, default: 15 },
         smokeUpdraft: { type: 'slider', label: 'Updraft', min: 0.0, max: 20.0, step: 0.1, default: 8.8 },
         smokeTurbulence: { type: 'slider', label: 'Turbulence', min: 0.0, max: 5.0, step: 0.05, default: 0.05 },
-        smokeWindInfluence: { type: 'slider', label: 'Wind Response', min: 0.0, max: 10.0, step: 0.1, default: 3.1 },
+        smokeWindInfluence: { type: 'slider', label: 'Wind Influence', min: 0.0, max: 10.0, step: 0.1, default: 3.1 },
         smokeAlphaStart: { type: 'slider', label: 'Alpha Ramp Start', min: 0.0, max: 1.0, step: 0.01, default: 0.7 },
         smokeAlphaPeak: { type: 'slider', label: 'Alpha Peak', min: 0.0, max: 1.0, step: 0.01, default: 0.8 },
         smokeAlphaEnd: { type: 'slider', label: 'Alpha Fade End', min: 0.0, max: 1.0, step: 0.01, default: 1.0 },
@@ -278,6 +312,7 @@ export class FireEffectV2 {
   async populate(foundrySceneData) {
     log.info('FireEffectV2.populate() called, initialized=' + this._initialized);
     if (!this._initialized) { log.warn('populate: not initialized'); return; }
+    this._lastPopulateSceneData = foundrySceneData ?? this._lastPopulateSceneData;
     this.clear();
 
     // Wait for fire/ember sprite textures to load before creating systems.
@@ -451,6 +486,8 @@ export class FireEffectV2 {
         log.info(`  First 3 fire points (u,v,brightness): [${pts.slice(0,9).join(', ')}]`);
       }
     }
+
+    this._structuralSignature = this._computeStructuralSignature();
   }
 
   /**
@@ -532,6 +569,8 @@ export class FireEffectV2 {
 
     // Remove batch renderer from bus.
     this._renderBus.removeEffectOverlay('__fire_batch__');
+
+    this._structuralSignature = '';
   }
 
   dispose() {
@@ -1100,5 +1139,34 @@ export class FireEffectV2 {
     if (!floors || floorIndex >= floors.length) return 0;
     const f = floors[floorIndex];
     return f?.elevationMin ?? 0;
+  }
+
+  /** @private */
+  _computeStructuralSignature() {
+    const p = this.params || {};
+    return REBUILD_PARAM_KEYS.map((k) => `${k}:${Number(p[k] ?? 0).toFixed(4)}`).join('|');
+  }
+
+  /** @private */
+  _queueRebuild() {
+    if (this._rebuildInFlight) {
+      this._rebuildQueued = true;
+      return;
+    }
+
+    const sceneData = this._lastPopulateSceneData;
+    if (!sceneData) return;
+
+    this._rebuildInFlight = this.populate(sceneData)
+      .catch((err) => {
+        log.warn('FireEffectV2: runtime rebuild failed', err);
+      })
+      .finally(() => {
+        this._rebuildInFlight = null;
+        if (this._rebuildQueued) {
+          this._rebuildQueued = false;
+          this._queueRebuild();
+        }
+      });
   }
 }

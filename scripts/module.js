@@ -9,10 +9,41 @@
 // then considers the init phase complete and rejects late registrations.
 import { registerLevelNavigationKeybindings } from './foundry/level-navigation-keybindings.js';
 
+function _suppressDiagConsoleLogs() {
+  try {
+    if (window.__msaDiagLogsSuppressed) return;
+
+    window.__msaDiagLogsSuppressed = true;
+
+    const shouldSuppress = (args) => {
+      try {
+        if (!Array.isArray(args)) return false;
+        return args.some((arg) => (typeof arg === 'string') && arg.includes('Diag #'));
+      } catch (_) {
+        return false;
+      }
+    };
+
+    const wrap = (fn) => {
+      if (typeof fn !== 'function') return fn;
+      return (...args) => {
+        if (shouldSuppress(args)) return;
+        return fn(...args);
+      };
+    };
+
+    console.log = wrap(console.log.bind(console));
+    console.warn = wrap(console.warn.bind(console));
+    console.error = wrap(console.error.bind(console));
+  } catch (_) {
+  }
+}
+
+_suppressDiagConsoleLogs();
+
 function _msaCrisisLog(id, message) {
   try {
     const n = String(id).padStart(3, '0');
-    console.log(`Crisis #${n} - ${message}`);
   } catch (_) {
   }
 }
@@ -40,9 +71,6 @@ function _msaCrisisInspectScene(scene, label) {
     const dim = scene.dimensions ?? null;
     const bg = scene.background?.src ?? scene.img ?? null;
 
-    console.log(`Crisis #361 - ${label}: scene id=${id}, name=${name}`);
-    console.log(`Crisis #362 - ${label}: dims=${dim ? JSON.stringify({w: dim.width, h: dim.height, sceneX: dim.sceneX, sceneY: dim.sceneY, sceneW: dim.sceneWidth, sceneH: dim.sceneHeight, pad: dim.padding, grid: dim.size}) : 'null'}`);
-    console.log(`Crisis #363 - ${label}: bg=${bg ? String(bg).slice(0, 240) : 'null'}`);
 
     const counts = {
       tokens: scene.tokens?.size ?? scene.tokens?.length ?? null,
@@ -54,11 +82,9 @@ function _msaCrisisInspectScene(scene, label) {
       notes: scene.notes?.size ?? scene.notes?.length ?? null,
       regions: scene.regions?.size ?? scene.regions?.length ?? null,
     };
-    console.log(`Crisis #364 - ${label}: counts=${JSON.stringify(counts)}`);
 
     const allFlagsSize = _msaCrisisSafeJsonSize(flags);
     const msaFlagsSize = _msaCrisisSafeJsonSize(msaFlags);
-    console.log(`Crisis #365 - ${label}: flags sizes: all=${allFlagsSize ?? '??'} bytes, msa=${msaFlagsSize ?? '??'} bytes`);
 
     try {
       const perModule = [];
@@ -68,7 +94,6 @@ function _msaCrisisInspectScene(scene, label) {
       }
       perModule.sort((a, b) => b.sz - a.sz);
       const top = perModule.slice(0, 12);
-      console.log(`Crisis #366 - ${label}: largest flag namespaces:`, top);
     } catch (_) {
     }
 
@@ -126,28 +151,22 @@ function _msaCrisisInspectScene(scene, label) {
       each(scene.regions, 'Region');
 
       if (suspicious.length) {
-        console.warn(`Crisis #367 - ${label}: suspicious numeric/field values detected (${suspicious.length})`);
-        console.log('Crisis #367 - details:', suspicious.slice(0, 80));
-        if (suspicious.length > 80) console.warn(`Crisis #367 - details truncated (showing 80/${suspicious.length})`);
       } else {
-        console.log(`Crisis #368 - ${label}: no suspicious numeric values detected`);
       }
     } catch (_) {
     }
 
   } catch (e) {
-    try { console.warn(`Crisis #369 - ${label}: inspector failed: ${e?.message ?? e}`); } catch (_) {}
   }
 }
 
 _msaCrisisLog(1, 'module.js: module evaluation started');
 
 try {
-  console.warn('MapShine DIAG loaded module.js from:', import.meta?.url ?? '(no import.meta.url)');
 } catch (_) {
 }
 
-// ── Crisis kill-switch cleanup ───────────────────────────────────────────
+// â”€â”€ diagnostic kill-switch cleanup â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // These localStorage flags were temporary debugging measures during the
 // 0%/98% load-stall investigation. They are now treated as deprecated and
 // are forcibly cleared on startup so they cannot silently break rendering.
@@ -187,7 +206,6 @@ try {
         const err = ev?.error;
         const stack = err?.stack ?? null;
         _msaCrisisLog(5, `window.onerror: ${msg} @ ${file}:${line}:${col}`);
-        if (stack) console.log(`Crisis #005 - window.onerror stack:\n${stack}`);
       } catch (_) {
       }
     });
@@ -198,7 +216,6 @@ try {
         const msg = (reason && typeof reason === 'object' && 'message' in reason) ? reason.message : String(reason);
         const stack = reason?.stack ?? null;
         _msaCrisisLog(6, `window.onunhandledrejection: ${msg}`);
-        if (stack) console.log(`Crisis #006 - window.onunhandledrejection stack:\n${stack}`);
       } catch (_) {
       }
     });
@@ -297,15 +314,7 @@ Hooks.once('init', async function() {
           const ns = changes?.flags?.['map-shine-advanced'];
           const touched = (ns !== undefined) || (changes?.flags?.['-=map-shine-advanced'] !== undefined);
           if (!touched) return;
-          const currentEnabled = (() => {
-            try { return sceneDoc?.getFlag?.('map-shine-advanced', 'enabled'); } catch (_) { return null; }
-          })();
-          console.warn('MapShine DIAG updateScene flags changed:', {
-            sceneId: sceneDoc?.id ?? null,
-            sceneName: sceneDoc?.name ?? null,
-            changesFlags: changes?.flags ?? null,
-            currentEnabled,
-          });
+          // Diagnostic logging removed intentionally.
         } catch (_) {}
       });
     }
@@ -337,7 +346,6 @@ Hooks.once('init', async function() {
         try {
           const worldId = game?.world?.id ?? 'unknown';
           const worldTitle = game?.world?.title ?? 'unknown';
-          console.log(`Crisis #359 - ready: world id=${worldId}, title=${worldTitle}`);
           _msaCrisisInspectScene(game?.scenes?.active ?? canvas?.scene ?? null, 'ready');
         } catch (_) {}
       });
@@ -348,7 +356,7 @@ Hooks.once('init', async function() {
   }
 
   // Register keybindings SYNCHRONOUSLY before any await. Foundry's hook system
-  // does not await async handlers — after the first yield, Foundry considers the
+  // does not await async handlers â€” after the first yield, Foundry considers the
   // init phase complete and rejects late keybinding registrations with:
   // "You cannot register a Keybinding after the init hook"
   try {
@@ -397,7 +405,7 @@ Hooks.once('init', async function() {
 
   try {
     _msaCrisisLog(18, 'init: loadingOverlay.showBlack() about to run');
-    loadingOverlay.showBlack('Initializing…');
+    loadingOverlay.showBlack('Initializingâ€¦');
     _msaCrisisLog(19, 'init: loadingOverlay.showBlack() completed');
   } catch (e) {
     console.warn('Map Shine: failed to initialize loading overlay', e);
@@ -405,7 +413,7 @@ Hooks.once('init', async function() {
   }
 
 
-  console.log("%c GNU Terry Pratchett %c \n“A man is not dead while his name is still spoken.”",
+  console.log("%c GNU Terry Pratchett %c \nâ€œA man is not dead while his name is still spoken.â€",
   "background: #313131ff; color: #FFD700; font-weight: bold; padding: 4px 8px; border-radius: 4px;",
   "color: #888; font-style: italic;"
 );
@@ -810,14 +818,14 @@ Hooks.once('ready', async function() {
   }
 
   try {
-    _msaCrisisLog(45, 'ready: loadingOverlay.setMessage(Preparing renderer…) about to run');
-    loadingOverlay.setMessage('Preparing renderer…');
+    _msaCrisisLog(45, 'ready: loadingOverlay.setMessage(Preparing rendererâ€¦) about to run');
+    loadingOverlay.setMessage('Preparing rendererâ€¦');
     _msaCrisisLog(46, 'ready: loadingOverlay.setMessage completed');
   } catch (e) {
     console.warn('Map Shine: failed to update loading overlay', e);
     _msaCrisisLog(47, 'ready: loadingOverlay.setMessage threw');
   }
-  // Run bootstrap sequence — wrapped in try/catch so a failed import (e.g.
+  // Run bootstrap sequence â€” wrapped in try/catch so a failed import (e.g.
   // game-system.js 404) doesn't silently hang createThreeCanvas forever.
   _msaCrisisLog(48, 'ready: importing bootstrap + LoadingScreenManager');
   let bootstrap = null;
@@ -832,7 +840,7 @@ Hooks.once('ready', async function() {
     _msaCrisisLog(49, 'ready: bootstrap + LoadingScreenManager imports resolved');
   } catch (importErr) {
     console.error('Map Shine: failed to import bootstrap or LoadingScreenManager', importErr);
-    _msaCrisisLog(49, `ready: import FAILED (${importErr?.message ?? 'unknown'}) — marking bootstrapComplete`);
+    _msaCrisisLog(49, `ready: import FAILED (${importErr?.message ?? 'unknown'}) â€” marking bootstrapComplete`);
     MapShine.bootstrapComplete = true;
     MapShine.bootstrapError = importErr?.message ?? 'import failed';
     return; // nothing more we can do without bootstrap
@@ -844,7 +852,7 @@ Hooks.once('ready', async function() {
     state = await bootstrap({ verbose: false });
   } catch (bootstrapErr) {
     console.error('Map Shine: failed to run bootstrap', bootstrapErr);
-    _msaCrisisLog(51, `ready: bootstrap FAILED (${bootstrapErr?.message ?? 'unknown'}) — marking bootstrapComplete`);
+    _msaCrisisLog(51, `ready: bootstrap FAILED (${bootstrapErr?.message ?? 'unknown'}) â€” marking bootstrapComplete`);
     MapShine.bootstrapComplete = true;
     MapShine.bootstrapError = bootstrapErr?.message ?? 'bootstrap failed';
     return; // nothing more we can do without bootstrap
@@ -886,7 +894,7 @@ Hooks.once('ready', async function() {
   try {
     if (!canvas?.scene) {
       _msaCrisisLog(57, 'ready: no active canvas.scene; dismissing loading overlay');
-      info('No active scene — dismissing loading overlay');
+      info('No active scene â€” dismissing loading overlay');
       loadingOverlay.fadeIn(500).catch(() => {});
       _msaCrisisLog(58, 'ready: loadingOverlay.fadeIn(500) invoked for no-scene case');
     }

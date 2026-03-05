@@ -321,13 +321,19 @@ export class ModeManager {
 
     // Active layer detection
     const activeLayerObj = canvas.activeLayer;
-    const activeLayerName = activeLayerObj?.options?.name || activeLayerObj?.name || '';
-    const activeLayerCtor = activeLayerObj?.constructor?.name || '';
-    const isActiveLayer = (name) => (activeLayerName === name) || (activeLayerCtor === name);
+    const activeLayerName = String(activeLayerObj?.options?.name || activeLayerObj?.name || '').toLowerCase();
+    const activeLayerCtor = String(activeLayerObj?.constructor?.name || '').toLowerCase();
+    const activeControl = String(ui?.controls?.activeControl || ui?.controls?.control?.name || '').toLowerCase();
+    const isActiveLayer = (name) => {
+      const normalized = String(name || '').toLowerCase();
+      return activeLayerName === normalized || activeLayerCtor === normalized || activeControl === normalized;
+    };
+    const isLightingActive = !!canvas?.lighting?.active;
+    const isWallsActiveFlag = !!canvas?.walls?.active;
 
     // Walls
     if (canvas.walls) {
-      const isWallsActive = isActiveLayer('WallsLayer') || isActiveLayer('walls');
+      const isWallsActive = isWallsActiveFlag || isActiveLayer('WallsLayer') || isActiveLayer('WallLayer') || isActiveLayer('walls');
 
       canvas.walls.visible = true;
       canvas.walls.interactiveChildren = true;
@@ -410,28 +416,34 @@ export class ModeManager {
       if (!canvas?.ready || this.isMapMakerMode) return;
 
       const finalLayerObj = canvas.activeLayer;
-      const finalLayerName = finalLayerObj?.options?.name || finalLayerObj?.name || '';
-      const finalLayerCtor = finalLayerObj?.constructor?.name || '';
-      const isFinalLayer = (name) => (finalLayerName === name) || (finalLayerCtor === name);
-      const isEditMode = editLayers.some(l => finalLayerName === l || finalLayerCtor === l);
+      const finalLayerName = String(finalLayerObj?.options?.name || finalLayerObj?.name || '').toLowerCase();
+      const finalLayerCtor = String(finalLayerObj?.constructor?.name || '').toLowerCase();
+      const finalControl = String(ui?.controls?.activeControl || ui?.controls?.control?.name || '').toLowerCase();
+      const isFinalLayer = (name) => {
+        const normalized = String(name || '').toLowerCase();
+        return finalLayerName === normalized || finalLayerCtor === normalized || finalControl === normalized;
+      };
+      const isLightingFinal = !!canvas?.lighting?.active || isFinalLayer('LightingLayer') || isFinalLayer('lighting');
+      const isWallsFinal = !!canvas?.walls?.active || isFinalLayer('WallsLayer') || isFinalLayer('WallLayer') || isFinalLayer('walls');
+      const isEditMode = editLayers.some(l => isFinalLayer(l));
 
       // Light icon visibility
       const lim = this._deps.lightIconManager;
       if (lim?.setVisibility) {
-        const showLighting = (isFinalLayer('LightingLayer') || isFinalLayer('lighting')) && !this.isMapMakerMode;
+        const showLighting = isLightingFinal && !this.isMapMakerMode;
         lim.setVisibility(showLighting);
       }
 
       const elim = this._deps.enhancedLightIconManager;
       if (elim?.setVisibility) {
-        const showLighting = (isFinalLayer('LightingLayer') || isFinalLayer('lighting')) && !this.isMapMakerMode;
+        const showLighting = isLightingFinal && !this.isMapMakerMode;
         elim.setVisibility(showLighting);
       }
 
       // Wall visibility
       const wm = this._deps.wallManager;
       if (wm?.setVisibility) {
-        const showThreeWalls = (isFinalLayer('WallsLayer') || isFinalLayer('walls')) && !this.isMapMakerMode;
+        const showThreeWalls = isWallsFinal && !this.isMapMakerMode;
         wm.setVisibility(showThreeWalls);
       }
 

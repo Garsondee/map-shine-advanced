@@ -336,7 +336,7 @@ export class EffectComposer {
 
     const initPromises = toInit.map(async (effect) => {
       await acquire();
-      console.log(`[Map Shine Advanced: Loading] ▶ Effect INIT START: ${effect.id}`);
+      console.log(` ▶ Effect INIT START: ${effect.id}`);
       const t0 = performance.now();
       const spanId = doLoadProfile ? `effect:${effect.id}:initialize` : null;
       if (doLoadProfile) {
@@ -353,7 +353,7 @@ export class EffectComposer {
       const dt = performance.now() - t0;
       timings.push({ id: effect.id, durationMs: dt });
       completed++;
-      console.log(`[Map Shine Advanced: Loading] ✔ Effect INIT DONE:  ${effect.id} (${dt.toFixed(1)}ms) [${completed}/${total}]`);
+      console.log(` ✔ Effect INIT DONE:  ${effect.id} (${dt.toFixed(1)}ms) [${completed}/${total}]`);
       if (onProgress) {
         try { onProgress(completed, total, effect.id); } catch (_) {}
       }
@@ -1068,7 +1068,7 @@ export class EffectBase {
      * - `'global'`: The effect runs exactly once per frame, after the floor
      *   loop completes, on the fully-composited accumulated image. Use for
      *   floor-agnostic effects whose output should not be multiplied across
-     *   floors (ParticleSystem, WorldSpaceFogEffect, PlayerLightEffect,
+     *   floors (ParticleSystem, FogOfWarEffectV2, PlayerLightEffect,
      *   all POST_PROCESSING effects that don't need per-floor depth).
      *
      * @type {'floor'|'global'}

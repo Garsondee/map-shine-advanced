@@ -63,7 +63,9 @@ export class FilterEffectV2 {
       inkDarkSoftness: 0.08,
       inkEdgeStrength: 1.0,
       inkEdgePower: 1.25,
-      inkSpreadPx: 2.0,
+      inkSpreadPx: 12.0,
+      inkBlurPx: 2.0,
+      inkOutdoorsDarkOnly: false,
       inkTintColor: { r: 0.0, g: 0.0, b: 0.0 },
 
       // Vignette-style multiplicative darken (separate from ColorCorrection vignette).
@@ -82,6 +84,9 @@ export class FilterEffectV2 {
     this._composeMaterial = null;
     /** @type {THREE.Mesh|null} */
     this._composeQuad = null;
+
+    /** @type {THREE.Texture|null} */
+    this._outdoorsMask = null;
   }
 
   // ── UI schema (used directly in V2 mode) ─────────────────────────────────
@@ -109,6 +114,8 @@ export class FilterEffectV2 {
             'inkEdgeStrength',
             'inkEdgePower',
             'inkSpreadPx',
+            'inkBlurPx',
+            'inkOutdoorsDarkOnly',
             'inkTintColor',
           ],
         },
@@ -132,7 +139,9 @@ export class FilterEffectV2 {
         inkDarkSoftness: { type: 'slider', label: 'Dark Softness', min: 0.001, max: 0.5, step: 0.01, default: 0.12 },
         inkEdgeStrength: { type: 'slider', label: 'Edge Strength', min: 0, max: 4, step: 0.01, default: 1.35 },
         inkEdgePower: { type: 'slider', label: 'Edge Power', min: 0.25, max: 4, step: 0.01, default: 1.15 },
-        inkSpreadPx: { type: 'slider', label: 'Spread (px)', min: 0, max: 16, step: 0.25, default: 2.75 },
+        inkSpreadPx: { type: 'slider', label: 'Spread (px)', min: 0, max: 96, step: 0.5, default: 12.0 },
+        inkBlurPx: { type: 'slider', label: 'Spread Blur (px)', min: 0, max: 24, step: 0.25, default: 2.0 },
+        inkOutdoorsDarkOnly: { type: 'boolean', label: 'Only _Outdoors Dark Regions', default: false },
         inkTintColor: { type: 'color', label: 'AO Tint', default: { r: 0, g: 0, b: 0 } },
 
         vignetteEnabled: { type: 'boolean', label: 'Enabled', default: false },
@@ -191,6 +200,13 @@ export class FilterEffectV2 {
       uniforms: {
         tDiffuse: { value: null },
         uResolution: { value: new THREE.Vector2(1, 1) },
+        uZoom: { value: 1.0 },
+        // Three world-space view bounds (minX,minY,maxX,maxY)
+        uViewBounds: { value: new THREE.Vector4(0, 0, 1, 1) },
+        // Foundry sceneRect bounds (x,y,width,height) in Foundry coords (top-left origin)
+        uSceneBounds: { value: new THREE.Vector4(0, 0, 1, 1) },
+        // Full canvas dimensions (including padding) in Foundry coords
+        uSceneDimensions: { value: new THREE.Vector2(1, 1) },
 
         uEnabled: { value: 0.0 },
         uIntensity: { value: 1.0 },
@@ -204,7 +220,13 @@ export class FilterEffectV2 {
         uInkEdgeStrength: { value: 1.0 },
         uInkEdgePower: { value: 1.25 },
         uInkSpreadPx: { value: 2.0 },
+        uInkBlurPx: { value: 2.0 },
+        uInkOutdoorsDarkOnly: { value: 0.0 },
         uInkTint: { value: new THREE.Vector3(0, 0, 0) },
+
+        uOutdoorsMask: { value: null },
+        uHasOutdoorsMask: { value: 0.0 },
+        uOutdoorsMaskFlipY: { value: 0.0 },
 
         uVignetteEnabled: { value: 0.0 },
         uVignetteStrength: { value: 0.35 },
@@ -222,6 +244,10 @@ export class FilterEffectV2 {
       fragmentShader: /* glsl */`
         uniform sampler2D tDiffuse;
         uniform vec2 uResolution;
+        uniform float uZoom;
+        uniform vec4 uViewBounds;
+        uniform vec4 uSceneBounds;
+        uniform vec2 uSceneDimensions;
 
         uniform float uEnabled;
         uniform float uIntensity;
@@ -234,7 +260,13 @@ export class FilterEffectV2 {
         uniform float uInkEdgeStrength;
         uniform float uInkEdgePower;
         uniform float uInkSpreadPx;
+        uniform float uInkBlurPx;
+        uniform float uInkOutdoorsDarkOnly;
         uniform vec3  uInkTint;
+
+        uniform sampler2D uOutdoorsMask;
+        uniform float uHasOutdoorsMask;
+        uniform float uOutdoorsMaskFlipY;
 
         uniform float uVignetteEnabled;
         uniform float uVignetteStrength;
@@ -254,6 +286,25 @@ export class FilterEffectV2 {
           return 1.0 - smoothstep(threshold - s, threshold, lum);
         }
 
+        float readOutdoorsMask(vec2 uv) {
+          // Convert screen UV to Three world coordinates from current view bounds.
+          float worldX = mix(uViewBounds.x, uViewBounds.z, uv.x);
+          float worldY = mix(uViewBounds.y, uViewBounds.w, uv.y);
+
+          // Map to sceneRect UV for world-space _Outdoors sampling.
+          // Match V2 SkyColor/Cloud convention: world Y-up -> scene UV with V flip.
+          vec2 maskUv = vec2(
+            (worldX - uSceneBounds.x) / max(uSceneBounds.z, 1.0),
+            1.0 - ((worldY - uSceneBounds.y) / max(uSceneBounds.w, 1.0))
+          );
+          maskUv = clamp(maskUv, 0.0, 1.0);
+
+          // Optional compatibility flip for mask sources that require it.
+          if (uOutdoorsMaskFlipY > 0.5) maskUv.y = 1.0 - maskUv.y;
+
+          return clamp(texture2D(uOutdoorsMask, maskUv).r, 0.0, 1.0);
+        }
+
         void main() {
           vec4 scene = texture2D(tDiffuse, vUv);
           vec3 base = scene.rgb;
@@ -267,12 +318,15 @@ export class FilterEffectV2 {
           vec3 filterMul = max(uTint, vec3(0.0));
 
           // ── Ink AO approximation ───────────────────────────────────────
-          // Detect dark outlines and local contrast, then spread the influence
-          // outwards by sampling at a configurable radius (dilation-ish).
+          // Detect dark outlines and local contrast.
+          // Then perform spread first (dilation-style), followed by blur.
           if (uInkAoEnabled > 0.5 && uInkAoStrength > 0.0) {
             vec2 texel = vec2(1.0) / max(uResolution, vec2(1.0));
-            float rPx = max(0.0, uInkSpreadPx);
-            vec2 o = texel * rPx;
+            float zoom = max(uZoom, 0.0001);
+            float spreadPx = max(0.0, uInkSpreadPx) * zoom;
+            float blurPx = max(0.0, uInkBlurPx) * zoom;
+            vec2 o = texel * spreadPx;
+            vec2 b = texel * blurPx;
 
             float Lc = luma(base);
 
@@ -295,18 +349,53 @@ export class FilterEffectV2 {
             edge += 0.6 * (abs(Lc - Lne) + abs(Lc - Lnw) + abs(Lc - Lse) + abs(Lc - Lsw));
             edge = pow(clamp(edge * 0.5 * uInkEdgeStrength, 0.0, 1.0), max(0.01, uInkEdgePower));
 
-            // Spread darkness by sampling at radius (4 taps). This makes thick outlines
-            // actually darken adjacent areas rather than only the line pixels.
+            // Spread pass: dilation-like growth from dark linework.
             float dN = darkMaskFromLuma(Ln, uInkDarkThreshold, uInkDarkSoftness);
             float dS = darkMaskFromLuma(Ls, uInkDarkThreshold, uInkDarkSoftness);
             float dE = darkMaskFromLuma(Le, uInkDarkThreshold, uInkDarkSoftness);
             float dW = darkMaskFromLuma(Lw, uInkDarkThreshold, uInkDarkSoftness);
+            float dNE = darkMaskFromLuma(Lne, uInkDarkThreshold, uInkDarkSoftness);
+            float dNW = darkMaskFromLuma(Lnw, uInkDarkThreshold, uInkDarkSoftness);
+            float dSE = darkMaskFromLuma(Lse, uInkDarkThreshold, uInkDarkSoftness);
+            float dSW = darkMaskFromLuma(Lsw, uInkDarkThreshold, uInkDarkSoftness);
 
-            float darkSpread = max(darkC, max(max(dN, dS), max(dE, dW)));
+            float darkSpread = max(
+              darkC,
+              max(
+                max(max(dN, dS), max(dE, dW)),
+                max(max(dNE, dNW), max(dSE, dSW))
+              )
+            );
+
+            // Blur pass on top of spread result.
+            float darkBlur = darkSpread;
+            if (blurPx > 0.0) {
+              float bN = darkMaskFromLuma(luma(texture2D(tDiffuse, vUv + vec2(0.0,  b.y)).rgb), uInkDarkThreshold, uInkDarkSoftness);
+              float bS = darkMaskFromLuma(luma(texture2D(tDiffuse, vUv + vec2(0.0, -b.y)).rgb), uInkDarkThreshold, uInkDarkSoftness);
+              float bE = darkMaskFromLuma(luma(texture2D(tDiffuse, vUv + vec2( b.x, 0.0)).rgb), uInkDarkThreshold, uInkDarkSoftness);
+              float bW = darkMaskFromLuma(luma(texture2D(tDiffuse, vUv + vec2(-b.x, 0.0)).rgb), uInkDarkThreshold, uInkDarkSoftness);
+              float bNE = darkMaskFromLuma(luma(texture2D(tDiffuse, vUv + vec2( b.x,  b.y)).rgb), uInkDarkThreshold, uInkDarkSoftness);
+              float bNW = darkMaskFromLuma(luma(texture2D(tDiffuse, vUv + vec2(-b.x,  b.y)).rgb), uInkDarkThreshold, uInkDarkSoftness);
+              float bSE = darkMaskFromLuma(luma(texture2D(tDiffuse, vUv + vec2( b.x, -b.y)).rgb), uInkDarkThreshold, uInkDarkSoftness);
+              float bSW = darkMaskFromLuma(luma(texture2D(tDiffuse, vUv + vec2(-b.x, -b.y)).rgb), uInkDarkThreshold, uInkDarkSoftness);
+              darkBlur = (
+                darkSpread +
+                (bN + bS + bE + bW) * 0.85 +
+                (bNE + bNW + bSE + bSW) * 0.65
+              ) / (1.0 + 4.0 * 0.85 + 4.0 * 0.65);
+            }
 
             // Mix darkness and edge evidence so flat dark strokes and high-contrast
             // linework both contribute to AO darkening.
-            float ao = clamp(max(darkSpread * 0.7, darkSpread * edge), 0.0, 1.0);
+            float ao = clamp(max(darkBlur * 0.7, darkBlur * edge), 0.0, 1.0);
+
+            // Optional gate: only apply AO in dark (_Outdoors=0) regions.
+            if (uInkOutdoorsDarkOnly > 0.5 && uHasOutdoorsMask > 0.5) {
+              float outdoors = readOutdoorsMask(vUv);
+              float indoorsGate = 1.0 - outdoors;
+              ao *= indoorsGate;
+            }
+
             ao *= uInkAoStrength;
 
             // Multiplicative AO: filterMul *= mix(1, aoTint, ao)
@@ -340,6 +429,11 @@ export class FilterEffectV2 {
     this._composeQuad.frustumCulled = false;
     this._composeScene.add(this._composeQuad);
 
+    // Apply any mask that may have been provided before initialize().
+    if (this._outdoorsMask) {
+      this.setOutdoorsMask(this._outdoorsMask);
+    }
+
     this._initialized = true;
     log.info('FilterEffectV2 initialized');
   }
@@ -369,6 +463,8 @@ export class FilterEffectV2 {
     u.uInkEdgeStrength.value = Math.max(0.0, finiteOr(Number(p.inkEdgeStrength), 1.0));
     u.uInkEdgePower.value = Math.max(0.01, finiteOr(Number(p.inkEdgePower), 1.0));
     u.uInkSpreadPx.value = Math.max(0.0, finiteOr(Number(p.inkSpreadPx), 0.0));
+    u.uInkBlurPx.value = Math.max(0.0, finiteOr(Number(p.inkBlurPx), 0.0));
+    u.uInkOutdoorsDarkOnly.value = p.inkOutdoorsDarkOnly ? 1.0 : 0.0;
     const inkTint = normalizeColor01(p.inkTintColor, { r: 0, g: 0, b: 0 });
     u.uInkTint.value.set(inkTint.r, inkTint.g, inkTint.b);
 
@@ -393,6 +489,46 @@ export class FilterEffectV2 {
 
     this._composeMaterial.uniforms.tDiffuse.value = inputRT.texture;
     this._composeMaterial.uniforms.uResolution.value.set(inputRT.width, inputRT.height);
+    const currentZoom = Number(window.MapShine?.sceneComposer?.currentZoom);
+    this._composeMaterial.uniforms.uZoom.value = Number.isFinite(currentZoom) ? Math.max(0.0001, currentZoom) : 1.0;
+    // Keep mask sampling world-locked by reconstructing Foundry coords from screen UV.
+    const sc = window.MapShine?.sceneComposer;
+    const sceneRect = canvas?.dimensions?.sceneRect;
+    const sceneX = sceneRect?.x ?? 0;
+    const sceneY = sceneRect?.y ?? 0;
+    const sceneW = sceneRect?.width ?? 1;
+    const sceneH = sceneRect?.height ?? 1;
+    let vMinX = 0;
+    let vMinY = 0;
+    let vMaxX = sceneW;
+    let vMaxY = sceneH;
+    const cam = sc?.camera;
+    if (cam) {
+      if (cam.isOrthographicCamera) {
+        const camPos = cam.position;
+        vMinX = camPos.x + cam.left / cam.zoom;
+        vMinY = camPos.y + cam.bottom / cam.zoom;
+        vMaxX = camPos.x + cam.right / cam.zoom;
+        vMaxY = camPos.y + cam.top / cam.zoom;
+      } else {
+        const groundZ = sc?.groundZ ?? 0;
+        const dist = Math.max(1e-3, Math.abs((cam.position?.z ?? 0) - groundZ));
+        const fovRad = ((Number(cam.fov) || 60) * Math.PI) / 180;
+        const halfH = dist * Math.tan(fovRad * 0.5);
+        const aspect = Number(cam.aspect) || ((sc?.baseViewportWidth || 1) / Math.max(1, (sc?.baseViewportHeight || 1)));
+        const halfW = halfH * aspect;
+        vMinX = cam.position.x - halfW;
+        vMaxX = cam.position.x + halfW;
+        vMinY = cam.position.y - halfH;
+        vMaxY = cam.position.y + halfH;
+      }
+    }
+    this._composeMaterial.uniforms.uViewBounds.value.set(vMinX, vMinY, vMaxX, vMaxY);
+    this._composeMaterial.uniforms.uSceneBounds.value.set(sceneX, sceneY, sceneW, sceneH);
+    const dims = canvas?.dimensions;
+    if (dims && Number.isFinite(dims.width) && Number.isFinite(dims.height)) {
+      this._composeMaterial.uniforms.uSceneDimensions.value.set(dims.width, dims.height);
+    }
 
     const prevTarget = renderer.getRenderTarget();
     const prevAutoClear = renderer.autoClear;
@@ -414,5 +550,17 @@ export class FilterEffectV2 {
     this._composeQuad = null;
     this._initialized = false;
     log.info('FilterEffectV2 disposed');
+  }
+
+  /**
+   * Set outdoors mask texture for optional AO gating.
+   * @param {THREE.Texture|null} texture
+   */
+  setOutdoorsMask(texture) {
+    this._outdoorsMask = texture ?? null;
+    if (!this._composeMaterial) return;
+    const u = this._composeMaterial.uniforms;
+    u.uOutdoorsMask.value = this._outdoorsMask;
+    u.uHasOutdoorsMask.value = this._outdoorsMask ? 1.0 : 0.0;
   }
 }

@@ -11,32 +11,32 @@
  * - Uses Foundry's exploration texture directly (it's already world-space)
  * - Composites vision + exploration in the fog plane's shader
  * 
- * @module effects/WorldSpaceFogEffect
+ * @module compositor-v2/effects/FogOfWarEffectV2
  */
 
-// NOTE: WorldSpaceFogEffect must NOT import from EffectComposer.js.
-// EffectComposer imports the V2 FloorCompositor, which imports WorldSpaceFogEffect
+// NOTE: FogOfWarEffectV2 must NOT import from EffectComposer.js.
+// EffectComposer imports the V2 FloorCompositor, which imports FogOfWarEffectV2
 // for V2 fog support. Importing EffectComposer here creates a circular module
 // dependency that can trigger a TDZ crash:
 //   "can't access lexical declaration 'EffectBase' before initialization"
 //
-// To avoid this, WorldSpaceFogEffect is implemented as a standalone effect-like
+// To avoid this, FogOfWarEffectV2 is implemented as a standalone effect-like
 // class that exposes the same public fields used by the engine (`id`, `layer`,
 // `enabled`, `floorScope`, etc.) without extending EffectBase.
 const OVERLAY_THREE_LAYER = 31;
 
 // Minimal layer descriptor matching EffectComposer.RenderLayers.ENVIRONMENTAL.
 const ENVIRONMENTAL_LAYER = { order: 400, name: 'Environmental', requiresDepth: false };
-import { createLogger } from '../core/log.js';
-import { frameCoordinator } from '../core/frame-coordinator.js';
-import { VisionSDF } from '../vision/VisionSDF.js';
-import { VisionPolygonComputer } from '../vision/VisionPolygonComputer.js';
-import { debugLoadingProfiler } from '../core/debug-loading-profiler.js';
-import { getLevelsCompatibilityMode, LEVELS_COMPATIBILITY_MODES } from '../foundry/levels-compatibility.js';
-import { isLevelsEnabledForScene, readTileLevelsFlags, tileHasLevelsRange } from '../foundry/levels-scene-flags.js';
-import { getPerspectiveElevation, isLightVisibleForPerspective } from '../foundry/elevation-context.js';
+import { createLogger } from '../../core/log.js';
+import { frameCoordinator } from '../../core/frame-coordinator.js';
+import { VisionSDF } from '../../vision/VisionSDF.js';
+import { VisionPolygonComputer } from '../../vision/VisionPolygonComputer.js';
+import { debugLoadingProfiler } from '../../core/debug-loading-profiler.js';
+import { getLevelsCompatibilityMode, LEVELS_COMPATIBILITY_MODES } from '../../foundry/levels-compatibility.js';
+import { isLevelsEnabledForScene, readTileLevelsFlags, tileHasLevelsRange } from '../../foundry/levels-scene-flags.js';
+import { getPerspectiveElevation, isLightVisibleForPerspective } from '../../foundry/elevation-context.js';
 
-const log = createLogger('WorldSpaceFogEffect');
+const log = createLogger('FogOfWarEffectV2');
 
 /**
  * Z offset for the fog plane above groundZ.
@@ -47,8 +47,8 @@ const log = createLogger('WorldSpaceFogEffect');
  * any unintended parallax or depth-related artifacts.
  *
  * NOTE:
- * - depthTest: false  → fog does not participate in depth testing
- * - renderOrder: 9999 → fog renders after everything else regardless of Z
+ * - depthTest: false  â†’ fog does not participate in depth testing
+ * - renderOrder: 9999 â†’ fog renders after everything else regardless of Z
  *
  * The small offset here is only to keep the plane numerically above other
  * meshes that may also sit near groundZ; visually, ordering is controlled
@@ -56,7 +56,7 @@ const log = createLogger('WorldSpaceFogEffect');
  */
 const FOG_PLANE_Z_OFFSET = 0.05; // Nearly coplanar with the ground plane to avoid parallax/perspective peeking
 
-export class WorldSpaceFogEffect {
+export class FogOfWarEffectV2 {
   constructor() {
     /** @type {string} */
     this.id = 'fog';
@@ -71,7 +71,7 @@ export class WorldSpaceFogEffect {
     /** @type {boolean} */
     this.alwaysRender = false;
 
-    // The fog plane is a global overlay — it covers the fully-accumulated floor
+    // The fog plane is a global overlay â€” it covers the fully-accumulated floor
     // image rather than any individual floor. Running it per-floor would
     // multiply the fog darkening N times. The fog plane is placed on
     // OVERLAY_THREE_LAYER (31) so it is excluded from per-floor scene renders
@@ -199,7 +199,7 @@ export class WorldSpaceFogEffect {
     // MS-LVL-060: Elevation band tracking for per-floor fog exploration.
     // When the active elevation band changes (e.g. navigating to a different
     // floor), the exploration accumulation buffer is reset so the new floor
-    // starts with fresh fog — matching Levels' behavior where changing floors
+    // starts with fresh fog â€” matching Levels' behavior where changing floors
     // reveals only what the token can currently see on the new floor.
     /** @type {number|null} Last known elevation band bottom (null = not yet set) */
     this._lastElevationBandBottom = null;
@@ -337,13 +337,13 @@ export class WorldSpaceFogEffect {
 
     // One-shot diagnostic: confirm fog plane setup
     const fp = this.fogPlane;
-    log.info(`WorldSpaceFogEffect initialized — fogPlane: ${!!fp}, layer: ${fp?.layers?.mask}, renderOrder: ${fp?.renderOrder}, visible: ${fp?.visible}, pos: (${fp?.position?.x?.toFixed(0)}, ${fp?.position?.y?.toFixed(0)}, ${fp?.position?.z?.toFixed(2)}), sceneRect: (${this.sceneRect.x}, ${this.sceneRect.y}, ${this.sceneRect.width}x${this.sceneRect.height}), tokenVision: ${canvas?.scene?.tokenVision}, globalIllum: ${this._isGlobalIlluminationActive()}`);
+    log.info(`FogOfWarEffectV2 initialized - fogPlane: ${!!fp}, layer: ${fp?.layers?.mask}, renderOrder: ${fp?.renderOrder}, visible: ${fp?.visible}, pos: (${fp?.position?.x?.toFixed(0)}, ${fp?.position?.y?.toFixed(0)}, ${fp?.position?.z?.toFixed(2)}), sceneRect: (${this.sceneRect.x}, ${this.sceneRect.y}, ${this.sceneRect.width}x${this.sceneRect.height}), tokenVision: ${canvas?.scene?.tokenVision}, globalIllum: ${this._isGlobalIlluminationActive()}`);
 
     this._queueUpgradeTargets();
   }
 
   /**
-   * Console-callable diagnostic — run `MapShine.fogEffect.diagnose()` in the
+   * Console-callable diagnostic â€” run `MapShine.fogEffect.diagnose()` in the
    * browser console to get a snapshot of all relevant fog state.
    */
   diagnose() {
@@ -409,7 +409,6 @@ export class WorldSpaceFogEffect {
     });
 
     console.table(info);
-    console.log('[FOG DIAGNOSE] Full state:', info);
     if (info.tokenDiag.length > 0) {
       console.table(info.tokenDiag);
     }
@@ -577,7 +576,7 @@ export class WorldSpaceFogEffect {
     this._needsVisionUpdate = true;
     this._hasValidVision = false;
 
-    log.info(`Full-res render targets ready — vision: ${this._visionRTWidth}x${this._visionRTHeight}, exploration: ${this._explorationRTWidth}x${this._explorationRTHeight}, SDF: ${!!this._visionSDF}`);
+    log.info(`Full-res render targets ready â€” vision: ${this._visionRTWidth}x${this._visionRTHeight}, exploration: ${this._explorationRTWidth}x${this._explorationRTHeight}, SDF: ${!!this._visionSDF}`);
   }
 
   /**
@@ -638,7 +637,7 @@ export class WorldSpaceFogEffect {
       stencilBuffer: false,
       depthBuffer: false,
       generateMipmaps: false
-      // No MSAA — unnecessary for a binary white/black vision mask.
+      // No MSAA â€” unnecessary for a binary white/black vision mask.
       // LinearFilter already smooths edges. MSAA would add 4x fragment
       // cost and can cause texture-resolve issues when this RT is sampled
       // in the exploration accumulation shader on some drivers.
@@ -933,7 +932,7 @@ export class WorldSpaceFogEffect {
         // Key insight: fwidth(signedDist) tells us how many SDF pixels
         // correspond to one screen pixel. Using this as the minimum edge
         // width ensures the anti-aliased transition is always ~1 screen
-        // pixel wide — producing clean sharp lines at any zoom level,
+        // pixel wide â€” producing clean sharp lines at any zoom level,
         // without the staircase pattern from low-res texture sampling.
         float sampleVisionSDF(vec2 uv, float softnessPx) {
           float sdfVal = texture2D(tVisionSDF, uv).r;
@@ -1095,7 +1094,7 @@ export class WorldSpaceFogEffect {
 
     // MS-LVL-060: When the active level context changes (floor navigation),
     // check if the elevation band has changed. If so, reset exploration so
-    // the new floor starts with fresh fog — matching Levels' per-floor fog
+    // the new floor starts with fresh fog â€” matching Levels' per-floor fog
     // reveal behavior. Also force a vision update since wall-height filtering
     // may produce a different LOS polygon for the new elevation.
     this._hookIds.push(['mapShineLevelContextChanged', Hooks.on('mapShineLevelContextChanged', (ctx) => {
@@ -1129,20 +1128,20 @@ export class WorldSpaceFogEffect {
     const bandBottom = Number.isFinite(levelCtx.bottom) ? levelCtx.bottom : null;
     const bandTop = Number.isFinite(levelCtx.top) ? levelCtx.top : null;
 
-    // First time — just record the band, don't reset
+    // First time â€” just record the band, don't reset
     if (this._lastElevationBandBottom === null && this._lastElevationBandTop === null) {
       this._lastElevationBandBottom = bandBottom;
       this._lastElevationBandTop = bandTop;
       return;
     }
 
-    // Band unchanged — nothing to do
+    // Band unchanged â€” nothing to do
     if (bandBottom === this._lastElevationBandBottom && bandTop === this._lastElevationBandTop) {
       return;
     }
 
-    // Band changed — reset exploration for the new floor
-    log.info(`[MS-LVL-060] Elevation band changed: [${this._lastElevationBandBottom}, ${this._lastElevationBandTop}] → [${bandBottom}, ${bandTop}] — resetting fog exploration for new floor`);
+    // Band changed â€” reset exploration for the new floor
+    log.info(`[MS-LVL-060] Elevation band changed: [${this._lastElevationBandBottom}, ${this._lastElevationBandTop}] â†’ [${bandBottom}, ${bandTop}] â€” resetting fog exploration for new floor`);
     this._lastElevationBandBottom = bandBottom;
     this._lastElevationBandTop = bandTop;
 
@@ -1231,7 +1230,7 @@ export class WorldSpaceFogEffect {
       }
     }
     
-    // Global illumination means the token can see in the dark — but it does
+    // Global illumination means the token can see in the dark â€” but it does
     // NOT bypass walls or sight range. Foundry's LOS polygon already accounts
     // for global illumination when computing visibility. We should always use
     // the token's actual LOS polygon when it exists.
@@ -1282,31 +1281,31 @@ export class WorldSpaceFogEffect {
       }
 
       // Token has no vision source at all. If sight isn't enabled on the
-      // token, this is expected — skip it without triggering retries.
+      // token, this is expected â€” skip it without triggering retries.
       if (!visionSource) {
         if (!hasSight) {
           tokensWithoutSight++;
         } else if (globalIllumActive) {
           // Sight enabled, no vision source yet, but global illumination is
-          // active — render full-scene rect so the token isn't blind.
+          // active â€” render full-scene rect so the token isn't blind.
           // Flag prevents this from polluting exploration.
           this._addFullSceneRect(THREE);
           this._visionIsFullSceneFallback = true;
           polygonsRendered++;
         } else {
-          // Sight is enabled but vision source hasn't been created yet — wait.
+          // Sight is enabled but vision source hasn't been created yet â€” wait.
           tokensWaitingForLOS++;
-          log.debug(`[FOG DIAG] Token "${token.name}" has sight enabled but no vision source yet — waiting`);
+          log.debug(`[FOG DIAG] Token "${token.name}" has sight enabled but no vision source yet â€” waiting`);
         }
         continue;
       }
 
-      // Vision source exists — check if the LOS polygon has been computed.
+      // Vision source exists â€” check if the LOS polygon has been computed.
       let shape = visionSource.los || visionSource.shape || visionSource.fov;
 
       if (!shape || !shape.points || shape.points.length < 6) {
         if (!hasSight) {
-          // Sight disabled — token has a default/inactive vision source.
+          // Sight disabled â€” token has a default/inactive vision source.
           tokensWithoutSight++;
         } else if (globalIllumActive) {
           // Sight enabled, LOS is tiny/missing (e.g. sight.range=0), but
@@ -1323,7 +1322,7 @@ export class WorldSpaceFogEffect {
         continue;
       }
 
-      // Valid LOS polygon — always use it, regardless of global illumination.
+      // Valid LOS polygon â€” always use it, regardless of global illumination.
       // Global illumination affects lighting, not wall occlusion.
       const points = shape.points;
       this._addPolygonPointsToVisionScene(points, THREE);
@@ -1343,7 +1342,7 @@ export class WorldSpaceFogEffect {
 
         for (const lightSource of lightSources) {
           if (!lightSource.active || !lightSource.data?.vision) continue;
-          // Skip GlobalLightSource — handled separately via _isGlobalIlluminationActive
+          // Skip GlobalLightSource â€” handled separately via _isGlobalIlluminationActive
           if (lightSource.constructor?.name === 'GlobalLightSource') continue;
 
           // MS-LVL-070: Elevation-filter vision-granting lights
@@ -1416,7 +1415,7 @@ export class WorldSpaceFogEffect {
       log.warn('Failed to render darkness source shapes:', e);
     }
 
-    // Phase 6: MS-LVL-034 — noFogHide tile fog suppression.
+    // Phase 6: MS-LVL-034 â€” noFogHide tile fog suppression.
     // Tiles with the Levels `noFogHide` flag punch through the fog mask:
     // their bounds are rendered as white rectangles in the vision mask so
     // they remain visible even outside the token's LOS polygon.
@@ -1466,7 +1465,7 @@ export class WorldSpaceFogEffect {
       log.warn('Failed to render noFogHide tile shapes:', e);
     }
 
-    // Phase 7: MS-LVL-061 — revealTokenInFog equivalent.
+    // Phase 7: MS-LVL-061 â€” revealTokenInFog equivalent.
     // When enabled, visible tokens on the current floor reveal a small area
     // of fog around themselves, even if they're outside the viewer's LOS.
     // This draws small circles at each visible token's position in the
@@ -1514,7 +1513,7 @@ export class WorldSpaceFogEffect {
       log.warn('Failed to render revealTokenInFog bubbles:', e);
     }
     
-    // Render to the vision target (always render, even if no polygons —
+    // Render to the vision target (always render, even if no polygons â€”
     // that gives us a black texture = "nothing visible" = full fog)
     const currentTarget = this.renderer.getRenderTarget();
     const currentClearColor = this.renderer.getClearColor(new THREE.Color());
@@ -1530,7 +1529,7 @@ export class WorldSpaceFogEffect {
     
     // Determine result state.
     //
-    // Key distinction: tokens without sight are NOT "invalid" — they simply
+    // Key distinction: tokens without sight are NOT "invalid" â€” they simply
     // don't contribute vision. Only tokens that SHOULD have LOS (sight enabled)
     // but DON'T yet should trigger retries.
     //
@@ -1538,23 +1537,23 @@ export class WorldSpaceFogEffect {
     const tokensWithSightRequirement = controlledTokens.length - tokensWithoutSight;
 
     if (controlledTokens.length === 0) {
-      // No controlled tokens at all — mark complete, bypass handles visibility
+      // No controlled tokens at all â€” mark complete, bypass handles visibility
       this._needsVisionUpdate = false;
       this._hasValidVision = true;
     } else if (tokensWithSightRequirement === 0) {
-      // All controlled tokens lack sight — vision RT is intentionally black
+      // All controlled tokens lack sight â€” vision RT is intentionally black
       // (full fog). This is valid; don't retry.
       this._needsVisionUpdate = false;
       this._hasValidVision = true;
-      log.debug(`[FOG DIAG] All ${controlledTokens.length} controlled tokens lack sight → full fog`);
+      log.debug(`[FOG DIAG] All ${controlledTokens.length} controlled tokens lack sight â†’ full fog`);
     } else if (tokensWaitingForLOS > 0 && polygonsRendered === 0) {
-      // Some tokens should have LOS but none are ready yet — keep retrying
+      // Some tokens should have LOS but none are ready yet â€” keep retrying
       frameCoordinator.forcePerceptionUpdate();
       this._hasValidVision = false;
       log.debug(`[FOG DIAG] Waiting for LOS: ${tokensWaitingForLOS} tokens pending, ${polygonsRendered} rendered`);
     } else {
       // We rendered at least some polygons, or all sight-enabled tokens were
-      // handled. Mark as valid — partial vision is better than no fog at all.
+      // handled. Mark as valid â€” partial vision is better than no fog at all.
       this._needsVisionUpdate = false;
       this._hasValidVision = true;
       if (tokensWaitingForLOS > 0) {
@@ -1617,7 +1616,7 @@ export class WorldSpaceFogEffect {
    * Used as a fallback when global illumination is active and a token's
    * LOS polygon is unavailable or too small (e.g. sight.range = 0).
    * IMPORTANT: callers must set _visionIsFullSceneFallback = true so that
-   * exploration accumulation is skipped — otherwise the full-scene white
+   * exploration accumulation is skipped â€” otherwise the full-scene white
    * would be max()'d into the exploration texture permanently, marking
    * areas behind walls as explored.
    * @param {object} THREE - Three.js namespace
@@ -1823,7 +1822,7 @@ export class WorldSpaceFogEffect {
       }
       if (selectionVersion !== this._lastSelectionVersion) {
         this._lastSelectionVersion = selectionVersion;
-        log.debug(`Selection changed → forcing perception update and vision recompute`);
+        log.debug(`Selection changed â†’ forcing perception update and vision recompute`);
         frameCoordinator.forcePerceptionUpdate();
         this._needsVisionUpdate = true;
         this._hasValidVision = false;
@@ -1854,7 +1853,7 @@ export class WorldSpaceFogEffect {
         } catch (e) {
           // If SDF fails (e.g. shader compile error), fall back to legacy path
           if (!this._sdfUpdateFailed) {
-            log.warn('[SDF] Vision SDF update failed — falling back to legacy softening', e);
+            log.warn('[SDF] Vision SDF update failed â€” falling back to legacy softening', e);
             this._sdfUpdateFailed = true;
           }
         }
@@ -1874,7 +1873,7 @@ export class WorldSpaceFogEffect {
         this._hasValidVision = true;
         this._visionRetryFrames = 0;
       } else {
-        // Still waiting — hide fog plane and skip the rest of the update
+        // Still waiting â€” hide fog plane and skip the rest of the update
         this.fogPlane.visible = false;
         return;
       }
@@ -1886,7 +1885,7 @@ export class WorldSpaceFogEffect {
     this.fogPlane.visible = true;
     
     // Accumulate exploration if enabled and prior state has been loaded.
-    // Don't accumulate before loading — otherwise we'd start from black,
+    // Don't accumulate before loading â€” otherwise we'd start from black,
     // mark dirty, and overwrite the existing FogExploration document.
     // PERF: Only accumulate when vision was actually re-rendered this frame,
     // OR when we have a pending catch-up accumulation from a frame where
@@ -1895,7 +1894,7 @@ export class WorldSpaceFogEffect {
     const canAccumulate = explorationEnabled && this._explorationLoadedFromFoundry;
 
     if (visionRenderedThisFrame && !canAccumulate) {
-      // Vision rendered but exploration not ready — remember to catch up later
+      // Vision rendered but exploration not ready â€” remember to catch up later
       this._pendingAccumulation = true;
     }
 
@@ -2064,7 +2063,7 @@ export class WorldSpaceFogEffect {
 
     FogExplorationCls.load().then((doc) => {
       try {
-        // Stale? A reset happened while we were loading — discard.
+        // Stale? A reset happened while we were loading â€” discard.
         if (loadGeneration !== this._explorationLoadGeneration) {
           log.debug('[FOG DIAG] Discarding stale FogExploration load (generation mismatch)');
           return;
@@ -2429,6 +2428,6 @@ export class WorldSpaceFogEffect {
     this._explorationEncodeImageData = null;
     
     this._initialized = false;
-    log.info('WorldSpaceFogEffect disposed');
+    log.info('FogOfWarEffectV2 disposed');
   }
 }

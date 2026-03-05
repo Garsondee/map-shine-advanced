@@ -4902,7 +4902,7 @@ export class WeatherParticles {
       const mm = window.MapShine?.maskManager;
       cloudShadowTexture = mm ? mm.getTexture('cloudShadow.screen') : null;
       if (!cloudShadowTexture) {
-        const cloud = window.MapShine?.cloudEffect;
+        const cloud = window.MapShine?.cloudEffectV2;
         cloudShadowTexture = cloud?.cloudShadowTarget?.texture || null;
       }
     } catch (_) {

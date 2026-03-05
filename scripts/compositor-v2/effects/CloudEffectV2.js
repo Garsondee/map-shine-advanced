@@ -88,6 +88,8 @@ export class CloudEffectV2 {
       // Cloud tops
       cloudTopMode: 'aboveEverything',
       cloudTopOpacity: 1.0,
+      cloudTopParallaxFactor: 1.0,
+      cloudTopDepthParallaxStrength: 0.6,
       cloudTopFadeStart: 0.24,
       cloudTopFadeEnd: 0.39,
 
@@ -100,11 +102,11 @@ export class CloudEffectV2 {
       layerParallaxBase: 1.0,
 
       // 5 cloud layers
-      layer1Enabled: true,  layer1Opacity: 0.35, layer1Coverage: 0.33, layer1Scale: 1.34, layer1ParallaxMult: 0, layer1SpeedMult: 0.99, layer1DirDeg: -1.7,
-      layer2Enabled: true,  layer2Opacity: 0.70, layer2Coverage: 0.57, layer2Scale: 1.22, layer2ParallaxMult: 0, layer2SpeedMult: 1.07, layer2DirDeg: -0.86,
-      layer3Enabled: true,  layer3Opacity: 0.19, layer3Coverage: 0.90, layer3Scale: 3.00, layer3ParallaxMult: 0, layer3SpeedMult: 0.94, layer3DirDeg: 0.0,
-      layer4Enabled: true,  layer4Opacity: 0.17, layer4Coverage: 0.46, layer4Scale: 1.72, layer4ParallaxMult: 0, layer4SpeedMult: 0.94, layer4DirDeg: 0.86,
-      layer5Enabled: true,  layer5Opacity: 0.13, layer5Coverage: 0.62, layer5Scale: 1.52, layer5ParallaxMult: 0, layer5SpeedMult: 1.07, layer5DirDeg: -0.6,
+      layer1Enabled: true,  layer1Opacity: 0.35, layer1Coverage: 0.33, layer1Scale: 1.34, layer1ParallaxMult: 1.00, layer1SpeedMult: 0.99, layer1DirDeg: -1.7,
+      layer2Enabled: true,  layer2Opacity: 0.70, layer2Coverage: 0.57, layer2Scale: 1.22, layer2ParallaxMult: 0.82, layer2SpeedMult: 1.07, layer2DirDeg: -0.86,
+      layer3Enabled: true,  layer3Opacity: 0.19, layer3Coverage: 0.90, layer3Scale: 3.00, layer3ParallaxMult: 0.64, layer3SpeedMult: 0.94, layer3DirDeg: 0.0,
+      layer4Enabled: true,  layer4Opacity: 0.17, layer4Coverage: 0.46, layer4Scale: 1.72, layer4ParallaxMult: 0.46, layer4SpeedMult: 0.94, layer4DirDeg: 0.86,
+      layer5Enabled: true,  layer5Opacity: 0.13, layer5Coverage: 0.62, layer5Scale: 1.52, layer5ParallaxMult: 0.28, layer5SpeedMult: 1.07, layer5DirDeg: -0.6,
     };
 
     // ── Render targets ────────────────────────────────────────────────
@@ -168,6 +170,7 @@ export class CloudEffectV2 {
     this._layerSpeedMult      = new Float32Array(5);
     this._layerDirAngle       = new Float32Array(5);
     this._layerParallax       = new Float32Array(5);
+    this._layerTopParallax    = new Float32Array(5);
     this._layerCoverMult      = new Float32Array(5);
     this._layerNoiseScaleMult = new Float32Array(5);
     this._layerWeight         = new Float32Array(5);
@@ -632,7 +635,9 @@ export class CloudEffectV2 {
       renderer.setClearColor(0x000000, 1); renderer.clear();
       renderer.render(this._quadScene, this._quadCam);
 
-      // ── Pass 2a: Raw shadow (no outdoors mask) — indoor consumers ────
+      // ── Pass 2a: Raw shadow (no outdoors mask, no blocker mask) ─────
+      // Used by indoor consumers (e.g. window-light projection) that should
+      // still respond to cloud coverage even under overhead blockers.
       {
         const prevHasMask = su.uHasOutdoorsMask.value;
         const prevMaskTex = su.tOutdoorsMask.value;
@@ -641,7 +646,7 @@ export class CloudEffectV2 {
         su.tOutdoorsMask.value   = null;
         su.tCloudDensity.value   = this._shadowDensityRT.texture;
         su.tBlockerMask.value    = this._blockerRT?.texture ?? null;
-        su.uHasBlockerMask.value = this._blockerRT ? 1 : 0;
+        su.uHasBlockerMask.value = 0;
         this._quad.material = this._shadowMat;
         renderer.setRenderTarget(this._shadowRawRT);
         renderer.setClearColor(0xffffff, 1); renderer.clear();
@@ -663,12 +668,24 @@ export class CloudEffectV2 {
       // ── Pass 3: Parallaxed multi-layer density for cloud tops ─────────
       if (this._topDensityRT) {
         du.uClipToScene.value   = 1;
-        du.uParallaxScale.value = 1;
+        // Cloud-top parallax only. Shadow passes above keep uParallaxScale=0
+        // so shadows remain anchored in world space.
+        const topParallaxFactor = Math.max(0, Number(this.params.cloudTopParallaxFactor) || 0);
+        const depthStrength = Math.max(0, Number(this.params.cloudTopDepthParallaxStrength) || 0);
+        for (let i = 0; i < 5; i++) {
+          // Foreground layers get more camera-relative drift, background layers less.
+          const depthWeight = 1 - (i / 4);
+          this._layerTopParallax[i] = Math.max(0, this._layerParallax[i] + (depthStrength * depthWeight));
+        }
+        du.uLayerParallax.value = this._layerTopParallax;
+        du.uParallaxScale.value = topParallaxFactor;
         du.uCompositeMode.value = 1;
         this._quad.material = this._densityMat;
         renderer.setRenderTarget(this._topDensityRT);
         renderer.setClearColor(0x000000, 1); renderer.clear();
         renderer.render(this._quadScene, this._quadCam);
+        // Restore canonical layer parallax array for future shadow-oriented passes.
+        du.uLayerParallax.value = this._layerParallax;
         this._cloudTopDensityValid = true;
       }
 
@@ -862,7 +879,7 @@ export class CloudEffectV2 {
         { name: 'cloud-generation',  label: 'Cloud Generation',       type: 'inline', parameters: ['noiseScale', 'noiseDetail', 'cloudSharpness', 'noiseTimeSpeed'] },
         { name: 'domain-warping',    label: 'Domain Warping (Wisps)', type: 'inline', separator: false, parameters: ['domainWarpEnabled', 'domainWarpStrength', 'domainWarpScale', 'domainWarpSpeed', 'domainWarpTimeOffsetY'] },
         { name: 'shadow-settings',   label: 'Cloud Shadows',          type: 'inline', separator: true,  parameters: ['shadowOpacity', 'shadowSoftness', 'shadowOffsetScale', 'minShadowBrightness'] },
-        { name: 'cloud-tops',        label: 'Cloud Tops (Zoom)',      type: 'inline', separator: true,  parameters: ['cloudTopMode', 'cloudTopOpacity', 'cloudTopFadeStart', 'cloudTopFadeEnd', 'cloudBrightness'] },
+        { name: 'cloud-tops',        label: 'Cloud Tops (Zoom)',      type: 'inline', separator: true,  parameters: ['cloudTopMode', 'cloudTopOpacity', 'cloudTopParallaxFactor', 'cloudTopDepthParallaxStrength', 'cloudTopFadeStart', 'cloudTopFadeEnd', 'cloudBrightness'] },
         { name: 'cloud-top-shading', label: 'Cloud Top Shading',      type: 'inline', separator: false, parameters: ['cloudTopShadingEnabled', 'cloudTopShadingStrength', 'cloudTopNormalStrength', 'cloudTopAOIntensity', 'cloudTopEdgeHighlight'] },
         { name: 'cloud-top-peaks',   label: 'Cloud Top Peaks',        type: 'inline', separator: false, parameters: ['cloudTopPeakDetailEnabled', 'cloudTopPeakDetailStrength', 'cloudTopPeakDetailScale', 'cloudTopPeakDetailSpeed', 'cloudTopPeakDetailStart', 'cloudTopPeakDetailEnd'] },
         { name: 'cloud-top-composite', label: 'Cloud Top Composite',  type: 'inline', separator: false, parameters: ['cloudTopSoftKnee'] },
@@ -890,6 +907,8 @@ export class CloudEffectV2 {
         minShadowBrightness:  { type: 'slider', label: 'Min Brightness',    min: 0.0,  max: 0.5,  step: 0.01,  default: 0.0   },
         cloudTopMode:         { type: 'list',   label: 'Cloud Top Mode',    options: { 'Outdoors Only': 'outdoorsOnly', 'Above Everything (Fade Mask)': 'aboveEverything' }, default: 'aboveEverything' },
         cloudTopOpacity:      { type: 'slider', label: 'Cloud Top Opacity', min: 0.0,  max: 1.0,  step: 0.01,  default: 1.0   },
+        cloudTopParallaxFactor:{ type: 'slider',label: 'Top Parallax',      min: 0.0,  max: 2.0,  step: 0.05,  default: 1.0   },
+        cloudTopDepthParallaxStrength:{ type: 'slider',label: 'Depth Parallax', min: 0.0, max: 2.0, step: 0.05, default: 0.6 },
         cloudTopFadeStart:    { type: 'slider', label: 'Fade Start Zoom',   min: 0.1,  max: 1.0,  step: 0.01,  default: 0.24  },
         cloudTopFadeEnd:      { type: 'slider', label: 'Fade End Zoom',     min: 0.1,  max: 1.0,  step: 0.01,  default: 0.39  },
         cloudBrightness:      { type: 'slider', label: 'Cloud Brightness',  min: 0.8,  max: 1.5,  step: 0.01,  default: 1.01  },
@@ -911,11 +930,11 @@ export class CloudEffectV2 {
         driftResponsiveness:  { type: 'slider', label: 'Responsiveness',    min: 0.0,  max: 1.0,  step: 0.01,  default: 0.4   },
         driftMaxSpeed:        { type: 'slider', label: 'Max Speed',         min: 0.0,  max: 2.0,  step: 0.01,  default: 0.5   },
         layerParallaxBase:    { type: 'slider', label: 'Parallax Base',     min: 0.0,  max: 3.0,  step: 0.1,   default: 1.0   },
-        layer1Enabled:  { type: 'boolean', label: 'Enabled', default: true  }, layer1Opacity:  { type: 'slider', label: 'Opacity',   min: 0, max: 1, step: 0.01, default: 0.35 }, layer1Coverage: { type: 'slider', label: 'Coverage',  min: 0, max: 1, step: 0.01, default: 0.33 }, layer1Scale:    { type: 'slider', label: 'Scale',     min: 0.5, max: 5, step: 0.05, default: 1.34 }, layer1ParallaxMult: { type: 'slider', label: 'Parallax', min: 0, max: 2, step: 0.05, default: 0 }, layer1SpeedMult: { type: 'slider', label: 'Speed',    min: 0, max: 3, step: 0.01, default: 0.99 }, layer1DirDeg: { type: 'slider', label: 'Direction°', min: -180, max: 180, step: 0.1, default: -1.7 },
-        layer2Enabled:  { type: 'boolean', label: 'Enabled', default: true  }, layer2Opacity:  { type: 'slider', label: 'Opacity',   min: 0, max: 1, step: 0.01, default: 0.70 }, layer2Coverage: { type: 'slider', label: 'Coverage',  min: 0, max: 1, step: 0.01, default: 0.57 }, layer2Scale:    { type: 'slider', label: 'Scale',     min: 0.5, max: 5, step: 0.05, default: 1.22 }, layer2ParallaxMult: { type: 'slider', label: 'Parallax', min: 0, max: 2, step: 0.05, default: 0 }, layer2SpeedMult: { type: 'slider', label: 'Speed',    min: 0, max: 3, step: 0.01, default: 1.07 }, layer2DirDeg: { type: 'slider', label: 'Direction°', min: -180, max: 180, step: 0.1, default: -0.86 },
-        layer3Enabled:  { type: 'boolean', label: 'Enabled', default: true  }, layer3Opacity:  { type: 'slider', label: 'Opacity',   min: 0, max: 1, step: 0.01, default: 0.19 }, layer3Coverage: { type: 'slider', label: 'Coverage',  min: 0, max: 1, step: 0.01, default: 0.90 }, layer3Scale:    { type: 'slider', label: 'Scale',     min: 0.5, max: 5, step: 0.05, default: 3.00 }, layer3ParallaxMult: { type: 'slider', label: 'Parallax', min: 0, max: 2, step: 0.05, default: 0 }, layer3SpeedMult: { type: 'slider', label: 'Speed',    min: 0, max: 3, step: 0.01, default: 0.94 }, layer3DirDeg: { type: 'slider', label: 'Direction°', min: -180, max: 180, step: 0.1, default: 0.0 },
-        layer4Enabled:  { type: 'boolean', label: 'Enabled', default: true  }, layer4Opacity:  { type: 'slider', label: 'Opacity',   min: 0, max: 1, step: 0.01, default: 0.17 }, layer4Coverage: { type: 'slider', label: 'Coverage',  min: 0, max: 1, step: 0.01, default: 0.46 }, layer4Scale:    { type: 'slider', label: 'Scale',     min: 0.5, max: 5, step: 0.05, default: 1.72 }, layer4ParallaxMult: { type: 'slider', label: 'Parallax', min: 0, max: 2, step: 0.05, default: 0 }, layer4SpeedMult: { type: 'slider', label: 'Speed',    min: 0, max: 3, step: 0.01, default: 0.94 }, layer4DirDeg: { type: 'slider', label: 'Direction°', min: -180, max: 180, step: 0.1, default: 0.86 },
-        layer5Enabled:  { type: 'boolean', label: 'Enabled', default: true  }, layer5Opacity:  { type: 'slider', label: 'Opacity',   min: 0, max: 1, step: 0.01, default: 0.13 }, layer5Coverage: { type: 'slider', label: 'Coverage',  min: 0, max: 1, step: 0.01, default: 0.62 }, layer5Scale:    { type: 'slider', label: 'Scale',     min: 0.5, max: 5, step: 0.05, default: 1.52 }, layer5ParallaxMult: { type: 'slider', label: 'Parallax', min: 0, max: 2, step: 0.05, default: 0 }, layer5SpeedMult: { type: 'slider', label: 'Speed',    min: 0, max: 3, step: 0.01, default: 1.07 }, layer5DirDeg: { type: 'slider', label: 'Direction°', min: -180, max: 180, step: 0.1, default: -0.6 },
+        layer1Enabled:  { type: 'boolean', label: 'Enabled', default: true  }, layer1Opacity:  { type: 'slider', label: 'Opacity',   min: 0, max: 1, step: 0.01, default: 0.35 }, layer1Coverage: { type: 'slider', label: 'Coverage',  min: 0, max: 1, step: 0.01, default: 0.33 }, layer1Scale:    { type: 'slider', label: 'Scale',     min: 0.5, max: 5, step: 0.05, default: 1.34 }, layer1ParallaxMult: { type: 'slider', label: 'Parallax', min: 0, max: 2, step: 0.05, default: 1.00 }, layer1SpeedMult: { type: 'slider', label: 'Speed',    min: 0, max: 3, step: 0.01, default: 0.99 }, layer1DirDeg: { type: 'slider', label: 'Direction°', min: -180, max: 180, step: 0.1, default: -1.7 },
+        layer2Enabled:  { type: 'boolean', label: 'Enabled', default: true  }, layer2Opacity:  { type: 'slider', label: 'Opacity',   min: 0, max: 1, step: 0.01, default: 0.70 }, layer2Coverage: { type: 'slider', label: 'Coverage',  min: 0, max: 1, step: 0.01, default: 0.57 }, layer2Scale:    { type: 'slider', label: 'Scale',     min: 0.5, max: 5, step: 0.05, default: 1.22 }, layer2ParallaxMult: { type: 'slider', label: 'Parallax', min: 0, max: 2, step: 0.05, default: 0.82 }, layer2SpeedMult: { type: 'slider', label: 'Speed',    min: 0, max: 3, step: 0.01, default: 1.07 }, layer2DirDeg: { type: 'slider', label: 'Direction°', min: -180, max: 180, step: 0.1, default: -0.86 },
+        layer3Enabled:  { type: 'boolean', label: 'Enabled', default: true  }, layer3Opacity:  { type: 'slider', label: 'Opacity',   min: 0, max: 1, step: 0.01, default: 0.19 }, layer3Coverage: { type: 'slider', label: 'Coverage',  min: 0, max: 1, step: 0.01, default: 0.90 }, layer3Scale:    { type: 'slider', label: 'Scale',     min: 0.5, max: 5, step: 0.05, default: 3.00 }, layer3ParallaxMult: { type: 'slider', label: 'Parallax', min: 0, max: 2, step: 0.05, default: 0.64 }, layer3SpeedMult: { type: 'slider', label: 'Speed',    min: 0, max: 3, step: 0.01, default: 0.94 }, layer3DirDeg: { type: 'slider', label: 'Direction°', min: -180, max: 180, step: 0.1, default: 0.0 },
+        layer4Enabled:  { type: 'boolean', label: 'Enabled', default: true  }, layer4Opacity:  { type: 'slider', label: 'Opacity',   min: 0, max: 1, step: 0.01, default: 0.17 }, layer4Coverage: { type: 'slider', label: 'Coverage',  min: 0, max: 1, step: 0.01, default: 0.46 }, layer4Scale:    { type: 'slider', label: 'Scale',     min: 0.5, max: 5, step: 0.05, default: 1.72 }, layer4ParallaxMult: { type: 'slider', label: 'Parallax', min: 0, max: 2, step: 0.05, default: 0.46 }, layer4SpeedMult: { type: 'slider', label: 'Speed',    min: 0, max: 3, step: 0.01, default: 0.94 }, layer4DirDeg: { type: 'slider', label: 'Direction°', min: -180, max: 180, step: 0.1, default: 0.86 },
+        layer5Enabled:  { type: 'boolean', label: 'Enabled', default: true  }, layer5Opacity:  { type: 'slider', label: 'Opacity',   min: 0, max: 1, step: 0.01, default: 0.13 }, layer5Coverage: { type: 'slider', label: 'Coverage',  min: 0, max: 1, step: 0.01, default: 0.62 }, layer5Scale:    { type: 'slider', label: 'Scale',     min: 0.5, max: 5, step: 0.05, default: 1.52 }, layer5ParallaxMult: { type: 'slider', label: 'Parallax', min: 0, max: 2, step: 0.05, default: 0.28 }, layer5SpeedMult: { type: 'slider', label: 'Speed',    min: 0, max: 3, step: 0.01, default: 1.07 }, layer5DirDeg: { type: 'slider', label: 'Direction°', min: -180, max: 180, step: 0.1, default: -0.6 },
       },
     };
   }
@@ -927,6 +946,23 @@ export class CloudEffectV2 {
 
   /** @type {THREE.Texture|null} Raw shadow (no outdoors mask) — for indoor consumers */
   get cloudShadowRawTexture() { return this._shadowRawRT?.texture ?? null; }
+
+  /**
+   * Current world-space bounds used when rendering the shadow pass.
+   * Consumers sampling cloud shadow textures in world space must use these
+   * exact bounds for stable pan/zoom mapping.
+   * @returns {{minX:number,minY:number,maxX:number,maxY:number}|null}
+   */
+  get cloudShadowViewBounds() {
+    const u = this._shadowMat?.uniforms;
+    if (!u?.uViewBoundsMin?.value || !u?.uViewBoundsMax?.value) return null;
+    return {
+      minX: Number(u.uViewBoundsMin.value.x) || 0,
+      minY: Number(u.uViewBoundsMin.value.y) || 0,
+      maxX: Number(u.uViewBoundsMax.value.x) || 0,
+      maxY: Number(u.uViewBoundsMax.value.y) || 0,
+    };
+  }
 
   /** @type {THREE.Texture|null} Cloud density — for other consumers */
   get cloudDensityTexture() { return this._densityRT?.texture ?? null; }

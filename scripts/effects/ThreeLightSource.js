@@ -673,7 +673,7 @@ export class ThreeLightSource {
     this.updateData(this.document, true);
 
     try {
-      log.info('[COOKIE DEBUG] light-init', {
+      log.info(' light-init', {
         id: this.id,
         hasDoc: !!this.document
       });
@@ -695,7 +695,7 @@ export class ThreeLightSource {
         ? config.cookieTexture.trim()
         : null;
       if (cookieEnabled || cookieTexture) {
-        log.info('[COOKIE DEBUG] light-update', {
+        log.info(' light-update', {
           id: this.id,
           cookieEnabled,
           cookieTexture
@@ -921,7 +921,7 @@ export class ThreeLightSource {
     if (!path) {
       try {
         if (this._cookiePath) {
-          log.info('[COOKIE DEBUG] cookie-clear', {
+          log.info(' cookie-clear', {
             id: this.id,
             previousPath: this._cookiePath,
             enabled,
@@ -972,7 +972,7 @@ export class ThreeLightSource {
     try {
       const dbg = this._cookieDebugState || (this._cookieDebugState = { path: null, enabled: null });
       if (dbg.path !== path || dbg.enabled !== enabled) {
-        log.info('[COOKIE DEBUG] cookie-config', {
+        log.info(' cookie-config', {
           id: this.id,
           enabled,
           hasTexture: !!hasTexture,
@@ -1028,7 +1028,7 @@ export class ThreeLightSource {
             const img = tex?.image ?? null;
             const w = Number(img?.naturalWidth ?? img?.videoWidth ?? img?.width ?? 0) || undefined;
             const h = Number(img?.naturalHeight ?? img?.videoHeight ?? img?.height ?? 0) || undefined;
-            log.info('[COOKIE DEBUG] cookie-load-success', {
+            log.info(' cookie-load-success', {
               id: this.id,
               path,
               width: w,
@@ -1050,7 +1050,7 @@ export class ThreeLightSource {
 
           const handleFailure = (failureErr) => {
             try {
-              log.warn('[COOKIE DEBUG] cookie-load-failed', {
+              log.warn(' cookie-load-failed', {
                 id: this.id,
                 path,
                 message: String(failureErr?.message ?? failureErr ?? 'unknown')
@@ -1115,7 +1115,7 @@ export class ThreeLightSource {
                     const img = tex?.image ?? null;
                     const w = Number(img?.naturalWidth ?? img?.videoWidth ?? img?.width ?? 0) || undefined;
                     const h = Number(img?.naturalHeight ?? img?.videoHeight ?? img?.height ?? 0) || undefined;
-                    log.info('[COOKIE DEBUG] cookie-load-success-fallback', {
+                    log.info(' cookie-load-success-fallback', {
                       id: this.id,
                       path,
                       width: w,

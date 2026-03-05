@@ -301,7 +301,10 @@ export class FlameLifecycleBehavior {
     const t = age / Math.max(0.001, life);
 
     const heat = particle._flameHeat ?? 1.0;
-    const brightness = Math.max(0.3, particle._flameBrightness ?? 1.0);
+    // Fire masks often contain soft falloff pixels. A low brightness floor keeps
+    // the flame body visible while still allowing mask intensity variation.
+    const minBrightness = Math.max(0.0, this.ownerEffect?.params?.flameBrightnessFloor ?? 0.75);
+    const brightness = Math.max(minBrightness, particle._flameBrightness ?? 1.0);
 
     const color = lerpColorStops(this._colorStops, t, _flameColorTemp);
     const emission = lerpScalarStops(FLAME_EMISSION_STOPS, t) * heat * this._emissionScale;
@@ -482,7 +485,7 @@ export class SmokeLifecycleBehavior {
     this._smokeOpacity = Math.max(0.0, Math.min(1.0, p?.smokeOpacity ?? 0.6));
     this._colorWarmth = Math.max(0.0, Math.min(1.0, p?.smokeColorWarmth ?? 0.4));
     this._colorBrightness = Math.max(0.01, p?.smokeColorBrightness ?? 0.45);
-    this._sizeGrowth = Math.max(1.0, p?.smokeSizeGrowth ?? 4.0);
+    this._sizeGrowth = Math.max(1.0, p?.smokeSizeOverLife ?? p?.smokeSizeGrowth ?? 4.0);
     this._alphaStart = Math.max(0.0, Math.min(1.0, p?.smokeAlphaStart ?? 0.0));
     this._alphaPeak = Math.max(this._alphaStart, Math.min(1.0, p?.smokeAlphaPeak ?? 0.75));
     this._alphaEnd = Math.max(this._alphaPeak, Math.min(1.0, p?.smokeAlphaEnd ?? 1.0));

@@ -171,6 +171,9 @@ export class LayerVisibilityManager {
   getActiveLayerName() {
     const activeLayer = canvas.activeLayer;
     if (!activeLayer) return '';
+
+    const activeControl = String(ui?.controls?.control?.name || ui?.controls?.activeControl || '').toLowerCase();
+    if (activeControl) return activeControl;
     
     // Try to get the layer name from various sources
     return activeLayer.options?.name || 
@@ -186,10 +189,14 @@ export class LayerVisibilityManager {
    * @returns {boolean}
    */
   isLayerActive(layerName, activeName) {
+    const normalizedLayer = String(layerName || '').toLowerCase().replace('layer', '');
+
+    if (normalizedLayer === 'lighting' && canvas?.lighting?.active) return true;
+    if (normalizedLayer === 'walls' && canvas?.walls?.active) return true;
+
     if (!activeName) return false;
     
     // Normalize names for comparison
-    const normalizedLayer = layerName.toLowerCase().replace('layer', '');
     const normalizedActive = activeName.toLowerCase().replace('layer', '');
     
     return normalizedLayer === normalizedActive;

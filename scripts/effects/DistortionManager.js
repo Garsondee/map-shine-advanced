@@ -2574,7 +2574,7 @@ export class DistortionManager extends EffectBase {
         }
         if (!outdoorsTex) {
           const wle = window.MapShine?.windowLightEffect;
-          const cloud = window.MapShine?.cloudEffect;
+          const cloud = window.MapShine?.cloudEffectV2;
           outdoorsTex = wle?.outdoorsMask || cloud?.outdoorsMask || null;
         }
         if (au.tOutdoorsMask) au.tOutdoorsMask.value = outdoorsTex;
@@ -2595,7 +2595,7 @@ export class DistortionManager extends EffectBase {
         if (au.uHasCloudShadow) au.uHasCloudShadow.value = cloudShadowTex ? 1.0 : 0.0;
 
         if (!cloudShadowTex) {
-          const cloud = window.MapShine?.cloudEffect;
+          const cloud = window.MapShine?.cloudEffectV2;
           const fallback = (cloud && cloud.enabled && cloud.cloudShadowTarget?.texture)
             ? cloud.cloudShadowTarget.texture
             : null;

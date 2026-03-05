@@ -67,6 +67,9 @@ import { DazzleOverlayEffectV2 } from './effects/DazzleOverlayEffectV2.js';
 import { VisionModeEffectV2 } from './effects/VisionModeEffectV2.js';
 import { InvertEffectV2 } from './effects/InvertEffectV2.js';
 import { SepiaEffectV2 } from './effects/SepiaEffectV2.js';
+import { LightningEffectV2 } from './effects/LightningEffectV2.js';
+import { AtmosphericFogEffectV2 } from './effects/AtmosphericFogEffectV2.js';
+import { FogOfWarEffectV2 } from './effects/FogOfWarEffectV2.js';
 import { SmellyFliesEffect } from '../particles/SmellyFliesEffect.js';
 import { CandleFlamesEffectV2 } from './effects/CandleFlamesEffectV2.js';
 import { weatherController } from '../core/WeatherController.js';
@@ -174,6 +177,21 @@ export class FloorCompositor {
     this._filterEffect = new FilterEffectV2();
 
     /**
+     * V2 Atmospheric Fog Effect: weather-driven distance fog as a post-process
+     * pass. Runs after water and before bloom.
+     * @type {AtmosphericFogEffectV2}
+     */
+    this._atmosphericFogEffect = new AtmosphericFogEffectV2();
+
+    /**
+     * V2 Fog of War: gameplay LOS + exploration fog overlay.
+     * Updated as an effect state machine, then rendered once as a dedicated
+     * fullscreen overlay scene after final post blit.
+     * @type {FogOfWarEffectV2}
+     */
+    this._fogEffect = new FogOfWarEffectV2();
+
+    /**
      * V2 Bloom Effect: screen-space glow via UnrealBloomPass.
      * Runs after sky color, before color correction.
      * @type {BloomEffectV2}
@@ -246,6 +264,13 @@ export class FloorCompositor {
      * @type {SmellyFliesEffect}
      */
     this._smellyFliesEffect = new SmellyFliesEffect();
+
+    /**
+     * V2 Lightning Effect: map-point-driven atmospheric lightning arcs +
+     * environment flash metadata for downstream post effects.
+     * @type {LightningEffectV2}
+     */
+    this._lightningEffect = new LightningEffectV2();
 
     /**
      * V2 Candle Flames Effect: map-point-driven instanced flames + light-scene glow.
@@ -342,6 +367,9 @@ export class FloorCompositor {
     /** @type {string|null} Last resolved floor key used for outdoors sync diagnostics */
     this._lastOutdoorsFloorKey = null;
 
+    /** @type {import('../scene/map-points-manager.js').MapPointsManager|null} Last wired map-points manager instance */
+    this._wiredMapPointsManager = null;
+
     // Diagnostic: log the first frame's major render stages once.
     // This helps pinpoint which stage stalls the main thread on some GPUs.
     this._debugFirstFrameStagesLogged = false;
@@ -370,7 +398,34 @@ export class FloorCompositor {
     /** @type {THREE.Mesh|null} Fullscreen quad for blit */
     this._blitQuad = null;
 
+    /** @type {THREE.Scene|null} Dedicated scene for fog overlay pass */
+    this._fogOverlayScene = null;
+    /** @type {THREE.OrthographicCamera|null} Camera for fog overlay pass */
+    this._fogOverlayCamera = null;
+
     log.debug('FloorCompositor created');
+  }
+
+  _wireMapPointConsumers() {
+    try {
+      const mapPoints = window.MapShine?.mapPointsManager ?? null;
+      const activeLevelContext = window.MapShine?.activeLevelContext ?? null;
+      if (mapPoints === this._wiredMapPointsManager) return;
+
+      this._smellyFliesEffect?.setMapPointsSources?.(mapPoints);
+      this._lightningEffect?.setMapPointsSources?.(mapPoints);
+      this._candleFlamesEffect?.setMapPointsSources?.(mapPoints);
+      this._smellyFliesEffect?.setActiveLevelContext?.(activeLevelContext);
+      this._lightningEffect?.setActiveLevelContext?.(activeLevelContext);
+      this._candleFlamesEffect?.setActiveLevelContext?.(activeLevelContext);
+
+      this._wiredMapPointsManager = mapPoints;
+      if (mapPoints) {
+        log.info('Map-point effect wiring refreshed (smelly flies / lightning / candle flames)');
+      }
+    } catch (err) {
+      log.warn('Map-point effect wiring failed (smelly flies / lightning / candle flames):', err);
+    }
   }
 
   // ── Lifecycle ───────────────────────────────────────────────────────────────
@@ -480,8 +535,24 @@ export class FloorCompositor {
     this._blitQuad.frustumCulled = false;
     this._blitScene.add(this._blitQuad);
 
+    // Fog overlay scene is rendered after final blit with autoClear=false.
+    this._fogOverlayScene = new THREE.Scene();
+    this._fogOverlayScene.name = 'FogOverlaySceneV2';
+    this._fogOverlayCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+
     // ── Effects + hooks ───────────────────────────────────────────────────
     this._renderBus.initialize();
+
+    // Door meshes are still managed by the legacy DoorMeshManager, but in V2
+    // only the FloorRenderBus scene is rendered. Re-target existing and future
+    // door meshes to the bus scene so door graphics remain visible.
+    try {
+      const doorMeshManager = window.MapShine?.doorMeshManager ?? null;
+      doorMeshManager?.setScene?.(this._renderBus._scene ?? null);
+    } catch (err) {
+      log.warn('FloorCompositor: failed to route door meshes to V2 render bus scene:', err);
+    }
+
     this._specularEffect.initialize();
     this._fluidEffect.initialize();
     this._bushEffect.initialize();
@@ -509,6 +580,10 @@ export class FloorCompositor {
     try { this._smellyFliesEffect?.initialize?.(this.renderer, this._renderBus._scene, this.camera); } catch (err) {
       log.warn('FloorCompositor: SmellyFliesEffect initialize failed:', err);
     }
+    // Lightning renders procedural strike meshes in the bus scene.
+    try { this._lightningEffect?.initialize?.(this.renderer, this._renderBus._scene, this.camera); } catch (err) {
+      log.warn('FloorCompositor: LightningEffectV2 initialize failed:', err);
+    }
 
     // Candle flames render in bus scene and push glow into lighting lightScene.
     try {
@@ -528,6 +603,18 @@ export class FloorCompositor {
     this._skyColorEffect.initialize();
     this._colorCorrectionEffect.initialize();
     this._filterEffect.initialize();
+    this._atmosphericFogEffect.initialize(this.renderer, this._renderBus._scene, this.camera);
+    this._fogEffect.initialize(this.renderer, this.scene, this.camera);
+    try {
+      const fogPlane = this._fogEffect.fogPlane ?? null;
+      if (fogPlane) {
+        // In V2, the main scene is not drawn. Move fog plane to dedicated overlay scene.
+        fogPlane.removeFromParent();
+        this._fogOverlayScene?.add(fogPlane);
+      }
+    } catch (err) {
+      log.warn('FloorCompositor: FogOfWarEffectV2 overlay setup failed:', err);
+    }
     this._bloomEffect.initialize(w, h);
     this._filmGrainEffect.initialize();
     this._sharpenEffect.initialize();
@@ -601,6 +688,8 @@ export class FloorCompositor {
       if (splash?.enabled && splash._activeFloors?.size > 0) return true;
       const flies = this._smellyFliesEffect;
       if (flies?.enabled && (flies?.flySystems?.size ?? 0) > 0) return true;
+      const lightning = this._lightningEffect;
+      if (lightning?.enabled && lightning?.wantsContinuousRender?.()) return true;
       const candles = this._candleFlamesEffect;
       if (candles?.enabled && ((candles?._sourceFlameCount ?? 0) > 0 || (candles?._glowBuckets?.size ?? 0) > 0)) return true;
       return false;
@@ -635,6 +724,10 @@ export class FloorCompositor {
       log.warn('FloorCompositor.render called before initialize()');
       return;
     }
+
+    // Keep map-point-driven effects (flies/lightning/candles) wired even if
+    // MapPointsManager is exposed on window.MapShine after the first render.
+    this._wireMapPointConsumers();
 
     // ── Lazy bus population ───────────────────────────────────────────────────
     // Populate on the first render frame. Uses THREE.TextureLoader internally
@@ -723,14 +816,8 @@ export class FloorCompositor {
           });
         }
 
-        // Wire map point sources for smelly flies after managers are available.
-        try {
-          const mapPoints = window.MapShine?.mapPointsManager ?? null;
-          this._smellyFliesEffect?.setMapPointsSources?.(mapPoints);
-          this._candleFlamesEffect?.setMapPointsSources?.(mapPoints);
-        } catch (err) {
-          log.warn('Map-point effect wiring failed (smelly flies / candle flames):', err);
-        }
+        // Initial attempt; render-time guard above re-attempts when globals land.
+        this._wireMapPointConsumers();
         // Push current outdoors mask immediately; async compositor cache warmup
         // can still update this later via the per-frame sync below.
         this._syncOutdoorsMaskConsumers({
@@ -796,6 +883,13 @@ export class FloorCompositor {
         log.warn('SmellyFliesEffect update threw, skipping frame:', err);
       }
       try {
+        this._lightningEffect?.ensureMeshesAttached?.(this._renderBus?._scene ?? null);
+        this._lightningEffect?.update?.(timeInfo);
+      } catch (err) {
+        log.warn('LightningEffectV2 update threw, skipping frame:', err);
+      }
+      try {
+        this._candleFlamesEffect?.ensureMeshesAttached?.(this._renderBus?._scene ?? null);
         this._candleFlamesEffect?.update?.(timeInfo);
       } catch (err) {
         log.warn('CandleFlamesEffectV2 update threw, skipping frame:', err);
@@ -825,6 +919,8 @@ export class FloorCompositor {
       this._windowLightEffect.update(timeInfo);
       this._colorCorrectionEffect.update(timeInfo);
       this._filterEffect.update(timeInfo);
+      this._atmosphericFogEffect.update(timeInfo);
+      this._fogEffect.update(timeInfo);
       this._bloomEffect.update(timeInfo);
       this._filmGrainEffect.update(timeInfo);
       this._sharpenEffect.update(timeInfo);
@@ -914,6 +1010,15 @@ export class FloorCompositor {
       ? this._windowLightEffect._scene : null;
     const cloudShadowTex = (this._cloudEffect.enabled && this._cloudEffect.params.enabled)
       ? this._cloudEffect.cloudShadowTexture : null;
+    const windowCloudShadowTex = (this._cloudEffect.enabled && this._cloudEffect.params.enabled)
+      ? (this._cloudEffect.cloudShadowRawTexture ?? this._cloudEffect.cloudShadowTexture)
+      : null;
+    const windowCloudShadowViewBounds = (this._cloudEffect.enabled && this._cloudEffect.params.enabled)
+      ? (this._cloudEffect.cloudShadowViewBounds ?? null)
+      : null;
+    const shadowW = Number(windowCloudShadowTex?.image?.width) || this._sceneRT?.width || 1;
+    const shadowH = Number(windowCloudShadowTex?.image?.height) || this._sceneRT?.height || 1;
+    this._windowLightEffect?.setCloudShadowTexture?.(windowCloudShadowTex, shadowW, shadowH, windowCloudShadowViewBounds);
     const buildingShadowTex = (this._buildingShadowEffect?.params?.enabled)
       ? this._buildingShadowEffect.shadowFactorTexture : null;
     const buildingShadowOpacity = Number.isFinite(this._buildingShadowEffect?.params?.opacity)
@@ -1002,6 +1107,16 @@ export class FloorCompositor {
       if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: water.render DONE'); } catch (_) {} }
     }
 
+    // Atmospheric fog pass: weather-driven distance haze over the graded scene.
+    if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: atmosphericFog.render'); } catch (_) {} }
+    if (this._atmosphericFogEffect?.enabled && this._atmosphericFogEffect?.params?.enabled) {
+      const fogOutput = (currentInput === this._postA) ? this._postB : this._postA;
+      if (this._atmosphericFogEffect.render(this.renderer, this.camera, currentInput, fogOutput)) {
+        currentInput = fogOutput;
+      }
+    }
+    if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: atmosphericFog.render DONE'); } catch (_) {} }
+
     // Bloom pass: screen-space glow (threshold → mip blur → additive composite).
     if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: bloom.render'); } catch (_) {} }
     if (this._bloomEffect.params.enabled) {
@@ -1089,6 +1204,11 @@ export class FloorCompositor {
     this._blitToScreen(currentInput);
     if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: blitToScreen DONE'); } catch (_) {} }
 
+    // Render fog of war as a final overlay above the composited frame.
+    if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: fogOverlay.render'); } catch (_) {} }
+    this._renderFogOverlay();
+    if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: fogOverlay.render DONE'); } catch (_) {} }
+
     if (_dbgStages) {
       this._debugFirstFrameStagesLogged = true;
       try { log.info('[V2 Frame] ✔ FloorCompositor.render: END'); } catch (_) {}
@@ -1146,6 +1266,30 @@ export class FloorCompositor {
 
     renderer.autoClear = prevAutoClear;
     renderer.setRenderTarget(prevTarget);
+  }
+
+  /**
+   * Render the fog overlay scene once per frame after final blit.
+   * @private
+   */
+  _renderFogOverlay() {
+    const fog = this._fogEffect;
+    if (!fog?.enabled || fog?.params?.enabled === false) return;
+    const scene = this._fogOverlayScene;
+    const camera = this._fogOverlayCamera;
+    if (!scene || !camera || !this.renderer) return;
+
+    const renderer = this.renderer;
+    const prevTarget = renderer.getRenderTarget();
+    const prevAutoClear = renderer.autoClear;
+    renderer.setRenderTarget(null);
+    renderer.autoClear = false;
+    try {
+      renderer.render(scene, camera);
+    } finally {
+      renderer.autoClear = prevAutoClear;
+      renderer.setRenderTarget(prevTarget);
+    }
   }
 
   /**
@@ -1293,6 +1437,8 @@ export class FloorCompositor {
       this._cloudEffect?.setOutdoorsMask?.(outdoorsTex);
       this._waterEffect?.setOutdoorsMask?.(outdoorsTex);
       this._skyColorEffect?.setOutdoorsMask?.(outdoorsTex);
+      this._filterEffect?.setOutdoorsMask?.(outdoorsTex);
+      this._atmosphericFogEffect?.setOutdoorsMask?.(outdoorsTex);
       this._overheadShadowEffect?.setOutdoorsMask?.(outdoorsTex);
       this._buildingShadowEffect?.setOutdoorsMask?.(outdoorsTex);
 
@@ -1406,6 +1552,10 @@ export class FloorCompositor {
     this._cloudEffect.onFloorChange(maxFloorIndex);
     // Weather particles are global (rain falls on all visible floors); no-op.
     try { this._weatherParticles?.onFloorChange?.(maxFloorIndex); } catch (_) {}
+    try { this._smellyFliesEffect?.setActiveLevelContext?.(payload?.context ?? window.MapShine?.activeLevelContext ?? null); } catch (_) {}
+    try { this._lightningEffect?.setActiveLevelContext?.(payload?.context ?? window.MapShine?.activeLevelContext ?? null); } catch (_) {}
+    try { this._candleFlamesEffect?.setActiveLevelContext?.(payload?.context ?? window.MapShine?.activeLevelContext ?? null); } catch (_) {}
+    try { this._lightningEffect?.onFloorChange?.(maxFloorIndex); } catch (_) {}
     try { this._candleFlamesEffect?.onFloorChange?.(maxFloorIndex); } catch (_) {}
     // Outdoors mask floor changes are handled above via GpuSceneMaskCompositor
     // Swap active water SDF data for the new floor.
@@ -1433,6 +1583,8 @@ export class FloorCompositor {
     try { this._overheadShadowEffect?.onResize?.(w, h); } catch (_) {}
     try { this._buildingShadowEffect?.onResize?.(w, h); } catch (_) {}
     try { this._weatherParticles?.onResize?.(w, h); } catch (_) {}
+    try { this._lightningEffect?.onResize?.(w, h); } catch (_) {}
+    try { this._atmosphericFogEffect?.onResize?.(w, h); } catch (_) {}
     try { this._dotScreenEffect?.onResize?.(w, h); } catch (_) {}
     try { this._halftoneEffect?.onResize?.(w, h); } catch (_) {}
     try { this._asciiEffect?.onResize?.(w, h); } catch (_) {}
@@ -1466,6 +1618,8 @@ export class FloorCompositor {
     try { this._cloudEffect?.dispose?.(); } catch (_) {}
     try { this._lightingEffect?.dispose?.(); } catch (_) {}
     try { this._skyColorEffect?.dispose?.(); } catch (_) {}
+    try { this._atmosphericFogEffect?.dispose?.(); } catch (_) {}
+    try { this._fogEffect?.dispose?.(); } catch (_) {}
     try { this._bloomEffect.dispose(); } catch (_) {}
     try { this._colorCorrectionEffect.dispose(); } catch (_) {}
     try { this._skyColorEffect.dispose(); } catch (_) {}
@@ -1473,6 +1627,7 @@ export class FloorCompositor {
     try { this._overheadShadowEffect?.dispose?.(); } catch (_) {}
     try { this._buildingShadowEffect?.dispose?.(); } catch (_) {}
     try { this._smellyFliesEffect?.dispose?.(); } catch (_) {}
+    try { this._lightningEffect?.dispose?.(); } catch (_) {}
     try { this._candleFlamesEffect?.dispose?.(); } catch (_) {}
     try { this._dotScreenEffect?.dispose?.(); } catch (_) {}
     try { this._halftoneEffect?.dispose?.(); } catch (_) {}
@@ -1504,6 +1659,8 @@ export class FloorCompositor {
     this._blitCamera = null;
     this._blitMaterial = null;
     this._blitQuad = null;
+    this._fogOverlayScene = null;
+    this._fogOverlayCamera = null;
 
     // Unregister the level-change hook.
     if (this._levelHookId !== null) {

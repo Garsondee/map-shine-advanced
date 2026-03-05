@@ -1,14 +1,13 @@
 /**
- * @fileoverview Atmospheric Fog Effect - Weather-driven distance fog
+ * @fileoverview AtmosphericFogEffectV2 — V2 weather-driven atmospheric distance fog.
  * Renders distance-based atmospheric fog controlled by weatherController.fogDensity
- * @module effects/AtmosphericFogEffect
+ * @module compositor-v2/effects/AtmosphericFogEffectV2
  */
 
-import { EffectBase, RenderLayers } from './EffectComposer.js';
-import { createLogger } from '../core/log.js';
-import { weatherController } from '../core/WeatherController.js';
+import { createLogger } from '../../core/log.js';
+import { weatherController } from '../../core/WeatherController.js';
 
-const log = createLogger('AtmosphericFogEffect');
+const log = createLogger('AtmosphericFogEffectV2');
 
 /**
  * Atmospheric Fog Effect
@@ -22,12 +21,14 @@ const log = createLogger('AtmosphericFogEffect');
  * - Respects indoor/outdoor mask to avoid fogging indoors
  * - Smooth transitions via weatherController interpolation
  */
-export class AtmosphericFogEffect extends EffectBase {
+export class AtmosphericFogEffectV2 {
   constructor() {
-    super('atmospheric-fog', RenderLayers.POST_PROCESSING, 'low');
+    /** @type {string} */
+    this.id = 'atmospheric-fog';
+    /** @type {boolean} */
+    this.enabled = true;
 
-    this.priority = 5; // After main scene, before bloom
-    this.alwaysRender = false;
+    this.priority = 5;
 
     /** @type {THREE.ShaderMaterial|null} */
     this.material = null;
@@ -541,7 +542,7 @@ export class AtmosphericFogEffect extends EffectBase {
     this.quadScene.add(this.quadMesh);
 
     this._initialized = true;
-    log.info('AtmosphericFogEffect initialized');
+    log.info('AtmosphericFogEffectV2 initialized');
   }
 
   /**
@@ -755,20 +756,19 @@ export class AtmosphericFogEffect extends EffectBase {
       }
     }
 
-    // Update outdoor mask from weather controller
-    if (this.params.useIndoorMask && weatherController?.roofMap) {
+    // Update outdoor mask from weather controller when explicit V2 bindings
+    // have not provided one yet.
+    if (this.params.useIndoorMask && weatherController?.roofMap && !this.outdoorsMask) {
       u.tOutdoors.value = weatherController.roofMap;
-    } else {
+    } else if (!u.tOutdoors.value) {
       u.tOutdoors.value = this._fallbackOutdoors;
     }
 
-    // Distance map for smooth building buffer (generated once per load)
-    if (this.params.useIndoorMask && weatherController?.roofDistanceMap) {
+    // Distance map for smooth building buffer (generated once per load).
+    // Prefer WeatherController fallback if compositor hasn't explicitly provided a map.
+    if (this.params.useIndoorMask && weatherController?.roofDistanceMap && u.tRoofDistance.value === this._fallbackOutdoors) {
       u.tRoofDistance.value = weatherController.roofDistanceMap;
       u.uRoofDistanceMaxPx.value = Number(weatherController.roofDistanceMapMaxPx) || 1.0;
-    } else {
-      u.tRoofDistance.value = this._fallbackOutdoors;
-      u.uRoofDistanceMaxPx.value = 1.0;
     }
 
     // Update view bounds
@@ -843,10 +843,12 @@ export class AtmosphericFogEffect extends EffectBase {
     u.uScreenSize.value.copy(size);
   }
 
-  render(renderer, scene, camera) {
+  render(renderer, camera, inputRT, outputRT) {
     if (!this.enabled || !this._initialized) return;
 
-    const inputTexture = this.readBuffer?.texture || this.material.uniforms.tDiffuse.value;
+    this.camera = camera || this.camera;
+
+    const inputTexture = inputRT?.texture || this.readBuffer?.texture || this.material.uniforms.tDiffuse.value;
     if (!inputTexture) return;
 
     this.material.uniforms.tDiffuse.value = inputTexture;
@@ -863,14 +865,16 @@ export class AtmosphericFogEffect extends EffectBase {
       u.uGroundDistance.value = window.MapShine?.sceneComposer?.groundDistance ?? 1000.0;
     }
 
-    if (this.writeBuffer) {
-      renderer.setRenderTarget(this.writeBuffer);
+    const target = outputRT || this.writeBuffer || null;
+    if (target) {
+      renderer.setRenderTarget(target);
       renderer.clear();
     } else {
       renderer.setRenderTarget(null);
     }
 
     renderer.render(this.quadScene, this.quadCamera);
+    return true;
   }
 
   onResize(width, height) {
@@ -894,6 +898,6 @@ export class AtmosphericFogEffect extends EffectBase {
       this._fallbackOutdoors = null;
     }
     this._initialized = false;
-    log.info('AtmosphericFogEffect disposed');
+    log.info('AtmosphericFogEffectV2 disposed');
   }
 }

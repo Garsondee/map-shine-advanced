@@ -107,6 +107,22 @@ export class InputRouter {
    * @returns {boolean} Success status
    */
   setMode(mode, reason = '') {
+    const activeControl = String(ui?.controls?.control?.name ?? ui?.controls?.activeControl ?? '').toLowerCase();
+    const activeTool = String(ui?.controls?.tool?.name ?? ui?.controls?.activeTool ?? '').toLowerCase();
+    const forcePixiOverlay =
+      mode === InputMode.PIXI && (
+        !!canvas?.walls?.active ||
+        !!canvas?.lighting?.active ||
+        activeControl === 'walls' ||
+        activeControl === 'lighting' ||
+        activeTool === 'doors' ||
+        activeTool === 'door' ||
+        activeTool === 'light'
+      );
+    if (window.MapShine) {
+      window.MapShine.__forcePixiEditorOverlay = forcePixiOverlay;
+    }
+
     if (this._transitionLock) {
       log.warn('Input mode transition already in progress');
       return false;
@@ -114,6 +130,21 @@ export class InputRouter {
     
     // Skip if already in this mode AND initialized (canvas styles already applied)
     if (this.currentMode === mode && this._initialized) {
+      if (mode === InputMode.PIXI && forcePixiOverlay) {
+        const pixiCanvas = canvas.app?.view;
+        if (pixiCanvas) {
+          pixiCanvas.style.display = '';
+          pixiCanvas.style.visibility = 'visible';
+          pixiCanvas.style.opacity = '1';
+        }
+        const board = document.getElementById('board');
+        if (board && board.tagName === 'CANVAS') {
+          board.style.display = '';
+          board.style.visibility = 'visible';
+          board.style.opacity = '1';
+          board.style.zIndex = '10';
+        }
+      }
       return true;
     }
     
@@ -137,8 +168,23 @@ export class InputRouter {
       //   while PIXI becomes a transparent visual overlay.
       if (mode === InputMode.PIXI) {
         // PIXI receives input
+        pixiCanvas.style.display = '';
+        pixiCanvas.style.visibility = 'visible';
         pixiCanvas.style.pointerEvents = 'auto';
         pixiCanvas.style.opacity = '1';
+
+        // Foundry's composited board canvas may be separate from canvas.app.view.
+        // Keep it visible whenever native editor overlays are required.
+        if (forcePixiOverlay) {
+          const board = document.getElementById('board');
+          if (board && board.tagName === 'CANVAS') {
+            board.style.display = '';
+            board.style.visibility = 'visible';
+            board.style.opacity = '1';
+            board.style.zIndex = '10';
+            board.style.pointerEvents = 'auto';
+          }
+        }
         
         // Three.js is render-only
         threeCanvas.style.pointerEvents = 'none';
@@ -201,6 +247,8 @@ export class InputRouter {
     
     const layerCtorName = activeLayer.constructor?.name || '';
     const layerIdName = activeLayer.name || '';
+    const layerOptionsName = activeLayer.options?.name || '';
+    const activeControl = ui?.controls?.control?.name ?? ui?.controls?.activeControl ?? '';
     
     // Defensive: ui.controls may not exist during initialization
     // This prevents the "toolclip" error when Foundry is still setting up
@@ -221,6 +269,21 @@ export class InputRouter {
       layerCtorName === 'TilesLayer' ||
       layerIdName === 'tiles';
 
+    const isLightingLayer =
+      !!canvas?.lighting?.active ||
+      layerCtorName === 'LightingLayer' ||
+      layerIdName === 'lighting' ||
+      layerOptionsName === 'lighting' ||
+      activeControl === 'lighting';
+
+    const isWallsLayer =
+      !!canvas?.walls?.active ||
+      layerCtorName === 'WallsLayer' ||
+      layerCtorName === 'WallLayer' ||
+      layerIdName === 'walls' ||
+      layerOptionsName === 'walls' ||
+      activeControl === 'walls';
+
     if (isTokensLayer) {
       // WP-2 Ruler parity: when Foundry's ruler tool is active on the tokens
       // layer (toggled via R key), route input to PIXI so the ruler can receive
@@ -236,6 +299,20 @@ export class InputRouter {
     // Three.js so we keep input routed to Three even when the Tiles layer/tools are active.
     if (isTilesLayer) {
       return InputMode.THREE;
+    }
+
+    // In V2, editor overlays from legacy Three managers are not part of the
+    // FloorCompositor render path, so rely on Foundry's native PIXI lighting
+    // controls for visibility/selection/move parity.
+    const v2Active = !!window.MapShine?.__v2Active;
+
+    // Lighting interactions are Three-driven in V1, PIXI-driven in V2.
+    if (isLightingLayer) {
+      return v2Active ? InputMode.PIXI : InputMode.THREE;
+    }
+
+    if (isWallsLayer) {
+      return InputMode.PIXI;
     }
     
     // Check if tool explicitly requires Three.js

@@ -38,6 +38,11 @@ const DOOR_STYLES = Object.freeze({
   DOUBLE_RIGHT: 'doubleR'
 });
 
+// In V2, FloorRenderBus uses transparent tile materials with depthTest disabled
+// and high renderOrder values per floor. Keep door meshes late in transparent
+// sorting so they are drawn on top of floor albedo instead of being overdrawn.
+const DOOR_RENDER_ORDER = 250000;
+
 /**
  * Represents a single animated door mesh in THREE.js
  */
@@ -206,7 +211,7 @@ class DoorMesh {
       transparent: true,
       side: THREE.DoubleSide,
       depthWrite: false,
-      depthTest: true
+      depthTest: false
     });
     
     this.mesh = new THREE.Mesh(geometry, material);
@@ -216,8 +221,8 @@ class DoorMesh {
       style: this.style
     };
     
-    // Set render order to be above the base map but below UI
-    this.mesh.renderOrder = 50;
+    // Draw doors after floor albedo/overhead tiles in V2's transparent pass.
+    this.mesh.renderOrder = DOOR_RENDER_ORDER;
     
     // Add to scene
     this.scene.add(this.mesh);
@@ -386,6 +391,21 @@ class DoorMesh {
       this.mesh.geometry?.dispose();
       this.mesh.material?.dispose();
       this.mesh = null;
+    }
+  }
+
+  /**
+   * Reattach this mesh to a new scene.
+   * @param {THREE.Scene|null} scene
+   */
+  setScene(scene) {
+    if (scene === this.scene) return;
+    if (this.mesh && this.scene) {
+      this.scene.remove(this.mesh);
+    }
+    this.scene = scene;
+    if (this.mesh && this.scene) {
+      this.scene.add(this.mesh);
     }
   }
 }
@@ -656,6 +676,27 @@ export class DoorMeshManager {
         doorMesh.update(timeInfo);
       }
     }
+  }
+
+  /**
+   * Move all managed door meshes to a new render scene.
+   * Used by V2 compositor, which renders FloorRenderBus scene instead of the
+   * legacy main Three scene.
+   * @param {THREE.Scene|null} scene
+   */
+  setScene(scene) {
+    if (!scene || scene === this.scene) return;
+
+    this.scene = scene;
+    let moved = 0;
+    for (const meshSet of this.doorMeshes.values()) {
+      for (const doorMesh of meshSet) {
+        doorMesh.setScene(scene);
+        moved += 1;
+      }
+    }
+
+    log.info(`DoorMeshManager scene target updated; moved ${moved} mesh(es)`);
   }
 
   _updateGlobalTint() {

@@ -87,6 +87,85 @@ export class ControlsIntegration {
     this._wallsAreTransparent = false;
   }
 
+  _getActiveLayerMeta() {
+    const layer = canvas?.activeLayer;
+    const optionsName = String(layer?.options?.name || '').toLowerCase();
+    const name = String(layer?.name || '').toLowerCase();
+    const ctor = String(layer?.constructor?.name || '').toLowerCase();
+    const sceneControl = String(ui?.controls?.control?.name || ui?.controls?.activeControl || '').toLowerCase();
+    return { optionsName, name, ctor, sceneControl };
+  }
+
+  _isLightingContextActive() {
+    if (canvas?.lighting?.active) return true;
+    const { optionsName, name, ctor, sceneControl } = this._getActiveLayerMeta();
+    return optionsName === 'lighting'
+      || name === 'lighting'
+      || ctor === 'lightinglayer'
+      || sceneControl === 'lighting';
+  }
+
+  _isWallsContextActive() {
+    if (canvas?.walls?.active) return true;
+    const { optionsName, name, ctor, sceneControl } = this._getActiveLayerMeta();
+    return optionsName === 'walls'
+      || name === 'walls'
+      || ctor === 'wallslayer'
+      || ctor === 'walllayer'
+      || sceneControl === 'walls';
+  }
+
+  _isPixiEditorOverlayNeeded() {
+    const activeControl = String(ui?.controls?.control?.name || ui?.controls?.activeControl || '').toLowerCase();
+    const activeTool = String(ui?.controls?.tool?.name || ui?.controls?.activeTool || '').toLowerCase();
+    return this._isWallsContextActive()
+      || this._isLightingContextActive()
+      || activeControl === 'walls'
+      || activeControl === 'lighting'
+      || activeTool === 'doors'
+      || activeTool === 'door'
+      || activeTool === 'light';
+  }
+
+  _applyPixiEditorOverlayGate() {
+    try {
+      const needsOverlay = this._isPixiEditorOverlayNeeded();
+      const activeControl = String(ui?.controls?.control?.name || ui?.controls?.activeControl || '').toLowerCase();
+      const activeTool = String(ui?.controls?.tool?.name || ui?.controls?.activeTool || '').toLowerCase();
+      const pixiCanvas = canvas?.app?.view;
+      const board = document.getElementById('board');
+
+      if (window.MapShine) {
+        window.MapShine.__forcePixiEditorOverlay = !!needsOverlay;
+      }
+
+      if (!pixiCanvas) return;
+
+      if (needsOverlay) {
+        pixiCanvas.style.display = '';
+        pixiCanvas.style.visibility = 'visible';
+        pixiCanvas.style.opacity = '1';
+        pixiCanvas.style.zIndex = '10';
+        if (board && board.tagName === 'CANVAS') {
+          board.style.display = '';
+          board.style.visibility = 'visible';
+          board.style.opacity = '1';
+          board.style.zIndex = '10';
+          board.style.pointerEvents = pixiCanvas.style.pointerEvents || 'none';
+        }
+      }
+
+      log.info(
+        `EditorOverlayGate: needs=${needsOverlay} control=${activeControl || 'none'} tool=${activeTool || 'none'} ` +
+        `wallsActive=${!!canvas?.walls?.active} lightingActive=${!!canvas?.lighting?.active} ` +
+        `pixiDisplay=${pixiCanvas.style.display || '(default)'} boardDisplay=${board?.style?.display || '(default)'} ` +
+        `pixiPE=${pixiCanvas.style.pointerEvents || '(default)'} boardPE=${board?.style?.pointerEvents || '(default)'}`
+      );
+    } catch (_) {
+      // Best effort gate
+    }
+  }
+
   /**
    * When ControlsIntegration is active, canvas-replacement's legacy input mode
    * arbiter does not run its light-gizmo visibility updates. We replicate the
@@ -98,9 +177,11 @@ export class ControlsIntegration {
       if (!canvas?.ready) return;
 
       const isMapMakerMode = !!window.MapShine?.isMapMakerMode;
+      const v2Active = !!window.MapShine?.__v2Active;
 
-      const layerName = canvas.activeLayer?.name || canvas.activeLayer?.constructor?.name || '';
-      const showLighting = (layerName === 'LightingLayer' || layerName === 'lighting') && !isMapMakerMode;
+      // V2 renders through FloorCompositor and does not include legacy
+      // Three-based editor icon managers in its draw path.
+      const showLighting = this._isLightingContextActive() && !isMapMakerMode && !v2Active;
 
       const lightIconManager = window.MapShine?.lightIconManager;
       if (lightIconManager?.setVisibility) {
@@ -292,6 +373,7 @@ export class ControlsIntegration {
 
     // Ensure wall visuals are configured correctly (doors should remain visible)
     this._updateWallsVisualState();
+    this._applyPixiEditorOverlayGate();
     
     // Re-hide visibility layer after sight refresh (Foundry may re-show it)
     Hooks.on('sightRefresh', () => {
@@ -574,8 +656,7 @@ export class ControlsIntegration {
   _updateWallsVisualState() {
     if (!canvas?.ready || !canvas.walls?.placeables) return;
 
-    const activeLayerName = canvas.activeLayer?.constructor?.name || canvas.activeLayer?.name || '';
-    const isWallsActive = activeLayerName === 'WallsLayer' || activeLayerName === 'walls';
+    const isWallsActive = this._isWallsContextActive();
 
     try {
       const wallManager = window.MapShine?.wallManager;
@@ -597,14 +678,11 @@ export class ControlsIntegration {
     }
 
     if (isWallsActive) {
-      // Walls layer is active — restore walls on the current floor,
-      // hide walls on other floors to declutter the editor.
+      // In walls edit mode, always show all native wall graphics.
+      // Floor filtering here can hide every wall when perspective/flags mismatch,
+      // which makes the wall tool appear broken.
       for (const wall of canvas.walls.placeables) {
-        if (this._isWallOnCurrentFloor(wall)) {
-          this._restoreWallVisuals(wall);
-        } else {
-          this._hideWallForOtherFloor(wall);
-        }
+        this._restoreWallVisuals(wall);
       }
       this._wallsAreTransparent = false;
     } else {
@@ -705,6 +783,7 @@ export class ControlsIntegration {
           this.inputRouter?.autoUpdate();
           this._updateWallsVisualState();
           this._updateThreeGizmoVisibility();
+          this._applyPixiEditorOverlayGate();
         } catch (error) {
           this.handleError(error, 'activateCanvasLayer');
         }
@@ -722,6 +801,7 @@ export class ControlsIntegration {
           this.inputRouter?.autoUpdate();
           this._updateWallsVisualState();
           this._updateThreeGizmoVisibility();
+          this._applyPixiEditorOverlayGate();
         } catch (error) {
           this.handleError(error, 'renderSceneControls');
         }

@@ -128,10 +128,10 @@ export class SceneContext {
     /** @type {import('../compositor-v2/effects/LightingEffectV2.js').LightingEffectV2|null} */
     this.lightingEffect = null;
 
-    /** @type {import('../effects/LightningEffect.js').LightningEffect|null} */
+    /** @type {import('../compositor-v2/effects/LightningEffectV2.js').LightningEffectV2|null} */
     this.lightningEffect = null;
 
-    /** @type {import('../effects/WorldSpaceFogEffect.js').WorldSpaceFogEffect|null} */
+    /** @type {import('../compositor-v2/effects/FogOfWarEffectV2.js').FogOfWarEffectV2|null} */
     this.fogEffect = null;
 
     /** @type {import('../compositor-v2/effects/SkyColorEffectV2.js').SkyColorEffectV2|null} */
@@ -414,7 +414,7 @@ export class SceneContext {
       'overlayUIManager', 'lightEditor', 'enhancedLightInspector',
       'dynamicExposureManager', 'lightingEffect', 'lightningEffect',
       'fogEffect', 'skyColorEffect', 'candleFlamesEffect', 'ashDisturbanceEffect',
-      'maskManager', 'waterEffect', 'distortionManager', 'cloudEffect',
+      'maskManager', 'waterEffect', 'distortionManager',
       'frameCoordinator', 'graphicsSettings', 'controlPanel', 'uiManager'
     ];
 

@@ -2262,7 +2262,7 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
       const tileId = tileDoc?.id;
       const _texSrc = tileDoc?.texture?.src ?? 'no-texture';
       const _texName = _texSrc.split('/').pop() || _texSrc;
-      console.log(`[Map Shine Advanced: Loading]     tile ${++_syncIdx}/${tiles.size}: ${tileId} (${_texName})`);
+      console.log(`     tile ${++_syncIdx}/${tiles.size}: ${tileId} (${_texName})`);
       if (tileId) {
         this._initialLoad.trackedIds.add(tileId);
         this._initialLoad.pendingAll++;
@@ -3128,7 +3128,7 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     }
 
     const _ctsId = tileDoc.id;
-    console.log(`[Map Shine Advanced: Loading]       createTileSprite START: ${_ctsId}`);
+    console.log(`       createTileSprite START: ${_ctsId}`);
 
     // Create sprite with material.
     // alphaTest is intentionally 0 (disabled): a non-zero alphaTest hard-clips
@@ -3170,12 +3170,12 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
 
     // Install overhead CC shader patch early so it compiles with the material.
     // Uniform values will be populated once overhead classification is known.
-    console.log(`[Map Shine Advanced: Loading]       createTileSprite [${_ctsId}]: _ensureOverheadColorCorrection...`);
+    console.log(`       createTileSprite [${_ctsId}]: _ensureOverheadColorCorrection...`);
     try {
       this._ensureOverheadColorCorrection(material);
     } catch (_) {
     }
-    console.log(`[Map Shine Advanced: Loading]       createTileSprite [${_ctsId}]: _ensureOverheadColorCorrection DONE`);
+    console.log(`       createTileSprite [${_ctsId}]: _ensureOverheadColorCorrection DONE`);
 
     const isOverheadForLoad = isTileOverhead(tileDoc);
 
@@ -3240,7 +3240,7 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
       }
 
       try {
-        window.MapShine?.cloudEffect?.requestBlockerUpdate?.(2);
+        window.MapShine?.cloudEffectV2?.requestBlockerUpdate?.(2);
       } catch (_) {
       }
 
@@ -3281,9 +3281,9 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     });
 
     // Set initial transform and visibility
-    console.log(`[Map Shine Advanced: Loading]       createTileSprite [${_ctsId}]: updateSpriteTransform...`);
+    console.log(`       createTileSprite [${_ctsId}]: updateSpriteTransform...`);
     this.updateSpriteTransform(sprite, tileDoc);
-    console.log(`[Map Shine Advanced: Loading]       createTileSprite [${_ctsId}]: updateSpriteTransform DONE`);
+    console.log(`       createTileSprite [${_ctsId}]: updateSpriteTransform DONE`);
     
     this.scene.add(sprite);
 
@@ -3334,12 +3334,12 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     } catch (_) {
     }
 
-    console.log(`[Map Shine Advanced: Loading]       createTileSprite [${_ctsId}]: _ensure*Mesh...`);
+    console.log(`       createTileSprite [${_ctsId}]: _ensure*Mesh...`);
     this._ensureWaterOccluderMesh(this.tileSprites.get(tileDoc.id), tileDoc);
     this._ensureAboveFloorBlockerMesh(this.tileSprites.get(tileDoc.id), tileDoc);
     this._ensureFloorPresenceMesh(this.tileSprites.get(tileDoc.id), tileDoc);
     this._ensureBelowFloorPresenceMesh(this.tileSprites.get(tileDoc.id), tileDoc);
-    console.log(`[Map Shine Advanced: Loading]       createTileSprite [${_ctsId}]: _ensure*Mesh DONE`);
+    console.log(`       createTileSprite [${_ctsId}]: _ensure*Mesh DONE`);
 
     if (sprite.userData.isOverhead) {
       this._overheadTileIds.add(tileDoc.id);
@@ -3362,11 +3362,11 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     this._tintDirty = true;
 
     try {
-      window.MapShine?.cloudEffect?.requestBlockerUpdate?.(2);
+      window.MapShine?.cloudEffectV2?.requestBlockerUpdate?.(2);
     } catch (_) {
     }
 
-    console.log(`[Map Shine Advanced: Loading]       createTileSprite END: ${_ctsId}`);
+    console.log(`       createTileSprite END: ${_ctsId}`);
     log.debug(`Created tile sprite: ${tileDoc.id}`);
   }
 
@@ -3509,7 +3509,7 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
         }
 
         try {
-          window.MapShine?.cloudEffect?.requestBlockerUpdate?.(2);
+          window.MapShine?.cloudEffectV2?.requestBlockerUpdate?.(2);
         } catch (_) {
         }
       }).catch(error => {
@@ -3672,7 +3672,7 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     log.debug(`Removed tile sprite: ${tileId}`);
 
     try {
-      window.MapShine?.cloudEffect?.requestBlockerUpdate?.(2);
+      window.MapShine?.cloudEffectV2?.requestBlockerUpdate?.(2);
     } catch (_) {
     }
   }
@@ -3907,7 +3907,7 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     }
 
     try {
-      window.MapShine?.cloudEffect?.requestBlockerUpdate?.(2);
+      window.MapShine?.cloudEffectV2?.requestBlockerUpdate?.(2);
     } catch (_) {
     }
 
@@ -4154,7 +4154,7 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     }
 
     try {
-      window.MapShine?.cloudEffect?.requestBlockerUpdate?.(2);
+      window.MapShine?.cloudEffectV2?.requestBlockerUpdate?.(2);
     } catch (_) {
     }
   }

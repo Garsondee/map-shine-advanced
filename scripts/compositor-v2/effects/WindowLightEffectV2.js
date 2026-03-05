@@ -72,6 +72,10 @@ export class WindowLightEffectV2 {
       flickerSpeed: 0.35,
       flickerAmount: 0.15,
       cloudInfluence: 1.0,
+      cloudShadowContrast: 4.0,
+      cloudShadowBias: 0.05,
+      cloudShadowGamma: 2.28,
+      cloudShadowMinLight: 0.0,
       useSkyTint: true,
       skyTintStrength: 3.62,
       nightDimming: 1.0,
@@ -446,10 +450,18 @@ export class WindowLightEffectV2 {
     u.uCloudInfluence.value = Math.max(0.0, Math.min(1.0, Number(this.params.cloudInfluence) || 0.0));
 
     const weatherState = weatherController?.getCurrentState?.() ?? weatherController?.currentState ?? {};
-    const precipType = Number(weatherState?.precipType) || PrecipitationType.NONE;
+    const precipTypeRaw = Number(weatherState?.precipType);
+    const precipType = Number.isFinite(precipTypeRaw) ? precipTypeRaw : PrecipitationType.NONE;
     const precipAmount = Math.max(0.0, Math.min(1.0, Number(weatherState?.precipitation) || 0.0));
-    const isLiquidPrecip = precipType === PrecipitationType.RAIN || precipType === PrecipitationType.HAIL;
-    const rainEnabled = !!this.params.rainOnGlassEnabled && isLiquidPrecip;
+    const freezeLevel = Math.max(0.0, Math.min(1.0, Number(weatherState?.freezeLevel) || 0.0));
+    const hasExplicitPrecipType = Number.isFinite(precipTypeRaw) && precipType !== PrecipitationType.NONE;
+    const isLiquidByType = precipType === PrecipitationType.RAIN || precipType === PrecipitationType.HAIL;
+    // Fallback: during some transitions precipType can temporarily lag while
+    // precipitation is already rising. Treat low-freeze precipitation as rain.
+    const isLikelyLiquid = freezeLevel < 0.65;
+    const rainEnabled = !!this.params.rainOnGlassEnabled
+      && precipAmount > 0.001
+      && (isLiquidByType || (!hasExplicitPrecipType && isLikelyLiquid));
     const pStart = Math.max(0.0, Math.min(1.0, Number(this.params.rainOnGlassPrecipStart) || 0.0));
     const pFull = Math.max(pStart + 0.001, Math.min(1.0, Number(this.params.rainOnGlassPrecipFull) || 1.0));
     const rainRamp = Math.max(0.0, Math.min(1.0, (precipAmount - pStart) / Math.max(0.001, pFull - pStart)));
@@ -459,6 +471,10 @@ export class WindowLightEffectV2 {
     u.uRainDir.value.set(Math.cos(rainDirRad), Math.sin(rainDirRad));
     u.uRainMaxOffsetPx.value = Math.max(0.0, Number(this.params.rainOnGlassMaxOffsetPx) || 0.0);
     u.uRainDarken.value = Math.max(0.0, Math.min(1.0, Number(this.params.rainOnGlassDarken) || 0.0));
+    u.uCloudShadowContrast.value = Math.max(0.0, Number(this.params.cloudShadowContrast) || 1.0);
+    u.uCloudShadowBias.value = Number(this.params.cloudShadowBias) || 0.0;
+    u.uCloudShadowGamma.value = Math.max(0.01, Number(this.params.cloudShadowGamma) || 1.0);
+    u.uCloudShadowMinLight.value = Math.max(0.0, Math.min(1.0, Number(this.params.cloudShadowMinLight) || 0.0));
 
     // RGB shift — convert angle from degrees to radians each frame so live
     // tweaks take effect without requiring a repopulate.
@@ -496,6 +512,31 @@ export class WindowLightEffectV2 {
     }
   }
 
+  /**
+   * Bind CloudEffectV2 shadow factor texture for screen-space occlusion.
+   * @param {THREE.Texture|null} texture
+   * @param {number} screenW
+   * @param {number} screenH
+   * @param {{minX:number,minY:number,maxX:number,maxY:number}|null} [viewBounds]
+   */
+  setCloudShadowTexture(texture, screenW, screenH, viewBounds = null) {
+    const u = this._sharedUniforms;
+    if (!u) return;
+    u.uCloudShadowTex.value = texture ?? null;
+    u.uHasCloudShadowTex.value = texture ? 1.0 : 0.0;
+    const w = Math.max(1, Number(screenW) || 1);
+    const h = Math.max(1, Number(screenH) || 1);
+    u.uScreenSize.value.set(w, h);
+    if (viewBounds && Number.isFinite(viewBounds.minX) && Number.isFinite(viewBounds.minY)
+      && Number.isFinite(viewBounds.maxX) && Number.isFinite(viewBounds.maxY)) {
+      u.uCloudShadowViewMin.value.set(viewBounds.minX, viewBounds.minY);
+      u.uCloudShadowViewMax.value.set(viewBounds.maxX, viewBounds.maxY);
+      u.uHasCloudShadowViewBounds.value = 1.0;
+    } else {
+      u.uHasCloudShadowViewBounds.value = 0.0;
+    }
+  }
+
   // ── Internals ──────────────────────────────────────────────────────────────
 
   _buildSharedUniforms() {
@@ -525,6 +566,16 @@ export class WindowLightEffectV2 {
       uSunLightLength: { value: Math.max(0.0, Number(this.params.sunLightLength) || 0.0) },
       uCloudFactor: { value: 1.0 },
       uCloudInfluence: { value: Math.max(0.0, Math.min(1.0, Number(this.params.cloudInfluence) || 0.0)) },
+      uCloudShadowTex: { value: null },
+      uHasCloudShadowTex: { value: 0.0 },
+      uScreenSize: { value: new THREE.Vector2(1, 1) },
+      uCloudShadowViewMin: { value: new THREE.Vector2(0, 0) },
+      uCloudShadowViewMax: { value: new THREE.Vector2(1, 1) },
+      uHasCloudShadowViewBounds: { value: 0.0 },
+      uCloudShadowContrast: { value: Math.max(0.0, Number(this.params.cloudShadowContrast) || 1.0) },
+      uCloudShadowBias: { value: Number(this.params.cloudShadowBias) || 0.0 },
+      uCloudShadowGamma: { value: Math.max(0.01, Number(this.params.cloudShadowGamma) || 1.0) },
+      uCloudShadowMinLight: { value: Math.max(0.0, Math.min(1.0, Number(this.params.cloudShadowMinLight) || 0.0)) },
       uRainAmount: { value: 0.0 },
       uRainSpeed: { value: Math.max(0.0, Number(this.params.rainOnGlassSpeed) || 0.0) },
       uRainDir: { value: new THREE.Vector2(0, -1) },
@@ -564,8 +615,11 @@ export class WindowLightEffectV2 {
       blending: THREE.AdditiveBlending,
       vertexShader: /* glsl */`
         varying vec2 vUv;
+        varying vec2 vWorldXY;
         void main() {
           vUv = uv;
+          vec4 worldPos = modelMatrix * vec4(position, 1.0);
+          vWorldXY = worldPos.xy;
           gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
         }
       `,
@@ -587,6 +641,16 @@ export class WindowLightEffectV2 {
         uniform float uSunLightLength;
         uniform float uCloudFactor;
         uniform float uCloudInfluence;
+        uniform sampler2D uCloudShadowTex;
+        uniform float uHasCloudShadowTex;
+        uniform vec2  uScreenSize;
+        uniform vec2  uCloudShadowViewMin;
+        uniform vec2  uCloudShadowViewMax;
+        uniform float uHasCloudShadowViewBounds;
+        uniform float uCloudShadowContrast;
+        uniform float uCloudShadowBias;
+        uniform float uCloudShadowGamma;
+        uniform float uCloudShadowMinLight;
         uniform float uRainAmount;
         uniform float uRainSpeed;
         uniform vec2  uRainDir;
@@ -598,6 +662,7 @@ export class WindowLightEffectV2 {
         uniform sampler2D uMask;
         uniform float uMaskReady;
         varying vec2 vUv;
+        varying vec2 vWorldXY;
 
         float msLuminance(vec3 c) {
           return dot(c, vec3(0.2126, 0.7152, 0.0722));
@@ -636,17 +701,20 @@ export class WindowLightEffectV2 {
           vec2 rOffset  = shiftDir * uRgbShiftAmount * uWindowTexelSize;
           vec2 bOffset  = -rOffset;
 
-          float maskR = msLuminance(texture2D(uMask, clamp(baseUv + rOffset, 0.001, 0.999)).rgb);
-          float maskG = msLuminance(mCenter.rgb);
-          float maskB = msLuminance(texture2D(uMask, clamp(baseUv + bOffset, 0.001, 0.999)).rgb);
+          vec3 sampleR = texture2D(uMask, clamp(baseUv + rOffset, 0.001, 0.999)).rgb;
+          vec3 sampleC = mCenter.rgb;
+          vec3 sampleB = texture2D(uMask, clamp(baseUv + bOffset, 0.001, 0.999)).rgb;
+          // Preserve mask chroma when available (_Windows/_Structural can be tinted).
+          // Keep RGB shift behaviour by taking channel-aligned taps.
+          vec3 maskRgb = vec3(sampleR.r, sampleC.g, sampleB.b);
 
-          // Average luminance drives the overall shape/falloff.
-          float maskScalar = (maskR + maskG + maskB) / 3.0;
+          // Luminance still drives cheap reject and overall energy.
+          float maskScalar = msLuminance(maskRgb);
           if (maskScalar <= 0.001) discard;
 
           // Shape with gamma-like falloff — matches V1 uFalloff usage.
-          // Apply falloff per-channel so the RGB split is visible in the shaped output.
-          vec3 shaped = pow(clamp(vec3(maskR, maskG, maskB), 0.0, 1.0), vec3(uFalloff));
+          // Apply falloff per-channel so mask tint and RGB split remain visible.
+          vec3 shaped = pow(clamp(maskRgb, 0.0, 1.0), vec3(uFalloff));
 
           // Optional subtle flicker.
           float flicker = 1.0;
@@ -667,11 +735,27 @@ export class WindowLightEffectV2 {
           skyTint.b = mix(skyTint.b, min(skyTint.b, 1.0), dayWarmth * 0.6);
           float skyMix = (uUseSkyTint > 0.5) ? (1.0 - exp(-max(uSkyTintStrength, 0.0) * 0.16)) : 0.0;
           vec3 tintColor = mix(vec3(1.0), skyTint, clamp(skyMix, 0.0, 1.0));
+          // Keep daytime windows from drifting too cool under strong sky tint.
+          float warmDayFactor = clamp((uNightFactor - 0.45) / 0.55, 0.0, 1.0);
+          vec3 daylightWarmTint = vec3(1.05, 1.0, 0.94);
+          vec3 envTintColor = mix(tintColor, tintColor * daylightWarmTint, 0.35 * warmDayFactor);
 
           float cloudDimming = mix(1.0, clamp(uCloudFactor, 0.0, 1.0), clamp(uCloudInfluence, 0.0, 1.0));
+          float cloudShadow = 1.0;
+          if (uHasCloudShadowTex > 0.5) {
+            vec2 shadowUv = gl_FragCoord.xy / max(uScreenSize, vec2(1.0));
+            if (uHasCloudShadowViewBounds > 0.5) {
+              vec2 vbSize = max(uCloudShadowViewMax - uCloudShadowViewMin, vec2(1e-3));
+              shadowUv = (vWorldXY - uCloudShadowViewMin) / vbSize;
+            }
+            float s = clamp(texture2D(uCloudShadowTex, clamp(shadowUv, 0.0, 1.0)).r, 0.0, 1.0);
+            s = clamp((s - 0.5) * max(uCloudShadowContrast, 0.0) + 0.5 + uCloudShadowBias, 0.0, 1.0);
+            s = pow(s, max(uCloudShadowGamma, 0.01));
+            cloudShadow = max(s, clamp(uCloudShadowMinLight, 0.0, 1.0));
+          }
           float rainDarkenMul = 1.0 - clamp(uRainDarken, 0.0, 1.0) * clamp(uRainAmount, 0.0, 1.0) * 0.35;
 
-          vec3 lightOut = shaped * (uColor * tintColor) * uIntensity * flicker * max(uNightFactor, 0.0) * cloudDimming * rainDarkenMul;
+          vec3 lightOut = shaped * (uColor * envTintColor) * uIntensity * flicker * max(uNightFactor, 0.0) * cloudDimming * cloudShadow * rainDarkenMul;
 
           // Output raw linear light — no tone mapping on additive overlays.
           // AdditiveBlending: dst += src.rgb * src.a. Alpha=1 so the full

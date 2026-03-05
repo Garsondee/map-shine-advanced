@@ -60,6 +60,9 @@ export class BushEffectV2 {
       windRampSpeed: 2.93,
       gustFrequency: 0.01,
       gustSpeed: 0.52463,
+      minRustleSpeed: 0.18,
+      edgeFadeStart: 0.03,
+      edgeFadeEnd: 0.14,
 
       // -- Bush Movement --
       branchBend: 0.037,
@@ -74,7 +77,7 @@ export class BushEffectV2 {
       exposure: 0.0,
       brightness: 0.0,
       contrast: 1.0,
-      saturation: 1.1,
+      saturation: 1.0,
       temperature: 0.0,
       tint: 0.0,
 
@@ -106,7 +109,7 @@ export class BushEffectV2 {
           name: 'bush-phys',
           label: 'Wind Physics',
           type: 'inline',
-          parameters: ['windSpeedGlobal', 'windRampSpeed', 'branchBend', 'elasticity']
+          parameters: ['windSpeedGlobal', 'windRampSpeed', 'minRustleSpeed', 'branchBend', 'elasticity']
         },
         {
           name: 'bush-flutter',
@@ -125,12 +128,19 @@ export class BushEffectV2 {
           label: 'Shadow',
           type: 'inline',
           parameters: ['shadowOpacity', 'shadowLength', 'shadowSoftness']
+        },
+        {
+          name: 'bush-edges',
+          label: 'Edge Safety',
+          type: 'inline',
+          parameters: ['edgeFadeStart', 'edgeFadeEnd']
         }
       ],
       parameters: {
         intensity: { type: 'slider', min: 0.0, max: 2.0, default: undefined },
         windSpeedGlobal: { type: 'slider', label: 'Wind Strength', min: 0.0, max: 3.0, default: 0.04 },
         windRampSpeed: { type: 'slider', label: 'Wind Responsiveness', min: 0.1, max: 10.0, default: 2.93 },
+        minRustleSpeed: { type: 'slider', label: 'Low-Wind Rustle Floor', min: 0.0, max: 0.6, default: 0.18 },
         branchBend: { type: 'slider', label: 'Branch Bend', min: 0.0, max: 0.05, step: 0.001, default: 0.037 },
         elasticity: { type: 'slider', label: 'Springiness', min: 0.5, max: 5.0, default: 5.0 },
         flutterIntensity: { type: 'slider', label: 'Leaf Flutter Amount', min: 0.0, max: 0.005, step: 0.0001, default: 0.0014 },
@@ -139,12 +149,14 @@ export class BushEffectV2 {
         exposure: { type: 'slider', min: -2.0, max: 2.0, default: 0.0 },
         brightness: { type: 'slider', min: -0.5, max: 0.5, default: 0.0 },
         contrast: { type: 'slider', min: 0.5, max: 2.0, default: 1.0 },
-        saturation: { type: 'slider', min: 0.0, max: 2.0, default: 1.1 },
+        saturation: { type: 'slider', min: 0.0, max: 2.0, default: 1.0 },
         temperature: { type: 'slider', min: -1.0, max: 1.0, default: 0.0 },
         tint: { type: 'slider', min: -1.0, max: 1.0, default: 0.0 },
         shadowOpacity: { type: 'slider', label: 'Shadow Opacity', min: 0.0, max: 1.0, default: 0.4 },
         shadowLength: { type: 'slider', label: 'Shadow Length', min: 0.0, max: 0.1, default: 0.02 },
-        shadowSoftness: { type: 'slider', label: 'Shadow Softness', min: 0.5, max: 5.0, default: 5.0 }
+        shadowSoftness: { type: 'slider', label: 'Shadow Softness', min: 0.5, max: 5.0, default: 5.0 },
+        edgeFadeStart: { type: 'slider', label: 'Edge Fade Start', min: 0.0, max: 0.2, default: 0.03 },
+        edgeFadeEnd: { type: 'slider', label: 'Edge Fade End', min: 0.02, max: 0.4, default: 0.14 }
       }
     };
   }
@@ -222,6 +234,8 @@ export class BushEffectV2 {
     const lerpT = Math.min(1.0, delta * ramp);
     this._currentWindSpeed = this._currentWindSpeed + (windSpeed01 - this._currentWindSpeed) * lerpT;
 
+    this._syncSceneBoundsUniforms();
+
     // Update shared uniforms.
     if (this._sharedUniforms) {
       this._sharedUniforms.uTime.value = time;
@@ -235,6 +249,9 @@ export class BushEffectV2 {
       this._sharedUniforms.uWindSpeedGlobal.value = this.params.windSpeedGlobal;
       this._sharedUniforms.uGustFrequency.value = this.params.gustFrequency;
       this._sharedUniforms.uGustSpeed.value = this.params.gustSpeed;
+      this._sharedUniforms.uMinRustleSpeed.value = this.params.minRustleSpeed;
+      this._sharedUniforms.uEdgeFadeStart.value = this.params.edgeFadeStart;
+      this._sharedUniforms.uEdgeFadeEnd.value = this.params.edgeFadeEnd;
       this._sharedUniforms.uBranchBend.value = this.params.branchBend;
       this._sharedUniforms.uElasticity.value = this.params.elasticity;
       this._sharedUniforms.uFlutterIntensity.value = this.params.flutterIntensity;
@@ -295,11 +312,16 @@ export class BushEffectV2 {
       uTime: { value: 0.0 },
       uWindDir: { value: new THREE.Vector2(1.0, 0.0) },
       uWindSpeed: { value: 0.0 },
+      uSceneMin: { value: new THREE.Vector2(0.0, 0.0) },
+      uSceneMax: { value: new THREE.Vector2(1.0, 1.0) },
 
       uIntensity: { value: (this.params.intensity ?? 1.0) },
       uWindSpeedGlobal: { value: this.params.windSpeedGlobal },
       uGustFrequency: { value: this.params.gustFrequency },
       uGustSpeed: { value: this.params.gustSpeed },
+      uMinRustleSpeed: { value: this.params.minRustleSpeed },
+      uEdgeFadeStart: { value: this.params.edgeFadeStart },
+      uEdgeFadeEnd: { value: this.params.edgeFadeEnd },
       uBranchBend: { value: this.params.branchBend },
       uElasticity: { value: this.params.elasticity },
       uFlutterIntensity: { value: this.params.flutterIntensity },
@@ -344,6 +366,26 @@ export class BushEffectV2 {
     return 0;
   }
 
+  _syncSceneBoundsUniforms() {
+    if (!this._sharedUniforms) return;
+    const dims = canvas?.dimensions;
+    const sceneRect = dims?.sceneRect;
+    if (!sceneRect) return;
+
+    const canvasHeight = Number(dims?.height ?? 0);
+    const sceneX = Number(sceneRect.x ?? 0);
+    const sceneY = Number(sceneRect.y ?? 0);
+    const sceneW = Number(sceneRect.width ?? 0);
+    const sceneH = Number(sceneRect.height ?? 0);
+
+    // Scene rect is Foundry-space (Y-down); shader world positions are Three-space (Y-up).
+    const minY = canvasHeight - (sceneY + sceneH);
+    const maxY = canvasHeight - sceneY;
+
+    this._sharedUniforms.uSceneMin.value.set(sceneX, minY);
+    this._sharedUniforms.uSceneMax.value.set(sceneX + sceneW, maxY);
+  }
+
   _createOverlay(tileId, floorIndex, opts) {
     const THREE = window.THREE;
     if (!THREE || !this._sharedUniforms) return;
@@ -377,11 +419,16 @@ export class BushEffectV2 {
         uniform float uWindSpeedGlobal;
         uniform float uGustFrequency;
         uniform float uGustSpeed;
+        uniform float uMinRustleSpeed;
+        uniform float uEdgeFadeStart;
+        uniform float uEdgeFadeEnd;
         uniform float uBranchBend;
         uniform float uElasticity;
         uniform float uFlutterIntensity;
         uniform float uFlutterSpeed;
         uniform float uFlutterScale;
+        uniform vec2  uSceneMin;
+        uniform vec2  uSceneMax;
 
         uniform float uExposure;
         uniform float uBrightness;
@@ -428,12 +475,13 @@ export class BushEffectV2 {
           vec2 windDir = normalize(uWindDir);
           if (length(windDir) < 0.01) windDir = vec2(1.0, 0.0);
 
-          float speed = uWindSpeed * uWindSpeedGlobal;
+          float speed = max(0.0, uWindSpeed * uWindSpeedGlobal);
+          float rustleSpeed = max(speed, max(0.0, uMinRustleSpeed));
           float ambientMotion = 0.1;
-          float effectiveSpeed = ambientMotion + speed;
+          float effectiveSpeed = ambientMotion + rustleSpeed;
 
           vec2 gustPos = vWorldPos * uGustFrequency;
-          vec2 scroll = windDir * uTime * uGustSpeed * effectiveSpeed;
+          vec2 scroll = windDir * uTime * uGustSpeed * rustleSpeed;
           float gustNoise = noise(gustPos - scroll);
           float gustStrength = smoothstep(0.2, 0.8, gustNoise);
 
@@ -445,20 +493,30 @@ export class BushEffectV2 {
           float swayMagnitude = orbitSway * (uBranchBend * 0.4) * effectiveSpeed * (0.5 + 0.5 * gustStrength);
 
           float noiseVal = noise(vWorldPos * uFlutterScale);
-          float flutterPhase = uTime * uFlutterSpeed * effectiveSpeed + noiseVal * 6.28;
+          float flutterPhase = uTime * uFlutterSpeed * (0.85 + rustleSpeed) + noiseVal * 6.28;
           float flutter = sin(flutterPhase);
-          float flutterMagnitude = flutter * uFlutterIntensity * (0.5 + 0.5 * gustStrength);
+          float lowWindBoost = mix(1.35, 1.0, smoothstep(uMinRustleSpeed, uMinRustleSpeed + 0.25, speed));
+          float flutterMagnitude = flutter * uFlutterIntensity * (0.5 + 0.5 * gustStrength) * lowWindBoost;
 
           vec2 distortion = (windDir * pushMagnitude)
                           + (perpDir * swayMagnitude)
                           + vec2(flutter, flutter) * flutterMagnitude;
+
+          vec2 sceneSpan = max(uSceneMax - uSceneMin, vec2(1e-3));
+          vec2 sceneUv = clamp((vWorldPos - uSceneMin) / sceneSpan, 0.0, 1.0);
+          float edgeDist = min(min(sceneUv.x, 1.0 - sceneUv.x), min(sceneUv.y, 1.0 - sceneUv.y));
+          float edgeFade = smoothstep(uEdgeFadeStart, max(uEdgeFadeStart + 1e-4, uEdgeFadeEnd), edgeDist);
+          distortion *= edgeFade;
 
           vec4 bushSample = texture2D(uBushMask, vUv - distortion);
 
           float a = bushSample.a * uIntensity;
           if (a <= 0.001) discard;
 
-          vec3 color = applyCC(bushSample.rgb);
+          float ccDelta = abs(uExposure) + abs(uBrightness) + abs(uContrast - 1.0)
+                        + abs(uSaturation - 1.0) + abs(uTemperature) + abs(uTint);
+          vec3 color = bushSample.rgb;
+          if (ccDelta > 0.0001) color = applyCC(color);
           gl_FragColor = vec4(color, clamp(a, 0.0, 1.0));
         }
       `,

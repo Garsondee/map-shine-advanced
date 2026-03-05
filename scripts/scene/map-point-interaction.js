@@ -72,6 +72,27 @@ export class MapPointDrawHandler {
   /** @returns {boolean} */
   get active() { return this.state.active; }
 
+  /**
+   * Resolve map-point metadata for the currently active level context.
+   * Falls back to an all-levels contract if level context is unavailable.
+   * @returns {Object}
+   * @private
+   */
+  _getActiveLevelMetadata() {
+    const mapPointsManager = window.MapShine?.mapPointsManager;
+    if (typeof mapPointsManager?.buildMetadataFromLevelContext === 'function') {
+      return mapPointsManager.buildMetadataFromLevelContext(window.MapShine?.activeLevelContext ?? null);
+    }
+    return {
+      levelBinding: {
+        mode: 'all-levels',
+        bottom: null,
+        top: null,
+        floorKey: null,
+      },
+    };
+  }
+
   // ── Preview Mesh Creation ─────────────────────────────────────────────────
 
   /**
@@ -255,7 +276,8 @@ export class MapPointDrawHandler {
         const existingGroup = mapPointsManager.getGroup(editingGroupId);
         const isExistingRopeGroup = existingGroup?.effectTarget === 'rope' || existingGroup?.type === 'rope';
         const updates = {
-          points: points.map(p => ({ x: p.x, y: p.y }))
+          points: points.map(p => ({ x: p.x, y: p.y })),
+          metadata: this._getActiveLevelMetadata(),
         };
 
         // Preserve rope-specific properties when editing a rope group
@@ -295,7 +317,8 @@ export class MapPointDrawHandler {
           points: points.map(p => ({ x: p.x, y: p.y })),
           isEffectSource: isRope ? false : true,
           effectTarget: isRopeEffect ? 'rope' : (isRope ? '' : effectTarget),
-          ropeType: isRopeEffect ? ropePreset : undefined
+          ropeType: isRopeEffect ? ropePreset : undefined,
+          metadata: this._getActiveLevelMetadata(),
         });
 
         log.info(`Created map point group: ${group.id}`);
@@ -678,7 +701,8 @@ export class MapPointDrawHandler {
             const newGroup = await mapPointsManager.createGroup({
               ...group,
               id: undefined,
-              label: `${group.label} (copy)`
+              label: `${group.label} (copy)`,
+              metadata: this._getActiveLevelMetadata(),
             });
             log.info(`Created map point group: ${newGroup.id}`);
             ui.notifications.info(`Duplicated: ${newGroup.label}`);

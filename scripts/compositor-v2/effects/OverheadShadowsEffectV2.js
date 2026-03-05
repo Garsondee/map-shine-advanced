@@ -797,8 +797,9 @@ export class OverheadShadowsEffectV2 {
           // Smooth edge falloff: when we cannot travel full projection distance
           // near viewport borders, fade contribution to avoid smear bands from
           // heavily compressed sample neighborhoods.
-          float baseEdgeFade = smoothstep(0.0, 1.0, baseOffsetScale);
-          vec2 offsetUv = roofUv + baseOffsetDeltaUv;
+          // Keep a non-zero floor so projection degrades instead of vanishing.
+          float baseEdgeFade = mix(0.25, 1.0, smoothstep(0.0, 1.0, baseOffsetScale));
+          vec2 offsetUv = roofUv + baseOffsetDeltaUv * baseOffsetScale;
           // Suppress self-shadowing on the caster layer itself.
           float roofBaseAlpha = clamp(texture2D(tRoof, clamp(roofUv, 0.0, 1.0)).a, 0.0, 1.0);
 
@@ -807,8 +808,9 @@ export class OverheadShadowsEffectV2 {
           float projectedPixelLen = pixelLen * tileProjectionLengthScale;
           vec2 projectedOffsetDeltaUv = screenDir * projectedPixelLen * uTexelSize * tileProjectionUvScale;
           float projectedOffsetScale = offsetTravelScale(tileProjectionUv, projectedOffsetDeltaUv);
-          float projectedEdgeFade = smoothstep(0.0, 1.0, projectedOffsetScale);
-          vec2 projectedOffsetUv = tileProjectionUv + projectedOffsetDeltaUv;
+          // Keep a non-zero floor so tile projection degrades instead of vanishing.
+          float projectedEdgeFade = mix(0.25, 1.0, smoothstep(0.0, 1.0, projectedOffsetScale));
+          vec2 projectedOffsetUv = tileProjectionUv + projectedOffsetDeltaUv * projectedOffsetScale;
           // Same rule for tile projection casters: do not project onto the
           // tile's own layer footprint at the receiver pixel.
           float tileBaseAlpha = clamp(texture2D(tTileProjection, clamp(tileProjectionUv, 0.0, 1.0)).a, 0.0, 1.0);
@@ -829,7 +831,7 @@ export class OverheadShadowsEffectV2 {
               float receiverHeight = uGroundDistance - receiverLinear;
 
               // Tile projection caster height (uses projection-length offset)
-              vec2 tileCasterUv = screenUv + screenDir * projectedPixelLen * uTexelSize;
+              vec2 tileCasterUv = screenUv + screenDir * projectedPixelLen * uTexelSize * projectedOffsetScale;
               float tileCasterDevice = texture2D(uDepthTexture, tileCasterUv).r;
               if (tileCasterDevice < 0.9999) {
                 float tileCasterLinear = msa_linearizeDepth(tileCasterDevice);

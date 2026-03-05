@@ -52,51 +52,27 @@ These live in `scripts/compositor-v2/effects/` and are self-contained:
 
 **Total V2 effect code: ~714KB** across 22 files.
 
-### V1 Effects — Still in `scripts/effects/` (36+ effects)
+### V1 Effects — Current `scripts/effects/` Reality (investigated Mar 2026)
 
-These are the V1 implementations. Many have V2 equivalents above:
+The old “36+ V1 effects” count is stale. A direct filesystem audit shows `scripts/effects/` now contains a **much smaller core set** (plus shader helpers and one stub folder). Most previously-listed effects already live in `scripts/compositor-v2/effects/`.
 
-| V1 Effect | Has V2 Equivalent? | Notes |
-|-----------|-------------------|-------|
-| SpecularEffect (145KB) | ✅ Yes | V2 is independent |
-| LightingEffect (120KB) | ✅ Yes | V2 is independent |
-| WindowLightEffect (163KB) | ✅ Yes | V2 is independent |
-| WaterEffectV2 (247KB) | ✅ Yes (in compositor-v2) | Confusingly named — this is the V1 water in `scripts/effects/` |
-| CloudEffect (109KB) | ✅ Yes | V2 is independent |
-| DistortionManager (140KB) | ❌ **No V2** | V1-only; heat haze, water ripples, magic effects |
-| OverheadShadowsEffect (74KB) | ✅ Yes | V2 is independent |
-| WorldSpaceFogEffect (96KB) | ❌ **No V2** | Fog of war — critical, no V2 implementation |
-| PlayerLightEffect (121KB) | ❌ **No V2** | Flashlight/torch — critical, no V2 implementation |
-| SkyColorEffect (45KB) | ✅ Yes | V2 is independent |
-| BuildingShadowsEffect (23KB) | ✅ Yes | V2 is independent |
-| BloomEffect (33KB) | ✅ Yes | V2 is independent |
-| TreeEffect (51KB) | ❌ **No V2** | Animated trees with wind |
-| BushEffect (43KB) | ❌ **No V2** | Animated bushes with wind |
-| ColorCorrectionEffect (14KB) | ✅ Yes | V2 is independent |
-| IridescenceEffect (41KB) | ❌ **No V2** | Holographic thin-film |
-| PrismEffect (19KB) | ❌ **No V2** | Refraction overlay |
-| FluidEffect (64KB) | ❌ **No V2** | Fluid simulation overlay |
-| AtmosphericFogEffect (36KB) | ❌ **No V2** | Distance/height fog |
-| LightningEffect (38KB) | ❌ **No V2** | Weather lightning flashes |
-| CandleFlamesEffect (38KB) | ❌ **No V2** | Candle/torch particles |
-| LensflareEffect (25KB) | ❌ **No V2** | Camera-space light flares |
-| SmellyFliesEffect | ❌ **No V2** | Particle effect |
-| DustMotesEffect | ❌ **No V2** | Particle effect |
-| AshDisturbanceEffect | ❌ **No V2** | Particle effect (token-driven) |
-| SelectionBoxEffect (39KB) | ❌ **No V2** | Token selection UI |
-| FilmGrainEffect (5KB) | ✅ Yes | V2 is independent |
-| SharpenEffect (6KB) | ✅ Yes | V2 is independent |
-| DotScreenEffect (5KB) | ❌ **No V2** | Artistic filter |
-| HalftoneEffect (14KB) | ❌ **No V2** | Artistic filter |
-| AsciiEffect (21KB) | ❌ **No V2** | Artistic filter |
-| DazzleOverlayEffect (6KB) | ❌ **No V2** | Full-screen grade |
-| VisionModeEffect (11KB) | ❌ **No V2** | Darkvision, tremorsense |
-| DetectionFilterEffect (13KB) | ❌ **No V2** | Token detection overlay |
-| MaskDebugEffect (14KB) | ❌ **No V2** | Dev overlay |
-| DebugLayerEffect (18KB) | ❌ **No V2** | Dev overlay |
-| EffectComposer (108KB) | Partially — delegates to FloorCompositor | Still the frame loop owner |
+| File in `scripts/effects/` | V2 Equivalent in `scripts/compositor-v2/effects/`? | Notes |
+|---|---|---|
+| DistortionManager.js (140KB) | ❌ No direct V2 replacement | Still the large V1 distortion hub (heat/water/magic distortion source system). |
+| PlayerLightEffect.js (121KB) | ❌ No | Still V1-only and gameplay-critical. |
+| IridescenceEffect.js (42KB) | ❌ No | Material overlay not yet ported. |
+| PrismEffect.js (19KB) | ❌ No | Material overlay not yet ported. |
+| LensflareEffect.js (26KB) | ❌ No | Camera-space flare pass not yet ported. |
+| SelectionBoxEffect.js (39KB) | ❌ No | Token selection UI overlay still in V1 folder. |
+| DetectionFilterEffect.js (13KB) | ❌ No | Detection visualization path still V1. |
+| MaskDebugEffect.js (15KB) | ❌ No | V1 debug tooling. |
+| DebugLayerEffect.js (18KB) | ❌ No | V1 debug tooling. |
+| EffectComposer.js (64KB) | ⚠️ Partial | Still hosts shared frame/updatable orchestration + V2 delegation. |
+| EnhancedLightsApi.js / LightEnhancementStore.js / LightRegistry.js / MapShineLightAdapter.js / ThreeLightSource.js / ThreeDarknessSource.js | ⚠️ N/A (shared/bridge infra) | These are lighting/support infrastructure, not standalone migrated effects. |
+| DepthShaderChunks.js / Foundry*ShaderChunks.js / WaterSurfaceModel.js | ⚠️ N/A (shared shader/model helpers) | Shared utility code; not direct 1:1 effect classes. |
+| `stubs/StubEffects.js` | N/A | Stub-only compatibility surface. |
 
-**Total V1 effect code: ~2.1MB** across 46+ files.
+**Audit summary:** the migration bottleneck is no longer “dozens of active V1 effects,” but a **small set of true V1 holdouts** (notably `DistortionManager` and `PlayerLightEffect`) plus shared infrastructure that still lives under `scripts/effects/`.
 
 ### V1 Infrastructure — Still Present
 
@@ -127,14 +103,14 @@ These are the V1 implementations. Many have V2 equivalents above:
 
 ### Arguments AGAINST deleting V1 now
 
-1. **15 effects have NO V2 equivalent.** These would stop working entirely:
-   - **WorldSpaceFogEffect** — Fog of war (critical for gameplay)
+1. **14 effects have NO V2 equivalent.** These would stop working entirely:
+   - ~~**WorldSpaceFogEffect** — Fog of war (critical for gameplay)~~ ✅ Migrated as `FogOfWarEffectV2`
    - **PlayerLightEffect** — Flashlight/torch (critical for gameplay)
    - **TreeEffect / BushEffect** — Animated vegetation (important for map makers)
    - **IridescenceEffect / PrismEffect / FluidEffect** — Material overlays (nice-to-have)
    - **DistortionManager** — Heat haze, water ripples (important)
-   - **AtmosphericFogEffect** — Distance fog (nice-to-have)
-   - **LightningEffect / CandleFlamesEffect** — Weather/particle (medium priority)
+   - ~~**AtmosphericFogEffect** — Distance fog (nice-to-have)~~ ✅ migrated to V2
+   - **CandleFlamesEffect** — Weather/particle (medium priority)
    - **LensflareEffect** — Camera-space flares (nice-to-have)
    - **SmellyFliesEffect / DustMotesEffect / AshDisturbanceEffect** — Ambient particles (low priority)
    - **Artistic filters** — DotScreen, Halftone, ASCII, Dazzle, VisionMode (low priority)
@@ -193,7 +169,7 @@ Priority order based on gameplay impact:
 
 | Priority | Effect | Complexity | Why Critical |
 |----------|--------|-----------|-------------|
-| P0 | **WorldSpaceFogEffect** → FogEffectV2 | High | Fog of war is core gameplay. Without it, players see everything. |
+| P0 | **WorldSpaceFogEffect** → FogOfWarEffectV2 | ✅ Complete | Fog of war migrated into V2 post-blit overlay path. |
 | P0 | **PlayerLightEffect** → PlayerLightEffectV2 | High | Flashlight/torch is essential for dungeon crawling. |
 | P1 | **TreeEffect** → TreeEffectV2 | Medium | Map makers expect trees. Mask-driven per-tile overlay. |
 | P1 | **BushEffect** → BushEffectV2 | Medium | Same architecture as trees. |
@@ -559,16 +535,16 @@ Disposing MapShine’s `FrameCoordinator` helps reduce extra PIXI flush renderin
    - Keep the MutationObserver enforcement so Foundry/modules can’t re-enable it.
    - Keep FrameCoordinator disabled/gated in V2 as defense-in-depth.
 2. **Bring V2 fog online next (highest priority missing visual)** ✅
-   - Implemented by integrating `WorldSpaceFogEffect` into the V2 `FloorCompositor` as a dedicated post-blit overlay pass.
+   - Implemented by integrating `FogOfWarEffectV2` into the V2 `FloorCompositor` as a dedicated post-blit overlay pass.
    - **Where:**
      - `scripts/compositor-v2/FloorCompositor.js`
      - `scripts/foundry/canvas-replacement.js` (V2 Tweakpane registration)
-     - `scripts/effects/WorldSpaceFogEffect.js` (critical circular-import hardening)
+     - `scripts/compositor-v2/effects/FogOfWarEffectV2.js` (critical circular-import hardening)
    - **Key details:**
      - V2 renders the bus scene into an RT and then blits; it does *not* render the main Three scene directly.
        Because of that, fog cannot rely on “fog plane lives in the main scene” like V1.
      - Solution: create a dedicated `FogOverlaySceneV2` and render it *after* `_blitToScreen(...)` using `autoClear=false`.
-     - Fog uniforms/vision/exploration RT generation remains inside `WorldSpaceFogEffect.update(timeInfo)`.
+     - Fog uniforms/vision/exploration RT generation remains inside `FogOfWarEffectV2.update(timeInfo)`.
    - **Critical bug fixed (TDZ / circular import):**
      - Runtime error observed:
        - `ReferenceError: can't access lexical declaration 'EffectBase' before initialization`
@@ -877,3 +853,50 @@ BuildingShadowsEffectV2 projects indoor casters from this mask onto outdoor rece
 - Building-shadow contribution from `_Outdoors` dark regions is preserved and tunable.
 - Shadow motion remains intact while region correctness is enforced.
 - Overhead shadows are now zoom-stable for both the main roof contribution and the `_Outdoors` building-shadow contribution.
+
+---
+
+## Success Story — Foundry Editor Overlays Restored in V2 (Walls, Lights, Doors)
+
+### Problem
+
+In V2 gameplay mode, users could switch to **Walls** or **Lighting** tools, but wall lines/endpoints, light handles, and door controls/icons were not visible or interactive. Diagnostic snapshots showed:
+
+- `canvas.walls.active` / `canvas.lighting.active` could be `true`
+- while `window.MapShine.__forcePixiEditorOverlay` remained `false`
+- and both `canvas.app.view` and `#board` stayed hidden (`display:none`, `visibility:hidden`, `opacity:0`).
+
+### Root causes
+
+1. **Suppression won the race**: gameplay PIXI suppression hooks kept hiding the board/canvas even after tool switches.
+2. **No-op input transitions missed overlay updates**: when InputRouter was already in PIXI mode, early-return logic skipped reapplying overlay state.
+3. **Detection split across systems**: overlay gating depended on one path (ControlsIntegration/InputRouter) instead of also being enforced at suppression point.
+4. **Deprecated control accessor noise**: `activeControl` reads caused V13 compatibility warnings, obscuring debugging.
+
+### Fixes applied
+
+1. **InputRouter now updates overlay force state before no-op return**
+   - `setMode()` computes editor-overlay need first and writes `window.MapShine.__forcePixiEditorOverlay` before any early return.
+   - If mode is already PIXI and overlay is needed, it still re-applies PIXI/board visible styles.
+   - File: `scripts/foundry/input-router.js`
+
+2. **Suppression function became self-gating and self-healing**
+   - `_enforceGameplayPixiSuppression()` now computes `needsEditorOverlay` from current runtime context (`walls/lighting active`, control/tool checks) instead of relying only on external flag timing.
+   - When overlay is needed, it actively unsuppresses both `canvas.app.view` and `#board`, including pointer events.
+   - File: `scripts/foundry/canvas-replacement.js`
+
+3. **Suppression watchdog hooks were expanded**
+   - Enforcement now runs on additional control/layer lifecycle hooks (including `activateCanvasLayer`) so tool changes cannot leave stale hidden styles.
+   - File: `scripts/foundry/canvas-replacement.js`
+
+4. **Active control reads were modernized**
+   - Prefer `ui.controls.control?.name` and only fallback to `activeControl`.
+   - Applied in routing/visibility integration paths to reduce deprecation churn and improve consistency.
+   - Files: `scripts/foundry/input-router.js`, `scripts/foundry/controls-integration.js`, `scripts/foundry/layer-visibility-manager.js`, `scripts/foundry/canvas-replacement.js`
+
+### Outcome
+
+- Walls layer now shows wall lines/endpoints in edit mode.
+- Lighting layer now shows light controls/icons in edit mode.
+- Door controls/icons are visible again when appropriate.
+- PIXI editor overlays and Three gameplay rendering now coexist via deterministic mode-aware gating.

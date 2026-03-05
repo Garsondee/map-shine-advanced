@@ -55,18 +55,18 @@ function showDiagnosticDialog() {
     <hr>
     <h3>Module Status</h3>
     <ul>
-      <li><strong>Initialized:</strong> ${info.moduleInitialized ? '✓ Yes' : '✗ No'}</li>
+      <li><strong>Initialized:</strong> ${info.moduleInitialized ? 'âœ“ Yes' : 'âœ— No'}</li>
       <li><strong>Renderer:</strong> ${info.rendererType}</li>
       <li><strong>GPU Tier:</strong> ${info.gpuTier}</li>
-      <li><strong>three.js Loaded:</strong> ${info.threeJsLoaded ? '✓ Yes' : '✗ No'}</li>
+      <li><strong>three.js Loaded:</strong> ${info.threeJsLoaded ? 'âœ“ Yes' : 'âœ— No'}</li>
     </ul>
     <hr>
     <h3>Current Scene</h3>
     <ul>
       <li><strong>Scene Name:</strong> ${scene?.name || 'None'}</li>
-      <li><strong>Map Shine Enabled:</strong> ${info.sceneEnabled ? '✓ Yes' : '✗ No'}</li>
+      <li><strong>Map Shine Enabled:</strong> ${info.sceneEnabled ? 'âœ“ Yes' : 'âœ— No'}</li>
       <li><strong>Background Image:</strong> ${info.sceneBackground}</li>
-      <li><strong>Canvas Ready:</strong> ${info.canvasReady ? '✓ Yes' : '✗ No'}</li>
+      <li><strong>Canvas Ready:</strong> ${info.canvasReady ? 'âœ“ Yes' : 'âœ— No'}</li>
     </ul>
     <hr>
     <h3>Asset Loading</h3>
@@ -127,7 +127,6 @@ function showDiagnosticDialog() {
         icon: '<i class="fas fa-clipboard"></i>',
         label: 'Copy to Console',
         callback: () => {
-          console.log('=== Map Shine Diagnostic Info ===');
           console.log('Module:', info);
           console.log('MapShine State:', mapShine);
           console.log('Scene:', scene);

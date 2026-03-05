@@ -6,6 +6,12 @@ import { LightMesh } from '../../scene/LightMesh.js';
 
 const log = createLogger('CandleFlamesEffectV2');
 
+// IMPORTANT (V2): FloorRenderBus tiles use very large renderOrder ranges
+// (floorIndex * 10000 + tile sort). If candle flames keep low renderOrder
+// values (~120), they draw before tiles and get overwritten, making flames
+// appear invisible while glow/light flicker still works.
+const CANDLE_FLAME_RENDER_ORDER = 200100;
+
 export class CandleFlamesEffectV2 {
   constructor() {
     // Keep EffectBase-compatible fields local to avoid importing EffectComposer
@@ -65,6 +71,7 @@ export class CandleFlamesEffectV2 {
 
     this._mapPointsManager = null;
     this._changeListener = null;
+    this._activeLevelContext = null;
 
     this._lightingEffect = null;
 
@@ -328,7 +335,7 @@ export class CandleFlamesEffectV2 {
 
     this._group = new THREE.Group();
     this._group.name = 'CandleFlames';
-    this._group.renderOrder = 120;
+    this._group.renderOrder = CANDLE_FLAME_RENDER_ORDER;
 
     this._createFlameMesh();
 
@@ -344,6 +351,10 @@ export class CandleFlamesEffectV2 {
     this._glowGroup.name = 'CandleGlow';
 
     this._registerWallHooks();
+    // Build once on init so candles can appear even before the next map-point
+    // change notification/render wiring tick.
+    this._rebuildFromMapPoints();
+    this._applyVisibility();
 
     log.info('CandleFlamesEffect initialized');
     this.isInitialized = true;
@@ -373,6 +384,35 @@ export class CandleFlamesEffectV2 {
     }
 
     this._rebuildFromMapPoints();
+  }
+
+  setActiveLevelContext(context = null) {
+    this._activeLevelContext = context ?? window.MapShine?.activeLevelContext ?? null;
+    this._rebuildFromMapPoints();
+  }
+
+  ensureMeshesAttached(scene) {
+    if (!scene || !this._group) return;
+
+    // FloorRenderBus.populate() calls clear(), which detaches non-token scene
+    // objects. Re-attach the candle group so flame sprites remain visible.
+    if (this._group.parent !== scene) {
+      try {
+        this._group.removeFromParent();
+      } catch (_) {
+      }
+      try {
+        scene.add(this._group);
+      } catch (_) {
+      }
+    }
+
+    if (this._flameMesh && this._flameMesh.parent !== this._group) {
+      try {
+        this._group.add(this._flameMesh);
+      } catch (_) {
+      }
+    }
   }
 
   update(timeInfo) {
@@ -455,14 +495,14 @@ export class CandleFlamesEffectV2 {
       }
     }
 
-    // Floor-presence gate: occlude candle flames under current-floor solid tiles.
+    // Keep flame sprites visible in V2: floor-presence masking can resolve to
+    // full-scene coverage in current post stack and zero out flame alpha.
+    // Glow lighting still uses clustered light meshes and remains unchanged.
     if (this._flameMaterial?.uniforms?.uHasFloorPresenceMap !== undefined) {
       const u = this._flameMaterial.uniforms;
-      const fpTex = window.MapShine?.distortionManager?.floorPresenceTarget?.texture ?? null;
-      u.uFloorPresenceMap.value    = fpTex;
-      u.uHasFloorPresenceMap.value = fpTex ? 1.0 : 0.0;
+      u.uFloorPresenceMap.value = null;
+      u.uHasFloorPresenceMap.value = 0.0;
       if (this.renderer) {
-        // Reuse cached vector to avoid per-frame allocation.
         if (!this._fpSizeVec) this._fpSizeVec = new THREE.Vector2();
         this.renderer.getDrawingBufferSize(this._fpSizeVec);
         u.uResolution.value.copy(this._fpSizeVec);
@@ -479,6 +519,10 @@ export class CandleFlamesEffectV2 {
   }
 
   render() {
+  }
+
+  onFloorChange(_maxFloorIndex) {
+    this.setActiveLevelContext(window.MapShine?.activeLevelContext ?? null);
   }
 
   dispose() {
@@ -825,7 +869,7 @@ export class CandleFlamesEffectV2 {
     const mesh = new THREE.InstancedMesh(geometry, material, this.params.maxFlames);
     mesh.frustumCulled = false;
     mesh.count = 0;
-    mesh.renderOrder = 120;
+    mesh.renderOrder = CANDLE_FLAME_RENDER_ORDER;
 
     this._flameGeometry = geometry;
     this._flameMaterial = material;
@@ -841,7 +885,9 @@ export class CandleFlamesEffectV2 {
       return;
     }
 
-    const groups = this._mapPointsManager.getGroupsByEffect('candleFlame');
+    const groups = (typeof this._mapPointsManager.getGroupsByEffectForContext === 'function')
+      ? (this._mapPointsManager.getGroupsByEffectForContext('candleFlame', this._activeLevelContext) || [])
+      : (this._mapPointsManager.getGroupsByEffect('candleFlame') || []);
     const points = [];
     for (const g of groups) {
       if (!g?.points?.length) continue;
@@ -930,7 +976,9 @@ export class CandleFlamesEffectV2 {
 
         this._phaseArray[written] = phase;
         this._outdoorArray[written] = outdoor;
-        this._intensityArray[written] = pt.intensity;
+        // Keep a small minimum so flames remain visible even when map-point
+        // emission intensity is authored as 0 (glow already uses a similar floor).
+        this._intensityArray[written] = Math.max(0.25, Number(pt.intensity) || 0);
 
         const cIdx = written * 3;
         this._colorArray[cIdx] = baseR;

@@ -371,7 +371,7 @@ deferred.
 |    8 | BuildingShadowsEffect    | ENVIRONMENTAL      | ⏳ Deferred | Needs `_Structural` mask + cloud state. |
 |    9 | OverheadShadowsEffect    | ENVIRONMENTAL      | ⏳ Deferred | Roof/floor isolation. |
 |   10 | PlayerLightEffect        | ENVIRONMENTAL      | ⏳ Deferred | Token-based dynamic lights. |
-|   11 | LightningEffect          | ENVIRONMENTAL      | ⏳ Deferred | Weather lightning flashes. |
+|   11 | LightningEffect          | ENVIRONMENTAL      | ✅ Migrated | Implemented as `LightningEffectV2` and wired in `FloorCompositor`. |
 |   12 | CandleFlamesEffect       | ENVIRONMENTAL      | ⏳ Deferred | Candle/torch particles. |
 |   13 | AtmosphericFogEffect     | POST_PROCESSING    | ⏳ Deferred | Distance/height fog. |
 

@@ -428,7 +428,10 @@ export class WallManager {
       doorGroup.position.set(midX, midY, 0.1); // Slightly above wall line
       doorGroup.userData = { type: 'doorControl', wallId: doc.id };
 
-      const showVisuals = false;
+      // Keep door controls visually enabled. If this is false, meshes still
+      // exist for interaction but render no visible pixels, making doors look
+      // "missing" in Three even when the control geometry is present.
+      const showVisuals = true;
       
       const size = 40 * (canvas.dimensions.uiScale || 1);
       const radius = size / 2;

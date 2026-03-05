@@ -1964,8 +1964,7 @@ export class InteractionManager {
 
         // 1.5 Check Lights (Lighting Layer)
         // Open the light editor UI on selection. Hold Alt (or Ctrl/Cmd) to force the Foundry sheet.
-        const _layerName = canvas.activeLayer?.name;
-        const _isLightingLayer = (_layerName === 'LightingLayer' || _layerName === 'lighting');
+        const _isLightingLayer = this._isLightingContextActive();
         if (_isLightingLayer && this.lightIconManager) {
             const lightIcons = Array.from(this.lightIconManager.lights.values());
             const intersects = this.raycaster.intersectObjects(lightIcons, false);
@@ -2207,6 +2206,34 @@ export class InteractionManager {
     const layerName = layer?.options?.name || layer?.name || '';
     const layerCtor = layer?.constructor?.name || '';
     return layerName === 'tiles' || layerName === 'TilesLayer' || layerCtor === 'TilesLayer';
+  }
+
+  _getActiveLayerMeta() {
+    const layer = canvas?.activeLayer;
+    const optionsName = String(layer?.options?.name || '').toLowerCase();
+    const name = String(layer?.name || '').toLowerCase();
+    const ctor = String(layer?.constructor?.name || '').toLowerCase();
+    const sceneControl = String(ui?.controls?.control?.name || ui?.controls?.activeControl || '').toLowerCase();
+    return { optionsName, name, ctor, sceneControl };
+  }
+
+  _isLightingContextActive() {
+    if (canvas?.lighting?.active) return true;
+    const { optionsName, name, ctor, sceneControl } = this._getActiveLayerMeta();
+    return optionsName === 'lighting'
+      || name === 'lighting'
+      || ctor === 'lightinglayer'
+      || sceneControl === 'lighting';
+  }
+
+  _isWallsContextActive() {
+    if (canvas?.walls?.active) return true;
+    const { optionsName, name, ctor, sceneControl } = this._getActiveLayerMeta();
+    return optionsName === 'walls'
+      || name === 'walls'
+      || ctor === 'wallslayer'
+      || ctor === 'walllayer'
+      || sceneControl === 'walls';
   }
 
   _isTileWithinActiveBand(tileDoc) {
@@ -2496,7 +2523,8 @@ export class InteractionManager {
         // for the Tokens layer so gameplay clicks are never blocked.
         const mapShine = window.MapShine || window.mapShine;
         const inputRouter = mapShine?.inputRouter;
-        const routerActiveLayerName = canvas.activeLayer?.name;
+        const routerLayerMeta = this._getActiveLayerMeta();
+        const routerActiveLayerName = routerLayerMeta.optionsName || routerLayerMeta.name || routerLayerMeta.ctor;
         const activeTool = ui?.controls?.tool?.name ?? game.activeTool;
         
         // DEBUG: Log InputRouter state to diagnose why clicks aren't being processed
@@ -2508,7 +2536,7 @@ export class InteractionManager {
           activeTool
         });
 
-        const isTokenLayerName = routerActiveLayerName === 'TokenLayer' || routerActiveLayerName === 'TokensLayer' || routerActiveLayerName === 'tokens';
+        const isTokenLayerName = routerActiveLayerName === 'tokenlayer' || routerActiveLayerName === 'tokenslayer' || routerActiveLayerName === 'tokens';
         const isTokenSelectTool = activeTool === 'select' || !activeTool;
         const shouldOverrideRouter = isTokenLayerName && isTokenSelectTool;
         
@@ -2707,8 +2735,7 @@ export class InteractionManager {
         if (event.button === 2) {
             // Toggle Foundry light disable via MapShine icons (so disabled lights can be re-enabled).
             safeCall(() => {
-              const layerName = canvas.activeLayer?.name;
-              const isLightingLayer = (layerName === 'LightingLayer' || layerName === 'lighting');
+              const isLightingLayer = this._isLightingContextActive();
               if (isLightingLayer && this.lightIconManager) {
                 const lightIcons = Array.from(this.lightIconManager.lights.values());
                 const intersects = this.raycaster.intersectObjects(lightIcons, false);
@@ -2804,11 +2831,10 @@ export class InteractionManager {
         const activeLayerObj = canvas.activeLayer;
         const activeLayerName = activeLayerObj?.name || activeLayerObj?.options?.name || '';
         const activeLayerCtor = activeLayerObj?.constructor?.name || '';
-        const activeLayer = activeLayerName || activeLayerCtor;
         const currentTool = ui?.controls?.tool?.name ?? game.activeTool;
 
         const isTokensLayer = activeLayerName === 'TokensLayer' || activeLayerCtor === 'TokenLayer' || activeLayerCtor === 'TokensLayer' || activeLayerName === 'tokens';
-        const isWallLayer = activeLayerName.includes('WallsLayer') || activeLayerCtor === 'WallsLayer' || activeLayerName === 'walls';
+        const isWallLayer = this._isWallsContextActive();
         const isTilesLayer = activeLayerName === 'TilesLayer' || activeLayerName === 'tiles' || activeLayerCtor === 'TilesLayer';
 
         if (isTilesLayer && this._handleTilesLayerPointerDown(event, currentTool)) {
@@ -2878,7 +2904,7 @@ export class InteractionManager {
                 }
 
                 if (type === 'wallLine') {
-                    if (game.user.isGM || canvas.activeLayer?.name?.includes('WallsLayer')) {
+                    if (game.user.isGM || this._isWallsContextActive()) {
                         this.selectWall(interactable, event);
                         return;
                     }
@@ -2947,7 +2973,7 @@ export class InteractionManager {
         // 2.5. Native Light Placement (LightingLayer in Three.js Gameplay Mode)
         // When on the Lighting layer with the standard light tool active, allow the GM to
         // place AmbientLight documents directly from the 3D view without swapping modes.
-        const isLightingLayer = (activeLayer === 'LightingLayer' || activeLayer === 'lighting');
+        const isLightingLayer = this._isLightingContextActive();
         if (isLightingLayer) {
 
           // 2.5a Check for Existing Lights (Select/Drag)
@@ -3772,7 +3798,7 @@ export class InteractionManager {
     // We'll enable it for GM mainly for editing, or everyone for doors?
     // Highlighting the whole wall is good for knowing which one you are about to click.
     
-    if (game.user.isGM || canvas.activeLayer?.name?.includes('WallsLayer')) {
+    if (game.user.isGM || this._isWallsContextActive()) {
         const wallGroup = this.wallManager.wallGroup;
         this.raycaster.params.Line.threshold = 20; // Lenient threshold
         const wallIntersects = this.raycaster.intersectObject(wallGroup, true);
@@ -5001,8 +5027,7 @@ export class InteractionManager {
 
           // Only allow box-selecting lights when the Lighting layer is active.
           // In token movement mode (TokenLayer), marquee selection should not grab lights.
-          const activeLayer = canvas?.activeLayer?.name;
-          const isLightingLayer = (activeLayer === 'LightingLayer' || activeLayer === 'lighting');
+          const isLightingLayer = this._isLightingContextActive();
           if (isLightingLayer) {
             // Select Foundry lights within bounds (world-space icon centers)
             const lightIcons = this.lightIconManager?.lights?.values?.() ? Array.from(this.lightIconManager.lights.values()) : [];

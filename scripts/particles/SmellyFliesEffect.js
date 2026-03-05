@@ -13,6 +13,12 @@ import {
   RenderMode,
   ConstantValue
 } from '../libs/three.quarks.module.js';
+import { 
+  MeshSurfaceEmitter,
+  BatchedParticleRenderer,
+  EmitterMode
+} from '../libs/three.quarks.module.js';
+import Coordinates from '../utils/coordinates.js';
 import { weatherController } from '../core/WeatherController.js';
 
 const log = createLogger('SmellyFliesEffect');
@@ -144,6 +150,13 @@ class AreaSpawnShape {
     particle.userData.polygon = this.polygon;
     particle.userData.bounds = this.bounds;
     particle.userData.spawnTime = 0;  // Track spawn time for fade-in
+    // Lock each particle to the indoors/outdoors region where it spawned.
+    // If it crosses the boundary later, we kill it so the emitter can respawn
+    // a replacement in-bounds.
+    const spawnOutdoors = this.ownerEffect?._classifyWorldOutdoors?.(x, y);
+    particle.userData.spawnOutdoors = (spawnOutdoors === true || spawnOutdoors === false)
+      ? spawnOutdoors
+      : null;
     
     // Reset velocity
     if (particle.velocity) {
@@ -197,9 +210,10 @@ class AreaSpawnShape {
  * Handles flying, landing, walking, and takeoff transitions
  */
 class FlyBehavior {
-  constructor(config = {}) {
+  constructor(config = {}, ownerEffect = null) {
     this.type = 'FlyBehavior';
     this.config = { ...DEFAULT_FLY_CONFIG, ...config };
+    this.ownerEffect = ownerEffect;
     
     // PERFORMANCE: Reuse temp objects
     this._tempVec = { x: 0, y: 0 };
@@ -218,6 +232,7 @@ class FlyBehavior {
     if (!ud.home) ud.home = { x: particle.position.x, y: particle.position.y };
     if (!ud.walkState) ud.walkState = WALK_STATE.IDLE;
     if (typeof ud.rotation !== 'number') ud.rotation = Math.random() * Math.PI * 2;
+    if (!ud.ownerEffect && this.ownerEffect) ud.ownerEffect = this.ownerEffect;
     
     // Burst-based flight: flies dart in a direction, then pick a new one
     if (typeof ud.burstTimer !== 'number') ud.burstTimer = 0;
@@ -270,6 +285,50 @@ class FlyBehavior {
     
     // Set UV tile based on state (0 = flying, 1 = landed/walking)
     this._applyTextureTile(particle);
+
+    // Enforce spawn region fidelity (indoors/outdoors).
+    this._enforceSpawnRegion(particle, system);
+  }
+
+  /**
+   * Kill particles that cross indoors/outdoors boundary relative to spawn region.
+   * @private
+   */
+  _enforceSpawnRegion(particle, system) {
+    const owner = this.ownerEffect || system?.userData?.ownerEffect || particle?.userData?.ownerEffect;
+    const classify = owner?._classifyWorldOutdoors;
+    if (typeof classify !== 'function') return;
+
+    const ud = particle?.userData;
+    if (!ud) return;
+
+    let spawnOutdoors = ud.spawnOutdoors;
+    if (spawnOutdoors !== true && spawnOutdoors !== false) {
+      const initial = classify.call(owner, particle.position.x, particle.position.y);
+      if (initial !== true && initial !== false) return;
+      spawnOutdoors = initial;
+      ud.spawnOutdoors = initial;
+    }
+
+    const nowOutdoors = classify.call(owner, particle.position.x, particle.position.y);
+    if (nowOutdoors !== true && nowOutdoors !== false) return;
+    if (nowOutdoors === spawnOutdoors) return;
+
+    // Hard-kill (preferred) so emitter immediately replaces this fly.
+    if (typeof particle.life === 'number') particle.life = 0;
+    if (typeof particle.age === 'number' && typeof particle.life === 'number') {
+      particle.age = Math.max(particle.age, particle.life + 1);
+    }
+    // Defensive visual hide in case lifetime fields are unavailable on this build.
+    if (particle.color && typeof particle.color.w === 'number') particle.color.w = 0;
+    if (typeof particle.size === 'number') particle.size = 0;
+    if (particle.size && typeof particle.size.set === 'function') {
+      particle.size.set(0, 0, 0);
+    } else if (particle.size && typeof particle.size === 'object') {
+      particle.size.x = 0;
+      particle.size.y = 0;
+      particle.size.z = 0;
+    }
   }
   
   /**
@@ -759,7 +818,7 @@ class FlyBehavior {
   }
 
   clone() {
-    return new FlyBehavior(this.config);
+    return new FlyBehavior(this.config, this.ownerEffect);
   }
 
   reset() {
@@ -1163,6 +1222,65 @@ export class SmellyFliesEffect {
   }
 
   /**
+   * Classify a world-space point as outdoors(true)/indoors(false) via the
+   * current _Outdoors mask extracted by WeatherController.
+   *
+   * Returns null if classification is unavailable.
+   * @param {number} worldX
+   * @param {number} worldY
+   * @returns {boolean|null}
+   * @private
+   */
+  _classifyWorldOutdoors(worldX, worldY) {
+    const dims = canvas?.dimensions;
+    const rect = dims?.sceneRect;
+    if (!rect) return null;
+
+    const sceneX = Number(rect.x);
+    const sceneY = Number(rect.y);
+    const sceneW = Number(rect.width);
+    const sceneH = Number(rect.height);
+    if (!(sceneW > 0) || !(sceneH > 0)) return null;
+
+    // Canonical world(Y-up) -> Foundry(Y-down) conversion.
+    const foundry = Coordinates.toFoundry(worldX, worldY);
+    const u = (Number(foundry.x) - sceneX) / sceneW;
+    const v = (Number(foundry.y) - sceneY) / sceneH;
+
+    if (!Number.isFinite(u) || !Number.isFinite(v)) return null;
+    if (u < 0 || u > 1 || v < 0 || v > 1) return null;
+
+    // Preferred source in V2: scene compositor CPU readback for active floor.
+    // This avoids relying on WeatherController image extraction (which is often
+    // unavailable for render-target textures).
+    const compositor = window.MapShine?.sceneComposer?._sceneMaskCompositor;
+    const gpuOutdoors = compositor?.getCpuPixels?.('outdoors');
+    const outdoorsDims = compositor?.getOutputDims?.('outdoors');
+    if (gpuOutdoors && outdoorsDims?.width && outdoorsDims?.height) {
+      const ow = outdoorsDims.width;
+      const oh = outdoorsDims.height;
+      const ox = Math.max(0, Math.min(ow - 1, Math.floor(u * (ow - 1))));
+      // Orientation can differ by source/capture path; sample both conventions
+      // and pick the stronger (further from 0.5) binary classification.
+      const oyTop = Math.max(0, Math.min(oh - 1, Math.floor(v * (oh - 1))));
+      const oyBottom = Math.max(0, Math.min(oh - 1, Math.floor((1 - v) * (oh - 1))));
+      const idxTop = (oyTop * ow + ox) * 4;
+      const idxBottom = (oyBottom * ow + ox) * 4;
+      const iTop = gpuOutdoors[idxTop] / 255.0;
+      const iBottom = gpuOutdoors[idxBottom] / 255.0;
+      const dTop = Math.abs(iTop - 0.5);
+      const dBottom = Math.abs(iBottom - 0.5);
+      const intensity = dBottom > dTop ? iBottom : iTop;
+      return intensity >= 0.5;
+    }
+
+    // Fallback path: WeatherController CPU roof map sample.
+    const intensity = weatherController?.getRoofMaskIntensity?.(u, v);
+    if (!Number.isFinite(intensity)) return null;
+    return intensity >= 0.5;
+  }
+
+  /**
    * Rebuild all fly systems based on current map points
    * @private
    */
@@ -1256,7 +1374,7 @@ export class SmellyFliesEffect {
       vTileCount: 1,
       startTileIndex: new ConstantValue(1),  // Start with flying frame
       behaviors: [
-        new FlyBehavior(cfg)
+        new FlyBehavior(cfg, this)
       ]
     });
     
@@ -1381,7 +1499,7 @@ export class SmellyFliesEffect {
       vTileCount: 1,
       startTileIndex: new ConstantValue(0),  // Start with flying frame
       behaviors: [
-        new FlyBehavior(cfg)
+        new FlyBehavior(cfg, this)
       ]
     });
     

@@ -196,6 +196,16 @@ export class OverheadShadowsEffectV2 {
   }
 
   /**
+   * Raw overhead roof alpha texture (screen-space).
+   * Used by LightingEffectV2 to suppress other ambient shadow layers on pixels
+   * currently covered by visible overhead tiles.
+   * @returns {THREE.Texture|null}
+   */
+  get roofAlphaTexture() {
+    return this.roofTarget?.texture || null;
+  }
+
+  /**
    * Subscribe to the EffectMaskRegistry for 'outdoors' mask updates.
    * @param {import('../assets/EffectMaskRegistry.js').EffectMaskRegistry} registry
    */
@@ -1399,6 +1409,10 @@ export class OverheadShadowsEffectV2 {
     // Capture roof/fluid with a guard-band expanded camera view so projected
     // sampling near viewport edges still has valid source texels.
     const zoom = this._getEffectiveZoom();
+    if (this.material?.uniforms?.uZoom) {
+      // Keep shader projection distance and capture guard computations in sync.
+      this.material.uniforms.uZoom.value = zoom;
+    }
     const maxProjectionScale = Math.max(
       1.0,
       Number(this.params.tileProjectionLengthScale) || 0.0,

@@ -190,6 +190,8 @@ export class LightingEffectV2 {
         tBuildingShadow:     { value: null },
         uHasBuildingShadow:  { value: 0 },
         uBuildingShadowOpacity: { value: 0.75 },
+        tOverheadRoofAlpha: { value: null },
+        uHasOverheadRoofAlpha: { value: 0 },
         // Foundry canvas dimensions (includes padding). Matches CloudEffectV2.
         // Used to convert Three world Y-up into Foundry world Y-down.
         uSceneDimensions: { value: new THREE.Vector2(1, 1) },
@@ -241,6 +243,8 @@ export class LightingEffectV2 {
         uniform sampler2D tBuildingShadow;
         uniform float uHasBuildingShadow;
         uniform float uBuildingShadowOpacity;
+        uniform sampler2D tOverheadRoofAlpha;
+        uniform float uHasOverheadRoofAlpha;
         uniform vec2  uSceneDimensions;
         uniform vec2 uBldViewBoundsMin;
         uniform vec2 uBldViewBoundsMax;
@@ -334,8 +338,15 @@ export class LightingEffectV2 {
             // with sceneUvFoundry, so do not apply an additional Y flip here.
             float bldShadow = clamp(texture2D(tBuildingShadow, sceneUvFoundry).r, 0.0, 1.0);
 
+            // Do not apply projected building shadows onto visible overhead roofs.
+            // roofAlpha is screen-space (same vUv convention as overhead passes).
+            float roofVisible = 0.0;
+            if (uHasOverheadRoofAlpha > 0.5) {
+              roofVisible = step(0.05, clamp(texture2D(tOverheadRoofAlpha, vUv).a, 0.0, 1.0));
+            }
+
             // Blend: 1.0 = shadow has full effect, 0.0 = no effect.
-            float shadowMix = mix(1.0, bldShadow, uBuildingShadowOpacity);
+            float shadowMix = mix(1.0, bldShadow, uBuildingShadowOpacity * (1.0 - roofVisible));
             // Apply only to ambient contribution; dynamic lights punch through.
             vec3 ambientComponent = totalIllumination - vec3(lightI) * master;
             ambientComponent *= shadowMix;
@@ -652,8 +663,11 @@ export class LightingEffectV2 {
    *   uSceneBounds + uCanvasSize are updated from canvas.dimensions each frame.
    * @param {THREE.Texture|null} [overheadShadowTexture=null] - Screen-space shadow
    *   factor from OverheadShadowsEffectV2 (1.0=lit, 0.0=shadowed). Sampled at vUv.
+   * @param {THREE.Texture|null} [overheadRoofAlphaTexture=null] - Screen-space overhead
+   *   roof alpha mask from OverheadShadowsEffectV2. Building shadow is suppressed
+   *   where this mask indicates a visible overhead roof.
    */
-  render(renderer, camera, sceneRT, outputRT, windowLightScene = null, cloudShadowTexture = null, buildingShadowTexture = null, overheadShadowTexture = null, buildingShadowOpacity = 0.75) {
+  render(renderer, camera, sceneRT, outputRT, windowLightScene = null, cloudShadowTexture = null, buildingShadowTexture = null, overheadShadowTexture = null, buildingShadowOpacity = 0.75, overheadRoofAlphaTexture = null) {
     if (!this._initialized || !this._enabled || !sceneRT) return;
     if (!this._lightRT || !this._darknessRT || !this._composeMaterial) return;
 
@@ -842,6 +856,13 @@ export class LightingEffectV2 {
     } else {
       cu.tBuildingShadow.value    = null;
       cu.uHasBuildingShadow.value = 0;
+    }
+    if (overheadRoofAlphaTexture) {
+      cu.tOverheadRoofAlpha.value = overheadRoofAlphaTexture;
+      cu.uHasOverheadRoofAlpha.value = 1;
+    } else {
+      cu.tOverheadRoofAlpha.value = null;
+      cu.uHasOverheadRoofAlpha.value = 0;
     }
     // Bind overhead shadow texture (screen-space, sampled directly at vUv).
     if (overheadShadowTexture) {

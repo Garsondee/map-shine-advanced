@@ -338,25 +338,53 @@ export class UnifiedCameraController {
     this._lastChangeSource = source;
     
     try {
-      // Calculate world position under cursor before zoom
-      const rect = canvas?.app?.view?.getBoundingClientRect();
+      // Use the same viewport space as the input source. Mixing PIXI and Three
+      // rects causes cursor-anchor drift when their CSS/layout bounds differ.
+      const rect = this._getViewportRectForSource(source);
+      let anchorClientX = null;
+      let anchorClientY = null;
+      let worldBefore = null;
       if (rect) {
-        const screenPosX = rect.width * screenX;
-        const screenPosY = rect.height * screenY;
-        
-        // World position under cursor (Foundry coords)
-        const worldX = this.state.x + (screenPosX - rect.width / 2) / oldZoom;
-        const worldY = this.state.y + (screenPosY - rect.height / 2) / oldZoom;
-        
-        // After zoom, adjust pivot so world position stays under cursor
-        this.state.x = worldX - (screenPosX - rect.width / 2) / newZoom;
-        this.state.y = worldY - (screenPosY - rect.height / 2) / newZoom;
+        const clampedScreenX = Math.max(0, Math.min(1, Number(screenX) || 0.5));
+        const clampedScreenY = Math.max(0, Math.min(1, Number(screenY) || 0.5));
+
+        anchorClientX = rect.left + (rect.width * clampedScreenX);
+        anchorClientY = rect.top + (rect.height * clampedScreenY);
+        worldBefore = this._screenClientToFoundryWorld(anchorClientX, anchorClientY, rect);
+
+        const screenPosX = rect.width * clampedScreenX;
+        const screenPosY = rect.height * clampedScreenY;
+        const screenOffsetX = screenPosX - (rect.width / 2);
+        const screenOffsetY = screenPosY - (rect.height / 2);
+
+        // Keep world point beneath the cursor fixed across zoom.
+        const worldX = this.state.x + (screenOffsetX / oldZoom);
+        const worldY = this.state.y + (screenOffsetY / oldZoom);
+
+        this.state.x = worldX - (screenOffsetX / newZoom);
+        this.state.y = worldY - (screenOffsetY / newZoom);
       }
       
       this.state.zoom = newZoom;
       
       this._applyToPixi();
       this._applyToThree();
+
+      // Perspective/FOV zoom can drift from simple offset math. Correct using an
+      // exact ray-to-ground sample at the cursor before/after the zoom change.
+      if (rect && worldBefore && Number.isFinite(anchorClientX) && Number.isFinite(anchorClientY)) {
+        const worldAfter = this._screenClientToFoundryWorld(anchorClientX, anchorClientY, rect);
+        if (worldAfter) {
+          const correctionX = worldBefore.x - worldAfter.x;
+          const correctionY = worldBefore.y - worldAfter.y;
+          if (Math.abs(correctionX) > 0.01 || Math.abs(correctionY) > 0.01) {
+            this.state.x += correctionX;
+            this.state.y += correctionY;
+            this._applyToPixi();
+            this._applyToThree();
+          }
+        }
+      }
       
     } finally {
       this._updateLock = false;
@@ -371,6 +399,54 @@ export class UnifiedCameraController {
   _getZoomLimits() {
     // Match Foundry's default zoom limits
     return { min: 0.1, max: 3.0 };
+  }
+
+  /**
+   * Resolve viewport bounds for a camera operation source.
+   * @param {string} source
+   * @returns {DOMRect|null}
+   * @private
+   */
+  _getViewportRectForSource(source) {
+    if (source === 'three' && this.threeCanvas) {
+      return this.threeCanvas.getBoundingClientRect();
+    }
+    return canvas?.app?.view?.getBoundingClientRect() ||
+           this.threeCanvas?.getBoundingClientRect() ||
+           null;
+  }
+
+  /**
+   * Convert a client-space screen position into Foundry world coordinates by
+   * ray-intersecting the ground plane (Three world Z=0).
+   * @param {number} clientX
+   * @param {number} clientY
+   * @param {DOMRect} rect
+   * @returns {{x:number,y:number}|null}
+   * @private
+   */
+  _screenClientToFoundryWorld(clientX, clientY, rect) {
+    const camera = this.sceneComposer?.camera;
+    const THREE_NS = globalThis.THREE;
+    if (!camera || !rect || !THREE_NS?.Vector3) return null;
+
+    const width = rect.width || 0;
+    const height = rect.height || 0;
+    if (width <= 0 || height <= 0) return null;
+
+    const nx = ((clientX - rect.left) / width) * 2 - 1;
+    const ny = -(((clientY - rect.top) / height) * 2 - 1);
+
+    const near = new THREE_NS.Vector3(nx, ny, -1).unproject(camera);
+    const far = new THREE_NS.Vector3(nx, ny, 1).unproject(camera);
+    const dz = far.z - near.z;
+    if (Math.abs(dz) < 1e-8) return null;
+
+    const t = -near.z / dz;
+    const ix = near.x + ((far.x - near.x) * t);
+    const iy = near.y + ((far.y - near.y) * t);
+    const worldHeight = this._getWorldHeight();
+    return { x: ix, y: worldHeight - iy };
   }
   
   /**

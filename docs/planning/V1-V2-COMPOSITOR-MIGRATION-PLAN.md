@@ -765,6 +765,10 @@ BuildingShadowsEffectV2 projects indoor casters from this mask onto outdoor rece
 3. **Fallback mask behavior could re-introduce leakage in multi-floor scenes:**
    - Ground/default fallback could be used in situations where strict floor-specific masking was required.
 
+4. **Prior V2 composition paths could appear view-dependent unless sampled in scene UV space:**
+   - Building shadow is authored in scene/world mask space, so composition must reconstruct world position per pixel before sampling.
+   - Any direct screen-UV treatment would make shadow behavior more sensitive to camera zoom/pan.
+
 ### Fixes applied
 
 1. **Active+above floor source compositing hardened** (`scripts/compositor-v2/effects/BuildingShadowsEffectV2.js`)
@@ -783,6 +787,11 @@ BuildingShadowsEffectV2 projects indoor casters from this mask onto outdoor rece
    - Ground/global fallback mask is disabled for true multi-floor operation to avoid ambiguous leakage.
    - Added async preloading/warmup of floor outdoors masks so all relevant floor textures are ready before compositing.
 
+4. **Scene-space sampling path confirmed and retained for zoom stability** (`scripts/compositor-v2/effects/BuildingShadowsEffectV2.js` + `scripts/compositor-v2/effects/LightingEffectV2.js`)
+   - Building shadow RT remains scene-space authored (not tied to current screen size).
+   - Lighting compose reconstructs world XY from camera frustum corners and converts to Foundry scene UV before sampling `tBuildingShadow`.
+   - This keeps building-shadow contribution stable under camera zoom/pan and became the reference model used to diagnose overhead instability.
+
 ### Why the layering now works
 
 - **Caster decision** answers: "Which floors cast into this view?" → active+above floors.
@@ -794,8 +803,9 @@ BuildingShadowsEffectV2 projects indoor casters from this mask onto outdoor rece
 - Ground floor now receives combined building shadow from ground + upper floors.
 - Upper floors no longer show leaked lower-floor building shadows.
 - Upper-floor overhang shadows rendered on ground floor are masked by ground-floor receiver rules (correct), not upper-floor hole rules (incorrect).
+- Building-shadow contribution is now consistently zoom-stable in V2 scenes.
 
-## 14. Success Story: Overhead Shadows Region-Split + _Outdoors Routing Stabilized
+## 14. Success Story: Overhead Shadows Region-Split + Zoom Stability Restored
 
 **Status:** Fixed and validated in-scene.
 
@@ -804,8 +814,24 @@ BuildingShadowsEffectV2 projects indoor casters from this mask onto outdoor rece
 - Indoor-origin overhead shadows were leaking into outdoor receiver regions after projection.
 - Attempts to block leakage accidentally broke the projected `_Outdoors` building-shadow contribution.
 - Behavior became brittle when trying to preserve motion while also enforcing region correctness.
+- Overhead shadow changed apparent softness and position while zooming.
+- The `_Outdoors` dark-region building contribution inside overhead shadows remained zoom-unstable even after main roof-path improvements.
 
-### What worked
+### Root causes identified
+
+1. **Screen-space overhead path had mixed zoom regimes:**
+   - Projection distance, blur kernel radius, and capture assumptions were not all scaled consistently.
+   - Result: perceived softness drift and positional swim while zooming.
+
+2. **Perspective zoom source could diverge from actual camera projection state:**
+   - Using only stored zoom state can lag/quantize relative to the camera's current FOV during transitions.
+   - Result: small but visible mismatch in projection offset behavior.
+
+3. **`_Outdoors` dark-region contribution is world-UV based and must not inherit screen-UV zoom rules:**
+   - The indoor dark-region term was sampled in scene/world mask UV, but portions of its length/jitter behavior were being driven like screen-space taps.
+   - Result: this channel remained zoom-unstable after roof-path fixes.
+
+### Fixes applied
 
 1. **Strict region split for projected roof taps** (`scripts/compositor-v2/effects/OverheadShadowsEffectV2.js`)
    - The roof projection tap gate now explicitly routes by binary receiver/caster region class:
@@ -818,7 +844,20 @@ BuildingShadowsEffectV2 projects indoor casters from this mask onto outdoor rece
    - The contribution is sourced from `_Outdoors` dark casters and applied to outdoor receivers as a separate building-shadow channel.
    - This restored the visual contribution that regressed during earlier leakage fixes.
 
-3. **Control schema copy re-aligned with actual runtime behavior** (`scripts/compositor-v2/effects/OverheadShadowsEffectV2.js`)
+3. **Perspective zoom derivation hardened + per-frame sync added** (`scripts/compositor-v2/effects/OverheadShadowsEffectV2.js`)
+   - Effective zoom is derived from the current camera FOV versus compositor base FOV for perspective cameras.
+   - `uZoom` is refreshed during render so shader projection math and capture guard calculations share the same frame-consistent zoom value.
+
+4. **Roof/tile blur footprint aligned with projection zoom regime** (`scripts/compositor-v2/effects/OverheadShadowsEffectV2.js`)
+   - Screen-space blur tap steps for roof/tile/fluid paths are scaled with zoom in the same regime as projection length.
+   - This removed zoom-linked softening/sharpening drift on the main overhead path.
+
+5. **`_Outdoors` dark-region path explicitly made zoom-stable in world UV** (`scripts/compositor-v2/effects/OverheadShadowsEffectV2.js`)
+   - Removed camera-zoom scaling from `_Outdoors` dark-region projection length base.
+   - Added a dedicated non-zoom indoor mask jitter step for dark-region taps.
+   - This fixed the remaining outdoor building-shadow instability within overhead shadows.
+
+6. **Control schema copy re-aligned with actual runtime behavior** (`scripts/compositor-v2/effects/OverheadShadowsEffectV2.js`)
    - Tweakpane labels/tooltips were updated back to “Outdoor Building Shadow (_Outdoors)” semantics.
    - This avoids tuning confusion and keeps authored settings consistent with shader routing.
 
@@ -828,9 +867,13 @@ BuildingShadowsEffectV2 projects indoor casters from this mask onto outdoor rece
   - **Motion:** UV offsets follow sun direction as before.
   - **Validity:** contribution only survives if receiver/caster region pairing is allowed by the explicit split.
 - The `_Outdoors` building shadow remains independent from the main roof same-region tap path, so it can be tuned without reopening indoor/outdoor leakage.
+- Zoom behavior now follows UV-space ownership:
+  - **Screen-space roof/tile/fluid taps:** projection + blur scale together with effective zoom.
+  - **World/scene-space `_Outdoors` dark-region taps:** projection + blur remain zoom-independent.
 
 ### Outcome
 
 - Indoor overhead shadows no longer project into outdoor receiver areas.
 - Building-shadow contribution from `_Outdoors` dark regions is preserved and tunable.
 - Shadow motion remains intact while region correctness is enforced.
+- Overhead shadows are now zoom-stable for both the main roof contribution and the `_Outdoors` building-shadow contribution.

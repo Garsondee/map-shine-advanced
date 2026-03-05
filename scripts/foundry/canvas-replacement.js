@@ -12,8 +12,7 @@ import { CameraFollower } from './camera-follower.js';
 import { PixiInputBridge } from './pixi-input-bridge.js';
 import { CinematicCameraManager } from './cinematic-camera-manager.js';
 import { EffectComposer } from '../effects/EffectComposer.js';
-// Dependent effects still constructed directly in createThreeCanvas
-import { CandleFlamesEffect } from '../effects/CandleFlamesEffect.js';
+import { CandleFlamesEffectV2 } from '../compositor-v2/effects/CandleFlamesEffectV2.js';
 import { MaskManager } from '../masks/MaskManager.js';
 import { ParticleSystem } from '../particles/ParticleSystem.js';
 import { DustMotesEffect } from '../particles/DustMotesEffect.js';
@@ -4826,6 +4825,11 @@ async function createThreeCanvas(scene) {
           uiManager.registerEffect('smelly-flies', 'Smelly Flies',
             SmellyFliesEffect.getControlSchema(), _makeV2Callback('_smellyFliesEffect'), 'particle');
         }, 'v2.registerSmellyFliesUI(V2)', Severity.COSMETIC);
+
+        safeCall(() => {
+          uiManager.registerEffect('candle-flames', 'Candle Flames',
+            CandleFlamesEffectV2.getControlSchema(), _makeV2Callback('_candleFlamesEffect'), 'particle');
+        }, 'v2.registerCandleFlamesUI(V2)', Severity.COSMETIC);
 
         safeCall(() => {
           uiManager.registerEffect('bloom', 'Bloom (Glow)',

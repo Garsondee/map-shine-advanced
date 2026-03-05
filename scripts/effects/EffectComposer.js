@@ -655,6 +655,7 @@ export class EffectComposer {
           window.MapShine.windowLightEffectV2 = this._floorCompositorV2._windowLightEffect;
           window.MapShine.cloudEffectV2 = this._floorCompositorV2._cloudEffect;
           window.MapShine.waterSplashesEffectV2 = this._floorCompositorV2._waterSplashesEffect;
+          window.MapShine.candleFlamesEffectV2 = this._floorCompositorV2._candleFlamesEffect;
         }
       } catch (_) {}
 
@@ -689,6 +690,7 @@ export class EffectComposer {
         'tree':             '_treeEffect',
         'water-splashes':   '_waterSplashesEffect',
         'underwater-bubbles':'_underwaterBubblesEffect',
+        'candle-flames':    '_candleFlamesEffect',
         'bloom':            '_bloomEffect',
         'colorCorrection':  '_colorCorrectionEffect',
         'filter':           '_filterEffect',

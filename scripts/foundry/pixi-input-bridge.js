@@ -70,6 +70,9 @@ export class PixiInputBridge {
     /** @type {{x:number, y:number, scale:number}|null} */
     this._smoothTargetView = null;
 
+    /** @type {'pan'|'zoom'|null} */
+    this._smoothTargetSource = null;
+
     /** @type {number|null} */
     this._smoothRafId = null;
 
@@ -406,6 +409,7 @@ export class PixiInputBridge {
 
     if (!this.enabled || this._isInputBlocked()) {
       this._smoothTargetView = null;
+      this._smoothTargetSource = null;
       return;
     }
 
@@ -415,6 +419,7 @@ export class PixiInputBridge {
     const stageView = this._getStageView();
     if (!stageView) {
       this._smoothTargetView = null;
+      this._smoothTargetSource = null;
       return;
     }
 
@@ -422,18 +427,21 @@ export class PixiInputBridge {
     if (!cfg.enabled) {
       this._applyView(target);
       this._smoothTargetView = null;
+      this._smoothTargetSource = null;
       return;
     }
 
     const dt = clamp((nowMs - (this._smoothLastAt || nowMs)) / 1000, 1 / 240, 0.1);
     this._smoothLastAt = nowMs;
 
+    const isZoomTarget = this._smoothTargetSource === 'zoom';
     const alphaPan = clamp(1 - Math.exp(-cfg.panHz * dt), 0.04, 1);
-    const alphaZoom = clamp(1 - Math.exp(-cfg.zoomHz * dt), 0.04, 1);
+    const alphaZoom = clamp(1 - Math.exp(-cfg.zoomHz * dt), 0.10, 1);
+    const alphaPos = isZoomTarget ? alphaZoom : alphaPan;
 
     const nextView = this._applyExternalViewConstraint({
-      x: stageView.x + ((target.x - stageView.x) * alphaPan),
-      y: stageView.y + ((target.y - stageView.y) * alphaPan),
+      x: stageView.x + ((target.x - stageView.x) * alphaPos),
+      y: stageView.y + ((target.y - stageView.y) * alphaPos),
       scale: stageView.scale + ((target.scale - stageView.scale) * alphaZoom),
     }, 'smooth');
 
@@ -445,6 +453,7 @@ export class PixiInputBridge {
     if (dx <= this._smoothEpsilonWorld && dy <= this._smoothEpsilonWorld && ds <= this._smoothEpsilonScale) {
       this._applyView(target);
       this._smoothTargetView = null;
+      this._smoothTargetSource = null;
       return;
     }
 
@@ -461,23 +470,16 @@ export class PixiInputBridge {
     const constrained = this._applyExternalViewConstraint(view, source);
     if (!constrained) return;
 
-    // Zoom-to-cursor anchoring must be immediate. Interpolating x/y/scale with
-    // different alphas causes apparent center-zoom drift under the mouse.
-    if (source === 'zoom') {
-      this._smoothTargetView = null;
-      this._stopSmoothingLoop();
-      this._applyView(constrained);
-      return;
-    }
-
     if (!this._isSmoothingEnabled()) {
       this._smoothTargetView = null;
+      this._smoothTargetSource = null;
       this._stopSmoothingLoop();
       this._applyView(constrained);
       return;
     }
 
     this._smoothTargetView = constrained;
+    this._smoothTargetSource = (source === 'zoom') ? 'zoom' : 'pan';
     this._startSmoothingLoop();
   }
   
@@ -685,6 +687,7 @@ export class PixiInputBridge {
     this._pendingRightDrag = false;
     this._rightDragStartPos = null;
     this._smoothTargetView = null;
+    this._smoothTargetSource = null;
     this._stopSmoothingLoop();
     if (this.threeCanvas) {
       this.threeCanvas.style.cursor = 'default';

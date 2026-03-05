@@ -68,6 +68,7 @@ import { VisionModeEffectV2 } from './effects/VisionModeEffectV2.js';
 import { InvertEffectV2 } from './effects/InvertEffectV2.js';
 import { SepiaEffectV2 } from './effects/SepiaEffectV2.js';
 import { SmellyFliesEffect } from '../particles/SmellyFliesEffect.js';
+import { CandleFlamesEffectV2 } from './effects/CandleFlamesEffectV2.js';
 import { weatherController } from '../core/WeatherController.js';
 
 const log = createLogger('FloorCompositor');
@@ -245,6 +246,13 @@ export class FloorCompositor {
      * @type {SmellyFliesEffect}
      */
     this._smellyFliesEffect = new SmellyFliesEffect();
+
+    /**
+     * V2 Candle Flames Effect: map-point-driven instanced flames + light-scene glow.
+     * Global-scoped effect (not floor-isolated).
+     * @type {CandleFlamesEffectV2}
+     */
+    this._candleFlamesEffect = new CandleFlamesEffectV2();
 
     // Outdoors mask is now provided by EffectMaskRegistry (central asset system)
 
@@ -502,6 +510,14 @@ export class FloorCompositor {
       log.warn('FloorCompositor: SmellyFliesEffect initialize failed:', err);
     }
 
+    // Candle flames render in bus scene and push glow into lighting lightScene.
+    try {
+      this._candleFlamesEffect?.initialize?.(this.renderer, this._renderBus._scene, this.camera);
+      this._candleFlamesEffect?.setLightingEffect?.(this._lightingEffect);
+    } catch (err) {
+      log.warn('FloorCompositor: CandleFlamesEffectV2 initialize failed:', err);
+    }
+
     // Subscribe outdoors mask consumers so they receive the texture as soon as
     // populate() builds it, and again on every floor change.
     // CloudEffectV2: cloud shadows and cloud tops only fall on outdoor areas.
@@ -585,6 +601,8 @@ export class FloorCompositor {
       if (splash?.enabled && splash._activeFloors?.size > 0) return true;
       const flies = this._smellyFliesEffect;
       if (flies?.enabled && (flies?.flySystems?.size ?? 0) > 0) return true;
+      const candles = this._candleFlamesEffect;
+      if (candles?.enabled && ((candles?._sourceFlameCount ?? 0) > 0 || (candles?._glowBuckets?.size ?? 0) > 0)) return true;
       return false;
     } catch (_) {
       // Fail safe: if anything about the probe throws, treat as active.
@@ -709,8 +727,9 @@ export class FloorCompositor {
         try {
           const mapPoints = window.MapShine?.mapPointsManager ?? null;
           this._smellyFliesEffect?.setMapPointsSources?.(mapPoints);
+          this._candleFlamesEffect?.setMapPointsSources?.(mapPoints);
         } catch (err) {
-          log.warn('SmellyFliesEffect map-points wiring failed:', err);
+          log.warn('Map-point effect wiring failed (smelly flies / candle flames):', err);
         }
         // Push current outdoors mask immediately; async compositor cache warmup
         // can still update this later via the per-frame sync below.
@@ -775,6 +794,11 @@ export class FloorCompositor {
         this._smellyFliesEffect?.update?.(timeInfo);
       } catch (err) {
         log.warn('SmellyFliesEffect update threw, skipping frame:', err);
+      }
+      try {
+        this._candleFlamesEffect?.update?.(timeInfo);
+      } catch (err) {
+        log.warn('CandleFlamesEffectV2 update threw, skipping frame:', err);
       }
       try {
         this._ashDisturbanceEffect?.update?.(timeInfo);
@@ -1375,6 +1399,7 @@ export class FloorCompositor {
     this._cloudEffect.onFloorChange(maxFloorIndex);
     // Weather particles are global (rain falls on all visible floors); no-op.
     try { this._weatherParticles?.onFloorChange?.(maxFloorIndex); } catch (_) {}
+    try { this._candleFlamesEffect?.onFloorChange?.(maxFloorIndex); } catch (_) {}
     // Outdoors mask floor changes are handled above via GpuSceneMaskCompositor
     // Swap active water SDF data for the new floor.
     try { this._waterEffect?.onFloorChange?.(maxFloorIndex); } catch (_) {}
@@ -1441,6 +1466,7 @@ export class FloorCompositor {
     try { this._overheadShadowEffect?.dispose?.(); } catch (_) {}
     try { this._buildingShadowEffect?.dispose?.(); } catch (_) {}
     try { this._smellyFliesEffect?.dispose?.(); } catch (_) {}
+    try { this._candleFlamesEffect?.dispose?.(); } catch (_) {}
     try { this._dotScreenEffect?.dispose?.(); } catch (_) {}
     try { this._halftoneEffect?.dispose?.(); } catch (_) {}
     try { this._asciiEffect?.dispose?.(); } catch (_) {}

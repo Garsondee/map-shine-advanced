@@ -15,6 +15,20 @@ import { createLogger } from '../../core/log.js';
 const log = createLogger('FilterEffectV2');
 
 const clamp01 = (n) => Math.max(0, Math.min(1, n));
+const finiteOr = (n, fallback) => (Number.isFinite(n) ? n : fallback);
+
+function normalizeColor01(input, fallback) {
+  if (!input || typeof input !== 'object') return fallback;
+  let { r, g, b } = input;
+  if (!Number.isFinite(r) || !Number.isFinite(g) || !Number.isFinite(b)) return fallback;
+  // Accept both 0..1 and 0..255 UI payloads.
+  if (r > 1 || g > 1 || b > 1) {
+    r /= 255;
+    g /= 255;
+    b /= 255;
+  }
+  return { r: clamp01(r), g: clamp01(g), b: clamp01(b) };
+}
 
 export class FilterEffectV2 {
   constructor() {
@@ -234,6 +248,12 @@ export class FilterEffectV2 {
           return dot(c, vec3(0.2126, 0.7152, 0.0722));
         }
 
+        float darkMaskFromLuma(float lum, float threshold, float softness) {
+          float s = max(0.0001, softness);
+          // 1 for dark pixels (lum << threshold), 0 for bright pixels.
+          return 1.0 - smoothstep(threshold - s, threshold, lum);
+        }
+
         void main() {
           vec4 scene = texture2D(tDiffuse, vUv);
           vec3 base = scene.rgb;
@@ -244,7 +264,7 @@ export class FilterEffectV2 {
           }
 
           // Start with simple tint multiplier.
-          vec3 filter = max(uTint, vec3(0.0));
+          vec3 filterMul = max(uTint, vec3(0.0));
 
           // ── Ink AO approximation ───────────────────────────────────────
           // Detect dark outlines and local contrast, then spread the influence
@@ -257,7 +277,7 @@ export class FilterEffectV2 {
             float Lc = luma(base);
 
             // Darkness mask at the center.
-            float darkC = smoothstep(uInkDarkThreshold, uInkDarkThreshold - max(0.0001, uInkDarkSoftness), 1.0 - Lc);
+            float darkC = darkMaskFromLuma(Lc, uInkDarkThreshold, uInkDarkSoftness);
 
             // Edge/contrast proxy.
             float Ln = luma(texture2D(tDiffuse, vUv + vec2(0.0,  o.y)).rgb);
@@ -277,10 +297,10 @@ export class FilterEffectV2 {
 
             // Spread darkness by sampling at radius (4 taps). This makes thick outlines
             // actually darken adjacent areas rather than only the line pixels.
-            float dN = smoothstep(uInkDarkThreshold, uInkDarkThreshold - max(0.0001, uInkDarkSoftness), 1.0 - Ln);
-            float dS = smoothstep(uInkDarkThreshold, uInkDarkThreshold - max(0.0001, uInkDarkSoftness), 1.0 - Ls);
-            float dE = smoothstep(uInkDarkThreshold, uInkDarkThreshold - max(0.0001, uInkDarkSoftness), 1.0 - Le);
-            float dW = smoothstep(uInkDarkThreshold, uInkDarkThreshold - max(0.0001, uInkDarkSoftness), 1.0 - Lw);
+            float dN = darkMaskFromLuma(Ln, uInkDarkThreshold, uInkDarkSoftness);
+            float dS = darkMaskFromLuma(Ls, uInkDarkThreshold, uInkDarkSoftness);
+            float dE = darkMaskFromLuma(Le, uInkDarkThreshold, uInkDarkSoftness);
+            float dW = darkMaskFromLuma(Lw, uInkDarkThreshold, uInkDarkSoftness);
 
             float darkSpread = max(darkC, max(max(dN, dS), max(dE, dW)));
 
@@ -289,9 +309,9 @@ export class FilterEffectV2 {
             float ao = clamp(max(darkSpread * 0.7, darkSpread * edge), 0.0, 1.0);
             ao *= uInkAoStrength;
 
-            // Multiplicative AO: filter *= mix(1, aoTint, ao)
+            // Multiplicative AO: filterMul *= mix(1, aoTint, ao)
             vec3 aoTint = mix(vec3(1.0), clamp(uInkTint, 0.0, 1.0), clamp(ao, 0.0, 1.0));
-            filter *= aoTint;
+            filterMul *= aoTint;
           }
 
           // ── Vignette (multiplicative) ──────────────────────────────────
@@ -301,11 +321,11 @@ export class FilterEffectV2 {
             float v = smoothstep(uVignetteInner, uVignetteOuter, len);
             float m = clamp(v * uVignetteStrength, 0.0, 1.0);
             vec3 vTint = mix(vec3(1.0), clamp(uVignetteTint, 0.0, 1.0), m);
-            filter *= vTint;
+            filterMul *= vTint;
           }
 
           // Apply filter with intensity.
-          vec3 filtered = base * filter;
+          vec3 filtered = base * filterMul;
           vec3 outColor = mix(base, filtered, clamp(uIntensity, 0.0, 1.0));
 
           gl_FragColor = vec4(outColor, scene.a);
@@ -336,24 +356,28 @@ export class FilterEffectV2 {
     const p = this.params;
 
     u.uEnabled.value = p.enabled ? 1.0 : 0.0;
-    u.uIntensity.value = clamp01(p.intensity ?? 1.0);
+    const intensity = clamp01(finiteOr(Number(p.intensity), 1.0));
+    u.uIntensity.value = intensity;
 
-    if (p.tintColor) u.uTint.value.set(p.tintColor.r, p.tintColor.g, p.tintColor.b);
+    const tint = normalizeColor01(p.tintColor, { r: 1, g: 1, b: 1 });
+    u.uTint.value.set(tint.r, tint.g, tint.b);
 
     u.uInkAoEnabled.value = p.inkAoEnabled ? 1.0 : 0.0;
-    u.uInkAoStrength.value = Math.max(0.0, p.inkAoStrength ?? 0.0);
-    u.uInkDarkThreshold.value = clamp01(p.inkDarkThreshold ?? 0.7);
-    u.uInkDarkSoftness.value = Math.max(0.0, p.inkDarkSoftness ?? 0.05);
-    u.uInkEdgeStrength.value = Math.max(0.0, p.inkEdgeStrength ?? 1.0);
-    u.uInkEdgePower.value = Math.max(0.01, p.inkEdgePower ?? 1.0);
-    u.uInkSpreadPx.value = Math.max(0.0, p.inkSpreadPx ?? 0.0);
-    if (p.inkTintColor) u.uInkTint.value.set(p.inkTintColor.r, p.inkTintColor.g, p.inkTintColor.b);
+    u.uInkAoStrength.value = Math.max(0.0, finiteOr(Number(p.inkAoStrength), 0.0));
+    u.uInkDarkThreshold.value = clamp01(finiteOr(Number(p.inkDarkThreshold), 0.7));
+    u.uInkDarkSoftness.value = Math.max(0.0, finiteOr(Number(p.inkDarkSoftness), 0.05));
+    u.uInkEdgeStrength.value = Math.max(0.0, finiteOr(Number(p.inkEdgeStrength), 1.0));
+    u.uInkEdgePower.value = Math.max(0.01, finiteOr(Number(p.inkEdgePower), 1.0));
+    u.uInkSpreadPx.value = Math.max(0.0, finiteOr(Number(p.inkSpreadPx), 0.0));
+    const inkTint = normalizeColor01(p.inkTintColor, { r: 0, g: 0, b: 0 });
+    u.uInkTint.value.set(inkTint.r, inkTint.g, inkTint.b);
 
     u.uVignetteEnabled.value = p.vignetteEnabled ? 1.0 : 0.0;
-    u.uVignetteStrength.value = Math.max(0.0, p.vignetteStrength ?? 0.0);
-    u.uVignetteInner.value = Math.max(0.0, p.vignetteInner ?? 0.55);
-    u.uVignetteOuter.value = Math.max(0.0001, p.vignetteOuter ?? 1.15);
-    if (p.vignetteTintColor) u.uVignetteTint.value.set(p.vignetteTintColor.r, p.vignetteTintColor.g, p.vignetteTintColor.b);
+    u.uVignetteStrength.value = Math.max(0.0, finiteOr(Number(p.vignetteStrength), 0.0));
+    u.uVignetteInner.value = Math.max(0.0, finiteOr(Number(p.vignetteInner), 0.55));
+    u.uVignetteOuter.value = Math.max(0.0001, finiteOr(Number(p.vignetteOuter), 1.15));
+    const vignetteTint = normalizeColor01(p.vignetteTintColor, { r: 0, g: 0, b: 0 });
+    u.uVignetteTint.value.set(vignetteTint.r, vignetteTint.g, vignetteTint.b);
   }
 
   /**

@@ -221,9 +221,12 @@ export class BuildingShadowsEffectV2 {
             return;
           }
 
-          // Match OverheadShadows projection direction.
+          // This pass renders in scene/world UV space (not screen UV), so
+          // projection distance must remain world-stable and NOT scale with
+          // camera zoom. Scaling by zoom here causes visible shadow length
+          // changes while zooming.
           vec2 dir = -normalize(uSunDir);
-          float pxLen = uLength * 1080.0 * max(uZoom, 0.0001);
+          float pxLen = uLength * 1080.0;
           vec2 maskTexel = uTexelSize;
           vec2 baseOffsetUv = dir * pxLen * maskTexel;
 

@@ -72,7 +72,7 @@ export class OverheadShadowsEffectV2 {
       verticalOnly: true,  // v1: primarily vertical motion in screen space
       affectsLights: 0.0,
       sunLatitude: 0.1,    // 0=flat east/west, 1=maximum north/south arc
-      indoorShadowEnabled: true, // Back-compat toggle; controls outdoor building-shadow injection from _Outdoors dark regions
+      indoorShadowEnabled: true, // Back-compat toggle; controls projected _Outdoors dark-region building shadow contribution on outdoor receivers
       indoorShadowOpacity: 0.5,   // Back-compat alias for outdoorBuildingShadowOpacity
       outdoorBuildingShadowOpacity: 0.5,
       indoorShadowLengthScale: 1.0, // Back-compat alias for outdoorBuildingShadowLengthScale
@@ -456,7 +456,7 @@ export class OverheadShadowsEffectV2 {
           type: 'checkbox',
           label: 'Enable Outdoor Building Shadow',
           default: true,
-          tooltip: 'Injects a building-shadow term into overhead shadows using _Outdoors dark regions (outdoor receivers only)'
+          tooltip: 'Injects a projected building-shadow term from _Outdoors dark regions (outdoor receivers only)'
         },
         outdoorBuildingShadowOpacity: {
           type: 'slider',
@@ -465,7 +465,7 @@ export class OverheadShadowsEffectV2 {
           max: 1.0,
           step: 0.01,
           default: 0.5,
-          tooltip: 'Strength of _Outdoors dark-region contribution on outdoor receivers'
+          tooltip: 'Strength of projected _Outdoors dark-region contribution on outdoor receivers'
         },
         outdoorBuildingShadowLengthScale: {
           type: 'slider',
@@ -836,15 +836,9 @@ export class OverheadShadowsEffectV2 {
           // 2) Optional indoor-only shadow contribution
           bool indoorEnabled = (uIndoorShadowEnabled > 0.5 && hasOutdoorsMask);
           vec2 maskTexelSize = vec2(1.0) / max(uSceneDimensions, vec2(1.0));
-          // Keep _Outdoors-derived building shadow offset aligned with the
-          // same sampling convention as roof projection above.
-          //
-          // Roof path samples in SCREEN UV at +screenDir, which corresponds to
-          // +dir in mesh/world UV (Y axis is inverted between those spaces).
-          // Sampling _Outdoors at +dir keeps building contribution in the same
-          // cast arc as overhead roof shadows as sun azimuth changes.
+          // Keep _Outdoors dark-region taps projected with sun direction so
+          // building-shadow motion remains consistent with roof projection.
           float buildingMaskPixelLenBase = uLength * 1080.0 * max(uZoom, 0.0001);
-          vec2 buildingMaskProjectDir = dir;
           float maskPixelLenBase = uLength * 1080.0 * receiverLengthScale;
           float maskPixelLenIndoor = buildingMaskPixelLenBase * max(uOutdoorBuildingShadowLengthScale, 0.0);
           float maskPixelLenProjected = maskPixelLenBase * tileProjectionLengthScale;
@@ -852,7 +846,7 @@ export class OverheadShadowsEffectV2 {
           // world-UV sampling direction as the roof projection path.
           vec2 maskProjectDir = dir;
           vec2 maskOffsetUvBase = vUv + maskProjectDir * maskPixelLenBase * maskTexelSize;
-          vec2 maskOffsetUvIndoor = vUv + buildingMaskProjectDir * maskPixelLenIndoor * maskTexelSize;
+          vec2 maskOffsetUvIndoor = vUv + maskProjectDir * maskPixelLenIndoor * maskTexelSize;
           vec2 maskOffsetUvProjected = vUv + maskProjectDir * maskPixelLenProjected * maskTexelSize;
 
           // Apply indoor/outdoor softness selection uniformly so all shadow
@@ -884,19 +878,24 @@ export class OverheadShadowsEffectV2 {
               // indoor/outdoor boundary. If the projected caster tap lives in
               // a different _Outdoors region than the receiver pixel, discard it.
               vec2 maskJitterUv = vec2(float(dx), float(dy)) * maskStepUv;
-              float sameRegionTap = 1.0;
+              float sameRegionTap = hasOutdoorsMask ? 0.0 : 1.0;
               if (hasOutdoorsMask) {
                 vec2 mUvBase = maskOffsetUvBase + maskJitterUv;
                 float mUvBaseValid = uvInBounds(mUvBase, maskTexelSize);
                 if (mUvBaseValid > 0.5) {
                   float casterOutdoorsBase = readOutdoorsMask(mUvBase);
                   float casterIsOutdoors = step(0.5, casterOutdoorsBase);
-                  sameRegionTap = 1.0 - abs(casterIsOutdoors - receiverIsOutdoors);
+                  float casterIsIndoor = 1.0 - casterIsOutdoors;
+                  // Explicit region split so indoor casters only project to
+                  // indoor receivers and outdoor casters only to outdoor receivers.
+                  sameRegionTap = receiverIsOutdoors * casterIsOutdoors + receiverIsIndoor * casterIsIndoor;
                 }
                 roofStrengthTap *= sameRegionTap;
               }
 
               // Dark-region tap (world-space _Outdoors mask)
+              // This is a separate projected building-shadow term sourced from
+              // indoor (_Outdoors dark) casters and applied to outdoor receivers.
               float indoorStrengthTap = 0.0;
               if (indoorEnabled) {
                 vec2 mUvIndoor = maskOffsetUvIndoor + maskJitterUv;
@@ -904,9 +903,7 @@ export class OverheadShadowsEffectV2 {
                 if (mUvIndoorValid > 0.5) {
                   float casterOutdoorsIndoor = readOutdoorsMask(mUvIndoor);
                   float casterIndoorsIndoor = 1.0 - casterOutdoorsIndoor;
-                  // Use dark-region casters as an extra "building shadow" only on
-                  // outdoor receivers. Indoors should not get this extra layer.
-                  indoorStrengthTap = clamp(casterIndoorsIndoor * uOutdoorBuildingShadowOpacity * receiverOutdoors, 0.0, 1.0);
+                  indoorStrengthTap = clamp(casterIndoorsIndoor * uOutdoorBuildingShadowOpacity * receiverIsOutdoors, 0.0, 1.0);
                   indoorStrengthTap *= baseEdgeFade;
                 }
               }
@@ -1420,7 +1417,12 @@ export class OverheadShadowsEffectV2 {
     const guardPx = Math.max(8.0, projectionPx + blurPx + 2.0);
     const guardScaleX = 1.0 + (2.0 * guardPx / Math.max(size.x, 1));
     const guardScaleY = 1.0 + (2.0 * guardPx / Math.max(size.y, 1));
-    const roofCaptureScale = Math.max(guardScaleX, guardScaleY);
+    // Perspective guard scaling expands FOV and then applies a linear UV remap.
+    // That remap is only exact for orthographic projection; with perspective it
+    // introduces subtle position drift while zooming. Keep guard scaling only
+    // for ortho cameras to preserve world stability.
+    const useLinearGuardScale = !!this.mainCamera?.isOrthographicCamera;
+    const roofCaptureScale = useLinearGuardScale ? Math.max(guardScaleX, guardScaleY) : 1.0;
 
     const restoreRoofCaptureCamera = this._applyRoofCaptureGuardScale(roofCaptureScale);
     if (this.material?.uniforms?.uRoofUvScale) {
@@ -1586,7 +1588,7 @@ export class OverheadShadowsEffectV2 {
       const tileGuardPx = Math.max(8.0, tileProjectionPx + tileProjectionBlurPx + 2.0);
       const tileGuardScaleX = 1.0 + (2.0 * tileGuardPx / Math.max(size.x, 1));
       const tileGuardScaleY = 1.0 + (2.0 * tileGuardPx / Math.max(size.y, 1));
-      const tileCaptureScale = Math.max(tileGuardScaleX, tileGuardScaleY);
+      const tileCaptureScale = useLinearGuardScale ? Math.max(tileGuardScaleX, tileGuardScaleY) : 1.0;
 
       // Receiver sort maps: capture currently visible top tile stacking so
       // projected casters can be occluded by higher-sort receiver tiles.

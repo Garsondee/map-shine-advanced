@@ -162,12 +162,7 @@ export class WeatherParticlesV2 {
   }
 
   _ensureWeatherSystemsRegistered() {
-    // IMPORTANT: Use the globally exposed WeatherParticles instance when present.
-    // In some V2 lifecycles, window.MapShineParticles.weatherParticles can be
-    // overwritten by another initializer; the debug probes the user runs also
-    // read from window.MapShineParticles. Registering systems from a different
-    // instance will not make the probed systems render.
-    const wp = window.MapShineParticles?.weatherParticles || this._weatherParticles;
+    const wp = this._weatherParticles;
     if (!wp) return;
 
     // Core precipitation systems
@@ -226,12 +221,17 @@ export class WeatherParticlesV2 {
     // Instantiate the V1 WeatherParticles system, pointed at our bus scene.
     this._weatherParticles = new WeatherParticles(this._batchRenderer, busScene);
 
-    // Expose on window.MapShineParticles so existing bridges (WaterEffectV2
-    // foam sync, UI weather enable toggle, etc.) keep working without changes.
+    // Expose on window.MapShine as the V2-owned weather particle authority.
+    try {
+      if (window.MapShine) {
+        window.MapShine.weatherParticlesV2 = this;
+        window.MapShine.weatherParticles = this._weatherParticles;
+      }
+    } catch (_) {}
+
+    // Legacy bridge for code paths not yet migrated to V2 accessors.
     if (!window.MapShineParticles) window.MapShineParticles = {};
     window.MapShineParticles.weatherParticles = this._weatherParticles;
-    // Also expose a minimal ParticleSystem-like shape so callers that check
-    // for window.MapShineParticles as a ParticleSystem can still introspect it.
     window.MapShineParticles.batchRenderer = this._batchRenderer;
 
     // Reusable culling objects (avoid per-frame allocations).
@@ -376,6 +376,21 @@ export class WeatherParticlesV2 {
    */
   onResize(_w, _h) {}
 
+  /**
+   * V2 integration accessor for downstream systems that need weather particle internals.
+   * @returns {WeatherParticles|null}
+   */
+  getWeatherParticles() {
+    return this._weatherParticles;
+  }
+
+  /**
+   * Clear cached water/foam mask data after tile/water mask edits.
+   */
+  clearWaterCaches() {
+    try { this._weatherParticles?.clearWaterCaches?.(); } catch (_) {}
+  }
+
   // ── Dispose ─────────────────────────────────────────────────────────────────
 
   /**
@@ -397,6 +412,12 @@ export class WeatherParticlesV2 {
       window.MapShineParticles.weatherParticles = null;
       window.MapShineParticles.batchRenderer = null;
     }
+    try {
+      if (window.MapShine) {
+        window.MapShine.weatherParticles = null;
+        window.MapShine.weatherParticlesV2 = null;
+      }
+    } catch (_) {}
 
     this._busScene = null;
     this._sceneBounds = null;

@@ -706,10 +706,15 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
 
       // WeatherParticles tile foam cache
       try {
-        const particleSystem = window.MapShineParticles;
-        const wp = particleSystem?.weatherParticles;
-        if (wp && typeof wp.clearWaterCaches === 'function') {
-          wp.clearWaterCaches();
+        const wpV2 = window.MapShine?.effectComposer?._floorCompositorV2?._weatherParticles;
+        if (wpV2 && typeof wpV2.clearWaterCaches === 'function') {
+          wpV2.clearWaterCaches();
+        } else {
+          const particleSystem = window.MapShineParticles;
+          const wp = particleSystem?.weatherParticles;
+          if (wp && typeof wp.clearWaterCaches === 'function') {
+            wp.clearWaterCaches();
+          }
         }
       } catch (_) {
       }

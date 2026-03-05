@@ -748,6 +748,8 @@ export class OverheadShadowsEffectV2 {
           // heavily compressed sample neighborhoods.
           float baseEdgeFade = smoothstep(0.0, 1.0, baseOffsetScale);
           vec2 offsetUv = roofUv + baseOffsetDeltaUv;
+          // Suppress self-shadowing on the caster layer itself.
+          float roofBaseAlpha = clamp(texture2D(tRoof, clamp(roofUv, 0.0, 1.0)).a, 0.0, 1.0);
 
           bool tileProjectionEnabled = (uTileProjectionEnabled > 0.5 && uHasTileProjection > 0.5);
           float tileProjectionLengthScale = max(uTileProjectionLengthScale, 0.0);
@@ -756,6 +758,9 @@ export class OverheadShadowsEffectV2 {
           float projectedOffsetScale = offsetTravelScale(tileProjectionUv, projectedOffsetDeltaUv);
           float projectedEdgeFade = smoothstep(0.0, 1.0, projectedOffsetScale);
           vec2 projectedOffsetUv = tileProjectionUv + projectedOffsetDeltaUv;
+          // Same rule for tile projection casters: do not project onto the
+          // tile's own layer footprint at the receiver pixel.
+          float tileBaseAlpha = clamp(texture2D(tTileProjection, clamp(tileProjectionUv, 0.0, 1.0)).a, 0.0, 1.0);
 
           // ---- Depth pass: height-based shadow modulation ----
           // IMPORTANT: Keep depth gating only for tile projection shadows.
@@ -830,7 +835,8 @@ export class OverheadShadowsEffectV2 {
 
               // Roof tap (screen-space)
               float roofTap = texture2D(tRoof, clamp(sUv, 0.0, 1.0)).a * sUvValid;
-              float roofStrengthTap = clamp(roofTap * uOpacity, 0.0, 1.0);
+              float roofProjectedOnlyTap = max(roofTap - roofBaseAlpha, 0.0);
+              float roofStrengthTap = clamp(roofProjectedOnlyTap * uOpacity, 0.0, 1.0);
               roofStrengthTap *= baseEdgeFade;
 
               // Region clipping: prevent shadows from crossing the
@@ -896,8 +902,9 @@ export class OverheadShadowsEffectV2 {
                 float pwEffective = pw * pUvValid;
 
                 float tileAlphaTap = clamp(texture2D(tTileProjection, clamp(pUv, 0.0, 1.0)).a, 0.0, 1.0) * pUvValid;
+                float tileProjectedOnlyTap = max(tileAlphaTap - tileBaseAlpha, 0.0);
                 float thresholdDenom = max(1.0 - uTileProjectionThreshold, 0.0001);
-                float tileMaskedTap = clamp((tileAlphaTap - uTileProjectionThreshold) / thresholdDenom, 0.0, 1.0);
+                float tileMaskedTap = clamp((tileProjectedOnlyTap - uTileProjectionThreshold) / thresholdDenom, 0.0, 1.0);
                 tileMaskedTap = pow(tileMaskedTap, max(uTileProjectionPower, 0.0001));
 
                 float sortGate = 1.0;

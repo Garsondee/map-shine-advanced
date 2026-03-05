@@ -1029,7 +1029,8 @@ export class WaterEffectV2 {
    */
   _syncLegacyFoamParticles(elapsedSeconds) {
     try {
-      const wp = window.MapShineParticles?.weatherParticles;
+      const wpV2 = window.MapShine?.effectComposer?._floorCompositorV2?._weatherParticles;
+      const wp = wpV2?.getWeatherParticles?.() || window.MapShine?.weatherParticles || window.MapShineParticles?.weatherParticles;
       if (!wp) return;
 
       const floorData = this._floorWater.get(this._activeFloorIndex);

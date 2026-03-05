@@ -369,13 +369,10 @@ export class FloorRenderBus {
         continue;
       }
 
-      // Overhead tiles act as ceilings/roofs for the floor below.
-      // When the user is on floor N, we must keep overhead tiles on floor N+1
-      // visible; otherwise overhead art disappears entirely and the overhead
-      // shadow capture pass has nothing to sample.
-      const isOverhead = entry.mesh?.userData?.isOverhead === true;
-      const extraCeilingFloor = isOverhead ? 1 : 0;
-      entry.mesh.visible = entry.floorIndex <= (maxFloorIndex + extraCeilingFloor);
+      // Visibility should be strict to the active stack slice: render floors
+      // from 0..N only. Overhead/roof capture uses dedicated layer/passes and
+      // must not leak upper-floor albedo into lower-floor views.
+      entry.mesh.visible = entry.floorIndex <= maxFloorIndex;
     }
     log.debug(`FloorRenderBus: showing floors 0–${maxFloorIndex}`);
   }

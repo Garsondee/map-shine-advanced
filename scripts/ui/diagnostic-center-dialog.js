@@ -642,6 +642,9 @@ export class DiagnosticCenterDialog {
     const now = Date.now();
 
     const levelController = ms?.levelNavigationController || null;
+    const floorStack = ms?.floorStack || null;
+    const floorLayerManager = ms?.floorLayerManager || null;
+    const floorRenderBus = ms?.floorRenderBus || null;
     const activeContext = levelController?.getActiveLevelContext?.() || ms?.activeLevelContext || null;
     const availableLevels = levelController?.getAvailableLevels?.() || ms?.availableLevels || [];
     const diagnostics = levelController?.getLevelDiagnostics?.() || ms?.levelNavigationDiagnostics || null;
@@ -971,6 +974,31 @@ export class DiagnosticCenterDialog {
       checks.push(_mkCheck('Levels', 'levels.controller.exists', 'WARN', 'Level navigation controller is not available'));
     }
 
+    try {
+      if (levelController) {
+        const hasGetAvailable = typeof levelController.getAvailableLevels === 'function';
+        const hasGetActive = typeof levelController.getActiveLevelContext === 'function';
+        const hasGetDiagnostics = typeof levelController.getLevelDiagnostics === 'function';
+        const hasSetActive = typeof levelController.setActiveLevel === 'function';
+        const hasStep = typeof levelController.stepLevel === 'function';
+        const hasSetLock = typeof levelController.setLockMode === 'function';
+        const hasRefresh = typeof levelController.refreshLevelBands === 'function';
+        const status = (hasGetAvailable && hasGetActive && hasGetDiagnostics && hasSetActive && hasStep && hasSetLock && hasRefresh)
+          ? 'PASS'
+          : 'WARN';
+        checks.push(_mkCheck('Levels', 'levels.controller.api', status, 'Level controller API surface', {
+          hasGetAvailable,
+          hasGetActive,
+          hasGetDiagnostics,
+          hasSetActive,
+          hasStep,
+          hasSetLock,
+          hasRefresh,
+        }));
+      }
+    } catch (_) {
+    }
+
     if (activeContext) {
       checks.push(_mkCheck('Levels', 'levels.context.active', 'PASS', 'Active level context is available', {
         levelId: activeContext.levelId,
@@ -991,6 +1019,53 @@ export class DiagnosticCenterDialog {
       checks.push(_mkCheck('Levels', 'levels.available', 'PASS', `Available levels: ${availableLevels.length}`));
     } else {
       checks.push(_mkCheck('Levels', 'levels.available', 'WARN', 'No available levels reported by controller'));
+    }
+
+    try {
+      if (Array.isArray(availableLevels) && availableLevels.length > 0) {
+        const invalidLevels = [];
+        const duplicateIds = new Set();
+        const seenIds = new Set();
+        for (let i = 0; i < availableLevels.length; i += 1) {
+          const lvl = availableLevels[i] || {};
+          const bottom = Number(lvl.bottom);
+          const top = Number(lvl.top);
+          const center = Number(lvl.center);
+          const levelId = String(lvl.levelId || `idx-${i}`);
+          if (!Number.isFinite(bottom) || !Number.isFinite(top) || !Number.isFinite(center) || bottom > top) {
+            invalidLevels.push({ i, levelId, bottom: lvl.bottom, top: lvl.top, center: lvl.center });
+          }
+          if (seenIds.has(levelId)) duplicateIds.add(levelId);
+          seenIds.add(levelId);
+        }
+        const status = (invalidLevels.length > 0 || duplicateIds.size > 0) ? 'WARN' : 'PASS';
+        checks.push(_mkCheck('Levels', 'levels.available.quality', status,
+          `Level list quality: ${availableLevels.length - invalidLevels.length}/${availableLevels.length} valid`, {
+            count: availableLevels.length,
+            invalidLevels,
+            duplicateIds: Array.from(duplicateIds),
+          }));
+      }
+    } catch (_) {
+    }
+
+    try {
+      if (activeContext && Array.isArray(availableLevels) && availableLevels.length > 0) {
+        const ctxIndex = Number(activeContext.index);
+        const indexInRange = Number.isInteger(ctxIndex) && ctxIndex >= 0 && ctxIndex < availableLevels.length;
+        const levelByIndex = indexInRange ? availableLevels[ctxIndex] : null;
+        const idMatches = Boolean(levelByIndex && String(levelByIndex.levelId || '') === String(activeContext.levelId || ''));
+        const status = (indexInRange && idMatches) ? 'PASS' : 'WARN';
+        checks.push(_mkCheck('Levels', 'levels.context.consistency', status, 'Active context consistency against level list', {
+          contextIndex: activeContext.index,
+          contextLevelId: activeContext.levelId,
+          levelCount: availableLevels.length,
+          indexInRange,
+          idMatches,
+          indexedLevel: levelByIndex || null,
+        }));
+      }
+    } catch (_) {
     }
 
     if (diagnostics) {
@@ -1128,6 +1203,47 @@ export class DiagnosticCenterDialog {
         } else {
           checks.push(_mkCheck('Levels', 'levels.tiles.rangeFlags', 'INFO', `No tiles with Levels range flags (${sceneTiles.size} tiles total)`));
         }
+      }
+    } catch (_) {
+    }
+
+    // Generic doc range summary (lights/sounds/notes/drawings/templates)
+    try {
+      const scene = canvas?.scene;
+      if (scene) {
+        const collectionEntries = [
+          ['lights', scene.lights],
+          ['sounds', scene.sounds],
+          ['notes', scene.notes],
+          ['drawings', scene.drawings],
+          ['templates', scene.templates],
+        ];
+        const byCollection = {};
+        let rangedTotal = 0;
+        let docsTotal = 0;
+        for (const [name, collection] of collectionEntries) {
+          let total = 0;
+          let ranged = 0;
+          if (collection) {
+            for (const doc of collection) {
+              total += 1;
+              const r = readDocLevelsRange(doc);
+              if (Number.isFinite(r.rangeBottom) || Number.isFinite(r.rangeTop)) {
+                ranged += 1;
+              }
+            }
+          }
+          byCollection[name] = { total, ranged };
+          docsTotal += total;
+          rangedTotal += ranged;
+        }
+        const status = rangedTotal > 0 ? 'PASS' : 'INFO';
+        checks.push(_mkCheck('Levels', 'levels.docs.rangeFlags', status,
+          `Documents with Levels ranges: ${rangedTotal}/${docsTotal}`, {
+            total: docsTotal,
+            ranged: rangedTotal,
+            byCollection,
+          }));
       }
     } catch (_) {
     }
@@ -1305,7 +1421,6 @@ export class DiagnosticCenterDialog {
 
     // --- Floor Rendering Pipeline ---
     try {
-      const floorStack = ms?.floorStack;
       const registry = ms?.effectMaskRegistry;
       const compositor = ms?.maskCompositor;
       
@@ -1313,20 +1428,87 @@ export class DiagnosticCenterDialog {
         const floors = floorStack._floors ?? [];
         const activeFloor = floorStack._activeFloorIndex ?? 0;
         const visibleFloors = floorStack.getVisibleFloors?.() ?? [];
+        const activeBand = floorStack.getActiveFloor?.() || null;
         
         checks.push(_mkCheck('Floor', 'floor.stack', 'PASS', `Floors: ${floors.length} (active: ${activeFloor}, visible: ${visibleFloors.length})`, {
           totalFloors: floors.length,
           activeFloorIndex: activeFloor,
           visibleFloorCount: visibleFloors.length,
+          activeBand,
           floors: floors.map((f, i) => ({
             index: i,
-            bottom: f.bottom,
-            top: f.top,
-            visible: f.visible ?? false,
+            elevationMin: f.elevationMin,
+            elevationMax: f.elevationMax,
+            compositorKey: f.compositorKey,
+            isActive: f.isActive ?? false,
           })),
         }));
+
+        if (activeContext && activeBand) {
+          const matchesBand = Number(activeContext.bottom) === Number(activeBand.elevationMin)
+            && Number(activeContext.top) === Number(activeBand.elevationMax);
+          checks.push(_mkCheck('Floor', 'floor.stack.contextAlignment', matchesBand ? 'PASS' : 'WARN',
+            matchesBand
+              ? 'FloorStack active band matches active level context'
+              : 'FloorStack active band differs from active level context', {
+                activeContext: {
+                  bottom: activeContext.bottom,
+                  top: activeContext.top,
+                  index: activeContext.index,
+                },
+                activeBand,
+              }));
+        }
       } else {
         checks.push(_mkCheck('Floor', 'floor.stack', 'INFO', 'FloorStack not available (single-level scene or V2 mode)'));
+      }
+
+      if (floorLayerManager) {
+        const trackedSprites = floorLayerManager._spriteFloorMap?.size ?? 0;
+        const hasFloorStack = Boolean(floorLayerManager._floorStack);
+        checks.push(_mkCheck('Floor', 'floor.layerManager', trackedSprites > 0 ? 'PASS' : 'INFO',
+          `FloorLayerManager tracking ${trackedSprites} sprite(s)`, {
+            trackedSprites,
+            hasFloorStack,
+          }));
+      }
+
+      if (floorRenderBus) {
+        const tileEntries = floorRenderBus._tiles;
+        const sceneRef = floorRenderBus._scene;
+        if (tileEntries && typeof tileEntries.forEach === 'function') {
+          const perFloor = {};
+          let total = 0;
+          let overhead = 0;
+          tileEntries.forEach((entry, key) => {
+            if (String(key).startsWith('__')) return;
+            total += 1;
+            const fi = Number(entry?.floorIndex ?? 0);
+            perFloor[fi] = (perFloor[fi] ?? 0) + 1;
+            if (entry?.mesh?.userData?.isOverhead === true) overhead += 1;
+          });
+          checks.push(_mkCheck('Floor', 'floor.renderBus', total > 0 ? 'PASS' : 'INFO',
+            `FloorRenderBus tiles: ${total} (overhead: ${overhead})`, {
+              initialized: Boolean(floorRenderBus._initialized),
+              total,
+              overhead,
+              perFloor,
+              sceneChildren: sceneRef?.children?.length ?? 0,
+            }));
+        }
+      }
+
+      if (effectComposer?._floorCompositorV2) {
+        const v2 = effectComposer._floorCompositorV2;
+        const flm = v2._floorLayerManager || null;
+        const frb = v2._renderBus || null;
+        const status = (flm && frb) ? 'PASS' : 'WARN';
+        checks.push(_mkCheck('Floor', 'floor.v2.pipeline', status, 'V2 floor compositor wiring', {
+          hasFloorLayerManager: Boolean(flm),
+          hasRenderBus: Boolean(frb),
+          hasFloorStack: Boolean(v2._floorStack),
+          hasSceneComposer: Boolean(v2._sceneComposer),
+        }));
       }
       
       if (registry) {
@@ -1354,16 +1536,73 @@ export class DiagnosticCenterDialog {
       if (compositor) {
         const activeFloorKey = compositor._activeFloorKey ?? null;
         const cacheSize = compositor._floorMaskCache?.size ?? 0;
+        const floorMetaSize = compositor._floorMeta?.size ?? 0;
+        const cpuCacheSize = compositor._cpuPixelCache?.size ?? 0;
+        const belowFloorKey = compositor._belowFloorKey ?? null;
         
         checks.push(_mkCheck('Floor', 'floor.compositor', 'INFO', `Compositor: active floor "${activeFloorKey}", ${cacheSize} cached floors`, {
           activeFloorKey,
           cacheSize,
+          floorMetaSize,
+          cpuCacheSize,
+          belowFloorKey,
         }));
       }
     } catch (e) {
       checks.push(_mkCheck('Floor', 'floor.pipeline', 'WARN', 'Failed to read floor pipeline state', {
         error: String(e?.message || e)
       }));
+    }
+
+    // Placeable elevation distribution across available levels (active scene)
+    try {
+      if (Array.isArray(availableLevels) && availableLevels.length > 0) {
+        const bucketCounts = availableLevels.map((lvl, idx) => ({
+          index: idx,
+          levelId: lvl.levelId,
+          label: lvl.label,
+          tokenCount: 0,
+          tileCount: 0,
+        }));
+
+        const findLevelIndex = (elev) => {
+          const n = Number(elev);
+          if (!Number.isFinite(n)) return -1;
+          for (let i = 0; i < availableLevels.length; i += 1) {
+            const lvl = availableLevels[i] || {};
+            const bottom = Number(lvl.bottom);
+            const top = Number(lvl.top);
+            if (!Number.isFinite(bottom) || !Number.isFinite(top)) continue;
+            if (n >= bottom && n <= top) return i;
+          }
+          return -1;
+        };
+
+        let unmatchedTokens = 0;
+        for (const tokenDoc of (canvas?.scene?.tokens || [])) {
+          const idx = findLevelIndex(tokenDoc?.elevation);
+          if (idx >= 0) bucketCounts[idx].tokenCount += 1;
+          else unmatchedTokens += 1;
+        }
+
+        let unmatchedTiles = 0;
+        for (const tileDoc of (canvas?.scene?.tiles || [])) {
+          const flags = readTileLevelsFlags(tileDoc);
+          const sourceElevation = Number.isFinite(Number(flags.rangeBottom)) ? Number(flags.rangeBottom) : Number(tileDoc?.elevation ?? 0);
+          const idx = findLevelIndex(sourceElevation);
+          if (idx >= 0) bucketCounts[idx].tileCount += 1;
+          else unmatchedTiles += 1;
+        }
+
+        const status = (unmatchedTokens === 0 && unmatchedTiles === 0) ? 'PASS' : 'INFO';
+        checks.push(_mkCheck('Levels', 'levels.scene.distribution', status,
+          `Scene placeable distribution mapped across ${availableLevels.length} level(s)`, {
+            levels: bucketCounts,
+            unmatchedTokens,
+            unmatchedTiles,
+          }));
+      }
+    } catch (_) {
     }
 
     // --- Scene Topology ---

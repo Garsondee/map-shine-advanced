@@ -87,7 +87,7 @@ import { clearCache as clearAssetCache, warmupBundleTextures, getCacheStats } fr
 import * as assetLoader from '../assets/loader.js';
 import { globalLoadingProfiler } from '../core/loading-profiler.js';
 import { debugLoadingProfiler } from '../core/debug-loading-profiler.js';
-import { weatherController } from '../core/WeatherController.js';
+import { WeatherController, weatherController } from '../core/WeatherController.js';
 import { DynamicExposureManager } from '../core/DynamicExposureManager.js';
 import { ControlsIntegration } from './controls-integration.js';
 import { frameCoordinator } from '../core/frame-coordinator.js';
@@ -4594,6 +4594,189 @@ async function createThreeCanvas(scene) {
         };
 
         safeCall(() => {
+          const weatherSchema =
+            WeatherController?.getControlSchema?.() ||
+            weatherController?.constructor?.getControlSchema?.();
+          if (!weatherSchema) return;
+          const onWeatherUpdate = (_effectId, paramId, value) => {
+            try {
+              const st = weatherController.targetState;
+              const cur = weatherController.currentState;
+              const THREE = window.THREE;
+
+              if (paramId === 'enabled' || paramId === 'masterEnabled') {
+                weatherController.enabled = !!value;
+                return;
+              }
+
+              if (paramId === 'dynamicEnabled') return weatherController.setDynamicEnabled(!!value);
+              if (paramId === 'dynamicPresetId') return weatherController.setDynamicPreset(String(value || 'Temperate Plains'));
+              if (paramId === 'dynamicEvolutionSpeed') return weatherController.setDynamicEvolutionSpeed(Number(value) || 0);
+              if (paramId === 'dynamicPaused') return weatherController.setDynamicPaused(!!value);
+              if (paramId === 'dynamicPlanDurationMinutes') return weatherController.setDynamicPlanDurationMinutes(Number(value) || 0.1);
+
+              if (paramId === 'dynamicBoundsEnabled') return weatherController.setDynamicBoundsEnabled(!!value);
+              if (paramId.startsWith('dynamicBounds')) {
+                const key = paramId.replace('dynamicBounds', '');
+                const boundKey = key.charAt(0).toLowerCase() + key.slice(1);
+                weatherController.setDynamicBound(boundKey, Number(value) || 0);
+                return;
+              }
+
+              if (paramId === 'queueFromCurrent') return weatherController.queueTransitionFromCurrent();
+              if (paramId === 'startQueuedTransition') return weatherController.startQueuedTransition(weatherController.transitionDuration);
+              if (paramId.startsWith('queued')) return weatherController.setQueuedTransitionParam(paramId, Number(value) || 0);
+
+              if (paramId === 'transitionDuration') {
+                weatherController.transitionDuration = Number(value) || 0.1;
+                return;
+              }
+              if (paramId === 'presetTransitionDurationMinutes') {
+                const mins = Math.max(0.1, Number(value) || 0.5);
+                weatherController.presetTransitionDurationSeconds = mins * 60.0;
+                return;
+              }
+
+              if (paramId === 'variability') return weatherController.setVariability(Number(value) || 0);
+              if (paramId === 'simulationSpeed') {
+                weatherController.simulationSpeed = Math.max(0.01, Number(value) || 1.0);
+                return;
+              }
+
+              if (paramId === 'precipitation') {
+                const v = Math.max(0, Math.min(1, Number(value) || 0));
+                st.precipitation = v;
+                cur.precipitation = v;
+                return;
+              }
+              if (paramId === 'cloudCover') {
+                const v = Math.max(0, Math.min(1, Number(value) || 0));
+                st.cloudCover = v;
+                cur.cloudCover = v;
+                return;
+              }
+              if (paramId === 'fogDensity') {
+                const v = Math.max(0, Math.min(1, Number(value) || 0));
+                st.fogDensity = v;
+                cur.fogDensity = v;
+                return;
+              }
+              if (paramId === 'wetness') {
+                const v = Math.max(0, Math.min(1, Number(value) || 0));
+                st.wetness = v;
+                cur.wetness = v;
+                return;
+              }
+              if (paramId === 'freezeLevel') {
+                const v = Math.max(0, Math.min(1, Number(value) || 0));
+                st.freezeLevel = v;
+                cur.freezeLevel = v;
+                return;
+              }
+              if (paramId === 'ashIntensity') {
+                const v = Math.max(0, Math.min(1, Number(value) || 0));
+                st.ashIntensity = v;
+                cur.ashIntensity = v;
+                return;
+              }
+
+              if (paramId === 'windSpeed') {
+                const v = Math.max(0, Math.min(1, Number(value) || 0));
+                st.windSpeed = v;
+                cur.windSpeed = v;
+                return;
+              }
+              if (paramId === 'windDirection') {
+                const deg = Number(value) || 0;
+                const rad = (deg * Math.PI) / 180;
+                const x = Math.cos(rad);
+                const y = -Math.sin(rad);
+                if (st.windDirection?.set) st.windDirection.set(x, y);
+                else st.windDirection = { x, y };
+                if (cur.windDirection?.set) cur.windDirection.set(x, y);
+                else cur.windDirection = { x, y };
+                return;
+              }
+
+              if (paramId === 'gustWaitMin') return void (weatherController.gustWaitMin = Number(value) || 0);
+              if (paramId === 'gustWaitMax') return void (weatherController.gustWaitMax = Number(value) || 0);
+              if (paramId === 'gustDuration') return void (weatherController.gustDuration = Number(value) || 0.1);
+              if (paramId === 'gustStrength') return void (weatherController.gustStrength = Number(value) || 0);
+
+              if (paramId === 'wettingDuration') return void (weatherController.wetnessTuning.wettingDuration = Number(value) || 1);
+              if (paramId === 'dryingDuration') return void (weatherController.wetnessTuning.dryingDuration = Number(value) || 1);
+              if (paramId === 'precipThreshold') return void (weatherController.wetnessTuning.precipThreshold = Number(value) || 0);
+
+              if (paramId === 'roofMaskForceEnabled') {
+                weatherController.roofMaskForceEnabled = !!value;
+                return;
+              }
+
+              const rainMap = {
+                rainIntensityScale: 'intensityScale',
+                rainStreakLength: 'streakLength',
+                rainDropSize: 'dropSize',
+                rainDropSizeMin: 'dropSizeMin',
+                rainDropSizeMax: 'dropSizeMax',
+                rainBrightness: 'brightness',
+                rainGravityScale: 'gravityScale',
+                rainWindInfluence: 'windInfluence',
+                rainCurlStrength: 'curlStrength',
+                rainSplash1IntensityScale: 'splash1IntensityScale',
+                rainSplash1LifeMin: 'splash1LifeMin',
+                rainSplash1LifeMax: 'splash1LifeMax',
+                rainSplash1SizeMin: 'splash1SizeMin',
+                rainSplash1SizeMax: 'splash1SizeMax',
+                rainSplash1OpacityPeak: 'splash1OpacityPeak',
+                rainSplash2IntensityScale: 'splash2IntensityScale',
+                rainSplash2LifeMin: 'splash2LifeMin',
+                rainSplash2LifeMax: 'splash2LifeMax',
+                rainSplash2SizeMin: 'splash2SizeMin',
+                rainSplash2SizeMax: 'splash2SizeMax',
+                rainSplash2OpacityPeak: 'splash2OpacityPeak',
+                rainSplash3IntensityScale: 'splash3IntensityScale',
+                rainSplash3LifeMin: 'splash3LifeMin',
+                rainSplash3LifeMax: 'splash3LifeMax',
+                rainSplash3SizeMin: 'splash3SizeMin',
+                rainSplash3SizeMax: 'splash3SizeMax',
+                rainSplash3OpacityPeak: 'splash3OpacityPeak',
+                rainSplash4IntensityScale: 'splash4IntensityScale',
+                rainSplash4LifeMin: 'splash4LifeMin',
+                rainSplash4LifeMax: 'splash4LifeMax',
+                rainSplash4SizeMin: 'splash4SizeMin',
+                rainSplash4SizeMax: 'splash4SizeMax',
+                rainSplash4OpacityPeak: 'splash4OpacityPeak'
+              };
+              if (Object.prototype.hasOwnProperty.call(rainMap, paramId)) {
+                weatherController.rainTuning[rainMap[paramId]] = Number(value) || 0;
+                return;
+              }
+
+              const snowMap = {
+                snowIntensityScale: 'intensityScale',
+                snowFlakeSize: 'flakeSize',
+                snowBrightness: 'brightness',
+                snowGravityScale: 'gravityScale',
+                snowWindInfluence: 'windInfluence',
+                snowCurlStrength: 'curlStrength',
+                snowFlutterStrength: 'flutterStrength'
+              };
+              if (Object.prototype.hasOwnProperty.call(snowMap, paramId)) {
+                weatherController.snowTuning[snowMap[paramId]] = Number(value) || 0;
+                return;
+              }
+
+              // Keep wind-direction visual sync if a wind vane binding exists.
+              if (paramId === 'windDirection' && THREE) {
+                safeCall(() => uiManager?.updateControlStates?.('weather'), 'weather.syncWindUI', Severity.COSMETIC);
+              }
+            } catch (_) {}
+          };
+
+          uiManager.registerEffect('weather', 'Weather', weatherSchema, onWeatherUpdate, 'atmospheric');
+        }, 'v2.registerWeatherUI', Severity.COSMETIC);
+
+        safeCall(() => {
           uiManager.registerEffect('lighting', 'Lighting & Tone Mapping',
             LightingEffectV2.getControlSchema(), _makeV2Callback('_lightingEffect'), 'global');
         }, 'v2.registerLightingUI', Severity.COSMETIC);
@@ -5599,9 +5782,14 @@ export async function resetScene(options = undefined) {
     }, 'resetScene.clearWaterCaches', Severity.COSMETIC);
 
     safeCall(() => {
-      const particleSystem = window.MapShineParticles;
-      const wp = particleSystem?.weatherParticles;
-      if (wp && typeof wp.clearWaterCaches === 'function') wp.clearWaterCaches();
+      const wpV2 = window.MapShine?.effectComposer?._floorCompositorV2?._weatherParticles;
+      if (wpV2 && typeof wpV2.clearWaterCaches === 'function') {
+        wpV2.clearWaterCaches();
+      } else {
+        const particleSystem = window.MapShineParticles;
+        const wp = particleSystem?.weatherParticles;
+        if (wp && typeof wp.clearWaterCaches === 'function') wp.clearWaterCaches();
+      }
     }, 'resetScene.clearWeatherCaches', Severity.COSMETIC);
 
     await createThreeCanvas(scene);

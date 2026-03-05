@@ -28,10 +28,9 @@ const log = createLogger('FloorStack');
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-/** Sentinel min elevation for open-ended floor bands (no Levels data) */
-const ELEVATION_OPEN_BOTTOM = -1e9;
-/** Sentinel max elevation for open-ended floor bands (no Levels data) */
-const ELEVATION_OPEN_TOP = 1e9;
+/** Default fallback floor band for scenes with no valid Levels setup. */
+const DEFAULT_FALLBACK_BOTTOM = 0;
+const DEFAULT_FALLBACK_TOP = 10;
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -126,14 +125,14 @@ export class FloorStack {
         isActive: false,
       }));
     } else {
-      // Non-Levels scene: single omnipresent floor.
+      // No valid scene level bands: use a deterministic default floor so
+      // downstream systems always have concrete bottom/top values.
       this._floors = [{
         index: 0,
-        elevationMin: ELEVATION_OPEN_BOTTOM,
-        elevationMax: ELEVATION_OPEN_TOP,
+        elevationMin: DEFAULT_FALLBACK_BOTTOM,
+        elevationMax: DEFAULT_FALLBACK_TOP,
         key: 'floor_0_default',
-        // Non-Levels scene: context has no bottom/top so both sides are empty string.
-        compositorKey: ':',
+        compositorKey: `${DEFAULT_FALLBACK_BOTTOM}:${DEFAULT_FALLBACK_TOP}`,
         isActive: true,
       }];
     }
@@ -313,8 +312,8 @@ export class FloorStack {
    *   to any floor whose band overlaps with that range.
    * - If the tile has no Levels range flags, it belongs to whichever floor
    *   band contains its `elevation` value.
-   * - If the floor band is the sentinel open-ended range (non-Levels scene),
-   *   all tiles are considered on that floor.
+   * - In single-floor fallback mode (no valid Levels setup), all tiles are
+   *   considered on floor 0.
    *
    * @param {object} tileDoc
    * @param {FloorBand} floor
@@ -322,8 +321,8 @@ export class FloorStack {
    * @private
    */
   _tileIsOnFloor(tileDoc, floor) {
-    // Open-ended single-floor fallback — everything is on floor 0.
-    if (floor.elevationMin === ELEVATION_OPEN_BOTTOM && floor.elevationMax === ELEVATION_OPEN_TOP) {
+    // Single-floor fallback: all tiles belong to floor 0.
+    if (this._floors.length <= 1) {
       return true;
     }
 
@@ -353,8 +352,8 @@ export class FloorStack {
    * @private
    */
   _tokenIsOnFloor(tokenDoc, floor) {
-    // Open-ended single-floor fallback — all tokens are on floor 0.
-    if (floor.elevationMin === ELEVATION_OPEN_BOTTOM && floor.elevationMax === ELEVATION_OPEN_TOP) {
+    // Single-floor fallback: all tokens belong to floor 0.
+    if (this._floors.length <= 1) {
       return true;
     }
 

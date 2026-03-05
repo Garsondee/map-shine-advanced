@@ -6,8 +6,9 @@
  * LightingEffectV2.
  *
  * Multi-level behavior:
- * - Combines all floors above the active floor into one shadow field.
- * - Falls back to the active floor outdoors mask when no upper floors exist
+ * - Combines the active floor + all floors above it into one shadow field.
+ * - As perspective moves upward, lower floors are excluded.
+ * - Falls back to the active floor outdoors mask when no floor-stack data exists
  *   (single-level maps / non-level scenes).
  *
  * @module compositor-v2/effects/BuildingShadowsEffectV2
@@ -62,6 +63,11 @@ export class BuildingShadowsEffectV2 {
 
     this._sunAzimuthDeg = null;
     this._sunElevationDeg = null;
+
+    /** @type {Promise<void>|null} Background floor-mask warmup in flight */
+    this._floorPreloadPromise = null;
+    /** @type {number} Last warmup attempt timestamp (ms) */
+    this._lastFloorPreloadAttemptMs = 0;
   }
 
   static getControlSchema() {
@@ -141,6 +147,9 @@ export class BuildingShadowsEffectV2 {
         uOutdoorsMask: { value: null },
         uHasMask: { value: 0.0 },
         uOutdoorsMaskFlipY: { value: 0.0 },
+        uReceiverOutdoorsMask: { value: null },
+        uHasReceiverMask: { value: 0.0 },
+        uReceiverOutdoorsMaskFlipY: { value: 0.0 },
         uSunDir: { value: new THREE.Vector2(0, 1) },
         uLength: { value: this.params.length },
         uSoftness: { value: this.params.softness },
@@ -159,6 +168,9 @@ export class BuildingShadowsEffectV2 {
         uniform sampler2D uOutdoorsMask;
         uniform float uHasMask;
         uniform float uOutdoorsMaskFlipY;
+        uniform sampler2D uReceiverOutdoorsMask;
+        uniform float uHasReceiverMask;
+        uniform float uReceiverOutdoorsMaskFlipY;
         uniform vec2 uSunDir;
         uniform float uLength;
         uniform float uSoftness;
@@ -183,6 +195,15 @@ export class BuildingShadowsEffectV2 {
           return clamp(texture2D(uOutdoorsMask, suv).r, 0.0, 1.0);
         }
 
+        float readReceiverOutdoorsMask(vec2 uv) {
+          if (uHasReceiverMask < 0.5) return readOutdoorsMask(uv);
+          vec2 suv = clamp(uv, 0.0, 1.0);
+          if (uReceiverOutdoorsMaskFlipY > 0.5) {
+            suv.y = 1.0 - suv.y;
+          }
+          return clamp(texture2D(uReceiverOutdoorsMask, suv).r, 0.0, 1.0);
+        }
+
         void main() {
           if (uHasMask < 0.5) {
             gl_FragColor = vec4(0.0);
@@ -195,7 +216,10 @@ export class BuildingShadowsEffectV2 {
           vec2 maskTexel = uTexelSize;
           vec2 baseOffsetUv = dir * pxLen * maskTexel;
 
-          float receiverOutdoors = readOutdoorsMask(vUv);
+          // Receiver gating must come from the active/view floor mask, not the
+          // current caster floor. This prevents upper-floor holes from cutting
+          // out projected shadow on lower floors.
+          float receiverOutdoors = readReceiverOutdoorsMask(vUv);
           float receiverOutdoorGate = step(0.5, receiverOutdoors);
 
           vec2 stepUv = maskTexel * max(uSoftness, 0.5) * 4.0;
@@ -354,8 +378,15 @@ export class BuildingShadowsEffectV2 {
       return;
     }
 
+    const floorCount = Number(window.MapShine?.floorStack?.getFloors?.()?.length ?? 0);
+    this._maybeWarmFloorMaskCache(compositor, floorCount);
+
     const floorKeys = this._resolveSourceFloorKeys(compositor);
-    const fallbackMask = this._outdoorsMask ?? null;
+    // Multi-floor safety: never fall back to an ambiguous single outdoors texture
+    // (often ground) when per-floor keys are unavailable; that causes cross-floor
+    // leakage on upper floors. Single-floor scenes still use fallbackMask.
+    const allowFallbackMask = floorCount <= 1;
+    const fallbackMask = allowFallbackMask ? (this._outdoorsMask ?? null) : null;
     if (floorKeys.length === 0 && !fallbackMask) {
       if (!this._loggedNoMaskOnce) {
         this._loggedNoMaskOnce = true;
@@ -374,6 +405,13 @@ export class BuildingShadowsEffectV2 {
     }
 
     this.update(null);
+
+    const receiverMaskTex = this._resolveReceiverMaskTexture(compositor);
+    if (this._projectMaterial?.uniforms) {
+      this._projectMaterial.uniforms.uReceiverOutdoorsMask.value = receiverMaskTex;
+      this._projectMaterial.uniforms.uHasReceiverMask.value = receiverMaskTex ? 1.0 : 0.0;
+      this._projectMaterial.uniforms.uReceiverOutdoorsMaskFlipY.value = receiverMaskTex?.flipY ? 1.0 : 0.0;
+    }
 
     const THREE = window.THREE;
     if (!THREE) return;
@@ -432,46 +470,144 @@ export class BuildingShadowsEffectV2 {
     const activeKey = (ctx && Number.isFinite(Number(ctx.bottom)) && Number.isFinite(Number(ctx.top)))
       ? `${ctx.bottom}:${ctx.top}`
       : null;
+    const activeBottom = Number(ctx?.bottom);
+
+    // Preferred source of truth: compositor cache keys that actually have
+    // outdoors textures available this frame.
+    const cachedEntries = [];
+    try {
+      const floorMeta = compositor?._floorMeta;
+      if (floorMeta && typeof floorMeta.entries === 'function') {
+        for (const [key] of floorMeta.entries()) {
+          const parts = String(key).split(':');
+          const b = Number(parts[0]);
+          const t = Number(parts[1]);
+          if (!Number.isFinite(b) || !Number.isFinite(t)) continue;
+          if (!compositor.getFloorTexture(key, 'outdoors')) continue;
+          cachedEntries.push({ key, bottom: b, top: t });
+        }
+      }
+    } catch (_) {}
+
+    if (cachedEntries.length > 0) {
+      cachedEntries.sort((a, b) => a.bottom - b.bottom);
+      if (Number.isFinite(activeBottom)) {
+        const filtered = cachedEntries
+          .filter((entry) => entry.bottom >= activeBottom)
+          .map((entry) => entry.key);
+        if (filtered.length > 0) return filtered;
+      }
+      return cachedEntries.map((entry) => entry.key);
+    }
 
     const floorStack = window.MapShine?.floorStack;
-    const activeIdx = Number.isFinite(floorStack?.getActiveFloor?.()?.index)
-      ? floorStack.getActiveFloor().index
-      : 0;
+    const activeFloor = floorStack?.getActiveFloor?.() ?? null;
+    const activeIdx = Number.isFinite(activeFloor?.index)
+      ? Number(activeFloor.index)
+      : null;
 
     const keys = [];
+    const seen = new Set();
+    const pushKey = (key) => {
+      if (!key || seen.has(key)) return;
+      if (!compositor.getFloorTexture(key, 'outdoors')) return;
+      seen.add(key);
+      keys.push(key);
+    };
+
     const floors = floorStack?.getFloors?.() ?? [];
     if (Array.isArray(floors) && floors.length > 0) {
+      let resolvedActiveIdx = activeIdx;
+      if (!Number.isFinite(resolvedActiveIdx) && activeKey) {
+        const match = floors.find((floor) => {
+          const b = Number(floor?.elevationMin);
+          const t = Number(floor?.elevationMax);
+          return Number.isFinite(b) && Number.isFinite(t) && `${b}:${t}` === activeKey;
+        });
+        if (Number.isFinite(match?.index)) resolvedActiveIdx = Number(match.index);
+      }
+      if (!Number.isFinite(resolvedActiveIdx)) {
+        resolvedActiveIdx = 0;
+      }
+
       for (const floor of floors) {
-        if (!Number.isFinite(floor?.index) || floor.index <= activeIdx) continue;
+        if (!Number.isFinite(floor?.index) || floor.index < resolvedActiveIdx) continue;
         const b = Number(floor?.elevationMin);
         const t = Number(floor?.elevationMax);
         if (!Number.isFinite(b) || !Number.isFinite(t)) continue;
-        const key = `${b}:${t}`;
-        if (compositor.getFloorTexture(key, 'outdoors')) keys.push(key);
+        pushKey(`${b}:${t}`);
       }
     }
 
-    const activeFloor = floorStack?.getActiveFloor?.() ?? null;
     if (keys.length === 0 && activeFloor) {
       const b = Number(activeFloor?.elevationMin);
       const t = Number(activeFloor?.elevationMax);
       if (Number.isFinite(b) && Number.isFinite(t)) {
-        const key = `${b}:${t}`;
-        if (compositor.getFloorTexture(key, 'outdoors')) keys.push(key);
+        pushKey(`${b}:${t}`);
       }
     }
 
-    // Single-level fallback: use active floor if no upper floors are available.
-    if (keys.length === 0 && activeKey && compositor.getFloorTexture(activeKey, 'outdoors')) {
-      keys.push(activeKey);
+    // Single-level / no-floor-stack fallback: use active context band if available.
+    if (keys.length === 0 && activeKey) {
+      pushKey(activeKey);
     }
 
     // Non-level fallback used by some scenes.
-    if (keys.length === 0 && compositor.getFloorTexture('ground', 'outdoors')) {
-      keys.push('ground');
+    if (keys.length === 0) {
+      pushKey('ground');
     }
 
     return keys;
+  }
+
+  _resolveReceiverMaskTexture(compositor) {
+    const ctx = window.MapShine?.activeLevelContext ?? null;
+    const activeKey = (ctx && Number.isFinite(Number(ctx.bottom)) && Number.isFinite(Number(ctx.top)))
+      ? `${ctx.bottom}:${ctx.top}`
+      : null;
+
+    if (activeKey) {
+      const tex = compositor.getFloorTexture(activeKey, 'outdoors');
+      if (tex) return tex;
+    }
+
+    const activeFloor = window.MapShine?.floorStack?.getActiveFloor?.() ?? null;
+    if (activeFloor) {
+      const b = Number(activeFloor?.elevationMin);
+      const t = Number(activeFloor?.elevationMax);
+      if (Number.isFinite(b) && Number.isFinite(t)) {
+        const tex = compositor.getFloorTexture(`${b}:${t}`, 'outdoors');
+        if (tex) return tex;
+      }
+    }
+
+    return this._outdoorsMask ?? null;
+  }
+
+  _maybeWarmFloorMaskCache(compositor, floorCount) {
+    if (!compositor || floorCount <= 1) return;
+    if (this._floorPreloadPromise) return;
+
+    const now = Date.now();
+    if ((now - this._lastFloorPreloadAttemptMs) < 1000) return;
+    this._lastFloorPreloadAttemptMs = now;
+
+    const scene = canvas?.scene ?? null;
+    if (!scene || typeof compositor.preloadAllFloors !== 'function') return;
+
+    const activeLevelContext = window.MapShine?.activeLevelContext ?? null;
+    const lastMaskBasePath = compositor?._activeFloorBasePath ?? null;
+
+    this._floorPreloadPromise = compositor.preloadAllFloors(scene, {
+      activeLevelContext,
+      lastMaskBasePath,
+    })
+      .catch((err) => {
+        log.debug('BuildingShadowsEffectV2: preloadAllFloors warmup failed', err);
+      })
+      .finally(() => {
+        this._floorPreloadPromise = null;
+      });
   }
 
   /**

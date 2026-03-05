@@ -77,37 +77,90 @@ export class FilterEffectV2 {
       enabled: true,
       groups: [
         {
+          name: 'filter',
           label: 'Filter',
-          items: [
-            { type: 'toggle', id: 'enabled', label: 'Enabled', default: false },
-            { type: 'slider', id: 'intensity', label: 'Intensity', min: 0, max: 1, step: 0.01, default: 1.0 },
-            { type: 'color', id: 'tintColor', label: 'Tint (Multiply)', default: { r: 1, g: 1, b: 1 } },
-          ],
+          type: 'inline',
+          parameters: ['intensity', 'tintColor'],
         },
         {
+          name: 'inkAo',
           label: 'Ink AO (from scene)',
-          items: [
-            { type: 'toggle', id: 'inkAoEnabled', label: 'Enabled', default: true },
-            { type: 'slider', id: 'inkAoStrength', label: 'Strength', min: 0, max: 2, step: 0.01, default: 0.65 },
-            { type: 'slider', id: 'inkDarkThreshold', label: 'Dark Threshold', min: 0, max: 1, step: 0.01, default: 0.72 },
-            { type: 'slider', id: 'inkDarkSoftness', label: 'Dark Softness', min: 0, max: 0.5, step: 0.01, default: 0.08 },
-            { type: 'slider', id: 'inkEdgeStrength', label: 'Edge Strength', min: 0, max: 4, step: 0.01, default: 1.0 },
-            { type: 'slider', id: 'inkEdgePower', label: 'Edge Power', min: 0.25, max: 4, step: 0.01, default: 1.25 },
-            { type: 'slider', id: 'inkSpreadPx', label: 'Spread (px)', min: 0, max: 12, step: 0.25, default: 2.0 },
-            { type: 'color', id: 'inkTintColor', label: 'AO Tint', default: { r: 0, g: 0, b: 0 } },
+          type: 'folder',
+          expanded: false,
+          parameters: [
+            'inkAoEnabled',
+            'inkAoStrength',
+            'inkDarkThreshold',
+            'inkDarkSoftness',
+            'inkEdgeStrength',
+            'inkEdgePower',
+            'inkSpreadPx',
+            'inkTintColor',
           ],
         },
         {
+          name: 'vignette',
           label: 'Vignette (Multiply)',
-          items: [
-            { type: 'toggle', id: 'vignetteEnabled', label: 'Enabled', default: false },
-            { type: 'slider', id: 'vignetteStrength', label: 'Strength', min: 0, max: 2, step: 0.01, default: 0.35 },
-            { type: 'slider', id: 'vignetteInner', label: 'Inner', min: 0, max: 2, step: 0.01, default: 0.55 },
-            { type: 'slider', id: 'vignetteOuter', label: 'Outer', min: 0, max: 2.5, step: 0.01, default: 1.15 },
-            { type: 'color', id: 'vignetteTintColor', label: 'Tint', default: { r: 0, g: 0, b: 0 } },
-          ],
+          type: 'folder',
+          expanded: false,
+          parameters: ['vignetteEnabled', 'vignetteStrength', 'vignetteInner', 'vignetteOuter', 'vignetteTintColor'],
         },
       ],
+      parameters: {
+        enabled: { type: 'boolean', default: false, hidden: true },
+
+        intensity: { type: 'slider', label: 'Intensity', min: 0, max: 1, step: 0.01, default: 1.0 },
+        tintColor: { type: 'color', label: 'Tint (Multiply)', default: { r: 1, g: 1, b: 1 } },
+
+        inkAoEnabled: { type: 'boolean', label: 'Enabled', default: true },
+        inkAoStrength: { type: 'slider', label: 'Strength', min: 0, max: 2, step: 0.01, default: 0.85 },
+        inkDarkThreshold: { type: 'slider', label: 'Dark Threshold', min: 0, max: 1, step: 0.01, default: 0.65 },
+        inkDarkSoftness: { type: 'slider', label: 'Dark Softness', min: 0.001, max: 0.5, step: 0.01, default: 0.12 },
+        inkEdgeStrength: { type: 'slider', label: 'Edge Strength', min: 0, max: 4, step: 0.01, default: 1.35 },
+        inkEdgePower: { type: 'slider', label: 'Edge Power', min: 0.25, max: 4, step: 0.01, default: 1.15 },
+        inkSpreadPx: { type: 'slider', label: 'Spread (px)', min: 0, max: 16, step: 0.25, default: 2.75 },
+        inkTintColor: { type: 'color', label: 'AO Tint', default: { r: 0, g: 0, b: 0 } },
+
+        vignetteEnabled: { type: 'boolean', label: 'Enabled', default: false },
+        vignetteStrength: { type: 'slider', label: 'Strength', min: 0, max: 2, step: 0.01, default: 0.35 },
+        vignetteInner: { type: 'slider', label: 'Inner', min: 0, max: 2, step: 0.01, default: 0.55 },
+        vignetteOuter: { type: 'slider', label: 'Outer', min: 0.01, max: 2.5, step: 0.01, default: 1.15 },
+        vignetteTintColor: { type: 'color', label: 'Tint', default: { r: 0, g: 0, b: 0 } },
+      },
+      presets: {
+        Off: {
+          intensity: 1.0,
+          tintColor: { r: 1, g: 1, b: 1 },
+          inkAoEnabled: false,
+          vignetteEnabled: false,
+        },
+        'Ink AO — Subtle': {
+          intensity: 1.0,
+          tintColor: { r: 1, g: 1, b: 1 },
+          inkAoEnabled: true,
+          inkAoStrength: 0.6,
+          inkDarkThreshold: 0.7,
+          inkDarkSoftness: 0.1,
+          inkEdgeStrength: 1.15,
+          inkEdgePower: 1.2,
+          inkSpreadPx: 2.0,
+          inkTintColor: { r: 0.0, g: 0.0, b: 0.0 },
+          vignetteEnabled: false,
+        },
+        'Ink AO — Bold': {
+          intensity: 1.0,
+          tintColor: { r: 1, g: 1, b: 1 },
+          inkAoEnabled: true,
+          inkAoStrength: 1.1,
+          inkDarkThreshold: 0.62,
+          inkDarkSoftness: 0.14,
+          inkEdgeStrength: 1.6,
+          inkEdgePower: 1.0,
+          inkSpreadPx: 3.5,
+          inkTintColor: { r: 0.0, g: 0.0, b: 0.0 },
+          vignetteEnabled: false,
+        },
+      },
     };
   }
 
@@ -212,8 +265,15 @@ export class FilterEffectV2 {
             float Le = luma(texture2D(tDiffuse, vUv + vec2( o.x, 0.0)).rgb);
             float Lw = luma(texture2D(tDiffuse, vUv + vec2(-o.x, 0.0)).rgb);
 
-            float edge = abs(Lc - Ln) + abs(Lc - Ls) + abs(Lc - Le) + abs(Lc - Lw);
-            edge = pow(clamp(edge * uInkEdgeStrength, 0.0, 1.0), max(0.01, uInkEdgePower));
+            float Lne = luma(texture2D(tDiffuse, vUv + vec2( o.x,  o.y)).rgb);
+            float Lnw = luma(texture2D(tDiffuse, vUv + vec2(-o.x,  o.y)).rgb);
+            float Lse = luma(texture2D(tDiffuse, vUv + vec2( o.x, -o.y)).rgb);
+            float Lsw = luma(texture2D(tDiffuse, vUv + vec2(-o.x, -o.y)).rgb);
+
+            float edge = 0.0;
+            edge += abs(Lc - Ln) + abs(Lc - Ls) + abs(Lc - Le) + abs(Lc - Lw);
+            edge += 0.6 * (abs(Lc - Lne) + abs(Lc - Lnw) + abs(Lc - Lse) + abs(Lc - Lsw));
+            edge = pow(clamp(edge * 0.5 * uInkEdgeStrength, 0.0, 1.0), max(0.01, uInkEdgePower));
 
             // Spread darkness by sampling at radius (4 taps). This makes thick outlines
             // actually darken adjacent areas rather than only the line pixels.
@@ -224,7 +284,9 @@ export class FilterEffectV2 {
 
             float darkSpread = max(darkC, max(max(dN, dS), max(dE, dW)));
 
-            float ao = clamp(darkSpread * edge, 0.0, 1.0);
+            // Mix darkness and edge evidence so flat dark strokes and high-contrast
+            // linework both contribute to AO darkening.
+            float ao = clamp(max(darkSpread * 0.7, darkSpread * edge), 0.0, 1.0);
             ao *= uInkAoStrength;
 
             // Multiplicative AO: filter *= mix(1, aoTint, ao)

@@ -20,20 +20,6 @@ const log = createLogger('OverheadShadowsEffect');
  */
 export class OverheadShadowsEffectV2 {
   constructor() {
-    this.params = {
-      enabled: true,
-      opacity: 0.4,
-      length: 0.08,
-      softness: 2.0,
-      verticalOnly: true,  // v1: primarily vertical motion in screen space
-      affectsLights: 0.0,
-      sunLatitude: 0.1,    // 0=flat east/west, 1=maximum north/south arc
-      indoorShadowEnabled: true, // Use _Outdoors dark regions as extra projected building shadow
-      indoorShadowOpacity: 0.5,   // Opacity of dark-region projection contribution
-      indoorShadowLengthScale: 1.0,
-      indoorShadowSoftness: 3.0,
-    };
-
     /** @type {THREE.ShaderMaterial|null} */
     this.material = null;
     /** @type {THREE.WebGLRenderTarget|null} */
@@ -81,12 +67,16 @@ export class OverheadShadowsEffectV2 {
       opacity: 0.4,
       length: 0.165,
       softness: 3.0,
+      outdoorShadowLengthScale: 1.0,
+      indoorReceiverShadowLengthScale: 1.0,
       verticalOnly: true,  // v1: primarily vertical motion in screen space
       affectsLights: 0.0,
       sunLatitude: 0.1,    // 0=flat east/west, 1=maximum north/south arc
-      indoorShadowEnabled: true, // Use _Outdoors dark regions as extra projected building shadow
-      indoorShadowOpacity: 0.5,   // Opacity of dark-region projection contribution
-      indoorShadowLengthScale: 1.0,
+      indoorShadowEnabled: true, // Back-compat toggle; controls outdoor building-shadow injection from _Outdoors dark regions
+      indoorShadowOpacity: 0.5,   // Back-compat alias for outdoorBuildingShadowOpacity
+      outdoorBuildingShadowOpacity: 0.5,
+      indoorShadowLengthScale: 1.0, // Back-compat alias for outdoorBuildingShadowLengthScale
+      outdoorBuildingShadowLengthScale: 1.0,
       indoorShadowSoftness: 3.0,
       indoorFluidShadowSoftness: 3.0,
       indoorFluidShadowIntensityBoost: 1.0,
@@ -279,10 +269,16 @@ export class OverheadShadowsEffectV2 {
           parameters: ['tileProjectionEnabled', 'tileProjectionOpacity', 'tileProjectionLengthScale', 'tileProjectionSoftness', 'tileProjectionThreshold', 'tileProjectionPower', 'tileProjectionOutdoorOpacityScale', 'tileProjectionIndoorOpacityScale']
         },
         {
-          name: 'indoorShadow',
-          label: 'Indoor Shadow',
+          name: 'receiverTuning',
+          label: 'Receiver Regions',
           type: 'inline',
-          parameters: ['indoorShadowEnabled', 'indoorShadowOpacity', 'indoorShadowLengthScale', 'indoorShadowSoftness', 'indoorFluidShadowSoftness', 'indoorFluidShadowIntensityBoost', 'indoorFluidColorSaturation']
+          parameters: ['outdoorShadowLengthScale', 'indoorReceiverShadowLengthScale']
+        },
+        {
+          name: 'indoorShadow',
+          label: 'Outdoor Building Shadow (_Outdoors)',
+          type: 'inline',
+          parameters: ['indoorShadowEnabled', 'outdoorBuildingShadowOpacity', 'outdoorBuildingShadowLengthScale', 'indoorShadowSoftness', 'indoorFluidShadowSoftness', 'indoorFluidShadowIntensityBoost', 'indoorFluidColorSaturation']
         }
       ],
       parameters: {
@@ -309,6 +305,24 @@ export class OverheadShadowsEffectV2 {
           max: 5.0,
           step: 0.1,
           default: 3.0
+        },
+        outdoorShadowLengthScale: {
+          type: 'slider',
+          label: 'Outdoor Shadow Length Scale',
+          min: 0.0,
+          max: 30.0,
+          step: 1.00,
+          default: 1.0,
+          tooltip: 'Scales projected overhead shadow distance on outdoor receivers'
+        },
+        indoorReceiverShadowLengthScale: {
+          type: 'slider',
+          label: 'Indoor Shadow Length Scale',
+          min: 0.0,
+          max: 30.0,
+          step: 0.01,
+          default: 1.0,
+          tooltip: 'Scales projected overhead shadow distance on indoor receivers'
         },
         affectsLights: {
           type: 'slider',
@@ -388,7 +402,7 @@ export class OverheadShadowsEffectV2 {
           type: 'slider',
           label: 'Tile Projection Length Scale',
           min: 0.0,
-          max: 3.0,
+          max: 30.0,
           step: 0.01,
           default: 1.0,
           tooltip: 'Scales projection distance for tile-projected shadows relative to roof shadows'
@@ -440,27 +454,27 @@ export class OverheadShadowsEffectV2 {
         },
         indoorShadowEnabled: {
           type: 'checkbox',
-          label: 'Enable Indoor Shadow',
+          label: 'Enable Outdoor Building Shadow',
           default: true,
-          tooltip: 'Enable projected shadow contribution from _Outdoors dark regions'
+          tooltip: 'Injects a building-shadow term into overhead shadows using _Outdoors dark regions (outdoor receivers only)'
         },
-        indoorShadowOpacity: {
+        outdoorBuildingShadowOpacity: {
           type: 'slider',
-          label: 'Indoor Shadow Strength',
+          label: 'Outdoor Building Shadow Strength',
           min: 0.0,
           max: 1.0,
           step: 0.01,
           default: 0.5,
-          tooltip: 'Strength of dark-region projection on outdoor receivers'
+          tooltip: 'Strength of _Outdoors dark-region contribution on outdoor receivers'
         },
-        indoorShadowLengthScale: {
+        outdoorBuildingShadowLengthScale: {
           type: 'slider',
-          label: 'Indoor Shadow Length Scale',
+          label: 'Outdoor Building Shadow Length Scale',
           min: 0.0,
-          max: 2.0,
+          max: 30.0,
           step: 0.01,
           default: 1.0,
-          tooltip: 'Scale factor for indoor contribution projection distance'
+          tooltip: 'Scale factor for _Outdoors dark-region projection distance'
         },
         indoorShadowSoftness: {
           type: 'slider',
@@ -551,6 +565,8 @@ export class OverheadShadowsEffectV2 {
         uOpacity: { value: this.params.opacity },
         uLength: { value: this.params.length },
         uSoftness: { value: this.params.softness },
+        uOutdoorShadowLengthScale: { value: this.params.outdoorShadowLengthScale ?? 1.0 },
+        uIndoorReceiverShadowLengthScale: { value: this.params.indoorReceiverShadowLengthScale ?? 1.0 },
         uTexelSize: { value: new THREE.Vector2(1 / 1024, 1 / 1024) },
         uRoofUvScale: { value: 1.0 },
         uTileProjectionUvScale: { value: 1.0 },
@@ -560,9 +576,10 @@ export class OverheadShadowsEffectV2 {
         // Indoor shadow from _Outdoors mask
         uOutdoorsMask: { value: null },
         uHasOutdoorsMask: { value: 0.0 },
+        uOutdoorsMaskFlipY: { value: 0.0 },
         uIndoorShadowEnabled: { value: 0.0 },
-        uIndoorShadowOpacity: { value: 0.5 },
-        uIndoorShadowLengthScale: { value: 1.0 },
+        uOutdoorBuildingShadowOpacity: { value: this.params.outdoorBuildingShadowOpacity ?? this.params.indoorShadowOpacity ?? 0.5 },
+        uOutdoorBuildingShadowLengthScale: { value: this.params.outdoorBuildingShadowLengthScale ?? this.params.indoorShadowLengthScale ?? 1.0 },
         uIndoorShadowSoftness: { value: 3.0 },
         uIndoorFluidShadowSoftness: { value: 3.0 },
         uIndoorFluidShadowIntensityBoost: { value: 1.0 },
@@ -614,6 +631,8 @@ export class OverheadShadowsEffectV2 {
         uniform float uOpacity;
         uniform float uLength;
         uniform float uSoftness;
+        uniform float uOutdoorShadowLengthScale;
+        uniform float uIndoorReceiverShadowLengthScale;
         uniform vec2 uTexelSize;
         uniform float uRoofUvScale;
         uniform float uTileProjectionUvScale;
@@ -624,9 +643,10 @@ export class OverheadShadowsEffectV2 {
         // Indoor shadow from _Outdoors mask
         uniform sampler2D uOutdoorsMask;
         uniform float uHasOutdoorsMask;
+        uniform float uOutdoorsMaskFlipY;
         uniform float uIndoorShadowEnabled;
-        uniform float uIndoorShadowOpacity;
-        uniform float uIndoorShadowLengthScale;
+        uniform float uOutdoorBuildingShadowOpacity;
+        uniform float uOutdoorBuildingShadowLengthScale;
         uniform float uIndoorShadowSoftness;
         uniform float uIndoorFluidShadowSoftness;
         uniform float uIndoorFluidShadowIntensityBoost;
@@ -686,6 +706,14 @@ export class OverheadShadowsEffectV2 {
           return ge0.x * ge0.y * le1.x * le1.y;
         }
 
+        float readOutdoorsMask(vec2 uv) {
+          vec2 suv = clamp(uv, 0.0, 1.0);
+          if (uOutdoorsMaskFlipY > 0.5) {
+            suv.y = 1.0 - suv.y;
+          }
+          return clamp(texture2D(uOutdoorsMask, suv).r, 0.0, 1.0);
+        }
+
         // Compute how far we can travel along delta before leaving [0,1].
         // Returned scale is clamped to [0,1], so callers can safely apply it
         // to their intended offset vector.
@@ -730,13 +758,26 @@ export class OverheadShadowsEffectV2 {
           vec2 dir = normalize(uSunDir);
           vec2 screenDir = normalize(vec2(uSunDir.x, -uSunDir.y));
 
+          // Receiver-space classification (at the current fragment).
+          // White in _Outdoors = outdoors, black = indoors.
+          bool hasOutdoorsMask = (uHasOutdoorsMask > 0.5);
+          float receiverOutdoors = hasOutdoorsMask ? readOutdoorsMask(vUv) : 1.0;
+          float receiverIndoor = 1.0 - receiverOutdoors;
+          float receiverIsOutdoors = step(0.5, receiverOutdoors);
+          float receiverIsIndoor = 1.0 - receiverIsOutdoors;
+
           // Scale length by zoom so the world-space band stays
           // approximately constant as the camera zoom changes.
           // We use a reference height of 1080px to convert the normalized uLength
           // into a pixel distance. This ensures the shadow length is stable across
           // different resolutions (resolution-independent) and aspect ratios.
           // uLength (0.04) * 1080 ~= 43 pixels at Zoom 1.
-          float pixelLen = uLength * 1080.0 * max(uZoom, 0.0001);
+          float receiverLengthScale = mix(
+            max(uOutdoorShadowLengthScale, 0.0),
+            max(uIndoorReceiverShadowLengthScale, 0.0),
+            receiverIndoor
+          );
+          float pixelLen = uLength * 1080.0 * max(uZoom, 0.0001) * receiverLengthScale;
 
           // Sample the roof mask at an offset along screenDir. We look for
           // roof pixels in the +screenDir direction so shadow extends in
@@ -793,26 +834,26 @@ export class OverheadShadowsEffectV2 {
           // 1) Receiver/caster region matching (clip shadows that cross the
           //    indoor/outdoor boundary)
           // 2) Optional indoor-only shadow contribution
-          bool hasOutdoorsMask = (uHasOutdoorsMask > 0.5);
           bool indoorEnabled = (uIndoorShadowEnabled > 0.5 && hasOutdoorsMask);
           vec2 maskTexelSize = vec2(1.0) / max(uSceneDimensions, vec2(1.0));
-          float maskPixelLenBase = uLength * 1080.0;
-          float maskPixelLenIndoor = maskPixelLenBase * uIndoorShadowLengthScale;
+          // Keep _Outdoors-derived building shadow offset aligned with the
+          // same sampling convention as roof projection above.
+          //
+          // Roof path samples in SCREEN UV at +screenDir, which corresponds to
+          // +dir in mesh/world UV (Y axis is inverted between those spaces).
+          // Sampling _Outdoors at +dir keeps building contribution in the same
+          // cast arc as overhead roof shadows as sun azimuth changes.
+          float buildingMaskPixelLenBase = uLength * 1080.0 * max(uZoom, 0.0001);
+          vec2 buildingMaskProjectDir = dir;
+          float maskPixelLenBase = uLength * 1080.0 * receiverLengthScale;
+          float maskPixelLenIndoor = buildingMaskPixelLenBase * max(uOutdoorBuildingShadowLengthScale, 0.0);
           float maskPixelLenProjected = maskPixelLenBase * tileProjectionLengthScale;
-          // Match BuildingShadows projection convention for _Outdoors-based casters.
-          // This keeps indoor dark-region projection on the same apparent cast side
-          // as the dedicated building-shadow pass.
-          vec2 maskProjectDir = -dir;
+          // Region matching and tile-projection region checks should use the same
+          // world-UV sampling direction as the roof projection path.
+          vec2 maskProjectDir = dir;
           vec2 maskOffsetUvBase = vUv + maskProjectDir * maskPixelLenBase * maskTexelSize;
-          vec2 maskOffsetUvIndoor = vUv + maskProjectDir * maskPixelLenIndoor * maskTexelSize;
+          vec2 maskOffsetUvIndoor = vUv + buildingMaskProjectDir * maskPixelLenIndoor * maskTexelSize;
           vec2 maskOffsetUvProjected = vUv + maskProjectDir * maskPixelLenProjected * maskTexelSize;
-
-          // Receiver-space classification (at the current fragment).
-          // White in _Outdoors = outdoors, black = indoors.
-          float receiverOutdoors = hasOutdoorsMask ? clamp(texture2D(uOutdoorsMask, vUv).r, 0.0, 1.0) : 1.0;
-          float receiverIndoor = 1.0 - receiverOutdoors;
-          float receiverIsOutdoors = step(0.5, receiverOutdoors);
-          float receiverIsIndoor = 1.0 - receiverIsOutdoors;
 
           // Apply indoor/outdoor softness selection uniformly so all shadow
           // components (roof, indoor mask, and fluid tint) blur consistently.
@@ -848,7 +889,7 @@ export class OverheadShadowsEffectV2 {
                 vec2 mUvBase = maskOffsetUvBase + maskJitterUv;
                 float mUvBaseValid = uvInBounds(mUvBase, maskTexelSize);
                 if (mUvBaseValid > 0.5) {
-                  float casterOutdoorsBase = clamp(texture2D(uOutdoorsMask, clamp(mUvBase, 0.0, 1.0)).r, 0.0, 1.0);
+                  float casterOutdoorsBase = readOutdoorsMask(mUvBase);
                   float casterIsOutdoors = step(0.5, casterOutdoorsBase);
                   sameRegionTap = 1.0 - abs(casterIsOutdoors - receiverIsOutdoors);
                 }
@@ -861,11 +902,11 @@ export class OverheadShadowsEffectV2 {
                 vec2 mUvIndoor = maskOffsetUvIndoor + maskJitterUv;
                 float mUvIndoorValid = uvInBounds(mUvIndoor, maskTexelSize);
                 if (mUvIndoorValid > 0.5) {
-                  float casterOutdoorsIndoor = clamp(texture2D(uOutdoorsMask, clamp(mUvIndoor, 0.0, 1.0)).r, 0.0, 1.0);
+                  float casterOutdoorsIndoor = readOutdoorsMask(mUvIndoor);
                   float casterIndoorsIndoor = 1.0 - casterOutdoorsIndoor;
                   // Use dark-region casters as an extra "building shadow" only on
                   // outdoor receivers. Indoors should not get this extra layer.
-                  indoorStrengthTap = clamp(casterIndoorsIndoor * uIndoorShadowOpacity * receiverOutdoors, 0.0, 1.0);
+                  indoorStrengthTap = clamp(casterIndoorsIndoor * uOutdoorBuildingShadowOpacity * receiverOutdoors, 0.0, 1.0);
                   indoorStrengthTap *= baseEdgeFade;
                 }
               }
@@ -962,7 +1003,7 @@ export class OverheadShadowsEffectV2 {
                   vec2 mUvFluid = maskOffsetUvBase + maskJitterFluidUv;
                   float mUvFluidValid = uvInBounds(mUvFluid, maskTexelSize);
                   if (mUvFluidValid > 0.5) {
-                    float casterOutdoorsFluid = clamp(texture2D(uOutdoorsMask, clamp(mUvFluid, 0.0, 1.0)).r, 0.0, 1.0);
+                    float casterOutdoorsFluid = readOutdoorsMask(mUvFluid);
                     float casterIsOutdoorsFluid = step(0.5, casterOutdoorsFluid);
                     sameRegionFluidTap = 1.0 - abs(casterIsOutdoorsFluid - receiverIsOutdoors);
                   }
@@ -1222,7 +1263,7 @@ export class OverheadShadowsEffectV2 {
 
     // Optimization: Skip update if params haven't changed
     const camZoom = this._getEffectiveZoom();
-    const updateHash = `${hour.toFixed(3)}_${this.params.sunLatitude}_${this.params.opacity}_${this.params.length}_${this.params.softness}_${camZoom.toFixed(4)}_${this.params.indoorShadowEnabled}_${this.params.indoorShadowOpacity}_${this.params.indoorShadowLengthScale}_${this.params.indoorShadowSoftness}_${this.params.indoorFluidShadowSoftness}_${this.params.indoorFluidShadowIntensityBoost}_${this.params.indoorFluidColorSaturation}_${this.params.tileProjectionEnabled}_${this.params.tileProjectionOpacity}_${this.params.tileProjectionLengthScale}_${this.params.tileProjectionSoftness}_${this.params.tileProjectionThreshold}_${this.params.tileProjectionPower}_${this.params.tileProjectionOutdoorOpacityScale}_${this.params.tileProjectionIndoorOpacityScale}_${this.params.tileProjectionSortBias}_${this.params.fluidColorEnabled}_${this.params.fluidEffectTransparency}_${this.params.fluidShadowIntensityBoost}_${this.params.fluidShadowSoftness}_${this.params.fluidColorBoost}_${this.params.fluidColorSaturation}`;
+    const updateHash = `${hour.toFixed(3)}_${this.params.sunLatitude}_${this.params.opacity}_${this.params.length}_${this.params.softness}_${this.params.outdoorShadowLengthScale}_${this.params.indoorReceiverShadowLengthScale}_${camZoom.toFixed(4)}_${this.params.indoorShadowEnabled}_${this.params.outdoorBuildingShadowOpacity}_${this.params.outdoorBuildingShadowLengthScale}_${this.params.indoorShadowSoftness}_${this.params.indoorFluidShadowSoftness}_${this.params.indoorFluidShadowIntensityBoost}_${this.params.indoorFluidColorSaturation}_${this.params.tileProjectionEnabled}_${this.params.tileProjectionOpacity}_${this.params.tileProjectionLengthScale}_${this.params.tileProjectionSoftness}_${this.params.tileProjectionThreshold}_${this.params.tileProjectionPower}_${this.params.tileProjectionOutdoorOpacityScale}_${this.params.tileProjectionIndoorOpacityScale}_${this.params.tileProjectionSortBias}_${this.params.fluidColorEnabled}_${this.params.fluidEffectTransparency}_${this.params.fluidShadowIntensityBoost}_${this.params.fluidShadowSoftness}_${this.params.fluidColorBoost}_${this.params.fluidColorSaturation}`;
     
     // Floor/mask transitions can swap outdoorsMask without changing any scalar params.
     // Do not short-circuit in that case or uOutdoorsMask/uHasOutdoorsMask goes stale.
@@ -1257,16 +1298,21 @@ export class OverheadShadowsEffectV2 {
     // Drive basic uniforms from params and camera zoom.
     if (this.material) {
       const u = this.material.uniforms;
+      // Back-compat aliases so existing scenes that only have older keys keep behavior.
+      const outdoorBuildingShadowOpacity = this.params.outdoorBuildingShadowOpacity ?? this.params.indoorShadowOpacity ?? 0.5;
+      const outdoorBuildingShadowLengthScale = this.params.outdoorBuildingShadowLengthScale ?? this.params.indoorShadowLengthScale ?? 1.0;
       if (u.uOpacity) u.uOpacity.value = this.params.opacity;
       if (u.uLength)  u.uLength.value  = this.params.length;
       if (u.uSoftness) u.uSoftness.value = this.params.softness;
+      if (u.uOutdoorShadowLengthScale) u.uOutdoorShadowLengthScale.value = this.params.outdoorShadowLengthScale ?? 1.0;
+      if (u.uIndoorReceiverShadowLengthScale) u.uIndoorReceiverShadowLengthScale.value = this.params.indoorReceiverShadowLengthScale ?? 1.0;
       if (u.uZoom && this.mainCamera) {
         u.uZoom.value = this._getEffectiveZoom();
       }
       // Indoor shadow uniforms — resolve the selected mask from MaskManager
       if (u.uIndoorShadowEnabled) u.uIndoorShadowEnabled.value = this.params.indoorShadowEnabled ? 1.0 : 0.0;
-      if (u.uIndoorShadowOpacity) u.uIndoorShadowOpacity.value = this.params.indoorShadowOpacity;
-      if (u.uIndoorShadowLengthScale) u.uIndoorShadowLengthScale.value = this.params.indoorShadowLengthScale;
+      if (u.uOutdoorBuildingShadowOpacity) u.uOutdoorBuildingShadowOpacity.value = outdoorBuildingShadowOpacity;
+      if (u.uOutdoorBuildingShadowLengthScale) u.uOutdoorBuildingShadowLengthScale.value = outdoorBuildingShadowLengthScale;
       if (u.uIndoorShadowSoftness) u.uIndoorShadowSoftness.value = this.params.indoorShadowSoftness;
       if (u.uIndoorFluidShadowSoftness) u.uIndoorFluidShadowSoftness.value = this.params.indoorFluidShadowSoftness;
       if (u.uIndoorFluidShadowIntensityBoost) u.uIndoorFluidShadowIntensityBoost.value = this.params.indoorFluidShadowIntensityBoost;
@@ -1304,6 +1350,7 @@ export class OverheadShadowsEffectV2 {
       const activeMask = this.outdoorsMask;
       if (u.uOutdoorsMask) u.uOutdoorsMask.value = activeMask;
       if (u.uHasOutdoorsMask) u.uHasOutdoorsMask.value = activeMask ? 1.0 : 0.0;
+      if (u.uOutdoorsMaskFlipY) u.uOutdoorsMaskFlipY.value = activeMask?.flipY ? 1.0 : 0.0;
       this._lastOutdoorsMaskRef = activeMask;
     }
   }

@@ -741,3 +741,56 @@ BuildingShadowsEffectV2 projects indoor casters from this mask onto outdoor rece
 - Cloud tops now render in the V2 baseline path.
 - Cloud shadow + cloud-top composition is coherent again.
 - Multi-floor blocker behavior is more accurate and no longer globally suppresses clouds.
+
+## 13. Success Story: Building Shadows Multi-Floor Layering Fixed in V2
+
+**Status:** Fixed and confirmed in Foundry.
+
+### Symptoms
+
+- On upper floors, ground-floor building shadows leaked through where they should be excluded.
+- On ground floor, upper-floor overhang shadows appeared but were incorrectly cut out using upper-floor hole masking.
+- In some scenes only ground-floor shadow contribution appeared, instead of active+above floor contributions.
+
+### Root causes identified
+
+1. **Source floor selection was not robust enough in multi-floor context:**
+   - Shadow caster masks were not consistently resolved from compositor-cached floor keys by active level bottom.
+   - This made contribution selection brittle when floor cache/state changed.
+
+2. **Caster and receiver masking were coupled in projection:**
+   - The same outdoors mask sample path was being used to both identify caster footprint and gate receiver visibility.
+   - Result: when projecting upper-floor shadows to lower floors, upper-floor holes cut the projected result incorrectly.
+
+3. **Fallback mask behavior could re-introduce leakage in multi-floor scenes:**
+   - Ground/default fallback could be used in situations where strict floor-specific masking was required.
+
+### Fixes applied
+
+1. **Active+above floor source compositing hardened** (`scripts/compositor-v2/effects/BuildingShadowsEffectV2.js`)
+   - Source floor keys now resolve from compositor cache metadata and are filtered by active floor bottom elevation.
+   - Behavior is deterministic: active floor and all floors above contribute; lower floors are excluded when viewing higher floors.
+
+2. **Receiver mask decoupled from caster mask** (`scripts/compositor-v2/effects/BuildingShadowsEffectV2.js`)
+   - Added separate receiver uniforms and sampling path:
+     - `uReceiverOutdoorsMask`
+     - `uHasReceiverMask`
+     - `uReceiverOutdoorsMaskFlipY`
+   - Shader now uses receiver-floor outdoors mask for receiver gate, while caster accumulation still uses per-source-floor caster masks.
+   - This is the key layering fix that keeps upper-floor projected shadow shape on ground floor without inheriting upper-floor hole cutouts.
+
+3. **Multi-floor fallback tightened + cache warmup added** (`scripts/compositor-v2/effects/BuildingShadowsEffectV2.js`)
+   - Ground/global fallback mask is disabled for true multi-floor operation to avoid ambiguous leakage.
+   - Added async preloading/warmup of floor outdoors masks so all relevant floor textures are ready before compositing.
+
+### Why the layering now works
+
+- **Caster decision** answers: "Which floors cast into this view?" → active+above floors.
+- **Receiver decision** answers: "Where can shadow land in this view?" → active/view floor outdoors mask.
+- Separating those two decisions solved the mismatch that previously caused cross-floor cutout artifacts.
+
+### Outcome
+
+- Ground floor now receives combined building shadow from ground + upper floors.
+- Upper floors no longer show leaked lower-floor building shadows.
+- Upper-floor overhang shadows rendered on ground floor are masked by ground-floor receiver rules (correct), not upper-floor hole rules (incorrect).

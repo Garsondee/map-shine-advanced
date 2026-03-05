@@ -26,6 +26,7 @@ export class BuildingShadowsEffectV2 {
       opacity: 0.75,
       length: 0.165,
       softness: 3.0,
+      smear: 0.65,
       sunLatitude: 0.1,
     };
 
@@ -78,7 +79,7 @@ export class BuildingShadowsEffectV2 {
           name: 'main',
           label: 'Building Shadows',
           type: 'inline',
-          parameters: ['opacity', 'length', 'softness']
+          parameters: ['opacity', 'length', 'softness', 'smear']
         }
       ],
       parameters: {
@@ -105,6 +106,14 @@ export class BuildingShadowsEffectV2 {
           max: 8.0,
           step: 0.1,
           default: 3.0
+        },
+        smear: {
+          type: 'slider',
+          label: 'Smear',
+          min: 0.0,
+          max: 1.0,
+          step: 0.01,
+          default: 0.65
         }
       }
     };
@@ -153,6 +162,7 @@ export class BuildingShadowsEffectV2 {
         uSunDir: { value: new THREE.Vector2(0, 1) },
         uLength: { value: this.params.length },
         uSoftness: { value: this.params.softness },
+        uSmear: { value: this.params.smear },
         uZoom: { value: 1.0 },
         uTexelSize: { value: new THREE.Vector2(1 / 1024, 1 / 1024) },
         uSceneDimensions: { value: new THREE.Vector2(1, 1) }
@@ -174,6 +184,7 @@ export class BuildingShadowsEffectV2 {
         uniform vec2 uSunDir;
         uniform float uLength;
         uniform float uSoftness;
+        uniform float uSmear;
         uniform float uZoom;
         uniform vec2 uTexelSize;
         uniform vec2 uSceneDimensions;
@@ -222,20 +233,33 @@ export class BuildingShadowsEffectV2 {
           float receiverOutdoors = readReceiverOutdoorsMask(vUv);
           float receiverOutdoorGate = step(0.5, receiverOutdoors);
 
-          vec2 stepUv = maskTexel * max(uSoftness, 0.5) * 4.0;
           float accum = 0.0;
           float weightSum = 0.0;
 
-          for (int dy = -1; dy <= 1; dy++) {
-            for (int dx = -1; dx <= 1; dx++) {
-              vec2 jitter = vec2(float(dx), float(dy)) * stepUv;
-              vec2 sampleUv = vUv + baseOffsetUv + jitter;
-              float valid = uvInBounds(sampleUv);
-              float w = (dx == 0 && dy == 0) ? 2.0 : 1.0;
-              float casterOutdoors = readOutdoorsMask(sampleUv);
-              float casterIndoor = (1.0 - casterOutdoors) * receiverOutdoorGate * valid;
-              accum += casterIndoor * w;
-              weightSum += w * valid;
+          // Distance-based smear + gaussian-style softening:
+          // as distance from the building increases along projected direction,
+          // blur radius and blend weight increase to keep far shadow softer.
+          for (int s = 0; s < 6; s++) {
+            float t = float(s) / 5.0;
+            float t2 = t * t;
+            float sigma = max(uSoftness, 0.5) * (0.55 + 1.55 * t2);
+            vec2 blurStepUv = maskTexel * sigma * 2.2;
+            vec2 centerUv = vUv + (baseOffsetUv * mix(0.25, 1.0, t));
+            float smearWeight = mix(1.0, 1.6, clamp(uSmear, 0.0, 1.0) * t);
+
+            for (int dy = -1; dy <= 1; dy++) {
+              for (int dx = -1; dx <= 1; dx++) {
+                vec2 jitter = vec2(float(dx), float(dy)) * blurStepUv;
+                vec2 sampleUv = centerUv + jitter;
+                float valid = uvInBounds(sampleUv);
+                float r2 = float(dx * dx + dy * dy);
+                float gaussianW = exp(-0.5 * r2 / max(sigma * sigma, 0.0001));
+                float w = gaussianW * smearWeight;
+                float casterOutdoors = readOutdoorsMask(sampleUv);
+                float casterIndoor = (1.0 - casterOutdoors) * receiverOutdoorGate * valid;
+                accum += casterIndoor * w;
+                weightSum += w * valid;
+              }
             }
           }
 
@@ -340,6 +364,7 @@ export class BuildingShadowsEffectV2 {
     const u = this._projectMaterial.uniforms;
     u.uLength.value = this.params.length;
     u.uSoftness.value = this.params.softness;
+    u.uSmear.value = this.params.smear;
     u.uZoom.value = this._getEffectiveZoom();
     if (this.sunDir) u.uSunDir.value.copy(this.sunDir);
 

@@ -2546,8 +2546,11 @@ export class InteractionManager {
         const shouldOverrideRouter = isTokenLayerName && isTokenSelectTool;
         const activeControl = String(ui?.controls?.control?.name ?? ui?.controls?.activeControl ?? '').toLowerCase();
         const normalizedTool = String(activeTool || '').toLowerCase();
+        const isTokenNativeSelectContext =
+          activeControl === 'tokens' &&
+          (!normalizedTool || normalizedTool === 'select' || normalizedTool === 'target' || normalizedTool === 'ruler');
         const pixiOwnedContextWithoutRouter =
-          (activeControl === 'tokens' && (!normalizedTool || normalizedTool === 'select' || normalizedTool === 'target' || normalizedTool === 'ruler')) ||
+          isTokenNativeSelectContext ||
           activeControl === 'walls' ||
           activeControl === 'lighting' ||
           normalizedTool === 'walls' ||
@@ -2558,6 +2561,15 @@ export class InteractionManager {
           normalizedTool === 'secret' ||
           normalizedTool === 'window' ||
           normalizedTool === 'light';
+
+        if (isTokenNativeSelectContext) {
+          log.debug('onPointerDown BLOCKED: token native select context is PIXI-owned', {
+            activeControl,
+            activeTool: normalizedTool,
+            activeLayer: routerActiveLayerName
+          });
+          return;
+        }
         
         if (inputRouter && !inputRouter.shouldThreeReceiveInput()) {
           log.debug('onPointerDown BLOCKED by InputRouter (PIXI mode active)', {

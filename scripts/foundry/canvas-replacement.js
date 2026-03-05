@@ -540,14 +540,26 @@ let _mapShineOrigDrawSelect = null;
 let _mapShineSelectSuppressed = false;
 
 function _updateFoundrySelectRectSuppression(forceValue = null) {
-  // Suppress Foundry selection rectangle when:
-  // - MapShine is running and we are in Gameplay mode
-  // - and our InteractionManager selection box is enabled
+  // Suppress Foundry selection rectangle only when Three owns interaction.
+  // If PIXI owns token-native select/target/ruler, Foundry's marquee must remain active.
   let suppress = safeCall(() => {
     const im = window.MapShine?.interactionManager;
     const enabled = im?.selectionBoxParams?.enabled !== false;
-    return !isMapMakerMode && enabled;
-  }, 'selectRect.checkSuppression', Severity.COSMETIC, { fallback: !isMapMakerMode });
+    const activeControl = String(ui?.controls?.control?.name || ui?.controls?.activeControl || '').toLowerCase();
+    const activeTool = String(ui?.controls?.tool?.name || ui?.controls?.activeTool || '').toLowerCase();
+    const tokenNativeSelectContext =
+      activeControl === 'tokens' &&
+      (activeTool === '' || activeTool === 'select' || activeTool === 'target' || activeTool === 'ruler');
+
+    const inputRouter =
+      window.MapShine?.inputRouter ||
+      window.mapShine?.inputRouter ||
+      controlsIntegration?.inputRouter ||
+      null;
+    const pixiOwnsInput = tokenNativeSelectContext || !!inputRouter?.shouldPixiReceiveInput?.();
+
+    return !isMapMakerMode && enabled && !pixiOwnsInput;
+  }, 'selectRect.checkSuppression', Severity.COSMETIC, { fallback: false });
 
   if (typeof forceValue === 'boolean') suppress = forceValue;
 
@@ -4205,6 +4217,7 @@ async function createThreeCanvas(scene) {
         try {
           const id = Hooks.on(hook, () => {
             try { _enforceGameplayPixiSuppression(); } catch (_) {}
+            try { _updateFoundrySelectRectSuppression(); } catch (_) {}
           });
           _pixiSuppressionHookIds.push({ hook, id });
         } catch (_) {}
@@ -5888,9 +5901,9 @@ function _enforceGameplayPixiSuppression() {
       activeTool === 'secret' ||
       activeTool === 'window' ||
       activeTool === 'light';
-    const shouldPixiReceiveInput = inputRouter
-      ? !!inputRouter.shouldPixiReceiveInput?.()
-      : pixiEditContext;
+    const shouldPixiReceiveInput =
+      pixiEditContext ||
+      !!inputRouter?.shouldPixiReceiveInput?.();
     const needsEditorOverlay =
       shouldPixiReceiveInput ||
       !!window.MapShine?.__forcePixiEditorOverlay ||

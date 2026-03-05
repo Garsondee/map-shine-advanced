@@ -198,6 +198,32 @@ Interpretation:
 - **Outcome**: implementation complete; runtime validation pending.
 - **Decision**: validate immediately against token drag-select, walls, doors, and lights.
 
+### Attempt 015 - Token select/marquee hardening
+
+- **What changed**:
+  1. In `_enforceGameplayPixiSuppression()`, `shouldPixiReceiveInput` now ORs `pixiEditContext` with router state (instead of preferring router only), so stale router state cannot disable PIXI ownership in token native select context.
+  2. In `InteractionManager.onPointerDown`, added explicit early return for token native select/target/ruler context so Three handlers never intercept Foundry marquee/token control workflow.
+- **Why**: walls/lights were restored, but token click-select and drag-select were still being disrupted by mixed ownership and stale router mode.
+- **Files**:
+  - `scripts/foundry/canvas-replacement.js`
+  - `scripts/scene/interaction-manager.js`
+- **Outcome**: implementation complete; runtime validation pending.
+- **Decision**: validate token click-select + marquee immediately.
+
+### Attempt 016 - Restore Foundry marquee visibility in PIXI-owned token context
+
+- **What changed**:
+  1. Refined `_updateFoundrySelectRectSuppression()` so suppression only applies when Three owns input.
+     - Token native select/target/ruler context now explicitly unsuppresses Foundry `controls.drawSelect`.
+     - Router-aware fallback included (`MapShine/mapShine/controlsIntegration` inputRouter lookup).
+  2. Changed suppression fallback to conservative `false` so transient errors do not hide Foundry marquee.
+  3. Added `_updateFoundrySelectRectSuppression()` refresh call alongside suppression hooks (`activateCanvasLayer`, `renderSceneControls`, etc.) so marquee state updates immediately on tool/layer switches.
+- **Why**: token drag-select rectangle remained invisible because global suppression logic still hid Foundry select rectangle even when PIXI correctly owned token select interaction.
+- **Files**:
+  - `scripts/foundry/canvas-replacement.js`
+- **Outcome**: implementation complete; runtime validation pending.
+- **Decision**: validate token click-select and drag marquee immediately.
+
 ---
 
 ## Current Hypothesis (working)

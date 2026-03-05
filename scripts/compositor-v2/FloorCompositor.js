@@ -805,7 +805,6 @@ export class FloorCompositor {
       } catch (err) {
         log.warn('AshDisturbanceEffectV2 update threw, skipping frame:', err);
       }
-      this._windowLightEffect.update(timeInfo);
       this._cloudEffect.update(timeInfo);
       this._lightingEffect.update(timeInfo);
       // Weather particles must update BEFORE the bus render so their BatchedRenderer
@@ -817,6 +816,13 @@ export class FloorCompositor {
         log.warn('WaterEffectV2 update threw, skipping water update:', err);
       }
       this._skyColorEffect.update(timeInfo);
+      try {
+        this._windowLightEffect?.setSkyState?.({
+          skyTintColor: this._skyColorEffect?.currentSkyTintColor,
+          sunAzimuthDeg: this._skyColorEffect?.currentSunAzimuthDeg,
+        });
+      } catch (_) {}
+      this._windowLightEffect.update(timeInfo);
       this._colorCorrectionEffect.update(timeInfo);
       this._filterEffect.update(timeInfo);
       this._bloomEffect.update(timeInfo);
@@ -1286,6 +1292,7 @@ export class FloorCompositor {
       // Always propagate (including null) so consumers cannot keep stale masks.
       this._cloudEffect?.setOutdoorsMask?.(outdoorsTex);
       this._waterEffect?.setOutdoorsMask?.(outdoorsTex);
+      this._skyColorEffect?.setOutdoorsMask?.(outdoorsTex);
       this._overheadShadowEffect?.setOutdoorsMask?.(outdoorsTex);
       this._buildingShadowEffect?.setOutdoorsMask?.(outdoorsTex);
 

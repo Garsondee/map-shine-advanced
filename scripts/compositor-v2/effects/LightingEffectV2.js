@@ -87,6 +87,15 @@ export class LightingEffectV2 {
     this._sizeVec = null;
   }
 
+  /**
+   * Compatibility accessor used by effects that inject additive light meshes
+   * directly into the lighting accumulation scene (e.g. candle glow buckets).
+   * @returns {THREE.Scene|null}
+   */
+  get lightScene() {
+    return this._lightScene;
+  }
+
   // ── UI schema (moved from V1 LightingEffect) ─────────────────────────────
 
   static getControlSchema() {

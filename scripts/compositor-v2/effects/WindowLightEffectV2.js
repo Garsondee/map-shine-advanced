@@ -23,6 +23,7 @@
 import { createLogger } from '../../core/log.js';
 import { probeMaskFile } from '../../assets/loader.js';
 import { tileHasLevelsRange, readTileLevelsFlags } from '../../foundry/levels-scene-flags.js';
+import { weatherController, PrecipitationType } from '../../core/WeatherController.js';
 
 const log = createLogger('WindowLightEffectV2');
 
@@ -56,6 +57,12 @@ export class WindowLightEffectV2 {
     /** @type {object|null} */
     this._sharedUniforms = null;
 
+    /** @type {{ skyTintColor: {r:number,g:number,b:number}, sunAzimuthDeg: number }} */
+    this._skyState = {
+      skyTintColor: { r: 1.0, g: 1.0, b: 1.0 },
+      sunAzimuthDeg: 180.0,
+    };
+
     this.params = {
       enabled: true,
       intensity: 1.5,
@@ -64,6 +71,20 @@ export class WindowLightEffectV2 {
       flickerEnabled: false,
       flickerSpeed: 0.35,
       flickerAmount: 0.15,
+      cloudInfluence: 1.0,
+      useSkyTint: true,
+      skyTintStrength: 3.62,
+      nightDimming: 1.0,
+      sunLightEnabled: false,
+      sunLightLength: 0.03,
+      rainOnGlassEnabled: true,
+      rainOnGlassIntensity: 1.0,
+      rainOnGlassPrecipStart: 0.15,
+      rainOnGlassPrecipFull: 0.7,
+      rainOnGlassSpeed: 0.35,
+      rainOnGlassDirectionDeg: 270.0,
+      rainOnGlassMaxOffsetPx: 1.25,
+      rainOnGlassDarken: 0.25,
       // RGB shift (chromatic dispersion / refraction)
       rgbShiftAmount: 1.9,  // pixels
       rgbShiftAngle: 76.0,  // degrees
@@ -398,6 +419,47 @@ export class WindowLightEffectV2 {
     u.uFlickerSpeed.value = Math.max(0.0, Number(this.params.flickerSpeed) || 0);
     u.uFlickerAmount.value = Math.max(0.0, Number(this.params.flickerAmount) || 0);
 
+    const skyTint = this._skyState.skyTintColor;
+    u.uSkyTintColor.value.setRGB(
+      Math.max(0.01, Number(skyTint.r) || 1.0),
+      Math.max(0.01, Number(skyTint.g) || 1.0),
+      Math.max(0.01, Number(skyTint.b) || 1.0)
+    );
+    u.uUseSkyTint.value = this.params.useSkyTint ? 1.0 : 0.0;
+    u.uSkyTintStrength.value = Math.max(0.0, Number(this.params.skyTintStrength) || 0.0);
+
+    const darkness = Math.max(0.0, Math.min(1.0, Number(canvas?.environment?.darknessLevel) || 0.0));
+    const nightDimming = Math.max(0.0, Math.min(1.0, Number(this.params.nightDimming) || 0.0));
+    u.uNightFactor.value = Math.max(0.0, 1.0 - darkness * nightDimming);
+
+    const sunAzimuthDeg = Number(this._skyState.sunAzimuthDeg) || 180.0;
+    const sunAzimuthRad = sunAzimuthDeg * (Math.PI / 180.0);
+    u.uSunDir.value.set(-Math.sin(sunAzimuthRad), -Math.cos(sunAzimuthRad));
+    u.uSunTrackEnabled.value = this.params.sunLightEnabled ? 1.0 : 0.0;
+    u.uSunLightLength.value = Math.max(0.0, Number(this.params.sunLightLength) || 0.0);
+
+    const env = weatherController?.getEnvironment?.() ?? {};
+    const overcastFactor = Math.max(0.0, Math.min(1.0, Number(env?.overcastFactor) || 0.0));
+    const stormFactor = Math.max(0.0, Math.min(1.0, Number(env?.stormFactor) || 0.0));
+    const cloudFactor = Math.max(0.0, Math.min(1.0, (1.0 - overcastFactor * 0.55) * (1.0 - stormFactor * 0.25)));
+    u.uCloudFactor.value = cloudFactor;
+    u.uCloudInfluence.value = Math.max(0.0, Math.min(1.0, Number(this.params.cloudInfluence) || 0.0));
+
+    const weatherState = weatherController?.getCurrentState?.() ?? weatherController?.currentState ?? {};
+    const precipType = Number(weatherState?.precipType) || PrecipitationType.NONE;
+    const precipAmount = Math.max(0.0, Math.min(1.0, Number(weatherState?.precipitation) || 0.0));
+    const isLiquidPrecip = precipType === PrecipitationType.RAIN || precipType === PrecipitationType.HAIL;
+    const rainEnabled = !!this.params.rainOnGlassEnabled && isLiquidPrecip;
+    const pStart = Math.max(0.0, Math.min(1.0, Number(this.params.rainOnGlassPrecipStart) || 0.0));
+    const pFull = Math.max(pStart + 0.001, Math.min(1.0, Number(this.params.rainOnGlassPrecipFull) || 1.0));
+    const rainRamp = Math.max(0.0, Math.min(1.0, (precipAmount - pStart) / Math.max(0.001, pFull - pStart)));
+    u.uRainAmount.value = rainEnabled ? rainRamp * Math.max(0.0, Number(this.params.rainOnGlassIntensity) || 0.0) : 0.0;
+    u.uRainSpeed.value = Math.max(0.0, Number(this.params.rainOnGlassSpeed) || 0.0);
+    const rainDirRad = (Number(this.params.rainOnGlassDirectionDeg) || 270.0) * (Math.PI / 180.0);
+    u.uRainDir.value.set(Math.cos(rainDirRad), Math.sin(rainDirRad));
+    u.uRainMaxOffsetPx.value = Math.max(0.0, Number(this.params.rainOnGlassMaxOffsetPx) || 0.0);
+    u.uRainDarken.value = Math.max(0.0, Math.min(1.0, Number(this.params.rainOnGlassDarken) || 0.0));
+
     // RGB shift — convert angle from degrees to radians each frame so live
     // tweaks take effect without requiring a repopulate.
     u.uRgbShiftAmount.value = Math.max(0.0, Number(this.params.rgbShiftAmount) || 0);
@@ -413,6 +475,25 @@ export class WindowLightEffectV2 {
    * @param {THREE.Camera} _camera
    */
   render(_renderer, _camera) {
+  }
+
+  /**
+   * Receives environment data from FloorCompositor/SkyColorEffectV2.
+   * @param {{ skyTintColor?: {r:number,g:number,b:number}, sunAzimuthDeg?: number }} state
+   */
+  setSkyState(state = {}) {
+    if (!state || typeof state !== 'object') return;
+
+    if (state.skyTintColor && typeof state.skyTintColor === 'object') {
+      this._skyState.skyTintColor = {
+        r: Number(state.skyTintColor.r) || 1.0,
+        g: Number(state.skyTintColor.g) || 1.0,
+        b: Number(state.skyTintColor.b) || 1.0,
+      };
+    }
+    if (Number.isFinite(Number(state.sunAzimuthDeg))) {
+      this._skyState.sunAzimuthDeg = Number(state.sunAzimuthDeg);
+    }
   }
 
   // ── Internals ──────────────────────────────────────────────────────────────
@@ -435,6 +516,20 @@ export class WindowLightEffectV2 {
       uFlickerEnabled: { value: 0.0 },
       uFlickerSpeed: { value: 0.35 },
       uFlickerAmount: { value: 0.15 },
+      uSkyTintColor: { value: new THREE.Color(1, 1, 1) },
+      uUseSkyTint: { value: this.params.useSkyTint ? 1.0 : 0.0 },
+      uSkyTintStrength: { value: Math.max(0.0, Number(this.params.skyTintStrength) || 0.0) },
+      uNightFactor: { value: 1.0 },
+      uSunDir: { value: new THREE.Vector2(0, -1) },
+      uSunTrackEnabled: { value: this.params.sunLightEnabled ? 1.0 : 0.0 },
+      uSunLightLength: { value: Math.max(0.0, Number(this.params.sunLightLength) || 0.0) },
+      uCloudFactor: { value: 1.0 },
+      uCloudInfluence: { value: Math.max(0.0, Math.min(1.0, Number(this.params.cloudInfluence) || 0.0)) },
+      uRainAmount: { value: 0.0 },
+      uRainSpeed: { value: Math.max(0.0, Number(this.params.rainOnGlassSpeed) || 0.0) },
+      uRainDir: { value: new THREE.Vector2(0, -1) },
+      uRainMaxOffsetPx: { value: Math.max(0.0, Number(this.params.rainOnGlassMaxOffsetPx) || 0.0) },
+      uRainDarken: { value: Math.max(0.0, Math.min(1.0, Number(this.params.rainOnGlassDarken) || 0.0)) },
       // RGB shift (chromatic dispersion) — pixel offset split into R/B channels.
       uRgbShiftAmount: { value: Math.max(0.0, Number(this.params.rgbShiftAmount) || 0) },
       uRgbShiftAngle: { value: (Number(this.params.rgbShiftAngle) || 0) * (Math.PI / 180.0) },
@@ -483,6 +578,20 @@ export class WindowLightEffectV2 {
         uniform float uFlickerEnabled;
         uniform float uFlickerSpeed;
         uniform float uFlickerAmount;
+        uniform vec3  uSkyTintColor;
+        uniform float uUseSkyTint;
+        uniform float uSkyTintStrength;
+        uniform float uNightFactor;
+        uniform vec2  uSunDir;
+        uniform float uSunTrackEnabled;
+        uniform float uSunLightLength;
+        uniform float uCloudFactor;
+        uniform float uCloudInfluence;
+        uniform float uRainAmount;
+        uniform float uRainSpeed;
+        uniform vec2  uRainDir;
+        uniform float uRainMaxOffsetPx;
+        uniform float uRainDarken;
         uniform float uRgbShiftAmount;
         uniform float uRgbShiftAngle;
         uniform vec2  uWindowTexelSize;
@@ -494,6 +603,12 @@ export class WindowLightEffectV2 {
           return dot(c, vec3(0.2126, 0.7152, 0.0722));
         }
 
+        float msHash12(vec2 p) {
+          vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+          p3 += dot(p3, p3.yzx + 33.33);
+          return fract((p3.x + p3.y) * p3.z);
+        }
+
         void main() {
           // Discard until the mask texture has finished loading to avoid
           // white-tile flash caused by sampling a null/uninitialized sampler.
@@ -501,7 +616,16 @@ export class WindowLightEffectV2 {
 
           // Boundary alpha check at the unshifted UV — cuts out areas outside
           // the map tile footprint.
-          vec4 mCenter = texture2D(uMask, vUv);
+          vec2 sunOffset = (uSunTrackEnabled > 0.5) ? (uSunDir * uSunLightLength) : vec2(0.0);
+          vec2 rainDir = normalize((length(uRainDir) > 0.001) ? uRainDir : vec2(0.0, -1.0));
+          float rainPhase = uTime * max(uRainSpeed, 0.001);
+          vec2 rainNoiseUv = vec2(vUv.x * 110.0, vUv.y * 180.0 - rainPhase * 7.5);
+          float rainNoise = msHash12(floor(rainNoiseUv));
+          float rainStrand = smoothstep(0.78, 0.98, rainNoise) * clamp(uRainAmount, 0.0, 1.0);
+          vec2 rainOffset = rainDir * (uRainMaxOffsetPx * rainStrand) * uWindowTexelSize;
+
+          vec2 baseUv = clamp(vUv + sunOffset + rainOffset, 0.001, 0.999);
+          vec4 mCenter = texture2D(uMask, baseUv);
           if (mCenter.a < 0.01) discard;
 
           // RGB Shift (chromatic dispersion / refraction):
@@ -512,9 +636,9 @@ export class WindowLightEffectV2 {
           vec2 rOffset  = shiftDir * uRgbShiftAmount * uWindowTexelSize;
           vec2 bOffset  = -rOffset;
 
-          float maskR = msLuminance(texture2D(uMask, clamp(vUv + rOffset, 0.001, 0.999)).rgb);
+          float maskR = msLuminance(texture2D(uMask, clamp(baseUv + rOffset, 0.001, 0.999)).rgb);
           float maskG = msLuminance(mCenter.rgb);
-          float maskB = msLuminance(texture2D(uMask, clamp(vUv + bOffset, 0.001, 0.999)).rgb);
+          float maskB = msLuminance(texture2D(uMask, clamp(baseUv + bOffset, 0.001, 0.999)).rgb);
 
           // Average luminance drives the overall shape/falloff.
           float maskScalar = (maskR + maskG + maskB) / 3.0;
@@ -537,7 +661,17 @@ export class WindowLightEffectV2 {
           // channels are all equal and carry no color information. Use the
           // per-channel shaped luminance directly and tint with uColor only.
           // This matches V1 behaviour: mask drives shape, uColor drives tint.
-          vec3 lightOut = shaped * uColor * uIntensity * flicker;
+          // Keep midday light warmer by reducing cool-sky tint bias when darkness is low.
+          float dayWarmth = clamp((uNightFactor - 0.55) / 0.45, 0.0, 1.0);
+          vec3 skyTint = max(uSkyTintColor, vec3(0.01));
+          skyTint.b = mix(skyTint.b, min(skyTint.b, 1.0), dayWarmth * 0.6);
+          float skyMix = (uUseSkyTint > 0.5) ? (1.0 - exp(-max(uSkyTintStrength, 0.0) * 0.16)) : 0.0;
+          vec3 tintColor = mix(vec3(1.0), skyTint, clamp(skyMix, 0.0, 1.0));
+
+          float cloudDimming = mix(1.0, clamp(uCloudFactor, 0.0, 1.0), clamp(uCloudInfluence, 0.0, 1.0));
+          float rainDarkenMul = 1.0 - clamp(uRainDarken, 0.0, 1.0) * clamp(uRainAmount, 0.0, 1.0) * 0.35;
+
+          vec3 lightOut = shaped * (uColor * tintColor) * uIntensity * flicker * max(uNightFactor, 0.0) * cloudDimming * rainDarkenMul;
 
           // Output raw linear light — no tone mapping on additive overlays.
           // AdditiveBlending: dst += src.rgb * src.a. Alpha=1 so the full

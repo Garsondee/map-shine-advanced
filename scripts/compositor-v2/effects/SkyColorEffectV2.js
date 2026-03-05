@@ -177,6 +177,9 @@ export class SkyColorEffectV2 {
 
     // Cached dayFactor for auto-intensity computation
     this._lastDayFactor = 0.5;
+
+    /** @type {THREE.DataTexture|null} */
+    this._fallbackWhite = null;
   }
 
   // ── UI schema (moved from V1 SkyColorEffect) ─────────────────────────────
@@ -298,14 +301,23 @@ export class SkyColorEffectV2 {
     const THREE = window.THREE;
     if (!THREE) return;
 
+    this._ensureFallbackWhite();
+
     this._composeScene = new THREE.Scene();
     this._composeCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
 
     this._composeMaterial = new THREE.ShaderMaterial({
       uniforms: {
         tDiffuse:    { value: null },
+        tOutdoorsMask: { value: this._fallbackWhite },
         uTime:       { value: 0.0 },
         uResolution: { value: new THREE.Vector2(1, 1) },
+        uHasOutdoorsMask: { value: 0.0 },
+        uOutdoorsMaskFlipY: { value: 0.0 },
+        uViewBoundsMin: { value: new THREE.Vector2(0, 0) },
+        uViewBoundsMax: { value: new THREE.Vector2(1, 1) },
+        uSceneBounds: { value: new THREE.Vector4(0, 0, 1, 1) },
+        uSceneDimensions: { value: new THREE.Vector2(1, 1) },
 
         // Grading params (blended per time-of-day)
         uExposure:    { value: 0.0 },
@@ -337,8 +349,15 @@ export class SkyColorEffectV2 {
       `,
       fragmentShader: /* glsl */`
         uniform sampler2D tDiffuse;
+        uniform sampler2D tOutdoorsMask;
         uniform vec2 uResolution;
         uniform float uTime;
+        uniform float uHasOutdoorsMask;
+        uniform float uOutdoorsMaskFlipY;
+        uniform vec2 uViewBoundsMin;
+        uniform vec2 uViewBoundsMax;
+        uniform vec4 uSceneBounds;
+        uniform vec2 uSceneDimensions;
 
         uniform float uExposure;
         uniform float uTemperature;
@@ -382,6 +401,18 @@ export class SkyColorEffectV2 {
 
         float random(vec2 p) {
           return fract(sin(dot(p.xy, vec2(12.9898, 78.233))) * 43758.5453);
+        }
+
+        float sampleOutdoorsMask(vec2 screenUv) {
+          if (uHasOutdoorsMask < 0.5) return 1.0;
+          vec2 worldXY = mix(uViewBoundsMin, uViewBoundsMax, screenUv);
+          vec2 sceneUv = vec2(
+            (worldXY.x - uSceneBounds.x) / max(1e-5, uSceneBounds.z),
+            1.0 - ((worldXY.y - uSceneBounds.y) / max(1e-5, uSceneBounds.w))
+          );
+          if (uOutdoorsMaskFlipY > 0.5) sceneUv.y = 1.0 - sceneUv.y;
+          sceneUv = clamp(sceneUv, vec2(0.0), vec2(1.0));
+          return texture2D(tOutdoorsMask, sceneUv).r;
         }
 
         void main() {
@@ -451,6 +482,7 @@ export class SkyColorEffectV2 {
 
           // Blend graded result with original based on intensity.
           float mask = clamp(uIntensity, 0.0, 1.0);
+          mask *= sampleOutdoorsMask(vUv);
           vec3 finalColor = mix(base, color, mask);
 
           gl_FragColor = vec4(finalColor, sceneColor.a);
@@ -470,6 +502,32 @@ export class SkyColorEffectV2 {
 
     this._initialized = true;
     log.info('SkyColorEffectV2 initialized');
+  }
+
+  /** @private */
+  _ensureFallbackWhite() {
+    const THREE = window.THREE;
+    if (!THREE || this._fallbackWhite) return;
+    const data = new Uint8Array([255, 255, 255, 255]);
+    this._fallbackWhite = new THREE.DataTexture(data, 1, 1, THREE.RGBAFormat, THREE.UnsignedByteType);
+    this._fallbackWhite.needsUpdate = true;
+    this._fallbackWhite.flipY = false;
+    this._fallbackWhite.generateMipmaps = false;
+    this._fallbackWhite.minFilter = THREE.NearestFilter;
+    this._fallbackWhite.magFilter = THREE.NearestFilter;
+  }
+
+  /**
+   * Feed the active-floor outdoors mask into sky grading.
+   * Outdoors pixels receive sky grading; indoors remain ungraded.
+   * @param {THREE.Texture|null} outdoorsTex
+   */
+  setOutdoorsMask(outdoorsTex) {
+    const u = this._composeMaterial?.uniforms;
+    if (!u) return;
+    u.tOutdoorsMask.value = outdoorsTex ?? this._fallbackWhite;
+    u.uHasOutdoorsMask.value = outdoorsTex ? 1.0 : 0.0;
+    u.uOutdoorsMaskFlipY.value = outdoorsTex?.flipY ? 1.0 : 0.0;
   }
 
   // ── Per-frame update ──────────────────────────────────────────────────
@@ -720,6 +778,40 @@ export class SkyColorEffectV2 {
       const u = this._composeMaterial.uniforms;
       u.uTime.value = timeInfo.elapsed;
 
+      // Keep post-pass screen UV -> world -> scene UV mapping in sync for outdoors masking.
+      const sc = window.MapShine?.sceneComposer;
+      const sceneRect = canvas?.dimensions?.sceneRect;
+      const sceneX = sceneRect?.x ?? 0;
+      const sceneY = sceneRect?.y ?? 0;
+      const sceneW = sceneRect?.width ?? 1;
+      const sceneH = sceneRect?.height ?? 1;
+      let vMinX = 0, vMinY = 0, vMaxX = sceneW, vMaxY = sceneH;
+      const cam = sc?.camera;
+      if (cam) {
+        if (cam.isOrthographicCamera) {
+          const camPos = cam.position;
+          vMinX = camPos.x + cam.left / cam.zoom;
+          vMinY = camPos.y + cam.bottom / cam.zoom;
+          vMaxX = camPos.x + cam.right / cam.zoom;
+          vMaxY = camPos.y + cam.top / cam.zoom;
+        } else {
+          const groundZ = sc?.groundZ ?? 0;
+          const dist = Math.max(1e-3, Math.abs((cam.position?.z ?? 0) - groundZ));
+          const fovRad = (Number(cam.fov) || 60) * Math.PI / 180;
+          const halfH = dist * Math.tan(fovRad * 0.5);
+          const aspect = Number(cam.aspect) || ((sc?.baseViewportWidth || 1) / Math.max(1, (sc?.baseViewportHeight || 1)));
+          const halfW = halfH * aspect;
+          vMinX = cam.position.x - halfW;
+          vMaxX = cam.position.x + halfW;
+          vMinY = cam.position.y - halfH;
+          vMaxY = cam.position.y + halfH;
+        }
+      }
+      u.uViewBoundsMin.value.set(vMinX, vMinY);
+      u.uViewBoundsMax.value.set(vMaxX, vMaxY);
+      u.uSceneBounds.value.set(sceneX, sceneY, sceneW, sceneH);
+      u.uSceneDimensions.value.set(canvas?.dimensions?.width ?? sceneW, canvas?.dimensions?.height ?? sceneH);
+
       u.uExposure.value = exposure;
       u.uTemperature.value = temperature;
       u.uTint.value = tint;
@@ -797,10 +889,12 @@ export class SkyColorEffectV2 {
   dispose() {
     try { this._composeMaterial?.dispose(); } catch (_) {}
     try { this._composeQuad?.geometry?.dispose(); } catch (_) {}
+    try { this._fallbackWhite?.dispose?.(); } catch (_) {}
     this._composeScene = null;
     this._composeCamera = null;
     this._composeMaterial = null;
     this._composeQuad = null;
+    this._fallbackWhite = null;
     this._initialized = false;
     log.info('SkyColorEffectV2 disposed');
   }

@@ -137,7 +137,7 @@ export class SceneContext {
     /** @type {import('../compositor-v2/effects/SkyColorEffectV2.js').SkyColorEffectV2|null} */
     this.skyColorEffect = null;
 
-    /** @type {import('../effects/CandleFlamesEffect.js').CandleFlamesEffect|null} */
+    /** @type {import('../compositor-v2/effects/CandleFlamesEffectV2.js').CandleFlamesEffectV2|null} */
     this.candleFlamesEffect = null;
 
     /** @type {import('../compositor-v2/effects/AshDisturbanceEffectV2.js').AshDisturbanceEffectV2|null} */

@@ -300,6 +300,22 @@ export class PixiInputBridge {
   }
 
   /**
+   * Resolve viewport rect used for pointer-based camera math.
+   * Prefer the actual input surface (Three canvas) to avoid cursor-anchor drift.
+   * @private
+   * @returns {DOMRect|null}
+   */
+  _getInputViewportRect() {
+    const threeRect = this.threeCanvas?.getBoundingClientRect?.();
+    if (threeRect && threeRect.width > 0 && threeRect.height > 0) return threeRect;
+
+    const pixiRect = canvas?.app?.view?.getBoundingClientRect?.();
+    if (pixiRect && pixiRect.width > 0 && pixiRect.height > 0) return pixiRect;
+
+    return null;
+  }
+
+  /**
    * @private
    * @returns {boolean}
    */
@@ -444,6 +460,15 @@ export class PixiInputBridge {
     if (!view) return;
     const constrained = this._applyExternalViewConstraint(view, source);
     if (!constrained) return;
+
+    // Zoom-to-cursor anchoring must be immediate. Interpolating x/y/scale with
+    // different alphas causes apparent center-zoom drift under the mouse.
+    if (source === 'zoom') {
+      this._smoothTargetView = null;
+      this._stopSmoothingLoop();
+      this._applyView(constrained);
+      return;
+    }
 
     if (!this._isSmoothingEnabled()) {
       this._smoothTargetView = null;
@@ -605,8 +630,10 @@ export class PixiInputBridge {
     // Skip if no significant change
     if (Math.abs(newZoom - oldZoom) < 0.001) return;
     
-    // Get viewport rect
-    const rect = canvas.app.view.getBoundingClientRect();
+    // Use the same viewport as the input surface (Three canvas) to keep
+    // cursor-relative zoom anchoring stable.
+    const rect = this._getInputViewportRect();
+    if (!rect) return;
     
     // Mouse position relative to viewport
     const screenPosX = event.clientX - rect.left;

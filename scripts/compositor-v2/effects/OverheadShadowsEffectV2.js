@@ -848,7 +848,9 @@ export class OverheadShadowsEffectV2 {
           vec2 maskTexelSize = vec2(1.0) / max(uSceneDimensions, vec2(1.0));
           // Keep _Outdoors dark-region taps projected with sun direction so
           // building-shadow motion remains consistent with roof projection.
-          float buildingMaskPixelLenBase = uLength * 1080.0 * max(uZoom, 0.0001);
+          // _Outdoors dark-region projection is sampled in world/scene UV.
+          // Keep this path zoom-stable (do NOT scale by camera zoom).
+          float buildingMaskPixelLenBase = uLength * 1080.0;
           float maskPixelLenBase = uLength * 1080.0 * receiverLengthScale;
           float maskPixelLenIndoor = buildingMaskPixelLenBase * max(uOutdoorBuildingShadowLengthScale, 0.0);
           float maskPixelLenProjected = maskPixelLenBase * tileProjectionLengthScale;
@@ -862,11 +864,18 @@ export class OverheadShadowsEffectV2 {
           // Apply indoor/outdoor softness selection uniformly so all shadow
           // components (roof, indoor mask, and fluid tint) blur consistently.
           float blurSoftness = mix(uSoftness, uIndoorShadowSoftness, receiverIsIndoor);
-          vec2 stepUv = uTexelSize * blurSoftness * roofUvScale;
-          vec2 maskStepUv = maskTexelSize * blurSoftness * 4.0;
+          // Keep blur footprint in the same zoom regime as projection length.
+          // Without this, shadows appear to sharpen/soften while zooming even
+          // when the caster offset is otherwise world-stable.
+          float zoomScale = max(uZoom, 0.0001);
+          vec2 stepUv = uTexelSize * blurSoftness * roofUvScale * zoomScale;
+          vec2 maskStepUv = maskTexelSize * blurSoftness * 4.0 * zoomScale;
+          // Indoor dark-region taps are world/scene-UV based, so keep their blur
+          // radius independent of camera zoom to avoid zoom-linked swim.
+          vec2 indoorMaskStepUv = maskTexelSize * blurSoftness * 4.0;
           float fluidBlurSoftness = mix(uFluidShadowSoftness, uIndoorFluidShadowSoftness, receiverIndoor);
-          vec2 fluidStepUv = uTexelSize * fluidBlurSoftness * roofUvScale;
-          vec2 maskFluidStepUv = maskTexelSize * fluidBlurSoftness * 4.0;
+          vec2 fluidStepUv = uTexelSize * fluidBlurSoftness * roofUvScale * zoomScale;
+          vec2 maskFluidStepUv = maskTexelSize * fluidBlurSoftness * 4.0 * zoomScale;
 
           float accum = 0.0;
           float weightSum = 0.0;
@@ -888,6 +897,7 @@ export class OverheadShadowsEffectV2 {
               // indoor/outdoor boundary. If the projected caster tap lives in
               // a different _Outdoors region than the receiver pixel, discard it.
               vec2 maskJitterUv = vec2(float(dx), float(dy)) * maskStepUv;
+              vec2 indoorMaskJitterUv = vec2(float(dx), float(dy)) * indoorMaskStepUv;
               float sameRegionTap = hasOutdoorsMask ? 0.0 : 1.0;
               if (hasOutdoorsMask) {
                 vec2 mUvBase = maskOffsetUvBase + maskJitterUv;
@@ -908,7 +918,7 @@ export class OverheadShadowsEffectV2 {
               // indoor (_Outdoors dark) casters and applied to outdoor receivers.
               float indoorStrengthTap = 0.0;
               if (indoorEnabled) {
-                vec2 mUvIndoor = maskOffsetUvIndoor + maskJitterUv;
+                vec2 mUvIndoor = maskOffsetUvIndoor + indoorMaskJitterUv;
                 float mUvIndoorValid = uvInBounds(mUvIndoor, maskTexelSize);
                 if (mUvIndoorValid > 0.5) {
                   float casterOutdoorsIndoor = readOutdoorsMask(mUvIndoor);
@@ -930,7 +940,7 @@ export class OverheadShadowsEffectV2 {
           float tileProjectedStrength = 0.0;
           if (tileProjectionEnabled) {
             float projectedSoftness = max(uTileProjectionSoftness, 0.5);
-            vec2 projectedStepUv = uTexelSize * projectedSoftness * tileProjectionUvScale;
+            vec2 projectedStepUv = uTexelSize * projectedSoftness * tileProjectionUvScale * zoomScale;
             float projectedAccum = 0.0;
             float projectedWeightSum = 0.0;
             float projectionReceiverScale = mix(max(uTileProjectionOutdoorOpacityScale, 0.0), max(uTileProjectionIndoorOpacityScale, 0.0), receiverIndoor);
@@ -1193,13 +1203,29 @@ export class OverheadShadowsEffectV2 {
    * @private
    */
   _getEffectiveZoom() {
-    // Prefer sceneComposer.currentZoom (FOV-based zoom system)
     const sceneComposer = window.MapShine?.sceneComposer;
+
+    if (!this.mainCamera) return 1.0;
+
+    // Perspective camera: derive zoom from the camera's *current* FOV against
+    // the compositor base FOV. This keeps projection math aligned to the exact
+    // camera projection used for this frame (prevents zoom-step mismatch drift).
+    if (this.mainCamera.isPerspectiveCamera) {
+      try {
+        const camFovDeg = Number(this.mainCamera.fov);
+        const camFovRad = camFovDeg * (Math.PI / 180);
+        const camTanHalf = Math.tan(camFovRad * 0.5);
+        const baseTanHalf = Number(sceneComposer?.baseFovTanHalf);
+        if (Number.isFinite(baseTanHalf) && baseTanHalf > 1e-6 && Number.isFinite(camTanHalf) && camTanHalf > 1e-6) {
+          return baseTanHalf / camTanHalf;
+        }
+      } catch (_) {}
+    }
+
+    // Fallback: compositor-provided zoom scalar.
     if (sceneComposer?.currentZoom !== undefined) {
       return sceneComposer.currentZoom;
     }
-    
-    if (!this.mainCamera) return 1.0;
     
     // OrthographicCamera: zoom is a direct property
     if (this.mainCamera.isOrthographicCamera) {

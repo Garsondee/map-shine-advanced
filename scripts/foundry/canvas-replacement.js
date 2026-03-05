@@ -37,6 +37,7 @@ import {
   LightingEffectV2,
   FireEffectV2,
   AshDisturbanceEffectV2,
+  SmellyFliesEffect,
   CloudEffectV2,
   AsciiEffectV2,
   WaterEffectV2,
@@ -4820,6 +4821,11 @@ async function createThreeCanvas(scene) {
           uiManager.registerEffect('ash-disturbance', 'Ash Disturbance',
             AshDisturbanceEffectV2.getControlSchema(), _makeV2Callback('_ashDisturbanceEffect'), 'particle');
         }, 'v2.registerAshDisturbanceUI(V2)', Severity.COSMETIC);
+
+        safeCall(() => {
+          uiManager.registerEffect('smelly-flies', 'Smelly Flies',
+            SmellyFliesEffect.getControlSchema(), _makeV2Callback('_smellyFliesEffect'), 'particle');
+        }, 'v2.registerSmellyFliesUI(V2)', Severity.COSMETIC);
 
         safeCall(() => {
           uiManager.registerEffect('bloom', 'Bloom (Glow)',

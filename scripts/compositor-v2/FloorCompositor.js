@@ -67,6 +67,7 @@ import { DazzleOverlayEffectV2 } from './effects/DazzleOverlayEffectV2.js';
 import { VisionModeEffectV2 } from './effects/VisionModeEffectV2.js';
 import { InvertEffectV2 } from './effects/InvertEffectV2.js';
 import { SepiaEffectV2 } from './effects/SepiaEffectV2.js';
+import { SmellyFliesEffect } from '../particles/SmellyFliesEffect.js';
 import { weatherController } from '../core/WeatherController.js';
 
 const log = createLogger('FloorCompositor');
@@ -236,6 +237,14 @@ export class FloorCompositor {
      * @type {AshDisturbanceEffectV2}
      */
     this._ashDisturbanceEffect = new AshDisturbanceEffectV2(this._renderBus);
+
+    /**
+     * V2 Smelly Flies Effect: map-point-driven ambient fly swarms.
+     * Uses Quarks systems that render in the bus scene through the shared
+     * weather/particles batch renderer bridge.
+     * @type {SmellyFliesEffect}
+     */
+    this._smellyFliesEffect = new SmellyFliesEffect();
 
     // Outdoors mask is now provided by EffectMaskRegistry (central asset system)
 
@@ -487,6 +496,12 @@ export class FloorCompositor {
       log.warn('FloorCompositor: AshDisturbanceEffectV2 initialize failed:', err);
     }
 
+    // Smelly flies uses the particles bridge batch renderer and should render
+    // in the bus scene for V2.
+    try { this._smellyFliesEffect?.initialize?.(this.renderer, this._renderBus._scene, this.camera); } catch (err) {
+      log.warn('FloorCompositor: SmellyFliesEffect initialize failed:', err);
+    }
+
     // Subscribe outdoors mask consumers so they receive the texture as soon as
     // populate() builds it, and again on every floor change.
     // CloudEffectV2: cloud shadows and cloud tops only fall on outdoor areas.
@@ -568,6 +583,8 @@ export class FloorCompositor {
       if (fire?.enabled && fire._activeFloors?.size > 0) return true;
       const splash = this._waterSplashesEffect;
       if (splash?.enabled && splash._activeFloors?.size > 0) return true;
+      const flies = this._smellyFliesEffect;
+      if (flies?.enabled && (flies?.flySystems?.size ?? 0) > 0) return true;
       return false;
     } catch (_) {
       // Fail safe: if anything about the probe throws, treat as active.
@@ -687,6 +704,14 @@ export class FloorCompositor {
             log.error('AshDisturbanceEffectV2 populate failed:', err);
           });
         }
+
+        // Wire map point sources for smelly flies after managers are available.
+        try {
+          const mapPoints = window.MapShine?.mapPointsManager ?? null;
+          this._smellyFliesEffect?.setMapPointsSources?.(mapPoints);
+        } catch (err) {
+          log.warn('SmellyFliesEffect map-points wiring failed:', err);
+        }
         // Push current outdoors mask immediately; async compositor cache warmup
         // can still update this later via the per-frame sync below.
         this._syncOutdoorsMaskConsumers({
@@ -745,6 +770,11 @@ export class FloorCompositor {
         this._waterSplashesEffect?.update?.(timeInfo);
       } catch (err) {
         log.warn('WaterSplashesEffectV2 update threw, skipping frame:', err);
+      }
+      try {
+        this._smellyFliesEffect?.update?.(timeInfo);
+      } catch (err) {
+        log.warn('SmellyFliesEffect update threw, skipping frame:', err);
       }
       try {
         this._ashDisturbanceEffect?.update?.(timeInfo);
@@ -1408,6 +1438,7 @@ export class FloorCompositor {
     try { this._lightingEffect.dispose(); } catch (_) {}
     try { this._overheadShadowEffect?.dispose?.(); } catch (_) {}
     try { this._buildingShadowEffect?.dispose?.(); } catch (_) {}
+    try { this._smellyFliesEffect?.dispose?.(); } catch (_) {}
     try { this._dotScreenEffect?.dispose?.(); } catch (_) {}
     try { this._halftoneEffect?.dispose?.(); } catch (_) {}
     try { this._asciiEffect?.dispose?.(); } catch (_) {}

@@ -794,3 +794,43 @@ BuildingShadowsEffectV2 projects indoor casters from this mask onto outdoor rece
 - Ground floor now receives combined building shadow from ground + upper floors.
 - Upper floors no longer show leaked lower-floor building shadows.
 - Upper-floor overhang shadows rendered on ground floor are masked by ground-floor receiver rules (correct), not upper-floor hole rules (incorrect).
+
+## 14. Success Story: Overhead Shadows Region-Split + _Outdoors Routing Stabilized
+
+**Status:** Fixed and validated in-scene.
+
+### Symptoms
+
+- Indoor-origin overhead shadows were leaking into outdoor receiver regions after projection.
+- Attempts to block leakage accidentally broke the projected `_Outdoors` building-shadow contribution.
+- Behavior became brittle when trying to preserve motion while also enforcing region correctness.
+
+### What worked
+
+1. **Strict region split for projected roof taps** (`scripts/compositor-v2/effects/OverheadShadowsEffectV2.js`)
+   - The roof projection tap gate now explicitly routes by binary receiver/caster region class:
+     - indoor caster -> indoor receiver
+     - outdoor caster -> outdoor receiver
+   - This removed cross-boundary bleed while preserving projected motion.
+
+2. **Projected `_Outdoors` building contribution restored to intended routing** (`scripts/compositor-v2/effects/OverheadShadowsEffectV2.js`)
+   - The dark-region term remains projected (so it still moves with sun direction).
+   - The contribution is sourced from `_Outdoors` dark casters and applied to outdoor receivers as a separate building-shadow channel.
+   - This restored the visual contribution that regressed during earlier leakage fixes.
+
+3. **Control schema copy re-aligned with actual runtime behavior** (`scripts/compositor-v2/effects/OverheadShadowsEffectV2.js`)
+   - Tweakpane labels/tooltips were updated back to “Outdoor Building Shadow (_Outdoors)” semantics.
+   - This avoids tuning confusion and keeps authored settings consistent with shader routing.
+
+### Why this is stable
+
+- Projection motion and region masking are handled as separate concerns:
+  - **Motion:** UV offsets follow sun direction as before.
+  - **Validity:** contribution only survives if receiver/caster region pairing is allowed by the explicit split.
+- The `_Outdoors` building shadow remains independent from the main roof same-region tap path, so it can be tuned without reopening indoor/outdoor leakage.
+
+### Outcome
+
+- Indoor overhead shadows no longer project into outdoor receiver areas.
+- Building-shadow contribution from `_Outdoors` dark regions is preserved and tunable.
+- Shadow motion remains intact while region correctness is enforced.

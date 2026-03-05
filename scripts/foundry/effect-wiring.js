@@ -30,6 +30,7 @@ import { AshDisturbanceEffectV2 } from '../compositor-v2/effects/AshDisturbanceE
 import { CloudEffectV2 } from '../compositor-v2/effects/CloudEffectV2.js';
 import { AsciiEffectV2 } from '../compositor-v2/effects/AsciiEffectV2.js';
 import { WaterEffectV2 } from '../compositor-v2/effects/WaterEffectV2.js';
+import { SmellyFliesEffect } from '../particles/SmellyFliesEffect.js';
 
 import { createLogger } from '../core/log.js';
 
@@ -50,6 +51,7 @@ export {
   LightingEffectV2,
   FireEffectV2,
   AshDisturbanceEffectV2,
+  SmellyFliesEffect,
   CloudEffectV2,
   AsciiEffectV2,
   WaterEffectV2,

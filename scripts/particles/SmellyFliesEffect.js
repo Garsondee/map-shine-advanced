@@ -4,7 +4,6 @@
  * @module particles/SmellyFliesEffect
  */
 
-import { EffectBase, RenderLayers } from '../effects/EffectComposer.js';
 import { createLogger } from '../core/log.js';
 import { 
   ParticleSystem, 
@@ -772,7 +771,7 @@ class FlyBehavior {
  * Smelly Flies Effect - Creates swarms of flies that buzz, land, walk, and take off
  * Uses three.quarks ParticleSystem with custom FlyBehavior for AI-like movement
  */
-export class SmellyFliesEffect extends EffectBase {
+export class SmellyFliesEffect {
   static _shared = {
     refCount: 0,
     loadPromise: null,
@@ -887,7 +886,16 @@ export class SmellyFliesEffect extends EffectBase {
   }
 
   constructor() {
-    super('smellyFlies', RenderLayers.PARTICLES, 'low');
+    // Intentionally standalone (no EffectBase import) to avoid V2 circular-import
+    // TDZ with EffectComposer -> FloorCompositor -> SmellyFliesEffect.
+    this.id = 'smellyFlies';
+    this.layer = { order: 300, name: 'Particles', requiresDepth: true };
+    this.requiredTier = 'low';
+    this.enabled = true;
+    this.priority = 0;
+    this.alwaysRender = false;
+    this.requiresContinuousRender = false;
+    this.floorScope = 'floor';
 
     // Fly particle systems live persistently in the Three.js scene without
     // per-floor visibility filtering. Running per-floor would render all flies

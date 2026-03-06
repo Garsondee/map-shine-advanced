@@ -3,6 +3,7 @@ import Coordinates from '../../utils/coordinates.js';
 import { readWallHeightFlags } from '../../foundry/levels-scene-flags.js';
 import { 
   ParticleSystem, 
+  BatchedRenderer,
   IntervalValue,
   ColorRange,
   Vector4,
@@ -243,6 +244,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
     this._defaultCookieTexture = null;
 
     this._torchParticlesRegistered = false;
+    this._torchBatchRenderer = null;
 
     this._flickerNoise = new SimpleSmoothNoise({ amplitude: 1, scale: 1, seed: Math.random() * 1000 });
     this._wanderNoiseX = new SimpleSmoothNoise({ amplitude: 1, scale: 1, seed: Math.random() * 1000 + 10 });
@@ -291,6 +293,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
     this._flashlightLightDoc = null;
     this._flashlightCookieWorld = null;
     this._flashlightAimWorld = null;
+    this._clampedTargetWorld = null;
 
     this._flashlightFinalIntensity = 0;
 
@@ -615,6 +618,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
 
     this._flashlightCookieWorld = new THREE.Vector3();
     this._flashlightAimWorld = new THREE.Vector3();
+    this._clampedTargetWorld = new THREE.Vector3();
 
     this._visionMaskTexelSize = new THREE.Vector2(1, 1);
 
@@ -625,6 +629,19 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
     this._group.name = 'PlayerLight';
     this._group.renderOrder = 200;
 
+    // Keep torch/spark particles self-contained in V2. This avoids depending on
+    // the legacy global particles bridge, which may be absent in V2-only scenes.
+    this._torchBatchRenderer = new BatchedRenderer();
+    this._torchBatchRenderer.renderOrder = 200000;
+    this._torchBatchRenderer.frustumCulled = false;
+    try {
+      if (this._torchBatchRenderer.layers && typeof this._torchBatchRenderer.layers.enable === 'function') {
+        this._torchBatchRenderer.layers.enable(0);
+        this._torchBatchRenderer.layers.enable(OVERLAY_THREE_LAYER);
+      }
+    } catch (_) {
+    }
+
     this._initCookieTextures();
 
     this._createTorchParticleSystem();
@@ -633,6 +650,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
     this._createDebugOverlay();
 
     this.scene.add(this._group);
+    this.scene.add(this._torchBatchRenderer);
 
     this._tryAttachFlashlightToLightScene();
 
@@ -1045,7 +1063,9 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
     let collisionWorld = null;
 
     // When blocked, we clamp the target to a safe point on the token-side of the wall.
-    let clampedTargetWorld = aimWorld;
+    let clampedTargetWorld = this._clampedTargetWorld
+      ? this._clampedTargetWorld.set(aimWorld.x, aimWorld.y, groundZ)
+      : aimWorld;
     let safeWallDistanceUnits = wallDistanceUnits;
 
     if (this.params.wallBlockEnabled) {
@@ -1075,7 +1095,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
           const len = Math.hypot(this._tempB.x, this._tempB.y);
           if (len > 0.0001) {
             this._tempB.multiplyScalar(1 / len);
-            clampedTargetWorld = this._tempA;
+            clampedTargetWorld = this._clampedTargetWorld || this._tempA;
             clampedTargetWorld.set(
               collisionWorld.x + this._tempB.x * marginPx,
               collisionWorld.y + this._tempB.y * marginPx,
@@ -1083,7 +1103,8 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
             );
             safeWallDistanceUnits = Math.max(0, wallDistanceUnits - (marginPx * pxToUnits));
           } else {
-            clampedTargetWorld = collisionWorld;
+            clampedTargetWorld = this._clampedTargetWorld || this._tempA;
+            clampedTargetWorld.set(collisionWorld.x, collisionWorld.y, groundZ);
             safeWallDistanceUnits = wallDistanceUnits;
           }
         }
@@ -1098,30 +1119,23 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
     this._updateDebugOverlay(state, distanceUnits, blocked, fade);
 
     if (!this._torchParticlesRegistered) {
-      const batch = window.MapShineParticles?.batchRenderer;
-      if (batch && typeof batch.addSystem === 'function' && (this._torchParticleSystem || this._torchSparksSystem)) {
-        try {
-          const add = (system) => {
-            if (!system) return;
-            if (system.emitter?.parent === this._group) {
-              this._group.remove(system.emitter);
-            }
-            if (this.scene && system.emitter && !system.emitter.parent) {
-              this.scene.add(system.emitter);
-            }
-            if (system.emitter) {
-              const ud = system.emitter.userData || (system.emitter.userData = {});
-              ud.msAutoCull = false;
-            }
-            batch.addSystem(system);
-          };
+      this._registerTorchParticleSystem(this._torchParticleSystem);
+      this._registerTorchParticleSystem(this._torchSparksSystem);
+    }
 
-          add(this._torchParticleSystem);
-          add(this._torchSparksSystem);
-          this._torchParticlesRegistered = true;
-        } catch (_) {
-        }
+    // Step the local torch particle simulation each frame.
+    // This mirrors FireEffectV2's explicit BatchedRenderer.update() flow.
+    try {
+      if (this._torchBatchRenderer && typeof this._torchBatchRenderer.update === 'function') {
+        const deltaSec = typeof timeInfo?.delta === 'number' ? timeInfo.delta : 0.016;
+        const clampedDelta = Math.min(deltaSec, 0.1);
+        const simSpeed = (weatherController && typeof weatherController.simulationSpeed === 'number')
+          ? weatherController.simulationSpeed
+          : 2.0;
+        const dtQuarks = clampedDelta * 0.001 * 750 * simSpeed;
+        this._torchBatchRenderer.update(dtQuarks);
       }
+    } catch (_) {
     }
 
     if (this.params.mode === 'flashlight') {
@@ -1218,6 +1232,18 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
       }
       this._torchSparksSystem.dispose?.();
       this._torchSparksSystem = null;
+    }
+
+    if (this._torchBatchRenderer) {
+      try {
+        this._torchBatchRenderer.parent?.remove?.(this._torchBatchRenderer);
+      } catch (_) {
+      }
+      try {
+        this._torchBatchRenderer.dispose?.();
+      } catch (_) {
+      }
+      this._torchBatchRenderer = null;
     }
 
     if (this._torchSparksTexture) {
@@ -1662,6 +1688,36 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
     }
   }
 
+  _registerTorchParticleSystem(system) {
+    if (!system) return;
+
+    const ud = system.userData || (system.userData = {});
+    if (ud._msRegisteredToBatch) return;
+
+    // Prefer the local V2 batch renderer; fall back to legacy batch bridge if needed.
+    const batch = this._torchBatchRenderer || window.MapShineParticles?.batchRenderer;
+    if (batch && typeof batch.addSystem === 'function') {
+      try {
+        if (system.emitter?.parent === this._group) {
+          this._group.remove(system.emitter);
+        }
+        batch.addSystem(system);
+        ud._msRegisteredToBatch = true;
+        this._torchParticlesRegistered = true;
+      } catch (_) {
+      }
+    }
+
+    if (!ud._msRegisteredToBatch && system.emitter && !system.emitter.parent) {
+      this._group.add(system.emitter);
+    }
+
+    if (system.emitter) {
+      const emitterUd = system.emitter.userData || (system.emitter.userData = {});
+      emitterUd.msAutoCull = false;
+    }
+  }
+
   _createTorchParticleSystem() {
     const THREE = window.THREE;
     if (!THREE || !this._group) return;
@@ -1742,7 +1798,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
       shape: emitter,
       material: material,
       renderMode: RenderMode.BillBoard,
-      renderOrder: 50,
+      renderOrder: 200050,
       uTileCount: atlasTex ? 8 : 1,
       vTileCount: atlasTex ? 8 : 1,
       startTileIndex: new ConstantValue(0),
@@ -1765,21 +1821,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
     system.userData._msTorchUpdraft = buoyancy;
 
     this._torchParticleSystem = system;
-
-    const batch = window.MapShineParticles?.batchRenderer;
-    if (batch && typeof batch.addSystem === 'function') {
-      batch.addSystem(system);
-      this._torchParticlesRegistered = true;
-      if (this.scene && system.emitter && !system.emitter.parent) {
-        this.scene.add(system.emitter);
-      }
-    } else {
-      this._group.add(system.emitter);
-    }
-    if (system.emitter) {
-      const ud = system.emitter.userData || (system.emitter.userData = {});
-      ud.msAutoCull = false;
-    }
+    this._registerTorchParticleSystem(system);
     system.emitter.visible = false;
   }
 
@@ -1862,7 +1904,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
       material,
       renderMode: RenderMode.StretchedBillBoard,
       speedFactor: 0.03,
-      renderOrder: 52,
+      renderOrder: 200052,
       startRotation: new IntervalValue(0, Math.PI * 2),
       behaviors: [
         colorOverLife,
@@ -1881,21 +1923,9 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
     system.userData._msTorchUpdraft = updraft;
 
     this._torchSparksSystem = system;
-
-    const batch = window.MapShineParticles?.batchRenderer;
-    if (batch && typeof batch.addSystem === 'function') {
-      batch.addSystem(system);
-      if (this.scene && system.emitter && !system.emitter.parent) {
-        this.scene.add(system.emitter);
-      }
-    } else if (system.emitter) {
-      this._group.add(system.emitter);
-    }
-
+    this._registerTorchParticleSystem(system);
     if (system.emitter) {
       system.emitter.visible = false;
-      const ud = system.emitter.userData || (system.emitter.userData = {});
-      ud.msAutoCull = false;
     }
   }
 
@@ -2571,15 +2601,18 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
     const aimFalloff = Math.max(0, Math.min(1, invSq * rangeFade));
 
     // Do not turn off due to collision; collisions shorten the cone via wallDistanceUnits.
+    const baseBeamLenU = (this.params.flashlightBeamLengthUnits ?? this.params.flashlightLengthUnits);
+    const wallAttenuation = blocked
+      ? Math.max(0.10, Math.min(1.0, wallDistanceUnits / Math.max(0.001, baseBeamLenU)))
+      : 1.0;
     const rawIntensity = (this.params.flashlightIntensity * aimFalloff) * Math.max(0, Math.min(1, distanceFade));
     const brokennessMult = this._getFlashlightBrokennessMultiplier(t, dt);
-    const intensity = rawIntensity * Math.max(0, Math.min(1.25, brokennessMult));
+    const intensity = rawIntensity * Math.max(0, Math.min(1.25, brokennessMult)) * wallAttenuation;
     this._flashlightFinalIntensity = intensity;
 
     const baseFlashlightIntensity = Math.max(1e-6, this.params.flashlightIntensity);
     const intensityFactor = Math.max(0, Math.min(1, intensity / baseFlashlightIntensity));
 
-    const baseBeamLenU = (this.params.flashlightBeamLengthUnits ?? this.params.flashlightLengthUnits);
     const coneMaxLenU = Math.max(0.5, (typeof coneMaxLenUOverride === 'number' ? coneMaxLenUOverride : baseBeamLenU));
     const reachFactor = Math.max(0, Math.min(1, intensityFactor));
     const effectiveConeMaxLenU = coneMaxLenU * reachFactor;
@@ -2936,7 +2969,10 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
         // Aim distance factor in [0..1] for distance scaling
         const dx = cursorWorld.x - tokenCenterWorld.x;
         const dy = cursorWorld.y - tokenCenterWorld.y;
-        const distU = Math.hypot(dx, dy) * pxToUnits;
+        const freeAimDistU = Math.hypot(dx, dy) * pxToUnits;
+        const distU = blocked
+          ? Math.max(0, wallDistanceUnits)
+          : freeAimDistU;
 
         const maxU = Math.max(0.001, this.params.flashlightMaxDistanceUnits) * 4.0;
         const distT = Math.max(0, Math.min(1, distU / maxU));
@@ -2944,7 +2980,10 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
           ? ((this.params.flashlightLightDistanceScaleNear * (1 - distT)) + (this.params.flashlightLightDistanceScaleFar * distT))
           : 1.0;
 
-        const scale = distanceScale * flashlightIntensityFactor;
+        const wallScale = blocked
+          ? Math.max(0.10, Math.min(1.0, wallDistanceUnits / Math.max(0.001, this.params.flashlightLightDim)))
+          : 1.0;
+        const scale = distanceScale * flashlightIntensityFactor * wallScale;
 
         let lightWorldX = tokenCenterWorld.x;
         let lightWorldY = tokenCenterWorld.y;
@@ -2966,13 +3005,13 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
           color: c,
           dim,
           bright,
-          alpha: this.params.flashlightLightAlpha * flashlightIntensityFactor,
+          alpha: this.params.flashlightLightAlpha * flashlightIntensityFactor * wallScale,
           attenuation: this.params.flashlightLightAttenuation,
-          luminosity: this.params.flashlightLightLuminosity * flashlightIntensityFactor,
+          luminosity: this.params.flashlightLightLuminosity * flashlightIntensityFactor * wallScale,
           animation: {
             type: animType,
             speed: this.params.flashlightLightAnimSpeed,
-            intensity: this.params.flashlightLightAnimIntensity * flashlightIntensityFactor,
+            intensity: this.params.flashlightLightAnimIntensity * flashlightIntensityFactor * wallScale,
             reverse: false
           }
         };

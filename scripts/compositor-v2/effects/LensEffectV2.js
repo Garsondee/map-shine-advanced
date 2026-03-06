@@ -14,6 +14,7 @@
  */
 
 import { createLogger } from '../../core/log.js';
+import { getGlobalFrameState } from '../../core/frame-state.js';
 import { getVertexShader, getFragmentShader } from './lens-shader.js';
 
 const log = createLogger('LensEffectV2');
@@ -184,8 +185,17 @@ export class LensEffectV2 {
     this._autoFocusEventElapsedSec = 0;
     this._autoFocusEventDurationSec = 0.35;
     this._autoFocusTimeToNextEventSec = 60;
+    this._autoFocusZoomCooldownSec = 0;
     this._autoFocusShiftPx = { x: 0, y: 0 };
     this._autoFocusAmount = 0;
+
+    this._cameraMotionPx = { x: 0, y: 0 };
+    this._cameraMotionSmoothedPx = { x: 0, y: 0 };
+    this._cameraMotionBlurPx = { x: 0, y: 0 };
+    this._zoomMotionBlurPx = 0;
+    this._cameraZoomVelocity = 0;
+    this._lastCameraFrame = null;
+    this._lightBurnDarknessGate = 1.0;
 
     this._lightBurnScene = null;
     this._lightBurnCamera = null;
@@ -211,6 +221,10 @@ export class LensEffectV2 {
       autoFocusDefocusDurationSeconds: 0.35,
       autoFocusMaxBlurPx: 2.5,
       autoFocusMaxShiftPx: 1.4,
+      autoFocusZoomTriggerEnabled: true,
+      autoFocusZoomTriggerThreshold: 0.75,
+      autoFocusZoomTriggerCooldownSeconds: 1.1,
+      autoFocusZoomTriggerStrength: 1.0,
 
       lightBurnEnabled: false,
       lightBurnThreshold: 0.80,
@@ -219,6 +233,16 @@ export class LensEffectV2 {
       lightBurnResponse: 1.15,
       lightBurnIntensity: 0.30,
       lightBurnBlurPx: 1.0,
+      lightBurnDarknessGateEnabled: true,
+      lightBurnDarknessStart: 0.45,
+      lightBurnDarknessEnd: 0.78,
+      lightBurnDarknessInfluence: 1.0,
+
+      motionBlurEnabled: true,
+      motionBlurStrength: 0.35,
+      motionBlurMaxPx: 3.0,
+      motionBlurZoomStrength: 1.9,
+      motionBlurSmoothingSeconds: 0.16,
 
       structuralSelection: 'auto',
       structuralIntensity: 0.40,
@@ -584,7 +608,9 @@ export class LensEffectV2 {
           parameters: [
             'autoFocusEnabled',
             'autoFocusMinIntervalSeconds', 'autoFocusMaxIntervalSeconds',
-            'autoFocusDefocusDurationSeconds', 'autoFocusMaxBlurPx', 'autoFocusMaxShiftPx'
+            'autoFocusDefocusDurationSeconds', 'autoFocusMaxBlurPx', 'autoFocusMaxShiftPx',
+            'autoFocusZoomTriggerEnabled', 'autoFocusZoomTriggerThreshold',
+            'autoFocusZoomTriggerCooldownSeconds', 'autoFocusZoomTriggerStrength'
           ]
         },
         {
@@ -596,7 +622,19 @@ export class LensEffectV2 {
             'lightBurnEnabled',
             'lightBurnThreshold', 'lightBurnThresholdSoftness',
             'lightBurnPersistenceSeconds', 'lightBurnResponse',
-            'lightBurnIntensity', 'lightBurnBlurPx'
+            'lightBurnIntensity', 'lightBurnBlurPx',
+            'lightBurnDarknessGateEnabled', 'lightBurnDarknessStart',
+            'lightBurnDarknessEnd', 'lightBurnDarknessInfluence'
+          ]
+        },
+        {
+          name: 'lens-motion',
+          label: 'Camera Motion Response',
+          type: 'folder',
+          expanded: false,
+          parameters: [
+            'motionBlurEnabled', 'motionBlurStrength', 'motionBlurMaxPx',
+            'motionBlurZoomStrength', 'motionBlurSmoothingSeconds'
           ]
         },
         {
@@ -688,6 +726,10 @@ export class LensEffectV2 {
         autoFocusDefocusDurationSeconds: { type: 'slider', min: 0.05, max: 2.0, step: 0.01, default: 0.35, label: 'Defocus Duration (s)' },
         autoFocusMaxBlurPx: { type: 'slider', min: 0.0, max: 8.0, step: 0.05, default: 2.5, label: 'Max Blur (px)' },
         autoFocusMaxShiftPx: { type: 'slider', min: 0.0, max: 6.0, step: 0.05, default: 1.4, label: 'Max Shift (px)' },
+        autoFocusZoomTriggerEnabled: { type: 'boolean', default: true, label: 'Zoom Triggers Refocus' },
+        autoFocusZoomTriggerThreshold: { type: 'slider', min: 0.05, max: 3.0, step: 0.01, default: 0.75, label: 'Zoom Trigger Threshold' },
+        autoFocusZoomTriggerCooldownSeconds: { type: 'slider', min: 0.0, max: 6.0, step: 0.05, default: 1.1, label: 'Zoom Trigger Cooldown (s)' },
+        autoFocusZoomTriggerStrength: { type: 'slider', min: 0.1, max: 2.5, step: 0.05, default: 1.0, label: 'Zoom Trigger Strength' },
 
         lightBurnEnabled: { type: 'boolean', default: false, label: 'Enable Light Burn' },
         lightBurnThreshold: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.80, label: 'Bright Threshold' },
@@ -696,6 +738,16 @@ export class LensEffectV2 {
         lightBurnResponse: { type: 'slider', min: 0.1, max: 3.0, step: 0.05, default: 1.15, label: 'Burn Response' },
         lightBurnIntensity: { type: 'slider', min: 0.0, max: 2.5, step: 0.01, default: 0.30, label: 'Burn Intensity' },
         lightBurnBlurPx: { type: 'slider', min: 0.0, max: 8.0, step: 0.05, default: 1.0, label: 'Burn Blur (px)' },
+        lightBurnDarknessGateEnabled: { type: 'boolean', default: true, label: 'Gate Burn by Scene Darkness' },
+        lightBurnDarknessStart: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.45, label: 'Darkness Gate Start' },
+        lightBurnDarknessEnd: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.78, label: 'Darkness Gate End' },
+        lightBurnDarknessInfluence: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 1.0, label: 'Darkness Gate Influence' },
+
+        motionBlurEnabled: { type: 'boolean', default: true, label: 'Enable Camera Motion Blur' },
+        motionBlurStrength: { type: 'slider', min: 0.0, max: 2.0, step: 0.01, default: 0.35, label: 'Motion Blur Strength' },
+        motionBlurMaxPx: { type: 'slider', min: 0.0, max: 10.0, step: 0.05, default: 3.0, label: 'Motion Blur Max (px)' },
+        motionBlurZoomStrength: { type: 'slider', min: 0.0, max: 8.0, step: 0.05, default: 1.9, label: 'Zoom Blur Strength' },
+        motionBlurSmoothingSeconds: { type: 'slider', min: 0.0, max: 0.8, step: 0.01, default: 0.16, label: 'Motion Blur Smoothing (s)' },
 
         viewfinderEnabled: { type: 'boolean', default: false, label: 'Enable Viewfinder Overlay' },
         viewfinderSelection: { type: 'string', default: 'none', options: viewfinderOptions, label: 'Viewfinder Texture' },
@@ -797,6 +849,9 @@ export class LensEffectV2 {
         uAutoFocusAmount: { value: 0 },
         uAutoFocusBlurPx: { value: 0 },
         uAutoFocusShiftPx: { value: new THREE.Vector2(0, 0) },
+        uMotionBlurEnabled: { value: this.params.motionBlurEnabled ? 1.0 : 0.0 },
+        uMotionBlurCameraPx: { value: new THREE.Vector2(0, 0) },
+        uMotionBlurZoomPx: { value: 0.0 },
         tLightBurnMap: { value: this._fallbackBlack },
         uLightBurnEnabled: { value: 0.0 },
         uLightBurnIntensity: { value: 0.0 },
@@ -909,6 +964,21 @@ export class LensEffectV2 {
     return 1.0 - smooth;
   }
 
+  _triggerAutoFocusEvent(strength = 1.0) {
+    const s = Math.max(0.1, Number(strength) || 1.0);
+    this._autoFocusEventActive = true;
+    this._autoFocusEventElapsedSec = 0;
+    const baseDuration = Math.max(0.05, Number(this.params.autoFocusDefocusDurationSeconds) || 0.35);
+    this._autoFocusEventDurationSec = Math.max(0.05, baseDuration / Math.max(0.6, s));
+    this._autoFocusAmount = 0;
+
+    const maxShift = Math.max(0, Number(this.params.autoFocusMaxShiftPx) || 0) * Math.min(1.8, s);
+    const theta = Math.random() * (Math.PI * 2);
+    const mag = maxShift * this._randomInRange(0.45, 1.0);
+    this._autoFocusShiftPx.x = Math.cos(theta) * mag;
+    this._autoFocusShiftPx.y = Math.sin(theta) * mag;
+  }
+
   _updateAutoFocusState(dtSec) {
     const dt = Math.max(0, Number(dtSec) || 0);
     if (!this.params.autoFocusEnabled) {
@@ -935,18 +1005,98 @@ export class LensEffectV2 {
     }
 
     this._autoFocusTimeToNextEventSec -= dt;
+    this._autoFocusZoomCooldownSec = Math.max(0, this._autoFocusZoomCooldownSec - dt);
     if (this._autoFocusTimeToNextEventSec > 0) return;
 
-    this._autoFocusEventActive = true;
-    this._autoFocusEventElapsedSec = 0;
-    this._autoFocusEventDurationSec = Math.max(0.05, Number(this.params.autoFocusDefocusDurationSeconds) || 0.35);
-    this._autoFocusAmount = 0;
+    this._triggerAutoFocusEvent(1.0);
+  }
 
-    const maxShift = Math.max(0, Number(this.params.autoFocusMaxShiftPx) || 0);
-    const theta = Math.random() * (Math.PI * 2);
-    const mag = maxShift * this._randomInRange(0.45, 1.0);
-    this._autoFocusShiftPx.x = Math.cos(theta) * mag;
-    this._autoFocusShiftPx.y = Math.sin(theta) * mag;
+  _readSceneDarknessLevel() {
+    let darkness = 0;
+    try {
+      darkness = Number(canvas?.environment?.darknessLevel);
+    } catch (_) {}
+    if (!Number.isFinite(darkness)) {
+      try {
+        darkness = Number(canvas?.scene?.environment?.darknessLevel);
+      } catch (_) {}
+    }
+    return clamp01(Number.isFinite(darkness) ? darkness : 0);
+  }
+
+  _computeLightBurnDarknessGate() {
+    if (!this.params.lightBurnDarknessGateEnabled) return 1.0;
+    const darkness = this._readSceneDarknessLevel();
+    const d0 = clamp01(this.params.lightBurnDarknessStart);
+    const d1 = clamp01(this.params.lightBurnDarknessEnd);
+    const lo = Math.min(d0, d1);
+    const hi = Math.max(d0, d1);
+    const denom = Math.max(0.0001, hi - lo);
+    const x = clamp01((darkness - lo) / denom);
+    const smooth = x * x * (3 - 2 * x);
+    return 1.0 + (smooth - 1.0) * clamp01(this.params.lightBurnDarknessInfluence);
+  }
+
+  _updateCameraMotionState(dtSec) {
+    const dt = Math.max(1 / 240, Number(dtSec) || (1 / 60));
+    const frameState = getGlobalFrameState();
+    const current = {
+      cameraX: Number(frameState?.cameraX) || 0,
+      cameraY: Number(frameState?.cameraY) || 0,
+      zoom: Number(frameState?.zoom) || 1,
+      viewW: Math.max(1e-3, (Number(frameState?.viewMaxX) || 0) - (Number(frameState?.viewMinX) || 0)),
+      viewH: Math.max(1e-3, (Number(frameState?.viewMaxY) || 0) - (Number(frameState?.viewMinY) || 0)),
+      screenW: Math.max(1, Number(frameState?.screenWidth) || 1),
+      screenH: Math.max(1, Number(frameState?.screenHeight) || 1),
+    };
+
+    if (!this._lastCameraFrame) {
+      this._lastCameraFrame = current;
+      this._cameraMotionPx.x = 0;
+      this._cameraMotionPx.y = 0;
+      this._cameraMotionSmoothedPx.x = 0;
+      this._cameraMotionSmoothedPx.y = 0;
+      this._cameraMotionBlurPx.x = 0;
+      this._cameraMotionBlurPx.y = 0;
+      this._zoomMotionBlurPx = 0;
+      this._cameraZoomVelocity = 0;
+      return;
+    }
+
+    const dxWorld = current.cameraX - this._lastCameraFrame.cameraX;
+    const dyWorld = current.cameraY - this._lastCameraFrame.cameraY;
+    // Camera move right makes world appear to move left, so invert sign.
+    this._cameraMotionPx.x = -(dxWorld / current.viewW) * current.screenW;
+    this._cameraMotionPx.y = -(dyWorld / current.viewH) * current.screenH;
+
+    const tau = Math.max(0, Number(this.params.motionBlurSmoothingSeconds) || 0);
+    const alpha = (tau <= 0.0001) ? 1.0 : (1.0 - Math.exp(-dt / tau));
+    this._cameraMotionSmoothedPx.x += (this._cameraMotionPx.x - this._cameraMotionSmoothedPx.x) * alpha;
+    this._cameraMotionSmoothedPx.y += (this._cameraMotionPx.y - this._cameraMotionSmoothedPx.y) * alpha;
+
+    const motionStrength = Math.max(0, Number(this.params.motionBlurStrength) || 0);
+    const motionMax = Math.max(0, Number(this.params.motionBlurMaxPx) || 0);
+    this._cameraMotionBlurPx.x = Math.max(-motionMax, Math.min(motionMax, this._cameraMotionSmoothedPx.x * motionStrength));
+    this._cameraMotionBlurPx.y = Math.max(-motionMax, Math.min(motionMax, this._cameraMotionSmoothedPx.y * motionStrength));
+
+    const zoomDelta = current.zoom - this._lastCameraFrame.zoom;
+    this._cameraZoomVelocity = zoomDelta / dt;
+    const zoomStrength = Math.max(0, Number(this.params.motionBlurZoomStrength) || 0);
+    this._zoomMotionBlurPx = Math.max(-motionMax, Math.min(motionMax, this._cameraZoomVelocity * zoomStrength));
+
+    this._lastCameraFrame = current;
+  }
+
+  _maybeTriggerZoomRefocus() {
+    if (!this.params.autoFocusEnabled || !this.params.autoFocusZoomTriggerEnabled) return;
+    if (this._autoFocusEventActive || this._autoFocusZoomCooldownSec > 0) return;
+    const speed = Math.abs(Number(this._cameraZoomVelocity) || 0);
+    const threshold = Math.max(0.01, Number(this.params.autoFocusZoomTriggerThreshold) || 0.75);
+    if (speed < threshold) return;
+    const strengthScale = Math.max(0.1, Number(this.params.autoFocusZoomTriggerStrength) || 1.0);
+    const strength = Math.min(2.0, strengthScale * (1.0 + (speed - threshold)));
+    this._triggerAutoFocusEvent(strength);
+    this._autoFocusZoomCooldownSec = Math.max(0, Number(this.params.autoFocusZoomTriggerCooldownSeconds) || 0);
   }
 
   _disposeLightBurnTargets() {
@@ -977,6 +1127,7 @@ export class LensEffectV2 {
           uSoftness: { value: 0.12 },
           uResponse: { value: 1.15 },
           uDecayFactor: { value: 0.98 },
+          uBurnWriteGain: { value: 1.0 },
         },
         vertexShader: /* glsl */`
           varying vec2 vUv;
@@ -992,6 +1143,7 @@ export class LensEffectV2 {
           uniform float uSoftness;
           uniform float uResponse;
           uniform float uDecayFactor;
+          uniform float uBurnWriteGain;
           varying vec2 vUv;
 
           void main() {
@@ -1000,7 +1152,7 @@ export class LensEffectV2 {
             float luma = dot(src, vec3(0.2126, 0.7152, 0.0722));
             float soft = max(0.0001, uSoftness);
             float gate = smoothstep(uThreshold - soft, uThreshold + soft, luma);
-            vec3 fresh = src * gate * max(0.0, uResponse);
+            vec3 fresh = src * gate * max(0.0, uResponse) * clamp(uBurnWriteGain, 0.0, 1.0);
             gl_FragColor = vec4(max(prev, fresh), 1.0);
           }
         `,
@@ -1034,7 +1186,7 @@ export class LensEffectV2 {
     return true;
   }
 
-  _updateLightBurnMap(renderer, inputRT, dtSec) {
+  _updateLightBurnMap(renderer, inputRT, dtSec, darknessGate = 1.0) {
     if (!renderer || !inputRT || !this.params.lightBurnEnabled) return;
     if (!this._ensureLightBurnResources(inputRT.width, inputRT.height)) return;
     if (!this._lightBurnMaterial || !this._lightBurnReadRT || !this._lightBurnWriteRT) return;
@@ -1050,6 +1202,7 @@ export class LensEffectV2 {
     u.uSoftness.value = Math.max(0.001, Number(this.params.lightBurnThresholdSoftness) || 0.12);
     u.uResponse.value = Math.max(0, Number(this.params.lightBurnResponse) || 1.15);
     u.uDecayFactor.value = clamp01(decay);
+    u.uBurnWriteGain.value = clamp01(darknessGate);
 
     const prevTarget = renderer.getRenderTarget();
     const prevAutoClear = renderer.autoClear;
@@ -1335,8 +1488,11 @@ export class LensEffectV2 {
     }
 
     this._advanceSlotCrossfades(this._lastUpdateDeltaSec);
+    this._updateCameraMotionState(this._lastUpdateDeltaSec);
+    this._maybeTriggerZoomRefocus();
     if (this._autoFocusTimeToNextEventSec <= 0) this._scheduleNextAutoFocusEvent();
     this._updateAutoFocusState(this._lastUpdateDeltaSec);
+    this._lightBurnDarknessGate = this._computeLightBurnDarknessGate();
 
     this._configureOverlaySlotsForCurrentFrame(timeInfo);
 
@@ -1371,8 +1527,14 @@ export class LensEffectV2 {
       Number(this._autoFocusShiftPx?.x) || 0,
       Number(this._autoFocusShiftPx?.y) || 0
     );
+    u.uMotionBlurEnabled.value = this.params.motionBlurEnabled ? 1.0 : 0.0;
+    u.uMotionBlurCameraPx.value.set(
+      Number(this._cameraMotionBlurPx?.x) || 0,
+      Number(this._cameraMotionBlurPx?.y) || 0
+    );
+    u.uMotionBlurZoomPx.value = Number(this._zoomMotionBlurPx) || 0;
     u.uLightBurnEnabled.value    = this.params.lightBurnEnabled ? 1.0 : 0.0;
-    u.uLightBurnIntensity.value  = Math.max(0, Number(this.params.lightBurnIntensity) || 0);
+    u.uLightBurnIntensity.value  = Math.max(0, Number(this.params.lightBurnIntensity) || 0) * clamp01(this._lightBurnDarknessGate);
     u.uLightBurnBlurPx.value     = Math.max(0, Number(this.params.lightBurnBlurPx) || 0);
 
     for (let i = 0; i < OVERLAY_SLOT_COUNT; i++) {
@@ -1409,7 +1571,7 @@ export class LensEffectV2 {
     this._updateSmoothedSceneLuma(renderer, inputRT);
 
     if (this.params.lightBurnEnabled) {
-      this._updateLightBurnMap(renderer, inputRT, this._lastUpdateDeltaSec);
+      this._updateLightBurnMap(renderer, inputRT, this._lastUpdateDeltaSec, this._lightBurnDarknessGate);
     }
 
     const w = Math.max(1, Number(inputRT.width)  || 1);

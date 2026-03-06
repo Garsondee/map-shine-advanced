@@ -29,6 +29,9 @@ export function getFragmentShader() {
     uniform float uAutoFocusAmount;
     uniform float uAutoFocusBlurPx;
     uniform vec2  uAutoFocusShiftPx;
+    uniform float uMotionBlurEnabled;
+    uniform vec2  uMotionBlurCameraPx;
+    uniform float uMotionBlurZoomPx;
     uniform sampler2D tLightBurnMap;
     uniform float uLightBurnEnabled;
     uniform float uLightBurnIntensity;
@@ -250,6 +253,19 @@ export function getFragmentShader() {
         blurAccum += sampleSceneWithCA(focusUV + vec2( blurStep.x,  blurStep.y), texelSize) * 0.10;
         blurAccum += sampleSceneWithCA(focusUV + vec2(-blurStep.x, -blurStep.y), texelSize) * 0.10;
         sceneColor = mix(sceneColor, blurAccum, clamp(uAutoFocusAmount, 0.0, 1.0));
+      }
+
+      // Optional cheap motion blur from camera pan + zoom speed (2-tap directional).
+      if (uMotionBlurEnabled > 0.5) {
+        vec2 radialDir = normalize((vUv - vec2(0.5)) + vec2(1e-5));
+        vec2 motionUv = (uMotionBlurCameraPx + radialDir * uMotionBlurZoomPx) * texelSize;
+        float mLen = length(motionUv);
+        if (mLen > 1e-5) {
+          vec3 mA = sampleSceneWithCA(focusUV + motionUv, texelSize);
+          vec3 mB = sampleSceneWithCA(focusUV - motionUv, texelSize);
+          float blend = clamp(mLen * 2.2, 0.0, 0.65);
+          sceneColor = mix(sceneColor, (mA + mB) * 0.5, blend);
+        }
       }
 
       // 4. Add overlay on top of distorted scene

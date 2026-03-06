@@ -192,8 +192,8 @@ export class TokenManager {
     if (!this._ambientTint) this._ambientTint = new THREE.Color(1, 1, 1);
 
     try {
-      const le = window.MapShine?.lightingEffect;
-      if (le && le.enabled) {
+      const { useV2, lightingEffect } = this._getTokenLightingContext();
+      if (useV2 || (lightingEffect && lightingEffect.enabled)) {
         sprite.material.color.setRGB(1, 1, 1);
         return;
       }
@@ -209,7 +209,7 @@ export class TokenManager {
 
       if (scene?.environment?.darknessLevel !== undefined) {
         let darkness = scene.environment.darknessLevel;
-        const le = window.MapShine?.lightingEffect;
+        const { lightingEffect: le } = this._getTokenLightingContext();
         if (le && typeof le.getEffectiveDarkness === 'function') {
           darkness = le.getEffectiveDarkness();
         }
@@ -305,11 +305,12 @@ export class TokenManager {
 
     // Update window light texture
     try {
-      const wle = window.MapShine?.windowLightEffect;
+      const { useV2, windowLightEffect: wle } = this._getTokenLightingContext();
       const tex = (wle && typeof wle.getLightTexture === 'function') ? wle.getLightTexture() : (wle?.lightTarget?.texture ?? null);
       if (shader.uniforms.tWindowLight) {
-        shader.uniforms.tWindowLight.value = tex || null;
-        shader.uniforms.uHasWindowLight.value = tex ? 1.0 : 0.0;
+        const enableWindowLight = !useV2 && !!tex;
+        shader.uniforms.tWindowLight.value = enableWindowLight ? tex : null;
+        shader.uniforms.uHasWindowLight.value = enableWindowLight ? 1.0 : 0.0;
         if (shader.uniforms.uWindowLightScreenSize?.value?.set) {
           const w = wle?.lightTarget?.width ?? window.innerWidth ?? 1;
           const h = wle?.lightTarget?.height ?? window.innerHeight ?? 1;
@@ -672,6 +673,34 @@ vec3 ms_applySceneLighting(vec3 color) {
   }
 
   /**
+   * Resolve lighting context for token shading/tint decisions.
+   *
+   * In V2, tokens are rendered inside the bus scene and already participate in
+   * the main post lighting pipeline. Legacy per-token lighting sampling/tinting
+   * should be disabled to avoid double-application.
+   *
+   * @returns {{ useV2: boolean, lightingEffect: any, windowLightEffect: any }}
+   * @private
+   */
+  _getTokenLightingContext() {
+    try {
+      const floorCompositor = window.MapShine?.effectComposer?._floorCompositorV2 ?? null;
+      const v2Lighting = floorCompositor?._lightingEffect ?? null;
+      if (v2Lighting) {
+        // In V2, window light is already folded into the lighting post pass.
+        return { useV2: true, lightingEffect: v2Lighting, windowLightEffect: null };
+      }
+    } catch (_) {
+    }
+
+    return {
+      useV2: false,
+      lightingEffect: window.MapShine?.lightingEffect ?? null,
+      windowLightEffect: window.MapShine?.windowLightEffect ?? null,
+    };
+  }
+
+  /**
    * Update tokens (called every frame by EffectComposer)
    * @param {TimeInfo} timeInfo 
    */
@@ -709,19 +738,18 @@ vec3 ms_applySceneLighting(vec3 color) {
 
     // Update window light texture + P4-10: lighting target + outdoors mask for all tokens.
     try {
-      const wle = window.MapShine?.windowLightEffect;
+      const { useV2, lightingEffect: le, windowLightEffect: wle } = this._getTokenLightingContext();
       const wlTex = (wle && typeof wle.getLightTexture === 'function') ? wle.getLightTexture() : (wle?.lightTarget?.texture ?? null);
-      const hasWindowLight = wlTex ? 1.0 : 0.0;
+      const hasWindowLight = (!useV2 && wlTex) ? 1.0 : 0.0;
       const wlW = wle?.lightTarget?.width ?? window.innerWidth ?? 1;
       const wlH = wle?.lightTarget?.height ?? window.innerHeight ?? 1;
 
       // P4-10: Resolve LightingEffect composite target + outdoors mask once per frame.
-      const le = window.MapShine?.lightingEffect;
-      const lightTex = le?.lightTarget?.texture ?? null;
+      const lightTex = useV2 ? null : (le?.lightTarget?.texture ?? null);
       const hasLightTex = lightTex ? 1.0 : 0.0;
       const lightW = le?.lightTarget?.width ?? window.innerWidth ?? 1;
       const lightH = le?.lightTarget?.height ?? window.innerHeight ?? 1;
-      const outdoorsTex = le?.outdoorsTarget?.texture ?? null;
+      const outdoorsTex = useV2 ? null : (le?.outdoorsTarget?.texture ?? null);
       const hasOutdoors = outdoorsTex ? 1.0 : 0.0;
 
       for (const data of this.tokenSprites.values()) {
@@ -791,8 +819,8 @@ vec3 ms_applySceneLighting(vec3 color) {
       // If LightingEffect is active, token lighting is handled by the lighting composite.
       // Keep token base colors neutral so lights can punch through the global darkness.
       try {
-        const le = window.MapShine?.lightingEffect;
-        if (le && le.enabled) {
+        const { useV2, lightingEffect: le } = this._getTokenLightingContext();
+        if (useV2 || (le && le.enabled)) {
           const globalTint = this._globalTint;
           globalTint.setRGB(1, 1, 1);
 
@@ -824,7 +852,7 @@ vec3 ms_applySceneLighting(vec3 color) {
 
         if (scene?.environment?.darknessLevel !== undefined) {
           let darkness = scene.environment.darknessLevel;
-          const le = window.MapShine?.lightingEffect;
+          const { lightingEffect: le } = this._getTokenLightingContext();
           if (le && typeof le.getEffectiveDarkness === 'function') {
             darkness = le.getEffectiveDarkness();
           }

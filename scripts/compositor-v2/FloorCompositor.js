@@ -69,6 +69,7 @@ import { DazzleOverlayEffectV2 } from './effects/DazzleOverlayEffectV2.js';
 import { VisionModeEffectV2 } from './effects/VisionModeEffectV2.js';
 import { InvertEffectV2 } from './effects/InvertEffectV2.js';
 import { SepiaEffectV2 } from './effects/SepiaEffectV2.js';
+import { LensEffectV2 } from './effects/LensEffectV2.js';
 import { LightningEffectV2 } from './effects/LightningEffectV2.js';
 import { AtmosphericFogEffectV2 } from './effects/AtmosphericFogEffectV2.js';
 import { FogOfWarEffectV2 } from './effects/FogOfWarEffectV2.js';
@@ -372,6 +373,13 @@ export class FloorCompositor {
      */
     this._sepiaEffect = new SepiaEffectV2();
 
+    /**
+     * V2 Lens Effect: stylized lens distortion/aberration/grime post pass.
+     * Post-processing pass. Disabled by default.
+     * @type {LensEffectV2}
+     */
+    this._lensEffect = new LensEffectV2();
+
     /** @type {boolean} Whether the render bus has been populated this session. */
     this._busPopulated = false;
 
@@ -430,6 +438,43 @@ export class FloorCompositor {
     this._fogOverlayCamera = null;
 
     log.debug('FloorCompositor created');
+  }
+
+  /**
+   * Composite fog overlay into the post RT chain.
+   * @param {THREE.WebGLRenderTarget} inputRT
+   * @param {THREE.WebGLRenderTarget} outputRT
+   * @returns {boolean} True when fog was composited into outputRT.
+   * @private
+   */
+  _compositeFogOverlayToRT(inputRT, outputRT) {
+    const fog = this._fogEffect;
+    if (!fog?.enabled || fog?.params?.enabled === false) return false;
+    const scene = this._fogOverlayScene;
+    const camera = this.camera;
+    const renderer = this.renderer;
+    if (!scene || !camera || !renderer || !this._blitMaterial || !inputRT || !outputRT) return false;
+
+    const prevTarget = renderer.getRenderTarget();
+    const prevAutoClear = renderer.autoClear;
+    const prevLayerMask = camera.layers.mask;
+    try {
+      // Start from the latest composited scene color in outputRT.
+      this._blitMaterial.uniforms.tDiffuse.value = inputRT.texture;
+      renderer.setRenderTarget(outputRT);
+      renderer.autoClear = true;
+      renderer.render(this._blitScene, this._blitCamera);
+
+      // Alpha-over fog plane onto the same RT.
+      renderer.autoClear = false;
+      camera.layers.enable(31);
+      renderer.render(scene, camera);
+      return true;
+    } finally {
+      camera.layers.mask = prevLayerMask;
+      renderer.autoClear = prevAutoClear;
+      renderer.setRenderTarget(prevTarget);
+    }
   }
 
   _wireMapPointConsumers() {
@@ -691,6 +736,9 @@ export class FloorCompositor {
     try { this._sepiaEffect?.initialize?.(); } catch (err) {
       log.warn('FloorCompositor: SepiaEffectV2 initialize failed:', err);
     }
+    try { this._lensEffect?.initialize?.(); } catch (err) {
+      log.warn('FloorCompositor: LensEffectV2 initialize failed:', err);
+    }
 
     // Listen for floor/level changes so we can update tile mesh visibility.
     this._levelHookId = Hooks.on('mapShineLevelContextChanged', (payload) => {
@@ -734,6 +782,8 @@ export class FloorCompositor {
       if (candles?.enabled && ((candles?._sourceFlameCount ?? 0) > 0 || (candles?._glowBuckets?.size ?? 0) > 0)) return true;
       const playerLight = this._playerLightEffect;
       if (playerLight?.enabled && playerLight?.params?.enabled) return true;
+      const lens = this._lensEffect;
+      if (lens?.enabled && ((Number(lens?.params?.grainAmount) || 0) > 0) && ((Number(lens?.params?.grainSpeed) || 0) > 0)) return true;
       return false;
     } catch (_) {
       // Fail safe: if anything about the probe throws, treat as active.
@@ -999,6 +1049,7 @@ export class FloorCompositor {
       try { this._visionModeEffect?.update?.(timeInfo); } catch (_) {}
       try { this._invertEffect?.update?.(timeInfo); } catch (_) {}
       try { this._sepiaEffect?.update?.(timeInfo); } catch (_) {}
+      try { this._lensEffect?.update?.(timeInfo); } catch (_) {}
       // Overhead shadows: update sun direction + uniform params from controls.
       try { this._overheadShadowEffect?.update?.(timeInfo); } catch (err) {
         log.warn('OverheadShadowsEffectV2 update threw, skipping overhead shadow update:', err);
@@ -1268,15 +1319,32 @@ export class FloorCompositor {
       }
     }
 
+    // Composite fog-of-war into the RT chain so downstream post effects (lens)
+    // are guaranteed to render above fog.
+    if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: fogOverlay.compositeToRT'); } catch (_) {} }
+    {
+      const fogOutput = (currentInput === this._postA) ? this._postB : this._postA;
+      if (this._compositeFogOverlayToRT(currentInput, fogOutput)) {
+        currentInput = fogOutput;
+      }
+    }
+    if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: fogOverlay.compositeToRT DONE'); } catch (_) {} }
+
+    // Stylized lens pass: distortion/chromatic/vignette/grime overlays.
+    // This now runs after fog composition so lens artifacts remain on top of FOW.
+    if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: lens.render'); } catch (_) {} }
+    if (this._lensEffect?.enabled && this._lensEffect?.params?.enabled) {
+      const lensOutput = (currentInput === this._postA) ? this._postB : this._postA;
+      if (this._lensEffect.render(this.renderer, this.camera, currentInput, lensOutput)) {
+        currentInput = lensOutput;
+      }
+    }
+    if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: lens.render DONE'); } catch (_) {} }
+
     // ── Step 3: Blit final result to screen ──────────────────────────────
     if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: blitToScreen'); } catch (_) {} }
     this._blitToScreen(currentInput);
     if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: blitToScreen DONE'); } catch (_) {} }
-
-    // Render fog of war as a final overlay above the composited frame.
-    if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: fogOverlay.render'); } catch (_) {} }
-    this._renderFogOverlay();
-    if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: fogOverlay.render DONE'); } catch (_) {} }
 
     if (_dbgStages) {
       this._debugFirstFrameStagesLogged = true;
@@ -1671,6 +1739,7 @@ export class FloorCompositor {
     try { this._visionModeEffect?.onResize?.(w, h); } catch (_) {}
     try { this._invertEffect?.onResize?.(w, h); } catch (_) {}
     try { this._sepiaEffect?.onResize?.(w, h); } catch (_) {}
+    try { this._lensEffect?.onResize?.(w, h); } catch (_) {}
     log.debug(`FloorCompositor.onResize: RTs resized to ${w}x${h}`);
   }
 
@@ -1718,6 +1787,7 @@ export class FloorCompositor {
     try { this._visionModeEffect?.dispose?.(); } catch (_) {}
     try { this._invertEffect?.dispose?.(); } catch (_) {}
     try { this._sepiaEffect?.dispose?.(); } catch (_) {}
+    try { this._lensEffect?.dispose?.(); } catch (_) {}
     try { this._fireEffect.dispose(); } catch (_) {}
     try { this._specularEffect.dispose(); } catch (_) {}
     try { this._windowLightEffect.dispose(); } catch (_) {}

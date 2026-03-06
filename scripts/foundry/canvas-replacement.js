@@ -80,6 +80,7 @@ import { DazzleOverlayEffectV2 } from '../compositor-v2/effects/DazzleOverlayEff
 import { VisionModeEffectV2 } from '../compositor-v2/effects/VisionModeEffectV2.js';
 import { InvertEffectV2 } from '../compositor-v2/effects/InvertEffectV2.js';
 import { SepiaEffectV2 } from '../compositor-v2/effects/SepiaEffectV2.js';
+import { LensEffectV2 } from '../compositor-v2/effects/LensEffectV2.js';
 import { TemplateManager } from '../scene/template-manager.js';
 import { LightIconManager } from '../scene/light-icon-manager.js';
 import { EnhancedLightIconManager } from '../scene/enhanced-light-icon-manager.js';
@@ -586,29 +587,18 @@ export function applyTokenRenderingMode() {
 
 function _updateFoundrySelectRectSuppression(forceValue = null) {
   // Suppress Foundry selection rectangle only when Three owns interaction.
-  // If PIXI owns token-native select/target/ruler, Foundry's marquee must remain active.
+  // Token selection/marquee in gameplay is Three-authoritative.
+  // Foundry marquee should only be active when PIXI truly owns input (e.g. edit tools).
   let suppress = safeCall(() => {
     const im = window.MapShine?.interactionManager;
     const enabled = im?.selectionBoxParams?.enabled !== false;
-    const activeControl = String(ui?.controls?.control?.name || ui?.controls?.activeControl || '').toLowerCase();
-    const activeTool = String(ui?.controls?.tool?.name || ui?.controls?.activeTool || '').toLowerCase();
-    const activeLayerObj = canvas?.activeLayer;
-    const activeLayerName = String(activeLayerObj?.options?.name || activeLayerObj?.name || '').toLowerCase();
-    const activeLayerCtor = String(activeLayerObj?.constructor?.name || '').toLowerCase();
-    const controlMetadataReady = !!(activeControl || activeLayerName || activeLayerCtor);
-    const tokenNativeSelectContext =
-      activeControl === 'tokens' &&
-      (activeTool === '' || activeTool === 'select' || activeTool === 'target' || activeTool === 'ruler');
 
     const inputRouter =
       window.MapShine?.inputRouter ||
       window.mapShine?.inputRouter ||
       controlsIntegration?.inputRouter ||
       null;
-    const pixiOwnsInput =
-      tokenNativeSelectContext ||
-      !controlMetadataReady ||
-      !!inputRouter?.shouldPixiReceiveInput?.();
+    const pixiOwnsInput = !!inputRouter?.shouldPixiReceiveInput?.();
 
     return !isMapMakerMode && enabled && !pixiOwnsInput;
   }, 'selectRect.checkSuppression', Severity.COSMETIC, { fallback: false });
@@ -4854,6 +4844,11 @@ async function createThreeCanvas(scene) {
             SepiaEffectV2.getControlSchema(), _makeV2Callback('_sepiaEffect'), 'global');
         }, 'v2.registerSepiaUI', Severity.COSMETIC);
 
+        safeCall(() => {
+          uiManager.registerEffect('lens', 'Lens',
+            LensEffectV2.getControlSchema(), _makeV2Callback('_lensEffect'), 'global');
+        }, 'v2.registerLensUI', Severity.COSMETIC);
+
         // Ash controls: in V2 mode WeatherController isn't constructed as an updatable, but
         // we still expose full ash tuning controls so users can keep it disabled and
         // adjust tuning consistently across V1/V2. The enabled toggle is implemented as a
@@ -5069,7 +5064,7 @@ async function createThreeCanvas(scene) {
           );
         }, 'v2.registerBuildingShadowsUI', Severity.COSMETIC);
 
-        log.info('V2: registered effect controls (Lighting, Specular, SkyColor, WindowLight, Fire, WaterSplashes, SmellyFlies, Lightning, CandleFlames, Bloom, ColorCorrection, FilmGrain, Sharpen, Fog, Water, Cloud, OverheadShadows, BuildingShadows)');
+        log.info('V2: registered effect controls (Lighting, Specular, SkyColor, WindowLight, Fire, WaterSplashes, SmellyFlies, Lightning, CandleFlames, Bloom, ColorCorrection, FilmGrain, Sharpen, Fog, Water, Cloud, OverheadShadows, BuildingShadows, Lens)');
 
         log.info('V2: UI initialized');
     }, 'initializeUI', Severity.DEGRADED);
@@ -5939,22 +5934,14 @@ function _enforceGameplayPixiSuppression() {
   safeCall(() => {
     if (!canvas?.ready) return;
     if (isMapMakerMode) return;
-    const activeLayerObj = canvas?.activeLayer;
-    const activeLayerName = String(activeLayerObj?.options?.name || activeLayerObj?.name || '').toLowerCase();
-    const activeLayerCtor = String(activeLayerObj?.constructor?.name || '').toLowerCase();
     const activeControl = String(ui?.controls?.control?.name || ui?.controls?.activeControl || '').toLowerCase();
     const activeTool = String(ui?.controls?.tool?.name || ui?.controls?.activeTool || '').toLowerCase();
-    const controlMetadataReady = !!(activeLayerName || activeLayerCtor || activeControl);
     const inputRouter =
       window.MapShine?.inputRouter ||
       window.mapShine?.inputRouter ||
       controlsIntegration?.inputRouter ||
       null;
-    const tokenEditContext =
-      activeControl === 'tokens' &&
-      (activeTool === '' || activeTool === 'select' || activeTool === 'target' || activeTool === 'ruler');
     const pixiEditContext =
-      tokenEditContext ||
       activeControl === 'walls' ||
       activeControl === 'lighting' ||
       activeTool === 'walls' ||
@@ -5967,11 +5954,9 @@ function _enforceGameplayPixiSuppression() {
       activeTool === 'light';
     const shouldPixiReceiveInput =
       pixiEditContext ||
-      !controlMetadataReady ||
       !!inputRouter?.shouldPixiReceiveInput?.();
     const needsEditorOverlay =
-      shouldPixiReceiveInput ||
-      !!window.MapShine?.__forcePixiEditorOverlay ||
+      pixiEditContext ||
       !!canvas?.walls?.active ||
       !!canvas?.lighting?.active ||
       activeControl === 'walls' ||
@@ -6006,6 +5991,35 @@ function _enforceGameplayPixiSuppression() {
 
       if (threeCanvas) {
         threeCanvas.style.pointerEvents = shouldPixiReceiveInput ? 'none' : 'auto';
+      }
+      return;
+    }
+
+    // Some Foundry tools may still require PIXI hit-testing in gameplay mode.
+    // Keep PIXI/board interactive but fully transparent so they cannot occlude
+    // the Three-rendered scene.
+    if (shouldPixiReceiveInput) {
+      const pixiCanvas = canvas.app?.view;
+      const threeCanvas = document.getElementById('map-shine-canvas');
+      if (pixiCanvas) {
+        pixiCanvas.style.display = '';
+        pixiCanvas.style.visibility = 'visible';
+        pixiCanvas.style.opacity = '0';
+        pixiCanvas.style.zIndex = '10';
+        pixiCanvas.style.pointerEvents = 'auto';
+      }
+
+      const board = document.getElementById('board');
+      if (board && board.tagName === 'CANVAS') {
+        board.style.display = '';
+        board.style.visibility = 'visible';
+        board.style.opacity = '0';
+        board.style.zIndex = '10';
+        board.style.pointerEvents = 'auto';
+      }
+
+      if (threeCanvas) {
+        threeCanvas.style.pointerEvents = 'none';
       }
       return;
     }
@@ -6485,9 +6499,6 @@ function updateInputMode() {
     
     // Use PIXI for Foundry-native edit workflows.
     const editLayers = [
-      'TokenLayer',
-      'TokensLayer',
-      'tokens',
       'WallsLayer',
       'WallLayer',
       'walls',
@@ -6520,10 +6531,7 @@ function updateInputMode() {
       };
       const isLightingFinal = !!canvas?.lighting?.active || isFinalLayer('lightinglayer') || isFinalLayer('lighting');
       const isWallsFinal = !!canvas?.walls?.active || isFinalLayer('wallslayer') || isFinalLayer('walllayer') || isFinalLayer('walls');
-      const isTokensFinal = isFinalLayer('tokenlayer') || isFinalLayer('tokenslayer') || isFinalLayer('tokens');
-      const isTokenEditTool = !finalTool || finalTool === 'select' || finalTool === 'target' || finalTool === 'ruler';
-      const isTokenEditFinal = isTokensFinal && isTokenEditTool;
-      const isEditMode = editLayers.some((l) => isFinalLayer(l)) || isLightingFinal || isWallsFinal || isTokenEditFinal;
+      const isEditMode = editLayers.some((l) => isFinalLayer(l)) || isLightingFinal || isWallsFinal;
       const controlMetadataReady = !!(finalLayerName || finalLayerCtor || finalControl);
 
       // Drive Three.js light icon visibility from a single source of truth.
@@ -6547,9 +6555,7 @@ function updateInputMode() {
         wallManager.setVisibility(showThreeWalls);
       }
 
-      // On initial scene load Foundry may not have finalized active layer/control yet.
-      // In that unresolved state, prefer PIXI input so token select/marquee are not blocked.
-      if (isEditMode || !controlMetadataReady) {
+      if (isLightingFinal || isWallsFinal) {
         pixiCanvas.style.pointerEvents = 'auto';
         const board = document.getElementById('board');
         if (board && board.tagName === 'CANVAS') {
@@ -6559,7 +6565,7 @@ function updateInputMode() {
           board.style.pointerEvents = 'auto';
         }
         if (threeCanvasEl) threeCanvasEl.style.pointerEvents = 'none';
-        log.debug(`Input Mode: PIXI (${controlMetadataReady ? 'Edit' : 'StartupUnresolved'}: ${finalLayerCtor || finalLayerName || finalControl || 'unknown'})`);
+        log.debug(`Input Mode: PIXI (Edit: ${finalLayerCtor || finalLayerName || finalControl || 'unknown'})`);
       } else {
         pixiCanvas.style.pointerEvents = 'none'; // Pass through to Three.js
         const board = document.getElementById('board');

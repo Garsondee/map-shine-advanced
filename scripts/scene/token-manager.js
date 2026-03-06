@@ -910,6 +910,16 @@ vec3 ms_applySceneLighting(vec3 color) {
     this._hookIds.push(['createToken', Hooks.on('createToken', (tokenDoc, options, userId) => {
       log.debug(`Token created: ${tokenDoc.id}`);
       this.createTokenSprite(tokenDoc);
+
+      // Token placeable can be instantiated shortly after createToken fires.
+      // Suppress native PIXI token text overlays once the placeable exists.
+      setTimeout(() => {
+        try {
+          const token = canvas?.tokens?.get?.(tokenDoc.id);
+          if (token) this._suppressNativeTokenTextOverlays(token);
+        } catch (_) {
+        }
+      }, 0);
     })]);
 
     // Update existing token
@@ -927,6 +937,7 @@ vec3 ms_applySceneLighting(vec3 color) {
     // Refresh token (rendering changes)
     this._hookIds.push(['refreshToken', Hooks.on('refreshToken', (token) => {
       log.debug(`Token refreshed: ${token.id}`);
+      this._suppressNativeTokenTextOverlays(token);
       // Refresh typically means visual state changed (visibility, effects, etc.)
       this.refreshTokenSprite(token.document);
     })]);
@@ -943,6 +954,7 @@ vec3 ms_applySceneLighting(vec3 color) {
     // Keep Three selection visuals in sync when control state changes from
     // outside InteractionManager (core keybinds, macros, other modules).
     this._hookIds.push(['controlToken', Hooks.on('controlToken', (token, controlled) => {
+      this._suppressNativeTokenTextOverlays(token);
       const tokenId = token?.id ?? token?.document?.id ?? null;
       const spriteData = tokenId ? this.tokenSprites.get(tokenId) : null;
       if (!spriteData) return;
@@ -953,6 +965,7 @@ vec3 ms_applySceneLighting(vec3 color) {
 
     // Keep Three hover visuals in sync for native PIXI hover workflows.
     this._hookIds.push(['hoverToken', Hooks.on('hoverToken', (token, hovered) => {
+      this._suppressNativeTokenTextOverlays(token);
       const tokenId = token?.id ?? token?.document?.id ?? null;
       const spriteData = tokenId ? this.tokenSprites.get(tokenId) : null;
       if (!spriteData) return;
@@ -1017,6 +1030,7 @@ vec3 ms_applySceneLighting(vec3 color) {
     let completed = 0;
     for (const token of tokens) {
       try {
+        this._suppressNativeTokenTextOverlays(token);
         this.createTokenSprite(token.document);
       } catch (e) {
         log.error('Failed to create token sprite during syncAllTokensAsync', e);
@@ -2024,6 +2038,24 @@ vec3 ms_applySceneLighting(vec3 color) {
     }
 
     return true;
+  }
+
+  _suppressNativeTokenTextOverlays(token) {
+    if (!token) return;
+    try {
+      if (token.nameplate) {
+        token.nameplate.alpha = 0;
+        token.nameplate.visible = false;
+        token.nameplate.renderable = false;
+      }
+      if (token.tooltip) {
+        token.tooltip.alpha = 0;
+        token.tooltip.visible = false;
+        token.tooltip.renderable = false;
+      }
+    } catch (_) {
+      // Best effort: token display object structure can vary by Foundry/system version.
+    }
   }
 
   _shouldShowTokenBorder(spriteData) {

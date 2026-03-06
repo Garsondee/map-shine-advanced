@@ -12,11 +12,12 @@ import { SelectionBoxEffect } from '../effects/SelectionBoxEffect.js';
 import { MapPointDrawHandler } from './map-point-interaction.js';
 import { LightInteractionHandler } from './light-interaction.js';
 import { SelectionBoxHandler } from './selection-box-interaction.js';
+import { TokenSelectionController } from './token-selection-controller.js';
 import { safeCall, safeDispose, Severity } from '../core/safe-call.js';
 import { readWallHeightFlags, readTileLevelsFlags, tileHasLevelsRange, isLevelsEnabledForScene } from '../foundry/levels-scene-flags.js';
 import { applyAmbientLightLevelDefaults, applyWallLevelDefaults } from '../foundry/levels-create-defaults.js';
 import { getPerspectiveElevation } from '../foundry/elevation-context.js';
-import { isTokenOnActiveLevel, isTokenDragSelectable, getAutoSwitchElevation, switchToLevelForElevation } from './level-interaction-service.js';
+import { isTokenOnActiveLevel, getAutoSwitchElevation, switchToLevelForElevation } from './level-interaction-service.js';
 
 const log = createLogger('InteractionManager');
 
@@ -71,6 +72,7 @@ export class InteractionManager {
     
     /** @type {Set<string>} Set of selected object IDs (e.g. "Token.abc", "Tile.xyz") */
     this.selection = new Set();
+    this.tokenSelectionController = new TokenSelectionController(this);
 
     // Copy/paste clipboard for lights.
     // Stored as a plain serializable object so we can safely deep-clone and mutate.
@@ -2248,6 +2250,19 @@ export class InteractionManager {
       || sceneControl === 'walls';
   }
 
+  _isTokenSelectionContextActive() {
+    const { optionsName, name, ctor, sceneControl } = this._getActiveLayerMeta();
+    const activeTool = String(ui?.controls?.tool?.name ?? ui?.controls?.activeTool ?? game?.activeTool ?? '').toLowerCase();
+    const toolAllowsTokenSelect = !activeTool || activeTool === 'select' || activeTool === 'target' || activeTool === 'ruler';
+    const isTokenControl = sceneControl === 'tokens';
+    const isTokenLayer =
+      optionsName === 'tokens' ||
+      name === 'tokens' ||
+      ctor === 'tokenlayer' ||
+      ctor === 'tokenslayer';
+    return toolAllowsTokenSelect && (isTokenControl || isTokenLayer);
+  }
+
   _isTileWithinActiveBand(tileDoc) {
     if (!isLevelsEnabledForScene(canvas?.scene)) return true;
 
@@ -2561,6 +2576,7 @@ export class InteractionManager {
         const isTokenNativeSelectContext =
           activeControl === 'tokens' &&
           (!normalizedTool || normalizedTool === 'select' || normalizedTool === 'target' || normalizedTool === 'ruler');
+        const threeOwnsTokenSelection = this._isTokenSelectionContextActive();
         const clickToMoveButton = this._getClickToMoveButton();
         const canBypassForClickMove =
           event.button === clickToMoveButton &&
@@ -2579,7 +2595,7 @@ export class InteractionManager {
           normalizedTool === 'window' ||
           normalizedTool === 'light';
 
-        if (isTokenNativeSelectContext && !canBypassForClickMove) {
+        if (isTokenNativeSelectContext && !threeOwnsTokenSelection && !canBypassForClickMove) {
           log.debug('onPointerDown BLOCKED: token native select context is PIXI-owned', {
             activeControl,
             activeTool: normalizedTool,
@@ -2588,7 +2604,7 @@ export class InteractionManager {
           return;
         }
         
-        if (inputRouter && !inputRouter.shouldThreeReceiveInput() && !canBypassForClickMove) {
+        if (inputRouter && !inputRouter.shouldThreeReceiveInput() && !threeOwnsTokenSelection && !canBypassForClickMove) {
           log.debug('onPointerDown BLOCKED by InputRouter (PIXI mode active)', {
             currentMode: inputRouter.currentMode,
             isTokenLayerName,
@@ -2599,7 +2615,7 @@ export class InteractionManager {
           return;
         }
 
-        if (!inputRouter && pixiOwnedContextWithoutRouter && !canBypassForClickMove) {
+        if (!inputRouter && pixiOwnedContextWithoutRouter && !threeOwnsTokenSelection && !canBypassForClickMove) {
           log.debug('onPointerDown BLOCKED: no InputRouter and active context is PIXI-owned', {
             activeControl,
             activeTool: normalizedTool,
@@ -3191,40 +3207,16 @@ export class InteractionManager {
           }
 
           // Handle Selection (Three.js selection state)
-          const isSelected = this.selection.has(tokenDoc.id);
+          const isSelected = this.tokenSelectionController.getSelectedTokenIds().has(String(tokenDoc.id));
+          const additive = !!event.shiftKey;
+          const toggle = !!(event.ctrlKey || event.metaKey);
           
-          if (event.shiftKey) {
-            // Toggle or Add
-            if (isSelected) {
-              // If shift-clicking selected, deselect it (unless we start dragging?)
-              // For now, let's just ensure it stays selected or maybe allow deselect on UP if no drag?
-              // Simpler: Shift always adds/keeps.
-            } else {
-              this.selectObject(sprite);
-            }
-          } else {
-            if (!isSelected) {
-              // Clicked unselected -> Clear others, select this
-              this.clearSelection();
-              this.selectObject(sprite);
-            }
-            // If clicked selected -> Keep group selection
+          if (toggle || !isSelected || !additive) {
+            this.tokenSelectionController.selectSingle(tokenDoc.id, { additive, toggle });
           }
 
           // Start Drag
           this.startDrag(sprite, hit.point);
-
-          // Also drive Foundry's native token control so cursor/selection/HUD
-          // behavior matches core. This uses the underlying PIXI token object
-          // but is triggered from our Three.js hit test.
-          safeCall(() => {
-            const fvttToken = canvas.tokens?.get(tokenDoc.id);
-            if (fvttToken) {
-              const releaseOthers = !event.shiftKey;
-              // Do not pan camera here; CameraSync keeps Three.js aligned.
-              fvttToken.control({ releaseOthers, pan: false });
-            }
-          }, 'pointerDown.syncFoundryToken', Severity.DEGRADED);
 
           // Auto-switch floor when clicking a visible token on a different level.
           // If you can see a token (even on a floor below), clicking it selects it
@@ -3259,7 +3251,7 @@ export class InteractionManager {
 
           // Clicked empty space - deselect all unless shift held
           if (!event.shiftKey) {
-            this.clearSelection();
+            this.tokenSelectionController.clearTokenSelection();
           }
           
           // Close any open Token HUD when clicking empty space
@@ -4959,31 +4951,13 @@ export class InteractionManager {
           const minY = Math.min(start.y, current.y);
           const maxY = Math.max(start.y, current.y);
           
-          // Find tokens within bounds
-          // Foundry selects if CENTER is within bounds.
-          // Level-aware filtering: tokens on other floors are excluded if they are
-          // hidden under a solid floor tile (tile occlusion test). Tokens visible
-          // through transparent areas (holes, stairwells, balconies) stay selectable.
-          const tokens = this.tokenManager.getAllTokenSprites();
-          const dragSelectedDocs = [];
-          
-          for (const sprite of tokens) {
-            const x = sprite.position.x;
-            const y = sprite.position.y;
-            
-            if (x >= minX && x <= maxX && y >= minY && y <= maxY) {
-              const tokenDoc = sprite.userData.tokenDoc;
-              if (!tokenDoc?.canUserModify(game.user, "update")) continue;
-
-              // Level-aware drag-select: skip tokens on other floors that are
-              // hidden under opaque floor tiles. Allow tokens visible through
-              // transparent areas (gaps, stairwells, balconies).
-              if (!isTokenDragSelectable(sprite, this.tileManager)) continue;
-
-              this.selectObject(sprite);
-              dragSelectedDocs.push(tokenDoc);
+          const dragSelectedDocs = this.tokenSelectionController.selectByMarquee(
+            { minX, maxX, minY, maxY },
+            {
+              additive: !!event.shiftKey,
+              subtractive: !!(event.ctrlKey || event.metaKey)
             }
-          }
+          );
 
           // Auto-switch floor: if ALL drag-selected tokens are on the same floor
           // that is different from the current floor, switch the level view to

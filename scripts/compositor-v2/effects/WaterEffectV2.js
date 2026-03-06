@@ -725,17 +725,17 @@ export class WaterEffectV2 {
           type: 'dropdown',
           default: 0,
           label: 'Debug View',
-          options: [
-            { value: 0, text: 'Final' },
-            { value: 1, text: 'Water Mask' },
-            { value: 2, text: 'SDF Shore' },
-            { value: 3, text: 'Water Data (RGBA)' },
-            { value: 4, text: 'Distortion' },
-            { value: 5, text: 'Specular' },
-            { value: 6, text: 'Foam' },
-            { value: 7, text: 'Murk' },
-            { value: 8, text: 'Sand' },
-          ]
+          options: {
+            Final: 0,
+            'Water Mask': 1,
+            'SDF Shore': 2,
+            'Water Data (RGBA)': 3,
+            Distortion: 4,
+            Specular: 5,
+            Foam: 6,
+            Murk: 7,
+            Sand: 8,
+          }
         },
         debugWindArrow: { type: 'boolean', default: false, label: 'Debug Wind Arrow' },
 
@@ -844,10 +844,10 @@ export class WaterEffectV2 {
           type: 'dropdown',
           default: 1,
           label: 'Spec Model',
-          options: [
-            { value: 0, text: 'Legacy' },
-            { value: 1, text: 'GGX' }
-          ]
+          options: {
+            Legacy: 0,
+            GGX: 1
+          }
         },
         specClamp: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.65, label: 'Spec Clamp' },
         specSunAzimuthDeg: { type: 'slider', min: 0, max: 360, step: 1, default: 135.0, label: 'Sun Azimuth (deg)' },
@@ -859,12 +859,12 @@ export class WaterEffectV2 {
           type: 'dropdown',
           default: 3,
           label: 'Normal Mode',
-          options: [
-            { value: 0, text: 'Default' },
-            { value: 1, text: 'Variant 1' },
-            { value: 2, text: 'Variant 2' },
-            { value: 3, text: 'Variant 3' }
-          ]
+          options: {
+            Default: 0,
+            'Variant 1': 1,
+            'Variant 2': 2,
+            'Variant 3': 3
+          }
         },
         specMicroStrength: { type: 'slider', min: 0, max: 2, step: 0.01, default: 0.6, label: 'Micro Strength' },
         specMicroScale: { type: 'slider', min: 0.1, max: 8, step: 0.01, default: 1.8, label: 'Micro Scale' },

@@ -710,6 +710,7 @@ export class EffectComposer {
         'visionMode':       '_visionModeEffect',
         'invert':           '_invertEffect',
         'sepia':            '_sepiaEffect',
+        'lens':             '_lensEffect',
       };
 
       try {

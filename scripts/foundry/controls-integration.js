@@ -814,6 +814,18 @@ export class ControlsIntegration {
       if (token.border) {
         token.border.alpha = ALPHA;
       }
+
+      // Keep Foundry token text overlays hidden so only Three.js labels render.
+      if (token.nameplate) {
+        token.nameplate.alpha = 0;
+        token.nameplate.visible = false;
+        token.nameplate.renderable = false;
+      }
+      if (token.tooltip) {
+        token.tooltip.alpha = 0;
+        token.tooltip.visible = false;
+        token.tooltip.renderable = false;
+      }
       
       // Keep the token itself visible (for hit area) but children transparent
       token.visible = true;
@@ -928,6 +940,19 @@ export class ControlsIntegration {
       }
     });
     this._hookIds.push({ name: 'refreshToken', id: refreshTokenHookId });
+
+    // Foundry hover workflows can re-show native token nameplate/tooltip. Re-hide
+    // after hover state changes to keep Three.js as the sole label renderer.
+    const hoverTokenHookId = Hooks.on('hoverToken', (token) => {
+      if (this.state !== IntegrationState.ACTIVE) return;
+      setTimeout(() => {
+        try {
+          this.makeTokenTransparent(token);
+        } catch (_) {
+        }
+      }, 0);
+    });
+    this._hookIds.push({ name: 'hoverToken', id: hoverTokenHookId });
 
     // When a token is controlled/released, Foundry may adjust control icon visibility.
     // Re-assert that the walls layer stays visible so door controls/icons remain visible.
@@ -1174,6 +1199,16 @@ export class ControlsIntegration {
         if (token.mesh) token.mesh.alpha = 1;
         if (token.icon) token.icon.alpha = 1;
         if (token.border) token.border.alpha = 1;
+        if (token.nameplate) {
+          token.nameplate.alpha = 1;
+          token.nameplate.visible = true;
+          token.nameplate.renderable = true;
+        }
+        if (token.tooltip) {
+          token.tooltip.alpha = 1;
+          token.tooltip.visible = true;
+          token.tooltip.renderable = true;
+        }
       }
     }
     

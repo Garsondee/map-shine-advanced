@@ -586,17 +586,17 @@ export class FogOfWarEffectV2 {
   _updateSceneDimensions() {
     if (canvas?.dimensions) {
       this.sceneDimensions = {
-        width: canvas.dimensions.width || 1,
-        height: canvas.dimensions.height || 1
+        width: Math.max(1, Number(canvas.dimensions.width) || 1),
+        height: Math.max(1, Number(canvas.dimensions.height) || 1)
       };
       
       const rect = canvas.dimensions.sceneRect;
       if (rect) {
         this.sceneRect = {
-          x: rect.x,
-          y: rect.y,
-          width: rect.width,
-          height: rect.height
+          x: Number(rect.x) || 0,
+          y: Number(rect.y) || 0,
+          width: Math.max(1, Number(rect.width) || 1),
+          height: Math.max(1, Number(rect.height) || 1)
         };
       } else {
         this.sceneRect = {
@@ -615,7 +615,8 @@ export class FogOfWarEffectV2 {
    */
   _createVisionRenderTarget() {
     const THREE = window.THREE;
-    const { width, height } = this.sceneRect;
+    const width = Math.max(1, Number(this.sceneRect?.width) || 1);
+    const height = Math.max(1, Number(this.sceneRect?.height) || 1);
     
     // Use a reasonable resolution (can be lower than scene for performance)
     const maxTexSize = this.renderer?.capabilities?.maxTextureSize ?? 2048;
@@ -623,8 +624,8 @@ export class FogOfWarEffectV2 {
     // can be extremely expensive and cause long-task hitches.
     const maxSize = Math.min(2048, maxTexSize);
     const scale = Math.min(1, maxSize / Math.max(width, height));
-    const rtWidth = Math.ceil(width * scale);
-    const rtHeight = Math.ceil(height * scale);
+    const rtWidth = Math.max(1, Math.ceil(width * scale));
+    const rtHeight = Math.max(1, Math.ceil(height * scale));
 
     this._visionRTWidth = rtWidth;
     this._visionRTHeight = rtHeight;
@@ -681,7 +682,8 @@ export class FogOfWarEffectV2 {
    */
   _createExplorationRenderTarget() {
     const THREE = window.THREE;
-    const { width, height } = this.sceneRect;
+    const width = Math.max(1, Number(this.sceneRect?.width) || 1);
+    const height = Math.max(1, Number(this.sceneRect?.height) || 1);
     
     // Use same resolution as vision target
     const maxTexSize = this.renderer?.capabilities?.maxTextureSize ?? 2048;
@@ -689,8 +691,8 @@ export class FogOfWarEffectV2 {
     // readRenderTargetPixels when persisting exploration.
     const maxSize = Math.min(2048, maxTexSize);
     const scale = Math.min(1, maxSize / Math.max(width, height));
-    const rtWidth = Math.ceil(width * scale);
-    const rtHeight = Math.ceil(height * scale);
+    const rtWidth = Math.max(1, Math.ceil(width * scale));
+    const rtHeight = Math.max(1, Math.ceil(height * scale));
 
     this._explorationRTWidth = rtWidth;
     this._explorationRTHeight = rtHeight;
@@ -2233,9 +2235,11 @@ export class FogOfWarEffectV2 {
     this._lastExplorationSaveMs = nowMs;
 
     try {
-      const width = this._explorationRTWidth;
-      const height = this._explorationRTHeight;
+      const width = Math.max(1, Number(this._explorationRTWidth) || 1);
+      const height = Math.max(1, Number(this._explorationRTHeight) || 1);
+      if (!Number.isFinite(width) || !Number.isFinite(height)) return;
       const required = Math.max(0, Math.floor(width * height * 4));
+      if (required <= 0) return;
       if (!this._explorationSaveBuffer || this._explorationSaveBuffer.length !== required) {
         this._explorationSaveBuffer = new Uint8Array(required);
       }

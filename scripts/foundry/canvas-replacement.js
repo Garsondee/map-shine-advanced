@@ -592,6 +592,10 @@ function _updateFoundrySelectRectSuppression(forceValue = null) {
     const enabled = im?.selectionBoxParams?.enabled !== false;
     const activeControl = String(ui?.controls?.control?.name || ui?.controls?.activeControl || '').toLowerCase();
     const activeTool = String(ui?.controls?.tool?.name || ui?.controls?.activeTool || '').toLowerCase();
+    const activeLayerObj = canvas?.activeLayer;
+    const activeLayerName = String(activeLayerObj?.options?.name || activeLayerObj?.name || '').toLowerCase();
+    const activeLayerCtor = String(activeLayerObj?.constructor?.name || '').toLowerCase();
+    const controlMetadataReady = !!(activeControl || activeLayerName || activeLayerCtor);
     const tokenNativeSelectContext =
       activeControl === 'tokens' &&
       (activeTool === '' || activeTool === 'select' || activeTool === 'target' || activeTool === 'ruler');
@@ -601,7 +605,10 @@ function _updateFoundrySelectRectSuppression(forceValue = null) {
       window.mapShine?.inputRouter ||
       controlsIntegration?.inputRouter ||
       null;
-    const pixiOwnsInput = tokenNativeSelectContext || !!inputRouter?.shouldPixiReceiveInput?.();
+    const pixiOwnsInput =
+      tokenNativeSelectContext ||
+      !controlMetadataReady ||
+      !!inputRouter?.shouldPixiReceiveInput?.();
 
     return !isMapMakerMode && enabled && !pixiOwnsInput;
   }, 'selectRect.checkSuppression', Severity.COSMETIC, { fallback: false });

@@ -3469,126 +3469,28 @@ export class InteractionManager {
    * Update Token HUD position to match Three.js camera
    */
   updateHUDPosition() {
-      const hud = canvas.tokens.hud;
-      const token = hud.object;
-      if (!token) return;
-      
-      // Get Three.js sprite for this token
-      // tokenManager might store data by ID
-      const spriteData = this.tokenManager.tokenSprites.get(token.id);
-      if (!spriteData || !spriteData.sprite) {
-          // Token may have been deleted; avoid spamming errors by closing the HUD.
-          safeCall(() => { if (hud?.rendered) hud.close(); }, 'updateHUD.closeStaleHud', Severity.COSMETIC);
-          this.openHudTokenId = null;
-          return;
-      }
-      
-      const sprite = spriteData.sprite;
-      
-      // CRITICAL: Ensure camera matrices are up to date for accurate projection
-      // This fixes "lag" or "parallax" where the HUD trails behind the camera
-      const cam = this.sceneComposer?.camera;
-      if (!cam) return;
-      cam.updateMatrixWorld();
+      const hud = canvas?.tokens?.hud;
+      const token = hud?.object;
+      if (!hud || !token) return;
 
-      // Project world position to screen coordinates
-      // We use the sprite's position (which is center bottom usually, or center? TokenManager puts it at center)
-      // Token sprites are centered.
-      const pos = this._tempVec3HUD;
-      pos.copy(sprite.position);
-      pos.project(cam);
-      
-      // Convert NDC to CSS pixels
-      // NDC: [-1, 1] -> CSS: [0, width/height]
-      // Y is inverted in CSS (0 at top) vs NDC (1 at top)
-      const rect = this._getCanvasRectCached();
-      const width = rect.width;
-      const height = rect.height;
-      const left = rect.left;
-      const top = rect.top;
-      
-      // Calculate Screen Coordinates
-      // NDC X [-1, 1] -> [0, Width]
-      const x = (pos.x + 1) * width / 2 + left;
-      
-      // NDC Y [-1, 1] -> [Height, 0] (Inverted)
-      // pos.y=1 (Top) -> 0
-      // pos.y=-1 (Bottom) -> Height
-      // Formula: (1 - pos.y) * height / 2
-      const y = (1 - pos.y) * height / 2 + top;
-      
-      // Update HUD element position
-      // Foundry's HUD usually centers itself based on object bounds, but since the object bounds
-      // (PIXI) are disconnected from the view, we must position it manually.
-      // The HUD element has absolute positioning.
-      // We'll center the HUD on the token.
-      
-      if (hud.element) {
-          // hud.element might be jQuery object or raw DOM or array
-          const hasJq = (typeof jQuery !== 'undefined');
-          const hudEl = (hasJq && (hud.element instanceof jQuery || hud.element.jquery)) ? hud.element[0] : hud.element;
-          
-          if (hudEl) {
-              // CRITICAL FIX: Reparent HUD to body to avoid parent scaling issues (Parallax)
-              // Foundry/System might put HUD in a scaled container (like #board).
-              // We need screen-space coordinates (1:1).
-              if (hudEl.parentNode !== document.body) {
-                  document.body.appendChild(hudEl);
-                  log.debug('Reparented Token HUD to body');
-              }
+      // Foundry positions HUDs from token PIXI object bounds + uiScale. Using
+      // native positioning avoids drift and scale mismatch from custom CSS transforms.
+      const s = canvas?.dimensions?.uiScale || 1;
+      const left = token.position?.x ?? token.document?.x ?? 0;
+      const top = token.position?.y ?? token.document?.y ?? 0;
+      const bounds = token.bounds || token.getBounds?.();
+      const width = bounds?.width ?? token.w ?? 0;
+      const height = bounds?.height ?? token.h ?? 0;
 
-              // Calculate Scale
-              // We need to match the scale of the token on screen.
-              // Base scale is 1:1 at baseDistance.
-              // Current scale = baseDistance / currentDistance (approx for perspective)
-              // Or better: use the ratio of screen pixels to world units.
-              
-              let scale = 1.0;
-              if (this.sceneComposer.camera && this.sceneComposer.baseDistance) {
-                  // Simple perspective scale approx
-                  const dist = this.sceneComposer.camera.position.z - (sprite.position.z || 0);
-                  if (dist > 0) {
-                      scale = this.sceneComposer.baseDistance / dist;
-                  }
-              }
-              
-              // Apply position and scale
-              // Use translate(-50%, -50%) to center the HUD element on the screen coordinate (x,y)
-              // regardless of its size or scale.
-              
-              // Slightly enlarge the HUD (~25%) so it nicely wraps around the token even
-              // when Foundry's native layout expects a slightly smaller canvas zoom.
-              const finalScale = scale * 1.25;
-
-              // Avoid per-frame style object allocations and jQuery .css overhead.
-              // Only touch CSS properties if they changed meaningfully.
-              const leftCss = `${Math.round(x)}px`;
-              const topCss = `${Math.round(y)}px`;
-              const transformCss = `translate(-50%, -50%) scale(${finalScale})`;
-
-              if (this._hudStyledEl !== hudEl) {
-                  hudEl.style.transformOrigin = 'center center';
-                  hudEl.style.zIndex = '100';
-                  hudEl.style.pointerEvents = 'auto';
-                  hudEl.style.position = 'fixed';
-                  this._hudStyledEl = hudEl;
-              }
-
-              const last = this._hudLastCss;
-              if (last.left !== leftCss) {
-                  hudEl.style.left = leftCss;
-                  last.left = leftCss;
-              }
-              if (last.top !== topCss) {
-                  hudEl.style.top = topCss;
-                  last.top = topCss;
-              }
-              if (last.transform !== transformCss) {
-                  hudEl.style.transform = transformCss;
-                  last.transform = transformCss;
-              }
-          }
-      }
+      safeCall(() => {
+        hud.setPosition?.({
+          left,
+          top,
+          width: width / s,
+          height: height / s,
+          scale: s
+        });
+      }, 'updateHUD.nativePosition', Severity.COSMETIC);
   }
 
   /**
@@ -3971,6 +3873,17 @@ export class InteractionManager {
       const fvttToken = canvas?.tokens?.get?.(tokenId);
       if (!fvttToken) return;
 
+      // Keep native PIXI token text hidden in Three-rendered mode. Foundry may
+      // re-enable these during hover refresh; enforce hidden state here.
+      if (fvttToken.nameplate) {
+        fvttToken.nameplate.visible = false;
+        fvttToken.nameplate.renderable = false;
+      }
+      if (fvttToken.tooltip) {
+        fvttToken.tooltip.visible = false;
+        fvttToken.tooltip.renderable = false;
+      }
+
       // Set Foundry's authoritative hover state
       const layer = fvttToken.layer ?? canvas?.tokens;
       if (layer) layer.hover = fvttToken;
@@ -4003,6 +3916,16 @@ export class InteractionManager {
     safeCall(() => {
       const fvttToken = canvas?.tokens?.get?.(tokenId);
       if (!fvttToken) return;
+
+      // Keep native PIXI token text hidden in Three-rendered mode.
+      if (fvttToken.nameplate) {
+        fvttToken.nameplate.visible = false;
+        fvttToken.nameplate.renderable = false;
+      }
+      if (fvttToken.tooltip) {
+        fvttToken.tooltip.visible = false;
+        fvttToken.tooltip.renderable = false;
+      }
 
       // Clear Foundry's authoritative hover state
       const layer = fvttToken.layer ?? canvas?.tokens;

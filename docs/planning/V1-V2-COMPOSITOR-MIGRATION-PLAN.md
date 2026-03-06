@@ -59,7 +59,7 @@ The old “36+ V1 effects” count is stale. A direct filesystem audit shows `sc
 | File in `scripts/effects/` | V2 Equivalent in `scripts/compositor-v2/effects/`? | Notes |
 |---|---|---|
 | DistortionManager.js (140KB) | ❌ No direct V2 replacement | Still the large V1 distortion hub (heat/water/magic distortion source system). |
-| PlayerLightEffect.js (121KB) | ❌ No | Still V1-only and gameplay-critical. |
+| PlayerLightEffect.js (121KB) | ✅ Yes (`PlayerLightEffectV2`) | Gameplay flashlight/torch path has a V2 implementation and is wired in `FloorCompositor`. |
 | IridescenceEffect.js | ✅ Replaced by `IridescenceEffectV2` | V1 file removed; V2 per-tile overlay wired in FloorCompositor + V2 UI. |
 | PrismEffect.js (19KB) | ✅ Yes (`PrismEffectV2`) | V2 per-tile prism overlay now wired; V1 file deleted. |
 | LensflareEffect.js (26KB) | ❌ No | Camera-space flare pass not yet ported. |
@@ -72,7 +72,7 @@ The old “36+ V1 effects” count is stale. A direct filesystem audit shows `sc
 | DepthShaderChunks.js / Foundry*ShaderChunks.js / WaterSurfaceModel.js | ⚠️ N/A (shared shader/model helpers) | Shared utility code; not direct 1:1 effect classes. |
 | `stubs/StubEffects.js` | N/A | Stub-only compatibility surface. |
 
-**Audit summary:** the migration bottleneck is no longer “dozens of active V1 effects,” but a **small set of true V1 holdouts** (notably `DistortionManager` and `PlayerLightEffect`) plus shared infrastructure that still lives under `scripts/effects/`.
+**Audit summary:** the migration bottleneck is no longer “dozens of active V1 effects,” but a **small set of true V1 holdouts** (most notably `DistortionManager`) plus shared infrastructure that still lives under `scripts/effects/`.
 
 ### V1 Infrastructure — Still Present
 
@@ -105,7 +105,7 @@ The old “36+ V1 effects” count is stale. A direct filesystem audit shows `sc
 
 1. **14 effects have NO V2 equivalent.** These would stop working entirely:
    - ~~**WorldSpaceFogEffect** — Fog of war (critical for gameplay)~~ ✅ Migrated as `FogOfWarEffectV2`
-   - **PlayerLightEffect** — Flashlight/torch (critical for gameplay)
+   - ~~**PlayerLightEffect** — Flashlight/torch (critical for gameplay)~~ ✅ Migrated as `PlayerLightEffectV2`
    - **TreeEffect / BushEffect** — Animated vegetation (important for map makers)
    - **IridescenceEffect / FluidEffect** — Material overlays (nice-to-have)
    - **DistortionManager** — Heat haze, water ripples (important)
@@ -170,7 +170,7 @@ Priority order based on gameplay impact:
 | Priority | Effect | Complexity | Why Critical |
 |----------|--------|-----------|-------------|
 | P0 | **WorldSpaceFogEffect** → FogOfWarEffectV2 | ✅ Complete | Fog of war migrated into V2 post-blit overlay path. |
-| P0 | **PlayerLightEffect** → PlayerLightEffectV2 | High | Flashlight/torch is essential for dungeon crawling. |
+| P0 | **PlayerLightEffect** → PlayerLightEffectV2 | ✅ Complete | Flashlight/torch gameplay path is now available in V2. |
 | P1 | **TreeEffect** → TreeEffectV2 | Medium | Map makers expect trees. Mask-driven per-tile overlay. |
 | P1 | **BushEffect** → BushEffectV2 | Medium | Same architecture as trees. |
 | P1 | **DistortionManager** → DistortionEffectV2 | High | Heat haze over fire, water ripples — important visual quality. |
@@ -396,11 +396,11 @@ No more per-effect UI wiring in `canvas-replacement.js`.
 - ✅ Foundry loads without freezing
 - ✅ Specular effect is working correctly
 
-### Blocker: Camera-Locked Albedo / Stuck Overlay — UNRESOLVED
+### Blocker: Camera-Locked Albedo / Stuck Overlay — RESOLVED (historical)
 
 **Summary:** A semi-transparent “albedo-like” image remains stuck to the screen (camera-locked) in V2 mode. It appears perfectly aligned with the scene at initial load, then becomes screen-space locked during pan/zoom. The artifact can change when selecting/deselecting tokens (vision/fog refresh events), which suggests an interaction with Foundry’s internal PIXI rendering/vision pipeline.
 
-**Why this blocks migration:** This prevents reliable validation of the V2 compositor as the exclusive renderer. Until PIXI’s scene output is fully suppressed (or the overlay source is conclusively removed), it’s not possible to confidently proceed with Phase 0 cleanup and Phase 1 effect ports.
+**Historical impact:** This previously blocked reliable validation of V2-as-sole-renderer. It is retained here as incident history because the root cause and remediation are useful for future regressions.
 
 **What we tried (high level):**
 
@@ -1044,3 +1044,65 @@ This made explored fog visually incorrect and broke the expected Foundry-style �
 - The explored 50% fog region is now world-stable during pan/zoom.
 - No camera-pinned semi-transparent ghosting remains.
 - Dark/unexplored and explored fog layers now move consistently as one world-space fog system.
+
+---
+
+## Success Story — Initial-Load Token Selection + Marquee + Grid Startup Race Fixed
+
+### Problem
+
+In V2 baseline gameplay, immediate interaction after scene load was inconsistent:
+- Token click-select did not work on first load.
+- Rectangular marquee selection did not start on first load.
+- Grid/editor overlay visibility was also delayed.
+- Switching tools (or alt-tab / Alt key interaction) would suddenly make everything work.
+
+### Root cause
+
+The issue was a startup arbitration race in the legacy fallback path (`ControlsIntegration` is skipped in baseline V2):
+
+1. Input/layer ownership was evaluated before Foundry had finalized active control/layer metadata.
+2. PIXI suppression and input-mode logic could briefly land in a non-editor state during boot.
+3. Focus/Alt-related browser events triggered a later re-evaluation, which is why "jiggling" the app appeared to fix the issue.
+
+### Fixes applied
+
+Files: `scripts/foundry/canvas-replacement.js`
+
+1. **Startup-safe input default when metadata is unresolved**
+   - In both arbitration paths, unresolved control/layer metadata now prefers PIXI/editor-side input until state is known.
+
+2. **Unified reconciliation helper for arbitration state**
+   - Added `_reconcileInputArbitrationState(reason)` to re-apply, in one place:
+     - `updateLayerVisibility()`
+     - `updateInputMode()`
+     - `_enforceGameplayPixiSuppression()`
+     - `_updateFoundrySelectRectSuppression()`
+
+3. **Startup settle watcher**
+   - Added short rAF-based settle loop (`_startInputArbitrationSettleWatcher`) for initial scene boot.
+   - Runs reconciliation for ~1.2s max, exits early after stable metadata frames.
+
+4. **Alt/focus/visibility nudges (explicit fallback)**
+   - Added one-time listeners for:
+     - `window.focus`
+     - `window.blur`
+     - `document.visibilitychange`
+     - `Alt` key down/up
+   - Each nudge re-runs reconciliation + settle watcher.
+
+5. **Additional trigger source for startup timing**
+   - `activateCanvasLayer` now participates in legacy arbitration updates.
+
+### Why this works
+
+- Startup no longer assumes control metadata is immediately available.
+- Arbitration is repeatedly reconciled during the period where Foundry finalizes controls/layers.
+- The same path is reused for normal hooks and Alt/focus nudges, so behavior is deterministic instead of event-luck-dependent.
+
+### Outcome
+
+- Token selection works immediately on first load.
+- Marquee selection works immediately on first load.
+- Grid/editor overlay appears without requiring manual tool swaps.
+- Alt-tab/Alt is no longer required as a user workaround.

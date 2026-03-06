@@ -56,6 +56,8 @@ import { WeatherParticlesV2 } from './effects/WeatherParticlesV2.js';
 import { WaterSplashesEffectV2 } from './effects/WaterSplashesEffectV2.js';
 import { AshDisturbanceEffectV2 } from './effects/AshDisturbanceEffectV2.js';
 import { FluidEffectV2 } from './effects/FluidEffectV2.js';
+import { IridescenceEffectV2 } from './effects/IridescenceEffectV2.js';
+import { PrismEffectV2 } from './effects/PrismEffectV2.js';
 import { BushEffectV2 } from './effects/BushEffectV2.js';
 import { TreeEffectV2 } from './effects/TreeEffectV2.js';
 import { OverheadShadowsEffectV2 } from './effects/OverheadShadowsEffectV2.js';
@@ -70,6 +72,7 @@ import { SepiaEffectV2 } from './effects/SepiaEffectV2.js';
 import { LightningEffectV2 } from './effects/LightningEffectV2.js';
 import { AtmosphericFogEffectV2 } from './effects/AtmosphericFogEffectV2.js';
 import { FogOfWarEffectV2 } from './effects/FogOfWarEffectV2.js';
+import { PlayerLightEffectV2 } from './effects/PlayerLightEffectV2.js';
 import { SmellyFliesEffect } from '../particles/SmellyFliesEffect.js';
 import { CandleFlamesEffectV2 } from './effects/CandleFlamesEffectV2.js';
 import { weatherController } from '../core/WeatherController.js';
@@ -116,6 +119,22 @@ export class FloorCompositor {
      * @type {FluidEffectV2}
      */
     this._fluidEffect = new FluidEffectV2(this._renderBus);
+
+    /**
+     * V2 Iridescence Effect: per-tile holographic overlays driven by
+     * _Iridescence masks. Overlays live in the bus scene and are floor-visible
+     * via the bus visibility system.
+     * @type {IridescenceEffectV2}
+     */
+    this._iridescenceEffect = new IridescenceEffectV2(this._renderBus);
+
+    /**
+     * V2 Prism Effect: per-tile crystal/glass refraction overlays driven by
+     * _Prism masks. Overlays live in the bus scene and are floor-visible
+     * via the bus visibility system.
+     * @type {PrismEffectV2}
+     */
+    this._prismEffect = new PrismEffectV2(this._renderBus);
 
     /**
      * V2 Bush Effect: animated per-tile overlays driven by _Bush masks.
@@ -278,6 +297,13 @@ export class FloorCompositor {
      * @type {CandleFlamesEffectV2}
      */
     this._candleFlamesEffect = new CandleFlamesEffectV2();
+
+    /**
+     * V2 Player Light Effect: token-attached torch/flashlight gameplay light.
+     * Global-scoped effect (not floor-isolated).
+     * @type {PlayerLightEffectV2}
+     */
+    this._playerLightEffect = new PlayerLightEffectV2();
 
     // Outdoors mask is now provided by EffectMaskRegistry (central asset system)
 
@@ -555,6 +581,8 @@ export class FloorCompositor {
 
     this._specularEffect.initialize();
     this._fluidEffect.initialize();
+    this._iridescenceEffect.initialize();
+    this._prismEffect.initialize();
     this._bushEffect.initialize();
     this._treeEffect.initialize();
     this._fireEffect.initialize();
@@ -591,6 +619,14 @@ export class FloorCompositor {
       this._candleFlamesEffect?.setLightingEffect?.(this._lightingEffect);
     } catch (err) {
       log.warn('FloorCompositor: CandleFlamesEffectV2 initialize failed:', err);
+    }
+
+    // Player light renders token-attached flashlight/torch effects and drives
+    // gameplay-facing dynamic light behavior.
+    try {
+      this._playerLightEffect?.initialize?.(this.renderer, this._renderBus._scene, this.camera);
+    } catch (err) {
+      log.warn('FloorCompositor: PlayerLightEffectV2 initialize failed:', err);
     }
 
     // Subscribe outdoors mask consumers so they receive the texture as soon as
@@ -678,6 +714,10 @@ export class FloorCompositor {
       // render so uTime advances and the effect animates.
       const fluid = this._fluidEffect;
       if (fluid?.enabled && (fluid?._overlays?.size ?? 0) > 0) return true;
+      const iridescence = this._iridescenceEffect;
+      if (iridescence?.enabled && (iridescence?._overlays?.size ?? 0) > 0) return true;
+      const prism = this._prismEffect;
+      if (prism?.enabled && (prism?._overlays?.size ?? 0) > 0) return true;
       const bush = this._bushEffect;
       if (bush?.enabled && (bush?._overlays?.size ?? 0) > 0) return true;
       const tree = this._treeEffect;
@@ -692,6 +732,8 @@ export class FloorCompositor {
       if (lightning?.enabled && lightning?.wantsContinuousRender?.()) return true;
       const candles = this._candleFlamesEffect;
       if (candles?.enabled && ((candles?._sourceFlameCount ?? 0) > 0 || (candles?._glowBuckets?.size ?? 0) > 0)) return true;
+      const playerLight = this._playerLightEffect;
+      if (playerLight?.enabled && playerLight?.params?.enabled) return true;
       return false;
     } catch (_) {
       // Fail safe: if anything about the probe throws, treat as active.
@@ -763,6 +805,20 @@ export class FloorCompositor {
           this._applyCurrentFloorVisibility();
         }).catch(err => {
           log.error('FluidEffectV2 populate failed:', err);
+        });
+
+        // Populate iridescence overlays from _Iridescence masks.
+        this._iridescenceEffect.populate(sc.foundrySceneData).then(() => {
+          this._applyCurrentFloorVisibility();
+        }).catch(err => {
+          log.error('IridescenceEffectV2 populate failed:', err);
+        });
+
+        // Populate prism overlays from _Prism masks.
+        this._prismEffect.populate(sc.foundrySceneData).then(() => {
+          this._applyCurrentFloorVisibility();
+        }).catch(err => {
+          log.error('PrismEffectV2 populate failed:', err);
         });
 
         // Populate bush overlays from _Bush masks.
@@ -861,6 +917,12 @@ export class FloorCompositor {
       try { this._fluidEffect.update(timeInfo); } catch (err) {
         log.warn('FluidEffectV2 update threw, skipping fluid update:', err);
       }
+      try { this._iridescenceEffect.update(timeInfo); } catch (err) {
+        log.warn('IridescenceEffectV2 update threw, skipping iridescence update:', err);
+      }
+      try { this._prismEffect.update(timeInfo); } catch (err) {
+        log.warn('PrismEffectV2 update threw, skipping prism update:', err);
+      }
       try { this._bushEffect.update(timeInfo); } catch (err) {
         log.warn('BushEffectV2 update threw, skipping bush update:', err);
       }
@@ -893,6 +955,11 @@ export class FloorCompositor {
         this._candleFlamesEffect?.update?.(timeInfo);
       } catch (err) {
         log.warn('CandleFlamesEffectV2 update threw, skipping frame:', err);
+      }
+      try {
+        this._playerLightEffect?.update?.(timeInfo);
+      } catch (err) {
+        log.warn('PlayerLightEffectV2 update threw, skipping frame:', err);
       }
       try {
         this._ashDisturbanceEffect?.update?.(timeInfo);
@@ -943,6 +1010,8 @@ export class FloorCompositor {
 
     // ── Bind per-frame textures and camera to effects ────────────────────────
     this._specularEffect.render(this.renderer, this.camera);
+    this._iridescenceEffect.render(this.renderer, this.camera);
+    this._prismEffect.render(this.renderer, this.camera);
 
     // Feed live sun angles from SkyColorEffectV2 into building shadows and
     // overhead shadows — single source of truth for sun direction.
@@ -1276,17 +1345,23 @@ export class FloorCompositor {
     const fog = this._fogEffect;
     if (!fog?.enabled || fog?.params?.enabled === false) return;
     const scene = this._fogOverlayScene;
-    const camera = this._fogOverlayCamera;
+    // IMPORTANT: Fog plane is world-space geometry. Rendering it with a
+    // fullscreen orthographic camera makes it screen-locked during pan/zoom.
+    // Use the main world camera so fog stays pinned to map coordinates.
+    const camera = this.camera;
     if (!scene || !camera || !this.renderer) return;
 
     const renderer = this.renderer;
     const prevTarget = renderer.getRenderTarget();
     const prevAutoClear = renderer.autoClear;
+    const prevLayerMask = camera.layers.mask;
     renderer.setRenderTarget(null);
     renderer.autoClear = false;
     try {
+      camera.layers.enable(31);
       renderer.render(scene, camera);
     } finally {
+      camera.layers.mask = prevLayerMask;
       renderer.autoClear = prevAutoClear;
       renderer.setRenderTarget(prevTarget);
     }
@@ -1532,6 +1607,8 @@ export class FloorCompositor {
     this._renderBus.setVisibleFloors(maxFloorIndex);
     // Notify fire effect of floor change so it can swap active particle systems.
     this._fireEffect.onFloorChange(maxFloorIndex);
+    // Iridescence overlays are bus-managed but we still notify for parity.
+    try { this._iridescenceEffect?.onFloorChange?.(maxFloorIndex); } catch (_) {}
     // Notify water splashes of floor change so it can swap active systems.
     try { this._waterSplashesEffect?.onFloorChange?.(maxFloorIndex); } catch (_) {}
     // Notify ash disturbance so it can swap active burst system sets.
@@ -1555,8 +1632,10 @@ export class FloorCompositor {
     try { this._smellyFliesEffect?.setActiveLevelContext?.(payload?.context ?? window.MapShine?.activeLevelContext ?? null); } catch (_) {}
     try { this._lightningEffect?.setActiveLevelContext?.(payload?.context ?? window.MapShine?.activeLevelContext ?? null); } catch (_) {}
     try { this._candleFlamesEffect?.setActiveLevelContext?.(payload?.context ?? window.MapShine?.activeLevelContext ?? null); } catch (_) {}
+    try { this._playerLightEffect?.setActiveLevelContext?.(payload?.context ?? window.MapShine?.activeLevelContext ?? null); } catch (_) {}
     try { this._lightningEffect?.onFloorChange?.(maxFloorIndex); } catch (_) {}
     try { this._candleFlamesEffect?.onFloorChange?.(maxFloorIndex); } catch (_) {}
+    try { this._playerLightEffect?.onFloorChange?.(maxFloorIndex); } catch (_) {}
     // Outdoors mask floor changes are handled above via GpuSceneMaskCompositor
     // Swap active water SDF data for the new floor.
     try { this._waterEffect?.onFloorChange?.(maxFloorIndex); } catch (_) {}
@@ -1611,6 +1690,8 @@ export class FloorCompositor {
     // Effects
     try { this._specularEffect?.dispose?.(); } catch (_) {}
     try { this._fluidEffect?.dispose?.(); } catch (_) {}
+    try { this._iridescenceEffect?.dispose?.(); } catch (_) {}
+    try { this._prismEffect?.dispose?.(); } catch (_) {}
     try { this._bushEffect?.dispose?.(); } catch (_) {}
     try { this._treeEffect?.dispose?.(); } catch (_) {}
     try { this._fireEffect?.dispose?.(); } catch (_) {}
@@ -1629,6 +1710,7 @@ export class FloorCompositor {
     try { this._smellyFliesEffect?.dispose?.(); } catch (_) {}
     try { this._lightningEffect?.dispose?.(); } catch (_) {}
     try { this._candleFlamesEffect?.dispose?.(); } catch (_) {}
+    try { this._playerLightEffect?.dispose?.(); } catch (_) {}
     try { this._dotScreenEffect?.dispose?.(); } catch (_) {}
     try { this._halftoneEffect?.dispose?.(); } catch (_) {}
     try { this._asciiEffect?.dispose?.(); } catch (_) {}

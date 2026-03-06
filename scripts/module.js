@@ -39,6 +39,19 @@ function _suppressDiagConsoleLogs() {
   }
 }
 
+function getPlayerLightEffectInstance() {
+  try {
+    return (
+      window.MapShine?.playerLightEffectV2
+      ?? window.MapShine?.floorCompositorV2?._playerLightEffect
+      ?? window.MapShine?.playerLightEffect
+      ?? null
+    );
+  } catch (_) {
+    return null;
+  }
+}
+
 _suppressDiagConsoleLogs();
 
 function _msaCrisisLog(id, message) {
@@ -594,7 +607,8 @@ Hooks.once('init', async function() {
             return;
           }
 
-          if (!window.MapShine?.playerLightEffect?.enabled) {
+          const playerLightEffect = getPlayerLightEffectInstance();
+          if (!playerLightEffect?.enabled) {
             ui.notifications?.warn?.('Player Light is disabled for this map.');
             return;
           }
@@ -634,7 +648,8 @@ Hooks.once('init', async function() {
             return;
           }
 
-          if (!window.MapShine?.playerLightEffect?.enabled) {
+          const playerLightEffect = getPlayerLightEffectInstance();
+          if (playerLightEffect && !playerLightEffect.enabled) {
             ui.notifications?.warn?.('Player Light is disabled for this map.');
             return;
           }

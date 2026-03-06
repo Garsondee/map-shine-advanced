@@ -60,8 +60,8 @@ The old “36+ V1 effects” count is stale. A direct filesystem audit shows `sc
 |---|---|---|
 | DistortionManager.js (140KB) | ❌ No direct V2 replacement | Still the large V1 distortion hub (heat/water/magic distortion source system). |
 | PlayerLightEffect.js (121KB) | ❌ No | Still V1-only and gameplay-critical. |
-| IridescenceEffect.js (42KB) | ❌ No | Material overlay not yet ported. |
-| PrismEffect.js (19KB) | ❌ No | Material overlay not yet ported. |
+| IridescenceEffect.js | ✅ Replaced by `IridescenceEffectV2` | V1 file removed; V2 per-tile overlay wired in FloorCompositor + V2 UI. |
+| PrismEffect.js (19KB) | ✅ Yes (`PrismEffectV2`) | V2 per-tile prism overlay now wired; V1 file deleted. |
 | LensflareEffect.js (26KB) | ❌ No | Camera-space flare pass not yet ported. |
 | SelectionBoxEffect.js (39KB) | ❌ No | Token selection UI overlay still in V1 folder. |
 | DetectionFilterEffect.js (13KB) | ❌ No | Detection visualization path still V1. |
@@ -107,7 +107,7 @@ The old “36+ V1 effects” count is stale. A direct filesystem audit shows `sc
    - ~~**WorldSpaceFogEffect** — Fog of war (critical for gameplay)~~ ✅ Migrated as `FogOfWarEffectV2`
    - **PlayerLightEffect** — Flashlight/torch (critical for gameplay)
    - **TreeEffect / BushEffect** — Animated vegetation (important for map makers)
-   - **IridescenceEffect / PrismEffect / FluidEffect** — Material overlays (nice-to-have)
+   - **IridescenceEffect / FluidEffect** — Material overlays (nice-to-have)
    - **DistortionManager** — Heat haze, water ripples (important)
    - ~~**AtmosphericFogEffect** — Distance fog (nice-to-have)~~ ✅ migrated to V2
    - **CandleFlamesEffect** — Weather/particle (medium priority)
@@ -175,7 +175,7 @@ Priority order based on gameplay impact:
 | P1 | **BushEffect** → BushEffectV2 | Medium | Same architecture as trees. |
 | P1 | **DistortionManager** → DistortionEffectV2 | High | Heat haze over fire, water ripples — important visual quality. |
 | P2 | **IridescenceEffect** → IridescenceEffectV2 | Low | Per-tile overlay, same pattern as Specular. |
-| P2 | **PrismEffect** → PrismEffectV2 | Low | Per-tile overlay, same pattern as Specular. |
+| P2 | **PrismEffect** → PrismEffectV2 | ✅ Complete | Per-tile overlay, same pattern as Specular. |
 | P2 | **FluidEffect** → FluidEffectV2 | Medium | Per-tile overlay with animation. |
 | P2 | **AtmosphericFogEffect** → AtmosphericFogEffectV2 | Medium | Screen-space depth fog post-process. |
 | P3 | **LightningEffect** → LightningEffectV2 | Low | Global flash overlay. |
@@ -629,6 +629,91 @@ Disposing MapShine’s `FrameCoordinator` helps reduce extra PIXI flush renderin
   - Depth texture occlusion
 - The effect is visually correct and animated, but may draw through geometry until V2 provides equivalent occlusion inputs.
 
+## 10.1 Success Story: IridescenceEffect → IridescenceEffectV2 (Per-tile overlay)
+
+**Status:** Working in V2 (ported + wired; syntax checks pass).
+
+**What it is:** A per-tile holographic overlay driven by `_Iridescence` masks, now using the V2 bus-overlay architecture (same floor-isolated pattern as Specular/Fluid).
+
+**Implementation (V2 pattern):**
+- New effect: `scripts/compositor-v2/effects/IridescenceEffectV2.js`
+- Wiring:
+  - `scripts/compositor-v2/FloorCompositor.js`
+    - Constructed as `this._iridescenceEffect`
+    - Initialized in `initialize()`
+    - Populated on first-frame bus population (`_Iridescence` discovery on background + tiles)
+    - Updated every frame (time, lighting, environment uniforms)
+    - Render-bound every frame (camera/screen uniforms + roof-alpha occlusion texture)
+    - Included in `wantsContinuousRender()` and disposal flow
+  - `scripts/foundry/canvas-replacement.js`
+    - V2 Tweakpane registration targets `_iridescenceEffect`
+  - `scripts/foundry/effect-wiring.js`
+    - Re-exported `IridescenceEffectV2` for UI schema access
+    - Added capabilities metadata entry (`effectId: 'iridescence'`)
+
+**Behavior details:**
+- Runs as a **bus overlay** via `FloorRenderBus.addEffectOverlay(...)`, so floor visibility is inherited from bus floor culling.
+- Discovers `_Iridescence` masks for:
+  - Scene background (`__bg_image__` convention)
+  - Individual tiles
+- Preserves V1 visual model:
+  - Same iridescence shader logic (screen-space sweep + world-noise phase)
+  - Dynamic ambient light contribution from Foundry ambient lights
+  - Darkness/environment tint blending
+  - Roof alpha occlusion gate to avoid drawing over overhead roof pixels
+
+**Validation:**
+- `node --experimental-default-type=module --check scripts/compositor-v2/effects/IridescenceEffectV2.js`
+- `node --experimental-default-type=module --check scripts/compositor-v2/FloorCompositor.js`
+- `node --experimental-default-type=module --check scripts/foundry/effect-wiring.js`
+- `node --experimental-default-type=module --check scripts/foundry/canvas-replacement.js`
+
+All checks pass.
+
+## 10.2 Success Story: PrismEffect → PrismEffectV2 (Per-tile overlay)
+
+**Status:** Working in V2 (ported + wired; syntax checks pass).
+
+**What it is:** A per-tile crystal/glass refraction overlay driven by `_Prism` masks, now using the V2 bus-overlay architecture.
+
+**Implementation (V2 pattern):**
+- New effect: `scripts/compositor-v2/effects/PrismEffectV2.js`
+- Wiring:
+  - `scripts/compositor-v2/FloorCompositor.js`
+    - Constructed as `this._prismEffect`
+    - Initialized in `initialize()`
+    - Populated on first-frame bus population (`_Prism` discovery on background + tiles)
+    - Updated every frame and render-bound for camera/screen uniforms
+    - Included in `wantsContinuousRender()` and disposal flow
+  - `scripts/foundry/canvas-replacement.js`
+    - V2 Tweakpane registration targets `_prismEffect`
+  - `scripts/foundry/effect-wiring.js`
+    - Re-exported `PrismEffectV2` for UI schema access
+    - Added capabilities metadata entry (`effectId: 'prism'`)
+  - `scripts/effects/EffectComposer.js`
+    - Added V2 debug exposure (`window.MapShine.prismEffectV2`)
+    - Added param replay mapping (`'prism' -> '_prismEffect'`)
+
+**Behavior details:**
+- Runs as a **bus overlay** via `FloorRenderBus.addEffectOverlay(...)`, so floor visibility is inherited from bus floor culling.
+- Discovers `_Prism` masks for:
+  - Scene background (`__bg_image__` convention)
+  - Individual tiles
+- Preserves V1 visual model:
+  - Faceted pseudo-refraction with chromatic spread
+  - Camera parallax response
+  - Glint highlights
+  - Roof alpha occlusion gate to avoid drawing over overhead roof pixels
+
+**Cleanup:**
+- Removed legacy file: `scripts/effects/PrismEffect.js`.
+
+**Validation:**
+- `node --experimental-default-type=module --check scripts/compositor-v2/effects/PrismEffectV2.js`
+- `node --experimental-default-type=module --check scripts/compositor-v2/FloorCompositor.js`
+
+Both checks pass.
+
 ## 11. Basic Version Working: BuildingShadowsEffectV2 + _Outdoors mask
 
 **Status:** Basic version working in V2 (confirmed in Foundry).
@@ -900,3 +985,62 @@ In V2 gameplay mode, users could switch to **Walls** or **Lighting** tools, but 
 - Lighting layer now shows light controls/icons in edit mode.
 - Door controls/icons are visible again when appropriate.
 - PIXI editor overlays and Three gameplay rendering now coexist via deterministic mode-aware gating.
+
+---
+
+## Success Story — FogOfWarEffectV2 Explored-Fog Stability (Camera-Pin Artifact Eliminated)
+
+### Problem
+
+Fog of war was partially correct:
+- The dark/unexplored fog behaved like a world-space overlay.
+- But the **explored (50% opacity) region** looked camera-pinned while panning, as if a semi-transparent copy of the scene was sliding under the fog.
+
+This made explored fog visually incorrect and broke the expected Foundry-style “revealed but not currently visible” behavior.
+
+### Root causes
+
+1. **Overlay camera mismatch in V2 fog presentation path**
+   - The fog overlay scene was presented through a fullscreen orthographic camera path at one stage of integration.
+   - A world-space fog plane rendered with a screen-space camera can appear locked to viewport motion.
+
+2. **Native Foundry PIXI fog/visibility visuals resurfacing during refresh cycles**
+   - Even with Three fog active, native `canvas.fog` / `canvas.visibility` visuals can reappear after Foundry refresh hooks.
+   - That native layer is effectively screen/camera-space in this pipeline context, producing the persistent camera-pinned artifact specifically visible in semi-transparent explored regions.
+
+3. **Exploration sampling needed to remain strictly stable**
+   - Exploration must not inherit animated UV distortion intended for current-vision edge breakup.
+   - Any temporal warp on explored sampling reads as drifting/swimming.
+
+### Fixes applied (clean final state)
+
+1. **Fog overlay pass anchored to world camera**
+   - Render fog overlay with the main compositor world camera, not the fullscreen ortho camera.
+   - Preserve/restore layer mask while explicitly enabling overlay layer 31 for the pass.
+   - File: `scripts/compositor-v2/FloorCompositor.js`
+
+2. **Native fog visual suppression enforced in fog update loop**
+   - Added per-frame, idempotent suppression in `FogOfWarEffectV2.update()`:
+     - `canvas.fog.visible = false`
+     - `canvas.fog.sprite.visible = false` and `alpha = 0`
+     - `canvas.visibility.visible = false`
+     - `canvas.visibility.filter.enabled = false`
+     - `canvas.visibility.vision.visible = false`
+   - This prevents native PIXI fog from bleeding back in after Foundry sight/lighting refreshes.
+   - File: `scripts/compositor-v2/effects/FogOfWarEffectV2.js`
+
+3. **Exploration UV sampling kept stable (no animated warp)**
+   - Exploration sampling remains on stable scene UV mapping and does not add `uvWarp`.
+   - File: `scripts/compositor-v2/effects/FogOfWarEffectV2.js`
+
+### Why this works cleanly
+
+- **Single visual authority** for fog is enforced every frame (Three.js fog plane only).
+- **Camera-space leakage path is closed** by suppressing Foundry’s native fog/visibility draw surfaces at runtime, not just at initialization.
+- **Explored-state sampling is deterministic** and world-stable, while only live-vision edges keep optional organic distortion.
+
+### Outcome
+
+- The explored 50% fog region is now world-stable during pan/zoom.
+- No camera-pinned semi-transparent ghosting remains.
+- Dark/unexplored and explored fog layers now move consistently as one world-space fog system.

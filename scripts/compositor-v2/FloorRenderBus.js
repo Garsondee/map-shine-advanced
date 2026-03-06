@@ -324,6 +324,13 @@ export class FloorRenderBus {
         log.info(`[V2 DEBUG] Preserving door mesh: ${name} (type=${type})`);
         continue;
       }
+      // Preserve transient interaction overlays (path previews, gizmos, etc.)
+      // managed by InteractionManager.
+      if (type === 'interactionOverlay') {
+        tokenCount++;
+        log.info(`[V2 DEBUG] Preserving interaction overlay: ${name} (type=${type})`);
+        continue;
+      }
       // Preserve particle systems and other effect objects
       if (child.name?.startsWith('Token_')) {
         tokenCount++;

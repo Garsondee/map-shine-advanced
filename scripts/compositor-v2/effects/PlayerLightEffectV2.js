@@ -1,7 +1,6 @@
-import { EffectBase, RenderLayers } from './EffectComposer.js';
-import { createLogger } from '../core/log.js';
-import Coordinates from '../utils/coordinates.js';
-import { readWallHeightFlags } from '../foundry/levels-scene-flags.js';
+import { createLogger } from '../../core/log.js';
+import Coordinates from '../../utils/coordinates.js';
+import { readWallHeightFlags } from '../../foundry/levels-scene-flags.js';
 import { 
   ParticleSystem, 
   IntervalValue,
@@ -18,11 +17,38 @@ import {
   ApplyForce,
   CurlNoiseField,
   FrameOverLife
-} from '../libs/three.quarks.module.js';
+} from '../../libs/three.quarks.module.js';
 
-import { SmartWindBehavior } from '../particles/SmartWindBehavior.js';
-import { ThreeLightSource } from './ThreeLightSource.js';
-import { OVERLAY_THREE_LAYER } from './EffectComposer.js';
+import { SmartWindBehavior } from '../../particles/SmartWindBehavior.js';
+import { ThreeLightSource } from '../../effects/ThreeLightSource.js';
+
+// NOTE: Avoid importing EffectBase/RenderLayers from EffectComposer here.
+// EffectComposer -> FloorCompositor -> PlayerLightEffectV2 -> EffectComposer
+// created a circular dependency that triggered a TDZ error at class definition.
+class EffectBaseShim {
+  constructor(id, layer, requiredTier = 'low') {
+    this.id = id;
+    this.layer = layer;
+    this.requiredTier = requiredTier;
+    this.enabled = true;
+    this.priority = 0;
+    this.alwaysRender = false;
+    this.requiresContinuousRender = false;
+    this.floorScope = 'floor';
+  }
+
+  isActive() {
+    return !!this.enabled;
+  }
+
+  dispose() {}
+}
+
+const RenderLayers = {
+  ENVIRONMENTAL: { order: 400, name: 'Environmental', requiresDepth: false }
+};
+
+const OVERLAY_THREE_LAYER = 31;
 
 const log = createLogger('PlayerLightEffect');
 
@@ -49,7 +75,7 @@ class SimpleSmoothNoise {
   }
 }
 
-export class PlayerLightEffect extends EffectBase {
+export class PlayerLightEffectV2 extends EffectBaseShim {
   constructor() {
     super('player-light', RenderLayers.ENVIRONMENTAL, 'low');
 
@@ -1660,7 +1686,7 @@ export class PlayerLightEffect extends EffectBase {
       map: tex,
       transparent: true,
       blending: THREE.AdditiveBlending,
-      depthTest: true,
+      depthTest: false,
       depthWrite: false,
       color: 0xffffff,
       side: THREE.DoubleSide,
@@ -1731,6 +1757,9 @@ export class PlayerLightEffect extends EffectBase {
       ]
     });
 
+    // Match FireEffectV2 behavior: systems must be started explicitly.
+    if (typeof system.play === 'function') system.play();
+
     system.userData = system.userData || {};
     system.userData.windInfluence = 0.25;
     system.userData._msTorchUpdraft = buoyancy;
@@ -1774,7 +1803,7 @@ export class PlayerLightEffect extends EffectBase {
       map: sparkTex,
       transparent: true,
       blending: THREE.AdditiveBlending,
-      depthTest: true,
+      depthTest: false,
       depthWrite: false,
       color: 0xffffff,
       side: THREE.DoubleSide,
@@ -1843,6 +1872,9 @@ export class PlayerLightEffect extends EffectBase {
         turbulence
       ]
     });
+
+    // Match FireEffectV2 behavior: systems must be started explicitly.
+    if (typeof system.play === 'function') system.play();
 
     system.userData = system.userData || {};
     system.userData.windInfluence = 0.45;
@@ -2578,7 +2610,10 @@ export class PlayerLightEffect extends EffectBase {
     // The cone max is intentionally inflated (see update(): flashlightLengthUnits * 4.0) to allow aiming
     // far, but using it for width makes the beam start extremely wide.
     const beamWidthLenU = Math.max(0.001, baseBeamLenU);
-    const beamRefLenU = blocked ? Math.min(edgeWallDistanceU, beamWidthLenU) : beamWidthLenU;
+    // Keep width reference independent of blocked-wall state.
+    // Shrinking width when the endpoint is clamped to a nearby wall concentrates
+    // additive energy and appears as an unintended brightness spike.
+    const beamRefLenU = beamWidthLenU;
     const beamRefLenPx = beamRefLenU / Math.max(pxToUnits, 1e-6);
     const widthPx = Math.tan(halfAngle) * beamRefLenPx * 2 * widthScale;
     const wallT = (coneLenU > 0.0001) ? Math.max(0, Math.min(1, edgeWallDistanceU / coneLenU)) : 0.0;
@@ -2726,6 +2761,9 @@ export class PlayerLightEffect extends EffectBase {
 
   _getLightingEffect() {
     try {
+      const floorCompositor = window.MapShine?.floorCompositorV2;
+      const v2Lighting = floorCompositor?._lightingEffect;
+      if (v2Lighting) return v2Lighting;
       const direct = window.MapShine?.lightingEffect;
       if (direct) return direct;
       const sceneComposer = window.MapShine?.sceneComposer;
@@ -2972,3 +3010,5 @@ export class PlayerLightEffect extends EffectBase {
     if (this._flashlightOriginMesh) this._flashlightOriginMesh.visible = flashlightOn;
   }
 }
+
+export { PlayerLightEffectV2 as PlayerLightEffect };

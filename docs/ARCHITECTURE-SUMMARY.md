@@ -114,7 +114,7 @@ scripts/
 │   ├── ThreeDarknessSource.js # Darkness source representation
 │   ├── WorldSpaceFogEffect.js # Fog of war (world-space plane mesh)
 │   ├── SpecularEffect.js     # PBR specular/metallic with micro-sparkle
-│   ├── IridescenceEffect.js  # Thin-film holographic interference
+│   ├── ../compositor-v2/effects/IridescenceEffectV2.js  # Thin-film holographic interference (V2)
 │   ├── PrismEffect.js        # Refraction/prism effect
 │   ├── WaterEffectV2.js      # Full water system (reflections, caustics, depth)
 │   ├── WaterSurfaceModel.js  # Water surface simulation model

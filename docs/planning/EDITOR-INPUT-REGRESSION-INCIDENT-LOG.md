@@ -224,6 +224,49 @@ Interpretation:
 - **Outcome**: implementation complete; runtime validation pending.
 - **Decision**: validate token click-select and drag marquee immediately.
 
+### Attempt 017 - Token rendering ownership setting + native fallback path
+
+- **Finding from diagnostics**:
+  - `mode/shouldThree/shouldPixi` were `undefined` while token selection worked, confirming active authority is the legacy V2 baseline path (ControlsIntegration/InputRouter unavailable in this runtime branch).
+  - Token selection is currently Foundry-native PIXI interaction, which is now stable for click+marquee.
+- **What changed**:
+  1. Added world setting **Token Rendering Mode** to Foundry configuration:
+     - `Map Shine Three.js (default)`
+     - `Foundry native PIXI (fallback)`
+  2. Added `getTokenRenderingMode()` + `TOKEN_RENDERING_MODES` helpers in scene settings.
+  3. Added `applyTokenRenderingMode()` in canvas replacement and exposed it as `window.MapShine.applyTokenRenderingMode`.
+  4. Updated token visual alpha application in active V2 baseline paths to respect setting:
+     - Three mode => PIXI token visuals transparent (interactive)
+     - Foundry mode => PIXI token visuals visible
+  5. Updated VisibilityController + TokenManager fallback visibility logic so Three token sprites are hidden in Foundry-native mode to avoid double-rendering.
+- **Why**: provide robust compatibility fallback for module ecosystems while preserving current stable token interaction path.
+- **Files**:
+  - `scripts/settings/scene-settings.js`
+  - `scripts/foundry/canvas-replacement.js`
+  - `scripts/vision/VisibilityController.js`
+  - `scripts/scene/token-manager.js`
+- **Outcome**: implementation complete; runtime validation pending.
+- **Decision**: validate both rendering modes; then implement PIXI-selection-to-Three marquee visual mirroring as next refinement.
+
+### Attempt 018 - Restore right-click click-to-move/pathfinding in PIXI-owned token select mode
+
+- **Finding**:
+  - Token select now runs in PIXI-owned context by design.
+  - InteractionManager had an unconditional early-return in token-native select context, which also blocked click-to-move arming (`moveClickState`) for right-click movement.
+- **What changed**:
+  1. Added targeted bypass for click-to-move in `onPointerDown` gating logic:
+     - allow processing when the incoming event is the configured click-to-move button,
+     - currently constrained to right-click mode (`button === 2`) with selected tokens present.
+  2. Applied bypass consistently across all three block gates:
+     - token-native select context guard,
+     - InputRouter PIXI-mode guard,
+     - no-router PIXI-owned context guard.
+- **Why**: preserves PIXI ownership for token selection/marquee while letting pathfinding preview/execute pipeline continue to work from right-click move input.
+- **File**:
+  - `scripts/scene/interaction-manager.js`
+- **Outcome**: implementation complete; runtime validation pending.
+- **Decision**: validate right-click move preview + confirm-click execute in token select tool with both token rendering modes.
+
 ---
 
 ## Current Hypothesis (working)

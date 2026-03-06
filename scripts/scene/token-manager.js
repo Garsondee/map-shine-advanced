@@ -9,8 +9,17 @@ import { OVERLAY_THREE_LAYER } from '../effects/EffectComposer.js';
 import { getLevelsCompatibilityMode, LEVELS_COMPATIBILITY_MODES } from '../foundry/levels-compatibility.js';
 import { isLevelsEnabledForScene } from '../foundry/levels-scene-flags.js';
 import { getPerspectiveElevation } from '../foundry/elevation-context.js';
+import { getTokenRenderingMode, TOKEN_RENDERING_MODES } from '../settings/scene-settings.js';
 
 const log = createLogger('TokenManager');
+
+function _isFoundryNativeTokenRenderingMode() {
+  try {
+    return getTokenRenderingMode() === TOKEN_RENDERING_MODES.FOUNDRY;
+  } catch (_) {
+    return false;
+  }
+}
 
 /**
  * Z-position base for tokens.
@@ -1613,6 +1622,11 @@ vec3 ms_applySceneLighting(vec3 color) {
    * @private
    */
   updateSpriteVisibility(sprite, tokenDoc) {
+    if (_isFoundryNativeTokenRenderingMode()) {
+      sprite.visible = false;
+      return;
+    }
+
     // When the VisibilityController is active, it is the SOLE authority on
     // Three.js sprite visibility (via _refreshVisibility patch + sightRefresh
     // hook). Do NOT touch sprite.visible here — doing so would race with
@@ -2301,7 +2315,14 @@ vec3 ms_applySceneLighting(vec3 color) {
       }
 
       const blob = await response.blob();
-      const bitmap = await createImageBitmap(blob);
+      // ImageBitmap-backed textures do not honor THREE.Texture.flipY.
+      // Request flipped decode so token UVs match the rest of the scene.
+      let bitmap;
+      try {
+        bitmap = await createImageBitmap(blob, { imageOrientation: 'flipY' });
+      } catch (_) {
+        bitmap = await createImageBitmap(blob);
+      }
 
       const texture = new THREE.Texture(bitmap);
       texture.colorSpace = THREE.SRGBColorSpace;

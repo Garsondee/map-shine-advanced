@@ -100,7 +100,7 @@ Registered effects are orchestrated through `EffectComposer` (`scripts/effects/E
 - **LightingEffect**: screen-space lighting composition.
 - **WorldSpaceFogEffect**: Fog of War rendered as a world-space plane with Foundry vision/exploration textures.
 - **SpecularEffect**: mask-driven specular surface shading.
-- **IridescenceEffect**: additive iridescent overlay.
+- **IridescenceEffectV2**: additive iridescent per-tile overlay.
 - **PrismEffect**: masked refraction/prism look.
 - **WindowLightEffect**: interior window light pools driven by `_Windows` / `_Structural`.
 - **OverheadShadowsEffect**: roof/overhead shadowing.

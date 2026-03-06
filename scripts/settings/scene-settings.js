@@ -19,6 +19,7 @@ const FLAG_NAMESPACE = 'map-shine-advanced';
 const DEBUG_LOADING_MODE_SETTING = 'debugLoadingMode';
 const LEVELS_COMPATIBILITY_MODE_SETTING = 'levelsCompatibilityMode';
 const LIGHT_ICON_LEVEL_VISIBILITY_MODE_SETTING = 'lightIconLevelVisibilityMode';
+const TOKEN_RENDERING_MODE_SETTING = 'tokenRenderingMode';
 const LOADING_SCREEN_ENABLED_SETTING = 'loadingScreenEnabled';
 const LOADING_SCREEN_MODE_SETTING = 'loadingScreenMode';
 const LOADING_SCREEN_CONFIG_SETTING = 'loadingScreenConfig';
@@ -47,8 +48,27 @@ export const LIGHT_ICON_LEVEL_VISIBILITY_MODES = Object.freeze({
   PERSPECTIVE: 'perspective',
 });
 
+export const TOKEN_RENDERING_MODES = Object.freeze({
+  THREE: 'three',
+  FOUNDRY: 'foundry',
+});
+
 function _getPlayerOverridesSettingKey(scene) {
   return `scene-${scene?.id}-player-overrides`;
+}
+
+/**
+ * Read token rendering mode policy.
+ * @returns {'three'|'foundry'}
+ */
+export function getTokenRenderingMode() {
+  try {
+    const raw = String(game.settings.get(FLAG_NAMESPACE, TOKEN_RENDERING_MODE_SETTING) ?? '').trim().toLowerCase();
+    if (raw === TOKEN_RENDERING_MODES.FOUNDRY) return TOKEN_RENDERING_MODES.FOUNDRY;
+    return TOKEN_RENDERING_MODES.THREE;
+  } catch (_) {
+    return TOKEN_RENDERING_MODES.THREE;
+  }
 }
 
 /**
@@ -548,6 +568,26 @@ export function registerSettings() {
     onChange: () => {
       try {
         window.MapShine?.lightIconManager?._refreshPerLightVisibility?.();
+      } catch (_) {
+      }
+    },
+  });
+
+  game.settings.register(FLAG_NAMESPACE, TOKEN_RENDERING_MODE_SETTING, {
+    name: 'Token Rendering Mode',
+    hint: 'Choose whether token visuals are rendered by Map Shine (Three.js) or Foundry native PIXI. Selection/input remains Foundry-native in both modes.',
+    scope: 'world',
+    config: true,
+    restricted: true,
+    type: String,
+    choices: {
+      [TOKEN_RENDERING_MODES.THREE]: 'Map Shine Three.js (default)',
+      [TOKEN_RENDERING_MODES.FOUNDRY]: 'Foundry native PIXI (fallback)',
+    },
+    default: TOKEN_RENDERING_MODES.THREE,
+    onChange: () => {
+      try {
+        window.MapShine?.applyTokenRenderingMode?.();
       } catch (_) {
       }
     },

@@ -849,6 +849,14 @@ export class InteractionManager {
     }, 'consumeKeyEvent', Severity.COSMETIC);
   }
 
+  _getInteractionOverlayScene() {
+    // In V2, FloorCompositor renders FloorRenderBus._scene (not sceneComposer.scene).
+    // Interaction overlays must attach to that scene to be visible.
+    const busScene = window.MapShine?.floorRenderBus?._scene;
+    if (busScene) return busScene;
+    return this.sceneComposer?.scene || null;
+  }
+
   // ── Selection Box methods — delegated to SelectionBoxHandler ────────────
   createSelectionBox() { this.selectionBoxHandler.createSelectionBox(); }
   createSelectionOverlay() { this.selectionBoxHandler.createSelectionOverlay(); }
@@ -864,11 +872,15 @@ export class InteractionManager {
 
   createMovementPathPreviewOverlay() {
     const THREE = window.THREE;
-    const scene = this.sceneComposer?.scene;
+    const scene = this._getInteractionOverlayScene();
     if (!THREE || !scene) return;
 
     const group = new THREE.Group();
     group.name = 'TokenMovementPathPreview';
+    group.userData = {
+      ...(group.userData || {}),
+      type: 'interactionOverlay'
+    };
     group.visible = false;
     group.renderOrder = 25;
 
@@ -2549,6 +2561,11 @@ export class InteractionManager {
         const isTokenNativeSelectContext =
           activeControl === 'tokens' &&
           (!normalizedTool || normalizedTool === 'select' || normalizedTool === 'target' || normalizedTool === 'ruler');
+        const clickToMoveButton = this._getClickToMoveButton();
+        const canBypassForClickMove =
+          event.button === clickToMoveButton &&
+          clickToMoveButton === 2 &&
+          this._getSelectedTokenDocs().length > 0;
         const pixiOwnedContextWithoutRouter =
           isTokenNativeSelectContext ||
           activeControl === 'walls' ||
@@ -2562,7 +2579,7 @@ export class InteractionManager {
           normalizedTool === 'window' ||
           normalizedTool === 'light';
 
-        if (isTokenNativeSelectContext) {
+        if (isTokenNativeSelectContext && !canBypassForClickMove) {
           log.debug('onPointerDown BLOCKED: token native select context is PIXI-owned', {
             activeControl,
             activeTool: normalizedTool,
@@ -2571,7 +2588,7 @@ export class InteractionManager {
           return;
         }
         
-        if (inputRouter && !inputRouter.shouldThreeReceiveInput()) {
+        if (inputRouter && !inputRouter.shouldThreeReceiveInput() && !canBypassForClickMove) {
           log.debug('onPointerDown BLOCKED by InputRouter (PIXI mode active)', {
             currentMode: inputRouter.currentMode,
             isTokenLayerName,
@@ -2582,7 +2599,7 @@ export class InteractionManager {
           return;
         }
 
-        if (!inputRouter && pixiOwnedContextWithoutRouter) {
+        if (!inputRouter && pixiOwnedContextWithoutRouter && !canBypassForClickMove) {
           log.debug('onPointerDown BLOCKED: no InputRouter and active context is PIXI-owned', {
             activeControl,
             activeTool: normalizedTool,
@@ -2734,8 +2751,6 @@ export class InteractionManager {
         log.debug('onPointerDown tokenSprites count', { count: tokenSprites.length });
         const wallGroup = this.wallManager.wallGroup;
         const groundZ = this.sceneComposer?.groundZ ?? 0;
-
-        const clickToMoveButton = this._getClickToMoveButton();
 
         // Handle Right Click (Potential HUD or Door Lock/Unlock)
         if (event.button === 2) {

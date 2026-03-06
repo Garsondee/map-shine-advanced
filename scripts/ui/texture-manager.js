@@ -667,7 +667,7 @@ export class TextureManagerUI {
       'specular.scene': 'SpecularEffect',
       'roughness.scene': 'SpecularEffect',
       'normal.scene': 'SpecularEffect',
-      'iridescence.scene': 'IridescenceEffect',
+      'iridescence.scene': 'IridescenceEffectV2',
       'outdoors.scene': 'WeatherController / masking',
       'fire.scene': 'FireSparksEffect',
       'windows.scene': 'WindowLightEffect',
@@ -693,7 +693,7 @@ export class TextureManagerUI {
       roughness: 'SpecularEffect',
       normal: 'SpecularEffect',
       outdoors: 'Weather + indoor/outdoor masking',
-      iridescence: 'IridescenceEffect',
+      iridescence: 'IridescenceEffectV2',
       windows: 'WindowLightEffect',
       structural: 'WindowLightEffect (legacy)',
       fire: 'FireSparksEffect'

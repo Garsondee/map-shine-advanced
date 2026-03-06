@@ -28,6 +28,8 @@ import {
   // V2 effect classes for initializeUI's static getControlSchema() calls
   SpecularEffectV2,
   FluidEffectV2,
+  IridescenceEffectV2,
+  PrismEffectV2,
   WindowLightEffectV2,
   ColorCorrectionEffectV2,
   FilmGrainEffectV2,
@@ -43,6 +45,7 @@ import {
   WaterEffectV2,
   AtmosphericFogEffectV2,
   FogOfWarEffectV2,
+  PlayerLightEffectV2,
 } from './effect-wiring.js';
 import { TileEffectBindingManager } from '../scene/TileEffectBindingManager.js';
 import { RenderLoop } from '../core/render-loop.js';
@@ -150,6 +153,18 @@ let controlsIntegration = null;
 
 /** @type {Array<{hook: string, id: number}>} */
 let _pixiSuppressionHookIds = [];
+
+/** @type {number|null} */
+let _inputArbitrationSettleRaf = null;
+
+/** @type {number} */
+let _inputArbitrationSettleDeadlineMs = 0;
+
+/** @type {number} */
+let _inputArbitrationStableFrames = 0;
+
+/** @type {boolean} */
+let _inputArbitrationDomNudgesInstalled = false;
 
 /** @type {boolean} */
 let isHooked = false;
@@ -539,6 +554,36 @@ let interactionManager = null;
 let _mapShineOrigDrawSelect = null;
 let _mapShineSelectSuppressed = false;
 
+function _isFoundryNativeTokenRenderingMode() {
+  try {
+    return sceneSettings.getTokenRenderingMode?.() === sceneSettings.TOKEN_RENDERING_MODES?.FOUNDRY;
+  } catch (_) {
+    return false;
+  }
+}
+
+function _applyPixiTokenVisualMode() {
+  const foundryNative = _isFoundryNativeTokenRenderingMode();
+  if (!canvas?.tokens?.placeables) return;
+
+  for (const token of canvas.tokens.placeables) {
+    if (token.mesh) token.mesh.alpha = foundryNative ? 1 : 0;
+    if (token.icon) token.icon.alpha = foundryNative ? 1 : 0;
+    if (token.border) token.border.alpha = foundryNative ? 1 : 0;
+    token.visible = true;
+    token.interactive = true;
+  }
+}
+
+export function applyTokenRenderingMode() {
+  safeCall(() => {
+    _applyPixiTokenVisualMode();
+    window.MapShine?.visibilityController?._queueBulkRefresh?.();
+    window.MapShine?.tokenManager?.refreshAllTokenOverlayStates?.();
+    log.info(`Token rendering mode applied: ${_isFoundryNativeTokenRenderingMode() ? 'foundry' : 'three'}`);
+  }, 'tokenRendering.applyMode', Severity.COSMETIC);
+}
+
 function _updateFoundrySelectRectSuppression(forceValue = null) {
   // Suppress Foundry selection rectangle only when Three owns interaction.
   // If PIXI owns token-native select/target/ruler, Foundry's marquee must remain active.
@@ -784,6 +829,7 @@ export function initialize() {
   // even if the rest of initialization fails or hangs.
   try {
     if (!window.MapShine) window.MapShine = {};
+    window.MapShine.applyTokenRenderingMode = applyTokenRenderingMode;
 
     /**
      * Wipe all Map Shine Advanced flags from a scene.
@@ -3435,15 +3481,7 @@ async function createThreeCanvas(scene) {
     if (canvas.tokens) {
       canvas.tokens.visible = true; // Layer stays visible for interaction
       canvas.tokens.interactiveChildren = true;
-      // Make tokens transparent - ControlsIntegration.hideReplacedLayers() handles this
-      // more thoroughly after tokens are synced
-      for (const token of canvas.tokens.placeables) {
-        if (token.mesh) token.mesh.alpha = 0;
-        if (token.icon) token.icon.alpha = 0;
-        if (token.border) token.border.alpha = 0;
-        token.visible = true;
-        token.interactive = true;
-      }
+      _applyPixiTokenVisualMode();
     }
     log.debug('Replaced PIXI layers hidden, tokens layer transparent but interactive');
     
@@ -4680,6 +4718,16 @@ async function createThreeCanvas(scene) {
         }, 'v2.registerFluidUI', Severity.COSMETIC);
 
         safeCall(() => {
+          uiManager.registerEffect('iridescence', 'Iridescence',
+            IridescenceEffectV2.getControlSchema(), _makeV2Callback('_iridescenceEffect'), 'surface');
+        }, 'v2.registerIridescenceUI', Severity.COSMETIC);
+
+        safeCall(() => {
+          uiManager.registerEffect('prism', 'Prism',
+            PrismEffectV2.getControlSchema(), _makeV2Callback('_prismEffect'), 'surface');
+        }, 'v2.registerPrismUI', Severity.COSMETIC);
+
+        safeCall(() => {
           uiManager.registerEffect('sky-color', 'Sky Color',
             SkyColorEffectV2.getControlSchema(), _makeV2Callback('_skyColorEffect'), 'global');
         }, 'v2.registerSkyColorUI', Severity.COSMETIC);
@@ -4723,6 +4771,11 @@ async function createThreeCanvas(scene) {
           uiManager.registerEffect('candle-flames', 'Candle Flames',
             CandleFlamesEffectV2.getControlSchema(), _makeV2Callback('_candleFlamesEffect'), 'particle');
         }, 'v2.registerCandleFlamesUI(V2)', Severity.COSMETIC);
+
+        safeCall(() => {
+          uiManager.registerEffect('player-light', 'Player Light',
+            PlayerLightEffectV2.getControlSchema(), _makeV2Callback('_playerLightEffect'), 'atmospheric');
+        }, 'v2.registerPlayerLightUI(V2)', Severity.COSMETIC);
 
         safeCall(() => {
           uiManager.registerEffect('bloom', 'Bloom (Glow)',
@@ -5879,8 +5932,12 @@ function _enforceGameplayPixiSuppression() {
   safeCall(() => {
     if (!canvas?.ready) return;
     if (isMapMakerMode) return;
+    const activeLayerObj = canvas?.activeLayer;
+    const activeLayerName = String(activeLayerObj?.options?.name || activeLayerObj?.name || '').toLowerCase();
+    const activeLayerCtor = String(activeLayerObj?.constructor?.name || '').toLowerCase();
     const activeControl = String(ui?.controls?.control?.name || ui?.controls?.activeControl || '').toLowerCase();
     const activeTool = String(ui?.controls?.tool?.name || ui?.controls?.activeTool || '').toLowerCase();
+    const controlMetadataReady = !!(activeLayerName || activeLayerCtor || activeControl);
     const inputRouter =
       window.MapShine?.inputRouter ||
       window.mapShine?.inputRouter ||
@@ -5903,6 +5960,7 @@ function _enforceGameplayPixiSuppression() {
       activeTool === 'light';
     const shouldPixiReceiveInput =
       pixiEditContext ||
+      !controlMetadataReady ||
       !!inputRouter?.shouldPixiReceiveInput?.();
     const needsEditorOverlay =
       shouldPixiReceiveInput ||
@@ -6135,14 +6193,7 @@ function updateLayerVisibility() {
   if (canvas.tokens) {
     canvas.tokens.visible = true; // Layer stays visible for interaction
     canvas.tokens.interactiveChildren = true;
-    // Make individual token visuals transparent but keep them interactive
-    for (const token of canvas.tokens.placeables) {
-      if (token.mesh) token.mesh.alpha = 0;
-      if (token.icon) token.icon.alpha = 0;
-      if (token.border) token.border.alpha = 0;
-      token.visible = true;
-      token.interactive = true;
-    }
+    _applyPixiTokenVisualMode();
   }
 
   // Drawings are NOT replaced; they should render via PIXI as an overlay.
@@ -6269,12 +6320,123 @@ function setupInputArbitration() {
   // Remove existing listeners to avoid duplicates if re-initialized
   Hooks.off('changeSidebarTab', updateInputMode);
   Hooks.off('renderSceneControls', updateInputMode);
+  Hooks.off('activateCanvasLayer', updateInputMode);
   
   Hooks.on('changeSidebarTab', updateInputMode);
   Hooks.on('renderSceneControls', updateInputMode);
+  Hooks.on('activateCanvasLayer', updateInputMode);
+
+  _installInputArbitrationDomNudges();
   
   // Initial check
   updateInputMode();
+  _reconcileInputArbitrationState('setupInputArbitration.initial');
+
+  // Foundry control/layer state can finalize a tick or two after first scene draw.
+  // Prime arbitration again so initial token-select + marquee work without
+  // requiring the user to switch tools.
+  const primeDelaysMs = [0, 50, 150, 300];
+  for (const delayMs of primeDelaysMs) {
+    setTimeout(() => {
+      try {
+        _reconcileInputArbitrationState(`setupInputArbitration.prime.${delayMs}`);
+      } catch (_) {
+      }
+    }, delayMs);
+  }
+
+  _startInputArbitrationSettleWatcher('setupInputArbitration');
+}
+
+function _isInputArbitrationMetadataReady() {
+  try {
+    const activeLayerObj = canvas?.activeLayer;
+    const layerName = String(activeLayerObj?.options?.name || activeLayerObj?.name || '').toLowerCase();
+    const layerCtor = String(activeLayerObj?.constructor?.name || '').toLowerCase();
+    const control = String(ui?.controls?.control?.name || ui?.controls?.activeControl || '').toLowerCase();
+    return !!(layerName || layerCtor || control);
+  } catch (_) {
+    return false;
+  }
+}
+
+function _reconcileInputArbitrationState(reason = '') {
+  try {
+    if (!canvas?.ready || isMapMakerMode) return;
+    updateLayerVisibility();
+    updateInputMode();
+    _enforceGameplayPixiSuppression();
+    _updateFoundrySelectRectSuppression();
+    log.debug('Input arbitration reconciled', {
+      reason,
+      ready: _isInputArbitrationMetadataReady()
+    });
+  } catch (_) {
+  }
+}
+
+function _stopInputArbitrationSettleWatcher() {
+  try {
+    if (_inputArbitrationSettleRaf != null) {
+      window.cancelAnimationFrame?.(_inputArbitrationSettleRaf);
+    }
+  } catch (_) {
+  }
+  _inputArbitrationSettleRaf = null;
+  _inputArbitrationSettleDeadlineMs = 0;
+  _inputArbitrationStableFrames = 0;
+}
+
+function _startInputArbitrationSettleWatcher(reason = '') {
+  _stopInputArbitrationSettleWatcher();
+  _inputArbitrationSettleDeadlineMs = Date.now() + 1200;
+  _inputArbitrationStableFrames = 0;
+
+  const tick = () => {
+    _reconcileInputArbitrationState(`settle.${reason}`);
+
+    if (_isInputArbitrationMetadataReady()) {
+      _inputArbitrationStableFrames += 1;
+    } else {
+      _inputArbitrationStableFrames = 0;
+    }
+
+    if (_inputArbitrationStableFrames >= 4 || Date.now() >= _inputArbitrationSettleDeadlineMs) {
+      _stopInputArbitrationSettleWatcher();
+      return;
+    }
+
+    _inputArbitrationSettleRaf = window.requestAnimationFrame?.(tick) ?? null;
+    if (_inputArbitrationSettleRaf == null) {
+      setTimeout(tick, 16);
+    }
+  };
+
+  _inputArbitrationSettleRaf = window.requestAnimationFrame?.(tick) ?? null;
+  if (_inputArbitrationSettleRaf == null) {
+    setTimeout(tick, 0);
+  }
+}
+
+function _installInputArbitrationDomNudges() {
+  if (_inputArbitrationDomNudgesInstalled) return;
+
+  const nudge = (reason) => {
+    _reconcileInputArbitrationState(reason);
+    _startInputArbitrationSettleWatcher(reason);
+  };
+
+  window.addEventListener('focus', () => nudge('window.focus'));
+  window.addEventListener('blur', () => nudge('window.blur'));
+  document.addEventListener('visibilitychange', () => nudge('document.visibilitychange'));
+  window.addEventListener('keydown', (event) => {
+    if (event?.key === 'Alt') nudge('window.keydown.alt');
+  }, { capture: true });
+  window.addEventListener('keyup', (event) => {
+    if (event?.key === 'Alt') nudge('window.keyup.alt');
+  }, { capture: true });
+
+  _inputArbitrationDomNudgesInstalled = true;
 }
 
 /**
@@ -6355,6 +6517,7 @@ function updateInputMode() {
       const isTokenEditTool = !finalTool || finalTool === 'select' || finalTool === 'target' || finalTool === 'ruler';
       const isTokenEditFinal = isTokensFinal && isTokenEditTool;
       const isEditMode = editLayers.some((l) => isFinalLayer(l)) || isLightingFinal || isWallsFinal || isTokenEditFinal;
+      const controlMetadataReady = !!(finalLayerName || finalLayerCtor || finalControl);
 
       // Drive Three.js light icon visibility from a single source of truth.
       // In Gameplay mode (Three.js active), show light icons only when the
@@ -6377,7 +6540,9 @@ function updateInputMode() {
         wallManager.setVisibility(showThreeWalls);
       }
 
-      if (isEditMode) {
+      // On initial scene load Foundry may not have finalized active layer/control yet.
+      // In that unresolved state, prefer PIXI input so token select/marquee are not blocked.
+      if (isEditMode || !controlMetadataReady) {
         pixiCanvas.style.pointerEvents = 'auto';
         const board = document.getElementById('board');
         if (board && board.tagName === 'CANVAS') {
@@ -6387,7 +6552,7 @@ function updateInputMode() {
           board.style.pointerEvents = 'auto';
         }
         if (threeCanvasEl) threeCanvasEl.style.pointerEvents = 'none';
-        log.debug(`Input Mode: PIXI (Edit: ${finalLayerCtor || finalLayerName})`);
+        log.debug(`Input Mode: PIXI (${controlMetadataReady ? 'Edit' : 'StartupUnresolved'}: ${finalLayerCtor || finalLayerName || finalControl || 'unknown'})`);
       } else {
         pixiCanvas.style.pointerEvents = 'none'; // Pass through to Three.js
         const board = document.getElementById('board');

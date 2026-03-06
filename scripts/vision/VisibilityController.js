@@ -27,8 +27,17 @@
  */
 
 import { createLogger } from '../core/log.js';
+import { getTokenRenderingMode, TOKEN_RENDERING_MODES } from '../settings/scene-settings.js';
 
 const log = createLogger('VisibilityController');
+
+function _isFoundryTokenRenderingMode() {
+  try {
+    return getTokenRenderingMode() === TOKEN_RENDERING_MODES.FOUNDRY;
+  } catch (_) {
+    return false;
+  }
+}
 
 export class VisibilityController {
   /**
@@ -142,6 +151,11 @@ export class VisibilityController {
         if (tokenId) {
           self._syncSingleToken(tokenId, this);
         }
+      }
+
+      if (_isFoundryTokenRenderingMode()) {
+        // In native mode, keep Foundry token visuals untouched.
+        return;
       }
 
       // Step 3: Force the PIXI token to remain visible for hit-testing/interaction.
@@ -259,6 +273,12 @@ export class VisibilityController {
 
     const sprite = spriteData.sprite;
 
+    if (_isFoundryTokenRenderingMode()) {
+      sprite.visible = false;
+      this.detectionState.set(tokenId, { visible: false, detectionFilter: null });
+      return;
+    }
+
     // After the original _refreshVisibility, this.visible holds the result
     // of this.isVisible (before we override it for PIXI interaction).
     let computedVisible = foundryToken.visible;
@@ -300,6 +320,8 @@ export class VisibilityController {
     const placeables = canvas?.tokens?.placeables;
     if (!placeables) return;
 
+    const foundryMode = _isFoundryTokenRenderingMode();
+
     // Build lookup: tokenId → Foundry PIXI Token
     const placeableMap = new Map();
     for (const t of placeables) {
@@ -311,6 +333,12 @@ export class VisibilityController {
     for (const [tokenId, spriteData] of this.tokenManager.tokenSprites) {
       const sprite = spriteData?.sprite;
       if (!sprite) continue;
+
+      if (foundryMode) {
+        sprite.visible = false;
+        this.detectionState.set(tokenId, { visible: false, detectionFilter: null });
+        continue;
+      }
 
       const foundryToken = placeableMap.get(tokenId);
       if (!foundryToken) {

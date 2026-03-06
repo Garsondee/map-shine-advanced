@@ -652,10 +652,14 @@ export class EffectComposer {
           window.MapShine.floorCompositorV2 = this._floorCompositorV2;
           window.MapShine.fireEffectV2 = this._floorCompositorV2._fireEffect;
           window.MapShine.specularEffectV2 = this._floorCompositorV2._specularEffect;
+          window.MapShine.prismEffectV2 = this._floorCompositorV2._prismEffect;
           window.MapShine.windowLightEffectV2 = this._floorCompositorV2._windowLightEffect;
           window.MapShine.cloudEffectV2 = this._floorCompositorV2._cloudEffect;
           window.MapShine.waterSplashesEffectV2 = this._floorCompositorV2._waterSplashesEffect;
           window.MapShine.candleFlamesEffectV2 = this._floorCompositorV2._candleFlamesEffect;
+          window.MapShine.playerLightEffectV2 = this._floorCompositorV2._playerLightEffect;
+          // Back-compat alias for call sites not yet migrated.
+          window.MapShine.playerLightEffect = this._floorCompositorV2._playerLightEffect;
         }
       } catch (_) {}
 
@@ -683,6 +687,7 @@ export class EffectComposer {
       const EFFECT_KEY_MAP = {
         'lighting':         '_lightingEffect',
         'specular':         '_specularEffect',
+        'prism':            '_prismEffect',
         'sky-color':        '_skyColorEffect',
         'windowLight':      '_windowLightEffect',
         'fire-sparks':      '_fireEffect',
@@ -691,6 +696,7 @@ export class EffectComposer {
         'water-splashes':   '_waterSplashesEffect',
         'underwater-bubbles':'_underwaterBubblesEffect',
         'candle-flames':    '_candleFlamesEffect',
+        'player-light':     '_playerLightEffect',
         'bloom':            '_bloomEffect',
         'colorCorrection':  '_colorCorrectionEffect',
         'filter':           '_filterEffect',

@@ -996,8 +996,11 @@ export class FogOfWarEffectV2 {
               : smoothstep(-softnessPx, softnessPx, dVisPx);
           }
           
-          // --- Exploration: always uses sampleSoft (no SDF for exploration yet) ---
-          vec2 exploredUv = vec2(sceneUv.x, 1.0 - sceneUv.y) + uvWarp;
+          // --- Exploration: keep sampling in stable world-space UVs ---
+          // Do NOT apply animated uvWarp here. Exploration represents persistent
+          // discovered world state, so warping it causes the semi-transparent
+          // explored tint to appear to drift/swim over the map.
+          vec2 exploredUv = vec2(sceneUv.x, 1.0 - sceneUv.y);
           float explored = sampleSoft(tExplored, exploredUv, uExploredTexelSize, uSoftnessPx);
           float softnessPxE = max(uSoftnessPx, 0.0);
           float de = max(fwidth(explored), 1e-4);
@@ -1020,6 +1023,15 @@ export class FogOfWarEffectV2 {
         }
       `,
       transparent: true,
+      blending: THREE.CustomBlending,
+      blendEquation: THREE.AddEquation,
+      blendSrc: THREE.SrcAlphaFactor,
+      blendDst: THREE.OneMinusSrcAlphaFactor,
+      // Keep framebuffer alpha unchanged (opaque) so explored-opacity fog does
+      // not reveal underlying canvases as a camera-locked ghost image.
+      blendEquationAlpha: THREE.AddEquation,
+      blendSrcAlpha: THREE.ZeroFactor,
+      blendDstAlpha: THREE.OneFactor,
       depthWrite: false,
       depthTest: false,  // Disable depth test - fog always renders on top via renderOrder
       side: THREE.DoubleSide
@@ -1779,8 +1791,40 @@ export class FogOfWarEffectV2 {
     return false;
   }
 
+  /**
+   * V2 renders fog in Three.js; Foundry's native PIXI fog/visibility draw
+   * must stay visually suppressed or it can appear as a camera-locked overlay.
+   * Keep this idempotent and cheap since it may run every frame.
+   * @private
+   */
+  _suppressNativeFogVisuals() {
+    try {
+      const nativeFog = canvas?.fog;
+      if (nativeFog) {
+        nativeFog.visible = false;
+        if (nativeFog.sprite) {
+          nativeFog.sprite.visible = false;
+          nativeFog.sprite.alpha = 0;
+        }
+      }
+
+      const vis = canvas?.visibility;
+      if (vis) {
+        vis.visible = false;
+        if (vis.filter) vis.filter.enabled = false;
+        if (vis.vision) vis.vision.visible = false;
+      }
+    } catch (_) {
+      // Ignore Foundry-version-specific layer structure differences.
+    }
+  }
+
   update(timeInfo) {
     if (!this._initialized || !this.fogPlane) return;
+
+    // Hard guard against native PIXI fog visuals resurfacing after Foundry
+    // refresh hooks. Any resurfaced native fog appears camera-locked.
+    this._suppressNativeFogVisuals();
     
     // Check if fog should be bypassed
     const bypassFog = this._shouldBypassFog();

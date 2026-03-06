@@ -18,6 +18,8 @@
 // V2 effect classes (V1 equivalents deleted — use V2 for getControlSchema())
 import { SpecularEffectV2 } from '../compositor-v2/effects/SpecularEffectV2.js';
 import { FluidEffectV2 } from '../compositor-v2/effects/FluidEffectV2.js';
+import { IridescenceEffectV2 } from '../compositor-v2/effects/IridescenceEffectV2.js';
+import { PrismEffectV2 } from '../compositor-v2/effects/PrismEffectV2.js';
 import { WindowLightEffectV2 } from '../compositor-v2/effects/WindowLightEffectV2.js';
 import { ColorCorrectionEffectV2 } from '../compositor-v2/effects/ColorCorrectionEffectV2.js';
 import { FilmGrainEffectV2 } from '../compositor-v2/effects/FilmGrainEffectV2.js';
@@ -32,6 +34,7 @@ import { AsciiEffectV2 } from '../compositor-v2/effects/AsciiEffectV2.js';
 import { WaterEffectV2 } from '../compositor-v2/effects/WaterEffectV2.js';
 import { AtmosphericFogEffectV2 } from '../compositor-v2/effects/AtmosphericFogEffectV2.js';
 import { FogOfWarEffectV2 } from '../compositor-v2/effects/FogOfWarEffectV2.js';
+import { PlayerLightEffectV2 } from '../compositor-v2/effects/PlayerLightEffectV2.js';
 import { SmellyFliesEffect } from '../particles/SmellyFliesEffect.js';
 
 import { createLogger } from '../core/log.js';
@@ -44,6 +47,8 @@ const log = createLogger('EffectWiring');
 export {
   SpecularEffectV2,
   FluidEffectV2,
+  IridescenceEffectV2,
+  PrismEffectV2,
   WindowLightEffectV2,
   ColorCorrectionEffectV2,
   FilmGrainEffectV2,
@@ -59,6 +64,7 @@ export {
   WaterEffectV2,
   AtmosphericFogEffectV2,
   FogOfWarEffectV2,
+  PlayerLightEffectV2,
 };
 
 // ── Independent Effect Definitions ──────────────────────────────────────────
@@ -89,6 +95,8 @@ export function getIndependentEffectDefs() {
 const CAPABILITIES = [
   { effectId: 'specular',          displayName: 'Metallic / Specular',       category: 'surface',      performanceImpact: 'medium' },
   { effectId: 'fluid',             displayName: 'Fluid',                     category: 'surface',      performanceImpact: 'medium' },
+  { effectId: 'iridescence',       displayName: 'Iridescence',               category: 'surface',      performanceImpact: 'medium' },
+  { effectId: 'prism',             displayName: 'Prism',                     category: 'surface',      performanceImpact: 'medium' },
   { effectId: 'window-lights',     displayName: 'Window Lights',             category: 'structure',    performanceImpact: 'medium' },
   { effectId: 'water',             displayName: 'Water',                     category: 'water',        performanceImpact: 'high' },
   { effectId: 'bloom',             displayName: 'Bloom',                     category: 'global',       performanceImpact: 'high' },

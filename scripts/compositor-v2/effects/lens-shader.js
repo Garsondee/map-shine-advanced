@@ -152,6 +152,30 @@ export function getFragmentShader() {
       return c;
     }
 
+    // Kawase-style blur kernel for soft defocus. Using two radii keeps the
+    // blur smooth without requiring a heavy Gaussian sample count.
+    vec3 sampleSceneKawase(vec2 uv, vec2 texelSize, float blurPx) {
+      float r1 = max(0.001, blurPx);
+      float r2 = r1 * 2.0;
+      vec2 d1 = texelSize * r1;
+      vec2 d2 = texelSize * r2;
+
+      vec3 accum = vec3(0.0);
+      accum += sampleSceneWithCA(uv, texelSize) * 0.20;
+
+      accum += sampleSceneWithCA(uv + vec2( d1.x,  d1.y), texelSize) * 0.12;
+      accum += sampleSceneWithCA(uv + vec2(-d1.x,  d1.y), texelSize) * 0.12;
+      accum += sampleSceneWithCA(uv + vec2( d1.x, -d1.y), texelSize) * 0.12;
+      accum += sampleSceneWithCA(uv + vec2(-d1.x, -d1.y), texelSize) * 0.12;
+
+      accum += sampleSceneWithCA(uv + vec2( d2.x, 0.0), texelSize) * 0.08;
+      accum += sampleSceneWithCA(uv + vec2(-d2.x, 0.0), texelSize) * 0.08;
+      accum += sampleSceneWithCA(uv + vec2(0.0,  d2.y), texelSize) * 0.08;
+      accum += sampleSceneWithCA(uv + vec2(0.0, -d2.y), texelSize) * 0.08;
+
+      return accum;
+    }
+
     vec3 sampleOverlay(
       sampler2D tex,
       float activeFlag,
@@ -177,18 +201,11 @@ export function getFragmentShader() {
       float pulseMag       = anim.w;
       float pulseFreq      = pulse.x;
       float pulsePhase     = pulse.y;
-      float gateMinLuma    = lumaGate.x;
-      float gateMaxLuma    = max(gateMinLuma, lumaGate.y);
-      float gateSoftness   = max(0.001, lumaGate.z);
-      float gateInfluence  = clamp(lumaGate.w, 0.0, 1.0);
 
+      // Simplified reactivity: overlay intensity scales with scene brightness.
+      // Base intensity is always present, then boosted by scene luminance.
       float reactivity = mix(1.0, sceneLuma * lumaBoost, lumaReactivity);
       float pulseVal = 1.0 + sin(uTime * pulseFreq * 6.2832 + pulsePhase) * pulseMag;
-
-      float gateIn  = smoothstep(gateMinLuma - gateSoftness, gateMinLuma + gateSoftness, sceneLuma);
-      float gateOut = 1.0 - smoothstep(gateMaxLuma - gateSoftness, gateMaxLuma + gateSoftness, sceneLuma);
-      float lumaWindow = clamp(gateIn * gateOut, 0.0, 1.0);
-      float lumaWindowApplied = mix(1.0, lumaWindow, gateInfluence);
 
       float dist = length(vUv - vec2(0.5));
       float clearMask = smoothstep(
@@ -198,7 +215,7 @@ export function getFragmentShader() {
       );
       float appliedClear = (clearRadius < 0.001) ? 1.0 : clearMask;
 
-      return texColor * intensity * reactivity * pulseVal * appliedClear * lumaWindowApplied;
+      return texColor * intensity * reactivity * pulseVal * appliedClear;
     }
 
     vec3 sampleOverlayCrossfade(
@@ -243,16 +260,10 @@ export function getFragmentShader() {
 
       // Optional autofocus pulse blur (infrequent lens shift / refocus moment).
       if (uAutoFocusAmount > 0.0001 && uAutoFocusBlurPx > 0.0001) {
-        float blurPx = uAutoFocusBlurPx * clamp(uAutoFocusAmount, 0.0, 1.0);
-        vec2 blurStep = texelSize * blurPx;
-        vec3 blurAccum = vec3(0.0);
-        blurAccum += sampleSceneWithCA(focusUV + vec2( blurStep.x, 0.0), texelSize) * 0.20;
-        blurAccum += sampleSceneWithCA(focusUV + vec2(-blurStep.x, 0.0), texelSize) * 0.20;
-        blurAccum += sampleSceneWithCA(focusUV + vec2(0.0,  blurStep.y), texelSize) * 0.20;
-        blurAccum += sampleSceneWithCA(focusUV + vec2(0.0, -blurStep.y), texelSize) * 0.20;
-        blurAccum += sampleSceneWithCA(focusUV + vec2( blurStep.x,  blurStep.y), texelSize) * 0.10;
-        blurAccum += sampleSceneWithCA(focusUV + vec2(-blurStep.x, -blurStep.y), texelSize) * 0.10;
-        sceneColor = mix(sceneColor, blurAccum, clamp(uAutoFocusAmount, 0.0, 1.0));
+        float focusAmount = clamp(uAutoFocusAmount, 0.0, 1.0);
+        float blurPx = uAutoFocusBlurPx * focusAmount;
+        vec3 kawaseBlur = sampleSceneKawase(focusUV, texelSize, blurPx);
+        sceneColor = mix(sceneColor, kawaseBlur, focusAmount);
       }
 
       // Optional cheap motion blur from camera pan + zoom speed (2-tap directional).

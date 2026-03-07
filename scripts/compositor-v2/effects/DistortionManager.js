@@ -9,12 +9,11 @@
  * - Final distortion is applied as a post-processing pass
  * - Supports above/below overhead tiles, masking other effects
  * 
- * @module effects/DistortionManager
+ * @module compositor-v2/effects/DistortionManager
  */
 
-import { EffectBase, RenderLayers } from './EffectComposer.js';
-import { createLogger } from '../core/log.js';
-import { DepthShaderChunks } from './DepthShaderChunks.js';
+import { createLogger } from '../../core/log.js';
+import { DepthShaderChunks } from '../../effects/DepthShaderChunks.js';
 
 const log = createLogger('DistortionManager');
 
@@ -318,9 +317,14 @@ export const DistortionNoise = {
  * This effect operates as a post-processing pass that samples the scene texture
  * with UV offsets derived from registered distortion sources.
  */
-export class DistortionManager extends EffectBase {
+export class DistortionManager {
   constructor() {
-    super('distortion-manager', RenderLayers.POST_PROCESSING, 'low');
+    // V2-style metadata (no EffectBase inheritance).
+    this.id = 'distortion-manager';
+    this.enabled = true;
+    this.layer = 'post-processing';
+    this.floorScope = 'global';
+    this.performanceTier = 'low';
     
     // Render after lighting and after WaterEffectV2 (priority=80), but before
     // late post steps like ColorCorrectionEffect (priority=100).

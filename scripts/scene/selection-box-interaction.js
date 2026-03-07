@@ -14,7 +14,7 @@
  * @module scene/selection-box-interaction
  */
 
-import { OVERLAY_THREE_LAYER } from '../effects/EffectComposer.js';
+import { OVERLAY_THREE_LAYER } from '../core/render-layers.js';
 
 /**
  * Handles all selection-box-specific visuals: 3D mesh, DOM overlay, shadow mesh.
@@ -36,6 +36,14 @@ export class SelectionBoxHandler {
   get selectionBoxParams() { return this._im.selectionBoxParams; }
   get _selectionOverlay() { return this._im._selectionOverlay; }
 
+  /**
+   * Resolve the active world overlay scene.
+   * In V2 this is the FloorRenderBus scene; in legacy mode it is SceneComposer.scene.
+   */
+  get _overlayScene() {
+    return this._im._getInteractionOverlayScene?.() || this.sceneComposer?.scene || null;
+  }
+
   // ── 3D Selection Box Mesh ─────────────────────────────────────────────────
 
   /**
@@ -43,6 +51,8 @@ export class SelectionBoxHandler {
    */
   createSelectionBox() {
     const THREE = window.THREE;
+    const scene = this._overlayScene;
+    if (!THREE || !scene) return;
 
     // Semi-transparent blue fill
     const geometry = new THREE.PlaneGeometry(1, 1);
@@ -57,6 +67,10 @@ export class SelectionBoxHandler {
     this.dragSelect.mesh = new THREE.Mesh(geometry, material);
     this.dragSelect.mesh.visible = false;
     this.dragSelect.mesh.name = 'SelectionBoxFill';
+    this.dragSelect.mesh.userData = {
+      ...(this.dragSelect.mesh.userData || {}),
+      type: 'interactionOverlay'
+    };
     this.dragSelect.mesh.layers.set(OVERLAY_THREE_LAYER);
     this.dragSelect.mesh.renderOrder = 9999;
 
@@ -72,13 +86,15 @@ export class SelectionBoxHandler {
     this.dragSelect.border = new THREE.LineSegments(borderGeo, borderMat);
     this.dragSelect.border.visible = false;
     this.dragSelect.border.name = 'SelectionBoxBorder';
+    this.dragSelect.border.userData = {
+      ...(this.dragSelect.border.userData || {}),
+      type: 'interactionOverlay'
+    };
     this.dragSelect.border.layers.set(OVERLAY_THREE_LAYER);
     this.dragSelect.border.renderOrder = 10000;
 
-    if (this.sceneComposer.scene) {
-      this.sceneComposer.scene.add(this.dragSelect.mesh);
-      this.sceneComposer.scene.add(this.dragSelect.border);
-    }
+    scene.add(this.dragSelect.mesh);
+    scene.add(this.dragSelect.border);
   }
 
   // ── Screen-Space DOM Overlay ──────────────────────────────────────────────
@@ -228,11 +244,12 @@ export class SelectionBoxHandler {
    */
   createSelectionShadow() {
     const THREE = window.THREE;
-    if (!THREE || !this.sceneComposer?.scene) return;
+    const scene = this._overlayScene;
+    if (!THREE || !scene) return;
 
     // Avoid double-creating on hot reloads.
     if (this.dragSelect.shadowMesh) {
-      try { this.sceneComposer.scene.remove(this.dragSelect.shadowMesh); } catch (_) {}
+      try { this.dragSelect.shadowMesh.parent?.remove?.(this.dragSelect.shadowMesh); } catch (_) {}
       try { this.dragSelect.shadowMesh.geometry?.dispose?.(); } catch (_) {}
       try { this.dragSelect.shadowMaterial?.dispose?.(); } catch (_) {}
       this.dragSelect.shadowMesh = null;
@@ -276,10 +293,15 @@ export class SelectionBoxHandler {
     mesh.visible = false;
     mesh.name = 'SelectionBoxShadow';
     mesh.renderOrder = 500;
+    mesh.userData = {
+      ...(mesh.userData || {}),
+      type: 'interactionOverlay'
+    };
+    mesh.layers.set(OVERLAY_THREE_LAYER);
 
     this.dragSelect.shadowMesh = mesh;
     this.dragSelect.shadowMaterial = material;
-    this.sceneComposer.scene.add(mesh);
+    scene.add(mesh);
 
     this.applySelectionShadowParams();
   }

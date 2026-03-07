@@ -23,7 +23,7 @@
  */
 
 import { createLogger } from '../core/log.js';
-import { OVERLAY_THREE_LAYER } from '../effects/EffectComposer.js';
+import { OVERLAY_THREE_LAYER } from '../core/render-layers.js';
 
 const log = createLogger('DepthPass');
 

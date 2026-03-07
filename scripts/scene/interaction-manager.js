@@ -6,9 +6,9 @@
 
 import { createLogger } from '../core/log.js';
 import Coordinates from '../utils/coordinates.js';
-import { OVERLAY_THREE_LAYER } from '../effects/EffectComposer.js';
+import { OVERLAY_THREE_LAYER } from '../core/render-layers.js';
 import { EnhancedLightInspector } from '../ui/enhanced-light-inspector.js';
-import { SelectionBoxEffect } from '../effects/SelectionBoxEffect.js';
+import { SelectionBoxEffectV2 } from '../compositor-v2/effects/SelectionBoxEffectV2.js';
 import { MapPointDrawHandler } from './map-point-interaction.js';
 import { LightInteractionHandler } from './light-interaction.js';
 import { SelectionBoxHandler } from './selection-box-interaction.js';
@@ -387,8 +387,8 @@ export class InteractionManager {
       glowAlpha: 0.12
     };
 
-    /** @type {SelectionBoxEffect|null} */
-    this.selectionBoxEffect = new SelectionBoxEffect(this);
+    /** @type {SelectionBoxEffectV2|null} */
+    this.selectionBoxEffect = new SelectionBoxEffectV2(this);
 
     // Right Click State (for HUD)
     this.rightClickState = {
@@ -859,6 +859,36 @@ export class InteractionManager {
     return this.sceneComposer?.scene || null;
   }
 
+  /**
+   * Move long-lived interaction overlays to the currently active overlay scene.
+   * This is required in V2 because InteractionManager initializes before the
+   * FloorRenderBus scene may exist on the first frame.
+   */
+  _ensureInteractionOverlaysInActiveScene() {
+    const targetScene = this._getInteractionOverlayScene();
+    if (!targetScene) return;
+
+    const reattach = (obj) => {
+      if (!obj || obj.parent === targetScene) return;
+      try { obj.parent?.remove?.(obj); } catch (_) {}
+      targetScene.add(obj);
+    };
+
+    // Note: movement path preview is now fully owned by MovementPreviewEffectV2
+    // in the FloorRenderBus scene. No reattach needed here.
+
+    // Selection box world-space visuals.
+    reattach(this.dragSelect?.mesh);
+    reattach(this.dragSelect?.border);
+    reattach(this.dragSelect?.shadowMesh);
+
+    // Light interaction world-space visuals.
+    reattach(this._selectedLightOutline?.line);
+    reattach(this.lightPlacement?.previewGroup);
+    reattach(this._lightTranslate?.group);
+    reattach(this._lightRadiusRings?.group);
+  }
+
   // ── Selection Box methods — delegated to SelectionBoxHandler ────────────
   createSelectionBox() { this.selectionBoxHandler.createSelectionBox(); }
   createSelectionOverlay() { this.selectionBoxHandler.createSelectionOverlay(); }
@@ -873,80 +903,11 @@ export class InteractionManager {
   applySelectionBoxParamChange(id, v) { this.selectionBoxHandler.applyParamChange(id, v); }
 
   createMovementPathPreviewOverlay() {
-    const THREE = window.THREE;
-    const scene = this._getInteractionOverlayScene();
-    if (!THREE || !scene) return;
-
-    const group = new THREE.Group();
-    group.name = 'TokenMovementPathPreview';
-    group.userData = {
-      ...(group.userData || {}),
-      type: 'interactionOverlay'
-    };
-    group.visible = false;
-    group.renderOrder = 25;
-
-    const lineOuter = new THREE.Line(
-      new THREE.BufferGeometry(),
-      new THREE.LineBasicMaterial({
-      color: 0x143e78,
-      transparent: true,
-      opacity: 0.72,
-      depthTest: false,
-      depthWrite: false
-      })
-    );
-    lineOuter.renderOrder = 26;
-
-    const lineInner = new THREE.Line(
-      new THREE.BufferGeometry(),
-      new THREE.LineDashedMaterial({
-        color: 0x69d2ff,
-        transparent: true,
-        opacity: 0.95,
-        depthTest: false,
-        depthWrite: false,
-        dashSize: 9,
-        gapSize: 6,
-        scale: 1
-      })
-    );
-    lineInner.renderOrder = 27;
-
-    const tileGroup = new THREE.Group();
-    tileGroup.name = 'TokenMovementPathPreviewTiles';
-    tileGroup.renderOrder = 24;
-
-    const ghostGroup = new THREE.Group();
-    ghostGroup.name = 'TokenMovementPathPreviewGhosts';
-    ghostGroup.renderOrder = 30;
-
-    group.add(lineOuter);
-    group.add(lineInner);
-    group.add(tileGroup);
-    group.add(ghostGroup);
-    scene.add(group);
-
-    const labelEl = document.createElement('div');
-    labelEl.style.position = 'fixed';
-    labelEl.style.pointerEvents = 'none';
-    labelEl.style.zIndex = '10000';
-    labelEl.style.padding = '2px 7px';
-    labelEl.style.borderRadius = '4px';
-    labelEl.style.backgroundColor = 'rgba(5, 12, 20, 0.72)';
-    labelEl.style.border = '1px solid rgba(88, 180, 255, 0.42)';
-    labelEl.style.color = '#d9f1ff';
-    labelEl.style.fontFamily = 'system-ui, -apple-system, Segoe UI, Roboto, sans-serif';
-    labelEl.style.fontSize = '12px';
-    labelEl.style.display = 'none';
-    document.body.appendChild(labelEl);
-
-    this.movementPathPreview.group = group;
-    this.movementPathPreview.lineOuter = lineOuter;
-    this.movementPathPreview.lineInner = lineInner;
-    this.movementPathPreview.tileGroup = tileGroup;
-    this.movementPathPreview.ghostGroup = ghostGroup;
-    this.movementPathPreview.labelEl = labelEl;
+    // All movement preview geometry (path lines, tile highlights, ghost tokens,
+    // drag ghosts) is now owned by MovementPreviewEffectV2, which is initialized
+    // by FloorCompositor after the first render frame.
+    // This method intentionally does nothing — the V2 effect self-initializes
+    // at the correct time with correct Z and bus-scene placement.
   }
 
   _clearMovementPathPreview() {
@@ -957,190 +918,42 @@ export class InteractionManager {
     preview.currentKey = '';
     preview.pending = null;
 
-    if (preview.group) preview.group.visible = false;
-
-    if (preview.labelEl) {
-      preview.labelEl.style.display = 'none';
-      preview.labelEl.textContent = '';
-    }
-
-    const tileGroup = preview.tileGroup;
-    if (tileGroup?.children && tileGroup.children.length > 0) {
-      for (let i = tileGroup.children.length - 1; i >= 0; i--) {
-        const mesh = tileGroup.children[i];
-        tileGroup.remove(mesh);
-        safeCall(() => mesh.geometry?.dispose?.(), 'movementPathPreview.disposeTileGeometry', Severity.COSMETIC);
-        safeCall(() => mesh.material?.dispose?.(), 'movementPathPreview.disposeTileMaterial', Severity.COSMETIC);
-      }
-    }
-
-    const ghostGroup = preview.ghostGroup;
-    if (ghostGroup?.children && ghostGroup.children.length > 0) {
-      for (let i = ghostGroup.children.length - 1; i >= 0; i--) {
-        const ghost = ghostGroup.children[i];
-        ghostGroup.remove(ghost);
-        safeCall(() => ghost.material?.dispose?.(), 'movementPathPreview.disposeGhostMaterial', Severity.COSMETIC);
-      }
-    }
-
-    const lineOuter = preview.lineOuter;
-    if (lineOuter?.geometry) {
-      safeCall(() => lineOuter.geometry.dispose?.(), 'movementPathPreview.disposeLineOuterGeometry', Severity.COSMETIC);
-      lineOuter.geometry = new window.THREE.BufferGeometry();
-    }
-
-    const lineInner = preview.lineInner;
-    if (lineInner?.geometry) {
-      safeCall(() => lineInner.geometry.dispose?.(), 'movementPathPreview.disposeLineInnerGeometry', Severity.COSMETIC);
-      lineInner.geometry = new window.THREE.BufferGeometry();
-    }
+    // Delegate geometry clear to MovementPreviewEffectV2.
+    safeCall(() => {
+      const v2Effect = window.MapShine?.movementPreviewEffectV2;
+      if (v2Effect) v2Effect.clearPathPreview();
+    }, 'movementPathPreview.clearV2', Severity.COSMETIC);
   }
 
   _renderMovementPathPreview(pathNodes, totalDistance, tokenDoc = null, groupAssignments = null, renderOptions = {}) {
-    const preview = this.movementPathPreview;
-    if (!preview?.group || !preview.lineOuter || !preview.lineInner || !Array.isArray(pathNodes) || pathNodes.length < 2) {
+    if (!Array.isArray(pathNodes) || pathNodes.length < 2) {
       this._clearMovementPathPreview();
       return;
     }
 
-    const showGhosts = renderOptions?.showGhosts !== false;
-
-    const THREE = window.THREE;
-    const groundZ = (this.sceneComposer?.groundZ ?? 0) + 0.5;
-    const points = [];
-    for (const node of pathNodes) {
-      const w = Coordinates.toWorld(node.x, node.y);
-      points.push(new THREE.Vector3(w.x, w.y, groundZ));
+    // Delegate all Three.js rendering to MovementPreviewEffectV2 which lives in
+    // the FloorRenderBus scene at the correct Z (1004, above tokens at 1003).
+    const v2Effect = window.MapShine?.movementPreviewEffectV2;
+    if (!v2Effect) {
+      // Effect not yet initialized (first few render frames). Nothing to draw.
+      return;
     }
 
-    safeCall(() => preview.lineOuter.geometry?.dispose?.(), 'movementPathPreview.swapLineOuterGeometry', Severity.COSMETIC);
-    preview.lineOuter.geometry = new THREE.BufferGeometry().setFromPoints(points);
-
-    safeCall(() => preview.lineInner.geometry?.dispose?.(), 'movementPathPreview.swapLineInnerGeometry', Severity.COSMETIC);
-    preview.lineInner.geometry = new THREE.BufferGeometry().setFromPoints(points);
-    safeCall(() => preview.lineInner.computeLineDistances?.(), 'movementPathPreview.computeLineDistances', Severity.COSMETIC);
-
-    // Remove previous tile highlights.
-    const tileGroup = preview.tileGroup;
-    for (let i = tileGroup.children.length - 1; i >= 0; i--) {
-      const mesh = tileGroup.children[i];
-      tileGroup.remove(mesh);
-      safeCall(() => mesh.geometry?.dispose?.(), 'movementPathPreview.removeOldTileGeometry', Severity.COSMETIC);
-      safeCall(() => mesh.material?.dispose?.(), 'movementPathPreview.removeOldTileMaterial', Severity.COSMETIC);
-    }
-
-    const grid = canvas?.grid;
-    const gridSize = Math.max(1, Number(grid?.size || canvas?.dimensions?.size || 100));
-    const tileW = Math.max(8, Number(grid?.sizeX || gridSize));
-    const tileH = Math.max(8, Number(grid?.sizeY || gridSize));
-
-    const seen = new Set();
-    for (let i = 1; i < pathNodes.length; i++) {
-      const p = pathNodes[i];
-      const key = `${Math.round(Number(p?.x || 0))}:${Math.round(Number(p?.y || 0))}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-
-      const world = Coordinates.toWorld(p.x, p.y);
-      const tile = new THREE.Mesh(
-        new THREE.PlaneGeometry(tileW * 0.92, tileH * 0.92),
-        new THREE.MeshBasicMaterial({
-          color: 0x3f86ff,
-          transparent: true,
-          opacity: 0.25,
-          depthTest: false,
-          depthWrite: false
-        })
-      );
-      tile.position.set(world.x, world.y, groundZ - 0.005);
-      tile.renderOrder = 24;
-      tileGroup.add(tile);
-    }
-
-    const ghostGroup = preview.ghostGroup;
-    for (let i = (ghostGroup?.children?.length || 0) - 1; i >= 0; i--) {
-      const ghost = ghostGroup.children[i];
-      ghostGroup.remove(ghost);
-      safeCall(() => ghost.material?.dispose?.(), 'movementPathPreview.removeOldGhostMaterial', Severity.COSMETIC);
-    }
-
-    // Destination ghost token(s) (50% opacity) to show final stop positions.
-    // Token drag previews can disable this so only one token ghost is shown.
-    if (showGhosts) {
-      safeCall(() => {
-        if (!ghostGroup) return;
-
-        /**
-         * @param {TokenDocument|object} doc
-         * @param {{x:number,y:number}} endFoundryCenter
-         */
-        const addGhost = (doc, endFoundryCenter) => {
-          if (!doc || !endFoundryCenter) return;
-          const tokenData = doc?.id ? this.tokenManager?.tokenSprites?.get?.(doc.id) : null;
-          const sourceSprite = tokenData?.sprite;
-          if (!sourceSprite) return;
-
-          const tex = sourceSprite.material?.map || sourceSprite.userData?.texture || null;
-          if (!tex) return;
-
-          const ghost = new THREE.Sprite(new THREE.SpriteMaterial({
-            map: tex,
-            transparent: true,
-            opacity: 0.5,
-            depthTest: false,
-            depthWrite: false
-          }));
-          const endWorld = Coordinates.toWorld(endFoundryCenter.x, endFoundryCenter.y);
-          const srcScale = sourceSprite.scale;
-          ghost.scale.set(srcScale?.x ?? 100, srcScale?.y ?? 100, srcScale?.z ?? 1);
-          ghost.position.set(endWorld.x, endWorld.y, (this.sceneComposer?.groundZ ?? 0) + 2.0);
-          ghost.renderOrder = 30;
-          ghostGroup.add(ghost);
-        };
-
-        if (Array.isArray(groupAssignments) && groupAssignments.length > 1) {
-          for (const assignment of groupAssignments) {
-            const tokenId = String(assignment?.tokenId || '');
-            if (!tokenId) continue;
-            const doc = this.tokenManager?.tokenSprites?.get?.(tokenId)?.tokenDoc || (tokenDoc?.id === tokenId ? tokenDoc : null);
-            if (!doc) continue;
-
-            const endFoundry = Array.isArray(assignment?.pathNodes) && assignment.pathNodes.length > 0
-              ? assignment.pathNodes[assignment.pathNodes.length - 1]
-              : this._tokenTopLeftToCenterFoundry(assignment?.destinationTopLeft, doc);
-            addGhost(doc, endFoundry);
-          }
-        } else {
-          const doc = tokenDoc || this._getPrimarySelectedTokenDoc();
-          const endFoundry = pathNodes[pathNodes.length - 1];
-          addGhost(doc, endFoundry);
+    safeCall(() => {
+      v2Effect.showPathPreview(
+        pathNodes,
+        totalDistance,
+        tokenDoc,
+        groupAssignments,
+        {
+          showGhosts: renderOptions?.showGhosts !== false,
+          tokenTopLeftToCenterFoundry: this._tokenTopLeftToCenterFoundry.bind(this),
+          worldToClient: this._worldToClient.bind(this)
         }
-      }, 'movementPathPreview.ghost', Severity.COSMETIC);
-    }
+      );
+    }, 'movementPathPreview.showV2', Severity.COSMETIC);
 
-    preview.group.visible = true;
-    preview.active = true;
-
-    const labelEl = preview.labelEl;
-    if (labelEl) {
-      const units = canvas?.grid?.units || canvas?.scene?.grid?.units || '';
-      const dist = Number.isFinite(totalDistance) ? totalDistance : 0;
-      const pxPerGrid = Number(canvas?.dimensions?.size || 100);
-      const unitsPerGrid = Number(canvas?.dimensions?.distance || 1);
-      const distanceInUnits = (dist / Math.max(1, pxPerGrid)) * unitsPerGrid;
-      const distLabel = Number.isFinite(distanceInUnits) ? distanceInUnits.toFixed(1) : '0.0';
-      labelEl.textContent = units ? `${distLabel} ${units}` : distLabel;
-
-      const last = points[points.length - 1];
-      const screen = this._worldToClient(last);
-      if (screen) {
-        labelEl.style.left = `${screen.x + 10}px`;
-        labelEl.style.top = `${screen.y - 24}px`;
-        labelEl.style.display = 'block';
-      } else {
-        labelEl.style.display = 'none';
-      }
-    }
+    this.movementPathPreview.active = true;
   }
 
   _worldToClient(worldVec3) {
@@ -1760,65 +1573,81 @@ export class InteractionManager {
     this.dragState.previews.clear();
 
     const THREE = window.THREE;
+    if (!THREE) return;
+
     const _tmpPos = new THREE.Vector3();
     const _tmpQuat = new THREE.Quaternion();
-    const groundDragZ = (this.sceneComposer?.groundZ ?? 0) + 3.0;
-    
+
+    // In V2, use the bus scene so previews render at the same Z as tokens (≈1003).
+    // Fall back to legacy scene when bus is unavailable.
+    const busScene = window.MapShine?.floorRenderBus?._scene;
+    const targetScene = busScene ?? this.sceneComposer?.scene;
+    // Token drag ghost Z: in V2 slightly above token layer (1003), in V1 above groundZ.
+    const groundDragZ = busScene ? 1004.5 : ((this.sceneComposer?.groundZ ?? 0) + 3.0);
+
+    // Partition selection into tokens vs. everything else.
+    const tokenIds = [];
+    const nonTokenIds = [];
     for (const id of this.selection) {
-      // Check Token
-      const tokenData = this.tokenManager.tokenSprites.get(id);
-      if (tokenData && tokenData.sprite) {
+      if (this.tokenManager.tokenSprites.has(id)) {
+        tokenIds.push(id);
+      } else {
+        nonTokenIds.push(id);
+      }
+    }
+
+    // ── Token drag previews ───────────────────────────────────────────────────
+    // Route through MovementPreviewEffectV2 which places sprites in the bus scene
+    // at the correct Z with the correct render-order and layer mask.
+    const v2Effect = window.MapShine?.movementPreviewEffectV2;
+    if (v2Effect && tokenIds.length > 0) {
+      v2Effect.showDragPreviews(this.tokenManager, tokenIds);
+      for (const id of tokenIds) {
+        const ghost = v2Effect.getDragPreview(id);
+        if (ghost) this.dragState.previews.set(id, ghost);
+      }
+    } else {
+      // Fallback: create ghost sprites manually and add to target scene.
+      for (const id of tokenIds) {
+        const tokenData = this.tokenManager.tokenSprites.get(id);
+        if (!tokenData?.sprite) continue;
         const original = tokenData.sprite;
         const preview = original.clone();
         const movementManager = window.MapShine?.tokenMovementManager;
         const isFlyingToken = !!movementManager?.isFlying?.(id);
-
-        // Previews must update their matrix as we drag them.
         preview.matrixAutoUpdate = true;
-        // Flying drags should preview the landing tile, not current flight height.
-        // Non-flying drags keep the existing slight z offset behavior.
         preview.position.z = isFlyingToken
           ? (groundDragZ + 0.01)
           : ((preview.position.z ?? 0) + 0.01);
-        // Ensure it's drawn above the original even if depth is enabled elsewhere.
         preview.renderOrder = 9998;
-        
         if (original.material) {
           preview.material = original.material.clone();
           preview.material.opacity = 0.5;
           preview.material.transparent = true;
-
-          // Render on top; this is purely a UX overlay.
           preview.material.depthTest = false;
           preview.material.depthWrite = false;
         }
-        
-        if (this.sceneComposer.scene) {
-          this.sceneComposer.scene.add(preview);
-        }
-        
+        if (targetScene) targetScene.add(preview);
         this.dragState.previews.set(id, preview);
-        continue;
       }
+    }
 
+    // ── Non-token drag previews (tiles, lights) ───────────────────────────────
+    for (const id of nonTokenIds) {
       // Check Tile
       const tileData = this.tileManager?.tileSprites?.get?.(id);
       if (tileData?.sprite) {
         const original = tileData.sprite;
         const preview = original.clone();
-
         preview.matrixAutoUpdate = true;
-
         safeCall(() => {
           original.getWorldPosition(_tmpPos);
           original.getWorldQuaternion(_tmpQuat);
           preview.position.copy(_tmpPos);
           preview.quaternion.copy(_tmpQuat);
         }, 'dragPreview.copyTileTransform', Severity.COSMETIC);
-
         preview.position.z = (preview.position.z ?? 0) + 0.01;
         preview.renderOrder = 9998;
-
         if (original.material) {
           preview.material = original.material.clone();
           preview.material.transparent = true;
@@ -1826,113 +1655,72 @@ export class InteractionManager {
           preview.material.depthTest = false;
           preview.material.depthWrite = false;
         }
-
-        if (this.sceneComposer.scene) {
-          this.sceneComposer.scene.add(preview);
-        }
-
+        if (targetScene) targetScene.add(preview);
         this.dragState.previews.set(id, preview);
         continue;
       }
 
       // Check Foundry Light
       if (this.lightIconManager && this.lightIconManager.lights.has(id)) {
-          const original = this.lightIconManager.lights.get(id);
-          const preview = original.clone();
-
-          preview.matrixAutoUpdate = true;
-
-          // Preserve the icon's world transform (the original sprite is parented under a
-          // group with a Z offset; cloning and adding to the root scene loses that offset).
-          safeCall(() => {
-            original.getWorldPosition(_tmpPos);
-            original.getWorldQuaternion(_tmpQuat);
-            preview.position.copy(_tmpPos);
-            preview.quaternion.copy(_tmpQuat);
-          }, 'dragPreview.copyTransform', Severity.COSMETIC);
-
-          preview.position.z = (preview.position.z ?? 0) + 0.01;
-          preview.renderOrder = 9998;
-
-          // Preserve radius metadata for LOS refresh (clone should copy userData, but be explicit).
-          safeCall(() => {
-            if (originalRoot?.userData && Object.prototype.hasOwnProperty.call(originalRoot.userData, 'radiusPixels')) {
-              preview.userData = preview.userData || {};
-              preview.userData.radiusPixels = originalRoot.userData.radiusPixels;
-            }
-          }, 'dragPreview.copyRadius', Severity.COSMETIC);
-
-          if (original.material) {
-              preview.material = original.material.clone();
-              preview.material.opacity = 0.5;
-              preview.material.transparent = true;
-
-              preview.material.depthTest = false;
-              preview.material.depthWrite = false;
-          }
-
-          if (this.sceneComposer.scene) {
-              this.sceneComposer.scene.add(preview);
-          }
-
-          this.dragState.previews.set(id, preview);
-          continue;
+        const original = this.lightIconManager.lights.get(id);
+        const preview = original.clone();
+        preview.matrixAutoUpdate = true;
+        safeCall(() => {
+          original.getWorldPosition(_tmpPos);
+          original.getWorldQuaternion(_tmpQuat);
+          preview.position.copy(_tmpPos);
+          preview.quaternion.copy(_tmpQuat);
+        }, 'dragPreview.copyTransform', Severity.COSMETIC);
+        preview.position.z = (preview.position.z ?? 0) + 0.01;
+        preview.renderOrder = 9998;
+        if (original.material) {
+          preview.material = original.material.clone();
+          preview.material.opacity = 0.5;
+          preview.material.transparent = true;
+          preview.material.depthTest = false;
+          preview.material.depthWrite = false;
+        }
+        if (targetScene) targetScene.add(preview);
+        this.dragState.previews.set(id, preview);
+        continue;
       }
 
       // Check MapShine Enhanced Light
       const enhancedLightIconManager = window.MapShine?.enhancedLightIconManager;
       if (enhancedLightIconManager && enhancedLightIconManager.lights.has(id)) {
-          const originalRoot = enhancedLightIconManager.getRootObject?.(id) || enhancedLightIconManager.lights.get(id);
-          if (!originalRoot) continue;
-
-          const preview = originalRoot.clone(true);
-
-          preview.matrixAutoUpdate = true;
-
-          // Preserve the gizmo's world transform (the original group is parented under a
-          // manager group with a Z offset; cloning and adding to the root scene loses that offset).
+        const originalRoot = enhancedLightIconManager.getRootObject?.(id) || enhancedLightIconManager.lights.get(id);
+        if (!originalRoot) continue;
+        const preview = originalRoot.clone(true);
+        preview.matrixAutoUpdate = true;
+        safeCall(() => {
+          originalRoot.getWorldPosition(_tmpPos);
+          originalRoot.getWorldQuaternion(_tmpQuat);
+          preview.position.copy(_tmpPos);
+          preview.quaternion.copy(_tmpQuat);
+        }, 'dragPreview.enhancedCopyTransform', Severity.COSMETIC);
+        preview.position.z = (preview.position.z ?? 0) + 0.01;
+        preview.renderOrder = 9998;
+        preview.traverse?.((obj) => {
           safeCall(() => {
-            originalRoot.getWorldPosition(_tmpPos);
-            originalRoot.getWorldQuaternion(_tmpQuat);
-            preview.position.copy(_tmpPos);
-            preview.quaternion.copy(_tmpQuat);
-          }, 'dragPreview.enhancedCopyTransform', Severity.COSMETIC);
-
-          preview.position.z = (preview.position.z ?? 0) + 0.01;
-          preview.renderOrder = 9998;
-
-          // Make materials semi-transparent and render on top.
-          preview.traverse?.((obj) => {
-            safeCall(() => {
-              if (obj?.material) {
-                obj.material = obj.material.clone();
-                obj.material.transparent = true;
-                obj.material.depthTest = false;
-                obj.material.depthWrite = false;
-
-                // IMPORTANT: Do not render any radius fill in the preview clone.
-                // Even a small opacity produces a white "wash" that reads as
-                // the light getting brighter only while dragging.
-                if (obj?.userData?.type === 'enhancedLightRadiusFill') {
-                  obj.material.opacity = 0.0;
-                  obj.visible = false;
-                } else if (obj?.userData?.type === 'enhancedLightRadiusBorder') {
-                  // Keep outline neutral + constant.
-                  obj.material.opacity = 0.35;
-                } else {
-                  // Icon and any other helper meshes.
-                  obj.material.opacity = 0.8;
-                }
+            if (obj?.material) {
+              obj.material = obj.material.clone();
+              obj.material.transparent = true;
+              obj.material.depthTest = false;
+              obj.material.depthWrite = false;
+              if (obj?.userData?.type === 'enhancedLightRadiusFill') {
+                obj.material.opacity = 0.0;
+                obj.visible = false;
+              } else if (obj?.userData?.type === 'enhancedLightRadiusBorder') {
+                obj.material.opacity = 0.35;
+              } else {
+                obj.material.opacity = 0.8;
               }
-            }, 'dragPreview.cloneMaterial', Severity.COSMETIC);
-          });
-
-          if (this.sceneComposer.scene) {
-            this.sceneComposer.scene.add(preview);
-          }
-
-          this.dragState.previews.set(id, preview);
-          continue;
+            }
+          }, 'dragPreview.cloneMaterial', Severity.COSMETIC);
+        });
+        if (targetScene) targetScene.add(preview);
+        this.dragState.previews.set(id, preview);
+        continue;
       }
     }
   }
@@ -1942,14 +1730,16 @@ export class InteractionManager {
    * @private
    */
   destroyDragPreviews() {
+    // Token drag previews are owned and cleaned up by MovementPreviewEffectV2.
+    const v2Effect = window.MapShine?.movementPreviewEffectV2;
+    if (v2Effect) v2Effect.clearDragPreviews();
+
+    // Non-token previews (tiles, lights) were added to the scene directly.
     for (const preview of this.dragState.previews.values()) {
-      if (preview.parent) {
-        preview.parent.remove(preview);
-      }
-      if (preview.material) {
-        preview.material.dispose();
-      }
-      // Don't dispose geometry if shared, but sprite geometry is usually standard plane
+      // Skip sprites managed by the V2 effect.
+      if (preview.userData?.type === 'dragPreview') continue;
+      if (preview.parent) preview.parent.remove(preview);
+      if (preview.material) preview.material.dispose();
     }
     this.dragState.previews.clear();
   }
@@ -3335,6 +3125,9 @@ export class InteractionManager {
    * @param {TimeInfo} timeInfo 
    */
   update(timeInfo) {
+    // Keep interaction overlays bound to the actively-rendered scene (V2 bus).
+    this._ensureInteractionOverlaysInActiveScene();
+
     // Keep HUD positioned correctly if open
     if (canvas.tokens?.hud?.rendered && canvas.tokens.hud.object) {
       this.updateHUDPosition();
@@ -3483,6 +3276,43 @@ export class InteractionManager {
           scale: s
         });
       }, 'updateHUD.nativePosition', Severity.COSMETIC);
+  }
+
+  _syncOpenHudTokenIdFromFoundry() {
+    const hudTokenId = canvas?.tokens?.hud?.object?.id;
+    this.openHudTokenId = hudTokenId ? String(hudTokenId) : null;
+  }
+
+  _openTokenHudViaPixi(token, event) {
+    if (!token) return false;
+
+    let handledByFoundry = false;
+
+    // Preferred path: defer to Foundry's own token right-click handler so any
+    // system/module HUD augmentations continue to work exactly as in PIXI mode.
+    safeCall(() => {
+      if (typeof token._onClickRight === 'function') {
+        token._onClickRight(event);
+        handledByFoundry = true;
+      }
+    }, 'rightClick.invokeFoundryTokenHandler', Severity.COSMETIC);
+
+    if (!handledByFoundry) {
+      const hud = token.layer?.hud;
+      if (hud) {
+        if (this.openHudTokenId === token.id) {
+          hud.close?.();
+        } else if (token.document?.isOwner) {
+          hud.bind?.(token);
+        }
+      }
+    }
+
+    this._syncOpenHudTokenIdFromFoundry();
+    if (this.openHudTokenId) {
+      this.updateHUDPosition();
+    }
+    return true;
   }
 
   /**
@@ -4683,27 +4513,9 @@ export class InteractionManager {
             this.rightClickState.active = false;
             this.rightClickState.tokenId = null;
 
-            const token = canvas.tokens.get(tokenId);
-            if (token && token.layer.hud) {
-                // If HUD is already open for this token, close it (toggle behavior)
-                if (this.openHudTokenId === tokenId) {
-                    log.debug(`Right click up: Closing HUD for ${tokenId}`);
-                    token.layer.hud.close();
-                    this.openHudTokenId = null;
-                } else {
-                    // Check permission again just to be safe, though HUD will also check
-                    if (token.document.isOwner) {
-                        log.debug(`Right click up: Opening HUD for ${tokenId}`);
-                        token.layer.hud.bind(token);
-                        this.openHudTokenId = tokenId;
-                        // Force immediate position update
-                        this.updateHUDPosition();
-                    } else {
-                        log.warn(`User is not owner of token ${token.name}, cannot open HUD`);
-                    }
-                }
-            } else {
-                log.warn(`Token ${tokenId} or HUD not found`);
+            const token = canvas?.tokens?.get?.(tokenId);
+            if (!this._openTokenHudViaPixi(token, event)) {
+              log.warn(`Token ${tokenId} or HUD not found`);
             }
             // Prevent context menu since we handled it
             event.preventDefault();
@@ -6326,6 +6138,11 @@ export class InteractionManager {
       }
 
       const ds = wallDoc.ds;
+      // Match Foundry door control behavior: right-click only toggles
+      // CLOSED <-> LOCKED. OPEN doors are not lock-toggled directly.
+      if (ds === 1) {
+          return;
+      }
       const newDs = ds === 2 ? 0 : 2;
       wallDoc.update({ ds: newDs }).catch((err) => log.error('Failed to update door lock state', err));
   }

@@ -1,17 +1,17 @@
-import { createLogger } from '../core/log.js';
+import { createLogger } from '../../core/log.js';
 
-const log = createLogger('SelectionBoxEffect');
+const log = createLogger('SelectionBoxEffectV2');
 
 /**
- * SelectionBoxEffect
+ * SelectionBoxEffectV2
  * Owns all drag-select visuals:
  * - Screen-space SVG overlay (border styles, patterns, label)
  * - World-space projected shadow mesh
  * - Animation (marching ants / pulse)
  */
-export class SelectionBoxEffect {
+export class SelectionBoxEffectV2 {
   /**
-   * @param {import('../scene/interaction-manager.js').InteractionManager} interactionManager
+   * @param {import('../../scene/interaction-manager.js').InteractionManager} interactionManager
    */
   constructor(interactionManager) {
     this.im = interactionManager;
@@ -23,7 +23,7 @@ export class SelectionBoxEffect {
       this.createSelectionShadow();
       this.createSelectionIllumination();
     } catch (e) {
-      log.warn('Failed to initialize SelectionBoxEffect', e);
+      log.warn('Failed to initialize SelectionBoxEffectV2', e);
     }
   }
 

@@ -7,7 +7,7 @@
 
 import { createLogger } from '../core/log.js';
 import { getGlobalFrameState } from '../core/frame-state.js';
-import { OVERLAY_THREE_LAYER } from '../effects/EffectComposer.js';
+import { OVERLAY_THREE_LAYER } from '../core/render-layers.js';
 
 const log = createLogger('GridRenderer');
 

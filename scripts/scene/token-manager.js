@@ -5,7 +5,7 @@
  */
 
 import { createLogger } from '../core/log.js';
-import { OVERLAY_THREE_LAYER } from '../effects/EffectComposer.js';
+import { OVERLAY_THREE_LAYER } from '../core/render-layers.js';
 import { getLevelsCompatibilityMode, LEVELS_COMPATIBILITY_MODES } from '../foundry/levels-compatibility.js';
 import { isLevelsEnabledForScene } from '../foundry/levels-scene-flags.js';
 import { getPerspectiveElevation } from '../foundry/elevation-context.js';

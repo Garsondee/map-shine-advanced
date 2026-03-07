@@ -32,7 +32,6 @@ import {
   PrismEffectV2,
   WindowLightEffectV2,
   ColorCorrectionEffectV2,
-  FilmGrainEffectV2,
   SharpenEffectV2,
   BloomEffectV2,
   SkyColorEffectV2,
@@ -3941,7 +3940,17 @@ async function createThreeCanvas(scene) {
     log.info('FloorLayerManager initialized');
 
     // Step 4b.1: Initialize tile motion runtime manager
-    // V2: Tile motion (animated tiles) is not needed for raw geometry ->-> skip.
+    if (tileMotionManager) {
+      safeDispose(() => {
+        effectComposer?.removeUpdatable?.(tileMotionManager);
+        tileMotionManager.dispose();
+      }, 'tileMotionManager.dispose(reinit)');
+    }
+    tileMotionManager = new TileMotionManager(tileManager);
+    await Promise.resolve(tileMotionManager.initialize());
+    effectComposer.addUpdatable(tileMotionManager);
+    if (window.MapShine) window.MapShine.tileMotionManager = tileMotionManager;
+    log.info('Tile motion manager initialized');
 
     safeCall(() => loadingOverlay.setStage('scene.sync', 0.35, 'Syncing tiles...', { keepAuto: true }), 'overlay.tiles', Severity.COSMETIC);
 
@@ -4800,11 +4809,6 @@ async function createThreeCanvas(scene) {
         }, 'v2.registerFogUI', Severity.COSMETIC);
 
         safeCall(() => {
-          uiManager.registerEffect('filmGrain', 'Film Grain',
-            FilmGrainEffectV2.getControlSchema(), _makeV2Callback('_filmGrainEffect'), 'global');
-        }, 'v2.registerFilmGrainUI', Severity.COSMETIC);
-
-        safeCall(() => {
           uiManager.registerEffect('sharpen', 'Sharpen',
             SharpenEffectV2.getControlSchema(), _makeV2Callback('_sharpenEffect'), 'global');
         }, 'v2.registerSharpenUI', Severity.COSMETIC);
@@ -5064,7 +5068,7 @@ async function createThreeCanvas(scene) {
           );
         }, 'v2.registerBuildingShadowsUI', Severity.COSMETIC);
 
-        log.info('V2: registered effect controls (Lighting, Specular, SkyColor, WindowLight, Fire, WaterSplashes, SmellyFlies, Lightning, CandleFlames, Bloom, ColorCorrection, FilmGrain, Sharpen, Fog, Water, Cloud, OverheadShadows, BuildingShadows, Lens)');
+        log.info('V2: registered effect controls (Lighting, Specular, SkyColor, WindowLight, Fire, WaterSplashes, SmellyFlies, Lightning, CandleFlames, Bloom, ColorCorrection, Sharpen, Fog, Water, Cloud, OverheadShadows, BuildingShadows, Lens)');
 
         log.info('V2: UI initialized');
     }, 'initializeUI', Severity.DEGRADED);
@@ -5972,12 +5976,16 @@ function _enforceGameplayPixiSuppression() {
     if (needsEditorOverlay) {
       const pixiCanvas = canvas.app?.view;
       const threeCanvas = document.getElementById('map-shine-canvas');
+      if (canvas.app?.renderer?.background) {
+        canvas.app.renderer.background.alpha = 0;
+      }
       if (pixiCanvas) {
         pixiCanvas.style.display = '';
         pixiCanvas.style.visibility = 'visible';
         pixiCanvas.style.opacity = '1';
         pixiCanvas.style.zIndex = '10';
         pixiCanvas.style.pointerEvents = shouldPixiReceiveInput ? 'auto' : 'none';
+        pixiCanvas.style.backgroundColor = 'transparent';
       }
 
       const board = document.getElementById('board');
@@ -5987,9 +5995,13 @@ function _enforceGameplayPixiSuppression() {
         board.style.opacity = '1';
         board.style.zIndex = '10';
         board.style.pointerEvents = shouldPixiReceiveInput ? 'auto' : 'none';
+        board.style.backgroundColor = 'transparent';
       }
 
       if (threeCanvas) {
+        threeCanvas.style.display = '';
+        threeCanvas.style.visibility = 'visible';
+        threeCanvas.style.opacity = '1';
         threeCanvas.style.pointerEvents = shouldPixiReceiveInput ? 'none' : 'auto';
       }
       return;

@@ -1,4 +1,5 @@
-import { EffectBase, RenderLayers, OVERLAY_THREE_LAYER } from '../effects/EffectComposer.js';
+import { EffectBase, RenderLayers } from '../effects/EffectComposer.js';
+import { OVERLAY_THREE_LAYER } from '../core/render-layers.js';
 import { createLogger } from '../core/log.js';
 import { weatherController } from '../core/WeatherController.js';
 import { BatchedRenderer } from '../libs/three.quarks.module.js';

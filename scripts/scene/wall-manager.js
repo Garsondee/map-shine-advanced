@@ -300,7 +300,24 @@ export class WallManager {
     this.walls.forEach((group, wallId) => {
       const wallDoc = canvas.walls?.get?.(wallId)?.document ?? canvas.scene?.walls?.get?.(wallId) ?? null;
       const inActiveBand = this._isWallVisibleAtPerspective(wallDoc);
-      group.visible = visible && inActiveBand;
+
+      // Keep wall groups alive in gameplay so Three door controls remain visible
+      // and interactive. Only hide wall editing visuals when not on Walls layer.
+      group.visible = inActiveBand;
+
+      for (const child of group.children || []) {
+        const type = child?.userData?.type;
+        if (!type) continue;
+
+        if (type === 'doorControl') {
+          child.visible = inActiveBand;
+          continue;
+        }
+
+        if (type === 'wallLine' || type === 'wallHitbox' || type === 'wallEndpoint') {
+          child.visible = visible && inActiveBand;
+        }
+      }
     });
   }
 
@@ -446,7 +463,8 @@ export class WallManager {
           transparent: true,
           opacity: showVisuals ? 0.5 : 0.0,
           side: THREE.DoubleSide,
-          depthWrite: false  // Prevent depth buffer conflicts
+          depthWrite: false,  // Prevent depth buffer conflicts
+          depthTest: false
       });
       bgMat.colorWrite = showVisuals;
       const bg = new THREE.Mesh(bgGeo, bgMat);
@@ -460,7 +478,8 @@ export class WallManager {
           transparent: true,
           opacity: showVisuals ? 0.8 : 0.0,
           side: THREE.DoubleSide,
-          depthWrite: false
+          depthWrite: false,
+          depthTest: false
       });
       borderMat.colorWrite = showVisuals;
       const border = new THREE.Mesh(borderGeo, borderMat);
@@ -482,7 +501,8 @@ export class WallManager {
           transparent: true,
           opacity: showVisuals ? 1.0 : 0.0,
           color: 0xffffff,
-          depthWrite: false
+          depthWrite: false,
+          depthTest: false
       });
       iconMat.colorWrite = showVisuals;
       

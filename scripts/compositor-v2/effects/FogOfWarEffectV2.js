@@ -35,8 +35,13 @@ import { debugLoadingProfiler } from '../../core/debug-loading-profiler.js';
 import { getLevelsCompatibilityMode, LEVELS_COMPATIBILITY_MODES } from '../../foundry/levels-compatibility.js';
 import { isLevelsEnabledForScene, readTileLevelsFlags, tileHasLevelsRange } from '../../foundry/levels-scene-flags.js';
 import { getPerspectiveElevation, isLightVisibleForPerspective } from '../../foundry/elevation-context.js';
+import Coordinates from '../../utils/coordinates.js';
 
 const log = createLogger('FogOfWarEffectV2');
+
+function easeInOutCosine(t) {
+  return (1 - Math.cos(Math.max(0, Math.min(1, t)) * Math.PI)) / 2;
+}
 
 /**
  * Z offset for the fog plane above groundZ.
@@ -86,7 +91,10 @@ export class FogOfWarEffectV2 {
       exploredOpacity: 0.5,
       softness: 6.0,
       noiseStrength: 6.0,
-      noiseSpeed: 0.2
+      noiseSpeed: 0.2,
+      doorFogSyncEnabled: true,
+      doorFogSyncThickness: 0.08,
+      doorFogSyncDefaultDurationMs: 500
     };
 
     // Scene reference
@@ -205,6 +213,120 @@ export class FogOfWarEffectV2 {
     this._lastElevationBandBottom = null;
     /** @type {number|null} Last known elevation band top */
     this._lastElevationBandTop = null;
+
+    // Door->fog transition sync: keep fog reveal/occlusion temporally aligned
+    // with door visual opening/closing rather than snapping instantly on ds.
+    // Keyed by wallId.
+    this._doorFogTransitions = new Map();
+    this._doorStateCache = new Map();
+    this._doorFogDefaultDurationMs = 500;
+    this._doorFogThicknessGrid = 0.35;
+  }
+
+  /**
+   * Build temporary LOS blocker wall-like entries for animated door leaves.
+   * These are injected into VisionPolygonComputer so door transitions cast
+   * proper visibility shadows instead of only masking a thin strip.
+   *
+   * @param {number} nowMs
+   * @returns {{ blockers: Array<object>, transitioningWallIds: Set<string> }}
+   * @private
+   */
+  _buildDoorTransitionBlockingWalls(nowMs) {
+    const empty = { blockers: [], transitioningWallIds: new Set() };
+    if (!this.params?.doorFogSyncEnabled) return empty;
+    if (!this._doorFogTransitions.size) return empty;
+
+    const out = [];
+    const transitioningWallIds = new Set();
+    const walls = canvas?.walls?.placeables;
+    if (!Array.isArray(walls) || !walls.length) return empty;
+
+    for (const wall of walls) {
+      const doc = wall?.document;
+      if (!doc) continue;
+      if (!(Number(doc.door ?? 0) > 0)) continue;
+
+      const state = this._getDoorFogTransitionState(doc.id, nowMs);
+      if (!state) continue;
+      const wallId = String(doc.id || '');
+      if (wallId) transitioningWallIds.add(wallId);
+
+      const c = doc.c;
+      if (!Array.isArray(c) || c.length < 4) continue;
+      const ax = Number(c[0]);
+      const ay = Number(c[1]);
+      const bx = Number(c[2]);
+      const by = Number(c[3]);
+      if (![ax, ay, bx, by].every(Number.isFinite)) continue;
+
+      const wallDx = bx - ax;
+      const wallDy = by - ay;
+      const wallLen = Math.hypot(wallDx, wallDy);
+      if (wallLen <= 0.001) continue;
+
+      const leafSpecs = [];
+
+      // Prefer live door mesh transforms so pivot/swing direction exactly matches render animation.
+      const meshSet = window.MapShine?.doorMeshManager?.doorMeshes?.get(String(doc.id));
+      if (meshSet && typeof meshSet[Symbol.iterator] === 'function') {
+        for (const doorMesh of meshSet) {
+          const mesh = doorMesh?.mesh;
+          if (!mesh) continue;
+          const style = String(doorMesh?.style || mesh?.userData?.style || 'single');
+          const len = style === 'single' ? wallLen : (wallLen * 0.5);
+          if (!(len > 0.001)) continue;
+
+          const foundryPivot = Coordinates.toFoundry(Number(mesh.position.x), Number(mesh.position.y));
+          const foundryAngle = -Number(mesh.rotation.z);
+          leafSpecs.push({
+            px: Number(foundryPivot?.x),
+            py: Number(foundryPivot?.y),
+            angle: foundryAngle,
+            len,
+          });
+        }
+      }
+
+      // Fallback when mesh data is unavailable.
+      if (!leafSpecs.length) {
+        const animationType = String(doc?.animation?.type || 'swing');
+        const strength = Number.isFinite(doc?.animation?.strength) ? Number(doc.animation.strength) : 1;
+        const direction = Number.isFinite(doc?.animation?.direction) ? Number(doc.animation.direction) : 1;
+        const isDouble = !!doc?.animation?.double;
+
+        if ((animationType === 'swing' || animationType === 'swivel') && wallLen > 0.001) {
+          const baseAngleAB = Math.atan2(wallDy, wallDx);
+          const baseDelta = (Math.PI / 2) * strength * state.openFactor;
+          if (isDouble) {
+            const halfLen = wallLen * 0.5;
+            leafSpecs.push({ px: ax, py: ay, angle: baseAngleAB + baseDelta * direction, len: halfLen });
+            leafSpecs.push({ px: bx, py: by, angle: (baseAngleAB + Math.PI) + baseDelta * (-direction), len: halfLen });
+          } else {
+            leafSpecs.push({ px: ax, py: ay, angle: baseAngleAB + baseDelta * direction, len: wallLen });
+          }
+        }
+      }
+
+      for (const leaf of leafSpecs) {
+        if (![leaf.px, leaf.py, leaf.angle, leaf.len].every(Number.isFinite)) continue;
+        const ex = leaf.px + Math.cos(leaf.angle) * leaf.len;
+        const ey = leaf.py + Math.sin(leaf.angle) * leaf.len;
+        if (![ex, ey].every(Number.isFinite)) continue;
+
+        out.push({
+          document: {
+            c: [leaf.px, leaf.py, ex, ey],
+            sight: CONST.WALL_SENSE_TYPES?.NORMAL ?? 20,
+            light: CONST.WALL_SENSE_TYPES?.NORMAL ?? 20,
+            door: CONST.WALL_DOOR_TYPES?.NONE ?? 0,
+            dir: CONST.WALL_DIRECTIONS?.BOTH ?? 0,
+          },
+        });
+      }
+    }
+
+    return { blockers: out, transitioningWallIds };
   }
 
   resetExploration() {
@@ -256,7 +378,7 @@ export class FogOfWarEffectV2 {
           name: 'fog',
           label: 'Fog of War',
           type: 'inline',
-          parameters: ['unexploredColor', 'exploredColor', 'exploredOpacity', 'softness', 'noiseStrength', 'noiseSpeed']
+          parameters: ['unexploredColor', 'exploredColor', 'exploredOpacity', 'softness', 'noiseStrength', 'noiseSpeed', 'doorFogSyncEnabled', 'doorFogSyncThickness', 'doorFogSyncDefaultDurationMs']
         }
       ],
       parameters: {
@@ -266,7 +388,10 @@ export class FogOfWarEffectV2 {
         exploredOpacity: { type: 'slider', min: 0, max: 1, step: 0.05, default: 0.5, label: 'Explored Opacity' },
         softness: { type: 'slider', min: 0, max: 12, step: 0.5, default: 3.0, label: 'Edge Softness' },
         noiseStrength: { type: 'slider', min: 0, max: 12, step: 0.5, default: 2.0, label: 'Edge Distortion (px)' },
-        noiseSpeed: { type: 'slider', min: 0, max: 2, step: 0.05, default: 0.2, label: 'Distortion Speed' }
+        noiseSpeed: { type: 'slider', min: 0, max: 2, step: 0.05, default: 0.2, label: 'Distortion Speed' },
+        doorFogSyncEnabled: { type: 'boolean', default: true, label: 'Door Sync' },
+        doorFogSyncThickness: { type: 'slider', min: 0.01, max: 0.5, step: 0.01, default: 0.08, label: 'Door Sync Thickness' },
+        doorFogSyncDefaultDurationMs: { type: 'slider', min: 50, max: 2500, step: 25, default: 500, label: 'Door Sync Duration (ms)' }
       }
     };
   }
@@ -1103,6 +1228,22 @@ export class FogOfWarEffectV2 {
     this._hookIds.push(['updateToken', Hooks.on('updateToken', () => { this._needsVisionUpdate = true; })]);
     this._hookIds.push(['sightRefresh', Hooks.on('sightRefresh', () => { this._needsVisionUpdate = true; })]);
     this._hookIds.push(['lightingRefresh', Hooks.on('lightingRefresh', () => { this._needsVisionUpdate = true; })]);
+    this._hookIds.push(['createWall', Hooks.on('createWall', () => {
+      this._primeDoorStateCache();
+      this._needsVisionUpdate = true;
+      frameCoordinator.forcePerceptionUpdate();
+    })]);
+    this._hookIds.push(['updateWall', Hooks.on('updateWall', (doc, changes) => {
+      this._onDoorWallUpdated(doc, changes);
+      this._needsVisionUpdate = true;
+      frameCoordinator.forcePerceptionUpdate();
+    })]);
+    this._hookIds.push(['deleteWall', Hooks.on('deleteWall', (doc) => {
+      this._doorFogTransitions.delete(String(doc?.id || ''));
+      this._doorStateCache.delete(String(doc?.id || ''));
+      this._needsVisionUpdate = true;
+      frameCoordinator.forcePerceptionUpdate();
+    })]);
 
     // MS-LVL-060: When the active level context changes (floor navigation),
     // check if the elevation band has changed. If so, reset exploration so
@@ -1113,12 +1254,75 @@ export class FogOfWarEffectV2 {
       this._needsVisionUpdate = true;
       this._checkElevationBandChange();
     })]);
+
+    // Keep local exploration in sync with Foundry's authoritative FogExploration
+    // document lifecycle. This ensures reset/sync events from core UI and sockets
+    // are reflected immediately in the V2 fog accumulation buffers.
+    this._hookIds.push(['deleteFogExploration', Hooks.on('deleteFogExploration', (doc) => {
+      this._onFoundryFogExplorationDeleted(doc);
+    })]);
+    this._hookIds.push(['createFogExploration', Hooks.on('createFogExploration', (doc) => {
+      this._onFoundryFogExplorationChanged(doc);
+    })]);
+    this._hookIds.push(['updateFogExploration', Hooks.on('updateFogExploration', (doc) => {
+      this._onFoundryFogExplorationChanged(doc);
+    })]);
     
     // Initial render: force perception so that any starting
     // controlled token (or vision source) has a valid LOS
     // polygon before the first fog mask is drawn.
+    this._primeDoorStateCache();
     frameCoordinator.forcePerceptionUpdate();
     this._needsVisionUpdate = true; // Initial render
+  }
+
+  _primeDoorStateCache() {
+    const walls = canvas?.walls?.placeables;
+    if (!Array.isArray(walls)) return;
+    for (const wall of walls) {
+      const doc = wall?.document;
+      if (!doc) continue;
+      if (!(Number(doc.door ?? 0) > 0)) continue;
+      this._doorStateCache.set(String(doc.id), Number(doc.ds ?? 0));
+    }
+  }
+
+  /**
+   * @private
+   */
+  _isActiveUserSceneFogDoc(doc) {
+    const sceneId = canvas?.scene?.id;
+    const userId = game?.user?.id;
+    if (!doc || !sceneId || !userId) return false;
+
+    const docSceneId = doc.scene ?? doc._source?.scene ?? doc.parent?.id ?? null;
+    const docUserId = doc.user ?? doc._source?.user ?? null;
+    return (docSceneId === sceneId) && (docUserId === userId);
+  }
+
+  /**
+   * @private
+   */
+  _onFoundryFogExplorationDeleted(doc) {
+    if (!this._isActiveUserSceneFogDoc(doc)) return;
+    this.resetExploration();
+    this._needsVisionUpdate = true;
+    this._hasValidVision = false;
+    this._pendingAccumulation = false;
+  }
+
+  /**
+   * @private
+   */
+  _onFoundryFogExplorationChanged(doc) {
+    if (!this._isActiveUserSceneFogDoc(doc)) return;
+
+    // Reload from Foundry doc so external sync/corrections are reflected in V2.
+    this._explorationLoadedFromFoundry = false;
+    this._explorationLoadAttempts = 0;
+    this._pendingAccumulation = false;
+    this._explorationLoadGeneration++;
+    this._ensureExplorationLoadedFromFoundry();
   }
 
   /**
@@ -1162,6 +1366,207 @@ export class FogOfWarEffectV2 {
     this._hasValidVision = false;
   }
 
+  _onDoorWallUpdated(doc, changes) {
+    const doorType = Number(doc?.door ?? 0);
+    if (!(doorType > 0)) return;
+    if (!changes || !Object.prototype.hasOwnProperty.call(changes, 'ds')) return;
+
+    const wallId = String(doc?.id || '');
+    if (!wallId) return;
+
+    const nextState = Number(changes.ds ?? doc?.ds ?? 0);
+    const cachedPrevState = this._doorStateCache.get(wallId);
+    const prevState = Number.isFinite(cachedPrevState)
+      ? cachedPrevState
+      : (nextState === CONST.WALL_DOOR_STATES.OPEN
+        ? CONST.WALL_DOOR_STATES.CLOSED
+        : CONST.WALL_DOOR_STATES.OPEN);
+    this._doorStateCache.set(wallId, nextState);
+    if (prevState === nextState) return;
+
+    const durationMs = Math.max(
+      1,
+      Number(doc?.animation?.duration)
+      || Number(doc?._source?.animation?.duration)
+      || Number(this.params?.doorFogSyncDefaultDurationMs)
+      || this._doorFogDefaultDurationMs
+    );
+
+    this._doorFogTransitions.set(wallId, {
+      wallId,
+      startTimeMs: performance.now(),
+      durationMs,
+      fromState: prevState,
+      toState: nextState,
+    });
+
+    try {
+      const loop = window.MapShine?.renderLoop;
+      loop?.requestRender?.();
+      loop?.requestContinuousRender?.(Math.min(3000, durationMs + 120));
+    } catch (_) {
+      // Best effort only.
+    }
+  }
+
+  _getDoorFogTransitionState(wallId, nowMs) {
+    const key = String(wallId || '');
+    if (!key) return null;
+
+    const entry = this._doorFogTransitions.get(key);
+    if (!entry) return null;
+
+    const elapsedMs = Math.max(0, nowMs - entry.startTimeMs);
+    const t = entry.durationMs > 0 ? (elapsedMs / entry.durationMs) : 1;
+    if (t >= 1) {
+      this._doorFogTransitions.delete(key);
+      return null;
+    }
+
+    const eased = easeInOutCosine(t);
+    const fromOpen = entry.fromState === CONST.WALL_DOOR_STATES.OPEN ? 1 : 0;
+    const toOpen = entry.toState === CONST.WALL_DOOR_STATES.OPEN ? 1 : 0;
+    const openFactor = fromOpen + (toOpen - fromOpen) * eased;
+
+    return {
+      openFactor,
+      isOpening: toOpen > fromOpen,
+      isClosing: toOpen < fromOpen,
+    };
+  }
+
+  _addDoorTransitionVisionOverlays(THREE, nowMs) {
+    if (!this.params?.doorFogSyncEnabled) return;
+    if (!this._doorFogTransitions.size) return;
+
+    const walls = canvas?.walls?.placeables;
+    if (!Array.isArray(walls) || !walls.length) return;
+
+    const gridSize = Number(canvas?.dimensions?.size ?? 100);
+    const thicknessGrid = Number(this.params?.doorFogSyncThickness ?? this._doorFogThicknessGrid);
+    const halfThickness = Math.max(0.75, gridSize * Math.max(0.01, thicknessGrid)) * 0.5;
+    const offsetX = this.sceneRect.x;
+    const offsetY = this.sceneRect.y;
+
+    for (const wall of walls) {
+      const doc = wall?.document;
+      if (!doc) continue;
+      if (!(Number(doc.door ?? 0) > 0)) continue;
+
+      const state = this._getDoorFogTransitionState(doc.id, nowMs);
+      if (!state) continue;
+
+      const c = doc.c;
+      if (!Array.isArray(c) || c.length < 4) continue;
+      const ax = Number(c[0]) - offsetX;
+      const ay = Number(c[1]) - offsetY;
+      const bx = Number(c[2]) - offsetX;
+      const by = Number(c[3]) - offsetY;
+      if (![ax, ay, bx, by].every(Number.isFinite)) continue;
+
+      const wallDx = bx - ax;
+      const wallDy = by - ay;
+      const wallLen = Math.hypot(wallDx, wallDy);
+      if (wallLen <= 0.001) continue;
+
+      const leafSpecs = [];
+
+      // Prefer live door mesh transform for robust swing direction/pivot.
+      const meshSet = window.MapShine?.doorMeshManager?.doorMeshes?.get(String(doc.id));
+      if (meshSet && typeof meshSet[Symbol.iterator] === 'function') {
+        for (const doorMesh of meshSet) {
+          const mesh = doorMesh?.mesh;
+          if (!mesh) continue;
+          const style = String(doorMesh?.style || mesh?.userData?.style || 'single');
+          const len = style === 'single' ? wallLen : (wallLen * 0.5);
+          if (!(len > 0.001)) continue;
+
+          leafSpecs.push({
+            px: Number(mesh.position.x),
+            py: Number(mesh.position.y),
+            angle: Number(mesh.rotation.z),
+            len,
+          });
+        }
+      }
+
+      if (!leafSpecs.length) {
+        const animationType = String(doc?.animation?.type || 'swing');
+        const strength = Number.isFinite(doc?.animation?.strength) ? Number(doc.animation.strength) : 1;
+        const direction = Number.isFinite(doc?.animation?.direction) ? Number(doc.animation.direction) : 1;
+        const isDouble = !!doc?.animation?.double;
+
+        if ((animationType === 'swing' || animationType === 'swivel') && wallLen > 0.001) {
+          const baseAngleAB = Math.atan2(wallDy, wallDx);
+          const baseDelta = (Math.PI / 2) * strength * state.openFactor;
+
+          if (isDouble) {
+            const halfLen = wallLen * 0.5;
+            leafSpecs.push({ px: ax, py: ay, angle: baseAngleAB + baseDelta * direction, len: halfLen });
+            leafSpecs.push({ px: bx, py: by, angle: (baseAngleAB + Math.PI) + baseDelta * (-direction), len: halfLen });
+          } else {
+            leafSpecs.push({ px: ax, py: ay, angle: baseAngleAB + baseDelta * direction, len: wallLen });
+          }
+        } else {
+          leafSpecs.push({ px: ax, py: ay, angle: Math.atan2(wallDy, wallDx), len: wallLen });
+        }
+      }
+
+      for (const leaf of leafSpecs) {
+        const ex = leaf.px + Math.cos(leaf.angle) * leaf.len;
+        const ey = leaf.py + Math.sin(leaf.angle) * leaf.len;
+        const segDx = ex - leaf.px;
+        const segDy = ey - leaf.py;
+        const segLen = Math.hypot(segDx, segDy);
+        if (segLen <= 0.001) continue;
+
+        const nx = -segDy / segLen;
+        const ny = segDx / segLen;
+        const ox = nx * halfThickness;
+        const oy = ny * halfThickness;
+
+        const shape = new THREE.Shape();
+        shape.moveTo(leaf.px + ox, leaf.py + oy);
+        shape.lineTo(ex + ox, ey + oy);
+        shape.lineTo(ex - ox, ey - oy);
+        shape.lineTo(leaf.px - ox, leaf.py - oy);
+        shape.closePath();
+
+        // Separate geometries/materials per overlay so disposal semantics stay
+        // aligned with existing visionScene child cleanup.
+        if (state.isOpening) {
+          const blocker = new THREE.Mesh(
+            new THREE.ShapeGeometry(shape),
+            new THREE.MeshBasicMaterial({
+              color: 0x000000,
+              transparent: false,
+              depthWrite: false,
+              depthTest: false,
+              side: THREE.DoubleSide,
+            })
+          );
+          blocker.renderOrder = 4;
+          this.visionScene.add(blocker);
+        }
+
+        if (state.isClosing) {
+          const opener = new THREE.Mesh(
+            new THREE.ShapeGeometry(shape),
+            new THREE.MeshBasicMaterial({
+              color: 0xffffff,
+              transparent: false,
+              depthWrite: false,
+              depthTest: false,
+              side: THREE.DoubleSide,
+            })
+          );
+          opener.renderOrder = 5;
+          this.visionScene.add(opener);
+        }
+      }
+    }
+  }
+
   /**
    * Render vision polygons to the world-space render target
    * @private
@@ -1176,6 +1581,9 @@ export class FogOfWarEffectV2 {
       const child = this.visionScene.children[0];
       this.visionScene.remove(child);
       if (child.geometry) child.geometry.dispose();
+      if (child.material && child.material !== this.visionMaterial && child.material !== this.darknessMaterial) {
+        child.material.dispose();
+      }
     }
     
     // Resolve vision tokens:
@@ -1257,7 +1665,20 @@ export class FogOfWarEffectV2 {
 
     const levelsActive = getLevelsCompatibilityMode() !== LEVELS_COMPATIBILITY_MODES.OFF
       && isLevelsEnabledForScene(canvas?.scene);
-    const levelWalls = levelsActive ? (canvas?.walls?.placeables ?? []) : null;
+    const baseWalls = canvas?.walls?.placeables ?? [];
+    const levelWalls = levelsActive ? baseWalls : null;
+    const nowMs = performance.now();
+    const doorTransitionData = this._buildDoorTransitionBlockingWalls(nowMs);
+    const doorTransitionBlockers = doorTransitionData.blockers;
+    const transitioningDoorWallIds = doorTransitionData.transitioningWallIds;
+    const hasDoorTransitionLOSBlockers = doorTransitionBlockers.length > 0;
+    const polygonWalls = (levelsActive ? (levelWalls ?? []) : baseWalls).filter((w) => {
+      const wallId = String(w?.document?.id || '');
+      return !transitioningDoorWallIds.has(wallId);
+    });
+    const polygonWallsWithDoors = hasDoorTransitionLOSBlockers
+      ? polygonWalls.concat(doorTransitionBlockers)
+      : polygonWalls;
     const sceneRect = canvas?.dimensions?.sceneRect;
     const sceneBounds = sceneRect
       ? { x: sceneRect.x, y: sceneRect.y, width: sceneRect.width, height: sceneRect.height }
@@ -1283,7 +1704,22 @@ export class FogOfWarEffectV2 {
         const sightAngle = Number(token.document?.sight?.angle ?? 360);
         const useCustomLevelsPolygon = !Number.isFinite(sightAngle) || sightAngle >= 360;
         if (useCustomLevelsPolygon) {
-          const customPoints = this._computeTokenVisionPolygonPoints(token, levelWalls, sceneBounds);
+          const customPoints = this._computeTokenVisionPolygonPoints(token, polygonWallsWithDoors, sceneBounds);
+          if (customPoints && customPoints.length >= 6) {
+            this._addPolygonPointsToVisionScene(customPoints, THREE);
+            polygonsRendered++;
+            continue;
+          }
+        }
+      }
+
+      // Outside levels mode, use custom polygon while door transitions are active
+      // so animated leaves behave as true LOS blockers, not post-mask strips.
+      if (!levelsActive && hasSight && hasDoorTransitionLOSBlockers) {
+        const sightAngle = Number(token.document?.sight?.angle ?? 360);
+        const useCustomDoorPolygon = !Number.isFinite(sightAngle) || sightAngle >= 360;
+        if (useCustomDoorPolygon) {
+          const customPoints = this._computeTokenVisionPolygonPoints(token, polygonWallsWithDoors, sceneBounds);
           if (customPoints && customPoints.length >= 6) {
             this._addPolygonPointsToVisionScene(customPoints, THREE);
             polygonsRendered++;
@@ -1523,6 +1959,19 @@ export class FogOfWarEffectV2 {
       }
     } catch (e) {
       log.warn('Failed to render revealTokenInFog bubbles:', e);
+    }
+
+    // Door-fog transition overlays (opening/closing smoothing).
+    // Drawn late so they can override prior LOS/light/darkness writes.
+    try {
+      // Only use raster overlays when LOS blockers aren't active (e.g. narrow-angle
+      // cones where we still rely on Foundry polygons). For standard 360 vision,
+      // custom polygon compute with dynamic blockers is authoritative.
+      if (!hasDoorTransitionLOSBlockers) {
+        this._addDoorTransitionVisionOverlays(THREE, nowMs);
+      }
+    } catch (e) {
+      log.warn('Failed to render door transition fog overlays:', e);
     }
     
     // Render to the vision target (always render, even if no polygons ->->
@@ -1821,6 +2270,13 @@ export class FogOfWarEffectV2 {
 
   update(timeInfo) {
     if (!this._initialized || !this.fogPlane) return;
+
+    // Keep the vision mask refreshing while any door transition is active.
+    // Without this, we only render one frame at transition start and the door
+    // sync overlay cannot progress over time.
+    if (this._doorFogTransitions.size > 0) {
+      this._needsVisionUpdate = true;
+    }
 
     // Hard guard against native PIXI fog visuals resurfacing after Foundry
     // refresh hooks. Any resurfaced native fog appears camera-locked.

@@ -212,7 +212,7 @@ export class LensEffectV2 {
       // High-level lens layering model.
       dynamicLayersEnabled: true,
       layerCycleSeconds: 36,
-      lumaSmoothingSeconds: 1.0,
+      lumaSmoothingSeconds: 0.2,
       layerSwapFadeSeconds: 0.8,
 
       autoFocusEnabled: false,
@@ -233,7 +233,7 @@ export class LensEffectV2 {
       lightBurnResponse: 1.15,
       lightBurnIntensity: 0.30,
       lightBurnBlurPx: 1.0,
-      lightBurnDarknessGateEnabled: true,
+      lightBurnDarknessGateEnabled: false,
       lightBurnDarknessStart: 0.45,
       lightBurnDarknessEnd: 0.78,
       lightBurnDarknessInfluence: 1.0,
@@ -246,11 +246,8 @@ export class LensEffectV2 {
 
       structuralSelection: 'auto',
       structuralIntensity: 0.40,
-      structuralLumaReactivity: 0.25,
-      structuralLumaBoost: 1.30,
-      structuralLumaMin: 0.00,
-      structuralLumaMax: 0.70,
-      structuralLumaInfluence: 0.80,
+      structuralLumaReactivity: 0.05,
+      structuralLumaBoost: 1.20,
       structuralClearRadius: 0.00,
       structuralClearSoftness: 0.10,
       structuralDriftX: 0.00006,
@@ -260,11 +257,8 @@ export class LensEffectV2 {
 
       opticalSelection: 'auto',
       opticalIntensity: 0.45,
-      opticalLumaReactivity: 0.55,
-      opticalLumaBoost: 1.70,
-      opticalLumaMin: 0.18,
-      opticalLumaMax: 0.95,
-      opticalLumaInfluence: 0.90,
+      opticalLumaReactivity: 0.35,
+      opticalLumaBoost: 2.00,
       opticalClearRadius: 0.20,
       opticalClearSoftness: 0.12,
       opticalDriftX: 0.00008,
@@ -274,11 +268,8 @@ export class LensEffectV2 {
 
       reactiveSelection: 'auto',
       reactiveIntensity: 0.65,
-      reactiveLumaReactivity: 0.95,
-      reactiveLumaBoost: 2.70,
-      reactiveLumaMin: 0.45,
-      reactiveLumaMax: 1.00,
-      reactiveLumaInfluence: 1.00,
+      reactiveLumaReactivity: 0.50,
+      reactiveLumaBoost: 3.50,
       reactiveClearRadius: 0.28,
       reactiveClearSoftness: 0.14,
       reactiveDriftX: 0.00010,
@@ -289,11 +280,8 @@ export class LensEffectV2 {
       viewfinderEnabled: false,
       viewfinderSelection: 'none',
       viewfinderIntensity: 0.90,
-      viewfinderLumaReactivity: 0.10,
-      viewfinderLumaBoost: 1.10,
-      viewfinderLumaInfluence: 0.0,
-      viewfinderClearRadius: 0.00,
-      viewfinderClearSoftness: 0.10,
+      viewfinderLumaReactivity: 0.00,
+      viewfinderLumaBoost: 1.00,
       viewfinderDriftX: 0.0,
       viewfinderDriftY: 0.0,
       viewfinderPulseMag: 0.0,
@@ -475,9 +463,6 @@ export class LensEffectV2 {
       pulseMag,
       pulseFreq,
       pulsePhase,
-      lumaMin,
-      lumaMax,
-      lumaInfluence,
     } = config;
 
     const s = String(slot);
@@ -492,9 +477,6 @@ export class LensEffectV2 {
     this.params[`overlayPulseMag${s}`] = Math.max(0, Number(pulseMag) || 0);
     this.params[`overlayPulseFreq${s}`] = Math.max(0, Number(pulseFreq) || 0);
     this.params[`overlayPulsePhase${s}`] = Number(pulsePhase) || 0;
-    this.params[`overlayLumaMin${s}`] = clamp01(lumaMin);
-    this.params[`overlayLumaMax${s}`] = clamp01(lumaMax);
-    this.params[`overlayLumaInfluence${s}`] = clamp01(lumaInfluence);
   }
 
   _configureOverlaySlotsForCurrentFrame(timeInfo) {
@@ -518,9 +500,6 @@ export class LensEffectV2 {
       pulseMag: this.params.structuralPulseMag,
       pulseFreq: this.params.structuralPulseFreq,
       pulsePhase: 0.0,
-      lumaMin: this.params.structuralLumaMin,
-      lumaMax: this.params.structuralLumaMax,
-      lumaInfluence: this.params.dynamicLayersEnabled ? this.params.structuralLumaInfluence : 0,
     });
 
     this._applyChannelToSlot(1, {
@@ -535,9 +514,6 @@ export class LensEffectV2 {
       pulseMag: this.params.opticalPulseMag,
       pulseFreq: this.params.opticalPulseFreq,
       pulsePhase: 1.9,
-      lumaMin: this.params.opticalLumaMin,
-      lumaMax: this.params.opticalLumaMax,
-      lumaInfluence: this.params.dynamicLayersEnabled ? this.params.opticalLumaInfluence : 0,
     });
 
     this._applyChannelToSlot(2, {
@@ -552,9 +528,6 @@ export class LensEffectV2 {
       pulseMag: this.params.reactivePulseMag,
       pulseFreq: this.params.reactivePulseFreq,
       pulsePhase: 3.7,
-      lumaMin: this.params.reactiveLumaMin,
-      lumaMax: this.params.reactiveLumaMax,
-      lumaInfluence: this.params.dynamicLayersEnabled ? this.params.reactiveLumaInfluence : 0,
     });
 
     this._applyChannelToSlot(3, {
@@ -569,9 +542,6 @@ export class LensEffectV2 {
       pulseMag: this.params.viewfinderPulseMag,
       pulseFreq: this.params.viewfinderPulseFreq,
       pulsePhase: 0,
-      lumaMin: 0,
-      lumaMax: 1,
-      lumaInfluence: this.params.viewfinderLumaInfluence,
     });
   }
 
@@ -717,7 +687,7 @@ export class LensEffectV2 {
 
         dynamicLayersEnabled: { type: 'boolean', default: true, label: 'Enable Illumination-Driven Dynamics' },
         layerCycleSeconds: { type: 'slider', min: 8, max: 180, step: 1, default: 36, label: 'Auto Texture Cycle (s)' },
-        lumaSmoothingSeconds: { type: 'slider', min: 0.0, max: 3.0, step: 0.05, default: 1.0, label: 'Light Fade Time (s)' },
+        lumaSmoothingSeconds: { type: 'slider', min: 0.0, max: 3.0, step: 0.05, default: 0.2, label: 'Light Fade Time (s)' },
         layerSwapFadeSeconds: { type: 'slider', min: 0.0, max: 3.0, step: 0.05, default: 0.8, label: 'Texture Swap Fade (s)' },
 
         autoFocusEnabled: { type: 'boolean', default: false, label: 'Enable Autofocus Defocus' },
@@ -738,7 +708,7 @@ export class LensEffectV2 {
         lightBurnResponse: { type: 'slider', min: 0.1, max: 3.0, step: 0.05, default: 1.15, label: 'Burn Response' },
         lightBurnIntensity: { type: 'slider', min: 0.0, max: 2.5, step: 0.01, default: 0.30, label: 'Burn Intensity' },
         lightBurnBlurPx: { type: 'slider', min: 0.0, max: 8.0, step: 0.05, default: 1.0, label: 'Burn Blur (px)' },
-        lightBurnDarknessGateEnabled: { type: 'boolean', default: true, label: 'Gate Burn by Scene Darkness' },
+        lightBurnDarknessGateEnabled: { type: 'boolean', default: false, label: 'Gate Burn by Scene Darkness' },
         lightBurnDarknessStart: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.45, label: 'Darkness Gate Start' },
         lightBurnDarknessEnd: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.78, label: 'Darkness Gate End' },
         lightBurnDarknessInfluence: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 1.0, label: 'Darkness Gate Influence' },
@@ -761,8 +731,8 @@ export class LensEffectV2 {
 
         structuralSelection: { type: 'string', default: 'auto', options: structuralOptions, label: 'Texture' },
         structuralIntensity: { type: 'slider', min: 0.0, max: 2.0, step: 0.01, default: 0.40 },
-        structuralLumaReactivity: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.25 },
-        structuralLumaBoost: { type: 'slider', min: 0.5, max: 4.0, step: 0.05, default: 1.30 },
+        structuralLumaReactivity: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.05 },
+        structuralLumaBoost: { type: 'slider', min: 0.5, max: 4.0, step: 0.05, default: 1.20 },
         structuralLumaMin: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.00, label: 'Reveal Luma Min' },
         structuralLumaMax: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.70, label: 'Reveal Luma Max' },
         structuralLumaInfluence: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.80, label: 'Reveal Influence' },
@@ -775,8 +745,8 @@ export class LensEffectV2 {
 
         opticalSelection: { type: 'string', default: 'auto', options: opticalOptions, label: 'Texture' },
         opticalIntensity: { type: 'slider', min: 0.0, max: 2.0, step: 0.01, default: 0.45 },
-        opticalLumaReactivity: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.55 },
-        opticalLumaBoost: { type: 'slider', min: 0.5, max: 4.0, step: 0.05, default: 1.70 },
+        opticalLumaReactivity: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.35 },
+        opticalLumaBoost: { type: 'slider', min: 0.5, max: 4.0, step: 0.05, default: 2.00 },
         opticalLumaMin: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.18, label: 'Reveal Luma Min' },
         opticalLumaMax: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.95, label: 'Reveal Luma Max' },
         opticalLumaInfluence: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.90, label: 'Reveal Influence' },
@@ -789,8 +759,8 @@ export class LensEffectV2 {
 
         reactiveSelection: { type: 'string', default: 'auto', options: reactiveOptions, label: 'Texture' },
         reactiveIntensity: { type: 'slider', min: 0.0, max: 2.0, step: 0.01, default: 0.65 },
-        reactiveLumaReactivity: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.95 },
-        reactiveLumaBoost: { type: 'slider', min: 0.5, max: 5.0, step: 0.05, default: 2.70 },
+        reactiveLumaReactivity: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.50 },
+        reactiveLumaBoost: { type: 'slider', min: 0.5, max: 5.0, step: 0.05, default: 3.50 },
         reactiveLumaMin: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.45, label: 'Reveal Luma Min' },
         reactiveLumaMax: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 1.00, label: 'Reveal Luma Max' },
         reactiveLumaInfluence: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 1.00, label: 'Reveal Influence' },
@@ -1464,12 +1434,21 @@ export class LensEffectV2 {
     const dt = Math.max(1 / 240, Number(this._lastUpdateDeltaSec) || (1 / 60));
     if (tau <= 0.0001) {
       this._smoothedSceneLuma = sampled;
+      // DEBUG: Log raw sampled luma
+      if (Math.random() < 0.01) { // 1% sample rate to avoid spam
+        log.info(`[LensEffectV2 DEBUG] Raw sampled luma: ${sampled.toFixed(3)}, smoothed: ${this._smoothedSceneLuma.toFixed(3)}`);
+      }
       return;
     }
 
     const alpha = 1 - Math.exp(-dt / tau);
     const prev = Number.isFinite(this._smoothedSceneLuma) ? this._smoothedSceneLuma : sampled;
     this._smoothedSceneLuma = prev + (sampled - prev) * alpha;
+    
+    // DEBUG: Log smoothed luma periodically
+    if (Math.random() < 0.01) { // 1% sample rate to avoid spam
+      log.info(`[LensEffectV2 DEBUG] Raw sampled luma: ${sampled.toFixed(3)}, smoothed: ${this._smoothedSceneLuma.toFixed(3)}, tau: ${tau.toFixed(2)}s`);
+    }
   }
 
   // ── Per-frame ────────────────────────────────────────────────────────────────
@@ -1555,20 +1534,18 @@ export class LensEffectV2 {
         Math.max(0, Number(this.params[`overlayPulseFreq${s}`]) || 0),
         Number(this.params[`overlayPulsePhase${s}`]) || 0
       );
-      u[`uOverlayLumaGate${i}`].value.set(
-        clamp01(this.params[`overlayLumaMin${s}`] ?? 0),
-        clamp01(this.params[`overlayLumaMax${s}`] ?? 1),
-        0.08,
-        clamp01(this.params[`overlayLumaInfluence${s}`] ?? 0)
-      );
     }
   }
 
-  render(renderer, camera, inputRT, outputRT) {
+  render(renderer, camera, inputRT, outputRT, lumaSampleRT = null) {
     if (!this._initialized || !this._composeMaterial || !inputRT) return false;
     if (!this.params.enabled) return false;
 
-    this._updateSmoothedSceneLuma(renderer, inputRT);
+    // Let the shader estimate scene luma directly from the input (which includes bloom).
+    // The CPU-side override was causing issues because all buffers are darkened by the
+    // lighting pass when scene darkness is high. The shader's GPU-side estimation works
+    // better because it samples the final image including bloom on bright areas.
+    // this._updateSmoothedSceneLuma(renderer, sampleSource);
 
     if (this.params.lightBurnEnabled) {
       this._updateLightBurnMap(renderer, inputRT, this._lastUpdateDeltaSec, this._lightBurnDarknessGate);
@@ -1581,8 +1558,8 @@ export class LensEffectV2 {
     u.tDiffuse.value = inputRT.texture;
     u.tLightBurnMap.value = this._lightBurnReadRT?.texture ?? this._fallbackBlack;
     u.uResolution.value.set(w, h);
-    u.uSceneLumaOverride.value = clamp01(this._smoothedSceneLuma);
-    u.uUseSceneLumaOverride.value = 1.0;
+    u.uSceneLumaOverride.value = 0.0;
+    u.uUseSceneLumaOverride.value = 0.0;  // Disable CPU override, use GPU estimation
 
     // Keep cover-fit fresh in case screen size or active texture changed.
     if (w !== this._currentScreenW || h !== this._currentScreenH) {

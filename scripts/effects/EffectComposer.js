@@ -11,6 +11,13 @@ import { globalLoadingProfiler } from '../core/loading-profiler.js';
 import { getCacheStats as getAssetCacheStats } from '../assets/loader.js';
 import { frameCoordinator } from '../core/frame-coordinator.js';
 import { getGlobalFrameState } from '../core/frame-state.js';
+import {
+  BLOOM_HOTSPOT_LAYER,
+  OVERLAY_THREE_LAYER,
+  GLOBAL_SCENE_LAYER,
+  ROPE_MASK_LAYER,
+  TILE_FEATURE_LAYERS,
+} from '../core/render-layers.js';
 import { FloorCompositor } from '../compositor-v2/FloorCompositor.js';
 
 const log = createLogger('EffectComposer');
@@ -27,24 +34,12 @@ export const RenderLayers = {
   POST_PROCESSING: { order: 500, name: 'PostProcessing', requiresDepth: false }
 };
 
-export const BLOOM_HOTSPOT_LAYER = 30;
-export const OVERLAY_THREE_LAYER = 31;
-
-/**
- * Layer for scene objects that must render exactly once per frame, in the
- * global scene pass that runs after the per-floor render loop completes.
- * Use this for world-space objects that are floor-agnostic (drawings, notes)
- * and must not be multi-composited (rendered once per floor) during the
- * floor loop. Objects on this layer are excluded from per-floor scene
- * renders and depth captures via camera.layers.disable(GLOBAL_SCENE_LAYER).
- */
-export const GLOBAL_SCENE_LAYER = 29;
-
-export const ROPE_MASK_LAYER = 25;
-
-export const TILE_FEATURE_LAYERS = {
-  CLOUD_SHADOW_BLOCKER: 23,
-  CLOUD_TOP_BLOCKER: 24
+export {
+  BLOOM_HOTSPOT_LAYER,
+  OVERLAY_THREE_LAYER,
+  GLOBAL_SCENE_LAYER,
+  ROPE_MASK_LAYER,
+  TILE_FEATURE_LAYERS,
 };
 
 /**
@@ -660,6 +655,10 @@ export class EffectComposer {
           window.MapShine.playerLightEffectV2 = this._floorCompositorV2._playerLightEffect;
           // Back-compat alias for call sites not yet migrated.
           window.MapShine.playerLightEffect = this._floorCompositorV2._playerLightEffect;
+          // Movement UI overlay (path lines, tile highlights, ghost tokens, drag ghosts).
+          window.MapShine.movementPreviewEffectV2 = this._floorCompositorV2._movementPreviewEffect;
+          // Bus scene reference — used by non-effect code to place overlays.
+          window.MapShine.floorRenderBus = this._floorCompositorV2._renderBus;
         }
       } catch (_) {}
 
@@ -700,7 +699,6 @@ export class EffectComposer {
         'bloom':            '_bloomEffect',
         'colorCorrection':  '_colorCorrectionEffect',
         'filter':           '_filterEffect',
-        'filmGrain':        '_filmGrainEffect',
         'sharpen':          '_sharpenEffect',
         'cloud':            '_cloudEffect',
         'dotScreen':        '_dotScreenEffect',

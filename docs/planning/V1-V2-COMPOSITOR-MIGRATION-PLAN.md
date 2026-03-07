@@ -63,7 +63,7 @@ The old “36+ V1 effects” count is stale. A direct filesystem audit shows `sc
 | IridescenceEffect.js | ✅ Replaced by `IridescenceEffectV2` | V1 file removed; V2 per-tile overlay wired in FloorCompositor + V2 UI. |
 | PrismEffect.js (19KB) | ✅ Yes (`PrismEffectV2`) | V2 per-tile prism overlay now wired; V1 file deleted. |
 | LensflareEffect.js (26KB) | ❌ No | Camera-space flare pass not yet ported. |
-| SelectionBoxEffect.js (39KB) | ❌ No | Token selection UI overlay still in V1 folder. |
+| SelectionBoxEffect.js (39KB) | ✅ Yes (`SelectionBoxEffectV2`) | Migrated to `scripts/compositor-v2/effects/SelectionBoxEffectV2.js`; V1 file removed and InteractionManager now imports V2. |
 | DetectionFilterEffect.js (13KB) | ❌ No | Detection visualization path still V1. |
 | MaskDebugEffect.js (15KB) | ❌ No | V1 debug tooling. |
 | DebugLayerEffect.js (18KB) | ❌ No | V1 debug tooling. |
@@ -1106,3 +1106,66 @@ Files: `scripts/foundry/canvas-replacement.js`
 - Marquee selection works immediately on first load.
 - Grid/editor overlay appears without requiring manual tool swaps.
 - Alt-tab/Alt is no longer required as a user workaround.
+
+---
+
+## Success Story — PlayerLightEffectV2 Torch Particles Rendering Restored
+
+### Problem
+
+Torch light intensity was active, but flame/embers were invisible in V2.
+
+Runtime diagnostics consistently showed:
+- `particleNum: 0`
+- `time: 0`
+- `Batch Renderer: { systemCount: 0, childrenCount: 2 }`
+
+This meant the emitters existed in scene graph, but Quarks had no actively registered systems to simulate.
+
+### What finally fixed it
+
+Files:
+- `scripts/compositor-v2/effects/PlayerLightEffectV2.js`
+- `scripts/compositor-v2/FloorRenderBus.js`
+
+1. **Unblocked runtime update path (hard failure was hidden)**
+   - Added missing `weatherController` import used by torch batch `dt` calculation.
+   - Before this, `BatchedRenderer.update()` path threw a `ReferenceError` and silently prevented simulation from advancing.
+
+2. **Correct Quarks constructor import parity**
+   - Used `ParticleSystem as QuarksParticleSystem` (same import pattern as `FireEffectV2`).
+
+3. **Preserved and attached torch batch in V2 bus scene**
+   - Ensured torch batch renderer survives bus clears and remains attached to the floor bus scene in V2.
+
+4. **Matched FireEffectV2 registration semantics**
+   - Registered systems via `batch.addSystem(system)` and kept emitter scene-graph attachment under the batched renderer (`batch.add(system.emitter)`) for stable world-matrix updates.
+
+5. **Kept torch materials visible and simulation-started**
+   - Removed accidental fully transparent flame material state.
+   - Ensured `system.play()` is called on created torch systems.
+
+### Mistakes made during debugging
+
+1. **Swallowed errors masked the real blocker**
+   - A broad `try/catch` around torch batch update originally hid the `weatherController is not defined` exception.
+   - This made it look like registration/rendering was wrong when simulation never advanced at all.
+
+2. **Assumed emitter presence implied system registration**
+   - `childrenCount > 0` on the batch was misread as success.
+   - The decisive signal was `systemCount`/batch-index mapping for each system, not emitter child count.
+
+3. **Over-corrected emitter parenting during parity pass**
+   - We briefly removed explicit emitter attachment while trying to avoid double-parenting.
+   - In this codebase’s working pattern (`FireEffectV2`), emitter attachment under the batch renderer is intentional and should be preserved.
+
+4. **Used weak diagnostics fields initially**
+   - Early checks looked at generic fields like `shape`/`maxParticles` that are not always authoritative on built Quarks objects.
+   - Better indicators were runtime behavior (`time`, `particleNum`) and batch registration state.
+
+### Outcome
+
+- Torch particles now follow the same runtime architecture as working V2 fire systems.
+- Batch stepping is active and observable.
+- The debugging playbook for future V2 particle issues is now clear:
+  1) verify update path errors, 2) verify batch registration, 3) verify emitter/batch attachment parity, 4) verify runtime counters (`time`, `particleNum`).

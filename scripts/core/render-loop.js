@@ -244,9 +244,7 @@ export class RenderLoop {
       try {
         const inContinuousWindow = now < (this._continuousRenderUntilMs || 0);
 
-        // V2-only runtime: always treat compositor mode as V2.
-        // This keeps rendering on every RAF to avoid stale screen-space outputs.
-        const v2Active = true;
+        // V2-only runtime: always render through the compositor.
 
         // Idle throttling: if camera is not moving, render at a reduced rate.
         // Prefer PIXI camera state (stage pivot/scale) to avoid 1-frame latency.
@@ -289,7 +287,7 @@ export class RenderLoop {
         // Fast path: when adaptive mode is on, nothing can render faster than the
         // highest configured mode cap. On high-refresh displays this avoids extra
         // per-RAF work (camera checks + effect scans) between allowed render ticks.
-        if (adaptiveFpsEnabled && !v2Active) {
+        if (adaptiveFpsEnabled) {
           const since = now - (this._lastComposerRenderTime || 0);
           const fastestFps = Math.max(idleFps, activeFps, continuousFps);
           const minIntervalMs = 1000 / Math.max(1, fastestFps);
@@ -303,7 +301,7 @@ export class RenderLoop {
           effectWantsContinuous = this._getEffectWantsContinuous(now);
         }
 
-        let shouldRender = v2Active || inContinuousWindow || effectWantsContinuous || this._forceNextRender || cameraChanged;
+        let shouldRender = inContinuousWindow || effectWantsContinuous || this._forceNextRender || cameraChanged;
         if (!shouldRender) {
           const since = now - (this._lastComposerRenderTime || 0);
           if (since >= idleIntervalMs) shouldRender = true;
@@ -313,7 +311,7 @@ export class RenderLoop {
         // - active: camera/interactions/forced updates
         // - continuous: ongoing animated effects requesting full-rate updates
         // - idle: falls back to the existing idle throttle target
-        if (shouldRender && adaptiveFpsEnabled && !v2Active) {
+        if (shouldRender && adaptiveFpsEnabled) {
           let targetFps = idleFps;
           if (inContinuousWindow || effectWantsContinuous) targetFps = continuousFps;
           else if (this._forceNextRender || cameraChanged) targetFps = activeFps;

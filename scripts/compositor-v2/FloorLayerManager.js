@@ -25,7 +25,7 @@
 
 import { createLogger } from '../core/log.js';
 import { tileHasLevelsRange, readTileLevelsFlags } from '../foundry/levels-scene-flags.js';
-import { OVERLAY_THREE_LAYER, GLOBAL_SCENE_LAYER } from '../effects/EffectComposer.js';
+import { OVERLAY_THREE_LAYER, GLOBAL_SCENE_LAYER } from '../core/render-layers.js';
 
 const log = createLogger('FloorLayerManager');
 

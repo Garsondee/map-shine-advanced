@@ -130,12 +130,20 @@ export class InputRouter {
     // Skip if already in this mode AND initialized (canvas styles already applied)
     if (this.currentMode === mode && this._initialized) {
       if (mode === InputMode.PIXI) {
+        try {
+          if (canvas?.app?.renderer?.background) {
+            canvas.app.renderer.background.alpha = 0;
+          }
+        } catch (_) {
+        }
+
         const pixiCanvas = canvas.app?.view;
         if (pixiCanvas) {
           pixiCanvas.style.display = '';
           pixiCanvas.style.visibility = 'visible';
           pixiCanvas.style.opacity = '1';
           pixiCanvas.style.pointerEvents = 'auto';
+          pixiCanvas.style.backgroundColor = 'transparent';
         }
         const board = document.getElementById('board');
         if (board && board.tagName === 'CANVAS') {
@@ -144,9 +152,15 @@ export class InputRouter {
           board.style.opacity = '1';
           board.style.zIndex = '10';
           board.style.pointerEvents = 'auto';
+          board.style.backgroundColor = 'transparent';
         }
         const threeCanvas = document.getElementById('map-shine-canvas');
-        if (threeCanvas) threeCanvas.style.pointerEvents = 'none';
+        if (threeCanvas) {
+          threeCanvas.style.display = '';
+          threeCanvas.style.visibility = 'visible';
+          threeCanvas.style.opacity = '1';
+          threeCanvas.style.pointerEvents = 'none';
+        }
       }
       return true;
     }
@@ -170,11 +184,22 @@ export class InputRouter {
       // - In THREE mode, the Three.js canvas handles interaction (tokens, 3D tools)
       //   while PIXI becomes a transparent visual overlay.
       if (mode === InputMode.PIXI) {
+        // Keep PIXI compositor transparent so showing the board for native
+        // wall/light tools does not cover the Three-rendered scene with a
+        // stale/opaque clear color.
+        try {
+          if (canvas?.app?.renderer?.background) {
+            canvas.app.renderer.background.alpha = 0;
+          }
+        } catch (_) {
+        }
+
         // PIXI receives input
         pixiCanvas.style.display = '';
         pixiCanvas.style.visibility = 'visible';
         pixiCanvas.style.pointerEvents = 'auto';
         pixiCanvas.style.opacity = '1';
+        pixiCanvas.style.backgroundColor = 'transparent';
 
         // Foundry's composited board canvas may be separate from canvas.app.view.
         // Keep it visible and interactive whenever PIXI owns interaction.
@@ -188,6 +213,9 @@ export class InputRouter {
         }
         
         // Three.js is render-only
+        threeCanvas.style.display = '';
+        threeCanvas.style.visibility = 'visible';
+        threeCanvas.style.opacity = '1';
         threeCanvas.style.pointerEvents = 'none';
       } else {
         // Three.js receives input

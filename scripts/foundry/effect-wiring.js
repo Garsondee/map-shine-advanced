@@ -22,7 +22,6 @@ import { IridescenceEffectV2 } from '../compositor-v2/effects/IridescenceEffectV
 import { PrismEffectV2 } from '../compositor-v2/effects/PrismEffectV2.js';
 import { WindowLightEffectV2 } from '../compositor-v2/effects/WindowLightEffectV2.js';
 import { ColorCorrectionEffectV2 } from '../compositor-v2/effects/ColorCorrectionEffectV2.js';
-import { FilmGrainEffectV2 } from '../compositor-v2/effects/FilmGrainEffectV2.js';
 import { SharpenEffectV2 } from '../compositor-v2/effects/SharpenEffectV2.js';
 import { BloomEffectV2 } from '../compositor-v2/effects/BloomEffectV2.js';
 import { SkyColorEffectV2 } from '../compositor-v2/effects/SkyColorEffectV2.js';
@@ -51,7 +50,6 @@ export {
   PrismEffectV2,
   WindowLightEffectV2,
   ColorCorrectionEffectV2,
-  FilmGrainEffectV2,
   SharpenEffectV2,
   BloomEffectV2,
   SkyColorEffectV2,
@@ -101,7 +99,6 @@ const CAPABILITIES = [
   { effectId: 'water',             displayName: 'Water',                     category: 'water',        performanceImpact: 'high' },
   { effectId: 'bloom',             displayName: 'Bloom',                     category: 'global',       performanceImpact: 'high' },
   { effectId: 'color-correction',  displayName: 'Color Correction',          category: 'global',       performanceImpact: 'low' },
-  { effectId: 'film-grain',        displayName: 'Film Grain',                category: 'global',       performanceImpact: 'low' },
   { effectId: 'dot-screen',        displayName: 'Dot Screen',                category: 'global',       performanceImpact: 'low' },
   { effectId: 'clouds',            displayName: 'Clouds',                   category: 'atmospheric',  performanceImpact: 'medium' },
   { effectId: 'overhead-shadows',  displayName: 'Overhead Shadows',         category: 'structure',    performanceImpact: 'medium' },
@@ -169,7 +166,6 @@ const GS_ID_TO_EFFECT_ID = new Map([
   ['trees', 'tree'],
   ['bushes', 'bush'],
   ['clouds', 'cloud'],
-  ['film-grain', 'filmGrain'],
   ['dot-screen', 'dotScreen'],
   ['color-correction', 'colorCorrection'],
 ]);

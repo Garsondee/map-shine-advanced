@@ -23,7 +23,7 @@ import { weatherController } from '../../core/WeatherController.js';
 import { probeMaskFile } from '../../assets/loader.js';
 import { tileHasLevelsRange, readTileLevelsFlags } from '../../foundry/levels-scene-flags.js';
 import { SmartWindBehavior } from '../../particles/SmartWindBehavior.js';
-import { OVERLAY_THREE_LAYER } from '../../effects/EffectComposer.js';
+import { OVERLAY_THREE_LAYER } from '../../core/render-layers.js';
 import {
   FireMaskShape,
   FlameLifecycleBehavior,

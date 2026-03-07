@@ -30,7 +30,6 @@
  *   - **SkyColorEffectV2**: Time-of-day atmospheric color grading.
  *   - **BloomEffectV2**: Screen-space glow via UnrealBloomPass.
  *   - **ColorCorrectionEffectV2**: User-authored color grade.
- *   - **FilmGrainEffectV2**: Animated noise overlay (disabled by default).
  *   - **SharpenEffectV2**: Unsharp mask filter (disabled by default).
  *
  * Called by EffectComposer.render() in the V2-only runtime.
@@ -39,6 +38,7 @@
  */
 
 import { createLogger } from '../core/log.js';
+import { OVERLAY_THREE_LAYER } from '../core/render-layers.js';
 import { FloorRenderBus } from './FloorRenderBus.js';
 import { SpecularEffectV2 } from './effects/SpecularEffectV2.js';
 import { FireEffectV2 } from './effects/FireEffectV2.js';
@@ -47,7 +47,6 @@ import { LightingEffectV2 } from './effects/LightingEffectV2.js';
 import { SkyColorEffectV2 } from './effects/SkyColorEffectV2.js';
 import { ColorCorrectionEffectV2 } from './effects/ColorCorrectionEffectV2.js';
 import { BloomEffectV2 } from './effects/BloomEffectV2.js';
-import { FilmGrainEffectV2 } from './effects/FilmGrainEffectV2.js';
 import { SharpenEffectV2 } from './effects/SharpenEffectV2.js';
 import { FilterEffectV2 } from './effects/FilterEffectV2.js';
 import { WaterEffectV2 } from './effects/WaterEffectV2.js';
@@ -73,6 +72,7 @@ import { LensEffectV2 } from './effects/LensEffectV2.js';
 import { LightningEffectV2 } from './effects/LightningEffectV2.js';
 import { AtmosphericFogEffectV2 } from './effects/AtmosphericFogEffectV2.js';
 import { FogOfWarEffectV2 } from './effects/FogOfWarEffectV2.js';
+import { MovementPreviewEffectV2 } from './effects/MovementPreviewEffectV2.js';
 import { PlayerLightEffectV2 } from './effects/PlayerLightEffectV2.js';
 import { SmellyFliesEffect } from '../particles/SmellyFliesEffect.js';
 import { CandleFlamesEffectV2 } from './effects/CandleFlamesEffectV2.js';
@@ -217,12 +217,6 @@ export class FloorCompositor {
      * @type {BloomEffectV2}
      */
     this._bloomEffect = new BloomEffectV2();
-
-    /**
-     * V2 Film Grain Effect: animated noise overlay. Disabled by default.
-     * @type {FilmGrainEffectV2}
-     */
-    this._filmGrainEffect = new FilmGrainEffectV2();
 
     /**
      * V2 Sharpen Effect: unsharp mask filter. Disabled by default.
@@ -380,6 +374,14 @@ export class FloorCompositor {
      */
     this._lensEffect = new LensEffectV2();
 
+    /**
+     * V2 Movement Preview Effect: token path preview lines, tile highlights, ghost
+     * tokens, and drag-ghost sprites — all rendered in the bus scene at the
+     * correct Z above tiles/tokens so they are always visible.
+     * @type {MovementPreviewEffectV2}
+     */
+    this._movementPreviewEffect = new MovementPreviewEffectV2(this._renderBus);
+
     /** @type {boolean} Whether the render bus has been populated this session. */
     this._busPopulated = false;
 
@@ -467,7 +469,7 @@ export class FloorCompositor {
 
       // Alpha-over fog plane onto the same RT.
       renderer.autoClear = false;
-      camera.layers.enable(31);
+      camera.layers.enable(OVERLAY_THREE_LAYER);
       renderer.render(scene, camera);
       return true;
     } finally {
@@ -614,6 +616,14 @@ export class FloorCompositor {
     // ── Effects + hooks ───────────────────────────────────────────────────
     this._renderBus.initialize();
 
+    // Movement preview UI: path lines, tile highlights, ghost tokens, drag ghosts.
+    // Must initialize after _renderBus so _scene is available.
+    try {
+      this._movementPreviewEffect.initialize();
+    } catch (err) {
+      log.warn('FloorCompositor: MovementPreviewEffectV2 initialize failed:', err);
+    }
+
     // Door meshes are still managed by the legacy DoorMeshManager, but in V2
     // only the FloorRenderBus scene is rendered. Re-target existing and future
     // door meshes to the bus scene so door graphics remain visible.
@@ -697,7 +707,6 @@ export class FloorCompositor {
       log.warn('FloorCompositor: FogOfWarEffectV2 overlay setup failed:', err);
     }
     this._bloomEffect.initialize(w, h);
-    this._filmGrainEffect.initialize();
     this._sharpenEffect.initialize();
     if (this._waterEffect) {
       this._waterEffect.initialize();
@@ -1039,7 +1048,6 @@ export class FloorCompositor {
       this._atmosphericFogEffect.update(timeInfo);
       this._fogEffect.update(timeInfo);
       this._bloomEffect.update(timeInfo);
-      this._filmGrainEffect.update(timeInfo);
       this._sharpenEffect.update(timeInfo);
       // Artistic post-processing effects
       try { this._dotScreenEffect?.update?.(timeInfo); } catch (_) {}
@@ -1257,15 +1265,6 @@ export class FloorCompositor {
     }
     if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: cloudTops.blit DONE'); } catch (_) {} }
 
-    // Film grain pass (disabled by default — optional artistic effect).
-    if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: filmGrain.render'); } catch (_) {} }
-    if (this._filmGrainEffect.params.enabled) {
-      const fgOutput = (currentInput === this._postA) ? this._postB : this._postA;
-      this._filmGrainEffect.render(this.renderer, currentInput, fgOutput);
-      currentInput = fgOutput;
-    }
-    if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: filmGrain.render DONE'); } catch (_) {} }
-
     // Sharpen pass (disabled by default — optional artistic effect).
     if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: sharpen.render'); } catch (_) {} }
     if (this._sharpenEffect.params.enabled) {
@@ -1332,10 +1331,14 @@ export class FloorCompositor {
 
     // Stylized lens pass: distortion/chromatic/vignette/grime overlays.
     // This now runs after fog composition so lens artifacts remain on top of FOW.
+    // CRITICAL: Pass _postA as the luma sample source so the lens effect can detect
+    // actual light intensity (albedo × lighting) BEFORE sky color grading darkens it.
+    // We can't use _sceneRT (raw albedo) because it's too dark, and we can't use
+    // currentInput (final graded output) because darkness level has already been applied.
     if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: lens.render'); } catch (_) {} }
     if (this._lensEffect?.enabled && this._lensEffect?.params?.enabled) {
       const lensOutput = (currentInput === this._postA) ? this._postB : this._postA;
-      if (this._lensEffect.render(this.renderer, this.camera, currentInput, lensOutput)) {
+      if (this._lensEffect.render(this.renderer, this.camera, currentInput, lensOutput, this._postA)) {
         currentInput = lensOutput;
       }
     }
@@ -1426,7 +1429,7 @@ export class FloorCompositor {
     renderer.setRenderTarget(null);
     renderer.autoClear = false;
     try {
-      camera.layers.enable(31);
+      camera.layers.enable(OVERLAY_THREE_LAYER);
       renderer.render(scene, camera);
     } finally {
       camera.layers.mask = prevLayerMask;

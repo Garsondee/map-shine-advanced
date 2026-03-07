@@ -1,8 +1,9 @@
 import { createLogger } from '../../core/log.js';
 import Coordinates from '../../utils/coordinates.js';
 import { readWallHeightFlags } from '../../foundry/levels-scene-flags.js';
+import { weatherController } from '../../core/WeatherController.js';
 import { 
-  ParticleSystem, 
+  ParticleSystem as QuarksParticleSystem,
   BatchedRenderer,
   IntervalValue,
   ColorRange,
@@ -628,12 +629,17 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
     this._group = new THREE.Group();
     this._group.name = 'PlayerLight';
     this._group.renderOrder = 200;
+    this._group.userData = this._group.userData || {};
+    this._group.userData.preserveOnBusClear = true;
 
     // Keep torch/spark particles self-contained in V2. This avoids depending on
     // the legacy global particles bridge, which may be absent in V2-only scenes.
     this._torchBatchRenderer = new BatchedRenderer();
+    this._torchBatchRenderer.name = 'PlayerLightTorchBatch';
     this._torchBatchRenderer.renderOrder = 200000;
     this._torchBatchRenderer.frustumCulled = false;
+    this._torchBatchRenderer.userData = this._torchBatchRenderer.userData || {};
+    this._torchBatchRenderer.userData.preserveOnBusClear = true;
     try {
       if (this._torchBatchRenderer.layers && typeof this._torchBatchRenderer.layers.enable === 'function') {
         this._torchBatchRenderer.layers.enable(0);
@@ -650,7 +656,21 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
     this._createDebugOverlay();
 
     this.scene.add(this._group);
-    this.scene.add(this._torchBatchRenderer);
+    // Register torch batch renderer via FloorRenderBus so it participates in
+    // the bus visibility system and camera layer rendering (like FireEffectV2).
+    try {
+      const renderBus = window.MapShine?.effectComposer?._floorCompositorV2?._renderBus;
+      if (renderBus && typeof renderBus.addEffectOverlay === 'function') {
+        renderBus.addEffectOverlay('__player_light_torch_batch__', this._torchBatchRenderer, 0);
+        log.info('PlayerLightEffectV2: torch batch registered via renderBus.addEffectOverlay');
+      } else {
+        this.scene.add(this._torchBatchRenderer);
+        log.warn('PlayerLightEffectV2: renderBus not available, adding batch directly to scene');
+      }
+    } catch (err) {
+      this.scene.add(this._torchBatchRenderer);
+      log.warn('PlayerLightEffectV2: failed to register batch via renderBus:', err);
+    }
 
     this._tryAttachFlashlightToLightScene();
 
@@ -861,6 +881,25 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
   }
 
   update(timeInfo) {
+    // V2 bus repopulation can temporarily detach effect-owned objects.
+    // Reattach defensively so torch particles keep rendering.
+    if (this.scene) {
+      if (this._group && !this._group.parent) this.scene.add(this._group);
+      if (this._torchBatchRenderer && !this._torchBatchRenderer.parent) {
+        // Try renderBus registration first, fall back to direct scene.add
+        try {
+          const renderBus = window.MapShine?.effectComposer?._floorCompositorV2?._renderBus;
+          if (renderBus && typeof renderBus.addEffectOverlay === 'function') {
+            renderBus.addEffectOverlay('__player_light_torch_batch__', this._torchBatchRenderer, 0);
+          } else {
+            this.scene.add(this._torchBatchRenderer);
+          }
+        } catch (_) {
+          this.scene.add(this._torchBatchRenderer);
+        }
+      }
+    }
+
     const torchWasActiveLastFrame = this._torchWasActiveLastFrame;
     const torchPrevTokenId = this._torchPrevTokenId;
     this._torchWasActiveLastFrame = false;
@@ -1133,9 +1172,22 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
           ? weatherController.simulationSpeed
           : 2.0;
         const dtQuarks = clampedDelta * 0.001 * 750 * simSpeed;
+        
+        // DEBUG: Log batch update
+        if (!this._debugBatchUpdateLogged) {
+          log.info(`[TORCH DEBUG] Calling batch.update(${dtQuarks}), systems: ${this._torchBatchRenderer.children?.length ?? 0}`);
+          this._debugBatchUpdateLogged = true;
+        }
+        
         this._torchBatchRenderer.update(dtQuarks);
+      } else {
+        if (!this._debugNoBatchLogged) {
+          log.warn('[TORCH DEBUG] Batch renderer not available or no update method');
+          this._debugNoBatchLogged = true;
+        }
       }
-    } catch (_) {
+    } catch (err) {
+      log.error('[TORCH DEBUG] Batch update threw:', err);
     }
 
     if (this.params.mode === 'flashlight') {
@@ -1236,8 +1288,14 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
 
     if (this._torchBatchRenderer) {
       try {
-        this._torchBatchRenderer.parent?.remove?.(this._torchBatchRenderer);
+        const renderBus = window.MapShine?.effectComposer?._floorCompositorV2?._renderBus;
+        if (renderBus && typeof renderBus.removeEffectOverlay === 'function') {
+          renderBus.removeEffectOverlay('__player_light_torch_batch__');
+        } else {
+          this._torchBatchRenderer.parent?.remove?.(this._torchBatchRenderer);
+        }
       } catch (_) {
+        this._torchBatchRenderer.parent?.remove?.(this._torchBatchRenderer);
       }
       try {
         this._torchBatchRenderer.dispose?.();
@@ -1698,13 +1756,22 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
     const batch = this._torchBatchRenderer || window.MapShineParticles?.batchRenderer;
     if (batch && typeof batch.addSystem === 'function') {
       try {
+        // Remove emitter from _group if it was added there (fallback path).
         if (system.emitter?.parent === this._group) {
           this._group.remove(system.emitter);
         }
+        // Keep parity with FireEffectV2:
+        // 1) register the system with the batch
+        // 2) ensure emitter is attached under the batched renderer so its
+        //    world matrix updates while the renderer is in the scene graph.
         batch.addSystem(system);
+        if (system.emitter) {
+          batch.add(system.emitter);
+        }
         ud._msRegisteredToBatch = true;
         this._torchParticlesRegistered = true;
-      } catch (_) {
+      } catch (err) {
+        log.error('[PlayerLightEffectV2] Failed to register particle system to batch:', err);
       }
     }
 
@@ -1745,8 +1812,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
       depthTest: false,
       depthWrite: false,
       color: 0xffffff,
-      side: THREE.DoubleSide,
-      opacity: 0.0
+      side: THREE.DoubleSide
     });
     material.toneMapped = false;
 
@@ -1768,7 +1834,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
     this._torchFlameMat = material;
 
     // Create particle system for torch
-    const emitter = new PointEmitter();
+    const shape = new PointEmitter();
     
     const cA = new Vector4(1.2, 1.0, 0.6, 0.35);
     const cB = new Vector4(0.8, 0.2, 0.05, 0.0);
@@ -1785,7 +1851,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
       2.0
     );
 
-    const system = new ParticleSystem({
+    const system = new QuarksParticleSystem({
       duration: 1,
       looping: true,
       startLife: new IntervalValue(0.55, 1.1),
@@ -1795,7 +1861,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
       worldSpace: true,
       maxParticles: 1200,
       emissionOverTime: new IntervalValue(70, 120),
-      shape: emitter,
+      shape: shape,
       material: material,
       renderMode: RenderMode.BillBoard,
       renderOrder: 200050,
@@ -1890,7 +1956,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
       3.0
     );
 
-    const system = new ParticleSystem({
+    const system = new QuarksParticleSystem({
       duration: 1,
       looping: true,
       startLife: new IntervalValue(0.25, 0.7),

@@ -12,7 +12,7 @@ import { EffectStackUI } from './effect-stack.js';
 import { DiagnosticCenterManager } from './diagnostic-center.js';
 import { TileMotionDialog } from './tile-motion-dialog.js';
 import { TokenMovementDialog } from './token-movement-dialog.js';
-import { OVERLAY_THREE_LAYER, TILE_FEATURE_LAYERS } from '../effects/EffectComposer.js';
+import { OVERLAY_THREE_LAYER, TILE_FEATURE_LAYERS } from '../core/render-layers.js';
 import * as sceneSettings from '../settings/scene-settings.js';
 import Coordinates from '../utils/coordinates.js';
 import { debugLoadingProfiler } from '../core/debug-loading-profiler.js';

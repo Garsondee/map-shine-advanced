@@ -1819,6 +1819,10 @@ export class TokenMovementManager {
     this._hookIds.push(['deleteCombat', Hooks.on('deleteCombat', () => {
       this._evaluateCombatState();
     })]);
+
+    this._hookIds.push(['preUpdateToken', Hooks.on('preUpdateToken', (tokenDoc, changes, options) => {
+      return this._guardKeyboardTokenUpdate(tokenDoc, changes, options);
+    })]);
   }
 
   _evaluateCombatState() {
@@ -1941,6 +1945,100 @@ export class TokenMovementManager {
     }
 
     return '';
+  }
+
+  /**
+   * Resolve movement constrainOptions payload for a token update.
+   *
+   * @param {TokenDocument|object|null} tokenDoc
+   * @param {object} [options]
+   * @returns {{ignoreWalls?:boolean, ignoreCost?:boolean}}
+   */
+  _resolveIncomingConstrainOptions(tokenDoc, options = {}) {
+    const movement = options?.movement;
+    if (!movement || typeof movement !== 'object') return {};
+
+    const tokenId = String(tokenDoc?.id || '');
+    const directEntry = tokenId ? movement?.[tokenId] : null;
+    const directConstrain = directEntry?.constrainOptions;
+    if (directConstrain && typeof directConstrain === 'object') {
+      return {
+        ignoreWalls: optionsBoolean(directConstrain?.ignoreWalls, false),
+        ignoreCost: optionsBoolean(directConstrain?.ignoreCost, false)
+      };
+    }
+
+    for (const entry of Object.values(movement)) {
+      const constrainOptions = entry?.constrainOptions;
+      if (constrainOptions && typeof constrainOptions === 'object') {
+        return {
+          ignoreWalls: optionsBoolean(constrainOptions?.ignoreWalls, false),
+          ignoreCost: optionsBoolean(constrainOptions?.ignoreCost, false)
+        };
+      }
+    }
+
+    return {};
+  }
+
+  /**
+   * Pre-update guard for keyboard nudges so token docs cannot commit into walls
+   * or half-cell offsets.
+   *
+   * @param {TokenDocument|object|null} tokenDoc
+   * @param {object} changes
+   * @param {object} [options]
+   * @returns {boolean}
+   */
+  _guardKeyboardTokenUpdate(tokenDoc, changes, options = {}) {
+    try {
+      const method = this._resolveIncomingMovementMethod(tokenDoc, options);
+      if (method !== 'keyboard') return true;
+
+      const hasX = Object.prototype.hasOwnProperty.call(changes || {}, 'x');
+      const hasY = Object.prototype.hasOwnProperty.call(changes || {}, 'y');
+      if (!hasX && !hasY) return true;
+
+      const currentTopLeft = {
+        x: asNumber(tokenDoc?.x, 0),
+        y: asNumber(tokenDoc?.y, 0)
+      };
+      const requestedTopLeft = {
+        x: hasX ? asNumber(changes?.x, currentTopLeft.x) : currentTopLeft.x,
+        y: hasY ? asNumber(changes?.y, currentTopLeft.y) : currentTopLeft.y
+      };
+
+      const constrainOptions = this._resolveIncomingConstrainOptions(tokenDoc, options);
+      const validation = this._validateMoveStepTarget(tokenDoc, currentTopLeft, requestedTopLeft, {
+        ignoreWalls: optionsBoolean(options?.ignoreWalls, false) || optionsBoolean(constrainOptions?.ignoreWalls, false),
+        collisionMode: options?.collisionMode || 'closest'
+      });
+
+      if (!validation?.ok) {
+        this._pathfindingLog('warn', '_guardKeyboardTokenUpdate blocked keyboard nudge into invalid target', {
+          token: this._pathfindingTokenMeta(tokenDoc),
+          currentTopLeft,
+          requestedTopLeft,
+          snappedTopLeft: validation?.targetTopLeft || null,
+          reason: validation?.reason || 'invalid-keyboard-step',
+          options
+        });
+        return false;
+      }
+
+      // Normalize to snapped full-cell endpoint so keyboard movement never
+      // commits half-grid offsets.
+      changes.x = validation.targetTopLeft.x;
+      changes.y = validation.targetTopLeft.y;
+      return true;
+    } catch (error) {
+      this._pathfindingLog('warn', '_guardKeyboardTokenUpdate failed unexpectedly; allowing update', {
+        token: this._pathfindingTokenMeta(tokenDoc),
+        changes,
+        options
+      }, error);
+      return true;
+    }
   }
 
   /**
@@ -8417,6 +8515,63 @@ export class TokenMovementManager {
   }
 
   /**
+   * Validate one movement step against grid alignment, scene bounds, and wall
+   * collision using the token's actual current position.
+   *
+   * @param {TokenDocument|object} tokenDoc
+   * @param {{x:number,y:number}} currentTopLeft
+   * @param {{x:number,y:number}} requestedTopLeft
+   * @param {object} [options]
+   * @returns {{ok:boolean, targetTopLeft:{x:number,y:number}, targetCenter:{x:number,y:number}, reason?:string}}
+   */
+  _validateMoveStepTarget(tokenDoc, currentTopLeft, requestedTopLeft, options = {}) {
+    const snappedTopLeft = this._snapTokenTopLeftToGrid(requestedTopLeft, tokenDoc);
+    const targetCenter = this._tokenTopLeftToCenter(snappedTopLeft, tokenDoc);
+
+    if (!this._isTokenTopLeftWithinScene(snappedTopLeft, tokenDoc)) {
+      return {
+        ok: false,
+        targetTopLeft: snappedTopLeft,
+        targetCenter,
+        reason: 'target-out-of-scene-bounds'
+      };
+    }
+
+    const ignoreWalls = optionsBoolean(options?.ignoreWalls, false);
+    if (!ignoreWalls) {
+      const fromCenter = this._tokenTopLeftToCenter(currentTopLeft, tokenDoc);
+      const moved = Math.hypot(
+        asNumber(targetCenter?.x, 0) - asNumber(fromCenter?.x, 0),
+        asNumber(targetCenter?.y, 0) - asNumber(fromCenter?.y, 0)
+      );
+
+      if (moved >= 0.5) {
+        const collision = this._validatePathSegmentCollision(fromCenter, targetCenter, {
+          tokenDoc,
+          options: {
+            ignoreWalls: false,
+            collisionMode: options?.collisionMode || 'closest'
+          }
+        });
+        if (!collision?.ok) {
+          return {
+            ok: false,
+            targetTopLeft: snappedTopLeft,
+            targetCenter,
+            reason: collision?.reason || 'blocked-by-wall'
+          };
+        }
+      }
+    }
+
+    return {
+      ok: true,
+      targetTopLeft: snappedTopLeft,
+      targetCenter
+    };
+  }
+
+  /**
    * @param {string} tokenId
    * @param {{x:number,y:number}} point
    * @param {TokenDocument|object} tokenDoc
@@ -8451,10 +8606,29 @@ export class TokenMovementManager {
       return { ok: false, reason: 'missing-token-doc' };
     }
 
-    const targetTopLeftRaw = this._tokenCenterToTopLeft(point, liveDoc);
-    const targetTopLeft = this._snapTokenTopLeftToGrid(targetTopLeftRaw, liveDoc);
     const currentX = asNumber(liveDoc?.x, NaN);
     const currentY = asNumber(liveDoc?.y, NaN);
+    const currentTopLeft = {
+      x: Number.isFinite(currentX) ? currentX : asNumber(tokenDoc?.x, 0),
+      y: Number.isFinite(currentY) ? currentY : asNumber(tokenDoc?.y, 0)
+    };
+
+    const targetTopLeftRaw = this._tokenCenterToTopLeft(point, liveDoc);
+    const targetCheck = this._validateMoveStepTarget(liveDoc, currentTopLeft, targetTopLeftRaw, options);
+    if (!targetCheck?.ok) {
+      this._pathfindingLog('warn', '_moveTokenToFoundryPoint blocked: invalid or wall-colliding step target', {
+        tokenId,
+        point,
+        currentTopLeft,
+        requestedTopLeft: targetTopLeftRaw,
+        snappedTopLeft: targetCheck?.targetTopLeft || null,
+        reason: targetCheck?.reason || 'invalid-step-target',
+        context,
+        options
+      });
+      return { ok: false, reason: targetCheck?.reason || 'invalid-step-target' };
+    }
+    const targetTopLeft = targetCheck.targetTopLeft;
 
     if (Number.isFinite(currentX) && Number.isFinite(currentY)) {
       const dx = Math.abs(targetTopLeft.x - currentX);

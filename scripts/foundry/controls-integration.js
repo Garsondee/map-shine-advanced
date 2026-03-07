@@ -168,6 +168,59 @@ export class ControlsIntegration {
     }
   }
 
+  /**
+   * Re-apply Foundry-native door icon visibility rules.
+   *
+   * Foundry computes icon visibility from DoorControl.isVisible (vision/FOV aware)
+   * and toggles the controls.doors container with active token workflows.
+   * In Three takeover mode we must re-assert this state because layer/input
+   * transitions can leave the doors container hidden.
+   * @private
+   */
+  _refreshFoundryDoorControlVisibility() {
+    try {
+      // Ensure door controls exist for door walls (Foundry normally does this in
+      // ControlsLayer.drawDoors). In takeover mode this can occasionally drift.
+      for (const wall of canvas?.walls?.placeables || []) {
+        try {
+          if (!wall?.isDoor) continue;
+          if (!wall.doorControl && typeof wall.createDoorControl === 'function') {
+            wall.createDoorControl();
+          }
+        } catch (_) {
+          // Ignore per-wall control creation failures
+        }
+      }
+
+      if (canvas?.controls) {
+        canvas.controls.visible = true;
+      }
+
+      const controlsDoors = canvas?.controls?.doors;
+      if (!controlsDoors) return;
+
+      // Mirror Foundry TokenLayer behavior: door controls are available during
+      // normal gameplay/token interaction.
+      controlsDoors.visible = true;
+      controlsDoors.renderable = true;
+
+      // Mirror CanvasVisibility.restrictVisibility door pass:
+      // for (const door of canvas.controls.doors.children) door.visible = door.isVisible;
+      for (const door of controlsDoors.children || []) {
+        try {
+          if (!door) continue;
+          if ('isVisible' in door) {
+            door.visible = !!door.isVisible;
+          }
+        } catch (_) {
+          // Ignore per-door visibility failures
+        }
+      }
+    } catch (_) {
+      // Best effort only
+    }
+  }
+
   _reassertInputOwnership(reason = '') {
     try {
       if (!this.inputRouter || this.state !== IntegrationState.ACTIVE) return;
@@ -594,6 +647,10 @@ export class ControlsIntegration {
       canvas.walls.visible = true;
       canvas.walls.interactiveChildren = true;
     }
+
+    // Keep Foundry's door-control container active in gameplay and refresh each
+    // door icon visibility using Foundry's own visibility rules.
+    this._refreshFoundryDoorControlVisibility();
   }
 
   /**
@@ -755,6 +812,9 @@ export class ControlsIntegration {
         this._wallsAreTransparent = true;
       }
     }
+
+    // Re-assert Foundry's vision-based door visibility after wall visual updates.
+    this._refreshFoundryDoorControlVisibility();
   }
   
   /**
@@ -783,6 +843,10 @@ export class ControlsIntegration {
           }
         }
       }
+
+      // Re-apply Foundry door visibility after sight refresh updates to ensure
+      // icons match the currently controlled token vision.
+      this._refreshFoundryDoorControlVisibility();
     } catch (_) {
       // Ignore errors
     }
@@ -931,6 +995,7 @@ export class ControlsIntegration {
         // on the next tick.
         setTimeout(() => {
           try {
+            this._refreshFoundryDoorControlVisibility();
             this._updateWallsVisualState();
           } catch (_) {
           }
@@ -971,12 +1036,23 @@ export class ControlsIntegration {
           if (this._wallsAreTransparent && canvas?.walls?.placeables) {
             for (const wall of canvas.walls.placeables) this._makeWallTransparent(wall);
           }
+          this._refreshFoundryDoorControlVisibility();
           this._updateWallsVisualState();
         } catch (_) {
         }
       }, 0);
     });
     this._hookIds.push({ name: 'controlToken', id: controlTokenHookId });
+
+    // Keep door icons in sync whenever Foundry recomputes visibility/FOV.
+    const sightRefreshHookId = Hooks.on('sightRefresh', () => {
+      if (this.state !== IntegrationState.ACTIVE) return;
+      try {
+        this._refreshFoundryDoorControlVisibility();
+      } catch (_) {
+      }
+    });
+    this._hookIds.push({ name: 'sightRefresh', id: sightRefreshHookId });
 
     // Wall refresh - reapply correct visual state based on layer and floor
     const refreshWallHookId = Hooks.on('refreshWall', (wall) => {

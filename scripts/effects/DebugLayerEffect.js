@@ -1,4 +1,5 @@
-import { EffectBase, RenderLayers, OVERLAY_THREE_LAYER } from './EffectComposer.js';
+import { EffectBase, RenderLayers } from './EffectComposer.js';
+import { OVERLAY_THREE_LAYER } from '../core/render-layers.js';
 import { createLogger } from '../core/log.js';
 import Coordinates from '../utils/coordinates.js';
 import { readWallHeightFlags } from '../foundry/levels-scene-flags.js';

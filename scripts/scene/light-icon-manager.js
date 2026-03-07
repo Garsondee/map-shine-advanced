@@ -6,7 +6,7 @@
 
 import { createLogger } from '../core/log.js';
 import Coordinates from '../utils/coordinates.js';
-import { OVERLAY_THREE_LAYER } from '../effects/EffectComposer.js';
+import { OVERLAY_THREE_LAYER } from '../core/render-layers.js';
 import { applyAmbientLightLevelDefaults } from '../foundry/levels-create-defaults.js';
 import { isLightVisibleForPerspective } from '../foundry/elevation-context.js';
 import {

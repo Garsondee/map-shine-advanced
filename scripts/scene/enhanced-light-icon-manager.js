@@ -8,7 +8,7 @@ import { createLogger } from '../core/log.js';
 import Coordinates from '../utils/coordinates.js';
 import { MapShineLightAdapter } from '../effects/MapShineLightAdapter.js';
 import { VisionPolygonComputer } from '../vision/VisionPolygonComputer.js';
-import { OVERLAY_THREE_LAYER } from '../effects/EffectComposer.js';
+import { OVERLAY_THREE_LAYER } from '../core/render-layers.js';
 
 const log = createLogger('EnhancedLightIconManager');
 

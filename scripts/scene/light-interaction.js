@@ -19,7 +19,7 @@
 
 import { createLogger } from '../core/log.js';
 import Coordinates from '../utils/coordinates.js';
-import { OVERLAY_THREE_LAYER } from '../effects/EffectComposer.js';
+import { OVERLAY_THREE_LAYER } from '../core/render-layers.js';
 import { VisionPolygonComputer } from '../vision/VisionPolygonComputer.js';
 
 const log = createLogger('LightInteraction');
@@ -48,12 +48,21 @@ export class LightInteractionHandler {
   get dragState() { return this._im.dragState; }
   get canvasElement() { return this._im.canvasElement; }
 
+  /**
+   * Resolve the active world overlay scene.
+   * In V2 this is the FloorRenderBus scene; in legacy mode it is SceneComposer.scene.
+   */
+  get _overlayScene() {
+    return this._im._getInteractionOverlayScene?.() || this.sceneComposer?.scene || null;
+  }
+
   // ── Selected-Light Outline ────────────────────────────────────────────────
 
   createSelectedLightOutline() {
     try {
       const THREE = window.THREE;
-      if (!THREE) return;
+      const scene = this._overlayScene;
+      if (!THREE || !scene) return;
 
       const points = [
         new THREE.Vector3(-0.5, -0.5, 0),
@@ -76,12 +85,14 @@ export class LightInteractionHandler {
       line.name = 'SelectedLightOutline';
       line.visible = false;
       line.renderOrder = 9999;
+      line.userData = {
+        ...(line.userData || {}),
+        type: 'interactionOverlay'
+      };
       line.layers.set(OVERLAY_THREE_LAYER);
       line.layers.enable(0);
 
-      if (this.sceneComposer?.scene) {
-        this.sceneComposer.scene.add(line);
-      }
+      scene.add(line);
 
       this._im._selectedLightOutline = {
         line,
@@ -216,12 +227,20 @@ export class LightInteractionHandler {
    */
   createLightPreview() {
     const THREE = window.THREE;
+    const scene = this._overlayScene;
+    if (!THREE || !scene) return;
     const lp = this._im.lightPlacement;
 
     lp.previewGroup = new THREE.Group();
     lp.previewGroup.name = 'LightPlacementPreview';
     lp.previewGroup.visible = false;
     lp.previewGroup.position.z = 0;
+    lp.previewGroup.userData = {
+      ...(lp.previewGroup.userData || {}),
+      type: 'interactionOverlay'
+    };
+    lp.previewGroup.layers.set(OVERLAY_THREE_LAYER);
+    lp.previewGroup.layers.enable(0);
 
     const geometry = new THREE.CircleGeometry(0.1, 64);
 
@@ -296,9 +315,7 @@ export class LightInteractionHandler {
     lp.previewBorder = new THREE.LineSegments(borderGeo, borderMat);
     lp.previewGroup.add(lp.previewBorder);
 
-    if (this.sceneComposer.scene) {
-      this.sceneComposer.scene.add(lp.previewGroup);
-    }
+    scene.add(lp.previewGroup);
   }
 
   // ── Translate Gizmo ───────────────────────────────────────────────────────
@@ -306,12 +323,17 @@ export class LightInteractionHandler {
   createTranslateGizmo() {
     try {
       const THREE = window.THREE;
-      if (!THREE || !this.sceneComposer?.scene) return;
+      const scene = this._overlayScene;
+      if (!THREE || !scene) return;
 
       const g = new THREE.Group();
       g.name = 'LightTranslateGizmo';
       g.visible = false;
       g.renderOrder = 10010;
+      g.userData = {
+        ...(g.userData || {}),
+        type: 'interactionOverlay'
+      };
       g.layers.set(OVERLAY_THREE_LAYER);
       g.layers.enable(0);
 
@@ -381,7 +403,7 @@ export class LightInteractionHandler {
       g.add(yArrow);
       g.add(cHandle);
 
-      this.sceneComposer.scene.add(g);
+      scene.add(g);
       this._im._lightTranslate.group = g;
       this._im._lightTranslate.handles = [xHandle, xArrow, yHandle, yArrow, cHandle];
     } catch (_) {
@@ -451,12 +473,17 @@ export class LightInteractionHandler {
   createRadiusRingsGizmo() {
     try {
       const THREE = window.THREE;
-      if (!THREE || !this.sceneComposer?.scene) return;
+      const scene = this._overlayScene;
+      if (!THREE || !scene) return;
 
       const g = new THREE.Group();
       g.name = 'LightRadiusHandlesGizmo';
       g.visible = false;
       g.renderOrder = 10005;
+      g.userData = {
+        ...(g.userData || {}),
+        type: 'interactionOverlay'
+      };
       g.layers.set(OVERLAY_THREE_LAYER);
       g.layers.enable(0);
 
@@ -491,7 +518,7 @@ export class LightInteractionHandler {
       g.add(brightHandle);
       g.add(dimHandle);
 
-      this.sceneComposer.scene.add(g);
+      scene.add(g);
       this._im._lightRadiusRings.group = g;
       this._im._lightRadiusRings.brightHandle = brightHandle;
       this._im._lightRadiusRings.dimHandle = dimHandle;

@@ -15,7 +15,7 @@
 import { createLogger } from '../../core/log.js';
 import { probeMaskFile } from '../../assets/loader.js';
 import { tileHasLevelsRange, readTileLevelsFlags } from '../../foundry/levels-scene-flags.js';
-import { OVERLAY_THREE_LAYER } from '../../effects/EffectComposer.js';
+import { OVERLAY_THREE_LAYER } from '../../core/render-layers.js';
 import {
   ParticleSystem as QuarksParticleSystem,
   BatchedRenderer,

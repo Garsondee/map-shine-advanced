@@ -495,6 +495,62 @@ Hooks.once('init', async function() {
       const tokenControls = getControl('tokens');
       if (!tokenControls || !tokenControls.tools) return;
 
+      // Keep Light layer Fog reset wired even when scene controls are rebuilt.
+      // Foundry core behavior is canvas.fog.reset(); we also clear the V2 fog
+      // accumulation buffer immediately for visual parity before socket roundtrip.
+      if (isGM) {
+        const lightingControls = getControl('lighting');
+        if (lightingControls?.tools) {
+          ensureTool(lightingControls, {
+            name: 'reset',
+            order: 4,
+            title: 'CONTROLS.LightReset',
+            icon: 'fa-solid fa-cloud',
+            button: true,
+            onChange: () => {
+              DialogV2.confirm({
+                window: { title: 'CONTROLS.FOWResetTitle', icon: 'fa-solid fa-cloud' },
+                content: `<p>${game.i18n.localize('CONTROLS.FOWResetDesc')}</p>`,
+                yes: {
+                  callback: async () => {
+                    const resolveV2FogEffect = () => {
+                      try {
+                        return (
+                          window.MapShine?.effectComposer?._floorCompositorV2?._fogEffect
+                          ?? window.MapShine?.effectComposer?._getFloorCompositorV2?.()?._fogEffect
+                          ?? window.MapShine?.floorCompositorV2?._fogEffect
+                          ?? null
+                        );
+                      } catch (_) {
+                        return null;
+                      }
+                    };
+
+                    try {
+                      const fogEffect = resolveV2FogEffect();
+                      if (fogEffect && typeof fogEffect.resetExploration === 'function') {
+                        fogEffect.resetExploration();
+                      }
+                    } catch (_) {
+                      // Fall through to Foundry authoritative reset.
+                    }
+                    await canvas?.fog?.reset?.();
+                    try {
+                      const fogEffect = resolveV2FogEffect();
+                      if (fogEffect && typeof fogEffect.resetExploration === 'function') {
+                        fogEffect.resetExploration();
+                      }
+                    } catch (_) {
+                      // Ignore post-reset local clear failures.
+                    }
+                  }
+                }
+              });
+            }
+          });
+        }
+      }
+
       if (isGM) {
         ensureTool(tokenControls, {
           name: 'map-shine-config',

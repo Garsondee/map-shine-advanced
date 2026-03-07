@@ -26,7 +26,7 @@
 import { createLogger } from '../core/log.js';
 import { tileHasLevelsRange, readTileLevelsFlags } from '../foundry/levels-scene-flags.js';
 import { isTileOverhead } from '../scene/tile-manager.js';
-import { OVERLAY_THREE_LAYER } from '../effects/EffectComposer.js';
+import { OVERLAY_THREE_LAYER } from '../core/render-layers.js';
 
 const log = createLogger('FloorRenderBus');
 
@@ -311,6 +311,14 @@ export class FloorRenderBus {
       const userData = child?.userData;
       const type = userData?.type;
       const name = child?.name || 'unnamed';
+
+      // Preserve long-lived, effect-owned objects that explicitly opt out
+      // of bus clear (for example PlayerLightEffectV2 batch/group objects).
+      if (userData?.preserveOnBusClear === true) {
+        tokenCount++;
+        log.info(`[V2 DEBUG] Preserving persistent effect object: ${name}`);
+        continue;
+      }
       
       // Preserve tokens (type === 'token')
       if (type === 'token') {

@@ -5,7 +5,7 @@
  */
 
 import { createLogger } from '../core/log.js';
-import { GLOBAL_SCENE_LAYER } from '../effects/EffectComposer.js';
+import { GLOBAL_SCENE_LAYER } from '../core/render-layers.js';
 import { getPerspectiveElevation } from '../foundry/elevation-context.js';
 import { readDocLevelsRange, isLevelsEnabledForScene } from '../foundry/levels-scene-flags.js';
 import { getLevelsCompatibilityMode, LEVELS_COMPATIBILITY_MODES } from '../foundry/levels-compatibility.js';

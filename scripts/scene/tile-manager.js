@@ -7,7 +7,7 @@
 
 import { createLogger } from '../core/log.js';
 import { weatherController } from '../core/WeatherController.js';
-import { OVERLAY_THREE_LAYER, TILE_FEATURE_LAYERS } from '../effects/EffectComposer.js';
+import { OVERLAY_THREE_LAYER, TILE_FEATURE_LAYERS } from '../core/render-layers.js';
 import { debugLoadingProfiler } from '../core/debug-loading-profiler.js';
 import { isTileVisibleForPerspective, isBackgroundVisibleForPerspective, isWeatherVisibleForPerspective } from '../foundry/elevation-context.js';
 import { tileHasLevelsRange, isLevelsEnabledForScene, readTileLevelsFlags } from '../foundry/levels-scene-flags.js';

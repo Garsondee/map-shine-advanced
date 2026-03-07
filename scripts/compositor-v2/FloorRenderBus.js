@@ -26,7 +26,6 @@
 import { createLogger } from '../core/log.js';
 import { tileHasLevelsRange, readTileLevelsFlags } from '../foundry/levels-scene-flags.js';
 import { isTileOverhead } from '../scene/tile-manager.js';
-import { OVERLAY_THREE_LAYER } from '../core/render-layers.js';
 
 const log = createLogger('FloorRenderBus');
 
@@ -221,13 +220,13 @@ export class FloorRenderBus {
     const prevColor     = renderer.getClearColor(new THREE.Color());
     const prevAlpha     = renderer.getClearAlpha();
 
-    // Save camera layer mask and enable all floor layers + layer 0 + OVERLAY_THREE_LAYER.
+    // Save camera layer mask and enable all floor layers + layer 0.
     // Tokens and tiles are assigned to floor layers (1-19) by FloorLayerManager,
     // so we must enable those layers to render them. Layer 0 is kept for legacy
-    // compatibility and OVERLAY_THREE_LAYER for UI overlays.
+    // compatibility. OVERLAY_THREE_LAYER is rendered in a late pass by
+    // FloorCompositor so UI can bypass post-processing.
     const prevLayerMask = camera.layers.mask;
     camera.layers.enable(0);
-    camera.layers.enable(OVERLAY_THREE_LAYER);
     // Enable all floor layers (1-19) so tokens/tiles assigned to floors are visible.
     for (let i = 1; i <= 19; i++) {
       camera.layers.enable(i);

@@ -3877,6 +3877,10 @@ async function createThreeCanvas(scene) {
     tokenManager = new TokenManager(threeScene);
     tokenManager.setEffectComposer(effectComposer);
     tokenManager.initialize();
+    // Register as updatable so TokenManager.update() runs every frame.
+    // V2 self-heal in update() migrates token sprites from threeScene into the
+    // FloorRenderBus scene (V2 only renders the bus scene, not threeScene).
+    effectComposer.addUpdatable(tokenManager);
     if (window.MapShine) window.MapShine.tokenManager = tokenManager;
     if (isDebugLoad) dlp.end('manager.TokenManager.init');
     console.log(' -> Manager: TokenManager DONE');
@@ -5511,6 +5515,7 @@ function destroyThreeCanvas() {
 
   // Dispose token manager
   if (tokenManager) {
+    safeDispose(() => { if (effectComposer) effectComposer.removeUpdatable(tokenManager); }, 'removeUpdatable(tokenManager)');
     tokenManager.dispose();
     tokenManager = null;
     log.debug('Token manager disposed');
@@ -5945,44 +5950,29 @@ function _enforceGameplayPixiSuppression() {
       window.mapShine?.inputRouter ||
       controlsIntegration?.inputRouter ||
       null;
-    const pixiEditContext =
-      activeControl === 'walls' ||
-      activeControl === 'lighting' ||
-      activeTool === 'walls' ||
-      activeTool === 'terrain' ||
-      activeTool === 'invisible' ||
-      activeTool === 'ethereal' ||
-      activeTool === 'doors' ||
-      activeTool === 'secret' ||
-      activeTool === 'window' ||
-      activeTool === 'light';
-    const shouldPixiReceiveInput =
-      pixiEditContext ||
-      !!inputRouter?.shouldPixiReceiveInput?.();
-    const needsEditorOverlay =
-      pixiEditContext ||
-      !!canvas?.walls?.active ||
-      !!canvas?.lighting?.active ||
-      activeControl === 'walls' ||
-      activeControl === 'lighting' ||
-      activeTool === 'doors' ||
-      activeTool === 'door' ||
-      activeTool === 'light';
+    // Walls, lighting, and tokens are fully Three.js-native now.
+    // Only need the PIXI overlay for unreplaced layers (drawings, regions,
+    // sounds, notes, templates) — determined by InputRouter.
+    const shouldPixiReceiveInput = !!inputRouter?.shouldPixiReceiveInput?.();
+    const needsEditorOverlay = shouldPixiReceiveInput;
 
     if (window.MapShine) {
       window.MapShine.__forcePixiEditorOverlay = needsEditorOverlay;
     }
 
+    const isV2Active = !!window.MapShine?.__v2Active;
+
     if (needsEditorOverlay) {
       const pixiCanvas = canvas.app?.view;
       const threeCanvas = document.getElementById('map-shine-canvas');
+      const pixiVisualOpacity = isV2Active ? '0' : '1';
       if (canvas.app?.renderer?.background) {
         canvas.app.renderer.background.alpha = 0;
       }
       if (pixiCanvas) {
         pixiCanvas.style.display = '';
         pixiCanvas.style.visibility = 'visible';
-        pixiCanvas.style.opacity = '1';
+        pixiCanvas.style.opacity = pixiVisualOpacity;
         pixiCanvas.style.zIndex = '10';
         pixiCanvas.style.pointerEvents = shouldPixiReceiveInput ? 'auto' : 'none';
         pixiCanvas.style.backgroundColor = 'transparent';
@@ -5992,10 +5982,23 @@ function _enforceGameplayPixiSuppression() {
       if (board && board.tagName === 'CANVAS') {
         board.style.display = '';
         board.style.visibility = 'visible';
-        board.style.opacity = '1';
+        board.style.opacity = pixiVisualOpacity;
         board.style.zIndex = '10';
         board.style.pointerEvents = shouldPixiReceiveInput ? 'auto' : 'none';
         board.style.backgroundColor = 'transparent';
+      }
+
+      // In V2, force-replaced PIXI scene layers to remain hidden even while
+      // temporarily allowing PIXI hit-testing for editor tools.
+      if (isV2Active) {
+        safeCall(() => { if (canvas.primary) canvas.primary.visible = false; }, 'pixiSuppress.primary(editorOverlayV2)', Severity.COSMETIC);
+        safeCall(() => { if (canvas.fog) canvas.fog.visible = false; }, 'pixiSuppress.fog(editorOverlayV2)', Severity.COSMETIC);
+        safeCall(() => {
+          if (!canvas.visibility) return;
+          canvas.visibility.visible = false;
+          if (canvas.visibility.filter) canvas.visibility.filter.enabled = false;
+          if (canvas.visibility.vision) canvas.visibility.vision.visible = false;
+        }, 'pixiSuppress.visibility(editorOverlayV2)', Severity.COSMETIC);
       }
 
       if (threeCanvas) {
@@ -6031,6 +6034,9 @@ function _enforceGameplayPixiSuppression() {
       }
 
       if (threeCanvas) {
+        threeCanvas.style.display = '';
+        threeCanvas.style.visibility = 'visible';
+        threeCanvas.style.opacity = '1';
         threeCanvas.style.pointerEvents = 'none';
       }
       return;
@@ -6055,6 +6061,18 @@ function _enforceGameplayPixiSuppression() {
       }
     }, 'pixiSuppress.pixiCanvasOpacity', Severity.COSMETIC);
 
+    // Always force the Three canvas visible in gameplay mode. Without this,
+    // mode transitions can leave stale display/visibility styles and present
+    // as a blank frame after PIXI is suppressed.
+    safeCall(() => {
+      const threeCanvas = document.getElementById('map-shine-canvas');
+      if (!threeCanvas) return;
+      threeCanvas.style.display = '';
+      threeCanvas.style.visibility = 'visible';
+      threeCanvas.style.opacity = '1';
+      threeCanvas.style.pointerEvents = 'auto';
+    }, 'pixiSuppress.threeCanvasVisible', Severity.COSMETIC);
+
     // Foundry's primary PIXI canvas element is typically #board. In some
     // Foundry versions/skins, canvas.app.view may not be the top-level board
     // element that is actually composited above Three. Hide it explicitly.
@@ -6067,6 +6085,25 @@ function _enforceGameplayPixiSuppression() {
         board.style.pointerEvents = 'none';
       }
     }, 'pixiSuppress.boardCanvas', Severity.COSMETIC);
+
+    // Defense-in-depth: Foundry/module integrations can introduce additional
+    // canvas elements under the same board container. In V2 gameplay, Three.js
+    // must be the only visible scene renderer. Hide every non-MapShine canvas
+    // in that container to prevent stale/static PIXI frames overdraw.
+    safeCall(() => {
+      const board = document.getElementById('board');
+      const container = board?.parentElement ?? null;
+      if (!container) return;
+      const canvases = container.querySelectorAll('canvas');
+      for (const el of canvases) {
+        if (!el) continue;
+        if (el.id === 'map-shine-canvas') continue;
+        el.style.display = 'none';
+        el.style.visibility = 'hidden';
+        el.style.opacity = '0';
+        el.style.pointerEvents = 'none';
+      }
+    }, 'pixiSuppress.extraBoardCanvases', Severity.COSMETIC);
 
     // V12+: primary can render tiles/overheads/roofs. Keep it hidden in gameplay.
     safeCall(() => { if (canvas.primary) canvas.primary.visible = false; }, 'pixiSuppress.primary', Severity.COSMETIC);
@@ -6237,9 +6274,13 @@ function updateLayerVisibility() {
   const activeLayerName = String(activeLayerObj?.options?.name || activeLayerObj?.name || '').toLowerCase();
   const activeLayerCtor = String(activeLayerObj?.constructor?.name || '').toLowerCase();
   const activeControl = String(ui?.controls?.control?.name || ui?.controls?.activeControl || '').toLowerCase();
+  const activeControlLayer = String(ui?.controls?.control?.layer || '').toLowerCase();
   const isActiveLayer = (name) => {
     const normalized = String(name || '').toLowerCase();
-    return (activeLayerName === normalized) || (activeLayerCtor === normalized) || (activeControl === normalized);
+    return (activeLayerName === normalized)
+      || (activeLayerCtor === normalized)
+      || (activeControl === normalized)
+      || (activeControlLayer === normalized);
   };
   const isLightingActive = !!canvas?.lighting?.active;
   const isWallsActiveFlag = !!canvas?.walls?.active;
@@ -6535,14 +6576,27 @@ function updateInputMode() {
       const finalLayerName = String(finalLayerObj?.options?.name || finalLayerObj?.name || '').toLowerCase();
       const finalLayerCtor = String(finalLayerObj?.constructor?.name || '').toLowerCase();
       const finalControl = String(ui?.controls?.control?.name || ui?.controls?.activeControl || '').toLowerCase();
+      const finalControlLayer = String(ui?.controls?.control?.layer || '').toLowerCase();
       const finalTool = String(ui?.controls?.tool?.name || ui?.controls?.activeTool || '').toLowerCase();
       const threeCanvasEl = document.getElementById('map-shine-canvas');
       const isFinalLayer = (name) => {
         const normalized = String(name || '').toLowerCase();
-        return (finalLayerName === normalized) || (finalLayerCtor === normalized) || (finalControl === normalized);
+        return (finalLayerName === normalized)
+          || (finalLayerCtor === normalized)
+          || (finalControl === normalized)
+          || (finalControlLayer === normalized);
       };
-      const isLightingFinal = !!canvas?.lighting?.active || isFinalLayer('lightinglayer') || isFinalLayer('lighting');
-      const isWallsFinal = !!canvas?.walls?.active || isFinalLayer('wallslayer') || isFinalLayer('walllayer') || isFinalLayer('walls');
+      const isLightingFinal =
+        !!canvas?.lighting?.active
+        || isFinalLayer('lightinglayer')
+        || isFinalLayer('lighting')
+        || isFinalLayer('light');
+      const isWallsFinal =
+        !!canvas?.walls?.active
+        || isFinalLayer('wallslayer')
+        || isFinalLayer('walllayer')
+        || isFinalLayer('walls')
+        || isFinalLayer('wall');
       const isEditMode = editLayers.some((l) => isFinalLayer(l)) || isLightingFinal || isWallsFinal;
       const controlMetadataReady = !!(finalLayerName || finalLayerCtor || finalControl);
 
@@ -6553,12 +6607,12 @@ function updateInputMode() {
       // canvas is hidden, so we also hide the icons here for logical
       // consistency.
       if (lightIconManager && lightIconManager.setVisibility) {
-        const showLighting = isLightingFinal && !isMapMakerMode && !v2Active;
+        const showLighting = isLightingFinal && !isMapMakerMode;
         lightIconManager.setVisibility(showLighting);
       }
 
       if (enhancedLightIconManager && enhancedLightIconManager.setVisibility) {
-        const showLighting = isLightingFinal && !isMapMakerMode && !v2Active;
+        const showLighting = isLightingFinal && !isMapMakerMode;
         enhancedLightIconManager.setVisibility(showLighting);
       }
 

@@ -307,6 +307,8 @@ export class EnhancedLightIconManager {
   initialize() {
     if (this.initialized) return;
 
+    this._ensureGroupInActiveRenderScene();
+
     const groundZ = window.MapShine?.sceneComposer?.groundZ ?? 0;
     this.group.position.z = groundZ + 4.0;
 
@@ -315,6 +317,27 @@ export class EnhancedLightIconManager {
 
     this.initialized = true;
     log.info(`EnhancedLightIconManager initialized at z=${this.group.position.z}`);
+  }
+
+  _getActiveRenderScene() {
+    const busScene = window.MapShine?.effectComposer?._floorCompositorV2?._renderBus?._scene
+      ?? window.MapShine?.floorRenderBus?._scene
+      ?? null;
+    return busScene || this.scene || null;
+  }
+
+  _ensureGroupInActiveRenderScene() {
+    const targetScene = this._getActiveRenderScene();
+    if (!targetScene || !this.group) return;
+    if (this.group.parent === targetScene) return;
+
+    try {
+      if (this.group.parent) this.group.parent.remove(this.group);
+      targetScene.add(this.group);
+      this.scene = targetScene;
+      log.info(`EnhancedLightIconManager render scene updated (children=${targetScene.children?.length ?? 0})`);
+    } catch (_) {
+    }
   }
 
   /**
@@ -351,6 +374,13 @@ export class EnhancedLightIconManager {
    * @param {boolean} visible
    */
   setVisibility(visible) {
+    this._ensureGroupInActiveRenderScene();
+
+    const scene = canvas?.scene;
+    if (scene && this.gizmos.size === 0) {
+      this.syncAllLights();
+    }
+
     this.group.visible = visible;
   }
 

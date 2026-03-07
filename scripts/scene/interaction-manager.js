@@ -884,6 +884,7 @@ export class InteractionManager {
 
     // Light interaction world-space visuals.
     reattach(this._selectedLightOutline?.line);
+    reattach(this.wallDraw?.previewLine);
     reattach(this.lightPlacement?.previewGroup);
     reattach(this._lightTranslate?.group);
     reattach(this._lightRadiusRings?.group);
@@ -2017,34 +2018,74 @@ export class InteractionManager {
     const optionsName = String(layer?.options?.name || '').toLowerCase();
     const name = String(layer?.name || '').toLowerCase();
     const ctor = String(layer?.constructor?.name || '').toLowerCase();
-    const sceneControl = String(ui?.controls?.control?.name || ui?.controls?.activeControl || '').toLowerCase();
-    return { optionsName, name, ctor, sceneControl };
+    const sceneControlName = String(ui?.controls?.control?.name || ui?.controls?.activeControl || '').toLowerCase();
+    const sceneControlLayer = String(ui?.controls?.control?.layer || '').toLowerCase();
+    return { optionsName, name, ctor, sceneControlName, sceneControlLayer };
   }
 
   _isLightingContextActive() {
     if (canvas?.lighting?.active) return true;
-    const { optionsName, name, ctor, sceneControl } = this._getActiveLayerMeta();
+    const { optionsName, name, ctor, sceneControlName, sceneControlLayer } = this._getActiveLayerMeta();
     return optionsName === 'lighting'
+      || optionsName === 'light'
       || name === 'lighting'
+      || name === 'light'
       || ctor === 'lightinglayer'
-      || sceneControl === 'lighting';
+      || sceneControlName === 'lighting'
+      || sceneControlName === 'light'
+      || sceneControlLayer === 'lighting'
+      || sceneControlLayer === 'light';
   }
 
   _isWallsContextActive() {
     if (canvas?.walls?.active) return true;
-    const { optionsName, name, ctor, sceneControl } = this._getActiveLayerMeta();
+    const { optionsName, name, ctor, sceneControlName, sceneControlLayer } = this._getActiveLayerMeta();
     return optionsName === 'walls'
+      || optionsName === 'wall'
       || name === 'walls'
+      || name === 'wall'
       || ctor === 'wallslayer'
       || ctor === 'walllayer'
-      || sceneControl === 'walls';
+      || sceneControlName === 'walls'
+      || sceneControlName === 'wall'
+      || sceneControlLayer === 'walls'
+      || sceneControlLayer === 'wall';
+  }
+
+  _isWallDrawTool(toolName) {
+    const tool = String(toolName || '').toLowerCase();
+    if (!tool) return false;
+
+    // Foundry wall tools have varied between singular/plural naming across versions/modules.
+    // Accept both forms so drawing remains resilient.
+    const wallDrawTools = new Set([
+      'wall', 'walls',
+      'terrain',
+      'invisible',
+      'ethereal',
+      'door', 'doors',
+      'secret',
+      'window'
+    ]);
+    return wallDrawTools.has(tool);
+  }
+
+  _isLightDrawTool(toolName) {
+    const tool = String(toolName || '').toLowerCase();
+
+    // Empty tool sometimes appears transiently during control refresh; preserve prior fallback.
+    if (!tool) return true;
+
+    // Foundry/compatibility modules can expose alternative names for ambient light creation.
+    const lightDrawTools = new Set(['light', 'ambientlight', 'ambient', 'draw', 'create', 'place']);
+    return lightDrawTools.has(tool);
   }
 
   _isTokenSelectionContextActive() {
-    const { optionsName, name, ctor, sceneControl } = this._getActiveLayerMeta();
+    const { optionsName, name, ctor, sceneControlName, sceneControlLayer } = this._getActiveLayerMeta();
     const activeTool = String(ui?.controls?.tool?.name ?? ui?.controls?.activeTool ?? game?.activeTool ?? '').toLowerCase();
     const toolAllowsTokenSelect = !activeTool || activeTool === 'select' || activeTool === 'target' || activeTool === 'ruler';
-    const isTokenControl = sceneControl === 'tokens';
+    const isTokenControl = sceneControlName === 'tokens' || sceneControlLayer === 'tokens';
     const isTokenLayer =
       optionsName === 'tokens' ||
       name === 'tokens' ||
@@ -2348,6 +2389,7 @@ export class InteractionManager {
         const routerLayerMeta = this._getActiveLayerMeta();
         const routerActiveLayerName = routerLayerMeta.optionsName || routerLayerMeta.name || routerLayerMeta.ctor;
         const activeTool = ui?.controls?.tool?.name ?? game.activeTool;
+        const clickToMoveButton = this._getClickToMoveButton();
         
         // DEBUG: Log InputRouter state to diagnose why clicks aren't being processed
         log.debug('onPointerDown InputRouter check', {
@@ -2358,58 +2400,18 @@ export class InteractionManager {
           activeTool
         });
 
-        const isTokenLayerName = routerActiveLayerName === 'tokenlayer' || routerActiveLayerName === 'tokenslayer' || routerActiveLayerName === 'tokens';
-        const isTokenSelectTool = activeTool === 'select' || !activeTool;
-        const shouldOverrideRouter = isTokenLayerName && isTokenSelectTool;
         const activeControl = String(ui?.controls?.control?.name ?? ui?.controls?.activeControl ?? '').toLowerCase();
         const normalizedTool = String(activeTool || '').toLowerCase();
-        const isTokenNativeSelectContext =
-          activeControl === 'tokens' &&
-          (!normalizedTool || normalizedTool === 'select' || normalizedTool === 'target' || normalizedTool === 'ruler');
-        const threeOwnsTokenSelection = this._isTokenSelectionContextActive();
-        const clickToMoveButton = this._getClickToMoveButton();
-        const canBypassForClickMove =
-          event.button === clickToMoveButton &&
-          clickToMoveButton === 2 &&
-          this._getSelectedTokenDocs().length > 0;
-        const pixiOwnedContextWithoutRouter =
-          isTokenNativeSelectContext ||
-          activeControl === 'walls' ||
-          activeControl === 'lighting' ||
-          normalizedTool === 'walls' ||
-          normalizedTool === 'terrain' ||
-          normalizedTool === 'invisible' ||
-          normalizedTool === 'ethereal' ||
-          normalizedTool === 'doors' ||
-          normalizedTool === 'secret' ||
-          normalizedTool === 'window' ||
-          normalizedTool === 'light';
 
-        if (isTokenNativeSelectContext && !threeOwnsTokenSelection && !canBypassForClickMove) {
-          log.debug('onPointerDown BLOCKED: token native select context is PIXI-owned', {
-            activeControl,
-            activeTool: normalizedTool,
-            activeLayer: routerActiveLayerName
-          });
-          return;
-        }
-        
-        if (inputRouter && !inputRouter.shouldThreeReceiveInput() && !threeOwnsTokenSelection && !canBypassForClickMove) {
+        // Block interactions when the InputRouter says PIXI should receive input.
+        // Tokens, walls, and lighting are fully Three.js-native and always routed
+        // to THREE by the InputRouter. Only unreplaced layers (drawings, regions,
+        // sounds, notes, templates) will be PIXI-owned.
+        if (inputRouter && !inputRouter.shouldThreeReceiveInput()) {
           log.debug('onPointerDown BLOCKED by InputRouter (PIXI mode active)', {
             currentMode: inputRouter.currentMode,
-            isTokenLayerName,
-            isTokenSelectTool,
-            shouldOverrideRouter,
-            activeTool
-          });
-          return;
-        }
-
-        if (!inputRouter && pixiOwnedContextWithoutRouter && !threeOwnsTokenSelection && !canBypassForClickMove) {
-          log.debug('onPointerDown BLOCKED: no InputRouter and active context is PIXI-owned', {
             activeControl,
-            activeTool: normalizedTool,
-            activeLayer: routerActiveLayerName
+            activeTool
           });
           return;
         }
@@ -2583,11 +2585,12 @@ export class InteractionManager {
               }
             }, 'pointerDown.rightClickLightToggle', Severity.COSMETIC);
 
+            // Defer wall/door raycast to avoid blocking right-click on tokens.
+            // Door interaction is less time-critical than token HUD opening.
             const wallIntersects = this.raycaster.intersectObject(wallGroup, true);
             log.debug('onPointerDown right-click wallIntersects', { count: wallIntersects.length });
+            let doorControl = null;
             if (wallIntersects.length > 0) {
-                let doorControl = null;
-
                 for (const hit of wallIntersects) {
                     let object = hit.object;
                     while(object && object !== wallGroup) {
@@ -2599,20 +2602,33 @@ export class InteractionManager {
                     }
                     if (doorControl) break;
                 }
-
-                if (doorControl) {
-                    if (game.user.isGM) {
-                        this.handleDoorRightClick(doorControl, event);
-                        event.preventDefault();
-                        event.stopPropagation();
-                        event.stopImmediatePropagation();
-                        return;
-                    }
-                }
+            }
+            
+            // Process door interaction if found
+            if (doorControl && game.user.isGM) {
+                this.handleDoorRightClick(doorControl, event);
+                event.preventDefault();
+                event.stopPropagation();
+                event.stopImmediatePropagation();
+                return;
             }
 
-            // Raycast against tokens for HUD
+            // Raycast against tokens for HUD.
+            // Tokens can be rendered on the overlay layer (31), so include it explicitly.
+            const prevTokenRayMask = this.raycaster.layers?.mask;
+            safeCall(() => {
+              if (!this.raycaster.layers) this.raycaster.layers = new THREE.Layers();
+              this.raycaster.layers.set(0);
+              this.raycaster.layers.enable(OVERLAY_THREE_LAYER);
+            }, 'pointerDown.rightClickTokenRayLayers', Severity.COSMETIC);
+
             const tokenIntersects = this.raycaster.intersectObjects(tokenSprites, true);
+
+            safeCall(() => {
+              if (typeof prevTokenRayMask === 'number' && this.raycaster.layers) {
+                this.raycaster.layers.mask = prevTokenRayMask;
+              }
+            }, 'pointerDown.restoreRightClickTokenRayLayers', Severity.COSMETIC);
             log.debug('onPointerDown right-click tokenIntersects', { count: tokenIntersects.length });
             if (tokenIntersects.length > 0) {
                 let sprite = null;
@@ -2632,15 +2648,23 @@ export class InteractionManager {
 
                 log.debug(`Right click down on token: ${tokenDoc.name} (${tokenDoc.id})`);
 
+                const token = canvas?.tokens?.get?.(tokenDoc.id) || null;
+                if (this._openTokenHudViaPixi(token, event, { immediate: true })) {
+                  // Stop propagation of the pointerdown to prevent Foundry's PIXI
+                  // from redundantly processing the right-click (which causes a
+                  // noticeable freeze).
+                  event.preventDefault();
+                  event.stopPropagation();
+                  event.stopImmediatePropagation?.();
+                  return;
+                }
+
+                // Fallback: preserve pointerup-toggle flow if immediate open was unavailable.
                 this.rightClickState.active = true;
                 this.rightClickState.tokenId = tokenDoc.id;
                 this.rightClickState.startPos.set(event.clientX, event.clientY);
                 this.rightClickState.time = Date.now();
 
-                // Stop propagation of the pointerdown to prevent Foundry's PIXI
-                // from redundantly processing the right-click (which causes a
-                // noticeable freeze). The UnifiedCamera still receives the separate
-                // mousedown event for right-drag panning support.
                 event.preventDefault();
                 event.stopPropagation();
                 return;
@@ -2670,7 +2694,7 @@ export class InteractionManager {
         const activeLayerObj = canvas.activeLayer;
         const activeLayerName = activeLayerObj?.name || activeLayerObj?.options?.name || '';
         const activeLayerCtor = activeLayerObj?.constructor?.name || '';
-        const currentTool = ui?.controls?.tool?.name ?? game.activeTool;
+        const currentTool = String(ui?.controls?.tool?.name ?? ui?.controls?.activeTool ?? game.activeTool ?? '').toLowerCase();
 
         const isTokensLayer = activeLayerName === 'TokensLayer' || activeLayerCtor === 'TokenLayer' || activeLayerCtor === 'TokensLayer' || activeLayerName === 'tokens';
         const isWallLayer = this._isWallsContextActive();
@@ -2751,7 +2775,7 @@ export class InteractionManager {
             }
         }
 
-        if (isWallLayer) {
+        if (isWallLayer && this._isWallDrawTool(currentTool)) {
           // Start Wall Drawing on the ground plane (aligned with groundZ)
           const worldPos = this.viewportToWorld(event.clientX, event.clientY, groundZ);
           if (!worldPos) return;
@@ -2775,8 +2799,8 @@ export class InteractionManager {
           const snappedWorld = Coordinates.toWorld(snapped.x, snapped.y);
           
           this.wallDraw.active = true;
-          this.wallDraw.start.set(snappedWorld.x, snappedWorld.y, 0);
-          this.wallDraw.current.set(snappedWorld.x, snappedWorld.y, 0);
+          this.wallDraw.start.set(snappedWorld.x, snappedWorld.y, groundZ);
+          this.wallDraw.current.set(snappedWorld.x, snappedWorld.y, groundZ);
           this.wallDraw.type = currentTool;
           
           // Create preview mesh
@@ -2786,11 +2810,14 @@ export class InteractionManager {
                 color: 0xffffff, 
                 side: THREE.DoubleSide,
                 transparent: true,
-                opacity: 0.5
+                opacity: 0.7,
+                depthTest: false,
+                depthWrite: false
             });
+            material.toneMapped = false;
             this.wallDraw.previewLine = new THREE.Mesh(geometry, material);
             this.wallDraw.previewLine.name = 'WallPreview';
-            this.wallDraw.previewLine.position.z = 3.5;
+            this.wallDraw.previewLine.position.z = groundZ + 3.5;
             this.sceneComposer.scene.add(this.wallDraw.previewLine);
           } else {
             this.wallDraw.previewLine.visible = true;
@@ -2798,7 +2825,7 @@ export class InteractionManager {
           
           // Reset transform
           this.wallDraw.previewLine.position.copy(this.wallDraw.start);
-          this.wallDraw.previewLine.position.z = 3.5;
+          this.wallDraw.previewLine.position.z = groundZ + 3.5;
           this.wallDraw.previewLine.scale.set(0, 1, 1);
           
           // Disable camera controls
@@ -2813,6 +2840,7 @@ export class InteractionManager {
         // When on the Lighting layer with the standard light tool active, allow the GM to
         // place AmbientLight documents directly from the 3D view without swapping modes.
         const isLightingLayer = this._isLightingContextActive();
+        const isLightDrawTool = this._isLightDrawTool(currentTool);
         if (isLightingLayer) {
 
           // 2.5a Check for Existing Lights (Select/Drag)
@@ -2897,6 +2925,8 @@ export class InteractionManager {
           }
 
           // 2.5b Place New Light
+          if (!isLightDrawTool) return;
+
           // Only GM may place lights for now, matching Foundry's default behavior
           if (!game.user.isGM) {
             ui.notifications.warn('Only the GM can place lights in this mode.');
@@ -3128,6 +3158,20 @@ export class InteractionManager {
     // Keep interaction overlays bound to the actively-rendered scene (V2 bus).
     this._ensureInteractionOverlaysInActiveScene();
 
+    // Defensive sync: if layer/control transitions race with hook-driven visibility,
+    // keep Three wall/light visuals aligned with the currently active editing context.
+    safeCall(() => {
+      const showLighting = this._isLightingContextActive();
+      const showWalls = this._isWallsContextActive();
+
+      this.lightIconManager?.setVisibility?.(showLighting);
+
+      const enhancedLightIconManager = window.MapShine?.enhancedLightIconManager;
+      enhancedLightIconManager?.setVisibility?.(showLighting);
+
+      this.wallManager?.setVisibility?.(showWalls);
+    }, 'update.syncWallLightVisibility', Severity.COSMETIC);
+
     // Keep HUD positioned correctly if open
     if (canvas.tokens?.hud?.rendered && canvas.tokens.hud.object) {
       this.updateHUDPosition();
@@ -3253,28 +3297,86 @@ export class InteractionManager {
   /**
    * Update Token HUD position to match Three.js camera
    */
+  _getTokenHudScreenRect(token) {
+    const THREE = window.THREE;
+    const camera = this.sceneComposer?.camera;
+    if (!THREE || !camera || !token) return null;
+
+    const tokenId = String(token?.id || token?.document?.id || '');
+    if (!tokenId) return null;
+
+    const spriteData = this.tokenManager?.tokenSprites?.get?.(tokenId);
+    const sprite = spriteData?.sprite;
+    if (!sprite) return null;
+
+    const origin = new THREE.Vector3();
+    const right = new THREE.Vector3();
+    const up = new THREE.Vector3();
+    const corner = new THREE.Vector3();
+    const camQuat = new THREE.Quaternion();
+
+    sprite.getWorldPosition(origin);
+    camera.getWorldQuaternion(camQuat);
+    right.set(1, 0, 0).applyQuaternion(camQuat);
+    up.set(0, 1, 0).applyQuaternion(camQuat);
+
+    const sx = Math.max(0.0001, Number(sprite.scale?.x || 1));
+    const sy = Math.max(0.0001, Number(sprite.scale?.y || 1));
+    const cx = Number(sprite.center?.x ?? 0.5);
+    const cy = Number(sprite.center?.y ?? 0.5);
+
+    const x0 = (-cx) * sx;
+    const x1 = (1 - cx) * sx;
+    const y0 = (-cy) * sy;
+    const y1 = (1 - cy) * sy;
+
+    const corners = [
+      [x0, y0],
+      [x1, y0],
+      [x1, y1],
+      [x0, y1],
+    ];
+
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+
+    for (const [x, y] of corners) {
+      corner.copy(origin);
+      corner.addScaledVector(right, x);
+      corner.addScaledVector(up, y);
+      const screen = this._worldToClient(corner);
+      if (!screen || !Number.isFinite(screen.x) || !Number.isFinite(screen.y)) continue;
+      minX = Math.min(minX, screen.x);
+      minY = Math.min(minY, screen.y);
+      maxX = Math.max(maxX, screen.x);
+      maxY = Math.max(maxY, screen.y);
+    }
+
+    if (!Number.isFinite(minX) || !Number.isFinite(minY) || !Number.isFinite(maxX) || !Number.isFinite(maxY)) {
+      return null;
+    }
+
+    return {
+      left: minX,
+      top: minY,
+      width: Math.max(1, maxX - minX),
+      height: Math.max(1, maxY - minY),
+    };
+  }
+
   updateHUDPosition() {
       const hud = canvas?.tokens?.hud;
       const token = hud?.object;
       if (!hud || !token) return;
 
-      // Foundry positions HUDs from token PIXI object bounds + uiScale. Using
-      // native positioning avoids drift and scale mismatch from custom CSS transforms.
-      const s = canvas?.dimensions?.uiScale || 1;
-      const left = token.position?.x ?? token.document?.x ?? 0;
-      const top = token.position?.y ?? token.document?.y ?? 0;
-      const bounds = token.bounds || token.getBounds?.();
-      const width = bounds?.width ?? token.w ?? 0;
-      const height = bounds?.height ?? token.h ?? 0;
-
+      // Use Foundry's native HUD positioning which already handles world-to-screen
+      // transforms correctly for both orthographic and perspective cameras.
       safeCall(() => {
-        hud.setPosition?.({
-          left,
-          top,
-          width: width / s,
-          height: height / s,
-          scale: s
-        });
+        if (typeof hud.setPosition === 'function') {
+          hud.setPosition();
+        }
       }, 'updateHUD.nativePosition', Severity.COSMETIC);
   }
 
@@ -3283,8 +3385,39 @@ export class InteractionManager {
     this.openHudTokenId = hudTokenId ? String(hudTokenId) : null;
   }
 
-  _openTokenHudViaPixi(token, event) {
+  _openTokenHudViaPixi(token, event, options = undefined) {
     if (!token) return false;
+
+    const immediate = !!options?.immediate;
+
+    // Primary path: direct HUD bind for immediate right-click parity without
+    // requiring prior token selection.
+    const hud = token.layer?.hud;
+    if (hud) {
+      const ownsToken = !!token.document?.isOwner;
+      if (ownsToken) {
+        // Defer HUD binding to next frame to avoid blocking the right-click event.
+        // The freeze happens during Foundry's HUD rendering, not in our code.
+        requestAnimationFrame(() => {
+          safeCall(() => {
+            if (!token.controlled) {
+              token.control?.({ releaseOthers: false });
+            }
+
+            if (this.openHudTokenId === token.id && !immediate) {
+              hud.close?.();
+            } else {
+              hud.bind?.(token);
+              hud.setPosition?.();
+            }
+          }, 'rightClick.openHudDirect', Severity.COSMETIC);
+
+          this._syncOpenHudTokenIdFromFoundry();
+          if (this.openHudTokenId) this.updateHUDPosition();
+        });
+        return true;
+      }
+    }
 
     let handledByFoundry = false;
 
@@ -3908,7 +4041,8 @@ export class InteractionManager {
         // Case 0.5: Wall Drawing
         if (this.wallDraw.active) {
           this.updateMouseCoords(event);
-          const worldPos = this.viewportToWorld(event.clientX, event.clientY, 0);
+          const targetZ = this.wallDraw.start?.z ?? (this.sceneComposer?.groundZ ?? 0);
+          const worldPos = this.viewportToWorld(event.clientX, event.clientY, targetZ);
           if (worldPos) {
             // Snap current position
             const foundryPos = Coordinates.toFoundry(worldPos.x, worldPos.y);
@@ -3927,7 +4061,7 @@ export class InteractionManager {
             
             const snappedWorld = Coordinates.toWorld(snapped.x, snapped.y);
             
-            this.wallDraw.current.set(snappedWorld.x, snappedWorld.y, 0);
+            this.wallDraw.current.set(snappedWorld.x, snappedWorld.y, this.wallDraw.start.z || 0);
             
             // Update geometry (Mesh transform)
             const dx = this.wallDraw.current.x - this.wallDraw.start.x;
@@ -3939,7 +4073,7 @@ export class InteractionManager {
             mesh.position.set(
                 (this.wallDraw.start.x + this.wallDraw.current.x) / 2,
                 (this.wallDraw.start.y + this.wallDraw.current.y) / 2,
-                3.5
+                (this.wallDraw.start.z || 0) + 3.5
             );
             mesh.rotation.z = angle;
             mesh.scale.set(length, 1, 1);
@@ -4489,9 +4623,13 @@ export class InteractionManager {
           this._resetMoveClickState();
 
           if (pendingTokenDoc && pendingWorldPos) {
-            await safeCall(async () => {
-              await this._handleRightClickMovePreview(pendingTokenDoc, pendingWorldPos, pendingTokenDocs);
-            }, 'pointerUp.clickMovePreview', Severity.DEGRADED);
+            // Defer pathfinding to next frame to avoid blocking the pointerup event.
+            // This prevents the 1-2 second freeze when right-clicking for click-to-move.
+            requestAnimationFrame(async () => {
+              await safeCall(async () => {
+                await this._handleRightClickMovePreview(pendingTokenDoc, pendingWorldPos, pendingTokenDocs);
+              }, 'pointerUp.clickMovePreview', Severity.DEGRADED);
+            });
 
             event.preventDefault();
             event.stopPropagation();

@@ -9,6 +9,7 @@ import Coordinates from '../utils/coordinates.js';
 import { applyWallLevelDefaults, getFiniteActiveLevelBand, shouldApplyLevelCreateDefaults } from '../foundry/levels-create-defaults.js';
 import { readWallHeightFlags } from '../foundry/levels-scene-flags.js';
 import { getPerspectiveElevation } from '../foundry/elevation-context.js';
+import { OVERLAY_THREE_LAYER } from '../core/render-layers.js';
 
 const log = createLogger('WallManager');
 
@@ -67,6 +68,8 @@ export class WallManager {
   initialize() {
     if (this.initialized) return;
 
+    this._ensureWallGroupInActiveRenderScene();
+
     // Update Z position based on groundZ
     const groundZ = window.MapShine?.sceneComposer?.groundZ ?? 0;
     this.wallGroup.position.z = groundZ + 3.0;
@@ -76,6 +79,27 @@ export class WallManager {
     
     this.initialized = true;
     log.info(`WallManager initialized at z=${this.wallGroup.position.z}`);
+  }
+
+  _getActiveRenderScene() {
+    const busScene = window.MapShine?.effectComposer?._floorCompositorV2?._renderBus?._scene
+      ?? window.MapShine?.floorRenderBus?._scene
+      ?? null;
+    return busScene || this.scene || null;
+  }
+
+  _ensureWallGroupInActiveRenderScene() {
+    const targetScene = this._getActiveRenderScene();
+    if (!targetScene || !this.wallGroup) return;
+    if (this.wallGroup.parent === targetScene) return;
+
+    try {
+      if (this.wallGroup.parent) this.wallGroup.parent.remove(this.wallGroup);
+      targetScene.add(this.wallGroup);
+      this.scene = targetScene;
+      log.info(`WallManager render scene updated (children=${targetScene.children?.length ?? 0})`);
+    } catch (_) {
+    }
   }
 
   /**
@@ -120,6 +144,14 @@ export class WallManager {
     })]);
 
     this._hookIds.push(['mapShineLevelContextChanged', Hooks.on('mapShineLevelContextChanged', () => {
+      this.updateVisibility();
+    })]);
+
+    this._hookIds.push(['controlToken', Hooks.on('controlToken', () => {
+      this.updateVisibility();
+    })]);
+
+    this._hookIds.push(['sightRefresh', Hooks.on('sightRefresh', () => {
       this.updateVisibility();
     })]);
   }
@@ -206,9 +238,18 @@ export class WallManager {
   _shouldShowWallLines() {
     try {
       const active = canvas?.activeLayer;
-      const activeName = active?.options?.name || active?.name || active?.constructor?.name || '';
+      const activeName = String(active?.options?.name || active?.name || active?.constructor?.name || '').toLowerCase();
+      const activeControlName = String(ui?.controls?.control?.name || ui?.controls?.activeControl || '').toLowerCase();
+      const activeControlLayer = String(ui?.controls?.control?.layer || '').toLowerCase();
       if (active === canvas?.walls) return true;
-      return activeName === 'WallsLayer' || activeName === 'walls';
+      return activeName === 'wallslayer'
+        || activeName === 'walllayer'
+        || activeName === 'walls'
+        || activeName === 'wall'
+        || activeControlName === 'walls'
+        || activeControlName === 'wall'
+        || activeControlLayer === 'walls'
+        || activeControlLayer === 'wall';
     } catch (_) {
       return false;
     }
@@ -267,6 +308,10 @@ export class WallManager {
    * Update visibility based on current active layer state
    */
   updateVisibility() {
+    // V2 self-heal: when FloorRenderBus becomes active after manager init,
+    // move walls/door controls into the actually rendered scene.
+    this._ensureWallGroupInActiveRenderScene();
+
     const showLines = this._shouldShowWallLines();
     this.setVisibility(showLines);
   }
@@ -292,33 +337,258 @@ export class WallManager {
     return (bottom <= elevation) && (elevation <= top);
   }
 
+  _getSelectedTokenDocs() {
+    const docs = [];
+    const seen = new Set();
+    const isGM = game?.user?.isGM ?? false;
+
+    const addDoc = (tokenDoc) => {
+      const tokenId = String(tokenDoc?.id || '');
+      if (!tokenId || seen.has(tokenId)) return;
+      seen.add(tokenId);
+      docs.push(tokenDoc);
+    };
+
+    try {
+      const interactionManager = window.MapShine?.interactionManager;
+      if (interactionManager?.selection && interactionManager?.tokenManager?.tokenSprites) {
+        for (const id of interactionManager.selection) {
+          const tokenDoc = interactionManager.tokenManager.tokenSprites.get(id)?.tokenDoc;
+          addDoc(tokenDoc);
+        }
+      }
+    } catch (_) {
+    }
+
+    if (docs.length === 0) {
+      for (const token of canvas?.tokens?.controlled || []) {
+        addDoc(token?.document);
+      }
+    }
+
+    if (docs.length === 0) {
+      const observed = canvas?.tokens?.observed;
+      if (Array.isArray(observed)) {
+        for (const token of observed) addDoc(token?.document);
+      } else {
+        addDoc(observed?.document);
+      }
+    }
+
+    if (!isGM && docs.length === 0) {
+      try {
+        const user = game?.user;
+        const placeables = canvas?.tokens?.placeables || [];
+        for (const token of placeables) {
+          const doc = token?.document;
+          if (!doc) continue;
+          let isOwner = token?.isOwner === true || doc?.isOwner === true;
+          if (!isOwner && typeof doc?.testUserPermission === 'function' && user) {
+            try {
+              isOwner = doc.testUserPermission(user, 'OWNER');
+            } catch (_) {
+              isOwner = false;
+            }
+          }
+          if (isOwner) addDoc(doc);
+        }
+      } catch (_) {
+      }
+    }
+
+    return docs;
+  }
+
+  _getEffectiveVisionTokens() {
+    const tokens = [];
+    const seen = new Set();
+    const isGM = game?.user?.isGM ?? false;
+    const addToken = (token) => {
+      const tokenId = String(token?.document?.id || '');
+      if (!tokenId || seen.has(tokenId)) return;
+      seen.add(tokenId);
+      tokens.push(token);
+    };
+
+    try {
+      const interactionManager = window.MapShine?.interactionManager;
+      const selection = interactionManager?.selection;
+      const placeables = canvas?.tokens?.placeables || [];
+      if (selection && placeables.length) {
+        for (const id of selection) {
+          const token = placeables.find((candidate) => candidate?.document?.id === id);
+          if (token) addToken(token);
+        }
+      }
+    } catch (_) {
+    }
+
+    if (!tokens.length) {
+      for (const token of canvas?.tokens?.controlled || []) addToken(token);
+    }
+
+    if (!tokens.length) {
+      const observed = canvas?.tokens?.observed;
+      if (Array.isArray(observed)) {
+        for (const token of observed) addToken(token);
+      } else {
+        addToken(observed);
+      }
+    }
+
+    if (!isGM && !tokens.length) {
+      for (const token of canvas?.tokens?.placeables || []) {
+        const doc = token?.document;
+        if (!doc) continue;
+        let isOwner = token?.isOwner === true || doc?.isOwner === true;
+        if (!isOwner && typeof doc?.testUserPermission === 'function') {
+          try {
+            isOwner = doc.testUserPermission(game.user, 'OWNER');
+          } catch (_) {
+            isOwner = false;
+          }
+        }
+        if (isOwner) addToken(token);
+      }
+    }
+
+    if (isGM && !tokens.length) {
+      for (const token of canvas?.tokens?.placeables || []) {
+        const hasSight = token?.hasSight || token?.document?.sight?.enabled;
+        if (hasSight) addToken(token);
+      }
+    }
+
+    return tokens;
+  }
+
+  _getNativeDoorControlVisibility(wallDoc) {
+    try {
+      const wall = canvas?.walls?.get?.(wallDoc?.id);
+      if (!wall?.isDoor) return null;
+      if (!wall.doorControl && typeof wall.createDoorControl === 'function') {
+        wall.createDoorControl();
+      }
+      const doorControl = wall.doorControl;
+      if (!doorControl) return null;
+      if (!('isVisible' in doorControl)) return null;
+      return !!doorControl.isVisible;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  _isDoorVisibleToSelection(wallDoc) {
+    if (!wallDoc?.door) return false;
+
+    if (!this._isWallVisibleAtPerspective(wallDoc)) return false;
+
+    const nativeVisibility = this._getNativeDoorControlVisibility(wallDoc);
+    if (nativeVisibility !== null) {
+      return nativeVisibility;
+    }
+
+    if ((wallDoc.door === CONST.WALL_DOOR_TYPES.SECRET) && !game.user.isGM) {
+      return false;
+    }
+
+    const visionTokens = this._getEffectiveVisionTokens();
+    if ((canvas?.scene?.tokenVision ?? false) && !visionTokens.length) {
+      return false;
+    }
+
+    if (!canvas?.visibility?.tokenVision) {
+      return true;
+    }
+
+    const coords = wallDoc.c;
+    if (!Array.isArray(coords) || coords.length < 4) return false;
+    const ray = Ray.fromArrays(coords.slice(0, 2), coords.slice(2, 4));
+    const x = (coords[0] + coords[2]) / 2;
+    const y = (coords[1] + coords[3]) / 2;
+    const dx = -ray.dy;
+    const dy = ray.dx;
+    const denom = Math.abs(dx) + Math.abs(dy);
+    if (!denom) return false;
+    const t = 3 / denom;
+    const points = [
+      { x: x + (t * dx), y: y + (t * dy) },
+      { x: x - (t * dx), y: y - (t * dy) }
+    ];
+
+    for (const token of visionTokens) {
+      try {
+        const shape = token?.vision?.los || token?.vision?.shape || token?.vision?.fov;
+        if (shape?.contains && points.some((point) => shape.contains(point.x, point.y))) {
+          return true;
+        }
+      } catch (_) {
+      }
+    }
+
+    try {
+      return points.some((point) => canvas.visibility.testVisibility(point, { tolerance: 0 }));
+    } catch (_) {
+      return game.user.isGM;
+    }
+  }
+
   /**
    * Set explicit visibility for wall lines
    * @param {boolean} visible 
    */
   setVisibility(visible) {
+    // Keep wall visuals attached to whichever scene is currently rendered.
+    this._ensureWallGroupInActiveRenderScene();
+
+    // Self-heal: if walls loaded after manager init (or scene switched), rebuild now.
+    const sceneWallCount = Number(canvas?.walls?.placeables?.length || 0);
+    if (sceneWallCount > 0 && this.walls.size === 0) {
+      this.syncAllWalls();
+    }
+
+    const selectedDocs = this._getSelectedTokenDocs();
+    let totalDoors = 0;
+    let visibleDoors = 0;
+    let wallLinesVisible = 0;
+
     this.walls.forEach((group, wallId) => {
       const wallDoc = canvas.walls?.get?.(wallId)?.document ?? canvas.scene?.walls?.get?.(wallId) ?? null;
       const inActiveBand = this._isWallVisibleAtPerspective(wallDoc);
+      const doorVisible = this._isDoorVisibleToSelection(wallDoc);
+      const showEditVisuals = !!visible;
+      if (wallDoc?.door) totalDoors += 1;
+      if (doorVisible) visibleDoors += 1;
 
       // Keep wall groups alive in gameplay so Three door controls remain visible
       // and interactive. Only hide wall editing visuals when not on Walls layer.
-      group.visible = inActiveBand;
+      group.visible = true;
 
       for (const child of group.children || []) {
         const type = child?.userData?.type;
         if (!type) continue;
 
         if (type === 'doorControl') {
-          child.visible = inActiveBand;
+          child.visible = doorVisible;
           continue;
         }
 
         if (type === 'wallLine' || type === 'wallHitbox' || type === 'wallEndpoint') {
-          child.visible = visible && inActiveBand;
+          child.visible = showEditVisuals;
+          if (type === 'wallLine' && child.visible) wallLinesVisible += 1;
         }
       }
     });
+
+    // Disabled: too spammy
+    // log.warn('Three door visibility refresh', {
+    //   totalWalls: this.walls.size,
+    //   totalDoors,
+    //   visibleDoors,
+    //   showWallLines: visible,
+    //   tokenVision: canvas?.visibility?.tokenVision,
+    //   selectedTokenIds: selectedDocs.map((doc) => doc?.id).filter(Boolean)
+    // });
   }
 
   /**
@@ -329,6 +599,7 @@ export class WallManager {
     if (!canvas.walls) return;
     
     log.info(`Syncing ${canvas.walls.placeables.length} walls...`);
+    let createdDoorControls = 0;
     
     // Clear existing
     this.walls.forEach(wall => {
@@ -338,7 +609,14 @@ export class WallManager {
     
     // Add current
     canvas.walls.placeables.forEach(wall => {
+      const doorType = wall?.document?.door;
+      if (doorType && doorType !== CONST.WALL_DOOR_TYPES.NONE) createdDoorControls += 1;
       this.create(wall.document);
+    });
+
+    log.info('Three wall sync complete', {
+      totalWalls: canvas.walls.placeables.length,
+      createdDoorControls
     });
   }
 
@@ -384,6 +662,9 @@ export class WallManager {
     wallMesh.rotation.z = angle;
     wallMesh.userData = { type: 'wallLine' };
     wallMesh.visible = showLines;
+    wallMesh.renderOrder = 9999;
+    wallMesh.layers.set(OVERLAY_THREE_LAYER);
+    wallMesh.layers.enable(0);
     group.add(wallMesh);
 
     // Hitbox (wider invisible mesh for easier selection)
@@ -406,15 +687,21 @@ export class WallManager {
     const dotMat = new THREE.MeshBasicMaterial({ color: color });
     
     const p0 = new THREE.Mesh(this.endpointGeometry, dotMat);
-    p0.position.copy(start);
+    p0.position.set(start.x, start.y, 0);
     p0.userData = { type: 'wallEndpoint', wallId: doc.id, index: 0 };
     p0.visible = showLines;
+    p0.renderOrder = 10000;
+    p0.layers.set(OVERLAY_THREE_LAYER);
+    p0.layers.enable(0);
     group.add(p0);
     
     const p1 = new THREE.Mesh(this.endpointGeometry, dotMat);
-    p1.position.copy(end);
+    p1.position.set(end.x, end.y, 0);
     p1.userData = { type: 'wallEndpoint', wallId: doc.id, index: 1 };
     p1.visible = showLines;
+    p1.renderOrder = 10000;
+    p1.layers.set(OVERLAY_THREE_LAYER);
+    p1.layers.enable(0);
     group.add(p1);
 
     const door = dataOverride.door !== undefined ? dataOverride.door : doc.door;
@@ -442,8 +729,16 @@ export class WallManager {
       
       // Door Group
       const doorGroup = new THREE.Group();
-      doorGroup.position.set(midX, midY, 0.1); // Slightly above wall line
+      doorGroup.position.set(midX, midY, 4.0); // Keep icon above wall/door planes
       doorGroup.userData = { type: 'doorControl', wallId: doc.id };
+
+      log.info(`Creating Three door control for wall ${doc.id}`, {
+        door: dataOverride.door !== undefined ? dataOverride.door : doc.door,
+        ds: dataOverride.ds !== undefined ? dataOverride.ds : doc.ds,
+        midX,
+        midY,
+        wallGroupZ: this.wallGroup.position.z
+      });
 
       // Keep door controls visually enabled. If this is false, meshes still
       // exist for interaction but render no visible pixels, making doors look
@@ -451,41 +746,6 @@ export class WallManager {
       const showVisuals = true;
       
       const size = 40 * (canvas.dimensions.uiScale || 1);
-      const radius = size / 2;
-      
-      // Higher segment count for smooth anti-aliased circles
-      const segments = 64;
-      
-      // Background (Circle) - increased z-separation to prevent z-fighting
-      const bgGeo = new THREE.CircleGeometry(radius, segments);
-      const bgMat = new THREE.MeshBasicMaterial({ 
-          color: 0x000000,
-          transparent: true,
-          opacity: showVisuals ? 0.5 : 0.0,
-          side: THREE.DoubleSide,
-          depthWrite: false,  // Prevent depth buffer conflicts
-          depthTest: false
-      });
-      bgMat.colorWrite = showVisuals;
-      const bg = new THREE.Mesh(bgGeo, bgMat);
-      bg.renderOrder = 1000;  // Ensure consistent render order
-      doorGroup.add(bg);
-      
-      // Border (Ring) - higher segments for smooth edges
-      const borderGeo = new THREE.RingGeometry(radius - 2, radius, segments);
-      const borderMat = new THREE.MeshBasicMaterial({ 
-          color: 0xffffff,
-          transparent: true,
-          opacity: showVisuals ? 0.8 : 0.0,
-          side: THREE.DoubleSide,
-          depthWrite: false,
-          depthTest: false
-      });
-      borderMat.colorWrite = showVisuals;
-      const border = new THREE.Mesh(borderGeo, borderMat);
-      border.position.z = 0.5;  // Increased z-separation to prevent flickering
-      border.renderOrder = 1001;
-      doorGroup.add(border);
       
       // Icon Sprite
       const iconPath = this.getDoorIconPath(doc, dataOverride);
@@ -495,7 +755,8 @@ export class WallManager {
 
       const loader = new THREE.TextureLoader();
       
-      const iconSize = size * 0.7;
+      // Requested: icons are twice as large as before (previously size * 0.7).
+      const iconSize = size * 1.4;
       const iconGeo = new THREE.PlaneGeometry(iconSize, iconSize);
       const iconMat = new THREE.MeshBasicMaterial({
           transparent: true,
@@ -519,12 +780,32 @@ export class WallManager {
       }
       
       const icon = new THREE.Mesh(iconGeo, iconMat);
-      icon.position.z = 1.0;  // Increased z-separation to prevent flickering
-      icon.renderOrder = 1002;
+      icon.position.z = 2.0;
+      // DoorMeshManager uses renderOrder 250000. Keep controls above that.
+      icon.renderOrder = 260000;
+      // Visual icon renders in the late overlay pass so it appears above
+      // fog/post-processing. Keep interaction separate via an invisible hit area.
+      icon.layers.set(OVERLAY_THREE_LAYER);
       doorGroup.add(icon);
 
+      // Keep left/right click interaction in the world pass (layer 0) while
+      // drawing visuals in the late overlay layer.
+      const hitGeo = new THREE.PlaneGeometry(iconSize, iconSize);
+      const hitMat = new THREE.MeshBasicMaterial({
+          transparent: true,
+          opacity: 0,
+          depthWrite: false,
+          depthTest: false,
+          side: THREE.DoubleSide
+      });
+      hitMat.colorWrite = false;
+      const hitArea = new THREE.Mesh(hitGeo, hitMat);
+      hitArea.position.z = 1.5;
+      hitArea.renderOrder = 259999;
+      hitArea.userData = { type: 'doorHitArea', wallId: doc.id };
+      doorGroup.add(hitArea);
+
       // Store references for updates
-      doorGroup.userData.bg = bg;
       doorGroup.userData.icon = icon;
       
       group.add(doorGroup);

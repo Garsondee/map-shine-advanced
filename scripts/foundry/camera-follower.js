@@ -710,6 +710,14 @@ export class CameraFollower {
       camera.zoom = pixiZoom;
       camera.updateProjectionMatrix();
     }
+    
+    // Update HUD alignment to match PIXI stage.
+    // Foundry's canvas.pan() normally calls hud.align() after updating the stage,
+    // but Map Shine bypasses canvas.pan() by reading stage state directly.
+    // We must call align() here to keep the #hud container transform synchronized.
+    if (canvas?.hud?.rendered && canvas.hud.align) {
+      canvas.hud.align();
+    }
   }
   
   /**

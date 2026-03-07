@@ -443,6 +443,34 @@ export class FloorCompositor {
   }
 
   /**
+   * Render overlay-layer world UI from the FloorRenderBus scene after final blit.
+   * @private
+   */
+  _renderLateWorldOverlay() {
+    const scene = this._renderBus?._scene;
+    const camera = this.camera;
+    if (!scene || !camera || !this.renderer) return;
+
+    const renderer = this.renderer;
+    const prevTarget = renderer.getRenderTarget();
+    const prevAutoClear = renderer.autoClear;
+    const prevLayerMask = camera.layers.mask;
+    renderer.setRenderTarget(null);
+    renderer.autoClear = false;
+    try {
+      // Render ONLY overlay layer content. Using enable() here would keep the
+      // existing layer 0 mask active and re-draw raw bus albedo on top of the
+      // post-processed frame, making most V2 effects appear "missing".
+      camera.layers.set(OVERLAY_THREE_LAYER);
+      renderer.render(scene, camera);
+    } finally {
+      camera.layers.mask = prevLayerMask;
+      renderer.autoClear = prevAutoClear;
+      renderer.setRenderTarget(prevTarget);
+    }
+  }
+
+  /**
    * Composite fog overlay into the post RT chain.
    * @param {THREE.WebGLRenderTarget} inputRT
    * @param {THREE.WebGLRenderTarget} outputRT
@@ -634,14 +662,24 @@ export class FloorCompositor {
       log.warn('FloorCompositor: failed to route door meshes to V2 render bus scene:', err);
     }
 
-    this._specularEffect.initialize();
-    this._fluidEffect.initialize();
-    this._iridescenceEffect.initialize();
-    this._prismEffect.initialize();
-    this._bushEffect.initialize();
-    this._treeEffect.initialize();
-    this._fireEffect.initialize();
-    this._windowLightEffect.initialize();
+    // Keep compositor startup resilient: a single effect init failure should not
+    // abort V2 rendering entirely. Each effect is isolated and logged.
+    const initEffect = (label, fn) => {
+      try {
+        fn?.();
+      } catch (err) {
+        log.warn(`FloorCompositor: ${label} initialize failed:`, err);
+      }
+    };
+
+    initEffect('SpecularEffectV2', () => this._specularEffect.initialize());
+    initEffect('FluidEffectV2', () => this._fluidEffect.initialize());
+    initEffect('IridescenceEffectV2', () => this._iridescenceEffect.initialize());
+    initEffect('PrismEffectV2', () => this._prismEffect.initialize());
+    initEffect('BushEffectV2', () => this._bushEffect.initialize());
+    initEffect('TreeEffectV2', () => this._treeEffect.initialize());
+    initEffect('FireEffectV2', () => this._fireEffect.initialize());
+    initEffect('WindowLightEffectV2', () => this._windowLightEffect.initialize());
     // Cloud effect needs the bus scene and main camera for the overhead blocker pass.
     this._cloudEffect.initialize(this.renderer, this._renderBus._scene, this.camera);
     // Water splashes: own BatchedRenderer added via addEffectOverlay.
@@ -690,12 +728,12 @@ export class FloorCompositor {
     // We set both the legacy single-texture path (setOutdoorsMask, which is the one
     // Outdoors mask subscribers now wired via EffectMaskRegistry in initialize()
 
-    this._lightingEffect.initialize(w, h);
-    this._skyColorEffect.initialize();
-    this._colorCorrectionEffect.initialize();
-    this._filterEffect.initialize();
-    this._atmosphericFogEffect.initialize(this.renderer, this._renderBus._scene, this.camera);
-    this._fogEffect.initialize(this.renderer, this.scene, this.camera);
+    initEffect('LightingEffectV2', () => this._lightingEffect.initialize(w, h));
+    initEffect('SkyColorEffectV2', () => this._skyColorEffect.initialize());
+    initEffect('ColorCorrectionEffectV2', () => this._colorCorrectionEffect.initialize());
+    initEffect('FilterEffectV2', () => this._filterEffect.initialize());
+    initEffect('AtmosphericFogEffectV2', () => this._atmosphericFogEffect.initialize(this.renderer, this._renderBus._scene, this.camera));
+    initEffect('FogOfWarEffectV2', () => this._fogEffect.initialize(this.renderer, this.scene, this.camera));
     try {
       const fogPlane = this._fogEffect.fogPlane ?? null;
       if (fogPlane) {
@@ -706,10 +744,10 @@ export class FloorCompositor {
     } catch (err) {
       log.warn('FloorCompositor: FogOfWarEffectV2 overlay setup failed:', err);
     }
-    this._bloomEffect.initialize(w, h);
-    this._sharpenEffect.initialize();
+    initEffect('BloomEffectV2', () => this._bloomEffect.initialize(w, h));
+    initEffect('SharpenEffectV2', () => this._sharpenEffect.initialize());
     if (this._waterEffect) {
-      this._waterEffect.initialize();
+      initEffect('WaterEffectV2', () => this._waterEffect.initialize());
     }
     // OverheadShadowsEffectV2 initialization
     try { 
@@ -1349,6 +1387,13 @@ export class FloorCompositor {
     this._blitToScreen(currentInput);
     if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: blitToScreen DONE'); } catch (_) {} }
 
+    // Late UI/world overlay pass (layer 31) rendered after all post-FX.
+    // This keeps interactive world controls (e.g. Three door icons) above
+    // fog, bloom, color correction, and any screen-space passes.
+    if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: lateOverlay.render'); } catch (_) {} }
+    this._renderLateWorldOverlay();
+    if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: lateOverlay.render DONE'); } catch (_) {} }
+
     if (_dbgStages) {
       this._debugFirstFrameStagesLogged = true;
       try { log.info('[V2 Frame] ✔ FloorCompositor.render: END'); } catch (_) {}
@@ -1366,6 +1411,9 @@ export class FloorCompositor {
 
     const prevTarget    = renderer.getRenderTarget();
     const prevAutoClear = renderer.autoClear;
+    const prevScissorTest = (typeof renderer.getScissorTest === 'function')
+      ? renderer.getScissorTest()
+      : null;
     const THREE = window.THREE;
     const prevClearColor = (THREE && typeof renderer.getClearColor === 'function')
       ? renderer.getClearColor(new THREE.Color())
@@ -1373,11 +1421,29 @@ export class FloorCompositor {
     const prevClearAlpha = (typeof renderer.getClearAlpha === 'function')
       ? renderer.getClearAlpha()
       : null;
+    const prevViewport = (THREE && typeof renderer.getViewport === 'function')
+      ? renderer.getViewport(new THREE.Vector4())
+      : null;
 
     this._blitMaterial.uniforms.tDiffuse.value = sourceRT.texture;
     renderer.setRenderTarget(null);
     renderer.autoClear = false;
     try {
+      // Defensive state reset: if any prior pass/module leaves scissor clipping
+      // enabled, the fullscreen blit only updates a sub-rect and stale pixels
+      // from earlier frames remain visible as a static "underlay".
+      if (typeof renderer.setScissorTest === 'function') {
+        renderer.setScissorTest(false);
+      }
+      if (typeof renderer.setViewport === 'function') {
+        // setViewport expects renderer logical/CSS pixels (not drawing-buffer
+        // pixels). Using drawing-buffer dimensions here applies pixelRatio twice
+        // and causes visible post/overlay misalignment.
+        const size = this._sizeVec ?? new THREE.Vector2();
+        renderer.getSize(size);
+        renderer.setViewport(0, 0, Math.max(1, size.x), Math.max(1, size.y));
+      }
+
       // Ensure an opaque clear. If the renderer's clearAlpha is 0, the blit quad
       // can appear semi-transparent over underlying canvases/frames.
       if (typeof renderer.setClearColor === 'function') {
@@ -1401,6 +1467,14 @@ export class FloorCompositor {
       }
       if (typeof renderer.setClearAlpha === 'function') {
         try { renderer.setClearAlpha(1); } catch (_) {}
+      }
+      if (typeof renderer.setScissorTest === 'function' && prevScissorTest !== null) {
+        try { renderer.setScissorTest(prevScissorTest); } catch (_) {}
+      }
+      if (prevViewport && typeof renderer.setViewport === 'function') {
+        try {
+          renderer.setViewport(prevViewport.x, prevViewport.y, prevViewport.z, prevViewport.w);
+        } catch (_) {}
       }
     }
 

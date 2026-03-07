@@ -95,39 +95,45 @@ export class ControlsIntegration {
     const optionsName = String(layer?.options?.name || '').toLowerCase();
     const name = String(layer?.name || '').toLowerCase();
     const ctor = String(layer?.constructor?.name || '').toLowerCase();
-    const sceneControl = String(ui?.controls?.control?.name || ui?.controls?.activeControl || '').toLowerCase();
-    return { optionsName, name, ctor, sceneControl };
+    const sceneControlName = String(ui?.controls?.control?.name || ui?.controls?.activeControl || '').toLowerCase();
+    const sceneControlLayer = String(ui?.controls?.control?.layer || '').toLowerCase();
+    return { optionsName, name, ctor, sceneControlName, sceneControlLayer };
   }
 
   _isLightingContextActive() {
     if (canvas?.lighting?.active) return true;
-    const { optionsName, name, ctor, sceneControl } = this._getActiveLayerMeta();
+    const { optionsName, name, ctor, sceneControlName, sceneControlLayer } = this._getActiveLayerMeta();
     return optionsName === 'lighting'
+      || optionsName === 'light'
       || name === 'lighting'
+      || name === 'light'
       || ctor === 'lightinglayer'
-      || sceneControl === 'lighting';
+      || sceneControlName === 'lighting'
+      || sceneControlName === 'light'
+      || sceneControlLayer === 'lighting'
+      || sceneControlLayer === 'light';
   }
 
   _isWallsContextActive() {
     if (canvas?.walls?.active) return true;
-    const { optionsName, name, ctor, sceneControl } = this._getActiveLayerMeta();
+    const { optionsName, name, ctor, sceneControlName, sceneControlLayer } = this._getActiveLayerMeta();
     return optionsName === 'walls'
+      || optionsName === 'wall'
       || name === 'walls'
+      || name === 'wall'
       || ctor === 'wallslayer'
       || ctor === 'walllayer'
-      || sceneControl === 'walls';
+      || sceneControlName === 'walls'
+      || sceneControlName === 'wall'
+      || sceneControlLayer === 'walls'
+      || sceneControlLayer === 'wall';
   }
 
   _isPixiEditorOverlayNeeded() {
-    const activeControl = String(ui?.controls?.control?.name || ui?.controls?.activeControl || '').toLowerCase();
-    const activeTool = String(ui?.controls?.tool?.name || ui?.controls?.activeTool || '').toLowerCase();
-    return this._isWallsContextActive()
-      || this._isLightingContextActive()
-      || activeControl === 'walls'
-      || activeControl === 'lighting'
-      || activeTool === 'doors'
-      || activeTool === 'door'
-      || activeTool === 'light';
+    // Walls, lighting, and tokens are fully Three.js-native now.
+    // Only return true for layers we haven't replaced yet (drawings, regions,
+    // sounds, notes, templates). The InputRouter handles this via determineMode().
+    return false;
   }
 
   _applyPixiEditorOverlayGate() {
@@ -144,15 +150,18 @@ export class ControlsIntegration {
 
       if (!pixiCanvas) return;
 
+      const isV2Active = !!window.MapShine?.__v2Active;
+      const pixiVisualOpacity = isV2Active ? '0' : '1';
+
       if (needsOverlay) {
         pixiCanvas.style.display = '';
         pixiCanvas.style.visibility = 'visible';
-        pixiCanvas.style.opacity = '1';
+        pixiCanvas.style.opacity = pixiVisualOpacity;
         pixiCanvas.style.zIndex = '10';
         if (board && board.tagName === 'CANVAS') {
           board.style.display = '';
           board.style.visibility = 'visible';
-          board.style.opacity = '1';
+          board.style.opacity = pixiVisualOpacity;
           board.style.zIndex = '10';
         }
       }

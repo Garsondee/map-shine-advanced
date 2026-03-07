@@ -7,6 +7,7 @@
 import { createLogger } from '../core/log.js';
 import Coordinates from '../utils/coordinates.js';
 import { OVERLAY_THREE_LAYER } from '../core/render-layers.js';
+import { VisionPolygonComputer } from '../vision/VisionPolygonComputer.js';
 import { applyAmbientLightLevelDefaults } from '../foundry/levels-create-defaults.js';
 import { isLightVisibleForPerspective } from '../foundry/elevation-context.js';
 import {
@@ -15,6 +16,8 @@ import {
 } from '../settings/scene-settings.js';
 
 const log = createLogger('LightIconManager');
+const _lightLosComputer = new VisionPolygonComputer();
+_lightLosComputer.circleSegments = 72;
 
 /**
  * Creates a custom shader material for light icon sprites with a dark outline.
@@ -126,6 +129,8 @@ export class LightIconManager {
   initialize() {
     if (this.initialized) return;
 
+    this._ensureGroupInActiveRenderScene();
+
     // Update Z position based on groundZ
     const groundZ = window.MapShine?.sceneComposer?.groundZ ?? 0;
     this.group.position.z = groundZ + 4.0;
@@ -135,6 +140,27 @@ export class LightIconManager {
 
     this.initialized = true;
     log.info(`LightIconManager initialized at z=${this.group.position.z}`);
+  }
+
+  _getActiveRenderScene() {
+    const busScene = window.MapShine?.effectComposer?._floorCompositorV2?._renderBus?._scene
+      ?? window.MapShine?.floorRenderBus?._scene
+      ?? null;
+    return busScene || this.scene || null;
+  }
+
+  _ensureGroupInActiveRenderScene() {
+    const targetScene = this._getActiveRenderScene();
+    if (!targetScene || !this.group) return;
+    if (this.group.parent === targetScene) return;
+
+    try {
+      if (this.group.parent) this.group.parent.remove(this.group);
+      targetScene.add(this.group);
+      this.scene = targetScene;
+      log.info(`LightIconManager render scene updated (children=${targetScene.children?.length ?? 0})`);
+    } catch (_) {
+    }
   }
 
   /**
@@ -218,6 +244,13 @@ export class LightIconManager {
    * @public
    */
   setVisibility(visible) {
+    this._ensureGroupInActiveRenderScene();
+
+    const sceneLightCount = Number(canvas?.lighting?.placeables?.length || 0);
+    if (sceneLightCount > 0 && this.lights.size === 0) {
+      this.syncAllLights();
+    }
+
     this.group.visible = visible;
     if (visible) {
       this._refreshPerLightVisibility();
@@ -249,6 +282,8 @@ export class LightIconManager {
     if (!sprite) return;
     const doc = docOverride || this._getLightDocById(id);
     sprite.visible = this._shouldShowLightIconForDoc(doc);
+    const ring = this._findRadiusRing(id);
+    if (ring) ring.visible = sprite.visible;
   }
 
   /**
@@ -260,7 +295,145 @@ export class LightIconManager {
       if (!sprite) continue;
       const doc = this._getLightDocById(id);
       sprite.visible = this._shouldShowLightIconForDoc(doc);
+      const ring = this._findRadiusRing(id);
+      if (ring) ring.visible = sprite.visible;
     }
+  }
+
+  _dimToPixels(dim) {
+    try {
+      const d = canvas?.dimensions;
+      if (!d || !Number.isFinite(d.size) || !Number.isFinite(d.distance) || d.distance === 0) return 0;
+      const v = Number(dim);
+      if (!Number.isFinite(v)) return 0;
+      return v * (d.size / d.distance);
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  _getRadiusPixelsForDoc(doc) {
+    const dim = Number(doc?.config?.dim ?? doc?.config?.bright ?? 0);
+    if (!Number.isFinite(dim) || dim <= 0) return 0;
+    return Math.max(0, this._dimToPixels(dim));
+  }
+
+  _findRadiusRing(id) {
+    const key = String(id || '');
+    if (!key || !this.group?.children) return null;
+    return this.group.children.find((obj) => obj?.userData?.type === 'ambientLightRadius' && String(obj?.userData?.lightId || '') === key) || null;
+  }
+
+  _computeRadiusLocalPolygon(foundryX, foundryY, radiusPx) {
+    try {
+      const r = Number(radiusPx);
+      if (!Number.isFinite(r) || r <= 0) return null;
+
+      const sceneRect = canvas?.dimensions?.sceneRect;
+      const sceneBounds = sceneRect ? {
+        x: sceneRect.x,
+        y: sceneRect.y,
+        width: sceneRect.width,
+        height: sceneRect.height
+      } : null;
+
+      const ptsF = _lightLosComputer.compute({ x: foundryX, y: foundryY }, r, null, sceneBounds, { sense: 'light' });
+      if (!ptsF || ptsF.length < 6) return null;
+
+      const THREE = window.THREE;
+      const centerW = Coordinates.toWorld(foundryX, foundryY);
+      const local = [];
+      for (let i = 0; i < ptsF.length; i += 2) {
+        const w = Coordinates.toWorld(ptsF[i], ptsF[i + 1]);
+        local.push(new THREE.Vector3(w.x - centerW.x, w.y - centerW.y, 0));
+      }
+
+      return local.length >= 3 ? local : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  _removeRadiusRing(id) {
+    const ring = this._findRadiusRing(id);
+    if (!ring) return;
+    try {
+      this.group.remove(ring);
+    } catch (_) {
+    }
+    try {
+      ring.geometry?.dispose?.();
+    } catch (_) {
+    }
+    try {
+      ring.material?.dispose?.();
+    } catch (_) {
+    }
+  }
+
+  _upsertRadiusRingForDoc(doc) {
+    const THREE = window.THREE;
+    if (!THREE || !doc?.id) return;
+
+    const lightId = String(doc.id);
+    const radiusPixels = this._getRadiusPixelsForDoc(doc);
+
+    if (!(radiusPixels > 0)) {
+      this._removeRadiusRing(lightId);
+      return;
+    }
+
+    const clippedPoints = this._computeRadiusLocalPolygon(doc.x, doc.y, radiusPixels);
+    const points = [];
+    if (clippedPoints && clippedPoints.length >= 3) {
+      for (const p of clippedPoints) points.push(p);
+    } else {
+      const segments = 72;
+      for (let i = 0; i < segments; i += 1) {
+        const angle = (i / segments) * Math.PI * 2;
+        points.push(new THREE.Vector3(Math.cos(angle) * radiusPixels, Math.sin(angle) * radiusPixels, 0));
+      }
+    }
+
+    if (points.length > 0) {
+      const first = points[0];
+      const last = points[points.length - 1];
+      if (first && last && (first.x !== last.x || first.y !== last.y || first.z !== last.z)) {
+        points.push(first.clone());
+      }
+    }
+
+    const geometry = new THREE.BufferGeometry().setFromPoints(points);
+
+    const worldPos = Coordinates.toWorld(doc.x, doc.y);
+    let ring = this._findRadiusRing(lightId);
+
+    if (!ring) {
+      const material = new THREE.LineBasicMaterial({
+        color: 0xffffff,
+        transparent: true,
+        opacity: 0.5,
+        depthTest: false,
+        depthWrite: false
+      });
+      material.toneMapped = false;
+
+      ring = new THREE.LineLoop(geometry, material);
+      ring.userData = { type: 'ambientLightRadius', lightId };
+      ring.layers.set(OVERLAY_THREE_LAYER);
+      ring.layers.enable(0);
+      ring.renderOrder = 9998;
+      ring.position.set(worldPos.x, worldPos.y, 0.01);
+      this.group.add(ring);
+      return;
+    }
+
+    try {
+      ring.geometry?.dispose?.();
+    } catch (_) {
+    }
+    ring.geometry = geometry;
+    ring.position.set(worldPos.x, worldPos.y, ring.position.z);
   }
 
   /**
@@ -301,6 +474,15 @@ export class LightIconManager {
       }
     }
     this.lights.clear();
+
+    // Clear radius rings
+    if (Array.isArray(this.group?.children)) {
+      for (let i = this.group.children.length - 1; i >= 0; i -= 1) {
+        const child = this.group.children[i];
+        if (child?.userData?.type !== 'ambientLightRadius') continue;
+        this._removeRadiusRing(child.userData.lightId);
+      }
+    }
 
     for (const light of canvas.lighting.placeables) {
       this.create(light.document);
@@ -358,6 +540,7 @@ export class LightIconManager {
 
       this.group.add(sprite);
       this.lights.set(doc.id, sprite);
+      this._upsertRadiusRingForDoc(doc);
       this._refreshSingleLightVisibility(doc.id, doc);
 
       log.debug(`Created light icon ${doc.id}`);
@@ -390,6 +573,8 @@ export class LightIconManager {
       sprite.position.set(worldPos.x, worldPos.y, sprite.position.z);
     }
 
+    this._upsertRadiusRingForDoc(doc);
+
     // No icon/color change for now; that could be extended later
     this._refreshSingleLightVisibility(doc.id, doc);
   }
@@ -411,6 +596,7 @@ export class LightIconManager {
       sprite.material.dispose();
       this.lights.delete(id);
     }
+    this._removeRadiusRing(id);
   }
 
   /**
@@ -442,6 +628,15 @@ export class LightIconManager {
       sprite.geometry?.dispose?.();
       sprite.material.dispose();
     }
+
+    if (Array.isArray(this.group?.children)) {
+      for (let i = this.group.children.length - 1; i >= 0; i -= 1) {
+        const child = this.group.children[i];
+        if (child?.userData?.type !== 'ambientLightRadius') continue;
+        this._removeRadiusRing(child.userData.lightId);
+      }
+    }
+
     this.lights.clear();
 
     this.scene.remove(this.group);

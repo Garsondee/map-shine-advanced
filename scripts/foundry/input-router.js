@@ -47,9 +47,6 @@ export class InputRouter {
      * @type {Set<string>}
      */
     this.pixiInteractiveLayers = new Set([
-      'TilesLayer',
-      'WallsLayer',
-      'LightingLayer',
       'SoundsLayer',
       'TemplateLayer',
       'DrawingsLayer',
@@ -62,10 +59,6 @@ export class InputRouter {
      * @type {Set<string>}
      */
     this.pixiInteractiveTools = new Set([
-      // Wall tools
-      'walls', 'terrain', 'invisible', 'ethereal', 'doors', 'secret', 'window',
-      // Light tools
-      'light',
       // Sound tools
       'sound',
       // Note tools
@@ -82,10 +75,7 @@ export class InputRouter {
      * Tools that should always use Three.js (even on PIXI layers)
      * @type {Set<string>}
      */
-    this.threeOnlyTools = new Set([
-      // Token tools handled by Three.js
-      'target'
-    ]);
+    this.threeOnlyTools = new Set([]);
     
     /**
      * Track mode change history for debugging
@@ -107,17 +97,14 @@ export class InputRouter {
    * @returns {boolean} Success status
    */
   setMode(mode, reason = '') {
+    const isV2Active = !!window.MapShine?.__v2Active;
+    const pixiVisualOpacity = isV2Active ? '0' : '1';
     const activeControl = String(ui?.controls?.control?.name ?? ui?.controls?.activeControl ?? '').toLowerCase();
     const activeTool = String(ui?.controls?.tool?.name ?? ui?.controls?.activeTool ?? '').toLowerCase();
-    const forcePixiOverlay =
-      mode === InputMode.PIXI ||
-      !!canvas?.walls?.active ||
-      !!canvas?.lighting?.active ||
-      activeControl === 'walls' ||
-      activeControl === 'lighting' ||
-      activeTool === 'doors' ||
-      activeTool === 'door' ||
-      activeTool === 'light';
+    // Only force PIXI overlay when actually in PIXI mode (for layers we haven't
+    // replaced yet like drawings, regions, sounds, notes, templates).
+    // Walls, lighting, and tokens are fully Three.js-native now.
+    const forcePixiOverlay = mode === InputMode.PIXI;
     if (window.MapShine) {
       window.MapShine.__forcePixiEditorOverlay = forcePixiOverlay;
     }
@@ -141,7 +128,7 @@ export class InputRouter {
         if (pixiCanvas) {
           pixiCanvas.style.display = '';
           pixiCanvas.style.visibility = 'visible';
-          pixiCanvas.style.opacity = '1';
+          pixiCanvas.style.opacity = pixiVisualOpacity;
           pixiCanvas.style.pointerEvents = 'auto';
           pixiCanvas.style.backgroundColor = 'transparent';
         }
@@ -149,7 +136,7 @@ export class InputRouter {
         if (board && board.tagName === 'CANVAS') {
           board.style.display = '';
           board.style.visibility = 'visible';
-          board.style.opacity = '1';
+          board.style.opacity = pixiVisualOpacity;
           board.style.zIndex = '10';
           board.style.pointerEvents = 'auto';
           board.style.backgroundColor = 'transparent';
@@ -198,7 +185,7 @@ export class InputRouter {
         pixiCanvas.style.display = '';
         pixiCanvas.style.visibility = 'visible';
         pixiCanvas.style.pointerEvents = 'auto';
-        pixiCanvas.style.opacity = '1';
+        pixiCanvas.style.opacity = pixiVisualOpacity;
         pixiCanvas.style.backgroundColor = 'transparent';
 
         // Foundry's composited board canvas may be separate from canvas.app.view.
@@ -207,7 +194,7 @@ export class InputRouter {
         if (board && board.tagName === 'CANVAS') {
           board.style.display = '';
           board.style.visibility = 'visible';
-          board.style.opacity = '1';
+          board.style.opacity = pixiVisualOpacity;
           board.style.zIndex = '10';
           board.style.pointerEvents = 'auto';
         }
@@ -283,6 +270,7 @@ export class InputRouter {
     const layerIdName = activeLayer.name || '';
     const layerOptionsName = activeLayer.options?.name || '';
     const activeControl = ui?.controls?.control?.name ?? ui?.controls?.activeControl ?? '';
+    const activeControlLayer = ui?.controls?.control?.layer ?? '';
     
     // Defensive: ui.controls may not exist during initialization
     // This prevents the "toolclip" error when Foundry is still setting up
@@ -303,22 +291,30 @@ export class InputRouter {
       !!canvas?.lighting?.active ||
       layerCtorName === 'LightingLayer' ||
       layerIdName === 'lighting' ||
+      layerIdName === 'light' ||
       layerOptionsName === 'lighting' ||
-      activeControl === 'lighting';
+      layerOptionsName === 'light' ||
+      activeControl === 'lighting' ||
+      activeControl === 'light' ||
+      activeControlLayer === 'lighting' ||
+      activeControlLayer === 'light';
 
     const isWallsLayer =
       !!canvas?.walls?.active ||
       layerCtorName === 'WallsLayer' ||
       layerCtorName === 'WallLayer' ||
       layerIdName === 'walls' ||
+      layerIdName === 'wall' ||
       layerOptionsName === 'walls' ||
-      activeControl === 'walls';
+      layerOptionsName === 'wall' ||
+      activeControl === 'walls' ||
+      activeControl === 'wall' ||
+      activeControlLayer === 'walls' ||
+      activeControlLayer === 'wall';
 
+    // Three.js handles all token interactions: selection, drag, HUD,
+    // targeting, click-to-move, and ruler forwarding. No PIXI overlay needed.
     if (isTokensLayer) {
-      const tokenEditTools = new Set(['select', 'target', 'ruler']);
-      if (tokenEditTools.has(String(activeTool || '').toLowerCase()) || !activeTool) {
-        return InputMode.PIXI;
-      }
       return InputMode.THREE;
     }
 
@@ -328,14 +324,16 @@ export class InputRouter {
       return InputMode.THREE;
     }
 
-    // Use Foundry-native lighting layer interactions.
+    // Three.js handles light placement (drag-to-create), light icon interaction,
+    // and right-click toggle hidden. No PIXI overlay needed.
     if (isLightingLayer) {
-      return InputMode.PIXI;
+      return InputMode.THREE;
     }
 
-    // Use Foundry-native wall/door interactions.
+    // Three.js handles wall placement (click-to-place with chaining), wall
+    // endpoint dragging, and door interactions. No PIXI overlay needed.
     if (isWallsLayer) {
-      return InputMode.PIXI;
+      return InputMode.THREE;
     }
     
     // Check if tool explicitly requires Three.js

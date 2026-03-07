@@ -4249,7 +4249,10 @@ export class TokenMovementManager {
     // so the full footprint is checked against walls.
     const halfW = this._getTokenCollisionHalfSize(context.tokenDoc);
     const cornerOffsets = [[0, 0]];
-    if (halfW.x > 1 || halfW.y > 1) {
+    const tokenWidthCells = asNumber(context?.tokenDoc?.width, asNumber(tokenObj?.document?.width, 1));
+    const tokenHeightCells = asNumber(context?.tokenDoc?.height, asNumber(tokenObj?.document?.height, 1));
+    const isMultiCellToken = (tokenWidthCells > 1.0001) || (tokenHeightCells > 1.0001);
+    if (isMultiCellToken) {
       cornerOffsets.push(
         [-halfW.x, -halfW.y],
         [halfW.x, -halfW.y],

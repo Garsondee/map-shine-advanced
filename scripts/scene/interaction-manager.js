@@ -15,7 +15,7 @@ import { SelectionBoxHandler } from './selection-box-interaction.js';
 import { TokenSelectionController } from './token-selection-controller.js';
 import { safeCall, safeDispose, Severity } from '../core/safe-call.js';
 import { readWallHeightFlags, readTileLevelsFlags, tileHasLevelsRange, isLevelsEnabledForScene } from '../foundry/levels-scene-flags.js';
-import { applyAmbientLightLevelDefaults, applyWallLevelDefaults } from '../foundry/levels-create-defaults.js';
+import { applyAmbientLightLevelDefaults, applyAmbientSoundLevelDefaults, applyWallLevelDefaults } from '../foundry/levels-create-defaults.js';
 import { getPerspectiveElevation } from '../foundry/elevation-context.js';
 import { isTokenOnActiveLevel, getAutoSwitchElevation, switchToLevelForElevation } from './level-interaction-service.js';
 
@@ -32,14 +32,16 @@ export class InteractionManager {
    * @param {TileManager} tileManager - For accessing tile sprites
    * @param {WallManager} wallManager - For creating/managing walls
    * @param {LightIconManager} [lightIconManager] - For accessing light icons
+   * @param {SoundIconManager} [soundIconManager] - For accessing ambient sound icons
    */
-  constructor(canvasElement, sceneComposer, tokenManager, tileManager, wallManager, lightIconManager = null) {
+  constructor(canvasElement, sceneComposer, tokenManager, tileManager, wallManager, lightIconManager = null, soundIconManager = null) {
     this.canvasElement = canvasElement;
     this.sceneComposer = sceneComposer;
     this.tokenManager = tokenManager;
     this.tileManager = tileManager;
     this.wallManager = wallManager;
     this.lightIconManager = lightIconManager;
+    this.soundIconManager = soundIconManager;
 
     /**
      * Sub-rate update lane — HUD positioning and gizmo updates are smooth at 30 Hz.
@@ -407,6 +409,17 @@ export class InteractionManager {
       previewGroup: null,
       previewFill: null,
       previewBorder: null
+    };
+
+    // Ambient sound placement drag-preview state (mirrors Foundry SoundsLayer drag UX).
+    this.soundPlacement = {
+      active: false,
+      start: new THREE.Vector3(),
+      current: new THREE.Vector3(),
+      previewGroup: null,
+      previewFill: null,
+      previewBorder: null,
+      previewLabel: null
     };
 
 
@@ -782,6 +795,47 @@ export class InteractionManager {
     return false;
   }
 
+  _isHardUIInteractionEvent(event) {
+    const target = event?.target;
+    const path = (event && typeof event.composedPath === 'function') ? event.composedPath() : null;
+    const elements = Array.isArray(path)
+      ? path.filter((n) => n instanceof Element)
+      : (target instanceof Element ? [target] : []);
+
+    // Mirror _isEventFromUI stack probing so capture-phase retargeting does not
+    // let Tweakpane sliders leak through to scene interactions.
+    safeCall(() => {
+      const cx = event?.clientX;
+      const cy = event?.clientY;
+      if (Number.isFinite(cx) && Number.isFinite(cy) && typeof document?.elementsFromPoint === 'function') {
+        const stack = document.elementsFromPoint(cx, cy);
+        if (Array.isArray(stack) && stack.length) {
+          for (const el of stack) {
+            if (el instanceof Element) elements.push(el);
+          }
+        }
+      }
+    }, 'hardUi.elementsFromPoint', Severity.COSMETIC);
+
+    for (const el of elements) {
+      if (el.closest('.window-app, .app.window-app, .application, dialog, .dialog, .filepicker')) return true;
+      if (el.closest('button, a, input, select, textarea, label')) return true;
+      if (el.closest('#map-shine-ui, #map-shine-texture-manager, #map-shine-effect-stack, #map-shine-control-panel, #map-shine-loading-overlay')) return true;
+      if (el.closest('#map-point-context-menu')) return true;
+      if (el.closest('#map-shine-overlay-root')) return true;
+      if (el.closest('[data-overlay-id], .map-shine-overlay-ui')) return true;
+
+      const classList = el.classList;
+      if (classList && classList.length) {
+        for (const cls of classList) {
+          if (typeof cls === 'string' && cls.startsWith('tp-')) return true;
+        }
+      }
+    }
+
+    return false;
+  }
+
   _isTextEditingEvent(event) {
     return safeCall(() => {
       const t = (event?.target instanceof Element) ? event.target : null;
@@ -820,7 +874,9 @@ export class InteractionManager {
     // gated by the InputRouter so we only react when Three.js should
     // receive input.
     window.addEventListener('pointerdown', this.boundHandlers.onPointerDown, { capture: true });
-    this.canvasElement.addEventListener('dblclick', this.boundHandlers.onDoubleClick);
+    // Use window capture for double-click too so Three tile edit actions still fire
+    // when a transparent PIXI/board overlay is above the Three canvas.
+    window.addEventListener('dblclick', this.boundHandlers.onDoubleClick, { capture: true });
 
     // Prevent the browser's native context menu on the Three.js canvas so
     // right-click interactions (token HUD, click-to-move) aren't interrupted.
@@ -886,6 +942,7 @@ export class InteractionManager {
     reattach(this._selectedLightOutline?.line);
     reattach(this.wallDraw?.previewLine);
     reattach(this.lightPlacement?.previewGroup);
+    reattach(this.soundPlacement?.previewGroup);
     reattach(this._lightTranslate?.group);
     reattach(this._lightRadiusRings?.group);
   }
@@ -1638,8 +1695,9 @@ export class InteractionManager {
       // Check Tile
       const tileData = this.tileManager?.tileSprites?.get?.(id);
       if (tileData?.sprite) {
-        const original = tileData.sprite;
-        const preview = original.clone();
+        const busEntry = window.MapShine?.floorRenderBus?._tiles?.get?.(id);
+        const original = busEntry?.root || busEntry?.mesh || tileData.sprite;
+        const preview = original.clone(true);
         preview.matrixAutoUpdate = true;
         safeCall(() => {
           original.getWorldPosition(_tmpPos);
@@ -1653,6 +1711,42 @@ export class InteractionManager {
           preview.material = original.material.clone();
           preview.material.transparent = true;
           preview.material.opacity = Math.min(Number(original.material.opacity ?? 1), 0.7);
+          preview.material.depthTest = false;
+          preview.material.depthWrite = false;
+        } else {
+          preview.traverse?.((obj) => {
+            safeCall(() => {
+              if (!obj?.material) return;
+              obj.material = obj.material.clone();
+              obj.material.transparent = true;
+              obj.material.opacity = Math.min(Number(obj.material.opacity ?? 1), 0.7);
+              obj.material.depthTest = false;
+              obj.material.depthWrite = false;
+            }, 'dragPreview.copyTileChildMaterial', Severity.COSMETIC);
+          });
+        }
+        if (targetScene) targetScene.add(preview);
+        this.dragState.previews.set(id, preview);
+        continue;
+      }
+
+      // Check Foundry Ambient Sound
+      if (this.soundIconManager && this.soundIconManager.sounds.has(id)) {
+        const original = this.soundIconManager.sounds.get(id);
+        const preview = original.clone();
+        preview.matrixAutoUpdate = true;
+        safeCall(() => {
+          original.getWorldPosition(_tmpPos);
+          original.getWorldQuaternion(_tmpQuat);
+          preview.position.copy(_tmpPos);
+          preview.quaternion.copy(_tmpQuat);
+        }, 'dragPreview.copySoundTransform', Severity.COSMETIC);
+        preview.position.z = (preview.position.z ?? 0) + 0.01;
+        preview.renderOrder = 9998;
+        if (original.material) {
+          preview.material = original.material.clone();
+          preview.material.opacity = 0.6;
+          preview.material.transparent = true;
           preview.material.depthTest = false;
           preview.material.depthWrite = false;
         }
@@ -1751,7 +1845,17 @@ export class InteractionManager {
    */
   onDoubleClick(event) {
     try {
-        if (this._isEventFromUI(event)) return;
+        const isTilesContextActive = this._isTilesLayerActive();
+        if (this._isEventFromUI(event)) {
+          const hardUiBlocker = this._isHardUIInteractionEvent(event);
+          const bypassForTiles = isTilesContextActive && !hardUiBlocker;
+          log.warn('TileInteraction.doubleClick.uiGate', {
+            tilesContext: isTilesContextActive,
+            hardUiBlocker,
+            bypassForTiles
+          });
+          if (!bypassForTiles) return;
+        }
 
         // Handle Map Point Drawing Mode - double-click finishes drawing
         if (this.mapPointDraw.active) {
@@ -1842,6 +1946,10 @@ export class InteractionManager {
         // 1.7 Check Tiles (double-click opens tile config sheet)
         if (this._isTilesLayerActive()) {
           const tilePick = this._pickTileHit();
+          log.warn('TileInteraction.doubleClick', {
+            picked: !!tilePick,
+            tileId: tilePick?.tileId ?? null
+          });
           if (tilePick) {
             const tile = canvas.tiles?.get?.(tilePick.tileId);
             if (tile?.document?.testUserPermission?.(game.user, 'LIMITED')) {
@@ -1944,20 +2052,59 @@ export class InteractionManager {
       this.dragState.active = true;
       this.dragState.mode = null;
       this.dragState.leaderId = id;
+
+      // Defensive: keep drag leader in selection so preview creation cannot
+      // fail if selection state was cleared/desynced by external hooks.
+      if (!this.selection.has(id)) {
+        this.selection.add(id);
+      }
       
       // Create Previews
       this.createDragPreviews();
       
       const leaderPreview = this.dragState.previews.get(id);
       if (!leaderPreview) {
-        log.error("Failed to create leader preview");
+        let fallbackPreview = null;
+        safeCall(() => {
+          const preview = targetObject.clone();
+          preview.matrixAutoUpdate = true;
+          preview.position.copy(targetObject.position);
+          preview.quaternion.copy(targetObject.quaternion);
+          preview.position.z = (preview.position.z ?? 0) + 0.01;
+          preview.renderOrder = 9998;
+          if (targetObject.material) {
+            preview.material = targetObject.material.clone();
+            preview.material.transparent = true;
+            preview.material.opacity = Math.min(Number(targetObject.material.opacity ?? 1), 0.7);
+            preview.material.depthTest = false;
+            preview.material.depthWrite = false;
+          }
+          const targetScene = window.MapShine?.floorRenderBus?._scene ?? this.sceneComposer?.scene;
+          if (targetScene) targetScene.add(preview);
+          this.dragState.previews.set(id, preview);
+          fallbackPreview = preview;
+        }, 'startDrag.fallbackPreview', Severity.COSMETIC);
+
+        if (!fallbackPreview) {
+          log.error('Failed to create leader preview', {
+            leaderId: id,
+            selectionSize: this.selection?.size ?? 0,
+            previewCount: this.dragState?.previews?.size ?? 0
+          });
+          this.dragState.active = false;
+          return;
+        }
+      }
+
+      const activeLeaderPreview = this.dragState.previews.get(id);
+      if (!activeLeaderPreview) {
         this.dragState.active = false;
         return;
       }
       
-      this.dragState.object = leaderPreview;
-      this.dragState.startPos.copy(leaderPreview.position);
-      this.dragState.offset.subVectors(leaderPreview.position, hitPoint); 
+      this.dragState.object = activeLeaderPreview;
+      this.dragState.startPos.copy(activeLeaderPreview.position);
+      this.dragState.offset.subVectors(activeLeaderPreview.position, hitPoint); 
       this.dragState.hasMoved = false;
       
       this.dragState.initialPositions.clear();
@@ -2006,11 +2153,15 @@ export class InteractionManager {
   }
 
   _isTilesLayerActive() {
-    const layer = canvas?.activeLayer;
-    if (!layer) return false;
-    const layerName = layer?.options?.name || layer?.name || '';
-    const layerCtor = layer?.constructor?.name || '';
-    return layerName === 'tiles' || layerName === 'TilesLayer' || layerCtor === 'TilesLayer';
+    if (canvas?.tiles?.active) return true;
+    const { optionsName, name, ctor, sceneControlName, sceneControlLayer } = this._getActiveLayerMeta();
+    return optionsName === 'tiles'
+      || optionsName === 'tile'
+      || name === 'tiles'
+      || name === 'tile'
+      || ctor === 'tileslayer'
+      || sceneControlName === 'tiles'
+      || sceneControlLayer === 'tiles';
   }
 
   _getActiveLayerMeta() {
@@ -2052,6 +2203,20 @@ export class InteractionManager {
       || sceneControlLayer === 'wall';
   }
 
+  _isSoundsContextActive() {
+    if (canvas?.sounds?.active) return true;
+    const { optionsName, name, ctor, sceneControlName, sceneControlLayer } = this._getActiveLayerMeta();
+    return optionsName === 'sounds'
+      || optionsName === 'sound'
+      || name === 'sounds'
+      || name === 'sound'
+      || ctor === 'soundslayer'
+      || sceneControlName === 'sounds'
+      || sceneControlName === 'sound'
+      || sceneControlLayer === 'sounds'
+      || sceneControlLayer === 'sound';
+  }
+
   _isWallDrawTool(toolName) {
     const tool = String(toolName || '').toLowerCase();
     if (!tool) return false;
@@ -2081,6 +2246,89 @@ export class InteractionManager {
     return lightDrawTools.has(tool);
   }
 
+  _isSoundDrawTool(toolName) {
+    const tool = String(toolName || '').toLowerCase();
+    if (!tool) return true;
+    const soundDrawTools = new Set(['sound', 'ambientsound', 'ambient', 'draw', 'create', 'place']);
+    return soundDrawTools.has(tool);
+  }
+
+  _ensureSoundPlacementPreview() {
+    const THREE = window.THREE;
+    if (!THREE || this.soundPlacement.previewGroup) return;
+
+    const group = new THREE.Group();
+    group.name = 'AmbientSoundPlacementPreview';
+    group.visible = false;
+    group.layers.set(OVERLAY_THREE_LAYER);
+    group.layers.enable(0);
+    group.renderOrder = 9996;
+
+    const fillMaterial = new THREE.MeshBasicMaterial({
+      color: 0xaaddff,
+      transparent: true,
+      opacity: 0.12,
+      depthTest: false,
+      depthWrite: false,
+      toneMapped: false
+    });
+    const fill = new THREE.Mesh(new THREE.CircleGeometry(0.1, 72), fillMaterial);
+    fill.layers.set(OVERLAY_THREE_LAYER);
+    fill.layers.enable(0);
+    fill.renderOrder = 9996;
+
+    const borderMaterial = new THREE.LineBasicMaterial({
+      color: 0xffffff,
+      transparent: true,
+      opacity: 0.55,
+      depthTest: false,
+      depthWrite: false,
+      toneMapped: false
+    });
+    const border = new THREE.LineLoop(
+      new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0.1, 0, 0)]),
+      borderMaterial
+    );
+    border.layers.set(OVERLAY_THREE_LAYER);
+    border.layers.enable(0);
+    border.renderOrder = 9997;
+    border.position.z = 0.01;
+
+    group.add(fill);
+    group.add(border);
+
+    this.sceneComposer?.scene?.add?.(group);
+    this.soundPlacement.previewGroup = group;
+    this.soundPlacement.previewFill = fill;
+    this.soundPlacement.previewBorder = border;
+  }
+
+  _updateSoundPlacementPreviewGeometry(radiusPx) {
+    const THREE = window.THREE;
+    if (!THREE || !this.soundPlacement.previewFill || !this.soundPlacement.previewBorder) return;
+
+    const radius = Math.max(Number(radiusPx) || 0, 0.1);
+    const segments = 72;
+
+    const fill = this.soundPlacement.previewFill;
+    const border = this.soundPlacement.previewBorder;
+
+    const fillGeometry = new THREE.CircleGeometry(radius, segments);
+    const points = [];
+    for (let i = 0; i < segments; i += 1) {
+      const angle = (i / segments) * Math.PI * 2;
+      points.push(new THREE.Vector3(Math.cos(angle) * radius, Math.sin(angle) * radius, 0));
+    }
+    const borderGeometry = new THREE.BufferGeometry().setFromPoints(points);
+
+    safeCall(() => {
+      fill.geometry?.dispose?.();
+      fill.geometry = fillGeometry;
+      border.geometry?.dispose?.();
+      border.geometry = borderGeometry;
+    }, 'soundPlacement.updatePreviewGeometry', Severity.COSMETIC);
+  }
+
   _isTokenSelectionContextActive() {
     const { optionsName, name, ctor, sceneControlName, sceneControlLayer } = this._getActiveLayerMeta();
     const activeTool = String(ui?.controls?.tool?.name ?? ui?.controls?.activeTool ?? game?.activeTool ?? '').toLowerCase();
@@ -2092,6 +2340,39 @@ export class InteractionManager {
       ctor === 'tokenlayer' ||
       ctor === 'tokenslayer';
     return toolAllowsTokenSelect && (isTokenControl || isTokenLayer);
+  }
+
+  _syncControlsOverlayContext() {
+    const tokenContextActive = this._isTokenSelectionContextActive();
+    if (tokenContextActive) return;
+
+    // When switching away from token-selection context (layer/tool), clear any
+    // token-only overlays to avoid stale visuals persisting across controls.
+    if (this.dragSelect?.active) {
+      this.dragSelect.active = false;
+      this.dragSelect.dragging = false;
+      if (this.dragSelect.mesh) this.dragSelect.mesh.visible = false;
+      if (this.dragSelect.border) this.dragSelect.border.visible = false;
+      if (this.dragSelect.overlayEl) this.dragSelect.overlayEl.style.display = 'none';
+      safeCall(() => this.selectionBoxEffect?._hideSelectionShadow?.(), 'overlayContext.hideSelectionShadow', Severity.COSMETIC);
+      safeCall(() => this.selectionBoxEffect?._hideSelectionIllumination?.(), 'overlayContext.hideSelectionIllumination', Severity.COSMETIC);
+    }
+
+    if (this.movementPathPreview?.active || this.rightClickMovePreview?.active) {
+      this._clearMovementPathPreview();
+      if (this.rightClickMovePreview) {
+        this.rightClickMovePreview.active = false;
+        this.rightClickMovePreview.tokenId = null;
+        this.rightClickMovePreview.tileKey = '';
+        this.rightClickMovePreview.destinationTopLeft = null;
+        this.rightClickMovePreview.selectionKey = '';
+        this.rightClickMovePreview.groupPlanCacheKey = '';
+      }
+    }
+
+    if (this._pingLongPress?.timerId != null) {
+      this._cancelPingLongPress();
+    }
   }
 
   _isTileWithinActiveBand(tileDoc) {
@@ -2115,7 +2396,7 @@ export class InteractionManager {
 
     const tileElevation = Number(tileDoc?.elevation);
     if (!Number.isFinite(tileElevation)) return true;
-    return tileElevation >= bandBottom && tileElevation <= bandTop;
+    return tileElevation >= bandBottom && tileElevation < bandTop;
   }
 
   _isTileSelectableForCurrentTool(data) {
@@ -2125,55 +2406,200 @@ export class InteractionManager {
     if (!sprite.visible) return false;
     if (!this._isTileWithinActiveBand(tileDoc)) return false;
 
-    const foregroundToggle = !!(
-      ui?.controls?.control?.tools?.foreground?.active
-      || ui?.controls?.controls?.tiles?.tools?.foreground?.active
-    );
+    return this._isTileAllowedByCurrentForegroundMode(tileDoc, sprite);
+  }
 
-    const isOverhead = !!sprite.userData?.isOverhead;
-    return foregroundToggle ? isOverhead : !isOverhead;
+  _isTileAllowedByCurrentForegroundMode(tileDoc, sprite = null) {
+    const foregroundMode = this._getTileForegroundMode();
+    if (typeof foregroundMode !== 'boolean') return true;
+
+    const sceneForegroundElevation = Number.isFinite(Number(canvas?.scene?.foregroundElevation))
+      ? Number(canvas.scene.foregroundElevation)
+      : 0;
+    const tileElevation = Number.isFinite(Number(tileDoc?.elevation))
+      ? Number(tileDoc.elevation)
+      : 0;
+    const isOverhead = (typeof sprite?.userData?.isOverhead === 'boolean')
+      ? !!sprite.userData.isOverhead
+      : (tileElevation >= sceneForegroundElevation);
+
+    return foregroundMode ? isOverhead : !isOverhead;
+  }
+
+  _getTileForegroundMode() {
+    const foregroundA = ui?.controls?.control?.tools?.foreground?.active;
+    if (typeof foregroundA === 'boolean') return foregroundA;
+
+    const foregroundB = ui?.controls?.controls?.tiles?.tools?.foreground?.active;
+    if (typeof foregroundB === 'boolean') return foregroundB;
+
+    const activeTool = String(ui?.controls?.tool?.name ?? ui?.controls?.activeTool ?? game?.activeTool ?? '').toLowerCase();
+    if (activeTool === 'foreground' || activeTool === 'overhead') return true;
+
+    // In tiles context, default to ground/background mode when no explicit signal
+    // is available. This prevents accidental overhead tile interaction leakage.
+    if (this._isTilesLayerActive()) return false;
+
+    return null;
+  }
+
+  _pruneIneligibleTileSelection() {
+    if (!this.selection || this.selection.size === 0) return;
+
+    const stale = [];
+    for (const id of this.selection) {
+      const data = this.tileManager?.tileSprites?.get?.(id);
+      if (!data?.tileDoc) continue;
+      if (!this._isTileWithinActiveBand(data.tileDoc) || !this._isTileAllowedByCurrentForegroundMode(data.tileDoc, data.sprite)) {
+        stale.push(id);
+      }
+    }
+
+    for (const id of stale) {
+      this.selection.delete(id);
+      const tileSprite = this.tileManager?.tileSprites?.get?.(id)?.sprite || null;
+      if (tileSprite) {
+        safeCall(() => this._setTileSelectionVisual(tileSprite, false), 'tileSelection.pruneVisual', Severity.COSMETIC);
+      }
+      safeCall(() => {
+        const tile = canvas.tiles?.get?.(id);
+        if (tile?.controlled) tile.release();
+      }, 'tileSelection.pruneRelease', Severity.COSMETIC);
+    }
   }
 
   _pickTileHit() {
     const camera = this.sceneComposer?.camera;
     if (!camera || !this.tileManager?.tileSprites) return null;
 
-    const sprites = [];
-    for (const data of this.tileManager.tileSprites.values()) {
-      if (!this._isTileSelectableForCurrentTool(data)) continue;
-      sprites.push(data.sprite);
+    const collectSprites = ({ ignoreForegroundFilter = false, ignoreBandFilter = false } = {}) => {
+      const next = [];
+      for (const data of this.tileManager.tileSprites.values()) {
+        if (!data?.sprite) continue;
+        if (!ignoreBandFilter && !this._isTileWithinActiveBand(data?.tileDoc)) continue;
+        if (!ignoreForegroundFilter && !this._isTileSelectableForCurrentTool(data)) continue;
+        next.push(data.sprite);
+      }
+      return next;
+    };
+
+    const strictTileMode = this._isTilesLayerActive();
+    const fallbackModes = strictTileMode
+      ? [{ ignoreForegroundFilter: false, ignoreBandFilter: false }]
+      : [
+          { ignoreForegroundFilter: false, ignoreBandFilter: false },
+          // Non-tile contexts can remain permissive to avoid dead pick paths
+          // while preserving strict restrictions during tile editing.
+          { ignoreForegroundFilter: true, ignoreBandFilter: false },
+          { ignoreForegroundFilter: true, ignoreBandFilter: true }
+        ];
+
+    let lastSpritesCount = 0;
+    let lastRayHitsCount = 0;
+
+    for (const mode of fallbackModes) {
+      const sprites = collectSprites(mode);
+      if (sprites.length > 0) {
+        lastSpritesCount = sprites.length;
+
+        const prevMask = this.raycaster.layers?.mask;
+        safeCall(() => {
+          if (!this.raycaster.layers) this.raycaster.layers = new THREE.Layers();
+          // Tile sprites can move across layers depending on bypass/effect states.
+          // Use all layers for interaction raycasts in full-control mode.
+          this.raycaster.layers.mask = 0xffffffff;
+        }, 'tilePick.rayLayers', Severity.COSMETIC);
+
+        const hits = this.raycaster.intersectObjects(sprites, false);
+        lastRayHitsCount = hits.length;
+
+        safeCall(() => {
+          if (typeof prevMask === 'number' && this.raycaster.layers) this.raycaster.layers.mask = prevMask;
+        }, 'tilePick.restoreRayLayers', Severity.COSMETIC);
+
+        for (const hit of hits) {
+          const tileId = hit?.object?.userData?.foundryTileId;
+          if (!tileId) continue;
+
+          const data = this.tileManager.tileSprites.get(tileId);
+          if (!data) continue;
+
+          let opaqueHit = true;
+          if (hit?.uv && typeof this.tileManager.isUvOpaque === 'function') {
+            opaqueHit = safeCall(() => this.tileManager.isUvOpaque(data, hit.uv), 'tilePick.uvOpaque', Severity.COSMETIC, { fallback: true });
+          } else if (hit?.point && typeof this.tileManager.isWorldPointOpaque === 'function') {
+            opaqueHit = safeCall(() => this.tileManager.isWorldPointOpaque(data, hit.point.x, hit.point.y), 'tilePick.worldOpaque', Severity.COSMETIC, { fallback: true });
+          }
+          if (!opaqueHit) continue;
+
+          return { hit, tileId, data };
+        }
+      }
+
+      const busHit = this._pickFloorBusTileHit(mode);
+      if (busHit) {
+        log.warn('TileInteraction.pick.busFallbackHit', {
+          tileId: busHit.tileId,
+          ignoreForegroundFilter: !!mode.ignoreForegroundFilter,
+          ignoreBandFilter: !!mode.ignoreBandFilter
+        });
+        return busHit;
+      }
     }
-    if (sprites.length === 0) return null;
+
+    log.warn('TileInteraction.pick.noHit', {
+      candidateSprites: lastSpritesCount,
+      rayHits: lastRayHitsCount,
+      tileSpritesTotal: this.tileManager?.tileSprites?.size ?? 0
+    });
+
+    return null;
+  }
+
+  _pickFloorBusTileHit({ ignoreForegroundFilter = false, ignoreBandFilter = false } = {}) {
+    const bus = window.MapShine?.floorRenderBus;
+    const entries = bus?._tiles;
+    if (!entries || typeof entries.values !== 'function') return null;
+
+    const objects = [];
+    for (const entry of entries.values()) {
+      const root = entry?.root || null;
+      const mesh = entry?.mesh || null;
+      if (root?.userData?.mapShineBusTile) {
+        objects.push(root);
+        continue;
+      }
+      if (mesh?.userData?.mapShineBusTile) {
+        objects.push(mesh);
+      }
+    }
+    if (objects.length === 0) return null;
 
     const prevMask = this.raycaster.layers?.mask;
     safeCall(() => {
       if (!this.raycaster.layers) this.raycaster.layers = new THREE.Layers();
-      this.raycaster.layers.set(0);
-      this.raycaster.layers.enable(20);
-      this.raycaster.layers.enable(OVERLAY_THREE_LAYER);
-    }, 'tilePick.rayLayers', Severity.COSMETIC);
+      this.raycaster.layers.mask = 0xffffffff;
+    }, 'tilePick.busRayLayers', Severity.COSMETIC);
 
-    const hits = this.raycaster.intersectObjects(sprites, false);
+    const hits = this.raycaster.intersectObjects(objects, true);
 
     safeCall(() => {
       if (typeof prevMask === 'number' && this.raycaster.layers) this.raycaster.layers.mask = prevMask;
-    }, 'tilePick.restoreRayLayers', Severity.COSMETIC);
+    }, 'tilePick.busRestoreRayLayers', Severity.COSMETIC);
 
     for (const hit of hits) {
-      const tileId = hit?.object?.userData?.foundryTileId;
+      let tileId = hit?.object?.userData?.foundryTileId;
+      let obj = hit?.object?.parent || null;
+      while (!tileId && obj) {
+        tileId = obj?.userData?.foundryTileId;
+        obj = obj.parent;
+      }
       if (!tileId) continue;
 
-      const data = this.tileManager.tileSprites.get(tileId);
-      if (!data || !this._isTileSelectableForCurrentTool(data)) continue;
-
-      let opaqueHit = true;
-      if (hit?.uv && typeof this.tileManager.isUvOpaque === 'function') {
-        opaqueHit = safeCall(() => this.tileManager.isUvOpaque(data, hit.uv), 'tilePick.uvOpaque', Severity.COSMETIC, { fallback: true });
-      } else if (hit?.point && typeof this.tileManager.isWorldPointOpaque === 'function') {
-        opaqueHit = safeCall(() => this.tileManager.isWorldPointOpaque(data, hit.point.x, hit.point.y), 'tilePick.worldOpaque', Severity.COSMETIC, { fallback: true });
-      }
-      if (!opaqueHit) continue;
-
+      const data = this.tileManager?.tileSprites?.get?.(tileId);
+      if (!data?.sprite) continue;
+      if (!ignoreBandFilter && !this._isTileWithinActiveBand(data?.tileDoc)) continue;
+      if (!ignoreForegroundFilter && !this._isTileSelectableForCurrentTool(data)) continue;
       return { hit, tileId, data };
     }
 
@@ -2182,9 +2608,19 @@ export class InteractionManager {
 
   _handleTilesLayerPointerDown(event, currentTool) {
     if (!this._isTilesLayerActive()) return false;
+    this._pruneIneligibleTileSelection();
+    log.warn('TileInteraction.pointerDown.enter', {
+      button: event?.button,
+      tool: currentTool,
+      selectionSize: this.selection?.size ?? 0
+    });
 
     if (event.button === 2) {
       const picked = this._pickTileHit();
+      log.warn('TileInteraction.pointerDown.rightClick', {
+        picked: !!picked,
+        tileId: picked?.tileId ?? null
+      });
       if (!picked) return true;
       const tile = canvas.tiles?.get?.(picked.tileId);
       if (tile?.document?.testUserPermission?.(game.user, 'LIMITED')) {
@@ -2197,6 +2633,10 @@ export class InteractionManager {
     if (event.button !== 0) return true;
 
     const picked = this._pickTileHit();
+    log.warn('TileInteraction.pointerDown.leftClick', {
+      picked: !!picked,
+      tileId: picked?.tileId ?? null
+    });
     if (picked) {
       const sprite = picked.data.sprite;
       const tileDoc = picked.data.tileDoc;
@@ -2217,7 +2657,8 @@ export class InteractionManager {
       }
 
       if (currentTool === 'select' || currentTool === 'tile') {
-        this.startDrag(sprite, picked.hit?.point || sprite.position);
+        const dragObject = this._resolveTileDragObject(picked) || sprite;
+        this.startDrag(dragObject, picked.hit?.point || dragObject.position);
       }
 
       this._consumeKeyEvent(event);
@@ -2229,6 +2670,14 @@ export class InteractionManager {
     }
     this._consumeKeyEvent(event);
     return true;
+  }
+
+  _resolveTileDragObject(picked) {
+    const tileId = String(picked?.tileId || '');
+    if (!tileId) return picked?.data?.sprite || null;
+
+    const entry = window.MapShine?.floorRenderBus?._tiles?.get?.(tileId);
+    return entry?.root || entry?.mesh || picked?.data?.sprite || null;
   }
 
   // ── Map Point Handle methods — delegated to MapPointDrawHandler ──────────
@@ -2275,9 +2724,18 @@ export class InteractionManager {
    */
   onPointerDown(event) {
     try {
-        // Ignore pointer-down on UI so we don't start scene interactions.
-        if (this._isEventFromUI(event)) {
-          return;
+        const isTilesContextActive = this._isTilesLayerActive();
+        const isUiEvent = this._isEventFromUI(event);
+        if (isUiEvent) {
+          const hardUiBlocker = this._isHardUIInteractionEvent(event);
+          const bypassForTiles = isTilesContextActive && !hardUiBlocker;
+          log.warn('TileInteraction.pointerDown.uiGate', {
+            tilesContext: isTilesContextActive,
+            hardUiBlocker,
+            bypassForTiles,
+            button: event?.button
+          });
+          if (!bypassForTiles) return;
         }
 
         // One-shot world pick callback (e.g., Tile Motion pivot selection).
@@ -2407,7 +2865,7 @@ export class InteractionManager {
         // Tokens, walls, and lighting are fully Three.js-native and always routed
         // to THREE by the InputRouter. Only unreplaced layers (drawings, regions,
         // sounds, notes, templates) will be PIXI-owned.
-        if (inputRouter && !inputRouter.shouldThreeReceiveInput()) {
+        if (inputRouter && !inputRouter.shouldThreeReceiveInput() && !isTilesContextActive) {
           log.debug('onPointerDown BLOCKED by InputRouter (PIXI mode active)', {
             currentMode: inputRouter.currentMode,
             activeControl,
@@ -2690,15 +3148,15 @@ export class InteractionManager {
             }
             return;
         }
-        
+
+        const currentTool = String(ui?.controls?.tool?.name ?? ui?.controls?.activeTool ?? game.activeTool ?? '').toLowerCase();
+
         const activeLayerObj = canvas.activeLayer;
         const activeLayerName = activeLayerObj?.name || activeLayerObj?.options?.name || '';
         const activeLayerCtor = activeLayerObj?.constructor?.name || '';
-        const currentTool = String(ui?.controls?.tool?.name ?? ui?.controls?.activeTool ?? game.activeTool ?? '').toLowerCase();
-
         const isTokensLayer = activeLayerName === 'TokensLayer' || activeLayerCtor === 'TokenLayer' || activeLayerCtor === 'TokensLayer' || activeLayerName === 'tokens';
         const isWallLayer = this._isWallsContextActive();
-        const isTilesLayer = activeLayerName === 'TilesLayer' || activeLayerName === 'tiles' || activeLayerCtor === 'TilesLayer';
+        const isTilesLayer = this._isTilesLayerActive();
 
         if (isTilesLayer && this._handleTilesLayerPointerDown(event, currentTool)) {
           return;
@@ -2975,6 +3433,72 @@ export class InteractionManager {
           return;
         }
 
+        // 2.6 Native Ambient Sound Placement (SoundsLayer in Three.js Gameplay Mode)
+        const isSoundsLayer = this._isSoundsContextActive();
+        const isSoundDrawTool = this._isSoundDrawTool(currentTool);
+        if (isSoundsLayer) {
+          if (this.soundIconManager) {
+            const soundIcons = Array.from(this.soundIconManager.sounds.values());
+            const intersects = this.raycaster.intersectObjects(soundIcons, false);
+            if (intersects.length > 0) {
+              const hit = intersects[0];
+              const sprite = hit.object;
+              const soundId = String(sprite?.userData?.soundId || '');
+              const soundDoc = soundId ? (canvas?.scene?.sounds?.get?.(soundId) || canvas?.sounds?.get?.(soundId)?.document || null) : null;
+              const canView = !!(soundDoc && soundDoc.testUserPermission(game.user, 'LIMITED'));
+              const canEdit = !!(soundDoc && soundDoc.canUserModify(game.user, 'update'));
+
+              if (canView) {
+                const isSelected = this.selection.has(soundId);
+                if (event.shiftKey) {
+                  if (!isSelected) this.selectObject(sprite, { showLightEditor: false });
+                } else if (!isSelected) {
+                  this.clearSelection();
+                  this.selectObject(sprite, { showLightEditor: false });
+                }
+
+                if (canEdit) {
+                  this.startDrag(sprite, hit.point);
+                }
+
+                return;
+              }
+            }
+          }
+
+          if (!isSoundDrawTool) return;
+          if (!game.user?.isGM) {
+            ui.notifications?.warn?.('Only the GM can place ambient sounds in this mode.');
+            return;
+          }
+
+          const worldPos = this.viewportToWorld(event.clientX, event.clientY, groundZ);
+          if (!worldPos) return;
+          const foundryPos = Coordinates.toFoundry(worldPos.x, worldPos.y);
+          let snapped = foundryPos;
+          if (!event.shiftKey) {
+            const M = CONST.GRID_SNAPPING_MODES;
+            snapped = this.snapToGrid(foundryPos.x, foundryPos.y, M.CENTER | M.VERTEX | M.CORNER | M.SIDE_MIDPOINT);
+          }
+
+          const snappedWorld = Coordinates.toWorld(snapped.x, snapped.y);
+          this._ensureSoundPlacementPreview();
+          this.soundPlacement.active = true;
+          this.soundPlacement.start.set(snappedWorld.x, snappedWorld.y, groundZ);
+          this.soundPlacement.current.set(snappedWorld.x, snappedWorld.y, groundZ);
+          if (this.soundPlacement.previewGroup) {
+            this.soundPlacement.previewGroup.visible = true;
+            this.soundPlacement.previewGroup.position.copy(this.soundPlacement.start);
+            this.soundPlacement.previewGroup.position.z = groundZ + 0.45;
+          }
+          this._updateSoundPlacementPreviewGeometry(0.1);
+
+          if (window.MapShine?.cameraController) {
+            window.MapShine.cameraController.enabled = false;
+          }
+          return;
+        }
+
         // Tokens may be rendered on the overlay layer (31) to draw above post-processing.
         // Ensure raycasting includes that layer, otherwise tokens won't be clickable/draggable.
         const prevTokenRayMask = this.raycaster.layers?.mask;
@@ -3163,14 +3687,21 @@ export class InteractionManager {
     safeCall(() => {
       const showLighting = this._isLightingContextActive();
       const showWalls = this._isWallsContextActive();
+      const showSounds = this._isSoundsContextActive();
 
       this.lightIconManager?.setVisibility?.(showLighting);
 
       const enhancedLightIconManager = window.MapShine?.enhancedLightIconManager;
       enhancedLightIconManager?.setVisibility?.(showLighting);
 
+      this.soundIconManager?.setVisibility?.(showSounds);
+
       this.wallManager?.setVisibility?.(showWalls);
-    }, 'update.syncWallLightVisibility', Severity.COSMETIC);
+    }, 'update.syncWallLightSoundVisibility', Severity.COSMETIC);
+
+    safeCall(() => {
+      this._syncControlsOverlayContext();
+    }, 'update.syncControlsOverlayContext', Severity.COSMETIC);
 
     // Keep HUD positioned correctly if open
     if (canvas.tokens?.hud?.rendered && canvas.tokens.hud.object) {
@@ -3743,18 +4274,22 @@ export class InteractionManager {
     // But if we are "near a line", we probably want the line.
     if (hitFound) return;
 
-    // Tree canopy hover-hide is a V1-only feature. V2 runtime skips it.
-    if (window.MapShine?.__v2Active === true) return;
-
+    // Tree canopy hover-hide.
+    // V1 uses a single mesh on mapShine.treeEffect; V2 uses many per-tile meshes on FloorCompositorV2._treeEffect.
     const mapShine = window.MapShine || window.mapShine;
-    const treeEffect = mapShine?.treeEffect;
-    if (treeEffect && treeEffect.mesh) {
-      const treeHits = this.raycaster.intersectObject(treeEffect.mesh, false);
+    const v2TreeEffect = mapShine?.effectComposer?._floorCompositorV2?._treeEffect;
+    const v2TreeMeshes = (typeof v2TreeEffect?.getHoverMeshes === 'function') ? v2TreeEffect.getHoverMeshes() : null;
+    const treeEffect = (window.MapShine?.__v2Active === true) ? v2TreeEffect : mapShine?.treeEffect;
+    const treeHits = (window.MapShine?.__v2Active === true)
+      ? (Array.isArray(v2TreeMeshes) && v2TreeMeshes.length > 0 ? this.raycaster.intersectObjects(v2TreeMeshes, false) : [])
+      : (treeEffect?.mesh ? this.raycaster.intersectObject(treeEffect.mesh, false) : []);
+
+    if (treeEffect && treeHits.length >= 0) {
       if (treeHits.length > 0) {
         const hit = treeHits[0];
         let opaqueHit = true;
         if (typeof treeEffect.isUvOpaque === 'function' && hit.uv) {
-          opaqueHit = treeEffect.isUvOpaque(hit.uv);
+          opaqueHit = treeEffect.isUvOpaque(hit.uv, hit.object ?? null);
         }
 
         if (opaqueHit) {
@@ -3915,6 +4450,7 @@ export class InteractionManager {
           !this.dragSelect?.active &&
           !this.wallDraw?.active &&
           !this.lightPlacement?.active &&
+          !this.soundPlacement?.active &&
           !this.mapPointDraw?.active &&
           !this.rightClickState?.active &&
           !this.moveClickState?.active &&
@@ -4103,6 +4639,22 @@ export class InteractionManager {
 
                  // Update Visuals: rebuild wall-clipped polygon geometry in real time.
                  this._updateLightPlacementPreviewGeometry(this.lightPlacement, this.lightPlacement.start, Math.max(radius, 0.1));
+             }
+             return;
+        }
+
+        // Case 0.3: Ambient Sound Placement Drag
+        if (this.soundPlacement.active) {
+             if (this._isEventFromUI(event)) return;
+             this.updateMouseCoords(event);
+             const targetZ = this.soundPlacement.start?.z ?? (this.sceneComposer?.groundZ ?? 0);
+             const worldPos = this.viewportToWorld(event.clientX, event.clientY, targetZ);
+             if (worldPos) {
+               this.soundPlacement.current.set(worldPos.x, worldPos.y, targetZ);
+               const dx = this.soundPlacement.current.x - this.soundPlacement.start.x;
+               const dy = this.soundPlacement.current.y - this.soundPlacement.start.y;
+               const radius = Math.sqrt(dx * dx + dy * dy);
+               this._updateSoundPlacementPreviewGeometry(Math.max(radius, 0.1));
              }
              return;
         }
@@ -4361,10 +4913,32 @@ export class InteractionManager {
           // Token drags should preview on-grid so users see the final landing cell.
           if (!event.shiftKey && !isLightDrag) {
             const foundryPos = Coordinates.toFoundry(x, y);
-            const snapped = this.snapToGrid(foundryPos.x, foundryPos.y);
-            const snappedWorld = Coordinates.toWorld(snapped.x, snapped.y);
-            x = snappedWorld.x;
-            y = snappedWorld.y;
+            const isTileDrag = !!(this.tileManager?.tileSprites?.has?.(this.dragState.leaderId));
+
+            if (isTileDrag) {
+              const tileData = this.tileManager?.tileSprites?.get?.(this.dragState.leaderId);
+              const tileDoc = tileData?.tileDoc;
+              const width = Number(tileDoc?.width ?? 0);
+              const height = Number(tileDoc?.height ?? 0);
+
+              const topLeft = {
+                x: foundryPos.x - (width / 2),
+                y: foundryPos.y - (height / 2)
+              };
+              const snappedTopLeft = this.snapToGrid(topLeft.x, topLeft.y, CONST.GRID_SNAPPING_MODES.TOP_LEFT_CORNER);
+              const snappedCenter = {
+                x: snappedTopLeft.x + (width / 2),
+                y: snappedTopLeft.y + (height / 2)
+              };
+              const snappedWorld = Coordinates.toWorld(snappedCenter.x, snappedCenter.y);
+              x = snappedWorld.x;
+              y = snappedWorld.y;
+            } else {
+              const snapped = this.snapToGrid(foundryPos.x, foundryPos.y);
+              const snappedWorld = Coordinates.toWorld(snapped.x, snapped.y);
+              x = snappedWorld.x;
+              y = snappedWorld.y;
+            }
           }
 
           // Calculate delta from LEADER's initial position
@@ -4561,6 +5135,7 @@ export class InteractionManager {
           !this.dragSelect?.active &&
           !this.wallDraw?.active &&
           !this.lightPlacement?.active &&
+          !this.soundPlacement?.active &&
           !this.mapPointDraw?.active &&
           !this.rightClickState?.active &&
           !this.moveClickState?.active &&
@@ -4735,6 +5310,51 @@ export class InteractionManager {
                 log.info(`Created AmbientLight at (${startF.x.toFixed(1)}, ${startF.y.toFixed(1)}) with dim radius ${dim.toFixed(1)}`);
             }, 'pointerUp.createLight', Severity.DEGRADED);
             
+            return;
+        }
+
+        // Handle Ambient Sound Placement End
+        if (this.soundPlacement.active) {
+            this.soundPlacement.active = false;
+            if (this.soundPlacement.previewGroup) this.soundPlacement.previewGroup.visible = false;
+
+            // Re-enable camera controls
+            if (window.MapShine?.cameraController) {
+                window.MapShine.cameraController.enabled = true;
+            }
+
+            // If the pointer is released over UI (dialogs/filepickers), never create a sound.
+            if (this._isEventFromUI(event)) {
+                return;
+            }
+
+            const startWorld = this.soundPlacement.start;
+            const currentWorld = this.soundPlacement.current;
+            const startF = Coordinates.toFoundry(startWorld.x, startWorld.y);
+            const currentF = Coordinates.toFoundry(currentWorld.x, currentWorld.y);
+
+            const dx = currentF.x - startF.x;
+            const dy = currentF.y - startF.y;
+            const radiusPixels = Math.hypot(dx, dy);
+            if (radiusPixels < ((canvas?.dimensions?.size || 100) / 2)) {
+                return;
+            }
+
+            const radius = radiusPixels / Math.max(canvas?.dimensions?.distancePixels || 1, 1);
+            const data = {
+                x: startF.x,
+                y: startF.y,
+                radius,
+                path: ''
+            };
+
+            applyAmbientSoundLevelDefaults(data, { scene: canvas?.scene });
+
+            await safeCall(async () => {
+                await canvas.scene.createEmbeddedDocuments('AmbientSound', [data]);
+                log.info(`Created AmbientSound at (${startF.x.toFixed(1)}, ${startF.y.toFixed(1)}) with radius ${radius.toFixed(1)}`);
+            }, 'pointerUp.createAmbientSound', Severity.DEGRADED);
+
             return;
         }
 
@@ -4946,6 +5566,18 @@ export class InteractionManager {
             }
           }
 
+          const isSoundsLayer = this._isSoundsContextActive();
+          if (isSoundsLayer) {
+            const soundIcons = this.soundIconManager?.sounds?.values?.() ? Array.from(this.soundIconManager.sounds.values()) : [];
+            for (const sprite of soundIcons) {
+              const x = sprite.position.x;
+              const y = sprite.position.y;
+              if (x >= minX && x <= maxX && y >= minY && y <= maxY) {
+                this.selectObject(sprite, { showLightEditor: false });
+              }
+            }
+          }
+
           return;
         }
 
@@ -4963,12 +5595,19 @@ export class InteractionManager {
           const tokenUpdates = [];
           const tileUpdates = [];
           const lightUpdates = [];
+          const soundUpdates = [];
           let anyUpdates = false;
           let anyEnhancedLightUpdates = false;
           let tokenUpdateSucceeded = false;
           
-          // Use selection set
-          for (const id of this.selection) {
+          // Commit from drag previews first (authoritative drag participants), then
+          // include any extra selected ids as fallback.
+          const commitIds = new Set([
+            ...Array.from(this.dragState.previews?.keys?.() || []),
+            ...Array.from(this.selection || [])
+          ]);
+
+          for (const id of commitIds) {
             const preview = this.dragState.previews.get(id);
             if (!preview) continue;
 
@@ -5053,6 +5692,21 @@ export class InteractionManager {
                 }
 
                 tileUpdates.push({ _id: id, x: finalX, y: finalY });
+
+                // Optimistic local visual update so tile appears to land immediately
+                // on pointer-up instead of waiting for document round-trip.
+                safeCall(() => {
+                  const sprite = tileData?.sprite;
+                  if (!sprite) return;
+                  const centerF = { x: finalX + (width / 2), y: finalY + (height / 2) };
+                  const centerW = Coordinates.toWorld(centerF.x, centerF.y);
+                  sprite.position.x = centerW.x;
+                  sprite.position.y = centerW.y;
+                  if (typeof sprite.updateMatrix === 'function') sprite.updateMatrix();
+                  this.tileManager?.syncTileAttachedEffects?.(id, sprite);
+                  this._syncFloorBusTileVisual(id, finalX, finalY, width, height);
+                }, 'pointerUp.tileOptimisticSpriteMove', Severity.COSMETIC);
+
                 continue;
             }
 
@@ -5062,6 +5716,15 @@ export class InteractionManager {
                 const foundryPos = Coordinates.toFoundry(worldPos.x, worldPos.y);
                 
                 lightUpdates.push({ _id: id, x: foundryPos.x, y: foundryPos.y });
+                continue;
+            }
+
+            // Check Foundry Ambient Sound
+            if (this.soundIconManager && this.soundIconManager.sounds.has(id)) {
+                const worldPos = preview.position;
+                const foundryPos = Coordinates.toFoundry(worldPos.x, worldPos.y);
+
+                soundUpdates.push({ _id: id, x: foundryPos.x, y: foundryPos.y });
                 continue;
             }
 
@@ -5268,8 +5931,20 @@ export class InteractionManager {
               }, 'pointerUp.updateLightPositions', Severity.DEGRADED);
           }
 
+          if (soundUpdates.length > 0) {
+              log.info(`Updating ${soundUpdates.length} sounds`);
+              anyUpdates = true;
+              await safeCall(async () => {
+                  await canvas.scene.updateEmbeddedDocuments('AmbientSound', soundUpdates);
+              }, 'pointerUp.updateSoundPositions', Severity.DEGRADED);
+          }
+
           if (tileUpdates.length > 0) {
               log.info(`Updating ${tileUpdates.length} tiles`);
+              log.warn('TileInteraction.commit.tileUpdates', {
+                count: tileUpdates.length,
+                ids: tileUpdates.map((u) => String(u?._id || ''))
+              });
               anyUpdates = true;
               await safeCall(async () => {
                   await canvas.scene.updateEmbeddedDocuments('Tile', tileUpdates);
@@ -5848,6 +6523,10 @@ export class InteractionManager {
             // Check Tile
             const tileDoc = canvas.tiles?.get?.(id)?.document ?? canvas.scene?.tiles?.get?.(id);
             if (tileDoc) {
+              const tileData = this.tileManager?.tileSprites?.get?.(id) || { tileDoc, sprite: null };
+              if (!this._isTileWithinActiveBand(tileData.tileDoc) || !this._isTileAllowedByCurrentForegroundMode(tileData.tileDoc, tileData.sprite)) {
+                continue;
+              }
               if (!tileDoc.canUserModify(game.user, 'delete')) {
                 continue;
               }
@@ -6115,10 +6794,28 @@ export class InteractionManager {
     } else if (sprite.userData.foundryTileId) {
         id = sprite.userData.foundryTileId;
 
+        const tileData = this.tileManager?.tileSprites?.get?.(id);
+        if (!this._isTileSelectableForCurrentTool(tileData)) {
+          return;
+        }
+
+        safeCall(() => this._setTileSelectionVisual(sprite, true), 'selectObject.tileSelectionVisual', Severity.COSMETIC);
+
         safeCall(() => {
           const tile = canvas.tiles?.get?.(id);
           if (tile && !tile.controlled) tile.control({ releaseOthers: false });
         }, 'selectObject.controlTile', Severity.COSMETIC);
+    } else if (sprite.userData.soundId) {
+        id = sprite.userData.soundId;
+        safeCall(() => {
+          const base = sprite?.userData?.baseScale;
+          if (base && Number.isFinite(base.x) && Number.isFinite(base.y)) {
+            sprite.scale.set(base.x * 1.12, base.y * 1.12, base.z ?? 1);
+          }
+          if (sprite.material?.uniforms?.tintColor?.value?.setHex) {
+            sprite.material.uniforms.tintColor.value.setHex(0x88ccff);
+          }
+        }, 'selectObject.selectSound', Severity.COSMETIC);
     } else {
         return;
     }
@@ -6169,6 +6866,25 @@ export class InteractionManager {
       if (tile?.controlled) {
         safeCall(() => tile.release(), 'clearSelection.releaseTile', Severity.COSMETIC);
       }
+      const tileSprite = this.tileManager?.tileSprites?.get?.(id)?.sprite || null;
+      if (tileSprite) {
+        safeCall(() => this._setTileSelectionVisual(tileSprite, false), 'clearSelection.tileSelectionVisual', Severity.COSMETIC);
+      }
+
+      if (this.soundIconManager?.sounds?.has?.(id)) {
+        const sprite = this.soundIconManager.sounds.get(id);
+        safeCall(() => {
+          const base = sprite?.userData?.baseScale;
+          if (base && Number.isFinite(base.x) && Number.isFinite(base.y)) {
+            sprite.scale.set(base.x, base.y, base.z ?? 1);
+          }
+          const soundDoc = canvas?.scene?.sounds?.get?.(id) || canvas?.sounds?.get?.(id)?.document || null;
+          const hiddenLike = !!(soundDoc?.hidden || !soundDoc?.path);
+          if (sprite?.material?.uniforms?.tintColor?.value?.setHex) {
+            sprite.material.uniforms.tintColor.value.setHex(hiddenLike ? 0xff3300 : 0xffffff);
+          }
+        }, 'clearSelection.resetSoundSelection', Severity.COSMETIC);
+      }
     }
     this.selection.clear();
     this._clearMovementPathPreview();
@@ -6192,6 +6908,132 @@ export class InteractionManager {
     
     // NOTE: Vision/fog updates are now handled by MapShine's world-space fog
     // effect, which also consults Foundry's controlled tokens for GM bypass.
+  }
+
+  _setTileSelectionVisual(sprite, selected) {
+    if (!sprite) return;
+    const THREERef = window.THREE;
+    if (!THREERef) return;
+    const tileId = sprite?.userData?.foundryTileId || null;
+
+    if (selected) {
+      if (!sprite.userData._msTileSelectOutline) {
+        const cx = Number(sprite.center?.x ?? 0.5);
+        const cy = Number(sprite.center?.y ?? 0.5);
+        const sx = Math.max(0.0001, Number(sprite.scale?.x || 1));
+        const sy = Math.max(0.0001, Number(sprite.scale?.y || 1));
+        const x0 = (-cx) * sx;
+        const x1 = (1 - cx) * sx;
+        const y0 = (-cy) * sy;
+        const y1 = (1 - cy) * sy;
+        const points = [
+          new THREERef.Vector3(x0, y0, 0.02),
+          new THREERef.Vector3(x1, y0, 0.02),
+          new THREERef.Vector3(x1, y1, 0.02),
+          new THREERef.Vector3(x0, y1, 0.02)
+        ];
+        const geometry = new THREERef.BufferGeometry().setFromPoints(points);
+        const material = new THREERef.LineBasicMaterial({
+          color: 0x66d9ff,
+          transparent: true,
+          opacity: 0.95,
+          depthTest: false,
+          depthWrite: false,
+          toneMapped: false
+        });
+        const outline = new THREERef.LineLoop(geometry, material);
+        outline.renderOrder = 10001;
+        sprite.add(outline);
+        sprite.userData._msTileSelectOutline = outline;
+      }
+      if (tileId) {
+        safeCall(() => this._setFloorBusTileSelectionVisual(tileId, true), 'tileSelectionOutline.busShow', Severity.COSMETIC);
+      }
+    } else {
+      const outline = sprite.userData._msTileSelectOutline;
+      if (outline) {
+        try { sprite.remove(outline); } catch (_) {}
+        safeDispose(() => outline.geometry?.dispose?.(), 'tileSelectionOutline.disposeGeometry');
+        safeDispose(() => outline.material?.dispose?.(), 'tileSelectionOutline.disposeMaterial');
+      }
+      delete sprite.userData._msTileSelectOutline;
+      if (tileId) {
+        safeCall(() => this._setFloorBusTileSelectionVisual(tileId, false), 'tileSelectionOutline.busHide', Severity.COSMETIC);
+      }
+    }
+  }
+
+  _setFloorBusTileSelectionVisual(tileId, selected) {
+    const bus = window.MapShine?.floorRenderBus;
+    const entry = bus?._tiles?.get?.(tileId);
+    const root = entry?.root || null;
+    if (!root) return;
+
+    const THREERef = window.THREE;
+    if (!THREERef) return;
+
+    if (selected) {
+      if (root.userData?._msTileSelectOutline) return;
+
+      const tileData = this.tileManager?.tileSprites?.get?.(tileId);
+      const tileDoc = tileData?.tileDoc || null;
+      const w = Math.max(0.0001, Number(tileDoc?.width ?? entry?.mesh?.geometry?.parameters?.width ?? 1));
+      const h = Math.max(0.0001, Number(tileDoc?.height ?? entry?.mesh?.geometry?.parameters?.height ?? 1));
+      const hw = w / 2;
+      const hh = h / 2;
+
+      const points = [
+        new THREERef.Vector3(-hw, -hh, 0.06),
+        new THREERef.Vector3(hw, -hh, 0.06),
+        new THREERef.Vector3(hw, hh, 0.06),
+        new THREERef.Vector3(-hw, hh, 0.06)
+      ];
+      const geometry = new THREERef.BufferGeometry().setFromPoints(points);
+      const material = new THREERef.LineBasicMaterial({
+        color: 0x66d9ff,
+        transparent: true,
+        opacity: 0.98,
+        depthTest: false,
+        depthWrite: false,
+        toneMapped: false
+      });
+
+      const outline = new THREERef.LineLoop(geometry, material);
+      outline.renderOrder = 12001;
+      root.add(outline);
+      root.userData._msTileSelectOutline = outline;
+      return;
+    }
+
+    const outline = root.userData?._msTileSelectOutline;
+    if (outline) {
+      try { root.remove(outline); } catch (_) {}
+      safeDispose(() => outline.geometry?.dispose?.(), 'tileSelectionOutline.busDisposeGeometry');
+      safeDispose(() => outline.material?.dispose?.(), 'tileSelectionOutline.busDisposeMaterial');
+    }
+    if (root.userData) delete root.userData._msTileSelectOutline;
+  }
+
+  _syncFloorBusTileVisual(tileId, foundryX, foundryY, width, height) {
+    const bus = window.MapShine?.floorRenderBus;
+    const entry = bus?._tiles?.get?.(tileId);
+    const root = entry?.root || null;
+    const mesh = entry?.mesh || null;
+    const target = root || mesh;
+    if (!target) return;
+
+    const w = Number(width || 0);
+    const h = Number(height || 0);
+    const centerF = { x: Number(foundryX || 0) + (w / 2), y: Number(foundryY || 0) + (h / 2) };
+    const centerW = Coordinates.toWorld(centerF.x, centerF.y);
+
+    // FloorRenderBus stores world-space tile transform on `root` (mesh stays local 0,0).
+    target.position.x = centerW.x;
+    target.position.y = centerW.y;
+    if (typeof target.updateMatrix === 'function') target.updateMatrix();
+    if (target.parent && typeof target.parent.updateMatrixWorld === 'function') {
+      target.parent.updateMatrixWorld(true);
+    }
   }
 
   /**
@@ -6290,7 +7132,7 @@ export class InteractionManager {
    */
   dispose() {
     window.removeEventListener('pointerdown', this.boundHandlers.onPointerDown, { capture: true });
-    this.canvasElement.removeEventListener('dblclick', this.boundHandlers.onDoubleClick);
+    window.removeEventListener('dblclick', this.boundHandlers.onDoubleClick, { capture: true });
     window.removeEventListener('pointermove', this.boundHandlers.onPointerMove);
     window.removeEventListener('pointerup', this.boundHandlers.onPointerUp);
     window.removeEventListener('wheel', this.boundHandlers.onWheel);
@@ -6331,6 +7173,16 @@ export class InteractionManager {
       const labelEl = this.movementPathPreview?.labelEl;
       if (labelEl?.parentNode) labelEl.parentNode.removeChild(labelEl);
     }, 'dispose.movementPathPreview', Severity.COSMETIC);
+
+    safeCall(() => {
+      if (this.soundPlacement?.previewGroup?.parent) {
+        this.soundPlacement.previewGroup.parent.remove(this.soundPlacement.previewGroup);
+      }
+      this.soundPlacement?.previewFill?.geometry?.dispose?.();
+      this.soundPlacement?.previewFill?.material?.dispose?.();
+      this.soundPlacement?.previewBorder?.geometry?.dispose?.();
+      this.soundPlacement?.previewBorder?.material?.dispose?.();
+    }, 'dispose.soundPlacementPreview', Severity.COSMETIC);
 
     safeDispose(this.selectionBoxEffect, 'dispose.selectionBoxEffect');
     this.selectionBoxEffect = null;

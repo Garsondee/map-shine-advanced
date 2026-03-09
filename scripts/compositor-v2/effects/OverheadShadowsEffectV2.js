@@ -48,6 +48,9 @@ export class OverheadShadowsEffectV2 {
     /** @type {THREE.Texture|null} */
     this.inputTexture = null;
 
+    /** @type {import('../../scene/tile-motion-manager.js').TileMotionManager|null} */
+    this._tileMotionManager = null;
+
     /** @type {THREE.Texture|null} */
     this.outdoorsMask = null; // _Outdoors mask (bright outside, dark indoors)
 
@@ -109,6 +112,25 @@ export class OverheadShadowsEffectV2 {
      * @type {Map<string, {outdoorsMask: THREE.Texture|null}>}
      */
     this._floorStates = new Map();
+  }
+
+  /**
+   * Inject TileMotionManager dependency from the V2 compositor.
+   * @param {import('../../scene/tile-motion-manager.js').TileMotionManager|null} manager
+   */
+  setTileMotionManager(manager) {
+    this._tileMotionManager = manager || null;
+  }
+
+  /**
+   * Resolve tile IDs opted into shadow projection.
+   * Source is the injected V2 TileMotionManager only.
+   * @returns {string[]}
+   * @private
+   */
+  _getTileProjectionIds() {
+    const idsFromInjected = this._tileMotionManager?.getShadowProjectionTileIds?.();
+    return Array.isArray(idsFromInjected) ? idsFromInjected : [];
   }
 
   _clearShadowTargetToWhite(renderer) {
@@ -210,15 +232,6 @@ export class OverheadShadowsEffectV2 {
    * @param {import('../assets/EffectMaskRegistry.js').EffectMaskRegistry} registry
    */
   connectToRegistry(registry) {
-    if (this._registryUnsub) { this._registryUnsub(); this._registryUnsub = null; }
-    this._registryUnsub = registry.subscribe('outdoors', (texture) => {
-      this.outdoorsMask = texture;
-      // Clear per-floor cache so next bindFloorMasks() picks up the new global mask.
-      this._floorStates.clear();
-      if (texture && this.renderer && this.mainScene && this.mainCamera) {
-        this._createShadowMesh();
-      }
-    });
   }
 
   /**
@@ -836,7 +849,10 @@ export class OverheadShadowsEffectV2 {
               if (tileCasterDevice < 0.9999) {
                 float tileCasterLinear = msa_linearizeDepth(tileCasterDevice);
                 float tileCasterHeight = uGroundDistance - tileCasterLinear;
-                depthTileProjectionMod = smoothstep(0.0, 1.0, tileCasterHeight - receiverHeight);
+                // Preserve projection for same-height casters (common for tile->tile
+                // projections) and only suppress clearly lower casters.
+                float tileHeightDiff = tileCasterHeight - receiverHeight;
+                depthTileProjectionMod = smoothstep(-2.0, -0.1, tileHeightDiff);
               }
             }
           }
@@ -1352,7 +1368,9 @@ export class OverheadShadowsEffectV2 {
       if (u.uIndoorFluidShadowSoftness) u.uIndoorFluidShadowSoftness.value = this.params.indoorFluidShadowSoftness;
       if (u.uIndoorFluidShadowIntensityBoost) u.uIndoorFluidShadowIntensityBoost.value = this.params.indoorFluidShadowIntensityBoost;
       if (u.uIndoorFluidColorSaturation) u.uIndoorFluidColorSaturation.value = this.params.indoorFluidColorSaturation;
-      if (u.uTileProjectionEnabled) u.uTileProjectionEnabled.value = this.params.tileProjectionEnabled ? 1.0 : 0.0;
+      const projectionIds = this._getTileProjectionIds();
+      const hasTileProjection = Array.isArray(projectionIds) && projectionIds.length > 0;
+      if (u.uTileProjectionEnabled) u.uTileProjectionEnabled.value = (this.params.tileProjectionEnabled || hasTileProjection) ? 1.0 : 0.0;
       if (u.uTileProjectionOpacity) u.uTileProjectionOpacity.value = this.params.tileProjectionOpacity;
       if (u.uTileProjectionLengthScale) u.uTileProjectionLengthScale.value = this.params.tileProjectionLengthScale;
       if (u.uTileProjectionSoftness) u.uTileProjectionSoftness.value = this.params.tileProjectionSoftness;
@@ -1589,27 +1607,26 @@ export class OverheadShadowsEffectV2 {
     this.mainCamera.layers.mask = previousLayersMask;
 
     // Pass 1.5: optional tile alpha projection pass.
-    // Uses the per-tile "Shadow Projection" flags from TileMotionManager,
-    // but only for tiles that are motion-enabled.
+    // Uses per-tile "Shadow Projection" flags from the injected V2
+    // TileMotionManager dependency.
     let hasTileProjection = false;
     let hasTileProjectionSort = false;
     let hasTileReceiverSort = false;
-    const tileProjectionIds = this.params.tileProjectionEnabled
-      ? (window.MapShine?.tileMotionManager?.getShadowProjectionTileIds?.() || [])
-      : [];
+    const tileProjectionIds = this._getTileProjectionIds();
     if (tileProjectionIds.length > 0
       && this.tileProjectionTarget
       && this.tileProjectionSortTarget
       && this.tileReceiverAlphaTarget
       && this.tileReceiverSortTarget) {
-      const idSet = new Set(tileProjectionIds);
+      const idSet = new Set(tileProjectionIds.map((id) => String(id)));
 
       // Build a dynamic sort normalization range from currently present tile
       // sprites so projected-caster and receiver sort maps stay comparable.
       let sortMin = Infinity;
       let sortMax = -Infinity;
       this.mainScene.traverse((object) => {
-        if (!object?.isSprite || !object?.material) return;
+        const isTileRenderable = !!(object?.isSprite || object?.isMesh);
+        if (!isTileRenderable || !object?.material) return;
         if (!object?.userData?.foundryTileId) return;
         const sortKey = this._getTileSortKey(object);
         if (sortKey < sortMin) sortMin = sortKey;
@@ -1620,7 +1637,10 @@ export class OverheadShadowsEffectV2 {
         sortMax = 1;
       }
       const sortDelta = sortMax - sortMin;
-      const canUseSortOcclusion = Number.isFinite(sortDelta) && sortDelta > 0.00001;
+      // V2 bus tiles currently do not guarantee a stable, receiver-comparable
+      // sort signal across all tile render paths. Failing open avoids fully
+      // suppressing projection in scenes where sort encoding is inconsistent.
+      const canUseSortOcclusion = false;
       const sortRange = canUseSortOcclusion ? sortDelta : 1.0;
 
       // Projection contributors need the same guard-band strategy as roof
@@ -1639,7 +1659,8 @@ export class OverheadShadowsEffectV2 {
         if (!isRenderable || typeof object.visible !== 'boolean') return;
         tileReceiverVisibilityOverrides.push({ object, visible: object.visible });
 
-        const keepVisible = !!(object.visible && object.isSprite && object?.userData?.foundryTileId && object.material);
+        const isTileRenderable = !!(object.isSprite || object.isMesh);
+        const keepVisible = !!(object.visible && isTileRenderable && object?.userData?.foundryTileId && object.material);
         object.visible = keepVisible;
 
         if (keepVisible && typeof object.material?.opacity === 'number') {
@@ -1687,14 +1708,15 @@ export class OverheadShadowsEffectV2 {
         tileProjectionVisibilityOverrides.push({ object, visible: object.visible });
 
         const tileId = object?.userData?.foundryTileId;
-        const keepVisible = !!(object.isSprite && tileId && idSet.has(tileId));
+        const isTileRenderable = !!(object.isSprite || object.isMesh);
+        const keepVisible = !!(isTileRenderable && tileId && idSet.has(String(tileId)));
         // Projection should still capture tiles that are currently hidden/faded
         // by indoor roof reveal logic. Force selected contributors visible.
         object.visible = keepVisible;
 
         // Ignore runtime sprite opacity fades (e.g. hover/roof hide) so the
         // projection pass captures the tile alpha silhouette consistently.
-        if (keepVisible && object.isSprite && typeof object.material?.opacity === 'number') {
+        if (keepVisible && typeof object.material?.opacity === 'number') {
           tileProjectionOpacityOverrides.push({ object, opacity: object.material.opacity });
           object.material.opacity = 1.0;
         }
@@ -1802,6 +1824,7 @@ export class OverheadShadowsEffectV2 {
 
   dispose() {
     if (this._registryUnsub) { this._registryUnsub(); this._registryUnsub = null; }
+    this._tileMotionManager = null;
     if (this.roofTarget) {
       this.roofTarget.dispose();
       this.roofTarget = null;

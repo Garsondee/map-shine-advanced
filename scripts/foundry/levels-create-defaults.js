@@ -153,6 +153,43 @@ export function applyWallLevelDefaults(data, options = {}) {
 }
 
 /**
+ * Seed missing ambient-sound elevation/range defaults from the active level band.
+ *
+ * @param {object} data
+ * @param {{scene?: Scene|null|undefined}} [options]
+ * @returns {object}
+ */
+export function applyAmbientSoundLevelDefaults(data, options = {}) {
+  if (!data || typeof data !== 'object') return data;
+
+  const scene = options.scene ?? canvas?.scene;
+  if (!shouldApplyLevelCreateDefaults(scene)) return data;
+
+  const band = getFiniteActiveLevelBand() || _getFallbackCreateBandForLightData(data);
+  if (!band) return data;
+
+  const hasElevation = !_isMissing(data.elevation);
+  const hasRangeBottom = !_isMissing(data.flags?.levels?.rangeBottom);
+  const hasRangeTop = !_isMissing(data.flags?.levels?.rangeTop);
+  if (hasElevation && hasRangeBottom && hasRangeTop) return data;
+
+  if (!hasElevation) {
+    data.elevation = band.center;
+  }
+
+  if (!hasRangeBottom || !hasRangeTop) {
+    data.flags = (data.flags && typeof data.flags === 'object') ? data.flags : {};
+    data.flags.levels = (data.flags.levels && typeof data.flags.levels === 'object')
+      ? data.flags.levels
+      : {};
+    if (!hasRangeBottom) data.flags.levels.rangeBottom = band.bottom;
+    if (!hasRangeTop) data.flags.levels.rangeTop = band.top;
+  }
+
+  return data;
+}
+
+/**
  * Seed missing tile elevation/range defaults from the active level band.
  *
  * This keeps newly created tiles (including drag/drop creates) scoped to the

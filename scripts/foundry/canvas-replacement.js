@@ -83,6 +83,7 @@ import { LensEffectV2 } from '../compositor-v2/effects/LensEffectV2.js';
 import { TemplateManager } from '../scene/template-manager.js';
 import { LightIconManager } from '../scene/light-icon-manager.js';
 import { EnhancedLightIconManager } from '../scene/enhanced-light-icon-manager.js';
+import { SoundIconManager } from '../scene/sound-icon-manager.js';
 import { InteractionManager } from '../scene/interaction-manager.js';
 import { GridRenderer } from '../scene/grid-renderer.js';
 import { MapPointsManager } from '../scene/map-points-manager.js';
@@ -418,6 +419,11 @@ function _setCreateThreeCanvasProgress(step) {
 /** @type {number|null} */
 let _createThreeCanvasProgressTimeout = null;
 
+// Prevents concurrent createThreeCanvas calls (recovery + real canvasReady racing).
+// If a second call arrives while one is already running, it is dropped to avoid
+// double-initialization and the watchdog confusion that causes the 60s fadeIn timeout.
+let _createThreeCanvasRunning = false;
+
 /** @type {SceneComposer|null} */
 let sceneComposer = null;
 
@@ -544,6 +550,9 @@ let lightIconManager = null;
 
 /** @type {EnhancedLightIconManager|null} */
 let enhancedLightIconManager = null;
+
+/** @type {SoundIconManager|null} */
+let soundIconManager = null;
 
 /** @type {InteractionManager|null} */
 let interactionManager = null;
@@ -2318,7 +2327,17 @@ function installCanvasTransitionWrapper() {
         loadingOverlay.setProgress(0, { immediate: true });
       }, 'sceneTransition.fade', Severity.DEGRADED);
 
-      const result = await wrapped(...args);
+      // Catch tearDown errors (e.g. fog save IndexSizeError/DOMException) so they
+      // do not propagate to Canvas.draw() and trigger spurious recovery paths.
+      // Foundry's fog extraction can fail with invalid canvas dimensions during
+      // scene switches; this is non-fatal — the transition should proceed regardless.
+      let result;
+      try {
+        result = await wrapped(...args);
+      } catch (err) {
+        log.warn('Canvas.tearDown() threw during scene transition (non-fatal, transition continues):', err?.message ?? String(err));
+        // Return undefined so Canvas.draw() sees a resolved tearDown and continues normally.
+      }
 
       // BLANK-CANVAS SAFETY: When canvas.draw(null) is called (scene deleted,
       // deactivated, unviewed, etc.), Foundry's internal #drawBlank() runs
@@ -3172,6 +3191,15 @@ function restoreFoundryStateFromSnapshot() {
 }
 
 async function createThreeCanvas(scene) {
+  // Guard against concurrent calls — can happen when tearDown throws and both the
+  // recovery path AND the real canvasReady hook fire createThreeCanvas simultaneously.
+  // The second call is dropped; the first one owns the initialization.
+  if (_createThreeCanvasRunning) {
+    log.warn('[loading] createThreeCanvas already in progress — ignoring concurrent call (recovery race).');
+    return;
+  }
+  _createThreeCanvasRunning = true;
+
   try {
     const n = String(95).padStart(3, '0');
   } catch (_) {
@@ -3824,7 +3852,16 @@ async function createThreeCanvas(scene) {
       // but don't await it ->-> we just need the compositor instance created.
       let fc = null;
       safeCall(() => {
-        fc = effectComposer._getFloorCompositorV2();
+        fc = effectComposer._getFloorCompositorV2({
+          // Fire setStage('effects.core') after each effect is initialized so the
+          // bar advances steadily across the 38 effects instead of one frozen block.
+          onProgress: (label, index, total) => {
+            safeCall(() => {
+              const p = 0.10 + (index / total) * 0.85;
+              loadingOverlay.setStage('effects.core', p, `Loading ${label}...`, { keepAuto: true });
+            }, 'overlay.compositor.progress', Severity.COSMETIC);
+          },
+        });
         log.info('V2 FloorCompositor instance created');
       }, 'v2.floorCompositor.create', Severity.DEGRADED);
       
@@ -3895,7 +3932,7 @@ async function createThreeCanvas(scene) {
     }
 
     safeCall(() => {
-      loadingOverlay.setStage('scene.sync', 0.0, 'Preparing tiles...', { keepAuto: true });
+      loadingOverlay.setStage('scene.managers', 0.05, 'Initializing token manager...', { keepAuto: true });
     }, 'overlay.tokens', Severity.COSMETIC);
     // Yield so the browser can paint the scene.sync stage transition.
     _setCreateThreeCanvasProgress('scene.managers.yield.beforeTiles');
@@ -3912,6 +3949,12 @@ async function createThreeCanvas(scene) {
     console.log('   -> TileManager: constructor...');
     tileManager = new TileManager(threeScene);
     console.log('   -> TileManager: constructor DONE');
+    console.log('   -> TileManager: initialize...');
+    tileManager.initialize();
+    console.log('   -> TileManager: initialize DONE');
+    console.log('   -> TileManager: syncAllTiles...');
+    tileManager.syncAllTiles();
+    console.log('   -> TileManager: syncAllTiles DONE');
     effectComposer.addUpdatable(tileManager); // Register for occlusion updates
     if (isDebugLoad) dlp.end('manager.TileManager.syncAll');
     console.log(' -> Manager: TileManager DONE (synced)');
@@ -3956,7 +3999,7 @@ async function createThreeCanvas(scene) {
     if (window.MapShine) window.MapShine.tileMotionManager = tileMotionManager;
     log.info('Tile motion manager initialized');
 
-    safeCall(() => loadingOverlay.setStage('scene.sync', 0.35, 'Syncing tiles...', { keepAuto: true }), 'overlay.tiles', Severity.COSMETIC);
+    safeCall(() => loadingOverlay.setStage('scene.managers', 0.30, 'Setting up floor layers...', { keepAuto: true }), 'overlay.tiles', Severity.COSMETIC);
 
     // V2: SurfaceRegistry is effect infrastructure ->-> skip.
 
@@ -3990,16 +4033,16 @@ async function createThreeCanvas(scene) {
     console.log(' -> Manager: TokenMovementManager DONE');
     log.info('Token movement manager initialized');
 
-    safeCall(() => loadingOverlay.setStage('scene.sync', 0.55, 'Syncing walls...', { keepAuto: true }), 'overlay.walls', Severity.COSMETIC);
+    safeCall(() => loadingOverlay.setStage('scene.managers', 0.50, 'Initializing movement manager...', { keepAuto: true }), 'overlay.walls', Severity.COSMETIC);
 
     // P1.3: Parallel initialization of independent lightweight managers.
     // These managers only create THREE objects and register Foundry hooks ->-> they
     // don't depend on each other or on tokens/tiles/walls, so it's safe to run
     // them concurrently. MapPointsManager is async and included in the batch.
-    safeCall(() => loadingOverlay.setStage('scene.sync', 0.7, 'Syncing remaining objects...', { keepAuto: true }), 'overlay.remaining', Severity.COSMETIC);
+    safeCall(() => loadingOverlay.setStage('scene.managers', 0.65, 'Syncing scene objects...', { keepAuto: true }), 'overlay.remaining', Severity.COSMETIC);
 
     _setCreateThreeCanvasProgress('scene.managers.lightweightBatch.construct');
-    console.log(' -> Manager: Lightweight batch (Door, Drawing, Note, Template, LightIcon, EnhancedLightIcon, MapPoints)');
+    console.log(' -> Manager: Lightweight batch (Door, Drawing, Note, Template, LightIcon, EnhancedLightIcon, SoundIcon, MapPoints)');
 
     if (!sceneComposer) {
       // This can happen if the scene load session becomes stale (scene switch)
@@ -4020,6 +4063,7 @@ async function createThreeCanvas(scene) {
     templateManager = new TemplateManager(threeScene);
     lightIconManager = new LightIconManager(threeScene);
     enhancedLightIconManager = new EnhancedLightIconManager(threeScene);
+    soundIconManager = new SoundIconManager(threeScene);
     mapPointsManager = new MapPointsManager(threeScene);
 
     if (isDebugLoad) {
@@ -4031,6 +4075,7 @@ async function createThreeCanvas(scene) {
         ['manager.Template.init', templateManager],
         ['manager.LightIcon.init', lightIconManager],
         ['manager.EnhancedLightIcon.init', enhancedLightIconManager],
+        ['manager.SoundIcon.init', soundIconManager],
         ['manager.MapPoints.init', mapPointsManager],
       ];
       for (const [id, mgr] of lightweightManagers) {
@@ -4049,6 +4094,7 @@ async function createThreeCanvas(scene) {
         Promise.resolve(templateManager.initialize()),
         Promise.resolve(lightIconManager.initialize()),
         Promise.resolve(enhancedLightIconManager.initialize()),
+        Promise.resolve(soundIconManager.initialize()),
         mapPointsManager.initialize(),
       ]);
     }
@@ -4056,7 +4102,7 @@ async function createThreeCanvas(scene) {
     effectComposer.addUpdatable(doorMeshManager);
     if (window.MapShine) window.MapShine.doorMeshManager = doorMeshManager;
     console.log(' -> Manager: Lightweight batch DONE');
-    log.info('Parallel manager batch initialized (Door, Drawing, Note, Template, LightIcon, EnhancedLightIcon, MapPoints)');
+    log.info('Parallel manager batch initialized (Door, Drawing, Note, Template, LightIcon, EnhancedLightIcon, SoundIcon, MapPoints)');
 
     // Wire map points to particle effects (fire, candle flame, smelly flies, etc.)
     // V2: No particle effects ->-> skip wiring.
@@ -4069,12 +4115,13 @@ async function createThreeCanvas(scene) {
     if (isDebugLoad) dlp.begin('manager.Interaction.init', 'manager');
     _setCreateThreeCanvasProgress('scene.managers.interaction.init');
     console.log(' -> Manager: InteractionManager');
-    interactionManager = new InteractionManager(threeCanvas, sceneComposer, tokenManager, tileManager, wallManager, lightIconManager);
+    interactionManager = new InteractionManager(threeCanvas, sceneComposer, tokenManager, tileManager, wallManager, lightIconManager, soundIconManager);
     interactionManager.initialize();
     effectComposer.addUpdatable(interactionManager); // Register for updates (HUD positioning)
     if (isDebugLoad) dlp.end('manager.Interaction.init');
     console.log(' -> Manager: InteractionManager DONE');
     log.info('Interaction manager initialized');
+    safeCall(() => loadingOverlay.setStage('scene.managers', 0.80, 'Building interaction systems...', { keepAuto: true }), 'overlay.interaction', Severity.COSMETIC);
 
     // Wire token movement hook for ash disturbance.
     // V2: Route into the V2 ash disturbance effect if present.
@@ -4223,6 +4270,7 @@ async function createThreeCanvas(scene) {
     }, 'exposeLegacyCameraControllerAlias', Severity.COSMETIC);
     if (isDebugLoad) dlp.end('manager.PixiInputBridge.init');
     log.info('PIXI input bridge initialized - pan/zoom updates PIXI stage');
+    safeCall(() => loadingOverlay.setStage('scene.managers', 0.93, 'Setting up camera...', { keepAuto: true }), 'overlay.camera', Severity.COSMETIC);
 
     // Step 6a.5: Initialize cinematic camera manager
     if (isDebugLoad) dlp.begin('manager.CinematicCamera.init', 'manager');
@@ -4246,6 +4294,7 @@ async function createThreeCanvas(scene) {
     if (window.MapShine) window.MapShine.cinematicCameraManager = cinematicCameraManager;
     if (isDebugLoad) dlp.end('manager.CinematicCamera.init');
     log.info('Cinematic camera manager initialized');
+    safeCall(() => loadingOverlay.setStage('scene.sync', 0.5, 'Syncing scene state...', { keepAuto: true }), 'overlay.sceneSync', Severity.COSMETIC);
 
     // BASELINE: Skip ControlsIntegration (V1 component causing crashes in V2 mode)
     console.log(' -> Manager: ControlsIntegration SKIPPED (V2 baseline)');
@@ -4311,7 +4360,7 @@ async function createThreeCanvas(scene) {
     if (isDebugLoad) dlp.begin('gpu.shaderCompile', 'gpu');
     {
       // V2 compositor is always-on. Legacy V1 progressive shader warmup has been removed.
-      safeCall(() => loadingOverlay.setStage('final', 0.9, 'Shaders ready...', { keepAuto: true }), 'overlay.shaderCompile', Severity.COSMETIC);
+      safeCall(() => loadingOverlay.setStage('final', 0.05, 'Shaders ready...', { keepAuto: true }), 'overlay.shaderCompile', Severity.COSMETIC);
       dlp.event('gpu.shaderCompile: SKIPPED ->-> V2 compositor active');
       log.info('Shader warmup skipped: V2 compositor active');
     }
@@ -4380,6 +4429,7 @@ async function createThreeCanvas(scene) {
       tokenManager, tokenMovementManager, tileManager, visibilityController, detectionFilterEffect,
       wallManager, doorMeshManager,
       drawingManager, noteManager, templateManager, lightIconManager,
+      soundIconManager,
       enhancedLightIconManager, enhancedLightInspector, interactionManager,
       overlayUIManager, lightEditor, gridRenderer, mapPointsManager,
       tileMotionManager,
@@ -4738,6 +4788,16 @@ async function createThreeCanvas(scene) {
         }, 'v2.registerPrismUI', Severity.COSMETIC);
 
         safeCall(() => {
+          uiManager.registerEffect('bush', 'Bush',
+            BushEffectV2.getControlSchema(), _makeV2Callback('_bushEffect'), 'surface');
+        }, 'v2.registerBushUI', Severity.COSMETIC);
+
+        safeCall(() => {
+          uiManager.registerEffect('tree', 'Tree',
+            TreeEffectV2.getControlSchema(), _makeV2Callback('_treeEffect'), 'surface');
+        }, 'v2.registerTreeUI', Severity.COSMETIC);
+
+        safeCall(() => {
           uiManager.registerEffect('sky-color', 'Sky Color',
             SkyColorEffectV2.getControlSchema(), _makeV2Callback('_skyColorEffect'), 'global');
         }, 'v2.registerSkyColorUI', Severity.COSMETIC);
@@ -4746,6 +4806,7 @@ async function createThreeCanvas(scene) {
           uiManager.registerEffect('windowLight', 'Window Light',
             WindowLightEffectV2.getControlSchema(), _makeV2Callback('_windowLightEffect'), 'structure');
         }, 'v2.registerWindowLightUI', Severity.COSMETIC);
+        safeCall(() => loadingOverlay.setStage('final', 0.10, 'Loading effect controls...', { keepAuto: true }), 'overlay.ui.p1', Severity.COSMETIC);
 
         safeCall(() => {
           uiManager.registerEffect('fire-sparks', 'Fire',
@@ -4786,6 +4847,7 @@ async function createThreeCanvas(scene) {
           uiManager.registerEffect('player-light', 'Player Light',
             PlayerLightEffectV2.getControlSchema(), _makeV2Callback('_playerLightEffect'), 'atmospheric');
         }, 'v2.registerPlayerLightUI(V2)', Severity.COSMETIC);
+        safeCall(() => loadingOverlay.setStage('final', 0.18, 'Loading effect controls...', { keepAuto: true }), 'overlay.ui.p2', Severity.COSMETIC);
 
         safeCall(() => {
           uiManager.registerEffect('bloom', 'Bloom (Glow)',
@@ -4826,6 +4888,7 @@ async function createThreeCanvas(scene) {
           uiManager.registerEffect('halftone', 'Halftone',
             HalftoneEffectV2.getControlSchema(), _makeV2Callback('_halftoneEffect'), 'global');
         }, 'v2.registerHalftoneUI', Severity.COSMETIC);
+        safeCall(() => loadingOverlay.setStage('final', 0.26, 'Loading effect controls...', { keepAuto: true }), 'overlay.ui.p3', Severity.COSMETIC);
 
         safeCall(() => {
           uiManager.registerEffect('ascii', 'ASCII Art',
@@ -4856,6 +4919,7 @@ async function createThreeCanvas(scene) {
           uiManager.registerEffect('lens', 'Lens',
             LensEffectV2.getControlSchema(), _makeV2Callback('_lensEffect'), 'global');
         }, 'v2.registerLensUI', Severity.COSMETIC);
+        safeCall(() => loadingOverlay.setStage('final', 0.34, 'Loading effect controls...', { keepAuto: true }), 'overlay.ui.p4', Severity.COSMETIC);
 
         // Ash controls: in V2 mode WeatherController isn't constructed as an updatable, but
         // we still expose full ash tuning controls so users can keep it disabled and
@@ -5072,7 +5136,7 @@ async function createThreeCanvas(scene) {
           );
         }, 'v2.registerBuildingShadowsUI', Severity.COSMETIC);
 
-        log.info('V2: registered effect controls (Lighting, Specular, SkyColor, WindowLight, Fire, WaterSplashes, SmellyFlies, Lightning, CandleFlames, Bloom, ColorCorrection, Sharpen, Fog, Water, Cloud, OverheadShadows, BuildingShadows, Lens)');
+        log.info('V2: registered effect controls (Lighting, Specular, Fluid, Iridescence, Prism, Bush, Tree, SkyColor, WindowLight, Fire, WaterSplashes, SmellyFlies, Lightning, CandleFlames, Bloom, ColorCorrection, Sharpen, Fog, Water, Cloud, OverheadShadows, BuildingShadows, Lens)');
 
         log.info('V2: UI initialized');
     }, 'initializeUI', Severity.DEGRADED);
@@ -5353,6 +5417,7 @@ async function createThreeCanvas(scene) {
       await loadingOverlay.fadeIn(500);
     }, 'overlay.fadeIn(error)', Severity.COSMETIC);
   } finally {
+    _createThreeCanvasRunning = false;
     try { if (_progressHeartbeatId) clearInterval(_progressHeartbeatId); } catch (_) {}
     try {
       if (window.MapShine) window.MapShine.__msaSceneLoading = false;
@@ -5595,6 +5660,12 @@ function destroyThreeCanvas() {
     enhancedLightIconManager.dispose();
     enhancedLightIconManager = null;
     log.debug('Enhanced light icon manager disposed');
+  }
+
+  if (soundIconManager) {
+    soundIconManager.dispose();
+    soundIconManager = null;
+    log.debug('Sound icon manager disposed');
   }
 
   // Dispose interaction manager
@@ -5950,11 +6021,24 @@ function _enforceGameplayPixiSuppression() {
       window.mapShine?.inputRouter ||
       controlsIntegration?.inputRouter ||
       null;
+    const activeLayerName = String(canvas?.activeLayer?.options?.name || canvas?.activeLayer?.name || '').toLowerCase();
+    const activeLayerCtor = String(canvas?.activeLayer?.constructor?.name || '').toLowerCase();
+    const activeControlLayer = String(ui?.controls?.control?.layer || '').toLowerCase();
+    const tilesEditContext =
+      activeControl === 'tiles'
+      || activeTool === 'tile'
+      || activeLayerName === 'tiles'
+      || activeLayerCtor === 'tileslayer'
+      || activeControlLayer === 'tiles';
+    const pixiEditContextFallback = tilesEditContext;
     // Walls, lighting, and tokens are fully Three.js-native now.
     // Only need the PIXI overlay for unreplaced layers (drawings, regions,
     // sounds, notes, templates) — determined by InputRouter.
     const shouldPixiReceiveInput = !!inputRouter?.shouldPixiReceiveInput?.();
-    const needsEditorOverlay = shouldPixiReceiveInput;
+    // Respect InputRouter ownership when available. Only fall back to tile-context
+    // PIXI ownership if the router is temporarily unavailable.
+    const shouldPixiReceiveInputEffective = shouldPixiReceiveInput || (!inputRouter && pixiEditContextFallback);
+    const needsEditorOverlay = shouldPixiReceiveInputEffective;
 
     if (window.MapShine) {
       window.MapShine.__forcePixiEditorOverlay = needsEditorOverlay;
@@ -5974,7 +6058,7 @@ function _enforceGameplayPixiSuppression() {
         pixiCanvas.style.visibility = 'visible';
         pixiCanvas.style.opacity = pixiVisualOpacity;
         pixiCanvas.style.zIndex = '10';
-        pixiCanvas.style.pointerEvents = shouldPixiReceiveInput ? 'auto' : 'none';
+        pixiCanvas.style.pointerEvents = shouldPixiReceiveInputEffective ? 'auto' : 'none';
         pixiCanvas.style.backgroundColor = 'transparent';
       }
 
@@ -5984,14 +6068,19 @@ function _enforceGameplayPixiSuppression() {
         board.style.visibility = 'visible';
         board.style.opacity = pixiVisualOpacity;
         board.style.zIndex = '10';
-        board.style.pointerEvents = shouldPixiReceiveInput ? 'auto' : 'none';
+        board.style.pointerEvents = shouldPixiReceiveInputEffective ? 'auto' : 'none';
         board.style.backgroundColor = 'transparent';
       }
 
       // In V2, force-replaced PIXI scene layers to remain hidden even while
       // temporarily allowing PIXI hit-testing for editor tools.
       if (isV2Active) {
-        safeCall(() => { if (canvas.primary) canvas.primary.visible = false; }, 'pixiSuppress.primary(editorOverlayV2)', Severity.COSMETIC);
+        safeCall(() => {
+          if (!canvas.primary) return;
+          // Tile editing relies on Foundry's native tile interaction chain.
+          // Keep primary visible only in tile edit context.
+          canvas.primary.visible = !!tilesEditContext;
+        }, 'pixiSuppress.primary(editorOverlayV2)', Severity.COSMETIC);
         safeCall(() => { if (canvas.fog) canvas.fog.visible = false; }, 'pixiSuppress.fog(editorOverlayV2)', Severity.COSMETIC);
         safeCall(() => {
           if (!canvas.visibility) return;
@@ -6005,7 +6094,24 @@ function _enforceGameplayPixiSuppression() {
         threeCanvas.style.display = '';
         threeCanvas.style.visibility = 'visible';
         threeCanvas.style.opacity = '1';
-        threeCanvas.style.pointerEvents = shouldPixiReceiveInput ? 'none' : 'auto';
+        threeCanvas.style.pointerEvents = shouldPixiReceiveInputEffective ? 'none' : 'auto';
+      }
+
+      // Ensure native tile placeables are active while in tile edit context.
+      if (tilesEditContext && canvas?.tiles) {
+        canvas.tiles.visible = true;
+        canvas.tiles.renderable = true;
+        canvas.tiles.interactive = true;
+        canvas.tiles.interactiveChildren = true;
+        const ALPHA = 0.01;
+        for (const tile of canvas.tiles.placeables || []) {
+          if (!tile) continue;
+          tile.visible = true;
+          tile.renderable = true;
+          tile.interactive = true;
+          tile.interactiveChildren = true;
+          if (tile.mesh) tile.mesh.alpha = ALPHA;
+        }
       }
       return;
     }
@@ -6013,7 +6119,7 @@ function _enforceGameplayPixiSuppression() {
     // Some Foundry tools may still require PIXI hit-testing in gameplay mode.
     // Keep PIXI/board interactive but fully transparent so they cannot occlude
     // the Three-rendered scene.
-    if (shouldPixiReceiveInput) {
+    if (shouldPixiReceiveInputEffective) {
       const pixiCanvas = canvas.app?.view;
       const threeCanvas = document.getElementById('map-shine-canvas');
       if (pixiCanvas) {
@@ -6284,6 +6390,11 @@ function updateLayerVisibility() {
   };
   const isLightingActive = !!canvas?.lighting?.active;
   const isWallsActiveFlag = !!canvas?.walls?.active;
+  const isTilesActive = isActiveLayer('TilesLayer') || isActiveLayer('tiles');
+
+  if (isTilesActive && canvas.primary) {
+    canvas.primary.visible = true;
+  }
   
   // Helper to toggle PIXI layer vs Three.js Manager
   const toggleLayer = (pixiLayerName, manager, forceHideThree = false) => {
@@ -6351,11 +6462,25 @@ function updateLayerVisibility() {
       }
   }
 
-  // Tiles are fully Three-owned in gameplay mode.
+  // Tiles: keep native PIXI tile placeables interactive while the Tiles controls
+  // are active, otherwise suppress them to avoid double-rendering.
   if (canvas.tiles) {
-      canvas.tiles.visible = false;
-      if (tileManager) {
-          tileManager.setVisibility(!isMapMakerMode);
+      if (isTilesActive) {
+          canvas.tiles.visible = true;
+          canvas.tiles.interactiveChildren = true;
+          const ALPHA = 0.01;
+          for (const tile of canvas.tiles.placeables || []) {
+            if (!tile) continue;
+            tile.visible = true;
+            tile.renderable = true;
+            tile.interactive = true;
+            tile.interactiveChildren = true;
+            if (tile.mesh) tile.mesh.alpha = ALPHA;
+          }
+          if (tileManager) tileManager.setVisibility(true);
+      } else {
+          canvas.tiles.visible = false;
+          if (tileManager) tileManager.setVisibility(!isMapMakerMode);
       }
   }
 
@@ -6552,6 +6677,8 @@ function updateInputMode() {
     
     // Use PIXI for Foundry-native edit workflows.
     const editLayers = [
+      'TilesLayer',
+      'tiles',
       'WallsLayer',
       'WallLayer',
       'walls',
@@ -6597,6 +6724,11 @@ function updateInputMode() {
         || isFinalLayer('walllayer')
         || isFinalLayer('walls')
         || isFinalLayer('wall');
+      const isSoundsFinal =
+        !!canvas?.sounds?.active
+        || isFinalLayer('soundslayer')
+        || isFinalLayer('sounds')
+        || isFinalLayer('sound');
       const isEditMode = editLayers.some((l) => isFinalLayer(l)) || isLightingFinal || isWallsFinal;
       const controlMetadataReady = !!(finalLayerName || finalLayerCtor || finalControl);
 
@@ -6616,12 +6748,17 @@ function updateInputMode() {
         enhancedLightIconManager.setVisibility(showLighting);
       }
 
+      if (soundIconManager && soundIconManager.setVisibility) {
+        const showSounds = isSoundsFinal && !isMapMakerMode;
+        soundIconManager.setVisibility(showSounds);
+      }
+
       if (wallManager && wallManager.setVisibility) {
         const showThreeWalls = isWallsFinal && !isMapMakerMode;
         wallManager.setVisibility(showThreeWalls);
       }
 
-      if (isLightingFinal || isWallsFinal) {
+      if (isEditMode) {
         pixiCanvas.style.pointerEvents = 'auto';
         const board = document.getElementById('board');
         if (board && board.tagName === 'CANVAS') {

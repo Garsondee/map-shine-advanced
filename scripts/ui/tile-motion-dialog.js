@@ -89,8 +89,20 @@ export class TileMotionDialog {
     /** @type {boolean} */
     this._pickingPivot = false;
 
-    /** @type {THREE.Mesh|null} Pivot point visualization marker in the Three.js scene. */
+    /** @type {THREE.Object3D|null} Pivot point visualization marker in the Three.js scene. */
     this._pivotMarker = null;
+
+    /** @type {THREE.Object3D|null} Parent object currently hosting the pivot marker. */
+    this._pivotMarkerHost = null;
+
+    /** @type {THREE.Sprite|null} Selected tile highlight overlay. */
+    this._selectedTileHighlight = null;
+
+    /** @type {THREE.Object3D|null} Current tile sprite hosting the highlight. */
+    this._selectedTileHighlightHost = null;
+
+    /** @type {number|null} Hook id for external tile selection sync. */
+    this._tileSelectedHookId = null;
 
     /** @type {Object<string, HTMLElement|null>} Folder tag elements for summary chips. */
     this._folderTags = {};
@@ -607,6 +619,28 @@ export class TileMotionDialog {
     // Load the first tile's config now that all bindings exist.
     this._loadTileConfigToUI();
     this._refreshModeVisibility();
+    this._updateSelectedTileHighlight();
+  }
+
+  _setSelectedTileId(tileId, { rebuildBindings = true } = {}) {
+    const nextId = String(tileId || '');
+    const mgr = this._getManager();
+    const tiles = mgr?.getTileList?.() || [];
+    if (!nextId || !tiles.some((t) => t.id === nextId)) return false;
+
+    this.uiState.tileId = nextId;
+
+    if (rebuildBindings) {
+      this._rebuildTileBindings(true);
+    } else {
+      this._refreshParentBinding();
+      this._refreshSelectedTileStatus();
+      this._loadTileConfigToUI();
+    }
+
+    this._updatePivotMarker();
+    this._updateSelectedTileHighlight();
+    return true;
   }
 
   /**
@@ -640,9 +674,7 @@ export class TileMotionDialog {
       label: 'Tile',
       options: tileOptions
     }).on('change', () => {
-      this._refreshParentBinding();
-      this._refreshSelectedTileStatus();
-      this._loadTileConfigToUI();
+      this._setSelectedTileId(this.uiState.tileId, { rebuildBindings: false });
     });
 
     this._bindings.tileStatus = this._tileFolder.addBinding(this.uiState, 'tileStatus', {
@@ -690,6 +722,7 @@ export class TileMotionDialog {
     this._bindings.playState?.refresh?.();
     this._setFolderTag('playState', this.uiState.playState);
     this._refreshSelectedTileStatus();
+    this._updateSelectedTileHighlight();
   }
 
   _refreshSelectedTileStatus() {
@@ -753,6 +786,7 @@ export class TileMotionDialog {
 
     this._refreshModeVisibility();
     this._updatePivotMarker();
+    this._updateSelectedTileHighlight();
   }
 
   _refreshModeVisibility() {
@@ -803,9 +837,11 @@ export class TileMotionDialog {
     }
   }
 
-  _onConfigChanged(ev) {
+  async _onConfigChanged(ev) {
     const persist = (typeof ev?.last === 'boolean') ? ev.last : true;
-    void this._applyCurrentTileConfig({ persist });
+    await this._applyCurrentTileConfig({ persist });
+    this._refreshSelectedTileStatus();
+    this._rebuildTileBindings(false);
     this._updatePivotMarker();
   }
 
@@ -1009,9 +1045,87 @@ export class TileMotionDialog {
     const tiles = mgr?.getTileList?.() || [];
     if (!tiles.some((t) => t.id === tileId)) return;
 
-    this.uiState.tileId = tileId;
-    this._rebuildTileBindings(true);
-    this._updatePivotMarker();
+    this._setSelectedTileId(tileId, { rebuildBindings: true });
+  }
+
+  _activateTilesMode() {
+    try {
+      canvas?.tiles?.activate?.();
+    } catch (_) {
+    }
+
+    try {
+      if (ui?.controls?.initialize) {
+        ui.controls.initialize({ control: 'tiles', tool: 'select' });
+      }
+    } catch (_) {
+    }
+
+    try {
+      window.MapShine?.inputRouter?.autoUpdate?.();
+    } catch (_) {
+    }
+  }
+
+  _ensureSelectedTileHighlight() {
+    if (this._selectedTileHighlight) return this._selectedTileHighlight;
+    const THREE = window.THREE;
+    if (!THREE) return null;
+
+    const material = new THREE.SpriteMaterial({
+      color: 0xff4040,
+      transparent: true,
+      opacity: 0.2,
+      depthTest: false,
+      depthWrite: false
+    });
+
+    const sprite = new THREE.Sprite(material);
+    sprite.name = 'TileMotion_SelectedTileHighlight';
+    sprite.renderOrder = 9998;
+    sprite.visible = false;
+    this._selectedTileHighlight = sprite;
+    return sprite;
+  }
+
+  _clearSelectedTileHighlight() {
+    if (this._selectedTileHighlight?.parent) {
+      this._selectedTileHighlight.parent.remove(this._selectedTileHighlight);
+    }
+    this._selectedTileHighlightHost = null;
+    if (this._selectedTileHighlight) this._selectedTileHighlight.visible = false;
+  }
+
+  _updateSelectedTileHighlight() {
+    if (!this.visible || !this.uiState.tileId) {
+      this._clearSelectedTileHighlight();
+      return;
+    }
+
+    const tileMgr = this._getTileManager();
+    const sprite = tileMgr?.getTileSpriteData?.(this.uiState.tileId)?.sprite;
+    if (!sprite?.visible) {
+      this._clearSelectedTileHighlight();
+      return;
+    }
+
+    const highlight = this._ensureSelectedTileHighlight();
+    if (!highlight) return;
+
+    if (highlight.parent !== sprite) {
+      this._clearSelectedTileHighlight();
+      sprite.add(highlight);
+      this._selectedTileHighlightHost = sprite;
+    }
+
+    highlight.position.set(0, 0, 0.1);
+    highlight.scale.set(1.06, 1.06, 1);
+    highlight.visible = true;
+
+    try {
+      window.MapShine?.renderLoop?.requestRender?.();
+    } catch (_) {
+    }
   }
 
   // ── Pivot Marker Visualization ───────────────────────────────────────
@@ -1049,7 +1163,10 @@ export class TileMotionDialog {
   _updatePivotMarker() {
     const THREE = window.THREE;
     const sceneComposer = window.MapShine?.sceneComposer;
-    if (!THREE || !sceneComposer?.scene) {
+    const floorCompositorV2 = window.MapShine?.floorCompositorV2;
+    const busScene = floorCompositorV2?._renderBus?._scene ?? null;
+    const targetScene = busScene || sceneComposer?.scene;
+    if (!THREE || !targetScene) {
       this._disposePivotMarker();
       return;
     }
@@ -1060,8 +1177,11 @@ export class TileMotionDialog {
       return;
     }
 
-    // Lazy-create the marker mesh (torus ring).
+    // Lazy-create the marker mesh (ring + crosshair).
     if (!this._pivotMarker) {
+      const markerGroup = new THREE.Group();
+      markerGroup.name = 'TileMotion_PivotMarker';
+
       const ringGeo = new THREE.RingGeometry(8, 12, 24);
       const ringMat = new THREE.MeshBasicMaterial({
         color: 0xff4444,
@@ -1071,15 +1191,50 @@ export class TileMotionDialog {
         depthTest: false,
         depthWrite: false
       });
-      this._pivotMarker = new THREE.Mesh(ringGeo, ringMat);
-      this._pivotMarker.name = 'TileMotion_PivotMarker';
-      this._pivotMarker.renderOrder = 9999;
-      // Lay flat on the ground plane (ring is in XY, we need it in XY at groundZ).
-      sceneComposer.scene.add(this._pivotMarker);
+      const ring = new THREE.Mesh(ringGeo, ringMat);
+      ring.renderOrder = 9999;
+      markerGroup.add(ring);
+
+      const crossMaterial = new THREE.LineBasicMaterial({
+        color: 0xff8888,
+        transparent: true,
+        opacity: 0.95,
+        depthTest: false,
+        depthWrite: false
+      });
+      const crossGeometry = new THREE.BufferGeometry();
+      crossGeometry.setAttribute('position', new THREE.Float32BufferAttribute([
+        -14, 0, 0,
+         14, 0, 0,
+         0, -14, 0,
+         0,  14, 0
+      ], 3));
+      const cross = new THREE.LineSegments(crossGeometry, crossMaterial);
+      cross.renderOrder = 10000;
+      markerGroup.add(cross);
+
+      this._pivotMarker = markerGroup;
     }
 
-    const groundZ = sceneComposer.groundZ ?? 1000;
-    this._pivotMarker.position.set(worldPos.x, worldPos.y, groundZ + 0.5);
+    const busRoot = floorCompositorV2?._renderBus?._tiles?.get?.(this.uiState.tileId)?.root ?? null;
+    const nextHost = busRoot || targetScene;
+    if (this._pivotMarkerHost !== nextHost || this._pivotMarker.parent !== nextHost) {
+      this._pivotMarker.removeFromParent();
+      nextHost.add(this._pivotMarker);
+      this._pivotMarkerHost = nextHost;
+    }
+
+    if (busRoot) {
+      // Bus tile roots use world-space Y-up with tile rotation on the root.
+      // Foundry local pivot uses Y-down, so invert Y before placing in local space.
+      const localX = _toNumber(this.uiState.pivotX, 0);
+      const localY = -_toNumber(this.uiState.pivotY, 0);
+      this._pivotMarker.position.set(localX, localY, 0.35);
+    } else {
+      const groundZ = sceneComposer?.groundZ ?? 1000;
+      this._pivotMarker.position.set(worldPos.x, worldPos.y, groundZ + 0.5);
+    }
+
     this._pivotMarker.visible = true;
   }
 
@@ -1087,9 +1242,16 @@ export class TileMotionDialog {
   _disposePivotMarker() {
     if (!this._pivotMarker) return;
     this._pivotMarker.removeFromParent();
-    this._pivotMarker.geometry?.dispose?.();
-    this._pivotMarker.material?.dispose?.();
+    this._pivotMarker.traverse?.((obj) => {
+      obj.geometry?.dispose?.();
+      if (Array.isArray(obj.material)) {
+        for (const mat of obj.material) mat?.dispose?.();
+      } else {
+        obj.material?.dispose?.();
+      }
+    });
     this._pivotMarker = null;
+    this._pivotMarkerHost = null;
   }
 
   _onHeaderDown(e) {
@@ -1142,6 +1304,8 @@ export class TileMotionDialog {
     if (!this.container) return;
     this.container.style.display = 'block';
     this.visible = true;
+
+    this._activateTilesMode();
     this.refreshTileList();
 
     if (this._refreshInterval !== null) clearInterval(this._refreshInterval);
@@ -1155,7 +1319,17 @@ export class TileMotionDialog {
       im.addWorldClickObserver(this._bound.onWorldClick);
     }
 
+    if (this._tileSelectedHookId == null) {
+      this._tileSelectedHookId = Hooks.on('controlTile', (tile, controlled) => {
+        if (!controlled || !this.visible) return;
+        const tileId = tile?.document?.id || tile?.id;
+        if (!tileId) return;
+        this._setSelectedTileId(tileId, { rebuildBindings: true });
+      });
+    }
+
     this._updatePivotMarker();
+    this._updateSelectedTileHighlight();
   }
 
   hide() {
@@ -1176,8 +1350,14 @@ export class TileMotionDialog {
       im.removeWorldClickObserver(this._bound.onWorldClick);
     }
 
+    if (this._tileSelectedHookId != null) {
+      Hooks.off('mapShineTileSelected', this._tileSelectedHookId);
+      this._tileSelectedHookId = null;
+    }
+
     // Hide pivot marker when dialog is closed.
     if (this._pivotMarker) this._pivotMarker.visible = false;
+    this._clearSelectedTileHighlight();
   }
 
   toggle() {
@@ -1188,6 +1368,13 @@ export class TileMotionDialog {
   dispose() {
     this.hide();
     this._disposePivotMarker();
+
+    if (this._selectedTileHighlight) {
+      this._selectedTileHighlight.geometry?.dispose?.();
+      this._selectedTileHighlight.material?.dispose?.();
+      this._selectedTileHighlight = null;
+      this._selectedTileHighlightHost = null;
+    }
 
     if (this.headerOverlay) {
       this.headerOverlay.removeEventListener('mousedown', this._bound.onHeaderDown);

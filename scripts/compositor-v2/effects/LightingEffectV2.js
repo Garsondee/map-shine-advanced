@@ -29,6 +29,8 @@ import { ThreeLightSource } from '../../effects/ThreeLightSource.js';
 import { ThreeDarknessSource } from '../../effects/ThreeDarknessSource.js';
 
 const log = createLogger('LightingEffectV2');
+const MODULE_ID = 'map-shine-advanced';
+const LIGHT_ENHANCEMENT_FLAG_KEY = 'lightEnhancements';
 
 export class LightingEffectV2 {
   constructor() {
@@ -85,6 +87,92 @@ export class LightingEffectV2 {
 
     /** @type {THREE.Vector2|null} Reusable size vector */
     this._sizeVec = null;
+  }
+
+  /** @private */
+  _onSceneUpdate(scene, changes) {
+    if (!this._initialized) return;
+    if (!scene) return;
+
+    const activeSceneId = canvas?.scene?.id;
+    const sceneId = scene?.id ?? scene?._id;
+    if (!activeSceneId || !sceneId || String(activeSceneId) !== String(sceneId)) return;
+
+    const moduleFlags = changes?.flags?.[MODULE_ID];
+    if (!moduleFlags || !Object.prototype.hasOwnProperty.call(moduleFlags, LIGHT_ENHANCEMENT_FLAG_KEY)) return;
+
+    this.syncAllLights();
+  }
+
+  /**
+   * Read per-light enhancement config from scene flags.
+   * @private
+   * @returns {Map<string, object>}
+   */
+  _getLightEnhancementConfigMap() {
+    const map = new Map();
+    const scene = canvas?.scene;
+    if (!scene) return map;
+
+    let raw;
+    try {
+      raw = scene.getFlag?.(MODULE_ID, LIGHT_ENHANCEMENT_FLAG_KEY);
+    } catch (_) {
+      raw = scene?.flags?.[MODULE_ID]?.[LIGHT_ENHANCEMENT_FLAG_KEY];
+    }
+
+    const list = Array.isArray(raw)
+      ? raw
+      : (Array.isArray(raw?.lights) ? raw.lights : (Array.isArray(raw?.items) ? raw.items : []));
+
+    for (const entry of list) {
+      if (!entry || typeof entry !== 'object') continue;
+      const id = entry.id != null ? String(entry.id) : '';
+      if (!id) continue;
+      const config = (entry.config && typeof entry.config === 'object') ? entry.config : entry;
+      if (!config || typeof config !== 'object') continue;
+      map.set(id, config);
+    }
+
+    return map;
+  }
+
+  /**
+   * Merge scene-flag light enhancements (cookie/output tuning) into an ambient
+   * light doc-shaped object before handing it to ThreeLightSource.
+   * @private
+   * @param {object} doc
+   * @param {Map<string, object>|null} [enhancementMap]
+   * @returns {object}
+   */
+  _mergeLightEnhancementsIntoDoc(doc, enhancementMap = null) {
+    if (!doc) return doc;
+
+    const id = doc?.id ?? doc?._id;
+    if (!id) return doc;
+
+    const map = enhancementMap ?? this._getLightEnhancementConfigMap();
+    const enhancement = map.get(String(id));
+    if (!enhancement || typeof enhancement !== 'object') return doc;
+
+    const baseConfig = (doc.config && typeof doc.config === 'object') ? doc.config : {};
+    const nextConfig = { ...baseConfig, ...enhancement };
+    if (baseConfig.darknessResponse && enhancement.darknessResponse && typeof enhancement.darknessResponse === 'object') {
+      nextConfig.darknessResponse = { ...baseConfig.darknessResponse, ...enhancement.darknessResponse };
+    }
+
+    // Preserve the live runtime document when possible, but provide a plain
+    // doc-shaped object with guaranteed id/config fields for ThreeLightSource.
+    return {
+      ...doc,
+      id,
+      _id: id,
+      x: doc?.x,
+      y: doc?.y,
+      hidden: doc?.hidden,
+      negative: doc?.negative,
+      config: nextConfig,
+    };
   }
 
   /**
@@ -364,10 +452,15 @@ export class LightingEffectV2 {
 
           // Overhead shadow: screen-space shadow from overhead tiles.
           // Sampled directly at vUv since the RT is already in screen UV space.
+          // RGB encodes roof/building-style overhead shadow factor, while alpha
+          // encodes tile-projection factor from OverheadShadowsEffectV2.
           // Dims ambient only — dynamic lights punch through.
           if (uHasOverheadShadow > 0.5) {
-            float ovShadow = clamp(texture2D(tOverheadShadow, vUv).r, 0.0, 1.0);
-            float ovMix = mix(1.0, ovShadow, clamp(uOverheadShadowOpacity, 0.0, 1.0));
+            vec4 ovSample = texture2D(tOverheadShadow, vUv);
+            float ovShadow = clamp(ovSample.r, 0.0, 1.0);
+            float tileProjectionFactor = clamp(ovSample.a, 0.0, 1.0);
+            float combinedShadowFactor = ovShadow * tileProjectionFactor;
+            float ovMix = mix(1.0, combinedShadowFactor, clamp(uOverheadShadowOpacity, 0.0, 1.0));
             vec3 ambientComp = totalIllumination - vec3(lightI) * master;
             ambientComp *= ovMix;
             totalIllumination = ambientComp + vec3(lightI) * master;
@@ -404,6 +497,7 @@ export class LightingEffectV2 {
     this._registerHook('createAmbientLight', (doc) => this._onLightCreate(doc));
     this._registerHook('updateAmbientLight', (doc, changes) => this._onLightUpdate(doc, changes));
     this._registerHook('deleteAmbientLight', (doc) => this._onLightDelete(doc));
+    this._registerHook('updateScene', (scene, changes) => this._onSceneUpdate(scene, changes));
 
     this._initialized = true;
     log.info(`LightingEffectV2 initialized (${w}x${h})`);
@@ -446,8 +540,9 @@ export class LightingEffectV2 {
       } catch (_) {}
     }
 
+    const enhancementMap = this._getLightEnhancementConfigMap();
     for (const doc of docs) {
-      this._addLightFromDoc(doc);
+      this._addLightFromDoc(doc, enhancementMap);
     }
 
     this._lightsSynced = true;
@@ -460,15 +555,16 @@ export class LightingEffectV2 {
    * @param {object} doc - Foundry AmbientLight document
    * @private
    */
-  _addLightFromDoc(doc) {
+  _addLightFromDoc(doc, enhancementMap = null) {
     if (!doc?.id && !doc?._id) return;
-    const id = doc.id ?? doc._id;
-    const isNegative = doc?.config?.negative === true || doc?.negative === true;
+    const mergedDoc = this._mergeLightEnhancementsIntoDoc(doc, enhancementMap);
+    const id = mergedDoc.id ?? mergedDoc._id;
+    const isNegative = mergedDoc?.config?.negative === true || mergedDoc?.negative === true;
 
     if (isNegative) {
       if (this._darknessSources.has(id)) return;
       try {
-        const ds = new ThreeDarknessSource(doc);
+        const ds = new ThreeDarknessSource(mergedDoc);
         ds.init();
         this._darknessSources.set(id, ds);
         if (ds.mesh && this._darknessScene) {
@@ -480,7 +576,7 @@ export class LightingEffectV2 {
     } else {
       if (this._lights.has(id)) return;
       try {
-        const light = new ThreeLightSource(doc);
+        const light = new ThreeLightSource(mergedDoc);
         light.init();
         this._lights.set(id, light);
         if (light.mesh && this._lightScene) {
@@ -523,6 +619,8 @@ export class LightingEffectV2 {
       }
       if (merged.id === undefined && merged._id !== undefined) merged.id = merged._id;
     } catch (_) {}
+
+    merged = this._mergeLightEnhancementsIntoDoc(merged);
 
     const isNegative = merged?.config?.negative === true || merged?.negative === true;
 

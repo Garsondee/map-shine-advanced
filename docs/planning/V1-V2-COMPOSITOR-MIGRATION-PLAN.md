@@ -1169,3 +1169,79 @@ Files:
 - Batch stepping is active and observable.
 - The debugging playbook for future V2 particle issues is now clear:
   1) verify update path errors, 2) verify batch registration, 3) verify emitter/batch attachment parity, 4) verify runtime counters (`time`, `particleNum`).
+
+---
+
+## 11. Investigation: Animated / Moving Tiles in V2
+
+### Executive Summary
+
+The tile motion system is **not disabled**. It initializes and updates every frame in V2, but its transforms are applied to `TileManager` sprites while V2 renders tile geometry from `FloorRenderBus` meshes built directly from tile documents. Result: the motion runtime can be "active" with no visible tile movement in the V2 output.
+
+### What is currently working
+
+1. **TileMotionManager is created and registered as an updatable in V2 boot.**
+   - `canvas-replacement.js` initializes `TileMotionManager` and calls `effectComposer.addUpdatable(tileMotionManager)`.
+
+2. **TileMotionManager update loop is active when `global.playing` is true.**
+   - `update(timeInfo)` computes animated transform/UV state and applies it each frame.
+
+3. **UI controls and scene flags are wired.**
+   - Start/Stop/Speed/Time Factor and per-tile config state are persisted in scene flags.
+
+### Root cause in V2
+
+1. **Different render source of truth**
+   - Tile motion mutates `TileManager` sprites (`scripts/scene/tile-motion-manager.js`).
+   - V2 final output renders `FloorRenderBus` meshes created from `canvas.scene.tiles.contents` (`scripts/compositor-v2/FloorRenderBus.js`).
+   - Those are different objects; sprite motion does not propagate to bus meshes.
+
+2. **Bus population is one-time/lazy**
+   - `FloorCompositor` sets `_busPopulated = true` and calls `this._renderBus.populate(sc)` on first render.
+   - There is no per-frame bus transform sync from `TileMotionManager` after initial populate.
+
+3. **`renderAboveTokens`/overhead semantics divergence**
+   - `TileMotionManager` can toggle `renderAboveTokens` and triggers `TileManager.updateSpriteTransform()`.
+   - `FloorRenderBus` overhead classification/render order is derived from tile document overhead/sort path, not tile-motion runtime state.
+
+4. **Only partial coupling exists today**
+   - `OverheadShadowsEffectV2` consumes `tileMotionManager.getShadowProjectionTileIds()`, but this is only for the optional tile projection shadow pass and does not move albedo tiles.
+
+### Conclusion
+
+Current behavior matches reports that animated/moving tiles appear broken in V2: runtime is running, but V2 render path bypasses the object graph being animated.
+
+### Recommended migration (V2-native tile motion)
+
+#### Phase TM-1 (Bridge, minimum risk)
+
+1. Add a V2 bridge that applies TileMotionManager resolved transforms onto bus tile meshes each frame.
+2. Use tileId mapping between TileMotionManager and `FloorRenderBus._tiles` entries.
+3. Apply to mesh transform fields:
+   - position/rotation for transform modes
+   - texture matrix/offset for texture-scroll mode
+4. Keep existing scene-flag format and Tile Motion UI unchanged.
+
+#### Phase TM-2 (Promote ownership)
+
+1. Move tile-motion execution authority from `TileManager` sprite graph to V2 bus graph.
+2. Keep `TileManager` motion writes off in V2 (interaction-only manager).
+3. Expose a small V2 interface from `FloorRenderBus`:
+   - `getTileMesh(tileId)`
+   - `applyTileRuntimeState(tileId, state)`
+   - `restoreTileRuntimeState(tileId)`
+
+#### Phase TM-3 (Ordering + floor correctness)
+
+1. Reconcile `renderAboveTokens` with bus `renderOrder` bands (floor/tile/token headroom).
+2. Ensure floor-layer visibility + overhead layer (`layer 20`) updates still align after runtime transform changes.
+3. Keep shadow-projection flags as optional features; decouple from "motion enabled" requirement if desired.
+
+### Validation checklist
+
+1. Transform mode: rotation/orbit/ping-pong/sine visibly animates tiles in V2.
+2. Texture mode: UV scroll/rotation animates in V2.
+3. Start/Stop restores exact base transform with no drift.
+4. Floor switch preserves animation continuity for visible floors.
+5. `renderAboveTokens` behavior remains deterministic in overlapping tile/token scenes.
+6. Overhead shadow projection still works with and without tile motion enabled.

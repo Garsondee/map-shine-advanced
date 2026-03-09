@@ -30,6 +30,11 @@ function _isFoundryNativeTokenRenderingMode() {
 const TOKEN_BASE_Z_V1 = 3.0;
 const TOKEN_BASE_Z_V2 = 1003.0;
 
+// Keep in sync with FloorRenderBus floor render-order layout.
+const RENDER_ORDER_PER_FLOOR = 10000;
+// Tokens should render above floor overlays on the same floor.
+const TOKEN_RENDER_ORDER_WITHIN_FLOOR = 9900;
+
 /**
  * TokenManager - Synchronizes Foundry VTT tokens to THREE.js sprites
  * Uses Foundry hooks for reactive updates instead of polling
@@ -673,6 +678,49 @@ vec3 ms_applySceneLighting(vec3 color) {
   }
 
   /**
+   * Resolve token floor index from current floor bands using top-exclusive upper
+   * bounds so adjacent bands don't double-match at shared boundaries.
+   * @param {object} tokenDoc
+   * @returns {number}
+   * @private
+   */
+  _resolveTokenFloorIndex(tokenDoc) {
+    try {
+      const floors = window.MapShine?.floorStack?.getFloors?.() ?? [];
+      if (!Array.isArray(floors) || floors.length <= 1) return 0;
+
+      const rawElev = tokenDoc?.elevation ?? tokenDoc?.document?.elevation ?? 0;
+      const elev = Number.isFinite(Number(rawElev)) ? Number(rawElev) : 0;
+
+      for (let i = 0; i < floors.length; i++) {
+        const f = floors[i];
+        if (elev >= f.elevationMin && elev < f.elevationMax) return i;
+      }
+
+      // Include exact top boundary on the final band as a fail-open fallback.
+      const last = floors[floors.length - 1];
+      if (last && elev >= last.elevationMin && elev <= last.elevationMax) {
+        return floors.length - 1;
+      }
+    } catch (_) {
+    }
+    return 0;
+  }
+
+  /**
+   * Apply deterministic token renderOrder in V2 so tokens stay above same-floor
+   * floor overlays even when transparent sorting uses renderOrder first.
+   * @param {THREE.Sprite} sprite
+   * @param {object} tokenDoc
+   * @private
+   */
+  _applyV2TokenRenderOrder(sprite, tokenDoc) {
+    if (!sprite || !this._getV2BusScene()) return;
+    const floorIndex = this._resolveTokenFloorIndex(tokenDoc);
+    sprite.renderOrder = (floorIndex * RENDER_ORDER_PER_FLOOR) + TOKEN_RENDER_ORDER_WITHIN_FLOOR;
+  }
+
+  /**
    * Resolve lighting context for token shading/tint decisions.
    *
    * In V2, tokens are rendered inside the bus scene and already participate in
@@ -715,9 +763,16 @@ vec3 ms_applySceneLighting(vec3 color) {
       if (busScene) {
         for (const data of this.tokenSprites.values()) {
           const sprite = data?.sprite;
+          const tokenDoc = data?.tokenDoc;
           if (!sprite) continue;
           if (sprite.parent !== busScene) {
             busScene.add(sprite);
+          }
+
+          // Ensure deterministic V2 ordering even for tokens created before
+          // the bus scene existed (or after floor context shifts).
+          if (tokenDoc) {
+            this._applyV2TokenRenderOrder(sprite, tokenDoc);
           }
 
           // If the sprite was created before V2 was ready, it may have been initialized
@@ -1133,6 +1188,7 @@ vec3 ms_applySceneLighting(vec3 color) {
     if (floorLayerMgr) {
       floorLayerMgr.assignTokenToFloor(sprite, tokenDoc);
     }
+    this._applyV2TokenRenderOrder(sprite, tokenDoc);
 
     // Store token metadata
     sprite.userData = {
@@ -1281,6 +1337,7 @@ vec3 ms_applySceneLighting(vec3 color) {
       if (floorLayerMgr) {
         floorLayerMgr.assignTokenToFloor(sprite, tokenDoc);
       }
+      this._applyV2TokenRenderOrder(sprite, tokenDoc);
     }
 
     // Update transform if position/size/elevation changed
@@ -1510,6 +1567,7 @@ vec3 ms_applySceneLighting(vec3 color) {
     const busScene = this._getV2BusScene();
     const baseZ = busScene ? TOKEN_BASE_Z_V2 : TOKEN_BASE_Z_V1;
     const zPosition = groundZ + baseZ + elevation;
+    this._applyV2TokenRenderOrder(sprite, tokenDoc);
 
     log.debug(`Calculated Sprite Pos: (${centerX}, ${centerY}, ${zPosition}) from Token (${tokenDoc.x}, ${tokenDoc.y})`);
     log.debug(`Current Sprite Pos: (${sprite.position.x}, ${sprite.position.y}, ${sprite.position.z})`);

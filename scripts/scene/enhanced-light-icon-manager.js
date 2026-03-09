@@ -9,72 +9,9 @@ import Coordinates from '../utils/coordinates.js';
 import { MapShineLightAdapter } from '../effects/MapShineLightAdapter.js';
 import { VisionPolygonComputer } from '../vision/VisionPolygonComputer.js';
 import { OVERLAY_THREE_LAYER } from '../core/render-layers.js';
+import { ControlGizmoFactory } from './control-gizmo-factory.js';
 
 const log = createLogger('EnhancedLightIconManager');
-
-/**
- * Creates a custom shader material for light icon sprites with a dark outline.
- * The outline ensures visibility against bright/white backgrounds.
- * @param {THREE.Texture} texture - The icon texture
- * @returns {THREE.ShaderMaterial}
- */
-function createOutlinedSpriteMaterial(texture) {
-  const THREE = window.THREE;
-  return new THREE.ShaderMaterial({
-    uniforms: {
-      map: { value: texture },
-      outlineColor: { value: new THREE.Color(0x222222) },
-      outlineWidth: { value: 0.08 }
-    },
-    vertexShader: `
-      varying vec2 vUv;
-      void main() {
-        vUv = uv;
-        vec4 mvPosition = modelViewMatrix * vec4(0.0, 0.0, 0.0, 1.0);
-        vec2 scale = vec2(
-          length(modelMatrix[0].xyz),
-          length(modelMatrix[1].xyz)
-        );
-        mvPosition.xy += position.xy * scale;
-        gl_Position = projectionMatrix * mvPosition;
-      }
-    `,
-    fragmentShader: `
-      uniform sampler2D map;
-      uniform vec3 outlineColor;
-      uniform float outlineWidth;
-      varying vec2 vUv;
-
-      void main() {
-        vec4 texColor = texture2D(map, vUv);
-        float alpha = texColor.a;
-
-        // Sample neighbors to detect edges for outline
-        float outlineAlpha = 0.0;
-        float step = outlineWidth;
-        for (float x = -1.0; x <= 1.0; x += 1.0) {
-          for (float y = -1.0; y <= 1.0; y += 1.0) {
-            if (x == 0.0 && y == 0.0) continue;
-            vec2 offset = vec2(x, y) * step;
-            float neighborAlpha = texture2D(map, vUv + offset).a;
-            outlineAlpha = max(outlineAlpha, neighborAlpha);
-          }
-        }
-
-        // Dark outline where neighbors have alpha but current pixel doesn't
-        float outline = clamp(outlineAlpha - alpha, 0.0, 1.0);
-        vec3 finalColor = mix(texColor.rgb, outlineColor, outline * 0.9);
-        float finalAlpha = max(alpha, outline * 0.85);
-
-        gl_FragColor = vec4(finalColor, finalAlpha);
-      }
-    `,
-    transparent: true,
-    depthTest: false,
-    depthWrite: false,
-    toneMapped: false
-  });
-}
 
 const _gizmoLosComputer = new VisionPolygonComputer();
 _gizmoLosComputer.circleSegments = 64;
@@ -471,15 +408,10 @@ export class EnhancedLightIconManager {
     lightGroup.layers.enable(0); // Also enable layer 0 for raycasting
 
     // Radius fill must be fully invisible (no tinting / no wash over the scene).
-    const fillMat = new THREE.MeshBasicMaterial({
+    const fillMat = ControlGizmoFactory.createRadiusFillMaterial({
       color: 0xffffff,
-      transparent: true,
-      opacity: 0.0,
-      depthTest: false,
-      depthWrite: false
+      opacity: 0.0
     });
-    // Avoid tonemapping/bloom interactions; this is an editor gizmo.
-    fillMat.toneMapped = false;
     let fillGeometry;
     const localPoly = this._computeLightLocalPolygon(foundryX, foundryY, radiusPixels);
     if (localPoly && localPoly.length >= 3) {
@@ -497,14 +429,10 @@ export class EnhancedLightIconManager {
     fill.visible = false;
 
     // Dim-radius border
-    const borderMat = new THREE.LineBasicMaterial({
+    const borderMat = ControlGizmoFactory.createRadiusBorderMaterial({
       color: 0xffffff,
-      transparent: true,
-      opacity: 0.35,
-      depthTest: false,
-      depthWrite: false
+      opacity: 0.35
     });
-    borderMat.toneMapped = false;
     const borderGeometry = new THREE.EdgesGeometry(fillGeometry);
     const border = new THREE.LineSegments(borderGeometry, borderMat);
     border.position.z = 0.01;
@@ -518,58 +446,7 @@ export class EnhancedLightIconManager {
     // Icon mesh with outline shader (billboard via custom vertex shader)
     const size = 48;
     // Create placeholder material - will be replaced when texture loads
-    const spriteMaterial = new THREE.ShaderMaterial({
-      uniforms: {
-        map: { value: null },
-        outlineColor: { value: new THREE.Color(0x222222) },
-        outlineWidth: { value: 0.08 }
-      },
-      vertexShader: `
-        varying vec2 vUv;
-        void main() {
-          vUv = uv;
-          vec4 mvPosition = modelViewMatrix * vec4(0.0, 0.0, 0.0, 1.0);
-          vec2 scale = vec2(
-            length(modelMatrix[0].xyz),
-            length(modelMatrix[1].xyz)
-          );
-          mvPosition.xy += position.xy * scale;
-          gl_Position = projectionMatrix * mvPosition;
-        }
-      `,
-      fragmentShader: `
-        uniform sampler2D map;
-        uniform vec3 outlineColor;
-        uniform float outlineWidth;
-        varying vec2 vUv;
-
-        void main() {
-          vec4 texColor = texture2D(map, vUv);
-          float alpha = texColor.a;
-
-          float outlineAlpha = 0.0;
-          float step = outlineWidth;
-          for (float x = -1.0; x <= 1.0; x += 1.0) {
-            for (float y = -1.0; y <= 1.0; y += 1.0) {
-              if (x == 0.0 && y == 0.0) continue;
-              vec2 offset = vec2(x, y) * step;
-              float neighborAlpha = texture2D(map, vUv + offset).a;
-              outlineAlpha = max(outlineAlpha, neighborAlpha);
-            }
-          }
-
-          float outline = clamp(outlineAlpha - alpha, 0.0, 1.0);
-          vec3 finalColor = mix(texColor.rgb, outlineColor, outline * 0.9);
-          float finalAlpha = max(alpha, outline * 0.85);
-
-          gl_FragColor = vec4(finalColor, finalAlpha);
-        }
-      `,
-      transparent: true,
-      depthTest: false,
-      depthWrite: false,
-      toneMapped: false
-    });
+    const spriteMaterial = ControlGizmoFactory.createOutlinedSpriteMaterial(null);
     const spriteGeometry = new THREE.PlaneGeometry(1, 1);
     const sprite = new THREE.Mesh(spriteGeometry, spriteMaterial);
     sprite.scale.set(size, size, 1);

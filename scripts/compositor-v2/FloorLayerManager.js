@@ -285,7 +285,7 @@ export class FloorLayerManager {
       // Find the best floor by midpoint containment, preferring lower floors.
       for (let i = 0; i < floors.length; i++) {
         const f = floors[i];
-        if (tileMid >= f.elevationMin && tileMid <= f.elevationMax) {
+        if (tileMid >= f.elevationMin && tileMid < f.elevationMax) {
           return Math.min(i, MAX_FLOOR_LAYERS - 1);
         }
       }
@@ -303,7 +303,7 @@ export class FloorLayerManager {
     const elev = Number.isFinite(Number(tileDoc?.elevation)) ? Number(tileDoc.elevation) : 0;
     for (let i = 0; i < floors.length; i++) {
       const f = floors[i];
-      if (elev >= f.elevationMin && elev <= f.elevationMax) {
+      if (elev >= f.elevationMin && elev < f.elevationMax) {
         return Math.min(i, MAX_FLOOR_LAYERS - 1);
       }
     }
@@ -326,7 +326,7 @@ export class FloorLayerManager {
 
     for (let i = 0; i < floors.length; i++) {
       const f = floors[i];
-      if (elev >= f.elevationMin && elev <= f.elevationMax) {
+      if (elev >= f.elevationMin && elev < f.elevationMax) {
         return Math.min(i, MAX_FLOOR_LAYERS - 1);
       }
     }

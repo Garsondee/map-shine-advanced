@@ -216,6 +216,20 @@ export class IridescenceEffectV2 {
     const roofTex = window.MapShine?.effectComposer?._floorCompositorV2?._overheadShadowEffect?.roofAlphaTexture ?? null;
     u.uRoofAlphaMap.value = roofTex;
     u.uHasRoofAlphaMap.value = roofTex ? 1.0 : 0.0;
+
+    // Screen-space token mask: suppress iridescence where token silhouettes exist.
+    try {
+      const mm = window.MapShine?.maskManager;
+      let tokenMaskTex = mm?.getTexture?.('tokenMask.screen') ?? null;
+      if (!tokenMaskTex) {
+        tokenMaskTex = window.MapShine?.lightingEffect?.tokenMaskTarget?.texture ?? null;
+      }
+      u.uTokenMask.value = tokenMaskTex;
+      u.uHasTokenMask.value = tokenMaskTex ? 1.0 : 0.0;
+    } catch (_) {
+      u.uTokenMask.value = null;
+      u.uHasTokenMask.value = 0.0;
+    }
   }
 
   _createOverlay(tileId, floorIndex, opts) {
@@ -280,6 +294,8 @@ export class IridescenceEffectV2 {
       uEffectEnabled: { value: this._enabled },
       uRoofAlphaMap: { value: null },
       uHasRoofAlphaMap: { value: 0.0 },
+      uTokenMask: { value: null },
+      uHasTokenMask: { value: 0.0 },
       uTime: { value: 0.0 },
       uResolution: { value: new THREE.Vector2(1, 1) },
       uIntensity: { value: this.params.intensity },
@@ -498,7 +514,7 @@ export class IridescenceEffectV2 {
       const tileMid = (tileBottom + tileTop) / 2;
       for (let i = 0; i < floors.length; i++) {
         const f = floors[i];
-        if (tileMid >= f.elevationMin && tileMid <= f.elevationMax) return i;
+        if (tileMid >= f.elevationMin && tileMid < f.elevationMax) return i;
       }
       for (let i = 0; i < floors.length; i++) {
         const f = floors[i];
@@ -531,6 +547,8 @@ export class IridescenceEffectV2 {
       uniform sampler2D uIridescenceMask;
       uniform sampler2D uRoofAlphaMap;
       uniform float uHasRoofAlphaMap;
+      uniform sampler2D uTokenMask;
+      uniform float uHasTokenMask;
       uniform float uTime;
       uniform vec2 uResolution;
       uniform float uIntensity;
@@ -631,6 +649,15 @@ export class IridescenceEffectV2 {
 
         vec3 finalRGB = rainbowColor * litFactor;
         float finalAlpha = clamp(maskVal * uAlpha * uIntensity, 0.0, 1.0);
+
+        if (uHasTokenMask > 0.5) {
+          vec2 tokenUv = gl_FragCoord.xy / max(uResolution.xy, vec2(1.0));
+          float tokenMask01 = smoothstep(0.1, 0.9, texture2D(uTokenMask, tokenUv).a);
+          float keep = 1.0 - tokenMask01;
+          finalRGB *= keep;
+          finalAlpha *= keep;
+        }
+
         gl_FragColor = vec4(finalRGB, finalAlpha);
       }
     `;

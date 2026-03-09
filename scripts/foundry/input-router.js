@@ -284,8 +284,15 @@ export class InputRouter {
       layerIdName === 'tokens';
 
     const isTilesLayer =
+      !!canvas?.tiles?.active ||
       layerCtorName === 'TilesLayer' ||
-      layerIdName === 'tiles';
+      layerIdName === 'tiles' ||
+      layerOptionsName === 'tiles' ||
+      layerOptionsName === 'tile' ||
+      activeControl === 'tiles' ||
+      activeControl === 'tile' ||
+      activeControlLayer === 'tiles' ||
+      activeControlLayer === 'tile';
 
     const isLightingLayer =
       !!canvas?.lighting?.active ||
@@ -318,8 +325,8 @@ export class InputRouter {
       return InputMode.THREE;
     }
 
-    // Tile placement/selection is handled by InteractionManager + TileManager in
-    // Three.js so we keep input routed to Three even when the Tiles layer/tools are active.
+    // Tile workflows are currently handled by InteractionManager's Three.js tile
+    // picking/edit path in the hybrid stack.
     if (isTilesLayer) {
       return InputMode.THREE;
     }

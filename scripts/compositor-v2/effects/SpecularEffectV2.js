@@ -611,6 +611,22 @@ export class SpecularEffectV2 {
       u.uHasBuildingShadowMap.value = false;
       u.uBuildingShadowMap.value = this._fallbackBlack;
     }
+
+    // ── Token mask (screen-space) ─────────────────────────────────────────
+    // Prevent floor specular overlays from brightening on top of tokens.
+    // tokenMask.screen is authored in screen UV space (alpha=1 inside token silhouette).
+    try {
+      const mm = window.MapShine?.maskManager;
+      let tokenMaskTex = mm?.getTexture?.('tokenMask.screen') ?? null;
+      if (!tokenMaskTex) {
+        tokenMaskTex = window.MapShine?.lightingEffect?.tokenMaskTarget?.texture ?? null;
+      }
+      u.uTokenMask.value = tokenMaskTex || this._fallbackBlack;
+      u.uHasTokenMask.value = !!tokenMaskTex;
+    } catch (_) {
+      u.uTokenMask.value = this._fallbackBlack;
+      u.uHasTokenMask.value = false;
+    }
   }
 
   // ── Cleanup ────────────────────────────────────────────────────────────────
@@ -694,14 +710,22 @@ export class SpecularEffectV2 {
     const mesh = new THREE.Mesh(geometry, material);
     mesh.name = `SpecV2_${tileId}`;
     mesh.frustumCulled = false;
-    mesh.position.set(centerX, centerY, z);
-    mesh.rotation.z = rotation;
+    const baseEntry = this._renderBus?._tiles?.get?.(tileId);
+    const canAttachToTileRoot = !!baseEntry && !String(tileId).startsWith('__');
+    if (canAttachToTileRoot) {
+      // Tile-attached overlays inherit tile runtime transforms from the bus root.
+      mesh.position.set(0, 0, SPECULAR_Z_OFFSET);
+      mesh.rotation.z = 0;
+    } else {
+      // Fallback path (e.g. scene background overlay): keep absolute transform.
+      mesh.position.set(centerX, centerY, z);
+      mesh.rotation.z = rotation;
+    }
 
     // Ensure the specular overlay renders immediately above its corresponding
     // albedo tile in the FloorRenderBus scene. The bus uses renderOrder to
     // guarantee deterministic stacking for transparent materials.
     try {
-      const baseEntry = this._renderBus?._tiles?.get?.(tileId);
       const baseOrder = Number(baseEntry?.mesh?.renderOrder);
       if (Number.isFinite(baseOrder)) {
         mesh.renderOrder = baseOrder + 1;
@@ -709,7 +733,13 @@ export class SpecularEffectV2 {
     } catch (_) {}
 
     // Register with the bus so floor visibility is handled automatically.
-    this._renderBus.addEffectOverlay(`${tileId}_specular`, mesh, floorIndex);
+    let attached = false;
+    if (canAttachToTileRoot && typeof this._renderBus?.addTileAttachedOverlay === 'function') {
+      attached = this._renderBus.addTileAttachedOverlay(tileId, `${tileId}_specular`, mesh, floorIndex) === true;
+    }
+    if (!attached) {
+      this._renderBus.addEffectOverlay(`${tileId}_specular`, mesh, floorIndex);
+    }
     this._overlays.set(tileId, { mesh, material, floorIndex });
 
     // Load textures asynchronously via THREE.TextureLoader.
@@ -883,6 +913,10 @@ export class SpecularEffectV2 {
       uBuildingShadowSuppressionStrength: { value: this.params.buildingShadowSuppressionStrength },
       uHasBuildingShadowMap: { value: false },
       uBuildingShadowMap: { value: this._fallbackBlack },
+
+      // Screen-space token mask (suppresses specular on top of token silhouettes)
+      uHasTokenMask: { value: false },
+      uTokenMask: { value: this._fallbackBlack },
     };
   }
 
@@ -1074,7 +1108,7 @@ export class SpecularEffectV2 {
 
       for (let i = 0; i < floors.length; i++) {
         const f = floors[i];
-        if (tileMid >= f.elevationMin && tileMid <= f.elevationMax) return i;
+        if (tileMid >= f.elevationMin && tileMid < f.elevationMax) return i;
       }
       for (let i = 0; i < floors.length; i++) {
         const f = floors[i];

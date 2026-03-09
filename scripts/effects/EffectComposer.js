@@ -630,13 +630,17 @@ export class EffectComposer {
   /**
    * Get or lazily create the FloorCompositor V2 instance.
    * Created on first use so the constructor doesn't run during module init.
+   * @param {object} [options]
+   * @param {(label: string, index: number, total: number) => void} [options.onProgress]
+   *   Forwarded to FloorCompositor.initialize() for loading-screen progress updates.
+   *   Only used on the first call (when the compositor is actually created).
    * @returns {FloorCompositor}
    * @private
    */
-  _getFloorCompositorV2() {
+  _getFloorCompositorV2(options = {}) {
     if (!this._floorCompositorV2) {
       this._floorCompositorV2 = new FloorCompositor(this.renderer, this.scene, this.camera);
-      this._floorCompositorV2.initialize();
+      this._floorCompositorV2.initialize({ onProgress: options?.onProgress });
       log.info('FloorCompositor V2 created and initialized');
 
       // Expose FloorCompositor V2 and its effects for runtime diagnostics and

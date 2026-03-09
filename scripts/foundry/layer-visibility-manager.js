@@ -139,11 +139,17 @@ export class LayerVisibilityManager {
     
     // Determine active layer
     const activeName = activeLayerName || this.getActiveLayerName();
+    const activeNormalized = String(activeName || '').toLowerCase().replace('layer', '');
+    const isTilesContext = activeNormalized === 'tiles' || !!canvas?.tiles?.active;
     
     log.debug(`Updating layer visibility (active: ${activeName})`);
     
     // Hide replaced layers (Three.js renders these)
     for (const name of this.replacedLayers) {
+      if (isTilesContext && (name === 'tiles' || name === 'primary')) {
+        this.setLayerVisibility(name, true, 'tiles-context-preserve');
+        continue;
+      }
       this.setLayerVisibility(name, false, 'replaced');
     }
     

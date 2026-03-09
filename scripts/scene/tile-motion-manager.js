@@ -111,6 +111,9 @@ export class TileMotionManager {
     /** @type {Map<string, {offsetX:number,offsetY:number,rotation:number,centerX:number,centerY:number,matrixAutoUpdate:boolean}>} */
     this._textureBaseCache = new Map();
 
+    /** @type {Map<string, {x:number,y:number,z:number,rotation:number}>} */
+    this._busBaseCache = new Map();
+
     /** @type {Map<string, {x:number,y:number,rotation:number,animDelta:number,frameId:number}>} */
     this._resolvedStates = new Map();
 
@@ -206,6 +209,7 @@ export class TileMotionManager {
 
     this._baseCache.clear();
     this._textureBaseCache.clear();
+    this._busBaseCache.clear();
     this._resolvedStates.clear();
     this._tileSeedCache.clear();
     this._runtimeOrder.length = 0;
@@ -261,27 +265,28 @@ export class TileMotionManager {
     const out = _createDefaultState();
     if (!raw || typeof raw !== 'object') return out;
 
-    out.version = CURRENT_VERSION;
+    // Backward compatibility:
+    // Some earlier builds stored tile-motion payload nested under { state: {...} }.
+    // Accept both shapes so existing scenes keep their configured tile motion.
+    const source = (raw.state && typeof raw.state === 'object') ? raw.state : raw;
+    const global = source.global && typeof source.global === 'object' ? source.global : {};
+    const tiles = source.tiles && typeof source.tiles === 'object' ? source.tiles : {};
 
-    const global = raw.global && typeof raw.global === 'object' ? raw.global : {};
-    out.state = {
-      version: CURRENT_VERSION,
-      global: {
-        playing: !!global.playing,
-        startEpochMs: _toNumber(global.startEpochMs, 0),
-        speedPercent: _clamp(_toNumber(global.speedPercent, 100), 0, 400),
-        timeFactorPercent: _clamp(_toNumber(global.timeFactorPercent, 100), 0, 200),
-        autoPlayEnabled: global.autoPlayEnabled !== false
-      },
-      tiles: raw.tiles && typeof raw.tiles === 'object' ? raw.tiles : {}
+    out.version = CURRENT_VERSION;
+    out.global = {
+      playing: !!global.playing,
+      startEpochMs: _toNumber(global.startEpochMs, 0),
+      speedPercent: _clamp(_toNumber(global.speedPercent, 100), 0, 400),
+      timeFactorPercent: _clamp(_toNumber(global.timeFactorPercent, 100), 0, 200),
+      autoPlayEnabled: global.autoPlayEnabled !== false
     };
 
-    for (const [tileId, cfg] of Object.entries(out.state.tiles)) {
+    for (const [tileId, cfg] of Object.entries(tiles)) {
       if (!tileId || !cfg || typeof cfg !== 'object') continue;
-      out.state.tiles[tileId] = this._sanitizeTileConfig(tileId, cfg);
+      out.tiles[tileId] = this._sanitizeTileConfig(tileId, cfg);
     }
 
-    return out.state;
+    return out;
   }
 
   _sanitizeTileConfig(tileId, cfg) {
@@ -451,13 +456,14 @@ export class TileMotionManager {
   }
 
   /**
-   * Get tile IDs which are motion-enabled and opted into overhead shadow projection.
+   * Get tile IDs opted into overhead shadow projection.
+   * Projection opt-in should work even if motion is currently disabled.
    * @returns {string[]}
    */
   getShadowProjectionTileIds() {
     const ids = [];
     for (const [tileId, cfg] of Object.entries(this.state?.tiles || {})) {
-      if (!tileId || !cfg?.enabled || !cfg?.shadowProjectionEnabled) continue;
+      if (!tileId || !cfg?.shadowProjectionEnabled) continue;
       ids.push(tileId);
     }
     return ids;
@@ -521,6 +527,8 @@ export class TileMotionManager {
     cur.enabled = !!enabled;
     this.state.tiles[tileId] = this._sanitizeTileConfig(tileId, cur);
     this._graphDirty = true;
+    this._rebuildRuntimeGraph();
+    if (this.state?.global?.playing) this._requestContinuousRender(500);
 
     return this._saveStateToScene();
   }
@@ -541,6 +549,7 @@ export class TileMotionManager {
 
     this.state.tiles[tileId] = this._sanitizeTileConfig(tileId, merged);
     this._graphDirty = true;
+    this._rebuildRuntimeGraph();
 
     // Some options (like renderAboveTokens) affect base layer placement (z/renderOrder).
     // Re-sync the tile immediately so playback and base caches reflect the new layer.
@@ -618,6 +627,7 @@ export class TileMotionManager {
       const sprite = data?.sprite;
       if (!tileId || !sprite) continue;
       this.captureBaseTransform(tileId, sprite);
+      this._captureBusBaseTransform(tileId);
     }
   }
 
@@ -631,7 +641,42 @@ export class TileMotionManager {
       if (!tileId || !sprite) continue;
       if (this._baseCache.has(tileId)) continue;
       this.captureBaseTransform(tileId, sprite);
+      this._captureBusBaseTransform(tileId);
     }
+  }
+
+  _getBusTileEntry(tileId) {
+    const busTiles = window.MapShine?.floorCompositorV2?._renderBus?._tiles;
+    if (!busTiles || typeof busTiles.get !== 'function') return null;
+    return busTiles.get(tileId) || null;
+  }
+
+  _getBusTileMesh(tileId) {
+    return this._getBusTileEntry(tileId)?.mesh || null;
+  }
+
+  _getBusTransformNode(tileId) {
+    const entry = this._getBusTileEntry(tileId);
+    return entry?.root || entry?.mesh || null;
+  }
+
+  _captureBusBaseTransform(tileId) {
+    if (!tileId) return;
+    const node = this._getBusTransformNode(tileId);
+    if (!node) return;
+
+    const base = this._busBaseCache.get(tileId) || {
+      x: 0,
+      y: 0,
+      z: 0,
+      rotation: 0
+    };
+
+    base.x = _toNumber(node.position?.x, 0);
+    base.y = _toNumber(node.position?.y, 0);
+    base.z = _toNumber(node.position?.z, 0);
+    base.rotation = _toNumber(node.rotation?.z, 0);
+    this._busBaseCache.set(tileId, base);
   }
 
   onTileRemoved(tileId) {
@@ -639,6 +684,7 @@ export class TileMotionManager {
 
     this._baseCache.delete(tileId);
     this._textureBaseCache.delete(tileId);
+    this._busBaseCache.delete(tileId);
     this._resolvedStates.delete(tileId);
     this._tileSeedCache.delete(tileId);
     this._activeTileIds.delete(tileId);
@@ -994,6 +1040,15 @@ export class TileMotionManager {
     sprite.updateMatrix();
     this.tileManager?.syncTileAttachedEffects?.(tileId, sprite);
 
+    const busNode = this._getBusTransformNode(tileId);
+    if (busNode) {
+      if (!this._busBaseCache.has(tileId)) this._captureBusBaseTransform(tileId);
+      const busBase = this._busBaseCache.get(tileId);
+      busNode.position.set(finalX, finalY, _toNumber(busBase?.z, _toNumber(busNode.position?.z, 0)));
+      if (busNode.rotation) busNode.rotation.z = finalRot;
+      busNode.updateMatrix();
+    }
+
     const resolved = this._getResolvedState(tileId, frameId);
     resolved.x = finalX;
     resolved.y = finalY;
@@ -1031,6 +1086,16 @@ export class TileMotionManager {
 
     sprite.updateMatrix();
     this.tileManager?.syncTileAttachedEffects?.(tileId, sprite);
+
+    const busNode = this._getBusTransformNode(tileId);
+    if (busNode) {
+      const busBase = this._busBaseCache.get(tileId);
+      if (busBase) {
+        busNode.position.set(busBase.x, busBase.y, busBase.z);
+        if (busNode.rotation) busNode.rotation.z = busBase.rotation;
+      }
+      busNode.updateMatrix();
+    }
   }
 
   _restoreAllActiveTiles() {

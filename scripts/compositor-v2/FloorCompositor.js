@@ -534,8 +534,20 @@ export class FloorCompositor {
   /**
    * Initialize the compositor. Currently just sets up the bus and the
    * floor-change hook. Render targets will be added when effects need them.
+   * @param {object} [options]
+   * @param {(label: string, index: number, total: number) => void} [options.onProgress]
+   *   Optional callback fired after each effect is initialized.
+   *   `index` is 1-based; `total` is the expected total number of init steps.
    */
-  initialize() {
+  initialize(options = {}) {
+    const _onProgress = typeof options?.onProgress === 'function' ? options.onProgress : null;
+    // Total number of named effect init steps in this method — update when adding/removing effects.
+    const TOTAL_EFFECT_INITS = 38;
+    let _effectInitIndex = 0;
+    const _reportProgress = (label) => {
+      if (!_onProgress) return;
+      try { _onProgress(label, ++_effectInitIndex, TOTAL_EFFECT_INITS); } catch (_) {}
+    };
     const THREE = window.THREE;
     if (!THREE || !this.renderer) {
       log.warn('FloorCompositor.initialize: missing THREE or renderer');
@@ -664,12 +676,14 @@ export class FloorCompositor {
 
     // Keep compositor startup resilient: a single effect init failure should not
     // abort V2 rendering entirely. Each effect is isolated and logged.
+    // `_reportProgress` is called after each init to advance the loading overlay.
     const initEffect = (label, fn) => {
       try {
         fn?.();
       } catch (err) {
         log.warn(`FloorCompositor: ${label} initialize failed:`, err);
       }
+      _reportProgress(label);
     };
 
     initEffect('SpecularEffectV2', () => this._specularEffect.initialize());
@@ -682,29 +696,35 @@ export class FloorCompositor {
     initEffect('WindowLightEffectV2', () => this._windowLightEffect.initialize());
     // Cloud effect needs the bus scene and main camera for the overhead blocker pass.
     this._cloudEffect.initialize(this.renderer, this._renderBus._scene, this.camera);
+    _reportProgress('CloudEffectV2');
     // Water splashes: own BatchedRenderer added via addEffectOverlay.
     try { this._waterSplashesEffect?.initialize?.(); } catch (err) {
       log.warn('FloorCompositor: WaterSplashesEffectV2 initialize failed:', err);
     }
+    _reportProgress('WaterSplashesEffectV2');
     // Weather particles live in the bus scene so they render in the same pass as tiles.
     try { this._weatherParticles?.initialize?.(this._renderBus._scene); } catch (err) {
       log.warn('FloorCompositor: WeatherParticlesV2 initialize failed:', err);
     }
+    _reportProgress('WeatherParticlesV2');
 
     // Ash disturbance bursts: owns its own batch renderer and registers it via renderBus overlay.
     try { this._ashDisturbanceEffect?.initialize?.(); } catch (err) {
       log.warn('FloorCompositor: AshDisturbanceEffectV2 initialize failed:', err);
     }
+    _reportProgress('AshDisturbanceEffectV2');
 
     // Smelly flies uses the particles bridge batch renderer and should render
     // in the bus scene for V2.
     try { this._smellyFliesEffect?.initialize?.(this.renderer, this._renderBus._scene, this.camera); } catch (err) {
       log.warn('FloorCompositor: SmellyFliesEffect initialize failed:', err);
     }
+    _reportProgress('SmellyFliesEffect');
     // Lightning renders procedural strike meshes in the bus scene.
     try { this._lightningEffect?.initialize?.(this.renderer, this._renderBus._scene, this.camera); } catch (err) {
       log.warn('FloorCompositor: LightningEffectV2 initialize failed:', err);
     }
+    _reportProgress('LightningEffectV2');
 
     // Candle flames render in bus scene and push glow into lighting lightScene.
     try {
@@ -713,6 +733,7 @@ export class FloorCompositor {
     } catch (err) {
       log.warn('FloorCompositor: CandleFlamesEffectV2 initialize failed:', err);
     }
+    _reportProgress('CandleFlamesEffectV2');
 
     // Player light renders token-attached flashlight/torch effects and drives
     // gameplay-facing dynamic light behavior.
@@ -721,6 +742,7 @@ export class FloorCompositor {
     } catch (err) {
       log.warn('FloorCompositor: PlayerLightEffectV2 initialize failed:', err);
     }
+    _reportProgress('PlayerLightEffectV2');
 
     // Subscribe outdoors mask consumers so they receive the texture as soon as
     // populate() builds it, and again on every floor change.
@@ -748,6 +770,8 @@ export class FloorCompositor {
     initEffect('SharpenEffectV2', () => this._sharpenEffect.initialize());
     if (this._waterEffect) {
       initEffect('WaterEffectV2', () => this._waterEffect.initialize());
+    } else {
+      _reportProgress('WaterEffectV2');
     }
     // OverheadShadowsEffectV2 initialization
     try { 
@@ -755,37 +779,47 @@ export class FloorCompositor {
     } catch (err) {
       log.warn('FloorCompositor: OverheadShadowsEffectV2 initialize failed:', err);
     }
+    _reportProgress('OverheadShadowsEffectV2');
     try {
       this._buildingShadowEffect?.initialize?.(this.renderer, this.camera);
     } catch (err) {
       log.warn('FloorCompositor: BuildingShadowsEffectV2 initialize failed:', err);
     }
+    _reportProgress('BuildingShadowsEffectV2');
 
     // Artistic post-processing effects (disabled by default)
     try { this._dotScreenEffect?.initialize?.(); } catch (err) {
       log.warn('FloorCompositor: DotScreenEffectV2 initialize failed:', err);
     }
+    _reportProgress('DotScreenEffectV2');
     try { this._halftoneEffect?.initialize?.(); } catch (err) {
       log.warn('FloorCompositor: HalftoneEffectV2 initialize failed:', err);
     }
+    _reportProgress('HalftoneEffectV2');
     try { this._asciiEffect?.initialize?.(); } catch (err) {
       log.warn('FloorCompositor: AsciiEffectV2 initialize failed:', err);
     }
+    _reportProgress('AsciiEffectV2');
     try { this._dazzleOverlayEffect?.initialize?.(); } catch (err) {
       log.warn('FloorCompositor: DazzleOverlayEffectV2 initialize failed:', err);
     }
+    _reportProgress('DazzleOverlayEffectV2');
     try { this._visionModeEffect?.initialize?.(); } catch (err) {
       log.warn('FloorCompositor: VisionModeEffectV2 initialize failed:', err);
     }
+    _reportProgress('VisionModeEffectV2');
     try { this._invertEffect?.initialize?.(); } catch (err) {
       log.warn('FloorCompositor: InvertEffectV2 initialize failed:', err);
     }
+    _reportProgress('InvertEffectV2');
     try { this._sepiaEffect?.initialize?.(); } catch (err) {
       log.warn('FloorCompositor: SepiaEffectV2 initialize failed:', err);
     }
+    _reportProgress('SepiaEffectV2');
     try { this._lensEffect?.initialize?.(); } catch (err) {
       log.warn('FloorCompositor: LensEffectV2 initialize failed:', err);
     }
+    _reportProgress('LensEffectV2');
 
     // Listen for floor/level changes so we can update tile mesh visibility.
     this._levelHookId = Hooks.on('mapShineLevelContextChanged', (payload) => {
@@ -867,6 +901,12 @@ export class FloorCompositor {
     // Keep map-point-driven effects (flies/lightning/candles) wired even if
     // MapPointsManager is exposed on window.MapShine after the first render.
     this._wireMapPointConsumers();
+
+    // Rewire tile projection source through the V2 compositor dependency path.
+    // This keeps OverheadShadowsEffectV2 independent from global lookups.
+    try {
+      this._overheadShadowEffect?.setTileMotionManager?.(window.MapShine?.tileMotionManager ?? null);
+    } catch (_) {}
 
     // ── Lazy bus population ───────────────────────────────────────────────────
     // Populate on the first render frame. Uses THREE.TextureLoader internally

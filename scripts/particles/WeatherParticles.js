@@ -2667,7 +2667,7 @@ export class WeatherParticles {
 
     const emitterZ = (sceneComposer && typeof sceneComposer.weatherEmitterZ === 'number')
       ? sceneComposer.weatherEmitterZ
-      : (groundZ + 6500);
+      : (groundZ + 4300);
 
     // IMPORTANT: Keep the weather emitter within the camera frustum.
     // The PerspectiveCamera looks down -Z from a fixed height (typically z=2000)

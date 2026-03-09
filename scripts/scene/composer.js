@@ -1073,7 +1073,7 @@ export class SceneComposer {
     // all effects (weather, fog, etc.) can place content relative to
     // the ground plane without duplicating constants.
     this.worldTopZ = groundZ + 7500;
-    this.weatherEmitterZ = groundZ + 6500;
+    this.weatherEmitterZ = groundZ + 4300;
     this.baseFov = baseFovDegrees;
     this.baseFovRadians = baseFovRadians;
     this.baseFovTanHalf = Math.tan(baseFovRadians / 2);
@@ -1111,7 +1111,7 @@ export class SceneComposer {
     // Keep vertical bounds in sync if the base plane Z changes (e.g. via
     // future editing tools or scene configuration).
     this.worldTopZ = groundZ + 7500;
-    this.weatherEmitterZ = groundZ + 6500;
+    this.weatherEmitterZ = groundZ + 4300;
 
     const baseFovRadiansRaw = 2 * Math.atan(viewportHeight / (2 * distanceToGround));
     const baseFovRadians = baseFovRadiansRaw * PERSPECTIVE_STRENGTH;

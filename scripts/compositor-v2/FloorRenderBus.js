@@ -33,6 +33,13 @@ const log = createLogger('FloorRenderBus');
 // always render on top of lower floors with standard depth sorting.
 const GROUND_Z = 1000;
 const Z_PER_FLOOR = 1;
+const RENDER_ORDER_PER_FLOOR = 10000;
+const OVERHEAD_OFFSET = 5000;
+
+// Reserve headroom near the top of each floor band for token sprites.
+// Effects (specular/prism/iridescence) inherit tile renderOrder and add a small
+// positive delta, so keep tile indices well below token order slots.
+const MAX_SORT_WITHIN_FLOOR_GROUP = 4800;
 
 // ─── FloorRenderBus ──────────────────────────────────────────────────────────
 
@@ -47,8 +54,8 @@ export class FloorRenderBus {
 
     /**
      * Per-tile entries. Key: tileId (string).
-     * Value: { mesh, material, floorIndex }
-     * @type {Map<string, {mesh: import('three').Mesh, material: import('three').MeshBasicMaterial, floorIndex: number}>}
+     * Value: { mesh, material, floorIndex, root?, attachedToTileId? }
+     * @type {Map<string, {mesh: import('three').Object3D, material: any, floorIndex: number, root?: import('three').Object3D|null, attachedToTileId?: string|null}>}
      */
     this._tiles = new Map();
 
@@ -154,12 +161,14 @@ export class FloorRenderBus {
       const tileId = tileDoc.id ?? tileDoc._id ?? `tile_${tileCount}`;
 
       // Render order: ensures correct visual stacking within and across floors.
-      // Layout: [floor 0 regular] [floor 0 overhead] [floor 1 regular] ...
-      // Within each group, tiles are ordered by Foundry sort (ascending).
+      // Layout: [floor N regular 0..4999] [floor N overhead 5000..9999].
+      // Within each floor-group, tiles are ordered by Foundry sort (ascending),
+      // with a cap to preserve a stable token headroom at top of floor band.
       const isOverhead = isTileOverhead(tileDoc);
-      const RENDER_ORDER_PER_FLOOR = 10000;
-      const OVERHEAD_OFFSET = 5000;
-      const sortWithinFloor = tileCount; // Already in sort order from pre-sort above
+      floorCounts[floorIndex] = floorCounts[floorIndex] ?? { regular: 0, overhead: 0 };
+      const groupCounts = floorCounts[floorIndex];
+      const localIndex = isOverhead ? groupCounts.overhead++ : groupCounts.regular++;
+      const sortWithinFloor = Math.min(localIndex, MAX_SORT_WITHIN_FLOOR_GROUP);
       const renderOrder = floorIndex * RENDER_ORDER_PER_FLOOR
         + (isOverhead ? OVERHEAD_OFFSET : 0)
         + sortWithinFloor;
@@ -183,7 +192,6 @@ export class FloorRenderBus {
       });
 
       tileCount++;
-      floorCounts[floorIndex] = (floorCounts[floorIndex] ?? 0) + 1;
     }
 
     // Diagnostic: log overhead tile assignment so we can spot mis-classified tiles.
@@ -270,8 +278,19 @@ export class FloorRenderBus {
     
     log.info(`[V2 DEBUG] FloorRenderBus.clear() called - scene has ${this._scene.children.length} children before clear`);
     
-    for (const { mesh, material } of this._tiles.values()) {
-      this._scene.remove(mesh);
+    for (const { mesh, material, root } of this._tiles.values()) {
+      try {
+        if (mesh?.parent) {
+          mesh.parent.remove(mesh);
+        } else {
+          this._scene.remove(mesh);
+        }
+      } catch (_) {}
+      try {
+        if (root?.parent) {
+          root.parent.remove(root);
+        }
+      } catch (_) {}
 
       // Tiles and some overlays are Mesh instances with materials/geometries.
       // Others (e.g. quarks BatchedRenderer) are Object3D renderers with no
@@ -382,17 +401,19 @@ export class FloorRenderBus {
   setVisibleFloors(maxFloorIndex) {
     if (!this._initialized) return;
     for (const [tileId, entry] of this._tiles) {
+      const node = entry?.root || entry?.mesh;
+      if (!node) continue;
       // Background planes and internal effect overlays (prefixed '__') are always
       // visible — their content visibility is managed by the effect itself.
       if (tileId.startsWith('__')) {
-        entry.mesh.visible = true;
+        node.visible = true;
         continue;
       }
 
       // Visibility should be strict to the active stack slice: render floors
       // from 0..N only. Overhead/roof capture uses dedicated layer/passes and
       // must not leak upper-floor albedo into lower-floor views.
-      entry.mesh.visible = entry.floorIndex <= maxFloorIndex;
+      node.visible = entry.floorIndex <= maxFloorIndex;
     }
     log.debug(`FloorRenderBus: showing floors 0–${maxFloorIndex}`);
   }
@@ -420,12 +441,14 @@ export class FloorRenderBus {
     const savedVisibility = new Map();
     const savedMaterialState = new Map();
     for (const [tileId, entry] of this._tiles) {
-      savedVisibility.set(tileId, entry.mesh.visible);
+      const node = entry?.root || entry?.mesh;
+      if (!node) continue;
+      savedVisibility.set(tileId, node.visible);
 
       // Background planes (__bg_*) should be hidden — they're not floor geometry.
       // Effect overlays (__*) should also be hidden.
       if (tileId.startsWith('__')) {
-        entry.mesh.visible = false;
+        node.visible = false;
         continue;
       }
 
@@ -441,14 +464,14 @@ export class FloorRenderBus {
 
       if (isBelowFloor) {
         // Below minFloorIndex: do not render into the occluder mask.
-        entry.mesh.visible = false;
+        node.visible = false;
       } else {
         // At or above minFloorIndex: skip tiles without textures (avoid opaque black).
         if (!hasMap) {
-          entry.mesh.visible = false;
+          node.visible = false;
           continue;
         }
-        entry.mesh.visible = true;
+        node.visible = true;
         // Render with real texture alpha so transparent areas are genuine openings.
         savedMaterialState.set(tileId, {
           transparent: mat.transparent,
@@ -497,7 +520,8 @@ export class FloorRenderBus {
     // Restore original tile visibility.
     for (const [tileId, wasVisible] of savedVisibility) {
       const entry = this._tiles.get(tileId);
-      if (entry) entry.mesh.visible = wasVisible;
+      const node = entry?.root || entry?.mesh;
+      if (node) node.visible = wasVisible;
     }
 
     // Restore original material state.
@@ -534,8 +558,42 @@ export class FloorRenderBus {
       this.removeEffectOverlay(key);
     }
     this._scene.add(mesh);
-    this._tiles.set(key, { mesh, material: mesh.material, floorIndex });
+    this._tiles.set(key, { mesh, material: mesh.material, floorIndex, root: null, attachedToTileId: null });
     log.debug(`FloorRenderBus: added effect overlay '${key}' (floor ${floorIndex})`);
+  }
+
+  /**
+   * Attach an overlay mesh under a tile's transform root so it inherits runtime
+   * tile motion (rotation/orbit/etc.) automatically.
+   *
+   * @param {string} tileId
+   * @param {string} key - Unique overlay key (e.g. `${tileId}_specular`)
+   * @param {import('three').Object3D} mesh
+   * @param {number} floorIndex
+   * @returns {boolean}
+   */
+  addTileAttachedOverlay(tileId, key, mesh, floorIndex) {
+    if (!this._initialized || !this._scene || !tileId || !key || !mesh) return false;
+
+    const tileEntry = this._tiles.get(tileId);
+    if (!tileEntry) return false;
+
+    if (this._tiles.has(key)) {
+      this.removeEffectOverlay(key);
+    }
+
+    const parent = tileEntry.root || tileEntry.mesh?.parent || this._scene;
+    if (!parent) return false;
+    parent.add(mesh);
+    this._tiles.set(key, {
+      mesh,
+      material: mesh.material,
+      floorIndex,
+      root: null,
+      attachedToTileId: tileId
+    });
+    log.debug(`FloorRenderBus: added tile-attached overlay '${key}' -> ${tileId} (floor ${floorIndex})`);
+    return true;
   }
 
   /**
@@ -547,7 +605,11 @@ export class FloorRenderBus {
     if (!this._scene) return;
     const entry = this._tiles.get(key);
     if (!entry) return;
-    this._scene.remove(entry.mesh);
+    if (entry.mesh?.parent) {
+      entry.mesh.parent.remove(entry.mesh);
+    } else {
+      this._scene.remove(entry.mesh);
+    }
     // Don't dispose material/geometry here — the effect owns those resources
     // and disposes them in its own clear()/dispose() methods.
     this._tiles.delete(key);
@@ -674,25 +736,41 @@ export class FloorRenderBus {
     mesh.name = `BusTile_${tileId}`;
     mesh.frustumCulled = false;
     mesh.userData = mesh.userData || {};
-    mesh.userData.isOverhead = isOverhead;
-    mesh.userData.floorIndex = floorIndex;
+    mesh.userData.foundryTileId = tileId;
+    mesh.userData.mapShineBusTile = true;
+    const root = new THREE.Group();
+    root.name = `BusTileRoot_${tileId}`;
+    root.frustumCulled = false;
+    root.userData = root.userData || {};
+    root.userData.foundryTileId = tileId;
+    root.userData.mapShineBusTile = true;
+    root.userData.isOverhead = isOverhead;
+    root.userData.floorIndex = floorIndex;
 
     // Layer conventions:
     // - Layer 0: normal bus rendering (FloorCompositor camera enables it)
     // - Layer 20: roof capture pass for OverheadShadowsEffectV2
+    root.layers.set(0);
     mesh.layers.set(0);
     if (isOverhead) {
+      root.layers.enable(20);
+      // IMPORTANT: camera layer tests are evaluated on renderable objects
+      // (the mesh), not only parent groups. Keep ROOF_LAYER on the mesh so
+      // OverheadShadowsEffectV2 roof capture pass can actually see overhead tiles.
       mesh.layers.enable(20);
     }
 
-    mesh.position.set(cx, cy, z);
-    mesh.rotation.z = rotation;
+    root.position.set(cx, cy, z);
+    root.rotation.z = rotation;
+    mesh.position.set(0, 0, 0);
+    mesh.rotation.z = 0;
     // renderOrder controls visual stacking: lower = behind, higher = in front.
     // Three.js sorts transparent objects by renderOrder first, then by distance.
     mesh.renderOrder = renderOrder;
 
-    this._scene.add(mesh);
-    this._tiles.set(tileId, { mesh, material: mat, floorIndex });
+    root.add(mesh);
+    this._scene.add(root);
+    this._tiles.set(tileId, { mesh, material: mat, floorIndex, root, attachedToTileId: null });
   }
 
   /**
@@ -715,7 +793,7 @@ export class FloorRenderBus {
 
       for (let i = 0; i < floors.length; i++) {
         const f = floors[i];
-        if (tileMid >= f.elevationMin && tileMid <= f.elevationMax) return i;
+        if (tileMid >= f.elevationMin && tileMid < f.elevationMax) return i;
       }
       for (let i = 0; i < floors.length; i++) {
         const f = floors[i];

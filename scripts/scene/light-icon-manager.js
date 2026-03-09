@@ -8,6 +8,7 @@ import { createLogger } from '../core/log.js';
 import Coordinates from '../utils/coordinates.js';
 import { OVERLAY_THREE_LAYER } from '../core/render-layers.js';
 import { VisionPolygonComputer } from '../vision/VisionPolygonComputer.js';
+import { ControlGizmoFactory } from './control-gizmo-factory.js';
 import { applyAmbientLightLevelDefaults } from '../foundry/levels-create-defaults.js';
 import { isLightVisibleForPerspective } from '../foundry/elevation-context.js';
 import {
@@ -18,70 +19,6 @@ import {
 const log = createLogger('LightIconManager');
 const _lightLosComputer = new VisionPolygonComputer();
 _lightLosComputer.circleSegments = 72;
-
-/**
- * Creates a custom shader material for light icon sprites with a dark outline.
- * The outline ensures visibility against bright/white backgrounds.
- * @param {THREE.Texture} texture - The icon texture
- * @returns {THREE.ShaderMaterial}
- */
-function createOutlinedSpriteMaterial(texture) {
-  const THREE = window.THREE;
-  return new THREE.ShaderMaterial({
-    uniforms: {
-      map: { value: texture },
-      outlineColor: { value: new THREE.Color(0x222222) },
-      outlineWidth: { value: 0.08 }
-    },
-    vertexShader: `
-      varying vec2 vUv;
-      void main() {
-        vUv = uv;
-        vec4 mvPosition = modelViewMatrix * vec4(0.0, 0.0, 0.0, 1.0);
-        vec2 scale = vec2(
-          length(modelMatrix[0].xyz),
-          length(modelMatrix[1].xyz)
-        );
-        mvPosition.xy += position.xy * scale;
-        gl_Position = projectionMatrix * mvPosition;
-      }
-    `,
-    fragmentShader: `
-      uniform sampler2D map;
-      uniform vec3 outlineColor;
-      uniform float outlineWidth;
-      varying vec2 vUv;
-
-      void main() {
-        vec4 texColor = texture2D(map, vUv);
-        float alpha = texColor.a;
-
-        // Sample neighbors to detect edges for outline
-        float outlineAlpha = 0.0;
-        float step = outlineWidth;
-        for (float x = -1.0; x <= 1.0; x += 1.0) {
-          for (float y = -1.0; y <= 1.0; y += 1.0) {
-            if (x == 0.0 && y == 0.0) continue;
-            vec2 offset = vec2(x, y) * step;
-            float neighborAlpha = texture2D(map, vUv + offset).a;
-            outlineAlpha = max(outlineAlpha, neighborAlpha);
-          }
-        }
-
-        // Dark outline where neighbors have alpha but current pixel doesn't
-        float outline = clamp(outlineAlpha - alpha, 0.0, 1.0);
-        vec3 finalColor = mix(texColor.rgb, outlineColor, outline * 0.9);
-        float finalAlpha = max(alpha, outline * 0.85);
-
-        gl_FragColor = vec4(finalColor, finalAlpha);
-      }
-    `,
-    transparent: true,
-    depthTest: false,
-    depthWrite: false,
-    toneMapped: false
-  });
-}
 
 /**
  * LightIconManager - Synchronizes Foundry VTT ambient lights to THREE.js sprites
@@ -409,14 +346,10 @@ export class LightIconManager {
     let ring = this._findRadiusRing(lightId);
 
     if (!ring) {
-      const material = new THREE.LineBasicMaterial({
+      const material = ControlGizmoFactory.createRadiusBorderMaterial({
         color: 0xffffff,
-        transparent: true,
-        opacity: 0.5,
-        depthTest: false,
-        depthWrite: false
+        opacity: 0.5
       });
-      material.toneMapped = false;
 
       ring = new THREE.LineLoop(geometry, material);
       ring.userData = { type: 'ambientLightRadius', lightId };
@@ -514,8 +447,8 @@ export class LightIconManager {
       } catch (_) {
       }
 
-      // Use custom outlined material for visibility on bright backgrounds
-      const material = createOutlinedSpriteMaterial(texture);
+      // Use shared outlined material for visibility on bright backgrounds.
+      const material = ControlGizmoFactory.createOutlinedSpriteMaterial(texture);
       
       // Create a mesh that acts like a sprite (billboard)
       const geometry = new THREE.PlaneGeometry(1, 1);

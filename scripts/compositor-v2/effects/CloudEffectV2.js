@@ -4,7 +4,7 @@
  * Outputs:
  *   - _shadowRT  : Shadow factor (1.0=lit, 0.0=shadowed). Fed into LightingEffectV2
  *                  as a multiplier so cloud shadow darkens scene illumination.
- *   - _cloudTopRT: RGBA cloud-top overlay, blitted after lighting, before sky-color.
+ *   - _cloudTopRT: RGBA cloud-top texture source for elevated world-space cloud planes.
  *
  * ## Multi-Floor Shadow Occlusion
  *
@@ -25,8 +25,8 @@
  *
  *   Bus → sceneRT
  *     → Lighting(cloudShadowRT) → postA
- *     → CloudTops blit (alpha-over) → postA
  *     → SkyColor → ColorCorrection → Water → Bloom → …
+ *     → Elevated Cloud Planes (world-space, stacked near weather emitter height)
  *
  * @module compositor-v2/effects/CloudEffectV2
  */
@@ -92,6 +92,23 @@ export class CloudEffectV2 {
       cloudTopDepthParallaxStrength: 0.6,
       cloudTopFadeStart: 0.24,
       cloudTopFadeEnd: 0.39,
+      cloudLayerCount: 3,
+      cloudLayerCoverageScale: 3.0,
+      cloudLayerDepthScaleStep: 0.18,
+      cloudLayerHeightFromGround: 4300,
+      cloudLayerZSpacing: 220,
+      cloudLayerBaseOffsetFromEmitter: -2200,
+      cloudLayerEdgeSoftness: 0.2,
+      cloudLayerOpacityBase: 0.75,
+      cloudLayerOpacityFalloff: 0.35,
+      cloudLayerUvScaleStep: 0.25,
+      cloudLayerDriftStrength: 0.02,
+      cloudLayerDriftDepthBoost: 0.015,
+      cloudLayerSliceStrength: 0.7,
+      cloudLayerSliceScale: 2.2,
+      cloudLayerSliceContrast: 1.3,
+      cloudLayerSliceSpeed: 0.015,
+      cloudLayerSliceSpacing: 2.0,
 
       // Wind
       windInfluence: 1.33,
@@ -129,17 +146,19 @@ export class CloudEffectV2 {
     this._densityMat      = null;
     this._shadowMat       = null;
     this._cloudTopMat     = null;
-    this._cloudTopBlitMat = null;
+    this._cloudLayerMatTemplate = null;
 
     // ── Scenes / cameras / quads ──────────────────────────────────────
     this._quadScene = null;
     this._quadCam   = null;
     /** @type {THREE.Mesh|null} Reused fullscreen quad; material swapped per pass */
     this._quad      = null;
-    /** @type {THREE.Scene|null} Dedicated blit scene for cloud-top alpha-over pass */
-    this._blitScene = null;
-    this._blitCam   = null;
-    this._blitQuad  = null;
+    /** @type {THREE.Scene|null} Elevated cloud layer scene rendered with main camera */
+    this._cloudLayerScene = null;
+    /** @type {Array<THREE.Mesh>} */
+    this._cloudLayerMeshes = [];
+    /** @type {number} */
+    this._cloudLayerCount = 4;
 
     // ── External references (set by FloorCompositor) ──────────────────
     this._renderer    = null;
@@ -250,24 +269,14 @@ export class CloudEffectV2 {
     this._quad.frustumCulled = false;
     this._quadScene.add(this._quad);
 
-    // Cloud-top blit scene (NormalBlending alpha-over onto the post RT)
-    this._cloudTopBlitMat = new THREE.ShaderMaterial({
-      uniforms: { tCloudTop: { value: null } },
-      vertexShader:   /* glsl */`varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position.xy,0.,1.); }`,
-      fragmentShader: /* glsl */`uniform sampler2D tCloudTop; varying vec2 vUv; void main(){ gl_FragColor=texture2D(tCloudTop,vUv); }`,
-      transparent: true, depthWrite: false, depthTest: false,
-      blending: THREE.NormalBlending,
-    });
-    this._cloudTopBlitMat.toneMapped = false;
-    this._blitScene = new THREE.Scene();
-    this._blitCam   = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
-    this._blitQuad  = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), this._cloudTopBlitMat);
-    this._blitQuad.frustumCulled = false;
-    this._blitScene.add(this._blitQuad);
+    // Elevated cloud planes (world-space), rendered after the post chain.
+    this._cloudLayerScene = new THREE.Scene();
 
     this._createDensityMaterial();
     this._createShadowMaterial();
     this._createCloudTopMaterial();
+    this._createCloudLayerMaterialTemplate();
+    this._ensureCloudLayerPlanes();
 
     this._ensureFallbackWhite();
 
@@ -536,8 +545,9 @@ export class CloudEffectV2 {
 
       // Fade outdoors mask when zoomed out in aboveEverything mode
       if (p.cloudTopMode === 'aboveEverything') {
-        const zf = 1 - this._smoothstep(p.cloudTopFadeStart, p.cloudTopFadeEnd, zoom);
-        tu.uOutdoorsMaskStrength.value = 1 - zf;
+        // Elevated world-space clouds should not be hard-clipped by outdoors masks.
+        // Keep masking behavior only for explicit outdoorsOnly mode.
+        tu.uOutdoorsMaskStrength.value = 0;
       } else {
         tu.uOutdoorsMaskStrength.value = 1;
       }
@@ -568,6 +578,8 @@ export class CloudEffectV2 {
         canvas?.dimensions?.height ?? sceneH
       );
     }
+
+    this._updateCloudLayerUniforms(vMinX, vMinY, vMaxX, vMaxY);
   }
 
   // ── Render ─────────────────────────────────────────────────────────────────
@@ -667,7 +679,9 @@ export class CloudEffectV2 {
 
       // ── Pass 3: Parallaxed multi-layer density for cloud tops ─────────
       if (this._topDensityRT) {
-        du.uClipToScene.value   = 1;
+        // Keep cloud-top density un-clipped so elevated cloud layers can extend
+        // beyond the scene rect with soft edge falloff.
+        du.uClipToScene.value   = 0;
         // Cloud-top parallax only. Shadow passes above keep uParallaxScale=0
         // so shadows remain anchored in world space.
         const topParallaxFactor = Math.max(0, Number(this.params.cloudTopParallaxFactor) || 0);
@@ -710,25 +724,29 @@ export class CloudEffectV2 {
   }
 
   /**
-   * Blit cloud tops (alpha-over) onto an existing render target.
-   * Call this after LightingEffectV2 has written its output.
+   * Render elevated cloud planes into the current post target.
+   * Call this after the post chain so clouds sit above grade/water/bloom.
    * @param {THREE.WebGLRenderer} renderer
    * @param {THREE.WebGLRenderTarget} outputRT
    */
   blitCloudTops(renderer, outputRT) {
-    if (!this._initialized || !this._cloudTopRT || !this._cloudTopBlitMat) return;
+    if (!this._initialized || !this._cloudTopRT || !this._cloudLayerScene || !this._mainCamera) return;
     const ws = this._getWeatherState();
     if (!ws.weatherEnabled || this._isCoverZero(ws.cloudCover)) return;
     if (this.params.cloudTopOpacity <= 0) return;
 
     const prevTarget = renderer.getRenderTarget();
     const prevAutoClear = renderer.autoClear;
+    const prevLayerMask = this._mainCamera.layers.mask;
     try {
-      this._cloudTopBlitMat.uniforms.tCloudTop.value = this._cloudTopRT.texture;
+      this._syncCloudLayerTexture();
+      this._updateCloudLayerTransforms();
       renderer.setRenderTarget(outputRT);
-      renderer.autoClear = false; // alpha-over without clearing
-      renderer.render(this._blitScene, this._blitCam);
+      renderer.autoClear = false;
+      this._mainCamera.layers.enable(0);
+      renderer.render(this._cloudLayerScene, this._mainCamera);
     } finally {
+      this._mainCamera.layers.mask = prevLayerMask;
       renderer.autoClear = prevAutoClear;
       renderer.setRenderTarget(prevTarget);
     }
@@ -880,6 +898,9 @@ export class CloudEffectV2 {
         { name: 'domain-warping',    label: 'Domain Warping (Wisps)', type: 'inline', separator: false, parameters: ['domainWarpEnabled', 'domainWarpStrength', 'domainWarpScale', 'domainWarpSpeed', 'domainWarpTimeOffsetY'] },
         { name: 'shadow-settings',   label: 'Cloud Shadows',          type: 'inline', separator: true,  parameters: ['shadowOpacity', 'shadowSoftness', 'shadowOffsetScale', 'minShadowBrightness'] },
         { name: 'cloud-tops',        label: 'Cloud Tops (Zoom)',      type: 'inline', separator: true,  parameters: ['cloudTopMode', 'cloudTopOpacity', 'cloudTopParallaxFactor', 'cloudTopDepthParallaxStrength', 'cloudTopFadeStart', 'cloudTopFadeEnd', 'cloudBrightness'] },
+        { name: 'cloud-layer-space', label: 'Cloud Layer Space',      type: 'inline', separator: false, parameters: ['cloudLayerCount', 'cloudLayerCoverageScale', 'cloudLayerDepthScaleStep', 'cloudLayerZSpacing', 'cloudLayerBaseOffsetFromEmitter', 'cloudLayerEdgeSoftness'] },
+        { name: 'cloud-layer-look',  label: 'Cloud Layer Look',       type: 'inline', separator: false, parameters: ['cloudLayerOpacityBase', 'cloudLayerOpacityFalloff', 'cloudLayerUvScaleStep', 'cloudLayerDriftStrength', 'cloudLayerDriftDepthBoost'] },
+        { name: 'cloud-layer-slices',label: 'Cloud Layer 3D Slices',  type: 'inline', separator: false, parameters: ['cloudLayerSliceStrength', 'cloudLayerSliceScale', 'cloudLayerSliceContrast', 'cloudLayerSliceSpeed', 'cloudLayerSliceSpacing'] },
         { name: 'cloud-top-shading', label: 'Cloud Top Shading',      type: 'inline', separator: false, parameters: ['cloudTopShadingEnabled', 'cloudTopShadingStrength', 'cloudTopNormalStrength', 'cloudTopAOIntensity', 'cloudTopEdgeHighlight'] },
         { name: 'cloud-top-peaks',   label: 'Cloud Top Peaks',        type: 'inline', separator: false, parameters: ['cloudTopPeakDetailEnabled', 'cloudTopPeakDetailStrength', 'cloudTopPeakDetailScale', 'cloudTopPeakDetailSpeed', 'cloudTopPeakDetailStart', 'cloudTopPeakDetailEnd'] },
         { name: 'cloud-top-composite', label: 'Cloud Top Composite',  type: 'inline', separator: false, parameters: ['cloudTopSoftKnee'] },
@@ -911,6 +932,23 @@ export class CloudEffectV2 {
         cloudTopDepthParallaxStrength:{ type: 'slider',label: 'Depth Parallax', min: 0.0, max: 2.0, step: 0.05, default: 0.6 },
         cloudTopFadeStart:    { type: 'slider', label: 'Fade Start Zoom',   min: 0.1,  max: 1.0,  step: 0.01,  default: 0.24  },
         cloudTopFadeEnd:      { type: 'slider', label: 'Fade End Zoom',     min: 0.1,  max: 1.0,  step: 0.01,  default: 0.39  },
+        cloudLayerCount:      { type: 'slider', label: 'Layer Count (Fixed)', min: 3,   max: 3,    step: 1,     default: 3     },
+        cloudLayerCoverageScale:{ type: 'slider', label: 'Coverage Scale',   min: 1.0,  max: 8.0,  step: 0.05,  default: 3.0   },
+        cloudLayerDepthScaleStep:{ type: 'slider', label: 'Depth Scale Step',min: 0.0,  max: 0.6,  step: 0.01,  default: 0.18  },
+        cloudLayerHeightFromGround:{ type: 'slider', label: 'Cloud Height (From Ground)', min: 200.0, max: 9000.0, step: 25.0, default: 4300.0 },
+        cloudLayerZSpacing:   { type: 'slider', label: 'Layer Z Spacing',   min: 20.0, max: 1200.0,step: 5.0,  default: 220.0 },
+        cloudLayerBaseOffsetFromEmitter:{ type: 'slider', label: 'Legacy Emitter Offset', min: -5000.0, max: 2000.0, step: 10.0, default: -2200.0 },
+        cloudLayerEdgeSoftness:{ type: 'slider', label: 'Edge Softness',     min: 0.01, max: 0.5,  step: 0.01,  default: 0.2   },
+        cloudLayerOpacityBase:{ type: 'slider', label: 'Base Layer Opacity', min: 0.1,  max: 1.5,  step: 0.01,  default: 0.75  },
+        cloudLayerOpacityFalloff:{ type: 'slider', label: 'Opacity Falloff', min: 0.0,  max: 1.0,  step: 0.01,  default: 0.35  },
+        cloudLayerUvScaleStep:{ type: 'slider', label: 'UV Scale Step',      min: 0.0,  max: 1.0,  step: 0.01,  default: 0.25  },
+        cloudLayerDriftStrength:{ type: 'slider', label: 'Drift Strength',   min: 0.0,  max: 0.2,  step: 0.001, default: 0.02  },
+        cloudLayerDriftDepthBoost:{ type: 'slider', label: 'Depth Drift Boost', min: 0.0, max: 0.2, step: 0.001, default: 0.015 },
+        cloudLayerSliceStrength:{ type: 'slider', label: '3D Slice Strength', min: 0.0, max: 1.0,  step: 0.01,  default: 0.7   },
+        cloudLayerSliceScale: { type: 'slider', label: '3D Slice Scale',     min: 0.2,  max: 8.0,  step: 0.05,  default: 2.2   },
+        cloudLayerSliceContrast:{ type: 'slider', label: '3D Slice Contrast',min: 0.5,  max: 3.0,  step: 0.01,  default: 1.3   },
+        cloudLayerSliceSpeed: { type: 'slider', label: '3D Slice Speed',     min: 0.0,  max: 0.2,  step: 0.001, default: 0.015 },
+        cloudLayerSliceSpacing:{ type: 'slider', label: '3D Slice Spacing',  min: 0.0,  max: 8.0,  step: 0.05,  default: 2.0   },
         cloudBrightness:      { type: 'slider', label: 'Cloud Brightness',  min: 0.8,  max: 1.5,  step: 0.01,  default: 1.01  },
         cloudTopShadingEnabled:    { type: 'boolean', label: 'Shading Enabled',   default: true  },
         cloudTopShadingStrength:   { type: 'slider',  label: 'Shading Strength',  min: 0.0, max: 1.0, step: 0.01, default: 0.99 },
@@ -1565,6 +1603,244 @@ export class CloudEffectV2 {
     this._cloudTopMat.toneMapped = false;
   }
 
+  /** @private */
+  _createCloudLayerMaterialTemplate() {
+    const THREE = window.THREE;
+    this._cloudLayerMatTemplate = new THREE.ShaderMaterial({
+      uniforms: {
+        tCloudTop:       { value: null },
+        uViewBoundsMin:  { value: new THREE.Vector2(0, 0) },
+        uViewBoundsMax:  { value: new THREE.Vector2(4000, 3000) },
+        uUvOffset:       { value: new THREE.Vector2(0, 0) },
+        uUvScale:        { value: 1 },
+        uOpacityMul:     { value: 1 },
+        uEdgeSoftness:   { value: 0.2 },
+        uTime:           { value: 0 },
+        uLayerSlice:     { value: 0 },
+        uSliceStrength:  { value: 0.45 },
+        uSliceScale:     { value: 2.2 },
+        uSliceContrast:  { value: 1.3 },
+        uSliceSpeed:     { value: 0.015 },
+      },
+      vertexShader: /* glsl */`
+        varying vec2 vWorldXY;
+        void main() {
+          vec4 worldPos = modelMatrix * vec4(position, 1.0);
+          vWorldXY = worldPos.xy;
+          gl_Position = projectionMatrix * viewMatrix * worldPos;
+        }
+      `,
+      fragmentShader: /* glsl */`
+        uniform sampler2D tCloudTop;
+        uniform vec2 uViewBoundsMin;
+        uniform vec2 uViewBoundsMax;
+        uniform vec2 uUvOffset;
+        uniform float uUvScale;
+        uniform float uOpacityMul;
+        uniform float uEdgeSoftness;
+        uniform float uTime;
+        uniform float uLayerSlice;
+        uniform float uSliceStrength;
+        uniform float uSliceScale;
+        uniform float uSliceContrast;
+        uniform float uSliceSpeed;
+        varying vec2 vWorldXY;
+
+        float hash13(vec3 p) {
+          return fract(sin(dot(p, vec3(127.1, 311.7, 191.999))) * 43758.5453123);
+        }
+        float noise3D(vec3 p) {
+          vec3 i = floor(p);
+          vec3 f = fract(p);
+          vec3 u = f * f * (3.0 - 2.0 * f);
+          float n000 = hash13(i + vec3(0.0, 0.0, 0.0));
+          float n100 = hash13(i + vec3(1.0, 0.0, 0.0));
+          float n010 = hash13(i + vec3(0.0, 1.0, 0.0));
+          float n110 = hash13(i + vec3(1.0, 1.0, 0.0));
+          float n001 = hash13(i + vec3(0.0, 0.0, 1.0));
+          float n101 = hash13(i + vec3(1.0, 0.0, 1.0));
+          float n011 = hash13(i + vec3(0.0, 1.0, 1.0));
+          float n111 = hash13(i + vec3(1.0, 1.0, 1.0));
+          float nx00 = mix(n000, n100, u.x);
+          float nx10 = mix(n010, n110, u.x);
+          float nx01 = mix(n001, n101, u.x);
+          float nx11 = mix(n011, n111, u.x);
+          float nxy0 = mix(nx00, nx10, u.y);
+          float nxy1 = mix(nx01, nx11, u.y);
+          return mix(nxy0, nxy1, u.z);
+        }
+        float fbm3D(vec3 p) {
+          float v = 0.0;
+          float a = 0.5;
+          for (int i = 0; i < 3; i++) {
+            v += a * noise3D(p);
+            p *= 2.03;
+            a *= 0.5;
+          }
+          return v;
+        }
+
+        void main() {
+          vec2 span = max(uViewBoundsMax - uViewBoundsMin, vec2(1e-5));
+          vec2 uv = (vWorldXY - uViewBoundsMin) / span;
+          uv = ((uv - 0.5) / max(uUvScale, 1e-3)) + 0.5 + uUvOffset;
+          vec2 uvSample = clamp(uv, vec2(0.0), vec2(1.0));
+          vec4 c = texture2D(tCloudTop, uvSample);
+          float edgeDist = min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y));
+          float edgeSoft = max(uEdgeSoftness, 1e-4);
+          float edgeMask = smoothstep(-edgeSoft, edgeSoft, edgeDist);
+
+          vec2 world01 = (vWorldXY - uViewBoundsMin) / span;
+          vec2 sliceXY = world01 + vec2(uLayerSlice * 0.131, uLayerSlice * 0.073);
+          float sliceZ = (uLayerSlice * 6.0) + (uTime * uSliceSpeed * 2.0);
+          vec3 slicePos = vec3(sliceXY * uSliceScale, sliceZ);
+          float sliceN = fbm3D(slicePos);
+          float sliceMask = clamp((sliceN - 0.5) * uSliceContrast + 0.5, 0.0, 1.0);
+          float s = clamp(uSliceStrength, 0.0, 1.0);
+          float shapedSlice = mix(1.0, pow(sliceMask, 2.2 - (2.0 * s)), s);
+          float densitySlice = mix(1.0, (sliceMask * 0.75 + 0.25), s);
+
+          c.rgb *= densitySlice;
+          c.a *= (uOpacityMul * edgeMask * shapedSlice);
+          if (c.a < 0.001) discard;
+          gl_FragColor = c;
+        }
+      `,
+      transparent: true,
+      depthWrite: false,
+      depthTest: false,
+      blending: THREE.NormalBlending,
+    });
+    this._cloudLayerMatTemplate.toneMapped = false;
+  }
+
+  /** @private */
+  _ensureCloudLayerPlanes() {
+    const THREE = window.THREE;
+    if (!THREE || !this._cloudLayerScene || !this._cloudLayerMatTemplate) return;
+
+    const desiredCount = 3;
+    this._cloudLayerCount = desiredCount;
+
+    while (this._cloudLayerMeshes.length < desiredCount) {
+      const layerIndex = this._cloudLayerMeshes.length;
+      const mat = this._cloudLayerMatTemplate.clone();
+      mat.uniforms = THREE.UniformsUtils.clone(this._cloudLayerMatTemplate.uniforms);
+      const mesh = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), mat);
+      mesh.frustumCulled = false;
+      mesh.renderOrder = 22000 + layerIndex;
+      this._cloudLayerScene.add(mesh);
+      this._cloudLayerMeshes.push(mesh);
+    }
+
+    while (this._cloudLayerMeshes.length > desiredCount) {
+      const mesh = this._cloudLayerMeshes.pop();
+      if (!mesh) continue;
+      try { this._cloudLayerScene.remove(mesh); } catch (_) {}
+      try { mesh.geometry?.dispose?.(); } catch (_) {}
+      try { mesh.material?.dispose?.(); } catch (_) {}
+    }
+  }
+
+  /** @private */
+  _syncCloudLayerTexture() {
+    const tex = this._cloudTopRT?.texture ?? null;
+    for (const mesh of this._cloudLayerMeshes) {
+      if (!mesh?.material?.uniforms?.tCloudTop) continue;
+      mesh.material.uniforms.tCloudTop.value = tex;
+    }
+  }
+
+  /** @private */
+  _updateCloudLayerTransforms() {
+    const cam = this._mainCamera;
+    if (!cam || !this._cloudLayerMeshes.length) return;
+    const d = canvas?.dimensions;
+    const rect = d?.sceneRect;
+    const sceneX = rect?.x ?? d?.sceneX ?? 0;
+    const sceneY = rect?.y ?? d?.sceneY ?? 0;
+    const sceneW = rect?.width ?? d?.sceneWidth ?? d?.width ?? 4000;
+    const sceneH = rect?.height ?? d?.sceneHeight ?? d?.height ?? 3000;
+    const worldH = d?.height ?? (sceneY + sceneH);
+    const centerX = sceneX + sceneW * 0.5;
+    const centerY = worldH - (sceneY + sceneH * 0.5);
+
+    const sceneComposer = window.MapShine?.sceneComposer;
+    const groundZ = Number(sceneComposer?.groundZ) || 1000;
+    const emitterZ = Number(sceneComposer?.weatherEmitterZ) || (groundZ + 4300);
+    const camZ = Number(cam.position?.z) || (groundZ + 1000);
+    const heightFromGround = Number(this.params.cloudLayerHeightFromGround);
+    const baseOffsetFromEmitter = Number(this.params.cloudLayerBaseOffsetFromEmitter);
+    const fallbackEmitterOffset = Number.isFinite(baseOffsetFromEmitter) ? baseOffsetFromEmitter : -2200;
+    const targetBaseZ = Number.isFinite(heightFromGround)
+      ? (groundZ + Math.max(50, heightFromGround))
+      : (emitterZ + fallbackEmitterOffset);
+    const baseZ = Math.min(targetBaseZ, camZ - 120);
+    const layerSpacing = Math.max(20, Number(this.params.cloudLayerZSpacing) || 220);
+    const coverageScale = Math.max(1, Number(this.params.cloudLayerCoverageScale) || 3.0);
+
+    for (let i = 0; i < this._cloudLayerMeshes.length; i++) {
+      const mesh = this._cloudLayerMeshes[i];
+      if (!mesh) continue;
+      const layerOffsetIndex = i - 1;
+      const depthScale = coverageScale;
+      mesh.position.set(centerX, centerY, baseZ - (layerOffsetIndex * layerSpacing));
+      mesh.scale.set(sceneW * depthScale, sceneH * depthScale, 1);
+      mesh.visible = this.params.enabled && this.params.cloudTopOpacity > 0;
+    }
+  }
+
+  /** @private */
+  _updateCloudLayerUniforms(vMinX, vMinY, vMaxX, vMaxY) {
+    this._ensureCloudLayerPlanes();
+    if (!this._cloudLayerMeshes.length) return;
+    const d = canvas?.dimensions;
+    const rect = d?.sceneRect;
+    const sceneX = rect?.x ?? d?.sceneX ?? 0;
+    const sceneY = rect?.y ?? d?.sceneY ?? 0;
+    const sceneW = rect?.width ?? d?.sceneWidth ?? d?.width ?? 4000;
+    const sceneH = rect?.height ?? d?.sceneHeight ?? d?.height ?? 3000;
+    const worldH = d?.height ?? (sceneY + sceneH);
+    const centerX = sceneX + sceneW * 0.5;
+    const centerY = worldH - (sceneY + sceneH * 0.5);
+
+    const opacity = Math.max(0, Number(this.params.cloudTopOpacity) || 0);
+    const coverageScale = Math.max(1, Number(this.params.cloudLayerCoverageScale) || 3.0);
+    const uvScaleStep = Math.max(0, Number(this.params.cloudLayerUvScaleStep) || 0.25);
+    const driftStrength = Math.max(0, Number(this.params.cloudLayerDriftStrength) || 0.02);
+    const opacityBase = Math.max(0, Number(this.params.cloudLayerOpacityBase) || 0.75);
+    const edgeSoftness = Math.max(0.01, Number(this.params.cloudLayerEdgeSoftness) || 0.2);
+    const sliceStrength = Math.max(0, Math.min(1, Number(this.params.cloudLayerSliceStrength) || 0.7));
+    const sliceScale = Math.max(0.1, Number(this.params.cloudLayerSliceScale) || 2.2);
+    const sliceContrast = Math.max(0.1, Number(this.params.cloudLayerSliceContrast) || 1.3);
+    const sliceSpeed = Math.max(0, Number(this.params.cloudLayerSliceSpeed) || 0.015);
+    const sliceSpacing = Math.max(0, Number(this.params.cloudLayerSliceSpacing) || 2.0);
+    for (let i = 0; i < this._cloudLayerMeshes.length; i++) {
+      const mesh = this._cloudLayerMeshes[i];
+      const u = mesh?.material?.uniforms;
+      if (!u) continue;
+      const layerOffsetIndex = i - 1;
+      const layerScale = coverageScale;
+      const halfW = (sceneW * layerScale) * 0.5;
+      const halfH = (sceneH * layerScale) * 0.5;
+      const wind = this._windOffset;
+      // Use layer world bounds (not camera view bounds) so cloud coverage and
+      // edge gradients remain stable across pans and scene-edge traversal.
+      u.uViewBoundsMin.value.set(centerX - halfW, centerY - halfH);
+      u.uViewBoundsMax.value.set(centerX + halfW, centerY + halfH);
+      u.uUvScale.value = 1.0 + uvScaleStep;
+      u.uUvOffset.value.set((wind?.x ?? 0) * driftStrength, (wind?.y ?? 0) * driftStrength);
+      u.uOpacityMul.value = opacity * opacityBase;
+      u.uEdgeSoftness.value = edgeSoftness;
+      u.uTime.value = this._lastElapsed;
+      u.uLayerSlice.value = layerOffsetIndex * sliceSpacing;
+      u.uSliceStrength.value = sliceStrength;
+      u.uSliceScale.value = sliceScale;
+      u.uSliceContrast.value = sliceContrast;
+      u.uSliceSpeed.value = sliceSpeed;
+    }
+  }
+
   // ── Dispose ────────────────────────────────────────────────────────────────
 
   dispose() {
@@ -1574,16 +1850,21 @@ export class CloudEffectV2 {
     ];
     for (const k of rts) { try { this[k]?.dispose(); } catch (_) {} this[k] = null; }
 
-    const mats = ['_densityMat', '_shadowMat', '_cloudTopMat', '_cloudTopBlitMat'];
+    const mats = ['_densityMat', '_shadowMat', '_cloudTopMat', '_cloudLayerMatTemplate'];
     for (const k of mats) { try { this[k]?.dispose(); } catch (_) {} this[k] = null; }
 
     try { this._fallbackWhite?.dispose(); } catch (_) {}
     this._fallbackWhite = null;
 
     try { this._quad?.geometry?.dispose(); } catch (_) {}
-    try { this._blitQuad?.geometry?.dispose(); } catch (_) {}
-    this._quad = null; this._blitQuad = null;
-    this._quadScene = null; this._blitScene = null;
+    for (const mesh of this._cloudLayerMeshes) {
+      try { mesh?.geometry?.dispose?.(); } catch (_) {}
+      try { mesh?.material?.dispose?.(); } catch (_) {}
+    }
+    this._cloudLayerMeshes = [];
+    this._quad = null;
+    this._quadScene = null;
+    this._cloudLayerScene = null;
 
     this._initialized = false;
     log.info('CloudEffectV2 disposed');

@@ -228,6 +228,20 @@ export class PrismEffectV2 {
     const roofTex = window.MapShine?.effectComposer?._floorCompositorV2?._overheadShadowEffect?.roofAlphaTexture ?? null;
     u.uRoofAlphaMap.value = roofTex;
     u.uHasRoofAlphaMap.value = roofTex ? 1.0 : 0.0;
+
+    // Screen-space token mask: suppress prism overlay where token silhouettes exist.
+    try {
+      const mm = window.MapShine?.maskManager;
+      let tokenMaskTex = mm?.getTexture?.('tokenMask.screen') ?? null;
+      if (!tokenMaskTex) {
+        tokenMaskTex = window.MapShine?.lightingEffect?.tokenMaskTarget?.texture ?? null;
+      }
+      u.uTokenMask.value = tokenMaskTex;
+      u.uHasTokenMask.value = tokenMaskTex ? 1.0 : 0.0;
+    } catch (_) {
+      u.uTokenMask.value = null;
+      u.uHasTokenMask.value = 0.0;
+    }
   }
 
   _buildSharedUniforms() {
@@ -238,6 +252,8 @@ export class PrismEffectV2 {
       uBaseMap: { value: null },
       uRoofAlphaMap: { value: null },
       uHasRoofAlphaMap: { value: 0.0 },
+      uTokenMask: { value: null },
+      uHasTokenMask: { value: 0.0 },
       uTime: { value: 0.0 },
       uResolution: { value: new THREE.Vector2(1, 1) },
       uIntensity: { value: this.params.intensity },
@@ -345,7 +361,7 @@ export class PrismEffectV2 {
       const tileMid = (tileBottom + tileTop) / 2;
       for (let i = 0; i < floors.length; i++) {
         const f = floors[i];
-        if (tileMid >= f.elevationMin && tileMid <= f.elevationMax) return i;
+        if (tileMid >= f.elevationMin && tileMid < f.elevationMax) return i;
       }
       for (let i = 0; i < floors.length; i++) {
         const f = floors[i];
@@ -387,6 +403,8 @@ export class PrismEffectV2 {
       uniform sampler2D uPrismMask;
       uniform sampler2D uRoofAlphaMap;
       uniform float uHasRoofAlphaMap;
+      uniform sampler2D uTokenMask;
+      uniform float uHasTokenMask;
       uniform float uTime;
       uniform vec2 uResolution;
 
@@ -476,7 +494,16 @@ export class PrismEffectV2 {
 
         refractionColor += vec3(glint * uGlintStrength);
 
-        gl_FragColor = vec4(refractionColor, mask * uOpacity);
+        float finalAlpha = mask * uOpacity;
+        if (uHasTokenMask > 0.5) {
+          vec2 tokenUv = gl_FragCoord.xy / max(uResolution.xy, vec2(1.0));
+          float tokenMask01 = smoothstep(0.1, 0.9, texture2D(uTokenMask, tokenUv).a);
+          float keep = 1.0 - tokenMask01;
+          refractionColor *= keep;
+          finalAlpha *= keep;
+        }
+
+        gl_FragColor = vec4(refractionColor, finalAlpha);
       }
     `;
   }

@@ -129,6 +129,30 @@ export class ControlsIntegration {
       || sceneControlLayer === 'wall';
   }
 
+  _isSoundsContextActive() {
+    if (canvas?.sounds?.active) return true;
+    const { optionsName, name, ctor, sceneControlName, sceneControlLayer } = this._getActiveLayerMeta();
+    return optionsName === 'sounds'
+      || optionsName === 'sound'
+      || name === 'sounds'
+      || name === 'sound'
+      || ctor === 'soundslayer'
+      || sceneControlName === 'sounds'
+      || sceneControlName === 'sound'
+      || sceneControlLayer === 'sounds'
+      || sceneControlLayer === 'sound';
+  }
+
+  _isTilesContextActive() {
+    if (canvas?.tiles?.active) return true;
+    const { optionsName, name, ctor, sceneControlName, sceneControlLayer } = this._getActiveLayerMeta();
+    return optionsName === 'tiles'
+      || name === 'tiles'
+      || ctor === 'tileslayer'
+      || sceneControlName === 'tiles'
+      || sceneControlLayer === 'tiles';
+  }
+
   _isPixiEditorOverlayNeeded() {
     // Walls, lighting, and tokens are fully Three.js-native now.
     // Only return true for layers we haven't replaced yet (drawings, regions,
@@ -306,6 +330,12 @@ export class ControlsIntegration {
       if (enhancedLightIconManager?.setVisibility) {
         enhancedLightIconManager.setVisibility(showLighting);
       }
+
+      const soundIconManager = window.MapShine?.soundIconManager;
+      if (soundIconManager?.setVisibility) {
+        const showSounds = this._isSoundsContextActive() && !isMapMakerMode;
+        soundIconManager.setVisibility(showSounds);
+      }
     } catch (_) {
       // Ignore - visibility is best-effort
     }
@@ -400,6 +430,7 @@ export class ControlsIntegration {
       // Initial state sync
       this.layerVisibility.update();
       this.inputRouter.autoUpdate();
+      this._updateTilesVisualState();
 
       // Keep global diagnostics/runtime lookups in sync even when ControlsIntegration
       // initializes after initial manager exposure.
@@ -660,6 +691,76 @@ export class ControlsIntegration {
     // Keep Foundry's door-control container active in gameplay and refresh each
     // door icon visibility using Foundry's own visibility rules.
     this._refreshFoundryDoorControlVisibility();
+  }
+
+  /**
+   * Keep Foundry's native tile editor interactions available when the Tiles
+   * layer is active while still hiding PIXI tile visuals beneath Three.
+   * Also applies Levels-aware floor filtering so off-floor tiles do not steal
+   * selection/drag hit-tests.
+   * @private
+   */
+  _updateTilesVisualState() {
+    if (!canvas?.ready || !canvas.tiles) return;
+
+    const isTilesActive = this._isTilesContextActive();
+    if (!isTilesActive) {
+      canvas.tiles.visible = false;
+      return;
+    }
+
+    // Foundry v12 tile interaction depends on primary group visibility.
+    // Keep it enabled while tile tools are active.
+    if (canvas.primary) {
+      canvas.primary.visible = true;
+    }
+
+    // Foundry native tile workflows (select/drag/double-click sheet/delete) rely
+    // on TilesLayer being the active controllable layer. During rapid control
+    // switches we can end up in a stale activeLayer state, so re-activate here.
+    try {
+      if (canvas.tiles && canvas.activeLayer !== canvas.tiles && typeof canvas.tiles.activate === 'function') {
+        canvas.tiles.activate();
+      }
+    } catch (_) {
+      // Best effort only
+    }
+
+    canvas.tiles.visible = true;
+    canvas.tiles.renderable = true;
+
+    // Defensive: if another system races and flips ownership back to Three,
+    // enforce PIXI interactivity while tile tools are active.
+    const pixiCanvas = canvas?.app?.view;
+    if (pixiCanvas) {
+      pixiCanvas.style.pointerEvents = 'auto';
+      pixiCanvas.style.display = '';
+      pixiCanvas.style.visibility = 'visible';
+    }
+    const board = document.getElementById('board');
+    if (board && board.tagName === 'CANVAS') {
+      board.style.pointerEvents = 'auto';
+      board.style.display = '';
+      board.style.visibility = 'visible';
+    }
+    const threeCanvas = document.getElementById('map-shine-canvas');
+    if (threeCanvas) {
+      threeCanvas.style.pointerEvents = 'none';
+    }
+
+    const ALPHA = 0.01;
+    for (const tile of canvas.tiles.placeables || []) {
+      try {
+        // Keep every native tile placeable interactive. Foundry itself handles
+        // controllableObjects filtering for foreground/background workflows.
+        tile.visible = true;
+        tile.renderable = true;
+
+        // Hide native visuals but keep hit-testing active.
+        if (tile.mesh) tile.mesh.alpha = ALPHA;
+      } catch (_) {
+      }
+    }
   }
 
   /**
@@ -931,6 +1032,7 @@ export class ControlsIntegration {
           this.layerVisibility?.update();
           this.inputRouter?.autoUpdate();
           this._updateWallsVisualState();
+          this._updateTilesVisualState();
           this._updateThreeGizmoVisibility();
           this._applyPixiEditorOverlayGate();
           this._logInteractionSnapshot('activateCanvasLayer.postUpdate', {
@@ -953,6 +1055,7 @@ export class ControlsIntegration {
         try {
           this.inputRouter?.autoUpdate();
           this._updateWallsVisualState();
+          this._updateTilesVisualState();
           this._updateThreeGizmoVisibility();
           this._applyPixiEditorOverlayGate();
           this._logInteractionSnapshot('renderSceneControls.postUpdate');
@@ -1047,6 +1150,7 @@ export class ControlsIntegration {
           }
           this._refreshFoundryDoorControlVisibility();
           this._updateWallsVisualState();
+          this._updateTilesVisualState();
         } catch (_) {
         }
       }, 0);
@@ -1120,11 +1224,32 @@ export class ControlsIntegration {
             for (const wall of canvas.walls.placeables) this._makeWallTransparent(wall);
           }
           this._updateWallsVisualState();
+          this._updateTilesVisualState();
         } catch (_) {
         }
       }, 0);
     });
     this._hookIds.push({ name: 'mapShineLevelContextChanged', id: levelContextHookId });
+
+    const refreshTileHookId = Hooks.on('refreshTile', () => {
+      if (this.state !== IntegrationState.ACTIVE) return;
+      try {
+        this._updateTilesVisualState();
+      } catch (_) {
+      }
+    });
+    this._hookIds.push({ name: 'refreshTile', id: refreshTileHookId });
+
+    const createTileHookId = Hooks.on('createTile', () => {
+      if (this.state !== IntegrationState.ACTIVE) return;
+      setTimeout(() => {
+        try {
+          this._updateTilesVisualState();
+        } catch (_) {
+        }
+      }, 0);
+    });
+    this._hookIds.push({ name: 'createTile', id: createTileHookId });
 
     // Also handle createToken to catch initial creation
     const createTokenHookId = Hooks.on('createToken', (doc, options, userId) => {
@@ -1211,6 +1336,7 @@ export class ControlsIntegration {
         this.configurePixiOverlay();
         this.layerVisibility?.update();
         this.inputRouter?.autoUpdate();
+        this._updateTilesVisualState();
         this._updateThreeGizmoVisibility();
         this.cameraSync?.forceFullSync();
         

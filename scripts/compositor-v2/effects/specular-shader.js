@@ -186,6 +186,10 @@ export function getFragmentShader(maxLights = 64) {
     uniform bool uHasBuildingShadowMap;
     uniform sampler2D uBuildingShadowMap;
 
+    // ── Token mask suppression (screen-space) ───────────────────────────────
+    uniform bool uHasTokenMask;
+    uniform sampler2D uTokenMask;
+
     // ── Varyings ──────────────────────────────────────────────────────────────
     varying vec2 vUv;
     varying vec3 vWorldPosition;
@@ -569,6 +573,15 @@ export function getFragmentShader(maxLights = 64) {
 
       // ── Final composite (specular only — additive blending handles albedo) ─
       vec3 litSpecular = specularColor + wetSpecularColor + frostSpecularColor;
+
+      // Suppress specular where token silhouettes are present so floor overlays
+      // don't brighten over token bodies.
+      if (uHasTokenMask) {
+        vec2 tokenUv = gl_FragCoord.xy / max(uScreenSize, vec2(1.0));
+        float tokenMask01 = smoothstep(0.1, 0.9, texture2D(uTokenMask, tokenUv).a);
+        litSpecular *= (1.0 - tokenMask01);
+      }
+
       // Output raw linear light — no tone mapping on additive overlays.
       gl_FragColor = vec4(litSpecular, 1.0);
     }

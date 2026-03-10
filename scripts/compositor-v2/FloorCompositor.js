@@ -872,6 +872,25 @@ export class FloorCompositor {
     }
   }
 
+  /**
+   * Optional adaptive-FPS hint for RenderLoop.
+   * Return 0 when no override is needed.
+   *
+   * @returns {number}
+   */
+  getPreferredContinuousFps() {
+    try {
+      const fluid = this._fluidEffect;
+      if (fluid?.enabled && (fluid?._overlays?.size ?? 0) > 0) {
+        // Fluid shader animation looks noticeably stepped at 30fps.
+        // Prefer 60fps while fluid overlays are active.
+        return 60;
+      }
+    } catch (_) {
+    }
+    return 0;
+  }
+
   // ── Render ──────────────────────────────────────────────────────────────────
 
   /**

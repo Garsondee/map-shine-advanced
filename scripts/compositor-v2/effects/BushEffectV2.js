@@ -686,17 +686,61 @@ export class BushEffectV2 {
 
           vec2 shadowDir = normalize(vec2(uSunDir.x, -uSunDir.y));
           if (length(shadowDir) < 0.01) shadowDir = -windDir;
-          vec2 shadowPerp = vec2(-shadowDir.y, shadowDir.x);
           vec2 shadowOffset = shadowDir * uShadowLength;
-          float shadowBlur = uShadowSoftness * 0.0008;
+          float shadowBlur = max(0.0001, uShadowSoftness * 0.0008);
+          vec2 shadowBaseUv = vUv - distortion - shadowOffset;
+          vec2 step1 = vec2(shadowBlur);
+          vec2 step2 = step1 * 2.0;
 
-          float shadowA = 0.0;
-          shadowA += safeAlpha(texture2D(uBushMask, vUv - distortion - shadowOffset));
-          shadowA += safeAlpha(texture2D(uBushMask, vUv - distortion - shadowOffset + shadowPerp * shadowBlur));
-          shadowA += safeAlpha(texture2D(uBushMask, vUv - distortion - shadowOffset - shadowPerp * shadowBlur));
-          shadowA += safeAlpha(texture2D(uBushMask, vUv - distortion - shadowOffset + shadowDir * shadowBlur));
-          shadowA += safeAlpha(texture2D(uBushMask, vUv - distortion - shadowOffset - shadowDir * shadowBlur));
-          shadowA = (shadowA / 5.0) * clamp(uShadowOpacity, 0.0, 1.0) * uIntensity * edgeFade;
+          // Kawase-style multi-ring taps: center + near diagonals + far axis + far diagonals.
+          float shadowAccum = 0.0;
+          float shadowWeight = 0.0;
+
+          float tap = safeAlpha(texture2D(uBushMask, shadowBaseUv));
+          shadowAccum += tap * 0.24;
+          shadowWeight += 0.24;
+
+          tap = safeAlpha(texture2D(uBushMask, shadowBaseUv + vec2( step1.x,  step1.y)));
+          shadowAccum += tap * 0.12;
+          shadowWeight += 0.12;
+          tap = safeAlpha(texture2D(uBushMask, shadowBaseUv + vec2(-step1.x,  step1.y)));
+          shadowAccum += tap * 0.12;
+          shadowWeight += 0.12;
+          tap = safeAlpha(texture2D(uBushMask, shadowBaseUv + vec2( step1.x, -step1.y)));
+          shadowAccum += tap * 0.12;
+          shadowWeight += 0.12;
+          tap = safeAlpha(texture2D(uBushMask, shadowBaseUv + vec2(-step1.x, -step1.y)));
+          shadowAccum += tap * 0.12;
+          shadowWeight += 0.12;
+
+          tap = safeAlpha(texture2D(uBushMask, shadowBaseUv + vec2( step2.x, 0.0)));
+          shadowAccum += tap * 0.07;
+          shadowWeight += 0.07;
+          tap = safeAlpha(texture2D(uBushMask, shadowBaseUv + vec2(-step2.x, 0.0)));
+          shadowAccum += tap * 0.07;
+          shadowWeight += 0.07;
+          tap = safeAlpha(texture2D(uBushMask, shadowBaseUv + vec2(0.0,  step2.y)));
+          shadowAccum += tap * 0.07;
+          shadowWeight += 0.07;
+          tap = safeAlpha(texture2D(uBushMask, shadowBaseUv + vec2(0.0, -step2.y)));
+          shadowAccum += tap * 0.07;
+          shadowWeight += 0.07;
+
+          tap = safeAlpha(texture2D(uBushMask, shadowBaseUv + vec2( step2.x,  step2.y)));
+          shadowAccum += tap * 0.04;
+          shadowWeight += 0.04;
+          tap = safeAlpha(texture2D(uBushMask, shadowBaseUv + vec2(-step2.x,  step2.y)));
+          shadowAccum += tap * 0.04;
+          shadowWeight += 0.04;
+          tap = safeAlpha(texture2D(uBushMask, shadowBaseUv + vec2( step2.x, -step2.y)));
+          shadowAccum += tap * 0.04;
+          shadowWeight += 0.04;
+          tap = safeAlpha(texture2D(uBushMask, shadowBaseUv + vec2(-step2.x, -step2.y)));
+          shadowAccum += tap * 0.04;
+          shadowWeight += 0.04;
+
+          float shadowA = (shadowWeight > 0.0) ? (shadowAccum / shadowWeight) : 0.0;
+          shadowA *= clamp(uShadowOpacity, 0.0, 1.0) * uIntensity * edgeFade;
 
           vec4 bushSample = texture2D(uBushMask, vUv - distortion);
           float mainAlpha = safeAlpha(bushSample) * uIntensity;

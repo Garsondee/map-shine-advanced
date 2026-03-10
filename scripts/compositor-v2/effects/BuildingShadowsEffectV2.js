@@ -239,31 +239,111 @@ export class BuildingShadowsEffectV2 {
           float accum = 0.0;
           float weightSum = 0.0;
 
-          // Distance-based smear + gaussian-style softening:
-          // as distance from the building increases along projected direction,
-          // blur radius and blend weight increase to keep far shadow softer.
-          for (int s = 0; s < 6; s++) {
-            float t = float(s) / 5.0;
-            float t2 = t * t;
-            float sigma = max(uSoftness, 0.5) * (0.55 + 1.55 * t2);
-            vec2 blurStepUv = maskTexel * sigma * 2.2;
+          // Kawase-style multi-ring taps at several distances along projection.
+          // This yields smoother penumbra-like edges with fewer harsh box artifacts.
+          float smearAmount = clamp(uSmear, 0.0, 1.0);
+          for (int s = 0; s < 3; s++) {
+            float t = float(s) / 2.0;
+            float sigma = max(uSoftness, 0.5) * mix(0.8, 1.8, t * t);
+            vec2 step1 = maskTexel * sigma * 2.0;
+            vec2 step2 = step1 * 2.0;
             vec2 centerUv = vUv + (baseOffsetUv * mix(0.25, 1.0, t));
-            float smearWeight = mix(1.0, 1.6, clamp(uSmear, 0.0, 1.0) * t);
+            float traceWeight = mix(1.0, 1.7, smearAmount * t);
 
-            for (int dy = -1; dy <= 1; dy++) {
-              for (int dx = -1; dx <= 1; dx++) {
-                vec2 jitter = vec2(float(dx), float(dy)) * blurStepUv;
-                vec2 sampleUv = centerUv + jitter;
-                float valid = uvInBounds(sampleUv);
-                float r2 = float(dx * dx + dy * dy);
-                float gaussianW = exp(-0.5 * r2 / max(sigma * sigma, 0.0001));
-                float w = gaussianW * smearWeight;
-                float casterOutdoors = readOutdoorsMask(sampleUv);
-                float casterIndoor = (1.0 - casterOutdoors) * receiverOutdoorGate * valid;
-                accum += casterIndoor * w;
-                weightSum += w * valid;
-              }
-            }
+            vec2 sampleUv = centerUv;
+            float valid = uvInBounds(sampleUv);
+            float w = 0.24 * traceWeight;
+            float casterOutdoors = readOutdoorsMask(sampleUv);
+            float casterIndoor = (1.0 - casterOutdoors) * receiverOutdoorGate * valid;
+            accum += casterIndoor * w;
+            weightSum += w * valid;
+
+            sampleUv = centerUv + vec2( step1.x,  step1.y);
+            valid = uvInBounds(sampleUv);
+            w = 0.12 * traceWeight;
+            casterOutdoors = readOutdoorsMask(sampleUv);
+            casterIndoor = (1.0 - casterOutdoors) * receiverOutdoorGate * valid;
+            accum += casterIndoor * w;
+            weightSum += w * valid;
+
+            sampleUv = centerUv + vec2(-step1.x,  step1.y);
+            valid = uvInBounds(sampleUv);
+            casterOutdoors = readOutdoorsMask(sampleUv);
+            casterIndoor = (1.0 - casterOutdoors) * receiverOutdoorGate * valid;
+            accum += casterIndoor * w;
+            weightSum += w * valid;
+
+            sampleUv = centerUv + vec2( step1.x, -step1.y);
+            valid = uvInBounds(sampleUv);
+            casterOutdoors = readOutdoorsMask(sampleUv);
+            casterIndoor = (1.0 - casterOutdoors) * receiverOutdoorGate * valid;
+            accum += casterIndoor * w;
+            weightSum += w * valid;
+
+            sampleUv = centerUv + vec2(-step1.x, -step1.y);
+            valid = uvInBounds(sampleUv);
+            casterOutdoors = readOutdoorsMask(sampleUv);
+            casterIndoor = (1.0 - casterOutdoors) * receiverOutdoorGate * valid;
+            accum += casterIndoor * w;
+            weightSum += w * valid;
+
+            w = 0.07 * traceWeight;
+            sampleUv = centerUv + vec2( step2.x, 0.0);
+            valid = uvInBounds(sampleUv);
+            casterOutdoors = readOutdoorsMask(sampleUv);
+            casterIndoor = (1.0 - casterOutdoors) * receiverOutdoorGate * valid;
+            accum += casterIndoor * w;
+            weightSum += w * valid;
+
+            sampleUv = centerUv + vec2(-step2.x, 0.0);
+            valid = uvInBounds(sampleUv);
+            casterOutdoors = readOutdoorsMask(sampleUv);
+            casterIndoor = (1.0 - casterOutdoors) * receiverOutdoorGate * valid;
+            accum += casterIndoor * w;
+            weightSum += w * valid;
+
+            sampleUv = centerUv + vec2(0.0,  step2.y);
+            valid = uvInBounds(sampleUv);
+            casterOutdoors = readOutdoorsMask(sampleUv);
+            casterIndoor = (1.0 - casterOutdoors) * receiverOutdoorGate * valid;
+            accum += casterIndoor * w;
+            weightSum += w * valid;
+
+            sampleUv = centerUv + vec2(0.0, -step2.y);
+            valid = uvInBounds(sampleUv);
+            casterOutdoors = readOutdoorsMask(sampleUv);
+            casterIndoor = (1.0 - casterOutdoors) * receiverOutdoorGate * valid;
+            accum += casterIndoor * w;
+            weightSum += w * valid;
+
+            w = 0.04 * traceWeight;
+            sampleUv = centerUv + vec2( step2.x,  step2.y);
+            valid = uvInBounds(sampleUv);
+            casterOutdoors = readOutdoorsMask(sampleUv);
+            casterIndoor = (1.0 - casterOutdoors) * receiverOutdoorGate * valid;
+            accum += casterIndoor * w;
+            weightSum += w * valid;
+
+            sampleUv = centerUv + vec2(-step2.x,  step2.y);
+            valid = uvInBounds(sampleUv);
+            casterOutdoors = readOutdoorsMask(sampleUv);
+            casterIndoor = (1.0 - casterOutdoors) * receiverOutdoorGate * valid;
+            accum += casterIndoor * w;
+            weightSum += w * valid;
+
+            sampleUv = centerUv + vec2( step2.x, -step2.y);
+            valid = uvInBounds(sampleUv);
+            casterOutdoors = readOutdoorsMask(sampleUv);
+            casterIndoor = (1.0 - casterOutdoors) * receiverOutdoorGate * valid;
+            accum += casterIndoor * w;
+            weightSum += w * valid;
+
+            sampleUv = centerUv + vec2(-step2.x, -step2.y);
+            valid = uvInBounds(sampleUv);
+            casterOutdoors = readOutdoorsMask(sampleUv);
+            casterIndoor = (1.0 - casterOutdoors) * receiverOutdoorGate * valid;
+            accum += casterIndoor * w;
+            weightSum += w * valid;
           }
 
           float strength = (weightSum > 0.0) ? (accum / weightSum) : 0.0;

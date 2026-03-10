@@ -40,6 +40,8 @@ export class LightingEffectV2 {
     this._enabled = true;
     /** @type {boolean} */
     this._lightsSynced = false;
+    /** @type {number} Last seen count of scene light-enhancement entries */
+    this._lastEnhancementCount = -1;
 
     // ── Tuning parameters (match V1 defaults) ──────────────────────────
     this.params = {
@@ -451,16 +453,14 @@ export class LightingEffectV2 {
           }
 
           // Overhead shadow: screen-space shadow from overhead tiles.
-          // Sampled directly at vUv since the RT is already in screen UV space.
-          // RGB encodes roof/building-style overhead shadow factor, while alpha
-          // encodes tile-projection factor from OverheadShadowsEffectV2.
+          // RGB carries roof/fluid-tinted shadow factor, alpha carries tile-projection factor.
           // Dims ambient only — dynamic lights punch through.
           if (uHasOverheadShadow > 0.5) {
             vec4 ovSample = texture2D(tOverheadShadow, vUv);
-            float ovShadow = clamp(ovSample.r, 0.0, 1.0);
+            vec3 ovShadowRgb = clamp(ovSample.rgb, vec3(0.0), vec3(1.0));
             float tileProjectionFactor = clamp(ovSample.a, 0.0, 1.0);
-            float combinedShadowFactor = ovShadow * tileProjectionFactor;
-            float ovMix = mix(1.0, combinedShadowFactor, clamp(uOverheadShadowOpacity, 0.0, 1.0));
+            vec3 combinedShadowFactor = ovShadowRgb * tileProjectionFactor;
+            vec3 ovMix = mix(vec3(1.0), combinedShadowFactor, clamp(uOverheadShadowOpacity, 0.0, 1.0));
             vec3 ambientComp = totalIllumination - vec3(lightI) * master;
             ambientComp *= ovMix;
             totalIllumination = ambientComp + vec3(lightI) * master;
@@ -541,6 +541,7 @@ export class LightingEffectV2 {
     }
 
     const enhancementMap = this._getLightEnhancementConfigMap();
+    this._lastEnhancementCount = enhancementMap.size;
     for (const doc of docs) {
       this._addLightFromDoc(doc, enhancementMap);
     }
@@ -557,7 +558,15 @@ export class LightingEffectV2 {
    */
   _addLightFromDoc(doc, enhancementMap = null) {
     if (!doc?.id && !doc?._id) return;
-    const mergedDoc = this._mergeLightEnhancementsIntoDoc(doc, enhancementMap);
+    let plainDoc = doc;
+    try {
+      plainDoc = (typeof doc?.toObject === 'function') ? doc.toObject() : { ...doc };
+      if (plainDoc.id === undefined && plainDoc._id !== undefined) plainDoc.id = plainDoc._id;
+    } catch (_) {
+      plainDoc = doc;
+    }
+
+    const mergedDoc = this._mergeLightEnhancementsIntoDoc(plainDoc, enhancementMap);
     const id = mergedDoc.id ?? mergedDoc._id;
     const isNegative = mergedDoc?.config?.negative === true || mergedDoc?.negative === true;
 
@@ -788,6 +797,17 @@ export class LightingEffectV2 {
         '| outputRT', outputRT?.width, 'x', outputRT?.height,
         '| windowLightScene children', windowLightScene?.children?.length ?? 'none'
       );
+    }
+
+    // Some worlds hydrate scene flag data slightly after initial canvas/light
+    // construction. If enhancement entries appear later, force a one-shot resync
+    // so initial-load light coloration/intensity matches post-move updates.
+    try {
+      const enhancementCount = this._getLightEnhancementConfigMap().size;
+      if (this._lightsSynced && enhancementCount !== this._lastEnhancementCount) {
+        this.syncAllLights();
+      }
+    } catch (_) {
     }
 
     // Ensure RTs match drawing buffer size
@@ -1050,6 +1070,7 @@ export class LightingEffectV2 {
     this._composeMaterial = null;
     this._composeQuad = null;
     this._lightsSynced = false;
+    this._lastEnhancementCount = -1;
     this._initialized = false;
 
     log.info('LightingEffectV2 disposed');

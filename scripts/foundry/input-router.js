@@ -66,7 +66,7 @@ export class InputRouter {
       // Template tools
       'circle', 'cone', 'rect', 'ray',
       // Drawing tools
-      'select', 'polygon', 'freehand', 'text', 'ellipse', 'rectangle',
+      'select', 'polygon', 'freehand', 'text', 'ellipse', 'rect', 'rectangle',
       // Region tools
       'region'
     ]);
@@ -318,6 +318,25 @@ export class InputRouter {
       activeControl === 'wall' ||
       activeControlLayer === 'walls' ||
       activeControlLayer === 'wall';
+
+    const isDrawingsLayer =
+      !!canvas?.drawings?.active ||
+      layerCtorName === 'DrawingsLayer' ||
+      layerIdName === 'drawings' ||
+      layerIdName === 'drawing' ||
+      layerOptionsName === 'drawings' ||
+      layerOptionsName === 'drawing' ||
+      activeControl === 'drawings' ||
+      activeControl === 'drawing' ||
+      activeControlLayer === 'drawings' ||
+      activeControlLayer === 'drawing';
+
+    // Drawings are Foundry-native PIXI workflows. Prioritize this check before
+    // token/wall/light/tile ownership to survive transient stale activeLayer state
+    // immediately after control switches.
+    if (isDrawingsLayer) {
+      return InputMode.PIXI;
+    }
 
     // Three.js handles all token interactions: selection, drag, HUD,
     // targeting, click-to-move, and ruler forwarding. No PIXI overlay needed.

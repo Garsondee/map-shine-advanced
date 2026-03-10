@@ -897,12 +897,13 @@ export class OverheadShadowsEffectV2 {
 
           float accum = 0.0;
           float weightSum = 0.0;
-          for (int dy = -1; dy <= 1; dy++) {
-            for (int dx = -1; dx <= 1; dx++) {
+          for (int dy = -2; dy <= 2; dy++) {
+            for (int dx = -2; dx <= 2; dx++) {
               vec2 sUv = offsetUv + vec2(float(dx), float(dy)) * stepUv;
               float sUvValid = uvInBounds(sUv, uTexelSize);
-              float w = 1.0;
-              if (dx == 0 && dy == 0) w = 2.0; // center bias
+              float wx = 1.0 - (abs(float(dx)) / 3.0);
+              float wy = 1.0 - (abs(float(dy)) / 3.0);
+              float w = max(wx * wy, 0.0001);
               float wEffective = w * sUvValid;
 
               // Roof tap (screen-space)
@@ -969,12 +970,13 @@ export class OverheadShadowsEffectV2 {
               ? clamp(receiverTileSortEncoded / receiverTileAlpha, 0.0, 1.0)
               : 0.0;
 
-            for (int pdy = -1; pdy <= 1; pdy++) {
-              for (int pdx = -1; pdx <= 1; pdx++) {
+            for (int pdy = -2; pdy <= 2; pdy++) {
+              for (int pdx = -2; pdx <= 2; pdx++) {
                 vec2 pUv = projectedOffsetUv + vec2(float(pdx), float(pdy)) * projectedStepUv;
                 float pUvValid = uvInBounds(pUv, uTexelSize);
-                float pw = 1.0;
-                if (pdx == 0 && pdy == 0) pw = 2.0;
+                float pwx = 1.0 - (abs(float(pdx)) / 3.0);
+                float pwy = 1.0 - (abs(float(pdy)) / 3.0);
+                float pw = max(pwx * pwy, 0.0001);
                 float pwEffective = pw * pUvValid;
 
                 float tileAlphaTap = clamp(texture2D(tTileProjection, clamp(pUv, 0.0, 1.0)).a, 0.0, 1.0) * pUvValid;
@@ -1049,8 +1051,13 @@ export class OverheadShadowsEffectV2 {
                 fa *= fUvValid;
                 fa *= baseEdgeFade;
                 fluidAccumA += fa * fw;
-                // fluidTap.rgb is already alpha-weighted in the source pass.
-                fluidAccumRgb += fluidTap.rgb * fw * sameRegionFluidTap * fUvValid * baseEdgeFade;
+                // Fluid capture can be straight or premultiplied depending on
+                // renderer/material state. Reconstruct tap color from alpha so
+                // tint remains chromatic (instead of collapsing toward black).
+                vec3 fluidTapColor = (fluidTap.a > 0.0001)
+                  ? clamp(fluidTap.rgb / fluidTap.a, 0.0, 1.0)
+                  : vec3(0.0);
+                fluidAccumRgb += fluidTapColor * fa * fw;
                 fluidWeightSum += fwEffective;
               }
             }

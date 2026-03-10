@@ -153,6 +153,20 @@ export class ControlsIntegration {
       || sceneControlLayer === 'tiles';
   }
 
+  _isDrawingsContextActive() {
+    if (canvas?.drawings?.active) return true;
+    const { optionsName, name, ctor, sceneControlName, sceneControlLayer } = this._getActiveLayerMeta();
+    return optionsName === 'drawings'
+      || optionsName === 'drawing'
+      || name === 'drawings'
+      || name === 'drawing'
+      || ctor === 'drawingslayer'
+      || sceneControlName === 'drawings'
+      || sceneControlName === 'drawing'
+      || sceneControlLayer === 'drawings'
+      || sceneControlLayer === 'drawing';
+  }
+
   _isPixiEditorOverlayNeeded() {
     // Walls, lighting, and tokens are fully Three.js-native now.
     // Only return true for layers we haven't replaced yet (drawings, regions,
@@ -428,9 +442,10 @@ export class ControlsIntegration {
       this.registerHooks();
       
       // Initial state sync
-      this.layerVisibility.update();
+      this.layerVisibility?.update();
       this.inputRouter.autoUpdate();
       this._updateTilesVisualState();
+      this._updateDrawingsVisualState();
 
       // Keep global diagnostics/runtime lookups in sync even when ControlsIntegration
       // initializes after initial manager exposure.
@@ -764,6 +779,50 @@ export class ControlsIntegration {
   }
 
   /**
+   * Ensure Foundry DrawingsLayer is active when drawings controls/tools are
+   * selected. This mirrors the tiles re-activation guard and avoids stale
+   * activeLayer state that prevents native drawing workflows.
+   * @private
+   */
+  _updateDrawingsVisualState() {
+    if (!canvas?.ready || !canvas.drawings) return;
+    const isDrawingsActive = this._isDrawingsContextActive();
+    if (!isDrawingsActive) return;
+
+    try {
+      if (canvas.activeLayer !== canvas.drawings && typeof canvas.drawings.activate === 'function') {
+        canvas.drawings.activate();
+      }
+    } catch (_) {
+      // Best effort only
+    }
+
+    canvas.drawings.visible = true;
+    canvas.drawings.renderable = true;
+    canvas.drawings.interactiveChildren = true;
+
+    // Keep ownership consistent for native drawing interactions.
+    const pixiCanvas = canvas?.app?.view;
+    if (pixiCanvas) {
+      pixiCanvas.style.pointerEvents = 'auto';
+      pixiCanvas.style.display = '';
+      pixiCanvas.style.visibility = 'visible';
+    }
+
+    const board = document.getElementById('board');
+    if (board && board.tagName === 'CANVAS') {
+      board.style.pointerEvents = 'auto';
+      board.style.display = '';
+      board.style.visibility = 'visible';
+    }
+
+    const threeCanvas = document.getElementById('map-shine-canvas');
+    if (threeCanvas) {
+      threeCanvas.style.pointerEvents = 'none';
+    }
+  }
+
+  /**
    * Make a PIXI wall visually transparent but keep door controls visible.
    * @param {Wall} wall
    * @private
@@ -1033,6 +1092,7 @@ export class ControlsIntegration {
           this.inputRouter?.autoUpdate();
           this._updateWallsVisualState();
           this._updateTilesVisualState();
+          this._updateDrawingsVisualState();
           this._updateThreeGizmoVisibility();
           this._applyPixiEditorOverlayGate();
           this._logInteractionSnapshot('activateCanvasLayer.postUpdate', {
@@ -1056,6 +1116,7 @@ export class ControlsIntegration {
           this.inputRouter?.autoUpdate();
           this._updateWallsVisualState();
           this._updateTilesVisualState();
+          this._updateDrawingsVisualState();
           this._updateThreeGizmoVisibility();
           this._applyPixiEditorOverlayGate();
           this._logInteractionSnapshot('renderSceneControls.postUpdate');
@@ -1337,6 +1398,7 @@ export class ControlsIntegration {
         this.layerVisibility?.update();
         this.inputRouter?.autoUpdate();
         this._updateTilesVisualState();
+        this._updateDrawingsVisualState();
         this._updateThreeGizmoVisibility();
         this.cameraSync?.forceFullSync();
         

@@ -33,6 +33,9 @@ export class LightIconManager {
     /** @type {Map<string, THREE.Sprite>} */
     this.lights = new Map();
 
+    /** @type {Set<string>} Light IDs currently waiting on async icon texture load */
+    this._pendingCreates = new Set();
+
     /** @type {THREE.TextureLoader} */
     this.textureLoader = new THREE.TextureLoader();
 
@@ -388,6 +391,9 @@ export class LightIconManager {
   syncAllLights() {
     if (!canvas.lighting) return;
 
+    // Invalidate any in-flight async icon creation callbacks from the previous sync pass.
+    this._pendingCreates.clear();
+
     // Clear existing
     for (const sprite of this.lights.values()) {
       this.group.remove(sprite);
@@ -428,14 +434,30 @@ export class LightIconManager {
    * @private
    */
   create(doc) {
-    if (this.lights.has(doc.id)) return;
+    const id = String(doc?.id ?? '');
+    if (!id) return;
+    if (this.lights.has(id) || this._pendingCreates.has(id)) return;
+    this._pendingCreates.add(id);
 
     const iconPath = this.defaultIcon;
 
     this.textureLoader.load(iconPath, (texture) => {
       const THREE = window.THREE;
+      const pending = this._pendingCreates.has(id);
+      // If this request was invalidated (resync/remove), ignore callback.
+      if (!pending) return;
       // Make sure the light still exists
-      if (!canvas.lighting?.placeables?.some(l => l.id === doc.id)) return;
+      if (!canvas.lighting?.placeables?.some(l => String(l.id) === id)) {
+        this._pendingCreates.delete(id);
+        return;
+      }
+
+      // Another code path may have already created the sprite while this texture
+      // was loading. Keep the first winner and drop this duplicate callback.
+      if (this.lights.has(id)) {
+        this._pendingCreates.delete(id);
+        return;
+      }
 
       const size = 48; // Fixed icon size in pixels
 
@@ -466,18 +488,20 @@ export class LightIconManager {
       sprite.renderOrder = 9999;
 
       sprite.userData = {
-        lightId: doc.id,
+        lightId: id,
         type: 'ambientLight',
         baseScale: { x: size, y: size, z: 1 }
       };
 
       this.group.add(sprite);
-      this.lights.set(doc.id, sprite);
+      this.lights.set(id, sprite);
+      this._pendingCreates.delete(id);
       this._upsertRadiusRingForDoc(doc);
-      this._refreshSingleLightVisibility(doc.id, doc);
+      this._refreshSingleLightVisibility(id, doc);
 
-      log.debug(`Created light icon ${doc.id}`);
+      log.debug(`Created light icon ${id}`);
     }, undefined, (err) => {
+      this._pendingCreates.delete(id);
       log.warn('Failed to load light icon texture', err);
     });
   }
@@ -489,7 +513,10 @@ export class LightIconManager {
    * @private
    */
   update(doc, changes) {
-    const sprite = this.lights.get(doc.id);
+    const id = String(doc?.id ?? doc?._id ?? '');
+    if (!id) return;
+
+    const sprite = this.lights.get(id);
     if (!sprite) {
       this.create(doc);
       return;
@@ -509,7 +536,7 @@ export class LightIconManager {
     this._upsertRadiusRingForDoc(doc);
 
     // No icon/color change for now; that could be extended later
-    this._refreshSingleLightVisibility(doc.id, doc);
+    this._refreshSingleLightVisibility(id, doc);
   }
 
   /**
@@ -518,7 +545,12 @@ export class LightIconManager {
    * @private
    */
   remove(id) {
-    const sprite = this.lights.get(id);
+    const key = String(id ?? '');
+    if (!key) return;
+
+    this._pendingCreates.delete(key);
+
+    const sprite = this.lights.get(key);
     if (sprite) {
       this.group.remove(sprite);
       // Handle shader material with uniform texture
@@ -527,9 +559,9 @@ export class LightIconManager {
       }
       sprite.geometry?.dispose?.();
       sprite.material.dispose();
-      this.lights.delete(id);
+      this.lights.delete(key);
     }
-    this._removeRadiusRing(id);
+    this._removeRadiusRing(key);
   }
 
   /**
@@ -551,6 +583,7 @@ export class LightIconManager {
     }
     this._hookIds = [];
     this.hooksRegistered = false;
+    this._pendingCreates.clear();
 
     for (const sprite of this.lights.values()) {
       this.group.remove(sprite);

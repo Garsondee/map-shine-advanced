@@ -282,6 +282,13 @@ export class RenderLoop {
         const idleFps = this._clampFps(ms?.renderIdleFps, this._idleFps, 5, 60);
         const activeFps = this._clampFps(ms?.renderActiveFps, this._activeFps, 5, 120);
         const continuousFps = this._clampFps(ms?.renderContinuousFps, this._continuousFps, 5, 120);
+        const preferredContinuousFps = this._clampFps(
+          this.effectComposer?.getPreferredContinuousFps?.(),
+          0,
+          0,
+          120
+        );
+        const effectiveContinuousFps = Math.max(continuousFps, preferredContinuousFps);
         const idleIntervalMs = 1000 / Math.max(1, idleFps);
 
         // Fast path: when adaptive mode is on, nothing can render faster than the
@@ -289,7 +296,7 @@ export class RenderLoop {
         // per-RAF work (camera checks + effect scans) between allowed render ticks.
         if (adaptiveFpsEnabled) {
           const since = now - (this._lastComposerRenderTime || 0);
-          const fastestFps = Math.max(idleFps, activeFps, continuousFps);
+          const fastestFps = Math.max(idleFps, activeFps, effectiveContinuousFps);
           const minIntervalMs = 1000 / Math.max(1, fastestFps);
           if (since < minIntervalMs) return;
         }
@@ -313,7 +320,7 @@ export class RenderLoop {
         // - idle: falls back to the existing idle throttle target
         if (shouldRender && adaptiveFpsEnabled) {
           let targetFps = idleFps;
-          if (inContinuousWindow || effectWantsContinuous) targetFps = continuousFps;
+          if (inContinuousWindow || effectWantsContinuous) targetFps = effectiveContinuousFps;
           else if (this._forceNextRender || cameraChanged) targetFps = activeFps;
 
           const minIntervalMs = 1000 / Math.max(1, targetFps);

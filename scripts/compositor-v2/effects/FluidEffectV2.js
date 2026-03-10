@@ -286,6 +286,7 @@ export class FluidEffectV2 {
           tileW: sceneW,
           tileH: sceneH,
           rotation: 0,
+          isOverhead: false,
         });
         overlayCount++;
       }
@@ -319,6 +320,7 @@ export class FluidEffectV2 {
         centerX, centerY, z,
         tileW, tileH,
         rotation,
+        isOverhead: !!tileDoc?.overhead,
       });
       overlayCount++;
     }
@@ -484,7 +486,7 @@ export class FluidEffectV2 {
 
   _createOverlay(tileId, floorIndex, opts) {
     const THREE = window.THREE;
-    const { maskUrl, centerX, centerY, z, tileW, tileH, rotation } = opts;
+    const { maskUrl, centerX, centerY, z, tileW, tileH, rotation, isOverhead } = opts;
 
     const material = this._createMaterial();
     const geometry = new THREE.PlaneGeometry(tileW, tileH);
@@ -493,6 +495,10 @@ export class FluidEffectV2 {
     mesh.frustumCulled = false;
     mesh.position.set(centerX, centerY, z);
     mesh.rotation.z = rotation;
+    // Keep overlays in the normal bus layer and opt overhead-tile fluids into
+    // ROOF_LAYER so OverheadShadowsEffectV2's fluid capture pass can see them.
+    mesh.layers.set(0);
+    if (isOverhead) mesh.layers.enable(20);
 
     // Keep renderOrder under the base tile if present.
     try {

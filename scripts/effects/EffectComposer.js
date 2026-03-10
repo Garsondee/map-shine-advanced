@@ -205,6 +205,24 @@ export class EffectComposer {
   }
 
   /**
+   * Optional adaptive-FPS hint for the render loop when continuous rendering is active.
+   * Returns 0 when no override is needed.
+   *
+   * @returns {number}
+   */
+  getPreferredContinuousFps() {
+    try {
+      const fc = this._floorCompositorV2;
+      if (fc && typeof fc.getPreferredContinuousFps === 'function') {
+        const preferred = Number(fc.getPreferredContinuousFps());
+        return Number.isFinite(preferred) && preferred > 0 ? preferred : 0;
+      }
+    } catch (_) {
+    }
+    return 0;
+  }
+
+  /**
    * Initialize the composer with GPU capabilities
    * @param {GPUCapabilities} capabilities - GPU capability info
    */

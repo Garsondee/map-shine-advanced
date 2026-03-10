@@ -462,6 +462,10 @@ export class InteractionManager {
     /** @type {number|null} Timeout handle for overhead hover-hide debounce */
     this._overheadHoverTimeoutId = null;
     this.hoveringTreeCanopy = false;
+    /** @type {number} Last timestamp where canopy hover test was positive */
+    this._treeCanopyLastOpaqueHitMs = 0;
+    /** @type {number} Delay before releasing canopy fade to avoid flicker on brief misses */
+    this._treeCanopyReleaseDelayMs = 150;
     
     /** @type {string|null} ID of token whose HUD is currently open */
     this.openHudTokenId = null;
@@ -3224,7 +3228,7 @@ export class InteractionManager {
                      return;
                 }
 
-                if (type === 'wallLine') {
+                if (type === 'wallLine' || type === 'wallHitbox') {
                     if (game.user.isGM || this._isWallsContextActive()) {
                         this.selectWall(interactable, event);
                         return;
@@ -4017,9 +4021,7 @@ export class InteractionManager {
           // In V2, tree overlays are per-tile meshes managed by FloorRenderBus.
           safeCall(() => {
             if (this.hoveringTreeCanopy) {
-              const treeEffect = (window.MapShine || window.mapShine)?.treeEffect;
-              treeEffect?.setHoverHidden?.(false);
-              this.hoveringTreeCanopy = false;
+              this._setTreeCanopyHoverHidden(false);
             }
           }, 'hover.clearTree', Severity.COSMETIC);
 
@@ -4054,6 +4056,10 @@ export class InteractionManager {
     // (We intentionally keep it visible while hovering the relevant handle.)
     this._hideUIHoverLabel();
 
+    // Tree canopy hover-hide must be evaluated independently from wall/tile/token
+    // hit priority so early returns do not suppress canopy fade updates.
+    safeCall(() => this._updateTreeCanopyHoverState(event), 'hover.treeCanopy', Severity.COSMETIC);
+
     // 1. Check Overhead Tiles (for hover-to-hide behavior)
     // IMPORTANT: This must run BEFORE wall hover detection.
     // Wall raycasting uses a large line threshold (for UX when selecting walls),
@@ -4078,22 +4084,12 @@ export class InteractionManager {
         // Reuse temp for world-position Z ranking.
         const zPos = this._tempVec3ZRank || (this._tempVec3ZRank = new THREE.Vector3());
 
-        // Raycast against the actual overhead sprites (billboards).
-        // This aligns hit-testing with what the user sees on screen under a perspective camera.
-        //
-        // IMPORTANT: Overhead sprites are rendered with ROOF_LAYER enabled (see TileManager).
-        // The THREE.Raycaster respects layers, so we must enable ROOF_LAYER here or all
-        // overhead picking will silently miss.
-        const prevMask = this.raycaster.layers?.mask;
-        safeCall(() => { this.raycaster.layers.enable(20); this.raycaster.layers.enable(0); }, 'hover.roofLayers', Severity.COSMETIC);
-
-        const hits = this.raycaster.intersectObjects(overheadSprites, false);
-
-        safeCall(() => { if (typeof prevMask === 'number' && this.raycaster.layers) this.raycaster.layers.mask = prevMask; }, 'hover.restoreRoofLayers', Severity.COSMETIC);
-        if (hits && hits.length > 0) {
-          for (let i = 0; i < hits.length; i++) {
-            const hit = hits[i];
-            const sprite = hit?.object;
+        // Option B primary path: project cursor to world XY once and test tile bounds
+        // + alpha in tile space. This avoids billboard raycast drift under perspective.
+        const worldPos = this.screenToWorld(event.clientX, event.clientY);
+        if (worldPos && typeof this.tileManager?.isWorldPointInTileBounds === 'function') {
+          for (let i = 0; i < overheadSprites.length; i++) {
+            const sprite = overheadSprites[i];
             const tileId = sprite?.userData?.foundryTileId;
             if (!tileId) continue;
 
@@ -4107,13 +4103,25 @@ export class InteractionManager {
               const tileDoc = data.tileDoc;
               const occlusionMode = tileDoc?.occlusion?.mode ?? CONST.TILE_OCCLUSION_MODES.NONE;
               return !!sprite.userData.isWeatherRoof || (occlusionMode !== CONST.TILE_OCCLUSION_MODES.NONE);
-            }, 'hover.checkOcclusion', Severity.COSMETIC, { fallback: true });
+            }, 'hover.checkOcclusionWorld', Severity.COSMETIC, { fallback: true });
             if (!hoverEligible) continue;
 
-            // Pixel-opaque test using UV from the sprite raycast.
+            const inBounds = safeCall(
+              () => this.tileManager.isWorldPointInTileBounds(data, worldPos.x, worldPos.y),
+              'hover.worldBounds',
+              Severity.COSMETIC,
+              { fallback: false }
+            );
+            if (!inBounds) continue;
+
             let opaqueHit = true;
-            if (typeof this.tileManager.isUvOpaque === 'function' && hit?.uv) {
-              opaqueHit = safeCall(() => this.tileManager.isUvOpaque(data, hit.uv), 'hover.uvOpaque', Severity.COSMETIC, { fallback: true });
+            if (typeof this.tileManager.isWorldPointOpaque === 'function') {
+              opaqueHit = safeCall(
+                () => this.tileManager.isWorldPointOpaque(data, worldPos.x, worldPos.y),
+                'hover.worldOpaque',
+                Severity.COSMETIC,
+                { fallback: true }
+              );
             }
             if (!opaqueHit) continue;
 
@@ -4122,8 +4130,53 @@ export class InteractionManager {
             if (z >= bestZ) {
               bestZ = z;
               bestTileId = tileId;
-              bestHit = hit;
+              bestHit = null;
               bestOpaque = opaqueHit;
+            }
+          }
+        }
+
+        // Fallback: keep legacy billboard raycast path when world-point test did not select a roof.
+        if (!bestTileId) {
+          // IMPORTANT: Overhead sprites are rendered with ROOF_LAYER enabled (see TileManager).
+          // The THREE.Raycaster respects layers, so we must enable ROOF_LAYER here or all
+          // overhead picking will silently miss.
+          const prevMask = this.raycaster.layers?.mask;
+          safeCall(() => { this.raycaster.layers.enable(20); this.raycaster.layers.enable(0); }, 'hover.roofLayers', Severity.COSMETIC);
+
+          const hits = this.raycaster.intersectObjects(overheadSprites, false);
+
+          safeCall(() => { if (typeof prevMask === 'number' && this.raycaster.layers) this.raycaster.layers.mask = prevMask; }, 'hover.restoreRoofLayers', Severity.COSMETIC);
+          if (hits && hits.length > 0) {
+            for (let i = 0; i < hits.length; i++) {
+              const hit = hits[i];
+              const sprite = hit?.object;
+              const tileId = sprite?.userData?.foundryTileId;
+              if (!tileId) continue;
+
+              const data = this.tileManager.tileSprites.get(tileId);
+              if (!data) continue;
+
+              const hoverEligible = safeCall(() => {
+                const tileDoc = data.tileDoc;
+                const occlusionMode = tileDoc?.occlusion?.mode ?? CONST.TILE_OCCLUSION_MODES.NONE;
+                return !!sprite.userData.isWeatherRoof || (occlusionMode !== CONST.TILE_OCCLUSION_MODES.NONE);
+              }, 'hover.checkOcclusionRay', Severity.COSMETIC, { fallback: true });
+              if (!hoverEligible) continue;
+
+              let opaqueHit = true;
+              if (typeof this.tileManager.isUvOpaque === 'function' && hit?.uv) {
+                opaqueHit = safeCall(() => this.tileManager.isUvOpaque(data, hit.uv), 'hover.uvOpaque', Severity.COSMETIC, { fallback: true });
+              }
+              if (!opaqueHit) continue;
+
+              const z = safeCall(() => { sprite.getWorldPosition(zPos); return zPos.z; }, 'hover.worldZRay', Severity.COSMETIC, { fallback: sprite.position?.z ?? 0 });
+              if (z >= bestZ) {
+                bestZ = z;
+                bestTileId = tileId;
+                bestHit = hit;
+                bestOpaque = opaqueHit;
+              }
             }
           }
         }
@@ -4131,9 +4184,7 @@ export class InteractionManager {
         // Update debug marker for the winning hit (or hide when no hit).
         this._updateOverheadHoverDebug(event, bestHit, bestOpaque);
 
-        // NOTE: We intentionally do not implement a world-space "sticky hover" fallback here.
-        // The hover test is now based on sprite raycast UVs (screen-aligned). Mixing in a
-        // ground-plane bounds check can reintroduce misalignment.
+        // World-point path is authoritative for stability; raycast path above is fallback.
 
         if (bestTileId) {
           // Clear wall hover highlight while a roof is being hover-hidden.
@@ -4274,39 +4325,6 @@ export class InteractionManager {
     // But if we are "near a line", we probably want the line.
     if (hitFound) return;
 
-    // Tree canopy hover-hide.
-    // V1 uses a single mesh on mapShine.treeEffect; V2 uses many per-tile meshes on FloorCompositorV2._treeEffect.
-    const mapShine = window.MapShine || window.mapShine;
-    const v2TreeEffect = mapShine?.effectComposer?._floorCompositorV2?._treeEffect;
-    const v2TreeMeshes = (typeof v2TreeEffect?.getHoverMeshes === 'function') ? v2TreeEffect.getHoverMeshes() : null;
-    const treeEffect = (window.MapShine?.__v2Active === true) ? v2TreeEffect : mapShine?.treeEffect;
-    const treeHits = (window.MapShine?.__v2Active === true)
-      ? (Array.isArray(v2TreeMeshes) && v2TreeMeshes.length > 0 ? this.raycaster.intersectObjects(v2TreeMeshes, false) : [])
-      : (treeEffect?.mesh ? this.raycaster.intersectObject(treeEffect.mesh, false) : []);
-
-    if (treeEffect && treeHits.length >= 0) {
-      if (treeHits.length > 0) {
-        const hit = treeHits[0];
-        let opaqueHit = true;
-        if (typeof treeEffect.isUvOpaque === 'function' && hit.uv) {
-          opaqueHit = treeEffect.isUvOpaque(hit.uv, hit.object ?? null);
-        }
-
-        if (opaqueHit) {
-          if (!this.hoveringTreeCanopy && typeof treeEffect.setHoverHidden === 'function') {
-            treeEffect.setHoverHidden(true);
-            this.hoveringTreeCanopy = true;
-          }
-        } else if (this.hoveringTreeCanopy && typeof treeEffect.setHoverHidden === 'function') {
-          treeEffect.setHoverHidden(false);
-          this.hoveringTreeCanopy = false;
-        }
-      } else if (this.hoveringTreeCanopy && typeof treeEffect.setHoverHidden === 'function') {
-        treeEffect.setHoverHidden(false);
-        this.hoveringTreeCanopy = false;
-      }
-    }
-
     // 3. Check Tokens
     // Tokens may be rendered on the overlay layer (31) to draw above post-processing.
     // Ensure raycasting includes that layer, otherwise tokens won't be clickable/draggable.
@@ -4348,6 +4366,94 @@ export class InteractionManager {
         this.hoveredTokenId = null;
         this.canvasElement.style.cursor = 'default';
       }
+    }
+  }
+
+  /**
+   * Resolve active tree hover effect and raycast meshes for canopy fade checks.
+   * @returns {{treeEffect: any, treeMeshes: any[]}}
+   * @private
+   */
+  _getTreeCanopyHoverTargets() {
+    const mapShine = window.MapShine || window.mapShine;
+    const v2TreeEffect = mapShine?.effectComposer?._floorCompositorV2?._treeEffect;
+    const isV2 = window.MapShine?.__v2Active === true;
+    const treeEffect = isV2 ? v2TreeEffect : mapShine?.treeEffect;
+
+    if (!treeEffect) return { treeEffect: null, treeMeshes: [] };
+    if (isV2) {
+      const treeMeshes = (typeof v2TreeEffect?.getHoverMeshes === 'function') ? v2TreeEffect.getHoverMeshes() : [];
+      return { treeEffect, treeMeshes: Array.isArray(treeMeshes) ? treeMeshes : [] };
+    }
+
+    return { treeEffect, treeMeshes: treeEffect?.mesh ? [treeEffect.mesh] : [] };
+  }
+
+  /**
+   * Set canopy hover-hidden state on the active tree effect.
+   * @param {boolean} hidden
+   * @returns {boolean}
+   * @private
+   */
+  _setTreeCanopyHoverHidden(hidden) {
+    const { treeEffect } = this._getTreeCanopyHoverTargets();
+    if (!treeEffect || typeof treeEffect.setHoverHidden !== 'function') return false;
+    treeEffect.setHoverHidden(!!hidden);
+    this.hoveringTreeCanopy = !!hidden;
+    return true;
+  }
+
+  /**
+   * Update canopy hover/fade state. Runs independently from other hover priorities
+   * so wall/tile early-returns cannot suppress tree fade updates.
+   *
+   * Detection policy:
+   * 1) Sample canopy from mouse world point (Option B authoritative path).
+   * 2) If world-point path is unavailable, fall back to mesh raycast + UV opacity.
+   * 3) Use short release hysteresis to prevent flicker from one-frame misses.
+   * @param {PointerEvent} event
+   * @private
+   */
+  _updateTreeCanopyHoverState(event) {
+    const { treeEffect, treeMeshes } = this._getTreeCanopyHoverTargets();
+    if (!treeEffect || !Array.isArray(treeMeshes) || treeMeshes.length === 0) {
+      if (this.hoveringTreeCanopy) this._setTreeCanopyHoverHidden(false);
+      return;
+    }
+
+    let opaqueHit = false;
+
+    // Option B: direct world-point opacity lookup (independent of ray-hit ordering).
+    if (typeof treeEffect.isWorldPointOpaque === 'function' && Number.isFinite(event?.clientX) && Number.isFinite(event?.clientY)) {
+      const worldPos = this.screenToWorld(event.clientX, event.clientY);
+      if (worldPos) {
+        opaqueHit = !!treeEffect.isWorldPointOpaque(worldPos.x, worldPos.y);
+      }
+    }
+
+    // Fallback path: legacy raycast + UV test.
+    if (!opaqueHit) {
+      const treeHits = this.raycaster.intersectObjects(treeMeshes, false);
+      if (treeHits.length > 0) {
+        const hit = treeHits[0];
+        if (typeof treeEffect.isUvOpaque === 'function' && hit?.uv) {
+          opaqueHit = !!treeEffect.isUvOpaque(hit.uv, hit.object ?? null);
+        } else {
+          opaqueHit = true;
+        }
+      }
+    }
+
+    const nowMs = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+    if (opaqueHit) {
+      this._treeCanopyLastOpaqueHitMs = nowMs;
+      if (!this.hoveringTreeCanopy) this._setTreeCanopyHoverHidden(true);
+      return;
+    }
+
+    if (!this.hoveringTreeCanopy) return;
+    if ((nowMs - this._treeCanopyLastOpaqueHitMs) >= this._treeCanopyReleaseDelayMs) {
+      this._setTreeCanopyHoverHidden(false);
     }
   }
 
@@ -4702,17 +4808,25 @@ export class InteractionManager {
             if (worldPos) {
                  const foundryPos = Coordinates.toFoundry(worldPos.x, worldPos.y);
                  let snapped;
-                 if (event.shiftKey) {
-                     snapped = foundryPos;
-                 } else {
-                     const M = CONST.GRID_SNAPPING_MODES;
-                     const size = canvas.dimensions.size;
-                     const resolution = size >= 128 ? 8 : (size >= 64 ? 4 : 2);
-                     const mode = canvas.forceSnapVertices ? M.VERTEX : (M.CENTER | M.VERTEX | M.CORNER | M.SIDE_MIDPOINT);
-                     
-                     snapped = this.snapToGrid(foundryPos.x, foundryPos.y, mode, resolution);
-                 }
-                 const snappedWorld = Coordinates.toWorld(snapped.x, snapped.y);
+                const wallsLayer = canvas?.walls;
+                if (wallsLayer && typeof wallsLayer._getWallEndpointCoordinates === 'function') {
+                    const endpoint = wallsLayer._getWallEndpointCoordinates(foundryPos, { snap: !event.shiftKey });
+                    if (Array.isArray(endpoint) && endpoint.length >= 2) {
+                        snapped = { x: Number(endpoint[0]) || foundryPos.x, y: Number(endpoint[1]) || foundryPos.y };
+                    }
+                }
+                if (!snapped) {
+                    if (event.shiftKey) {
+                        snapped = foundryPos;
+                    } else {
+                        const M = CONST.GRID_SNAPPING_MODES;
+                        const size = canvas.dimensions.size;
+                        const resolution = size >= 128 ? 8 : (size >= 64 ? 4 : 2);
+                        const mode = canvas.forceSnapVertices ? M.VERTEX : (M.CENTER | M.VERTEX | M.CORNER | M.SIDE_MIDPOINT);
+                        snapped = this.snapToGrid(foundryPos.x, foundryPos.y, mode, resolution);
+                    }
+                }
+                const snappedWorld = Coordinates.toWorld(snapped.x, snapped.y);
                  
                  // Update Visuals (Optimistic)
                  // We need to update the Line and the Endpoint
@@ -6731,21 +6845,26 @@ export class InteractionManager {
 
     const wallId = object.userData.wallId;
     const isSelected = this.selection.has(wallId);
+    const wallPlaceable = canvas?.walls?.get?.(wallId) || null;
 
     if (event.shiftKey) {
         if (isSelected) {
-             // keep selected or toggle? Standard is toggle or keep.
-             // Let's just ensure it is added.
+             // Keep wall selected on shift-click for parity with current multi-select semantics.
              this.wallManager.select(wallId, true);
+             safeCall(() => wallPlaceable?.control?.({ releaseOthers: false }), 'selectWall.control.shift.keep', Severity.COSMETIC);
         } else {
              this.selection.add(wallId);
              this.wallManager.select(wallId, true);
+             safeCall(() => wallPlaceable?.control?.({ releaseOthers: false }), 'selectWall.control.shift.add', Severity.COSMETIC);
         }
     } else {
         if (!isSelected) {
              this.clearSelection();
              this.selection.add(wallId);
              this.wallManager.select(wallId, true);
+             safeCall(() => wallPlaceable?.control?.({ releaseOthers: true }), 'selectWall.control.primary', Severity.COSMETIC);
+        } else {
+             safeCall(() => wallPlaceable?.control?.({ releaseOthers: true }), 'selectWall.control.reaffirm', Severity.COSMETIC);
         }
     }
   }
@@ -6859,6 +6978,10 @@ export class InteractionManager {
       // Check Wall
       if (this.wallManager.walls.has(id)) {
           this.wallManager.select(id, false);
+          safeCall(() => {
+            const wall = canvas?.walls?.get?.(id);
+            if (wall?.controlled) wall.release();
+          }, 'clearSelection.releaseWall', Severity.COSMETIC);
       }
 
       // Check Tile

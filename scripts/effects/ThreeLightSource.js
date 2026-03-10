@@ -717,9 +717,34 @@ export class ThreeLightSource {
     const colorInput = config.color;
 
     if (colorInput) {
-      if (typeof colorInput === 'string') c.set(colorInput);
-      else if (typeof colorInput === 'number') c.setHex(colorInput);
-      else if (typeof colorInput === 'object' && colorInput.r !== undefined) c.copy(colorInput);
+      try {
+        if (typeof colorInput === 'string') {
+          c.set(colorInput);
+        } else if (typeof colorInput === 'number') {
+          c.setHex(colorInput);
+        } else if (typeof colorInput === 'object') {
+          // Foundry color payloads vary by code path:
+          // - {r,g,b}
+          // - {rgb:[r,g,b]}
+          // - Color-like objects exposing toArray()
+          // - serializable payloads accepted by foundry.utils.Color.from
+          if (Array.isArray(colorInput.rgb)) {
+            const [r = 1, g = 1, b = 1] = colorInput.rgb;
+            c.setRGB(r, g, b);
+          } else if (typeof colorInput.r === 'number' && typeof colorInput.g === 'number' && typeof colorInput.b === 'number') {
+            c.setRGB(colorInput.r, colorInput.g, colorInput.b);
+          } else if (typeof colorInput.toArray === 'function') {
+            const arr = colorInput.toArray();
+            c.setRGB(arr?.[0] ?? 1, arr?.[1] ?? 1, arr?.[2] ?? 1);
+          } else if (foundry?.utils?.Color?.from) {
+            const fc = foundry.utils.Color.from(colorInput);
+            if (fc && typeof fc.r === 'number' && typeof fc.g === 'number' && typeof fc.b === 'number') {
+              c.setRGB(fc.r, fc.g, fc.b);
+            }
+          }
+        }
+      } catch (_) {
+      }
     }
     
     // Reduced saturation boost (was 1.1, causing colors to be ~50% too intense)

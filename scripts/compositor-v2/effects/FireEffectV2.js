@@ -53,6 +53,10 @@ const log = createLogger('FireEffectV2');
 // Ground Z for the bus scene (matches FloorRenderBus GROUND_Z).
 const GROUND_Z = 1000;
 
+// Keep render-order math aligned with FloorRenderBus floor bands.
+const RENDER_ORDER_PER_FLOOR = 10000;
+const OVERHEAD_OFFSET = 5000;
+
 // Spatial bucket size for splitting large fire masks into smaller emitters (px).
 const BUCKET_SIZE = 2000;
 
@@ -287,7 +291,9 @@ export class FireEffectV2 {
     // IMPORTANT (V2): FloorRenderBus tiles use very large renderOrder values
     // (floorIndex * 10000 + sort). If we keep the quarks renderer at ~50 it will
     // render BEFORE tiles and get fully overwritten by tile draws.
-    this._batchRenderer.renderOrder = 200000;
+    // Fire should sit under overhead tiles by default, but above regular tiles
+    // on the active floor band.
+    this._batchRenderer.renderOrder = OVERHEAD_OFFSET - 1;
     this._batchRenderer.frustumCulled = false;
     try {
       if (this._batchRenderer.layers && typeof this._batchRenderer.layers.enable === 'function') {
@@ -532,6 +538,10 @@ export class FireEffectV2 {
    */
   onFloorChange(maxFloorIndex) {
     if (!this._initialized) return;
+
+    // Re-anchor fire draw order to the currently visible floor band so particles
+    // render below overhead tiles instead of globally on top of all tile layers.
+    this._updateBatchRenderOrder(maxFloorIndex);
 
     // Determine which floors should be active.
     const desired = new Set();
@@ -872,6 +882,14 @@ export class FireEffectV2 {
     const maxFloorIndex = Number.isFinite(activeFloor?.index) ? activeFloor.index : 0;
     log.info(`FireEffectV2: _activateCurrentFloor called, activeFloor=${JSON.stringify(activeFloor)}, maxFloorIndex=${maxFloorIndex}`);
     this.onFloorChange(maxFloorIndex);
+  }
+
+  /** Keep batched particle draw order aligned with the active floor band. @private */
+  _updateBatchRenderOrder(maxFloorIndex) {
+    if (!this._batchRenderer) return;
+    const safeFloorIndex = Number.isFinite(Number(maxFloorIndex)) ? Number(maxFloorIndex) : 0;
+    const floorBandStart = safeFloorIndex * RENDER_ORDER_PER_FLOOR;
+    this._batchRenderer.renderOrder = floorBandStart + (OVERHEAD_OFFSET - 1);
   }
 
   /** Add a floor's systems to the BatchedRenderer + scene. @private */

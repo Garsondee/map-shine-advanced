@@ -16,6 +16,10 @@ const log = createLogger('TreeEffectV2');
 
 const GROUND_Z = 1000;
 const TREE_Z_OFFSET = 0.18; // above bushes/specular but still within same floor band
+// Keep in sync with FloorRenderBus / TokenManager ordering.
+const RENDER_ORDER_PER_FLOOR = 10000;
+const TOKEN_RENDER_ORDER_WITHIN_FLOOR = 9900;
+const TREE_RENDER_ORDER_WITHIN_FLOOR = 9950;
 
 export class TreeEffectV2 {
   /**
@@ -57,6 +61,8 @@ export class TreeEffectV2 {
     this._currentWindSpeed = 0.0;
     this._lastFrameTime = 0.0;
     this._hoverHidden = false;
+    this._worldSamplePoint = null;
+    this._localSamplePoint = null;
 
     // Public params (mirrors V1 schema / defaults)
     this.params = {
@@ -396,8 +402,79 @@ export class TreeEffectV2 {
     const tileId = hitObject?.userData?.mapShineTreeTileId || null;
     if (!tileId) return false;
 
+    return this._sampleTileAlphaAtUv(tileId, uv);
+  }
+
+  /**
+   * Option B path: sample canopy mask opacity from a world XY point, independent
+   * from mesh raycast hit/UV reliability.
+   *
+   * @param {number} worldX
+   * @param {number} worldY
+   * @returns {boolean}
+   */
+  isWorldPointOpaque(worldX, worldY) {
+    if (!Number.isFinite(worldX) || !Number.isFinite(worldY)) return false;
+
+    const THREE = window.THREE;
+    if (!THREE) return false;
+
+    if (!this._worldSamplePoint) this._worldSamplePoint = new THREE.Vector3();
+    if (!this._localSamplePoint) this._localSamplePoint = new THREE.Vector3();
+
+    this._worldSamplePoint.set(worldX, worldY, 0.0);
+
+    let topTileId = null;
+    let topUv = null;
+    let topOrder = -Infinity;
+    let topWorldZ = -Infinity;
+
+    for (const [tileId, entry] of this._overlays) {
+      if (tileId?.startsWith('__')) continue;
+      const mesh = entry?.mesh;
+      const geometry = mesh?.geometry;
+      const params = geometry?.parameters;
+      if (!mesh || !params) continue;
+
+      const w = Number(params.width ?? 0);
+      const h = Number(params.height ?? 0);
+      if (!(w > 0 && h > 0)) continue;
+
+      this._localSamplePoint.copy(this._worldSamplePoint);
+      mesh.worldToLocal(this._localSamplePoint);
+
+      const halfW = w * 0.5;
+      const halfH = h * 0.5;
+      const lx = this._localSamplePoint.x;
+      const ly = this._localSamplePoint.y;
+      if (lx < -halfW || lx > halfW || ly < -halfH || ly > halfH) continue;
+
+      const u = (lx + halfW) / w;
+      const v = (ly + halfH) / h;
+      const order = Number.isFinite(mesh.renderOrder) ? mesh.renderOrder : 0;
+      const worldZ = Number.isFinite(mesh.position?.z) ? mesh.position.z : 0;
+      if (order > topOrder || (order === topOrder && worldZ > topWorldZ)) {
+        topOrder = order;
+        topWorldZ = worldZ;
+        topTileId = tileId;
+        topUv = { x: u, y: v };
+      }
+    }
+
+    if (!topTileId || !topUv) return false;
+    return this._sampleTileAlphaAtUv(topTileId, topUv);
+  }
+
+  _sampleTileAlphaAtUv(tileId, uv) {
+    if (!tileId || !uv || !Number.isFinite(uv.x) || !Number.isFinite(uv.y)) return false;
+
     const sample = this._alphaSampleByTileId.get(tileId);
-    if (!sample?.data || !Number.isFinite(sample.width) || !Number.isFinite(sample.height)) return false;
+    if (!sample?.data || !Number.isFinite(sample.width) || !Number.isFinite(sample.height)) {
+      // Fallback: if CPU-side alpha sampling is unavailable (e.g. CORS-tainted image
+      // readback), still allow canopy hover-hide to engage when the ray intersects
+      // the canopy mesh. This preserves expected UX over silently disabling fade.
+      return true;
+    }
 
     const u = Math.min(0.999999, Math.max(0.0, uv.x));
     const v = Math.min(0.999999, Math.max(0.0, uv.y));
@@ -766,17 +843,61 @@ export class TreeEffectV2 {
 
           vec2 shadowDir = normalize(vec2(uSunDir.x, -uSunDir.y));
           if (length(shadowDir) < 0.01) shadowDir = -windDir;
-          vec2 shadowPerp = vec2(-shadowDir.y, shadowDir.x);
           vec2 shadowOffset = shadowDir * uShadowLength;
-          float shadowBlur = uShadowSoftness * 0.0008;
+          float shadowBlur = max(0.0001, uShadowSoftness * 0.0008);
+          vec2 shadowBaseUv = vUv - distortion - shadowOffset;
+          vec2 step1 = vec2(shadowBlur);
+          vec2 step2 = step1 * 2.0;
 
-          float shadowA = 0.0;
-          shadowA += safeAlpha(texture2D(uTreeMask, vUv - distortion - shadowOffset));
-          shadowA += safeAlpha(texture2D(uTreeMask, vUv - distortion - shadowOffset + shadowPerp * shadowBlur));
-          shadowA += safeAlpha(texture2D(uTreeMask, vUv - distortion - shadowOffset - shadowPerp * shadowBlur));
-          shadowA += safeAlpha(texture2D(uTreeMask, vUv - distortion - shadowOffset + shadowDir * shadowBlur));
-          shadowA += safeAlpha(texture2D(uTreeMask, vUv - distortion - shadowOffset - shadowDir * shadowBlur));
-          shadowA = (shadowA / 5.0) * clamp(uShadowOpacity, 0.0, 1.0) * uIntensity * edgeFade * clamp(uHoverFade, 0.0, 1.0);
+          // Kawase-style multi-ring taps: center + near diagonals + far axis + far diagonals.
+          float shadowAccum = 0.0;
+          float shadowWeight = 0.0;
+
+          float tap = safeAlpha(texture2D(uTreeMask, shadowBaseUv));
+          shadowAccum += tap * 0.24;
+          shadowWeight += 0.24;
+
+          tap = safeAlpha(texture2D(uTreeMask, shadowBaseUv + vec2( step1.x,  step1.y)));
+          shadowAccum += tap * 0.12;
+          shadowWeight += 0.12;
+          tap = safeAlpha(texture2D(uTreeMask, shadowBaseUv + vec2(-step1.x,  step1.y)));
+          shadowAccum += tap * 0.12;
+          shadowWeight += 0.12;
+          tap = safeAlpha(texture2D(uTreeMask, shadowBaseUv + vec2( step1.x, -step1.y)));
+          shadowAccum += tap * 0.12;
+          shadowWeight += 0.12;
+          tap = safeAlpha(texture2D(uTreeMask, shadowBaseUv + vec2(-step1.x, -step1.y)));
+          shadowAccum += tap * 0.12;
+          shadowWeight += 0.12;
+
+          tap = safeAlpha(texture2D(uTreeMask, shadowBaseUv + vec2( step2.x, 0.0)));
+          shadowAccum += tap * 0.07;
+          shadowWeight += 0.07;
+          tap = safeAlpha(texture2D(uTreeMask, shadowBaseUv + vec2(-step2.x, 0.0)));
+          shadowAccum += tap * 0.07;
+          shadowWeight += 0.07;
+          tap = safeAlpha(texture2D(uTreeMask, shadowBaseUv + vec2(0.0,  step2.y)));
+          shadowAccum += tap * 0.07;
+          shadowWeight += 0.07;
+          tap = safeAlpha(texture2D(uTreeMask, shadowBaseUv + vec2(0.0, -step2.y)));
+          shadowAccum += tap * 0.07;
+          shadowWeight += 0.07;
+
+          tap = safeAlpha(texture2D(uTreeMask, shadowBaseUv + vec2( step2.x,  step2.y)));
+          shadowAccum += tap * 0.04;
+          shadowWeight += 0.04;
+          tap = safeAlpha(texture2D(uTreeMask, shadowBaseUv + vec2(-step2.x,  step2.y)));
+          shadowAccum += tap * 0.04;
+          shadowWeight += 0.04;
+          tap = safeAlpha(texture2D(uTreeMask, shadowBaseUv + vec2( step2.x, -step2.y)));
+          shadowAccum += tap * 0.04;
+          shadowWeight += 0.04;
+          tap = safeAlpha(texture2D(uTreeMask, shadowBaseUv + vec2(-step2.x, -step2.y)));
+          shadowAccum += tap * 0.04;
+          shadowWeight += 0.04;
+
+          float shadowA = (shadowWeight > 0.0) ? (shadowAccum / shadowWeight) : 0.0;
+          shadowA *= clamp(uShadowOpacity, 0.0, 1.0) * uIntensity * edgeFade * clamp(uHoverFade, 0.0, 1.0);
 
           vec4 treeSample = texture2D(uTreeMask, vUv - distortion);
 
@@ -812,7 +933,16 @@ export class TreeEffectV2 {
     try {
       const baseEntry = this._renderBus?._tiles?.get?.(tileId);
       const baseOrder = Number(baseEntry?.mesh?.renderOrder);
-      if (Number.isFinite(baseOrder)) mesh.renderOrder = baseOrder + 3;
+      const floorOrderBase = Number.isFinite(floorIndex) ? (floorIndex * RENDER_ORDER_PER_FLOOR) : 0;
+      const minTreeOrder = floorOrderBase + TREE_RENDER_ORDER_WITHIN_FLOOR;
+      if (Number.isFinite(baseOrder)) {
+        mesh.renderOrder = Math.max(baseOrder + 3, minTreeOrder);
+      } else {
+        mesh.renderOrder = minTreeOrder;
+      }
+      if (mesh.renderOrder <= floorOrderBase + TOKEN_RENDER_ORDER_WITHIN_FLOOR) {
+        mesh.renderOrder = floorOrderBase + TOKEN_RENDER_ORDER_WITHIN_FLOOR + 1;
+      }
     } catch (_) {}
 
     this._renderBus.addEffectOverlay(`${tileId}_tree`, mesh, floorIndex);

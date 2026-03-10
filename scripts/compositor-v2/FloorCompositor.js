@@ -434,12 +434,87 @@ export class FloorCompositor {
     /** @type {THREE.Mesh|null} Fullscreen quad for blit */
     this._blitQuad = null;
 
+    /** @type {THREE.Scene|null} Scene for compositing PIXI world channel into post chain */
+    this._pixiWorldCompositeScene = null;
+    /** @type {THREE.OrthographicCamera|null} Camera for PIXI world composite */
+    this._pixiWorldCompositeCamera = null;
+    /** @type {THREE.ShaderMaterial|null} Material for base+overlay alpha composite */
+    this._pixiWorldCompositeMaterial = null;
+    /** @type {THREE.Mesh|null} Fullscreen quad for PIXI world composite */
+    this._pixiWorldCompositeQuad = null;
+
+    /** @type {THREE.Scene|null} Scene for rendering PIXI UI channel to screen */
+    this._pixiUiOverlayScene = null;
+    /** @type {THREE.OrthographicCamera|null} Camera for PIXI UI overlay */
+    this._pixiUiOverlayCamera = null;
+    /** @type {THREE.ShaderMaterial|null} Material for PIXI UI overlay */
+    this._pixiUiOverlayMaterial = null;
+    /** @type {THREE.Mesh|null} Fullscreen quad for PIXI UI overlay */
+    this._pixiUiOverlayQuad = null;
+
     /** @type {THREE.Scene|null} Dedicated scene for fog overlay pass */
     this._fogOverlayScene = null;
     /** @type {THREE.OrthographicCamera|null} Camera for fog overlay pass */
     this._fogOverlayCamera = null;
 
     log.debug('FloorCompositor created');
+  }
+
+  /**
+   * Composite PIXI world-channel texture into the post chain using straight-alpha over.
+   * @param {THREE.WebGLRenderTarget} inputRT
+   * @returns {THREE.WebGLRenderTarget}
+   * @private
+   */
+  _compositePixiWorldOverlay(inputRT) {
+    if (!inputRT || !this._pixiWorldCompositeMaterial || !this._postA || !this._postB) return inputRT;
+    const bridge = window.MapShine?.pixiContentLayerBridge ?? null;
+    const overlayTexture = bridge?.getWorldTexture?.() ?? null;
+    if (!overlayTexture) return inputRT;
+
+    const outputRT = (inputRT === this._postA) ? this._postB : this._postA;
+    const renderer = this.renderer;
+    const prevTarget = renderer.getRenderTarget();
+    const prevAutoClear = renderer.autoClear;
+
+    this._pixiWorldCompositeMaterial.uniforms.tBase.value = inputRT.texture;
+    this._pixiWorldCompositeMaterial.uniforms.tOverlay.value = overlayTexture;
+
+    renderer.setRenderTarget(outputRT);
+    renderer.autoClear = true;
+    try {
+      renderer.render(this._pixiWorldCompositeScene, this._pixiWorldCompositeCamera);
+    } finally {
+      renderer.autoClear = prevAutoClear;
+      renderer.setRenderTarget(prevTarget);
+    }
+
+    return outputRT;
+  }
+
+  /**
+   * Render PIXI UI-channel texture above the final composed frame.
+   * @private
+   */
+  _renderPixiUiOverlay() {
+    if (!this._pixiUiOverlayMaterial || !this._pixiUiOverlayScene || !this._pixiUiOverlayCamera) return;
+    const bridge = window.MapShine?.pixiContentLayerBridge ?? null;
+    const overlayTexture = bridge?.getUiTexture?.() ?? null;
+    if (!overlayTexture) return;
+
+    const renderer = this.renderer;
+    const prevTarget = renderer.getRenderTarget();
+    const prevAutoClear = renderer.autoClear;
+    this._pixiUiOverlayMaterial.uniforms.tOverlay.value = overlayTexture;
+
+    renderer.setRenderTarget(null);
+    renderer.autoClear = false;
+    try {
+      renderer.render(this._pixiUiOverlayScene, this._pixiUiOverlayCamera);
+    } finally {
+      renderer.autoClear = prevAutoClear;
+      renderer.setRenderTarget(prevTarget);
+    }
   }
 
   /**
@@ -647,6 +722,80 @@ export class FloorCompositor {
     );
     this._blitQuad.frustumCulled = false;
     this._blitScene.add(this._blitQuad);
+
+    // ── PIXI world-channel composite quad (post-chain injection) ───────────
+    this._pixiWorldCompositeScene = new THREE.Scene();
+    this._pixiWorldCompositeCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+    this._pixiWorldCompositeMaterial = new THREE.ShaderMaterial({
+      uniforms: {
+        tBase: { value: null },
+        tOverlay: { value: null },
+      },
+      vertexShader: /* glsl */`
+        varying vec2 vUv;
+        void main() {
+          vUv = uv;
+          gl_Position = vec4(position.xy, 0.0, 1.0);
+        }
+      `,
+      fragmentShader: /* glsl */`
+        uniform sampler2D tBase;
+        uniform sampler2D tOverlay;
+        varying vec2 vUv;
+        void main() {
+          vec4 base = texture2D(tBase, vUv);
+          vec4 ov = texture2D(tOverlay, vUv);
+          vec3 outRgb = mix(base.rgb, ov.rgb, clamp(ov.a, 0.0, 1.0));
+          gl_FragColor = vec4(outRgb, 1.0);
+        }
+      `,
+      depthTest: false,
+      depthWrite: false,
+      transparent: false,
+      blending: THREE.NoBlending,
+    });
+    this._pixiWorldCompositeMaterial.toneMapped = false;
+    this._pixiWorldCompositeQuad = new THREE.Mesh(
+      new THREE.PlaneGeometry(2, 2),
+      this._pixiWorldCompositeMaterial
+    );
+    this._pixiWorldCompositeQuad.frustumCulled = false;
+    this._pixiWorldCompositeScene.add(this._pixiWorldCompositeQuad);
+
+    // ── PIXI UI-channel overlay quad (rendered above all post FX) ─────────
+    this._pixiUiOverlayScene = new THREE.Scene();
+    this._pixiUiOverlayCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+    this._pixiUiOverlayMaterial = new THREE.ShaderMaterial({
+      uniforms: {
+        tOverlay: { value: null },
+      },
+      vertexShader: /* glsl */`
+        varying vec2 vUv;
+        void main() {
+          vUv = uv;
+          gl_Position = vec4(position.xy, 0.0, 1.0);
+        }
+      `,
+      fragmentShader: /* glsl */`
+        uniform sampler2D tOverlay;
+        varying vec2 vUv;
+        void main() {
+          vec4 c = texture2D(tOverlay, vUv);
+          gl_FragColor = vec4(c.rgb, c.a);
+        }
+      `,
+      depthTest: false,
+      depthWrite: false,
+      transparent: true,
+      blending: THREE.NormalBlending,
+    });
+    this._pixiUiOverlayMaterial.toneMapped = false;
+    this._pixiUiOverlayQuad = new THREE.Mesh(
+      new THREE.PlaneGeometry(2, 2),
+      this._pixiUiOverlayMaterial
+    );
+    this._pixiUiOverlayQuad.frustumCulled = false;
+    this._pixiUiOverlayScene.add(this._pixiUiOverlayQuad);
 
     // Fog overlay scene is rendered after final blit with autoClear=false.
     this._fogOverlayScene = new THREE.Scene();
@@ -915,6 +1064,13 @@ export class FloorCompositor {
     if (!this._initialized) {
       log.warn('FloorCompositor.render called before initialize()');
       return;
+    }
+
+    // Update PIXI-content bridge once per compositor frame.
+    try {
+      const bridge = window.MapShine?.pixiContentLayerBridge ?? null;
+      bridge?.update?.();
+    } catch (_) {
     }
 
     // Keep map-point-driven effects (flies/lightning/candles) wired even if
@@ -1203,6 +1359,14 @@ export class FloorCompositor {
     }
     if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: buildingShadows.render DONE'); } catch (_) {} }
 
+    // Mirror runtime tile sprite opacity (hover/occlusion fades) into bus tile
+    // materials before the main albedo render, but after overhead shadow capture.
+    // This keeps roof/tree-style shadows stable while allowing tiles + overlays
+    // (specular/fluid/etc.) to fade with hover-hidden state.
+    try {
+      this._renderBus?.syncRuntimeTileState?.();
+    } catch (_) {}
+
     // ── Step 1: Render bus scene → sceneRT ───────────────────────────────
     // The bus scene contains albedo tiles + specular/fire overlays.
     // Window light is NOT in the bus scene — it renders after lighting.
@@ -1258,6 +1422,10 @@ export class FloorCompositor {
     if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: lighting.render(sceneRT→postA) DONE'); } catch (_) {} }
 
     currentInput = this._postA;
+
+    // PIXI world-channel composite: world-anchored bridge content that should
+    // continue through the color/post pipeline.
+    currentInput = this._compositePixiWorldOverlay(currentInput);
 
     // Sky color grading pass (time-of-day atmospheric grading). Ping-pongs.
     if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: skyColor.render'); } catch (_) {} }
@@ -1452,6 +1620,9 @@ export class FloorCompositor {
     if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: lateOverlay.render'); } catch (_) {} }
     this._renderLateWorldOverlay();
     if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: lateOverlay.render DONE'); } catch (_) {} }
+
+    // PIXI UI-channel overlay: render last so it remains above bloom/fog/lens.
+    this._renderPixiUiOverlay();
 
     if (_dbgStages) {
       this._debugFirstFrameStagesLogged = true;
@@ -1943,10 +2114,22 @@ export class FloorCompositor {
     // Dispose blit resources.
     try { this._blitMaterial?.dispose(); } catch (_) {}
     try { this._blitQuad?.geometry?.dispose(); } catch (_) {}
+    try { this._pixiWorldCompositeMaterial?.dispose?.(); } catch (_) {}
+    try { this._pixiWorldCompositeQuad?.geometry?.dispose?.(); } catch (_) {}
+    try { this._pixiUiOverlayMaterial?.dispose?.(); } catch (_) {}
+    try { this._pixiUiOverlayQuad?.geometry?.dispose?.(); } catch (_) {}
     this._blitScene = null;
     this._blitCamera = null;
     this._blitMaterial = null;
     this._blitQuad = null;
+    this._pixiWorldCompositeScene = null;
+    this._pixiWorldCompositeCamera = null;
+    this._pixiWorldCompositeMaterial = null;
+    this._pixiWorldCompositeQuad = null;
+    this._pixiUiOverlayScene = null;
+    this._pixiUiOverlayCamera = null;
+    this._pixiUiOverlayMaterial = null;
+    this._pixiUiOverlayQuad = null;
     this._fogOverlayScene = null;
     this._fogOverlayCamera = null;
 

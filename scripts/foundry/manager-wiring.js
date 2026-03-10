@@ -76,6 +76,7 @@ export function wireMapPointsToEffects(effectMap, mapPointsManager) {
  * @param {Object} refs.enhancedLightIconManager
  * @param {Object} refs.enhancedLightInspector
  * @param {Object} refs.interactionManager
+ * @param {Object} refs.mouseStateManager
  * @param {Object} refs.overlayUIManager
  * @param {Object} refs.lightEditor
  * @param {Object} refs.gridRenderer
@@ -121,6 +122,7 @@ export function exposeGlobals(mapShine, refs) {
     'tokenManager', 'tokenMovementManager', 'tileManager', 'wallManager', 'doorMeshManager',
     'drawingManager', 'noteManager', 'templateManager', 'lightIconManager',
     'enhancedLightIconManager', 'enhancedLightInspector', 'interactionManager',
+    'mouseStateManager',
     'overlayUIManager', 'lightEditor', 'gridRenderer', 'mapPointsManager',
     'tileMotionManager',
     'weatherController', 'renderLoop', 'sceneDebug', 'controlsIntegration',

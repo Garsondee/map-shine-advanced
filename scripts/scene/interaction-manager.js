@@ -13,6 +13,7 @@ import { MapPointDrawHandler } from './map-point-interaction.js';
 import { LightInteractionHandler } from './light-interaction.js';
 import { SelectionBoxHandler } from './selection-box-interaction.js';
 import { TokenSelectionController } from './token-selection-controller.js';
+import { MouseStateManager } from './mouse-state-manager.js';
 import { safeCall, safeDispose, Severity } from '../core/safe-call.js';
 import { readWallHeightFlags, readTileLevelsFlags, tileHasLevelsRange, isLevelsEnabledForScene } from '../foundry/levels-scene-flags.js';
 import { applyAmbientLightLevelDefaults, applyAmbientSoundLevelDefaults, applyWallLevelDefaults } from '../foundry/levels-create-defaults.js';
@@ -42,6 +43,12 @@ export class InteractionManager {
     this.wallManager = wallManager;
     this.lightIconManager = lightIconManager;
     this.soundIconManager = soundIconManager;
+
+    // Centralized cursor/pointer state and coordinate conversion service.
+    this.mouseStateManager = new MouseStateManager({
+      canvasElement: this.canvasElement,
+      sceneComposer: this.sceneComposer,
+    });
 
     /**
      * Sub-rate update lane — HUD positioning and gizmo updates are smooth at 30 Hz.
@@ -901,6 +908,24 @@ export class InteractionManager {
       width: rect.width,
       height: rect.height
     });
+  }
+
+  /**
+   * Update the active render canvas reference and refresh cursor conversion cache.
+   * @param {HTMLElement} canvasElement
+   */
+  setCanvasElement(canvasElement) {
+    this.canvasElement = canvasElement;
+    this.mouseStateManager?.setCanvasElement?.(canvasElement);
+  }
+
+  /**
+   * Update scene composer dependency used for camera-based cursor projection.
+   * @param {object} sceneComposer
+   */
+  setSceneComposer(sceneComposer) {
+    this.sceneComposer = sceneComposer;
+    this.mouseStateManager?.setSceneComposer?.(sceneComposer);
   }
 
   _consumeKeyEvent(event) {
@@ -1849,6 +1874,12 @@ export class InteractionManager {
    */
   onDoubleClick(event) {
     try {
+        // Drawings are fully Foundry-native PIXI workflows. Our global capture
+        // listener must never process double-clicks in this context.
+        if (this._isDrawingsContextActive()) {
+          return;
+        }
+
         const isTilesContextActive = this._isTilesLayerActive();
         if (this._isEventFromUI(event)) {
           const hardUiBlocker = this._isHardUIInteractionEvent(event);
@@ -2219,6 +2250,20 @@ export class InteractionManager {
       || sceneControlName === 'sound'
       || sceneControlLayer === 'sounds'
       || sceneControlLayer === 'sound';
+  }
+
+  _isDrawingsContextActive() {
+    if (canvas?.drawings?.active) return true;
+    const { optionsName, name, ctor, sceneControlName, sceneControlLayer } = this._getActiveLayerMeta();
+    return optionsName === 'drawings'
+      || optionsName === 'drawing'
+      || name === 'drawings'
+      || name === 'drawing'
+      || ctor === 'drawingslayer'
+      || sceneControlName === 'drawings'
+      || sceneControlName === 'drawing'
+      || sceneControlLayer === 'drawings'
+      || sceneControlLayer === 'drawing';
   }
 
   _isWallDrawTool(toolName) {
@@ -2728,6 +2773,12 @@ export class InteractionManager {
    */
   onPointerDown(event) {
     try {
+        // Drawings are fully Foundry-native PIXI workflows. Since we listen in
+        // capture phase on window, hard-bypass all Three interaction logic here.
+        if (this._isDrawingsContextActive()) {
+          return;
+        }
+
         const isTilesContextActive = this._isTilesLayerActive();
         const isUiEvent = this._isEventFromUI(event);
         if (isUiEvent) {
@@ -3024,6 +3075,7 @@ export class InteractionManager {
 
         // Handle Right Click (Potential HUD or Door Lock/Unlock)
         if (event.button === 2) {
+            const isWallLayerContext = this._isWallsContextActive();
             // Toggle Foundry light disable via MapShine icons (so disabled lights can be re-enabled).
             safeCall(() => {
               const isLightingLayer = this._isLightingContextActive();
@@ -3067,7 +3119,7 @@ export class InteractionManager {
             }
             
             // Process door interaction if found
-            if (doorControl && game.user.isGM) {
+            if (doorControl && game.user.isGM && !isWallLayerContext) {
                 this.handleDoorRightClick(doorControl, event);
                 event.preventDefault();
                 event.stopPropagation();
@@ -3166,7 +3218,7 @@ export class InteractionManager {
           return;
         }
 
-        const doorIntersects = this.raycaster.intersectObject(wallGroup, true);
+        const doorIntersects = isWallLayer ? [] : this.raycaster.intersectObject(wallGroup, true);
         if (doorIntersects.length > 0) {
             let doorControl = null;
 
@@ -3182,7 +3234,7 @@ export class InteractionManager {
                 if (doorControl) break;
             }
 
-            if (doorControl) {
+            if (doorControl && !isWallLayer) {
                 this.handleDoorClick(doorControl, event);
                 event.preventDefault();
                 event.stopPropagation();
@@ -3200,37 +3252,77 @@ export class InteractionManager {
         });
         
         if (wallIntersects.length > 0) {
-            // Sort by distance is default
-            const hit = wallIntersects[0];
-            let object = hit.object;
-            
-            // Traverse up to find userData if needed (e.g. door parts)
-            let interactable = null;
-            let type = null;
-            
-            while (object && object !== wallGroup) {
-                if (object.userData && object.userData.type) {
-                    interactable = object;
-                    type = object.userData.type;
-                    break;
+            // Prefer endpoints over broad hitboxes to match Foundry's edit behavior.
+            let candidate = null;
+            let candidateType = null;
+            const priority = {
+              wallEndpoint: 3,
+              wallEndpointOuter: 3,
+              wallLine: 2,
+              wallLineBg: 2,
+              wallHitbox: 1,
+              ...(isWallLayer ? {} : { doorControl: 0 })
+            };
+            const selectedWallIds = new Set(
+              [...(this.selection || [])]
+                .map((id) => String(id || ''))
+                .filter((id) => !!id && this.wallManager?.walls?.has?.(id))
+            );
+            const controlledWallIds = new Set(
+              (canvas?.walls?.controlled || [])
+                .map((wall) => String(wall?.id || wall?.document?.id || ''))
+                .filter(Boolean)
+            );
+            const preferredWallId = selectedWallIds.values().next().value || controlledWallIds.values().next().value || null;
+            const scoreHit = (type, object) => {
+              let score = (priority[type] ?? -1) * 100;
+              if (type === 'wallEndpoint' || type === 'wallEndpointOuter') {
+                const wallId = String(object?.userData?.wallId || '');
+                if (wallId && preferredWallId && wallId === preferredWallId) score += 30;
+                if (wallId && selectedWallIds.has(wallId)) score += 20;
+                if (wallId && controlledWallIds.has(wallId)) score += 10;
+              }
+              return score;
+            };
+
+            for (const hit of wallIntersects) {
+              let object = hit.object;
+              while (object && object !== wallGroup) {
+                const type = object?.userData?.type;
+                if (!type) {
+                  object = object.parent;
+                  continue;
                 }
-                object = object.parent;
+                if (!(type in priority)) {
+                  object = object.parent;
+                  continue;
+                }
+
+                const candidateScore = scoreHit(type, object);
+                const currentScore = candidate ? scoreHit(candidateType, candidate) : -Infinity;
+                if (!candidate || (candidateScore > currentScore)) {
+                  candidate = object;
+                  candidateType = type;
+                }
+                break;
+              }
+              if (candidateType === 'wallEndpoint' || candidateType === 'wallEndpointOuter') break;
             }
-            
-            if (interactable) {
-                if (type === 'doorControl') {
-                     this.handleDoorClick(interactable, event);
-                     return;
-                }
-                
-                if (type === 'wallEndpoint') {
-                     this.startWallDrag(interactable, event);
+
+            if (candidate) {
+                if (candidateType === 'doorControl') {
+                     this.handleDoorClick(candidate, event);
                      return;
                 }
 
-                if (type === 'wallLine' || type === 'wallHitbox') {
+                if (candidateType === 'wallEndpoint' || candidateType === 'wallEndpointOuter') {
+                     this.startWallDrag(candidate, event);
+                     return;
+                }
+
+                if (candidateType === 'wallLine' || candidateType === 'wallLineBg' || candidateType === 'wallHitbox') {
                     if (game.user.isGM || this._isWallsContextActive()) {
-                        this.selectWall(interactable, event);
+                        this.selectWall(candidate, event);
                         return;
                     }
                 }
@@ -3785,33 +3877,7 @@ export class InteractionManager {
   }
 
   _getCanvasRectCached(force = false) {
-    const now = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
-    const cache = this._canvasRectCache;
-    const maxAge = (typeof this._canvasRectCacheMaxAgeMs === 'number') ? this._canvasRectCacheMaxAgeMs : 250;
-
-    if (!force && cache && cache.width > 0 && cache.height > 0 && (now - (cache.ts || 0)) < maxAge) {
-      return cache;
-    }
-
-    const rect = safeCall(() => this.canvasElement?.getBoundingClientRect?.(), 'getCanvasRect', Severity.COSMETIC, { fallback: null });
-
-    if (rect) {
-      cache.left = rect.left;
-      cache.top = rect.top;
-      cache.width = rect.width;
-      cache.height = rect.height;
-    }
-
-    // Fallback if canvas rect is invalid (e.g. not yet laid out)
-    if (!cache.width || !cache.height) {
-      cache.left = 0;
-      cache.top = 0;
-      cache.width = window.innerWidth;
-      cache.height = window.innerHeight;
-    }
-
-    cache.ts = now;
-    return cache;
+    return this.mouseStateManager?.getCanvasRectCached?.(force) || this._canvasRectCache;
   }
 
   // ── Light gizmo/query methods — delegated to LightInteractionHandler ──────
@@ -3997,7 +4063,20 @@ export class InteractionManager {
     // Raycaster sees correct matrixWorld values.
     safeCall(() => this.sceneComposer?.scene?.updateMatrixWorld?.(true), 'hover.updateSceneMatrix', Severity.COSMETIC);
 
-    this.updateMouseCoords(event);
+    // Keep the central mouse snapshot fresh for this hover sample and derive all
+    // downstream tests from this single source.
+    safeCall(() => {
+      this.mouseStateManager?.updateFromEvent?.(event, {
+        isFromUI: this._isEventFromUI(event),
+      });
+    }, 'hover.updateMouseSnapshot', Severity.COSMETIC);
+
+    const mouseState = this.getMouseState();
+
+    this.updateMouseCoords({
+      clientX: Number.isFinite(mouseState.clientX) ? mouseState.clientX : event.clientX,
+      clientY: Number.isFinite(mouseState.clientY) ? mouseState.clientY : event.clientY,
+    });
     this.raycaster.setFromCamera(this.mouse, this.sceneComposer.camera);
 
     let hitFound = false;
@@ -4058,7 +4137,7 @@ export class InteractionManager {
 
     // Tree canopy hover-hide must be evaluated independently from wall/tile/token
     // hit priority so early returns do not suppress canopy fade updates.
-    safeCall(() => this._updateTreeCanopyHoverState(event), 'hover.treeCanopy', Severity.COSMETIC);
+    safeCall(() => this._updateTreeCanopyHoverState(mouseState), 'hover.treeCanopy', Severity.COSMETIC);
 
     // 1. Check Overhead Tiles (for hover-to-hide behavior)
     // IMPORTANT: This must run BEFORE wall hover detection.
@@ -4414,7 +4493,7 @@ export class InteractionManager {
    * @param {PointerEvent} event
    * @private
    */
-  _updateTreeCanopyHoverState(event) {
+  _updateTreeCanopyHoverState(mouseState) {
     const { treeEffect, treeMeshes } = this._getTreeCanopyHoverTargets();
     if (!treeEffect || !Array.isArray(treeMeshes) || treeMeshes.length === 0) {
       if (this.hoveringTreeCanopy) this._setTreeCanopyHoverHidden(false);
@@ -4424,11 +4503,12 @@ export class InteractionManager {
     let opaqueHit = false;
 
     // Option B: direct world-point opacity lookup (independent of ray-hit ordering).
-    if (typeof treeEffect.isWorldPointOpaque === 'function' && Number.isFinite(event?.clientX) && Number.isFinite(event?.clientY)) {
-      const worldPos = this.screenToWorld(event.clientX, event.clientY);
-      if (worldPos) {
-        opaqueHit = !!treeEffect.isWorldPointOpaque(worldPos.x, worldPos.y);
-      }
+    const worldPos = (Number.isFinite(mouseState?.worldX) && Number.isFinite(mouseState?.worldY))
+      ? { x: mouseState.worldX, y: mouseState.worldY }
+      : null;
+
+    if (typeof treeEffect.isWorldPointOpaque === 'function' && worldPos) {
+      opaqueHit = !!treeEffect.isWorldPointOpaque(worldPos.x, worldPos.y);
     }
 
     // Fallback path: legacy raycast + UV test.
@@ -4550,6 +4630,11 @@ export class InteractionManager {
    */
   onPointerMove(event) {
     try {
+        // Drawings drag/preview lifecycle is owned by Foundry DrawingsLayer.
+        if (this._isDrawingsContextActive()) {
+          return;
+        }
+
         if (
           this._isEventFromUI(event) &&
           !this.dragState?.active &&
@@ -4565,25 +4650,23 @@ export class InteractionManager {
           return;
         }
 
-        // Track last pointer position for paste placement.
-        // Only update when the pointer is actually over the canvas to avoid using
-        // stale values from dragging UI.
+        // Update centralized pointer snapshot once per pointer event.
+        // This is the authoritative mouse source for hover/paste/Foundry cursor sync.
         safeCall(() => {
-          const rect = this.canvasElement.getBoundingClientRect();
-          const inside = event.clientX >= rect.left && event.clientX <= rect.right && event.clientY >= rect.top && event.clientY <= rect.bottom;
-          if (inside && !this._isEventFromUI(event)) {
-            this._lastPointerClientX = event.clientX;
-            this._lastPointerClientY = event.clientY;
+          const pointer = this.mouseStateManager?.updateFromEvent?.(event, {
+            isFromUI: this._isEventFromUI(event),
+          }) || null;
+          if (pointer?.insideCanvas && !pointer?.isFromUI) {
+            this._lastPointerClientX = pointer.clientX;
+            this._lastPointerClientY = pointer.clientY;
 
             // WP-7: Sync canvas.mousePosition and broadcast cursor activity
             // when Three.js owns input, mirroring ControlsLayer._onMouseMove.
             const now = performance.now();
             if (now - this._lastCursorBroadcastMs >= this._cursorBroadcastIntervalMs) {
               this._lastCursorBroadcastMs = now;
-              const groundZ = this.sceneComposer?.groundZ ?? 0;
-              const wp = this.viewportToWorld(event.clientX, event.clientY, groundZ);
-              if (wp) {
-                const fp = Coordinates.toFoundry(wp.x, wp.y);
+              if (Number.isFinite(pointer.foundryX) && Number.isFinite(pointer.foundryY)) {
+                const fp = { x: pointer.foundryX, y: pointer.foundryY };
                 // Keep canvas.mousePosition in sync so Foundry features
                 // (cursor display, ruler tooltips) that read it stay correct.
                 if (canvas?.mousePosition) {
@@ -4803,8 +4886,8 @@ export class InteractionManager {
         // Case 0.5: Wall Endpoint Drag
         if (this.dragState.active && this.dragState.mode === 'wallEndpoint') {
             this.updateMouseCoords(event);
-            const worldPos = this.viewportToWorld(event.clientX, event.clientY, 0); // Walls are at Z=0? No, Z=3. But we project to Z=0 plane usually for grid.
-            // Let's project to Z=0 or Z=3.
+            const targetZ = this.sceneComposer?.groundZ ?? 0;
+            const worldPos = this.viewportToWorld(event.clientX, event.clientY, targetZ);
             if (worldPos) {
                  const foundryPos = Coordinates.toFoundry(worldPos.x, worldPos.y);
                  let snapped;
@@ -4835,6 +4918,7 @@ export class InteractionManager {
                  if (!wallGroup) return;
 
                  const wallMesh = wallGroup.children.find(c => c.userData.type === 'wallLine');
+                 const wallLineBg = wallGroup.children.find(c => c.userData.type === 'wallLineBg');
                  const endpoint = this.dragState.object;
                  
                  // Local Z should be 0 relative to wallGroup
@@ -4863,6 +4947,12 @@ export class InteractionManager {
                          const originalLength = wallMesh.geometry.parameters.width;
                          if (originalLength > 0) {
                              wallMesh.scale.setX(dist / originalLength);
+                         }
+
+                         if (wallLineBg) {
+                             wallLineBg.position.copy(wallMesh.position);
+                             wallLineBg.rotation.copy(wallMesh.rotation);
+                             wallLineBg.scale.copy(wallMesh.scale);
                          }
                          
                          // Update Hitbox
@@ -5243,6 +5333,11 @@ export class InteractionManager {
         // WP-3: Cancel ping long-press on any pointer up.
         this._cancelPingLongPress();
 
+        // Drawings completion/cancel is handled by Foundry DrawingsLayer.
+        if (this._isDrawingsContextActive()) {
+          return;
+        }
+
         if (
           this._isEventFromUI(event) &&
           !this.dragState?.active &&
@@ -5496,12 +5591,14 @@ export class InteractionManager {
               // Update document
               // doc.c is [x0, y0, x1, y1]
               const c = [...wall.document.c];
+              const roundedX = Math.round(foundryPos.x);
+              const roundedY = Math.round(foundryPos.y);
               if (index === 0) {
-                  c[0] = foundryPos.x;
-                  c[1] = foundryPos.y;
+                  c[0] = roundedX;
+                  c[1] = roundedY;
               } else {
-                  c[2] = foundryPos.x;
-                  c[3] = foundryPos.y;
+                  c[2] = roundedX;
+                  c[3] = roundedY;
               }
               
               await safeCall(async () => {
@@ -5591,11 +5688,16 @@ export class InteractionManager {
           const startF = Coordinates.toFoundry(this.wallDraw.start.x, this.wallDraw.start.y);
           const endF = Coordinates.toFoundry(this.wallDraw.current.x, this.wallDraw.current.y);
           
+          const startXi = Math.round(startF.x);
+          const startYi = Math.round(startF.y);
+          const endXi = Math.round(endF.x);
+          const endYi = Math.round(endF.y);
+
           // Ignore zero-length walls
-          if (startF.x === endF.x && startF.y === endF.y) return;
+          if (startXi === endXi && startYi === endYi) return;
           
           // Prepare Data based on tool
-          const data = this.getWallData(this.wallDraw.type, [startF.x, startF.y, endF.x, endF.y]);
+          const data = this.getWallData(this.wallDraw.type, [startXi, startYi, endXi, endYi]);
           
           await safeCall(async () => {
             await canvas.scene.createEmbeddedDocuments('Wall', [data]);
@@ -6141,7 +6243,10 @@ export class InteractionManager {
    * @private
    */
   getWallData(tool, coords) {
-    const data = { c: coords };
+    const intCoords = Array.isArray(coords)
+      ? coords.map((v) => Math.round(Number(v) || 0))
+      : [0, 0, 0, 0];
+    const data = { c: intCoords };
     
     // Defaults: move=20 (NORMAL), sight=20 (NORMAL), door=0 (NONE)
     // Constants from Foundry source or approximations
@@ -6186,6 +6291,67 @@ export class InteractionManager {
     applyWallLevelDefaults(data, { scene: canvas?.scene });
     
     return data;
+  }
+
+  /**
+   * Handle key down (delete)
+   * @param {KeyboardEvent} event 
+   */
+  async _pasteWallsWithIntegerCoords(event) {
+    const wallsLayer = canvas?.walls;
+    const clipboard = wallsLayer?.clipboard;
+    const objects = Array.isArray(clipboard?.objects) ? clipboard.objects : [];
+    if (!wallsLayer || !objects.length) return false;
+
+    // Keep cut-paste on Foundry default path for safety; only sanitize copy-paste.
+    if (clipboard?.cut) return false;
+
+    const origin = wallsLayer.constructor?.placeableClass?._getCopiedObjectsOrigin?.(objects);
+    if (!origin) return false;
+
+    const sceneRect = canvas?.dimensions?.sceneRect || canvas?.dimensions?.rect || null;
+    const fallbackMouseX = sceneRect ? (Number(sceneRect.x) + (Number(sceneRect.width) * 0.5)) : 0;
+    const fallbackMouseY = sceneRect ? (Number(sceneRect.y) + (Number(sceneRect.height) * 0.5)) : 0;
+
+    // Use the latest pointer location over the Three canvas for paste origin.
+    // This matches light paste behavior and avoids stale/invalid canvas.mousePosition.
+    let pasteF = null;
+    if (Number.isFinite(this._lastPointerClientX) && Number.isFinite(this._lastPointerClientY)) {
+      const world = this.screenToWorld(this._lastPointerClientX, this._lastPointerClientY);
+      if (world) pasteF = Coordinates.toFoundry(world.x, world.y);
+    }
+    if (!pasteF) {
+      const rawMouseX = Number(canvas?.mousePosition?.x);
+      const rawMouseY = Number(canvas?.mousePosition?.y);
+      pasteF = {
+        x: Number.isFinite(rawMouseX) ? rawMouseX : fallbackMouseX,
+        y: Number.isFinite(rawMouseY) ? rawMouseY : fallbackMouseY
+      };
+    }
+
+    const offset = { x: pasteF.x - origin.x, y: pasteF.y - origin.y };
+    const data = [];
+    for (const object of objects) {
+      const pasted = object?._pasteObject?.(offset, { hidden: !!event?.altKey, snap: !event?.shiftKey });
+      if (!pasted) continue;
+      if (Array.isArray(pasted.c) && pasted.c.length >= 4) {
+        const sourceC = Array.isArray(object?.document?.c) ? object.document.c : [0, 0, 0, 0];
+        pasted.c = pasted.c.slice(0, 4).map((v, i) => {
+          const candidate = Number(v);
+          if (Number.isFinite(candidate)) return Math.round(candidate);
+          const fallback = Number(sourceC[i]);
+          return Number.isFinite(fallback) ? Math.round(fallback) : 0;
+        });
+      }
+      data.push(pasted);
+    }
+    if (!data.length) return false;
+
+    const allowed = Hooks.call('pasteWall', objects, data, { cut: false });
+    if (!allowed) return true;
+
+    await canvas.scene.createEmbeddedDocuments('Wall', data);
+    return true;
   }
 
   /**
@@ -6313,11 +6479,13 @@ export class InteractionManager {
       return;
     }
 
-    // Copy/Paste for Three-native lights.
+    // Copy for Three-native lights. If no light selection is present, allow
+    // Foundry's active layer copy flow (e.g. walls) to handle Ctrl/Cmd+C.
     if (isMod && key === 'c') {
+      const selectedLights = this._getSelectedLights();
+      if (!selectedLights.length) return;
       safeCall(async () => {
-        const selected = this._getSelectedLights();
-        if (!selected.length) return;
+        const selected = selectedLights;
 
         if (selected.length === 1) {
           const sel = selected[0];
@@ -6441,9 +6609,25 @@ export class InteractionManager {
     }
 
     if (isMod && key === 'v') {
+      if (this._isWallsContextActive()) {
+        const handled = await safeCall(
+          async () => this._pasteWallsWithIntegerCoords(event),
+          'onKeyDown.pasteWalls',
+          Severity.COSMETIC,
+          { fallback: false }
+        );
+        if (handled) {
+          this._consumeKeyEvent(event);
+          return;
+        }
+      }
+
+      const clip = this._lightClipboard;
+      const canHandleLightPaste = !!(clip && (clip.kind === 'foundry' || clip.kind === 'enhanced' || clip.kind === 'multi'));
+      if (!canHandleLightPaste) return;
       safeCall(async () => {
         const clip = this._lightClipboard;
-        if (!clip || !clip.kind || !clip.data) return;
+        if (!clip || !clip.kind) return;
 
         const canEditScene = safeCall(() => {
             if (!canvas?.scene || !game?.user) return false;
@@ -6726,9 +6910,11 @@ export class InteractionManager {
    * @param {PointerEvent} event 
    */
   updateMouseCoords(event) {
-    const rect = this._getCanvasRectCached();
-    this.mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
-    this.mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+    if (!event) return;
+    const ndc = this.mouseStateManager?.clientToNdc?.(event.clientX, event.clientY) || null;
+    if (!ndc) return;
+    this.mouse.x = ndc.x;
+    this.mouse.y = ndc.y;
   }
 
   /**
@@ -6739,33 +6925,7 @@ export class InteractionManager {
    * @returns {THREE.Vector3|null} Intersection point or null if no intersection
    */
   viewportToWorld(clientX, clientY, targetZ = 0) {
-    // updateMouseCoords expects an event-like object with clientX/Y
-    // We can just reuse the logic here or call updateMouseCoords if we construct a fake event
-    // But easier to just recalculate NDC directly since we have the raw coords
-    const rect = this._getCanvasRectCached();
-    const ndcX = ((clientX - rect.left) / rect.width) * 2 - 1;
-    const ndcY = -((clientY - rect.top) / rect.height) * 2 + 1;
-    
-    const THREE = window.THREE;
-    const camera = this.sceneComposer.camera;
-    
-    if (!camera) return null;
-
-    // Use the class raycaster to ensure consistency with selection logic
-    // (avoiding manual unproject which might differ slightly)
-    this.mouse.set(ndcX, ndcY);
-    this.raycaster.setFromCamera(this.mouse, camera);
-
-    // Reuse cached plane + target to avoid per-call allocations.
-    const plane = this._viewportToWorldPlane;
-    if (this._viewportToWorldLastZ !== targetZ) {
-      plane.constant = -targetZ;
-      this._viewportToWorldLastZ = targetZ;
-    }
-    const target = this._viewportToWorldTarget;
-    const intersection = this.raycaster.ray.intersectPlane(plane, target);
-    
-    return intersection || null;
+    return this.mouseStateManager?.viewportToWorld?.(clientX, clientY, targetZ) || null;
   }
 
   /**
@@ -6775,10 +6935,25 @@ export class InteractionManager {
    * @returns {{x: number, y: number}|null} World coordinates or null
    */
   screenToWorld(clientX, clientY) {
-    const groundZ = this.sceneComposer?.groundZ ?? 1000;
-    const worldPos = this.viewportToWorld(clientX, clientY, groundZ);
-    if (!worldPos) return null;
-    return { x: worldPos.x, y: worldPos.y };
+    return this.mouseStateManager?.screenToWorld?.(clientX, clientY) || null;
+  }
+
+  /**
+   * Read the latest centralized mouse snapshot.
+   * @returns {{clientX:number|null,clientY:number|null,insideCanvas:boolean,isFromUI:boolean,worldX:number|null,worldY:number|null,foundryX:number|null,foundryY:number|null,ts:number}}
+   */
+  getMouseState() {
+    return this.mouseStateManager?.getLastPointer?.() || {
+      clientX: null,
+      clientY: null,
+      insideCanvas: false,
+      isFromUI: false,
+      worldX: null,
+      worldY: null,
+      foundryX: null,
+      foundryY: null,
+      ts: 0,
+    };
   }
 
   // ── World Pick / Observer API ────────────────────────────────────────────

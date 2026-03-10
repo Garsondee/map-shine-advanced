@@ -98,9 +98,21 @@ export class InputRouter {
    */
   setMode(mode, reason = '') {
     const isV2Active = !!window.MapShine?.__v2Active;
-    const pixiVisualOpacity = isV2Active ? '0' : '1';
     const activeControl = String(ui?.controls?.control?.name ?? ui?.controls?.activeControl ?? '').toLowerCase();
-    const activeTool = String(ui?.controls?.tool?.name ?? ui?.controls?.activeTool ?? '').toLowerCase();
+    const activeTool = String(ui?.controls?.tool?.name ?? ui?.controls?.activeTool ?? game?.activeTool ?? '').toLowerCase();
+    const activeLayerName = String(canvas?.activeLayer?.options?.name ?? canvas?.activeLayer?.name ?? '').toLowerCase();
+    const activeLayerCtor = String(canvas?.activeLayer?.constructor?.name ?? '').toLowerCase();
+    const activeControlLayer = String(ui?.controls?.control?.layer ?? '').toLowerCase();
+    const isDrawingsContext =
+      !!canvas?.drawings?.active
+      || activeControl === 'drawings'
+      || activeControl === 'drawing'
+      || activeControlLayer === 'drawings'
+      || activeControlLayer === 'drawing'
+      || activeLayerName === 'drawings'
+      || activeLayerName === 'drawing'
+      || activeLayerCtor === 'drawingslayer';
+    const pixiVisualOpacity = (isV2Active && !isDrawingsContext) ? '0' : '1';
     // Only force PIXI overlay when actually in PIXI mode (for layers we haven't
     // replaced yet like drawings, regions, sounds, notes, templates).
     // Walls, lighting, and tokens are fully Three.js-native now.
@@ -241,7 +253,7 @@ export class InputRouter {
       Hooks.callAll('mapShineInputModeChange', { 
         mode, 
         layer: canvas.activeLayer?.constructor?.name,
-        tool: ui.controls?.tool?.name ?? ui.controls?.activeTool,
+        tool: ui.controls?.tool?.name ?? ui.controls?.activeTool ?? game?.activeTool,
         reason 
       });
       
@@ -274,7 +286,7 @@ export class InputRouter {
     
     // Defensive: ui.controls may not exist during initialization
     // This prevents the "toolclip" error when Foundry is still setting up
-    const activeTool = ui?.controls?.tool?.name ?? ui?.controls?.activeTool ?? '';
+    const activeTool = ui?.controls?.tool?.name ?? ui?.controls?.activeTool ?? game?.activeTool ?? '';
     
     // Foundry-native token edit tools (select/target/ruler) are PIXI workflows
     // and rely on board-level drag/select handling.
@@ -393,7 +405,7 @@ export class InputRouter {
     
     const newMode = this.determineMode();
     const layer = canvas.activeLayer?.constructor?.name || 'unknown';
-    const tool = ui.controls?.tool?.name ?? ui.controls?.activeTool ?? 'unknown';
+    const tool = ui.controls?.tool?.name ?? ui.controls?.activeTool ?? game?.activeTool ?? 'unknown';
     
     this.setMode(newMode, `auto: ${layer}/${tool}`);
   }
@@ -465,7 +477,7 @@ export class InputRouter {
     return {
       currentMode: this.currentMode,
       activeLayer: canvas.activeLayer?.constructor?.name || null,
-      activeTool: ui.controls?.tool?.name ?? ui.controls?.activeTool ?? null,
+      activeTool: ui.controls?.tool?.name ?? ui.controls?.activeTool ?? game?.activeTool ?? null,
       determinedMode: this.determineMode(),
       transitionLocked: this._transitionLock
     };

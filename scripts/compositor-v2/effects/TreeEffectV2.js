@@ -381,13 +381,19 @@ export class TreeEffectV2 {
 
   getHoverMeshes() {
     const meshes = [];
+    const backgroundMeshes = [];
     for (const [tileId, entry] of this._overlays) {
-      // Ignore background-sized overlay: hover-hide should react to canopy tiles,
-      // not any pointer movement over the whole scene plane.
-      if (tileId?.startsWith('__')) continue;
-      if (entry?.mesh) meshes.push(entry.mesh);
+      if (!entry?.mesh) continue;
+      if (tileId?.startsWith('__')) {
+        backgroundMeshes.push(entry.mesh);
+      } else {
+        meshes.push(entry.mesh);
+      }
     }
-    return meshes;
+    // Prefer per-tile canopy overlays. If none exist, fall back to background
+    // overlays so scenes that only use background _Tree masks still support
+    // hover-hide behavior.
+    return meshes.length > 0 ? meshes : backgroundMeshes;
   }
 
   /**
@@ -429,8 +435,16 @@ export class TreeEffectV2 {
     let topOrder = -Infinity;
     let topWorldZ = -Infinity;
 
+    let hasNonBackgroundOverlay = false;
+    for (const [tileId] of this._overlays) {
+      if (!tileId?.startsWith('__')) {
+        hasNonBackgroundOverlay = true;
+        break;
+      }
+    }
+
     for (const [tileId, entry] of this._overlays) {
-      if (tileId?.startsWith('__')) continue;
+      if (hasNonBackgroundOverlay && tileId?.startsWith('__')) continue;
       const mesh = entry?.mesh;
       const geometry = mesh?.geometry;
       const params = geometry?.parameters;
@@ -897,7 +911,9 @@ export class TreeEffectV2 {
           shadowWeight += 0.04;
 
           float shadowA = (shadowWeight > 0.0) ? (shadowAccum / shadowWeight) : 0.0;
-          shadowA *= clamp(uShadowOpacity, 0.0, 1.0) * uIntensity * edgeFade * clamp(uHoverFade, 0.0, 1.0);
+          // Keep tree shadows visible when canopy hover fade hides the foliage.
+          // Hover fade should only affect the canopy color/alpha, not shadowing.
+          shadowA *= clamp(uShadowOpacity, 0.0, 1.0) * uIntensity * edgeFade;
 
           vec4 treeSample = texture2D(uTreeMask, vUv - distortion);
 

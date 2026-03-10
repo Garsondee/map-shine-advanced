@@ -61,6 +61,7 @@ export function getFragmentShader(maxLights = 64) {
 
     // ── Global toggles ────────────────────────────────────────────────────────
     uniform bool uEffectEnabled;
+    uniform float uTileOpacity;
 
     // ── PBR parameters ────────────────────────────────────────────────────────
     uniform float uSpecularIntensity;
@@ -573,6 +574,7 @@ export function getFragmentShader(maxLights = 64) {
 
       // ── Final composite (specular only — additive blending handles albedo) ─
       vec3 litSpecular = specularColor + wetSpecularColor + frostSpecularColor;
+      litSpecular *= clamp(uTileOpacity, 0.0, 1.0);
 
       // Suppress specular where token silhouettes are present so floor overlays
       // don't brighten over token bodies.
@@ -583,7 +585,7 @@ export function getFragmentShader(maxLights = 64) {
       }
 
       // Output raw linear light — no tone mapping on additive overlays.
-      gl_FragColor = vec4(litSpecular, 1.0);
+      gl_FragColor = vec4(litSpecular, clamp(uTileOpacity, 0.0, 1.0));
     }
   `;
 }

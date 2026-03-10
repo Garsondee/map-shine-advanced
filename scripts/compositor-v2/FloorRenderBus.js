@@ -418,6 +418,44 @@ export class FloorRenderBus {
     log.debug(`FloorRenderBus: showing floors 0–${maxFloorIndex}`);
   }
 
+  /**
+   * Sync runtime tile visual state from TileManager into bus tile materials.
+   *
+   * V2 renders tile albedo from FloorRenderBus meshes, while hover/occlusion
+   * fade animation is currently authored on TileManager sprites. Mirror the
+   * effective sprite opacity onto bus materials each frame so overhead hover-hide
+   * is visible in the final V2 render.
+   */
+  syncRuntimeTileState() {
+    if (!this._initialized) return;
+    const tileManager = window.MapShine?.tileManager;
+    if (!tileManager || typeof tileManager.getTileSpriteData !== 'function') return;
+
+    for (const [tileId, entry] of this._tiles) {
+      if (!entry?.material) continue;
+      // Skip internal background/effect entries.
+      if (tileId.startsWith('__')) continue;
+
+      const sourceTileId = entry.attachedToTileId || tileId;
+      const data = tileManager.getTileSpriteData(sourceTileId);
+      const spriteOpacity = Number(data?.sprite?.material?.opacity);
+      const fallbackAlpha = Number.isFinite(data?.tileDoc?.alpha) ? data.tileDoc.alpha : 1.0;
+      const targetOpacity = Number.isFinite(spriteOpacity) ? spriteOpacity : fallbackAlpha;
+
+      const currentOpacity = Number(entry.material.opacity);
+      if (!Number.isFinite(currentOpacity) || Math.abs(currentOpacity - targetOpacity) > 0.0005) {
+        entry.material.opacity = targetOpacity;
+      }
+
+      // Shader overlays (e.g. FluidEffectV2) can carry their own tile-opacity
+      // uniform path. Keep it in sync with the same runtime tile fade.
+      const uniforms = entry.material.uniforms;
+      if (uniforms?.uTileOpacity) {
+        uniforms.uTileOpacity.value = targetOpacity;
+      }
+    }
+  }
+
   // ── Floor Mask Rendering ────────────────────────────────────────────────────
 
   /**

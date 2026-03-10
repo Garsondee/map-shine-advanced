@@ -689,6 +689,7 @@ export class SpecularEffectV2 {
       uNormalMap:      { value: this._fallbackBlack },
       uHasRoughnessMap: { value: false },
       uHasNormalMap:    { value: false },
+      uTileOpacity:     { value: 1.0 },
     };
 
     // Merge shared + per-tile uniforms. Shared uniforms are referenced (not cloned)

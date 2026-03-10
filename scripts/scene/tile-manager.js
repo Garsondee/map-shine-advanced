@@ -2384,13 +2384,23 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
   setTileHoverHidden(tileId, hidden) {
     const data = this.tileSprites.get(tileId);
     if (!data) return;
+    let isOverhead = false;
+    let hoverEligible = false;
 
-    // Hover-hide is an overhead-only UX feature.
-    // If a tile is not overhead, ensure it cannot be left permanently hidden
-    // due to a stale hoverHidden flag from a previous overhead classification.
+    // Hover-hide is a roof/occluder UX feature.
+    // Keep eligibility aligned with InteractionManager hover selection so we do
+    // not detect a roof as hover-targetable but then reject the fade here.
+    // If a tile is not hover-eligible, ensure it cannot be left permanently
+    // hidden due to a stale hoverHidden flag from a previous classification.
     try {
-      const isOverhead = !!data?.sprite?.userData?.isOverhead;
-      if (!isOverhead) {
+      const sprite = data?.sprite;
+      const tileDoc = data?.tileDoc;
+      isOverhead = !!sprite?.userData?.isOverhead;
+      const isWeatherRoof = !!sprite?.userData?.isWeatherRoof;
+      const occlusionMode = tileDoc?.occlusion?.mode ?? CONST.TILE_OCCLUSION_MODES.NONE;
+      hoverEligible = isOverhead || isWeatherRoof || (occlusionMode !== CONST.TILE_OCCLUSION_MODES.NONE);
+      if (!hoverEligible) {
+        if (!isOverhead) this._overheadTileIds.delete(tileId);
         data.hoverHidden = false;
         // Re-apply normal visibility immediately in case the tile was stuck at opacity 0.
         try {
@@ -2403,6 +2413,15 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     }
 
     data.hoverHidden = !!hidden;
+
+    // Update loop applies hover fades by iterating _overheadTileIds.
+    // Some roof/occluder tiles are hover-eligible without being flagged as
+    // sprite.userData.isOverhead. Keep those IDs tracked so both hover fade-out
+    // and fade-in restoration animate in the same path.
+    if (!isOverhead) {
+      if (hoverEligible) this._overheadTileIds.add(tileId);
+      else this._overheadTileIds.delete(tileId);
+    }
 
     // Hover-hide uses a smooth alpha animation in update(). If RenderLoop is
     // currently idle-throttled, the fade can appear to "start" and then stall
@@ -2792,8 +2811,8 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
         anyHoverHidden = true;
       }
       
-      // Smoothly interpolate alpha
-      // Use a ~2 second time constant for hover/occlusion fades
+      // Smoothly interpolate alpha with a fast response so hover-hidden roofs
+      // clear quickly and attached overlays (synced from tile opacity) keep up.
       const currentAlphaRaw = sprite.material.opacity;
       const currentAlpha = Number.isFinite(currentAlphaRaw) ? currentAlphaRaw : targetAlpha;
       const diff = targetAlpha - currentAlpha;
@@ -2809,10 +2828,10 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
           rl?.requestContinuousRender?.(2500);
         } catch (_) {
         }
-        // Move opacity toward target at a fixed rate of 0.5 per second,
-        // so a full 0->1 transition takes about 2 seconds regardless of
+        // Move opacity toward target at a fixed rate of 2.0 per second,
+        // so a full 0->1 transition takes about 0.5 seconds regardless of
         // frame rate.
-        const maxStep = dt / 2; // 0.5 units per second
+        const maxStep = dt * 2; // 2.0 units per second
         const step = Math.sign(diff) * Math.min(absDiff, maxStep);
         sprite.material.opacity = currentAlpha + step;
       } else {
@@ -4089,8 +4108,10 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     // refreshTile/update hooks don't fight the hover fade in update().
     try {
       const data = this.tileSprites.get(tileDoc?.id);
-      // Hover-hide is overhead-only; never force-hide ground tiles.
-      if (data?.hoverHidden && sprite?.userData?.isOverhead) {
+      // Keep hover-hidden tiles at opacity 0 even if refresh hooks run between
+      // update() ticks. This must apply to all hover-eligible roof/occluder
+      // tiles, not only sprite.userData.isOverhead classifications.
+      if (data?.hoverHidden) {
         sprite.material.opacity = 0;
       }
     } catch (_) {

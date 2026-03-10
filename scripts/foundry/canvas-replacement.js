@@ -85,6 +85,7 @@ import { LightIconManager } from '../scene/light-icon-manager.js';
 import { EnhancedLightIconManager } from '../scene/enhanced-light-icon-manager.js';
 import { SoundIconManager } from '../scene/sound-icon-manager.js';
 import { InteractionManager } from '../scene/interaction-manager.js';
+import { PixiContentLayerBridge } from './pixi-content-layer-bridge.js';
 import { GridRenderer } from '../scene/grid-renderer.js';
 import { MapPointsManager } from '../scene/map-points-manager.js';
 import { PhysicsRopeManager } from '../scene/physics-rope-manager.js';
@@ -538,6 +539,9 @@ let doorMeshManager = null;
 
 /** @type {DrawingManager|null} */
 let drawingManager = null;
+
+/** @type {PixiContentLayerBridge|null} */
+let pixiContentLayerBridge = null;
 
 /** @type {NoteManager|null} */
 let noteManager = null;
@@ -3067,6 +3071,8 @@ function onCanvasTearDown(canvas) {
     delete window.MapShine.levelsSnapshot;
     window.MapShine.pixiInputBridge = null;
     window.MapShine.interactionManager = null;
+    window.MapShine.mouseStateManager = null;
+    window.MapShine.pixiContentLayerBridge = null;
     window.MapShine.noteManager = null;
     window.MapShine.gridRenderer = null;
     window.MapShine.mapPointsManager = null;
@@ -3081,6 +3087,10 @@ function onCanvasTearDown(canvas) {
     // Keep renderer and capabilities - they're reusable
   }
   candleFlamesEffect = null;
+  if (pixiContentLayerBridge) {
+    safeDispose(() => pixiContentLayerBridge.dispose(), 'pixiContentLayerBridge.dispose');
+    pixiContentLayerBridge = null;
+  }
 
   // SAFETY NET: Schedule a delayed fallback check. If the overlay is still
   // visible after 10 seconds and there's no active scene or loading in
@@ -3550,7 +3560,7 @@ async function createThreeCanvas(scene) {
     // all coordinate transformations (getBoundingClientRect) will use the detached
     // placeholder, causing zoom offset and token selection failures.
     if (interactionManager) {
-      interactionManager.canvasElement = rendererCanvas;
+      interactionManager.setCanvasElement?.(rendererCanvas);
       // Force canvas rect cache refresh so the next interaction uses correct bounds.
       interactionManager._getCanvasRectCached?.(true);
     }
@@ -4058,6 +4068,8 @@ async function createThreeCanvas(scene) {
     // global sceneComposer ref can be cleared while the local `camera` is still
     // valid for this init phase.
     doorMeshManager = new DoorMeshManager(threeScene, camera);
+    pixiContentLayerBridge = new PixiContentLayerBridge();
+    pixiContentLayerBridge.initialize();
     drawingManager = new DrawingManager(threeScene);
     noteManager = new NoteManager(threeScene);
     templateManager = new TemplateManager(threeScene);
@@ -4188,6 +4200,8 @@ async function createThreeCanvas(scene) {
     // Expose for InteractionManager selection routing and debugging.
     if (window.MapShine) {
       window.MapShine.interactionManager = interactionManager;
+      window.MapShine.mouseStateManager = interactionManager?.mouseStateManager ?? null;
+      window.MapShine.pixiContentLayerBridge = pixiContentLayerBridge;
       window.MapShine.overlayUIManager = overlayUIManager;
       window.MapShine.lightEditor = lightEditor;
       window.MapShine.noteManager = noteManager;
@@ -4429,8 +4443,10 @@ async function createThreeCanvas(scene) {
       tokenManager, tokenMovementManager, tileManager, visibilityController, detectionFilterEffect,
       wallManager, doorMeshManager,
       drawingManager, noteManager, templateManager, lightIconManager,
+      pixiContentLayerBridge,
       soundIconManager,
       enhancedLightIconManager, enhancedLightInspector, interactionManager,
+      mouseStateManager: interactionManager?.mouseStateManager ?? null,
       overlayUIManager, lightEditor, gridRenderer, mapPointsManager,
       tileMotionManager,
       weatherController, renderLoop, sceneDebug, controlsIntegration,
@@ -6015,7 +6031,7 @@ function _enforceGameplayPixiSuppression() {
     if (!canvas?.ready) return;
     if (isMapMakerMode) return;
     const activeControl = String(ui?.controls?.control?.name || ui?.controls?.activeControl || '').toLowerCase();
-    const activeTool = String(ui?.controls?.tool?.name || ui?.controls?.activeTool || '').toLowerCase();
+    const activeTool = String(ui?.controls?.tool?.name || ui?.controls?.activeTool || game?.activeTool || '').toLowerCase();
     const inputRouter =
       window.MapShine?.inputRouter ||
       window.mapShine?.inputRouter ||
@@ -6030,15 +6046,64 @@ function _enforceGameplayPixiSuppression() {
       || activeLayerName === 'tiles'
       || activeLayerCtor === 'tileslayer'
       || activeControlLayer === 'tiles';
-    const pixiEditContextFallback = tilesEditContext;
+    const drawingsEditContext =
+      !!canvas?.drawings?.active
+      || activeControl === 'drawings'
+      || activeControl === 'drawing'
+      || activeControlLayer === 'drawings'
+      || activeControlLayer === 'drawing'
+      || activeLayerName === 'drawings'
+      || activeLayerName === 'drawing'
+      || activeLayerCtor === 'drawingslayer';
+    const soundsEditContext =
+      !!canvas?.sounds?.active
+      || activeControl === 'sounds'
+      || activeControl === 'sound'
+      || activeControlLayer === 'sounds'
+      || activeControlLayer === 'sound'
+      || activeLayerName === 'sounds'
+      || activeLayerName === 'sound'
+      || activeLayerCtor === 'soundslayer';
+    const templatesEditContext =
+      !!canvas?.templates?.active
+      || activeControl === 'templates'
+      || activeControl === 'template'
+      || activeControlLayer === 'templates'
+      || activeControlLayer === 'template'
+      || activeLayerName === 'templates'
+      || activeLayerName === 'template'
+      || activeLayerCtor === 'templatelayer';
+    const notesEditContext =
+      !!canvas?.notes?.active
+      || activeControl === 'notes'
+      || activeControl === 'note'
+      || activeControlLayer === 'notes'
+      || activeControlLayer === 'note'
+      || activeLayerName === 'notes'
+      || activeLayerName === 'note'
+      || activeLayerCtor === 'noteslayer';
+    const regionsEditContext =
+      !!canvas?.regions?.active
+      || activeControl === 'regions'
+      || activeControl === 'region'
+      || activeControlLayer === 'regions'
+      || activeControlLayer === 'region'
+      || activeLayerName === 'regions'
+      || activeLayerName === 'region'
+      || activeLayerCtor === 'regionlayer';
+    const pixiEditContextFallback =
+      tilesEditContext || drawingsEditContext || soundsEditContext
+      || templatesEditContext || notesEditContext || regionsEditContext;
     // Walls, lighting, and tokens are fully Three.js-native now.
     // Only need the PIXI overlay for unreplaced layers (drawings, regions,
     // sounds, notes, templates) — determined by InputRouter.
     const shouldPixiReceiveInput = !!inputRouter?.shouldPixiReceiveInput?.();
-    // Respect InputRouter ownership when available. Only fall back to tile-context
-    // PIXI ownership if the router is temporarily unavailable.
-    const shouldPixiReceiveInputEffective = shouldPixiReceiveInput || (!inputRouter && pixiEditContextFallback);
+    // Respect InputRouter ownership, but always fail-open to Foundry-native edit
+    // contexts (drawings/templates/notes/regions/sounds/tiles) when router state
+    // is stale during control transitions.
+    const shouldPixiReceiveInputEffective = shouldPixiReceiveInput || pixiEditContextFallback;
     const needsEditorOverlay = shouldPixiReceiveInputEffective;
+    const isDrawingsContext = drawingsEditContext;
 
     if (window.MapShine) {
       window.MapShine.__forcePixiEditorOverlay = needsEditorOverlay;
@@ -6049,7 +6114,7 @@ function _enforceGameplayPixiSuppression() {
     if (needsEditorOverlay) {
       const pixiCanvas = canvas.app?.view;
       const threeCanvas = document.getElementById('map-shine-canvas');
-      const pixiVisualOpacity = isV2Active ? '0' : '1';
+      const pixiVisualOpacity = (isV2Active && !isDrawingsContext) ? '0' : '1';
       if (canvas.app?.renderer?.background) {
         canvas.app.renderer.background.alpha = 0;
       }

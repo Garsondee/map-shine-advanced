@@ -807,6 +807,7 @@ export class ControlsIntegration {
       pixiCanvas.style.pointerEvents = 'auto';
       pixiCanvas.style.display = '';
       pixiCanvas.style.visibility = 'visible';
+      pixiCanvas.style.opacity = '1';
     }
 
     const board = document.getElementById('board');
@@ -814,6 +815,7 @@ export class ControlsIntegration {
       board.style.pointerEvents = 'auto';
       board.style.display = '';
       board.style.visibility = 'visible';
+      board.style.opacity = '1';
     }
 
     const threeCanvas = document.getElementById('map-shine-canvas');

@@ -442,9 +442,6 @@ export class FluidEffectV2 {
       u.uDepthEnabled.value = 0.0;
       u.uDepthTexture.value = null;
 
-      // No tile opacity mirroring in V2 (tile meshes are not sprites with per-tile fade).
-      u.uTileOpacity.value = 1.0;
-
       mesh.visible = this._enabled;
     }
   }
@@ -487,14 +484,22 @@ export class FluidEffectV2 {
   _createOverlay(tileId, floorIndex, opts) {
     const THREE = window.THREE;
     const { maskUrl, centerX, centerY, z, tileW, tileH, rotation, isOverhead } = opts;
+    const baseEntry = this._renderBus?._tiles?.get?.(tileId);
+    const canAttachToTileRoot = !!baseEntry && !String(tileId).startsWith('__');
 
     const material = this._createMaterial();
     const geometry = new THREE.PlaneGeometry(tileW, tileH);
     const mesh = new THREE.Mesh(geometry, material);
     mesh.name = `FluidV2_${tileId}`;
     mesh.frustumCulled = false;
-    mesh.position.set(centerX, centerY, z);
-    mesh.rotation.z = rotation;
+    if (canAttachToTileRoot) {
+      // Tile-attached overlays must use local tile-root space.
+      mesh.position.set(0, 0, FLUID_Z_OFFSET);
+      mesh.rotation.z = 0;
+    } else {
+      mesh.position.set(centerX, centerY, z);
+      mesh.rotation.z = rotation;
+    }
     // Keep overlays in the normal bus layer and opt overhead-tile fluids into
     // ROOF_LAYER so OverheadShadowsEffectV2's fluid capture pass can see them.
     mesh.layers.set(0);
@@ -502,14 +507,19 @@ export class FluidEffectV2 {
 
     // Keep renderOrder under the base tile if present.
     try {
-      const baseEntry = this._renderBus?._tiles?.get?.(tileId);
       const baseOrder = Number(baseEntry?.mesh?.renderOrder);
       if (Number.isFinite(baseOrder)) {
         mesh.renderOrder = baseOrder - 1;
       }
     } catch (_) {}
 
-    this._renderBus.addEffectOverlay(`${tileId}_fluid`, mesh, floorIndex);
+    let attached = false;
+    if (canAttachToTileRoot && typeof this._renderBus?.addTileAttachedOverlay === 'function') {
+      attached = this._renderBus.addTileAttachedOverlay(tileId, `${tileId}_fluid`, mesh, floorIndex) === true;
+    }
+    if (!attached) {
+      this._renderBus.addEffectOverlay(`${tileId}_fluid`, mesh, floorIndex);
+    }
     this._overlays.set(tileId, { mesh, material, floorIndex });
 
     // Load mask texture.

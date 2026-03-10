@@ -107,6 +107,17 @@ export class WallManager {
    * @private
    */
   setupHooks() {
+    this._hookIds.push(['pasteWall', Hooks.on('pasteWall', (_objects, data) => {
+      try {
+        if (!Array.isArray(data)) return;
+        for (const entry of data) {
+          if (!entry || !Array.isArray(entry.c) || entry.c.length < 4) continue;
+          entry.c = entry.c.slice(0, 4).map((v) => Math.round(Number(v) || 0));
+        }
+      } catch (_) {
+      }
+    })]);
+
     this._hookIds.push(['preCreateWall', Hooks.on('preCreateWall', (doc, data, options, userId) => {
       this._onPreCreateWall(doc, data, options, userId);
     })]);
@@ -159,6 +170,17 @@ export class WallManager {
   _onPreCreateWall(doc, data, options, userId) {
     try {
       if (userId && game?.user?.id && userId !== game.user.id) return;
+
+      // Foundry requires integer wall endpoints. Some legacy wall data and copy/paste
+      // workflows can carry float coordinates; coerce here before model validation.
+      if (Array.isArray(data?.c) && data.c.length >= 4) {
+        const intCoords = data.c.slice(0, 4).map((v) => Math.round(Number(v) || 0));
+        data.c = intCoords;
+        try {
+          doc.updateSource({ c: intCoords });
+        } catch (_) {
+        }
+      }
 
       const hasBottom = data?.flags?.['wall-height']?.bottom !== undefined
         && data?.flags?.['wall-height']?.bottom !== null;
@@ -573,7 +595,7 @@ export class WallManager {
           continue;
         }
 
-        if (type === 'wallLine' || type === 'wallHitbox' || type === 'wallEndpoint') {
+        if (type === 'wallLine' || type === 'wallLineBg' || type === 'wallHitbox' || type === 'wallEndpoint' || type === 'wallEndpointOuter') {
           child.visible = showEditVisuals;
           if (type === 'wallLine' && child.visible) wallLinesVisible += 1;
         }
@@ -650,8 +672,25 @@ export class WallManager {
     const length = Math.sqrt(dx * dx + dy * dy);
     const angle = Math.atan2(dy, dx);
 
-    const thickness = 6; // px
+    const lineWidth = Math.max(2, 2 * (canvas?.dimensions?.uiScale || 1));
+    const thickness = lineWidth;
+    const bgThickness = lineWidth * 3;
     const wallGeo = new THREE.PlaneGeometry(length, thickness);
+    const wallBgGeo = new THREE.PlaneGeometry(length, bgThickness);
+    const wallBgMat = new THREE.MeshBasicMaterial({
+        color: 0x000000,
+        side: THREE.DoubleSide,
+        depthWrite: false
+    });
+    const wallBg = new THREE.Mesh(wallBgGeo, wallBgMat);
+    wallBg.position.set((start.x + end.x) / 2, (start.y + end.y) / 2, -0.01);
+    wallBg.rotation.z = angle;
+    wallBg.userData = { type: 'wallLineBg' };
+    wallBg.visible = showLines;
+    wallBg.renderOrder = 9998;
+    wallBg.layers.set(OVERLAY_THREE_LAYER);
+    wallBg.layers.enable(0);
+    group.add(wallBg);
     const wallMat = new THREE.MeshBasicMaterial({ 
         color: color,
         side: THREE.DoubleSide
@@ -668,7 +707,8 @@ export class WallManager {
     group.add(wallMesh);
 
     // Hitbox (wider invisible mesh for easier selection)
-    const hitboxGeo = new THREE.PlaneGeometry(length, 20); 
+    const hitboxThickness = Math.max(24, lineWidth * 10);
+    const hitboxGeo = new THREE.PlaneGeometry(length, hitboxThickness);
     const hitboxMat = new THREE.MeshBasicMaterial({ 
         visible: true,
         transparent: true,
@@ -683,10 +723,24 @@ export class WallManager {
     hitbox.visible = showLines;
     group.add(hitbox);
 
-    // Create Endpoints (Circles)
-    const dotMat = new THREE.MeshBasicMaterial({ color: color });
+    // Create Endpoints (black ring + colored center), matching Foundry's handle style.
+    const endpointOuterRadius = Math.max(5, lineWidth * 3);
+    const endpointInnerRadius = Math.max(2.5, endpointOuterRadius - lineWidth);
+    const endpointOuterGeometry = new THREE.CircleGeometry(endpointOuterRadius, 20);
+    const endpointInnerGeometry = new THREE.CircleGeometry(endpointInnerRadius, 20);
+    const outerDotMat = new THREE.MeshBasicMaterial({ color: 0x000000, depthWrite: false });
+    const innerDotMat = new THREE.MeshBasicMaterial({ color: color, depthWrite: false });
     
-    const p0 = new THREE.Mesh(this.endpointGeometry, dotMat);
+    const p0Outer = new THREE.Mesh(endpointOuterGeometry, outerDotMat);
+    p0Outer.position.set(start.x, start.y, -0.005);
+    p0Outer.userData = { type: 'wallEndpointOuter', wallId: doc.id, index: 0 };
+    p0Outer.visible = showLines;
+    p0Outer.renderOrder = 10000;
+    p0Outer.layers.set(OVERLAY_THREE_LAYER);
+    p0Outer.layers.enable(0);
+    group.add(p0Outer);
+
+    const p0 = new THREE.Mesh(endpointInnerGeometry, innerDotMat);
     p0.position.set(start.x, start.y, 0);
     p0.userData = { type: 'wallEndpoint', wallId: doc.id, index: 0 };
     p0.visible = showLines;
@@ -695,7 +749,16 @@ export class WallManager {
     p0.layers.enable(0);
     group.add(p0);
     
-    const p1 = new THREE.Mesh(this.endpointGeometry, dotMat);
+    const p1Outer = new THREE.Mesh(endpointOuterGeometry, outerDotMat);
+    p1Outer.position.set(end.x, end.y, -0.005);
+    p1Outer.userData = { type: 'wallEndpointOuter', wallId: doc.id, index: 1 };
+    p1Outer.visible = showLines;
+    p1Outer.renderOrder = 10000;
+    p1Outer.layers.set(OVERLAY_THREE_LAYER);
+    p1Outer.layers.enable(0);
+    group.add(p1Outer);
+
+    const p1 = new THREE.Mesh(endpointInnerGeometry, innerDotMat);
     p1.position.set(end.x, end.y, 0);
     p1.userData = { type: 'wallEndpoint', wallId: doc.id, index: 1 };
     p1.visible = showLines;
@@ -910,11 +973,18 @@ export class WallManager {
           }
           line.material.needsUpdate = true;
       }
+
+      const lineBg = group.children.find(c => c.userData.type === 'wallLineBg');
+      if (lineBg?.material?.color) {
+        lineBg.material.color.setHex(0x000000);
+        lineBg.material.needsUpdate = true;
+      }
       
-      // Highlight endpoints too?
+      // Highlight endpoint center fill while preserving black outer ring.
       group.children.forEach(c => {
           if (c.userData.type === 'wallEndpoint') {
               c.material.color.setHex(shouldBeHighlighted ? 0xff9829 : this.getWallColor(canvas.walls.get(id).document));
+              c.material.needsUpdate = true;
           }
       });
   }

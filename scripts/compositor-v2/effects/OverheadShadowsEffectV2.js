@@ -596,6 +596,7 @@ export class OverheadShadowsEffectV2 {
         uSunDir: { value: new THREE.Vector2(0.0, 1.0) },
         uResolution: { value: new THREE.Vector2(1024, 1024) },
         uZoom: { value: 1.0 },
+        uHoverRevealActive: { value: 0.0 },
         // Indoor shadow from _Outdoors mask
         uOutdoorsMask: { value: null },
         uHasOutdoorsMask: { value: 0.0 },
@@ -662,6 +663,7 @@ export class OverheadShadowsEffectV2 {
         uniform vec2 uSunDir;
         uniform vec2 uResolution;
         uniform float uZoom;
+        uniform float uHoverRevealActive;
 
         // Indoor shadow from _Outdoors mask
         uniform sampler2D uOutdoorsMask;
@@ -815,6 +817,9 @@ export class OverheadShadowsEffectV2 {
           vec2 offsetUv = roofUv + baseOffsetDeltaUv * baseOffsetScale;
           // Suppress self-shadowing on the caster layer itself.
           float roofBaseAlpha = clamp(texture2D(tRoof, clamp(roofUv, 0.0, 1.0)).a, 0.0, 1.0);
+          // Tree-style unmasking behavior during hover reveal: keep caster
+          // projection active, but stop masking it out under the source roof.
+          roofBaseAlpha *= (1.0 - clamp(uHoverRevealActive, 0.0, 1.0));
 
           bool tileProjectionEnabled = (uTileProjectionEnabled > 0.5 && uHasTileProjection > 0.5);
           float tileProjectionLengthScale = max(uTileProjectionLengthScale, 0.0);
@@ -1319,9 +1324,16 @@ export class OverheadShadowsEffectV2 {
       // Fallback: keep default hour
     }
 
+    let hoverRevealActive = false;
+    try {
+      hoverRevealActive = !!weatherController?.roofMaskActive;
+    } catch (_) {
+      hoverRevealActive = false;
+    }
+
     // Optimization: Skip update if params haven't changed
     const camZoom = this._getEffectiveZoom();
-    const updateHash = `${hour.toFixed(3)}_${this.params.sunLatitude}_${this.params.opacity}_${this.params.length}_${this.params.softness}_${this.params.outdoorShadowLengthScale}_${this.params.indoorReceiverShadowLengthScale}_${camZoom.toFixed(4)}_${this.params.indoorShadowEnabled}_${this.params.outdoorBuildingShadowOpacity}_${this.params.outdoorBuildingShadowLengthScale}_${this.params.indoorShadowSoftness}_${this.params.indoorFluidShadowSoftness}_${this.params.indoorFluidShadowIntensityBoost}_${this.params.indoorFluidColorSaturation}_${this.params.tileProjectionEnabled}_${this.params.tileProjectionOpacity}_${this.params.tileProjectionLengthScale}_${this.params.tileProjectionSoftness}_${this.params.tileProjectionThreshold}_${this.params.tileProjectionPower}_${this.params.tileProjectionOutdoorOpacityScale}_${this.params.tileProjectionIndoorOpacityScale}_${this.params.tileProjectionSortBias}_${this.params.fluidColorEnabled}_${this.params.fluidEffectTransparency}_${this.params.fluidShadowIntensityBoost}_${this.params.fluidShadowSoftness}_${this.params.fluidColorBoost}_${this.params.fluidColorSaturation}`;
+    const updateHash = `${hour.toFixed(3)}_${this.params.sunLatitude}_${this.params.opacity}_${this.params.length}_${this.params.softness}_${this.params.outdoorShadowLengthScale}_${this.params.indoorReceiverShadowLengthScale}_${camZoom.toFixed(4)}_${this.params.indoorShadowEnabled}_${this.params.outdoorBuildingShadowOpacity}_${this.params.outdoorBuildingShadowLengthScale}_${this.params.indoorShadowSoftness}_${this.params.indoorFluidShadowSoftness}_${this.params.indoorFluidShadowIntensityBoost}_${this.params.indoorFluidColorSaturation}_${this.params.tileProjectionEnabled}_${this.params.tileProjectionOpacity}_${this.params.tileProjectionLengthScale}_${this.params.tileProjectionSoftness}_${this.params.tileProjectionThreshold}_${this.params.tileProjectionPower}_${this.params.tileProjectionOutdoorOpacityScale}_${this.params.tileProjectionIndoorOpacityScale}_${this.params.tileProjectionSortBias}_${this.params.fluidColorEnabled}_${this.params.fluidEffectTransparency}_${this.params.fluidShadowIntensityBoost}_${this.params.fluidShadowSoftness}_${this.params.fluidColorBoost}_${this.params.fluidColorSaturation}_${hoverRevealActive ? 1 : 0}`;
     
     // Floor/mask transitions can swap outdoorsMask without changing any scalar params.
     // Do not short-circuit in that case or uOutdoorsMask/uHasOutdoorsMask goes stale.
@@ -1362,6 +1374,7 @@ export class OverheadShadowsEffectV2 {
       if (u.uOpacity) u.uOpacity.value = this.params.opacity;
       if (u.uLength)  u.uLength.value  = this.params.length;
       if (u.uSoftness) u.uSoftness.value = this.params.softness;
+      if (u.uHoverRevealActive) u.uHoverRevealActive.value = hoverRevealActive ? 1.0 : 0.0;
       if (u.uOutdoorShadowLengthScale) u.uOutdoorShadowLengthScale.value = this.params.outdoorShadowLengthScale ?? 1.0;
       if (u.uIndoorReceiverShadowLengthScale) u.uIndoorReceiverShadowLengthScale.value = this.params.indoorReceiverShadowLengthScale ?? 1.0;
       if (u.uZoom && this.mainCamera) {

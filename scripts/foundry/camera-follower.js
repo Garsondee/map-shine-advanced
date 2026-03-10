@@ -319,6 +319,58 @@ export class CameraFollower {
    * @returns {Array<{levelId:string,label:string,bottom:number,top:number,center:number,source:'inferred'}>}
    */
   _buildInferredLevelBands(scene) {
+    const defaultSingleFloor = {
+      levelId: 'inferred-default',
+      label: 'Ground',
+      bottom: 0,
+      top: 10,
+      center: 5,
+      source: 'inferred'
+    };
+
+    const hasAuthoredLevelsMetadata = (() => {
+      const sceneLevelsFlags = scene?.flags?.levels;
+      if (sceneLevelsFlags?.enabled === true) return true;
+      if (sceneLevelsFlags?.weatherElevation !== undefined) return true;
+      if (sceneLevelsFlags?.lightMasking !== undefined) return true;
+
+      const hasRangeFlags = (collection) => {
+        const placeables = Array.isArray(collection?.placeables) ? collection.placeables : [];
+        for (const placeable of placeables) {
+          const levels = placeable?.document?.flags?.levels;
+          if (!levels || typeof levels !== 'object') continue;
+          if (levels.rangeBottom !== undefined) return true;
+          if (levels.rangeTop !== undefined) return true;
+          if (levels.showIfAbove === true) return true;
+          if (levels.isBasement === true) return true;
+        }
+        return false;
+      };
+
+      if (hasRangeFlags(canvas?.tiles)) return true;
+      if (hasRangeFlags(canvas?.tokens)) return true;
+      if (hasRangeFlags(canvas?.drawings)) return true;
+      if (hasRangeFlags(canvas?.templates)) return true;
+      if (hasRangeFlags(canvas?.lighting)) return true;
+      if (hasRangeFlags(canvas?.sounds)) return true;
+      if (hasRangeFlags(canvas?.notes)) return true;
+
+      const walls = Array.isArray(canvas?.walls?.placeables) ? canvas.walls.placeables : [];
+      for (const wall of walls) {
+        const wh = wall?.document?.flags?.['wall-height'];
+        if (!wh || typeof wh !== 'object') continue;
+        if (wh.bottom !== undefined || wh.top !== undefined) return true;
+      }
+
+      return false;
+    })();
+
+    // Default for non-authored scenes: keep one implicit floor and rely on
+    // overhead layering (foregroundElevation) instead of creating many inferred bands.
+    if (!hasAuthoredLevelsMetadata) {
+      return [defaultSingleFloor];
+    }
+
     const elevations = [];
     const pushElevation = (value) => {
       const n = Number(value);
@@ -373,16 +425,7 @@ export class CameraFollower {
     }
 
     if (!centers.length) {
-      const fallback = Number(scene?.flags?.levels?.backgroundElevation ?? 0);
-      const center = Number.isFinite(fallback) ? fallback : 0;
-      return [{
-        levelId: 'inferred-ground',
-        label: 'Ground',
-        bottom: center,
-        top: center,
-        center,
-        source: 'inferred'
-      }];
+      return [defaultSingleFloor];
     }
 
     if (centers.length === 1) {

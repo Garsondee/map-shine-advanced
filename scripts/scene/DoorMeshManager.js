@@ -514,9 +514,7 @@ export class DoorMeshManager {
     if (doc.door === CONST.WALL_DOOR_TYPES.NONE) return false;
     const animation = doc.animation;
     if (animation?.type && animation?.texture) return true;
-    // Fallback: standard Foundry doors without custom animation still get a
-    // visible mesh/icon in V2 so door graphics are not missing.
-    return !!this._getFallbackDoorIconPath(doc);
+    return false;
   }
 
   /**
@@ -548,7 +546,8 @@ export class DoorMeshManager {
     if (!this._hasDoorMesh(doc)) return;
     
     const animation = doc.animation || {};
-    const textureSrc = animation.texture || this._getFallbackDoorIconPath(doc);
+    const textureSrc = animation.texture;
+    if (!textureSrc) return;
     
     try {
       // Load texture (with caching)

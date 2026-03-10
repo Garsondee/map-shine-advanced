@@ -456,6 +456,38 @@ export class FloorRenderBus {
     }
   }
 
+  /**
+   * Sync bus tile/overlay opacity to static tile document alpha.
+   *
+   * Used before overhead shadow capture so shadow masks remain stable even when
+   * runtime hover-hide fades are active on the visible albedo/effect pass.
+   */
+  syncStaticTileAlphaState() {
+    if (!this._initialized) return;
+    const tileManager = window.MapShine?.tileManager;
+    if (!tileManager || typeof tileManager.getTileSpriteData !== 'function') return;
+
+    for (const [tileId, entry] of this._tiles) {
+      if (!entry?.material) continue;
+      if (tileId.startsWith('__')) continue;
+
+      const sourceTileId = entry.attachedToTileId || tileId;
+      const data = tileManager.getTileSpriteData(sourceTileId);
+      const staticAlphaRaw = Number(data?.tileDoc?.alpha);
+      const staticAlpha = Number.isFinite(staticAlphaRaw) ? staticAlphaRaw : 1.0;
+
+      const currentOpacity = Number(entry.material.opacity);
+      if (!Number.isFinite(currentOpacity) || Math.abs(currentOpacity - staticAlpha) > 0.0005) {
+        entry.material.opacity = staticAlpha;
+      }
+
+      const uniforms = entry.material.uniforms;
+      if (uniforms?.uTileOpacity) {
+        uniforms.uTileOpacity.value = staticAlpha;
+      }
+    }
+  }
+
   // ── Floor Mask Rendering ────────────────────────────────────────────────────
 
   /**

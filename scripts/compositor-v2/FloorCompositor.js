@@ -470,7 +470,19 @@ export class FloorCompositor {
     if (!inputRT || !this._pixiWorldCompositeMaterial || !this._postA || !this._postB) return inputRT;
     const bridge = window.MapShine?.pixiContentLayerBridge ?? null;
     const overlayTexture = bridge?.getWorldTexture?.() ?? null;
-    if (!overlayTexture) return inputRT;
+    const debugForceTint = !!window.MapShine?.__pixiBridgeForceCompositorTint;
+    if (!overlayTexture && !debugForceTint) {
+      if (window.MapShine) {
+        window.MapShine.__pixiBridgeCompositeStatus = {
+          ran: false,
+          reason: 'skip:no-overlay',
+          bridgeStatus: bridge?._lastUpdateStatus ?? 'bridge-missing',
+          debugForceTint,
+          timestampMs: Date.now(),
+        };
+      }
+      return inputRT;
+    }
 
     const outputRT = (inputRT === this._postA) ? this._postB : this._postA;
     const renderer = this.renderer;
@@ -479,11 +491,23 @@ export class FloorCompositor {
 
     this._pixiWorldCompositeMaterial.uniforms.tBase.value = inputRT.texture;
     this._pixiWorldCompositeMaterial.uniforms.tOverlay.value = overlayTexture;
+    this._pixiWorldCompositeMaterial.uniforms.uHasOverlay.value = overlayTexture ? 1 : 0;
+    this._pixiWorldCompositeMaterial.uniforms.uDebugForceTint.value = debugForceTint ? 1 : 0;
 
     renderer.setRenderTarget(outputRT);
     renderer.autoClear = true;
     try {
       renderer.render(this._pixiWorldCompositeScene, this._pixiWorldCompositeCamera);
+      if (window.MapShine) {
+        window.MapShine.__pixiBridgeCompositeStatus = {
+          ran: true,
+          reason: 'rendered',
+          hasOverlay: !!overlayTexture,
+          bridgeStatus: bridge?._lastUpdateStatus ?? 'bridge-missing',
+          debugForceTint,
+          timestampMs: Date.now(),
+        };
+      }
     } finally {
       renderer.autoClear = prevAutoClear;
       renderer.setRenderTarget(prevTarget);
@@ -730,6 +754,8 @@ export class FloorCompositor {
       uniforms: {
         tBase: { value: null },
         tOverlay: { value: null },
+        uHasOverlay: { value: 0 },
+        uDebugForceTint: { value: 0 },
       },
       vertexShader: /* glsl */`
         varying vec2 vUv;
@@ -741,11 +767,29 @@ export class FloorCompositor {
       fragmentShader: /* glsl */`
         uniform sampler2D tBase;
         uniform sampler2D tOverlay;
+        uniform float uHasOverlay;
+        uniform float uDebugForceTint;
         varying vec2 vUv;
         void main() {
           vec4 base = texture2D(tBase, vUv);
+          if (uDebugForceTint > 0.5) {
+            vec3 dbg = vec3(1.0, 0.0, 1.0);
+            gl_FragColor = vec4(mix(base.rgb, dbg, 0.9), 1.0);
+            return;
+          }
+          if (uHasOverlay < 0.5) {
+            gl_FragColor = vec4(base.rgb, 1.0);
+            return;
+          }
           vec4 ov = texture2D(tOverlay, vUv);
-          vec3 outRgb = mix(base.rgb, ov.rgb, clamp(ov.a, 0.0, 1.0));
+          // PIXI extract sources can be premultiplied and in some runtime states
+          // carry weak/zero alpha despite visible RGB content.
+          vec3 ovRgb = ov.rgb;
+          if (ov.a > 0.0001) {
+            ovRgb = ov.rgb / ov.a;
+          }
+          float ovAlpha = clamp(max(ov.a, max(ovRgb.r, max(ovRgb.g, ovRgb.b))), 0.0, 1.0);
+          vec3 outRgb = mix(base.rgb, ovRgb, ovAlpha);
           gl_FragColor = vec4(outRgb, 1.0);
         }
       `,
@@ -1342,6 +1386,12 @@ export class FloorCompositor {
       try { log.info('[V2 Frame] ▶ FloorCompositor.render: BEGIN'); } catch (_) {}
     }
 
+    // Force base/document tile alpha for shadow capture so overhead shadows
+    // remain stable even when the visible overhead layer is hover-faded.
+    try {
+      this._renderBus?.syncStaticTileAlphaState?.();
+    } catch (_) {}
+
     // Capture overhead tile alpha + compute soft shadow factor (V1 signature)
     if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: overheadShadows.render'); } catch (_) {} }
     try {
@@ -1422,10 +1472,6 @@ export class FloorCompositor {
     if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: lighting.render(sceneRT→postA) DONE'); } catch (_) {} }
 
     currentInput = this._postA;
-
-    // PIXI world-channel composite: world-anchored bridge content that should
-    // continue through the color/post pipeline.
-    currentInput = this._compositePixiWorldOverlay(currentInput);
 
     // Sky color grading pass (time-of-day atmospheric grading). Ping-pongs.
     if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: skyColor.render'); } catch (_) {} }
@@ -1582,6 +1628,10 @@ export class FloorCompositor {
         currentInput = sepOutput;
       }
     }
+
+    // PIXI world-channel composite: inject bridge drawings late so they are
+    // not altered by bloom/grading stylization passes.
+    currentInput = this._compositePixiWorldOverlay(currentInput);
 
     // Composite fog-of-war into the RT chain so downstream post effects (lens)
     // are guaranteed to render above fog.

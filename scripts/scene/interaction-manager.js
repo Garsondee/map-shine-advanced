@@ -1979,8 +1979,10 @@ export class InteractionManager {
         }, 'dblClick.noteInteraction', Severity.COSMETIC);
 
         // 1.7 Check Tiles (double-click opens tile config sheet)
+        // Bypass foreground/background mode filter so any visible tile can be
+        // opened via double-click, regardless of which tool mode is active.
         if (this._isTilesLayerActive()) {
-          const tilePick = this._pickTileHit();
+          const tilePick = this._pickTileHit({ ignoreForegroundFilter: true });
           log.warn('TileInteraction.doubleClick', {
             picked: !!tilePick,
             tileId: tilePick?.tileId ?? null
@@ -2517,24 +2519,35 @@ export class InteractionManager {
     }
   }
 
-  _pickTileHit() {
+  _pickTileHit({ ignoreForegroundFilter = false } = {}) {
     const camera = this.sceneComposer?.camera;
     if (!camera || !this.tileManager?.tileSprites) return null;
 
-    const collectSprites = ({ ignoreForegroundFilter = false, ignoreBandFilter = false } = {}) => {
+    const collectSprites = ({ ignoreForegroundFilter: igFF = false, ignoreBandFilter = false } = {}) => {
       const next = [];
       for (const data of this.tileManager.tileSprites.values()) {
         if (!data?.sprite) continue;
         if (!ignoreBandFilter && !this._isTileWithinActiveBand(data?.tileDoc)) continue;
-        if (!ignoreForegroundFilter && !this._isTileSelectableForCurrentTool(data)) continue;
+        if (!igFF && !this._isTileSelectableForCurrentTool(data)) continue;
         next.push(data.sprite);
       }
       return next;
     };
 
     const strictTileMode = this._isTilesLayerActive();
+    // In Tiles mode, we prefer to respect the active Foundry tile tool mode
+    // (foreground/background) for selection and dragging, but selection must not
+    // become impossible when the user clicks a visible tile of the "other" type.
+    //
+    // Therefore: try strict first, then fall back to a permissive pick when strict
+    // misses. For double-click config open we can start permissive immediately.
     const fallbackModes = strictTileMode
-      ? [{ ignoreForegroundFilter: false, ignoreBandFilter: false }]
+      ? (ignoreForegroundFilter
+          ? [{ ignoreForegroundFilter: true, ignoreBandFilter: false }]
+          : [
+              { ignoreForegroundFilter: false, ignoreBandFilter: false },
+              { ignoreForegroundFilter: true, ignoreBandFilter: false }
+            ])
       : [
           { ignoreForegroundFilter: false, ignoreBandFilter: false },
           // Non-tile contexts can remain permissive to avoid dead pick paths
@@ -4364,7 +4377,10 @@ export class InteractionManager {
     // We'll enable it for GM mainly for editing, or everyone for doors?
     // Highlighting the whole wall is good for knowing which one you are about to click.
     
-    if (game.user.isGM || this._isWallsContextActive()) {
+    const currentTool = String(ui?.controls?.tool?.name ?? ui?.controls?.activeTool ?? game?.activeTool ?? '').toLowerCase();
+    const isWallPlacementMode = this._isWallsContextActive() && this._isWallDrawTool(currentTool);
+
+    if (isWallPlacementMode) {
         const wallGroup = this.wallManager.wallGroup;
         this.raycaster.params.Line.threshold = 20; // Lenient threshold
         const wallIntersects = this.raycaster.intersectObject(wallGroup, true);
@@ -4383,8 +4399,8 @@ export class InteractionManager {
                         }
                         this.hoveredWallId = wallId;
                         this.wallManager.setHighlight(this.hoveredWallId, true);
-                        this.canvasElement.style.cursor = 'pointer';
                     }
+                    this.canvasElement.style.cursor = 'pointer';
                     break; // Found valid wall part
                 }
                 object = object.parent;

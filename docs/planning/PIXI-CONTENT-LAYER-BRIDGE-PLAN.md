@@ -300,3 +300,161 @@ Immediate implementation order:
 2. Wire Drawings preview/container capture.
 3. Composite in V2 pass with explicit ordering contract.
 4. Run parity checks for rect/ellipse/polygon/freehand/text (including in-progress previews).
+
+---
+
+## Notes: Current Implementation + Investigation Log (WIP)
+
+### Current status
+
+- **Bridge capture:** working
+- **Capture resolution:** full viewport confirmed (example `captured:3384x2028`)
+- **User-visible result:** **no visible drawings yet**
+- **Most likely remaining issue:** presentation/compositing path (bridge texture is captured but not producing visible pixels in the final frame)
+
+### What was implemented so far
+
+#### 1) New subsystem: `PixiContentLayerBridge`
+
+- **File:** `scripts/foundry/pixi-content-layer-bridge.js`
+- **Purpose:** capture Foundry PIXI Drawings layer output and publish as Three.js textures for V2 compositing.
+- **Outputs:**
+  - `getWorldTexture()` (used for Drawings)
+  - `getUiTexture()` (reserved for future UI/HUD capture)
+
+Key behaviors implemented:
+
+- **CanvasTexture lifecycle hardening**
+  - Create backing canvases on demand.
+  - Recreate `THREE.CanvasTexture` when canvas dimensions change to prevent `texSubImage` out-of-bounds warnings.
+- **Clear-on-failure**
+  - If capture cannot run (canvas not ready, renderer/layer missing, capture throws), clear channel canvases to transparent so the compositor never samples stale pixels.
+- **Ticker-driven update fallback**
+  - Bridge updates are driven via `canvas.app.ticker` to avoid relying solely on FloorCompositor driving `bridge.update()`.
+- **Performance gates**
+  - Fullscreen extraction is expensive.
+  - Capture is skipped when idle unless `_dirty` or there is an active Drawings preview being edited (`drawingsLayer.preview.children.length > 0`).
+  - Capture is throttled (currently ~66ms) to reduce main-thread/GPU pressure.
+- **Debug status**
+  - `_lastUpdateStatus` string tracks why capture ran or skipped (`skip:idle`, `skip:throttled`, `captured:WxH`, etc.) for runtime diagnosis.
+
+#### 2) Wiring into MapShine/Foundry lifecycle
+
+- **File:** `scripts/foundry/canvas-replacement.js`
+- **Integration:** instantiate + `initialize()` the bridge during Three canvas setup, expose as `window.MapShine.pixiContentLayerBridge`, and dispose on teardown.
+
+#### 3) V2 compositor integration
+
+- **File:** `scripts/compositor-v2/FloorCompositor.js`
+- **Integration points:**
+  - Composite world-channel bridge texture into the post-processing chain.
+  - Render a UI-channel overlay pass at the very end (reserved for future UI ingestion).
+
+### Issues found during investigation
+
+#### A) WebGL warning: `texSubImage` size mismatch
+
+- Symptom: warnings like `Offset+size must be <= the size of the existing specified image`.
+- Fix implemented: recreate `CanvasTexture` when backing canvas dimensions change.
+
+#### B) Fullscreen selection-box artifact during rectangle draw
+
+- Symptom: selection box appears spanning the entire camera view / world.
+- Cause hypothesis: capture target included layer-level interaction visuals.
+- Mitigations attempted:
+  - Capturing `drawingsLayer.objects` only.
+  - Ultimately switched to capturing `drawingsLayer` but temporarily hiding `preview` and `_configPreview` during extraction.
+
+#### C) 1x1 capture collapse
+
+- Symptom: `extract.canvas(...)` returned a 1x1 canvas even with drawings present.
+- Fix implemented:
+  - Extract using an explicit full-screen `PIXI.Rectangle(0,0,screenW,screenH)` frame.
+  - Temporarily force `visible/renderable` on the capture target (and objects container) during extraction.
+
+#### D) Freeze from continuous full-resolution extraction
+
+- Symptom: Foundry freezes when extraction runs full-screen too frequently.
+- Fix implemented:
+  - Idle short-circuit (skip unless dirty or live preview).
+  - Throttle capture (~66ms).
+
+### Current open problem
+
+- Despite capture being confirmed full-size and updating, **drawings are still not visible**.
+
+Remaining hypotheses to pursue:
+
+- Bridge texture is captured but:
+  - not actually being sampled in the final output (wrong compositor path active), or
+  - sampled but alpha/premultiplication causes near-zero blend factor, or
+  - colorspace / tone mapping interaction produces a fully transparent/black result, or
+  - the texture is bound but UV mapping mismatch means we sample empty pixels.
+
+### Useful runtime checks used during investigation
+
+- Bridge status probe (example):
+  - `{ tickerFrameId, lastCaptureFrame, lastUpdateStatus, worldCanvas: [w,h] }`
+
+### List of Shame (recent attempts that did NOT solve visibility)
+
+1. **Switched capture source from `canvas.drawings` to drawing `placeable.shape` refs in `canvas.primary/interface`**
+   - Why: Foundry source confirms drawing visuals are not children of DrawingsLayer.
+   - Result: Correct architecture; still transparent capture output.
+
+2. **Stage-isolation capture pass (hide non-drawing siblings, keep only shape ancestry visible)**
+   - Why: avoid tiles/tokens/etc. polluting capture.
+   - Result: capture ran, but probes stayed fully transparent (`maxAlpha=0`, `maxRGB=0`).
+
+3. **Disabled masks/filters/filterArea/cullable on stage + ancestor + shape nodes during capture**
+   - Why: prevent external compositing dependencies from collapsing output.
+   - Result: no meaningful pixel content appeared.
+
+4. **Forced visibility/renderability/alpha on stage root and all relevant ancestors/shapes**
+   - Why: rule out hidden or alpha-zero parents.
+   - Result: no visible drawings in captured texture.
+
+5. **PIXI v7/v8 render signature hardening (`renderer.render(...)` call variants)**
+   - Why: v8-style signature can silently no-op in v7-like runtimes.
+   - Result: no visible drawing pixels; capture still empty/near-empty.
+
+6. **Non-isolated fallback capture (render full stage, minimal mutation)**
+   - Why: isolation might remove dependencies required by Foundry primary rendering.
+   - Result: still transparent.
+
+7. **Suppression-race mitigation with gameplay PIXI suppression**
+   - Added bypass in `_enforceGameplayPixiSuppression()` when `window.MapShine.__bridgeCaptureActive` is true.
+   - Bridge now sets/unsets `__bridgeCaptureActive` during capture windows.
+   - Why: ticker-enforced suppression was repeatedly hiding `canvas.primary`.
+   - Result: did not resolve transparent captures.
+
+8. **`app.view` fallback capture path**
+   - Why: some Foundry rendering paths may only materialize correctly through app render path.
+   - Result: fallback activated (`captured-view-fallback:*`), but output contained only tiny alpha noise (`maxAlpha` single-digit/low teens, `maxRGB=0`), not drawings.
+
+9. **Forced drawing shapes visible/renderable during `app.view` fallback**
+   - Why: ensure shapes are not suppressed during fallback render.
+   - Result: still no usable RGB/alpha drawing signal.
+
+10. **DPI/backing-size correction in `app.view` fallback (`view` -> `fw/fh`)**
+    - Why: remove partial/empty-square artifact from size mismatch.
+    - Result: improved sizing consistency, but still no visible drawing content.
+
+11. **Extensive runtime probes (shape bounds, center-point probes, sparse canvas scan, status tracing)**
+    - Observed repeatedly:
+      - Shapes exist (`shapes=19`)
+      - Shape bounds are non-zero
+      - Bridge statuses show capture paths executing
+      - Captured world canvas remains transparent/near-transparent
+    - Result: confirms pipeline executes but does not yield drawing pixels.
+
+12. **Temporary `canvas.primary.visible=true` sanity check windows**
+    - Why: verify whether drawings appear when PIXI primary is force-shown.
+    - Result: no visible drawing art in gameplay view, likely because PIXI canvas presentation is still suppressed by mode ownership path.
+
+Current conclusion from this shame list:
+
+- We have repeatedly validated **drawing data exists** and **capture passes execute**.
+- We have **not** yet produced a reliable, non-transparent drawing image in bridge output.
+- Next likely direction is a **hard bypass capture model**: render a dedicated drawing-only container (or clone-based extraction path) that avoids Foundry stage/app-view side effects entirely.
+

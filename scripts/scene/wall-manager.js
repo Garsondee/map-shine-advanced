@@ -75,10 +75,37 @@ export class WallManager {
     this.wallGroup.position.z = groundZ + 3.0;
 
     this.setupHooks();
-    this.syncAllWalls();
+
+    // Initial wall sync can occur before Foundry fully populates wall placeables
+    // and/or before canvas dimensions are stable. If we build door controls too
+    // early, some can end up stuck at origin and appear as a second icon set.
+    this._scheduleInitialSync();
     
     this.initialized = true;
     log.info(`WallManager initialized at z=${this.wallGroup.position.z}`);
+  }
+
+  _scheduleInitialSync() {
+    const maxAttempts = 30;
+    const attemptDelayMs = 50;
+
+    let attempts = 0;
+    const tick = () => {
+      attempts += 1;
+      try {
+        const dimsOk = Number.isFinite(Number(canvas?.dimensions?.height)) && canvas.dimensions.height > 0;
+        const wallsOk = Array.isArray(canvas?.walls?.placeables) && canvas.walls.placeables.length > 0;
+        if (dimsOk && wallsOk) {
+          this.syncAllWalls();
+          return;
+        }
+      } catch (_) {
+      }
+
+      if (attempts < maxAttempts) setTimeout(tick, attemptDelayMs);
+    };
+
+    setTimeout(tick, 0);
   }
 
   _getActiveRenderScene() {
@@ -619,6 +646,12 @@ export class WallManager {
    */
   syncAllWalls() {
     if (!canvas.walls) return;
+
+    // If called before canvas dimensions are ready, coordinate transforms can
+    // be incorrect and door controls may appear at origin. Bail and allow the
+    // initializer retry loop to reschedule.
+    const dimsH = Number(canvas?.dimensions?.height);
+    if (!Number.isFinite(dimsH) || dimsH <= 0) return;
     
     log.info(`Syncing ${canvas.walls.placeables.length} walls...`);
     let createdDoorControls = 0;

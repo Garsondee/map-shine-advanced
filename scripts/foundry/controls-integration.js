@@ -234,34 +234,55 @@ export class ControlsIntegration {
           if (!wall.doorControl && typeof wall.createDoorControl === 'function') {
             wall.createDoorControl();
           }
+
+          // Even if Foundry re-shows the ControlsLayer.doors container later,
+          // explicitly disable each DoorControl instance so its icon can never
+          // render (commonly appears at 0,0 when controls transforms drift).
+          if (wall.doorControl) {
+            wall.doorControl.visible = false;
+            wall.doorControl.renderable = false;
+            if (wall.doorControl.icon) {
+              wall.doorControl.icon.visible = false;
+              wall.doorControl.icon.renderable = false;
+            }
+          }
         } catch (_) {
           // Ignore per-wall control creation failures
         }
       }
 
-      if (canvas?.controls) {
-        canvas.controls.visible = true;
-      }
-
       const controlsDoors = canvas?.controls?.doors;
       if (!controlsDoors) return;
 
-      // Mirror Foundry TokenLayer behavior: door controls are available during
-      // normal gameplay/token interaction.
-      controlsDoors.visible = true;
-      controlsDoors.renderable = true;
+      // IMPORTANT: Map Shine renders its own Three-based door icons/controls.
+      // Foundry's native DoorControl icons must NOT be rendered, otherwise we
+      // get a second icon set (commonly stuck at screen origin if the PIXI
+      // controls layer transform isn't being updated).
+      //
+      // We still keep DoorControl instances created so other parts of Map Shine
+      // can query `doorControl.isVisible` to match Foundry's visibility rules.
+      controlsDoors.visible = false;
+      controlsDoors.renderable = false;
 
-      // Mirror CanvasVisibility.restrictVisibility door pass:
-      // for (const door of canvas.controls.doors.children) door.visible = door.isVisible;
+      // Also force-hide any existing door controls as defense-in-depth.
       for (const door of controlsDoors.children || []) {
         try {
           if (!door) continue;
-          if ('isVisible' in door) {
-            door.visible = !!door.isVisible;
-          }
+          door.visible = false;
+          door.renderable = false;
         } catch (_) {
           // Ignore per-door visibility failures
         }
+      }
+
+      // Final defense: if Foundry has re-populated the doors container with
+      // new children after our per-door pass, clear them entirely. DoorControl
+      // instances remain attached to walls, so visibility checks still work.
+      try {
+        if (Array.isArray(controlsDoors.children) && controlsDoors.children.length) {
+          controlsDoors.removeChildren();
+        }
+      } catch (_) {
       }
     } catch (_) {
       // Best effort only

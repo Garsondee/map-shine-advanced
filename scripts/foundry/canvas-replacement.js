@@ -63,7 +63,6 @@ import { TileMotionManager } from '../scene/tile-motion-manager.js';
 import { SurfaceRegistry } from '../scene/surface-registry.js';
 import { WallManager } from '../scene/wall-manager.js';
 import { DoorMeshManager } from '../scene/DoorMeshManager.js';
-import { DrawingManager } from '../scene/drawing-manager.js';
 import { NoteManager } from '../scene/note-manager.js';
 import { FloorStack } from '../scene/FloorStack.js';
 import { FloorLayerManager } from '../compositor-v2/FloorLayerManager.js';
@@ -155,6 +154,12 @@ let controlsIntegration = null;
 
 /** @type {Array<{hook: string, id: number}>} */
 let _pixiSuppressionHookIds = [];
+
+/** @type {Function|null} */
+let _pixiSuppressionTickerFn = null;
+
+/** @type {number} */
+let _pixiSuppressionTickerLastMs = 0;
 
 /** @type {number|null} */
 let _inputArbitrationSettleRaf = null;
@@ -3018,6 +3023,15 @@ function onCanvasTearDown(canvas) {
     }, 'frameCoordinator.dispose');
   }
 
+  // Remove PIXI suppression ticker hook (V2 baseline enforcement)
+  if (_pixiSuppressionTickerFn) {
+    safeDispose(() => {
+      canvas?.app?.ticker?.remove?.(_pixiSuppressionTickerFn);
+    }, 'pixiSuppress.ticker.remove');
+    _pixiSuppressionTickerFn = null;
+    _pixiSuppressionTickerLastMs = 0;
+  }
+
   // EffectMaskRegistry removed - GpuSceneMaskCompositor handles all masks
 
   if (window.MapShine?.maskManager && typeof window.MapShine.maskManager.dispose === 'function') {
@@ -4052,7 +4066,7 @@ async function createThreeCanvas(scene) {
     safeCall(() => loadingOverlay.setStage('scene.managers', 0.65, 'Syncing scene objects...', { keepAuto: true }), 'overlay.remaining', Severity.COSMETIC);
 
     _setCreateThreeCanvasProgress('scene.managers.lightweightBatch.construct');
-    console.log(' -> Manager: Lightweight batch (Door, Drawing, Note, Template, LightIcon, EnhancedLightIcon, SoundIcon, MapPoints)');
+    console.log(' -> Manager: Lightweight batch (Door, Note, Template, LightIcon, EnhancedLightIcon, SoundIcon, MapPoints)');
 
     if (!sceneComposer) {
       // This can happen if the scene load session becomes stale (scene switch)
@@ -4070,7 +4084,10 @@ async function createThreeCanvas(scene) {
     doorMeshManager = new DoorMeshManager(threeScene, camera);
     pixiContentLayerBridge = new PixiContentLayerBridge();
     pixiContentLayerBridge.initialize();
-    drawingManager = new DrawingManager(threeScene);
+    // Drawings ownership test mode:
+    // Keep PIXI as the single visual source for drawings so the content bridge
+    // can be validated in isolation. Three-native DrawingManager remains disabled.
+    drawingManager = null;
     noteManager = new NoteManager(threeScene);
     templateManager = new TemplateManager(threeScene);
     lightIconManager = new LightIconManager(threeScene);
@@ -4082,7 +4099,6 @@ async function createThreeCanvas(scene) {
       // Debug mode: initialize managers sequentially for accurate per-manager timing
       const lightweightManagers = [
         ['manager.DoorMesh.init', doorMeshManager],
-        ['manager.Drawing.init', drawingManager],
         ['manager.Note.init', noteManager],
         ['manager.Template.init', templateManager],
         ['manager.LightIcon.init', lightIconManager],
@@ -4101,7 +4117,6 @@ async function createThreeCanvas(scene) {
       _setCreateThreeCanvasProgress('scene.managers.lightweightBatch.init');
       await Promise.all([
         Promise.resolve(doorMeshManager.initialize()),
-        Promise.resolve(drawingManager.initialize()),
         Promise.resolve(noteManager.initialize()),
         Promise.resolve(templateManager.initialize()),
         Promise.resolve(lightIconManager.initialize()),
@@ -4114,7 +4129,7 @@ async function createThreeCanvas(scene) {
     effectComposer.addUpdatable(doorMeshManager);
     if (window.MapShine) window.MapShine.doorMeshManager = doorMeshManager;
     console.log(' -> Manager: Lightweight batch DONE');
-    log.info('Parallel manager batch initialized (Door, Drawing, Note, Template, LightIcon, EnhancedLightIcon, SoundIcon, MapPoints)');
+    log.info('Parallel manager batch initialized (Door, Note, Template, LightIcon, EnhancedLightIcon, SoundIcon, MapPoints)');
 
     // Wire map points to particle effects (fire, candle flame, smelly flies, etc.)
     // V2: No particle effects ->-> skip wiring.
@@ -4324,6 +4339,13 @@ async function createThreeCanvas(scene) {
       }
       _pixiSuppressionHookIds = [];
 
+      // Also clear any previous ticker enforcement so we don't double-install.
+      if (_pixiSuppressionTickerFn) {
+        try { canvas?.app?.ticker?.remove?.(_pixiSuppressionTickerFn); } catch (_) {}
+        _pixiSuppressionTickerFn = null;
+        _pixiSuppressionTickerLastMs = 0;
+      }
+
       const install = (hook) => {
         try {
           const id = Hooks.on(hook, () => {
@@ -4340,6 +4362,25 @@ async function createThreeCanvas(scene) {
       install('updateToken');
       install('activateCanvasLayer');
       install('renderSceneControls');
+
+      // V2 baseline: Foundry can re-enable controls.doors and per-wall DoorControl
+      // visibility continuously as part of its own ControlsLayer workflows.
+      // Enforce suppression every PIXI tick (throttled) to prevent duplicate
+      // door icons stuck at (0,0) when PIXI transforms drift.
+      try {
+        const ticker = canvas?.app?.ticker;
+        if (ticker?.add) {
+          _pixiSuppressionTickerFn = () => {
+            const now = performance.now();
+            if ((now - _pixiSuppressionTickerLastMs) < 33) return;
+            _pixiSuppressionTickerLastMs = now;
+            try { _enforceGameplayPixiSuppression(); } catch (_) {}
+            try { _updateFoundrySelectRectSuppression(); } catch (_) {}
+          };
+          ticker.add(_pixiSuppressionTickerFn, null, -75);
+        }
+      } catch (_) {
+      }
     }, 'pixiSuppress.installHooks', Severity.COSMETIC);
 
     dlp.event('sceneSync: DONE ->-> entering finalization');
@@ -6030,6 +6071,37 @@ function _enforceGameplayPixiSuppression() {
   safeCall(() => {
     if (!canvas?.ready) return;
     if (isMapMakerMode) return;
+    // Debug/bridge escape hatch: allow temporary suspension of suppression
+    // while PIXI-content bridge performs offscreen extraction.
+    if (window?.MapShine?.__disablePixiSuppression === true) return;
+    if (window?.MapShine?.__bridgeCaptureActive === true) return;
+
+    // Door controls: Map Shine renders its own Three-based door icons. Foundry's
+    // native PIXI door controls must never render, otherwise we can get a second
+    // icon set stuck at (0,0) when PIXI control transforms drift.
+    try {
+      const controlsDoors = canvas?.controls?.doors;
+      if (controlsDoors) {
+        controlsDoors.visible = false;
+        controlsDoors.renderable = false;
+        if (Array.isArray(controlsDoors.children) && controlsDoors.children.length) {
+          try { controlsDoors.removeChildren(); } catch (_) {}
+        }
+      }
+      for (const wall of canvas?.walls?.placeables || []) {
+        if (!wall?.isDoor) continue;
+        const dc = wall.doorControl;
+        if (!dc) continue;
+        dc.visible = false;
+        dc.renderable = false;
+        if (dc.icon) {
+          dc.icon.visible = false;
+          dc.icon.renderable = false;
+        }
+      }
+    } catch (_) {
+    }
+
     const activeControl = String(ui?.controls?.control?.name || ui?.controls?.activeControl || '').toLowerCase();
     const activeTool = String(ui?.controls?.tool?.name || ui?.controls?.activeTool || game?.activeTool || '').toLowerCase();
     const inputRouter =

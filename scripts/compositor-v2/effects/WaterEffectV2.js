@@ -2,7 +2,7 @@
  * @fileoverview WaterEffectV2 — V2 water post-processing pass.
  *
  * Applies water tint, wave distortion, caustics, specular (GGX), foam, murk,
- * sand, rain ripples, and chromatic aberration to water areas defined by
+ * rain ripples, and chromatic aberration to water areas defined by
  * `_Water` mask textures.
  *
  * Architecture:
@@ -101,28 +101,26 @@ export class WaterEffectV2 {
       waveBreakupScale: 80.0,
       waveBreakupSpeed: 0.18,
       waveBreakupWarp: 0.85,
-      waveBreakupDistortionStrength: 0.10,
+      waveBreakupDistortionStrength: 0.28,
       waveBreakupSpecularStrength: 0.35,
 
-      waveMicroNormalStrength: 0.22,
+      waveMicroNormalStrength: 0.32,
       waveMicroNormalScale: 80.0,
       waveMicroNormalSpeed: 0.18,
       waveMicroNormalWarp: 0.85,
-      waveMicroNormalDistortionStrength: 0.10,
+      waveMicroNormalDistortionStrength: 0.24,
       waveMicroNormalSpecularStrength: 0.35,
 
       waveEvolutionEnabled: true,
       waveEvolutionSpeed: 0.15,
       waveEvolutionAmount: 0.3,
       waveEvolutionScale: 0.5,
-      waveSpeedUseWind: true,
+      // Wind always drives wave speed/strength — min factors set the calm-water baseline
       waveSpeedWindMinFactor: 0.2,
-      waveStrengthUseWind: true,
       waveStrengthWindMinFactor: 0.55,
       waveIndoorDampingEnabled: false,
       waveIndoorDampingStrength: 1.0,
       waveIndoorMinFactor: 0.05,
-      useTargetWindDirection: true,
       windDirResponsiveness: 10.0,
 
       // Chromatic aberration
@@ -148,47 +146,16 @@ export class WaterEffectV2 {
       // Keep multi-tap enabled by default to preserve the softer V1 water look.
       refractionMultiTapEnabled: true,
 
-      // Rain
+      // Precipitation distortion — simple noise-based surface agitation
       rainPrecipitation: 0.0,
       rainDistortionEnabled: true,
       rainDistortionUseWeather: true,
       rainDistortionPrecipitationOverride: 0.0,
+      rainDistortionStrengthPx: 6.0,
+      rainDistortionScale: 8.0,
+      rainDistortionSpeed: 1.2,
       rainIndoorDampingEnabled: true,
       rainIndoorDampingStrength: 1.0,
-      rainSplit: 0.5,
-      rainBlend: 0.1,
-      rainGlobalStrength: 1.0,
-      rainRippleStrengthPx: 3.0,
-      rainRippleScale: 12.0,
-      rainRippleSpeed: 1.0,
-      rainRippleDensity: 0.7,
-      rainRippleSharpness: 1.0,
-      rainRippleJitter: 0.8,
-      rainRippleRadiusMin: 0.1,
-      rainRippleRadiusMax: 0.45,
-      rainRippleWidthScale: 1.0,
-      rainRippleSecondaryEnabled: true,
-      rainRippleSecondaryStrength: 0.4,
-      rainRippleSecondaryPhaseOffset: 0.35,
-      rainStormStrengthPx: 8.0,
-      rainStormScale: 6.0,
-      rainStormSpeed: 0.5,
-      rainStormCurl: 1.0,
-      rainStormRateBase: 0.6,
-      rainStormRateSpeedScale: 0.3,
-      rainStormSizeMin: 0.08,
-      rainStormSizeMax: 0.35,
-      rainStormWidthMinScale: 0.3,
-      rainStormWidthMaxScale: 0.8,
-      rainStormDecay: 3.0,
-      rainStormCoreWeight: 0.6,
-      rainStormRingWeight: 0.8,
-      rainStormSwirlStrength: 0.6,
-      rainStormMicroEnabled: true,
-      rainStormMicroStrength: 0.3,
-      rainStormMicroScale: 2.5,
-      rainStormMicroSpeed: 0.8,
-      rainMaxCombinedStrengthPx: 10.0,
 
       // Wind coupling
       lockWaveTravelToWind: true,
@@ -240,20 +207,19 @@ export class WaterEffectV2 {
       cloudShadowSpecularKill: 1.0,
       cloudShadowSpecularCurve: 6.0,
 
-      // Caustics (disabled by default — dual-layer ridged FBM is expensive
-      // on integrated GPUs and can contribute to shader compilation TDR)
-      causticsEnabled: false,
-      causticsIntensity: 8.0,
+      // Caustics — dual-layer ridged FBM for underwater light filaments
+      causticsEnabled: true,
+      causticsIntensity: 4.0,
       causticsScale: 33.4,
       causticsSpeed: 1.05,
-      causticsSharpness: 0.25,
-      causticsEdgeLo: 0.0,
+      causticsSharpness: 0.15,
+      causticsEdgeLo: 0.05,
       causticsEdgeHi: 1.0,
 
-      // Caustics brightness thresholding (V1: brightness mask gate)
-      causticsBrightnessMaskEnabled: false,
-      causticsBrightnessThreshold: 0.55,
-      causticsBrightnessSoftness: 0.20,
+      // Caustics brightness thresholding: gate caustics to lit scene areas
+      causticsBrightnessMaskEnabled: true,
+      causticsBrightnessThreshold: 0.35,
+      causticsBrightnessSoftness: 0.30,
       causticsBrightnessGamma: 1.0,
 
       // Foam
@@ -295,32 +261,6 @@ export class WaterEffectV2 {
       murkGrainSpeed: 0.3,
       murkGrainStrength: 0.4,
       murkDepthFade: 1.5,
-
-      // Sand
-      sandEnabled: false,
-      sandIntensity: 0.5,
-      sandColor: { r: 0.76, g: 0.68, b: 0.50 },
-      sandContrast: 1.5,
-      sandChunkScale: 12.0,
-      sandChunkSpeed: 0.15,
-      sandGrainScale: 600.0,
-      sandGrainSpeed: 0.1,
-      sandWindDriftScale: 0.5,
-      sandLayeringEnabled: false,
-      sandLayerScaleSpread: 0.5,
-      sandLayerIntensitySpread: 0.65,
-      sandLayerDriftSpread: 0.4,
-      sandLayerEvolutionSpread: 0.5,
-      sandBillowStrength: 0.4,
-      sandCoverage: 0.4,
-      sandChunkSoftness: 0.15,
-      sandSpeckCoverage: 0.3,
-      sandSpeckSoftness: 0.1,
-      sandDepthLo: 0.0,
-      sandDepthHi: 0.85,
-      sandAnisotropy: 0.3,
-      sandDistortionStrength: 0.3,
-      sandAdditive: 0.15,
 
       // SDF build (1024 is sufficient for water masks; 2048 causes multi-second
       // CPU hangs during SDF generation — 4 million pixels to distance-transform)
@@ -384,6 +324,8 @@ export class WaterEffectV2 {
     this._smoothedWindDirX = 1.0;
     this._smoothedWindDirY = 0.0;
     this._smoothedWindSpeed01 = 0.0;
+    this._smoothedAdvectionSpeed01 = 0.0;
+    this._smoothedWaveShapeWind01 = 0.0;
 
     // Dual-spectrum wind-direction blending.
     // We keep a "previous" direction and "target" direction and blend between
@@ -393,6 +335,8 @@ export class WaterEffectV2 {
     this._targetWindDirX = 1.0;
     this._targetWindDirY = 0.0;
     this._windDirBlend01 = 1.0;
+    this._waveDirX = 1.0;
+    this._waveDirY = 0.0;
 
     // ── Debug arrow DOM overlay ──────────────────────────────────────────
     /** @type {HTMLElement|null} */
@@ -579,10 +523,9 @@ export class WaterEffectV2 {
           type: 'folder',
           expanded: false,
           parameters: [
-            'waveSpeedUseWind', 'waveSpeedWindMinFactor',
-            'waveStrengthUseWind', 'waveStrengthWindMinFactor',
+            'waveSpeedWindMinFactor', 'waveStrengthWindMinFactor',
             'waveIndoorDampingEnabled', 'waveIndoorDampingStrength', 'waveIndoorMinFactor',
-            'useTargetWindDirection', 'windDirResponsiveness',
+            'windDirResponsiveness',
             'lockWaveTravelToWind', 'waveDirOffsetDeg', 'waveAppearanceRotDeg',
             'waveDirFieldEnabled', 'waveDirFieldMaxDeg', 'waveDirFieldScale', 'waveDirFieldSpeed',
             'advectionDirOffsetDeg', 'advectionSpeed01'
@@ -604,26 +547,15 @@ export class WaterEffectV2 {
         },
         {
           name: 'water-rain',
-          label: 'Rain Distortion',
+          label: 'Precipitation Distortion',
           type: 'folder',
           expanded: false,
           parameters: [
             'rainDistortionEnabled',
             'rainDistortionUseWeather',
             'rainDistortionPrecipitationOverride',
-            'rainIndoorDampingEnabled', 'rainIndoorDampingStrength',
-            'rainPrecipitation', 'rainSplit', 'rainBlend', 'rainGlobalStrength',
-            'rainRippleStrengthPx', 'rainRippleScale', 'rainRippleSpeed', 'rainRippleDensity',
-            'rainRippleSharpness', 'rainRippleJitter',
-            'rainRippleRadiusMin', 'rainRippleRadiusMax', 'rainRippleWidthScale',
-            'rainRippleSecondaryEnabled', 'rainRippleSecondaryStrength', 'rainRippleSecondaryPhaseOffset',
-            'rainStormStrengthPx', 'rainStormScale', 'rainStormSpeed', 'rainStormCurl',
-            'rainStormRateBase', 'rainStormRateSpeedScale',
-            'rainStormSizeMin', 'rainStormSizeMax',
-            'rainStormWidthMinScale', 'rainStormWidthMaxScale',
-            'rainStormDecay', 'rainStormCoreWeight', 'rainStormRingWeight', 'rainStormSwirlStrength',
-            'rainStormMicroEnabled', 'rainStormMicroStrength', 'rainStormMicroScale', 'rainStormMicroSpeed',
-            'rainMaxCombinedStrengthPx'
+            'rainDistortionStrengthPx', 'rainDistortionScale', 'rainDistortionSpeed',
+            'rainIndoorDampingEnabled', 'rainIndoorDampingStrength'
           ]
         },
         {
@@ -694,24 +626,6 @@ export class WaterEffectV2 {
             'murkDepthLo', 'murkDepthHi', 'murkDepthFade',
             'murkGrainScale', 'murkGrainSpeed', 'murkGrainStrength'
           ]
-        },
-        {
-          name: 'water-sand',
-          label: 'Sand',
-          type: 'folder',
-          expanded: false,
-          parameters: [
-            'sandEnabled',
-            'sandLayeringEnabled',
-            'sandIntensity', 'sandColor', 'sandContrast',
-            'sandChunkScale', 'sandChunkSpeed', 'sandChunkSoftness',
-            'sandGrainScale', 'sandGrainSpeed',
-            'sandWindDriftScale',
-            'sandLayerScaleSpread', 'sandLayerIntensitySpread', 'sandLayerDriftSpread', 'sandLayerEvolutionSpread',
-            'sandBillowStrength', 'sandCoverage', 'sandSpeckCoverage', 'sandSpeckSoftness',
-            'sandDepthLo', 'sandDepthHi',
-            'sandAnisotropy', 'sandDistortionStrength', 'sandAdditive'
-          ]
         }
       ],
       parameters: {
@@ -734,7 +648,6 @@ export class WaterEffectV2 {
             Specular: 5,
             Foam: 6,
             Murk: 7,
-            Sand: 8,
           }
         },
         debugWindArrow: { type: 'boolean', default: false, label: 'Debug Wind Arrow' },
@@ -750,27 +663,24 @@ export class WaterEffectV2 {
         waveBreakupScale: { type: 'slider', min: 1, max: 300, step: 0.1, default: 80.0, label: 'Breakup Scale' },
         waveBreakupSpeed: { type: 'slider', min: 0, max: 2, step: 0.01, default: 0.18, label: 'Breakup Speed' },
         waveBreakupWarp: { type: 'slider', min: 0, max: 2, step: 0.01, default: 0.85, label: 'Breakup Warp' },
-        waveBreakupDistortionStrength: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.10, label: 'Breakup Distortion' },
+        waveBreakupDistortionStrength: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.28, label: 'Breakup Distortion' },
         waveBreakupSpecularStrength: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.35, label: 'Breakup Specular' },
-        waveMicroNormalStrength: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.22, label: 'Micro Normal Strength' },
+        waveMicroNormalStrength: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.32, label: 'Micro Normal Strength' },
         waveMicroNormalScale: { type: 'slider', min: 1, max: 300, step: 0.1, default: 80.0, label: 'Micro Normal Scale' },
         waveMicroNormalSpeed: { type: 'slider', min: 0, max: 2, step: 0.01, default: 0.18, label: 'Micro Normal Speed' },
         waveMicroNormalWarp: { type: 'slider', min: 0, max: 2, step: 0.01, default: 0.85, label: 'Micro Normal Warp' },
-        waveMicroNormalDistortionStrength: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.10, label: 'Micro Distortion' },
+        waveMicroNormalDistortionStrength: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.24, label: 'Micro Distortion' },
         waveMicroNormalSpecularStrength: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.35, label: 'Micro Specular' },
         waveEvolutionEnabled: { type: 'boolean', default: true, label: 'Wave Evolution Enabled' },
         waveEvolutionSpeed: { type: 'slider', min: 0, max: 2, step: 0.01, default: 0.15, label: 'Evolution Speed' },
         waveEvolutionAmount: { type: 'slider', min: 0, max: 2, step: 0.01, default: 0.3, label: 'Evolution Amount' },
         waveEvolutionScale: { type: 'slider', min: 0.05, max: 4, step: 0.01, default: 0.5, label: 'Evolution Scale' },
 
-        waveSpeedUseWind: { type: 'boolean', default: true, label: 'Wave Speed Uses Wind' },
-        waveSpeedWindMinFactor: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.2, label: 'Speed Wind Min' },
-        waveStrengthUseWind: { type: 'boolean', default: true, label: 'Wave Strength Uses Wind' },
-        waveStrengthWindMinFactor: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.55, label: 'Strength Wind Min' },
+        waveSpeedWindMinFactor: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.2, label: 'Speed Calm Baseline' },
+        waveStrengthWindMinFactor: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.55, label: 'Strength Calm Baseline' },
         waveIndoorDampingEnabled: { type: 'boolean', default: false, label: 'Indoor Damping Enabled' },
         waveIndoorDampingStrength: { type: 'slider', min: 0, max: 2, step: 0.01, default: 1.0, label: 'Indoor Damping Strength' },
         waveIndoorMinFactor: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.05, label: 'Indoor Min Factor' },
-        useTargetWindDirection: { type: 'boolean', default: true, label: 'Smooth Wind Direction' },
         windDirResponsiveness: { type: 'slider', min: 0.05, max: 30, step: 0.05, default: 10.0, label: 'Wind Responsiveness' },
         lockWaveTravelToWind: { type: 'boolean', default: true, label: 'Lock Travel To Wind' },
         waveDirOffsetDeg: { type: 'slider', min: -180, max: 180, step: 1, default: 0.0, label: 'Wave Dir Offset (deg)' },
@@ -797,46 +707,14 @@ export class WaterEffectV2 {
         distortionShorePow: { type: 'slider', min: 0.1, max: 4, step: 0.01, default: 1.0, label: 'Shore Power' },
         distortionShoreMin: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.0, label: 'Shore Min' },
 
-        rainDistortionEnabled: { type: 'boolean', default: true, label: 'Rain Distortion Enabled' },
+        rainDistortionEnabled: { type: 'boolean', default: true, label: 'Precip Distortion Enabled' },
         rainDistortionUseWeather: { type: 'boolean', default: true, label: 'Use Weather Precipitation' },
         rainDistortionPrecipitationOverride: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.0, label: 'Precip Override' },
-        rainIndoorDampingEnabled: { type: 'boolean', default: true, label: 'Rain Indoor Damping' },
-        rainIndoorDampingStrength: { type: 'slider', min: 0, max: 2, step: 0.01, default: 1.0, label: 'Rain Indoor Damping Strength' },
-        rainPrecipitation: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.0, label: 'Manual Precipitation' },
-        rainSplit: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.5, label: 'Rain Split' },
-        rainBlend: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.1, label: 'Rain Blend' },
-        rainGlobalStrength: { type: 'slider', min: 0, max: 3, step: 0.01, default: 1.0, label: 'Rain Global Strength' },
-        rainRippleStrengthPx: { type: 'slider', min: 0, max: 20, step: 0.1, default: 3.0, label: 'Ripple Strength (px)' },
-        rainRippleScale: { type: 'slider', min: 1, max: 50, step: 0.1, default: 12.0, label: 'Ripple Scale' },
-        rainRippleSpeed: { type: 'slider', min: 0, max: 4, step: 0.01, default: 1.0, label: 'Ripple Speed' },
-        rainRippleDensity: { type: 'slider', min: 0, max: 2, step: 0.01, default: 0.7, label: 'Ripple Density' },
-        rainRippleSharpness: { type: 'slider', min: 0.1, max: 4, step: 0.01, default: 1.0, label: 'Ripple Sharpness' },
-        rainRippleJitter: { type: 'slider', min: 0, max: 2, step: 0.01, default: 0.8, label: 'Ripple Jitter' },
-        rainRippleRadiusMin: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.1, label: 'Ripple Radius Min' },
-        rainRippleRadiusMax: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.45, label: 'Ripple Radius Max' },
-        rainRippleWidthScale: { type: 'slider', min: 0.1, max: 3, step: 0.01, default: 1.0, label: 'Ripple Width Scale' },
-        rainRippleSecondaryEnabled: { type: 'boolean', default: true, label: 'Secondary Ripples Enabled' },
-        rainRippleSecondaryStrength: { type: 'slider', min: 0, max: 2, step: 0.01, default: 0.4, label: 'Secondary Ripple Strength' },
-        rainRippleSecondaryPhaseOffset: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.35, label: 'Secondary Phase Offset' },
-        rainStormStrengthPx: { type: 'slider', min: 0, max: 24, step: 0.1, default: 8.0, label: 'Storm Strength (px)' },
-        rainStormScale: { type: 'slider', min: 0.1, max: 20, step: 0.01, default: 6.0, label: 'Storm Scale' },
-        rainStormSpeed: { type: 'slider', min: 0, max: 4, step: 0.01, default: 0.5, label: 'Storm Speed' },
-        rainStormCurl: { type: 'slider', min: 0, max: 4, step: 0.01, default: 1.0, label: 'Storm Curl' },
-        rainStormRateBase: { type: 'slider', min: 0, max: 2, step: 0.01, default: 0.6, label: 'Storm Rate Base' },
-        rainStormRateSpeedScale: { type: 'slider', min: 0, max: 2, step: 0.01, default: 0.3, label: 'Storm Rate Speed Scale' },
-        rainStormSizeMin: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.08, label: 'Storm Size Min' },
-        rainStormSizeMax: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.35, label: 'Storm Size Max' },
-        rainStormWidthMinScale: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.3, label: 'Storm Width Min Scale' },
-        rainStormWidthMaxScale: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.8, label: 'Storm Width Max Scale' },
-        rainStormDecay: { type: 'slider', min: 0.1, max: 8, step: 0.01, default: 3.0, label: 'Storm Decay' },
-        rainStormCoreWeight: { type: 'slider', min: 0, max: 2, step: 0.01, default: 0.6, label: 'Storm Core Weight' },
-        rainStormRingWeight: { type: 'slider', min: 0, max: 2, step: 0.01, default: 0.8, label: 'Storm Ring Weight' },
-        rainStormSwirlStrength: { type: 'slider', min: 0, max: 2, step: 0.01, default: 0.6, label: 'Storm Swirl Strength' },
-        rainStormMicroEnabled: { type: 'boolean', default: true, label: 'Storm Micro Enabled' },
-        rainStormMicroStrength: { type: 'slider', min: 0, max: 2, step: 0.01, default: 0.3, label: 'Storm Micro Strength' },
-        rainStormMicroScale: { type: 'slider', min: 0.1, max: 10, step: 0.01, default: 2.5, label: 'Storm Micro Scale' },
-        rainStormMicroSpeed: { type: 'slider', min: 0, max: 4, step: 0.01, default: 0.8, label: 'Storm Micro Speed' },
-        rainMaxCombinedStrengthPx: { type: 'slider', min: 0, max: 32, step: 0.1, default: 10.0, label: 'Rain Max Combined (px)' },
+        rainDistortionStrengthPx: { type: 'slider', min: 0, max: 24, step: 0.1, default: 6.0, label: 'Distortion Strength (px)' },
+        rainDistortionScale: { type: 'slider', min: 0.5, max: 40, step: 0.1, default: 8.0, label: 'Distortion Scale' },
+        rainDistortionSpeed: { type: 'slider', min: 0, max: 4, step: 0.01, default: 1.2, label: 'Distortion Speed' },
+        rainIndoorDampingEnabled: { type: 'boolean', default: true, label: 'Indoor Damping' },
+        rainIndoorDampingStrength: { type: 'slider', min: 0, max: 2, step: 0.01, default: 1.0, label: 'Indoor Damping Strength' },
 
         specStrength: { type: 'slider', min: 0, max: 200, step: 0.1, default: 80.0, label: 'Spec Strength' },
         specPower: { type: 'slider', min: 0.1, max: 64, step: 0.1, default: 8.0, label: 'Spec Power' },
@@ -890,12 +768,12 @@ export class WaterEffectV2 {
         cloudShadowSpecularKill: { type: 'slider', min: 0, max: 3, step: 0.01, default: 1.0, label: 'Specular Kill' },
         cloudShadowSpecularCurve: { type: 'slider', min: 0.1, max: 12, step: 0.01, default: 6.0, label: 'Specular Curve' },
 
-        causticsEnabled: { type: 'boolean', default: false, label: 'Caustics Enabled' },
-        causticsBrightnessMaskEnabled: { type: 'boolean', default: false, label: 'Brightness Mask Enabled' },
-        causticsIntensity: { type: 'slider', min: 0, max: 20, step: 0.01, default: 8.0, label: 'Caustics Intensity' },
+        causticsEnabled: { type: 'boolean', default: true, label: 'Caustics Enabled' },
+        causticsBrightnessMaskEnabled: { type: 'boolean', default: true, label: 'Brightness Mask Enabled' },
+        causticsIntensity: { type: 'slider', min: 0, max: 20, step: 0.01, default: 4.0, label: 'Caustics Intensity' },
         causticsScale: { type: 'slider', min: 0.1, max: 120, step: 0.1, default: 33.4, label: 'Caustics Scale' },
         causticsSpeed: { type: 'slider', min: 0, max: 4, step: 0.01, default: 1.05, label: 'Caustics Speed' },
-        causticsSharpness: { type: 'slider', min: 0, max: 2, step: 0.01, default: 0.25, label: 'Caustics Sharpness' },
+        causticsSharpness: { type: 'slider', min: 0, max: 2, step: 0.01, default: 0.15, label: 'Caustics Sharpness' },
         causticsEdgeLo: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.0, label: 'Caustics Edge Low' },
         causticsEdgeHi: { type: 'slider', min: 0, max: 1, step: 0.01, default: 1.0, label: 'Caustics Edge High' },
         causticsBrightnessThreshold: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.55, label: 'Brightness Threshold' },
@@ -940,30 +818,6 @@ export class WaterEffectV2 {
         murkGrainSpeed: { type: 'slider', min: 0, max: 4, step: 0.01, default: 0.3, label: 'Murk Grain Speed' },
         murkGrainStrength: { type: 'slider', min: 0, max: 2, step: 0.01, default: 0.4, label: 'Murk Grain Strength' },
 
-        sandEnabled: { type: 'boolean', default: false, label: 'Sand Enabled' },
-        sandLayeringEnabled: { type: 'boolean', default: false, label: 'Sand Layering Enabled' },
-        sandIntensity: { type: 'slider', min: 0, max: 2, step: 0.01, default: 0.5, label: 'Sand Intensity' },
-        sandColor: { type: 'color', default: { r: 0.76, g: 0.68, b: 0.50 }, label: 'Sand Color' },
-        sandContrast: { type: 'slider', min: 0, max: 4, step: 0.01, default: 1.5, label: 'Sand Contrast' },
-        sandChunkScale: { type: 'slider', min: 1, max: 60, step: 0.1, default: 12.0, label: 'Sand Chunk Scale' },
-        sandChunkSpeed: { type: 'slider', min: 0, max: 2, step: 0.01, default: 0.15, label: 'Sand Chunk Speed' },
-        sandChunkSoftness: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.15, label: 'Sand Chunk Softness' },
-        sandGrainScale: { type: 'slider', min: 50, max: 12000, step: 1, default: 600.0, label: 'Sand Grain Scale' },
-        sandGrainSpeed: { type: 'slider', min: 0, max: 2, step: 0.01, default: 0.1, label: 'Sand Grain Speed' },
-        sandWindDriftScale: { type: 'slider', min: 0, max: 3, step: 0.01, default: 0.5, label: 'Sand Wind Drift Scale' },
-        sandLayerScaleSpread: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.5, label: 'Layer Scale Spread' },
-        sandLayerIntensitySpread: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.65, label: 'Layer Intensity Spread' },
-        sandLayerDriftSpread: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.4, label: 'Layer Drift Spread' },
-        sandLayerEvolutionSpread: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.5, label: 'Layer Evolution Spread' },
-        sandBillowStrength: { type: 'slider', min: 0, max: 2, step: 0.01, default: 0.4, label: 'Sand Billow Strength' },
-        sandCoverage: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.4, label: 'Sand Coverage' },
-        sandSpeckCoverage: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.3, label: 'Sand Speck Coverage' },
-        sandSpeckSoftness: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.1, label: 'Sand Speck Softness' },
-        sandDepthLo: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.0, label: 'Sand Depth Low' },
-        sandDepthHi: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.85, label: 'Sand Depth High' },
-        sandAnisotropy: { type: 'slider', min: -1, max: 1, step: 0.01, default: 0.3, label: 'Sand Anisotropy' },
-        sandDistortionStrength: { type: 'slider', min: 0, max: 2, step: 0.01, default: 0.3, label: 'Sand Distortion Strength' },
-        sandAdditive: { type: 'slider', min: 0, max: 2, step: 0.01, default: 0.15, label: 'Sand Additive' },
       }
     };
   }
@@ -1028,20 +882,10 @@ export class WaterEffectV2 {
 
     // Build initial defines based on default params
     const defines = {};
-    // IMPORTANT: Sand is extremely expensive to compile on some Windows GPU
-    // drivers. We've seen the first WaterEffectV2 render hang indefinitely while
-    // compiling the shader when USE_SAND is enabled, even if sandEnabled=false.
-    //
-    // To keep the compositor stable, we default to NOT compiling sand.
-    // Sand is still uniform-gated, but the shader code is removed at compile time.
-    //
-    // If you later want sand, we can add a controlled (opt-in) shader recompile path.
-    // For now: stability first.
-    // defines.USE_SAND = 1;
     if (this.params.foamFlecksEnabled) defines.USE_FOAM_FLECKS = 1;
     if (this.params.refractionMultiTapEnabled) defines.USE_WATER_REFRACTION_MULTITAP = 1;
     if (this.params.chromaticAberrationEnabled) defines.USE_WATER_CHROMATIC_ABERRATION = 1;
-    const fragSrc = getFragmentShader();
+    const fragSrc = this._getSafeWaterShader();
 
     // Create shader material with all uniforms
     const _matStartMs = performance?.now?.() ?? Date.now();
@@ -1522,11 +1366,8 @@ export class WaterEffectV2 {
       if (!this._debugSignatureUpdateLogged) {
         this._debugSignatureUpdateLogged = true;
         log.warn('MSA_SIGNATURE: WaterEffectV2.update live', {
-          waveSpeedUseWind: p.waveSpeedUseWind,
           waveSpeedWindMinFactor: p.waveSpeedWindMinFactor,
-          waveStrengthUseWind: p.waveStrengthUseWind,
           waveStrengthWindMinFactor: p.waveStrengthWindMinFactor,
-          advectionSpeed: p.advectionSpeed,
           advectionSpeed01: p.advectionSpeed01,
         });
       }
@@ -1585,10 +1426,13 @@ export class WaterEffectV2 {
       }
     } catch (_) {}
 
-    // Optional wind-direction smoothing (legacy V1 behavior parity).
-    if (p.useTargetWindDirection) {
-      const responsiveness = Math.max(0, Number(p.windDirResponsiveness) || 0);
-      const lerpT = 1.0 - Math.exp(-responsiveness * dt);
+    // Wind-direction smoothing: low-pass filter gated by wind speed so
+    // calm water remains stable while gusts smoothly steer the wavefield.
+    {
+      const responsiveness = Math.max(0, Number(p.windDirResponsiveness) || 10.0);
+      const speedGate = Math.max(0.05, Math.min(1.0, windSpeed01));
+      const dirTrack = responsiveness * (0.20 + 0.80 * speedGate);
+      const lerpT = 1.0 - Math.exp(-dirTrack * dt);
       this._smoothedWindDirX += (windDirX - this._smoothedWindDirX) * lerpT;
       this._smoothedWindDirY += (windDirY - this._smoothedWindDirY) * lerpT;
       const smoothLen = Math.hypot(this._smoothedWindDirX, this._smoothedWindDirY);
@@ -1598,39 +1442,35 @@ export class WaterEffectV2 {
       }
     }
 
-    // Dual-spectrum blend setup.
-    // - waterWindDir is the final direction used by non-wave systems (foam drift,
-    //   sand drift, etc.)
-    // - uPrevWindDir/uTargetWindDir/uWindDirBlend are used ONLY by the wavefield
-    //   to avoid snapping on direction changes.
+    // Wave-direction driving for wave shape.
+    // Use a continuous, speed-aware low-pass direction state (no threshold-triggered
+    // "start blend" events) so gusts smoothly steer the wavefield instead of
+    // causing abrupt handoffs.
     {
       const len = Math.hypot(windDirX, windDirY);
       const nx = len > 1e-6 ? (windDirX / len) : 1.0;
       const ny = len > 1e-6 ? (windDirY / len) : 0.0;
 
-      // If the target changed meaningfully, start a new blend.
-      const dot = (this._targetWindDirX * nx + this._targetWindDirY * ny);
-      const angDelta = Math.acos(Math.max(-1.0, Math.min(1.0, dot)));
-      const changed = angDelta > (5.0 * (Math.PI / 180.0));
-
-      if (changed) {
-        // Previous becomes the current effective direction, and we blend to the new target.
-        this._prevWindDirX = this._targetWindDirX;
-        this._prevWindDirY = this._targetWindDirY;
-        this._targetWindDirX = nx;
-        this._targetWindDirY = ny;
-        this._windDirBlend01 = 0.0;
-      }
-
-      // Blend progression. We use the same responsiveness knob (seconds-ish) but
-      // clamp so it can't be absurdly fast.
       const resp = Math.max(0.05, Number(p.windDirResponsiveness) || 2.5);
-      const k = 1.0 - Math.exp(-resp * dt);
-      this._windDirBlend01 = Math.min(1.0, Math.max(0.0, this._windDirBlend01 + (1.0 - this._windDirBlend01) * k));
+      const speedGate = Math.max(0.05, Math.min(1.0, windSpeed01));
+      const dirTrack = resp * (0.12 + 0.52 * speedGate);
+      const k = 1.0 - Math.exp(-dirTrack * dt);
+      this._waveDirX += (nx - this._waveDirX) * k;
+      this._waveDirY += (ny - this._waveDirY) * k;
 
-      if (u.uPrevWindDir) u.uPrevWindDir.value.set(this._prevWindDirX, -this._prevWindDirY);
-      if (u.uTargetWindDir) u.uTargetWindDir.value.set(this._targetWindDirX, -this._targetWindDirY);
-      if (u.uWindDirBlend) u.uWindDirBlend.value = this._windDirBlend01;
+      const dlen = Math.hypot(this._waveDirX, this._waveDirY);
+      const wdx = dlen > 1e-6 ? (this._waveDirX / dlen) : 1.0;
+      const wdy = dlen > 1e-6 ? (this._waveDirY / dlen) : 0.0;
+
+      this._prevWindDirX = wdx;
+      this._prevWindDirY = wdy;
+      this._targetWindDirX = wdx;
+      this._targetWindDirY = wdy;
+      this._windDirBlend01 = 1.0;
+
+      if (u.uPrevWindDir) u.uPrevWindDir.value.set(wdx, -wdy);
+      if (u.uTargetWindDir) u.uTargetWindDir.value.set(wdx, -wdy);
+      if (u.uWindDirBlend) u.uWindDirBlend.value = 1.0;
     }
 
     // Wind speed smoothing (V1): asymmetric (fast gain, slow loss).
@@ -1648,22 +1488,47 @@ export class WaterEffectV2 {
       windSpeed01 = this._smoothedWindSpeed01;
     }
 
+    // Advection speed smoothing: slower than the core wind-speed filter so
+    // gusts don't instantly speed up/slow down drifted wave detail.
+    let advectionWind01 = windSpeed01;
+    {
+      const resp = Math.max(0.05, Number(p.windDirResponsiveness) || 2.5);
+      const up = resp * 0.40;
+      const down = resp * 0.22;
+      const current = Number.isFinite(this._smoothedAdvectionSpeed01) ? this._smoothedAdvectionSpeed01 : advectionWind01;
+      const target = Math.max(0.0, Math.min(1.0, advectionWind01));
+      const rate = target > current ? up : down;
+      const k = 1.0 - Math.exp(-dt * rate);
+      advectionWind01 = current + (target - current) * Math.min(1.0, Math.max(0.0, k));
+      this._smoothedAdvectionSpeed01 = advectionWind01;
+    }
+
+    // Wave-shape wind filter: intentionally slower and more damped than global
+    // wind speed so gusts don't abruptly reshape distortion patterns.
+    let waveShapeWind01 = windSpeed01;
+    {
+      const resp = Math.max(0.05, Number(p.windDirResponsiveness) || 2.5);
+      const up = resp * 0.30;
+      const down = resp * 0.18;
+      const current = Number.isFinite(this._smoothedWaveShapeWind01) ? this._smoothedWaveShapeWind01 : waveShapeWind01;
+      const target = Math.max(0.0, Math.min(1.0, waveShapeWind01));
+      const rate = target > current ? up : down;
+      const k = 1.0 - Math.exp(-dt * rate);
+      const filtered = current + (target - current) * Math.min(1.0, Math.max(0.0, k));
+      // Compress high-end gust response so shape changes stay smooth.
+      waveShapeWind01 = Math.min(1.0, Math.max(0.0, Math.pow(filtered, 0.82)));
+      this._smoothedWaveShapeWind01 = waveShapeWind01;
+    }
+
     // ── Waves (compute early: used to advance uWindTime) ─────────────────
-    // windSpeed01 mixes between the "at wind=0" factor and 1.0 (full wind).
-    // Math.max was wrong: it treated minFactor as a floor and ignored the slider
-    // whenever wind exceeded it. lerp gives smooth, visible control.
+    // Wind always drives wave speed/strength. Min factors set the calm-water baseline.
     const speedMin = Math.max(0.0, p.waveSpeedWindMinFactor ?? 0.2);
     const strengthMin = Math.max(0.0, p.waveStrengthWindMinFactor ?? 0.55);
-    const waveSpeed = (p.waveSpeedUseWind ? (speedMin + (1.0 - speedMin) * windSpeed01) : 1.0) * (p.waveSpeed ?? 1.0);
-    const waveStrength = (p.waveStrengthUseWind ? (strengthMin + (1.0 - strengthMin) * windSpeed01) : 1.0) * (p.waveStrength ?? 0.6);
+    const waveSpeed = (speedMin + (1.0 - speedMin) * waveShapeWind01) * (p.waveSpeed ?? 1.0);
+    const waveStrength = (strengthMin + (1.0 - strengthMin) * waveShapeWind01) * (p.waveStrength ?? 0.6);
 
-    // waveSpeed drives the animation rate of the wave pattern itself.
-    // windSpeed01 only scales uWindTime when waveSpeedUseWind is enabled.
-    // Without wind coupling the wave animation must run at full real-time speed
-    // (dt * waveSpeed), otherwise the 0.15 default windSpeed01 makes waves
-    // appear to run at 15% speed (choppy / slow-motion appearance).
-    const windTimeScale = p.waveSpeedUseWind ? windSpeed01 : 1.0;
-    this._windTime += dt * windTimeScale * waveSpeed;
+    // Wind time: monotonic integration driven by smoothed advection wind.
+    this._windTime += dt * advectionWind01 * waveSpeed;
     u.uWindTime.value = this._windTime;
 
     // Water uses the Y-flipped wind direction.
@@ -1672,10 +1537,10 @@ export class WaterEffectV2 {
     const waterWindDirX = windDirX;
     const waterWindDirY = -windDirY;
     u.uWindDir.value.set(waterWindDirX, waterWindDirY);
-    u.uWindSpeed.value = windSpeed01;
+    u.uWindSpeed.value = advectionWind01;
 
     // Debug arrow: visualize the wind direction vector actually used by water.
-    this._updateWindDebugArrow(waterWindDirX, waterWindDirY, windSpeed01, !!p.debugWindArrow);
+    this._updateWindDebugArrow(waterWindDirX, waterWindDirY, advectionWind01, !!p.debugWindArrow);
 
     // Advection offset (UV drift from wind) — V1 monotonic integration.
     // Compute drift in scene pixels/sec, normalize by scene dimensions.
@@ -1689,7 +1554,8 @@ export class WaterEffectV2 {
       const advMulLegacy = Number.isFinite(p.advectionSpeed) ? Math.max(0.0, Number(p.advectionSpeed)) : null;
       const advMul = (advMulLegacy != null) ? advMulLegacy : (advSpeed01 * 4.0);
 
-      const pxPerSec = (35.0 + 220.0 * windSpeed01) * advMul;
+      // Drive advection strictly by wind speed (no constant base drift).
+      const pxPerSec = (220.0 * advectionWind01) * advMul;
 
       const adDeg = Number.isFinite(p.advectionDirOffsetDeg) ? p.advectionDirOffsetDeg : 0.0;
       if (this._cachedAdvectionDirOffsetDeg !== adDeg) {
@@ -1729,6 +1595,7 @@ export class WaterEffectV2 {
     u.uWaveScale.value = p.waveScale;
     u.uWaveSpeed.value = waveSpeed;
     u.uWaveStrength.value = waveStrength;
+    if (u.uWaveMotion01) u.uWaveMotion01.value = waveShapeWind01;
     u.uDistortionStrengthPx.value = p.distortionStrengthPx;
 
     // Wave breakup noise (new). If unset, fall back to legacy waveMicroNormal* params.
@@ -1792,9 +1659,8 @@ export class WaterEffectV2 {
     u.uChromaticAberrationEdgeGamma.value = p.chromaticAberrationEdgeGamma;
     u.uChromaticAberrationEdgeMin.value = p.chromaticAberrationEdgeMin;
 
-    // ── Rain (parameter + WeatherController coupling) ─────────────────────
-    // Preserve manual tuning (`rainPrecipitation`) but allow live weather to
-    // drive intensity when it is stronger.
+    // ── Precipitation distortion (WeatherController coupling) ──────────────
+    // Resolve precipitation: manual param, override, or live weather.
     let precip = p.rainPrecipitation ?? 0;
     const rainDistortionEnabled = (p.rainDistortionEnabled ?? true) !== false;
     if (!rainDistortionEnabled) {
@@ -1808,7 +1674,7 @@ export class WaterEffectV2 {
           const ws = weatherController?.getCurrentState?.();
           const weatherPrecip = Number(ws?.precipitation);
           const precipType = Number(ws?.precipType);
-          // Treat type=1 (RAIN) and type=3 (HAIL) as liquid precipitation coupling.
+          // Treat type=1 (RAIN) and type=3 (HAIL) as liquid precipitation.
           const isLiquid = (precipType === 1 || precipType === 3);
           if (isLiquid && Number.isFinite(weatherPrecip)) {
             precip = Math.max(precip, Math.max(0, Math.min(1, weatherPrecip)));
@@ -1818,43 +1684,11 @@ export class WaterEffectV2 {
     }
     u.uRainEnabled.value = precip > 0.001 ? 1.0 : 0.0;
     u.uRainPrecipitation.value = precip;
-    u.uRainSplit.value = (p.rainDistortionSplit ?? p.rainSplit ?? 0.5);
-    u.uRainBlend.value = (p.rainDistortionBlend ?? p.rainBlend ?? 0.1);
-    const rainGlobalStrength = (p.rainDistortionGlobalStrength ?? p.rainGlobalStrength ?? 1.0);
-    u.uRainGlobalStrength.value = rainGlobalStrength;
+    u.uRainDistortionStrengthPx.value = p.rainDistortionStrengthPx ?? 6.0;
+    u.uRainDistortionScale.value = p.rainDistortionScale ?? 8.0;
+    u.uRainDistortionSpeed.value = p.rainDistortionSpeed ?? 1.2;
     u.uRainIndoorDampingEnabled.value = p.rainIndoorDampingEnabled ? 1.0 : 0.0;
     u.uRainIndoorDampingStrength.value = p.rainIndoorDampingStrength ?? 1.0;
-    u.uRainRippleStrengthPx.value = p.rainRippleStrengthPx;
-    u.uRainRippleScale.value = p.rainRippleScale;
-    u.uRainRippleSpeed.value = p.rainRippleSpeed;
-    u.uRainRippleDensity.value = p.rainRippleDensity;
-    u.uRainRippleSharpness.value = p.rainRippleSharpness;
-    u.uRainRippleJitter.value = p.rainRippleJitter;
-    u.uRainRippleRadiusMin.value = p.rainRippleRadiusMin;
-    u.uRainRippleRadiusMax.value = p.rainRippleRadiusMax;
-    u.uRainRippleWidthScale.value = p.rainRippleWidthScale;
-    u.uRainRippleSecondaryEnabled.value = p.rainRippleSecondaryEnabled ? 1.0 : 0.0;
-    u.uRainRippleSecondaryStrength.value = p.rainRippleSecondaryStrength;
-    u.uRainRippleSecondaryPhaseOffset.value = p.rainRippleSecondaryPhaseOffset;
-    u.uRainStormStrengthPx.value = p.rainStormStrengthPx;
-    u.uRainStormScale.value = p.rainStormScale;
-    u.uRainStormSpeed.value = p.rainStormSpeed;
-    u.uRainStormCurl.value = p.rainStormCurl;
-    u.uRainStormRateBase.value = p.rainStormRateBase;
-    u.uRainStormRateSpeedScale.value = p.rainStormRateSpeedScale;
-    u.uRainStormSizeMin.value = p.rainStormSizeMin;
-    u.uRainStormSizeMax.value = p.rainStormSizeMax;
-    u.uRainStormWidthMinScale.value = p.rainStormWidthMinScale;
-    u.uRainStormWidthMaxScale.value = p.rainStormWidthMaxScale;
-    u.uRainStormDecay.value = p.rainStormDecay;
-    u.uRainStormCoreWeight.value = p.rainStormCoreWeight;
-    u.uRainStormRingWeight.value = p.rainStormRingWeight;
-    u.uRainStormSwirlStrength.value = p.rainStormSwirlStrength;
-    u.uRainStormMicroEnabled.value = p.rainStormMicroEnabled ? 1.0 : 0.0;
-    u.uRainStormMicroStrength.value = p.rainStormMicroStrength;
-    u.uRainStormMicroScale.value = p.rainStormMicroScale;
-    u.uRainStormMicroSpeed.value = p.rainStormMicroSpeed;
-    u.uRainMaxCombinedStrengthPx.value = p.rainMaxCombinedStrengthPx;
 
     // ── Specular (GGX) ───────────────────────────────────────────────────
     u.uSpecStrength.value = p.specStrength;
@@ -1892,7 +1726,7 @@ export class WaterEffectV2 {
     u.uCausticsIntensity.value = p.causticsIntensity ?? 4.0;
     u.uCausticsScale.value = p.causticsScale ?? 33.4;
     u.uCausticsSpeed.value = p.causticsSpeed ?? 1.05;
-    u.uCausticsSharpness.value = p.causticsSharpness ?? 0.1;
+    u.uCausticsSharpness.value = p.causticsSharpness ?? 0.15;
     u.uCausticsEdgeLo.value = p.causticsEdgeLo ?? 0.11;
     u.uCausticsEdgeHi.value = p.causticsEdgeHi ?? 1.0;
     if (u.uCausticsBrightnessMaskEnabled) u.uCausticsBrightnessMaskEnabled.value = p.causticsBrightnessMaskEnabled ? 1.0 : 0.0;
@@ -1954,54 +1788,6 @@ export class WaterEffectV2 {
     u.uMurkGrainSpeed.value = p.murkGrainSpeed;
     u.uMurkGrainStrength.value = p.murkGrainStrength;
     u.uMurkDepthFade.value = p.murkDepthFade;
-
-    // ── Sand ──────────────────────────────────────────────────────────────
-    // Gate sand with uniforms (never via defines) for runtime safety.
-    const sandEnabled = !!p.sandEnabled;
-    u.uSandIntensity.value = sandEnabled ? p.sandIntensity : 0.0;
-    const sandColor = normalizeRgb01(p.sandColor, { r: 0.76, g: 0.68, b: 0.5 });
-    u.uSandColor.value.set(sandColor.r, sandColor.g, sandColor.b);
-    u.uSandContrast.value = p.sandContrast;
-    // Very low scales produce extremely large "brick" blobs. Clamp to a
-    // sane range defensively so out-of-date saved params can't break visuals.
-    u.uSandChunkScale.value = Math.max(1.0, Math.min(60.0, p.sandChunkScale));
-    u.uSandChunkSpeed.value = p.sandChunkSpeed;
-    u.uSandGrainScale.value = Math.max(50.0, Math.min(12000.0, p.sandGrainScale));
-    u.uSandGrainSpeed.value = p.sandGrainSpeed;
-    if (u.uSandWindDriftScale) {
-      const v = p.sandWindDriftScale;
-      // Desired default: sand drift at ~50% of the global wind advection.
-      u.uSandWindDriftScale.value = Number.isFinite(v) ? Math.max(0.0, Math.min(3.0, v)) : 0.5;
-    }
-    if (u.uSandLayeringEnabled) {
-      u.uSandLayeringEnabled.value = (p.sandLayeringEnabled === true) ? 1.0 : 0.0;
-    }
-    if (u.uSandLayerScaleSpread) {
-      const v = p.sandLayerScaleSpread;
-      u.uSandLayerScaleSpread.value = Number.isFinite(v) ? Math.max(0.0, Math.min(1.0, v)) : 0.5;
-    }
-    if (u.uSandLayerIntensitySpread) {
-      const v = p.sandLayerIntensitySpread;
-      u.uSandLayerIntensitySpread.value = Number.isFinite(v) ? Math.max(0.0, Math.min(1.0, v)) : 0.65;
-    }
-    if (u.uSandLayerDriftSpread) {
-      const v = p.sandLayerDriftSpread;
-      u.uSandLayerDriftSpread.value = Number.isFinite(v) ? Math.max(0.0, Math.min(1.0, v)) : 0.4;
-    }
-    if (u.uSandLayerEvolutionSpread) {
-      const v = p.sandLayerEvolutionSpread;
-      u.uSandLayerEvolutionSpread.value = Number.isFinite(v) ? Math.max(0.0, Math.min(1.0, v)) : 0.5;
-    }
-    u.uSandBillowStrength.value = p.sandBillowStrength;
-    u.uSandCoverage.value = p.sandCoverage;
-    u.uSandChunkSoftness.value = p.sandChunkSoftness;
-    u.uSandSpeckCoverage.value = p.sandSpeckCoverage;
-    u.uSandSpeckSoftness.value = p.sandSpeckSoftness;
-    u.uSandDepthLo.value = p.sandDepthLo;
-    u.uSandDepthHi.value = p.sandDepthHi;
-    u.uSandAnisotropy.value = p.sandAnisotropy;
-    u.uSandDistortionStrength.value = p.sandDistortionStrength;
-    u.uSandAdditive.value = sandEnabled ? p.sandAdditive : 0.0;
 
     // ── Sky / environment ─────────────────────────────────────────────────
     // uSkyIntensity feeds skySpecI = mix(0.08, 1.0, skyI) in the shader.
@@ -2222,6 +2008,7 @@ export class WaterEffectV2 {
     this._windTime = 0;
     this._windOffsetUvX = 0;
     this._windOffsetUvY = 0;
+    this._smoothedWaveShapeWind01 = 0;
     this._lastDefinesKey = -1;
     this._firstRenderDone = false;
     this._activeFloorIndex = 0;
@@ -2335,9 +2122,6 @@ export class WaterEffectV2 {
     const tintColor = normalizeRgb01(p.tintColor, { r: 0.02, g: 0.18, b: 0.28 });
     const foamColor = normalizeRgb01(p.foamColor, { r: 0.85, g: 0.9, b: 0.88 });
     const murkColor = normalizeRgb01(p.murkColor, { r: 0.15, g: 0.22, b: 0.12 });
-    const sandColor = normalizeRgb01(p.sandColor, { r: 0.76, g: 0.68, b: 0.5 });
-    const sandEnabled = !!p.sandEnabled;
-
     return {
       tDiffuse:            { value: fallbacks.black },
       tNoiseMap:           { value: noiseTex ?? fallbacks.black },
@@ -2359,6 +2143,7 @@ export class WaterEffectV2 {
       uWaveScale:              { value: p.waveScale },
       uWaveSpeed:              { value: p.waveSpeed },
       uWaveStrength:           { value: p.waveStrength },
+      uWaveMotion01:           { value: 1.0 },
       uDistortionStrengthPx:   { value: p.distortionStrengthPx },
 
       uWaveBreakupStrength: { value: (p.waveBreakupStrength ?? p.waveMicroNormalStrength) ?? 0.0 },
@@ -2402,48 +2187,17 @@ export class WaterEffectV2 {
       uDistortionShorePow:      { value: p.distortionShorePow },
       uDistortionShoreMin:      { value: p.distortionShoreMin },
 
-      // Rain
-      uRainEnabled:        { value: 0.0 },
-      uRainPrecipitation:  { value: p.rainPrecipitation },
-      uRainSplit:          { value: p.rainSplit },
-      uRainBlend:          { value: p.rainBlend },
-      uRainGlobalStrength: { value: p.rainGlobalStrength },
-      tOutdoorsMask:       { value: fallbacks.white },
-      uHasOutdoorsMask:    { value: 0.0 },
-      uOutdoorsMaskFlipY:  { value: 0.0 },
+      // Precipitation distortion
+      uRainEnabled:              { value: 0.0 },
+      uRainPrecipitation:        { value: p.rainPrecipitation ?? 0.0 },
+      uRainDistortionStrengthPx: { value: p.rainDistortionStrengthPx ?? 6.0 },
+      uRainDistortionScale:      { value: p.rainDistortionScale ?? 8.0 },
+      uRainDistortionSpeed:      { value: p.rainDistortionSpeed ?? 1.2 },
+      tOutdoorsMask:             { value: fallbacks.white },
+      uHasOutdoorsMask:          { value: 0.0 },
+      uOutdoorsMaskFlipY:        { value: 0.0 },
       uRainIndoorDampingEnabled: { value: p.rainIndoorDampingEnabled ? 1.0 : 0.0 },
-      uRainIndoorDampingStrength: { value: p.rainIndoorDampingStrength ?? 1.0 },
-      uRainRippleStrengthPx:          { value: p.rainRippleStrengthPx },
-      uRainRippleScale:               { value: p.rainRippleScale },
-      uRainRippleSpeed:               { value: p.rainRippleSpeed },
-      uRainRippleDensity:             { value: p.rainRippleDensity },
-      uRainRippleSharpness:           { value: p.rainRippleSharpness },
-      uRainRippleJitter:              { value: p.rainRippleJitter },
-      uRainRippleRadiusMin:           { value: p.rainRippleRadiusMin },
-      uRainRippleRadiusMax:           { value: p.rainRippleRadiusMax },
-      uRainRippleWidthScale:          { value: p.rainRippleWidthScale },
-      uRainRippleSecondaryEnabled:    { value: p.rainRippleSecondaryEnabled ? 1.0 : 0.0 },
-      uRainRippleSecondaryStrength:   { value: p.rainRippleSecondaryStrength },
-      uRainRippleSecondaryPhaseOffset: { value: p.rainRippleSecondaryPhaseOffset },
-      uRainStormStrengthPx:    { value: p.rainStormStrengthPx },
-      uRainStormScale:         { value: p.rainStormScale },
-      uRainStormSpeed:         { value: p.rainStormSpeed },
-      uRainStormCurl:          { value: p.rainStormCurl },
-      uRainStormRateBase:      { value: p.rainStormRateBase },
-      uRainStormRateSpeedScale: { value: p.rainStormRateSpeedScale },
-      uRainStormSizeMin:       { value: p.rainStormSizeMin },
-      uRainStormSizeMax:       { value: p.rainStormSizeMax },
-      uRainStormWidthMinScale: { value: p.rainStormWidthMinScale },
-      uRainStormWidthMaxScale: { value: p.rainStormWidthMaxScale },
-      uRainStormDecay:         { value: p.rainStormDecay },
-      uRainStormCoreWeight:    { value: p.rainStormCoreWeight },
-      uRainStormRingWeight:    { value: p.rainStormRingWeight },
-      uRainStormSwirlStrength: { value: p.rainStormSwirlStrength },
-      uRainStormMicroEnabled:  { value: p.rainStormMicroEnabled ? 1.0 : 0.0 },
-      uRainStormMicroStrength: { value: p.rainStormMicroStrength },
-      uRainStormMicroScale:    { value: p.rainStormMicroScale },
-      uRainStormMicroSpeed:    { value: p.rainStormMicroSpeed },
-      uRainMaxCombinedStrengthPx: { value: p.rainMaxCombinedStrengthPx },
+      uRainIndoorDampingStrength:{ value: p.rainIndoorDampingStrength ?? 1.0 },
 
       // Wind
       uWindDir:      { value: new THREE.Vector2(1, 0) },
@@ -2502,7 +2256,7 @@ export class WaterEffectV2 {
       uCausticsIntensity:    { value: p.causticsIntensity ?? 4.0 },
       uCausticsScale:        { value: p.causticsScale ?? 33.4 },
       uCausticsSpeed:        { value: p.causticsSpeed ?? 1.05 },
-      uCausticsSharpness:    { value: p.causticsSharpness ?? 0.1 },
+      uCausticsSharpness:    { value: p.causticsSharpness ?? 0.15 },
       uCausticsEdgeLo:       { value: p.causticsEdgeLo ?? 0.11 },
       uCausticsEdgeHi:       { value: p.causticsEdgeHi ?? 1.0 },
       uCausticsBrightnessMaskEnabled: { value: p.causticsBrightnessMaskEnabled ? 1.0 : 0.0 },
@@ -2548,31 +2302,6 @@ export class WaterEffectV2 {
       uMurkGrainSpeed:    { value: p.murkGrainSpeed },
       uMurkGrainStrength: { value: p.murkGrainStrength },
       uMurkDepthFade:     { value: p.murkDepthFade },
-
-      // Sand
-      uSandIntensity:          { value: sandEnabled ? p.sandIntensity : 0.0 },
-      uSandColor:              { value: new THREE.Vector3(sandColor.r, sandColor.g, sandColor.b) },
-      uSandContrast:           { value: p.sandContrast },
-      uSandChunkScale:         { value: p.sandChunkScale },
-      uSandChunkSpeed:         { value: p.sandChunkSpeed },
-      uSandGrainScale:         { value: p.sandGrainScale },
-      uSandGrainSpeed:         { value: p.sandGrainSpeed },
-      uSandWindDriftScale:     { value: p.sandWindDriftScale ?? 0.5 },
-      uSandLayeringEnabled:    { value: (p.sandLayeringEnabled === true) ? 1.0 : 0.0 },
-      uSandLayerScaleSpread:   { value: p.sandLayerScaleSpread ?? 0.5 },
-      uSandLayerIntensitySpread:{ value: p.sandLayerIntensitySpread ?? 0.65 },
-      uSandLayerDriftSpread:   { value: p.sandLayerDriftSpread ?? 0.4 },
-      uSandLayerEvolutionSpread:{ value: p.sandLayerEvolutionSpread ?? 0.5 },
-      uSandBillowStrength:     { value: p.sandBillowStrength },
-      uSandCoverage:           { value: p.sandCoverage },
-      uSandChunkSoftness:      { value: p.sandChunkSoftness },
-      uSandSpeckCoverage:      { value: p.sandSpeckCoverage },
-      uSandSpeckSoftness:      { value: p.sandSpeckSoftness },
-      uSandDepthLo:            { value: p.sandDepthLo },
-      uSandDepthHi:            { value: p.sandDepthHi },
-      uSandAnisotropy:         { value: p.sandAnisotropy },
-      uSandDistortionStrength: { value: p.sandDistortionStrength },
-      uSandAdditive:           { value: sandEnabled ? p.sandAdditive : 0.0 },
 
       // Debug
       uDebugView: { value: p.debugView },

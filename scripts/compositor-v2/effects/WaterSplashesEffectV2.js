@@ -605,9 +605,13 @@ export class WaterSplashesEffectV2 {
     let totalSystems = 0;
     for (const [floorIndex, { edgeArrays, interiorArrays }] of floorWaterData) {
       // Merge edge arrays.
-      const mergedEdge = this._mergeFloat32Arrays(edgeArrays);
+      const mergedEdgeRaw = this._mergeFloat32Arrays(edgeArrays);
       // Merge interior arrays.
-      const mergedInterior = this._mergeFloat32Arrays(interiorArrays);
+      const mergedInteriorRaw = this._mergeFloat32Arrays(interiorArrays);
+
+      // Prevent scene-border spawning from full-bleed masks touching scene edges.
+      const mergedEdge = this._filterSceneEdgeUvPoints(mergedEdgeRaw, sceneWidth, sceneHeight);
+      const mergedInterior = this._filterSceneEdgeUvPoints(mergedInteriorRaw, sceneWidth, sceneHeight);
 
       // One-time diagnostics: show whether scans produced any points.
       if (!this._loggedPopulateCountsOnce) {
@@ -1693,6 +1697,44 @@ export class WaterSplashesEffectV2 {
       offset += arr.length;
     }
     return merged;
+  }
+
+  /**
+   * Remove spawn points that are too close to scene UV borders.
+   * This prevents shoreline/interior emitters from treating map borders as
+   * valid spawn regions when full-bleed water masks touch the scene edge.
+   *
+   * @param {Float32Array|null} points - Packed (u, v, strength) triples
+   * @param {number} sceneW
+   * @param {number} sceneH
+   * @returns {Float32Array|null}
+   * @private
+   */
+  _filterSceneEdgeUvPoints(points, sceneW, sceneH) {
+    if (!points || points.length < 3) return points;
+
+    // Keep this hardcoded for now; applies equally to splashes and bubbles.
+    const edgeInsetPx = 24;
+    if (!Number.isFinite(sceneW) || !Number.isFinite(sceneH) || sceneW <= 0 || sceneH <= 0 || edgeInsetPx <= 0) {
+      return points;
+    }
+
+    const uInset = Math.max(0, Math.min(0.49, edgeInsetPx / sceneW));
+    const vInset = Math.max(0, Math.min(0.49, edgeInsetPx / sceneH));
+    if (uInset <= 0 && vInset <= 0) return points;
+
+    const kept = [];
+    for (let i = 0; i < points.length; i += 3) {
+      const u = points[i];
+      const v = points[i + 1];
+      if (!Number.isFinite(u) || !Number.isFinite(v)) continue;
+      if (u <= uInset || u >= (1.0 - uInset) || v <= vInset || v >= (1.0 - vInset)) continue;
+      kept.push(u, v, points[i + 2]);
+    }
+
+    if (kept.length === 0) return null;
+    if (kept.length === points.length) return points;
+    return new Float32Array(kept);
   }
 
   /**

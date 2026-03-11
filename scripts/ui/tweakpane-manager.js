@@ -198,6 +198,9 @@ export class TweakpaneManager {
     /** @type {any|null} Tweakpane button for Undo */
     this.undoButton = null;
 
+    /** @type {HTMLButtonElement|null} */
+    this._quickUndoButtonEl = null;
+
     this._uiValidatorActive = false;
     this._uiValidatorRunning = false;
     this._uiValidatorButton = null;
@@ -403,6 +406,10 @@ export class TweakpaneManager {
     const sceneIsEnabled = !!scene && sceneSettings.isEnabled(scene);
     const showOnboardingOnly = (game.user?.isGM ?? false) && !sceneIsEnabled;
 
+    // Always keep core launchers near the top of the UI so they're accessible
+    // regardless of which authoring section is currently expanded.
+    this.buildQuickActionsSection();
+
     if (_isDbg) _dlp.begin('tp.buildSections', 'finalize');
     // Build scene setup section (only for GMs)
     if (game.user.isGM) {
@@ -419,9 +426,6 @@ export class TweakpaneManager {
 
       // Build token/character rendering authoring controls
       this.buildTokensSection();
-
-      // Build utility launchers as a dedicated section
-      this.buildUtilityLaunchersSection();
 
       this.buildRopesSection();
 
@@ -901,19 +905,23 @@ export class TweakpaneManager {
   }
 
   /**
-   * Build utility launchers as a separate top-level section.
+   * Build always-accessible launchers as a separate top-level section.
    * @private
    */
-  buildUtilityLaunchersSection() {
+  buildQuickActionsSection() {
     if (!this.pane) return;
 
-    const utilitiesFolder = this.pane.addFolder({
-      title: 'Utilities',
-      expanded: this.accordionStates['utilities'] ?? false
-    });
-    this._registerPrimaryFolder(utilitiesFolder);
+    const expanded = this.accordionStates['quick_actions']
+      ?? this.accordionStates['utilities']
+      ?? true;
 
-    const contentElement = utilitiesFolder.element.querySelector('.tp-fldv_c') || utilitiesFolder.element;
+    const quickActionsFolder = this.pane.addFolder({
+      title: 'Quick Actions',
+      expanded
+    });
+    this._registerPrimaryFolder(quickActionsFolder);
+
+    const contentElement = quickActionsFolder.element.querySelector('.tp-fldv_c') || quickActionsFolder.element;
     const grid = document.createElement('div');
     grid.style.display = 'grid';
     grid.style.gridTemplateColumns = '1fr 1fr';
@@ -936,7 +944,16 @@ export class TweakpaneManager {
       btn.style.cursor = 'pointer';
       btn.addEventListener('click', onClick);
       grid.appendChild(btn);
+      return btn;
     };
+
+    addGridButton('Defaults', () => {
+      this.onMasterResetToDefaults();
+    }, true);
+
+    this._quickUndoButtonEl = addGridButton('Undo Defaults', () => {
+      this.onUndoMasterReset();
+    });
 
     addGridButton('Texture Manager', () => {
       if (this.textureManager) this.textureManager.toggle();
@@ -1009,8 +1026,10 @@ export class TweakpaneManager {
 
     contentElement.appendChild(grid);
 
-    utilitiesFolder.on('fold', (ev) => {
-      this.accordionStates['utilities'] = ev.expanded;
+    this.updateUndoButtonState();
+
+    quickActionsFolder.on('fold', (ev) => {
+      this.accordionStates['quick_actions'] = ev.expanded;
       this.saveUIState();
     });
   }
@@ -1889,6 +1908,9 @@ export class TweakpaneManager {
   updateUndoButtonState() {
     if (this.undoButton) {
       this.undoButton.disabled = !this.lastMasterResetSnapshot;
+    }
+    if (this._quickUndoButtonEl) {
+      this._quickUndoButtonEl.disabled = !this.lastMasterResetSnapshot;
     }
   }
 

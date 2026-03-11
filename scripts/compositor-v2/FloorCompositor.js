@@ -385,6 +385,12 @@ export class FloorCompositor {
     /** @type {boolean} Whether the render bus has been populated this session. */
     this._busPopulated = false;
 
+    /** @type {Promise<boolean>|null} In-flight async populate/prewarm task. */
+    this._populatePromise = null;
+
+    /** @type {boolean} Whether bus/effect populate has completed at least once. */
+    this._populateComplete = false;
+
     /** @type {boolean} Whether initialize() has been called */
     this._initialized = false;
 
@@ -1148,6 +1154,141 @@ export class FloorCompositor {
     return 0;
   }
 
+  /**
+   * Explicit loading-time prewarm entrypoint.
+   *
+   * Runs the one-time populate work that used to happen lazily on first render,
+   * then optionally cycles floor visibility across all bands so floor-scoped
+   * systems are touched before gameplay starts.
+   *
+   * @param {object} [options]
+   * @param {boolean} [options.prewarmAllFloors=false]
+   * @param {boolean} [options.awaitPopulate=false]
+   * @returns {Promise<boolean>}
+   */
+  async prewarmForLoading(options = {}) {
+    const { prewarmAllFloors = false, awaitPopulate = false } = options;
+    const populatePromise = this._ensureBusPopulated({ source: 'loading' });
+    if (!awaitPopulate) {
+      return true;
+    }
+    const ok = await populatePromise;
+    if (ok && prewarmAllFloors) {
+      this._prewarmFloorVisibilityPasses();
+    }
+    return ok;
+  }
+
+  /**
+   * Ensure render bus + async effect population run exactly once.
+   *
+   * @param {object} [options]
+   * @param {string} [options.source='runtime']
+   * @returns {Promise<boolean>}
+   * @private
+   */
+  async _ensureBusPopulated(options = {}) {
+    const { source = 'runtime' } = options;
+    if (this._populateComplete) return true;
+    if (this._populatePromise) return this._populatePromise;
+
+    this._populatePromise = (async () => {
+      const sc = window.MapShine?.sceneComposer ?? null;
+      if (!sc) {
+        log.warn(`FloorCompositor: no sceneComposer available for populate (${source})`);
+        return false;
+      }
+
+      if (!this._busPopulated) {
+        this._renderBus.populate(sc);
+        this._busPopulated = true;
+      }
+
+      // Wire basePlaneMesh into V1-based shadow effects once it exists.
+      // Both BuildingShadowsEffectV2 and OverheadShadowsEffectV2 rely on a
+      // world-pinned mesh (baseMesh geometry) for their projection pass.
+      try {
+        const basePlaneMesh = sc.basePlaneMesh ?? null;
+        if (basePlaneMesh) {
+          this._overheadShadowEffect?.setBaseMesh?.(basePlaneMesh);
+        }
+      } catch (_) {}
+
+      // Apply initial floor visibility for albedo tiles (synchronous).
+      this._applyCurrentFloorVisibility();
+
+      const populateJobs = [
+        ['SpecularEffectV2', () => this._specularEffect.populate(sc.foundrySceneData)],
+        ['FluidEffectV2', () => this._fluidEffect.populate(sc.foundrySceneData)],
+        ['IridescenceEffectV2', () => this._iridescenceEffect.populate(sc.foundrySceneData)],
+        ['PrismEffectV2', () => this._prismEffect.populate(sc.foundrySceneData)],
+        ['BushEffectV2', () => this._bushEffect.populate(sc.foundrySceneData)],
+        ['TreeEffectV2', () => this._treeEffect.populate(sc.foundrySceneData)],
+        ['FireEffectV2', () => this._fireEffect.populate(sc.foundrySceneData)],
+        ['WindowLightEffectV2', () => this._windowLightEffect.populate(sc.foundrySceneData)],
+      ];
+
+      if (this._waterEffect) {
+        populateJobs.push(['WaterEffectV2', () => this._waterEffect.populate(sc.foundrySceneData)]);
+      }
+      if (this._waterSplashesEffect) {
+        populateJobs.push(['WaterSplashesEffectV2', () => this._waterSplashesEffect.populate(sc.foundrySceneData)]);
+      }
+      if (this._ashDisturbanceEffect) {
+        populateJobs.push(['AshDisturbanceEffectV2', () => this._ashDisturbanceEffect.populate(sc.foundrySceneData)]);
+      }
+
+      for (const [label, fn] of populateJobs) {
+        try {
+          await fn();
+        } catch (err) {
+          log.error(`${label} populate failed:`, err);
+        }
+        try { this._applyCurrentFloorVisibility(); } catch (_) {}
+        // Give the browser/event loop a chance to process socket + UI work
+        // between heavy floor/effect populate steps.
+        await new Promise(resolve => setTimeout(resolve, 0));
+      }
+
+      // Initial attempt; render-time guard above re-attempts when globals land.
+      this._wireMapPointConsumers();
+      // Push current outdoors mask immediately; async compositor cache warmup
+      // can still update this later via the per-frame sync below.
+      this._syncOutdoorsMaskConsumers({
+        context: window.MapShine?.activeLevelContext ?? null,
+        force: true,
+      });
+
+      this._populateComplete = true;
+      return true;
+    })();
+
+    return this._populatePromise;
+  }
+
+  /**
+   * Run floor visibility notifications across all floors once, then restore
+   * the currently active context. This touches floor-scoped states during load.
+   *
+   * @private
+   */
+  _prewarmFloorVisibilityPasses() {
+    const floorStack = window.MapShine?.floorStack;
+    const floors = floorStack?.getFloors?.() ?? [];
+    if (!floors.length) return;
+
+    const originalContext = window.MapShine?.activeLevelContext ?? null;
+    for (const floor of floors) {
+      this._applyCurrentFloorVisibility({
+        context: {
+          bottom: Number(floor?.elevationMin),
+          top: Number(floor?.elevationMax),
+        },
+      });
+    }
+    this._applyCurrentFloorVisibility({ context: originalContext });
+  }
+
   // ── Render ──────────────────────────────────────────────────────────────────
 
   /**
@@ -1191,118 +1332,9 @@ export class FloorCompositor {
       this._overheadShadowEffect?.setTileMotionManager?.(window.MapShine?.tileMotionManager ?? null);
     } catch (_) {}
 
-    // ── Lazy bus population ───────────────────────────────────────────────────
-    // Populate on the first render frame. Uses THREE.TextureLoader internally
-    // so textures arrive asynchronously — meshes become visible as they load.
-    if (!this._busPopulated) {
-      this._busPopulated = true;
-      const sc = window.MapShine?.sceneComposer ?? null;
-      if (sc) {
-        this._renderBus.populate(sc);
-        // Wire basePlaneMesh into V1-based shadow effects once it exists.
-        // Both BuildingShadowsEffectV2 and OverheadShadowsEffectV2 rely on a
-        // world-pinned mesh (baseMesh geometry) for their projection pass.
-        try {
-          const basePlaneMesh = sc.basePlaneMesh ?? null;
-          if (basePlaneMesh) {
-            this._overheadShadowEffect?.setBaseMesh?.(basePlaneMesh);
-          }
-        } catch (_) {}
-        // Apply initial floor visibility for albedo tiles (synchronous).
-        this._applyCurrentFloorVisibility();
-        // Populate specular overlays after bus tiles are built.
-        // This is async (mask probing) so we re-apply floor visibility after
-        // all overlays have been added — otherwise overlays default to visible
-        // and upper-floor specular bleeds onto the ground floor on first load.
-        this._specularEffect.populate(sc.foundrySceneData).then(() => {
-          this._applyCurrentFloorVisibility();
-        }).catch(err => {
-          log.error('SpecularEffectV2 populate failed:', err);
-        });
-
-        // Populate fluid overlays from _Fluid masks.
-        this._fluidEffect.populate(sc.foundrySceneData).then(() => {
-          this._applyCurrentFloorVisibility();
-        }).catch(err => {
-          log.error('FluidEffectV2 populate failed:', err);
-        });
-
-        // Populate iridescence overlays from _Iridescence masks.
-        this._iridescenceEffect.populate(sc.foundrySceneData).then(() => {
-          this._applyCurrentFloorVisibility();
-        }).catch(err => {
-          log.error('IridescenceEffectV2 populate failed:', err);
-        });
-
-        // Populate prism overlays from _Prism masks.
-        this._prismEffect.populate(sc.foundrySceneData).then(() => {
-          this._applyCurrentFloorVisibility();
-        }).catch(err => {
-          log.error('PrismEffectV2 populate failed:', err);
-        });
-
-        // Populate bush overlays from _Bush masks.
-        this._bushEffect.populate(sc.foundrySceneData).then(() => {
-          this._applyCurrentFloorVisibility();
-        }).catch(err => {
-          log.error('BushEffectV2 populate failed:', err);
-        });
-
-        // Populate tree overlays from _Tree masks.
-        this._treeEffect.populate(sc.foundrySceneData).then(() => {
-          this._applyCurrentFloorVisibility();
-        }).catch(err => {
-          log.error('TreeEffectV2 populate failed:', err);
-        });
-        // Populate fire particle systems from _Fire masks.
-        this._fireEffect.populate(sc.foundrySceneData).then(() => {
-          this._applyCurrentFloorVisibility();
-        }).catch(err => {
-          log.error('FireEffectV2 populate failed:', err);
-        });
-        // Populate window light overlays from _Windows masks.
-        this._windowLightEffect.populate(sc.foundrySceneData).then(() => {
-          this._applyCurrentFloorVisibility();
-        }).catch(err => {
-          log.error('WindowLightEffectV2 populate failed:', err);
-        });
-        // Populate water mask discovery + SDF building.
-        if (this._waterEffect) {
-          this._waterEffect.populate(sc.foundrySceneData).then(() => {
-            this._applyCurrentFloorVisibility();
-          }).catch(err => {
-            log.error('WaterEffectV2 populate failed:', err);
-          });
-        }
-        // Populate water splash particle systems from _Water masks.
-        if (this._waterSplashesEffect) {
-          this._waterSplashesEffect.populate(sc.foundrySceneData).then(() => {
-            this._applyCurrentFloorVisibility();
-          }).catch(err => {
-            log.error('WaterSplashesEffectV2 populate failed:', err);
-          });
-        }
-
-        // Populate ash disturbance per-floor point sets from _Ash masks.
-        if (this._ashDisturbanceEffect) {
-          this._ashDisturbanceEffect.populate(sc.foundrySceneData).then(() => {
-            this._applyCurrentFloorVisibility();
-          }).catch(err => {
-            log.error('AshDisturbanceEffectV2 populate failed:', err);
-          });
-        }
-
-        // Initial attempt; render-time guard above re-attempts when globals land.
-        this._wireMapPointConsumers();
-        // Push current outdoors mask immediately; async compositor cache warmup
-        // can still update this later via the per-frame sync below.
-        this._syncOutdoorsMaskConsumers({
-          context: window.MapShine?.activeLevelContext ?? null,
-          force: true,
-        });
-      } else {
-        log.warn('FloorCompositor.render: no sceneComposer available for populate');
-      }
+    // ── Lazy fallback: if loading-time prewarm didn't run, kick it off here. ──
+    if (!this._populateComplete) {
+      void this._ensureBusPopulated({ source: 'render' });
     }
 
     // ── Robust floor change handling (per-frame self-correction) ─────────────
@@ -1566,7 +1598,7 @@ export class FloorCompositor {
     }
     if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: filter.render DONE'); } catch (_) {} }
 
-    // Feed sky state into water (specular tint + live sun direction) after sky+CC have updated.
+    // Feed sky state + cloud shadow into water after sky+CC have updated.
     // Water runs after grading so caustics/specular add onto the final image and bloom can pick them up.
     try {
       const sky = this._skyColorEffect;
@@ -1582,6 +1614,11 @@ export class FloorCompositor {
       // angle changes as the sun moves across the sky.
       if (sky && typeof this._waterEffect?.setSunAngles === 'function') {
         this._waterEffect.setSunAngles(sky.currentSunAzimuthDeg, sky.currentSunElevationDeg);
+      }
+      // Feed cloud shadow texture so water darkening, caustics kill, and
+      // specular kill all respond to cloud coverage.
+      if (typeof this._waterEffect?.setCloudShadowTexture === 'function') {
+        this._waterEffect.setCloudShadowTexture(cloudShadowTex);
       }
     } catch (_) {}
 

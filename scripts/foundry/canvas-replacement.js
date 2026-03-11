@@ -4066,7 +4066,7 @@ async function createThreeCanvas(scene) {
     safeCall(() => loadingOverlay.setStage('scene.managers', 0.65, 'Syncing scene objects...', { keepAuto: true }), 'overlay.remaining', Severity.COSMETIC);
 
     _setCreateThreeCanvasProgress('scene.managers.lightweightBatch.construct');
-    console.log(' -> Manager: Lightweight batch (Door, Note, Template, LightIcon, EnhancedLightIcon, SoundIcon, MapPoints)');
+    console.log(' -> Manager: Lightweight batch (Door, Note, Template, LightIcon, EnhancedLightIcon, SoundIcon, MapPoints, Grid)');
 
     if (!sceneComposer) {
       // This can happen if the scene load session becomes stale (scene switch)
@@ -4082,6 +4082,14 @@ async function createThreeCanvas(scene) {
     // global sceneComposer ref can be cleared while the local `camera` is still
     // valid for this init phase.
     doorMeshManager = new DoorMeshManager(threeScene, camera);
+    // Grid overlay must live in the V2 render-bus scene because late overlay
+    // rendering reads from FloorCompositor._renderBus._scene.
+    const gridHostScene = fc?._renderBus?._scene ?? threeScene;
+    if (gridRenderer) {
+      safeDispose(() => { if (effectComposer) effectComposer.removeUpdatable(gridRenderer); }, 'removeUpdatable(gridRenderer.reinit)');
+      safeDispose(() => gridRenderer.dispose(), 'gridRenderer.dispose(reinit)');
+    }
+    gridRenderer = new GridRenderer(gridHostScene);
     pixiContentLayerBridge = new PixiContentLayerBridge();
     pixiContentLayerBridge.initialize();
     // Drawings ownership test mode:
@@ -4105,6 +4113,7 @@ async function createThreeCanvas(scene) {
         ['manager.EnhancedLightIcon.init', enhancedLightIconManager],
         ['manager.SoundIcon.init', soundIconManager],
         ['manager.MapPoints.init', mapPointsManager],
+        ['manager.GridRenderer.init', gridRenderer],
       ];
       for (const [id, mgr] of lightweightManagers) {
         dlp.begin(id, 'manager');
@@ -4123,13 +4132,15 @@ async function createThreeCanvas(scene) {
         Promise.resolve(enhancedLightIconManager.initialize()),
         Promise.resolve(soundIconManager.initialize()),
         mapPointsManager.initialize(),
+        Promise.resolve(gridRenderer.initialize()),
       ]);
     }
 
     effectComposer.addUpdatable(doorMeshManager);
+    effectComposer.addUpdatable(gridRenderer);
     if (window.MapShine) window.MapShine.doorMeshManager = doorMeshManager;
     console.log(' -> Manager: Lightweight batch DONE');
-    log.info('Parallel manager batch initialized (Door, Note, Template, LightIcon, EnhancedLightIcon, SoundIcon, MapPoints)');
+    log.info('Parallel manager batch initialized (Door, Note, Template, LightIcon, EnhancedLightIcon, SoundIcon, MapPoints, Grid)');
 
     // Wire map points to particle effects (fire, candle flame, smelly flies, etc.)
     // V2: No particle effects ->-> skip wiring.
@@ -5193,7 +5204,37 @@ async function createThreeCanvas(scene) {
           );
         }, 'v2.registerBuildingShadowsUI', Severity.COSMETIC);
 
-        log.info('V2: registered effect controls (Lighting, Specular, Fluid, Iridescence, Prism, Bush, Tree, SkyColor, WindowLight, Fire, WaterSplashes, SmellyFlies, Lightning, CandleFlames, Bloom, ColorCorrection, Sharpen, Fog, Water, Cloud, OverheadShadows, BuildingShadows, Lens)');
+        safeCall(() => {
+          const onGridUpdate = (_effectId, paramId, value) => {
+            const grid = window.MapShine?.gridRenderer;
+            if (!grid) return;
+
+            // Tweakpane always injects an Enabled toggle. GridRenderer currently
+            // models visibility through alpha, so map enabled->alpha consistently.
+            if (paramId === 'enabled' || paramId === 'masterEnabled') {
+              grid.settings.useAlphaOverride = true;
+              if (value === false) {
+                grid.settings.alphaOverride = 0;
+              } else if (!(Number(grid.settings.alphaOverride) > 0)) {
+                grid.settings.alphaOverride = 0.05;
+              }
+              grid.updateGrid();
+              return;
+            }
+
+            grid.updateSetting(paramId, value);
+          };
+
+          uiManager.registerEffect(
+            'grid',
+            'Grid',
+            GridRenderer.getControlSchema(),
+            onGridUpdate,
+            'environment'
+          );
+        }, 'v2.registerGridUI', Severity.COSMETIC);
+
+        log.info('V2: registered effect controls (Lighting, Specular, Fluid, Iridescence, Prism, Bush, Tree, SkyColor, WindowLight, Fire, WaterSplashes, SmellyFlies, Lightning, CandleFlames, Bloom, ColorCorrection, Sharpen, Fog, Water, Cloud, OverheadShadows, BuildingShadows, Grid, Lens)');
 
         log.info('V2: UI initialized');
     }, 'initializeUI', Severity.DEGRADED);
@@ -5267,10 +5308,9 @@ async function createThreeCanvas(scene) {
 
     // V2: Time-of-day drives lighting/sky/shadow effects ->-> skip.
 
-    // Floor pre-loading (V2): assign tiles to floor layers and warm floor mask cache
-    // so first level switch doesn't pay composition cost on-demand.
+    // Floor setup (V2): assign tiles to floor layers.
     if (isDebugLoad) dlp.begin('fin.preloadAllFloors', 'finalize');
-    safeCall(() => loadingOverlay.setStage('final', 0.85, 'Pre-loading floors...', { keepAuto: true }), 'overlay.preloadFloors', Severity.COSMETIC);
+    safeCall(() => loadingOverlay.setStage('final', 0.85, 'Preparing floors...', { keepAuto: true }), 'overlay.preloadFloors', Severity.COSMETIC);
     _setCreateThreeCanvasProgress('preloadAllFloors');
     console.log(' -> Step: preloadAllFloors');
 
@@ -5285,18 +5325,34 @@ async function createThreeCanvas(scene) {
       }
     }, 'v2.floorLayerAssignment', Severity.DEGRADED);
 
-    await safeCallAsync(async () => {
+    safeCall(() => {
       const sc = window.MapShine?.sceneComposer;
       const compositor = sc?._sceneMaskCompositor;
       const sceneDoc = canvas?.scene ?? null;
       if (!compositor || !sceneDoc || typeof compositor.preloadAllFloors !== 'function') return;
 
-      await compositor.preloadAllFloors(sceneDoc, {
+      // Keep startup responsive: warm floor mask bundles in the background.
+      void compositor.preloadAllFloors(sceneDoc, {
         activeLevelContext: window.MapShine?.activeLevelContext ?? null,
         lastMaskBasePath: compositor?._activeFloorBasePath ?? sc?.currentBundle?.basePath ?? null,
         initialMasks: sc?.currentBundle?.masks ?? null,
+      }).catch(err => {
+        log.warn('V2 preloadAllFloors background task failed:', err);
       });
-    }, 'v2.preloadAllFloors', Severity.DEGRADED);
+    }, 'v2.preloadAllFloors.background', Severity.DEGRADED);
+
+    safeCall(() => {
+      const fc = window.MapShine?.effectComposer?._floorCompositorV2;
+      if (!fc || typeof fc.prewarmForLoading !== 'function') return;
+
+      // Trigger floor/effect prewarm opportunistically without blocking fade-in.
+      void fc.prewarmForLoading({
+        prewarmAllFloors: true,
+        awaitPopulate: false,
+      }).catch(err => {
+        log.warn('V2 prewarmForLoading background task failed:', err);
+      });
+    }, 'v2.prewarmForLoading.background', Severity.DEGRADED);
 
     console.log(' -> Step: preloadAllFloors DONE');
     if (isDebugLoad) dlp.end('fin.preloadAllFloors');

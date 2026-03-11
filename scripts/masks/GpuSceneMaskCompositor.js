@@ -900,8 +900,20 @@ export class GpuSceneMaskCompositor {
       // Track bands that were evicted and re-composed so we can push updated masks
       // to the registry for the active floor without requiring a floor re-transition.
       const _recomposedBands = new Set();
+      let _lastYieldAt = (typeof performance !== 'undefined' && performance?.now)
+        ? performance.now()
+        : Date.now();
+      const _yieldIfNeeded = async () => {
+        const now = (typeof performance !== 'undefined' && performance?.now)
+          ? performance.now()
+          : Date.now();
+        if ((now - _lastYieldAt) < 24) return;
+        _lastYieldAt = now;
+        await new Promise(resolve => setTimeout(resolve, 0));
+      };
 
       for (const bandKey of bands) {
+        await _yieldIfNeeded();
         const [bottom, top] = bandKey.split(':').map(Number);
 
         // Stale-cache detection MUST run before the _floorMeta skip guard.
@@ -948,6 +960,7 @@ export class GpuSceneMaskCompositor {
         try {
           await this.composeFloor({ bottom, top }, sc, { lastMaskBasePath: floorBasePath, cacheOnly: true });
           _recomposedBands.add(bandKey);
+          await _yieldIfNeeded();
         } catch (e) {
           log.debug('preloadAllFloors: failed for band', bandKey, e);
         }
@@ -987,6 +1000,7 @@ export class GpuSceneMaskCompositor {
           _patchKeySet.add(_waterFloorKey);
         }
         if (_patchKeySet.size >= 2) {
+          await _yieldIfNeeded();
           // Sort all floor keys by bandBottom ascending (lowest floor first).
           const sortedKeys = [..._patchKeySet].sort((a, b) => {
             const aBottom = Number(a.split(':')[0]);
@@ -994,6 +1008,7 @@ export class GpuSceneMaskCompositor {
             return aBottom - bBottom;
           });
           this._patchWaterMasksForUpperFloors(sortedKeys);
+          await _yieldIfNeeded();
           log.info('preloadAllFloors: water mask patch applied for', sortedKeys.length, 'floors');
 
           // Push the patched water mask into WaterEffectV2 so it rebuilds its SDF

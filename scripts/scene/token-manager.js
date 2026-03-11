@@ -774,18 +774,6 @@ vec3 ms_applySceneLighting(vec3 color) {
           if (tokenDoc) {
             this._applyV2TokenRenderOrder(sprite, tokenDoc);
           }
-
-          // If the sprite was created before V2 was ready, it may have been initialized
-          // with opacity=0 (anti-flash) and never recovered because it wasn't being
-          // rendered. Make sure we don't strand tokens invisible after migration.
-          // VisibilityController can still override later once it initializes.
-          try {
-            if (sprite.visible === false) sprite.visible = true;
-            if (sprite.material && typeof sprite.material.opacity === 'number' && sprite.material.opacity <= 0) {
-              sprite.material.opacity = 1.0;
-            }
-          } catch (_) {
-          }
         }
       }
     } catch (_) {
@@ -1063,6 +1051,13 @@ vec3 ms_applySceneLighting(vec3 color) {
       this.refreshAllTokenOverlayStates();
     })]);
 
+    // Keep token visibility aligned with floor navigation changes.
+    // Token sprites can be created before the initial activeLevelContext is emitted,
+    // so they must be re-evaluated once level context is available/changes.
+    this._hookIds.push(['mapShineLevelContextChanged', Hooks.on('mapShineLevelContextChanged', () => {
+      this.refreshAllTokenSpriteVisibility();
+    })]);
+
     this.hooksRegistered = true;
     log.debug('Foundry hooks registered');
   }
@@ -1239,43 +1234,22 @@ vec3 ms_applySceneLighting(vec3 color) {
     const floorCompositor = effectComposer?._floorCompositorV2;
     const renderBus = floorCompositor?._renderBus;
     const busScene = renderBus?._scene;
-    const isV2 = !!busScene;
-    
-    log.warn(`[V2 DEBUG] Token ${tokenDoc.id} scene assignment check:`);
-    log.warn(`  - effectComposer exists: ${!!effectComposer}`);
-    log.warn(`  - _floorCompositorV2 exists: ${!!floorCompositor}`);
-    log.warn(`  - _renderBus exists: ${!!renderBus}`);
-    log.warn(`  - _scene exists: ${!!busScene}`);
-    log.warn(`  - isV2: ${isV2}`);
     
     if (busScene) {
       busScene.add(sprite);
-      log.info(`[V2] Token ${tokenDoc.id} added to FloorRenderBus scene (children: ${busScene.children.length})`);
+      log.info(`[V2] Token ${tokenDoc.id} added to FloorRenderBus scene`);
     } else {
       this.scene.add(sprite);
       log.warn(`[V1 fallback] Token ${tokenDoc.id} added to main scene - FloorCompositor not available`);
     }
 
-    // V2 DEBUG: Make tokens immediately visible to diagnose rendering
-    // In V2, bypass VisibilityController and show tokens with full opacity
-    // This helps us see if the rendering pipeline works at all
-    if (isV2) {
-      sprite.visible = true;
-      sprite.material.opacity = 1.0;
-      log.warn(`[V2 DEBUG] Token ${tokenDoc.id} forced visible for debugging`);
-      log.warn(`[V2 DEBUG] Token ${tokenDoc.id} position: (${sprite.position.x.toFixed(1)}, ${sprite.position.y.toFixed(1)}, ${sprite.position.z.toFixed(1)})`);
-      log.warn(`[V2 DEBUG] Token ${tokenDoc.id} layers: ${sprite.layers.mask.toString(2)}`);
-      log.warn(`[V2 DEBUG] Token ${tokenDoc.id} material: map=${!!sprite.material.map}, opacity=${sprite.material.opacity}, transparent=${sprite.material.transparent}`);
-      log.warn(`[V2 DEBUG] Bus scene children count: ${busScene.children.length}`);
-    } else {
-      // V1: Use normal VisibilityController flow
-      const vc = window.MapShine?.visibilityController;
-      if (vc?._initialized) {
-        sprite.visible = false;
-      }
-      // Start with 0 opacity to prevent white flash before texture loads
-      sprite.material.opacity = 0;
+    // Use normal visibility flow in all modes. Start with 0 opacity to
+    // prevent white flash before texture loads; visibility logic restores it.
+    const vc = window.MapShine?.visibilityController;
+    if (vc?._initialized) {
+      sprite.visible = false;
     }
+    sprite.material.opacity = 0;
 
     const foundryToken = canvas?.tokens?.get?.(tokenDoc.id) || null;
 
@@ -1454,6 +1428,19 @@ vec3 ms_applySceneLighting(vec3 color) {
     if (sprite.material?.userData) {
       sprite.material.userData._msTokenDoc = tokenDoc;
       this._applyTokenColorCorrectionUniforms(sprite.material, tokenDoc);
+    }
+  }
+
+  /**
+   * Recompute visibility for all managed token sprites.
+   * Used after level-context changes so startup visibility matches floor state.
+   */
+  refreshAllTokenSpriteVisibility() {
+    for (const spriteData of this.tokenSprites.values()) {
+      const sprite = spriteData?.sprite;
+      const tokenDoc = spriteData?.tokenDoc;
+      if (!sprite || !tokenDoc || sprite.userData?._removed) continue;
+      this.updateSpriteVisibility(sprite, tokenDoc);
     }
   }
 

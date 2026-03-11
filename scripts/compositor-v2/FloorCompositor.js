@@ -493,6 +493,47 @@ export class FloorCompositor {
     this._pixiWorldCompositeMaterial.uniforms.tOverlay.value = overlayTexture;
     this._pixiWorldCompositeMaterial.uniforms.uHasOverlay.value = overlayTexture ? 1 : 0;
     this._pixiWorldCompositeMaterial.uniforms.uDebugForceTint.value = debugForceTint ? 1 : 0;
+    // Keep reprojection in the same coordinate space as PIXI stage transforms
+    // (renderer.screen logical pixels), not Three RT drawing-buffer pixels.
+    const pixiScreenW = Math.max(1, Number(canvas?.app?.renderer?.screen?.width) || 0);
+    const pixiScreenH = Math.max(1, Number(canvas?.app?.renderer?.screen?.height) || 0);
+    const rtW = Math.max(1, Number(inputRT?.width) || Number(this._sceneRT?.width) || 1);
+    const rtH = Math.max(1, Number(inputRT?.height) || Number(this._sceneRT?.height) || 1);
+    const screenW = pixiScreenW > 0 ? pixiScreenW : rtW;
+    const screenH = pixiScreenH > 0 ? pixiScreenH : rtH;
+    this._pixiWorldCompositeMaterial.uniforms.uScreenSize.value.set(screenW, screenH);
+    const logicalSize = bridge?.getWorldLogicalSize?.() ?? null;
+    const ovW = Math.max(
+      1,
+      Number(logicalSize?.width) || Number(overlayTexture?.image?.width) || Number(overlayTexture?.source?.data?.width) || 1
+    );
+    const ovH = Math.max(
+      1,
+      Number(logicalSize?.height) || Number(overlayTexture?.image?.height) || Number(overlayTexture?.source?.data?.height) || 1
+    );
+    this._pixiWorldCompositeMaterial.uniforms.uOverlaySize.value.set(ovW, ovH);
+
+    const t = canvas?.stage?.worldTransform ?? null;
+    let ia = 1; let ib = 0; let ic = 0; let id = 1; let itx = 0; let ity = 0;
+    if (t) {
+      const a = Number(t.a) || 0;
+      const b = Number(t.b) || 0;
+      const c = Number(t.c) || 0;
+      const d = Number(t.d) || 0;
+      const tx = Number(t.tx) || 0;
+      const ty = Number(t.ty) || 0;
+      const det = (a * d) - (b * c);
+      if (Math.abs(det) > 1e-8) {
+        ia = d / det;
+        ib = -b / det;
+        ic = -c / det;
+        id = a / det;
+        itx = ((c * ty) - (d * tx)) / det;
+        ity = ((b * tx) - (a * ty)) / det;
+      }
+    }
+    this._pixiWorldCompositeMaterial.uniforms.uStageInvMat.value.set(ia, ib, ic, id);
+    this._pixiWorldCompositeMaterial.uniforms.uStageInvTranslate.value.set(itx, ity);
 
     renderer.setRenderTarget(outputRT);
     renderer.autoClear = true;
@@ -756,6 +797,10 @@ export class FloorCompositor {
         tOverlay: { value: null },
         uHasOverlay: { value: 0 },
         uDebugForceTint: { value: 0 },
+        uScreenSize: { value: new THREE.Vector2(1, 1) },
+        uOverlaySize: { value: new THREE.Vector2(1, 1) },
+        uStageInvMat: { value: new THREE.Vector4(1, 0, 0, 1) },
+        uStageInvTranslate: { value: new THREE.Vector2(0, 0) },
       },
       vertexShader: /* glsl */`
         varying vec2 vUv;
@@ -769,6 +814,10 @@ export class FloorCompositor {
         uniform sampler2D tOverlay;
         uniform float uHasOverlay;
         uniform float uDebugForceTint;
+        uniform vec2 uScreenSize;
+        uniform vec2 uOverlaySize;
+        uniform vec4 uStageInvMat;
+        uniform vec2 uStageInvTranslate;
         varying vec2 vUv;
         void main() {
           vec4 base = texture2D(tBase, vUv);
@@ -781,15 +830,30 @@ export class FloorCompositor {
             gl_FragColor = vec4(base.rgb, 1.0);
             return;
           }
-          vec4 ov = texture2D(tOverlay, vUv);
-          // PIXI extract sources can be premultiplied and in some runtime states
-          // carry weak/zero alpha despite visible RGB content.
-          vec3 ovRgb = ov.rgb;
-          if (ov.a > 0.0001) {
-            ovRgb = ov.rgb / ov.a;
+          // Fullscreen UV is bottom-left origin; PIXI stage transforms are in
+          // top-left screen coordinates (Y-down). Convert before inverse stage.
+          vec2 screenPx = vec2(vUv.x * uScreenSize.x, (1.0 - vUv.y) * uScreenSize.y);
+          vec2 worldPx = vec2(
+            (uStageInvMat.x * screenPx.x) + (uStageInvMat.z * screenPx.y) + uStageInvTranslate.x,
+            (uStageInvMat.y * screenPx.x) + (uStageInvMat.w * screenPx.y) + uStageInvTranslate.y
+          );
+          vec2 ovUv = vec2(
+            worldPx.x / max(uOverlaySize.x, 1.0),
+            1.0 - (worldPx.y / max(uOverlaySize.y, 1.0))
+          );
+          if (ovUv.x < 0.0 || ovUv.x > 1.0 || ovUv.y < 0.0 || ovUv.y > 1.0) {
+            gl_FragColor = vec4(base.rgb, 1.0);
+            return;
           }
-          float ovAlpha = clamp(max(ov.a, max(ovRgb.r, max(ovRgb.g, ovRgb.b))), 0.0, 1.0);
-          vec3 outRgb = mix(base.rgb, ovRgb, ovAlpha);
+          vec4 ov = texture2D(tOverlay, ovUv);
+          // Preserve sub-pixel AA from replay canvas by trusting source alpha.
+          // Keep a narrow fallback for rare legacy captures that carry RGB with
+          // near-zero alpha.
+          float ovAlpha = clamp(ov.a, 0.0, 1.0);
+          if (ovAlpha < 0.0001) {
+            ovAlpha = clamp(max(ov.r, max(ov.g, ov.b)), 0.0, 1.0);
+          }
+          vec3 outRgb = mix(base.rgb, ov.rgb, ovAlpha);
           gl_FragColor = vec4(outRgb, 1.0);
         }
       `,

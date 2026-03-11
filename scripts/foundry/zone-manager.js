@@ -134,6 +134,194 @@ export class ZoneManager {
 
     /** @type {Function|null} Callback fired when drawing completes or cancels */
     this._drawCallback = null;
+
+    /** @type {Map<string, {center:{x:number,y:number}|null, fillMesh:any|null, lineMesh:any|null, iconMesh:any|null}>} */
+    this._zoneVisuals = new Map();
+
+    /** @type {any|null} Cached THREE.Texture for stair icon */
+    this._stairIconTexture = null;
+    /** @type {boolean} */
+    this._stairIconTextureLoading = false;
+
+    /** @type {any|null} Cached THREE.Texture for lift/elevator icon */
+    this._liftIconTexture = null;
+    /** @type {boolean} */
+    this._liftIconTextureLoading = false;
+
+    /** @type {Array<{hook:string,id:number}>} */
+    this._hookIds = [];
+  }
+
+  _getThreeOverlayScene() {
+    try {
+      // V2 renders the FloorRenderBus scene, not SceneComposer.scene.
+      // Runtime owner is EffectComposer._floorCompositorV2.
+      const v2Scene = window.MapShine?.effectComposer?._floorCompositorV2?._renderBus?._scene
+        ?? window.MapShine?.floorCompositor?._renderBus?._scene
+        ?? null;
+      if (v2Scene) return v2Scene;
+    } catch (_) {
+    }
+    return this._sceneComposer?.scene ?? null;
+  }
+
+  _polygonCentroid(points) {
+    const pts = Array.isArray(points) ? points : [];
+    if (pts.length < 3) return null;
+
+    let area = 0;
+    let cx = 0;
+    let cy = 0;
+    for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+      const p0 = pts[j];
+      const p1 = pts[i];
+      const x0 = Number(p0?.x);
+      const y0 = Number(p0?.y);
+      const x1 = Number(p1?.x);
+      const y1 = Number(p1?.y);
+      if (!Number.isFinite(x0) || !Number.isFinite(y0) || !Number.isFinite(x1) || !Number.isFinite(y1)) continue;
+      const a = x0 * y1 - x1 * y0;
+      area += a;
+      cx += (x0 + x1) * a;
+      cy += (y0 + y1) * a;
+    }
+
+    area *= 0.5;
+    if (!Number.isFinite(area) || Math.abs(area) < 1e-6) {
+      // Fallback: average points
+      let sx = 0;
+      let sy = 0;
+      let count = 0;
+      for (const p of pts) {
+        const x = Number(p?.x);
+        const y = Number(p?.y);
+        if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+        sx += x;
+        sy += y;
+        count += 1;
+      }
+      if (!count) return null;
+      return { x: sx / count, y: sy / count };
+    }
+
+    cx /= (6 * area);
+    cy /= (6 * area);
+    if (!Number.isFinite(cx) || !Number.isFinite(cy)) return null;
+    return { x: cx, y: cy };
+  }
+
+  _ensureIconTexture(path, loadedFlagKey, loadingFlagKey) {
+    const THREE = window.THREE;
+    if (!THREE) return null;
+    if (this[loadedFlagKey]) return this[loadedFlagKey];
+    if (this[loadingFlagKey]) return null;
+
+    this[loadingFlagKey] = true;
+    try {
+      const loader = new THREE.TextureLoader();
+      loader.load(
+        path,
+        (tex) => {
+          this[loadingFlagKey] = false;
+          this[loadedFlagKey] = tex;
+          try {
+            tex.colorSpace = THREE.SRGBColorSpace;
+          } catch (_) {
+          }
+          this._rebuildOverlays();
+          this._updateZoneVisualsVisibility();
+        },
+        undefined,
+        () => {
+          this[loadingFlagKey] = false;
+        }
+      );
+    } catch (_) {
+      this[loadingFlagKey] = false;
+    }
+    return null;
+  }
+
+  _resolveZoneDirection(zone) {
+    const type = String(zone?.type || '').toLowerCase();
+    if (type === ZONE_TYPES.STAIR_DOWN.toLowerCase()) return 'down';
+    if (type === ZONE_TYPES.STAIR_UP.toLowerCase()) return 'up';
+    if (type !== ZONE_TYPES.STAIR.toLowerCase()) return 'up';
+
+    const from = zone?.fromLevel || null;
+    const to = zone?.toLevel || null;
+    const centerOf = (lvl) => {
+      if (!lvl) return NaN;
+      const b = Number(lvl.bottom);
+      const t = Number(lvl.top);
+      if (Number.isFinite(b) && Number.isFinite(t)) return (b + t) * 0.5;
+      if (Number.isFinite(b)) return b;
+      if (Number.isFinite(t)) return t;
+      return NaN;
+    };
+
+    const fromC = centerOf(from);
+    const toC = centerOf(to);
+    if (!Number.isFinite(fromC) || !Number.isFinite(toC)) return 'up';
+
+    const activeCenter = Number(window.MapShine?.activeLevelContext?.center);
+    if (Number.isFinite(activeCenter)) {
+      const dFrom = Math.abs(activeCenter - fromC);
+      const dTo = Math.abs(activeCenter - toC);
+      if (dFrom <= dTo) return toC > fromC ? 'up' : 'down';
+      return fromC > toC ? 'up' : 'down';
+    }
+
+    // Fallback: default direction from fromLevel to toLevel.
+    return toC > fromC ? 'up' : 'down';
+  }
+
+  _updateZoneVisualsVisibility() {
+    try {
+      const visuals = this._zoneVisuals;
+      if (!visuals || visuals.size === 0) return;
+
+      const controlled = canvas?.tokens?.controlled || [];
+      const token = controlled[0] || null;
+      const canTest = !!canvas?.visibility?.testVisibility;
+      const defaultVisible = (game?.user?.isGM === true);
+
+      const applyVisible = (entry, visible) => {
+        if (!entry) return;
+        if (entry.fillMesh) entry.fillMesh.visible = visible;
+        if (entry.lineMesh) entry.lineMesh.visible = visible;
+        if (entry.iconMesh) entry.iconMesh.visible = visible;
+      };
+
+      if (!token || !canTest) {
+        for (const entry of visuals.values()) applyVisible(entry, defaultVisible);
+        this._sceneComposer?.requestRender?.();
+        return;
+      }
+
+      const tolerance = Math.max(0, (Number(canvas?.dimensions?.size) || 100) * 0.15);
+      for (const entry of visuals.values()) {
+        const center = entry?.center || null;
+        if (!center) {
+          applyVisible(entry, defaultVisible);
+          continue;
+        }
+        let visible = false;
+        try {
+          visible = !!canvas.visibility.testVisibility({ x: center.x, y: center.y }, { tolerance });
+        } catch (_) {
+          visible = defaultVisible;
+        }
+        applyVisible(entry, visible);
+      }
+      this._sceneComposer?.requestRender?.();
+    } catch (_) {
+    }
+  }
+
+  _updateZoneIconsVisibility() {
+    // Back-compat shim: call the generalized zone visuals visibility updater.
+    this._updateZoneVisualsVisibility();
   }
 
   // -------------------------------------------------------------------------
@@ -150,10 +338,27 @@ export class ZoneManager {
     this._sceneComposer = sceneComposer;
     this._interactionManager = interactionManager;
 
+    // Keep icon visibility in sync with vision, controlled token changes, and movement.
+    // Similar to Foundry door controls: only show interactive cues if there's LOS.
+    this._hookIds.push({ hook: 'sightRefresh', id: Hooks.on('sightRefresh', () => this._updateZoneVisualsVisibility()) });
+    this._hookIds.push({ hook: 'controlToken', id: Hooks.on('controlToken', () => this._updateZoneVisualsVisibility()) });
+    this._hookIds.push({ hook: 'mapShineLevelContextChanged', id: Hooks.on('mapShineLevelContextChanged', () => this._rebuildOverlays()) });
+
     // Hook: detect token movement into zones
     this._updateTokenHookId = Hooks.on('updateToken', (tokenDoc, changes, options, userId) => {
       if (!('x' in changes || 'y' in changes)) return;
       this._onTokenPositionChanged(tokenDoc, changes, options, userId);
+    });
+
+    // Also refresh icon visibility when the controlled token moves.
+    this._hookIds.push({
+      hook: 'updateToken',
+      id: Hooks.on('updateToken', (tokenDoc, changes) => {
+        if (!('x' in (changes || {})) && !('y' in (changes || {})) && !('elevation' in (changes || {}))) return;
+        const controlled = canvas?.tokens?.controlled || [];
+        if (!controlled.some((t) => t?.document?.id === tokenDoc?.id)) return;
+        this._updateZoneVisualsVisibility();
+      })
     });
 
     // Hook: re-render overlays when scene zone flags change
@@ -166,11 +371,20 @@ export class ZoneManager {
     });
 
     this._rebuildOverlays();
+    this._updateZoneVisualsVisibility();
     log.info('ZoneManager initialized');
   }
 
   dispose() {
     this.cancelDrawing();
+
+    for (const entry of this._hookIds) {
+      try {
+        if (entry?.hook && entry?.id != null) Hooks.off(entry.hook, entry.id);
+      } catch (_) {
+      }
+    }
+    this._hookIds = [];
 
     if (this._updateTokenHookId !== null) {
       Hooks.off('updateToken', this._updateTokenHookId);
@@ -182,6 +396,7 @@ export class ZoneManager {
     }
 
     this._removeOverlays();
+    this._zoneVisuals.clear();
     this._tokenZonePresence.clear();
     this._sceneComposer = null;
     this._interactionManager = null;
@@ -545,9 +760,9 @@ export class ZoneManager {
 
   _updatePreview() {
     const THREE = window.THREE;
-    if (!THREE || !this._sceneComposer?.scene) return;
+    const scene = this._getThreeOverlayScene();
+    if (!THREE || !scene) return;
 
-    const scene = this._sceneComposer.scene;
     const h = canvas?.dimensions?.height || 1000;
     const groundZ = this._sceneComposer.groundZ ?? 1000;
     const previewZ = groundZ + 5; // Slightly above ground
@@ -587,6 +802,7 @@ export class ZoneManager {
       this._previewLine = new THREE.Line(geometry, material);
       this._previewLine.renderOrder = 99999;
       this._previewLine.frustumCulled = false;
+      this._previewLine.userData = { ...(this._previewLine.userData || {}), type: 'interactionOverlay' };
       scene.add(this._previewLine);
     } else {
       const geo = this._previewLine.geometry;
@@ -617,6 +833,7 @@ export class ZoneManager {
       dot.position.set(v.x, h - v.y, previewZ + 0.1);
       dot.renderOrder = 100000;
       dot.frustumCulled = false;
+      dot.userData = { ...(dot.userData || {}), type: 'interactionOverlay' };
       scene.add(dot);
       this._previewDots.push(dot);
     }
@@ -626,7 +843,7 @@ export class ZoneManager {
   }
 
   _removePreview() {
-    const scene = this._sceneComposer?.scene;
+    const scene = this._getThreeOverlayScene();
     if (this._previewLine) {
       scene?.remove?.(this._previewLine);
       this._previewLine.geometry?.dispose?.();
@@ -994,19 +1211,24 @@ export class ZoneManager {
     this._removeOverlays();
 
     const THREE = window.THREE;
-    if (!THREE || !this._sceneComposer?.scene) return;
+    const scene3 = this._getThreeOverlayScene();
+    if (!THREE || !scene3) return;
 
     const zones = this.getZones();
     if (!zones.length) return;
 
-    const scene3 = this._sceneComposer.scene;
     const h = canvas?.dimensions?.height || 1000;
     const groundZ = this._sceneComposer.groundZ ?? 1000;
     const overlayZ = groundZ + 3;
 
+    const stairIconTex = this._ensureIconTexture('/icons/svg/thrust.svg', '_stairIconTexture', '_stairIconTextureLoading');
+    const liftIconTex = this._ensureIconTexture('/icons/svg/ladder.svg', '_liftIconTexture', '_liftIconTextureLoading');
+    this._zoneVisuals.clear();
+
     this._overlayGroup = new THREE.Group();
     this._overlayGroup.name = 'MapShineZoneOverlays';
     this._overlayGroup.renderOrder = 50000;
+    this._overlayGroup.userData = { ...(this._overlayGroup.userData || {}), type: 'interactionOverlay' };
 
     for (const zone of zones) {
       if (!zone.points || zone.points.length < 3) continue;
@@ -1023,10 +1245,11 @@ export class ZoneManager {
       shape.lineTo(first.x, h - first.y);
 
       const fillGeo = new THREE.ShapeGeometry(shape);
+      const fillColor = color.clone().lerp(new THREE.Color(0xffffff), 0.25);
       const fillMat = new THREE.MeshBasicMaterial({
-        color,
+        color: fillColor,
         transparent: true,
-        opacity: 0.15,
+        opacity: 0.05,
         depthTest: false,
         side: THREE.DoubleSide,
       });
@@ -1034,6 +1257,7 @@ export class ZoneManager {
       fillMesh.position.z = overlayZ;
       fillMesh.renderOrder = 50000;
       fillMesh.frustumCulled = false;
+      fillMesh.userData = { ...(fillMesh.userData || {}), type: 'interactionOverlay' };
       this._overlayGroup.add(fillMesh);
 
       // Outline
@@ -1047,25 +1271,72 @@ export class ZoneManager {
       const lineGeo = new THREE.BufferGeometry();
       lineGeo.setAttribute('position', new THREE.Float32BufferAttribute(linePositions, 3));
       const lineMat = new THREE.LineBasicMaterial({
-        color,
+        color: fillColor,
         linewidth: 2,
         depthTest: false,
         transparent: true,
-        opacity: 0.7,
+        opacity: 0.28,
       });
       const lineMesh = new THREE.Line(lineGeo, lineMat);
       lineMesh.renderOrder = 50001;
       lineMesh.frustumCulled = false;
+      lineMesh.userData = { ...(lineMesh.userData || {}), type: 'interactionOverlay' };
       this._overlayGroup.add(lineMesh);
+
+      const center = this._polygonCentroid(zone.points);
+      let iconMesh = null;
+      const zoneType = String(zone.type || '').toLowerCase();
+      const isStairLike = zoneType === ZONE_TYPES.STAIR.toLowerCase()
+        || zoneType === ZONE_TYPES.STAIR_UP.toLowerCase()
+        || zoneType === ZONE_TYPES.STAIR_DOWN.toLowerCase();
+      const isLiftLike = zoneType === ZONE_TYPES.ELEVATOR.toLowerCase() || zoneType === 'lift';
+      const iconTex = isLiftLike ? liftIconTex : (isStairLike ? stairIconTex : null);
+      if (iconTex && center) {
+        const gridSize = Number(canvas?.dimensions?.size ?? canvas?.scene?.grid?.size ?? 100);
+        const size = Math.max(16, gridSize * 0.35);
+        const iconGeo = new THREE.PlaneGeometry(size, size);
+        const iconMat = new THREE.MeshBasicMaterial({
+          map: iconTex,
+          transparent: true,
+          depthTest: false,
+          depthWrite: false,
+          opacity: 0.82,
+          side: THREE.DoubleSide,
+        });
+        iconMesh = new THREE.Mesh(iconGeo, iconMat);
+        iconMesh.position.set(center.x, h - center.y, overlayZ + 1.25);
+        if (isStairLike && this._resolveZoneDirection(zone) === 'down') {
+          iconMesh.scale.y *= -1;
+        }
+        iconMesh.renderOrder = 50002;
+        iconMesh.frustumCulled = false;
+        iconMesh.userData = {
+          ...(iconMesh.userData || {}),
+          type: 'interactionOverlay',
+          zoneId: zone.id,
+          zoneCenterFoundry: center,
+        };
+        this._overlayGroup.add(iconMesh);
+      }
+
+      if (zone.id) {
+        this._zoneVisuals.set(String(zone.id), {
+          center,
+          fillMesh,
+          lineMesh,
+          iconMesh,
+        });
+      }
     }
 
     scene3.add(this._overlayGroup);
     this._sceneComposer?.requestRender?.();
+    this._updateZoneVisualsVisibility();
   }
 
   _removeOverlays() {
     if (!this._overlayGroup) return;
-    const scene3 = this._sceneComposer?.scene;
+    const scene3 = this._getThreeOverlayScene();
 
     // Dispose all children
     this._overlayGroup.traverse((child) => {

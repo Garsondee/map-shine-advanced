@@ -114,6 +114,18 @@ export class InteractionManager {
       mapPointPoints: null
     };
 
+    // Token double-click (click-left2) state.
+    // We cannot rely on the browser's native `dblclick` event because our pointerdown
+    // handler may preventDefault/start drags which suppresses dblclick delivery.
+    this._tokenDoubleClick = {
+      lastTokenId: null,
+      lastAtMs: 0,
+      lastClientX: 0,
+      lastClientY: 0,
+      thresholdMs: 360,
+      moveThresholdPx: 10,
+    };
+
     // Pending light interaction (disambiguate click-to-open-editor vs drag-to-move-light).
     // We only open the editor on pointerup if the pointer hasn't moved past threshold.
     this._pendingLight = {
@@ -1881,15 +1893,33 @@ export class InteractionManager {
         }
 
         const isTilesContextActive = this._isTilesLayerActive();
-        if (this._isEventFromUI(event)) {
+        const isUiEvent = this._isEventFromUI(event);
+        if (isUiEvent) {
           const hardUiBlocker = this._isHardUIInteractionEvent(event);
           const bypassForTiles = isTilesContextActive && !hardUiBlocker;
+
+          // World-anchored HUD overlays can appear in the DOM stack under the pointer
+          // (and thus read as "UI") even when the user is clearly double-clicking a
+          // token on the canvas. Preserve sheet-open parity by allowing dblclick
+          // processing when the pointer is inside the Three canvas and no hard UI
+          // interaction (dialogs, text inputs, etc.) is active.
+          const insideCanvas = safeCall(() => {
+            const rect = this.canvasElement?.getBoundingClientRect?.();
+            if (!rect) return false;
+            const cx = Number(event?.clientX);
+            const cy = Number(event?.clientY);
+            if (!Number.isFinite(cx) || !Number.isFinite(cy)) return false;
+            return cx >= rect.left && cx <= rect.right && cy >= rect.top && cy <= rect.bottom;
+          }, 'dblClick.insideCanvas', Severity.COSMETIC, { fallback: false });
+
           log.warn('TileInteraction.doubleClick.uiGate', {
             tilesContext: isTilesContextActive,
             hardUiBlocker,
-            bypassForTiles
+            bypassForTiles,
+            insideCanvas
           });
-          if (!bypassForTiles) return;
+
+          if (!bypassForTiles && (hardUiBlocker || !insideCanvas)) return;
         }
 
         // Handle Map Point Drawing Mode - double-click finishes drawing
@@ -3642,6 +3672,47 @@ export class InteractionManager {
           if (!tokenDoc) {
             log.debug('onPointerDown left-click token ray hit child meshes but no tokenDoc parent found; treating as empty click');
           } else {
+
+          // Robust token double-click (click-left2) handling.
+          // This runs BEFORE update-permission gating so players can still open
+          // the actor sheet on double-click even when they cannot move the token.
+          const nowMs = Date.now();
+          const dc = this._tokenDoubleClick;
+          const sameToken = dc.lastTokenId === tokenDoc.id;
+          const dt = nowMs - (dc.lastAtMs || 0);
+          const dx = Math.abs(Number(event?.clientX ?? 0) - Number(dc.lastClientX ?? 0));
+          const dy = Math.abs(Number(event?.clientY ?? 0) - Number(dc.lastClientY ?? 0));
+          const withinTime = dt > 0 && dt <= (dc.thresholdMs || 360);
+          const withinMove = (dx * dx + dy * dy) <= Math.pow((dc.moveThresholdPx || 10), 2);
+          const isDouble = !!(sameToken && withinTime && withinMove);
+
+          // Update click memory immediately so further downstream returns don't
+          // break the cadence.
+          dc.lastTokenId = tokenDoc.id;
+          dc.lastAtMs = nowMs;
+          dc.lastClientX = Number(event?.clientX ?? 0);
+          dc.lastClientY = Number(event?.clientY ?? 0);
+
+          if (event.button === 0 && isDouble && !this.dragState?.active) {
+            const canView = !!tokenDoc?.testUserPermission?.(game.user, 'LIMITED');
+            const actor = tokenDoc?.actor || null;
+            if (canView && actor?.sheet?.render) {
+              safeCall(() => {
+                log.info(`Opening actor sheet for: ${tokenDoc.name}`);
+                actor.sheet.render(true);
+              }, 'pointerDown.doubleClickOpenSheet', Severity.COSMETIC);
+
+              // Consume the event so Foundry/other handlers don't interpret this
+              // as a drag-start.
+              safeCall(() => {
+                event.preventDefault();
+                event.stopPropagation();
+                event.stopImmediatePropagation?.();
+              }, 'pointerDown.doubleClickConsume', Severity.COSMETIC);
+
+              return;
+            }
+          }
           
           // Close HUD if clicking on a different token
           if (this.openHudTokenId && this.openHudTokenId !== tokenDoc.id) {

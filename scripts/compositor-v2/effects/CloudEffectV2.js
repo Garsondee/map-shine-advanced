@@ -95,7 +95,10 @@ export class CloudEffectV2 {
       cloudLayerCount: 3,
       cloudLayerCoverageScale: 3.0,
       cloudLayerDepthScaleStep: 0.18,
-      cloudLayerHeightFromGround: 4300,
+      cloudLayerHeightFromGround: 200,
+      cloudLayer1HeightFromGround: 0,
+      cloudLayer2HeightFromGround: 150,
+      cloudLayer3HeightFromGround: 300,
       cloudLayerZSpacing: 220,
       cloudLayerBaseOffsetFromEmitter: -2200,
       cloudLayerEdgeSoftness: 0.2,
@@ -898,7 +901,7 @@ export class CloudEffectV2 {
         { name: 'domain-warping',    label: 'Domain Warping (Wisps)', type: 'inline', separator: false, parameters: ['domainWarpEnabled', 'domainWarpStrength', 'domainWarpScale', 'domainWarpSpeed', 'domainWarpTimeOffsetY'] },
         { name: 'shadow-settings',   label: 'Cloud Shadows',          type: 'inline', separator: true,  parameters: ['shadowOpacity', 'shadowSoftness', 'shadowOffsetScale', 'minShadowBrightness'] },
         { name: 'cloud-tops',        label: 'Cloud Tops (Zoom)',      type: 'inline', separator: true,  parameters: ['cloudTopMode', 'cloudTopOpacity', 'cloudTopParallaxFactor', 'cloudTopDepthParallaxStrength', 'cloudTopFadeStart', 'cloudTopFadeEnd', 'cloudBrightness'] },
-        { name: 'cloud-layer-space', label: 'Cloud Layer Space',      type: 'inline', separator: false, parameters: ['cloudLayerCount', 'cloudLayerCoverageScale', 'cloudLayerDepthScaleStep', 'cloudLayerZSpacing', 'cloudLayerBaseOffsetFromEmitter', 'cloudLayerEdgeSoftness'] },
+        { name: 'cloud-layer-space', label: 'Cloud Layer Space',      type: 'inline', separator: false, parameters: ['cloudLayerCount', 'cloudLayerCoverageScale', 'cloudLayerDepthScaleStep', 'cloudLayerHeightFromGround', 'cloudLayer1HeightFromGround', 'cloudLayer2HeightFromGround', 'cloudLayer3HeightFromGround', 'cloudLayerZSpacing', 'cloudLayerBaseOffsetFromEmitter', 'cloudLayerEdgeSoftness'] },
         { name: 'cloud-layer-look',  label: 'Cloud Layer Look',       type: 'inline', separator: false, parameters: ['cloudLayerOpacityBase', 'cloudLayerOpacityFalloff', 'cloudLayerUvScaleStep', 'cloudLayerDriftStrength', 'cloudLayerDriftDepthBoost'] },
         { name: 'cloud-layer-slices',label: 'Cloud Layer 3D Slices',  type: 'inline', separator: false, parameters: ['cloudLayerSliceStrength', 'cloudLayerSliceScale', 'cloudLayerSliceContrast', 'cloudLayerSliceSpeed', 'cloudLayerSliceSpacing'] },
         { name: 'cloud-top-shading', label: 'Cloud Top Shading',      type: 'inline', separator: false, parameters: ['cloudTopShadingEnabled', 'cloudTopShadingStrength', 'cloudTopNormalStrength', 'cloudTopAOIntensity', 'cloudTopEdgeHighlight'] },
@@ -913,7 +916,7 @@ export class CloudEffectV2 {
         { name: 'layer-5', label: 'Layer 5', type: 'folder', expanded: false, separator: false, parameters: ['layer5Enabled', 'layer5Opacity', 'layer5Scale', 'layer5Coverage', 'layer5ParallaxMult', 'layer5SpeedMult', 'layer5DirDeg'] },
       ],
       parameters: {
-        noiseScale:           { type: 'slider', label: 'Cloud Scale',       min: 0.5,  max: 8.0,  step: 0.1,   default: 0.5   },
+        noiseScale:           { type: 'slider', label: 'Cloud Scale',       min: 0.05, max: 8.0,  step: 0.05,  default: 0.5   },
         noiseDetail:          { type: 'slider', label: 'Detail (Octaves)',   min: 1,    max: 6,    step: 1,     default: 4     },
         cloudSharpness:       { type: 'slider', label: 'Edge Sharpness',    min: 0.0,  max: 1.0,  step: 0.01,  default: 0.0   },
         noiseTimeSpeed:       { type: 'slider', label: 'Internal Motion',   min: 0.0,  max: 0.05, step: 0.001, default: 0.011 },
@@ -935,8 +938,11 @@ export class CloudEffectV2 {
         cloudLayerCount:      { type: 'slider', label: 'Layer Count (Fixed)', min: 3,   max: 3,    step: 1,     default: 3     },
         cloudLayerCoverageScale:{ type: 'slider', label: 'Coverage Scale',   min: 1.0,  max: 8.0,  step: 0.05,  default: 3.0   },
         cloudLayerDepthScaleStep:{ type: 'slider', label: 'Depth Scale Step',min: 0.0,  max: 0.6,  step: 0.01,  default: 0.18  },
-        cloudLayerHeightFromGround:{ type: 'slider', label: 'Cloud Height (From Ground)', min: 200.0, max: 9000.0, step: 25.0, default: 4300.0 },
-        cloudLayerZSpacing:   { type: 'slider', label: 'Layer Z Spacing',   min: 20.0, max: 1200.0,step: 5.0,  default: 220.0 },
+        cloudLayerHeightFromGround:{ type: 'slider', label: 'Base Cloud Height (From Ground)', min: -2000.0, max: 300.0, step: 1.0, default: 200.0 },
+        cloudLayer1HeightFromGround:{ type: 'slider', label: 'Layer 1 Height (From Ground)', min: 0.0, max: 12000.0, step: 10.0, default: 0.0 },
+        cloudLayer2HeightFromGround:{ type: 'slider', label: 'Layer 2 Height (From Ground)', min: 0.0, max: 12000.0, step: 10.0, default: 150.0 },
+        cloudLayer3HeightFromGround:{ type: 'slider', label: 'Layer 3 Height (From Ground)', min: 0.0, max: 12000.0, step: 10.0, default: 300.0 },
+        cloudLayerZSpacing:   { type: 'slider', label: 'Duplicate Layer Up/Down Offset',   min: 20.0, max: 1200.0,step: 5.0,  default: 220.0 },
         cloudLayerBaseOffsetFromEmitter:{ type: 'slider', label: 'Legacy Emitter Offset', min: -5000.0, max: 2000.0, step: 10.0, default: -2200.0 },
         cloudLayerEdgeSoftness:{ type: 'slider', label: 'Edge Softness',     min: 0.01, max: 0.5,  step: 0.01,  default: 0.2   },
         cloudLayerOpacityBase:{ type: 'slider', label: 'Base Layer Opacity', min: 0.1,  max: 1.5,  step: 0.01,  default: 0.75  },
@@ -1684,9 +1690,13 @@ export class CloudEffectV2 {
           vec2 span = max(uViewBoundsMax - uViewBoundsMin, vec2(1e-5));
           vec2 uv = (vWorldXY - uViewBoundsMin) / span;
           uv = ((uv - 0.5) / max(uUvScale, 1e-3)) + 0.5 + uUvOffset;
-          vec2 uvSample = clamp(uv, vec2(0.0), vec2(1.0));
+          // Wrap the sampling UV so each stacked cloud plane can use a large
+          // per-layer offset without clamping to a single edge texel.
+          vec2 uvSample = fract(uv);
           vec4 c = texture2D(tCloudTop, uvSample);
-          float edgeDist = min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y));
+          // Edge fade must match the wrapped UV, otherwise large offsets push
+          // uv outside [0,1] and edgeMask becomes 0 everywhere (invisible layer).
+          float edgeDist = min(min(uvSample.x, 1.0 - uvSample.x), min(uvSample.y, 1.0 - uvSample.y));
           float edgeSoft = max(uEdgeSoftness, 1e-4);
           float edgeMask = smoothstep(-edgeSoft, edgeSoft, edgeDist);
 
@@ -1766,25 +1776,65 @@ export class CloudEffectV2 {
     const centerY = worldH - (sceneY + sceneH * 0.5);
 
     const sceneComposer = window.MapShine?.sceneComposer;
-    const groundZ = Number(sceneComposer?.groundZ) || 1000;
-    const emitterZ = Number(sceneComposer?.weatherEmitterZ) || (groundZ + 4300);
-    const camZ = Number(cam.position?.z) || (groundZ + 1000);
+    const groundZRaw = Number(sceneComposer?.groundZ);
+    const groundZ = Number.isFinite(groundZRaw) ? groundZRaw : 0;
+    const emitterZRaw = Number(sceneComposer?.weatherEmitterZ);
+    const emitterZ = Number.isFinite(emitterZRaw) ? emitterZRaw : (groundZ + 4300);
+    const camZRaw = Number(cam.position?.z);
+    const camZ = Number.isFinite(camZRaw) ? camZRaw : (groundZ + 1000);
     const heightFromGround = Number(this.params.cloudLayerHeightFromGround);
+    const layerHeight1 = Number(this.params.cloudLayer1HeightFromGround);
+    const layerHeight2 = Number(this.params.cloudLayer2HeightFromGround);
+    const layerHeight3 = Number(this.params.cloudLayer3HeightFromGround);
     const baseOffsetFromEmitter = Number(this.params.cloudLayerBaseOffsetFromEmitter);
     const fallbackEmitterOffset = Number.isFinite(baseOffsetFromEmitter) ? baseOffsetFromEmitter : -2200;
-    const targetBaseZ = Number.isFinite(heightFromGround)
-      ? (groundZ + Math.max(50, heightFromGround))
-      : (emitterZ + fallbackEmitterOffset);
-    const baseZ = Math.min(targetBaseZ, camZ - 120);
     const layerSpacing = Math.max(20, Number(this.params.cloudLayerZSpacing) || 220);
+    const targetBaseZ = Number.isFinite(heightFromGround)
+      ? (groundZ + heightFromGround)
+      : (emitterZ + fallbackEmitterOffset);
+    // Interpret the base height as the LOWEST cloud plane height (closest to ground),
+    // and stack duplicate planes upward by spacing. Clamp the lowest plane so the
+    // highest plane stays in front of the camera.
+    const highestPlaneOffset = Math.max(0, (this._cloudLayerMeshes.length - 1)) * layerSpacing;
+    const baseZ = Math.min(targetBaseZ, camZ - 120 - highestPlaneOffset);
     const coverageScale = Math.max(1, Number(this.params.cloudLayerCoverageScale) || 3.0);
+    const depthScaleStep = Math.max(0, Number(this.params.cloudLayerDepthScaleStep) || 0.18);
+
+    const usePerLayerHeights = Number.isFinite(layerHeight1) || Number.isFinite(layerHeight2) || Number.isFinite(layerHeight3);
+    const perHeights = [layerHeight1, layerHeight2, layerHeight3];
+
+    // If per-layer heights push some layers above the camera, we shift ALL layers
+    // down together to keep them visible while preserving relative separation.
+    // Clamping each layer individually collapses them onto the same Z and makes it
+    // look like only one layer exists.
+    let zShiftDown = 0;
+    const maxAllowedZ = camZ - 120;
+    if (usePerLayerHeights) {
+      let maxDesiredZ = -Infinity;
+      for (let i = 0; i < this._cloudLayerMeshes.length; i++) {
+        const h = perHeights[i];
+        if (!Number.isFinite(h)) continue;
+        maxDesiredZ = Math.max(maxDesiredZ, groundZ + h);
+      }
+      if (Number.isFinite(maxDesiredZ) && maxDesiredZ > maxAllowedZ) {
+        zShiftDown = maxDesiredZ - maxAllowedZ;
+      }
+    }
 
     for (let i = 0; i < this._cloudLayerMeshes.length; i++) {
       const mesh = this._cloudLayerMeshes[i];
       if (!mesh) continue;
       const layerOffsetIndex = i - 1;
-      const depthScale = coverageScale;
-      mesh.position.set(centerX, centerY, baseZ - (layerOffsetIndex * layerSpacing));
+      // Keep the per-layer scale variation symmetric using layerOffsetIndex.
+      const depthScale = coverageScale * (1.0 + Math.abs(layerOffsetIndex) * depthScaleStep);
+
+      let z = baseZ + (i * layerSpacing);
+      if (usePerLayerHeights) {
+        const h = perHeights[i];
+        if (Number.isFinite(h)) z = (groundZ + h) - zShiftDown;
+      }
+
+      mesh.position.set(centerX, centerY, z);
       mesh.scale.set(sceneW * depthScale, sceneH * depthScale, 1);
       mesh.visible = this.params.enabled && this.params.cloudTopOpacity > 0;
     }
@@ -1804,10 +1854,22 @@ export class CloudEffectV2 {
     const centerX = sceneX + sceneW * 0.5;
     const centerY = worldH - (sceneY + sceneH * 0.5);
 
+    const camPos = this._mainCamera?.position;
+    const camX = Number(camPos?.x);
+    const camY = Number(camPos?.y);
+
+    const sceneComposer = window.MapShine?.sceneComposer;
+    const groundZRaw = Number(sceneComposer?.groundZ);
+    const groundZ = Number.isFinite(groundZRaw) ? groundZRaw : 0;
+    const camZRaw = Number(camPos?.z);
+    const camZ = Number.isFinite(camZRaw) ? camZRaw : (groundZ + 1000);
+    const camZSpan = Math.max(1e-3, camZ - groundZ);
+
     const opacity = Math.max(0, Number(this.params.cloudTopOpacity) || 0);
     const coverageScale = Math.max(1, Number(this.params.cloudLayerCoverageScale) || 3.0);
     const uvScaleStep = Math.max(0, Number(this.params.cloudLayerUvScaleStep) || 0.25);
     const driftStrength = Math.max(0, Number(this.params.cloudLayerDriftStrength) || 0.02);
+    const driftDepthBoost = Math.max(0, Number(this.params.cloudLayerDriftDepthBoost) || 0.015);
     const opacityBase = Math.max(0, Number(this.params.cloudLayerOpacityBase) || 0.75);
     const edgeSoftness = Math.max(0.01, Number(this.params.cloudLayerEdgeSoftness) || 0.2);
     const sliceStrength = Math.max(0, Math.min(1, Number(this.params.cloudLayerSliceStrength) || 0.7));
@@ -1815,6 +1877,13 @@ export class CloudEffectV2 {
     const sliceContrast = Math.max(0.1, Number(this.params.cloudLayerSliceContrast) || 1.3);
     const sliceSpeed = Math.max(0, Number(this.params.cloudLayerSliceSpeed) || 0.015);
     const sliceSpacing = Math.max(0, Number(this.params.cloudLayerSliceSpacing) || 2.0);
+
+    const perHeights = [
+      Number(this.params.cloudLayer1HeightFromGround),
+      Number(this.params.cloudLayer2HeightFromGround),
+      Number(this.params.cloudLayer3HeightFromGround)
+    ];
+
     for (let i = 0; i < this._cloudLayerMeshes.length; i++) {
       const mesh = this._cloudLayerMeshes[i];
       const u = mesh?.material?.uniforms;
@@ -1828,8 +1897,30 @@ export class CloudEffectV2 {
       // edge gradients remain stable across pans and scene-edge traversal.
       u.uViewBoundsMin.value.set(centerX - halfW, centerY - halfH);
       u.uViewBoundsMax.value.set(centerX + halfW, centerY + halfH);
-      u.uUvScale.value = 1.0 + uvScaleStep;
-      u.uUvOffset.value.set((wind?.x ?? 0) * driftStrength, (wind?.y ?? 0) * driftStrength);
+      // Per-layer variation so stacked planes don't look identical.
+      // Large offsets are safe because the shader wraps sampling UV via fract().
+      const h = perHeights[i];
+      const hSeed = Number.isFinite(h) ? (h * 0.002) : 0;
+      const seedX = (layerOffsetIndex * 37.13) + (hSeed * 11.0);
+      const seedY = (layerOffsetIndex * -19.77) + (hSeed * -7.0);
+      const scaleVar = 1.0 + (layerOffsetIndex * 0.15);
+      u.uUvScale.value = (1.0 + uvScaleStep) * Math.max(0.5, scaleVar);
+
+      // Camera-relative parallax cue: layers shift differently as the camera pans.
+      // This makes low clouds feel "closer" to the map and makes spacing actually
+      // read as depth even in a near-top-down camera.
+      const nCamX = Number.isFinite(camX) ? ((camX - centerX) / Math.max(1, sceneW * layerScale)) : 0;
+      const nCamY = Number.isFinite(camY) ? ((camY - centerY) / Math.max(1, sceneH * layerScale)) : 0;
+      // Scale by actual height so layers at/near ground don't "slide like sky".
+      const layerZRaw = Number(mesh?.position?.z);
+      const layerZ = Number.isFinite(layerZRaw) ? layerZRaw : groundZ;
+      const height01 = Math.max(0, Math.min(1, (layerZ - groundZ) / camZSpan));
+      const parallaxMul = layerOffsetIndex * driftDepthBoost * 6.0 * height01;
+
+      u.uUvOffset.value.set(
+        ((wind?.x ?? 0) * driftStrength) + seedX + (nCamX * parallaxMul),
+        ((wind?.y ?? 0) * driftStrength) + seedY + (nCamY * parallaxMul)
+      );
       u.uOpacityMul.value = opacity * opacityBase;
       u.uEdgeSoftness.value = edgeSoftness;
       u.uTime.value = this._lastElapsed;

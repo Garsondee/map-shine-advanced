@@ -5267,7 +5267,8 @@ async function createThreeCanvas(scene) {
 
     // V2: Time-of-day drives lighting/sky/shadow effects ->-> skip.
 
-    // Floor pre-loading (V2): assign tiles to floor layers.
+    // Floor pre-loading (V2): assign tiles to floor layers and warm floor mask cache
+    // so first level switch doesn't pay composition cost on-demand.
     if (isDebugLoad) dlp.begin('fin.preloadAllFloors', 'finalize');
     safeCall(() => loadingOverlay.setStage('final', 0.85, 'Pre-loading floors...', { keepAuto: true }), 'overlay.preloadFloors', Severity.COSMETIC);
     _setCreateThreeCanvasProgress('preloadAllFloors');
@@ -5283,6 +5284,20 @@ async function createThreeCanvas(scene) {
         // FloorRenderBus repopulates lazily on first render frame from tile docs.
       }
     }, 'v2.floorLayerAssignment', Severity.DEGRADED);
+
+    await safeCallAsync(async () => {
+      const sc = window.MapShine?.sceneComposer;
+      const compositor = sc?._sceneMaskCompositor;
+      const sceneDoc = canvas?.scene ?? null;
+      if (!compositor || !sceneDoc || typeof compositor.preloadAllFloors !== 'function') return;
+
+      await compositor.preloadAllFloors(sceneDoc, {
+        activeLevelContext: window.MapShine?.activeLevelContext ?? null,
+        lastMaskBasePath: compositor?._activeFloorBasePath ?? sc?.currentBundle?.basePath ?? null,
+        initialMasks: sc?.currentBundle?.masks ?? null,
+      });
+    }, 'v2.preloadAllFloors', Severity.DEGRADED);
+
     console.log(' -> Step: preloadAllFloors DONE');
     if (isDebugLoad) dlp.end('fin.preloadAllFloors');
 

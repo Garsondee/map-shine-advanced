@@ -60,6 +60,12 @@ export class PixiContentLayerBridge {
     this._lastStageTransformSig = '';
     /** @type {boolean} */
     this._testPatternWasEnabled = false;
+    /** @type {number} */
+    this._worldLogicalWidth = 1;
+    /** @type {number} */
+    this._worldLogicalHeight = 1;
+    /** @type {number} */
+    this._worldCaptureScale = 2.5;
 
     if (THREE) {
       this._worldCanvas = document.createElement('canvas');
@@ -81,9 +87,9 @@ export class PixiContentLayerBridge {
     const THREE = this._THREE;
     if (!THREE || !source) return null;
     const tex = new THREE.CanvasTexture(source);
-    tex.minFilter = THREE.LinearFilter;
+    tex.minFilter = THREE.LinearMipmapLinearFilter ?? THREE.LinearFilter;
     tex.magFilter = THREE.LinearFilter;
-    tex.generateMipmaps = false;
+    tex.generateMipmaps = true;
     tex.needsUpdate = true;
     if (THREE.SRGBColorSpace) tex.colorSpace = THREE.SRGBColorSpace;
     return tex;
@@ -158,25 +164,11 @@ export class PixiContentLayerBridge {
       this._hookIds.push(['deleteDrawing', Hooks.on('deleteDrawing', () => { this._dirty = true; })]);
       this._hookIds.push(['activateDrawingsLayer', Hooks.on('activateDrawingsLayer', () => { this._dirty = true; })]);
       this._hookIds.push(['renderSceneControls', Hooks.on('renderSceneControls', () => { this._dirty = true; })]);
-      this._hookIds.push(['canvasPan', Hooks.on('canvasPan', () => { this._dirty = true; })]);
       this._hookIds.push(['canvasReady', Hooks.on('canvasReady', () => { this._dirty = true; })]);
     }
 
-    if (!this._tickerUpdateFn) {
-      const ticker = canvas?.app?.ticker;
-      if (ticker?.add) {
-        this._tickerUpdateFn = () => {
-          this._tickerFrameId += 1;
-          this.update(this._tickerFrameId);
-        };
-        try {
-          ticker.add(this._tickerUpdateFn);
-        } catch (err) {
-          this._tickerUpdateFn = null;
-          log.warn('Failed to register bridge ticker update', err);
-        }
-      }
-    }
+    // Compositor render() already calls bridge.update() once per frame.
+    // Keep a single driver to avoid out-of-phase capture/composite updates.
 
     this._dirty = true;
   }
@@ -187,6 +179,17 @@ export class PixiContentLayerBridge {
 
   getUiTexture() {
     return this._ensureChannelTexture('ui');
+  }
+
+  /**
+   * Logical world capture dimensions (Foundry world pixels, unscaled).
+   * @returns {{width:number,height:number}}
+   */
+  getWorldLogicalSize() {
+    return {
+      width: Math.max(1, Math.round(this._toNumber(this._worldLogicalWidth, 1))),
+      height: Math.max(1, Math.round(this._toNumber(this._worldLogicalHeight, 1))),
+    };
   }
 
   markDirty() {
@@ -228,6 +231,34 @@ export class PixiContentLayerBridge {
   }
 
   /**
+   * Use full padded canvas dimensions for world-space replay so overlay
+   * sampling remains stable during pan/zoom and preserves map resolution.
+   * @returns {{width:number,height:number}}
+   * @private
+   */
+  _getWorldCaptureSize() {
+    const dims = canvas?.dimensions ?? null;
+    const width = Math.max(1, Math.round(this._toNumber(dims?.width, 1)));
+    const height = Math.max(1, Math.round(this._toNumber(dims?.height, 1)));
+    return { width, height };
+  }
+
+  /**
+   * @param {number} logicalWidth
+   * @param {number} logicalHeight
+   * @returns {number}
+   * @private
+   */
+  _getWorldCaptureScale(logicalWidth, logicalHeight) {
+    const runtimeRequested = this._toNumber(window?.MapShine?.__pixiBridgeCaptureScale, this._worldCaptureScale);
+    const requested = Math.max(1, runtimeRequested);
+    const maxDim = 8192;
+    const safeByWidth = maxDim / Math.max(1, logicalWidth);
+    const safeByHeight = maxDim / Math.max(1, logicalHeight);
+    return Math.max(1, Math.min(requested, safeByWidth, safeByHeight));
+  }
+
+  /**
    * @param {number} width
    * @param {number} height
    * @returns {THREE.CanvasTexture|null}
@@ -254,6 +285,8 @@ export class PixiContentLayerBridge {
    * @private
    */
   _renderCompositorSanityPattern(width, height) {
+    this._worldLogicalWidth = Math.max(1, Math.round(this._toNumber(width, 1)));
+    this._worldLogicalHeight = Math.max(1, Math.round(this._toNumber(height, 1)));
     const worldTexture = this._ensureWorldCanvasSize(width, height);
     if (!worldTexture || !this._worldCanvas) return false;
     const w = this._worldCanvas.width;
@@ -371,12 +404,7 @@ export class PixiContentLayerBridge {
    * @private
    */
   _worldToScreen(x, y) {
-    const t = canvas?.stage?.worldTransform;
-    if (!t) return { x, y };
-    return {
-      x: (t.a * x) + (t.c * y) + t.tx,
-      y: (t.b * x) + (t.d * y) + t.ty,
-    };
+    return { x, y };
   }
 
   /**
@@ -426,7 +454,7 @@ export class PixiContentLayerBridge {
    * @param {CanvasRenderingContext2D} ctx
    * @param {any} doc
    * @param {string} kind
-   * @returns {boolean}
+   * @returns {{hasPath:boolean,closed:boolean}}
    * @private
    */
   _traceDrawingPath(ctx, doc, kind) {
@@ -435,7 +463,7 @@ export class PixiContentLayerBridge {
     const points = Array.isArray(doc?.shape?.points) ? doc.shape.points : [];
 
     if (kind === 'rectangle') {
-      if (w <= 0 || h <= 0) return false;
+      if (w <= 0 || h <= 0) return { hasPath: false, closed: false };
       const corners = [
         this._drawingLocalToWorld(doc, 0, 0),
         this._drawingLocalToWorld(doc, w, 0),
@@ -450,11 +478,11 @@ export class PixiContentLayerBridge {
         ctx.lineTo(s.x, s.y);
       }
       ctx.closePath();
-      return true;
+      return { hasPath: true, closed: true };
     }
 
     if (kind === 'ellipse') {
-      if (w <= 0 || h <= 0) return false;
+      if (w <= 0 || h <= 0) return { hasPath: false, closed: false };
       const cx = w * 0.5;
       const cy = h * 0.5;
       const rx = w * 0.5;
@@ -471,7 +499,7 @@ export class PixiContentLayerBridge {
         else ctx.lineTo(s.x, s.y);
       }
       ctx.closePath();
-      return true;
+      return { hasPath: true, closed: true };
     }
 
     if (points.length >= 4) {
@@ -487,10 +515,10 @@ export class PixiContentLayerBridge {
       const isClosed = this._toBool(doc?.shape?.closed, false);
       const shouldClose = (kind === 'polygon' && isClosed);
       if (shouldClose) ctx.closePath();
-      return shouldClose;
+      return { hasPath: true, closed: shouldClose };
     }
 
-    return false;
+    return { hasPath: false, closed: false };
   }
 
   /**
@@ -502,14 +530,18 @@ export class PixiContentLayerBridge {
     const text = String(doc?.text ?? '').trim();
     if (!text) return;
 
-    const baseFontSize = Math.max(8, this._toNumber(doc?.fontSize, 48));
-    const zoom = Math.max(0.01, Math.abs(this._toNumber(canvas?.stage?.worldTransform?.a, 1)));
-    const fontSize = Math.max(8, baseFontSize * zoom);
+    const fontSize = Math.max(8, this._toNumber(doc?.fontSize, 48));
     const fontFamily = String(doc?.fontFamily || 'Signika').trim() || 'Signika';
     const textAlpha = Math.max(0, Math.min(1, this._toNumber(doc?.textAlpha, 1)));
     const textColor = this._normalizeHexColor(doc?.textColor) || '#ffffff';
+    const r = Number.parseInt(textColor.slice(1, 3), 16);
+    const g = Number.parseInt(textColor.slice(3, 5), 16);
+    const b = Number.parseInt(textColor.slice(5, 7), 16);
+    const luminance = (0.2126 * r) + (0.7152 * g) + (0.0722 * b);
+    const outlineColor = luminance > 153 ? '#000000' : '#ffffff';
+    const outlineWidth = Math.max(1, Math.round(fontSize / 18));
     const world = this._drawingLocalToWorld(doc, this._toNumber(doc?.shape?.width, 0) * 0.5, this._toNumber(doc?.shape?.height, 0) * 0.5);
-    const p = this._worldToScreen(world.x, world.y);
+    const p = world;
     const rad = (this._toNumber(doc?.rotation, 0) * Math.PI) / 180;
 
     ctx.save();
@@ -518,7 +550,12 @@ export class PixiContentLayerBridge {
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.font = `${fontSize}px ${fontFamily}`;
+    ctx.lineJoin = 'round';
+    ctx.miterLimit = 2;
+    ctx.lineWidth = outlineWidth;
+    ctx.strokeStyle = this._rgbaFromHex(outlineColor, textAlpha * 0.9);
     ctx.fillStyle = this._rgbaFromHex(textColor, textAlpha);
+    ctx.strokeText(text, 0, 0);
     ctx.fillText(text, 0, 0);
     ctx.restore();
   }
@@ -533,7 +570,15 @@ export class PixiContentLayerBridge {
    * @private
    */
   _renderReplayCapture(drawingsLayer, width, height) {
-    const worldTexture = this._ensureWorldCanvasSize(width, height);
+    const logicalW = Math.max(1, Math.round(this._toNumber(width, 1)));
+    const logicalH = Math.max(1, Math.round(this._toNumber(height, 1)));
+    const captureScale = this._getWorldCaptureScale(logicalW, logicalH);
+    const renderW = Math.max(1, Math.round(logicalW * captureScale));
+    const renderH = Math.max(1, Math.round(logicalH * captureScale));
+    this._worldLogicalWidth = logicalW;
+    this._worldLogicalHeight = logicalH;
+
+    const worldTexture = this._ensureWorldCanvasSize(renderW, renderH);
     if (!worldTexture || !this._worldCanvas) {
       return { ok: false, count: 0, status: 'skip:world-channel-missing' };
     }
@@ -562,20 +607,21 @@ export class PixiContentLayerBridge {
 
     const w = this._worldCanvas.width;
     const h = this._worldCanvas.height;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, w, h);
+    ctx.setTransform(captureScale, 0, 0, captureScale, 0, 0);
 
     let drawCount = 0;
-    const zoom = Math.max(0.01, Math.abs(this._toNumber(canvas?.stage?.worldTransform?.a, 1)));
     for (const doc of replayDocs) {
       const kind = this._resolveDrawingType(doc);
-      const isClosedPath = this._traceDrawingPath(ctx, doc, kind);
-      if (isClosedPath || kind === 'freehand' || kind === 'polygon') {
+      const pathInfo = this._traceDrawingPath(ctx, doc, kind);
+      if (pathInfo.hasPath) {
         const fillAlpha = Math.max(0, Math.min(1, this._toNumber(doc?.fillAlpha, 0)));
         const fillType = this._toNumber(doc?.fillType, 0);
         const strokeAlpha = Math.max(0, Math.min(1, this._toNumber(doc?.strokeAlpha, 1)));
-        const strokeWidth = Math.max(0, this._toNumber(doc?.strokeWidth, 8)) * zoom;
+        const strokeWidth = Math.max(0, this._toNumber(doc?.strokeWidth, 8));
 
-        if (isClosedPath && fillAlpha > 0.001 && fillType !== 0) {
+        if (pathInfo.closed && fillAlpha > 0.001 && fillType !== 0) {
           ctx.fillStyle = this._rgbaFromHex(this._normalizeHexColor(doc?.fillColor), fillAlpha);
           ctx.fill();
         }
@@ -592,11 +638,12 @@ export class PixiContentLayerBridge {
       drawCount += 1;
     }
 
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
     worldTexture.needsUpdate = true;
     if (drawCount <= 0) {
-      return { ok: true, count: 0, status: `captured:replay-empty:${w}x${h}` };
+      return { ok: true, count: 0, status: `captured:replay-empty:${w}x${h} logical=${logicalW}x${logicalH} ss=${captureScale.toFixed(2)}` };
     }
-    return { ok: true, count: drawCount, status: `captured:replay:${w}x${h} docs=${drawCount}` };
+    return { ok: true, count: drawCount, status: `captured:replay:${w}x${h} logical=${logicalW}x${logicalH} ss=${captureScale.toFixed(2)} docs=${drawCount}` };
   }
 
   /**
@@ -648,6 +695,8 @@ export class PixiContentLayerBridge {
    * @private
    */
   _renderFoundryShapeReplay(drawingsLayer, renderer, width, height) {
+    this._worldLogicalWidth = Math.max(1, Math.round(this._toNumber(width, 1)));
+    this._worldLogicalHeight = Math.max(1, Math.round(this._toNumber(height, 1)));
     const worldTexture = this._ensureWorldCanvasSize(width, height);
     if (!worldTexture || !this._worldCanvas || !renderer?.extract) {
       return { ok: false, count: 0, status: 'skip:shape-replay-unavailable' };
@@ -736,12 +785,7 @@ export class PixiContentLayerBridge {
     const drawingsLayer = canvas?.drawings;
     const hasLivePreview = !!drawingsLayer?.preview?.children?.length;
     const forceTestPattern = this._isCompositorSanityPatternEnabled();
-    const stageSig = this._getStageTransformSignature();
-
-    if (this._lastStageTransformSig && stageSig !== this._lastStageTransformSig) {
-      this._dirty = true;
-    }
-    this._lastStageTransformSig = stageSig;
+    this._lastStageTransformSig = this._getStageTransformSignature();
 
     if (this._testPatternWasEnabled && !forceTestPattern) {
       this._dirty = true;
@@ -784,10 +828,11 @@ export class PixiContentLayerBridge {
       if (this._renderCompositorSanityPattern(viewport.width, viewport.height)) return;
     }
 
+    const worldCapture = this._getWorldCaptureSize();
     const useShapeReplay = this._isShapeReplayDebugEnabled();
     const replayResult = useShapeReplay
-      ? this._renderFoundryShapeReplay(drawingsLayer, renderer, viewport.width, viewport.height)
-      : this._renderReplayCapture(drawingsLayer, viewport.width, viewport.height);
+      ? this._renderFoundryShapeReplay(drawingsLayer, renderer, worldCapture.width, worldCapture.height)
+      : this._renderReplayCapture(drawingsLayer, worldCapture.width, worldCapture.height);
     if (replayResult.ok) {
       this._lastUpdateStatus = replayResult.status;
       this._dirty = false;

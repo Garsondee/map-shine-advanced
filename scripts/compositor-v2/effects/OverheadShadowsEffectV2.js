@@ -816,7 +816,10 @@ export class OverheadShadowsEffectV2 {
           float baseEdgeFade = mix(0.25, 1.0, smoothstep(0.0, 1.0, baseOffsetScale));
           vec2 offsetUv = roofUv + baseOffsetDeltaUv * baseOffsetScale;
           // Suppress self-shadowing on the caster layer itself.
-          float roofBaseAlpha = clamp(texture2D(tRoof, clamp(roofUv, 0.0, 1.0)).a, 0.0, 1.0);
+          // Keep an unmodified receiver roof coverage mask so non-roof shadow
+          // contributions (e.g. Outdoor Building Shadow) stay below overhead tiles.
+          float roofCoverageAlpha = clamp(texture2D(tRoof, clamp(roofUv, 0.0, 1.0)).a, 0.0, 1.0);
+          float roofBaseAlpha = roofCoverageAlpha;
           // Tree-style unmasking behavior during hover reveal: keep caster
           // projection active, but stop masking it out under the source roof.
           roofBaseAlpha *= (1.0 - clamp(uHoverRevealActive, 0.0, 1.0));
@@ -948,6 +951,8 @@ export class OverheadShadowsEffectV2 {
                   float casterOutdoorsIndoor = readOutdoorsMask(mUvIndoor);
                   float casterIndoorsIndoor = 1.0 - casterOutdoorsIndoor;
                   indoorStrengthTap = clamp(casterIndoorsIndoor * uOutdoorBuildingShadowOpacity * receiverIsOutdoors, 0.0, 1.0);
+                  // Keep outdoor-building shadow below visible overhead tiles.
+                  indoorStrengthTap *= (1.0 - roofCoverageAlpha);
                   indoorStrengthTap *= baseEdgeFade;
                 }
               }

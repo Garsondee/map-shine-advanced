@@ -885,7 +885,7 @@ export class GpuSceneMaskCompositor {
 
       if (bands.size <= 1) return;
 
-      log.info('preloadAllFloors: warming cache for', bands.size, 'level bands');
+      log.debug('preloadAllFloors: warming cache for', bands.size, 'level bands');
 
       // Derive the scene background image's basePath for ground-floor fallback.
       // lastMaskBasePath holds the ACTIVE floor's path — if the player loaded on
@@ -1022,7 +1022,7 @@ export class GpuSceneMaskCompositor {
         log.warn('preloadAllFloors: water mask patch failed', _patchErr);
       }
 
-      log.info('preloadAllFloors: done,', this._floorMeta.size, 'floors cached');
+      log.debug('preloadAllFloors: done,', this._floorMeta.size, 'floors cached');
     } catch (e) {
       log.debug('preloadAllFloors: error', e);
     }

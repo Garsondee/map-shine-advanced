@@ -28,6 +28,52 @@ const REGION_BEHAVIOR_KINDS = Object.freeze({
 let patchInstalled = false;
 const elevatorDialogsByTokenId = new Map();
 
+let _pendingRetryHookId = null;
+
+function _getExecuteScriptRegionBehaviorProto() {
+  try {
+    const ExecuteScriptType = foundry?.data?.regionBehaviors?.ExecuteScriptRegionBehaviorType
+      ?? foundry?.data?.regionBehaviors?.ExecuteScriptRegionBehavior
+      ?? globalThis?.foundry?.data?.regionBehaviors?.ExecuteScriptRegionBehaviorType;
+    const proto = ExecuteScriptType?.prototype;
+    if (!proto) return null;
+    if (typeof proto._handleRegionEvent !== 'function') return null;
+    return proto;
+  } catch (_) {
+    return null;
+  }
+}
+
+function _getBehaviorSourceText(behaviorInstance) {
+  try {
+    // Foundry/region behavior internals have shifted between versions.
+    // Levels writes scripts that reference RegionHandler.*; we only need
+    // the source text to pattern-match those calls.
+    return String(
+      behaviorInstance?.source
+        ?? behaviorInstance?.script
+        ?? behaviorInstance?.data?.source
+        ?? behaviorInstance?.data?.script
+        ?? ''
+    );
+  } catch (_) {
+    return '';
+  }
+}
+
+function _resolveEventTokenDocument(event) {
+  try {
+    const maybe = event?.data?.token
+      ?? event?.data?.tokenDocument
+      ?? event?.token
+      ?? event?.tokenDocument
+      ?? null;
+    return maybe?.document ?? maybe;
+  } catch (_) {
+    return null;
+  }
+}
+
 function _parseEscapedString(value, quote) {
   let text = String(value);
   const escapedQuote = `\\${quote}`;
@@ -210,7 +256,7 @@ async function _handleLevelsRegionBehavior(parsed, region, event) {
   if (!parsed || !region || !event) return;
   if (!_sameUser(event)) return;
 
-  const tokenDocument = event?.data?.token || null;
+  const tokenDocument = _resolveEventTokenDocument(event);
   if (!tokenDocument) return;
 
   const movement = event?.data?.movement || null;
@@ -449,11 +495,18 @@ async function _handleLegacyDrawingStairs(tokenDoc, changes) {
 export function installLevelsRegionBehaviorCompatPatch() {
   if (patchInstalled) return;
 
-  const ExecuteScriptType = foundry?.data?.regionBehaviors?.ExecuteScriptRegionBehaviorType;
-  const proto = ExecuteScriptType?.prototype;
+  const proto = _getExecuteScriptRegionBehaviorProto();
   const original = proto?._handleRegionEvent;
   if (!proto || (typeof original !== 'function')) {
-    log.warn('ExecuteScript region behavior class not available; region compat patch not installed yet');
+    // This can run before Foundry has fully initialized region behavior classes.
+    // If we fail to install here and never retry, Levels stair Regions become inert.
+    if (!_pendingRetryHookId) {
+      _pendingRetryHookId = Hooks.once('ready', () => {
+        _pendingRetryHookId = null;
+        installLevelsRegionBehaviorCompatPatch();
+      });
+    }
+    log.warn('ExecuteScript region behavior class not available; will retry install at ready');
     return;
   }
 
@@ -463,14 +516,14 @@ export function installLevelsRegionBehaviorCompatPatch() {
   }
 
   const wrapped = async function(event) {
-    const source = String(this?.source || '');
+    const source = _getBehaviorSourceText(this);
     const parsed = _parseLevelsRegionBehaviorSource(source);
 
     if (!parsed) {
       return original.call(this, event);
     }
 
-    const scene = this?.scene || this?.region?.parent || canvas?.scene || null;
+    const scene = this?.scene || this?.region?.parent || this?.region?.scene || canvas?.scene || null;
     if (!sceneSettings.isEnabled(scene)) return;
     if (getLevelsCompatibilityMode() === LEVELS_COMPATIBILITY_MODES.OFF) return;
     if (!isLevelsEnabledForScene(scene)) return;

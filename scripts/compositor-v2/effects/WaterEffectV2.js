@@ -29,6 +29,7 @@ import { probeMaskFile } from '../../assets/loader.js';
 import { tileHasLevelsRange, readTileLevelsFlags } from '../../foundry/levels-scene-flags.js';
 import { WaterSurfaceModel } from '../../effects/WaterSurfaceModel.js';
 import { DepthShaderChunks } from '../../effects/DepthShaderChunks.js';
+import { VisionSDF } from '../../vision/VisionSDF.js';
 import { getVertexShader, getFragmentShader, getFragmentShaderSafe } from './water-shader.js';
 
 const log = createLogger('WaterEffectV2');
@@ -226,6 +227,10 @@ export class WaterEffectV2 {
       foamColor: { r: 0.85, g: 0.90, b: 0.88 },
       foamStrength: 0.60,
       foamThreshold: 0.28,
+      foamShoreCorePower: 4.5,
+      foamShoreCoreStrength: 1.0,
+      foamShoreTailPower: 0.60,
+      foamShoreTailStrength: 0.20,
       foamScale: 20.0,
       foamSpeed: 0.1,
       foamCurlStrength: 0.35,
@@ -247,7 +252,7 @@ export class WaterEffectV2 {
       floatingFoamScale: 8.0,
       floatingFoamWaveDistortion: 0.5,
       foamFlecksEnabled: true,
-      foamFlecksIntensity: 0.6,
+      foamFlecksIntensity: 1.25,
 
       // Murk
       murkEnabled: true,
@@ -261,6 +266,14 @@ export class WaterEffectV2 {
       murkGrainSpeed: 0.3,
       murkGrainStrength: 0.4,
       murkDepthFade: 1.5,
+
+      // Faux bathymetry (Beer-Lambert volumetric absorption/scatter)
+      bathymetryEnabled: true,
+      bathymetryDepthCurve: 2.0,
+      bathymetryMaxDepth: 2.0,
+      bathymetryStrength: 1.0,
+      bathymetryAbsorptionCoeff: { r: 4.0, g: 1.5, b: 0.1 },
+      bathymetryDeepScatterColor: { r: 0.02, g: 0.10, b: 0.20 },
 
       // SDF build (1024 is sufficient for water masks; 2048 causes multi-second
       // CPU hangs during SDF generation — 4 million pixels to distance-transform)
@@ -297,6 +310,18 @@ export class WaterEffectV2 {
     /** @type {WaterSurfaceModel} */
     this._surfaceModel = new WaterSurfaceModel();
 
+    /** @type {VisionSDF|null} */
+    this._visionSDF = null;
+
+    /** @type {THREE.Scene|null} */
+    this._waterDataPackScene = null;
+    /** @type {THREE.OrthographicCamera|null} */
+    this._waterDataPackCamera = null;
+    /** @type {THREE.Mesh|null} */
+    this._waterDataPackQuad = null;
+    /** @type {THREE.ShaderMaterial|null} */
+    this._waterDataPackMaterial = null;
+
     // ── GPU resources (created in initialize()) ──────────────────────────
     /** @type {THREE.Scene|null} */
     this._composeScene = null;
@@ -319,12 +344,12 @@ export class WaterEffectV2 {
 
     // ── Wind / time state ────────────────────────────────────────────────
     this._windTime = 0;
+    this._waveTime = 0;
     this._windOffsetUvX = 0;
     this._windOffsetUvY = 0;
     this._smoothedWindDirX = 1.0;
     this._smoothedWindDirY = 0.0;
     this._smoothedWindSpeed01 = 0.0;
-    this._smoothedAdvectionSpeed01 = 0.0;
     this._smoothedWaveShapeWind01 = 0.0;
 
     // Dual-spectrum wind-direction blending.
@@ -509,7 +534,6 @@ export class WaterEffectV2 {
           expanded: false,
           parameters: [
             'waveScale', 'waveSpeed', 'waveStrength',
-            'waveWarpLargeStrength', 'waveWarpSmallStrength', 'waveWarpMicroStrength', 'waveWarpTimeSpeed',
             'waveBreakupStrength', 'waveBreakupScale', 'waveBreakupSpeed', 'waveBreakupWarp',
             'waveBreakupDistortionStrength', 'waveBreakupSpecularStrength',
             'waveMicroNormalStrength', 'waveMicroNormalScale', 'waveMicroNormalSpeed', 'waveMicroNormalWarp',
@@ -527,7 +551,6 @@ export class WaterEffectV2 {
             'waveIndoorDampingEnabled', 'waveIndoorDampingStrength', 'waveIndoorMinFactor',
             'windDirResponsiveness',
             'lockWaveTravelToWind', 'waveDirOffsetDeg', 'waveAppearanceRotDeg',
-            'waveDirFieldEnabled', 'waveDirFieldMaxDeg', 'waveDirFieldScale', 'waveDirFieldSpeed',
             'advectionDirOffsetDeg', 'advectionSpeed01'
           ]
         },
@@ -606,6 +629,7 @@ export class WaterEffectV2 {
           parameters: [
             'foamFlecksEnabled',
             'foamColor', 'foamStrength', 'foamThreshold',
+            'foamShoreCorePower', 'foamShoreCoreStrength', 'foamShoreTailPower', 'foamShoreTailStrength',
             'foamScale', 'foamSpeed',
             'foamCurlStrength', 'foamCurlScale', 'foamCurlSpeed',
             'foamBreakupStrength1', 'foamBreakupScale1', 'foamBreakupSpeed1',
@@ -625,6 +649,17 @@ export class WaterEffectV2 {
             'murkIntensity', 'murkColor', 'murkScale', 'murkSpeed',
             'murkDepthLo', 'murkDepthHi', 'murkDepthFade',
             'murkGrainScale', 'murkGrainSpeed', 'murkGrainStrength'
+          ]
+        },
+        {
+          name: 'water-bathymetry',
+          label: 'Bathymetry (Volumetric)',
+          type: 'folder',
+          expanded: false,
+          parameters: [
+            'bathymetryEnabled',
+            'bathymetryDepthCurve', 'bathymetryMaxDepth', 'bathymetryStrength',
+            'bathymetryAbsorptionCoeff', 'bathymetryDeepScatterColor'
           ]
         }
       ],
@@ -655,10 +690,6 @@ export class WaterEffectV2 {
         waveScale: { type: 'slider', min: 0.1, max: 16, step: 0.05, default: 4.0, label: 'Wave Scale' },
         waveSpeed: { type: 'slider', min: 0, max: 4, step: 0.01, default: 1.0, label: 'Wave Speed' },
         waveStrength: { type: 'slider', min: 0, max: 2, step: 0.01, default: 0.6, label: 'Wave Strength' },
-        waveWarpLargeStrength: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.15, label: 'Warp Large' },
-        waveWarpSmallStrength: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.08, label: 'Warp Small' },
-        waveWarpMicroStrength: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.04, label: 'Warp Micro' },
-        waveWarpTimeSpeed: { type: 'slider', min: 0, max: 2, step: 0.01, default: 0.15, label: 'Warp Time Speed' },
         waveBreakupStrength: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.22, label: 'Breakup Strength' },
         waveBreakupScale: { type: 'slider', min: 1, max: 300, step: 0.1, default: 80.0, label: 'Breakup Scale' },
         waveBreakupSpeed: { type: 'slider', min: 0, max: 2, step: 0.01, default: 0.18, label: 'Breakup Speed' },
@@ -685,10 +716,6 @@ export class WaterEffectV2 {
         lockWaveTravelToWind: { type: 'boolean', default: true, label: 'Lock Travel To Wind' },
         waveDirOffsetDeg: { type: 'slider', min: -180, max: 180, step: 1, default: 0.0, label: 'Wave Dir Offset (deg)' },
         waveAppearanceRotDeg: { type: 'slider', min: -180, max: 180, step: 1, default: 0.0, label: 'Wave Appearance Rot (deg)' },
-        waveDirFieldEnabled: { type: 'boolean', default: true, label: 'Direction Field Enabled' },
-        waveDirFieldMaxDeg: { type: 'slider', min: 0, max: 90, step: 1, default: 45.0, label: 'Field Max Angle (deg)' },
-        waveDirFieldScale: { type: 'slider', min: 0.05, max: 4, step: 0.01, default: 0.65, label: 'Field Scale' },
-        waveDirFieldSpeed: { type: 'slider', min: 0, max: 2, step: 0.01, default: 0.35, label: 'Field Speed' },
         advectionDirOffsetDeg: { type: 'slider', min: -180, max: 180, step: 1, default: 0.0, label: 'Advection Dir Offset (deg)' },
         advectionSpeed01: { type: 'slider', min: 0, max: 3, step: 0.01, default: 0.15, label: 'Advection Speed' },
 
@@ -784,6 +811,10 @@ export class WaterEffectV2 {
         foamColor: { type: 'color', default: { r: 0.85, g: 0.90, b: 0.88 }, label: 'Foam Color' },
         foamStrength: { type: 'slider', min: 0, max: 2, step: 0.01, default: 0.60, label: 'Foam Strength' },
         foamThreshold: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.28, label: 'Foam Threshold' },
+        foamShoreCorePower: { type: 'slider', min: 1, max: 12, step: 0.01, default: 4.5, label: 'Shore Core Power' },
+        foamShoreCoreStrength: { type: 'slider', min: 0, max: 3, step: 0.01, default: 1.0, label: 'Shore Core Strength' },
+        foamShoreTailPower: { type: 'slider', min: 0.1, max: 2, step: 0.01, default: 0.60, label: 'Shore Tail Power' },
+        foamShoreTailStrength: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.20, label: 'Shore Tail Strength' },
         foamScale: { type: 'slider', min: 0.1, max: 80, step: 0.1, default: 20.0, label: 'Foam Scale' },
         foamSpeed: { type: 'slider', min: 0, max: 2, step: 0.01, default: 0.1, label: 'Foam Speed' },
         foamCurlStrength: { type: 'slider', min: 0, max: 2, step: 0.01, default: 0.35, label: 'Foam Curl Strength' },
@@ -802,9 +833,9 @@ export class WaterEffectV2 {
         foamBrightness: { type: 'slider', min: -1, max: 1, step: 0.01, default: 0.0, label: 'Foam Brightness' },
         floatingFoamStrength: { type: 'slider', min: 0, max: 2, step: 0.01, default: 0.40, label: 'Floating Foam Strength' },
         floatingFoamCoverage: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.35, label: 'Floating Foam Coverage' },
-        floatingFoamScale: { type: 'slider', min: 0.1, max: 40, step: 0.1, default: 8.0, label: 'Floating Foam Scale' },
+        floatingFoamScale: { type: 'slider', min: 0.1, max: 200, step: 0.1, default: 8.0, label: 'Floating Foam Scale' },
         floatingFoamWaveDistortion: { type: 'slider', min: 0, max: 2, step: 0.01, default: 0.5, label: 'Floating Foam Distortion' },
-        foamFlecksIntensity: { type: 'slider', min: 0, max: 2, step: 0.01, default: 0.6, label: 'Foam Flecks Intensity' },
+        foamFlecksIntensity: { type: 'slider', min: 0, max: 4, step: 0.01, default: 1.25, label: 'Foam Flecks Intensity' },
 
         murkEnabled: { type: 'boolean', default: true, label: 'Murk Enabled' },
         murkIntensity: { type: 'slider', min: 0, max: 2, step: 0.01, default: 0.4, label: 'Murk Intensity' },
@@ -817,6 +848,13 @@ export class WaterEffectV2 {
         murkGrainScale: { type: 'slider', min: 10, max: 6000, step: 1, default: 80.0, label: 'Murk Grain Scale' },
         murkGrainSpeed: { type: 'slider', min: 0, max: 4, step: 0.01, default: 0.3, label: 'Murk Grain Speed' },
         murkGrainStrength: { type: 'slider', min: 0, max: 2, step: 0.01, default: 0.4, label: 'Murk Grain Strength' },
+
+        bathymetryEnabled: { type: 'boolean', default: true, label: 'Enabled' },
+        bathymetryDepthCurve: { type: 'slider', min: 0.05, max: 6, step: 0.01, default: 2.0, label: 'Depth Curve' },
+        bathymetryMaxDepth: { type: 'slider', min: 0, max: 8, step: 0.01, default: 2.0, label: 'Max Depth' },
+        bathymetryStrength: { type: 'slider', min: 0, max: 3, step: 0.01, default: 1.0, label: 'Strength' },
+        bathymetryAbsorptionCoeff: { type: 'color', default: { r: 4.0, g: 1.5, b: 0.1 }, label: 'Absorption Coeff' },
+        bathymetryDeepScatterColor: { type: 'color', default: { r: 0.02, g: 0.10, b: 0.20 }, label: 'Deep Scatter Color' },
 
       }
     };
@@ -1148,34 +1186,40 @@ export class WaterEffectV2 {
       }
     }
 
-    // Wrap the canvas in a THREE.CanvasTexture so buildFromMaskTexture gets a
-    // real image-backed texture (CPU path, not RT readback path)
-    const canvasTex = new THREE.CanvasTexture(canvas);
-    canvasTex.flipY = false;
-    canvasTex.needsUpdate = true;
+    const imageData = ctx.getImageData(0, 0, cvW, cvH).data;
 
-    // Build SDF from the composited canvas texture
+    // Prefer GPU JFA path (near-instant mask->SDF), with CPU fallback.
     let waterData = null;
     try {
-      waterData = this._surfaceModel.buildFromMaskTexture(canvasTex, {
-        resolution: maxRes,
-        threshold: this.params.maskThreshold ?? 0.15,
-        channel: this.params.maskChannel ?? 'auto',
-        invert: !!this.params.maskInvert,
-        blurRadius: this.params.maskBlurRadius ?? 0.0,
-        blurPasses: this.params.maskBlurPasses ?? 0,
-        expandPx: this.params.maskExpandPx ?? 0.0,
-        sdfRangePx: this.params.sdfRangePx ?? 64,
-        exposureWidthPx: this.params.shoreWidthPx ?? 24,
-      });
+      waterData = this._buildWaterDataGpuJfa(THREE, imageData, cvW, cvH);
     } catch (err) {
-      log.error('_compositeFloorMask: SDF build failed:', err);
-      canvasTex.dispose();
-      return null;
+      log.warn('_compositeFloorMask: GPU JFA SDF build failed, falling back to CPU path.', err);
     }
 
-    // CanvasTexture is no longer needed once SDF is built (CPU data was consumed)
-    canvasTex.dispose();
+    if (!waterData) {
+      // Fallback: legacy CPU WaterSurfaceModel build.
+      const canvasTex = new THREE.CanvasTexture(canvas);
+      canvasTex.flipY = false;
+      canvasTex.needsUpdate = true;
+      try {
+        waterData = this._surfaceModel.buildFromMaskTexture(canvasTex, {
+          resolution: maxRes,
+          threshold: this.params.maskThreshold ?? 0.15,
+          channel: this.params.maskChannel ?? 'auto',
+          invert: !!this.params.maskInvert,
+          blurRadius: this.params.maskBlurRadius ?? 0.0,
+          blurPasses: this.params.maskBlurPasses ?? 0,
+          expandPx: this.params.maskExpandPx ?? 0.0,
+          sdfRangePx: this.params.sdfRangePx ?? 64,
+          exposureWidthPx: this.params.shoreWidthPx ?? 24,
+        });
+      } catch (err) {
+        log.error('_compositeFloorMask: CPU SDF build failed:', err);
+        canvasTex.dispose();
+        return null;
+      }
+      canvasTex.dispose();
+    }
 
     if (!waterData?.hasWater) {
       log.info('_compositeFloorMask: mask found but no water pixels above threshold');
@@ -1185,6 +1229,184 @@ export class WaterEffectV2 {
     const rawMask = waterData?.rawMaskTexture ?? null;
     // Return the canvas reference so the caller can reuse it for the next floor
     return { waterData, rawMask, _canvas: canvas };
+  }
+
+  _detectMaskUseAlpha(rgba) {
+    let rMin = 255;
+    let rMax = 0;
+    let aMin = 255;
+    let aMax = 0;
+    for (let i = 0; i < rgba.length; i += 16) {
+      const r = rgba[i];
+      const a = rgba[i + 3];
+      if (r < rMin) rMin = r;
+      if (r > rMax) rMax = r;
+      if (a < aMin) aMin = a;
+      if (a > aMax) aMax = a;
+    }
+    return (aMax - aMin) > ((rMax - rMin) + 8);
+  }
+
+  _ensureWaterDataPackResources(THREE) {
+    if (this._waterDataPackScene && this._waterDataPackMaterial && this._waterDataPackQuad && this._waterDataPackCamera) return;
+    this._waterDataPackScene = new THREE.Scene();
+    this._waterDataPackCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+    this._waterDataPackMaterial = new THREE.ShaderMaterial({
+      uniforms: {
+        tSdf: { value: null },
+        uSdfMaxDistancePx: { value: 32.0 },
+        uSdfRangePx: { value: 64.0 },
+        uExposureWidthPx: { value: 24.0 },
+        uMaskExpandPx: { value: 0.0 },
+      },
+      vertexShader: /* glsl */`
+        varying vec2 vUv;
+        void main() {
+          vUv = uv;
+          gl_Position = vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: /* glsl */`
+        uniform sampler2D tSdf;
+        uniform float uSdfMaxDistancePx;
+        uniform float uSdfRangePx;
+        uniform float uExposureWidthPx;
+        uniform float uMaskExpandPx;
+        varying vec2 vUv;
+
+        void main() {
+          float sdfNorm = texture2D(tSdf, vUv).r;
+          float signedPx = (0.5 - sdfNorm) * (2.0 * max(1e-4, uSdfMaxDistancePx)) - uMaskExpandPx;
+          float sdf01 = clamp(0.5 + (signedPx / (2.0 * max(1e-4, uSdfRangePx))), 0.0, 1.0);
+          float exposure01 = clamp(max(0.0, -signedPx) / max(1e-4, uExposureWidthPx), 0.0, 1.0);
+          gl_FragColor = vec4(sdf01, exposure01, 0.5, 0.5);
+        }
+      `,
+      depthWrite: false,
+      depthTest: false,
+    });
+    this._waterDataPackQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), this._waterDataPackMaterial);
+    this._waterDataPackQuad.frustumCulled = false;
+    this._waterDataPackScene.add(this._waterDataPackQuad);
+  }
+
+  _buildWaterDataGpuJfa(THREE, rgbaPixels, width, height) {
+    const renderer = window.MapShine?.renderer;
+    if (!renderer) return null;
+    if (!this._visionSDF) {
+      this._visionSDF = new VisionSDF(renderer, width, height);
+      this._visionSDF.initialize();
+    } else {
+      this._visionSDF.resize(width, height);
+    }
+
+    const channel = this.params.maskChannel ?? 'auto';
+    const useAlpha = (channel === 'a') ? true : (channel === 'r' ? false : this._detectMaskUseAlpha(rgbaPixels));
+    const invert = !!this.params.maskInvert;
+    const threshold255 = Math.max(0, Math.min(255, Math.round((this.params.maskThreshold ?? 0.15) * 255)));
+
+    const rawRgba = new Uint8Array(width * height * 4);
+    const binRgba = new Uint8Array(width * height * 4);
+    let hasWater = false;
+    for (let i = 0; i < width * height; i++) {
+      const o = i * 4;
+      const r = rgbaPixels[o];
+      const g = rgbaPixels[o + 1];
+      const b = rgbaPixels[o + 2];
+      const a = rgbaPixels[o + 3];
+      let v;
+      if (channel === 'luma') v = Math.round(0.2126 * r + 0.7152 * g + 0.0722 * b);
+      else v = useAlpha ? a : r;
+      if (invert) v = 255 - v;
+      const on = v >= threshold255;
+      if (on) hasWater = true;
+      const bv = on ? 255 : 0;
+
+      rawRgba[o] = v; rawRgba[o + 1] = v; rawRgba[o + 2] = v; rawRgba[o + 3] = 255;
+      binRgba[o] = bv; binRgba[o + 1] = bv; binRgba[o + 2] = bv; binRgba[o + 3] = 255;
+    }
+
+    if (!hasWater) {
+      return {
+        texture: null,
+        rawMaskTexture: null,
+        transform: null,
+        resolution: Math.max(width, height),
+        threshold: this.params.maskThreshold ?? 0.15,
+        hasWater: false,
+      };
+    }
+
+    const rawMaskTexture = new THREE.DataTexture(rawRgba, width, height, THREE.RGBAFormat, THREE.UnsignedByteType);
+    rawMaskTexture.minFilter = THREE.LinearFilter;
+    rawMaskTexture.magFilter = THREE.LinearFilter;
+    rawMaskTexture.wrapS = THREE.ClampToEdgeWrapping;
+    rawMaskTexture.wrapT = THREE.ClampToEdgeWrapping;
+    rawMaskTexture.generateMipmaps = false;
+    rawMaskTexture.flipY = false;
+    if ('colorSpace' in rawMaskTexture && THREE.NoColorSpace) rawMaskTexture.colorSpace = THREE.NoColorSpace;
+    rawMaskTexture.needsUpdate = true;
+
+    const binaryMaskTexture = new THREE.DataTexture(binRgba, width, height, THREE.RGBAFormat, THREE.UnsignedByteType);
+    binaryMaskTexture.minFilter = THREE.NearestFilter;
+    binaryMaskTexture.magFilter = THREE.NearestFilter;
+    binaryMaskTexture.wrapS = THREE.ClampToEdgeWrapping;
+    binaryMaskTexture.wrapT = THREE.ClampToEdgeWrapping;
+    binaryMaskTexture.generateMipmaps = false;
+    binaryMaskTexture.flipY = false;
+    if ('colorSpace' in binaryMaskTexture && THREE.NoColorSpace) binaryMaskTexture.colorSpace = THREE.NoColorSpace;
+    binaryMaskTexture.needsUpdate = true;
+
+    const sdfRange = Math.max(1.0, Number(this.params.sdfRangePx ?? 64));
+    try {
+      // Keep JFA distance normalization aligned with the requested water SDF range.
+      this._visionSDF._maxDistance = sdfRange;
+      if (this._visionSDF._distanceMaterial?.uniforms?.uMaxDistance) {
+        this._visionSDF._distanceMaterial.uniforms.uMaxDistance.value = sdfRange;
+      }
+    } catch (_) {}
+
+    const sdfTex = this._visionSDF.update(binaryMaskTexture);
+    binaryMaskTexture.dispose();
+    if (!sdfTex) {
+      rawMaskTexture.dispose();
+      return null;
+    }
+
+    this._ensureWaterDataPackResources(THREE);
+    const packTarget = new THREE.WebGLRenderTarget(width, height, {
+      format: THREE.RGBAFormat,
+      type: THREE.UnsignedByteType,
+      minFilter: THREE.LinearFilter,
+      magFilter: THREE.LinearFilter,
+      depthBuffer: false,
+      stencilBuffer: false,
+      generateMipmaps: false,
+    });
+
+    const prevTarget = renderer.getRenderTarget();
+    const prevAutoClear = renderer.autoClear;
+    this._waterDataPackMaterial.uniforms.tSdf.value = sdfTex;
+    this._waterDataPackMaterial.uniforms.uSdfMaxDistancePx.value = sdfRange;
+    this._waterDataPackMaterial.uniforms.uSdfRangePx.value = sdfRange;
+    this._waterDataPackMaterial.uniforms.uExposureWidthPx.value = Math.max(1.0, Number(this.params.shoreWidthPx ?? 24));
+    this._waterDataPackMaterial.uniforms.uMaskExpandPx.value = Number(this.params.maskExpandPx ?? 0.0);
+    renderer.autoClear = true;
+    renderer.setRenderTarget(packTarget);
+    renderer.clear();
+    renderer.render(this._waterDataPackScene, this._waterDataPackCamera);
+    renderer.setRenderTarget(prevTarget);
+    renderer.autoClear = prevAutoClear;
+
+    return {
+      texture: packTarget.texture,
+      rawMaskTexture,
+      transform: new THREE.Vector4(0, 0, 1, 1),
+      resolution: Math.max(width, height),
+      threshold: this.params.maskThreshold ?? 0.15,
+      hasWater: true,
+      _packedTarget: packTarget,
+    };
   }
 
   /**
@@ -1340,6 +1562,7 @@ export class WaterEffectV2 {
       // waterData holds the SDF texture + rawMaskTexture (DataTextures)
       try { data.waterData?.texture?.dispose(); } catch (_) {}
       try { data.waterData?.rawMaskTexture?.dispose(); } catch (_) {}
+      try { data.waterData?._packedTarget?.dispose(); } catch (_) {}
       // rawMask is a reference to waterData.rawMaskTexture — already disposed above
     }
     this._floorWater.clear();
@@ -1357,7 +1580,10 @@ export class WaterEffectV2 {
     // throttle/quantize timeInfo updates even when the render loop runs fast.
     // Water needs continuous time for fluid motion.
     const now = (typeof performance !== 'undefined' && performance.now) ? performance.now() * 0.001 : (timeInfo?.elapsed ?? 0);
-    const dt = (this._lastTimeValue == null) ? 0 : Math.max(0, now - this._lastTimeValue);
+    const dtRaw = (this._lastTimeValue == null) ? 0 : Math.max(0, now - this._lastTimeValue);
+    // Clamp simulation step to avoid large post-stall jumps feeding wind time/advection.
+    // Big jumps can look like surface shaking/teleporting on the next rendered frame.
+    const dt = Math.min(dtRaw, 1.0 / 20.0);
     this._lastTimeValue = now;
     const elapsed = now;
 
@@ -1426,6 +1652,19 @@ export class WaterEffectV2 {
       }
     } catch (_) {}
 
+    // At very low wind speeds, weather direction can wander/noise rapidly.
+    // Freeze to the last stable direction to prevent low-speed wave jitter.
+    if (windSpeed01 < 0.06) {
+      const stableLen = Math.hypot(this._waveDirX, this._waveDirY);
+      if (stableLen > 1e-6) {
+        windDirX = this._waveDirX / stableLen;
+        windDirY = this._waveDirY / stableLen;
+      } else {
+        windDirX = 1.0;
+        windDirY = 0.0;
+      }
+    }
+
     // Wind-direction smoothing: low-pass filter gated by wind speed so
     // calm water remains stable while gusts smoothly steer the wavefield.
     {
@@ -1443,9 +1682,10 @@ export class WaterEffectV2 {
     }
 
     // Wave-direction driving for wave shape.
-    // Use a continuous, speed-aware low-pass direction state (no threshold-triggered
-    // "start blend" events) so gusts smoothly steer the wavefield instead of
-    // causing abrupt handoffs.
+    // Use a discrete dual-spectrum state to handle wind rotation.
+    // Instead of continuously turning the waves (which causes huge sweeping movement far from the UV origin),
+    // we snap to a new target direction when the wind rotates enough, and use uWindDirBlend to cross-fade 
+    // the wave normals in the shader.
     {
       const len = Math.hypot(windDirX, windDirY);
       const nx = len > 1e-6 ? (windDirX / len) : 1.0;
@@ -1453,6 +1693,26 @@ export class WaterEffectV2 {
 
       const resp = Math.max(0.05, Number(p.windDirResponsiveness) || 2.5);
       const speedGate = Math.max(0.05, Math.min(1.0, windSpeed01));
+      const blendRate = resp * (0.12 + 0.52 * speedGate);
+
+      // Advance blend
+      this._windDirBlend01 = Math.min(1.0, this._windDirBlend01 + dt * blendRate * 0.5);
+
+      // Calculate angle diff between current tracked wind and target
+      const dot = nx * this._targetWindDirX + ny * this._targetWindDirY;
+      const angleDiff = Math.acos(Math.max(-1.0, Math.min(1.0, dot)));
+
+      // If blend is complete and wind has rotated > 15 degrees, start a new blend
+      if (this._windDirBlend01 >= 1.0 && angleDiff > 0.26) {
+        this._prevWindDirX = this._targetWindDirX;
+        this._prevWindDirY = this._targetWindDirY;
+        this._targetWindDirX = nx;
+        this._targetWindDirY = ny;
+        this._windDirBlend01 = 0.0;
+      }
+
+      // To keep advection and downstream continuous effects smooth, we still provide a continuously
+      // smoothed vector as the main windDir.
       const dirTrack = resp * (0.12 + 0.52 * speedGate);
       const k = 1.0 - Math.exp(-dirTrack * dt);
       this._waveDirX += (nx - this._waveDirX) * k;
@@ -1462,15 +1722,17 @@ export class WaterEffectV2 {
       const wdx = dlen > 1e-6 ? (this._waveDirX / dlen) : 1.0;
       const wdy = dlen > 1e-6 ? (this._waveDirY / dlen) : 0.0;
 
-      this._prevWindDirX = wdx;
-      this._prevWindDirY = wdy;
-      this._targetWindDirX = wdx;
-      this._targetWindDirY = wdy;
-      this._windDirBlend01 = 1.0;
+      // Use this single smoothed direction for all downstream wind-coupled
+      // motion (waves/specular/foam/advection) so systems cannot fight.
+      windDirX = wdx;
+      windDirY = wdy;
 
-      if (u.uPrevWindDir) u.uPrevWindDir.value.set(wdx, -wdy);
-      if (u.uTargetWindDir) u.uTargetWindDir.value.set(wdx, -wdy);
-      if (u.uWindDirBlend) u.uWindDirBlend.value = 1.0;
+      // Apply smoothstep easing to the blend factor
+      const sBlend = this._windDirBlend01 * this._windDirBlend01 * (3.0 - 2.0 * this._windDirBlend01);
+
+      if (u.uPrevWindDir) u.uPrevWindDir.value.set(this._prevWindDirX, this._prevWindDirY);
+      if (u.uTargetWindDir) u.uTargetWindDir.value.set(this._targetWindDirX, this._targetWindDirY);
+      if (u.uWindDirBlend) u.uWindDirBlend.value = sBlend;
     }
 
     // Wind speed smoothing (V1): asymmetric (fast gain, slow loss).
@@ -1488,61 +1750,49 @@ export class WaterEffectV2 {
       windSpeed01 = this._smoothedWindSpeed01;
     }
 
-    // Advection speed smoothing: slower than the core wind-speed filter so
-    // gusts don't instantly speed up/slow down drifted wave detail.
-    let advectionWind01 = windSpeed01;
+    // Single wind-motion state used by all movement + strength couplings.
+    // This smooths gust response (faster ramp-up, slower decay) while keeping
+    // every wind-driven subsystem coherent.
+    let windMotion01 = windSpeed01;
     {
       const resp = Math.max(0.05, Number(p.windDirResponsiveness) || 2.5);
-      const up = resp * 0.40;
-      const down = resp * 0.22;
-      const current = Number.isFinite(this._smoothedAdvectionSpeed01) ? this._smoothedAdvectionSpeed01 : advectionWind01;
-      const target = Math.max(0.0, Math.min(1.0, advectionWind01));
-      const rate = target > current ? up : down;
-      const k = 1.0 - Math.exp(-dt * rate);
-      advectionWind01 = current + (target - current) * Math.min(1.0, Math.max(0.0, k));
-      this._smoothedAdvectionSpeed01 = advectionWind01;
-    }
-
-    // Wave-shape wind filter: intentionally slower and more damped than global
-    // wind speed so gusts don't abruptly reshape distortion patterns.
-    let waveShapeWind01 = windSpeed01;
-    {
-      const resp = Math.max(0.05, Number(p.windDirResponsiveness) || 2.5);
-      const up = resp * 0.30;
-      const down = resp * 0.18;
-      const current = Number.isFinite(this._smoothedWaveShapeWind01) ? this._smoothedWaveShapeWind01 : waveShapeWind01;
-      const target = Math.max(0.0, Math.min(1.0, waveShapeWind01));
+      const up = resp * 0.35;
+      const down = resp * 0.20;
+      const current = Number.isFinite(this._smoothedWaveShapeWind01) ? this._smoothedWaveShapeWind01 : windMotion01;
+      const target = Math.max(0.0, Math.min(1.0, windMotion01));
       const rate = target > current ? up : down;
       const k = 1.0 - Math.exp(-dt * rate);
       const filtered = current + (target - current) * Math.min(1.0, Math.max(0.0, k));
-      // Compress high-end gust response so shape changes stay smooth.
-      waveShapeWind01 = Math.min(1.0, Math.max(0.0, Math.pow(filtered, 0.82)));
-      this._smoothedWaveShapeWind01 = waveShapeWind01;
+      // Mild high-end compression keeps gusts smooth without flattening motion.
+      windMotion01 = Math.min(1.0, Math.max(0.0, Math.pow(filtered, 0.90)));
+      this._smoothedWaveShapeWind01 = windMotion01;
     }
 
     // ── Waves (compute early: used to advance uWindTime) ─────────────────
     // Wind always drives wave speed/strength. Min factors set the calm-water baseline.
     const speedMin = Math.max(0.0, p.waveSpeedWindMinFactor ?? 0.2);
     const strengthMin = Math.max(0.0, p.waveStrengthWindMinFactor ?? 0.55);
-    const waveSpeed = (speedMin + (1.0 - speedMin) * waveShapeWind01) * (p.waveSpeed ?? 1.0);
-    const waveStrength = (strengthMin + (1.0 - strengthMin) * waveShapeWind01) * (p.waveStrength ?? 0.6);
+    const waveSpeed = (speedMin + (1.0 - speedMin) * windMotion01) * (p.waveSpeed ?? 1.0);
+    const waveStrength = (strengthMin + (1.0 - strengthMin) * windMotion01) * (p.waveStrength ?? 0.6);
 
-    // Wind time: monotonic integration driven by smoothed advection wind.
-    this._windTime += dt * advectionWind01 * waveSpeed;
+    // Wind time: monotonic integration driven by the unified wind motion state.
+    this._windTime += dt * (0.1 + windMotion01 * 0.9);
+    this._waveTime += dt * waveSpeed;
     u.uWindTime.value = this._windTime;
+    if (u.uWaveTime) u.uWaveTime.value = this._waveTime;
 
-    // Water uses the Y-flipped wind direction.
-    // Ground-truth from the on-screen arrows: the raw vector was vertically inverted
-    // relative to the intended wind direction.
+    // Water uses Foundry/scene UV space (Y-down), matching CloudEffectV2.
+    // The water shader assumes uWindDir points toward the direction of travel
+    // ("blowing toward"). Do not flip Y here.
     const waterWindDirX = windDirX;
-    const waterWindDirY = -windDirY;
+    const waterWindDirY = windDirY;
     u.uWindDir.value.set(waterWindDirX, waterWindDirY);
-    u.uWindSpeed.value = advectionWind01;
+    u.uWindSpeed.value = windMotion01;
 
     // Debug arrow: visualize the wind direction vector actually used by water.
-    this._updateWindDebugArrow(waterWindDirX, waterWindDirY, advectionWind01, !!p.debugWindArrow);
+    this._updateWindDebugArrow(waterWindDirX, waterWindDirY, windMotion01, !!p.debugWindArrow);
 
-    // Advection offset (UV drift from wind) — V1 monotonic integration.
+    // Advection offset (UV drift from wind) — monotonic integration.
     // Compute drift in scene pixels/sec, normalize by scene dimensions.
     // This produces coherent, non-oscillating pattern travel.
     if (dt > 0.0 && u.uWindOffsetUv) {
@@ -1555,7 +1805,7 @@ export class WaterEffectV2 {
       const advMul = (advMulLegacy != null) ? advMulLegacy : (advSpeed01 * 4.0);
 
       // Drive advection strictly by wind speed (no constant base drift).
-      const pxPerSec = (220.0 * advectionWind01) * advMul;
+      const pxPerSec = (220.0 * windMotion01) * advMul;
 
       const adDeg = Number.isFinite(p.advectionDirOffsetDeg) ? p.advectionDirOffsetDeg : 0.0;
       if (this._cachedAdvectionDirOffsetDeg !== adDeg) {
@@ -1595,7 +1845,7 @@ export class WaterEffectV2 {
     u.uWaveScale.value = p.waveScale;
     u.uWaveSpeed.value = waveSpeed;
     u.uWaveStrength.value = waveStrength;
-    if (u.uWaveMotion01) u.uWaveMotion01.value = waveShapeWind01;
+    if (u.uWaveMotion01) u.uWaveMotion01.value = windMotion01;
     u.uDistortionStrengthPx.value = p.distortionStrengthPx;
 
     // Wave breakup noise (new). If unset, fall back to legacy waveMicroNormal* params.
@@ -1753,6 +2003,10 @@ export class WaterEffectV2 {
     u.uFoamColor.value.set(foamColor.r, foamColor.g, foamColor.b);
     u.uFoamStrength.value = p.foamStrength;
     u.uFoamThreshold.value = p.foamThreshold;
+    u.uFoamShoreCorePower.value = p.foamShoreCorePower;
+    u.uFoamShoreCoreStrength.value = p.foamShoreCoreStrength;
+    u.uFoamShoreTailPower.value = p.foamShoreTailPower;
+    u.uFoamShoreTailStrength.value = p.foamShoreTailStrength;
     u.uFoamScale.value = p.foamScale;
     u.uFoamSpeed.value = p.foamSpeed;
     u.uFoamCurlStrength.value = p.foamCurlStrength;
@@ -1788,6 +2042,20 @@ export class WaterEffectV2 {
     u.uMurkGrainSpeed.value = p.murkGrainSpeed;
     u.uMurkGrainStrength.value = p.murkGrainStrength;
     u.uMurkDepthFade.value = p.murkDepthFade;
+
+    // ── Faux bathymetry (Beer-Lambert) ───────────────────────────────────
+    if (u.uBathymetryEnabled) u.uBathymetryEnabled.value = p.bathymetryEnabled ? 1.0 : 0.0;
+    if (u.uBathymetryDepthCurve) u.uBathymetryDepthCurve.value = Number.isFinite(p.bathymetryDepthCurve) ? Math.max(0.05, p.bathymetryDepthCurve) : 2.0;
+    if (u.uBathymetryMaxDepth) u.uBathymetryMaxDepth.value = Number.isFinite(p.bathymetryMaxDepth) ? Math.max(0.0, p.bathymetryMaxDepth) : 2.0;
+    if (u.uBathymetryStrength) u.uBathymetryStrength.value = Number.isFinite(p.bathymetryStrength) ? Math.max(0.0, p.bathymetryStrength) : 1.0;
+    if (u.uBathymetryAbsorptionCoeff?.value?.set) {
+      const a = normalizeRgb01(p.bathymetryAbsorptionCoeff, { r: 4.0, g: 1.5, b: 0.1 });
+      u.uBathymetryAbsorptionCoeff.value.set(a.r, a.g, a.b);
+    }
+    if (u.uBathymetryDeepScatterColor?.value?.set) {
+      const c = normalizeRgb01(p.bathymetryDeepScatterColor, { r: 0.02, g: 0.10, b: 0.20 });
+      u.uBathymetryDeepScatterColor.value.set(c.r, c.g, c.b);
+    }
 
     // ── Sky / environment ─────────────────────────────────────────────────
     // uSkyIntensity feeds skySpecI = mix(0.08, 1.0, skyI) in the shader.
@@ -1992,6 +2260,16 @@ export class WaterEffectV2 {
     try { this._noiseTexture?.dispose(); } catch (_) {}
     this._noiseTexture = null;
 
+    // Dispose GPU JFA / water-data packing resources
+    try { this._visionSDF?.dispose?.(); } catch (_) {}
+    this._visionSDF = null;
+    try { this._waterDataPackMaterial?.dispose?.(); } catch (_) {}
+    try { this._waterDataPackQuad?.geometry?.dispose?.(); } catch (_) {}
+    this._waterDataPackScene = null;
+    this._waterDataPackCamera = null;
+    this._waterDataPackMaterial = null;
+    this._waterDataPackQuad = null;
+
     // Dispose fallback textures
     try { this._fallbackBlack?.dispose(); } catch (_) {}
     try { this._fallbackWhite?.dispose(); } catch (_) {}
@@ -2122,6 +2400,8 @@ export class WaterEffectV2 {
     const tintColor = normalizeRgb01(p.tintColor, { r: 0.02, g: 0.18, b: 0.28 });
     const foamColor = normalizeRgb01(p.foamColor, { r: 0.85, g: 0.9, b: 0.88 });
     const murkColor = normalizeRgb01(p.murkColor, { r: 0.15, g: 0.22, b: 0.12 });
+    const bathAbsorb = normalizeRgb01(p.bathymetryAbsorptionCoeff, { r: 4.0, g: 1.5, b: 0.1 });
+    const bathScatter = normalizeRgb01(p.bathymetryDeepScatterColor, { r: 0.02, g: 0.10, b: 0.20 });
     return {
       tDiffuse:            { value: fallbacks.black },
       tNoiseMap:           { value: noiseTex ?? fallbacks.black },
@@ -2207,6 +2487,7 @@ export class WaterEffectV2 {
       uWindSpeed:    { value: 0.0 },
       uWindOffsetUv: { value: new THREE.Vector2(0, 0) },
       uWindTime:     { value: 0.0 },
+      uWaveTime:     { value: 0.0 },
       uLockWaveTravelToWind: { value: p.lockWaveTravelToWind ? 1.0 : 0.0 },
       uWaveDirOffsetRad:     { value: 0.0 },
       uWaveAppearanceRotRad: { value: 0.0 },
@@ -2268,6 +2549,10 @@ export class WaterEffectV2 {
       uFoamColor:     { value: new THREE.Vector3(foamColor.r, foamColor.g, foamColor.b) },
       uFoamStrength:  { value: p.foamStrength },
       uFoamThreshold: { value: p.foamThreshold },
+      uFoamShoreCorePower:    { value: p.foamShoreCorePower ?? 4.5 },
+      uFoamShoreCoreStrength: { value: p.foamShoreCoreStrength ?? 1.0 },
+      uFoamShoreTailPower:    { value: p.foamShoreTailPower ?? 0.60 },
+      uFoamShoreTailStrength: { value: p.foamShoreTailStrength ?? 0.20 },
       uFoamScale:     { value: p.foamScale },
       uFoamSpeed:     { value: p.foamSpeed },
       uFoamCurlStrength:     { value: p.foamCurlStrength },
@@ -2302,6 +2587,14 @@ export class WaterEffectV2 {
       uMurkGrainSpeed:    { value: p.murkGrainSpeed },
       uMurkGrainStrength: { value: p.murkGrainStrength },
       uMurkDepthFade:     { value: p.murkDepthFade },
+
+      // Faux bathymetry (Beer-Lambert volumetric params)
+      uBathymetryEnabled:         { value: p.bathymetryEnabled ? 1.0 : 0.0 },
+      uBathymetryDepthCurve:      { value: Number.isFinite(p.bathymetryDepthCurve) ? Math.max(0.05, p.bathymetryDepthCurve) : 2.0 },
+      uBathymetryMaxDepth:        { value: Number.isFinite(p.bathymetryMaxDepth) ? Math.max(0.0, p.bathymetryMaxDepth) : 2.0 },
+      uBathymetryStrength:        { value: Number.isFinite(p.bathymetryStrength) ? Math.max(0.0, p.bathymetryStrength) : 1.0 },
+      uBathymetryAbsorptionCoeff: { value: new THREE.Vector3(bathAbsorb.r, bathAbsorb.g, bathAbsorb.b) },
+      uBathymetryDeepScatterColor:{ value: new THREE.Vector3(bathScatter.r, bathScatter.g, bathScatter.b) },
 
       // Debug
       uDebugView: { value: p.debugView },

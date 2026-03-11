@@ -1041,9 +1041,9 @@ export class FireEffectV2 {
 
     const fireP = new Promise((resolve) => {
       loader.load('modules/map-shine-advanced/assets/flame.webp', (tex) => {
-        tex.minFilter = THREE.LinearMipmapLinearFilter;
+        tex.minFilter = THREE.LinearFilter;
         tex.magFilter = THREE.LinearFilter;
-        tex.generateMipmaps = true;
+        tex.generateMipmaps = false;
         tex.needsUpdate = true;
         this._fireTexture = tex;
         resolve();
@@ -1052,9 +1052,9 @@ export class FireEffectV2 {
 
     const emberP = new Promise((resolve) => {
       loader.load('modules/map-shine-advanced/assets/particle.webp', (tex) => {
-        tex.minFilter = THREE.LinearMipmapLinearFilter;
+        tex.minFilter = THREE.LinearFilter;
         tex.magFilter = THREE.LinearFilter;
-        tex.generateMipmaps = true;
+        tex.generateMipmaps = false;
         tex.needsUpdate = true;
         this._emberTexture = tex;
         resolve();

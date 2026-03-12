@@ -188,6 +188,10 @@ export class PixiContentLayerBridge {
       this._hookIds.push(['updateAmbientSound', Hooks.on('updateAmbientSound', () => { markDirty(2); })]);
       this._hookIds.push(['deleteAmbientSound', Hooks.on('deleteAmbientSound', () => { markDirty(2); })]);
       this._hookIds.push(['activateSoundsLayer', Hooks.on('activateSoundsLayer', () => { markDirty(2); })]);
+      this._hookIds.push(['createNote', Hooks.on('createNote', () => { markDirty(2); })]);
+      this._hookIds.push(['updateNote', Hooks.on('updateNote', () => { markDirty(2); })]);
+      this._hookIds.push(['deleteNote', Hooks.on('deleteNote', () => { markDirty(2); })]);
+      this._hookIds.push(['activateNotesLayer', Hooks.on('activateNotesLayer', () => { markDirty(2); })]);
       this._hookIds.push(['renderSceneControls', Hooks.on('renderSceneControls', () => { markDirty(1); })]);
       this._hookIds.push(['canvasReady', Hooks.on('canvasReady', () => { markDirty(1); })]);
     }
@@ -368,6 +372,28 @@ export class PixiContentLayerBridge {
   }
 
   /**
+   * Is the current control/layer context the native notes workflow?
+   * @returns {boolean}
+   * @private
+   */
+  _isNotesContextActive() {
+    const activeControl = String(ui?.controls?.control?.name ?? ui?.controls?.activeControl ?? '').toLowerCase();
+    const activeTool = String(ui?.controls?.tool?.name ?? ui?.controls?.activeTool ?? game?.activeTool ?? '').toLowerCase();
+    const activeLayerName = String(canvas?.activeLayer?.options?.name ?? canvas?.activeLayer?.name ?? '').toLowerCase();
+    const activeLayerCtor = String(canvas?.activeLayer?.constructor?.name ?? '').toLowerCase();
+    const activeControlLayer = String(ui?.controls?.control?.layer ?? '').toLowerCase();
+    return !!canvas?.notes?.active
+      || activeControl === 'notes'
+      || activeControl === 'note'
+      || activeTool === 'note'
+      || activeControlLayer === 'notes'
+      || activeControlLayer === 'note'
+      || activeLayerName === 'notes'
+      || activeLayerName === 'note'
+      || activeLayerCtor === 'noteslayer';
+  }
+
+  /**
    * Resolve capture strategy for the current frame.
    * Default is a deterministic drawings-only replay path to keep runtime stable.
    * Advanced extraction paths are debug-only and opt-in.
@@ -376,20 +402,31 @@ export class PixiContentLayerBridge {
    * - replay-only (default)
    * - replay-shape
    * - sounds-extract
+   * - notes-extract
    * - stage-extract
    *
    * If no override is provided, auto-select sounds-extract while actively
    * editing sounds, otherwise use replay-only.
    *
-   * @returns {'replay-only'|'replay-shape'|'sounds-extract'|'stage-extract'}
+   * @returns {'replay-only'|'replay-shape'|'sounds-extract'|'notes-extract'|'stage-extract'}
    * @private
    */
   _getCaptureStrategy() {
     const raw = String(window?.MapShine?.__pixiBridgeCaptureStrategy || '').trim().toLowerCase();
     if (raw === 'stage-extract') return 'stage-extract';
     if (raw === 'sounds-extract') return 'sounds-extract';
+    if (raw === 'notes-extract') return 'notes-extract';
     if (raw === 'replay-shape') return 'replay-shape';
     if (this._isSoundsContextActive()) return 'sounds-extract';
+    if (this._isNotesContextActive()) return 'notes-extract';
+    const notesLayer = canvas?.notes;
+    const hasNotesContent =
+      ((Number(canvas?.scene?.notes?.size) || 0) > 0) ||
+      !!notesLayer?.placeables?.length ||
+      !!notesLayer?.objects?.children?.length ||
+      this._hasActivePreview(notesLayer) ||
+      !!notesLayer?._configPreview;
+    if (hasNotesContent) return 'notes-extract';
     return 'replay-only';
   }
 
@@ -1139,6 +1176,156 @@ export class PixiContentLayerBridge {
   }
 
   /**
+   * Replay journal notes by extracting explicit note visuals from each placeable.
+   * @param {PIXI.NotesLayer|null} notesLayer
+   * @param {PIXI.Renderer|null} renderer
+   * @param {number} width
+   * @param {number} height
+   * @param {{clear?:boolean}} [options]
+   * @returns {{ok:boolean,count:number,status:string}}
+   * @private
+   */
+  _renderFoundryNotesReplay(notesLayer, renderer, width, height, options = {}) {
+    const shouldClear = options?.clear !== false;
+    const logicalW = Math.max(1, Math.round(this._toNumber(width, 1)));
+    const logicalH = Math.max(1, Math.round(this._toNumber(height, 1)));
+    const captureScale = this._getWorldCaptureScale(logicalW, logicalH);
+    const renderW = Math.max(1, Math.round(logicalW * captureScale));
+    const renderH = Math.max(1, Math.round(logicalH * captureScale));
+    this._worldLogicalWidth = logicalW;
+    this._worldLogicalHeight = logicalH;
+
+    const worldTexture = this._ensureWorldCanvasSize(renderW, renderH);
+    if (!worldTexture || !this._worldCanvas || !renderer?.extract) {
+      return { ok: false, count: 0, status: 'skip:notes-replay-unavailable' };
+    }
+
+    const ctx = this._worldCanvas.getContext('2d');
+    if (!ctx) return { ok: false, count: 0, status: 'skip:no-world-context' };
+
+    const notes = [];
+    const seen = new Set();
+    const collect = (obj) => {
+      if (!obj) return;
+      const key = String(obj.id ?? obj?.document?.id ?? `${notes.length}`);
+      if (seen.has(key)) return;
+      seen.add(key);
+      notes.push(obj);
+    };
+
+    const placeables = Array.isArray(notesLayer?.placeables) ? notesLayer.placeables : [];
+    const objectChildren = Array.isArray(notesLayer?.objects?.children) ? notesLayer.objects.children : [];
+    const previewChildren = Array.isArray(notesLayer?.preview?.children) ? notesLayer.preview.children : [];
+    for (const p of placeables) collect(p);
+    for (const p of objectChildren) collect(p);
+    for (const p of previewChildren) collect(p);
+    if (notesLayer?._configPreview) collect(notesLayer._configPreview);
+
+    notes.sort((a, b) => this._toNumber(a?.document?.sort ?? a?.sort, 0) - this._toNumber(b?.document?.sort ?? b?.sort, 0));
+
+    const w = this._worldCanvas.width;
+    const h = this._worldCanvas.height;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, w, h);
+    ctx.setTransform(captureScale, 0, 0, captureScale, 0, 0);
+    ctx.imageSmoothingEnabled = true;
+
+    if (notes.length <= 0) {
+      worldTexture.needsUpdate = true;
+      return { ok: true, count: 0, status: `captured:notes-replay-empty:${w}x${h}` };
+    }
+
+    let drawn = 0;
+    const maxWorldW = Math.max(1, logicalW * 1.5);
+    const maxWorldH = Math.max(1, logicalH * 1.5);
+    for (const note of notes) {
+      const targetCandidates = [];
+      const pushUniqueTarget = (target) => {
+        if (!target) return;
+        if (targetCandidates.includes(target)) return;
+        targetCandidates.push(target);
+      };
+
+      // Prefer controlIcon first; its geometry matches Foundry Note sizing
+      // semantics (iconSize plus ControlIcon padding/border).
+      pushUniqueTarget(note?.controlIcon);
+      pushUniqueTarget(note);
+      pushUniqueTarget(note?.icon);
+      pushUniqueTarget(note?.tooltip);
+
+      let drewPrimaryTarget = false;
+      for (const target of targetCandidates) {
+        const savedChainState = [];
+        let chainNode = target;
+        while (chainNode) {
+          savedChainState.push({
+            obj: chainNode,
+            visible: chainNode.visible,
+            renderable: chainNode.renderable,
+            alpha: Number(chainNode.alpha),
+          });
+          chainNode.visible = true;
+          chainNode.renderable = true;
+          if (!Number.isFinite(chainNode.alpha) || chainNode.alpha <= 0) chainNode.alpha = 1;
+          chainNode = chainNode.parent ?? null;
+        }
+        try {
+          let bounds = null;
+          try { bounds = target.getBounds?.(false) ?? null; } catch (_) { bounds = null; }
+          const bx = Math.floor(this._toNumber(bounds?.x, 0));
+          const by = Math.floor(this._toNumber(bounds?.y, 0));
+          const bw = Math.ceil(this._toNumber(bounds?.width, 0));
+          const bh = Math.ceil(this._toNumber(bounds?.height, 0));
+          if (bw <= 0 || bh <= 0) continue;
+
+          const frame = new PIXI.Rectangle(bx, by, bw, bh);
+          let targetCanvas = null;
+          try {
+            targetCanvas = renderer.extract.canvas(target, frame);
+          } catch (_) {
+            targetCanvas = null;
+          }
+          if (!targetCanvas || !targetCanvas.width || !targetCanvas.height) continue;
+
+          let drawX = 0;
+          let drawY = 0;
+          let drawW = 0;
+          let drawH = 0;
+          const worldRect = this._stageScreenRectToWorldRect(bx, by, bw, bh);
+          if (worldRect.w <= 0 || worldRect.h <= 0) continue;
+          drawW = worldRect.w;
+          drawH = worldRect.h;
+          drawX = worldRect.x;
+          drawY = worldRect.y;
+
+          if (drawW > maxWorldW || drawH > maxWorldH) continue;
+          try {
+            ctx.drawImage(targetCanvas, drawX, drawY, drawW, drawH);
+            drawn += 1;
+            if (target === note?.controlIcon || target === note) {
+              drewPrimaryTarget = true;
+              break;
+            }
+          } catch (_) {}
+        } finally {
+          for (let i = savedChainState.length - 1; i >= 0; i -= 1) {
+            const s = savedChainState[i];
+            s.obj.visible = s.visible;
+            s.obj.renderable = s.renderable;
+            s.obj.alpha = s.alpha;
+          }
+        }
+      }
+
+      if (drewPrimaryTarget) continue;
+    }
+
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    worldTexture.needsUpdate = true;
+    return { ok: true, count: drawn, status: `captured:notes-replay:${w}x${h} logical=${logicalW}x${logicalH} ss=${captureScale.toFixed(2)} shapes=${drawn}` };
+  }
+
+  /**
    * Fast sparse probe for any non-empty pixel content.
    * @param {HTMLCanvasElement|null} source
    * @returns {boolean}
@@ -1306,13 +1493,48 @@ export class PixiContentLayerBridge {
       return;
     }
 
-    const hasNonDrawingUiContent =
+    const hasSoundsUiContent =
       !!soundsLayer?.active ||
       !!soundsLayer?.placeables?.length ||
       this._hasActivePreview(soundsLayer);
+    const hasNotesUiContent =
+      ((Number(canvas?.scene?.notes?.size) || 0) > 0) ||
+      !!notesLayer?.active ||
+      !!notesLayer?.placeables?.length ||
+      !!notesLayer?.objects?.children?.length ||
+      this._hasActivePreview(notesLayer);
+    const hasNonDrawingUiContent = hasSoundsUiContent || hasNotesUiContent;
+
+    if (captureStrategy === 'notes-extract') {
+      if (replayResult.ok && !hasNotesUiContent) {
+        this._lastUpdateStatus = `${replayResult.status} strategy=${captureStrategy}`;
+        this._dirty = false;
+        return;
+      }
+
+      const notesReplayResult = this._renderFoundryNotesReplay(
+        notesLayer,
+        renderer,
+        worldCapture.width,
+        worldCapture.height,
+        { clear: !replayResult.ok }
+      );
+      if (notesReplayResult.ok) {
+        const statusPrefix = replayResult.ok ? `${replayResult.status} + ` : '';
+        this._lastUpdateStatus = `${statusPrefix}${notesReplayResult.status} strategy=${captureStrategy}`;
+        this._dirty = false;
+        return;
+      }
+
+      this._lastUpdateStatus = `skip:notes-replay-failed strategy=${captureStrategy}`;
+      this._clearChannel('world');
+      this._clearChannel('ui');
+      this._dirty = false;
+      return;
+    }
 
     if (captureStrategy === 'sounds-extract') {
-      if (replayResult.ok && !hasNonDrawingUiContent) {
+      if (replayResult.ok && !hasSoundsUiContent) {
         this._lastUpdateStatus = `${replayResult.status} strategy=${captureStrategy}`;
         this._dirty = false;
         return;
@@ -1378,9 +1600,12 @@ export class PixiContentLayerBridge {
 
     if (captureStrategy === 'sounds-extract') {
       collectFromLayer(soundsLayer);
+    } else if (captureStrategy === 'notes-extract') {
+      collectFromLayer(notesLayer);
     } else {
       collectFromLayer(drawingsLayer);
       collectFromLayer(soundsLayer);
+      collectFromLayer(notesLayer);
     }
 
     if (uiShapes.size === 0) {

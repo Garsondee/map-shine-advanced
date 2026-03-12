@@ -448,3 +448,76 @@ Mitigation: defer those layers until drawings-only core is stable.
 2. Consolidate ownership (disable legacy arbitration path under V2).
 3. Validate drawings end-to-end in this reduced system.
 4. Only then re-open multi-layer compatibility work.
+
+---
+
+## Progress Update (Implemented)
+
+This section records what has already been implemented after this plan was written.
+
+### Completed and Verified
+
+1. **Replay-first bridge behavior is now the default**
+   - Production behavior prioritizes deterministic replay paths.
+   - Stage-isolation and other risky extraction paths are no longer the default runtime behavior.
+
+2. **Debug/advanced capture paths are explicitly gated**
+   - Non-primary capture modes are behind debug strategy toggles.
+   - Day-to-day runtime behavior is now more predictable.
+
+3. **Sound layer support was reintroduced in a controlled way**
+   - Added dedicated sounds replay handling.
+   - Sound radius rendering uses `PointSoundSource.shape` polygon replay for wall-clipped geometry parity.
+   - Sound icon positioning and world reprojection were corrected.
+
+4. **Major rendering correctness fixes were landed**
+   - Black overlay/fullscreen artifact risk reduced by extracting explicit sound visuals and clamping anomalous blits.
+   - Water shader validation issue fixed (`zoomNorm` declaration path corrected).
+
+5. **Sound placement performance regression was resolved to basic working state**
+   - Introduced preview fast-path behavior for sounds placement.
+   - Added settled-sounds cache reuse during drag preview.
+   - Added interactive preview gating + preview signature checks to prevent stale preview states from forcing continuous recapture.
+   - Result: sound placement now works in a basic form with restored usable performance.
+
+### Current Status Snapshot
+
+- **Drawings bridge:** Stable in replay-first mode.
+- **Sounds bridge:** Functional with wall-clipped radius and basic placement workflow working.
+- **Known quality direction:** Continue refining visual parity/quality while preserving the new performance guardrails.
+
+---
+
+## Success Stories
+
+These are concrete wins that proved the recovery direction was correct.
+
+### 1) Drawings stability was recovered by shrinking scope first
+
+When drawings were made replay-first and deterministic, stability immediately improved. This confirmed that reducing runtime mutation and fallback churn was the right first principle.
+
+**Why this was correct:** it reduced ownership conflicts and made behavior explainable frame-to-frame.
+
+### 2) Sound radius parity improved by using Foundry source geometry
+
+Switching from generic circles to replay of `sound.source.shape` restored wall-clipped behavior.
+
+**Why this was correct:** it aligned bridge output with Foundry's own source-of-truth geometry instead of approximating it.
+
+### 3) Black-overlay artifacts were solved by narrowing extraction intent
+
+Restricting extraction targets and rejecting anomalous world blit sizes removed a class of catastrophic capture failures.
+
+**Why this was correct:** broad stage extraction is fragile; explicit visual ownership is safer and easier to reason about.
+
+### 4) Persistent FPS collapse was fixed by preview lifecycle control
+
+The critical breakthrough was treating sounds preview as interactive only while the preview geometry is actively changing, and ignoring stale `_creating`-style states for continuous recapture decisions.
+
+**Why this was correct:** performance failures were lifecycle-state bugs as much as rendering-cost bugs; fixing liveness detection removed runaway work.
+
+### 5) Fast-path + cache architecture enabled usable placement performance
+
+By compositing a cached settled pass with a lightweight live preview pass, placement remained responsive without abandoning quality in settled frames.
+
+**Why this was correct:** it matches real user interaction patterns (high-frequency drag updates vs low-frequency settled updates) and keeps expensive work off the hot path.

@@ -6198,15 +6198,21 @@ function _enforceGameplayPixiSuppression() {
     const pixiEditContextFallback =
       tilesEditContext || drawingsEditContext || soundsEditContext
       || templatesEditContext || notesEditContext || regionsEditContext;
+    const hasPersistentPixiOverlays =
+      ((Number(canvas?.scene?.notes?.size) || 0) > 0) ||
+      ((Number(canvas?.scene?.templates?.size) || 0) > 0) ||
+      !!canvas?.notes?.placeables?.length ||
+      !!canvas?.templates?.placeables?.length;
     // Walls, lighting, and tokens are fully Three.js-native now.
     // Only need the PIXI overlay for unreplaced layers (drawings, regions,
     // sounds, notes, templates) — determined by InputRouter.
     const shouldPixiReceiveInput = !!inputRouter?.shouldPixiReceiveInput?.();
-    // Respect InputRouter ownership, but always fail-open to Foundry-native edit
-    // contexts (drawings/templates/notes/regions/sounds/tiles) when router state
-    // is stale during control transitions.
+    // Prefer InputRouter ownership, but fail-open for native PIXI edit contexts
+    // when router metadata is briefly stale during control/layer transitions.
+    // This prevents destructive misroutes (e.g. ambient-sound move becoming a
+    // new placement because Three receives the drag).
     const shouldPixiReceiveInputEffective = shouldPixiReceiveInput || pixiEditContextFallback;
-    const needsEditorOverlay = shouldPixiReceiveInputEffective;
+    const needsEditorOverlay = shouldPixiReceiveInputEffective || hasPersistentPixiOverlays;
     const isDrawingsContext = drawingsEditContext;
 
     if (window.MapShine) {
@@ -6218,7 +6224,10 @@ function _enforceGameplayPixiSuppression() {
     if (needsEditorOverlay) {
       const pixiCanvas = canvas.app?.view;
       const threeCanvas = document.getElementById('map-shine-canvas');
-      const pixiVisualOpacity = (isV2Active && !isDrawingsContext) ? '0' : '1';
+      // Overlay-visible contexts (drawings/notes/templates/sounds/etc.) must
+      // remain visually present; forcing opacity 0 here makes these workflows
+      // appear broken even when interaction ownership is correct.
+      const pixiVisualOpacity = '1';
       if (canvas.app?.renderer?.background) {
         canvas.app.renderer.background.alpha = 0;
       }
@@ -6544,6 +6553,11 @@ function updateLayerVisibility() {
   // Drawings are NOT replaced; they should render via PIXI as an overlay.
   if (canvas.drawings) canvas.drawings.visible = true;
 
+  // Journal notes and measured templates should remain visible as persistent
+  // gameplay overlays, not only while their controls are actively selected.
+  if (canvas.notes) canvas.notes.visible = true;
+  if (canvas.templates) canvas.templates.visible = true;
+
   // 2. Dynamic Layers - Show only if using the corresponding tool
   const activeLayerObj = canvas.activeLayer;
   const activeLayerName = String(activeLayerObj?.options?.name || activeLayerObj?.name || '').toLowerCase();
@@ -6657,7 +6671,7 @@ function updateLayerVisibility() {
   // For Lighting, we also drive the Three.js light icon manager visibility so that
   // light icons only show when the Lighting tool is active.
   const simpleLayers = [
-      'LightingLayer', 'SoundsLayer', 'TemplateLayer', 'NotesLayer', 'RegionLayer'
+      'LightingLayer', 'SoundsLayer', 'RegionLayer'
   ];
   
   simpleLayers.forEach(name => {
@@ -6681,6 +6695,12 @@ function updateLayerVisibility() {
  * @private
  */
 function setupInputArbitration() {
+  // Ownership consolidation: when ControlsIntegration is active, InputRouter
+  // is the single source of truth for pointer routing and overlay state.
+  if (controlsIntegration && controlsIntegration.getState?.() === 'active') {
+    return;
+  }
+
   // Hook into tool changes
   // We use 'canvasInit' to re-apply settings if scene changes, 
   // but 'createThreeCanvas' handles the main init.

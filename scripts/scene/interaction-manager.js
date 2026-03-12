@@ -2107,6 +2107,8 @@ export class InteractionManager {
           id = targetObject.userData.tokenDoc.id;
       } else if (targetObject.userData.lightId) {
           id = targetObject.userData.lightId;
+      } else if (targetObject.userData.soundId) {
+          id = targetObject.userData.soundId;
       } else if (targetObject.userData.enhancedLightId) {
           id = targetObject.userData.enhancedLightId;
       } else if (targetObject.userData.foundryTileId) {
@@ -2815,9 +2817,16 @@ export class InteractionManager {
    */
   onPointerDown(event) {
     try {
-        // Drawings are fully Foundry-native PIXI workflows. Since we listen in
-        // capture phase on window, hard-bypass all Three interaction logic here.
-        if (this._isDrawingsContextActive()) {
+        // Native PIXI overlay workflows must bypass Three interaction entirely.
+        // We listen in window capture phase, so without this guard, Three can
+        // still consume clicks and trigger create-path logic (e.g. sounds).
+        if (
+          this._isDrawingsContextActive()
+          || this._isSoundsContextActive()
+          || this._isNotesContextActive()
+          || this._isTemplatesContextActive()
+          || this._isRegionsContextActive()
+        ) {
           return;
         }
 
@@ -3577,10 +3586,13 @@ export class InteractionManager {
         if (isSoundsLayer) {
           if (this.soundIconManager) {
             const soundIcons = Array.from(this.soundIconManager.sounds.values());
-            const intersects = this.raycaster.intersectObjects(soundIcons, false);
+            const intersects = this.raycaster.intersectObjects(soundIcons, true);
             if (intersects.length > 0) {
               const hit = intersects[0];
-              const sprite = hit.object;
+              let sprite = hit.object;
+              while (sprite && !sprite.userData?.soundId) sprite = sprite.parent;
+              if (!sprite) return;
+
               const soundId = String(sprite?.userData?.soundId || '');
               const soundDoc = soundId ? (canvas?.scene?.sounds?.get?.(soundId) || canvas?.sounds?.get?.(soundId)?.document || null) : null;
               const canView = !!(soundDoc && soundDoc.testUserPermission(game.user, 'LIMITED'));

@@ -483,9 +483,32 @@ This section records what has already been implemented after this plan was writt
 ### Current Status Snapshot
 
 - **Drawings bridge:** Stable in replay-first mode.
-- **Sounds bridge:** Functional with wall-clipped radius and basic placement workflow working.
-- **Journals/Notes bridge:** Functionally working in world-stable mode (icons/squares now render), but icon/square sizing is still smaller than native Foundry parity.
-- **Known quality direction:** Continue refining visual parity/quality while preserving the new performance guardrails.
+- **Sounds bridge:** Functional with wall-clipped radius; existing ambient sounds can be moved by left-drag without forcing create-path behavior.
+- **Templates bridge:** Templates are visible again with improved drag-preview performance under replay-first capture.
+- **Journals/Notes bridge:** Remaining active regression was journals not consistently visible in token mode when templates content was present.
+- **Known quality direction:** Keep ownership paths consolidated and prioritize visibility parity before deeper styling parity tweaks.
+
+### March 2026 Runtime Recovery Update (Notes + Templates Coexistence)
+
+Observed issue:
+
+- Notes/journal icons could disappear in token mode while templates remained visible.
+
+Root cause (active runtime path):
+
+- `PixiContentLayerBridge` selected `templates-extract` whenever templates content existed.
+- In that strategy branch, template replay was treated as terminal success and notes replay was not composited in the same frame.
+- Result: templates rendered, notes did not, despite valid scene notes content.
+
+Implemented fix:
+
+1. In `templates-extract`, replay success now composites notes replay when notes UI content is present (no clear between passes).
+2. If notes replay fails after template replay success, the strategy now falls through to stage-isolation fallback instead of returning early.
+3. Stage-isolation fallback collection for `templates-extract` now includes both templates and notes layers.
+
+Verification target:
+
+- In token mode, with both templates and journals present, both overlays should remain visible simultaneously.
 
 ### Journals Follow-up (Known Gap + Theories)
 

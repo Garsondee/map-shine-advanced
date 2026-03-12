@@ -89,6 +89,9 @@ export class PixiContentLayerBridge {
     /** @type {string} Signature of currently interactive sounds preview state */
     this._lastSoundsPreviewSig = '';
 
+    /** @type {string} Signature of currently interactive templates preview state */
+    this._lastTemplatesPreviewSig = '';
+
     /** @type {string} */
     this._textureSamplingStateKey = '';
 
@@ -255,6 +258,10 @@ export class PixiContentLayerBridge {
       this._hookIds.push(['updateNote', Hooks.on('updateNote', () => { markDirty(2); })]);
       this._hookIds.push(['deleteNote', Hooks.on('deleteNote', () => { markDirty(2); })]);
       this._hookIds.push(['activateNotesLayer', Hooks.on('activateNotesLayer', () => { markDirty(2); })]);
+      this._hookIds.push(['createMeasuredTemplate', Hooks.on('createMeasuredTemplate', () => { markDirty(2); })]);
+      this._hookIds.push(['updateMeasuredTemplate', Hooks.on('updateMeasuredTemplate', () => { markDirty(2); })]);
+      this._hookIds.push(['deleteMeasuredTemplate', Hooks.on('deleteMeasuredTemplate', () => { markDirty(2); })]);
+      this._hookIds.push(['activateTemplateLayer', Hooks.on('activateTemplateLayer', () => { markDirty(2); })]);
       this._hookIds.push(['renderSceneControls', Hooks.on('renderSceneControls', () => { markDirty(1); })]);
       this._hookIds.push(['canvasReady', Hooks.on('canvasReady', () => { markDirty(1); })]);
     }
@@ -389,6 +396,38 @@ export class PixiContentLayerBridge {
     return parts.join('|');
   }
 
+  /**
+   * Build a compact signature for interactive templates preview geometry.
+   * Signature changes drive live recapture while template preview is dragged.
+   * @param {any} templatesLayer
+   * @returns {string}
+   * @private
+   */
+  _getTemplatesPreviewSignature(templatesLayer) {
+    if (!this._isTemplatesContextActive()) return '';
+    const previewChildren = Array.isArray(templatesLayer?.preview?.children) ? templatesLayer.preview.children : [];
+    const parts = [];
+    for (const child of previewChildren) {
+      if (!child) continue;
+      if (child.visible === false || child.renderable === false) continue;
+      const alpha = Number(child.alpha);
+      if (Number.isFinite(alpha) && alpha <= 0) continue;
+
+      const doc = child.document ?? {};
+      const id = String(child.id ?? doc.id ?? parts.length);
+      const x = Math.round(this._toNumber(doc.x ?? child.x, 0));
+      const y = Math.round(this._toNumber(doc.y ?? child.y, 0));
+      const direction = Math.round(this._toNumber(doc.direction ?? doc.ray?.direction, 0) * 100) / 100;
+      const distance = Math.round(this._toNumber(doc.distance ?? doc.ray?.distance, 0) * 100) / 100;
+      const angle = Math.round(this._toNumber(doc.angle, 0) * 100) / 100;
+      const type = String(doc.t ?? doc.type ?? '');
+      parts.push(`${id}:${type}:${x},${y},${direction},${distance},${angle}`);
+    }
+
+    parts.sort();
+    return parts.join('|');
+  }
+
   markDirty() {
     this._dirty = true;
   }
@@ -460,6 +499,31 @@ export class PixiContentLayerBridge {
   }
 
   /**
+   * Is the current control/layer context the native templates workflow?
+   * @returns {boolean}
+   * @private
+   */
+  _isTemplatesContextActive() {
+    const activeControl = String(ui?.controls?.control?.name ?? ui?.controls?.activeControl ?? '').toLowerCase();
+    const activeTool = String(ui?.controls?.tool?.name ?? ui?.controls?.activeTool ?? game?.activeTool ?? '').toLowerCase();
+    const activeLayerName = String(canvas?.activeLayer?.options?.name ?? canvas?.activeLayer?.name ?? '').toLowerCase();
+    const activeLayerCtor = String(canvas?.activeLayer?.constructor?.name ?? '').toLowerCase();
+    const activeControlLayer = String(ui?.controls?.control?.layer ?? '').toLowerCase();
+    return !!canvas?.templates?.active
+      || activeControl === 'templates'
+      || activeControl === 'template'
+      || activeTool === 'circle'
+      || activeTool === 'cone'
+      || activeTool === 'rect'
+      || activeTool === 'ray'
+      || activeControlLayer === 'templates'
+      || activeControlLayer === 'template'
+      || activeLayerName === 'templates'
+      || activeLayerName === 'template'
+      || activeLayerCtor === 'templatelayer';
+  }
+
+  /**
    * Resolve capture strategy for the current frame.
    * Default is a deterministic drawings-only replay path to keep runtime stable.
    * Advanced extraction paths are debug-only and opt-in.
@@ -469,12 +533,13 @@ export class PixiContentLayerBridge {
    * - replay-shape
    * - sounds-extract
    * - notes-extract
+   * - templates-extract
    * - stage-extract
    *
    * If no override is provided, auto-select sounds-extract while actively
    * editing sounds, otherwise use replay-only.
    *
-   * @returns {'replay-only'|'replay-shape'|'sounds-extract'|'notes-extract'|'stage-extract'}
+   * @returns {'replay-only'|'replay-shape'|'sounds-extract'|'notes-extract'|'templates-extract'|'stage-extract'}
    * @private
    */
   _getCaptureStrategy() {
@@ -482,9 +547,20 @@ export class PixiContentLayerBridge {
     if (raw === 'stage-extract') return 'stage-extract';
     if (raw === 'sounds-extract') return 'sounds-extract';
     if (raw === 'notes-extract') return 'notes-extract';
+    if (raw === 'templates-extract') return 'templates-extract';
     if (raw === 'replay-shape') return 'replay-shape';
     if (this._isSoundsContextActive()) return 'sounds-extract';
+    if (this._isTemplatesContextActive()) return 'templates-extract';
     if (this._isNotesContextActive()) return 'notes-extract';
+    const templatesLayer = canvas?.templates;
+    const hasTemplatesContent =
+      ((Number(canvas?.scene?.templates?.size) || 0) > 0) ||
+      !!templatesLayer?.active ||
+      !!templatesLayer?.placeables?.length ||
+      !!templatesLayer?.objects?.children?.length ||
+      this._hasActivePreview(templatesLayer) ||
+      !!templatesLayer?._configPreview;
+    if (hasTemplatesContent) return 'templates-extract';
     const notesLayer = canvas?.notes;
     const hasNotesContent =
       ((Number(canvas?.scene?.notes?.size) || 0) > 0) ||
@@ -1411,6 +1487,24 @@ export class PixiContentLayerBridge {
           drawX = worldRect.x;
           drawY = worldRect.y;
 
+          const isPrimaryIconTarget = target === note?.controlIcon || target === note;
+          if (isPrimaryIconTarget) {
+            const uiScale = Math.max(0.25, this._toNumber(canvas?.dimensions?.uiScale, 1));
+            const expectedSize = Math.max(8, this._toNumber(note?.document?.iconSize ?? note?.iconSize, 40) + (4 * uiScale));
+            const actualSize = Math.max(drawW, drawH);
+            if (actualSize > 0) {
+              const scaleUp = expectedSize / actualSize;
+              if (scaleUp > 1.05) {
+                const cx = drawX + (drawW * 0.5);
+                const cy = drawY + (drawH * 0.5);
+                drawW *= scaleUp;
+                drawH *= scaleUp;
+                drawX = cx - (drawW * 0.5);
+                drawY = cy - (drawH * 0.5);
+              }
+            }
+          }
+
           if (drawW > maxWorldW || drawH > maxWorldH) continue;
           try {
             ctx.drawImage(targetCanvas, drawX, drawY, drawW, drawH);
@@ -1436,6 +1530,147 @@ export class PixiContentLayerBridge {
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     worldTexture.needsUpdate = true;
     return { ok: true, count: drawn, status: `captured:notes-replay:${w}x${h} logical=${logicalW}x${logicalH} ss=${captureScale.toFixed(2)} shapes=${drawn}` };
+  }
+
+  /**
+   * Replay measured templates by extracting native template visuals from each placeable.
+   * @param {PIXI.TemplateLayer|null} templatesLayer
+   * @param {PIXI.Renderer|null} renderer
+   * @param {number} width
+   * @param {number} height
+   * @param {{previewOnly?:boolean}} [options]
+   * @returns {{ok:boolean,count:number,status:string}}
+   * @private
+   */
+  _renderFoundryTemplatesReplay(templatesLayer, renderer, width, height, options = {}) {
+    const previewOnly = options?.previewOnly === true;
+    const logicalW = Math.max(1, Math.round(this._toNumber(width, 1)));
+    const logicalH = Math.max(1, Math.round(this._toNumber(height, 1)));
+    const baseCaptureScale = this._getWorldCaptureScale(logicalW, logicalH);
+    const captureScale = previewOnly ? Math.min(1.0, baseCaptureScale) : baseCaptureScale;
+    const renderW = Math.max(1, Math.round(logicalW * captureScale));
+    const renderH = Math.max(1, Math.round(logicalH * captureScale));
+    this._worldLogicalWidth = logicalW;
+    this._worldLogicalHeight = logicalH;
+
+    const worldTexture = this._ensureWorldCanvasSize(renderW, renderH);
+    if (!worldTexture || !this._worldCanvas || !renderer?.extract) {
+      return { ok: false, count: 0, status: 'skip:templates-replay-unavailable' };
+    }
+
+    const ctx = this._worldCanvas.getContext('2d');
+    if (!ctx) return { ok: false, count: 0, status: 'skip:no-world-context' };
+
+    const templates = [];
+    const seen = new Set();
+    const collect = (obj) => {
+      if (!obj) return;
+      const key = String(obj.id ?? obj?.document?.id ?? `${templates.length}`);
+      if (seen.has(key)) return;
+      seen.add(key);
+      templates.push(obj);
+    };
+
+    const previewChildren = Array.isArray(templatesLayer?.preview?.children) ? templatesLayer.preview.children : [];
+    if (!previewOnly) {
+      const placeables = Array.isArray(templatesLayer?.placeables) ? templatesLayer.placeables : [];
+      const objectChildren = Array.isArray(templatesLayer?.objects?.children) ? templatesLayer.objects.children : [];
+      for (const p of placeables) collect(p);
+      for (const p of objectChildren) collect(p);
+    }
+    for (const p of previewChildren) collect(p);
+    if (templatesLayer?._configPreview) collect(templatesLayer._configPreview);
+
+    templates.sort((a, b) => this._toNumber(a?.document?.sort ?? a?.sort, 0) - this._toNumber(b?.document?.sort ?? b?.sort, 0));
+
+    const w = this._worldCanvas.width;
+    const h = this._worldCanvas.height;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, w, h);
+    ctx.setTransform(captureScale, 0, 0, captureScale, 0, 0);
+    ctx.imageSmoothingEnabled = true;
+
+    if (templates.length <= 0) {
+      worldTexture.needsUpdate = true;
+      return { ok: true, count: 0, status: `captured:templates-replay-empty:${w}x${h}` };
+    }
+
+    let drawn = 0;
+    const maxWorldW = Math.max(1, logicalW * 1.5);
+    const maxWorldH = Math.max(1, logicalH * 1.5);
+    for (const template of templates) {
+      const targetCandidates = [];
+      const pushUniqueTarget = (target) => {
+        if (!target) return;
+        if (targetCandidates.includes(target)) return;
+        targetCandidates.push(target);
+      };
+
+      pushUniqueTarget(template?.template);
+      pushUniqueTarget(template?.shape);
+      pushUniqueTarget(template?.highlight);
+      pushUniqueTarget(template?.frame);
+      pushUniqueTarget(template?.controlIcon);
+      pushUniqueTarget(template?.rulerText);
+      pushUniqueTarget(template);
+
+      for (const target of targetCandidates) {
+        const savedChainState = [];
+        let chainNode = target;
+        while (chainNode) {
+          savedChainState.push({
+            obj: chainNode,
+            visible: chainNode.visible,
+            renderable: chainNode.renderable,
+            alpha: Number(chainNode.alpha),
+          });
+          chainNode.visible = true;
+          chainNode.renderable = true;
+          if (!Number.isFinite(chainNode.alpha) || chainNode.alpha <= 0) chainNode.alpha = 1;
+          chainNode = chainNode.parent ?? null;
+        }
+        try {
+          let bounds = null;
+          try { bounds = target.getBounds?.(false) ?? null; } catch (_) { bounds = null; }
+          const bx = Math.floor(this._toNumber(bounds?.x, 0));
+          const by = Math.floor(this._toNumber(bounds?.y, 0));
+          const bw = Math.ceil(this._toNumber(bounds?.width, 0));
+          const bh = Math.ceil(this._toNumber(bounds?.height, 0));
+          if (bw <= 0 || bh <= 0) continue;
+
+          const frame = new PIXI.Rectangle(bx, by, bw, bh);
+          let targetCanvas = null;
+          try {
+            targetCanvas = renderer.extract.canvas(target, frame);
+          } catch (_) {
+            targetCanvas = null;
+          }
+          if (!targetCanvas || !targetCanvas.width || !targetCanvas.height) continue;
+
+          const worldRect = this._stageScreenRectToWorldRect(bx, by, bw, bh);
+          if (worldRect.w <= 0 || worldRect.h <= 0) continue;
+          if (worldRect.w > maxWorldW || worldRect.h > maxWorldH) continue;
+
+          try {
+            ctx.drawImage(targetCanvas, worldRect.x, worldRect.y, worldRect.w, worldRect.h);
+            drawn += 1;
+            break;
+          } catch (_) {
+          }
+        } finally {
+          for (let i = savedChainState.length - 1; i >= 0; i -= 1) {
+            const s = savedChainState[i];
+            s.obj.visible = s.visible;
+            s.obj.renderable = s.renderable;
+            s.obj.alpha = s.alpha;
+          }
+        }
+      }
+    }
+
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    worldTexture.needsUpdate = true;
+    return { ok: true, count: drawn, status: `captured:templates-replay:${w}x${h} logical=${logicalW}x${logicalH} ss=${captureScale.toFixed(2)} previewOnly=${previewOnly ? 1 : 0} shapes=${drawn}` };
   }
 
   /**
@@ -1516,7 +1751,6 @@ export class PixiContentLayerBridge {
     const hasOtherLivePreview =
       this._hasActivePreview(drawingsLayer) ||
       this._hasActivePreview(notesLayer) ||
-      this._hasActivePreview(templatesLayer) ||
       this._hasActivePreview(lightingLayer) ||
       this._hasActivePreview(regionsLayer);
 
@@ -1524,9 +1758,13 @@ export class PixiContentLayerBridge {
     const soundsPreviewChanged = soundsPreviewSig !== this._lastSoundsPreviewSig;
     this._lastSoundsPreviewSig = soundsPreviewSig;
 
+    const templatesPreviewSig = this._getTemplatesPreviewSignature(templatesLayer);
+    const templatesPreviewChanged = templatesPreviewSig !== this._lastTemplatesPreviewSig;
+    this._lastTemplatesPreviewSig = templatesPreviewSig;
+
     // For sounds, only treat preview as "live" while geometry is changing.
     // This prevents stale preview objects from forcing perpetual recapture.
-    const hasLivePreview = hasOtherLivePreview || soundsPreviewChanged;
+    const hasLivePreview = hasOtherLivePreview || soundsPreviewChanged || templatesPreviewChanged;
       
     const forceTestPattern = this._isCompositorSanityPatternEnabled();
     this._lastStageTransformSig = this._getStageTransformSignature();
@@ -1619,7 +1857,13 @@ export class PixiContentLayerBridge {
       !!notesLayer?.placeables?.length ||
       !!notesLayer?.objects?.children?.length ||
       this._hasActivePreview(notesLayer);
-    const hasNonDrawingUiContent = hasSoundsUiContent || hasNotesUiContent;
+    const hasTemplatesUiContent =
+      ((Number(canvas?.scene?.templates?.size) || 0) > 0) ||
+      !!templatesLayer?.active ||
+      !!templatesLayer?.placeables?.length ||
+      !!templatesLayer?.objects?.children?.length ||
+      this._hasActivePreview(templatesLayer);
+    const hasNonDrawingUiContent = hasSoundsUiContent || hasNotesUiContent || hasTemplatesUiContent;
 
     if (captureStrategy === 'notes-extract') {
       if (replayResult.ok && !hasNotesUiContent) {
@@ -1670,6 +1914,53 @@ export class PixiContentLayerBridge {
       return;
     }
 
+    if (captureStrategy === 'templates-extract') {
+      if (replayResult.ok && !hasTemplatesUiContent && !hasNotesUiContent) {
+        this._lastUpdateStatus = `${replayResult.status} strategy=${captureStrategy}`;
+        this._dirty = false;
+        return;
+      }
+
+      const templatesReplayResult = this._renderFoundryTemplatesReplay(
+        templatesLayer,
+        renderer,
+        worldCapture.width,
+        worldCapture.height,
+        { previewOnly: templatesPreviewChanged }
+      );
+      if (templatesReplayResult.ok && (templatesReplayResult.count > 0 || !hasTemplatesUiContent)) {
+        if (hasNotesUiContent) {
+          const notesReplayResult = this._renderFoundryNotesReplay(
+            notesLayer,
+            renderer,
+            worldCapture.width,
+            worldCapture.height,
+            { clear: false }
+          );
+          if (notesReplayResult.ok) {
+            this._lastUpdateStatus = `${templatesReplayResult.status} + ${notesReplayResult.status} strategy=${captureStrategy}`;
+            this._dirty = false;
+            return;
+          }
+
+          // Notes and templates can coexist. If template replay succeeded but
+          // notes replay failed, continue into stage-isolation fallback so notes
+          // still get a recovery path instead of disappearing in token mode.
+          this._lastUpdateStatus = `fallback:templates-notes-stage-isolation strategy=${captureStrategy}`;
+        } else {
+          this._lastUpdateStatus = `${templatesReplayResult.status} strategy=${captureStrategy}`;
+          this._dirty = false;
+          return;
+        }
+      }
+
+      // Fallback: if extraction produced no usable pixels (or notes overlay replay
+      // failed while templates succeeded), continue into stage-isolation below.
+      if (!String(this._lastUpdateStatus || '').startsWith('fallback:templates-notes-stage-isolation')) {
+        this._lastUpdateStatus = `fallback:templates-stage-isolation strategy=${captureStrategy}`;
+      }
+    }
+
     if (replayResult.ok && !hasNonDrawingUiContent) {
       this._lastUpdateStatus = replayResult.status;
       this._dirty = false;
@@ -1716,11 +2007,15 @@ export class PixiContentLayerBridge {
 
     if (captureStrategy === 'sounds-extract') {
       collectFromLayer(soundsLayer);
+    } else if (captureStrategy === 'templates-extract') {
+      collectFromLayer(templatesLayer);
+      collectFromLayer(notesLayer);
     } else if (captureStrategy === 'notes-extract') {
       collectFromLayer(notesLayer);
     } else {
       collectFromLayer(drawingsLayer);
       collectFromLayer(soundsLayer);
+      collectFromLayer(templatesLayer);
       collectFromLayer(notesLayer);
     }
 

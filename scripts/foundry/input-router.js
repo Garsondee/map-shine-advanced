@@ -328,11 +328,9 @@ export class InputRouter {
     if (!canvas?.ready) return InputMode.THREE;
     
     const activeLayer = canvas.activeLayer;
-    if (!activeLayer) return InputMode.THREE;
-    
-    const layerCtorName = activeLayer.constructor?.name || '';
-    const layerIdName = activeLayer.name || '';
-    const layerOptionsName = activeLayer.options?.name || '';
+    const layerCtorName = activeLayer?.constructor?.name || '';
+    const layerIdName = activeLayer?.name || '';
+    const layerOptionsName = activeLayer?.options?.name || '';
     const activeControl = ui?.controls?.control?.name ?? ui?.controls?.activeControl ?? '';
     const activeControlLayer = ui?.controls?.control?.layer ?? '';
     

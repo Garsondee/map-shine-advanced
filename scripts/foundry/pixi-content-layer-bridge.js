@@ -73,6 +73,8 @@ export class PixiContentLayerBridge {
     /** @type {boolean} */
     this._testPatternWasEnabled = false;
     /** @type {number} */
+    this._lastDrawingsRecoveryAttemptMs = 0;
+    /** @type {number} */
     this._worldLogicalWidth = 1;
     /** @type {number} */
     this._worldLogicalHeight = 1;
@@ -552,23 +554,10 @@ export class PixiContentLayerBridge {
     if (this._isSoundsContextActive()) return 'sounds-extract';
     if (this._isTemplatesContextActive()) return 'templates-extract';
     if (this._isNotesContextActive()) return 'notes-extract';
-    const templatesLayer = canvas?.templates;
-    const hasTemplatesContent =
-      ((Number(canvas?.scene?.templates?.size) || 0) > 0) ||
-      !!templatesLayer?.active ||
-      !!templatesLayer?.placeables?.length ||
-      !!templatesLayer?.objects?.children?.length ||
-      this._hasActivePreview(templatesLayer) ||
-      !!templatesLayer?._configPreview;
-    if (hasTemplatesContent) return 'templates-extract';
-    const notesLayer = canvas?.notes;
-    const hasNotesContent =
-      ((Number(canvas?.scene?.notes?.size) || 0) > 0) ||
-      !!notesLayer?.placeables?.length ||
-      !!notesLayer?.objects?.children?.length ||
-      this._hasActivePreview(notesLayer) ||
-      !!notesLayer?._configPreview;
-    if (hasNotesContent) return 'notes-extract';
+
+    // Keep drawing visibility deterministic across gameplay modes.
+    // Non-drawing overlays should only auto-switch extraction strategy while
+    // their own editing context is actively selected.
     return 'replay-only';
   }
 
@@ -1775,6 +1764,27 @@ export class PixiContentLayerBridge {
     const now = performance.now();
     this._markDirtyForZoomIfNeeded(now);
 
+    // Safety net: only retry after explicit empty/failure statuses, and at a
+    // low frequency. Avoid per-frame pixel probing which can force recapture
+    // thrash on large scene canvases.
+    const drawingsPresent =
+      ((Number(canvas?.scene?.drawings?.size) || 0) > 0)
+      || !!drawingsLayer?.placeables?.length
+      || this._hasActivePreview(drawingsLayer);
+    const lastStatus = String(this._lastUpdateStatus || '');
+    const needsRecoveryRetry =
+      lastStatus.includes('replay-empty')
+      || lastStatus.includes('replay-failed')
+      || lastStatus.includes('capture-threw')
+      || lastStatus.includes('no-ui-shapes');
+    const recoveryCooldownMs = 1200;
+    if (!this._dirty && drawingsPresent && needsRecoveryRetry && (now - this._lastDrawingsRecoveryAttemptMs) > recoveryCooldownMs) {
+      this._dirty = true;
+      this._postDirtyCapturesRemaining = Math.max(this._postDirtyCapturesRemaining, 1);
+      this._lastDrawingsRecoveryAttemptMs = now;
+      this._lastUpdateStatus = 'retry:drawings-status-recovery';
+    }
+
     if (this._testPatternWasEnabled && !forceTestPattern) {
       this._dirty = true;
     }
@@ -1796,7 +1806,7 @@ export class PixiContentLayerBridge {
       return;
     }
 
-    if (!forceTestPattern && !hasLivePreview && (now - this._lastCaptureMs) < this._captureThrottleMs) {
+    if (!forceTestPattern && !this._dirty && !hasLivePreview && (now - this._lastCaptureMs) < this._captureThrottleMs) {
       this._lastUpdateStatus = 'skip:throttled';
       return;
     }

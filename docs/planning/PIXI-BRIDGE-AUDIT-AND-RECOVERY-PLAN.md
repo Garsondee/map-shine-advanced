@@ -987,3 +987,52 @@ Together this points to a stale/empty bridge world canvas state being composited
 2. **Drawings invisibility:** bridge strategy + idle capture state leaves transparent world canvas while compositor still blends overlay (high confidence from status + pixel probes).
 3. **Drawings secondary risk:** non-replay strategy selection (`templates-extract`) in non-template context increases likelihood of branch-specific capture non-updates.
 
+---
+
+## Fix Log — Token Visibility + Levels Navigator UI (Mar 12, 2026)
+
+User-confirmed outcome after the changes below:
+
+- Three token visuals are visible again.
+- Compact Levels navigator UI is visible again.
+
+### 1) Token visibility fix (implemented)
+
+Root cause:
+
+- Strict level-top filtering was being applied while active level context source was `inferred` and the scene was not explicitly Levels-enabled.
+- In that state, tokens at elevation `0` were interpreted as above active top (negative inferred band top), causing all token sprites to remain hidden.
+
+Fix applied:
+
+- Added guardrails so strict token level filtering is only applied when:
+  - scene is Levels-enabled (`isLevelsEnabledForScene(canvas.scene)`), and
+  - level context source is not `inferred`.
+
+Files:
+
+- `scripts/vision/VisibilityController.js`
+  - imported `isLevelsEnabledForScene`
+  - updated `_isTokenAboveCurrentLevel(...)` gating
+- `scripts/scene/token-manager.js`
+  - mirrored the same gating in fallback `updateSpriteVisibility(...)`
+
+### 2) Levels navigator visibility fix (implemented)
+
+Root cause:
+
+- Overlay visibility depended solely on `isLevelsEnabledForScene(canvas.scene)`.
+- Scenes using inferred runtime floor bands (without explicit scene Levels flags) were treated as not Levels-enabled, so overlay was hidden despite valid runtime level navigation context.
+
+Fix applied:
+
+- Updated compact navigator visibility gating to show when runtime level context is meaningful, even without explicit scene Levels flags.
+- Overlay is now visible when controller exists and either:
+  - scene is Levels-enabled by flags, or
+  - runtime provides multi-level context (available levels > 1, context count > 1, or finite bottom/top band).
+
+File:
+
+- `scripts/ui/level-navigator-overlay.js`
+  - updated `_syncFromState()` visibility logic (`visible` computation)
+

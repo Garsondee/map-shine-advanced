@@ -207,6 +207,51 @@ export class PixiContentLayerBridge {
     };
   }
 
+  /**
+   * Trace a PIXI shape into canvas path commands.
+   * Supports common Foundry polygon/circle/ellipse/rect shapes.
+   * @param {CanvasRenderingContext2D} ctx
+   * @param {any} shape
+   * @returns {boolean}
+   * @private
+   */
+  _tracePixiShapePath(ctx, shape) {
+    if (!ctx || !shape) return false;
+
+    const points = Array.isArray(shape?.points) ? shape.points : null;
+    if (points && points.length >= 4) {
+      ctx.beginPath();
+      ctx.moveTo(this._toNumber(points[0], 0), this._toNumber(points[1], 0));
+      for (let i = 2; i + 1 < points.length; i += 2) {
+        ctx.lineTo(this._toNumber(points[i], 0), this._toNumber(points[i + 1], 0));
+      }
+      ctx.closePath();
+      return true;
+    }
+
+    if (Number.isFinite(shape?.radius)) {
+      const cx = this._toNumber(shape?.x, 0);
+      const cy = this._toNumber(shape?.y, 0);
+      const r = Math.max(0, this._toNumber(shape?.radius, 0));
+      if (r <= 0) return false;
+      ctx.beginPath();
+      ctx.arc(cx, cy, r, 0, Math.PI * 2);
+      return true;
+    }
+
+    const ex = this._toNumber(shape?.x, NaN);
+    const ey = this._toNumber(shape?.y, NaN);
+    const ew = this._toNumber(shape?.width, NaN);
+    const eh = this._toNumber(shape?.height, NaN);
+    if (Number.isFinite(ex) && Number.isFinite(ey) && Number.isFinite(ew) && Number.isFinite(eh) && ew > 0 && eh > 0) {
+      ctx.beginPath();
+      ctx.rect(ex, ey, ew, eh);
+      return true;
+    }
+
+    return false;
+  }
+
   markDirty() {
     this._dirty = true;
   }
@@ -865,9 +910,16 @@ export class PixiContentLayerBridge {
    * @private
    */
   _renderFoundrySoundsReplay(soundsLayer, renderer, width, height) {
-    this._worldLogicalWidth = Math.max(1, Math.round(this._toNumber(width, 1)));
-    this._worldLogicalHeight = Math.max(1, Math.round(this._toNumber(height, 1)));
-    const worldTexture = this._ensureWorldCanvasSize(width, height);
+    const logicalW = Math.max(1, Math.round(this._toNumber(width, 1)));
+    const logicalH = Math.max(1, Math.round(this._toNumber(height, 1)));
+    const baseCaptureScale = this._getWorldCaptureScale(logicalW, logicalH);
+    const maxSafeScale = Math.max(1, 8192 / Math.max(logicalW, logicalH));
+    const captureScale = Math.min(maxSafeScale, Math.max(baseCaptureScale, 4));
+    const renderW = Math.max(1, Math.round(logicalW * captureScale));
+    const renderH = Math.max(1, Math.round(logicalH * captureScale));
+    this._worldLogicalWidth = logicalW;
+    this._worldLogicalHeight = logicalH;
+    const worldTexture = this._ensureWorldCanvasSize(renderW, renderH);
     if (!worldTexture || !this._worldCanvas || !renderer?.extract) {
       return { ok: false, count: 0, status: 'skip:sounds-replay-unavailable' };
     }
@@ -896,19 +948,35 @@ export class PixiContentLayerBridge {
 
     const w = this._worldCanvas.width;
     const h = this._worldCanvas.height;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, w, h);
+    ctx.setTransform(captureScale, 0, 0, captureScale, 0, 0);
+    ctx.imageSmoothingEnabled = true;
     if (sounds.length <= 0) {
       worldTexture.needsUpdate = true;
       return { ok: true, count: 0, status: `captured:sounds-replay-empty:${w}x${h}` };
     }
 
     let drawn = 0;
-    const maxWorldW = Math.max(1, w * 1.5);
-    const maxWorldH = Math.max(1, h * 1.5);
+    const maxWorldW = Math.max(1, logicalW * 1.5);
+    const maxWorldH = Math.max(1, logicalH * 1.5);
+    const uiScale = Math.max(0.25, this._toNumber(canvas?.dimensions?.uiScale, 1));
     for (const sound of sounds) {
+      const sourceShape = sound?.source?.shape ?? null;
+      if (sourceShape && this._tracePixiShapePath(ctx, sourceShape)) {
+        // Mirrors Foundry AmbientSound#_refreshField styling and preserves
+        // wall-clipped source geometry from PointSoundSource.
+        ctx.fillStyle = 'rgba(170, 221, 255, 0.15)';
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.5)';
+        ctx.lineWidth = Math.max(0.75, uiScale);
+        ctx.fill();
+        ctx.stroke();
+        drawn += 1;
+      }
+
       // AmbientSound placeable container extraction can include renderer clear
       // artifacts on some runtimes; capture explicit visuals only.
-      const drawTargets = [sound?.field, sound?.controlIcon];
+      const drawTargets = [sound?.controlIcon];
       for (const target of drawTargets) {
         if (!target) continue;
 
@@ -954,8 +1022,9 @@ export class PixiContentLayerBridge {
       }
     }
 
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
     worldTexture.needsUpdate = true;
-    return { ok: true, count: drawn, status: `captured:sounds-replay:${w}x${h} shapes=${drawn}` };
+    return { ok: true, count: drawn, status: `captured:sounds-replay:${w}x${h} logical=${logicalW}x${logicalH} ss=${captureScale.toFixed(2)} shapes=${drawn}` };
   }
 
   /**

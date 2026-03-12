@@ -484,7 +484,36 @@ This section records what has already been implemented after this plan was writt
 
 - **Drawings bridge:** Stable in replay-first mode.
 - **Sounds bridge:** Functional with wall-clipped radius and basic placement workflow working.
+- **Journals/Notes bridge:** Functionally working in world-stable mode (icons/squares now render), but icon/square sizing is still smaller than native Foundry parity.
 - **Known quality direction:** Continue refining visual parity/quality while preserving the new performance guardrails.
+
+### Journals Follow-up (Known Gap + Theories)
+
+Known gap:
+
+- Journal note icon + square are still visibly too small compared to native Foundry notes.
+
+What we learned:
+
+1. Getting notes to render at all required explicit extraction target ownership (`controlIcon`/note display objects) and robust visibility handling (including parent-chain visibility during extraction).
+2. Notes are sensitive to layer-state/toggle semantics (`NotesLayer` display toggle and non-active behavior), so strategy selection must account for scene notes content, not only active tool mode.
+3. World-stable reprojection is working for notes; the remaining issue is predominantly a parity/scaling mismatch rather than coordinate drift.
+
+Why sounds icons look correct but journal icons may not:
+
+1. **Different visual composition primitives**
+   - Sounds primarily use a simpler, explicit `controlIcon` extraction path and custom field replay.
+   - Notes use `ControlIcon` + tooltip + visibility/permission-dependent behavior that can alter effective bounds and rendered content.
+2. **Bounds contract differences**
+   - Notes rely on `Note` + `ControlIcon` internals where border padding (`iconSize + 4*uiScale`) and parent-chain transforms can affect measured/extracted bounds.
+   - Sounds extraction has been exercised longer in the bridge and appears to align better with current world-rect projection assumptions.
+3. **Visibility and state coupling**
+   - `NotesLayer` has a client toggle and non-active deactivation behavior that can produce different render-time object states than sounds.
+   - These states can influence extracted target dimensions if not normalized identically to native draw timing.
+
+Next targeted parity step (deferred):
+
+- Add one-frame comparative diagnostics for notes vs sounds icon extraction (`screen bounds`, `extracted canvas size`, `projected world rect`) under identical zoom/pan to isolate the exact scaling factor mismatch.
 
 ---
 
@@ -521,3 +550,9 @@ The critical breakthrough was treating sounds preview as interactive only while 
 By compositing a cached settled pass with a lightweight live preview pass, placement remained responsive without abandoning quality in settled frames.
 
 **Why this was correct:** it matches real user interaction patterns (high-frequency drag updates vs low-frequency settled updates) and keeps expensive work off the hot path.
+
+### 6) Journals were recovered to a working, world-stable baseline
+
+Journal note icons/squares now render through the bridge in a stable world-anchored way, and the system can proceed without blocking on complete visual parity.
+
+**Why this was correct:** it converts a full compatibility failure into a known, bounded parity issue (size mismatch), which is much safer to iterate on than continuing broad architectural churn.

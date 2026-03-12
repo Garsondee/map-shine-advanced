@@ -39,6 +39,9 @@ export class PixiContentLayerBridge {
     /** @type {number} */
     this._captureThrottleMs = 66;
 
+    /** @type {number} */
+    this._zoomSettleDelayMs = 220;
+
     /** @type {boolean} */
     this._dirty = true;
 
@@ -61,6 +64,12 @@ export class PixiContentLayerBridge {
 
     /** @type {string} */
     this._lastStageTransformSig = '';
+    /** @type {string} */
+    this._lastStageZoomSig = '';
+    /** @type {string} */
+    this._pendingStageZoomSig = '';
+    /** @type {number} */
+    this._lastZoomDirtyMs = 0;
     /** @type {boolean} */
     this._testPatternWasEnabled = false;
     /** @type {number} */
@@ -79,6 +88,9 @@ export class PixiContentLayerBridge {
 
     /** @type {string} Signature of currently interactive sounds preview state */
     this._lastSoundsPreviewSig = '';
+
+    /** @type {string} */
+    this._textureSamplingStateKey = '';
 
     if (THREE) {
       this._worldCanvas = document.createElement('canvas');
@@ -100,12 +112,63 @@ export class PixiContentLayerBridge {
     const THREE = this._THREE;
     if (!THREE || !source) return null;
     const tex = new THREE.CanvasTexture(source);
-    tex.minFilter = THREE.LinearMipmapLinearFilter ?? THREE.LinearFilter;
-    tex.magFilter = THREE.LinearFilter;
-    tex.generateMipmaps = true;
+    this._applyTextureSampling(tex);
     tex.needsUpdate = true;
     if (THREE.SRGBColorSpace) tex.colorSpace = THREE.SRGBColorSpace;
     return tex;
+  }
+
+  /**
+   * @returns {number}
+   * @private
+   */
+  _resolveBridgeAnisotropy() {
+    const renderer = window?.MapShine?.sceneComposer?.renderer ?? window?.MapShine?.effectComposer?.renderer ?? null;
+    const maxFn = renderer?.capabilities?.getMaxAnisotropy;
+    if (typeof maxFn !== 'function') return 1;
+    const value = Number(maxFn.call(renderer.capabilities));
+    if (!Number.isFinite(value) || value < 1) return 1;
+    return Math.max(1, Math.floor(value));
+  }
+
+  /**
+   * @param {THREE.Texture|null|undefined} texture
+   * @private
+   */
+  _applyTextureSampling(texture) {
+    const THREE = this._THREE;
+    if (!THREE || !texture) return;
+
+    const sharpMipmaps = window?.MapShine?.__pixiBridgeSharpMipmaps !== false;
+    if (sharpMipmaps) {
+      texture.minFilter = THREE.LinearMipmapLinearFilter ?? THREE.LinearFilter;
+      texture.magFilter = THREE.LinearFilter;
+      texture.generateMipmaps = true;
+      texture.anisotropy = this._resolveBridgeAnisotropy();
+      return;
+    }
+
+    texture.minFilter = THREE.LinearFilter;
+    texture.magFilter = THREE.LinearFilter;
+    texture.generateMipmaps = false;
+    texture.anisotropy = 1;
+  }
+
+  /**
+   * @private
+   */
+  _refreshTextureSamplingIfNeeded() {
+    const sharpMipmaps = window?.MapShine?.__pixiBridgeSharpMipmaps !== false;
+    const anisotropy = sharpMipmaps ? this._resolveBridgeAnisotropy() : 1;
+    const stateKey = `${sharpMipmaps ? 'sharp' : 'soft'}:${anisotropy}`;
+    if (stateKey === this._textureSamplingStateKey) return;
+
+    this._textureSamplingStateKey = stateKey;
+    for (const texture of [this._worldTexture, this._uiTexture]) {
+      if (!texture) continue;
+      this._applyTextureSampling(texture);
+      texture.needsUpdate = true;
+    }
   }
 
   /**
@@ -199,6 +262,9 @@ export class PixiContentLayerBridge {
     // Compositor render() already calls bridge.update() once per frame.
     // Keep a single driver to avoid out-of-phase capture/composite updates.
 
+    this._lastStageZoomSig = this._getStageZoomSignature();
+    this._pendingStageZoomSig = '';
+    this._lastZoomDirtyMs = 0;
     this._dirty = true;
   }
 
@@ -870,6 +936,53 @@ export class PixiContentLayerBridge {
   }
 
   /**
+   * @returns {string}
+   * @private
+   */
+  _getStageZoomSignature() {
+    const t = canvas?.stage?.worldTransform;
+    if (!t) return 'none';
+    const a = this._toNumber(t.a, 1);
+    const b = this._toNumber(t.b, 0);
+    const c = this._toNumber(t.c, 0);
+    const d = this._toNumber(t.d, 1);
+    const scaleX = Math.hypot(a, b);
+    const scaleY = Math.hypot(c, d);
+    const avgScale = (scaleX + scaleY) * 0.5;
+    const q = (n) => Math.round(this._toNumber(n, 0) * 10000) / 10000;
+    return `${q(scaleX)}|${q(scaleY)}|${q(avgScale)}`;
+  }
+
+  /**
+   * Queue throttled bridge recapture when stage zoom changes.
+   * @param {number} now
+   * @private
+   */
+  _markDirtyForZoomIfNeeded(now) {
+    const settleDelayMs = Math.max(
+      0,
+      this._toNumber(window?.MapShine?.__pixiBridgeZoomSettleMs, this._zoomSettleDelayMs)
+    );
+    const zoomSig = this._getStageZoomSignature();
+    if (zoomSig !== this._lastStageZoomSig) {
+      this._lastStageZoomSig = zoomSig;
+      this._pendingStageZoomSig = zoomSig;
+      this._lastZoomDirtyMs = now;
+      return;
+    }
+    if (!this._pendingStageZoomSig) return;
+
+    // Expensive bridge recapture should run when zoom has settled, not during
+    // every wheel/pinch step.
+    if ((now - this._lastZoomDirtyMs) < settleDelayMs) return;
+
+    this._pendingStageZoomSig = '';
+    this._lastZoomDirtyMs = now;
+    this._dirty = true;
+    this._postDirtyCapturesRemaining = Math.max(this._postDirtyCapturesRemaining, 1);
+  }
+
+  /**
    * Convert a screen-space rectangle (stage transformed) into world-space
    * rectangle coordinates used by bridge world-canvas compositing.
    * @param {number} x
@@ -1378,6 +1491,8 @@ export class PixiContentLayerBridge {
   }
 
   update(frameId) {
+    this._refreshTextureSamplingIfNeeded();
+
     if (!canvas?.ready) {
       this._lastUpdateStatus = 'skip:canvas-not-ready';
       this._clearChannel('world');
@@ -1415,6 +1530,8 @@ export class PixiContentLayerBridge {
       
     const forceTestPattern = this._isCompositorSanityPatternEnabled();
     this._lastStageTransformSig = this._getStageTransformSignature();
+    const now = performance.now();
+    this._markDirtyForZoomIfNeeded(now);
 
     if (this._testPatternWasEnabled && !forceTestPattern) {
       this._dirty = true;
@@ -1437,7 +1554,6 @@ export class PixiContentLayerBridge {
       return;
     }
 
-    const now = performance.now();
     if (!forceTestPattern && !hasLivePreview && (now - this._lastCaptureMs) < this._captureThrottleMs) {
       this._lastUpdateStatus = 'skip:throttled';
       return;

@@ -1951,7 +1951,7 @@ export class PixiContentLayerBridge {
         renderer,
         worldCapture.width,
         worldCapture.height,
-        { previewOnly: templatesPreviewChanged }
+        { previewOnly: templatesPreviewChanged, clear: !replayResult.ok }
       );
       if (templatesReplayResult.ok && (templatesReplayResult.count > 0 || !hasTemplatesUiContent)) {
         if (hasNotesUiContent) {

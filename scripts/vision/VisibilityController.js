@@ -145,11 +145,14 @@ export class VisibilityController {
       // emulateMoveEvent fired if changed, occlusion refresh triggered if needed.
       self._origRefreshVisibility.call(this);
 
+      // Save the computed visibility BEFORE we override it for hit-testing
+      const computedVisibility = this.isVisible ?? this.visible;
+
       // Step 2: Sync the computed result to the Three.js sprite.
       if (self._initialized) {
         const tokenId = this.document?.id;
         if (tokenId) {
-          self._syncSingleToken(tokenId, this);
+          self._syncSingleToken(tokenId, this, computedVisibility);
         }
       }
 
@@ -265,9 +268,10 @@ export class VisibilityController {
    * Called from the _refreshVisibility patch (Path A).
    * @param {string} tokenId
    * @param {Token} foundryToken - The Foundry PIXI token object
+   * @param {boolean} [computedVisibility] - The computed visibility from the patch
    * @private
    */
-  _syncSingleToken(tokenId, foundryToken) {
+  _syncSingleToken(tokenId, foundryToken, computedVisibility) {
     const spriteData = this.tokenManager?.tokenSprites?.get(tokenId);
     if (!spriteData?.sprite) return;
 
@@ -279,18 +283,17 @@ export class VisibilityController {
       return;
     }
 
-    // After the original _refreshVisibility, this.visible holds the result
-    // of this.isVisible (before we override it for PIXI interaction).
-    let computedVisible = foundryToken.visible;
+    // Use the explicitly passed computed visibility, or fallback to isVisible
+    let visible = computedVisibility ?? foundryToken.isVisible ?? foundryToken.visible;
 
     // Level-based filtering: hide tokens that are above the current level.
     // This runs after Foundry's own visibility so we only further restrict.
-    if (computedVisible && this._isTokenAboveCurrentLevel(foundryToken.document)) {
-      computedVisible = false;
+    if (visible && this._isTokenAboveCurrentLevel(foundryToken.document)) {
+      visible = false;
     }
 
-    sprite.visible = computedVisible;
-    if (computedVisible && sprite.material?.map) {
+    sprite.visible = visible;
+    if (visible && sprite.material?.map) {
       // Only restore opacity if the texture has loaded. Without a map,
       // setting opacity > 0 would show a white rectangle.
       sprite.material.opacity = foundryToken.document?.hidden ? 0.5 : 1.0;
@@ -300,7 +303,7 @@ export class VisibilityController {
     const detectionFilter = foundryToken.detectionFilter
       ? this._identifyDetectionFilter(foundryToken)
       : null;
-    this.detectionState.set(tokenId, { visible: computedVisible, detectionFilter });
+    this.detectionState.set(tokenId, { visible, detectionFilter });
   }
 
   /**

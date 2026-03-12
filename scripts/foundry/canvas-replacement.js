@@ -3510,7 +3510,12 @@ async function createThreeCanvas(scene) {
     // These are rendered by Three.js, so they must be hidden
     if (canvas.background) canvas.background.visible = false;
     if (canvas.grid) canvas.grid.visible = false;
-    if (canvas.primary) canvas.primary.visible = false;
+    if (canvas.primary) {
+      canvas.primary.visible = true;
+      if (canvas.primary.background) canvas.primary.background.visible = false;
+      if (canvas.primary.foreground) canvas.primary.foreground.visible = false;
+      if (canvas.primary.tiles) canvas.primary.tiles.visible = false;
+    }
     if (canvas.weather) canvas.weather.visible = false;
     if (canvas.environment) canvas.environment.visible = false;
     
@@ -6256,8 +6261,11 @@ function _enforceGameplayPixiSuppression() {
         safeCall(() => {
           if (!canvas.primary) return;
           // Tile editing relies on Foundry's native tile interaction chain.
-          // Keep primary visible only in tile edit context.
-          canvas.primary.visible = !!tilesEditContext;
+          // Keep primary logically visible so transforms update, hide visuals surgically.
+          canvas.primary.visible = true;
+          if (canvas.primary.background) canvas.primary.background.visible = false;
+          if (canvas.primary.foreground) canvas.primary.foreground.visible = false;
+          if (canvas.primary.tiles) canvas.primary.tiles.visible = !!tilesEditContext;
         }, 'pixiSuppress.primary(editorOverlayV2)', Severity.COSMETIC);
         safeCall(() => { if (canvas.fog) canvas.fog.visible = false; }, 'pixiSuppress.fog(editorOverlayV2)', Severity.COSMETIC);
         safeCall(() => {
@@ -6390,7 +6398,14 @@ function _enforceGameplayPixiSuppression() {
     }, 'pixiSuppress.extraBoardCanvases', Severity.COSMETIC);
 
     // V12+: primary can render tiles/overheads/roofs. Keep it hidden in gameplay.
-    safeCall(() => { if (canvas.primary) canvas.primary.visible = false; }, 'pixiSuppress.primary', Severity.COSMETIC);
+    safeCall(() => { 
+      if (canvas.primary) {
+        canvas.primary.visible = true;
+        if (canvas.primary.background) canvas.primary.background.visible = false;
+        if (canvas.primary.foreground) canvas.primary.foreground.visible = false;
+        if (canvas.primary.tiles) canvas.primary.tiles.visible = false;
+      }
+    }, 'pixiSuppress.primary', Severity.COSMETIC);
 
     // Fog of war / visibility: in V2 we do not use Foundry's fog visuals.
     // Leaving these visible can produce a fullscreen, camera-locked semi-transparent
@@ -6535,7 +6550,12 @@ function updateLayerVisibility() {
   // If this remains visible in Hybrid/Gameplay mode, tiles (including overhead/roof)
   // can be rendered by PIXI *in addition* to our Three.js TileManager, creating
   // a "duplicate" tile that will not respond to MapShine hover fading.
-  if (canvas.primary) canvas.primary.visible = false;
+  if (canvas.primary) {
+    canvas.primary.visible = true;
+    if (canvas.primary.background) canvas.primary.background.visible = false;
+    if (canvas.primary.foreground) canvas.primary.foreground.visible = false;
+    if (canvas.primary.tiles) canvas.primary.tiles.visible = false;
+  }
   if (canvas.weather) canvas.weather.visible = false;
   if (canvas.environment) canvas.environment.visible = false; // V12+
 

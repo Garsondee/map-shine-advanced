@@ -1253,7 +1253,6 @@ export class PixiContentLayerBridge {
     const w = this._worldCanvas.width;
     const h = this._worldCanvas.height;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.clearRect(0, 0, w, h);
     ctx.setTransform(captureScale, 0, 0, captureScale, 0, 0);
     ctx.imageSmoothingEnabled = true;
 
@@ -1586,7 +1585,6 @@ export class PixiContentLayerBridge {
     const w = this._worldCanvas.width;
     const h = this._worldCanvas.height;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.clearRect(0, 0, w, h);
     ctx.setTransform(captureScale, 0, 0, captureScale, 0, 0);
     ctx.imageSmoothingEnabled = true;
 
@@ -1606,13 +1604,19 @@ export class PixiContentLayerBridge {
         targetCandidates.push(target);
       };
 
+      // Foundry (and systems/modules extending MeasuredTemplate) may render
+      // wall-occluded geometry as additional children (e.g. `field`) on the
+      // template container. Capture the full container first so we preserve the
+      // exact runtime output from Foundry's own refresh/draw methods.
+      pushUniqueTarget(template);
+      pushUniqueTarget(template?.field);
       pushUniqueTarget(template?.template);
       pushUniqueTarget(template?.shape);
       pushUniqueTarget(template?.highlight);
       pushUniqueTarget(template?.frame);
       pushUniqueTarget(template?.controlIcon);
+      pushUniqueTarget(template?.ruler);
       pushUniqueTarget(template?.rulerText);
-      pushUniqueTarget(template);
 
       for (const target of targetCandidates) {
         const savedChainState = [];
@@ -1886,11 +1890,11 @@ export class PixiContentLayerBridge {
         return;
       }
 
-      this._lastUpdateStatus = `skip:notes-replay-failed strategy=${captureStrategy}`;
-      this._clearChannel('world');
-      this._clearChannel('ui');
-      this._dirty = false;
-      return;
+      // Notes extraction can fail transiently during layer churn (e.g. template
+      // deletion flips strategy in the same frame). Fall through into stage
+      // isolation fallback instead of clearing the overlay, which can make
+      // journals disappear until another unrelated dirty event occurs.
+      this._lastUpdateStatus = `fallback:notes-stage-isolation strategy=${captureStrategy}`;
     }
 
     if (captureStrategy === 'sounds-extract') {
@@ -1899,10 +1903,21 @@ export class PixiContentLayerBridge {
         this._dirty = false;
         return;
       }
+      
+      if (!replayResult.ok) {
+        const w = this._worldCanvas.width;
+        const h = this._worldCanvas.height;
+        const ctx = this._worldCanvas.getContext('2d');
+        if (ctx) {
+          ctx.setTransform(1, 0, 0, 1, 0, 0);
+          ctx.clearRect(0, 0, w, h);
+        }
+      }
 
       const soundsReplayResult = this._renderFoundrySoundsReplay(soundsLayer, renderer, worldCapture.width, worldCapture.height);
       if (soundsReplayResult.ok) {
-        this._lastUpdateStatus = `${soundsReplayResult.status} strategy=${captureStrategy}`;
+        const statusPrefix = replayResult.ok ? `${replayResult.status} + ` : '';
+        this._lastUpdateStatus = `${statusPrefix}${soundsReplayResult.status} strategy=${captureStrategy}`;
         this._dirty = false;
         return;
       }
@@ -1919,6 +1934,16 @@ export class PixiContentLayerBridge {
         this._lastUpdateStatus = `${replayResult.status} strategy=${captureStrategy}`;
         this._dirty = false;
         return;
+      }
+      
+      if (!replayResult.ok) {
+        const w = this._worldCanvas.width;
+        const h = this._worldCanvas.height;
+        const ctx = this._worldCanvas.getContext('2d');
+        if (ctx) {
+          ctx.setTransform(1, 0, 0, 1, 0, 0);
+          ctx.clearRect(0, 0, w, h);
+        }
       }
 
       const templatesReplayResult = this._renderFoundryTemplatesReplay(
@@ -2006,11 +2031,14 @@ export class PixiContentLayerBridge {
     };
 
     if (captureStrategy === 'sounds-extract') {
+      collectFromLayer(drawingsLayer);
       collectFromLayer(soundsLayer);
     } else if (captureStrategy === 'templates-extract') {
+      collectFromLayer(drawingsLayer);
       collectFromLayer(templatesLayer);
       collectFromLayer(notesLayer);
     } else if (captureStrategy === 'notes-extract') {
+      collectFromLayer(drawingsLayer);
       collectFromLayer(notesLayer);
     } else {
       collectFromLayer(drawingsLayer);
@@ -2020,6 +2048,15 @@ export class PixiContentLayerBridge {
     }
 
     if (uiShapes.size === 0) {
+      if (captureStrategy === 'notes-extract' && hasNotesUiContent) {
+        // Preserve previously captured frame and retry soon. This avoids a
+        // visible notes flicker/disappear when Foundry momentarily reports no
+        // extractable note display objects during strategy transitions.
+        this._lastUpdateStatus = 'retry:notes-ui-shapes-empty';
+        this._dirty = true;
+        this._postDirtyCapturesRemaining = Math.max(this._postDirtyCapturesRemaining, 2);
+        return;
+      }
       this._lastUpdateStatus = 'skip:no-ui-shapes';
       this._clearChannel('world');
       this._clearChannel('ui');

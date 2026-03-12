@@ -2299,6 +2299,48 @@ export class InteractionManager {
       || sceneControlLayer === 'drawing';
   }
 
+  _isNotesContextActive() {
+    if (canvas?.notes?.active) return true;
+    const { optionsName, name, ctor, sceneControlName, sceneControlLayer } = this._getActiveLayerMeta();
+    return optionsName === 'notes'
+      || optionsName === 'note'
+      || name === 'notes'
+      || name === 'note'
+      || ctor === 'noteslayer'
+      || sceneControlName === 'notes'
+      || sceneControlName === 'note'
+      || sceneControlLayer === 'notes'
+      || sceneControlLayer === 'note';
+  }
+
+  _isTemplatesContextActive() {
+    if (canvas?.templates?.active) return true;
+    const { optionsName, name, ctor, sceneControlName, sceneControlLayer } = this._getActiveLayerMeta();
+    return optionsName === 'templates'
+      || optionsName === 'template'
+      || name === 'templates'
+      || name === 'template'
+      || ctor === 'templatelayer'
+      || sceneControlName === 'templates'
+      || sceneControlName === 'template'
+      || sceneControlLayer === 'templates'
+      || sceneControlLayer === 'template';
+  }
+
+  _isRegionsContextActive() {
+    if (canvas?.regions?.active) return true;
+    const { optionsName, name, ctor, sceneControlName, sceneControlLayer } = this._getActiveLayerMeta();
+    return optionsName === 'regions'
+      || optionsName === 'region'
+      || name === 'regions'
+      || name === 'region'
+      || ctor === 'regionlayer'
+      || sceneControlName === 'regions'
+      || sceneControlName === 'region'
+      || sceneControlLayer === 'regions'
+      || sceneControlLayer === 'region';
+  }
+
   _isWallDrawTool(toolName) {
     const tool = String(toolName || '').toLowerCase();
     if (!tool) return false;
@@ -3767,6 +3809,7 @@ export class InteractionManager {
           }
           
         } else {
+          let moveClickArmed = false;
           if (clickToMoveButton === 0) {
             const selectedTokenDocs = this._getSelectedTokenDocs();
             const selectedTokenDoc = selectedTokenDocs[0] || null;
@@ -3780,12 +3823,12 @@ export class InteractionManager {
                 clientX: event.clientX,
                 clientY: event.clientY
               });
-              return;
+              moveClickArmed = true;
             }
           }
 
           // Clicked empty space - deselect all unless shift held
-          if (!event.shiftKey) {
+          if (!event.shiftKey && !moveClickArmed) {
             this.tokenSelectionController.clearTokenSelection();
           }
           
@@ -5505,6 +5548,16 @@ export class InteractionManager {
           this._resetMoveClickState();
 
           if (pendingTokenDoc && pendingWorldPos) {
+            if (this.dragSelect?.active) {
+              this.dragSelect.active = false;
+              this.dragSelect.dragging = false;
+              if (this.dragSelect.mesh) this.dragSelect.mesh.visible = false;
+              if (this.dragSelect.border) this.dragSelect.border.visible = false;
+              if (this.dragSelect.overlayEl) this.dragSelect.overlayEl.style.display = 'none';
+              safeCall(() => this.selectionBoxEffect?._hideSelectionShadow?.(), 'pointerUp.moveClickHideSelectionShadow', Severity.COSMETIC);
+              safeCall(() => this.selectionBoxEffect?._hideSelectionIllumination?.(), 'pointerUp.moveClickHideSelectionIllumination', Severity.COSMETIC);
+            }
+
             // Defer pathfinding to next frame to avoid blocking the pointerup event.
             // This prevents the 1-2 second freeze when right-clicking for click-to-move.
             requestAnimationFrame(async () => {

@@ -579,3 +579,411 @@ By compositing a cached settled pass with a lightweight live preview pass, place
 Journal note icons/squares now render through the bridge in a stable world-anchored way, and the system can proceed without blocking on complete visual parity.
 
 **Why this was correct:** it converts a full compatibility failure into a known, bounded parity issue (size mismatch), which is much safer to iterate on than continuing broad architectural churn.
+
+---
+
+## Recent Attempt Log — Tokens Invisible + Drawings Invisible (Mar 12, 2026)
+
+This section records all recent work attempted to resolve:
+
+1. Three-native tokens not visible.
+2. PIXI-bridge drawings not visible.
+
+### User-reported status during this sequence
+
+- Marquee selection recovered.
+- Tokens still invisible.
+- Drawings still invisible.
+- Multiple patches reported as “no change or improvement”.
+
+### Questions asked and investigated
+
+Token system questions:
+
+1. Is token rendering mode incorrectly set to Foundry (which hides Three sprites)?
+2. Is `VisibilityController` active and forcing sprites hidden?
+3. Are token sprites parented to the V2 render bus scene?
+4. Are canvas/input ownership gates hiding or bypassing token visuals?
+
+Drawing bridge questions:
+
+1. Are drawing shapes discovered from Foundry display objects (`PrimaryCanvasGroup`) correctly?
+2. Is bridge strategy selection (`replay-only` vs `templates-extract`) erasing drawing content?
+3. Is the compositing pipeline drawing bridge textures to final output in V2?
+
+### Runtime diagnostics collected
+
+#### Token diagnostics snapshot (from user console)
+
+- `tokenModeSetting`: `three`
+- `tokenManagerExists`: `true`
+- `visibilityControllerInitialized`: `false`
+- `threeTokenCount`: `3`
+- `firstSpriteVisible`: `false`
+- `firstSpriteOpacity`: `1`
+- `firstSpriteParent`: `FloorBusScene`
+- `firstNativeMeshAlpha`: `1`
+- Canvas styles showed PIXI canvas visible/interactive (`opacity=1`, `pointerEvents=auto`), Three canvas `pointerEvents=none` while in drawings context.
+
+Interpretation at time of capture:
+
+- Three token sprites existed and were correctly attached to bus scene.
+- They were still hidden at sprite visibility level.
+- `VisibilityController` not initialized was a critical red flag.
+
+#### Drawing/bridge diagnostics snapshot (from user console)
+
+- `bridgeExists`: `true`
+- `bridgeDirty`: `false`
+- `bridgeLastStatus`: `skip:idle`
+- `bridgeStrategy`: `templates-extract`
+- `drawingsLayerPlaceables`: `5`
+- `drawingShapeRefsFound`: `5`
+- `drawingShapeParentTypes`: `PrimaryCanvasGroup`
+- `worldCanvasExists`: `true`
+- `worldCanvasSize`: `10350x10800`
+- `worldCanvasCenterPixelRGBA`: `0,0,0,0`
+
+Interpretation at time of capture:
+
+- Drawings were discovered, but effective world capture remained transparent for sampled center pixel.
+- Strategy remained in template-extract path during test window.
+
+### Code changes attempted in this phase
+
+1. **InteractionManager crash fix**
+   - Added missing context helpers used by pointer guard path:
+     - `_isNotesContextActive`
+     - `_isTemplatesContextActive`
+     - `_isRegionsContextActive`
+   - File: `scripts/scene/interaction-manager.js`
+   - Result: Removed `TypeError` spam and restored marquee interactions.
+
+2. **PIXI suppression + primary visibility adjustments**
+   - Multiple edits attempted in `scripts/foundry/canvas-replacement.js` to:
+     - keep `canvas.primary` logically visible,
+     - hide only primary subcontainers,
+     - preserve overlay ownership semantics.
+   - Some intermediary edits introduced syntax breakage and were reverted/fixed during the sequence.
+
+3. **VisibilityController visibility-source correction**
+   - Updated visibility sync to preserve computed visibility from Foundry patch timing and avoid reading only mutable `visible` state after token is force-kept interactive.
+   - File: `scripts/vision/VisibilityController.js`
+   - Key adjustments:
+     - capture `computedVisibility` early in `_refreshVisibility` patch,
+     - pass it through `_syncSingleToken(...)`,
+     - prefer `isVisible` in bulk refresh fallback path.
+
+4. **Templates extraction clear behavior**
+   - Updated template replay call to avoid unnecessary clears over successful replay base:
+     - `clear: !replayResult.ok`
+   - File: `scripts/foundry/pixi-content-layer-bridge.js`
+
+5. **Token visibility pipeline initialization restored**
+   - Added explicit V2 startup initialization for:
+     - `visibilityController = new VisibilityController(tokenManager); visibilityController.initialize();`
+     - `detectionFilterEffect = new DetectionFilterEffect(tokenManager, visibilityController); detectionFilterEffect.initialize();`
+     - registration with `effectComposer.addUpdatable(detectionFilterEffect)`.
+   - File: `scripts/foundry/canvas-replacement.js`
+   - This was added because diagnostics confirmed `visibilityControllerInitialized: false`.
+
+### Validation steps executed during this phase
+
+- Syntax checks run on modified files:
+  - `scripts/foundry/canvas-replacement.js`
+  - `scripts/foundry/pixi-content-layer-bridge.js`
+  - `scripts/vision/VisibilityController.js`
+- No syntax errors after final edits in this phase.
+
+### Net outcome at end of this logged sequence
+
+- Marquee: recovered.
+- Tokens: still reported invisible by user after earlier rounds; additional initialization and visibility fixes were then applied.
+- Drawings: still reported invisible by user after earlier rounds; template-extract clear behavior was then patched and additional investigation continued.
+
+### Open unresolved risk at this point in timeline
+
+- Runtime verification still required after the final two patches above (VisibilityController initialization + template-extract clear preservation) to confirm whether tokens/drawings are restored in the user scene.
+
+---
+
+## Deep Research Addendum (Mar 12, 2026)
+
+This section separates the two systems explicitly:
+
+1. **Native Three token rendering** (TokenManager + VisibilityController)
+2. **PIXI bridge drawing rendering** (PixiContentLayerBridge + FloorCompositor composite)
+
+No fixes are proposed here; this is architecture and failure-surface research only.
+
+## System A — Native Three Token Rendering (Not the PIXI Bridge)
+
+### A1) Ownership and startup chain
+
+Token visibility/render ownership is distributed across three components:
+
+1. `TokenManager` creates and updates Three sprites (`createTokenSprite`, `updateTokenSprite`, hook wiring).
+2. `VisibilityController` is intended to be the sole authority for `sprite.visible` once initialized.
+3. `canvas-replacement` controls native PIXI token visual suppression (alpha 0) while keeping PIXI tokens interactive.
+
+Observed wiring:
+
+- Token manager init: `canvas-replacement.js` creates `TokenManager`, registers it as updatable, and exposes `window.MapShine.tokenManager`.
+- Visibility init: `canvas-replacement.js` creates `VisibilityController`, initializes it, then creates `DetectionFilterEffect` and registers updatable.
+- Native PIXI token visual mode: `_applyPixiTokenVisualMode()` sets `token.mesh/icon/border.alpha` according to token rendering mode (`three` vs `foundry`).
+
+Relevant code references:
+
+- `scripts/foundry/canvas-replacement.js` (TokenManager + VisibilityController startup block)
+- `scripts/scene/token-manager.js` (hooks, creation/update, visibility fallback rules)
+- `scripts/vision/VisibilityController.js` (patched `_refreshVisibility` + `sightRefresh` bulk path)
+- `scripts/settings/scene-settings.js` (`TOKEN_RENDERING_MODES`, `getTokenRenderingMode()`)
+
+### A2) Token render path (frame lifecycle)
+
+1. On `canvasReady` / `syncAllTokens`, TokenManager creates sprites for placeables.
+2. `createTokenSprite`:
+   - builds `THREE.SpriteMaterial` (initially no map)
+   - calls transform + visibility setup
+   - adds sprite to V2 FloorRenderBus scene if available, otherwise main scene fallback
+   - if VC is already initialized: forces `sprite.visible = false`
+   - forces `sprite.material.opacity = 0`
+3. Async texture load sets `material.map`; if VC is initialized, opacity restore is conditional on `sprite.visible` already being true.
+4. At runtime, TokenManager `update()` reparents sprites to bus scene defensively and reapplies V2 render order.
+5. VisibilityController should later set `sprite.visible` based on Foundry visibility (patch + hooks).
+
+### A3) Visibility authority contract
+
+TokenManager explicitly yields authority once VC is active:
+
+- `updateSpriteVisibility()` early-returns when `window.MapShine.visibilityController._initialized` is true.
+- VC owns per-token and bulk visibility synchronization:
+  - Path A: patched `Token._refreshVisibility`
+  - Path B: `sightRefresh`, `visibilityRefresh`, deferred bulk refresh
+
+If VC is inactive, TokenManager fallback logic controls visibility (`hidden` + level filter).
+
+### A4) Critical token invisibility failure surfaces (research)
+
+1. **Initialization gap / ordering race**
+   - Sprites start hidden+opacity=0 in VC mode, but depend on VC hooks/patch to unhide.
+   - Any missed timing window before first visibility sync can leave tokens invisible.
+
+2. **Render-mode gate mismatch**
+   - If token mode resolves to `foundry`, Three sprites are intentionally hidden (`updateSpriteVisibility` and VC both honor this).
+
+3. **Scene ownership mismatch (V2 vs fallback)**
+   - If bus scene is unavailable during creation, sprites go to main scene fallback.
+   - In V2, only bus-scene content is part of primary floor render path.
+
+4. **PIXI counterpart dependency in VC bulk pass**
+   - VC bulk path hides sprite if no matching PIXI placeable is found in map lookup.
+
+5. **Level-based filter hides at shared boundary**
+   - VC and fallback both hide tokens when `tokenElev >= levelContext.top - 0.01`.
+   - Boundary semantics can look like “missing token” during floor transitions.
+
+6. **Texture-load + opacity recovery dependence on visibility state**
+   - Texture callback only restores opacity immediately in VC mode when sprite is already visible.
+
+### A5) Token diagnostics checklist (research workflow)
+
+For each failed scene capture:
+
+1. Confirm mode and managers:
+   - token rendering mode (`three`/`foundry`)
+   - `window.MapShine.tokenManager` exists
+   - `window.MapShine.visibilityController?._initialized`
+2. Confirm sprite residency:
+   - sprite count in `tokenManager.tokenSprites`
+   - parent scene (`FloorBusScene` vs main scene)
+3. Confirm visibility state source:
+   - `sprite.visible`, `sprite.material.opacity`, `sprite.material.map`
+   - matching `canvas.tokens.placeables` presence by id
+4. Confirm level gate inputs:
+   - `window.MapShine.activeLevelContext`
+   - token elevation vs context top
+
+---
+
+## System B — PIXI Bridge Drawings Rendering (Not TokenManager)
+
+### B1) Explicit ownership in current runtime
+
+Current startup intentionally disables Three-native drawings for this test path:
+
+- `drawingManager = null` in `canvas-replacement.js`
+- PIXI bridge becomes the sole drawing visual source:
+  - `pixiContentLayerBridge = new PixiContentLayerBridge(); initialize();`
+  - exposed at `window.MapShine.pixiContentLayerBridge`
+
+This is a hard separation: **drawings visibility issues are in bridge/compositor strategy, not TokenManager**.
+
+### B2) Bridge-to-screen pipeline
+
+1. `FloorCompositor.render()` calls `bridge.update()` once per frame.
+2. Bridge writes world canvas/texture (`getWorldTexture()`), status in `_lastUpdateStatus`.
+3. Late in post chain, `_compositePixiWorldOverlay(currentInput)` alpha-composites bridge world texture into the RT chain.
+4. UI channel exists but is effectively secondary; drawings are routed through world overlay path.
+
+### B3) Bridge strategy model (important)
+
+Bridge is not strictly “drawings-only replay” at runtime today.
+
+`_getCaptureStrategy()` can auto-select:
+
+- `replay-only`
+- `replay-shape`
+- `sounds-extract`
+- `notes-extract`
+- `templates-extract`
+- `stage-extract`
+
+Selection can drift to `templates-extract`/`notes-extract` based on scene content or active context, even when debugging drawings.
+
+### B4) Drawing capture path
+
+Primary drawing path is deterministic replay:
+
+- `_renderReplayCapture(drawingsLayer, width, height)`
+  - collects from drawings placeables + preview + configPreview
+  - traces shape path from drawing document data
+  - draws fill/stroke/text to world canvas
+  - marks world texture dirty
+
+If strategy is not replay-only, branch behavior may include:
+
+- extra layer replay (templates/notes/sounds)
+- stage-isolation fallback with temporary stage/container visibility and transform mutation
+- fallback clears on failure (`_clearChannel('world')`/`_clearChannel('ui')`)
+
+### B5) High-risk drawing invisibility surfaces (research)
+
+1. **Strategy drift away from replay-only**
+   - Drawings can be overshadowed by templates/notes extraction branch logic.
+
+2. **Idle/throttle state suppresses recapture**
+   - Bridge can remain `skip:idle` when `_dirty` is false and no live preview signatures change.
+
+3. **Failure branches clear world channel**
+   - Multiple strategy failures explicitly clear world/ui textures, yielding transparent overlays.
+
+4. **Stage-isolation fallback complexity**
+   - Stage mutation path hides/shows ancestors/siblings, strips masks/filters, alters transforms.
+   - This remains a fragile path when branch falls through beyond replay logic.
+
+5. **Single-source fallback disabled**
+   - Three-native DrawingManager is intentionally disabled in this mode, so bridge failure has no local visual fallback.
+
+### B6) Compositor-side verification points
+
+For every frame where drawings are missing, inspect:
+
+1. `window.MapShine.__pixiBridgeCompositeStatus`:
+   - `ran`, `reason`, `bridgeStatus`
+2. Bridge internals:
+   - `_lastUpdateStatus`
+   - strategy selected (`_getCaptureStrategy` result)
+3. Texture presence:
+   - `bridge.getWorldTexture()` exists
+   - world canvas dimensions + sampled alpha
+4. Composite path reached:
+   - `_compositePixiWorldOverlay` executes after post chain in `FloorCompositor.render()`
+
+---
+
+## Combined Triage Matrix (Keep systems separate)
+
+When both “tokens invisible” and “drawings invisible” occur in the same report:
+
+1. **Token path first** (Three-native)
+   - VC initialized?
+   - token mode set to `three`?
+   - sprites in bus scene?
+   - visibility sync events firing?
+2. **Drawing path second** (PIXI bridge)
+   - bridge strategy?
+   - bridge status (`skip:*` vs `captured:*`)
+   - world texture non-empty?
+   - compositor world-overlay composite ran?
+
+This split avoids cross-system misdiagnosis:
+
+- TokenManager/VisibilityController issues should not be debugged as bridge extraction issues.
+- Bridge strategy/composite issues should not be debugged as token visibility issues.
+
+---
+
+## User Runtime Evidence Log (Mar 12, 2026, 21:30 UTC)
+
+This section records direct console output provided by the user and the interpretation of that evidence.
+
+### Token system evidence (Three-native path)
+
+Observed snapshot:
+
+- `tokenRenderingModeSetting: "three"`
+- `tokenManagerExists: true`
+- `visibilityControllerInitialized: true`
+- `tokenSpriteCount: 3`
+- `floorBusSceneExists: true`
+- each token row shows:
+  - `spriteVisible: false`
+  - `opacity: 0`
+  - `hasMap: true`
+  - `parent: FloorBusScene`
+  - `pixiExists: true`
+  - `pixiIsVisible: true`
+  - `tokenHidden: false`
+  - `tokenElevation: 0`
+
+Active level context during capture:
+
+- `bottom: -14.75`
+- `top: -13.25`
+- `count: 28`
+- `index: 0`
+
+Most important inference:
+
+- `VisibilityController` level gate hides tokens when `tokenElev >= levelContext.top - 0.01`.
+- With `tokenElevation = 0` and `top = -13.25`, condition is true (`0 >= -13.26`).
+- Therefore all tokens are filtered as “above current level”, which is fully consistent with all-three-tokens hidden (`visible=false`, `opacity=0`) despite valid sprite setup.
+
+This is currently the strongest evidence-backed cause of token invisibility.
+
+### PIXI bridge drawings evidence (bridge/compositor path)
+
+Observed snapshot:
+
+- `bridgeExists: true`
+- `floorCompositorV2Exists: true`
+- `bridgeLastStatus: "skip:idle"`
+- `bridgeDirty: false`
+- `bridgeStrategyNow: "templates-extract"`
+- `hasWorldTexture: true`
+- `worldCanvasSize: "10350x10800"`
+- `sceneDrawingsCount: 6`
+- `drawLayerPlaceables: 6`
+- compositor status:
+  - `ran: true`
+  - `reason: "rendered"`
+  - `hasOverlay: true`
+  - `bridgeStatus: "skip:idle"`
+- world-canvas sampled RGBA at center/q1/q2/q3/q4 all `0,0,0,0`
+
+Most important inferences:
+
+1. **Compositor path is active** (overlay composite pass is running), so this is not a "compositor not called" failure.
+2. **Bridge world texture exists but contains transparent pixels** at probe points.
+3. **Bridge is idle** (`skip:idle`, `dirty=false`), so capture did not refresh during the snapshot.
+4. **Strategy drift to `templates-extract` while active control is `tokens/select`** indicates bridge is not in deterministic drawings replay mode for this runtime state.
+
+Together this points to a stale/empty bridge world canvas state being composited successfully but containing no visible drawing content.
+
+### Evidence-backed likely causes ranking
+
+1. **Token invisibility:** level-context filter mismatch (very high confidence from numeric condition).
+2. **Drawings invisibility:** bridge strategy + idle capture state leaves transparent world canvas while compositor still blends overlay (high confidence from status + pixel probes).
+3. **Drawings secondary risk:** non-replay strategy selection (`templates-extract`) in non-template context increases likelihood of branch-specific capture non-updates.
+

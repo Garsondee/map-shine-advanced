@@ -1738,7 +1738,13 @@ vec3 ms_applySceneLighting(vec3 color) {
     if (sprite.visible) {
       try {
         const levelContext = window.MapShine?.activeLevelContext;
-        if (levelContext && Number.isFinite(levelContext.top) && (levelContext.count ?? 0) > 1) {
+        if (
+          levelContext
+          && Number.isFinite(levelContext.top)
+          && (levelContext.count ?? 0) > 1
+          && isLevelsEnabledForScene(canvas?.scene)
+          && String(levelContext?.source || '') !== 'inferred'
+        ) {
           const tokenElev = Number(tokenDoc?.elevation ?? 0);
           if (Number.isFinite(tokenElev) && tokenElev >= levelContext.top - 0.01) {
             sprite.visible = false;

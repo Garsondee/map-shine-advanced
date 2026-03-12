@@ -28,6 +28,7 @@
 
 import { createLogger } from '../core/log.js';
 import { getTokenRenderingMode, TOKEN_RENDERING_MODES } from '../settings/scene-settings.js';
+import { isLevelsEnabledForScene } from '../foundry/levels-scene-flags.js';
 
 const log = createLogger('VisibilityController');
 
@@ -239,6 +240,15 @@ export class VisibilityController {
       // No active level context (single-level scene or levels not configured)
       // → don't filter, let normal Foundry visibility decide.
       if (!levelContext || !Number.isFinite(levelContext.top)) return false;
+
+      // Do not apply strict level gating unless the scene is explicitly
+      // Levels-enabled. Inferred runtime bands are useful for navigation/UI,
+      // but can otherwise hide all tokens in non-Levels scenes.
+      if (!isLevelsEnabledForScene(canvas?.scene)) return false;
+
+      // Inferred contexts are not authoritative wall-height levels.
+      // Fail-open to avoid filtering tokens from synthetic floor bands.
+      if (String(levelContext?.source || '') === 'inferred') return false;
 
       // Only filter when there are multiple levels — single-level scenes
       // should never hide tokens via this path.

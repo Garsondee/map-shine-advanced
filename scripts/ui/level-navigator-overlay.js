@@ -340,13 +340,22 @@ export class LevelNavigatorOverlay {
 
     const enabledForScene = this._hasLevelsEnabledOnScene();
     const hasController = !!this.levelNavigationController;
-    const visible = enabledForScene && hasController;
+    const context = this.levelNavigationController?.getActiveLevelContext?.() || null;
+    const levels = this.levelNavigationController?.getAvailableLevels?.() || [];
+
+    // Keep navigator available whenever level navigation has meaningful runtime
+    // context (including inferred multi-floor bands), even if the scene does not
+    // carry explicit Levels flags.
+    const hasRuntimeLevels =
+      (Array.isArray(levels) && levels.length > 1)
+      || (Number.isFinite(Number(context?.count)) && Number(context.count) > 1)
+      || (Number.isFinite(Number(context?.bottom)) && Number(context?.top));
+
+    const visible = hasController && (enabledForScene || hasRuntimeLevels);
     this.overlayManager.setVisible(OVERLAY_ID, visible);
 
     if (!visible) return;
 
-    const context = this.levelNavigationController?.getActiveLevelContext?.() || null;
-    const levels = this.levelNavigationController?.getAvailableLevels?.() || [];
     const lockMode = this.levelNavigationController?.getLockMode?.() || 'manual';
     const diagnostics = this._lastDiagnostics || this.levelNavigationController?.getLevelDiagnostics?.() || null;
 

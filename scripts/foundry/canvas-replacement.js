@@ -3944,6 +3944,26 @@ async function createThreeCanvas(scene) {
     if (isDebugLoad) dlp.end('manager.TokenManager.init');
     console.log(' -> Manager: TokenManager DONE');
 
+    // Step 4a.1: Initialize token visibility + detection filters.
+    // Required in V2 so Three.js token visibility follows Foundry visibility tests.
+    if (visibilityController) {
+      safeDispose(() => visibilityController.dispose(), 'visibilityController.dispose(reinit)');
+      visibilityController = null;
+    }
+    visibilityController = new VisibilityController(tokenManager);
+    visibilityController.initialize();
+
+    if (detectionFilterEffect) {
+      safeDispose(() => {
+        effectComposer?.removeUpdatable?.(detectionFilterEffect);
+        detectionFilterEffect.dispose();
+      }, 'detectionFilterEffect.dispose(reinit)');
+      detectionFilterEffect = null;
+    }
+    detectionFilterEffect = new DetectionFilterEffect(tokenManager, visibilityController);
+    detectionFilterEffect.initialize();
+    effectComposer.addUpdatable(detectionFilterEffect);
+
     // CRITICAL: Expose managers on window.MapShine so other subsystems
     // (e.g. TokenManager.updateSpriteVisibility) can check VC state.
     // Without this, the VC early-return path is never taken and

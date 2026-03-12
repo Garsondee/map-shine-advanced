@@ -168,6 +168,10 @@ export class FireEffectV2 {
       smokeAlphaStart: 0.7,
       smokeAlphaPeak: 0.8,
       smokeAlphaEnd: 1,
+      heatDistortionEnabled: true,
+      heatDistortionIntensity: 0.05,
+      heatDistortionFrequency: 20.0,
+      heatDistortionSpeed: 3.0,
     };
 
     log.debug('FireEffectV2 created');

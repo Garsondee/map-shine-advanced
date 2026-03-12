@@ -42,6 +42,9 @@ export class PixiContentLayerBridge {
     /** @type {boolean} */
     this._dirty = true;
 
+    /** @type {number} Extra captures to run after state mutations settle async draws */
+    this._postDirtyCapturesRemaining = 0;
+
     /** @type {string} */
     this._lastUpdateStatus = 'init';
 
@@ -159,12 +162,24 @@ export class PixiContentLayerBridge {
 
   initialize() {
     if (!this._hookIds.length) {
-      this._hookIds.push(['createDrawing', Hooks.on('createDrawing', () => { this._dirty = true; })]);
-      this._hookIds.push(['updateDrawing', Hooks.on('updateDrawing', () => { this._dirty = true; })]);
-      this._hookIds.push(['deleteDrawing', Hooks.on('deleteDrawing', () => { this._dirty = true; })]);
-      this._hookIds.push(['activateDrawingsLayer', Hooks.on('activateDrawingsLayer', () => { this._dirty = true; })]);
-      this._hookIds.push(['renderSceneControls', Hooks.on('renderSceneControls', () => { this._dirty = true; })]);
-      this._hookIds.push(['canvasReady', Hooks.on('canvasReady', () => { this._dirty = true; })]);
+      const markDirty = (followupCaptures = 0) => {
+        this._dirty = true;
+        this._postDirtyCapturesRemaining = Math.max(
+          this._postDirtyCapturesRemaining,
+          Math.max(0, Math.round(this._toNumber(followupCaptures, 0)))
+        );
+      };
+
+      this._hookIds.push(['createDrawing', Hooks.on('createDrawing', () => { markDirty(1); })]);
+      this._hookIds.push(['updateDrawing', Hooks.on('updateDrawing', () => { markDirty(1); })]);
+      this._hookIds.push(['deleteDrawing', Hooks.on('deleteDrawing', () => { markDirty(1); })]);
+      this._hookIds.push(['activateDrawingsLayer', Hooks.on('activateDrawingsLayer', () => { markDirty(1); })]);
+      this._hookIds.push(['createAmbientSound', Hooks.on('createAmbientSound', () => { markDirty(2); })]);
+      this._hookIds.push(['updateAmbientSound', Hooks.on('updateAmbientSound', () => { markDirty(2); })]);
+      this._hookIds.push(['deleteAmbientSound', Hooks.on('deleteAmbientSound', () => { markDirty(2); })]);
+      this._hookIds.push(['activateSoundsLayer', Hooks.on('activateSoundsLayer', () => { markDirty(2); })]);
+      this._hookIds.push(['renderSceneControls', Hooks.on('renderSceneControls', () => { markDirty(1); })]);
+      this._hookIds.push(['canvasReady', Hooks.on('canvasReady', () => { markDirty(1); })]);
     }
 
     // Compositor render() already calls bridge.update() once per frame.
@@ -216,6 +231,54 @@ export class PixiContentLayerBridge {
    */
   _isShapeReplayDebugEnabled() {
     return !!window?.MapShine?.__pixiBridgeUseShapeReplay;
+  }
+
+  /**
+   * Is the current control/layer context the native sounds workflow?
+   * @returns {boolean}
+   * @private
+   */
+  _isSoundsContextActive() {
+    const activeControl = String(ui?.controls?.control?.name ?? ui?.controls?.activeControl ?? '').toLowerCase();
+    const activeTool = String(ui?.controls?.tool?.name ?? ui?.controls?.activeTool ?? game?.activeTool ?? '').toLowerCase();
+    const activeLayerName = String(canvas?.activeLayer?.options?.name ?? canvas?.activeLayer?.name ?? '').toLowerCase();
+    const activeLayerCtor = String(canvas?.activeLayer?.constructor?.name ?? '').toLowerCase();
+    const activeControlLayer = String(ui?.controls?.control?.layer ?? '').toLowerCase();
+    return !!canvas?.sounds?.active
+      || activeControl === 'sounds'
+      || activeControl === 'sound'
+      || activeTool === 'sound'
+      || activeControlLayer === 'sounds'
+      || activeControlLayer === 'sound'
+      || activeLayerName === 'sounds'
+      || activeLayerName === 'sound'
+      || activeLayerCtor === 'soundslayer';
+  }
+
+  /**
+   * Resolve capture strategy for the current frame.
+   * Default is a deterministic drawings-only replay path to keep runtime stable.
+   * Advanced extraction paths are debug-only and opt-in.
+   *
+   * Accepted values (debug/override):
+   * - replay-only (default)
+   * - replay-shape
+   * - sounds-extract
+   * - stage-extract
+   *
+   * If no override is provided, auto-select sounds-extract while actively
+   * editing sounds, otherwise use replay-only.
+   *
+   * @returns {'replay-only'|'replay-shape'|'sounds-extract'|'stage-extract'}
+   * @private
+   */
+  _getCaptureStrategy() {
+    const raw = String(window?.MapShine?.__pixiBridgeCaptureStrategy || '').trim().toLowerCase();
+    if (raw === 'stage-extract') return 'stage-extract';
+    if (raw === 'sounds-extract') return 'sounds-extract';
+    if (raw === 'replay-shape') return 'replay-shape';
+    if (this._isSoundsContextActive()) return 'sounds-extract';
+    return 'replay-only';
   }
 
   /**
@@ -658,6 +721,56 @@ export class PixiContentLayerBridge {
   }
 
   /**
+   * Convert a screen-space rectangle (stage transformed) into world-space
+   * rectangle coordinates used by bridge world-canvas compositing.
+   * @param {number} x
+   * @param {number} y
+   * @param {number} w
+   * @param {number} h
+   * @returns {{x:number,y:number,w:number,h:number}}
+   * @private
+   */
+  _stageScreenRectToWorldRect(x, y, w, h) {
+    const t = canvas?.stage?.worldTransform;
+    if (!t) return { x, y, w, h };
+
+    const a = this._toNumber(t.a, 1);
+    const b = this._toNumber(t.b, 0);
+    const c = this._toNumber(t.c, 0);
+    const d = this._toNumber(t.d, 1);
+    const tx = this._toNumber(t.tx, 0);
+    const ty = this._toNumber(t.ty, 0);
+    const det = (a * d) - (b * c);
+    if (!Number.isFinite(det) || Math.abs(det) < 1e-8) return { x, y, w, h };
+
+    const inv = (sx, sy) => {
+      const px = this._toNumber(sx, 0) - tx;
+      const py = this._toNumber(sy, 0) - ty;
+      return {
+        x: ((d * px) - (c * py)) / det,
+        y: ((-b * px) + (a * py)) / det,
+      };
+    };
+
+    const p0 = inv(x, y);
+    const p1 = inv(x + w, y);
+    const p2 = inv(x + w, y + h);
+    const p3 = inv(x, y + h);
+
+    const minX = Math.min(p0.x, p1.x, p2.x, p3.x);
+    const maxX = Math.max(p0.x, p1.x, p2.x, p3.x);
+    const minY = Math.min(p0.y, p1.y, p2.y, p3.y);
+    const maxY = Math.max(p0.y, p1.y, p2.y, p3.y);
+
+    return {
+      x: minX,
+      y: minY,
+      w: Math.max(0, maxX - minX),
+      h: Math.max(0, maxY - minY),
+    };
+  }
+
+  /**
    * @param {PIXI.DrawingsLayer|null} drawingsLayer
    * @returns {PIXI.DisplayObject[]}
    * @private
@@ -742,6 +855,110 @@ export class PixiContentLayerBridge {
   }
 
   /**
+   * Replay ambient sounds by extracting each sound placeable object directly.
+   * This avoids high-mutation stage isolation in the sounds editing workflow.
+   * @param {PIXI.SoundsLayer|null} soundsLayer
+   * @param {PIXI.Renderer|null} renderer
+   * @param {number} width
+   * @param {number} height
+   * @returns {{ok:boolean,count:number,status:string}}
+   * @private
+   */
+  _renderFoundrySoundsReplay(soundsLayer, renderer, width, height) {
+    this._worldLogicalWidth = Math.max(1, Math.round(this._toNumber(width, 1)));
+    this._worldLogicalHeight = Math.max(1, Math.round(this._toNumber(height, 1)));
+    const worldTexture = this._ensureWorldCanvasSize(width, height);
+    if (!worldTexture || !this._worldCanvas || !renderer?.extract) {
+      return { ok: false, count: 0, status: 'skip:sounds-replay-unavailable' };
+    }
+
+    const ctx = this._worldCanvas.getContext('2d');
+    if (!ctx) return { ok: false, count: 0, status: 'skip:no-world-context' };
+
+    const sounds = [];
+    const seen = new Set();
+    const collect = (obj) => {
+      if (!obj) return;
+      const key = String(obj.id ?? obj?.document?.id ?? `${sounds.length}`);
+      if (seen.has(key)) return;
+      seen.add(key);
+      sounds.push(obj);
+    };
+    try {
+      const placeables = Array.isArray(soundsLayer?.placeables) ? soundsLayer.placeables : [];
+      for (const p of placeables) collect(p);
+      const preview = Array.isArray(soundsLayer?.preview?.children) ? soundsLayer.preview.children : [];
+      for (const p of preview) collect(p);
+      if (soundsLayer?._configPreview) collect(soundsLayer._configPreview);
+    } catch (_) {}
+
+    sounds.sort((a, b) => this._toNumber(a?.document?.sort ?? a?.sort, 0) - this._toNumber(b?.document?.sort ?? b?.sort, 0));
+
+    const w = this._worldCanvas.width;
+    const h = this._worldCanvas.height;
+    ctx.clearRect(0, 0, w, h);
+    if (sounds.length <= 0) {
+      worldTexture.needsUpdate = true;
+      return { ok: true, count: 0, status: `captured:sounds-replay-empty:${w}x${h}` };
+    }
+
+    let drawn = 0;
+    const maxWorldW = Math.max(1, w * 1.5);
+    const maxWorldH = Math.max(1, h * 1.5);
+    for (const sound of sounds) {
+      // AmbientSound placeable container extraction can include renderer clear
+      // artifacts on some runtimes; capture explicit visuals only.
+      const drawTargets = [sound?.field, sound?.controlIcon];
+      for (const target of drawTargets) {
+        if (!target) continue;
+
+        const prevVisible = target.visible;
+        const prevRenderable = target.renderable;
+        const prevAlpha = Number(target.alpha);
+        try {
+          target.visible = true;
+          target.renderable = true;
+          if (!Number.isFinite(prevAlpha) || prevAlpha <= 0) target.alpha = 1;
+
+          let bounds = null;
+          try { bounds = target.getBounds?.(false) ?? null; } catch (_) { bounds = null; }
+          const bx = Math.floor(this._toNumber(bounds?.x, 0));
+          const by = Math.floor(this._toNumber(bounds?.y, 0));
+          const bw = Math.ceil(this._toNumber(bounds?.width, 0));
+          const bh = Math.ceil(this._toNumber(bounds?.height, 0));
+          if (bw <= 0 || bh <= 0) continue;
+
+          const frame = new PIXI.Rectangle(bx, by, bw, bh);
+          let shapeCanvas = null;
+          try {
+            shapeCanvas = renderer.extract.canvas(target, frame);
+          } catch (_) {
+            shapeCanvas = null;
+          }
+          if (!shapeCanvas || !shapeCanvas.width || !shapeCanvas.height) continue;
+
+          try {
+            const worldRect = this._stageScreenRectToWorldRect(bx, by, bw, bh);
+            if (worldRect.w <= 0 || worldRect.h <= 0) continue;
+            // Guard against transform/bounds anomalies that would stretch a tiny
+            // extracted bitmap into a near-fullscreen opaque rectangle.
+            if (worldRect.w > maxWorldW || worldRect.h > maxWorldH) continue;
+            ctx.drawImage(shapeCanvas, worldRect.x, worldRect.y, worldRect.w, worldRect.h);
+            drawn += 1;
+          } catch (_) {}
+        } finally {
+          target.visible = prevVisible;
+          target.renderable = prevRenderable;
+          target.alpha = prevAlpha;
+        }
+      }
+    }
+
+    worldTexture.needsUpdate = true;
+    return { ok: true, count: drawn, status: `captured:sounds-replay:${w}x${h} shapes=${drawn}` };
+  }
+
+  /**
    * Fast sparse probe for any non-empty pixel content.
    * @param {HTMLCanvasElement|null} source
    * @returns {boolean}
@@ -768,6 +985,31 @@ export class PixiContentLayerBridge {
     return false;
   }
 
+  /**
+   * Detect whether a layer preview is actively rendering content.
+   * SoundsLayer can keep a preview child resident even when not being edited.
+   * Treat only renderable/visible preview objects as "live" to avoid forced
+   * per-frame bridge recapture and input lag.
+   * @param {any} layer
+   * @returns {boolean}
+   * @private
+   */
+  _hasActivePreview(layer) {
+    const preview = layer?.preview;
+    if (!preview) return false;
+    if (preview?._creating) return true;
+    const children = Array.isArray(preview.children) ? preview.children : [];
+    for (const child of children) {
+      if (!child) continue;
+      if (child.visible === false) continue;
+      if (child.renderable === false) continue;
+      const alpha = Number(child.alpha);
+      if (Number.isFinite(alpha) && alpha <= 0) continue;
+      return true;
+    }
+    return false;
+  }
+
   update(frameId) {
     if (!canvas?.ready) {
       this._lastUpdateStatus = 'skip:canvas-not-ready';
@@ -783,7 +1025,20 @@ export class PixiContentLayerBridge {
     }
 
     const drawingsLayer = canvas?.drawings;
-    const hasLivePreview = !!drawingsLayer?.preview?.children?.length;
+    const soundsLayer = canvas?.sounds;
+    const notesLayer = canvas?.notes;
+    const templatesLayer = canvas?.templates;
+    const lightingLayer = canvas?.lighting;
+    const regionsLayer = canvas?.regions;
+    
+    const hasLivePreview =
+      this._hasActivePreview(drawingsLayer) ||
+      this._hasActivePreview(soundsLayer) ||
+      this._hasActivePreview(notesLayer) ||
+      this._hasActivePreview(templatesLayer) ||
+      this._hasActivePreview(lightingLayer) ||
+      this._hasActivePreview(regionsLayer);
+      
     const forceTestPattern = this._isCompositorSanityPatternEnabled();
     this._lastStageTransformSig = this._getStageTransformSignature();
 
@@ -792,9 +1047,12 @@ export class PixiContentLayerBridge {
     }
     this._testPatternWasEnabled = forceTestPattern;
 
+    const hasFollowupCapture = this._postDirtyCapturesRemaining > 0;
+
     // Fullscreen extraction is expensive. Outside of explicit dirty changes,
-    // only keep capturing while a drawing preview is actively being edited.
-    if (!this._dirty && !hasLivePreview && !forceTestPattern) {
+    // only keep capturing while a drawing preview is actively being edited,
+    // or for a short post-mutation followup window.
+    if (!this._dirty && !hasLivePreview && !forceTestPattern && !hasFollowupCapture) {
       this._lastUpdateStatus = 'skip:idle';
       return;
     }
@@ -813,6 +1071,9 @@ export class PixiContentLayerBridge {
 
     this._lastCaptureMs = now;
     this._lastCaptureFrame = hasFrameId ? frameId : this._lastCaptureFrame;
+    if (this._postDirtyCapturesRemaining > 0) {
+      this._postDirtyCapturesRemaining -= 1;
+    }
 
     const renderer = canvas?.app?.renderer;
     const extract = renderer?.extract;
@@ -823,17 +1084,68 @@ export class PixiContentLayerBridge {
       return;
     }
 
-    const viewport = this._getViewportSize(renderer);
+    const worldCapture = this._getWorldCaptureSize();
+    const captureLogicalW = Math.max(1, Math.round(this._toNumber(worldCapture.width, 1)));
+    const captureLogicalH = Math.max(1, Math.round(this._toNumber(worldCapture.height, 1)));
+    const captureScale = this._getWorldCaptureScale(captureLogicalW, captureLogicalH);
+    const captureW = Math.max(1, Math.round(captureLogicalW * captureScale));
+    const captureH = Math.max(1, Math.round(captureLogicalH * captureScale));
+    this._worldLogicalWidth = captureLogicalW;
+    this._worldLogicalHeight = captureLogicalH;
+
     if (this._isCompositorSanityPatternEnabled()) {
-      if (this._renderCompositorSanityPattern(viewport.width, viewport.height)) return;
+      if (this._renderCompositorSanityPattern(captureW, captureH)) return;
     }
 
-    const worldCapture = this._getWorldCaptureSize();
-    const useShapeReplay = this._isShapeReplayDebugEnabled();
+    const captureStrategy = this._getCaptureStrategy();
+    const useShapeReplay = (captureStrategy === 'replay-shape') || this._isShapeReplayDebugEnabled();
     const replayResult = useShapeReplay
       ? this._renderFoundryShapeReplay(drawingsLayer, renderer, worldCapture.width, worldCapture.height)
       : this._renderReplayCapture(drawingsLayer, worldCapture.width, worldCapture.height);
-    if (replayResult.ok) {
+
+    // Default runtime behavior: drawings-first replay only.
+    // Fall through into extraction only for explicit stage extraction or
+    // auto/explicit sounds extraction.
+    if (captureStrategy === 'replay-only' || captureStrategy === 'replay-shape') {
+      if (replayResult.ok) {
+        this._lastUpdateStatus = `${replayResult.status} strategy=${captureStrategy}`;
+        this._dirty = false;
+        return;
+      }
+      this._lastUpdateStatus = `skip:replay-failed strategy=${captureStrategy}`;
+      this._clearChannel('world');
+      this._clearChannel('ui');
+      this._dirty = false;
+      return;
+    }
+
+    const hasNonDrawingUiContent =
+      !!soundsLayer?.active ||
+      !!soundsLayer?.placeables?.length ||
+      this._hasActivePreview(soundsLayer);
+
+    if (captureStrategy === 'sounds-extract') {
+      if (replayResult.ok && !hasNonDrawingUiContent) {
+        this._lastUpdateStatus = `${replayResult.status} strategy=${captureStrategy}`;
+        this._dirty = false;
+        return;
+      }
+
+      const soundsReplayResult = this._renderFoundrySoundsReplay(soundsLayer, renderer, worldCapture.width, worldCapture.height);
+      if (soundsReplayResult.ok) {
+        this._lastUpdateStatus = `${soundsReplayResult.status} strategy=${captureStrategy}`;
+        this._dirty = false;
+        return;
+      }
+
+      this._lastUpdateStatus = `skip:sounds-replay-failed strategy=${captureStrategy}`;
+      this._clearChannel('world');
+      this._clearChannel('ui');
+      this._dirty = false;
+      return;
+    }
+
+    if (replayResult.ok && !hasNonDrawingUiContent) {
       this._lastUpdateStatus = replayResult.status;
       this._dirty = false;
       return;
@@ -851,25 +1163,59 @@ export class PixiContentLayerBridge {
     // by collecting placeable.shape references from canvas.drawings.placeables.
     // -------------------------------------------------------------------------
 
-    // Collect all drawing shape objects (they live in canvas.primary/canvas.interface).
-    const drawingShapes = new Set();
-    try {
-      const placeables = Array.isArray(drawingsLayer?.placeables) ? drawingsLayer.placeables : [];
-      for (const p of placeables) {
-        if (p?.shape) drawingShapes.add(p.shape);
-      }
-    } catch (_) {}
+    // Collect all UI shape objects we want in bridge output.
+    const uiShapes = new Set();
+    const collectFromLayer = (layer) => {
+      try {
+        const placeables = Array.isArray(layer?.placeables) ? layer.placeables : [];
+        for (const p of placeables) {
+          if (p) uiShapes.add(p);
+          if (p?.shape) uiShapes.add(p.shape);
+          if (p?.controlIcon) uiShapes.add(p.controlIcon);
+          if (p?.field) uiShapes.add(p.field);
+          if (p?.template) uiShapes.add(p.template);
+          if (p?.tooltip) uiShapes.add(p.tooltip);
+        }
 
-    if (drawingShapes.size === 0) {
-      this._lastUpdateStatus = 'skip:no-drawing-shapes';
+        const previewChildren = Array.isArray(layer?.preview?.children) ? layer.preview.children : [];
+        for (const p of previewChildren) {
+          if (p) uiShapes.add(p);
+          if (p?.shape) uiShapes.add(p.shape);
+          if (p?.controlIcon) uiShapes.add(p.controlIcon);
+          if (p?.field) uiShapes.add(p.field);
+          if (p?.template) uiShapes.add(p.template);
+          if (p?.tooltip) uiShapes.add(p.tooltip);
+        }
+      } catch (_) {}
+    };
+
+    if (captureStrategy === 'sounds-extract') {
+      collectFromLayer(soundsLayer);
+    } else {
+      collectFromLayer(drawingsLayer);
+      collectFromLayer(soundsLayer);
+    }
+
+    if (uiShapes.size === 0) {
+      this._lastUpdateStatus = 'skip:no-ui-shapes';
       this._clearChannel('world');
       this._clearChannel('ui');
       return;
     }
 
-    const fw = viewport.width;
-    const fh = viewport.height;
-    const frame = new PIXI.Rectangle(0, 0, fw, fh);
+    // For the stage isolation path we cap the RT to a sensible pixel budget.
+    // captureLogicalW/H (and therefore uOverlaySize in the compositor) must NOT
+    // change — the UV math relies on them matching canvas.dimensions exactly.
+    // We only reduce the scale of the actual RenderTexture pixels.
+    const MAX_UI_RT_DIM = 1024;
+    const uiRenderScale = Math.max(
+      0.05,
+      Math.min(captureScale, MAX_UI_RT_DIM / Math.max(captureLogicalW, captureLogicalH))
+    );
+    const uiRtW = Math.max(1, Math.round(captureLogicalW * uiRenderScale));
+    const uiRtH = Math.max(1, Math.round(captureLogicalH * uiRenderScale));
+
+    const frame = new PIXI.Rectangle(0, 0, uiRtW, uiRtH);
 
     let capturedCanvas = null;
     // Saved state arrays for restore in finally block.
@@ -877,6 +1223,8 @@ export class PixiContentLayerBridge {
     const savedState = [];
     /** @type {Array<{obj: PIXI.DisplayObject, mask: any, filters: any, filterArea: any, cullable: any}>} */
     const savedCompositing = [];
+    /** @type {{px:number,py:number,sx:number,sy:number,pivx:number,pivy:number,skx:number,sky:number,rot:number}|null} */
+    let stageSavedTransform = null;
 
     try {
       if (window?.MapShine) window.MapShine.__bridgeCaptureActive = true;
@@ -886,6 +1234,18 @@ export class PixiContentLayerBridge {
         this._clearChannel('world');
         return;
       }
+
+      stageSavedTransform = {
+        px: Number(stageRoot.position?.x) || 0,
+        py: Number(stageRoot.position?.y) || 0,
+        sx: Number(stageRoot.scale?.x) || 1,
+        sy: Number(stageRoot.scale?.y) || 1,
+        pivx: Number(stageRoot.pivot?.x) || 0,
+        pivy: Number(stageRoot.pivot?.y) || 0,
+        skx: Number(stageRoot.skew?.x) || 0,
+        sky: Number(stageRoot.skew?.y) || 0,
+        rot: Number(stageRoot.rotation) || 0,
+      };
 
       // Force the stage root itself visible/renderable. Some MapShine flows can
       // temporarily hide higher-level containers during mode switches.
@@ -899,10 +1259,18 @@ export class PixiContentLayerBridge {
       stageRoot.renderable = true;
       if (!Number.isFinite(stageRoot.alpha) || stageRoot.alpha <= 0) stageRoot.alpha = 1;
 
-      // Identify the parent containers that hold drawing shapes.
+      // Render the isolated UI pass in world-space: world (0,0) maps to texture
+      // origin. Use uiRenderScale (capped) so the RT stays a reasonable size.
+      stageRoot.position?.set?.(0, 0);
+      stageRoot.scale?.set?.(uiRenderScale, uiRenderScale);
+      stageRoot.pivot?.set?.(0, 0);
+      stageRoot.skew?.set?.(0, 0);
+      stageRoot.rotation = 0;
+
+      // Identify the parent containers that hold UI shape objects.
       // Typically canvas.primary and/or canvas.interface.
       const shapeParents = new Set();
-      for (const shape of drawingShapes) {
+      for (const shape of uiShapes) {
         if (shape.parent) shapeParents.add(shape.parent);
       }
 
@@ -930,7 +1298,7 @@ export class PixiContentLayerBridge {
         if (!Number.isFinite(node.alpha) || node.alpha <= 0) node.alpha = 1;
       }
 
-      // Hide all stage direct children except ancestors of drawing shapes.
+      // Hide all stage direct children except ancestors of UI shapes.
       if (stageRoot.children) {
         for (const child of stageRoot.children) {
           if (ancestorNodes.has(child)) continue;
@@ -946,12 +1314,12 @@ export class PixiContentLayerBridge {
       }
 
       // Within each shape parent container, hide all children that are NOT
-      // drawing shapes so we only capture drawings, not tiles/tokens/etc.
+      // UI shapes so we only capture editor overlays, not tiles/tokens/etc.
       for (const parent of shapeParents) {
         if (!parent.children) continue;
         for (const child of parent.children) {
-          if (drawingShapes.has(child)) {
-            // Force drawing shape visible for capture.
+          if (uiShapes.has(child)) {
+            // Force UI shape visible for capture.
             savedState.push({
               obj: child,
               visible: child.visible,
@@ -962,7 +1330,7 @@ export class PixiContentLayerBridge {
             child.renderable = true;
             if (!Number.isFinite(child.alpha) || child.alpha <= 0) child.alpha = 1;
           } else {
-            // Hide non-drawing siblings.
+            // Hide non-UI siblings.
             savedState.push({
               obj: child,
               visible: child.visible,
@@ -975,9 +1343,24 @@ export class PixiContentLayerBridge {
         }
       }
 
-      // Disable masks/filters on ancestor chain + drawing shapes to prevent
+      // Ensure nested targets (e.g., AmbientSound.controlIcon) are explicitly
+      // visible even when their own local visibility was toggled by layer state.
+      for (const node of uiShapes) {
+        if (!node) continue;
+        savedState.push({
+          obj: node,
+          visible: node.visible,
+          renderable: node.renderable,
+          alpha: Number(node.alpha),
+        });
+        node.visible = true;
+        node.renderable = true;
+        if (!Number.isFinite(node.alpha) || node.alpha <= 0) node.alpha = 1;
+      }
+
+      // Disable masks/filters on ancestor chain + UI shapes to prevent
       // external mask dependencies from collapsing the output to transparent.
-      const compNodes = new Set([stageRoot, ...ancestorNodes, ...drawingShapes]);
+      const compNodes = new Set([stageRoot, ...ancestorNodes, ...uiShapes]);
       for (const node of compNodes) {
         if (!node) continue;
         savedCompositing.push({
@@ -996,13 +1379,13 @@ export class PixiContentLayerBridge {
       if (this._probeLogCount === 0) {
         const parentNames = [...shapeParents].map(p => p.constructor?.name || 'unknown').join(',');
         const stageName = stageRoot?.constructor?.name || 'unknown';
-        log.info(`[Bridge] Drawing shapes: ${drawingShapes.size} in parents=[${parentNames}], ancestors=${ancestorNodes.size}, stage=${stageName}`);
+        log.info(`[Bridge] UI shapes: ${uiShapes.size} in parents=[${parentNames}], ancestors=${ancestorNodes.size}, stage=${stageName}`);
       }
 
-      // Render canvas.stage (with pan/zoom transform) to an RT, then extract.
+      // Render the isolated UI pass to an RT at the capped ui render dimensions.
       let tempRT = null;
       try {
-        tempRT = PIXI.RenderTexture.create({ width: fw, height: fh });
+        tempRT = PIXI.RenderTexture.create({ width: uiRtW, height: uiRtH });
         const pixiVersion = String(PIXI?.VERSION || '');
         const isPixiV7 = /^7\./.test(pixiVersion);
         if (isPixiV7) {
@@ -1026,6 +1409,7 @@ export class PixiContentLayerBridge {
     } catch (err) {
       log.warn('Drawings capture failed', err);
       this._lastUpdateStatus = 'skip:capture-threw';
+      this._dirty = false;
       this._clearChannel('world');
       this._clearChannel('ui');
       return;
@@ -1043,6 +1427,19 @@ export class PixiContentLayerBridge {
         s.obj.renderable = s.renderable;
         s.obj.alpha = s.alpha;
       }
+      try {
+        const stageRoot = canvas?.stage;
+        if (stageRoot) {
+          const s = stageSavedTransform;
+          if (s) {
+            stageRoot.position?.set?.(s.px, s.py);
+            stageRoot.scale?.set?.(s.sx, s.sy);
+            stageRoot.pivot?.set?.(s.pivx, s.pivy);
+            stageRoot.skew?.set?.(s.skx, s.sky);
+            stageRoot.rotation = s.rot;
+          }
+        }
+      } catch (_) {}
       if (window?.MapShine) window.MapShine.__bridgeCaptureActive = false;
     }
 
@@ -1056,6 +1453,17 @@ export class PixiContentLayerBridge {
       if (stageRoot) {
         /** @type {Array<{obj: PIXI.DisplayObject, visible: boolean, renderable: boolean, alpha: number}>} */
         const savedFallbackState = [];
+        const stageSavedFallbackTransform = {
+          px: Number(stageRoot.position?.x) || 0,
+          py: Number(stageRoot.position?.y) || 0,
+          sx: Number(stageRoot.scale?.x) || 1,
+          sy: Number(stageRoot.scale?.y) || 1,
+          pivx: Number(stageRoot.pivot?.x) || 0,
+          pivy: Number(stageRoot.pivot?.y) || 0,
+          skx: Number(stageRoot.skew?.x) || 0,
+          sky: Number(stageRoot.skew?.y) || 0,
+          rot: Number(stageRoot.rotation) || 0,
+        };
         let fallbackCanvas = null;
         try {
           if (window?.MapShine) window.MapShine.__bridgeCaptureActive = true;
@@ -1072,9 +1480,17 @@ export class PixiContentLayerBridge {
             if (!Number.isFinite(node.alpha) || node.alpha <= 0) node.alpha = 1;
           }
 
+          // Keep fallback in the same coordinate space and dimensions as the
+          // primary capture so compositor mapping remains deterministic.
+          stageRoot.position?.set?.(0, 0);
+          stageRoot.scale?.set?.(uiRenderScale, uiRenderScale);
+          stageRoot.pivot?.set?.(0, 0);
+          stageRoot.skew?.set?.(0, 0);
+          stageRoot.rotation = 0;
+
           let tempRT = null;
           try {
-            tempRT = PIXI.RenderTexture.create({ width: fw, height: fh });
+            tempRT = PIXI.RenderTexture.create({ width: uiRtW, height: uiRtH });
             const pixiVersion = String(PIXI?.VERSION || '');
             const isPixiV7 = /^7\./.test(pixiVersion);
             if (isPixiV7) {
@@ -1100,12 +1516,19 @@ export class PixiContentLayerBridge {
             s.obj.renderable = s.renderable;
             s.obj.alpha = s.alpha;
           }
+          try {
+            stageRoot.position?.set?.(stageSavedFallbackTransform.px, stageSavedFallbackTransform.py);
+            stageRoot.scale?.set?.(stageSavedFallbackTransform.sx, stageSavedFallbackTransform.sy);
+            stageRoot.pivot?.set?.(stageSavedFallbackTransform.pivx, stageSavedFallbackTransform.pivy);
+            stageRoot.skew?.set?.(stageSavedFallbackTransform.skx, stageSavedFallbackTransform.sky);
+            stageRoot.rotation = stageSavedFallbackTransform.rot;
+          } catch (_) {}
           if (window?.MapShine) window.MapShine.__bridgeCaptureActive = false;
         }
 
         if (fallbackCanvas && this._canvasHasContent(fallbackCanvas)) {
           capturedCanvas = fallbackCanvas;
-          this._lastUpdateStatus = `captured-fallback:${fw}x${fh}`;
+          this._lastUpdateStatus = `captured-fallback:${uiRtW}x${uiRtH}`;
           log.warn('[Bridge] Isolated drawings capture was empty; using non-isolated fallback stage capture');
         }
       }
@@ -1114,7 +1537,7 @@ export class PixiContentLayerBridge {
     // Final fallback: PrimaryCanvasGroup can render correctly only in Foundry's
     // normal app render path on some runtimes. If both RT extraction paths are
     // empty, force one app render and copy pixels from canvas.app.view.
-    if (capturedCanvas && !this._canvasHasContent(capturedCanvas)) {
+    if (capturedCanvas && !this._canvasHasContent(capturedCanvas) && !!window?.MapShine?.__pixiBridgeAllowViewFallback) {
       const app = canvas?.app ?? null;
       const view = app?.view ?? null;
       const stageRoot = canvas?.stage ?? null;
@@ -1125,7 +1548,7 @@ export class PixiContentLayerBridge {
         const savedViewFallbackState = [];
         try {
           if (window?.MapShine) window.MapShine.__bridgeCaptureActive = true;
-          for (const node of [stageRoot, primary, iface, ...drawingShapes]) {
+          for (const node of [stageRoot, primary, iface, ...uiShapes]) {
             if (!node) continue;
             savedViewFallbackState.push({
               obj: node,
@@ -1141,21 +1564,20 @@ export class PixiContentLayerBridge {
           // Render via Foundry's normal PIXI app path.
           try { app.render?.(); } catch (_) {}
 
-          const vw = Math.max(1, Math.round(Number(view.width) || fw));
-          const vh = Math.max(1, Math.round(Number(view.height) || fh));
+          const vw = Math.max(1, Math.round(Number(view.width) || uiRtW));
+          const vh = Math.max(1, Math.round(Number(view.height) || uiRtH));
           const copyCanvas = document.createElement('canvas');
-          // Bridge output must stay in screen-space dimensions (fw/fh).
-          // app.view can be higher-DPI backing size (vw/vh), which otherwise
-          // creates a partial-content square when sampled in compositor UV space.
-          copyCanvas.width = fw;
-          copyCanvas.height = fh;
+          // Bridge output must stay in the same world-space target dimensions
+          // used by the primary capture path.
+          copyCanvas.width = uiRtW;
+          copyCanvas.height = uiRtH;
           const copyCtx = copyCanvas.getContext('2d');
           if (copyCtx) {
-            copyCtx.clearRect(0, 0, fw, fh);
-            copyCtx.drawImage(view, 0, 0, vw, vh, 0, 0, fw, fh);
+            copyCtx.clearRect(0, 0, uiRtW, uiRtH);
+            copyCtx.drawImage(view, 0, 0, vw, vh, 0, 0, uiRtW, uiRtH);
             if (this._canvasHasContent(copyCanvas)) {
               capturedCanvas = copyCanvas;
-              this._lastUpdateStatus = `captured-view-fallback:${fw}x${fh}`;
+              this._lastUpdateStatus = `captured-view-fallback:${uiRtW}x${uiRtH}`;
               log.warn('[Bridge] RT extraction empty; using app.view fallback capture');
             }
           }
@@ -1174,8 +1596,16 @@ export class PixiContentLayerBridge {
 
     if (!capturedCanvas || !capturedCanvas.width || !capturedCanvas.height) {
       this._lastUpdateStatus = 'skip:empty-capture';
+      if (soundsLayer?.active) {
+        // SoundsLayer controls can render one frame later during tool/layer
+        // transitions. Keep last valid texture and request short retries.
+        this._dirty = true;
+        this._postDirtyCapturesRemaining = Math.max(this._postDirtyCapturesRemaining, 2);
+        return;
+      }
       this._clearChannel('world');
       this._clearChannel('ui');
+      this._dirty = false;
       return;
     }
 
@@ -1245,7 +1675,7 @@ export class PixiContentLayerBridge {
 
     this._dirty = false;
     if (!hadFallbackStatus) {
-      this._lastUpdateStatus = `captured:${w}x${h} shapes=${drawingShapes.size} probe#${this._probeLogCount}`;
+      this._lastUpdateStatus = `captured:${w}x${h} shapes=${uiShapes.size} probe#${this._probeLogCount}`;
     }
   }
 

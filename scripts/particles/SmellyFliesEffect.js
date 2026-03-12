@@ -1349,7 +1349,7 @@ export class SmellyFliesEffect {
       map: this.atlasTexture,
       transparent: true,
       depthWrite: false,
-      depthTest: false,
+      depthTest: true,
       blending: THREE.NormalBlending,
       side: THREE.DoubleSide
     });
@@ -1399,6 +1399,9 @@ export class SmellyFliesEffect {
 
     if (system.emitter) {
       system.emitter.userData = system.emitter.userData || {};
+      // Render fly particles in the main bus pass (layer 0) so they share
+      // the scene depth buffer and can be occluded by world geometry.
+      system.emitter.userData.msOverlayLayer = false;
       const b = area && area.bounds;
       if (b && typeof b === 'object') {
         const minX = b.minX;
@@ -1478,7 +1481,7 @@ export class SmellyFliesEffect {
       map: this.atlasTexture,
       transparent: true,
       depthWrite: false,
-      depthTest: false,
+      depthTest: true,
       blending: THREE.NormalBlending,
       side: THREE.DoubleSide
     });
@@ -1523,6 +1526,9 @@ export class SmellyFliesEffect {
 
     if (system.emitter) {
       system.emitter.userData = system.emitter.userData || {};
+      // Render fly particles in the main bus pass (layer 0) so they share
+      // the scene depth buffer and can be occluded by world geometry.
+      system.emitter.userData.msOverlayLayer = false;
       const minX = bounds.minX;
       const minY = bounds.minY;
       const maxX = bounds.maxX;

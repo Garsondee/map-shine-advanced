@@ -69,6 +69,7 @@ import { VisionModeEffectV2 } from './effects/VisionModeEffectV2.js';
 import { InvertEffectV2 } from './effects/InvertEffectV2.js';
 import { SepiaEffectV2 } from './effects/SepiaEffectV2.js';
 import { LensEffectV2 } from './effects/LensEffectV2.js';
+import { DistortionManager, DistortionLayer } from './effects/DistortionManager.js';
 import { LightningEffectV2 } from './effects/LightningEffectV2.js';
 import { AtmosphericFogEffectV2 } from './effects/AtmosphericFogEffectV2.js';
 import { FogOfWarEffectV2 } from './effects/FogOfWarEffectV2.js';
@@ -375,6 +376,13 @@ export class FloorCompositor {
     this._lensEffect = new LensEffectV2();
 
     /**
+     * V2 Distortion Manager: unified post-process distortion pass.
+     * Currently driven by FireEffectV2 heat-haze source.
+     * @type {DistortionManager}
+     */
+    this._distortionEffect = new DistortionManager();
+
+    /**
      * V2 Movement Preview Effect: token path preview lines, tile highlights, ghost
      * tokens, and drag-ghost sprites — all rendered in the bus scene at the
      * correct Z above tiles/tokens so they are always visible.
@@ -408,6 +416,15 @@ export class FloorCompositor {
 
     /** @type {string|null} Last resolved floor key used for outdoors sync diagnostics */
     this._lastOutdoorsFloorKey = null;
+
+    /** @type {THREE.Texture|null} Cached fire mask texture used for heat-haze blur */
+    this._fireHeatMaskInput = null;
+    /** @type {THREE.Texture|null} Cached blurred fire mask texture used by distortion */
+    this._fireHeatMaskOutput = null;
+    /** @type {number} Cached blur radius used to build _fireHeatMaskOutput */
+    this._fireHeatMaskBlurRadius = -1;
+    /** @type {number} Cached blur pass count used to build _fireHeatMaskOutput */
+    this._fireHeatMaskBlurPasses = -1;
 
     /** @type {import('../scene/map-points-manager.js').MapPointsManager|null} Last wired map-points manager instance */
     this._wiredMapPointsManager = null;
@@ -688,7 +705,7 @@ export class FloorCompositor {
   initialize(options = {}) {
     const _onProgress = typeof options?.onProgress === 'function' ? options.onProgress : null;
     // Total number of named effect init steps in this method — update when adding/removing effects.
-    const TOTAL_EFFECT_INITS = 38;
+    const TOTAL_EFFECT_INITS = 39;
     let _effectInitIndex = 0;
     const _reportProgress = (label) => {
       if (!_onProgress) return;
@@ -1083,6 +1100,11 @@ export class FloorCompositor {
       log.warn('FloorCompositor: LensEffectV2 initialize failed:', err);
     }
     _reportProgress('LensEffectV2');
+    initEffect('DistortionManagerV2', () => this._distortionEffect.initialize(this.renderer, this._renderBus._scene, this.camera));
+
+    try {
+      if (window.MapShine) window.MapShine.distortionManager = this._distortionEffect;
+    } catch (_) {}
 
     // Listen for floor/level changes so we can update tile mesh visibility.
     this._levelHookId = Hooks.on('mapShineLevelContextChanged', (payload) => {
@@ -1292,6 +1314,139 @@ export class FloorCompositor {
   // ── Render ──────────────────────────────────────────────────────────────────
 
   /**
+   * Asynchronously compiles all shaders used by the compositor and its effects.
+   * This prevents the main thread from freezing when the first frame renders.
+   * 
+   * It traverses all scenes (including the FloorRenderBus scene which contains
+   * meshes for all floors, visible or not), so materials for all floors are compiled.
+   * 
+   * @param {number} [timeoutMs=5000] - Maximum time to wait for compilation
+   * @returns {Promise<boolean>} True if completed fully, false if timed out or failed
+   */
+  async warmupAsync(timeoutMs = 5000) {
+    if (!this.renderer || typeof this.renderer.compileAsync !== 'function') {
+      log.warn('warmupAsync: renderer.compileAsync is not available');
+      return false;
+    }
+
+    const targets = [];
+    const seenTargets = new Set();
+    const pushTarget = (scene, camera, label = 'unknown') => {
+      if (!scene || scene.isScene !== true) return;
+      if (!camera || camera.isCamera !== true) return;
+      const key = `${scene.uuid || label}:${camera.uuid || 'no-camera-uuid'}`;
+      if (seenTargets.has(key)) return;
+      seenTargets.add(key);
+      targets.push({ scene, camera, label });
+    };
+
+    // 1. Add bus scene (contains all tile/overlay materials across all floors)
+    if (this._renderBus && this._renderBus._scene) {
+      pushTarget(this._renderBus._scene, this.camera, 'FloorRenderBus');
+    }
+
+    // 2. Add full-screen quad scene used for compositing
+    if (this._scene) {
+      pushTarget(this._scene, this.camera, 'FloorCompositorMain');
+    }
+
+    // 3. Sniff scenes from all registered effects
+    const effectKeys = [
+      '_specularEffect', '_fluidEffect', '_iridescenceEffect', '_prismEffect',
+      '_bushEffect', '_treeEffect', '_fireEffect', '_windowLightEffect',
+      '_lightingEffect', '_skyColorEffect', '_colorCorrectionEffect',
+      '_filterEffect', '_atmosphericFogEffect', '_fogEffect', '_bloomEffect',
+      '_sharpenEffect', '_cloudEffect', '_waterEffect', '_waterSplashesEffect',
+      '_underwaterBubblesEffect', '_ashDisturbanceEffect', '_smellyFliesEffect',
+      '_lightningEffect', '_candleFlamesEffect', '_playerLightEffect',
+      '_overheadShadowEffect', '_buildingShadowEffect', '_dotScreenEffect',
+      '_halftoneEffect', '_asciiEffect', '_dazzleOverlayEffect',
+      '_visionModeEffect', '_invertEffect', '_sepiaEffect', '_lensEffect',
+      '_movementPreviewEffect'
+    ];
+
+    for (const key of effectKeys) {
+      const effect = this[key];
+      if (!effect) continue;
+
+      if (typeof effect.getCompileTargets === 'function') {
+        const effectTargets = effect.getCompileTargets();
+        for (const target of effectTargets) {
+          if (target) {
+            pushTarget(target.scene, target.camera, `${key}.getCompileTargets`);
+          }
+        }
+      } else {
+        // Fallback: sniff common scene properties
+        const scenes = [
+          effect._composeScene, effect._quadScene, effect._scene, effect._cloudLayerScene,
+          effect._lightScene, effect._darknessScene, effect._passThroughScene,
+          effect._waterDataPackScene
+        ];
+        // Camera is usually _composeCamera, _quadCamera, or this.camera
+        const camera = effect._composeCamera || effect._quadCamera || effect._camera || this.camera;
+        for (const s of scenes) {
+          pushTarget(s, camera, `${key}.fallback`);
+        }
+      }
+    }
+
+    if (targets.length === 0) return true;
+
+    log.info(`warmupAsync: starting compilation for ${targets.length} scenes...`);
+
+    const cameraMasks = new Map();
+    try {
+      const enableAllLayers = (camera) => {
+        if (!camera || camera.isCamera !== true || !camera.layers) return;
+        if (cameraMasks.has(camera)) return;
+        cameraMasks.set(camera, camera.layers.mask);
+        camera.layers.enableAll();
+      };
+
+      // Compile with all layers enabled so hidden floors also warm up.
+      enableAllLayers(this.camera);
+
+      const promises = [];
+      for (const target of targets) {
+        enableAllLayers(target.camera);
+        try {
+          const p = this.renderer.compileAsync(target.scene, target.camera)
+            .catch((err) => {
+              log.warn(`warmupAsync: compileAsync failed for target ${target.label}`, err);
+            });
+          promises.push(p);
+        } catch (err) {
+          log.warn(`warmupAsync: compileAsync threw synchronously for target ${target.label}`, err);
+        }
+      }
+
+      if (promises.length === 0) {
+        log.warn('warmupAsync: no valid compile targets');
+        return false;
+      }
+
+      const timeoutPromise = new Promise((resolve) => setTimeout(() => resolve('timeout'), timeoutMs));
+      const result = await Promise.race([Promise.all(promises), timeoutPromise]);
+      
+      if (result === 'timeout') {
+        log.warn(`warmupAsync: shader compilation timed out after ${timeoutMs}ms, proceeding with lazy compilation`);
+        return false;
+      }
+      
+      log.info('warmupAsync: shader compilation finished successfully');
+      return true;
+    } catch (err) {
+      log.error('warmupAsync: error during shader compilation', err);
+      return false;
+    } finally {
+      for (const [camera, mask] of cameraMasks.entries()) {
+        try { camera.layers.mask = mask; } catch (_) {}
+      }
+    }
+  }
+
+  /**
    * Per-frame render entry point. Called by EffectComposer when V2 is active.
    *
    * Renders the bus scene (albedo tiles + specular overlays) directly to screen.
@@ -1451,6 +1606,7 @@ export class FloorCompositor {
       try { this._invertEffect?.update?.(timeInfo); } catch (_) {}
       try { this._sepiaEffect?.update?.(timeInfo); } catch (_) {}
       try { this._lensEffect?.update?.(timeInfo); } catch (_) {}
+      try { this._distortionEffect?.update?.(timeInfo); } catch (_) {}
       // Overhead shadows: update sun direction + uniform params from controls.
       try { this._overheadShadowEffect?.update?.(timeInfo); } catch (err) {
         log.warn('OverheadShadowsEffectV2 update threw, skipping overhead shadow update:', err);
@@ -1482,10 +1638,13 @@ export class FloorCompositor {
       try { log.info('[V2 Frame] ▶ FloorCompositor.render: BEGIN'); } catch (_) {}
     }
 
-    // Force base/document tile alpha for shadow capture so overhead shadows
-    // remain stable even when the visible overhead layer is hover-faded.
+    // Keep bus tile materials aligned to live TileManager sprite opacity before
+    // shadow capture. OverheadShadowsEffectV2 now handles its own stable caster
+    // capture internally (forced-opacity roofTarget pass), while the separate
+    // roof-visibility pass must see runtime fade alpha to avoid stale clipping
+    // holes in building shadows.
     try {
-      this._renderBus?.syncStaticTileAlphaState?.();
+      this._renderBus?.syncRuntimeTileState?.();
     } catch (_) {}
 
     // Capture overhead tile alpha + compute soft shadow factor (V1 signature)
@@ -1505,13 +1664,8 @@ export class FloorCompositor {
     }
     if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: buildingShadows.render DONE'); } catch (_) {} }
 
-    // Mirror runtime tile sprite opacity (hover/occlusion fades) into bus tile
-    // materials before the main albedo render, but after overhead shadow capture.
-    // This keeps roof/tree-style shadows stable while allowing tiles + overlays
-    // (specular/fluid/etc.) to fade with hover-hidden state.
-    try {
-      this._renderBus?.syncRuntimeTileState?.();
-    } catch (_) {}
+    // Runtime tile opacity already synced before shadow capture above. Keep the
+    // value as-is for the main albedo render.
 
     // ── Step 1: Render bus scene → sceneRT ───────────────────────────────
     // The bus scene contains albedo tiles + specular/fire overlays.
@@ -1646,6 +1800,18 @@ export class FloorCompositor {
       if (waterWrote) currentInput = waterOutput;
       if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: water.render DONE'); } catch (_) {} }
     }
+
+    // Distortion pass (fire-driven heat haze).
+    if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: distortion.render'); } catch (_) {} }
+    if (this._distortionEffect?.enabled && this._distortionEffect?.params?.enabled) {
+      this._syncFireHeatDistortionSource();
+      const distOutput = (currentInput === this._postA) ? this._postB : this._postA;
+      this._distortionEffect.setBuffers(currentInput, distOutput);
+      this._distortionEffect.setRenderToScreen(false);
+      this._distortionEffect.render(this.renderer, this._renderBus?._scene ?? this.scene, this.camera);
+      currentInput = distOutput;
+    }
+    if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: distortion.render DONE'); } catch (_) {} }
 
     // Atmospheric fog pass: weather-driven distance haze over the graded scene.
     if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: atmosphericFog.render'); } catch (_) {} }
@@ -2165,7 +2331,131 @@ export class FloorCompositor {
     // Outdoors mask floor changes are handled above via GpuSceneMaskCompositor
     // Swap active water SDF data for the new floor.
     try { this._waterEffect?.onFloorChange?.(maxFloorIndex); } catch (_) {}
+    this._fireHeatMaskInput = null;
+    this._fireHeatMaskOutput = null;
+    this._fireHeatMaskBlurRadius = -1;
+    this._fireHeatMaskBlurPasses = -1;
     log.info(`FloorCompositor: visibility set to floors 0–${maxFloorIndex}`);
+  }
+
+  /**
+   * Update DistortionManager's `heat` source from the currently active fire mask.
+   * Heat intensity and expansion scale with fire size/rate so larger flames produce
+   * broader, stronger haze.
+   * @private
+   */
+  _syncFireHeatDistortionSource() {
+    const dist = this._distortionEffect;
+    if (!dist) return;
+
+    const fire = this._fireEffect;
+    const fireParams = fire?.params ?? null;
+    const fireEnabled = !!(fire?.enabled && fireParams?.enabled !== false && fireParams?.heatDistortionEnabled !== false);
+    if (!fireEnabled) {
+      dist.setSourceEnabled('heat', false);
+      return;
+    }
+
+    const compositor = window.MapShine?.sceneComposer?._sceneMaskCompositor;
+    const ctx = window.MapShine?.activeLevelContext ?? null;
+    const b = Number(ctx?.bottom);
+    const t = Number(ctx?.top);
+    const activeKey = (Number.isFinite(b) && Number.isFinite(t)) ? `${b}:${t}` : null;
+
+    let fireMask = null;
+    if (compositor && activeKey) {
+      fireMask = compositor.getFloorTexture?.(activeKey, 'fire') ?? null;
+    }
+    if (!fireMask && compositor && Number.isFinite(b) && Number.isFinite(t)) {
+      // In levels-inferred contexts, activeLevelContext keys may be fractional and
+      // not string-identical to compositor cache keys. Resolve by numeric range.
+      const cacheKeys = Array.isArray(compositor?._floorCache?.keys?.())
+        ? compositor._floorCache.keys()
+        : Array.from(compositor?._floorCache?.keys?.() ?? []);
+      const mid = (b + t) * 0.5;
+      let bestKey = null;
+      let bestDelta = Infinity;
+      for (const key of cacheKeys) {
+        if (typeof key !== 'string') continue;
+        const parts = key.split(':');
+        if (parts.length !== 2) continue;
+        const kb = Number(parts[0]);
+        const kt = Number(parts[1]);
+        if (!Number.isFinite(kb) || !Number.isFinite(kt)) continue;
+        if (mid < kb || mid > kt) continue;
+        const delta = Math.abs(kb - b) + Math.abs(kt - t);
+        if (delta < bestDelta) {
+          bestDelta = delta;
+          bestKey = key;
+        }
+      }
+      if (bestKey) {
+        fireMask = compositor.getFloorTexture?.(bestKey, 'fire') ?? null;
+      }
+    }
+    if (!fireMask) {
+      fireMask = compositor?.getGroundFloorMaskTexture?.('fire') ?? null;
+    }
+    if (!fireMask) {
+      fireMask = window.MapShine?.effectMaskRegistry?.getSlot?.('fire')?.texture ?? null;
+    }
+    if (!fireMask) {
+      fireMask = window.MapShine?.sceneComposer?.currentBundle?.masks?.find?.(
+        (m) => (m?.id === 'fire' || m?.type === 'fire')
+      )?.texture ?? null;
+    }
+    if (!fireMask) {
+      fireMask = window.MapShine?.maskManager?.getTexture?.('fire.scene') ?? null;
+    }
+
+    if (!fireMask) {
+      dist.setSourceEnabled('heat', false);
+      return;
+    }
+
+    const baseIntensity = Number.isFinite(Number(fireParams.heatDistortionIntensity)) ? Number(fireParams.heatDistortionIntensity) : 0.05;
+    const heatFrequency = Number.isFinite(Number(fireParams.heatDistortionFrequency)) ? Number(fireParams.heatDistortionFrequency) : 20.0;
+    const heatSpeed = Number.isFinite(Number(fireParams.heatDistortionSpeed)) ? Number(fireParams.heatDistortionSpeed) : 3.0;
+    const fireRate = Number.isFinite(Number(fireParams.globalFireRate)) ? Number(fireParams.globalFireRate) : 5.2;
+    const fireSizeMin = Number.isFinite(Number(fireParams.fireSizeMin)) ? Number(fireParams.fireSizeMin) : 19;
+    const fireSizeMax = Number.isFinite(Number(fireParams.fireSizeMax)) ? Number(fireParams.fireSizeMax) : 170;
+    const avgSize = Math.max(1, (fireSizeMin + fireSizeMax) * 0.5);
+
+    const sizeScale = Math.max(0.25, Math.min(2.0, avgSize / 95.0));
+    const rateScale = Math.max(0.15, Math.min(2.0, fireRate / 5.2));
+    const finalIntensity = Math.max(0.0, Math.min(0.2, baseIntensity * sizeScale * rateScale));
+    const blurRadius = Math.max(1.0, Math.min(8.0, 0.8 + (avgSize / 65.0) + (fireRate * 0.08)));
+    const blurPasses = blurRadius >= 3.0 ? 2 : 1;
+
+    let heatMask = fireMask;
+    const needsBlurRefresh =
+      this._fireHeatMaskInput !== fireMask ||
+      Math.abs(this._fireHeatMaskBlurRadius - blurRadius) > 0.01 ||
+      this._fireHeatMaskBlurPasses !== blurPasses;
+    if (needsBlurRefresh) {
+      this._fireHeatMaskInput = fireMask;
+      this._fireHeatMaskBlurRadius = blurRadius;
+      this._fireHeatMaskBlurPasses = blurPasses;
+      this._fireHeatMaskOutput = dist.blurMask(fireMask, blurRadius, blurPasses) ?? fireMask;
+    }
+    if (this._fireHeatMaskOutput) heatMask = this._fireHeatMaskOutput;
+
+    const source = dist.getSource('heat');
+    if (!source) {
+      dist.registerSource('heat', DistortionLayer.UNDER_OVERHEAD, heatMask, {
+        intensity: finalIntensity,
+        frequency: heatFrequency,
+        speed: heatSpeed,
+      });
+    } else {
+      dist.updateSourceMask('heat', heatMask);
+      dist.updateSourceParams('heat', {
+        intensity: finalIntensity,
+        frequency: heatFrequency,
+        speed: heatSpeed,
+      });
+      dist.setSourceEnabled('heat', true);
+    }
   }
 
   /**
@@ -2198,6 +2488,7 @@ export class FloorCompositor {
     try { this._invertEffect?.onResize?.(w, h); } catch (_) {}
     try { this._sepiaEffect?.onResize?.(w, h); } catch (_) {}
     try { this._lensEffect?.onResize?.(w, h); } catch (_) {}
+    try { this._distortionEffect?.onResize?.(w, h); } catch (_) {}
     log.debug(`FloorCompositor.onResize: RTs resized to ${w}x${h}`);
   }
 
@@ -2246,6 +2537,7 @@ export class FloorCompositor {
     try { this._invertEffect?.dispose?.(); } catch (_) {}
     try { this._sepiaEffect?.dispose?.(); } catch (_) {}
     try { this._lensEffect?.dispose?.(); } catch (_) {}
+    try { this._distortionEffect?.dispose?.(); } catch (_) {}
     try { this._fireEffect.dispose(); } catch (_) {}
     try { this._specularEffect.dispose(); } catch (_) {}
     try { this._windowLightEffect.dispose(); } catch (_) {}

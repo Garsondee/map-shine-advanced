@@ -52,7 +52,6 @@ import { TweakpaneManager } from '../ui/tweakpane-manager.js';
 import { ControlPanelManager } from '../ui/control-panel-manager.js';
 import { CameraPanelManager } from '../ui/camera-panel-manager.js';
 import { LevelNavigatorOverlay } from '../ui/level-navigator-overlay.js';
-import { EnhancedLightInspector } from '../ui/enhanced-light-inspector.js';
 import { LevelsAuthoringDialog } from '../ui/levels-authoring-dialog.js';
 import { TokenManager } from '../scene/token-manager.js';
 import { VisibilityController } from '../vision/VisibilityController.js';
@@ -63,7 +62,6 @@ import { TileMotionManager } from '../scene/tile-motion-manager.js';
 import { SurfaceRegistry } from '../scene/surface-registry.js';
 import { WallManager } from '../scene/wall-manager.js';
 import { DoorMeshManager } from '../scene/DoorMeshManager.js';
-import { NoteManager } from '../scene/note-manager.js';
 import { FloorStack } from '../scene/FloorStack.js';
 import { FloorLayerManager } from '../compositor-v2/FloorLayerManager.js';
 import { FilterEffectV2 } from '../compositor-v2/effects/FilterEffectV2.js';
@@ -79,10 +77,6 @@ import { VisionModeEffectV2 } from '../compositor-v2/effects/VisionModeEffectV2.
 import { InvertEffectV2 } from '../compositor-v2/effects/InvertEffectV2.js';
 import { SepiaEffectV2 } from '../compositor-v2/effects/SepiaEffectV2.js';
 import { LensEffectV2 } from '../compositor-v2/effects/LensEffectV2.js';
-import { TemplateManager } from '../scene/template-manager.js';
-import { LightIconManager } from '../scene/light-icon-manager.js';
-import { EnhancedLightIconManager } from '../scene/enhanced-light-icon-manager.js';
-import { SoundIconManager } from '../scene/sound-icon-manager.js';
 import { InteractionManager } from '../scene/interaction-manager.js';
 import { PixiContentLayerBridge } from './pixi-content-layer-bridge.js';
 import { GridRenderer } from '../scene/grid-renderer.js';
@@ -103,7 +97,6 @@ import { stateApplier } from '../ui/state-applier.js';
 import { createEnhancedLightsApi } from '../effects/EnhancedLightsApi.js';
 import { LightEnhancementStore } from '../effects/LightEnhancementStore.js';
 import { OverlayUIManager } from '../ui/overlay-ui-manager.js';
-import { LightEditorTweakpane } from '../ui/light-editor-tweakpane.js';
 import { EffectCapabilitiesRegistry } from '../effects/effect-capabilities-registry.js';
 import { GraphicsSettingsManager } from '../ui/graphics-settings-manager.js';
 import { TokenMovementManager } from '../scene/token-movement-manager.js';
@@ -548,19 +541,19 @@ let drawingManager = null;
 /** @type {PixiContentLayerBridge|null} */
 let pixiContentLayerBridge = null;
 
-/** @type {NoteManager|null} */
+/** @type {any|null} */
 let noteManager = null;
 
-/** @type {TemplateManager|null} */
+/** @type {any|null} */
 let templateManager = null;
 
-/** @type {LightIconManager|null} */
+/** @type {any|null} */
 let lightIconManager = null;
 
-/** @type {EnhancedLightIconManager|null} */
+/** @type {any|null} */
 let enhancedLightIconManager = null;
 
-/** @type {SoundIconManager|null} */
+/** @type {any|null} */
 let soundIconManager = null;
 
 /** @type {InteractionManager|null} */
@@ -4096,22 +4089,17 @@ async function createThreeCanvas(scene) {
     // Keep PIXI as the single visual source for drawings so the content bridge
     // can be validated in isolation. Three-native DrawingManager remains disabled.
     drawingManager = null;
-    noteManager = new NoteManager(threeScene);
-    templateManager = new TemplateManager(threeScene);
-    lightIconManager = new LightIconManager(threeScene);
-    enhancedLightIconManager = new EnhancedLightIconManager(threeScene);
-    soundIconManager = new SoundIconManager(threeScene);
+    noteManager = null;
+    templateManager = null;
+    lightIconManager = null;
+    enhancedLightIconManager = null;
+    soundIconManager = null;
     mapPointsManager = new MapPointsManager(threeScene);
 
     if (isDebugLoad) {
       // Debug mode: initialize managers sequentially for accurate per-manager timing
       const lightweightManagers = [
         ['manager.DoorMesh.init', doorMeshManager],
-        ['manager.Note.init', noteManager],
-        ['manager.Template.init', templateManager],
-        ['manager.LightIcon.init', lightIconManager],
-        ['manager.EnhancedLightIcon.init', enhancedLightIconManager],
-        ['manager.SoundIcon.init', soundIconManager],
         ['manager.MapPoints.init', mapPointsManager],
         ['manager.GridRenderer.init', gridRenderer],
       ];
@@ -4126,11 +4114,6 @@ async function createThreeCanvas(scene) {
       _setCreateThreeCanvasProgress('scene.managers.lightweightBatch.init');
       await Promise.all([
         Promise.resolve(doorMeshManager.initialize()),
-        Promise.resolve(noteManager.initialize()),
-        Promise.resolve(templateManager.initialize()),
-        Promise.resolve(lightIconManager.initialize()),
-        Promise.resolve(enhancedLightIconManager.initialize()),
-        Promise.resolve(soundIconManager.initialize()),
         mapPointsManager.initialize(),
         Promise.resolve(gridRenderer.initialize()),
       ]);
@@ -4140,7 +4123,7 @@ async function createThreeCanvas(scene) {
     effectComposer.addUpdatable(gridRenderer);
     if (window.MapShine) window.MapShine.doorMeshManager = doorMeshManager;
     console.log(' -> Manager: Lightweight batch DONE');
-    log.info('Parallel manager batch initialized (Door, Note, Template, LightIcon, EnhancedLightIcon, SoundIcon, MapPoints, Grid)');
+    log.info('Parallel manager batch initialized (Door, MapPoints, Grid)');
 
     // Wire map points to particle effects (fire, candle flame, smelly flies, etc.)
     // V2: No particle effects ->-> skip wiring.
@@ -4215,13 +4198,7 @@ async function createThreeCanvas(scene) {
     effectComposer.addUpdatable(overlayUIManager);
     if (isDebugLoad) dlp.end('manager.OverlayUI.init');
 
-    if (isDebugLoad) dlp.begin('manager.LightEditor.init', 'manager');
-    _setCreateThreeCanvasProgress('scene.managers.lightEditor.init');
-    lightEditor = new LightEditorTweakpane(overlayUIManager);
-    lightEditor.initialize();
-    if (isDebugLoad) dlp.end('manager.LightEditor.init');
-
-    safeCall(() => effectComposer.addUpdatable(lightEditor), 'addUpdatable(lightEditor)', Severity.COSMETIC);
+    lightEditor = null;
 
     // Expose for InteractionManager selection routing and debugging.
     if (window.MapShine) {
@@ -4230,7 +4207,6 @@ async function createThreeCanvas(scene) {
       window.MapShine.pixiContentLayerBridge = pixiContentLayerBridge;
       window.MapShine.overlayUIManager = overlayUIManager;
       window.MapShine.lightEditor = lightEditor;
-      window.MapShine.noteManager = noteManager;
     }
 
     // Step 5c: Initialize zone manager (bespoke stair/elevator zones)
@@ -5763,26 +5739,11 @@ function destroyThreeCanvas() {
     log.debug('Drawing manager disposed');
   }
 
-  // Dispose note manager
-  if (noteManager) {
-    noteManager.dispose();
-    noteManager = null;
-    log.debug('Note manager disposed');
-  }
+  
 
-  // Dispose template manager
-  if (templateManager) {
-    templateManager.dispose();
-    templateManager = null;
-    log.debug('Template manager disposed');
-  }
+  
 
-  // Dispose light icon manager
-  if (lightIconManager) {
-    lightIconManager.dispose();
-    lightIconManager = null;
-    log.debug('Light icon manager disposed');
-  }
+  
 
   if (enhancedLightIconManager) {
     enhancedLightIconManager.dispose();

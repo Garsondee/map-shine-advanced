@@ -466,7 +466,7 @@ export class ControlsIntegration {
       this.layerVisibility?.update();
       this.inputRouter.autoUpdate();
       this._updateTilesVisualState();
-      this._updateDrawingsVisualState();
+      this._updatePixiEditorVisualState();
 
       // Keep global diagnostics/runtime lookups in sync even when ControlsIntegration
       // initializes after initial manager exposure.
@@ -800,29 +800,52 @@ export class ControlsIntegration {
   }
 
   /**
-   * Ensure Foundry DrawingsLayer is active when drawings controls/tools are
-   * selected. This mirrors the tiles re-activation guard and avoids stale
-   * activeLayer state that prevents native drawing workflows.
+   * Ensure Foundry's active PIXI UI layer is interactable when its tools are selected.
+   * This mirrors the tiles re-activation guard and avoids stale activeLayer state 
+   * that prevents native workflows.
    * @private
    */
-  _updateDrawingsVisualState() {
-    if (!canvas?.ready || !canvas.drawings) return;
-    const isDrawingsActive = this._isDrawingsContextActive();
-    if (!isDrawingsActive) return;
+  _updatePixiEditorVisualState() {
+    if (!canvas?.ready) return;
+    
+    // Check if any PIXI editor context is active
+    const isActive = 
+      this._isDrawingsContextActive() ||
+      this._isLightingContextActive() ||
+      this._isSoundsContextActive() ||
+      this._isNotesContextActive() ||
+      this._isTemplatesContextActive() ||
+      this._isRegionsContextActive();
+
+    if (!isActive) return;
 
     try {
-      if (canvas.activeLayer !== canvas.drawings && typeof canvas.drawings.activate === 'function') {
-        canvas.drawings.activate();
+      // Ensure the currently selected layer is active
+      const controlName = ui?.controls?.control?.name;
+      let targetLayer = null;
+      switch (controlName) {
+        case 'drawings': targetLayer = canvas.drawings; break;
+        case 'lighting': targetLayer = canvas.lighting; break;
+        case 'sounds': targetLayer = canvas.sounds; break;
+        case 'notes': targetLayer = canvas.notes; break;
+        case 'templates': targetLayer = canvas.templates; break;
+        case 'regions': targetLayer = canvas.regions; break;
+      }
+      
+      if (targetLayer && canvas.activeLayer !== targetLayer && typeof targetLayer.activate === 'function') {
+        targetLayer.activate();
+      }
+      
+      if (targetLayer) {
+        targetLayer.visible = true;
+        targetLayer.renderable = true;
+        targetLayer.interactiveChildren = true;
       }
     } catch (_) {
       // Best effort only
     }
 
-    canvas.drawings.visible = true;
-    canvas.drawings.renderable = true;
-    canvas.drawings.interactiveChildren = true;
-
-    // Keep ownership consistent for native drawing interactions.
+    // Keep ownership consistent for native UI layer interactions.
     const pixiCanvas = canvas?.app?.view;
     if (pixiCanvas) {
       pixiCanvas.style.pointerEvents = 'auto';
@@ -1115,7 +1138,7 @@ export class ControlsIntegration {
           this.inputRouter?.autoUpdate();
           this._updateWallsVisualState();
           this._updateTilesVisualState();
-          this._updateDrawingsVisualState();
+          this._updatePixiEditorVisualState();
           this._updateThreeGizmoVisibility();
           this._applyPixiEditorOverlayGate();
           this._logInteractionSnapshot('activateCanvasLayer.postUpdate', {
@@ -1139,7 +1162,7 @@ export class ControlsIntegration {
           this.inputRouter?.autoUpdate();
           this._updateWallsVisualState();
           this._updateTilesVisualState();
-          this._updateDrawingsVisualState();
+          this._updatePixiEditorVisualState();
           this._updateThreeGizmoVisibility();
           this._applyPixiEditorOverlayGate();
           this._logInteractionSnapshot('renderSceneControls.postUpdate');
@@ -1421,7 +1444,7 @@ export class ControlsIntegration {
         this.layerVisibility?.update();
         this.inputRouter?.autoUpdate();
         this._updateTilesVisualState();
-        this._updateDrawingsVisualState();
+        this._updatePixiEditorVisualState();
         this._updateThreeGizmoVisibility();
         this.cameraSync?.forceFullSync();
         

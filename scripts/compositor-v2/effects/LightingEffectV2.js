@@ -437,15 +437,10 @@ export class LightingEffectV2 {
             // with sceneUvFoundry, so do not apply an additional Y flip here.
             float bldShadow = clamp(texture2D(tBuildingShadow, sceneUvFoundry).r, 0.0, 1.0);
 
-            // Do not apply projected building shadows onto visible overhead roofs.
-            // roofAlpha is screen-space (same vUv convention as overhead passes).
-            float roofVisible = 0.0;
-            if (uHasOverheadRoofAlpha > 0.5) {
-              roofVisible = step(0.05, clamp(texture2D(tOverheadRoofAlpha, vUv).a, 0.0, 1.0));
-            }
-
-            // Blend: 1.0 = shadow has full effect, 0.0 = no effect.
-            float shadowMix = mix(1.0, bldShadow, uBuildingShadowOpacity * (1.0 - roofVisible));
+            // Strict layering model: building shadows are a ground shading term.
+            // Overhead visibility should not mask/cut this term; overhead tiles
+            // are layered above the lit ground by draw order.
+            float shadowMix = mix(1.0, bldShadow, uBuildingShadowOpacity);
             // Apply only to ambient contribution; dynamic lights punch through.
             vec3 ambientComponent = totalIllumination - vec3(lightI) * master;
             ambientComponent *= shadowMix;

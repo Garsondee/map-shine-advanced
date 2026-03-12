@@ -459,14 +459,15 @@ export class WeatherParticlesV2 {
       const emitter = ps.emitter;
       const ud = emitter.userData || (emitter.userData = {});
 
-      // Force all quarks batches onto the overlay layer so the bus render
-      // pass includes them. This must run even when msAutoCull is disabled
-      // (foam systems set msAutoCull=false) — otherwise the batch can end up
-      // on a layer the camera isn't rendering and appear "missing".
+      // Force quarks batches onto the requested render layer so the correct
+      // bus pass includes them. Most systems stay on OVERLAY_THREE_LAYER,
+      // but specific systems can opt into layer 0 for full depth integration
+      // with tiles/tokens in the main scene pass.
       try {
         const idx = systemMap.get(ps);
         const batch = (idx !== undefined && batches) ? batches[idx] : null;
-        if (batch?.layers?.set) batch.layers.set(OVERLAY_THREE_LAYER);
+        const layer = (ud.msOverlayLayer === false) ? 0 : OVERLAY_THREE_LAYER;
+        if (batch?.layers?.set) batch.layers.set(layer);
       } catch (_) {}
 
       // Allow specific systems (e.g. full-scene foam overlays) to opt out of

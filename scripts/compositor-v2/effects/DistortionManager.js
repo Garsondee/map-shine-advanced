@@ -979,6 +979,13 @@ export class DistortionManager {
             // This keeps tiles without any _Water mask treated as non-water.
             waterMask *= (1.0 - waterOccluder);
 
+            // Roof masking should only gate water distortion. Heat haze from fire
+            // must remain visible around flames regardless of roof coverage.
+            if (uHasRoofAlpha > 0.5) {
+              float roofAlpha = texture2D(tRoofAlpha, vUv).a;
+              waterMask *= (1.0 - roofAlpha);
+            }
+
             // Use waterUv for noise coords so ripples stay pinned to the map
             // and aligned to the mask's UV convention.
             vec2 waterOffset = waterDistortion(waterUv, uTime, uWaterIntensity, uWaterFrequency, uWaterSpeed);
@@ -1067,14 +1074,6 @@ export class DistortionManager {
           totalOffset *= (1.0 - depthOccluder);
           totalMask *= (1.0 - depthOccluder);
           waterOnlyMask *= (1.0 - depthOccluder);
-
-          // Apply roof masking if needed (distortion only under roofs)
-          if (uHasRoofAlpha > 0.5) {
-            float roofAlpha = texture2D(tRoofAlpha, vUv).a;
-            // Areas under visible roofs don't get distorted
-            totalOffset *= (1.0 - roofAlpha);
-            totalMask *= (1.0 - roofAlpha);
-          }
           
           // Apply global intensity
           totalOffset *= uGlobalIntensity;
@@ -1577,16 +1576,12 @@ export class DistortionManager {
           // screen-space UV offset. (Zoom out => smaller offset.)
           float zoom = max(uZoom, 0.001);
           float zoomMax = max(uZoomMax, 0.001);
-          // IMPORTANT: always gate the actual UV offset by the distortion mask.
-          // This prevents hard cut edges and avoids any tiny mask leakage from
-          // distorting the whole scene.
-          // Normalize against max zoom so strength is monotonic as you zoom out.
-          // Example: if maxZoom=3, then zoom=0.94 => zoomNorm~0.31 (not near 1.0).
           float zoomNorm = clamp(zoom / zoomMax, 0.0, 1.0);
-
-          // General distortion mask (heat haze from fire).
-          // Floor-presence gating removed — per-floor rendering handles isolation.
-          float mask01 = clamp(mask, 0.0, 1.0);
+          // Distortion offsets are already mask-weighted in the composite pass.
+          // Use zoom=1.0 as baseline and attenuate only when zoomed out so heat
+          // haze does not get stronger as the camera pulls back.
+          // (zoom > 1.0 keeps baseline strength; zoom < 1.0 reduces offset)
+          float zoomScale = clamp(zoom, 0.08, 1.0);
 
           // Tokens should not be distorted/tinted by post-process effects.
           // tokenMask is authored in screen UV space, alpha = 1 inside token silhouette.
@@ -1596,12 +1591,12 @@ export class DistortionManager {
           }
           float tokenKeep = 1.0 - tokenMask01;
 
-          vec2 scaledOffset = offset * zoomNorm * mask01 * tokenKeep;
+          vec2 scaledOffset = offset * zoomScale * tokenKeep;
 
           // Clamp maximum distortion in pixels. Also reduce the allowed pixel shift
           // when zoomed out so the effect doesn't dominate the scene.
           vec2 texelSize = 1.0 / max(uResolution, vec2(1.0));
-          float maxPixels = 8.0 * zoomNorm;
+          float maxPixels = 8.0 * zoomScale;
           float maxOffsetUv = maxPixels * max(texelSize.x, texelSize.y);
           float offLen = length(scaledOffset);
           vec2 zoomedOffset = (offLen > maxOffsetUv && offLen > 1e-6)

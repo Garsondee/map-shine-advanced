@@ -207,6 +207,9 @@ export class StyledLoadingScreenRenderer {
 
   showBlack(message = 'Loading…') {
     this.ensure();
+    // Cancel any in-flight fade from a previous scene load.
+    // Without this, a stale fadeIn() completion can hide a newly shown overlay.
+    this._token++;
     this._resetProgress();
     this.setMessage(message);
     this._startTimer();
@@ -219,11 +222,14 @@ export class StyledLoadingScreenRenderer {
   }
 
   showLoading(message = 'Loading…') {
+    // Keep behavior aligned with showBlack while preserving explicit API intent.
     this.showBlack(message);
   }
 
   hide() {
     if (!this.el) return;
+    // Invalidate pending async fades so they cannot race future show calls.
+    this._token++;
     this._resetProgress();
     this._stopTimer();
     this.el.classList.add('map-shine-loading-overlay--hidden');

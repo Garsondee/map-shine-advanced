@@ -112,10 +112,62 @@ export class InputRouter {
       || activeLayerName === 'drawings'
       || activeLayerName === 'drawing'
       || activeLayerCtor === 'drawingslayer';
-    const pixiVisualOpacity = (isV2Active && !isDrawingsContext) ? '0' : '1';
+      
+    const isLightingContext =
+      !!canvas?.lighting?.active
+      || activeControl === 'lighting'
+      || activeControl === 'light'
+      || activeControlLayer === 'lighting'
+      || activeControlLayer === 'light'
+      || activeLayerName === 'lighting'
+      || activeLayerName === 'light'
+      || activeLayerCtor === 'lightinglayer';
+      
+    const isSoundsContext =
+      !!canvas?.sounds?.active
+      || activeControl === 'sounds'
+      || activeControl === 'sound'
+      || activeControlLayer === 'sounds'
+      || activeControlLayer === 'sound'
+      || activeLayerName === 'sounds'
+      || activeLayerName === 'sound'
+      || activeLayerCtor === 'soundslayer';
+      
+    const isNotesContext =
+      !!canvas?.notes?.active
+      || activeControl === 'notes'
+      || activeControl === 'note'
+      || activeControlLayer === 'notes'
+      || activeControlLayer === 'note'
+      || activeLayerName === 'notes'
+      || activeLayerName === 'note'
+      || activeLayerCtor === 'noteslayer';
+      
+    const isTemplatesContext =
+      !!canvas?.templates?.active
+      || activeControl === 'templates'
+      || activeControl === 'template'
+      || activeControlLayer === 'templates'
+      || activeControlLayer === 'template'
+      || activeLayerName === 'templates'
+      || activeLayerName === 'template'
+      || activeLayerCtor === 'templatelayer';
+      
+    const isRegionsContext =
+      !!canvas?.regions?.active
+      || activeControl === 'regions'
+      || activeControl === 'region'
+      || activeControlLayer === 'regions'
+      || activeControlLayer === 'region'
+      || activeLayerName === 'regions'
+      || activeLayerName === 'region'
+      || activeLayerCtor === 'regionlayer';
+
+    const isPixiContext = isDrawingsContext || isLightingContext || isSoundsContext || isNotesContext || isTemplatesContext || isRegionsContext;
+    const pixiVisualOpacity = (isV2Active && !isPixiContext) ? '0' : '1';
     // Only force PIXI overlay when actually in PIXI mode (for layers we haven't
-    // replaced yet like drawings, regions, sounds, notes, templates).
-    // Walls, lighting, and tokens are fully Three.js-native now.
+    // replaced yet like drawings, regions, sounds, notes, templates, and now lights).
+    // Walls and tokens are fully Three.js-native now.
     const forcePixiOverlay = mode === InputMode.PIXI;
     if (window.MapShine) {
       window.MapShine.__forcePixiEditorOverlay = forcePixiOverlay;
@@ -343,10 +395,58 @@ export class InputRouter {
       activeControlLayer === 'drawings' ||
       activeControlLayer === 'drawing';
 
-    // Drawings are Foundry-native PIXI workflows. Prioritize this check before
-    // token/wall/light/tile ownership to survive transient stale activeLayer state
+    const isTemplatesLayer =
+      !!canvas?.templates?.active ||
+      layerCtorName === 'TemplateLayer' ||
+      layerIdName === 'templates' ||
+      layerIdName === 'template' ||
+      layerOptionsName === 'templates' ||
+      layerOptionsName === 'template' ||
+      activeControl === 'templates' ||
+      activeControl === 'template' ||
+      activeControlLayer === 'templates' ||
+      activeControlLayer === 'template';
+
+    const isNotesLayer =
+      !!canvas?.notes?.active ||
+      layerCtorName === 'NotesLayer' ||
+      layerIdName === 'notes' ||
+      layerIdName === 'note' ||
+      layerOptionsName === 'notes' ||
+      layerOptionsName === 'note' ||
+      activeControl === 'notes' ||
+      activeControl === 'note' ||
+      activeControlLayer === 'notes' ||
+      activeControlLayer === 'note';
+
+    const isSoundsLayer =
+      !!canvas?.sounds?.active ||
+      layerCtorName === 'SoundsLayer' ||
+      layerIdName === 'sounds' ||
+      layerIdName === 'sound' ||
+      layerOptionsName === 'sounds' ||
+      layerOptionsName === 'sound' ||
+      activeControl === 'sounds' ||
+      activeControl === 'sound' ||
+      activeControlLayer === 'sounds' ||
+      activeControlLayer === 'sound';
+
+    const isRegionsLayer =
+      !!canvas?.regions?.active ||
+      layerCtorName === 'RegionLayer' ||
+      layerIdName === 'regions' ||
+      layerIdName === 'region' ||
+      layerOptionsName === 'regions' ||
+      layerOptionsName === 'region' ||
+      activeControl === 'regions' ||
+      activeControl === 'region' ||
+      activeControlLayer === 'regions' ||
+      activeControlLayer === 'region';
+
+    // UI overlays are Foundry-native PIXI workflows. Prioritize this check before
+    // token/wall/tile ownership to survive transient stale activeLayer state
     // immediately after control switches.
-    if (isDrawingsLayer) {
+    if (isDrawingsLayer || isLightingLayer || isSoundsLayer || isNotesLayer || isTemplatesLayer || isRegionsLayer) {
       return InputMode.PIXI;
     }
 
@@ -359,12 +459,6 @@ export class InputRouter {
     // Tile workflows are currently handled by InteractionManager's Three.js tile
     // picking/edit path in the hybrid stack.
     if (isTilesLayer) {
-      return InputMode.THREE;
-    }
-
-    // Three.js handles light placement (drag-to-create), light icon interaction,
-    // and right-click toggle hidden. No PIXI overlay needed.
-    if (isLightingLayer) {
       return InputMode.THREE;
     }
 

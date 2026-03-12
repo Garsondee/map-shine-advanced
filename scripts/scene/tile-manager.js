@@ -2864,10 +2864,12 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
       }
     }
 
-    // Tell WeatherController whether any roof is currently being hover-hidden,
-    // so that precipitation effects can decide when to apply the _Outdoors mask.
+    // Tell WeatherController whether roof reveal/fade is active.
+    // Include both explicit hover-hidden state and the fade tail so downstream
+    // consumers (lighting/shadow masking) don't re-enable roof clipping while
+    // tiles are still transitioning opacity.
     if (weatherController && typeof weatherController.setRoofMaskActive === 'function') {
-      weatherController.setRoofMaskActive(anyHoverHidden);
+      weatherController.setRoofMaskActive(anyHoverHidden || anyOverheadFadeInProgress);
     }
 
     // Apply window light to overhead tiles if enabled

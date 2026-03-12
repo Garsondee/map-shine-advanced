@@ -26,6 +26,9 @@ export class OverheadShadowsEffectV2 {
     this.roofTarget = null;   // Raw roof alpha (overhead tiles)
 
     /** @type {THREE.WebGLRenderTarget|null} */
+    this.roofVisibilityTarget = null; // Runtime roof visibility alpha for LightingEffectV2 suppression
+
+    /** @type {THREE.WebGLRenderTarget|null} */
     this.shadowTarget = null; // Final overhead shadow factor texture
 
     // Outdoors mask now obtained from GpuSceneMaskCompositor via FloorCompositor
@@ -224,7 +227,7 @@ export class OverheadShadowsEffectV2 {
    * @returns {THREE.Texture|null}
    */
   get roofAlphaTexture() {
-    return this.roofTarget?.texture || null;
+    return this.roofVisibilityTarget?.texture || null;
   }
 
   /**
@@ -1133,6 +1136,17 @@ export class OverheadShadowsEffectV2 {
       this.roofTarget.setSize(width, height);
     }
 
+    if (!this.roofVisibilityTarget) {
+      this.roofVisibilityTarget = new THREE.WebGLRenderTarget(width, height, {
+        minFilter: THREE.LinearFilter,
+        magFilter: THREE.LinearFilter,
+        format: THREE.RGBAFormat,
+        type: THREE.UnsignedByteType
+      });
+    } else {
+      this.roofVisibilityTarget.setSize(width, height);
+    }
+
     if (this.material && this.material.uniforms && this.material.uniforms.uTexelSize) {
       this.material.uniforms.uTexelSize.value.set(1 / width, 1 / height);
     }
@@ -1458,6 +1472,7 @@ export class OverheadShadowsEffectV2 {
     renderer.getDrawingBufferSize(size);
 
     if (!this.roofTarget
+      || !this.roofVisibilityTarget
       || !this.shadowTarget
       || !this.fluidRoofTarget
       || !this.tileProjectionTarget
@@ -1474,6 +1489,7 @@ export class OverheadShadowsEffectV2 {
     //    (their sprite opacity fades out for UX), we temporarily force
     //    roof sprite materials to full opacity for this mask pass only.
     const ROOF_LAYER = 20;
+    const roofMaskBit = 1 << ROOF_LAYER;
     const previousLayersMask = this.mainCamera.layers.mask;
     const previousTarget = renderer.getRenderTarget();
 
@@ -1509,6 +1525,42 @@ export class OverheadShadowsEffectV2 {
     const useLinearGuardScale = !!this.mainCamera?.isOrthographicCamera;
     const roofCaptureScale = useLinearGuardScale ? Math.max(guardScaleX, guardScaleY) : 1.0;
 
+    const roofVisibilityExclusions = [];
+    const roofVisibilityNonBusExclusions = [];
+    this.mainScene.traverse((object) => {
+      if (!object.layers || (object.layers.mask & roofMaskBit) === 0) return;
+      const isFluidOverlay = !!(object.material?.uniforms?.tFluidMask);
+      const isBusTileRenderable = !!object?.userData?.mapShineBusTile;
+      if (!isBusTileRenderable && typeof object.visible === 'boolean') {
+        roofVisibilityNonBusExclusions.push({ object, visible: object.visible });
+        object.visible = false;
+      }
+      if (!isFluidOverlay) return;
+      if (typeof object.visible === 'boolean') {
+        roofVisibilityExclusions.push({ object, visible: object.visible });
+        object.visible = false;
+      }
+    });
+
+    // Capture runtime roof visibility (with live hover fade opacity) for
+    // LightingEffectV2 building-shadow suppression. This pass intentionally uses
+    // true tile visibility/opacity and excludes fluid overlays.
+    this.mainCamera.layers.set(ROOF_LAYER);
+    renderer.setRenderTarget(this.roofVisibilityTarget);
+    renderer.setClearColor(0x000000, 0);
+    renderer.clear();
+    renderer.render(this.mainScene, this.mainCamera);
+
+    for (const entry of roofVisibilityExclusions) {
+      if (entry.object) entry.object.visible = entry.visible;
+    }
+    for (const entry of roofVisibilityNonBusExclusions) {
+      if (entry.object) entry.object.visible = entry.visible;
+    }
+
+    // Guard-band capture is only for roof/fluid caster passes. Do NOT apply it
+    // to roofVisibilityTarget because LightingEffect samples that texture in
+    // direct screen UV space (vUv) without guard remap.
     const restoreRoofCaptureCamera = this._applyRoofCaptureGuardScale(roofCaptureScale);
     if (this.material?.uniforms?.uRoofUvScale) {
       this.material.uniforms.uRoofUvScale.value = 1.0 / Math.max(roofCaptureScale, 1.0);
@@ -1526,16 +1578,16 @@ export class OverheadShadowsEffectV2 {
     const tileProjectionOpacityOverrides = [];
     const tileReceiverVisibilityOverrides = [];
     const tileReceiverOpacityOverrides = [];
-    const roofMaskBit = 1 << ROOF_LAYER;
     this.mainScene.traverse((object) => {
       if (!object.layers || !object.material) return;
 
       // Directly test the ROOF_LAYER bit to avoid Layers.test() argument issues.
       if ((object.layers.mask & roofMaskBit) === 0) return;
 
+      const isFluidOverlay = !!(object.material?.uniforms?.tFluidMask);
+
       if (typeof object.visible === 'boolean') {
         fluidVisibilityOverrides.push({ object, visible: object.visible });
-        const isFluidOverlay = !!(object.material?.uniforms?.tFluidMask);
         object.visible = isFluidOverlay;
 
         if (isFluidOverlay) {
@@ -1552,13 +1604,14 @@ export class OverheadShadowsEffectV2 {
         }
       }
 
-      if (!object.isSprite) return;
+      if (isFluidOverlay) return;
       const mat = object.material;
       if (typeof mat.opacity !== 'number') return;
       overrides.push({ object, opacity: mat.opacity });
-      // IMPORTANT: Hover-hide is a UX-only fade on roof sprites. We intentionally
+      // IMPORTANT: Hover-hide is a UX-only fade on roof tile renderables. We
+      // intentionally
       // keep overhead shadows active while hovering, so the shadow mask render
-      // pass always treats roof sprites as fully opaque.
+      // pass always treats roof casters as fully opaque.
       mat.opacity = 1.0;
     });
 
@@ -1598,9 +1651,9 @@ export class OverheadShadowsEffectV2 {
           return;
         }
 
-        // Hover-reveal can temporarily hide/fade roof sprites. For the roof mask
+        // Hover-reveal can temporarily hide/fade roof renderables. For the roof mask
         // capture pass we still need those tiles to contribute caster alpha.
-        if (object.isSprite && typeof object.visible === 'boolean') {
+        if ((object.isSprite || object.isMesh) && typeof object.visible === 'boolean') {
           roofSpriteVisibilityOverrides.push({ object, visible: object.visible });
           object.visible = true;
         }
@@ -1853,6 +1906,10 @@ export class OverheadShadowsEffectV2 {
     if (this.roofTarget) {
       this.roofTarget.dispose();
       this.roofTarget = null;
+    }
+    if (this.roofVisibilityTarget) {
+      this.roofVisibilityTarget.dispose();
+      this.roofVisibilityTarget = null;
     }
     if (this.shadowTarget) {
       this.shadowTarget.dispose();

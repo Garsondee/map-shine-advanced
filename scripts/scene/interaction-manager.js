@@ -7,7 +7,6 @@
 import { createLogger } from '../core/log.js';
 import Coordinates from '../utils/coordinates.js';
 import { OVERLAY_THREE_LAYER } from '../core/render-layers.js';
-import { EnhancedLightInspector } from '../ui/enhanced-light-inspector.js';
 import { SelectionBoxEffectV2 } from '../compositor-v2/effects/SelectionBoxEffectV2.js';
 import { MapPointDrawHandler } from './map-point-interaction.js';
 import { LightInteractionHandler } from './light-interaction.js';

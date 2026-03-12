@@ -39,6 +39,142 @@ function _suppressDiagConsoleLogs() {
   }
 }
 
+function _installGlobalPasswordManagerInsertGuard() {
+  try {
+    if (window.__msaGlobalPasswordManagerInsertGuardInstalled) return;
+    window.__msaGlobalPasswordManagerInsertGuardInstalled = true;
+
+    const wrapNodeInsertMethod = (name) => {
+      try {
+        const original = Node.prototype?.[name];
+        if (typeof original !== 'function') return;
+
+        Node.prototype[name] = function(...args) {
+          const result = original.apply(this, args);
+          try {
+            const insertedNode = (name === 'replaceChild') ? args?.[0] : args?.[0];
+            _applyPasswordManagerIgnores(insertedNode);
+          } catch (_) {
+          }
+          return result;
+        };
+      } catch (_) {
+      }
+    };
+
+    wrapNodeInsertMethod('appendChild');
+    wrapNodeInsertMethod('insertBefore');
+    wrapNodeInsertMethod('replaceChild');
+
+    try {
+      const originalInsertAdjacentHTML = Element.prototype?.insertAdjacentHTML;
+      if (typeof originalInsertAdjacentHTML === 'function') {
+        Element.prototype.insertAdjacentHTML = function(position, text) {
+          const result = originalInsertAdjacentHTML.call(this, position, text);
+          try {
+            if (typeof text === 'string' && /<(input|textarea|select|form)\b/i.test(text)) {
+              _applyPasswordManagerIgnores(this);
+            }
+          } catch (_) {
+          }
+          return result;
+        };
+      }
+    } catch (_) {
+    }
+
+    try {
+      const existingFields = document.querySelectorAll?.('input, textarea, select, form');
+      if (existingFields && existingFields.length) {
+        for (const field of existingFields) {
+          _setPasswordManagerIgnoreAttributes(field);
+        }
+      }
+    } catch (_) {
+    }
+  } catch (_) {
+  }
+}
+
+function _setPasswordManagerIgnoreAttributes(el) {
+  try {
+    if (!(el instanceof Element)) return;
+    if (!el.matches('input, textarea, select, form')) return;
+
+    el.setAttribute('data-bwignore', 'true');
+    el.setAttribute('data-1p-ignore', 'true');
+    el.setAttribute('data-lpignore', 'true');
+    el.setAttribute('autocomplete', 'off');
+  } catch (_) {
+  }
+}
+
+function _applyPasswordManagerIgnores(root) {
+  try {
+    if (!root) return;
+
+    const rootNode = root?.jquery ? root[0] : root;
+    if (!(rootNode instanceof Element || rootNode instanceof Document || rootNode instanceof DocumentFragment)) return;
+
+    if (rootNode instanceof Element) {
+      _setPasswordManagerIgnoreAttributes(rootNode);
+    }
+
+    const fields = rootNode.querySelectorAll?.('input, textarea, select, form');
+    if (!fields || !fields.length) return;
+    for (const field of fields) {
+      _setPasswordManagerIgnoreAttributes(field);
+    }
+  } catch (_) {
+  }
+}
+
+function _installTokenHudPasswordManagerGuard() {
+  try {
+    if (window.__msaTokenHudPasswordManagerGuardInstalled) return;
+    window.__msaTokenHudPasswordManagerGuardInstalled = true;
+
+    const observer = new MutationObserver((mutations) => {
+      try {
+        for (const mutation of mutations) {
+          const added = mutation?.addedNodes;
+          if (!added || !added.length) continue;
+
+          for (const node of added) {
+            if (!(node instanceof Element)) continue;
+
+            const hudRoot =
+              (node.id === 'token-hud' ? node : null)
+              ?? node.closest?.('#token-hud')
+              ?? node.querySelector?.('#token-hud')
+              ?? null;
+
+            if (hudRoot) {
+              _applyPasswordManagerIgnores(hudRoot);
+              continue;
+            }
+
+            if (node.matches?.('input, textarea, select, form')) {
+              const isHudField = !!node.closest?.('#token-hud');
+              if (isHudField) _setPasswordManagerIgnoreAttributes(node);
+            }
+          }
+        }
+      } catch (_) {
+      }
+    });
+
+    observer.observe(document.body, { childList: true, subtree: true });
+    window.__msaTokenHudPasswordManagerObserver = observer;
+
+    const existingHud = document.getElementById('token-hud');
+    if (existingHud) {
+      _applyPasswordManagerIgnores(existingHud);
+    }
+  } catch (_) {
+  }
+}
+
 function getPlayerLightEffectInstance() {
   try {
     return (
@@ -53,6 +189,7 @@ function getPlayerLightEffectInstance() {
 }
 
 _suppressDiagConsoleLogs();
+_installGlobalPasswordManagerInsertGuard();
 
 function _msaCrisisLog(id, message) {
   try {
@@ -307,6 +444,9 @@ try {
 window.MapShine = MapShine;
 MapShine.loadingScreenService = MapShine.loadingScreenService ?? null;
 MapShine.debugLoadingProfiler = MapShine.debugLoadingProfiler ?? null;
+MapShine.applyPasswordManagerIgnores = _applyPasswordManagerIgnores;
+MapShine.installTokenHudPasswordManagerGuard = _installTokenHudPasswordManagerGuard;
+MapShine.installGlobalPasswordManagerInsertGuard = _installGlobalPasswordManagerInsertGuard;
 
 _msaCrisisLog(4, 'module.js: MapShine state exposed on window');
 
@@ -316,6 +456,7 @@ _msaCrisisLog(4, 'module.js: MapShine state exposed on window');
  */
 Hooks.once('init', async function() {
   _msaCrisisLog(10, "Hooks.once('init'): handler entered");
+  _installGlobalPasswordManagerInsertGuard();
 
   // Diagnostic: watch for any changes to the MSA enabled flag or namespace.
   // This will show whether something is overwriting or deleting flags after you enable.
@@ -840,6 +981,25 @@ Hooks.once('init', async function() {
     } catch (e) {
       console.error('Map Shine: failed to inject TileConfig overhead roof toggle', e);
       _msaCrisisLog(29, 'init: renderTileConfig threw');
+    }
+  });
+
+  Hooks.on('renderTokenHUD', (app, html) => {
+    _msaCrisisLog(38, 'init: renderTokenHUD hook fired');
+    try {
+      _installTokenHudPasswordManagerGuard();
+
+      const root = html?.jquery ? html[0] : html;
+      if (root) {
+        _applyPasswordManagerIgnores(root);
+        // Token HUD can add/update form controls asynchronously after initial render.
+        setTimeout(() => _applyPasswordManagerIgnores(root), 0);
+        setTimeout(() => _applyPasswordManagerIgnores(root), 50);
+        setTimeout(() => _applyPasswordManagerIgnores(root), 200);
+      }
+    } catch (e) {
+      console.error('Map Shine: failed to inject password manager bypass into TokenHUD', e);
+      _msaCrisisLog(39, 'init: renderTokenHUD threw');
     }
   });
 

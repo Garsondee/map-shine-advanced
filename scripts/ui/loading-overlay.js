@@ -547,6 +547,9 @@ export class LoadingOverlay {
 
   showBlack(message = 'Loading…') {
     this.ensure();
+    // Cancel any in-flight fade from a previous scene load.
+    // Without this, a stale fadeIn() completion can hide a newly shown overlay.
+    this._token++;
     this.setMessage(message);
     this._resetProgress();
     this._startTimer();
@@ -562,6 +565,9 @@ export class LoadingOverlay {
 
   showLoading(message = 'Loading…') {
     this.ensure();
+    // Cancel any in-flight fade from a previous scene load.
+    // Without this, a stale fadeIn() completion can hide a newly shown overlay.
+    this._token++;
     this.setMessage(message);
     this._resetProgress();
     this._startTimer();
@@ -574,6 +580,8 @@ export class LoadingOverlay {
 
   hide() {
     if (!this.el) return;
+    // Invalidate pending async fades so they cannot race future show calls.
+    this._token++;
     this._resetProgress();
     this._stopTimer();
     this.el.classList.add('map-shine-loading-overlay--hidden');

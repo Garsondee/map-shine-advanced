@@ -64,13 +64,13 @@ export class SceneContext {
     /** @type {import('../effects/effect-capabilities-registry.js').EffectCapabilitiesRegistry|null} */
     this.effectCapabilitiesRegistry = null;
 
-    /** @type {import('../ui/enhanced-light-inspector.js').EnhancedLightInspector|null} */
+    /** @type {object|null} */
     this.enhancedLightInspector = null;
 
     /** @type {import('../ui/overlay-ui-manager.js').OverlayUIManager|null} */
     this.overlayUIManager = null;
 
-    /** @type {import('../ui/light-editor-tweakpane.js').LightEditorTweakpane|null} */
+    /** @type {object|null} */
     this.lightEditor = null;
 
     // --- Scene Managers ---
@@ -92,17 +92,6 @@ export class SceneContext {
     /** @type {import('../scene/drawing-manager.js').DrawingManager|null} */
     this.drawingManager = null;
 
-    /** @type {import('../scene/note-manager.js').NoteManager|null} */
-    this.noteManager = null;
-
-    /** @type {import('../scene/template-manager.js').TemplateManager|null} */
-    this.templateManager = null;
-
-    /** @type {import('../scene/light-icon-manager.js').LightIconManager|null} */
-    this.lightIconManager = null;
-
-    /** @type {import('../scene/enhanced-light-icon-manager.js').EnhancedLightIconManager|null} */
-    this.enhancedLightIconManager = null;
 
     /** @type {import('../scene/interaction-manager.js').InteractionManager|null} */
     this.interactionManager = null;
@@ -363,10 +352,6 @@ export class SceneContext {
     ms.wallManager = this.wallManager;
     ms.doorMeshManager = this.doorMeshManager;
     ms.drawingManager = this.drawingManager;
-    ms.noteManager = this.noteManager;
-    ms.templateManager = this.templateManager;
-    ms.lightIconManager = this.lightIconManager;
-    ms.enhancedLightIconManager = this.enhancedLightIconManager;
     ms.interactionManager = this.interactionManager;
     ms.gridRenderer = this.gridRenderer;
     ms.mapPointsManager = this.mapPointsManager;

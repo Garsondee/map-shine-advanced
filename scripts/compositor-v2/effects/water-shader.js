@@ -951,9 +951,9 @@ float getFoamBaseAmount(vec2 sceneUv, float shore, float inside, vec2 rainOffPx,
 
   // 3. Fine bubbly detail (matches the logic of floating foam clumps for unity)
   vec2 fUv = foamBasis * max(0.1, uFoamScale) - windBasis * (tWind * uFoamSpeed * 0.5) + curl * 0.25;
-  float c1 = valueNoise(fUv);
-  float c2 = valueNoise(fUv * 2.1 + 5.2);
-  float bubbles = c1 * 0.7 + c2 * 0.3;
+  float shoreC1 = valueNoise(fUv);
+  float shoreC2 = valueNoise(fUv * 2.1 + 5.2);
+  float bubbles = shoreC1 * 0.7 + shoreC2 * 0.3;
 
   // 4. Shore Coverage (Core vs Tail)
   // Utilizing the previously unused UI settings to allow art direction!
@@ -982,9 +982,9 @@ float getFoamBaseAmount(vec2 sceneUv, float shore, float inside, vec2 rainOffPx,
     float rainFoamScale = max(1.0, uFloatingFoamScale * 0.35);
     clumpUv += rainBasis * foamDistort * rainFoamScale;
   }
-  float c1 = valueNoise(clumpUv);
-  float c2 = valueNoise(clumpUv * 2.1 + 5.2);
-  float c = c1 * 0.7 + c2 * 0.3;
+  float clumpC1 = valueNoise(clumpUv);
+  float clumpC2 = valueNoise(clumpUv * 2.1 + 5.2);
+  float c = clumpC1 * 0.7 + clumpC2 * 0.3;
   float clumps = smoothstep(1.0 - clamp(uFloatingFoamCoverage, 0.0, 1.0), 1.0, c);
   float deepMask = smoothstep(0.15, 0.65, 1.0 - shore);
   float floatingFoamAmount = clumps * inside * max(0.0, uFloatingFoamStrength) * deepMask;

@@ -70,6 +70,16 @@ export class PixiContentLayerBridge {
     /** @type {number} */
     this._worldCaptureScale = 2.5;
 
+    /** @type {HTMLCanvasElement|null} Cached settled sounds layer for fast preview rendering */
+    this._soundsSettledCacheCanvas = null;
+    /** @type {number} */
+    this._soundsSettledCacheLogicalW = 0;
+    /** @type {number} */
+    this._soundsSettledCacheLogicalH = 0;
+
+    /** @type {string} Signature of currently interactive sounds preview state */
+    this._lastSoundsPreviewSig = '';
+
     if (THREE) {
       this._worldCanvas = document.createElement('canvas');
       this._uiCanvas = document.createElement('canvas');
@@ -250,6 +260,63 @@ export class PixiContentLayerBridge {
     }
 
     return false;
+  }
+
+  /**
+   * Determine whether sounds preview is actively being manipulated.
+   * We intentionally exclude config-confirmation mode (_creating), since that
+   * state can persist and should not force per-frame recapture.
+   * @param {any} soundsLayer
+   * @returns {boolean}
+   * @private
+   */
+  _isSoundsPreviewInteractive(soundsLayer) {
+    const layerName = String(canvas?.activeLayer?.options?.name ?? '');
+    const activeTool = String(game?.activeTool ?? ui?.controls?.activeTool ?? '');
+    if (layerName !== 'sounds' || activeTool !== 'sound') return false;
+
+    const preview = soundsLayer?.preview;
+    if (!preview || preview?._creating) return false;
+    const children = Array.isArray(preview.children) ? preview.children : [];
+    for (const child of children) {
+      if (!child) continue;
+      if (child.visible === false) continue;
+      if (child.renderable === false) continue;
+      const alpha = Number(child.alpha);
+      if (Number.isFinite(alpha) && alpha <= 0) continue;
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Build a compact signature for interactive sounds preview geometry.
+   * Signature changes drive live recapture; unchanged preview is treated idle.
+   * @param {any} soundsLayer
+   * @returns {string}
+   * @private
+   */
+  _getSoundsPreviewSignature(soundsLayer) {
+    if (!this._isSoundsPreviewInteractive(soundsLayer)) return '';
+    const previewChildren = Array.isArray(soundsLayer?.preview?.children) ? soundsLayer.preview.children : [];
+    const parts = [];
+    for (const child of previewChildren) {
+      if (!child) continue;
+      if (child.visible === false || child.renderable === false) continue;
+      const alpha = Number(child.alpha);
+      if (Number.isFinite(alpha) && alpha <= 0) continue;
+
+      const doc = child.document ?? {};
+      const id = String(child.id ?? doc.id ?? parts.length);
+      const x = Math.round(this._toNumber(doc.x ?? child.x, 0));
+      const y = Math.round(this._toNumber(doc.y ?? child.y, 0));
+      const radius = Math.round(this._toNumber(doc.radius, 0) * 100) / 100;
+      const elevation = Math.round(this._toNumber(doc.elevation, 0) * 100) / 100;
+      parts.push(`${id}:${x},${y},${radius},${elevation}`);
+    }
+
+    parts.sort();
+    return parts.join('|');
   }
 
   markDirty() {
@@ -912,9 +979,13 @@ export class PixiContentLayerBridge {
   _renderFoundrySoundsReplay(soundsLayer, renderer, width, height) {
     const logicalW = Math.max(1, Math.round(this._toNumber(width, 1)));
     const logicalH = Math.max(1, Math.round(this._toNumber(height, 1)));
+    const placeables = Array.isArray(soundsLayer?.placeables) ? soundsLayer.placeables : [];
+    const previewChildren = Array.isArray(soundsLayer?.preview?.children) ? soundsLayer.preview.children : [];
+    const hasLivePreview = this._isSoundsPreviewInteractive(soundsLayer);
+
     const baseCaptureScale = this._getWorldCaptureScale(logicalW, logicalH);
     const maxSafeScale = Math.max(1, 8192 / Math.max(logicalW, logicalH));
-    const captureScale = Math.min(maxSafeScale, Math.max(baseCaptureScale, 4));
+    const captureScale = Math.min(maxSafeScale, Math.max(baseCaptureScale, hasLivePreview ? 1.0 : 3));
     const renderW = Math.max(1, Math.round(logicalW * captureScale));
     const renderH = Math.max(1, Math.round(logicalH * captureScale));
     this._worldLogicalWidth = logicalW;
@@ -936,13 +1007,20 @@ export class PixiContentLayerBridge {
       seen.add(key);
       sounds.push(obj);
     };
-    try {
-      const placeables = Array.isArray(soundsLayer?.placeables) ? soundsLayer.placeables : [];
-      for (const p of placeables) collect(p);
-      const preview = Array.isArray(soundsLayer?.preview?.children) ? soundsLayer.preview.children : [];
-      for (const p of preview) collect(p);
+
+    const previewSet = new Set(previewChildren);
+    if (soundsLayer?._configPreview) previewSet.add(soundsLayer._configPreview);
+
+    // Fast path during drag-preview: render cached settled sounds + current
+    // preview only. Avoid reprocessing all placeables every mouse move.
+    if (hasLivePreview) {
+      for (const p of previewChildren) collect(p);
       if (soundsLayer?._configPreview) collect(soundsLayer._configPreview);
-    } catch (_) {}
+    } else {
+      for (const p of placeables) collect(p);
+      for (const p of previewChildren) collect(p);
+      if (soundsLayer?._configPreview) collect(soundsLayer._configPreview);
+    }
 
     sounds.sort((a, b) => this._toNumber(a?.document?.sort ?? a?.sort, 0) - this._toNumber(b?.document?.sort ?? b?.sort, 0));
 
@@ -952,6 +1030,16 @@ export class PixiContentLayerBridge {
     ctx.clearRect(0, 0, w, h);
     ctx.setTransform(captureScale, 0, 0, captureScale, 0, 0);
     ctx.imageSmoothingEnabled = true;
+
+    if (hasLivePreview) {
+      const cacheCanvas = this._soundsSettledCacheCanvas;
+      const cacheW = this._toNumber(this._soundsSettledCacheLogicalW, 0);
+      const cacheH = this._toNumber(this._soundsSettledCacheLogicalH, 0);
+      if (cacheCanvas && cacheW === logicalW && cacheH === logicalH && cacheCanvas.width > 0 && cacheCanvas.height > 0) {
+        try { ctx.drawImage(cacheCanvas, 0, 0, logicalW, logicalH); } catch (_) {}
+      }
+    }
+
     if (sounds.length <= 0) {
       worldTexture.needsUpdate = true;
       return { ok: true, count: 0, status: `captured:sounds-replay-empty:${w}x${h}` };
@@ -962,8 +1050,10 @@ export class PixiContentLayerBridge {
     const maxWorldH = Math.max(1, logicalH * 1.5);
     const uiScale = Math.max(0.25, this._toNumber(canvas?.dimensions?.uiScale, 1));
     for (const sound of sounds) {
+      const isPreviewSound = previewSet.has(sound);
+      const shouldDrawField = hasLivePreview ? isPreviewSound : true;
       const sourceShape = sound?.source?.shape ?? null;
-      if (sourceShape && this._tracePixiShapePath(ctx, sourceShape)) {
+      if (shouldDrawField && sourceShape && this._tracePixiShapePath(ctx, sourceShape)) {
         // Mirrors Foundry AmbientSound#_refreshField styling and preserves
         // wall-clipped source geometry from PointSoundSource.
         ctx.fillStyle = 'rgba(170, 221, 255, 0.15)';
@@ -976,7 +1066,7 @@ export class PixiContentLayerBridge {
 
       // AmbientSound placeable container extraction can include renderer clear
       // artifacts on some runtimes; capture explicit visuals only.
-      const drawTargets = [sound?.controlIcon];
+      const drawTargets = hasLivePreview ? [] : [sound?.controlIcon];
       for (const target of drawTargets) {
         if (!target) continue;
 
@@ -1023,6 +1113,27 @@ export class PixiContentLayerBridge {
     }
 
     ctx.setTransform(1, 0, 0, 1, 0, 0);
+
+    if (!hasLivePreview && w > 0 && h > 0) {
+      let cacheCanvas = this._soundsSettledCacheCanvas;
+      if (!cacheCanvas) {
+        cacheCanvas = document.createElement('canvas');
+        this._soundsSettledCacheCanvas = cacheCanvas;
+      }
+      if (cacheCanvas.width !== w || cacheCanvas.height !== h) {
+        cacheCanvas.width = w;
+        cacheCanvas.height = h;
+      }
+      const cacheCtx = cacheCanvas.getContext('2d');
+      if (cacheCtx) {
+        cacheCtx.setTransform(1, 0, 0, 1, 0, 0);
+        cacheCtx.clearRect(0, 0, w, h);
+        try { cacheCtx.drawImage(this._worldCanvas, 0, 0); } catch (_) {}
+        this._soundsSettledCacheLogicalW = logicalW;
+        this._soundsSettledCacheLogicalH = logicalH;
+      }
+    }
+
     worldTexture.needsUpdate = true;
     return { ok: true, count: drawn, status: `captured:sounds-replay:${w}x${h} logical=${logicalW}x${logicalH} ss=${captureScale.toFixed(2)} shapes=${drawn}` };
   }
@@ -1100,13 +1211,20 @@ export class PixiContentLayerBridge {
     const lightingLayer = canvas?.lighting;
     const regionsLayer = canvas?.regions;
     
-    const hasLivePreview =
+    const hasOtherLivePreview =
       this._hasActivePreview(drawingsLayer) ||
-      this._hasActivePreview(soundsLayer) ||
       this._hasActivePreview(notesLayer) ||
       this._hasActivePreview(templatesLayer) ||
       this._hasActivePreview(lightingLayer) ||
       this._hasActivePreview(regionsLayer);
+
+    const soundsPreviewSig = this._getSoundsPreviewSignature(soundsLayer);
+    const soundsPreviewChanged = soundsPreviewSig !== this._lastSoundsPreviewSig;
+    this._lastSoundsPreviewSig = soundsPreviewSig;
+
+    // For sounds, only treat preview as "live" while geometry is changing.
+    // This prevents stale preview objects from forcing perpetual recapture.
+    const hasLivePreview = hasOtherLivePreview || soundsPreviewChanged;
       
     const forceTestPattern = this._isCompositorSanityPatternEnabled();
     this._lastStageTransformSig = this._getStageTransformSignature();

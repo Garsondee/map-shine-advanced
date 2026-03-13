@@ -55,6 +55,46 @@ export function isTokenOnActiveLevel(tokenDoc) {
 }
 
 /**
+ * Check whether a token is below the currently active level band.
+ *
+ * @param {TokenDocument|object} tokenDoc
+ * @returns {boolean}
+ */
+export function isTokenBelowActiveLevel(tokenDoc) {
+  const levelCtx = window.MapShine?.activeLevelContext;
+  if (!levelCtx || (levelCtx.count ?? 0) <= 1) return false;
+
+  const tokenElev = Number(tokenDoc?.elevation ?? 0);
+  if (!Number.isFinite(tokenElev)) return false;
+
+  const bottom = Number(levelCtx.bottom);
+  if (!Number.isFinite(bottom)) return false;
+
+  return tokenElev < bottom;
+}
+
+/**
+ * Determine whether marquee selection should be restricted to active-level
+ * tokens only.
+ *
+ * Current behavior: when the user is on any upper floor (index > 0), marquee
+ * selection is limited to the active floor to avoid selecting hidden/off-floor
+ * tokens.
+ *
+ * @returns {boolean}
+ */
+export function shouldRestrictMarqueeToActiveLevel() {
+  const levelCtx = window.MapShine?.activeLevelContext;
+  if (!levelCtx || (levelCtx.count ?? 0) <= 1) return false;
+
+  const levelIndex = Number(levelCtx.index);
+  if (Number.isFinite(levelIndex)) return levelIndex > 0;
+
+  const bottom = Number(levelCtx.bottom);
+  return Number.isFinite(bottom) && bottom > 0;
+}
+
+/**
  * Find which level index a given elevation belongs to, using the camera
  * follower's level bands. Returns -1 if no levels are configured.
  *
@@ -168,21 +208,30 @@ export function isTokenOccludedByFloorAbove(tokenDoc, worldX, worldY, tileManage
  * Rules:
  * 1. Invisible sprites are always excluded.
  * 2. Tokens on the active level are always included.
- * 3. Tokens on other levels are included ONLY if they are NOT occluded by a
+ * 3. Optionally, selection can be restricted to active-level tokens only.
+ * 4. Optionally, off-floor selection can be limited to lower-floor tokens.
+ * 5. Otherwise, off-floor tokens are included only when NOT occluded by a
  *    floor tile above them (i.e., visible through a transparent area).
  *
  * @param {THREE.Sprite} sprite - Token sprite with userData.tokenDoc
  * @param {import('./tile-manager.js').TileManager} tileManager
+ * @param {{ activeLevelOnly?: boolean, allowBelowOnly?: boolean }} [options]
  * @returns {boolean}
  */
-export function isTokenDragSelectable(sprite, tileManager) {
+export function isTokenDragSelectable(sprite, tileManager, options = {}) {
   if (!sprite?.visible) return false;
 
   const tokenDoc = sprite.userData?.tokenDoc;
   if (!tokenDoc) return false;
 
+  const activeLevelOnly = !!options.activeLevelOnly;
+  const allowBelowOnly = !!options.allowBelowOnly;
+
   // Tokens on the active level are always selectable
   if (isTokenOnActiveLevel(tokenDoc)) return true;
+
+  if (activeLevelOnly) return false;
+  if (allowBelowOnly && !isTokenBelowActiveLevel(tokenDoc)) return false;
 
   // Token is on a different floor — check if it's hidden under a tile
   return !isTokenOccludedByFloorAbove(

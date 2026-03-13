@@ -306,9 +306,11 @@ class PF2eAdapter extends BaseSystemAdapter {
     if (actor) {
       // PF2e perception.vision boolean
       if (actor.system?.perception?.vision === true) return true;
-      // Senses array implies vision capability
-      const senses = actor.system?.traits?.senses;
-      if (Array.isArray(senses) && senses.length > 0) return true;
+      // PF2e may expose senses in either perception.senses or traits.senses.
+      const perceptionSenses = actor.system?.perception?.senses;
+      if (Array.isArray(perceptionSenses) && perceptionSenses.length > 0) return true;
+      const traitSenses = actor.system?.traits?.senses;
+      if (Array.isArray(traitSenses) && traitSenses.length > 0) return true;
     }
     return false;
   }
@@ -316,7 +318,12 @@ class PF2eAdapter extends BaseSystemAdapter {
   getTokenVisionRadius(token) {
     if (!token) return 0;
     const docRange = token.document?.sight?.range;
-    if (typeof docRange === 'number' && docRange > 0) return docRange;
+    if (typeof docRange === 'number' && docRange > 0) {
+      // PF2e often uses Infinity for darkvision/unlimited sight. Return a
+      // large finite value so downstream px conversion and LOS compute remain
+      // numerically stable.
+      return Number.isFinite(docRange) ? docRange : 10000;
+    }
 
     const actor = token.actor;
     if (actor) {

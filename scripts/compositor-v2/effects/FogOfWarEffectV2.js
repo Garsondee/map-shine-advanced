@@ -92,6 +92,7 @@ export class FogOfWarEffectV2 {
       softness: 6.0,
       noiseStrength: 6.0,
       noiseSpeed: 0.2,
+      revealTokenInFogEnabled: false,
       doorFogSyncEnabled: true,
       doorFogSyncThickness: 0.08,
       doorFogSyncDefaultDurationMs: 500
@@ -378,7 +379,7 @@ export class FogOfWarEffectV2 {
           name: 'fog',
           label: 'Fog of War',
           type: 'inline',
-          parameters: ['unexploredColor', 'exploredColor', 'exploredOpacity', 'softness', 'noiseStrength', 'noiseSpeed', 'doorFogSyncEnabled', 'doorFogSyncThickness', 'doorFogSyncDefaultDurationMs']
+          parameters: ['unexploredColor', 'exploredColor', 'exploredOpacity', 'softness', 'noiseStrength', 'noiseSpeed', 'revealTokenInFogEnabled', 'doorFogSyncEnabled', 'doorFogSyncThickness', 'doorFogSyncDefaultDurationMs']
         }
       ],
       parameters: {
@@ -389,6 +390,7 @@ export class FogOfWarEffectV2 {
         softness: { type: 'slider', min: 0, max: 12, step: 0.5, default: 3.0, label: 'Edge Softness' },
         noiseStrength: { type: 'slider', min: 0, max: 12, step: 0.5, default: 2.0, label: 'Edge Distortion (px)' },
         noiseSpeed: { type: 'slider', min: 0, max: 2, step: 0.05, default: 0.2, label: 'Distortion Speed' },
+        revealTokenInFogEnabled: { type: 'boolean', default: false, label: 'Reveal Token Bubbles' },
         doorFogSyncEnabled: { type: 'boolean', default: true, label: 'Door Sync' },
         doorFogSyncThickness: { type: 'slider', min: 0.01, max: 0.5, step: 0.01, default: 0.08, label: 'Door Sync Thickness' },
         doorFogSyncDefaultDurationMs: { type: 'slider', min: 50, max: 2500, step: 25, default: 500, label: 'Door Sync Duration (ms)' }
@@ -1697,28 +1699,14 @@ export class FogOfWarEffectV2 {
       const visionSource = token.vision;
       const hasSight = this._tokenHasVisionCapability(token);
 
-      // MS-LVL-120: In levels-enabled scenes, compute token LOS polygon with
-      // explicit elevation-aware wall filtering for fog rendering.
-      // Keep Foundry polygon fallback for non-levels scenes and non-360 cones.
-      if (levelsActive && hasSight) {
+      // Prefer MapShine's custom LOS polygon for all sight-capable 360-vision
+      // tokens. This keeps fog behavior consistent across token types/systems
+      // (PC/NPC, PF2e bestiary imports, etc.) even when Foundry visionSource
+      // objects are missing or delayed. Non-360 cones still use Foundry fallback.
+      if (hasSight) {
         const sightAngle = Number(token.document?.sight?.angle ?? 360);
-        const useCustomLevelsPolygon = !Number.isFinite(sightAngle) || sightAngle >= 360;
-        if (useCustomLevelsPolygon) {
-          const customPoints = this._computeTokenVisionPolygonPoints(token, polygonWallsWithDoors, sceneBounds);
-          if (customPoints && customPoints.length >= 6) {
-            this._addPolygonPointsToVisionScene(customPoints, THREE);
-            polygonsRendered++;
-            continue;
-          }
-        }
-      }
-
-      // Outside levels mode, use custom polygon while door transitions are active
-      // so animated leaves behave as true LOS blockers, not post-mask strips.
-      if (!levelsActive && hasSight && hasDoorTransitionLOSBlockers) {
-        const sightAngle = Number(token.document?.sight?.angle ?? 360);
-        const useCustomDoorPolygon = !Number.isFinite(sightAngle) || sightAngle >= 360;
-        if (useCustomDoorPolygon) {
+        const useCustomPolygon = !Number.isFinite(sightAngle) || sightAngle >= 360;
+        if (useCustomPolygon) {
           const customPoints = this._computeTokenVisionPolygonPoints(token, polygonWallsWithDoors, sceneBounds);
           if (customPoints && customPoints.length >= 6) {
             this._addPolygonPointsToVisionScene(customPoints, THREE);
@@ -1919,7 +1907,8 @@ export class FogOfWarEffectV2 {
     // This draws small circles at each visible token's position in the
     // vision mask. Uses Three.js CircleGeometry for efficient rendering.
     try {
-      if (getLevelsCompatibilityMode() !== LEVELS_COMPATIBILITY_MODES.OFF
+      if (this.params?.revealTokenInFogEnabled
+          && getLevelsCompatibilityMode() !== LEVELS_COMPATIBILITY_MODES.OFF
           && isLevelsEnabledForScene(canvas?.scene)) {
         const tokens = canvas?.tokens?.placeables;
         if (tokens && tokens.length > 0) {
@@ -2067,43 +2056,6 @@ export class FogOfWarEffectV2 {
       // If GM and ALL controlled tokens lack sight capability, bypass fog.
       const hasSightCapability = controlled.some((t) => this._tokenHasVisionCapability(t));
       if (!hasSightCapability) return true;
-
-      // Capability alone is not enough. Some systems/tokens report vision
-      // capability but produce no active/usable vision source in the current
-      // frame. Fail-open for GM to avoid full-scene fog-out.
-      const visionSources = canvas?.effects?.visionSources;
-      const hasRenderableVision = controlled.some((t) => {
-        if (!this._tokenHasVisionCapability(t)) return false;
-
-        // Fast path: token vision object already has an active polygon/shape.
-        const tv = t?.vision;
-        if (tv?.active && (tv?.los || tv?.shape || tv?.fov)) return true;
-
-        // Fallback: resolve a matching Foundry vision source.
-        if (!visionSources?.size) return false;
-        const tokenId = t?.document?.id;
-        const candidateId = t?.sourceId || tv?.sourceId || tokenId;
-
-        let source = null;
-        if (candidateId && typeof visionSources.get === 'function') {
-          source = visionSources.get(candidateId) || null;
-        }
-        if (!source) {
-          for (const vs of visionSources.values()) {
-            const sid = vs?.sourceId || vs?.object?.sourceId || vs?.object?.document?.id;
-            if ((tokenId && sid === tokenId) || vs?.object === t || vs?.object?.document?.id === tokenId) {
-              source = vs;
-              break;
-            }
-          }
-        }
-
-        if (!source) return false;
-        if (source.active === false) return false;
-        return !!(source.los || source.shape || source.fov || source.data || source.radius);
-      });
-
-      if (!hasRenderableVision) return true;
     }
     return false;
   }

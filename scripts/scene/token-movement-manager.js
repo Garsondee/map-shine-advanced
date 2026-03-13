@@ -4242,6 +4242,15 @@ export class TokenMovementManager {
     const collisionElevation = this._resolveCollisionElevation(context, tokenObj);
     const rayA = { x: asNumber(from?.x, 0), y: asNumber(from?.y, 0), elevation: collisionElevation };
     const rayB = { x: asNumber(to?.x, 0), y: asNumber(to?.y, 0), elevation: collisionElevation };
+    const segDx = rayB.x - rayA.x;
+    const segDy = rayB.y - rayA.y;
+    const segLen = Math.hypot(segDx, segDy);
+    // Trim segment endpoints a little so a corner that starts flush against a
+    // door frame/wall endpoint does not register a spurious t=0 collision in
+    // one travel direction but not the reverse direction.
+    const trimPx = Math.max(0, Math.min(4, segLen * 0.25));
+    const trimX = (segLen > 0.0001) ? ((segDx / segLen) * trimPx) : 0;
+    const trimY = (segLen > 0.0001) ? ((segDy / segLen) * trimPx) : 0;
 
     // Build corner offsets for fat-token Minkowski expansion.
     // For 1×1 tokens the only ray is center→center (offsets = [[0,0]]).
@@ -4279,8 +4288,8 @@ export class TokenMovementManager {
       }
 
       for (const [ox, oy] of cornerOffsets) {
-        const a = { x: rayA.x + ox, y: rayA.y + oy, elevation: rayA.elevation };
-        const b = { x: rayB.x + ox, y: rayB.y + oy, elevation: rayB.elevation };
+        const a = { x: rayA.x + ox + trimX, y: rayA.y + oy + trimY, elevation: rayA.elevation };
+        const b = { x: rayB.x + ox - trimX, y: rayB.y + oy - trimY, elevation: rayB.elevation };
 
         try {
           const hit = moveBackend.testCollision(a, b, {
@@ -4446,7 +4455,7 @@ export class TokenMovementManager {
     const gridSizeX = Math.max(1, asNumber(grid?.sizeX, asNumber(grid?.size, asNumber(canvas?.dimensions?.size, 100))));
     const gridSizeY = Math.max(1, asNumber(grid?.sizeY, asNumber(grid?.size, asNumber(canvas?.dimensions?.size, 100))));
     const insetBasis = Math.max(gridSizeX, gridSizeY);
-    const adaptiveInset = Math.max(8, Math.min(24, insetBasis * 0.14));
+    const adaptiveInset = Math.max(10, Math.min(28, insetBasis * 0.18));
     return {
       x: Math.max(0, (size.widthPx / 2) - adaptiveInset),
       y: Math.max(0, (size.heightPx / 2) - adaptiveInset)

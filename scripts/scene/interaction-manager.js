@@ -6208,30 +6208,19 @@ export class InteractionManager {
                 
                 // Calculate final position from PREVIEW position
                 const worldPos = preview.position;
-                let foundryPos = Coordinates.toFoundry(worldPos.x, worldPos.y);
-                
-                // Drag commit (tokens): do not run client-side collision stepping.
-                // It can incorrectly clamp moves and make tokens feel "stuck" in certain regions.
-                // Snap to grid center (when applicable), then let Foundry enforce collisions.
-                const token = tokenDoc.object;
-                safeCall(() => {
-                  const grid = canvas?.grid;
-                  const isGridless = !!(grid && grid.type === CONST.GRID_TYPES.GRIDLESS);
-                  if (!isGridless && grid && typeof grid.getSnappedPoint === 'function') {
-                    foundryPos = grid.getSnappedPoint(foundryPos, { mode: CONST.GRID_SNAPPING_MODES.CENTER });
-                  }
-                }, 'pointerUp.snapToGrid', Severity.COSMETIC);
+                const foundryCenter = Coordinates.toFoundry(worldPos.x, worldPos.y);
 
-                // Adjust for center vs top-left
-                const wPx = (token && typeof token.w === 'number' && token.w > 0)
-                  ? token.w
-                  : (tokenDoc.width * (canvas?.grid?.size || canvas?.dimensions?.size || 100));
-                const hPx = (token && typeof token.h === 'number' && token.h > 0)
-                  ? token.h
-                  : (tokenDoc.height * (canvas?.grid?.size || canvas?.dimensions?.size || 100));
+                // IMPORTANT: Drag commit must follow the exact same center->top-left
+                // conversion + top-left snap path used by drag preview/pathfinding.
+                // Center snapping causes half-cell drift for multi-cell tokens (2x2+),
+                // making the preview end marker disagree with where the token actually lands.
+                const rawTopLeft = this._tokenCenterToTopLeftFoundry(foundryCenter, tokenDoc);
+                const snappedTopLeft = event.shiftKey
+                  ? rawTopLeft
+                  : this._snapTokenTopLeftToGrid(tokenDoc, rawTopLeft);
 
-                const finalX = foundryPos.x - wPx / 2;
-                const finalY = foundryPos.y - hPx / 2;
+                const finalX = Number(snappedTopLeft?.x ?? rawTopLeft?.x ?? 0);
+                const finalY = Number(snappedTopLeft?.y ?? rawTopLeft?.y ?? 0);
 
                 // If collision resolution produced a no-op, do not submit an update.
                 // This avoids the "ghost" preview getting stuck waiting for movement-start that never occurs.

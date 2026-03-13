@@ -17,7 +17,6 @@ import { safeCall, safeDispose, Severity } from '../core/safe-call.js';
 import { readWallHeightFlags, readTileLevelsFlags, tileHasLevelsRange, isLevelsEnabledForScene } from '../foundry/levels-scene-flags.js';
 import { applyAmbientLightLevelDefaults, applyAmbientSoundLevelDefaults, applyTileLevelDefaults, applyWallLevelDefaults } from '../foundry/levels-create-defaults.js';
 import { getPerspectiveElevation } from '../foundry/elevation-context.js';
-import { isTokenOnActiveLevel, getAutoSwitchElevation, switchToLevelForElevation } from './level-interaction-service.js';
 
 const log = createLogger('InteractionManager');
 
@@ -3960,11 +3959,6 @@ export class InteractionManager {
 
           // Start Drag
           this.startDrag(sprite, hit.point);
-
-          // TEMPORARY INCIDENT GUARD (2026-03-13): disable click-select floor
-          // auto-switch. Off-floor token selection (commonly NPCs) can trigger a
-          // level transition race that leads to invalid-level/fade regressions.
-          // Keep selection stable; explicit floor switching remains user-driven.
           }
           
         } else {
@@ -6135,9 +6129,6 @@ export class InteractionManager {
               subtractive: !!(event.ctrlKey || event.metaKey)
             }
           );
-
-          // TEMPORARY INCIDENT GUARD (2026-03-13): disable drag-select floor
-          // auto-switch for the same reason as click-select guard above.
 
           // Only allow box-selecting lights when the Lighting layer is active.
           // In token movement mode (TokenLayer), marquee selection should not grab lights.

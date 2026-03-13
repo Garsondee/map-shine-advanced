@@ -1,6 +1,11 @@
 import { createLogger } from '../core/log.js';
 import { applyControlledTokenSet } from '../foundry/selection-bridge.js';
-import { isTokenDragSelectable } from './level-interaction-service.js';
+import {
+  isTokenBelowActiveLevel,
+  isTokenDragSelectable,
+  shouldRestrictMarqueeToActiveLevel,
+  switchToLevelForElevation
+} from './level-interaction-service.js';
 
 const log = createLogger('TokenSelectionController');
 
@@ -25,7 +30,7 @@ export class TokenSelectionController {
 
   /**
    * @param {string|null|undefined} tokenId
-   * @param {{ additive?: boolean, toggle?: boolean }} [options]
+   * @param {{ additive?: boolean, toggle?: boolean, autoSwitchFloor?: boolean }} [options]
    */
   selectSingle(tokenId, options = {}) {
     const id = String(tokenId || '').trim();
@@ -51,6 +56,10 @@ export class TokenSelectionController {
     }
 
     this._applyTokenSelectionSet(next);
+
+    if (options.autoSwitchFloor !== false && isTokenBelowActiveLevel(tokenDoc)) {
+      switchToLevelForElevation(Number(tokenDoc.elevation ?? 0), 'level-interaction-click-select');
+    }
   }
 
   /**
@@ -73,6 +82,7 @@ export class TokenSelectionController {
     const insideIds = new Set();
     const selectedDocs = [];
     const tokens = this.im.tokenManager?.getAllTokenSprites?.() || [];
+    const activeLevelOnly = shouldRestrictMarqueeToActiveLevel();
 
     for (const sprite of tokens) {
       const x = Number(sprite?.position?.x);
@@ -82,7 +92,7 @@ export class TokenSelectionController {
 
       const tokenDoc = sprite?.userData?.tokenDoc;
       if (!tokenDoc?.canUserModify?.(game.user, 'update')) continue;
-      if (!isTokenDragSelectable(sprite, this.im.tileManager)) continue;
+      if (!isTokenDragSelectable(sprite, this.im.tileManager, { activeLevelOnly, allowBelowOnly: true })) continue;
 
       const id = String(tokenDoc.id || '').trim();
       if (!id) continue;

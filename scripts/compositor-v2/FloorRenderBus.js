@@ -458,6 +458,146 @@ export class FloorRenderBus {
   }
 
   /**
+   * Incrementally create/update a single bus tile from a TileDocument.
+   *
+   * This is used by TileManager's live refresh/update hooks so V2 albedo tiles
+   * track manual Foundry tile edits (drag/create/update) without requiring a
+   * full bus repopulate.
+   *
+   * @param {object} tileDoc
+   * @param {object} [options]
+   * @param {object|null} [options.foundrySceneData]
+   * @returns {boolean}
+   */
+  upsertTileFromDocument(tileDoc, options = {}) {
+    if (!this._initialized || !this._scene || !tileDoc) return false;
+
+    const tileId = tileDoc.id ?? tileDoc._id;
+    if (!tileId) return false;
+
+    const sceneData = options.foundrySceneData
+      ?? window.MapShine?.sceneComposer?.foundrySceneData
+      ?? null;
+    if (!sceneData) return false;
+
+    const src = tileDoc?.texture?.src ?? tileDoc?.img ?? '';
+    const floors = window.MapShine?.floorStack?.getFloors?.() ?? [];
+    const floorIndex = this._resolveFloorIndex(tileDoc, floors);
+    const worldH = Number(sceneData?.height) || 0;
+    const tileW = Number(tileDoc?.width) || 0;
+    const tileH = Number(tileDoc?.height) || 0;
+    const centerX = (Number(tileDoc?.x) || 0) + tileW / 2;
+    const centerY = worldH - ((Number(tileDoc?.y) || 0) + tileH / 2);
+    const z = GROUND_Z + floorIndex * Z_PER_FLOOR;
+    const alpha = typeof tileDoc.alpha === 'number' ? tileDoc.alpha : 1;
+    const rotation = typeof tileDoc.rotation === 'number'
+      ? (tileDoc.rotation * Math.PI) / 180
+      : 0;
+    const isOverhead = isTileOverhead(tileDoc);
+
+    const rawSort = Number.isFinite(Number(tileDoc?.sort ?? tileDoc?.z))
+      ? Number(tileDoc.sort ?? tileDoc.z)
+      : 0;
+    const sortWithinFloor = Math.max(
+      0,
+      Math.min(MAX_SORT_WITHIN_FLOOR_GROUP, Math.round(rawSort + (MAX_SORT_WITHIN_FLOOR_GROUP / 2)))
+    );
+    const renderOrder = floorIndex * RENDER_ORDER_PER_FLOOR
+      + (isOverhead ? OVERHEAD_OFFSET : 0)
+      + sortWithinFloor;
+
+    let entry = this._tiles.get(tileId);
+    if (!entry) {
+      this._addTileMesh(tileId, floorIndex, null, centerX, centerY, z, tileW, tileH, rotation, alpha, renderOrder, isOverhead);
+      entry = this._tiles.get(tileId);
+      if (!entry) return false;
+    }
+
+    const root = entry.root || entry.mesh?.parent || null;
+    if (root) {
+      root.position.set(centerX, centerY, z);
+      if (root.rotation) root.rotation.z = rotation;
+      root.userData = root.userData || {};
+      root.userData.isOverhead = isOverhead;
+      root.userData.floorIndex = floorIndex;
+    }
+
+    if (entry.mesh) {
+      const params = entry.mesh.geometry?.parameters || {};
+      const currentW = Number(params.width);
+      const currentH = Number(params.height);
+      if (!Number.isFinite(currentW) || !Number.isFinite(currentH)
+          || Math.abs(currentW - tileW) > 0.001 || Math.abs(currentH - tileH) > 0.001) {
+        try { entry.mesh.geometry?.dispose?.(); } catch (_) {}
+        entry.mesh.geometry = new window.THREE.PlaneGeometry(tileW, tileH);
+      }
+
+      entry.mesh.renderOrder = renderOrder;
+      entry.mesh.layers.set(0);
+      if (isOverhead) {
+        entry.mesh.layers.enable(20);
+        entry.mesh.layers.enable(TILE_FEATURE_LAYERS.CLOUD_SHADOW_BLOCKER);
+      } else {
+        entry.mesh.layers.disable(20);
+        entry.mesh.layers.disable(TILE_FEATURE_LAYERS.CLOUD_SHADOW_BLOCKER);
+      }
+      entry.mesh.updateMatrix?.();
+    }
+
+    if (root) {
+      root.layers.set(0);
+      if (isOverhead) {
+        root.layers.enable(20);
+        root.layers.enable(TILE_FEATURE_LAYERS.CLOUD_SHADOW_BLOCKER);
+      } else {
+        root.layers.disable(20);
+        root.layers.disable(TILE_FEATURE_LAYERS.CLOUD_SHADOW_BLOCKER);
+      }
+      root.updateMatrix?.();
+    }
+
+    if (entry.material) {
+      entry.material.opacity = alpha;
+      entry.material.transparent = true;
+      entry.material.needsUpdate = true;
+    }
+
+    entry.floorIndex = floorIndex;
+    const prevSrc = entry.textureSrc || '';
+    entry.textureSrc = src;
+    this._tiles.set(tileId, entry);
+
+    if (src && prevSrc !== src) {
+      this._loadTileTextureIntoEntry(tileId, src, floorIndex);
+    }
+
+    return true;
+  }
+
+  /**
+   * Remove one bus tile entry (incremental path used by TileManager delete).
+   * @param {string} tileId
+   */
+  removeTile(tileId) {
+    if (!tileId) return;
+    const entry = this._tiles.get(tileId);
+    if (!entry) return;
+
+    try {
+      if (entry.root?.parent) entry.root.parent.remove(entry.root);
+      else if (entry.mesh?.parent) entry.mesh.parent.remove(entry.mesh);
+      else this._scene?.remove?.(entry.mesh);
+    } catch (_) {
+    }
+
+    try { entry.mesh?.geometry?.dispose?.(); } catch (_) {}
+    try { entry.material?.map?.dispose?.(); } catch (_) {}
+    try { entry.material?.dispose?.(); } catch (_) {}
+
+    this._tiles.delete(tileId);
+  }
+
+  /**
    * Sync bus tile/overlay opacity to static tile document alpha.
    *
    * Used before overhead shadow capture so shadow masks remain stable even when
@@ -845,7 +985,34 @@ export class FloorRenderBus {
 
     root.add(mesh);
     this._scene.add(root);
-    this._tiles.set(tileId, { mesh, material: mat, floorIndex, root, attachedToTileId: null });
+    this._tiles.set(tileId, { mesh, material: mat, floorIndex, root, attachedToTileId: null, textureSrc: '' });
+  }
+
+  /**
+   * Load/replace the tile albedo texture for an existing bus tile entry.
+   * @param {string} tileId
+   * @param {string} src
+   * @param {number} floorIndex
+   * @private
+   */
+  _loadTileTextureIntoEntry(tileId, src, floorIndex) {
+    if (!this._loader || !src || !tileId) return;
+
+    this._loader.load(src, (tex) => {
+      const current = this._tiles.get(tileId);
+      if (!current || current.textureSrc !== src) return;
+
+      tex.colorSpace = window.THREE.SRGBColorSpace;
+      tex.flipY = true;
+      tex.needsUpdate = true;
+
+      try { current.material?.map?.dispose?.(); } catch (_) {}
+      current.material.map = tex;
+      current.material.needsUpdate = true;
+      log.debug(`FloorRenderBus: texture loaded for tile ${tileId} (floor ${floorIndex})`);
+    }, undefined, (err) => {
+      log.warn(`FloorRenderBus: failed to load texture for tile ${tileId}: ${src}`, err);
+    });
   }
 
   /**

@@ -753,6 +753,19 @@ export class ControlsIntegration {
       return;
     }
 
+    // Re-assert Three.js tile visibility whenever the tile layer becomes active.
+    // An earlier gameplay-mode suppression pass (mode-manager, canvas-replacement)
+    // may have called tileManager.setVisibility(false), leaving _globalVisible=false.
+    // With _globalVisible=false, newly created sprites stay permanently hidden after
+    // texture load because updateSpriteVisibility returns early. Re-assert true here
+    // so create/update/refresh hooks can show sprites correctly.
+    // Guard: skip the full-sprite iteration if _globalVisible is already true to
+    // avoid O(n_tiles) work on every refreshTile (~60fps during drag).
+    const tileManager = window.MapShine?.tileManager;
+    if (tileManager?.setVisibility && tileManager._globalVisible !== true) {
+      try { tileManager.setVisibility(true); } catch (_) {}
+    }
+
     // Foundry v12 tile interaction depends on primary group visibility.
     if (canvas.primary) {
       canvas.primary.visible = true;
@@ -807,6 +820,48 @@ export class ControlsIntegration {
     }
 
     this._resyncFoundryTileInteractionState();
+  }
+
+  /**
+   * Force a Three.js tile rerender from Foundry tile hooks.
+   *
+   * This is a fail-safe path in case TileManager hook wiring becomes stale during
+   * scene/layer transitions. It intentionally mirrors the basic lifecycle:
+   * create -> update -> refresh.
+   * @param {Tile|TileDocument|object} tileOrDoc
+   * @param {object|null} [changes]
+   * @private
+   */
+  _forceThreeTileRerender(tileOrDoc, changes = null) {
+    const tileManager = window.MapShine?.tileManager;
+    if (!tileManager) return;
+
+    const tileDoc = tileOrDoc?.document ?? tileOrDoc;
+    if (!tileDoc?.id) return;
+
+    try {
+      // If gameplay/layer arbitration left tiles globally hidden, no per-tile
+      // refresh path can make the sprite visible. Re-assert visibility first.
+      if (tileManager.setVisibility && tileManager._globalVisible !== true) {
+        tileManager.setVisibility(true);
+      }
+
+      if (changes && typeof tileManager.updateTileSprite === 'function') {
+        tileManager.updateTileSprite(tileDoc, changes);
+        return;
+      }
+
+      const hasSprite = !!tileManager.tileSprites?.has?.(tileDoc.id);
+      if (hasSprite && typeof tileManager.refreshTileSprite === 'function') {
+        tileManager.refreshTileSprite(tileDoc);
+        return;
+      }
+
+      if (typeof tileManager.createTileSprite === 'function') {
+        tileManager.createTileSprite(tileDoc);
+      }
+    } catch (_) {
+    }
   }
 
   /**
@@ -1401,27 +1456,63 @@ export class ControlsIntegration {
     });
     this._hookIds.push({ name: 'mapShineLevelContextChanged', id: levelContextHookId });
 
-    const refreshTileHookId = Hooks.on('refreshTile', () => {
+    const refreshTileHookId = Hooks.on('refreshTile', (tile) => {
       if (this.state !== IntegrationState.ACTIVE) return;
       try {
         this._updateTilesVisualState();
         this._resyncFoundryTileInteractionState();
+
+        // During drag/resize, Foundry updates the placeable's live transform
+        // before document commit. Build a lightweight proxy so Three.js tracks
+        // the live position immediately instead of waiting for updateTile.
+        const baseDoc = tile?.document;
+        if (baseDoc) {
+          const liveDoc = new Proxy(baseDoc, {
+            get(target, prop, receiver) {
+              if (prop === 'x') return Number.isFinite(Number(tile?.x)) ? Number(tile.x) : target.x;
+              if (prop === 'y') return Number.isFinite(Number(tile?.y)) ? Number(tile.y) : target.y;
+              if (prop === 'rotation') return Number.isFinite(Number(tile?.rotation)) ? Number(tile.rotation) : target.rotation;
+              if (prop === 'width') return Number.isFinite(Number(target?.width)) ? Number(target.width) : (Number(tile?.w) || 0);
+              if (prop === 'height') return Number.isFinite(Number(target?.height)) ? Number(target.height) : (Number(tile?.h) || 0);
+              return Reflect.get(target, prop, receiver);
+            }
+          });
+          this._forceThreeTileRerender(liveDoc);
+        }
       } catch (_) {
       }
     });
     this._hookIds.push({ name: 'refreshTile', id: refreshTileHookId });
 
-    const createTileHookId = Hooks.on('createTile', () => {
+    const createTileHookId = Hooks.on('createTile', (tileDoc) => {
       if (this.state !== IntegrationState.ACTIVE) return;
       setTimeout(() => {
         try {
           this._updateTilesVisualState();
           this._resyncFoundryTileInteractionState();
+          this._forceThreeTileRerender(tileDoc);
         } catch (_) {
         }
       }, 0);
     });
     this._hookIds.push({ name: 'createTile', id: createTileHookId });
+
+    const updateTileHookId = Hooks.on('updateTile', (tileDoc, changes) => {
+      if (this.state !== IntegrationState.ACTIVE) return;
+      try {
+        const keys = changes && typeof changes === 'object' ? Object.keys(changes) : [];
+        const geometryOrVisualChanged = keys.length === 0 || keys.some((k) => (
+          k === 'x' || k === 'y' || k === 'width' || k === 'height' ||
+          k === 'rotation' || k === 'elevation' || k === 'z' ||
+          k === 'hidden' || k === 'alpha' || k === 'texture' || k === 'flags'
+        ));
+        if (!geometryOrVisualChanged) return;
+
+        this._forceThreeTileRerender(tileDoc, changes || {});
+      } catch (_) {
+      }
+    });
+    this._hookIds.push({ name: 'updateTile', id: updateTileHookId });
 
     // Hard eligibility guard: if a tile somehow becomes controlled while it
     // does not match the current foreground/background mode, release it

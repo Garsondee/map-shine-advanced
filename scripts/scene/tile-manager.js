@@ -586,6 +586,26 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
   }
 
   /**
+   * Keep V2 FloorRenderBus tile geometry in sync with tile document updates.
+   *
+   * V2 albedo rendering comes from FloorRenderBus meshes, not TileManager sprites.
+   * Tile Motion already updates bus roots each frame; this incremental path mirrors
+   * the same behavior for manual Foundry tile create/drag/update flows.
+   * @param {TileDocument|object} tileDoc
+   * @private
+   */
+  _syncFloorRenderBusTile(tileDoc) {
+    if (!tileDoc?.id) return;
+    try {
+      const bus = window.MapShine?.floorCompositorV2?._renderBus;
+      if (!bus || typeof bus.upsertTileFromDocument !== 'function') return;
+      const fd = window.MapShine?.sceneComposer?.foundrySceneData ?? null;
+      bus.upsertTileFromDocument(tileDoc, { foundrySceneData: fd });
+    } catch (_) {
+    }
+  }
+
+  /**
    * Provide a dedicated scene for floor-presence alpha meshes.
    * All tile sprites render a simple alpha quad here (layer 23) so effects
    * can determine which screen pixels are covered by the current floor.
@@ -2589,10 +2609,30 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
         const meshPosY = Number(placeable?.mesh?.position?.y ?? placeable?.position?.y);
         const fallbackX = Number.isFinite(meshPosX) ? (meshPosX - (Number(baseDoc.width) || 0) / 2) : baseDoc.x;
         const fallbackY = Number.isFinite(meshPosY) ? (meshPosY - (Number(baseDoc.height) || 0) / 2) : baseDoc.y;
+
+        // During a PIXI drag, Foundry creates a preview clone (placeable._preview)
+        // with keepId:true, only updating the CLONE's document.x/y each frame.
+        // The original's document.x/y is unchanged until drag commit, so reading
+        // placeable.x = original.document.x here would revert the sprite to the
+        // pre-drag position every Three.js frame, fighting the refreshTile hook
+        // which correctly reads the clone's live position.
+        const preview = placeable._preview;
+        const posDoc = (preview && typeof preview.document?.x === 'number') ? preview.document : null;
+
         const overrides = {
-          x: Number.isFinite(Number(placeable?.x)) ? Number(placeable.x) : fallbackX,
-          y: Number.isFinite(Number(placeable?.y)) ? Number(placeable.y) : fallbackY,
-          rotation: Number.isFinite(Number(placeable?.rotation)) ? Number(placeable.rotation) : baseDoc.rotation,
+          // posDoc = preview clone doc during drag (correct live position).
+          // Fallback uses document.x/y (synchronously updated at commit time)
+          // rather than placeable.x/y (PIXI container, lags one tick behind
+          // until _refreshPosition fires), preventing a post-commit position bounce.
+          x: posDoc
+            ? Number(posDoc.x)
+            : (Number.isFinite(Number(baseDoc.x)) ? Number(baseDoc.x) : fallbackX),
+          y: posDoc
+            ? Number(posDoc.y)
+            : (Number.isFinite(Number(baseDoc.y)) ? Number(baseDoc.y) : fallbackY),
+          rotation: posDoc
+            ? (Number.isFinite(Number(posDoc.rotation)) ? Number(posDoc.rotation) : baseDoc.rotation)
+            : (Number.isFinite(Number(baseDoc.rotation)) ? Number(baseDoc.rotation) : 0),
           width: Number.isFinite(Number(baseDoc.width)) ? Number(baseDoc.width) : (Number(placeable?.w) || 0),
           height: Number.isFinite(Number(baseDoc.height)) ? Number(baseDoc.height) : (Number(placeable?.h) || 0)
         };
@@ -3781,6 +3821,15 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     }
 
     this.scene.remove(sprite);
+
+    // Keep V2 albedo tile bus in sync when a tile is deleted.
+    try {
+      const bus = window.MapShine?.floorCompositorV2?._renderBus;
+      if (bus && typeof bus.removeTile === 'function') {
+        bus.removeTile(tileId);
+      }
+    } catch (_) {
+    }
     
     if (sprite.material) {
       sprite.material.dispose();
@@ -4157,6 +4206,10 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
       window.MapShine?.tileMotionManager?.captureBaseTransform?.(tileDoc?.id, sprite);
     } catch (_) {
     }
+
+    // V2 albedo is rendered by FloorRenderBus tile meshes; sync that geometry
+    // incrementally so manual Foundry edits (create/drag/update) move instantly.
+    this._syncFloorRenderBusTile(tileDoc);
   }
 
   /**

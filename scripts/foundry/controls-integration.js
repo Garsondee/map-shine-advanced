@@ -791,9 +791,17 @@ export class ControlsIntegration {
         tile.renderable = false;
         tile.interactive = false;
         tile.interactiveChildren = false;
+        
+        // V12 compat: force eventMode to none
+        tile.eventMode = 'none';
 
-        // Hide native visuals
-        if (tile.mesh) tile.mesh.alpha = ALPHA;
+        // Hide native visuals and also disable mesh-level interactivity
+        if (tile.mesh) {
+          tile.mesh.alpha = ALPHA;
+          tile.mesh.interactive = false;
+          tile.mesh.interactiveChildren = false;
+          tile.mesh.eventMode = 'none';
+        }
       } catch (_) {
       }
     }

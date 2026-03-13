@@ -2534,24 +2534,33 @@ export class InteractionManager {
     const foregroundMode = this._getTileForegroundMode();
     if (typeof foregroundMode !== 'boolean') return true;
 
-    // Resolve overhead classification from persisted document data first.
-    // Do not rely solely on sprite.userData here because stale sprite state can
-    // drift from current document values during rapid layer/tool transitions.
-    const sourceOverhead = tileDoc?._source?.overhead;
-    const levelsOverhead = tileDoc?._source?.flags?.levels?.overhead;
-    const sceneForegroundElevation = Number.isFinite(Number(canvas?.scene?.foregroundElevation))
-      ? Number(canvas.scene.foregroundElevation)
-      : 0;
-    const tileElevation = Number.isFinite(Number(tileDoc?.elevation))
-      ? Number(tileDoc.elevation)
-      : 0;
-    const isOverhead = (typeof sourceOverhead === 'boolean')
-      ? sourceOverhead
-      : (typeof levelsOverhead === 'boolean')
-        ? levelsOverhead
-        : (typeof sprite?.userData?.isOverhead === 'boolean')
-          ? !!sprite.userData.isOverhead
-          : (tileElevation >= sceneForegroundElevation);
+    // Use the sprite's overhead status as the primary truth since that dictates
+    // how the tile is actually rendered and layered right now.
+    // If sprite isn't available, fallback to document evaluation.
+    let isOverhead = false;
+    if (sprite?.userData && typeof sprite.userData.isOverhead === 'boolean') {
+      isOverhead = sprite.userData.isOverhead;
+    } else {
+      const sourceOverhead = tileDoc?._source?.overhead;
+      const getterOverhead = tileDoc?.overhead;
+      const levelsOverhead = tileDoc?._source?.flags?.levels?.overhead;
+      const sceneForegroundElevation = Number.isFinite(Number(canvas?.scene?.foregroundElevation))
+        ? Number(canvas.scene.foregroundElevation)
+        : 0;
+      const tileElevation = Number.isFinite(Number(tileDoc?.elevation))
+        ? Number(tileDoc.elevation)
+        : 0;
+
+      // Foundry v12 relies on elevation for overhead status, but older scenes
+      // may still use the boolean flag.
+      isOverhead = (typeof getterOverhead === 'boolean')
+        ? getterOverhead
+        : (typeof sourceOverhead === 'boolean')
+          ? sourceOverhead
+          : (typeof levelsOverhead === 'boolean')
+            ? levelsOverhead
+            : (tileElevation >= sceneForegroundElevation);
+    }
 
     return foregroundMode ? isOverhead : !isOverhead;
   }
@@ -4607,8 +4616,10 @@ export class InteractionManager {
       }
     }
 
-    // If we hit an overhead tile, don't hover walls/tokens through it.
-    if (hitFound) return;
+    // Overhead hover-hiding should only suppress deeper hover targets while the
+    // Tiles workflow is active. In gameplay/token workflows, token hover must
+    // remain available even when a large overhead tile spans the scene.
+    if (hitFound && this._isTilesLayerActive()) return;
 
     // 1b. Tiles layer hover — show pointer cursor when hovering a selectable tile
     if (this._isTilesLayerActive() && this.tileManager?.tileSprites) {

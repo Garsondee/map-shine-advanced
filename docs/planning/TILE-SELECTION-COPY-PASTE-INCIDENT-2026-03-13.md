@@ -178,6 +178,13 @@ This incident remains unresolved as of 2026-03-13 and should be treated as a blo
    - The `paste` function attempts to select the tile immediately (`canvas.tiles.get(id).control(...)`), which delegates to `InteractionManager.selectObject`.
    - Furthermore, `InteractionManager._isTileSelectableForCurrentTool` strictly requires `sprite.visible === true`, meaning you cannot pick or drag the newly pasted tile until its texture fully downloads. This causes the "ghost paste" effect.
 
+8. **Overhead tile misclassification (V12 elevation logic mismatch)**
+   - Even when MapShine handles Three.js pointer logic correctly, the cursor could still think "the entire scene is a tile" while in background mode.
+   - Why? `TileManager.isTileOverhead` and `InteractionManager._isTileAllowedByCurrentForegroundMode` were checking `tileDoc._source.overhead` and skipping the dynamic `tileDoc.overhead` getter.
+   - In Foundry V12, `_source.overhead` is often `false`, and the true overhead status is derived dynamically from `elevation >= scene.foregroundElevation`.
+   - Because MapShine misclassified the giant overhead tile as a *background* tile, it allowed it to be hovered and selected while in the background tool mode, intercepting all clicks.
+   - Fix: Prioritize `sprite.userData.isOverhead` in the interaction manager, and ensure `TileManager` respects the native `tileDoc.overhead` getter before falling back to `_source.overhead`.
+
 ### Root Cause Summary
 
 The main failure is **input/hit-test ownership mismatch** in tile context:

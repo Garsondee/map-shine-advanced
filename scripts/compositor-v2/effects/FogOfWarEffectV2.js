@@ -1929,11 +1929,22 @@ export class FogOfWarEffectV2 {
           const offsetX = this.sceneRect.x;
           const offsetY = this.sceneRect.y;
           const perspective = getPerspectiveElevation();
+          const visibilityController = window.MapShine?.visibilityController;
 
           for (const token of tokens) {
-            if (!token?.visible) continue;
+            if (!token) continue;
             const doc = token.document;
             if (!doc) continue;
+
+            // In Three-token mode, PIXI token.visible is intentionally kept true
+            // for hit-testing. Use VisibilityController's computed LOS state (or
+            // token.isVisible fallback) so unseen tokens do NOT punch fog holes.
+            const tokenId = doc.id;
+            const vcState = tokenId ? visibilityController?.getDetectionState?.(tokenId) : null;
+            const isVisibleToVision = (vcState && typeof vcState.visible === 'boolean')
+              ? vcState.visible
+              : !!token?.isVisible;
+            if (!isVisibleToVision) continue;
 
             // Only reveal tokens on the same floor as the viewer
             if (perspective.source !== 'background') {

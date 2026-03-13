@@ -2,6 +2,29 @@ import { createLogger } from '../core/log.js';
 
 const log = createLogger('SelectionBridge');
 
+function _reassertManualLevelsPerspective() {
+  const ctx = window.MapShine?.cameraFollower?.getActiveLevelContext?.() || window.MapShine?.activeLevelContext;
+  if (!ctx || ctx.lockMode !== 'manual') return;
+
+  const elevation = Number(ctx.center ?? ctx.bottom);
+  if (!Number.isFinite(elevation)) return;
+
+  try {
+    if (globalThis.WallHeight && globalThis.WallHeight.currentTokenElevation !== elevation) {
+      globalThis.WallHeight.currentTokenElevation = elevation;
+    }
+  } catch (_) {
+  }
+
+  try {
+    const levels = globalThis.CONFIG?.Levels;
+    if (levels && levels.currentToken != null) {
+      levels.currentToken = null;
+    }
+  } catch (_) {
+  }
+}
+
 /**
  * Apply an authoritative token controlled-set into Foundry.
  * This keeps module interoperability while allowing Three.js to own selection input.
@@ -54,6 +77,10 @@ export function applyControlledTokenSet(desiredTokenIds) {
   }
 
   if (toRelease.length > 0 || toControl.length > 0) {
+    // Keep manual floor mode authoritative even when Foundry token control
+    // events trigger Levels perspective rebinding.
+    _reassertManualLevelsPerspective();
+
     log.debug('Applied controlled token set', {
       desiredCount: desired.size,
       released: toRelease.length,

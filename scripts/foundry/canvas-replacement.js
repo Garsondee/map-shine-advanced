@@ -6691,7 +6691,9 @@ function updateLayerVisibility() {
       if (isTilesActive) {
           canvas.tiles.visible = true;
           canvas.tiles.interactiveChildren = true;
-          const ALPHA = 0.01;
+          // In tile-edit mode, keep PIXI visuals fully visible so Foundry's
+          // native selection frame and copy/paste affordances remain obvious.
+          const ALPHA = 1;
           for (const tile of canvas.tiles.placeables || []) {
             if (!tile) continue;
             tile.visible = true;
@@ -6699,6 +6701,12 @@ function updateLayerVisibility() {
             tile.interactive = true;
             tile.interactiveChildren = true;
             if (tile.mesh) tile.mesh.alpha = ALPHA;
+            if (tile.texture) tile.texture.alpha = ALPHA;
+            if (Array.isArray(tile.children)) {
+              for (const child of tile.children) {
+                if (child && typeof child.alpha === 'number') child.alpha = ALPHA;
+              }
+            }
           }
           if (tileManager) tileManager.setVisibility(true);
       } else {

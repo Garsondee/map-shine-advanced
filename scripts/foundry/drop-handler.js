@@ -6,9 +6,23 @@
 
 import { createLogger } from '../core/log.js';
 import Coordinates from '../utils/coordinates.js';
-import { applyTileLevelDefaults } from './levels-create-defaults.js';
+import { applyTileLevelDefaults, getFiniteActiveLevelBand } from './levels-create-defaults.js';
+import { getPerspectiveElevation } from './elevation-context.js';
 
 const log = createLogger('DropHandler');
+
+function _resolveActorDropElevation() {
+  // Prefer the current runtime perspective first. This follows the floor the
+  // user is actively viewing, even when level-band metadata is temporarily stale.
+  const perspectiveElevation = Number(getPerspectiveElevation?.()?.elevation);
+  if (Number.isFinite(perspectiveElevation)) return perspectiveElevation;
+
+  const band = getFiniteActiveLevelBand();
+  const bandCenter = Number(band?.center);
+  if (Number.isFinite(bandCenter)) return bandCenter;
+
+  return null;
+}
 
 /**
  * DropHandler - Manages drag-and-drop interactions on the THREE.js canvas
@@ -154,6 +168,17 @@ export class DropHandler {
   async handleActorDrop(event, data) {
     log.info('Handling actor drop');
 
+    // Foundry's TokenLayer._onDropActorData consumes data.elevation as the
+    // authoritative drop elevation. Seed this from the active level so actor
+    // drops land on the currently viewed floor instead of prototype defaults.
+    const hasExplicitElevation = Number.isFinite(Number(data?.elevation));
+    if (!hasExplicitElevation) {
+      const dropElevation = _resolveActorDropElevation();
+      if (Number.isFinite(dropElevation)) {
+        data.elevation = dropElevation;
+      }
+    }
+
     // Prefer Foundry's native Actor drop workflow for maximum module/system
     // compatibility (permissions, defaults, system overrides, wrappers).
     if (canvas?.tokens?._onDropActorData) {
@@ -198,7 +223,11 @@ export class DropHandler {
         snap: !event.shiftKey // Shift key disables snapping
       });
 
-      tokenData.updateSource(position);
+      const nextSource = { ...position };
+      if (Number.isFinite(Number(data?.elevation))) {
+        nextSource.elevation = Number(data.elevation);
+      }
+      tokenData.updateSource(nextSource);
 
       // Create the token document
       // This will trigger our 'createToken' hook, which creates the THREE.js sprite

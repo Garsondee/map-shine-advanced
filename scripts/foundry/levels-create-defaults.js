@@ -232,6 +232,49 @@ export function applyTileLevelDefaults(data, options = {}) {
 }
 
 /**
+ * Seed missing token elevation/range defaults from the active level band.
+ *
+ * @param {object} data
+ * @param {{scene?: Scene|null|undefined}} [options]
+ * @returns {object}
+ */
+export function applyTokenLevelDefaults(data, options = {}) {
+  if (!data || typeof data !== 'object') return data;
+
+  // In single-floor contexts, token range flags are unnecessary and can
+  // destabilize Levels perspective evaluation for some actor prototypes.
+  // Keep token creation on core elevation semantics in this mode.
+  try {
+    const levelCount = Number(window.MapShine?.activeLevelContext?.count ?? 0);
+    if (Number.isFinite(levelCount) && levelCount <= 1) {
+      const levelsFlags = data.flags?.levels;
+      if (levelsFlags && typeof levelsFlags === 'object') {
+        delete levelsFlags.rangeBottom;
+        delete levelsFlags.rangeTop;
+      }
+    }
+  } catch (_) {
+  }
+
+  const scene = options.scene ?? canvas?.scene;
+  // Token floor scoping should keep working when explicit active-floor context
+  // exists, even if compatibility mode is OFF.
+  if (!shouldApplyLevelCreateDefaults(scene, { allowWhenModeOff: true })) return data;
+
+  const band = getFiniteActiveLevelBand() || _getFallbackCreateBandForLightData(data);
+  if (!band) return data;
+
+  const hasElevation = !_isMissing(data.elevation);
+  if (hasElevation) return data;
+
+  if (!hasElevation) {
+    data.elevation = band.center;
+  }
+
+  return data;
+}
+
+/**
  * Seed missing ambient-light elevation/range defaults from the active level band.
  *
  * @param {object} data

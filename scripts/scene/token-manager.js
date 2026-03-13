@@ -8,6 +8,7 @@ import { createLogger } from '../core/log.js';
 import { OVERLAY_THREE_LAYER } from '../core/render-layers.js';
 import { getLevelsCompatibilityMode, LEVELS_COMPATIBILITY_MODES } from '../foundry/levels-compatibility.js';
 import { isLevelsEnabledForScene } from '../foundry/levels-scene-flags.js';
+import { applyTokenLevelDefaults } from '../foundry/levels-create-defaults.js';
 import { getPerspectiveElevation } from '../foundry/elevation-context.js';
 import { getTokenRenderingMode, TOKEN_RENDERING_MODES } from '../settings/scene-settings.js';
 
@@ -971,6 +972,21 @@ vec3 ms_applySceneLighting(vec3 color) {
   setupHooks() {
     if (this.hooksRegistered) return;
 
+    this._hookIds.push(['preCreateToken', Hooks.on('preCreateToken', (doc, data, options, userId) => {
+      try {
+        if (userId && game?.user?.id && userId !== game.user.id) return;
+        if (!data || typeof data !== 'object') return;
+
+        const next = foundry.utils?.deepClone
+          ? foundry.utils.deepClone(data)
+          : { ...data };
+
+        applyTokenLevelDefaults(next, { scene: doc?.parent ?? canvas?.scene });
+        doc.updateSource(next);
+      } catch (_) {
+      }
+    })]);
+
     // Initial load when canvas is ready
     this._hookIds.push(['canvasReady', Hooks.on('canvasReady', () => {
       log.debug('Canvas ready, syncing all tokens');
@@ -1243,12 +1259,11 @@ vec3 ms_applySceneLighting(vec3 color) {
       log.warn(`[V1 fallback] Token ${tokenDoc.id} added to main scene - FloorCompositor not available`);
     }
 
-    // Use normal visibility flow in all modes. Start with 0 opacity to
-    // prevent white flash before texture loads; visibility logic restores it.
+    // Start with 0 opacity to prevent white flash before texture loads while
+    // keeping the sprite raycastable for immediate hover/select interactions.
+    // VisibilityController will set final visibility on its next refresh.
     const vc = window.MapShine?.visibilityController;
-    if (vc?._initialized) {
-      sprite.visible = false;
-    }
+    sprite.visible = true;
     sprite.material.opacity = 0;
 
     const foundryToken = canvas?.tokens?.get?.(tokenDoc.id) || null;
@@ -1276,6 +1291,14 @@ vec3 ms_applySceneLighting(vec3 color) {
     this._updateNameLabelVisibility(spriteData);
 
     this.updateTokenTargetIndicator(tokenDoc.id);
+
+    // Ensure freshly created tokens get a prompt visibility pass from VC.
+    // This prevents prolonged 0-opacity states when no immediate sightRefresh
+    // is emitted after document creation.
+    try {
+      vc?._queueBulkRefresh?.();
+    } catch (_) {
+    }
 
     // Apply current lighting tint immediately so new tokens (e.g., copy-pasted)
     // pick up scene lighting right away instead of waiting for next update() call

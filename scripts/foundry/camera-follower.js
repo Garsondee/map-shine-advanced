@@ -142,24 +142,24 @@ export class CameraFollower {
     });
     this._hookIds.push({ name: 'updateScene', id: updateSceneId });
 
-    // Selecting a token is an explicit user action — always switch to that
-    // token's level regardless of lock mode or GM status. This gives
-    // immediate floor-navigation feedback when clicking a token.
+    // Token control/elevation events should only auto-sync level context when
+    // policy allows it (follow mode, or player-controlled workflows).
+    // In manual GM workflows, selecting a token must not override the
+    // currently selected floor.
     const controlTokenId = Hooks.on('controlToken', (_token, controlled) => {
       if (!controlled) return;
+      if (!this._shouldAutoSyncControlledTokenEvents()) return;
       this._syncToControlledTokenLevel({ emit: true, reason: 'control-token' });
     });
     this._hookIds.push({ name: 'controlToken', id: controlTokenId });
 
-    // When a controlled token's elevation changes, ALWAYS switch the active
-    // level to the band containing the new elevation — regardless of lock mode
-    // or GM status. This is distinct from the controlToken hook (which respects
-    // manual mode) because an elevation change is an explicit signal that the
-    // view should follow the token to its new floor.
+    // Controlled token elevation changes use the same policy gate as
+    // control-token events so manual floor selection stays authoritative.
     const updateTokenId = Hooks.on('updateToken', (tokenDoc, changes) => {
       if (!('elevation' in (changes || {}))) return;
       const controlled = canvas?.tokens?.controlled || [];
       if (!controlled.some((t) => t?.document?.id === tokenDoc?.id)) return;
+      if (!this._shouldAutoSyncControlledTokenEvents()) return;
       this._syncToControlledTokenLevel({ emit: true, reason: 'token-elevation-update' });
     });
     this._hookIds.push({ name: 'updateToken', id: updateTokenId });

@@ -150,6 +150,23 @@ export class LevelsPerspectiveBridge {
         this._syncing = false;
       }
     })]);
+
+    // Some Levels workflows update runtime perspective on token control without
+    // always emitting a stable post-state for manual floor mode. Re-assert
+    // manual perspective after control settles.
+    this._hookIds.push(['controlToken', Hooks.on('controlToken', (_token, controlled) => {
+      if (!controlled) return;
+      if (this._syncing) return;
+      setTimeout(() => {
+        if (this._syncing) return;
+        this._syncing = true;
+        try {
+          this._reassertManualPerspective('control-token');
+        } finally {
+          this._syncing = false;
+        }
+      }, 0);
+    })]);
   }
 
   // -------------------------------------------------------------------------
@@ -256,29 +273,54 @@ export class LevelsPerspectiveBridge {
    * @private
    */
   _onLevelsPerspectiveChanged(token) {
-    // This is primarily informational. The camera follower's own controlToken
-    // handling and follow mode will typically keep things in sync.
-    // We just make sure the WallHeight elevation matches what MapShine expects
-    // when in manual lock mode.
+    this._reassertManualPerspective('levels-perspective-changed');
+  }
+
+  /**
+   * In manual lock mode, keep Levels runtime perspective aligned to the active
+   * MapShine floor context and clear token-bound perspective overrides.
+   *
+   * @param {string} [reason='manual-reassert']
+   * @private
+   */
+  _reassertManualPerspective(reason = 'manual-reassert') {
     const cameraFollower = window.MapShine?.cameraFollower;
     if (!cameraFollower) return;
 
     const ctx = cameraFollower.getActiveLevelContext?.();
     if (!ctx || ctx.lockMode !== 'manual') return;
 
-    // In manual mode, MapShine's chosen floor takes precedence over
-    // whatever token Levels just focused on. Re-assert our elevation.
-    const WH = _getWallHeight();
-    if (!WH) return;
-
     const elevation = Number(ctx.center ?? ctx.bottom);
     if (!Number.isFinite(elevation)) return;
-    if (WH.currentTokenElevation === elevation) return;
 
+    let changed = false;
+
+    const WH = _getWallHeight();
+    if (WH) {
+      try {
+        if (WH.currentTokenElevation !== elevation) {
+          WH.currentTokenElevation = elevation;
+          changed = true;
+        }
+      } catch (_) {
+      }
+    }
+
+    // Manual mode should not be implicitly rebound to a controlled token.
+    // Clearing Levels' currentToken keeps perspective anchored to active floor.
     try {
-      WH.currentTokenElevation = elevation;
-      log.debug(`Re-asserted manual level elevation ${elevation} after levelsPerspectiveChanged`);
-    } catch (_) {}
+      const levels = globalThis.CONFIG?.Levels;
+      if (levels && levels.currentToken != null) {
+        levels.currentToken = null;
+        changed = true;
+      }
+    } catch (_) {
+    }
+
+    if (changed) {
+      this._schedulePerceptionRefresh();
+      log.debug(`Re-asserted manual level perspective (${reason}) at elevation ${elevation}`);
+    }
   }
 
   // -------------------------------------------------------------------------

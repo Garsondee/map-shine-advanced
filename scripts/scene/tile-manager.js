@@ -49,17 +49,35 @@ const FLOOR_PRESENCE_LAYER = 23;
 const BELOW_FLOOR_PRESENCE_LAYER = 24;
 
 /**
- * Determine whether a tile is overhead based solely on its elevation relative
- * to the scene's foregroundElevation. This matches Foundry v12+ behavior.
+ * Determine whether a tile should be treated as overhead.
  *
- * The legacy `tileDoc.overhead` boolean is intentionally NOT accessed here —
- * reading that property triggers a PF2e deprecation getter on every tile.
- * Elevation is the single source of truth for overhead status.
+ * Priority:
+ * 1) Respect persisted source overhead flags when present (legacy/core scenes).
+ * 2) Fall back to elevation >= scene.foregroundElevation.
+ *
+ * We intentionally read from _source/flags first so we avoid triggering
+ * deprecation getters in systems that shim tileDoc.overhead.
  *
  * @param {object} tileDoc - The tile document
  * @returns {boolean}
  */
 export function isTileOverhead(tileDoc) {
+  // Foundry's native document getter is the most reliable way to determine
+  // overhead status across v11 and v12.
+  if (typeof tileDoc?.overhead === 'boolean') {
+    return tileDoc.overhead;
+  }
+
+  // Legacy/core persisted overhead marker.
+  // Keep this authoritative when present because many scenes still rely on it
+  // even when elevation is not above foregroundElevation.
+  const sourceOverhead = tileDoc?._source?.overhead;
+  if (typeof sourceOverhead === 'boolean') return sourceOverhead;
+
+  // Levels-compatible overhead marker used by some migrated data flows.
+  const levelsOverhead = tileDoc?._source?.flags?.levels?.overhead;
+  if (typeof levelsOverhead === 'boolean') return levelsOverhead;
+
   const foregroundElevation = Number.isFinite(canvas.scene?.foregroundElevation)
     ? canvas.scene.foregroundElevation
     : 0;
@@ -2398,7 +2416,8 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
       isOverhead = !!sprite?.userData?.isOverhead;
       const isWeatherRoof = !!sprite?.userData?.isWeatherRoof;
       const occlusionMode = tileDoc?.occlusion?.mode ?? CONST.TILE_OCCLUSION_MODES.NONE;
-      hoverEligible = isOverhead || isWeatherRoof || (occlusionMode !== CONST.TILE_OCCLUSION_MODES.NONE);
+      const forceOverheadNoHover = !!sprite?.userData?._msMotionForcedOverhead;
+      hoverEligible = (!forceOverheadNoHover && isOverhead) || isWeatherRoof || (occlusionMode !== CONST.TILE_OCCLUSION_MODES.NONE);
       if (!hoverEligible) {
         if (!isOverhead) this._overheadTileIds.delete(tileId);
         data.hoverHidden = false;
@@ -2710,6 +2729,7 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
       if (!data) continue;
 
       const { sprite, tileDoc, hoverHidden } = data;
+      const skipRoofFade = !!sprite?.userData?._msMotionForcedOverhead;
 
       // MS-LVL-036: Skip overhead fade for tiles that are elevation-hidden.
       // Levels range-hide takes precedence over hover-fade — if the tile is
@@ -2773,7 +2793,7 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
       // controlled token is underneath — matching Foundry's native behaviour.
       // Without the hover gate, selecting a token would immediately fade ALL
       // overhead tiles covering it, which is incorrect.
-      if (hoverHidden && mode !== CONST.TILE_OCCLUSION_MODES.NONE) {
+      if (!skipRoofFade && hoverHidden && mode !== CONST.TILE_OCCLUSION_MODES.NONE) {
         let occluded = false;
 
         // Check if any relevant token is under this tile
@@ -2806,9 +2826,15 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
       }
 
       // Apply hover-hide (fade to zero alpha when hovered)
-      if (hoverHidden) {
+      if (!skipRoofFade && hoverHidden) {
         targetAlpha = 0;
         anyHoverHidden = true;
+      }
+
+      if (skipRoofFade && hoverHidden) {
+        // Defensive cleanup: motion-forced overhead tiles should never remain in
+        // hover-hidden state, but stale state can exist after mode/config flips.
+        data.hoverHidden = false;
       }
       
       // Smoothly interpolate alpha with a fast response so hover-hidden roofs
@@ -3828,8 +3854,14 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     // Per-tile motion toggle can force overhead-style draw ordering so the tile
     // participates in the proven roof-style depth/render path (avoids custom band
     // ordering regressions with post effects).
-    const isOverhead = (isTileOverhead(tileDoc) && !treatAsCurrentFloor) || renderAboveTokens;
+    const naturalOverhead = isTileOverhead(tileDoc) && !treatAsCurrentFloor;
+    const isOverhead = naturalOverhead || renderAboveTokens;
     const wasOverhead = !!sprite.userData.isOverhead;
+
+    // Tile-motion's "renderAboveTokens" can force roof-style render ordering
+    // for non-roof tiles. Keep that ordering, but do not opt these tiles into
+    // roof hover-hide / roof occlusion alpha logic.
+    sprite.userData._msMotionForcedOverhead = !!(renderAboveTokens && !naturalOverhead);
 
     // Store overhead status for update loop
     sprite.userData.isOverhead = isOverhead;

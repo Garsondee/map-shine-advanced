@@ -8508,10 +8508,11 @@ export class TokenMovementManager {
       return { x, y };
     }
 
-    const center = this._tokenTopLeftToCenter({ x, y }, tokenDoc);
     try {
-      const snappedCenter = grid.getSnappedPoint(center, { mode: CONST?.GRID_SNAPPING_MODES?.CENTER });
-      return this._tokenCenterToTopLeft(snappedCenter, tokenDoc);
+      const mode = CONST?.GRID_SNAPPING_MODES?.TOP_LEFT_CORNER;
+      return (mode !== undefined)
+        ? grid.getSnappedPoint({ x, y }, { mode })
+        : grid.getSnappedPoint({ x, y });
     } catch (_) {
       return { x, y };
     }

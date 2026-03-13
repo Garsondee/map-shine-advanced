@@ -2048,13 +2048,52 @@ export class FogOfWarEffectV2 {
     const fogEnabled = canvas?.scene?.tokenVision ?? false;
 
     if (!fogEnabled) return true;
+    if (isGM) {
+      // If GM and NO tokens are controlled, bypass fog
+      const controlled = canvas?.tokens?.controlled || [];
+      if (controlled.length === 0) return true;
 
-    // GMs always see the full scene. We never restrict GM view based on
-    // controlled-token vision. This prevents PF2e bestiary NPCs (which have
-    // sight.enabled=true and active VisionSources) from engaging the fog plane
-    // and fading the scene when the GM selects them.
-    if (isGM) return true;
+      // If GM and ALL controlled tokens lack sight capability, bypass fog.
+      const hasSightCapability = controlled.some((t) => this._tokenHasVisionCapability(t));
+      if (!hasSightCapability) return true;
 
+      // Capability alone is not enough. Some systems/tokens report vision
+      // capability but produce no active/usable vision source in the current
+      // frame. Fail-open for GM to avoid full-scene fog-out.
+      const visionSources = canvas?.effects?.visionSources;
+      const hasRenderableVision = controlled.some((t) => {
+        if (!this._tokenHasVisionCapability(t)) return false;
+
+        // Fast path: token vision object already has an active polygon/shape.
+        const tv = t?.vision;
+        if (tv?.active && (tv?.los || tv?.shape || tv?.fov)) return true;
+
+        // Fallback: resolve a matching Foundry vision source.
+        if (!visionSources?.size) return false;
+        const tokenId = t?.document?.id;
+        const candidateId = t?.sourceId || tv?.sourceId || tokenId;
+
+        let source = null;
+        if (candidateId && typeof visionSources.get === 'function') {
+          source = visionSources.get(candidateId) || null;
+        }
+        if (!source) {
+          for (const vs of visionSources.values()) {
+            const sid = vs?.sourceId || vs?.object?.sourceId || vs?.object?.document?.id;
+            if ((tokenId && sid === tokenId) || vs?.object === t || vs?.object?.document?.id === tokenId) {
+              source = vs;
+              break;
+            }
+          }
+        }
+
+        if (!source) return false;
+        if (source.active === false) return false;
+        return !!(source.los || source.shape || source.fov || source.data || source.radius);
+      });
+
+      if (!hasRenderableVision) return true;
+    }
     return false;
   }
 

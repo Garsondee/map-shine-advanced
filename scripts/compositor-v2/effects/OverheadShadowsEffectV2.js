@@ -588,6 +588,8 @@ export class OverheadShadowsEffectV2 {
     this.material = new THREE.ShaderMaterial({
       uniforms: {
         tRoof: { value: null },
+        tRoofVisibility: { value: null },
+        uHasRoofVisibility: { value: 0.0 },
         uOpacity: { value: this.params.opacity },
         uLength: { value: this.params.length },
         uSoftness: { value: this.params.softness },
@@ -655,6 +657,8 @@ export class OverheadShadowsEffectV2 {
       `,
       fragmentShader: `
         uniform sampler2D tRoof;
+        uniform sampler2D tRoofVisibility;
+        uniform float uHasRoofVisibility;
         uniform float uOpacity;
         uniform float uLength;
         uniform float uSoftness;
@@ -822,6 +826,13 @@ export class OverheadShadowsEffectV2 {
           // Keep an unmodified receiver roof coverage mask so non-roof shadow
           // contributions (e.g. Outdoor Building Shadow) stay below overhead tiles.
           float roofCoverageAlpha = clamp(texture2D(tRoof, clamp(roofUv, 0.0, 1.0)).a, 0.0, 1.0);
+          // Building-shadow suppression should follow the runtime roof fade
+          // state (hover-reveal/visibility) rather than the forced-opacity
+          // caster capture in tRoof.
+          float roofVisibilityAlpha = roofCoverageAlpha;
+          if (uHasRoofVisibility > 0.5) {
+            roofVisibilityAlpha = clamp(texture2D(tRoofVisibility, clamp(screenUv, 0.0, 1.0)).a, 0.0, 1.0);
+          }
           float roofBaseAlpha = roofCoverageAlpha;
           // Tree-style unmasking behavior during hover reveal: keep caster
           // projection active, but stop masking it out under the source roof.
@@ -955,7 +966,7 @@ export class OverheadShadowsEffectV2 {
                   float casterIndoorsIndoor = 1.0 - casterOutdoorsIndoor;
                   indoorStrengthTap = clamp(casterIndoorsIndoor * uOutdoorBuildingShadowOpacity * receiverIsOutdoors, 0.0, 1.0);
                   // Keep outdoor-building shadow below visible overhead tiles.
-                  indoorStrengthTap *= (1.0 - roofCoverageAlpha);
+                  indoorStrengthTap *= (1.0 - roofVisibilityAlpha);
                   indoorStrengthTap *= baseEdgeFade;
                 }
               }
@@ -1853,6 +1864,8 @@ export class OverheadShadowsEffectV2 {
     // groundplane mesh that samples the roof mask in screen space.
     if (this.material && this.material.uniforms) {
       this.material.uniforms.tRoof.value = this.roofTarget.texture;
+      this.material.uniforms.tRoofVisibility.value = this.roofVisibilityTarget?.texture || null;
+      this.material.uniforms.uHasRoofVisibility.value = this.roofVisibilityTarget?.texture ? 1.0 : 0.0;
       this.material.uniforms.tFluidRoof.value = this.fluidRoofTarget?.texture || null;
       this.material.uniforms.uHasFluidRoof.value = this.fluidRoofTarget?.texture ? 1.0 : 0.0;
       this.material.uniforms.tTileProjection.value = hasTileProjection ? this.tileProjectionTarget?.texture : null;

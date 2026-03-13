@@ -765,34 +765,34 @@ export class ControlsIntegration {
     canvas.tiles.visible = true;
     canvas.tiles.renderable = true;
 
-    // Defensive: if another system races and flips ownership back to Three,
-    // enforce PIXI interactivity while tile tools are active.
+    // We no longer force PIXI ownership for tiles context. Three.js owns tile
+    // interactions, so we keep PIXI transparent and allow events to pass through
+    // to Three.js.
     const pixiCanvas = canvas?.app?.view;
     if (pixiCanvas) {
-      pixiCanvas.style.pointerEvents = 'auto';
-      pixiCanvas.style.display = '';
-      pixiCanvas.style.visibility = 'visible';
+      pixiCanvas.style.pointerEvents = 'none';
     }
     const board = document.getElementById('board');
     if (board && board.tagName === 'CANVAS') {
-      board.style.pointerEvents = 'auto';
-      board.style.display = '';
-      board.style.visibility = 'visible';
+      board.style.pointerEvents = 'none';
     }
     const threeCanvas = document.getElementById('map-shine-canvas');
     if (threeCanvas) {
-      threeCanvas.style.pointerEvents = 'none';
+      threeCanvas.style.pointerEvents = 'auto';
     }
 
+    // Hide native visuals but KEEP THEM NON-INTERACTIVE so they do not steal clicks
+    // from Three.js (especially scene-wide overhead tiles).
     const ALPHA = 0.01;
     for (const tile of canvas.tiles.placeables || []) {
       try {
-        // Keep every native tile placeable interactive. Foundry itself handles
-        // controllableObjects filtering for foreground/background workflows.
-        tile.visible = true;
-        tile.renderable = true;
+        // We set these false to explicitly yield input to Three.
+        tile.visible = false;
+        tile.renderable = false;
+        tile.interactive = false;
+        tile.interactiveChildren = false;
 
-        // Hide native visuals but keep hit-testing active.
+        // Hide native visuals
         if (tile.mesh) tile.mesh.alpha = ALPHA;
       } catch (_) {
       }

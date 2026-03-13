@@ -15,7 +15,7 @@ import { TokenSelectionController } from './token-selection-controller.js';
 import { MouseStateManager } from './mouse-state-manager.js';
 import { safeCall, safeDispose, Severity } from '../core/safe-call.js';
 import { readWallHeightFlags, readTileLevelsFlags, tileHasLevelsRange, isLevelsEnabledForScene } from '../foundry/levels-scene-flags.js';
-import { applyAmbientLightLevelDefaults, applyAmbientSoundLevelDefaults, applyWallLevelDefaults } from '../foundry/levels-create-defaults.js';
+import { applyAmbientLightLevelDefaults, applyAmbientSoundLevelDefaults, applyTileLevelDefaults, applyWallLevelDefaults } from '../foundry/levels-create-defaults.js';
 import { getPerspectiveElevation } from '../foundry/elevation-context.js';
 import { isTokenOnActiveLevel, getAutoSwitchElevation, switchToLevelForElevation } from './level-interaction-service.js';
 
@@ -82,9 +82,10 @@ export class InteractionManager {
     this.selection = new Set();
     this.tokenSelectionController = new TokenSelectionController(this);
 
-    // Copy/paste clipboard for lights.
-    // Stored as a plain serializable object so we can safely deep-clone and mutate.
+    // Copy/paste clipboards for custom interaction paths.
+    // Stored as plain serializable objects so we can safely deep-clone and mutate.
     this._lightClipboard = null;
+    this._tileClipboard = null;
 
     // Track last pointer position (screen coords) so paste can place at cursor.
     this._lastPointerClientX = null;
@@ -1102,17 +1103,11 @@ export class InteractionManager {
       return { x, y };
     }
 
-    const center = {
-      x: x + (this._getTokenPixelSize(tokenDoc).w * 0.5),
-      y: y + (this._getTokenPixelSize(tokenDoc).h * 0.5)
-    };
-
     try {
-      const mode = globalThis.CONST?.GRID_SNAPPING_MODES?.CENTER;
-      const snappedCenter = (mode !== undefined)
-        ? grid.getSnappedPoint(center, { mode })
-        : grid.getSnappedPoint(center);
-      return this._tokenCenterToTopLeftFoundry(snappedCenter, tokenDoc);
+      const mode = globalThis.CONST?.GRID_SNAPPING_MODES?.TOP_LEFT_CORNER;
+      return (mode !== undefined)
+        ? grid.getSnappedPoint({ x, y }, { mode })
+        : grid.getSnappedPoint({ x, y });
     } catch (_) {
       return { x, y };
     }
@@ -2527,7 +2522,9 @@ export class InteractionManager {
     const sprite = data?.sprite;
     const tileDoc = data?.tileDoc;
     if (!sprite || !tileDoc) return false;
-    if (!sprite.visible) return false;
+    // Removed `!sprite.visible` check to allow picking/selection immediately after paste
+    // even if the async texture loading hasn't fully completed yet. We use 
+    // `sprite.userData.textureReady` if we specifically need to know about the texture.
     if (!this._isTileWithinActiveBand(tileDoc)) return false;
 
     return this._isTileAllowedByCurrentForegroundMode(tileDoc, sprite);
@@ -2537,34 +2534,65 @@ export class InteractionManager {
     const foregroundMode = this._getTileForegroundMode();
     if (typeof foregroundMode !== 'boolean') return true;
 
+    // Resolve overhead classification from persisted document data first.
+    // Do not rely solely on sprite.userData here because stale sprite state can
+    // drift from current document values during rapid layer/tool transitions.
+    const sourceOverhead = tileDoc?._source?.overhead;
+    const levelsOverhead = tileDoc?._source?.flags?.levels?.overhead;
     const sceneForegroundElevation = Number.isFinite(Number(canvas?.scene?.foregroundElevation))
       ? Number(canvas.scene.foregroundElevation)
       : 0;
     const tileElevation = Number.isFinite(Number(tileDoc?.elevation))
       ? Number(tileDoc.elevation)
       : 0;
-    const isOverhead = (typeof sprite?.userData?.isOverhead === 'boolean')
-      ? !!sprite.userData.isOverhead
-      : (tileElevation >= sceneForegroundElevation);
+    const isOverhead = (typeof sourceOverhead === 'boolean')
+      ? sourceOverhead
+      : (typeof levelsOverhead === 'boolean')
+        ? levelsOverhead
+        : (typeof sprite?.userData?.isOverhead === 'boolean')
+          ? !!sprite.userData.isOverhead
+          : (tileElevation >= sceneForegroundElevation);
 
     return foregroundMode ? isOverhead : !isOverhead;
   }
 
   _getTileForegroundMode() {
-    const foregroundA = ui?.controls?.control?.tools?.foreground?.active;
-    if (typeof foregroundA === 'boolean') return foregroundA;
-
-    const foregroundB = ui?.controls?.controls?.tiles?.tools?.foreground?.active;
-    if (typeof foregroundB === 'boolean') return foregroundB;
-
     const activeTool = String(ui?.controls?.tool?.name ?? ui?.controls?.activeTool ?? game?.activeTool ?? '').toLowerCase();
-    if (activeTool === 'foreground' || activeTool === 'overhead') return true;
+    if (!this._isTilesLayerActive()) return null;
 
-    // In tiles context, default to ground/background mode when no explicit signal
-    // is available. This prevents accidental overhead tile interaction leakage.
-    if (this._isTilesLayerActive()) return false;
+    const overheadToolNames = new Set(['foreground', 'overhead', 'roof']);
+    const backgroundToolNames = new Set(['tile', 'select', 'background', 'browse']);
 
-    return null;
+    if (overheadToolNames.has(activeTool)) return true;
+    if (backgroundToolNames.has(activeTool)) return false;
+
+    // Fallback: infer from active tile control tools when activeTool is transiently
+    // empty/unknown during control refresh.
+    const toolSets = [];
+    if (Array.isArray(ui?.controls?.control?.tools)) toolSets.push(ui.controls.control.tools);
+    if (Array.isArray(ui?.controls?.controls)) {
+      const tilesControl = ui.controls.controls.find((c) => String(c?.name || '').toLowerCase() === 'tiles');
+      if (Array.isArray(tilesControl?.tools)) toolSets.push(tilesControl.tools);
+    }
+
+    for (const tools of toolSets) {
+      const activeForegroundTool = tools.find((t) => {
+        if (!t?.active) return false;
+        const name = String(t?.name || '').toLowerCase();
+        return overheadToolNames.has(name);
+      });
+      if (activeForegroundTool) return true;
+
+      const activeBackgroundTool = tools.find((t) => {
+        if (!t?.active) return false;
+        const name = String(t?.name || '').toLowerCase();
+        return backgroundToolNames.has(name);
+      });
+      if (activeBackgroundTool) return false;
+    }
+
+    // Safe default in tile context: disallow overhead picking unless explicitly requested.
+    return false;
   }
 
   _pruneIneligibleTileSelection() {
@@ -2608,19 +2636,79 @@ export class InteractionManager {
     };
 
     const strictTileMode = this._isTilesLayerActive();
-    // In Tiles mode, we prefer to respect the active Foundry tile tool mode
-    // (foreground/background) for selection and dragging, but selection must not
-    // become impossible when the user clicks a visible tile of the "other" type.
-    //
-    // Therefore: try strict first, then fall back to a permissive pick when strict
-    // misses. For double-click config open we can start permissive immediately.
+
+    // Primary in tile editing context: evaluate candidates from cursor world XY.
+    // This avoids raycast ordering issues where a full-scene overhead tile can
+    // dominate hit results and make underlying eligible tiles difficult to select.
+    if (strictTileMode) {
+      const clientX = Number(this._lastPointerClientX);
+      const clientY = Number(this._lastPointerClientY);
+      if (Number.isFinite(clientX) && Number.isFinite(clientY) && typeof this.tileManager?.isWorldPointInTileBounds === 'function') {
+        const world = this.screenToWorld(clientX, clientY);
+        if (world) {
+          let best = null;
+          let bestZ = -Infinity;
+          let bestRenderOrder = -Infinity;
+          const temp = this._tempVec3TilePick || (this._tempVec3TilePick = new THREE.Vector3());
+
+          for (const data of this.tileManager.tileSprites.values()) {
+            if (!data?.sprite || !data?.tileDoc) continue;
+            if (!this._isTileWithinActiveBand(data.tileDoc)) continue;
+            if (!ignoreForegroundFilter && !this._isTileSelectableForCurrentTool(data)) continue;
+
+            const inBounds = safeCall(
+              () => this.tileManager.isWorldPointInTileBounds(data, world.x, world.y),
+              'tilePick.worldBounds',
+              Severity.COSMETIC,
+              { fallback: false }
+            );
+            if (!inBounds) continue;
+
+            const opaqueHit = safeCall(() => {
+              if (typeof this.tileManager.isWorldPointOpaque !== 'function') return true;
+              return this.tileManager.isWorldPointOpaque(data, world.x, world.y);
+            }, 'tilePick.worldOpaque', Severity.COSMETIC, { fallback: true });
+            if (!opaqueHit) continue;
+
+            const sprite = data.sprite;
+            const z = safeCall(
+              () => {
+                sprite.getWorldPosition(temp);
+                return Number(temp.z) || 0;
+              },
+              'tilePick.worldZ',
+              Severity.COSMETIC,
+              { fallback: Number(sprite.position?.z) || 0 }
+            );
+            const renderOrder = Number(sprite.renderOrder ?? 0) || 0;
+
+            if (!best || z > bestZ || (z === bestZ && renderOrder >= bestRenderOrder)) {
+              best = {
+                hit: {
+                  point: new THREE.Vector3(world.x, world.y, z),
+                  object: sprite,
+                  uv: null
+                },
+                tileId: String(data.tileDoc.id || ''),
+                data
+              };
+              bestZ = z;
+              bestRenderOrder = renderOrder;
+            }
+          }
+
+          if (best?.tileId) return best;
+        }
+      }
+    }
+
+    // In Tiles mode, selection/drag must strictly respect active foreground mode
+    // to avoid accidentally selecting overhead tiles while editing background tiles
+    // (and vice-versa). Keep permissive fallback only for non-tile contexts.
     const fallbackModes = strictTileMode
       ? (ignoreForegroundFilter
           ? [{ ignoreForegroundFilter: true, ignoreBandFilter: false }]
-          : [
-              { ignoreForegroundFilter: false, ignoreBandFilter: false },
-              { ignoreForegroundFilter: true, ignoreBandFilter: false }
-            ])
+          : [{ ignoreForegroundFilter: false, ignoreBandFilter: false }])
       : [
           { ignoreForegroundFilter: false, ignoreBandFilter: false },
           // Non-tile contexts can remain permissive to avoid dead pick paths
@@ -2743,6 +2831,11 @@ export class InteractionManager {
 
   _handleTilesLayerPointerDown(event, currentTool) {
     if (!this._isTilesLayerActive()) return false;
+
+    // Keep tile picking tied to the actual click position.
+    this._lastPointerClientX = Number.isFinite(Number(event?.clientX)) ? Number(event.clientX) : this._lastPointerClientX;
+    this._lastPointerClientY = Number.isFinite(Number(event?.clientY)) ? Number(event.clientY) : this._lastPointerClientY;
+
     this._pruneIneligibleTileSelection();
     log.warn('TileInteraction.pointerDown.enter', {
       button: event?.button,
@@ -3726,6 +3819,22 @@ export class InteractionManager {
             log.debug('onPointerDown left-click token ray hit child meshes but no tokenDoc parent found; treating as empty click');
           } else {
 
+          // Foundry parity: in Target tool, left-click toggles target state and
+          // does not enter selection/drag workflows.
+          if (event.button === 0 && currentTool === 'target') {
+            const token = canvas?.tokens?.get?.(tokenDoc.id) || null;
+            if (token && !token.document?.isSecret) {
+              token.setTarget(!token.isTargeted, { releaseOthers: !event.shiftKey });
+              this.tokenManager?.updateTokenTargetIndicator?.(token.id);
+            }
+            safeCall(() => {
+              event.preventDefault();
+              event.stopPropagation();
+              event.stopImmediatePropagation?.();
+            }, 'pointerDown.targetToolConsume', Severity.COSMETIC);
+            return;
+          }
+
           // Robust token double-click (click-left2) handling.
           // This runs BEFORE update-permission gating so players can still open
           // the actor sheet on double-click even when they cannot move the token.
@@ -3809,6 +3918,22 @@ export class InteractionManager {
           }
           
         } else {
+          // Foundry parity: in Target tool, empty left-click can clear targets
+          // when core leftClickRelease is enabled.
+          if (event.button === 0 && currentTool === 'target') {
+            const leftClickRelease = !!game?.settings?.get?.('core', 'leftClickRelease');
+            if (leftClickRelease) {
+              game?.user?._onUpdateTokenTargets?.([]);
+              game?.user?.broadcastActivity?.({ targets: [] });
+            }
+            safeCall(() => {
+              event.preventDefault();
+              event.stopPropagation();
+              event.stopImmediatePropagation?.();
+            }, 'pointerDown.targetToolEmptyConsume', Severity.COSMETIC);
+            return;
+          }
+
           let moveClickArmed = false;
           if (clickToMoveButton === 0) {
             const selectedTokenDocs = this._getSelectedTokenDocs();
@@ -4552,14 +4677,21 @@ export class InteractionManager {
     safeCall(() => { this.raycaster.layers?.enable?.(OVERLAY_THREE_LAYER); this.raycaster.layers?.enable?.(0); }, 'hover.tokenLayers', Severity.COSMETIC);
 
     const interactables = this.tokenManager.getAllTokenSprites();
-    const intersects = this.raycaster.intersectObjects(interactables, false);
+    const intersects = this.raycaster.intersectObjects(interactables, true);
 
     safeCall(() => { if (typeof prevRayMask === 'number' && this.raycaster.layers) this.raycaster.layers.mask = prevRayMask; }, 'hover.restoreTokenLayers', Severity.COSMETIC);
 
     if (intersects.length > 0) {
-      const hit = intersects[0];
-      const sprite = hit.object;
-      const tokenDoc = sprite.userData.tokenDoc;
+      let tokenDoc = null;
+      for (const hit of intersects) {
+        let candidate = hit.object;
+        while (candidate && !candidate.userData?.tokenDoc) candidate = candidate.parent;
+        if (candidate?.userData?.tokenDoc) {
+          tokenDoc = candidate.userData.tokenDoc;
+          break;
+        }
+      }
+      if (!tokenDoc) return;
       
       // Check permissions
       const canControl = tokenDoc.canUserModify(game.user, "update"); // Or just visible? 
@@ -5278,6 +5410,14 @@ export class InteractionManager {
               const snappedWorld = Coordinates.toWorld(snappedCenter.x, snappedCenter.y);
               x = snappedWorld.x;
               y = snappedWorld.y;
+            } else if (isTokenDrag) {
+              const leaderTokenDoc = this.tokenManager?.tokenSprites?.get?.(this.dragState.leaderId)?.tokenDoc;
+              const tokenTopLeft = this._tokenCenterToTopLeftFoundry(foundryPos, leaderTokenDoc);
+              const snappedTopLeft = this._snapTokenTopLeftToGrid(leaderTokenDoc, tokenTopLeft);
+              const snappedCenter = this._tokenTopLeftToCenterFoundry(snappedTopLeft, leaderTokenDoc);
+              const snappedWorld = Coordinates.toWorld(snappedCenter.x, snappedCenter.y);
+              x = snappedWorld.x;
+              y = snappedWorld.y;
             } else {
               const snapped = this.snapToGrid(foundryPos.x, foundryPos.y);
               const snappedWorld = Coordinates.toWorld(snapped.x, snapped.y);
@@ -5887,6 +6027,21 @@ export class InteractionManager {
           const maxX = Math.max(start.x, current.x);
           const minY = Math.min(start.y, current.y);
           const maxY = Math.max(start.y, current.y);
+
+          const currentTool = String(ui?.controls?.tool?.name ?? ui?.controls?.activeTool ?? game?.activeTool ?? '').toLowerCase();
+          if (currentTool === 'target') {
+            const startFoundry = Coordinates.toFoundry(minX, minY);
+            const endFoundry = Coordinates.toFoundry(maxX, maxY);
+            const rectX = Math.min(startFoundry.x, endFoundry.x);
+            const rectY = Math.min(startFoundry.y, endFoundry.y);
+            const rectW = Math.abs(endFoundry.x - startFoundry.x);
+            const rectH = Math.abs(endFoundry.y - startFoundry.y);
+            canvas?.tokens?.targetObjects?.(
+              { x: rectX, y: rectY, width: rectW, height: rectH },
+              { releaseOthers: !event.shiftKey }
+            );
+            return;
+          }
           
           const dragSelectedDocs = this.tokenSelectionController.selectByMarquee(
             { minX, maxX, minY, maxY },
@@ -6505,6 +6660,113 @@ export class InteractionManager {
     return true;
   }
 
+  _copySelectedTilesToClipboard() {
+    const controlledTiles = Array.isArray(canvas?.tiles?.controlled) ? canvas.tiles.controlled : [];
+    if (!controlledTiles.length) return false;
+
+    const items = [];
+    let sumX = 0;
+    let sumY = 0;
+    let count = 0;
+
+    for (const tile of controlledTiles) {
+      const doc = tile?.document || tile;
+      if (!doc) continue;
+      const raw = (typeof doc.toObject === 'function') ? doc.toObject() : doc;
+      const data = foundry?.utils?.duplicate ? foundry.utils.duplicate(raw) : JSON.parse(JSON.stringify(raw));
+      delete data._id;
+      delete data.id;
+
+      const sourceX = Number(doc?.x);
+      const sourceY = Number(doc?.y);
+      items.push({
+        data,
+        sourceX: Number.isFinite(sourceX) ? sourceX : 0,
+        sourceY: Number.isFinite(sourceY) ? sourceY : 0
+      });
+
+      if (Number.isFinite(sourceX) && Number.isFinite(sourceY)) {
+        sumX += sourceX;
+        sumY += sourceY;
+        count += 1;
+      }
+    }
+
+    if (!items.length) return false;
+
+    const norm = Math.max(1, count);
+    this._tileClipboard = {
+      kind: 'tiles',
+      originX: sumX / norm,
+      originY: sumY / norm,
+      items
+    };
+    return true;
+  }
+
+  async _pasteTilesFromClipboard(event) {
+    const clip = this._tileClipboard;
+    if (!clip || clip.kind !== 'tiles' || !Array.isArray(clip.items) || !clip.items.length) return false;
+
+    const canEditScene = safeCall(() => {
+      if (!canvas?.scene || !game?.user) return false;
+      if (game.user.isGM) return true;
+      if (typeof canvas.scene.canUserModify === 'function') return canvas.scene.canUserModify(game.user, 'update');
+      return false;
+    }, 'pasteTiles.canEditScene', Severity.COSMETIC, { fallback: false });
+    if (!canEditScene) return false;
+
+    const sceneRect = canvas?.dimensions?.sceneRect || null;
+    const gridSize = Number(canvas?.dimensions?.size ?? canvas?.grid?.size ?? 100) || 100;
+
+    let pasteF = null;
+    if (Number.isFinite(this._lastPointerClientX) && Number.isFinite(this._lastPointerClientY)) {
+      const world = this.screenToWorld(this._lastPointerClientX, this._lastPointerClientY);
+      if (world) pasteF = Coordinates.toFoundry(world.x, world.y);
+    }
+
+    if (!pasteF) {
+      const cx = Number(sceneRect?.x) + (Number(sceneRect?.width) * 0.5);
+      const cy = Number(sceneRect?.y) + (Number(sceneRect?.height) * 0.5);
+      const fallbackX = Number.isFinite(cx) ? cx : ((Number(clip.originX) || 0) + (gridSize * 0.5));
+      const fallbackY = Number.isFinite(cy) ? cy : ((Number(clip.originY) || 0) + (gridSize * 0.5));
+      pasteF = { x: fallbackX, y: fallbackY };
+    }
+
+    const dx = (Number(pasteF?.x) || 0) - (Number(clip.originX) || 0);
+    const dy = (Number(pasteF?.y) || 0) - (Number(clip.originY) || 0);
+
+    const createData = [];
+    for (const item of clip.items) {
+      const data = foundry?.utils?.duplicate
+        ? foundry.utils.duplicate(item?.data || {})
+        : JSON.parse(JSON.stringify(item?.data || {}));
+      delete data._id;
+      delete data.id;
+
+      data.x = (Number(item?.sourceX) || 0) + dx;
+      data.y = (Number(item?.sourceY) || 0) + dy;
+
+      if (event?.altKey) data.hidden = true;
+
+      applyTileLevelDefaults(data, { scene: canvas?.scene });
+      createData.push(data);
+    }
+
+    if (!createData.length) return false;
+    const created = await canvas.scene.createEmbeddedDocuments('Tile', createData);
+    if (Array.isArray(created) && canvas?.tiles?.releaseAll) {
+      canvas.tiles.releaseAll();
+      for (const doc of created) {
+        try {
+          canvas.tiles?.get?.(doc?.id)?.control?.({ releaseOthers: false });
+        } catch (_) {
+        }
+      }
+    }
+    return true;
+  }
+
   /**
    * Handle key down (delete)
    * @param {KeyboardEvent} event 
@@ -6612,13 +6874,45 @@ export class InteractionManager {
       // Prefer Foundry's authoritative token-layer hover first. When MapShine
       // controls selection, canvas.activeLayer can be non-token, so relying on
       // activeLayer.hover alone can miss valid hovered tokens.
-      const hoveredTokenId =
+      let hoveredTokenId =
         canvas?.tokens?.hover?.id
         || canvas?.tokens?.hover?.document?.id
         || this.hoveredTokenId
         || activeLayer?.hover?.id
         || activeLayer?.hover?.document?.id
         || null;
+
+      // Fallback: resolve token directly under current cursor when hover state
+      // could not be established through hook/layer state.
+      if (!hoveredTokenId) {
+        const camera = this.sceneComposer?.camera;
+        if (camera && this.raycaster && this.mouse) {
+          const prevTokenRayMask = this.raycaster.layers?.mask;
+          safeCall(() => {
+            this.raycaster.setFromCamera(this.mouse, camera);
+            if (!this.raycaster.layers) this.raycaster.layers = new THREE.Layers();
+            this.raycaster.layers.set(0);
+            this.raycaster.layers.enable(OVERLAY_THREE_LAYER);
+          }, 'targetKey.fallbackRaySetup', Severity.COSMETIC);
+
+          const tokenSprites = this.tokenManager?.getAllTokenSprites?.() || [];
+          const intersects = this.raycaster.intersectObjects(tokenSprites, true);
+          for (const hit of intersects) {
+            let candidate = hit.object;
+            while (candidate && !candidate.userData?.tokenDoc) candidate = candidate.parent;
+            if (candidate?.userData?.tokenDoc?.id) {
+              hoveredTokenId = candidate.userData.tokenDoc.id;
+              break;
+            }
+          }
+
+          safeCall(() => {
+            if (typeof prevTokenRayMask === 'number' && this.raycaster.layers) {
+              this.raycaster.layers.mask = prevTokenRayMask;
+            }
+          }, 'targetKey.fallbackRayRestore', Severity.COSMETIC);
+        }
+      }
       if (!hoveredTokenId) return;
 
       const token = canvas?.tokens?.get?.(hoveredTokenId);
@@ -6634,7 +6928,19 @@ export class InteractionManager {
     // Foundry's active layer copy flow (e.g. walls) to handle Ctrl/Cmd+C.
     if (isMod && key === 'c') {
       const selectedLights = this._getSelectedLights();
-      if (!selectedLights.length) return;
+      if (!selectedLights.length) {
+        const copiedTiles = safeCall(
+          () => this._copySelectedTilesToClipboard(),
+          'onKeyDown.copyTiles',
+          Severity.COSMETIC,
+          { fallback: false }
+        );
+        if (copiedTiles) {
+          this._consumeKeyEvent(event);
+          return;
+        }
+        return;
+      }
       safeCall(async () => {
         const selected = selectedLights;
 
@@ -6773,6 +7079,23 @@ export class InteractionManager {
         }
       }
 
+      if (this._isTilesLayerActive()) {
+        const handled = await safeCall(
+          async () => this._pasteTilesFromClipboard(event),
+          'onKeyDown.pasteTiles',
+          Severity.COSMETIC,
+          { fallback: false }
+        );
+        if (handled) {
+          this._consumeKeyEvent(event);
+          return;
+        }
+        // In tiles context, never let light clipboard hijack Ctrl/Cmd+V.
+        // Fall through to Foundry's native tile paste path when local tile
+        // clipboard is empty or fails.
+        return;
+      }
+
       const clip = this._lightClipboard;
       const canHandleLightPaste = !!(clip && (clip.kind === 'foundry' || clip.kind === 'enhanced' || clip.kind === 'multi'));
       if (!canHandleLightPaste) return;
@@ -6882,9 +7205,15 @@ export class InteractionManager {
       return;
     }
 
+    const controlledTileIds = new Set(
+      (canvas?.tiles?.controlled || [])
+        .map((tile) => String(tile?.id || tile?.document?.id || ''))
+        .filter(Boolean)
+    );
+
     // Intercept Delete/Backspace early so Foundry doesn't also process it.
     // (Otherwise you can get double-deletes and "does not exist" notifications.)
-    if ((event.key === 'Delete' || event.key === 'Backspace') && (this.mapPointDraw.active || this.selection.size > 0)) {
+    if ((event.key === 'Delete' || event.key === 'Backspace') && (this.mapPointDraw.active || this.selection.size > 0 || controlledTileIds.size > 0)) {
       this._consumeKeyEvent(event);
     }
 
@@ -6910,7 +7239,7 @@ export class InteractionManager {
 
     // Delete key
     if (event.key === 'Delete' || event.key === 'Backspace') {
-      if (this.selection.size > 0) {
+      if (this.selection.size > 0 || controlledTileIds.size > 0) {
         let deleteConsumed = false;
         try {
           // Filter for tokens and walls
@@ -6921,7 +7250,10 @@ export class InteractionManager {
           const enhancedLightsToDelete = [];
           const staleIds = [];
 
-          for (const id of this.selection) {
+          const selectedIds = new Set(this.selection || []);
+          for (const id of controlledTileIds) selectedIds.add(id);
+
+          for (const id of selectedIds) {
             // Check Token
             const sprite = this.tokenManager.getTokenSprite(id);
             if (sprite) {
@@ -6973,7 +7305,7 @@ export class InteractionManager {
             const tileDoc = canvas.tiles?.get?.(id)?.document ?? canvas.scene?.tiles?.get?.(id);
             if (tileDoc) {
               const tileData = this.tileManager?.tileSprites?.get?.(id) || { tileDoc, sprite: null };
-              if (!this._isTileWithinActiveBand(tileData.tileDoc) || !this._isTileAllowedByCurrentForegroundMode(tileData.tileDoc, tileData.sprite)) {
+              if (!this._isTileWithinActiveBand(tileData.tileDoc)) {
                 continue;
               }
               if (!tileDoc.canUserModify(game.user, 'delete')) {
@@ -7369,8 +7701,16 @@ export class InteractionManager {
       if (!sprite.userData._msTileSelectOutline) {
         const cx = Number(sprite.center?.x ?? 0.5);
         const cy = Number(sprite.center?.y ?? 0.5);
-        const sx = Math.max(0.0001, Number(sprite.scale?.x || 1));
-        const sy = Math.max(0.0001, Number(sprite.scale?.y || 1));
+        // Use tile document width/height if texture isn't ready or scale isn't fully computed
+        const tileDoc = sprite.userData?.tileDoc;
+        let sx = Math.max(0.0001, Number(sprite.scale?.x || 1));
+        let sy = Math.max(0.0001, Number(sprite.scale?.y || 1));
+        
+        if (!sprite.userData.textureReady && tileDoc) {
+          sx = Math.max(0.0001, Number(tileDoc.width || 1));
+          sy = Math.max(0.0001, Number(tileDoc.height || 1));
+        }
+
         const x0 = (-cx) * sx;
         const x1 = (1 - cx) * sx;
         const y0 = (-cy) * sy;
@@ -7392,6 +7732,11 @@ export class InteractionManager {
         });
         const outline = new THREERef.LineLoop(geometry, material);
         outline.renderOrder = 10001;
+        
+        // Ensure outline is always visible even if the underlying sprite isn't fully visible yet
+        // (e.g. while texture is still loading)
+        outline.visible = true; 
+        
         sprite.add(outline);
         sprite.userData._msTileSelectOutline = outline;
       }

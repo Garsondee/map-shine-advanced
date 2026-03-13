@@ -212,6 +212,32 @@ export class InputRouter {
           threeCanvas.style.opacity = '1';
           threeCanvas.style.pointerEvents = 'none';
         }
+      } else {
+        // Re-assert THREE ownership styles even when mode doesn't change.
+        // Foundry can re-show the board canvas during control/layer refreshes,
+        // which otherwise leaves a full-scene grey/grid overlay visible above
+        // Three rendering.
+        const pixiCanvas = canvas.app?.view;
+        if (pixiCanvas) {
+          pixiCanvas.style.pointerEvents = 'none';
+          pixiCanvas.style.opacity = '1';
+          pixiCanvas.style.backgroundColor = 'transparent';
+        }
+        const board = document.getElementById('board');
+        if (board && board.tagName === 'CANVAS') {
+          board.style.display = 'none';
+          board.style.visibility = 'hidden';
+          board.style.opacity = '0';
+          board.style.pointerEvents = 'none';
+          board.style.backgroundColor = 'transparent';
+        }
+        const threeCanvas = document.getElementById('map-shine-canvas');
+        if (threeCanvas) {
+          threeCanvas.style.display = '';
+          threeCanvas.style.visibility = 'visible';
+          threeCanvas.style.opacity = '1';
+          threeCanvas.style.pointerEvents = 'auto';
+        }
       }
       return true;
     }
@@ -270,15 +296,23 @@ export class InputRouter {
         threeCanvas.style.pointerEvents = 'none';
       } else {
         // Three.js receives input
+        threeCanvas.style.display = '';
+        threeCanvas.style.visibility = 'visible';
+        threeCanvas.style.opacity = '1';
         threeCanvas.style.pointerEvents = 'auto';
         
         // PIXI stays on top visually but passes pointer events through
         pixiCanvas.style.pointerEvents = 'none';
         pixiCanvas.style.opacity = '1';
+        pixiCanvas.style.backgroundColor = 'transparent';
 
         const board = document.getElementById('board');
         if (board && board.tagName === 'CANVAS') {
+          board.style.display = 'none';
+          board.style.visibility = 'hidden';
+          board.style.opacity = '0';
           board.style.pointerEvents = 'none';
+          board.style.backgroundColor = 'transparent';
         }
       }
       
@@ -454,10 +488,13 @@ export class InputRouter {
       return InputMode.THREE;
     }
 
-    // Tile workflows are currently handled by InteractionManager's Three.js tile
-    // picking/edit path in the hybrid stack.
+    // Tile editing is PIXI-owned: Foundry's native Tile._refreshState() handles
+    // foreground/background filtering via per-tile eventMode. This avoids
+    // reimplementing Foundry's overhead classification in Three.js, which was the
+    // root cause of the scene-wide overhead tile click-absorption bug.
+    // Three.js continues to render tile visuals; PIXI handles all interaction.
     if (isTilesLayer) {
-      return InputMode.THREE;
+      return InputMode.PIXI;
     }
 
     // Three.js handles wall placement (click-to-place with chaining), wall

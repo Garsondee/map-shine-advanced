@@ -730,10 +730,15 @@ export class ControlsIntegration {
   }
 
   /**
-   * Keep Foundry's native tile editor interactions available when the Tiles
-   * layer is active while still hiding PIXI tile visuals beneath Three.
-   * Also applies Levels-aware floor filtering so off-floor tiles do not steal
-   * selection/drag hit-tests.
+   * PIXI-owned tile editing visual sync.
+   *
+   * This method intentionally owns only:
+   * - pointer routing (PIXI canvas receives events, Three canvas is render-only)
+   * - visibility/transparency of PIXI tile visuals so Three.js visuals show through
+   *
+   * It must NOT own tile hit-testing semantics (foreground/background eligibility).
+   * Foundry tile state (`eventMode`, controllableObjects, tool filtering) remains
+   * the sole authority for manipulation behavior.
    * @private
    */
   _updateTilesVisualState() {
@@ -741,69 +746,106 @@ export class ControlsIntegration {
 
     const isTilesActive = this._isTilesContextActive();
     if (!isTilesActive) {
+      // When tiles layer is not active, hide it. Foundry's layer deactivation
+      // already sets eventMode='passive' and interactiveChildren=false, so we
+      // don't need to force those.
       canvas.tiles.visible = false;
       return;
     }
 
     // Foundry v12 tile interaction depends on primary group visibility.
-    // Keep it enabled while tile tools are active.
     if (canvas.primary) {
       canvas.primary.visible = true;
     }
 
-    // Foundry native tile workflows (select/drag/double-click sheet/delete) rely
-    // on TilesLayer being the active controllable layer. During rapid control
-    // switches we can end up in a stale activeLayer state, so re-activate here.
-    try {
-      if (canvas.tiles && canvas.activeLayer !== canvas.tiles && typeof canvas.tiles.activate === 'function') {
-        canvas.tiles.activate();
-      }
-    } catch (_) {
-      // Best effort only
-    }
-
+    // Keep the tiles layer visible and interactive so Foundry's native
+    // tile workflows (select, drag, copy/paste, foreground toggle) work.
     canvas.tiles.visible = true;
     canvas.tiles.renderable = true;
+    canvas.tiles.interactiveChildren = true;
 
-    // We no longer force PIXI ownership for tiles context. Three.js owns tile
-    // interactions, so we keep PIXI transparent and allow events to pass through
-    // to Three.js.
+    // PIXI owns tile interaction — ensure PIXI canvas receives pointer events
+    // and Three.js canvas is render-only during tile editing.
     const pixiCanvas = canvas?.app?.view;
     if (pixiCanvas) {
-      pixiCanvas.style.pointerEvents = 'none';
+      pixiCanvas.style.pointerEvents = 'auto';
+      pixiCanvas.style.display = '';
+      pixiCanvas.style.visibility = 'visible';
     }
     const board = document.getElementById('board');
     if (board && board.tagName === 'CANVAS') {
-      board.style.pointerEvents = 'none';
+      board.style.pointerEvents = 'auto';
+      board.style.display = '';
+      board.style.visibility = 'visible';
     }
     const threeCanvas = document.getElementById('map-shine-canvas');
     if (threeCanvas) {
-      threeCanvas.style.pointerEvents = 'auto';
+      threeCanvas.style.pointerEvents = 'none';
     }
 
-    // Hide native visuals but KEEP THEM NON-INTERACTIVE so they do not steal clicks
-    // from Three.js (especially scene-wide overhead tiles).
-    const ALPHA = 0.01;
+    // Make PIXI visuals nearly invisible so Three.js tile visuals show through.
+    // Do not change eventMode here; Foundry owns eligibility semantics.
+    const VISUAL_ALPHA = 0.01;
     for (const tile of canvas.tiles.placeables || []) {
       try {
-        // We set these false to explicitly yield input to Three.
-        tile.visible = false;
-        tile.renderable = false;
-        tile.interactive = false;
-        tile.interactiveChildren = false;
-        
-        // V12 compat: force eventMode to none
-        tile.eventMode = 'none';
+        tile.visible = true;
+        tile.renderable = true;
+        tile.alpha = VISUAL_ALPHA;
 
-        // Hide native visuals and also disable mesh-level interactivity
         if (tile.mesh) {
-          tile.mesh.alpha = ALPHA;
-          tile.mesh.interactive = false;
-          tile.mesh.interactiveChildren = false;
-          tile.mesh.eventMode = 'none';
+          tile.mesh.alpha = VISUAL_ALPHA;
+          tile.mesh.visible = true;
+          tile.mesh.renderable = true;
+        }
+
+        // Keep selection affordances readable while parent alpha is very low.
+        if (tile.frame) {
+          tile.frame.alpha = 1 / VISUAL_ALPHA;
         }
       } catch (_) {
       }
+    }
+
+    this._resyncFoundryTileInteractionState();
+  }
+
+  /**
+   * Re-run Foundry tile interactivity state and emulate pointer move so cursor
+   * eligibility updates immediately after layer/tool transitions.
+   * @private
+   */
+  _resyncFoundryTileInteractionState() {
+    if (!canvas?.ready || !canvas?.tiles || !this._isTilesContextActive()) return;
+
+    try {
+      for (const tile of canvas.tiles.placeables || []) {
+        try {
+          // Delegate eligibility entirely to Foundry's _refreshState.
+          // Foundry uses: overhead = elevation >= parent.foregroundElevation
+          //               foreground = layer.active && tools.foreground.active
+          //               eventMode = overhead === foreground ? 'static' : 'none'
+          // Our previous override used _source.overhead first, which diverges from
+          // Foundry's elevation-only model and caused incorrect 'static' on overhead
+          // tiles in background mode.
+          if (typeof tile._refreshState === 'function') {
+            tile._refreshState();
+          } else if (typeof tile.refresh === 'function') {
+            tile.refresh();
+          }
+
+          // Release any controlled tile that Foundry just marked ineligible.
+          if (tile.eventMode === 'none' && tile.controlled && typeof tile.release === 'function') {
+            tile.release();
+          }
+        } catch (_) {
+        }
+      }
+
+      const emulateMove = canvas?.mouseInteractionManager?.constructor?.emulateMoveEvent
+        || window?.MouseInteractionManager?.emulateMoveEvent
+        || null;
+      if (typeof emulateMove === 'function') emulateMove();
+    } catch (_) {
     }
   }
 
@@ -1190,6 +1232,13 @@ export class ControlsIntegration {
         layer: payload?.layer,
         tool: payload?.tool
       });
+
+      setTimeout(() => {
+        try {
+          this._resyncFoundryTileInteractionState();
+        } catch (_) {
+        }
+      }, 0);
     });
     this._hookIds.push({ name: 'mapShineInputModeChange', id: modeChangeHookId });
 
@@ -1253,6 +1302,11 @@ export class ControlsIntegration {
       if (this.state !== IntegrationState.ACTIVE) return;
       setTimeout(() => {
         try {
+          // Token interactions are Three-owned. Foundry can transiently refresh
+          // control/layer state during selection, so force an ownership
+          // re-evaluation before applying per-layer visual state.
+          this.inputRouter?.autoUpdate?.();
+
           // Keep walls layer visible for door controls
           if (canvas?.walls) {
             canvas.walls.visible = true;
@@ -1266,6 +1320,7 @@ export class ControlsIntegration {
           this._refreshFoundryDoorControlVisibility();
           this._updateWallsVisualState();
           this._updateTilesVisualState();
+          this._reassertInputOwnership('controlToken');
         } catch (_) {
         }
       }, 0);
@@ -1350,6 +1405,7 @@ export class ControlsIntegration {
       if (this.state !== IntegrationState.ACTIVE) return;
       try {
         this._updateTilesVisualState();
+        this._resyncFoundryTileInteractionState();
       } catch (_) {
       }
     });
@@ -1360,11 +1416,35 @@ export class ControlsIntegration {
       setTimeout(() => {
         try {
           this._updateTilesVisualState();
+          this._resyncFoundryTileInteractionState();
         } catch (_) {
         }
       }, 0);
     });
     this._hookIds.push({ name: 'createTile', id: createTileHookId });
+
+    // Hard eligibility guard: if a tile somehow becomes controlled while it
+    // does not match the current foreground/background mode, release it
+    // immediately to prevent move/drag in the wrong mode.
+    // Use Foundry's own _refreshState to determine eligibility (elevation-based),
+    // not our _source.overhead fallback which diverges from Foundry's logic.
+    const controlTileHookId = Hooks.on('controlTile', (tile, controlled) => {
+      if (this.state !== IntegrationState.ACTIVE) return;
+      if (!controlled || !this._isTilesContextActive()) return;
+
+      try {
+        // Let Foundry compute the correct eventMode via its own _refreshState.
+        if (typeof tile._refreshState === 'function') tile._refreshState();
+        // If Foundry just set this tile to 'none', it's not eligible — release it.
+        if (tile.eventMode === 'none' && typeof tile.release === 'function') {
+          setTimeout(() => {
+            try { tile.release(); } catch (_) {}
+          }, 0);
+        }
+      } catch (_) {
+      }
+    });
+    this._hookIds.push({ name: 'controlTile', id: controlTileHookId });
 
     // Also handle createToken to catch initial creation
     const createTokenHookId = Hooks.on('createToken', (doc, options, userId) => {
@@ -1385,6 +1465,38 @@ export class ControlsIntegration {
     this._hookIds.push({ name: 'createToken', id: createTokenHookId });
 
     log.debug(`Registered ${this._hookIds.length} integration hooks`);
+  }
+
+  /**
+   * Strict overhead tile mode gate.
+   *
+   * We intentionally tie overhead eligibility to the explicitly active overhead
+   * tool names (foreground/overhead/roof), rather than a sticky foreground
+   * toggle object state. This matches expected UX that overhead-only selection
+   * should happen only while explicitly in overhead mode.
+   * @returns {boolean}
+   * @private
+   */
+  _isOverheadTileToolActive() {
+    const tools = ui?.controls?.control?.tools;
+    if (tools) {
+      if (typeof tools === 'object' && !Array.isArray(tools)) {
+        if (typeof tools?.foreground?.active === 'boolean') {
+          return !!tools.foreground.active;
+        }
+      }
+      if (Array.isArray(tools)) {
+        const activeForegroundTool = tools.find((t) => {
+          if (!t?.active) return false;
+          const name = String(t?.name || '').toLowerCase();
+          return name === 'foreground' || name === 'overhead' || name === 'roof';
+        });
+        if (activeForegroundTool) return true;
+      }
+    }
+
+    const activeTool = String(ui?.controls?.tool?.name ?? ui?.controls?.activeTool ?? game?.activeTool ?? '').toLowerCase();
+    return activeTool === 'foreground' || activeTool === 'overhead' || activeTool === 'roof';
   }
   
   /**

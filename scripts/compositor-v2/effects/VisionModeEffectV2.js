@@ -111,14 +111,30 @@ export class VisionModeEffectV2 {
 
   _resolveActiveVisionMode() {
     try {
-      const ms = window.MapShine;
-      const tokenId = ms?.selectedTokenId || canvas?.tokens?.controlled?.[0]?.id;
-      if (!tokenId) return 'basic';
+      // GM view should stay authorial/full-scene and must not inherit token
+      // vision-mode post processing when selecting NPCs.
+      if (game?.user?.isGM) return 'basic';
 
-      const tokenDoc = game.scenes?.current?.tokens?.get(tokenId);
-      if (!tokenDoc) return 'basic';
+      // Resolve from Foundry's active vision source, not selected token docs.
+      // Selected tokens can have darkvision configured even when there is no
+      // active vision source driving current visibility, which would otherwise
+      // incorrectly dim/tint the whole scene.
+      const sources = canvas?.effects?.visionSources;
+      if (!sources?.size) return 'basic';
 
-      return tokenDoc.sight?.visionMode || 'basic';
+      let activeSource = null;
+      for (const source of sources.values()) {
+        if (!source?.active) continue;
+        if (source?.isPreview) continue;
+        activeSource = source;
+        break;
+      }
+      if (!activeSource) return 'basic';
+
+      const modeId = activeSource?.visionMode?.id
+        ?? activeSource?.object?.document?.sight?.visionMode
+        ?? 'basic';
+      return modeId || 'basic';
     } catch (_) {
       return 'basic';
     }

@@ -2418,12 +2418,17 @@ export class FloorCompositor {
       if (floors.length > 1 && Number.isFinite(b) && Number.isFinite(t)) {
         const mid = (b + t) / 2;
         let bestIdx = 0;
+        let foundExactMatch = false;
         for (let i = 0; i < floors.length; i++) {
           const f = floors[i];
           if (Number(f?.elevationMin) === b && Number(f?.elevationMax) === t) {
             bestIdx = i;
+            foundExactMatch = true;
             break;
           }
+          // If we haven't found an exact match, check if mid is within bounds.
+          // Ignore infinity bounds for the mid check to avoid jumping to a
+          // "catch-all" floor if a tighter floor contains the center.
           if (mid >= Number(f?.elevationMin) && mid <= Number(f?.elevationMax)) {
             bestIdx = i;
           }
@@ -2437,12 +2442,18 @@ export class FloorCompositor {
     // BuildingShadowsEffectV2) treat non-finite floor indices as "floor 0" to
     // avoid infinite loops, which would make the effect appear stuck on the
     // ground-floor state.
-    const maxFloorIndex = Number.isFinite(activeFloor?.index) ? activeFloor.index : 0;
-    if (!Number.isFinite(activeFloor?.index)) {
-      log.info('FloorCompositor: activeFloor.index missing; falling back to 0', activeFloor);
+    let maxFloorIndex = 0;
+    if (activeFloor && typeof activeFloor.index === 'number' && Number.isFinite(activeFloor.index)) {
+      maxFloorIndex = activeFloor.index;
+    }
+    
+    if (maxFloorIndex < 0 || !Number.isFinite(maxFloorIndex)) {
+      log.info('FloorCompositor: maxFloorIndex invalid; falling back to 0', activeFloor);
+      maxFloorIndex = 0;
     } else {
       log.info(`FloorCompositor: active floor index = ${maxFloorIndex}`);
     }
+    
     this._renderBus.setVisibleFloors(maxFloorIndex);
     // Notify fire effect of floor change so it can swap active particle systems.
     this._fireEffect.onFloorChange(maxFloorIndex);

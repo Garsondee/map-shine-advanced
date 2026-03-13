@@ -6693,20 +6693,24 @@ function updateLayerVisibility() {
           canvas.tiles.interactiveChildren = true;
           // In tile-edit mode, keep PIXI visuals fully visible so Foundry's
           // native selection frame and copy/paste affordances remain obvious.
+          // DO NOT set tile.interactive = true here — that sets eventMode='static'
+          // for ALL tiles including full-scene overhead tiles and bypasses
+          // Foundry's foreground/overhead eligibility logic in _refreshState.
+          // Let Foundry own eventMode via _refreshState.
           const ALPHA = 1;
           for (const tile of canvas.tiles.placeables || []) {
             if (!tile) continue;
             tile.visible = true;
             tile.renderable = true;
-            tile.interactive = true;
-            tile.interactiveChildren = true;
             if (tile.mesh) tile.mesh.alpha = ALPHA;
-            if (tile.texture) tile.texture.alpha = ALPHA;
             if (Array.isArray(tile.children)) {
               for (const child of tile.children) {
                 if (child && typeof child.alpha === 'number') child.alpha = ALPHA;
               }
             }
+            // Queue Foundry's native eligibility refresh so eventMode is
+            // correctly set per foreground/background mode on the next frame.
+            try { tile.renderFlags?.set({ refreshState: true }); } catch (_) {}
           }
           if (tileManager) tileManager.setVisibility(true);
       } else {

@@ -2192,7 +2192,28 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     // Refresh tile (rendering changes)
     this._hookIds.push(['refreshTile', Hooks.on('refreshTile', (tile) => {
       log.debug(`Tile refreshed: ${tile.id}`);
-      this.refreshTileSprite(tile.document);
+      // During PIXI-native drag/resize, refreshTile can run with live placeable
+      // transforms that have not yet been committed to the document. Use those
+      // live values so Three visuals track movement immediately.
+      const baseDoc = tile?.document;
+      if (!baseDoc) return;
+
+      // Preserve TileDocument prototype/methods/parent context while overlaying
+      // live geometry values. Use a Proxy to avoid writing to getter-only fields.
+      const overrides = {
+        x: Number.isFinite(Number(tile?.x)) ? Number(tile.x) : baseDoc.x,
+        y: Number.isFinite(Number(tile?.y)) ? Number(tile.y) : baseDoc.y,
+        rotation: Number.isFinite(Number(tile?.rotation)) ? Number(tile.rotation) : baseDoc.rotation,
+        width: Number.isFinite(Number(baseDoc.width)) ? Number(baseDoc.width) : (Number(tile?.w) || 0),
+        height: Number.isFinite(Number(baseDoc.height)) ? Number(baseDoc.height) : (Number(tile?.h) || 0)
+      };
+      const liveDoc = new Proxy(baseDoc, {
+        get(target, prop, receiver) {
+          if (Object.prototype.hasOwnProperty.call(overrides, prop)) return overrides[prop];
+          return Reflect.get(target, prop, receiver);
+        }
+      });
+      this.refreshTileSprite(liveDoc);
     })]);
 
     // Scene updates (foregroundElevation changes)
@@ -2546,6 +2567,55 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     return alpha > 0.5;
   }
 
+  /**
+   * While Foundry/PIXI owns tile dragging, keep controlled Three tile sprites in
+   * sync with live placeable transforms each frame (before document commit).
+   * @private
+   */
+  _syncControlledTileTransforms() {
+    const controlled = canvas?.tiles?.controlled || [];
+    if (!controlled.length) return;
+
+    for (const placeable of controlled) {
+      try {
+        const tileId = String(placeable?.id || placeable?.document?.id || '');
+        if (!tileId) continue;
+
+        const data = this.tileSprites.get(tileId);
+        if (!data?.sprite || !placeable?.document) continue;
+
+        const baseDoc = placeable.document;
+        const meshPosX = Number(placeable?.mesh?.position?.x ?? placeable?.position?.x);
+        const meshPosY = Number(placeable?.mesh?.position?.y ?? placeable?.position?.y);
+        const fallbackX = Number.isFinite(meshPosX) ? (meshPosX - (Number(baseDoc.width) || 0) / 2) : baseDoc.x;
+        const fallbackY = Number.isFinite(meshPosY) ? (meshPosY - (Number(baseDoc.height) || 0) / 2) : baseDoc.y;
+        const overrides = {
+          x: Number.isFinite(Number(placeable?.x)) ? Number(placeable.x) : fallbackX,
+          y: Number.isFinite(Number(placeable?.y)) ? Number(placeable.y) : fallbackY,
+          rotation: Number.isFinite(Number(placeable?.rotation)) ? Number(placeable.rotation) : baseDoc.rotation,
+          width: Number.isFinite(Number(baseDoc.width)) ? Number(baseDoc.width) : (Number(placeable?.w) || 0),
+          height: Number.isFinite(Number(baseDoc.height)) ? Number(baseDoc.height) : (Number(placeable?.h) || 0)
+        };
+
+        const liveDoc = new Proxy(baseDoc, {
+          get(target, prop, receiver) {
+            if (Object.prototype.hasOwnProperty.call(overrides, prop)) return overrides[prop];
+            return Reflect.get(target, prop, receiver);
+          }
+        });
+
+        this.updateSpriteTransform(data.sprite, liveDoc);
+        this.updateSpriteVisibility(data.sprite, liveDoc);
+
+        try {
+          this.tileBindingManager.onTileTransformChanged(tileId, data.sprite);
+        } catch (_) {
+        }
+      } catch (_) {
+      }
+    }
+  }
+
   isUvOpaque(data, uv) {
     const { sprite, tileDoc } = data;
     const texture = sprite.material?.map;
@@ -2602,6 +2672,12 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
   update(timeInfo) {
     if (DISABLE_TILE_UPDATES) return;
 
+    // During PIXI-native tile editing, placeables can move before their document
+    // commits. Keep controlled Three sprites in lockstep each frame.
+    if (canvas?.tiles?.active) {
+      this._syncControlledTileTransforms();
+    }
+
     // If tiles are globally hidden (e.g. TilesLayer active in PIXI), do not run
     // occlusion/hover fade updates. This prevents hidden tiles from being
     // re-shown by later updateSpriteVisibility calls.
@@ -2613,6 +2689,13 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     const sources = canvas.tokens?.controlled.length > 0 
       ? canvas.tokens.controlled 
       : (canvas.tokens?.observed || []);
+
+    // Defensive gate: hover-hide roof fades are an editing workflow and must not
+    // keep running during general gameplay/token selection. Stale hoverHidden
+    // state on scene-spanning overhead tiles can present as a full-scene fade.
+    const activeControl = String(ui?.controls?.control?.name ?? ui?.controls?.activeControl ?? '').toLowerCase();
+    const inputMode = String(window.MapShine?.inputRouter?.currentMode ?? '').toLowerCase();
+    const allowHoverHiddenFade = activeControl === 'tiles' && inputMode !== 'pixi';
 
     // Calculate global tile tint based on darkness
     // This matches the logic in SpecularEffect to darken elements at night
@@ -2728,7 +2811,11 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
       const data = this.tileSprites.get(tileId);
       if (!data) continue;
 
-      const { sprite, tileDoc, hoverHidden } = data;
+      const { sprite, tileDoc } = data;
+      const hoverHidden = allowHoverHiddenFade ? !!data.hoverHidden : false;
+      if (!allowHoverHiddenFade && data.hoverHidden) {
+        data.hoverHidden = false;
+      }
       const skipRoofFade = !!sprite?.userData?._msMotionForcedOverhead;
 
       // MS-LVL-036: Skip overhead fade for tiles that are elevation-hidden.

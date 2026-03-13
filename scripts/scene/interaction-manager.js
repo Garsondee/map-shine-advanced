@@ -1886,6 +1886,12 @@ export class InteractionManager {
           return;
         }
 
+        // Tiles are now fully Foundry-native while tile tools are active.
+        // Do not run any Three-side double-click logic in this context.
+        if (this._isTilesLayerActive()) {
+          return;
+        }
+
         const isTilesContextActive = this._isTilesLayerActive();
         const isUiEvent = this._isEventFromUI(event);
         if (isUiEvent) {
@@ -2003,9 +2009,10 @@ export class InteractionManager {
         }, 'dblClick.noteInteraction', Severity.COSMETIC);
 
         // 1.7 Check Tiles (double-click opens tile config sheet)
+        // Skip when PIXI owns tiles: Foundry's native Tile._onClickLeft2() handles this.
         // Bypass foreground/background mode filter so any visible tile can be
         // opened via double-click, regardless of which tool mode is active.
-        if (this._isTilesLayerActive()) {
+        if (this._isTilesLayerActive() && !this._isPixiOwnedTileMode()) {
           const tilePick = this._pickTileHit({ ignoreForegroundFilter: true });
           log.warn('TileInteraction.doubleClick', {
             picked: !!tilePick,
@@ -2225,6 +2232,23 @@ export class InteractionManager {
       || ctor === 'tileslayer'
       || sceneControlName === 'tiles'
       || sceneControlLayer === 'tiles';
+  }
+
+  /**
+   * Check whether PIXI owns tile interaction (Foundry handles all tile editing
+   * natively). When true, Three-side tile picking, hover, drag, and copy/paste
+   * must be disabled to avoid conflicts with Foundry's native tile workflows.
+   * @returns {boolean}
+   */
+  _isPixiOwnedTileMode() {
+    const mapShine = window.MapShine || window.mapShine;
+    const inputRouter =
+      mapShine?.inputRouter ||
+      mapShine?.controlsIntegration?.inputRouter ||
+      null;
+    // If there's no router, assume Three owns (legacy fallback).
+    if (!inputRouter) return false;
+    return inputRouter.currentMode === 'pixi';
   }
 
   _getActiveLayerMeta() {
@@ -2840,6 +2864,8 @@ export class InteractionManager {
 
   _handleTilesLayerPointerDown(event, currentTool) {
     if (!this._isTilesLayerActive()) return false;
+    // Tiles are PIXI-owned: this path is retained for legacy fallback only.
+    if (this._isPixiOwnedTileMode()) return false;
 
     // Keep tile picking tied to the actual click position.
     this._lastPointerClientX = Number.isFinite(Number(event?.clientX)) ? Number(event.clientX) : this._lastPointerClientX;
@@ -2979,13 +3005,35 @@ export class InteractionManager {
         if (isUiEvent) {
           const hardUiBlocker = this._isHardUIInteractionEvent(event);
           const bypassForTiles = isTilesContextActive && !hardUiBlocker;
+          const targetPath = (event && typeof event.composedPath === 'function') ? event.composedPath() : null;
+          const targetHitsCanvas = Array.isArray(targetPath)
+            ? targetPath.includes(this.canvasElement)
+            : (event?.target === this.canvasElement);
+          const insideCanvas = safeCall(() => {
+            const rect = this.canvasElement?.getBoundingClientRect?.();
+            if (!rect) return false;
+            const cx = Number(event?.clientX);
+            const cy = Number(event?.clientY);
+            if (!Number.isFinite(cx) || !Number.isFinite(cy)) return false;
+            return cx >= rect.left && cx <= rect.right && cy >= rect.top && cy <= rect.bottom;
+          }, 'pointerDown.uiGate.insideCanvas', Severity.COSMETIC, { fallback: false });
+
           log.warn('TileInteraction.pointerDown.uiGate', {
             tilesContext: isTilesContextActive,
             hardUiBlocker,
             bypassForTiles,
+            targetHitsCanvas,
+            insideCanvas,
             button: event?.button
           });
-          if (!bypassForTiles) return;
+
+          // Global UI roots can appear in elementsFromPoint even when the actual
+          // pointer event originated from the scene canvas. Keep canvas-originated
+          // clicks interactive (token select/drag), while still blocking true UI hits.
+          if (!bypassForTiles) {
+            if (!insideCanvas) return;
+            if (hardUiBlocker && !targetHitsCanvas) return;
+          }
         }
 
         // One-shot world pick callback (e.g., Tile Motion pivot selection).
@@ -3113,9 +3161,9 @@ export class InteractionManager {
 
         // Block interactions when the InputRouter says PIXI should receive input.
         // Tokens, walls, and lighting are fully Three.js-native and always routed
-        // to THREE by the InputRouter. Only unreplaced layers (drawings, regions,
-        // sounds, notes, templates) will be PIXI-owned.
-        if (inputRouter && !inputRouter.shouldThreeReceiveInput() && !isTilesContextActive) {
+        // to THREE by the InputRouter. Tiles, drawings, regions, sounds, notes,
+        // and templates are PIXI-owned — Foundry handles their native interactions.
+        if (inputRouter && !inputRouter.shouldThreeReceiveInput()) {
           log.debug('onPointerDown BLOCKED by InputRouter (PIXI mode active)', {
             currentMode: inputRouter.currentMode,
             activeControl,
@@ -3327,8 +3375,7 @@ export class InteractionManager {
             const prevTokenRayMask = this.raycaster.layers?.mask;
             safeCall(() => {
               if (!this.raycaster.layers) this.raycaster.layers = new THREE.Layers();
-              this.raycaster.layers.set(0);
-              this.raycaster.layers.enable(OVERLAY_THREE_LAYER);
+              this.raycaster.layers.mask = 0xffffffff;
             }, 'pointerDown.rightClickTokenRayLayers', Severity.COSMETIC);
 
             const tokenIntersects = this.raycaster.intersectObjects(tokenSprites, true);
@@ -3409,7 +3456,9 @@ export class InteractionManager {
         const isWallLayer = this._isWallsContextActive();
         const isTilesLayer = this._isTilesLayerActive();
 
-        if (isTilesLayer && this._handleTilesLayerPointerDown(event, currentTool)) {
+        // Hard ownership boundary: in Tiles context, Foundry/PIXI owns all tile
+        // manipulation. Three.js must not process pointer-down tile workflows.
+        if (isTilesLayer) {
           return;
         }
 
@@ -3798,8 +3847,7 @@ export class InteractionManager {
         const prevTokenRayMask = this.raycaster.layers?.mask;
         safeCall(() => {
           if (!this.raycaster.layers) this.raycaster.layers = new THREE.Layers();
-          this.raycaster.layers.set(0);
-          this.raycaster.layers.enable(OVERLAY_THREE_LAYER);
+          this.raycaster.layers.mask = 0xffffffff;
         }, 'pointerDown.tokenRayLayers', Severity.COSMETIC);
 
         const intersects = this.raycaster.intersectObjects(tokenSprites, true);
@@ -3913,17 +3961,10 @@ export class InteractionManager {
           // Start Drag
           this.startDrag(sprite, hit.point);
 
-          // Auto-switch floor when clicking a visible token on a different level.
-          // If you can see a token (even on a floor below), clicking it selects it
-          // and automatically changes the level view to that token's floor.
-          safeCall(() => {
-            if (!isTokenOnActiveLevel(tokenDoc)) {
-              const elev = Number(tokenDoc?.elevation ?? 0);
-              if (Number.isFinite(elev)) {
-                switchToLevelForElevation(elev, 'click-select-token-auto-switch');
-              }
-            }
-          }, 'pointerDown.autoSwitchLevel', Severity.COSMETIC);
+          // TEMPORARY INCIDENT GUARD (2026-03-13): disable click-select floor
+          // auto-switch. Off-floor token selection (commonly NPCs) can trigger a
+          // level transition race that leads to invalid-level/fade regressions.
+          // Keep selection stable; explicit floor switching remains user-driven.
           }
           
         } else {
@@ -4407,15 +4448,46 @@ export class InteractionManager {
     // (We intentionally keep it visible while hovering the relevant handle.)
     this._hideUIHoverLabel();
 
+    // Hard ownership boundary: in Tiles context, Foundry/PIXI owns tile hover
+    // cursor/targets. Disable Three-side tile hover workflows entirely.
+    if (this._isTilesLayerActive()) {
+      if (this.hoveredOverheadTileId && this.tileManager?.setTileHoverHidden) {
+        this.tileManager.setTileHoverHidden(this.hoveredOverheadTileId, false);
+      }
+      this.hoveredOverheadTileId = null;
+      this._pendingOverheadTileId = null;
+      if (this._overheadHoverTimeoutId != null) {
+        clearTimeout(this._overheadHoverTimeoutId);
+        this._overheadHoverTimeoutId = null;
+      }
+      return;
+    }
+
     // Tree canopy hover-hide must be evaluated independently from wall/tile/token
     // hit priority so early returns do not suppress canopy fade updates.
     safeCall(() => this._updateTreeCanopyHoverState(mouseState), 'hover.treeCanopy', Severity.COSMETIC);
+
+    // Overhead roof hover-hide is only valid in Three-owned tile editing paths.
+    // In gameplay/token workflows it can fade large overhead map tiles and make
+    // the scene appear to "fade out" when selecting tokens.
+    const allowThreeOverheadHoverHide = this._isTilesLayerActive() && !this._isPixiOwnedTileMode();
+    if (!allowThreeOverheadHoverHide) {
+      if (this.hoveredOverheadTileId && this.tileManager?.setTileHoverHidden) {
+        this.tileManager.setTileHoverHidden(this.hoveredOverheadTileId, false);
+      }
+      this.hoveredOverheadTileId = null;
+      this._pendingOverheadTileId = null;
+      if (this._overheadHoverTimeoutId != null) {
+        clearTimeout(this._overheadHoverTimeoutId);
+        this._overheadHoverTimeoutId = null;
+      }
+    }
 
     // 1. Check Overhead Tiles (for hover-to-hide behavior)
     // IMPORTANT: This must run BEFORE wall hover detection.
     // Wall raycasting uses a large line threshold (for UX when selecting walls),
     // which can otherwise steal hover from roofs/overhead tiles (especially indoors).
-    if (this.tileManager && this.tileManager.getOverheadTileSprites) {
+    if (allowThreeOverheadHoverHide && this.tileManager && this.tileManager.getOverheadTileSprites) {
       const overheadSprites = this.tileManager.getOverheadTileSprites();
       if (overheadSprites.length > 0) {
         // IMPORTANT: Tiles are rendered as THREE.Sprite (billboards). Under a
@@ -4617,12 +4689,14 @@ export class InteractionManager {
     }
 
     // Overhead hover-hiding should only suppress deeper hover targets while the
-    // Tiles workflow is active. In gameplay/token workflows, token hover must
-    // remain available even when a large overhead tile spans the scene.
-    if (hitFound && this._isTilesLayerActive()) return;
+    // Tiles workflow is active AND Three.js owns interaction. When PIXI owns
+    // tiles, Foundry handles hover natively.
+    const _tileHoverPixiOwned = this._isTilesLayerActive() && this._isPixiOwnedTileMode();
+    if (hitFound && this._isTilesLayerActive() && !_tileHoverPixiOwned) return;
 
-    // 1b. Tiles layer hover — show pointer cursor when hovering a selectable tile
-    if (this._isTilesLayerActive() && this.tileManager?.tileSprites) {
+    // 1b. Tiles layer hover — show pointer cursor when hovering a selectable tile.
+    // Skip when PIXI owns tiles: Foundry handles hover cursor natively.
+    if (this._isTilesLayerActive() && !_tileHoverPixiOwned && this.tileManager?.tileSprites) {
       const tileHit = this._pickTileHit();
       if (tileHit) {
         this.canvasElement.style.cursor = 'pointer';
@@ -4685,7 +4759,7 @@ export class InteractionManager {
     // Tokens may be rendered on the overlay layer (31) to draw above post-processing.
     // Ensure raycasting includes that layer, otherwise tokens won't be clickable/draggable.
     const prevRayMask = this.raycaster.layers?.mask;
-    safeCall(() => { this.raycaster.layers?.enable?.(OVERLAY_THREE_LAYER); this.raycaster.layers?.enable?.(0); }, 'hover.tokenLayers', Severity.COSMETIC);
+    safeCall(() => { if (!this.raycaster.layers) this.raycaster.layers = new THREE.Layers(); this.raycaster.layers.mask = 0xffffffff; }, 'hover.tokenLayers', Severity.COSMETIC);
 
     const interactables = this.tokenManager.getAllTokenSprites();
     const intersects = this.raycaster.intersectObjects(interactables, true);
@@ -6062,16 +6136,8 @@ export class InteractionManager {
             }
           );
 
-          // Auto-switch floor: if ALL drag-selected tokens are on the same floor
-          // that is different from the current floor, switch the level view to
-          // that floor. This lets users drag-select a group on a visible lower
-          // floor and seamlessly transition to it.
-          safeCall(() => {
-            const switchElev = getAutoSwitchElevation(dragSelectedDocs);
-            if (switchElev !== null) {
-              switchToLevelForElevation(switchElev, 'drag-select-auto-switch');
-            }
-          }, 'dragSelect.autoSwitchLevel', Severity.COSMETIC);
+          // TEMPORARY INCIDENT GUARD (2026-03-13): disable drag-select floor
+          // auto-switch for the same reason as click-select guard above.
 
           // Only allow box-selecting lights when the Lighting layer is active.
           // In token movement mode (TokenLayer), marquee selection should not grab lights.
@@ -6940,6 +7006,9 @@ export class InteractionManager {
     if (isMod && key === 'c') {
       const selectedLights = this._getSelectedLights();
       if (!selectedLights.length) {
+        // Tiles are Foundry-native: never intercept tile copy in Three.
+        if (this._isTilesLayerActive()) return;
+
         const copiedTiles = safeCall(
           () => this._copySelectedTilesToClipboard(),
           'onKeyDown.copyTiles',
@@ -7091,19 +7160,7 @@ export class InteractionManager {
       }
 
       if (this._isTilesLayerActive()) {
-        const handled = await safeCall(
-          async () => this._pasteTilesFromClipboard(event),
-          'onKeyDown.pasteTiles',
-          Severity.COSMETIC,
-          { fallback: false }
-        );
-        if (handled) {
-          this._consumeKeyEvent(event);
-          return;
-        }
-        // In tiles context, never let light clipboard hijack Ctrl/Cmd+V.
-        // Fall through to Foundry's native tile paste path when local tile
-        // clipboard is empty or fails.
+        // Tiles are Foundry-native: never intercept tile paste in Three.
         return;
       }
 
@@ -7216,14 +7273,23 @@ export class InteractionManager {
       return;
     }
 
-    const controlledTileIds = new Set(
-      (canvas?.tiles?.controlled || [])
-        .map((tile) => String(tile?.id || tile?.document?.id || ''))
-        .filter(Boolean)
-    );
+    // When PIXI owns tiles, Foundry handles tile delete natively — don't
+    // collect controlled tile IDs or consume the Delete event for them.
+    const _pixiOwnsTiles = this._isTilesLayerActive() && this._isPixiOwnedTileMode();
+    if (_pixiOwnsTiles && (event.key === 'Delete' || event.key === 'Backspace')) {
+      return;
+    }
+    const controlledTileIds = _pixiOwnsTiles
+      ? new Set()
+      : new Set(
+          (canvas?.tiles?.controlled || [])
+            .map((tile) => String(tile?.id || tile?.document?.id || ''))
+            .filter(Boolean)
+        );
 
     // Intercept Delete/Backspace early so Foundry doesn't also process it.
     // (Otherwise you can get double-deletes and "does not exist" notifications.)
+    // When PIXI owns tiles, we only intercept if non-tile items are selected.
     if ((event.key === 'Delete' || event.key === 'Backspace') && (this.mapPointDraw.active || this.selection.size > 0 || controlledTileIds.size > 0)) {
       this._consumeKeyEvent(event);
     }

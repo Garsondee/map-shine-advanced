@@ -1644,7 +1644,7 @@ export class FogOfWarEffectV2 {
       log.debug(`[FOG DIAG] Vision sources: ${visionSources?.size || 0}, controlled: ${controlledTokens.length}, retryFrame: ${this._visionRetryFrames}`);
       for (const token of controlledTokens) {
         const vs = token.vision;
-        const hasSight = token.document?.sight?.enabled ?? false;
+        const hasSight = this._tokenHasVisionCapability(token);
         const shape = vs?.los || vs?.shape || vs?.fov;
         log.debug(`  [FOG DIAG] Token "${token.name}": sight.enabled=${hasSight}, vision=${!!vs}, active=${vs?.active ?? 'N/A'}, los=${!!vs?.los}, shape=${!!vs?.shape}, fov=${!!vs?.fov}, points=${shape?.points?.length || 0}`);
       }
@@ -1695,7 +1695,7 @@ export class FogOfWarEffectV2 {
 
     for (const token of controlledTokens) {
       const visionSource = token.vision;
-      const hasSight = token.document?.sight?.enabled ?? false;
+      const hasSight = this._tokenHasVisionCapability(token);
 
       // MS-LVL-120: In levels-enabled scenes, compute token LOS polygon with
       // explicit elevation-aware wall filtering for fog rendering.
@@ -1728,7 +1728,7 @@ export class FogOfWarEffectV2 {
         }
       }
 
-      // Token has no vision source at all. If sight isn't enabled on the
+      // Token has no vision source at all. If vision isn't enabled on the
       // token, this is expected ->-> skip it without triggering retries.
       if (!visionSource) {
         if (!hasSight) {
@@ -2032,43 +2032,29 @@ export class FogOfWarEffectV2 {
    * Check if fog should be bypassed (GM with no tokens selected)
    * @private
    */
+  _tokenHasVisionCapability(token) {
+    try {
+      const gsm = window.MapShine?.gameSystem;
+      if (gsm?.hasTokenVision) return !!gsm.hasTokenVision(token);
+    } catch (_) {
+      // Fall through to core token flags.
+    }
+
+    return !!(token?.hasSight || token?.document?.sight?.enabled);
+  }
+
   _shouldBypassFog() {
     const isGM = game?.user?.isGM;
     const fogEnabled = canvas?.scene?.tokenVision ?? false;
-    
+
     if (!fogEnabled) return true;
-    
-    if (isGM) {
-      // First, trust Foundry's native controlled tokens
-      const foundryControlled = canvas?.tokens?.controlled || [];
-      let hasControlledTokens = foundryControlled.length > 0;
 
-      // Also consider MapShine's Three.js selection as a fallback/extension.
-      // This ensures that as soon as a token is selected in our custom UI,
-      // the GM no longer bypasses fog, even if Foundry hasn't fully synced yet.
-      if (!hasControlledTokens) {
-        try {
-          const ms = window.MapShine;
-          const interactionManager = ms?.interactionManager;
-          const tokenManager = ms?.tokenManager;
-          const selection = interactionManager?.selection;
+    // GMs always see the full scene. We never restrict GM view based on
+    // controlled-token vision. This prevents PF2e bestiary NPCs (which have
+    // sight.enabled=true and active VisionSources) from engaging the fog plane
+    // and fading the scene when the GM selects them.
+    if (isGM) return true;
 
-          if (interactionManager && tokenManager && selection && selection.size > 0) {
-            for (const id of selection) {
-              if (tokenManager.tokenSprites && tokenManager.tokenSprites.has(id)) {
-                hasControlledTokens = true;
-                break;
-              }
-            }
-          }
-        } catch (_) {
-          // Ignore MapShine check errors
-        }
-      }
-
-      return !hasControlledTokens;
-    }
-    
     return false;
   }
 

@@ -389,6 +389,9 @@ export class FloorStack {
       if (f.elevationMin === ctxBottom && f.elevationMax === ctxTop) {
         return i; // Exact match
       }
+      // If we haven't found an exact match, check if mid is within bounds.
+      // Ignore infinity bounds for the mid check to avoid jumping to a
+      // "catch-all" floor if a tighter floor contains the center.
       if (mid >= f.elevationMin && mid <= f.elevationMax) {
         bestIdx = i;
       }

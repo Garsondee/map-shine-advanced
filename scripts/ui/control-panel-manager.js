@@ -921,6 +921,10 @@ export class ControlPanelManager {
       this._sunLatitudeSyncIntervalId = null;
     }
 
+    // P3: Reduced from 200ms to 2000ms. Sun latitude changes infrequently
+    // (only when map maker edits it or time-link updates it). The old 200ms
+    // interval created 5 wakeups/sec of main-thread noise with no visible
+    // benefit. 2s is more than responsive enough for a UI sync.
     let lastLat = null;
     this._sunLatitudeSyncIntervalId = setInterval(() => {
       try {
@@ -939,7 +943,7 @@ export class ControlPanelManager {
         }
       } catch (e) {
       }
-    }, 200);
+    }, 2000);
   }
 
   /**

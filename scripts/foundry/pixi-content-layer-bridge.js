@@ -38,6 +38,8 @@ export class PixiContentLayerBridge {
     this._lastCaptureMs = 0;
     /** @type {number} */
     this._captureThrottleMs = 66;
+    /** @type {number} */
+    this._liveCaptureThrottleMs = 120;
 
     /** @type {number} */
     this._zoomSettleDelayMs = 220;
@@ -79,7 +81,20 @@ export class PixiContentLayerBridge {
     /** @type {number} */
     this._worldLogicalHeight = 1;
     /** @type {number} */
-    this._worldCaptureScale = 2.5;
+    this._worldCaptureScale = 1.0;
+
+    /** @type {string} Content signature from last replay capture — skip GPU upload when unchanged */
+    this._lastReplayDocsSig = '';
+
+    /** @type {number} Minimum ms between post-dirty followup captures */
+    this._postDirtyThrottleMs = 200;
+
+    /** @type {PIXI.RenderTexture|null} Reused scratch RT to avoid per-frame RT churn */
+    this._scratchRenderTexture = null;
+    /** @type {number} */
+    this._scratchRtWidth = 0;
+    /** @type {number} */
+    this._scratchRtHeight = 0;
 
     /** @type {HTMLCanvasElement|null} Cached settled sounds layer for fast preview rendering */
     this._soundsSettledCacheCanvas = null;
@@ -96,6 +111,9 @@ export class PixiContentLayerBridge {
 
     /** @type {string} */
     this._textureSamplingStateKey = '';
+
+    /** @type {boolean} Whether UI channel currently has non-empty content */
+    this._uiHasContent = false;
 
     if (THREE) {
       this._worldCanvas = document.createElement('canvas');
@@ -144,7 +162,8 @@ export class PixiContentLayerBridge {
     const THREE = this._THREE;
     if (!THREE || !texture) return;
 
-    const sharpMipmaps = window?.MapShine?.__pixiBridgeSharpMipmaps !== false;
+    // Bridge textures are frequently updated; keep costly mipmap regen opt-in.
+    const sharpMipmaps = window?.MapShine?.__pixiBridgeSharpMipmaps === true;
     if (sharpMipmaps) {
       texture.minFilter = THREE.LinearMipmapLinearFilter ?? THREE.LinearFilter;
       texture.magFilter = THREE.LinearFilter;
@@ -163,7 +182,7 @@ export class PixiContentLayerBridge {
    * @private
    */
   _refreshTextureSamplingIfNeeded() {
-    const sharpMipmaps = window?.MapShine?.__pixiBridgeSharpMipmaps !== false;
+    const sharpMipmaps = window?.MapShine?.__pixiBridgeSharpMipmaps === true;
     const anisotropy = sharpMipmaps ? this._resolveBridgeAnisotropy() : 1;
     const stateKey = `${sharpMipmaps ? 'sharp' : 'soft'}:${anisotropy}`;
     if (stateKey === this._textureSamplingStateKey) return;
@@ -242,6 +261,9 @@ export class PixiContentLayerBridge {
     if (!this._hookIds.length) {
       const markDirty = (followupCaptures = 0) => {
         this._dirty = true;
+        // Invalidate replay content signature so the next capture redraws
+        // even if doc fields haven't visually changed (e.g., sort reorder).
+        this._lastReplayDocsSig = '';
         this._postDirtyCapturesRemaining = Math.max(
           this._postDirtyCapturesRemaining,
           Math.max(0, Math.round(this._toNumber(followupCaptures, 0)))
@@ -264,6 +286,10 @@ export class PixiContentLayerBridge {
       this._hookIds.push(['updateMeasuredTemplate', Hooks.on('updateMeasuredTemplate', () => { markDirty(2); })]);
       this._hookIds.push(['deleteMeasuredTemplate', Hooks.on('deleteMeasuredTemplate', () => { markDirty(2); })]);
       this._hookIds.push(['activateTemplateLayer', Hooks.on('activateTemplateLayer', () => { markDirty(2); })]);
+      this._hookIds.push(['createRegion', Hooks.on('createRegion', () => { markDirty(2); })]);
+      this._hookIds.push(['updateRegion', Hooks.on('updateRegion', () => { markDirty(2); })]);
+      this._hookIds.push(['deleteRegion', Hooks.on('deleteRegion', () => { markDirty(2); })]);
+      this._hookIds.push(['activateRegionsLayer', Hooks.on('activateRegionsLayer', () => { markDirty(2); })]);
       this._hookIds.push(['renderSceneControls', Hooks.on('renderSceneControls', () => { markDirty(1); })]);
       this._hookIds.push(['canvasReady', Hooks.on('canvasReady', () => { markDirty(1); })]);
     }
@@ -283,6 +309,14 @@ export class PixiContentLayerBridge {
 
   getUiTexture() {
     return this._ensureChannelTexture('ui');
+  }
+
+  /**
+   * Whether the bridge UI channel currently contains renderable content.
+   * @returns {boolean}
+   */
+  hasUiContent() {
+    return !!this._uiHasContent;
   }
 
   /**
@@ -432,6 +466,7 @@ export class PixiContentLayerBridge {
 
   markDirty() {
     this._dirty = true;
+    this._lastReplayDocsSig = '';
   }
 
   /**
@@ -526,6 +561,26 @@ export class PixiContentLayerBridge {
   }
 
   /**
+   * Is the current control/layer context the native regions workflow?
+   * @returns {boolean}
+   * @private
+   */
+  _isRegionsContextActive() {
+    const activeControl = String(ui?.controls?.control?.name ?? ui?.controls?.activeControl ?? '').toLowerCase();
+    const activeLayerName = String(canvas?.activeLayer?.options?.name ?? canvas?.activeLayer?.name ?? '').toLowerCase();
+    const activeLayerCtor = String(canvas?.activeLayer?.constructor?.name ?? '').toLowerCase();
+    const activeControlLayer = String(ui?.controls?.control?.layer ?? '').toLowerCase();
+    return !!canvas?.regions?.active
+      || activeControl === 'regions'
+      || activeControl === 'region'
+      || activeControlLayer === 'regions'
+      || activeControlLayer === 'region'
+      || activeLayerName === 'regions'
+      || activeLayerName === 'region'
+      || activeLayerCtor === 'regionlayer';
+  }
+
+  /**
    * Resolve capture strategy for the current frame.
    * Default is a deterministic drawings-only replay path to keep runtime stable.
    * Advanced extraction paths are debug-only and opt-in.
@@ -536,12 +591,13 @@ export class PixiContentLayerBridge {
    * - sounds-extract
    * - notes-extract
    * - templates-extract
+   * - regions-extract
    * - stage-extract
    *
    * If no override is provided, auto-select sounds-extract while actively
    * editing sounds, otherwise use replay-only.
    *
-   * @returns {'replay-only'|'replay-shape'|'sounds-extract'|'notes-extract'|'templates-extract'|'stage-extract'}
+   * @returns {'replay-only'|'replay-shape'|'sounds-extract'|'notes-extract'|'templates-extract'|'regions-extract'|'stage-extract'}
    * @private
    */
   _getCaptureStrategy() {
@@ -550,8 +606,10 @@ export class PixiContentLayerBridge {
     if (raw === 'sounds-extract') return 'sounds-extract';
     if (raw === 'notes-extract') return 'notes-extract';
     if (raw === 'templates-extract') return 'templates-extract';
+    if (raw === 'regions-extract') return 'regions-extract';
     if (raw === 'replay-shape') return 'replay-shape';
     if (this._isSoundsContextActive()) return 'sounds-extract';
+    if (this._isRegionsContextActive()) return 'regions-extract';
     if (this._isTemplatesContextActive()) return 'templates-extract';
     if (this._isNotesContextActive()) return 'notes-extract';
 
@@ -596,9 +654,13 @@ export class PixiContentLayerBridge {
     const runtimeRequested = this._toNumber(window?.MapShine?.__pixiBridgeCaptureScale, this._worldCaptureScale);
     const requested = Math.max(1, runtimeRequested);
     const maxDim = 8192;
+    // Adaptive pixel budget: cap total upload pixels to avoid massive texSubImage2D stalls.
+    // 4M pixels (~2048x2048) keeps uploads under ~2ms on most GPUs.
+    const maxPixelBudget = this._toNumber(window?.MapShine?.__pixiBridgeMaxPixels, 4_000_000);
     const safeByWidth = maxDim / Math.max(1, logicalWidth);
     const safeByHeight = maxDim / Math.max(1, logicalHeight);
-    return Math.max(1, Math.min(requested, safeByWidth, safeByHeight));
+    const safeByBudget = Math.sqrt(maxPixelBudget / Math.max(1, logicalWidth * logicalHeight));
+    return Math.max(1, Math.min(requested, safeByWidth, safeByHeight, safeByBudget));
   }
 
   /**
@@ -619,6 +681,50 @@ export class PixiContentLayerBridge {
       worldTexture = this._ensureChannelTexture('world');
     }
     return worldTexture;
+  }
+
+  /**
+   * Reuse a single PIXI render texture across bridge captures to reduce
+   * transient GPU/JS allocations and associated GC pressure.
+   * @param {number} width
+   * @param {number} height
+   * @returns {PIXI.RenderTexture|null}
+   * @private
+   */
+  _ensureScratchRenderTexture(width, height) {
+    const w = Math.max(1, Math.round(this._toNumber(width, 1)));
+    const h = Math.max(1, Math.round(this._toNumber(height, 1)));
+    const existing = this._scratchRenderTexture;
+    if (existing && this._scratchRtWidth === w && this._scratchRtHeight === h) return existing;
+
+    if (existing) {
+      try { existing.destroy(true); } catch (_) {}
+      this._scratchRenderTexture = null;
+    }
+
+    try {
+      this._scratchRenderTexture = PIXI.RenderTexture.create({ width: w, height: h });
+      this._scratchRtWidth = w;
+      this._scratchRtHeight = h;
+      return this._scratchRenderTexture;
+    } catch (_) {
+      this._scratchRenderTexture = null;
+      this._scratchRtWidth = 0;
+      this._scratchRtHeight = 0;
+      return null;
+    }
+  }
+
+  /**
+   * @private
+   */
+  _destroyScratchRenderTexture() {
+    const rt = this._scratchRenderTexture;
+    if (!rt) return;
+    try { rt.destroy(true); } catch (_) {}
+    this._scratchRenderTexture = null;
+    this._scratchRtWidth = 0;
+    this._scratchRtHeight = 0;
   }
 
   /**
@@ -947,6 +1053,26 @@ export class PixiContentLayerBridge {
     }
 
     replayDocs.sort((a, b) => this._toNumber(a?.sort, 0) - this._toNumber(b?.sort, 0));
+
+    // Compute a cheap content signature from doc geometry/style to detect no-ops.
+    // When content hasn't changed, skip the canvas redraw and GPU upload entirely.
+    const sigParts = [];
+    for (const doc of replayDocs) {
+      sigParts.push(
+        `${this._toNumber(doc?.x, 0)}:${this._toNumber(doc?.y, 0)}:`
+        + `${this._toNumber(doc?.shape?.width, 0)}:${this._toNumber(doc?.shape?.height, 0)}:`
+        + `${this._toNumber(doc?.rotation, 0)}:`
+        + `${this._toNumber(doc?.strokeWidth, 0)}:`
+        + `${String(doc?.strokeColor ?? '')}:${String(doc?.fillColor ?? '')}:`
+        + `${String(doc?.text ?? '')}:${this._toNumber(doc?.sort, 0)}`
+      );
+    }
+    const contentSig = `${renderW}x${renderH}:${replayDocs.length}:${sigParts.join('|')}`;
+    if (contentSig === this._lastReplayDocsSig) {
+      // Content unchanged — skip canvas redraw and GPU re-upload.
+      return { ok: true, count: replayDocs.length, status: `skip:replay-unchanged:${renderW}x${renderH} docs=${replayDocs.length}` };
+    }
+    this._lastReplayDocsSig = contentSig;
 
     const w = this._worldCanvas.width;
     const h = this._worldCanvas.height;
@@ -1667,6 +1793,159 @@ export class PixiContentLayerBridge {
   }
 
   /**
+   * Collect overlay-level RegionLayer graphics that are not represented as
+   * Region placeables. Foundry stores region draw/create preview and highlight
+   * graphics directly on the layer.
+   * @param {PIXI.RegionLayer|null} regionsLayer
+   * @returns {PIXI.DisplayObject[]}
+   * @private
+   */
+  _getRegionLayerOverlayTargets(regionsLayer) {
+    const overlays = [];
+    const children = Array.isArray(regionsLayer?.children) ? regionsLayer.children : [];
+    for (const child of children) {
+      if (!child) continue;
+      if (child === regionsLayer?.objects) continue;
+      if (child === regionsLayer?.preview) continue;
+      if (child.visible === false || child.renderable === false) continue;
+      const ctor = String(child?.constructor?.name || '').toLowerCase();
+      const isGraphicsLike = ctor.includes('graphics') || ctor.includes('mesh');
+      if (!isGraphicsLike) continue;
+      overlays.push(child);
+    }
+    return overlays;
+  }
+
+  /**
+   * Replay regions by extracting Region placeables and RegionLayer overlay
+   * graphics (draw preview/highlight) into the world channel.
+   * @param {PIXI.RegionLayer|null} regionsLayer
+   * @param {PIXI.Renderer|null} renderer
+   * @param {number} width
+   * @param {number} height
+   * @param {{clear?:boolean}} [options]
+   * @returns {{ok:boolean,count:number,status:string}}
+   * @private
+   */
+  _renderFoundryRegionsReplay(regionsLayer, renderer, width, height, options = {}) {
+    const shouldClear = options?.clear !== false;
+    const logicalW = Math.max(1, Math.round(this._toNumber(width, 1)));
+    const logicalH = Math.max(1, Math.round(this._toNumber(height, 1)));
+    const baseCaptureScale = this._getWorldCaptureScale(logicalW, logicalH);
+    const captureScale = Math.min(1.5, Math.max(1.0, baseCaptureScale));
+    const renderW = Math.max(1, Math.round(logicalW * captureScale));
+    const renderH = Math.max(1, Math.round(logicalH * captureScale));
+    this._worldLogicalWidth = logicalW;
+    this._worldLogicalHeight = logicalH;
+
+    const worldTexture = this._ensureWorldCanvasSize(renderW, renderH);
+    if (!worldTexture || !this._worldCanvas || !renderer?.extract) {
+      return { ok: false, count: 0, status: 'skip:regions-replay-unavailable' };
+    }
+
+    const ctx = this._worldCanvas.getContext('2d');
+    if (!ctx) return { ok: false, count: 0, status: 'skip:no-world-context' };
+
+    const regions = [];
+    const seen = new Set();
+    const collect = (obj) => {
+      if (!obj) return;
+      const key = String(obj.id ?? obj?.document?.id ?? `${regions.length}`);
+      if (seen.has(key)) return;
+      seen.add(key);
+      regions.push(obj);
+    };
+
+    const placeables = Array.isArray(regionsLayer?.placeables) ? regionsLayer.placeables : [];
+    const objectChildren = Array.isArray(regionsLayer?.objects?.children) ? regionsLayer.objects.children : [];
+    const previewChildren = Array.isArray(regionsLayer?.preview?.children) ? regionsLayer.preview.children : [];
+    for (const p of placeables) collect(p);
+    for (const p of objectChildren) collect(p);
+    for (const p of previewChildren) collect(p);
+    if (regionsLayer?._configPreview) collect(regionsLayer._configPreview);
+
+    const overlayTargets = this._getRegionLayerOverlayTargets(regionsLayer);
+    const w = this._worldCanvas.width;
+    const h = this._worldCanvas.height;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    if (shouldClear) ctx.clearRect(0, 0, w, h);
+    ctx.setTransform(captureScale, 0, 0, captureScale, 0, 0);
+    ctx.imageSmoothingEnabled = true;
+
+    if (regions.length <= 0 && overlayTargets.length <= 0) {
+      worldTexture.needsUpdate = true;
+      return { ok: true, count: 0, status: `captured:regions-replay-empty:${w}x${h}` };
+    }
+
+    let drawn = 0;
+    const maxWorldW = Math.max(1, logicalW * 1.5);
+    const maxWorldH = Math.max(1, logicalH * 1.5);
+
+    const drawExtractTarget = (target) => {
+      if (!target) return false;
+      const savedChainState = [];
+      let chainNode = target;
+      while (chainNode) {
+        savedChainState.push({
+          obj: chainNode,
+          visible: chainNode.visible,
+          renderable: chainNode.renderable,
+          alpha: Number(chainNode.alpha),
+        });
+        chainNode.visible = true;
+        chainNode.renderable = true;
+        if (!Number.isFinite(chainNode.alpha) || chainNode.alpha <= 0) chainNode.alpha = 1;
+        chainNode = chainNode.parent ?? null;
+      }
+      try {
+        let bounds = null;
+        try { bounds = target.getBounds?.(false) ?? null; } catch (_) { bounds = null; }
+        const bx = Math.floor(this._toNumber(bounds?.x, 0));
+        const by = Math.floor(this._toNumber(bounds?.y, 0));
+        const bw = Math.ceil(this._toNumber(bounds?.width, 0));
+        const bh = Math.ceil(this._toNumber(bounds?.height, 0));
+        if (bw <= 0 || bh <= 0) return false;
+
+        const frame = new PIXI.Rectangle(bx, by, bw, bh);
+        let targetCanvas = null;
+        try {
+          targetCanvas = renderer.extract.canvas(target, frame);
+        } catch (_) {
+          targetCanvas = null;
+        }
+        if (!targetCanvas || !targetCanvas.width || !targetCanvas.height) return false;
+
+        const worldRect = this._stageScreenRectToWorldRect(bx, by, bw, bh);
+        if (worldRect.w <= 0 || worldRect.h <= 0) return false;
+        if (worldRect.w > maxWorldW || worldRect.h > maxWorldH) return false;
+
+        ctx.drawImage(targetCanvas, worldRect.x, worldRect.y, worldRect.w, worldRect.h);
+        return true;
+      } catch (_) {
+        return false;
+      } finally {
+        for (let i = savedChainState.length - 1; i >= 0; i -= 1) {
+          const s = savedChainState[i];
+          s.obj.visible = s.visible;
+          s.obj.renderable = s.renderable;
+          s.obj.alpha = s.alpha;
+        }
+      }
+    };
+
+    for (const region of regions) {
+      if (drawExtractTarget(region)) drawn += 1;
+    }
+    for (const overlay of overlayTargets) {
+      if (drawExtractTarget(overlay)) drawn += 1;
+    }
+
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    worldTexture.needsUpdate = true;
+    return { ok: true, count: drawn, status: `captured:regions-replay:${w}x${h} logical=${logicalW}x${logicalH} ss=${captureScale.toFixed(2)} shapes=${drawn}` };
+  }
+
+  /**
    * Fast sparse probe for any non-empty pixel content.
    * @param {HTMLCanvasElement|null} source
    * @returns {boolean}
@@ -1725,6 +2004,7 @@ export class PixiContentLayerBridge {
       this._lastUpdateStatus = 'skip:canvas-not-ready';
       this._clearChannel('world');
       this._clearChannel('ui');
+      this._uiHasContent = false;
       return;
     }
 
@@ -1800,6 +2080,14 @@ export class PixiContentLayerBridge {
       return;
     }
 
+    // Throttle post-dirty followup captures to avoid burst uploads after mutations.
+    if (!this._dirty && hasFollowupCapture && !hasLivePreview && !forceTestPattern) {
+      if ((now - this._lastCaptureMs) < this._postDirtyThrottleMs) {
+        this._lastUpdateStatus = 'skip:postdirty-throttled';
+        return;
+      }
+    }
+
     const hasFrameId = (arguments.length > 0) && Number.isFinite(frameId);
     if (hasFrameId && frameId === this._lastCaptureFrame && !this._dirty && !forceTestPattern) {
       this._lastUpdateStatus = 'skip:duplicate-frame';
@@ -1823,6 +2111,7 @@ export class PixiContentLayerBridge {
       this._lastUpdateStatus = 'skip:renderer-missing';
       this._clearChannel('world');
       this._clearChannel('ui');
+      this._uiHasContent = false;
       return;
     }
 
@@ -1840,6 +2129,17 @@ export class PixiContentLayerBridge {
     }
 
     const captureStrategy = this._getCaptureStrategy();
+
+    const expensiveCaptureStrategy = captureStrategy !== 'replay-only';
+    const liveThrottleMs = Math.max(
+      this._captureThrottleMs,
+      this._toNumber(window?.MapShine?.__pixiBridgeLiveThrottleMs, this._liveCaptureThrottleMs)
+    );
+    if (!forceTestPattern && !this._dirty && hasLivePreview && expensiveCaptureStrategy && (now - this._lastCaptureMs) < liveThrottleMs) {
+      this._lastUpdateStatus = 'skip:live-throttled';
+      return;
+    }
+
     const useShapeReplay = (captureStrategy === 'replay-shape') || this._isShapeReplayDebugEnabled();
     const replayResult = useShapeReplay
       ? this._renderFoundryShapeReplay(drawingsLayer, renderer, worldCapture.width, worldCapture.height)
@@ -1857,6 +2157,7 @@ export class PixiContentLayerBridge {
       this._lastUpdateStatus = `skip:replay-failed strategy=${captureStrategy}`;
       this._clearChannel('world');
       this._clearChannel('ui');
+      this._uiHasContent = false;
       this._dirty = false;
       return;
     }
@@ -1877,7 +2178,14 @@ export class PixiContentLayerBridge {
       !!templatesLayer?.placeables?.length ||
       !!templatesLayer?.objects?.children?.length ||
       this._hasActivePreview(templatesLayer);
-    const hasNonDrawingUiContent = hasSoundsUiContent || hasNotesUiContent || hasTemplatesUiContent;
+    const hasRegionsUiContent =
+      ((Number(canvas?.scene?.regions?.size) || 0) > 0) ||
+      !!regionsLayer?.active ||
+      !!regionsLayer?.placeables?.length ||
+      !!regionsLayer?.objects?.children?.length ||
+      this._hasActivePreview(regionsLayer) ||
+      this._getRegionLayerOverlayTargets(regionsLayer).length > 0;
+    const hasNonDrawingUiContent = hasSoundsUiContent || hasNotesUiContent || hasTemplatesUiContent || hasRegionsUiContent;
 
     if (captureStrategy === 'notes-extract') {
       if (replayResult.ok && !hasNotesUiContent) {
@@ -1935,6 +2243,7 @@ export class PixiContentLayerBridge {
       this._lastUpdateStatus = `skip:sounds-replay-failed strategy=${captureStrategy}`;
       this._clearChannel('world');
       this._clearChannel('ui');
+      this._uiHasContent = false;
       this._dirty = false;
       return;
     }
@@ -1996,6 +2305,40 @@ export class PixiContentLayerBridge {
       }
     }
 
+    if (captureStrategy === 'regions-extract') {
+      if (replayResult.ok && !hasRegionsUiContent) {
+        this._lastUpdateStatus = `${replayResult.status} strategy=${captureStrategy}`;
+        this._dirty = false;
+        return;
+      }
+
+      if (!replayResult.ok) {
+        const w = this._worldCanvas.width;
+        const h = this._worldCanvas.height;
+        const ctx = this._worldCanvas.getContext('2d');
+        if (ctx) {
+          ctx.setTransform(1, 0, 0, 1, 0, 0);
+          ctx.clearRect(0, 0, w, h);
+        }
+      }
+
+      const regionsReplayResult = this._renderFoundryRegionsReplay(
+        regionsLayer,
+        renderer,
+        worldCapture.width,
+        worldCapture.height,
+        { clear: !replayResult.ok }
+      );
+      if (regionsReplayResult.ok && (regionsReplayResult.count > 0 || !hasRegionsUiContent)) {
+        const statusPrefix = replayResult.ok ? `${replayResult.status} + ` : '';
+        this._lastUpdateStatus = `${statusPrefix}${regionsReplayResult.status} strategy=${captureStrategy}`;
+        this._dirty = false;
+        return;
+      }
+
+      this._lastUpdateStatus = `fallback:regions-stage-isolation strategy=${captureStrategy}`;
+    }
+
     if (replayResult.ok && !hasNonDrawingUiContent) {
       this._lastUpdateStatus = replayResult.status;
       this._dirty = false;
@@ -2043,6 +2386,9 @@ export class PixiContentLayerBridge {
     if (captureStrategy === 'sounds-extract') {
       collectFromLayer(drawingsLayer);
       collectFromLayer(soundsLayer);
+    } else if (captureStrategy === 'regions-extract') {
+      collectFromLayer(drawingsLayer);
+      collectFromLayer(regionsLayer);
     } else if (captureStrategy === 'templates-extract') {
       collectFromLayer(drawingsLayer);
       collectFromLayer(templatesLayer);
@@ -2055,6 +2401,7 @@ export class PixiContentLayerBridge {
       collectFromLayer(soundsLayer);
       collectFromLayer(templatesLayer);
       collectFromLayer(notesLayer);
+      collectFromLayer(regionsLayer);
     }
 
     if (uiShapes.size === 0) {
@@ -2070,6 +2417,7 @@ export class PixiContentLayerBridge {
       this._lastUpdateStatus = 'skip:no-ui-shapes';
       this._clearChannel('world');
       this._clearChannel('ui');
+      this._uiHasContent = false;
       return;
     }
 
@@ -2255,7 +2603,8 @@ export class PixiContentLayerBridge {
       // Render the isolated UI pass to an RT at the capped ui render dimensions.
       let tempRT = null;
       try {
-        tempRT = PIXI.RenderTexture.create({ width: uiRtW, height: uiRtH });
+        tempRT = this._ensureScratchRenderTexture(uiRtW, uiRtH);
+        if (!tempRT) throw new Error('scratch-rt-unavailable');
         const pixiVersion = String(PIXI?.VERSION || '');
         const isPixiV7 = /^7\./.test(pixiVersion);
         if (isPixiV7) {
@@ -2272,9 +2621,6 @@ export class PixiContentLayerBridge {
         }
         capturedCanvas = extract.canvas(tempRT, frame);
       } finally {
-        if (tempRT) {
-          try { tempRT.destroy(true); } catch (_) {}
-        }
       }
     } catch (err) {
       log.warn('Drawings capture failed', err);
@@ -2282,6 +2628,7 @@ export class PixiContentLayerBridge {
       this._dirty = false;
       this._clearChannel('world');
       this._clearChannel('ui');
+      this._uiHasContent = false;
       return;
     } finally {
       // Restore all saved state in reverse order.
@@ -2360,7 +2707,8 @@ export class PixiContentLayerBridge {
 
           let tempRT = null;
           try {
-            tempRT = PIXI.RenderTexture.create({ width: uiRtW, height: uiRtH });
+            tempRT = this._ensureScratchRenderTexture(uiRtW, uiRtH);
+            if (!tempRT) throw new Error('scratch-rt-unavailable');
             const pixiVersion = String(PIXI?.VERSION || '');
             const isPixiV7 = /^7\./.test(pixiVersion);
             if (isPixiV7) {
@@ -2374,9 +2722,6 @@ export class PixiContentLayerBridge {
             }
             fallbackCanvas = extract.canvas(tempRT, frame);
           } finally {
-            if (tempRT) {
-              try { tempRT.destroy(true); } catch (_) {}
-            }
           }
         } catch (_) {
         } finally {
@@ -2475,6 +2820,7 @@ export class PixiContentLayerBridge {
       }
       this._clearChannel('world');
       this._clearChannel('ui');
+      this._uiHasContent = false;
       this._dirty = false;
       return;
     }
@@ -2527,21 +2873,8 @@ export class PixiContentLayerBridge {
       this._probeLogCount++;
     }
 
-    // UI channel reserved for future PIXI UI/HUD ingestion.
-    if (this._uiCanvas && this._uiTexture) {
-      let uiTexture = this._uiTexture;
-      if (this._uiCanvas.width !== w || this._uiCanvas.height !== h) {
-        this._uiCanvas.width = w;
-        this._uiCanvas.height = h;
-        this._recreateTexture('ui');
-        uiTexture = this._uiTexture;
-      }
-      const uiCtx = this._uiCanvas.getContext('2d');
-      if (uiCtx) {
-        uiCtx.clearRect(0, 0, w, h);
-        if (uiTexture) uiTexture.needsUpdate = true;
-      }
-    }
+    // UI channel remains empty by default until dedicated UI ingestion ships.
+    this._uiHasContent = false;
 
     this._dirty = false;
     if (!hadFallbackStatus) {
@@ -2562,6 +2895,8 @@ export class PixiContentLayerBridge {
       this._tickerUpdateFn = null;
     }
     this._tickerFrameId = 0;
+
+    this._destroyScratchRenderTexture();
 
     try { this._worldTexture?.dispose?.(); } catch (_) {}
     try { this._uiTexture?.dispose?.(); } catch (_) {}

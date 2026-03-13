@@ -32,6 +32,7 @@
  */
 
 import { createLogger } from '../../core/log.js';
+import { TILE_FEATURE_LAYERS } from '../../core/render-layers.js';
 import { weatherController } from '../../core/WeatherController.js';
 
 const log = createLogger('CloudEffectV2');
@@ -760,10 +761,16 @@ export class CloudEffectV2 {
   /**
    * Render the overhead-tile blocker mask for the current frame.
    *
-   * Traverses the FloorRenderBus scene and isolates sprites that should block
-   * cloud shadow (userData.isOverhead || userData.cloudShadowBlocker).
-   * All other sprites are temporarily hidden. The blocker is rendered with
-   * the main camera so world-space position matches the shadow RT exactly.
+   * Uses layer-based culling via CLOUD_SHADOW_BLOCKER (layer 23) instead of
+   * traversing the full bus scene and toggling visibility per object. Overhead
+   * tiles are assigned to this layer in FloorRenderBus._addTileMesh, so the
+   * camera only sees blockers — no per-frame full-scene traversal.
+   *
+   * Floor filtering: only overhead tiles ABOVE the active floor should block
+   * cloud shadows. Tiles below active are already hidden by bus visibility.
+   * Tiles ON the active floor are visible in the bus but must NOT block, so
+   * we temporarily hide them during this pass. This is O(active-floor-overhead)
+   * instead of the old O(all-bus-objects) approach.
    *
    * @param {THREE.WebGLRenderer} renderer
    * @private
@@ -775,44 +782,46 @@ export class CloudEffectV2 {
       window.MapShine?.floorStack?.getActiveFloor?.()?.index ?? 0
     );
 
+    // Temporarily hide overhead tiles ON the active floor — they should not
+    // block cloud shadows. Only iterate top-level bus scene children (tiles),
+    // not the full scene graph. Much cheaper than the old full traverse.
     const overrideObjs = this._blockerOverrideObjs;
     const overrideVis  = this._blockerOverrideVis;
     let count = 0;
-
-    // Walk bus scene — hide non-blocker objects, record state to restore
-    this._busScene.traverse((obj) => {
-      if (!obj.isMesh && !obj.isSprite) return;
-      const floorIndex = Number(obj.userData?.floorIndex);
-      const blocksByFloor = Number.isFinite(floorIndex)
-        ? floorIndex > activeFloorIndex
-        : true;
-      const isBlocker = (obj.userData?.isOverhead || obj.userData?.cloudShadowBlocker) && blocksByFloor;
-      if (!isBlocker && obj.visible) {
-        // Pool expansion: grow arrays on demand (no GC after warm-up)
-        if (count >= overrideObjs.length) {
-          overrideObjs.push(null);
-          overrideVis.push(false);
-        }
-        overrideObjs[count] = obj;
-        overrideVis[count]  = true;
-        obj.visible = false;
-        count++;
+    const children = this._busScene.children;
+    for (let i = 0, len = children.length; i < len; i++) {
+      const obj = children[i];
+      if (!obj.visible) continue;
+      const ud = obj.userData;
+      if (!ud?.isOverhead) continue;
+      // Only hide overhead tiles on the active floor. Above-active tiles
+      // should block; below-active tiles are already hidden by bus visibility.
+      if (Number(ud.floorIndex) !== activeFloorIndex) continue;
+      if (count >= overrideObjs.length) {
+        overrideObjs.push(null);
+        overrideVis.push(false);
       }
-    });
+      overrideObjs[count] = obj;
+      overrideVis[count]  = true;
+      obj.visible = false;
+      count++;
+    }
     this._blockerOverrideCount = count;
 
     const prevTarget    = renderer.getRenderTarget();
     const prevAutoClear = renderer.autoClear;
     const prevLayerMask = this._mainCamera.layers.mask;
     try {
-      this._mainCamera.layers.enableAll();
+      // Render ONLY objects on the CLOUD_SHADOW_BLOCKER layer (23).
+      // Overhead tiles are assigned to this layer at creation time in the bus.
+      this._mainCamera.layers.set(TILE_FEATURE_LAYERS.CLOUD_SHADOW_BLOCKER);
       renderer.setRenderTarget(this._blockerRT);
       renderer.autoClear = true;
       renderer.setClearColor(0x000000, 0);
       renderer.clear();
       renderer.render(this._busScene, this._mainCamera);
     } finally {
-      // Restore visibility
+      // Restore active-floor overhead tile visibility
       for (let i = 0; i < count; i++) overrideObjs[i].visible = overrideVis[i];
       this._mainCamera.layers.mask = prevLayerMask;
       renderer.autoClear = prevAutoClear;

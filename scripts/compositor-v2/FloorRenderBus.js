@@ -24,6 +24,7 @@
  */
 
 import { createLogger } from '../core/log.js';
+import { TILE_FEATURE_LAYERS } from '../core/render-layers.js';
 import { tileHasLevelsRange, readTileLevelsFlags } from '../foundry/levels-scene-flags.js';
 import { isTileOverhead } from '../scene/tile-manager.js';
 
@@ -828,6 +829,10 @@ export class FloorRenderBus {
       // (the mesh), not only parent groups. Keep ROOF_LAYER on the mesh so
       // OverheadShadowsEffectV2 roof capture pass can actually see overhead tiles.
       mesh.layers.enable(20);
+      // Cloud shadow blocker layer — CloudEffectV2 renders only this layer
+      // to build the blocker mask, avoiding per-frame full-scene traversal.
+      root.layers.enable(TILE_FEATURE_LAYERS.CLOUD_SHADOW_BLOCKER);
+      mesh.layers.enable(TILE_FEATURE_LAYERS.CLOUD_SHADOW_BLOCKER);
     }
 
     root.position.set(cx, cy, z);

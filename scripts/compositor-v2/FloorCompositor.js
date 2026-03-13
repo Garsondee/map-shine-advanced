@@ -433,6 +433,15 @@ export class FloorCompositor {
     // This helps pinpoint which stage stalls the main thread on some GPUs.
     this._debugFirstFrameStagesLogged = false;
 
+    /**
+     * P4: Per-pass profiler counters. Enabled via MapShine.__v2PassProfiler = true.
+     * When active, accumulates per-pass wall-clock times and exposes them on
+     * MapShine.__v2PassTimings as a plain object { stageName: { total, count, avg, last } }.
+     * @type {Object<string,{total:number,count:number,last:number}>|null}
+     * @private
+     */
+    this._passTimings = null;
+
     // ── RT Infrastructure (Step 4) ───────────────────────────────────────────
     // Bus renders to sceneRT instead of screen. Post-processing effects will
     // read sceneRT and chain through ping-pong buffers. Final result is blit
@@ -475,10 +484,25 @@ export class FloorCompositor {
     /** @type {THREE.Mesh|null} Fullscreen quad for PIXI UI overlay */
     this._pixiUiOverlayQuad = null;
 
+    /** @type {string} Cached PIXI world stage transform signature for uniform updates */
+    this._pixiWorldStageInvSig = '';
+    /** @type {string} Cached PIXI world screen-size signature for uniform updates */
+    this._pixiWorldScreenSizeSig = '';
+    /** @type {string} Cached PIXI world overlay-size signature for uniform updates */
+    this._pixiWorldOverlaySizeSig = '';
+
     /** @type {THREE.Scene|null} Dedicated scene for fog overlay pass */
     this._fogOverlayScene = null;
     /** @type {THREE.OrthographicCamera|null} Camera for fog overlay pass */
     this._fogOverlayCamera = null;
+
+    /**
+     * P2: Whether the bus scene has any objects on OVERLAY_THREE_LAYER (31).
+     * Checked cheaply each frame to skip the late overlay render pass when empty.
+     * Set to true when overlay content is added; reset/recomputed on populate.
+     * @type {boolean}
+     */
+    this._hasOverlayLayerContent = false;
 
     log.debug('FloorCompositor created');
   }
@@ -492,18 +516,19 @@ export class FloorCompositor {
   _compositePixiWorldOverlay(inputRT) {
     if (!inputRT || !this._pixiWorldCompositeMaterial || !this._postA || !this._postB) return inputRT;
     const bridge = window.MapShine?.pixiContentLayerBridge ?? null;
+    const mapShine = window.MapShine ?? null;
     const overlayTexture = bridge?.getWorldTexture?.() ?? null;
-    const debugForceTint = !!window.MapShine?.__pixiBridgeForceCompositorTint;
+    const debugForceTint = !!mapShine?.__pixiBridgeForceCompositorTint;
+    const debugCompositeStatus = !!mapShine?.__pixiBridgeCompositeDebug;
+
     if (!overlayTexture && !debugForceTint) {
-      if (window.MapShine) {
-        window.MapShine.__pixiBridgeCompositeStatus = {
-          ran: false,
-          reason: 'skip:no-overlay',
-          bridgeStatus: bridge?._lastUpdateStatus ?? 'bridge-missing',
-          debugForceTint,
-          timestampMs: Date.now(),
-        };
-      }
+      this._setPixiBridgeCompositeStatus({
+        enabled: debugCompositeStatus,
+        ran: false,
+        reason: 'skip:no-overlay',
+        bridgeStatus: bridge?._lastUpdateStatus ?? 'bridge-missing',
+        debugForceTint,
+      });
       return inputRT;
     }
 
@@ -524,54 +549,49 @@ export class FloorCompositor {
     const rtH = Math.max(1, Number(inputRT?.height) || Number(this._sceneRT?.height) || 1);
     const screenW = pixiScreenW > 0 ? pixiScreenW : rtW;
     const screenH = pixiScreenH > 0 ? pixiScreenH : rtH;
-    this._pixiWorldCompositeMaterial.uniforms.uScreenSize.value.set(screenW, screenH);
-    const logicalSize = bridge?.getWorldLogicalSize?.() ?? null;
+    const screenSig = `${screenW}x${screenH}`;
+    if (screenSig !== this._pixiWorldScreenSizeSig) {
+      this._pixiWorldScreenSizeSig = screenSig;
+      this._pixiWorldCompositeMaterial.uniforms.uScreenSize.value.set(screenW, screenH);
+    }
+
+    // Read bridge logical size directly to avoid per-frame object allocation via
+    // getWorldLogicalSize(), then fall back to texture backing dimensions.
     const ovW = Math.max(
       1,
-      Number(logicalSize?.width) || Number(overlayTexture?.image?.width) || Number(overlayTexture?.source?.data?.width) || 1
+      Number(bridge?._worldLogicalWidth) || Number(overlayTexture?.image?.width) || Number(overlayTexture?.source?.data?.width) || 1
     );
     const ovH = Math.max(
       1,
-      Number(logicalSize?.height) || Number(overlayTexture?.image?.height) || Number(overlayTexture?.source?.data?.height) || 1
+      Number(bridge?._worldLogicalHeight) || Number(overlayTexture?.image?.height) || Number(overlayTexture?.source?.data?.height) || 1
     );
-    this._pixiWorldCompositeMaterial.uniforms.uOverlaySize.value.set(ovW, ovH);
+    const overlaySig = `${ovW}x${ovH}`;
+    if (overlaySig !== this._pixiWorldOverlaySizeSig) {
+      this._pixiWorldOverlaySizeSig = overlaySig;
+      this._pixiWorldCompositeMaterial.uniforms.uOverlaySize.value.set(ovW, ovH);
+    }
 
     const t = canvas?.stage?.worldTransform ?? null;
-    let ia = 1; let ib = 0; let ic = 0; let id = 1; let itx = 0; let ity = 0;
-    if (t) {
-      const a = Number(t.a) || 0;
-      const b = Number(t.b) || 0;
-      const c = Number(t.c) || 0;
-      const d = Number(t.d) || 0;
-      const tx = Number(t.tx) || 0;
-      const ty = Number(t.ty) || 0;
-      const det = (a * d) - (b * c);
-      if (Math.abs(det) > 1e-8) {
-        ia = d / det;
-        ib = -b / det;
-        ic = -c / det;
-        id = a / det;
-        itx = ((c * ty) - (d * tx)) / det;
-        ity = ((b * tx) - (a * ty)) / det;
-      }
+    const stageSig = this._getPixiStageTransformSig(t);
+    if (stageSig !== this._pixiWorldStageInvSig) {
+      this._pixiWorldStageInvSig = stageSig;
+      const inv = this._computePixiStageInverse(t);
+      this._pixiWorldCompositeMaterial.uniforms.uStageInvMat.value.set(inv.ia, inv.ib, inv.ic, inv.id);
+      this._pixiWorldCompositeMaterial.uniforms.uStageInvTranslate.value.set(inv.itx, inv.ity);
     }
-    this._pixiWorldCompositeMaterial.uniforms.uStageInvMat.value.set(ia, ib, ic, id);
-    this._pixiWorldCompositeMaterial.uniforms.uStageInvTranslate.value.set(itx, ity);
 
     renderer.setRenderTarget(outputRT);
     renderer.autoClear = true;
     try {
       renderer.render(this._pixiWorldCompositeScene, this._pixiWorldCompositeCamera);
-      if (window.MapShine) {
-        window.MapShine.__pixiBridgeCompositeStatus = {
-          ran: true,
-          reason: 'rendered',
-          hasOverlay: !!overlayTexture,
-          bridgeStatus: bridge?._lastUpdateStatus ?? 'bridge-missing',
-          debugForceTint,
-          timestampMs: Date.now(),
-        };
-      }
+      this._setPixiBridgeCompositeStatus({
+        enabled: debugCompositeStatus,
+        ran: true,
+        reason: 'rendered',
+        hasOverlay: !!overlayTexture,
+        bridgeStatus: bridge?._lastUpdateStatus ?? 'bridge-missing',
+        debugForceTint,
+      });
     } finally {
       renderer.autoClear = prevAutoClear;
       renderer.setRenderTarget(prevTarget);
@@ -581,12 +601,70 @@ export class FloorCompositor {
   }
 
   /**
+   * @param {PIXI.Matrix|null|undefined} t
+   * @returns {string}
+   * @private
+   */
+  _getPixiStageTransformSig(t) {
+    if (!t) return 'none';
+    const q = (v) => Math.round((Number(v) || 0) * 10000) / 10000;
+    return `${q(t.a)}|${q(t.b)}|${q(t.c)}|${q(t.d)}|${q(t.tx)}|${q(t.ty)}`;
+  }
+
+  /**
+   * @param {PIXI.Matrix|null|undefined} t
+   * @returns {{ia:number,ib:number,ic:number,id:number,itx:number,ity:number}}
+   * @private
+   */
+  _computePixiStageInverse(t) {
+    let ia = 1; let ib = 0; let ic = 0; let id = 1; let itx = 0; let ity = 0;
+    if (!t) return { ia, ib, ic, id, itx, ity };
+
+    const a = Number(t.a) || 0;
+    const b = Number(t.b) || 0;
+    const c = Number(t.c) || 0;
+    const d = Number(t.d) || 0;
+    const tx = Number(t.tx) || 0;
+    const ty = Number(t.ty) || 0;
+    const det = (a * d) - (b * c);
+    if (Math.abs(det) <= 1e-8) return { ia, ib, ic, id, itx, ity };
+
+    ia = d / det;
+    ib = -b / det;
+    ic = -c / det;
+    id = a / det;
+    itx = ((c * ty) - (d * tx)) / det;
+    ity = ((b * tx) - (a * ty)) / det;
+    return { ia, ib, ic, id, itx, ity };
+  }
+
+  /**
+   * Debug-only status emitter for PIXI world composite pass.
+   * Reuses a single object to avoid per-frame allocation churn.
+   * @param {{enabled:boolean,ran:boolean,reason:string,bridgeStatus:string,debugForceTint:boolean,hasOverlay?:boolean}} payload
+   * @private
+   */
+  _setPixiBridgeCompositeStatus(payload) {
+    if (!payload?.enabled) return;
+    const mapShine = window.MapShine;
+    if (!mapShine) return;
+    const status = mapShine.__pixiBridgeCompositeStatus ?? (mapShine.__pixiBridgeCompositeStatus = {});
+    status.ran = !!payload.ran;
+    status.reason = String(payload.reason || 'unknown');
+    status.bridgeStatus = String(payload.bridgeStatus || 'bridge-missing');
+    status.debugForceTint = !!payload.debugForceTint;
+    status.hasOverlay = !!payload.hasOverlay;
+    status.timestampMs = performance.now();
+  }
+
+  /**
    * Render PIXI UI-channel texture above the final composed frame.
    * @private
    */
   _renderPixiUiOverlay() {
     if (!this._pixiUiOverlayMaterial || !this._pixiUiOverlayScene || !this._pixiUiOverlayCamera) return;
     const bridge = window.MapShine?.pixiContentLayerBridge ?? null;
+    if (typeof bridge?.hasUiContent === 'function' && !bridge.hasUiContent()) return;
     const overlayTexture = bridge?.getUiTexture?.() ?? null;
     if (!overlayTexture) return;
 
@@ -613,6 +691,25 @@ export class FloorCompositor {
     const scene = this._renderBus?._scene;
     const camera = this.camera;
     if (!scene || !camera || !this.renderer) return;
+
+    // P2: Skip the late overlay render call when no objects are on OVERLAY_THREE_LAYER.
+    // This avoids an unnecessary renderer.render() call per frame on scenes without
+    // door icons or other late-overlay objects.
+    if (!this._hasOverlayLayerContent) {
+      // Cheap refresh: check if any bus scene child has the overlay layer enabled.
+      // Only scan top-level children (not full traverse) to keep this O(N-floors).
+      const children = scene.children;
+      let found = false;
+      const overlayBit = 1 << OVERLAY_THREE_LAYER;
+      for (let i = 0, len = children.length; i < len; i++) {
+        if (children[i].layers && (children[i].layers.mask & overlayBit)) {
+          found = true;
+          break;
+        }
+      }
+      this._hasOverlayLayerContent = found;
+      if (!found) return;
+    }
 
     const renderer = this.renderer;
     const prevTarget = renderer.getRenderTarget();
@@ -1638,6 +1735,16 @@ export class FloorCompositor {
       try { log.info('[V2 Frame] ▶ FloorCompositor.render: BEGIN'); } catch (_) {}
     }
 
+    // P4: Per-pass profiler — toggled via MapShine.__v2PassProfiler.
+    // When active, each _profileStart/_profileEnd pair records wall-clock ms.
+    const _profiling = !!window.MapShine?.__v2PassProfiler;
+    if (_profiling && !this._passTimings) {
+      this._passTimings = {};
+    } else if (!_profiling && this._passTimings) {
+      this._passTimings = null;
+    }
+    let _profileT0 = 0;
+
     // Keep bus tile materials aligned to live TileManager sprite opacity before
     // shadow capture. OverheadShadowsEffectV2 now handles its own stable caster
     // capture internally (forced-opacity roofTarget pass), while the separate
@@ -1671,7 +1778,9 @@ export class FloorCompositor {
     // The bus scene contains albedo tiles + specular/fire overlays.
     // Window light is NOT in the bus scene — it renders after lighting.
     if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: bus.renderTo(sceneRT)'); } catch (_) {} }
+    if (_profiling) _profileT0 = performance.now();
     this._renderBus.renderTo(this.renderer, this.camera, this._sceneRT);
+    if (_profiling) this._recordPassTiming('busRender', _profileT0);
     if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: bus.renderTo(sceneRT) DONE'); } catch (_) {} }
 
     // ── Cloud passes (before lighting) ───────────────────────────────────
@@ -1679,9 +1788,11 @@ export class FloorCompositor {
     // Outputs: _cloudEffect.cloudShadowTexture (fed into lighting compose shader)
     //          _cloudEffect._cloudTopRT        (blitted after lighting)
     if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: cloud.render'); } catch (_) {} }
+    if (_profiling) _profileT0 = performance.now();
     if (this._cloudEffect.enabled && this._cloudEffect.params.enabled) {
       this._cloudEffect.render(this.renderer);
     }
+    if (_profiling) this._recordPassTiming('cloudRender', _profileT0);
     if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: cloud.render DONE'); } catch (_) {} }
 
     // ── Step 2: Post-processing chain ────────────────────────────────────
@@ -1717,8 +1828,9 @@ export class FloorCompositor {
     const overheadRoofAlphaTex = (this._overheadShadowEffect?.params?.enabled)
       ? this._overheadShadowEffect.roofAlphaTexture : null;
     if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: lighting.render(sceneRT→postA)'); } catch (_) {} }
-
+    if (_profiling) _profileT0 = performance.now();
     this._lightingEffect.render(this.renderer, this.camera, currentInput, this._postA, winScene, cloudShadowTex, buildingShadowTex, overheadShadowTex, buildingShadowOpacity, overheadRoofAlphaTex);
+    if (_profiling) this._recordPassTiming('lightingRender', _profileT0);
     if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: lighting.render(sceneRT→postA) DONE'); } catch (_) {} }
 
     currentInput = this._postA;
@@ -1898,7 +2010,9 @@ export class FloorCompositor {
 
     // PIXI world-channel composite: inject bridge drawings late so they are
     // not altered by bloom/grading stylization passes.
+    if (_profiling) _profileT0 = performance.now();
     currentInput = this._compositePixiWorldOverlay(currentInput);
+    if (_profiling) this._recordPassTiming('pixiWorldComposite', _profileT0);
 
     // Composite fog-of-war into the RT chain so downstream post effects (lens)
     // are guaranteed to render above fog.
@@ -1941,10 +2055,43 @@ export class FloorCompositor {
     // PIXI UI-channel overlay: render last so it remains above bloom/fog/lens.
     this._renderPixiUiOverlay();
 
+    // P4: Expose accumulated pass timings on MapShine for console inspection.
+    if (_profiling && this._passTimings && window.MapShine) {
+      const out = {};
+      for (const [name, data] of Object.entries(this._passTimings)) {
+        out[name] = {
+          total: Math.round(data.total * 100) / 100,
+          count: data.count,
+          avg: data.count > 0 ? Math.round((data.total / data.count) * 100) / 100 : 0,
+          last: Math.round(data.last * 100) / 100,
+        };
+      }
+      window.MapShine.__v2PassTimings = out;
+    }
+
     if (_dbgStages) {
       this._debugFirstFrameStagesLogged = true;
       try { log.info('[V2 Frame] ✔ FloorCompositor.render: END'); } catch (_) {}
     }
+  }
+
+  /**
+   * P4: Record wall-clock time for a named render pass.
+   * @param {string} name
+   * @param {number} t0 - performance.now() timestamp from before the pass
+   * @private
+   */
+  _recordPassTiming(name, t0) {
+    if (!this._passTimings) return;
+    const elapsed = performance.now() - t0;
+    let entry = this._passTimings[name];
+    if (!entry) {
+      entry = { total: 0, count: 0, last: 0 };
+      this._passTimings[name] = entry;
+    }
+    entry.total += elapsed;
+    entry.count += 1;
+    entry.last = elapsed;
   }
 
   /**

@@ -75,11 +75,11 @@ export class LayerVisibilityManager {
     for (const tile of canvas.tiles.placeables) {
       if (!tile) continue;
       try {
-        // Keep the placeable interactive, but hide its visual output.
-        // Foundry tile visuals are typically a Sprite (tile.mesh) plus additional children.
+        // Keep the placeable visible for document sync, but do NOT set interactive=true.
+        // interactive=true sets eventMode='static' for ALL tiles (including the full-scene
+        // overhead tile), bypassing Foundry's _refreshState foreground/background filtering.
+        // Foundry owns eventMode; we only own alpha/visibility.
         tile.visible = true;
-        tile.interactive = true;
-        tile.interactiveChildren = true;
       } catch (_) {
       }
 

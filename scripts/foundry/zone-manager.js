@@ -1057,39 +1057,58 @@ export class ZoneManager {
 
     let targetElev = null;
 
-    if (onFromLevel && onToLevel) {
-      // Shared boundary: token elevation sits in both levels (e.g. Ground=[0,10],
-      // First=[10,20], elevation=10). The token was most likely sent here by the
-      // stair previously (to to.bottom). Reverse direction back to from.bottom,
-      // unless the zone is one-way or stair-down.
-      if (zone.oneWay || zone.type === ZONE_TYPES.STAIR_DOWN) {
+    if (zone.type === ZONE_TYPES.STAIR_DOWN || zone.type === ZONE_TYPES.STAIR_UP) {
+      // For directional stair types, determine lower/upper by actual elevation so the
+      // logic is independent of which connected level is labelled "from" vs "to".
+      // This prevents the stair from breaking when the zone author assigns fromLevel/toLevel
+      // in reverse order relative to the stair's physical direction.
+      const lowerLevel = from.bottom <= to.bottom ? from : to;
+      const upperLevel = from.bottom <= to.bottom ? to : from;
+      const onLower = currentElev >= lowerLevel.bottom && currentElev <= lowerLevel.top;
+      const onUpper = currentElev >= upperLevel.bottom && currentElev <= upperLevel.top;
+
+      if (zone.type === ZONE_TYPES.STAIR_DOWN) {
+        if (onLower && !onUpper) {
+          // Token is strictly on the lower level — nowhere further to descend.
+          log.debug(
+            `Stair-down zone "${zone.name}": token already on lower level (${currentElev}), blocked`
+          );
+          return;
+        }
+        // Token is on the upper level, or at the shared boundary — descend to lower level.
+        targetElev = lowerLevel.bottom;
+      } else {
+        // STAIR_UP
+        if (onUpper && !onLower) {
+          // Token is strictly on the upper level — can't ascend further.
+          log.debug(
+            `Stair-up zone "${zone.name}": token already on upper level (${currentElev}), blocked`
+          );
+          return;
+        }
+        // Token is on the lower level, or at the shared boundary — ascend to upper level.
+        targetElev = upperLevel.bottom;
+      }
+    } else if (onFromLevel && onToLevel) {
+      // Shared boundary with a bidirectional stair (e.g. Ground=[0,10], First=[10,20],
+      // elevation=10). The token was most likely sent here by a previous stair trigger.
+      // Reverse direction back to from.bottom, unless the zone is one-way.
+      if (zone.oneWay) {
         log.debug(
-          `Stair zone "${zone.name}": token at shared boundary ${currentElev}, ` +
-          `reverse blocked (oneWay=${zone.oneWay}, type=${zone.type})`
+          `Stair zone "${zone.name}": token at shared boundary ${currentElev}, one-way blocked`
         );
         return;
       }
       targetElev = from.bottom;
     } else if (onFromLevel) {
-      // Token is on the "from" level — move to "to" level
+      // Token is on the "from" level — move to "to" level.
       targetElev = to.bottom;
-    } else if (onToLevel && !zone.oneWay) {
-      // Bidirectional: go back to "from" level
-      if (zone.type === ZONE_TYPES.STAIR_DOWN) {
-        // stairDown is one-direction down only — can't go back up
-        log.debug(`Stair-down zone "${zone.name}": token on toLevel, reverse blocked`);
-        return;
-      }
+    } else if (onToLevel) {
+      if (zone.oneWay) return;
+      // Bidirectional: go back to "from" level.
       targetElev = from.bottom;
-    } else if (onToLevel && zone.oneWay) {
-      // One-way: token on destination level, can't reverse
-      return;
-    } else if (zone.type === ZONE_TYPES.STAIR_UP) {
-      targetElev = Math.max(from.bottom, to.bottom);
-    } else if (zone.type === ZONE_TYPES.STAIR_DOWN) {
-      targetElev = Math.min(from.bottom, to.bottom);
     } else {
-      // Default bidirectional: go to whichever level is further from current
+      // Token elevation is outside both level ranges — go to whichever level is closer.
       const distFrom = Math.abs(currentElev - (from.bottom + from.top) / 2);
       const distTo = Math.abs(currentElev - (to.bottom + to.top) / 2);
       targetElev = distFrom <= distTo ? to.bottom : from.bottom;

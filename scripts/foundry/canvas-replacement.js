@@ -6304,19 +6304,21 @@ function _enforceGameplayPixiSuppression() {
       }
 
       // Ensure native tile placeables are active while in tile edit context.
+      // DO NOT set tile.interactive = true here — that sets eventMode='static' for ALL
+      // tiles including the full-scene overhead tile, bypassing Foundry's foreground/
+      // background eligibility logic in _refreshState.
+      // Let Foundry own eventMode; queue refreshState so _refreshState runs next frame.
       if (tilesEditContext && canvas?.tiles) {
         canvas.tiles.visible = true;
         canvas.tiles.renderable = true;
-        canvas.tiles.interactive = true;
         canvas.tiles.interactiveChildren = true;
         const ALPHA = 0.01;
         for (const tile of canvas.tiles.placeables || []) {
           if (!tile) continue;
           tile.visible = true;
           tile.renderable = true;
-          tile.interactive = true;
-          tile.interactiveChildren = true;
           if (tile.mesh) tile.mesh.alpha = ALPHA;
+          try { tile.renderFlags?.set({ refreshState: true }); } catch (_) {}
         }
       }
       return;
@@ -6459,9 +6461,10 @@ function _enforceGameplayPixiSuppression() {
         for (const tile of canvas.tiles.placeables) {
           if (!tile) continue;
           safeCall(() => {
+            // Gameplay mode: tiles are Three.js-owned visually, keep PIXI placeables
+            // visible for document sync but do NOT force interactive=true.
+            // Three.js canvas (pointerEvents:auto) owns all input in gameplay mode.
             tile.visible = true;
-            tile.interactive = true;
-            tile.interactiveChildren = true;
             if (tile.mesh) tile.mesh.alpha = alpha;
             if (tile.texture) tile.texture.alpha = alpha;
             if (Array.isArray(tile.children)) {

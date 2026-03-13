@@ -270,11 +270,11 @@ export class ModeManager {
         if (canvas.tiles?.placeables) {
           for (const tile of canvas.tiles.placeables) {
             if (!tile) continue;
-            try {
-              tile.visible = true;
-              tile.interactive = true;
-              tile.interactiveChildren = true;
-            } catch (_) {}
+            // Gameplay mode: Three.js canvas owns input (pointerEvents:auto).
+            // Do NOT set interactive=true — that sets eventMode='static' for ALL
+            // tiles including the overhead tile, which absorbs click events if PIXI
+            // ever temporarily receives pointer events.
+            try { tile.visible = true; } catch (_) {}
             try { if (tile.mesh) tile.mesh.alpha = alpha; } catch (_) {}
             try { if (tile.texture) tile.texture.alpha = alpha; } catch (_) {}
             try {

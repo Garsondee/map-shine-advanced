@@ -8075,25 +8075,52 @@ export class TokenMovementManager {
 
       let pathNodes = [startCenter, endCenter];
       if (!ignoreWalls) {
-        const pathResult = this.findWeightedPath({
+        const tokenWidthCells = asNumber(liveDoc?.width, 1);
+        const tokenHeightCells = asNumber(liveDoc?.height, 1);
+        const isMultiCellToken = tokenWidthCells > 1.0001 || tokenHeightCells > 1.0001;
+
+        const pathSearchOptions = {
+          ignoreWalls,
+          ignoreCost,
+          fogPathPolicy: this.settings.fogPathPolicy,
+          allowDiagonal: optionsBoolean(options?.allowDiagonal, true),
+          maxSearchIterations: asNumber(options?.maxSearchIterations, 12000),
+          maxGraphNodes: asNumber(options?.maxGraphNodes, isMultiCellToken ? 12000 : 6000),
+          searchMarginPx: asNumber(options?.searchMarginPx, isMultiCellToken ? 420 : 260)
+        };
+
+        const pathResult = this._findWeightedPathWithAdaptiveExpansion({
           start: startCenter,
           end: endCenter,
           tokenDoc: liveDoc,
-          options: {
-            ignoreWalls,
-            ignoreCost,
-            fogPathPolicy: this.settings.fogPathPolicy,
-            allowDiagonal: optionsBoolean(options?.allowDiagonal, true),
-            maxSearchIterations: asNumber(options?.maxSearchIterations, 12000)
-          }
+          options: pathSearchOptions,
+          preferLongRange: isMultiCellToken
         });
 
-        if (!pathResult?.ok || !Array.isArray(pathResult.pathNodes) || pathResult.pathNodes.length < 2) {
+        const foundryPathResult = this._computeFoundryParityPathImmediate({
+          tokenDoc: liveDoc,
+          startTopLeft,
+          endTopLeft: targetTopLeft,
+          ignoreWalls,
+          ignoreCost
+        });
+
+        const paritySelection = this._selectPathWithFoundryParity({
+          customPathResult: pathResult,
+          foundryPathResult,
+          startCenter,
+          endCenter,
+          gridSize: asNumber(canvas?.grid?.size, 100),
+          forceFoundryParity: optionsBoolean(options?.forceFoundryParity, false)
+        });
+
+        if (!paritySelection?.ok || !Array.isArray(paritySelection.pathNodes) || paritySelection.pathNodes.length < 2) {
           this._pathfindingLog('warn', 'computeTokenPathPreview failed to find a valid path', {
             token: this._pathfindingTokenMeta(liveDoc),
             destinationTopLeft: targetTopLeft,
-            reason: pathResult?.reason || 'no-path',
+            reason: paritySelection?.reason || pathResult?.reason || 'no-path',
             diagnostics: pathResult?.diagnostics || null,
+            foundryPathReason: foundryPathResult?.reason || null,
             options
           });
           return {
@@ -8101,11 +8128,11 @@ export class TokenMovementManager {
             tokenId,
             pathNodes: [],
             distance: 0,
-            reason: pathResult?.reason || 'no-path'
+            reason: paritySelection?.reason || pathResult?.reason || 'no-path'
           };
         }
 
-        pathNodes = pathResult.pathNodes.slice();
+        pathNodes = paritySelection.pathNodes.slice();
         pathNodes[0] = startCenter;
         pathNodes[pathNodes.length - 1] = endCenter;
       }
@@ -9020,6 +9047,82 @@ export class TokenMovementManager {
     if (optionsBoolean(options?.ignoreWalls, false)) constrainOptions.ignoreWalls = true;
     if (optionsBoolean(options?.ignoreCost, false)) constrainOptions.ignoreCost = true;
     return constrainOptions;
+  }
+
+  /**
+   * Synchronous Foundry parity query used by preview flows that cannot await.
+   *
+   * This attempts to read `findMovementPath(...).result` immediately. If the
+   * path is only available asynchronously (`job.promise`), callers can fall
+   * back to custom pathing and let execution-time parity (async) handle it.
+   *
+   * @param {object} params
+   * @param {TokenDocument|object} params.tokenDoc
+   * @param {{x:number,y:number}} params.startTopLeft
+   * @param {{x:number,y:number}} params.endTopLeft
+   * @param {boolean} params.ignoreWalls
+   * @param {boolean} params.ignoreCost
+   * @returns {{ok:boolean,pathNodes:Array<{x:number,y:number}>,reason?:string}}
+   */
+  _computeFoundryParityPathImmediate({ tokenDoc, startTopLeft, endTopLeft, ignoreWalls, ignoreCost }) {
+    const tokenObj = tokenDoc?.object || canvas?.tokens?.get?.(tokenDoc?.id) || null;
+    if (!tokenObj || typeof tokenObj.findMovementPath !== 'function') {
+      return { ok: false, pathNodes: [], reason: 'no-find-movement-path' };
+    }
+
+    const waypoints = [
+      {
+        x: asNumber(startTopLeft?.x, asNumber(tokenDoc?.x, 0)),
+        y: asNumber(startTopLeft?.y, asNumber(tokenDoc?.y, 0)),
+        elevation: asNumber(tokenDoc?.elevation, 0),
+        width: asNumber(tokenDoc?.width, 1),
+        height: asNumber(tokenDoc?.height, 1),
+        shape: tokenDoc?.shape,
+        action: tokenDoc?.movementAction,
+        explicit: true,
+        checkpoint: true
+      },
+      {
+        x: asNumber(endTopLeft?.x, asNumber(startTopLeft?.x, 0)),
+        y: asNumber(endTopLeft?.y, asNumber(startTopLeft?.y, 0)),
+        elevation: asNumber(tokenDoc?.elevation, 0),
+        width: asNumber(tokenDoc?.width, 1),
+        height: asNumber(tokenDoc?.height, 1),
+        shape: tokenDoc?.shape,
+        action: tokenDoc?.movementAction,
+        explicit: true,
+        checkpoint: true
+      }
+    ];
+
+    const searchOptions = {
+      preview: false,
+      history: false,
+      delay: 0,
+      ...this._getFoundryConstrainOptions({ ignoreWalls, ignoreCost })
+    };
+
+    try {
+      const job = tokenObj.findMovementPath(waypoints, searchOptions);
+      const result = Array.isArray(job?.result) ? job.result : [];
+      if (!Array.isArray(result) || result.length < 2) {
+        return {
+          ok: false,
+          pathNodes: [],
+          reason: job?.promise ? 'pending-foundry-path' : 'empty-foundry-path'
+        };
+      }
+
+      const pathNodes = result.map((wp) => this._tokenTopLeftToCenter({ x: wp?.x, y: wp?.y }, {
+        ...tokenDoc,
+        width: wp?.width ?? tokenDoc?.width,
+        height: wp?.height ?? tokenDoc?.height
+      }));
+
+      return { ok: true, pathNodes };
+    } catch (_) {
+      return { ok: false, pathNodes: [], reason: 'find-movement-path-error' };
+    }
   }
 
   /**

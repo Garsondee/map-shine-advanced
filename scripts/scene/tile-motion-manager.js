@@ -108,11 +108,20 @@ export class TileMotionManager {
     /** @type {Map<string, {x:number,y:number,z:number,scaleX:number,scaleY:number,rotation:number}>} */
     this._baseCache = new Map();
 
+    /** @type {Map<string, {x:number,y:number,z:number,scaleX:number,scaleY:number,rotation:number}>} */
+    this._stableStartBaseCache = new Map();
+
     /** @type {Map<string, {offsetX:number,offsetY:number,rotation:number,centerX:number,centerY:number,matrixAutoUpdate:boolean}>} */
     this._textureBaseCache = new Map();
 
+    /** @type {Map<string, {offsetX:number,offsetY:number,rotation:number,centerX:number,centerY:number,matrixAutoUpdate:boolean,wrapS:number,wrapT:number}>} */
+    this._stableStartTextureBaseCache = new Map();
+
     /** @type {Map<string, {x:number,y:number,z:number,rotation:number}>} */
     this._busBaseCache = new Map();
+
+    /** @type {Map<string, {x:number,y:number,z:number,rotation:number}>} */
+    this._stableStartBusBaseCache = new Map();
 
     /** @type {Map<string, {x:number,y:number,rotation:number,animDelta:number,frameId:number}>} */
     this._resolvedStates = new Map();
@@ -158,6 +167,12 @@ export class TileMotionManager {
 
     /** @type {number} */
     this._lastEffectiveStartMs = 0;
+
+    /** @type {boolean} */
+    this._tileEditSuppressed = false;
+
+    /** @type {boolean} */
+    this._externalTileEditSuppressed = false;
 
     // Reused per-frame temp objects to avoid allocations in hot paths.
     this._tmpInherited = { inheritedX: 0, inheritedY: 0, inheritedRotation: 0, inheritedAnimDelta: 0 };
@@ -208,8 +223,11 @@ export class TileMotionManager {
     this._restoreAllActiveTiles();
 
     this._baseCache.clear();
+    this._stableStartBaseCache.clear();
     this._textureBaseCache.clear();
+    this._stableStartTextureBaseCache.clear();
     this._busBaseCache.clear();
+    this._stableStartBusBaseCache.clear();
     this._resolvedStates.clear();
     this._tileSeedCache.clear();
     this._runtimeOrder.length = 0;
@@ -356,6 +374,30 @@ export class TileMotionManager {
     return false;
   }
 
+  /**
+   * Detect whether Foundry's native tile editing context is active.
+   * While active, tile motion should be visually paused so tiles can be
+   * selected/dragged without moving targets.
+   * @returns {boolean}
+   * @private
+   */
+  _isTilesEditContextActive() {
+    try {
+      if (canvas?.tiles?.active) return true;
+
+      const activeLayer = String(canvas?.activeLayer?.options?.name || canvas?.activeLayer?.name || '').toLowerCase();
+      if (activeLayer === 'tiles' || activeLayer === 'tileslayer') return true;
+
+      const controlName = String(ui?.controls?.control?.name || ui?.controls?.activeControl || '').toLowerCase();
+      if (controlName === 'tiles') return true;
+
+      const controlLayer = String(ui?.controls?.control?.layer || '').toLowerCase();
+      if (controlLayer === 'tiles') return true;
+    } catch (_) {
+    }
+    return false;
+  }
+
   async _saveStateToScene() {
     const scene = canvas?.scene;
     if (!scene || !this._canEditScene()) return false;
@@ -395,6 +437,115 @@ export class TileMotionManager {
       this.tileManager?.refreshTileSprite?.(tileDoc);
     } catch (_) {
     }
+  }
+
+  /**
+   * Enter tile-edit suppression mode.
+   *
+   * Snap all motion-enabled tiles back to their current document transforms,
+   * then recapture base transforms so edit-mode interactions use stable poses.
+   * @private
+   */
+  _enterTileEditSuppression() {
+    if (this._tileEditSuppressed) return;
+
+    if (this._graphDirty) this._rebuildRuntimeGraph();
+
+    const tileIds = this._runtimeOrder.length > 0
+      ? this._runtimeOrder
+      : Object.keys(this.state?.tiles || {});
+
+    for (const tileId of tileIds) {
+      const cfg = this.state?.tiles?.[tileId];
+      if (!cfg?.enabled) continue;
+
+      const data = this._getTileData(tileId);
+      const tileDoc = data?.tileDoc;
+      if (!tileDoc) continue;
+
+      // Re-sync from authoritative document transform before snapshotting stable
+      // state. This prevents stale runtime rotation (e.g. 90/270 tiles cached as
+      // horizontal) from being reused during tile-mode suppression.
+      this._refreshTileBaseTransform(tileId);
+
+      const refreshedData = this._getTileData(tileId);
+      const refreshedSprite = refreshedData?.sprite;
+      if (refreshedSprite) {
+        this.captureBaseTransform(tileId, refreshedSprite);
+        this._captureBusBaseTransform(tileId);
+
+        const docRotDeg = Number.isFinite(Number(tileDoc?.rotation)) ? Number(tileDoc.rotation) : 0;
+        const docRotRad = (docRotDeg * Math.PI) / 180;
+
+        const base = this._baseCache.get(tileId);
+        if (base) {
+          this._stableStartBaseCache.set(tileId, {
+            x: base.x,
+            y: base.y,
+            z: base.z,
+            scaleX: base.scaleX,
+            scaleY: base.scaleY,
+            rotation: docRotRad
+          });
+        }
+
+        const texBase = this._textureBaseCache.get(tileId);
+        if (texBase) {
+          this._stableStartTextureBaseCache.set(tileId, { ...texBase });
+        }
+
+        const busBase = this._busBaseCache.get(tileId);
+        if (busBase) {
+          this._stableStartBusBaseCache.set(tileId, {
+            x: busBase.x,
+            y: busBase.y,
+            z: busBase.z,
+            rotation: docRotRad
+          });
+        }
+      }
+
+      // Reset to stable scene-load pose while in tile mode.
+      this._restoreTileToStableStart(tileId);
+    }
+
+    this._activeTileIds.clear();
+    this._frameActiveTileIds.clear();
+    this._resolvedStates.clear();
+    this._tileEditSuppressed = true;
+  }
+
+  /**
+   * Exit tile-edit suppression mode and refresh base captures from final edited
+   * tile positions before animation resumes.
+   * @private
+   */
+  _exitTileEditSuppression() {
+    if (!this._tileEditSuppressed) return;
+    this._activeTileIds.clear();
+    this._frameActiveTileIds.clear();
+    this._resolvedStates.clear();
+    this._tileEditSuppressed = false;
+  }
+
+  /**
+   * Explicit tile-edit suppression gate set by layer/control integration.
+   * This avoids per-frame suppression flapping when activeLayer metadata is
+   * briefly inconsistent during tool transitions.
+   * @param {boolean} suppressed
+   */
+  setTileEditSuppressed(suppressed) {
+    const next = suppressed === true;
+    if (this._externalTileEditSuppressed === next) return;
+    this._externalTileEditSuppressed = next;
+
+    if (next) {
+      this._enterTileEditSuppression();
+    } else {
+      this._exitTileEditSuppression();
+    }
+
+    this._lastUpdateNowMs = this._getNowMs();
   }
 
   async setTimeFactorPercent(percent, options = undefined) {
@@ -589,6 +740,17 @@ export class TileMotionManager {
 
     this._baseCache.set(tileId, base);
 
+    if (!this._stableStartBaseCache.has(tileId)) {
+      this._stableStartBaseCache.set(tileId, {
+        x: base.x,
+        y: base.y,
+        z: base.z,
+        scaleX: base.scaleX,
+        scaleY: base.scaleY,
+        rotation: base.rotation
+      });
+    }
+
     const isPlaying = this.state?.global?.playing === true;
     const cfg = this.state?.tiles?.[tileId];
     const isTextureTile = cfg?.enabled && cfg?.mode === 'texture';
@@ -606,7 +768,7 @@ export class TileMotionManager {
     }
 
     const THREE = window.THREE;
-    this._textureBaseCache.set(tileId, {
+    const captured = {
       offsetX: _toNumber(map.offset?.x, 0),
       offsetY: _toNumber(map.offset?.y, 0),
       rotation: _toNumber(map.rotation, 0),
@@ -615,7 +777,12 @@ export class TileMotionManager {
       matrixAutoUpdate: map.matrixAutoUpdate !== false,
       wrapS: map.wrapS ?? (THREE ? THREE.ClampToEdgeWrapping : 1001),
       wrapT: map.wrapT ?? (THREE ? THREE.ClampToEdgeWrapping : 1001)
-    });
+    };
+
+    this._textureBaseCache.set(tileId, captured);
+    if (!this._stableStartTextureBaseCache.has(tileId)) {
+      this._stableStartTextureBaseCache.set(tileId, { ...captured });
+    }
   }
 
   _captureAllBaseTransforms() {
@@ -677,14 +844,26 @@ export class TileMotionManager {
     base.z = _toNumber(node.position?.z, 0);
     base.rotation = _toNumber(node.rotation?.z, 0);
     this._busBaseCache.set(tileId, base);
+
+    if (!this._stableStartBusBaseCache.has(tileId)) {
+      this._stableStartBusBaseCache.set(tileId, {
+        x: base.x,
+        y: base.y,
+        z: base.z,
+        rotation: base.rotation
+      });
+    }
   }
 
   onTileRemoved(tileId) {
     if (!tileId) return;
 
     this._baseCache.delete(tileId);
+    this._stableStartBaseCache.delete(tileId);
     this._textureBaseCache.delete(tileId);
+    this._stableStartTextureBaseCache.delete(tileId);
     this._busBaseCache.delete(tileId);
+    this._stableStartBusBaseCache.delete(tileId);
     this._resolvedStates.delete(tileId);
     this._tileSeedCache.delete(tileId);
     this._activeTileIds.delete(tileId);
@@ -1098,6 +1277,73 @@ export class TileMotionManager {
     }
   }
 
+  _restoreTileToStableStart(tileId) {
+    const data = this._getTileData(tileId);
+    const sprite = data?.sprite;
+    if (!sprite) return;
+
+    const base = this._stableStartBaseCache.get(tileId) || this._baseCache.get(tileId);
+    if (!base) return;
+
+    sprite.position.set(base.x, base.y, base.z);
+    sprite.scale.set(base.scaleX, base.scaleY, 1);
+    if (sprite.material) sprite.material.rotation = base.rotation;
+
+    const textureBase = this._stableStartTextureBaseCache.get(tileId) || this._textureBaseCache.get(tileId);
+    const map = sprite?.material?.map;
+    if (map && textureBase) {
+      map.offset.set(textureBase.offsetX, textureBase.offsetY);
+      map.center.set(textureBase.centerX, textureBase.centerY);
+      map.rotation = textureBase.rotation;
+      map.matrixAutoUpdate = textureBase.matrixAutoUpdate;
+      if (map.wrapS !== textureBase.wrapS || map.wrapT !== textureBase.wrapT) {
+        map.wrapS = textureBase.wrapS;
+        map.wrapT = textureBase.wrapT;
+        map.needsUpdate = true;
+      }
+      map.updateMatrix();
+    }
+
+    sprite.updateMatrix();
+    this.tileManager?.syncTileAttachedEffects?.(tileId, sprite);
+
+    const busNode = this._getBusTransformNode(tileId);
+    if (busNode) {
+      const busBase = this._stableStartBusBaseCache.get(tileId) || this._busBaseCache.get(tileId);
+      if (busBase) {
+        busNode.position.set(busBase.x, busBase.y, busBase.z);
+        if (busNode.rotation) busNode.rotation.z = busBase.rotation;
+      }
+      busNode.updateMatrix();
+    }
+
+    // Keep runtime bases aligned with the stable pose used in tile mode.
+    this._baseCache.set(tileId, {
+      x: base.x,
+      y: base.y,
+      z: base.z,
+      scaleX: base.scaleX,
+      scaleY: base.scaleY,
+      rotation: base.rotation
+    });
+
+    if (textureBase) {
+      this._textureBaseCache.set(tileId, { ...textureBase });
+    }
+
+    const busBase = this._stableStartBusBaseCache.get(tileId) || this._busBaseCache.get(tileId);
+    if (busBase) {
+      this._busBaseCache.set(tileId, {
+        x: busBase.x,
+        y: busBase.y,
+        z: busBase.z,
+        rotation: busBase.rotation
+      });
+    }
+
+    this._resolvedStates.delete(tileId);
+  }
+
   _restoreAllActiveTiles() {
     for (const tileId of this._activeTileIds) {
       this._restoreTile(tileId);
@@ -1319,6 +1565,8 @@ export class TileMotionManager {
     if (!this.initialized) return;
 
     if (!this.state?.global?.playing) {
+      this._externalTileEditSuppressed = false;
+      this._tileEditSuppressed = false;
       this._fallbackStartEpochMs = 0;
       this._elapsedAccumSec = 0;
       this._lastUpdateNowMs = 0;
@@ -1328,6 +1576,19 @@ export class TileMotionManager {
       }
       return;
     }
+
+    const suppressForTileEdit = this._externalTileEditSuppressed || this._isTilesEditContextActive();
+
+    // Hard UX guard: in Tile editor mode, pause all runtime tile motion so
+    // users can reliably select, drag, and align tiles.
+    if (suppressForTileEdit) {
+      this._enterTileEditSuppression();
+      // Prevent fallback dt accumulation from producing a jump when tile mode exits.
+      this._lastUpdateNowMs = this._getNowMs();
+      return;
+    }
+
+    this._exitTileEditSuppression();
 
     this._requestContinuousRender(250);
 

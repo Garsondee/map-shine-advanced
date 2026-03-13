@@ -745,25 +745,33 @@ export class ControlsIntegration {
     if (!canvas?.ready || !canvas.tiles) return;
 
     const isTilesActive = this._isTilesContextActive();
+    const tileManager = window.MapShine?.tileManager;
+    const bus = window.MapShine?.floorCompositorV2?._renderBus;
+    const tileMotionManager = window.MapShine?.tileMotionManager;
     if (!isTilesActive) {
       // When tiles layer is not active, hide it. Foundry's layer deactivation
       // already sets eventMode='passive' and interactiveChildren=false, so we
       // don't need to force those.
       canvas.tiles.visible = false;
+      if (bus?.setTileEditingSuppressed) {
+        try { bus.setTileEditingSuppressed(false); } catch (_) {}
+      }
+      if (tileMotionManager?.setTileEditSuppressed) {
+        try { tileMotionManager.setTileEditSuppressed(false); } catch (_) {}
+      }
       return;
     }
 
-    // Re-assert Three.js tile visibility whenever the tile layer becomes active.
-    // An earlier gameplay-mode suppression pass (mode-manager, canvas-replacement)
-    // may have called tileManager.setVisibility(false), leaving _globalVisible=false.
-    // With _globalVisible=false, newly created sprites stay permanently hidden after
-    // texture load because updateSpriteVisibility returns early. Re-assert true here
-    // so create/update/refresh hooks can show sprites correctly.
-    // Guard: skip the full-sprite iteration if _globalVisible is already true to
-    // avoid O(n_tiles) work on every refreshTile (~60fps during drag).
-    const tileManager = window.MapShine?.tileManager;
-    if (tileManager?.setVisibility && tileManager._globalVisible !== true) {
-      try { tileManager.setVisibility(true); } catch (_) {}
+    // In tile-edit mode, avoid mixed PIXI+Three tile rendering. Foundry's native
+    // PIXI tiles are the single visual authority for selection/manipulation.
+    if (tileManager?.setVisibility && tileManager._globalVisible !== false) {
+      try { tileManager.setVisibility(false); } catch (_) {}
+    }
+    if (bus?.setTileEditingSuppressed) {
+      try { bus.setTileEditingSuppressed(true); } catch (_) {}
+    }
+    if (tileMotionManager?.setTileEditSuppressed) {
+      try { tileMotionManager.setTileEditSuppressed(true); } catch (_) {}
     }
 
     // Foundry v12 tile interaction depends on primary group visibility.
@@ -796,9 +804,9 @@ export class ControlsIntegration {
       threeCanvas.style.pointerEvents = 'none';
     }
 
-    // Make PIXI visuals nearly invisible so Three.js tile visuals show through.
+    // Keep PIXI visuals fully visible in tile edit mode.
     // Do not change eventMode here; Foundry owns eligibility semantics.
-    const VISUAL_ALPHA = 0.01;
+    const VISUAL_ALPHA = 1;
     for (const tile of canvas.tiles.placeables || []) {
       try {
         tile.visible = true;
@@ -839,9 +847,13 @@ export class ControlsIntegration {
     const tileDoc = tileOrDoc?.document ?? tileOrDoc;
     if (!tileDoc?.id) return;
 
+    const isTilesActive = this._isTilesContextActive();
+
+    // In native tile-edit mode, PIXI is the only visual authority. Do not run
+    // any fallback Three tile refresh/update/create path here.
+    if (isTilesActive) return;
+
     try {
-      // If gameplay/layer arbitration left tiles globally hidden, no per-tile
-      // refresh path can make the sprite visible. Re-assert visibility first.
       if (tileManager.setVisibility && tileManager._globalVisible !== true) {
         tileManager.setVisibility(true);
       }
@@ -1467,11 +1479,18 @@ export class ControlsIntegration {
         // the live position immediately instead of waiting for updateTile.
         const baseDoc = tile?.document;
         if (baseDoc) {
+          const rawLiveRotation = Number(tile?.rotation);
+          const liveRotation = Number.isFinite(rawLiveRotation)
+            ? (Math.abs(rawLiveRotation) <= (Math.PI * 2 + 0.001)
+              ? (rawLiveRotation * 180) / Math.PI
+              : rawLiveRotation)
+            : baseDoc.rotation;
+
           const liveDoc = new Proxy(baseDoc, {
             get(target, prop, receiver) {
               if (prop === 'x') return Number.isFinite(Number(tile?.x)) ? Number(tile.x) : target.x;
               if (prop === 'y') return Number.isFinite(Number(tile?.y)) ? Number(tile.y) : target.y;
-              if (prop === 'rotation') return Number.isFinite(Number(tile?.rotation)) ? Number(tile.rotation) : target.rotation;
+              if (prop === 'rotation') return liveRotation;
               if (prop === 'width') return Number.isFinite(Number(target?.width)) ? Number(target.width) : (Number(tile?.w) || 0);
               if (prop === 'height') return Number.isFinite(Number(target?.height)) ? Number(target.height) : (Number(tile?.h) || 0);
               return Reflect.get(target, prop, receiver);

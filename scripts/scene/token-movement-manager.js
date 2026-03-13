@@ -4437,11 +4437,19 @@ export class TokenMovementManager {
    */
   _getTokenCollisionHalfSize(tokenDoc) {
     const size = this._getTokenPixelSize(tokenDoc);
-    // Shrink by 2px so a 2×2 token can fit through a 2-grid-wide gap.
-    const margin = 2;
+    // Use an adaptive inset so exact-fit doorways remain traversable for
+    // multi-cell tokens (2x2, 3x3, etc.) while still blocking clearly-too-
+    // narrow openings. We intentionally bias toward a larger tolerance than
+    // strict geometry to account for wall endpoint thickness + collision math
+    // when squeezing through exact-width open door spans.
+    const grid = canvas?.grid;
+    const gridSizeX = Math.max(1, asNumber(grid?.sizeX, asNumber(grid?.size, asNumber(canvas?.dimensions?.size, 100))));
+    const gridSizeY = Math.max(1, asNumber(grid?.sizeY, asNumber(grid?.size, asNumber(canvas?.dimensions?.size, 100))));
+    const insetBasis = Math.max(gridSizeX, gridSizeY);
+    const adaptiveInset = Math.max(8, Math.min(24, insetBasis * 0.14));
     return {
-      x: Math.max(0, (size.widthPx / 2) - margin),
-      y: Math.max(0, (size.heightPx / 2) - margin)
+      x: Math.max(0, (size.widthPx / 2) - adaptiveInset),
+      y: Math.max(0, (size.heightPx / 2) - adaptiveInset)
     };
   }
 
@@ -8481,12 +8489,14 @@ export class TokenMovementManager {
    * @returns {{widthPx:number,heightPx:number}}
    */
   _getTokenPixelSize(tokenDoc) {
-    const gridSize = asNumber(canvas?.grid?.size, asNumber(canvas?.dimensions?.size, 100));
+    const grid = canvas?.grid;
+    const gridSizeX = Math.max(1, asNumber(grid?.sizeX, asNumber(grid?.size, asNumber(canvas?.dimensions?.size, 100))));
+    const gridSizeY = Math.max(1, asNumber(grid?.sizeY, asNumber(grid?.size, asNumber(canvas?.dimensions?.size, 100))));
     const width = asNumber(tokenDoc?.width, 1);
     const height = asNumber(tokenDoc?.height, 1);
     return {
-      widthPx: width * gridSize,
-      heightPx: height * gridSize
+      widthPx: width * gridSizeX,
+      heightPx: height * gridSizeY
     };
   }
 

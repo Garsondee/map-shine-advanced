@@ -70,6 +70,12 @@ export class FloorRenderBus {
     /** @type {boolean} */
     this._initialized = false;
 
+    /** @type {number} */
+    this._visibleMaxFloorIndex = Infinity;
+
+    /** @type {boolean} */
+    this._suppressTileAlbedoForEditing = false;
+
     log.debug('FloorRenderBus created');
   }
 
@@ -389,6 +395,38 @@ export class FloorRenderBus {
 
   // ── Visibility ─────────────────────────────────────────────────────────────────
 
+  _applyTileVisibility() {
+    if (!this._initialized) return;
+
+    for (const [tileId, entry] of this._tiles) {
+      const node = entry?.root || entry?.mesh;
+      if (!node) continue;
+
+      // Background planes and internal effect overlays stay visible.
+      if (tileId.startsWith('__')) {
+        node.visible = true;
+        continue;
+      }
+
+      const inVisibleFloorSlice = entry.floorIndex <= this._visibleMaxFloorIndex;
+      node.visible = inVisibleFloorSlice && !this._suppressTileAlbedoForEditing;
+    }
+  }
+
+  /**
+   * Hide/show bus tile albedo during native tile editing.
+   *
+   * When true, only PIXI tile visuals should be visible to avoid mixed
+   * renderer contention (PIXI selection box vs Three albedo mesh).
+   * @param {boolean} suppressed
+   */
+  setTileEditingSuppressed(suppressed) {
+    const next = suppressed === true;
+    if (this._suppressTileAlbedoForEditing === next) return;
+    this._suppressTileAlbedoForEditing = next;
+    this._applyTileVisibility();
+  }
+
   /**
    * Show tile meshes up to and including `maxFloorIndex`, hide the rest.
    * Background planes (solid colour + scene image) are always visible.
@@ -401,21 +439,8 @@ export class FloorRenderBus {
    */
   setVisibleFloors(maxFloorIndex) {
     if (!this._initialized) return;
-    for (const [tileId, entry] of this._tiles) {
-      const node = entry?.root || entry?.mesh;
-      if (!node) continue;
-      // Background planes and internal effect overlays (prefixed '__') are always
-      // visible — their content visibility is managed by the effect itself.
-      if (tileId.startsWith('__')) {
-        node.visible = true;
-        continue;
-      }
-
-      // Visibility should be strict to the active stack slice: render floors
-      // from 0..N only. Overhead/roof capture uses dedicated layer/passes and
-      // must not leak upper-floor albedo into lower-floor views.
-      node.visible = entry.floorIndex <= maxFloorIndex;
-    }
+    this._visibleMaxFloorIndex = Number.isFinite(Number(maxFloorIndex)) ? Number(maxFloorIndex) : Infinity;
+    this._applyTileVisibility();
     log.debug(`FloorRenderBus: showing floors 0–${maxFloorIndex}`);
   }
 

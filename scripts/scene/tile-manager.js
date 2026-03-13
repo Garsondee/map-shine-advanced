@@ -2212,6 +2212,13 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     // Refresh tile (rendering changes)
     this._hookIds.push(['refreshTile', Hooks.on('refreshTile', (tile) => {
       log.debug(`Tile refreshed: ${tile.id}`);
+
+      // In native tile-edit mode, PIXI is authoritative. Suppress Three live
+      // refresh writes here to avoid delayed transform contention a frame or two
+      // after entering tile mode.
+      const activeControl = String(ui?.controls?.control?.name || ui?.controls?.activeControl || '').toLowerCase();
+      if (canvas?.tiles?.active || activeControl === 'tiles') return;
+
       // During PIXI-native drag/resize, refreshTile can run with live placeable
       // transforms that have not yet been committed to the document. Use those
       // live values so Three visuals track movement immediately.
@@ -2220,10 +2227,17 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
 
       // Preserve TileDocument prototype/methods/parent context while overlaying
       // live geometry values. Use a Proxy to avoid writing to getter-only fields.
+      const rawLiveRotation = Number(tile?.rotation);
+      const liveRotation = Number.isFinite(rawLiveRotation)
+        ? (Math.abs(rawLiveRotation) <= (Math.PI * 2 + 0.001)
+          ? (rawLiveRotation * 180) / Math.PI
+          : rawLiveRotation)
+        : baseDoc.rotation;
+
       const overrides = {
         x: Number.isFinite(Number(tile?.x)) ? Number(tile.x) : baseDoc.x,
         y: Number.isFinite(Number(tile?.y)) ? Number(tile.y) : baseDoc.y,
-        rotation: Number.isFinite(Number(tile?.rotation)) ? Number(tile.rotation) : baseDoc.rotation,
+        rotation: liveRotation,
         width: Number.isFinite(Number(baseDoc.width)) ? Number(baseDoc.width) : (Number(tile?.w) || 0),
         height: Number.isFinite(Number(baseDoc.height)) ? Number(baseDoc.height) : (Number(tile?.h) || 0)
       };
@@ -4184,8 +4198,9 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     sprite.updateMatrix();
     
     // 3. Rotation
-    if (tileDoc.rotation) {
-      sprite.material.rotation = THREE.MathUtils.degToRad(tileDoc.rotation);
+    if (sprite.material) {
+      const rotDeg = Number.isFinite(Number(tileDoc?.rotation)) ? Number(tileDoc.rotation) : 0;
+      sprite.material.rotation = THREE.MathUtils.degToRad(rotDeg);
     }
 
     const data = this.tileSprites.get(tileDoc.id);

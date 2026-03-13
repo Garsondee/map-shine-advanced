@@ -6691,6 +6691,8 @@ function updateLayerVisibility() {
   // Tiles: keep native PIXI tile placeables interactive while the Tiles controls
   // are active, otherwise suppress them to avoid double-rendering.
   if (canvas.tiles) {
+      const bus = window.MapShine?.floorCompositorV2?._renderBus;
+      const tileMotion = window.MapShine?.tileMotionManager;
       if (isTilesActive) {
           canvas.tiles.visible = true;
           canvas.tiles.interactiveChildren = true;
@@ -6715,10 +6717,16 @@ function updateLayerVisibility() {
             // correctly set per foreground/background mode on the next frame.
             try { tile.renderFlags?.set({ refreshState: true }); } catch (_) {}
           }
-          if (tileManager) tileManager.setVisibility(true);
+          // Native tile editing should be PIXI-authoritative to avoid mixed
+          // PIXI+Three tile visuals fighting during selection/transform.
+          if (tileManager) tileManager.setVisibility(false);
+          if (bus?.setTileEditingSuppressed) bus.setTileEditingSuppressed(true);
+          if (tileMotion?.setTileEditSuppressed) tileMotion.setTileEditSuppressed(true);
       } else {
           canvas.tiles.visible = false;
           if (tileManager) tileManager.setVisibility(!isMapMakerMode);
+          if (bus?.setTileEditingSuppressed) bus.setTileEditingSuppressed(false);
+          if (tileMotion?.setTileEditSuppressed) tileMotion.setTileEditSuppressed(false);
       }
   }
 
@@ -6806,6 +6814,15 @@ function _isInputArbitrationMetadataReady() {
 function _reconcileInputArbitrationState(reason = '') {
   try {
     if (!canvas?.ready || isMapMakerMode) return;
+
+    // ControlsIntegration is the active owner for layer/input arbitration.
+    // Running legacy reconciliation in parallel can re-run updateLayerVisibility()
+    // a frame later and flip tile visibility/suppression states after entering
+    // tile mode.
+    if (controlsIntegration && controlsIntegration.getState?.() === 'active') {
+      return;
+    }
+
     updateLayerVisibility();
     updateInputMode();
     _enforceGameplayPixiSuppression();

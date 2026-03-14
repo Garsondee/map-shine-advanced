@@ -4068,6 +4068,9 @@ async function createThreeCanvas(scene) {
     }
     tokenMovementManager = new TokenMovementManager({ tokenManager, wallManager });
     tokenMovementManager.initialize();
+    // Restore persisted pathfinding settings (fog policy, A* weight, door policy)
+    // that were configured via TokenMovementDialog (BUG-1).
+    tokenMovementManager.loadSettingsFromGame();
     tokenManager.setMovementManager(tokenMovementManager);
     effectComposer.addUpdatable(tokenMovementManager);
     if (window.MapShine) window.MapShine.tokenMovementManager = tokenMovementManager;

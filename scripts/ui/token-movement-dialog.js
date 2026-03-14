@@ -169,6 +169,7 @@ export class TokenMovementDialog {
       const manager = this._getManager();
       if (!manager || !game.user?.isGM) return;
       manager.settings.weightedAStarWeight = clamp(asNumber(ev.value, 1.15), 1, 2);
+      manager.saveSettingsToGame?.();
     });
     this._bindings.weightedAStarWeight.disabled = !canEdit;
 
@@ -183,6 +184,7 @@ export class TokenMovementDialog {
       const manager = this._getManager();
       if (!manager || !game.user?.isGM) return;
       manager.setFogPathPolicy(ev.value);
+      manager.saveSettingsToGame?.();
     });
     this._bindings.fogPathPolicy.disabled = !canEdit;
 
@@ -272,6 +274,7 @@ export class TokenMovementDialog {
     const manager = this._getManager();
     if (!manager || !game.user?.isGM) return;
     manager.setDoorPolicy(patch);
+    manager.saveSettingsToGame?.();
   }
 
   refreshFromManager() {

@@ -733,6 +733,41 @@ export function registerSettings() {
     default: false
   });
 
+  // Pathfinding policy settings (BUG-1: these were previously only stored
+  // in-memory on TokenMovementManager and lost on every canvas reinit).
+  game.settings.register('map-shine-advanced', 'movementFogPathPolicy', {
+    name: 'Fog Path Policy',
+    hint: 'Controls whether pathfinding respects fog-of-war for players.',
+    scope: 'world',
+    config: false,
+    type: String,
+    default: 'strictNoFogPath'
+  });
+
+  game.settings.register('map-shine-advanced', 'movementWeightedAStarWeight', {
+    name: 'A* Pathfinding Weight',
+    hint: 'Heuristic weight for the weighted A* pathfinder (1.0 = optimal, 2.0 = faster).',
+    scope: 'world',
+    config: false,
+    type: Number,
+    default: 1.15
+  });
+
+  game.settings.register('map-shine-advanced', 'movementDoorPolicy', {
+    name: 'Door Policy',
+    hint: 'Persisted door auto-open/close policy for token pathfinding.',
+    scope: 'world',
+    config: false,
+    type: Object,
+    default: {
+      autoOpen: true,
+      autoClose: 'outOfCombatOnly',
+      closeDelayMs: 0,
+      playerAutoDoorEnabled: false,
+      requireDoorPermission: true
+    }
+  });
+
   // Last used map point effect target (for quick placement)
   game.settings.register('map-shine-advanced', 'lastMapPointEffect', {
     name: 'Last Map Point Effect',

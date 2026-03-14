@@ -587,7 +587,7 @@ export class TokenMovementManager {
 
     const reason = String(firstResult?.reason || '');
     const graphDiagnostics = firstResult?.diagnostics?.graphDiagnostics || null;
-    const retryableReason = reason === 'no-path' || reason === 'max-iterations';
+    const retryableReason = reason === 'no-path' || reason === 'max-iterations' || reason === 'wall-truncated';
     const graphTruncated = optionsBoolean(graphDiagnostics?.truncated, false);
     const lowConnectivity = asNumber(graphDiagnostics?.nodeCount, 0) <= 28;
     const shouldRetry = retryableReason
@@ -606,21 +606,27 @@ export class TokenMovementManager {
     const endY = asNumber(end?.y, 0);
     const directDistance = Math.hypot(endX - startX, endY - startY);
 
+    const gridSize = Math.max(1, asNumber(canvas?.grid?.size, asNumber(canvas?.dimensions?.size, 100)));
     const baseMargin = Math.max(0, asNumber(baseOptions?.searchMarginPx, 260));
     const expandedMargin = preferLongRange
-      ? Math.max(baseMargin + 260, (directDistance * 0.9) + 240)
+      // Nearby targets can still require long detours around blocking geometry
+      // (e.g. diagonal wall bisectors / large wall complexes). Use a larger
+      // floor so retries can search a genuinely wider corridor.
+      ? Math.max(baseMargin + 520, (directDistance * 1.4) + 360, gridSize * 14)
       : Math.max(baseMargin + 180, (directDistance * 0.6) + 180);
 
     const baseGraphNodes = Math.max(128, asNumber(baseOptions?.maxGraphNodes, 6000));
     const baseIterations = Math.max(64, asNumber(baseOptions?.maxSearchIterations, 12000));
+    const nodeMultiplier = preferLongRange ? 2.6 : 1.8;
+    const iterationMultiplier = preferLongRange ? 2.1 : 1.6;
 
     const retryOptions = {
       ...baseOptions,
       __adaptivePathExpansionApplied: true,
       suppressNoPathLog: true,
-      searchMarginPx: clamp(Math.round(expandedMargin), 120, 2800),
-      maxGraphNodes: clamp(Math.round(baseGraphNodes * 1.8), 1000, 24000),
-      maxSearchIterations: clamp(Math.round(baseIterations * 1.6), 1000, 38000)
+      searchMarginPx: clamp(Math.round(expandedMargin), 120, 4800),
+      maxGraphNodes: clamp(Math.round(baseGraphNodes * nodeMultiplier), 1000, 42000),
+      maxSearchIterations: clamp(Math.round(baseIterations * iterationMultiplier), 1000, 62000)
     };
 
     const retryResult = this.findWeightedPath({
@@ -1589,11 +1595,18 @@ export class TokenMovementManager {
         waypoints.push({ x: asNumber(end?.x, 0), y: asNumber(end?.y, 0) });
 
         const refined = [];
-        const localMargin = Math.max(
-          asNumber(options?.searchMarginPx, 260),
-          Math.round(asNumber(index?.sectorSize, 400) * 0.85)
-        );
         for (let i = 1; i < waypoints.length; i++) {
+          // Scale localMargin by the actual segment distance so long inter-waypoint
+          // spans that exceed the static sectorSize cap stay navigable (BUG-5).
+          const segmentDist = Math.hypot(
+            waypoints[i].x - waypoints[i - 1].x,
+            waypoints[i].y - waypoints[i - 1].y
+          );
+          const localMargin = Math.max(
+            asNumber(options?.searchMarginPx, 260),
+            Math.round(asNumber(index?.sectorSize, 400) * 0.85),
+            Math.round(segmentDist * 0.75)
+          );
           const segment = this.findWeightedPath({
             start: waypoints[i - 1],
             end: waypoints[i],
@@ -3872,6 +3885,36 @@ export class TokenMovementManager {
           const finalValidatedPath = ignoreWalls
             ? smoothedPath
             : this._validatePathWallIntegrity(smoothedPath, tokenDoc, options);
+          const wallTruncated = smoothedPath.length !== finalValidatedPath.length;
+
+          // If validation had to truncate, treat this as a failed route rather
+          // than returning a partial path that trends toward the goal and then
+          // dead-ends at the blocker. This allows adaptive retry/parity fallback
+          // to search for a longer valid detour instead.
+          if (!ignoreWalls && wallTruncated) {
+            this._recordWeightedPathStats(statsCollector, {
+              ok: false,
+              reason: 'wall-truncated',
+              iterations,
+              graphDiagnostics: graph.diagnostics
+            });
+            return {
+              ok: false,
+              pathNodes: [],
+              reason: 'wall-truncated',
+              diagnostics: {
+                iterations,
+                weight,
+                backtrackClipped: rawPathNodes.length !== clippedPath.length,
+                nodesClipped: rawPathNodes.length - clippedPath.length,
+                smoothed: clippedPath.length !== smoothedPath.length,
+                nodesSmoothed: clippedPath.length - smoothedPath.length,
+                wallTruncated,
+                graphDiagnostics: graph.diagnostics
+              }
+            };
+          }
+
           // Re-densify for smooth walk animation: insert intermediate
           // waypoints at grid-cell intervals along each segment.
           const pathNodes = (typeof this._interpolatePathForWalking === 'function')
@@ -3893,7 +3936,7 @@ export class TokenMovementManager {
               nodesClipped: rawPathNodes.length - clippedPath.length,
               smoothed: clippedPath.length !== smoothedPath.length,
               nodesSmoothed: clippedPath.length - smoothedPath.length,
-              wallTruncated: smoothedPath.length !== finalValidatedPath.length,
+              wallTruncated,
               graphDiagnostics: graph.diagnostics
             }
           };
@@ -4242,31 +4285,46 @@ export class TokenMovementManager {
     const collisionElevation = this._resolveCollisionElevation(context, tokenObj);
     const rayA = { x: asNumber(from?.x, 0), y: asNumber(from?.y, 0), elevation: collisionElevation };
     const rayB = { x: asNumber(to?.x, 0), y: asNumber(to?.y, 0), elevation: collisionElevation };
+    const tokenWidthCells = asNumber(context?.tokenDoc?.width, asNumber(tokenObj?.document?.width, 1));
+    const tokenHeightCells = asNumber(context?.tokenDoc?.height, asNumber(tokenObj?.document?.height, 1));
+    const isMultiCellToken = (tokenWidthCells > 1.0001) || (tokenHeightCells > 1.0001);
     const segDx = rayB.x - rayA.x;
     const segDy = rayB.y - rayA.y;
     const segLen = Math.hypot(segDx, segDy);
     // Trim segment endpoints a little so a corner that starts flush against a
     // door frame/wall endpoint does not register a spurious t=0 collision in
     // one travel direction but not the reverse direction.
-    const trimPx = Math.max(0, Math.min(4, segLen * 0.25));
+    // IMPORTANT: for 1x1 tokens we do NOT trim endpoints. Diagonal walls that
+    // bisect a grid square frequently intersect near segment endpoints; trimming
+    // lets those collisions slip through and causes "path into the wall" routes.
+    const trimPx = isMultiCellToken
+      ? Math.max(0, Math.min(4, segLen * 0.25))
+      : 0;
     const trimX = (segLen > 0.0001) ? ((segDx / segLen) * trimPx) : 0;
     const trimY = (segLen > 0.0001) ? ((segDy / segLen) * trimPx) : 0;
 
-    // Build corner offsets for fat-token Minkowski expansion.
-    // For 1×1 tokens the only ray is center→center (offsets = [[0,0]]).
-    // For larger tokens we also test at each corner of the bounding box
-    // so the full footprint is checked against walls.
+    // Build ray offsets for collision expansion.
+    // For larger tokens we test each footprint corner (Minkowski-style).
+    // For 1x1 tokens we still add tiny perpendicular guard rays to reduce
+    // leakage when crossing exactly through diagonal wall endpoints or
+    // shared wall vertices where center-only tests can be numerically brittle.
     const halfW = this._getTokenCollisionHalfSize(context.tokenDoc);
     const cornerOffsets = [[0, 0]];
-    const tokenWidthCells = asNumber(context?.tokenDoc?.width, asNumber(tokenObj?.document?.width, 1));
-    const tokenHeightCells = asNumber(context?.tokenDoc?.height, asNumber(tokenObj?.document?.height, 1));
-    const isMultiCellToken = (tokenWidthCells > 1.0001) || (tokenHeightCells > 1.0001);
     if (isMultiCellToken) {
       cornerOffsets.push(
         [-halfW.x, -halfW.y],
         [halfW.x, -halfW.y],
         [-halfW.x, halfW.y],
         [halfW.x, halfW.y]
+      );
+    } else if (segLen > 0.0001) {
+      const gridSize = Math.max(1, asNumber(canvas?.grid?.size, asNumber(canvas?.dimensions?.size, 100)));
+      const guardPx = clamp(gridSize * 0.03, 0.75, 2);
+      const nx = -segDy / segLen;
+      const ny = segDx / segLen;
+      cornerOffsets.push(
+        [nx * guardPx, ny * guardPx],
+        [-nx * guardPx, -ny * guardPx]
       );
     }
 
@@ -4322,6 +4380,46 @@ export class TokenMovementManager {
         } catch (_) {
         }
       }
+
+      // Corner/endpoint robustness pass for 1x1 tokens.
+      // Some diagonal/shared-vertex layouts can be numerically ambiguous when a
+      // segment intersects exactly at t=0/t=1. Extend the segment by a tiny
+      // epsilon in both directions and re-test to catch those borderline cases.
+      if (!isMultiCellToken && segLen > 0.0001) {
+        const gridSize = Math.max(1, asNumber(canvas?.grid?.size, asNumber(canvas?.dimensions?.size, 100)));
+        const endpointProbePx = clamp(gridSize * 0.02, 0.5, 2);
+        const ux = segDx / segLen;
+        const uy = segDy / segLen;
+
+        for (const [ox, oy] of cornerOffsets) {
+          const a = {
+            x: rayA.x + ox + trimX - (ux * endpointProbePx),
+            y: rayA.y + oy + trimY - (uy * endpointProbePx),
+            elevation: rayA.elevation
+          };
+          const b = {
+            x: rayB.x + ox - trimX + (ux * endpointProbePx),
+            y: rayB.y + oy - trimY + (uy * endpointProbePx),
+            elevation: rayB.elevation
+          };
+
+          try {
+            const probeHits = moveBackend.testCollision(a, b, {
+              mode: 'all',
+              type: 'move',
+              source: tokenObj,
+              token: tokenObj,
+              wallDirectionMode: 0,
+              useThreshold: true
+            });
+            if (this._collisionResultBlocksAtElevation(probeHits, collisionElevation)) {
+              return { ok: false, reason: 'collision-move-endpoint-probe' };
+            }
+          } catch (_) {
+          }
+        }
+      }
+
       return { ok: true };
     }
 
@@ -5031,6 +5129,239 @@ export class TokenMovementManager {
     }
 
     return pathNodes;
+  }
+
+  /**
+   * Constrained path resolution strategy:
+   * 1) Fast path: if direct segment start->end is wall-clear, use it immediately.
+   * 2) If direct is blocked, run a larger-budget weighted search (+ parity), and
+   *    escalate to a much larger final attempt before failing.
+   *
+   * @param {object} params
+   * @param {TokenDocument|object} params.tokenDoc
+   * @param {{x:number,y:number}} params.startTopLeft
+   * @param {{x:number,y:number}} params.endTopLeft
+   * @param {{x:number,y:number}} params.startCenter
+   * @param {{x:number,y:number}} params.endCenter
+   * @param {boolean} [params.ignoreCost=false]
+   * @param {object} [params.options]
+   * @param {boolean} [params.preferLongRange=true]
+   * @returns {{ok:boolean,pathNodes:Array<{x:number,y:number}>,reason?:string,diagnostics?:object}}
+   */
+  _computeConstrainedPathWithDirectAndEscalation({
+    tokenDoc,
+    startTopLeft,
+    endTopLeft,
+    startCenter,
+    endCenter,
+    ignoreCost = false,
+    options = {},
+    preferLongRange = true
+  } = {}) {
+    const collisionMode = options?.collisionMode || 'closest';
+    const directCheck = this._validatePathSegmentCollision(startCenter, endCenter, {
+      tokenDoc,
+      options: {
+        ignoreWalls: false,
+        collisionMode
+      }
+    });
+
+    if (directCheck?.ok) {
+      return {
+        ok: true,
+        pathNodes: [startCenter, endCenter],
+        diagnostics: {
+          strategy: 'direct-clear'
+        }
+      };
+    }
+
+    const tokenWidthCells = asNumber(tokenDoc?.width, 1);
+    const tokenHeightCells = asNumber(tokenDoc?.height, 1);
+    const isMultiCellToken = tokenWidthCells > 1.0001 || tokenHeightCells > 1.0001;
+    const gridSize = Math.max(1, asNumber(canvas?.grid?.size, 100));
+    const directDistance = Math.hypot(
+      asNumber(endCenter?.x, 0) - asNumber(startCenter?.x, 0),
+      asNumber(endCenter?.y, 0) - asNumber(startCenter?.y, 0)
+    );
+
+    const basePathOptions = {
+      ignoreWalls: false,
+      ignoreCost,
+      fogPathPolicy: this.settings.fogPathPolicy,
+      allowDiagonal: optionsBoolean(options?.allowDiagonal, true),
+      maxSearchIterations: Math.max(
+        asNumber(options?.maxSearchIterations, isMultiCellToken ? 12000 : 6000),
+        isMultiCellToken ? 36000 : 26000
+      ),
+      maxGraphNodes: Math.max(
+        asNumber(options?.maxGraphNodes, isMultiCellToken ? 12000 : 6000),
+        isMultiCellToken ? 24000 : 16000
+      ),
+      searchMarginPx: Math.max(
+        asNumber(options?.searchMarginPx, isMultiCellToken ? 420 : 260),
+        isMultiCellToken ? 900 : 700
+      )
+    };
+
+    // Since the direct path is blocked, the A* detour is legitimately longer than the
+    // straight-line distance. Parity's "too-long" length comparison would throw away a
+    // valid detour in favour of Foundry's wall-crossing straight path. So we do NOT use
+    // _selectPathWithFoundryParity here. Instead:
+    //  - Accept A* result directly if it finds a path (A* already validated each edge).
+    //  - Fall back to Foundry only if A* genuinely fails.
+    //  - Foundry fallback is wall-integrity checked because Foundry can return straight-
+    //    line wall-crossing paths from constrainMovementPath.
+
+    const validateAStarPath = (pathResult) => {
+      if (!pathResult?.ok || !Array.isArray(pathResult?.pathNodes) || pathResult.pathNodes.length < 2) {
+        return { ok: false, reason: pathResult?.reason || 'no-path', pathNodes: [] };
+      }
+      const nodes = pathResult.pathNodes;
+      const endNode = nodes[nodes.length - 1];
+      const endDelta = endNode
+        ? Math.hypot(asNumber(endNode?.x, 0) - endCenter.x, asNumber(endNode?.y, 0) - endCenter.y)
+        : Number.POSITIVE_INFINITY;
+      if (endDelta > gridSize * 0.35) {
+        return { ok: false, reason: 'no-path', pathNodes: nodes };
+      }
+      const pinned = nodes.slice();
+      pinned[0] = startCenter;
+      pinned[pinned.length - 1] = endCenter;
+      return { ok: true, pathNodes: pinned };
+    };
+
+    const validateFoundryPath = (pathResult) => {
+      if (!pathResult?.ok || !Array.isArray(pathResult?.pathNodes) || pathResult.pathNodes.length < 2) {
+        return { ok: false, reason: pathResult?.reason || 'no-path', pathNodes: [] };
+      }
+      // Foundry can return a straight-line path that crosses walls, so re-check integrity.
+      const validated = this._validatePathWallIntegrity(pathResult.pathNodes, tokenDoc, {
+        ignoreWalls: false,
+        collisionMode
+      });
+      const endNode = validated[validated.length - 1];
+      const endDelta = endNode
+        ? Math.hypot(asNumber(endNode?.x, 0) - endCenter.x, asNumber(endNode?.y, 0) - endCenter.y)
+        : Number.POSITIVE_INFINITY;
+      if (validated.length < 2 || endDelta > gridSize * 0.35) {
+        return { ok: false, reason: 'wall-truncated', pathNodes: validated };
+      }
+      const pinned = validated.slice();
+      pinned[0] = startCenter;
+      pinned[pinned.length - 1] = endCenter;
+      return { ok: true, pathNodes: pinned };
+    };
+
+    const firstPathResult = this._findWeightedPathWithAdaptiveExpansion({
+      start: startCenter,
+      end: endCenter,
+      tokenDoc,
+      options: basePathOptions,
+      preferLongRange
+    });
+
+    const firstValidated = validateAStarPath(firstPathResult);
+    if (firstValidated.ok) {
+      return {
+        ok: true,
+        pathNodes: firstValidated.pathNodes,
+        diagnostics: {
+          strategy: 'expanded-search',
+          directBlockedReason: directCheck?.reason || 'collision',
+          adaptiveExpansionUsed: !!firstPathResult?.adaptiveExpansionUsed
+        }
+      };
+    }
+
+    // A* first attempt failed — try Foundry as a fallback before deep search.
+    const foundryPathResult = this._computeFoundryParityPathImmediate({
+      tokenDoc,
+      startTopLeft,
+      endTopLeft,
+      ignoreWalls: false,
+      ignoreCost
+    });
+    const foundryValidated = validateFoundryPath(foundryPathResult);
+    if (foundryValidated.ok) {
+      return {
+        ok: true,
+        pathNodes: foundryValidated.pathNodes,
+        diagnostics: {
+          strategy: 'foundry-fallback',
+          directBlockedReason: directCheck?.reason || 'collision',
+          firstAttemptReason: firstValidated?.reason || firstPathResult?.reason || 'no-path'
+        }
+      };
+    }
+
+    const deepPathOptions = {
+      ...basePathOptions,
+      suppressNoPathLog: true,
+      searchMarginPx: clamp(
+        Math.round(Math.max(basePathOptions.searchMarginPx + 900, (directDistance * 2.2) + 700, gridSize * 26)),
+        220,
+        6800
+      ),
+      maxGraphNodes: clamp(
+        Math.round(Math.max(basePathOptions.maxGraphNodes * 2.3, 32000)),
+        2000,
+        96000
+      ),
+      maxSearchIterations: clamp(
+        Math.round(Math.max(basePathOptions.maxSearchIterations * 2.4, 56000)),
+        2000,
+        160000
+      )
+    };
+
+    const deepPathResult = this._findWeightedPathWithAdaptiveExpansion({
+      start: startCenter,
+      end: endCenter,
+      tokenDoc,
+      options: deepPathOptions,
+      preferLongRange: true
+    });
+
+    const deepValidated = validateAStarPath(deepPathResult);
+    if (deepValidated.ok) {
+      return {
+        ok: true,
+        pathNodes: deepValidated.pathNodes,
+        diagnostics: {
+          strategy: 'deep-expanded-search',
+          directBlockedReason: directCheck?.reason || 'collision',
+          firstAttemptReason: firstValidated?.reason || firstPathResult?.reason || 'no-path',
+          adaptiveExpansionUsed: !!deepPathResult?.adaptiveExpansionUsed
+        }
+      };
+    }
+
+    return {
+      ok: false,
+      pathNodes: [],
+      reason: deepPathResult?.reason || firstPathResult?.reason || foundryPathResult?.reason || 'no-path',
+      diagnostics: {
+        strategy: 'deep-expanded-failed',
+        directBlockedReason: directCheck?.reason || 'collision',
+        firstAttemptReason: firstValidated?.reason || firstPathResult?.reason || 'no-path',
+        foundryAttemptReason: foundryValidated?.reason || foundryPathResult?.reason || 'no-path',
+        deepAttemptReason: deepValidated?.reason || deepPathResult?.reason || 'no-path',
+        searchOptions: {
+          first: {
+            searchMarginPx: basePathOptions.searchMarginPx,
+            maxGraphNodes: basePathOptions.maxGraphNodes,
+            maxSearchIterations: basePathOptions.maxSearchIterations
+          },
+          deep: {
+            searchMarginPx: deepPathOptions.searchMarginPx,
+            maxGraphNodes: deepPathOptions.maxGraphNodes,
+            maxSearchIterations: deepPathOptions.maxSearchIterations
+          }
+        }
+      }
+    };
   }
 
   /**
@@ -5821,58 +6152,35 @@ export class TokenMovementManager {
 
       let pathNodes = [startCenter, endCenter];
       if (!ignoreWalls) {
-        const pathResult = this.findWeightedPath({
-          start: startCenter,
-          end: endCenter,
-          tokenDoc: currentDoc,
-          options: {
-            ignoreWalls,
-            ignoreCost,
-            fogPathPolicy: this.settings.fogPathPolicy,
-            allowDiagonal: optionsBoolean(options?.allowDiagonal, true),
-            maxSearchIterations: asNumber(options?.maxSearchIterations, 12000)
-          }
-        });
-
-        const foundryPathResult = await this._computeFoundryParityPath({
+        const constrainedPath = this._computeConstrainedPathWithDirectAndEscalation({
           tokenDoc: currentDoc,
           startTopLeft: { x: currentDoc.x, y: currentDoc.y },
           endTopLeft: targetTopLeft,
-          ignoreWalls,
-          ignoreCost
-        });
-
-        const paritySelection = this._selectPathWithFoundryParity({
-          customPathResult: pathResult,
-          foundryPathResult,
           startCenter,
           endCenter,
-          gridSize: asNumber(canvas?.grid?.size, 100),
-          forceFoundryParity: optionsBoolean(options?.forceFoundryParity, false)
+          ignoreCost,
+          options,
+          preferLongRange: true
         });
 
-        if (!paritySelection?.ok) {
+        if (!constrainedPath?.ok || !Array.isArray(constrainedPath?.pathNodes) || constrainedPath.pathNodes.length < 2) {
           this._pathfindingLog('warn', 'executeDoorAwareTokenMove path selection failed', {
             token: this._pathfindingTokenMeta(currentDoc),
             destinationTopLeft: targetTopLeft,
-            pathReason: pathResult?.reason || null,
-            foundryPathReason: foundryPathResult?.reason || null,
-            parityReason: paritySelection?.reason || 'no-path',
-            pathDiagnostics: pathResult?.diagnostics || null,
+            reason: constrainedPath?.reason || 'no-path',
+            diagnostics: constrainedPath?.diagnostics || null,
             options
           });
           return {
             ok: false,
             tokenId,
-            reason: paritySelection?.reason || 'no-path',
+            reason: constrainedPath?.reason || 'no-path',
             transitions: [],
             pathNodes: []
           };
         }
 
-        if (Array.isArray(paritySelection.pathNodes) && paritySelection.pathNodes.length >= 2) {
-          pathNodes = paritySelection.pathNodes;
-        }
+        pathNodes = constrainedPath.pathNodes;
       }
 
       const moveToPoint = async (point, context = {}) => {
@@ -6555,20 +6863,51 @@ export class TokenMovementManager {
       });
     }
 
-    if (entries.length < 2) {
-      this._pathfindingLog('warn', '_planDoorAwareGroupMove blocked: insufficient live token entries', {
+    if (entries.length === 0) {
+      this._pathfindingLog('warn', '_planDoorAwareGroupMove blocked: no live token entries resolved', {
         requestedMoves: moves.length,
-        resolvedEntries: entries.length,
         options
       });
       return {
         ok: false,
         reason: 'insufficient-group-tokens',
-        tokenCount: entries.length,
-        metrics: {
-          planningMs: this._nowMs() - planningStartMs,
-          tokenCount: entries.length
+        tokenCount: 0,
+        metrics: { planningMs: this._nowMs() - planningStartMs, tokenCount: 0 }
+      };
+    }
+
+    // When only one token resolved, produce a minimal single-token plan so the move
+    // still executes rather than failing the whole group operation (BUG-6).
+    if (entries.length === 1) {
+      const sole = entries[0];
+      const solePathResult = this._findWeightedPathWithAdaptiveExpansion({
+        start: sole.startCenter,
+        end: sole.desiredCenter,
+        tokenDoc: sole.tokenDoc,
+        options: {
+          ignoreWalls,
+          ignoreCost,
+          fogPathPolicy: this.settings.fogPathPolicy,
+          allowDiagonal: optionsBoolean(options?.allowDiagonal, true)
         }
+      });
+      const solePathNodes = solePathResult?.ok && Array.isArray(solePathResult.pathNodes)
+        && solePathResult.pathNodes.length >= 2
+        ? solePathResult.pathNodes
+        : [sole.startCenter, sole.desiredCenter];
+      return {
+        ok: true,
+        tokenCount: 1,
+        planEntries: [{
+          tokenId: sole.tokenId,
+          tokenDoc: sole.tokenDoc,
+          destinationTopLeft: sole.desiredTopLeft,
+          pathNodes: solePathNodes
+        }],
+        ignoreWalls,
+        ignoreCost,
+        stepCount: Math.max(0, solePathNodes.length - 1),
+        metrics: { planningMs: this._nowMs() - planningStartMs, tokenCount: 1 }
       };
     }
 
@@ -6627,7 +6966,10 @@ export class TokenMovementManager {
     );
     const gridSize = Math.max(1, asNumber(canvas?.grid?.size, asNumber(canvas?.dimensions?.size, 100)));
     const isLongDistance = groupTravelDistance >= gridSize * 10;
-    const baseBudgetMs = asNumber(options?.groupPlanningBudgetMs, 280);
+    // Raised from 280 to 450ms — dense wall geometry frequently exceeded the old
+    // default, triggering the minimum-candidates fallback and causing assignment
+    // failures (BUG-7).
+    const baseBudgetMs = asNumber(options?.groupPlanningBudgetMs, 450);
     const effectiveBudgetMs = isLongDistance
       ? clamp(Math.max(baseBudgetMs, baseBudgetMs * 1.6), 0, 5000)
       : clamp(baseBudgetMs, 0, 5000);
@@ -7589,15 +7931,18 @@ export class TokenMovementManager {
         const tokenId = proposal.tokenId;
 
         // Prevent edge swaps (A->B while B->A).
+        // Grid-proportional tolerance (10% of cell) avoids false positives on
+        // sub-pixel interpolated path nodes while still catching real swaps (BUG-11).
+        const swapTol = Math.max(1, asNumber(canvas?.grid?.size, 100) * 0.1);
         let blocked = false;
         let blockedByTokenId = '';
         let blockedReason = '';
         for (const a of accepted) {
           if (
-            Math.abs(a.from.x - proposal.to.x) < 0.5
-            && Math.abs(a.from.y - proposal.to.y) < 0.5
-            && Math.abs(a.to.x - proposal.from.x) < 0.5
-            && Math.abs(a.to.y - proposal.from.y) < 0.5
+            Math.abs(a.from.x - proposal.to.x) < swapTol
+            && Math.abs(a.from.y - proposal.to.y) < swapTol
+            && Math.abs(a.to.x - proposal.from.x) < swapTol
+            && Math.abs(a.to.y - proposal.from.y) < swapTol
           ) {
             blocked = true;
             blockedByTokenId = a.tokenId;
@@ -8075,52 +8420,23 @@ export class TokenMovementManager {
 
       let pathNodes = [startCenter, endCenter];
       if (!ignoreWalls) {
-        const tokenWidthCells = asNumber(liveDoc?.width, 1);
-        const tokenHeightCells = asNumber(liveDoc?.height, 1);
-        const isMultiCellToken = tokenWidthCells > 1.0001 || tokenHeightCells > 1.0001;
-
-        const pathSearchOptions = {
-          ignoreWalls,
-          ignoreCost,
-          fogPathPolicy: this.settings.fogPathPolicy,
-          allowDiagonal: optionsBoolean(options?.allowDiagonal, true),
-          maxSearchIterations: asNumber(options?.maxSearchIterations, 12000),
-          maxGraphNodes: asNumber(options?.maxGraphNodes, isMultiCellToken ? 12000 : 6000),
-          searchMarginPx: asNumber(options?.searchMarginPx, isMultiCellToken ? 420 : 260)
-        };
-
-        const pathResult = this._findWeightedPathWithAdaptiveExpansion({
-          start: startCenter,
-          end: endCenter,
-          tokenDoc: liveDoc,
-          options: pathSearchOptions,
-          preferLongRange: isMultiCellToken
-        });
-
-        const foundryPathResult = this._computeFoundryParityPathImmediate({
+        const constrainedPath = this._computeConstrainedPathWithDirectAndEscalation({
           tokenDoc: liveDoc,
           startTopLeft,
           endTopLeft: targetTopLeft,
-          ignoreWalls,
-          ignoreCost
-        });
-
-        const paritySelection = this._selectPathWithFoundryParity({
-          customPathResult: pathResult,
-          foundryPathResult,
           startCenter,
           endCenter,
-          gridSize: asNumber(canvas?.grid?.size, 100),
-          forceFoundryParity: optionsBoolean(options?.forceFoundryParity, false)
+          ignoreCost,
+          options,
+          preferLongRange: true
         });
 
-        if (!paritySelection?.ok || !Array.isArray(paritySelection.pathNodes) || paritySelection.pathNodes.length < 2) {
+        if (!constrainedPath?.ok || !Array.isArray(constrainedPath?.pathNodes) || constrainedPath.pathNodes.length < 2) {
           this._pathfindingLog('warn', 'computeTokenPathPreview failed to find a valid path', {
             token: this._pathfindingTokenMeta(liveDoc),
             destinationTopLeft: targetTopLeft,
-            reason: paritySelection?.reason || pathResult?.reason || 'no-path',
-            diagnostics: pathResult?.diagnostics || null,
-            foundryPathReason: foundryPathResult?.reason || null,
+            reason: constrainedPath?.reason || 'no-path',
+            diagnostics: constrainedPath?.diagnostics || null,
             options
           });
           return {
@@ -8128,11 +8444,11 @@ export class TokenMovementManager {
             tokenId,
             pathNodes: [],
             distance: 0,
-            reason: paritySelection?.reason || pathResult?.reason || 'no-path'
+            reason: constrainedPath?.reason || 'no-path'
           };
         }
 
-        pathNodes = paritySelection.pathNodes.slice();
+        pathNodes = constrainedPath.pathNodes.slice();
         pathNodes[0] = startCenter;
         pathNodes[pathNodes.length - 1] = endCenter;
       }
@@ -8663,22 +8979,22 @@ export class TokenMovementManager {
       y: Number.isFinite(currentY) ? currentY : asNumber(tokenDoc?.y, 0)
     };
 
-    const targetTopLeftRaw = this._tokenCenterToTopLeft(point, liveDoc);
-    const targetCheck = this._validateMoveStepTarget(liveDoc, currentTopLeft, targetTopLeftRaw, options);
-    if (!targetCheck?.ok) {
-      this._pathfindingLog('warn', '_moveTokenToFoundryPoint blocked: invalid or wall-colliding step target', {
+    // Snap the step target to the grid. Wall collision is NOT re-checked here because
+    // the path was already fully validated by A* and _validatePathWallIntegrity.
+    // Re-checking uses the stale liveDoc position as the ray origin, which differs
+    // slightly from the A*-snapped center and can cause false "blocked-by-wall"
+    // rejections on valid path steps, stopping tokens mid-path (BUG-2).
+    const targetTopLeft = this._snapTokenTopLeftToGrid(this._tokenCenterToTopLeft(point, liveDoc), liveDoc);
+    if (!this._isTokenTopLeftWithinScene(targetTopLeft, liveDoc)) {
+      this._pathfindingLog('warn', '_moveTokenToFoundryPoint blocked: step target outside scene bounds', {
         tokenId,
         point,
-        currentTopLeft,
-        requestedTopLeft: targetTopLeftRaw,
-        snappedTopLeft: targetCheck?.targetTopLeft || null,
-        reason: targetCheck?.reason || 'invalid-step-target',
+        targetTopLeft,
         context,
         options
       });
-      return { ok: false, reason: targetCheck?.reason || 'invalid-step-target' };
+      return { ok: false, reason: 'target-out-of-scene-bounds' };
     }
-    const targetTopLeft = targetCheck.targetTopLeft;
 
     if (Number.isFinite(currentX) && Number.isFinite(currentY)) {
       const dx = Math.abs(targetTopLeft.x - currentX);
@@ -8755,8 +9071,11 @@ export class TokenMovementManager {
 
     const gridSize = Math.max(1, asNumber(canvas?.grid?.size, asNumber(canvas?.dimensions?.size, 100)));
     const gridSteps = Math.max(0, asNumber(stepDistancePx, 0) / gridSize);
-    const estMs = (gridSteps * 290) + 140;
-    return clamp(estMs, 90, 1800);
+    // Reduced multiplier 290→180 and base 140→80 — the old values added 430ms+ per
+    // grid step, making multi-step paths feel sluggish even when the animation
+    // completed faster. The poll loop against activeTracks exits early anyway (BUG-10).
+    const estMs = (gridSteps * 180) + 80;
+    return clamp(estMs, 60, 1800);
   }
 
   /**
@@ -9271,7 +9590,10 @@ export class TokenMovementManager {
     const foundryLen = this._measurePathLength(normalizedFoundry);
     const lenDelta = Math.abs(customLen - foundryLen);
     const lenRel = lenDelta / Math.max(1, foundryLen);
-    if (lenDelta > (asNumber(gridSize, 100) * 2) && lenRel > 0.35) {
+    // Raised from 35% to 50%: a valid A* detour (e.g. avoiding cost terrain) can
+    // legitimately be longer than Foundry's path; the old threshold was too aggressive
+    // and discarded correct custom routes in favour of Foundry's shorter path (BUG-9).
+    if (lenDelta > (asNumber(gridSize, 100) * 2) && lenRel > 0.50) {
       return { ok: true, pathNodes: normalizedFoundry };
     }
 
@@ -9611,6 +9933,56 @@ export class TokenMovementManager {
   setFogPathPolicy(policy) {
     if (!FOG_PATH_POLICIES.has(policy)) return;
     this.settings.fogPathPolicy = policy;
+  }
+
+  /**
+   * Read persisted pathfinding settings from game.settings and apply them to
+   * this manager's in-memory settings object. Called once after initialize() so
+   * user-configured policies survive scene transitions and browser refreshes
+   * (BUG-1: settings were previously lost on every canvas reinit).
+   */
+  loadSettingsFromGame() {
+    try {
+      const fogPolicy = game?.settings?.get?.('map-shine-advanced', 'movementFogPathPolicy');
+      if (typeof fogPolicy === 'string' && FOG_PATH_POLICIES.has(fogPolicy)) {
+        this.settings.fogPathPolicy = fogPolicy;
+      }
+    } catch (_) {}
+
+    try {
+      const weight = Number(game?.settings?.get?.('map-shine-advanced', 'movementWeightedAStarWeight'));
+      if (Number.isFinite(weight) && weight >= 1 && weight <= 2) {
+        this.settings.weightedAStarWeight = weight;
+      }
+    } catch (_) {}
+
+    try {
+      const doorPolicy = game?.settings?.get?.('map-shine-advanced', 'movementDoorPolicy');
+      if (doorPolicy && typeof doorPolicy === 'object') {
+        this.settings.doorPolicy = {
+          ...this.settings.doorPolicy,
+          ...doorPolicy
+        };
+      }
+    } catch (_) {}
+  }
+
+  /**
+   * Persist the current in-memory pathfinding settings to game.settings so they
+   * survive scene transitions. Safe to call after any settings mutation.
+   */
+  saveSettingsToGame() {
+    try {
+      game?.settings?.set?.('map-shine-advanced', 'movementFogPathPolicy', this.settings.fogPathPolicy);
+    } catch (_) {}
+
+    try {
+      game?.settings?.set?.('map-shine-advanced', 'movementWeightedAStarWeight', this.settings.weightedAStarWeight);
+    } catch (_) {}
+
+    try {
+      game?.settings?.set?.('map-shine-advanced', 'movementDoorPolicy', { ...this.settings.doorPolicy });
+    } catch (_) {}
   }
 
   // ── Diagnostics ───────────────────────────────────────────────────────────

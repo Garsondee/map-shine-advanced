@@ -129,6 +129,10 @@ export class WaterEffectV2 {
       // on distortion edges). This was accidentally left disabled in early V2.
       chromaticAberrationEnabled: true,
       chromaticAberrationStrengthPx: 2.5,
+      chromaticAberrationThreshold: 0.45,
+      chromaticAberrationThresholdSoftness: 0.18,
+      chromaticAberrationKawaseBlurPx: 1.75,
+      chromaticAberrationSampleSpread: 1.0,
       chromaticAberrationEdgeCenter: 0.50,
       chromaticAberrationEdgeFeather: 0.10,
       chromaticAberrationEdgeGamma: 1.0,
@@ -563,6 +567,8 @@ export class WaterEffectV2 {
             'refractionMultiTapEnabled',
             'chromaticAberrationEnabled',
             'chromaticAberrationStrengthPx', 'chromaticAberrationEdgeCenter',
+            'chromaticAberrationThreshold', 'chromaticAberrationThresholdSoftness',
+            'chromaticAberrationKawaseBlurPx', 'chromaticAberrationSampleSpread',
             'chromaticAberrationEdgeFeather', 'chromaticAberrationEdgeGamma', 'chromaticAberrationEdgeMin',
             'distortionEdgeCenter', 'distortionEdgeFeather', 'distortionEdgeGamma',
             'distortionShoreRemapLo', 'distortionShoreRemapHi', 'distortionShorePow', 'distortionShoreMin'
@@ -722,6 +728,10 @@ export class WaterEffectV2 {
         refractionMultiTapEnabled: { type: 'boolean', default: true, label: 'Multi-Tap Refraction' },
         chromaticAberrationEnabled: { type: 'boolean', default: true, label: 'Chromatic Aberration Enabled' },
         chromaticAberrationStrengthPx: { type: 'slider', min: 0, max: 8, step: 0.05, default: 2.5, label: 'Chromatic Strength (px)' },
+        chromaticAberrationThreshold: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.45, label: 'Chromatic Luma Threshold' },
+        chromaticAberrationThresholdSoftness: { type: 'slider', min: 0.001, max: 1, step: 0.01, default: 0.18, label: 'Chromatic Threshold Softness' },
+        chromaticAberrationKawaseBlurPx: { type: 'slider', min: 0, max: 8, step: 0.05, default: 1.75, label: 'Chromatic Kawase Blur (px)' },
+        chromaticAberrationSampleSpread: { type: 'slider', min: 0.25, max: 3, step: 0.01, default: 1.0, label: 'Chromatic Sample Spread' },
         chromaticAberrationEdgeCenter: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.50, label: 'Chromatic Edge Center' },
         chromaticAberrationEdgeFeather: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.10, label: 'Chromatic Edge Feather' },
         chromaticAberrationEdgeGamma: { type: 'slider', min: 0.1, max: 4, step: 0.01, default: 1.0, label: 'Chromatic Edge Gamma' },
@@ -1904,6 +1914,10 @@ export class WaterEffectV2 {
 
     // ── Chromatic aberration ──────────────────────────────────────────────
     u.uChromaticAberrationStrengthPx.value = p.chromaticAberrationStrengthPx;
+    u.uChromaticAberrationThreshold.value = p.chromaticAberrationThreshold;
+    u.uChromaticAberrationThresholdSoftness.value = p.chromaticAberrationThresholdSoftness;
+    u.uChromaticAberrationKawaseBlurPx.value = p.chromaticAberrationKawaseBlurPx;
+    u.uChromaticAberrationSampleSpread.value = p.chromaticAberrationSampleSpread;
     u.uChromaticAberrationEdgeCenter.value = p.chromaticAberrationEdgeCenter;
     u.uChromaticAberrationEdgeFeather.value = p.chromaticAberrationEdgeFeather;
     u.uChromaticAberrationEdgeGamma.value = p.chromaticAberrationEdgeGamma;
@@ -2453,6 +2467,10 @@ export class WaterEffectV2 {
 
       // Chromatic aberration
       uChromaticAberrationStrengthPx:  { value: p.chromaticAberrationStrengthPx },
+      uChromaticAberrationThreshold: { value: p.chromaticAberrationThreshold ?? 0.45 },
+      uChromaticAberrationThresholdSoftness: { value: p.chromaticAberrationThresholdSoftness ?? 0.18 },
+      uChromaticAberrationKawaseBlurPx: { value: p.chromaticAberrationKawaseBlurPx ?? 1.75 },
+      uChromaticAberrationSampleSpread: { value: p.chromaticAberrationSampleSpread ?? 1.0 },
       uChromaticAberrationEdgeCenter:  { value: p.chromaticAberrationEdgeCenter },
       uChromaticAberrationEdgeFeather: { value: p.chromaticAberrationEdgeFeather },
       uChromaticAberrationEdgeGamma:   { value: p.chromaticAberrationEdgeGamma },

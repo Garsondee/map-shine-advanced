@@ -117,6 +117,10 @@ uniform float uWaveMicroNormalSpecularStrength;
 
 // ── Chromatic aberration ─────────────────────────────────────────────────
 uniform float uChromaticAberrationStrengthPx;
+uniform float uChromaticAberrationThreshold;
+uniform float uChromaticAberrationThresholdSoftness;
+uniform float uChromaticAberrationKawaseBlurPx;
+uniform float uChromaticAberrationSampleSpread;
 uniform float uChromaticAberrationEdgeCenter;
 uniform float uChromaticAberrationEdgeFeather;
 uniform float uChromaticAberrationEdgeGamma;
@@ -1265,23 +1269,69 @@ void main() {
 
   #ifdef USE_WATER_CHROMATIC_ABERRATION
   vec2 texel2 = 1.0 / max(uResolution, vec2(1.0));
-  float caPx = clamp(uChromaticAberrationStrengthPx, 0.0, 12.0);
+  float caPxBase = clamp(uChromaticAberrationStrengthPx, 0.0, 12.0);
+  float caThresh = clamp(uChromaticAberrationThreshold, 0.0, 1.0);
+  float caSoft = max(0.001, uChromaticAberrationThresholdSoftness);
+  float lumBase = msLuminance(refracted.rgb);
+  float caLumaGate = smoothstep(caThresh - caSoft, caThresh + caSoft, lumBase);
   vec2 dir = offsetUv; float dirLen = length(dir);
   vec2 dirN = (dirLen > 1e-6) ? (dir / dirLen) : vec2(1.0, 0.0);
+  vec2 perpN = vec2(-dirN.y, dirN.x);
   // Gate by both SDF edge mask AND distMask so RGB samples never land outside
   // the water body or in occluded (upper-floor) areas near the shoreline.
-  float caEdgeMask = chromaticInsideFromSdf(sdf01) * clamp(distMask, 0.0, 1.0);
-  vec2 caUv = dirN * (caPx * texel2) * clamp(0.25 + 2.0 * distMask, 0.0, 2.5) * zoom * caEdgeMask;
+  float caEdgeMask = chromaticInsideFromSdf(sdf01) * clamp(distMask, 0.0, 1.0) * caLumaGate;
+  float caDistGate = smoothstep(0.0006, 0.006, dirLen);
+  float caPx = caPxBase * caEdgeMask * caDistGate;
+  float spread = clamp(uChromaticAberrationSampleSpread, 0.25, 3.0);
+  float kawasePx = clamp(uChromaticAberrationKawaseBlurPx, 0.0, 8.0);
+
+  vec2 caUv = dirN * (caPx * texel2) * clamp(0.35 + 1.9 * distMask, 0.0, 2.4) * zoom;
+  vec2 axisBlurUv = dirN * (kawasePx * texel2) * spread * zoom;
+  vec2 perpBlurUv = perpN * (kawasePx * texel2) * spread * zoom;
+
   vec2 uvR = clamp(uv1 + caUv, vec2(0.001), vec2(0.999));
   vec2 uvB = clamp(uv1 - caUv, vec2(0.001), vec2(0.999));
-  // Prevent RGB shift from pulling pixels from occluded (upper-floor) regions.
-  float occR = (uHasWaterOccluderAlpha > 0.5) ? texture2D(tWaterOccluderAlpha, uvR).a : 0.0;
-  float occB = (uHasWaterOccluderAlpha > 0.5) ? texture2D(tWaterOccluderAlpha, uvB).a : 0.0;
-  vec4 sR = texture2D(tDiffuse, uvR);
-  vec4 sB = texture2D(tDiffuse, uvB);
-  // Fall back to centre sample for any channel whose shifted UV is occluded.
-  float rChannel = (occR > 0.5) ? refracted.r : sR.r;
-  float bChannel = (occB > 0.5) ? refracted.b : sB.b;
+
+  float vR0 = refractTapValid(uvR);
+  float vR1 = refractTapValid(clamp(uvR + axisBlurUv, vec2(0.001), vec2(0.999)));
+  float vR2 = refractTapValid(clamp(uvR - axisBlurUv, vec2(0.001), vec2(0.999)));
+  float vR3 = refractTapValid(clamp(uvR + perpBlurUv, vec2(0.001), vec2(0.999)));
+  float vR4 = refractTapValid(clamp(uvR - perpBlurUv, vec2(0.001), vec2(0.999)));
+
+  float vB0 = refractTapValid(uvB);
+  float vB1 = refractTapValid(clamp(uvB + axisBlurUv, vec2(0.001), vec2(0.999)));
+  float vB2 = refractTapValid(clamp(uvB - axisBlurUv, vec2(0.001), vec2(0.999)));
+  float vB3 = refractTapValid(clamp(uvB + perpBlurUv, vec2(0.001), vec2(0.999)));
+  float vB4 = refractTapValid(clamp(uvB - perpBlurUv, vec2(0.001), vec2(0.999)));
+
+  float rW0 = 0.34 * vR0;
+  float rW1 = 0.165 * vR1;
+  float rW2 = 0.165 * vR2;
+  float rW3 = 0.165 * vR3;
+  float rW4 = 0.165 * vR4;
+  float bW0 = 0.34 * vB0;
+  float bW1 = 0.165 * vB1;
+  float bW2 = 0.165 * vB2;
+  float bW3 = 0.165 * vB3;
+  float bW4 = 0.165 * vB4;
+
+  float rSum = max(1e-5, rW0 + rW1 + rW2 + rW3 + rW4);
+  float bSum = max(1e-5, bW0 + bW1 + bW2 + bW3 + bW4);
+
+  float r0 = (vR0 > 0.5) ? texture2D(tDiffuse, uvR).r : refracted.r;
+  float r1 = (vR1 > 0.5) ? texture2D(tDiffuse, clamp(uvR + axisBlurUv, vec2(0.001), vec2(0.999))).r : refracted.r;
+  float r2 = (vR2 > 0.5) ? texture2D(tDiffuse, clamp(uvR - axisBlurUv, vec2(0.001), vec2(0.999))).r : refracted.r;
+  float r3 = (vR3 > 0.5) ? texture2D(tDiffuse, clamp(uvR + perpBlurUv, vec2(0.001), vec2(0.999))).r : refracted.r;
+  float r4 = (vR4 > 0.5) ? texture2D(tDiffuse, clamp(uvR - perpBlurUv, vec2(0.001), vec2(0.999))).r : refracted.r;
+
+  float b0 = (vB0 > 0.5) ? texture2D(tDiffuse, uvB).b : refracted.b;
+  float b1 = (vB1 > 0.5) ? texture2D(tDiffuse, clamp(uvB + axisBlurUv, vec2(0.001), vec2(0.999))).b : refracted.b;
+  float b2 = (vB2 > 0.5) ? texture2D(tDiffuse, clamp(uvB - axisBlurUv, vec2(0.001), vec2(0.999))).b : refracted.b;
+  float b3 = (vB3 > 0.5) ? texture2D(tDiffuse, clamp(uvB + perpBlurUv, vec2(0.001), vec2(0.999))).b : refracted.b;
+  float b4 = (vB4 > 0.5) ? texture2D(tDiffuse, clamp(uvB - perpBlurUv, vec2(0.001), vec2(0.999))).b : refracted.b;
+
+  float rChannel = (r0 * rW0 + r1 * rW1 + r2 * rW2 + r3 * rW3 + r4 * rW4) / rSum;
+  float bChannel = (b0 * bW0 + b1 * bW1 + b2 * bW2 + b3 * bW3 + b4 * bW4) / bSum;
   refracted.rgb = vec3(rChannel, refracted.g, bChannel);
   #endif
 

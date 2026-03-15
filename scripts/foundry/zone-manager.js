@@ -17,6 +17,7 @@
  */
 
 import { createLogger } from '../core/log.js';
+import { switchToLevelForElevation } from '../scene/level-interaction-service.js';
 
 const log = createLogger('ZoneManager');
 
@@ -1039,6 +1040,28 @@ export class ZoneManager {
   }
 
   /**
+   * Follow a controlled token's floor transition by switching the viewed floor
+   * to the band that owns the token's target elevation.
+   *
+   * @param {object|null} tokenDoc
+   * @param {number} targetElev
+   * @param {string} reason
+   */
+  _followControlledTokenFloorTransition(tokenDoc, targetElev, reason) {
+    if (!tokenDoc || !Number.isFinite(Number(targetElev))) return;
+    const controlled = Array.isArray(canvas?.tokens?.controlled) ? canvas.tokens.controlled : [];
+    const tokenId = String(tokenDoc?.id || tokenDoc?._id || '');
+    if (!tokenId) return;
+
+    const isControlled = controlled.some((t) => String(t?.document?.id || t?.id || '') === tokenId);
+    if (!isControlled) return;
+
+    // Nudge above shared boundaries so half-open [min, max) floor ownership
+    // resolves to the destination band consistently.
+    switchToLevelForElevation(Number(targetElev) + 0.001, reason);
+  }
+
+  /**
    * Handle stair zone behavior: toggle token elevation between two levels.
    * Uses inclusive range checks `[bottom, top]` so tokens exactly at a
    * boundary aren't excluded.
@@ -1133,6 +1156,7 @@ export class ZoneManager {
       `${currentElev} → ${targetElev}`
     );
     await doc.update({ elevation: targetElev });
+    this._followControlledTokenFloorTransition(doc, targetElev, 'zone-stair-floor-follow');
   }
 
   /**
@@ -1217,6 +1241,7 @@ export class ZoneManager {
       `${currentElev} → ${targetElev}`
     );
     await doc.update({ elevation: targetElev });
+    this._followControlledTokenFloorTransition(doc, targetElev, 'zone-elevator-floor-follow');
   }
 
   // -------------------------------------------------------------------------

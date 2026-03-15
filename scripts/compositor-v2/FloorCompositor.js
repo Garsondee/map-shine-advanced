@@ -402,6 +402,15 @@ export class FloorCompositor {
     /** @type {boolean} Whether initialize() has been called */
     this._initialized = false;
 
+    /**
+     * Whether the shader warmup gate is open. While false, all effect update()
+     * calls receive delta=0 so time-based systems (particles, wind, waves) don't
+     * accumulate missed time during the warmup window. Opens via openShaderGate()
+     * after warmupAsync() resolves.
+     * @type {boolean}
+     */
+    this._shaderWarmupGateOpen = false;
+
     /** @type {THREE.Vector2} Reusable size vector (avoids per-frame allocation) */
     this._sizeVec = null;
 
@@ -1413,14 +1422,20 @@ export class FloorCompositor {
   /**
    * Asynchronously compiles all shaders used by the compositor and its effects.
    * This prevents the main thread from freezing when the first frame renders.
-   * 
+   *
    * It traverses all scenes (including the FloorRenderBus scene which contains
    * meshes for all floors, visible or not), so materials for all floors are compiled.
-   * 
-   * @param {number} [timeoutMs=5000] - Maximum time to wait for compilation
+   *
+   * Uses KHR_parallel_shader_compile when available so GPU compilation runs
+   * in a driver thread without blocking the browser main thread. Progress is
+   * reported via onProgress by polling renderer.info.programs readiness every 32ms.
+   *
+   * @param {number} [timeoutMs=8000] - Maximum time to wait for compilation
+   * @param {((progress: number, label: string) => void)|null} [onProgress] - Optional
+   *   callback fired ~30× per second with (0..1 progress, status label)
    * @returns {Promise<boolean>} True if completed fully, false if timed out or failed
    */
-  async warmupAsync(timeoutMs = 5000) {
+  async warmupAsync(timeoutMs = 8000, onProgress = null) {
     if (!this.renderer || typeof this.renderer.compileAsync !== 'function') {
       log.warn('warmupAsync: renderer.compileAsync is not available');
       return false;
@@ -1488,11 +1503,15 @@ export class FloorCompositor {
       }
     }
 
-    if (targets.length === 0) return true;
+    if (targets.length === 0) {
+      if (onProgress) try { onProgress(1.0, 'Shaders: 0/0'); } catch (_) {}
+      return true;
+    }
 
     log.info(`warmupAsync: starting compilation for ${targets.length} scenes...`);
 
     const cameraMasks = new Map();
+    let _pollingActive = false;
     try {
       const enableAllLayers = (camera) => {
         if (!camera || camera.isCamera !== true || !camera.layers) return;
@@ -1504,6 +1523,9 @@ export class FloorCompositor {
       // Compile with all layers enabled so hidden floors also warm up.
       enableAllLayers(this.camera);
 
+      // Submit all compile jobs. renderer.compileAsync calls renderer.compile()
+      // synchronously inside, which submits all programs to the GPU driver.
+      // After these calls, all programs exist in renderer.info.programs.
       const promises = [];
       for (const target of targets) {
         enableAllLayers(target.camera);
@@ -1523,24 +1545,76 @@ export class FloorCompositor {
         return false;
       }
 
+      // Snapshot total program count now that compile() has submitted them.
+      const getPrograms = () => this.renderer.info?.programs ?? [];
+      const totalAtSubmit = getPrograms().length;
+      log.info(`warmupAsync: ${totalAtSubmit} programs submitted`);
+
+      // Parallel polling loop: report KHR_parallel_shader_compile readiness at ~30fps.
+      // Without the extension isReady() returns true immediately (programs stall on
+      // first draw instead) — progress still jumps to 100% quickly, which is correct.
+      _pollingActive = true;
+      const pollLoop = (async () => {
+        while (_pollingActive) {
+          if (onProgress) {
+            const progs = getPrograms();
+            const total = Math.max(progs.length, totalAtSubmit, 1);
+            let ready = 0;
+            for (const p of progs) {
+              try { if (typeof p.isReady === 'function' ? p.isReady() : true) ready++; } catch (_) { ready++; }
+            }
+            try { onProgress(Math.min(ready / total, 1.0), `Shaders: ${ready}/${total}`); } catch (_) {}
+            if (ready >= total) break;
+          }
+          await new Promise(r => setTimeout(r, 32));
+        }
+      })();
+
       const timeoutPromise = new Promise((resolve) => setTimeout(() => resolve('timeout'), timeoutMs));
-      const result = await Promise.race([Promise.all(promises), timeoutPromise]);
-      
+      const result = await Promise.race([Promise.all([...promises, pollLoop]), timeoutPromise]);
+      _pollingActive = false;
+
       if (result === 'timeout') {
         log.warn(`warmupAsync: shader compilation timed out after ${timeoutMs}ms, proceeding with lazy compilation`);
+        // Report final achieved progress on timeout.
+        if (onProgress) {
+          const progs = getPrograms();
+          const total = Math.max(progs.length, 1);
+          let ready = 0;
+          for (const p of progs) {
+            try { if (typeof p.isReady === 'function' ? p.isReady() : true) ready++; } catch (_) { ready++; }
+          }
+          try { onProgress(Math.min(ready / total, 1.0), `Shaders: ${ready}/${total} (timeout)`); } catch (_) {}
+        }
         return false;
       }
-      
-      log.info('warmupAsync: shader compilation finished successfully');
+
+      // Final 100% report.
+      const finalCount = getPrograms().length;
+      if (onProgress) try { onProgress(1.0, `Shaders: ${finalCount}/${finalCount}`); } catch (_) {}
+      log.info(`warmupAsync: shader compilation finished (${finalCount} programs)`);
       return true;
     } catch (err) {
+      _pollingActive = false;
       log.error('warmupAsync: error during shader compilation', err);
       return false;
     } finally {
+      _pollingActive = false;
       for (const [camera, mask] of cameraMasks.entries()) {
         try { camera.layers.mask = mask; } catch (_) {}
       }
     }
+  }
+
+  /**
+   * Open the shader warmup gate, allowing time to advance in all effects.
+   * Call this after warmupAsync() resolves so all systems start simultaneously
+   * from t=0 rather than catching up on accumulated missed time.
+   */
+  openShaderGate() {
+    if (this._shaderWarmupGateOpen) return;
+    this._shaderWarmupGateOpen = true;
+    log.info('FloorCompositor: shader warmup gate opened — time now advancing');
   }
 
   /**
@@ -1614,6 +1688,12 @@ export class FloorCompositor {
     this._syncOutdoorsMaskConsumers({ context: window.MapShine?.activeLevelContext ?? null });
 
     // ── Update effects (time-varying uniforms) ───────────────────────────
+    // Freeze delta to 0 while the shader warmup gate is closed. This prevents
+    // particles, wind, and waves from accumulating time during the warmup window
+    // so all systems start cleanly from t=0 when the scene first becomes visible.
+    if (!this._shaderWarmupGateOpen && timeInfo) {
+      timeInfo = { ...timeInfo, delta: 0 };
+    }
     if (timeInfo) {
       // Wind must advance before update() so accumulation is 1× per frame.
       this._cloudEffect.advanceWind(timeInfo.delta ?? 0.016);

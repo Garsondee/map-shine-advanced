@@ -126,6 +126,8 @@ uniform float uChromaticAberrationEdgeCenter;
 uniform float uChromaticAberrationEdgeFeather;
 uniform float uChromaticAberrationEdgeGamma;
 uniform float uChromaticAberrationEdgeMin;
+uniform float uChromaticAberrationDeadzone;
+uniform float uChromaticAberrationDeadzoneSoftness;
 
 // ── Distortion edge masking ──────────────────────────────────────────────
 uniform float uDistortionEdgeCenter;
@@ -161,6 +163,8 @@ uniform float uWaveTime;
 uniform float uLockWaveTravelToWind;
 uniform float uWaveDirOffsetRad;
 uniform float uWaveAppearanceRotRad;
+uniform float uWaveTriBlendAngleRad;
+uniform float uWaveTriSideWeight;
 
 // ── Specular (GGX) ──────────────────────────────────────────────────────
 uniform float uSpecStrength;
@@ -915,7 +919,15 @@ float chromaticInsideFromSdf(float sdf01) {
   float f = max(0.0, uChromaticAberrationEdgeFeather);
   float inside = (f > 1e-6) ? smoothstep(c + f, c - f, sdf01) : step(sdf01, c);
   inside = pow(clamp(inside, 0.0, 1.0), max(0.01, uChromaticAberrationEdgeGamma));
-  return max(clamp(uChromaticAberrationEdgeMin, 0.0, 1.0), inside);
+  inside = max(clamp(uChromaticAberrationEdgeMin, 0.0, 1.0), inside);
+
+  // Deadzone near shoreline edge (water-land transition) to prevent CA overlap
+  // artifacts where mask transitions are sharp.
+  float dz = max(0.0, uChromaticAberrationDeadzone);
+  float dzSoft = max(1e-5, uChromaticAberrationDeadzoneSoftness);
+  float edgeDelta = max(0.0, c - sdf01);
+  float deadzoneMask = smoothstep(dz, dz + dzSoft, edgeDelta);
+  return inside * deadzoneMask;
 }
 
 // ── Foam flecks (shader-based) ───────────────────────────────────────────

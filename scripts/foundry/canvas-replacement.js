@@ -2930,13 +2930,14 @@ async function onCanvasReady(canvas) {
     loadingOverlay.setSceneName(displayName);
     loadingOverlay.configureStages([
       { id: 'assets.discover', label: 'Discovering assets...', weight: 5 },
-      { id: 'assets.load',     label: 'Loading textures...', weight: 25 },
-      { id: 'effects.core',    label: 'Core effects...', weight: 15 },
-      { id: 'effects.deps',    label: 'Dependent effects...', weight: 10 },
-      { id: 'effects.wire',    label: 'Wiring effects...', weight: 5 },
-      { id: 'scene.managers',  label: 'Scene managers...', weight: 15 },
-      { id: 'scene.sync',      label: 'Syncing objects...', weight: 15 },
-      { id: 'final',           label: 'Finalizing...', weight: 10 },
+      { id: 'assets.load',     label: 'Loading textures...',   weight: 25 },
+      { id: 'effects.core',    label: 'Core effects...',       weight: 12 },
+      { id: 'effects.deps',    label: 'Dependent effects...',  weight: 5  },
+      { id: 'effects.wire',    label: 'Wiring effects...',     weight: 3  },
+      { id: 'scene.managers',  label: 'Scene managers...',     weight: 12 },
+      { id: 'scene.sync',      label: 'Syncing objects...',    weight: 13 },
+      { id: 'shaders.compile', label: 'Compiling shaders...',  weight: 20 },
+      { id: 'final',           label: 'Finalizing...',         weight: 5  },
     ]);
     loadingOverlay.startStages();
     loadingOverlay.setStage('assets.discover', 0.0, undefined, { immediate: true });
@@ -4421,18 +4422,15 @@ async function createThreeCanvas(scene) {
     });
     modeManager.ensureUILayering();
 
-    // Step 7.5: Progressive shader warmup.
-    //
-    // When V2 compositor is active, all effect shaders are bypassed at runtime.
-    // V2 uses MeshBasicMaterial only ->-> no custom shaders to warm up.
-    // Skip the full progressive warmup to avoid compiling 30+ unused shaders.
+    // Step 7.5: Shader compile stage initialisation.
+    // Actual async shader compilation runs later (fin.shaderCompile) after the
+    // bus is populated by the first render frame. This step just primes the stage.
     _sectionStart('gpu.shaderCompile');
     if (isDebugLoad) dlp.begin('gpu.shaderCompile', 'gpu');
     {
-      // V2 compositor is always-on. Legacy V1 progressive shader warmup has been removed.
-      safeCall(() => loadingOverlay.setStage('final', 0.05, 'Shaders ready...', { keepAuto: true }), 'overlay.shaderCompile', Severity.COSMETIC);
-      dlp.event('gpu.shaderCompile: SKIPPED ->-> V2 compositor active');
-      log.info('Shader warmup skipped: V2 compositor active');
+      safeCall(() => loadingOverlay.setStage('shaders.compile', 0.0, 'Preparing shaders...', { immediate: true }), 'overlay.shaderCompile.init', Severity.COSMETIC);
+      dlp.event('gpu.shaderCompile: stage initialised ->-> async warmup deferred to fin.shaderCompile');
+      log.info('Shader compile stage initialised: async warmup will run after bus populate');
     }
     if (isDebugLoad) dlp.end('gpu.shaderCompile');
     _sectionEnd('gpu.shaderCompile');
@@ -5360,6 +5358,56 @@ async function createThreeCanvas(scene) {
 
     console.log(' -> Step: preloadAllFloors DONE');
     if (isDebugLoad) dlp.end('fin.preloadAllFloors');
+
+    // Step: Shader compilation gate.
+    // Awaits non-blocking GPU shader compilation (KHR_parallel_shader_compile) before
+    // revealing the scene. This prevents the first-frame stutter that occurs when
+    // shaders compile lazily on first draw. Reports progress to the shaders.compile stage.
+    _sectionStart('fin.shaderCompile');
+    if (isDebugLoad) dlp.begin('fin.shaderCompile', 'finalize');
+    safeCall(() => loadingOverlay.setStage('shaders.compile', 0.0, 'Compiling shaders...', { immediate: true }), 'overlay.shaderCompile.start', Severity.COSMETIC);
+    _setCreateThreeCanvasProgress('shaderCompile');
+    console.log(' -> Step: shaderCompile');
+    await safeCallAsync(async () => {
+      const fc = window.MapShine?.effectComposer?._floorCompositorV2;
+      if (!fc || typeof fc.warmupAsync !== 'function') {
+        log.warn('fin.shaderCompile: no FloorCompositor available, shaders will compile lazily');
+        safeCall(() => loadingOverlay.setStage('shaders.compile', 1.0, 'Shaders: ready (lazy)', { immediate: true }), 'overlay.shaderCompile.skip', Severity.COSMETIC);
+        return;
+      }
+
+      // Ensure the bus is populated so effect materials exist in their scenes.
+      // _ensureBusPopulated is deduped via _populatePromise — safe to call repeatedly.
+      await fc.prewarmForLoading({ prewarmAllFloors: false, awaitPopulate: true });
+
+      // One render frame to force-submit any lazily-created materials to the GPU.
+      safeCall(() => effectComposer.progressiveWarmup(), 'shaderCompile.progressiveWarmup', Severity.DEGRADED);
+      await new Promise(r => setTimeout(r, 16));
+
+      // Await non-blocking async compilation, polling KHR_parallel_shader_compile.
+      if (isDebugLoad) dlp.begin('fin.shaderCompile.warmupAsync', 'finalize');
+      const compiled = await fc.warmupAsync(10000, (progress, label) => {
+        safeCall(() => {
+          loadingOverlay.setStage('shaders.compile', progress, label, { keepAuto: false });
+        }, 'overlay.shaderCompile.progress', Severity.COSMETIC);
+      });
+      if (isDebugLoad) {
+        const progCount = renderer.info?.programs?.length ?? 0;
+        dlp.event(`fin.shaderCompile.warmupAsync: ${compiled ? 'OK' : 'TIMEOUT'}, ${progCount} programs`);
+        dlp.end('fin.shaderCompile.warmupAsync');
+      }
+      if (!compiled) {
+        log.warn('fin.shaderCompile: warmupAsync timed out — some shaders will compile lazily on first frame');
+      }
+
+      // Open the time gate: all effects now start advancing from t=0 together.
+      fc.openShaderGate();
+
+      safeCall(() => loadingOverlay.setStage('shaders.compile', 1.0, 'Shaders ready', { immediate: true }), 'overlay.shaderCompile.done', Severity.COSMETIC);
+    }, 'fin.shaderCompile', Severity.DEGRADED);
+    console.log(' -> Step: shaderCompile DONE');
+    if (isDebugLoad) dlp.end('fin.shaderCompile');
+    _sectionEnd('fin.shaderCompile');
 
     _sectionStart('fin.fadeIn');
     dlp.event('fin.fadeIn: loading pipeline complete ->-> preparing overlay transition');

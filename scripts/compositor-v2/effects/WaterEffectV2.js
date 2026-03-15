@@ -138,6 +138,8 @@ export class WaterEffectV2 {
       chromaticAberrationEdgeFeather: 0.10,
       chromaticAberrationEdgeGamma: 1.0,
       chromaticAberrationEdgeMin: 0.0,
+      chromaticAberrationDeadzone: 0.02,
+      chromaticAberrationDeadzoneSoftness: 0.02,
 
       // Distortion edge masking
       distortionEdgeCenter: 0.50,
@@ -167,6 +169,8 @@ export class WaterEffectV2 {
       lockWaveTravelToWind: true,
       waveDirOffsetDeg: 0.0,
       waveAppearanceRotDeg: 0.0,
+      waveTriBlendAngleDeg: 35.0,
+      waveTriSideWeight: 0.35,
       waveAppearanceOffsetDeg: 0.0,
       // Wave direction field (patchwise crisscrossing)
       waveDirFieldEnabled: true,
@@ -675,6 +679,7 @@ export class WaterEffectV2 {
             'waveIndoorDampingEnabled', 'waveIndoorDampingStrength', 'waveIndoorMinFactor',
             'windDirResponsiveness',
             'lockWaveTravelToWind', 'waveDirOffsetDeg', 'waveAppearanceRotDeg',
+            'waveTriBlendAngleDeg', 'waveTriSideWeight',
             'advectionDirOffsetDeg', 'advectionSpeed01'
           ]
         },
@@ -700,7 +705,8 @@ export class WaterEffectV2 {
             'chromaticAberrationThreshold', 'chromaticAberrationThresholdSoftness',
             'chromaticAberrationKawaseBlurPx', 'chromaticAberrationSampleSpread',
             'chromaticAberrationEdgeCenter', 'chromaticAberrationEdgeFeather',
-            'chromaticAberrationEdgeGamma', 'chromaticAberrationEdgeMin'
+            'chromaticAberrationEdgeGamma', 'chromaticAberrationEdgeMin',
+            'chromaticAberrationDeadzone', 'chromaticAberrationDeadzoneSoftness'
           ]
         },
         {
@@ -895,6 +901,8 @@ export class WaterEffectV2 {
         lockWaveTravelToWind: { type: 'boolean', default: true, label: 'Lock Travel To Wind' },
         waveDirOffsetDeg: { type: 'slider', min: -180, max: 180, step: 1, default: 0.0, label: 'Wave Dir Offset (deg)' },
         waveAppearanceRotDeg: { type: 'slider', min: -180, max: 180, step: 1, default: 0.0, label: 'Wave Appearance Rot (deg)' },
+        waveTriBlendAngleDeg: { type: 'slider', min: 0, max: 90, step: 1, default: 35.0, label: 'Tri Blend Angle (deg)' },
+        waveTriSideWeight: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.35, label: 'Tri Blend Side Weight' },
         advectionDirOffsetDeg: { type: 'slider', min: -180, max: 180, step: 1, default: 0.0, label: 'Advection Dir Offset (deg)' },
         advectionSpeed01: { type: 'slider', min: 0, max: 3, step: 0.01, default: 0.15, label: 'Advection Speed' },
 
@@ -909,6 +917,8 @@ export class WaterEffectV2 {
         chromaticAberrationEdgeFeather: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.10, label: 'Chromatic Edge Feather' },
         chromaticAberrationEdgeGamma: { type: 'slider', min: 0.1, max: 4, step: 0.01, default: 1.0, label: 'Chromatic Edge Gamma' },
         chromaticAberrationEdgeMin: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.0, label: 'Chromatic Edge Min' },
+        chromaticAberrationDeadzone: { type: 'slider', min: 0, max: 0.25, step: 0.001, default: 0.02, label: 'Chromatic Deadzone' },
+        chromaticAberrationDeadzoneSoftness: { type: 'slider', min: 0.001, max: 0.25, step: 0.001, default: 0.02, label: 'Deadzone Softness' },
         distortionEdgeCenter: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.50, label: 'Distortion Edge Center' },
         distortionEdgeFeather: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.06, label: 'Distortion Edge Feather' },
         distortionEdgeGamma: { type: 'slider', min: 0.1, max: 4, step: 0.01, default: 1.0, label: 'Distortion Edge Gamma' },
@@ -2174,6 +2184,8 @@ export class WaterEffectV2 {
     u.uWaveDirOffsetRad.value = (p.waveDirOffsetDeg ?? 0) * (Math.PI / 180);
     const waveAppearanceDeg = this._resolveWaveAppearanceDeg(p);
     u.uWaveAppearanceRotRad.value = waveAppearanceDeg * (Math.PI / 180);
+    if (u.uWaveTriBlendAngleRad) u.uWaveTriBlendAngleRad.value = Math.abs((p.waveTriBlendAngleDeg ?? 35.0) * (Math.PI / 180));
+    if (u.uWaveTriSideWeight) u.uWaveTriSideWeight.value = Math.max(0.0, Number(p.waveTriSideWeight ?? 0.35));
 
     // Patchwise wave direction field
     u.uWaveDirFieldEnabled.value = (p.waveDirFieldEnabled === false) ? 0.0 : 1.0;
@@ -2201,6 +2213,8 @@ export class WaterEffectV2 {
     u.uChromaticAberrationEdgeFeather.value = p.chromaticAberrationEdgeFeather;
     u.uChromaticAberrationEdgeGamma.value = p.chromaticAberrationEdgeGamma;
     u.uChromaticAberrationEdgeMin.value = p.chromaticAberrationEdgeMin;
+    u.uChromaticAberrationDeadzone.value = p.chromaticAberrationDeadzone ?? 0.02;
+    u.uChromaticAberrationDeadzoneSoftness.value = p.chromaticAberrationDeadzoneSoftness ?? 0.02;
 
     // ── Precipitation distortion (WeatherController coupling) ──────────────
     // Resolve precipitation: manual param, override, or live weather.
@@ -2844,6 +2858,8 @@ export class WaterEffectV2 {
       uChromaticAberrationEdgeFeather: { value: p.chromaticAberrationEdgeFeather },
       uChromaticAberrationEdgeGamma:   { value: p.chromaticAberrationEdgeGamma },
       uChromaticAberrationEdgeMin:     { value: p.chromaticAberrationEdgeMin },
+      uChromaticAberrationDeadzone: { value: p.chromaticAberrationDeadzone ?? 0.02 },
+      uChromaticAberrationDeadzoneSoftness: { value: p.chromaticAberrationDeadzoneSoftness ?? 0.02 },
 
       // Distortion edge
       uDistortionEdgeCenter:    { value: p.distortionEdgeCenter },
@@ -2878,6 +2894,8 @@ export class WaterEffectV2 {
       uLockWaveTravelToWind: { value: p.lockWaveTravelToWind ? 1.0 : 0.0 },
       uWaveDirOffsetRad:     { value: 0.0 },
       uWaveAppearanceRotRad: { value: 0.0 },
+      uWaveTriBlendAngleRad: { value: Math.abs(Number(p.waveTriBlendAngleDeg ?? 35.0) * (Math.PI / 180)) },
+      uWaveTriSideWeight:    { value: Math.max(0.0, Number(p.waveTriSideWeight ?? 0.35)) },
 
       // Patchwise wave direction field
       uWaveDirFieldEnabled: { value: (p.waveDirFieldEnabled === false) ? 0.0 : 1.0 },

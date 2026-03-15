@@ -51,8 +51,9 @@ const RO_BASE       = 250000;
 const RO_LINE_OUTER = 250001;
 const RO_LINE_INNER = 250002;
 const RO_TILES      = 250003;
-const RO_GHOST      = 250004;
-const RO_DRAG       = 250005;
+const RO_PORTAL     = 250004;
+const RO_GHOST      = 250005;
+const RO_DRAG       = 250006;
 
 // ─── MovementPreviewEffectV2 ─────────────────────────────────────────────────
 
@@ -76,6 +77,8 @@ export class MovementPreviewEffectV2 {
     this._lineInner = null;
     /** @type {import('three').Group|null} */
     this._tileGroup = null;
+    /** @type {import('three').Group|null} */
+    this._portalGroup = null;
     /** @type {import('three').Group|null} */
     this._ghostGroup = null;
 
@@ -217,6 +220,29 @@ export class MovementPreviewEffectV2 {
       }
     }
 
+    // Fog-of-war occlusion for players: clip preview at the first hidden cell so
+    // path UI cannot reveal geometry/routes beyond explored/visible space.
+    const shouldFogClip = !game?.user?.isGM;
+    let hiddenTailClipped = false;
+    if (shouldFogClip && displayCells.length > 0) {
+      const clippedCells = [];
+      for (const cell of displayCells) {
+        const visible = this._isFoundryPointVisibleToPlayer(cell.centerX, cell.centerY);
+        if (!visible) {
+          hiddenTailClipped = true;
+          break;
+        }
+        clippedCells.push(cell);
+      }
+      displayCells.length = 0;
+      displayCells.push(...clippedCells);
+    }
+
+    if (displayCells.length < 2) {
+      this.clearPathPreview();
+      return;
+    }
+
     // ── Build world-space points from the same snapped cell route used for highlights ──
     const points = displayCells.map(cell => {
       const w = Coordinates.toWorld(cell.centerX, cell.centerY);
@@ -258,6 +284,87 @@ export class MovementPreviewEffectV2 {
     // ── Ghost token(s) at destination ───────────────────────────────────────
     this._clearChildren(this._ghostGroup, false);
 
+    // ── Cross-floor portal markers ──────────────────────────────────────────
+    this._clearChildren(this._portalGroup, true);
+    const crossFloorSegments = Array.isArray(options?.crossFloorSegments)
+      ? options.crossFloorSegments
+      : [];
+    if (crossFloorSegments.length > 0) {
+      const markerRadius = Math.max(8, Math.min(tileW, tileH) * 0.22);
+      for (const segment of crossFloorSegments) {
+        if (String(segment?.type || '') !== 'portal-transition') continue;
+        const entry = segment?.entry;
+        const exit = segment?.exit;
+        if (!entry || !Number.isFinite(Number(entry.x)) || !Number.isFinite(Number(entry.y))) continue;
+
+        const entryVisible = !shouldFogClip || this._isFoundryPointVisibleToPlayer(entry.x, entry.y);
+        if (!entryVisible) continue;
+        const exitVisible = !!(exit
+          && Number.isFinite(Number(exit.x))
+          && Number.isFinite(Number(exit.y))
+          && (!shouldFogClip || this._isFoundryPointVisibleToPlayer(exit.x, exit.y)));
+
+        const entryWorld = Coordinates.toWorld(Number(entry.x), Number(entry.y));
+        const entryMarker = new THREE.Mesh(
+          new THREE.CircleGeometry(markerRadius, 22),
+          new THREE.MeshBasicMaterial({
+            color: 0xffc347,
+            transparent: true,
+            opacity: 0.82,
+            depthTest: false,
+            depthWrite: false
+          })
+        );
+        entryMarker.position.set(entryWorld.x, entryWorld.y, OVERLAY_Z + 0.01);
+        entryMarker.renderOrder = RO_PORTAL;
+        entryMarker.layers.set(OVERLAY_THREE_LAYER);
+        entryMarker.layers.enable(0);
+        this._portalGroup.add(entryMarker);
+
+        if (exitVisible) {
+          const exitWorld = Coordinates.toWorld(Number(exit.x), Number(exit.y));
+
+          const connector = new THREE.Line(
+            new THREE.BufferGeometry().setFromPoints([
+              new THREE.Vector3(entryWorld.x, entryWorld.y, OVERLAY_Z + 0.01),
+              new THREE.Vector3(exitWorld.x, exitWorld.y, OVERLAY_Z + 0.01)
+            ]),
+            new THREE.LineDashedMaterial({
+              color: 0xffd98f,
+              transparent: true,
+              opacity: 0.85,
+              depthTest: false,
+              depthWrite: false,
+              dashSize: Math.max(8, markerRadius * 0.9),
+              gapSize: Math.max(6, markerRadius * 0.65),
+              scale: 1
+            })
+          );
+          try { connector.computeLineDistances(); } catch (_) {}
+          connector.renderOrder = RO_PORTAL;
+          connector.layers.set(OVERLAY_THREE_LAYER);
+          connector.layers.enable(0);
+          this._portalGroup.add(connector);
+
+          const exitMarker = new THREE.Mesh(
+            new THREE.RingGeometry(markerRadius * 0.5, markerRadius * 0.9, 24),
+            new THREE.MeshBasicMaterial({
+              color: 0x8fe3ff,
+              transparent: true,
+              opacity: 0.82,
+              depthTest: false,
+              depthWrite: false
+            })
+          );
+          exitMarker.position.set(exitWorld.x, exitWorld.y, OVERLAY_Z + 0.011);
+          exitMarker.renderOrder = RO_PORTAL;
+          exitMarker.layers.set(OVERLAY_THREE_LAYER);
+          exitMarker.layers.enable(0);
+          this._portalGroup.add(exitMarker);
+        }
+      }
+    }
+
     if (showGhosts && tokenManager) {
       /**
        * @param {object} doc  Token document
@@ -265,6 +372,9 @@ export class MovementPreviewEffectV2 {
        */
       const addGhost = (doc, endFoundryCenter) => {
         if (!doc || !endFoundryCenter) return;
+        if (shouldFogClip && !this._isFoundryPointVisibleToPlayer(endFoundryCenter.x, endFoundryCenter.y)) {
+          return;
+        }
         const spriteData = doc?.id ? tokenManager.tokenSprites?.get?.(doc.id) : null;
         const sourceSprite = spriteData?.sprite;
         if (!sourceSprite) return;
@@ -330,6 +440,10 @@ export class MovementPreviewEffectV2 {
       const distanceInUnits = (dist / Math.max(1, pxPerGrid)) * unitsPerGrid;
       const distLabel = Number.isFinite(distanceInUnits) ? distanceInUnits.toFixed(1) : '0.0';
       this._labelEl.textContent = units ? `${distLabel} ${units}` : distLabel;
+      if (hiddenTailClipped) {
+        // Avoid implying hidden remaining distance by appending an ellipsis.
+        this._labelEl.textContent += '…';
+      }
 
       if (options?.worldToClient) {
         const last = points[points.length - 1];
@@ -499,6 +613,13 @@ export class MovementPreviewEffectV2 {
     this._tileGroup.layers.set(OVERLAY_THREE_LAYER);
     this._tileGroup.layers.enable(0);
 
+    // Cross-floor portal transition markers.
+    this._portalGroup = new THREE.Group();
+    this._portalGroup.name = 'MovementPreviewPortalsV2';
+    this._portalGroup.renderOrder = RO_PORTAL;
+    this._portalGroup.layers.set(OVERLAY_THREE_LAYER);
+    this._portalGroup.layers.enable(0);
+
     // Destination ghost token sprite(s).
     this._ghostGroup = new THREE.Group();
     this._ghostGroup.name = 'MovementPreviewGhostsV2';
@@ -509,6 +630,7 @@ export class MovementPreviewEffectV2 {
     group.add(this._lineOuter);
     group.add(this._lineInner);
     group.add(this._tileGroup);
+    group.add(this._portalGroup);
     group.add(this._ghostGroup);
 
     this._scene.add(group);
@@ -546,6 +668,7 @@ export class MovementPreviewEffectV2 {
     this._lineOuter = null;
     this._lineInner = null;
     this._tileGroup = null;
+    this._portalGroup = null;
     this._ghostGroup = null;
   }
 
@@ -563,6 +686,7 @@ export class MovementPreviewEffectV2 {
       if (window.THREE) this._lineInner.geometry = new window.THREE.BufferGeometry();
     }
     this._clearChildren(this._tileGroup, true);
+    this._clearChildren(this._portalGroup, true);
     this._clearChildren(this._ghostGroup, false);
   }
 
@@ -580,6 +704,26 @@ export class MovementPreviewEffectV2 {
         try { child.geometry?.dispose?.(); } catch (_) {}
       }
       try { child.material?.dispose?.(); } catch (_) {}
+    }
+  }
+
+  /**
+   * Return whether a Foundry-space point is visible/explored for players.
+   * @param {number} x
+   * @param {number} y
+   * @returns {boolean}
+   */
+  _isFoundryPointVisibleToPlayer(x, y) {
+    const px = Number(x ?? 0);
+    const py = Number(y ?? 0);
+    if (!Number.isFinite(px) || !Number.isFinite(py)) return false;
+
+    try {
+      const visible = !!canvas?.visibility?.testVisibility?.({ x: px, y: py }, { tolerance: 1 });
+      const explored = !!canvas?.fog?.isPointExplored?.({ x: px, y: py });
+      return visible || explored;
+    } catch (_) {
+      return false;
     }
   }
 }

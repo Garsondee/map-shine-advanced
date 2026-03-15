@@ -408,8 +408,14 @@ export function readWallHeightFlags(wallDoc) {
   // IMPORTANT: wall-height must remain authoritative even when Levels
   // compatibility mode is OFF so floor-scoped walls don't regress into
   // full-height blockers across all levels.
-  const flags = wallDoc?.flags?.['wall-height']
+  const wallHeightFlags = wallDoc?.flags?.['wall-height']
     ?? wallDoc?.document?.flags?.['wall-height'];
+  const levelsFlags = wallDoc?.flags?.levels
+    ?? wallDoc?.document?.flags?.levels;
+
+  // Prefer wall-height module bounds when present. If absent, fall back to
+  // Levels wall ranges so level-scoped walls are not treated as full-height.
+  const flags = wallHeightFlags || levelsFlags;
   if (!flags) return defaults;
 
   let bottom = -Infinity;
@@ -417,20 +423,27 @@ export function readWallHeightFlags(wallDoc) {
 
   const docId = wallDoc?.id ?? wallDoc?._id;
 
-  if (flags.bottom !== undefined && flags.bottom !== null) {
-    const n = Number(flags.bottom);
+  const rawBottom = (flags.bottom !== undefined && flags.bottom !== null)
+    ? flags.bottom
+    : flags.rangeBottom;
+  const rawTop = (flags.top !== undefined && flags.top !== null)
+    ? flags.top
+    : flags.rangeTop;
+
+  if (rawBottom !== undefined && rawBottom !== null) {
+    const n = Number(rawBottom);
     if (Number.isFinite(n)) {
       bottom = n;
-    } else if (flags.bottom !== Infinity && flags.bottom !== -Infinity) {
-      _recordFlagDiagnostic('readWallHeightFlags', 'bottom', flags.bottom, bottom, docId);
+    } else if (rawBottom !== Infinity && rawBottom !== -Infinity) {
+      _recordFlagDiagnostic('readWallHeightFlags', 'bottom', rawBottom, bottom, docId);
     }
   }
-  if (flags.top !== undefined && flags.top !== null) {
-    const n = Number(flags.top);
+  if (rawTop !== undefined && rawTop !== null) {
+    const n = Number(rawTop);
     if (Number.isFinite(n)) {
       top = n;
-    } else if (flags.top !== Infinity && flags.top !== -Infinity) {
-      _recordFlagDiagnostic('readWallHeightFlags', 'top', flags.top, top, docId);
+    } else if (rawTop !== Infinity && rawTop !== -Infinity) {
+      _recordFlagDiagnostic('readWallHeightFlags', 'top', rawTop, top, docId);
     }
   }
 
@@ -445,15 +458,24 @@ export function readWallHeightFlags(wallDoc) {
  * @returns {boolean}
  */
 export function wallHasHeightBounds(wallDoc) {
-  const flags = wallDoc?.flags?.['wall-height']
+  const wallHeightFlags = wallDoc?.flags?.['wall-height']
     ?? wallDoc?.document?.flags?.['wall-height'];
+  const levelsFlags = wallDoc?.flags?.levels
+    ?? wallDoc?.document?.flags?.levels;
+  const flags = wallHeightFlags || levelsFlags;
   if (!flags) return false;
-  if (flags.bottom !== undefined && flags.bottom !== null) {
-    const n = Number(flags.bottom);
+  const rawBottom = (flags.bottom !== undefined && flags.bottom !== null)
+    ? flags.bottom
+    : flags.rangeBottom;
+  const rawTop = (flags.top !== undefined && flags.top !== null)
+    ? flags.top
+    : flags.rangeTop;
+  if (rawBottom !== undefined && rawBottom !== null) {
+    const n = Number(rawBottom);
     if (Number.isFinite(n)) return true;
   }
-  if (flags.top !== undefined && flags.top !== null) {
-    const n = Number(flags.top);
+  if (rawTop !== undefined && rawTop !== null) {
+    const n = Number(rawTop);
     if (Number.isFinite(n)) return true;
   }
   return false;

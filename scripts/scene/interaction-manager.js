@@ -1045,6 +1045,9 @@ export class InteractionManager {
         groupAssignments,
         {
           showGhosts: renderOptions?.showGhosts !== false,
+          crossFloorSegments: Array.isArray(renderOptions?.crossFloorSegments)
+            ? renderOptions.crossFloorSegments
+            : [],
           tokenTopLeftToCenterFoundry: this._tokenTopLeftToCenterFoundry.bind(this),
           worldToClient: this._worldToClient.bind(this)
         }
@@ -1221,7 +1224,13 @@ export class InteractionManager {
       return;
     }
     this.movementPathPreview.currentKey = key;
-    this._renderMovementPathPreview(previewResult.pathNodes, previewResult.distance || 0, tokenDoc, null, renderOptions);
+    const crossFloorSegments = Array.isArray(previewResult?.diagnostics?.crossFloor?.segments)
+      ? previewResult.diagnostics.crossFloor.segments
+      : [];
+    this._renderMovementPathPreview(previewResult.pathNodes, previewResult.distance || 0, tokenDoc, null, {
+      ...renderOptions,
+      crossFloorSegments
+    });
   }
 
   _applyGroupMovementPreviewResult(previewResult, key, leaderTokenDoc = null) {
@@ -1293,13 +1302,27 @@ export class InteractionManager {
     this.movementPathPreview.inFlight = true;
     this.movementPathPreview.lastUpdateMs = now;
 
+    const activeCtx = window.MapShine?.activeLevelContext;
+    const floorBottom = Number(activeCtx?.bottom);
+    const floorTop = Number(activeCtx?.top);
+    const hasFloorBounds = Number.isFinite(floorBottom) && Number.isFinite(floorTop);
+
     const movementManager = window.MapShine?.tokenMovementManager;
+    this._pathfindingLog('debug', '_updateTokenDragPathPreview outbound constrain options', {
+      tokenId: String(tokenDoc?.id || ''),
+      destinationTopLeft,
+      constrainOptions: hasFloorBounds
+        ? { destinationFloorBottom: floorBottom, destinationFloorTop: floorTop }
+        : null
+    });
     const previewResult = movementManager?.computeTokenPathPreview?.({
       tokenDoc,
       destinationTopLeft,
       options: {
         ignoreWalls: this._getUnconstrainedMovementEnabled(),
-        ignoreCost: this._getUnconstrainedMovementEnabled()
+        ignoreCost: this._getUnconstrainedMovementEnabled(),
+        destinationFloorBottom: hasFloorBounds ? floorBottom : undefined,
+        destinationFloorTop: hasFloorBounds ? floorTop : undefined
       }
     });
 
@@ -1330,6 +1353,10 @@ export class InteractionManager {
       }
 
       const unconstrainedMovement = this._getUnconstrainedMovementEnabled();
+      const activeCtx = window.MapShine?.activeLevelContext;
+      const floorBottom = Number(activeCtx?.bottom);
+      const floorTop = Number(activeCtx?.top);
+      const hasFloorBounds = Number.isFinite(floorBottom) && Number.isFinite(floorTop);
       const movementManager = window.MapShine?.tokenMovementManager;
       if (movementManager && typeof movementManager.executeDoorAwareTokenMove === 'function') {
         const sequencedResult = await movementManager.executeDoorAwareTokenMove({
@@ -1341,6 +1368,8 @@ export class InteractionManager {
             ignoreCost: unconstrainedMovement,
             includeMovementPayload: unconstrainedMovement,
             suppressFoundryMovementUI: !unconstrainedMovement,
+            destinationFloorBottom: hasFloorBounds ? floorBottom : undefined,
+            destinationFloorTop: hasFloorBounds ? floorTop : undefined,
             updateOptions: {}
           }
         });
@@ -1406,6 +1435,10 @@ export class InteractionManager {
       }));
 
       const unconstrainedMovement = this._getUnconstrainedMovementEnabled();
+      const activeCtx = window.MapShine?.activeLevelContext;
+      const floorBottom = Number(activeCtx?.bottom);
+      const floorTop = Number(activeCtx?.top);
+      const hasFloorBounds = Number.isFinite(floorBottom) && Number.isFinite(floorTop);
       const movementManager = window.MapShine?.tokenMovementManager;
       if (movementManager && typeof movementManager.executeDoorAwareGroupMove === 'function') {
         const groupResult = await movementManager.executeDoorAwareGroupMove({
@@ -1423,6 +1456,8 @@ export class InteractionManager {
             enforceAnchorSide: true,
             groupPlanCacheKey: String(groupPlanCacheKey || ''),
             suppressFoundryMovementUI: !unconstrainedMovement,
+            destinationFloorBottom: hasFloorBounds ? floorBottom : undefined,
+            destinationFloorTop: hasFloorBounds ? floorTop : undefined,
             updateOptions: {}
           }
         });
@@ -1486,17 +1521,34 @@ export class InteractionManager {
       const rawTopLeft = this._tokenCenterToTopLeftFoundry(foundryCenter, tokenDoc);
       const destinationTopLeft = this._snapTokenTopLeftToGrid(tokenDoc, rawTopLeft);
       const tileKey = this._buildMovePreviewKey(tokenDoc.id, destinationTopLeft);
+      const priorPreview = {
+        active: !!this.rightClickMovePreview.active,
+        tokenId: String(this.rightClickMovePreview.tokenId || ''),
+        tileKey: String(this.rightClickMovePreview.tileKey || ''),
+        selectionKey: String(this.rightClickMovePreview.selectionKey || ''),
+        destinationTopLeft: this.rightClickMovePreview.destinationTopLeft || null
+      };
 
       const immediateMove = !!game?.settings?.get?.('map-shine-advanced', 'rightClickMoveImmediate');
       const isConfirmClick = this.rightClickMovePreview.active
         && this.rightClickMovePreview.tokenId === tokenDoc.id
-        && this.rightClickMovePreview.tileKey === tileKey
-        && this.rightClickMovePreview.selectionKey === selectionKey;
-
+        && this.rightClickMovePreview.tileKey === tileKey;
+      const confirmState = {
+        active: !!this.rightClickMovePreview.active,
+        tokenMatch: this.rightClickMovePreview.tokenId === tokenDoc.id,
+        tileMatch: this.rightClickMovePreview.tileKey === tileKey,
+        selectionMatch: this.rightClickMovePreview.selectionKey === selectionKey,
+        isConfirmClick
+      };
       const unconstrainedMovement = this._getUnconstrainedMovementEnabled();
+      const activeCtx = window.MapShine?.activeLevelContext;
+      const floorBottom = Number(activeCtx?.bottom);
+      const floorTop = Number(activeCtx?.top);
+      const hasFloorBounds = Number.isFinite(floorBottom) && Number.isFinite(floorTop);
+
+      let previewResult = null;
       const isGroup = selectedTokenDocs.length > 1;
 
-      let previewResult;
       if (isGroup && typeof movementManager?.computeDoorAwareGroupMovePreview === 'function') {
         const tokenMoves = selectedTokenDocs.map((doc) => ({
           tokenDoc: doc,
@@ -1516,7 +1568,9 @@ export class InteractionManager {
               x: Number(destinationTopLeft.x || 0),
               y: Number(destinationTopLeft.y || 0)
             },
-            enforceAnchorSide: true
+            enforceAnchorSide: true,
+            destinationFloorBottom: hasFloorBounds ? floorBottom : undefined,
+            destinationFloorTop: hasFloorBounds ? floorTop : undefined
           }
         });
         this._applyGroupMovementPreviewResult(previewResult, tileKey, tokenDoc);
@@ -1526,7 +1580,9 @@ export class InteractionManager {
           destinationTopLeft,
           options: {
             ignoreWalls: unconstrainedMovement,
-            ignoreCost: unconstrainedMovement
+            ignoreCost: unconstrainedMovement,
+            destinationFloorBottom: hasFloorBounds ? floorBottom : undefined,
+            destinationFloorTop: hasFloorBounds ? floorTop : undefined
           }
         });
         this._applyMovementPreviewResult(previewResult, tileKey, tokenDoc);
@@ -1553,6 +1609,19 @@ export class InteractionManager {
         return;
       }
 
+      this._pathfindingLog('debug', '_handleRightClickMovePreview preview resolved', {
+        tokenId: String(tokenDoc?.id || ''),
+        selectionKey,
+        selectedTokenCount: selectedTokenDocs.length,
+        destinationTopLeft,
+        tileKey,
+        immediateMove,
+        isGroup,
+        confirmState,
+        priorPreview,
+        previewDiagnostics: previewResult?.diagnostics || null
+      });
+
       this.rightClickMovePreview.active = true;
       this.rightClickMovePreview.tokenId = tokenDoc.id;
       this.rightClickMovePreview.tileKey = tileKey;
@@ -1568,13 +1637,29 @@ export class InteractionManager {
           expectedTileKey: this.rightClickMovePreview.tileKey,
           expectedSelectionKey: this.rightClickMovePreview.selectionKey,
           selectedTokenCount: selectedTokenDocs.length,
-          destinationTopLeft
+          destinationTopLeft,
+          confirmState,
+          priorPreview
         });
       }
 
       if (immediateMove || isConfirmClick) {
         // Preview visuals are for planning only; hide before the token starts stepping.
         this._clearMovementPathPreview();
+
+        this._pathfindingLog('warn', '_handleRightClickMovePreview executing move from right-click preview', {
+          tokenId: String(tokenDoc?.id || ''),
+          selectionKey,
+          selectedTokenCount: selectedTokenDocs.length,
+          destinationTopLeft,
+          tileKey,
+          immediateMove,
+          isConfirmClick,
+          isGroup,
+          groupPlanCacheKey: this.rightClickMovePreview.groupPlanCacheKey || '',
+          confirmState,
+          priorPreview
+        });
 
         const moveResult = await this._executeTokenGroupMoveToTopLeft(tokenDoc, destinationTopLeft, selectedTokenDocs, {
           method: 'path-walk',
@@ -1593,6 +1678,18 @@ export class InteractionManager {
             isConfirmClick,
             isGroup
           });
+        } else {
+          this._pathfindingLog('warn', '_handleRightClickMovePreview movement execution succeeded', {
+            tokenId: String(tokenDoc?.id || ''),
+            selectionKey,
+            selectedTokenCount: selectedTokenDocs.length,
+            destinationTopLeft,
+            tileKey,
+            immediateMove,
+            isConfirmClick,
+            isGroup,
+            result: moveResult
+          });
         }
         this.rightClickMovePreview.active = false;
         this.rightClickMovePreview.tokenId = null;
@@ -1600,6 +1697,18 @@ export class InteractionManager {
         this.rightClickMovePreview.destinationTopLeft = null;
         this.rightClickMovePreview.selectionKey = '';
         this.rightClickMovePreview.groupPlanCacheKey = '';
+      } else {
+        this._pathfindingLog('warn', '_handleRightClickMovePreview movement not executed (confirmation pending)', {
+          tokenId: String(tokenDoc?.id || ''),
+          selectionKey,
+          selectedTokenCount: selectedTokenDocs.length,
+          destinationTopLeft,
+          tileKey,
+          immediateMove,
+          isConfirmClick,
+          confirmState,
+          priorPreview
+        });
       }
     } catch (error) {
       this._pathfindingLog('error', '_handleRightClickMovePreview threw unexpectedly', {
@@ -6353,6 +6462,10 @@ export class InteractionManager {
               game?.user?.isGM &&
               game?.settings?.get?.('core', 'unconstrainedMovement')
             );
+            const activeCtx = window.MapShine?.activeLevelContext;
+            const floorBottom = Number(activeCtx?.bottom);
+            const floorTop = Number(activeCtx?.top);
+            const hasFloorBounds = Number.isFinite(floorBottom) && Number.isFinite(floorTop);
 
             const movementManager = window.MapShine?.tokenMovementManager;
             const canRunTokenSequencer = !!(
@@ -6400,6 +6513,8 @@ export class InteractionManager {
                     ignoreCost: unconstrainedMovement,
                     includeMovementPayload: unconstrainedMovement,
                     suppressFoundryMovementUI: true,
+                    destinationFloorBottom: hasFloorBounds ? floorBottom : undefined,
+                    destinationFloorTop: hasFloorBounds ? floorTop : undefined,
                     updateOptions: {}
                   }
                 });
@@ -6432,6 +6547,8 @@ export class InteractionManager {
                       ignoreCost: unconstrainedMovement,
                       includeMovementPayload: unconstrainedMovement,
                       suppressFoundryMovementUI: true,
+                      destinationFloorBottom: hasFloorBounds ? floorBottom : undefined,
+                      destinationFloorTop: hasFloorBounds ? floorTop : undefined,
                       updateOptions: {}
                     }
                   });
@@ -6489,8 +6606,18 @@ export class InteractionManager {
                       // Foundry validates movement.method against a strict enum.
                       // Keep internal choreography labels out of document payloads.
                       method: 'api',
-                      constrainOptions: { ignoreWalls: true, ignoreCost: true }
+                      constrainOptions: {
+                        ignoreWalls: true,
+                        ignoreCost: true,
+                        destinationFloorBottom: hasFloorBounds ? floorBottom : undefined,
+                        destinationFloorTop: hasFloorBounds ? floorTop : undefined
+                      }
                     };
+
+                    this._pathfindingLog('debug', 'pointerUp fallback outbound movement constrain options', {
+                      tokenId: id,
+                      constrainOptions: movement[id].constrainOptions
+                    });
                   }
 
                   updateOptions.movement = movement;
@@ -6904,12 +7031,31 @@ export class InteractionManager {
             const nextY = startY + (intent.dy * gridStep);
 
             const update = { x: nextX, y: nextY };
+            const activeCtx = window.MapShine?.activeLevelContext;
+            const floorBottom = Number(activeCtx?.bottom);
+            const floorTop = Number(activeCtx?.top);
+            const hasFloorBounds = Number.isFinite(floorBottom) && Number.isFinite(floorTop);
             const updateOptions = {
               animate: false,
               animation: { duration: 0 },
               method: 'keyboard',
-              mapShineMovement: { animated: true, method: 'keyboard' }
+              mapShineMovement: {
+                animated: true,
+                method: 'keyboard',
+                constrainOptions: hasFloorBounds
+                  ? {
+                    destinationFloorBottom: floorBottom,
+                    destinationFloorTop: floorTop
+                  }
+                  : undefined
+              }
             };
+
+            this._pathfindingLog('debug', 'keyboard outbound constrain options', {
+              tokenId,
+              update,
+              constrainOptions: updateOptions?.mapShineMovement?.constrainOptions || null
+            });
 
             safeCall(async () => {
               this._keyboardStepInFlight.set(tokenId, performance.now());
@@ -7913,7 +8059,9 @@ export class InteractionManager {
     // Unbounded walls are always reachable
     if (bottom === -Infinity && top === Infinity) return true;
 
-    return (bottom <= tokenElevation) && (tokenElevation <= top);
+    // Levels/Foundry wall-height ownership is half-open [bottom, top):
+    // seam elevations belong to the upper floor.
+    return (bottom <= tokenElevation) && (tokenElevation < top);
   }
 
   handleDoorClick(doorControl, event) {

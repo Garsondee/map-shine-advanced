@@ -605,7 +605,9 @@ export class WallManager {
       const wallDoc = canvas.walls?.get?.(wallId)?.document ?? canvas.scene?.walls?.get?.(wallId) ?? null;
       const inActiveBand = this._isWallVisibleAtPerspective(wallDoc);
       const doorVisible = this._isDoorVisibleToSelection(wallDoc);
-      const showEditVisuals = !!visible;
+      // Keep wall editing handles/segments floor-scoped so Walls tool only shows
+      // the current perspective floor's walls.
+      const showEditVisuals = !!visible && inActiveBand;
       if (wallDoc?.door) totalDoors += 1;
       if (doorVisible) visibleDoors += 1;
 

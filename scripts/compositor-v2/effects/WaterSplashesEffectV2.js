@@ -773,7 +773,11 @@ export class WaterSplashesEffectV2 {
       // This RT marks pixels covered by the current/upper floor's tiles.
       // It is already aligned with the main camera and sampled in screen UV.
       const fc = window.MapShine?.effectComposer?._floorCompositorV2 ?? null;
-      const fpTex = fc?._waterOccluderRT?.texture ?? null;
+      // Match WaterEffectV2 occluder semantics: floor 0 has no upper-floor occluder.
+      // Without this gate we can keep sampling stale RT contents from the last
+      // upper-floor frame after returning to ground floor.
+      const viewFloor = window.MapShine?.floorStack?.getActiveFloor?.()?.index ?? 0;
+      const fpTex = viewFloor > 0 ? (fc?._waterOccluderRT?.texture ?? null) : null;
       const waterMaskTex = (fc?._waterEffect && typeof fc._waterEffect.getWaterMaskTexture === 'function')
         ? fc._waterEffect.getWaterMaskTexture()
         : null;

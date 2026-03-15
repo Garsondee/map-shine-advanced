@@ -219,35 +219,58 @@ uniform float uCausticsBrightnessThreshold;
 uniform float uCausticsBrightnessSoftness;
 uniform float uCausticsBrightnessGamma;
 
-// ── Foam ─────────────────────────────────────────────────────────────────
-uniform vec3 uFoamColor;
-uniform float uFoamStrength;
-uniform float uFoamThreshold;
-uniform float uFoamScale;
-uniform float uFoamSpeed;
+// ── Shore Foam (Advanced) ────────────────────────────────────────────────
+uniform float uShoreFoamEnabled;
+uniform float uShoreFoamStrength;
+uniform float uShoreFoamThreshold;
+uniform float uShoreFoamScale;
+uniform float uShoreFoamSpeed;
 
-uniform float uFoamCurlStrength;
-uniform float uFoamCurlScale;
-uniform float uFoamCurlSpeed;
+// Shore Foam Appearance
+uniform vec3 uShoreFoamColor;
+uniform float uShoreFoamOpacity;
+uniform float uShoreFoamBrightness;
+uniform float uShoreFoamContrast;
+uniform float uShoreFoamGamma;
+uniform vec3 uShoreFoamTint;
+uniform float uShoreFoamTintStrength;
+uniform float uShoreFoamColorVariation;
 
-uniform float uFoamBreakupStrength1;
-uniform float uFoamBreakupScale1;
-uniform float uFoamBreakupSpeed1;
-uniform float uFoamBreakupStrength2;
-uniform float uFoamBreakupScale2;
-uniform float uFoamBreakupSpeed2;
+// Shore Foam Lighting
+uniform float uShoreFoamLightingEnabled;
+uniform float uShoreFoamAmbientLight;
+uniform float uShoreFoamSceneLightInfluence;
+uniform float uShoreFoamDarknessResponse;
 
-uniform float uFoamShoreCorePower;
-uniform float uFoamShoreCoreStrength;
-uniform float uFoamShoreTailPower;
-uniform float uFoamShoreTailStrength;
+// Shore Foam Complexity
+uniform float uShoreFoamFilamentsEnabled;
+uniform float uShoreFoamFilamentsStrength;
+uniform float uShoreFoamFilamentsScale;
+uniform float uShoreFoamFilamentsLength;
+uniform float uShoreFoamFilamentsWidth;
+uniform float uShoreFoamThicknessVariation;
+uniform float uShoreFoamThicknessScale;
+uniform float uShoreFoamEdgeDetail;
+uniform float uShoreFoamEdgeDetailScale;
 
-uniform float uFoamBlackPoint;
-uniform float uFoamWhitePoint;
-uniform float uFoamGamma;
-uniform float uFoamContrast;
-uniform float uFoamBrightness;
+// Shore Foam Distortion & Evolution
+uniform float uShoreFoamWaveDistortionStrength;
+uniform float uShoreFoamNoiseDistortionEnabled;
+uniform float uShoreFoamNoiseDistortionStrength;
+uniform float uShoreFoamNoiseDistortionScale;
+uniform float uShoreFoamNoiseDistortionSpeed;
+uniform float uShoreFoamEvolutionEnabled;
+uniform float uShoreFoamEvolutionSpeed;
+uniform float uShoreFoamEvolutionAmount;
+uniform float uShoreFoamEvolutionScale;
 
+// Shore Foam Coverage
+uniform float uShoreFoamCoreWidth;
+uniform float uShoreFoamCoreFalloff;
+uniform float uShoreFoamTailWidth;
+uniform float uShoreFoamTailFalloff;
+
+// ── Floating Foam ────────────────────────────────────────────────────────
 uniform float uFloatingFoamStrength;
 uniform float uFloatingFoamCoverage;
 uniform float uFloatingFoamScale;
@@ -905,13 +928,13 @@ float getShaderFlecks(vec2 sceneUv, float inside, float shore, float rainAmt, ve
   vec2 windDir = vec2(windF.x, windF.y);
   vec2 windBasis = normalize(vec2(windDir.x * sceneAspect, windDir.y));
   float tWind = uWindTime;
-  float fleckSpeed = uFoamSpeed * 2.5 + 0.15;
+  float fleckSpeed = uShoreFoamSpeed * 2.5 + 0.15;
   vec2 fleckOffset = windBasis * (tWind * fleckSpeed);
   vec2 foamWindOffsetUv = uWindOffsetUv;
   vec2 foamSceneUv = sceneUv - (foamWindOffsetUv * 0.5);
   vec2 fleckBasis = vec2(foamSceneUv.x * sceneAspect, foamSceneUv.y);
   fleckBasis += windBasis * 0.02;
-  float fleckScale = clamp(uFoamScale, 0.1, 6000.0);
+  float fleckScale = clamp(uShoreFoamScale, 0.1, 6000.0);
   vec2 fleckUv1 = fleckBasis * fleckScale - fleckOffset * 400.0;
   vec2 fleckUv2 = fleckBasis * 1200.0 - fleckOffset * 600.0;
   vec2 fleckUv3 = fleckBasis * 500.0 - fleckOffset * 250.0;
@@ -997,51 +1020,149 @@ void getFoamData(vec2 sceneUv, float shore, float inside, vec2 rainOffPx, vec2 w
   vec2 windBasis = normalize(vec2(windDir.x * sceneAspect, windDir.y));
   float tWind = uWindTime;
 
-  // 1. Curl warping for roiling motion
-  vec2 curlP = foamBasis * max(0.01, uFoamCurlScale) - windBasis * (tWind * uFoamCurlSpeed);
-  vec2 curl = curlNoise2D(curlP) * clamp(uFoamCurlStrength, 0.0, 5.0);
-
-  // 2. Macro breakup to warp the distance from shore
-  // Subtract curl so the breakup edges swirl organically
-  vec2 b1Uv = foamBasis * max(0.1, uFoamBreakupScale1) - windBasis * (tWind * uFoamBreakupSpeed1) + curl * 0.15;
-  vec2 b2Uv = foamBasis * max(0.1, uFoamBreakupScale2) - windBasis * (tWind * uFoamBreakupSpeed2) + curl * 0.15;
+  // ═══════════════════════════════════════════════════════════════════════════
+  // NEW ADVANCED SHORE FOAM SYSTEM (based on floating foam techniques)
+  // ═══════════════════════════════════════════════════════════════════════════
   
-  float b1 = fbmNoise(b1Uv);
-  float b2 = fbmNoise(b2Uv);
-  // Combine breakups and center around 0.5 so it pushes and pulls equally
-  float bSum = (b1 * clamp(uFoamBreakupStrength1, 0.0, 3.0) + b2 * clamp(uFoamBreakupStrength2, 0.0, 3.0));
-  float bMax = max(1e-4, clamp(uFoamBreakupStrength1, 0.0, 3.0) + clamp(uFoamBreakupStrength2, 0.0, 3.0));
-  float breakupOffset = ((bSum / bMax) - 0.5) * bMax * 0.15;
-
-  // 'shore' is 0.0 at the absolute edge, increasing inwards.
-  float warpedDist = shore - breakupOffset;
+  float shoreFoamAmount = 0.0;
   
-  // Map distance to a 0..1 range within the threshold
-  float distNormalized = clamp(warpedDist / max(0.01, uFoamThreshold), 0.0, 1.0);
-
-  // 3. Fine bubbly detail (matches the logic of floating foam clumps for unity)
-  vec2 fUv = foamBasis * max(0.1, uFoamScale) - windBasis * (tWind * uFoamSpeed * 0.5) + curl * 0.25;
-  float shoreC1 = valueNoise(fUv);
-  float shoreC2 = valueNoise(fUv * 2.1 + 5.2);
-  float bubbles = shoreC1 * 0.7 + shoreC2 * 0.3;
-
-  // 4. Shore Coverage (Core vs Tail)
-  // Utilizing the previously unused UI settings to allow art direction!
-  float coreCoverage = pow(1.0 - distNormalized, max(0.1, uFoamShoreCorePower));
-  float tailCoverage = pow(1.0 - distNormalized, max(0.1, uFoamShoreTailPower));
-
-  // Core is a solid band of foam right at the shoreline
-  float coreFoam = smoothstep(0.2, 0.8, coreCoverage) * clamp(uFoamShoreCoreStrength, 0.0, 5.0);
-  
-  // Tail uses bubbles thresholded by coverage so it breaks into roiling clumps
-  float tailThresh = mix(1.0, 0.2, tailCoverage);
-  float tailFoam = smoothstep(tailThresh - 0.25, tailThresh + 0.15, bubbles) * clamp(uFoamShoreTailStrength, 0.0, 5.0) * tailCoverage;
-
-  float shoreFoamAmount = clamp(coreFoam + tailFoam, 0.0, 1.0);
-  shoreFoamAmount *= inside * max(0.0, uFoamStrength);
+  if (uShoreFoamEnabled > 0.5 && uShoreFoamStrength > 0.01) {
+    // Base UV for shore foam
+    vec2 shoreUv = foamBasis * max(0.1, uShoreFoamScale);
+    shoreUv -= windBasis * (tWind * uShoreFoamSpeed);
+    
+    // Enhanced wave distortion
+    float waveDistortStr = clamp(uShoreFoamWaveDistortionStrength, 0.0, 5.0);
+    shoreUv += waveGradPre * waveDistortStr * 0.15;
+    vec2 texel = 1.0 / max(uResolution, vec2(1.0));
+    vec2 rainUv = rainOffPx * texel;
+    vec2 rainBasis = vec2(rainUv.x * sceneAspect, rainUv.y);
+    shoreUv += rainBasis * waveDistortStr * 0.1;
+    
+    // Random noise distortion for organic movement
+    if (uShoreFoamNoiseDistortionEnabled > 0.5 && uShoreFoamNoiseDistortionStrength > 0.01) {
+      float noiseDistStr = clamp(uShoreFoamNoiseDistortionStrength, 0.0, 2.0);
+      float noiseDistScale = max(0.1, uShoreFoamNoiseDistortionScale);
+      float noiseDistSpeed = max(0.0, uShoreFoamNoiseDistortionSpeed);
+      
+      vec2 noiseUv = foamBasis * noiseDistScale;
+      float noiseTime = tWind * noiseDistSpeed;
+      
+      float sn1x = valueNoise(noiseUv + vec2(noiseTime, 0.0));
+      float sn1y = valueNoise(noiseUv + vec2(0.0, noiseTime) + 11.3);
+      float sn2x = valueNoise(noiseUv * 2.3 + vec2(noiseTime * 1.3, 0.0) + 23.7);
+      float sn2y = valueNoise(noiseUv * 2.3 + vec2(0.0, noiseTime * 1.3) + 41.1);
+      
+      vec2 noiseOffset = vec2(
+        (sn1x - 0.5) * 0.7 + (sn2x - 0.5) * 0.3,
+        (sn1y - 0.5) * 0.7 + (sn2y - 0.5) * 0.3
+      );
+      
+      shoreUv += noiseOffset * noiseDistStr;
+    }
+    
+    // Temporal evolution
+    vec2 shoreEvolUv = shoreUv;
+    if (uShoreFoamEvolutionEnabled > 0.5 && uShoreFoamEvolutionAmount > 0.01) {
+      float evolSpeed = max(0.0, uShoreFoamEvolutionSpeed);
+      float evolScale = max(0.1, uShoreFoamEvolutionScale);
+      float evolAmount = clamp(uShoreFoamEvolutionAmount, 0.0, 1.0);
+      
+      float evolTime = tWind * evolSpeed * 0.1;
+      
+      vec2 evolWarpUv = foamBasis * evolScale;
+      float sew1 = valueNoise(evolWarpUv + vec2(evolTime, 0.0));
+      float sew2 = valueNoise(evolWarpUv + vec2(0.0, evolTime) + 19.3);
+      float sew3 = valueNoise(evolWarpUv * 1.7 + vec2(evolTime * 0.7, evolTime * 0.7) + 37.7);
+      
+      vec2 evolWarp = vec2(
+        (sew1 - 0.5) * 0.5 + (sew3 - 0.5) * 0.3,
+        (sew2 - 0.5) * 0.5 + (sew3 - 0.5) * 0.3
+      );
+      
+      shoreEvolUv = mix(shoreUv, shoreUv + evolWarp, evolAmount);
+    }
+    
+    // Base foam pattern
+    float sc1 = valueNoise(shoreEvolUv);
+    float sc2 = valueNoise(shoreEvolUv * 2.1 + 7.3);
+    float shoreBase = sc1 * 0.7 + sc2 * 0.3;
+    
+    // Complexity layers
+    float complexShore = shoreBase;
+    
+    // Thickness variation
+    if (uShoreFoamThicknessVariation > 0.01) {
+      float thickScale = max(0.1, uShoreFoamThicknessScale);
+      float sthick1 = valueNoise(shoreEvolUv * thickScale);
+      float sthick2 = valueNoise(shoreEvolUv * thickScale * 2.3 + 5.7);
+      float thickness = sthick1 * 0.6 + sthick2 * 0.4;
+      thickness = mix(1.0, thickness, clamp(uShoreFoamThicknessVariation, 0.0, 1.0));
+      complexShore *= thickness;
+    }
+    
+    // Filaments and tendrils
+    if (uShoreFoamFilamentsEnabled > 0.5 && uShoreFoamFilamentsStrength > 0.01) {
+      float filScale = max(0.1, uShoreFoamFilamentsScale);
+      float filLength = clamp(uShoreFoamFilamentsLength, 0.1, 4.0);
+      float filWidth = clamp(uShoreFoamFilamentsWidth, 0.01, 0.5);
+      
+      vec2 sfilUv = shoreEvolUv * filScale;
+      vec2 windStretch = windBasis * filLength;
+      
+      float filaments = 0.0;
+      for (int i = 0; i < 3; i++) {
+        float angle = float(i) * 0.523599;
+        vec2 rotUv = vec2(
+          sfilUv.x * cos(angle) - sfilUv.y * sin(angle),
+          sfilUv.x * sin(angle) + sfilUv.y * cos(angle)
+        );
+        rotUv += windStretch * float(i) * 0.3;
+        
+        float fil = valueNoise(rotUv * vec2(1.0, filLength));
+        fil = smoothstep(1.0 - filWidth, 1.0, fil);
+        filaments = max(filaments, fil);
+      }
+      
+      float filStr = clamp(uShoreFoamFilamentsStrength, 0.0, 1.0);
+      complexShore = max(complexShore, filaments * filStr);
+    }
+    
+    // Edge detail
+    if (uShoreFoamEdgeDetail > 0.01) {
+      float edgeScale = max(0.1, uShoreFoamEdgeDetailScale);
+      float sedge1 = valueNoise(shoreEvolUv * edgeScale * 3.0);
+      float sedge2 = valueNoise(shoreEvolUv * edgeScale * 7.0 + 11.9);
+      float edgeNoise = sedge1 * 0.6 + sedge2 * 0.4;
+      
+      float edgeStr = clamp(uShoreFoamEdgeDetail, 0.0, 1.0);
+      float edgeOffset = (edgeNoise - 0.5) * edgeStr * 0.3;
+      complexShore = clamp(complexShore + edgeOffset, 0.0, 1.0);
+    }
+    
+    // Distance-based coverage (core and tail)
+    float distNormalized = clamp(shore / max(0.01, uShoreFoamThreshold), 0.0, 1.0);
+    
+    // Core: solid foam at shoreline
+    float coreWidth = clamp(uShoreFoamCoreWidth, 0.01, 1.0);
+    float coreFalloff = max(0.01, uShoreFoamCoreFalloff);
+    float coreMask = smoothstep(coreWidth + coreFalloff, coreWidth, distNormalized);
+    
+    // Tail: textured foam extending inland
+    float tailWidth = clamp(uShoreFoamTailWidth, 0.01, 1.0);
+    float tailFalloff = max(0.01, uShoreFoamTailFalloff);
+    float tailMask = smoothstep(tailWidth + tailFalloff, 0.0, distNormalized);
+    
+    // Combine core (solid) and tail (textured)
+    float coreFoam = coreMask;
+    float tailFoam = complexShore * tailMask;
+    
+    shoreFoamAmount = clamp(max(coreFoam, tailFoam), 0.0, 1.0);
+    shoreFoamAmount *= inside * max(0.0, uShoreFoamStrength);
+  }
 
   vec2 clumpUv = foamBasis * max(0.1, uFloatingFoamScale);
-  clumpUv -= windBasis * (tWind * (0.02 + uFoamSpeed * 0.05));
+  clumpUv -= windBasis * (tWind * (0.02 + uShoreFoamSpeed * 0.05));
   
   // Enhanced wave distortion (much stronger)
   if (uFloatingFoamWaveDistortion > 0.01) {
@@ -1169,15 +1290,8 @@ void getFoamData(vec2 sceneUv, float shore, float inside, vec2 rainOffPx, vec2 w
   float raw01 = (uHasWaterRawMask > 0.5) ? texture2D(tWaterRawMask, sceneUv).r : inside;
   float rawMask = smoothstep(0.70, 0.95, clamp(raw01, 0.0, 1.0));
   float floatingFoamMaskAmount = clumps * inside * max(0.0, uFloatingFoamStrength) * rawMask;
-  // Shore foam processing (existing logic)
-  float shoreFoamFinal = clamp(shoreFoamAmount, 0.0, 1.0);
-  float bp = clamp(uFoamBlackPoint, 0.0, 1.0);
-  float wp = clamp(uFoamWhitePoint, 0.0, 1.0);
-  shoreFoamFinal = clamp((shoreFoamFinal - bp) / max(1e-5, wp - bp), 0.0, 1.0);
-  shoreFoamFinal = pow(shoreFoamFinal, max(0.01, uFoamGamma));
-  shoreFoamFinal = (shoreFoamFinal - 0.5) * max(0.0, uFoamContrast) + 0.5;
-  shoreFoamFinal = clamp(shoreFoamFinal + uFoamBrightness, 0.0, 1.0);
-  shoreFoamOut = shoreFoamFinal;
+  // Shore foam processing
+  shoreFoamOut = clamp(shoreFoamAmount, 0.0, 1.0);
 
   // Floating foam processing (NEW - Phase 1)
   float floatingBase = clamp(floatingFoamAmount + floatingFoamMaskAmount, 0.0, 1.0);
@@ -1684,25 +1798,64 @@ void main() {
     col *= (1.0 - shadowDarken);
   }
   
-  // Shore foam rendering (existing logic)
-  float foamVisual = clamp(shoreFoamAmount, 0.0, 1.0);
-  float foamAlpha = smoothstep(0.08, 0.35, foamVisual);
-  foamAlpha = pow(foamAlpha, 0.75);
-  
-  // Make foam less reliant on the background scene brightness.
-  // Foam should generally look white, even over dark water/backgrounds.
-  float foamDarkScale = mix(1.0, 0.35, darkness);
-  
-  // Use a steep curve so normal lit water keeps foam vibrantly white,
-  // but deep building/overhead shadows (low luma) heavily darken the foam
-  // so it sits naturally inside shadowed regions without glowing.
-  float foamLightScale = smoothstep(0.02, 0.35, sceneLuma);
-  foamLightScale = mix(0.10, 1.0, foamLightScale); // Allow it to get very dark
-  
-  vec3 foamCol = uFoamColor * foamLightScale * foamDarkScale;
-  
-  // Boost foam alpha blending slightly for a punchier white
-  col = mix(col, foamCol, clamp(foamAlpha * 1.2, 0.0, 1.0));
+  // Shore foam rendering (NEW ADVANCED SYSTEM)
+  if (shoreFoamAmount > 0.01) {
+    // Color processing
+    vec3 shoreFoamColor = uShoreFoamColor;
+    
+    // Apply tint
+    if (uShoreFoamTintStrength > 0.01) {
+      float tintStr = clamp(uShoreFoamTintStrength, 0.0, 1.0);
+      shoreFoamColor = mix(shoreFoamColor, uShoreFoamTint, tintStr);
+    }
+    
+    // Color variation
+    if (uShoreFoamColorVariation > 0.01) {
+      vec2 colorVarUv = sceneUv * 3.0 + vec2(uWindTime * 0.05);
+      float colorVar = valueNoise(colorVarUv);
+      float varAmount = clamp(uShoreFoamColorVariation, 0.0, 1.0);
+      shoreFoamColor = mix(shoreFoamColor, shoreFoamColor * (0.8 + colorVar * 0.4), varAmount);
+    }
+    
+    // Brightness, contrast, gamma
+    float brightness = clamp(uShoreFoamBrightness, 0.0, 2.0);
+    float contrast = clamp(uShoreFoamContrast, 0.0, 2.0);
+    float gamma = max(0.1, uShoreFoamGamma);
+    
+    shoreFoamColor = shoreFoamColor * brightness;
+    shoreFoamColor = ((shoreFoamColor - 0.5) * contrast) + 0.5;
+    shoreFoamColor = pow(max(shoreFoamColor, vec3(0.0)), vec3(gamma));
+    shoreFoamColor = clamp(shoreFoamColor, vec3(0.0), vec3(1.0));
+    
+    // Lighting calculation
+    float shoreLightFactor = 1.0;
+    float shoreDarkScale = 1.0;
+    if (uShoreFoamLightingEnabled > 0.5) {
+      float ambient = clamp(uShoreFoamAmbientLight, 0.0, 1.0);
+      float sceneInfluence = clamp(uShoreFoamSceneLightInfluence, 0.0, 1.0);
+      float darkResponse = clamp(uShoreFoamDarknessResponse, 0.0, 1.0);
+      
+      float sceneLit = smoothstep(0.02, 0.35, sceneLuma);
+      sceneLit = mix(ambient, 1.0, sceneLit);
+      
+      shoreDarkScale = mix(1.0, 0.05, darkness * darkResponse);
+      
+      shoreLightFactor = sceneLit * sceneInfluence + ambient * (1.0 - sceneInfluence);
+      shoreLightFactor = clamp(shoreLightFactor, 0.0, 1.0);
+    }
+    
+    // Apply lighting to color
+    shoreFoamColor *= shoreLightFactor;
+    
+    // Opacity and blending
+    float shoreOpacity = clamp(uShoreFoamOpacity, 0.0, 1.0);
+    float shoreAlpha = clamp(shoreFoamAmount * shoreOpacity, 0.0, 1.0);
+    
+    // Blend foam color first
+    col = mix(col, shoreFoamColor, shoreAlpha);
+    // THEN apply darkness for proper night darkening
+    col *= shoreDarkScale;
+  }
   
   // Apply floating foam with independent color and FULL opacity control
   if (floatingFoam.amount > 0.01) {
@@ -1713,9 +1866,11 @@ void main() {
     col *= floatingFoam.darkScale;
   }
 
-  // Shader flecks
-  float shaderFlecks = getShaderFlecks(sceneUv, inside, shore, foamAlpha, rainOffPx);
-  col += foamCol * shaderFlecks * 0.8;
+  // Shader flecks (drive by combined foam presence)
+  float fleckDriver = clamp(max(shoreFoamAmount, floatingFoam.amount), 0.0, 1.0);
+  float shaderFlecks = getShaderFlecks(sceneUv, inside, shore, fleckDriver, rainOffPx);
+  vec3 fleckCol = mix(uShoreFoamColor, floatingFoam.color, clamp(floatingFoam.amount, 0.0, 1.0));
+  col += fleckCol * shaderFlecks * 0.8;
 
   // Apply screen-space cloud shadows globally to water + foam + caustics + murk
   col *= max(0.0, 1.0 - cloudDarken);

@@ -237,28 +237,57 @@ export class WaterEffectV2 {
 
       // Foam
       foamColor: { r: 0.85, g: 0.90, b: 0.88 },
-      foamStrength: 0.60,
-      foamThreshold: 0.28,
-      foamShoreCorePower: 4.5,
-      foamShoreCoreStrength: 1.0,
-      foamShoreTailPower: 0.60,
-      foamShoreTailStrength: 0.20,
-      foamScale: 20.0,
-      foamSpeed: 0.1,
-      foamCurlStrength: 0.35,
-      foamCurlScale: 2.0,
-      foamCurlSpeed: 0.05,
-      foamBreakupStrength1: 0.5,
-      foamBreakupScale1: 3.0,
-      foamBreakupSpeed1: 0.04,
-      foamBreakupStrength2: 0.3,
-      foamBreakupScale2: 7.0,
-      foamBreakupSpeed2: 0.02,
-      foamBlackPoint: 0.0,
-      foamWhitePoint: 1.0,
-      foamGamma: 1.0,
-      foamContrast: 1.0,
-      foamBrightness: 0.0,
+      // Shore Foam (Advanced)
+      shoreFoamEnabled: true,
+      shoreFoamStrength: 0.8,
+      shoreFoamThreshold: 0.28,
+      shoreFoamScale: 20.0,
+      shoreFoamSpeed: 0.1,
+      
+      // Shore Foam Appearance
+      shoreFoamColor: { r: 1.0, g: 1.0, b: 1.0 },
+      shoreFoamOpacity: 1.0,
+      shoreFoamBrightness: 0.6,
+      shoreFoamContrast: 1.5,
+      shoreFoamGamma: 0.8,
+      shoreFoamTint: { r: 0.95, g: 0.97, b: 0.9 },
+      shoreFoamTintStrength: 0.2,
+      shoreFoamColorVariation: 0.15,
+      
+      // Shore Foam Lighting
+      shoreFoamLightingEnabled: true,
+      shoreFoamAmbientLight: 0.5,
+      shoreFoamSceneLightInfluence: 0.8,
+      shoreFoamDarknessResponse: 0.7,
+      
+      // Shore Foam Complexity
+      shoreFoamFilamentsEnabled: true,
+      shoreFoamFilamentsStrength: 0.5,
+      shoreFoamFilamentsScale: 5.0,
+      shoreFoamFilamentsLength: 2.0,
+      shoreFoamFilamentsWidth: 0.2,
+      shoreFoamThicknessVariation: 0.4,
+      shoreFoamThicknessScale: 4.0,
+      shoreFoamEdgeDetail: 0.5,
+      shoreFoamEdgeDetailScale: 10.0,
+      
+      // Shore Foam Distortion & Evolution
+      shoreFoamWaveDistortionStrength: 3.0,
+      shoreFoamNoiseDistortionEnabled: true,
+      shoreFoamNoiseDistortionStrength: 1.0,
+      shoreFoamNoiseDistortionScale: 2.5,
+      shoreFoamNoiseDistortionSpeed: 0.4,
+      shoreFoamEvolutionEnabled: true,
+      shoreFoamEvolutionSpeed: 0.2,
+      shoreFoamEvolutionAmount: 0.5,
+      shoreFoamEvolutionScale: 2.0,
+      
+      // Shore Foam Coverage
+      shoreFoamCoreWidth: 0.15,
+      shoreFoamCoreFalloff: 0.1,
+      shoreFoamTailWidth: 0.6,
+      shoreFoamTailFalloff: 0.3,
+      
       floatingFoamStrength: 0.40,
       floatingFoamCoverage: 0.35,
       floatingFoamScale: 8.0,
@@ -728,21 +757,35 @@ export class WaterEffectV2 {
           ]
         },
         {
-          name: 'water-foam',
-          label: 'Foam',
+          name: 'water-shore-foam-advanced',
+          label: 'Shore Foam (Advanced)',
           type: 'folder',
           expanded: false,
           parameters: [
-            'foamFlecksEnabled',
-            'foamColor', 'foamStrength', 'foamThreshold',
-            'foamShoreCorePower', 'foamShoreCoreStrength', 'foamShoreTailPower', 'foamShoreTailStrength',
-            'foamScale', 'foamSpeed',
-            'foamCurlStrength', 'foamCurlScale', 'foamCurlSpeed',
-            'foamBreakupStrength1', 'foamBreakupScale1', 'foamBreakupSpeed1',
-            'foamBreakupStrength2', 'foamBreakupScale2', 'foamBreakupSpeed2',
-            'foamBlackPoint', 'foamWhitePoint', 'foamGamma', 'foamContrast', 'foamBrightness',
+            'shoreFoamEnabled',
+            'shoreFoamStrength', 'shoreFoamThreshold', 'shoreFoamScale', 'shoreFoamSpeed',
+            'shoreFoamColor', 'shoreFoamTint', 'shoreFoamTintStrength',
+            'shoreFoamColorVariation', 'shoreFoamOpacity',
+            'shoreFoamBrightness', 'shoreFoamContrast', 'shoreFoamGamma',
+            'shoreFoamLightingEnabled',
+            'shoreFoamAmbientLight', 'shoreFoamSceneLightInfluence',
+            'shoreFoamDarknessResponse',
+            'shoreFoamFilamentsEnabled',
+            'shoreFoamFilamentsStrength', 'shoreFoamFilamentsScale',
+            'shoreFoamFilamentsLength', 'shoreFoamFilamentsWidth',
+            'shoreFoamThicknessVariation', 'shoreFoamThicknessScale',
+            'shoreFoamEdgeDetail', 'shoreFoamEdgeDetailScale',
+            'shoreFoamWaveDistortionStrength',
+            'shoreFoamNoiseDistortionEnabled',
+            'shoreFoamNoiseDistortionStrength', 'shoreFoamNoiseDistortionScale',
+            'shoreFoamNoiseDistortionSpeed',
+            'shoreFoamEvolutionEnabled',
+            'shoreFoamEvolutionSpeed', 'shoreFoamEvolutionAmount',
+            'shoreFoamEvolutionScale',
+            'shoreFoamCoreWidth', 'shoreFoamCoreFalloff',
+            'shoreFoamTailWidth', 'shoreFoamTailFalloff',
             'floatingFoamStrength', 'floatingFoamCoverage', 'floatingFoamScale', 'floatingFoamWaveDistortion',
-            'foamFlecksIntensity'
+            'foamFlecksEnabled', 'foamFlecksIntensity'
           ]
         },
         {
@@ -952,6 +995,47 @@ export class WaterEffectV2 {
         causticsBrightnessThreshold: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.55, label: 'Brightness Threshold' },
         causticsBrightnessSoftness: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.20, label: 'Brightness Softness' },
         causticsBrightnessGamma: { type: 'slider', min: 0.01, max: 4, step: 0.01, default: 1.0, label: 'Brightness Gamma' },
+
+        // Shore Foam (Advanced)
+        shoreFoamEnabled: { type: 'boolean', default: true, label: 'Shore Foam Enabled' },
+        shoreFoamStrength: { type: 'slider', min: 0, max: 2, step: 0.01, default: 0.8, label: 'Strength' },
+        shoreFoamThreshold: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.28, label: 'Threshold' },
+        shoreFoamScale: { type: 'slider', min: 0.1, max: 80, step: 0.1, default: 20.0, label: 'Scale' },
+        shoreFoamSpeed: { type: 'slider', min: 0, max: 2, step: 0.01, default: 0.1, label: 'Speed' },
+        shoreFoamColor: { type: 'color', default: { r: 1.0, g: 1.0, b: 1.0 }, label: 'Color' },
+        shoreFoamTint: { type: 'color', default: { r: 0.95, g: 0.97, b: 0.9 }, label: 'Tint' },
+        shoreFoamTintStrength: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.2, label: 'Tint Strength' },
+        shoreFoamColorVariation: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.15, label: 'Color Variation' },
+        shoreFoamOpacity: { type: 'slider', min: 0, max: 1, step: 0.01, default: 1.0, label: 'Opacity' },
+        shoreFoamBrightness: { type: 'slider', min: 0, max: 2, step: 0.01, default: 0.6, label: 'Brightness' },
+        shoreFoamContrast: { type: 'slider', min: 0, max: 4, step: 0.01, default: 1.5, label: 'Contrast' },
+        shoreFoamGamma: { type: 'slider', min: 0.1, max: 4, step: 0.01, default: 0.8, label: 'Gamma' },
+        shoreFoamLightingEnabled: { type: 'boolean', default: true, label: 'Enable Lighting' },
+        shoreFoamAmbientLight: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.5, label: 'Ambient Light' },
+        shoreFoamSceneLightInfluence: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.8, label: 'Scene Light Influence' },
+        shoreFoamDarknessResponse: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.7, label: 'Darkness Response' },
+        shoreFoamFilamentsEnabled: { type: 'boolean', default: true, label: 'Enable Filaments' },
+        shoreFoamFilamentsStrength: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.5, label: 'Filaments Strength' },
+        shoreFoamFilamentsScale: { type: 'slider', min: 0.1, max: 20, step: 0.1, default: 5.0, label: 'Filaments Scale' },
+        shoreFoamFilamentsLength: { type: 'slider', min: 0.1, max: 8, step: 0.1, default: 2.0, label: 'Filaments Length' },
+        shoreFoamFilamentsWidth: { type: 'slider', min: 0.01, max: 1, step: 0.01, default: 0.2, label: 'Filaments Width' },
+        shoreFoamThicknessVariation: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.4, label: 'Thickness Variation' },
+        shoreFoamThicknessScale: { type: 'slider', min: 0.1, max: 20, step: 0.1, default: 4.0, label: 'Thickness Scale' },
+        shoreFoamEdgeDetail: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.5, label: 'Edge Detail' },
+        shoreFoamEdgeDetailScale: { type: 'slider', min: 0.1, max: 40, step: 0.1, default: 10.0, label: 'Edge Detail Scale' },
+        shoreFoamWaveDistortionStrength: { type: 'slider', min: 0, max: 10, step: 0.1, default: 3.0, label: 'Wave Distortion Strength' },
+        shoreFoamNoiseDistortionEnabled: { type: 'boolean', default: true, label: 'Enable Noise Distortion' },
+        shoreFoamNoiseDistortionStrength: { type: 'slider', min: 0, max: 3, step: 0.01, default: 1.0, label: 'Noise Distortion Strength' },
+        shoreFoamNoiseDistortionScale: { type: 'slider', min: 0.1, max: 10, step: 0.1, default: 2.5, label: 'Noise Distortion Scale' },
+        shoreFoamNoiseDistortionSpeed: { type: 'slider', min: 0, max: 2, step: 0.01, default: 0.4, label: 'Noise Distortion Speed' },
+        shoreFoamEvolutionEnabled: { type: 'boolean', default: true, label: 'Enable Evolution' },
+        shoreFoamEvolutionSpeed: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.2, label: 'Evolution Speed' },
+        shoreFoamEvolutionAmount: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.5, label: 'Evolution Amount' },
+        shoreFoamEvolutionScale: { type: 'slider', min: 0.1, max: 10, step: 0.1, default: 2.0, label: 'Evolution Scale' },
+        shoreFoamCoreWidth: { type: 'slider', min: 0.01, max: 1, step: 0.01, default: 0.15, label: 'Core Width' },
+        shoreFoamCoreFalloff: { type: 'slider', min: 0.01, max: 1, step: 0.01, default: 0.1, label: 'Core Falloff' },
+        shoreFoamTailWidth: { type: 'slider', min: 0.01, max: 1, step: 0.01, default: 0.6, label: 'Tail Width' },
+        shoreFoamTailFalloff: { type: 'slider', min: 0.01, max: 1, step: 0.01, default: 0.3, label: 'Tail Falloff' },
 
         foamFlecksEnabled: { type: 'boolean', default: true, label: 'Foam Flecks Enabled' },
         foamColor: { type: 'color', default: { r: 0.85, g: 0.90, b: 0.88 }, label: 'Foam Color' },
@@ -2193,6 +2277,49 @@ export class WaterEffectV2 {
     if (u.uCausticsBrightnessSoftness) u.uCausticsBrightnessSoftness.value = Number.isFinite(p.causticsBrightnessSoftness) ? Math.max(0.0, p.causticsBrightnessSoftness) : 0.20;
     if (u.uCausticsBrightnessGamma) u.uCausticsBrightnessGamma.value = Number.isFinite(p.causticsBrightnessGamma) ? Math.max(0.01, p.causticsBrightnessGamma) : 1.0;
 
+    // Shore Foam (Advanced)
+    u.uShoreFoamEnabled.value = (p.shoreFoamEnabled ?? true) ? 1.0 : 0.0;
+    u.uShoreFoamStrength.value = p.shoreFoamStrength ?? 0.8;
+    u.uShoreFoamThreshold.value = p.shoreFoamThreshold ?? 0.28;
+    u.uShoreFoamScale.value = p.shoreFoamScale ?? 20.0;
+    u.uShoreFoamSpeed.value = p.shoreFoamSpeed ?? 0.1;
+    const shoreFoamColor = normalizeRgb01(p.shoreFoamColor, { r: 1.0, g: 1.0, b: 1.0 });
+    u.uShoreFoamColor.value.set(shoreFoamColor.r, shoreFoamColor.g, shoreFoamColor.b);
+    const shoreFoamTint = normalizeRgb01(p.shoreFoamTint, { r: 0.95, g: 0.97, b: 0.9 });
+    u.uShoreFoamTint.value.set(shoreFoamTint.r, shoreFoamTint.g, shoreFoamTint.b);
+    u.uShoreFoamTintStrength.value = p.shoreFoamTintStrength ?? 0.2;
+    u.uShoreFoamColorVariation.value = p.shoreFoamColorVariation ?? 0.15;
+    u.uShoreFoamOpacity.value = p.shoreFoamOpacity ?? 1.0;
+    u.uShoreFoamBrightness.value = p.shoreFoamBrightness ?? 0.6;
+    u.uShoreFoamContrast.value = p.shoreFoamContrast ?? 1.5;
+    u.uShoreFoamGamma.value = p.shoreFoamGamma ?? 0.8;
+    u.uShoreFoamLightingEnabled.value = (p.shoreFoamLightingEnabled ?? true) ? 1.0 : 0.0;
+    u.uShoreFoamAmbientLight.value = p.shoreFoamAmbientLight ?? 0.5;
+    u.uShoreFoamSceneLightInfluence.value = p.shoreFoamSceneLightInfluence ?? 0.8;
+    u.uShoreFoamDarknessResponse.value = p.shoreFoamDarknessResponse ?? 0.7;
+    u.uShoreFoamFilamentsEnabled.value = (p.shoreFoamFilamentsEnabled ?? true) ? 1.0 : 0.0;
+    u.uShoreFoamFilamentsStrength.value = p.shoreFoamFilamentsStrength ?? 0.5;
+    u.uShoreFoamFilamentsScale.value = p.shoreFoamFilamentsScale ?? 5.0;
+    u.uShoreFoamFilamentsLength.value = p.shoreFoamFilamentsLength ?? 2.0;
+    u.uShoreFoamFilamentsWidth.value = p.shoreFoamFilamentsWidth ?? 0.2;
+    u.uShoreFoamThicknessVariation.value = p.shoreFoamThicknessVariation ?? 0.4;
+    u.uShoreFoamThicknessScale.value = p.shoreFoamThicknessScale ?? 4.0;
+    u.uShoreFoamEdgeDetail.value = p.shoreFoamEdgeDetail ?? 0.5;
+    u.uShoreFoamEdgeDetailScale.value = p.shoreFoamEdgeDetailScale ?? 10.0;
+    u.uShoreFoamWaveDistortionStrength.value = p.shoreFoamWaveDistortionStrength ?? 3.0;
+    u.uShoreFoamNoiseDistortionEnabled.value = (p.shoreFoamNoiseDistortionEnabled ?? true) ? 1.0 : 0.0;
+    u.uShoreFoamNoiseDistortionStrength.value = p.shoreFoamNoiseDistortionStrength ?? 1.0;
+    u.uShoreFoamNoiseDistortionScale.value = p.shoreFoamNoiseDistortionScale ?? 2.5;
+    u.uShoreFoamNoiseDistortionSpeed.value = p.shoreFoamNoiseDistortionSpeed ?? 0.4;
+    u.uShoreFoamEvolutionEnabled.value = (p.shoreFoamEvolutionEnabled ?? true) ? 1.0 : 0.0;
+    u.uShoreFoamEvolutionSpeed.value = p.shoreFoamEvolutionSpeed ?? 0.2;
+    u.uShoreFoamEvolutionAmount.value = p.shoreFoamEvolutionAmount ?? 0.5;
+    u.uShoreFoamEvolutionScale.value = p.shoreFoamEvolutionScale ?? 2.0;
+    u.uShoreFoamCoreWidth.value = p.shoreFoamCoreWidth ?? 0.15;
+    u.uShoreFoamCoreFalloff.value = p.shoreFoamCoreFalloff ?? 0.1;
+    u.uShoreFoamTailWidth.value = p.shoreFoamTailWidth ?? 0.6;
+    u.uShoreFoamTailFalloff.value = p.shoreFoamTailFalloff ?? 0.3;
+
     // Sun direction from azimuth + elevation (cached to avoid per-frame trig)
     const az = p.specSunAzimuthDeg ?? 135;
     const el = p.specSunElevationDeg ?? 45;
@@ -2652,6 +2779,8 @@ export class WaterEffectV2 {
   static _buildUniforms(THREE, p, noiseTex, waterData, waterRawMask, waterOccluderAlpha, fallbacks) {
     const tintColor = normalizeRgb01(p.tintColor, { r: 0.02, g: 0.18, b: 0.28 });
     const foamColor = normalizeRgb01(p.foamColor, { r: 0.85, g: 0.9, b: 0.88 });
+    const shoreFoamColor = normalizeRgb01(p.shoreFoamColor, { r: 1.0, g: 1.0, b: 1.0 });
+    const shoreFoamTint = normalizeRgb01(p.shoreFoamTint, { r: 0.95, g: 0.97, b: 0.9 });
     const murkColor = normalizeRgb01(p.murkColor, { r: 0.15, g: 0.22, b: 0.12 });
     const bathAbsorb = normalizeRgb01(p.bathymetryAbsorptionCoeff, { r: 4.0, g: 1.5, b: 0.1 });
     const bathScatter = normalizeRgb01(p.bathymetryDeepScatterColor, { r: 0.02, g: 0.10, b: 0.20 });
@@ -2800,17 +2929,58 @@ export class WaterEffectV2 {
       uHasOverheadShadow:   { value: 0.0 },
 
       // Caustics
-      uCausticsEnabled:      { value: p.causticsEnabled ? 1.0 : 0.0 },
-      uCausticsIntensity:    { value: p.causticsIntensity ?? 4.0 },
-      uCausticsScale:        { value: p.causticsScale ?? 33.4 },
-      uCausticsSpeed:        { value: p.causticsSpeed ?? 1.05 },
-      uCausticsSharpness:    { value: p.causticsSharpness ?? 0.15 },
-      uCausticsEdgeLo:       { value: p.causticsEdgeLo ?? 0.11 },
-      uCausticsEdgeHi:       { value: p.causticsEdgeHi ?? 1.0 },
-      uCausticsBrightnessMaskEnabled: { value: p.causticsBrightnessMaskEnabled ? 1.0 : 0.0 },
-      uCausticsBrightnessThreshold:   { value: Number.isFinite(p.causticsBrightnessThreshold) ? Math.max(0.0, p.causticsBrightnessThreshold) : 0.55 },
-      uCausticsBrightnessSoftness:    { value: Number.isFinite(p.causticsBrightnessSoftness) ? Math.max(0.0, p.causticsBrightnessSoftness) : 0.20 },
-      uCausticsBrightnessGamma:       { value: Number.isFinite(p.causticsBrightnessGamma) ? Math.max(0.01, p.causticsBrightnessGamma) : 1.0 },
+      uCausticsEnabled:              { value: p.causticsEnabled ? 1.0 : 0.0 },
+      uCausticsIntensity:            { value: p.causticsIntensity ?? 4.0 },
+      uCausticsScale:                { value: p.causticsScale ?? 33.4 },
+      uCausticsSpeed:                { value: p.causticsSpeed ?? 1.05 },
+      uCausticsSharpness:            { value: p.causticsSharpness ?? 0.15 },
+      uCausticsEdgeLo:               { value: p.causticsEdgeLo ?? 0.11 },
+      uCausticsEdgeHi:               { value: p.causticsEdgeHi ?? 1.0 },
+      uCausticsBrightnessMaskEnabled:{ value: p.causticsBrightnessMaskEnabled ? 1.0 : 0.0 },
+      uCausticsBrightnessThreshold:  { value: Number.isFinite(p.causticsBrightnessThreshold) ? Math.max(0.0, p.causticsBrightnessThreshold) : 0.55 },
+      uCausticsBrightnessSoftness:   { value: Number.isFinite(p.causticsBrightnessSoftness) ? Math.max(0.0, p.causticsBrightnessSoftness) : 0.20 },
+      uCausticsBrightnessGamma:      { value: Number.isFinite(p.causticsBrightnessGamma) ? Math.max(0.01, p.causticsBrightnessGamma) : 1.0 },
+
+      // Shore Foam (Advanced)
+      uShoreFoamEnabled:                  { value: (p.shoreFoamEnabled ?? true) ? 1.0 : 0.0 },
+      uShoreFoamStrength:                 { value: p.shoreFoamStrength ?? 0.8 },
+      uShoreFoamThreshold:                { value: p.shoreFoamThreshold ?? 0.28 },
+      uShoreFoamScale:                    { value: p.shoreFoamScale ?? 20.0 },
+      uShoreFoamSpeed:                    { value: p.shoreFoamSpeed ?? 0.1 },
+      uShoreFoamColor:                    { value: new THREE.Vector3(shoreFoamColor.r, shoreFoamColor.g, shoreFoamColor.b) },
+      uShoreFoamTint:                     { value: new THREE.Vector3(shoreFoamTint.r, shoreFoamTint.g, shoreFoamTint.b) },
+      uShoreFoamTintStrength:             { value: p.shoreFoamTintStrength ?? 0.2 },
+      uShoreFoamColorVariation:           { value: p.shoreFoamColorVariation ?? 0.15 },
+      uShoreFoamOpacity:                  { value: p.shoreFoamOpacity ?? 1.0 },
+      uShoreFoamBrightness:               { value: p.shoreFoamBrightness ?? 0.6 },
+      uShoreFoamContrast:                 { value: p.shoreFoamContrast ?? 1.5 },
+      uShoreFoamGamma:                    { value: p.shoreFoamGamma ?? 0.8 },
+      uShoreFoamLightingEnabled:          { value: (p.shoreFoamLightingEnabled ?? true) ? 1.0 : 0.0 },
+      uShoreFoamAmbientLight:             { value: p.shoreFoamAmbientLight ?? 0.5 },
+      uShoreFoamSceneLightInfluence:      { value: p.shoreFoamSceneLightInfluence ?? 0.8 },
+      uShoreFoamDarknessResponse:         { value: p.shoreFoamDarknessResponse ?? 0.7 },
+      uShoreFoamFilamentsEnabled:         { value: (p.shoreFoamFilamentsEnabled ?? true) ? 1.0 : 0.0 },
+      uShoreFoamFilamentsStrength:        { value: p.shoreFoamFilamentsStrength ?? 0.5 },
+      uShoreFoamFilamentsScale:           { value: p.shoreFoamFilamentsScale ?? 5.0 },
+      uShoreFoamFilamentsLength:          { value: p.shoreFoamFilamentsLength ?? 2.0 },
+      uShoreFoamFilamentsWidth:           { value: p.shoreFoamFilamentsWidth ?? 0.2 },
+      uShoreFoamThicknessVariation:       { value: p.shoreFoamThicknessVariation ?? 0.4 },
+      uShoreFoamThicknessScale:           { value: p.shoreFoamThicknessScale ?? 4.0 },
+      uShoreFoamEdgeDetail:               { value: p.shoreFoamEdgeDetail ?? 0.5 },
+      uShoreFoamEdgeDetailScale:          { value: p.shoreFoamEdgeDetailScale ?? 10.0 },
+      uShoreFoamWaveDistortionStrength:   { value: p.shoreFoamWaveDistortionStrength ?? 3.0 },
+      uShoreFoamNoiseDistortionEnabled:   { value: (p.shoreFoamNoiseDistortionEnabled ?? true) ? 1.0 : 0.0 },
+      uShoreFoamNoiseDistortionStrength:  { value: p.shoreFoamNoiseDistortionStrength ?? 1.0 },
+      uShoreFoamNoiseDistortionScale:     { value: p.shoreFoamNoiseDistortionScale ?? 2.5 },
+      uShoreFoamNoiseDistortionSpeed:     { value: p.shoreFoamNoiseDistortionSpeed ?? 0.4 },
+      uShoreFoamEvolutionEnabled:         { value: (p.shoreFoamEvolutionEnabled ?? true) ? 1.0 : 0.0 },
+      uShoreFoamEvolutionSpeed:           { value: p.shoreFoamEvolutionSpeed ?? 0.2 },
+      uShoreFoamEvolutionAmount:          { value: p.shoreFoamEvolutionAmount ?? 0.5 },
+      uShoreFoamEvolutionScale:           { value: p.shoreFoamEvolutionScale ?? 2.0 },
+      uShoreFoamCoreWidth:                { value: p.shoreFoamCoreWidth ?? 0.15 },
+      uShoreFoamCoreFalloff:              { value: p.shoreFoamCoreFalloff ?? 0.1 },
+      uShoreFoamTailWidth:                { value: p.shoreFoamTailWidth ?? 0.6 },
+      uShoreFoamTailFalloff:              { value: p.shoreFoamTailFalloff ?? 0.3 },
 
       // Foam
       uFoamColor:     { value: new THREE.Vector3(foamColor.r, foamColor.g, foamColor.b) },

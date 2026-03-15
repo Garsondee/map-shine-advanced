@@ -2899,7 +2899,10 @@ async function onCanvasReady(canvas) {
     // Even in UI-only mode, we create the dialog so the scene-control button does not dead-end.
     // In this mode there are no live effects to toggle; the UI will remain minimal.
     await safeCallAsync(async () => {
-      if (!effectCapabilitiesRegistry) effectCapabilitiesRegistry = new EffectCapabilitiesRegistry();
+      if (!effectCapabilitiesRegistry) {
+        effectCapabilitiesRegistry = new EffectCapabilitiesRegistry();
+        registerAllCapabilities(effectCapabilitiesRegistry);
+      }
       if (!graphicsSettings) {
         graphicsSettings = new GraphicsSettingsManager(null, effectCapabilitiesRegistry, {
           onApplyRenderResolution: () => {
@@ -2912,6 +2915,8 @@ async function onCanvasReady(canvas) {
           }
         });
       }
+
+      await graphicsSettings.initialize();
 
       if (window.MapShine) window.MapShine.graphicsSettings = graphicsSettings;
     }, 'graphicsSettings.init(UI-only)', Severity.DEGRADED);
@@ -4544,6 +4549,37 @@ async function createThreeCanvas(scene) {
 
       safeCall(() => { if (window.MapShine) window.MapShine.stateApplier = stateApplier; }, 'exposeStateApplier', Severity.COSMETIC);
 
+      if (!effectCapabilitiesRegistry) {
+        effectCapabilitiesRegistry = new EffectCapabilitiesRegistry();
+        registerAllCapabilities(effectCapabilitiesRegistry);
+      }
+
+      if (!graphicsSettings) {
+        graphicsSettings = new GraphicsSettingsManager(effectComposer, effectCapabilitiesRegistry, {
+          onApplyRenderResolution: () => {
+            safeCall(() => {
+              if (!threeCanvas) return;
+              const rect = threeCanvas.getBoundingClientRect();
+              resize(rect.width, rect.height);
+            }, 'graphicsSettings.resize', Severity.COSMETIC);
+          }
+        });
+      }
+
+      graphicsSettings.effectComposer = effectComposer;
+      await graphicsSettings.initialize();
+      if (tokenManager && typeof tokenManager.setDepthInteraction === 'function') {
+        graphicsSettings._onTokenDepthInteractionChanged = (enabled) => {
+          safeCall(() => tokenManager.setDepthInteraction(enabled), 'graphicsSettings.tokenDepthInteraction', Severity.COSMETIC);
+        };
+        safeCall(
+          () => tokenManager.setDepthInteraction(graphicsSettings.getTokenDepthInteraction()),
+          'graphicsSettings.tokenDepthInteraction.init',
+          Severity.COSMETIC
+        );
+      }
+      if (window.MapShine) window.MapShine.graphicsSettings = graphicsSettings;
+
         if (!uiManager) {
           uiManager = new TweakpaneManager();
           await uiManager.initialize();
@@ -5327,37 +5363,115 @@ async function createThreeCanvas(scene) {
       }
     }, 'v2.floorLayerAssignment', Severity.DEGRADED);
 
-    safeCall(() => {
+    await safeCallAsync(async () => {
       const sc = window.MapShine?.sceneComposer;
       const compositor = sc?._sceneMaskCompositor;
       const sceneDoc = canvas?.scene ?? null;
       if (!compositor || !sceneDoc || typeof compositor.preloadAllFloors !== 'function') return;
 
-      // Keep startup responsive: warm floor mask bundles in the background.
-      void compositor.preloadAllFloors(sceneDoc, {
+      // Deterministic startup warmup: block here so first floor-step does not hit
+      // cold per-floor mask composition on demand.
+      await compositor.preloadAllFloors(sceneDoc, {
         activeLevelContext: window.MapShine?.activeLevelContext ?? null,
         lastMaskBasePath: compositor?._activeFloorBasePath ?? sc?.currentBundle?.basePath ?? null,
         initialMasks: sc?.currentBundle?.masks ?? null,
-      }).catch(err => {
-        log.warn('V2 preloadAllFloors background task failed:', err);
       });
-    }, 'v2.preloadAllFloors.background', Severity.DEGRADED);
+    }, 'v2.preloadAllFloors.await', Severity.DEGRADED);
 
-    safeCall(() => {
+    await safeCallAsync(async () => {
       const fc = window.MapShine?.effectComposer?._floorCompositorV2;
       if (!fc || typeof fc.prewarmForLoading !== 'function') return;
 
-      // Trigger floor/effect prewarm opportunistically without blocking fade-in.
-      void fc.prewarmForLoading({
+      // Ensure bus/effect populate has completed before we do virtual floor stepping.
+      await fc.prewarmForLoading({
         prewarmAllFloors: true,
-        awaitPopulate: false,
-      }).catch(err => {
-        log.warn('V2 prewarmForLoading background task failed:', err);
+        awaitPopulate: true,
       });
-    }, 'v2.prewarmForLoading.background', Severity.DEGRADED);
+    }, 'v2.prewarmForLoading.await', Severity.DEGRADED);
 
     console.log(' -> Step: preloadAllFloors DONE');
     if (isDebugLoad) dlp.end('fin.preloadAllFloors');
+
+    // Step: deterministic floor-step prewarm.
+    // Simulate user floor navigation during loading: step up through all floors,
+    // then step down to ground floor. This triggers the exact runtime pathway used
+    // by the + / - controls so first in-session floor switch is cache-hot.
+    _sectionStart('fin.floorStepPrewarm');
+    if (isDebugLoad) dlp.begin('fin.floorStepPrewarm', 'finalize');
+    safeCall(() => loadingOverlay.setStage('final', 0.90, 'Prewarming floor transitions...', { keepAuto: true }), 'overlay.floorStepPrewarm.start', Severity.COSMETIC);
+    _setCreateThreeCanvasProgress('floorStepPrewarm');
+    console.log(' -> Step: floorStepPrewarm');
+    await safeCallAsync(async () => {
+      const controller = window.MapShine?.levelNavigationController ?? window.MapShine?.cameraFollower ?? null;
+      if (!controller || typeof controller.setActiveLevel !== 'function' || typeof controller.getAvailableLevels !== 'function') {
+        log.info('fin.floorStepPrewarm: level navigation controller unavailable, skipping');
+        return;
+      }
+
+      const levels = controller.getAvailableLevels() ?? [];
+      if (levels.length <= 1) {
+        log.info('fin.floorStepPrewarm: single-floor scene, skipping');
+        return;
+      }
+
+      const originalContext = controller.getActiveLevelContext?.() ?? null;
+      const originalIndexRaw = Number(originalContext?.index);
+      const originalIndex = Number.isFinite(originalIndexRaw) ? Math.max(0, Math.min(levels.length - 1, originalIndexRaw)) : 0;
+      const previousLockMode = controller.getLockMode?.() ?? 'manual';
+
+      if (previousLockMode === 'follow-controlled-token') {
+        controller.setLockMode?.('manual', { emit: false, reason: 'loading-floor-prewarm-manual' });
+      }
+
+      // Walk: current -> top, then top-1 -> ground.
+      const sequence = [];
+      for (let i = originalIndex + 1; i < levels.length; i++) sequence.push(i);
+      for (let i = levels.length - 2; i >= 0; i--) sequence.push(i);
+
+      if (!sequence.length) return;
+
+      const total = sequence.length;
+      for (let i = 0; i < total; i++) {
+        const targetIndex = sequence[i];
+        controller.setActiveLevel(targetIndex, {
+          reason: 'loading-floor-prewarm',
+          keepLockMode: true,
+          emit: true,
+        });
+
+        const progress = (i + 1) / total;
+        safeCall(() => {
+          loadingOverlay.setStage(
+            'final',
+            0.90 + (progress * 0.08),
+            `Prewarming floor transitions (${i + 1}/${total})...`,
+            { keepAuto: true }
+          );
+        }, 'overlay.floorStepPrewarm.progress', Severity.COSMETIC);
+
+        // Allow hook listeners + render loop to settle floor-dependent state.
+        window.MapShine?.renderLoop?.requestRender?.();
+        window.MapShine?.renderLoop?.requestContinuousRender?.(120);
+        await new Promise(resolve => setTimeout(resolve, 34));
+      }
+
+      // Honor requested loading behavior: end on ground floor.
+      controller.setActiveLevel(0, {
+        reason: 'loading-floor-prewarm-return-ground',
+        keepLockMode: true,
+        emit: true,
+      });
+
+      if (previousLockMode === 'follow-controlled-token') {
+        controller.setLockMode?.('follow-controlled-token', { emit: true, reason: 'loading-floor-prewarm-restore-lock' });
+      }
+
+      window.MapShine?.renderLoop?.requestRender?.();
+      window.MapShine?.renderLoop?.requestContinuousRender?.(180);
+    }, 'fin.floorStepPrewarm', Severity.DEGRADED);
+    console.log(' -> Step: floorStepPrewarm DONE');
+    if (isDebugLoad) dlp.end('fin.floorStepPrewarm');
+    _sectionEnd('fin.floorStepPrewarm');
 
     // Step: Shader compilation gate.
     // Awaits non-blocking GPU shader compilation (KHR_parallel_shader_compile) before

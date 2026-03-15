@@ -791,6 +791,28 @@ Hooks.once('init', async function() {
       }
 
       ensureTool(tokenControls, {
+        name: 'map-shine-graphics-options',
+        title: 'Map Shine Graphics Options',
+        icon: 'fas fa-desktop',
+        button: true,
+        order: 103,
+        visible: true,
+        toolclip: {
+          src: '',
+          heading: 'MAPSHINE.ToolTitle',
+          items: [{ paragraph: 'Open per-client graphics options' }]
+        },
+        onChange: () => {
+          const graphicsSettings = window.MapShine?.graphicsSettings;
+          if (!graphicsSettings || typeof graphicsSettings.toggle !== 'function') {
+            ui.notifications?.warn?.('Map Shine Graphics Options are not available yet. The scene may still be initializing.');
+            return;
+          }
+          graphicsSettings.toggle();
+        }
+      });
+
+      ensureTool(tokenControls, {
         name: 'map-shine-player-torch',
         title: 'Player Light: Torch',
         icon: 'fas fa-fire',

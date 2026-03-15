@@ -39,7 +39,6 @@ const WATER_MASK_FORMATS = ['webp', 'png', 'jpg', 'jpeg'];
 // Bitmask flags for conditional shader defines.
 const DEF_FOAM_FLECKS = 1 << 0;
 const DEF_MULTITAP    = 1 << 1;
-const DEF_CHROM_AB    = 1 << 2;
 
 /**
  * Accept either 0..1 or 0..255 color channels and normalize to 0..1.
@@ -129,8 +128,10 @@ export class WaterEffectV2 {
       // on distortion edges). This was accidentally left disabled in early V2.
       chromaticAberrationEnabled: true,
       chromaticAberrationStrengthPx: 2.5,
-      chromaticAberrationThreshold: 0.45,
-      chromaticAberrationThresholdSoftness: 0.18,
+      // Lower default threshold keeps the effect visible in darker water while
+      // threshold/softness still let artists target bright highlights.
+      chromaticAberrationThreshold: 0.20,
+      chromaticAberrationThresholdSoftness: 0.35,
       chromaticAberrationKawaseBlurPx: 1.75,
       chromaticAberrationSampleSpread: 1.0,
       chromaticAberrationEdgeCenter: 0.50,
@@ -205,6 +206,13 @@ export class WaterEffectV2 {
       specAnisotropy: 0.0,
       specAnisoRatio: 2.0,
 
+      // Sun angle specular suppression
+      specUseSunAngle: true,
+      specSunElevationFalloffEnabled: true,
+      specSunElevationFalloffStart: 15.0,
+      specSunElevationFalloffEnd: 5.0,
+      specSunElevationFalloffCurve: 2.0,
+
       // Cloud shadow modulation
       cloudShadowEnabled: true,
       cloudShadowDarkenStrength: 1.25,
@@ -255,6 +263,53 @@ export class WaterEffectV2 {
       floatingFoamCoverage: 0.35,
       floatingFoamScale: 8.0,
       floatingFoamWaveDistortion: 0.5,
+      
+      // Floating Foam Advanced (Phase 1)
+      floatingFoamColor: { r: 1.0, g: 1.0, b: 1.0 },
+      floatingFoamOpacity: 1.0,
+      floatingFoamBrightness: 0.5,
+      floatingFoamContrast: 1.8,
+      floatingFoamGamma: 0.7,
+      floatingFoamTint: { r: 0.9, g: 0.95, b: 0.85 },
+      floatingFoamTintStrength: 0.3,
+      floatingFoamColorVariation: 0.2,
+      
+      // Floating Foam Lighting
+      floatingFoamLightingEnabled: true,
+      floatingFoamAmbientLight: 0.4,
+      floatingFoamSceneLightInfluence: 0.7,
+      floatingFoamDarknessResponse: 0.6,
+      
+      // Floating Foam Shadow Casting
+      floatingFoamShadowEnabled: true,
+      floatingFoamShadowStrength: 0.35,
+      floatingFoamShadowSoftness: 0.5,
+      floatingFoamShadowDepth: 0.8,
+      
+      // Floating Foam Complexity (Phase 2)
+      floatingFoamFilamentsEnabled: true,
+      floatingFoamFilamentsStrength: 0.6,
+      floatingFoamFilamentsScale: 4.0,
+      floatingFoamFilamentsLength: 2.5,
+      floatingFoamFilamentsWidth: 0.15,
+      floatingFoamThicknessVariation: 0.5,
+      floatingFoamThicknessScale: 3.0,
+      floatingFoamEdgeDetail: 0.4,
+      floatingFoamEdgeDetailScale: 8.0,
+      floatingFoamLayerCount: 2.0,
+      floatingFoamLayerOffset: 0.3,
+      
+      // Floating Foam Distortion & Evolution
+      floatingFoamWaveDistortionStrength: 2.5,
+      floatingFoamNoiseDistortionEnabled: true,
+      floatingFoamNoiseDistortionStrength: 0.8,
+      floatingFoamNoiseDistortionScale: 2.0,
+      floatingFoamNoiseDistortionSpeed: 0.3,
+      floatingFoamEvolutionEnabled: true,
+      floatingFoamEvolutionSpeed: 0.15,
+      floatingFoamEvolutionAmount: 0.6,
+      floatingFoamEvolutionScale: 1.5,
+      
       foamFlecksEnabled: true,
       foamFlecksIntensity: 1.25,
 
@@ -355,6 +410,10 @@ export class WaterEffectV2 {
     this._smoothedWindDirY = 0.0;
     this._smoothedWindSpeed01 = 0.0;
     this._smoothedWaveShapeWind01 = 0.0;
+
+    // Smoothed wave wind motion: always ≥ 0, rate-limited to prevent advection reversal.
+    // Rises faster than it falls so gusts are felt but calm spells don't snap waves backward.
+    this._waveWindMotion01 = 0.0;
 
     // Dual-spectrum wind-direction blending.
     // We keep a "previous" direction and "target" direction and blend between
@@ -499,6 +558,38 @@ export class WaterEffectV2 {
   }
 
   /**
+   * Feed the live building shadow texture into the water shader.
+   * Called by FloorCompositor each frame after BuildingShadowsEffectV2 renders.
+   * When tex is null (building shadows disabled), the uniform is bound to the white fallback
+   * so specular is unaffected (shadow factor = 1.0).
+   * @param {THREE.Texture|null} shadowTex
+   */
+  setBuildingShadowTexture(shadowTex) {
+    try {
+      const u = this._composeMaterial?.uniforms;
+      if (!u) return;
+      if (u.tBuildingShadow) u.tBuildingShadow.value = shadowTex ?? this._fallbackWhite;
+      if (u.uHasBuildingShadow) u.uHasBuildingShadow.value = shadowTex ? 1.0 : 0.0;
+    } catch (_) {}
+  }
+
+  /**
+   * Feed the live overhead shadow texture into the water shader.
+   * Called by FloorCompositor each frame after OverheadShadowsEffectV2 renders.
+   * When tex is null (overhead shadows disabled), the uniform is bound to the white fallback
+   * so specular is unaffected (shadow factor = 1.0).
+   * @param {THREE.Texture|null} shadowTex
+   */
+  setOverheadShadowTexture(shadowTex) {
+    try {
+      const u = this._composeMaterial?.uniforms;
+      if (!u) return;
+      if (u.tOverheadShadow) u.tOverheadShadow.value = shadowTex ?? this._fallbackWhite;
+      if (u.uHasOverheadShadow) u.uHasOverheadShadow.value = shadowTex ? 1.0 : 0.0;
+    } catch (_) {}
+  }
+
+  /**
    * Set the specular sun direction from live time-of-day azimuth and elevation.
    * Called by FloorCompositor each frame after SkyColorEffectV2 updates.
    * @param {number} azimuthDeg - Degrees: 0=North, 90=East, 180=South, 270=West
@@ -559,19 +650,28 @@ export class WaterEffectV2 {
           ]
         },
         {
-          name: 'water-refraction-ca',
-          label: 'Refraction & Chromatic Aberration',
+          name: 'water-refraction',
+          label: 'Refraction',
           type: 'folder',
           expanded: false,
           parameters: [
             'refractionMultiTapEnabled',
-            'chromaticAberrationEnabled',
-            'chromaticAberrationStrengthPx', 'chromaticAberrationEdgeCenter',
-            'chromaticAberrationThreshold', 'chromaticAberrationThresholdSoftness',
-            'chromaticAberrationKawaseBlurPx', 'chromaticAberrationSampleSpread',
-            'chromaticAberrationEdgeFeather', 'chromaticAberrationEdgeGamma', 'chromaticAberrationEdgeMin',
             'distortionEdgeCenter', 'distortionEdgeFeather', 'distortionEdgeGamma',
             'distortionShoreRemapLo', 'distortionShoreRemapHi', 'distortionShorePow', 'distortionShoreMin'
+          ]
+        },
+        {
+          name: 'water-chromatic-aberration',
+          label: 'Chromatic Aberration',
+          type: 'folder',
+          expanded: false,
+          parameters: [
+            'chromaticAberrationEnabled',
+            'chromaticAberrationStrengthPx',
+            'chromaticAberrationThreshold', 'chromaticAberrationThresholdSoftness',
+            'chromaticAberrationKawaseBlurPx', 'chromaticAberrationSampleSpread',
+            'chromaticAberrationEdgeCenter', 'chromaticAberrationEdgeFeather',
+            'chromaticAberrationEdgeGamma', 'chromaticAberrationEdgeMin'
           ]
         },
         {
@@ -643,6 +743,36 @@ export class WaterEffectV2 {
             'foamBlackPoint', 'foamWhitePoint', 'foamGamma', 'foamContrast', 'foamBrightness',
             'floatingFoamStrength', 'floatingFoamCoverage', 'floatingFoamScale', 'floatingFoamWaveDistortion',
             'foamFlecksIntensity'
+          ]
+        },
+        {
+          name: 'water-floating-foam-advanced',
+          label: 'Floating Foam (Advanced)',
+          type: 'folder',
+          expanded: false,
+          parameters: [
+            'floatingFoamColor', 'floatingFoamTint', 'floatingFoamTintStrength',
+            'floatingFoamColorVariation', 'floatingFoamOpacity',
+            'floatingFoamBrightness', 'floatingFoamContrast', 'floatingFoamGamma',
+            'floatingFoamLightingEnabled',
+            'floatingFoamAmbientLight', 'floatingFoamSceneLightInfluence',
+            'floatingFoamDarknessResponse',
+            'floatingFoamShadowEnabled',
+            'floatingFoamShadowStrength', 'floatingFoamShadowSoftness',
+            'floatingFoamShadowDepth',
+            'floatingFoamFilamentsEnabled',
+            'floatingFoamFilamentsStrength', 'floatingFoamFilamentsScale',
+            'floatingFoamFilamentsLength', 'floatingFoamFilamentsWidth',
+            'floatingFoamThicknessVariation', 'floatingFoamThicknessScale',
+            'floatingFoamEdgeDetail', 'floatingFoamEdgeDetailScale',
+            'floatingFoamLayerCount', 'floatingFoamLayerOffset',
+            'floatingFoamWaveDistortionStrength',
+            'floatingFoamNoiseDistortionEnabled',
+            'floatingFoamNoiseDistortionStrength', 'floatingFoamNoiseDistortionScale',
+            'floatingFoamNoiseDistortionSpeed',
+            'floatingFoamEvolutionEnabled',
+            'floatingFoamEvolutionSpeed', 'floatingFoamEvolutionAmount',
+            'floatingFoamEvolutionScale'
           ]
         },
         {
@@ -728,8 +858,8 @@ export class WaterEffectV2 {
         refractionMultiTapEnabled: { type: 'boolean', default: true, label: 'Multi-Tap Refraction' },
         chromaticAberrationEnabled: { type: 'boolean', default: true, label: 'Chromatic Aberration Enabled' },
         chromaticAberrationStrengthPx: { type: 'slider', min: 0, max: 8, step: 0.05, default: 2.5, label: 'Chromatic Strength (px)' },
-        chromaticAberrationThreshold: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.45, label: 'Chromatic Luma Threshold' },
-        chromaticAberrationThresholdSoftness: { type: 'slider', min: 0.001, max: 1, step: 0.01, default: 0.18, label: 'Chromatic Threshold Softness' },
+        chromaticAberrationThreshold: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.20, label: 'Chromatic Luma Threshold' },
+        chromaticAberrationThresholdSoftness: { type: 'slider', min: 0.001, max: 1, step: 0.01, default: 0.35, label: 'Chromatic Threshold Softness' },
         chromaticAberrationKawaseBlurPx: { type: 'slider', min: 0, max: 8, step: 0.05, default: 1.75, label: 'Chromatic Kawase Blur (px)' },
         chromaticAberrationSampleSpread: { type: 'slider', min: 0.25, max: 3, step: 0.01, default: 1.0, label: 'Chromatic Sample Spread' },
         chromaticAberrationEdgeCenter: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.50, label: 'Chromatic Edge Center' },
@@ -799,6 +929,12 @@ export class WaterEffectV2 {
         specAnisotropy: { type: 'slider', min: -1, max: 1, step: 0.01, default: 0.0, label: 'Anisotropy' },
         specAnisoRatio: { type: 'slider', min: 0.1, max: 8, step: 0.01, default: 2.0, label: 'Aniso Ratio' },
 
+        specUseSunAngle: { type: 'boolean', default: true, label: 'Use Sun Angle' },
+        specSunElevationFalloffEnabled: { type: 'boolean', default: true, label: 'Sun Elevation Falloff' },
+        specSunElevationFalloffStart: { type: 'slider', min: 0, max: 90, step: 0.5, default: 15.0, label: 'Falloff Start (deg)' },
+        specSunElevationFalloffEnd: { type: 'slider', min: 0, max: 90, step: 0.5, default: 5.0, label: 'Falloff End (deg)' },
+        specSunElevationFalloffCurve: { type: 'slider', min: 0.1, max: 8, step: 0.1, default: 2.0, label: 'Falloff Curve' },
+
         cloudShadowEnabled: { type: 'boolean', default: true, label: 'Cloud Shadow Enabled' },
         cloudShadowDarkenStrength: { type: 'slider', min: 0, max: 3, step: 0.01, default: 1.25, label: 'Darken Strength' },
         cloudShadowDarkenCurve: { type: 'slider', min: 0.1, max: 8, step: 0.01, default: 1.5, label: 'Darken Curve' },
@@ -845,6 +981,51 @@ export class WaterEffectV2 {
         floatingFoamCoverage: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.35, label: 'Floating Foam Coverage' },
         floatingFoamScale: { type: 'slider', min: 0.1, max: 200, step: 0.1, default: 8.0, label: 'Floating Foam Scale' },
         floatingFoamWaveDistortion: { type: 'slider', min: 0, max: 2, step: 0.01, default: 0.5, label: 'Floating Foam Distortion' },
+        
+        // Floating Foam Advanced (Phase 1)
+        floatingFoamColor: { type: 'color', default: { r: 1.0, g: 1.0, b: 1.0 }, label: 'Base Color' },
+        floatingFoamTint: { type: 'color', default: { r: 0.9, g: 0.95, b: 0.85 }, label: 'Tint Color' },
+        floatingFoamTintStrength: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.3, label: 'Tint Strength' },
+        floatingFoamColorVariation: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.2, label: 'Color Variation' },
+        floatingFoamOpacity: { type: 'slider', min: 0, max: 1, step: 0.01, default: 1.0, label: 'Opacity' },
+        floatingFoamBrightness: { type: 'slider', min: -1, max: 1, step: 0.01, default: 0.5, label: 'Brightness' },
+        floatingFoamContrast: { type: 'slider', min: 0, max: 4, step: 0.01, default: 1.8, label: 'Contrast' },
+        floatingFoamGamma: { type: 'slider', min: 0.1, max: 4, step: 0.01, default: 0.7, label: 'Gamma' },
+        
+        floatingFoamLightingEnabled: { type: 'boolean', default: true, label: 'Enable Lighting' },
+        floatingFoamAmbientLight: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.4, label: 'Ambient Light' },
+        floatingFoamSceneLightInfluence: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.7, label: 'Scene Light Influence' },
+        floatingFoamDarknessResponse: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.6, label: 'Darkness Response' },
+        
+        floatingFoamShadowEnabled: { type: 'boolean', default: true, label: 'Enable Shadow' },
+        floatingFoamShadowStrength: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.35, label: 'Shadow Strength' },
+        floatingFoamShadowSoftness: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.5, label: 'Shadow Softness' },
+        floatingFoamShadowDepth: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.8, label: 'Shadow Depth' },
+        
+        // Floating Foam Complexity (Phase 2)
+        floatingFoamFilamentsEnabled: { type: 'boolean', default: true, label: 'Enable Filaments' },
+        floatingFoamFilamentsStrength: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.6, label: 'Filaments Strength' },
+        floatingFoamFilamentsScale: { type: 'slider', min: 0.1, max: 20, step: 0.1, default: 4.0, label: 'Filaments Scale' },
+        floatingFoamFilamentsLength: { type: 'slider', min: 0.1, max: 8, step: 0.1, default: 2.5, label: 'Filaments Length' },
+        floatingFoamFilamentsWidth: { type: 'slider', min: 0.01, max: 1, step: 0.01, default: 0.15, label: 'Filaments Width' },
+        floatingFoamThicknessVariation: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.5, label: 'Thickness Variation' },
+        floatingFoamThicknessScale: { type: 'slider', min: 0.1, max: 20, step: 0.1, default: 3.0, label: 'Thickness Scale' },
+        floatingFoamEdgeDetail: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.4, label: 'Edge Detail' },
+        floatingFoamEdgeDetailScale: { type: 'slider', min: 0.1, max: 40, step: 0.1, default: 8.0, label: 'Edge Detail Scale' },
+        floatingFoamLayerCount: { type: 'slider', min: 1, max: 4, step: 1, default: 2, label: 'Layer Count' },
+        floatingFoamLayerOffset: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.3, label: 'Layer Offset' },
+        
+        // Floating Foam Distortion & Evolution
+        floatingFoamWaveDistortionStrength: { type: 'slider', min: 0, max: 10, step: 0.1, default: 2.5, label: 'Wave Distortion Strength' },
+        floatingFoamNoiseDistortionEnabled: { type: 'boolean', default: true, label: 'Enable Noise Distortion' },
+        floatingFoamNoiseDistortionStrength: { type: 'slider', min: 0, max: 3, step: 0.01, default: 0.8, label: 'Noise Distortion Strength' },
+        floatingFoamNoiseDistortionScale: { type: 'slider', min: 0.1, max: 10, step: 0.1, default: 2.0, label: 'Noise Distortion Scale' },
+        floatingFoamNoiseDistortionSpeed: { type: 'slider', min: 0, max: 2, step: 0.01, default: 0.3, label: 'Noise Distortion Speed' },
+        floatingFoamEvolutionEnabled: { type: 'boolean', default: true, label: 'Enable Evolution' },
+        floatingFoamEvolutionSpeed: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.15, label: 'Evolution Speed' },
+        floatingFoamEvolutionAmount: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.6, label: 'Evolution Amount' },
+        floatingFoamEvolutionScale: { type: 'slider', min: 0.1, max: 10, step: 0.1, default: 1.5, label: 'Evolution Scale' },
+        
         foamFlecksIntensity: { type: 'slider', min: 0, max: 4, step: 0.01, default: 1.25, label: 'Foam Flecks Intensity' },
 
         murkEnabled: { type: 'boolean', default: true, label: 'Murk Enabled' },
@@ -932,7 +1113,6 @@ export class WaterEffectV2 {
     const defines = {};
     if (this.params.foamFlecksEnabled) defines.USE_FOAM_FLECKS = 1;
     if (this.params.refractionMultiTapEnabled) defines.USE_WATER_REFRACTION_MULTITAP = 1;
-    if (this.params.chromaticAberrationEnabled) defines.USE_WATER_CHROMATIC_ABERRATION = 1;
     const fragSrc = this._getSafeWaterShader();
 
     // Create shader material with all uniforms
@@ -1778,15 +1958,29 @@ export class WaterEffectV2 {
       this._smoothedWaveShapeWind01 = windMotion01;
     }
 
+    // Smoothed wave wind motion — always non-negative, asymmetrically rate-limited.
+    // Rise rate is responsive to gusts; fall rate is very slow so wave advection
+    // never reverses direction or jerks backward when wind drops.
+    {
+      const resp = Math.max(0.05, Number(p.windDirResponsiveness) || 2.5);
+      const riseRate = resp * 0.50;  // responsive on gusts
+      const fallRate = resp * 0.06;  // ~8x slower decay — waves persist through calm spells
+      const current = Number.isFinite(this._waveWindMotion01) ? this._waveWindMotion01 : 0.0;
+      const target = Math.max(0.0, Math.min(1.0, windMotion01));
+      const rate = target > current ? riseRate : fallRate;
+      const k = 1.0 - Math.exp(-dt * rate);
+      this._waveWindMotion01 = Math.max(0.0, Math.min(1.0, current + (target - current) * k));
+    }
+
     // ── Waves (compute early: used to advance uWindTime) ─────────────────
     // Wind always drives wave speed/strength. Min factors set the calm-water baseline.
     const speedMin = Math.max(0.0, p.waveSpeedWindMinFactor ?? 0.2);
     const strengthMin = Math.max(0.0, p.waveStrengthWindMinFactor ?? 0.55);
-    const waveSpeed = (speedMin + (1.0 - speedMin) * windMotion01) * (p.waveSpeed ?? 1.0);
-    const waveStrength = (strengthMin + (1.0 - strengthMin) * windMotion01) * (p.waveStrength ?? 0.6);
+    const waveSpeed = (speedMin + (1.0 - speedMin) * this._waveWindMotion01) * (p.waveSpeed ?? 1.0);
+    const waveStrength = (strengthMin + (1.0 - strengthMin) * this._waveWindMotion01) * (p.waveStrength ?? 0.6);
 
-    // Wind time: monotonic integration driven by the unified wind motion state.
-    this._windTime += dt * (0.1 + windMotion01 * 0.9);
+    // Wind time: monotonic integration driven by the smoothed wave wind (never reverses).
+    this._windTime += dt * (0.1 + this._waveWindMotion01 * 0.9);
     this._waveTime += dt * waveSpeed;
     u.uWindTime.value = this._windTime;
     if (u.uWaveTime) u.uWaveTime.value = this._waveTime;
@@ -1797,7 +1991,7 @@ export class WaterEffectV2 {
     const waterWindDirX = windDirX;
     const waterWindDirY = windDirY;
     u.uWindDir.value.set(waterWindDirX, waterWindDirY);
-    u.uWindSpeed.value = windMotion01;
+    u.uWindSpeed.value = this._waveWindMotion01;
 
     // Debug arrow: visualize the wind direction vector actually used by water.
     this._updateWindDebugArrow(waterWindDirX, waterWindDirY, windMotion01, !!p.debugWindArrow);
@@ -1814,8 +2008,8 @@ export class WaterEffectV2 {
       const advMulLegacy = Number.isFinite(p.advectionSpeed) ? Math.max(0.0, Number(p.advectionSpeed)) : null;
       const advMul = (advMulLegacy != null) ? advMulLegacy : (advSpeed01 * 4.0);
 
-      // Drive advection strictly by wind speed (no constant base drift).
-      const pxPerSec = (220.0 * windMotion01) * advMul;
+      // Drive advection strictly by smoothed wave wind speed (no constant base drift, no reversal).
+      const pxPerSec = (220.0 * this._waveWindMotion01) * advMul;
 
       const adDeg = Number.isFinite(p.advectionDirOffsetDeg) ? p.advectionDirOffsetDeg : 0.0;
       if (this._cachedAdvectionDirOffsetDeg !== adDeg) {
@@ -1855,7 +2049,7 @@ export class WaterEffectV2 {
     u.uWaveScale.value = p.waveScale;
     u.uWaveSpeed.value = waveSpeed;
     u.uWaveStrength.value = waveStrength;
-    if (u.uWaveMotion01) u.uWaveMotion01.value = windMotion01;
+    if (u.uWaveMotion01) u.uWaveMotion01.value = this._waveWindMotion01;
     u.uDistortionStrengthPx.value = p.distortionStrengthPx;
 
     // Wave breakup noise (new). If unset, fall back to legacy waveMicroNormal* params.
@@ -1913,6 +2107,7 @@ export class WaterEffectV2 {
     u.uDistortionShoreMin.value = p.distortionShoreMin;
 
     // ── Chromatic aberration ──────────────────────────────────────────────
+    u.uChromaticAberrationEnabled.value = p.chromaticAberrationEnabled ? 1.0 : 0.0;
     u.uChromaticAberrationStrengthPx.value = p.chromaticAberrationStrengthPx;
     u.uChromaticAberrationThreshold.value = p.chromaticAberrationThreshold;
     u.uChromaticAberrationThresholdSoftness.value = p.chromaticAberrationThresholdSoftness;
@@ -2041,6 +2236,53 @@ export class WaterEffectV2 {
     u.uFloatingFoamCoverage.value = p.floatingFoamCoverage;
     u.uFloatingFoamScale.value = p.floatingFoamScale;
     u.uFloatingFoamWaveDistortion.value = p.floatingFoamWaveDistortion;
+    
+    // Floating Foam Advanced (Phase 1)
+    const floatingFoamColor = normalizeRgb01(p.floatingFoamColor, { r: 1.0, g: 1.0, b: 1.0 });
+    u.uFloatingFoamColor.value.set(floatingFoamColor.r, floatingFoamColor.g, floatingFoamColor.b);
+    const floatingFoamTint = normalizeRgb01(p.floatingFoamTint, { r: 0.9, g: 0.95, b: 0.85 });
+    u.uFloatingFoamTint.value.set(floatingFoamTint.r, floatingFoamTint.g, floatingFoamTint.b);
+    u.uFloatingFoamTintStrength.value = p.floatingFoamTintStrength ?? 0.3;
+    u.uFloatingFoamColorVariation.value = p.floatingFoamColorVariation ?? 0.2;
+    u.uFloatingFoamOpacity.value = p.floatingFoamOpacity ?? 1.0;
+    u.uFloatingFoamBrightness.value = p.floatingFoamBrightness ?? 0.5;
+    u.uFloatingFoamContrast.value = p.floatingFoamContrast ?? 1.8;
+    u.uFloatingFoamGamma.value = p.floatingFoamGamma ?? 0.7;
+    
+    u.uFloatingFoamLightingEnabled.value = (p.floatingFoamLightingEnabled ?? true) ? 1.0 : 0.0;
+    u.uFloatingFoamAmbientLight.value = p.floatingFoamAmbientLight ?? 0.4;
+    u.uFloatingFoamSceneLightInfluence.value = p.floatingFoamSceneLightInfluence ?? 0.7;
+    u.uFloatingFoamDarknessResponse.value = p.floatingFoamDarknessResponse ?? 0.6;
+    
+    u.uFloatingFoamShadowEnabled.value = (p.floatingFoamShadowEnabled ?? true) ? 1.0 : 0.0;
+    u.uFloatingFoamShadowStrength.value = p.floatingFoamShadowStrength ?? 0.35;
+    u.uFloatingFoamShadowSoftness.value = p.floatingFoamShadowSoftness ?? 0.5;
+    u.uFloatingFoamShadowDepth.value = p.floatingFoamShadowDepth ?? 0.8;
+    
+    // Floating Foam Complexity (Phase 2)
+    u.uFloatingFoamFilamentsEnabled.value = (p.floatingFoamFilamentsEnabled ?? true) ? 1.0 : 0.0;
+    u.uFloatingFoamFilamentsStrength.value = p.floatingFoamFilamentsStrength ?? 0.6;
+    u.uFloatingFoamFilamentsScale.value = p.floatingFoamFilamentsScale ?? 4.0;
+    u.uFloatingFoamFilamentsLength.value = p.floatingFoamFilamentsLength ?? 2.5;
+    u.uFloatingFoamFilamentsWidth.value = p.floatingFoamFilamentsWidth ?? 0.15;
+    u.uFloatingFoamThicknessVariation.value = p.floatingFoamThicknessVariation ?? 0.5;
+    u.uFloatingFoamThicknessScale.value = p.floatingFoamThicknessScale ?? 3.0;
+    u.uFloatingFoamEdgeDetail.value = p.floatingFoamEdgeDetail ?? 0.4;
+    u.uFloatingFoamEdgeDetailScale.value = p.floatingFoamEdgeDetailScale ?? 8.0;
+    u.uFloatingFoamLayerCount.value = p.floatingFoamLayerCount ?? 2.0;
+    u.uFloatingFoamLayerOffset.value = p.floatingFoamLayerOffset ?? 0.3;
+    
+    // Floating Foam Distortion & Evolution
+    u.uFloatingFoamWaveDistortionStrength.value = p.floatingFoamWaveDistortionStrength ?? 2.5;
+    u.uFloatingFoamNoiseDistortionEnabled.value = (p.floatingFoamNoiseDistortionEnabled ?? true) ? 1.0 : 0.0;
+    u.uFloatingFoamNoiseDistortionStrength.value = p.floatingFoamNoiseDistortionStrength ?? 0.8;
+    u.uFloatingFoamNoiseDistortionScale.value = p.floatingFoamNoiseDistortionScale ?? 2.0;
+    u.uFloatingFoamNoiseDistortionSpeed.value = p.floatingFoamNoiseDistortionSpeed ?? 0.3;
+    u.uFloatingFoamEvolutionEnabled.value = (p.floatingFoamEvolutionEnabled ?? true) ? 1.0 : 0.0;
+    u.uFloatingFoamEvolutionSpeed.value = p.floatingFoamEvolutionSpeed ?? 0.15;
+    u.uFloatingFoamEvolutionAmount.value = p.floatingFoamEvolutionAmount ?? 0.6;
+    u.uFloatingFoamEvolutionScale.value = p.floatingFoamEvolutionScale ?? 1.5;
+    
     u.uFoamFlecksIntensity.value = p.foamFlecksIntensity;
 
     // ── Murk ──────────────────────────────────────────────────────────────
@@ -2087,16 +2329,13 @@ export class WaterEffectV2 {
     // ── Shader defines (conditional compilation) ──────────────────────────
     const flecksEnabled = !!p.foamFlecksEnabled;
     const multiTapEnabled = !!p.refractionMultiTapEnabled;
-    const chromEnabled = !!p.chromaticAberrationEnabled;
     const definesKey = (flecksEnabled ? DEF_FOAM_FLECKS : 0)
-      | (multiTapEnabled ? DEF_MULTITAP : 0)
-      | (chromEnabled ? DEF_CHROM_AB : 0);
+      | (multiTapEnabled ? DEF_MULTITAP : 0);
 
     if (definesKey !== this._lastDefinesKey) {
       const d = this._composeMaterial.defines || {};
       if (flecksEnabled) d.USE_FOAM_FLECKS = 1; else delete d.USE_FOAM_FLECKS;
       if (multiTapEnabled) d.USE_WATER_REFRACTION_MULTITAP = 1; else delete d.USE_WATER_REFRACTION_MULTITAP;
-      if (chromEnabled) d.USE_WATER_CHROMATIC_ABERRATION = 1; else delete d.USE_WATER_CHROMATIC_ABERRATION;
       this._composeMaterial.defines = d;
       this._composeMaterial.needsUpdate = true;
       this._lastDefinesKey = definesKey;
@@ -2466,9 +2705,10 @@ export class WaterEffectV2 {
       uWaveIndoorMinFactor: { value: p.waveIndoorMinFactor ?? 0.05 },
 
       // Chromatic aberration
+      uChromaticAberrationEnabled: { value: p.chromaticAberrationEnabled ? 1.0 : 0.0 },
       uChromaticAberrationStrengthPx:  { value: p.chromaticAberrationStrengthPx },
-      uChromaticAberrationThreshold: { value: p.chromaticAberrationThreshold ?? 0.45 },
-      uChromaticAberrationThresholdSoftness: { value: p.chromaticAberrationThresholdSoftness ?? 0.18 },
+      uChromaticAberrationThreshold: { value: p.chromaticAberrationThreshold ?? 0.20 },
+      uChromaticAberrationThresholdSoftness: { value: p.chromaticAberrationThresholdSoftness ?? 0.35 },
       uChromaticAberrationKawaseBlurPx: { value: p.chromaticAberrationKawaseBlurPx ?? 1.75 },
       uChromaticAberrationSampleSpread: { value: p.chromaticAberrationSampleSpread ?? 1.0 },
       uChromaticAberrationEdgeCenter:  { value: p.chromaticAberrationEdgeCenter },
@@ -2542,6 +2782,11 @@ export class WaterEffectV2 {
       uSpecDistortionNormalStrength: { value: p.specDistortionNormalStrength },
       uSpecAnisotropy:      { value: p.specAnisotropy },
       uSpecAnisoRatio:      { value: p.specAnisoRatio },
+      uSpecUseSunAngle:     { value: p.specUseSunAngle ? 1.0 : 0.0 },
+      uSpecSunElevationFalloffEnabled: { value: p.specSunElevationFalloffEnabled ? 1.0 : 0.0 },
+      uSpecSunElevationFalloffStart: { value: p.specSunElevationFalloffStart ?? 15.0 },
+      uSpecSunElevationFalloffEnd: { value: p.specSunElevationFalloffEnd ?? 5.0 },
+      uSpecSunElevationFalloffCurve: { value: p.specSunElevationFalloffCurve ?? 2.0 },
       tCloudShadow:         { value: fallbacks.white },
       uHasCloudShadow:      { value: 0.0 },
       uCloudShadowEnabled:  { value: p.cloudShadowEnabled ? 1.0 : 0.0 },
@@ -2549,6 +2794,10 @@ export class WaterEffectV2 {
       uCloudShadowDarkenCurve: { value: p.cloudShadowDarkenCurve ?? 1.5 },
       uCloudShadowSpecularKill: { value: p.cloudShadowSpecularKill ?? 1.0 },
       uCloudShadowSpecularCurve: { value: p.cloudShadowSpecularCurve ?? 6.0 },
+      tBuildingShadow:      { value: fallbacks.white },
+      uHasBuildingShadow:   { value: 0.0 },
+      tOverheadShadow:      { value: fallbacks.white },
+      uHasOverheadShadow:   { value: 0.0 },
 
       // Caustics
       uCausticsEnabled:      { value: p.causticsEnabled ? 1.0 : 0.0 },
@@ -2591,6 +2840,59 @@ export class WaterEffectV2 {
       uFloatingFoamCoverage:       { value: p.floatingFoamCoverage },
       uFloatingFoamScale:          { value: p.floatingFoamScale },
       uFloatingFoamWaveDistortion: { value: p.floatingFoamWaveDistortion },
+      
+      // Floating Foam Advanced (Phase 1)
+      uFloatingFoamColor: { value: new THREE.Vector3(
+        normalizeRgb01(p.floatingFoamColor, { r: 1.0, g: 1.0, b: 1.0 }).r,
+        normalizeRgb01(p.floatingFoamColor, { r: 1.0, g: 1.0, b: 1.0 }).g,
+        normalizeRgb01(p.floatingFoamColor, { r: 1.0, g: 1.0, b: 1.0 }).b
+      ) },
+      uFloatingFoamTint: { value: new THREE.Vector3(
+        normalizeRgb01(p.floatingFoamTint, { r: 0.9, g: 0.95, b: 0.85 }).r,
+        normalizeRgb01(p.floatingFoamTint, { r: 0.9, g: 0.95, b: 0.85 }).g,
+        normalizeRgb01(p.floatingFoamTint, { r: 0.9, g: 0.95, b: 0.85 }).b
+      ) },
+      uFloatingFoamTintStrength:    { value: p.floatingFoamTintStrength ?? 0.3 },
+      uFloatingFoamColorVariation:  { value: p.floatingFoamColorVariation ?? 0.2 },
+      uFloatingFoamOpacity:         { value: p.floatingFoamOpacity ?? 1.0 },
+      uFloatingFoamBrightness:      { value: p.floatingFoamBrightness ?? 0.5 },
+      uFloatingFoamContrast:        { value: p.floatingFoamContrast ?? 1.8 },
+      uFloatingFoamGamma:           { value: p.floatingFoamGamma ?? 0.7 },
+      
+      uFloatingFoamLightingEnabled:     { value: (p.floatingFoamLightingEnabled ?? true) ? 1.0 : 0.0 },
+      uFloatingFoamAmbientLight:        { value: p.floatingFoamAmbientLight ?? 0.4 },
+      uFloatingFoamSceneLightInfluence: { value: p.floatingFoamSceneLightInfluence ?? 0.7 },
+      uFloatingFoamDarknessResponse:    { value: p.floatingFoamDarknessResponse ?? 0.6 },
+      
+      uFloatingFoamShadowEnabled:  { value: (p.floatingFoamShadowEnabled ?? true) ? 1.0 : 0.0 },
+      uFloatingFoamShadowStrength: { value: p.floatingFoamShadowStrength ?? 0.35 },
+      uFloatingFoamShadowSoftness: { value: p.floatingFoamShadowSoftness ?? 0.5 },
+      uFloatingFoamShadowDepth:    { value: p.floatingFoamShadowDepth ?? 0.8 },
+      
+      // Floating Foam Complexity (Phase 2)
+      uFloatingFoamFilamentsEnabled:   { value: (p.floatingFoamFilamentsEnabled ?? true) ? 1.0 : 0.0 },
+      uFloatingFoamFilamentsStrength:  { value: p.floatingFoamFilamentsStrength ?? 0.6 },
+      uFloatingFoamFilamentsScale:     { value: p.floatingFoamFilamentsScale ?? 4.0 },
+      uFloatingFoamFilamentsLength:    { value: p.floatingFoamFilamentsLength ?? 2.5 },
+      uFloatingFoamFilamentsWidth:     { value: p.floatingFoamFilamentsWidth ?? 0.15 },
+      uFloatingFoamThicknessVariation: { value: p.floatingFoamThicknessVariation ?? 0.5 },
+      uFloatingFoamThicknessScale:     { value: p.floatingFoamThicknessScale ?? 3.0 },
+      uFloatingFoamEdgeDetail:         { value: p.floatingFoamEdgeDetail ?? 0.4 },
+      uFloatingFoamEdgeDetailScale:    { value: p.floatingFoamEdgeDetailScale ?? 8.0 },
+      uFloatingFoamLayerCount:         { value: p.floatingFoamLayerCount ?? 2.0 },
+      uFloatingFoamLayerOffset:        { value: p.floatingFoamLayerOffset ?? 0.3 },
+      
+      // Floating Foam Distortion & Evolution
+      uFloatingFoamWaveDistortionStrength:   { value: p.floatingFoamWaveDistortionStrength ?? 2.5 },
+      uFloatingFoamNoiseDistortionEnabled:   { value: (p.floatingFoamNoiseDistortionEnabled ?? true) ? 1.0 : 0.0 },
+      uFloatingFoamNoiseDistortionStrength:  { value: p.floatingFoamNoiseDistortionStrength ?? 0.8 },
+      uFloatingFoamNoiseDistortionScale:     { value: p.floatingFoamNoiseDistortionScale ?? 2.0 },
+      uFloatingFoamNoiseDistortionSpeed:     { value: p.floatingFoamNoiseDistortionSpeed ?? 0.3 },
+      uFloatingFoamEvolutionEnabled:         { value: (p.floatingFoamEvolutionEnabled ?? true) ? 1.0 : 0.0 },
+      uFloatingFoamEvolutionSpeed:           { value: p.floatingFoamEvolutionSpeed ?? 0.15 },
+      uFloatingFoamEvolutionAmount:          { value: p.floatingFoamEvolutionAmount ?? 0.6 },
+      uFloatingFoamEvolutionScale:           { value: p.floatingFoamEvolutionScale ?? 1.5 },
+      
       uFoamFlecksIntensity:        { value: p.foamFlecksIntensity },
 
       // Murk

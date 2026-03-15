@@ -25,7 +25,7 @@
  *   - Shader-based foam flecks (ifdef USE_FOAM_FLECKS)
  *   - Murk (subsurface silt/algae)
  *   - GGX specular with anisotropy
- *   - Chromatic aberration (ifdef USE_WATER_CHROMATIC_ABERRATION)
+ *   - Chromatic aberration (runtime toggle + thresholded Kawase blur)
  *   - Multi-tap refraction (ifdef USE_WATER_REFRACTION_MULTITAP)
  *   - SDF-based edge masking for distortion and chromatic aberration
  *   - Debug views (raw mask, inside, SDF, exposure, normals, wave height)
@@ -116,6 +116,7 @@ uniform float uWaveMicroNormalDistortionStrength;
 uniform float uWaveMicroNormalSpecularStrength;
 
 // ── Chromatic aberration ─────────────────────────────────────────────────
+uniform float uChromaticAberrationEnabled;
 uniform float uChromaticAberrationStrengthPx;
 uniform float uChromaticAberrationThreshold;
 uniform float uChromaticAberrationThresholdSoftness;
@@ -188,6 +189,11 @@ uniform float uSpecShoreBias;
 uniform float uSpecDistortionNormalStrength;
 uniform float uSpecAnisotropy;
 uniform float uSpecAnisoRatio;
+uniform float uSpecUseSunAngle;
+uniform float uSpecSunElevationFalloffEnabled;
+uniform float uSpecSunElevationFalloffStart;
+uniform float uSpecSunElevationFalloffEnd;
+uniform float uSpecSunElevationFalloffCurve;
 uniform sampler2D tCloudShadow;
 uniform float uHasCloudShadow;
 uniform float uCloudShadowEnabled;
@@ -195,6 +201,10 @@ uniform float uCloudShadowDarkenStrength;
 uniform float uCloudShadowDarkenCurve;
 uniform float uCloudShadowSpecularKill;
 uniform float uCloudShadowSpecularCurve;
+uniform sampler2D tBuildingShadow;
+uniform float uHasBuildingShadow;
+uniform sampler2D tOverheadShadow;
+uniform float uHasOverheadShadow;
 
 // ── Caustics ─────────────────────────────────────────────────────────────
 uniform float uCausticsEnabled;
@@ -242,6 +252,52 @@ uniform float uFloatingFoamStrength;
 uniform float uFloatingFoamCoverage;
 uniform float uFloatingFoamScale;
 uniform float uFloatingFoamWaveDistortion;
+
+// Floating Foam Advanced (Phase 1)
+uniform vec3 uFloatingFoamColor;
+uniform float uFloatingFoamOpacity;
+uniform float uFloatingFoamBrightness;
+uniform float uFloatingFoamContrast;
+uniform float uFloatingFoamGamma;
+uniform vec3 uFloatingFoamTint;
+uniform float uFloatingFoamTintStrength;
+uniform float uFloatingFoamColorVariation;
+
+// Floating Foam Lighting
+uniform float uFloatingFoamLightingEnabled;
+uniform float uFloatingFoamAmbientLight;
+uniform float uFloatingFoamSceneLightInfluence;
+uniform float uFloatingFoamDarknessResponse;
+
+// Floating Foam Shadow Casting
+uniform float uFloatingFoamShadowEnabled;
+uniform float uFloatingFoamShadowStrength;
+uniform float uFloatingFoamShadowSoftness;
+uniform float uFloatingFoamShadowDepth;
+
+// Floating Foam Complexity (Phase 2)
+uniform float uFloatingFoamFilamentsEnabled;
+uniform float uFloatingFoamFilamentsStrength;
+uniform float uFloatingFoamFilamentsScale;
+uniform float uFloatingFoamFilamentsLength;
+uniform float uFloatingFoamFilamentsWidth;
+uniform float uFloatingFoamThicknessVariation;
+uniform float uFloatingFoamThicknessScale;
+uniform float uFloatingFoamEdgeDetail;
+uniform float uFloatingFoamEdgeDetailScale;
+uniform float uFloatingFoamLayerCount;
+uniform float uFloatingFoamLayerOffset;
+
+// Floating Foam Distortion & Evolution
+uniform float uFloatingFoamWaveDistortionStrength;
+uniform float uFloatingFoamNoiseDistortionEnabled;
+uniform float uFloatingFoamNoiseDistortionStrength;
+uniform float uFloatingFoamNoiseDistortionScale;
+uniform float uFloatingFoamNoiseDistortionSpeed;
+uniform float uFloatingFoamEvolutionEnabled;
+uniform float uFloatingFoamEvolutionSpeed;
+uniform float uFloatingFoamEvolutionAmount;
+uniform float uFloatingFoamEvolutionScale;
 
 uniform float uFoamFlecksIntensity;
 
@@ -919,8 +975,18 @@ function getFragmentShaderPart2() {
   return /* glsl */`
 
 // ── Foam ─────────────────────────────────────────────────────────────────
+// Floating foam data structure
+struct FloatingFoamData {
+  float amount;
+  vec3 color;
+  float opacity;
+  float shadowStrength;
+  float lightFactor;
+  float darkScale;
+};
+
 // waveGradPre: pre-computed waveGrad2D result from main() to avoid redundant wave calculation.
-float getFoamBaseAmount(vec2 sceneUv, float shore, float inside, vec2 rainOffPx, vec2 waveGradPre) {
+void getFoamData(vec2 sceneUv, float shore, float inside, vec2 rainOffPx, vec2 waveGradPre, float sceneLuma, float darkness, out float shoreFoamOut, out FloatingFoamData floatingOut) {
   vec2 foamWindOffsetUv = uWindOffsetUv;
   vec2 foamSceneUv = sceneUv - (foamWindOffsetUv * 0.5);
   float sceneAspect = (uHasSceneRect > 0.5) ? (uSceneRect.z / max(1.0, uSceneRect.w)) : (uResolution.x / max(1.0, uResolution.y));
@@ -976,32 +1042,212 @@ float getFoamBaseAmount(vec2 sceneUv, float shore, float inside, vec2 rainOffPx,
 
   vec2 clumpUv = foamBasis * max(0.1, uFloatingFoamScale);
   clumpUv -= windBasis * (tWind * (0.02 + uFoamSpeed * 0.05));
+  
+  // Enhanced wave distortion (much stronger)
   if (uFloatingFoamWaveDistortion > 0.01) {
     float foamDistort = clamp(uFloatingFoamWaveDistortion, 0.0, 2.0);
+    float waveDistortStr = clamp(uFloatingFoamWaveDistortionStrength, 0.0, 5.0);
     // Use pre-computed wave gradient from main() instead of recalculating
-    clumpUv += waveGradPre * foamDistort * 0.1;
+    clumpUv += waveGradPre * foamDistort * waveDistortStr * 0.2;
     vec2 texel = 1.0 / max(uResolution, vec2(1.0));
     vec2 rainUv = rainOffPx * texel;
     vec2 rainBasis = vec2(rainUv.x * sceneAspect, rainUv.y);
     float rainFoamScale = max(1.0, uFloatingFoamScale * 0.35);
-    clumpUv += rainBasis * foamDistort * rainFoamScale;
+    clumpUv += rainBasis * foamDistort * waveDistortStr * rainFoamScale * 0.15;
   }
-  float clumpC1 = valueNoise(clumpUv);
-  float clumpC2 = valueNoise(clumpUv * 2.1 + 5.2);
+  
+  // Random noise distortion for organic movement
+  if (uFloatingFoamNoiseDistortionEnabled > 0.5 && uFloatingFoamNoiseDistortionStrength > 0.01) {
+    float noiseDistStr = clamp(uFloatingFoamNoiseDistortionStrength, 0.0, 2.0);
+    float noiseDistScale = max(0.1, uFloatingFoamNoiseDistortionScale);
+    float noiseDistSpeed = max(0.0, uFloatingFoamNoiseDistortionSpeed);
+    
+    vec2 noiseUv = foamBasis * noiseDistScale;
+    float noiseTime = tWind * noiseDistSpeed;
+    
+    // Multi-octave curl noise for organic distortion
+    float n1x = valueNoise(noiseUv + vec2(noiseTime, 0.0));
+    float n1y = valueNoise(noiseUv + vec2(0.0, noiseTime) + 17.3);
+    float n2x = valueNoise(noiseUv * 2.3 + vec2(noiseTime * 1.3, 0.0) + 31.7);
+    float n2y = valueNoise(noiseUv * 2.3 + vec2(0.0, noiseTime * 1.3) + 53.1);
+    
+    vec2 noiseOffset = vec2(
+      (n1x - 0.5) * 0.7 + (n2x - 0.5) * 0.3,
+      (n1y - 0.5) * 0.7 + (n2y - 0.5) * 0.3
+    );
+    
+    clumpUv += noiseOffset * noiseDistStr;
+  }
+  
+  // Temporal evolution - slowly evolve shape over time
+  vec2 evolutionUv = clumpUv;
+  if (uFloatingFoamEvolutionEnabled > 0.5 && uFloatingFoamEvolutionAmount > 0.01) {
+    float evolSpeed = max(0.0, uFloatingFoamEvolutionSpeed);
+    float evolScale = max(0.1, uFloatingFoamEvolutionScale);
+    float evolAmount = clamp(uFloatingFoamEvolutionAmount, 0.0, 1.0);
+    
+    float evolTime = tWind * evolSpeed * 0.1; // Slow evolution
+    
+    // Create evolving domain warp
+    vec2 evolWarpUv = foamBasis * evolScale;
+    float ew1 = valueNoise(evolWarpUv + vec2(evolTime, 0.0));
+    float ew2 = valueNoise(evolWarpUv + vec2(0.0, evolTime) + 23.7);
+    float ew3 = valueNoise(evolWarpUv * 1.7 + vec2(evolTime * 0.7, evolTime * 0.7) + 47.3);
+    
+    vec2 evolWarp = vec2(
+      (ew1 - 0.5) * 0.5 + (ew3 - 0.5) * 0.3,
+      (ew2 - 0.5) * 0.5 + (ew3 - 0.5) * 0.3
+    );
+    
+    evolutionUv = mix(clumpUv, clumpUv + evolWarp, evolAmount);
+  }
+  // Base clumps (use evolution UV)
+  float clumpC1 = valueNoise(evolutionUv);
+  float clumpC2 = valueNoise(evolutionUv * 2.1 + 5.2);
   float c = clumpC1 * 0.7 + clumpC2 * 0.3;
-  float clumps = smoothstep(1.0 - clamp(uFloatingFoamCoverage, 0.0, 1.0), 1.0, c);
+  
+  // Phase 2: Multi-layer complexity
+  float complexFoam = c;
+  int layerCount = int(clamp(uFloatingFoamLayerCount, 1.0, 4.0));
+  
+  // Add multiple octaves for thickness variation (use evolution UV)
+  if (uFloatingFoamThicknessVariation > 0.01) {
+    float thickScale = max(0.1, uFloatingFoamThicknessScale);
+    float thick1 = valueNoise(evolutionUv * thickScale);
+    float thick2 = valueNoise(evolutionUv * thickScale * 2.3 + 7.1);
+    float thickness = thick1 * 0.6 + thick2 * 0.4;
+    thickness = mix(1.0, thickness, clamp(uFloatingFoamThicknessVariation, 0.0, 1.0));
+    complexFoam *= thickness;
+  }
+  
+  // Add filaments and tendrils (Phase 2)
+  if (uFloatingFoamFilamentsEnabled > 0.5 && uFloatingFoamFilamentsStrength > 0.01) {
+    float filScale = max(0.1, uFloatingFoamFilamentsScale);
+    float filLength = clamp(uFloatingFoamFilamentsLength, 0.1, 4.0);
+    float filWidth = clamp(uFloatingFoamFilamentsWidth, 0.01, 0.5);
+    
+    // Create elongated filaments using directional noise (use evolution UV)
+    vec2 filUv = evolutionUv * filScale;
+    vec2 windStretch = windBasis * filLength;
+    
+    // Multiple filament layers at different angles
+    float filaments = 0.0;
+    for (int i = 0; i < 3; i++) {
+      float angle = float(i) * 0.523599; // ~30 degrees apart
+      vec2 rotUv = vec2(
+        filUv.x * cos(angle) - filUv.y * sin(angle),
+        filUv.x * sin(angle) + filUv.y * cos(angle)
+      );
+      rotUv += windStretch * float(i) * 0.3;
+      
+      // Elongated noise for filaments
+      float fil = valueNoise(rotUv * vec2(1.0, filLength));
+      fil = smoothstep(1.0 - filWidth, 1.0, fil);
+      filaments = max(filaments, fil);
+    }
+    
+    float filStr = clamp(uFloatingFoamFilamentsStrength, 0.0, 1.0);
+    complexFoam = max(complexFoam, filaments * filStr);
+  }
+  
+  // Add edge detail and breakup (Phase 2, use evolution UV)
+  if (uFloatingFoamEdgeDetail > 0.01) {
+    float edgeScale = max(0.1, uFloatingFoamEdgeDetailScale);
+    float edge1 = valueNoise(evolutionUv * edgeScale * 3.0);
+    float edge2 = valueNoise(evolutionUv * edgeScale * 7.0 + 13.7);
+    float edgeNoise = edge1 * 0.6 + edge2 * 0.4;
+    
+    // Apply edge detail as erosion/expansion
+    float edgeStr = clamp(uFloatingFoamEdgeDetail, 0.0, 1.0);
+    float edgeOffset = (edgeNoise - 0.5) * edgeStr * 0.3;
+    complexFoam = clamp(complexFoam + edgeOffset, 0.0, 1.0);
+  }
+  
+  float clumps = smoothstep(1.0 - clamp(uFloatingFoamCoverage, 0.0, 1.0), 1.0, complexFoam);
   float deepMask = smoothstep(0.15, 0.65, 1.0 - shore);
   float floatingFoamAmount = clumps * inside * max(0.0, uFloatingFoamStrength) * deepMask;
   float raw01 = (uHasWaterRawMask > 0.5) ? texture2D(tWaterRawMask, sceneUv).r : inside;
   float rawMask = smoothstep(0.70, 0.95, clamp(raw01, 0.0, 1.0));
   float floatingFoamMaskAmount = clumps * inside * max(0.0, uFloatingFoamStrength) * rawMask;
-  float foamAmount = clamp(shoreFoamAmount + floatingFoamAmount + floatingFoamMaskAmount, 0.0, 1.0);
+  // Shore foam processing (existing logic)
+  float shoreFoamFinal = clamp(shoreFoamAmount, 0.0, 1.0);
   float bp = clamp(uFoamBlackPoint, 0.0, 1.0);
   float wp = clamp(uFoamWhitePoint, 0.0, 1.0);
-  foamAmount = clamp((foamAmount - bp) / max(1e-5, wp - bp), 0.0, 1.0);
-  foamAmount = pow(foamAmount, max(0.01, uFoamGamma));
-  foamAmount = (foamAmount - 0.5) * max(0.0, uFoamContrast) + 0.5;
-  return clamp(foamAmount + uFoamBrightness, 0.0, 1.0);
+  shoreFoamFinal = clamp((shoreFoamFinal - bp) / max(1e-5, wp - bp), 0.0, 1.0);
+  shoreFoamFinal = pow(shoreFoamFinal, max(0.01, uFoamGamma));
+  shoreFoamFinal = (shoreFoamFinal - 0.5) * max(0.0, uFoamContrast) + 0.5;
+  shoreFoamFinal = clamp(shoreFoamFinal + uFoamBrightness, 0.0, 1.0);
+  shoreFoamOut = shoreFoamFinal;
+
+  // Floating foam processing (NEW - Phase 1)
+  float floatingBase = clamp(floatingFoamAmount + floatingFoamMaskAmount, 0.0, 1.0);
+  
+  // Apply color variation noise
+  vec2 colorVarUv = clumpUv * 0.3;
+  float colorVar = valueNoise(colorVarUv) * 2.0 - 1.0;
+  colorVar *= clamp(uFloatingFoamColorVariation, 0.0, 1.0);
+  
+  // Base color with variation
+  vec3 baseColor = clamp(uFloatingFoamColor, vec3(0.0), vec3(1.0));
+  vec3 tintColor = clamp(uFloatingFoamTint, vec3(0.0), vec3(1.0));
+  float tintStr = clamp(uFloatingFoamTintStrength, 0.0, 1.0);
+  vec3 foamColor = mix(baseColor, tintColor, tintStr);
+  
+  // Apply color variation (subtle hue shift)
+  foamColor = foamColor * (1.0 + colorVar * 0.15);
+  
+  // Brightness/Contrast/Gamma adjustments
+  float foamBright = clamp(uFloatingFoamBrightness, -1.0, 1.0);
+  float foamContrast = max(0.0, uFloatingFoamContrast);
+  float foamGamma = max(0.01, uFloatingFoamGamma);
+  
+  floatingBase = clamp(floatingBase + foamBright, 0.0, 1.0);
+  floatingBase = (floatingBase - 0.5) * foamContrast + 0.5;
+  floatingBase = pow(clamp(floatingBase, 0.0, 1.0), foamGamma);
+  
+  // Lighting calculation (applied AFTER opacity blending for proper darkness)
+  float lightFactor = 1.0;
+  float darkScale = 1.0;
+  if (uFloatingFoamLightingEnabled > 0.5) {
+    float ambient = clamp(uFloatingFoamAmbientLight, 0.0, 1.0);
+    float sceneInfluence = clamp(uFloatingFoamSceneLightInfluence, 0.0, 1.0);
+    float darkResponse = clamp(uFloatingFoamDarknessResponse, 0.0, 1.0);
+    
+    // Scene lighting contribution
+    float sceneLit = smoothstep(0.02, 0.35, sceneLuma);
+    sceneLit = mix(ambient, 1.0, sceneLit);
+    
+    // Darkness response - much stronger at night (0.05 instead of 0.25)
+    darkScale = mix(1.0, 0.05, darkness * darkResponse);
+    
+    lightFactor = sceneLit * sceneInfluence + ambient * (1.0 - sceneInfluence);
+    lightFactor = clamp(lightFactor, 0.0, 1.0);
+  }
+  
+  // Opacity control
+  float opacity = clamp(uFloatingFoamOpacity, 0.0, 1.0);
+  
+  // Shadow strength calculation
+  float shadowStr = 0.0;
+  if (uFloatingFoamShadowEnabled > 0.5) {
+    float shadowBase = clamp(uFloatingFoamShadowStrength, 0.0, 1.0);
+    float shadowDepth = clamp(uFloatingFoamShadowDepth, 0.0, 1.0);
+    float shadowSoft = clamp(uFloatingFoamShadowSoftness, 0.0, 1.0);
+    
+    // Shadow intensity based on foam density
+    float densityFactor = smoothstep(0.1, 0.6, floatingBase);
+    shadowStr = shadowBase * densityFactor * shadowDepth;
+    
+    // Soften shadow edges
+    shadowStr *= mix(1.0, floatingBase, shadowSoft);
+  }
+  
+  floatingOut.amount = floatingBase;
+  floatingOut.color = foamColor;
+  floatingOut.opacity = opacity;
+  floatingOut.shadowStrength = shadowStr;
+  floatingOut.lightFactor = lightFactor;
+  floatingOut.darkScale = darkScale;
 }
 
 // ── Murk (subsurface silt/algae) ─────────────────────────────────────────
@@ -1267,73 +1513,74 @@ void main() {
   vec4 refracted = centerSample;
   #endif
 
-  #ifdef USE_WATER_CHROMATIC_ABERRATION
-  vec2 texel2 = 1.0 / max(uResolution, vec2(1.0));
-  float caPxBase = clamp(uChromaticAberrationStrengthPx, 0.0, 12.0);
-  float caThresh = clamp(uChromaticAberrationThreshold, 0.0, 1.0);
-  float caSoft = max(0.001, uChromaticAberrationThresholdSoftness);
-  float lumBase = msLuminance(refracted.rgb);
-  float caLumaGate = smoothstep(caThresh - caSoft, caThresh + caSoft, lumBase);
-  vec2 dir = offsetUv; float dirLen = length(dir);
-  vec2 dirN = (dirLen > 1e-6) ? (dir / dirLen) : vec2(1.0, 0.0);
-  vec2 perpN = vec2(-dirN.y, dirN.x);
-  // Gate by both SDF edge mask AND distMask so RGB samples never land outside
-  // the water body or in occluded (upper-floor) areas near the shoreline.
-  float caEdgeMask = chromaticInsideFromSdf(sdf01) * clamp(distMask, 0.0, 1.0) * caLumaGate;
-  float caDistGate = smoothstep(0.0006, 0.006, dirLen);
-  float caPx = caPxBase * caEdgeMask * caDistGate;
-  float spread = clamp(uChromaticAberrationSampleSpread, 0.25, 3.0);
-  float kawasePx = clamp(uChromaticAberrationKawaseBlurPx, 0.0, 8.0);
+  if (uChromaticAberrationEnabled > 0.5) {
+    vec2 texel2 = 1.0 / max(uResolution, vec2(1.0));
+    float caPxBase = clamp(uChromaticAberrationStrengthPx, 0.0, 12.0);
+    float caThresh = clamp(uChromaticAberrationThreshold, 0.0, 1.0);
+    float caSoft = max(0.001, uChromaticAberrationThresholdSoftness);
+    float lumBase = msLuminance(refracted.rgb);
+    float caLumaGate = smoothstep(caThresh - caSoft, caThresh + caSoft, lumBase);
+    vec2 dir = offsetUv; float dirLen = length(dir);
+    vec2 dirN = (dirLen > 1e-6) ? (dir / dirLen) : vec2(1.0, 0.0);
+    vec2 perpN = vec2(-dirN.y, dirN.x);
 
-  vec2 caUv = dirN * (caPx * texel2) * clamp(0.35 + 1.9 * distMask, 0.0, 2.4) * zoom;
-  vec2 axisBlurUv = dirN * (kawasePx * texel2) * spread * zoom;
-  vec2 perpBlurUv = perpN * (kawasePx * texel2) * spread * zoom;
+    // Gate CA by shoreline mask + luminance threshold. Keep it independent from
+    // distortion edge masking so CA controls still work when refraction settings
+    // are dialed low or multi-tap is disabled.
+    float caEdgeMask = chromaticInsideFromSdf(sdf01) * caLumaGate;
+    float caPx = caPxBase * caEdgeMask;
+    float spread = clamp(uChromaticAberrationSampleSpread, 0.25, 3.0);
+    float kawasePx = clamp(uChromaticAberrationKawaseBlurPx, 0.0, 8.0);
 
-  vec2 uvR = clamp(uv1 + caUv, vec2(0.001), vec2(0.999));
-  vec2 uvB = clamp(uv1 - caUv, vec2(0.001), vec2(0.999));
+    vec2 caUv = dirN * (caPx * texel2) * zoom;
+    vec2 axisBlurUv = dirN * (kawasePx * texel2) * spread * zoom;
+    vec2 perpBlurUv = perpN * (kawasePx * texel2) * spread * zoom;
 
-  float vR0 = refractTapValid(uvR);
-  float vR1 = refractTapValid(clamp(uvR + axisBlurUv, vec2(0.001), vec2(0.999)));
-  float vR2 = refractTapValid(clamp(uvR - axisBlurUv, vec2(0.001), vec2(0.999)));
-  float vR3 = refractTapValid(clamp(uvR + perpBlurUv, vec2(0.001), vec2(0.999)));
-  float vR4 = refractTapValid(clamp(uvR - perpBlurUv, vec2(0.001), vec2(0.999)));
+    vec2 uvR = clamp(uv1 + caUv, vec2(0.001), vec2(0.999));
+    vec2 uvB = clamp(uv1 - caUv, vec2(0.001), vec2(0.999));
 
-  float vB0 = refractTapValid(uvB);
-  float vB1 = refractTapValid(clamp(uvB + axisBlurUv, vec2(0.001), vec2(0.999)));
-  float vB2 = refractTapValid(clamp(uvB - axisBlurUv, vec2(0.001), vec2(0.999)));
-  float vB3 = refractTapValid(clamp(uvB + perpBlurUv, vec2(0.001), vec2(0.999)));
-  float vB4 = refractTapValid(clamp(uvB - perpBlurUv, vec2(0.001), vec2(0.999)));
+    float vR0 = refractTapValid(uvR);
+    float vR1 = refractTapValid(clamp(uvR + axisBlurUv, vec2(0.001), vec2(0.999)));
+    float vR2 = refractTapValid(clamp(uvR - axisBlurUv, vec2(0.001), vec2(0.999)));
+    float vR3 = refractTapValid(clamp(uvR + perpBlurUv, vec2(0.001), vec2(0.999)));
+    float vR4 = refractTapValid(clamp(uvR - perpBlurUv, vec2(0.001), vec2(0.999)));
 
-  float rW0 = 0.34 * vR0;
-  float rW1 = 0.165 * vR1;
-  float rW2 = 0.165 * vR2;
-  float rW3 = 0.165 * vR3;
-  float rW4 = 0.165 * vR4;
-  float bW0 = 0.34 * vB0;
-  float bW1 = 0.165 * vB1;
-  float bW2 = 0.165 * vB2;
-  float bW3 = 0.165 * vB3;
-  float bW4 = 0.165 * vB4;
+    float vB0 = refractTapValid(uvB);
+    float vB1 = refractTapValid(clamp(uvB + axisBlurUv, vec2(0.001), vec2(0.999)));
+    float vB2 = refractTapValid(clamp(uvB - axisBlurUv, vec2(0.001), vec2(0.999)));
+    float vB3 = refractTapValid(clamp(uvB + perpBlurUv, vec2(0.001), vec2(0.999)));
+    float vB4 = refractTapValid(clamp(uvB - perpBlurUv, vec2(0.001), vec2(0.999)));
 
-  float rSum = max(1e-5, rW0 + rW1 + rW2 + rW3 + rW4);
-  float bSum = max(1e-5, bW0 + bW1 + bW2 + bW3 + bW4);
+    float rW0 = 0.34 * vR0;
+    float rW1 = 0.165 * vR1;
+    float rW2 = 0.165 * vR2;
+    float rW3 = 0.165 * vR3;
+    float rW4 = 0.165 * vR4;
+    float bW0 = 0.34 * vB0;
+    float bW1 = 0.165 * vB1;
+    float bW2 = 0.165 * vB2;
+    float bW3 = 0.165 * vB3;
+    float bW4 = 0.165 * vB4;
 
-  float r0 = (vR0 > 0.5) ? texture2D(tDiffuse, uvR).r : refracted.r;
-  float r1 = (vR1 > 0.5) ? texture2D(tDiffuse, clamp(uvR + axisBlurUv, vec2(0.001), vec2(0.999))).r : refracted.r;
-  float r2 = (vR2 > 0.5) ? texture2D(tDiffuse, clamp(uvR - axisBlurUv, vec2(0.001), vec2(0.999))).r : refracted.r;
-  float r3 = (vR3 > 0.5) ? texture2D(tDiffuse, clamp(uvR + perpBlurUv, vec2(0.001), vec2(0.999))).r : refracted.r;
-  float r4 = (vR4 > 0.5) ? texture2D(tDiffuse, clamp(uvR - perpBlurUv, vec2(0.001), vec2(0.999))).r : refracted.r;
+    float rSum = max(1e-5, rW0 + rW1 + rW2 + rW3 + rW4);
+    float bSum = max(1e-5, bW0 + bW1 + bW2 + bW3 + bW4);
 
-  float b0 = (vB0 > 0.5) ? texture2D(tDiffuse, uvB).b : refracted.b;
-  float b1 = (vB1 > 0.5) ? texture2D(tDiffuse, clamp(uvB + axisBlurUv, vec2(0.001), vec2(0.999))).b : refracted.b;
-  float b2 = (vB2 > 0.5) ? texture2D(tDiffuse, clamp(uvB - axisBlurUv, vec2(0.001), vec2(0.999))).b : refracted.b;
-  float b3 = (vB3 > 0.5) ? texture2D(tDiffuse, clamp(uvB + perpBlurUv, vec2(0.001), vec2(0.999))).b : refracted.b;
-  float b4 = (vB4 > 0.5) ? texture2D(tDiffuse, clamp(uvB - perpBlurUv, vec2(0.001), vec2(0.999))).b : refracted.b;
+    float r0 = (vR0 > 0.5) ? texture2D(tDiffuse, uvR).r : refracted.r;
+    float r1 = (vR1 > 0.5) ? texture2D(tDiffuse, clamp(uvR + axisBlurUv, vec2(0.001), vec2(0.999))).r : refracted.r;
+    float r2 = (vR2 > 0.5) ? texture2D(tDiffuse, clamp(uvR - axisBlurUv, vec2(0.001), vec2(0.999))).r : refracted.r;
+    float r3 = (vR3 > 0.5) ? texture2D(tDiffuse, clamp(uvR + perpBlurUv, vec2(0.001), vec2(0.999))).r : refracted.r;
+    float r4 = (vR4 > 0.5) ? texture2D(tDiffuse, clamp(uvR - perpBlurUv, vec2(0.001), vec2(0.999))).r : refracted.r;
 
-  float rChannel = (r0 * rW0 + r1 * rW1 + r2 * rW2 + r3 * rW3 + r4 * rW4) / rSum;
-  float bChannel = (b0 * bW0 + b1 * bW1 + b2 * bW2 + b3 * bW3 + b4 * bW4) / bSum;
-  refracted.rgb = vec3(rChannel, refracted.g, bChannel);
-  #endif
+    float b0 = (vB0 > 0.5) ? texture2D(tDiffuse, uvB).b : refracted.b;
+    float b1 = (vB1 > 0.5) ? texture2D(tDiffuse, clamp(uvB + axisBlurUv, vec2(0.001), vec2(0.999))).b : refracted.b;
+    float b2 = (vB2 > 0.5) ? texture2D(tDiffuse, clamp(uvB - axisBlurUv, vec2(0.001), vec2(0.999))).b : refracted.b;
+    float b3 = (vB3 > 0.5) ? texture2D(tDiffuse, clamp(uvB + perpBlurUv, vec2(0.001), vec2(0.999))).b : refracted.b;
+    float b4 = (vB4 > 0.5) ? texture2D(tDiffuse, clamp(uvB - perpBlurUv, vec2(0.001), vec2(0.999))).b : refracted.b;
+
+    float rChannel = (r0 * rW0 + r1 * rW1 + r2 * rW2 + r3 * rW3 + r4 * rW4) / rSum;
+    float bChannel = (b0 * bW0 + b1 * bW1 + b2 * bW2 + b3 * bW3 + b4 * bW4) / bSum;
+    refracted.rgb = vec3(rChannel, refracted.g, bChannel);
+  }
 
   vec3 col = refracted.rgb;
 
@@ -1413,12 +1660,34 @@ void main() {
   }
 
   // Foam (pass pre-computed waveGrad to avoid redundant calculateWave call)
-  float foamAmount = getFoamBaseAmount(sceneUv, shore, inside, rainOffPx, waveGrad);
-  float foamVisual = clamp(foamAmount, 0.0, 1.0);
-  float foamAlpha = smoothstep(0.08, 0.35, foamVisual);
-  foamAlpha = pow(foamAlpha, 0.75);
   float sceneLuma = dot(col, vec3(0.299, 0.587, 0.114));
   float darkness = clamp(uSceneDarkness, 0.0, 1.0);
+  
+  float shoreFoamAmount;
+  FloatingFoamData floatingFoam;
+  getFoamData(sceneUv, shore, inside, rainOffPx, waveGrad, sceneLuma, darkness, shoreFoamAmount, floatingFoam);
+  
+  // Apply floating foam shadow to water surface BEFORE foam rendering
+  // Shadow offset based on sun direction (like building shadows)
+  if (floatingFoam.shadowStrength > 0.01) {
+    vec3 sunDir = normalize(uSpecSunDir);
+    // Project sun direction onto XY plane for shadow offset
+    vec2 shadowOffset = vec2(sunDir.x, sunDir.y) * 0.002; // Small offset in UV space
+    vec2 shadowUv = sceneUv + shadowOffset;
+    
+    // Sample foam at offset position for directional shadow
+    float shoreFoamShadow;
+    FloatingFoamData shadowFoam;
+    getFoamData(shadowUv, shore, inside, rainOffPx, waveGrad, sceneLuma, darkness, shoreFoamShadow, shadowFoam);
+    
+    float shadowDarken = shadowFoam.amount * floatingFoam.shadowStrength;
+    col *= (1.0 - shadowDarken);
+  }
+  
+  // Shore foam rendering (existing logic)
+  float foamVisual = clamp(shoreFoamAmount, 0.0, 1.0);
+  float foamAlpha = smoothstep(0.08, 0.35, foamVisual);
+  foamAlpha = pow(foamAlpha, 0.75);
   
   // Make foam less reliant on the background scene brightness.
   // Foam should generally look white, even over dark water/backgrounds.
@@ -1434,6 +1703,15 @@ void main() {
   
   // Boost foam alpha blending slightly for a punchier white
   col = mix(col, foamCol, clamp(foamAlpha * 1.2, 0.0, 1.0));
+  
+  // Apply floating foam with independent color and FULL opacity control
+  if (floatingFoam.amount > 0.01) {
+    float floatingAlpha = clamp(floatingFoam.amount * floatingFoam.opacity, 0.0, 1.0);
+    // Blend foam color first (without darkness)
+    col = mix(col, floatingFoam.color, floatingAlpha);
+    // THEN apply darkness to the final result for proper night darkening
+    col *= floatingFoam.darkScale;
+  }
 
   // Shader flecks
   float shaderFlecks = getShaderFlecks(sceneUv, inside, shore, foamAlpha, rainOffPx);
@@ -1502,6 +1780,12 @@ void main() {
   vec3 N = normalize(vec3(-slope.x, -slope.y, 1.0));
   vec3 V = vec3(0.0, 0.0, 1.0);
   vec3 L = normalize(uSpecSunDir);
+  
+  // Sun angle toggle: if disabled, use zenith direction (no directional specular)
+  if (uSpecUseSunAngle < 0.5) {
+    L = vec3(0.0, 0.0, 1.0);
+  }
+  
   float NoV = clamp(dot(N, V), 0.0, 1.0);
   float NoL = clamp(dot(N, L), 0.0, 1.0);
   vec3 H = normalize(L + V);
@@ -1546,10 +1830,52 @@ void main() {
     spec = specBRDF * NoL;
   }
 
+  // Sun elevation falloff: reduce specular at low sun angles (dawn/dusk)
+  if (uSpecSunElevationFalloffEnabled > 0.5 && uSpecUseSunAngle > 0.5) {
+    // Extract sun elevation from uSpecSunDir.z (normalized, so Z is sin(elevation))
+    float sunElevationRad = asin(clamp(uSpecSunDir.z, -1.0, 1.0));
+    float sunElevationDeg = sunElevationRad * 57.2957795; // rad to deg
+    
+    float falloffStart = clamp(uSpecSunElevationFalloffStart, 0.0, 90.0);
+    float falloffEnd = clamp(uSpecSunElevationFalloffEnd, 0.0, 90.0);
+    float falloffCurve = max(0.1, uSpecSunElevationFalloffCurve);
+    
+    // Ensure start > end for proper falloff range
+    float rangeStart = max(falloffStart, falloffEnd + 0.1);
+    float rangeEnd = min(falloffEnd, falloffStart - 0.1);
+    
+    // Smoothstep from full specular (above start) to zero (below end)
+    float elevationFactor = smoothstep(rangeEnd, rangeStart, sunElevationDeg);
+    elevationFactor = pow(elevationFactor, falloffCurve);
+    
+    spec *= elevationFactor;
+  }
+
+  // Combined shadow suppression: cloud, building, and overhead shadows
+  float combinedShadow = 0.0;
+  
+  // Cloud shadow
   if (uCloudShadowEnabled > 0.5 && cloudShadow > 1e-5) {
+    combinedShadow = max(combinedShadow, cloudShadow);
+  }
+  
+  // Building shadow (world-space sampled)
+  if (uHasBuildingShadow > 0.5) {
+    float buildingShadowVal = 1.0 - texture2D(tBuildingShadow, vUv).r;
+    combinedShadow = max(combinedShadow, buildingShadowVal);
+  }
+  
+  // Overhead shadow (screen-space sampled)
+  if (uHasOverheadShadow > 0.5) {
+    float overheadShadowVal = 1.0 - texture2D(tOverheadShadow, vUv).r;
+    combinedShadow = max(combinedShadow, overheadShadowVal);
+  }
+  
+  // Apply combined shadow to specular
+  if (combinedShadow > 1e-5) {
     float kStrength = clamp(uCloudShadowSpecularKill, 0.0, 1.0);
     float kCurve = max(0.01, uCloudShadowSpecularCurve);
-    float litPow = pow(clamp(1.0 - cloudShadow, 0.0, 1.0), kCurve);
+    float litPow = pow(clamp(1.0 - combinedShadow, 0.0, 1.0), kCurve);
     spec *= mix(1.0, litPow, kStrength);
   }
   if (uSpecDisableMasking < 0.5) {

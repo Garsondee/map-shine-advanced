@@ -1944,17 +1944,6 @@ export class FloorCompositor {
     }
     if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: bloom.render DONE'); } catch (_) {} }
 
-    // Cloud-top blit: alpha-over after the full post chain (sky, CC, water, bloom).
-    // Placed here so cloud tops are never refracted by water, never double-graded
-    // by sky-color/CC, and sit visually above everything except grain and sharpen.
-    // bloom has already run so cloud edges can still receive glow via the bloom
-    // pass below, while cloud tops themselves remain crisp and unaffected.
-    if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: cloudTops.blit'); } catch (_) {} }
-    if (this._cloudEffect.enabled && this._cloudEffect.params.enabled) {
-      this._cloudEffect.blitCloudTops(this.renderer, currentInput);
-    }
-    if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: cloudTops.blit DONE'); } catch (_) {} }
-
     // Sharpen pass (disabled by default — optional artistic effect).
     if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: sharpen.render'); } catch (_) {} }
     if (this._sharpenEffect.params.enabled) {
@@ -2039,6 +2028,15 @@ export class FloorCompositor {
       }
     }
     if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: lens.render DONE'); } catch (_) {} }
+
+    // Cloud-top blit: final world-space cloud composite, rendered after all
+    // screen-space post effects so white cloud tops fully sit above them.
+    // Cloud shadows remain in their existing place (pre-lighting via cloud.render).
+    if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: cloudTops.blit'); } catch (_) {} }
+    if (this._cloudEffect.enabled && this._cloudEffect.params.enabled) {
+      this._cloudEffect.blitCloudTops(this.renderer, currentInput);
+    }
+    if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: cloudTops.blit DONE'); } catch (_) {} }
 
     // ── Step 3: Blit final result to screen ──────────────────────────────
     if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: blitToScreen'); } catch (_) {} }

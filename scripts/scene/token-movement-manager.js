@@ -1525,7 +1525,9 @@ export class TokenMovementManager {
       doorSegmentCacheStats: { calls: 0, hits: 0 },
       // Dummy start/end — not used during full-scene build.
       startNode: { x: 0, y: 0, key: '0:0' },
-      endNode: { x: 0, y: 0, key: '0:0' }
+      endNode: { x: 0, y: 0, key: '0:0' },
+      // Suppress collision diagnostics during prewarm — stub token has no elevation
+      suppressCollisionDiagnostics: true
     };
 
     // Enumerate all grid cell centers within the scene rect.
@@ -4798,16 +4800,18 @@ export class TokenMovementManager {
             ? this._collectBlockingWallDetailsFromHit(hit, collisionElevation)
             : [];
           if (nearestHitDetails.length > 0) {
-            this._pathfindingLog('warn', '_validatePathSegmentCollision blocked (nearest hit)', {
-              reason: 'collision-move',
-              trace: this._traceSummary(movementTrace),
-              from: rayA,
-              to: rayB,
-              destinationFloorBottom: asNumber(context?.options?.destinationFloorBottom, NaN),
-              destinationFloorTop: asNumber(context?.options?.destinationFloorTop, NaN),
-              collisionElevation,
-              blockDetails: nearestHitDetails
-            });
+            if (!context?.suppressCollisionDiagnostics) {
+              this._pathfindingLog('warn', '_validatePathSegmentCollision blocked (nearest hit)', {
+                reason: 'collision-move',
+                trace: this._traceSummary(movementTrace),
+                from: rayA,
+                to: rayB,
+                destinationFloorBottom: asNumber(context?.options?.destinationFloorBottom, NaN),
+                destinationFloorTop: asNumber(context?.options?.destinationFloorTop, NaN),
+                collisionElevation,
+                blockDetails: nearestHitDetails
+              });
+            }
             return { ok: false, reason: 'collision-move', blockDetail: nearestHitDetails[0], blockDetails: nearestHitDetails };
           }
 
@@ -4823,16 +4827,18 @@ export class TokenMovementManager {
           });
           const allHitDetails = this._collectBlockingWallDetailsFromHit(allHits, collisionElevation);
           if (allHitDetails.length > 0) {
-            this._pathfindingLog('warn', '_validatePathSegmentCollision blocked (all hits)', {
-              reason: 'collision-move',
-              trace: this._traceSummary(movementTrace),
-              from: rayA,
-              to: rayB,
-              destinationFloorBottom: asNumber(context?.options?.destinationFloorBottom, NaN),
-              destinationFloorTop: asNumber(context?.options?.destinationFloorTop, NaN),
-              collisionElevation,
-              blockDetails: allHitDetails
-            });
+            if (!context?.suppressCollisionDiagnostics) {
+              this._pathfindingLog('warn', '_validatePathSegmentCollision blocked (all hits)', {
+                reason: 'collision-move',
+                trace: this._traceSummary(movementTrace),
+                from: rayA,
+                to: rayB,
+                destinationFloorBottom: asNumber(context?.options?.destinationFloorBottom, NaN),
+                destinationFloorTop: asNumber(context?.options?.destinationFloorTop, NaN),
+                collisionElevation,
+                blockDetails: allHitDetails
+              });
+            }
             return { ok: false, reason: 'collision-move', blockDetail: allHitDetails[0], blockDetails: allHitDetails };
           }
         } catch (_) {
@@ -4872,16 +4878,18 @@ export class TokenMovementManager {
             });
             const probeDetails = this._collectBlockingWallDetailsFromHit(probeHits, collisionElevation);
             if (probeDetails.length > 0) {
-              this._pathfindingLog('warn', '_validatePathSegmentCollision blocked (endpoint probe)', {
-                reason: 'collision-move-endpoint-probe',
-                trace: this._traceSummary(movementTrace),
-                from: rayA,
-                to: rayB,
-                destinationFloorBottom: asNumber(context?.options?.destinationFloorBottom, NaN),
-                destinationFloorTop: asNumber(context?.options?.destinationFloorTop, NaN),
-                collisionElevation,
-                blockDetails: probeDetails
-              });
+              if (!context?.suppressCollisionDiagnostics) {
+                this._pathfindingLog('warn', '_validatePathSegmentCollision blocked (endpoint probe)', {
+                  reason: 'collision-move-endpoint-probe',
+                  trace: this._traceSummary(movementTrace),
+                  from: rayA,
+                  to: rayB,
+                  destinationFloorBottom: asNumber(context?.options?.destinationFloorBottom, NaN),
+                  destinationFloorTop: asNumber(context?.options?.destinationFloorTop, NaN),
+                  collisionElevation,
+                  blockDetails: probeDetails
+                });
+              }
               return { ok: false, reason: 'collision-move-endpoint-probe', blockDetail: probeDetails[0], blockDetails: probeDetails };
             }
           } catch (_) {
@@ -4904,21 +4912,23 @@ export class TokenMovementManager {
           origin: { x: rayA.x, y: rayA.y, elevation: rayA.elevation }
         });
         if (hit) {
-          this._pathfindingLog('warn', '_validatePathSegmentCollision blocked (fallback checkCollision)', {
-            reason: 'collision-move',
-            trace: this._traceSummary(movementTrace),
-            from: rayA,
-            to: rayB,
-            destinationFloorBottom: asNumber(context?.options?.destinationFloorBottom, NaN),
-            destinationFloorTop: asNumber(context?.options?.destinationFloorTop, NaN),
-            collisionElevation,
-            blockDetails: [{
-              wallId: '',
-              bottom: NaN,
-              top: NaN,
-              reason: 'fallback-checkCollision-opaque-hit'
-            }]
-          });
+          if (!context?.suppressCollisionDiagnostics) {
+            this._pathfindingLog('warn', '_validatePathSegmentCollision blocked (fallback checkCollision)', {
+              reason: 'collision-move',
+              trace: this._traceSummary(movementTrace),
+              from: rayA,
+              to: rayB,
+              destinationFloorBottom: asNumber(context?.options?.destinationFloorBottom, NaN),
+              destinationFloorTop: asNumber(context?.options?.destinationFloorTop, NaN),
+              collisionElevation,
+              blockDetails: [{
+                wallId: '',
+                bottom: NaN,
+                top: NaN,
+                reason: 'fallback-checkCollision-opaque-hit'
+              }]
+            });
+          }
           return {
             ok: false,
             reason: 'collision-move',

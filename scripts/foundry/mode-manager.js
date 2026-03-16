@@ -198,9 +198,9 @@ export class ModeManager {
     try {
       const im = window.MapShine?.interactionManager;
       const enabled = im?.selectionBoxParams?.enabled !== false;
-      suppress = !this.isMapMakerMode && enabled;
+      suppress = !this.isMapMakerMode && enabled && this._isTokenMarqueeContextActive();
     } catch (_) {
-      suppress = !this.isMapMakerMode;
+      suppress = !this.isMapMakerMode && this._isTokenMarqueeContextActive();
     }
 
     if (typeof forceValue === 'boolean') suppress = forceValue;
@@ -241,6 +241,32 @@ export class ModeManager {
         } catch (_) {}
       }
     } catch (_) {}
+  }
+
+  /**
+   * Foundry marquee suppression should only apply to token marquee workflows.
+   * Drawings/templates/notes/etc. should keep native PIXI marquee behavior.
+   * @returns {boolean}
+   * @private
+   */
+  _isTokenMarqueeContextActive() {
+    const layer = canvas?.activeLayer;
+    const optionsName = String(layer?.options?.name || '').toLowerCase();
+    const name = String(layer?.name || '').toLowerCase();
+    const ctor = String(layer?.constructor?.name || '').toLowerCase();
+    const sceneControlName = String(ui?.controls?.control?.name || ui?.controls?.activeControl || '').toLowerCase();
+    const sceneControlLayer = String(ui?.controls?.control?.layer || '').toLowerCase();
+    const activeTool = String(ui?.controls?.tool?.name || ui?.controls?.activeTool || game?.activeTool || '').toLowerCase();
+
+    const toolAllowsTokenMarquee = !activeTool || activeTool === 'select' || activeTool === 'target' || activeTool === 'ruler';
+    const isTokenControl = sceneControlName === 'tokens' || sceneControlLayer === 'tokens';
+    const isTokenLayer =
+      optionsName === 'tokens' ||
+      name === 'tokens' ||
+      ctor === 'tokenlayer' ||
+      ctor === 'tokenslayer';
+
+    return toolAllowsTokenMarquee && (isTokenControl || isTokenLayer);
   }
 
   /**

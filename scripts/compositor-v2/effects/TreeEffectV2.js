@@ -89,6 +89,8 @@ export class TreeEffectV2 {
       bendMinStrength: 0.19,
       bendWindStart: 0.22,
       bendWindFull: 0.78,
+      turbulence: 0.45,
+      turbulenceScale: 0.00022,
       minRustleSpeed: 0.12,
       edgeFadeStart: 0.0,
       edgeFadeEnd: 0.04,
@@ -138,7 +140,7 @@ export class TreeEffectV2 {
           name: 'tree-phys',
           label: 'Wind Physics',
           type: 'inline',
-          parameters: ['windSpeedGlobal', 'windRampSpeed', 'gustFrequency', 'gustSpeed', 'waveSpatialFrequency', 'waveTravelSpeed', 'waveSharpness', 'waveInfluence', 'minRustleSpeed', 'branchBend', 'elasticity']
+          parameters: ['windSpeedGlobal', 'windRampSpeed', 'gustFrequency', 'gustSpeed', 'waveSpatialFrequency', 'waveTravelSpeed', 'waveSharpness', 'waveInfluence', 'turbulence', 'turbulenceScale', 'minRustleSpeed', 'branchBend', 'elasticity']
         },
         {
           name: 'tree-flutter',
@@ -196,6 +198,8 @@ export class TreeEffectV2 {
         bendMinStrength: { type: 'slider', label: 'Bend Min Strength', min: 0.0, max: 1.0, step: 0.01, default: 0.19 },
         bendWindStart: { type: 'slider', label: 'Bend Wind Start', min: 0.0, max: 0.8, step: 0.01, default: 0.22 },
         bendWindFull: { type: 'slider', label: 'Bend Wind Full', min: 0.1, max: 1.0, step: 0.01, default: 0.78 },
+        turbulence: { type: 'slider', label: 'Turbulence', min: 0.0, max: 2.0, step: 0.01, default: 0.45 },
+        turbulenceScale: { type: 'slider', label: 'Turbulence Scale', min: 0.00005, max: 0.003, step: 0.00001, default: 0.00022 },
         minRustleSpeed: { type: 'slider', label: 'Low-Wind Rustle Floor', min: 0.0, max: 0.6, default: 0.12 },
         branchBend: { type: 'slider', label: 'Branch Bend', min: 0.0, max: 0.1, step: 0.001, default: 0.05 },
         elasticity: { type: 'slider', label: 'Springiness', min: 0.5, max: 5.0, default: 5.0 },
@@ -321,6 +325,8 @@ export class TreeEffectV2 {
       this._sharedUniforms.uBendMinStrength.value = this.params.bendMinStrength;
       this._sharedUniforms.uBendWindStart.value = this.params.bendWindStart;
       this._sharedUniforms.uBendWindFull.value = this.params.bendWindFull;
+      this._sharedUniforms.uTurbulence.value = this.params.turbulence;
+      this._sharedUniforms.uTurbulenceScale.value = this.params.turbulenceScale;
       this._sharedUniforms.uMinRustleSpeed.value = this.params.minRustleSpeed;
       this._sharedUniforms.uEdgeFadeStart.value = this.params.edgeFadeStart;
       this._sharedUniforms.uEdgeFadeEnd.value = this.params.edgeFadeEnd;
@@ -576,6 +582,8 @@ export class TreeEffectV2 {
       uBendMinStrength: { value: this.params.bendMinStrength },
       uBendWindStart: { value: this.params.bendWindStart },
       uBendWindFull: { value: this.params.bendWindFull },
+      uTurbulence: { value: this.params.turbulence },
+      uTurbulenceScale: { value: this.params.turbulenceScale },
       uMinRustleSpeed: { value: this.params.minRustleSpeed },
       uEdgeFadeStart: { value: this.params.edgeFadeStart },
       uEdgeFadeEnd: { value: this.params.edgeFadeEnd },
@@ -731,6 +739,8 @@ export class TreeEffectV2 {
         uniform float uBendMinStrength;
         uniform float uBendWindStart;
         uniform float uBendWindFull;
+        uniform float uTurbulence;
+        uniform float uTurbulenceScale;
         uniform float uMinRustleSpeed;
         uniform float uEdgeFadeStart;
         uniform float uEdgeFadeEnd;
@@ -837,6 +847,17 @@ export class TreeEffectV2 {
           float pushMagnitude = gustStrength * uBranchBend * effectiveSpeed * waveMod * bendStrength;
           float swayMagnitude = orbitSway * (uBranchBend * 0.4) * effectiveSpeed * (0.5 + 0.5 * gustStrength) * (0.65 + 0.35 * waveMod) * bendStrength;
 
+          float turbulenceStrength = max(0.0, uTurbulence);
+          float turbulenceScale = max(0.00001, uTurbulenceScale);
+          vec2 turbulencePos = vWorldPos * turbulenceScale;
+          float turbulenceFieldA = noise(turbulencePos + vec2(uTime * 0.27, -uTime * 0.19));
+          float turbulenceFieldB = noise((turbulencePos * 1.9) - vec2(uTime * 0.61, uTime * 0.47));
+          float turbulenceSigned = ((turbulenceFieldA * 0.65 + turbulenceFieldB * 0.35) - 0.5) * 2.0;
+          float turbulenceGustCoupling = 0.45 + 0.55 * gustStrength;
+          float turbulenceMagnitude = turbulenceStrength * effectiveSpeed * turbulenceGustCoupling * (0.55 + 0.45 * waveMod);
+          vec2 turbulenceVec = (perpDir * (turbulenceSigned * uBranchBend * 0.9 * turbulenceMagnitude))
+                             + (windDir * (((turbulenceFieldB - 0.5) * 2.0) * uBranchBend * 0.3 * turbulenceMagnitude));
+
           float noiseVal = noise(vWorldPos * uFlutterScale);
           float flutterPhase = uTime * uFlutterSpeed * (0.85 + rustleSpeed) + noiseVal * 6.28;
           float flutter = sin(flutterPhase);
@@ -847,6 +868,7 @@ export class TreeEffectV2 {
 
           vec2 distortion = (windDir * pushMagnitude)
                           + (perpDir * swayMagnitude)
+                          + turbulenceVec
                           + flutterVec;
 
           vec2 sceneSpan = max(uSceneMax - uSceneMin, vec2(1e-3));

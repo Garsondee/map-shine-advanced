@@ -609,8 +609,24 @@ function _updateFoundrySelectRectSuppression(forceValue = null) {
       controlsIntegration?.inputRouter ||
       null;
     const pixiOwnsInput = !!inputRouter?.shouldPixiReceiveInput?.();
+    const layer = canvas?.activeLayer;
+    const optionsName = String(layer?.options?.name || '').toLowerCase();
+    const name = String(layer?.name || '').toLowerCase();
+    const ctor = String(layer?.constructor?.name || '').toLowerCase();
+    const sceneControlName = String(ui?.controls?.control?.name || ui?.controls?.activeControl || '').toLowerCase();
+    const sceneControlLayer = String(ui?.controls?.control?.layer || '').toLowerCase();
+    const activeTool = String(ui?.controls?.tool?.name || ui?.controls?.activeTool || game?.activeTool || '').toLowerCase();
 
-    return !isMapMakerMode && enabled && !pixiOwnsInput;
+    const toolAllowsTokenMarquee = !activeTool || activeTool === 'select' || activeTool === 'target' || activeTool === 'ruler';
+    const isTokenControl = sceneControlName === 'tokens' || sceneControlLayer === 'tokens';
+    const isTokenLayer =
+      optionsName === 'tokens' ||
+      name === 'tokens' ||
+      ctor === 'tokenlayer' ||
+      ctor === 'tokenslayer';
+    const tokenMarqueeContextActive = toolAllowsTokenMarquee && (isTokenControl || isTokenLayer);
+
+    return !isMapMakerMode && enabled && tokenMarqueeContextActive && !pixiOwnsInput;
   }, 'selectRect.checkSuppression', Severity.COSMETIC, { fallback: false });
 
   if (typeof forceValue === 'boolean') suppress = forceValue;

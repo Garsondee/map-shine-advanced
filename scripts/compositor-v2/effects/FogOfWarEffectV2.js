@@ -222,6 +222,15 @@ export class FogOfWarEffectV2 {
     this._doorStateCache = new Map();
     this._doorFogDefaultDurationMs = 500;
     this._doorFogThicknessGrid = 0.35;
+
+    // Socket listener for the authoritative fog reset broadcast from Foundry's
+    // server. canvas.fog.reset() emits 'resetFog' via socket; the server then
+    // calls _handleReset() on every client. That path does NOT fire a
+    // deleteFogExploration hook, so we listen to the socket directly to ensure
+    // V2 exploration buffers are always cleared on reset regardless of whether
+    // the user has a persisted FogExploration document.
+    /** @type {Function|null} */
+    this._fogResetSocketHandler = null;
   }
 
   /**
@@ -1270,6 +1279,24 @@ export class FogOfWarEffectV2 {
       this._onFoundryFogExplorationChanged(doc);
     })]);
     
+    // Directly intercept the Foundry fog-reset socket broadcast so V2 exploration
+    // buffers are cleared even when no FogExploration document existed for the
+    // current user (which means deleteFogExploration hook would never fire).
+    // The server emits 'resetFog' with { sceneId } to all clients.
+    try {
+      if (game?.socket) {
+        this._fogResetSocketHandler = ({ sceneId } = {}) => {
+          try {
+            if (!sceneId || sceneId !== canvas?.scene?.id) return;
+            log.info('[FOG] resetFog socket received — clearing V2 exploration buffers');
+            this.resetExploration();
+            this._needsVisionUpdate = true;
+          } catch (_) {}
+        };
+        game.socket.on('resetFog', this._fogResetSocketHandler);
+      }
+    } catch (_) {}
+
     // Initial render: force perception so that any starting
     // controlled token (or vision source) has a valid LOS
     // polygon before the first fog mask is drawn.
@@ -2874,6 +2901,14 @@ export class FogOfWarEffectV2 {
     } catch (e) {
     }
     this._hookIds = [];
+
+    // Unregister the resetFog socket listener
+    try {
+      if (this._fogResetSocketHandler && game?.socket) {
+        game.socket.off('resetFog', this._fogResetSocketHandler);
+        this._fogResetSocketHandler = null;
+      }
+    } catch (_) {}
     
     if (this.fogPlane && this.mainScene) {
       this.mainScene.remove(this.fogPlane);

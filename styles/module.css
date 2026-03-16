@@ -188,6 +188,32 @@
   margin-bottom: 4px !important;
 }
 
+/* Gradient-over-lifespan editor widget */
+.ms-gradient-editor-host {
+  width: 100%;
+  margin: 4px 0;
+}
+
+.ms-gradient-editor {
+  box-sizing: border-box;
+  width: 100%;
+}
+
+.ms-gradient-editor canvas {
+  display: block;
+  image-rendering: pixelated;
+}
+
+.ms-gradient-editor input[type='number'] {
+  background: rgba(0,0,0,0.35);
+  border: 1px solid rgba(255,255,255,0.15);
+  color: #fff;
+  border-radius: 2px;
+  padding: 1px 4px;
+  font-size: 10px;
+  width: 60px;
+}
+
 :root {
   --map-shine-fade-ms: 5000ms;
 }

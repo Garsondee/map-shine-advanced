@@ -393,6 +393,21 @@ export class GridRenderer {
         useAlphaOverride: {
           label: 'Override Opacity',
           default: true
+        },
+        ghostGridEnabled: {
+          label: 'Show Adjacent Floor Grids',
+          default: true
+        },
+        ghostGridAlphaScale: {
+          label: 'Adjacent Grid Opacity Scale',
+          min: 0.0,
+          max: 1.0,
+          step: 0.01,
+          default: 0.22
+        },
+        floorTintPresetsEnabled: {
+          label: 'Floor Color Tinting',
+          default: true
         }
       }
     };
@@ -407,6 +422,22 @@ export class GridRenderer {
     if (param in this.settings) {
       this.settings[param] = value;
       this.updateGrid();
+      return;
+    }
+    // Ghost grid and floor tint settings live outside this.settings
+    // because they only affect the ghost meshes, not the primary grid geometry.
+    if (param === 'ghostGridEnabled') {
+      this.setGhostGridEnabled(!!value);
+      return;
+    }
+    if (param === 'ghostGridAlphaScale') {
+      this._ghostGridAlphaScale = Math.max(0, Math.min(1, Number(value) || 0));
+      this._refreshGhostGridMeshes();
+      return;
+    }
+    if (param === 'floorTintPresetsEnabled') {
+      this.setFloorTintPresetsEnabled(!!value);
+      return;
     }
   }
 

@@ -227,6 +227,8 @@ export class GraphicsSettingsManager {
     } catch (e) {
       log.warn('Failed to apply render resolution', e);
     }
+    
+    this.saveState();
   }
 
   /**
@@ -235,6 +237,7 @@ export class GraphicsSettingsManager {
   setRenderAdaptiveFpsEnabled(enabled) {
     this.state.renderAdaptiveFpsEnabled = enabled === true;
     this.applyRenderPerformanceSettings();
+    this.saveState();
   }
 
   /**
@@ -243,6 +246,7 @@ export class GraphicsSettingsManager {
   setRenderIdleFps(fps) {
     this.state.renderIdleFps = this._coerceFps(fps, 15, 5, 60);
     this.applyRenderPerformanceSettings();
+    this.saveState();
   }
 
   /**
@@ -251,6 +255,7 @@ export class GraphicsSettingsManager {
   setRenderActiveFps(fps) {
     this.state.renderActiveFps = this._coerceFps(fps, 60, 5, 120);
     this.applyRenderPerformanceSettings();
+    this.saveState();
   }
 
   /**
@@ -259,6 +264,7 @@ export class GraphicsSettingsManager {
   setRenderContinuousFps(fps) {
     this.state.renderContinuousFps = this._coerceFps(fps, 30, 5, 120);
     this.applyRenderPerformanceSettings();
+    this.saveState();
   }
 
   /**

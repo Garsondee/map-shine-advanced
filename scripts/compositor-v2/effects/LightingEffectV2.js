@@ -46,9 +46,9 @@ export class LightingEffectV2 {
     // ── Tuning parameters (match V1 defaults) ──────────────────────────
     this.params = {
       enabled: true,
-      globalIllumination: 1.2,
-      lightIntensity: 0.2,
-      colorationStrength: 3.0,
+      globalIllumination: 0.9,
+      lightIntensity: 0.1,
+      colorationStrength: 10.0,
       darknessLevel: 0.0,
       negativeDarknessStrength: 1.0,
       darknessPunchGain: 2.0,
@@ -205,9 +205,9 @@ export class LightingEffectV2 {
       ],
       parameters: {
         enabled: { type: 'boolean', default: true, hidden: true },
-        globalIllumination: { type: 'slider', min: 0, max: 2, step: 0.1, default: 1.2 },
-        lightIntensity: { type: 'slider', min: 0, max: 2, step: 0.05, default: 0.2, label: 'Light Intensity' },
-        colorationStrength: { type: 'slider', min: 0, max: 500, step: 0.05, default: 3.0, label: 'Coloration Strength' },
+        globalIllumination: { type: 'slider', min: 0, max: 2, step: 0.1, default: 0.9 },
+        lightIntensity: { type: 'slider', min: 0, max: 2, step: 0.05, default: 0.1, label: 'Light Intensity' },
+        colorationStrength: { type: 'slider', min: 0, max: 500, step: 0.05, default: 10.0, label: 'Coloration Strength' },
         wallInsetPx: { type: 'slider', min: 0, max: 40, step: 0.5, default: 6.0, label: 'Wall Inset (px)' },
         upperFloorTransmissionEnabled: { type: 'boolean', default: false, label: 'Upper Floor Through-Gaps' },
         upperFloorTransmissionStrength: { type: 'slider', min: 0, max: 2, step: 0.05, default: 0.6, label: 'Upper Light Strength' },

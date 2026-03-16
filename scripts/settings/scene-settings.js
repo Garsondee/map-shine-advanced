@@ -181,6 +181,114 @@ function _canEditScene(scene) {
 }
 
 /**
+ * Read and normalize the scene settings payload without mutating the Scene.
+ * This gives all callers a single authoritative read path, even when older
+ * scenes still contain legacy strings or malformed partial objects.
+ *
+ * @param {Scene} scene
+ * @returns {SceneSettings}
+ * @public
+ */
+export function getSceneSettings(scene) {
+  const defaults = createDefaultSettings();
+
+  try {
+    if (!scene) return defaults;
+
+    let raw = scene.getFlag(FLAG_NAMESPACE, 'settings');
+    raw = _safeParseJsonMaybe(raw);
+
+    if (!_isPlainObject(raw)) return defaults;
+
+    const next = {
+      ...defaults,
+      ...raw,
+    };
+
+    if (!_isPlainObject(next.mapMaker)) next.mapMaker = { ...defaults.mapMaker };
+    else next.mapMaker = { ...defaults.mapMaker, ...next.mapMaker };
+    if (!_isPlainObject(next.mapMaker.effects)) next.mapMaker.effects = {};
+    if (!_isPlainObject(next.mapMaker.renderer)) next.mapMaker.renderer = { ...defaults.mapMaker.renderer };
+    if (!_isPlainObject(next.mapMaker.performance)) next.mapMaker.performance = { ...defaults.mapMaker.performance };
+
+    if (next.gm !== null) {
+      if (!_isPlainObject(next.gm)) next.gm = null;
+      else {
+        next.gm = { ...next.gm };
+        if (!_isPlainObject(next.gm.effects)) next.gm.effects = {};
+      }
+    }
+
+    if (!_isPlainObject(next.player)) next.player = {};
+
+    next.version = CURRENT_VERSION;
+    next.mapMaker.version = CURRENT_VERSION;
+
+    return next;
+  } catch (e) {
+    log.warn('Failed to read scene settings; falling back to defaults:', e?.message ?? e);
+    return defaults;
+  }
+}
+
+/**
+ * Persist a normalized scene settings payload back to the Scene document.
+ *
+ * @param {Scene} scene
+ * @param {any} settings
+ * @returns {Promise<SceneSettings>}
+ * @public
+ */
+export async function setSceneSettings(scene, settings) {
+  const defaults = createDefaultSettings();
+  const normalized = getSceneSettings(scene);
+
+  try {
+    if (!scene) return defaults;
+
+    const merged = {
+      ...normalized,
+      ...(_isPlainObject(settings) ? settings : {}),
+    };
+
+    if (_isPlainObject(settings?.mapMaker)) {
+      merged.mapMaker = {
+        ...normalized.mapMaker,
+        ...settings.mapMaker,
+      };
+      if (!_isPlainObject(merged.mapMaker.effects)) merged.mapMaker.effects = {};
+      if (!_isPlainObject(merged.mapMaker.renderer)) merged.mapMaker.renderer = { ...defaults.mapMaker.renderer };
+      if (!_isPlainObject(merged.mapMaker.performance)) merged.mapMaker.performance = { ...defaults.mapMaker.performance };
+    }
+
+    if (settings?.gm === null) {
+      merged.gm = null;
+    } else if (_isPlainObject(settings?.gm)) {
+      merged.gm = {
+        ...(normalized.gm && _isPlainObject(normalized.gm) ? normalized.gm : {}),
+        ...settings.gm,
+      };
+      if (!_isPlainObject(merged.gm.effects)) merged.gm.effects = {};
+    }
+
+    if (_isPlainObject(settings?.player)) {
+      merged.player = { ...normalized.player, ...settings.player };
+    }
+
+    merged.version = CURRENT_VERSION;
+    if (!_isPlainObject(merged.mapMaker)) merged.mapMaker = { ...defaults.mapMaker };
+    merged.mapMaker.version = CURRENT_VERSION;
+    if (!_isPlainObject(merged.mapMaker.effects)) merged.mapMaker.effects = {};
+
+    await scene.setFlag(FLAG_NAMESPACE, 'settings', merged);
+    return merged;
+  } catch (e) {
+    log.warn('Failed to save normalized scene settings:', e?.message ?? e);
+    return normalized;
+  }
+}
+
+/**
  * Ensure the scene's Map Shine settings flag exists and has the expected shape.
  *
  * Old scenes (or scenes migrated from earlier versions) may have:
@@ -218,22 +326,7 @@ export async function ensureValidSceneSettings(scene, options = {}) {
     }
 
     // Normalize tiers.
-    const next = {
-      ...defaults,
-      ...raw,
-    };
-
-    if (!_isPlainObject(next.mapMaker)) next.mapMaker = { ...defaults.mapMaker };
-    if (!_isPlainObject(next.mapMaker.effects)) next.mapMaker.effects = {};
-
-    if (next.gm !== null && !_isPlainObject(next.gm)) next.gm = null;
-    if (next.gm && !_isPlainObject(next.gm.effects)) next.gm.effects = {};
-
-    if (!_isPlainObject(next.player)) next.player = {};
-
-    // Maintain version field.
-    next.version = CURRENT_VERSION;
-    next.mapMaker.version = CURRENT_VERSION;
+    const next = getSceneSettings(scene);
 
     // If anything had to be normalized, persist it.
     if (autoRepair && _canEditScene(scene)) {
@@ -273,7 +366,7 @@ export async function enable(scene) {
   const verifyEnabled = scene.getFlag(FLAG_NAMESPACE, 'enabled');
   console.warn(`MapShine enable(): verification after setFlag — getFlag('enabled') = ${JSON.stringify(verifyEnabled)}`);
   
-  await scene.setFlag(FLAG_NAMESPACE, 'settings', defaultSettings);
+  await setSceneSettings(scene, defaultSettings);
   
   // Final verification: dump the entire MSA flag namespace
   const allFlags = scene?.flags?.['map-shine-advanced'];
@@ -304,16 +397,7 @@ export function getEffectiveSettings(scene) {
     return null;
   }
 
-  let settings = null;
-  try {
-    settings = _safeParseJsonMaybe(scene.getFlag(FLAG_NAMESPACE, 'settings'));
-  } catch (_) {
-    settings = null;
-  }
-  if (!_isPlainObject(settings) || !_isPlainObject(settings.mapMaker) || !_isPlainObject(settings.mapMaker.effects)) {
-    log.warn('Scene enabled but settings flag was missing/invalid, using defaults');
-    settings = createDefaultSettings();
-  }
+  const settings = getSceneSettings(scene);
 
   // Determine user mode
   const isGM = game.user.isGM;
@@ -357,11 +441,15 @@ export async function saveMapMakerSettings(scene, settings) {
   }
 
   settings.version = CURRENT_VERSION;
-  
-  const currentSettings = scene.getFlag(FLAG_NAMESPACE, 'settings') || {};
-  currentSettings.mapMaker = settings;
 
-  await scene.setFlag(FLAG_NAMESPACE, 'settings', currentSettings);
+  const currentSettings = getSceneSettings(scene);
+  currentSettings.mapMaker = {
+    ...currentSettings.mapMaker,
+    ...settings,
+    version: CURRENT_VERSION,
+  };
+
+  await setSceneSettings(scene, currentSettings);
   log.info('Map Maker settings saved');
 }
 
@@ -379,10 +467,14 @@ export async function saveGMSettings(scene, settings) {
 
   settings.version = CURRENT_VERSION;
 
-  const currentSettings = scene.getFlag(FLAG_NAMESPACE, 'settings') || {};
-  currentSettings.gm = settings;
+  const currentSettings = getSceneSettings(scene);
+  currentSettings.gm = {
+    ...(currentSettings.gm && _isPlainObject(currentSettings.gm) ? currentSettings.gm : {}),
+    ...settings,
+    version: CURRENT_VERSION,
+  };
 
-  await scene.setFlag(FLAG_NAMESPACE, 'settings', currentSettings);
+  await setSceneSettings(scene, currentSettings);
   log.info('GM settings saved');
 }
 
@@ -397,10 +489,10 @@ export async function revertToOriginal(scene) {
     throw new Error('Only GMs can revert settings');
   }
 
-  const currentSettings = scene.getFlag(FLAG_NAMESPACE, 'settings') || {};
+  const currentSettings = getSceneSettings(scene);
   currentSettings.gm = null;
 
-  await scene.setFlag(FLAG_NAMESPACE, 'settings', currentSettings);
+  await setSceneSettings(scene, currentSettings);
   log.info('Reverted to Map Maker original settings');
 }
 

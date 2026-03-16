@@ -91,7 +91,7 @@ export class SpecularEffectV2 {
 
     // Effect parameters — same defaults as V1 for visual parity.
     this.params = {
-      intensity: 0.53,
+      intensity: 0.4,
       roughness: 0.0,
       lightDirection: { x: 0.6, y: 0.4, z: 0.7 },
       lightColor: { r: 1.0, g: 1.0, b: 1.0 },
@@ -101,7 +101,7 @@ export class SpecularEffectV2 {
       stripeBlendMode: 0,
       parallaxStrength: 1.5,
       stripeMaskThreshold: 0.1,
-      worldPatternScale: 3072.0,
+      worldPatternScale: 5808.0,
 
       // Layer 1
       stripe1Enabled: true,
@@ -148,10 +148,11 @@ export class SpecularEffectV2 {
       // Outdoor Cloud Specular
       outdoorCloudSpecularEnabled: true,
       outdoorStripeBlend: 0.8,
-      cloudSpecularIntensity: 0.37,
+      cloudSpecularIntensity: 3.0,
 
       // Wet Surface (Rain)
       wetSpecularEnabled: true,
+      wetSpecularThreshold: 0.5,
       wetInputBrightness: 0.0,
       wetInputGamma: 1.0,
       wetSpecularContrast: 3.0,
@@ -216,12 +217,12 @@ export class SpecularEffectV2 {
       parameters: {
         hasSpecularMask: { type: 'boolean', default: true },
         textureStatus: { type: 'string', label: 'Mask Status', default: 'Checking...', readonly: true },
-        intensity: { type: 'slider', label: 'Specular Intensity', min: 0, max: 2, step: 0.01, default: 0.53, throttle: 100 },
+        intensity: { type: 'slider', label: 'Specular Intensity', min: 0, max: 2, step: 0.01, default: 0.4, throttle: 100 },
         roughness: { type: 'slider', label: 'Roughness', min: 0, max: 1, step: 0.01, default: 0.0, throttle: 100 },
         stripeEnabled: { type: 'boolean', label: 'Enable Stripes', default: true },
         stripeBlendMode: { type: 'list', label: 'Stripe Blend Mode', options: { 'Add': 0, 'Multiply': 1, 'Screen': 2, 'Overlay': 3 }, default: 0 },
         stripeMaskThreshold: { type: 'slider', label: 'Stripe Brightness Threshold', min: 0, max: 1, step: 0.01, default: 0.1, throttle: 100 },
-        worldPatternScale: { type: 'slider', label: 'Specular World Scale', min: 256, max: 8192, step: 16, default: 3072, throttle: 100 },
+        worldPatternScale: { type: 'slider', label: 'Specular World Scale', min: 256, max: 8192, step: 16, default: 5808, throttle: 100 },
         parallaxStrength: { type: 'slider', label: 'Parallax Strength', min: 0, max: 2, step: 0.1, default: 1.5, throttle: 100 },
         stripe1Enabled: { type: 'boolean', label: 'Layer 1 Enabled', default: true },
         stripe1Frequency: { type: 'slider', label: 'Layer 1 Frequency', min: 0.5, max: 20, step: 0.5, default: 11.0, throttle: 100 },
@@ -259,7 +260,7 @@ export class SpecularEffectV2 {
         sparkleSpeed: { type: 'slider', label: 'Sparkle Speed', min: 0, max: 5, step: 0.01, default: 1.38, throttle: 100 },
         outdoorCloudSpecularEnabled: { type: 'boolean', label: 'Enable Cloud Specular', default: true },
         outdoorStripeBlend: { type: 'slider', label: 'Outdoor Stripe Blend', min: 0, max: 1, step: 0.01, default: 0.8, throttle: 100 },
-        cloudSpecularIntensity: { type: 'slider', label: 'Cloud Specular Intensity', min: 0, max: 3, step: 0.01, default: 3.0, throttle: 100 },
+        cloudSpecularIntensity: { type: 'slider', label: 'Cloud Specular Intensity', min: 0, max: 3, step: 0.01, default: 3, throttle: 100 },
         wetSpecularEnabled: { type: 'boolean', label: 'Enable Wet Surface', default: true },
         wetSpecularThreshold: { type: 'slider', label: 'Rain Threshold', min: 0, max: 1, step: 0.01, default: 0.5, throttle: 100 },
         wetInputBrightness: { type: 'slider', label: 'Input Brightness', min: -0.5, max: 0.5, step: 0.01, default: 0.0, throttle: 100 },

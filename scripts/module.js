@@ -39,6 +39,64 @@ function _suppressDiagConsoleLogs() {
   }
 }
 
+async function showExperimentalWarningDialog() {
+  try {
+    if (window.__msaExperimentalWarningShownThisSession) return;
+
+    const dismissed = game?.settings?.get?.(MODULE_ID, 'dismissExperimentalWarning') === true;
+    if (dismissed) return;
+
+    window.__msaExperimentalWarningShownThisSession = true;
+
+    const content = `
+      <div>
+        <p><strong>Map Shine Advanced is experimental.</strong></p>
+        <p>
+          Stability issues can still occur in complex scenes or unusual module combinations. Because
+          Map Shine replaces Foundry's rendering pipeline, modules with heavy visual FX will not be
+          compatible yet.
+        </p>
+        <p>
+          If you encounter a rendering problem: save your world, refresh the browser, and gather
+          console logs before reporting the issue.
+        </p>
+        <p>
+          Contact / support:
+          <a href="https://github.com/Garsondee/map-shine-advanced/issues" target="_blank" rel="noopener noreferrer">GitHub Issues Tracker</a>
+          or
+          <a href="https://www.patreon.com/c/MythicaMachina" target="_blank" rel="noopener noreferrer">Patreon</a>.
+        </p>
+      </div>
+    `;
+
+    const action = await new Promise((resolve) => {
+      new Dialog({
+        title: 'Map Shine Stability Warning',
+        content,
+        buttons: {
+          continue: {
+            icon: '<i class="fas fa-check"></i>',
+            label: 'Continue',
+            callback: () => resolve('continue')
+          },
+          dismiss: {
+            icon: '<i class="fas fa-eye-slash"></i>',
+            label: "Don't Show Again",
+            callback: () => resolve('dismiss')
+          }
+        },
+        default: 'continue',
+        close: () => resolve('continue')
+      }).render(true);
+    });
+
+    if (action === 'dismiss') {
+      await game?.settings?.set?.(MODULE_ID, 'dismissExperimentalWarning', true);
+    }
+  } catch (_) {
+  }
+}
+
 function _installGlobalPasswordManagerInsertGuard() {
   try {
     if (window.__msaGlobalPasswordManagerInsertGuardInstalled) return;
@@ -639,56 +697,66 @@ Hooks.once('init', async function() {
       // Keep Light layer Fog reset wired even when scene controls are rebuilt.
       // Foundry core behavior is canvas.fog.reset(); we also clear the V2 fog
       // accumulation buffer immediately for visual parity before socket roundtrip.
+      //
+      // IMPORTANT: Foundry already registers a native 'reset' tool in the lighting
+      // controls. ensureTool() only adds if absent, so our callback would never
+      // run. We must REPLACE the existing tool to intercept the button click.
       if (isGM) {
         const lightingControls = getControl('lighting');
         if (lightingControls?.tools) {
-          ensureTool(lightingControls, {
+          const _resetTool = {
             name: 'reset',
             order: 4,
             title: 'CONTROLS.LightReset',
             icon: 'fa-solid fa-cloud',
             button: true,
             onChange: () => {
-              DialogV2.confirm({
-                window: { title: 'CONTROLS.FOWResetTitle', icon: 'fa-solid fa-cloud' },
-                content: `<p>${game.i18n.localize('CONTROLS.FOWResetDesc')}</p>`,
-                yes: {
-                  callback: async () => {
-                    const resolveV2FogEffect = () => {
-                      try {
-                        return (
-                          window.MapShine?.effectComposer?._floorCompositorV2?._fogEffect
-                          ?? window.MapShine?.effectComposer?._getFloorCompositorV2?.()?._fogEffect
-                          ?? window.MapShine?.floorCompositorV2?._fogEffect
-                          ?? null
-                        );
-                      } catch (_) {
-                        return null;
-                      }
-                    };
-
-                    try {
-                      const fogEffect = resolveV2FogEffect();
-                      if (fogEffect && typeof fogEffect.resetExploration === 'function') {
-                        fogEffect.resetExploration();
-                      }
-                    } catch (_) {
-                      // Fall through to Foundry authoritative reset.
-                    }
-                    await canvas?.fog?.reset?.();
-                    try {
-                      const fogEffect = resolveV2FogEffect();
-                      if (fogEffect && typeof fogEffect.resetExploration === 'function') {
-                        fogEffect.resetExploration();
-                      }
-                    } catch (_) {
-                      // Ignore post-reset local clear failures.
-                    }
+              const _runFogReset = async () => {
+                // Immediately clear V2 fog accumulation buffers for visual
+                // parity before the socket roundtrip completes. The socket
+                // handler in FogOfWarEffectV2 also resets on the server
+                // broadcast, so this is an optimistic pre-clear only.
+                try {
+                  const fogEffect = window.MapShine?.floorCompositorV2?._fogEffect ?? null;
+                  if (fogEffect && typeof fogEffect.resetExploration === 'function') {
+                    fogEffect.resetExploration();
                   }
+                } catch (_) {
+                  // Fall through to Foundry authoritative reset.
                 }
+                await canvas?.fog?.reset?.();
+              };
+
+              const _content = `<p>${game.i18n.localize('CONTROLS.FOWResetDesc')}</p>`;
+              const _dialogV2Confirm = globalThis?.DialogV2?.confirm
+                ?? globalThis?.foundry?.applications?.api?.DialogV2?.confirm;
+
+              if (typeof _dialogV2Confirm === 'function') {
+                _dialogV2Confirm({
+                  window: { title: 'CONTROLS.FOWResetTitle', icon: 'fa-solid fa-cloud' },
+                  content: _content,
+                  yes: { callback: _runFogReset }
+                });
+                return;
+              }
+
+              Dialog.confirm({
+                title: game.i18n.localize('CONTROLS.FOWResetTitle'),
+                content: _content,
+                yes: _runFogReset
               });
             }
-          });
+          };
+          // Replace any existing native 'reset' tool rather than only adding
+          // when absent — Foundry's built-in reset tool already occupies this
+          // slot and would otherwise shadow our V2-aware callback.
+          if (Array.isArray(lightingControls.tools)) {
+            const _idx = lightingControls.tools.findIndex((t) => t?.name === 'reset');
+            if (_idx >= 0) lightingControls.tools[_idx] = _resetTool;
+            else lightingControls.tools.push(_resetTool);
+          } else if (typeof lightingControls.tools === 'object') {
+            lightingControls.tools['reset'] = _resetTool;
+          }
         }
       }
 
@@ -1061,7 +1129,7 @@ Hooks.once('ready', async function() {
     // Defer slightly so the rest of Foundry UI finishes settling before we show a modal.
     setTimeout(() => {
       try {
-        if (typeof showExperimentalWarningDialog === 'function') showExperimentalWarningDialog();
+        if (typeof showExperimentalWarningDialog === 'function') void showExperimentalWarningDialog();
       } catch (_) {
       }
     }, 250);

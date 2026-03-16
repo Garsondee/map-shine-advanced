@@ -2560,6 +2560,24 @@ async function onUpdateScene(scene, changes, _options, _userId) {
     if (!changes?.flags?.['map-shine-advanced']) return;
     const ns = changes.flags['map-shine-advanced'];
 
+    if (Object.prototype.hasOwnProperty.call(ns, 'settings')) {
+      safeCall(() => {
+        sceneSettings.ensureValidSceneSettings?.(scene, { autoRepair: false });
+      }, 'updateScene.settings.ensureValid', Severity.COSMETIC);
+
+      safeCall(() => {
+        uiManager?.reloadAllEffectParameters?.();
+      }, 'updateScene.settings.reloadUI', Severity.COSMETIC);
+
+      safeCall(() => {
+        // Effect Stack refresh can probe many mask bundles. Only do this when
+        // the panel is visible, otherwise rapid UI saves can trigger probe bursts.
+        if (uiManager?.effectStack?.visible) {
+          uiManager.effectStack.refresh?.();
+        }
+      }, 'updateScene.settings.refreshEffectStack', Severity.COSMETIC);
+    }
+
     if (Object.prototype.hasOwnProperty.call(ns, 'controlState')) {
       const cs = scene.getFlag('map-shine-advanced', 'controlState');
       if (cs && typeof cs === 'object') {
@@ -2934,19 +2952,21 @@ async function onCanvasReady(canvas) {
     loadingOverlay.showBlack('Loading...');
     loadingOverlay.setSceneName(displayName);
     loadingOverlay.configureStages([
-      { id: 'assets.discover', label: 'Discovering assets...', weight: 5 },
-      { id: 'assets.load',     label: 'Loading textures...',   weight: 25 },
-      { id: 'effects.core',    label: 'Core effects...',       weight: 12 },
-      { id: 'effects.deps',    label: 'Dependent effects...',  weight: 5  },
-      { id: 'effects.wire',    label: 'Wiring effects...',     weight: 3  },
+      { id: 'assets.discover', label: 'Discovering assets...', weight: 3  },
+      { id: 'assets.load',     label: 'Loading textures...',   weight: 20 },
+      { id: 'effects.core',    label: 'Core effects...',       weight: 25 },
+      { id: 'effects.deps',    label: 'Dependent effects...',  weight: 1  },
+      { id: 'effects.wire',    label: 'Wiring effects...',     weight: 1  },
       { id: 'scene.managers',  label: 'Scene managers...',     weight: 12 },
-      { id: 'scene.sync',      label: 'Syncing objects...',    weight: 13 },
-      { id: 'shaders.compile', label: 'Compiling shaders...',  weight: 20 },
-      { id: 'final',           label: 'Finalizing...',         weight: 5  },
+      { id: 'scene.sync',      label: 'Syncing scene...',      weight: 3  },
+      { id: 'ui.init',         label: 'Initializing UI...',    weight: 8  },
+      { id: 'scene.prepare',   label: 'Preparing scene...',    weight: 10 },
+      { id: 'shaders.compile', label: 'Compiling shaders...',  weight: 15 },
+      { id: 'final',           label: 'Finalizing...',         weight: 2  },
     ]);
     loadingOverlay.startStages();
     loadingOverlay.setStage('assets.discover', 0.0, undefined, { immediate: true });
-    loadingOverlay.startAutoProgress(0.08, 0.02);
+    loadingOverlay.startAutoProgress(0.04, 0.05);
   }, 'overlay.configureStages', Severity.COSMETIC);
 
   // Create three.js canvas overlay.
@@ -2956,7 +2976,7 @@ async function onCanvasReady(canvas) {
   // This replaces the old fixed 90s timeout which would fire even when loading
   // was actively progressing (just slowly across many steps).
   const WATCHDOG_INTERVAL_MS = 15000;
-  const WATCHDOG_STUCK_THRESHOLD_MS = 60000;
+  const WATCHDOG_STUCK_THRESHOLD_MS = 300000; // 5 minutes - increased for large scenes with many floors/masks
   let _loadingTimedOut = false;
   let _watchdogLastStep = null;
   let _watchdogLastStepSince = performance.now();
@@ -3408,18 +3428,21 @@ async function createThreeCanvas(scene) {
       loadingOverlay.showBlack('Loading...');
       loadingOverlay.setSceneName(displayName);
       loadingOverlay.configureStages([
-        { id: 'assets.discover', label: 'Discovering assets...', weight: 5 },
-        { id: 'assets.load',     label: 'Loading textures...', weight: 25 },
-        { id: 'effects.core',    label: 'Core effects...', weight: 15 },
-        { id: 'effects.deps',    label: 'Dependent effects...', weight: 10 },
-        { id: 'effects.wire',    label: 'Wiring effects...', weight: 5 },
-        { id: 'scene.managers',  label: 'Scene managers...', weight: 15 },
-        { id: 'scene.sync',      label: 'Syncing objects...', weight: 15 },
-        { id: 'final',           label: 'Finalizing...', weight: 10 },
+        { id: 'assets.discover', label: 'Discovering assets...', weight: 3  },
+        { id: 'assets.load',     label: 'Loading textures...',   weight: 20 },
+        { id: 'effects.core',    label: 'Core effects...',       weight: 25 },
+        { id: 'effects.deps',    label: 'Dependent effects...',  weight: 1  },
+        { id: 'effects.wire',    label: 'Wiring effects...',     weight: 1  },
+        { id: 'scene.managers',  label: 'Scene managers...',     weight: 12 },
+        { id: 'scene.sync',      label: 'Syncing scene...',      weight: 3  },
+        { id: 'ui.init',         label: 'Initializing UI...',    weight: 8  },
+        { id: 'scene.prepare',   label: 'Preparing scene...',    weight: 10 },
+        { id: 'shaders.compile', label: 'Compiling shaders...',  weight: 15 },
+        { id: 'final',           label: 'Finalizing...',         weight: 2  },
       ]);
       loadingOverlay.startStages();
       loadingOverlay.setStage('assets.discover', 0.0, undefined, { immediate: true });
-      loadingOverlay.startAutoProgress(0.08, 0.02);
+      loadingOverlay.startAutoProgress(0.04, 0.05);
     }, 'overlay.configureStages(create)', Severity.COSMETIC);
 
     // Proactively validate and normalize the scene settings flag.
@@ -4405,12 +4428,13 @@ async function createThreeCanvas(scene) {
     }, 'pixiSuppress.installHooks', Severity.COSMETIC);
 
     dlp.event('sceneSync: DONE ->-> entering finalization');
+    safeCall(() => loadingOverlay.setStage('scene.sync', 1.0, 'Scene synced', { immediate: true }), 'overlay.sceneSync.done', Severity.COSMETIC);
     _sectionEnd('sceneSync');
     _sectionStart('finalization');
+    // Transition to UI init stage — the next blocking phase is initializeUI.
     safeCall(() => {
-      loadingOverlay.setStage('final', 0.0, 'Finalizing...', { immediate: true, keepAuto: true });
-      loadingOverlay.startAutoProgress(0.98, 0.01);
-    }, 'overlay.final', Severity.COSMETIC);
+      loadingOverlay.setStage('ui.init', 0.0, 'Initializing UI...', { immediate: true });
+    }, 'overlay.uiInit.start', Severity.COSMETIC);
 
     // Step 7: Create ModeManager and ensure Foundry UI layers are above our canvas
     if (modeManager) {
@@ -4427,18 +4451,9 @@ async function createThreeCanvas(scene) {
     });
     modeManager.ensureUILayering();
 
-    // Step 7.5: Shader compile stage initialisation.
-    // Actual async shader compilation runs later (fin.shaderCompile) after the
-    // bus is populated by the first render frame. This step just primes the stage.
-    _sectionStart('gpu.shaderCompile');
-    if (isDebugLoad) dlp.begin('gpu.shaderCompile', 'gpu');
-    {
-      safeCall(() => loadingOverlay.setStage('shaders.compile', 0.0, 'Preparing shaders...', { immediate: true }), 'overlay.shaderCompile.init', Severity.COSMETIC);
-      dlp.event('gpu.shaderCompile: stage initialised ->-> async warmup deferred to fin.shaderCompile');
-      log.info('Shader compile stage initialised: async warmup will run after bus populate');
-    }
-    if (isDebugLoad) dlp.end('gpu.shaderCompile');
-    _sectionEnd('gpu.shaderCompile');
+    // Step 7.5 removed: shaders.compile is now a real stage in configureStages and is
+    // initialized by fin.shaderCompile after UI init and scene prepare have completed.
+    // Prematurely jumping to shaders.compile here would cause the bar to go backwards.
 
     // Step 8: Start render loop
     console.log(' -> Step: renderLoop.start');
@@ -4547,6 +4562,7 @@ async function createThreeCanvas(scene) {
     await safeCallAsync(async () => {
       if (session.isStale()) return;
 
+      safeCall(() => loadingOverlay.setStage('ui.init', 0.05, 'Graphics settings...', { keepAuto: false }), 'overlay.uiInit.graphicsSettings', Severity.COSMETIC);
       safeCall(() => { if (window.MapShine) window.MapShine.stateApplier = stateApplier; }, 'exposeStateApplier', Severity.COSMETIC);
 
       if (!effectCapabilitiesRegistry) {
@@ -4567,7 +4583,16 @@ async function createThreeCanvas(scene) {
       }
 
       graphicsSettings.effectComposer = effectComposer;
+      
+      // Update resizeHandler with graphicsSettings reference BEFORE initialize()
+      // so that the initial resolution application in initialize() can use it
+      if (resizeHandler && typeof resizeHandler.setGraphicsSettings === 'function') {
+        resizeHandler.setGraphicsSettings(graphicsSettings);
+      }
+      
       await graphicsSettings.initialize();
+      safeCall(() => loadingOverlay.setStage('ui.init', 0.20, 'Graphics ready...', { keepAuto: false }), 'overlay.uiInit.graphicsReady', Severity.COSMETIC);
+      await new Promise(r => setTimeout(r, 0)); // yield so browser paints progress
       if (tokenManager && typeof tokenManager.setDepthInteraction === 'function') {
         graphicsSettings._onTokenDepthInteractionChanged = (enabled) => {
           safeCall(() => tokenManager.setDepthInteraction(enabled), 'graphicsSettings.tokenDepthInteraction', Severity.COSMETIC);
@@ -4583,12 +4608,16 @@ async function createThreeCanvas(scene) {
         if (!uiManager) {
           uiManager = new TweakpaneManager();
           await uiManager.initialize();
+          safeCall(() => loadingOverlay.setStage('ui.init', 0.40, 'UI manager ready...', { keepAuto: false }), 'overlay.uiInit.uiManagerReady', Severity.COSMETIC);
+          await new Promise(r => setTimeout(r, 0)); // yield
           if (window.MapShine) window.MapShine.uiManager = uiManager;
         }
 
         if (!controlPanel) {
           controlPanel = new ControlPanelManager();
           await controlPanel.initialize();
+          safeCall(() => loadingOverlay.setStage('ui.init', 0.55, 'Control panel ready...', { keepAuto: false }), 'overlay.uiInit.controlPanelReady', Severity.COSMETIC);
+          await new Promise(r => setTimeout(r, 0)); // yield
           if (window.MapShine) window.MapShine.controlPanel = controlPanel;
         }
 
@@ -4613,7 +4642,9 @@ async function createThreeCanvas(scene) {
           safeCall(() => { if (window.MapShine) window.MapShine.levelsAuthoring = levelsAuthoring; }, 'exposeLevelsAuthoring', Severity.COSMETIC);
         }
 
-        // ->->->-> Register V2 effect controls in Tweakpane ->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->
+        safeCall(() => loadingOverlay.setStage('ui.init', 0.65, 'Registering effects...', { keepAuto: false }), 'overlay.uiInit.registerEffects', Severity.COSMETIC);
+
+        // ->->->-> Register V2 effect controls in Tweakpane ->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->
         // V1 effects are NOT constructed in V2 mode, but we still need UI
         // controls for the V2 post-processing effects on FloorCompositor.
         // Schemas come from V1 static getControlSchema() (classes are imported).
@@ -5274,6 +5305,7 @@ async function createThreeCanvas(scene) {
 
         log.info('V2: registered effect controls (Lighting, Specular, Fluid, Iridescence, Prism, Bush, Tree, SkyColor, WindowLight, Fire, WaterSplashes, SmellyFlies, Lightning, CandleFlames, Bloom, ColorCorrection, Sharpen, Fog, Water, Cloud, OverheadShadows, BuildingShadows, Grid, Lens)');
 
+        safeCall(() => loadingOverlay.setStage('ui.init', 1.0, 'UI ready', { immediate: true }), 'overlay.uiInit.done', Severity.COSMETIC);
         log.info('V2: UI initialized');
     }, 'initializeUI', Severity.DEGRADED);
     console.log(' -> Step: initializeUI DONE');
@@ -5284,9 +5316,8 @@ async function createThreeCanvas(scene) {
     // Only begin fading-in once we have proof that Three has actually rendered.
     // This prevents the overlay from fading out during shader compilation / first-frame stutter.
     safeCall(() => {
-      loadingOverlay.setStage('final', 0.4, 'Finalizing...', { keepAuto: true });
-      loadingOverlay.startAutoProgress(0.995, 0.008);
-    }, 'overlay.finalProgress', Severity.COSMETIC);
+      loadingOverlay.setStage('scene.prepare', 0.0, 'Preparing scene...', { immediate: true });
+    }, 'overlay.scenePrepare.start', Severity.COSMETIC);
     console.log(' -> Step: overlay.finalProgress DONE');
 
     // P1.2: Wait for all effects to be ready before fading overlay
@@ -5301,7 +5332,7 @@ async function createThreeCanvas(scene) {
     //   3. Overhead/decorative tiles are not required for an interactive scene
     // The tile textures will pop in when ready ->-> this is acceptable vs a 60s stall.
     _sectionStart('fin.waitForTiles');
-    safeCall(() => loadingOverlay.setStage('final', 0.50, 'Preparing tiles...', { keepAuto: true }), 'overlay.prepareTiles', Severity.COSMETIC);
+    safeCall(() => loadingOverlay.setStage('scene.prepare', 0.05, 'Waiting for tiles...', { keepAuto: false }), 'overlay.prepareTiles', Severity.COSMETIC);
     {
       const pendingAll = tileManager?._initialLoad?.pendingAll ?? 0;
       const totalTracked = tileManager?._initialLoad?.trackedIds?.size ?? 0;
@@ -5348,7 +5379,11 @@ async function createThreeCanvas(scene) {
 
     // Floor setup (V2): assign tiles to floor layers.
     if (isDebugLoad) dlp.begin('fin.preloadAllFloors', 'finalize');
-    safeCall(() => loadingOverlay.setStage('final', 0.85, 'Preparing floors...', { keepAuto: true }), 'overlay.preloadFloors', Severity.COSMETIC);
+    safeCall(() => {
+      loadingOverlay.setStage('scene.prepare', 0.10, 'Loading floor masks...', { keepAuto: false });
+      // Auto-advance the bar slowly while preloadAllFloors blocks so the user sees movement.
+      loadingOverlay.startAutoProgress(0.82, 0.025);
+    }, 'overlay.preloadFloors', Severity.COSMETIC);
     _setCreateThreeCanvasProgress('preloadAllFloors');
     console.log(' -> Step: preloadAllFloors');
 
@@ -5377,7 +5412,9 @@ async function createThreeCanvas(scene) {
         initialMasks: sc?.currentBundle?.masks ?? null,
       });
     }, 'v2.preloadAllFloors.await', Severity.DEGRADED);
+    safeCall(() => loadingOverlay.setStage('scene.prepare', 0.40, 'Floor masks loaded', { immediate: true }), 'overlay.preloadFloors.done', Severity.COSMETIC);
 
+    safeCall(() => loadingOverlay.setStage('scene.prepare', 0.45, 'Prewarming compositor...', { keepAuto: false }), 'overlay.prewarm.start', Severity.COSMETIC);
     await safeCallAsync(async () => {
       const fc = window.MapShine?.effectComposer?._floorCompositorV2;
       if (!fc || typeof fc.prewarmForLoading !== 'function') return;
@@ -5388,6 +5425,7 @@ async function createThreeCanvas(scene) {
         awaitPopulate: true,
       });
     }, 'v2.prewarmForLoading.await', Severity.DEGRADED);
+    safeCall(() => loadingOverlay.setStage('scene.prepare', 0.55, 'Compositor ready', { immediate: true }), 'overlay.prewarm.done', Severity.COSMETIC);
 
     console.log(' -> Step: preloadAllFloors DONE');
     if (isDebugLoad) dlp.end('fin.preloadAllFloors');
@@ -5398,7 +5436,7 @@ async function createThreeCanvas(scene) {
     // by the + / - controls so first in-session floor switch is cache-hot.
     _sectionStart('fin.floorStepPrewarm');
     if (isDebugLoad) dlp.begin('fin.floorStepPrewarm', 'finalize');
-    safeCall(() => loadingOverlay.setStage('final', 0.90, 'Prewarming floor transitions...', { keepAuto: true }), 'overlay.floorStepPrewarm.start', Severity.COSMETIC);
+    safeCall(() => loadingOverlay.setStage('scene.prepare', 0.58, 'Prewarming floor transitions...', { keepAuto: false }), 'overlay.floorStepPrewarm.start', Severity.COSMETIC);
     _setCreateThreeCanvasProgress('floorStepPrewarm');
     console.log(' -> Step: floorStepPrewarm');
     await safeCallAsync(async () => {
@@ -5441,11 +5479,12 @@ async function createThreeCanvas(scene) {
 
         const progress = (i + 1) / total;
         safeCall(() => {
+          // scene.prepare spans 0.58 to 0.98 during floor step prewarm.
           loadingOverlay.setStage(
-            'final',
-            0.90 + (progress * 0.08),
+            'scene.prepare',
+            0.58 + (progress * 0.40),
             `Prewarming floor transitions (${i + 1}/${total})...`,
-            { keepAuto: true }
+            { keepAuto: false }
           );
         }, 'overlay.floorStepPrewarm.progress', Severity.COSMETIC);
 
@@ -5469,6 +5508,7 @@ async function createThreeCanvas(scene) {
       window.MapShine?.renderLoop?.requestRender?.();
       window.MapShine?.renderLoop?.requestContinuousRender?.(180);
     }, 'fin.floorStepPrewarm', Severity.DEGRADED);
+    safeCall(() => loadingOverlay.setStage('scene.prepare', 1.0, 'Scene ready', { immediate: true }), 'overlay.scenePrepare.done', Severity.COSMETIC);
     console.log(' -> Step: floorStepPrewarm DONE');
     if (isDebugLoad) dlp.end('fin.floorStepPrewarm');
     _sectionEnd('fin.floorStepPrewarm');
@@ -5526,6 +5566,8 @@ async function createThreeCanvas(scene) {
     _sectionStart('fin.fadeIn');
     dlp.event('fin.fadeIn: loading pipeline complete ->-> preparing overlay transition');
     _setCreateThreeCanvasProgress('fadeIn');
+    // Advance the final stage to 100% so the bar fully fills before the overlay begins fading.
+    safeCall(() => loadingOverlay.setStage('final', 1.0, 'Ready!', { immediate: true }), 'overlay.final.complete', Severity.COSMETIC);
 
     // Debug loading mode: capture resource snapshot, generate the full log,
     // replace it in the overlay, and show the dismiss button instead of auto-fading.

@@ -360,7 +360,9 @@ export class StyledLoadingScreenRenderer {
     if (Math.abs(diff) < 0.0005) {
       this._progressCurrent = this._progressTarget;
     } else if (dt > 0) {
-      const k = 1 - Math.exp(-8 * dt);
+      // k=20 closes ~28% of the gap per 60fps frame → bar reaches target in ~150ms
+      // vs the old k=8 which took ~580ms, making progress updates feel sluggish.
+      const k = 1 - Math.exp(-20 * dt);
       this._progressCurrent += diff * k;
     }
 
@@ -879,7 +881,7 @@ export class StyledLoadingScreenRenderer {
         height: 100%; width: 0%;
         background: linear-gradient(90deg, var(--ms-ls-accent, rgba(0,180,255,0.9)), var(--ms-ls-accent-2, rgba(140,100,255,0.9)));
         box-shadow: 0 0 10px rgba(0,180,255,0.3);
-        transition: width 120ms ease-out;
+        transition: width 55ms ease-out;
       }
 
       .map-shine-styled-loading-overlay__stage-row {

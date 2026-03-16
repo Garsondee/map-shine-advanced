@@ -112,25 +112,34 @@ export class GraphicsSettingsDialog {
       label: 'Render Resolution',
       options: {
         'Native': 'native',
-        '3840x2160 (4K)': '3840x2160',
-        '2560x1440 (1440p)': '2560x1440',
-        '1920x1080 (1080p)': '1920x1080',
-        '1600x900 (900p)': '1600x900',
-        '1280x720 (720p)': '1280x720',
-        '1024x576': '1024x576',
-        '800x450': '800x450'
+        '3840x2160 (4K, 16:9)': '3840x2160',
+        '2560x1440 (1440p, 16:9)': '2560x1440',
+        '1920x1080 (1080p, 16:9)': '1920x1080',
+        '1600x900 (900p, 16:9)': '1600x900',
+        '1366x768 (16:9)': '1366x768',
+        '1280x720 (720p, 16:9)': '1280x720',
+        '1024x576 (16:9)': '1024x576',
+        '800x450 (16:9)': '800x450',
+        '2560x1600 (16:10)': '2560x1600',
+        '1920x1200 (16:10)': '1920x1200',
+        '1680x1050 (16:10)': '1680x1050',
+        '1440x900 (16:10)': '1440x900',
+        '1280x800 (16:10)': '1280x800',
+        '3440x1440 (UWQHD, 21:9)': '3440x1440',
+        '2560x1080 (UWHD, 21:9)': '2560x1080',
+        '1720x720 (21:9)': '1720x720',
+        '5120x1440 (DQHD, 32:9)': '5120x1440',
+        '3840x1080 (32:9)': '3840x1080',
+        '2560x720 (32:9)': '2560x720'
       }
     }).on('change', (ev) => {
       this.manager.setRenderResolutionPreset(ev.value);
-      this.manager.saveState();
     });
 
-    // Frame pacing controls (client-local).
     globalFolder.addBinding(this.manager.state, 'renderAdaptiveFpsEnabled', {
       label: 'Adaptive Frame Cap'
     }).on('change', (ev) => {
       this.manager.setRenderAdaptiveFpsEnabled(ev.value === true);
-      this.manager.saveState();
     });
 
     globalFolder.addBinding(this.manager.state, 'renderIdleFps', {
@@ -140,7 +149,6 @@ export class GraphicsSettingsDialog {
       step: 1
     }).on('change', (ev) => {
       this.manager.setRenderIdleFps(ev.value);
-      this.manager.saveState();
     });
 
     globalFolder.addBinding(this.manager.state, 'renderActiveFps', {
@@ -150,7 +158,6 @@ export class GraphicsSettingsDialog {
       step: 1
     }).on('change', (ev) => {
       this.manager.setRenderActiveFps(ev.value);
-      this.manager.saveState();
     });
 
     globalFolder.addBinding(this.manager.state, 'renderContinuousFps', {
@@ -160,7 +167,12 @@ export class GraphicsSettingsDialog {
       step: 1
     }).on('change', (ev) => {
       this.manager.setRenderContinuousFps(ev.value);
-      this.manager.saveState();
+    });
+
+    globalFolder.addBinding(this.manager.state, 'tokenDepthInteraction', {
+      label: 'Token Depth Interaction'
+    }).on('change', (ev) => {
+      this.manager.setTokenDepthInteraction(ev.value === true);
     });
 
     // Compact 2-column button grid (matches Main Config / Control Panel pattern).

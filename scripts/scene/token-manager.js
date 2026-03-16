@@ -1253,7 +1253,7 @@ vec3 ms_applySceneLighting(vec3 color) {
     
     if (busScene) {
       busScene.add(sprite);
-      log.info(`[V2] Token ${tokenDoc.id} added to FloorRenderBus scene`);
+      log.debug(`[V2] Token ${tokenDoc.id} added to FloorRenderBus scene`);
     } else {
       this.scene.add(sprite);
       log.warn(`[V1 fallback] Token ${tokenDoc.id} added to main scene - FloorCompositor not available`);

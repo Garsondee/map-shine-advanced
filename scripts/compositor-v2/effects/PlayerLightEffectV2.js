@@ -525,7 +525,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
         flashlightBeamNoiseScale: { type: 'slider', label: 'Noise Scale', min: 0.1, max: 30.0, step: 0.1, default: 7.0, throttle: 50 },
         flashlightBeamNoiseSpeed: { type: 'slider', label: 'Noise Speed', min: 0.0, max: 10.0, step: 0.01, default: 1.2, throttle: 50 },
         flashlightCookieTexture: { type: 'list', label: 'Cookie', options: { 'Light 1': 'light_01', 'Light 2': 'light_02', 'Light 3': 'light_03' }, default: 'light_01' },
-        flashlightCookieRotation: { type: 'boolean', label: 'Rotate Cookie', default: false },
+        flashlightCookieRotation: { type: 'boolean', label: 'Rotate Cookie', default: true },
         flashlightCookieRotationSpeed: { type: 'slider', label: 'Rotation Speed', min: 0.0, max: 4, step: 0.05, default: 0.3, throttle: 50 },
 
         flashlightCookieIntensity: { type: 'slider', label: 'Intensity Mult', min: 0.0, max: 6.0, step: 0.01, default: 1.68, throttle: 50 },

@@ -123,7 +123,7 @@ export class WeatherController {
     this.noiseOffset = 0;
 
     // Manual preset transition duration (used when selecting a preset)
-    this.presetTransitionDurationSeconds = undefined;
+    this.presetTransitionDurationSeconds = 30.0;
 
     // Wind Gust System
     this.gustWaitMin = 1.0;   // Seconds to wait between gusts (min)
@@ -145,7 +145,7 @@ export class WeatherController {
     this.dynamicPaused = false;
     this.dynamicEvolutionSpeed = 15.0;
 
-    this.dynamicPlanDurationSeconds = undefined;
+    this.dynamicPlanDurationSeconds = 360.0;
     this._dynamicPlanStrength = 0.0;
 
     /** @type {THREE.Texture|null} */
@@ -190,8 +190,8 @@ export class WeatherController {
     };
 
     this._queuedTransitionTarget = {
-      precipitation: 0.0,
-      cloudCover: 0.0,
+      precipitation: 0.88,
+      cloudCover: 0.93,
       windSpeed: 0.1,
       windDirectionDeg: 205.0,
       fogDensity: 0.0,
@@ -253,7 +253,7 @@ export class WeatherController {
     // Per-system tuning parameters for precipitation visuals
     this.rainTuning = {
       intensityScale: 1.0,
-      streakLength: 0.18,
+      streakLength: 0.25,
       dropSize: 3.1,
       dropSizeMin: 1.4,
       dropSizeMax: 13.8,

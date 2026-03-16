@@ -5,6 +5,7 @@
  */
 
 import { createLogger } from '../core/log.js';
+import { GradientEditor } from './gradient-editor.js';
 import { stateApplier } from './state-applier.js';
 import { globalValidator, getSpecularEffectiveState, getStripeDependencyState } from './parameter-validator.js';
 import { TextureManagerUI } from './texture-manager.js';
@@ -1116,7 +1117,7 @@ export class TweakpaneManager {
     });
 
     settingsFolder.addButton({
-      title: 'Copy Current Settings'
+      title: 'Copy All Current Settings'
     }).on('click', async () => {
       await this.copyCurrentSettingsToClipboard();
     });
@@ -2623,6 +2624,12 @@ export class TweakpaneManager {
     // Use saved value if available, otherwise use default from schema
     effectData.params[paramId] = savedParams[paramId] ?? paramDef.default;
 
+    // Gradient type is handled separately via DOM injection — skip Tweakpane binding
+    if (paramDef.type === 'gradient') {
+      this._buildGradientControl(effectId, container, paramId, paramDef, updateCallback);
+      return;
+    }
+
     // Determine control type
     const bindingOptions = {
       label: paramDef.label || paramId
@@ -2636,6 +2643,13 @@ export class TweakpaneManager {
       if (paramDef.min !== undefined) bindingOptions.min = paramDef.min;
       if (paramDef.max !== undefined) bindingOptions.max = paramDef.max;
       if (paramDef.step !== undefined) bindingOptions.step = paramDef.step;
+    }
+
+    // Colour params use float (0–1) space throughout. Without colorType:'float',
+    // Tweakpane defaults to 'int' (0–255), which misinterprets all our schema
+    // defaults and writes back integer values on user interaction.
+    if (paramDef.type === 'color') {
+      bindingOptions.colorType = paramDef.colorType ?? 'float';
     }
 
     // Create binding
@@ -2715,6 +2729,59 @@ export class TweakpaneManager {
   }
 
   /**
+   * Build a gradient-over-lifespan editor and inject it into the Tweakpane container.
+   * Called from buildParameterControl when paramDef.type === 'gradient'.
+   * @private
+   */
+  _buildGradientControl(effectId, container, paramId, paramDef, updateCallback) {
+    const effectData = this.effectFolders[effectId];
+    if (!effectData) return;
+
+    // Obtain the underlying DOM element for the Tweakpane container.
+    // FolderApi exposes .element; BladeApi also exposes .element.
+    const containerEl = container?.element ?? container?._element;
+    if (!containerEl) {
+      log.warn(`_buildGradientControl: cannot find DOM element for container (effectId=${effectId}, paramId=${paramId})`);
+      return;
+    }
+
+    // Folder DOM layout places control rows inside `.tp-fldv_c`. Appending directly
+    // to the folder root can make custom nodes easy to miss or collapse strangely.
+    // Mount into the content region when present.
+    const contentEl = containerEl.querySelector?.('.tp-fldv_c') ?? containerEl;
+
+    // Dedicated host wrapper keeps custom widget isolated from Tweakpane row styles.
+    const hostEl = document.createElement('div');
+    hostEl.className = 'ms-gradient-editor-host';
+    contentEl.appendChild(hostEl);
+
+    const stops = effectData.params[paramId] ?? paramDef.default ?? null;
+
+    const editor = new GradientEditor(hostEl, {
+      mode: paramDef.mode ?? 'color',
+      label: paramDef.label ?? paramId,
+      stops,
+      scalarMax: paramDef.scalarMax ?? 3.0,
+      onChange: (newStops) => {
+        effectData.params[paramId] = newStops;
+        updateCallback(effectId, paramId, newStops);
+        this.queueSave(effectId);
+      },
+    });
+
+    // Store editor so it can be refreshed (e.g. preset load) or destroyed later.
+    if (!effectData.gradientEditors) effectData.gradientEditors = {};
+    effectData.gradientEditors[paramId] = editor;
+
+    // Override the effectData.bindings slot with a thin shim so that
+    // resetEffectToDefaults and other machinery can call .refresh() safely.
+    effectData.bindings[paramId] = {
+      refresh: () => editor.setStops(effectData.params[paramId] ?? paramDef.default),
+      disabled: false,
+    };
+  }
+
+  /**
    * Handle global parameter changes
    * @private
    */
@@ -2775,7 +2842,7 @@ export class TweakpaneManager {
       }
 
       // Get all settings from scene flags
-      const allSettings = scene.getFlag('map-shine-advanced', 'settings') || {};
+      const allSettings = sceneSettings.getSceneSettings(scene);
       
       // Start with Map Maker settings
       const params = {};
@@ -2802,6 +2869,25 @@ export class TweakpaneManager {
       for (const paramId of Object.keys(schemaParams)) {
         const v = this._getProperty(merged, paramId);
         if (v !== undefined) params[paramId] = v;
+      }
+
+      // Migration: colour values may have been saved in 0–255 int range due to a previous
+      // bug where colorType was not set on addBinding. Any channel > 2.0 is unambiguously
+      // an old int value — normalise to 0–1 float.
+      for (const [paramId, paramDef] of Object.entries(schemaParams)) {
+        if (paramDef?.type !== 'color') continue;
+        const cv = params[paramId];
+        if (!cv || typeof cv !== 'object') continue;
+        const maxChannel = Math.max(cv.r ?? 0, cv.g ?? 0, cv.b ?? 0, cv.a ?? 0);
+        if (maxChannel > 2.0) {
+          params[paramId] = {
+            r: (cv.r ?? 0) / 255,
+            g: (cv.g ?? 0) / 255,
+            b: (cv.b ?? 0) / 255,
+            ...(cv.a !== undefined ? { a: cv.a / 255 } : {})
+          };
+          log.info(`${effectId}.${paramId}: migrated int colour to float (was max channel ${maxChannel.toFixed(1)})`);
+        }
       }
 
       // Apply player overrides (client-local, disable only)
@@ -2863,7 +2949,7 @@ export class TweakpaneManager {
       }
 
       // Get all settings
-      const allSettings = scene.getFlag('map-shine-advanced', 'settings') || this.createDefaultSettings();
+      const allSettings = sceneSettings.getSceneSettings(scene);
 
       // Save to appropriate tier based on user role and mode
       if (game.user.isGM) {
@@ -2883,7 +2969,7 @@ export class TweakpaneManager {
         }
 
         // Write to scene flags
-        await scene.setFlag('map-shine-advanced', 'settings', allSettings);
+        await sceneSettings.setSceneSettings(scene, allSettings);
       } else {
         // Players can only save enabled/disabled to client settings
         const playerOverrides = sceneSettings.getPlayerOverrides(scene);
@@ -3081,7 +3167,7 @@ export class TweakpaneManager {
       } catch (e) {
       }
 
-      const current = scene.getFlag('map-shine-advanced', 'settings') || this.createDefaultSettings();
+      const current = sceneSettings.getSceneSettings(scene);
 
       const publishedEffects = this._buildEffectiveEffectsSnapshot(current);
 
@@ -3100,11 +3186,11 @@ export class TweakpaneManager {
 
       // Ensure the scene itself is enabled for Map Shine.
       await scene.setFlag('map-shine-advanced', 'enabled', true);
-      await scene.setFlag('map-shine-advanced', 'settings', nextSettings);
+      await sceneSettings.setSceneSettings(scene, nextSettings);
 
       // Verify readback.
       const storedEnabled = scene.getFlag('map-shine-advanced', 'enabled') === true;
-      const storedSettings = scene.getFlag('map-shine-advanced', 'settings');
+      const storedSettings = sceneSettings.getSceneSettings(scene);
       const storedEffects = storedSettings?.mapMaker?.effects || null;
 
       // Normalize for Foundry flag serialization (undefined keys are dropped).
@@ -3584,7 +3670,7 @@ export class TweakpaneManager {
 
       for (const [paramId, paramDef] of Object.entries(schemaParams)) {
         if (paramId === 'enabled') continue;
-        const currentValue = params[paramId];
+        const currentValue = (params[paramId] === undefined) ? paramDef?.default : params[paramId];
         const formatted = this.formatParamValue(paramId, currentValue, paramDef);
         effectLines.push(`${paramId} = ${formatted}`);
       }
@@ -3605,12 +3691,12 @@ export class TweakpaneManager {
     try {
       if (navigator?.clipboard?.writeText) {
         await navigator.clipboard.writeText(dump);
-        ui.notifications.info('Map Shine: Current settings copied to clipboard');
+        ui.notifications.info('Map Shine: All current settings copied to clipboard');
       } else {
         throw new Error('Clipboard API not available');
       }
     } catch (error) {
-      log.warn('Failed to copy current settings to clipboard, printing to console instead:', error);
+      log.warn('Failed to copy all current settings to clipboard, printing to console instead:', error);
       console.log(dump);
       ui.notifications.warn('Map Shine: Could not copy to clipboard. Dump printed to browser console.');
     }
@@ -3692,9 +3778,9 @@ export class TweakpaneManager {
       }
 
       // Clear GM tier
-      const allSettings = scene.getFlag('map-shine-advanced', 'settings') || {};
+      const allSettings = sceneSettings.getSceneSettings(scene);
       allSettings.gm = null;
-      await scene.setFlag('map-shine-advanced', 'settings', allSettings);
+      await sceneSettings.setSceneSettings(scene, allSettings);
 
       log.info('Reverted to Map Maker settings');
 
@@ -4398,6 +4484,15 @@ export class TweakpaneManager {
     if (this.tokenMovementDialog) {
       this.tokenMovementDialog.dispose();
       this.tokenMovementDialog = null;
+    }
+
+    // Destroy any GradientEditor instances before wiping effectFolders.
+    for (const effectData of Object.values(this.effectFolders)) {
+      if (effectData?.gradientEditors) {
+        for (const editor of Object.values(effectData.gradientEditors)) {
+          try { editor.destroy(); } catch (_) {}
+        }
+      }
     }
 
     if (this.pane) {

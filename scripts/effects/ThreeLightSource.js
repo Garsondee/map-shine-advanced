@@ -892,6 +892,12 @@ export class ThreeLightSource {
       this.mesh.position.set(worldPos.x, worldPos.y, lightZ);
     }
 
+    // Respect Foundry's hidden flag so toggling a light off in the UI removes
+    // it from the light accumulation buffer immediately.
+    if (this.mesh) {
+      this.mesh.visible = (doc.hidden !== true);
+    }
+
     this._lastDocX = docX;
     this._lastDocY = docY;
   }

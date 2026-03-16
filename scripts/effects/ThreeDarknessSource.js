@@ -358,6 +358,12 @@ export class ThreeDarknessSource {
     } else {
       this.mesh.position.set(worldPos.x, worldPos.y, z);
     }
+
+    // Respect Foundry's hidden flag so toggling a darkness source off in the UI
+    // removes it from the darkness accumulation buffer immediately.
+    if (this.mesh) {
+      this.mesh.visible = (doc.hidden !== true);
+    }
   }
 
   rebuildGeometry(worldX, worldY, radiusPx, z) {

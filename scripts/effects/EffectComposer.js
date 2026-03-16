@@ -11,6 +11,7 @@ import { globalLoadingProfiler } from '../core/loading-profiler.js';
 import { getCacheStats as getAssetCacheStats } from '../assets/loader.js';
 import { frameCoordinator } from '../core/frame-coordinator.js';
 import { getGlobalFrameState } from '../core/frame-state.js';
+import * as sceneSettings from '../settings/scene-settings.js';
 import {
   BLOOM_HOTSPOT_LAYER,
   OVERLAY_THREE_LAYER,
@@ -751,7 +752,7 @@ export class EffectComposer {
         // into the V2 WaterEffectV2 instance.
         try {
           const scene = globalThis.canvas?.scene;
-          const allSettings = scene?.getFlag('map-shine-advanced', 'settings') || {};
+          const allSettings = sceneSettings.getSceneSettings(scene);
           const waterFlags = allSettings?.mapMaker?.effects?.water || {};
           const waterEffect = this._floorCompositorV2._waterEffect;
           if (waterEffect?.params) {

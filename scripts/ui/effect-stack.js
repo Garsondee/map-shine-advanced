@@ -528,11 +528,7 @@ export class EffectStackUI {
       if (!scene) return;
 
       if (game.user?.isGM) {
-        const allSettings = scene.getFlag('map-shine-advanced', 'settings') || {
-          mapMaker: { enabled: true, effects: {} },
-          gm: null,
-          player: {}
-        };
+        const allSettings = sceneSettings.getSceneSettings(scene);
 
         const mode = window.MapShine?.uiManager?.settingsMode || 'mapMaker';
         if (mode === 'gm') {
@@ -547,7 +543,7 @@ export class EffectStackUI {
           allSettings.mapMaker.effects[effectId] = { ...prev, enabled: !!enabled };
         }
 
-        await scene.setFlag('map-shine-advanced', 'settings', allSettings);
+        await sceneSettings.setSceneSettings(scene, allSettings);
       } else {
         const playerOverrides = sceneSettings.getPlayerOverrides(scene);
         playerOverrides[effectId] = !!enabled;

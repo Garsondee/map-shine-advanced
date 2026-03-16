@@ -60,10 +60,10 @@ export class BushEffectV2 {
       intensity: undefined,
 
       // -- Wind Physics --
-      windSpeedGlobal: 0.6,
-      windRampSpeed: 2.93,
+      windSpeedGlobal: 0.23,
+      windRampSpeed: 0.74,
       gustFrequency: 0.01,
-      gustSpeed: 0.52463,
+      gustSpeed: 0.5246,
       waveSpatialFrequency: 0.0018,
       waveTravelSpeed: 0.85,
       waveSharpness: 2.2,
@@ -79,18 +79,18 @@ export class BushEffectV2 {
       bendMinStrength: 0.2,
       bendWindStart: 0.22,
       bendWindFull: 0.78,
-      minRustleSpeed: 0.18,
+      minRustleSpeed: 0.04,
       edgeFadeStart: 0.03,
       edgeFadeEnd: 0.14,
 
       // -- Bush Movement --
-      branchBend: 0.037,
-      elasticity: 5.0,
+      branchBend: 0.012,
+      elasticity: 0.89,
 
       // -- Leaf Flutter --
-      flutterIntensity: 0.0014,
-      flutterSpeed: 1.85362,
-      flutterScale: 0.01133,
+      flutterIntensity: 0.0005,
+      flutterSpeed: 1.19,
+      flutterScale: 0.02,
 
       // -- Color --
       exposure: 0.0,
@@ -101,9 +101,9 @@ export class BushEffectV2 {
       tint: 0.0,
 
       // Shadow params retained for UI parity (not applied in V2 yet)
-      shadowOpacity: 0.4,
-      shadowLength: 0.02,
-      shadowSoftness: 5.0,
+      shadowOpacity: 0.5,
+      shadowLength: 0.01,
+      shadowSoftness: 0.5,
     };
 
     log.debug('BushEffectV2 created');
@@ -167,10 +167,10 @@ export class BushEffectV2 {
       ],
       parameters: {
         intensity: { type: 'slider', min: 0.0, max: 2.0, default: undefined },
-        windSpeedGlobal: { type: 'slider', label: 'Wind Strength', min: 0.0, max: 3.0, default: 0.6 },
-        windRampSpeed: { type: 'slider', label: 'Wind Responsiveness', min: 0.1, max: 10.0, default: 2.93 },
+        windSpeedGlobal: { type: 'slider', label: 'Wind Strength', min: 0.0, max: 3.0, default: 0.23 },
+        windRampSpeed: { type: 'slider', label: 'Wind Responsiveness', min: 0.1, max: 10.0, default: 0.74 },
         gustFrequency: { type: 'slider', label: 'Gust Frequency', min: 0.0, max: 0.05, step: 0.0001, default: 0.01 },
-        gustSpeed: { type: 'slider', label: 'Gust Speed', min: 0.0, max: 2.0, step: 0.0001, default: 0.52463 },
+        gustSpeed: { type: 'slider', label: 'Gust Speed', min: 0.0, max: 2.0, step: 0.0001, default: 0.5246 },
         waveSpatialFrequency: { type: 'slider', label: 'Wave Spacing', min: 0.0001, max: 0.01, step: 0.0001, default: 0.0018 },
         waveTravelSpeed: { type: 'slider', label: 'Wave Travel Speed', min: 0.05, max: 4.0, default: 0.85 },
         waveSharpness: { type: 'slider', label: 'Wave Crest Sharpness', min: 0.5, max: 6.0, default: 2.2 },
@@ -186,21 +186,21 @@ export class BushEffectV2 {
         bendMinStrength: { type: 'slider', label: 'Bend Min Strength', min: 0.0, max: 1.0, step: 0.01, default: 0.2 },
         bendWindStart: { type: 'slider', label: 'Bend Wind Start', min: 0.0, max: 0.8, step: 0.01, default: 0.22 },
         bendWindFull: { type: 'slider', label: 'Bend Wind Full', min: 0.1, max: 1.0, step: 0.01, default: 0.78 },
-        minRustleSpeed: { type: 'slider', label: 'Low-Wind Rustle Floor', min: 0.0, max: 0.6, default: 0.18 },
-        branchBend: { type: 'slider', label: 'Branch Bend', min: 0.0, max: 0.05, step: 0.001, default: 0.037 },
-        elasticity: { type: 'slider', label: 'Springiness', min: 0.5, max: 5.0, default: 5.0 },
-        flutterIntensity: { type: 'slider', label: 'Leaf Flutter Amount', min: 0.0, max: 0.005, step: 0.0001, default: 0.0014 },
-        flutterSpeed: { type: 'slider', label: 'Leaf Flutter Speed', min: 1.0, max: 20.0, default: 1.85 },
-        flutterScale: { type: 'slider', label: 'Leaf Cluster Size', min: 0.005, max: 0.1, default: 0.01 },
+        minRustleSpeed: { type: 'slider', label: 'Low-Wind Rustle Floor', min: 0.0, max: 0.6, default: 0.04 },
+        branchBend: { type: 'slider', label: 'Branch Bend', min: 0.0, max: 0.05, step: 0.001, default: 0.012 },
+        elasticity: { type: 'slider', label: 'Springiness', min: 0.5, max: 5.0, default: 0.89 },
+        flutterIntensity: { type: 'slider', label: 'Leaf Flutter Amount', min: 0.0, max: 0.005, step: 0.0001, default: 0.0005 },
+        flutterSpeed: { type: 'slider', label: 'Leaf Flutter Speed', min: 1.0, max: 20.0, default: 1.19 },
+        flutterScale: { type: 'slider', label: 'Leaf Cluster Size', min: 0.005, max: 0.1, default: 0.02 },
         exposure: { type: 'slider', min: -2.0, max: 2.0, default: 0.0 },
         brightness: { type: 'slider', min: -0.5, max: 0.5, default: 0.0 },
         contrast: { type: 'slider', min: 0.5, max: 2.0, default: 1.0 },
         saturation: { type: 'slider', min: 0.0, max: 2.0, default: 1.0 },
         temperature: { type: 'slider', min: -1.0, max: 1.0, default: 0.0 },
         tint: { type: 'slider', min: -1.0, max: 1.0, default: 0.0 },
-        shadowOpacity: { type: 'slider', label: 'Shadow Opacity', min: 0.0, max: 1.0, default: 0.4 },
-        shadowLength: { type: 'slider', label: 'Shadow Length', min: 0.0, max: 0.1, default: 0.02 },
-        shadowSoftness: { type: 'slider', label: 'Shadow Softness', min: 0.5, max: 5.0, default: 5.0 },
+        shadowOpacity: { type: 'slider', label: 'Shadow Opacity', min: 0.0, max: 1.0, default: 0.5 },
+        shadowLength: { type: 'slider', label: 'Shadow Length', min: 0.0, max: 0.1, default: 0.01 },
+        shadowSoftness: { type: 'slider', label: 'Shadow Softness', min: 0.5, max: 5.0, default: 0.5 },
         edgeFadeStart: { type: 'slider', label: 'Edge Fade Start', min: 0.0, max: 0.2, default: 0.03 },
         edgeFadeEnd: { type: 'slider', label: 'Edge Fade End', min: 0.02, max: 0.4, default: 0.14 }
       }

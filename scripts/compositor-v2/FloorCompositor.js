@@ -2652,6 +2652,9 @@ export class FloorCompositor {
     const baseIntensity = Number.isFinite(Number(fireParams.heatDistortionIntensity)) ? Number(fireParams.heatDistortionIntensity) : 0.05;
     const heatFrequency = Number.isFinite(Number(fireParams.heatDistortionFrequency)) ? Number(fireParams.heatDistortionFrequency) : 20.0;
     const heatSpeed = Number.isFinite(Number(fireParams.heatDistortionSpeed)) ? Number(fireParams.heatDistortionSpeed) : 3.0;
+    const heatEdgeSoftness = Number.isFinite(Number(fireParams.heatDistortionEdgeSoftness))
+      ? Number(fireParams.heatDistortionEdgeSoftness)
+      : 1.0;
     const fireRate = Number.isFinite(Number(fireParams.globalFireRate)) ? Number(fireParams.globalFireRate) : 5.2;
     const fireSizeMin = Number.isFinite(Number(fireParams.fireSizeMin)) ? Number(fireParams.fireSizeMin) : 19;
     const fireSizeMax = Number.isFinite(Number(fireParams.fireSizeMax)) ? Number(fireParams.fireSizeMax) : 170;
@@ -2660,8 +2663,13 @@ export class FloorCompositor {
     const sizeScale = Math.max(0.25, Math.min(2.0, avgSize / 95.0));
     const rateScale = Math.max(0.15, Math.min(2.0, fireRate / 5.2));
     const finalIntensity = Math.max(0.0, Math.min(0.2, baseIntensity * sizeScale * rateScale));
-    const blurRadius = Math.max(1.0, Math.min(8.0, 0.8 + (avgSize / 65.0) + (fireRate * 0.08)));
-    const blurPasses = blurRadius >= 3.0 ? 2 : 1;
+    const softnessScale = Math.max(0.4, Math.min(3.0, heatEdgeSoftness));
+    // Softer, larger feathering for heat masks; sharp clipping looked unnatural
+    // around fire edges. Keep this in pixel-space style scaling and let
+    // DistortionManager map it through its blur texel-size path.
+    const blurRadiusBase = 1.6 + (avgSize / 48.0) + (fireRate * 0.12);
+    const blurRadius = Math.max(2.0, Math.min(18.0, blurRadiusBase * softnessScale));
+    const blurPasses = blurRadius >= 11.0 ? 4 : (blurRadius >= 7.0 ? 3 : (blurRadius >= 4.0 ? 2 : 1));
 
     let heatMask = fireMask;
     const needsBlurRefresh =

@@ -212,6 +212,9 @@ export class ParameterValidator {
     if (paramDef.type === 'slider') return 'number';
     if (paramDef.type === 'boolean') return 'boolean';
     if (paramDef.type === 'list') return typeof Object.values(paramDef.options || {})[0];
+    // 'color' values are {r,g,b} objects; 'gradient' values are stop arrays.
+    // Skip JS typeof checking for these — object shape validation is not done here.
+    if (paramDef.type === 'color' || paramDef.type === 'gradient') return null;
     if (paramDef.min !== undefined || paramDef.max !== undefined) return 'number';
     return null;
   }

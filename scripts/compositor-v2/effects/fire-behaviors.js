@@ -122,12 +122,65 @@ const _flameColorTemp = { r: 0, g: 0, b: 0 };
 const _emberColorTemp = { r: 0, g: 0, b: 0 };
 const _smokeColorTemp = { r: 0, g: 0, b: 0 };
 const _smokeColorTemp2 = { r: 0, g: 0, b: 0 };
+const _smokeEmissionTemp = { r: 0, g: 0, b: 0 };
+
+function clamp01(v) {
+  return v < 0 ? 0 : v > 1 ? 1 : v;
+}
+
+function finiteOr(v, fallback = 0) {
+  return Number.isFinite(v) ? v : fallback;
+}
+
+/**
+ * Normalize arbitrary stop arrays into safe color stops [{t,r,g,b}, ...].
+ * Supports legacy scalar stops {t,v} by converting to grayscale {r:g:b=v}.
+ */
+function normalizeColorStops(stops) {
+  if (!Array.isArray(stops) || stops.length < 2) return null;
+
+  const total = stops.length;
+  const normalized = [];
+  for (let i = 0; i < total; i++) {
+    const s = stops[i];
+    if (!s || typeof s !== 'object') continue;
+    const fallbackT = total <= 1 ? 0 : i / Math.max(1, total - 1);
+    const t = clamp01(finiteOr(s.t, fallbackT));
+
+    if (Number.isFinite(s.r) || Number.isFinite(s.g) || Number.isFinite(s.b)) {
+      normalized.push({
+        t,
+        r: clamp01(finiteOr(s.r, 0)),
+        g: clamp01(finiteOr(s.g, 0)),
+        b: clamp01(finiteOr(s.b, 0)),
+      });
+      continue;
+    }
+
+    if (Number.isFinite(s.v)) {
+      const v = clamp01(s.v);
+      normalized.push({ t, r: v, g: v, b: v });
+    }
+  }
+
+  if (normalized.length < 2) return null;
+  normalized.sort((a, b) => a.t - b.t);
+  return normalized;
+}
 
 /**
  * Lerp a color stop array [{t,r,g,b}, ...] returning {r,g,b}.
  * Uses the provided temp object to avoid allocation.
  */
 function lerpColorStops(stops, t, temp) {
+  if (!stops || stops.length === 0) {
+    temp.r = 1; temp.g = 1; temp.b = 1;
+    return temp;
+  }
+  if (t <= stops[0].t) {
+    temp.r = stops[0].r; temp.g = stops[0].g; temp.b = stops[0].b;
+    return temp;
+  }
   let i = 0;
   while (i < stops.length - 1 && stops[i + 1].t <= t) i++;
   if (i >= stops.length - 1) {
@@ -426,6 +479,11 @@ export class SmokeLifecycleBehavior {
     this._alphaStart = 0.0;
     this._alphaPeak = 0.75;
     this._alphaEnd = 1.0;
+    // Cached gradient references (color stops {t,r,g,b}) updated each frameUpdate.
+    // When null the legacy COOL/WARM warmth blend is used.
+    // Emission uses same format: black = no glow, any colour = additive emission.
+    this._colorGradient = null;
+    this._emissionGradient = null;
   }
 
   initialize(particle) {
@@ -441,19 +499,45 @@ export class SmokeLifecycleBehavior {
     const t = age / Math.max(0.001, life);
 
     const density = particle._smokeDensity ?? 0.75;
-
-    // Color: blend cool grey and warm brown.
-    const coolColor = lerpColorStops(SMOKE_COLOR_COOL, t, _smokeColorTemp);
-    const warmColor = lerpColorStops(SMOKE_COLOR_WARM, t, _smokeColorTemp2);
-    const w = this._colorWarmth;
-    const baseR = coolColor.r + (warmColor.r - coolColor.r) * w;
-    const baseG = coolColor.g + (warmColor.g - coolColor.g) * w;
-    const baseB = coolColor.b + (warmColor.b - coolColor.b) * w;
-
     const brightDark = this._colorBrightness * this._darknessFactor;
-    particle.color.x = baseR * brightDark;
-    particle.color.y = baseG * brightDark;
-    particle.color.z = baseB * brightDark;
+
+    // Smoke alpha can intentionally hide early life (e.g. alphaStart=0.7).
+    // For user-authored colour/emission gradients, map the visible alpha window
+    // to 0..1 so the gradient bar matches what is actually visible in-scene.
+    const visibleDenom = Math.max(0.0001, this._alphaEnd - this._alphaStart);
+    const gradientT = clamp01((t - this._alphaStart) / visibleDenom);
+
+    let baseR, baseG, baseB;
+
+    if (this._colorGradient) {
+      // User-defined colour gradient — replaces the legacy COOL/WARM blend.
+      const gc = lerpColorStops(this._colorGradient, gradientT, _smokeColorTemp);
+      baseR = gc.r;
+      baseG = gc.g;
+      baseB = gc.b;
+    } else {
+      // Legacy fallback: blend cool grey and warm brown.
+      const coolColor = lerpColorStops(SMOKE_COLOR_COOL, t, _smokeColorTemp);
+      const warmColor = lerpColorStops(SMOKE_COLOR_WARM, t, _smokeColorTemp2);
+      const w = this._colorWarmth;
+      baseR = coolColor.r + (warmColor.r - coolColor.r) * w;
+      baseG = coolColor.g + (warmColor.g - coolColor.g) * w;
+      baseB = coolColor.b + (warmColor.b - coolColor.b) * w;
+    }
+
+    // Emission (self-illumination) — additive glow sampled from a colour gradient.
+    // Black (0,0,0) = no emission; any colour = that colour added on top.
+    let emissionR = 0, emissionG = 0, emissionB = 0;
+    if (this._emissionGradient) {
+      const em = lerpColorStops(this._emissionGradient, gradientT, _smokeEmissionTemp);
+      emissionR = em.r;
+      emissionG = em.g;
+      emissionB = em.b;
+    }
+
+    particle.color.x = baseR * brightDark + emissionR;
+    particle.color.y = baseG * brightDark + emissionG;
+    particle.color.z = baseB * brightDark + emissionB;
 
     // Alpha: 3-point smoothstep envelope.
     let alphaEnv = 0.0;
@@ -497,6 +581,11 @@ export class SmokeLifecycleBehavior {
 
     const precip = weatherController.currentState?.precipitation || 0;
     this._precipMult = Math.max(0.2, 1.0 - precip * 0.5);
+
+    // Cache gradient arrays once per frame (avoids per-particle property access).
+    // Gradient is active whenever it has ≥2 valid stops; no separate toggle needed.
+    this._colorGradient = normalizeColorStops(p?.smokeColorGradient);
+    this._emissionGradient = normalizeColorStops(p?.smokeEmissionGradient);
   }
 
   reset() {}

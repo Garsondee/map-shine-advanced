@@ -746,12 +746,12 @@ export class ThreeLightSource {
       } catch (_) {
       }
     }
-    
-    // Reduced saturation boost (was 1.1, causing colors to be ~50% too intense)
+
+    // Keep authored color unchanged for closer Foundry parity.
     const hsl = {};
     c.getHSL(hsl);
     if (hsl.s > 0) {
-      c.setHSL(hsl.h, Math.min(1.0, hsl.s * 1.05), hsl.l);
+      c.setHSL(hsl.h, hsl.s, hsl.l);
     }
     this.material.uniforms.uColor.value.copy(c);
 
@@ -760,12 +760,10 @@ export class ThreeLightSource {
     if (!this._baseLightColor) this._baseLightColor = new THREE.Color();
     this._baseLightColor.copy(c);
 
-    // 2. Brightness / intensity logic (reduced by 25% to match Foundry VTT)
+    // 2. Brightness / intensity logic (Foundry-like luminosity mapping)
     const luminosity = config.luminosity ?? 0.5;
-    const satBonus = (hsl.s > 0.2) ? 0.5 : 0.0;
-    this.material.uniforms.uBrightness.value = 1.2 + (luminosity * 1.5) + satBonus;
-
-    // 3. Geometry
+    const satBonus = 0.0;
+    this.material.uniforms.uBrightness.value = Math.max(0.2, 1.0 + ((luminosity * 2.0 - 1.0) * 0.35)) + satBonus;
 
     const dim = config.dim || 0;
     const bright = config.bright || 0;

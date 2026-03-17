@@ -1,8 +1,8 @@
 /**
- * @fileoverview Gameplay / Map Maker mode switching for Map Shine.
+ * @fileoverview Gameplay / PIXI-native parity mode switching for Map Shine.
  * 
  * Extracted from canvas-replacement.js to isolate:
- * - Mode toggling (Gameplay ↔ Map Maker)
+ * - Mode toggling (Gameplay ↔ PIXI native parity mode)
  * - PIXI state capture/restore
  * - Select rect suppression
  * - Layer visibility management
@@ -18,10 +18,10 @@ import { createLogger } from '../core/log.js';
 const log = createLogger('ModeManager');
 
 /**
- * Manages the Gameplay / Map Maker mode lifecycle.
+ * Manages the Gameplay / PIXI-native parity mode lifecycle.
  * 
  * In Gameplay mode, Three.js is the primary renderer and interaction handler.
- * In Map Maker mode, Foundry's PIXI canvas takes over for editing.
+ * In parity mode, Foundry's PIXI canvas takes over for native rendering checks.
  */
 export class ModeManager {
   /**
@@ -67,18 +67,18 @@ export class ModeManager {
   // ── Public API ────────────────────────────────────────────────────
 
   /**
-   * Set Map Maker Mode (Master Toggle).
-   * @param {boolean} enabled - True for Map Maker (PIXI), False for Gameplay (Three.js).
+   * Set native Foundry rendering parity mode (master toggle).
+   * @param {boolean} enabled - True for native Foundry PIXI, False for Map Shine Three.js gameplay.
    */
   setMapMakerMode(enabled) {
     if (this.isMapMakerMode === enabled) return;
 
     this.isMapMakerMode = enabled;
 
-    // In Map Maker mode, Foundry should own drag-select visuals (PIXI).
+    // In parity mode, Foundry should own drag-select visuals (PIXI).
     // In Gameplay mode, MapShine should own drag-select visuals (DOM + Three shadow).
     this.updateSelectRectSuppression();
-    log.info(`Switching to ${enabled ? 'Map Maker' : 'Gameplay'} Mode`);
+    log.info(`Switching to ${enabled ? 'PIXI / Native Foundry rendering' : 'Map Shine gameplay rendering'} mode`);
 
     try {
       if (window.MapShine) window.MapShine.isMapMakerMode = this.isMapMakerMode;
@@ -149,6 +149,12 @@ export class ModeManager {
 
     log.info('Restoring Foundry PIXI rendering');
 
+    // Gameplay mode installs a board suppression observer in canvas-replacement.
+    // In native PIXI parity mode we must explicitly bypass that suppression.
+    try {
+      if (window.MapShine) window.MapShine.__forcePixiEditorOverlay = true;
+    } catch (_) {}
+
     // Restore PIXI renderer background to opaque
     if (canvas.app?.renderer?.background) {
       canvas.app.renderer.background.alpha = 1;
@@ -157,9 +163,21 @@ export class ModeManager {
     // Restore PIXI canvas to default state
     const pixiCanvas = canvas.app.view;
     if (pixiCanvas) {
+      pixiCanvas.style.display = '';
+      pixiCanvas.style.visibility = 'visible';
       pixiCanvas.style.opacity = '1';
       pixiCanvas.style.pointerEvents = 'auto';
       pixiCanvas.style.zIndex = '';
+    }
+
+    // Foundry's top-level rendered board canvas is #board.
+    const board = document.getElementById('board');
+    if (board && board.tagName === 'CANVAS') {
+      board.style.display = '';
+      board.style.visibility = 'visible';
+      board.style.opacity = '1';
+      board.style.pointerEvents = 'auto';
+      board.style.zIndex = '';
     }
 
     // Restore ALL layers
@@ -505,6 +523,10 @@ export class ModeManager {
     const { threeCanvas, renderLoop, controlsIntegration } = this._deps;
     if (!threeCanvas) return;
 
+    try {
+      if (window.MapShine) window.MapShine.__forcePixiEditorOverlay = false;
+    } catch (_) {}
+
     this.enforceGameplayPixiSuppression();
 
     // Leaving Map Maker mode — restore fog overrides
@@ -566,6 +588,10 @@ export class ModeManager {
   _disableSystem() {
     const { renderLoop, threeCanvas, controlsIntegration } = this._deps;
 
+    try {
+      if (window.MapShine) window.MapShine.__forcePixiEditorOverlay = true;
+    } catch (_) {}
+
     if (renderLoop && renderLoop.running()) {
       renderLoop.stop();
     }
@@ -579,9 +605,10 @@ export class ModeManager {
     if (controlsIntegration && controlsIntegration.getState() === 'active') {
       controlsIntegration.disable();
       log.info('ControlsIntegration disabled for Map Maker mode');
-    } else {
-      this.restoreFoundryRendering();
     }
+
+    // Always restore native PIXI visuals when parity mode is active.
+    this.restoreFoundryRendering();
 
     // GM convenience: prevent fog from blacking out the map while editing
     this._applyMapMakerFogOverride();

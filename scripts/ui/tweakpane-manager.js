@@ -541,14 +541,14 @@ export class TweakpaneManager {
     });
     this._registerPrimaryFolder(globalFolder);
 
-    // Map Maker Mode toggle
+    // PIXI/native rendering parity toggle (legacy key kept for compatibility)
     const onMapMakerModeChange = (ev) => {
       this.onGlobalChange('mapMakerMode', ev.value);
     };
     this._uiValidatorGlobalHandlers.mapMakerMode = onMapMakerModeChange;
 
     globalFolder.addBinding(this.globalParams, 'mapMakerMode', {
-      label: 'Map Maker Mode'
+      label: 'PIXI / Native Foundry rendering mode'
     }).on('change', onMapMakerModeChange);
 
     // Time rate slider
@@ -2845,7 +2845,7 @@ export class TweakpaneManager {
     log.debug(`Global param changed: ${param} = ${value}`);
     
     if (param === 'mapMakerMode') {
-      // Toggle Map Maker Mode (System Swap)
+      // Toggle rendering ownership (MapShine Three.js <-> native Foundry PIXI)
       if (window.MapShine?.setMapMakerMode) {
         window.MapShine.setMapMakerMode(value);
       } else {
@@ -4427,6 +4427,15 @@ export class TweakpaneManager {
 
       try {
         this.globalParams.introZoomEnabled = game.settings.get('map-shine-advanced', 'introZoomEnabled') !== false;
+      } catch (_) {
+      }
+
+      // Runtime mode source-of-truth: if MapShine already exposed the active mode,
+      // prefer that over stale persisted UI-state values.
+      try {
+        if (typeof window.MapShine?.isMapMakerMode === 'boolean') {
+          this.globalParams.mapMakerMode = window.MapShine.isMapMakerMode;
+        }
       } catch (_) {
       }
 

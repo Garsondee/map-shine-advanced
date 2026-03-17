@@ -991,7 +991,9 @@ export class WeatherController {
       // socket.io has backpressure — blocking the entire loading pipeline.
       const SCENE_UPDATE_TIMEOUT_MS = 5000;
       const hasStoredDarkness = Number.isFinite(stored.sceneDarkness);
-      if (hasStoredDarkness && game?.user?.isGM && canvas?.scene) {
+      const hasStoredTimeOfDay = Number.isFinite(stored.timeOfDay);
+      const shouldRestoreStoredDarkness = hasStoredDarkness && !hasStoredTimeOfDay;
+      if (shouldRestoreStoredDarkness && game?.user?.isGM && canvas?.scene) {
         try {
           await Promise.race([
             canvas.scene.update({ 'environment.darknessLevel': stored.sceneDarkness }),
@@ -1036,14 +1038,14 @@ export class WeatherController {
       // Ensure time-driven systems (color grading, scene darkness) update with restored time.
       // Wrapped in a 5s timeout for the same reason as the darkness restore above —
       // applyTimeOfDay may call canvas.scene.update() internally.
-      if (Number.isFinite(stored.timeOfDay)) {
+      if (hasStoredTimeOfDay) {
         try {
           const stateApplier = window.MapShine?.stateApplier;
           if (stateApplier && typeof stateApplier.applyTimeOfDay === 'function') {
-            // If the snapshot contains a persisted Foundry scene darkness, do NOT recompute it
-            // from timeOfDay here (would overwrite restored value). For older snapshots that
-            // don't have sceneDarkness, fall back to recomputing from timeOfDay.
-            const applyDarkness = !hasStoredDarkness;
+            // Always recompute darkness from restored time-of-day when time is present.
+            // Snapshot darkness can be stale or mismatched with stored time, which can
+            // leave scenes incorrectly dark at midday after reload.
+            const applyDarkness = true;
             await Promise.race([
               stateApplier.applyTimeOfDay(stored.timeOfDay % 24, false, applyDarkness),
               new Promise((_, reject) => setTimeout(() => reject(new Error(

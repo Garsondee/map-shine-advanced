@@ -2744,12 +2744,10 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
       ? canvas.tokens.controlled 
       : (canvas.tokens?.observed || []);
 
-    // Defensive gate: hover-hide roof fades are an editing workflow and must not
-    // keep running during general gameplay/token selection. Stale hoverHidden
-    // state on scene-spanning overhead tiles can present as a full-scene fade.
-    const activeControl = String(ui?.controls?.control?.name ?? ui?.controls?.activeControl ?? '').toLowerCase();
+    // Hover-hide should mirror tree canopy parity across gameplay + editing when
+    // Three owns interaction. If PIXI owns tiles, disable Three-side hover fade.
     const inputMode = String(window.MapShine?.inputRouter?.currentMode ?? '').toLowerCase();
-    const allowHoverHiddenFade = activeControl === 'tiles' && inputMode !== 'pixi';
+    const allowHoverHiddenFade = inputMode !== 'pixi';
 
     // Calculate global tile tint based on darkness
     // This matches the logic in SpecularEffect to darken elements at night

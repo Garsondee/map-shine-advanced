@@ -176,6 +176,77 @@ let threeCanvas = null;
 /** @type {boolean} */
 let isMapMakerMode = false;
 
+const NATIVE_RENDERING_MODE_STORAGE_KEY = 'map-shine-advanced.native-foundry-rendering-mode';
+const NATIVE_RENDERING_RESTART_BLOCKER_ID = 'map-shine-native-rendering-restart-blocker';
+
+function _readNativeFoundryRenderingModePreference() {
+  try {
+    return globalThis?.localStorage?.getItem(NATIVE_RENDERING_MODE_STORAGE_KEY) === '1';
+  } catch (_) {
+    return false;
+  }
+}
+
+function _writeNativeFoundryRenderingModePreference(enabled) {
+  try {
+    if (enabled) globalThis?.localStorage?.setItem(NATIVE_RENDERING_MODE_STORAGE_KEY, '1');
+    else globalThis?.localStorage?.removeItem(NATIVE_RENDERING_MODE_STORAGE_KEY);
+  } catch (_) {
+  }
+}
+
+function _showRenderingModeRestartBlocker(message) {
+  try {
+    let blocker = document.getElementById(NATIVE_RENDERING_RESTART_BLOCKER_ID);
+    if (!blocker) {
+      blocker = document.createElement('div');
+      blocker.id = NATIVE_RENDERING_RESTART_BLOCKER_ID;
+      blocker.style.position = 'fixed';
+      blocker.style.inset = '0';
+      blocker.style.zIndex = '300000';
+      blocker.style.background = 'rgba(0, 0, 0, 0.92)';
+      blocker.style.display = 'flex';
+      blocker.style.alignItems = 'center';
+      blocker.style.justifyContent = 'center';
+      blocker.style.pointerEvents = 'auto';
+      blocker.style.color = '#f2f2f2';
+      blocker.style.fontFamily = 'Arial, sans-serif';
+      blocker.style.fontSize = '18px';
+      blocker.style.textAlign = 'center';
+      blocker.style.padding = '24px';
+      document.body.appendChild(blocker);
+    }
+    blocker.textContent = message;
+  } catch (_) {
+  }
+}
+
+function _requestRenderingModeSessionRestart(enabled) {
+  const targetLabel = enabled
+    ? 'PIXI / Native Foundry rendering mode'
+    : 'Map Shine Three.js rendering mode';
+
+  _writeNativeFoundryRenderingModePreference(enabled);
+
+  safeCall(() => {
+    loadingOverlay.showBlack('Switching rendering mode...');
+    loadingOverlay.setMessage(`Restarting session to apply ${targetLabel}`);
+  }, 'renderMode.restartOverlay', Severity.COSMETIC);
+
+  _showRenderingModeRestartBlocker(`Switching to ${targetLabel}\n\nRestarting Foundry session...`);
+
+  safeCall(() => {
+    ui?.notifications?.info?.(`Map Shine: Restarting session to apply ${targetLabel}.`);
+  }, 'renderMode.restartNotify', Severity.COSMETIC);
+
+  setTimeout(() => {
+    try {
+      window.location.reload();
+    } catch (_) {
+    }
+  }, 150);
+}
+
 // ->->->-> Recovery mode flag ->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->
 // Set to true when Canvas.draw() completes but canvasReady never fired
 // (Foundry returned early due to an error like a missing tile texture).
@@ -3490,8 +3561,9 @@ async function createThreeCanvas(scene) {
     // P0.3: Capture Foundry state before modifying it
     captureFoundryStateSnapshot();
 
-    // Set default mode - actual canvas configuration happens after ControlsIntegration init
-    isMapMakerMode = false; // Default to Gameplay Mode
+    // Restore persisted rendering mode preference.
+    // True means parity mode (native Foundry PIXI), false means gameplay (Map Shine Three.js).
+    isMapMakerMode = _readNativeFoundryRenderingModePreference();
 
     // Create new canvas element
     if (isDebugLoad) dlp.begin('canvas.create', 'setup');
@@ -4493,6 +4565,11 @@ async function createThreeCanvas(scene) {
     console.log(' -> Step: renderLoop.start DONE');
     // Update ModeManager with the now-created renderLoop reference
     if (modeManager) modeManager._deps.renderLoop = renderLoop;
+
+    // Apply persisted native rendering preference after mode manager + render loop are alive.
+    if (isMapMakerMode && modeManager) {
+      safeCall(() => modeManager.setMapMakerMode(true), 'modeManager.restoreNativeMode', Severity.COSMETIC);
+    }
 
     dlp.event('renderLoop: STARTED ->-> first rAF frame queued');
     log.info('Render loop started');
@@ -6298,12 +6375,31 @@ function destroyThreeCanvas() {
  * @param {boolean} enabled - True for Map Maker (PIXI), False for Gameplay (Three.js)
  * @public
  */
-export function setMapMakerMode(enabled) {
+export function setMapMakerMode(enabled, options = {}) {
+  const nextEnabled = enabled === true;
+  const currentEnabled = !!(modeManager?.isMapMakerMode ?? isMapMakerMode);
+  const restartSession = options?.restartSession !== false;
+
+  if (currentEnabled === nextEnabled) return;
+
+  if (restartSession) {
+    _requestRenderingModeSessionRestart(nextEnabled);
+    return;
+  }
+
   if (modeManager) {
-    modeManager.setMapMakerMode(enabled);
+    modeManager.setMapMakerMode(nextEnabled);
     // Keep module-scope flag in sync for any remaining legacy references
     isMapMakerMode = modeManager.isMapMakerMode;
+  } else {
+    isMapMakerMode = nextEnabled;
   }
+
+  _writeNativeFoundryRenderingModePreference(isMapMakerMode);
+
+  safeCall(() => {
+    if (window.MapShine) window.MapShine.isMapMakerMode = isMapMakerMode;
+  }, 'setMapMakerMode.syncWindow', Severity.COSMETIC);
 }
 
 /**
@@ -6706,6 +6802,19 @@ function _enforceGameplayPixiSuppression() {
           tile.visible = true;
           tile.renderable = true;
           if (tile.mesh) tile.mesh.alpha = ALPHA;
+          // Restore native PIXI overlays (selection frame/handles/HUD affordances)
+          // in tile edit mode. Gameplay suppression may have previously forced
+          // child alpha to 0, which makes the selection rectangle disappear.
+          if (Array.isArray(tile.children)) {
+            for (const child of tile.children) {
+              if (child && typeof child.alpha === 'number') child.alpha = 1;
+            }
+          }
+          if (tile.frame) {
+            tile.frame.visible = true;
+            tile.frame.renderable = true;
+            tile.frame.alpha = 1;
+          }
           try { tile.renderFlags?.set({ refreshState: true }); } catch (_) {}
         }
       }

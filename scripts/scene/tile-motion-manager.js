@@ -522,6 +522,29 @@ export class TileMotionManager {
    */
   _exitTileEditSuppression() {
     if (!this._tileEditSuppressed) return;
+
+    // During tile-edit suppression we temporarily rewrite runtime bases to the
+    // stable edit pose so Three visuals stay deterministic while Foundry owns
+    // manipulation. On exit, recapture authoritative transforms from the final
+    // edited tile documents before resuming motion.
+    const tileIds = this._runtimeOrder.length > 0
+      ? this._runtimeOrder
+      : Object.keys(this.state?.tiles || {});
+
+    for (const tileId of tileIds) {
+      const cfg = this.state?.tiles?.[tileId];
+      if (!cfg?.enabled) continue;
+
+      this._refreshTileBaseTransform(tileId);
+
+      const refreshedData = this._getTileData(tileId);
+      const refreshedSprite = refreshedData?.sprite;
+      if (refreshedSprite) {
+        this.captureBaseTransform(tileId, refreshedSprite);
+        this._captureBusBaseTransform(tileId);
+      }
+    }
+
     this._activeTileIds.clear();
     this._frameActiveTileIds.clear();
     this._resolvedStates.clear();

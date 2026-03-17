@@ -4551,9 +4551,9 @@ export class InteractionManager {
     // (We intentionally keep it visible while hovering the relevant handle.)
     this._hideUIHoverLabel();
 
-    // Hard ownership boundary: in Tiles context, Foundry/PIXI owns tile hover
-    // cursor/targets. Disable Three-side tile hover workflows entirely.
-    if (this._isTilesLayerActive()) {
+    // Hard ownership boundary: when PIXI owns tile interaction, disable Three-side
+    // overhead hover-hide and clear any stale pending/active hover-hide state.
+    if (this._isTilesLayerActive() && this._isPixiOwnedTileMode()) {
       if (this.hoveredOverheadTileId && this.tileManager?.setTileHoverHidden) {
         this.tileManager.setTileHoverHidden(this.hoveredOverheadTileId, false);
       }
@@ -4570,10 +4570,9 @@ export class InteractionManager {
     // hit priority so early returns do not suppress canopy fade updates.
     safeCall(() => this._updateTreeCanopyHoverState(mouseState), 'hover.treeCanopy', Severity.COSMETIC);
 
-    // Overhead roof hover-hide is only valid in Three-owned tile editing paths.
-    // In gameplay/token workflows it can fade large overhead map tiles and make
-    // the scene appear to "fade out" when selecting tokens.
-    const allowThreeOverheadHoverHide = this._isTilesLayerActive() && !this._isPixiOwnedTileMode();
+    // Keep roof hover-hide parity with canopy hover whenever Three owns tile
+    // interaction. PIXI-owned tile workflows are still excluded.
+    const allowThreeOverheadHoverHide = !this._isPixiOwnedTileMode();
     if (!allowThreeOverheadHoverHide) {
       if (this.hoveredOverheadTileId && this.tileManager?.setTileHoverHidden) {
         this.tileManager.setTileHoverHidden(this.hoveredOverheadTileId, false);

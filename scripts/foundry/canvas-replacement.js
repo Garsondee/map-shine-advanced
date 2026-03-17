@@ -77,6 +77,7 @@ import { VisionModeEffectV2 } from '../compositor-v2/effects/VisionModeEffectV2.
 import { InvertEffectV2 } from '../compositor-v2/effects/InvertEffectV2.js';
 import { SepiaEffectV2 } from '../compositor-v2/effects/SepiaEffectV2.js';
 import { LensEffectV2 } from '../compositor-v2/effects/LensEffectV2.js';
+import { FloorDepthBlurEffect } from '../compositor-v2/effects/FloorDepthBlurEffect.js';
 import { InteractionManager } from '../scene/interaction-manager.js';
 import { PixiContentLayerBridge } from './pixi-content-layer-bridge.js';
 import { GridRenderer } from '../scene/grid-renderer.js';
@@ -5424,6 +5425,13 @@ async function createThreeCanvas(scene) {
         }, 'v2.registerBuildingShadowsUI', Severity.COSMETIC);
 
         safeCall(() => {
+          uiManager.registerEffect(
+            'floor-depth-blur', 'Floor Depth Blur',
+            FloorDepthBlurEffect.getControlSchema(), _makeV2Callback('_floorDepthBlurEffect'), 'global'
+          );
+        }, 'v2.registerFloorDepthBlurUI', Severity.COSMETIC);
+
+        safeCall(() => {
           const onGridUpdate = (_effectId, paramId, value) => {
             const grid = window.MapShine?.gridRenderer;
             if (!grid) return;
@@ -5453,7 +5461,7 @@ async function createThreeCanvas(scene) {
           );
         }, 'v2.registerGridUI', Severity.COSMETIC);
 
-        log.info('V2: registered effect controls (Lighting, Specular, Fluid, Iridescence, Prism, Bush, Tree, SkyColor, WindowLight, Fire, WaterSplashes, SmellyFlies, Lightning, CandleFlames, Bloom, ColorCorrection, Sharpen, Fog, Water, Cloud, OverheadShadows, BuildingShadows, Grid, Lens)');
+        log.info('V2: registered effect controls (Lighting, Specular, Fluid, Iridescence, Prism, Bush, Tree, SkyColor, WindowLight, Fire, WaterSplashes, SmellyFlies, Lightning, CandleFlames, Bloom, ColorCorrection, Sharpen, Fog, Water, Cloud, OverheadShadows, BuildingShadows, FloorDepthBlur, Grid, Lens)');
 
         safeCall(() => loadingOverlay.setStage('ui.init', 1.0, 'UI ready', { immediate: true }), 'overlay.uiInit.done', Severity.COSMETIC);
         log.info('V2: UI initialized');

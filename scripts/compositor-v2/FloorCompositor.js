@@ -48,6 +48,7 @@ import { SkyColorEffectV2 } from './effects/SkyColorEffectV2.js';
 import { ColorCorrectionEffectV2 } from './effects/ColorCorrectionEffectV2.js';
 import { BloomEffectV2 } from './effects/BloomEffectV2.js';
 import { SharpenEffectV2 } from './effects/SharpenEffectV2.js';
+import { FloorDepthBlurEffect } from './effects/FloorDepthBlurEffect.js';
 import { FilterEffectV2 } from './effects/FilterEffectV2.js';
 import { WaterEffectV2 } from './effects/WaterEffectV2.js';
 import { CloudEffectV2 } from './effects/CloudEffectV2.js';
@@ -224,6 +225,13 @@ export class FloorCompositor {
      * @type {SharpenEffectV2}
      */
     this._sharpenEffect = new SharpenEffectV2();
+
+    /**
+     * V2 Floor Depth Blur Effect: Kawase multi-pass blur applied to floors
+     * below the currently active level. Disabled by default.
+     * @type {FloorDepthBlurEffect}
+     */
+    this._floorDepthBlurEffect = new FloorDepthBlurEffect();
 
     /**
      * V2 Cloud Effect: procedural cloud density, shadow, and cloud-top passes.
@@ -811,7 +819,7 @@ export class FloorCompositor {
   initialize(options = {}) {
     const _onProgress = typeof options?.onProgress === 'function' ? options.onProgress : null;
     // Total number of named effect init steps in this method — update when adding/removing effects.
-    const TOTAL_EFFECT_INITS = 39;
+    const TOTAL_EFFECT_INITS = 40;
     let _effectInitIndex = 0;
     const _reportProgress = (label) => {
       if (!_onProgress) return;
@@ -1072,6 +1080,9 @@ export class FloorCompositor {
       _reportProgress(label);
     };
 
+    // Initialize floor depth blur with the same RT type as the rest of the pipeline.
+    initEffect('FloorDepthBlurEffect', () =>
+      this._floorDepthBlurEffect.initialize(this.renderer, w, h, preferredType));
     initEffect('SpecularEffectV2', () => this._specularEffect.initialize());
     initEffect('FluidEffectV2', () => this._fluidEffect.initialize());
     initEffect('IridescenceEffectV2', () => this._iridescenceEffect.initialize());
@@ -1389,7 +1400,14 @@ export class FloorCompositor {
 
       this._populateComplete = true;
       return true;
-    })();
+    })().finally(() => {
+      // Allow retry if the attempt failed or aborted before completion.
+      // Without this, a single early false/rejection can permanently block
+      // particle/effect population for the session until full refresh.
+      if (!this._populateComplete) {
+        this._populatePromise = null;
+      }
+    });
 
     return this._populatePromise;
   }
@@ -1474,7 +1492,8 @@ export class FloorCompositor {
       '_overheadShadowEffect', '_buildingShadowEffect', '_dotScreenEffect',
       '_halftoneEffect', '_asciiEffect', '_dazzleOverlayEffect',
       '_visionModeEffect', '_invertEffect', '_sepiaEffect', '_lensEffect',
-      '_movementPreviewEffect'
+      '_movementPreviewEffect',
+      '_floorDepthBlurEffect',
     ];
 
     for (const key of effectKeys) {
@@ -1857,9 +1876,29 @@ export class FloorCompositor {
     // ── Step 1: Render bus scene → sceneRT ───────────────────────────────
     // The bus scene contains albedo tiles + specular/fire overlays.
     // Window light is NOT in the bus scene — it renders after lighting.
+    //
+    // When floor depth blur is enabled and the player is above floor 0,
+    // FloorDepthBlurEffect handles the bus render internally: it renders
+    // each below-floor separately, applies progressive Kawase blur, composites
+    // them, then renders the active+above floors sharp on top — all writing
+    // the final result into _sceneRT.
     if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: bus.renderTo(sceneRT)'); } catch (_) {} }
     if (_profiling) _profileT0 = performance.now();
-    this._renderBus.renderTo(this.renderer, this.camera, this._sceneRT);
+    {
+      // Use the bus's already-authoritative value (set by _applyCurrentFloorVisibility).
+      // Guard against the Infinity default (single-floor / not yet initialised) to prevent
+      // the per-floor loop in FloorDepthBlurEffect from running indefinitely.
+      const activeFloorIndex = Number.isFinite(this._renderBus._visibleMaxFloorIndex)
+        ? this._renderBus._visibleMaxFloorIndex
+        : 0;
+      const blurEnabled = this._floorDepthBlurEffect?.params.enabled && activeFloorIndex > 0;
+      if (blurEnabled) {
+        this._floorDepthBlurEffect.render(
+          this.renderer, this.camera, this._renderBus, activeFloorIndex, this._sceneRT);
+      } else {
+        this._renderBus.renderTo(this.renderer, this.camera, this._sceneRT);
+      }
+    }
     if (_profiling) this._recordPassTiming('busRender', _profileT0);
     if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: bus.renderTo(sceneRT) DONE'); } catch (_) {} }
 
@@ -2734,6 +2773,7 @@ export class FloorCompositor {
     try { this._sepiaEffect?.onResize?.(w, h); } catch (_) {}
     try { this._lensEffect?.onResize?.(w, h); } catch (_) {}
     try { this._distortionEffect?.onResize?.(w, h); } catch (_) {}
+    try { this._floorDepthBlurEffect?.onResize?.(w, h); } catch (_) {}
     log.debug(`FloorCompositor.onResize: RTs resized to ${w}x${h}`);
   }
 
@@ -2783,11 +2823,14 @@ export class FloorCompositor {
     try { this._sepiaEffect?.dispose?.(); } catch (_) {}
     try { this._lensEffect?.dispose?.(); } catch (_) {}
     try { this._distortionEffect?.dispose?.(); } catch (_) {}
+    try { this._floorDepthBlurEffect?.dispose?.(); } catch (_) {}
     try { this._fireEffect.dispose(); } catch (_) {}
     try { this._specularEffect.dispose(); } catch (_) {}
     try { this._windowLightEffect.dispose(); } catch (_) {}
     try { this._renderBus?.dispose?.(); } catch (_) {}
     this._busPopulated = false;
+    this._populateComplete = false;
+    this._populatePromise = null;
 
     // Dispose render targets.
     try { this._sceneRT?.dispose(); } catch (_) {}

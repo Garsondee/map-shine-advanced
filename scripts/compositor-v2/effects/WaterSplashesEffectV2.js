@@ -52,6 +52,10 @@ const log = createLogger('WaterSplashesV2');
 // Ground Z for the bus scene (matches FloorRenderBus GROUND_Z).
 const GROUND_Z = 1000;
 
+// Keep render-order math aligned with FloorRenderBus floor bands.
+const RENDER_ORDER_PER_FLOOR = 10000;
+const OVERHEAD_OFFSET = 5000;
+
 // Spatial bucket size for splitting large water masks into smaller emitters (px).
 const BUCKET_SIZE = 2500;
 
@@ -300,6 +304,14 @@ export class WaterSplashesEffectV2 {
         if (!vs.includes('vMsWorldPos =') && vs.includes('#include <soft_vertex>')) {
           vs = vs.replace('#include <soft_vertex>', '#include <soft_vertex>\n  ' + desiredAssign);
         }
+        // Fallback: the quarks SpriteBatch shader has neither #include <soft_vertex>
+        // nor the legacy assign anchor. Without this, vMsWorldPos stays vec3(0),
+        // fails the scene-bounds check, and every particle is fully discarded.
+        if (!vs.includes('vMsWorldPos =') && vs.includes('void main()')) {
+          const posAttr = /\battribute\s+\S+\s+offset\b/.test(vs) ? 'offset' : 'position';
+          const fallbackAssign = `vMsWorldPos = (modelMatrix * vec4(${posAttr}, 1.0)).xyz;`;
+          vs = vs.replace('void main() {', `void main() {\n  ${fallbackAssign}`);
+        }
 
         if (vs !== beforeVS) {
           material.vertexShader = vs;
@@ -453,6 +465,14 @@ export class WaterSplashesEffectV2 {
     }
   }
 
+  /** Keep batched particle draw order aligned with the active floor band. @private */
+  _updateBatchRenderOrder(maxFloorIndex) {
+    if (!this._batchRenderer) return;
+    const safeFloorIndex = Number.isFinite(Number(maxFloorIndex)) ? Number(maxFloorIndex) : 0;
+    const floorBandStart = safeFloorIndex * RENDER_ORDER_PER_FLOOR;
+    this._batchRenderer.renderOrder = floorBandStart + (OVERHEAD_OFFSET - 1);
+  }
+
   // ── Lifecycle ──────────────────────────────────────────────────────────────
 
   initialize() {
@@ -461,8 +481,12 @@ export class WaterSplashesEffectV2 {
     if (!THREE) { log.warn('initialize: THREE not available'); return; }
 
     // Create a dedicated BatchedRenderer for water splash particles.
+    // IMPORTANT (V2): FloorRenderBus tiles use very large renderOrder values
+    // (floorIndex * 10000 + sort). Starting at 49 causes all tile draws to
+    // fully overwrite particle pixels. Match FireEffectV2: start above the
+    // overhead tile offset (5000) so particles are visible above regular tiles.
     this._batchRenderer = new BatchedRenderer();
-    this._batchRenderer.renderOrder = 49; // Just below weather particles (50)
+    this._batchRenderer.renderOrder = OVERHEAD_OFFSET - 1; // Matches FireEffectV2 initial value
     this._batchRenderer.frustumCulled = false;
     try {
       if (this._batchRenderer.layers && typeof this._batchRenderer.layers.enable === 'function') {
@@ -750,19 +774,11 @@ export class WaterSplashesEffectV2 {
       ? weatherController.simulationSpeed : 2.0;
     const dt = clampedDelta * 0.001 * 750 * simSpeed;
 
-    // View-dependent spawn concentration (legacy foam behavior):
-    // filter point clouds to camera-visible bounds (+ margin) and renormalize
-    // emission weights across only the visible buckets.
-    // Throttled because filtering allocates and is not visually sensitive frame-to-frame.
-    try {
-      const nowMs = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
-      if (!this._lastViewSpawnUpdateAtMs || (nowMs - this._lastViewSpawnUpdateAtMs) > 150) {
-        this._lastViewSpawnUpdateAtMs = nowMs;
-        this._updateViewDependentSpawning();
-      }
-    } catch (_) {
-      this._updateViewDependentSpawning();
-    }
+    // View-dependent spawn concentration is disabled.
+    // It set _msEmissionScaleDynamic=0.0 for out-of-view buckets; since 0??fallback
+    // returns 0 (not nullish), those systems were permanently silenced. All systems
+    // now fall through to _msEmissionScale (the per-bucket weight set at creation),
+    // matching how FireEffectV2 handles emission.
 
     // Update per-frame emission rates and params.
     this._updateSystemParams(splashesEnabled, bubblesEnabled);
@@ -854,11 +870,14 @@ export class WaterSplashesEffectV2 {
         for (const sys of systems) {
           if (!sys) continue;
 
-          // Splashes should not be clipped strictly to the _Water mask.
-          // Underwater bubbles still need the mask clip.
-          const wantsWaterClip = (sys.userData?.isBubbles === true)
-            ? 1.0
-            : (sys.userData?.isSplash === true ? 0.0 : 1.0);
+          // Restore normal masking behavior: keep particles clipped to the water mask
+          // so underwater bubbles/splashes cannot drift onto land.
+          const wantsWaterClip = 1.0;
+          // Floor presence RT currently includes the active floor's tile coverage,
+          // which self-occludes water-surface particles (splashes/bubbles) and can
+          // make them disappear entirely. Keep this opt-in per system until we have
+          // a strict "above-floor only" occluder input.
+          const wantsFloorPresenceClip = (sys.userData?.occludeByFloorPresence === true) ? 1.0 : 0.0;
 
           // Patch and update the source material (MeshBasicMaterial)
           if (sys.material) {
@@ -866,7 +885,7 @@ export class WaterSplashesEffectV2 {
             const u = sys.material.userData?._msFloorPresenceUniforms;
             if (u) {
               u.uFloorPresenceMap.value = fpTex;
-              u.uHasFloorPresenceMap.value = fpTex ? 1.0 : 0.0;
+              u.uHasFloorPresenceMap.value = (fpTex && wantsFloorPresenceClip > 0.5) ? 1.0 : 0.0;
               u.uResolution.value.set(resX, resY);
               u.uWaterMask.value = waterMaskTex;
               u.uHasWaterMask.value = waterMaskTex ? 1.0 : 0.0;
@@ -887,7 +906,7 @@ export class WaterSplashesEffectV2 {
             const u = batchMat.userData?._msFloorPresenceUniforms;
             if (u) {
               u.uFloorPresenceMap.value = fpTex;
-              u.uHasFloorPresenceMap.value = fpTex ? 1.0 : 0.0;
+              u.uHasFloorPresenceMap.value = (fpTex && wantsFloorPresenceClip > 0.5) ? 1.0 : 0.0;
               u.uResolution.value.set(resX, resY);
               u.uWaterMask.value = waterMaskTex;
               u.uHasWaterMask.value = waterMaskTex ? 1.0 : 0.0;
@@ -1019,6 +1038,24 @@ export class WaterSplashesEffectV2 {
           if (Number.isFinite(activeCount) && activeCount > 0) totalVisible += activeCount;
         }
 
+        // Fail-open guard: if camera bounds filtering produced zero visible points
+        // for an entire system class, treat it as a bounds mismatch and revert to
+        // full point-cloud emission instead of collapsing all rates to zero.
+        if (totalVisible <= 0) {
+          for (const sys of systems) {
+            if (!sys?.userData) continue;
+            const shape = sys.emitterShape || sys.shape;
+            const all = shape?._allPoints;
+            if (all && all.length >= 3) {
+              try { shape.points = all; } catch (_) {}
+              try { sys.userData._msActivePointCount = Math.floor(all.length / 3); } catch (_) {}
+            }
+            // Clear dynamic override so emission falls back to base bucket weights.
+            delete sys.userData._msEmissionScaleDynamic;
+          }
+          return;
+        }
+
         // Second pass: normalize dynamic emission weights.
         for (const sys of systems) {
           if (!sys?.userData) continue;
@@ -1044,6 +1081,10 @@ export class WaterSplashesEffectV2 {
    */
   onFloorChange(maxFloorIndex) {
     if (!this._initialized) return;
+
+    // Keep water particles in the active floor's render-order band so they are
+    // not fully overwritten by tile draws on upper floors.
+    this._updateBatchRenderOrder(maxFloorIndex);
 
     const desired = new Set();
     for (const idx of this._floorStates.keys()) {
@@ -1219,7 +1260,7 @@ export class WaterSplashesEffectV2 {
       shape,
       material,
       renderMode: RenderMode.BillBoard,
-      renderOrder: 49,
+      renderOrder: 200000,
       startRotation: new IntervalValue(0, Math.PI * 2),
       behaviors: [foamLifecycle],
     });
@@ -1229,6 +1270,9 @@ export class WaterSplashesEffectV2 {
       _msEmissionScale: weight,
       isFoam: true,
     };
+
+    // Match FireEffectV2: explicitly start systems so quarks cannot stay paused.
+    if (typeof system.play === 'function') system.play();
 
     return system;
   }
@@ -1280,7 +1324,7 @@ export class WaterSplashesEffectV2 {
       shape,
       material,
       renderMode: RenderMode.BillBoard,
-      renderOrder: 49,
+      renderOrder: 200001,
       startRotation: new IntervalValue(0, Math.PI * 2),
       behaviors: [splashLifecycle],
     });
@@ -1290,6 +1334,9 @@ export class WaterSplashesEffectV2 {
       _msEmissionScale: weight,
       isSplash: true,
     };
+
+    // Match FireEffectV2: explicitly start systems so quarks cannot stay paused.
+    if (typeof system.play === 'function') system.play();
 
     return system;
   }
@@ -1343,7 +1390,7 @@ export class WaterSplashesEffectV2 {
       shape,
       material,
       renderMode: RenderMode.BillBoard,
-      renderOrder: 49,
+      renderOrder: 200000,
       startRotation: new IntervalValue(0, Math.PI * 2),
       behaviors: [foamLifecycle],
     });
@@ -1354,6 +1401,9 @@ export class WaterSplashesEffectV2 {
       isFoam: true,
       isBubbles: true,
     };
+
+    // Match FireEffectV2: explicitly start systems so quarks cannot stay paused.
+    if (typeof system.play === 'function') system.play();
 
     return system;
   }
@@ -1405,7 +1455,7 @@ export class WaterSplashesEffectV2 {
       shape,
       material,
       renderMode: RenderMode.BillBoard,
-      renderOrder: 49,
+      renderOrder: 200001,
       startRotation: new IntervalValue(0, Math.PI * 2),
       behaviors: [splashLifecycle],
     });
@@ -1416,6 +1466,9 @@ export class WaterSplashesEffectV2 {
       isSplash: true,
       isBubbles: true,
     };
+
+    // Match FireEffectV2: explicitly start systems so quarks cannot stay paused.
+    if (typeof system.play === 'function') system.play();
 
     return system;
   }
@@ -1444,6 +1497,11 @@ export class WaterSplashesEffectV2 {
       // Emitters as children of BatchedRenderer — transitive scene membership.
       if (sys.emitter) this._batchRenderer.add(sys.emitter);
     }
+
+    // Force the occlusion-uniform block to re-run on the next update frame.
+    // batchMat may be null on the frame when the key first changes (batch not yet
+    // registered), so resetting here ensures we patch after addSystem() wires everything up.
+    this._lastOcclusionUniformKey = null;
 
     // Optional diagnostics for "systems exist but nothing renders".
     // Enable at runtime: window.MapShine.debugWaterSplashesLogs = true

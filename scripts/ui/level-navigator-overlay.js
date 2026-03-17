@@ -163,12 +163,29 @@ export class LevelNavigatorOverlay {
     title.textContent = 'Levels';
     title.style.cssText = 'font-size:12px;font-weight:700;letter-spacing:0.02em;';
 
-    const hint = document.createElement('div');
-    hint.textContent = '[ / ]';
-    hint.style.cssText = 'font-size:10px;opacity:0.7;';
+    const closeBtn = document.createElement('button');
+    closeBtn.type = 'button';
+    closeBtn.textContent = '✕';
+    closeBtn.title = 'Close levels panel';
+    closeBtn.style.cssText = [
+      'height:20px',
+      'min-width:20px',
+      'padding:0 4px',
+      'border-radius:4px',
+      'border:1px solid rgba(255,255,255,0.18)',
+      'background:rgba(255,255,255,0.07)',
+      'color:rgba(255,255,255,0.70)',
+      'font-size:10px',
+      'cursor:pointer',
+      'line-height:1',
+    ].join(';');
+    closeBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      this.overlayManager?.setVisible(OVERLAY_ID, false);
+    });
 
     header.appendChild(title);
-    header.appendChild(hint);
+    header.appendChild(closeBtn);
     header.addEventListener('pointerdown', (e) => this._onDragStart(e), true);
 
     const row1 = document.createElement('div');

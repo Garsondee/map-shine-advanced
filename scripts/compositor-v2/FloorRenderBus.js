@@ -791,6 +791,83 @@ export class FloorRenderBus {
     }
   }
 
+  /**
+   * Render only tiles with `minFloorIndex <= floorIndex <= maxFloorIndex` to a target RT.
+   * Used by FloorDepthBlurEffect to render below-active floors separately from
+   * the active floor so per-floor blur can be applied before compositing.
+   *
+   * @param {import('three').WebGLRenderer} renderer
+   * @param {import('three').Camera} camera
+   * @param {number} minFloorIndex - Minimum floor index to include (inclusive)
+   * @param {number} maxFloorIndex - Maximum floor index to include (inclusive). Pass Infinity for no upper cap.
+   * @param {import('three').WebGLRenderTarget} target - Render target
+   * @param {object} [options]
+   * @param {boolean} [options.includeBackground=true] - Whether to include __bg_* background planes
+   * @param {boolean} [options.clearBeforeRender=true] - Whether to clear target before rendering this range
+   * @param {number} [options.clearAlpha=1] - Clear alpha (0 for transparent, 1 for opaque)
+   * @param {number} [options.clearColor=0x000000] - Clear colour hex
+   */
+  renderFloorRangeTo(renderer, camera, minFloorIndex, maxFloorIndex, target, options = {}) {
+    if (!this._initialized || !this._scene) return;
+    const THREE = window.THREE;
+    const {
+      includeBackground = true,
+      clearBeforeRender = true,
+      clearAlpha = 1,
+      clearColor = 0x000000,
+    } = options;
+
+    // Save each tile's current visibility so we can restore it after.
+    const savedVisibility = new Map();
+    for (const [tileId, entry] of this._tiles) {
+      const node = entry?.root || entry?.mesh;
+      if (!node) continue;
+      const wasVisible = node.visible === true;
+      savedVisibility.set(tileId, wasVisible);
+
+      if (tileId.startsWith('__')) {
+        // Background planes: keep any pre-existing hidden state, then apply range intent.
+        node.visible = wasVisible && includeBackground;
+        continue;
+      }
+
+      const inRange = entry.floorIndex >= minFloorIndex && entry.floorIndex <= maxFloorIndex;
+      // Respect the node's existing visibility state (effect toggles, temporary hides,
+      // warmup/runtime guards, etc.) and only apply additional floor-range culling.
+      node.visible = wasVisible && inRange && !this._suppressTileAlbedoForEditing;
+    }
+
+    // Save and configure renderer state.
+    const prevTarget    = renderer.getRenderTarget();
+    const prevAutoClear = renderer.autoClear;
+    const prevColor     = renderer.getClearColor(new THREE.Color());
+    const prevAlpha     = renderer.getClearAlpha();
+    const prevLayerMask = camera.layers.mask;
+    camera.layers.enable(0);
+    for (let i = 1; i <= 19; i++) camera.layers.enable(i);
+
+    renderer.setRenderTarget(target);
+    renderer.setClearColor(clearColor, clearAlpha);
+    renderer.autoClear = !!clearBeforeRender;
+    renderer.render(this._scene, camera);
+
+    // Restore camera and renderer state.
+    camera.layers.mask = prevLayerMask;
+    renderer.autoClear = prevAutoClear;
+    renderer.setClearColor(prevColor, prevAlpha);
+    if (typeof renderer.setClearAlpha === 'function') {
+      try { renderer.setClearAlpha(prevAlpha); } catch (_) {}
+    }
+    renderer.setRenderTarget(prevTarget);
+
+    // Restore original tile visibility.
+    for (const [tileId, wasVisible] of savedVisibility) {
+      const entry = this._tiles.get(tileId);
+      const node = entry?.root || entry?.mesh;
+      if (node) node.visible = wasVisible;
+    }
+  }
+
   // ── Effect Overlay API ──────────────────────────────────────────────────────
 
   /**

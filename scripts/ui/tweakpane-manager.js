@@ -1232,6 +1232,20 @@ export class TweakpaneManager {
       }
     });
 
+    sceneFolder.addBlade({ view: 'separator' });
+
+    sceneFolder.addButton({
+      title: 'Copy Scene Settings'
+    }).on('click', async () => {
+      await this.copySceneSettingsToClipboard();
+    });
+
+    sceneFolder.addButton({
+      title: 'Paste Scene Settings'
+    }).on('click', async () => {
+      await this.pasteSceneSettingsFromClipboard();
+    });
+
     sceneFolder.on('fold', (ev) => {
       this.accordionStates['debug_scene'] = ev.expanded;
       this.saveUIState();
@@ -3755,6 +3769,116 @@ export class TweakpaneManager {
       log.warn('Failed to copy all current settings to clipboard, printing to console instead:', error);
       console.log(dump);
       ui.notifications.warn('Map Shine: Could not copy to clipboard. Dump printed to browser console.');
+    }
+  }
+
+  /**
+   * Copy the full Map Shine scene settings (all effect params + enabled flag) to
+   * the clipboard as a JSON payload that can be pasted into another scene.
+   * @returns {Promise<void>}
+   * @public
+   */
+  async copySceneSettingsToClipboard() {
+    const scene = canvas?.scene;
+    if (!scene) {
+      ui.notifications?.warn?.('Map Shine: No active scene to copy settings from');
+      return;
+    }
+
+    const settings = sceneSettings.getSceneSettings(scene);
+    const enabled = scene.getFlag('map-shine-advanced', 'enabled') ?? false;
+
+    const payload = {
+      msaVersion: 'scene-settings-v1',
+      sceneName: scene.name,
+      enabled,
+      settings
+    };
+
+    const json = JSON.stringify(payload, null, 2);
+
+    try {
+      if (navigator?.clipboard?.writeText) {
+        await navigator.clipboard.writeText(json);
+        ui.notifications.info(`Map Shine: Scene settings for "${scene.name}" copied to clipboard`);
+      } else {
+        throw new Error('Clipboard API not available');
+      }
+    } catch (error) {
+      log.warn('Failed to copy scene settings to clipboard, printing to console instead:', error);
+      console.log(json);
+      ui.notifications.warn('Map Shine: Could not copy to clipboard. JSON printed to browser console.');
+    }
+  }
+
+  /**
+   * Read Map Shine scene settings from the clipboard and apply them to the
+   * current scene, overwriting all existing effect params.
+   * GM-only. Prompts for confirmation before writing.
+   * @returns {Promise<void>}
+   * @public
+   */
+  async pasteSceneSettingsFromClipboard() {
+    const scene = canvas?.scene;
+    if (!scene) {
+      ui.notifications?.warn?.('Map Shine: No active scene to paste settings into');
+      return;
+    }
+
+    if (!game.user?.isGM) {
+      ui.notifications?.warn?.('Map Shine: Only GMs can paste scene settings');
+      return;
+    }
+
+    // Read clipboard text.
+    let text;
+    try {
+      if (navigator?.clipboard?.readText) {
+        text = await navigator.clipboard.readText();
+      } else {
+        throw new Error('Clipboard API not available');
+      }
+    } catch (error) {
+      log.warn('Failed to read clipboard:', error);
+      ui.notifications.warn('Map Shine: Could not read clipboard. Check browser permissions.');
+      return;
+    }
+
+    // Parse and validate the payload.
+    let payload;
+    try {
+      payload = JSON.parse(text);
+    } catch (_) {
+      ui.notifications.error('Map Shine: Clipboard does not contain valid JSON');
+      return;
+    }
+
+    if (!payload || payload.msaVersion !== 'scene-settings-v1' || typeof payload.settings !== 'object') {
+      ui.notifications.error('Map Shine: Clipboard does not contain Map Shine scene settings (missing msaVersion or settings)');
+      return;
+    }
+
+    const sourceName = payload.sceneName || 'Unknown Scene';
+
+    // Confirm before overwriting.
+    const confirmed = await Dialog.confirm({
+      title: 'Paste Map Shine Scene Settings',
+      content: `<p>Apply Map Shine settings from <strong>${sourceName}</strong> to <strong>${scene.name}</strong>?</p>
+               <p>This will overwrite <em>all</em> current Map Shine effect settings for this scene.</p>`,
+      yes: () => true,
+      no: () => false,
+      defaultYes: false
+    });
+
+    if (!confirmed) return;
+
+    try {
+      await scene.setFlag('map-shine-advanced', 'enabled', !!payload.enabled);
+      await sceneSettings.setSceneSettings(scene, payload.settings);
+      ui.notifications.info(`Map Shine: Settings from "${sourceName}" applied to "${scene.name}". Reload the scene to see full changes.`);
+    } catch (e) {
+      log.warn('Failed to paste scene settings:', e);
+      ui.notifications.error('Map Shine: Failed to apply scene settings — see browser console for details.');
     }
   }
 

@@ -487,7 +487,8 @@ export class WaterEffectV2 {
     this._cachedAdvectionDirOffsetDeg = null;
     this._cachedAdvectionDirCos = 1.0;
     this._cachedAdvectionDirSin = 0.0;
-    this._lastTimeValue = null;
+    // _lastTimeValue removed: update() now uses TimeManager timeInfo directly.
+    this._shaderTime = 0.0;
 
     // ── Cached sun direction ─────────────────────────────────────────────
     this._cachedSunAzDeg = null;
@@ -1878,16 +1879,25 @@ export class WaterEffectV2 {
     if (!this._initialized || !this._composeMaterial) return;
     const u = this._composeMaterial.uniforms;
     const p = this.params;
-    // Use real wall time for smooth shader animation. Some upstream paths can
-    // throttle/quantize timeInfo updates even when the render loop runs fast.
-    // Water needs continuous time for fluid motion.
-    const now = (typeof performance !== 'undefined' && performance.now) ? performance.now() * 0.001 : (timeInfo?.elapsed ?? 0);
-    const dtRaw = (this._lastTimeValue == null) ? 0 : Math.max(0, now - this._lastTimeValue);
-    // Clamp simulation step to avoid large post-stall jumps feeding wind time/advection.
-    // Big jumps can look like surface shaking/teleporting on the next rendered frame.
-    const dt = Math.min(dtRaw, 1.0 / 20.0);
-    this._lastTimeValue = now;
-    const elapsed = now;
+    // Derive pause from both TimeManager and Foundry global state.
+    // This keeps water frozen even if pause propagation to TimeManager is delayed.
+    const foundryPaused = (globalThis.game?.paused === true);
+    const scale = Number(timeInfo?.scale);
+    const timeManagerPaused = (timeInfo?.paused === true) || (Number.isFinite(scale) && scale <= 1e-6);
+    const paused = foundryPaused || timeManagerPaused;
+
+    // Use TimeManager elapsed for active playback, but freeze shader time while paused.
+    // Floating foam/specular shaders sample uTime directly, so this must stop changing.
+    const rawElapsed = Number(timeInfo?.elapsed);
+    if (!paused && Number.isFinite(rawElapsed)) {
+      this._shaderTime = rawElapsed;
+    }
+    const elapsed = this._shaderTime;
+
+    // TimeManager already clamps delta to 100ms; apply an additional 1/20s clamp here
+    // to guard against large post-stall jumps in advection/wind integration.
+    const baseDt = Math.min(Math.max(0.0, Number(timeInfo?.delta) || 0.0), 1.0 / 20.0);
+    const dt = paused ? 0.0 : baseDt;
 
     // Runtime signature: log once on first update with key Wind & Flow params.
     try {
@@ -1954,6 +1964,20 @@ export class WaterEffectV2 {
       }
     } catch (_) {}
 
+    // Freeze wind-driving inputs while paused. This prevents paused-frame drift
+    // when external weather fallbacks (e.g. cloud fallback state) continue to
+    // update off wall-clock time.
+    if (paused) {
+      const stableLen = Math.hypot(this._waveDirX, this._waveDirY);
+      if (stableLen > 1e-6) {
+        windDirX = this._waveDirX / stableLen;
+        windDirY = this._waveDirY / stableLen;
+      }
+      windSpeed01 = Number.isFinite(this._smoothedWindSpeed01)
+        ? Math.max(0.0, Math.min(1.0, this._smoothedWindSpeed01))
+        : 0.0;
+    }
+
     // At very low wind speeds, weather direction can wander/noise rapidly.
     // Freeze to the last stable direction to prevent low-speed wave jitter.
     if (windSpeed01 < 0.06) {
@@ -2005,7 +2029,7 @@ export class WaterEffectV2 {
       const angleDiff = Math.acos(Math.max(-1.0, Math.min(1.0, dot)));
 
       // If blend is complete and wind has rotated > 15 degrees, start a new blend
-      if (this._windDirBlend01 >= 1.0 && angleDiff > 0.26) {
+      if (!paused && this._windDirBlend01 >= 1.0 && angleDiff > 0.26) {
         this._prevWindDirX = this._targetWindDirX;
         this._prevWindDirY = this._targetWindDirY;
         this._targetWindDirX = nx;
@@ -2355,7 +2379,7 @@ export class WaterEffectV2 {
     // Sun direction from azimuth + elevation (cached to avoid per-frame trig)
     const az = p.specSunAzimuthDeg ?? 135;
     const el = p.specSunElevationDeg ?? 45;
-    if (az !== this._cachedSunAzDeg || el !== this._cachedSunElDeg) {
+    if (!paused && (az !== this._cachedSunAzDeg || el !== this._cachedSunElDeg)) {
       const azRad = az * (Math.PI / 180);
       const elRad = el * (Math.PI / 180);
       this._cachedSunDirX = Math.cos(elRad) * Math.sin(azRad);

@@ -20,8 +20,8 @@ export class VisionModeEffectV2 {
     this._material = null;
 
     this._activeMode = 'basic';
-    this._target = { saturation: 1.0, brightness: 0.0, contrast: 1.0, tintR: 1.0, tintG: 1.0, tintB: 1.0 };
-    this._current = { saturation: 1.0, brightness: 0.0, contrast: 1.0, tintR: 1.0, tintG: 1.0, tintB: 1.0 };
+    this._target = { saturation: 1.0, brightness: 0.0, contrast: 1.0, tintR: 1.0, tintG: 1.0, tintB: 1.0, waveStrength: 0.0 };
+    this._current = { saturation: 1.0, brightness: 0.0, contrast: 1.0, tintR: 1.0, tintG: 1.0, tintB: 1.0, waveStrength: 0.0 };
     this._lerpSpeed = 6.0;
 
     this.params = {
@@ -62,7 +62,9 @@ export class VisionModeEffectV2 {
         uContrast: { value: 1.0 },
         uTint: { value: new THREE.Vector3(1, 1, 1) },
         uStrength: { value: 0.0 },
-        uTime: { value: 0.0 }
+        uTime: { value: 0.0 },
+        // Tremorsense wave distortion (0=off, 1=on, lerped for smooth transitions)
+        uWaveStrength: { value: 0.0 }
       },
       vertexShader: /* glsl */`
         varying vec2 vUv;
@@ -73,26 +75,40 @@ export class VisionModeEffectV2 {
       `,
       fragmentShader: /* glsl */`
         uniform sampler2D tDiffuse;
-        uniform float uSaturation;
-        uniform float uBrightness;
-        uniform float uContrast;
+        uniform float uSaturation;   // 0=greyscale, 1=unchanged, 2=oversaturated
+        uniform float uBrightness;   // added directly to RGB channels
+        uniform float uContrast;     // 0=flat grey, 1=unchanged, 2=high contrast
         uniform vec3 uTint;
-        uniform float uStrength;
+        uniform float uStrength;     // 0=bypass (basic mode), 1=full effect
         uniform float uTime;
+        uniform float uWaveStrength; // 0=off, 1=tremorsense ripple
         varying vec2 vUv;
 
         void main() {
-          vec2 uv = vUv;
+          // Tremorsense: apply sonar-wave UV distortion before sampling.
+          // Multiplying offsets by uWaveStrength means this is a no-op when off.
+          float waveX = sin(vUv.y * 12.0 + uTime * 2.5) * 0.004 * uWaveStrength;
+          float waveY = cos(vUv.x *  8.5 + uTime * 1.8) * 0.004 * uWaveStrength;
+          vec2 uv = clamp(vUv + vec2(waveX, waveY), vec2(0.001), vec2(0.999));
+
           vec4 texel = texture2D(tDiffuse, uv);
           vec3 color = texel.rgb;
 
+          // Saturation: mix towards luma (0=greyscale, 1=unchanged)
           float luma = dot(color, vec3(0.2126, 0.7152, 0.0722));
           vec3 adjusted = mix(vec3(luma), color, uSaturation);
+
+          // Brightness: direct additive offset
           adjusted += uBrightness;
+
+          // Contrast: pivot around 0.5
           adjusted = (adjusted - 0.5) * uContrast + 0.5;
+
+          // Tint multiply (lightAmplification green, etc.)
           adjusted *= uTint;
           adjusted = max(adjusted, vec3(0.0));
 
+          // Blend between original and adjusted based on overall effect strength
           color = mix(color, adjusted, uStrength);
           gl_FragColor = vec4(color, texel.a);
         }
@@ -143,29 +159,49 @@ export class VisionModeEffectV2 {
   _updateTargetFromMode(modeId) {
     const config = CONFIG?.Canvas?.visionModes?.[modeId];
     if (!config?.vision?.defaults) {
-      this._target.saturation = 1.0;
-      this._target.brightness = 0.0;
-      this._target.contrast = 1.0;
-      this._target.tintR = 1.0;
-      this._target.tintG = 1.0;
-      this._target.tintB = 1.0;
+      // Unknown / unregistered mode — reset to neutral
+      this._target.saturation    = 1.0;
+      this._target.brightness    = 0.0;
+      this._target.contrast      = 1.0;
+      this._target.tintR         = 1.0;
+      this._target.tintG         = 1.0;
+      this._target.tintB         = 1.0;
+      this._target.waveStrength  = 0.0;
       return;
     }
 
     const d = config.vision.defaults;
-    this._target.saturation = d.saturation ?? 1.0;
-    this._target.brightness = d.brightness ?? 0.0;
-    this._target.contrast = d.contrast ?? 1.0;
 
-    if (modeId === 'lightAmplification') {
-      this._target.tintR = 0.38;
-      this._target.tintG = 0.8;
-      this._target.tintB = 0.38;
+    // Foundry vision.defaults use a [-1, 1] convention where 0 = no change.
+    // The shader uses [0, 2] for saturation and contrast (1 = unchanged).
+    //   saturation: -1 (greyscale) → uSaturation=0,  0 (unchanged) → 1,  1 → 2
+    //   contrast:   -1 (flat)      → uContrast=0,    0 (unchanged) → 1,  1 → 2
+    //   brightness: -1..1 added directly to RGB channels (same in both conventions)
+    const sat = d.saturation !== undefined && d.saturation !== null ? Number(d.saturation) : 0;
+    const con = d.contrast   !== undefined && d.contrast   !== null ? Number(d.contrast)   : 0;
+    this._target.saturation = sat + 1.0;
+    this._target.contrast   = con + 1.0;
+    this._target.brightness = d.brightness !== undefined && d.brightness !== null ? Number(d.brightness) : 0.0;
+
+    // Tint: read from CONFIG canvas uniforms so system-registered modes with
+    // custom tints are honoured automatically (e.g. PF2e may change the
+    // lightAmplification tint colour for its own low-light vision flavour).
+    const canvasTint = config.canvas?.uniforms?.tint;
+    if (Array.isArray(canvasTint) && canvasTint.length >= 3) {
+      this._target.tintR = Number(canvasTint[0]) || 1.0;
+      this._target.tintG = Number(canvasTint[1]) || 1.0;
+      this._target.tintB = Number(canvasTint[2]) || 1.0;
     } else {
       this._target.tintR = 1.0;
       this._target.tintG = 1.0;
       this._target.tintB = 1.0;
     }
+
+    // Wave distortion: active for tremorsense and any mode that uses a Wave*
+    // vision shader (detected by shader name convention used by Foundry core).
+    const bgShaderName = config.vision?.background?.shader?.name ?? '';
+    const hasWaveShader = bgShaderName.toLowerCase().includes('wave');
+    this._target.waveStrength = (modeId === 'tremorsense' || hasWaveShader) ? 1.0 : 0.0;
   }
 
   update(timeInfo) {
@@ -180,21 +216,27 @@ export class VisionModeEffectV2 {
     const dt = timeInfo?.delta ?? 0.016;
     const alpha = Math.min(1.0, this._lerpSpeed * dt);
 
-    this._current.saturation += (this._target.saturation - this._current.saturation) * alpha;
-    this._current.brightness += (this._target.brightness - this._current.brightness) * alpha;
-    this._current.contrast += (this._target.contrast - this._current.contrast) * alpha;
-    this._current.tintR += (this._target.tintR - this._current.tintR) * alpha;
-    this._current.tintG += (this._target.tintG - this._current.tintG) * alpha;
-    this._current.tintB += (this._target.tintB - this._current.tintB) * alpha;
+    this._current.saturation   += (this._target.saturation   - this._current.saturation)   * alpha;
+    this._current.brightness   += (this._target.brightness   - this._current.brightness)   * alpha;
+    this._current.contrast     += (this._target.contrast     - this._current.contrast)     * alpha;
+    this._current.tintR        += (this._target.tintR        - this._current.tintR)        * alpha;
+    this._current.tintG        += (this._target.tintG        - this._current.tintG)        * alpha;
+    this._current.tintB        += (this._target.tintB        - this._current.tintB)        * alpha;
+    this._current.waveStrength += (this._target.waveStrength - this._current.waveStrength) * alpha;
 
     const u = this._material.uniforms;
-    u.uSaturation.value = this._current.saturation;
-    u.uBrightness.value = this._current.brightness;
-    u.uContrast.value = this._current.contrast;
+    u.uSaturation.value   = this._current.saturation;
+    u.uBrightness.value   = this._current.brightness;
+    u.uContrast.value     = this._current.contrast;
     u.uTint.value.set(this._current.tintR, this._current.tintG, this._current.tintB);
+    u.uWaveStrength.value = this._current.waveStrength;
 
     const isBasic = (this._activeMode === 'basic');
-    u.uStrength.value = isBasic ? 0.0 : 1.0;
+    // Overall effect strength: bypass entirely for basic mode.
+    // Wave distortion can still lerp down even when returning to basic,
+    // so keep the pass active until waveStrength has fully faded out.
+    const waveResidual = this._current.waveStrength > 0.005;
+    u.uStrength.value = (isBasic && !waveResidual) ? 0.0 : 1.0;
     u.uTime.value = timeInfo?.elapsed ?? 0;
   }
 

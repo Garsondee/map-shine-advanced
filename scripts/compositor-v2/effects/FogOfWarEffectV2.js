@@ -1842,6 +1842,58 @@ export class FogOfWarEffectV2 {
       log.warn('Failed to render light-grants-vision shapes:', e);
     }
 
+    // Phase 3: Detection Mode Wall-Ignoring Radii
+    // Senses such as tremorsense, wavesense, and scent bypass walls entirely.
+    // For each controlled token that has such senses, draw a circle in the
+    // vision mask at the token's position, regardless of LOS or wall geometry.
+    // This matches Foundry's DetectionMode behaviour where `walls === false`
+    // allows detection through any obstacle.
+    try {
+      const gsm = window.MapShine?.gameSystem;
+      if (gsm?.getTokenDetectionRadii && controlledTokens.length > 0) {
+        const gridSize = Number(canvas?.dimensions?.size ?? 100);
+        const distance = Number(canvas?.dimensions?.distance ?? 5);
+        const pixelsPerUnit = gridSize / distance;
+        const offsetX = this.sceneRect.x;
+        const offsetY = this.sceneRect.y;
+
+        for (const token of controlledTokens) {
+          let radii;
+          try { radii = gsm.getTokenDetectionRadii(token); } catch (_) { radii = []; }
+          if (!radii || radii.length === 0) continue;
+
+          const doc = token?.document;
+          if (!doc) continue;
+
+          // Token center in scene-local coordinates
+          let cx, cy;
+          if (Number.isFinite(token?.center?.x) && Number.isFinite(token?.center?.y)) {
+            cx = token.center.x - offsetX;
+            cy = token.center.y - offsetY;
+          } else {
+            const tGridSize = Number(canvas?.dimensions?.size ?? 100);
+            cx = Number(doc.x ?? 0) + Number(doc.width  ?? 1) * tGridSize * 0.5 - offsetX;
+            cy = Number(doc.y ?? 0) + Number(doc.height ?? 1) * tGridSize * 0.5 - offsetY;
+          }
+          if (!Number.isFinite(cx) || !Number.isFinite(cy)) continue;
+
+          for (const { range } of radii) {
+            const radiusPx = Number(range) * pixelsPerUnit;
+            if (!(radiusPx > 0) || !Number.isFinite(radiusPx)) continue;
+
+            // 32 segments gives a smooth circle at typical vision distances
+            const circleGeo = new THREE.CircleGeometry(radiusPx, 32);
+            const circleMesh = new THREE.Mesh(circleGeo, this.visionMaterial);
+            circleMesh.position.set(cx, cy, 0);
+            this.visionScene.add(circleMesh);
+          }
+          if (radii.length > 0) polygonsRendered++;
+        }
+      }
+    } catch (e) {
+      log.warn('Failed to render detection-mode wall-ignoring radii:', e);
+    }
+
     // Phase 5: Darkness Source Integration
     // Darkness-emitting lights (PointDarknessSource) suppress vision within their area.
     // Draw their shapes in black AFTER vision/light shapes to subtract those zones.

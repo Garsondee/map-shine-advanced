@@ -838,6 +838,7 @@ export class WaterSplashesEffectV2 {
 
       const key = JSON.stringify({
         fp: fpTex?.uuid ?? null,
+        vf: viewFloor,
         wm: waterMaskTex?.uuid ?? null,
         wmv: waterFlipV ? 1 : 0,
         rx: resX,
@@ -873,11 +874,16 @@ export class WaterSplashesEffectV2 {
           // Restore normal masking behavior: keep particles clipped to the water mask
           // so underwater bubbles/splashes cannot drift onto land.
           const wantsWaterClip = 1.0;
-          // Floor presence RT currently includes the active floor's tile coverage,
-          // which self-occludes water-surface particles (splashes/bubbles) and can
-          // make them disappear entirely. Keep this opt-in per system until we have
-          // a strict "above-floor only" occluder input.
-          const wantsFloorPresenceClip = (sys.userData?.occludeByFloorPresence === true) ? 1.0 : 0.0;
+          // Floor presence RT includes the active floor's tile coverage.
+          // For same-floor systems this can self-occlude splashes/bubbles, so keep
+          // same-floor clipping opt-in only. But when we intentionally show a lower-floor
+          // fallback system while viewing an upper floor, enable clipping so upper tiles
+          // correctly mask lower-floor particles.
+          const systemFloorIndex = Number(sys.userData?._msFloorIndex);
+          const shouldClipByUpperFloor = Number.isFinite(systemFloorIndex)
+            && Number.isFinite(viewFloor)
+            && systemFloorIndex < viewFloor;
+          const wantsFloorPresenceClip = (sys.userData?.occludeByFloorPresence === true || shouldClipByUpperFloor) ? 1.0 : 0.0;
 
           // Patch and update the source material (MeshBasicMaterial)
           if (sys.material) {
@@ -1087,8 +1093,23 @@ export class WaterSplashesEffectV2 {
     this._updateBatchRenderOrder(maxFloorIndex);
 
     const desired = new Set();
-    for (const idx of this._floorStates.keys()) {
-      if (idx <= maxFloorIndex) desired.add(idx);
+    const activeFloorIndex = Number(maxFloorIndex);
+    // Water splashes/bubbles are screen-facing overlays (depthTest disabled).
+    // Keep a single active floor to avoid cross-floor stacking. When the active
+    // floor has no dedicated water systems, fall back to the nearest lower floor
+    // that does (matching WaterEffectV2's floor-data selection behavior).
+    if (Number.isFinite(activeFloorIndex)) {
+      if (this._floorStates.has(activeFloorIndex)) {
+        desired.add(activeFloorIndex);
+      } else {
+        let fallbackFloor = null;
+        for (const idx of this._floorStates.keys()) {
+          if (idx <= activeFloorIndex && (fallbackFloor === null || idx > fallbackFloor)) {
+            fallbackFloor = idx;
+          }
+        }
+        if (fallbackFloor !== null) desired.add(fallbackFloor);
+      }
     }
 
     // Deactivate floors that should no longer be visible.
@@ -1100,7 +1121,7 @@ export class WaterSplashesEffectV2 {
       if (!this._activeFloors.has(idx)) this._activateFloor(idx);
     }
 
-    log.info(`onFloorChange(${maxFloorIndex}): active=[${[...desired]}]`);
+    log.info(`onFloorChange(${maxFloorIndex}): active=[${[...desired]}] states=[${[...this._floorStates.keys()]}]`);
     this._activeFloors = desired;
   }
 
@@ -1475,12 +1496,12 @@ export class WaterSplashesEffectV2 {
 
   // ── Private: Floor switching ───────────────────────────────────────────────
 
-  /** Activate all floors up to the current active floor. @private */
+  /** Activate only the current active floor's systems. @private */
   _activateCurrentFloor() {
     const floorStack = window.MapShine?.floorStack;
     const activeFloor = floorStack?.getActiveFloor();
-    const maxFloorIndex = activeFloor?.index ?? Infinity;
-    this.onFloorChange(maxFloorIndex);
+    const activeFloorIndex = Number.isFinite(activeFloor?.index) ? Number(activeFloor.index) : 0;
+    this.onFloorChange(activeFloorIndex);
   }
 
   /** Add a floor's systems to the BatchedRenderer. @private */
@@ -1493,6 +1514,7 @@ export class WaterSplashesEffectV2 {
       ...(state.foamSystems2 ?? []), ...(state.splashSystems2 ?? []),
     ];
     for (const sys of allSystems) {
+      if (sys?.userData) sys.userData._msFloorIndex = floorIndex;
       try { this._batchRenderer.addSystem(sys); } catch (_) {}
       // Emitters as children of BatchedRenderer — transitive scene membership.
       if (sys.emitter) this._batchRenderer.add(sys.emitter);

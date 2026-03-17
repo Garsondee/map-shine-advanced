@@ -193,6 +193,62 @@ class BaseSystemAdapter {
     } catch (_) { return []; }
   }
 
+  // -- Vision mode / detection radii ----------------------------------------
+
+  /**
+   * Return the VisionMode ID that best represents this token's primary sense.
+   * Reads `token.document.sight.visionMode` first (set by the active game system)
+   * and falls back to "basic" if unset.
+   *
+   * System adapters override this to infer the mode from actor sense data when
+   * the document field is not reliably populated.
+   *
+   * @param {Token} token
+   * @returns {string}  e.g. "darkvision", "lightAmplification", "tremorsense", "basic"
+   */
+  getTokenVisionMode(token) {
+    const mode = token?.document?.sight?.visionMode;
+    if (mode && typeof mode === 'string' && mode !== 'basic') return mode;
+    return 'basic';
+  }
+
+  /**
+   * Return an array of detection-mode ranges that bypass walls for this token.
+   * Used by the fog system to add circular reveal areas around the token that
+   * pass through walls (tremorsense, blindsight, scent, etc.).
+   *
+   * Each entry: { range: number (scene-distance units), type: string (mode id) }
+   *
+   * Reads `token.document.detectionModes` and filters for modes registered in
+   * CONFIG.Canvas.detectionModes that have `walls === false`.
+   *
+   * @param {Token} token
+   * @returns {Array<{range: number, type: string}>}
+   */
+  getTokenDetectionRadii(token) {
+    try {
+      const tokenDoc = token?.document;
+      if (!tokenDoc) return [];
+      const modes = tokenDoc.detectionModes;
+      if (!Array.isArray(modes) || modes.length === 0) return [];
+      const result = [];
+      for (const m of modes) {
+        if (!m.enabled) continue;
+        const range = Number(m.range ?? 0);
+        if (!(range > 0)) continue;
+        const cfg = CONFIG?.Canvas?.detectionModes?.[m.id];
+        if (!cfg) continue;
+        // Only include modes that are not constrained by walls
+        if (cfg.walls === false) {
+          result.push({ range, type: m.id });
+        }
+      }
+      return result;
+    } catch (_) {
+      return [];
+    }
+  }
+
   // -- Utility --------------------------------------------------------------
 
   /**
@@ -272,6 +328,40 @@ class DnD5eAdapter extends BaseSystemAdapter {
     const hp = this.getTokenHP(tokenDoc);
     if (hp !== null && hp <= 0) return true;
     return super.isTokenDefeated(tokenDoc);
+  }
+
+  // -- Vision mode / detection radii ----------------------------------------
+
+  getTokenVisionMode(token) {
+    if (!token) return 'basic';
+    // Read the Foundry-authoritative field first (set by dnd5e token preparation)
+    const docMode = token.document?.sight?.visionMode;
+    if (docMode && typeof docMode === 'string' && docMode !== 'basic') return docMode;
+
+    // Infer from actor senses when the document field isn't populated
+    const senses = token.actor?.system?.attributes?.senses;
+    if (senses) {
+      // Darkvision is the primary visual mode; grants the greyscale appearance
+      if ((senses.darkvision || 0) > 0) return 'darkvision';
+    }
+    return 'basic';
+  }
+
+  getTokenDetectionRadii(token) {
+    // Prefer Foundry's authoritative detectionModes array (populated by dnd5e)
+    const fromFoundry = super.getTokenDetectionRadii(token);
+    if (fromFoundry.length > 0) return fromFoundry;
+
+    // Fallback: infer directly from actor senses for systems that don't populate
+    // detectionModes or populate them without the `walls` flag correctly set
+    const senses = token?.actor?.system?.attributes?.senses;
+    if (!senses) return [];
+    const result = [];
+    // Tremorsense passes through walls — the only D&D5e sense that does
+    if ((senses.tremorsense || 0) > 0) {
+      result.push({ range: senses.tremorsense, type: 'feelTremor' });
+    }
+    return result;
   }
 
   // -- Templates ------------------------------------------------------------
@@ -393,6 +483,45 @@ class PF2eAdapter extends BaseSystemAdapter {
       }
     } catch (_) { /* safe fallback */ }
     return super.isTokenDefeated(tokenDoc);
+  }
+
+  // -- Vision mode / detection radii ----------------------------------------
+
+  getTokenVisionMode(token) {
+    if (!token) return 'basic';
+    const docMode = token.document?.sight?.visionMode;
+    if (docMode && typeof docMode === 'string' && docMode !== 'basic') return docMode;
+
+    // Infer from PF2e actor senses when document field isn't set
+    const senses = token.actor?.system?.perception?.senses;
+    if (Array.isArray(senses)) {
+      for (const s of senses) {
+        if (s.type === 'darkvision') return 'darkvision';
+        // lowLightVision maps to the light amplification (NVG-style) mode
+        if (s.type === 'lowLightVision') return 'lightAmplification';
+      }
+    }
+    return 'basic';
+  }
+
+  getTokenDetectionRadii(token) {
+    // Prefer Foundry's authoritative detectionModes array (populated by pf2e)
+    const fromFoundry = super.getTokenDetectionRadii(token);
+    if (fromFoundry.length > 0) return fromFoundry;
+
+    // Fallback: read PF2e actor senses for wall-bypassing sense types
+    const senses = token?.actor?.system?.perception?.senses;
+    if (!Array.isArray(senses)) return [];
+    const result = [];
+    // These PF2e sense types do not require line-of-sight through walls
+    const WALL_IGNORING = new Set(['tremorsense', 'wavesense', 'scent']);
+    for (const s of senses) {
+      if (!WALL_IGNORING.has(s.type)) continue;
+      const range = Number(s.range ?? 0);
+      if (!(range > 0)) continue;
+      result.push({ range, type: s.type });
+    }
+    return result;
   }
 
   // -- Templates ------------------------------------------------------------
@@ -520,6 +649,12 @@ export class GameSystemManager {
 
   /** @see BaseSystemAdapter#getConditions */
   getConditions() { return this.adapter.getConditions(); }
+
+  /** @see BaseSystemAdapter#getTokenVisionMode */
+  getTokenVisionMode(token) { return this.adapter.getTokenVisionMode(token); }
+
+  /** @see BaseSystemAdapter#getTokenDetectionRadii */
+  getTokenDetectionRadii(token) { return this.adapter.getTokenDetectionRadii(token); }
 
   /** @see BaseSystemAdapter#distanceToPixels */
   distanceToPixels(distance) { return this.adapter.distanceToPixels(distance); }

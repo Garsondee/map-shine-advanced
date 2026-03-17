@@ -797,6 +797,16 @@ export function registerSettings() {
     default: []
   });
 
+  // Intro Zoom Effect — client-local (each player can opt out independently).
+  game.settings.register('map-shine-advanced', 'introZoomEnabled', {
+    name: 'Intro Zoom on Scene Load',
+    hint: 'When enabled, the loading screen transitions with a white flash and a cinematic camera zoom-in to your owned token(s) instead of a plain fade-out.',
+    scope: 'client',
+    config: true,
+    type: Boolean,
+    default: true,
+  });
+
   game.settings.register('map-shine-advanced', 'allowPlayersToTogglePlayerLightMode', {
     name: 'Allow Players to Toggle Player Light',
     hint: 'If disabled, only the GM can switch between torch and flashlight mode for player lights.',

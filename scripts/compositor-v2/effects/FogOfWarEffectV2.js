@@ -2679,12 +2679,16 @@ export class FogOfWarEffectV2 {
   }
 
   async _saveExplorationToFoundry() {
+    if (!this._initialized) return;
     const tokenVisionEnabled = canvas?.scene?.tokenVision ?? false;
     const explorationEnabled = canvas?.scene?.fog?.exploration ?? false;
     if (!tokenVisionEnabled || !explorationEnabled) return;
     if (!this._explorationDirty) return;
     if (this._isSavingExploration) return;
     if (!this.renderer) return;
+
+    const sceneIdAtStart = canvas?.scene?.id;
+    if (!sceneIdAtStart) return;
 
     // PERF: Rate-limit saves to avoid regular long-task stalls.
     // Keep exploration dirty so it will eventually persist.
@@ -2704,9 +2708,23 @@ export class FogOfWarEffectV2 {
     this._lastExplorationSaveMs = nowMs;
 
     try {
-      const width = this._explorationRTWidth;
-      const height = this._explorationRTHeight;
+      const targetWidth = Number(
+        explorationTarget?.width
+        ?? explorationTarget?.texture?.image?.width
+        ?? explorationTarget?.texture?.width
+        ?? this._explorationRTWidth
+      );
+      const targetHeight = Number(
+        explorationTarget?.height
+        ?? explorationTarget?.texture?.image?.height
+        ?? explorationTarget?.texture?.height
+        ?? this._explorationRTHeight
+      );
+      const width = Math.max(1, Math.floor(targetWidth));
+      const height = Math.max(1, Math.floor(targetHeight));
+      if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return;
       const required = Math.max(0, Math.floor(width * height * 4));
+      if (!Number.isFinite(required) || required <= 0) return;
       if (!this._explorationSaveBuffer || this._explorationSaveBuffer.length !== required) {
         this._explorationSaveBuffer = new Uint8Array(required);
       }
@@ -2714,10 +2732,17 @@ export class FogOfWarEffectV2 {
 
       // PERF: Large single-call readbacks can cause long stalls.
       // Read the render target in smaller tiles and yield between batches.
-      await this._readRenderTargetPixelsTiled(explorationTarget, width, height, buffer);
+      const readbackOk = await this._readRenderTargetPixelsTiled(explorationTarget, width, height, buffer);
+      if (!readbackOk) return;
+
+      // Scene changed while reading back -> skip persistence for stale scene data.
+      if (sceneIdAtStart !== canvas?.scene?.id) return;
 
       const base64 = await this._encodeExplorationBase64(buffer, width, height);
       if (!base64) return;
+
+      // Scene changed while encoding -> avoid writing stale data to the new scene.
+      if (sceneIdAtStart !== canvas?.scene?.id) return;
 
       const fogMgr = canvas?.fog;
       if (!fogMgr) return;
@@ -2727,7 +2752,7 @@ export class FogOfWarEffectV2 {
       if (!FogExplorationCls) return;
 
       const updateData = {
-        scene: canvas?.scene?.id,
+        scene: sceneIdAtStart,
         user: game?.user?.id,
         explored: base64,
         timestamp: Date.now()
@@ -2756,10 +2781,26 @@ export class FogOfWarEffectV2 {
   }
 
   async _readRenderTargetPixelsTiled(renderTarget, width, height, outBuffer) {
-    if (!this.renderer) return;
-    if (!renderTarget) return;
-    if (!outBuffer) return;
-    if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return;
+    if (!this._initialized || !this.renderer) return false;
+    if (!renderTarget) return false;
+    if (!outBuffer) return false;
+    if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return false;
+
+    const rtWidth = Number(
+      renderTarget?.width
+      ?? renderTarget?.texture?.image?.width
+      ?? renderTarget?.texture?.width
+      ?? width
+    );
+    const rtHeight = Number(
+      renderTarget?.height
+      ?? renderTarget?.texture?.image?.height
+      ?? renderTarget?.texture?.height
+      ?? height
+    );
+    const safeWidth = Math.min(width, Math.max(1, Math.floor(rtWidth)));
+    const safeHeight = Math.min(height, Math.max(1, Math.floor(rtHeight)));
+    if (!Number.isFinite(safeWidth) || !Number.isFinite(safeHeight) || safeWidth <= 0 || safeHeight <= 0) return false;
 
     const tileSize = Math.max(32, Math.min(1024, Math.floor(this._explorationReadbackTileSize || 256)));
     const maxBytes = tileSize * tileSize * 4;
@@ -2771,15 +2812,21 @@ export class FogOfWarEffectV2 {
     let tilesSinceYield = 0;
     const yieldEvery = 8;
 
-    for (let y0 = 0; y0 < height; y0 += tileSize) {
-      const th = Math.min(tileSize, height - y0);
-      for (let x0 = 0; x0 < width; x0 += tileSize) {
-        const tw = Math.min(tileSize, width - x0);
+    for (let y0 = 0; y0 < safeHeight; y0 += tileSize) {
+      const th = Math.min(tileSize, safeHeight - y0);
+      for (let x0 = 0; x0 < safeWidth; x0 += tileSize) {
+        const tw = Math.min(tileSize, safeWidth - x0);
         const needed = tw * th * 4;
         const view = tileBuf.subarray(0, needed);
 
         // This call is synchronous; keeping tw/th small reduces worst-case stall.
-        this.renderer.readRenderTargetPixels(renderTarget, x0, y0, tw, th, view);
+        try {
+          this.renderer.readRenderTargetPixels(renderTarget, x0, y0, tw, th, view);
+        } catch (e) {
+          // Scene switches can dispose/replace RTs mid-save; abort this attempt silently.
+          log.debug('Skipping fog exploration readback after render target became invalid', e);
+          return false;
+        }
 
         // Copy into the final packed buffer.
         // Render target data is bottom-left origin in WebGL space; the encoding path
@@ -2794,14 +2841,22 @@ export class FogOfWarEffectV2 {
         if (tilesSinceYield >= yieldEvery) {
           tilesSinceYield = 0;
           await new Promise(resolve => setTimeout(resolve, 0));
-          if (!this.renderer) return;
+          if (!this._initialized || !this.renderer) return false;
         }
       }
     }
+
+    return true;
   }
 
   async _encodeExplorationBase64(buffer, width, height) {
     try {
+      if (!buffer) return null;
+      if (!Number.isFinite(width) || !Number.isFinite(height)) return null;
+      width = Math.max(1, Math.floor(width));
+      height = Math.max(1, Math.floor(height));
+      if (width <= 0 || height <= 0) return null;
+
       const useOffscreen = (typeof OffscreenCanvas !== 'undefined');
 
       if (!this._explorationEncodeCanvas || !this._explorationEncodeCtx) {
@@ -2943,13 +2998,23 @@ export class FogOfWarEffectV2 {
     if (this._fallbackWhite) this._fallbackWhite.dispose();
     if (this._fallbackBlack) this._fallbackBlack.dispose();
 
+    try {
+      if (this._saveExplorationDebounced?.cancel) this._saveExplorationDebounced.cancel();
+    } catch (_) {
+    }
+    this._saveExplorationDebounced = null;
+
     // Release reusable save buffers
     this._explorationSaveBuffer = null;
     this._explorationReadbackTileBuffer = null;
     this._explorationEncodeCanvas = null;
     this._explorationEncodeCtx = null;
     this._explorationEncodeImageData = null;
-    
+
+    // Prevent stale async save callbacks from using disposed resources.
+    this.renderer = null;
+    this.mainScene = null;
+
     this._initialized = false;
     log.info('FogOfWarEffectV2 disposed');
   }

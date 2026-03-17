@@ -70,8 +70,8 @@ export class TreeEffectV2 {
       intensity: 1.0,
 
       // -- Wind Physics --
-      windSpeedGlobal: 0.06,
-      windRampSpeed: 1.32,
+      windSpeedGlobal: 0.05666,
+      windRampSpeed: 1.49174,
       gustFrequency: 0.0022,
       gustSpeed: 0.15,
       waveSpatialFrequency: 0.0014,
@@ -89,20 +89,20 @@ export class TreeEffectV2 {
       bendMinStrength: 0.19,
       bendWindStart: 0.22,
       bendWindFull: 0.78,
-      turbulence: 0.45,
-      turbulenceScale: 0.00022,
-      minRustleSpeed: 0.12,
+      turbulence: 1.06,
+      turbulenceScale: 0.00146,
+      minRustleSpeed: 0.12347,
       edgeFadeStart: 0.0,
       edgeFadeEnd: 0.04,
 
       // -- Tree Movement --
-      branchBend: 0.05,
-      elasticity: 5.0,
+      branchBend: 0.072,
+      elasticity: 1.38,
 
       // -- Leaf Flutter --
       flutterIntensity: 0.0007,
-      flutterSpeed: 6.64,
-      flutterScale: 0.02,
+      flutterSpeed: 6.64492,
+      flutterScale: 0.02351,
 
       // -- Color --
       exposure: 0.0,
@@ -828,10 +828,16 @@ export class TreeEffectV2 {
           float ambientMotion = uAmbientMotion;
           float effectiveSpeed = ambientMotion + rustleSpeed;
 
-          vec2 gustPos = vWorldPos * uGustFrequency;
-          vec2 scroll = windDir * uTime * uGustSpeed * rustleSpeed;
-          float gustNoise = noise(gustPos - scroll);
-          float gustStrength = smoothstep(0.2, 0.8, gustNoise);
+          // Build a continuous, speed-driven wind pressure field that travels across
+          // the map with wind direction. This replaces gust-special branching with
+          // a single coherent wind response signal.
+          float windFieldFrequency = mix(0.00025, max(0.00025, uGustFrequency), rawWind);
+          float windFieldTravel = mix(0.18, max(0.18, uGustSpeed), rawWind);
+          vec2 windFieldPos = vWorldPos * windFieldFrequency;
+          vec2 windFieldScroll = windDir * uTime * windFieldTravel * (0.2 + rawWind);
+          float windField = noise(windFieldPos - windFieldScroll);
+          float windPulse = mix(0.65, 1.3, smoothstep(0.08, 0.92, windField));
+          windPulse *= (0.35 + 0.65 * rawWind);
 
           float waveCoord = dot(vWorldPos, windDir);
           float wavePhase = waveCoord * uWaveSpatialFrequency - uTime * uWaveTravelSpeed * (0.35 + rustleSpeed);
@@ -840,12 +846,13 @@ export class TreeEffectV2 {
           float waveMod = mix(1.0, waveFront, clamp(uWaveInfluence, 0.0, 1.0));
 
           vec2 perpDir = vec2(-windDir.y, windDir.x);
-          float orbitPhase = uTime * uElasticity + (gustNoise * 5.0);
+          float orbitPhase = uTime * uElasticity + (windField * 5.0);
           float orbitSway = sin(orbitPhase);
 
           float bendStrength = (uBendMinStrength + (1.0 - uBendMinStrength) * rawWind) * bendDrive;
-          float pushMagnitude = gustStrength * uBranchBend * effectiveSpeed * waveMod * bendStrength;
-          float swayMagnitude = orbitSway * (uBranchBend * 0.4) * effectiveSpeed * (0.5 + 0.5 * gustStrength) * (0.65 + 0.35 * waveMod) * bendStrength;
+          float pushMagnitude = windPulse * uBranchBend * effectiveSpeed * waveMod * bendStrength;
+          float swayMagnitude = orbitSway * (uBranchBend * 0.4) * effectiveSpeed * (0.5 + 0.5 * windPulse) * (0.65 + 0.35 * waveMod) * bendStrength;
+          float crossSwayMagnitude = swayMagnitude * 0.18;
 
           float turbulenceStrength = max(0.0, uTurbulence);
           float turbulenceScale = max(0.00001, uTurbulenceScale);
@@ -853,21 +860,23 @@ export class TreeEffectV2 {
           float turbulenceFieldA = noise(turbulencePos + vec2(uTime * 0.27, -uTime * 0.19));
           float turbulenceFieldB = noise((turbulencePos * 1.9) - vec2(uTime * 0.61, uTime * 0.47));
           float turbulenceSigned = ((turbulenceFieldA * 0.65 + turbulenceFieldB * 0.35) - 0.5) * 2.0;
-          float turbulenceGustCoupling = 0.45 + 0.55 * gustStrength;
+          float turbulenceGustCoupling = 0.45 + 0.55 * windPulse;
           float turbulenceMagnitude = turbulenceStrength * effectiveSpeed * turbulenceGustCoupling * (0.55 + 0.45 * waveMod);
-          vec2 turbulenceVec = (perpDir * (turbulenceSigned * uBranchBend * 0.9 * turbulenceMagnitude))
-                             + (windDir * (((turbulenceFieldB - 0.5) * 2.0) * uBranchBend * 0.3 * turbulenceMagnitude));
+          vec2 turbulenceVec = (windDir * (turbulenceSigned * uBranchBend * 0.85 * turbulenceMagnitude))
+                             + (perpDir * (((turbulenceFieldB - 0.5) * 2.0) * uBranchBend * 0.15 * turbulenceMagnitude));
 
           float noiseVal = noise(vWorldPos * uFlutterScale);
           float flutterPhase = uTime * uFlutterSpeed * (0.85 + rustleSpeed) + noiseVal * 6.28;
           float flutter = sin(flutterPhase);
           float lowWindBoost = mix(uFlutterLowWindBoost, 1.0, smoothstep(0.04, max(0.041, uFlutterLowWindFadeEnd), rawWind));
-          float gustFlutter = uFlutterGustFloor + (1.0 - uFlutterGustFloor) * gustStrength;
-          float flutterMagnitude = flutter * uFlutterIntensity * gustFlutter * lowWindBoost * flutterDrive * (0.6 + 0.4 * waveMod);
-          vec2 flutterVec = (perpDir * flutterMagnitude) + (windDir * (flutterMagnitude * 0.35));
+          float legacyFlutterFloor = clamp(uFlutterGustFloor, 0.0, 1.0);
+          float flutterWindPulse = mix(legacyFlutterFloor, 1.0, clamp(windPulse, 0.0, 1.0));
+          float flutterMagnitude = flutter * uFlutterIntensity * flutterWindPulse * lowWindBoost * flutterDrive * (0.6 + 0.4 * waveMod);
+          vec2 flutterVec = (windDir * flutterMagnitude) + (perpDir * (flutterMagnitude * 0.12));
 
           vec2 distortion = (windDir * pushMagnitude)
-                          + (perpDir * swayMagnitude)
+                          + (windDir * swayMagnitude)
+                          + (perpDir * crossSwayMagnitude)
                           + turbulenceVec
                           + flutterVec;
 

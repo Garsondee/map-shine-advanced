@@ -92,6 +92,9 @@ export class CinematicCameraManager {
     this._selfUpdateRafId = null;
     this._selfUpdateLastAt = 0;
     this._selfUpdateBound = this._selfUpdateTick.bind(this);
+
+    /** @type {number} */
+    this._temporaryRuntimeSuspendCount = 0;
   }
 
   _createDefaultSceneState() {
@@ -439,6 +442,7 @@ export class CinematicCameraManager {
   }
 
   _enforcePanBounds(position) {
+    if (this.isRuntimeTemporarilySuspended()) return;
     if (!this.sceneState.improvedModeEnabled) return;
     if (!this.sceneState.playerBoundsEnabled) return;
     if (game.user?.isGM) return;
@@ -590,6 +594,7 @@ export class CinematicCameraManager {
   }
 
   _isPlayerFollowLocked() {
+    if (this.isRuntimeTemporarilySuspended()) return false;
     if (game.user?.isGM) return false;
     if (!this.sceneState.cinematicActive) return false;
     if (!this.sceneState.lockPlayers) return false;
@@ -598,8 +603,38 @@ export class CinematicCameraManager {
   }
 
   shouldBlockLocalCameraInput() {
+    if (this.isRuntimeTemporarilySuspended()) return false;
     if (this._isApplyingRemotePan) return true;
     return this._isPlayerFollowLocked();
+  }
+
+  /**
+   * Temporarily suspend runtime camera control systems (follow, cohesion, bounds,
+   * and input blocking logic) so short cinematic transitions can run without
+   * being counter-steered. Uses a refcount and must be paired with
+   * resumeTemporaryRuntimeControl().
+   */
+  suspendTemporaryRuntimeControl() {
+    this._temporaryRuntimeSuspendCount = Math.max(0, this._temporaryRuntimeSuspendCount) + 1;
+    if (this._temporaryRuntimeSuspendCount === 1) {
+      this._resetRemoteFollowState({ clearTarget: true });
+    }
+  }
+
+  /**
+   * Releases one temporary runtime suspension lease acquired by
+   * suspendTemporaryRuntimeControl().
+   */
+  resumeTemporaryRuntimeControl() {
+    this._temporaryRuntimeSuspendCount = Math.max(0, this._temporaryRuntimeSuspendCount - 1);
+    if (this._temporaryRuntimeSuspendCount === 0) {
+      this._resetRemoteFollowState({ clearTarget: true });
+    }
+  }
+
+  /** @returns {boolean} */
+  isRuntimeTemporarilySuspended() {
+    return this._temporaryRuntimeSuspendCount > 0;
   }
 
   toggleLocalOptOut() {
@@ -855,6 +890,7 @@ export class CinematicCameraManager {
   }
 
   _tickRemoteFollow(timeInfo = null) {
+    if (this.isRuntimeTemporarilySuspended()) return;
     if (game.user?.isGM) return;
     if (!this._isPlayerFollowLocked()) return;
     if (!this._remotePanTarget) return;
@@ -993,6 +1029,7 @@ export class CinematicCameraManager {
 
   constrainView(view) {
     if (!view || typeof view !== 'object') return view;
+    if (this.isRuntimeTemporarilySuspended()) return view;
     if (!this.sceneState.improvedModeEnabled) return view;
     if (!this.sceneState.playerBoundsEnabled) return view;
     if (game.user?.isGM) return view;
@@ -1088,6 +1125,7 @@ export class CinematicCameraManager {
   }
 
   _tickGroupCohesion() {
+    if (this.isRuntimeTemporarilySuspended()) return;
     if (!this.sceneState.improvedModeEnabled) return;
     if (!this.sceneState.cohesionEnabled) return;
     if (this._isPlayerFollowLocked()) return;

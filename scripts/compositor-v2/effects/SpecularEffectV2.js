@@ -36,6 +36,12 @@ const log = createLogger('SpecularEffectV2');
 // but large enough to consistently render on top of the albedo tile.
 const SPECULAR_Z_OFFSET = 0.1;
 
+// Render-order offset for tile-attached specular overlays.
+// Keep this fractional so the overlay renders immediately after its own tile,
+// but before the next tile's integer sort slot (prevents leakage through stacked
+// tiles when neighboring docs have adjacent sort values).
+const SPECULAR_RENDER_ORDER_OFFSET = 0.1;
+
 // Maximum number of dynamic lights the shader supports (compile-time constant).
 const MAX_LIGHTS = 64;
 
@@ -730,7 +736,7 @@ export class SpecularEffectV2 {
     try {
       const baseOrder = Number(baseEntry?.mesh?.renderOrder);
       if (Number.isFinite(baseOrder)) {
-        mesh.renderOrder = baseOrder + 1;
+        mesh.renderOrder = baseOrder + SPECULAR_RENDER_ORDER_OFFSET;
       }
     } catch (_) {}
 

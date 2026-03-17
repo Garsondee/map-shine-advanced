@@ -117,6 +117,7 @@ import { installSnapshotStoreHooks, getSnapshot as getLevelsSnapshot } from '../
 import { installLevelsApiFacade } from './levels-api-facade.js';
 import { ZoneManager } from './zone-manager.js';
 import { LevelsPerspectiveBridge } from './levels-perspective-bridge.js';
+import { IntroZoomEffect } from './intro-zoom-effect.js';
 
 const log = createLogger('Canvas');
 
@@ -461,6 +462,9 @@ let levelsPerspectiveBridge = null;
 /** @type {CinematicCameraManager|null} */
 let cinematicCameraManager = null;
 
+/** @type {IntroZoomEffect} - Singleton reused across scene loads (stateless between runs). */
+const introZoomEffect = new IntroZoomEffect();
+
 /**
  * ESSENTIAL FEATURE:
  * Per-client Graphics Settings (Players/GMs) to disable or reduce effect intensity.
@@ -696,6 +700,9 @@ let skyColorEffect = null;
 
 /** @type {boolean} - Whether frame coordinator is initialized */
 let frameCoordinatorInitialized = false;
+
+/** @type {Function|null} - Unsubscribe function for frameCoordinator post-PIXI callback */
+let frameCoordinatorPostPixiUnsubscribe = null;
 
 /** @type {ResizeObserver|null} - Observer for canvas container resize */
 let resizeObserver = null;
@@ -3045,6 +3052,10 @@ async function onCanvasReady(canvas) {
 function onCanvasTearDown(canvas) {
   log.info('Tearing down Map Shine canvas');
 
+  // Abort any in-flight intro zoom sequence and remove its white flash overlay
+  // so it doesn't get stranded in the DOM if a scene change fires mid-sequence.
+  safeDispose(() => introZoomEffect.dispose(), 'introZoomEffect.dispose');
+
   // CRITICAL: Pause time manager immediately to stop all animations
   if (effectComposer?.timeManager) {
     safeDispose(() => effectComposer.timeManager.pause(), 'timeManager.pause');
@@ -3053,6 +3064,10 @@ function onCanvasTearDown(canvas) {
   // Dispose frame coordinator (removes PIXI ticker hook)
   if (frameCoordinatorInitialized) {
     safeDispose(() => {
+      if (typeof frameCoordinatorPostPixiUnsubscribe === 'function') {
+        try { frameCoordinatorPostPixiUnsubscribe(); } catch (_) {}
+      }
+      frameCoordinatorPostPixiUnsubscribe = null;
       frameCoordinator.dispose();
       frameCoordinatorInitialized = false;
     }, 'frameCoordinator.dispose');
@@ -4513,14 +4528,56 @@ async function createThreeCanvas(scene) {
       }, false);
     }
 
-    // V2 compositor does not sample PIXI textures, so FrameCoordinator is unused.
-    if (frameCoordinatorInitialized) {
-      safeDispose(() => {
-        frameCoordinator.dispose();
-        frameCoordinatorInitialized = false;
-      }, 'frameCoordinator.dispose(v2)');
+    // Keep FrameCoordinator active in V2 for post-PIXI camera/frame timing sync.
+    // Even though V2 does not sample PIXI fog textures, coordinated post-PIXI
+    // callbacks help align Three rendering cadence with pan/zoom updates.
+    if (!frameCoordinatorInitialized) {
+      safeCall(() => {
+        frameCoordinatorInitialized = frameCoordinator.initialize() === true;
+      }, 'frameCoordinator.initialize(v2)', Severity.DEGRADED);
     }
-    mapShine.frameCoordinator = null;
+
+    if (typeof frameCoordinatorPostPixiUnsubscribe === 'function') {
+      try { frameCoordinatorPostPixiUnsubscribe(); } catch (_) {}
+      frameCoordinatorPostPixiUnsubscribe = null;
+    }
+
+    if (frameCoordinatorInitialized) {
+      let lastX = NaN;
+      let lastY = NaN;
+      let lastScale = NaN;
+      frameCoordinatorPostPixiUnsubscribe = frameCoordinator.onPostPixi((frameState) => {
+        const rl = window.MapShine?.renderLoop;
+        if (!rl) return;
+
+        const x = Number(frameState?.cameraX);
+        const y = Number(frameState?.cameraY);
+        const scale = Number(frameState?.zoom);
+        const valid = Number.isFinite(x) && Number.isFinite(y) && Number.isFinite(scale);
+
+        // Always request at least one follow-up render after PIXI finishes its tick.
+        // This reduces stale-camera frames where Three renders just before PIXI updates.
+        try { rl.requestRender?.(); } catch (_) {}
+
+        if (!valid) return;
+
+        const moved = (
+          Math.abs(x - lastX) > 0.001 ||
+          Math.abs(y - lastY) > 0.001 ||
+          Math.abs(scale - lastScale) > 0.000001
+        );
+
+        if (moved) {
+          lastX = x;
+          lastY = y;
+          lastScale = scale;
+          // Hold a short continuous window while camera is actively changing so
+          // adaptive throttling does not under-sample motion between PIXI ticks.
+          try { rl.requestContinuousRender?.(120); } catch (_) {}
+        }
+      });
+    }
+    mapShine.frameCoordinator = frameCoordinatorInitialized ? frameCoordinator : null;
 
     // V2 fog is owned by FloorCompositor._fogEffect; no legacy fog-manager wrapping.
 
@@ -5618,18 +5675,126 @@ async function createThreeCanvas(scene) {
       // Expose the profiler on window.MapShine for console access
       if (window.MapShine) window.MapShine.debugLoadingProfiler = dlp;
     } else {
-      console.log(' -> Step: overlay.fadeIn');
+      console.log(' -> Step: overlay.fadeIn / intro-zoom');
       await safeCallAsync(async () => {
+        const waitForCompiledPrograms = async ({ maxWaitMs = 90000, requiredStableFrames = 20 } = {}) => {
+          const start = performance.now();
+          let stable = 0;
+          let readyStableTotal = -1;
+          let lastTotal = 0;
+          let lastReady = 0;
+
+          // Kick an extra warmup pass now that shader gate is open.
+          safeCall(() => effectComposer.progressiveWarmup(), 'introZoom.readinessWarmup', Severity.DEGRADED);
+
+          // Late warmup pass: some effect programs are only created after the first
+          // post-gate renders or async setup settles. Run one additional compile pass
+          // before intro gating so late variants are submitted and accounted for.
+          await safeCallAsync(async () => {
+            const fcLate = window.MapShine?.effectComposer?._floorCompositorV2;
+            if (!fcLate || typeof fcLate.warmupAsync !== 'function') return;
+
+            try {
+              await fcLate.prewarmForLoading?.({ prewarmAllFloors: false, awaitPopulate: true });
+            } catch (_) {}
+
+            await fcLate.warmupAsync(15000);
+            safeCall(() => effectComposer.progressiveWarmup(), 'introZoom.readinessWarmup.late', Severity.DEGRADED);
+          }, 'introZoom.waitForCompiledPrograms.lateWarmup', Severity.DEGRADED);
+
+          while ((performance.now() - start) < maxWaitMs) {
+            window.MapShine?.renderLoop?.requestRender?.();
+            window.MapShine?.renderLoop?.requestContinuousRender?.(100);
+
+            const programs = renderer?.info?.programs ?? [];
+            const total = programs.length;
+            let ready = 0;
+            for (const p of programs) {
+              try {
+                ready += (typeof p?.isReady === 'function') ? (p.isReady() ? 1 : 0) : 1;
+              } catch (_) {
+                // If readiness probing throws, treat as ready to avoid deadlock.
+                ready += 1;
+              }
+            }
+
+            lastTotal = total;
+            lastReady = ready;
+
+            const allReady = total <= 0 ? true : (ready >= total);
+            if (allReady) {
+              if (readyStableTotal === total) stable += 1;
+              else {
+                readyStableTotal = total;
+                stable = 1;
+              }
+            } else {
+              stable = 0;
+              readyStableTotal = -1;
+            }
+
+            if (stable >= requiredStableFrames) {
+              return {
+                ok: true,
+                total,
+                ready,
+                stableFrames: stable,
+                elapsedMs: Math.round(performance.now() - start),
+              };
+            }
+
+            await new Promise((resolve) => setTimeout(resolve, 50));
+          }
+
+          return {
+            ok: false,
+            total: lastTotal,
+            ready: lastReady,
+            stableFrames: stable,
+            elapsedMs: Math.round(performance.now() - start),
+          };
+        };
+
         const elapsed = loadingOverlay.getElapsedSeconds();
         const readyMsg = elapsed > 0 ? `Ready! (${elapsed.toFixed(1)}s)` : 'Ready!';
         loadingOverlay.setStage('final', 1.0, readyMsg, { immediate: true });
-        // Add timeout to prevent indefinite hang if fadeIn never resolves
-        await Promise.race([
-          loadingOverlay.fadeIn(2000, 800),
-          new Promise(resolve => setTimeout(resolve, 5000))
-        ]);
-      }, 'overlay.fadeIn', Severity.COSMETIC);
-      console.log(' -> Step: overlay.fadeIn DONE');
+
+        // Hard gate intro start until shader programs report compiled readiness for
+        // multiple consecutive polls. This prevents the intro from starting while
+        // water (or any post effect) is still compiling.
+        const compileGate = await waitForCompiledPrograms({
+          maxWaitMs: 90000,
+          requiredStableFrames: 20,
+        });
+
+        if (!compileGate.ok) {
+          log.warn('overlay.introZoom: shader readiness gate timed out; using standard fade-in to avoid stuttered intro', compileGate);
+          await Promise.race([
+            loadingOverlay.fadeIn(2000, 800),
+            new Promise((r) => setTimeout(r, 5000)),
+          ]);
+          return;
+        }
+
+        // IntroZoomEffect intercepts the fade-out when enabled.
+        // It handles its own fallback to a standard fadeIn when disabled or when
+        // no owned tokens are found. The effect temporarily locks user pan/zoom
+        // input and restores the cinematic camera manager's blocker on completion.
+        await introZoomEffect.run(loadingOverlay, {
+          onBlockInput: () => {
+            try { cinematicCameraManager?.suspendTemporaryRuntimeControl?.(); } catch (_) {}
+            pixiInputBridge?.setInputBlocker(() => true);
+          },
+          onUnblockInput: () => {
+            pixiInputBridge?.setInputBlocker(null);
+            try { cinematicCameraManager?.resumeTemporaryRuntimeControl?.(); } catch (_) {}
+            // Restore the cinematic camera manager's input blocker so its
+            // player-follow-lock and bounds-constraint features work after the sequence.
+            try { cinematicCameraManager?._bindInputBridge?.(); } catch (_) {}
+          },
+        });
+      }, 'overlay.introZoom', Severity.COSMETIC);
+      console.log(' -> Step: overlay.introZoom DONE');
     }
 
     _sectionEnd('fin.fadeIn');

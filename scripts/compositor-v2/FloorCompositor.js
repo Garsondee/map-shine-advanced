@@ -2109,15 +2109,6 @@ export class FloorCompositor {
     }
     if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: lens.render DONE'); } catch (_) {} }
 
-    // Cloud-top blit: final world-space cloud composite, rendered after all
-    // screen-space post effects so white cloud tops fully sit above them.
-    // Cloud shadows remain in their existing place (pre-lighting via cloud.render).
-    if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: cloudTops.blit'); } catch (_) {} }
-    if (this._cloudEffect.enabled && this._cloudEffect.params.enabled) {
-      this._cloudEffect.blitCloudTops(this.renderer, currentInput);
-    }
-    if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: cloudTops.blit DONE'); } catch (_) {} }
-
     // ── Step 3: Blit final result to screen ──────────────────────────────
     if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: blitToScreen'); } catch (_) {} }
     this._blitToScreen(currentInput);
@@ -2129,6 +2120,16 @@ export class FloorCompositor {
     if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: lateOverlay.render'); } catch (_) {} }
     this._renderLateWorldOverlay();
     if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: lateOverlay.render DONE'); } catch (_) {} }
+
+    // Cloud-top blit: render after late world overlay so atmospheric cloud tops
+    // remain visually above world-space overlay content (e.g. bypass tiles,
+    // drawing overlays, interaction aids routed through OVERLAY_THREE_LAYER).
+    // Keep PIXI UI overlay above clouds so HUD/control affordances stay readable.
+    if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: cloudTops.blit'); } catch (_) {} }
+    if (this._cloudEffect.enabled && this._cloudEffect.params.enabled) {
+      this._cloudEffect.blitCloudTops(this.renderer, null);
+    }
+    if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: cloudTops.blit DONE'); } catch (_) {} }
 
     // PIXI UI-channel overlay: render last so it remains above bloom/fog/lens.
     this._renderPixiUiOverlay();

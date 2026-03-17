@@ -2071,11 +2071,15 @@ export class ControlPanelManager {
         return;
       }
 
-      // Convert wind direction from degrees to radians
-      const directionRad = (this.controlState.windDirection * Math.PI) / 180.0;
-
-      const dirX = Math.cos(directionRad);
-      const dirY = Math.sin(directionRad);
+      const resolvedWindDir = (typeof weatherController._windDirFromAngleDeg === 'function')
+        ? weatherController._windDirFromAngleDeg(this.controlState.windDirection)
+        : (() => {
+            const directionRad = (this.controlState.windDirection * Math.PI) / 180.0;
+            // Foundry-space direction is Y-down.
+            return { x: Math.cos(directionRad), y: -Math.sin(directionRad) };
+          })();
+      const dirX = Number.isFinite(resolvedWindDir?.x) ? resolvedWindDir.x : 1.0;
+      const dirY = Number.isFinite(resolvedWindDir?.y) ? resolvedWindDir.y : 0.0;
 
       // WeatherController.update() derives currentState from targetState every frame.
       // So, to make the override "stick", we must write to targetState.
@@ -2103,23 +2107,8 @@ export class ControlPanelManager {
       // (even before the next WeatherController.update()).
       applyToState(weatherController.currentState);
 
-      // Apply gustiness settings to gust parameters
-      const gustinessMap = {
-        'calm': { waitMin: 5.0, waitMax: 15.0, duration: 1.5, strength: 1.0 },
-        'light': { waitMin: 3.0, waitMax: 10.0, duration: 2.5, strength: 1.5 },
-        'moderate': { waitMin: 1.0, waitMax: 11.5, duration: 3.9, strength: 2.5 },
-        'strong': { waitMin: 0.5, waitMax: 8.0, duration: 5.0, strength: 4.0 },
-        'extreme': { waitMin: 0.2, waitMax: 5.0, duration: 6.5, strength: 6.0 }
-      };
-
-      const gustConfig = gustinessMap[this.controlState.gustiness] || gustinessMap['moderate'];
-      
-      if (typeof weatherController.gustWaitMin !== 'undefined') {
-        weatherController.gustWaitMin = gustConfig.waitMin;
-        weatherController.gustWaitMax = gustConfig.waitMax;
-        weatherController.gustDuration = gustConfig.duration;
-        weatherController.gustStrength = gustConfig.strength;
-      }
+      // Legacy gustiness controls are intentionally no longer written here.
+      // Wind variability is generated continuously from current wind speed.
 
       log.debug('Applied wind state:', {
         speedMS: this.controlState.windSpeedMS,

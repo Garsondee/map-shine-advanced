@@ -208,6 +208,10 @@ export class WeatherController {
     this._weatherSnapshotSaveTimeout = null;
     this._weatherSnapshotSaveDebounceMs = 1000;
 
+    // Tracks last realized normalized wind speed so we can expose a continuous
+    // surge envelope (legacy-compatible replacement for binary gust toggles).
+    this._lastWindSpeed01 = this.currentState.windSpeed;
+
     this._environmentState = {
       timeOfDay: 0.0,
       sceneDarkness: 0.0,
@@ -388,6 +392,67 @@ export class WeatherController {
       : this._windMSFrom01(state.windSpeed);
     state.windSpeedMS = ms;
     state.windSpeed = this._wind01FromMS(ms);
+  }
+
+  /**
+   * Convert an angle in degrees to Foundry-space wind direction (Y-down).
+   * @param {number} angleDeg
+   * @param {THREE.Vector2|{x:number,y:number}|null} [out]
+   * @returns {THREE.Vector2|{x:number,y:number}}
+   */
+  _windDirFromAngleDeg(angleDeg, out = null) {
+    const rad = (Number(angleDeg) * Math.PI) / 180.0;
+    const x = Number.isFinite(rad) ? Math.cos(rad) : 1.0;
+    const y = Number.isFinite(rad) ? -Math.sin(rad) : 0.0;
+    if (out && typeof out.set === 'function') {
+      out.set(x, y);
+      return out;
+    }
+    if (out && typeof out === 'object') {
+      out.x = x;
+      out.y = y;
+      return out;
+    }
+    return { x, y };
+  }
+
+  /**
+   * Convert Foundry-space wind direction (Y-down) to [0,360) degrees.
+   * @param {{x:number,y:number}|THREE.Vector2|null|undefined} dir
+   * @returns {number}
+   */
+  _windAngleDegFromDir(dir) {
+    const x = Number.isFinite(Number(dir?.x)) ? Number(dir.x) : 1.0;
+    const y = Number.isFinite(Number(dir?.y)) ? Number(dir.y) : 0.0;
+    const deg = Math.atan2(-y, x) * (180.0 / Math.PI);
+    return deg < 0 ? (deg + 360.0) : deg;
+  }
+
+  /**
+   * Convert a math-space angle (Y-up radians) to Foundry-space wind direction.
+   * @param {number} angleRad
+   * @param {THREE.Vector2|{x:number,y:number}|null} out
+   */
+  _setWindDirFromMathAngle(angleRad, out) {
+    const safe = Number.isFinite(angleRad) ? angleRad : 0.0;
+    const x = Math.cos(safe);
+    const y = -Math.sin(safe);
+    if (out && typeof out.set === 'function') out.set(x, y);
+    else if (out && typeof out === 'object') {
+      out.x = x;
+      out.y = y;
+    }
+  }
+
+  /**
+   * Convert Foundry-space wind direction (Y-down) to math-space angle (Y-up radians).
+   * @param {{x:number,y:number}|THREE.Vector2|null|undefined} dir
+   * @returns {number}
+   */
+  _mathAngleFromWindDir(dir) {
+    const x = Number.isFinite(Number(dir?.x)) ? Number(dir.x) : 1.0;
+    const y = Number.isFinite(Number(dir?.y)) ? Number(dir.y) : 0.0;
+    return Math.atan2(-y, x);
   }
 
   /**
@@ -1111,9 +1176,9 @@ export class WeatherController {
     // Ash presets include ashIntensity; default to 0 so non-ash presets clear any active ash.
     const ashIntensity = clamp01(Number(presetDef.ashIntensity ?? 0));
 
-    const rad = (Number(presetDef.windDirection ?? NaN) * Math.PI) / 180;
-    const windDirection = Number.isFinite(rad)
-      ? new THREE.Vector2(Math.cos(rad), -Math.sin(rad))
+    const parsedAngleDeg = Number(presetDef.windDirection ?? NaN);
+    const windDirection = Number.isFinite(parsedAngleDeg)
+      ? this._windDirFromAngleDeg(parsedAngleDeg, new THREE.Vector2(1, 0))
       : (this.targetState.windDirection?.clone?.() ?? new THREE.Vector2(1, 0));
 
     const next = {
@@ -1462,8 +1527,7 @@ export class WeatherController {
     this.targetState.windSpeed = outWindBase;
 
     if (this.targetState.windDirection && this.targetState.windDirection.set) {
-      const ang = this._dynamicLatent.windAngle;
-      this.targetState.windDirection.set(Math.cos(ang), -Math.sin(ang));
+      this._setWindDirFromMathAngle(this._dynamicLatent.windAngle, this.targetState.windDirection);
     }
 
     if (outPrecipitation < 0.05) {
@@ -1494,11 +1558,11 @@ export class WeatherController {
     if (!THREE) return;
 
     const s = this.getCurrentState();
-    const angleDeg = Math.atan2(-s.windDirection.y, s.windDirection.x) * (180 / Math.PI);
+    const angleDeg = this._windAngleDegFromDir(s?.windDirection);
     this._queuedTransitionTarget.precipitation = s.precipitation ?? 0.0;
     this._queuedTransitionTarget.cloudCover = s.cloudCover ?? 0.0;
     this._queuedTransitionTarget.windSpeed = s.windSpeed ?? 0.0;
-    this._queuedTransitionTarget.windDirectionDeg = angleDeg < 0 ? (angleDeg + 360) : angleDeg;
+    this._queuedTransitionTarget.windDirectionDeg = angleDeg;
     this._queuedTransitionTarget.fogDensity = s.fogDensity ?? 0.0;
     this._queuedTransitionTarget.freezeLevel = s.freezeLevel ?? 0.0;
     this._queuedTransitionTarget.ashIntensity = s.ashIntensity ?? 0.0;
@@ -1564,7 +1628,6 @@ export class WeatherController {
     if (!THREE) return null;
 
     const q = this._queuedTransitionTarget;
-    const rad = (Number(q.windDirectionDeg) * Math.PI) / 180;
     const precipitation = Number(q.precipitation) || 0.0;
     const freezeLevel = Number(q.freezeLevel) || 0.0;
     const ashIntensity = Number(q.ashIntensity) || 0.0;
@@ -1582,7 +1645,7 @@ export class WeatherController {
       precipitation,
       cloudCover: q.cloudCover,
       windSpeed: q.windSpeed,
-      windDirection: { x: Math.cos(rad), y: -Math.sin(rad) },
+      windDirection: this._windDirFromAngleDeg(q.windDirectionDeg),
       fogDensity: q.fogDensity,
       freezeLevel,
       ashIntensity,
@@ -2148,82 +2211,53 @@ export class WeatherController {
   _applyVariability(time, dt) {
     const baseVar = this.variability;
 
-    // --- Gust State Machine ---
-    this.gustTimer -= dt;
-    if (this.gustTimer <= 0) {
-      // Toggle state
-      this.isGusting = !this.isGusting;
-      
-      if (this.isGusting) {
-        // Start Gust
-        this.gustTimer = this.gustDuration;
-        // log.debug('Gust started');
-      } else {
-        // Start Wait
-        // Random wait between min and max
-        const range = Math.max(0, this.gustWaitMax - this.gustWaitMin);
-        this.gustTimer = this.gustWaitMin + Math.random() * range;
-        // log.debug(`Gust ended. Waiting ${this.gustTimer.toFixed(1)}s`);
-      }
-    }
-
-    // Smoothly attack/decay the gust strength scalar
-    const targetGust = this.isGusting ? 1.0 : 0.0;
-    // Attack fast, decay with a longer tail so gust-driven motion "coasts".
-    // Use exponential smoothing so behavior is framerate independent.
-    const attackRate = 6.0;
-    const decayRate = 0.8;
-    const rate = this.isGusting ? attackRate : decayRate;
-    const k = 1.0 - Math.exp(-Math.max(0.0, rate) * Math.max(0.0, dt));
-    this.currentGustStrength += (targetGust - this.currentGustStrength) * k;
-
-
-    // --- Noise Generation ---
-    
-    // 1. Base Meander (Always active, low frequency)
-    // Gives the wind a "living" feeling even when not gusting
-    const meanderNoiseSigned = (this._getPinkNoise01(time * 0.06 + this.noiseOffset) * 2.0 - 1.0);
-    const meander = meanderNoiseSigned * baseVar * 0.1;
-
-    // 2. Gust Noise (High frequency turbulence)
-    // Only audible/visible when gust strength is high
-    // FBM gives organic "texture" without the pendulum wobble of sine waves.
-    // Keep this as a 0..1 envelope so gusts can only ADD energy.
-    const gustNoise01 = this._getPinkNoise01(time * 0.9 + this.noiseOffset * 10.0);
-    // Multiply by baseVar and gustStrength so the overall "Variability" slider and wind UI both scale this.
-    const gustComponent = gustNoise01 * this.currentGustStrength * (baseVar * 2.0) * this.gustStrength;
-
-
-    // --- Apply to State ---
-
-    // Wind Speed (m/s) = Target + Meander + Gust
-    // This keeps the existing 0..1 gust/meander shaping, but converts it into m/s so UI and
-    // future consumers can reason about real-world values. We still expose `windSpeed` as legacy
-    // normalized 0..1 for existing effects.
+    // Build continuous wind variability directly from speed-coupled noise bands.
+    // This intentionally avoids binary gust state toggles and keeps behavior driven
+    // by current wind speed.
     this._syncWindUnits(this.targetState);
     const windBaseMS = this.targetState.windSpeedMS;
     const windBase01 = this._wind01FromMS(windBaseMS);
-    const magnitudeScale01 = Math.min(1.0, windBase01 + 0.2);
+    const windEnergy = this._clamp01(0.2 + windBase01 * 0.8);
+    const baseVarClamped = this._clamp01(baseVar);
 
-    const base01 = windBase01 + meander * magnitudeScale01;
-    const gustBoost01 = gustComponent * magnitudeScale01;
-    const next01 = THREE.MathUtils.clamp(base01 + gustBoost01, 0.0, 1.0);
+    // Multi-scale variability bands. Higher base wind increases both contribution
+    // and perceptual pacing, producing natural "surge" behavior without a separate
+    // gust mode.
+    const lowBandSigned = (this._getPinkNoise01(time * 0.03 + this.noiseOffset * 0.7) * 2.0 - 1.0);
+    const midBandSigned = (this._getPinkNoise01(time * 0.12 + this.noiseOffset * 1.9 + 37.0) * 2.0 - 1.0);
+    const highBandSigned = (this._getPinkNoise01(time * 0.55 + this.noiseOffset * 4.7 + 73.0) * 2.0 - 1.0);
+
+    const ampLow = 0.08 * baseVarClamped * (0.35 + 0.65 * windBase01);
+    const ampMid = 0.05 * baseVarClamped * (0.25 + 0.75 * windBase01);
+    const ampHigh = 0.025 * baseVarClamped * (0.15 + 0.85 * windBase01);
+
+    const speedDelta01 = (lowBandSigned * ampLow) + (midBandSigned * ampMid) + (highBandSigned * ampHigh);
+    const next01 = THREE.MathUtils.clamp(windBase01 + speedDelta01 * windEnergy, 0.0, 1.0);
     const nextMS = this._windMSFrom01(next01);
 
     this.currentState.windSpeedMS = nextMS;
     this.currentState.windSpeed = next01;
 
+    // Maintain a legacy surge envelope for existing effects that still read
+    // currentGustStrength. This now reflects continuous positive wind surges.
+    const prev01 = Number.isFinite(this._lastWindSpeed01) ? this._lastWindSpeed01 : windBase01;
+    const delta01 = next01 - prev01;
+    this._lastWindSpeed01 = next01;
+    const accel01 = dt > 1e-5 ? Math.max(0.0, delta01 / dt) : 0.0;
+    const surgeTarget = this._clamp01(accel01 / 0.12);
+    const surgeK = 1.0 - Math.exp(-Math.max(0.0, dt) * 4.0);
+    this.currentGustStrength += (surgeTarget - this.currentGustStrength) * surgeK;
+    this.isGusting = this.currentGustStrength > 0.15;
 
-    // Wind Direction = Target + Meander
-    // IMPORTANT: do NOT integrate from currentState each frame (random-walk drift can eventually reverse wind).
-    // Instead, treat variability as a bounded perturbation around the *target* direction.
-    const dirNoiseSigned = (this._getPinkNoise01(time * 0.04 + this.noiseOffset * 3.0 + 100.0) * 2.0 - 1.0);
-    const dirMeander = dirNoiseSigned * baseVar * 0.5; // Radians
-    // windDirection is stored in Foundry/world coordinates (Y-down).
-    // Convert to a math angle (Y-up) for perturbation, then convert back.
-    const baseAngle = Math.atan2(-this.targetState.windDirection.y, this.targetState.windDirection.x);
-    const newAngle = baseAngle + dirMeander;
-    this.currentState.windDirection.set(Math.cos(newAngle), -Math.sin(newAngle));
+
+    // Wind direction = target heading + bounded continuous meander.
+    // Keep perturbation around target heading (no random-walk integration).
+    const dirLowSigned = (this._getPinkNoise01(time * 0.02 + this.noiseOffset * 1.3 + 100.0) * 2.0 - 1.0);
+    const dirHighSigned = (this._getPinkNoise01(time * 0.11 + this.noiseOffset * 5.1 + 190.0) * 2.0 - 1.0);
+    const maxDirOffsetRad = (0.04 + 0.22 * windBase01) * baseVarClamped;
+    const dirOffset = ((dirLowSigned * 0.7) + (dirHighSigned * 0.3)) * maxDirOffsetRad;
+    const baseAngle = this._mathAngleFromWindDir(this.targetState.windDirection);
+    this._setWindDirFromMathAngle(baseAngle + dirOffset, this.currentState.windDirection);
 
     // Ash Intensity = Target + subtle noise variation
     // Only modulate if target ashIntensity > 0 so idle scenes aren't affected.

@@ -120,6 +120,26 @@ export class RenderLoop {
   }
 
   /**
+   * Enter cinematic mode for a fixed duration: bypasses ALL adaptive FPS throttling
+   * and forces every rAF callback to trigger a full render. Use this for high-quality
+   * camera animations (intro zoom, cutscenes) where frame drops are unacceptable.
+   *
+   * @param {number} durationMs - How long to stay in cinematic mode.
+   */
+  startCinematicMode(durationMs) {
+    const d = Math.max(0, Number(durationMs) || 0);
+    this._cinematicModeUntilMs = performance.now() + d;
+    this._forceNextRender = true;
+  }
+
+  /**
+   * Immediately exit cinematic mode before its natural expiry.
+   */
+  stopCinematicMode() {
+    this._cinematicModeUntilMs = 0;
+  }
+
+  /**
    * Temporarily bypass idle frame skipping.
    * Useful for smooth movement animations where a low render rate looks "steppy".
    * @param {number} durationMs
@@ -249,9 +269,20 @@ export class RenderLoop {
         // Idle throttling: if camera is not moving, render at a reduced rate.
         // Prefer PIXI camera state (stage pivot/scale) to avoid 1-frame latency.
         const stage = canvas?.stage;
-        const pixiPivotX = stage?.pivot?.x;
-        const pixiPivotY = stage?.pivot?.y;
-        const pixiZoom = stage?.scale?.x;
+        const fcState = (() => {
+          try {
+            const fc = window.MapShine?.frameCoordinator;
+            return fc?.initialized ? fc.getFrameState?.() : null;
+          } catch (_) {
+            return null;
+          }
+        })();
+
+        // Prefer post-PIXI coordinated camera snapshots when available.
+        // This reduces cases where we sample stage state just before PIXI updates.
+        const pixiPivotX = Number.isFinite(fcState?.cameraX) ? fcState.cameraX : stage?.pivot?.x;
+        const pixiPivotY = Number.isFinite(fcState?.cameraY) ? fcState.cameraY : stage?.pivot?.y;
+        const pixiZoom = Number.isFinite(fcState?.zoom) ? fcState.zoom : stage?.scale?.x;
 
         let cameraChanged = false;
         if (typeof pixiPivotX === 'number' && typeof pixiPivotY === 'number' && typeof pixiZoom === 'number') {
@@ -291,10 +322,14 @@ export class RenderLoop {
         const effectiveContinuousFps = Math.max(continuousFps, preferredContinuousFps);
         const idleIntervalMs = 1000 / Math.max(1, idleFps);
 
+        // Cinematic mode: bypass ALL throttling so every rAF fires a full render.
+        // Used during intro zoom and other time-critical camera animations.
+        const inCinematicMode = now < (this._cinematicModeUntilMs || 0);
+
         // Fast path: when adaptive mode is on, nothing can render faster than the
         // highest configured mode cap. On high-refresh displays this avoids extra
         // per-RAF work (camera checks + effect scans) between allowed render ticks.
-        if (adaptiveFpsEnabled) {
+        if (adaptiveFpsEnabled && !inCinematicMode && !this._forceNextRender) {
           const since = now - (this._lastComposerRenderTime || 0);
           const fastestFps = Math.max(idleFps, activeFps, effectiveContinuousFps);
           const minIntervalMs = 1000 / Math.max(1, fastestFps);
@@ -308,20 +343,24 @@ export class RenderLoop {
           effectWantsContinuous = this._getEffectWantsContinuous(now);
         }
 
-        let shouldRender = inContinuousWindow || effectWantsContinuous || this._forceNextRender || cameraChanged;
+        // Cinematic mode renders every rAF with no further checks.
+        let shouldRender = inCinematicMode || inContinuousWindow || effectWantsContinuous || this._forceNextRender || cameraChanged;
         if (!shouldRender) {
           const since = now - (this._lastComposerRenderTime || 0);
           if (since >= idleIntervalMs) shouldRender = true;
         }
 
         // Optional adaptive frame cap for smoother pacing under continuous load.
+        // Skipped in cinematic mode so every rAF produces a render.
         // - active: camera/interactions/forced updates
         // - continuous: ongoing animated effects requesting full-rate updates
         // - idle: falls back to the existing idle throttle target
-        if (shouldRender && adaptiveFpsEnabled) {
+        if (shouldRender && adaptiveFpsEnabled && !inCinematicMode) {
           let targetFps = idleFps;
-          if (inContinuousWindow || effectWantsContinuous) targetFps = effectiveContinuousFps;
-          else if (this._forceNextRender || cameraChanged) targetFps = activeFps;
+          // Camera motion should always get activeFps priority; otherwise continuous
+          // effect requests (often 30fps) can under-sample pan/zoom updates.
+          if (this._forceNextRender || cameraChanged) targetFps = activeFps;
+          else if (inContinuousWindow || effectWantsContinuous) targetFps = effectiveContinuousFps;
 
           const minIntervalMs = 1000 / Math.max(1, targetFps);
           const since = now - (this._lastComposerRenderTime || 0);

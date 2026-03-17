@@ -85,10 +85,13 @@ export class CloudEffectV2 {
       shadowSoftness: 0.9,
       shadowOffsetScale: 0.3,
       minShadowBrightness: 0.0,
+      shadowSceneFadeSoftness: 0.025,
 
       // Cloud tops
       cloudTopMode: 'aboveEverything',
       cloudTopOpacity: 1.0,
+      cloudTopAlphaStart: 0.2,
+      cloudTopAlphaEnd: 0.6,
       cloudTopParallaxFactor: 1.0,
       cloudTopDepthParallaxStrength: 0.6,
       cloudTopFadeStart: 0.24,
@@ -102,7 +105,11 @@ export class CloudEffectV2 {
       cloudLayer3HeightFromGround: 300,
       cloudLayerZSpacing: 220,
       cloudLayerBaseOffsetFromEmitter: -2200,
-      cloudLayerEdgeSoftness: 0.2,
+      // Edge softness is applied to the world-space mesh boundary (mesh = coverageScale * scene).
+      // With the default coverageScale=3, the mesh edge is 1 scene-width outside the scene.
+      // 0.12 of mesh width ≈ 36% of scene width of fade at each edge, giving smooth falloff
+      // well outside the viewport without being invisible within the scene.
+      cloudLayerEdgeSoftness: 0.12,
       cloudLayerOpacityBase: 0.75,
       cloudLayerOpacityFalloff: 0.35,
       cloudLayerUvScaleStep: 0.25,
@@ -470,6 +477,7 @@ export class CloudEffectV2 {
       su.uShadowOpacity.value  = p.shadowOpacity;
       su.uShadowSoftness.value = p.shadowSoftness;
       su.uMinBrightness.value  = p.minShadowBrightness;
+      su.uSceneFadeSoftness.value = Math.max(0, p.shadowSceneFadeSoftness ?? 0.025);
       su.uZoom.value           = zoom;
       su.uSceneOrigin.value.set(sceneX, sceneY);
       su.uSceneSize.value.set(sceneW, sceneH);
@@ -522,6 +530,8 @@ export class CloudEffectV2 {
     if (tu) {
       tu.uTime.value            = this._lastElapsed;
       tu.uCloudTopOpacity.value = p.cloudTopOpacity;
+      tu.uAlphaStart.value      = Math.max(0, Math.min(0.99, p.cloudTopAlphaStart ?? 0.2));
+      tu.uAlphaEnd.value        = Math.max(tu.uAlphaStart.value + 0.01, Math.min(1.0, p.cloudTopAlphaEnd ?? 0.6));
       tu.uFadeStart.value       = p.cloudTopFadeStart;
       tu.uFadeEnd.value         = p.cloudTopFadeEnd;
       tu.uCloudBrightness.value = p.cloudBrightness;
@@ -714,8 +724,12 @@ export class CloudEffectV2 {
         this._cloudTopMat.uniforms.tCloudDensity.value = usePacked
           ? this._topDensityRT.texture
           : this._densityRT.texture;
-        this._cloudTopMat.uniforms.tBlockerMask.value    = this._blockerRT?.texture ?? null;
-        this._cloudTopMat.uniforms.uHasBlockerMask.value = this._blockerRT ? 1 : 0;
+        // Overhead blocker mask is for shadow occlusion only.
+        // Applying it to cloud-top alpha punches tile-shaped holes in the cloud layer,
+        // which makes underlying post effects/world content show through even at
+        // cloudCover=1 and cloudTopOpacity=1.
+        this._cloudTopMat.uniforms.tBlockerMask.value    = null;
+        this._cloudTopMat.uniforms.uHasBlockerMask.value = 0;
         this._quad.material = this._cloudTopMat;
         renderer.setRenderTarget(this._cloudTopRT);
         renderer.setClearColor(0x000000, 0); renderer.clear();
@@ -908,8 +922,8 @@ export class CloudEffectV2 {
       groups: [
         { name: 'cloud-generation',  label: 'Cloud Generation',       type: 'inline', parameters: ['noiseScale', 'noiseDetail', 'cloudSharpness', 'noiseTimeSpeed'] },
         { name: 'domain-warping',    label: 'Domain Warping (Wisps)', type: 'inline', separator: false, parameters: ['domainWarpEnabled', 'domainWarpStrength', 'domainWarpScale', 'domainWarpSpeed', 'domainWarpTimeOffsetY'] },
-        { name: 'shadow-settings',   label: 'Cloud Shadows',          type: 'inline', separator: true,  parameters: ['shadowOpacity', 'shadowSoftness', 'shadowOffsetScale', 'minShadowBrightness'] },
-        { name: 'cloud-tops',        label: 'Cloud Tops (Zoom)',      type: 'inline', separator: true,  parameters: ['cloudTopMode', 'cloudTopOpacity', 'cloudTopParallaxFactor', 'cloudTopDepthParallaxStrength', 'cloudTopFadeStart', 'cloudTopFadeEnd', 'cloudBrightness'] },
+        { name: 'shadow-settings',   label: 'Cloud Shadows',          type: 'inline', separator: true,  parameters: ['shadowOpacity', 'shadowSoftness', 'shadowOffsetScale', 'minShadowBrightness', 'shadowSceneFadeSoftness'] },
+        { name: 'cloud-tops',        label: 'Cloud Tops (Zoom)',      type: 'inline', separator: true,  parameters: ['cloudTopMode', 'cloudTopOpacity', 'cloudTopAlphaStart', 'cloudTopAlphaEnd', 'cloudTopParallaxFactor', 'cloudTopDepthParallaxStrength', 'cloudTopFadeStart', 'cloudTopFadeEnd', 'cloudBrightness'] },
         { name: 'cloud-layer-space', label: 'Cloud Layer Space',      type: 'inline', separator: false, parameters: ['cloudLayerCount', 'cloudLayerCoverageScale', 'cloudLayerDepthScaleStep', 'cloudLayerHeightFromGround', 'cloudLayer1HeightFromGround', 'cloudLayer2HeightFromGround', 'cloudLayer3HeightFromGround', 'cloudLayerZSpacing', 'cloudLayerBaseOffsetFromEmitter', 'cloudLayerEdgeSoftness'] },
         { name: 'cloud-layer-look',  label: 'Cloud Layer Look',       type: 'inline', separator: false, parameters: ['cloudLayerOpacityBase', 'cloudLayerOpacityFalloff', 'cloudLayerUvScaleStep', 'cloudLayerDriftStrength', 'cloudLayerDriftDepthBoost'] },
         { name: 'cloud-layer-slices',label: 'Cloud Layer 3D Slices',  type: 'inline', separator: false, parameters: ['cloudLayerSliceStrength', 'cloudLayerSliceScale', 'cloudLayerSliceContrast', 'cloudLayerSliceSpeed', 'cloudLayerSliceSpacing'] },
@@ -938,8 +952,11 @@ export class CloudEffectV2 {
         shadowSoftness:       { type: 'slider', label: 'Shadow Softness',   min: 0.5,  max: 10.0, step: 0.1,   default: 0.9   },
         shadowOffsetScale:    { type: 'slider', label: 'Shadow Offset',     min: 0.0,  max: 0.3,  step: 0.01,  default: 0.3   },
         minShadowBrightness:  { type: 'slider', label: 'Min Brightness',    min: 0.0,  max: 0.5,  step: 0.01,  default: 0.0   },
+        shadowSceneFadeSoftness:{ type: 'slider', label: 'Scene Edge Fade',   min: 0.0,  max: 0.15, step: 0.005, default: 0.025 },
         cloudTopMode:         { type: 'list',   label: 'Cloud Top Mode',    options: { 'Outdoors Only': 'outdoorsOnly', 'Above Everything (Fade Mask)': 'aboveEverything' }, default: 'aboveEverything' },
         cloudTopOpacity:      { type: 'slider', label: 'Cloud Top Opacity', min: 0.0,  max: 1.0,  step: 0.01,  default: 1.0   },
+        cloudTopAlphaStart:   { type: 'slider', label: 'Edge Fade Start',    min: 0.0,  max: 0.8,  step: 0.01,  default: 0.2   },
+        cloudTopAlphaEnd:     { type: 'slider', label: 'Edge Fade End',      min: 0.05, max: 1.0,  step: 0.01,  default: 0.6   },
         cloudTopParallaxFactor:{ type: 'slider',label: 'Top Parallax',      min: 0.0,  max: 2.0,  step: 0.05,  default: 1.0   },
         cloudTopDepthParallaxStrength:{ type: 'slider',label: 'Depth Parallax', min: 0.0, max: 2.0, step: 0.05, default: 0.6 },
         cloudTopFadeStart:    { type: 'slider', label: 'Fade Start Zoom',   min: 0.1,  max: 1.0,  step: 0.01,  default: 0.24  },
@@ -953,7 +970,7 @@ export class CloudEffectV2 {
         cloudLayer3HeightFromGround:{ type: 'slider', label: 'Layer 3 Height (From Ground)', min: 0.0, max: 12000.0, step: 10.0, default: 300.0 },
         cloudLayerZSpacing:   { type: 'slider', label: 'Duplicate Layer Up/Down Offset',   min: 20.0, max: 1200.0,step: 5.0,  default: 220.0 },
         cloudLayerBaseOffsetFromEmitter:{ type: 'slider', label: 'Legacy Emitter Offset', min: -5000.0, max: 2000.0, step: 10.0, default: -2200.0 },
-        cloudLayerEdgeSoftness:{ type: 'slider', label: 'Edge Softness',     min: 0.01, max: 0.5,  step: 0.01,  default: 0.2   },
+        cloudLayerEdgeSoftness:{ type: 'slider', label: 'Edge Softness',     min: 0.01, max: 0.5,  step: 0.01,  default: 0.12  },
         cloudLayerOpacityBase:{ type: 'slider', label: 'Base Layer Opacity', min: 0.1,  max: 1.5,  step: 0.01,  default: 0.75  },
         cloudLayerOpacityFalloff:{ type: 'slider', label: 'Opacity Falloff', min: 0.0,  max: 1.0,  step: 0.01,  default: 0.35  },
         cloudLayerUvScaleStep:{ type: 'slider', label: 'UV Scale Step',      min: 0.0,  max: 1.0,  step: 0.01,  default: 0.25  },
@@ -1044,12 +1061,10 @@ export class CloudEffectV2 {
         const wcInitialized = weatherController.initialized === true;
         if (s && wcInitialized) {
           if (typeof s.cloudCover === 'number') {
-            // V2 baseline often runs with WeatherController active but cloudCover=0
-            // (clear weather). If we hard-override with 0, clouds disappear even
-            // when the CloudEffect's own control panel cloudCover is non-zero.
-            // Treat weather cloud cover as a driver while keeping local cloudCover
-            // as a minimum floor so cloud controls remain visible/authorable.
-            cloudCover = Math.max(Number(this.params.cloudCover) || 0, s.cloudCover);
+            // When WeatherController is initialized, weather cloud cover is the
+            // authoritative runtime source. This ensures Weather Cloud Cover = 0
+            // truly clears clouds instead of being clamped by the local fallback.
+            cloudCover = s.cloudCover;
           }
           if (typeof s.windSpeedMS === 'number' && Number.isFinite(s.windSpeedMS)) {
             windSpeed = Math.max(0.0, Math.min(1.0, s.windSpeedMS / 78.0));
@@ -1291,6 +1306,7 @@ export class CloudEffectV2 {
         uTexelSize:         { value: new THREE.Vector2(1/512, 1/512) },
         uZoom:              { value: 1 },
         uMinBrightness:     { value: 0 },
+        uSceneFadeSoftness: { value: 0.025 },
         uShadowOffsetWorld: { value: new THREE.Vector2(0, 0) },
         uViewBoundsMin:     { value: new THREE.Vector2(0, 0) },
         uViewBoundsMax:     { value: new THREE.Vector2(4000, 3000) },
@@ -1323,6 +1339,7 @@ export class CloudEffectV2 {
         uniform vec2  uTexelSize;
         uniform float uZoom;
         uniform float uMinBrightness;
+        uniform float uSceneFadeSoftness;
         uniform vec2  uShadowOffsetWorld;
         uniform vec2  uViewBoundsMin;
         uniform vec2  uViewBoundsMax;
@@ -1366,10 +1383,14 @@ export class CloudEffectV2 {
         void main() {
           vec2 baseWorld = mix(uViewBoundsMin, uViewBoundsMax, vUv);
           vec2 sceneUvCheck = worldToSceneUv(baseWorld);
-          if (sceneUvCheck.x < 0.0 || sceneUvCheck.x > 1.0 ||
-              sceneUvCheck.y < 0.0 || sceneUvCheck.y > 1.0) {
-            gl_FragColor = vec4(1.0); return;
-          }
+          // Soft scene boundary fade: shadow fades smoothly to 1.0 (fully lit) outside
+          // the scene rect. Hard discard creates a sharp rectangular edge at the
+          // scene/padding boundary visible as a box in the middle of the viewport.
+          float sf = max(uSceneFadeSoftness, 0.001);
+          float sfX = smoothstep(-sf, 0.0, sceneUvCheck.x) * smoothstep(1.0 + sf, 1.0, sceneUvCheck.x);
+          float sfY = smoothstep(-sf, 0.0, sceneUvCheck.y) * smoothstep(1.0 + sf, 1.0, sceneUvCheck.y);
+          float sceneMask = sfX * sfY;
+          if (sceneMask < 0.001) { gl_FragColor = vec4(1.0); return; }
 
           // Sample density at sun-offset world position
           vec2 shadowWorld = baseWorld + uShadowOffsetWorld;
@@ -1405,6 +1426,9 @@ export class CloudEffectV2 {
             factor = mix(factor, 1.0, clamp(b, 0.0, 1.0));
           }
 
+          // Blend shadow back toward 1.0 (lit) near scene rect edges so there is
+          // no hard rectangular transition between shadow and the padding area.
+          factor = mix(1.0, factor, sceneMask);
           gl_FragColor = vec4(factor, factor, factor, 1.0);
         }
       `,
@@ -1440,6 +1464,8 @@ export class CloudEffectV2 {
         tBlockerMask:          { value: null },
         uHasBlockerMask:       { value: 0 },
         uCloudTopOpacity:      { value: 1 },
+        uAlphaStart:           { value: 0.2 },
+        uAlphaEnd:             { value: 0.6 },
         uNormalizedZoom:       { value: 1 },
         uFadeStart:            { value: 0.24 },
         uFadeEnd:              { value: 0.39 },
@@ -1487,6 +1513,8 @@ export class CloudEffectV2 {
         uniform sampler2D tBlockerMask;
         uniform float uHasBlockerMask;
         uniform float uCloudTopOpacity;
+        uniform float uAlphaStart;
+        uniform float uAlphaEnd;
         uniform float uNormalizedZoom;
         uniform float uFadeStart;
         uniform float uFadeEnd;
@@ -1584,7 +1612,9 @@ export class CloudEffectV2 {
           float density = readDensity(vUv);
           vec4 densTex  = texture2D(tCloudDensity, vUv);
           float zoomFade = 1.0 - smoothstep(uFadeStart, uFadeEnd, uNormalizedZoom);
-          float alpha = smoothstep(0.2, 0.6, density) * zoomFade * uCloudTopOpacity;
+          // uAlphaStart/uAlphaEnd control the density ramp so cloud edges can be
+          // tuned from wispy (low start) to crisp (high start approaching end).
+          float alpha = smoothstep(uAlphaStart, uAlphaEnd, density) * zoomFade * uCloudTopOpacity;
 
           float dMid   = (uDensityMode < 0.5) ? density : densTex.r;
           float dInner = (uDensityMode < 0.5) ? density : densTex.g;
@@ -1604,9 +1634,10 @@ export class CloudEffectV2 {
             alpha *= mix(1.0, o, clamp(uOutdoorsMaskStrength, 0.0, 1.0));
           }
           if (uHasBlockerMask > 0.5) {
-            float b = max(max(texture2D(tBlockerMask,vUv).r, texture2D(tBlockerMask,vUv).g),
-                          max(texture2D(tBlockerMask,vUv).b, texture2D(tBlockerMask,vUv).a));
-            alpha *= (1.0 - step(0.01, b));
+            vec4 bTex = texture2D(tBlockerMask, vUv);
+            float b = max(max(bTex.r, bTex.g), max(bTex.b, bTex.a));
+            // Soft fade at tile boundaries instead of a hard binary step.
+            alpha *= (1.0 - smoothstep(0.01, 0.15, b));
           }
           if (alpha < 0.001) discard;
           gl_FragColor = vec4(color, alpha);
@@ -1697,20 +1728,31 @@ export class CloudEffectV2 {
 
         void main() {
           vec2 span = max(uViewBoundsMax - uViewBoundsMin, vec2(1e-5));
-          vec2 uv = (vWorldXY - uViewBoundsMin) / span;
+          // uvWorld is [0,1] across the physical mesh world bounds — used for edge fade
+          // so the fade is anchored to the mesh boundary, not the UV wrap seam.
+          vec2 uvWorld = (vWorldXY - uViewBoundsMin) / span;
+          vec2 uv = uvWorld;
           uv = ((uv - 0.5) / max(uUvScale, 1e-3)) + 0.5 + uUvOffset;
-          // Wrap the sampling UV so each stacked cloud plane can use a large
-          // per-layer offset without clamping to a single edge texel.
-          vec2 uvSample = fract(uv);
+          // Fade out as UV exits [0,1] so clamp sampling does not smear border texels
+          // along the cloud mesh edges (notably visible on left/top boundaries).
+          const float UV_EDGE_FADE = 0.03;
+          float uvMaskX = smoothstep(-UV_EDGE_FADE, 0.0, uv.x) * smoothstep(1.0 + UV_EDGE_FADE, 1.0, uv.x);
+          float uvMaskY = smoothstep(-UV_EDGE_FADE, 0.0, uv.y) * smoothstep(1.0 + UV_EDGE_FADE, 1.0, uv.y);
+          float uvSampleMask = uvMaskX * uvMaskY;
+          // Non-repeating sample to avoid periodic seams in the middle of the effect.
+          // Repeating (fract) creates visible tile boundaries because tCloudTop is not
+          // authored as a perfectly tileable texture.
+          vec2 uvSample = clamp(uv, vec2(0.0), vec2(1.0));
           vec4 c = texture2D(tCloudTop, uvSample);
-          // Edge fade must match the wrapped UV, otherwise large offsets push
-          // uv outside [0,1] and edgeMask becomes 0 everywhere (invisible layer).
-          float edgeDist = min(min(uvSample.x, 1.0 - uvSample.x), min(uvSample.y, 1.0 - uvSample.y));
+          c.a *= uvSampleMask;
+          // Edge fade based on world-space UV (pre-fract) so the soft boundary is
+          // always at the physical mesh edge.
+          float edgeDist = min(min(uvWorld.x, 1.0 - uvWorld.x), min(uvWorld.y, 1.0 - uvWorld.y));
           float edgeSoft = max(uEdgeSoftness, 1e-4);
-          float edgeMask = smoothstep(-edgeSoft, edgeSoft, edgeDist);
+          // smoothstep(0, edgeSoft, ...) fades cleanly from 0 at the mesh edge to 1 inward.
+          float edgeMask = smoothstep(0.0, edgeSoft, edgeDist);
 
-          vec2 world01 = (vWorldXY - uViewBoundsMin) / span;
-          vec2 sliceXY = world01 + vec2(uLayerSlice * 0.131, uLayerSlice * 0.073);
+          vec2 sliceXY = uvWorld + vec2(uLayerSlice * 0.131, uLayerSlice * 0.073);
           float sliceZ = (uLayerSlice * 6.0) + (uTime * uSliceSpeed * 2.0);
           vec3 slicePos = vec3(sliceXY * uSliceScale, sliceZ);
           float sliceN = fbm3D(slicePos);
@@ -1879,8 +1921,9 @@ export class CloudEffectV2 {
     const uvScaleStep = Math.max(0, Number(this.params.cloudLayerUvScaleStep) || 0.25);
     const driftStrength = Math.max(0, Number(this.params.cloudLayerDriftStrength) || 0.02);
     const driftDepthBoost = Math.max(0, Number(this.params.cloudLayerDriftDepthBoost) || 0.015);
-    const opacityBase = Math.max(0, Number(this.params.cloudLayerOpacityBase) || 0.75);
-    const edgeSoftness = Math.max(0.01, Number(this.params.cloudLayerEdgeSoftness) || 0.2);
+    const opacityBase    = Math.max(0, Number(this.params.cloudLayerOpacityBase) || 0.75);
+    const opacityFalloff = Math.max(0, Math.min(1, Number(this.params.cloudLayerOpacityFalloff) ?? 0.35));
+    const edgeSoftness   = Math.max(0.01, Number(this.params.cloudLayerEdgeSoftness) || 0.12);
     const sliceStrength = Math.max(0, Math.min(1, Number(this.params.cloudLayerSliceStrength) || 0.7));
     const sliceScale = Math.max(0.1, Number(this.params.cloudLayerSliceScale) || 2.2);
     const sliceContrast = Math.max(0.1, Number(this.params.cloudLayerSliceContrast) || 1.3);
@@ -1907,11 +1950,12 @@ export class CloudEffectV2 {
       u.uViewBoundsMin.value.set(centerX - halfW, centerY - halfH);
       u.uViewBoundsMax.value.set(centerX + halfW, centerY + halfH);
       // Per-layer variation so stacked planes don't look identical.
-      // Large offsets are safe because the shader wraps sampling UV via fract().
+      // Keep offsets bounded to prevent clamped sampling from collapsing onto
+      // texture edges and to avoid introducing repeating seams.
       const h = perHeights[i];
-      const hSeed = Number.isFinite(h) ? (h * 0.002) : 0;
-      const seedX = (layerOffsetIndex * 37.13) + (hSeed * 11.0);
-      const seedY = (layerOffsetIndex * -19.77) + (hSeed * -7.0);
+      const hSeed = Number.isFinite(h) ? (h * 0.001) : 0;
+      const seedX = (layerOffsetIndex * 0.17) + (Math.sin(hSeed + i * 1.7) * 0.06);
+      const seedY = (layerOffsetIndex * -0.11) + (Math.cos(hSeed + i * 2.3) * 0.06);
       const scaleVar = 1.0 + (layerOffsetIndex * 0.15);
       u.uUvScale.value = (1.0 + uvScaleStep) * Math.max(0.5, scaleVar);
 
@@ -1925,12 +1969,19 @@ export class CloudEffectV2 {
       const layerZ = Number.isFinite(layerZRaw) ? layerZRaw : groundZ;
       const height01 = Math.max(0, Math.min(1, (layerZ - groundZ) / camZSpan));
       const parallaxMul = layerOffsetIndex * driftDepthBoost * 6.0 * height01;
+      // Wind offset is unbounded over time. Compress it smoothly into [-1,1]
+      // so UV offsets remain bounded without discontinuous modulo jumps.
+      const windNormX = Math.tanh((wind?.x ?? 0) * 0.08);
+      const windNormY = Math.tanh((wind?.y ?? 0) * 0.08);
 
       u.uUvOffset.value.set(
-        ((wind?.x ?? 0) * driftStrength) + seedX + (nCamX * parallaxMul),
-        ((wind?.y ?? 0) * driftStrength) + seedY + (nCamY * parallaxMul)
+        (windNormX * driftStrength) + seedX + (nCamX * parallaxMul),
+        (windNormY * driftStrength) + seedY + (nCamY * parallaxMul)
       );
-      u.uOpacityMul.value = opacity * opacityBase;
+      // Apply depth falloff: layer 0 (lowest/closest) gets full opacityBase,
+      // higher layers get progressively less opacity to simulate sky depth.
+      const layerOpacity = opacityBase * Math.max(0, 1.0 - opacityFalloff * i);
+      u.uOpacityMul.value = opacity * layerOpacity;
       u.uEdgeSoftness.value = edgeSoftness;
       u.uTime.value = this._lastElapsed;
       u.uLayerSlice.value = layerOffsetIndex * sliceSpacing;

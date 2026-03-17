@@ -68,6 +68,7 @@ export class TweakpaneManager {
     this.globalParams = {
       mapMakerMode: false,
       timeRate: 100, // 0-200%
+      introZoomEnabled: true,
       sunLatitude: 0.1, // 0=flat east/west, 1=maximum north/south arc (single source of truth for all effects)
       // Light authoring UI visibility toggles
       showLightTranslateGizmo: true,
@@ -422,6 +423,9 @@ export class TweakpaneManager {
       // Build authoring workflow controls
       this.buildGlobalControls();
 
+      // Build intro sequence controls (loading transition and scene intro behavior)
+      this.buildIntroSequencesSection();
+
       // Build environment section (sun latitude etc.) — single source of truth
       this.buildEnvironmentSection();
 
@@ -637,6 +641,58 @@ export class TweakpaneManager {
     // Track accordion state
     globalFolder.on('fold', (ev) => {
       this.accordionStates['global'] = ev.expanded;
+      this.saveUIState();
+    });
+  }
+
+  /**
+   * Build intro transition controls.
+   * @private
+   */
+  buildIntroSequencesSection() {
+    const introFolder = this.pane.addFolder({
+      title: 'Intro Sequences',
+      expanded: this.accordionStates['introSequences'] ?? true
+    });
+    this._registerPrimaryFolder(introFolder);
+
+    const onIntroZoomChange = async (ev) => {
+      this.globalParams.introZoomEnabled = ev.value;
+      try {
+        await game.settings.set('map-shine-advanced', 'introZoomEnabled', ev.value === true);
+      } catch (e) {
+        log.warn('Failed to persist intro zoom setting', e);
+      }
+      this.saveUIState();
+    };
+    this._uiValidatorGlobalHandlers.introZoomEnabled = onIntroZoomChange;
+
+    introFolder.addBinding(this.globalParams, 'introZoomEnabled', {
+      label: 'Intro Zoom'
+    }).on('change', onIntroZoomChange);
+
+    introFolder.addButton({
+      title: 'Loading Screens…',
+      label: 'Loading'
+    }).on('click', async () => {
+      try {
+        let manager = window.MapShine?.loadingScreenManager;
+        if (!manager) {
+          const mod = await import('./loading-screen/loading-screen-manager.js');
+          const LoadingScreenManager = mod.LoadingScreenManager;
+          manager = new LoadingScreenManager();
+          await manager.initialize();
+          if (window.MapShine) window.MapShine.loadingScreenManager = manager;
+        }
+        await manager.toggle();
+      } catch (e) {
+        console.error('Map Shine: failed to open Loading Screen Composer', e);
+        ui.notifications?.warn?.('Loading Screen Composer is not available yet.');
+      }
+    });
+
+    introFolder.on('fold', (ev) => {
+      this.accordionStates['introSequences'] = ev.expanded;
       this.saveUIState();
     });
   }
@@ -4348,6 +4404,10 @@ export class TweakpaneManager {
           this.globalParams.sunLatitude = 0.1;
         }
 
+        if (this.globalParams.introZoomEnabled === undefined) {
+          this.globalParams.introZoomEnabled = true;
+        }
+
         // Backwards-compatible defaults for newly added Dynamic Exposure controls
         if (this.globalParams.dynamicExposure) {
           if (this.globalParams.dynamicExposure.enabled === undefined) this.globalParams.dynamicExposure.enabled = true;
@@ -4363,6 +4423,11 @@ export class TweakpaneManager {
       if (state.scale) {
         this.uiScale = state.scale;
         this.updateScale();
+      }
+
+      try {
+        this.globalParams.introZoomEnabled = game.settings.get('map-shine-advanced', 'introZoomEnabled') !== false;
+      } catch (_) {
       }
 
       log.debug('UI state loaded from settings');

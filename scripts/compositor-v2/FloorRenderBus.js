@@ -36,6 +36,7 @@ const GROUND_Z = 1000;
 const Z_PER_FLOOR = 1;
 const RENDER_ORDER_PER_FLOOR = 10000;
 const OVERHEAD_OFFSET = 5000;
+const MOTION_ABOVE_TOKENS_OFFSET = 9950;
 
 // Reserve headroom near the top of each floor band for token sprites.
 // Effects (specular/prism/iridescence) inherit tile renderOrder and add a small
@@ -143,8 +144,8 @@ export class FloorRenderBus {
     // Lower sort = behind, higher sort = in front.  Stable sort preserves
     // document order for tiles with identical sort values.
     const sortedTileDocs = [...tileDocs].sort((a, b) => {
-      const sa = Number(a?.sort) || 0;
-      const sb = Number(b?.sort) || 0;
+      const sa = this._getTileSortValue(a);
+      const sb = this._getTileSortValue(b);
       return sa - sb;
     });
 
@@ -171,14 +172,25 @@ export class FloorRenderBus {
       // Layout: [floor N regular 0..4999] [floor N overhead 5000..9999].
       // Within each floor-group, tiles are ordered by Foundry sort (ascending),
       // with a cap to preserve a stable token headroom at top of floor band.
-      const isOverhead = isTileOverhead(tileDoc);
+      const isOverhead = this._isOverheadForBusTile(tileDoc, tileId);
+      const motionRenderAboveTokens = !!window.MapShine?.tileMotionManager?.getTileConfig?.(tileId)?.renderAboveTokens;
       floorCounts[floorIndex] = floorCounts[floorIndex] ?? { regular: 0, overhead: 0 };
       const groupCounts = floorCounts[floorIndex];
-      const localIndex = isOverhead ? groupCounts.overhead++ : groupCounts.regular++;
-      const sortWithinFloor = Math.min(localIndex, MAX_SORT_WITHIN_FLOOR_GROUP);
-      const renderOrder = floorIndex * RENDER_ORDER_PER_FLOOR
-        + (isOverhead ? OVERHEAD_OFFSET : 0)
-        + sortWithinFloor;
+      if (isOverhead) groupCounts.overhead += 1;
+      else groupCounts.regular += 1;
+      const sortWithinFloor = this._computeSortWithinFloor(tileDoc);
+      let renderOrder;
+      if (motionRenderAboveTokens) {
+        // Keep motion-forced tiles above same-floor tokens.
+        const sort01 = Math.max(0, Math.min(1, sortWithinFloor / MAX_SORT_WITHIN_FLOOR_GROUP));
+        renderOrder = floorIndex * RENDER_ORDER_PER_FLOOR
+          + MOTION_ABOVE_TOKENS_OFFSET
+          + sort01 * 49;
+      } else {
+        renderOrder = floorIndex * RENDER_ORDER_PER_FLOOR
+          + (isOverhead ? OVERHEAD_OFFSET : 0)
+          + sortWithinFloor;
+      }
 
       // Create mesh immediately with null texture (invisible until loaded).
       this._addTileMesh(tileId, floorIndex, null, centerX, centerY, z, tileW, tileH, rotation, alpha, renderOrder, isOverhead);
@@ -203,7 +215,7 @@ export class FloorRenderBus {
 
     // Diagnostic: log overhead tile assignment so we can spot mis-classified tiles.
     const overheadDiag = sortedTileDocs
-      .filter(td => isTileOverhead(td))
+      .filter(td => this._isOverheadForBusTile(td, td?.id ?? td?._id))
       .map(td => {
         const fi = this._resolveFloorIndex(td, floors);
         return { id: td.id, floor: fi, src: (td.texture?.src ?? td.img ?? '').split('/').pop() };
@@ -518,18 +530,21 @@ export class FloorRenderBus {
     const rotation = typeof tileDoc.rotation === 'number'
       ? (tileDoc.rotation * Math.PI) / 180
       : 0;
-    const isOverhead = isTileOverhead(tileDoc);
+    const isOverhead = this._isOverheadForBusTile(tileDoc, tileId);
+    const motionRenderAboveTokens = !!window.MapShine?.tileMotionManager?.getTileConfig?.(tileId)?.renderAboveTokens;
 
-    const rawSort = Number.isFinite(Number(tileDoc?.sort ?? tileDoc?.z))
-      ? Number(tileDoc.sort ?? tileDoc.z)
-      : 0;
-    const sortWithinFloor = Math.max(
-      0,
-      Math.min(MAX_SORT_WITHIN_FLOOR_GROUP, Math.round(rawSort + (MAX_SORT_WITHIN_FLOOR_GROUP / 2)))
-    );
-    const renderOrder = floorIndex * RENDER_ORDER_PER_FLOOR
-      + (isOverhead ? OVERHEAD_OFFSET : 0)
-      + sortWithinFloor;
+    const sortWithinFloor = this._computeSortWithinFloor(tileDoc);
+    let renderOrder;
+    if (motionRenderAboveTokens) {
+      const sort01 = Math.max(0, Math.min(1, sortWithinFloor / MAX_SORT_WITHIN_FLOOR_GROUP));
+      renderOrder = floorIndex * RENDER_ORDER_PER_FLOOR
+        + MOTION_ABOVE_TOKENS_OFFSET
+        + sort01 * 49;
+    } else {
+      renderOrder = floorIndex * RENDER_ORDER_PER_FLOOR
+        + (isOverhead ? OVERHEAD_OFFSET : 0)
+        + sortWithinFloor;
+    }
 
     let entry = this._tiles.get(tileId);
     if (!entry) {
@@ -855,6 +870,27 @@ export class FloorRenderBus {
   // ── Private Helpers ──────────────────────────────────────────────────────────
 
   /**
+   * Resolve overhead classification for bus tiles.
+   *
+   * In addition to native/levels overhead docs, tile-motion can force tiles into
+   * roof-style draw ordering via renderAboveTokens. Mirror that flag here so V2
+   * bus renderOrder/layers stay aligned with TileManager behavior.
+   *
+   * @param {object} tileDoc
+   * @param {string|null} tileId
+   * @returns {boolean}
+   * @private
+   */
+  _isOverheadForBusTile(tileDoc, tileId = null) {
+    const resolvedTileId = tileId ?? tileDoc?.id ?? tileDoc?._id ?? null;
+    const motionConfig = resolvedTileId
+      ? window.MapShine?.tileMotionManager?.getTileConfig?.(resolvedTileId)
+      : null;
+    const renderAboveTokens = !!motionConfig?.renderAboveTokens;
+    return isTileOverhead(tileDoc) || renderAboveTokens;
+  }
+
+  /**
    * Add a solid-colour plane covering the full world canvas at the lowest Z.
    * Ensures no transparent black shows in padding areas.
    * @param {object} fd - foundrySceneData
@@ -1038,6 +1074,31 @@ export class FloorRenderBus {
     }, undefined, (err) => {
       log.warn(`FloorRenderBus: failed to load texture for tile ${tileId}: ${src}`, err);
     });
+  }
+
+  /**
+   * Resolve Foundry tile sort with cross-version fallback.
+   * @param {object} tileDoc
+   * @returns {number}
+   * @private
+   */
+  _getTileSortValue(tileDoc) {
+    const rawSort = Number(tileDoc?.sort ?? tileDoc?.z);
+    return Number.isFinite(rawSort) ? rawSort : 0;
+  }
+
+  /**
+   * Map Foundry sort values into the floor-local render-order slot range.
+   * @param {object} tileDoc
+   * @returns {number}
+   * @private
+   */
+  _computeSortWithinFloor(tileDoc) {
+    const rawSort = this._getTileSortValue(tileDoc);
+    return Math.max(
+      0,
+      Math.min(MAX_SORT_WITHIN_FLOOR_GROUP, Math.round(rawSort + (MAX_SORT_WITHIN_FLOOR_GROUP / 2)))
+    );
   }
 
   /**

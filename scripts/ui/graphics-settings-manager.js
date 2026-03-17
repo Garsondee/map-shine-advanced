@@ -14,6 +14,55 @@ import { GraphicsSettingsDialog } from './graphics-settings-dialog.js';
 
 const log = createLogger('GraphicsSettings');
 
+// Legacy/alias IDs used by capabilities or historical UI wiring.
+// Normalize these to the runtime V2 effect IDs so overrides remain stable.
+const EFFECT_ID_ALIASES = Object.freeze({
+  'window-lights': 'windowLight',
+  'window-light': 'windowLight',
+  'color-correction': 'colorCorrection',
+  'dot-screen': 'dotScreen',
+  'clouds': 'cloud',
+  'trees': 'tree',
+  'bushes': 'bush',
+});
+
+// Graphics effect ID -> FloorCompositor V2 property key.
+const V2_EFFECT_KEY_BY_ID = Object.freeze({
+  lighting: '_lightingEffect',
+  specular: '_specularEffect',
+  fluid: '_fluidEffect',
+  iridescence: '_iridescenceEffect',
+  prism: '_prismEffect',
+  bush: '_bushEffect',
+  tree: '_treeEffect',
+  'sky-color': '_skyColorEffect',
+  windowLight: '_windowLightEffect',
+  'fire-sparks': '_fireEffect',
+  'water-splashes': '_waterSplashesEffect',
+  'underwater-bubbles': '_underwaterBubblesEffect',
+  'ash-disturbance': '_ashDisturbanceEffect',
+  bloom: '_bloomEffect',
+  colorCorrection: '_colorCorrectionEffect',
+  filter: '_filterEffect',
+  'atmospheric-fog': '_atmosphericFogEffect',
+  fog: '_fogEffect',
+  sharpen: '_sharpenEffect',
+  dotScreen: '_dotScreenEffect',
+  halftone: '_halftoneEffect',
+  ascii: '_asciiEffect',
+  dazzleOverlay: '_dazzleOverlayEffect',
+  visionMode: '_visionModeEffect',
+  invert: '_invertEffect',
+  sepia: '_sepiaEffect',
+  lens: '_lensEffect',
+  water: '_waterEffect',
+  cloud: '_cloudEffect',
+  'overhead-shadows': '_overheadShadowEffect',
+  'building-shadows': '_buildingShadowEffect',
+  'player-light': '_playerLightEffect',
+  'candle-flames': '_candleFlamesEffect',
+});
+
 /**
  * @typedef {Object} GraphicsSettingsState
  * @property {boolean} globalDisableAll
@@ -67,6 +116,102 @@ export class GraphicsSettingsManager {
 
   /**
    * @private
+   * @param {string} effectId
+   * @returns {string}
+   */
+  _normalizeEffectId(effectId) {
+    if (!effectId) return '';
+    return EFFECT_ID_ALIASES[effectId] || effectId;
+  }
+
+  /**
+   * @private
+   * @param {string} effectId
+   * @returns {Array<string>}
+   */
+  _legacyAliasKeysFor(effectId) {
+    const normalized = this._normalizeEffectId(effectId);
+    const out = [];
+    for (const [legacy, canonical] of Object.entries(EFFECT_ID_ALIASES)) {
+      if (canonical === normalized) out.push(legacy);
+    }
+    return out;
+  }
+
+  /**
+   * @private
+   * @param {string} effectId
+   * @returns {{enabled?: boolean}|null}
+   */
+  _getOverride(effectId) {
+    const overrides = this.state.effectOverrides || {};
+    const normalized = this._normalizeEffectId(effectId);
+    if (overrides[normalized]) return overrides[normalized];
+    if (overrides[effectId]) return overrides[effectId];
+    const aliases = this._legacyAliasKeysFor(normalized);
+    for (const key of aliases) {
+      if (overrides[key]) return overrides[key];
+    }
+    return null;
+  }
+
+  /**
+   * @private
+   * @param {string} effectKey
+   * @param {boolean} enabled
+   */
+  _queueV2Enabled(effectKey, enabled) {
+    try {
+      if (!window?.MapShine) return;
+      const root = window.MapShine;
+      if (!root.__pendingV2EffectParams) root.__pendingV2EffectParams = {};
+      if (!root.__pendingV2EffectParams[effectKey]) root.__pendingV2EffectParams[effectKey] = {};
+      root.__pendingV2EffectParams[effectKey].enabled = enabled === true;
+    } catch (_) {
+    }
+  }
+
+  /**
+   * @private
+   * @param {string} effectId
+   * @param {boolean} enabled
+   * @returns {boolean} true when the ID maps to a V2 effect key
+   */
+  _applyV2Enabled(effectId, enabled) {
+    const normalized = this._normalizeEffectId(effectId);
+    const effectKey = V2_EFFECT_KEY_BY_ID[normalized];
+    if (!effectKey) return false;
+
+    // Always queue so toggles made before lazy compositor creation still apply.
+    this._queueV2Enabled(effectKey, enabled);
+
+    try {
+      const fc = window.MapShine?.effectComposer?._floorCompositorV2
+        ?? this.effectComposer?._floorCompositorV2
+        ?? null;
+      if (!fc) return true;
+
+      if (typeof fc.applyParam === 'function') {
+        fc.applyParam(effectKey, 'enabled', enabled === true);
+        return true;
+      }
+
+      const effect = fc[effectKey];
+      if (!effect) return true;
+      if (typeof effect.enabled === 'boolean') {
+        effect.enabled = enabled === true;
+      }
+      if (effect.params && Object.prototype.hasOwnProperty.call(effect.params, 'enabled')) {
+        effect.params.enabled = enabled === true;
+      }
+    } catch (e) {
+      log.warn(`Failed to apply V2 override to ${normalized}`, e);
+    }
+    return true;
+  }
+
+  /**
+   * @private
    * @param {*} value
    * @param {number} fallback
    * @param {number} min
@@ -96,7 +241,7 @@ export class GraphicsSettingsManager {
    */
   registerEffectInstance(effectId, effect) {
     if (!effectId || !effect) return;
-    this._effects.set(effectId, effect);
+    this._effects.set(this._normalizeEffectId(effectId), effect);
   }
 
   /**
@@ -289,14 +434,25 @@ export class GraphicsSettingsManager {
   listEffectsForUI() {
     const caps = this.capabilitiesRegistry?.list?.() ?? [];
     if (caps.length > 0) {
-      return caps.map((c) => ({
-        effectId: c.effectId,
-        displayName: c.displayName || c.effectId
-      }));
+      const seen = new Set();
+      const out = [];
+      for (const c of caps) {
+        const normalized = this._normalizeEffectId(c.effectId);
+        if (!normalized || seen.has(normalized)) continue;
+        seen.add(normalized);
+        out.push({
+          effectId: normalized,
+          displayName: c.displayName || normalized
+        });
+      }
+      return out;
     }
 
     // Fallback: if registry isn't available, list known registered instances.
-    return Array.from(this._effects.keys()).map((id) => ({ effectId: id, displayName: id }));
+    return Array.from(this._effects.keys()).map((id) => {
+      const normalized = this._normalizeEffectId(id);
+      return { effectId: normalized, displayName: normalized };
+    });
   }
 
   /**
@@ -305,7 +461,17 @@ export class GraphicsSettingsManager {
    */
   getAvailability(effectId) {
     if (!this.capabilitiesRegistry?.getAvailability) return { available: true, reason: '' };
-    return this.capabilitiesRegistry.getAvailability(effectId);
+
+    const normalized = this._normalizeEffectId(effectId);
+    const candidates = [normalized, effectId, ...this._legacyAliasKeysFor(normalized)];
+    for (const id of candidates) {
+      if (!id) continue;
+      const caps = this.capabilitiesRegistry.get?.(id);
+      if (!caps) continue;
+      return this.capabilitiesRegistry.getAvailability(id);
+    }
+
+    return { available: true, reason: '' };
   }
 
   /**
@@ -313,12 +479,13 @@ export class GraphicsSettingsManager {
    * @param {string} effectId
    */
   getEffectiveEnabled(effectId) {
+    const normalized = this._normalizeEffectId(effectId);
     const avail = this.getAvailability(effectId);
     if (!avail.available) return false;
 
     if (this.state.globalDisableAll) return false;
 
-    const ov = this.state.effectOverrides?.[effectId];
+    const ov = this._getOverride(normalized);
     if (ov && typeof ov.enabled === 'boolean') return ov.enabled;
 
     // Default: enabled.
@@ -332,8 +499,21 @@ export class GraphicsSettingsManager {
    * on demand. This is async but we fire-and-forget so the UI stays responsive.
    */
   applyOverrides() {
-    for (const [effectId, effect] of this._effects.entries()) {
+    const ids = new Set([
+      ...this.listEffectsForUI().map((e) => this._normalizeEffectId(e.effectId)),
+      ...Array.from(this._effects.keys()).map((id) => this._normalizeEffectId(id)),
+    ]);
+
+    for (const effectId of ids) {
+      if (!effectId) continue;
       const enabled = this.getEffectiveEnabled(effectId);
+      const effect = this._effects.get(effectId);
+
+      // V2 runtime path (FloorCompositor-owned effects)
+      this._applyV2Enabled(effectId, enabled);
+
+      // Legacy/direct instance path (V1 or hybrid instances)
+      if (!effect) continue;
 
       try {
         // P2.1: If the effect was deferred and is now being enabled, trigger lazy init.
@@ -413,10 +593,15 @@ export class GraphicsSettingsManager {
    */
   setEffectEnabled(effectId, enabled) {
     if (!effectId) return;
-    this.state.effectOverrides[effectId] = {
-      ...(this.state.effectOverrides[effectId] || {}),
+    const normalized = this._normalizeEffectId(effectId);
+    this.state.effectOverrides[normalized] = {
+      ...(this.state.effectOverrides[normalized] || {}),
       enabled: enabled === true
     };
+    // Clean legacy alias keys to avoid conflicting duplicate entries.
+    for (const legacyKey of this._legacyAliasKeysFor(normalized)) {
+      if (legacyKey !== normalized) delete this.state.effectOverrides[legacyKey];
+    }
     this.applyOverrides();
   }
 
@@ -426,7 +611,11 @@ export class GraphicsSettingsManager {
   clearEffectOverride(effectId) {
     if (!effectId) return;
     if (!this.state.effectOverrides) this.state.effectOverrides = {};
-    delete this.state.effectOverrides[effectId];
+    const normalized = this._normalizeEffectId(effectId);
+    delete this.state.effectOverrides[normalized];
+    for (const legacyKey of this._legacyAliasKeysFor(normalized)) {
+      delete this.state.effectOverrides[legacyKey];
+    }
     this.applyOverrides();
   }
 

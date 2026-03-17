@@ -647,10 +647,15 @@ export class BushEffectV2 {
           float ambientMotion = uAmbientMotion;
           float effectiveSpeed = ambientMotion + rustleSpeed;
 
-          vec2 gustPos = vWorldPos * uGustFrequency;
-          vec2 scroll = windDir * uTime * uGustSpeed * rustleSpeed;
-          float gustNoise = noise(gustPos - scroll);
-          float gustStrength = smoothstep(0.2, 0.8, gustNoise);
+          // Continuous speed-coupled wind pressure field (traveling across map)
+          // to avoid binary gust behavior and keep response wind-speed driven.
+          float windFieldFrequency = mix(0.0003, max(0.0003, uGustFrequency), rawWind);
+          float windFieldTravel = mix(0.16, max(0.16, uGustSpeed), rawWind);
+          vec2 windFieldPos = vWorldPos * windFieldFrequency;
+          vec2 windFieldScroll = windDir * uTime * windFieldTravel * (0.2 + rawWind);
+          float windField = noise(windFieldPos - windFieldScroll);
+          float windPulse = mix(0.65, 1.28, smoothstep(0.08, 0.92, windField));
+          windPulse *= (0.35 + 0.65 * rawWind);
 
           float waveCoord = dot(vWorldPos, windDir);
           float wavePhase = waveCoord * uWaveSpatialFrequency - uTime * uWaveTravelSpeed * (0.35 + rustleSpeed);
@@ -659,23 +664,26 @@ export class BushEffectV2 {
           float waveMod = mix(1.0, waveFront, clamp(uWaveInfluence, 0.0, 1.0));
 
           vec2 perpDir = vec2(-windDir.y, windDir.x);
-          float orbitPhase = uTime * uElasticity + (gustNoise * 5.0);
+          float orbitPhase = uTime * uElasticity + (windField * 5.0);
           float orbitSway = sin(orbitPhase);
 
           float bendStrength = (uBendMinStrength + (1.0 - uBendMinStrength) * rawWind) * bendDrive;
-          float pushMagnitude = gustStrength * uBranchBend * effectiveSpeed * waveMod * bendStrength;
-          float swayMagnitude = orbitSway * (uBranchBend * 0.4) * effectiveSpeed * (0.5 + 0.5 * gustStrength) * (0.65 + 0.35 * waveMod) * bendStrength;
+          float pushMagnitude = windPulse * uBranchBend * effectiveSpeed * waveMod * bendStrength;
+          float swayMagnitude = orbitSway * (uBranchBend * 0.4) * effectiveSpeed * (0.5 + 0.5 * windPulse) * (0.65 + 0.35 * waveMod) * bendStrength;
+          float crossSwayMagnitude = swayMagnitude * 0.16;
 
           float noiseVal = noise(vWorldPos * uFlutterScale);
           float flutterPhase = uTime * uFlutterSpeed * (0.85 + rustleSpeed) + noiseVal * 6.28;
           float flutter = sin(flutterPhase);
           float lowWindBoost = mix(uFlutterLowWindBoost, 1.0, smoothstep(0.04, max(0.041, uFlutterLowWindFadeEnd), rawWind));
-          float gustFlutter = uFlutterGustFloor + (1.0 - uFlutterGustFloor) * gustStrength;
-          float flutterMagnitude = flutter * uFlutterIntensity * gustFlutter * lowWindBoost * flutterDrive * (0.6 + 0.4 * waveMod);
-          vec2 flutterVec = (perpDir * flutterMagnitude) + (windDir * (flutterMagnitude * 0.35));
+          float legacyFlutterFloor = clamp(uFlutterGustFloor, 0.0, 1.0);
+          float flutterWindPulse = mix(legacyFlutterFloor, 1.0, clamp(windPulse, 0.0, 1.0));
+          float flutterMagnitude = flutter * uFlutterIntensity * flutterWindPulse * lowWindBoost * flutterDrive * (0.6 + 0.4 * waveMod);
+          vec2 flutterVec = (windDir * flutterMagnitude) + (perpDir * (flutterMagnitude * 0.1));
 
           vec2 distortion = (windDir * pushMagnitude)
-                          + (perpDir * swayMagnitude)
+                          + (windDir * swayMagnitude)
+                          + (perpDir * crossSwayMagnitude)
                           + flutterVec;
 
           vec2 sceneSpan = max(uSceneMax - uSceneMin, vec2(1e-3));

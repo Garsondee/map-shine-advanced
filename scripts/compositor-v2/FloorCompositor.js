@@ -2804,10 +2804,8 @@ export class FloorCompositor {
     try { this._skyColorEffect?.dispose?.(); } catch (_) {}
     try { this._atmosphericFogEffect?.dispose?.(); } catch (_) {}
     try { this._fogEffect?.dispose?.(); } catch (_) {}
-    try { this._bloomEffect.dispose(); } catch (_) {}
-    try { this._colorCorrectionEffect.dispose(); } catch (_) {}
-    try { this._skyColorEffect.dispose(); } catch (_) {}
-    try { this._lightingEffect.dispose(); } catch (_) {}
+    try { this._bloomEffect?.dispose?.(); } catch (_) {}
+    try { this._colorCorrectionEffect?.dispose?.(); } catch (_) {}
     try { this._overheadShadowEffect?.dispose?.(); } catch (_) {}
     try { this._buildingShadowEffect?.dispose?.(); } catch (_) {}
     try { this._smellyFliesEffect?.dispose?.(); } catch (_) {}
@@ -2824,9 +2822,6 @@ export class FloorCompositor {
     try { this._lensEffect?.dispose?.(); } catch (_) {}
     try { this._distortionEffect?.dispose?.(); } catch (_) {}
     try { this._floorDepthBlurEffect?.dispose?.(); } catch (_) {}
-    try { this._fireEffect.dispose(); } catch (_) {}
-    try { this._specularEffect.dispose(); } catch (_) {}
-    try { this._windowLightEffect.dispose(); } catch (_) {}
     try { this._renderBus?.dispose?.(); } catch (_) {}
     this._busPopulated = false;
     this._populateComplete = false;
@@ -2863,12 +2858,6 @@ export class FloorCompositor {
     this._pixiUiOverlayQuad = null;
     this._fogOverlayScene = null;
     this._fogOverlayCamera = null;
-
-    // Unregister the level-change hook.
-    if (this._levelHookId !== null) {
-      try { Hooks.off('mapShineLevelContextChanged', this._levelHookId); } catch (_) {}
-      this._levelHookId = null;
-    }
 
     this._initialized = false;
     log.info('FloorCompositor disposed');

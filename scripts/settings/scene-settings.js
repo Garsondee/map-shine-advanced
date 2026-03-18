@@ -29,6 +29,10 @@ const LOADING_SCREEN_GOOGLE_FONTS_ENABLED_SETTING = 'loadingScreenGoogleFontsEna
 const LOADING_SCREEN_USE_FOUNDRY_DEFAULT_SETTING = 'loadingScreenUseFoundryDefault';
 const LOADING_SCREEN_ACTIVE_PRESET_ID_SETTING = 'loadingScreenActivePresetId';
 
+/** World-scoped effect settings keys (used for effects in "World Based" mode) */
+const WORLD_EFFECT_SETTINGS_KEY = 'worldEffectSettings';
+const WORLD_BASED_EFFECTS_KEY = 'worldBasedEffects';
+
 const LOADING_SCREEN_MODES = Object.freeze({
   LEGACY: 'legacy',
   STYLED: 'styled',
@@ -880,5 +884,80 @@ export function registerSettings() {
     default: 'smellyFlies'
   });
 
+  // World-based effect settings: params stored globally instead of per-scene.
+  // Only used for effects the user has toggled to "World Based" mode (lighting, colorCorrection).
+  game.settings.register(FLAG_NAMESPACE, WORLD_EFFECT_SETTINGS_KEY, {
+    name: 'World Effect Settings',
+    hint: 'Stores effect parameters that apply globally across all scenes (world-based mode).',
+    scope: 'world',
+    config: false,
+    type: Object,
+    default: {}
+  });
+
+  game.settings.register(FLAG_NAMESPACE, WORLD_BASED_EFFECTS_KEY, {
+    name: 'World-Based Effects Config',
+    hint: 'Tracks which effects use world-based (global) settings instead of per-scene settings.',
+    scope: 'world',
+    config: false,
+    type: Object,
+    default: {}
+  });
+
   log.info('Settings registered');
+}
+
+/**
+ * Get effect parameters stored in world-based (global) mode.
+ * Returns an object keyed by effectId containing their saved parameters.
+ * @returns {Object.<string, Object>}
+ * @public
+ */
+export function getWorldEffectSettings() {
+  try {
+    return game.settings.get(FLAG_NAMESPACE, WORLD_EFFECT_SETTINGS_KEY) || {};
+  } catch (_) {
+    return {};
+  }
+}
+
+/**
+ * Persist world-based effect parameters.
+ * @param {Object.<string, Object>} settings - All world-effect params keyed by effectId
+ * @returns {Promise<void>}
+ * @public
+ */
+export async function setWorldEffectSettings(settings) {
+  try {
+    await game.settings.set(FLAG_NAMESPACE, WORLD_EFFECT_SETTINGS_KEY, settings || {});
+  } catch (e) {
+    log.warn('Failed to save world effect settings:', e?.message ?? e);
+  }
+}
+
+/**
+ * Get the world-based effects configuration (which effects are in world-based mode).
+ * @returns {Object.<string, boolean>}
+ * @public
+ */
+export function getWorldBasedEffectsConfig() {
+  try {
+    return game.settings.get(FLAG_NAMESPACE, WORLD_BASED_EFFECTS_KEY) || {};
+  } catch (_) {
+    return {};
+  }
+}
+
+/**
+ * Persist the world-based effects configuration.
+ * @param {Object.<string, boolean>} config - effectId → true/false
+ * @returns {Promise<void>}
+ * @public
+ */
+export async function setWorldBasedEffectsConfig(config) {
+  try {
+    await game.settings.set(FLAG_NAMESPACE, WORLD_BASED_EFFECTS_KEY, config || {});
+  } catch (e) {
+    log.warn('Failed to save world-based effects config:', e?.message ?? e);
+  }
 }

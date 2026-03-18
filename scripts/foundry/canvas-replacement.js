@@ -779,6 +779,9 @@ let frameCoordinatorPostPixiUnsubscribe = null;
 /** @type {ResizeObserver|null} - Observer for canvas container resize */
 let resizeObserver = null;
 
+/** @type {MutationObserver|null} - Suppresses PIXI #board canvas style changes in V2 gameplay mode */
+let _boardSuppressionObserver = null;
+
 /** @type {Function|null} - Bound window resize handler for cleanup */
 let windowResizeHandler = null;
 
@@ -3426,6 +3429,11 @@ async function createThreeCanvas(scene) {
   console.log(' -> Step: cleanup (destroyThreeCanvas)');
   destroyThreeCanvas();
   console.log(' -> Step: cleanup DONE');
+  // Clear pending V2 effect params queue from the previous scene so stale
+  // UI parameter values don't get flushed into the new scene's FloorCompositor.
+  safeCall(() => {
+    if (window.MapShine) window.MapShine.__pendingV2EffectParams = {};
+  }, 'cleanup.clearPendingV2Params', Severity.COSMETIC);
   // Retry ambient sound patch at scene init time in case early init occurred
   // before CONFIG ambient sound classes were fully available.
   installAmbientSoundAudibilityPatch();
@@ -3610,8 +3618,12 @@ async function createThreeCanvas(scene) {
     // Foundry (or other modules) can re-apply styles during layer/tool changes.
     // Keep #board suppressed so PIXI cannot contribute pixels.
     safeCall(() => {
-      if (globalThis.__msaV2BoardSuppressionObserverInstalled) return;
-      globalThis.__msaV2BoardSuppressionObserverInstalled = true;
+      // Disconnect any previous observer (pointing at the old scene's #board element)
+      // before installing a new one for the current pixiCanvas.
+      if (_boardSuppressionObserver) {
+        try { _boardSuppressionObserver.disconnect(); } catch (_) {}
+        _boardSuppressionObserver = null;
+      }
 
       const enforce = () => {
         try {
@@ -3630,6 +3642,7 @@ async function createThreeCanvas(scene) {
 
       const obs = new MutationObserver(() => enforce());
       obs.observe(pixiCanvas, { attributes: true, attributeFilter: ['style', 'class'] });
+      _boardSuppressionObserver = obs;
     }, 'v2.boardSuppressionObserver', Severity.COSMETIC);
     
     // CRITICAL: Set PIXI renderer background to transparent
@@ -3962,6 +3975,12 @@ async function createThreeCanvas(scene) {
     if (isDebugLoad) dlp.begin('weatherController.initialize', 'weather');
     console.log(' -> Step: weatherController.initialize');
     await weatherController.initialize();
+    // initialize() has an `if (this.initialized) return` guard — it only runs once.
+    // On subsequent scene changes it is a no-op and the previous scene's weather
+    // state (precipitation, wind, fog density, etc.) would persist into the new scene.
+    // Always reload the snapshot from the new scene's flags so each scene starts
+    // with its own saved weather state (or defaults if no snapshot exists).
+    safeCall(() => weatherController._loadWeatherSnapshotFromScene?.(), 'weatherController.sceneReload', Severity.DEGRADED);
     console.log(' -> Step: weatherController.initialize DONE');
     if (isDebugLoad) dlp.end('weatherController.initialize');
 
@@ -6305,6 +6324,13 @@ function destroyThreeCanvas() {
     sceneComposer.dispose();
     sceneComposer = null;
     log.debug('Scene composer disposed');
+  }
+
+  // Disconnect the board suppression observer so it doesn't hold a reference to
+  // the old #board element across scene transitions.
+  if (_boardSuppressionObserver) {
+    safeDispose(() => { _boardSuppressionObserver.disconnect(); }, 'boardSuppressionObserver.disconnect');
+    _boardSuppressionObserver = null;
   }
 
   // Remove canvas element

@@ -422,6 +422,13 @@ export class LevelNavigatorOverlay {
   _onDragStart(event) {
     if (!this._overlayHandle) return;
 
+    // Don't start a drag from interactive controls (e.g. the close button).
+    // Preventing default on pointerdown would otherwise suppress the click.
+    const targetEl = event?.target instanceof Element ? event.target : null;
+    if (targetEl?.closest?.('button, input, select, textarea, a, [role="button"]')) {
+      return;
+    }
+
     this._drag.active = true;
     const p = this._overlayHandle.lockedScreenPos || this._loadPosition();
     this._drag.startX = Number(p?.x ?? 0);

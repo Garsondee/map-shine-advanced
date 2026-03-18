@@ -21,6 +21,12 @@ import { debugLoadingProfiler } from '../core/debug-loading-profiler.js';
 const log = createLogger('UI');
 
 /**
+ * Effect IDs eligible for "World Based" mode (settings shared across all scenes).
+ * Only Lighting & Tone Mapping and Color Grading & VFX support this toggle.
+ */
+const WORLD_BASED_EFFECT_IDS = ['lighting', 'colorCorrection'];
+
+/**
  * Manages the Tweakpane UI panel with state persistence and performance optimizations
  * Implements decoupled UI loop, throttling, and client settings persistence
  */
@@ -203,6 +209,9 @@ export class TweakpaneManager {
     /** @type {HTMLButtonElement|null} */
     this._quickUndoButtonEl = null;
 
+    /** @type {(() => void)|null} */
+    this._windowResizeHandler = null;
+
     this._uiValidatorActive = false;
     this._uiValidatorRunning = false;
     this._uiValidatorButton = null;
@@ -218,6 +227,25 @@ export class TweakpaneManager {
 
     /** @type {Array<any>} */
     this._primaryFolders = [];
+
+    /** @type {string} Current section filter query */
+    this._filterQuery = '';
+
+    /** @type {HTMLElement|null} Filter bar wrapper element */
+    this._filterBarEl = null;
+
+    /** @type {Array<Object>} Accumulated DOM highlight items awaiting cleanup */
+    this._filterHighlighted = [];
+
+    /** @type {Map<any, boolean>} Saved folder expanded states before filter auto-expand */
+    this._filterSavedExpanded = new Map();
+
+    /**
+     * Set of effectIds currently using world-based (global) settings instead of per-scene.
+     * Populated from game.settings on initialize() and updated when the toggle changes.
+     * @type {Set<string>}
+     */
+    this._worldBasedEffects = new Set();
   }
 
   _registerPrimaryFolder(folder) {
@@ -234,6 +262,332 @@ export class TweakpaneManager {
         }
       }
     });
+  }
+
+  /**
+   * Build the sticky search/filter bar inserted between the pane title and the section list.
+   * Filtering shows/hides top-level sections, auto-expands matched ones, highlights matching
+   * text within visible sections, and scrolls to the first match.
+   * @private
+   */
+  _buildFilterBar() {
+    if (!this.pane?.element) return;
+
+    const paneEl = this.pane.element;
+    const firstFolderEl = paneEl.querySelector('.tp-fldv');
+    const listHost = firstFolderEl?.parentElement;
+    if (!firstFolderEl || !listHost) return;
+
+    if (this._filterBarEl?.parentElement) {
+      this._filterBarEl.remove();
+    }
+
+    const wrap = document.createElement('div');
+    wrap.className = 'ms-filter-bar';
+
+    const icon = document.createElement('span');
+    icon.className = 'ms-filter-icon';
+    icon.textContent = '⌕';
+    icon.setAttribute('aria-hidden', 'true');
+
+    const input = document.createElement('input');
+    input.type = 'search';
+    input.placeholder = 'Filter sections…';
+    input.className = 'ms-filter-input';
+    input.setAttribute('autocomplete', 'off');
+    input.setAttribute('data-lpignore', 'true');
+    input.setAttribute('data-1p-ignore', 'true');
+    input.setAttribute('data-bwignore', 'true');
+
+    const clearBtn = document.createElement('button');
+    clearBtn.type = 'button';
+    clearBtn.textContent = '✕';
+    clearBtn.className = 'ms-filter-clear';
+    clearBtn.style.display = 'none';
+    clearBtn.title = 'Clear filter';
+
+    wrap.appendChild(icon);
+    wrap.appendChild(input);
+    wrap.appendChild(clearBtn);
+
+    // Block pointer events from propagating to the Foundry canvas
+    for (const evt of ['mousedown', 'pointerdown', 'click', 'dblclick']) {
+      wrap.addEventListener(evt, (e) => e.stopPropagation());
+    }
+    wrap.addEventListener('wheel', (e) => e.stopPropagation(), { passive: true });
+    wrap.addEventListener('contextmenu', (e) => { e.preventDefault(); e.stopPropagation(); });
+
+    // Block keyboard events so typing doesn't trigger Foundry hotkeys
+    for (const evt of ['keydown', 'keypress', 'keyup']) {
+      input.addEventListener(evt, (e) => e.stopPropagation());
+    }
+
+    input.addEventListener('input', (e) => {
+      const q = e.target.value;
+      clearBtn.style.display = q ? 'flex' : 'none';
+      this._applyFilter(q.trim());
+    });
+
+    clearBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      input.value = '';
+      clearBtn.style.display = 'none';
+      this._applyFilter('');
+    });
+
+    // Insert directly before the first top-level folder so the filter bar is always
+    // visible at the top of the section list regardless of Tweakpane wrapper layout.
+    listHost.insertBefore(wrap, firstFolderEl);
+
+    this._filterBarEl = wrap;
+  }
+
+  /**
+   * Apply a filter query: show/hide primary sections, auto-expand matched ones,
+   * highlight matching text, and scroll to the first match.
+   * Clearing the query restores all sections and saved accordion states.
+   * @param {string} query
+   * @private
+   */
+  _applyFilter(query) {
+    this._filterQuery = query;
+    const q = query.toLowerCase();
+
+    // Remove all existing text highlights first
+    this._clearFilterHighlights();
+
+    if (!q) {
+      // Restore saved accordion expanded states and unhide all folders
+      const prevSingle = this._singleOpenPrimarySections;
+      this._singleOpenPrimarySections = false;
+      for (const [folder, wasExpanded] of this._filterSavedExpanded) {
+        try { folder.expanded = wasExpanded; } catch (_) {}
+      }
+      this._singleOpenPrimarySections = prevSingle;
+      this._filterSavedExpanded.clear();
+
+      for (const folder of this._primaryFolders) {
+        if (!folder?.element) continue;
+        folder.element.style.display = '';
+        for (const child of folder.element.querySelectorAll('.tp-fldv')) {
+          child.style.display = '';
+        }
+      }
+      return;
+    }
+
+    let firstMatchEl = null;
+
+    // Disable single-open accordion while programmatically expanding matched folders
+    const prevSingle = this._singleOpenPrimarySections;
+    this._singleOpenPrimarySections = false;
+
+    for (const folder of this._primaryFolders) {
+      if (!folder?.element) continue;
+
+      const topEl = folder.element;
+      const childFolders = this._getDirectChildFolderElements(topEl);
+      let folderVisible = false;
+      let localFirstMatchEl = null;
+
+      if (childFolders.length > 0) {
+        // Category-style sections: filter child effect folders individually.
+        for (const childEl of childFolders) {
+          if (!this._folderMatchesQuery(childEl, q)) {
+            childEl.style.display = 'none';
+            continue;
+          }
+
+          childEl.style.display = '';
+          folderVisible = true;
+
+          const firstEl = this._highlightInFolder(childEl, q);
+          if (!localFirstMatchEl) localFirstMatchEl = firstEl || childEl;
+        }
+      } else if (this._folderMatchesQuery(topEl, q)) {
+        // Utility-style top-level sections with no child folders.
+        folderVisible = true;
+        const firstEl = this._highlightInFolder(topEl, q);
+        localFirstMatchEl = firstEl || topEl;
+      }
+
+      if (!folderVisible) {
+        topEl.style.display = 'none';
+        continue;
+      }
+
+      topEl.style.display = '';
+
+      // Save current expanded state (once per filter session) then auto-expand
+      if (!this._filterSavedExpanded.has(folder)) {
+        this._filterSavedExpanded.set(folder, folder.expanded ?? false);
+      }
+      try { folder.expanded = true; } catch (_) {}
+
+      if (!firstMatchEl) firstMatchEl = localFirstMatchEl || topEl;
+    }
+
+    this._singleOpenPrimarySections = prevSingle;
+
+    // Scroll to first match after a short delay to let DOM settle
+    if (firstMatchEl) {
+      setTimeout(() => {
+        try { firstMatchEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); } catch (_) {}
+      }, 60);
+    }
+  }
+
+  /**
+   * Get direct child folders of a folder element (one level down).
+   * @param {HTMLElement} folderEl
+   * @returns {HTMLElement[]}
+   * @private
+   */
+  _getDirectChildFolderElements(folderEl) {
+    if (!folderEl) return [];
+    const contentEl = Array.from(folderEl.children).find((el) => el.classList?.contains('tp-fldv_c'));
+    if (!contentEl) return [];
+    return Array.from(contentEl.children).filter((el) => el.classList?.contains('tp-fldv'));
+  }
+
+  /**
+   * Return true if a top-level folder should remain visible for the query.
+   * Matches against meaningful text nodes within that category:
+   *  - Folder/subfolder titles
+   *  - Label text cells
+   *  - Button title text
+   * This avoids matching incidental numeric values while still surfacing nested
+   * subcategories (e.g., "Cloud" under "Weather").
+   * @param {HTMLElement} folderEl
+   * @param {string} q - Lowercase query string
+   * @returns {boolean}
+   * @private
+   */
+  _folderMatchesQuery(folderEl, q) {
+    if (!folderEl) return false;
+
+    const selectors = ['.tp-fldv_t', '.tp-lblv_l', '.tp-btnv_t'];
+    for (const selector of selectors) {
+      for (const el of folderEl.querySelectorAll(selector)) {
+        const text = (el?.textContent ?? '').toLowerCase();
+        if (text.includes(q)) return true;
+      }
+    }
+
+    return false;
+  }
+
+  /**
+   * Highlight all matching text within a folder's DOM subtree.
+   * Folder titles are handled via text-node replacement (preserving badge child elements).
+   * Pure-text label/button cells are handled via innerHTML replacement.
+   * @param {HTMLElement} folderEl
+   * @param {string} q - Lowercase query string
+   * @returns {HTMLElement|null} First highlighted element (for scroll targeting)
+   * @private
+   */
+  _highlightInFolder(folderEl, q) {
+    if (!folderEl || !q) return null;
+
+    let firstEl = null;
+
+    // Highlight all .tp-fldv_t title elements (top-level and nested sub-folders).
+    // We only target the first direct text node in each title to avoid touching
+    // badge chip child elements (like .map-shine-folder-tag spans).
+    for (const titleEl of folderEl.querySelectorAll('.tp-fldv_t')) {
+      let textNode = null;
+      for (const child of titleEl.childNodes) {
+        if (child.nodeType === Node.TEXT_NODE && child.textContent.trim()) {
+          textNode = child;
+          break;
+        }
+      }
+      if (!textNode) continue;
+
+      const text = textNode.textContent;
+      const idx = text.toLowerCase().indexOf(q);
+      if (idx === -1) continue;
+
+      // Replace the text node with a span wrapper containing the bolded match.
+      // This preserves sibling child elements (badges etc.) in titleEl.
+      const span = document.createElement('span');
+      span.className = 'ms-filter-title-wrap';
+      span.innerHTML =
+        `${this._escHtml(text.slice(0, idx))}<strong class="ms-filter-match">${this._escHtml(text.slice(idx, idx + q.length))}</strong>${this._escHtml(text.slice(idx + q.length))}`;
+      titleEl.replaceChild(span, textNode);
+
+      // Track for cleanup: store original text node so we can swap back
+      this._filterHighlighted.push({ type: 'titleSpan', titleEl, span, textNode });
+      if (!firstEl) firstEl = titleEl;
+    }
+
+    // Highlight pure-text label cells
+    for (const lbl of folderEl.querySelectorAll('.tp-lblv_l')) {
+      if (this._highlightPureTextEl(lbl, q) && !firstEl) firstEl = lbl;
+    }
+
+    // Highlight button title cells
+    for (const btn of folderEl.querySelectorAll('.tp-btnv_t')) {
+      if (this._highlightPureTextEl(btn, q) && !firstEl) firstEl = btn;
+    }
+
+    return firstEl;
+  }
+
+  /**
+   * Highlight a query match inside an element whose content is plain text (no child elements).
+   * Stores original innerHTML for clean restoration.
+   * @param {HTMLElement} el
+   * @param {string} q - Lowercase query string
+   * @returns {boolean} Whether a match was found and highlighted
+   * @private
+   */
+  _highlightPureTextEl(el, q) {
+    if (!el) return false;
+    const text = el.textContent;
+    const idx = text.toLowerCase().indexOf(q);
+    if (idx === -1) return false;
+
+    const originalHtml = el.innerHTML;
+    el.innerHTML =
+      `${this._escHtml(text.slice(0, idx))}<strong class="ms-filter-match">${this._escHtml(text.slice(idx, idx + q.length))}</strong>${this._escHtml(text.slice(idx + q.length))}`;
+
+    this._filterHighlighted.push({ type: 'html', el, originalHtml });
+    return true;
+  }
+
+  /**
+   * Remove all active filter highlights from the DOM and restore original content.
+   * @private
+   */
+  _clearFilterHighlights() {
+    for (const item of this._filterHighlighted) {
+      try {
+        if (item.type === 'html') {
+          item.el.innerHTML = item.originalHtml;
+        } else if (item.type === 'titleSpan') {
+          // Swap the injected span wrapper back out for the original text node
+          if (item.titleEl.contains(item.span)) {
+            item.titleEl.replaceChild(item.textNode, item.span);
+          }
+        }
+      } catch (_) {}
+    }
+    this._filterHighlighted.length = 0;
+  }
+
+  /**
+   * HTML-escape a string for safe injection into innerHTML.
+   * @param {string} str
+   * @returns {string}
+   * @private
+   */
+  _escHtml(str) {
+    return String(str)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
   }
 
   _getProperty(obj, path) {
@@ -404,6 +758,9 @@ export class TweakpaneManager {
     await this.loadUIState();
     if (_isDbg) _dlp.end('tp.loadUIState');
 
+    // Populate _worldBasedEffects from persisted game setting
+    this._initWorldBasedEffects();
+
     const scene = canvas?.scene ?? null;
     const sceneIsEnabled = !!scene && sceneSettings.isEnabled(scene);
     const showOnboardingOnly = (game.user?.isGM ?? false) && !sceneIsEnabled;
@@ -443,11 +800,20 @@ export class TweakpaneManager {
     }
     if (_isDbg) _dlp.end('tp.buildSections');
 
+    // Build the always-visible section filter bar after folders exist so we can
+    // anchor it against the actual section list instead of guessing Tweakpane internals.
+    this._buildFilterBar();
+
     // Start UI update loop only when full controls are available.
     if (!showOnboardingOnly) this.startUILoop();
 
     // Make pane draggable
     this.makeDraggable();
+
+    this._windowResizeHandler = () => {
+      requestAnimationFrame(() => this._ensurePaneSafePosition({ persist: true }));
+    };
+    window.addEventListener('resize', this._windowResizeHandler);
 
     if (!showOnboardingOnly) {
       // Initialize Texture Manager
@@ -2213,6 +2579,9 @@ export class TweakpaneManager {
       expanded: this.accordionStates[`cat_${categoryId}`] ?? false
     });
 
+    // Category folders are top-level sections and must participate in section filtering.
+    this._registerPrimaryFolder(folder);
+
     try {
       const debugEl = this._debugFolder?.element;
       const folderEl = folder?.element;
@@ -2469,6 +2838,57 @@ export class TweakpaneManager {
     const validatedParams = validation.params;
 
     this.addStatusIndicator(effectId, folder);
+
+    // World Based toggle — only for Lighting & Tone Mapping and Color Grading & VFX.
+    // When enabled, this effect reads/writes from a single world-scoped game setting
+    // rather than per-scene flags, so the same values apply across all scenes.
+    if (this._isWorldBasedEligible(effectId)) {
+      const worldBasedState = { worldBased: this._worldBasedEffects.has(effectId) };
+
+      const worldBasedBinding = folder.addBinding(worldBasedState, 'worldBased', {
+        label: 'World Based'
+      });
+
+      worldBasedBinding.on('change', async (ev) => {
+        const isWorldBased = !!ev.value;
+
+        if (isWorldBased) {
+          // Turning ON: add to set, save current params to world storage, persist config
+          this._worldBasedEffects.add(effectId);
+
+          // Snapshot the current UI params into world storage immediately
+          await this._saveWorldEffectParameters(effectId);
+        } else {
+          // Turning OFF: remove from set, reload from scene settings, persist config
+          this._worldBasedEffects.delete(effectId);
+
+          // Reload params from scene flags and push them back into the effect
+          const reloaded = this.loadEffectParameters(effectId, schema);
+          const effectData = this.effectFolders[effectId];
+          if (effectData) {
+            const callback = this.effectCallbacks.get(effectId);
+            for (const [paramId, value] of Object.entries(reloaded)) {
+              effectData.params[paramId] = value;
+              if (effectData.bindings[paramId]) effectData.bindings[paramId].refresh();
+              if (callback) callback(effectId, paramId, value);
+            }
+          }
+        }
+
+        // Persist which effects are world-based across all sessions
+        try {
+          const config = sceneSettings.getWorldBasedEffectsConfig();
+          config[effectId] = isWorldBased;
+          await sceneSettings.setWorldBasedEffectsConfig(config);
+        } catch (e) {
+          log.warn(`Failed to persist world-based config for ${effectId}:`, e);
+        }
+
+        log.debug(`${effectId} world-based mode: ${isWorldBased}`);
+      });
+
+      folder.addBlade({ view: 'separator' });
+    }
 
     // Preset dropdown just under header
     if (schema.presets && typeof schema.presets === 'object') {
@@ -2897,6 +3317,98 @@ export class TweakpaneManager {
   }
 
   /**
+   * Populate _worldBasedEffects from game.settings on startup.
+   * Called once during initialize() after loadUIState().
+   * @private
+   */
+  _initWorldBasedEffects() {
+    try {
+      const config = sceneSettings.getWorldBasedEffectsConfig();
+      this._worldBasedEffects.clear();
+      for (const effectId of WORLD_BASED_EFFECT_IDS) {
+        if (config[effectId] === true) {
+          this._worldBasedEffects.add(effectId);
+        }
+      }
+    } catch (e) {
+      log.warn('_initWorldBasedEffects: failed to read world-based config', e);
+    }
+  }
+
+  /**
+   * Returns true if the given effectId supports the "World Based" mode toggle.
+   * @param {string} effectId
+   * @returns {boolean}
+   * @private
+   */
+  _isWorldBasedEligible(effectId) {
+    return WORLD_BASED_EFFECT_IDS.includes(effectId);
+  }
+
+  /**
+   * Load effect parameters from the world-scoped game setting instead of scene flags.
+   * Used when an effect has been toggled to "World Based" mode.
+   * @param {string} effectId
+   * @param {Object} schema
+   * @returns {Object}
+   * @private
+   */
+  _loadWorldEffectParameters(effectId, schema) {
+    try {
+      const worldSettings = sceneSettings.getWorldEffectSettings();
+      const saved = worldSettings[effectId] || {};
+
+      const schemaParams = schema?.parameters || {};
+      const params = {};
+      for (const paramId of Object.keys(schemaParams)) {
+        const v = this._getProperty(saved, paramId);
+        if (v !== undefined) params[paramId] = v;
+      }
+
+      log.debug(`Loaded world-based parameters for ${effectId}:`, params);
+      return params;
+    } catch (e) {
+      log.warn(`_loadWorldEffectParameters(${effectId}): failed`, e);
+      return {};
+    }
+  }
+
+  /**
+   * Save effect parameters to the world-scoped game setting.
+   * Used when an effect has been toggled to "World Based" mode.
+   * @param {string} effectId
+   * @returns {Promise<void>}
+   * @private
+   */
+  async _saveWorldEffectParameters(effectId) {
+    try {
+      const effectData = this.effectFolders[effectId];
+      if (!effectData) {
+        log.warn(`_saveWorldEffectParameters(${effectId}): effect not registered`);
+        return;
+      }
+
+      const schemaParams = effectData.schema?.parameters || {};
+      const params = {};
+      for (const [paramId, value] of Object.entries(effectData.params || {})) {
+        const def = schemaParams[paramId];
+        if (def?.readonly === true) continue;
+        if (def?.hidden === true && paramId !== 'enabled') continue;
+        const v = this._sanitizeSerializableValue(value);
+        if (v === undefined) continue;
+        this._setProperty(params, paramId, v);
+      }
+
+      const worldSettings = sceneSettings.getWorldEffectSettings();
+      worldSettings[effectId] = params;
+      await sceneSettings.setWorldEffectSettings(worldSettings);
+      log.debug(`Saved ${effectId} to world settings`);
+    } catch (e) {
+      log.warn(`_saveWorldEffectParameters(${effectId}): failed`, e);
+    }
+  }
+
+  /**
    * Load effect parameters from scene settings (three-tier hierarchy)
    * @param {string} effectId - Effect identifier
    * @param {Object} schema - Effect schema with defaults
@@ -2905,6 +3417,11 @@ export class TweakpaneManager {
    */
   loadEffectParameters(effectId, schema) {
     try {
+      // Route to world-scoped storage when this effect is in "World Based" mode
+      if (this._isWorldBasedEligible(effectId) && this._worldBasedEffects.has(effectId)) {
+        return this._loadWorldEffectParameters(effectId, schema);
+      }
+
       const scene = canvas?.scene;
       if (!scene) {
         log.debug(`No active scene, using defaults for ${effectId}`);
@@ -2994,6 +3511,12 @@ export class TweakpaneManager {
    */
   async saveEffectParameters(effectId) {
     try {
+      // Route to world-scoped storage when this effect is in "World Based" mode
+      if (this._isWorldBasedEligible(effectId) && this._worldBasedEffects.has(effectId)) {
+        await this._saveWorldEffectParameters(effectId);
+        return;
+      }
+
       const scene = canvas?.scene;
       if (!scene) {
         log.warn(`Cannot save ${effectId}: no active scene`);
@@ -4384,7 +4907,77 @@ export class TweakpaneManager {
     if (this.container) {
       this.container.style.transformOrigin = 'top left';
       this.container.style.transform = `scale(${this.uiScale})`;
+      this._ensurePaneSafePosition();
     }
+  }
+
+  /**
+   * Keep the pane inside a safe viewport region. If the saved state is fully off-screen,
+   * recover to a known-good default first, then clamp.
+   * @param {{persist?: boolean}} [options]
+   * @returns {boolean} True if position was corrected.
+   * @private
+   */
+  _ensurePaneSafePosition(options = {}) {
+    const persist = options.persist === true;
+    if (!this.container || !this.container.isConnected) return false;
+
+    const rect = this.container.getBoundingClientRect();
+    if (!Number.isFinite(rect.width) || !Number.isFinite(rect.height) || rect.width <= 0 || rect.height <= 0) {
+      return false;
+    }
+
+    const viewportWidth = Math.max(window.innerWidth || 0, document.documentElement?.clientWidth || 0);
+    const viewportHeight = Math.max(window.innerHeight || 0, document.documentElement?.clientHeight || 0);
+    if (viewportWidth <= 0 || viewportHeight <= 0) return false;
+
+    const safeMargin = 12;
+    const minVisible = 48;
+    let corrected = false;
+
+    const isCompletelyOffscreen = (
+      rect.right < minVisible ||
+      rect.bottom < minVisible ||
+      rect.left > viewportWidth - minVisible ||
+      rect.top > viewportHeight - minVisible
+    );
+
+    // If a stale saved position lands fully outside the viewport, recover to default first.
+    if (isCompletelyOffscreen) {
+      this.container.style.left = 'auto';
+      this.container.style.top = 'auto';
+      this.container.style.right = '20px';
+      this.container.style.bottom = '20px';
+      corrected = true;
+    }
+
+    const normalizedRect = this.container.getBoundingClientRect();
+    let targetLeft = normalizedRect.left;
+    let targetTop = normalizedRect.top;
+
+    if (normalizedRect.width > viewportWidth - safeMargin * 2) {
+      targetLeft = safeMargin;
+    } else {
+      targetLeft = Math.max(safeMargin, Math.min(targetLeft, viewportWidth - safeMargin - normalizedRect.width));
+    }
+
+    if (normalizedRect.height > viewportHeight - safeMargin * 2) {
+      targetTop = safeMargin;
+    } else {
+      targetTop = Math.max(safeMargin, Math.min(targetTop, viewportHeight - safeMargin - normalizedRect.height));
+    }
+
+    const epsilon = 0.5;
+    if (Math.abs(targetLeft - normalizedRect.left) > epsilon || Math.abs(targetTop - normalizedRect.top) > epsilon) {
+      this.container.style.right = 'auto';
+      this.container.style.bottom = 'auto';
+      this.container.style.left = `${Math.round(targetLeft)}px`;
+      this.container.style.top = `${Math.round(targetTop)}px`;
+      corrected = true;
+    }
+
+    if (corrected && persist) this.saveUIState();
+    return corrected;
   }
 
   /**
@@ -4462,6 +5055,7 @@ export class TweakpaneManager {
       }
 
       // Save position after drag or click
+      this._ensurePaneSafePosition();
       this.saveUIState();
     };
 
@@ -4548,6 +5142,8 @@ export class TweakpaneManager {
         this.uiScale = state.scale;
         this.updateScale();
       }
+
+      this._ensurePaneSafePosition();
 
       try {
         this.globalParams.introZoomEnabled = game.settings.get('map-shine-advanced', 'introZoomEnabled') !== false;
@@ -4641,6 +5237,7 @@ export class TweakpaneManager {
   show() {
     if (this.container) {
       this.container.style.display = 'block';
+      this._ensurePaneSafePosition({ persist: true });
       this.visible = true;
     }
   }
@@ -4673,6 +5270,11 @@ export class TweakpaneManager {
     log.info('Disposing Tweakpane UI');
     
     this.stopUILoop();
+
+    // Clean up filter bar state
+    this._clearFilterHighlights();
+    this._filterSavedExpanded.clear();
+    this._filterBarEl = null;
     
     if (this.tileMotionDialog) {
       this.tileMotionDialog.dispose();
@@ -4701,6 +5303,11 @@ export class TweakpaneManager {
     if (this.container) {
       this.container.remove();
       this.container = null;
+    }
+
+    if (this._windowResizeHandler) {
+      window.removeEventListener('resize', this._windowResizeHandler);
+      this._windowResizeHandler = null;
     }
     
     this.effectFolders = {};

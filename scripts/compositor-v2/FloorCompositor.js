@@ -62,6 +62,7 @@ import { BushEffectV2 } from './effects/BushEffectV2.js';
 import { TreeEffectV2 } from './effects/TreeEffectV2.js';
 import { OverheadShadowsEffectV2 } from './effects/OverheadShadowsEffectV2.js';
 import { BuildingShadowsEffectV2 } from './effects/BuildingShadowsEffectV2.js';
+import { DustEffectV2 } from './effects/DustEffectV2.js';
 import { DotScreenEffectV2 } from './effects/DotScreenEffectV2.js';
 import { HalftoneEffectV2 } from './effects/HalftoneEffectV2.js';
 import { AsciiEffectV2 } from './effects/AsciiEffectV2.js';
@@ -159,6 +160,13 @@ export class FloorCompositor {
      * @type {FireEffectV2}
      */
     this._fireEffect = new FireEffectV2(this._renderBus);
+
+    /**
+     * V2 Dust Effect: per-floor ambient dust particles driven by _Dust masks.
+     * BatchedRenderer lives in the bus scene.
+     * @type {DustEffectV2}
+     */
+    this._dustEffect = new DustEffectV2(this._renderBus);
 
     /**
      * V2 Window Light Effect: per-tile additive overlays driven by _Windows masks.
@@ -819,7 +827,7 @@ export class FloorCompositor {
   initialize(options = {}) {
     const _onProgress = typeof options?.onProgress === 'function' ? options.onProgress : null;
     // Total number of named effect init steps in this method — update when adding/removing effects.
-    const TOTAL_EFFECT_INITS = 40;
+    const TOTAL_EFFECT_INITS = 41;
     let _effectInitIndex = 0;
     const _reportProgress = (label) => {
       if (!_onProgress) return;
@@ -1090,6 +1098,7 @@ export class FloorCompositor {
     initEffect('BushEffectV2', () => this._bushEffect.initialize());
     initEffect('TreeEffectV2', () => this._treeEffect.initialize());
     initEffect('FireEffectV2', () => this._fireEffect.initialize());
+    initEffect('DustEffectV2', () => this._dustEffect.initialize());
     initEffect('WindowLightEffectV2', () => this._windowLightEffect.initialize());
     // Cloud effect needs the bus scene and main camera for the overhead blocker pass.
     this._cloudEffect.initialize(this.renderer, this._renderBus._scene, this.camera);
@@ -1255,6 +1264,8 @@ export class FloorCompositor {
       if (tree?.enabled && (tree?._overlays?.size ?? 0) > 0) return true;
       const fire = this._fireEffect;
       if (fire?.enabled && fire._activeFloors?.size > 0) return true;
+      const dust = this._dustEffect;
+      if (dust?.enabled && dust._activeFloors?.size > 0) return true;
       const splash = this._waterSplashesEffect;
       if (splash?.enabled && splash._activeFloors?.size > 0) return true;
       const flies = this._smellyFliesEffect;
@@ -1364,6 +1375,7 @@ export class FloorCompositor {
         ['BushEffectV2', () => this._bushEffect.populate(sc.foundrySceneData)],
         ['TreeEffectV2', () => this._treeEffect.populate(sc.foundrySceneData)],
         ['FireEffectV2', () => this._fireEffect.populate(sc.foundrySceneData)],
+        ['DustEffectV2', () => this._dustEffect.populate(sc.foundrySceneData)],
         ['WindowLightEffectV2', () => this._windowLightEffect.populate(sc.foundrySceneData)],
       ];
 
@@ -1483,7 +1495,7 @@ export class FloorCompositor {
     // 3. Sniff scenes from all registered effects
     const effectKeys = [
       '_specularEffect', '_fluidEffect', '_iridescenceEffect', '_prismEffect',
-      '_bushEffect', '_treeEffect', '_fireEffect', '_windowLightEffect',
+      '_bushEffect', '_treeEffect', '_fireEffect', '_dustEffect', '_windowLightEffect',
       '_lightingEffect', '_skyColorEffect', '_colorCorrectionEffect',
       '_filterEffect', '_atmosphericFogEffect', '_fogEffect', '_bloomEffect',
       '_sharpenEffect', '_cloudEffect', '_waterEffect', '_waterSplashesEffect',
@@ -1736,6 +1748,11 @@ export class FloorCompositor {
         this._fireEffect.update(timeInfo);
       } catch (err) {
         log.warn('FireEffectV2 update threw, skipping frame:', err);
+      }
+      try {
+        this._dustEffect.update(timeInfo);
+      } catch (err) {
+        log.warn('DustEffectV2 update threw, skipping frame:', err);
       }
       try {
         this._waterSplashesEffect?.update?.(timeInfo);
@@ -2575,6 +2592,8 @@ export class FloorCompositor {
     this._renderBus.setVisibleFloors(maxFloorIndex);
     // Notify fire effect of floor change so it can swap active particle systems.
     this._fireEffect.onFloorChange(maxFloorIndex);
+    // Notify dust effect of floor change so it can swap active particle systems.
+    this._dustEffect.onFloorChange(maxFloorIndex);
     // Iridescence overlays are bus-managed but we still notify for parity.
     try { this._iridescenceEffect?.onFloorChange?.(maxFloorIndex); } catch (_) {}
     // Notify water splashes of floor change so it can swap active systems.
@@ -2798,6 +2817,7 @@ export class FloorCompositor {
     try { this._bushEffect?.dispose?.(); } catch (_) {}
     try { this._treeEffect?.dispose?.(); } catch (_) {}
     try { this._fireEffect?.dispose?.(); } catch (_) {}
+    try { this._dustEffect?.dispose?.(); } catch (_) {}
     try { this._windowLightEffect?.dispose?.(); } catch (_) {}
     try { this._cloudEffect?.dispose?.(); } catch (_) {}
     try { this._lightingEffect?.dispose?.(); } catch (_) {}

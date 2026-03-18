@@ -27,6 +27,7 @@ import { BloomEffectV2 } from '../compositor-v2/effects/BloomEffectV2.js';
 import { SkyColorEffectV2 } from '../compositor-v2/effects/SkyColorEffectV2.js';
 import { LightingEffectV2 } from '../compositor-v2/effects/LightingEffectV2.js';
 import { FireEffectV2 } from '../compositor-v2/effects/FireEffectV2.js';
+import { DustEffectV2 } from '../compositor-v2/effects/DustEffectV2.js';
 import { AshDisturbanceEffectV2 } from '../compositor-v2/effects/AshDisturbanceEffectV2.js';
 import { CloudEffectV2 } from '../compositor-v2/effects/CloudEffectV2.js';
 import { AsciiEffectV2 } from '../compositor-v2/effects/AsciiEffectV2.js';
@@ -55,6 +56,7 @@ export {
   SkyColorEffectV2,
   LightingEffectV2,
   FireEffectV2,
+  DustEffectV2,
   AshDisturbanceEffectV2,
   SmellyFliesEffect,
   CloudEffectV2,
@@ -104,6 +106,7 @@ const CAPABILITIES = [
   { effectId: 'overhead-shadows',  displayName: 'Overhead Shadows',         category: 'structure',    performanceImpact: 'medium' },
   { effectId: 'building-shadows',  displayName: 'Building Shadows',         category: 'structure',    performanceImpact: 'medium' },
   { effectId: 'fire-sparks',       displayName: 'Fire & Embers',            category: 'particle',     performanceImpact: 'high' },
+  { effectId: 'dust',              displayName: 'Dust Motes',               category: 'particle',     performanceImpact: 'low' },
   { effectId: 'ash-disturbance',   displayName: 'Ash Disturbance',          category: 'particle',     performanceImpact: 'low' },
   { effectId: 'ascii',             displayName: 'ASCII',                    category: 'global',       performanceImpact: 'high' },
   { effectId: 'halftone',          displayName: 'Halftone',                 category: 'global',       performanceImpact: 'medium' },

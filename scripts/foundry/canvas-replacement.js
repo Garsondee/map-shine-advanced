@@ -16,7 +16,6 @@ import { CandleFlamesEffectV2 } from '../compositor-v2/effects/CandleFlamesEffec
 import { LightningEffectV2 } from '../compositor-v2/effects/LightningEffectV2.js';
 import { MaskManager } from '../masks/MaskManager.js';
 import { ParticleSystem } from '../particles/ParticleSystem.js';
-import { DustMotesEffect } from '../particles/DustMotesEffect.js';
 // Effect wiring ->-> tables, helpers, and re-exported effect classes (for static getControlSchema() calls)
 import {
   getIndependentEffectDefs,
@@ -37,6 +36,7 @@ import {
   SkyColorEffectV2,
   LightingEffectV2,
   FireEffectV2,
+  DustEffectV2,
   AshDisturbanceEffectV2,
   SmellyFliesEffect,
   CloudEffectV2,
@@ -5119,6 +5119,11 @@ async function createThreeCanvas(scene) {
           uiManager.registerEffect('fire-sparks', 'Fire',
             FireEffectV2.getControlSchema(), _makeV2Callback('_fireEffect'), 'particle');
         }, 'v2.registerFireUI', Severity.COSMETIC);
+
+        safeCall(() => {
+          uiManager.registerEffect('dust', 'Dust Motes',
+            DustEffectV2.getControlSchema(), _makeV2Callback('_dustEffect'), 'particle');
+        }, 'v2.registerDustUI', Severity.COSMETIC);
 
         safeCall(() => {
           uiManager.registerEffect('water-splashes', 'Water Splashes',

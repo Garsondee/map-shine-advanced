@@ -107,6 +107,12 @@ export class MapPointDrawHandler {
     this.state.previewGroup.visible = false;
     this.state.previewGroup.renderOrder = 9998;
     this.state.previewGroup.layers.set(OVERLAY_THREE_LAYER);
+    this.state.previewGroup.userData = {
+      ...(this.state.previewGroup.userData || {}),
+      type: 'interactionOverlay',
+      preserveOnBusClear: true,
+      interactionOverlayKind: 'mapPointDrawPreview',
+    };
 
     // Line connecting points
     const lineGeo = new THREE.BufferGeometry();
@@ -164,9 +170,23 @@ export class MapPointDrawHandler {
     // Initialize point markers array
     this.state.pointMarkers = [];
 
-    if (this.sceneComposer?.scene) {
-      this.sceneComposer.scene.add(this.state.previewGroup);
+    const hostScene = this._getPreviewHostScene();
+    if (hostScene) {
+      hostScene.add(this.state.previewGroup);
     }
+  }
+
+  /**
+   * Resolve the scene used to render map-point drawing previews.
+   * In V2 we must attach to FloorRenderBus scene; SceneComposer.scene is not
+   * part of the visible render path.
+   * @returns {THREE.Scene|null}
+   * @private
+   */
+  _getPreviewHostScene() {
+    return window.MapShine?.effectComposer?._floorCompositorV2?._renderBus?._scene
+      ?? this.sceneComposer?.scene
+      ?? null;
   }
 
   // ── Drawing Lifecycle ─────────────────────────────────────────────────────

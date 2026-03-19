@@ -119,71 +119,9 @@ import { installLevelsApiFacade } from './levels-api-facade.js';
 import { ZoneManager } from './zone-manager.js';
 import { LevelsPerspectiveBridge } from './levels-perspective-bridge.js';
 import { IntroZoomEffect } from './intro-zoom-effect.js';
-import { msaComputeHash } from '../utils/msa-hash.js';
 
 const log = createLogger('Canvas');
 
-/**
- * Verify the MSA config hash for a newly-loaded scene.
- *
- * If the scene carries an `_expectedHash` flag (embedded by the author when
- * saving config to the Adventure pack via the UI button), this function
- * recomputes the hash from the current scene flags and compares the two values.
- * A match confirms the config survived the Adventure pack round-trip intact.
- * A mismatch means some or all MSA flags were lost or altered during packaging.
- *
- * Fire-and-forget — never throws, never blocks canvas initialization.
- *
- * @param {Scene} scene
- */
-async function _msaVerifyConfigHash(scene) {
-  try {
-    const NS = 'map-shine-advanced';
-    const expected = scene.flags?.[NS]?._expectedHash;
-    if (!expected || typeof expected !== 'string') return;
-
-    const cleanFlags = Object.assign({}, scene.flags?.[NS] ?? {});
-    delete cleanFlags._expectedHash;
-
-    const tiles = {};
-    for (const tile of (scene.tiles ?? [])) {
-      const f = tile.flags?.[NS];
-      if (!f || typeof f !== 'object' || !Object.keys(f).length) continue;
-      const clean = Object.assign({}, f);
-      delete clean._expectedHash;
-      tiles[tile.id] = { flags: { [NS]: clean } };
-    }
-
-    const configObj = {
-      flags: { [NS]: cleanFlags },
-      ...(Object.keys(tiles).length ? { tiles } : {})
-    };
-
-    const actual = await msaComputeHash(configObj);
-
-    if (actual === expected) {
-      log.info(`MSA config verified ✓  hash=${actual}`);
-      console.log(
-        '%cMap Shine MSA config: VERIFIED ✓  hash=' + actual,
-        'color:#00ff88;font-weight:bold;font-family:monospace'
-      );
-    } else {
-      log.warn(`MSA config MISMATCH ✗  expected=${expected}  actual=${actual}`);
-      console.warn(
-        '%cMap Shine MSA config: MISMATCH ✗  expected=' + expected + '  actual=' + actual,
-        'color:#ff4444;font-weight:bold;font-family:monospace'
-      );
-      if (game?.user?.isGM) {
-        ui.notifications?.warn?.(
-          `Map Shine: Config verification failed — expected hash ${expected}, got ${actual}. ` +
-          'Re-run "📦 Save Config to Adventure Pack" on the author world.'
-        );
-      }
-    }
-  } catch (_) {
-    // Never let hash verification block canvas initialization.
-  }
-}
 
 async function _withTimeout(promise, timeoutMs, label) {
   const ms = Number.isFinite(timeoutMs) ? Math.max(0, timeoutMs) : 0;
@@ -558,6 +496,14 @@ let _createThreeCanvasProgressTimeout = null;
 // If a second call arrives while one is already running, it is dropped to avoid
 // double-initialization and the watchdog confusion that causes the 60s fadeIn timeout.
 let _createThreeCanvasRunning = false;
+
+// Tracks whether a Three.js canvas was actually attached to the DOM during the
+// current scene's lifetime. Used to guard renderer disposal in destroyThreeCanvas:
+// we only need to force-context-loss + dispose if the renderer was actually used
+// for a canvas. When coming from a non-MSA scene, the bootstrap renderer exists
+// but was never used — destroying it forces an unnecessary lazy-bootstrap cycle
+// on the next MSA load and risks WebGL context creation failures.
+let _threeCanvasWasActive = false;
 
 /** @type {SceneComposer|null} */
 let sceneComposer = null;
@@ -2944,10 +2890,6 @@ async function onCanvasReady(canvas) {
     return;
   }
 
-  // Fire-and-forget: verify MSA config hash if _expectedHash is present.
-  // Logs VERIFIED / MISMATCH to console; warns GM in notifications bar on mismatch.
-  _msaVerifyConfigHash(scene).catch(() => {});
-
   // Safe-boot follow-up: if any textures were missing/corrupt during Foundry's
   // "Loading Assets" phase, offer to remove the stale references from the
   // scene document so future loads don't repeatedly stall.
@@ -3313,7 +3255,10 @@ function onCanvasTearDown(canvas) {
     try {
       // Only dismiss if the canvas is genuinely idle with no scene.
       // If a new scene is loading or already loaded, canvasReady will handle it.
-      if (!canvas?.scene && !canvas?.loading) {
+      // Use globalThis.canvas (not the closed-over parameter) so we read the
+      // current canvas state, not the stale state from when tearDown fired.
+      const currentCanvas = globalThis.canvas;
+      if (!currentCanvas?.scene && !currentCanvas?.loading) {
         log.warn('Overlay safety net triggered ->-> forcing overlay dismissal (no scene loaded after 10s)');
         safeCall(() => loadingOverlay.fadeIn(300).catch(() => {}), 'overlay.safetyNet', Severity.COSMETIC);
       }
@@ -3492,10 +3437,12 @@ async function createThreeCanvas(scene) {
   _sectionStart('cleanup');
   if (isDebugLoad) dlp.begin('cleanup', 'cleanup');
   _setCreateThreeCanvasProgress('cleanup');
-  // Cleanup existing canvas if present
-  console.log(' -> Step: cleanup (destroyThreeCanvas)');
-  destroyThreeCanvas();
-  console.log(' -> Step: cleanup DONE');
+  // NOTE: destroyThreeCanvas() was previously called here as a belt-and-suspenders
+  // cleanup. It is now REMOVED from this location because onCanvasTearDown already
+  // calls it before createThreeCanvas runs. The redundant call caused two problems:
+  // (1) restoreFoundryRendering() was invoked mid-init, briefly making PIXI layers
+  //     visible during MSA initialization.
+  // (2) It reset _threeCanvasWasActive to false, defeating our renderer-lifecycle guard.
   // Clear pending V2 effect params queue from the previous scene so stale
   // UI parameter values don't get flushed into the new scene's FloorCompositor.
   safeCall(() => {
@@ -3515,16 +3462,31 @@ async function createThreeCanvas(scene) {
 
   _setCreateThreeCanvasProgress('bootstrap/renderer');
 
+  // Helper: dismiss the loading overlay and return early. Used for hard-failure
+  // early exits (missing THREE, bootstrap failure, etc.) to prevent the overlay
+  // from staying visible forever when createThreeCanvas aborts before the main
+  // try/catch block that normally handles overlay dismissal on errors.
+  const _failEarly = (reason) => {
+    log.error(`createThreeCanvas aborting: ${reason}`);
+    safeCall(() => {
+      loadingOverlay.setStage?.('final', 1.0, `Init failed: ${reason}`, { immediate: true });
+      loadingOverlay.fadeIn(500).catch(() => {});
+    }, 'overlay.failEarly', Severity.COSMETIC);
+  };
+
   const THREE = window.THREE;
   if (!THREE) {
-    log.error('three.js not loaded');
+    _failEarly('three.js not loaded');
     return;
   }
 
   // Get MapShine state from global (set by bootstrap)
   let mapShine = window.MapShine;
   if (!mapShine || !mapShine.renderer) {
-    // Try a lazy bootstrap as a recovery path
+    // Try a lazy bootstrap as a recovery path.
+    // This runs when the renderer was disposed during teardown of a previous scene
+    // (including non-MSA scenes that had _threeCanvasWasActive=false, which now
+    // skips the renderer disposal — so this path is less likely to be needed).
     log.warn('MapShine renderer missing, attempting lazy bootstrap...');
     const bootstrapOk = await safeCallAsync(async () => {
       const mod = await import('../core/bootstrap.js');
@@ -3533,10 +3495,10 @@ async function createThreeCanvas(scene) {
       mapShine = window.MapShine;
       return true;
     }, 'lazyBootstrap', Severity.CRITICAL);
-    if (!bootstrapOk) return;
-    if (session.isStale()) return;
+    if (!bootstrapOk) { _failEarly('lazy bootstrap failed'); return; }
+    if (session.isStale()) return; // New scene is loading — its canvasReady will handle overlay.
     if (!mapShine.renderer) {
-      log.error('Renderer still unavailable after lazy bootstrap. Aborting.');
+      _failEarly('renderer unavailable after lazy bootstrap');
       return;
     }
   }
@@ -3575,9 +3537,17 @@ async function createThreeCanvas(scene) {
       return true;
     }, 'waitForFoundryCanvas', Severity.DEGRADED, { fallback: true });
     if (isDebugLoad) dlp.end('waitForFoundryCanvas');
-    if (canvasOk === false) return;
+    if (canvasOk === false) {
+      // Foundry canvas never became ready — could be a blank/invalid scene.
+      // Dismiss overlay so the user isn't permanently locked out.
+      safeCall(() => {
+        loadingOverlay.setStage?.('final', 1.0, 'Canvas ready timeout', { immediate: true });
+        loadingOverlay.fadeIn(500).catch(() => {});
+      }, 'overlay.canvasNotReady', Severity.COSMETIC);
+      return;
+    }
 
-    if (session.isStale()) return;
+    if (session.isStale()) return; // New scene loading — its canvasReady will handle overlay.
 
     safeCall(() => {
       refreshLevelsInteropDiagnostics({
@@ -3746,6 +3716,10 @@ async function createThreeCanvas(scene) {
     
     // Insert our canvas as a sibling, right after the PIXI canvas
     pixiCanvas.parentElement.insertBefore(threeCanvas, pixiCanvas.nextSibling);
+    // Mark that a Three canvas is now live for this scene. This flag gates renderer
+    // disposal in destroyThreeCanvas — we only force-context-loss when the renderer
+    // was actually attached and used, not when it was only bootstrapped but idle.
+    _threeCanvasWasActive = true;
     if (isDebugLoad) dlp.end('canvas.create');
     console.log(' -> Step: canvas.create DONE');
     log.debug('Three.js canvas created and attached as sibling to PIXI canvas');
@@ -6442,20 +6416,19 @@ function destroyThreeCanvas() {
   // detect and re-probe. Explicit cache clearing is still available via
   // clearAssetCache() for manual use or memory pressure scenarios.
 
-  // CRITICAL FIX: Explicitly dispose the Three.js renderer and release its WebGL
-  // context during teardown. The renderer used to persist across scene transitions,
-  // but its active WebGL context competes with PIXI's context during the next
-  // scene load. Browsers have a low limit on concurrent WebGL contexts (typically
-  // 8-16, sometimes as few as 2-3 under GPU pressure). If the limit is exceeded,
-  // the browser loses a context ->-> and if PIXI's context is the one lost, Foundry's
-  // TextureLoader.load() hangs forever because textures can't be uploaded.
+  // Dispose the Three.js renderer and release its WebGL context, but ONLY if
+  // the renderer was actually attached and used for a canvas this session
+  // (_threeCanvasWasActive=true). When coming from a non-MSA scene the bootstrap
+  // renderer exists but was never used — destroying it forces an unnecessary
+  // lazy-bootstrap on the next MSA load and risks WebGL context creation failures
+  // (forceContextLoss + immediate new context can fail on some drivers).
   //
-  // By disposing here, we free the GPU context slot before Foundry creates its
-  // PIXI renderer for the next scene. createThreeCanvas() has a lazy bootstrap
-  // recovery path that will re-create the renderer when needed.
+  // When the renderer WAS active: disposing frees the GPU context slot before
+  // Foundry creates its PIXI renderer for the next scene, preventing context-limit
+  // exhaustion. createThreeCanvas() has a lazy bootstrap path to re-create it.
   safeCall(() => {
     const globalRenderer = window.MapShine?.renderer;
-    if (globalRenderer) {
+    if (globalRenderer && _threeCanvasWasActive) {
       try {
         // Three.js forceContextLoss() calls the WEBGL_lose_context extension
         // to explicitly release the GPU context slot.
@@ -6474,9 +6447,13 @@ function destroyThreeCanvas() {
         window.MapShine.renderer = null;
         window.MapShine.rendererType = null;
       }
+    } else if (globalRenderer && !_threeCanvasWasActive) {
+      log.debug('Three.js renderer kept alive (no canvas was active this session — non-MSA scene)');
     }
   }, 'renderer.dispose(teardown)', Severity.DEGRADED);
   renderer = null;
+  // Reset the active flag so the next scene starts clean.
+  _threeCanvasWasActive = false;
 
   log.info('Three.js canvas destroyed');
 }
@@ -6844,10 +6821,11 @@ function _enforceGameplayPixiSuppression() {
     if (needsEditorOverlay) {
       const pixiCanvas = canvas.app?.view;
       const threeCanvas = document.getElementById('map-shine-canvas');
-      // Overlay-visible contexts (drawings/notes/templates/sounds/etc.) must
-      // remain visually present; forcing opacity 0 here makes these workflows
-      // appear broken even when interaction ownership is correct.
-      const pixiVisualOpacity = '1';
+      // IMPORTANT: keep PIXI visually present only while the user is actively in
+      // a PIXI-driven edit/input context. If overlay mode is enabled solely due
+      // to persistent scene docs (notes/templates), showing board at opacity=1 can
+      // occlude the Three frame with a flat/partial PIXI render during scene init.
+      const pixiVisualOpacity = shouldPixiReceiveInputEffective ? '1' : '0';
       if (canvas.app?.renderer?.background) {
         canvas.app.renderer.background.alpha = 0;
       }
@@ -6874,6 +6852,11 @@ function _enforceGameplayPixiSuppression() {
       // temporarily allowing PIXI hit-testing for editor tools.
       if (isV2Active) {
         safeCall(() => {
+          if (canvas.background) canvas.background.visible = false;
+          if (canvas.grid) canvas.grid.visible = false;
+          if (canvas.weather) canvas.weather.visible = false;
+          if (canvas.environment) canvas.environment.visible = false;
+
           if (!canvas.primary) return;
           // Tile editing relies on Foundry's native tile interaction chain.
           // Keep primary logically visible so transforms update, hide visuals surgically.

@@ -8,7 +8,6 @@
 // hook, before any await. Dynamic imports yield control back to Foundry, which
 // then considers the init phase complete and rejects late registrations.
 import { registerLevelNavigationKeybindings } from './foundry/level-navigation-keybindings.js';
-import { msaComputeHash } from './utils/msa-hash.js';
 
 function _suppressDiagConsoleLogs() {
   try {
@@ -234,99 +233,6 @@ function _installTokenHudPasswordManagerGuard() {
   }
 }
 
-/**
- * Collect all MSA scene-level and tile-level flags for the given scene.
- * Returns a normalized payload ready to store in an Adventure pack's own flags.
- * The `_expectedHash` key is stripped from any existing flags before capture
- * so that the captured config is always a "clean" baseline.
- *
- * @param {Scene} scene
- * @returns {{ sceneId: string, flags: object, tiles?: object }}
- */
-function _msaBuildSceneConfig(scene) {
-  const NS = 'map-shine-advanced';
-  const msaSceneFlags = Object.assign({}, scene.flags?.[NS] ?? {});
-  delete msaSceneFlags._expectedHash; // strip any stale hash before recomputing
-
-  const tiles = {};
-  for (const tile of (scene.tiles ?? [])) {
-    const f = tile.flags?.[NS];
-    if (!f || typeof f !== 'object' || !Object.keys(f).length) continue;
-    const tileCopy = Object.assign({}, f);
-    delete tileCopy._expectedHash;
-    tiles[tile.id] = { flags: { [NS]: tileCopy } };
-  }
-
-  return {
-    sceneId: scene.id,
-    flags: { [NS]: msaSceneFlags },
-    ...(Object.keys(tiles).length ? { tiles } : {})
-  };
-}
-
-/**
- * Save the current scene's MSA config into the specified Adventure pack's own
- * top-level flags. Also computes a SHA-256 fingerprint and embeds it as
- * `_expectedHash` in the scene's MSA flags, enabling load-time verification
- * after import.
- *
- * The config is stored at `adventure.flags['map-shine-advanced'].sceneConfig`
- * which is read by `_injectMSASidecarData` during `preImportAdventure`.
- *
- * @param {string} packId - Full pack ID (e.g. 'my-module.adventure')
- * @returns {Promise<{ hash: string, sceneId: string, packId: string }>}
- */
-async function _msaSaveSceneConfigToAdventurePack(packId) {
-  const NS = 'map-shine-advanced';
-  const scene = canvas?.scene;
-  if (!scene) throw new Error('No active scene');
-  if (!game?.user?.isGM) throw new Error('GM only');
-
-  const config = _msaBuildSceneConfig(scene);
-
-  // Compute hash of the clean config BEFORE embedding the hash sentinel.
-  const hashInput = {
-    flags: config.flags,
-    ...(config.tiles ? { tiles: config.tiles } : {})
-  };
-  const hash = await msaComputeHash(hashInput);
-
-  // Embed the expected hash into scene MSA flags so it travels with the scene
-  // when injected and can be verified by the customer after import.
-  config.flags[NS]._expectedHash = hash;
-
-  const sceneConfig = {
-    [config.sceneId]: {
-      flags: config.flags,
-      ...(config.tiles ? { tiles: config.tiles } : {})
-    }
-  };
-
-  const pack = game.packs.get(packId);
-  if (!pack) throw new Error(`Pack not found: ${packId}`);
-
-  const wasLocked = pack.locked;
-  if (wasLocked) await pack.configure({ locked: false });
-
-  try {
-    const docs = await pack.getDocuments();
-    const adv = docs.find(d => d.documentName === 'Adventure') ?? docs[0];
-    if (!adv) throw new Error('No Adventure document found in pack');
-
-    await adv.setFlag(NS, 'sceneConfig', sceneConfig);
-
-    // Verify the write actually persisted before reporting success.
-    const stored = adv.flags?.[NS]?.sceneConfig;
-    if (!stored?.[config.sceneId]) {
-      throw new Error('Write verification failed: config missing after setFlag');
-    }
-
-    console.log(`Map Shine: MSA config saved to "${packId}" | scene ${config.sceneId} | hash ${hash}`);
-    return { hash, sceneId: config.sceneId, packId };
-  } finally {
-    if (wasLocked) await pack.configure({ locked: true }).catch(() => {});
-  }
-}
 
 /**
  * Module-level cache of msa-data.json sidecars keyed by module ID.
@@ -411,38 +317,6 @@ function _autoCaptureMSASceneFlags(adventure, changes) {
   }
 }
 
-/**
- * Pre-fetch all msa-data.json sidecar files from installed modules that list
- * map-shine-advanced as a dependency. Results are stored in _msaSidecars.
- * @returns {Promise<void>}
- */
-async function _prefetchMSASidecars() {
-  try {
-    for (const mod of (game.modules?.values() ?? [])) {
-      if (!mod.active) continue;
-
-      // Only process modules that declare map-shine-advanced as a required dependency.
-      const deps = mod.relationships?.requires ?? [];
-      const requiresMSA = deps.some(d => (d.id ?? d.name) === 'map-shine-advanced');
-      if (!requiresMSA) continue;
-
-      const url = `modules/${mod.id}/packs/msa-data.json`;
-      try {
-        const resp = await fetch(url);
-        if (!resp.ok) continue;
-        const data = await resp.json();
-        if (data && typeof data === 'object') {
-          _msaSidecars.set(mod.id, data);
-          console.log(`Map Shine: loaded msa-data.json sidecar from module "${mod.id}" (${Object.keys(data.scenes ?? {}).length} scene(s))`);
-        }
-      } catch (_) {
-        // Sidecar not present for this module; skip silently.
-      }
-    }
-  } catch (e) {
-    console.warn('Map Shine: failed to pre-fetch MSA sidecars:', e);
-  }
-}
 
 /**
  * Inject MSA scene/tile flags into Adventure import data.
@@ -1509,18 +1383,6 @@ Hooks.once('ready', async function() {
   console.log('[MSA BOOT] ready hook: fired');
 
   _msaCrisisLog(42, 'ready: loading overlay assigned');
-
-  // NOTE: Sidecar prefetch (_prefetchMSASidecars) removed — the preUpdateAdventure
-  // auto-capture now handles MSA config preservation automatically. The sidecar
-  // code path in _injectMSASidecarData remains as a manual fallback if needed.
-
-  // Expose pack-writing and hash utilities on the global MapShine object so the
-  // UI layer (TweakpaneManager) and console tools can access them.
-  try {
-    MapShine.saveSceneConfigToAdventurePack = _msaSaveSceneConfigToAdventurePack;
-    MapShine.computeMSAHash = msaComputeHash;
-    MapShine.buildSceneConfig = _msaBuildSceneConfig;
-  } catch (_) {}
 
   try {
     // Defer slightly so the rest of Foundry UI finishes settling before we show a modal.

@@ -636,6 +636,7 @@ export class ControlPanelManager {
     });
 
     const onRapidWeatherChange = (param) => async (ev) => {
+      if (this._applyingRapidOverrides) return;
       this._ensureDirectedCustomPreset();
 
       const clamp01 = (v) => {
@@ -686,6 +687,7 @@ export class ControlPanelManager {
       max: 359.0,
       step: 1.0
     }).on('change', async (ev) => {
+      if (this._applyingRapidOverrides) return;
       this._ensureDirectedCustomPreset();
       const value = ((Number(ev?.value) % 360) + 360) % 360;
       this.controlState.directedCustomPreset.windDirection = value;
@@ -695,6 +697,8 @@ export class ControlPanelManager {
   }
 
   async _applyRapidWeatherOverrides() {
+    if (this._applyingRapidOverrides) return;
+    this._applyingRapidOverrides = true;
     this._ensureDirectedCustomPreset();
 
     try {
@@ -759,6 +763,8 @@ export class ControlPanelManager {
       }
     } catch (error) {
       log.error('Failed to apply rapid weather overrides:', error);
+    } finally {
+      this._applyingRapidOverrides = false;
     }
   }
 

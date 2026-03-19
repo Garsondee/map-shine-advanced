@@ -1510,9 +1510,9 @@ Hooks.once('ready', async function() {
 
   _msaCrisisLog(42, 'ready: loading overlay assigned');
 
-  // Pre-fetch MSA sidecar JSON files from all installed MSA-dependent modules so
-  // the preImportAdventure hook can inject them synchronously when needed.
-  _prefetchMSASidecars().catch(() => {});
+  // NOTE: Sidecar prefetch (_prefetchMSASidecars) removed — the preUpdateAdventure
+  // auto-capture now handles MSA config preservation automatically. The sidecar
+  // code path in _injectMSASidecarData remains as a manual fallback if needed.
 
   // Expose pack-writing and hash utilities on the global MapShine object so the
   // UI layer (TweakpaneManager) and console tools can access them.

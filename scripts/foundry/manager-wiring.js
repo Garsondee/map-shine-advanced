@@ -2,7 +2,6 @@
  * @fileoverview Manager cross-wiring and global exposure helpers.
  *
  * Extracted from canvas-replacement.js to isolate:
- * - Map points → particle effect wiring
  * - window.MapShine exposure of all managers and effects
  *
  * Manager *construction* remains in createThreeCanvas because it depends on
@@ -11,45 +10,6 @@
  *
  * @module foundry/manager-wiring
  */
-
-import { createLogger } from '../core/log.js';
-
-const log = createLogger('ManagerWiring');
-
-// ── Map Points → Effect Cross-Wiring ────────────────────────────────────────
-
-/**
- * Effects that consume map-point sources.
- * Each entry: [effectMap display name, whether to require existing groups].
- * @type {Array<[string, boolean]>}
- */
-const MAP_POINT_CONSUMERS = [
-  ['Fire Sparks',    true],   // Only wire if groups already exist
-  ['Smelly Flies',   false],  // Always wire — listens for changes
-  ['Lightning',      false],
-  ['Candle Flames',  false],
-];
-
-/**
- * Wire a MapPointsManager to all particle effects that consume map-point sources.
- * @param {Map<string, Object>} effectMap - Display name → effect instance
- * @param {import('../scene/map-points-manager.js').MapPointsManager} mapPointsManager
- */
-export function wireMapPointsToEffects(effectMap, mapPointsManager) {
-  for (const [name, requireGroups] of MAP_POINT_CONSUMERS) {
-    const effect = effectMap.get(name);
-    if (!effect) continue;
-    if (requireGroups && (!mapPointsManager.groups || mapPointsManager.groups.size === 0)) continue;
-    if (typeof effect.setMapPointsSources !== 'function') continue;
-
-    try {
-      effect.setMapPointsSources(mapPointsManager);
-      log.info(`Map points wired to ${name}`);
-    } catch (e) {
-      log.warn(`Failed to wire map points to ${name}:`, e);
-    }
-  }
-}
 
 // ── Global Exposure ─────────────────────────────────────────────────────────
 

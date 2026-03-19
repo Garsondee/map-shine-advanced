@@ -55,6 +55,9 @@ class DustFadeOverLifeBehavior {
     this._glitterStrength = 0.0;
     this._glitterRateMin = 8.0;
     this._glitterRateMax = 16.0;
+    this._skyTintEnabled = false;
+    this._skyTintStrength = 0.0;
+    this._skyTintColor = { r: 1.0, g: 1.0, b: 1.0 };
   }
 
   initialize(particle) {
@@ -91,6 +94,24 @@ class DustFadeOverLifeBehavior {
     const baseG = (typeof particle._dustBaseG === 'number') ? particle._dustBaseG : particle.color.y;
     const baseB = (typeof particle._dustBaseB === 'number') ? particle._dustBaseB : particle.color.z;
 
+    let tintR = baseR;
+    let tintG = baseG;
+    let tintB = baseB;
+    if (this._skyTintEnabled && this._skyTintStrength > 0.0001) {
+      // Preserve base intensity while shifting hue toward live sky tint.
+      const avg = Math.max(0.0001, (baseR + baseG + baseB) / 3.0);
+      const sr = Math.max(0.0, Number(this._skyTintColor?.r) || 0.0);
+      const sg = Math.max(0.0, Number(this._skyTintColor?.g) || 0.0);
+      const sb = Math.max(0.0, Number(this._skyTintColor?.b) || 0.0);
+      const targetR = avg * sr;
+      const targetG = avg * sg;
+      const targetB = avg * sb;
+      const mix = Math.max(0.0, Math.min(1.0, this._skyTintStrength));
+      tintR = baseR + (targetR - baseR) * mix;
+      tintG = baseG + (targetG - baseG) * mix;
+      tintB = baseB + (targetB - baseB) * mix;
+    }
+
     let glitterMul = 1.0;
     if (this._glitterEnabled && this._glitterStrength > 0.0001) {
       const phase = Number.isFinite(particle._dustGlitterPhase) ? particle._dustGlitterPhase : 0.0;
@@ -104,9 +125,9 @@ class DustFadeOverLifeBehavior {
     }
 
     const finalBrightness = this._brightness * glitterMul;
-    particle.color.x = baseR * finalBrightness;
-    particle.color.y = baseG * finalBrightness;
-    particle.color.z = baseB * finalBrightness;
+    particle.color.x = tintR * finalBrightness;
+    particle.color.y = tintG * finalBrightness;
+    particle.color.z = tintB * finalBrightness;
     particle.color.w = baseA * envelope * this._opacity;
   }
 
@@ -122,6 +143,16 @@ class DustFadeOverLifeBehavior {
     const maxHz = (p && typeof p.glitterRateMax === 'number') ? p.glitterRateMax : 16.0;
     this._glitterRateMin = Math.max(0.1, Math.min(minHz, maxHz));
     this._glitterRateMax = Math.max(this._glitterRateMin, Math.max(minHz, maxHz));
+    this._skyTintEnabled = !!(p && p.skyTintEnabled);
+    this._skyTintStrength = (p && typeof p.skyTintStrength === 'number')
+      ? Math.max(0.0, Math.min(1.0, p.skyTintStrength))
+      : 0.0;
+    const sky = this.ownerEffect?._skyState?.skyTintColor;
+    this._skyTintColor = {
+      r: Math.max(0.0, Number(sky?.r) || 1.0),
+      g: Math.max(0.0, Number(sky?.g) || 1.0),
+      b: Math.max(0.0, Number(sky?.b) || 1.0),
+    };
   }
 
   reset() {
@@ -209,6 +240,17 @@ export class DustEffectV2 {
     this._rebuildInFlight = null;
     /** @type {boolean} */
     this._rebuildQueued = false;
+    /** @type {import('../../scene/map-points-manager.js').MapPointsManager|null} */
+    this._mapPointsManager = null;
+    /** @type {(() => void)|null} */
+    this._mapPointChangeListener = null;
+    /** @type {any} */
+    this._activeLevelContext = null;
+    /** @type {{ skyTintColor: { r: number, g: number, b: number }, sunAzimuthDeg: number }} */
+    this._skyState = {
+      skyTintColor: { r: 1.0, g: 1.0, b: 1.0 },
+      sunAzimuthDeg: 180.0,
+    };
 
     this.params = {
       enabled: false,
@@ -216,6 +258,8 @@ export class DustEffectV2 {
       maxParticles: 4000,
       brightness: 3.0,
       opacity: 0.5,
+      skyTintEnabled: false,
+      skyTintStrength: 0.0,
       glitterEnabled: false,
       glitterStrength: 0.12,
       glitterRateMin: 8.0,
@@ -242,7 +286,7 @@ export class DustEffectV2 {
       enabled: true,
       groups: [
         { name: 'dust', label: 'Dust Motes', type: 'inline', parameters: ['density', 'maxParticles'] },
-        { name: 'appearance', label: 'Appearance', type: 'inline', separator: true, parameters: ['brightness', 'opacity'] },
+        { name: 'appearance', label: 'Appearance', type: 'inline', separator: true, parameters: ['brightness', 'opacity', 'skyTintEnabled', 'skyTintStrength'] },
         { name: 'glitter', label: 'Glitter', type: 'inline', separator: true, parameters: ['glitterEnabled', 'glitterStrength', 'glitterRateMin', 'glitterRateMax'] },
         { name: 'lifetime', label: 'Lifetime & Size', type: 'inline', separator: true, parameters: ['lifeMin', 'lifeMax', 'sizeMin', 'sizeMax'] },
         { name: 'volume', label: 'Volume', type: 'inline', separator: true, parameters: ['zMin', 'zMax'] },
@@ -254,6 +298,8 @@ export class DustEffectV2 {
         maxParticles: { type: 'slider', label: 'Max Particles', min: 0, max: 20000, step: 100, default: 4000 },
         brightness: { type: 'slider', label: 'Brightness', min: 0.0, max: 3.0, step: 0.05, default: 3.0 },
         opacity: { type: 'slider', label: 'Opacity', min: 0.0, max: 1.0, step: 0.01, default: 0.5 },
+        skyTintEnabled: { type: 'boolean', label: 'Sky Tint Dust', default: false },
+        skyTintStrength: { type: 'slider', label: 'Sky Tint Strength', min: 0.0, max: 1.0, step: 0.01, default: 0.0 },
         glitterEnabled: { type: 'boolean', label: 'Enable Glitter', default: false },
         glitterStrength: { type: 'slider', label: 'Glitter Strength', min: 0.0, max: 0.6, step: 0.01, default: 0.12 },
         glitterRateMin: { type: 'slider', label: 'Glitter Rate Min (Hz)', min: 0.1, max: 30.0, step: 0.1, default: 8.0 },
@@ -317,6 +363,60 @@ export class DustEffectV2 {
     }
   }
 
+  /**
+   * Receives live sky state from FloorCompositor.
+   * @param {{ skyTintColor?: { r?: number, g?: number, b?: number }, sunAzimuthDeg?: number }} state
+   */
+  setSkyState(state = {}) {
+    const tint = state?.skyTintColor;
+    this._skyState = {
+      skyTintColor: {
+        r: Math.max(0.0, Number(tint?.r) || 1.0),
+        g: Math.max(0.0, Number(tint?.g) || 1.0),
+        b: Math.max(0.0, Number(tint?.b) || 1.0),
+      },
+      sunAzimuthDeg: Number.isFinite(Number(state?.sunAzimuthDeg)) ? Number(state.sunAzimuthDeg) : 180.0,
+    };
+  }
+
+  /**
+   * Wire dust map-point sources from MapPointsManager.
+   * @param {import('../../scene/map-points-manager.js').MapPointsManager|null} manager
+   */
+  setMapPointsSources(manager) {
+    const prevManager = this._mapPointsManager;
+    if (this._mapPointChangeListener && prevManager) {
+      prevManager.removeChangeListener(this._mapPointChangeListener);
+    }
+
+    this._mapPointsManager = manager || null;
+    this._mapPointChangeListener = () => this._queueRebuild();
+
+    if (this._mapPointsManager) {
+      this._mapPointsManager.addChangeListener(this._mapPointChangeListener);
+    }
+
+    this._queueRebuild();
+  }
+
+  setActiveLevelContext(context = null) {
+    const nextContext = context ?? window.MapShine?.activeLevelContext ?? null;
+    const prevKey = this._levelContextKey(this._activeLevelContext);
+    const nextKey = this._levelContextKey(nextContext);
+    this._activeLevelContext = nextContext;
+
+    if (prevKey !== nextKey) {
+      this._queueRebuild();
+    }
+  }
+
+  _levelContextKey(context) {
+    const b = Number(context?.bottom);
+    const t = Number(context?.top);
+    if (!Number.isFinite(b) || !Number.isFinite(t)) return 'all-levels';
+    return `${b}:${t}`;
+  }
+
   async populate(foundrySceneData) {
     if (!this._initialized) return;
     this._lastPopulateSceneData = foundrySceneData ?? this._lastPopulateSceneData;
@@ -362,6 +462,8 @@ export class DustEffectV2 {
       });
     }
 
+    this._accumulateDustPointsFromMapPoints({ floors });
+
     for (const [floorIndex, state] of this._floorStates) {
       this._rebuildSystemsForFloor(floorIndex, state.points);
     }
@@ -376,7 +478,7 @@ export class DustEffectV2 {
     this._activateCurrentFloor();
 
     if (this._floorStates.size === 0) {
-      log.warn('DustEffectV2: no spawn points found from _Dust masks (background/tiles)');
+      log.warn('DustEffectV2: no spawn points found from _Dust masks or dust map points');
     }
 
     log.info('DustEffectV2 populated', {
@@ -408,6 +510,9 @@ export class DustEffectV2 {
   onFloorChange(maxFloorIndex) {
     if (!this._initialized) return;
 
+    // Keep floor-scoped map-point groups in sync with active level context.
+    this.setActiveLevelContext(window.MapShine?.activeLevelContext ?? null);
+
     this._updateBatchRenderOrder(maxFloorIndex);
 
     const desired = new Set();
@@ -437,6 +542,11 @@ export class DustEffectV2 {
 
   dispose() {
     this.clear();
+    if (this._mapPointChangeListener && this._mapPointsManager) {
+      this._mapPointsManager.removeChangeListener(this._mapPointChangeListener);
+    }
+    this._mapPointChangeListener = null;
+    this._mapPointsManager = null;
     this._particleTexture?.dispose();
     this._particleTexture = null;
     this._batchRenderer = null;
@@ -745,6 +855,12 @@ export class DustEffectV2 {
 
     if (!points || points.length === 0) return;
 
+    this._appendPointsToFloorState(floorIndex, points);
+  }
+
+  _appendPointsToFloorState(floorIndex, points) {
+    if (!points || points.length === 0) return;
+
     const existing = this._floorStates.get(floorIndex);
     if (!existing) {
       this._floorStates.set(floorIndex, { points, systems: [] });
@@ -755,6 +871,162 @@ export class DustEffectV2 {
     merged.set(existing.points, 0);
     merged.set(points, existing.points.length);
     existing.points = merged;
+  }
+
+  _accumulateDustPointsFromMapPoints({ floors }) {
+    const manager = this._mapPointsManager;
+    if (!manager) return;
+
+    const groups = typeof manager.getGroupsByEffect === 'function'
+      ? manager.getGroupsByEffect('dust')
+      : [];
+    if (!Array.isArray(groups) || groups.length === 0) return;
+
+    let contributingGroups = 0;
+    let contributedPointTriples = 0;
+
+    for (const group of groups) {
+      if (!group || !Array.isArray(group.points) || group.points.length === 0) continue;
+
+      const floorIndices = this._resolveMapPointGroupFloorIndices(group, floors);
+      if (!floorIndices.length) continue;
+
+      let points = null;
+      if (group.type === 'area' && group.points.length >= 3) {
+        points = this._sampleMapPointAreaToWorldPoints(group);
+      } else if (group.type === 'point') {
+        points = this._sampleMapPointPointGroupToWorldPoints(group);
+      }
+
+      if (!points || points.length === 0) continue;
+      contributingGroups += 1;
+      contributedPointTriples += Math.floor(points.length / 3);
+      for (const floorIndex of floorIndices) {
+        this._appendPointsToFloorState(floorIndex, points);
+      }
+    }
+
+    if (contributingGroups > 0) {
+      log.info('DustEffectV2: ingested dust map-point groups', {
+        groups: contributingGroups,
+        sampledPoints: contributedPointTriples,
+      });
+    }
+  }
+
+  _resolveMapPointGroupFloorIndices(group, floors) {
+    if (!Array.isArray(floors) || floors.length === 0) return [0];
+
+    const binding = group?.metadata?.levelBinding;
+    const mode = String(binding?.mode || 'all-levels');
+    if (mode !== 'locked') {
+      return floors.map((_, idx) => idx);
+    }
+
+    const bottom = Number(binding?.bottom);
+    const top = Number(binding?.top);
+    if (!Number.isFinite(bottom) || !Number.isFinite(top)) {
+      const activeFloor = window.MapShine?.floorStack?.getActiveFloor?.();
+      const idx = Number.isFinite(activeFloor?.index) ? activeFloor.index : 0;
+      return [idx];
+    }
+
+    const matched = [];
+    for (let i = 0; i < floors.length; i++) {
+      const floor = floors[i];
+      const fMin = Number(floor?.elevationMin);
+      const fMax = Number(floor?.elevationMax);
+      if (!Number.isFinite(fMin) || !Number.isFinite(fMax)) continue;
+      if (top >= fMin && bottom <= fMax) matched.push(i);
+    }
+
+    if (matched.length > 0) return matched;
+    const activeFloor = window.MapShine?.floorStack?.getActiveFloor?.();
+    const idx = Number.isFinite(activeFloor?.index) ? activeFloor.index : 0;
+    return [idx];
+  }
+
+  _sampleMapPointPointGroupToWorldPoints(group) {
+    const points = group?.points;
+    if (!Array.isArray(points) || points.length === 0) return null;
+
+    const out = [];
+    const intensity = this._mapPointEmissionIntensity(group);
+    for (const point of points) {
+      const fx = Number(point?.x);
+      const fy = Number(point?.y);
+      if (!Number.isFinite(fx) || !Number.isFinite(fy)) continue;
+      out.push(fx, fy, intensity);
+    }
+    return out.length ? new Float32Array(out) : null;
+  }
+
+  _sampleMapPointAreaToWorldPoints(group) {
+    const polygon = group?.points;
+    if (!Array.isArray(polygon) || polygon.length < 3) return null;
+
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    for (const p of polygon) {
+      const x = Number(p?.x);
+      const y = Number(p?.y);
+      if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+      if (x < minX) minX = x;
+      if (y < minY) minY = y;
+      if (x > maxX) maxX = x;
+      if (y > maxY) maxY = y;
+    }
+
+    if (!Number.isFinite(minX) || !Number.isFinite(minY) || !Number.isFinite(maxX) || !Number.isFinite(maxY)) {
+      return null;
+    }
+
+    const width = Math.max(1, maxX - minX);
+    const height = Math.max(1, maxY - minY);
+    const stride = Math.max(24, Math.min(160, Math.floor(Math.max(width, height) / 24)));
+    const intensity = this._mapPointEmissionIntensity(group);
+    const out = [];
+
+    // Include vertices so very small polygons still emit.
+    for (const p of polygon) {
+      const x = Number(p?.x);
+      const y = Number(p?.y);
+      if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+      out.push(x, y, intensity);
+    }
+
+    for (let y = minY; y <= maxY; y += stride) {
+      for (let x = minX; x <= maxX; x += stride) {
+        if (!this._isPointInPolygon(x, y, polygon)) continue;
+        out.push(x, y, intensity);
+      }
+    }
+
+    return out.length ? new Float32Array(out) : null;
+  }
+
+  _mapPointEmissionIntensity(group) {
+    const i = Number(group?.emission?.intensity);
+    if (!Number.isFinite(i)) return 1.0;
+    return Math.max(0.05, Math.min(1.0, i));
+  }
+
+  _isPointInPolygon(x, y, polygon) {
+    let inside = false;
+    for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+      const xi = Number(polygon[i]?.x);
+      const yi = Number(polygon[i]?.y);
+      const xj = Number(polygon[j]?.x);
+      const yj = Number(polygon[j]?.y);
+      if (!Number.isFinite(xi) || !Number.isFinite(yi) || !Number.isFinite(xj) || !Number.isFinite(yj)) continue;
+
+      const crosses = ((yi > y) !== (yj > y))
+        && (x < ((xj - xi) * (y - yi) / Math.max(1e-6, (yj - yi)) + xi));
+      if (crosses) inside = !inside;
+    }
+    return inside;
   }
 
   _scanDustMaskToWorldPoints(dustImage, outdoorsImage, { x, y, w, h, worldH }) {

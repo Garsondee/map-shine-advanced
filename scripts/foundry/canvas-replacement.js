@@ -104,7 +104,7 @@ import { TokenMovementManager } from '../scene/token-movement-manager.js';
 import { LoadSession } from '../core/load-session.js';
 import { ResizeHandler } from './resize-handler.js';
 import { ModeManager } from './mode-manager.js';
-import { wireMapPointsToEffects, exposeGlobals } from './manager-wiring.js';
+import { exposeGlobals } from './manager-wiring.js';
 import { DepthPassManager } from '../scene/depth-pass-manager.js';
 import {
   detectLevelsRuntimeInteropState,
@@ -119,8 +119,71 @@ import { installLevelsApiFacade } from './levels-api-facade.js';
 import { ZoneManager } from './zone-manager.js';
 import { LevelsPerspectiveBridge } from './levels-perspective-bridge.js';
 import { IntroZoomEffect } from './intro-zoom-effect.js';
+import { msaComputeHash } from '../utils/msa-hash.js';
 
 const log = createLogger('Canvas');
+
+/**
+ * Verify the MSA config hash for a newly-loaded scene.
+ *
+ * If the scene carries an `_expectedHash` flag (embedded by the author when
+ * saving config to the Adventure pack via the UI button), this function
+ * recomputes the hash from the current scene flags and compares the two values.
+ * A match confirms the config survived the Adventure pack round-trip intact.
+ * A mismatch means some or all MSA flags were lost or altered during packaging.
+ *
+ * Fire-and-forget — never throws, never blocks canvas initialization.
+ *
+ * @param {Scene} scene
+ */
+async function _msaVerifyConfigHash(scene) {
+  try {
+    const NS = 'map-shine-advanced';
+    const expected = scene.flags?.[NS]?._expectedHash;
+    if (!expected || typeof expected !== 'string') return;
+
+    const cleanFlags = Object.assign({}, scene.flags?.[NS] ?? {});
+    delete cleanFlags._expectedHash;
+
+    const tiles = {};
+    for (const tile of (scene.tiles ?? [])) {
+      const f = tile.flags?.[NS];
+      if (!f || typeof f !== 'object' || !Object.keys(f).length) continue;
+      const clean = Object.assign({}, f);
+      delete clean._expectedHash;
+      tiles[tile.id] = { flags: { [NS]: clean } };
+    }
+
+    const configObj = {
+      flags: { [NS]: cleanFlags },
+      ...(Object.keys(tiles).length ? { tiles } : {})
+    };
+
+    const actual = await msaComputeHash(configObj);
+
+    if (actual === expected) {
+      log.info(`MSA config verified ✓  hash=${actual}`);
+      console.log(
+        '%cMap Shine MSA config: VERIFIED ✓  hash=' + actual,
+        'color:#00ff88;font-weight:bold;font-family:monospace'
+      );
+    } else {
+      log.warn(`MSA config MISMATCH ✗  expected=${expected}  actual=${actual}`);
+      console.warn(
+        '%cMap Shine MSA config: MISMATCH ✗  expected=' + expected + '  actual=' + actual,
+        'color:#ff4444;font-weight:bold;font-family:monospace'
+      );
+      if (game?.user?.isGM) {
+        ui.notifications?.warn?.(
+          `Map Shine: Config verification failed — expected hash ${expected}, got ${actual}. ` +
+          'Re-run "📦 Save Config to Adventure Pack" on the author world.'
+        );
+      }
+    }
+  } catch (_) {
+    // Never let hash verification block canvas initialization.
+  }
+}
 
 async function _withTimeout(promise, timeoutMs, label) {
   const ms = Number.isFinite(timeoutMs) ? Math.max(0, timeoutMs) : 0;
@@ -2881,6 +2944,10 @@ async function onCanvasReady(canvas) {
     return;
   }
 
+  // Fire-and-forget: verify MSA config hash if _expectedHash is present.
+  // Logs VERIFIED / MISMATCH to console; warns GM in notifications bar on mismatch.
+  _msaVerifyConfigHash(scene).catch(() => {});
+
   // Safe-boot follow-up: if any textures were missing/corrupt during Foundry's
   // "Loading Assets" phase, offer to remove the stale references from the
   // scene document so future loads don't repeatedly stall.
@@ -4274,7 +4341,11 @@ async function createThreeCanvas(scene) {
     lightIconManager = null;
     enhancedLightIconManager = null;
     soundIconManager = null;
-    mapPointsManager = new MapPointsManager(threeScene);
+    // V2: map-point visual helpers must live in the FloorRenderBus scene.
+    // If they attach to the legacy threeScene, they are outside the visible V2
+    // render path and polygons/handles appear missing.
+    const mapPointHostScene = fc?._renderBus?._scene ?? threeScene;
+    mapPointsManager = new MapPointsManager(mapPointHostScene);
 
     if (isDebugLoad) {
       // Debug mode: initialize managers sequentially for accurate per-manager timing
@@ -4305,8 +4376,9 @@ async function createThreeCanvas(scene) {
     console.log(' -> Manager: Lightweight batch DONE');
     log.info('Parallel manager batch initialized (Door, MapPoints, Grid)');
 
-    // Wire map points to particle effects (fire, candle flame, smelly flies, etc.)
-    // V2: No particle effects ->-> skip wiring.
+    // Map-point consumers are wired by FloorCompositor V2
+    // (smelly flies / lightning / candle flames). Keep manager bootstrap
+    // decoupled from effect wiring.
 
     // Step 4i: Initialize physics ropes (rope/chain map points)
     // V2: Ropes are visual effects ->-> skip.

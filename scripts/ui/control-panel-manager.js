@@ -64,6 +64,14 @@ export class ControlPanelManager {
       // Directed mode
       directedPresetId: 'Clear (Dry)',
       directedTransitionMinutes: 5.0,
+      directedCustomPreset: {
+        precipitation: 0.0,
+        cloudCover: 0.15,
+        windSpeed: 39.0 / 78.0,
+        windDirection: 180.0,
+        fogDensity: 0.0,
+        freezeLevel: 0.0
+      },
       // Wind controls
       // Real-world wind speed in m/s (0..MAX_WIND_MS). WeatherController will still expose
       // a derived legacy 0..1 `windSpeed` for existing effects.
@@ -73,7 +81,8 @@ export class ControlPanelManager {
       // Tile motion transport controls (runtime state still lives in tileMotion scene flag)
       tileMotionSpeedPercent: 100,
       tileMotionAutoPlayEnabled: true,
-      tileMotionTimeFactorPercent: 100
+      tileMotionTimeFactorPercent: 100,
+      tileMotionPaused: false
     };
 
     this._suppressInitialWeatherApply = false;
@@ -98,6 +107,24 @@ export class ControlPanelManager {
 
     /** @type {HTMLElement|null} */
     this.headerOverlay = null;
+
+    /** @type {HTMLInputElement|null} Custom time transition input (replaces Tweakpane binding) */
+    this._timeTransitionInput = null;
+
+    /** @type {HTMLInputElement|null} Custom link-to-Foundry checkbox */
+    this._timeLinkCheckbox = null;
+
+    /** @type {HTMLButtonElement|null} */
+    this._minimizeButton = null;
+
+    /** @type {HTMLButtonElement|null} */
+    this._minimizedButton = null;
+
+    /** @type {boolean} */
+    this._isMinimized = false;
+
+    /** @type {string} */
+    this._uiStateStorageKey = 'map-shine-advanced.control-panel-ui-v1';
 
     /** @type {boolean} */
     this._isDraggingPanel = false;
@@ -135,26 +162,31 @@ export class ControlPanelManager {
     this._tileMotionTimeFactorBinding = null;
 
     /** @type {any|null} */
+    this._tileMotionPausedBinding = null;
+
+    /** @type {any|null} */
     this._weatherDynamicFolder = null;
 
     /** @type {any|null} */
     this._weatherDirectedFolder = null;
 
     /** @type {boolean} */
-    this._singleOpenTopLevelSections = true;
+    this._singleOpenTopLevelSections = false;
 
     /** @type {Array<any>} */
     this._topLevelFolders = [];
 
     /** @type {Object<string, HTMLElement|null>} */
     this._folderTags = {
+      master: null,
       quick: null,
       time: null,
       weather: null,
       wind: null,
       tileMotion: null,
       environment: null,
-      utilities: null
+      utilities: null,
+      system: null
     };
 
     /** @type {boolean} */
@@ -169,7 +201,9 @@ export class ControlPanelManager {
       onDocTouchEnd: () => this._onClockMouseUp(),
       onHeaderMouseDown: (e) => this._onHeaderMouseDown(e),
       onDocPanelMouseMove: (e) => this._onHeaderMouseMove(e),
-      onDocPanelMouseUp: () => this._onHeaderMouseUp()
+      onDocPanelMouseUp: () => this._onHeaderMouseUp(),
+      onMinimizeButtonClick: (e) => this._onMinimizeButtonClick(e),
+      onMinimizedBadgeClick: (e) => this._onMinimizedBadgeClick(e)
     };
   }
 
@@ -186,17 +220,6 @@ export class ControlPanelManager {
   _registerTopLevelFolder(folder) {
     if (!folder) return;
     this._topLevelFolders.push(folder);
-
-    folder.on('fold', (ev) => {
-      if (!ev?.expanded || !this._singleOpenTopLevelSections) return;
-      for (const other of this._topLevelFolders) {
-        if (!other || other === folder) continue;
-        try {
-          if (other.expanded) other.expanded = false;
-        } catch (_) {
-        }
-      }
-    });
   }
 
   _ensureFolderTag(folder, key, initialText = '') {
@@ -229,6 +252,17 @@ export class ControlPanelManager {
     }
   }
 
+  async _setTileMotionPaused(paused, options = undefined) {
+    try {
+      const mgr = window.MapShine?.tileMotionManager;
+      if (!mgr || typeof mgr.setPaused !== 'function') return false;
+      return await mgr.setPaused(paused === true, options);
+    } catch (error) {
+      log.warn('Failed to set tile motion pause state:', error);
+      return false;
+    }
+  }
+
   _setFolderTag(key, text) {
     const tag = this._folderTags?.[key];
     if (!tag) return;
@@ -240,6 +274,492 @@ export class ControlPanelManager {
   _refreshWeatherFolderTag() {
     const isDynamic = this.controlState.weatherMode === 'dynamic';
     this._setFolderTag('weather', isDynamic ? 'Dynamic' : 'Directed');
+  }
+
+  /**
+   * Build the compact live-play layout.
+   * Keeps frequently used controls in one streamlined section.
+   * @private
+   */
+  _buildPhaseALayout() {
+    const masterFolder = this.pane.addFolder({
+      title: '🎛️ Master Control',
+      expanded: true
+    });
+    this._registerTopLevelFolder(masterFolder);
+    this._ensureFolderTag(masterFolder, 'master', 'Live');
+
+    this._ensureDirectedCustomPreset();
+    this._buildRapidWeatherOverrides(masterFolder);
+    this._buildTimeSection(masterFolder, { expanded: true, registerTopLevel: false });
+    this._buildQuickSceneBeatsSection(masterFolder, { expanded: true, registerTopLevel: false });
+    this._buildTileMotionSection(masterFolder, { expanded: false, registerTopLevel: false });
+    this._buildWeatherSection(masterFolder, { expanded: false, registerTopLevel: false });
+    this._buildWindSection(masterFolder, { expanded: false, registerTopLevel: false });
+  }
+
+  _ensureDirectedCustomPreset() {
+    const defaults = {
+      precipitation: 0.0,
+      cloudCover: 0.15,
+      windSpeed: Math.max(0.0, Math.min(1.0, (Number(this.controlState?.windSpeedMS) || 0.0) / 78.0)),
+      windDirection: Number.isFinite(Number(this.controlState?.windDirection)) ? Number(this.controlState.windDirection) : 180.0,
+      fogDensity: 0.0,
+      freezeLevel: 0.0
+    };
+
+    const custom = this.controlState?.directedCustomPreset;
+    if (!custom || typeof custom !== 'object') {
+      this.controlState.directedCustomPreset = { ...defaults };
+      return;
+    }
+
+    const clamp01 = (v, fallback) => {
+      const n = Number(v);
+      if (!Number.isFinite(n)) return fallback;
+      return Math.max(0.0, Math.min(1.0, n));
+    };
+
+    custom.precipitation = clamp01(custom.precipitation, defaults.precipitation);
+    custom.cloudCover = clamp01(custom.cloudCover, defaults.cloudCover);
+    custom.windSpeed = clamp01(custom.windSpeed, defaults.windSpeed);
+    custom.fogDensity = clamp01(custom.fogDensity, defaults.fogDensity);
+    custom.freezeLevel = clamp01(custom.freezeLevel, defaults.freezeLevel);
+
+    const dir = Number(custom.windDirection);
+    custom.windDirection = Number.isFinite(dir)
+      ? ((dir % 360) + 360) % 360
+      : defaults.windDirection;
+  }
+
+  _injectPanelStyles() {
+    const STYLE_ID = 'map-shine-cp-phase-d-style';
+    if (document.getElementById(STYLE_ID)) return;
+
+    const style = document.createElement('style');
+    style.id = STYLE_ID;
+    style.textContent = `
+      /* ═══ Map Shine Control Panel — Phase D Visual Polish ═══ */
+
+      /* Container frame */
+      #map-shine-control-panel {
+        width: 292px !important;
+        max-width: 292px !important;
+        border-radius: 12px !important;
+        overflow: hidden !important;
+        box-shadow:
+          0 28px 72px rgba(0, 0, 0, 0.75),
+          0 8px 24px rgba(0, 0, 0, 0.50),
+          0 0 0 1px rgba(70, 130, 255, 0.20),
+          inset 0 1px 0 rgba(255, 255, 255, 0.05) !important;
+      }
+
+      /* Pane root — CSS variable retheme */
+      #map-shine-control-panel .tp-dfwv {
+        --tp-base-background-color: rgba(8, 11, 22, 1.0);
+        --tp-button-background-color: rgba(255, 255, 255, 0.065);
+        --tp-button-background-color-active: rgba(80, 175, 255, 0.28);
+        --tp-button-background-color-focus: rgba(80, 175, 255, 0.16);
+        --tp-button-background-color-hover: rgba(80, 175, 255, 0.15);
+        --tp-button-foreground-color: rgba(210, 232, 255, 0.90);
+        --tp-container-background-color: rgba(255, 255, 255, 0.025);
+        --tp-container-background-color-active: rgba(80, 175, 255, 0.12);
+        --tp-container-background-color-focus: rgba(80, 175, 255, 0.08);
+        --tp-container-background-color-hover: rgba(255, 255, 255, 0.04);
+        --tp-container-foreground-color: rgba(215, 235, 255, 0.90);
+        --tp-groove-foreground-color: rgba(90, 200, 250, 0.60);
+        --tp-input-background-color: rgba(255, 255, 255, 0.065);
+        --tp-input-background-color-active: rgba(80, 175, 255, 0.22);
+        --tp-input-background-color-focus: rgba(80, 175, 255, 0.13);
+        --tp-input-background-color-hover: rgba(255, 255, 255, 0.10);
+        --tp-input-foreground-color: rgba(225, 242, 255, 0.95);
+        --tp-label-foreground-color: rgba(150, 182, 225, 0.72);
+        --tp-monitor-background-color: rgba(0, 0, 0, 0.22);
+        --tp-monitor-foreground-color: rgba(175, 210, 250, 0.85);
+        width: 292px !important;
+        min-width: 292px !important;
+        max-width: 292px !important;
+        background: rgba(8, 11, 22, 1.0) !important;
+        font-family: var(--font-primary, 'Signika', 'Segoe UI', sans-serif) !important;
+      }
+
+      /* Root title bar */
+      #map-shine-control-panel .tp-rotv_b {
+        background: linear-gradient(135deg,
+          rgba(12, 18, 46, 1.0) 0%,
+          rgba(9, 14, 34, 1.0) 100%) !important;
+        border-bottom: 1px solid rgba(70, 130, 255, 0.22) !important;
+        padding: 0 32px 0 10px !important;
+        height: 30px !important;
+        min-height: 30px !important;
+      }
+
+      #map-shine-control-panel .tp-rotv_t {
+        font-size: 10px !important;
+        font-weight: 700 !important;
+        letter-spacing: 0.12em !important;
+        text-transform: uppercase !important;
+        color: rgba(125, 195, 255, 0.95) !important;
+      }
+
+      /* Scrollable content area */
+      #map-shine-control-panel .tp-rotv_c {
+        background: rgba(8, 11, 22, 1.0) !important;
+        max-height: 78vh;
+        overflow-y: auto;
+        scrollbar-width: thin;
+        scrollbar-color: rgba(70, 140, 255, 0.30) transparent;
+      }
+
+      #map-shine-control-panel .tp-rotv_c::-webkit-scrollbar { width: 3px; }
+      #map-shine-control-panel .tp-rotv_c::-webkit-scrollbar-track { background: transparent; }
+      #map-shine-control-panel .tp-rotv_c::-webkit-scrollbar-thumb {
+        background: rgba(70, 140, 255, 0.32);
+        border-radius: 2px;
+      }
+      #map-shine-control-panel .tp-rotv_c::-webkit-scrollbar-thumb:hover {
+        background: rgba(90, 200, 250, 0.50);
+      }
+
+      /* Blade rows — ultra-tight */
+      #map-shine-control-panel .tp-bldv {
+        margin: 0 !important;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.030) !important;
+      }
+
+      /* Label rows */
+      #map-shine-control-panel .tp-lblv {
+        padding: 0 8px !important;
+        min-height: 22px !important;
+        height: 22px !important;
+      }
+
+      #map-shine-control-panel .tp-lblv_l {
+        font-size: 10px !important;
+        min-width: 76px !important;
+        max-width: 96px !important;
+        white-space: nowrap !important;
+        overflow: hidden !important;
+        text-overflow: ellipsis !important;
+        color: rgba(150, 182, 225, 0.72) !important;
+      }
+
+      /* Top-level folder headers (direct children of content area) */
+      #map-shine-control-panel .tp-rotv_c > .tp-fldv > .tp-fldv_b {
+        background: linear-gradient(90deg,
+          rgba(14, 24, 58, 0.98) 0%,
+          rgba(10, 18, 44, 0.98) 100%) !important;
+        border-bottom: 1px solid rgba(70, 130, 255, 0.22) !important;
+        padding: 0 10px 0 12px !important;
+        height: 27px !important;
+        min-height: 27px !important;
+        position: relative;
+      }
+
+      /* Accent left-border on top-level folders */
+      #map-shine-control-panel .tp-rotv_c > .tp-fldv > .tp-fldv_b::before {
+        content: '';
+        position: absolute;
+        left: 0;
+        top: 4px;
+        bottom: 4px;
+        width: 2px;
+        background: linear-gradient(180deg, rgba(90, 200, 250, 0.90), rgba(60, 140, 255, 0.75));
+        border-radius: 0 2px 2px 0;
+      }
+
+      #map-shine-control-panel .tp-rotv_c > .tp-fldv > .tp-fldv_b:hover {
+        background: linear-gradient(90deg,
+          rgba(20, 34, 74, 0.98) 0%,
+          rgba(16, 26, 60, 0.98) 100%) !important;
+      }
+
+      #map-shine-control-panel .tp-rotv_c > .tp-fldv > .tp-fldv_b .tp-fldv_t {
+        font-size: 9.5px !important;
+        font-weight: 700 !important;
+        letter-spacing: 0.09em !important;
+        text-transform: uppercase !important;
+        color: rgba(125, 192, 255, 0.95) !important;
+      }
+
+      /* Level 2 nested folder headers */
+      #map-shine-control-panel .tp-fldv .tp-fldv .tp-fldv_b {
+        background: rgba(255, 255, 255, 0.022) !important;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.05) !important;
+        padding: 0 8px 0 10px !important;
+        height: 22px !important;
+        min-height: 22px !important;
+      }
+
+      #map-shine-control-panel .tp-fldv .tp-fldv .tp-fldv_b:hover {
+        background: rgba(70, 145, 255, 0.07) !important;
+      }
+
+      #map-shine-control-panel .tp-fldv .tp-fldv .tp-fldv_b .tp-fldv_t {
+        font-size: 9px !important;
+        font-weight: 600 !important;
+        letter-spacing: 0.05em !important;
+        text-transform: uppercase !important;
+        color: rgba(152, 183, 230, 0.80) !important;
+      }
+
+      /* Level 3+ deeply nested folder headers */
+      #map-shine-control-panel .tp-fldv .tp-fldv .tp-fldv .tp-fldv_b {
+        height: 20px !important;
+        min-height: 20px !important;
+        background: rgba(255, 255, 255, 0.013) !important;
+      }
+
+      #map-shine-control-panel .tp-fldv .tp-fldv .tp-fldv .tp-fldv_b .tp-fldv_t {
+        font-size: 8.5px !important;
+        color: rgba(140, 168, 215, 0.72) !important;
+      }
+
+      /* Expand arrow — dim */
+      #map-shine-control-panel .tp-fldv_m {
+        opacity: 0.45 !important;
+      }
+
+      /* Ultra-tight gap between sibling folders */
+      #map-shine-control-panel .tp-fldv + .tp-fldv { margin-top: 0 !important; }
+      #map-shine-control-panel .tp-fldv { margin-bottom: 0 !important; }
+
+      /* ── Sliders ── */
+      #map-shine-control-panel .tp-sldv {
+        height: 22px !important;
+        display: flex;
+        align-items: center;
+      }
+
+      #map-shine-control-panel .tp-sldv_t {
+        height: 2px !important;
+        border-radius: 2px !important;
+        background: rgba(255, 255, 255, 0.12) !important;
+      }
+
+      /* Track fill colour via groove var */
+      #map-shine-control-panel .tp-sldv_t::before {
+        background: linear-gradient(90deg,
+          rgba(55, 155, 255, 0.85) 0%,
+          rgba(90, 200, 250, 0.85) 100%) !important;
+        border-radius: 2px !important;
+      }
+
+      /* ── Buttons ── */
+      #map-shine-control-panel .tp-btnv_b {
+        height: 22px !important;
+        padding: 0 10px !important;
+        font-size: 10px !important;
+        font-weight: 600 !important;
+        border-radius: 5px !important;
+        letter-spacing: 0.02em !important;
+        transition: background 0.12s, border-color 0.12s, color 0.12s !important;
+      }
+
+      /* ── Button grids ── */
+      #map-shine-control-panel .tp-btngridv_b {
+        font-size: 9.5px !important;
+        height: 22px !important;
+        font-weight: 600 !important;
+        border-radius: 4px !important;
+        letter-spacing: 0.02em !important;
+      }
+
+      /* ── Dropdowns ── */
+      #map-shine-control-panel .tp-lstv_s {
+        font-size: 10px !important;
+        height: 20px !important;
+        padding: 0 4px !important;
+        border-radius: 4px !important;
+      }
+
+      /* ── Checkboxes ── */
+      #map-shine-control-panel .tp-ckbv_w {
+        width: 28px !important;
+        height: 14px !important;
+        border-radius: 7px !important;
+      }
+
+      #map-shine-control-panel .tp-ckbv_k {
+        width: 10px !important;
+        height: 10px !important;
+      }
+
+      /* ── Number / text inputs ── */
+      #map-shine-control-panel .tp-nmbv_i,
+      #map-shine-control-panel .tp-txtv_i {
+        font-size: 10px !important;
+        height: 20px !important;
+        padding: 0 6px !important;
+        border-radius: 4px !important;
+      }
+
+      /* ── Separators ── */
+      #map-shine-control-panel .tp-brkv {
+        border-top: 1px solid rgba(255, 255, 255, 0.06) !important;
+        margin: 3px 8px !important;
+      }
+
+      /* ── Tab views ── */
+      #map-shine-control-panel .tp-tabv_b {
+        font-size: 9.5px !important;
+        height: 24px !important;
+        font-weight: 600 !important;
+        letter-spacing: 0.04em !important;
+      }
+
+      /* ── Monitor / read-only ── */
+      #map-shine-control-panel .tp-mntv_v,
+      #map-shine-control-panel .tp-mntv_g {
+        font-size: 10px !important;
+      }
+
+      /* ── Map Shine folder-tag chips — keep legible at compressed height ── */
+      #map-shine-control-panel .map-shine-folder-tag,
+      #map-shine-control-panel .map-shine-effects-count-tag {
+        font-size: 8px !important;
+        padding: 0 4px !important;
+        min-height: 12px !important;
+        line-height: 12px !important;
+        border-radius: 3px !important;
+      }
+    `;
+    document.head.appendChild(style);
+  }
+
+  _buildRapidWeatherOverrides(parentFolder) {
+    this._ensureDirectedCustomPreset();
+
+    const rapidWeatherFolder = parentFolder.addFolder({
+      title: '🎚️ Live Weather Overrides',
+      expanded: true
+    });
+
+    const onRapidWeatherChange = (param) => async (ev) => {
+      this._ensureDirectedCustomPreset();
+
+      const clamp01 = (v) => {
+        const n = Number(v);
+        if (!Number.isFinite(n)) return 0.0;
+        return Math.max(0.0, Math.min(1.0, n));
+      };
+
+      const value = clamp01(ev?.value);
+      this.controlState.directedCustomPreset[param] = value;
+      await this._applyRapidWeatherOverrides();
+
+      if (ev?.last) this.debouncedSave();
+    };
+
+    rapidWeatherFolder.addBinding(this.controlState.directedCustomPreset, 'precipitation', {
+      label: 'Rain',
+      min: 0.0,
+      max: 1.0,
+      step: 0.01
+    }).on('change', onRapidWeatherChange('precipitation'));
+
+    rapidWeatherFolder.addBinding(this.controlState.directedCustomPreset, 'cloudCover', {
+      label: 'Clouds',
+      min: 0.0,
+      max: 1.0,
+      step: 0.01
+    }).on('change', onRapidWeatherChange('cloudCover'));
+
+    rapidWeatherFolder.addBinding(this.controlState.directedCustomPreset, 'freezeLevel', {
+      label: 'Temp (Freeze)',
+      min: 0.0,
+      max: 1.0,
+      step: 0.01
+    }).on('change', onRapidWeatherChange('freezeLevel'));
+
+    rapidWeatherFolder.addBinding(this.controlState.directedCustomPreset, 'windSpeed', {
+      label: 'Wind',
+      min: 0.0,
+      max: 1.0,
+      step: 0.01
+    }).on('change', onRapidWeatherChange('windSpeed'));
+
+    /* Wind direction uses a 0-359° range — needs a separate handler */
+    rapidWeatherFolder.addBinding(this.controlState.directedCustomPreset, 'windDirection', {
+      label: 'Wind Dir',
+      min: 0.0,
+      max: 359.0,
+      step: 1.0
+    }).on('change', async (ev) => {
+      this._ensureDirectedCustomPreset();
+      const value = ((Number(ev?.value) % 360) + 360) % 360;
+      this.controlState.directedCustomPreset.windDirection = value;
+      await this._applyRapidWeatherOverrides();
+      if (ev?.last) this.debouncedSave();
+    });
+  }
+
+  async _applyRapidWeatherOverrides() {
+    this._ensureDirectedCustomPreset();
+
+    try {
+      const weatherController = coreWeatherController || window.MapShine?.weatherController || window.weatherController;
+      if (!weatherController) {
+        log.warn('WeatherController not available for rapid weather overrides');
+        return;
+      }
+
+      this.controlState.weatherMode = 'directed';
+      this.controlState.dynamicEnabled = false;
+      this.controlState.directedPresetId = 'Custom';
+
+      if (typeof weatherController.setDynamicEnabled === 'function') {
+        weatherController.setDynamicEnabled(false);
+      } else if (typeof weatherController.dynamicEnabled !== 'undefined') {
+        weatherController.dynamicEnabled = false;
+      }
+      if (typeof weatherController.enabled !== 'undefined') {
+        weatherController.enabled = true;
+      }
+
+      const clamp01 = (v) => {
+        const n = Number(v);
+        if (!Number.isFinite(n)) return 0.0;
+        return Math.max(0.0, Math.min(1.0, n));
+      };
+
+      const custom = this.controlState.directedCustomPreset;
+      const precipitation = clamp01(custom.precipitation);
+      const cloudCover = clamp01(custom.cloudCover);
+      const freezeLevel = clamp01(custom.freezeLevel);
+      const windSpeed = clamp01(custom.windSpeed);
+      const windDir = ((Number(custom.windDirection) % 360) + 360) % 360;
+
+      custom.precipitation = precipitation;
+      custom.cloudCover = cloudCover;
+      custom.freezeLevel = freezeLevel;
+      custom.windSpeed = windSpeed;
+      custom.windDirection = windDir;
+
+      /* Also sync controlState wind fields so the Wind section stays in sync */
+      this.controlState.windSpeedMS = windSpeed * 78;
+      this.controlState.windDirection = windDir;
+
+      const applyToState = (state) => {
+        if (!state) return;
+        state.precipitation = precipitation;
+        state.cloudCover = cloudCover;
+        state.freezeLevel = freezeLevel;
+        state.windSpeed = windSpeed;
+        state.windDirection = windDir;
+      };
+
+      applyToState(weatherController.targetState);
+      applyToState(weatherController.currentState);
+
+      this._updateWeatherControls();
+      try {
+        this.pane?.refresh?.();
+      } catch (_) {
+      }
+    } catch (error) {
+      log.error('Failed to apply rapid weather overrides:', error);
+    }
   }
 
   _buildStatusPanel() {
@@ -254,113 +774,129 @@ export class ControlPanelManager {
           0% { transform: translateX(-60%); }
           100% { transform: translateX(160%); }
         }
+        .ms-status-mode-badge {
+          display: inline-flex;
+          align-items: center;
+          padding: 1px 5px;
+          border-radius: 3px;
+          font-size: 8.5px;
+          font-weight: 700;
+          letter-spacing: 0.06em;
+          text-transform: uppercase;
+          white-space: nowrap;
+          flex-shrink: 0;
+        }
+        .ms-status-mode-badge--dynamic {
+          background: rgba(80, 175, 255, 0.18);
+          color: rgba(140, 210, 255, 0.95);
+          border: 1px solid rgba(80, 175, 255, 0.28);
+        }
+        .ms-status-mode-badge--directed {
+          background: rgba(160, 110, 255, 0.18);
+          color: rgba(200, 170, 255, 0.95);
+          border: 1px solid rgba(160, 110, 255, 0.28);
+        }
+        .ms-status-mode-badge--off {
+          background: rgba(255, 255, 255, 0.07);
+          color: rgba(180, 190, 210, 0.75);
+          border: 1px solid rgba(255, 255, 255, 0.10);
+        }
       `;
       document.head.appendChild(style);
     }
 
+    const FF = 'system-ui, -apple-system, "Segoe UI", sans-serif';
+
+    /* Outer panel strip */
     const panel = document.createElement('div');
-    panel.style.padding = '10px 12px';
-    panel.style.margin = '6px';
-    panel.style.borderRadius = '8px';
-    panel.style.background = 'rgba(0,0,0,0.25)';
-    panel.style.border = '1px solid rgba(255,255,255,0.10)';
-    panel.style.fontFamily = 'system-ui, -apple-system, Segoe UI, sans-serif';
-    panel.style.fontSize = '13px';
-    panel.style.lineHeight = '1.35';
+    panel.style.padding = '5px 8px 6px';
+    panel.style.background = 'rgba(10, 14, 32, 0.90)';
+    panel.style.borderBottom = '1px solid rgba(60, 110, 255, 0.14)';
+    panel.style.fontFamily = FF;
+    panel.style.fontSize = '10px';
+    panel.style.lineHeight = '1.3';
+    panel.style.color = 'rgba(195, 220, 255, 0.88)';
 
-    const title = document.createElement('div');
-    title.textContent = 'Weather Status';
-    title.style.fontWeight = '600';
-    title.style.marginBottom = '6px';
-    panel.appendChild(title);
+    /* Top row: mode badge + activity description */
+    const topRow = document.createElement('div');
+    topRow.style.display = 'flex';
+    topRow.style.alignItems = 'center';
+    topRow.style.gap = '6px';
+    topRow.style.minHeight = '16px';
 
-    const modeLine = document.createElement('div');
-    modeLine.style.display = 'flex';
-    modeLine.style.justifyContent = 'space-between';
-    modeLine.style.gap = '10px';
-    modeLine.style.opacity = '0.92';
-    modeLine.style.marginBottom = '8px';
-    panel.appendChild(modeLine);
+    const modeText = document.createElement('span');
+    modeText.className = 'ms-status-mode-badge ms-status-mode-badge--off';
 
-    const modeText = document.createElement('div');
-    const activityText = document.createElement('div');
-    activityText.style.opacity = '0.85';
-    modeLine.appendChild(modeText);
-    modeLine.appendChild(activityText);
+    const activityText = document.createElement('span');
+    activityText.style.flex = '1';
+    activityText.style.overflow = 'hidden';
+    activityText.style.textOverflow = 'ellipsis';
+    activityText.style.whiteSpace = 'nowrap';
+    activityText.style.fontSize = '9.5px';
+    activityText.style.opacity = '0.78';
 
-    const scopeLine = document.createElement('div');
-    scopeLine.style.display = 'flex';
-    scopeLine.style.justifyContent = 'space-between';
-    scopeLine.style.gap = '10px';
-    scopeLine.style.opacity = '0.8';
-    scopeLine.style.marginBottom = '8px';
-    scopeLine.style.fontSize = '11px';
-    panel.appendChild(scopeLine);
+    topRow.appendChild(modeText);
+    topRow.appendChild(activityText);
+    panel.appendChild(topRow);
 
-    const scopeLabel = document.createElement('div');
-    scopeLabel.textContent = 'Persistence';
-    const scopeText = document.createElement('div');
-    scopeLine.appendChild(scopeLabel);
-    scopeLine.appendChild(scopeText);
+    /* Stats row: current | target | scope — compact inline */
+    const statsRow = document.createElement('div');
+    statsRow.style.display = 'flex';
+    statsRow.style.gap = '6px';
+    statsRow.style.marginTop = '3px';
+    statsRow.style.fontSize = '9px';
+    statsRow.style.opacity = '0.65';
+    statsRow.style.overflow = 'hidden';
 
-    const row = document.createElement('div');
-    row.style.display = 'grid';
-    row.style.gridTemplateColumns = '1fr 1fr';
-    row.style.gap = '10px';
+    const curText = document.createElement('span');
+    curText.style.flex = '1';
+    curText.style.overflow = 'hidden';
+    curText.style.textOverflow = 'ellipsis';
+    curText.style.whiteSpace = 'nowrap';
 
-    const cur = document.createElement('div');
-    const tgt = document.createElement('div');
+    const tgtText = document.createElement('span');
+    tgtText.style.flex = '1';
+    tgtText.style.overflow = 'hidden';
+    tgtText.style.textOverflow = 'ellipsis';
+    tgtText.style.whiteSpace = 'nowrap';
+    tgtText.style.opacity = '0.80';
 
-    const curLabel = document.createElement('div');
-    curLabel.textContent = 'Now';
-    curLabel.style.opacity = '0.8';
-    curLabel.style.marginBottom = '2px';
+    const scopeText = document.createElement('span');
+    scopeText.style.display = 'none'; // Hidden — scope tracked internally
 
-    const tgtLabel = document.createElement('div');
-    tgtLabel.textContent = 'Target';
-    tgtLabel.style.opacity = '0.8';
-    tgtLabel.style.marginBottom = '2px';
+    statsRow.appendChild(curText);
+    statsRow.appendChild(tgtText);
+    panel.appendChild(statsRow);
 
-    const curText = document.createElement('div');
-    const tgtText = document.createElement('div');
-    curText.style.whiteSpace = 'pre-line';
-    tgtText.style.whiteSpace = 'pre-line';
-
-    cur.appendChild(curLabel);
-    cur.appendChild(curText);
-    tgt.appendChild(tgtLabel);
-    tgt.appendChild(tgtText);
-    row.appendChild(cur);
-    row.appendChild(tgt);
-    panel.appendChild(row);
-
+    /* Slim progress bar — hidden when not transitioning */
     const progressWrap = document.createElement('div');
-    progressWrap.style.marginTop = '8px';
+    progressWrap.style.display = 'none';
+    progressWrap.style.marginTop = '5px';
 
     const progressMeta = document.createElement('div');
     progressMeta.style.display = 'flex';
     progressMeta.style.justifyContent = 'space-between';
-    progressMeta.style.gap = '8px';
-    progressMeta.style.opacity = '0.9';
+    progressMeta.style.marginBottom = '3px';
+    progressMeta.style.fontSize = '8.5px';
+    progressMeta.style.opacity = '0.65';
 
-    const progressLabel = document.createElement('div');
-    const progressPct = document.createElement('div');
-
+    const progressLabel = document.createElement('span');
+    const progressPct = document.createElement('span');
     progressMeta.appendChild(progressLabel);
     progressMeta.appendChild(progressPct);
 
     const barOuter = document.createElement('div');
-    barOuter.style.height = '8px';
+    barOuter.style.height = '2px';
     barOuter.style.borderRadius = '999px';
-    barOuter.style.background = 'rgba(255,255,255,0.10)';
+    barOuter.style.background = 'rgba(255,255,255,0.08)';
     barOuter.style.overflow = 'hidden';
-    barOuter.style.marginTop = '4px';
 
     const barInner = document.createElement('div');
     barInner.style.height = '100%';
     barInner.style.width = '0%';
-    barInner.style.background = 'rgba(80, 200, 255, 0.85)';
+    barInner.style.background = 'linear-gradient(90deg, rgba(55,155,255,0.90), rgba(90,200,250,0.90))';
     barInner.style.transition = 'width 120ms linear';
+    barInner.style.borderRadius = '999px';
     barOuter.appendChild(barInner);
 
     progressWrap.appendChild(progressMeta);
@@ -387,25 +923,221 @@ export class ControlPanelManager {
     this._updateStatusPanel();
   }
 
+  _loadControlPanelUIState() {
+    try {
+      const raw = localStorage.getItem(this._uiStateStorageKey);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      if (!parsed || typeof parsed !== 'object') return null;
+      return parsed;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  _readPx(value) {
+    if (typeof value === 'number' && Number.isFinite(value)) return value;
+    if (typeof value !== 'string') return null;
+    const n = parseFloat(value);
+    return Number.isFinite(n) ? n : null;
+  }
+
+  _saveControlPanelUIState() {
+    try {
+      const state = {
+        minimized: this._isMinimized === true,
+        left: null,
+        top: null
+      };
+
+      if (this._isMinimized && this._minimizedButton) {
+        state.left = this._readPx(this._minimizedButton.style.left);
+        state.top = this._readPx(this._minimizedButton.style.top);
+      } else if (this.container) {
+        state.left = this._readPx(this.container.style.left);
+        state.top = this._readPx(this.container.style.top);
+      }
+
+      localStorage.setItem(this._uiStateStorageKey, JSON.stringify(state));
+    } catch (_) {
+    }
+  }
+
+  _applyControlPanelUIState(state) {
+    if (!state || !this.container) return;
+
+    const left = this._readPx(state.left);
+    const top = this._readPx(state.top);
+
+    if (Number.isFinite(left) && Number.isFinite(top)) {
+      this.container.style.transform = 'none';
+      this.container.style.left = `${left}px`;
+      this.container.style.top = `${top}px`;
+    }
+
+    if (state.minimized === true) {
+      const x = Number.isFinite(left) ? left : 20;
+      const y = Number.isFinite(top) ? top : 20;
+      this._showMinimizedButtonAt(x, y);
+      this._isMinimized = true;
+      this.container.style.display = 'none';
+      this.visible = false;
+    }
+  }
+
+  _createMinimizeControls(parentElement = document.body) {
+    if (!this.container || !this.headerOverlay) return;
+
+    /* ─── In-panel minimize button (top-right of title bar) ─── */
+    const minimizeButton = document.createElement('button');
+    minimizeButton.type = 'button';
+    minimizeButton.title = 'Minimize panel';
+    minimizeButton.textContent = '−';
+    minimizeButton.style.cssText = [
+      'position:absolute',
+      'right:6px',
+      'top:50%',
+      'transform:translateY(-50%)',
+      'width:18px',
+      'height:18px',
+      'border:1px solid rgba(255,255,255,0.16)',
+      'border-radius:4px',
+      'background:rgba(0,0,0,0.30)',
+      'color:rgba(200,225,255,0.85)',
+      'cursor:pointer',
+      'line-height:16px',
+      'padding:0',
+      'font-size:14px',
+      'font-weight:300',
+      'z-index:10002',
+      'transition:background 0.12s,border-color 0.12s,color 0.12s'
+    ].join(';');
+    minimizeButton.addEventListener('mouseenter', () => {
+      minimizeButton.style.background = 'rgba(255,80,80,0.22)';
+      minimizeButton.style.borderColor = 'rgba(255,100,100,0.45)';
+      minimizeButton.style.color = 'rgba(255,200,200,0.95)';
+    });
+    minimizeButton.addEventListener('mouseleave', () => {
+      minimizeButton.style.background = 'rgba(0,0,0,0.30)';
+      minimizeButton.style.borderColor = 'rgba(255,255,255,0.16)';
+      minimizeButton.style.color = 'rgba(200,225,255,0.85)';
+    });
+    minimizeButton.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+    });
+    minimizeButton.addEventListener('click', this._boundHandlers.onMinimizeButtonClick);
+    this.headerOverlay.appendChild(minimizeButton);
+    this._minimizeButton = minimizeButton;
+
+    /* ─── Floating restore icon (shown when minimized) ─── */
+    const minimizedButton = document.createElement('button');
+    minimizedButton.type = 'button';
+    minimizedButton.title = 'Open Map Shine Control';
+    minimizedButton.textContent = '🎛️';
+    minimizedButton.style.cssText = [
+      'position:fixed',
+      'left:20px',
+      'top:20px',
+      'width:32px',
+      'height:32px',
+      'border:1px solid rgba(70,130,255,0.35)',
+      'border-radius:999px',
+      'background:rgba(8,11,22,0.88)',
+      'box-shadow:0 4px 16px rgba(0,0,0,0.55),0 0 0 1px rgba(70,130,255,0.18)',
+      'color:rgba(255,255,255,0.95)',
+      'cursor:pointer',
+      'display:none',
+      'z-index:10001',
+      'padding:0',
+      'line-height:1',
+      'font-size:15px',
+      'transition:box-shadow 0.15s,border-color 0.15s,background 0.15s'
+    ].join(';');
+    minimizedButton.addEventListener('mouseenter', () => {
+      minimizedButton.style.background = 'rgba(14,20,50,0.95)';
+      minimizedButton.style.borderColor = 'rgba(90,200,250,0.55)';
+      minimizedButton.style.boxShadow = '0 6px 24px rgba(0,0,0,0.60),0 0 0 1px rgba(90,200,250,0.28)';
+    });
+    minimizedButton.addEventListener('mouseleave', () => {
+      minimizedButton.style.background = 'rgba(8,11,22,0.88)';
+      minimizedButton.style.borderColor = 'rgba(70,130,255,0.35)';
+      minimizedButton.style.boxShadow = '0 4px 16px rgba(0,0,0,0.55),0 0 0 1px rgba(70,130,255,0.18)';
+    });
+    minimizedButton.addEventListener('click', this._boundHandlers.onMinimizedBadgeClick);
+    parentElement.appendChild(minimizedButton);
+    this._minimizedButton = minimizedButton;
+  }
+
+  _showMinimizedButtonAt(left, top) {
+    if (!this._minimizedButton) return;
+    const pad = 8;
+    const width = this._minimizedButton.offsetWidth || 28;
+    const height = this._minimizedButton.offsetHeight || 28;
+    const maxLeft = Math.max(pad, window.innerWidth - (width + pad));
+    const maxTop = Math.max(pad, window.innerHeight - (height + pad));
+    const x = Math.max(pad, Math.min(maxLeft, Number(left) || pad));
+    const y = Math.max(pad, Math.min(maxTop, Number(top) || pad));
+    this._minimizedButton.style.left = `${x}px`;
+    this._minimizedButton.style.top = `${y}px`;
+    this._minimizedButton.style.display = 'block';
+  }
+
+  _hideMinimizedButton() {
+    if (!this._minimizedButton) return;
+    this._minimizedButton.style.display = 'none';
+  }
+
+  _getPanelAnchorPosition() {
+    if (!this.container) return { left: 20, top: 20 };
+    const rect = this.container.getBoundingClientRect();
+    if (!rect || !Number.isFinite(rect.left) || !Number.isFinite(rect.top)) {
+      return { left: 20, top: 20 };
+    }
+    return { left: rect.left, top: rect.top };
+  }
+
+  _onMinimizeButtonClick(e) {
+    e.preventDefault();
+    e.stopPropagation();
+    this._minimizeToIcon();
+  }
+
+  _onMinimizedBadgeClick(e) {
+    e.preventDefault();
+    e.stopPropagation();
+    this.show();
+  }
+
+  _minimizeToIcon() {
+    if (!this.container) return;
+
+    const anchor = this._getPanelAnchorPosition();
+    this.container.style.display = 'none';
+    this.visible = false;
+    this._isMinimized = true;
+    this._showMinimizedButtonAt(anchor.left, anchor.top);
+
+    if (this._statusIntervalId) {
+      clearInterval(this._statusIntervalId);
+      this._statusIntervalId = null;
+    }
+
+    this._saveControlPanelUIState();
+  }
+
   _formatWeatherLine(state) {
     if (!state) return '—';
-    const pct = (v) => `${Math.round((Number(v) || 0) * 100)}%`;
+    const pct = (v) => `${Math.round(Math.max(0, Math.min(1, Number(v) || 0)) * 100)}%`;
     const windMS = (() => {
-      const ms = Number(state.windSpeedMS);
-      if (Number.isFinite(ms)) return Math.max(0.0, Math.min(78.0, ms));
-      const legacy01 = Number(state.windSpeed);
-      if (Number.isFinite(legacy01)) return Math.max(0.0, Math.min(78.0, legacy01 * 78.0));
-      return 0.0;
+      const ws = Number(state.windSpeed);
+      return (Number.isFinite(ws) && ws > 0.01) ? ws * 78 : (Number(state.windSpeedMS) || 0);
     })();
     const freeze = Math.max(0, Math.min(1, Number(state.freezeLevel) || 0));
-    const tempLabel = freeze > 0.75 ? 'Snow' : (freeze > 0.45 ? 'Sleet' : 'Rain');
-    return [
-      `Precipitation: ${pct(state.precipitation)}`,
-      `Humidity (Clouds): ${pct(state.cloudCover)}`,
-      `Wind Speed: ${windMS.toFixed(1)} m/s`,
-      `Fog: ${pct(state.fogDensity)}`,
-      `Temperature: ${Math.round(freeze * 100)}% (${tempLabel})`
-    ].join('\n');
+    const tempLabel = freeze > 0.75 ? 'Snow' : freeze > 0.45 ? 'Sleet' : 'Rain';
+    /* Short single-line summary for compact status strip */
+    return `${tempLabel} · Rain ${pct(state.precipitation)} · ` +
+           `Clouds ${pct(state.cloudCover)} · Wind ${Math.round(windMS)}m/s`;
   }
 
   _updateStatusPanel() {
@@ -417,7 +1149,8 @@ export class ControlPanelManager {
     els.scopeText.textContent = isGM ? 'Scene (GM authoritative)' : 'Runtime only';
 
     if (!wc) {
-      els.modeText.textContent = 'Weather: Unavailable';
+      els.modeText.className = 'ms-status-mode-badge ms-status-mode-badge--off';
+      els.modeText.textContent = 'Unavailable';
       els.activityText.textContent = '';
       els.curText.textContent = 'WeatherController not available';
       els.tgtText.textContent = '—';
@@ -437,14 +1170,21 @@ export class ControlPanelManager {
     const dynamicPreset = typeof wc.dynamicPresetId === 'string' && wc.dynamicPresetId ? wc.dynamicPresetId : '—';
     const dynamicSpeed = Number.isFinite(wc.dynamicEvolutionSpeed) ? wc.dynamicEvolutionSpeed : null;
 
-    let modeLabel = 'Weather: Directed';
+    let modeLabel;
+    let modeBadgeClass;
     if (!isEnabled) {
-      modeLabel = 'Weather: Disabled';
+      modeLabel = 'Disabled';
+      modeBadgeClass = 'ms-status-mode-badge--off';
     } else if (isDynamic) {
-      if (isPaused) modeLabel = `Weather: Dynamic (Paused)`;
-      else if (isTrans) modeLabel = `Weather: Dynamic (Transitioning)`;
-      else modeLabel = `Weather: Dynamic (Running)`;
+      if (isPaused) modeLabel = 'Dynamic · Paused';
+      else if (isTrans) modeLabel = 'Dynamic · →';
+      else modeLabel = 'Dynamic';
+      modeBadgeClass = 'ms-status-mode-badge--dynamic';
+    } else {
+      modeLabel = 'Directed';
+      modeBadgeClass = 'ms-status-mode-badge--directed';
     }
+    els.modeText.className = `ms-status-mode-badge ${modeBadgeClass}`;
     els.modeText.textContent = modeLabel;
 
     if (isEnabled && isDynamic) {
@@ -456,10 +1196,11 @@ export class ControlPanelManager {
 
     const cur = wc.getCurrentState?.() ?? wc.currentState;
     const tgt = wc.targetState;
-    els.curText.textContent = this._formatWeatherLine(cur);
-    els.tgtText.textContent = this._formatWeatherLine(tgt);
 
     if (!isEnabled) {
+      els.curText.textContent = 'Weather disabled';
+      els.tgtText.textContent = '';
+      els.tgtText.style.display = 'none';
       els.progressWrap.style.display = 'none';
       els.barInner.style.animation = 'none';
       els.barInner.style.width = '0%';
@@ -467,13 +1208,18 @@ export class ControlPanelManager {
     }
 
     if (isTrans) {
+      /* Show current → target during active transition */
+      els.curText.textContent = this._formatWeatherLine(cur);
+      els.tgtText.textContent = '→ ' + this._formatWeatherLine(tgt);
+      els.tgtText.style.display = '';
+
       const dur = Math.max(0.0001, Number(wc.transitionDuration) || 0);
       const el = Math.max(0, Number(wc.transitionElapsed) || 0);
       const t = Math.max(0, Math.min(1, el / dur));
       const eta = Math.max(0, dur - el);
 
       els.progressWrap.style.display = 'block';
-      els.progressLabel.textContent = `Transitioning (${eta.toFixed(1)}s)`;
+      els.progressLabel.textContent = `${eta.toFixed(1)}s remaining`;
       els.progressPct.textContent = `${Math.round(t * 100)}%`;
       els.barInner.style.animation = 'none';
       els.barInner.style.width = `${t * 100}%`;
@@ -481,14 +1227,22 @@ export class ControlPanelManager {
     }
 
     if (isDynamic) {
+      /* Show current state summary for dynamic mode */
+      els.curText.textContent = this._formatWeatherLine(cur);
+      els.tgtText.textContent = '';
+      els.tgtText.style.display = 'none';
       els.progressWrap.style.display = 'block';
-      els.progressLabel.textContent = isPaused ? 'Dynamic: Paused' : 'Dynamic: Running';
-      els.progressPct.textContent = '';
+      els.progressLabel.textContent = isPaused ? 'Paused' : dynamicPreset;
+      els.progressPct.textContent = dynamicSpeed !== null ? `${Math.round(dynamicSpeed)}×` : '';
       els.barInner.style.width = '35%';
       els.barInner.style.animation = isPaused ? 'none' : 'mapShineIndeterminate 1.15s linear infinite';
       return;
     }
 
+    /* Directed / idle — just show current state, hide target */
+    els.curText.textContent = this._formatWeatherLine(cur);
+    els.tgtText.textContent = '';
+    els.tgtText.style.display = 'none';
     els.progressWrap.style.display = 'none';
     els.barInner.style.animation = 'none';
     els.barInner.style.width = '0%';
@@ -649,6 +1403,8 @@ export class ControlPanelManager {
 
     log.info('Initializing Control Panel...');
 
+    this._injectPanelStyles();
+
     // Create container
     this.container = document.createElement('div');
     this.container.id = 'map-shine-control-panel';
@@ -658,6 +1414,10 @@ export class ControlPanelManager {
     this.container.style.top = '50%';
     this.container.style.transform = 'translate(-50%, -50%)';
     this.container.style.display = 'none'; // Initially hidden
+    this.container.style.borderRadius = '12px';
+    this.container.style.overflow = 'hidden';
+    this.container.style.width = '292px';
+    this.container.style.maxWidth = '292px';
     parentElement.appendChild(this.container);
 
     {
@@ -714,7 +1474,11 @@ export class ControlPanelManager {
     this.headerOverlay.addEventListener('mousedown', this._boundHandlers.onHeaderMouseDown);
     this.container.appendChild(this.headerOverlay);
 
+    this._createMinimizeControls(parentElement);
+
     this._buildStatusPanel();
+
+    this._applyControlPanelUIState(this._loadControlPanelUIState());
 
     // Load saved control state
     if (_isDbg) _dlp.begin('cp.loadControlState', 'finalize');
@@ -763,13 +1527,7 @@ export class ControlPanelManager {
 
     // Build UI sections
     if (_isDbg) _dlp.begin('cp.buildSections', 'finalize');
-    this._buildQuickSceneBeatsSection();
-    this._buildTimeSection();
-    this._buildWeatherSection();
-    this._buildWindSection();
-    this._buildTileMotionSection();
-    this._buildEnvironmentSection();
-    this._buildUtilitiesSection();
+    this._buildPhaseALayout();
     if (_isDbg) _dlp.end('cp.buildSections');
 
     // Apply initial state
@@ -779,78 +1537,57 @@ export class ControlPanelManager {
 
     this._registerFoundryTimeHook();
 
-    this._startEnvironmentSync();
-
     log.info('Control Panel initialized');
   }
 
-  _buildQuickSceneBeatsSection() {
-    const beatsFolder = this.pane.addFolder({
-      title: '⚡ Quick Scene Beats',
-      expanded: true
+  _buildQuickSceneBeatsSection(parentFolder = this.pane, options = undefined) {
+    const targetFolder = parentFolder || this.pane;
+    const beatsFolder = targetFolder.addFolder({
+      title: options?.title ?? '⚡ Weather Presets',
+      expanded: options?.expanded ?? true
     });
-    this._registerTopLevelFolder(beatsFolder);
+    if (options?.registerTopLevel !== false && targetFolder === this.pane) this._registerTopLevelFolder(beatsFolder);
     this._ensureFolderTag(beatsFolder, 'quick', 'Quick');
 
     const contentElement = beatsFolder.element.querySelector('.tp-fldv_c') || beatsFolder.element;
-
-    const makeGrid = () => {
-      const grid = document.createElement('div');
-      grid.style.display = 'grid';
-      grid.style.gridTemplateColumns = '1fr 1fr';
-      grid.style.gap = '6px';
-      grid.style.margin = '8px 0';
-      return grid;
-    };
 
     const makeBtn = (label, onClick) => {
       const btn = document.createElement('button');
       btn.type = 'button';
       btn.textContent = label;
-      btn.style.padding = '6px 8px';
-      btn.style.borderRadius = '6px';
-      btn.style.border = '1px solid rgba(255,255,255,0.15)';
-      btn.style.background = 'rgba(255,255,255,0.06)';
-      btn.style.color = 'inherit';
-      btn.style.cursor = 'pointer';
+      btn.style.cssText = [
+        'padding:5px 4px',
+        'border-radius:5px',
+        'border:1px solid rgba(255,255,255,0.12)',
+        'background:rgba(255,255,255,0.06)',
+        'color:rgba(210,232,255,0.90)',
+        'cursor:pointer',
+        'font-size:9.5px',
+        'font-weight:600',
+        'font-family:inherit',
+        'transition:background 0.12s,border-color 0.12s'
+      ].join(';');
+      btn.addEventListener('mouseenter', () => {
+        btn.style.background = 'rgba(80,170,255,0.14)';
+        btn.style.borderColor = 'rgba(80,170,255,0.32)';
+      });
+      btn.addEventListener('mouseleave', () => {
+        btn.style.background = 'rgba(255,255,255,0.06)';
+        btn.style.borderColor = 'rgba(255,255,255,0.12)';
+      });
       btn.addEventListener('click', onClick);
       return btn;
     };
 
-    const timeLabel = document.createElement('div');
-    timeLabel.textContent = 'Time';
-    timeLabel.style.fontSize = '11px';
-    timeLabel.style.opacity = '0.85';
-    contentElement.appendChild(timeLabel);
+    /* Compact 2×2 weather preset grid with theme-consistent padding */
+    const weatherGrid = document.createElement('div');
+    weatherGrid.style.cssText = 'display:grid;grid-template-columns:1fr 1fr;gap:3px;padding:5px 6px 5px;';
 
-    const timeGrid = makeGrid();
-    const timeBeats = this._getQuickTimeAnchors();
-    for (const [label, hour] of Object.entries(timeBeats)) {
-      timeGrid.appendChild(makeBtn(label, () => {
-        this._revealTimeTargetUI();
-        const mins = Number(this.controlState.timeTransitionMinutes) || 0;
-        if (mins > 0) {
-          void this._startTimeOfDayTransition(hour, mins).then(() => this.debouncedSave());
-        } else {
-          void this._setTimeOfDay(hour).then(() => this.debouncedSave());
-        }
-      }));
-    }
-    contentElement.appendChild(timeGrid);
-
-    const weatherLabel = document.createElement('div');
-    weatherLabel.textContent = 'Weather';
-    weatherLabel.style.fontSize = '11px';
-    weatherLabel.style.opacity = '0.85';
-    weatherLabel.style.marginTop = '2px';
-    contentElement.appendChild(weatherLabel);
-
-    const weatherGrid = makeGrid();
     const weatherBeats = {
-      Clear: 'Clear (Dry)',
-      Rain: 'Rain',
-      Storm: 'Thunderstorm',
-      Snow: 'Snow'
+      'Clear ☀️': 'Clear (Dry)',
+      'Rain 🌧️': 'Rain',
+      'Storm ⛈️': 'Thunderstorm',
+      'Snow ❄️': 'Snow'
     };
     for (const [label, presetId] of Object.entries(weatherBeats)) {
       weatherGrid.appendChild(makeBtn(label, () => {
@@ -874,12 +1611,13 @@ export class ControlPanelManager {
     await this._startDirectedTransition();
   }
 
-  _buildEnvironmentSection() {
-    const envFolder = this.pane.addFolder({
-      title: '🌤️ Environment',
-      expanded: false
+  _buildEnvironmentSection(parentFolder = this.pane, options = undefined) {
+    const targetFolder = parentFolder || this.pane;
+    const envFolder = targetFolder.addFolder({
+      title: options?.title ?? '🌤️ Environment',
+      expanded: options?.expanded ?? false
     });
-    this._registerTopLevelFolder(envFolder);
+    if (options?.registerTopLevel !== false && targetFolder === this.pane) this._registerTopLevelFolder(envFolder);
     this._ensureFolderTag(envFolder, 'environment', 'Sun');
 
     // Initialize from the shared config panel state if available.
@@ -950,75 +1688,70 @@ export class ControlPanelManager {
    * Build the Time of Day section with custom clock
    * @private
    */
-  _buildTimeSection() {
-    const timeFolder = this.pane.addFolder({
-      title: '⏰ Time Director',
-      expanded: true
+  _buildTimeSection(parentFolder = this.pane, options = undefined) {
+    const targetFolder = parentFolder || this.pane;
+    const timeFolder = targetFolder.addFolder({
+      title: options?.title ?? '⏰ Time Director',
+      expanded: options?.expanded ?? true
     });
-    this._registerTopLevelFolder(timeFolder);
+    if (options?.registerTopLevel !== false && targetFolder === this.pane) this._registerTopLevelFolder(timeFolder);
     this._ensureFolderTag(timeFolder, 'time', 'Now');
 
     const refreshTimeFolderTag = () => {
       const mins = Number(this.controlState.timeTransitionMinutes) || 0;
       if (this.controlState.linkTimeToFoundry) {
-        this._setFolderTag('time', 'Linked');
+        this._setFolderTag('time', 'Foundry Lock');
       } else if (mins > 0) {
-        this._setFolderTag('time', `Δ ${mins.toFixed(1)}m`);
+        this._setFolderTag('time', `${mins.toFixed(1)} min`);
       } else {
         this._setFolderTag('time', 'Now');
       }
     };
 
-    // Create custom clock DOM
     this.clockElement = this._createClockDOM();
-    const contentElement = timeFolder.element.querySelector('.tp-fldv_c') || timeFolder.element;
-    contentElement.appendChild(this.clockElement);
 
-    timeFolder.addBinding(this.controlState, 'timeTransitionMinutes', {
-      label: 'Transition (min)',
-      min: 0.0,
-      max: 60.0,
-      step: 0.5
-    }).on('change', (ev) => {
-      refreshTimeFolderTag();
-      if (ev?.last) this.debouncedSave();
-    });
+    /* Two-column layout: clock left, controls right */
+    const twoCol = document.createElement('div');
+    twoCol.style.cssText = 'display:flex;gap:6px;padding:6px 6px 5px;align-items:flex-start;';
 
-    const linkBinding = timeFolder.addBinding(this.controlState, 'linkTimeToFoundry', {
-      label: 'Link Foundry Time'
-    }).on('change', (ev) => {
-      refreshTimeFolderTag();
+    /* Left: clock */
+    const clockWrap = document.createElement('div');
+    clockWrap.style.flexShrink = '0';
+    clockWrap.appendChild(this.clockElement);
 
-      if (ev?.value === true) {
-        void this._syncTimeFromFoundryWorldTime(game?.time?.worldTime, false);
-      }
+    /* Right: controls column */
+    const ctrlWrap = document.createElement('div');
+    ctrlWrap.style.cssText = 'flex:1;min-width:0;display:flex;flex-direction:column;gap:4px;padding-top:1px;';
 
-      if (ev?.last) this.debouncedSave();
-    });
-    linkBinding.disabled = !(game.user?.isGM === true);
-
-    refreshTimeFolderTag();
-
-    // Quick time buttons
+    /* 2×2 quick-time buttons */
     const quickTimes = this._getQuickTimeAnchors();
-
     const btnGrid = document.createElement('div');
-    btnGrid.style.display = 'grid';
-    btnGrid.style.gridTemplateColumns = '1fr 1fr';
-    btnGrid.style.gap = '6px';
-    btnGrid.style.margin = '8px auto 0';
-    btnGrid.style.width = '200px';
+    btnGrid.style.cssText = 'display:grid;grid-template-columns:1fr 1fr;gap:3px;';
 
     for (const [label, hour] of Object.entries(quickTimes)) {
       const btn = document.createElement('button');
       btn.type = 'button';
       btn.textContent = label;
-      btn.style.padding = '6px 8px';
-      btn.style.borderRadius = '6px';
-      btn.style.border = '1px solid rgba(255,255,255,0.15)';
-      btn.style.background = 'rgba(255,255,255,0.06)';
-      btn.style.color = 'inherit';
-      btn.style.cursor = 'pointer';
+      btn.style.cssText = [
+        'padding:5px 3px',
+        'border-radius:5px',
+        'border:1px solid rgba(255,255,255,0.12)',
+        'background:rgba(255,255,255,0.06)',
+        'color:rgba(210,232,255,0.90)',
+        'cursor:pointer',
+        'font-size:9.5px',
+        'font-weight:600',
+        'font-family:inherit',
+        'transition:background 0.12s,border-color 0.12s'
+      ].join(';');
+      btn.addEventListener('mouseenter', () => {
+        btn.style.background = 'rgba(80,170,255,0.16)';
+        btn.style.borderColor = 'rgba(80,170,255,0.38)';
+      });
+      btn.addEventListener('mouseleave', () => {
+        btn.style.background = 'rgba(255,255,255,0.06)';
+        btn.style.borderColor = 'rgba(255,255,255,0.12)';
+      });
       btn.addEventListener('click', () => {
         this._revealTimeTargetUI();
         const mins = Number(this.controlState.timeTransitionMinutes) || 0;
@@ -1030,8 +1763,111 @@ export class ControlPanelManager {
       });
       btnGrid.appendChild(btn);
     }
+    ctrlWrap.appendChild(btnGrid);
 
-    contentElement.appendChild(btnGrid);
+    /* Thin separator */
+    const sep = document.createElement('div');
+    sep.style.cssText = 'border-top:1px solid rgba(255,255,255,0.06);margin:1px 0;';
+    ctrlWrap.appendChild(sep);
+
+    /* Transition row: label + number input */
+    const transRow = document.createElement('div');
+    transRow.style.cssText = 'display:flex;align-items:center;gap:4px;font-size:9.5px;color:rgba(155,185,225,0.75);';
+
+    const transLabel = document.createElement('span');
+    transLabel.textContent = 'Transition';
+    transLabel.style.flexShrink = '0';
+
+    const transInput = document.createElement('input');
+    transInput.type = 'number';
+    transInput.min = '0';
+    transInput.max = '60';
+    transInput.step = '0.5';
+    transInput.value = String(this.controlState.timeTransitionMinutes ?? 0);
+    transInput.style.cssText = [
+      'flex:1',
+      'min-width:0',
+      'height:18px',
+      'padding:0 4px',
+      'border:1px solid rgba(255,255,255,0.12)',
+      'border-radius:4px',
+      'background:rgba(255,255,255,0.07)',
+      'color:rgba(220,238,255,0.92)',
+      'font-size:9.5px',
+      'font-family:inherit',
+      'outline:none',
+      'transition:border-color 0.12s,background 0.12s'
+    ].join(';');
+    transInput.addEventListener('change', () => {
+      this.controlState.timeTransitionMinutes = Math.max(0, Math.min(60, Number(transInput.value) || 0));
+      transInput.value = String(this.controlState.timeTransitionMinutes);
+      refreshTimeFolderTag();
+      this.debouncedSave();
+    });
+    transInput.addEventListener('focus', () => {
+      transInput.style.borderColor = 'rgba(90,200,250,0.45)';
+      transInput.style.background = 'rgba(90,200,250,0.10)';
+    });
+    transInput.addEventListener('blur', () => {
+      transInput.style.borderColor = 'rgba(255,255,255,0.12)';
+      transInput.style.background = 'rgba(255,255,255,0.07)';
+    });
+    this._timeTransitionInput = transInput;
+
+    transRow.appendChild(transLabel);
+    transRow.appendChild(transInput);
+    ctrlWrap.appendChild(transRow);
+
+    /* Link-to-Foundry checkbox row */
+    const linkRow = document.createElement('label');
+    linkRow.style.cssText = [
+      'display:flex',
+      'align-items:center',
+      'gap:5px',
+      'cursor:pointer',
+      'font-size:9.5px',
+      'color:rgba(155,185,225,0.75)',
+      'user-select:none'
+    ].join(';');
+    linkRow.title = 'Lock Map Shine time to the Foundry world clock';
+
+    const linkChk = document.createElement('input');
+    linkChk.type = 'checkbox';
+    linkChk.checked = this.controlState.linkTimeToFoundry === true;
+    linkChk.disabled = !(game.user?.isGM === true);
+    linkChk.style.cssText = 'width:12px;height:12px;cursor:pointer;flex-shrink:0;accent-color:rgba(90,200,250,1);';
+    linkChk.addEventListener('change', (e) => {
+      this.controlState.linkTimeToFoundry = e.target.checked;
+      refreshTimeFolderTag();
+      if (e.target.checked) {
+        void this._syncTimeFromFoundryWorldTime(game?.time?.worldTime, false);
+      }
+      this.debouncedSave();
+    });
+    this._timeLinkCheckbox = linkChk;
+
+    const linkLabel = document.createElement('span');
+    linkLabel.textContent = 'Foundry Time Lock';
+    linkRow.appendChild(linkChk);
+    linkRow.appendChild(linkLabel);
+    ctrlWrap.appendChild(linkRow);
+
+    twoCol.appendChild(clockWrap);
+    twoCol.appendChild(ctrlWrap);
+
+    const contentElement = timeFolder.element.querySelector('.tp-fldv_c') || timeFolder.element;
+    contentElement.appendChild(twoCol);
+
+    refreshTimeFolderTag();
+  }
+
+  _updateCustomTimeControls() {
+    if (this._timeTransitionInput) {
+      this._timeTransitionInput.value = String(this.controlState.timeTransitionMinutes ?? 0);
+    }
+    if (this._timeLinkCheckbox) {
+      this._timeLinkCheckbox.checked = this.controlState.linkTimeToFoundry === true;
+    }
   }
 
   /**
@@ -1040,172 +1876,136 @@ export class ControlPanelManager {
    * @private
    */
   _createClockDOM() {
-    const container = document.createElement('div');
-    container.style.cssText = `
-      width: 200px;
-      height: auto;
-      position: relative;
-      margin: 10px auto;
-    `;
+    /* 120px face — all pixel values scaled from the original 180px design (scale ≈ 60/85) */
+    const FACE_SIZE = 120;
+    const CENTER   = 60;  // face center in px
 
-    // Clock face
+    const container = document.createElement('div');
+    container.style.cssText = 'width:120px;position:relative;flex-shrink:0;';
+
     const face = document.createElement('div');
     const modulePath = game?.modules?.get?.('map-shine-advanced')?.path;
     const clockBg = modulePath ? `${modulePath}/assets/clock-face.webp` : null;
-    face.style.cssText = `
-      width: 180px;
-      height: 180px;
-      border: 3px solid #444;
-      border-radius: 50%;
-      position: relative;
-      background: ${clockBg ? `url('${clockBg}') center/cover` : 'none'};
-      margin: 0 auto;
-      cursor: crosshair;
-    `;
+    face.style.cssText = [
+      `width:${FACE_SIZE}px`,
+      `height:${FACE_SIZE}px`,
+      'border:2px solid rgba(60,90,160,0.55)',
+      'border-radius:50%',
+      'position:relative',
+      `background:${clockBg ? `url('${clockBg}') center/cover` : 'rgba(14,20,42,0.85)'}`,
+      'cursor:crosshair',
+      'box-shadow:0 0 10px rgba(0,0,0,0.45),inset 0 0 12px rgba(0,0,0,0.35)'
+    ].join(';');
 
-    // Hour markers (24-hour)
-    // Noon (12) is at the top, midnight (0) is at the bottom.
+    /* Hour markers (24-hour, noon at top, midnight at bottom) */
+    const R1_MAJOR = 47, R1_MINOR = 50, R2 = 55;
     for (let i = 0; i < 24; i++) {
-      const marker = document.createElement('div');
       const isMajor = i % 6 === 0;
       const shifted = ((i - 12) % 24 + 24) % 24;
       const deg = shifted * 15;
       const angle = (deg - 90) * (Math.PI / 180);
-      const r1 = isMajor ? 72 : 76;
-      const r2 = 82;
-      const x1 = 85 + Math.cos(angle) * r1;
-      const y1 = 85 + Math.sin(angle) * r1;
-      const x2 = 85 + Math.cos(angle) * r2;
-      const y2 = 85 + Math.sin(angle) * r2;
-      
-      marker.style.cssText = `
-        position: absolute;
-        width: ${isMajor ? 3 : 2}px;
-        height: ${isMajor ? 10 : 6}px;
-        background: ${isMajor ? '#222' : '#333'};
-        left: ${x1}px;
-        top: ${y1}px;
-        transform: rotate(${deg}deg);
-        transform-origin: ${isMajor ? 1.5 : 1}px ${isMajor ? 5 : 3}px;
-      `;
+      const r1 = isMajor ? R1_MAJOR : R1_MINOR;
+      const x1 = CENTER + Math.cos(angle) * r1;
+      const y1 = CENTER + Math.sin(angle) * r1;
+      const marker = document.createElement('div');
+      marker.style.cssText = [
+        'position:absolute',
+        `width:${isMajor ? 2 : 1}px`,
+        `height:${isMajor ? 7 : 4}px`,
+        `background:${isMajor ? 'rgba(180,200,255,0.55)' : 'rgba(100,130,200,0.35)'}`,
+        `left:${x1.toFixed(1)}px`,
+        `top:${y1.toFixed(1)}px`,
+        `transform:rotate(${deg}deg)`,
+        `transform-origin:${isMajor ? '1px 3.5px' : '0.5px 2px'}`
+      ].join(';');
       face.appendChild(marker);
     }
 
-    // Clock hand
+    /* Time hand */
     const hand = document.createElement('div');
-    hand.style.cssText = `
-      position: absolute;
-      width: 3px;
-      height: 70px;
-      background: #e74c3c;
-      left: 88px;
-      top: 15px;
-      transform-origin: 1.5px 75px;
-      border-radius: 2px;
-      box-shadow: 0 0 4px rgba(0,0,0,0.3);
-      pointer-events: none;
-    `;
+    hand.style.cssText = [
+      'position:absolute',
+      'width:2px',
+      'height:46px',
+      'background:#e74c3c',
+      `left:${CENTER - 1}px`,
+      'top:10px',
+      `transform-origin:1px ${CENTER - 10}px`,
+      'border-radius:2px',
+      'box-shadow:0 0 3px rgba(0,0,0,0.4)',
+      'pointer-events:none'
+    ].join(';');
 
+    /* Target (ghost) hand — shown when dragging to a target time */
     const targetHand = document.createElement('div');
-    targetHand.style.cssText = `
-      position: absolute;
-      width: 3px;
-      height: 70px;
-      background: rgba(255,255,255,0.35);
-      left: 88px;
-      top: 15px;
-      transform-origin: 1.5px 75px;
-      border-radius: 2px;
-      pointer-events: none;
-      z-index: 1;
-    `;
+    targetHand.style.cssText = [
+      'position:absolute',
+      'width:2px',
+      'height:46px',
+      'background:rgba(255,255,255,0.30)',
+      `left:${CENTER - 1}px`,
+      'top:10px',
+      `transform-origin:1px ${CENTER - 10}px`,
+      'border-radius:2px',
+      'pointer-events:none',
+      'z-index:1',
+      'display:none'
+    ].join(';');
 
-    targetHand.style.display = 'none';
-
-    // Center dot
+    /* Center dot */
     const center = document.createElement('div');
-    center.style.cssText = `
-      position: absolute;
-      width: 12px;
-      height: 12px;
-      background: #2c3e50;
-      border-radius: 50%;
-      left: 84px;
-      top: 84px;
-      z-index: 2;
-    `;
+    center.style.cssText = [
+      'position:absolute',
+      'width:8px',
+      'height:8px',
+      'background:rgba(20,28,60,0.90)',
+      'border:1px solid rgba(90,200,250,0.45)',
+      'border-radius:50%',
+      `left:${CENTER - 4}px`,
+      `top:${CENTER - 4}px`,
+      'z-index:2'
+    ].join(';');
 
+    /* Wind direction arrow (stays on clock as a directional indicator) */
     const windArrow = document.createElement('div');
-    windArrow.style.position = 'absolute';
-    windArrow.style.left = '50%';
-    windArrow.style.top = '50%';
-    windArrow.style.width = '2px';
-    windArrow.style.height = '32px';
-    windArrow.style.background = 'rgba(255,255,255,0.85)';
-    windArrow.style.transformOrigin = '50% 100%';
-    windArrow.style.pointerEvents = 'none';
-    windArrow.style.zIndex = '3';
-    windArrow.style.transform = 'translate(-50%, 0%) rotate(0deg)';
+    windArrow.style.cssText = [
+      'position:absolute',
+      'left:50%',
+      'top:50%',
+      'width:2px',
+      'height:22px',
+      'background:rgba(90,200,250,0.75)',
+      'transform-origin:50% 100%',
+      'pointer-events:none',
+      'z-index:3',
+      'transform:translate(-50%,0%) rotate(0deg)'
+    ].join(';');
 
     const windArrowHead = document.createElement('div');
-    windArrowHead.style.position = 'absolute';
-    windArrowHead.style.left = '50%';
-    windArrowHead.style.top = '0';
-    windArrowHead.style.transform = 'translate(-50%, -50%)';
-    windArrowHead.style.width = '0';
-    windArrowHead.style.height = '0';
-    windArrowHead.style.borderLeft = '6px solid transparent';
-    windArrowHead.style.borderRight = '6px solid transparent';
-    windArrowHead.style.borderBottom = '10px solid rgba(255,255,255,0.85)';
+    windArrowHead.style.cssText = [
+      'position:absolute',
+      'left:50%',
+      'top:0',
+      'transform:translate(-50%,-50%)',
+      'width:0',
+      'height:0',
+      'border-left:4px solid transparent',
+      'border-right:4px solid transparent',
+      'border-bottom:7px solid rgba(90,200,250,0.80)'
+    ].join(';');
     windArrow.appendChild(windArrowHead);
 
-    // Digital time display
+    /* Digital time (below face) */
     const digital = document.createElement('div');
-    digital.style.cssText = `
-      text-align: center;
-      font-family: monospace;
-      font-size: 16px;
-      font-weight: bold;
-      color: #2c3e50;
-      margin-top: 10px;
-    `;
-
-    const windStrengthWrap = document.createElement('div');
-    windStrengthWrap.style.width = '180px';
-    windStrengthWrap.style.margin = '6px auto 10px';
-
-    const windStrengthMeta = document.createElement('div');
-    windStrengthMeta.style.display = 'flex';
-    windStrengthMeta.style.justifyContent = 'space-between';
-    windStrengthMeta.style.gap = '8px';
-    windStrengthMeta.style.fontSize = '11px';
-    windStrengthMeta.style.opacity = '0.92';
-
-    const windStrengthLabel = document.createElement('div');
-    windStrengthLabel.textContent = 'Wind';
-
-    const windStrengthText = document.createElement('div');
-    windStrengthText.textContent = '0%';
-
-    windStrengthMeta.appendChild(windStrengthLabel);
-    windStrengthMeta.appendChild(windStrengthText);
-
-    const windStrengthBarOuter = document.createElement('div');
-    windStrengthBarOuter.style.height = '6px';
-    windStrengthBarOuter.style.borderRadius = '999px';
-    windStrengthBarOuter.style.background = 'rgba(255,255,255,0.18)';
-    windStrengthBarOuter.style.overflow = 'hidden';
-    windStrengthBarOuter.style.marginTop = '4px';
-
-    const windStrengthBarInner = document.createElement('div');
-    windStrengthBarInner.style.height = '100%';
-    windStrengthBarInner.style.width = '0%';
-    windStrengthBarInner.style.background = 'rgba(80, 200, 255, 0.85)';
-    windStrengthBarInner.style.transition = 'width 120ms linear';
-    windStrengthBarOuter.appendChild(windStrengthBarInner);
-
-    windStrengthWrap.appendChild(windStrengthMeta);
-    windStrengthWrap.appendChild(windStrengthBarOuter);
+    digital.style.cssText = [
+      'text-align:center',
+      'font-family:monospace',
+      'font-size:10px',
+      'font-weight:700',
+      'color:rgba(215,235,255,0.88)',
+      'margin-top:4px',
+      'letter-spacing:0.05em'
+    ].join(';');
 
     face.appendChild(hand);
     face.appendChild(targetHand);
@@ -1213,20 +2013,19 @@ export class ControlPanelManager {
     face.appendChild(windArrow);
     container.appendChild(face);
     container.appendChild(digital);
-    container.appendChild(windStrengthWrap);
 
-    // Store references
+    /* Store references (wind strength bar removed — wind is now in Live Weather Overrides) */
     this.clockElements = { hand, targetHand, digital, face };
     this._windArrow = windArrow;
-    this._windStrengthBarInner = windStrengthBarInner;
-    this._windStrengthText = windStrengthText;
+    this._windStrengthBarInner = null;  // moved to Live Weather Overrides
+    this._windStrengthText = null;      // moved to Live Weather Overrides
 
-    // Mouse events for dragging
+    /* Mouse events for dragging */
     face.addEventListener('mousedown', this._boundHandlers.onFaceMouseDown);
     document.addEventListener('mousemove', this._boundHandlers.onDocMouseMove, { capture: true });
     document.addEventListener('mouseup', this._boundHandlers.onDocMouseUp, { capture: true });
 
-    // Touch events for mobile
+    /* Touch events */
     face.addEventListener('touchstart', this._boundHandlers.onFaceTouchStart);
     document.addEventListener('touchmove', this._boundHandlers.onDocTouchMove);
     document.addEventListener('touchend', this._boundHandlers.onDocTouchEnd);
@@ -1424,6 +2223,7 @@ export class ControlPanelManager {
     this._dragStart = null;
     document.removeEventListener('mousemove', this._boundHandlers.onDocPanelMouseMove, { capture: true });
     document.removeEventListener('mouseup', this._boundHandlers.onDocPanelMouseUp, { capture: true });
+    this._saveControlPanelUIState();
   }
 
   /**
@@ -1442,12 +2242,13 @@ export class ControlPanelManager {
    * Build the Weather section
    * @private
    */
-  _buildWeatherSection() {
-    const weatherFolder = this.pane.addFolder({
-      title: '🌦️ Weather Director',
-      expanded: false
+  _buildWeatherSection(parentFolder = this.pane, options = undefined) {
+    const targetFolder = parentFolder || this.pane;
+    const weatherFolder = targetFolder.addFolder({
+      title: options?.title ?? '🌦️ Weather Director',
+      expanded: options?.expanded ?? false
     });
-    this._registerTopLevelFolder(weatherFolder);
+    if (options?.registerTopLevel !== false && targetFolder === this.pane) this._registerTopLevelFolder(weatherFolder);
     this._ensureFolderTag(weatherFolder, 'weather', 'Directed');
 
     weatherFolder.on('fold', (ev) => {
@@ -1648,12 +2449,13 @@ export class ControlPanelManager {
     return controls;
   }
 
-  _buildWindSection() {
-    const windFolder = this.pane.addFolder({
-      title: '💨 Wind',
-      expanded: false
+  _buildWindSection(parentFolder = this.pane, options = undefined) {
+    const targetFolder = parentFolder || this.pane;
+    const windFolder = targetFolder.addFolder({
+      title: options?.title ?? '💨 Wind',
+      expanded: options?.expanded ?? false
     });
-    this._registerTopLevelFolder(windFolder);
+    if (options?.registerTopLevel !== false && targetFolder === this.pane) this._registerTopLevelFolder(windFolder);
     const initialWindMs = Number(this.controlState.windSpeedMS) || 0;
     const initialPct = `${Math.round(Math.max(0, Math.min(1, initialWindMs / 78.0)) * 100)}%`;
     this._ensureFolderTag(windFolder, 'wind', initialPct);
@@ -1743,12 +2545,13 @@ export class ControlPanelManager {
    * Build utilities section
    * @private
    */
-  _buildUtilitiesSection() {
-    const utilsFolder = this.pane.addFolder({
-      title: '⚙️ Utilities (Advanced)',
-      expanded: false
+  _buildUtilitiesSection(parentFolder = this.pane, options = undefined) {
+    const targetFolder = parentFolder || this.pane;
+    const utilsFolder = targetFolder.addFolder({
+      title: options?.title ?? '⚙️ Utilities (Advanced)',
+      expanded: options?.expanded ?? false
     });
-    this._registerTopLevelFolder(utilsFolder);
+    if (options?.registerTopLevel !== false && targetFolder === this.pane) this._registerTopLevelFolder(utilsFolder);
     this._ensureFolderTag(utilsFolder, 'utilities', 'Advanced');
 
     const contentElement = utilsFolder.element.querySelector('.tp-fldv_c') || utilsFolder.element;
@@ -1802,6 +2605,8 @@ export class ControlPanelManager {
       if (!mgr || typeof mgr.getGlobalState !== 'function') return;
 
       const global = mgr.getGlobalState();
+      const playing = global?.playing === true;
+      const paused = global?.paused === true;
       const speed = Number(global?.speedPercent);
       const autoPlay = global?.autoPlayEnabled !== false;
       const timeFactor = Number(global?.timeFactorPercent);
@@ -1811,7 +2616,9 @@ export class ControlPanelManager {
         if (Math.abs((this.controlState.tileMotionSpeedPercent ?? 100) - clamped) >= 0.001) {
           this.controlState.tileMotionSpeedPercent = clamped;
         }
-        this._setFolderTag('tileMotion', `${Math.round(clamped)}%`);
+        if (!playing) this._setFolderTag('tileMotion', 'Stopped');
+        else if (paused) this._setFolderTag('tileMotion', `Paused ${Math.round(clamped)}%`);
+        else this._setFolderTag('tileMotion', `${Math.round(clamped)}%`);
       }
 
       if ((this.controlState.tileMotionAutoPlayEnabled ?? true) !== autoPlay) {
@@ -1825,10 +2632,15 @@ export class ControlPanelManager {
         }
       }
 
+      if ((this.controlState.tileMotionPaused ?? false) !== paused) {
+        this.controlState.tileMotionPaused = paused;
+      }
+
       try {
         this._tileMotionSpeedBinding?.refresh?.();
         this._tileMotionAutoPlayBinding?.refresh?.();
         this._tileMotionTimeFactorBinding?.refresh?.();
+        this._tileMotionPausedBinding?.refresh?.();
       } catch (_) {
       }
     } catch (_) {
@@ -1890,6 +2702,50 @@ export class ControlPanelManager {
     ui.notifications?.info('Tile motion started');
   }
 
+  async _pauseTileMotion() {
+    if (!game.user?.isGM) {
+      ui.notifications?.warn('Tile motion controls are GM-only');
+      return;
+    }
+
+    const mgr = window.MapShine?.tileMotionManager;
+    if (!mgr || typeof mgr.pause !== 'function') {
+      ui.notifications?.warn('Tile motion manager is not available');
+      return;
+    }
+
+    const ok = await mgr.pause();
+    if (!ok) {
+      ui.notifications?.warn('Failed to pause tile motion');
+      return;
+    }
+
+    this._syncTileMotionSpeedFromManager();
+    ui.notifications?.info('Tile motion paused');
+  }
+
+  async _resumeTileMotion() {
+    if (!game.user?.isGM) {
+      ui.notifications?.warn('Tile motion controls are GM-only');
+      return;
+    }
+
+    const mgr = window.MapShine?.tileMotionManager;
+    if (!mgr || typeof mgr.resume !== 'function') {
+      ui.notifications?.warn('Tile motion manager is not available');
+      return;
+    }
+
+    const ok = await mgr.resume();
+    if (!ok) {
+      ui.notifications?.warn('Failed to resume tile motion');
+      return;
+    }
+
+    this._syncTileMotionSpeedFromManager();
+    ui.notifications?.info('Tile motion resumed');
+  }
+
   async _stopTileMotion() {
     if (!game.user?.isGM) {
       ui.notifications?.warn('Tile motion controls are GM-only');
@@ -1932,12 +2788,13 @@ export class ControlPanelManager {
     ui.notifications?.info('Tile motion phase reset');
   }
 
-  _buildTileMotionSection() {
-    const tileMotionFolder = this.pane.addFolder({
-      title: '🧭 Tile Motion',
-      expanded: false
+  _buildTileMotionSection(parentFolder = this.pane, options = undefined) {
+    const targetFolder = parentFolder || this.pane;
+    const tileMotionFolder = targetFolder.addFolder({
+      title: options?.title ?? '🧭 Tile Motion',
+      expanded: options?.expanded ?? false
     });
-    this._registerTopLevelFolder(tileMotionFolder);
+    if (options?.registerTopLevel !== false && targetFolder === this.pane) this._registerTopLevelFolder(tileMotionFolder);
     this._ensureFolderTag(tileMotionFolder, 'tileMotion', `${Math.round(Number(this.controlState.tileMotionSpeedPercent) || 0)}%`);
 
     const canEditTileMotion = game.user?.isGM === true && !!window.MapShine?.tileMotionManager;
@@ -1954,7 +2811,7 @@ export class ControlPanelManager {
     }
 
     this._tileMotionAutoPlayBinding = tileMotionFolder.addBinding(this.controlState, 'tileMotionAutoPlayEnabled', {
-      label: 'Auto Play'
+      label: 'Auto'
     }).on('change', (ev) => {
       this.controlState.tileMotionAutoPlayEnabled = !!ev.value;
       void this._setTileMotionAutoPlayEnabled(!!ev.value, { persist: !!ev?.last });
@@ -1962,8 +2819,17 @@ export class ControlPanelManager {
     });
     this._tileMotionAutoPlayBinding.disabled = !canEditTileMotion;
 
+    this._tileMotionPausedBinding = tileMotionFolder.addBinding(this.controlState, 'tileMotionPaused', {
+      label: 'Paused'
+    }).on('change', (ev) => {
+      this.controlState.tileMotionPaused = !!ev.value;
+      void this._setTileMotionPaused(!!ev.value, { persist: !!ev?.last });
+      if (ev?.last) this.debouncedSave();
+    });
+    this._tileMotionPausedBinding.disabled = !canEditTileMotion;
+
     this._tileMotionTimeFactorBinding = tileMotionFolder.addBinding(this.controlState, 'tileMotionTimeFactorPercent', {
-      label: 'Time Factor (%)',
+      label: 'Time %',
       min: 0,
       max: 200,
       step: 1
@@ -1975,7 +2841,7 @@ export class ControlPanelManager {
     this._tileMotionTimeFactorBinding.disabled = !canEditTileMotion;
 
     this._tileMotionSpeedBinding = tileMotionFolder.addBinding(this.controlState, 'tileMotionSpeedPercent', {
-      label: 'Speed (%)',
+      label: 'Speed %',
       min: 0,
       max: 400,
       step: 1
@@ -1987,26 +2853,42 @@ export class ControlPanelManager {
     });
     this._tileMotionSpeedBinding.disabled = !canEditTileMotion;
 
-    const startButton = tileMotionFolder.addButton({
-      title: 'Start'
-    }).on('click', () => {
-      void this._startTileMotion();
-    });
-    startButton.disabled = !canEditTileMotion;
+    const contentElement = tileMotionFolder.element.querySelector('.tp-fldv_c') || tileMotionFolder.element;
+    const transportGrid = document.createElement('div');
+    transportGrid.style.cssText = 'display:grid;grid-template-columns:1fr 1fr;gap:4px;padding:4px 6px 6px;';
 
-    const stopButton = tileMotionFolder.addButton({
-      title: 'Stop'
-    }).on('click', () => {
-      void this._stopTileMotion();
-    });
-    stopButton.disabled = !canEditTileMotion;
+    const makeTransportBtn = (label, onClick) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.textContent = label;
+      btn.disabled = !canEditTileMotion;
+      btn.style.cssText = [
+        'height:20px',
+        'padding:0 6px',
+        'border-radius:5px',
+        'border:1px solid rgba(255,255,255,0.12)',
+        'background:rgba(255,255,255,0.06)',
+        'color:rgba(210,232,255,0.90)',
+        'font-size:9px',
+        'font-weight:600',
+        'font-family:inherit',
+        'cursor:pointer'
+      ].join(';');
+      btn.addEventListener('click', onClick);
+      transportGrid.appendChild(btn);
+    };
 
-    const resetButton = tileMotionFolder.addButton({
-      title: 'Reset Phase'
-    }).on('click', () => {
-      void this._resetTileMotionPhase();
-    });
-    resetButton.disabled = !canEditTileMotion;
+    makeTransportBtn('Start', () => { void this._startTileMotion(); });
+    makeTransportBtn('Pause', () => { void this._pauseTileMotion(); });
+    makeTransportBtn('Resume', () => { void this._resumeTileMotion(); });
+    makeTransportBtn('Stop', () => { void this._stopTileMotion(); });
+    makeTransportBtn('Reset', () => { void this._resetTileMotionPhase(); });
+
+    const spacer = document.createElement('div');
+    spacer.style.display = 'none';
+    transportGrid.appendChild(spacer);
+
+    contentElement.appendChild(transportGrid);
   }
 
   /**
@@ -2166,19 +3048,30 @@ export class ControlPanelManager {
       dynamicPaused: false,
       directedPresetId: 'Clear (Dry)',
       directedTransitionMinutes: 5.0,
+      directedCustomPreset: {
+        precipitation: 0.0,
+        cloudCover: 0.15,
+        windSpeed: 39.0 / 78.0,
+        windDirection: 180.0,
+        fogDensity: 0.0,
+        freezeLevel: 0.0
+      },
       windSpeedMS: 39.0,
       windDirection: 180.0,
       gustiness: 'moderate',
       tileMotionSpeedPercent: 100,
       tileMotionAutoPlayEnabled: true,
-      tileMotionTimeFactorPercent: 100
+      tileMotionTimeFactorPercent: 100,
+      tileMotionPaused: false
     };
+    this._ensureDirectedCustomPreset();
 
     this._updateClock(12.0);
     void this._applyControlState().then(async () => {
       await this._setTileMotionSpeed(this.controlState.tileMotionSpeedPercent);
       await this._setTileMotionAutoPlayEnabled(this.controlState.tileMotionAutoPlayEnabled);
       await this._setTileMotionTimeFactor(this.controlState.tileMotionTimeFactorPercent);
+      await this._setTileMotionPaused(this.controlState.tileMotionPaused);
       await this._saveControlState();
     });
     
@@ -2186,6 +3079,7 @@ export class ControlPanelManager {
     if (this.pane) {
       this.pane.refresh();
     }
+    this._updateCustomTimeControls();
 
     ui.notifications?.info('Control panel reset to defaults');
   }
@@ -2251,6 +3145,7 @@ Current Weather:
       if (saved) {
         // Merge with defaults to handle missing properties
         Object.assign(this.controlState, saved);
+        this._ensureDirectedCustomPreset();
 
         // Backwards compatibility: older scenes saved legacy windSpeed (0..1).
         // If windSpeedMS is missing, derive it from windSpeed.
@@ -2314,6 +3209,18 @@ Current Weather:
    */
   show() {
     if (!this.container) return;
+
+    if (this._isMinimized) {
+      const left = this._readPx(this._minimizedButton?.style?.left);
+      const top = this._readPx(this._minimizedButton?.style?.top);
+      if (Number.isFinite(left) && Number.isFinite(top)) {
+        this.container.style.transform = 'none';
+        this.container.style.left = `${left}px`;
+        this.container.style.top = `${top}px`;
+      }
+      this._hideMinimizedButton();
+      this._isMinimized = false;
+    }
     
     this.container.style.display = 'block';
     this.visible = true;
@@ -2333,6 +3240,8 @@ Current Weather:
       } catch (e) {
       }
     }, 500);
+
+    this._saveControlPanelUIState();
     
     log.debug('Control panel shown');
   }
@@ -2345,11 +3254,15 @@ Current Weather:
     
     this.container.style.display = 'none';
     this.visible = false;
+    this._isMinimized = false;
+    this._hideMinimizedButton();
 
     if (this._statusIntervalId) {
       clearInterval(this._statusIntervalId);
       this._statusIntervalId = null;
     }
+
+    this._saveControlPanelUIState();
     
     log.debug('Control panel hidden');
   }
@@ -2403,6 +3316,17 @@ Current Weather:
       this.headerOverlay.removeEventListener('mousedown', this._boundHandlers.onHeaderMouseDown);
     }
 
+    if (this._minimizeButton) {
+      this._minimizeButton.removeEventListener('click', this._boundHandlers.onMinimizeButtonClick);
+    }
+
+    if (this._minimizedButton) {
+      this._minimizedButton.removeEventListener('click', this._boundHandlers.onMinimizedBadgeClick);
+      if (this._minimizedButton.parentNode) {
+        this._minimizedButton.parentNode.removeChild(this._minimizedButton);
+      }
+    }
+
     // Destroy Tweakpane
     if (this.pane) {
       this.pane.dispose();
@@ -2421,6 +3345,9 @@ Current Weather:
     this.statusPanel = null;
     this._statusEls = null;
     this.headerOverlay = null;
+    this._minimizeButton = null;
+    this._minimizedButton = null;
+    this._isMinimized = false;
     this._sunLatitudeBinding = null;
     this._tileMotionSpeedBinding = null;
 

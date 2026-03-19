@@ -141,19 +141,83 @@ export function getPlayerOverrides(scene) {
 }
 
 /**
- * Check if a scene is enabled for Map Shine
+ * Check whether a scene has Map Shine authoring data that implies it was pre-configured
+ * by a map author (e.g. packaged as a module compendium). This is distinct from the
+ * explicit `enabled` flag, which may not survive the compendium/Adventure import path.
+ *
+ * Indicators that survive packaging:
+ *   - `settings.mapMaker` block is present (author tuned effects)
+ *   - `mapPointGroups` has at least one group (author placed map points)
+ *   - `mapPointGroupsInitialized` is true (author opened map-points at least once)
+ *
+ * @param {Scene} scene - Foundry scene object
+ * @returns {boolean}
+ * @public
+ */
+export function hasImpliedMapShineConfig(scene) {
+  if (!scene) return false;
+  try {
+    const msaFlags = scene.flags?.[FLAG_NAMESPACE] ?? {};
+
+    // Settings block with a mapMaker section — strongest authoring evidence.
+    const settings = msaFlags['settings'];
+    if (settings && typeof settings === 'object' && settings.mapMaker) return true;
+
+    // Map point groups were populated by the author.
+    const groups = msaFlags['mapPointGroups'];
+    if (groups && typeof groups === 'object' && Object.keys(groups).length > 0) return true;
+
+    // Author explicitly initialized the map points system.
+    if (msaFlags['mapPointGroupsInitialized'] === true) return true;
+
+    return false;
+  } catch (_) {
+    return false;
+  }
+}
+
+/**
+ * Silently persist the `enabled` flag to true on the scene so that subsequent loads
+ * skip the implied-config check. Fire-and-forget — never blocks canvas init.
+ * @param {Scene} scene
+ * @private
+ */
+function _silentlyPersistEnabled(scene) {
+  Promise.resolve().then(async () => {
+    try {
+      if (scene.flags?.[FLAG_NAMESPACE]?.['enabled'] === true) return;
+      if (typeof scene.setFlag !== 'function') return;
+      await scene.setFlag(FLAG_NAMESPACE, 'enabled', true);
+    } catch (_) {}
+  });
+}
+
+/**
+ * Check if a scene is enabled for Map Shine.
+ *
+ * Returns true when:
+ *   1. The explicit `enabled` flag is set to true (standard path), OR
+ *   2. The scene carries unambiguous Map Shine authoring data that implies it was
+ *      pre-configured by a map author (packaged map auto-activation path).
+ *      In this case the flag is silently persisted so future loads skip the check.
+ *
  * @param {Scene} scene - Foundry scene object
  * @returns {boolean} Whether Map Shine is enabled
  * @public
  */
 export function isEnabled(scene) {
   const val = scene.getFlag(FLAG_NAMESPACE, 'enabled');
-  const result = val === true;
-  // Diagnostic: trace every isEnabled check so we can see if/when the flag disappears
-  try {
-    console.log(`MapShine isEnabled("${scene?.name ?? scene?.id ?? '?'}") = ${result} (raw flag value: ${JSON.stringify(val)})`);
-  } catch (_) {}
-  return result;
+  if (val === true) return true;
+
+  // Auto-detect pre-configured scenes (e.g. packaged module maps where the
+  // `enabled` flag was not included in the compendium export).
+  if (hasImpliedMapShineConfig(scene)) {
+    log.info(`MapShine: scene "${scene?.name ?? scene?.id ?? '?'}" has Map Shine authoring data but no enabled flag — auto-activating and persisting flag.`);
+    _silentlyPersistEnabled(scene);
+    return true;
+  }
+
+  return false;
 }
 
 function _isPlainObject(value) {
@@ -355,28 +419,34 @@ export async function ensureValidSceneSettings(scene, options = {}) {
 }
 
 /**
- * Enable Map Shine for a scene with default settingsxx
+ * Enable Map Shine for a scene.
+ *
+ * For fresh blank scenes, writes default settings. For scenes that already have
+ * Map Shine authoring data (e.g. imported from a packaged module compendium), the
+ * existing settings are preserved so the author's effect parameters are not lost.
+ *
  * @param {Scene} scene - Foundry scene object
  * @returns {Promise<void>}
  * @public
  */
 export async function enable(scene) {
-  const defaultSettings = createDefaultSettings();
-  
-  console.warn(`MapShine enable(): setting enabled=true for scene "${scene?.name}" (${scene?.id})`);
   await scene.setFlag(FLAG_NAMESPACE, 'enabled', true);
-  
-  // Verify the flag was actually persisted
-  const verifyEnabled = scene.getFlag(FLAG_NAMESPACE, 'enabled');
-  console.warn(`MapShine enable(): verification after setFlag — getFlag('enabled') = ${JSON.stringify(verifyEnabled)}`);
-  
-  await setSceneSettings(scene, defaultSettings);
-  
-  // Final verification: dump the entire MSA flag namespace
-  const allFlags = scene?.flags?.['map-shine-advanced'];
-  console.warn(`MapShine enable(): final flag state — flags['map-shine-advanced'] keys: [${Object.keys(allFlags ?? {}).join(', ')}], enabled=${allFlags?.enabled}`);
-  
-  log.info(`Map Shine enabled for scene: ${scene.name}`);
+
+  // Only write default settings when the scene has no existing Map Shine settings.
+  // Pre-configured packaged maps already have author-tuned parameters that must
+  // not be overwritten with defaults.
+  let existing = null;
+  try {
+    existing = scene.getFlag(FLAG_NAMESPACE, 'settings');
+    existing = _safeParseJsonMaybe(existing);
+  } catch (_) {}
+
+  if (!_isPlainObject(existing)) {
+    await setSceneSettings(scene, createDefaultSettings());
+    log.info(`Map Shine enabled for scene: ${scene.name} (default settings written)`);
+  } else {
+    log.info(`Map Shine enabled for scene: ${scene.name} (existing settings preserved)`);
+  }
 }
 
 /**

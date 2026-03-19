@@ -8,6 +8,7 @@
 // hook, before any await. Dynamic imports yield control back to Foundry, which
 // then considers the init phase complete and rejects late registrations.
 import { registerLevelNavigationKeybindings } from './foundry/level-navigation-keybindings.js';
+import { msaComputeHash } from './utils/msa-hash.js';
 
 function _suppressDiagConsoleLogs() {
   try {
@@ -230,6 +231,311 @@ function _installTokenHudPasswordManagerGuard() {
       _applyPasswordManagerIgnores(existingHud);
     }
   } catch (_) {
+  }
+}
+
+/**
+ * Collect all MSA scene-level and tile-level flags for the given scene.
+ * Returns a normalized payload ready to store in an Adventure pack's own flags.
+ * The `_expectedHash` key is stripped from any existing flags before capture
+ * so that the captured config is always a "clean" baseline.
+ *
+ * @param {Scene} scene
+ * @returns {{ sceneId: string, flags: object, tiles?: object }}
+ */
+function _msaBuildSceneConfig(scene) {
+  const NS = 'map-shine-advanced';
+  const msaSceneFlags = Object.assign({}, scene.flags?.[NS] ?? {});
+  delete msaSceneFlags._expectedHash; // strip any stale hash before recomputing
+
+  const tiles = {};
+  for (const tile of (scene.tiles ?? [])) {
+    const f = tile.flags?.[NS];
+    if (!f || typeof f !== 'object' || !Object.keys(f).length) continue;
+    const tileCopy = Object.assign({}, f);
+    delete tileCopy._expectedHash;
+    tiles[tile.id] = { flags: { [NS]: tileCopy } };
+  }
+
+  return {
+    sceneId: scene.id,
+    flags: { [NS]: msaSceneFlags },
+    ...(Object.keys(tiles).length ? { tiles } : {})
+  };
+}
+
+/**
+ * Save the current scene's MSA config into the specified Adventure pack's own
+ * top-level flags. Also computes a SHA-256 fingerprint and embeds it as
+ * `_expectedHash` in the scene's MSA flags, enabling load-time verification
+ * after import.
+ *
+ * The config is stored at `adventure.flags['map-shine-advanced'].sceneConfig`
+ * which is read by `_injectMSASidecarData` during `preImportAdventure`.
+ *
+ * @param {string} packId - Full pack ID (e.g. 'my-module.adventure')
+ * @returns {Promise<{ hash: string, sceneId: string, packId: string }>}
+ */
+async function _msaSaveSceneConfigToAdventurePack(packId) {
+  const NS = 'map-shine-advanced';
+  const scene = canvas?.scene;
+  if (!scene) throw new Error('No active scene');
+  if (!game?.user?.isGM) throw new Error('GM only');
+
+  const config = _msaBuildSceneConfig(scene);
+
+  // Compute hash of the clean config BEFORE embedding the hash sentinel.
+  const hashInput = {
+    flags: config.flags,
+    ...(config.tiles ? { tiles: config.tiles } : {})
+  };
+  const hash = await msaComputeHash(hashInput);
+
+  // Embed the expected hash into scene MSA flags so it travels with the scene
+  // when injected and can be verified by the customer after import.
+  config.flags[NS]._expectedHash = hash;
+
+  const sceneConfig = {
+    [config.sceneId]: {
+      flags: config.flags,
+      ...(config.tiles ? { tiles: config.tiles } : {})
+    }
+  };
+
+  const pack = game.packs.get(packId);
+  if (!pack) throw new Error(`Pack not found: ${packId}`);
+
+  const wasLocked = pack.locked;
+  if (wasLocked) await pack.configure({ locked: false });
+
+  try {
+    const docs = await pack.getDocuments();
+    const adv = docs.find(d => d.documentName === 'Adventure') ?? docs[0];
+    if (!adv) throw new Error('No Adventure document found in pack');
+
+    await adv.setFlag(NS, 'sceneConfig', sceneConfig);
+
+    // Verify the write actually persisted before reporting success.
+    const stored = adv.flags?.[NS]?.sceneConfig;
+    if (!stored?.[config.sceneId]) {
+      throw new Error('Write verification failed: config missing after setFlag');
+    }
+
+    console.log(`Map Shine: MSA config saved to "${packId}" | scene ${config.sceneId} | hash ${hash}`);
+    return { hash, sceneId: config.sceneId, packId };
+  } finally {
+    if (wasLocked) await pack.configure({ locked: true }).catch(() => {});
+  }
+}
+
+/**
+ * Module-level cache of msa-data.json sidecars keyed by module ID.
+ * Populated during the ready hook so it is available synchronously in preImportAdventure.
+ * @type {Map<string, object>}
+ */
+const _msaSidecars = new Map();
+
+/**
+ * Module-scoped set tracking scene IDs that were successfully injected with MSA
+ * flags during the preImportAdventure hook. The importAdventure post-hook reads
+ * this to know which scenes to auto-enable, regardless of whether the flags
+ * actually survived the Adventure round-trip on their own.
+ * @type {Set<string>}
+ */
+const _injectedSceneIds = new Set();
+
+/**
+ * Auto-capture MSA scene/tile flags into the Adventure's top-level flags during
+ * export. Adventure top-level flags are a standard DocumentFlagsField at the
+ * document root — NOT wrapped inside EmbeddedDataField — so they survive the
+ * compendium round-trip even when embedded scene flags are stripped.
+ *
+ * Called from preUpdateAdventure / preCreateAdventure hooks. Modifies the
+ * `changes` object in-place so the captured config is persisted alongside the
+ * Adventure document.
+ *
+ * @param {Adventure} adventure  The Adventure document being saved
+ * @param {object} changes       The update/create payload (modified in-place)
+ */
+function _autoCaptureMSASceneFlags(adventure, changes) {
+  try {
+    const NS = 'map-shine-advanced';
+    const scenes = changes.scenes;
+    if (!Array.isArray(scenes) || scenes.length === 0) return;
+
+    const sceneConfig = {};
+    let capturedCount = 0;
+
+    for (const sceneData of scenes) {
+      const sceneId = sceneData._id ?? sceneData.id;
+      if (!sceneId) continue;
+
+      const msaFlags = sceneData.flags?.[NS];
+      if (!msaFlags || typeof msaFlags !== 'object') continue;
+      // Skip scenes that only have trivial/empty MSA flags.
+      if (Object.keys(msaFlags).length === 0) continue;
+
+      // Build config entry with scene name (for fallback matching) and flags.
+      const entry = {
+        name: sceneData.name ?? null,
+        flags: { [NS]: { ...msaFlags } }
+      };
+
+      // Capture tile-level MSA flags.
+      if (Array.isArray(sceneData.tiles)) {
+        const tiles = {};
+        for (const tile of sceneData.tiles) {
+          const tileId = tile._id ?? tile.id;
+          const tileMsaFlags = tile.flags?.[NS];
+          if (tileId && tileMsaFlags && typeof tileMsaFlags === 'object' && Object.keys(tileMsaFlags).length > 0) {
+            tiles[tileId] = { flags: { [NS]: { ...tileMsaFlags } } };
+          }
+        }
+        if (Object.keys(tiles).length > 0) entry.tiles = tiles;
+      }
+
+      sceneConfig[sceneId] = entry;
+      capturedCount++;
+    }
+
+    if (capturedCount === 0) return;
+
+    // Merge into the Adventure's top-level flags in the update payload.
+    changes.flags ??= {};
+    changes.flags[NS] ??= {};
+    changes.flags[NS].sceneConfig = sceneConfig;
+
+    console.log(`Map Shine: auto-captured MSA config for ${capturedCount} scene(s) into Adventure top-level flags`);
+  } catch (e) {
+    console.warn('Map Shine: failed to auto-capture scene flags during Adventure export:', e);
+  }
+}
+
+/**
+ * Pre-fetch all msa-data.json sidecar files from installed modules that list
+ * map-shine-advanced as a dependency. Results are stored in _msaSidecars.
+ * @returns {Promise<void>}
+ */
+async function _prefetchMSASidecars() {
+  try {
+    for (const mod of (game.modules?.values() ?? [])) {
+      if (!mod.active) continue;
+
+      // Only process modules that declare map-shine-advanced as a required dependency.
+      const deps = mod.relationships?.requires ?? [];
+      const requiresMSA = deps.some(d => (d.id ?? d.name) === 'map-shine-advanced');
+      if (!requiresMSA) continue;
+
+      const url = `modules/${mod.id}/packs/msa-data.json`;
+      try {
+        const resp = await fetch(url);
+        if (!resp.ok) continue;
+        const data = await resp.json();
+        if (data && typeof data === 'object') {
+          _msaSidecars.set(mod.id, data);
+          console.log(`Map Shine: loaded msa-data.json sidecar from module "${mod.id}" (${Object.keys(data.scenes ?? {}).length} scene(s))`);
+        }
+      } catch (_) {
+        // Sidecar not present for this module; skip silently.
+      }
+    }
+  } catch (e) {
+    console.warn('Map Shine: failed to pre-fetch MSA sidecars:', e);
+  }
+}
+
+/**
+ * Inject MSA scene/tile flags into Adventure import data.
+ * Called synchronously from the preImportAdventure hook.
+ *
+ * Source code analysis indicates flags SHOULD survive the EmbeddedDataField
+ * round-trip (DocumentFlagsField validates via regex, our ID passes). This
+ * injection serves as a belt-and-suspenders fallback. Two sources are tried:
+ *
+ * 1. Adventure top-level flags (`adventure.flags['map-shine-advanced'].sceneConfig`):
+ *    Written by the map author via a developer console snippet. Self-contained inside
+ *    the Adventure pack — no extra files or HTTP requests required.
+ *
+ * 2. Sidecar JSON file (`modules/{id}/packs/msa-data.json`):
+ *    A fallback for map authors who prefer a separate file over Adventure flag storage.
+ *    Pre-fetched during the ready hook and cached in _msaSidecars.
+ *
+ * @param {Adventure} adventure   The Adventure document being imported
+ * @param {object} toCreate       Map of documentName → array of create payloads
+ * @param {object} toUpdate       Map of documentName → array of update payloads
+ */
+function _injectMSASidecarData(adventure, toCreate, toUpdate) {
+  try {
+    const NS = 'map-shine-advanced';
+
+    // --- Source 1: Adventure's own top-level flags (preferred) ---
+    // The Adventure document's flags are a top-level DocumentFlagsField and are NOT
+    // wrapped inside EmbeddedDataField, so they survive the pack serialization cycle.
+    // Map authors write to this via: adv.setFlag('map-shine-advanced', 'sceneConfig', {...})
+    let sceneConfig = adventure.flags?.[NS]?.sceneConfig ?? null;
+    let configSource = 'adventure-flags';
+
+    // --- Source 2: Pre-fetched sidecar JSON file (fallback) ---
+    if (!sceneConfig) {
+      const pack = game.packs.get(adventure.pack);
+      const moduleId = pack?.metadata?.packageName ?? null;
+      if (moduleId && pack?.metadata?.packageType === 'module') {
+        const sidecar = _msaSidecars.get(moduleId);
+        if (sidecar?.scenes && typeof sidecar.scenes === 'object') {
+          sceneConfig = sidecar.scenes;
+          configSource = `sidecar(${moduleId})`;
+        }
+      }
+    }
+
+    if (!sceneConfig || typeof sceneConfig !== 'object') return;
+
+    // Build a name→config lookup for fallback matching when scene IDs don't match
+    // (IDs can change if the Adventure was re-created or the scene was duplicated).
+    const configByName = new Map();
+    for (const [id, cfg] of Object.entries(sceneConfig)) {
+      const name = cfg?.name ?? cfg?.flags?.[NS]?.name;
+      if (name) configByName.set(name.toLowerCase().trim(), cfg);
+    }
+
+    for (const collection of [toCreate, toUpdate]) {
+      for (const sceneData of (collection?.Scene ?? [])) {
+        const sceneId = sceneData._id ?? sceneData.id;
+        let sidecarScene = sceneConfig[sceneId] ?? null;
+
+        // Fallback: match by scene name if ID lookup missed.
+        if (!sidecarScene && sceneData.name) {
+          sidecarScene = configByName.get(sceneData.name.toLowerCase().trim()) ?? null;
+          if (sidecarScene) {
+            console.log(`Map Shine: ID lookup missed for scene "${sceneData.name}", matched by name instead`);
+          }
+        }
+        if (!sidecarScene) continue;
+
+        // Inject scene-level MSA flags, merging over any existing data.
+        if (sidecarScene.flags?.[NS] && typeof sidecarScene.flags[NS] === 'object') {
+          sceneData.flags ??= {};
+          sceneData.flags[NS] = Object.assign({}, sceneData.flags[NS] ?? {}, sidecarScene.flags[NS]);
+        }
+
+        // Inject tile-level MSA flags.
+        if (sidecarScene.tiles && typeof sidecarScene.tiles === 'object') {
+          for (const tile of (sceneData.tiles ?? [])) {
+            const tileId = tile._id ?? tile.id;
+            const sidecarTile = sidecarScene.tiles[tileId];
+            if (!sidecarTile?.flags?.[NS]) continue;
+            tile.flags ??= {};
+            tile.flags[NS] = Object.assign({}, tile.flags[NS] ?? {}, sidecarTile.flags[NS]);
+          }
+        }
+
+        // Track this scene so the importAdventure post-hook can auto-enable it.
+        _injectedSceneIds.add(sceneId);
+        console.log(`Map Shine: injected MSA config [${configSource}] into scene "${sceneData.name ?? sceneId}"`);
+      }
+    }
+  } catch (e) {
+    console.warn('Map Shine: preImportAdventure injection failed:', e);
   }
 }
 
@@ -1093,6 +1399,85 @@ Hooks.once('init', async function() {
     }
   });
 
+  // Adventure EXPORT hooks: auto-capture MSA scene/tile flags into the Adventure's
+  // top-level flags whenever an Adventure is created or updated (e.g. via the
+  // AdventureExporter). Top-level Adventure flags survive the compendium round-trip
+  // even when embedded scene flags are stripped by EmbeddedDataField cleaning.
+  // This makes the preImportAdventure injection automatic — no manual console
+  // snippets or sidecar JSON files required.
+  Hooks.on('preUpdateAdventure', (adventure, changes, options, userId) => {
+    _autoCaptureMSASceneFlags(adventure, changes);
+  });
+  Hooks.on('preCreateAdventure', (document, data, options, userId) => {
+    _autoCaptureMSASceneFlags(document, data);
+  });
+
+  // Adventure pre-import hook: diagnostic logging + safety-net injection.
+  // Reads MSA config from Adventure top-level flags (auto-captured during export)
+  // or sidecar JSON, and injects it into the scene payloads before creation.
+  Hooks.on('preImportAdventure', (adventure, options, toCreate, toUpdate) => {
+    try {
+      // Layer 5: Diagnostic logging to verify whether flags survive Adventure export.
+      const NS = 'map-shine-advanced';
+      for (const sceneData of (toCreate?.Scene ?? [])) {
+        const msaFlags = sceneData.flags?.[NS];
+        const flagKeys = msaFlags ? Object.keys(msaFlags) : [];
+        console.log(
+          `Map Shine DIAG: preImport CREATE scene "${sceneData.name ?? '?'}" (${sceneData._id ?? '?'})`,
+          'MSA flags present:', !!msaFlags,
+          'keys:', flagKeys.length ? flagKeys.join(', ') : 'none'
+        );
+      }
+      for (const sceneData of (toUpdate?.Scene ?? [])) {
+        const msaFlags = sceneData.flags?.[NS];
+        const flagKeys = msaFlags ? Object.keys(msaFlags) : [];
+        console.log(
+          `Map Shine DIAG: preImport UPDATE scene "${sceneData.name ?? '?'}" (${sceneData._id ?? '?'})`,
+          'MSA flags present:', !!msaFlags,
+          'keys:', flagKeys.length ? flagKeys.join(', ') : 'none'
+        );
+      }
+    } catch (_) {}
+
+    // Layer 4: Safety-net injection from Adventure flags or sidecar file.
+    try {
+      _injectMSASidecarData(adventure, toCreate, toUpdate);
+    } catch (_) {}
+  });
+
+  // Layer 3: Post-import verification — auto-enable imported scenes that were
+  // injected with MSA flags during preImportAdventure, or that carry surviving
+  // MSA authoring data. Uses _injectedSceneIds (populated by _injectMSASidecarData)
+  // as the primary detection mechanism, with hasImpliedMapShineConfig as fallback.
+  Hooks.on('importAdventure', (adventure, formData, created, updated) => {
+    try {
+      const NS = 'map-shine-advanced';
+      const scenes = [...(created?.Scene ?? []), ...(updated?.Scene ?? [])];
+      for (const scene of scenes) {
+        const sceneId = scene.id ?? scene._id;
+        const wasInjected = _injectedSceneIds.has(sceneId);
+        const hasImplied = sceneSettings.hasImpliedMapShineConfig(scene);
+
+        if (!wasInjected && !hasImplied) continue;
+
+        const enabled = scene.getFlag(NS, 'enabled');
+        if (enabled !== true) {
+          scene.setFlag(NS, 'enabled', true).catch(() => {});
+          const reason = wasInjected ? 'injected during preImport' : 'has implied MSA config';
+          console.log(`Map Shine: auto-enabled imported scene "${scene.name}" (${reason})`);
+        } else {
+          console.log(`Map Shine: imported scene "${scene.name}" already has enabled=true`);
+        }
+      }
+
+      // Clear the tracking set after processing.
+      _injectedSceneIds.clear();
+    } catch (e) {
+      console.warn('Map Shine: importAdventure post-hook failed:', e);
+      _injectedSceneIds.clear();
+    }
+  });
+
   // Initialize canvas replacement hooks
   try {
     _msaCrisisLog(30, 'init: calling canvasReplacement.initialize()');
@@ -1124,6 +1509,18 @@ Hooks.once('ready', async function() {
   console.log('[MSA BOOT] ready hook: fired');
 
   _msaCrisisLog(42, 'ready: loading overlay assigned');
+
+  // Pre-fetch MSA sidecar JSON files from all installed MSA-dependent modules so
+  // the preImportAdventure hook can inject them synchronously when needed.
+  _prefetchMSASidecars().catch(() => {});
+
+  // Expose pack-writing and hash utilities on the global MapShine object so the
+  // UI layer (TweakpaneManager) and console tools can access them.
+  try {
+    MapShine.saveSceneConfigToAdventurePack = _msaSaveSceneConfigToAdventurePack;
+    MapShine.computeMSAHash = msaComputeHash;
+    MapShine.buildSceneConfig = _msaBuildSceneConfig;
+  } catch (_) {}
 
   try {
     // Defer slightly so the rest of Foundry UI finishes settling before we show a modal.

@@ -983,6 +983,7 @@ export class InteractionManager {
     reattach(this.wallDraw?.previewLine);
     reattach(this.lightPlacement?.previewGroup);
     reattach(this.soundPlacement?.previewGroup);
+    reattach(this.mapPointDrawHandler?.state?.previewGroup);
     reattach(this._lightTranslate?.group);
     reattach(this._lightRadiusRings?.group);
   }
@@ -3203,7 +3204,7 @@ export class InteractionManager {
         }
 
         // Handle right-click on map point helpers (context menu)
-        if (event.button === 2) {
+        if (this.mapPointDraw.active && event.button === 2) {
           const clickedGroupId = this.mapPointDrawHandler.getGroupAtPosition(event.clientX, event.clientY);
           if (clickedGroupId) {
             event.preventDefault();

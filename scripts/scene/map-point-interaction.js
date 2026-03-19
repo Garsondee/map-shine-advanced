@@ -203,6 +203,11 @@ export class MapPointDrawHandler {
       this.cancel();
     }
 
+    const mapPointsManager = window.MapShine?.mapPointsManager;
+    if (mapPointsManager && !mapPointsManager.showVisualHelpers) {
+      mapPointsManager.setShowVisualHelpers(true);
+    }
+
     this.state.active = true;
     this.state.effectTarget = effectTarget;
     this.state.groupType = groupType;
@@ -427,6 +432,10 @@ export class MapPointDrawHandler {
   startAddPointsToGroup(groupId) {
     const mapPointsManager = window.MapShine?.mapPointsManager;
     if (!mapPointsManager) return;
+
+    if (!mapPointsManager.showVisualHelpers) {
+      mapPointsManager.setShowVisualHelpers(true);
+    }
 
     const group = mapPointsManager.getGroup(groupId);
     if (!group) {
@@ -727,7 +736,6 @@ export class MapPointDrawHandler {
             log.info(`Created map point group: ${newGroup.id}`);
             ui.notifications.info(`Duplicated: ${newGroup.label}`);
             if (mapPointsManager.showVisualHelpers) {
-              mapPointsManager.setShowVisualHelpers(false);
               mapPointsManager.setShowVisualHelpers(true);
             }
             break;

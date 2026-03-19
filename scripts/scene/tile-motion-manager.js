@@ -76,6 +76,7 @@ function _createDefaultState() {
     version: CURRENT_VERSION,
     global: {
       playing: false,
+      paused: false,
       startEpochMs: 0,
       speedPercent: 100,
       // Additional runtime multiplier applied on top of speedPercent.
@@ -293,6 +294,7 @@ export class TileMotionManager {
     out.version = CURRENT_VERSION;
     out.global = {
       playing: !!global.playing,
+      paused: !!global.paused,
       startEpochMs: _toNumber(global.startEpochMs, 0),
       speedPercent: _clamp(_toNumber(global.speedPercent, 100), 0, 400),
       timeFactorPercent: _clamp(_toNumber(global.timeFactorPercent, 100), 0, 200),
@@ -651,6 +653,7 @@ export class TileMotionManager {
     if (!this._canEditScene()) return false;
 
     this.state.global.playing = true;
+    this.state.global.paused = false;
     this.state.global.startEpochMs = this._getNowMs();
 
     const ok = await this._saveStateToScene();
@@ -662,10 +665,38 @@ export class TileMotionManager {
     if (!this._canEditScene()) return false;
 
     this.state.global.playing = false;
+    this.state.global.paused = false;
 
     const ok = await this._saveStateToScene();
     this._restoreAllActiveTiles();
     return ok;
+  }
+
+  isPaused() {
+    return this.state?.global?.paused === true;
+  }
+
+  async setPaused(paused, options = undefined) {
+    if (!this._canEditScene()) return false;
+    const persist = options?.persist !== false;
+
+    this.state.global.paused = paused === true;
+    this._lastUpdateNowMs = this._getNowMs();
+
+    if (this.state.global.playing) this._requestContinuousRender(350);
+
+    if (!persist) return true;
+    return this._saveStateToScene();
+  }
+
+  async pause(options = undefined) {
+    if (!this.state?.global?.playing) return false;
+    return this.setPaused(true, options);
+  }
+
+  async resume(options = undefined) {
+    if (!this.state?.global?.playing) return false;
+    return this.setPaused(false, options);
   }
 
   async resetPhase() {
@@ -1612,6 +1643,14 @@ export class TileMotionManager {
     }
 
     this._exitTileEditSuppression();
+
+    // Runtime pause keeps tiles in their current animated pose while freezing
+    // elapsed accumulation so motion can resume smoothly.
+    if (this.state?.global?.paused === true) {
+      this._lastUpdateNowMs = this._getNowMs();
+      this._requestContinuousRender(120);
+      return;
+    }
 
     this._requestContinuousRender(250);
 

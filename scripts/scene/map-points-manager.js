@@ -127,7 +127,7 @@ export class MapPointsManager {
     this.initialized = false;
     
     /** @type {boolean} */
-    this.showVisualHelpers = false;
+    this.showVisualHelpers = true;
     
     /** @type {Function[]} */
     this.changeListeners = [];
@@ -1140,9 +1140,8 @@ export class MapPointsManager {
    * @param {boolean} show - Whether to show helpers
    */
   setShowVisualHelpers(show) {
-    this.showVisualHelpers = show;
-    
-    if (show) {
+    this.showVisualHelpers = !!show;
+    if (this.showVisualHelpers) {
       this.createVisualHelpers();
     } else {
       this.clearVisualObjects();

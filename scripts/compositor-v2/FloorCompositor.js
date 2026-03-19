@@ -801,16 +801,18 @@ export class FloorCompositor {
       this._smellyFliesEffect?.setMapPointsSources?.(mapPoints);
       this._lightningEffect?.setMapPointsSources?.(mapPoints);
       this._candleFlamesEffect?.setMapPointsSources?.(mapPoints);
+      this._dustEffect?.setMapPointsSources?.(mapPoints);
       this._smellyFliesEffect?.setActiveLevelContext?.(activeLevelContext);
       this._lightningEffect?.setActiveLevelContext?.(activeLevelContext);
       this._candleFlamesEffect?.setActiveLevelContext?.(activeLevelContext);
+      this._dustEffect?.setActiveLevelContext?.(activeLevelContext);
 
       this._wiredMapPointsManager = mapPoints;
       if (mapPoints) {
-        log.info('Map-point effect wiring refreshed (smelly flies / lightning / candle flames)');
+        log.info('Map-point effect wiring refreshed (smelly flies / lightning / candle flames / dust)');
       }
     } catch (err) {
-      log.warn('Map-point effect wiring failed (smelly flies / lightning / candle flames):', err);
+      log.warn('Map-point effect wiring failed (smelly flies / lightning / candle flames / dust):', err);
     }
   }
 
@@ -1803,6 +1805,12 @@ export class FloorCompositor {
           sunAzimuthDeg: this._skyColorEffect?.currentSunAzimuthDeg,
         });
       } catch (_) {}
+      try {
+        this._dustEffect?.setSkyState?.({
+          skyTintColor: this._skyColorEffect?.currentSkyTintColor,
+          sunAzimuthDeg: this._skyColorEffect?.currentSunAzimuthDeg,
+        });
+      } catch (_) {}
       this._windowLightEffect.update(timeInfo);
       this._colorCorrectionEffect.update(timeInfo);
       this._filterEffect.update(timeInfo);
@@ -2726,9 +2734,9 @@ export class FloorCompositor {
     // Softer, larger feathering for heat masks; sharp clipping looked unnatural
     // around fire edges. Keep this in pixel-space style scaling and let
     // DistortionManager map it through its blur texel-size path.
-    const blurRadiusBase = 1.6 + (avgSize / 48.0) + (fireRate * 0.12);
-    const blurRadius = Math.max(2.0, Math.min(18.0, blurRadiusBase * softnessScale));
-    const blurPasses = blurRadius >= 11.0 ? 4 : (blurRadius >= 7.0 ? 3 : (blurRadius >= 4.0 ? 2 : 1));
+    const blurRadiusBase = 3.0 + (avgSize / 30.0) + (fireRate * 0.22);
+    const blurRadius = Math.max(4.0, Math.min(28.0, blurRadiusBase * softnessScale));
+    const blurPasses = blurRadius >= 20.0 ? 5 : (blurRadius >= 14.0 ? 4 : (blurRadius >= 9.0 ? 3 : 2));
 
     let heatMask = fireMask;
     const needsBlurRefresh =

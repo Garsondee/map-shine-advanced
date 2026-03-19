@@ -9,7 +9,7 @@
  *   1. `populate()` discovers per-tile `_Water` masks via `probeMaskFile()`.
  *   2. Per-floor masks are composited into a single RT by rendering white quads
  *      masked by the water texture into a scene-sized render target.
- *   3. `WaterSurfaceModel.buildFromMaskTexture()` builds SDF data from the
+ *   3. An internal water-data builder converts the composited mask into
  *      composited mask (R=SDF, G=exposure, BA=normals).
  *   4. The fullscreen water shader reads tWaterData + scene RT to produce the
  *      refracted/tinted/specular output as a post-processing pass.
@@ -27,7 +27,6 @@ import { createLogger } from '../../core/log.js';
 import { weatherController } from '../../core/WeatherController.js';
 import { probeMaskFile } from '../../assets/loader.js';
 import { tileHasLevelsRange, readTileLevelsFlags } from '../../foundry/levels-scene-flags.js';
-import { WaterSurfaceModel } from '../../effects/WaterSurfaceModel.js';
 import { DepthShaderChunks } from '../../effects/DepthShaderChunks.js';
 import { VisionSDF } from '../../vision/VisionSDF.js';
 import { getVertexShader, getFragmentShader, getFragmentShaderSafe } from './water-shader.js';
@@ -416,21 +415,8 @@ export class WaterEffectV2 {
     /** @type {Array<{tileId: string, basePath: string, floorIndex: number, maskPath: string}>} */
     this._waterTiles = [];
 
-    // ── Surface model ────────────────────────────────────────────────────
-    /** @type {WaterSurfaceModel} */
-    this._surfaceModel = new WaterSurfaceModel();
-
     /** @type {VisionSDF|null} */
     this._visionSDF = null;
-
-    /** @type {THREE.Scene|null} */
-    this._waterDataPackScene = null;
-    /** @type {THREE.OrthographicCamera|null} */
-    this._waterDataPackCamera = null;
-    /** @type {THREE.Mesh|null} */
-    this._waterDataPackQuad = null;
-    /** @type {THREE.ShaderMaterial|null} */
-    this._waterDataPackMaterial = null;
 
     // ── GPU resources (created in initialize()) ──────────────────────────
     /** @type {THREE.Scene|null} */
@@ -1399,12 +1385,10 @@ export class WaterEffectV2 {
 
   /**
    * Composite all water mask images for one floor into a single scene-UV canvas,
-   * then build SDF via WaterSurfaceModel.
+   * then build the packed water-data texture.
    *
-   * Uses canvas 2D compositing instead of WebGL render targets so that
-   * WaterSurfaceModel.buildFromMaskTexture() receives a texture backed by a
-   * real HTMLImageElement/canvas (CPU path) rather than an RT texture (which
-   * would require the broken GPU readback path).
+   * Uses canvas 2D compositing so the CPU fallback can work directly from RGBA
+   * pixels without needing any separate legacy helper.
    *
    * @param {object} THREE
    * @param {Array} entries - Water tile entries for this floor
@@ -1500,28 +1484,13 @@ export class WaterEffectV2 {
     }
 
     if (!waterData) {
-      // Fallback: legacy CPU WaterSurfaceModel build.
-      const canvasTex = new THREE.CanvasTexture(canvas);
-      canvasTex.flipY = false;
-      canvasTex.needsUpdate = true;
+      // Fallback: CPU water-data build from the already composited RGBA pixels.
       try {
-        waterData = this._surfaceModel.buildFromMaskTexture(canvasTex, {
-          resolution: maxRes,
-          threshold: this.params.maskThreshold ?? 0.15,
-          channel: this.params.maskChannel ?? 'auto',
-          invert: !!this.params.maskInvert,
-          blurRadius: this.params.maskBlurRadius ?? 0.0,
-          blurPasses: this.params.maskBlurPasses ?? 0,
-          expandPx: this.params.maskExpandPx ?? 0.0,
-          sdfRangePx: this.params.sdfRangePx ?? 64,
-          exposureWidthPx: this.params.shoreWidthPx ?? 24,
-        });
+        waterData = this._buildWaterDataCpu(THREE, imageData, cvW, cvH);
       } catch (err) {
         log.error('_compositeFloorMask: CPU SDF build failed:', err);
-        canvasTex.dispose();
         return null;
       }
-      canvasTex.dispose();
     }
 
     if (!waterData?.hasWater) {
@@ -1710,6 +1679,182 @@ export class WaterEffectV2 {
       hasWater: true,
       _packedTarget: packTarget,
     };
+  }
+
+  _buildWaterDataCpu(THREE, rgbaPixels, width, height) {
+    const channel = this.params.maskChannel ?? 'auto';
+    const useAlpha = (channel === 'a') ? true : (channel === 'r' ? false : this._detectMaskUseAlpha(rgbaPixels));
+    const invert = !!this.params.maskInvert;
+    const threshold255 = Math.max(0, Math.min(255, Math.round((this.params.maskThreshold ?? 0.15) * 255)));
+    const blurRadius = Math.max(0.0, Number(this.params.maskBlurRadius ?? 0.0));
+    const blurPasses = Math.max(0, Math.floor(Number(this.params.maskBlurPasses ?? 0)));
+    const expandPx = Number.isFinite(this.params.maskExpandPx) ? Number(this.params.maskExpandPx) : 0.0;
+    const sdfRangePx = Math.max(1e-3, Number(this.params.sdfRangePx ?? 64));
+    const exposureWidthPx = Math.max(1e-3, Number(this.params.shoreWidthPx ?? 24));
+
+    const raw = new Uint8Array(width * height);
+    const rawRgba = new Uint8Array(width * height * 4);
+    for (let i = 0; i < width * height; i++) {
+      const o = i * 4;
+      const r = rgbaPixels[o];
+      const g = rgbaPixels[o + 1];
+      const b = rgbaPixels[o + 2];
+      const a = rgbaPixels[o + 3];
+      let v;
+      if (channel === 'luma') v = Math.round(0.2126 * r + 0.7152 * g + 0.0722 * b);
+      else v = useAlpha ? a : r;
+      if (invert) v = 255 - v;
+      raw[i] = v;
+      rawRgba[o] = v;
+      rawRgba[o + 1] = v;
+      rawRgba[o + 2] = v;
+      rawRgba[o + 3] = 255;
+    }
+
+    const rawMaskTexture = new THREE.DataTexture(rawRgba, width, height, THREE.RGBAFormat, THREE.UnsignedByteType);
+    rawMaskTexture.minFilter = THREE.LinearFilter;
+    rawMaskTexture.magFilter = THREE.LinearFilter;
+    rawMaskTexture.wrapS = THREE.ClampToEdgeWrapping;
+    rawMaskTexture.wrapT = THREE.ClampToEdgeWrapping;
+    rawMaskTexture.generateMipmaps = false;
+    rawMaskTexture.flipY = false;
+    if ('colorSpace' in rawMaskTexture && THREE.NoColorSpace) rawMaskTexture.colorSpace = THREE.NoColorSpace;
+    rawMaskTexture.needsUpdate = true;
+
+    const working = new Float32Array(width * height);
+    for (let i = 0; i < width * height; i++) working[i] = raw[i] / 255.0;
+
+    if (blurPasses > 0 && blurRadius > 1e-4) {
+      const tmp = new Float32Array(width * height);
+      const rr = Math.max(0.5, blurRadius);
+      const radius = Math.min(16, Math.ceil(rr * 3.0));
+      const weights = new Float32Array(radius * 2 + 1);
+      let wsum = 0.0;
+      for (let j = -radius; j <= radius; j++) {
+        const weight = Math.exp(-0.5 * (j * j) / (rr * rr));
+        weights[j + radius] = weight;
+        wsum += weight;
+      }
+      for (let j = 0; j < weights.length; j++) weights[j] /= Math.max(1e-6, wsum);
+
+      const blur1D = (src, dst, dx, dy) => {
+        for (let y = 0; y < height; y++) {
+          for (let x = 0; x < width; x++) {
+            let acc = 0.0;
+            for (let k = -radius; k <= radius; k++) {
+              const xx = Math.max(0, Math.min(width - 1, x + k * dx));
+              const yy = Math.max(0, Math.min(height - 1, y + k * dy));
+              acc += src[yy * width + xx] * weights[k + radius];
+            }
+            dst[y * width + x] = acc;
+          }
+        }
+      };
+
+      for (let p = 0; p < blurPasses; p++) {
+        blur1D(working, tmp, 1, 0);
+        blur1D(tmp, working, 0, 1);
+      }
+    }
+
+    const threshold = Math.max(0.0, Math.min(1.0, Number(this.params.maskThreshold ?? 0.15)));
+    const mask = new Uint8Array(width * height);
+    let hasWater = false;
+    for (let i = 0; i < width * height; i++) {
+      const on = working[i] >= threshold ? 1 : 0;
+      mask[i] = on;
+      if (on) hasWater = true;
+    }
+
+    if (!hasWater) {
+      return {
+        texture: null,
+        rawMaskTexture,
+        transform: new THREE.Vector4(0, 0, 1, 1),
+        resolution: Math.max(width, height),
+        threshold: this.params.maskThreshold ?? 0.15,
+        hasWater: false,
+      };
+    }
+
+    const distToLand = this._distanceTransform(mask, width, height, false);
+    const distToWater = this._distanceTransform(mask, width, height, true);
+    const packed = new Uint8Array(width * height * 4);
+    for (let i = 0; i < width * height; i++) {
+      const isWater = mask[i] === 1;
+      const sdfPx0 = isWater ? -distToLand[i] : distToWater[i];
+      const sdfPx = sdfPx0 - expandPx;
+      const sdf01 = this._clamp01(0.5 + (sdfPx / (2.0 * sdfRangePx)));
+      const exposure01 = this._clamp01(Math.max(0.0, -sdfPx) / exposureWidthPx);
+      const o = i * 4;
+      packed[o] = Math.round(sdf01 * 255);
+      packed[o + 1] = Math.round(exposure01 * 255);
+      packed[o + 2] = 128;
+      packed[o + 3] = 128;
+    }
+
+    const texture = new THREE.DataTexture(packed, width, height, THREE.RGBAFormat, THREE.UnsignedByteType);
+    texture.minFilter = THREE.LinearFilter;
+    texture.magFilter = THREE.LinearFilter;
+    texture.wrapS = THREE.ClampToEdgeWrapping;
+    texture.wrapT = THREE.ClampToEdgeWrapping;
+    texture.generateMipmaps = false;
+    texture.flipY = false;
+    if ('colorSpace' in texture && THREE.NoColorSpace) texture.colorSpace = THREE.NoColorSpace;
+    texture.needsUpdate = true;
+
+    return {
+      texture,
+      rawMaskTexture,
+      transform: new THREE.Vector4(0, 0, 1, 1),
+      resolution: Math.max(width, height),
+      threshold: this.params.maskThreshold ?? 0.15,
+      hasWater: true,
+    };
+  }
+
+  _distanceTransform(mask01, width, height, toWater) {
+    const INF = 1e9;
+    const SQRT2 = 1.41421356237;
+    const dist = new Float32Array(width * height);
+
+    for (let i = 0; i < width * height; i++) {
+      const isWater = mask01[i] === 1;
+      const feature = toWater ? isWater : !isWater;
+      dist[i] = feature ? 0.0 : INF;
+    }
+
+    for (let y = 0; y < height; y++) {
+      const row = y * width;
+      for (let x = 0; x < width; x++) {
+        const idx = row + x;
+        let d = dist[idx];
+        if (x > 0) d = Math.min(d, dist[idx - 1] + 1.0);
+        if (y > 0) d = Math.min(d, dist[idx - width] + 1.0);
+        if (x > 0 && y > 0) d = Math.min(d, dist[idx - width - 1] + SQRT2);
+        if (x < width - 1 && y > 0) d = Math.min(d, dist[idx - width + 1] + SQRT2);
+        dist[idx] = d;
+      }
+    }
+
+    for (let y = height - 1; y >= 0; y--) {
+      const row = y * width;
+      for (let x = width - 1; x >= 0; x--) {
+        const idx = row + x;
+        let d = dist[idx];
+        if (x < width - 1) d = Math.min(d, dist[idx + 1] + 1.0);
+        if (y < height - 1) d = Math.min(d, dist[idx + width] + 1.0);
+        if (x < width - 1 && y < height - 1) d = Math.min(d, dist[idx + width + 1] + SQRT2);
+        if (x > 0 && y < height - 1) d = Math.min(d, dist[idx + width - 1] + SQRT2);
+        dist[idx] = d;
+      }
+    }
+
+    return dist;
+  }
+
+  _clamp01(v) {
+    return v < 0 ? 0 : (v > 1 ? 1 : v);
   }
 
   /**

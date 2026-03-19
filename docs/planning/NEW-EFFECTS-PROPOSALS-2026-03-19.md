@@ -127,7 +127,7 @@ into a full dedicated effect.
 **Archetype A — Bus Overlay (per-tile mesh), additive blending.**
 
 ```
-_Ice mask → SDF (same WaterSurfaceModel approach) → frost edge channel
+_Ice mask → SDF (same WaterEffectV2 internal water-data approach) → frost edge channel
 ```
 
 **Shader internals:**
@@ -191,13 +191,13 @@ Ice Surface
 
 ### Implementation phases
 - **P1** — Static ice mask overlay with vein + sparkle shader, no SDF edge
-- **P2** — SDF edge glow (reuse WaterSurfaceModel for SDF generation)
+- **P2** — SDF edge glow (reuse WaterEffectV2-style internal SDF generation)
 - **P3** — `WeatherController.freezeLevel` integration + animated crack drift
 - **P4** — `DistortionManager` ice-shimmer registration
 
 ### Complexity estimate
 **Medium.** Archetype A is well-understood. Voronoi/FBM crack shaders are established GLSL
-patterns. SDF generation reuses the existing WaterSurfaceModel pipeline.
+patterns. SDF generation reuses the existing WaterEffectV2 internal water-data pipeline.
 
 ---
 
@@ -449,7 +449,7 @@ gl_FragColor        = vec4(causticColor, caustic * waterPresence);
 ```
 
 **Water SDF for adjacency:**
-Reuse `WaterSurfaceModel` SDF data (already computed by `WaterEffectV2`). Request the SDF
+Reuse `WaterEffectV2` SDF data (already computed internally). Request the SDF
 texture via `WaterEffectV2.getCausticSdfTexture()` — a new accessor that exposes the existing
 internal RT without exposing mutable state.
 

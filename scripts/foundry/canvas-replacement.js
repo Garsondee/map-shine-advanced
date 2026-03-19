@@ -681,6 +681,10 @@ export function applyTokenRenderingMode() {
 }
 
 function _updateFoundrySelectRectSuppression(forceValue = null) {
+  // Never suppress select rect on non-MSA scenes. Stray hooks from a previous
+  // MSA scene could otherwise patch Foundry's drawSelect on a vanilla scene.
+  if (!sceneSettings.isEnabled(canvas?.scene)) return;
+
   // Suppress Foundry selection rectangle only when Three owns interaction.
   // Token selection/marquee in gameplay is Three-authoritative.
   // Foundry marquee should only be active when PIXI truly owns input (e.g. edit tools).
@@ -3157,7 +3161,15 @@ function onCanvasTearDown(canvas) {
     }, 'frameCoordinator.dispose');
   }
 
-  // Remove PIXI suppression ticker hook (V2 baseline enforcement)
+  // Remove PIXI suppression hooks (V2 baseline enforcement).
+  // These hooks call _enforceGameplayPixiSuppression() which hides #board,
+  // PIXI canvas, fog, visibility, etc. If they survive into a non-MSA scene
+  // they will suppress Foundry's native rendering and cause a black screen.
+  for (const h of _pixiSuppressionHookIds) {
+    try { Hooks.off(h.hook, h.id); } catch (_) {}
+  }
+  _pixiSuppressionHookIds = [];
+
   if (_pixiSuppressionTickerFn) {
     safeDispose(() => {
       canvas?.app?.ticker?.remove?.(_pixiSuppressionTickerFn);
@@ -6700,6 +6712,9 @@ function _enforceGameplayPixiSuppression() {
   safeCall(() => {
     if (!canvas?.ready) return;
     if (isMapMakerMode) return;
+    // Safety: never suppress PIXI on scenes that are not MSA-enabled.
+    // Stray hooks or late callbacks could otherwise black-out non-MSA scenes.
+    if (!sceneSettings.isEnabled(canvas?.scene)) return;
     // Debug/bridge escape hatch: allow temporary suspension of suppression
     // while PIXI-content bridge performs offscreen extraction.
     if (window?.MapShine?.__disablePixiSuppression === true) return;

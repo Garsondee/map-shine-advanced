@@ -50,7 +50,7 @@ export class WindowLightEffectV2 {
 
     /**
      * Per-tile overlay entries.
-     * @type {Map<string, {mesh: THREE.Mesh, material: THREE.ShaderMaterial, floorIndex: number}>}
+     * @type {Map<string, {mesh: THREE.Mesh, material: THREE.ShaderMaterial, floorIndex: number, isOverhead: boolean}>}
      */
     this._overlays = new Map();
 
@@ -64,10 +64,13 @@ export class WindowLightEffectV2 {
     };
 
     this.params = {
+      hasWindowMask: false,
       enabled: true,
       intensity: 1.5,
       falloff: 3.0,
       color: { r: 1.0, g: 0.96, b: 0.85 },
+      lightOverheadTiles: true,
+      overheadLightIntensity: 1.0,
       flickerEnabled: false,
       flickerSpeed: 0.35,
       flickerAmount: 0.15,
@@ -295,6 +298,7 @@ export class WindowLightEffectV2 {
   async populate(foundrySceneData) {
     if (!this._initialized) { log.warn('populate: not initialized'); return; }
     this.clear();
+    this.params.hasWindowMask = false;
 
     const floors = window.MapShine?.floorStack?.getFloors?.() ?? [];
     // worldH must match FloorRenderBus and SpecularEffectV2: use foundrySceneData.height
@@ -335,9 +339,12 @@ export class WindowLightEffectV2 {
           h: sceneH,
           z,
           rotation: 0,
+          intensityMultiplier: 1.0,
+          isOverhead: false,
         });
 
         overlayCount++;
+        this.params.hasWindowMask = true;
         log.info(`WindowLightEffectV2: created background overlay (${sceneW}x${sceneH})`);
       }
     }
@@ -362,6 +369,10 @@ export class WindowLightEffectV2 {
       if (!maskPath) continue;
 
       const floorIndex = this._resolveFloorIndex(tileDoc, floors);
+      const isOverheadTile = !!tileDoc.overhead;
+      if (isOverheadTile && !this.params.lightOverheadTiles) {
+        continue;
+      }
 
       const tileW = tileDoc.width ?? 0;
       const tileH = tileDoc.height ?? 0;
@@ -374,6 +385,9 @@ export class WindowLightEffectV2 {
       // Z in bus coordinates.
       const GROUND_Z = 1000;
       const z = GROUND_Z + floorIndex + WINDOW_Z_OFFSET;
+      const intensityMultiplier = isOverheadTile
+        ? Math.max(0.0, Math.min(1.0, Number(this.params.overheadLightIntensity) || 0.0))
+        : 1.0;
 
       this._createOverlay(tileId, floorIndex, {
         maskUrl: maskPath,
@@ -382,9 +396,12 @@ export class WindowLightEffectV2 {
         h: tileH,
         z,
         rotation,
+        intensityMultiplier,
+        isOverhead: isOverheadTile,
       });
 
       overlayCount++;
+      this.params.hasWindowMask = true;
     }
 
     log.info(`WindowLightEffectV2 populated: ${overlayCount} overlay(s) (${bgSrc ? '1 bg + ' : ''}${overlayCount - (bgSrc && overlayCount > 0 ? 1 : 0)} tiles)`);
@@ -480,6 +497,19 @@ export class WindowLightEffectV2 {
     // tweaks take effect without requiring a repopulate.
     u.uRgbShiftAmount.value = Math.max(0.0, Number(this.params.rgbShiftAmount) || 0);
     u.uRgbShiftAngle.value = (Number(this.params.rgbShiftAngle) || 0) * (Math.PI / 180.0);
+
+    // Keep overhead controls live without requiring repopulate/rebuild.
+    const overheadEnabled = !!this.params.lightOverheadTiles;
+    const overheadIntensity = Math.max(0.0, Math.min(1.0, Number(this.params.overheadLightIntensity) || 0.0));
+    u.uLightOverheadTiles.value = overheadEnabled ? 1.0 : 0.0;
+    u.uOverheadLightIntensity.value = overheadIntensity;
+    for (const entry of this._overlays.values()) {
+      const overlayIntensity = entry.isOverhead
+        ? (overheadEnabled ? overheadIntensity : 0.0)
+        : 1.0;
+      const overlayUniform = entry.material?.uniforms?.uOverlayIntensity;
+      if (overlayUniform) overlayUniform.value = overlayIntensity;
+    }
   }
 
   /**
@@ -537,6 +567,24 @@ export class WindowLightEffectV2 {
     }
   }
 
+  /**
+   * Bind overhead roof alpha texture for screen-space gating of window light.
+   * This prevents non-overhead window overlays (e.g. background windows) from
+   * leaking light onto pixels currently covered by visible overhead tiles.
+   * @param {THREE.Texture|null} texture
+   * @param {number} screenW
+   * @param {number} screenH
+   */
+  setOverheadRoofAlphaTexture(texture, screenW, screenH) {
+    const u = this._sharedUniforms;
+    if (!u) return;
+    u.uOverheadRoofAlphaTex.value = texture ?? null;
+    u.uHasOverheadRoofAlphaTex.value = texture ? 1.0 : 0.0;
+    const w = Math.max(1, Number(screenW) || 1);
+    const h = Math.max(1, Number(screenH) || 1);
+    u.uScreenSize.value.set(w, h);
+  }
+
   // ── Internals ──────────────────────────────────────────────────────────────
 
   _buildSharedUniforms() {
@@ -576,6 +624,10 @@ export class WindowLightEffectV2 {
       uCloudShadowBias: { value: Number(this.params.cloudShadowBias) || 0.0 },
       uCloudShadowGamma: { value: Math.max(0.01, Number(this.params.cloudShadowGamma) || 1.0) },
       uCloudShadowMinLight: { value: Math.max(0.0, Math.min(1.0, Number(this.params.cloudShadowMinLight) || 0.0)) },
+      uOverheadRoofAlphaTex: { value: null },
+      uHasOverheadRoofAlphaTex: { value: 0.0 },
+      uLightOverheadTiles: { value: this.params.lightOverheadTiles ? 1.0 : 0.0 },
+      uOverheadLightIntensity: { value: Math.max(0.0, Math.min(1.0, Number(this.params.overheadLightIntensity) || 0.0)) },
       uRainAmount: { value: 0.0 },
       uRainSpeed: { value: Math.max(0.0, Number(this.params.rainOnGlassSpeed) || 0.0) },
       uRainDir: { value: new THREE.Vector2(0, -1) },
@@ -588,7 +640,7 @@ export class WindowLightEffectV2 {
     };
   }
 
-  _createOverlay(tileId, floorIndex, { maskUrl, centerX, centerY, w, h, z, rotation }) {
+  _createOverlay(tileId, floorIndex, { maskUrl, centerX, centerY, w, h, z, rotation, intensityMultiplier = 1.0, isOverhead = false }) {
     const THREE = window.THREE;
     if (!THREE || !this._sharedUniforms) return;
 
@@ -603,6 +655,7 @@ export class WindowLightEffectV2 {
       ...this._sharedUniforms,
       uMask: { value: null },
       uMaskReady: { value: 0.0 },
+      uOverlayIntensity: { value: Math.max(0.0, Number(intensityMultiplier) || 0.0) },
       // 1/texWidth, 1/texHeight — set once texture loads.
       uWindowTexelSize: { value: new THREE.Vector2(1.0 / w, 1.0 / h) },
     };
@@ -651,6 +704,10 @@ export class WindowLightEffectV2 {
         uniform float uCloudShadowBias;
         uniform float uCloudShadowGamma;
         uniform float uCloudShadowMinLight;
+        uniform sampler2D uOverheadRoofAlphaTex;
+        uniform float uHasOverheadRoofAlphaTex;
+        uniform float uLightOverheadTiles;
+        uniform float uOverheadLightIntensity;
         uniform float uRainAmount;
         uniform float uRainSpeed;
         uniform vec2  uRainDir;
@@ -658,6 +715,7 @@ export class WindowLightEffectV2 {
         uniform float uRainDarken;
         uniform float uRgbShiftAmount;
         uniform float uRgbShiftAngle;
+        uniform float uOverlayIntensity;
         uniform vec2  uWindowTexelSize;
         uniform sampler2D uMask;
         uniform float uMaskReady;
@@ -755,7 +813,22 @@ export class WindowLightEffectV2 {
           }
           float rainDarkenMul = 1.0 - clamp(uRainDarken, 0.0, 1.0) * clamp(uRainAmount, 0.0, 1.0) * 0.35;
 
-          vec3 lightOut = shaped * (uColor * envTintColor) * uIntensity * flicker * max(uNightFactor, 0.0) * cloudDimming * cloudShadow * rainDarkenMul;
+          float overheadGate = 1.0;
+          if (uHasOverheadRoofAlphaTex > 0.5) {
+            vec2 roofUv = gl_FragCoord.xy / max(uScreenSize, vec2(1.0));
+            vec4 roofSample = texture2D(uOverheadRoofAlphaTex, clamp(roofUv, 0.0, 1.0));
+            float roofAlpha = clamp(max(roofSample.r, roofSample.a), 0.0, 1.0);
+            if (uLightOverheadTiles < 0.5) {
+              // Hard block where overhead tiles are visible.
+              overheadGate = 1.0 - roofAlpha;
+            } else {
+              // Optional attenuation in overhead regions when enabled.
+              float overheadAllow = clamp(uOverheadLightIntensity, 0.0, 1.0);
+              overheadGate = mix(1.0 - roofAlpha, 1.0, overheadAllow);
+            }
+          }
+
+          vec3 lightOut = shaped * (uColor * envTintColor) * uIntensity * flicker * max(uNightFactor, 0.0) * cloudDimming * cloudShadow * rainDarkenMul * max(uOverlayIntensity, 0.0) * overheadGate;
 
           // Output raw linear light — no tone mapping on additive overlays.
           // AdditiveBlending: dst += src.rgb * src.a. Alpha=1 so the full
@@ -776,7 +849,7 @@ export class WindowLightEffectV2 {
     // Add to the isolated window light scene (not the bus scene).
     // Floor visibility is managed by onFloorChange() instead of the bus.
     this._scene.add(mesh);
-    this._overlays.set(tileId, { mesh, material, floorIndex });
+    this._overlays.set(tileId, { mesh, material, floorIndex, isOverhead: !!isOverhead });
 
     // Load texture asynchronously.
     const loader = new THREE.TextureLoader();

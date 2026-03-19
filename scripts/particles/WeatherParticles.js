@@ -6327,7 +6327,7 @@ export class WeatherParticles {
     }
 
     try {
-      // Fast path for DataTexture images (e.g. WaterSurfaceModel rawMaskTexture).
+      // Fast path for DataTexture images (e.g. WaterEffectV2 raw water mask textures).
       // These have { data: TypedArray, width, height } instead of a drawable
       // HTMLImageElement, so ctx.drawImage() would throw.
       if (image.data && (image.data instanceof Uint8Array || image.data instanceof Uint8ClampedArray || image.data instanceof Float32Array)) {
@@ -6526,7 +6526,7 @@ export class WeatherParticles {
         const idx = (yImg * w + x) * 4;
         const sdf01 = data[idx] / 255;
 
-        // Only consider inside-water pixels (WaterSurfaceModel encodes inside water as sdf01 < 0.5).
+        // Only consider inside-water pixels. Water data encodes inside water as sdf01 < 0.5.
         if (sdf01 >= 0.5) continue;
 
         // Boundary detection: any neighbor outside water.
@@ -6601,7 +6601,7 @@ export class WeatherParticles {
         const sdf01 = data[idx] / 255;
         const exposure01 = data[idx + 1] / 255;
 
-        // Only allow points inside water. In WaterSurfaceModel, sdf01 < 0.5 corresponds to inside water.
+        // Only allow points inside water. In the packed water-data texture, sdf01 < 0.5 corresponds to inside water.
         if (sdf01 >= 0.5) continue;
         if (exposure01 < lo || exposure01 > hi) continue;
 

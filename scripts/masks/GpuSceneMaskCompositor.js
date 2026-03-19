@@ -1596,7 +1596,7 @@ export class GpuSceneMaskCompositor {
 
   /**
    * Find the WebGLRenderTarget that owns the given texture.
-   * Used by WaterSurfaceModel to perform GPU readback on compositor-produced textures.
+   * Used by water-mask consumers that need GPU readback on compositor-produced textures.
    * Searches all cached floor targets across all floors.
    *
    * @param {THREE.Texture} texture

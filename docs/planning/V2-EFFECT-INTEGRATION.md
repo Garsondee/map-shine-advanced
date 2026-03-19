@@ -836,7 +836,7 @@ input, outputs a modified scene with all water layers composited on top.
 
 **Working:**
 - [x] `_Water` mask discovery and per-floor compositing
-- [x] `WaterSurfaceModel` SDF build from mask (R=SDF, G=exposure, B/A=normals)
+- [x] Internal `WaterEffectV2` water-data build from mask (R=SDF, G=exposure, B/A=normals)
 - [x] Per-floor water data switching on floor change (`onFloorChange`)
 - [x] Water tint applied inside SDF-gated region
 - [x] Wave distortion (smooth, world-locked, zoom-stable) using verbatim V1 wave math

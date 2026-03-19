@@ -1969,8 +1969,12 @@ export class FloorCompositor {
       ? this._buildingShadowEffect.params.opacity : 0.75;
     const overheadShadowTex = (this._overheadShadowEffect?.params?.enabled)
       ? this._overheadShadowEffect.shadowFactorTexture : null;
-    const overheadRoofAlphaTex = (this._overheadShadowEffect?.params?.enabled)
-      ? this._overheadShadowEffect.roofAlphaTexture : null;
+    const overheadRoofAlphaTex = this._overheadShadowEffect?.roofAlphaTexture ?? null;
+    this._windowLightEffect?.setOverheadRoofAlphaTexture?.(
+      overheadRoofAlphaTex,
+      this._sceneRT?.width || 1,
+      this._sceneRT?.height || 1
+    );
     if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: lighting.render(sceneRT→postA)'); } catch (_) {} }
     if (_profiling) _profileT0 = performance.now();
     this._lightingEffect.render(this.renderer, this.camera, currentInput, this._postA, winScene, cloudShadowTex, buildingShadowTex, overheadShadowTex, buildingShadowOpacity, overheadRoofAlphaTex);

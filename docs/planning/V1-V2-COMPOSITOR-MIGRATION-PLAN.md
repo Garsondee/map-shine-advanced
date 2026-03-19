@@ -69,7 +69,7 @@ The old “36+ V1 effects” count is stale. A direct filesystem audit shows `sc
 | DebugLayerEffect.js (18KB) | ❌ No | V1 debug tooling. |
 | EffectComposer.js (64KB) | ⚠️ Partial | Still hosts shared frame/updatable orchestration + V2 delegation. |
 | EnhancedLightsApi.js / LightEnhancementStore.js / LightRegistry.js / MapShineLightAdapter.js / ThreeLightSource.js / ThreeDarknessSource.js | ⚠️ N/A (shared/bridge infra) | These are lighting/support infrastructure, not standalone migrated effects. |
-| DepthShaderChunks.js / Foundry*ShaderChunks.js / WaterSurfaceModel.js | ⚠️ N/A (shared shader/model helpers) | Shared utility code; not direct 1:1 effect classes. |
+| DepthShaderChunks.js / Foundry*ShaderChunks.js | ⚠️ N/A (shared shader/model helpers) | Shared utility code; not direct 1:1 effect classes. |
 | `stubs/StubEffects.js` | N/A | Stub-only compatibility surface. |
 
 **Audit summary:** the migration bottleneck is no longer “dozens of active V1 effects,” but a **small set of true V1 holdouts** (most notably `DistortionManager`) plus shared infrastructure that still lives under `scripts/effects/`.

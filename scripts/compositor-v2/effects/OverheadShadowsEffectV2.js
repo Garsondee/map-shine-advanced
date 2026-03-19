@@ -1466,9 +1466,9 @@ export class OverheadShadowsEffectV2 {
     if (scene) this.mainScene = scene;
     if (camera) this.mainCamera = camera;
 
-    // If disabled or not initialized, force a neutral (white) shadow target so
+    // If not initialized, force a neutral (white) shadow target so
     // LightingEffectV2 doesn't multiply the scene to black.
-    if (!this.params.enabled || !this.material || !this.mainCamera || !this.mainScene || !this.shadowScene) {
+    if (!this.material || !this.mainCamera || !this.mainScene || !this.shadowScene) {
       this._clearShadowTargetToWhite(renderer);
       return;
     }
@@ -1500,7 +1500,9 @@ export class OverheadShadowsEffectV2 {
     //    (their sprite opacity fades out for UX), we temporarily force
     //    roof sprite materials to full opacity for this mask pass only.
     const ROOF_LAYER = 20;
+    const WEATHER_ROOF_LAYER = 21;
     const roofMaskBit = 1 << ROOF_LAYER;
+    const roofVisibilityMaskBits = (1 << ROOF_LAYER) | (1 << WEATHER_ROOF_LAYER);
     const previousLayersMask = this.mainCamera.layers.mask;
     const previousTarget = renderer.getRenderTarget();
 
@@ -1537,15 +1539,9 @@ export class OverheadShadowsEffectV2 {
     const roofCaptureScale = useLinearGuardScale ? Math.max(guardScaleX, guardScaleY) : 1.0;
 
     const roofVisibilityExclusions = [];
-    const roofVisibilityNonBusExclusions = [];
     this.mainScene.traverse((object) => {
-      if (!object.layers || (object.layers.mask & roofMaskBit) === 0) return;
+      if (!object.layers || (object.layers.mask & roofVisibilityMaskBits) === 0) return;
       const isFluidOverlay = !!(object.material?.uniforms?.tFluidMask);
-      const isBusTileRenderable = !!object?.userData?.mapShineBusTile;
-      if (!isBusTileRenderable && typeof object.visible === 'boolean') {
-        roofVisibilityNonBusExclusions.push({ object, visible: object.visible });
-        object.visible = false;
-      }
       if (!isFluidOverlay) return;
       if (typeof object.visible === 'boolean') {
         roofVisibilityExclusions.push({ object, visible: object.visible });
@@ -1557,6 +1553,7 @@ export class OverheadShadowsEffectV2 {
     // LightingEffectV2 building-shadow suppression. This pass intentionally uses
     // true tile visibility/opacity and excludes fluid overlays.
     this.mainCamera.layers.set(ROOF_LAYER);
+    this.mainCamera.layers.enable(WEATHER_ROOF_LAYER);
     renderer.setRenderTarget(this.roofVisibilityTarget);
     renderer.setClearColor(0x000000, 0);
     renderer.clear();
@@ -1565,8 +1562,15 @@ export class OverheadShadowsEffectV2 {
     for (const entry of roofVisibilityExclusions) {
       if (entry.object) entry.object.visible = entry.visible;
     }
-    for (const entry of roofVisibilityNonBusExclusions) {
-      if (entry.object) entry.object.visible = entry.visible;
+
+    // Even when overhead shadow projection is disabled, keep roofVisibilityTarget
+    // current so other effects (e.g. WindowLightEffectV2) can occlude against
+    // visible overhead tiles in screen space.
+    if (!this.params.enabled) {
+      this.mainCamera.layers.mask = previousLayersMask;
+      this._clearShadowTargetToWhite(renderer);
+      renderer.setRenderTarget(previousTarget);
+      return;
     }
 
     // Guard-band capture is only for roof/fluid caster passes. Do NOT apply it

@@ -200,7 +200,6 @@ scripts/
 │
 ├── effects/                     # Shared V1/V2 support layer
 │   ├── EffectComposer.js        # Per-frame orchestrator; delegates to FloorCompositor in V2 mode
-│   ├── WaterSurfaceModel.js     # SDF-based water surface simulation model (shared with V2)
 │   ├── ThreeLightSource.js      # Per-light shader data packing
 │   ├── ThreeDarknessSource.js   # Darkness source shader data packing
 │   └── effect-capabilities-registry.js  # Registry for Graphics Settings capability metadata
@@ -498,7 +497,7 @@ A standalone `THREE.Scene` that holds all tile meshes:
 **Post-Processing Effects** (fullscreen passes in step 5):
 - `LightingEffectV2` — Ambient + Foundry token lights + darkness + cloud shadow + window light. Reconstructs world XY from screen UVs via `uViewBounds`. `Final = Albedo × Light`. Roof alpha pre-pass for indoor occlusion.
 - `CloudEffectV2` — Procedural density field → shadow RT + cloud-top RT. Shadow RT fed to Lighting; cloud tops blitted after Lighting. Overhead-tile blocker pass for floor-aware shadow occlusion.
-- `WaterEffectV2` — Complete water system: noise, rain ripples, storm distortion, waves, foam, sand, murk (advected dual-FBM with wind), specular (GGX), chromatic aberration. Per-floor SDF from `WaterSurfaceModel`. Murk grain uses animated multi-octave `valueNoise` with wind advection via `uWindOffsetUv`.
+- `WaterEffectV2` — Complete water system: noise, rain ripples, storm distortion, waves, foam, sand, murk (advected dual-FBM with wind), specular (GGX), chromatic aberration. Per-floor water data is built internally from composited `_Water` masks. Murk grain uses animated multi-octave `valueNoise` with wind advection via `uWindOffsetUv`.
 - `OverheadShadowsEffectV2` — Drop-shadow from overhead tiles. Depth-pass gated for tile projection shadows only; roof/indoor overhead contribution uses mask-derived depth (not `depthMod`).
 - `BuildingShadowsEffectV2` — Raymarched building shadows, baked to 2048² world-space RT; re-renders only on time/param change
 - `SkyColorEffectV2` — Time-of-day color tinting (dawn pink → dusk orange → night blue)

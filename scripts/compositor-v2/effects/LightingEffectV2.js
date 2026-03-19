@@ -458,10 +458,15 @@ export class LightingEffectV2 {
             // with sceneUvFoundry, so do not apply an additional Y flip here.
             float bldShadow = clamp(texture2D(tBuildingShadow, sceneUvFoundry).r, 0.0, 1.0);
 
-            // Strict layering model: building shadows are a ground shading term.
-            // Overhead visibility should not mask/cut this term; overhead tiles
-            // are layered above the lit ground by draw order.
             float shadowMix = mix(1.0, bldShadow, uBuildingShadowOpacity);
+            // Suppress building shadow where visible overhead roof pixels exist.
+            // Use alpha primarily (with RGB fallback) so live roof fade opacity
+            // can smoothly attenuate this suppression.
+            if (uHasOverheadRoofAlpha > 0.5) {
+              vec4 roofSample = texture2D(tOverheadRoofAlpha, vUv);
+              float roofAlpha = clamp(max(roofSample.a, max(roofSample.r, max(roofSample.g, roofSample.b))), 0.0, 1.0);
+              shadowMix = mix(shadowMix, 1.0, roofAlpha);
+            }
             // Apply only to ambient contribution; dynamic lights punch through.
             vec3 ambientComponent = totalIllumination - vec3(lightI) * master;
             ambientComponent *= shadowMix;

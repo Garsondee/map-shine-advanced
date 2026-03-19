@@ -465,6 +465,23 @@ export class WaterSplashesEffectV2 {
     }
   }
 
+  /**
+   * Water splashes are a dependent visual layer for WaterEffectV2.
+   * If the parent water pass is disabled, hide splashes entirely so additive
+   * foam/splash sprites cannot glare on dry terrain where only `_Water` masks exist.
+   * @returns {boolean}
+   * @private
+   */
+  _isParentWaterEffectEnabled() {
+    try {
+      const waterEffect = window.MapShine?.effectComposer?._floorCompositorV2?._waterEffect;
+      if (!waterEffect) return true;
+      return (waterEffect.enabled !== false) && (waterEffect.params?.enabled !== false);
+    } catch (_) {
+      return true;
+    }
+  }
+
   /** Keep batched particle draw order aligned with the active floor band. @private */
   _updateBatchRenderOrder(maxFloorIndex) {
     if (!this._batchRenderer) return;
@@ -723,10 +740,15 @@ export class WaterSplashesEffectV2 {
    * @param {{ elapsed: number, delta: number }} timeInfo
    */
   update(timeInfo) {
-    if (!this._initialized || !this._batchRenderer || !this._enabled) return;
+    if (!this._initialized || !this._batchRenderer) return;
     const splashesEnabled = !!this.params?.enabled;
     const bubblesEnabled = !!this.bubblesParams?.enabled;
-    if (!splashesEnabled && !bubblesEnabled) return;
+    const parentWaterEnabled = this._isParentWaterEffectEnabled();
+    const shouldRender = this._enabled && parentWaterEnabled && (splashesEnabled || bubblesEnabled);
+
+    // Hide immediately when water is disabled to prevent lingering additive glare.
+    this._batchRenderer.visible = shouldRender;
+    if (!shouldRender) return;
 
     // Optional diagnostics for cases where systems were activated before the
     // user set the debug flag. This runs once when enabled and prints the

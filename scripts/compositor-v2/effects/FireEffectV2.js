@@ -23,7 +23,6 @@ import { weatherController } from '../../core/WeatherController.js';
 import { probeMaskFile } from '../../assets/loader.js';
 import { tileHasLevelsRange, readTileLevelsFlags } from '../../foundry/levels-scene-flags.js';
 import { SmartWindBehavior } from '../../particles/SmartWindBehavior.js';
-import { OVERLAY_THREE_LAYER } from '../../core/render-layers.js';
 import {
   FireMaskShape,
   FlameLifecycleBehavior,
@@ -56,6 +55,7 @@ const GROUND_Z = 1000;
 // Keep render-order math aligned with FloorRenderBus floor bands.
 const RENDER_ORDER_PER_FLOOR = 10000;
 const OVERHEAD_OFFSET = 5000;
+const FIRE_RENDER_ORDER_BASE = OVERHEAD_OFFSET - 4;
 
 // Spatial bucket size for splitting large fire masks into smaller emitters (px).
 const BUCKET_SIZE = 2000;
@@ -353,12 +353,14 @@ export class FireEffectV2 {
     // on the active floor band.
     this._batchRenderer.renderOrder = OVERHEAD_OFFSET - 1;
     this._batchRenderer.frustumCulled = false;
+    // Keep fire strictly in the main world pass (layer 0). If this object is also
+    // on OVERLAY_THREE_LAYER it gets drawn again in FloorCompositor's late overlay
+    // pass, which makes ground fire appear above overhead tiles.
     try {
-      if (this._batchRenderer.layers && typeof this._batchRenderer.layers.enable === 'function') {
-        this._batchRenderer.layers.enable(OVERLAY_THREE_LAYER);
+      if (this._batchRenderer.layers && typeof this._batchRenderer.layers.set === 'function') {
+        this._batchRenderer.layers.set(0);
       }
-    } catch (_) {
-    }
+    } catch (_) {}
 
     // Start loading sprite textures (populate() will await this).
     this._texturesReady = this._loadTextures();
@@ -695,16 +697,16 @@ export class FireEffectV2 {
       );
 
       // Fire system.
-      const fireSys = this._createFireSystem(shape, weight);
+      const fireSys = this._createFireSystem(shape, weight, floorIndex);
       if (fireSys) state.systems.push(fireSys);
 
       // Ember system.
-      const emberSys = this._createEmberSystem(shape, weight);
+      const emberSys = this._createEmberSystem(shape, weight, floorIndex);
       if (emberSys) state.emberSystems.push(emberSys);
 
       // Smoke system.
       if (this.params.smokeEnabled) {
-        const smokeSys = this._createSmokeSystem(shape, weight);
+        const smokeSys = this._createSmokeSystem(shape, weight, floorIndex);
         if (smokeSys) state.smokeSystems.push(smokeSys);
       }
     }
@@ -713,7 +715,7 @@ export class FireEffectV2 {
   }
 
   /** @private */
-  _createFireSystem(shape, weight) {
+  _createFireSystem(shape, weight, floorIndex) {
     const THREE = window.THREE;
     if (!THREE) return null;
 
@@ -761,7 +763,7 @@ export class FireEffectV2 {
       shape,
       material,
       renderMode: RenderMode.BillBoard,
-      renderOrder: 200000,
+      renderOrder: this._computeParticleRenderOrder(floorIndex, 0),
       uTileCount: 1,
       vTileCount: 1,
       startTileIndex: new ConstantValue(0),
@@ -786,7 +788,7 @@ export class FireEffectV2 {
   }
 
   /** @private */
-  _createEmberSystem(shape, weight) {
+  _createEmberSystem(shape, weight, floorIndex) {
     const THREE = window.THREE;
     if (!THREE) return null;
 
@@ -832,7 +834,7 @@ export class FireEffectV2 {
       shape,
       material,
       renderMode: RenderMode.BillBoard,
-      renderOrder: 200001,
+      renderOrder: this._computeParticleRenderOrder(floorIndex, 1),
       behaviors: [
         new ParticleTimeScaledBehavior(buoyancy),
         windForce,
@@ -860,7 +862,7 @@ export class FireEffectV2 {
   }
 
   /** @private */
-  _createSmokeSystem(shape, weight) {
+  _createSmokeSystem(shape, weight, floorIndex) {
     const THREE = window.THREE;
     if (!THREE) return null;
 
@@ -907,7 +909,7 @@ export class FireEffectV2 {
       shape,
       material,
       renderMode: RenderMode.BillBoard,
-      renderOrder: 200002,
+      renderOrder: this._computeParticleRenderOrder(floorIndex, 2),
       startRotation: new IntervalValue(0, Math.PI * 2),
       behaviors: [windForce, smokeUpdraft, turbulence, new FireSpinBehavior(), smokeLifecycle],
     });
@@ -948,6 +950,18 @@ export class FireEffectV2 {
     const safeFloorIndex = Number.isFinite(Number(maxFloorIndex)) ? Number(maxFloorIndex) : 0;
     const floorBandStart = safeFloorIndex * RENDER_ORDER_PER_FLOOR;
     this._batchRenderer.renderOrder = floorBandStart + (OVERHEAD_OFFSET - 1);
+  }
+
+  /**
+   * Compute particle-system render order within a floor band.
+   * Must stay below OVERHEAD_OFFSET so ground fire cannot sort above roof tiles.
+   * @private
+   */
+  _computeParticleRenderOrder(floorIndex, typeOffset = 0) {
+    const safeFloorIndex = Number.isFinite(Number(floorIndex)) ? Number(floorIndex) : 0;
+    const floorBandStart = safeFloorIndex * RENDER_ORDER_PER_FLOOR;
+    const safeTypeOffset = Math.max(0, Math.min(2, Number(typeOffset) || 0));
+    return floorBandStart + FIRE_RENDER_ORDER_BASE + safeTypeOffset;
   }
 
   /** Add a floor's systems to the BatchedRenderer + scene. @private */

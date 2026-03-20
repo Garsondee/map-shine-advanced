@@ -758,6 +758,8 @@ export class EffectComposer {
           if (waterEffect?.params) {
             for (const [k, v] of Object.entries(waterFlags)) {
               if (Object.prototype.hasOwnProperty.call(waterEffect.params, k)) {
+                // Reject NaN/Infinity — corrupted scene flags must not poison params.
+                if (typeof v === 'number' && !Number.isFinite(v)) continue;
                 waterEffect.params[k] = v;
               }
             }

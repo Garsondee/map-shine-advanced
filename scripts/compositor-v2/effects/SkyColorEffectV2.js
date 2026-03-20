@@ -310,9 +310,11 @@ export class SkyColorEffectV2 {
       uniforms: {
         tDiffuse:    { value: null },
         tOutdoorsMask: { value: this._fallbackWhite },
+        tOverheadRoofAlpha: { value: this._fallbackWhite },
         uTime:       { value: 0.0 },
         uResolution: { value: new THREE.Vector2(1, 1) },
         uHasOutdoorsMask: { value: 0.0 },
+        uHasOverheadRoofAlpha: { value: 0.0 },
         uOutdoorsMaskFlipY: { value: 0.0 },
         uViewBoundsMin: { value: new THREE.Vector2(0, 0) },
         uViewBoundsMax: { value: new THREE.Vector2(1, 1) },
@@ -350,9 +352,11 @@ export class SkyColorEffectV2 {
       fragmentShader: /* glsl */`
         uniform sampler2D tDiffuse;
         uniform sampler2D tOutdoorsMask;
+        uniform sampler2D tOverheadRoofAlpha;
         uniform vec2 uResolution;
         uniform float uTime;
         uniform float uHasOutdoorsMask;
+        uniform float uHasOverheadRoofAlpha;
         uniform float uOutdoorsMaskFlipY;
         uniform vec2 uViewBoundsMin;
         uniform vec2 uViewBoundsMax;
@@ -413,6 +417,12 @@ export class SkyColorEffectV2 {
           if (uOutdoorsMaskFlipY > 0.5) sceneUv.y = 1.0 - sceneUv.y;
           sceneUv = clamp(sceneUv, vec2(0.0), vec2(1.0));
           return texture2D(tOutdoorsMask, sceneUv).r;
+        }
+
+        float sampleOverheadRoofAlpha(vec2 screenUv) {
+          if (uHasOverheadRoofAlpha < 0.5) return 0.0;
+          vec4 roof = texture2D(tOverheadRoofAlpha, screenUv);
+          return clamp(max(roof.a, max(roof.r, max(roof.g, roof.b))), 0.0, 1.0);
         }
 
         void main() {
@@ -482,7 +492,12 @@ export class SkyColorEffectV2 {
 
           // Blend graded result with original based on intensity.
           float mask = clamp(uIntensity, 0.0, 1.0);
-          mask *= sampleOutdoorsMask(vUv);
+          float outdoorsMask = sampleOutdoorsMask(vUv);
+          float roofAlpha = sampleOverheadRoofAlpha(vUv);
+          // Treat any visible roof coverage as a full occluder for outdoors-only
+          // grading so indoor/outdoor transitions cannot bleed through roofs.
+          float roofPresence = step(0.01, roofAlpha);
+          mask *= outdoorsMask * (1.0 - roofPresence);
           vec3 finalColor = mix(base, color, mask);
 
           gl_FragColor = vec4(finalColor, sceneColor.a);
@@ -528,6 +543,18 @@ export class SkyColorEffectV2 {
     u.tOutdoorsMask.value = outdoorsTex ?? this._fallbackWhite;
     u.uHasOutdoorsMask.value = outdoorsTex ? 1.0 : 0.0;
     u.uOutdoorsMaskFlipY.value = outdoorsTex?.flipY ? 1.0 : 0.0;
+  }
+
+  /**
+   * Feed screen-space overhead roof visibility alpha for occluding outdoors-only
+   * grading on overhead-covered pixels.
+   * @param {THREE.Texture|null} roofAlphaTex
+   */
+  setOverheadRoofAlphaTexture(roofAlphaTex) {
+    const u = this._composeMaterial?.uniforms;
+    if (!u) return;
+    u.tOverheadRoofAlpha.value = roofAlphaTex ?? this._fallbackWhite;
+    u.uHasOverheadRoofAlpha.value = roofAlphaTex ? 1.0 : 0.0;
   }
 
   // ── Per-frame update ──────────────────────────────────────────────────

@@ -312,6 +312,8 @@ export class LightingEffectV2 {
         uBuildingShadowOpacity: { value: 0.75 },
         tOverheadRoofAlpha: { value: null },
         uHasOverheadRoofAlpha: { value: 0 },
+        tOverheadRoofBlock: { value: null },
+        uHasOverheadRoofBlock: { value: 0 },
         // Foundry canvas dimensions (includes padding). Matches CloudEffectV2.
         // Used to convert Three world Y-up into Foundry world Y-down.
         uSceneDimensions: { value: new THREE.Vector2(1, 1) },
@@ -365,6 +367,8 @@ export class LightingEffectV2 {
         uniform float uBuildingShadowOpacity;
         uniform sampler2D tOverheadRoofAlpha;
         uniform float uHasOverheadRoofAlpha;
+        uniform sampler2D tOverheadRoofBlock;
+        uniform float uHasOverheadRoofBlock;
         uniform vec2  uSceneDimensions;
         uniform vec2 uBldViewBoundsMin;
         uniform vec2 uBldViewBoundsMax;
@@ -407,10 +411,20 @@ export class LightingEffectV2 {
           // Light contribution (additive accumulation from ThreeLightSources).
           vec3 safeLights = max(lightSample.rgb, vec3(0.0));
           float lightI = max(max(safeLights.r, safeLights.g), safeLights.b);
+          float roofLightVisibility = 1.0;
+          if (uHasOverheadRoofBlock > 0.5) {
+            vec4 roofSample = texture2D(tOverheadRoofBlock, vUv);
+            // Use alpha for the blocker pass; this target is authored as
+            // forced-opaque roof coverage in direct screen UV.
+            float roofAlpha = clamp(roofSample.a, 0.0, 1.0);
+            roofLightVisibility = 1.0 - roofAlpha;
+          }
+          float occludedLightI = lightI * roofLightVisibility;
+          vec3 directLight = vec3(occludedLightI) * master;
 
           // Darkness punch: strong nearby lights reduce the effective darkness
           // level locally, letting the ambient brighten under torches/lamps.
-          float lightTermI = max(lightI * master, 0.0);
+          float lightTermI = max(occludedLightI * master, 0.0);
           float punch = 1.0 - exp(-lightTermI * max(uDarknessPunchGain, 0.0));
           float localDarknessLevel = clamp(
             baseDarknessLevel * (1.0 - punch * max(uNegativeDarknessStrength, 0.0)),
@@ -426,7 +440,7 @@ export class LightingEffectV2 {
           vec3 ambientAfterDark = punchedAmbient * (1.0 - punchedMask);
 
           // Total illumination = ambient (after darkness) + dynamic lights.
-          vec3 totalIllumination = ambientAfterDark + vec3(lightI) * master;
+          vec3 totalIllumination = ambientAfterDark + directLight;
 
           // Cloud shadow: dims the ambient component only.
           // Dynamic lights are NOT gated so torches/lamps still punch through clouds.
@@ -434,7 +448,7 @@ export class LightingEffectV2 {
             float shadowFactor = clamp(texture2D(tCloudShadow, vUv).r, 0.0, 1.0);
             // Only dim the ambient portion; keep dynamic-light additive intact.
             vec3 ambientPortion = ambientAfterDark;
-            totalIllumination = ambientPortion * shadowFactor + vec3(lightI) * master;
+            totalIllumination = ambientPortion * shadowFactor + directLight;
           }
 
           // Building shadow: dims only the ambient component.
@@ -468,9 +482,9 @@ export class LightingEffectV2 {
               shadowMix = mix(shadowMix, 1.0, roofAlpha);
             }
             // Apply only to ambient contribution; dynamic lights punch through.
-            vec3 ambientComponent = totalIllumination - vec3(lightI) * master;
+            vec3 ambientComponent = totalIllumination - directLight;
             ambientComponent *= shadowMix;
-            totalIllumination = ambientComponent + vec3(lightI) * master;
+            totalIllumination = ambientComponent + directLight;
           }
 
           // Overhead shadow: screen-space shadow from overhead tiles.
@@ -482,9 +496,9 @@ export class LightingEffectV2 {
             float tileProjectionFactor = clamp(ovSample.a, 0.0, 1.0);
             vec3 combinedShadowFactor = ovShadowRgb * tileProjectionFactor;
             vec3 ovMix = mix(vec3(1.0), combinedShadowFactor, clamp(uOverheadShadowOpacity, 0.0, 1.0));
-            vec3 ambientComp = totalIllumination - vec3(lightI) * master;
+            vec3 ambientComp = totalIllumination - directLight;
             ambientComp *= ovMix;
-            totalIllumination = ambientComp + vec3(lightI) * master;
+            totalIllumination = ambientComp + directLight;
           }
 
           // Minimum illumination floor to prevent pure black.
@@ -496,7 +510,7 @@ export class LightingEffectV2 {
 
           // Coloration: lights tint the surface proportional to surface brightness.
           float reflection = perceivedBrightness(baseColor.rgb);
-          vec3 coloration = safeLights * master * reflection * max(uColorationStrength, 0.0);
+          vec3 coloration = safeLights * master * reflection * max(uColorationStrength, 0.0) * roofLightVisibility;
           litColor += coloration;
 
           gl_FragColor = vec4(litColor, baseColor.a);
@@ -801,10 +815,13 @@ export class LightingEffectV2 {
    * @param {THREE.Texture|null} [overheadShadowTexture=null] - Screen-space shadow
    *   factor from OverheadShadowsEffectV2 (1.0=lit, 0.0=shadowed). Sampled at vUv.
    * @param {THREE.Texture|null} [overheadRoofAlphaTexture=null] - Screen-space overhead
-   *   roof alpha mask from OverheadShadowsEffectV2. Building shadow is suppressed
-   *   where this mask indicates a visible overhead roof.
+   *   roof visibility mask from OverheadShadowsEffectV2. Building shadow is
+   *   suppressed where this mask indicates a visible overhead roof.
+   * @param {THREE.Texture|null} [overheadRoofBlockTexture=null] - Screen-space
+   *   overhead roof blocker mask. Used for hard direct-light blocking so lights
+   *   do not leak through overhead tiles that block light.
    */
-  render(renderer, camera, sceneRT, outputRT, windowLightScene = null, cloudShadowTexture = null, buildingShadowTexture = null, overheadShadowTexture = null, buildingShadowOpacity = 0.75, overheadRoofAlphaTexture = null) {
+  render(renderer, camera, sceneRT, outputRT, windowLightScene = null, cloudShadowTexture = null, buildingShadowTexture = null, overheadShadowTexture = null, buildingShadowOpacity = 0.75, overheadRoofAlphaTexture = null, overheadRoofBlockTexture = null) {
     if (!this._initialized || !this._enabled || !sceneRT) return;
     if (!this._lightRT || !this._darknessRT || !this._composeMaterial) return;
 
@@ -1011,6 +1028,13 @@ export class LightingEffectV2 {
     } else {
       cu.tOverheadRoofAlpha.value = null;
       cu.uHasOverheadRoofAlpha.value = 0;
+    }
+    if (overheadRoofBlockTexture) {
+      cu.tOverheadRoofBlock.value = overheadRoofBlockTexture;
+      cu.uHasOverheadRoofBlock.value = 1;
+    } else {
+      cu.tOverheadRoofBlock.value = null;
+      cu.uHasOverheadRoofBlock.value = 0;
     }
     // Bind overhead shadow texture (screen-space, sampled directly at vUv).
     if (overheadShadowTexture) {

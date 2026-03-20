@@ -323,6 +323,14 @@ export class StateApplier {
 
       log.debug('Applying weather state:', weatherState);
 
+      // There is no explicit "off" mode in Control Panel weatherMode.
+      // Keep runtime weather enabled so getCurrentState() does not collapse
+      // to the disabled all-zero state unless some other system explicitly
+      // turns weather off.
+      if (typeof weatherController.enabled !== 'undefined') {
+        weatherController.enabled = true;
+      }
+
       // Apply dynamic mode settings
       if (weatherState.mode === 'dynamic') {
         if (typeof weatherController.setDynamicEnabled === 'function') {
@@ -350,6 +358,14 @@ export class StateApplier {
           } else {
             weatherController.dynamicPaused = weatherState.dynamicPaused ?? false;
           }
+        }
+      } else if (weatherState.mode === 'directed') {
+        // Directed mode must force dynamic simulation off; otherwise dynamic
+        // updates can overwrite manually applied rapid/direct values.
+        if (typeof weatherController.setDynamicEnabled === 'function') {
+          weatherController.setDynamicEnabled(false);
+        } else if (typeof weatherController.dynamicEnabled !== 'undefined') {
+          weatherController.dynamicEnabled = false;
         }
       }
 

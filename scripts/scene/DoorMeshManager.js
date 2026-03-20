@@ -38,12 +38,19 @@ const DOOR_STYLES = Object.freeze({
   DOUBLE_RIGHT: 'doubleR'
 });
 
-// In V2, FloorRenderBus uses transparent tile materials with depthTest disabled
-// and high renderOrder values per floor. Keep door meshes late in transparent
-// sorting so they are drawn on top of floor albedo instead of being overdrawn.
-const DOOR_RENDER_ORDER = 250000;
+// In V2, FloorRenderBus uses per-floor render-order bands.
+// Keep doors above regular floor albedo but BELOW overhead tiles.
+const RENDER_ORDER_PER_FLOOR = 10000;
+const OVERHEAD_OFFSET = 5000;
+const DOOR_RENDER_ORDER_WITHIN_FLOOR = OVERHEAD_OFFSET - 2;
 const DOOR_BASE_Z_V1 = 1.0;
 const DOOR_BASE_Z_V2 = 1004.0;
+
+function getDoorRenderOrder() {
+  const activeFloorIndex = Number(window.MapShine?.floorStack?.getActiveFloor?.()?.index);
+  const safeFloorIndex = Number.isFinite(activeFloorIndex) ? activeFloorIndex : 0;
+  return safeFloorIndex * RENDER_ORDER_PER_FLOOR + DOOR_RENDER_ORDER_WITHIN_FLOOR;
+}
 
 /**
  * Represents a single animated door mesh in THREE.js
@@ -225,8 +232,9 @@ class DoorMesh {
       style: this.style
     };
     
-    // Draw doors after floor albedo/overhead tiles in V2's transparent pass.
-    this.mesh.renderOrder = DOOR_RENDER_ORDER;
+    // Draw doors after regular tile albedo but below overhead tiles in the
+    // active floor's render-order band.
+    this.mesh.renderOrder = getDoorRenderOrder();
     
     // Add to scene
     this.scene.add(this.mesh);
@@ -240,6 +248,10 @@ class DoorMesh {
    */
   _applyAnimationState(progress) {
     if (!this.mesh) return;
+
+    // Re-anchor to the active floor band so doors keep correct layering when
+    // level changes occur after mesh creation.
+    this.mesh.renderOrder = getDoorRenderOrder();
     
     const closed = this._closedPosition;
     const type = this.animation.type;

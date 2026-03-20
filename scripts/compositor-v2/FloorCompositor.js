@@ -1970,14 +1970,16 @@ export class FloorCompositor {
     const overheadShadowTex = (this._overheadShadowEffect?.params?.enabled)
       ? this._overheadShadowEffect.shadowFactorTexture : null;
     const overheadRoofAlphaTex = this._overheadShadowEffect?.roofAlphaTexture ?? null;
+    const overheadRoofBlockTex = this._overheadShadowEffect?.roofBlockTexture ?? null;
     this._windowLightEffect?.setOverheadRoofAlphaTexture?.(
       overheadRoofAlphaTex,
       this._sceneRT?.width || 1,
       this._sceneRT?.height || 1
     );
+    this._skyColorEffect?.setOverheadRoofAlphaTexture?.(overheadRoofAlphaTex);
     if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: lighting.render(sceneRT→postA)'); } catch (_) {} }
     if (_profiling) _profileT0 = performance.now();
-    this._lightingEffect.render(this.renderer, this.camera, currentInput, this._postA, winScene, cloudShadowTex, buildingShadowTex, overheadShadowTex, buildingShadowOpacity, overheadRoofAlphaTex);
+    this._lightingEffect.render(this.renderer, this.camera, currentInput, this._postA, winScene, cloudShadowTex, buildingShadowTex, overheadShadowTex, buildingShadowOpacity, overheadRoofAlphaTex, overheadRoofBlockTex);
     if (_profiling) this._recordPassTiming('lightingRender', _profileT0);
     if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: lighting.render(sceneRT→postA) DONE'); } catch (_) {} }
 
@@ -2392,6 +2394,9 @@ export class FloorCompositor {
       }
 
       if (effect.params && Object.prototype.hasOwnProperty.call(effect.params, paramId)) {
+        // Reject NaN/Infinity numbers — corrupted scene flags or stale saves
+        // must not poison effect.params and propagate into GPU uniforms.
+        if (typeof value === 'number' && !Number.isFinite(value)) return;
         effect.params[paramId] = value;
       }
     } catch (_) {}

@@ -331,8 +331,6 @@ export class CameraFollower {
     const hasAuthoredLevelsMetadata = (() => {
       const sceneLevelsFlags = scene?.flags?.levels;
       if (sceneLevelsFlags?.enabled === true) return true;
-      if (sceneLevelsFlags?.weatherElevation !== undefined) return true;
-      if (sceneLevelsFlags?.lightMasking !== undefined) return true;
 
       const hasRangeFlags = (collection) => {
         const placeables = Array.isArray(collection?.placeables) ? collection.placeables : [];
@@ -383,15 +381,19 @@ export class CameraFollower {
       for (const placeable of placeables) {
         const doc = placeable?.document;
         if (!doc) continue;
-        pushElevation(doc.elevation);
+        // Only infer floors from explicit Levels range markers. Generic
+        // placeable elevation values alone should not create one floor per tile.
         pushElevation(doc.flags?.levels?.rangeBottom);
         pushElevation(doc.flags?.levels?.rangeTop);
       }
     };
 
-    // Scene defaults and known floor markers.
-    pushElevation(scene?.flags?.levels?.backgroundElevation);
-    pushElevation(scene?.foregroundElevation);
+    // Scene-level elevation hints are only treated as floor markers when
+    // Levels is explicitly enabled on the scene.
+    if (scene?.flags?.levels?.enabled === true) {
+      pushElevation(scene?.flags?.levels?.backgroundElevation);
+      pushElevation(scene?.foregroundElevation);
+    }
 
     // Infer from major placeable layers and relevant range flags.
     pushFromPlaceables(canvas?.tiles);

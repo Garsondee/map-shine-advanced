@@ -4878,8 +4878,16 @@ async function createThreeCanvas(scene) {
         // Schemas come from V1 static getControlSchema() (classes are imported).
         // Callbacks use lazy lookup so they work even though FloorCompositor
         // is lazily created on first render frame.
+        // Reject NaN/Infinity numbers that would corrupt effect.params and GPU uniforms.
+        // Objects (colors), booleans, strings, etc. pass through unchanged.
+        const _isFiniteOrNonNumeric = (v) => typeof v !== 'number' || Number.isFinite(v);
+
         const _propagateToV2 = (effectKey, paramId, value) => {
           try {
+            // Reject NaN/Infinity before queuing — prevents poison values from
+            // persisting in the pending map and being flushed into effect.params.
+            if (!_isFiniteOrNonNumeric(value)) return;
+
             // Queue param updates until FloorCompositorV2 exists.
             // In V2 mode the compositor is created lazily on first render; UI can
             // initialize (and users can tweak values) before it exists.
@@ -4912,6 +4920,9 @@ async function createThreeCanvas(scene) {
                     continue;
                   }
                   if (effect.params && Object.prototype.hasOwnProperty.call(effect.params, k)) {
+                    // Skip NaN/Infinity — stale pending values from a previous
+                    // session or corrupted scene flags must not poison params.
+                    if (!_isFiniteOrNonNumeric(v)) continue;
                     effect.params[k] = v;
                   }
                 }
@@ -6807,17 +6818,28 @@ function _enforceGameplayPixiSuppression() {
       || activeLayerName === 'regions'
       || activeLayerName === 'region'
       || activeLayerCtor === 'regionlayer';
+    const lightingEditContext =
+      !!canvas?.lighting?.active
+      || activeControl === 'lighting'
+      || activeControl === 'light'
+      || activeControlLayer === 'lighting'
+      || activeControlLayer === 'light'
+      || activeLayerName === 'lighting'
+      || activeLayerName === 'light'
+      || activeLayerCtor === 'lightinglayer';
     const pixiEditContextFallback =
       tilesEditContext || drawingsEditContext || soundsEditContext
-      || templatesEditContext || notesEditContext || regionsEditContext;
+      || templatesEditContext || notesEditContext || regionsEditContext
+      || lightingEditContext;
     const hasPersistentPixiOverlays =
       ((Number(canvas?.scene?.notes?.size) || 0) > 0) ||
       ((Number(canvas?.scene?.templates?.size) || 0) > 0) ||
       !!canvas?.notes?.placeables?.length ||
       !!canvas?.templates?.placeables?.length;
-    // Walls, lighting, and tokens are fully Three.js-native now.
+    // Walls and tokens are fully Three.js-native now.
+    // Lighting icons are PIXI-native (captured by bridge when editing).
     // Only need the PIXI overlay for unreplaced layers (drawings, regions,
-    // sounds, notes, templates) — determined by InputRouter.
+    // sounds, notes, templates, lighting) — determined by InputRouter.
     const shouldPixiReceiveInput = !!inputRouter?.shouldPixiReceiveInput?.();
     // Prefer InputRouter ownership, but fail-open for native PIXI edit contexts
     // when router metadata is briefly stale during control/layer transitions.

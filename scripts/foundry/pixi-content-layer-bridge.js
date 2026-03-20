@@ -278,6 +278,10 @@ export class PixiContentLayerBridge {
       this._hookIds.push(['updateAmbientSound', Hooks.on('updateAmbientSound', () => { markDirty(2); })]);
       this._hookIds.push(['deleteAmbientSound', Hooks.on('deleteAmbientSound', () => { markDirty(2); })]);
       this._hookIds.push(['activateSoundsLayer', Hooks.on('activateSoundsLayer', () => { markDirty(2); })]);
+      this._hookIds.push(['createAmbientLight', Hooks.on('createAmbientLight', () => { markDirty(2); })]);
+      this._hookIds.push(['updateAmbientLight', Hooks.on('updateAmbientLight', () => { markDirty(2); })]);
+      this._hookIds.push(['deleteAmbientLight', Hooks.on('deleteAmbientLight', () => { markDirty(2); })]);
+      this._hookIds.push(['activateLightingLayer', Hooks.on('activateLightingLayer', () => { markDirty(2); })]);
       this._hookIds.push(['createNote', Hooks.on('createNote', () => { markDirty(2); })]);
       this._hookIds.push(['updateNote', Hooks.on('updateNote', () => { markDirty(2); })]);
       this._hookIds.push(['deleteNote', Hooks.on('deleteNote', () => { markDirty(2); })]);
@@ -581,6 +585,28 @@ export class PixiContentLayerBridge {
   }
 
   /**
+   * Is the current control/layer context the native lighting workflow?
+   * @returns {boolean}
+   * @private
+   */
+  _isLightingContextActive() {
+    const activeControl = String(ui?.controls?.control?.name ?? ui?.controls?.activeControl ?? '').toLowerCase();
+    const activeTool = String(ui?.controls?.tool?.name ?? ui?.controls?.activeTool ?? game?.activeTool ?? '').toLowerCase();
+    const activeLayerName = String(canvas?.activeLayer?.options?.name ?? canvas?.activeLayer?.name ?? '').toLowerCase();
+    const activeLayerCtor = String(canvas?.activeLayer?.constructor?.name ?? '').toLowerCase();
+    const activeControlLayer = String(ui?.controls?.control?.layer ?? '').toLowerCase();
+    return !!canvas?.lighting?.active
+      || activeControl === 'lighting'
+      || activeControl === 'light'
+      || activeTool === 'light'
+      || activeControlLayer === 'lighting'
+      || activeControlLayer === 'light'
+      || activeLayerName === 'lighting'
+      || activeLayerName === 'light'
+      || activeLayerCtor === 'lightinglayer';
+  }
+
+  /**
    * Resolve capture strategy for the current frame.
    * Default is a deterministic drawings-only replay path to keep runtime stable.
    * Advanced extraction paths are debug-only and opt-in.
@@ -609,6 +635,7 @@ export class PixiContentLayerBridge {
     if (raw === 'regions-extract') return 'regions-extract';
     if (raw === 'replay-shape') return 'replay-shape';
     if (this._isSoundsContextActive()) return 'sounds-extract';
+    if (this._isLightingContextActive()) return 'stage-extract';
     if (this._isRegionsContextActive()) return 'regions-extract';
     if (this._isTemplatesContextActive()) return 'templates-extract';
     if (this._isNotesContextActive()) return 'notes-extract';
@@ -866,8 +893,8 @@ export class PixiContentLayerBridge {
   _drawingLocalToWorld(doc, lx, ly) {
     const x = this._toNumber(doc?.x, 0);
     const y = this._toNumber(doc?.y, 0);
-    const w = this._toNumber(doc?.shape?.width, 0);
-    const h = this._toNumber(doc?.shape?.height, 0);
+    const w = this._toNumber(doc?.shape?.width ?? doc?.width, 0);
+    const h = this._toNumber(doc?.shape?.height ?? doc?.height, 0);
     const rotDeg = this._toNumber(doc?.rotation, 0);
     if (Math.abs(rotDeg) < 0.0001) return { x: x + lx, y: y + ly };
 
@@ -891,11 +918,14 @@ export class PixiContentLayerBridge {
    */
   _resolveDrawingType(doc) {
     const t = doc?.shape?.type;
+    const points = Array.isArray(doc?.shape?.points) ? doc.shape.points : [];
     const types = globalThis.CONST?.DRAWING_TYPES ?? {};
     if (t === types.RECTANGLE || t === 'r' || t === 'rectangle') return 'rectangle';
     if (t === types.ELLIPSE || t === 'e' || t === 'ellipse') return 'ellipse';
     if (t === types.POLYGON || t === 'p' || t === 'polygon') return 'polygon';
     if (t === types.FREEHAND || t === 'f' || t === 'freehand') return 'freehand';
+    // Some persisted docs can omit shape.type while still carrying points.
+    if (points.length >= 4) return 'polygon';
     return 'rectangle';
   }
 
@@ -907,8 +937,8 @@ export class PixiContentLayerBridge {
    * @private
    */
   _traceDrawingPath(ctx, doc, kind) {
-    const w = Math.max(0, this._toNumber(doc?.shape?.width, 0));
-    const h = Math.max(0, this._toNumber(doc?.shape?.height, 0));
+    const w = Math.max(0, this._toNumber(doc?.shape?.width ?? doc?.width, 0));
+    const h = Math.max(0, this._toNumber(doc?.shape?.height ?? doc?.height, 0));
     const points = Array.isArray(doc?.shape?.points) ? doc.shape.points : [];
 
     if (kind === 'rectangle') {
@@ -977,7 +1007,7 @@ export class PixiContentLayerBridge {
    */
   _drawDrawingText(ctx, doc) {
     const text = String(doc?.text ?? '').trim();
-    if (!text) return;
+    if (!text) return false;
 
     const fontSize = Math.max(8, this._toNumber(doc?.fontSize, 48));
     const fontFamily = String(doc?.fontFamily || 'Signika').trim() || 'Signika';
@@ -989,7 +1019,9 @@ export class PixiContentLayerBridge {
     const luminance = (0.2126 * r) + (0.7152 * g) + (0.0722 * b);
     const outlineColor = luminance > 153 ? '#000000' : '#ffffff';
     const outlineWidth = Math.max(1, Math.round(fontSize / 18));
-    const world = this._drawingLocalToWorld(doc, this._toNumber(doc?.shape?.width, 0) * 0.5, this._toNumber(doc?.shape?.height, 0) * 0.5);
+    const textW = this._toNumber(doc?.shape?.width ?? doc?.width, 0);
+    const textH = this._toNumber(doc?.shape?.height ?? doc?.height, 0);
+    const world = this._drawingLocalToWorld(doc, textW * 0.5, textH * 0.5);
     const p = world;
     const rad = (this._toNumber(doc?.rotation, 0) * Math.PI) / 180;
 
@@ -1007,6 +1039,7 @@ export class PixiContentLayerBridge {
     ctx.strokeText(text, 0, 0);
     ctx.fillText(text, 0, 0);
     ctx.restore();
+    return true;
   }
 
   /**
@@ -1043,13 +1076,51 @@ export class PixiContentLayerBridge {
 
     const replayDocs = [];
     const seen = new Set();
+    const docById = new Map();
     for (const d of drawables) {
       const doc = this._getDrawingDocument(d);
       if (!doc) continue;
       const key = String(doc.id ?? d?.id ?? `${this._toNumber(doc.x, 0)}:${this._toNumber(doc.y, 0)}:${replayDocs.length}`);
       if (seen.has(key)) continue;
       seen.add(key);
+      if (doc?.id != null) docById.set(String(doc.id), doc);
       replayDocs.push(doc);
+    }
+
+    // Always merge canonical scene docs. On startup/tool switches, placeable docs
+    // can be transiently stale/incomplete while scene docs remain authoritative.
+    try {
+      const sceneDrawings = canvas?.scene?.drawings;
+      const docs = Array.isArray(sceneDrawings?.contents)
+        ? sceneDrawings.contents
+        : Array.from(sceneDrawings ?? []);
+      for (const doc of docs) {
+        if (!doc) continue;
+        const id = doc?.id != null ? String(doc.id) : '';
+        if (id) {
+          // Canonical scene doc wins over potentially stale placeable doc.
+          docById.set(id, doc);
+          if (!seen.has(id)) seen.add(id);
+          continue;
+        }
+        const key = String(`${this._toNumber(doc.x, 0)}:${this._toNumber(doc.y, 0)}:${replayDocs.length}`);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        replayDocs.push(doc);
+      }
+    } catch (_) {}
+
+    if (docById.size > 0) {
+      replayDocs.length = 0;
+      for (const doc of docById.values()) replayDocs.push(doc);
+    }
+
+    const sceneDrawingsPresent = (Number(canvas?.scene?.drawings?.size) || 0) > 0;
+    if (replayDocs.length === 0 && sceneDrawingsPresent) {
+      // Preserve previous bridge texture when scene docs exist but extraction is
+      // transiently empty. Clearing here causes drawings to vanish shortly after
+      // creation/tool transitions.
+      return { ok: true, count: 0, status: `retry:replay-docs-empty:${renderW}x${renderH}` };
     }
 
     replayDocs.sort((a, b) => this._toNumber(a?.sort, 0) - this._toNumber(b?.sort, 0));
@@ -1084,6 +1155,7 @@ export class PixiContentLayerBridge {
     for (const doc of replayDocs) {
       const kind = this._resolveDrawingType(doc);
       const pathInfo = this._traceDrawingPath(ctx, doc, kind);
+      let rendered = false;
       if (pathInfo.hasPath) {
         const fillAlpha = Math.max(0, Math.min(1, this._toNumber(doc?.fillAlpha, 0)));
         const fillType = this._toNumber(doc?.fillType, 0);
@@ -1101,15 +1173,19 @@ export class PixiContentLayerBridge {
           ctx.strokeStyle = this._rgbaFromHex(this._normalizeHexColor(doc?.strokeColor), strokeAlpha);
           ctx.stroke();
         }
+        rendered = true;
       }
 
-      this._drawDrawingText(ctx, doc);
-      drawCount += 1;
+      const textRendered = this._drawDrawingText(ctx, doc) === true;
+      if (rendered || textRendered) drawCount += 1;
     }
 
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     worldTexture.needsUpdate = true;
     if (drawCount <= 0) {
+      if (sceneDrawingsPresent) {
+        return { ok: true, count: 0, status: `retry:replay-render-empty:${w}x${h}` };
+      }
       return { ok: true, count: 0, status: `captured:replay-empty:${w}x${h} logical=${logicalW}x${logicalH} ss=${captureScale.toFixed(2)}` };
     }
     return { ok: true, count: drawCount, status: `captured:replay:${w}x${h} logical=${logicalW}x${logicalH} ss=${captureScale.toFixed(2)} docs=${drawCount}` };
@@ -2056,13 +2132,29 @@ export class PixiContentLayerBridge {
       lastStatus.includes('replay-empty')
       || lastStatus.includes('replay-failed')
       || lastStatus.includes('capture-threw')
-      || lastStatus.includes('no-ui-shapes');
+      || lastStatus.includes('no-ui-shapes')
+      || lastStatus.includes('ui-shapes-empty');
     const recoveryCooldownMs = 1200;
     if (!this._dirty && drawingsPresent && needsRecoveryRetry && (now - this._lastDrawingsRecoveryAttemptMs) > recoveryCooldownMs) {
       this._dirty = true;
       this._postDirtyCapturesRemaining = Math.max(this._postDirtyCapturesRemaining, 1);
       this._lastDrawingsRecoveryAttemptMs = now;
       this._lastUpdateStatus = 'retry:drawings-status-recovery';
+    }
+
+    // Startup guard: if scene drawings exist but we have not reached a stable
+    // capture yet, force an extra recapture window. This prevents the bridge
+    // from settling into skip:idle with an empty startup texture.
+    const startupStatus = String(this._lastUpdateStatus || '');
+    const needsStartupDrawingsBootstrap =
+      !this._dirty
+      && drawingsPresent
+      && (this._lastCaptureMs <= 0)
+      && startupStatus === 'init';
+    if (needsStartupDrawingsBootstrap) {
+      this._dirty = true;
+      this._postDirtyCapturesRemaining = Math.max(this._postDirtyCapturesRemaining, 2);
+      this._lastUpdateStatus = 'retry:startup-drawings-bootstrap';
     }
 
     if (this._testPatternWasEnabled && !forceTestPattern) {
@@ -2145,23 +2237,12 @@ export class PixiContentLayerBridge {
       ? this._renderFoundryShapeReplay(drawingsLayer, renderer, worldCapture.width, worldCapture.height)
       : this._renderReplayCapture(drawingsLayer, worldCapture.width, worldCapture.height);
 
-    // Default runtime behavior: drawings-first replay only.
-    // Fall through into extraction only for explicit stage extraction or
-    // auto/explicit sounds extraction.
-    if (captureStrategy === 'replay-only' || captureStrategy === 'replay-shape') {
-      if (replayResult.ok) {
-        this._lastUpdateStatus = `${replayResult.status} strategy=${captureStrategy}`;
-        this._dirty = false;
-        return;
-      }
-      this._lastUpdateStatus = `skip:replay-failed strategy=${captureStrategy}`;
-      this._clearChannel('world');
-      this._clearChannel('ui');
-      this._uiHasContent = false;
-      this._dirty = false;
-      return;
-    }
+    const replayCount = Number(this._toNumber(replayResult?.count, 0));
+    const replayEmptyWithDrawingsPresent = replayResult.ok && replayCount <= 0 && drawingsPresent;
 
+    // Compute non-drawing UI content flags BEFORE the replay-only gate so we
+    // can fall through to stage isolation when persistent overlays (notes,
+    // templates, etc.) exist on the scene even in replay-only mode.
     const hasSoundsUiContent =
       !!soundsLayer?.active ||
       !!soundsLayer?.placeables?.length ||
@@ -2185,7 +2266,49 @@ export class PixiContentLayerBridge {
       !!regionsLayer?.objects?.children?.length ||
       this._hasActivePreview(regionsLayer) ||
       this._getRegionLayerOverlayTargets(regionsLayer).length > 0;
-    const hasNonDrawingUiContent = hasSoundsUiContent || hasNotesUiContent || hasTemplatesUiContent || hasRegionsUiContent;
+    const hasLightingUiContent =
+      !!lightingLayer?.active
+      || !!lightingLayer?.placeables?.length
+      || !!lightingLayer?.objects?.children?.length
+      || this._hasActivePreview(lightingLayer);
+    const hasNonDrawingUiContent =
+      hasSoundsUiContent || hasNotesUiContent || hasTemplatesUiContent || hasRegionsUiContent || hasLightingUiContent;
+    const shouldCompositeReplayUnderStage =
+      (captureStrategy === 'replay-only' || captureStrategy === 'replay-shape')
+      && !!replayResult?.ok
+      && hasNonDrawingUiContent;
+
+    // Default runtime behavior: drawings-first replay only.
+    // Fall through into stage isolation when:
+    // (a) replay is empty but drawings are present (transient layer churn), OR
+    // (b) non-drawing UI content exists (notes, templates, sounds, regions,
+    //     lighting) — replay-only captures ONLY drawings, so the stage
+    //     isolation path is required to composite everything together.
+    if (captureStrategy === 'replay-only' || captureStrategy === 'replay-shape') {
+      if (replayResult.ok) {
+        if (replayEmptyWithDrawingsPresent) {
+          // Replay returned empty during layer churn — fall through to stage isolation.
+          this._lastUpdateStatus = `fallback:replay-empty strategy=${captureStrategy}`;
+        } else if (hasNonDrawingUiContent) {
+          // Non-drawing overlays present — replay captured drawings but we need
+          // stage isolation to also capture notes/templates/sounds/regions/lighting.
+          this._lastUpdateStatus = `fallback:non-drawing-content strategy=${captureStrategy}`;
+        } else {
+          // Pure drawings-only scene — replay is sufficient.
+          this._lastUpdateStatus = `${replayResult.status} strategy=${captureStrategy}`;
+          this._dirty = false;
+          return;
+        }
+      }
+      if (!replayResult.ok) {
+        this._lastUpdateStatus = `skip:replay-failed strategy=${captureStrategy}`;
+        this._clearChannel('world');
+        this._clearChannel('ui');
+        this._uiHasContent = false;
+        this._dirty = false;
+        return;
+      }
+    }
 
     if (captureStrategy === 'notes-extract') {
       if (replayResult.ok && !hasNotesUiContent) {
@@ -2339,7 +2462,7 @@ export class PixiContentLayerBridge {
       this._lastUpdateStatus = `fallback:regions-stage-isolation strategy=${captureStrategy}`;
     }
 
-    if (replayResult.ok && !hasNonDrawingUiContent) {
+    if (replayResult.ok && !hasNonDrawingUiContent && !replayEmptyWithDrawingsPresent) {
       this._lastUpdateStatus = replayResult.status;
       this._dirty = false;
       return;
@@ -2394,10 +2517,15 @@ export class PixiContentLayerBridge {
       collectFromLayer(templatesLayer);
       collectFromLayer(notesLayer);
     } else if (captureStrategy === 'notes-extract') {
-      collectFromLayer(drawingsLayer);
       collectFromLayer(notesLayer);
     } else {
-      collectFromLayer(drawingsLayer);
+      // When replay capture already produced drawing base pixels and we're
+      // compositing non-drawing overlays via stage isolation, avoid collecting
+      // drawings here to prevent duplicate/misaligned redraw jitter.
+      if (!shouldCompositeReplayUnderStage) {
+        collectFromLayer(drawingsLayer);
+      }
+      collectFromLayer(lightingLayer);
       collectFromLayer(soundsLayer);
       collectFromLayer(templatesLayer);
       collectFromLayer(notesLayer);
@@ -2410,6 +2538,25 @@ export class PixiContentLayerBridge {
         // visible notes flicker/disappear when Foundry momentarily reports no
         // extractable note display objects during strategy transitions.
         this._lastUpdateStatus = 'retry:notes-ui-shapes-empty';
+        this._dirty = true;
+        this._postDirtyCapturesRemaining = Math.max(this._postDirtyCapturesRemaining, 2);
+        return;
+      }
+      if (drawingsPresent) {
+        // Foundry can briefly report empty drawings placeables right after
+        // layer/tool transitions while scene drawing docs still exist.
+        // Preserve the prior bridge texture and retry shortly rather than
+        // clearing the channel and making drawings disappear.
+        this._lastUpdateStatus = 'retry:drawings-ui-shapes-empty';
+        this._dirty = true;
+        this._postDirtyCapturesRemaining = Math.max(this._postDirtyCapturesRemaining, 2);
+        return;
+      }
+      if (hasNonDrawingUiContent) {
+        // Non-drawing content exists but placeables weren't extractable this
+        // frame (layer churn / async draw). Preserve the last valid bridge
+        // texture and retry shortly instead of publishing a blank overlay.
+        this._lastUpdateStatus = 'retry:non-drawing-ui-shapes-empty';
         this._dirty = true;
         this._postDirtyCapturesRemaining = Math.max(this._postDirtyCapturesRemaining, 2);
         return;
@@ -2832,7 +2979,8 @@ export class PixiContentLayerBridge {
       typeof this._lastUpdateStatus === 'string' &&
       (this._lastUpdateStatus.startsWith('captured-fallback:') || this._lastUpdateStatus.startsWith('captured-view-fallback:'));
 
-    if (this._worldCanvas.width !== w || this._worldCanvas.height !== h) {
+    const shouldPreserveReplayBase = shouldCompositeReplayUnderStage;
+    if (!shouldPreserveReplayBase && (this._worldCanvas.width !== w || this._worldCanvas.height !== h)) {
       this._worldCanvas.width = w;
       this._worldCanvas.height = h;
       this._recreateTexture('world');
@@ -2841,8 +2989,14 @@ export class PixiContentLayerBridge {
 
     const worldCtx = this._worldCanvas.getContext('2d');
     if (!worldCtx) return;
-    worldCtx.clearRect(0, 0, w, h);
-    worldCtx.drawImage(capturedCanvas, 0, 0, w, h);
+    const targetW = this._worldCanvas.width;
+    const targetH = this._worldCanvas.height;
+    if (!shouldPreserveReplayBase) {
+      worldCtx.clearRect(0, 0, targetW, targetH);
+    }
+    // When replay-only falls through for non-drawing overlays, keep replayed
+    // drawings as the base and composite extracted stage overlays on top.
+    worldCtx.drawImage(capturedCanvas, 0, 0, targetW, targetH);
     if (worldTexture) worldTexture.needsUpdate = true;
 
     // Pixel probe: sample a sparse grid to verify captured content contains
@@ -2878,7 +3032,8 @@ export class PixiContentLayerBridge {
 
     this._dirty = false;
     if (!hadFallbackStatus) {
-      this._lastUpdateStatus = `captured:${w}x${h} shapes=${uiShapes.size} probe#${this._probeLogCount}`;
+      const captureMode = shouldPreserveReplayBase ? 'captured:overlay-on-replay' : 'captured';
+      this._lastUpdateStatus = `${captureMode}:${targetW}x${targetH} shapes=${uiShapes.size} probe#${this._probeLogCount}`;
     }
   }
 

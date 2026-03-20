@@ -26,6 +26,9 @@ export class OverheadShadowsEffectV2 {
     this.roofTarget = null;   // Raw roof alpha (overhead tiles)
 
     /** @type {THREE.WebGLRenderTarget|null} */
+    this.roofBlockTarget = null; // Screen-space forced-opaque roof alpha (no guard remap)
+
+    /** @type {THREE.WebGLRenderTarget|null} */
     this.roofVisibilityTarget = null; // Runtime roof visibility alpha for LightingEffectV2 suppression
 
     /** @type {THREE.WebGLRenderTarget|null} */
@@ -228,6 +231,16 @@ export class OverheadShadowsEffectV2 {
    */
   get roofAlphaTexture() {
     return this.roofVisibilityTarget?.texture || null;
+  }
+
+  /**
+   * Hard roof blocker texture (screen-space).
+   * Captured from a forced-opaque overhead roof pass without guard-band
+   * camera scaling so LightingEffectV2 can sample it directly in screen UV.
+   * @returns {THREE.Texture|null}
+   */
+  get roofBlockTexture() {
+    return this.roofBlockTarget?.texture || null;
   }
 
   /**
@@ -1147,6 +1160,17 @@ export class OverheadShadowsEffectV2 {
       this.roofTarget.setSize(width, height);
     }
 
+    if (!this.roofBlockTarget) {
+      this.roofBlockTarget = new THREE.WebGLRenderTarget(width, height, {
+        minFilter: THREE.LinearFilter,
+        magFilter: THREE.LinearFilter,
+        format: THREE.RGBAFormat,
+        type: THREE.UnsignedByteType
+      });
+    } else {
+      this.roofBlockTarget.setSize(width, height);
+    }
+
     if (!this.roofVisibilityTarget) {
       this.roofVisibilityTarget = new THREE.WebGLRenderTarget(width, height, {
         minFilter: THREE.LinearFilter,
@@ -1483,6 +1507,7 @@ export class OverheadShadowsEffectV2 {
     renderer.getDrawingBufferSize(size);
 
     if (!this.roofTarget
+      || !this.roofBlockTarget
       || !this.roofVisibilityTarget
       || !this.shadowTarget
       || !this.fluidRoofTarget
@@ -1567,6 +1592,17 @@ export class OverheadShadowsEffectV2 {
     // current so other effects (e.g. WindowLightEffectV2) can occlude against
     // visible overhead tiles in screen space.
     if (!this.params.enabled) {
+      this.mainCamera.layers.mask = previousLayersMask;
+      if (this.roofBlockTarget) {
+        // Keep hard roof light-blocking available even when overhead shadow
+        // projection is disabled.
+        this.mainCamera.layers.set(ROOF_LAYER);
+        this.mainCamera.layers.enable(WEATHER_ROOF_LAYER);
+        renderer.setRenderTarget(this.roofBlockTarget);
+        renderer.setClearColor(0x000000, 0);
+        renderer.clear();
+        renderer.render(this.mainScene, this.mainCamera);
+      }
       this.mainCamera.layers.mask = previousLayersMask;
       this._clearShadowTargetToWhite(renderer);
       renderer.setRenderTarget(previousTarget);
@@ -1676,6 +1712,7 @@ export class OverheadShadowsEffectV2 {
 
       // Pass 1: render overhead tiles into roofTarget (alpha mask)
       this.mainCamera.layers.set(ROOF_LAYER);
+      this.mainCamera.layers.enable(WEATHER_ROOF_LAYER);
       renderer.setRenderTarget(this.roofTarget);
       renderer.setClearColor(0x000000, 0);
       renderer.clear();
@@ -1683,6 +1720,15 @@ export class OverheadShadowsEffectV2 {
     } finally {
       restoreRoofCaptureCamera();
     }
+
+    // Pass 1b: capture a non-guard, forced-opaque roof blocker map for
+    // LightingEffectV2 hard occlusion. This must remain in direct screen UV.
+    this.mainCamera.layers.set(ROOF_LAYER);
+    this.mainCamera.layers.enable(WEATHER_ROOF_LAYER);
+    renderer.setRenderTarget(this.roofBlockTarget);
+    renderer.setClearColor(0x000000, 0);
+    renderer.clear();
+    renderer.render(this.mainScene, this.mainCamera);
 
     // Restore per-sprite opacity now that roof mask capture is done.
     // Tile projection should use each tile's true alpha/opacity settings.
@@ -1923,6 +1969,10 @@ export class OverheadShadowsEffectV2 {
     if (this.roofTarget) {
       this.roofTarget.dispose();
       this.roofTarget = null;
+    }
+    if (this.roofBlockTarget) {
+      this.roofBlockTarget.dispose();
+      this.roofBlockTarget = null;
     }
     if (this.roofVisibilityTarget) {
       this.roofVisibilityTarget.dispose();

@@ -86,6 +86,14 @@ export class ControlPanelManager {
     };
 
     this._suppressInitialWeatherApply = false;
+
+    /**
+     * Stable object reference used by rapid weather slider bindings.
+     * Keep this reference alive even if controlState is reloaded/reset so
+     * Tweakpane bindings never drift to a stale object and display NaN.
+     * @type {Object|null}
+     */
+    this._rapidWeatherBindingTarget = this.controlState.directedCustomPreset;
     
     /** @type {Object} Cached DOM elements for clock */
     this.clockElements = {};
@@ -308,28 +316,35 @@ export class ControlPanelManager {
       freezeLevel: 0.0
     };
 
-    const custom = this.controlState?.directedCustomPreset;
-    if (!custom || typeof custom !== 'object') {
-      this.controlState.directedCustomPreset = { ...defaults };
-      return;
-    }
-
     const clamp01 = (v, fallback) => {
       const n = Number(v);
       if (!Number.isFinite(n)) return fallback;
       return Math.max(0.0, Math.min(1.0, n));
     };
 
-    custom.precipitation = clamp01(custom.precipitation, defaults.precipitation);
-    custom.cloudCover = clamp01(custom.cloudCover, defaults.cloudCover);
-    custom.windSpeed = clamp01(custom.windSpeed, defaults.windSpeed);
-    custom.fogDensity = clamp01(custom.fogDensity, defaults.fogDensity);
-    custom.freezeLevel = clamp01(custom.freezeLevel, defaults.freezeLevel);
+    const custom = this.controlState?.directedCustomPreset;
+    const source = (custom && typeof custom === 'object') ? custom : {};
 
-    const dir = Number(custom.windDirection);
-    custom.windDirection = Number.isFinite(dir)
+    let target = (this._rapidWeatherBindingTarget && typeof this._rapidWeatherBindingTarget === 'object')
+      ? this._rapidWeatherBindingTarget
+      : null;
+    if (!target) {
+      target = (custom && typeof custom === 'object') ? custom : {};
+      this._rapidWeatherBindingTarget = target;
+    }
+
+    target.precipitation = clamp01(source.precipitation, defaults.precipitation);
+    target.cloudCover = clamp01(source.cloudCover, defaults.cloudCover);
+    target.windSpeed = clamp01(source.windSpeed, defaults.windSpeed);
+    target.fogDensity = clamp01(source.fogDensity, defaults.fogDensity);
+    target.freezeLevel = clamp01(source.freezeLevel, defaults.freezeLevel);
+
+    const dir = Number(source.windDirection);
+    target.windDirection = Number.isFinite(dir)
       ? ((dir % 360) + 360) % 360
       : defaults.windDirection;
+
+    this.controlState.directedCustomPreset = target;
   }
 
   _injectPanelStyles() {
@@ -629,6 +644,8 @@ export class ControlPanelManager {
 
   _buildRapidWeatherOverrides(parentFolder) {
     this._ensureDirectedCustomPreset();
+    const rapidPreset = this.controlState.directedCustomPreset;
+    this._rapidWeatherBindingTarget = rapidPreset;
 
     const rapidWeatherFolder = parentFolder.addFolder({
       title: '🎚️ Live Weather Overrides',
@@ -646,34 +663,35 @@ export class ControlPanelManager {
       };
 
       const value = clamp01(ev?.value);
-      this.controlState.directedCustomPreset[param] = value;
+      rapidPreset[param] = value;
+      this.controlState.directedCustomPreset = rapidPreset;
       await this._applyRapidWeatherOverrides();
 
       if (ev?.last) this.debouncedSave();
     };
 
-    rapidWeatherFolder.addBinding(this.controlState.directedCustomPreset, 'precipitation', {
+    rapidWeatherFolder.addBinding(rapidPreset, 'precipitation', {
       label: 'Rain',
       min: 0.0,
       max: 1.0,
       step: 0.01
     }).on('change', onRapidWeatherChange('precipitation'));
 
-    rapidWeatherFolder.addBinding(this.controlState.directedCustomPreset, 'cloudCover', {
+    rapidWeatherFolder.addBinding(rapidPreset, 'cloudCover', {
       label: 'Clouds',
       min: 0.0,
       max: 1.0,
       step: 0.01
     }).on('change', onRapidWeatherChange('cloudCover'));
 
-    rapidWeatherFolder.addBinding(this.controlState.directedCustomPreset, 'freezeLevel', {
+    rapidWeatherFolder.addBinding(rapidPreset, 'freezeLevel', {
       label: 'Temp (Freeze)',
       min: 0.0,
       max: 1.0,
       step: 0.01
     }).on('change', onRapidWeatherChange('freezeLevel'));
 
-    rapidWeatherFolder.addBinding(this.controlState.directedCustomPreset, 'windSpeed', {
+    rapidWeatherFolder.addBinding(rapidPreset, 'windSpeed', {
       label: 'Wind',
       min: 0.0,
       max: 1.0,
@@ -681,7 +699,7 @@ export class ControlPanelManager {
     }).on('change', onRapidWeatherChange('windSpeed'));
 
     /* Wind direction uses a 0-359° range — needs a separate handler */
-    rapidWeatherFolder.addBinding(this.controlState.directedCustomPreset, 'windDirection', {
+    rapidWeatherFolder.addBinding(rapidPreset, 'windDirection', {
       label: 'Wind Dir',
       min: 0.0,
       max: 359.0,
@@ -689,8 +707,10 @@ export class ControlPanelManager {
     }).on('change', async (ev) => {
       if (this._applyingRapidOverrides) return;
       this._ensureDirectedCustomPreset();
-      const value = ((Number(ev?.value) % 360) + 360) % 360;
-      this.controlState.directedCustomPreset.windDirection = value;
+      const raw = Number(ev?.value);
+      const value = Number.isFinite(raw) ? (((raw % 360) + 360) % 360) : 0.0;
+      rapidPreset.windDirection = value;
+      this.controlState.directedCustomPreset = rapidPreset;
       await this._applyRapidWeatherOverrides();
       if (ev?.last) this.debouncedSave();
     });
@@ -706,6 +726,12 @@ export class ControlPanelManager {
       if (!weatherController) {
         log.warn('WeatherController not available for rapid weather overrides');
         return;
+      }
+
+      // Cloud/Water V2 only treat WeatherController as authoritative after init.
+      // Ensure rapid overrides affect runtime state in all startup orders.
+      if (weatherController.initialized !== true && typeof weatherController.initialize === 'function') {
+        await weatherController.initialize();
       }
 
       this.controlState.weatherMode = 'directed';
@@ -732,7 +758,10 @@ export class ControlPanelManager {
       const cloudCover = clamp01(custom.cloudCover);
       const freezeLevel = clamp01(custom.freezeLevel);
       const windSpeed = clamp01(custom.windSpeed);
-      const windDir = ((Number(custom.windDirection) % 360) + 360) % 360;
+      const windDirRaw = Number(custom.windDirection);
+      const windDir = Number.isFinite(windDirRaw)
+        ? ((windDirRaw % 360) + 360) % 360
+        : 0.0;
 
       custom.precipitation = precipitation;
       custom.cloudCover = cloudCover;
@@ -740,17 +769,37 @@ export class ControlPanelManager {
       custom.windSpeed = windSpeed;
       custom.windDirection = windDir;
 
+      // Keep runtime weather fields coherent for all consumers.
+      const windSpeedMS = windSpeed * 78.0;
+      const precipType = (precipitation < 0.05)
+        ? 0 // NONE
+        : (freezeLevel > 0.55 ? 2 : 1); // SNOW : RAIN
+
       /* Also sync controlState wind fields so the Wind section stays in sync */
       this.controlState.windSpeedMS = windSpeed * 78;
       this.controlState.windDirection = windDir;
 
+      const windDirVec = (typeof weatherController._windDirFromAngleDeg === 'function')
+        ? weatherController._windDirFromAngleDeg(windDir)
+        : (() => {
+            const rad = (windDir * Math.PI) / 180.0;
+            return { x: Math.cos(rad), y: -Math.sin(rad) };
+          })();
+
       const applyToState = (state) => {
         if (!state) return;
         state.precipitation = precipitation;
+        state.precipType = precipType;
         state.cloudCover = cloudCover;
         state.freezeLevel = freezeLevel;
+        state.windSpeedMS = windSpeedMS;
         state.windSpeed = windSpeed;
-        state.windDirection = windDir;
+        if (state.windDirection && typeof state.windDirection.set === 'function') {
+          state.windDirection.set(Number(windDirVec.x) || 1, Number(windDirVec.y) || 0);
+          if (typeof state.windDirection.normalize === 'function') state.windDirection.normalize();
+        } else {
+          state.windDirection = { x: Number(windDirVec.x) || 1, y: Number(windDirVec.y) || 0 };
+        }
       };
 
       applyToState(weatherController.targetState);
@@ -2940,6 +2989,17 @@ export class ControlPanelManager {
         dynamicPaused: this.controlState.dynamicPaused
       };
       await stateApplier.applyWeatherState(weatherState, false); // Don't save here, handled by debouncedSave
+
+      // Important: applyWeatherState currently handles mode/dynamic controls but
+      // not the directed Custom scalar payload itself. Re-apply rapid overrides
+      // here so scene refresh + startup cannot leave runtime weather stuck at
+      // stale snapshot zeros.
+      const shouldApplyRapidCustom =
+        this.controlState.weatherMode === 'directed' &&
+        this.controlState.directedPresetId === 'Custom';
+      if (shouldApplyRapidCustom && !this._applyingRapidOverrides) {
+        await this._applyRapidWeatherOverrides();
+      }
 
       log.debug('Applied control state via StateApplier:', this.controlState);
     } catch (error) {

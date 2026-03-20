@@ -40,6 +40,18 @@ const DEF_FOAM_FLECKS = 1 << 0;
 const DEF_MULTITAP    = 1 << 1;
 
 /**
+ * Return v when it is a finite number, otherwise return fallback.
+ * Unlike the ?? operator this also catches NaN and Infinity which can
+ * leak in from corrupted scene flags or stale preset data.
+ * @param {*} v
+ * @param {number} fallback
+ * @returns {number}
+ */
+function safeNum(v, fallback) {
+  return (typeof v === 'number' && Number.isFinite(v)) ? v : fallback;
+}
+
+/**
  * Accept either 0..1 or 0..255 color channels and normalize to 0..1.
  * This keeps V2 tolerant of legacy V1 preset values.
  * @param {{r:number,g:number,b:number}|null|undefined} c
@@ -2324,22 +2336,22 @@ export class WaterEffectV2 {
     // ── Tint ──────────────────────────────────────────────────────────────
     const tint = normalizeRgb01(p.tintColor, { r: 0.02, g: 0.18, b: 0.28 });
     u.uTintColor.value.set(tint.r, tint.g, tint.b);
-    u.uTintStrength.value = p.tintStrength;
+    u.uTintStrength.value = safeNum(p.tintStrength, 0.36);
 
     // ── Waves ─────────────────────────────────────────────────────────────
-    u.uWaveScale.value = p.waveScale;
+    u.uWaveScale.value = safeNum(p.waveScale, 16.0);
     u.uWaveSpeed.value = waveSpeed;
     u.uWaveStrength.value = waveStrength;
     if (u.uWaveMotion01) u.uWaveMotion01.value = this._waveWindMotion01;
-    u.uDistortionStrengthPx.value = p.distortionStrengthPx;
+    u.uDistortionStrengthPx.value = safeNum(p.distortionStrengthPx, 24.0);
 
     // Wave breakup noise (new). If unset, fall back to legacy waveMicroNormal* params.
-    const breakupStrength = (p.waveBreakupStrength ?? p.waveMicroNormalStrength) ?? 0.0;
-    const breakupScale = (p.waveBreakupScale ?? p.waveMicroNormalScale) ?? 1.0;
-    const breakupSpeed = (p.waveBreakupSpeed ?? p.waveMicroNormalSpeed) ?? 0.0;
-    const breakupWarp = (p.waveBreakupWarp ?? p.waveMicroNormalWarp) ?? 0.0;
-    const breakupDist = (p.waveBreakupDistortionStrength ?? p.waveMicroNormalDistortionStrength) ?? 0.0;
-    const breakupSpec = (p.waveBreakupSpecularStrength ?? p.waveMicroNormalSpecularStrength) ?? 0.0;
+    const breakupStrength = safeNum(p.waveBreakupStrength, safeNum(p.waveMicroNormalStrength, 0.0));
+    const breakupScale = safeNum(p.waveBreakupScale, safeNum(p.waveMicroNormalScale, 1.0));
+    const breakupSpeed = safeNum(p.waveBreakupSpeed, safeNum(p.waveMicroNormalSpeed, 0.0));
+    const breakupWarp = safeNum(p.waveBreakupWarp, safeNum(p.waveMicroNormalWarp, 0.0));
+    const breakupDist = safeNum(p.waveBreakupDistortionStrength, safeNum(p.waveMicroNormalDistortionStrength, 0.0));
+    const breakupSpec = safeNum(p.waveBreakupSpecularStrength, safeNum(p.waveMicroNormalSpecularStrength, 0.0));
     if (u.uWaveBreakupStrength) u.uWaveBreakupStrength.value = breakupStrength;
     if (u.uWaveBreakupScale) u.uWaveBreakupScale.value = breakupScale;
     if (u.uWaveBreakupSpeed) u.uWaveBreakupSpeed.value = breakupSpeed;
@@ -2347,24 +2359,24 @@ export class WaterEffectV2 {
     if (u.uWaveBreakupDistortionStrength) u.uWaveBreakupDistortionStrength.value = breakupDist;
     if (u.uWaveBreakupSpecularStrength) u.uWaveBreakupSpecularStrength.value = breakupSpec;
 
-    if (u.uWaveMicroNormalStrength) u.uWaveMicroNormalStrength.value = p.waveMicroNormalStrength ?? 0.0;
-    if (u.uWaveMicroNormalScale) u.uWaveMicroNormalScale.value = p.waveMicroNormalScale ?? 1.0;
-    if (u.uWaveMicroNormalSpeed) u.uWaveMicroNormalSpeed.value = p.waveMicroNormalSpeed ?? 0.0;
-    if (u.uWaveMicroNormalWarp) u.uWaveMicroNormalWarp.value = p.waveMicroNormalWarp ?? 0.0;
-    if (u.uWaveMicroNormalDistortionStrength) u.uWaveMicroNormalDistortionStrength.value = p.waveMicroNormalDistortionStrength ?? 0.0;
-    if (u.uWaveMicroNormalSpecularStrength) u.uWaveMicroNormalSpecularStrength.value = p.waveMicroNormalSpecularStrength ?? 0.0;
+    if (u.uWaveMicroNormalStrength) u.uWaveMicroNormalStrength.value = safeNum(p.waveMicroNormalStrength, 0.0);
+    if (u.uWaveMicroNormalScale) u.uWaveMicroNormalScale.value = safeNum(p.waveMicroNormalScale, 1.0);
+    if (u.uWaveMicroNormalSpeed) u.uWaveMicroNormalSpeed.value = safeNum(p.waveMicroNormalSpeed, 0.0);
+    if (u.uWaveMicroNormalWarp) u.uWaveMicroNormalWarp.value = safeNum(p.waveMicroNormalWarp, 0.0);
+    if (u.uWaveMicroNormalDistortionStrength) u.uWaveMicroNormalDistortionStrength.value = safeNum(p.waveMicroNormalDistortionStrength, 0.0);
+    if (u.uWaveMicroNormalSpecularStrength) u.uWaveMicroNormalSpecularStrength.value = safeNum(p.waveMicroNormalSpecularStrength, 0.0);
 
-    u.uWaveWarpLargeStrength.value = p.waveWarpLargeStrength;
-    u.uWaveWarpSmallStrength.value = p.waveWarpSmallStrength;
-    u.uWaveWarpMicroStrength.value = p.waveWarpMicroStrength;
-    u.uWaveWarpTimeSpeed.value = p.waveWarpTimeSpeed;
+    u.uWaveWarpLargeStrength.value = safeNum(p.waveWarpLargeStrength, 0.15);
+    u.uWaveWarpSmallStrength.value = safeNum(p.waveWarpSmallStrength, 0.08);
+    u.uWaveWarpMicroStrength.value = safeNum(p.waveWarpMicroStrength, 0.04);
+    u.uWaveWarpTimeSpeed.value = safeNum(p.waveWarpTimeSpeed, 0.15);
     u.uWaveEvolutionEnabled.value = p.waveEvolutionEnabled ? 1.0 : 0.0;
-    u.uWaveEvolutionSpeed.value = p.waveEvolutionSpeed;
-    u.uWaveEvolutionAmount.value = p.waveEvolutionAmount;
-    u.uWaveEvolutionScale.value = p.waveEvolutionScale;
+    u.uWaveEvolutionSpeed.value = safeNum(p.waveEvolutionSpeed, 0.15);
+    u.uWaveEvolutionAmount.value = safeNum(p.waveEvolutionAmount, 0.3);
+    u.uWaveEvolutionScale.value = safeNum(p.waveEvolutionScale, 0.5);
     u.uWaveIndoorDampingEnabled.value = p.waveIndoorDampingEnabled ? 1.0 : 0.0;
-    u.uWaveIndoorDampingStrength.value = p.waveIndoorDampingStrength ?? 1.0;
-    u.uWaveIndoorMinFactor.value = p.waveIndoorMinFactor ?? 0.05;
+    u.uWaveIndoorDampingStrength.value = safeNum(p.waveIndoorDampingStrength, 1.0);
+    u.uWaveIndoorMinFactor.value = safeNum(p.waveIndoorMinFactor, 0.05);
 
     // ── Wave direction ────────────────────────────────────────────────────
     u.uLockWaveTravelToWind.value = p.lockWaveTravelToWind ? 1.0 : 0.0;
@@ -2381,27 +2393,27 @@ export class WaterEffectV2 {
     u.uWaveDirFieldSpeed.value = Number(p.waveDirFieldSpeed ?? 0.35);
 
     // ── Distortion edge ───────────────────────────────────────────────────
-    u.uDistortionEdgeCenter.value = p.distortionEdgeCenter;
-    u.uDistortionEdgeFeather.value = p.distortionEdgeFeather;
-    u.uDistortionEdgeGamma.value = p.distortionEdgeGamma;
-    u.uDistortionShoreRemapLo.value = p.distortionShoreRemapLo;
-    u.uDistortionShoreRemapHi.value = p.distortionShoreRemapHi;
-    u.uDistortionShorePow.value = p.distortionShorePow;
-    u.uDistortionShoreMin.value = p.distortionShoreMin;
+    u.uDistortionEdgeCenter.value = safeNum(p.distortionEdgeCenter, 1.0);
+    u.uDistortionEdgeFeather.value = safeNum(p.distortionEdgeFeather, 0.26);
+    u.uDistortionEdgeGamma.value = safeNum(p.distortionEdgeGamma, 1.0);
+    u.uDistortionShoreRemapLo.value = safeNum(p.distortionShoreRemapLo, 0.0);
+    u.uDistortionShoreRemapHi.value = safeNum(p.distortionShoreRemapHi, 1.0);
+    u.uDistortionShorePow.value = safeNum(p.distortionShorePow, 1.29);
+    u.uDistortionShoreMin.value = safeNum(p.distortionShoreMin, 0.31);
 
     // ── Chromatic aberration ──────────────────────────────────────────────
     u.uChromaticAberrationEnabled.value = p.chromaticAberrationEnabled ? 1.0 : 0.0;
-    u.uChromaticAberrationStrengthPx.value = p.chromaticAberrationStrengthPx;
-    u.uChromaticAberrationThreshold.value = p.chromaticAberrationThreshold;
-    u.uChromaticAberrationThresholdSoftness.value = p.chromaticAberrationThresholdSoftness;
-    u.uChromaticAberrationKawaseBlurPx.value = p.chromaticAberrationKawaseBlurPx;
-    u.uChromaticAberrationSampleSpread.value = p.chromaticAberrationSampleSpread;
-    u.uChromaticAberrationEdgeCenter.value = p.chromaticAberrationEdgeCenter;
-    u.uChromaticAberrationEdgeFeather.value = p.chromaticAberrationEdgeFeather;
-    u.uChromaticAberrationEdgeGamma.value = p.chromaticAberrationEdgeGamma;
-    u.uChromaticAberrationEdgeMin.value = p.chromaticAberrationEdgeMin;
-    u.uChromaticAberrationDeadzone.value = p.chromaticAberrationDeadzone ?? 0.02;
-    u.uChromaticAberrationDeadzoneSoftness.value = p.chromaticAberrationDeadzoneSoftness ?? 0.02;
+    u.uChromaticAberrationStrengthPx.value = safeNum(p.chromaticAberrationStrengthPx, 8.0);
+    u.uChromaticAberrationThreshold.value = safeNum(p.chromaticAberrationThreshold, 0.18);
+    u.uChromaticAberrationThresholdSoftness.value = safeNum(p.chromaticAberrationThresholdSoftness, 0.47);
+    u.uChromaticAberrationKawaseBlurPx.value = safeNum(p.chromaticAberrationKawaseBlurPx, 8.0);
+    u.uChromaticAberrationSampleSpread.value = safeNum(p.chromaticAberrationSampleSpread, 0.54);
+    u.uChromaticAberrationEdgeCenter.value = safeNum(p.chromaticAberrationEdgeCenter, 0.39);
+    u.uChromaticAberrationEdgeFeather.value = safeNum(p.chromaticAberrationEdgeFeather, 0.27);
+    u.uChromaticAberrationEdgeGamma.value = safeNum(p.chromaticAberrationEdgeGamma, 0.85);
+    u.uChromaticAberrationEdgeMin.value = safeNum(p.chromaticAberrationEdgeMin, 0.0);
+    u.uChromaticAberrationDeadzone.value = safeNum(p.chromaticAberrationDeadzone, 0.02);
+    u.uChromaticAberrationDeadzoneSoftness.value = safeNum(p.chromaticAberrationDeadzoneSoftness, 0.02);
 
     // ── Precipitation distortion (WeatherController coupling) ──────────────
     // Resolve precipitation: manual param, override, or live weather.
@@ -2428,51 +2440,51 @@ export class WaterEffectV2 {
     }
     u.uRainEnabled.value = precip > 0.001 ? 1.0 : 0.0;
     u.uRainPrecipitation.value = precip;
-    u.uRainDistortionStrengthPx.value = p.rainDistortionStrengthPx ?? 6.0;
-    u.uRainDistortionScale.value = p.rainDistortionScale ?? 8.0;
-    u.uRainDistortionSpeed.value = p.rainDistortionSpeed ?? 1.2;
+    u.uRainDistortionStrengthPx.value = safeNum(p.rainDistortionStrengthPx, 6.0);
+    u.uRainDistortionScale.value = safeNum(p.rainDistortionScale, 8.0);
+    u.uRainDistortionSpeed.value = safeNum(p.rainDistortionSpeed, 1.2);
     u.uRainIndoorDampingEnabled.value = p.rainIndoorDampingEnabled ? 1.0 : 0.0;
-    u.uRainIndoorDampingStrength.value = p.rainIndoorDampingStrength ?? 1.0;
+    u.uRainIndoorDampingStrength.value = safeNum(p.rainIndoorDampingStrength, 1.0);
 
     // ── Specular (GGX) ───────────────────────────────────────────────────
-    u.uSpecStrength.value = p.specStrength;
-    u.uSpecPower.value = p.specPower;
+    u.uSpecStrength.value = safeNum(p.specStrength, 200.0);
+    u.uSpecPower.value = safeNum(p.specPower, 64.0);
     if (u.uSpecModel) u.uSpecModel.value = (p.specModel ?? 0) ? 1.0 : 0.0;
-    if (u.uSpecClamp) u.uSpecClamp.value = p.specClamp ?? 0.0;
-    u.uSpecSunIntensity.value = p.specSunIntensity;
-    u.uSpecNormalStrength.value = p.specNormalStrength;
-    u.uSpecNormalScale.value = p.specNormalScale;
+    if (u.uSpecClamp) u.uSpecClamp.value = safeNum(p.specClamp, 0.0);
+    u.uSpecSunIntensity.value = safeNum(p.specSunIntensity, 8.0);
+    u.uSpecNormalStrength.value = safeNum(p.specNormalStrength, 4.0);
+    u.uSpecNormalScale.value = safeNum(p.specNormalScale, 8.0);
     u.uSpecNormalMode.value = Number.isFinite(Number(p.specNormalMode)) ? Number(p.specNormalMode) : 0.0;
-    u.uSpecMicroStrength.value = p.specMicroStrength ?? 0.0;
-    u.uSpecMicroScale.value = p.specMicroScale ?? 1.0;
-    u.uSpecAAStrength.value = p.specAAStrength ?? 0.0;
-    u.uSpecWaveStepMul.value = p.specWaveStepMul ?? 1.0;
+    u.uSpecMicroStrength.value = safeNum(p.specMicroStrength, 0.0);
+    u.uSpecMicroScale.value = safeNum(p.specMicroScale, 1.0);
+    u.uSpecAAStrength.value = safeNum(p.specAAStrength, 0.0);
+    u.uSpecWaveStepMul.value = safeNum(p.specWaveStepMul, 1.0);
     if (u.uSpecForceFlatNormal) u.uSpecForceFlatNormal.value = p.specForceFlatNormal ? 1.0 : 0.0;
     if (u.uSpecDisableMasking) u.uSpecDisableMasking.value = p.specDisableMasking ? 1.0 : 0.0;
     if (u.uSpecDisableRainSlope) u.uSpecDisableRainSlope.value = p.specDisableRainSlope ? 1.0 : 0.0;
-    u.uSpecRoughnessMin.value = p.specRoughnessMin;
-    u.uSpecRoughnessMax.value = p.specRoughnessMax;
-    u.uSpecF0.value = p.specF0;
-    u.uSpecMaskGamma.value = p.specMaskGamma;
-    u.uSpecSkyTint.value = p.specSkyTint;
-    u.uSpecShoreBias.value = p.specShoreBias;
-    u.uSpecDistortionNormalStrength.value = p.specDistortionNormalStrength;
-    u.uSpecAnisotropy.value = p.specAnisotropy;
-    u.uSpecAnisoRatio.value = p.specAnisoRatio;
+    u.uSpecRoughnessMin.value = safeNum(p.specRoughnessMin, 0.0);
+    u.uSpecRoughnessMax.value = safeNum(p.specRoughnessMax, 1.0);
+    u.uSpecF0.value = safeNum(p.specF0, 0.249);
+    u.uSpecMaskGamma.value = safeNum(p.specMaskGamma, 0.52);
+    u.uSpecSkyTint.value = safeNum(p.specSkyTint, 1.0);
+    u.uSpecShoreBias.value = safeNum(p.specShoreBias, -1.0);
+    u.uSpecDistortionNormalStrength.value = safeNum(p.specDistortionNormalStrength, 1.32);
+    u.uSpecAnisotropy.value = safeNum(p.specAnisotropy, -0.31);
+    u.uSpecAnisoRatio.value = safeNum(p.specAnisoRatio, 2.0);
     u.uCloudShadowEnabled.value = p.cloudShadowEnabled ? 1.0 : 0.0;
-    u.uCloudShadowDarkenStrength.value = p.cloudShadowDarkenStrength ?? 1.25;
-    u.uCloudShadowDarkenCurve.value = p.cloudShadowDarkenCurve ?? 1.5;
-    u.uCloudShadowSpecularKill.value = p.cloudShadowSpecularKill ?? 1.0;
-    u.uCloudShadowSpecularCurve.value = p.cloudShadowSpecularCurve ?? 6.0;
+    u.uCloudShadowDarkenStrength.value = safeNum(p.cloudShadowDarkenStrength, 1.25);
+    u.uCloudShadowDarkenCurve.value = safeNum(p.cloudShadowDarkenCurve, 1.5);
+    u.uCloudShadowSpecularKill.value = safeNum(p.cloudShadowSpecularKill, 1.0);
+    u.uCloudShadowSpecularCurve.value = safeNum(p.cloudShadowSpecularCurve, 6.0);
 
     // Caustics
     u.uCausticsEnabled.value = p.causticsEnabled ? 1.0 : 0.0;
-    u.uCausticsIntensity.value = p.causticsIntensity ?? 4.0;
-    u.uCausticsScale.value = p.causticsScale ?? 33.4;
-    u.uCausticsSpeed.value = p.causticsSpeed ?? 1.05;
-    u.uCausticsSharpness.value = p.causticsSharpness ?? 0.15;
-    u.uCausticsEdgeLo.value = p.causticsEdgeLo ?? 0.11;
-    u.uCausticsEdgeHi.value = p.causticsEdgeHi ?? 1.0;
+    u.uCausticsIntensity.value = safeNum(p.causticsIntensity, 4.0);
+    u.uCausticsScale.value = safeNum(p.causticsScale, 33.4);
+    u.uCausticsSpeed.value = safeNum(p.causticsSpeed, 1.05);
+    u.uCausticsSharpness.value = safeNum(p.causticsSharpness, 0.15);
+    u.uCausticsEdgeLo.value = safeNum(p.causticsEdgeLo, 0.11);
+    u.uCausticsEdgeHi.value = safeNum(p.causticsEdgeHi, 1.0);
     if (u.uCausticsBrightnessMaskEnabled) u.uCausticsBrightnessMaskEnabled.value = p.causticsBrightnessMaskEnabled ? 1.0 : 0.0;
     if (u.uCausticsBrightnessThreshold) u.uCausticsBrightnessThreshold.value = Number.isFinite(p.causticsBrightnessThreshold) ? Math.max(0.0, p.causticsBrightnessThreshold) : 0.55;
     if (u.uCausticsBrightnessSoftness) u.uCausticsBrightnessSoftness.value = Number.isFinite(p.causticsBrightnessSoftness) ? Math.max(0.0, p.causticsBrightnessSoftness) : 0.20;
@@ -2480,50 +2492,50 @@ export class WaterEffectV2 {
 
     // Shore Foam (Advanced)
     u.uShoreFoamEnabled.value = (p.shoreFoamEnabled ?? true) ? 1.0 : 0.0;
-    u.uShoreFoamStrength.value = p.shoreFoamStrength ?? 0.8;
-    u.uShoreFoamThreshold.value = p.shoreFoamThreshold ?? 0.28;
-    u.uShoreFoamScale.value = p.shoreFoamScale ?? 20.0;
-    u.uShoreFoamSpeed.value = p.shoreFoamSpeed ?? 0.1;
+    u.uShoreFoamStrength.value = safeNum(p.shoreFoamStrength, 0.8);
+    u.uShoreFoamThreshold.value = safeNum(p.shoreFoamThreshold, 0.28);
+    u.uShoreFoamScale.value = safeNum(p.shoreFoamScale, 20.0);
+    u.uShoreFoamSpeed.value = safeNum(p.shoreFoamSpeed, 0.1);
     const shoreFoamColor = normalizeRgb01(p.shoreFoamColor, { r: 1.0, g: 1.0, b: 1.0 });
     u.uShoreFoamColor.value.set(shoreFoamColor.r, shoreFoamColor.g, shoreFoamColor.b);
     const shoreFoamTint = normalizeRgb01(p.shoreFoamTint, { r: 0.95, g: 0.97, b: 0.9 });
     u.uShoreFoamTint.value.set(shoreFoamTint.r, shoreFoamTint.g, shoreFoamTint.b);
-    u.uShoreFoamTintStrength.value = p.shoreFoamTintStrength ?? 0.2;
-    u.uShoreFoamColorVariation.value = p.shoreFoamColorVariation ?? 0.15;
-    u.uShoreFoamOpacity.value = p.shoreFoamOpacity ?? 1.0;
-    u.uShoreFoamBrightness.value = p.shoreFoamBrightness ?? 0.6;
-    u.uShoreFoamContrast.value = p.shoreFoamContrast ?? 1.5;
-    u.uShoreFoamGamma.value = p.shoreFoamGamma ?? 0.8;
+    u.uShoreFoamTintStrength.value = safeNum(p.shoreFoamTintStrength, 0.2);
+    u.uShoreFoamColorVariation.value = safeNum(p.shoreFoamColorVariation, 0.15);
+    u.uShoreFoamOpacity.value = safeNum(p.shoreFoamOpacity, 1.0);
+    u.uShoreFoamBrightness.value = safeNum(p.shoreFoamBrightness, 0.6);
+    u.uShoreFoamContrast.value = safeNum(p.shoreFoamContrast, 1.5);
+    u.uShoreFoamGamma.value = safeNum(p.shoreFoamGamma, 0.8);
     u.uShoreFoamLightingEnabled.value = (p.shoreFoamLightingEnabled ?? true) ? 1.0 : 0.0;
-    u.uShoreFoamAmbientLight.value = p.shoreFoamAmbientLight ?? 0.5;
-    u.uShoreFoamSceneLightInfluence.value = p.shoreFoamSceneLightInfluence ?? 0.8;
-    u.uShoreFoamDarknessResponse.value = p.shoreFoamDarknessResponse ?? 0.7;
+    u.uShoreFoamAmbientLight.value = safeNum(p.shoreFoamAmbientLight, 0.5);
+    u.uShoreFoamSceneLightInfluence.value = safeNum(p.shoreFoamSceneLightInfluence, 0.8);
+    u.uShoreFoamDarknessResponse.value = safeNum(p.shoreFoamDarknessResponse, 0.7);
     u.uShoreFoamFilamentsEnabled.value = (p.shoreFoamFilamentsEnabled ?? true) ? 1.0 : 0.0;
-    u.uShoreFoamFilamentsStrength.value = p.shoreFoamFilamentsStrength ?? 0.5;
-    u.uShoreFoamFilamentsScale.value = p.shoreFoamFilamentsScale ?? 5.0;
-    u.uShoreFoamFilamentsLength.value = p.shoreFoamFilamentsLength ?? 2.0;
-    u.uShoreFoamFilamentsWidth.value = p.shoreFoamFilamentsWidth ?? 0.2;
-    u.uShoreFoamThicknessVariation.value = p.shoreFoamThicknessVariation ?? 0.4;
-    u.uShoreFoamThicknessScale.value = p.shoreFoamThicknessScale ?? 4.0;
-    u.uShoreFoamEdgeDetail.value = p.shoreFoamEdgeDetail ?? 0.5;
-    u.uShoreFoamEdgeDetailScale.value = p.shoreFoamEdgeDetailScale ?? 10.0;
-    u.uShoreFoamWaveDistortionStrength.value = p.shoreFoamWaveDistortionStrength ?? 3.0;
+    u.uShoreFoamFilamentsStrength.value = safeNum(p.shoreFoamFilamentsStrength, 0.5);
+    u.uShoreFoamFilamentsScale.value = safeNum(p.shoreFoamFilamentsScale, 5.0);
+    u.uShoreFoamFilamentsLength.value = safeNum(p.shoreFoamFilamentsLength, 2.0);
+    u.uShoreFoamFilamentsWidth.value = safeNum(p.shoreFoamFilamentsWidth, 0.2);
+    u.uShoreFoamThicknessVariation.value = safeNum(p.shoreFoamThicknessVariation, 0.4);
+    u.uShoreFoamThicknessScale.value = safeNum(p.shoreFoamThicknessScale, 4.0);
+    u.uShoreFoamEdgeDetail.value = safeNum(p.shoreFoamEdgeDetail, 0.5);
+    u.uShoreFoamEdgeDetailScale.value = safeNum(p.shoreFoamEdgeDetailScale, 10.0);
+    u.uShoreFoamWaveDistortionStrength.value = safeNum(p.shoreFoamWaveDistortionStrength, 3.0);
     u.uShoreFoamNoiseDistortionEnabled.value = (p.shoreFoamNoiseDistortionEnabled ?? true) ? 1.0 : 0.0;
-    u.uShoreFoamNoiseDistortionStrength.value = p.shoreFoamNoiseDistortionStrength ?? 1.0;
-    u.uShoreFoamNoiseDistortionScale.value = p.shoreFoamNoiseDistortionScale ?? 2.5;
-    u.uShoreFoamNoiseDistortionSpeed.value = p.shoreFoamNoiseDistortionSpeed ?? 0.4;
+    u.uShoreFoamNoiseDistortionStrength.value = safeNum(p.shoreFoamNoiseDistortionStrength, 1.0);
+    u.uShoreFoamNoiseDistortionScale.value = safeNum(p.shoreFoamNoiseDistortionScale, 2.5);
+    u.uShoreFoamNoiseDistortionSpeed.value = safeNum(p.shoreFoamNoiseDistortionSpeed, 0.4);
     u.uShoreFoamEvolutionEnabled.value = (p.shoreFoamEvolutionEnabled ?? true) ? 1.0 : 0.0;
-    u.uShoreFoamEvolutionSpeed.value = p.shoreFoamEvolutionSpeed ?? 0.2;
-    u.uShoreFoamEvolutionAmount.value = p.shoreFoamEvolutionAmount ?? 0.5;
-    u.uShoreFoamEvolutionScale.value = p.shoreFoamEvolutionScale ?? 2.0;
-    u.uShoreFoamCoreWidth.value = p.shoreFoamCoreWidth ?? 0.15;
-    u.uShoreFoamCoreFalloff.value = p.shoreFoamCoreFalloff ?? 0.1;
-    u.uShoreFoamTailWidth.value = p.shoreFoamTailWidth ?? 0.6;
-    u.uShoreFoamTailFalloff.value = p.shoreFoamTailFalloff ?? 0.3;
+    u.uShoreFoamEvolutionSpeed.value = safeNum(p.shoreFoamEvolutionSpeed, 0.2);
+    u.uShoreFoamEvolutionAmount.value = safeNum(p.shoreFoamEvolutionAmount, 0.5);
+    u.uShoreFoamEvolutionScale.value = safeNum(p.shoreFoamEvolutionScale, 2.0);
+    u.uShoreFoamCoreWidth.value = safeNum(p.shoreFoamCoreWidth, 0.15);
+    u.uShoreFoamCoreFalloff.value = safeNum(p.shoreFoamCoreFalloff, 0.1);
+    u.uShoreFoamTailWidth.value = safeNum(p.shoreFoamTailWidth, 0.6);
+    u.uShoreFoamTailFalloff.value = safeNum(p.shoreFoamTailFalloff, 0.3);
 
     // Sun direction from azimuth + elevation (cached to avoid per-frame trig)
-    const az = p.specSunAzimuthDeg ?? 135;
-    const el = p.specSunElevationDeg ?? 45;
+    const az = safeNum(p.specSunAzimuthDeg, 135);
+    const el = safeNum(p.specSunElevationDeg, 45);
     if (!paused && (az !== this._cachedSunAzDeg || el !== this._cachedSunElDeg)) {
       const azRad = az * (Math.PI / 180);
       const elRad = el * (Math.PI / 180);
@@ -2538,94 +2550,94 @@ export class WaterEffectV2 {
     // ── Foam ──────────────────────────────────────────────────────────────
     const foamColor = normalizeRgb01(p.foamColor, { r: 0.85, g: 0.9, b: 0.88 });
     u.uFoamColor.value.set(foamColor.r, foamColor.g, foamColor.b);
-    u.uFoamStrength.value = p.foamStrength;
-    u.uFoamThreshold.value = p.foamThreshold;
-    u.uFoamShoreCorePower.value = p.foamShoreCorePower;
-    u.uFoamShoreCoreStrength.value = p.foamShoreCoreStrength;
-    u.uFoamShoreTailPower.value = p.foamShoreTailPower;
-    u.uFoamShoreTailStrength.value = p.foamShoreTailStrength;
-    u.uFoamScale.value = p.foamScale;
-    u.uFoamSpeed.value = p.foamSpeed;
-    u.uFoamCurlStrength.value = p.foamCurlStrength;
-    u.uFoamCurlScale.value = p.foamCurlScale;
-    u.uFoamCurlSpeed.value = p.foamCurlSpeed;
-    u.uFoamBreakupStrength1.value = p.foamBreakupStrength1;
-    u.uFoamBreakupScale1.value = p.foamBreakupScale1;
-    u.uFoamBreakupSpeed1.value = p.foamBreakupSpeed1;
-    u.uFoamBreakupStrength2.value = p.foamBreakupStrength2;
-    u.uFoamBreakupScale2.value = p.foamBreakupScale2;
-    u.uFoamBreakupSpeed2.value = p.foamBreakupSpeed2;
-    u.uFoamBlackPoint.value = p.foamBlackPoint;
-    u.uFoamWhitePoint.value = p.foamWhitePoint;
-    u.uFoamGamma.value = p.foamGamma;
-    u.uFoamContrast.value = p.foamContrast;
-    u.uFoamBrightness.value = p.foamBrightness;
-    u.uFloatingFoamStrength.value = p.floatingFoamStrength;
-    u.uFloatingFoamCoverage.value = p.floatingFoamCoverage;
-    u.uFloatingFoamScale.value = p.floatingFoamScale;
-    u.uFloatingFoamWaveDistortion.value = p.floatingFoamWaveDistortion;
+    u.uFoamStrength.value = safeNum(p.foamStrength, 0.6);
+    u.uFoamThreshold.value = safeNum(p.foamThreshold, 0.28);
+    u.uFoamShoreCorePower.value = safeNum(p.foamShoreCorePower, 4.5);
+    u.uFoamShoreCoreStrength.value = safeNum(p.foamShoreCoreStrength, 1.0);
+    u.uFoamShoreTailPower.value = safeNum(p.foamShoreTailPower, 0.6);
+    u.uFoamShoreTailStrength.value = safeNum(p.foamShoreTailStrength, 0.2);
+    u.uFoamScale.value = safeNum(p.foamScale, 20.0);
+    u.uFoamSpeed.value = safeNum(p.foamSpeed, 0.1);
+    u.uFoamCurlStrength.value = safeNum(p.foamCurlStrength, 0.35);
+    u.uFoamCurlScale.value = safeNum(p.foamCurlScale, 2.0);
+    u.uFoamCurlSpeed.value = safeNum(p.foamCurlSpeed, 0.05);
+    u.uFoamBreakupStrength1.value = safeNum(p.foamBreakupStrength1, 0.5);
+    u.uFoamBreakupScale1.value = safeNum(p.foamBreakupScale1, 3.0);
+    u.uFoamBreakupSpeed1.value = safeNum(p.foamBreakupSpeed1, 0.04);
+    u.uFoamBreakupStrength2.value = safeNum(p.foamBreakupStrength2, 0.3);
+    u.uFoamBreakupScale2.value = safeNum(p.foamBreakupScale2, 7.0);
+    u.uFoamBreakupSpeed2.value = safeNum(p.foamBreakupSpeed2, 0.02);
+    u.uFoamBlackPoint.value = safeNum(p.foamBlackPoint, 0.0);
+    u.uFoamWhitePoint.value = safeNum(p.foamWhitePoint, 1.0);
+    u.uFoamGamma.value = safeNum(p.foamGamma, 1.0);
+    u.uFoamContrast.value = safeNum(p.foamContrast, 1.0);
+    u.uFoamBrightness.value = safeNum(p.foamBrightness, 0.0);
+    u.uFloatingFoamStrength.value = safeNum(p.floatingFoamStrength, 0.57);
+    u.uFloatingFoamCoverage.value = safeNum(p.floatingFoamCoverage, 0.57);
+    u.uFloatingFoamScale.value = safeNum(p.floatingFoamScale, 200.0);
+    u.uFloatingFoamWaveDistortion.value = safeNum(p.floatingFoamWaveDistortion, 2.0);
     
     // Floating Foam Advanced (Phase 1)
     const floatingFoamColor = normalizeRgb01(p.floatingFoamColor, { r: 1.0, g: 1.0, b: 1.0 });
     u.uFloatingFoamColor.value.set(floatingFoamColor.r, floatingFoamColor.g, floatingFoamColor.b);
     const floatingFoamTint = normalizeRgb01(p.floatingFoamTint, { r: 0.9, g: 0.95, b: 0.85 });
     u.uFloatingFoamTint.value.set(floatingFoamTint.r, floatingFoamTint.g, floatingFoamTint.b);
-    u.uFloatingFoamTintStrength.value = p.floatingFoamTintStrength ?? 0.3;
-    u.uFloatingFoamColorVariation.value = p.floatingFoamColorVariation ?? 0.2;
-    u.uFloatingFoamOpacity.value = p.floatingFoamOpacity ?? 1.0;
-    u.uFloatingFoamBrightness.value = p.floatingFoamBrightness ?? 0.5;
-    u.uFloatingFoamContrast.value = p.floatingFoamContrast ?? 1.8;
-    u.uFloatingFoamGamma.value = p.floatingFoamGamma ?? 0.7;
+    u.uFloatingFoamTintStrength.value = safeNum(p.floatingFoamTintStrength, 0.3);
+    u.uFloatingFoamColorVariation.value = safeNum(p.floatingFoamColorVariation, 0.2);
+    u.uFloatingFoamOpacity.value = safeNum(p.floatingFoamOpacity, 1.0);
+    u.uFloatingFoamBrightness.value = safeNum(p.floatingFoamBrightness, 0.5);
+    u.uFloatingFoamContrast.value = safeNum(p.floatingFoamContrast, 1.8);
+    u.uFloatingFoamGamma.value = safeNum(p.floatingFoamGamma, 0.7);
     
     u.uFloatingFoamLightingEnabled.value = (p.floatingFoamLightingEnabled ?? true) ? 1.0 : 0.0;
-    u.uFloatingFoamAmbientLight.value = p.floatingFoamAmbientLight ?? 0.4;
-    u.uFloatingFoamSceneLightInfluence.value = p.floatingFoamSceneLightInfluence ?? 0.7;
-    u.uFloatingFoamDarknessResponse.value = p.floatingFoamDarknessResponse ?? 0.6;
+    u.uFloatingFoamAmbientLight.value = safeNum(p.floatingFoamAmbientLight, 0.4);
+    u.uFloatingFoamSceneLightInfluence.value = safeNum(p.floatingFoamSceneLightInfluence, 0.7);
+    u.uFloatingFoamDarknessResponse.value = safeNum(p.floatingFoamDarknessResponse, 0.6);
     
     u.uFloatingFoamShadowEnabled.value = (p.floatingFoamShadowEnabled ?? true) ? 1.0 : 0.0;
-    u.uFloatingFoamShadowStrength.value = p.floatingFoamShadowStrength ?? 0.35;
-    u.uFloatingFoamShadowSoftness.value = p.floatingFoamShadowSoftness ?? 0.5;
-    u.uFloatingFoamShadowDepth.value = p.floatingFoamShadowDepth ?? 0.8;
+    u.uFloatingFoamShadowStrength.value = safeNum(p.floatingFoamShadowStrength, 0.35);
+    u.uFloatingFoamShadowSoftness.value = safeNum(p.floatingFoamShadowSoftness, 0.5);
+    u.uFloatingFoamShadowDepth.value = safeNum(p.floatingFoamShadowDepth, 0.8);
     
     // Floating Foam Complexity (Phase 2)
     u.uFloatingFoamFilamentsEnabled.value = (p.floatingFoamFilamentsEnabled ?? true) ? 1.0 : 0.0;
-    u.uFloatingFoamFilamentsStrength.value = p.floatingFoamFilamentsStrength ?? 0.6;
-    u.uFloatingFoamFilamentsScale.value = p.floatingFoamFilamentsScale ?? 4.0;
-    u.uFloatingFoamFilamentsLength.value = p.floatingFoamFilamentsLength ?? 2.5;
-    u.uFloatingFoamFilamentsWidth.value = p.floatingFoamFilamentsWidth ?? 0.15;
-    u.uFloatingFoamThicknessVariation.value = p.floatingFoamThicknessVariation ?? 0.5;
-    u.uFloatingFoamThicknessScale.value = p.floatingFoamThicknessScale ?? 3.0;
-    u.uFloatingFoamEdgeDetail.value = p.floatingFoamEdgeDetail ?? 0.4;
-    u.uFloatingFoamEdgeDetailScale.value = p.floatingFoamEdgeDetailScale ?? 8.0;
-    u.uFloatingFoamLayerCount.value = p.floatingFoamLayerCount ?? 2.0;
-    u.uFloatingFoamLayerOffset.value = p.floatingFoamLayerOffset ?? 0.3;
+    u.uFloatingFoamFilamentsStrength.value = safeNum(p.floatingFoamFilamentsStrength, 0.6);
+    u.uFloatingFoamFilamentsScale.value = safeNum(p.floatingFoamFilamentsScale, 4.0);
+    u.uFloatingFoamFilamentsLength.value = safeNum(p.floatingFoamFilamentsLength, 2.5);
+    u.uFloatingFoamFilamentsWidth.value = safeNum(p.floatingFoamFilamentsWidth, 0.15);
+    u.uFloatingFoamThicknessVariation.value = safeNum(p.floatingFoamThicknessVariation, 0.5);
+    u.uFloatingFoamThicknessScale.value = safeNum(p.floatingFoamThicknessScale, 3.0);
+    u.uFloatingFoamEdgeDetail.value = safeNum(p.floatingFoamEdgeDetail, 0.4);
+    u.uFloatingFoamEdgeDetailScale.value = safeNum(p.floatingFoamEdgeDetailScale, 8.0);
+    u.uFloatingFoamLayerCount.value = safeNum(p.floatingFoamLayerCount, 2.0);
+    u.uFloatingFoamLayerOffset.value = safeNum(p.floatingFoamLayerOffset, 0.3);
     
     // Floating Foam Distortion & Evolution
-    u.uFloatingFoamWaveDistortionStrength.value = p.floatingFoamWaveDistortionStrength ?? 2.5;
+    u.uFloatingFoamWaveDistortionStrength.value = safeNum(p.floatingFoamWaveDistortionStrength, 2.5);
     u.uFloatingFoamNoiseDistortionEnabled.value = (p.floatingFoamNoiseDistortionEnabled ?? true) ? 1.0 : 0.0;
-    u.uFloatingFoamNoiseDistortionStrength.value = p.floatingFoamNoiseDistortionStrength ?? 0.8;
-    u.uFloatingFoamNoiseDistortionScale.value = p.floatingFoamNoiseDistortionScale ?? 2.0;
-    u.uFloatingFoamNoiseDistortionSpeed.value = p.floatingFoamNoiseDistortionSpeed ?? 0.3;
+    u.uFloatingFoamNoiseDistortionStrength.value = safeNum(p.floatingFoamNoiseDistortionStrength, 0.8);
+    u.uFloatingFoamNoiseDistortionScale.value = safeNum(p.floatingFoamNoiseDistortionScale, 2.0);
+    u.uFloatingFoamNoiseDistortionSpeed.value = safeNum(p.floatingFoamNoiseDistortionSpeed, 0.3);
     u.uFloatingFoamEvolutionEnabled.value = (p.floatingFoamEvolutionEnabled ?? true) ? 1.0 : 0.0;
-    u.uFloatingFoamEvolutionSpeed.value = p.floatingFoamEvolutionSpeed ?? 0.15;
-    u.uFloatingFoamEvolutionAmount.value = p.floatingFoamEvolutionAmount ?? 0.6;
-    u.uFloatingFoamEvolutionScale.value = p.floatingFoamEvolutionScale ?? 1.5;
+    u.uFloatingFoamEvolutionSpeed.value = safeNum(p.floatingFoamEvolutionSpeed, 0.15);
+    u.uFloatingFoamEvolutionAmount.value = safeNum(p.floatingFoamEvolutionAmount, 0.6);
+    u.uFloatingFoamEvolutionScale.value = safeNum(p.floatingFoamEvolutionScale, 1.5);
     
-    u.uFoamFlecksIntensity.value = p.foamFlecksIntensity;
+    u.uFoamFlecksIntensity.value = safeNum(p.foamFlecksIntensity, 0.0);
 
     // ── Murk ──────────────────────────────────────────────────────────────
     u.uMurkEnabled.value = p.murkEnabled ? 1.0 : 0.0;
-    u.uMurkIntensity.value = p.murkIntensity;
+    u.uMurkIntensity.value = safeNum(p.murkIntensity, 0.76);
     const murkColor = normalizeRgb01(p.murkColor, { r: 0.15, g: 0.22, b: 0.12 });
     u.uMurkColor.value.set(murkColor.r, murkColor.g, murkColor.b);
-    u.uMurkScale.value = p.murkScale;
-    u.uMurkSpeed.value = p.murkSpeed;
-    u.uMurkDepthLo.value = p.murkDepthLo;
-    u.uMurkDepthHi.value = p.murkDepthHi;
-    u.uMurkGrainScale.value = p.murkGrainScale;
-    u.uMurkGrainSpeed.value = p.murkGrainSpeed;
-    u.uMurkGrainStrength.value = p.murkGrainStrength;
-    u.uMurkDepthFade.value = p.murkDepthFade;
+    u.uMurkScale.value = safeNum(p.murkScale, 5.66);
+    u.uMurkSpeed.value = safeNum(p.murkSpeed, 0.12);
+    u.uMurkDepthLo.value = safeNum(p.murkDepthLo, 0.2);
+    u.uMurkDepthHi.value = safeNum(p.murkDepthHi, 0.8);
+    u.uMurkGrainScale.value = safeNum(p.murkGrainScale, 80.0);
+    u.uMurkGrainSpeed.value = safeNum(p.murkGrainSpeed, 0.3);
+    u.uMurkGrainStrength.value = safeNum(p.murkGrainStrength, 0.4);
+    u.uMurkDepthFade.value = safeNum(p.murkDepthFade, 0.0);
 
     // ── Faux bathymetry (Beer-Lambert) ───────────────────────────────────
     if (u.uBathymetryEnabled) u.uBathymetryEnabled.value = p.bathymetryEnabled ? 1.0 : 0.0;

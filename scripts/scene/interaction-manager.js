@@ -4572,8 +4572,11 @@ export class InteractionManager {
     safeCall(() => this._updateTreeCanopyHoverState(mouseState), 'hover.treeCanopy', Severity.COSMETIC);
 
     // Keep roof hover-hide parity with canopy hover whenever Three owns tile
-    // interaction. PIXI-owned tile workflows are still excluded.
-    const allowThreeOverheadHoverHide = !this._isPixiOwnedTileMode();
+    // interaction. Only disable overhead hover-hide when the Tiles layer is
+    // specifically active AND PIXI owns it — not when any arbitrary PIXI layer
+    // (lighting, drawings, etc.) is active. This ensures roof fade-on-hover
+    // works in all editing modes (light placement, wall editing, etc.).
+    const allowThreeOverheadHoverHide = !(this._isTilesLayerActive() && this._isPixiOwnedTileMode());
     if (!allowThreeOverheadHoverHide) {
       if (this.hoveredOverheadTileId && this.tileManager?.setTileHoverHidden) {
         this.tileManager.setTileHoverHidden(this.hoveredOverheadTileId, false);
@@ -5145,8 +5148,21 @@ export class InteractionManager {
         // PERFORMANCE: Skip expensive hover detection if mouse is not over the canvas.
         // This prevents raycasting when hovering over Tweakpane UI or other overlays.
         // We still process active drags/draws since those need to track mouse globally.
-        const isOverCanvas = event.target === this.canvasElement || 
-                             this.canvasElement.contains(event.target);
+        const pointerState = this.getMouseState();
+        const targetPath = (typeof event.composedPath === 'function') ? event.composedPath() : null;
+        const pixiCanvas = canvas?.app?.view || null;
+        const boardCanvas = document.getElementById('board');
+        const targetHitsSceneCanvas = Array.isArray(targetPath)
+          ? targetPath.includes(this.canvasElement)
+            || (pixiCanvas ? targetPath.includes(pixiCanvas) : false)
+            || (boardCanvas ? targetPath.includes(boardCanvas) : false)
+          : (
+            event.target === this.canvasElement
+            || this.canvasElement.contains(event.target)
+            || (pixiCanvas && (event.target === pixiCanvas || pixiCanvas.contains?.(event.target)))
+            || (boardCanvas && (event.target === boardCanvas || boardCanvas.contains?.(event.target)))
+          );
+        const isOverCanvas = (!!pointerState?.insideCanvas && !pointerState?.isFromUI) || !!targetHitsSceneCanvas;
         
         // WP-3 Ping parity: cancel long-press ping if pointer moves beyond threshold.
         if (this._pingLongPress.timerId != null) {

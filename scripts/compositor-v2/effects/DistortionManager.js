@@ -2994,10 +2994,13 @@ export class DistortionManager {
       }
 
       if (au.tBelowFloorPresence) {
-        const bfpTex = this._wsBefloorAlphaTex ?? this.belowFloorPresenceTarget?.texture ?? null;
-        au.tBelowFloorPresence.value             = bfpTex;
-        au.uHasBelowFloorPresence.value          = bfpTex ? 1.0 : 0.0;
-        au.uBelowFloorPresenceIsWorldSpace.value = this._wsBefloorAlphaTex ? 1.0 : 0.0;
+        const bfpTex = needsWaterAuxPasses
+          ? (this._wsBefloorAlphaTex ?? this.belowFloorPresenceTarget?.texture ?? null)
+          : null;
+        au.tBelowFloorPresence.value = bfpTex;
+        au.uHasBelowFloorPresence.value = bfpTex ? 1.0 : 0.0;
+        au.uBelowFloorPresenceIsWorldSpace.value =
+          (needsWaterAuxPasses && this._wsBefloorAlphaTex) ? 1.0 : 0.0;
       }
       if (au.tBelowWaterMask !== undefined) {
         au.tBelowWaterMask.value    = belowWaterTex;

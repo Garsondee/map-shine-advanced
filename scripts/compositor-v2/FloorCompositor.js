@@ -1257,7 +1257,8 @@ export class FloorCompositor {
         const overlays = effect?._overlays;
         if (!(overlays instanceof Map) || overlays.size <= 0) return false;
         for (const entry of overlays.values()) {
-          if (entry?.mesh?.visible !== false) return true;
+          const mesh = entry?.mesh;
+          if (mesh && mesh.visible !== false) return true;
         }
         return false;
       };

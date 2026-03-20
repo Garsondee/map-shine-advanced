@@ -10,6 +10,7 @@ import { applyWallLevelDefaults, getFiniteActiveLevelBand, shouldApplyLevelCreat
 import { readWallHeightFlags } from '../foundry/levels-scene-flags.js';
 import { getPerspectiveElevation } from '../foundry/elevation-context.js';
 import { OVERLAY_THREE_LAYER } from '../core/render-layers.js';
+import { flattenWallUpdateChanges, isWallDoorStateOnlyUpdate } from '../utils/wall-update-classify.js';
 
 const log = createLogger('WallManager');
 
@@ -168,7 +169,9 @@ export class WallManager {
         } catch (_) {
         }
       }, 0);
-      this._requestLightingRefresh();
+      if (!window.MapShine?.__debugSkipWallManagerHookLightingRefresh) {
+        this._requestLightingRefresh();
+      }
     })]);
     this._hookIds.push(['deleteWall', Hooks.on('deleteWall', (doc) => {
       this.remove(doc.id);
@@ -867,13 +870,18 @@ export class WallManager {
       
       if (showVisuals) {
         loader.load(iconPath, (tex) => {
-            // Enable anisotropic filtering for sharper icon at angles
+            if (THREE.SRGBColorSpace) {
+              try {
+                tex.colorSpace = THREE.SRGBColorSpace;
+              } catch (_) {}
+            }
             tex.anisotropy = 4;
             tex.minFilter = THREE.LinearMipmapLinearFilter;
             tex.magFilter = THREE.LinearFilter;
             tex.generateMipmaps = true;
             iconMat.map = tex;
             iconMat.needsUpdate = true;
+            doorGroup.userData._lastDoorIconPath = iconPath;
         });
       }
       
@@ -956,13 +964,100 @@ export class WallManager {
   }
 
   /**
+   * Door open/close/lock only changes `ds`. Wall line color (getWallColor) does not
+   * depend on `ds`, so rebuilding every PlaneGeometry + material forces shader
+   * recompilation and texture reload — a major frame spike (see profiler:
+   * getProgramInfoLog + texSubImage2D). Update only the door icon texture.
+   *
+   * @param {THREE.Group} group
+   * @param {WallDocument} doc
+   * @param {Object} changes
+   * @returns {boolean} true if handled
+   * @private
+   */
+  _refreshDoorIconOnly(group, doc, changes) {
+    const doorGroup = group?.children?.find((c) => c?.userData?.type === 'doorControl');
+    if (!doorGroup) return false;
+    const icon = doorGroup.userData?.icon;
+    const mat = icon?.material;
+    if (!mat) return false;
+
+    const iconPath = this.getDoorIconPath(doc, flattenWallUpdateChanges(changes));
+    if (doorGroup.userData._lastDoorIconPath === iconPath) return true;
+
+    doorGroup.userData._lastDoorIconPath = iconPath;
+    const prevMap = mat.map || null;
+    const loader = new THREE.TextureLoader();
+    loader.load(
+      iconPath,
+      (tex) => {
+        if (THREE.SRGBColorSpace) {
+          try {
+            tex.colorSpace = THREE.SRGBColorSpace;
+          } catch (_) {}
+        }
+        tex.anisotropy = 4;
+        tex.minFilter = THREE.LinearMipmapLinearFilter;
+        tex.magFilter = THREE.LinearFilter;
+        tex.generateMipmaps = true;
+        if (prevMap && prevMap !== tex) {
+          try {
+            prevMap.dispose();
+          } catch (_) {}
+        }
+        mat.map = tex;
+        mat.needsUpdate = true;
+      },
+      undefined,
+      () => {
+        doorGroup.userData._lastDoorIconPath = '';
+      }
+    );
+    return true;
+  }
+
+  /**
+   * True when `changes` includes a door state update but nothing that affects
+   * wall segment geometry, door type, or pass/sight/light/sound channels.
+   * Foundry often adds unrelated keys (flags, etc.) — those must not block the fast path.
+   *
+   * @param {Object} changes
+   * @returns {boolean}
+   * @private
+   */
+  _isDoorStateOnlyWallChange(changes) {
+    if (!changes || typeof changes !== 'object') return false;
+    if (!Object.prototype.hasOwnProperty.call(changes, 'ds')) return false;
+    const geomKeys = ['c', 'door', 'move', 'sight', 'light', 'sound'];
+    return !geomKeys.some((k) => Object.prototype.hasOwnProperty.call(changes, k));
+  }
+
+  /**
    * Update an existing wall
    * @param {WallDocument} doc - Foundry wall document
    * @param {Object} changes - Changed data
    */
   update(doc, changes) {
     log.debug(`WallManager.update called for ${doc.id}`, changes);
-    
+
+    const wallMapKey = doc?.id != null ? doc.id : null;
+    let wallGroup = null;
+    if (wallMapKey != null) {
+      wallGroup = this.walls.get(wallMapKey);
+      if (!wallGroup && typeof wallMapKey !== 'string') {
+        wallGroup = this.walls.get(String(wallMapKey));
+      }
+    }
+
+    if (isWallDoorStateOnlyUpdate(changes) && wallGroup) {
+      if (this._refreshDoorIconOnly(wallGroup, doc, changes)) {
+        if (!window.MapShine?.__debugSkipWallManagerUpdateLightingRefresh) {
+          this._requestLightingRefresh();
+        }
+        return;
+      }
+    }
+
     // Rebuild geometry if coordinates, type, or state changed
     // Check for undefined because 0 is a valid value for ds, move, sight
     const shouldUpdate = 
@@ -978,7 +1073,9 @@ export class WallManager {
       log.debug(`WallManager.update: Recreating wall ${doc.id}`);
       this.remove(doc.id);
       this.create(doc, changes);
-      this._requestLightingRefresh();
+      if (!window.MapShine?.__debugSkipWallManagerUpdateLightingRefresh) {
+        this._requestLightingRefresh();
+      }
     } else {
       log.debug(`WallManager.update: Update skipped for ${doc.id} (no relevant changes)`);
     }

@@ -136,6 +136,16 @@ export class UnifiedCameraController {
     this.state.y = stage.pivot.y;
     this.state.zoom = stage.scale.x || 1;
   }
+
+  /**
+   * Bridge capture temporarily mutates stage transform for extraction.
+   * Camera sync must ignore those transient values.
+   * @returns {boolean}
+   * @private
+   */
+  _isBridgeCaptureActive() {
+    return window?.MapShine?.__bridgeCaptureActive === true;
+  }
   
   /**
    * Read current camera state from Three.js camera
@@ -455,6 +465,7 @@ export class UnifiedCameraController {
    */
   syncFromPixi(source = 'pixi') {
     if (!this.enabled || this._updateLock) return;
+    if (this._isBridgeCaptureActive()) return;
     
     // Don't sync if we just pushed a change to PIXI
     if (this._lastChangeSource === 'three') {
@@ -524,6 +535,7 @@ export class UnifiedCameraController {
   update() {
     if (!this.enabled || this._updateLock) return;
     if (!canvas?.ready || !canvas?.stage) return;
+    if (this._isBridgeCaptureActive()) return;
     
     // Skip drift detection during cooldown period after user input
     // This prevents the sync from fighting with zoom/pan operations
@@ -726,6 +738,7 @@ export class UnifiedCameraController {
   _registerHooks() {
     // canvasPan fires when Foundry's native controls move the camera
     const panHookId = Hooks.on('canvasPan', (canvas, position) => {
+      if (this._isBridgeCaptureActive()) return;
       this.syncFromPixi('canvasPan');
     });
     this._hookIds.push({ name: 'canvasPan', id: panHookId });

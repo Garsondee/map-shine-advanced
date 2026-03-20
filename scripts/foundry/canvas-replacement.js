@@ -62,6 +62,8 @@ import { TileMotionManager } from '../scene/tile-motion-manager.js';
 import { SurfaceRegistry } from '../scene/surface-registry.js';
 import { WallManager } from '../scene/wall-manager.js';
 import { DoorMeshManager } from '../scene/DoorMeshManager.js';
+import { NoteIconManager } from '../scene/NoteIconManager.js';
+import { TemplateAdornmentManager } from '../scene/TemplateAdornmentManager.js';
 import { FloorStack } from '../scene/FloorStack.js';
 import { FloorLayerManager } from '../compositor-v2/FloorLayerManager.js';
 import { FilterEffectV2 } from '../compositor-v2/effects/FilterEffectV2.js';
@@ -165,6 +167,8 @@ let _inputArbitrationSettleDeadlineMs = 0;
 
 /** @type {number} */
 let _inputArbitrationStableFrames = 0;
+/** @type {number} */
+let _lastPersistentOverlayRefreshMs = 0;
 
 /** @type {boolean} */
 let _inputArbitrationDomNudgesInstalled = false;
@@ -4359,6 +4363,8 @@ async function createThreeCanvas(scene) {
     effectComposer.addUpdatable(doorMeshManager);
     effectComposer.addUpdatable(gridRenderer);
     if (window.MapShine) window.MapShine.doorMeshManager = doorMeshManager;
+    if (window.MapShine) window.MapShine.noteManager = null;
+    if (window.MapShine) window.MapShine.templateManager = null;
     console.log(' -> Manager: Lightweight batch DONE');
     log.info('Parallel manager batch initialized (Door, MapPoints, Grid)');
 
@@ -6330,6 +6336,18 @@ function destroyThreeCanvas() {
     log.debug('Drawing manager disposed');
   }
 
+  if (noteManager) {
+    noteManager.dispose();
+    noteManager = null;
+    log.debug('Note icon manager disposed');
+  }
+
+  if (templateManager) {
+    templateManager.dispose();
+    templateManager = null;
+    log.debug('Template adornment manager disposed');
+  }
+
   
 
   
@@ -6831,11 +6849,15 @@ function _enforceGameplayPixiSuppression() {
       tilesEditContext || drawingsEditContext || soundsEditContext
       || templatesEditContext || notesEditContext || regionsEditContext
       || lightingEditContext;
+    const useNativePersistentPixiOverlays = window?.MapShine?.__useNativePersistentPixiOverlays === true;
     const hasPersistentPixiOverlays =
+      ((Number(canvas?.scene?.drawings?.size) || 0) > 0) ||
       ((Number(canvas?.scene?.notes?.size) || 0) > 0) ||
       ((Number(canvas?.scene?.templates?.size) || 0) > 0) ||
+      !!canvas?.drawings?.placeables?.length ||
       !!canvas?.notes?.placeables?.length ||
       !!canvas?.templates?.placeables?.length;
+    const nativeOverlayShouldStayVisible = useNativePersistentPixiOverlays && hasPersistentPixiOverlays;
     // Walls and tokens are fully Three.js-native now.
     // Lighting icons are PIXI-native (captured by bridge when editing).
     // Only need the PIXI overlay for unreplaced layers (drawings, regions,
@@ -6846,7 +6868,7 @@ function _enforceGameplayPixiSuppression() {
     // This prevents destructive misroutes (e.g. ambient-sound move becoming a
     // new placement because Three receives the drag).
     const shouldPixiReceiveInputEffective = shouldPixiReceiveInput || pixiEditContextFallback;
-    const needsEditorOverlay = shouldPixiReceiveInputEffective || hasPersistentPixiOverlays;
+    const needsEditorOverlay = shouldPixiReceiveInputEffective || nativeOverlayShouldStayVisible;
     const isDrawingsContext = drawingsEditContext;
 
     if (window.MapShine) {
@@ -6858,11 +6880,11 @@ function _enforceGameplayPixiSuppression() {
     if (needsEditorOverlay) {
       const pixiCanvas = canvas.app?.view;
       const threeCanvas = document.getElementById('map-shine-canvas');
-      // IMPORTANT: keep PIXI visually present only while the user is actively in
-      // a PIXI-driven edit/input context. If overlay mode is enabled solely due
-      // to persistent scene docs (notes/templates), showing board at opacity=1 can
-      // occlude the Three frame with a flat/partial PIXI render during scene init.
-      const pixiVisualOpacity = shouldPixiReceiveInputEffective ? '1' : '0';
+      // Persistent overlays (drawings/notes/templates) should remain visible in
+      // gameplay/default token mode just like native Foundry expectations.
+      // Keep PIXI overlay visually on whenever we have persistent PIXI overlay
+      // documents, not only during active PIXI edit tool contexts.
+      const pixiVisualOpacity = (shouldPixiReceiveInputEffective || nativeOverlayShouldStayVisible) ? '1' : '0';
       if (canvas.app?.renderer?.background) {
         canvas.app.renderer.background.alpha = 0;
       }
@@ -7104,7 +7126,104 @@ function _enforceGameplayPixiSuppression() {
         }
       }
     }, 'pixiSuppress.tiles', Severity.COSMETIC);
+
+    // Keep persistent note/template adornments (icons + labels) visible even
+    // when their native layer is not the active edit layer.
+    safeCall(() => {
+      _enforcePersistentOverlayAdornments();
+    }, 'pixiSuppress.persistentOverlayAdornments', Severity.COSMETIC);
   }, 'enforceGameplayPixiSuppression', Severity.COSMETIC);
+}
+
+/**
+ * Force persistent PIXI overlay adornments visible for notes/templates.
+ * Foundry often hides these when their layer is inactive, but gameplay mode
+ * expects them to remain visible like drawings.
+ * @private
+ */
+function _enforcePersistentOverlayAdornments() {
+  // Native-behavior mode: do not force notes/templates adornments outside their
+  // normal Foundry lifecycle unless explicitly requested for diagnostics.
+  if (window?.MapShine?.__forcePersistentOverlayAdornments !== true) return;
+  if (!canvas?.ready) return;
+
+  const forceVisible = (obj) => {
+    if (!obj) return;
+    try { obj.visible = true; } catch (_) {}
+    try { obj.renderable = true; } catch (_) {}
+    try {
+      const a = Number(obj.alpha);
+      if (!Number.isFinite(a) || a <= 0) obj.alpha = 1;
+    } catch (_) {}
+  };
+
+  const touchNote = (note) => {
+    if (!note) return;
+    forceVisible(note);
+    forceVisible(note.icon);
+    forceVisible(note.controlIcon);
+    forceVisible(note.tooltip);
+  };
+
+  const touchTemplate = (tpl) => {
+    if (!tpl) return;
+    forceVisible(tpl);
+    forceVisible(tpl.icon);
+    forceVisible(tpl.controlIcon);
+    forceVisible(tpl.ruler);
+    forceVisible(tpl.rulerText);
+    forceVisible(tpl.tooltip);
+  };
+
+  try {
+    if (canvas.notes) {
+      canvas.notes.visible = true;
+      canvas.notes.renderable = true;
+      const noteObjs = [
+        ...(Array.isArray(canvas.notes.placeables) ? canvas.notes.placeables : []),
+        ...(Array.isArray(canvas.notes.objects?.children) ? canvas.notes.objects.children : []),
+      ];
+      for (const n of noteObjs) touchNote(n);
+    }
+  } catch (_) {}
+
+  try {
+    if (canvas.templates) {
+      canvas.templates.visible = true;
+      canvas.templates.renderable = true;
+      const templateObjs = [
+        ...(Array.isArray(canvas.templates.placeables) ? canvas.templates.placeables : []),
+        ...(Array.isArray(canvas.templates.objects?.children) ? canvas.templates.objects.children : []),
+      ];
+      for (const t of templateObjs) touchTemplate(t);
+    }
+  } catch (_) {}
+
+  const now = performance.now();
+  if ((now - _lastPersistentOverlayRefreshMs) < 350) return;
+  _lastPersistentOverlayRefreshMs = now;
+
+  // Force Foundry to refresh native runtime visuals (icon/ruler text/field
+  // clipping) even when notes/templates controls are not active.
+  try {
+    for (const note of canvas?.notes?.placeables || []) {
+      if (!note) continue;
+      if (typeof note.refresh === 'function') note.refresh();
+      if (typeof note.draw === 'function' && !note.icon && !note.controlIcon) {
+        void note.draw();
+      }
+    }
+  } catch (_) {}
+
+  try {
+    for (const tpl of canvas?.templates?.placeables || []) {
+      if (!tpl) continue;
+      if (typeof tpl.refresh === 'function') tpl.refresh();
+      if (typeof tpl.draw === 'function' && !tpl.field && !tpl.highlight && !tpl.rulerText) {
+        void tpl.draw();
+      }
+    }
+  } catch (_) {}
 }
 
 /**
@@ -7228,6 +7347,7 @@ function updateLayerVisibility() {
   // gameplay overlays, not only while their controls are actively selected.
   if (canvas.notes) canvas.notes.visible = true;
   if (canvas.templates) canvas.templates.visible = true;
+  _enforcePersistentOverlayAdornments();
 
   // 2. Dynamic Layers - Show only if using the corresponding tool
   const activeLayerObj = canvas.activeLayer;

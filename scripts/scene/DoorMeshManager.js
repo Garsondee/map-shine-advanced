@@ -38,6 +38,15 @@ const DOOR_STYLES = Object.freeze({
   DOUBLE_RIGHT: 'doubleR'
 });
 
+/** Keep in sync with FogOfWarEffectV2.normalizeWallDoorAnimationType */
+function normalizeDoorAnimationType(raw) {
+  if (raw === undefined || raw === null) return 'swing';
+  const s = String(raw).trim().toLowerCase();
+  if (!s) return 'swing';
+  if (s === 'sliding') return 'slide';
+  return s;
+}
+
 // In V2, FloorRenderBus uses per-floor render-order bands.
 // Keep doors above regular floor albedo but BELOW overhead tiles.
 const RENDER_ORDER_PER_FLOOR = 10000;
@@ -77,7 +86,7 @@ class DoorMesh {
     
     // Animation config with defaults
     this.animation = {
-      type: animation?.type || 'swing',
+      type: normalizeDoorAnimationType(animation?.type),
       direction: animation?.direction ?? 1,
       double: animation?.double ?? false,
       duration: animation?.duration ?? 500,
@@ -436,6 +445,17 @@ class DoorMesh {
  */
 export class DoorMeshManager {
   /**
+   * Wall ids must be string keys so lookups match FogOfWarEffectV2 and other callers
+   * that use `String(doc.id)` (numeric ids would otherwise miss in Map.get).
+   * @param {string|number|null|undefined} id
+   * @returns {string}
+   */
+  static wallKey(id) {
+    if (id === undefined || id === null) return '';
+    return String(id);
+  }
+
+  /**
    * @param {THREE.Scene} scene
    * @param {THREE.Camera} camera
    */
@@ -494,7 +514,7 @@ export class DoorMeshManager {
     
     // Wall deleted - remove door meshes
     this._hookIds.push(['deleteWall', Hooks.on('deleteWall', (doc) => {
-      this._destroyDoorMeshes(doc.id);
+      this._destroyDoorMeshes(DoorMeshManager.wallKey(doc.id));
     })]);
   }
   
@@ -553,7 +573,7 @@ export class DoorMeshManager {
    */
   async _createDoorMeshes(doc) {
     // First destroy any existing meshes for this wall
-    this._destroyDoorMeshes(doc.id);
+    this._destroyDoorMeshes(DoorMeshManager.wallKey(doc.id));
     
     if (!this._hasDoorMesh(doc)) return;
     
@@ -599,7 +619,7 @@ export class DoorMeshManager {
         meshSet.add(doorMesh);
       }
       
-      this.doorMeshes.set(doc.id, meshSet);
+      this.doorMeshes.set(DoorMeshManager.wallKey(doc.id), meshSet);
       log.debug(`Created ${styles.length} door mesh(es) for wall ${doc.id}`);
       
     } catch (err) {
@@ -639,7 +659,7 @@ export class DoorMeshManager {
    * @param {Object} changes
    */
   _handleWallUpdate(doc, changes) {
-    const meshSet = this.doorMeshes.get(doc.id);
+    const meshSet = this.doorMeshes.get(DoorMeshManager.wallKey(doc.id));
     
     // Check if we need to recreate meshes (animation config changed)
     const needsRecreate = 
@@ -700,14 +720,15 @@ export class DoorMeshManager {
    * @param {string} wallId
    */
   _destroyDoorMeshes(wallId) {
-    const meshSet = this.doorMeshes.get(wallId);
+    const key = DoorMeshManager.wallKey(wallId);
+    const meshSet = this.doorMeshes.get(key);
     if (!meshSet) return;
     
     for (const doorMesh of meshSet) {
       doorMesh.dispose();
     }
     
-    this.doorMeshes.delete(wallId);
+    this.doorMeshes.delete(key);
     log.debug(`Destroyed door meshes for wall ${wallId}`);
   }
   

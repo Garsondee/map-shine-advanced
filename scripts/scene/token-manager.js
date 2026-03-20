@@ -33,8 +33,14 @@ const TOKEN_BASE_Z_V2 = 1003.0;
 
 // Keep in sync with FloorRenderBus floor render-order layout.
 const RENDER_ORDER_PER_FLOOR = 10000;
-// Tokens should render above floor overlays on the same floor.
+// Tokens at/above scene foregroundElevation (same threshold as overhead tiles in
+// tile-manager) draw here — above overhead bus albedo (5000..9800) and same-floor
+// effects keyed to token order.
 const TOKEN_RENDER_ORDER_WITHIN_FLOOR = 9900;
+// Sub-foreground tokens: above regular bus tiles (sort cap 4800) but below overhead
+// offset (5000) so roof/overhead albedo occludes them. Below fire/dust batch slots
+// (~4998–4999) so foot-level particles still read naturally.
+const TOKEN_GROUND_BELOW_OVERHEAD_RENDER_ORDER = 4940;
 
 /**
  * TokenManager - Synchronizes Foundry VTT tokens to THREE.js sprites
@@ -709,8 +715,24 @@ vec3 ms_applySceneLighting(vec3 color) {
   }
 
   /**
-   * Apply deterministic token renderOrder in V2 so tokens stay above same-floor
-   * floor overlays even when transparent sorting uses renderOrder first.
+   * Scene foreground elevation (Foundry). Matches tile-manager overhead fallback:
+   * tiles at or above this are overhead; token renderOrder uses the same split.
+   * @returns {number}
+   * @private
+   */
+  _resolveSceneForegroundElevation() {
+    try {
+      const fe = Number(canvas?.scene?.foregroundElevation);
+      return Number.isFinite(fe) ? fe : 0;
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  /**
+   * Apply deterministic token renderOrder in V2. Uses scene foregroundElevation:
+   * ground-band tokens sort below overhead bus albedo; at/above that threshold they
+   * use the legacy above-overlays slot (balconies, flying tokens).
    * @param {THREE.Sprite} sprite
    * @param {object} tokenDoc
    * @private
@@ -718,7 +740,14 @@ vec3 ms_applySceneLighting(vec3 color) {
   _applyV2TokenRenderOrder(sprite, tokenDoc) {
     if (!sprite || !this._getV2BusScene()) return;
     const floorIndex = this._resolveTokenFloorIndex(tokenDoc);
-    sprite.renderOrder = (floorIndex * RENDER_ORDER_PER_FLOOR) + TOKEN_RENDER_ORDER_WITHIN_FLOOR;
+    const floorBase = floorIndex * RENDER_ORDER_PER_FLOOR;
+    const rawElev = tokenDoc?.elevation ?? tokenDoc?.document?.elevation ?? 0;
+    const tokenElev = Number.isFinite(Number(rawElev)) ? Number(rawElev) : 0;
+    const fgElev = this._resolveSceneForegroundElevation();
+    const slot = (tokenElev >= fgElev)
+      ? TOKEN_RENDER_ORDER_WITHIN_FLOOR
+      : TOKEN_GROUND_BELOW_OVERHEAD_RENDER_ORDER;
+    sprite.renderOrder = floorBase + slot;
   }
 
   /**

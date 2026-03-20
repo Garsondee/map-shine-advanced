@@ -375,6 +375,15 @@ export class DistortionManager {
     this._tempNdc = null;
     this._tempWorld = null;
     this._tempDir = null;
+
+    /** @type {string} Signature of the last camera/view state used for aux passes */
+    this._lastAuxPassSig = '';
+    /** @type {boolean} */
+    this._hasRenderedWaterOccluder = false;
+    /** @type {boolean} */
+    this._hasRenderedFloorPresence = false;
+    /** @type {boolean} */
+    this._hasRenderedBelowFloorPresence = false;
     
     // Global parameters
     this.params = {
@@ -2822,11 +2831,81 @@ export class DistortionManager {
   /**
    * Render the distortion effect
    */
+  _getAuxPassSignature() {
+    const t = canvas?.stage?.worldTransform ?? null;
+    const q = (n, m = 1000) => Math.round(((Number.isFinite(n) ? n : 0) * m)) / m;
+    const stageSig = t
+      ? `${q(t.a)}|${q(t.b)}|${q(t.c)}|${q(t.d)}|${q(t.tx)}|${q(t.ty)}`
+      : 'none';
+
+    const cam = this.mainCamera;
+    const camSig = cam
+      ? `${q(cam.position?.x)}|${q(cam.position?.y)}|${q(cam.position?.z)}|${q(cam.zoom, 10000)}`
+      : 'none';
+
+    const levelCtx = window.MapShine?.activeLevelContext;
+    const floorSig = levelCtx
+      ? `${Number(levelCtx.bottom) || 0}:${Number(levelCtx.top) || 0}`
+      : 'none';
+
+    const dpr = Number(window.devicePixelRatio) || 1;
+    const w = Number(this.readBuffer?.width) || 0;
+    const h = Number(this.readBuffer?.height) || 0;
+
+    return `${stageSig}|${camSig}|${floorSig}|${q(dpr, 100)}|${w}x${h}`;
+  }
+
   render(renderer, scene, camera) {
     if (!this.enabled || !this.readBuffer) return;
 
+    const perf = window?.MapShine
+      ? (window.MapShine.__distortionPerfStats ||= {
+          frames: 0,
+          earlyPassThrough: 0,
+          waterAuxPassFrames: 0,
+          floorPresenceFallbackFrames: 0,
+          belowFloorPresenceFallbackFrames: 0,
+          fullApplyFrames: 0,
+          last: null,
+        })
+      : null;
+    if (perf) perf.frames += 1;
+
+    // Fast early-out: if no active source contributes and no below-floor water
+    // mask is available, skip all auxiliary render passes and just blit through.
+    let hasActiveSources = false;
+    for (const source of this.sources.values()) {
+      if (source?.enabled && source?.mask) {
+        hasActiveSources = true;
+        break;
+      }
+    }
+    const _compositor = window.MapShine?.sceneComposer?._sceneMaskCompositor;
+    const belowWaterTex = _compositor?.getBelowFloorTexture?.('water') ?? null;
+    const hasBelowWaterMask = !!belowWaterTex;
+    if (!hasActiveSources && !hasBelowWaterMask) {
+      if (perf) {
+        perf.earlyPassThrough += 1;
+        perf.last = 'passThrough:no-active-sources';
+      }
+      this._passThrough(renderer);
+      return;
+    }
+
+    const waterSource = this.sources.get('water');
+    const waterSourceActive = !!(waterSource?.enabled && waterSource?.mask);
+    const needsWaterAuxPasses = waterSourceActive || hasBelowWaterMask;
+    const auxSig = this._getAuxPassSignature();
+    const auxStateChanged = auxSig !== this._lastAuxPassSig;
+    if (auxStateChanged) this._lastAuxPassSig = auxSig;
+
     // Render screen-space occluder alpha for water (tile layer 22)
-    this._renderWaterOccluders(renderer, scene);
+    // only when water is actually participating in this frame.
+    if (needsWaterAuxPasses && (auxStateChanged || !this._hasRenderedWaterOccluder)) {
+      if (perf) perf.waterAuxPassFrames += 1;
+      this._renderWaterOccluders(renderer, scene);
+      this._hasRenderedWaterOccluder = true;
+    }
 
     // Prefer world-space floor alpha from the GPU compositor over the per-frame
     // screen-space mesh renders (layers 23/24). The compositor bakes floor alpha
@@ -2840,7 +2919,6 @@ export class DistortionManager {
     // would bind the upper floor's floorAlpha as floorPresence, causing
     // waterVisible=0 under the upper floor tile footprint and killing ground-floor
     // water tint/caustics in that region.
-    const _compositor = window.MapShine?.sceneComposer?._sceneMaskCompositor;
     const _levelCtx   = window.MapShine?.activeLevelContext;
     const _playerKey  = (_levelCtx && Number.isFinite(Number(_levelCtx.bottom)) && Number.isFinite(Number(_levelCtx.top)))
       ? `${Number(_levelCtx.bottom)}:${Number(_levelCtx.top)}`
@@ -2853,29 +2931,37 @@ export class DistortionManager {
 
     // Render floor-presence alpha for current floor (tile layer 23) — only when
     // the world-space compositor alpha is unavailable.
-    if (!this._wsFloorAlphaTex) this._renderFloorPresence(renderer, scene);
+    if (needsWaterAuxPasses && !this._wsFloorAlphaTex && (auxStateChanged || !this._hasRenderedFloorPresence)) {
+      if (perf) perf.floorPresenceFallbackFrames += 1;
+      this._renderFloorPresence(renderer, scene);
+      this._hasRenderedFloorPresence = true;
+    }
 
     // Render below-floor-presence alpha for levelsHidden tiles (tile layer 24) —
     // only when the world-space below-floor alpha is unavailable.
-    if (!this._wsBefloorAlphaTex) this._renderBelowFloorPresence(renderer, scene);
+    if (needsWaterAuxPasses && !this._wsBefloorAlphaTex && (auxStateChanged || !this._hasRenderedBelowFloorPresence)) {
+      if (perf) perf.belowFloorPresenceFallbackFrames += 1;
+      this._renderBelowFloorPresence(renderer, scene);
+      this._hasRenderedBelowFloorPresence = true;
+    }
 
     const u = this.compositeMaterial?.uniforms;
     const au = this.applyMaterial?.uniforms;
     if (u) {
-      u.tWaterOccluderAlpha.value = this.waterOccluderTarget?.texture ?? null;
-      u.uHasWaterOccluderAlpha.value = this.waterOccluderTarget ? 1.0 : 0.0;
+      u.tWaterOccluderAlpha.value = needsWaterAuxPasses ? (this.waterOccluderTarget?.texture ?? null) : null;
+      u.uHasWaterOccluderAlpha.value = (needsWaterAuxPasses && this.waterOccluderTarget) ? 1.0 : 0.0;
     }
     if (au) {
-      au.tWaterOccluderAlpha.value = this.waterOccluderTarget?.texture ?? null;
-      au.uHasWaterOccluderAlpha.value = this.waterOccluderTarget ? 1.0 : 0.0;
+      au.tWaterOccluderAlpha.value = needsWaterAuxPasses ? (this.waterOccluderTarget?.texture ?? null) : null;
+      au.uHasWaterOccluderAlpha.value = (needsWaterAuxPasses && this.waterOccluderTarget) ? 1.0 : 0.0;
       if (au.tFloorPresence) {
         // Use world-space floor alpha when the compositor has it ready; the shader
         // will convert screen UV → scene UV via screenUvToFoundry/foundryToSceneUv.
         // Fall back to the per-frame screen-space RT otherwise.
-        const fpTex = this._wsFloorAlphaTex ?? this.floorPresenceTarget?.texture ?? null;
+        const fpTex = needsWaterAuxPasses ? (this._wsFloorAlphaTex ?? this.floorPresenceTarget?.texture ?? null) : null;
         au.tFloorPresence.value           = fpTex;
         au.uHasFloorPresence.value        = fpTex ? 1.0 : 0.0;
-        au.uFloorPresenceIsWorldSpace.value = this._wsFloorAlphaTex ? 1.0 : 0.0;
+        au.uFloorPresenceIsWorldSpace.value = (needsWaterAuxPasses && this._wsFloorAlphaTex) ? 1.0 : 0.0;
       }
       // When the player is on an upper floor, swap tWaterMask to the patched
       // version from the compositor cache. The patched mask has upper floor tile
@@ -2914,20 +3000,8 @@ export class DistortionManager {
         au.uBelowFloorPresenceIsWorldSpace.value = this._wsBefloorAlphaTex ? 1.0 : 0.0;
       }
       if (au.tBelowWaterMask !== undefined) {
-        // Look up the below-floor's compositor water RT via the cached floor key.
-        const compositor = window.MapShine?.sceneComposer?._sceneMaskCompositor;
-        const bwTex = compositor?.getBelowFloorTexture?.('water') ?? null;
-        au.tBelowWaterMask.value    = bwTex;
-        au.uHasBelowWaterMask.value = bwTex ? 1.0 : 0.0;
-      }
-    }
-    
-    // Check if any sources are active
-    let hasActiveSources = false;
-    for (const source of this.sources.values()) {
-      if (source.enabled && source.mask) {
-        hasActiveSources = true;
-        break;
+        au.tBelowWaterMask.value    = belowWaterTex;
+        au.uHasBelowWaterMask.value = hasBelowWaterMask ? 1.0 : 0.0;
       }
     }
 
@@ -2935,12 +3009,13 @@ export class DistortionManager {
     // Without this, on a clean upper floor (no water/fire/heat of its own),
     // the pass would be skipped entirely and floor-0 water tint/caustics would
     // never show through floor-1 gaps even though tBelowWaterMask is non-null.
-    if (!hasActiveSources && au?.uHasBelowWaterMask?.value > 0.5) {
+    if (!hasActiveSources && hasBelowWaterMask) {
       hasActiveSources = true;
     }
     
     // If no active sources, just pass through
     if (!hasActiveSources) {
+      if (perf) perf.last = 'passThrough:no-post-sources';
       this._passThrough(renderer);
       return;
     }
@@ -2958,6 +3033,10 @@ export class DistortionManager {
     renderer.setRenderTarget(target);
     if (target) renderer.clear();
     renderer.render(this.applyScene, this.blurCamera);
+    if (perf) {
+      perf.fullApplyFrames += 1;
+      perf.last = 'apply';
+    }
   }
 
   /**

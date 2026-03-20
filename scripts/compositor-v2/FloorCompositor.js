@@ -1252,37 +1252,111 @@ export class FloorCompositor {
    */
   wantsContinuousRender() {
     try {
+      let reason = 'none';
+      const hasVisibleOverlay = (effect) => {
+        const overlays = effect?._overlays;
+        if (!(overlays instanceof Map) || overlays.size <= 0) return false;
+        for (const entry of overlays.values()) {
+          if (entry?.mesh?.visible !== false) return true;
+        }
+        return false;
+      };
       // Animated shader overlay: if any fluid overlays exist, we need continuous
       // render so uTime advances and the effect animates.
       const fluid = this._fluidEffect;
-      if (fluid?.enabled && (fluid?._overlays?.size ?? 0) > 0) return true;
+      if (fluid?.enabled && fluid?.params?.enabled !== false && hasVisibleOverlay(fluid)) {
+        reason = 'fluid:overlays';
+        if (window.MapShine) window.MapShine.__v2ContinuousRenderReason = reason;
+        return true;
+      }
       const iridescence = this._iridescenceEffect;
-      if (iridescence?.enabled && (iridescence?._overlays?.size ?? 0) > 0) return true;
+      if (iridescence?.enabled && iridescence?.params?.enabled !== false && hasVisibleOverlay(iridescence)) {
+        reason = 'iridescence:overlays';
+        if (window.MapShine) window.MapShine.__v2ContinuousRenderReason = reason;
+        return true;
+      }
       const prism = this._prismEffect;
-      if (prism?.enabled && (prism?._overlays?.size ?? 0) > 0) return true;
+      if (prism?.enabled && prism?.params?.enabled !== false && hasVisibleOverlay(prism)) {
+        reason = 'prism:overlays';
+        if (window.MapShine) window.MapShine.__v2ContinuousRenderReason = reason;
+        return true;
+      }
       const bush = this._bushEffect;
-      if (bush?.enabled && (bush?._overlays?.size ?? 0) > 0) return true;
+      if (bush?.enabled && bush?.params?.enabled !== false && hasVisibleOverlay(bush)) {
+        reason = 'bush:overlays';
+        if (window.MapShine) window.MapShine.__v2ContinuousRenderReason = reason;
+        return true;
+      }
       const tree = this._treeEffect;
-      if (tree?.enabled && (tree?._overlays?.size ?? 0) > 0) return true;
+      if (tree?.enabled && tree?.params?.enabled !== false && hasVisibleOverlay(tree)) {
+        reason = 'tree:overlays';
+        if (window.MapShine) window.MapShine.__v2ContinuousRenderReason = reason;
+        return true;
+      }
       const fire = this._fireEffect;
-      if (fire?.enabled && fire._activeFloors?.size > 0) return true;
+      if (fire?.enabled && fire._activeFloors?.size > 0) {
+        reason = 'fire:active-floors';
+        if (window.MapShine) window.MapShine.__v2ContinuousRenderReason = reason;
+        return true;
+      }
       const dust = this._dustEffect;
-      if (dust?.enabled && dust._activeFloors?.size > 0) return true;
+      if (dust?.enabled && dust._activeFloors?.size > 0) {
+        reason = 'dust:active-floors';
+        if (window.MapShine) window.MapShine.__v2ContinuousRenderReason = reason;
+        return true;
+      }
       const splash = this._waterSplashesEffect;
-      if (splash?.enabled && splash._activeFloors?.size > 0) return true;
+      if (splash?.enabled && splash._activeFloors?.size > 0) {
+        reason = 'splashes:active-floors';
+        if (window.MapShine) window.MapShine.__v2ContinuousRenderReason = reason;
+        return true;
+      }
       const flies = this._smellyFliesEffect;
-      if (flies?.enabled && (flies?.flySystems?.size ?? 0) > 0) return true;
+      if (flies?.enabled && (flies?.flySystems?.size ?? 0) > 0) {
+        reason = 'flies:systems';
+        if (window.MapShine) window.MapShine.__v2ContinuousRenderReason = reason;
+        return true;
+      }
       const lightning = this._lightningEffect;
-      if (lightning?.enabled && lightning?.wantsContinuousRender?.()) return true;
+      if (lightning?.enabled && lightning?.wantsContinuousRender?.()) {
+        reason = 'lightning:wants-continuous';
+        if (window.MapShine) window.MapShine.__v2ContinuousRenderReason = reason;
+        return true;
+      }
       const candles = this._candleFlamesEffect;
-      if (candles?.enabled && ((candles?._sourceFlameCount ?? 0) > 0 || (candles?._glowBuckets?.size ?? 0) > 0)) return true;
+      if (candles?.enabled && ((candles?._sourceFlameCount ?? 0) > 0 || (candles?._glowBuckets?.size ?? 0) > 0)) {
+        reason = 'candles:active-sources';
+        if (window.MapShine) window.MapShine.__v2ContinuousRenderReason = reason;
+        return true;
+      }
       const playerLight = this._playerLightEffect;
-      if (playerLight?.enabled && playerLight?.params?.enabled) return true;
+      const playerLightActive = !!(
+        playerLight?.enabled
+        && playerLight?.params?.enabled
+        && (
+          playerLight?._torchWasActiveLastFrame === true
+          || ((Number(playerLight?._flashlightFinalIntensity) || 0) > 1e-4)
+          || playerLight?._torchParticleSystem?.emitter?.visible === true
+          || playerLight?._torchSparksSystem?.emitter?.visible === true
+          || playerLight?._flashlightBeamMesh?.visible === true
+        )
+      );
+      if (playerLightActive) {
+        reason = 'playerLight:active';
+        if (window.MapShine) window.MapShine.__v2ContinuousRenderReason = reason;
+        return true;
+      }
       const lens = this._lensEffect;
-      if (lens?.enabled && ((Number(lens?.params?.grainAmount) || 0) > 0) && ((Number(lens?.params?.grainSpeed) || 0) > 0)) return true;
+      if (lens?.enabled && ((Number(lens?.params?.grainAmount) || 0) > 0) && ((Number(lens?.params?.grainSpeed) || 0) > 0)) {
+        reason = 'lens:grain';
+        if (window.MapShine) window.MapShine.__v2ContinuousRenderReason = reason;
+        return true;
+      }
+      if (window.MapShine) window.MapShine.__v2ContinuousRenderReason = reason;
       return false;
     } catch (_) {
       // Fail safe: if anything about the probe throws, treat as active.
+      if (window.MapShine) window.MapShine.__v2ContinuousRenderReason = 'probe-error';
       return true;
     }
   }
@@ -1880,19 +1954,23 @@ export class FloorCompositor {
 
     // Capture overhead tile alpha + compute soft shadow factor (V1 signature)
     if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: overheadShadows.render'); } catch (_) {} }
+    if (_profiling) _profileT0 = performance.now();
     try {
       this._overheadShadowEffect?.render?.(this.renderer, this._renderBus._scene, this.camera);
     } catch (err) {
       log.warn('OverheadShadowsEffectV2 render threw, skipping overhead shadow pass:', err);
     }
+    if (_profiling) this._recordPassTiming('overheadShadowsRender', _profileT0);
     if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: overheadShadows.render DONE'); } catch (_) {} }
 
     if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: buildingShadows.render'); } catch (_) {} }
+    if (_profiling) _profileT0 = performance.now();
     try {
       this._buildingShadowEffect?.render?.(this.renderer, this.camera);
     } catch (err) {
       log.warn('BuildingShadowsEffectV2 render threw, skipping building shadow pass:', err);
     }
+    if (_profiling) this._recordPassTiming('buildingShadowsRender', _profileT0);
     if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: buildingShadows.render DONE'); } catch (_) {} }
 
     // Runtime tile opacity already synced before shadow capture above. Keep the
@@ -2058,7 +2136,9 @@ export class FloorCompositor {
       // Only advance currentInput when the pass actually ran — otherwise waterOutput
       // is an unwritten (black) RT and advancing would black out the entire scene.
       if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: water.render'); } catch (_) {} }
+      if (_profiling) _profileT0 = performance.now();
       const waterWrote = this._waterEffect.render(this.renderer, this.camera, currentInput, waterOutput, occluderRT);
+      if (_profiling) this._recordPassTiming('waterRender', _profileT0);
       if (waterWrote) currentInput = waterOutput;
       if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: water.render DONE'); } catch (_) {} }
     }
@@ -2070,7 +2150,9 @@ export class FloorCompositor {
       const distOutput = (currentInput === this._postA) ? this._postB : this._postA;
       this._distortionEffect.setBuffers(currentInput, distOutput);
       this._distortionEffect.setRenderToScreen(false);
+      if (_profiling) _profileT0 = performance.now();
       this._distortionEffect.render(this.renderer, this._renderBus?._scene ?? this.scene, this.camera);
+      if (_profiling) this._recordPassTiming('distortionRender', _profileT0);
       currentInput = distOutput;
     }
     if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: distortion.render DONE'); } catch (_) {} }
@@ -2661,6 +2743,49 @@ export class FloorCompositor {
     if (!dist) return;
 
     const fire = this._fireEffect;
+    // Root-cause guard: a non-null fire mask texture can exist even when there are
+    // no active fire systems on the currently-visible band.
+    // In that state, leaving heat enabled forces DistortionManager to run its
+    // expensive full-screen apply every frame even when the active-frame heat
+    // mask has no meaningful contribution (e.g. all-zero masks).
+    const fireActiveFloorCount = Number(fire?._activeFloors?.size);
+    const fireHasActiveFloors = Number.isFinite(fireActiveFloorCount) && fireActiveFloorCount > 0;
+    if (!fireHasActiveFloors) {
+      dist.setSourceEnabled('heat', false);
+      return;
+    }
+
+    // Prefer checking whether the ACTIVE floor band has any fire systems.
+    // FireEffectV2 deactivates systems from the BatchedRenderer but keeps the
+    // per-floor arrays resident, so "any systems anywhere" is not enough to
+    // decide whether heat should run this frame.
+    let hasSystemsOnActiveBand = null;
+    try {
+      const activeFloor = window.MapShine?.floorStack?.getActiveFloor?.() ?? null;
+      const activeIdx = activeFloor && Number.isFinite(Number(activeFloor.index)) ? Number(activeFloor.index) : null;
+      if (activeIdx !== null) {
+        const state = fire?._floorStates?.get(activeIdx) ?? null;
+        hasSystemsOnActiveBand = this._fireEffectHasSystemsInState(state);
+      }
+    } catch (_) {
+      // Fall back to broader checks below.
+    }
+
+    if (hasSystemsOnActiveBand === false) {
+      dist.setSourceEnabled('heat', false);
+      return;
+    }
+
+    // If we couldn't resolve active-band state, fall back to whether there are
+    // any fire systems at all (legacy safety net).
+    if (hasSystemsOnActiveBand === null) {
+      const fireHasAnySystems = this._fireEffectHasAnySystems(fire);
+      if (!fireHasAnySystems) {
+        dist.setSourceEnabled('heat', false);
+        return;
+      }
+    }
+
     const fireParams = fire?.params ?? null;
     const fireEnabled = !!(fire?.enabled && fireParams?.enabled !== false && fireParams?.heatDistortionEnabled !== false);
     if (!fireEnabled) {
@@ -2675,8 +2800,10 @@ export class FloorCompositor {
     const activeKey = (Number.isFinite(b) && Number.isFinite(t)) ? `${b}:${t}` : null;
 
     let fireMask = null;
+    let fireMaskSource = 'none';
     if (compositor && activeKey) {
       fireMask = compositor.getFloorTexture?.(activeKey, 'fire') ?? null;
+      if (fireMask) fireMaskSource = 'compositor-active';
     }
     if (!fireMask && compositor && Number.isFinite(b) && Number.isFinite(t)) {
       // In levels-inferred contexts, activeLevelContext keys may be fractional and
@@ -2703,24 +2830,40 @@ export class FloorCompositor {
       }
       if (bestKey) {
         fireMask = compositor.getFloorTexture?.(bestKey, 'fire') ?? null;
+        if (fireMask) fireMaskSource = 'compositor-best';
       }
     }
     if (!fireMask) {
       fireMask = compositor?.getGroundFloorMaskTexture?.('fire') ?? null;
+      if (fireMask) fireMaskSource = 'compositor-ground';
     }
     if (!fireMask) {
       fireMask = window.MapShine?.effectMaskRegistry?.getSlot?.('fire')?.texture ?? null;
+      if (fireMask) fireMaskSource = 'registry-slot';
     }
     if (!fireMask) {
       fireMask = window.MapShine?.sceneComposer?.currentBundle?.masks?.find?.(
         (m) => (m?.id === 'fire' || m?.type === 'fire')
       )?.texture ?? null;
+      if (fireMask) fireMaskSource = 'bundle-mask';
     }
     if (!fireMask) {
       fireMask = window.MapShine?.maskManager?.getTexture?.('fire.scene') ?? null;
+      if (fireMask) fireMaskSource = 'mask-manager';
     }
 
     if (!fireMask) {
+      dist.setSourceEnabled('heat', false);
+      return;
+    }
+
+    // Guardrail: only trust compositor floor-scoped fire masks by default.
+    // Weak/global fallback sources can keep a non-null texture resident even when
+    // no meaningful fire contribution exists, forcing DistortionManager apply
+    // every frame. Allow override for debugging/legacy behavior.
+    const allowWeakHeatFallback = !!window?.MapShine?.__allowFireHeatMaskFallback;
+    const reliableFireMask = fireMaskSource.startsWith('compositor-');
+    if (!reliableFireMask && !allowWeakHeatFallback) {
       dist.setSourceEnabled('heat', false);
       return;
     }
@@ -2739,6 +2882,10 @@ export class FloorCompositor {
     const sizeScale = Math.max(0.25, Math.min(2.0, avgSize / 95.0));
     const rateScale = Math.max(0.15, Math.min(2.0, fireRate / 5.2));
     const finalIntensity = Math.max(0.0, Math.min(0.2, baseIntensity * sizeScale * rateScale));
+    if (finalIntensity <= 0.0001) {
+      dist.setSourceEnabled('heat', false);
+      return;
+    }
     const softnessScale = Math.max(0.4, Math.min(3.0, heatEdgeSoftness));
     // Softer, larger feathering for heat masks; sharp clipping looked unnatural
     // around fire edges. Keep this in pixel-space style scaling and let
@@ -2767,6 +2914,7 @@ export class FloorCompositor {
         frequency: heatFrequency,
         speed: heatSpeed,
       });
+      dist.setSourceEnabled('heat', true);
     } else {
       dist.updateSourceMask('heat', heatMask);
       dist.updateSourceParams('heat', {
@@ -2776,6 +2924,33 @@ export class FloorCompositor {
       });
       dist.setSourceEnabled('heat', true);
     }
+  }
+
+  /**
+   * Whether FireEffectV2 currently has any built systems across cached floors.
+   * @private
+   */
+  _fireEffectHasAnySystems(fire) {
+    const floorStates = fire?._floorStates;
+    if (!(floorStates instanceof Map) || floorStates.size === 0) return false;
+    for (const state of floorStates.values()) {
+      if (this._fireEffectHasSystemsInState(state)) return true;
+    }
+    return false;
+  }
+
+  /**
+   * @private
+   * Whether a FireEffectV2 floor state has any resident systems.
+   * This checks the actual per-floor arrays, not BatchedRenderer activation.
+   */
+  _fireEffectHasSystemsInState(state) {
+    if (!state) return false;
+    const n =
+      (Number.isFinite(Number(state?.systems?.length)) ? Number(state.systems.length) : 0) +
+      (Number.isFinite(Number(state?.emberSystems?.length)) ? Number(state.emberSystems.length) : 0) +
+      (Number.isFinite(Number(state?.smokeSystems?.length)) ? Number(state.smokeSystems.length) : 0);
+    return n > 0;
   }
 
   /**

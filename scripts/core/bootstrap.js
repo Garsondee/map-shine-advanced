@@ -90,7 +90,16 @@ export async function bootstrap(options = {}) {
     _msaCrisisLog(69, 'bootstrap: rendererStrategy.create() about to run');
     console.log('[MSA BOOT] bootstrap: creating renderer');
     logger.info('Initializing renderer...');
-    const { renderer, rendererType } = await rendererStrategy.create(THREE, state.capabilities);
+    const requestedSharedContext =
+      (window?.MapShine?.__usePixiSharedWebGLContext === true)
+      ? (canvas?.app?.renderer?.gl ?? canvas?.app?.renderer?.context?.gl ?? null)
+      : null;
+    if (window?.MapShine) {
+      window.MapShine.__requestedPixiSharedWebGLContext = !!requestedSharedContext;
+    }
+    const { renderer, rendererType } = await rendererStrategy.create(THREE, state.capabilities, {
+      sharedContext: requestedSharedContext,
+    });
     console.log('[MSA BOOT] bootstrap: renderer created=', !!renderer, 'type=', rendererType);
 
     _msaCrisisLog(70, `bootstrap: rendererStrategy.create() returned (hasRenderer=${!!renderer}, type=${rendererType ?? 'unknown'})`);

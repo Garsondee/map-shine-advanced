@@ -10,6 +10,303 @@ import { globalLoadingProfiler } from '../core/loading-profiler.js';
 
 const log = createLogger('ConsoleHelpers');
 
+const PERF_LOG_TAG = '[MS-PERF-10S]';
+const DEFAULT_PERF_LOG_INTERVAL_MS = 10000;
+
+let _perfLogTimer = null;
+let _perfLogIntervalMs = DEFAULT_PERF_LOG_INTERVAL_MS;
+let _perfPrevSnapshot = null;
+
+function _toFinite(n, fallback = 0) {
+  const v = Number(n);
+  return Number.isFinite(v) ? v : fallback;
+}
+
+function _pickTopPasses(passTimings, limit = 6) {
+  if (!passTimings || typeof passTimings !== 'object') return [];
+  return Object.entries(passTimings)
+    .map(([name, data]) => ({
+      name,
+      avg: _toFinite(data?.avg),
+      last: _toFinite(data?.last),
+      total: _toFinite(data?.total),
+      count: _toFinite(data?.count),
+    }))
+    .sort((a, b) => (b.avg - a.avg) || (b.last - a.last) || (b.total - a.total))
+    .slice(0, Math.max(1, limit));
+}
+
+function _collectContinuousCandidates(floorCompositor) {
+  if (!floorCompositor) return {};
+  return {
+    fluidOverlays: _toFinite(floorCompositor?._fluidEffect?._overlays?.size),
+    iridescenceOverlays: _toFinite(floorCompositor?._iridescenceEffect?._overlays?.size),
+    prismOverlays: _toFinite(floorCompositor?._prismEffect?._overlays?.size),
+    bushOverlays: _toFinite(floorCompositor?._bushEffect?._overlays?.size),
+    treeOverlays: _toFinite(floorCompositor?._treeEffect?._overlays?.size),
+    fireActiveFloors: _toFinite(floorCompositor?._fireEffect?._activeFloors?.size),
+    dustActiveFloors: _toFinite(floorCompositor?._dustEffect?._activeFloors?.size),
+    splashesActiveFloors: _toFinite(floorCompositor?._waterSplashesEffect?._activeFloors?.size),
+    fliesSystems: _toFinite(floorCompositor?._smellyFliesEffect?.flySystems?.size),
+    candlesFlameSources: _toFinite(floorCompositor?._candleFlamesEffect?._sourceFlameCount),
+    candlesGlowBuckets: _toFinite(floorCompositor?._candleFlamesEffect?._glowBuckets?.size),
+    playerLightEnabled: !!(floorCompositor?._playerLightEffect?.enabled && floorCompositor?._playerLightEffect?.params?.enabled),
+    playerLightTorchActive: floorCompositor?._playerLightEffect?._torchWasActiveLastFrame === true,
+    playerLightFlashIntensity: _toFinite(floorCompositor?._playerLightEffect?._flashlightFinalIntensity),
+    lensGrainAmount: _toFinite(floorCompositor?._lensEffect?.params?.grainAmount),
+    lensGrainSpeed: _toFinite(floorCompositor?._lensEffect?.params?.grainSpeed),
+  };
+}
+
+function _buildWindowedPassRows(currentRaw, prevRaw) {
+  if (!currentRaw || !prevRaw) return [];
+  const rows = [];
+  for (const [name, nowEntry] of Object.entries(currentRaw)) {
+    const prevEntry = prevRaw?.[name] ?? null;
+    if (!prevEntry) continue;
+    const dTotal = Math.max(0, _toFinite(nowEntry?.total) - _toFinite(prevEntry?.total));
+    const dCount = Math.max(0, _toFinite(nowEntry?.count) - _toFinite(prevEntry?.count));
+    if (dCount <= 0) continue;
+    rows.push({
+      name,
+      windowAvg: dTotal / dCount,
+      windowTotal: dTotal,
+      windowCount: dCount,
+      last: _toFinite(nowEntry?.last),
+    });
+  }
+  rows.sort((a, b) => (b.windowAvg - a.windowAvg) || (b.windowTotal - a.windowTotal));
+  return rows;
+}
+
+function _collectPerfSnapshot() {
+  const ms = window.MapShine ?? {};
+  const rl = ms.renderLoop ?? null;
+  const renderer = ms.renderer ?? null;
+  const rInfo = renderer?.info ?? null;
+
+  const passTimings = ms.__v2PassTimings ?? null;
+  const topPasses = _pickTopPasses(passTimings, 8);
+  const passRaw = passTimings && typeof passTimings === 'object'
+    ? Object.fromEntries(
+      Object.entries(passTimings).map(([k, v]) => [k, {
+        total: _toFinite(v?.total),
+        count: _toFinite(v?.count),
+        avg: _toFinite(v?.avg),
+        last: _toFinite(v?.last),
+      }])
+    )
+    : {};
+
+  const distortion = ms.__distortionPerfStats ?? null;
+  const bridge = ms.__pixiBridgePerfStats ?? null;
+  const bridgeTrigger = ms.__pixiBridgeFrameTrigger ?? null;
+
+  const frameCount = _toFinite(rl?.frameCount);
+  const fps = _toFinite(typeof rl?.getFPS === 'function' ? rl.getFPS() : rl?.fps);
+  const drawCalls = _toFinite(rInfo?.render?.calls);
+  const triangles = _toFinite(rInfo?.render?.triangles);
+  const lines = _toFinite(rInfo?.render?.lines);
+  const points = _toFinite(rInfo?.render?.points);
+  const textures = _toFinite(rInfo?.memory?.textures);
+  const geometries = _toFinite(rInfo?.memory?.geometries);
+  const programs = Array.isArray(rInfo?.programs) ? rInfo.programs.length : _toFinite(rInfo?.memory?.programs);
+
+  const distFrames = _toFinite(distortion?.frames);
+  const distApply = _toFinite(distortion?.fullApplyFrames);
+  const distPassThrough = _toFinite(distortion?.earlyPassThrough);
+  const distApplyRatio = distFrames > 0 ? (distApply / distFrames) : 0;
+
+  const bridgeFrames = _toFinite(bridge?.frames);
+  const bridgeAttempts = _toFinite(bridge?.captureAttempts);
+  const bridgeIdle = _toFinite(bridge?.skipIdle);
+  const bridgeIdleRatio = bridgeFrames > 0 ? (bridgeIdle / bridgeFrames) : 0;
+
+  const nowPerf = _toFinite(performance?.now?.(), 0);
+  const continuousUntilMs = _toFinite(rl?._continuousRenderUntilMs, 0);
+  const continuousWindowRemainingMs = Math.max(0, continuousUntilMs - nowPerf);
+  const cinematicUntilMs = _toFinite(rl?._cinematicModeUntilMs, 0);
+  const cinematicWindowRemainingMs = Math.max(0, cinematicUntilMs - nowPerf);
+  const adaptiveEnabled = ms?.renderAdaptiveFpsEnabled !== false;
+  const floorCompositor = ms.floorCompositorV2 ?? ms.effectComposer?._floorCompositorV2 ?? null;
+  const continuousCandidates = _collectContinuousCandidates(floorCompositor);
+
+  return {
+    ts: Date.now(),
+    fps,
+    frameCount,
+    drawCalls,
+    triangles,
+    lines,
+    points,
+    textures,
+    geometries,
+    programs,
+    continuousReason: ms.__v2ContinuousRenderReason ?? 'unknown',
+    passTop: topPasses,
+    passRaw,
+    renderLoop: {
+      forceNextRender: !!rl?._forceNextRender,
+      cachedEffectWantsContinuous: !!rl?._cachedEffectWantsContinuous,
+      continuousWindowRemainingMs,
+      cinematicWindowRemainingMs,
+      adaptiveEnabled,
+      idleFps: _toFinite(ms?.renderIdleFps, 15),
+      activeFps: _toFinite(ms?.renderActiveFps, 60),
+      continuousFps: _toFinite(ms?.renderContinuousFps, 30),
+    },
+    continuousCandidates,
+    distortion: {
+      frames: distFrames,
+      fullApplyFrames: distApply,
+      earlyPassThrough: distPassThrough,
+      applyRatio: distApplyRatio,
+      last: distortion?.last ?? null,
+      waterAuxPassFrames: _toFinite(distortion?.waterAuxPassFrames),
+    },
+    bridge: {
+      frames: bridgeFrames,
+      captureAttempts: bridgeAttempts,
+      skipIdle: bridgeIdle,
+      idleRatio: bridgeIdleRatio,
+      lastStatus: bridge?.lastStatus ?? null,
+      triggerDirty: !!bridgeTrigger?.dirty,
+      triggerLivePreview: !!bridgeTrigger?.hasLivePreview,
+      triggerPendingZoom: !!bridgeTrigger?.pendingZoomRecapture,
+    },
+  };
+}
+
+function _emitPeriodicPerfLog() {
+  const snap = _collectPerfSnapshot();
+  const prev = _perfPrevSnapshot;
+  _perfPrevSnapshot = snap;
+
+  const dtSec = prev ? Math.max(0.001, (snap.ts - prev.ts) / 1000) : (_perfLogIntervalMs / 1000);
+  const dFrames = prev ? Math.max(0, snap.frameCount - prev.frameCount) : 0;
+  const frameRateWindow = dFrames / dtSec;
+
+  const dDistApply = prev ? Math.max(0, snap.distortion.fullApplyFrames - prev.distortion.fullApplyFrames) : 0;
+  const dDistFrames = prev ? Math.max(0, snap.distortion.frames - prev.distortion.frames) : 0;
+  const distWindowRatio = dDistFrames > 0 ? (dDistApply / dDistFrames) : snap.distortion.applyRatio;
+
+  const dBridgeAttempts = prev ? Math.max(0, snap.bridge.captureAttempts - prev.bridge.captureAttempts) : 0;
+  const dBridgeFrames = prev ? Math.max(0, snap.bridge.frames - prev.bridge.frames) : 0;
+
+  const windowPassRows = _buildWindowedPassRows(snap.passRaw, prev?.passRaw);
+  const topWindow = windowPassRows[0] ?? null;
+  const top1 = topWindow?.name ?? (snap.passTop[0]?.name ?? 'none');
+  const top1Avg = topWindow?.windowAvg ?? (snap.passTop[0]?.avg ?? 0);
+  const top2 = (windowPassRows[1]?.name ?? (snap.passTop[1]?.name ?? 'none'));
+  const top2Avg = (windowPassRows[1]?.windowAvg ?? (snap.passTop[1]?.avg ?? 0));
+
+  console.log(
+    `${PERF_LOG_TAG} fps=${snap.fps.toFixed(1)} windowFps=${frameRateWindow.toFixed(1)} ` +
+    `topPassWin=${top1}:${top1Avg.toFixed(2)}ms top2Win=${top2}:${top2Avg.toFixed(2)}ms ` +
+    `distApplyRatio=${(distWindowRatio * 100).toFixed(1)}% bridgeAttempts+${dBridgeAttempts}/${dBridgeFrames}f ` +
+    `reason=${snap.continuousReason}`
+  );
+
+  const rows = [
+    { key: 'fps.current', value: snap.fps.toFixed(2) },
+    { key: 'fps.window', value: frameRateWindow.toFixed(2) },
+    { key: 'render.drawCalls', value: snap.drawCalls },
+    { key: 'render.triangles', value: snap.triangles },
+    { key: 'render.lines', value: snap.lines },
+    { key: 'render.points', value: snap.points },
+    { key: 'gpu.textures', value: snap.textures },
+    { key: 'gpu.geometries', value: snap.geometries },
+    { key: 'gpu.programs', value: snap.programs },
+    { key: 'continuous.reason', value: snap.continuousReason },
+    { key: 'renderLoop.forceNextRender', value: snap.renderLoop.forceNextRender },
+    { key: 'renderLoop.cachedEffectWantsContinuous', value: snap.renderLoop.cachedEffectWantsContinuous },
+    { key: 'renderLoop.continuousWindowRemainingMs', value: Math.round(snap.renderLoop.continuousWindowRemainingMs) },
+    { key: 'renderLoop.cinematicWindowRemainingMs', value: Math.round(snap.renderLoop.cinematicWindowRemainingMs) },
+    { key: 'renderLoop.adaptiveEnabled', value: snap.renderLoop.adaptiveEnabled },
+    { key: 'renderLoop.targetFps.idle', value: snap.renderLoop.idleFps },
+    { key: 'renderLoop.targetFps.active', value: snap.renderLoop.activeFps },
+    { key: 'renderLoop.targetFps.continuous', value: snap.renderLoop.continuousFps },
+    { key: 'distortion.applyRatio.window', value: `${(distWindowRatio * 100).toFixed(1)}%` },
+    { key: 'distortion.applyRatio.total', value: `${(snap.distortion.applyRatio * 100).toFixed(1)}%` },
+    { key: 'distortion.earlyPassThrough.total', value: snap.distortion.earlyPassThrough },
+    { key: 'distortion.waterAuxPassFrames.total', value: snap.distortion.waterAuxPassFrames },
+    { key: 'bridge.captureAttempts.delta', value: dBridgeAttempts },
+    { key: 'bridge.captureAttempts.total', value: snap.bridge.captureAttempts },
+    { key: 'bridge.idleRatio.total', value: `${(snap.bridge.idleRatio * 100).toFixed(1)}%` },
+    { key: 'bridge.lastStatus', value: snap.bridge.lastStatus ?? 'n/a' },
+    { key: 'bridge.triggerDirty', value: snap.bridge.triggerDirty },
+    { key: 'bridge.triggerLivePreview', value: snap.bridge.triggerLivePreview },
+    { key: 'bridge.triggerPendingZoom', value: snap.bridge.triggerPendingZoom },
+    { key: 'candidates.bushOverlays', value: snap.continuousCandidates.bushOverlays ?? 0 },
+    { key: 'candidates.treeOverlays', value: snap.continuousCandidates.treeOverlays ?? 0 },
+    { key: 'candidates.fluidOverlays', value: snap.continuousCandidates.fluidOverlays ?? 0 },
+    { key: 'candidates.iridescenceOverlays', value: snap.continuousCandidates.iridescenceOverlays ?? 0 },
+    { key: 'candidates.prismOverlays', value: snap.continuousCandidates.prismOverlays ?? 0 },
+    { key: 'candidates.fireActiveFloors', value: snap.continuousCandidates.fireActiveFloors ?? 0 },
+    { key: 'candidates.dustActiveFloors', value: snap.continuousCandidates.dustActiveFloors ?? 0 },
+    { key: 'candidates.splashesActiveFloors', value: snap.continuousCandidates.splashesActiveFloors ?? 0 },
+    { key: 'candidates.fliesSystems', value: snap.continuousCandidates.fliesSystems ?? 0 },
+    { key: 'candidates.candlesFlameSources', value: snap.continuousCandidates.candlesFlameSources ?? 0 },
+    { key: 'candidates.candlesGlowBuckets', value: snap.continuousCandidates.candlesGlowBuckets ?? 0 },
+    { key: 'candidates.playerLightEnabled', value: snap.continuousCandidates.playerLightEnabled ?? false },
+    { key: 'candidates.playerLightTorchActive', value: snap.continuousCandidates.playerLightTorchActive ?? false },
+    { key: 'candidates.playerLightFlashIntensity', value: (snap.continuousCandidates.playerLightFlashIntensity ?? 0).toFixed(4) },
+    { key: 'candidates.lensGrainAmount', value: snap.continuousCandidates.lensGrainAmount ?? 0 },
+    { key: 'candidates.lensGrainSpeed', value: snap.continuousCandidates.lensGrainSpeed ?? 0 },
+  ];
+
+  for (let i = 0; i < Math.min(6, windowPassRows.length); i += 1) {
+    const p = windowPassRows[i];
+    rows.push({ key: `passWin.${i + 1}.name`, value: p.name });
+    rows.push({ key: `passWin.${i + 1}.avgMs`, value: p.windowAvg.toFixed(2) });
+    rows.push({ key: `passWin.${i + 1}.lastMs`, value: p.last.toFixed(2) });
+  }
+
+  // Fallback when no previous snapshot exists yet.
+  if (windowPassRows.length === 0) {
+    for (let i = 0; i < Math.min(4, snap.passTop.length); i += 1) {
+      const p = snap.passTop[i];
+      rows.push({ key: `passCum.${i + 1}.name`, value: p.name });
+      rows.push({ key: `passCum.${i + 1}.avgMs`, value: p.avg.toFixed(2) });
+      rows.push({ key: `passCum.${i + 1}.lastMs`, value: p.last.toFixed(2) });
+    }
+  }
+
+  console.table(rows);
+}
+
+function startPeriodicPerfLog(options = {}) {
+  const intervalMs = Math.max(1000, _toFinite(options.intervalMs, DEFAULT_PERF_LOG_INTERVAL_MS));
+  const immediate = options.immediate !== false;
+
+  if (_perfLogTimer) {
+    clearInterval(_perfLogTimer);
+    _perfLogTimer = null;
+  }
+
+  _perfLogIntervalMs = intervalMs;
+  _perfPrevSnapshot = null;
+
+  if (immediate) _emitPeriodicPerfLog();
+  _perfLogTimer = setInterval(_emitPeriodicPerfLog, _perfLogIntervalMs);
+
+  console.log(`${PERF_LOG_TAG} started interval=${_perfLogIntervalMs}ms`);
+  return true;
+}
+
+function stopPeriodicPerfLog() {
+  if (_perfLogTimer) {
+    clearInterval(_perfLogTimer);
+    _perfLogTimer = null;
+    console.log(`${PERF_LOG_TAG} stopped`);
+  }
+  return true;
+}
+
+function getPeriodicPerfSnapshot() {
+  return _collectPerfSnapshot();
+}
+
 /**
  * Console helpers for debugging Map Shine Advanced
  * Access via window.MapShine.debug
@@ -1038,6 +1335,52 @@ export function installConsoleHelpers() {
     if (!window.MapShine) window.MapShine = {};
     window.MapShine.debug = consoleHelpers;
 
+    // Door-click jank bisect: toggle flags, open a door, observe frame time.
+    // MapShine.debugDoorJank.tryAll() enables all mitigations; .reset() clears.
+    window.MapShine.debugDoorJank = {
+      skipFogPerceptionOnWall: (v = true) => {
+        window.MapShine.__debugSkipForcePerceptionOnWall = !!v;
+        return window.MapShine.__debugSkipForcePerceptionOnWall;
+      },
+      skipBridgeDirtyOnWall: (v = true) => {
+        window.MapShine.__debugSkipBridgeDirtyOnWall = !!v;
+        return window.MapShine.__debugSkipBridgeDirtyOnWall;
+      },
+      skipWallManagerHookLightingRefresh: (v = true) => {
+        window.MapShine.__debugSkipWallManagerHookLightingRefresh = !!v;
+        return window.MapShine.__debugSkipWallManagerHookLightingRefresh;
+      },
+      skipWallManagerUpdateLightingRefresh: (v = true) => {
+        window.MapShine.__debugSkipWallManagerUpdateLightingRefresh = !!v;
+        return window.MapShine.__debugSkipWallManagerUpdateLightingRefresh;
+      },
+      tryAll: () => {
+        window.MapShine.__debugSkipForcePerceptionOnWall = true;
+        window.MapShine.__debugSkipBridgeDirtyOnWall = true;
+        window.MapShine.__debugSkipWallManagerHookLightingRefresh = true;
+        window.MapShine.__debugSkipWallManagerUpdateLightingRefresh = true;
+        return {
+          __debugSkipForcePerceptionOnWall: true,
+          __debugSkipBridgeDirtyOnWall: true,
+          __debugSkipWallManagerHookLightingRefresh: true,
+          __debugSkipWallManagerUpdateLightingRefresh: true,
+        };
+      },
+      reset: () => {
+        delete window.MapShine.__debugSkipForcePerceptionOnWall;
+        delete window.MapShine.__debugSkipBridgeDirtyOnWall;
+        delete window.MapShine.__debugSkipWallManagerHookLightingRefresh;
+        delete window.MapShine.__debugSkipWallManagerUpdateLightingRefresh;
+        return true;
+      },
+      status: () => ({
+        __debugSkipForcePerceptionOnWall: !!window.MapShine.__debugSkipForcePerceptionOnWall,
+        __debugSkipBridgeDirtyOnWall: !!window.MapShine.__debugSkipBridgeDirtyOnWall,
+        __debugSkipWallManagerHookLightingRefresh: !!window.MapShine.__debugSkipWallManagerHookLightingRefresh,
+        __debugSkipWallManagerUpdateLightingRefresh: !!window.MapShine.__debugSkipWallManagerUpdateLightingRefresh,
+      }),
+    };
+
     window.MapShine.perf = {
       start: (options = {}) => {
         globalProfiler.start(options);
@@ -1097,6 +1440,11 @@ export function installConsoleHelpers() {
         exportCsv: () => {
           return globalLoadingProfiler.exportCsv();
         }
+      },
+      periodic: {
+        start: (options = {}) => startPeriodicPerfLog(options),
+        stop: () => stopPeriodicPerfLog(),
+        snapshot: () => getPeriodicPerfSnapshot(),
       }
     };
     
@@ -1280,7 +1628,9 @@ export function installConsoleHelpers() {
     };
 
     log.info('Console helpers installed: MapShine.debug');
+    startPeriodicPerfLog({ intervalMs: DEFAULT_PERF_LOG_INTERVAL_MS, immediate: false });
     console.log('-> Type MapShine.debug.help() for debugging commands');
     console.log('-> Type MapShine.showOccluderDebug(8) to visualize tWaterOccluderAlpha');
+    console.log(`-> Filter console by ${PERF_LOG_TAG} for recurring 10s perf logs`);
   }
 }

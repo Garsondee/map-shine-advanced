@@ -36,11 +36,33 @@ import { getLevelsCompatibilityMode, LEVELS_COMPATIBILITY_MODES } from '../../fo
 import { isLevelsEnabledForScene, readTileLevelsFlags, tileHasLevelsRange } from '../../foundry/levels-scene-flags.js';
 import { getPerspectiveElevation, isLightVisibleForPerspective } from '../../foundry/elevation-context.js';
 import Coordinates from '../../utils/coordinates.js';
+import { flattenWallUpdateChanges } from '../../utils/wall-update-classify.js';
 
 const log = createLogger('FogOfWarEffectV2');
 
 function easeInOutCosine(t) {
   return (1 - Math.cos(Math.max(0, Math.min(1, t)) * Math.PI)) / 2;
+}
+
+/** Match DoorMeshManager / Foundry wall door `animation.type` strings (UI may vary casing). */
+function normalizeWallDoorAnimationType(raw) {
+  if (raw === undefined || raw === null) return 'swing';
+  const s = String(raw).trim().toLowerCase();
+  if (!s) return 'swing';
+  if (s === 'sliding') return 'slide';
+  return s;
+}
+
+/**
+ * Foundry passes `updateWall` hooks with a `changes` object; sometimes `ds` is
+ * nested under `diff` (see Document#update). Without this, door fog transitions
+ * never start and no door-sync logic runs.
+ */
+function wallChangesIncludeDoorState(changes) {
+  if (!changes || typeof changes !== 'object') return false;
+  if (Object.prototype.hasOwnProperty.call(changes, 'ds')) return true;
+  const d = changes.diff;
+  return !!(d && typeof d === 'object' && Object.prototype.hasOwnProperty.call(d, 'ds'));
 }
 
 /**
@@ -234,6 +256,178 @@ export class FogOfWarEffectV2 {
   }
 
   /**
+   * Door leaf segments from wall `doc` + `openFactor`, matching DoorMeshManager math and
+   * the same eased openFactor produced by `_getDoorFogTransitionState` (LOS stays time-synced
+   * with fog transitions). Foundry canvas coordinates.
+   *
+   * @param {object} doc
+   * @param {number} openFactor
+   * @returns {Array<{x0:number,y0:number,x1:number,y1:number}>}
+   * @private
+   */
+  _computeDoorLeafSegmentsDocMath(doc, openFactor) {
+    const segs = [];
+    const c = doc?.c;
+    if (!Array.isArray(c) || c.length < 4) return segs;
+
+    const ax = Number(c[0]);
+    const ay = Number(c[1]);
+    const bx = Number(c[2]);
+    const by = Number(c[3]);
+    if (![ax, ay, bx, by].every(Number.isFinite)) return segs;
+
+    const wallDx = bx - ax;
+    const wallDy = by - ay;
+    const wallLen = Math.hypot(wallDx, wallDy);
+    if (wallLen <= 0.001) return segs;
+
+    const anim = doc.animation || {};
+    const animationType = normalizeWallDoorAnimationType(anim.type);
+    const strength = Number.isFinite(anim.strength) ? Number(anim.strength) : 1;
+    const baseDirection = Number.isFinite(anim.direction) ? Number(anim.direction) : 1;
+    const isDouble = !!anim.double;
+
+    const a = Coordinates.toWorld(ax, ay);
+    const b = Coordinates.toWorld(bx, by);
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const distance = Math.hypot(dx, dy);
+    if (distance <= 0.001) return segs;
+
+    const angle = Math.atan2(dy, dx);
+    const styles = isDouble ? ['doubleL', 'doubleR'] : ['single'];
+    const t = Math.max(0, Math.min(1, Number(openFactor) || 0));
+
+    for (const styleKey of styles) {
+      let direction = baseDirection;
+      if (styleKey === 'doubleR') direction *= -1;
+
+      const isMidpoint =
+        animationType === 'ascend' || animationType === 'descend' || animationType === 'swivel';
+
+      let pivot;
+      if (styleKey === 'doubleR') {
+        pivot = isMidpoint
+          ? { x: a.x + dx * 0.75, y: a.y + dy * 0.75 }
+          : { x: b.x, y: b.y };
+      } else if (styleKey === 'doubleL') {
+        pivot = isMidpoint
+          ? { x: a.x + dx * 0.25, y: a.y + dy * 0.25 }
+          : { x: a.x, y: a.y };
+      } else {
+        pivot = isMidpoint
+          ? { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }
+          : { x: a.x, y: a.y };
+      }
+
+      const width = styleKey === 'single' ? distance : distance * 0.5;
+      const baseRotation = styleKey === 'doubleR' ? (angle - Math.PI) : angle;
+
+      let wx = pivot.x;
+      let wy = pivot.y;
+      let rotation = baseRotation;
+      let len = width;
+
+      switch (animationType) {
+        case 'swing':
+        case 'swivel':
+          rotation = baseRotation + (Math.PI / 2) * direction * strength * t;
+          break;
+        case 'slide': {
+          const m = styleKey === 'single' ? strength : strength * 0.5;
+          wx = pivot.x + (a.x - b.x) * direction * m * t;
+          wy = pivot.y + (a.y - b.y) * direction * m * t;
+          break;
+        }
+        case 'ascend': {
+          const scaleIncrease = 0.1 * strength * t;
+          len = width * (1 + scaleIncrease);
+          break;
+        }
+        case 'descend': {
+          const scaleDecrease = 0.05 * strength * t;
+          len = Math.max(width * (1 - scaleDecrease), width * 0.05);
+          break;
+        }
+        default:
+          rotation = baseRotation + (Math.PI / 2) * direction * strength * t;
+      }
+
+      const endWx = wx + Math.cos(rotation) * len;
+      const endWy = wy + Math.sin(rotation) * len;
+      const pF = Coordinates.toFoundry(wx, wy);
+      const eF = Coordinates.toFoundry(endWx, endWy);
+      if (![pF.x, pF.y, eF.x, eF.y].every(Number.isFinite)) continue;
+      segs.push({ x0: pF.x, y0: pF.y, x1: eF.x, y1: eF.y });
+    }
+
+    return segs;
+  }
+
+  /**
+   * Fallback: derive segments from live Three door meshes (bbox × matrixWorld).
+   * Only used when doc math yields nothing (degenerate wall, etc.).
+   *
+   * @param {object} doc
+   * @returns {Array<{x0:number,y0:number,x1:number,y1:number}>}
+   * @private
+   */
+  _computeDoorLeafSegmentsMeshBbox(doc) {
+    const segs = [];
+    const c = doc?.c;
+    if (!Array.isArray(c) || c.length < 4) return segs;
+
+    const dm = window.MapShine?.doorMeshManager;
+    const wid = doc?.id;
+    const meshSet = dm?.doorMeshes?.get(String(wid ?? ''))
+      ?? dm?.doorMeshes?.get(wid);
+    if (!meshSet || typeof meshSet[Symbol.iterator] !== 'function') return segs;
+
+    const THREE = window.THREE;
+    if (!THREE) return segs;
+
+    for (const doorMesh of meshSet) {
+      const mesh = doorMesh?.mesh;
+      if (!mesh) continue;
+      const geom = mesh.geometry;
+      if (!geom) continue;
+
+      geom.computeBoundingBox();
+      const bb = geom.boundingBox;
+      if (!bb || !(bb.max.x - bb.min.x > 0.001)) continue;
+
+      mesh.updateMatrixWorld(true);
+      const yMid = (bb.min.y + bb.max.y) * 0.5;
+      const v0 = new THREE.Vector3(bb.min.x, yMid, 0);
+      const v1 = new THREE.Vector3(bb.max.x, yMid, 0);
+      v0.applyMatrix4(mesh.matrixWorld);
+      v1.applyMatrix4(mesh.matrixWorld);
+
+      const pF = Coordinates.toFoundry(v0.x, v0.y);
+      const eF = Coordinates.toFoundry(v1.x, v1.y);
+      if (![pF.x, pF.y, eF.x, eF.y].every(Number.isFinite)) continue;
+      segs.push({ x0: pF.x, y0: pF.y, x1: eF.x, y1: eF.y });
+    }
+
+    return segs;
+  }
+
+  /**
+   * Each door leaf as a segment in Foundry canvas coordinates (matches VisionPolygonComputer).
+   * Prefers **doc + openFactor** math so LOS uses the same eased progress as fog transitions;
+   * mesh bbox is a last resort only.
+   *
+   * @param {object} doc - Wall document
+   * @param {number} openFactor - 0 closed .. 1 open
+   * @returns {Array<{x0:number,y0:number,x1:number,y1:number}>}
+   */
+  _getDoorTransitionLeafSegmentsFoundry(doc, openFactor) {
+    const math = this._computeDoorLeafSegmentsDocMath(doc, openFactor);
+    if (math.length) return math;
+    return this._computeDoorLeafSegmentsMeshBbox(doc);
+  }
+
+  /**
    * Build temporary LOS blocker wall-like entries for animated door leaves.
    * These are injected into VisionPolygonComputer so door transitions cast
    * proper visibility shadows instead of only masking a thin strip.
@@ -260,80 +454,27 @@ export class FogOfWarEffectV2 {
       const state = this._getDoorFogTransitionState(doc.id, nowMs);
       if (!state) continue;
       const wallId = String(doc.id || '');
-      if (wallId) transitioningWallIds.add(wallId);
 
-      const c = doc.c;
-      if (!Array.isArray(c) || c.length < 4) continue;
-      const ax = Number(c[0]);
-      const ay = Number(c[1]);
-      const bx = Number(c[2]);
-      const by = Number(c[3]);
-      if (![ax, ay, bx, by].every(Number.isFinite)) continue;
-
-      const wallDx = bx - ax;
-      const wallDy = by - ay;
-      const wallLen = Math.hypot(wallDx, wallDy);
-      if (wallLen <= 0.001) continue;
-
-      const leafSpecs = [];
-
-      // Prefer live door mesh transforms so pivot/swing direction exactly matches render animation.
-      const meshSet = window.MapShine?.doorMeshManager?.doorMeshes?.get(String(doc.id));
-      if (meshSet && typeof meshSet[Symbol.iterator] === 'function') {
-        for (const doorMesh of meshSet) {
-          const mesh = doorMesh?.mesh;
-          if (!mesh) continue;
-          const style = String(doorMesh?.style || mesh?.userData?.style || 'single');
-          const len = style === 'single' ? wallLen : (wallLen * 0.5);
-          if (!(len > 0.001)) continue;
-
-          const foundryPivot = Coordinates.toFoundry(Number(mesh.position.x), Number(mesh.position.y));
-          const foundryAngle = -Number(mesh.rotation.z);
-          leafSpecs.push({
-            px: Number(foundryPivot?.x),
-            py: Number(foundryPivot?.y),
-            angle: foundryAngle,
-            len,
-          });
-        }
-      }
-
-      // Fallback when mesh data is unavailable.
-      if (!leafSpecs.length) {
-        const animationType = String(doc?.animation?.type || 'swing');
-        const strength = Number.isFinite(doc?.animation?.strength) ? Number(doc.animation.strength) : 1;
-        const direction = Number.isFinite(doc?.animation?.direction) ? Number(doc.animation.direction) : 1;
-        const isDouble = !!doc?.animation?.double;
-
-        if ((animationType === 'swing' || animationType === 'swivel') && wallLen > 0.001) {
-          const baseAngleAB = Math.atan2(wallDy, wallDx);
-          const baseDelta = (Math.PI / 2) * strength * state.openFactor;
-          if (isDouble) {
-            const halfLen = wallLen * 0.5;
-            leafSpecs.push({ px: ax, py: ay, angle: baseAngleAB + baseDelta * direction, len: halfLen });
-            leafSpecs.push({ px: bx, py: by, angle: (baseAngleAB + Math.PI) + baseDelta * (-direction), len: halfLen });
-          } else {
-            leafSpecs.push({ px: ax, py: ay, angle: baseAngleAB + baseDelta * direction, len: wallLen });
-          }
-        }
-      }
-
-      for (const leaf of leafSpecs) {
-        if (![leaf.px, leaf.py, leaf.angle, leaf.len].every(Number.isFinite)) continue;
-        const ex = leaf.px + Math.cos(leaf.angle) * leaf.len;
-        const ey = leaf.py + Math.sin(leaf.angle) * leaf.len;
-        if (![ex, ey].every(Number.isFinite)) continue;
-
+      const segments = this._getDoorTransitionLeafSegmentsFoundry(doc, state.openFactor);
+      for (const seg of segments) {
+        if (![seg.x0, seg.y0, seg.x1, seg.y1].every(Number.isFinite)) continue;
         out.push({
           document: {
-            c: [leaf.px, leaf.py, ex, ey],
+            c: [seg.x0, seg.y0, seg.x1, seg.y1],
             sight: CONST.WALL_SENSE_TYPES?.NORMAL ?? 20,
             light: CONST.WALL_SENSE_TYPES?.NORMAL ?? 20,
             door: CONST.WALL_DOOR_TYPES?.NONE ?? 0,
             dir: CONST.WALL_DIRECTIONS?.BOTH ?? 0,
+            // Match real wall vertical bounds (Levels / wall-height) so door leaves
+            // don't block or pass wrong floors during transitions.
+            ...(doc.flags && typeof doc.flags === 'object' ? { flags: doc.flags } : {}),
           },
         });
       }
+      // Only strip the real wall from the LOS polygon list when we have at least
+      // one synthetic leaf segment. Otherwise we remove the wall line but inject
+      // nothing — vision treats the open door as no edge (wrong during animation).
+      if (wallId && segments.length > 0) transitioningWallIds.add(wallId);
     }
 
     return { blockers: out, transitioningWallIds };
@@ -1242,18 +1383,30 @@ export class FogOfWarEffectV2 {
     this._hookIds.push(['createWall', Hooks.on('createWall', () => {
       this._primeDoorStateCache();
       this._needsVisionUpdate = true;
-      frameCoordinator.forcePerceptionUpdate();
+      try {
+        if (!window.MapShine?.__debugSkipForcePerceptionOnWall) {
+          frameCoordinator.forcePerceptionUpdate();
+        }
+      } catch (_) {}
     })]);
     this._hookIds.push(['updateWall', Hooks.on('updateWall', (doc, changes) => {
       this._onDoorWallUpdated(doc, changes);
       this._needsVisionUpdate = true;
-      frameCoordinator.forcePerceptionUpdate();
+      try {
+        if (!window.MapShine?.__debugSkipForcePerceptionOnWall) {
+          frameCoordinator.forcePerceptionUpdate();
+        }
+      } catch (_) {}
     })]);
     this._hookIds.push(['deleteWall', Hooks.on('deleteWall', (doc) => {
       this._doorFogTransitions.delete(String(doc?.id || ''));
       this._doorStateCache.delete(String(doc?.id || ''));
       this._needsVisionUpdate = true;
-      frameCoordinator.forcePerceptionUpdate();
+      try {
+        if (!window.MapShine?.__debugSkipForcePerceptionOnWall) {
+          frameCoordinator.forcePerceptionUpdate();
+        }
+      } catch (_) {}
     })]);
 
     // MS-LVL-060: When the active level context changes (floor navigation),
@@ -1398,12 +1551,13 @@ export class FogOfWarEffectV2 {
   _onDoorWallUpdated(doc, changes) {
     const doorType = Number(doc?.door ?? 0);
     if (!(doorType > 0)) return;
-    if (!changes || !Object.prototype.hasOwnProperty.call(changes, 'ds')) return;
+    const flat = flattenWallUpdateChanges(changes);
+    if (!Object.prototype.hasOwnProperty.call(flat, 'ds')) return;
 
     const wallId = String(doc?.id || '');
     if (!wallId) return;
 
-    const nextState = Number(changes.ds ?? doc?.ds ?? 0);
+    const nextState = Number(flat.ds ?? doc?.ds ?? 0);
     const cachedPrevState = this._doorStateCache.get(wallId);
     const prevState = Number.isFinite(cachedPrevState)
       ? cachedPrevState
@@ -1484,68 +1638,19 @@ export class FogOfWarEffectV2 {
 
       const state = this._getDoorFogTransitionState(doc.id, nowMs);
       if (!state) continue;
+      // Opening: no raster overlay — only animated LOS segments (avoids vision=0 → solid fog).
+      if (!state.isClosing) continue;
 
-      const c = doc.c;
-      if (!Array.isArray(c) || c.length < 4) continue;
-      const ax = Number(c[0]) - offsetX;
-      const ay = Number(c[1]) - offsetY;
-      const bx = Number(c[2]) - offsetX;
-      const by = Number(c[3]) - offsetY;
-      if (![ax, ay, bx, by].every(Number.isFinite)) continue;
+      const segments = this._getDoorTransitionLeafSegmentsFoundry(doc, state.openFactor);
+      for (const seg of segments) {
+        const leafPx = seg.x0 - offsetX;
+        const leafPy = seg.y0 - offsetY;
+        const ex = seg.x1 - offsetX;
+        const ey = seg.y1 - offsetY;
+        if (![leafPx, leafPy, ex, ey].every(Number.isFinite)) continue;
 
-      const wallDx = bx - ax;
-      const wallDy = by - ay;
-      const wallLen = Math.hypot(wallDx, wallDy);
-      if (wallLen <= 0.001) continue;
-
-      const leafSpecs = [];
-
-      // Prefer live door mesh transform for robust swing direction/pivot.
-      const meshSet = window.MapShine?.doorMeshManager?.doorMeshes?.get(String(doc.id));
-      if (meshSet && typeof meshSet[Symbol.iterator] === 'function') {
-        for (const doorMesh of meshSet) {
-          const mesh = doorMesh?.mesh;
-          if (!mesh) continue;
-          const style = String(doorMesh?.style || mesh?.userData?.style || 'single');
-          const len = style === 'single' ? wallLen : (wallLen * 0.5);
-          if (!(len > 0.001)) continue;
-
-          leafSpecs.push({
-            px: Number(mesh.position.x),
-            py: Number(mesh.position.y),
-            angle: Number(mesh.rotation.z),
-            len,
-          });
-        }
-      }
-
-      if (!leafSpecs.length) {
-        const animationType = String(doc?.animation?.type || 'swing');
-        const strength = Number.isFinite(doc?.animation?.strength) ? Number(doc.animation.strength) : 1;
-        const direction = Number.isFinite(doc?.animation?.direction) ? Number(doc.animation.direction) : 1;
-        const isDouble = !!doc?.animation?.double;
-
-        if ((animationType === 'swing' || animationType === 'swivel') && wallLen > 0.001) {
-          const baseAngleAB = Math.atan2(wallDy, wallDx);
-          const baseDelta = (Math.PI / 2) * strength * state.openFactor;
-
-          if (isDouble) {
-            const halfLen = wallLen * 0.5;
-            leafSpecs.push({ px: ax, py: ay, angle: baseAngleAB + baseDelta * direction, len: halfLen });
-            leafSpecs.push({ px: bx, py: by, angle: (baseAngleAB + Math.PI) + baseDelta * (-direction), len: halfLen });
-          } else {
-            leafSpecs.push({ px: ax, py: ay, angle: baseAngleAB + baseDelta * direction, len: wallLen });
-          }
-        } else {
-          leafSpecs.push({ px: ax, py: ay, angle: Math.atan2(wallDy, wallDx), len: wallLen });
-        }
-      }
-
-      for (const leaf of leafSpecs) {
-        const ex = leaf.px + Math.cos(leaf.angle) * leaf.len;
-        const ey = leaf.py + Math.sin(leaf.angle) * leaf.len;
-        const segDx = ex - leaf.px;
-        const segDy = ey - leaf.py;
+        const segDx = ex - leafPx;
+        const segDy = ey - leafPy;
         const segLen = Math.hypot(segDx, segDy);
         if (segLen <= 0.001) continue;
 
@@ -1555,43 +1660,24 @@ export class FogOfWarEffectV2 {
         const oy = ny * halfThickness;
 
         const shape = new THREE.Shape();
-        shape.moveTo(leaf.px + ox, leaf.py + oy);
+        shape.moveTo(leafPx + ox, leafPy + oy);
         shape.lineTo(ex + ox, ey + oy);
         shape.lineTo(ex - ox, ey - oy);
-        shape.lineTo(leaf.px - ox, leaf.py - oy);
+        shape.lineTo(leafPx - ox, leafPy - oy);
         shape.closePath();
 
-        // Separate geometries/materials per overlay so disposal semantics stay
-        // aligned with existing visionScene child cleanup.
-        if (state.isOpening) {
-          const blocker = new THREE.Mesh(
-            new THREE.ShapeGeometry(shape),
-            new THREE.MeshBasicMaterial({
-              color: 0x000000,
-              transparent: false,
-              depthWrite: false,
-              depthTest: false,
-              side: THREE.DoubleSide,
-            })
-          );
-          blocker.renderOrder = 4;
-          this.visionScene.add(blocker);
-        }
-
-        if (state.isClosing) {
-          const opener = new THREE.Mesh(
-            new THREE.ShapeGeometry(shape),
-            new THREE.MeshBasicMaterial({
-              color: 0xffffff,
-              transparent: false,
-              depthWrite: false,
-              depthTest: false,
-              side: THREE.DoubleSide,
-            })
-          );
-          opener.renderOrder = 5;
-          this.visionScene.add(opener);
-        }
+        const opener = new THREE.Mesh(
+          new THREE.ShapeGeometry(shape),
+          new THREE.MeshBasicMaterial({
+            color: 0xffffff,
+            transparent: false,
+            depthWrite: false,
+            depthTest: false,
+            side: THREE.DoubleSide,
+          })
+        );
+        opener.renderOrder = 5;
+        this.visionScene.add(opener);
       }
     }
   }
@@ -2040,15 +2126,11 @@ export class FogOfWarEffectV2 {
       log.warn('Failed to render revealTokenInFog bubbles:', e);
     }
 
-    // Door-fog transition overlays (opening/closing smoothing).
-    // Drawn late so they can override prior LOS/light/darkness writes.
+    // Door-fog transition overlays (closing only): white strip softens re-occlusion.
+    // Opening intentionally has no raster overlay — black quads zero vision and
+    // read as solid fog through the doorway (especially with vision SDF).
     try {
-      // Only use raster overlays when LOS blockers aren't active (e.g. narrow-angle
-      // cones where we still rely on Foundry polygons). For standard 360 vision,
-      // custom polygon compute with dynamic blockers is authoritative.
-      if (!hasDoorTransitionLOSBlockers) {
-        this._addDoorTransitionVisionOverlays(THREE, nowMs);
-      }
+      this._addDoorTransitionVisionOverlays(THREE, nowMs);
     } catch (e) {
       log.warn('Failed to render door transition fog overlays:', e);
     }

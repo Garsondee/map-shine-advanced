@@ -363,6 +363,11 @@ export class ModeManager {
     // Drawings render via PIXI as an overlay
     if (canvas.drawings) canvas.drawings.visible = true;
 
+    // Templates (including measurement/ruler preview) are PIXI overlays and
+    // should remain visible even when we're not currently in the native
+    // templates tool mode.
+    if (canvas.templates) canvas.templates.visible = true;
+
     // Active layer detection
     const activeLayerObj = canvas.activeLayer;
     const activeLayerName = String(activeLayerObj?.options?.name || activeLayerObj?.name || '').toLowerCase();
@@ -418,7 +423,7 @@ export class ModeManager {
     }
 
     // Simple layers
-    const simpleLayers = ['LightingLayer', 'SoundsLayer', 'TemplateLayer', 'NotesLayer', 'RegionLayer'];
+    const simpleLayers = ['LightingLayer', 'SoundsLayer', 'NotesLayer', 'RegionLayer'];
     simpleLayers.forEach(name => {
       const layer = canvas[name === 'RegionLayer' ? 'regions' : name.replace('Layer', '').toLowerCase()];
       if (layer) {

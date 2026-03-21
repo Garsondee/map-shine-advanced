@@ -1628,7 +1628,11 @@ export function installConsoleHelpers() {
     };
 
     log.info('Console helpers installed: MapShine.debug');
-    startPeriodicPerfLog({ intervalMs: DEFAULT_PERF_LOG_INTERVAL_MS, immediate: false });
+    if (window?.MapShine?.__enablePeriodicPerfLog === true) {
+      startPeriodicPerfLog({ intervalMs: DEFAULT_PERF_LOG_INTERVAL_MS, immediate: false });
+    } else {
+      stopPeriodicPerfLog();
+    }
     console.log('-> Type MapShine.debug.help() for debugging commands');
     console.log('-> Type MapShine.showOccluderDebug(8) to visualize tWaterOccluderAlpha');
     console.log(`-> Filter console by ${PERF_LOG_TAG} for recurring 10s perf logs`);

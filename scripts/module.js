@@ -923,11 +923,11 @@ Hooks.once('init', async function() {
               };
 
               const _content = `<p>${game.i18n.localize('CONTROLS.FOWResetDesc')}</p>`;
-              const _dialogV2Confirm = globalThis?.DialogV2?.confirm
-                ?? globalThis?.foundry?.applications?.api?.DialogV2?.confirm;
+              const _dialogV2 = globalThis?.DialogV2
+                ?? globalThis?.foundry?.applications?.api?.DialogV2;
 
-              if (typeof _dialogV2Confirm === 'function') {
-                _dialogV2Confirm({
+              if (typeof _dialogV2?.confirm === 'function') {
+                _dialogV2.confirm({
                   window: { title: 'CONTROLS.FOWResetTitle', icon: 'fa-solid fa-cloud' },
                   content: _content,
                   yes: { callback: _runFogReset }

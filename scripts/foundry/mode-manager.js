@@ -345,120 +345,15 @@ export class ModeManager {
    */
   updateLayerVisibility() {
     if (!canvas?.ready) return;
-
-    // Always hide "replaced" layers in Gameplay/Hybrid Mode
-    if (canvas.background) canvas.background.visible = false;
-    const gridLayer = getConfiguredCanvasLayer('grid');
-    if (gridLayer) {
-      gridLayer.visible = true;
-      gridLayer.renderable = true;
-      if (gridLayer.highlight) {
-        gridLayer.highlight.visible = true;
-        gridLayer.highlight.renderable = true;
-      }
-      if (gridLayer.mesh) {
-        gridLayer.mesh.visible = false;
-        if (typeof gridLayer.mesh.alpha === 'number') gridLayer.mesh.alpha = 0;
-      }
-    }
-    if (canvas.primary) {
-      // Keep primary alive so Foundry-native overlay content attached through
-      // primary pathways (notably drawings in some flows) can still render.
-      canvas.primary.visible = true;
-      if (canvas.primary.background) canvas.primary.background.visible = false;
-      if (canvas.primary.foreground) canvas.primary.foreground.visible = false;
-      if (canvas.primary.tiles) canvas.primary.tiles.visible = false;
-    }
-    if (canvas.weather) canvas.weather.visible = false;
-    if (canvas.environment) canvas.environment.visible = false;
-
-    // Tokens: transparent but interactive for clicks, HUD, selection
-    if (canvas.tokens) {
-      canvas.tokens.visible = true;
-      canvas.tokens.interactiveChildren = true;
-      for (const token of canvas.tokens.placeables) {
-        if (token.mesh) token.mesh.alpha = 0;
-        if (token.icon) token.icon.alpha = 0;
-        if (token.border) token.border.alpha = 0;
-        token.visible = true;
-        token.interactive = true;
-      }
-    }
-
-    // Drawings render via PIXI as an overlay
+    // Single-source policy: use gameplay suppression as authority.
+    this.enforceGameplayPixiSuppression();
     if (canvas.drawings) canvas.drawings.visible = true;
-
-    // Templates (including measurement/ruler preview) are PIXI overlays and
-    // should remain visible even when we're not currently in the native
-    // templates tool mode.
     if (canvas.templates) canvas.templates.visible = true;
-
-    // Active layer detection
-    const activeLayerObj = canvas.activeLayer;
-    const activeLayerName = String(activeLayerObj?.options?.name || activeLayerObj?.name || '').toLowerCase();
-    const activeLayerCtor = String(activeLayerObj?.constructor?.name || '').toLowerCase();
-    const activeControl = String(ui?.controls?.activeControl || ui?.controls?.control?.name || '').toLowerCase();
-    const isActiveLayer = (name) => {
-      const normalized = String(name || '').toLowerCase();
-      return activeLayerName === normalized || activeLayerCtor === normalized || activeControl === normalized;
-    };
-    const isLightingActive = !!canvas?.lighting?.active;
-    const isWallsActiveFlag = !!canvas?.walls?.active;
-
-    // Walls
-    if (canvas.walls) {
-      const isWallsActive = isWallsActiveFlag || isActiveLayer('WallsLayer') || isActiveLayer('WallLayer') || isActiveLayer('walls');
-
-      canvas.walls.visible = true;
-      canvas.walls.interactiveChildren = true;
-
-      const ALPHA = 0.01;
-      if (Array.isArray(canvas.walls.placeables)) {
-        for (const wall of canvas.walls.placeables) {
-          if (!wall) continue;
-          try {
-            if (isWallsActive) {
-              if (wall.line) wall.line.alpha = 1;
-              if (wall.direction) wall.direction.alpha = 1;
-              if (wall.endpoints) wall.endpoints.alpha = 1;
-            } else {
-              if (wall.line) wall.line.alpha = ALPHA;
-              if (wall.direction) wall.direction.alpha = ALPHA;
-              if (wall.endpoints) wall.endpoints.alpha = ALPHA;
-            }
-            if (wall.doorControl) {
-              wall.doorControl.visible = true;
-              wall.doorControl.alpha = 1;
-            }
-            wall.visible = true;
-            wall.interactive = true;
-            wall.interactiveChildren = true;
-          } catch (_) {}
-        }
-      }
-    }
-
-    // Tiles are fully Three-owned in gameplay mode.
-    if (canvas.tiles) {
-      canvas.tiles.visible = false;
-      const tm = this._deps.tileManager;
-      if (tm?.setVisibility) {
-        tm.setVisibility(!this.isMapMakerMode);
-      }
-    }
-
-    // Simple layers
-    const simpleLayers = ['LightingLayer', 'SoundsLayer', 'NotesLayer', 'RegionLayer'];
-    simpleLayers.forEach(name => {
-      const layer = canvas[name === 'RegionLayer' ? 'regions' : name.replace('Layer', '').toLowerCase()];
-      if (layer) {
-        layer.visible = isActiveLayer(name) || isActiveLayer(name.replace('Layer', '').toLowerCase());
-      }
-    });
-
-    if (canvas.regions) {
-      canvas.regions.visible = isActiveLayer('RegionLayer') || isActiveLayer('regions');
-    }
+    if (canvas.notes) canvas.notes.visible = true;
+    if (canvas.lighting) canvas.lighting.visible = true;
+    if (canvas.sounds) canvas.sounds.visible = true;
+    if (canvas.regions) canvas.regions.visible = true;
+    if (canvas.controls) canvas.controls.visible = true;
   }
 
   /**

@@ -174,6 +174,10 @@ let _lastPersistentOverlayRefreshMs = 0;
 let _nativeTemplateHydrationTimer = null;
 /** @type {number} */
 let _nativeTemplateHydrationPassesRemaining = 0;
+/** @type {number|null} */
+let _nativeDrawingHydrationTimer = null;
+/** @type {number} */
+let _nativeDrawingHydrationPassesRemaining = 0;
 
 /** @type {boolean} */
 let _inputArbitrationDomNudgesInstalled = false;
@@ -811,7 +815,9 @@ function _rehydrateNativeTemplateOverlays(reason = 'unspecified') {
     if (!tpl) continue;
     try {
       if (tpl.renderFlags?.set) {
-        tpl.renderFlags.set({ refreshState: true, refreshGrid: true, refreshText: true });
+        // Avoid refreshState here: Foundry ties controlIcon/ruler visibility to
+        // active-layer state, which causes periodic icon/text flicker.
+        tpl.renderFlags.set({ refreshGrid: true, refreshText: true });
       }
     } catch (_) {}
     try { if (typeof tpl.highlightGrid === 'function') tpl.highlightGrid(); } catch (_) {}
@@ -861,6 +867,103 @@ function _scheduleNativeTemplateHydration(reason = 'unspecified', passes = 4) {
   };
 
   _nativeTemplateHydrationTimer = setTimeout(runPass, 0);
+}
+
+/**
+ * Re-apply native Drawing shape/text visibility after scene refresh.
+ * Drawing visuals are rendered via Drawing.shape on canvas.primary or canvas.interface.
+ * @param {string} [reason]
+ * @private
+ */
+function _rehydrateNativeDrawingOverlays(reason = 'unspecified') {
+  if (!canvas?.ready) return false;
+  if (window?.MapShine?.__usePixiContentLayerBridge === true) return false;
+  const drawings = Array.isArray(canvas?.drawings?.placeables) ? canvas.drawings.placeables : [];
+  if (drawings.length <= 0) return false;
+
+  let touched = 0;
+  for (const drawing of drawings) {
+    if (!drawing) continue;
+    // Foundry primary group is cached to an RGB renderTexture and clears with
+    // scene background color each frame. Promote drawings to interface path so
+    // their visuals remain overlay-only above Three without opaque backdrop.
+    try {
+      if (drawing.document?.interface !== true) {
+        if (typeof drawing.document?.updateSource === 'function') {
+          drawing.document.updateSource({ interface: true });
+        } else {
+          drawing.document.interface = true;
+        }
+        if (drawing.renderFlags?.set) drawing.renderFlags.set({ redraw: true });
+      }
+    } catch (_) {}
+    try {
+      drawing.visible = true;
+      drawing.renderable = true;
+      if (drawing.renderFlags?.set) {
+        drawing.renderFlags.set({
+          refreshState: true,
+          refreshPosition: true,
+          refreshShape: true,
+          refreshText: true,
+          refreshElevation: true,
+        });
+      }
+    } catch (_) {}
+    try {
+      if (drawing.shape) {
+        drawing.shape.visible = true;
+        drawing.shape.renderable = true;
+        if (!(Number(drawing.shape.alpha) > 0)) drawing.shape.alpha = 1;
+      }
+    } catch (_) {}
+    try {
+      if (drawing.text) {
+        drawing.text.visible = true;
+        drawing.text.renderable = true;
+        if (!(Number(drawing.text.alpha) > 0)) drawing.text.alpha = 1;
+      }
+    } catch (_) {}
+    try {
+      if (typeof drawing.refresh === 'function') drawing.refresh();
+    } catch (_) {}
+    touched += 1;
+  }
+
+  if (touched > 0) {
+    try {
+      window.MapShine.__pixiDrawingHydration = {
+        touched,
+        reason,
+        timestampMs: performance.now(),
+      };
+    } catch (_) {}
+  }
+  return touched > 0;
+}
+
+/**
+ * Schedule delayed native drawing hydration passes to absorb refresh-order races.
+ * @param {string} [reason]
+ * @param {number} [passes]
+ * @private
+ */
+function _scheduleNativeDrawingHydration(reason = 'unspecified', passes = 4) {
+  if (window?.MapShine?.__usePixiContentLayerBridge === true) return;
+  const desired = Math.max(1, Number(passes) || 1);
+  _nativeDrawingHydrationPassesRemaining = Math.max(_nativeDrawingHydrationPassesRemaining, desired);
+  if (_nativeDrawingHydrationTimer !== null) return;
+
+  const runPass = () => {
+    _nativeDrawingHydrationTimer = null;
+    _rehydrateNativeDrawingOverlays(reason);
+    _nativeDrawingHydrationPassesRemaining = Math.max(0, _nativeDrawingHydrationPassesRemaining - 1);
+    if (_nativeDrawingHydrationPassesRemaining <= 0) return;
+    const delayMs = _nativeDrawingHydrationPassesRemaining >= 3 ? 120 : 450;
+    _nativeDrawingHydrationTimer = setTimeout(runPass, delayMs);
+  };
+
+  _nativeDrawingHydrationTimer = setTimeout(runPass, 0);
 }
 
 /**
@@ -1919,6 +2022,10 @@ export function initialize() {
     // Hook into canvas ready event (when canvas is fully initialized)
     Hooks.on('canvasReady', onCanvasReady);
     Hooks.on('canvasReady', () => _scheduleNativeTemplateHydration('canvasReady', 5));
+    Hooks.on('canvasReady', () => _scheduleNativeDrawingHydration('canvasReady', 5));
+    Hooks.on('createDrawing', () => _scheduleNativeDrawingHydration('createDrawing', 4));
+    Hooks.on('updateDrawing', () => _scheduleNativeDrawingHydration('updateDrawing', 4));
+    Hooks.on('deleteDrawing', () => _scheduleNativeDrawingHydration('deleteDrawing', 3));
     Hooks.on('createMeasuredTemplate', () => _scheduleNativeTemplateHydration('createMeasuredTemplate', 4));
     Hooks.on('updateMeasuredTemplate', () => _scheduleNativeTemplateHydration('updateMeasuredTemplate', 4));
     Hooks.on('deleteMeasuredTemplate', () => _scheduleNativeTemplateHydration('deleteMeasuredTemplate', 3));
@@ -3322,6 +3429,7 @@ async function onCanvasReady(canvas) {
   // Native template overlays may need a few delayed refresh passes after scene
   // draw order settles, otherwise wall-aware highlighted cells/text can lag.
   _scheduleNativeTemplateHydration('onCanvasReady', 5);
+  _scheduleNativeDrawingHydration('onCanvasReady', 5);
 
   // Wait for bootstrap to complete if it hasn't yet
   // This handles race condition where canvas loads before 'ready' hook
@@ -7550,6 +7658,14 @@ function _enforcePersistentOverlayAdornments() {
     forceVisible(note.tooltip);
   };
 
+  const touchDrawing = (drawing) => {
+    if (!drawing) return;
+    forceVisible(drawing);
+    forceVisible(drawing.shape);
+    forceVisible(drawing.text);
+    forceVisible(drawing.frame);
+  };
+
   /** Measured template radius, fill, and grid highlights — always keep on for MapShine capture/gameplay. */
   const touchTemplate = (tpl) => {
     if (!tpl) return;
@@ -7592,6 +7708,20 @@ function _enforcePersistentOverlayAdornments() {
     } catch (_) {}
   }
 
+  // Drawings are native PIXI-owned overlays in the default path. Their rendered
+  // shape/text can be attached outside DrawingsLayer (Primary/Interface group).
+  try {
+    if (canvas.drawings) {
+      canvas.drawings.visible = true;
+      canvas.drawings.renderable = true;
+      const drawingObjs = [
+        ...(Array.isArray(canvas.drawings.placeables) ? canvas.drawings.placeables : []),
+        ...(Array.isArray(canvas.drawings.objects?.children) ? canvas.drawings.objects.children : []),
+      ];
+      for (const d of drawingObjs) touchDrawing(d);
+    }
+  } catch (_) {}
+
   const now = performance.now();
   if ((now - _lastPersistentOverlayRefreshMs) < 1200) return;
   _lastPersistentOverlayRefreshMs = now;
@@ -7608,11 +7738,8 @@ function _enforcePersistentOverlayAdornments() {
     } catch (_) {}
   }
 
-  // In native-overlay default mode, schedule lightweight delayed hydration passes
-  // so scene refresh and wall changes recompute template cells + ruler text.
-  if (window?.MapShine?.__usePixiContentLayerBridge !== true) {
-    _scheduleNativeTemplateHydration('persistent-overlay-pass', 1);
-  }
+  // Do not schedule recurring hydration here; event-driven hydration hooks handle
+  // scene/template/wall updates and avoid periodic overlay flicker.
 }
 
 /**
@@ -7700,193 +7827,8 @@ function configureFoundryCanvas() {
  */
 function updateLayerVisibility() {
   if (!canvas.ready) return;
-  
-  // 1. Always Hide "Replaced" Layers in Gameplay/Hybrid Mode
-  // These are rendered by Three.js
-  if (canvas.background) canvas.background.visible = false;
-  _setGridVisualSuppressed(true);
-  // V12+: canvas.primary is a core container for primary scene visuals.
-  // If this remains visible in Hybrid/Gameplay mode, tiles (including overhead/roof)
-  // can be rendered by PIXI *in addition* to our Three.js TileManager, creating
-  // a "duplicate" tile that will not respond to MapShine hover fading.
-  if (canvas.primary) {
-    canvas.primary.visible = true;
-    if (canvas.primary.background) canvas.primary.background.visible = false;
-    if (canvas.primary.foreground) canvas.primary.foreground.visible = false;
-    if (canvas.primary.tiles) canvas.primary.tiles.visible = false;
-  }
-  if (canvas.weather) canvas.weather.visible = false;
-  if (canvas.environment) canvas.environment.visible = false; // V12+
-
-  // CRITICAL: Tokens layer needs special handling
-  // - Visual rendering is done by Three.js (TokenManager)
-  // - But PIXI tokens must remain INTERACTIVE for clicks, HUD, selection, cursor
-  // - We make token meshes TRANSPARENT (alpha=0) instead of invisible
-  // - This keeps hit detection working while Three.js renders the visuals
-  if (canvas.tokens) {
-    canvas.tokens.visible = true; // Layer stays visible for interaction
-    canvas.tokens.interactiveChildren = true;
-    _applyPixiTokenVisualMode();
-  }
-
-  // Drawings are NOT replaced; they should render via PIXI as an overlay.
-  if (canvas.drawings) canvas.drawings.visible = true;
-
-  // Journal notes and measured templates should remain visible as persistent
-  // gameplay overlays, not only while their controls are actively selected.
-  if (canvas.notes) canvas.notes.visible = true;
-  if (canvas.templates) canvas.templates.visible = true;
-  _enforcePersistentOverlayAdornments();
-
-  // 2. Dynamic Layers - Show only if using the corresponding tool
-  const activeLayerObj = canvas.activeLayer;
-  const activeLayerName = String(activeLayerObj?.options?.name || activeLayerObj?.name || '').toLowerCase();
-  const activeLayerCtor = String(activeLayerObj?.constructor?.name || '').toLowerCase();
-  const activeControl = String(ui?.controls?.control?.name || ui?.controls?.activeControl || '').toLowerCase();
-  const activeControlLayer = String(ui?.controls?.control?.layer || '').toLowerCase();
-  const isActiveLayer = (name) => {
-    const normalized = String(name || '').toLowerCase();
-    return (activeLayerName === normalized)
-      || (activeLayerCtor === normalized)
-      || (activeControl === normalized)
-      || (activeControlLayer === normalized);
-  };
-  const isLightingActive = !!canvas?.lighting?.active;
-  const isWallsActiveFlag = !!canvas?.walls?.active;
-  const isTilesActive = isActiveLayer('TilesLayer') || isActiveLayer('tiles');
-
-  if (isTilesActive && canvas.primary) {
-    canvas.primary.visible = true;
-  }
-  
-  // Helper to toggle PIXI layer vs Three.js Manager
-  const toggleLayer = (pixiLayerName, manager, forceHideThree = false) => {
-    const isActive = isActiveLayer(pixiLayerName);
-    const layer = canvas.layers.find(l => l.name === pixiLayerName); // V12 safer access?
-    
-    // Show PIXI layer if active
-    if (layer) layer.visible = isActive;
-    
-    // Hide Three.js counterpart if active (to avoid double rendering during edit)
-    // OR if we are in Map Maker Mode (where Three.js is hidden anyway)
-    if (manager && manager.setVisibility) {
-        // In Gameplay Mode: Show manager unless we are explicitly editing this layer
-        // In Map Maker Mode: Manager is hidden via canvas opacity, but we can also logically hide it
-        const showThree = !isActive && !isMapMakerMode;
-        manager.setVisibility(showThree);
-    }
-  };
-
-  // Walls
-  // If Walls Layer is active, show PIXI walls, hide Three.js wall edit lines.
-  // If not active, hide PIXI walls, show Three.js wall edit lines.
-  if (canvas.walls) {
-      const isWallsActive = isWallsActiveFlag || isActiveLayer('WallsLayer') || isActiveLayer('WallLayer') || isActiveLayer('walls');
-
-      canvas.walls.visible = true;
-      canvas.walls.interactiveChildren = true;
-
-      const makeWallTransparent = (wall) => {
-        if (!wall) return;
-        safeCall(() => {
-          const ALPHA = 0.01;
-          if (wall.line) wall.line.alpha = ALPHA;
-          if (wall.direction) wall.direction.alpha = ALPHA;
-          if (wall.endpoints) wall.endpoints.alpha = ALPHA;
-          if (wall.doorControl) {
-            wall.doorControl.visible = true;
-            wall.doorControl.alpha = 1;
-          }
-          wall.visible = true;
-          wall.interactive = true;
-          wall.interactiveChildren = true;
-        }, 'makeWallTransparent', Severity.COSMETIC);
-      };
-
-      const restoreWallVisuals = (wall) => {
-        if (!wall) return;
-        safeCall(() => {
-          if (wall.line) wall.line.alpha = 1;
-          if (wall.direction) wall.direction.alpha = 1;
-          if (wall.endpoints) wall.endpoints.alpha = 1;
-          if (wall.doorControl) {
-            wall.doorControl.visible = true;
-            wall.doorControl.alpha = 1;
-          }
-        }, 'restoreWallVisuals', Severity.COSMETIC);
-      };
-
-      if (Array.isArray(canvas.walls.placeables)) {
-        if (isWallsActive) {
-          for (const wall of canvas.walls.placeables) restoreWallVisuals(wall);
-        } else {
-          for (const wall of canvas.walls.placeables) makeWallTransparent(wall);
-        }
-      }
-  }
-
-  // Tiles: keep native PIXI tile placeables interactive while the Tiles controls
-  // are active, otherwise suppress them to avoid double-rendering.
-  if (canvas.tiles) {
-      const bus = window.MapShine?.floorCompositorV2?._renderBus;
-      const tileMotion = window.MapShine?.tileMotionManager;
-      if (isTilesActive) {
-          canvas.tiles.visible = true;
-          canvas.tiles.interactiveChildren = true;
-          // In tile-edit mode, keep PIXI visuals fully visible so Foundry's
-          // native selection frame and copy/paste affordances remain obvious.
-          // DO NOT set tile.interactive = true here — that sets eventMode='static'
-          // for ALL tiles including full-scene overhead tiles and bypasses
-          // Foundry's foreground/overhead eligibility logic in _refreshState.
-          // Let Foundry own eventMode via _refreshState.
-          const ALPHA = 1;
-          for (const tile of canvas.tiles.placeables || []) {
-            if (!tile) continue;
-            tile.visible = true;
-            tile.renderable = true;
-            if (tile.mesh) tile.mesh.alpha = ALPHA;
-            if (Array.isArray(tile.children)) {
-              for (const child of tile.children) {
-                if (child && typeof child.alpha === 'number') child.alpha = ALPHA;
-              }
-            }
-            // Queue Foundry's native eligibility refresh so eventMode is
-            // correctly set per foreground/background mode on the next frame.
-            try { tile.renderFlags?.set({ refreshState: true }); } catch (_) {}
-          }
-          // Native tile editing should be PIXI-authoritative to avoid mixed
-          // PIXI+Three tile visuals fighting during selection/transform.
-          if (tileManager) tileManager.setVisibility(false);
-          if (bus?.setTileEditingSuppressed) bus.setTileEditingSuppressed(true);
-          if (tileMotion?.setTileEditSuppressed) tileMotion.setTileEditSuppressed(true);
-      } else {
-          canvas.tiles.visible = false;
-          if (tileManager) tileManager.setVisibility(!isMapMakerMode);
-          if (bus?.setTileEditingSuppressed) bus.setTileEditingSuppressed(false);
-          if (tileMotion?.setTileEditSuppressed) tileMotion.setTileEditSuppressed(false);
-      }
-  }
-
-  // Other Tools (Lighting, Sounds, etc.) - Just show/hide PIXI layer
-  // For Lighting, we also drive the Three.js light icon manager visibility so that
-  // light icons only show when the Lighting tool is active.
-  const simpleLayers = [
-      'LightingLayer', 'SoundsLayer', 'RegionLayer'
-  ];
-  
-  simpleLayers.forEach(name => {
-      const layer = canvas[name === 'RegionLayer' ? 'regions' : name.replace('Layer', '').toLowerCase()];
-      // Note: canvas.lighting, canvas.sounds, etc.
-      // V12 Regions is canvas.regions
-      if (layer) {
-          layer.visible = isActiveLayer(name) || isActiveLayer(name.replace('Layer', '').toLowerCase());
-      }
-  });
-  
-  // Regions Layer (V12 specific check)
-  if (canvas.regions) {
-      canvas.regions.visible = isActiveLayer('RegionLayer') || isActiveLayer('regions');
-  }
+  // Single-source policy: delegate all gameplay visibility to authoritative suppressor.
+  _enforceGameplayPixiSuppression();
 }
 
 /**

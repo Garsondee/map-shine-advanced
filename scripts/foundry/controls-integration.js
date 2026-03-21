@@ -671,6 +671,7 @@ export class ControlsIntegration {
       if (canvas.primary.tiles) canvas.primary.tiles.visible = false;
     }
 
+
     // Also hide native Fog of War visual layers in Three-driven rendering mode.
     // We keep Foundry vision/exploration computation active, but suppress the
     // PIXI fog draw pass so it doesn't conflict with Map Shine rendering.

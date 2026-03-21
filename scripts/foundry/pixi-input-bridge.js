@@ -84,6 +84,9 @@ export class PixiInputBridge {
 
     /** @type {number} */
     this._smoothEpsilonScale = 0.00025;
+
+    /** @type {boolean} */
+    this._applyingBridgePan = false;
     
     // Bind handlers
     this._onMouseDown = this._onMouseDown.bind(this);
@@ -138,6 +141,7 @@ export class PixiInputBridge {
    */
   _registerHooks() {
     const panHookId = Hooks.on('canvasPan', () => {
+      if (this._applyingBridgePan) return;
       // External pan events (e.g. pull-ping/animatePan/cinematic pan) should win.
       // If we keep a stale smoothing target alive, it can snap the camera back.
       this._smoothTargetView = null;
@@ -371,11 +375,22 @@ export class PixiInputBridge {
    */
   _applyView(view) {
     if (!view || !canvas?.stage?.pivot || !canvas?.stage?.scale || !canvas?.stage?.position) return;
+    // Use Foundry's pan pipeline so all dependent systems (masks, rulers,
+    // highlights, HUD alignment) stay synchronized with camera movement.
+    if (typeof canvas?.pan === 'function') {
+      this._applyingBridgePan = true;
+      try {
+        canvas.pan({ x: view.x, y: view.y, scale: view.scale });
+      } finally {
+        this._applyingBridgePan = false;
+      }
+      return;
+    }
 
+    // Fallback for non-standard runtimes.
     canvas.stage.pivot.x = view.x;
     canvas.stage.pivot.y = view.y;
     canvas.stage.scale.set(view.scale, view.scale);
-
     const vp = this._getViewportSize();
     canvas.stage.position.x = vp.width * 0.5;
     canvas.stage.position.y = vp.height * 0.5;

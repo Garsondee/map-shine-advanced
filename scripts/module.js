@@ -680,6 +680,21 @@ try {
 
 // Expose module state globally (idempotent)
 window.MapShine = MapShine;
+// PIXI/Three diagnostics: replaced when suppression / compositor run (see canvas-replacement, FloorCompositor).
+MapShine.__pixiVisibilityState = MapShine.__pixiVisibilityState ?? {
+  note: 'Awaiting _enforceGameplayPixiSuppression (MSA scene + canvas ready).',
+};
+MapShine.__pixiWorldCompositeMapping = MapShine.__pixiWorldCompositeMapping ?? {
+  active: false,
+  note: 'Awaiting V2 FloorCompositor._compositePixiWorldOverlay (non-V2 builds never set this).',
+};
+MapShine.__pixiBridgeCompositeStatus = MapShine.__pixiBridgeCompositeStatus ?? {
+  note: 'Last world-overlay composite attempt (updated every time compositor evaluates the pass).',
+};
+// Default runtime policy: keep Foundry native PIXI overlays on top and avoid
+// extra PIXI extraction/compositing unless explicitly enabled for diagnostics.
+MapShine.__usePixiContentLayerBridge = false;
+MapShine.__useThreeTemplateOverlays = false;
 MapShine.loadingScreenService = MapShine.loadingScreenService ?? null;
 MapShine.debugLoadingProfiler = MapShine.debugLoadingProfiler ?? null;
 MapShine.applyPasswordManagerIgnores = _applyPasswordManagerIgnores;

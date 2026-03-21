@@ -539,14 +539,33 @@ export class FloorCompositor {
    * @private
    */
   _compositePixiWorldOverlay(inputRT) {
-    if (!inputRT || !this._pixiWorldCompositeMaterial || !this._postA || !this._postB) return inputRT;
-    const bridge = window.MapShine?.pixiContentLayerBridge ?? null;
     const mapShine = window.MapShine ?? null;
+    const publishMappingStub = (skipReason, extra = {}) => {
+      try {
+        if (mapShine) {
+          mapShine.__pixiWorldCompositeMapping = {
+            active: false,
+            timestampMs: performance.now(),
+            skipReason: String(skipReason || 'unknown'),
+            ...extra,
+          };
+        }
+      } catch (_) {}
+    };
+
+    if (!inputRT || !this._pixiWorldCompositeMaterial || !this._postA || !this._postB) {
+      publishMappingStub('floor-compositor-not-ready', { hasInputRT: !!inputRT });
+      return inputRT;
+    }
+    const bridge = window.MapShine?.pixiContentLayerBridge ?? null;
     const overlayTexture = bridge?.getWorldTexture?.() ?? null;
     const debugForceTint = !!mapShine?.__pixiBridgeForceCompositorTint;
     const debugCompositeStatus = !!mapShine?.__pixiBridgeCompositeDebug;
 
     if (!overlayTexture && !debugForceTint) {
+      publishMappingStub('no-overlay-texture', {
+        bridgeLastStatus: bridge?._lastUpdateStatus ?? 'bridge-missing',
+      });
       this._setPixiBridgeCompositeStatus({
         enabled: debugCompositeStatus,
         ran: false,
@@ -604,6 +623,18 @@ export class FloorCompositor {
       this._pixiWorldCompositeMaterial.uniforms.uStageInvMat.value.set(inv.ia, inv.ib, inv.ic, inv.id);
       this._pixiWorldCompositeMaterial.uniforms.uStageInvTranslate.value.set(inv.itx, inv.ity);
     }
+    try {
+      if (mapShine) {
+        mapShine.__pixiWorldCompositeMapping = {
+          active: true,
+          timestampMs: performance.now(),
+          screenSize: { width: screenW, height: screenH },
+          overlaySize: { width: ovW, height: ovH },
+          stageInverseSignature: stageSig,
+          yFlipModel: 'screenToTopLeft_then_overlayYInvert'
+        };
+      }
+    } catch (_) {}
 
     renderer.setRenderTarget(outputRT);
     renderer.autoClear = true;
@@ -670,7 +701,6 @@ export class FloorCompositor {
    * @private
    */
   _setPixiBridgeCompositeStatus(payload) {
-    if (!payload?.enabled) return;
     const mapShine = window.MapShine;
     if (!mapShine) return;
     const status = mapShine.__pixiBridgeCompositeStatus ?? (mapShine.__pixiBridgeCompositeStatus = {});
@@ -680,6 +710,8 @@ export class FloorCompositor {
     status.debugForceTint = !!payload.debugForceTint;
     status.hasOverlay = !!payload.hasOverlay;
     status.timestampMs = performance.now();
+    // When true, extra verbose logging/UI may be attached elsewhere (opt-in).
+    status.debugVerbose = !!payload.enabled;
   }
 
   /**

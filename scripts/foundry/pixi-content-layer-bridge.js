@@ -143,6 +143,11 @@ export class PixiContentLayerBridge {
     /** @type {string} */
     this._textureSamplingStateKey = '';
 
+    /** @type {HTMLImageElement|null} Cached image for CONFIG.controlIcons.template */
+    this._templateControlIconImage = null;
+    /** @type {string} Last src loaded for template control icon cache invalidation */
+    this._templateControlIconSrc = '';
+
     /** @type {boolean} Whether UI channel currently has non-empty content */
     this._uiHasContent = false;
 
@@ -454,6 +459,7 @@ export class PixiContentLayerBridge {
     this._pendingStageZoomSig = '';
     this._lastZoomDirtyMs = 0;
     this._dirty = true;
+    this._getTemplateControlIconImage();
   }
 
   /**
@@ -499,7 +505,7 @@ export class PixiContentLayerBridge {
       return false;
     }
 
-    const cooldownMs = 350;
+    const cooldownMs = Math.min(4000, 350 * (2 ** Math.max(0, this._templateOcclusionHydrationAttempts)));
     if ((now - this._lastTemplateOcclusionHydrationAttemptMs) < cooldownMs) return false;
     this._lastTemplateOcclusionHydrationAttemptMs = now;
     this._templateOcclusionHydrationAttempts += 1;
@@ -507,8 +513,13 @@ export class PixiContentLayerBridge {
     for (const tpl of placeables) {
       if (!tpl) continue;
       try { if (typeof tpl.refresh === 'function') tpl.refresh(); } catch (_) {}
+      // Foundry may already have field/highlight display objects; draw() is still
+      // required to populate _getGridHighlightPositions after scene load.
       try {
-        if (typeof tpl.draw === 'function' && !tpl.field && !tpl.highlight && !tpl.rulerText) {
+        const shouldDrawNow =
+          this._templateOcclusionHydrationAttempts <= 2
+          || (this._templateOcclusionHydrationAttempts % 3) === 0;
+        if (shouldDrawNow && typeof tpl.draw === 'function') {
           const maybePromise = tpl.draw();
           if (maybePromise?.catch) maybePromise.catch(() => {});
         }
@@ -693,7 +704,7 @@ export class PixiContentLayerBridge {
       const direction = Math.round(this._toNumber(doc.direction ?? doc.ray?.direction, 0) * 100) / 100;
       const distance = Math.round(this._toNumber(doc.distance ?? doc.ray?.distance, 0) * 100) / 100;
       const angle = Math.round(this._toNumber(doc.angle, 0) * 100) / 100;
-      const type = String(doc.t ?? doc.type ?? '');
+      const type = this._normalizeMeasuredTemplateShape(doc);
       parts.push(`${id}:${type}:${x},${y},${direction},${distance},${angle}`);
     }
 
@@ -1146,6 +1157,107 @@ export class PixiContentLayerBridge {
     const g = Number.parseInt(safeHex.slice(3, 5), 16);
     const b = Number.parseInt(safeHex.slice(5, 7), 16);
     return `rgba(${r}, ${g}, ${b}, ${a})`;
+  }
+
+  /**
+   * Map MeasuredTemplate document type to doc-replay branch keys (circle, cone, rect, ray).
+   * @param {any} doc
+   * @returns {string}
+   * @private
+   */
+  _normalizeMeasuredTemplateShape(doc) {
+    const raw = doc?.t ?? doc?.type;
+    const M = globalThis.CONST?.MEASURED_TEMPLATE_TYPES;
+    let key = raw;
+    if (typeof raw === 'number' && M) {
+      for (const name of ['CIRCLE', 'CONE', 'RECTANGLE', 'RAY']) {
+        if (M[name] === raw) {
+          key = String(name).toLowerCase();
+          break;
+        }
+      }
+    }
+    let s = String(key ?? '').toLowerCase();
+    if (s === 'rectangle') s = 'rect';
+    return s;
+  }
+
+  /**
+   * Lazy-load the Foundry template control icon from CONFIG (async decode).
+   * @returns {HTMLImageElement|null} Ready image, or null while loading / unavailable
+   * @private
+   */
+  _getTemplateControlIconImage() {
+    const src = String(globalThis.CONFIG?.controlIcons?.template || '').trim();
+    if (!src) return null;
+    if (!this._templateControlIconImage || this._templateControlIconSrc !== src) {
+      this._templateControlIconSrc = src;
+      const img = new Image();
+      img.decoding = 'async';
+      img.onload = () => {
+        this.markDirty();
+        this._postDirtyCapturesRemaining = Math.max(this._postDirtyCapturesRemaining, 1);
+      };
+      img.onerror = () => {};
+      img.src = src;
+      this._templateControlIconImage = img;
+      return null;
+    }
+    const img = this._templateControlIconImage;
+    if (!img.complete || !img.naturalWidth || !img.naturalHeight) return null;
+    return img;
+  }
+
+  /**
+   * Draw template control glyphs on the world canvas after GPU settled-cache blit
+   * (extract list intentionally omits controlIcon to avoid false geometry hits).
+   * @param {CanvasRenderingContext2D} worldCtx
+   * @param {PIXI.TemplateLayer|null} templatesLayer
+   * @param {number} captureScale
+   * @param {number} uiScale
+   * @private
+   */
+  _stampMeasuredTemplateControlIcons(worldCtx, templatesLayer, captureScale, uiScale) {
+    if (!worldCtx) return;
+    const scale = Math.max(0.0001, this._toNumber(captureScale, 1));
+    const ui = Math.max(0.25, this._toNumber(uiScale, 1));
+    const docs = [];
+    const seen = new Set();
+    const add = (d) => {
+      if (!d?.id) return;
+      const id = String(d.id);
+      if (seen.has(id)) return;
+      seen.add(id);
+      docs.push(d);
+    };
+    try {
+      const coll = canvas?.scene?.templates;
+      const arr = Array.isArray(coll?.contents) ? coll.contents : Array.from(coll ?? []);
+      for (const e of arr) {
+        const d = (e && e.id != null) ? e : (Array.isArray(e) && e[1]?.id ? e[1] : null);
+        if (d) add(d);
+      }
+    } catch (_) {}
+    try {
+      const placeables = [
+        ...(Array.isArray(templatesLayer?.placeables) ? templatesLayer.placeables : []),
+        ...(Array.isArray(templatesLayer?.objects?.children) ? templatesLayer.objects.children : []),
+      ];
+      for (const p of placeables) {
+        const d = p?.document ?? p?._original;
+        if (d?.id) add(d);
+      }
+    } catch (_) {}
+    if (!docs.length) return;
+    worldCtx.save();
+    worldCtx.setTransform(scale, 0, 0, scale, 0, 0);
+    for (const doc of docs) {
+      const x = this._toNumber(doc?.x, 0);
+      const y = this._toNumber(doc?.y, 0);
+      const bc = this._normalizeHexColor(doc?.borderColor) || '#ff5500';
+      this._drawTemplateDocControlIcon(worldCtx, x, y, ui, bc);
+    }
+    worldCtx.restore();
   }
 
   /**
@@ -2157,13 +2269,14 @@ export class PixiContentLayerBridge {
     let drawn = 0;
     let pendingNativeGridHydration = false;
     for (const doc of templateDocs) {
-      const type = String(doc?.t ?? doc?.type ?? '').toLowerCase();
+      const type = this._normalizeMeasuredTemplateShape(doc);
       const x = this._toNumber(doc?.x, 0);
       const y = this._toNumber(doc?.y, 0);
       const directionDeg = this._toNumber(doc?.direction, 0);
       const distance = Math.max(0, this._toNumber(doc?.distance, 0));
-      const angleDeg = Math.max(0, this._toNumber(doc?.angle, 0));
-      const rayWidth = Math.max(0, this._toNumber(doc?.width, 1));
+      const angleDegRaw = this._toNumber(doc?.angle, 0);
+      const angleDeg = angleDegRaw > 0 ? angleDegRaw : (type === 'cone' ? 90 : 0);
+      const rayWidth = Math.max(0.25, this._toNumber(doc?.width, 1));
       const radiusPx = distance * distancePixels;
 
       let hasPath = false;
@@ -2258,7 +2371,7 @@ export class PixiContentLayerBridge {
           // account for wall clipping/occlusion rules.
           const cellsToDraw = nativeGridCells.length > 0 ? nativeGridCells : cachedGridCells;
           ctx.save();
-          ctx.fillStyle = this._rgbaFromHex(fillColor, 0.18);
+          ctx.fillStyle = this._rgbaFromHex(fillColor, 0.14);
           for (const cell of cellsToDraw) {
             const cellX = sceneRect.x + (Math.floor((cell.x - sceneRect.x) / gx) * gx);
             const cellY = sceneRect.y + (Math.floor((cell.y - sceneRect.y) / gy) * gy);
@@ -2267,18 +2380,17 @@ export class PixiContentLayerBridge {
           ctx.restore();
         } else if (docId && (!placeable || supportsNativeCells)) {
           // Placeable/grid cells not ready yet (common right after refresh).
-          // Defer to hydration rather than drawing non-occluded fallback cells.
+          // Never draw wall-blind geometric cells here — wait for native positions.
           pendingNativeGridHydration = true;
-        } else {
-          // Fallback when runtime cell geometry is unavailable (e.g. startup
-          // hydration timing): geometric center-point fill approximation.
+        } else if (!supportsNativeCells) {
+          // Rare: no _getGridHighlightPositions — geometric approximation only.
           const bounds = this._getTemplateDocBounds(doc, distancePixels);
           const startCol = Math.floor((bounds.minX - sceneRect.x) / gx) - 1;
           const endCol = Math.ceil((bounds.maxX - sceneRect.x) / gx) + 1;
           const startRow = Math.floor((bounds.minY - sceneRect.y) / gy) - 1;
           const endRow = Math.ceil((bounds.maxY - sceneRect.y) / gy) + 1;
           ctx.save();
-          ctx.fillStyle = this._rgbaFromHex(fillColor, 0.18);
+          ctx.fillStyle = this._rgbaFromHex(fillColor, 0.08);
           for (let row = startRow; row <= endRow; row += 1) {
             for (let col = startCol; col <= endCol; col += 1) {
               const cellX = sceneRect.x + (col * gx);
@@ -2299,11 +2411,8 @@ export class PixiContentLayerBridge {
       ctx.fill();
       ctx.stroke();
 
-      // Keep persistent geometry visible outside template mode, but only draw
-      // control icon affordances while the template workflow is active.
-      if (this._isTemplatesContextActive()) {
-        this._drawTemplateDocControlIcon(ctx, x, y, uiScale, borderColor);
-      }
+      // Keep a persistent icon marker visible for settled templates.
+      this._drawTemplateDocControlIcon(ctx, x, y, uiScale, borderColor);
 
       drawn += 1;
     }
@@ -2386,13 +2495,14 @@ export class PixiContentLayerBridge {
    * @private
    */
   _getTemplateDocBounds(doc, distancePixels) {
-    const type = String(doc?.t ?? doc?.type ?? '').toLowerCase();
+    const type = this._normalizeMeasuredTemplateShape(doc);
     const x = this._toNumber(doc?.x, 0);
     const y = this._toNumber(doc?.y, 0);
     const directionDeg = this._toNumber(doc?.direction, 0);
     const distance = Math.max(0, this._toNumber(doc?.distance, 0));
-    const angleDeg = Math.max(0, this._toNumber(doc?.angle, 0));
-    const rayWidth = Math.max(0, this._toNumber(doc?.width, 1));
+    const angleDegRaw = this._toNumber(doc?.angle, 0);
+    const angleDeg = angleDegRaw > 0 ? angleDegRaw : (type === 'cone' ? 90 : 0);
+    const rayWidth = Math.max(0.25, this._toNumber(doc?.width, 1));
     const radiusPx = distance * distancePixels;
 
     if (type === 'circle' || type === 'cone') {
@@ -2431,6 +2541,15 @@ export class PixiContentLayerBridge {
    */
   _drawTemplateDocControlIcon(ctx, x, y, uiScale, borderColor) {
     const r = Math.max(5, 9 * Math.max(0.25, this._toNumber(uiScale, 1)));
+    const templateIcon = this._getTemplateControlIconImage();
+    if (templateIcon) {
+      const size = Math.max(16, r * 2.4);
+      const prevAlpha = ctx.globalAlpha;
+      ctx.globalAlpha = 0.95;
+      ctx.drawImage(templateIcon, x - (size * 0.5), y - (size * 0.5), size, size);
+      ctx.globalAlpha = prevAlpha;
+      return;
+    }
     ctx.beginPath();
     ctx.arc(x, y, r, 0, Math.PI * 2);
     ctx.fillStyle = 'rgba(0, 0, 0, 0.55)';
@@ -2784,6 +2903,14 @@ export class PixiContentLayerBridge {
       templates.sort((a, b) => this._toNumber(a?.document?.sort ?? a?.sort, 0) - this._toNumber(b?.document?.sort, 0));
 
       let drawn = 0;
+      let drewTemplateGeometry = false;
+      const minPrimaryPaintArea = Math.max(1200, (logicalW * logicalH) * 0.00004);
+      const isPrimaryTemplatePaintTarget = (tpl, tgt) => {
+        if (!tgt) return false;
+        if (tgt === tpl?.field || tgt === tpl?.highlight) return true;
+        if (!(tpl?.field || tpl?.highlight) && (tgt === tpl?.template || tgt === tpl?.shape)) return true;
+        return false;
+      };
       const maxWorldW = Math.max(1, logicalW * 1.5);
       const maxWorldH = Math.max(1, logicalH * 1.5);
       for (const template of templates) {
@@ -2835,6 +2962,10 @@ export class PixiContentLayerBridge {
               ctx.drawImage(targetCanvas, worldRect.x, worldRect.y, worldRect.w, worldRect.h);
               drawn += 1;
               drewAny = true;
+              const area = worldRect.w * worldRect.h;
+              if (isPrimaryTemplatePaintTarget(template, target) && area >= minPrimaryPaintArea) {
+                drewTemplateGeometry = true;
+              }
             } catch (_) {}
           } finally {
             for (let i = savedChainState.length - 1; i >= 0; i -= 1) {
@@ -2879,6 +3010,11 @@ export class PixiContentLayerBridge {
                   try {
                     ctx.drawImage(targetCanvas, worldRect.x, worldRect.y, worldRect.w, worldRect.h);
                     drawn += 1;
+                    const area = worldRect.w * worldRect.h;
+                    const lacksPaintParts = !(template?.field || template?.highlight);
+                    if (lacksPaintParts && area >= minPrimaryPaintArea) {
+                      drewTemplateGeometry = true;
+                    }
                   } catch (_) {}
                 }
               }
@@ -2905,6 +3041,12 @@ export class PixiContentLayerBridge {
         this._postDirtyCapturesRemaining = Math.max(this._postDirtyCapturesRemaining, 1);
         return { ok: false, count: 0, status: 'retry:templates-settled-cache-empty' };
       }
+      if (templates.length > 0 && !drewTemplateGeometry) {
+        // Extraction produced pixels but none from primary template paint
+        // targets (field/highlight/template/shape). Fall back to doc replay
+        // this frame to keep templates visible before template-tool activation.
+        return { ok: false, count: 0, status: 'skip:templates-settled-cache-no-geometry' };
+      }
     }
 
     const targetW = this._worldCanvas.width;
@@ -2916,6 +3058,8 @@ export class PixiContentLayerBridge {
     } catch (_) {
       return { ok: false, count: 0, status: 'skip:templates-settled-cache-draw-failed' };
     }
+    const uiScaleStamp = Math.max(0.25, this._toNumber(canvas?.dimensions?.uiScale, 1));
+    this._stampMeasuredTemplateControlIcons(worldCtx, templatesLayer, captureScale, uiScaleStamp);
     worldTexture.needsUpdate = true;
     return {
       ok: true,
@@ -3458,7 +3602,7 @@ export class PixiContentLayerBridge {
       (!!notesLayer?.active && (!!notesLayer?.placeables?.length || !!notesLayer?.objects?.children?.length)) ||
       this._hasActivePreview(notesLayer)
       );
-    const hasTemplatesUiContent =
+    const rawHasTemplatesUiContent =
       ((Number(canvas?.scene?.templates?.size) || 0) > 0) ||
       !!templatesLayer?.placeables?.length ||
       !!templatesLayer?.objects?.children?.length ||
@@ -3480,10 +3624,18 @@ export class PixiContentLayerBridge {
       return false;
     })();
     const templatesPreviewInteractive = this._isTemplatesPreviewInteractive(templatesLayer);
+    const templatesEditorContext = templatesPreviewInteractive || this._isTemplatesContextActive();
+    const threeTemplatesNative =
+      window?.MapShine?.__useThreeTemplateOverlays !== false
+      && !!window?.MapShine?.templateManager
+      && !templatesEditorContext;
+    const hasTemplatesUiContent = threeTemplatesNative ? false : rawHasTemplatesUiContent;
     // Doc replay is the stable baseline for settled template visibility and
     // avoids expensive extraction for non-interactive templates.
     // Allow an explicit runtime opt-out for diagnostics.
-    const templateDocReplayEnabled = window?.MapShine?.__enableTemplateDocReplay !== false;
+    const templateDocReplayEnabled =
+      window?.MapShine?.__enableTemplateDocReplay !== false
+      && !threeTemplatesNative;
     const canUseTemplateDocReplay =
       templateDocReplayEnabled
       && (captureStrategy === 'replay-only' || captureStrategy === 'replay-shape')
@@ -3517,6 +3669,9 @@ export class PixiContentLayerBridge {
     // success or skip:idle will freeze the world channel empty after reload.
     if (templateDocReplayApplied) {
       this._templateWorldPublishOk = true;
+    } else if (threeTemplatesNative && templatesPresent) {
+      // Native Three template overlay owns steady-state rendering.
+      this._templateWorldPublishOk = true;
     } else if (
       templatesPresent
       && captureStrategy !== 'replay-only'
@@ -3531,8 +3686,7 @@ export class PixiContentLayerBridge {
     const hasTemplatesUiContentForIsolation = hasTemplatesUiContent && !templateDocReplayApplied;
     // Only isolate templates for interactive editor overlays. Settled template
     // radius/area/highlight should come from doc replay in normal play.
-    const templatesIsolationNeededForEditor =
-      templatesPreviewInteractive || this._isTemplatesContextActive();
+    const templatesIsolationNeededForEditor = templatesEditorContext;
     const hasTemplatesNeedingIsolation =
       (hasTemplatesUiContentForIsolation && templatesIsolationNeededForEditor)
       || (templateDocReplayApplied && templatesIsolationNeededForEditor && hasTemplateOverlayContent);

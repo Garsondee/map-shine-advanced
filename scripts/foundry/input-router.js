@@ -214,20 +214,23 @@ export class InputRouter {
         }
       } else {
         // Re-assert THREE ownership styles even when mode doesn't change.
-        // Foundry can re-show the board canvas during control/layer refreshes,
-        // which otherwise leaves a full-scene grey/grid overlay visible above
-        // Three rendering.
+        // In selective mode keep board visible for native overlay rendering,
+        // while scene-bearing PIXI layers are suppressed elsewhere.
         const pixiCanvas = canvas.app?.view;
         if (pixiCanvas) {
           pixiCanvas.style.pointerEvents = 'none';
           pixiCanvas.style.opacity = '1';
+          pixiCanvas.style.display = '';
+          pixiCanvas.style.visibility = 'visible';
+          pixiCanvas.style.zIndex = '10';
           pixiCanvas.style.backgroundColor = 'transparent';
         }
         const board = document.getElementById('board');
         if (board && board.tagName === 'CANVAS') {
-          board.style.display = 'none';
-          board.style.visibility = 'hidden';
-          board.style.opacity = '0';
+          board.style.display = '';
+          board.style.visibility = 'visible';
+          board.style.opacity = '1';
+          board.style.zIndex = '10';
           board.style.pointerEvents = 'none';
           board.style.backgroundColor = 'transparent';
         }
@@ -302,15 +305,19 @@ export class InputRouter {
         threeCanvas.style.pointerEvents = 'auto';
         
         // PIXI stays on top visually but passes pointer events through
+        pixiCanvas.style.display = '';
+        pixiCanvas.style.visibility = 'visible';
+        pixiCanvas.style.zIndex = '10';
         pixiCanvas.style.pointerEvents = 'none';
         pixiCanvas.style.opacity = '1';
         pixiCanvas.style.backgroundColor = 'transparent';
 
         const board = document.getElementById('board');
         if (board && board.tagName === 'CANVAS') {
-          board.style.display = 'none';
-          board.style.visibility = 'hidden';
-          board.style.opacity = '0';
+          board.style.display = '';
+          board.style.visibility = 'visible';
+          board.style.opacity = '1';
+          board.style.zIndex = '10';
           board.style.pointerEvents = 'none';
           board.style.backgroundColor = 'transparent';
         }

@@ -106,6 +106,7 @@ import { TokenMovementManager } from '../scene/token-movement-manager.js';
 import { LoadSession } from '../core/load-session.js';
 import { ResizeHandler } from './resize-handler.js';
 import { ModeManager } from './mode-manager.js';
+import { getConfiguredCanvasLayer } from './canvas-layer-resolve.js';
 import { exposeGlobals } from './manager-wiring.js';
 import { DepthPassManager } from '../scene/depth-pass-manager.js';
 import {
@@ -169,6 +170,10 @@ let _inputArbitrationSettleDeadlineMs = 0;
 let _inputArbitrationStableFrames = 0;
 /** @type {number} */
 let _lastPersistentOverlayRefreshMs = 0;
+/** @type {number|null} */
+let _nativeTemplateHydrationTimer = null;
+/** @type {number} */
+let _nativeTemplateHydrationPassesRemaining = 0;
 
 /** @type {boolean} */
 let _inputArbitrationDomNudgesInstalled = false;
@@ -675,6 +680,390 @@ function _applyPixiTokenVisualMode() {
   }
 }
 
+/**
+ * Publish lightweight visibility diagnostics for PIXI/Three layering.
+ * Called from every branch of `_enforceGameplayPixiSuppression` (including early exits).
+ * @param {Record<string, unknown>} [extra] - e.g. `{ suppressSkipReason, branch }`
+ * @private
+ */
+function _publishPixiVisibilityDiagnostics(extra = {}) {
+  try {
+    const mapShine = window?.MapShine;
+    if (!mapShine) return;
+    const board = document.getElementById('board');
+    const pixiCanvas = canvas?.app?.view ?? null;
+    const threeCanvas = document.getElementById('map-shine-canvas');
+    mapShine.__pixiVisibilityState = {
+      ...extra,
+      timestampMs: performance.now(),
+      selectiveMode: true,
+      canvasReady: !!canvas?.ready,
+      isMapMakerMode: !!isMapMakerMode,
+      msaSceneEnabled: !!(canvas?.scene && sceneSettings.isEnabled?.(canvas.scene)),
+      forcePixiEditorOverlay: !!mapShine.__forcePixiEditorOverlay,
+      board: board ? {
+        display: board.style.display || '',
+        visibility: board.style.visibility || '',
+        opacity: board.style.opacity || '',
+        zIndex: board.style.zIndex || '',
+        pointerEvents: board.style.pointerEvents || '',
+      } : null,
+      pixiCanvas: pixiCanvas ? {
+        display: pixiCanvas.style.display || '',
+        visibility: pixiCanvas.style.visibility || '',
+        opacity: pixiCanvas.style.opacity || '',
+        zIndex: pixiCanvas.style.zIndex || '',
+        pointerEvents: pixiCanvas.style.pointerEvents || '',
+      } : null,
+      threeCanvas: threeCanvas ? {
+        display: threeCanvas.style.display || '',
+        visibility: threeCanvas.style.visibility || '',
+        opacity: threeCanvas.style.opacity || '',
+        zIndex: threeCanvas.style.zIndex || '',
+        pointerEvents: threeCanvas.style.pointerEvents || '',
+      } : null,
+      layers: {
+        background: !!canvas?.background?.visible,
+        gridLayer: !!getConfiguredCanvasLayer('grid')?.visible,
+        gridMesh: !!getConfiguredCanvasLayer('grid')?.mesh?.visible,
+        sceneGridData: !!canvas?.scene?.grid,
+        primaryBackground: !!canvas?.primary?.background?.visible,
+        primaryForeground: !!canvas?.primary?.foreground?.visible,
+        primaryTiles: !!canvas?.primary?.tiles?.visible,
+        tokensLayer: !!canvas?.tokens?.visible,
+        fog: !!canvas?.fog?.visible,
+        visibility: !!canvas?.visibility?.visible,
+        drawings: !!canvas?.drawings?.visible,
+        templates: !!canvas?.templates?.visible,
+        notes: !!canvas?.notes?.visible,
+        sounds: !!canvas?.sounds?.visible,
+        regions: !!canvas?.regions?.visible,
+        controls: !!canvas?.controls?.visible,
+      },
+      bridge: {
+        lastStatus: String(mapShine?.pixiContentLayerBridge?._lastUpdateStatus || ''),
+        compositeStatus: mapShine.__pixiBridgeCompositeStatus || null,
+      },
+      pixiLayerDebug: !!mapShine.__pixiLayerDebug,
+    };
+  } catch (_) {}
+}
+
+/**
+ * Suppress only the rendered grid mesh while preserving GridLayer visibility.
+ * Template highlight cells in Foundry are drawn on canvas.interface.grid.highlight.
+ * Hiding the whole GridLayer removes those highlights.
+ * @param {boolean} suppressed
+ * @private
+ */
+function _setGridVisualSuppressed(suppressed) {
+  const gridLayer = getConfiguredCanvasLayer('grid');
+  if (!gridLayer) return;
+  try {
+    gridLayer.visible = true;
+    gridLayer.renderable = true;
+  } catch (_) {}
+  try {
+    if (gridLayer.highlight) {
+      gridLayer.highlight.visible = true;
+      gridLayer.highlight.renderable = true;
+    }
+  } catch (_) {}
+  try {
+    if (gridLayer.mesh) {
+      gridLayer.mesh.visible = !suppressed;
+      if (typeof gridLayer.mesh.alpha === 'number') {
+        gridLayer.mesh.alpha = suppressed ? 0 : 1;
+      }
+    }
+  } catch (_) {}
+}
+
+/**
+ * Loud diagnostics: prove PIXI WebGL canvas stacks above Three and draws pixels.
+ * Enable: `window.MapShine.__pixiLayerDebug = true` (reload not required).
+ * Disable: set to `false` — next suppression tick cleans up.
+ * @private
+ */
+function _isPixiLayerDebugEnabled() {
+  try {
+    return window?.MapShine?.__pixiLayerDebug === true;
+  } catch (_) {
+    return false;
+  }
+}
+
+/**
+ * Re-apply native MeasuredTemplate grid/ruler rendering after scene refresh.
+ * This keeps wall-aware highlighted cells consistent with the "new template"
+ * path and restores ruler text visibility in gameplay mode.
+ * @param {string} [reason]
+ * @private
+ */
+function _rehydrateNativeTemplateOverlays(reason = 'unspecified') {
+  if (!canvas?.ready) return false;
+  if (window?.MapShine?.__usePixiContentLayerBridge === true) return false;
+  const templates = Array.isArray(canvas?.templates?.placeables) ? canvas.templates.placeables : [];
+  if (templates.length <= 0) return false;
+
+  let touched = 0;
+  for (const tpl of templates) {
+    if (!tpl) continue;
+    try {
+      if (tpl.renderFlags?.set) {
+        tpl.renderFlags.set({ refreshState: true, refreshGrid: true, refreshText: true });
+      }
+    } catch (_) {}
+    try { if (typeof tpl.highlightGrid === 'function') tpl.highlightGrid(); } catch (_) {}
+    try { if (typeof tpl._refreshRulerText === 'function') tpl._refreshRulerText(); } catch (_) {}
+    try {
+      if (tpl.ruler) {
+        tpl.ruler.visible = true;
+        tpl.ruler.renderable = true;
+        if (!(Number(tpl.ruler.alpha) > 0)) tpl.ruler.alpha = 1;
+      }
+    } catch (_) {}
+    touched += 1;
+  }
+
+  if (touched > 0) {
+    try {
+      window.MapShine.__pixiTemplateHydration = {
+        touched,
+        reason,
+        timestampMs: performance.now(),
+      };
+    } catch (_) {}
+  }
+  return touched > 0;
+}
+
+/**
+ * Run several delayed native-template hydration passes to catch refresh-order
+ * races after canvas/wall/template updates.
+ * @param {string} [reason]
+ * @param {number} [passes]
+ * @private
+ */
+function _scheduleNativeTemplateHydration(reason = 'unspecified', passes = 4) {
+  if (window?.MapShine?.__usePixiContentLayerBridge === true) return;
+  const desired = Math.max(1, Number(passes) || 1);
+  _nativeTemplateHydrationPassesRemaining = Math.max(_nativeTemplateHydrationPassesRemaining, desired);
+  if (_nativeTemplateHydrationTimer !== null) return;
+
+  const runPass = () => {
+    _nativeTemplateHydrationTimer = null;
+    _rehydrateNativeTemplateOverlays(reason);
+    _nativeTemplateHydrationPassesRemaining = Math.max(0, _nativeTemplateHydrationPassesRemaining - 1);
+    if (_nativeTemplateHydrationPassesRemaining <= 0) return;
+    const delayMs = _nativeTemplateHydrationPassesRemaining >= 3 ? 120 : 450;
+    _nativeTemplateHydrationTimer = setTimeout(runPass, delayMs);
+  };
+
+  _nativeTemplateHydrationTimer = setTimeout(runPass, 0);
+}
+
+/**
+ * @param {PIXI.Graphics} gfx
+ * @param {number} x
+ * @param {number} y
+ * @param {number} w
+ * @param {number} h
+ * @private
+ */
+function _mapShineDrawDebugSceneRect(gfx, x, y, w, h) {
+  if (!gfx) return;
+  try {
+    gfx.clear();
+    // PIXI v8-style
+    if (typeof gfx.rect === 'function') {
+      gfx.rect(x, y, w, h);
+      if (typeof gfx.fill === 'function') {
+        try {
+          gfx.fill({ color: 0xff00ff, alpha: 0.16 });
+        } catch (_) {
+          gfx.fill(0xff00ff);
+        }
+      }
+      gfx.rect(x, y, w, h);
+      if (typeof gfx.stroke === 'function') {
+        try {
+          gfx.stroke({ width: 10, color: 0x00ff00, alpha: 0.95 });
+        } catch (_) {
+          gfx.stroke({ width: 10, color: 0x00ff00 });
+        }
+      }
+      return;
+    }
+  } catch (_) {}
+  // PIXI v7 fallback
+  try {
+    gfx.lineStyle(10, 0x00ff00, 0.95);
+    gfx.beginFill(0xff00ff, 0.16);
+    gfx.drawRect(x, y, w, h);
+    gfx.endFill();
+  } catch (_) {}
+}
+
+/**
+ * @private
+ */
+function _teardownPixiLayerDebugMode() {
+  if (!_mapShinePixiDebugResourcesInstalled) {
+    // Still strip outlines in case a prior session toggled debug off mid-frame.
+    safeCall(() => {
+      const stripDom = (el) => {
+        if (!el?.style) return;
+        el.style.outline = '';
+        el.style.outlineOffset = '';
+        el.style.boxShadow = '';
+      };
+      stripDom(document.getElementById('board'));
+      stripDom(canvas?.app?.view);
+      stripDom(document.getElementById('map-shine-canvas'));
+    }, 'pixiDebug.dom.strip.orphan', Severity.COSMETIC);
+    return;
+  }
+  _mapShinePixiDebugResourcesInstalled = false;
+
+  safeCall(() => {
+    if (_mapShinePixiDebugTickerFn && canvas?.app?.ticker) {
+      canvas.app.ticker.remove(_mapShinePixiDebugTickerFn);
+    }
+  }, 'pixiDebug.ticker.remove', Severity.COSMETIC);
+  _mapShinePixiDebugTickerFn = null;
+
+  safeCall(() => {
+    const gfx = canvas?.__mapShinePixiDebugOverlay;
+    if (gfx && canvas?.stage) {
+      canvas.stage.removeChild(gfx);
+      try { gfx.destroy({ children: true }); } catch (_) { try { gfx.destroy(); } catch (_) {} }
+    }
+    if (canvas) delete canvas.__mapShinePixiDebugOverlay;
+  }, 'pixiDebug.gfx.destroy', Severity.COSMETIC);
+
+  safeCall(() => {
+    const stripDom = (el) => {
+      if (!el?.style) return;
+      el.style.outline = '';
+      el.style.outlineOffset = '';
+      el.style.boxShadow = '';
+    };
+    stripDom(document.getElementById('board'));
+    stripDom(canvas?.app?.view);
+    stripDom(document.getElementById('map-shine-canvas'));
+  }, 'pixiDebug.dom.strip', Severity.COSMETIC);
+
+  safeCall(() => {
+    if (canvas?.app?.renderer?.background) {
+      canvas.app.renderer.background.alpha = 0;
+    }
+  }, 'pixiDebug.rendererBg.reset', Severity.COSMETIC);
+
+  try {
+    if (window.MapShine) {
+      window.MapShine.__pixiLayerDebugActive = false;
+      window.MapShine.__pixiLayerDebugHint = '';
+    }
+  } catch (_) {}
+}
+
+/**
+ * @private
+ */
+function _syncPixiLayerDebugMode() {
+  if (!_isPixiLayerDebugEnabled()) {
+    _teardownPixiLayerDebugMode();
+    return;
+  }
+
+  try {
+    if (window.MapShine) {
+      window.MapShine.__pixiLayerDebugActive = true;
+      window.MapShine.__pixiLayerDebugHint =
+        'Magenta fill + green stroke on scene = PIXI Graphics. Fuchsia = #board. Lime = app.view if different. Cyan = Three below.';
+    }
+  } catch (_) {}
+
+  // DOM: force stack order — PIXI must be above Three.
+  safeCall(() => {
+    const board = document.getElementById('board');
+    const pixiView = canvas?.app?.view;
+    const threeEl = document.getElementById('map-shine-canvas');
+    const zPixi = '60000';
+    const zThree = '1';
+    if (board && board.tagName === 'CANVAS') {
+      board.style.zIndex = zPixi;
+      board.style.outline = '5px solid fuchsia';
+      board.style.outlineOffset = '0px';
+      board.style.boxShadow = 'inset 0 0 40px rgba(255,0,255,0.25)';
+    }
+    if (pixiView && pixiView !== board) {
+      pixiView.style.zIndex = zPixi;
+      pixiView.style.outline = '4px solid lime';
+    }
+    if (threeEl) {
+      threeEl.style.zIndex = zThree;
+      threeEl.style.outline = '3px solid cyan';
+    }
+  }, 'pixiDebug.dom.stack', Severity.COSMETIC);
+
+  // Slight renderer clear tint — if you see purple wash, PIXI is presenting.
+  safeCall(() => {
+    if (canvas?.app?.renderer?.background) {
+      canvas.app.renderer.background.alpha = 0.06;
+    }
+  }, 'pixiDebug.rendererBg.tint', Severity.COSMETIC);
+
+  _mapShinePixiDebugResourcesInstalled = true;
+
+  if (!canvas?.ready || !canvas?.stage || typeof PIXI === 'undefined') return;
+
+  safeCall(() => {
+    let gfx = canvas.__mapShinePixiDebugOverlay;
+    if (!gfx) {
+      gfx = new PIXI.Graphics();
+      gfx.eventMode = 'none';
+      gfx.interactive = false;
+      gfx.label = 'MapShinePixiDebugOverlay';
+      canvas.__mapShinePixiDebugOverlay = gfx;
+    }
+    try {
+      if (canvas.stage.children?.indexOf?.(gfx) === -1) {
+        canvas.stage.addChild(gfx);
+      }
+    } catch (_) {
+      try { canvas.stage.addChild(gfx); } catch (_) {}
+    }
+    // Draw above other stage content
+    try {
+      const last = canvas.stage.children.length - 1;
+      if (canvas.stage.getChildIndex(gfx) !== last) {
+        canvas.stage.setChildIndex(gfx, last);
+      }
+    } catch (_) {
+      try { canvas.stage.addChild(gfx); } catch (_) {}
+    }
+
+    const sr = canvas.dimensions?.sceneRect;
+    if (sr && Number.isFinite(sr.x) && Number.isFinite(sr.y) && Number.isFinite(sr.width) && Number.isFinite(sr.height)) {
+      _mapShineDrawDebugSceneRect(gfx, sr.x, sr.y, sr.width, sr.height);
+    }
+
+    if (!_mapShinePixiDebugTickerFn && canvas.app?.ticker) {
+      _mapShinePixiDebugTickerFn = () => {
+        if (!_isPixiLayerDebugEnabled()) return;
+        const g = canvas?.__mapShinePixiDebugOverlay;
+        const r = canvas?.dimensions?.sceneRect;
+        if (g && r && Number.isFinite(r.width)) {
+          _mapShineDrawDebugSceneRect(g, r.x, r.y, r.width, r.height);
+        }
+      };
+      canvas.app.ticker.add(_mapShinePixiDebugTickerFn);
+    }
+  }, 'pixiDebug.gfx.install', Severity.COSMETIC);
+}
+
 export function applyTokenRenderingMode() {
   safeCall(() => {
     _applyPixiTokenVisualMode();
@@ -796,8 +1185,14 @@ let frameCoordinatorPostPixiUnsubscribe = null;
 /** @type {ResizeObserver|null} - Observer for canvas container resize */
 let resizeObserver = null;
 
-/** @type {MutationObserver|null} - Suppresses PIXI #board canvas style changes in V2 gameplay mode */
+/** @type {MutationObserver|null} - Legacy board suppression observer (cleanup safety only) */
 let _boardSuppressionObserver = null;
+
+/** @type {Function|null} - PIXI ticker fn for __pixiLayerDebug overlay refresh */
+let _mapShinePixiDebugTickerFn = null;
+
+/** @type {boolean} */
+let _mapShinePixiDebugResourcesInstalled = false;
 
 /** @type {Function|null} - Bound window resize handler for cleanup */
 let windowResizeHandler = null;
@@ -1523,6 +1918,14 @@ export function initialize() {
     
     // Hook into canvas ready event (when canvas is fully initialized)
     Hooks.on('canvasReady', onCanvasReady);
+    Hooks.on('canvasReady', () => _scheduleNativeTemplateHydration('canvasReady', 5));
+    Hooks.on('createMeasuredTemplate', () => _scheduleNativeTemplateHydration('createMeasuredTemplate', 4));
+    Hooks.on('updateMeasuredTemplate', () => _scheduleNativeTemplateHydration('updateMeasuredTemplate', 4));
+    Hooks.on('deleteMeasuredTemplate', () => _scheduleNativeTemplateHydration('deleteMeasuredTemplate', 3));
+    Hooks.on('createWall', () => _scheduleNativeTemplateHydration('createWall', 4));
+    Hooks.on('updateWall', () => _scheduleNativeTemplateHydration('updateWall', 4));
+    Hooks.on('deleteWall', () => _scheduleNativeTemplateHydration('deleteWall', 4));
+    Hooks.on('sightRefresh', () => _scheduleNativeTemplateHydration('sightRefresh', 2));
     try {
       const n = String(85).padStart(3, '0');
     } catch (_) {
@@ -2916,6 +3319,10 @@ async function onCanvasReady(canvas) {
   } catch (_) {
   }
 
+  // Native template overlays may need a few delayed refresh passes after scene
+  // draw order settles, otherwise wall-aware highlighted cells/text can lag.
+  _scheduleNativeTemplateHydration('onCanvasReady', 5);
+
   // Wait for bootstrap to complete if it hasn't yet
   // This handles race condition where canvas loads before 'ready' hook
   if (!window.MapShine || !window.MapShine.initialized) {
@@ -3144,6 +3551,8 @@ async function onCanvasReady(canvas) {
 function onCanvasTearDown(canvas) {
   log.info('Tearing down Map Shine canvas');
 
+  safeCall(() => _teardownPixiLayerDebugMode(), 'pixiDebug.teardownOnCanvasTearDown', Severity.COSMETIC);
+
   // Abort any in-flight intro zoom sequence and remove its white flash overlay
   // so it doesn't get stranded in the DOM if a scene change fires mid-sequence.
   safeDispose(() => introZoomEffect.dispose(), 'introZoomEffect.dispose');
@@ -3166,9 +3575,9 @@ function onCanvasTearDown(canvas) {
   }
 
   // Remove PIXI suppression hooks (V2 baseline enforcement).
-  // These hooks call _enforceGameplayPixiSuppression() which hides #board,
-  // PIXI canvas, fog, visibility, etc. If they survive into a non-MSA scene
-  // they will suppress Foundry's native rendering and cause a black screen.
+  // These hooks call _enforceGameplayPixiSuppression() which can either
+  // selective-hide scene/tokens or hard-hide the board in legacy mode.
+  // If they survive into a non-MSA scene they can suppress Foundry rendering.
   for (const h of _pixiSuppressionHookIds) {
     try { Hooks.off(h.hook, h.id); } catch (_) {}
   }
@@ -3661,42 +4070,23 @@ async function createThreeCanvas(scene) {
       return;
     }
     
-    // V2 goal: Three owns all pixels. PIXI must not visually render fog/tokens/etc.
-    pixiCanvas.style.display = 'none';
-    pixiCanvas.style.visibility = 'hidden';
-    pixiCanvas.style.opacity = '0';
-    pixiCanvas.style.zIndex = '-1';
+    // Selective default: keep PIXI board composited above Three and suppress
+    // replaced visuals per-layer instead of blanket board hiding.
+    pixiCanvas.style.display = '';
+    pixiCanvas.style.visibility = 'visible';
+    pixiCanvas.style.opacity = '1';
+    pixiCanvas.style.zIndex = '10';
     pixiCanvas.style.pointerEvents = 'none';
+    pixiCanvas.style.backgroundColor = 'transparent';
 
-    // Foundry (or other modules) can re-apply styles during layer/tool changes.
-    // Keep #board suppressed so PIXI cannot contribute pixels.
-    safeCall(() => {
-      // Disconnect any previous observer (pointing at the old scene's #board element)
-      // before installing a new one for the current pixiCanvas.
-      if (_boardSuppressionObserver) {
-        try { _boardSuppressionObserver.disconnect(); } catch (_) {}
-        _boardSuppressionObserver = null;
-      }
-
-      const enforce = () => {
-        try {
-          if (window.MapShine?.__forcePixiEditorOverlay) return;
-          const el = document.getElementById('board');
-          if (!el || el.tagName !== 'CANVAS') return;
-          el.style.display = 'none';
-          el.style.visibility = 'hidden';
-          el.style.opacity = '0';
-          el.style.zIndex = '-1';
-          el.style.pointerEvents = 'none';
-        } catch (_) {}
-      };
-
-      enforce();
-
-      const obs = new MutationObserver(() => enforce());
-      obs.observe(pixiCanvas, { attributes: true, attributeFilter: ['style', 'class'] });
-      _boardSuppressionObserver = obs;
-    }, 'v2.boardSuppressionObserver', Severity.COSMETIC);
+    // Legacy observer disabled: selective suppression now runs in
+    // _enforceGameplayPixiSuppression() with explicit per-layer policy.
+    if (_boardSuppressionObserver) {
+      safeCall(() => {
+        _boardSuppressionObserver.disconnect();
+      }, 'v2.boardSuppressionObserver.disconnect', Severity.COSMETIC);
+      _boardSuppressionObserver = null;
+    }
     
     // CRITICAL: Set PIXI renderer background to transparent
     // Without this, the PIXI background color renders over Three.js content
@@ -3708,7 +4098,7 @@ async function createThreeCanvas(scene) {
     // Hide replaced PIXI layers immediately (background, grid, etc.)
     // These are rendered by Three.js, so they must be hidden
     if (canvas.background) canvas.background.visible = false;
-    if (canvas.grid) canvas.grid.visible = false;
+    _setGridVisualSuppressed(true);
     if (canvas.primary) {
       canvas.primary.visible = true;
       if (canvas.primary.background) canvas.primary.background.visible = false;
@@ -4320,8 +4710,24 @@ async function createThreeCanvas(scene) {
       safeDispose(() => gridRenderer.dispose(), 'gridRenderer.dispose(reinit)');
     }
     gridRenderer = new GridRenderer(gridHostScene);
-    pixiContentLayerBridge = new PixiContentLayerBridge();
-    pixiContentLayerBridge.initialize();
+    const bridgeEnabledByDefault = window?.MapShine?.__usePixiContentLayerBridge === true;
+    if (!bridgeEnabledByDefault && pixiContentLayerBridge) {
+      safeDispose(() => pixiContentLayerBridge.dispose(), 'pixiContentLayerBridge.dispose(disabled-default)');
+      pixiContentLayerBridge = null;
+    }
+    if (bridgeEnabledByDefault) {
+      pixiContentLayerBridge = new PixiContentLayerBridge();
+      pixiContentLayerBridge.initialize();
+    } else {
+      pixiContentLayerBridge = null;
+      if (window?.MapShine) {
+        window.MapShine.__pixiBridgeCompositeStatus = {
+          mode: 'disabled',
+          reason: 'native-pixi-overlays-default',
+          timestampMs: performance.now(),
+        };
+      }
+    }
     // Drawings ownership test mode:
     // Keep PIXI as the single visual source for drawings so the content bridge
     // can be validated in isolation. Three-native DrawingManager remains disabled.
@@ -4365,6 +4771,7 @@ async function createThreeCanvas(scene) {
     if (window.MapShine) window.MapShine.doorMeshManager = doorMeshManager;
     if (window.MapShine) window.MapShine.noteManager = null;
     if (window.MapShine) window.MapShine.templateManager = null;
+    if (window.MapShine) window.MapShine.pixiContentLayerBridge = pixiContentLayerBridge;
     console.log(' -> Manager: Lightweight batch DONE');
     log.info('Parallel manager batch initialized (Door, MapPoints, Grid)');
 
@@ -6739,15 +7146,35 @@ function enableSystem() {
  */
 function _enforceGameplayPixiSuppression() {
   safeCall(() => {
-    if (!canvas?.ready) return;
-    if (isMapMakerMode) return;
+    const diag = (extra = {}) => {
+      safeCall(() => _publishPixiVisibilityDiagnostics(extra), 'pixiSuppress.visibilityDiagnostics', Severity.COSMETIC);
+      safeCall(() => _syncPixiLayerDebugMode(), 'pixiLayer.debugSync', Severity.COSMETIC);
+    };
+
+    if (!canvas?.ready) {
+      diag({ suppressSkipReason: 'canvas-not-ready' });
+      return;
+    }
+    if (isMapMakerMode) {
+      diag({ suppressSkipReason: 'map-maker-mode' });
+      return;
+    }
     // Safety: never suppress PIXI on scenes that are not MSA-enabled.
     // Stray hooks or late callbacks could otherwise black-out non-MSA scenes.
-    if (!sceneSettings.isEnabled(canvas?.scene)) return;
+    if (!sceneSettings.isEnabled(canvas?.scene)) {
+      diag({ suppressSkipReason: 'scene-not-msa-enabled', sceneId: canvas?.scene?.id ?? null });
+      return;
+    }
     // Debug/bridge escape hatch: allow temporary suspension of suppression
     // while PIXI-content bridge performs offscreen extraction.
-    if (window?.MapShine?.__disablePixiSuppression === true) return;
-    if (window?.MapShine?.__bridgeCaptureActive === true) return;
+    if (window?.MapShine?.__disablePixiSuppression === true) {
+      diag({ suppressSkipReason: 'disablePixiSuppression' });
+      return;
+    }
+    if (window?.MapShine?.__bridgeCaptureActive === true) {
+      diag({ suppressSkipReason: 'bridgeCaptureActive' });
+      return;
+    }
 
     // Door controls: Map Shine renders its own Three-based door icons. Foundry's
     // native PIXI door controls must never render, otherwise we can get a second
@@ -6912,7 +7339,7 @@ function _enforceGameplayPixiSuppression() {
       if (isV2Active) {
         safeCall(() => {
           if (canvas.background) canvas.background.visible = false;
-          if (canvas.grid) canvas.grid.visible = false;
+          _setGridVisualSuppressed(true);
           if (canvas.weather) canvas.weather.visible = false;
           if (canvas.environment) canvas.environment.visible = false;
 
@@ -6971,59 +7398,33 @@ function _enforceGameplayPixiSuppression() {
           try { tile.renderFlags?.set({ refreshState: true }); } catch (_) {}
         }
       }
+      safeCall(() => {
+        _enforcePersistentOverlayAdornments();
+      }, 'pixiEditorOverlay.persistentAdornments', Severity.COSMETIC);
+      diag({
+        branch: 'editor-overlay',
+        needsEditorOverlay: true,
+        shouldPixiReceiveInput: !!shouldPixiReceiveInput,
+        shouldPixiReceiveInputEffective: !!shouldPixiReceiveInputEffective,
+        nativeOverlayShouldStayVisible: !!nativeOverlayShouldStayVisible,
+        pixiVisualOpacity: (shouldPixiReceiveInputEffective || nativeOverlayShouldStayVisible) ? '1' : '0',
+      });
       return;
     }
 
-    // Some Foundry tools may still require PIXI hit-testing in gameplay mode.
-    // Keep PIXI/board interactive but fully transparent so they cannot occlude
-    // the Three-rendered scene.
-    if (shouldPixiReceiveInputEffective) {
-      const pixiCanvas = canvas.app?.view;
-      const threeCanvas = document.getElementById('map-shine-canvas');
-      if (pixiCanvas) {
-        pixiCanvas.style.display = '';
-        pixiCanvas.style.visibility = 'visible';
-        pixiCanvas.style.opacity = '0';
-        pixiCanvas.style.zIndex = '10';
-        pixiCanvas.style.pointerEvents = 'auto';
-      }
-
-      const board = document.getElementById('board');
-      if (board && board.tagName === 'CANVAS') {
-        board.style.display = '';
-        board.style.visibility = 'visible';
-        board.style.opacity = '0';
-        board.style.zIndex = '10';
-        board.style.pointerEvents = 'auto';
-      }
-
-      if (threeCanvas) {
-        threeCanvas.style.display = '';
-        threeCanvas.style.visibility = 'visible';
-        threeCanvas.style.opacity = '1';
-        threeCanvas.style.pointerEvents = 'none';
-      }
-      return;
-    }
-
-    // V2 goal: PIXI should never visually render the scene. Foundry can keep its
-    // internal computations (vision sources, layer state, measurements), but the
-    // PIXI canvas output must be fully suppressed so no fog/visibility/primary
-    // artifacts can appear.
+    // Selective system: keep PIXI board visible for compatibility overlays while
+    // scene-bearing layers are suppressed surgically below.
     safeCall(() => {
       const pixiCanvas = canvas.app?.view;
       if (pixiCanvas) {
-        // Use display:none as the strongest guarantee that PIXI cannot contribute
-        // any pixels to the final composed frame. Opacity=0 still allows some
-        // browser/driver edge cases where a stale frame can appear during
-        // rapid canvas swaps or context churn.
-        pixiCanvas.style.display = 'none';
-        pixiCanvas.style.visibility = 'hidden';
-        pixiCanvas.style.opacity = '0';
+        pixiCanvas.style.display = '';
+        pixiCanvas.style.visibility = 'visible';
+        pixiCanvas.style.opacity = '1';
         pixiCanvas.style.pointerEvents = 'none';
-
+        pixiCanvas.style.zIndex = '10';
+        pixiCanvas.style.backgroundColor = 'transparent';
       }
-    }, 'pixiSuppress.pixiCanvasOpacity', Severity.COSMETIC);
+    }, 'pixiSuppress.pixiCanvasSelectiveVisible', Severity.COSMETIC);
 
     // Always force the Three canvas visible in gameplay mode. Without this,
     // mode transitions can leave stale display/visibility styles and present
@@ -7037,37 +7438,19 @@ function _enforceGameplayPixiSuppression() {
       threeCanvas.style.pointerEvents = 'auto';
     }, 'pixiSuppress.threeCanvasVisible', Severity.COSMETIC);
 
-    // Foundry's primary PIXI canvas element is typically #board. In some
-    // Foundry versions/skins, canvas.app.view may not be the top-level board
-    // element that is actually composited above Three. Hide it explicitly.
+    // Foundry's primary PIXI canvas element is typically #board. Keep it alive
+    // so native overlays can render, but make it passthrough for pointer input.
     safeCall(() => {
       const board = document.getElementById('board');
       if (board && board.tagName === 'CANVAS') {
-        board.style.display = 'none';
-        board.style.visibility = 'hidden';
-        board.style.opacity = '0';
+        board.style.display = '';
+        board.style.visibility = 'visible';
+        board.style.opacity = '1';
         board.style.pointerEvents = 'none';
+        board.style.zIndex = '10';
+        board.style.backgroundColor = 'transparent';
       }
-    }, 'pixiSuppress.boardCanvas', Severity.COSMETIC);
-
-    // Defense-in-depth: Foundry/module integrations can introduce additional
-    // canvas elements under the same board container. In V2 gameplay, Three.js
-    // must be the only visible scene renderer. Hide every non-MapShine canvas
-    // in that container to prevent stale/static PIXI frames overdraw.
-    safeCall(() => {
-      const board = document.getElementById('board');
-      const container = board?.parentElement ?? null;
-      if (!container) return;
-      const canvases = container.querySelectorAll('canvas');
-      for (const el of canvases) {
-        if (!el) continue;
-        if (el.id === 'map-shine-canvas') continue;
-        el.style.display = 'none';
-        el.style.visibility = 'hidden';
-        el.style.opacity = '0';
-        el.style.pointerEvents = 'none';
-      }
-    }, 'pixiSuppress.extraBoardCanvases', Severity.COSMETIC);
+    }, 'pixiSuppress.boardCanvasSelectiveVisible', Severity.COSMETIC);
 
     // V12+: primary can render tiles/overheads/roofs. Keep it hidden in gameplay.
     safeCall(() => { 
@@ -7132,19 +7515,21 @@ function _enforceGameplayPixiSuppression() {
     safeCall(() => {
       _enforcePersistentOverlayAdornments();
     }, 'pixiSuppress.persistentOverlayAdornments', Severity.COSMETIC);
+    diag({
+      branch: 'gameplay-selective',
+      shouldPixiReceiveInput: !!shouldPixiReceiveInput,
+      shouldPixiReceiveInputEffective: !!shouldPixiReceiveInputEffective,
+    });
   }, 'enforceGameplayPixiSuppression', Severity.COSMETIC);
 }
 
 /**
- * Force persistent PIXI overlay adornments visible for notes/templates.
- * Foundry often hides these when their layer is inactive, but gameplay mode
- * expects them to remain visible like drawings.
+ * Keep measured-template radius/fill/grid highlights visible (always). Optionally
+ * force journal note adornments when `MapShine.__forcePersistentOverlayAdornments`
+ * is true (legacy / diagnostics).
  * @private
  */
 function _enforcePersistentOverlayAdornments() {
-  // Native-behavior mode: do not force notes/templates adornments outside their
-  // normal Foundry lifecycle unless explicitly requested for diagnostics.
-  if (window?.MapShine?.__forcePersistentOverlayAdornments !== true) return;
   if (!canvas?.ready) return;
 
   const forceVisible = (obj) => {
@@ -7165,28 +7550,21 @@ function _enforcePersistentOverlayAdornments() {
     forceVisible(note.tooltip);
   };
 
+  /** Measured template radius, fill, and grid highlights — always keep on for MapShine capture/gameplay. */
   const touchTemplate = (tpl) => {
     if (!tpl) return;
     forceVisible(tpl);
+    forceVisible(tpl.field);
+    forceVisible(tpl.highlight);
+    forceVisible(tpl.shape);
+    forceVisible(tpl.template);
     forceVisible(tpl.icon);
     forceVisible(tpl.controlIcon);
     forceVisible(tpl.ruler);
-    forceVisible(tpl.rulerText);
-    forceVisible(tpl.tooltip);
   };
 
-  try {
-    if (canvas.notes) {
-      canvas.notes.visible = true;
-      canvas.notes.renderable = true;
-      const noteObjs = [
-        ...(Array.isArray(canvas.notes.placeables) ? canvas.notes.placeables : []),
-        ...(Array.isArray(canvas.notes.objects?.children) ? canvas.notes.objects.children : []),
-      ];
-      for (const n of noteObjs) touchNote(n);
-    }
-  } catch (_) {}
-
+  // Measured templates must stay fully drawn (outline + highlighted cells) even
+  // when the template layer is not active; the PIXI bridge reads native cells.
   try {
     if (canvas.templates) {
       canvas.templates.visible = true;
@@ -7199,31 +7577,42 @@ function _enforcePersistentOverlayAdornments() {
     }
   } catch (_) {}
 
+  // Native-behavior mode for journal notes only: optional unless diagnostics flag set.
+  if (window?.MapShine?.__forcePersistentOverlayAdornments === true) {
+    try {
+      if (canvas.notes) {
+        canvas.notes.visible = true;
+        canvas.notes.renderable = true;
+        const noteObjs = [
+          ...(Array.isArray(canvas.notes.placeables) ? canvas.notes.placeables : []),
+          ...(Array.isArray(canvas.notes.objects?.children) ? canvas.notes.objects.children : []),
+        ];
+        for (const n of noteObjs) touchNote(n);
+      }
+    } catch (_) {}
+  }
+
   const now = performance.now();
-  if ((now - _lastPersistentOverlayRefreshMs) < 350) return;
+  if ((now - _lastPersistentOverlayRefreshMs) < 1200) return;
   _lastPersistentOverlayRefreshMs = now;
 
-  // Force Foundry to refresh native runtime visuals (icon/ruler text/field
-  // clipping) even when notes/templates controls are not active.
-  try {
-    for (const note of canvas?.notes?.placeables || []) {
-      if (!note) continue;
-      if (typeof note.refresh === 'function') note.refresh();
-      if (typeof note.draw === 'function' && !note.icon && !note.controlIcon) {
-        void note.draw();
+  if (window?.MapShine?.__forcePersistentOverlayAdornments === true) {
+    try {
+      for (const note of canvas?.notes?.placeables || []) {
+        if (!note) continue;
+        if (typeof note.refresh === 'function') note.refresh();
+        if (typeof note.draw === 'function' && !note.icon && !note.controlIcon) {
+          void note.draw();
+        }
       }
-    }
-  } catch (_) {}
+    } catch (_) {}
+  }
 
-  try {
-    for (const tpl of canvas?.templates?.placeables || []) {
-      if (!tpl) continue;
-      if (typeof tpl.refresh === 'function') tpl.refresh();
-      if (typeof tpl.draw === 'function' && !tpl.field && !tpl.highlight && !tpl.rulerText) {
-        void tpl.draw();
-      }
-    }
-  } catch (_) {}
+  // In native-overlay default mode, schedule lightweight delayed hydration passes
+  // so scene refresh and wall changes recompute template cells + ruler text.
+  if (window?.MapShine?.__usePixiContentLayerBridge !== true) {
+    _scheduleNativeTemplateHydration('persistent-overlay-pass', 1);
+  }
 }
 
 /**
@@ -7315,7 +7704,7 @@ function updateLayerVisibility() {
   // 1. Always Hide "Replaced" Layers in Gameplay/Hybrid Mode
   // These are rendered by Three.js
   if (canvas.background) canvas.background.visible = false;
-  if (canvas.grid) canvas.grid.visible = false;
+  _setGridVisualSuppressed(true);
   // V12+: canvas.primary is a core container for primary scene visuals.
   // If this remains visible in Hybrid/Gameplay mode, tiles (including overhead/roof)
   // can be rendered by PIXI *in addition* to our Three.js TileManager, creating
@@ -7815,7 +8204,7 @@ function restoreFoundryRendering() {
 
   // Restore ALL layers (including 'primary' which is critical for V12+)
   if (canvas.background) canvas.background.visible = true;
-  if (canvas.grid) canvas.grid.visible = true;
+  _setGridVisualSuppressed(false);
   if (canvas.primary) canvas.primary.visible = true;
   if (canvas.tokens) canvas.tokens.visible = true;
   if (canvas.tiles) canvas.tiles.visible = true;

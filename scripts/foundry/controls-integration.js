@@ -5,6 +5,7 @@
  */
 
 import { createLogger } from '../core/log.js';
+import { getConfiguredCanvasLayer } from './canvas-layer-resolve.js';
 import { LayerVisibilityManager } from './layer-visibility-manager.js';
 import { InputRouter } from './input-router.js';
 import { CameraSync } from './camera-sync.js';
@@ -635,14 +636,39 @@ export class ControlsIntegration {
     
     // These layers are VISUALLY replaced by Three.js but remain INTERACTIVE
     // We hide the visual elements but keep interaction enabled
-    const visuallyReplacedLayers = ['background', 'grid', 'primary', 'tiles', 'weather', 'environment'];
-    
-    for (const name of visuallyReplacedLayers) {
-      const layer = canvas[name];
+    // V12+: `canvas.grid` is scene BaseGrid, not GridLayer — use CONFIG group path.
+    const visuallyReplacedResolvers = [
+      ['background', () => canvas.primary?.background ?? canvas.background],
+      ['gridMesh', () => getConfiguredCanvasLayer('grid')?.mesh ?? null],
+      ['tiles', () => getConfiguredCanvasLayer('tiles')],
+      ['weather', () => getConfiguredCanvasLayer('weather')],
+      ['environment', () => canvas.environment],
+    ];
+    for (const [name, resolve] of visuallyReplacedResolvers) {
+      const layer = resolve();
       if (layer) {
         layer.visible = false;
         log.debug(`Hidden visual layer: ${name}`);
       }
+    }
+
+    // Keep GridLayer alive for template-cell highlights and other highlight overlays.
+    const gridLayer = getConfiguredCanvasLayer('grid');
+    if (gridLayer) {
+      gridLayer.visible = true;
+      gridLayer.renderable = true;
+      if (gridLayer.highlight) {
+        gridLayer.highlight.visible = true;
+        gridLayer.highlight.renderable = true;
+      }
+    }
+
+    // Keep primary active and suppress only scene-bearing primary visuals.
+    if (canvas.primary) {
+      canvas.primary.visible = true;
+      if (canvas.primary.background) canvas.primary.background.visible = false;
+      if (canvas.primary.foreground) canvas.primary.foreground.visible = false;
+      if (canvas.primary.tiles) canvas.primary.tiles.visible = false;
     }
 
     // Also hide native Fog of War visual layers in Three-driven rendering mode.

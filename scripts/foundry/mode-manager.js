@@ -14,6 +14,7 @@
  */
 
 import { createLogger } from '../core/log.js';
+import { getConfiguredCanvasLayer } from './canvas-layer-resolve.js';
 
 const log = createLogger('ModeManager');
 
@@ -296,9 +297,14 @@ export class ModeManager {
       if (!canvas?.ready) return;
       if (this.isMapMakerMode) return;
 
-      // V12+: primary can render tiles/overheads/roofs. Keep hidden in gameplay.
+      // Keep primary alive; suppress only scene-bearing visuals.
       try {
-        if (canvas.primary) canvas.primary.visible = false;
+        if (canvas.primary) {
+          canvas.primary.visible = true;
+          if (canvas.primary.background) canvas.primary.background.visible = false;
+          if (canvas.primary.foreground) canvas.primary.foreground.visible = false;
+          if (canvas.primary.tiles) canvas.primary.tiles.visible = false;
+        }
       } catch (_) {}
 
       // Tiles are fully Three-owned in gameplay. Keep PIXI visuals suppressed.
@@ -342,8 +348,27 @@ export class ModeManager {
 
     // Always hide "replaced" layers in Gameplay/Hybrid Mode
     if (canvas.background) canvas.background.visible = false;
-    if (canvas.grid) canvas.grid.visible = false;
-    if (canvas.primary) canvas.primary.visible = false;
+    const gridLayer = getConfiguredCanvasLayer('grid');
+    if (gridLayer) {
+      gridLayer.visible = true;
+      gridLayer.renderable = true;
+      if (gridLayer.highlight) {
+        gridLayer.highlight.visible = true;
+        gridLayer.highlight.renderable = true;
+      }
+      if (gridLayer.mesh) {
+        gridLayer.mesh.visible = false;
+        if (typeof gridLayer.mesh.alpha === 'number') gridLayer.mesh.alpha = 0;
+      }
+    }
+    if (canvas.primary) {
+      // Keep primary alive so Foundry-native overlay content attached through
+      // primary pathways (notably drawings in some flows) can still render.
+      canvas.primary.visible = true;
+      if (canvas.primary.background) canvas.primary.background.visible = false;
+      if (canvas.primary.foreground) canvas.primary.foreground.visible = false;
+      if (canvas.primary.tiles) canvas.primary.tiles.visible = false;
+    }
     if (canvas.weather) canvas.weather.visible = false;
     if (canvas.environment) canvas.environment.visible = false;
 

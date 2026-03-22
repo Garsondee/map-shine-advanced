@@ -54,27 +54,6 @@
 export function exposeGlobals(mapShine, refs) {
   if (!mapShine) return;
 
-  const { effectMap } = refs;
-
-  // Expose effects by their window.MapShine property name
-  const EFFECT_EXPOSURES = [
-    ['Specular',          'specularEffect'],
-    ['Overhead Shadows',  'overheadShadowsEffect'],
-    ['Building Shadows',  'buildingShadowsEffect'],
-    ['Ash Disturbance',   'ashDisturbanceEffect'],
-    ['Water',             'waterEffect'],
-    ['Sky Color',         'skyColorEffect'],
-    ['Lighting',          'lightingEffect'],
-    ['Candle Flames',     'candleFlamesEffect'],
-  ];
-
-  if (effectMap) {
-    for (const [mapName, propName] of EFFECT_EXPOSURES) {
-      const instance = effectMap.get(mapName);
-      if (instance) mapShine[propName] = instance;
-    }
-  }
-
   // Expose managers directly from refs
   const MANAGER_EXPOSURES = [
     'sceneComposer', 'effectComposer', 'cameraFollower', 'pixiInputBridge',

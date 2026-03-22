@@ -167,6 +167,8 @@ export class SpecularEffectV2 {
       wetSpecularIntensity: 1.5,
       wetOutputMax: 1.0,
       wetOutputGamma: 1.0,
+      wetBaseSheen: 0.3,
+      wetWindRippleStrength: 1.0,
 
       // Frost / Ice Glaze
       frostGlazeEnabled: true,
@@ -214,7 +216,7 @@ export class SpecularEffectV2 {
         { name: 'layer3', label: 'Layer 3', type: 'folder', expanded: false, parameters: ['stripe3Enabled', 'stripe3Frequency', 'stripe3Speed', 'stripe3Angle', 'stripe3Width', 'stripe3Intensity', 'stripe3Parallax', 'stripe3Wave', 'stripe3Gaps', 'stripe3Softness'] },
         { name: 'sparkle', label: 'Micro Sparkle', type: 'folder', expanded: false, parameters: ['sparkleEnabled', 'sparkleIntensity', 'sparkleScale', 'sparkleSpeed'] },
         { name: 'outdoor-cloud-specular', label: 'Outdoor Cloud Specular', type: 'folder', expanded: false, parameters: ['outdoorCloudSpecularEnabled', 'outdoorStripeBlend', 'cloudSpecularIntensity'] },
-        { name: 'wet-surface', label: 'Wet Surface (Rain)', type: 'folder', expanded: false, parameters: ['wetSpecularEnabled', 'wetInputBrightness', 'wetInputGamma', 'wetSpecularContrast', 'wetBlackPoint', 'wetWhitePoint', 'wetSpecularIntensity', 'wetOutputMax', 'wetOutputGamma'] },
+        { name: 'wet-surface', label: 'Wet Surface (Rain)', type: 'folder', expanded: false, parameters: ['wetSpecularEnabled', 'wetInputBrightness', 'wetInputGamma', 'wetSpecularContrast', 'wetBlackPoint', 'wetWhitePoint', 'wetSpecularIntensity', 'wetOutputMax', 'wetOutputGamma', 'wetBaseSheen', 'wetWindRippleStrength'] },
         { name: 'frost-glaze', label: 'Frost / Ice Glaze', type: 'folder', expanded: false, parameters: ['frostGlazeEnabled', 'frostThreshold', 'frostIntensity', 'frostTintStrength'] },
         { name: 'dynamic-light-tint', label: 'Dynamic Light Tinting', type: 'folder', expanded: false, parameters: ['dynamicLightTintEnabled', 'dynamicLightTintStrength'] },
         { name: 'wind-driven-stripes', label: 'Wind-Driven Stripes', type: 'folder', expanded: false, parameters: ['windDrivenStripesEnabled', 'windStripeInfluence'] },
@@ -277,6 +279,8 @@ export class SpecularEffectV2 {
         wetSpecularIntensity: { type: 'slider', label: 'Output Intensity', min: 0, max: 5, step: 0.01, default: 1.5, throttle: 100 },
         wetOutputMax: { type: 'slider', label: 'Output Max (Clamp)', min: 0.0, max: 3.0, step: 0.01, default: 1.0, throttle: 100 },
         wetOutputGamma: { type: 'slider', label: 'Output Gamma', min: 0.1, max: 3.0, step: 0.01, default: 1.0, throttle: 100 },
+        wetBaseSheen: { type: 'slider', label: 'Outdoor Base Sheen', min: 0.0, max: 2.0, step: 0.01, default: 0.3, throttle: 100 },
+        wetWindRippleStrength: { type: 'slider', label: 'Wind Ripple Strength', min: 0.0, max: 3.0, step: 0.01, default: 1.0, throttle: 100 },
         frostGlazeEnabled: { type: 'boolean', label: 'Enable Frost Glaze', default: true },
         frostThreshold: { type: 'slider', label: 'Freeze Threshold', min: 0, max: 1, step: 0.01, default: 0.55, throttle: 100 },
         frostIntensity: { type: 'slider', label: 'Frost Intensity', min: 0, max: 3, step: 0.01, default: 1.2, throttle: 100 },
@@ -522,6 +526,8 @@ export class SpecularEffectV2 {
     u.uWetSpecularIntensity.value = this.params.wetSpecularIntensity;
     u.uWetOutputMax.value = this.params.wetOutputMax;
     u.uWetOutputGamma.value = this.params.wetOutputGamma;
+    u.uWetBaseSheen.value = this.params.wetBaseSheen;
+    u.uWetWindRippleStrength.value = this.params.wetWindRippleStrength;
 
     // Frost
     u.uFrostGlazeEnabled.value = this.params.frostGlazeEnabled;
@@ -878,6 +884,8 @@ export class SpecularEffectV2 {
       uWetSpecularIntensity: { value: this.params.wetSpecularIntensity },
       uWetOutputMax: { value: this.params.wetOutputMax },
       uWetOutputGamma: { value: this.params.wetOutputGamma },
+      uWetBaseSheen: { value: this.params.wetBaseSheen },
+      uWetWindRippleStrength: { value: this.params.wetWindRippleStrength },
 
       // Roof / outdoor mask
       uRoofMap: { value: this._fallbackBlack },

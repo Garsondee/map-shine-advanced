@@ -143,6 +143,8 @@ export function getFragmentShader(maxLights = 64) {
     uniform float uWetSpecularIntensity;
     uniform float uWetOutputMax;
     uniform float uWetOutputGamma;
+    uniform float uWetBaseSheen;
+    uniform float uWetWindRippleStrength;
 
     // ── Outdoor/roof mask ─────────────────────────────────────────────────────
     uniform sampler2D uRoofMap;
@@ -553,7 +555,10 @@ export function getFragmentShader(maxLights = 64) {
       }
 
       // ── Wet specular ─────────────────────────────────────────────────────
-      float wetEffects = effectsOnly + windRipple;
+      // Keep a baseline outdoor sheen so wetness reads even when stripe/cloud
+      // modulators are subtle, then layer animated effects on top.
+      float wetBase = max(0.0, uWetBaseSheen) * outdoorFactor;
+      float wetEffects = wetBase + effectsOnly + (windRipple * max(0.0, uWetWindRippleStrength));
       vec3 wetSpecularColor = vec3(wetMask) * wetEffects * uWetSpecularIntensity
         * effectiveLightColor * totalIncidentLight * buildingShadowFactor;
 

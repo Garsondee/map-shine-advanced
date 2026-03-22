@@ -840,6 +840,60 @@ class WaterMaskedSplashEmitter {
   update(system, delta) { /* no-op for now */ }
 }
 
+class RoofEdgeDripEmitter {
+  constructor(parameters = {}) {
+    this.type = 'roof-edge-drip';
+    this.width = parameters.width ?? 1;
+    this.height = parameters.height ?? 1;
+    this.sceneX = parameters.sceneX ?? 0;
+    this.sceneY = parameters.sceneY ?? 0;
+    this.totalHeight = parameters.totalHeight ?? this.height;
+    this.centerX = parameters.centerX ?? (this.sceneX + this.width / 2);
+    this.centerY = parameters.centerY ?? (this.sceneY + this.height / 2);
+    this._offsetY = (this.totalHeight - this.sceneY - this.height);
+    this._points = null;
+  }
+
+  setPoints(points) {
+    this._points = points && points.length ? points : null;
+  }
+
+  clearPoints() {
+    this._points = null;
+  }
+
+  initialize(particle) {
+    const pts = this._points;
+    if (pts && pts.length >= 4) {
+      const count = Math.floor(pts.length / 4);
+      const idx = (Math.floor(Math.random() * count) * 4);
+      const u = pts[idx];
+      const v = pts[idx + 1];
+      const nx = pts[idx + 2];
+      const ny = pts[idx + 3];
+
+      const worldX = this.sceneX + u * this.width;
+      const worldY = this._offsetY + (1.0 - v) * this.height;
+      const normalJitter = (Math.random() - 0.5) * 20.0;
+
+      particle.position.x = (worldX + nx * normalJitter) - this.centerX;
+      particle.position.y = (worldY + ny * normalJitter) - this.centerY;
+      particle.position.z = 0;
+      particle.velocity.set(0, 0, particle.startSpeed);
+      return;
+    }
+
+    const x = (Math.random() - 0.5) * this.width;
+    const y = (Math.random() - 0.5) * this.height;
+    particle.position.x = x;
+    particle.position.y = y;
+    particle.position.z = 0;
+    particle.velocity.set(0, 0, particle.startSpeed);
+  }
+
+  update(system, delta) { /* no-op */ }
+}
+
 // Behavior: kill particles once they leave the world volume.
 //
 // Quarks runs all behaviors on the CPU each frame. Particles are removed
@@ -1575,6 +1629,7 @@ export class WeatherParticles {
     this.batchRenderer = batchRenderer;
     this.scene = scene;
     this.rainSystem = null;
+    this.roofDripSystem = null;
     this.snowSystem = null;
     this.ashSystem = null;
     this.ashEmberSystem = null;
@@ -1603,6 +1658,7 @@ export class WeatherParticles {
     this._controlInitialized = false;
 
     this._splashShape = null;
+    this._roofDripShape = null;
 
     this._waterHitMaskUuid = null;
     this._waterHitMaskFlipV = null;
@@ -1685,6 +1741,7 @@ export class WeatherParticles {
     this._waterMaskMaxPoints = 20000;
 
     this._rainMaterial = null;
+    this._roofDripMaterial = null;
     this._snowMaterial = null;
     this._ashMaterial = null;
     this._ashEmberMaterial = null;
@@ -1752,8 +1809,10 @@ export class WeatherParticles {
     this._sceneBounds = null;
 
     this._rainWindForce = null;
+    this._roofDripWindForce = null;
     this._snowWindForce = null;
     this._rainGravityForce = null;
+    this._roofDripGravityForce = null;
     this._snowGravityForce = null;
     this._snowFlutter = null; // legacy; no longer used in behaviors
     this._snowCurl = null;
@@ -1794,6 +1853,8 @@ export class WeatherParticles {
 
     /** @type {THREE.ShaderMaterial|null} quarks batch material for rain */
     this._rainBatchMaterial = null;
+    /** @type {THREE.ShaderMaterial|null} quarks batch material for roof drips */
+    this._roofDripBatchMaterial = null;
 
     /** @type {THREE.ShaderMaterial|null} quarks batch material for snow */
     this._snowBatchMaterial = null;
@@ -1880,6 +1941,11 @@ export class WeatherParticles {
     // when the slider abruptly goes to 0.
     this._lastPrecipitation = null;
 
+    // Roof/tree drips keep running for a while after rain stops.
+    this._roofDripTailDurationSec = 300.0;
+    this._roofDripTailRemainingSec = 0.0;
+    this._roofDripPointsRefreshSec = 0.0;
+
     this._initSystems();
     // Defensive: ensure all quarks systems created in _initSystems are actually
     // registered with the shared BatchedRenderer. In V2 we observed cases where
@@ -1904,6 +1970,7 @@ export class WeatherParticles {
   _ensureAllSystemsRegistered() {
     // Core precipitation systems
     this._ensureSystemRegistered(this.rainSystem);
+    this._ensureSystemRegistered(this.roofDripSystem);
     this._ensureSystemRegistered(this.snowSystem);
     this._ensureSystemRegistered(this.ashSystem);
     this._ensureSystemRegistered(this.ashEmberSystem);
@@ -2037,6 +2104,108 @@ export class WeatherParticles {
     }
   }
 
+  _worldToSceneUv(worldX, worldY) {
+    const sb = this._sceneBounds;
+    if (!sb) return null;
+    const sceneW = Number(sb.z) || 0;
+    const sceneH = Number(sb.w) || 0;
+    if (sceneW <= 1e-6 || sceneH <= 1e-6) return null;
+    const u = (worldX - sb.x) / sceneW;
+    const v = 1.0 - ((worldY - sb.y) / sceneH);
+    if (!Number.isFinite(u) || !Number.isFinite(v)) return null;
+    return { u, v };
+  }
+
+  _pushRectEdgeUvPoints(out, cx, cy, w, h, rotation = 0, spacing = 96) {
+    if (!out || w <= 2 || h <= 2) return;
+    const hw = w * 0.5;
+    const hh = h * 0.5;
+    const cosR = Math.cos(rotation || 0);
+    const sinR = Math.sin(rotation || 0);
+
+    const pushPoint = (lx, ly, nx, ny) => {
+      const wx = cx + (lx * cosR - ly * sinR);
+      const wy = cy + (lx * sinR + ly * cosR);
+      const uv = this._worldToSceneUv(wx, wy);
+      if (!uv) return;
+      if (uv.u < -0.05 || uv.u > 1.05 || uv.v < -0.05 || uv.v > 1.05) return;
+      const nwx = nx * cosR - ny * sinR;
+      const nwy = nx * sinR + ny * cosR;
+      out.push(Math.max(0, Math.min(1, uv.u)));
+      out.push(Math.max(0, Math.min(1, uv.v)));
+      out.push(nwx);
+      out.push(nwy);
+    };
+
+    const sampleEdge = (x0, y0, x1, y1, nx, ny) => {
+      const len = Math.hypot(x1 - x0, y1 - y0);
+      const steps = Math.max(2, Math.ceil(len / Math.max(16, spacing)));
+      for (let i = 0; i <= steps; i++) {
+        const t = i / steps;
+        const lx = x0 + (x1 - x0) * t;
+        const ly = y0 + (y1 - y0) * t;
+        pushPoint(lx, ly, nx, ny);
+      }
+    };
+
+    sampleEdge(-hw, hh, hw, hh, 0, 1);   // Top
+    sampleEdge(hw, hh, hw, -hh, 1, 0);   // Right
+    sampleEdge(hw, -hh, -hw, -hh, 0, -1); // Bottom
+    sampleEdge(-hw, -hh, -hw, hh, -1, 0); // Left
+  }
+
+  _rebuildRoofDripPoints() {
+    const points = [];
+    const d = canvas?.dimensions;
+    if (!d || !this._sceneBounds) return null;
+    const totalH = d.height ?? ((d.sceneY ?? 0) + (d.sceneHeight ?? 0));
+
+    // 1) Overhead/roof tile edges.
+    const tileDocs = canvas?.scene?.tiles?.contents ?? [];
+    for (const tile of tileDocs) {
+      const isOverhead = !!(tile?.overhead ?? tile?._source?.overhead ?? tile?._source?.flags?.levels?.overhead);
+      const isRoof = !!(tile?.getFlag?.('map-shine-advanced', 'overheadIsRoof')
+        ?? tile?.flags?.['map-shine-advanced']?.overheadIsRoof);
+      if (!isOverhead && !isRoof) continue;
+
+      const w = Number(tile?.width ?? 0);
+      const h = Number(tile?.height ?? 0);
+      if (w <= 8 || h <= 8) continue;
+      const x = Number(tile?.x ?? 0);
+      const y = Number(tile?.y ?? 0);
+      const cx = x + w * 0.5;
+      const cy = totalH - (y + h * 0.5);
+      const rot = (Number(tile?.rotation ?? 0) * Math.PI) / 180.0;
+      this._pushRectEdgeUvPoints(points, cx, cy, w, h, rot, 96);
+    }
+
+    // 2) Tree canopy edges (if TreeEffectV2 is active).
+    try {
+      const overlays = window.MapShine?.floorCompositorV2?._treeEffect?._overlays;
+      if (overlays && typeof overlays.values === 'function') {
+        for (const entry of overlays.values()) {
+          const mesh = entry?.mesh;
+          const geo = mesh?.geometry;
+          const gp = geo?.parameters;
+          const w = Number(gp?.width ?? 0);
+          const h = Number(gp?.height ?? 0);
+          if (w <= 8 || h <= 8) continue;
+          this._pushRectEdgeUvPoints(
+            points,
+            Number(mesh.position?.x ?? 0),
+            Number(mesh.position?.y ?? 0),
+            w,
+            h,
+            Number(mesh.rotation?.z ?? 0),
+            140
+          );
+        }
+      }
+    } catch (_) {}
+
+    return points.length >= 4 ? new Float32Array(points) : null;
+  }
+
   _getViewFilteredEdgePoints(pts) {
     if (!pts || pts.length < 4) return null;
 
@@ -2134,6 +2303,7 @@ export class WeatherParticles {
     const v = !!visible;
 
     if (this.rainSystem?.emitter) this.rainSystem.emitter.visible = v;
+    if (this.roofDripSystem?.emitter) this.roofDripSystem.emitter.visible = v;
     if (this.snowSystem?.emitter) this.snowSystem.emitter.visible = v;
     if (this.ashSystem?.emitter) this.ashSystem.emitter.visible = v;
     if (this.ashEmberSystem?.emitter) this.ashEmberSystem.emitter.visible = v;
@@ -2158,6 +2328,9 @@ export class WeatherParticles {
   _zeroWeatherEmissions() {
     if (this.rainSystem?.emissionOverTime && typeof this.rainSystem.emissionOverTime.value === 'number') {
       this.rainSystem.emissionOverTime.value = 0;
+    }
+    if (this.roofDripSystem?.emissionOverTime && typeof this.roofDripSystem.emissionOverTime.value === 'number') {
+      this.roofDripSystem.emissionOverTime.value = 0;
     }
     if (this.snowSystem?.emissionOverTime && typeof this.snowSystem.emissionOverTime.value === 'number') {
       this.snowSystem.emissionOverTime.value = 0;
@@ -2713,6 +2886,7 @@ export class WeatherParticles {
     };
 
     this._splashShape = new RandomRectangleEmitter({ width: sceneW, height: sceneH });
+    this._roofDripShape = new RoofEdgeDripEmitter(maskParams);
     this._waterHitShape = new WaterMaskedSplashEmitter(maskParams);
     this._waterFoamShape = new WaterMaskedSplashEmitter(maskParams);
     this._shoreFoamShape = new ShorelineFoamEmitter(maskParams);
@@ -2834,6 +3008,63 @@ export class WeatherParticles {
        }
      } catch (e) {
        log.warn('Failed to patch rain batch material for roof mask:', e);
+     }
+
+     // --- ROOF / TREE DRIPS ---
+     // Reuses the rain look but spawns from roof + canopy edges and decays over time.
+     const roofDripMaterial = new THREE.MeshBasicMaterial({
+       map: this.rainTexture,
+       transparent: true,
+       depthWrite: false,
+       depthTest: false,
+       blending: THREE.NormalBlending,
+       color: 0xffffff,
+       opacity: 0.8,
+       side: THREE.DoubleSide
+     });
+     this._roofDripMaterial = roofDripMaterial;
+     this._patchRoofMaskMaterial(this._roofDripMaterial);
+
+     const roofDripGravity = new ApplyForce(new THREE.Vector3(0, 0, -1), new ConstantValue(this._rainBaseGravity * 0.85));
+     const roofDripWind = new ApplyForce(new THREE.Vector3(1, 0, 0), new ConstantValue(1600));
+
+     this.roofDripSystem = new ParticleSystem({
+       duration: 1,
+       looping: true,
+       prewarm: false,
+       startLife: new IntervalValue(0.9, 1.8),
+       startSpeed: new IntervalValue(900, 1400),
+       startSize: new IntervalValue(0.9, 1.8),
+       startColor: new ColorRange(new Vector4(0.6, 0.7, 1.0, 0.95), new Vector4(0.6, 0.7, 1.0, 0.75)),
+       worldSpace: true,
+       maxParticles: 5000,
+       emissionOverTime: new ConstantValue(0),
+       shape: this._roofDripShape,
+       material: roofDripMaterial,
+       renderOrder: 50,
+       renderMode: RenderMode.StretchedBillBoard,
+       speedFactor: 0.012,
+       startRotation: new ConstantValue(0),
+       behaviors: [roofDripGravity, roofDripWind, rainColorOverLife, killBehavior, new RainFadeInBehavior()]
+     });
+
+     const dripEmitterZ = Math.max(groundZ + 700, safeEmitterZ - 1200);
+     this.roofDripSystem.emitter.position.set(centerX, centerY, dripEmitterZ);
+     this.roofDripSystem.emitter.rotation.set(Math.PI, 0, 0);
+     if (this.scene) this.scene.add(this.roofDripSystem.emitter);
+     this.batchRenderer.addSystem(this.roofDripSystem);
+
+     try {
+       const idx = this.batchRenderer.systemToBatchIndex?.get(this.roofDripSystem);
+       if (idx !== undefined && this.batchRenderer.batches && this.batchRenderer.batches[idx]) {
+         const batch = this.batchRenderer.batches[idx];
+         if (batch.material) {
+           this._roofDripBatchMaterial = batch.material;
+           this._patchRoofMaskMaterial(this._roofDripBatchMaterial);
+         }
+       }
+     } catch (e) {
+       log.warn('Failed to patch roof-drip batch material for roof mask:', e);
      }
 
      // --- RAIN CURL NOISE (shared for all rain particles) ---
@@ -3258,8 +3489,10 @@ export class WeatherParticles {
      
      // Cache references to key forces/behaviors so we can drive them from WeatherController
      this._rainWindForce = wind;
+    this._roofDripWindForce = roofDripWind;
     this._snowWindForce = snowWind;
     this._rainGravityForce = gravity;
+    this._roofDripGravityForce = roofDripGravity;
     this._snowGravityForce = snowGravity;
     this._snowCurl = snowCurl;
     this._snowCurlBaseStrength = snowCurl.strength.clone();
@@ -4217,6 +4450,7 @@ export class WeatherParticles {
       // continue to render when water is active.
       try {
         if (this.rainSystem?.emitter) this.rainSystem.emitter.visible = false;
+        if (this.roofDripSystem?.emitter) this.roofDripSystem.emitter.visible = false;
         if (this.snowSystem?.emitter) this.snowSystem.emitter.visible = false;
         if (this.ashSystem?.emitter) this.ashSystem.emitter.visible = false;
         if (this.ashEmberSystem?.emitter) this.ashEmberSystem.emitter.visible = false;
@@ -4931,7 +5165,26 @@ export class WeatherParticles {
     const baseRainIntensity = precip * (1.0 - freeze) * (rainTuning.intensityScale ?? 1.0);
     const snowIntensity = precip * freeze * (snowTuning.intensityScale ?? 1.0);
 
+    // Roof/canopy drip tail: keeps dripping for a long time after rain ends.
+    if (baseRainIntensity > 0.001) {
+      this._roofDripTailRemainingSec = this._roofDripTailDurationSec;
+    } else {
+      this._roofDripTailRemainingSec = Math.max(0, (this._roofDripTailRemainingSec ?? 0) - safeDt);
+    }
+    const roofDripTail01 = this._roofDripTailDurationSec > 0
+      ? Math.max(0, Math.min(1, this._roofDripTailRemainingSec / this._roofDripTailDurationSec))
+      : 0;
+
+    // Rebuild drip edge points infrequently (tile/tree topology changes slowly).
+    this._roofDripPointsRefreshSec = (this._roofDripPointsRefreshSec ?? 0) - safeDt;
+    if (this._roofDripPointsRefreshSec <= 0) {
+      const dripPoints = this._rebuildRoofDripPoints();
+      this._roofDripShape?.setPoints?.(dripPoints);
+      this._roofDripPointsRefreshSec = 1.5;
+    }
+
     this._ensureBatchMaterialPatched(this.rainSystem, '_rainBatchMaterial');
+    this._ensureBatchMaterialPatched(this.roofDripSystem, '_roofDripBatchMaterial');
     this._ensureBatchMaterialPatched(this.snowSystem, '_snowBatchMaterial');
     this._ensureBatchMaterialPatched(this._foamSystem, '_foamBatchMaterial');
 
@@ -5031,6 +5284,40 @@ export class WeatherParticles {
           uniforms.uRoofAlphaMap.value = effectiveHasRoofAlphaMap ? roofAlphaTexture : null;
           uniforms.uScreenSize.value.set(screenWidth, screenHeight);
         }
+    }
+
+    if (this.roofDripSystem) {
+      const dripEmission = this.roofDripSystem.emissionOverTime;
+      if (dripEmission && typeof dripEmission.value === 'number') {
+        const duringRain = 600 * Math.max(0, baseRainIntensity);
+        const decayTail = 450 * roofDripTail01;
+        const dripRate = duringRain + decayTail;
+        dripEmission.value = dripRate;
+      }
+
+      if (this._roofDripMaterial && this.rainSystem?.material) {
+        this._roofDripMaterial.opacity = this.rainSystem.material.opacity;
+      }
+
+      if (this._roofDripMaterial?.userData?.roofUniforms) {
+        const uniforms = this._roofDripMaterial.userData.roofUniforms;
+        uniforms.uRoofMaskEnabled.value = effectiveRoofMaskEnabled ? 1.0 : 0.0;
+        uniforms.uHasRoofAlphaMap.value = effectiveHasRoofAlphaMap ? 1.0 : 0.0;
+        if (this._sceneBounds) uniforms.uSceneBounds.value.copy(this._sceneBounds);
+        uniforms.uRoofMap.value = this._roofTexture;
+        uniforms.uRoofAlphaMap.value = effectiveHasRoofAlphaMap ? roofAlphaTexture : null;
+        uniforms.uScreenSize.value.set(screenWidth, screenHeight);
+      }
+
+      if (this._roofDripBatchMaterial?.userData?.roofUniforms) {
+        const uniforms = this._roofDripBatchMaterial.userData.roofUniforms;
+        uniforms.uRoofMaskEnabled.value = effectiveRoofMaskEnabled ? 1.0 : 0.0;
+        uniforms.uHasRoofAlphaMap.value = effectiveHasRoofAlphaMap ? 1.0 : 0.0;
+        if (this._sceneBounds) uniforms.uSceneBounds.value.copy(this._sceneBounds);
+        uniforms.uRoofMap.value = this._roofTexture;
+        uniforms.uRoofAlphaMap.value = effectiveHasRoofAlphaMap ? roofAlphaTexture : null;
+        uniforms.uScreenSize.value.set(screenWidth, screenHeight);
+      }
     }
     
     if (this.splashSystems && this.splashSystems.length > 0) {
@@ -6106,7 +6393,7 @@ export class WeatherParticles {
     }
 
     // --- WIND & GRAVITY COUPLING ---
-    if (THREE && (this._rainWindForce || this._snowWindForce || this._rainGravityForce || this._snowGravityForce)) {
+    if (THREE && (this._rainWindForce || this._roofDripWindForce || this._snowWindForce || this._rainGravityForce || this._roofDripGravityForce || this._snowGravityForce)) {
       const windSpeed = weather.windSpeed || 0; // 0-1 scalar
       const dir2 = weather.windDirection; // Expected THREE.Vector2 or Vector3-like
 
@@ -6124,6 +6411,12 @@ export class WeatherParticles {
         // PERFORMANCE: Mutate existing ConstantValue instead of creating new one
         if (this._rainWindForce.magnitude && typeof this._rainWindForce.magnitude.value === 'number') {
           this._rainWindForce.magnitude.value = 3000 * windSpeed * rainWindInfluence;
+        }
+      }
+      if (this._roofDripWindForce && this._roofDripWindForce.direction) {
+        this._roofDripWindForce.direction.set(baseDir.x, baseDir.y, 0);
+        if (this._roofDripWindForce.magnitude && typeof this._roofDripWindForce.magnitude.value === 'number') {
+          this._roofDripWindForce.magnitude.value = 1600 * windSpeed * rainWindInfluence;
         }
       }
 
@@ -6161,6 +6454,9 @@ export class WeatherParticles {
       const rainGravScale = rainTuning.gravityScale ?? 1.0;
       if (this._rainGravityForce && this._rainGravityForce.magnitude && typeof this._rainGravityForce.magnitude.value === 'number') {
         this._rainGravityForce.magnitude.value = this._rainBaseGravity * rainGravScale;
+      }
+      if (this._roofDripGravityForce && this._roofDripGravityForce.magnitude && typeof this._roofDripGravityForce.magnitude.value === 'number') {
+        this._roofDripGravityForce.magnitude.value = this._rainBaseGravity * 0.85 * rainGravScale;
       }
 
       const snowGravScale = snowTuning.gravityScale ?? 1.0;
@@ -6226,6 +6522,10 @@ export class WeatherParticles {
     if (this.rainSystem) {
       this.batchRenderer.deleteSystem(this.rainSystem);
       if (this.rainSystem.emitter.parent) this.rainSystem.emitter.parent.remove(this.rainSystem.emitter);
+    }
+    if (this.roofDripSystem) {
+      this.batchRenderer.deleteSystem(this.roofDripSystem);
+      if (this.roofDripSystem.emitter?.parent) this.roofDripSystem.emitter.parent.remove(this.roofDripSystem.emitter);
     }
     if (this.snowSystem) {
       this.batchRenderer.deleteSystem(this.snowSystem);

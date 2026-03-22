@@ -419,6 +419,14 @@ export class FloorCompositor {
     this._initialized = false;
 
     /**
+     * Optional scene-level hints provided by canvas replacement at load time.
+     * Expected shape: { maskIds: string[] }.
+     * Used to avoid compiling mask-driven effects that cannot run on this scene.
+     * @type {{maskIds?: string[]|Set<string>}|null}
+     */
+    this._effectHints = null;
+
+    /**
      * Whether the shader warmup gate is open. While false, all effect update()
      * calls receive delta=0 so time-based systems (particles, wind, waves) don't
      * accumulate missed time during the warmup window. Opens via openShaderGate()
@@ -857,9 +865,12 @@ export class FloorCompositor {
    * @param {(label: string, index: number, total: number) => void} [options.onProgress]
    *   Optional callback fired after each effect is initialized.
    *   `index` is 1-based; `total` is the expected total number of init steps.
+   * @param {{maskIds?: string[]|Set<string>}|null} [options.effectHints]
+   *   Advisory scene hints used by warmupAsync to skip unnecessary compile targets.
    */
   initialize(options = {}) {
     const _onProgress = typeof options?.onProgress === 'function' ? options.onProgress : null;
+    this._effectHints = options?.effectHints ?? null;
     // Total number of named effect init steps in this method — update when adding/removing effects.
     const TOTAL_EFFECT_INITS = 41;
     let _effectInitIndex = 0;
@@ -1414,6 +1425,78 @@ export class FloorCompositor {
   }
 
   /**
+   * @param {string} maskId
+   * @returns {boolean}
+   * @private
+   */
+  _hasSceneMaskHint(maskId) {
+    const id = String(maskId || '').trim().toLowerCase();
+    if (!id) return false;
+    const hints = this._effectHints;
+    if (!hints) return false;
+    const source = hints.maskIds;
+    if (source instanceof Set) return source.has(id);
+    if (Array.isArray(source)) return source.some((x) => String(x || '').trim().toLowerCase() === id);
+    return false;
+  }
+
+  /**
+   * Decide if a compositor effect should be included in shader warmup.
+   * This only affects upfront compile cost; runtime behavior is unchanged.
+   *
+   * @param {string} effectKey
+   * @returns {boolean}
+   * @private
+   */
+  _shouldWarmupEffectKey(effectKey) {
+    const effect = this[effectKey];
+    if (!effect) return false;
+
+    // Respect explicit runtime disable states when available.
+    if (effect?.enabled === false) return false;
+    if (effect?.params?.enabled === false) return false;
+
+    const maskDriven = {
+      _specularEffect: ['specular', 'roughness'],
+      _fluidEffect: ['fluid'],
+      _iridescenceEffect: ['iridescence'],
+      _prismEffect: ['prism'],
+      _bushEffect: ['bush'],
+      _treeEffect: ['tree'],
+      _fireEffect: ['fire'],
+      _dustEffect: ['dust'],
+      _windowLightEffect: ['windows', 'structural'],
+    };
+
+    if (Object.prototype.hasOwnProperty.call(maskDriven, effectKey)) {
+      const ids = maskDriven[effectKey];
+      return ids.some((id) => this._hasSceneMaskHint(id));
+    }
+
+    // Water compile should depend on discovered data, not scene bundle hints.
+    // The scene bundle intentionally omits _Water in V2.
+    if (effectKey === '_waterEffect') {
+      try {
+        if (typeof effect.hasRenderableWater === 'function') {
+          return effect.hasRenderableWater();
+        }
+      } catch (_) {}
+      return false;
+    }
+    if (effectKey === '_waterSplashesEffect') {
+      try {
+        const water = this._waterEffect;
+        if (water && typeof water.hasRenderableWater === 'function') {
+          return water.hasRenderableWater();
+        }
+      } catch (_) {}
+      return false;
+    }
+
+    return true;
+  }
+
+  /**
    * Explicit loading-time prewarm entrypoint.
    *
    * Runs the one-time populate work that used to happen lazily on first render,
@@ -1618,6 +1701,7 @@ export class FloorCompositor {
     ];
 
     for (const key of effectKeys) {
+      if (!this._shouldWarmupEffectKey(key)) continue;
       const effect = this[key];
       if (!effect) continue;
 
@@ -2494,6 +2578,9 @@ export class FloorCompositor {
       // to that would silently disable the entire pass. Detect accessor vs plain
       // property by checking whether the prototype defines a getter.
       if (paramId === 'enabled' || paramId === 'masterEnabled') {
+        if (typeof effect.setEnabled === 'function') {
+          try { effect.setEnabled(!!value); } catch (_) {}
+        }
         const proto = Object.getPrototypeOf(effect);
         const descriptor = proto ? Object.getOwnPropertyDescriptor(proto, 'enabled') : null;
         const hasAccessor = descriptor && typeof descriptor.get === 'function';

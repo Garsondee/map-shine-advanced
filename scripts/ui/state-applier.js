@@ -5,6 +5,8 @@
  */
 
 import { createLogger } from '../core/log.js';
+import { extendMsaLocalFlagWriteGuard } from '../utils/msa-local-flag-guard.js';
+import { mapShinePushSceneDarknessLevel } from '../utils/msa-v2-darkness.js';
 import { weatherController as coreWeatherController } from '../core/WeatherController.js';
 import { getFoundryTimePhaseHours, getWrappedHourProgress, getFoundrySunlightFactor } from '../core/foundry-time-phases.js';
 
@@ -286,6 +288,7 @@ export class StateApplier {
         try {
           if (window.MapShine?.controlPanel?.controlState) {
             window.MapShine.controlPanel.controlState.timeOfDay = clampedHour;
+            extendMsaLocalFlagWriteGuard();
             await canvas.scene.setFlag('map-shine-advanced', 'controlState', window.MapShine.controlPanel.controlState);
           }
         } catch (error) {
@@ -375,6 +378,7 @@ export class StateApplier {
           // Update control state if ControlPanel is available
           if (window.MapShine?.controlPanel) {
             Object.assign(window.MapShine.controlPanel.controlState, weatherState);
+            extendMsaLocalFlagWriteGuard();
             await canvas.scene.setFlag('map-shine-advanced', 'controlState', window.MapShine.controlPanel.controlState);
           }
         } catch (error) {
@@ -390,13 +394,35 @@ export class StateApplier {
   }
 
   /**
+   * Push Foundry `environment.darknessLevel` from current Map Shine / control-panel hour (GM only).
+   * Call after debounced `controlState` save so live time scrubbing does not hammer `canvas.scene.update`.
+   * @returns {Promise<void>}
+   */
+  async syncFoundryDarknessFromMapShineTime() {
+    try {
+      const wc = this._getWeatherController();
+      const raw =
+        wc?.getCurrentTime?.() ??
+        wc?.timeOfDay ??
+        window.MapShine?.controlPanel?.controlState?.timeOfDay;
+      const h = Number(raw);
+      if (!Number.isFinite(h)) return;
+      const clamped = ((h % 24) + 24) % 24;
+      await this._updateSceneDarkness(clamped);
+    } catch (e) {
+      log.warn('syncFoundryDarknessFromMapShineTime failed:', e);
+    }
+  }
+
+  /**
    * Start a smooth time-of-day transition.
    * @param {number} targetHour - 0-24 hour value
    * @param {number} transitionMinutes - Transition duration in minutes
    * @param {boolean} [saveToScene=true]
+   * @param {boolean} [applyFoundryDarkness=true] - When false, skips `canvas.scene.update` darkness (use for Control Panel live UI; sync via `syncFoundryDarknessFromMapShineTime` after save).
    * @returns {Promise<void>}
    */
-  async startTimeOfDayTransition(targetHour, transitionMinutes, saveToScene = true) {
+  async startTimeOfDayTransition(targetHour, transitionMinutes, saveToScene = true, applyFoundryDarkness = true) {
     try {
       const minutesNum = typeof transitionMinutes === 'number' ? transitionMinutes : Number(transitionMinutes);
       const safeMinutes = Number.isFinite(minutesNum) ? Math.max(0.0, Math.min(60.0, minutesNum)) : 0.0;
@@ -416,7 +442,7 @@ export class StateApplier {
 
       // If duration is 0, apply immediately.
       if (durationSeconds <= 0.001) {
-        await this.applyTimeOfDay(tgt, saveToScene, true);
+        await this.applyTimeOfDay(tgt, saveToScene, applyFoundryDarkness);
         return;
       }
 
@@ -429,7 +455,7 @@ export class StateApplier {
       const durationMs = durationSeconds * 1000.0;
 
       // Apply the first frame immediately.
-      await this.applyTimeOfDay(startHour, false, true);
+      await this.applyTimeOfDay(startHour, false, applyFoundryDarkness);
 
       return await new Promise((resolve, reject) => {
         this._timeTransitionIntervalId = setInterval(() => {
@@ -440,7 +466,7 @@ export class StateApplier {
             const hour = ((startHour + delta * t) % 24 + 24) % 24;
 
             // During the ramp we don't want to spam scene flags.
-            void this.applyTimeOfDay(hour, false, true);
+            void this.applyTimeOfDay(hour, false, applyFoundryDarkness);
 
             if (t >= 1) {
               if (this._timeTransitionIntervalId) {
@@ -449,7 +475,7 @@ export class StateApplier {
               }
 
               // Final application persists.
-              void this.applyTimeOfDay(tgt, saveToScene, true).then(resolve).catch(reject);
+              void this.applyTimeOfDay(tgt, saveToScene, applyFoundryDarkness).then(resolve).catch(reject);
             }
           } catch (e) {
             if (this._timeTransitionIntervalId) {
@@ -559,7 +585,8 @@ export class StateApplier {
   }
 
   /**
-   * Update Foundry scene darkness based on time of day
+   * Update Foundry scene darkness based on time of day.
+   * Persists via `mapShinePushSceneDarknessLevel` (V2-safe — see `msa-v2-darkness.js`).
    * @param {number} hour - 0-24 hour value
    * @private
    */
@@ -625,10 +652,10 @@ export class StateApplier {
           if (!Number.isFinite(pending)) return;
 
           try {
-            await canvas.scene.update({ 'environment.darknessLevel': pending });
+            await mapShinePushSceneDarknessLevel(pending);
             this._lastDarknessAppliedAtMs = Date.now();
             this._lastDarknessAppliedValue = pending;
-            log.debug(`Scene darkness updated: ${pending.toFixed(3)}`);
+            log.debug(`Scene darkness pushed: ${pending.toFixed(3)}`);
           } catch (error) {
             log.warn('Failed to update scene darkness:', error);
           }

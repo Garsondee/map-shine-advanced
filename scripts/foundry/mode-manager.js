@@ -394,7 +394,7 @@ export class ModeManager {
       };
       const isLightingFinal = !!canvas?.lighting?.active || isFinalLayer('LightingLayer') || isFinalLayer('lighting');
       const isWallsFinal = !!canvas?.walls?.active || isFinalLayer('WallsLayer') || isFinalLayer('WallLayer') || isFinalLayer('walls');
-      const isEditMode = editLayers.some(l => isFinalLayer(l));
+      const isEditMode = editLayers.some(l => isFinalLayer(l)) || isLightingFinal || isWallsFinal;
 
       // Light icon visibility
       const lim = this._deps.lightIconManager;
@@ -412,7 +412,7 @@ export class ModeManager {
       // Wall visibility
       const wm = this._deps.wallManager;
       if (wm?.setVisibility) {
-        const showThreeWalls = isWallsFinal && !this.isMapMakerMode;
+        const showThreeWalls = !isWallsFinal && !this.isMapMakerMode;
         wm.setVisibility(showThreeWalls);
       }
 

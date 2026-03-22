@@ -148,6 +148,7 @@ export class WeatherParticlesV2 {
     };
 
     reattach(wp.rainSystem);
+    reattach(wp.roofDripSystem);
     reattach(wp.snowSystem);
     reattach(wp.ashSystem);
     reattach(wp.ashEmberSystem);
@@ -167,6 +168,7 @@ export class WeatherParticlesV2 {
 
     // Core precipitation systems
     this._ensureSystemRegistered(wp.rainSystem, 'rain');
+    this._ensureSystemRegistered(wp.roofDripSystem, 'roofDrip');
     this._ensureSystemRegistered(wp.snowSystem, 'snow');
     this._ensureSystemRegistered(wp.ashSystem, 'ash');
     this._ensureSystemRegistered(wp.ashEmberSystem, 'ashEmber');

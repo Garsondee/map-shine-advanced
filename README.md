@@ -107,7 +107,7 @@ Registered effects are orchestrated through `EffectComposer` (`scripts/effects/E
 - **BuildingShadowsEffect**: long shadows derived from `_Outdoors`.
 - **CloudEffect**: procedural cloud shadows.
 - **SkyColorEffect**: outdoor grading driven by `WeatherController` time/weather.
-- **ColorCorrectionEffect**, **BloomEffect**, **LensflareEffect**, **AsciiEffect**.
+- **ColorCorrectionEffect**, **BloomEffect**, **AsciiEffect**.
 - **DistortionManager**: centralized distortion composition (heat haze, etc.).
 
 ### Particles

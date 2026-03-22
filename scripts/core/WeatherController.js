@@ -6,6 +6,8 @@
 
 import { createLogger } from './log.js';
 import { getFoundrySunlightFactor } from './foundry-time-phases.js';
+import { extendMsaLocalFlagWriteGuard } from '../utils/msa-local-flag-guard.js';
+import { mapShinePushSceneDarknessLevel } from '../utils/msa-v2-darkness.js';
 
 const log = createLogger('WeatherController');
 
@@ -207,6 +209,9 @@ export class WeatherController {
     this._weatherSnapshotPersistIntervalSeconds = 300.0;
     this._weatherSnapshotSaveTimeout = null;
     this._weatherSnapshotSaveDebounceMs = 1000;
+
+    /** @type {number|null} `updatedAt` of last snapshot this client wrote (skip echo reload) */
+    this._lastLocalWeatherSnapshotUpdatedAt = null;
 
     // Tracks last realized normalized wind speed so we can expose a continuous
     // surge envelope (legacy-compatible replacement for binary gust toggles).
@@ -750,6 +755,11 @@ export class WeatherController {
     // variability), snap target→current once and then early-return on
     // subsequent frames. This avoids per-frame noise, wetness, and output
     // recalculation when nothing is changing.
+    //
+    // REGRESSION: `_updateEnvironmentOutputs()` is skipped while `_staticSnapped`.
+    // Any external change to inputs that affect sky/fog/day (notably `timeOfDay`
+    // via `setTime`, dynamic mode, variability, transitions) MUST set
+    // `_staticSnapped = false` or `getEnvironment()` desyncs from shaders.
     if (!this.isTransitioning && this.dynamicEnabled !== true && this.variability <= 0) {
       if (!this._staticSnapped) {
         this._copyState(this.targetState, this.currentState);
@@ -946,6 +956,8 @@ export class WeatherController {
         transitionElapsed: Number(this.transitionElapsed) || 0
       };
 
+      this._lastLocalWeatherSnapshotUpdatedAt = payload.updatedAt;
+      extendMsaLocalFlagWriteGuard();
       await scene.setFlag('map-shine-advanced', 'weather-snapshot', payload);
       log.debug(`Saved weather snapshot to scene flags (updatedAt=${payload.updatedAt})`);
     } catch (e) {
@@ -960,6 +972,10 @@ export class WeatherController {
       const stored = scene.getFlag('map-shine-advanced', 'weather-snapshot');
       if (!stored || typeof stored !== 'object') return;
       if (stored.version !== 1) return;
+
+      if (this._lastLocalWeatherSnapshotUpdatedAt != null && stored.updatedAt === this._lastLocalWeatherSnapshotUpdatedAt) {
+        return;
+      }
 
       if (stored.enabled === true || stored.enabled === false) {
         this.enabled = stored.enabled === true;
@@ -996,9 +1012,9 @@ export class WeatherController {
       if (shouldRestoreStoredDarkness && game?.user?.isGM && canvas?.scene) {
         try {
           await Promise.race([
-            canvas.scene.update({ 'environment.darknessLevel': stored.sceneDarkness }),
+            mapShinePushSceneDarknessLevel(stored.sceneDarkness),
             new Promise((_, reject) => setTimeout(() => reject(new Error(
-              `scene.update timed out after ${SCENE_UPDATE_TIMEOUT_MS}ms`
+              `scene darkness push timed out after ${SCENE_UPDATE_TIMEOUT_MS}ms`
             )), SCENE_UPDATE_TIMEOUT_MS))
           ]);
           log.debug(`Restored scene darkness: ${stored.sceneDarkness.toFixed(3)}`);
@@ -1042,16 +1058,22 @@ export class WeatherController {
         try {
           const stateApplier = window.MapShine?.stateApplier;
           if (stateApplier && typeof stateApplier.applyTimeOfDay === 'function') {
-            // Always recompute darkness from restored time-of-day when time is present.
-            // Snapshot darkness can be stale or mismatched with stored time, which can
-            // leave scenes incorrectly dark at midday after reload.
-            const applyDarkness = true;
+            // Apply WC / Map Shine time without hammering canvas.scene.update here; snapshot
+            // loads often follow controlState sync and would stack darkness writes (V2 grey).
             await Promise.race([
-              stateApplier.applyTimeOfDay(stored.timeOfDay % 24, false, applyDarkness),
+              stateApplier.applyTimeOfDay(stored.timeOfDay % 24, false, false),
               new Promise((_, reject) => setTimeout(() => reject(new Error(
                 `applyTimeOfDay timed out after ${SCENE_UPDATE_TIMEOUT_MS}ms`
               )), SCENE_UPDATE_TIMEOUT_MS))
             ]);
+            if (game?.user?.isGM && typeof stateApplier.syncFoundryDarknessFromMapShineTime === 'function') {
+              await Promise.race([
+                stateApplier.syncFoundryDarknessFromMapShineTime(),
+                new Promise((_, reject) => setTimeout(() => reject(new Error(
+                  `syncFoundryDarknessFromMapShineTime timed out after ${SCENE_UPDATE_TIMEOUT_MS}ms`
+                )), SCENE_UPDATE_TIMEOUT_MS))
+              ]);
+            }
           }
         } catch (e) {
           log.warn('Failed to apply restored timeOfDay (continuing without it):', e?.message ?? e);
@@ -2409,6 +2431,9 @@ export class WeatherController {
    */
   setTime(hour) {
     this.timeOfDay = hour % 24;
+    // Static fast-path skips _updateEnvironmentOutputs until something else
+    // perturbs weather; time drives sky/fog via getEnvironment() — must refresh.
+    this._staticSnapped = false;
   }
 
   /**

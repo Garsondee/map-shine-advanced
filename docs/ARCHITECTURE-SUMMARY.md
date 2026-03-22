@@ -70,8 +70,7 @@ scripts/
 │   ├── loading-profiler.js      # Performance instrumentation
 │   ├── profiler.js              # Runtime frame profiler
 │   ├── scene-context.js         # Scene context helpers
-│   ├── safe-call.js             # Safe async call wrapper with circuit-breaker integration
-│   ├── circuit-breaker.js       # Circuit breaker for failing subsystems
+│   ├── safe-call.js             # Safe async call wrapper with severity/fallback handling
 │   ├── foundry-time-phases.js   # Time-of-day phase calculations (dawn, dusk, night, etc.)
 │   ├── shader-validator.js      # GLSL compile-time validation
 │   ├── log.js                   # Namespaced logger
@@ -102,7 +101,6 @@ scripts/
 │   ├── layer-visibility-manager.js  # Hides/shows PIXI layers by mode
 │   ├── mode-manager.js          # Rendering mode management (gameplay/edit/map-maker)
 │   ├── drop-handler.js          # Drag-and-drop token/tile creation
-│   ├── scene-controls.js        # Foundry scene control button definitions
 │   ├── resize-handler.js        # Canvas resize handling
 │   ├── selection-bridge.js      # PIXI↔Three.js selection sync
 │   ├── effect-wiring.js         # V2 effect wiring + capability metadata exports

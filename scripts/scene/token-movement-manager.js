@@ -4801,7 +4801,7 @@ export class TokenMovementManager {
             : [];
           if (nearestHitDetails.length > 0) {
             if (!context?.suppressCollisionDiagnostics) {
-              this._pathfindingLog('warn', '_validatePathSegmentCollision blocked (nearest hit)', {
+              this._pathfindingLog('debug', '_validatePathSegmentCollision blocked (nearest hit)', {
                 reason: 'collision-move',
                 trace: this._traceSummary(movementTrace),
                 from: rayA,
@@ -4828,7 +4828,7 @@ export class TokenMovementManager {
           const allHitDetails = this._collectBlockingWallDetailsFromHit(allHits, collisionElevation);
           if (allHitDetails.length > 0) {
             if (!context?.suppressCollisionDiagnostics) {
-              this._pathfindingLog('warn', '_validatePathSegmentCollision blocked (all hits)', {
+              this._pathfindingLog('debug', '_validatePathSegmentCollision blocked (all hits)', {
                 reason: 'collision-move',
                 trace: this._traceSummary(movementTrace),
                 from: rayA,
@@ -4879,7 +4879,7 @@ export class TokenMovementManager {
             const probeDetails = this._collectBlockingWallDetailsFromHit(probeHits, collisionElevation);
             if (probeDetails.length > 0) {
               if (!context?.suppressCollisionDiagnostics) {
-                this._pathfindingLog('warn', '_validatePathSegmentCollision blocked (endpoint probe)', {
+                this._pathfindingLog('debug', '_validatePathSegmentCollision blocked (endpoint probe)', {
                   reason: 'collision-move-endpoint-probe',
                   trace: this._traceSummary(movementTrace),
                   from: rayA,
@@ -4913,7 +4913,7 @@ export class TokenMovementManager {
         });
         if (hit) {
           if (!context?.suppressCollisionDiagnostics) {
-            this._pathfindingLog('warn', '_validatePathSegmentCollision blocked (fallback checkCollision)', {
+            this._pathfindingLog('debug', '_validatePathSegmentCollision blocked (fallback checkCollision)', {
               reason: 'collision-move',
               trace: this._traceSummary(movementTrace),
               from: rayA,

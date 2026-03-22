@@ -84,6 +84,8 @@ export class WaterEffectV2 {
     this._initialized = false;
     /** @type {boolean} */
     this.enabled = true;
+    /** @type {boolean} */
+    this._hasAnyWaterData = false;
 
     /** @type {string} */
     this._instanceId = `we2_${Math.random().toString(16).slice(2, 8)}`;
@@ -1269,6 +1271,28 @@ export class WaterEffectV2 {
   }
 
   /**
+   * Enable or disable the pass gate used by FloorCompositor.
+   * Keeps params.enabled in sync for UI/state consistency.
+   *
+   * @param {boolean} enabled
+   */
+  setEnabled(enabled) {
+    const next = enabled === true;
+    this.enabled = next;
+    if (this.params && Object.prototype.hasOwnProperty.call(this.params, 'enabled')) {
+      this.params.enabled = next;
+    }
+  }
+
+  /**
+   * Returns true when this scene has any discovered water data that can render.
+   * @returns {boolean}
+   */
+  hasRenderableWater() {
+    return this._hasAnyWaterData === true;
+  }
+
+  /**
    * Discover _Water masks for all tiles, composite per-floor, build SDF.
    * Call after FloorRenderBus.populate() so tile geometry is already built.
    * @param {object} foundrySceneData - Scene geometry data from SceneComposer
@@ -1281,6 +1305,7 @@ export class WaterEffectV2 {
     // Clear previous state
     this._disposeFloorWater();
     this._waterTiles = [];
+    this._hasAnyWaterData = false;
 
     const tileDocs = canvas?.scene?.tiles?.contents ?? [];
 
@@ -1349,6 +1374,7 @@ export class WaterEffectV2 {
 
     if (this._waterTiles.length === 0) {
       log.warn('WaterEffectV2 populate: no _Water masks found in any tile. Checked', tileDocs.length, 'tiles.');
+      this.setEnabled(false);
       return;
     }
     log.info(`WaterEffectV2 populate: found ${this._waterTiles.length} _Water mask(s)`, this._waterTiles.map(t => t.maskPath));
@@ -1391,6 +1417,10 @@ export class WaterEffectV2 {
     const activeFloor = window.MapShine?.floorStack?.getActiveFloor();
     this._activeFloorIndex = activeFloor?.index ?? 0;
     this._applyFloorWaterData(this._activeFloorIndex);
+    this._hasAnyWaterData = this._floorWater.size > 0;
+    if (!this._hasAnyWaterData) {
+      this.setEnabled(false);
+    }
 
     log.info(`WaterEffectV2 populated: ${this._waterTiles.length} tile(s), ${this._floorWater.size} floor(s)`);
   }
@@ -2696,8 +2726,13 @@ export class WaterEffectV2 {
   render(renderer, camera, inputRT, outputRT, occluderRT = null) {
     if (!this._initialized || !this._composeMaterial || !this._composeScene || !this._composeCamera) return false;
     if (!renderer || !inputRT || !outputRT) return false;
+    if (!this.enabled) return false;
+    if (!this._hasAnyWaterData) return false;
 
     const u = this._composeMaterial.uniforms;
+    if ((Number(u?.uHasWaterData?.value) || 0) <= 0 && (Number(u?.uHasWaterRawMask?.value) || 0) <= 0) {
+      return false;
+    }
     u.tDiffuse.value = inputRT.texture;
     u.uWaterEnabled.value = this.enabled ? 1.0 : 0.0;
 
@@ -2823,6 +2858,7 @@ export class WaterEffectV2 {
         this._composeMaterial.uniforms.uHasWaterRawMask.value = 0.0;
       }
     }
+    this._hasAnyWaterData = this._floorWater.size > 0;
   }
 
   /**
@@ -2840,6 +2876,7 @@ export class WaterEffectV2 {
     // Dispose per-floor water data (mask RTs, SDF textures, raw masks)
     this._disposeFloorWater();
     this._waterTiles = [];
+    this._hasAnyWaterData = false;
 
     // Dispose compose quad resources
     try { this._composeMaterial?.dispose(); } catch (_) {}

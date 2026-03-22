@@ -117,10 +117,18 @@ export function installSnapshotStoreHooks() {
 
   // Scene flag updates (e.g. Levels Authoring dialog saves sceneLevels)
   hookIds.push(['updateScene', Hooks.on('updateScene', (sceneDoc, changes) => {
-    // Only invalidate if flags were changed (avoid churn from darkness/time updates)
-    if (changes?.flags) {
-      invalidate();
-    }
+    const f = changes?.flags;
+    if (!f || typeof f !== 'object') return;
+
+    // Map Shine persists controlState / weather-snapshot under flags['map-shine-advanced'].
+    // Those do not affect LevelsImportSnapshot (tiles/walls/flags.levels). Invalidating here
+    // ran on every time-slider debounce -> snapshot cache churn + subtle floor/compositor desync.
+    const keys = Object.keys(f);
+    if (keys.length === 0) return;
+    const onlyMapShineAdvanced = keys.length === 1 && keys[0] === 'map-shine-advanced';
+    if (onlyMapShineAdvanced) return;
+
+    invalidate();
   })]);
 
   log.info('[LevelsSnapshotStore] Hooks installed for auto-invalidation');

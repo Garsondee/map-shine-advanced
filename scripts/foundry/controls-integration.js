@@ -169,9 +169,8 @@ export class ControlsIntegration {
   }
 
   _isPixiEditorOverlayNeeded() {
-    // Walls, lighting, and tokens are fully Three.js-native now.
-    // Only return true for layers we haven't replaced yet (drawings, regions,
-    // sounds, notes, templates). The InputRouter handles this via determineMode().
+    // Tokens stay Three.js-native; walls/lighting use Foundry PIXI tools. The
+    // InputRouter drives pointer routing — this gate stays false.
     return false;
   }
 
@@ -227,6 +226,32 @@ export class ControlsIntegration {
    */
   _refreshFoundryDoorControlVisibility() {
     try {
+      if (this._isWallsContextActive()) {
+        const controlsDoors = canvas?.controls?.doors;
+        if (controlsDoors) {
+          controlsDoors.visible = true;
+          controlsDoors.renderable = true;
+        }
+        for (const wall of canvas?.walls?.placeables || []) {
+          try {
+            if (!wall?.isDoor) continue;
+            if (!wall.doorControl && typeof wall.createDoorControl === 'function') {
+              wall.createDoorControl();
+            }
+            if (wall.doorControl) {
+              wall.doorControl.visible = true;
+              wall.doorControl.renderable = true;
+              if (wall.doorControl.icon) {
+                wall.doorControl.icon.visible = true;
+                wall.doorControl.icon.renderable = true;
+              }
+            }
+          } catch (_) {
+          }
+        }
+        return;
+      }
+
       // Ensure door controls exist for door walls (Foundry normally does this in
       // ControlsLayer.drawDoors). In takeover mode this can occasionally drift.
       for (const wall of canvas?.walls?.placeables || []) {
@@ -316,7 +341,7 @@ export class ControlsIntegration {
       const activeTool = String(ui?.controls?.tool?.name || ui?.controls?.activeTool || '').toLowerCase();
 
       this._interactionSnapshotSeq += 1;
-      log.warn(`[InputSnapshot #${this._interactionSnapshotSeq}] ${trigger}`, {
+      log.debug(`[InputSnapshot #${this._interactionSnapshotSeq}] ${trigger}`, {
         mode: resolvedRouter?.currentMode,
         shouldThree: resolvedRouter?.shouldThreeReceiveInput?.(),
         shouldPixi: resolvedRouter?.shouldPixiReceiveInput?.(),
@@ -741,11 +766,9 @@ export class ControlsIntegration {
       log.debug('Tokens layer: meshes transparent, interaction enabled');
     }
 
-    // Walls layer needs special handling:
-    // - We want native door controls/icons to remain visible as an overlay.
-    // - But wall segments themselves are rendered in Three.js.
-    // So we keep the Walls layer visible, but make its non-door visuals transparent
-    // unless the Walls layer is actively being edited.
+    // Walls layer: keep visible and interactive. During gameplay, wall segment
+    // PIXI graphics are nearly transparent (Three.js shows walls/doors); on the
+    // Walls layer, _updateWallsVisualState restores full native PIXI rendering.
     if (canvas.walls) {
       canvas.walls.visible = true;
       canvas.walls.interactiveChildren = true;
@@ -959,7 +982,8 @@ export class ControlsIntegration {
       this._isSoundsContextActive() ||
       this._isNotesContextActive() ||
       this._isTemplatesContextActive() ||
-      this._isRegionsContextActive();
+      this._isRegionsContextActive() ||
+      this._isWallsContextActive();
 
     if (!isActive) return;
 
@@ -974,6 +998,8 @@ export class ControlsIntegration {
         case 'notes': targetLayer = canvas.notes; break;
         case 'templates': targetLayer = canvas.templates; break;
         case 'regions': targetLayer = canvas.regions; break;
+        case 'walls': targetLayer = canvas.walls; break;
+        case 'wall': targetLayer = canvas.walls; break;
       }
       
       if (targetLayer && canvas.activeLayer !== targetLayer && typeof targetLayer.activate === 'function') {

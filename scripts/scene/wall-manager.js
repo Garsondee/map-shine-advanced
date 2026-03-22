@@ -289,12 +289,15 @@ export class WallManager {
 
   _shouldShowWallLines() {
     try {
+      // Native PIXI owns wall segments on the Walls layer; Three.js lines are for gameplay only.
+      if (canvas?.walls?.active) return false;
       const active = canvas?.activeLayer;
       const activeName = String(active?.options?.name || active?.name || active?.constructor?.name || '').toLowerCase();
       const activeControlName = String(ui?.controls?.control?.name || ui?.controls?.activeControl || '').toLowerCase();
       const activeControlLayer = String(ui?.controls?.control?.layer || '').toLowerCase();
-      if (active === canvas?.walls) return true;
-      return activeName === 'wallslayer'
+      if (active === canvas?.walls) return false;
+      const wallsEditing =
+        activeName === 'wallslayer'
         || activeName === 'walllayer'
         || activeName === 'walls'
         || activeName === 'wall'
@@ -302,8 +305,9 @@ export class WallManager {
         || activeControlName === 'wall'
         || activeControlLayer === 'walls'
         || activeControlLayer === 'wall';
+      return !wallsEditing;
     } catch (_) {
-      return false;
+      return true;
     }
   }
 

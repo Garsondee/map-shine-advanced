@@ -9,36 +9,6 @@
 // then considers the init phase complete and rejects late registrations.
 import { registerLevelNavigationKeybindings } from './foundry/level-navigation-keybindings.js';
 
-function _suppressDiagConsoleLogs() {
-  try {
-    if (window.__msaDiagLogsSuppressed) return;
-
-    window.__msaDiagLogsSuppressed = true;
-
-    const shouldSuppress = (args) => {
-      try {
-        if (!Array.isArray(args)) return false;
-        return args.some((arg) => (typeof arg === 'string') && arg.includes('Diag #'));
-      } catch (_) {
-        return false;
-      }
-    };
-
-    const wrap = (fn) => {
-      if (typeof fn !== 'function') return fn;
-      return (...args) => {
-        if (shouldSuppress(args)) return;
-        return fn(...args);
-      };
-    };
-
-    console.log = wrap(console.log.bind(console));
-    console.warn = wrap(console.warn.bind(console));
-    console.error = wrap(console.error.bind(console));
-  } catch (_) {
-  }
-}
-
 async function showExperimentalWarningDialog() {
   try {
     if (window.__msaExperimentalWarningShownThisSession) return;
@@ -426,133 +396,8 @@ function getPlayerLightEffectInstance() {
   }
 }
 
-_suppressDiagConsoleLogs();
 _installGlobalPasswordManagerInsertGuard();
 
-function _msaCrisisLog(id, message) {
-  try {
-    const n = String(id).padStart(3, '0');
-  } catch (_) {
-  }
-}
-
-function _msaCrisisSafeJsonSize(value) {
-  try {
-    return JSON.stringify(value)?.length ?? null;
-  } catch (_) {
-    return null;
-  }
-}
-
-function _msaCrisisInspectScene(scene, label) {
-  try {
-    if (!scene) {
-      _msaCrisisLog(360, `${label}: scene=null`);
-      return;
-    }
-
-    const id = scene.id ?? scene._id ?? 'unknown';
-    const name = scene.name ?? 'unnamed';
-    const flags = scene.flags ?? {};
-    const msaFlags = flags?.['map-shine-advanced'] ?? {};
-
-    const dim = scene.dimensions ?? null;
-    const bg = scene.background?.src ?? scene.img ?? null;
-
-
-    const counts = {
-      tokens: scene.tokens?.size ?? scene.tokens?.length ?? null,
-      tiles: scene.tiles?.size ?? scene.tiles?.length ?? null,
-      walls: scene.walls?.size ?? scene.walls?.length ?? null,
-      lights: scene.lights?.size ?? scene.lights?.length ?? null,
-      sounds: scene.sounds?.size ?? scene.sounds?.length ?? null,
-      drawings: scene.drawings?.size ?? scene.drawings?.length ?? null,
-      notes: scene.notes?.size ?? scene.notes?.length ?? null,
-      regions: scene.regions?.size ?? scene.regions?.length ?? null,
-    };
-
-    const allFlagsSize = _msaCrisisSafeJsonSize(flags);
-    const msaFlagsSize = _msaCrisisSafeJsonSize(msaFlags);
-
-    try {
-      const perModule = [];
-      for (const [modId, modFlags] of Object.entries(flags ?? {})) {
-        const sz = _msaCrisisSafeJsonSize(modFlags);
-        if (typeof sz === 'number') perModule.push({ modId, sz });
-      }
-      perModule.sort((a, b) => b.sz - a.sz);
-      const top = perModule.slice(0, 12);
-    } catch (_) {
-    }
-
-    try {
-      const suspicious = [];
-      const MAX_ABS = 10_000_000;
-      const checkDoc = (kind, doc) => {
-        try {
-          const d = doc?.document ?? doc;
-          if (!d) return;
-          const docId = d.id ?? d._id ?? 'unknown';
-          const pushIfBad = (field, v) => {
-            if (v === null || v === undefined) return;
-            if (typeof v !== 'number') return;
-            if (!Number.isFinite(v) || Math.abs(v) > MAX_ABS) {
-              suspicious.push({ kind, id: docId, field, value: v });
-            }
-          };
-
-          pushIfBad('x', d.x);
-          pushIfBad('y', d.y);
-          pushIfBad('width', d.width);
-          pushIfBad('height', d.height);
-          pushIfBad('rotation', d.rotation);
-          pushIfBad('elevation', d.elevation);
-
-          // Common texture fields
-          const src = d.texture?.src ?? d.img ?? null;
-          if (src != null && typeof src !== 'string') {
-            suspicious.push({ kind, id: docId, field: 'texture.src', value: `non-string (${typeof src})` });
-          }
-        } catch (_) {
-        }
-      };
-
-      const each = (collection, kind) => {
-        try {
-          if (!collection) return;
-          if (typeof collection.values === 'function') {
-            for (const doc of collection.values()) checkDoc(kind, doc);
-          } else if (Array.isArray(collection)) {
-            for (const doc of collection) checkDoc(kind, doc);
-          }
-        } catch (_) {
-        }
-      };
-
-      each(scene.tiles, 'Tile');
-      each(scene.tokens, 'Token');
-      each(scene.walls, 'Wall');
-      each(scene.lights, 'AmbientLight');
-      each(scene.sounds, 'AmbientSound');
-      each(scene.drawings, 'Drawing');
-      each(scene.notes, 'Note');
-      each(scene.regions, 'Region');
-
-      if (suspicious.length) {
-      } else {
-      }
-    } catch (_) {
-    }
-
-  } catch (e) {
-  }
-}
-
-_msaCrisisLog(1, 'module.js: module evaluation started');
-
-try {
-} catch (_) {
-}
 
 // -- diagnostic kill-switch cleanup --
 // These localStorage flags were temporary debugging measures during the
@@ -563,22 +408,6 @@ try {
 } catch (_) {}
 try {
   globalThis.localStorage?.removeItem?.('msa-disable-water-effect');
-} catch (_) {}
-
-// Some older builds (or other modules) may re-set these keys during early
-// startup. Scrub them for a few seconds so the session is reliably unblocked.
-try {
-  if (!globalThis.__msaDeprecatedKillSwitchScrubInstalled) {
-    globalThis.__msaDeprecatedKillSwitchScrubInstalled = true;
-    let remaining = 10;
-    const scrub = () => {
-      try { globalThis.localStorage?.removeItem?.('msa-disable-texture-loading'); } catch (_) {}
-      try { globalThis.localStorage?.removeItem?.('msa-disable-water-effect'); } catch (_) {}
-      remaining--;
-      if (remaining > 0) setTimeout(scrub, 500);
-    };
-    setTimeout(scrub, 0);
-  }
 } catch (_) {}
 
 try {
@@ -593,7 +422,6 @@ try {
         const col = (typeof ev?.colno === 'number') ? ev.colno : '';
         const err = ev?.error;
         const stack = err?.stack ?? null;
-        _msaCrisisLog(5, `window.onerror: ${msg} @ ${file}:${line}:${col}`);
       } catch (_) {
       }
     });
@@ -603,19 +431,16 @@ try {
         const reason = ev?.reason;
         const msg = (reason && typeof reason === 'object' && 'message' in reason) ? reason.message : String(reason);
         const stack = reason?.stack ?? null;
-        _msaCrisisLog(6, `window.onunhandledrejection: ${msg}`);
       } catch (_) {
       }
     });
 
-    _msaCrisisLog(7, 'module.js: installed global error handlers');
   }
 } catch (_) {
 }
 
 const MODULE_ID = 'map-shine-advanced';
 
-_msaCrisisLog(2, `module.js: MODULE_ID set (${MODULE_ID})`);
 
 function rerenderControls() {
   try {
@@ -666,7 +491,6 @@ const MapShine = window.MapShine ?? {
   camera: null
 };
 
-_msaCrisisLog(3, 'module.js: MapShine global state object prepared');
 
 // Wall-clock load timer (starts at module evaluation time).
 // This measures the full time from module load to "Finished" in createThreeCanvas.
@@ -701,66 +525,13 @@ MapShine.applyPasswordManagerIgnores = _applyPasswordManagerIgnores;
 MapShine.installTokenHudPasswordManagerGuard = _installTokenHudPasswordManagerGuard;
 MapShine.installGlobalPasswordManagerInsertGuard = _installGlobalPasswordManagerInsertGuard;
 
-_msaCrisisLog(4, 'module.js: MapShine state exposed on window');
 
 /**
  * Foundry VTT 'init' hook - Called when Foundry initializes
  * Used for early setup like settings registration
  */
 Hooks.once('init', async function() {
-  _msaCrisisLog(10, "Hooks.once('init'): handler entered");
   _installGlobalPasswordManagerInsertGuard();
-
-  // Diagnostic: watch for any changes to the MSA enabled flag or namespace.
-  // This will show whether something is overwriting or deleting flags after you enable.
-  try {
-    if (!window.__msaEnabledFlagWatchInstalled) {
-      window.__msaEnabledFlagWatchInstalled = true;
-      Hooks.on('updateScene', (sceneDoc, changes) => {
-        try {
-          const ns = changes?.flags?.['map-shine-advanced'];
-          const touched = (ns !== undefined) || (changes?.flags?.['-=map-shine-advanced'] !== undefined);
-          if (!touched) return;
-          // Diagnostic logging removed intentionally.
-        } catch (_) {}
-      });
-    }
-  } catch (_) {}
-
-  try {
-    // Scene/world corruption diagnostics: install very early so we still get logs
-    // even if scene loading later hard-stalls.
-    if (!window.__msaCrisisCorruptionDiagInstalled) {
-      window.__msaCrisisCorruptionDiagInstalled = true;
-
-      Hooks.on('canvasConfig', () => {
-        try { _msaCrisisInspectScene(game?.scenes?.active ?? canvas?.scene ?? null, 'canvasConfig'); } catch (_) {}
-      });
-
-      Hooks.on('canvasInit', () => {
-        try { _msaCrisisInspectScene(game?.scenes?.active ?? canvas?.scene ?? null, 'canvasInit'); } catch (_) {}
-      });
-
-      Hooks.on('drawCanvas', () => {
-        try { _msaCrisisInspectScene(game?.scenes?.active ?? canvas?.scene ?? null, 'drawCanvas'); } catch (_) {}
-      });
-
-      Hooks.on('preUpdateScene', (scene) => {
-        try { _msaCrisisInspectScene(scene, 'preUpdateScene'); } catch (_) {}
-      });
-
-      Hooks.once('ready', () => {
-        try {
-          const worldId = game?.world?.id ?? 'unknown';
-          const worldTitle = game?.world?.title ?? 'unknown';
-          _msaCrisisInspectScene(game?.scenes?.active ?? canvas?.scene ?? null, 'ready');
-        } catch (_) {}
-      });
-
-      _msaCrisisLog(358, 'init: corruption diagnostics hooks installed');
-    }
-  } catch (_) {
-  }
 
   // Register keybindings SYNCHRONOUSLY before any await. Foundry's hook system
   // does not await async handlers -- after the first yield, Foundry considers the
@@ -768,10 +539,8 @@ Hooks.once('init', async function() {
   // "You cannot register a Keybinding after the init hook"
   try {
     registerLevelNavigationKeybindings(MODULE_ID);
-    _msaCrisisLog(9, 'init: registerLevelNavigationKeybindings() completed (pre-await)');
   } catch (e) {
     console.warn('Map Shine: failed to register level navigation keybindings', e);
-    _msaCrisisLog(9, 'init: registerLevelNavigationKeybindings() threw (pre-await)');
   }
 
   const [{ info }, sceneSettings, canvasReplacement, { registerUISettings }, loadingService, debugLoadingProfilerMod] = await Promise.all([
@@ -783,60 +552,46 @@ Hooks.once('init', async function() {
     import('./core/debug-loading-profiler.js')
   ]);
 
-  _msaCrisisLog(11, 'init: dynamic imports resolved');
 
   const loadingOverlay = loadingService.loadingScreenService;
   const debugLoadingProfiler = debugLoadingProfilerMod.debugLoadingProfiler;
   MapShine.loadingScreenService = loadingOverlay;
   MapShine.debugLoadingProfiler = debugLoadingProfiler;
 
-  _msaCrisisLog(12, 'init: loading overlay + debug loading profiler assigned');
 
   info('Initializing...');
 
-  _msaCrisisLog(13, 'init: scene settings registerSettings() about to run');
 
   // Register settings first so loading-screen service can read world defaults.
   sceneSettings.registerSettings();
 
-  _msaCrisisLog(14, 'init: scene settings registered');
 
   try {
-    _msaCrisisLog(15, 'init: loadingOverlay.initialize() about to run');
     await loadingOverlay.initialize();
-    _msaCrisisLog(16, 'init: loadingOverlay.initialize() completed');
   } catch (e) {
     console.warn('Map Shine: failed to initialize loading screen service', e);
-    _msaCrisisLog(17, 'init: loadingOverlay.initialize() threw');
   }
 
   try {
-    _msaCrisisLog(18, 'init: loadingOverlay.showBlack() about to run');
     loadingOverlay.showBlack('Initializing...');
-    _msaCrisisLog(19, 'init: loadingOverlay.showBlack() completed');
   } catch (e) {
     console.warn('Map Shine: failed to initialize loading overlay', e);
-    _msaCrisisLog(20, 'init: loadingOverlay.showBlack() threw');
   }
 
 
   console.log("%c GNU Terry Pratchett %c \n\"A man is not dead while his name is still spoken.\"",
-  "background: #313131ff; color: #FFD700; font-weight: bold; padding: 4px 8px; border-radius: 4px;",
-  "color: #888; font-style: italic;"
-);
+    "background: #313131ff; color: #FFD700; font-weight: bold; padding: 4px 8px; border-radius: 4px;",
+    "color: #888; font-style: italic;"
+  );
 
   // Keybinding registration moved before the first await (see above).
-  _msaCrisisLog(21, 'init: keybinding registration already done (pre-await)');
   // Sync Debug Loading Mode from Foundry settings on startup.
   debugLoadingProfiler.debugMode = sceneSettings.getDebugLoadingModeEnabled();
-  _msaCrisisLog(22, 'init: debugLoadingProfiler.debugMode synced');
   registerUISettings();
-  _msaCrisisLog(23, 'init: registerUISettings() completed');
 
   // Register scene control buttons for Map Shine panels
   // Foundry v13+ uses Record<string, SceneControl> with tools as Record<string, SceneControlTool>
   Hooks.on('getSceneControlButtons', (controls) => {
-    _msaCrisisLog(24, 'init: getSceneControlButtons hook fired');
     try {
       const isGM = game.user?.isGM ?? false;
       const allowPlayers = game.settings?.get?.('map-shine-advanced', 'allowPlayersToTogglePlayerLightMode') ?? true;
@@ -1159,12 +914,10 @@ Hooks.once('init', async function() {
 
     } catch (e) {
       console.error('Map Shine: failed to register scene control buttons', e);
-      _msaCrisisLog(25, 'init: getSceneControlButtons threw');
     }
   });
 
   Hooks.on('getActorSheetHeaderButtons', (app, buttons) => {
-    _msaCrisisLog(26, 'init: getActorSheetHeaderButtons hook fired');
     try {
       const actor = app?.actor;
       if (!actor || !Array.isArray(buttons)) return;
@@ -1181,12 +934,10 @@ Hooks.once('init', async function() {
       });
     } catch (e) {
       console.error('Map Shine: failed to add actor sheet movement style header button', e);
-      _msaCrisisLog(27, 'init: getActorSheetHeaderButtons threw');
     }
   });
 
   Hooks.on('renderTileConfig', (app, html) => {
-    _msaCrisisLog(28, 'init: renderTileConfig hook fired');
     try {
       const $ = globalThis.$;
       if (typeof $ !== 'function') return;
@@ -1265,12 +1016,10 @@ Hooks.once('init', async function() {
       }
     } catch (e) {
       console.error('Map Shine: failed to inject TileConfig overhead roof toggle', e);
-      _msaCrisisLog(29, 'init: renderTileConfig threw');
     }
   });
 
   Hooks.on('renderTokenHUD', (app, html) => {
-    _msaCrisisLog(38, 'init: renderTokenHUD hook fired');
     try {
       _installTokenHudPasswordManagerGuard();
 
@@ -1284,7 +1033,6 @@ Hooks.once('init', async function() {
       }
     } catch (e) {
       console.error('Map Shine: failed to inject password manager bypass into TokenHUD', e);
-      _msaCrisisLog(39, 'init: renderTokenHUD threw');
     }
   });
 
@@ -1301,32 +1049,34 @@ Hooks.once('init', async function() {
     _autoCaptureMSASceneFlags(document, data);
   });
 
-  // Adventure pre-import hook: diagnostic logging + safety-net injection.
+  // Adventure pre-import hook: optional diagnostic logging + safety-net injection.
   // Reads MSA config from Adventure top-level flags (auto-captured during export)
   // or sidecar JSON, and injects it into the scene payloads before creation.
   Hooks.on('preImportAdventure', (adventure, options, toCreate, toUpdate) => {
-    try {
-      // Layer 5: Diagnostic logging to verify whether flags survive Adventure export.
-      const NS = 'map-shine-advanced';
-      for (const sceneData of (toCreate?.Scene ?? [])) {
-        const msaFlags = sceneData.flags?.[NS];
-        const flagKeys = msaFlags ? Object.keys(msaFlags) : [];
-        console.log(
-          `Map Shine DIAG: preImport CREATE scene "${sceneData.name ?? '?'}" (${sceneData._id ?? '?'})`,
-          'MSA flags present:', !!msaFlags,
-          'keys:', flagKeys.length ? flagKeys.join(', ') : 'none'
-        );
-      }
-      for (const sceneData of (toUpdate?.Scene ?? [])) {
-        const msaFlags = sceneData.flags?.[NS];
-        const flagKeys = msaFlags ? Object.keys(msaFlags) : [];
-        console.log(
-          `Map Shine DIAG: preImport UPDATE scene "${sceneData.name ?? '?'}" (${sceneData._id ?? '?'})`,
-          'MSA flags present:', !!msaFlags,
-          'keys:', flagKeys.length ? flagKeys.join(', ') : 'none'
-        );
-      }
-    } catch (_) {}
+    if (window.MapShine?.__debugAdventureImport === true) {
+      try {
+        // Layer 5: Optional diagnostics for Adventure flag round-trip verification.
+        const NS = 'map-shine-advanced';
+        for (const sceneData of (toCreate?.Scene ?? [])) {
+          const msaFlags = sceneData.flags?.[NS];
+          const flagKeys = msaFlags ? Object.keys(msaFlags) : [];
+          console.log(
+            `Map Shine DIAG: preImport CREATE scene "${sceneData.name ?? '?'}" (${sceneData._id ?? '?'})`,
+            'MSA flags present:', !!msaFlags,
+            'keys:', flagKeys.length ? flagKeys.join(', ') : 'none'
+          );
+        }
+        for (const sceneData of (toUpdate?.Scene ?? [])) {
+          const msaFlags = sceneData.flags?.[NS];
+          const flagKeys = msaFlags ? Object.keys(msaFlags) : [];
+          console.log(
+            `Map Shine DIAG: preImport UPDATE scene "${sceneData.name ?? '?'}" (${sceneData._id ?? '?'})`,
+            'MSA flags present:', !!msaFlags,
+            'keys:', flagKeys.length ? flagKeys.join(', ') : 'none'
+          );
+        }
+      } catch (_) {}
+    }
 
     // Layer 4: Safety-net injection from Adventure flags or sidecar file.
     try {
@@ -1369,13 +1119,10 @@ Hooks.once('init', async function() {
 
   // Initialize canvas replacement hooks
   try {
-    _msaCrisisLog(30, 'init: calling canvasReplacement.initialize()');
   } catch (_) {
   }
-  _msaCrisisLog(31, 'init: canvasReplacement.initialize() about to run');
   canvasReplacement.initialize();
   try {
-    _msaCrisisLog(32, 'init: canvasReplacement.initialize() returned');
   } catch (_) {
   }
 });
@@ -1385,19 +1132,16 @@ Hooks.once('init', async function() {
  * Main bootstrap happens here
  */
 Hooks.once('ready', async function() {
-  _msaCrisisLog(40, "Hooks.once('ready'): handler entered");
   const [{ info }, loadingService] = await Promise.all([
     import('./core/log.js'),
     import('./ui/loading-screen/loading-screen-service.js')
   ]);
 
-  _msaCrisisLog(41, 'ready: dynamic imports resolved');
 
   const loadingOverlay = loadingService.loadingScreenService;
   MapShine.loadingScreenService = loadingOverlay;
-  console.log('[MSA BOOT] ready hook: fired');
+  info('Ready hook fired');
 
-  _msaCrisisLog(42, 'ready: loading overlay assigned');
 
   try {
     // Defer slightly so the rest of Foundry UI finishes settling before we show a modal.
@@ -1407,55 +1151,42 @@ Hooks.once('ready', async function() {
       } catch (_) {
       }
     }, 250);
-    _msaCrisisLog(43, 'ready: experimental warning timeout scheduled');
   } catch (_) {
-    _msaCrisisLog(44, 'ready: failed to schedule experimental warning timeout');
   }
 
   try {
-    _msaCrisisLog(45, 'ready: loadingOverlay.setMessage(Preparing renderer...) about to run');
     loadingOverlay.setMessage('Preparing renderer...');
-    _msaCrisisLog(46, 'ready: loadingOverlay.setMessage completed');
   } catch (e) {
     console.warn('Map Shine: failed to update loading overlay', e);
-    _msaCrisisLog(47, 'ready: loadingOverlay.setMessage threw');
   }
   // Run bootstrap sequence -- wrapped in try/catch so a failed import (e.g.
   // game-system.js 404) doesn't silently hang createThreeCanvas forever.
-  _msaCrisisLog(48, 'ready: importing bootstrap + LoadingScreenManager');
   let bootstrap = null;
   let LoadingScreenManager = null;
   try {
-    _msaCrisisLog(48.1, 'ready: importing bootstrap.js...');
     const bsMod = await import('./core/bootstrap.js');
     bootstrap = bsMod.bootstrap;
-    _msaCrisisLog(48.2, 'ready: bootstrap.js imported, importing loading-screen-manager.js...');
     const lsmMod = await import('./ui/loading-screen/loading-screen-manager.js');
     LoadingScreenManager = lsmMod.LoadingScreenManager;
-    _msaCrisisLog(49, 'ready: bootstrap + LoadingScreenManager imports resolved');
   } catch (importErr) {
     console.error('Map Shine: failed to import bootstrap or LoadingScreenManager', importErr);
-    _msaCrisisLog(49, `ready: import FAILED (${importErr?.message ?? 'unknown'}) -- marking bootstrapComplete`);
     MapShine.bootstrapComplete = true;
     MapShine.bootstrapError = importErr?.message ?? 'import failed';
     return; // nothing more we can do without bootstrap
   }
 
-  _msaCrisisLog(50, 'ready: calling bootstrap({verbose:false})');
   let state = null;
   try {
     state = await bootstrap({ verbose: false });
   } catch (bootstrapErr) {
     console.error('Map Shine: failed to run bootstrap', bootstrapErr);
-    _msaCrisisLog(51, `ready: bootstrap FAILED (${bootstrapErr?.message ?? 'unknown'}) -- marking bootstrapComplete`);
     MapShine.bootstrapComplete = true;
     MapShine.bootstrapError = bootstrapErr?.message ?? 'bootstrap failed';
     return; // nothing more we can do without bootstrap
   }
 
-  _msaCrisisLog(51, `ready: bootstrap returned (initialized=${state?.initialized})`);
 
-  console.log('[MSA BOOT] ready hook: bootstrap complete, initialized=', state?.initialized);
+  info(`Bootstrap complete (initialized=${!!state?.initialized})`);
 
   // Update global state
   Object.assign(MapShine, state);
@@ -1463,23 +1194,18 @@ Hooks.once('ready', async function() {
   MapShine.bootstrapComplete = true;
   MapShine.bootstrapError = state?.error ?? null;
 
-  _msaCrisisLog(52, 'ready: MapShine global state updated from bootstrap');
 
   info('Module ready');
 
-  _msaCrisisLog(53, 'ready: info(Module ready) logged');
 
   try {
     if (!MapShine.loadingScreenManager) {
-      _msaCrisisLog(54, 'ready: creating LoadingScreenManager');
       const manager = new LoadingScreenManager();
       await manager.initialize();
       MapShine.loadingScreenManager = manager;
-      _msaCrisisLog(55, 'ready: LoadingScreenManager.initialize() completed');
     }
   } catch (e) {
     console.warn('Map Shine: failed to initialize Loading Screen Manager', e);
-    _msaCrisisLog(56, 'ready: LoadingScreenManager initialize threw');
   }
 
   // Safety net: when Foundry has no active scene, it calls #drawBlank() which
@@ -1488,13 +1214,10 @@ Hooks.once('ready', async function() {
   // canvasReady will fire normally when the user later navigates to a scene.
   try {
     if (!canvas?.scene) {
-      _msaCrisisLog(57, 'ready: no active canvas.scene; dismissing loading overlay');
       info('No active scene -- dismissing loading overlay');
       loadingOverlay.fadeIn(500).catch(() => {});
-      _msaCrisisLog(58, 'ready: loadingOverlay.fadeIn(500) invoked for no-scene case');
     }
   } catch (e) {
     console.warn('Map Shine: failed to dismiss overlay for no-scene case', e);
-    _msaCrisisLog(59, 'ready: no-scene overlay dismissal threw');
   }
 });

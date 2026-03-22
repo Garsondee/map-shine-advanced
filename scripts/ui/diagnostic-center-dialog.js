@@ -20,13 +20,17 @@ import { peekSnapshot } from '../core/levels-import/LevelsSnapshotStore.js';
 
 const log = createLogger('DiagnosticCenter');
 
-function _captureConsoleOutput(fn) {
+function _captureConsoleOutput(fn, { enabled = false } = {}) {
   const captured = {
     error: [],
     warn: [],
     info: [],
     log: []
   };
+
+  if (!enabled) {
+    return fn(captured);
+  }
 
   const original = {
     error: console.error,
@@ -1886,17 +1890,9 @@ export class DiagnosticCenterDialog {
 
       let shaderProbeSummary = null;
       try {
-        await _captureConsoleOutput(async (captured) => {
-          for (const t of compileTargets) {
-            try {
-              renderer.compile(t.scene, t.camera);
-            } catch (e) {
-              captured.error.push(`[MapShine Diagnostic] compile(${t.label}) threw: ${String(e?.message || e)}`);
-            }
-          }
-        });
-
-        // Run again to get captured output (capture wrapper returns fn result; we use side-effects)
+        const captureConsoleForShaderProbe = (
+          window.MapShine?.__debugDiagnosticConsoleCapture === true
+        );
         shaderProbeSummary = await _captureConsoleOutput(async (captured) => {
           for (const t of compileTargets) {
             try {
@@ -1906,7 +1902,7 @@ export class DiagnosticCenterDialog {
             }
           }
           return _summarizeShaderErrors(captured);
-        });
+        }, { enabled: captureConsoleForShaderProbe });
       } catch (e) {
         checks.push(_mkCheck('Shaders', 'shaders.compileProbe', 'WARN', 'Shader compile probe failed to run', {
           error: String(e?.message || e)
@@ -1914,12 +1910,20 @@ export class DiagnosticCenterDialog {
       }
 
       if (shaderProbeSummary) {
-        const status = shaderProbeSummary.shaderLineCount > 0 ? 'FAIL' : 'PASS';
-        const msg = shaderProbeSummary.shaderLineCount > 0
-          ? `Shader compile/link errors detected (${shaderProbeSummary.shaderLineCount} line(s)). See details.`
-          : 'No shader compile/link errors detected during compile sweep';
+        const captureEnabled = window.MapShine?.__debugDiagnosticConsoleCapture === true;
+        const status = captureEnabled
+          ? (shaderProbeSummary.shaderLineCount > 0 ? 'FAIL' : 'PASS')
+          : 'INFO';
+        const msg = captureEnabled
+          ? (
+              shaderProbeSummary.shaderLineCount > 0
+                ? `Shader compile/link errors detected (${shaderProbeSummary.shaderLineCount} line(s)). See details.`
+                : 'No shader compile/link errors detected during compile sweep'
+            )
+          : 'Shader compile sweep executed (console capture disabled by default; set MapShine.__debugDiagnosticConsoleCapture=true to capture shader console output).';
         checks.push(_mkCheck('Shaders', 'shaders.compileProbe', status, msg, {
           compileTargets: compileTargets.map((t) => t.label).slice(0, 40),
+          captureConsoleForShaderProbe: captureEnabled,
           ...shaderProbeSummary,
           shaderLines: shaderProbeSummary.shaderLines.slice(0, 20)
         }));

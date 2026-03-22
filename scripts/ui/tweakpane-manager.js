@@ -17,6 +17,11 @@ import { OVERLAY_THREE_LAYER, TILE_FEATURE_LAYERS } from '../core/render-layers.
 import * as sceneSettings from '../settings/scene-settings.js';
 import Coordinates from '../utils/coordinates.js';
 import { debugLoadingProfiler } from '../core/debug-loading-profiler.js';
+import {
+  hydrateMainWeatherTweakpaneFromController,
+  hydrateControlPanelLiveOverridesFromController,
+  resolveWeatherController
+} from './weather-param-bridge.js';
 
 const log = createLogger('UI');
 
@@ -1612,6 +1617,12 @@ export class TweakpaneManager {
       await this.pasteSceneSettingsFromClipboard();
     });
 
+    sceneFolder.addButton({
+      title: 'Import Single Effect'
+    }).on('click', async () => {
+      await this.importSingleEffectFromScene();
+    });
+
     sceneFolder.on('fold', (ev) => {
       this.accordionStates['debug_scene'] = ev.expanded;
       this.saveUIState();
@@ -3000,6 +3011,18 @@ export class TweakpaneManager {
     // Push initial parameter values into the effect so it starts in sync
     const effectData = this.effectFolders[effectId];
     const initialCallback = this.effectCallbacks.get(effectId) || updateCallback;
+
+    // Weather: WeatherController is hydrated from scene/snapshot before this UI exists.
+    // Without this, the initial callback would push schema defaults (often 0) into WC and
+    // wipe live state; the GM control panel would then show zeros and feel "disconnected".
+    if (effectId === 'weather') {
+      try {
+        hydrateMainWeatherTweakpaneFromController(resolveWeatherController(), this);
+      } catch (e) {
+        log.warn('hydrateMainWeatherTweakpaneFromController failed:', e);
+      }
+    }
+
     if (initialCallback && effectData && effectData.params) {
       for (const [paramId, value] of Object.entries(effectData.params)) {
         const def = effectData.schema?.parameters?.[paramId];
@@ -3010,6 +3033,19 @@ export class TweakpaneManager {
         if (def?.hidden === true && paramId !== 'enabled') continue;
 
         initialCallback(effectId, paramId, value);
+      }
+    }
+
+    if (effectId === 'weather') {
+      try {
+        hydrateControlPanelLiveOverridesFromController(resolveWeatherController());
+      } catch (e) {
+        log.warn('hydrateControlPanelLiveOverridesFromController failed:', e);
+      }
+      try {
+        window.MapShine?.controlPanel?._wireLiveWeatherOverrideBindingsIfReady?.();
+      } catch (e) {
+        log.warn('controlPanel._wireLiveWeatherOverrideBindingsIfReady failed:', e);
       }
     }
 
@@ -4404,6 +4440,319 @@ export class TweakpaneManager {
     } catch (e) {
       log.warn('Failed to paste scene settings:', e);
       ui.notifications.error('Map Shine: Failed to apply scene settings — see browser console for details.');
+    }
+  }
+
+  /**
+   * Resolve an effect ID from scene settings to a registered UI effect ID.
+   * Handles a small alias set used by legacy payloads.
+   * @param {string} effectId
+   * @returns {string|null}
+   * @private
+   */
+  _resolveRegisteredEffectId(effectId) {
+    if (!effectId) return null;
+    if (this.effectFolders[effectId]) return effectId;
+
+    // Legacy/canonical aliases.
+    if (effectId === 'window-light' && this.effectFolders.windowLight) return 'windowLight';
+    if (effectId === 'windowLight' && this.effectFolders['window-light']) return 'window-light';
+
+    return null;
+  }
+
+  /**
+   * Build scene effect map for current settings mode.
+   * - mapMaker mode: Map Maker tier only
+   * - gm mode: mapMaker merged with GM override tier
+   * @param {Scene} scene
+   * @returns {Object<string, any>}
+   * @private
+   */
+  _getSceneEffectsForCurrentMode(scene) {
+    const all = sceneSettings.getSceneSettings(scene);
+    const mapMaker = all?.mapMaker?.effects || {};
+    if (this.settingsMode !== 'gm') return { ...mapMaker };
+    const gm = all?.gm?.effects || {};
+    return this._deepMergeObjects(mapMaker, gm);
+  }
+
+  /**
+   * Import selected effects from another scene into the current scene.
+   * Supports full import, params-only, or enabled-only.
+   * @returns {Promise<void>}
+   * @public
+   */
+  async importSingleEffectFromScene() {
+    const targetScene = canvas?.scene;
+    if (!targetScene) {
+      ui.notifications?.warn?.('Map Shine: No active scene to import into');
+      return;
+    }
+
+    if (!game.user?.isGM) {
+      ui.notifications?.warn?.('Map Shine: Only GMs can import effect settings');
+      return;
+    }
+
+    const scenes = Array.from(game?.scenes?.contents || []).filter((s) => !!s?.id);
+    const sourceCandidates = scenes.filter((s) => s.id !== targetScene.id);
+    if (sourceCandidates.length === 0) {
+      ui.notifications?.warn?.('Map Shine: No other scenes are available to import from');
+      return;
+    }
+
+    const modeLabels = {
+      full: 'Full (enabled + parameters)',
+      params: 'Parameters only',
+      enabled: 'Enabled only',
+    };
+
+    const getSceneById = (id) => sourceCandidates.find((s) => s.id === id) || null;
+    const getImportableEffects = (scene) => {
+      if (!scene) return [];
+      const effects = this._getSceneEffectsForCurrentMode(scene);
+      const rows = [];
+      for (const effectId of Object.keys(effects || {})) {
+        const resolved = this._resolveRegisteredEffectId(effectId);
+        if (!resolved) continue;
+        const display = this.effectFolders[resolved]?.folder?.title || resolved;
+        rows.push({
+          sourceEffectId: effectId,
+          targetEffectId: resolved,
+          label: `${display} (${effectId})`
+        });
+      }
+      rows.sort((a, b) => a.label.localeCompare(b.label));
+      return rows;
+    };
+
+    const sceneOptionsHtml = sourceCandidates.map((s) => (
+      `<option value="${this._escHtml(s.id)}">${this._escHtml(s.name || s.id)}</option>`
+    )).join('');
+    const modeOptionsHtml = Object.entries(modeLabels).map(([k, v]) => (
+      `<option value="${k}">${this._escHtml(v)}</option>`
+    )).join('');
+
+    const content = `
+      <form>
+        <div class="form-group">
+          <label>Source Scene</label>
+          <select name="sourceSceneId">
+            ${sceneOptionsHtml}
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Effects</label>
+          <div style="display:flex; gap:6px; margin-bottom:6px;">
+            <button type="button" name="checkAllEffects" style="flex:1;">Check All</button>
+            <button type="button" name="uncheckAllEffects" style="flex:1;">Uncheck All</button>
+          </div>
+          <div
+            name="effectsList"
+            style="max-height:260px; overflow:auto; border:1px solid rgba(255,255,255,0.2); border-radius:4px; padding:6px;"
+          >
+            <div style="opacity:0.8;">Select a source scene to load effects.</div>
+          </div>
+          <p class="notes" style="margin-top:4px;">
+            Selected: <strong><span name="selectedCount">0</span></strong>
+          </p>
+        </div>
+        <div class="form-group">
+          <label>Import Mode</label>
+          <select name="importMode">
+            ${modeOptionsHtml}
+          </select>
+        </div>
+        <p class="notes" style="margin-top: 8px;">
+          Current target mode: <strong>${this._escHtml(this.settingsMode)}</strong> on scene
+          <strong>${this._escHtml(targetScene.name || targetScene.id)}</strong>.
+        </p>
+      </form>
+    `;
+
+    let currentEffects = [];
+    const selectedTargets = new Set();
+
+    const selected = await new Promise((resolve) => {
+      const dialog = new Dialog({
+        title: 'Import Map Shine Effects From Scene',
+        content,
+        buttons: {
+          import: {
+            icon: '<i class="fas fa-file-import"></i>',
+            label: 'Import',
+            callback: (html) => {
+              const sourceSceneId = String(html.find('[name="sourceSceneId"]').val() || '');
+              const importMode = String(html.find('[name="importMode"]').val() || 'full');
+              const selectedEffectIds = Array.from(selectedTargets);
+              resolve({
+                sourceSceneId,
+                importMode,
+                selectedEffectIds,
+              });
+            }
+          },
+          cancel: {
+            icon: '<i class="fas fa-times"></i>',
+            label: 'Cancel',
+            callback: () => resolve(null)
+          }
+        },
+        default: 'import',
+        close: () => resolve(null),
+        render: (html) => {
+          html.closest('.app.window-app')?.on('pointerdown', (ev) => ev.stopPropagation());
+
+          const sourceSelect = html.find('[name="sourceSceneId"]');
+          const effectsList = html.find('[name="effectsList"]');
+          const selectedCountEl = html.find('[name="selectedCount"]');
+          const checkAllBtn = html.find('[name="checkAllEffects"]');
+          const uncheckAllBtn = html.find('[name="uncheckAllEffects"]');
+
+          const syncSelectedCount = () => {
+            selectedCountEl.text(String(selectedTargets.size));
+          };
+
+          const rebuildEffects = () => {
+            const sourceId = String(sourceSelect.val() || '');
+            const source = getSceneById(sourceId);
+            currentEffects = getImportableEffects(source);
+            selectedTargets.clear();
+            if (currentEffects.length === 0) {
+              effectsList.html('<div style="opacity:0.8;">No matching effects found for this scene.</div>');
+              syncSelectedCount();
+              return;
+            }
+
+            const rowsHtml = currentEffects.map((e) => (
+              `<label style="display:flex; align-items:center; gap:6px; padding:2px 0;">
+                <input type="checkbox" data-target-effect="${this._escHtml(e.targetEffectId)}">
+                <span>${this._escHtml(e.label)}</span>
+              </label>`
+            )).join('');
+            effectsList.html(rowsHtml);
+            syncSelectedCount();
+
+            effectsList.find('input[type="checkbox"][data-target-effect]').on('change', (ev) => {
+              const targetEffectId = String(ev.currentTarget?.getAttribute('data-target-effect') || '');
+              if (!targetEffectId) return;
+              if (ev.currentTarget.checked) selectedTargets.add(targetEffectId);
+              else selectedTargets.delete(targetEffectId);
+              syncSelectedCount();
+            });
+          };
+
+          checkAllBtn.on('click', (ev) => {
+            ev.preventDefault();
+            selectedTargets.clear();
+            for (const row of currentEffects) {
+              selectedTargets.add(row.targetEffectId);
+            }
+            effectsList.find('input[type="checkbox"][data-target-effect]').each((_, el) => {
+              el.checked = true;
+            });
+            syncSelectedCount();
+          });
+
+          uncheckAllBtn.on('click', (ev) => {
+            ev.preventDefault();
+            selectedTargets.clear();
+            effectsList.find('input[type="checkbox"][data-target-effect]').each((_, el) => {
+              el.checked = false;
+            });
+            syncSelectedCount();
+          });
+
+          sourceSelect.on('change', rebuildEffects);
+          rebuildEffects();
+        }
+      });
+      dialog.render(true);
+    });
+
+    if (!selected) return;
+
+    const sourceScene = getSceneById(selected.sourceSceneId);
+    if (!sourceScene) {
+      ui.notifications?.warn?.('Map Shine: Source scene not found');
+      return;
+    }
+
+    const mode = (selected.importMode === 'params' || selected.importMode === 'enabled')
+      ? selected.importMode
+      : 'full';
+    const selectedIds = Array.isArray(selected.selectedEffectIds) ? selected.selectedEffectIds : [];
+    if (selectedIds.length === 0) {
+      ui.notifications?.warn?.('Map Shine: Select at least one effect to import');
+      return;
+    }
+
+    const sourceEffects = this._getSceneEffectsForCurrentMode(sourceScene);
+    const sourceByTarget = new Map();
+    for (const row of getImportableEffects(sourceScene)) {
+      sourceByTarget.set(row.targetEffectId, row.sourceEffectId);
+    }
+
+    let updatedCount = 0;
+    let importedEffects = 0;
+
+    for (const targetEffectId of selectedIds) {
+      const sourceEffectId = sourceByTarget.get(targetEffectId);
+      if (!sourceEffectId) continue;
+
+      const effectData = this.effectFolders[targetEffectId];
+      if (!effectData) continue;
+
+      const sourceParams = sourceEffects?.[sourceEffectId];
+      if (!sourceParams || typeof sourceParams !== 'object') continue;
+
+      const callback = this.effectCallbacks.get(targetEffectId);
+      const schemaParams = effectData.schema?.parameters || {};
+      let effectUpdated = 0;
+
+      if (mode === 'full' || mode === 'enabled') {
+        const sourceEnabled = this._getProperty(sourceParams, 'enabled');
+        if (typeof sourceEnabled === 'boolean') {
+          effectData.params.enabled = sourceEnabled;
+          if (effectData.bindings?.enabled) effectData.bindings.enabled.refresh();
+          callback?.(targetEffectId, 'enabled', sourceEnabled);
+          effectUpdated++;
+        }
+      }
+
+      if (mode === 'full' || mode === 'params') {
+        for (const [paramId, paramDef] of Object.entries(schemaParams)) {
+          if (paramId === 'enabled') continue;
+          if (paramDef?.readonly === true) continue;
+          if (paramDef?.hidden === true && paramId !== 'enabled') continue;
+
+          const sourceValue = this._getProperty(sourceParams, paramId);
+          if (sourceValue === undefined) continue;
+
+          const result = globalValidator.validateParameter(paramId, sourceValue, paramDef);
+          const finalValue = result.valid ? result.value : paramDef.default;
+          effectData.params[paramId] = finalValue;
+          if (effectData.bindings?.[paramId]) effectData.bindings[paramId].refresh();
+          callback?.(targetEffectId, paramId, finalValue);
+          effectUpdated++;
+        }
+      }
+
+      this.updateEffectiveState(targetEffectId);
+      this.updateControlStates(targetEffectId);
+      this.runSanityCheck(targetEffectId);
+      this.queueSave(targetEffectId);
+
+      if (effectUpdated > 0) importedEffects++;
+      updatedCount += effectUpdated;
+    }
+
+    const sourceName = sourceScene.name || sourceScene.id;
+    if (updatedCount > 0) {
+      ui.notifications?.info?.(`Map Shine: Imported ${modeLabels[mode].toLowerCase()} for ${importedEffects} effect(s) from "${sourceName}".`);
+    } else {
+      ui.notifications?.warn?.('Map Shine: No matching values were imported for the selected effects.');
     }
   }
 

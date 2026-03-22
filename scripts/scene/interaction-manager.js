@@ -1631,7 +1631,7 @@ export class InteractionManager {
       this.rightClickMovePreview.groupPlanCacheKey = String(previewResult?.groupPlanCacheKey || '');
 
       if (!immediateMove && this.rightClickMovePreview.active && !isConfirmClick) {
-        this._pathfindingLog('warn', '_handleRightClickMovePreview waiting for confirmation click', {
+        this._pathfindingLog('debug', '_handleRightClickMovePreview waiting for confirmation click', {
           tokenId: String(tokenDoc?.id || ''),
           tileKey,
           selectionKey,
@@ -1648,7 +1648,7 @@ export class InteractionManager {
         // Preview visuals are for planning only; hide before the token starts stepping.
         this._clearMovementPathPreview();
 
-        this._pathfindingLog('warn', '_handleRightClickMovePreview executing move from right-click preview', {
+        this._pathfindingLog('debug', '_handleRightClickMovePreview executing move from right-click preview', {
           tokenId: String(tokenDoc?.id || ''),
           selectionKey,
           selectedTokenCount: selectedTokenDocs.length,
@@ -1680,7 +1680,7 @@ export class InteractionManager {
             isGroup
           });
         } else {
-          this._pathfindingLog('warn', '_handleRightClickMovePreview movement execution succeeded', {
+          this._pathfindingLog('debug', '_handleRightClickMovePreview movement execution succeeded', {
             tokenId: String(tokenDoc?.id || ''),
             selectionKey,
             selectedTokenCount: selectedTokenDocs.length,
@@ -1699,7 +1699,7 @@ export class InteractionManager {
         this.rightClickMovePreview.selectionKey = '';
         this.rightClickMovePreview.groupPlanCacheKey = '';
       } else {
-        this._pathfindingLog('warn', '_handleRightClickMovePreview movement not executed (confirmation pending)', {
+        this._pathfindingLog('debug', '_handleRightClickMovePreview movement not executed (confirmation pending)', {
           tokenId: String(tokenDoc?.id || ''),
           selectionKey,
           selectedTokenCount: selectedTokenDocs.length,
@@ -3269,9 +3269,8 @@ export class InteractionManager {
         const normalizedTool = String(activeTool || '').toLowerCase();
 
         // Block interactions when the InputRouter says PIXI should receive input.
-        // Tokens, walls, and lighting are fully Three.js-native and always routed
-        // to THREE by the InputRouter. Tiles, drawings, regions, sounds, notes,
-        // and templates are PIXI-owned — Foundry handles their native interactions.
+        // Tokens stay Three.js-native in gameplay. Tiles, walls, drawings, regions,
+        // sounds, notes, templates, lighting, etc. use PIXI when the router says so.
         if (inputRouter && !inputRouter.shouldThreeReceiveInput()) {
           log.debug('onPointerDown BLOCKED by InputRouter (PIXI mode active)', {
             currentMode: inputRouter.currentMode,
@@ -3571,7 +3570,12 @@ export class InteractionManager {
           return;
         }
 
-        const doorIntersects = isWallLayer ? [] : this.raycaster.intersectObject(wallGroup, true);
+        // Walls layer: Foundry PIXI owns placement, marquee, endpoints (InputRouter → PIXI).
+        if (isWallLayer) {
+          return;
+        }
+
+        const doorIntersects = this.raycaster.intersectObject(wallGroup, true);
         if (doorIntersects.length > 0) {
             let doorControl = null;
 
@@ -3680,67 +3684,6 @@ export class InteractionManager {
                     }
                 }
             }
-        }
-
-        if (isWallLayer && this._isWallDrawTool(currentTool)) {
-          // Start Wall Drawing on the ground plane (aligned with groundZ)
-          const worldPos = this.viewportToWorld(event.clientX, event.clientY, groundZ);
-          if (!worldPos) return;
-
-          // Snap start position
-          const foundryPos = Coordinates.toFoundry(worldPos.x, worldPos.y);
-          
-          let snapped;
-          if (event.shiftKey) {
-            snapped = foundryPos;
-          } else {
-            // Use Foundry's standard wall snapping logic
-            const M = CONST.GRID_SNAPPING_MODES;
-            const size = canvas.dimensions.size;
-            const resolution = size >= 128 ? 8 : (size >= 64 ? 4 : 2);
-            const mode = canvas.forceSnapVertices ? M.VERTEX : (M.CENTER | M.VERTEX | M.CORNER | M.SIDE_MIDPOINT);
-            
-            snapped = this.snapToGrid(foundryPos.x, foundryPos.y, mode, resolution);
-          }
-          
-          const snappedWorld = Coordinates.toWorld(snapped.x, snapped.y);
-          
-          this.wallDraw.active = true;
-          this.wallDraw.start.set(snappedWorld.x, snappedWorld.y, groundZ);
-          this.wallDraw.current.set(snappedWorld.x, snappedWorld.y, groundZ);
-          this.wallDraw.type = currentTool;
-          
-          // Create preview mesh
-          if (!this.wallDraw.previewLine) {
-            const geometry = new THREE.PlaneGeometry(1, 6); // Unit length, 6px thickness
-            const material = new THREE.MeshBasicMaterial({ 
-                color: 0xffffff, 
-                side: THREE.DoubleSide,
-                transparent: true,
-                opacity: 0.7,
-                depthTest: false,
-                depthWrite: false
-            });
-            material.toneMapped = false;
-            this.wallDraw.previewLine = new THREE.Mesh(geometry, material);
-            this.wallDraw.previewLine.name = 'WallPreview';
-            this.wallDraw.previewLine.position.z = groundZ + 3.5;
-            this.sceneComposer.scene.add(this.wallDraw.previewLine);
-          } else {
-            this.wallDraw.previewLine.visible = true;
-          }
-          
-          // Reset transform
-          this.wallDraw.previewLine.position.copy(this.wallDraw.start);
-          this.wallDraw.previewLine.position.z = groundZ + 3.5;
-          this.wallDraw.previewLine.scale.set(0, 1, 1);
-          
-          // Disable camera controls
-          if (window.MapShine?.cameraController) {
-            window.MapShine.cameraController.enabled = false;
-          }
-          
-          return; // Skip token selection
         }
 
         // 2.5. Native Light Placement (LightingLayer in Three.js Gameplay Mode)

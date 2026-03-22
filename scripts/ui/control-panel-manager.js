@@ -7,8 +7,16 @@
 import { createLogger } from '../core/log.js';
 import { stateApplier } from './state-applier.js';
 import { weatherController as coreWeatherController } from '../core/WeatherController.js';
+import {
+  applyDirectedCustomPresetToWeather,
+  applyWeatherManualParam,
+  resolveWeatherController,
+  hydrateControlPanelLiveOverridesFromController,
+  LIVE_WEATHER_OVERRIDE_PARAM_IDS
+} from './weather-param-bridge.js';
 import { debugLoadingProfiler } from '../core/debug-loading-profiler.js';
 import { getFoundryTimePhaseHours } from '../core/foundry-time-phases.js';
+import { extendMsaLocalFlagWriteGuard } from '../utils/msa-local-flag-guard.js';
 
 const log = createLogger('ControlPanel');
 
@@ -88,12 +96,26 @@ export class ControlPanelManager {
     this._suppressInitialWeatherApply = false;
 
     /**
-     * Stable object reference used by rapid weather slider bindings.
-     * Keep this reference alive even if controlState is reloaded/reset so
-     * Tweakpane bindings never drift to a stale object and display NaN.
+     * Stable object reference for `directedCustomPreset` merge (flags / scene sync).
+     * Live overrides UI is plain DOM; this still keeps one canonical preset object.
      * @type {Object|null}
      */
     this._rapidWeatherBindingTarget = this.controlState.directedCustomPreset;
+
+    /** True once Live Weather Overrides DOM rows are built (idempotent). */
+    this._liveWeatherOverrideDomBuilt = false;
+
+    /** @type {any|null} Tweakpane folder API for live weather overrides */
+    this._liveWeatherOverrideFolder = null;
+
+    /**
+     * Plain DOM for the five scalars (avoids Tweakpane number-binding NaN issues).
+     * @type {{ root: HTMLElement, rows: Record<string, { range: HTMLInputElement, number: HTMLInputElement }> }|null}
+     */
+    this._liveWeatherOverrideDom = null;
+
+    /** Skip DOM-driven commits while programmatically syncing range/number from preset. */
+    this._suppressLiveWeatherDomEvents = false;
     
     /** @type {Object} Cached DOM elements for clock */
     this.clockElements = {};
@@ -200,6 +222,15 @@ export class ControlPanelManager {
     /** @type {boolean} */
     this._didLoadControlState = false;
 
+    /**
+     * Last serialized weather-relevant control state applied via _applyRapidWeatherOverrides.
+     * When only time-of-day changes, we must NOT re-apply directed Custom scalars — that was
+     * overwriting WeatherController (and persisted weather-snapshot) with stale zeros from
+     * directedCustomPreset every clock tick.
+     * @type {string|null}
+     */
+    this._lastWeatherControlFingerprint = null;
+
     this._boundHandlers = {
       onFaceMouseDown: (e) => this._onClockMouseDown(e),
       onFaceTouchStart: (e) => this._onClockTouchStart(e),
@@ -285,6 +316,39 @@ export class ControlPanelManager {
   }
 
   /**
+   * Stable fingerprint of weather UI state that maps to _applyRapidWeatherOverrides / WC.
+   * Excludes time-of-day so changing the clock does not re-trigger rapid custom apply.
+   * @returns {string}
+   * @private
+   */
+  _weatherControlFingerprint() {
+    const d = this.controlState?.directedCustomPreset ?? {};
+    const payload = {
+      weatherMode: this.controlState?.weatherMode,
+      dynamicEnabled: this.controlState?.dynamicEnabled,
+      dynamicPresetId: this.controlState?.dynamicPresetId,
+      dynamicEvolutionSpeed: this.controlState?.dynamicEvolutionSpeed,
+      dynamicPaused: this.controlState?.dynamicPaused,
+      directedPresetId: this.controlState?.directedPresetId,
+      custom: {
+        precipitation: d.precipitation,
+        cloudCover: d.cloudCover,
+        freezeLevel: d.freezeLevel,
+        windSpeed: d.windSpeed,
+        windDirection: d.windDirection,
+        fogDensity: d.fogDensity
+      },
+      windSpeedMS: this.controlState?.windSpeedMS,
+      windDirectionTop: this.controlState?.windDirection
+    };
+    try {
+      return JSON.stringify(payload);
+    } catch (_) {
+      return String(Math.random());
+    }
+  }
+
+  /**
    * Build the compact live-play layout.
    * Keeps frequently used controls in one streamlined section.
    * @private
@@ -306,8 +370,12 @@ export class ControlPanelManager {
     this._buildWindSection(masterFolder, { expanded: false, registerTopLevel: false });
   }
 
-  _ensureDirectedCustomPreset() {
-    const defaults = {
+  /**
+   * Default scalar bag for directed Custom — used by merge + NaN sanitization.
+   * @private
+   */
+  _directedCustomPresetDefaults() {
+    return {
       precipitation: 0.0,
       cloudCover: 0.15,
       windSpeed: Math.max(0.0, Math.min(1.0, (Number(this.controlState?.windSpeedMS) || 0.0) / 78.0)),
@@ -315,6 +383,41 @@ export class ControlPanelManager {
       fogDensity: 0.0,
       freezeLevel: 0.0
     };
+  }
+
+  /**
+   * Tweakpane's number input accepts `typeof x === 'number'` including NaN — that yields "NaN" in the UI.
+   * Force finite numbers on the binding target whenever we merge or mirror from WC.
+   * @param {object} target
+   * @param {object} [defaults] — from `_directedCustomPresetDefaults()`; built if omitted
+   * @private
+   */
+  _sanitizeDirectedCustomPresetNumbers(target, defaults) {
+    if (!target || typeof target !== 'object') return;
+    const d = defaults && typeof defaults === 'object' ? defaults : this._directedCustomPresetDefaults();
+
+    const finite01 = (v, fb) => {
+      const n = Number(v);
+      if (!Number.isFinite(n)) return fb;
+      return Math.max(0.0, Math.min(1.0, n));
+    };
+    const finiteDeg = (v, fb) => {
+      const n = Number(v);
+      if (!Number.isFinite(n)) return fb;
+      const out = ((n % 360) + 360) % 360;
+      return Number.isFinite(out) ? out : fb;
+    };
+
+    target.precipitation = finite01(target.precipitation, d.precipitation);
+    target.cloudCover = finite01(target.cloudCover, d.cloudCover);
+    target.windSpeed = finite01(target.windSpeed, d.windSpeed);
+    target.fogDensity = finite01(target.fogDensity, d.fogDensity);
+    target.freezeLevel = finite01(target.freezeLevel, d.freezeLevel);
+    target.windDirection = finiteDeg(target.windDirection, d.windDirection);
+  }
+
+  _ensureDirectedCustomPreset() {
+    const defaults = this._directedCustomPresetDefaults();
 
     const clamp01 = (v, fallback) => {
       const n = Number(v);
@@ -344,6 +447,7 @@ export class ControlPanelManager {
       ? ((dir % 360) + 360) % 360
       : defaults.windDirection;
 
+    this._sanitizeDirectedCustomPresetNumbers(target, defaults);
     this.controlState.directedCustomPreset = target;
   }
 
@@ -638,82 +742,270 @@ export class ControlPanelManager {
         line-height: 12px !important;
         border-radius: 3px !important;
       }
+
+      /* Live Weather Overrides — native range + number (not Tweakpane bindings) */
+      #map-shine-control-panel .map-shine-live-wx {
+        padding: 4px 6px 6px;
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+      #map-shine-control-panel .map-shine-live-wx-row {
+        display: grid;
+        grid-template-columns: 76px 1fr 44px;
+        align-items: center;
+        gap: 6px;
+        min-height: 22px;
+      }
+      #map-shine-control-panel .map-shine-live-wx-lbl {
+        font-size: 10px;
+        color: rgba(150, 182, 225, 0.78);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      #map-shine-control-panel .map-shine-live-wx-row input[type="range"] {
+        width: 100%;
+        height: 4px;
+        accent-color: rgba(80, 175, 255, 0.95);
+        cursor: pointer;
+      }
+      #map-shine-control-panel .map-shine-live-wx-num {
+        width: 100%;
+        font-size: 10px;
+        height: 20px;
+        padding: 0 4px;
+        border-radius: 4px;
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        background: rgba(255, 255, 255, 0.065);
+        color: rgba(225, 242, 255, 0.95);
+        box-sizing: border-box;
+      }
     `;
     document.head.appendChild(style);
   }
 
   _buildRapidWeatherOverrides(parentFolder) {
     this._ensureDirectedCustomPreset();
-    const rapidPreset = this.controlState.directedCustomPreset;
-    this._rapidWeatherBindingTarget = rapidPreset;
 
-    const rapidWeatherFolder = parentFolder.addFolder({
+    this._liveWeatherOverrideFolder = parentFolder.addFolder({
       title: '🎚️ Live Weather Overrides',
       expanded: true
     });
 
-    const onRapidWeatherChange = (param) => async (ev) => {
-      if (this._applyingRapidOverrides) return;
-      this._ensureDirectedCustomPreset();
+    this._wireLiveWeatherOverrideBindingsIfReady();
+  }
 
-      const clamp01 = (v) => {
-        const n = Number(v);
-        if (!Number.isFinite(n)) return 0.0;
-        return Math.max(0.0, Math.min(1.0, n));
-      };
-
-      const value = clamp01(ev?.value);
-      rapidPreset[param] = value;
-      this.controlState.directedCustomPreset = rapidPreset;
-      await this._applyRapidWeatherOverrides();
-
-      if (ev?.last) this.debouncedSave();
+  /**
+   * @param {string} param
+   * @param {*} raw
+   * @param {*} fallback
+   * @returns {number}
+   */
+  _coerceLiveWeatherScalar(param, raw, fallback = 0) {
+    const clamp01 = (v, fb) => {
+      const n = Number(v);
+      if (!Number.isFinite(n)) return fb;
+      return Math.max(0, Math.min(1, n));
     };
+    let v = raw;
+    if (!Number.isFinite(Number(v))) v = fallback;
+    if (param === 'windDirection') {
+      const n = Number(v);
+      if (!Number.isFinite(n)) return 0;
+      return ((n % 360) + 360) % 360;
+    }
+    return clamp01(v, 0);
+  }
 
-    rapidWeatherFolder.addBinding(rapidPreset, 'precipitation', {
-      label: 'Rain',
-      min: 0.0,
-      max: 1.0,
-      step: 0.01
-    }).on('change', onRapidWeatherChange('precipitation'));
+  /**
+   * Keep range + number inputs aligned without firing user handlers.
+   * @param {string} paramId
+   * @param {number} value
+   */
+  _mirrorLiveWeatherDomPair(paramId, value) {
+    const row = this._liveWeatherOverrideDom?.rows?.[paramId];
+    if (!row) return;
+    this._suppressLiveWeatherDomEvents = true;
+    try {
+      if (Number.isFinite(value)) {
+        row.range.valueAsNumber = value;
+        row.number.valueAsNumber = value;
+      }
+    } finally {
+      this._suppressLiveWeatherDomEvents = false;
+    }
+  }
 
-    rapidWeatherFolder.addBinding(rapidPreset, 'cloudCover', {
-      label: 'Clouds',
-      min: 0.0,
-      max: 1.0,
-      step: 0.01
-    }).on('change', onRapidWeatherChange('cloudCover'));
+  /**
+   * Apply one live scalar: `directedCustomPreset` → WeatherController → main Tweakpane mirror.
+   * @param {string} paramId
+   * @param {*} rawValue
+   * @param {{ save?: boolean }} [opts]
+   */
+  _commitLiveWeatherOverrideScalar(paramId, rawValue, opts = {}) {
+    if (this._suppressLiveWeatherDomEvents) return;
+    if (this._applyingRapidOverrides) return;
 
-    rapidWeatherFolder.addBinding(rapidPreset, 'freezeLevel', {
-      label: 'Temp (Freeze)',
-      min: 0.0,
-      max: 1.0,
-      step: 0.01
-    }).on('change', onRapidWeatherChange('freezeLevel'));
+    this._ensureDirectedCustomPreset();
+    const preset = this.controlState.directedCustomPreset;
+    if (!preset || typeof preset !== 'object') return;
 
-    rapidWeatherFolder.addBinding(rapidPreset, 'windSpeed', {
-      label: 'Wind',
-      min: 0.0,
-      max: 1.0,
-      step: 0.01
-    }).on('change', onRapidWeatherChange('windSpeed'));
+    const value = this._coerceLiveWeatherScalar(paramId, rawValue, preset[paramId]);
+    preset[paramId] = value;
 
-    /* Wind direction uses a 0-359° range — needs a separate handler */
-    rapidWeatherFolder.addBinding(rapidPreset, 'windDirection', {
-      label: 'Wind Dir',
-      min: 0.0,
-      max: 359.0,
-      step: 1.0
-    }).on('change', async (ev) => {
-      if (this._applyingRapidOverrides) return;
-      this._ensureDirectedCustomPreset();
-      const raw = Number(ev?.value);
-      const value = Number.isFinite(raw) ? (((raw % 360) + 360) % 360) : 0.0;
-      rapidPreset.windDirection = value;
-      this.controlState.directedCustomPreset = rapidPreset;
-      await this._applyRapidWeatherOverrides();
-      if (ev?.last) this.debouncedSave();
-    });
+    const wc = resolveWeatherController();
+    this._applyingRapidOverrides = true;
+    try {
+      this._forceDirectedCustomWeatherMode();
+      if (wc) {
+        applyWeatherManualParam(wc, paramId, value, { syncMainTweakpane: true });
+      }
+      this._lastWeatherControlFingerprint = this._weatherControlFingerprint();
+      this._updateWeatherControls();
+    } finally {
+      this._applyingRapidOverrides = false;
+    }
+
+    this._mirrorLiveWeatherDomPair(paramId, value);
+    if (opts.save) this.debouncedSave();
+  }
+
+  /**
+   * Push `directedCustomPreset` into the native Live Weather controls (after WC sync / load).
+   * Safe to call from `weather-param-bridge`; no-ops if DOM not built yet.
+   */
+  syncLiveWeatherOverrideDomFromDirectedPreset() {
+    if (!this._liveWeatherOverrideDom?.rows) return;
+    this._ensureDirectedCustomPreset();
+    const preset = this.controlState.directedCustomPreset;
+    if (!preset || typeof preset !== 'object') return;
+    this._sanitizeDirectedCustomPresetNumbers(preset);
+    for (const id of LIVE_WEATHER_OVERRIDE_PARAM_IDS) {
+      const v = preset[id];
+      if (Number.isFinite(Number(v))) {
+        this._mirrorLiveWeatherDomPair(id, Number(v));
+      }
+    }
+  }
+
+  /**
+   * Build plain-DOM range+number rows under the Live Weather Overrides folder (not Tweakpane `addBinding`).
+   * Idempotent; also callable from `tweakpane-manager` after weather registers.
+   */
+  _wireLiveWeatherOverrideBindingsIfReady() {
+    if (this._liveWeatherOverrideDomBuilt) return;
+
+    const folder = this._liveWeatherOverrideFolder;
+    if (!folder) return;
+
+    this._ensureDirectedCustomPreset();
+    const preset = this.controlState.directedCustomPreset;
+    if (!preset || typeof preset !== 'object') return;
+
+    this._sanitizeDirectedCustomPresetNumbers(preset);
+    this._rapidWeatherBindingTarget = preset;
+
+    const contentEl = folder.element.querySelector('.tp-fldv_c') || folder.element;
+    const root = document.createElement('div');
+    root.className = 'map-shine-live-wx';
+    root.dataset.msLiveWx = '1';
+
+    /** @type {Record<string, { range: HTMLInputElement, number: HTMLInputElement }>} */
+    const rows = {};
+
+    const specs = [
+      { id: 'precipitation', label: 'Rain', min: 0, max: 1, step: 0.01 },
+      { id: 'cloudCover', label: 'Clouds', min: 0, max: 1, step: 0.01 },
+      { id: 'freezeLevel', label: 'Temp (Freeze)', min: 0, max: 1, step: 0.01 },
+      { id: 'windSpeed', label: 'Wind', min: 0, max: 1, step: 0.01 },
+      { id: 'windDirection', label: 'Wind Dir', min: 0, max: 359, step: 1 }
+    ];
+
+    for (const spec of specs) {
+      const rowEl = document.createElement('div');
+      rowEl.className = 'map-shine-live-wx-row';
+
+      const lbl = document.createElement('span');
+      lbl.className = 'map-shine-live-wx-lbl';
+      lbl.textContent = spec.label;
+      lbl.title = spec.label;
+
+      const range = document.createElement('input');
+      range.type = 'range';
+      range.min = String(spec.min);
+      range.max = String(spec.max);
+      range.step = String(spec.step);
+      range.setAttribute('aria-label', spec.label);
+
+      const num = document.createElement('input');
+      num.type = 'number';
+      num.className = 'map-shine-live-wx-num';
+      num.min = String(spec.min);
+      num.max = String(spec.max);
+      num.step = String(spec.step);
+      num.setAttribute('aria-label', `${spec.label} value`);
+
+      const pid = spec.id;
+      range.addEventListener('input', () => {
+        const v = range.valueAsNumber;
+        if (!Number.isFinite(v)) return;
+        this._commitLiveWeatherOverrideScalar(pid, v, { save: false });
+      });
+      range.addEventListener('change', () => {
+        this.debouncedSave();
+      });
+
+      num.addEventListener('input', () => {
+        const v = parseFloat(num.value);
+        if (!Number.isFinite(v)) return;
+        this._commitLiveWeatherOverrideScalar(pid, v, { save: false });
+      });
+      num.addEventListener('change', () => {
+        const v = parseFloat(num.value);
+        if (Number.isFinite(v)) {
+          this._commitLiveWeatherOverrideScalar(pid, v, { save: false });
+        }
+        this.debouncedSave();
+      });
+
+      rowEl.appendChild(lbl);
+      rowEl.appendChild(range);
+      rowEl.appendChild(num);
+      root.appendChild(rowEl);
+
+      rows[pid] = { range, number: num };
+    }
+
+    contentEl.appendChild(root);
+    this._liveWeatherOverrideDom = { root, rows };
+    this._liveWeatherOverrideDomBuilt = true;
+
+    try {
+      hydrateControlPanelLiveOverridesFromController(resolveWeatherController());
+    } catch (_) {}
+    this.syncLiveWeatherOverrideDomFromDirectedPreset();
+  }
+
+  _forceDirectedCustomWeatherMode() {
+    const wc = resolveWeatherController();
+    this.controlState.weatherMode = 'directed';
+    this.controlState.dynamicEnabled = false;
+    this.controlState.directedPresetId = 'Custom';
+
+    if (wc) {
+      if (typeof wc.setDynamicEnabled === 'function') wc.setDynamicEnabled(false);
+      else if (typeof wc.dynamicEnabled !== 'undefined') wc.dynamicEnabled = false;
+      if (typeof wc.enabled !== 'undefined') wc.enabled = true;
+    }
+
+    const eff = window.MapShine?.uiManager?.effectFolders?.weather;
+    if (eff?.params && Object.prototype.hasOwnProperty.call(eff.params, 'dynamicEnabled')) {
+      eff.params.dynamicEnabled = false;
+      try {
+        eff.bindings?.dynamicEnabled?.refresh?.();
+      } catch (_) {}
+    }
   }
 
   async _applyRapidWeatherOverrides() {
@@ -722,7 +1014,7 @@ export class ControlPanelManager {
     this._ensureDirectedCustomPreset();
 
     try {
-      const weatherController = coreWeatherController || window.MapShine?.weatherController || window.weatherController;
+      const weatherController = resolveWeatherController();
       if (!weatherController) {
         log.warn('WeatherController not available for rapid weather overrides');
         return;
@@ -769,43 +1061,18 @@ export class ControlPanelManager {
       custom.windSpeed = windSpeed;
       custom.windDirection = windDir;
 
-      // Keep runtime weather fields coherent for all consumers.
-      const windSpeedMS = windSpeed * 78.0;
-      const precipType = (precipitation < 0.05)
-        ? 0 // NONE
-        : (freezeLevel > 0.55 ? 2 : 1); // SNOW : RAIN
-
       /* Also sync controlState wind fields so the Wind section stays in sync */
       this.controlState.windSpeedMS = windSpeed * 78;
       this.controlState.windDirection = windDir;
 
-      const windDirVec = (typeof weatherController._windDirFromAngleDeg === 'function')
-        ? weatherController._windDirFromAngleDeg(windDir)
-        : (() => {
-            const rad = (windDir * Math.PI) / 180.0;
-            return { x: Math.cos(rad), y: -Math.sin(rad) };
-          })();
+      applyDirectedCustomPresetToWeather(weatherController, custom, { syncMainTweakpane: true });
 
-      const applyToState = (state) => {
-        if (!state) return;
-        state.precipitation = precipitation;
-        state.precipType = precipType;
-        state.cloudCover = cloudCover;
-        state.freezeLevel = freezeLevel;
-        state.windSpeedMS = windSpeedMS;
-        state.windSpeed = windSpeed;
-        if (state.windDirection && typeof state.windDirection.set === 'function') {
-          state.windDirection.set(Number(windDirVec.x) || 1, Number(windDirVec.y) || 0);
-          if (typeof state.windDirection.normalize === 'function') state.windDirection.normalize();
-        } else {
-          state.windDirection = { x: Number(windDirVec.x) || 1, y: Number(windDirVec.y) || 0 };
-        }
-      };
-
-      applyToState(weatherController.targetState);
-      applyToState(weatherController.currentState);
+      // Keep fingerprint in sync when Live Overrides run so a subsequent time-only
+      // _applyControlState does not redundantly re-apply (or re-clobber snapshot).
+      this._lastWeatherControlFingerprint = this._weatherControlFingerprint();
 
       this._updateWeatherControls();
+      this.syncLiveWeatherOverrideDomFromDirectedPreset();
       try {
         this.pane?.refresh?.();
       } catch (_) {
@@ -1422,7 +1689,7 @@ export class ControlPanelManager {
       this.controlState.timeOfDay = ((targetHour % 24) + 24) % 24;
       await this._saveControlState();
 
-      await stateApplier.startTimeOfDayTransition(this.controlState.timeOfDay, safeMinutes, true);
+      await stateApplier.startTimeOfDayTransition(this.controlState.timeOfDay, safeMinutes, true, false);
       this._updateClockTarget(this.controlState.timeOfDay);
     } catch (error) {
       log.error('Failed to start time-of-day transition:', error);
@@ -1589,6 +1856,11 @@ export class ControlPanelManager {
     if (_isDbg) _dlp.begin('cp.applyControlState', 'finalize');
     await this._applyControlState();
     if (_isDbg) _dlp.end('cp.applyControlState');
+
+    try {
+      hydrateControlPanelLiveOverridesFromController(resolveWeatherController());
+      this.syncLiveWeatherOverrideDomFromDirectedPreset();
+    } catch (_) {}
 
     this._registerFoundryTimeHook();
 
@@ -2968,11 +3240,12 @@ export class ControlPanelManager {
       if (shouldStartTransition) {
         this._lastTimeTargetApplied = targetHour;
         this._lastTimeTransitionMinutesApplied = transitionMinutes;
-        await stateApplier.startTimeOfDayTransition(targetHour, transitionMinutes, false);
+        await stateApplier.startTimeOfDayTransition(targetHour, transitionMinutes, false, false);
       } else if (shouldApplyInstant) {
         this._lastTimeTargetApplied = targetHour;
         this._lastTimeTransitionMinutesApplied = transitionMinutes;
-        await stateApplier.applyTimeOfDay(targetHour, false); // Don't save here, handled by debouncedSave
+        // Do not call Foundry scene darkness from live slider — sync once on debouncedSave.
+        await stateApplier.applyTimeOfDay(targetHour, false, false);
       }
 
       if (this._suppressInitialWeatherApply) {
@@ -2990,15 +3263,19 @@ export class ControlPanelManager {
       };
       await stateApplier.applyWeatherState(weatherState, false); // Don't save here, handled by debouncedSave
 
-      // Important: applyWeatherState currently handles mode/dynamic controls but
-      // not the directed Custom scalar payload itself. Re-apply rapid overrides
-      // here so scene refresh + startup cannot leave runtime weather stuck at
-      // stale snapshot zeros.
+      // Important: applyWeatherState handles mode/dynamic only — directed Custom scalars
+      // need _applyRapidWeatherOverrides. Do NOT run that on every _applyControlState:
+      // time-of-day changes call this path constantly and would overwrite WC + persisted
+      // weather-snapshot with directedCustomPreset (e.g. wind 0) even when the user only
+      // moved the clock. Only re-apply when weather-relevant control state actually changed.
       const shouldApplyRapidCustom =
         this.controlState.weatherMode === 'directed' &&
         this.controlState.directedPresetId === 'Custom';
       if (shouldApplyRapidCustom && !this._applyingRapidOverrides) {
-        await this._applyRapidWeatherOverrides();
+        const fp = this._weatherControlFingerprint();
+        if (this._lastWeatherControlFingerprint !== fp) {
+          await this._applyRapidWeatherOverrides();
+        }
       }
 
       log.debug('Applied control state via StateApplier:', this.controlState);
@@ -3131,6 +3408,7 @@ export class ControlPanelManager {
       tileMotionPaused: false
     };
     this._ensureDirectedCustomPreset();
+    this._lastWeatherControlFingerprint = null;
 
     this._updateClock(12.0);
     void this._applyControlState().then(async () => {
@@ -3226,6 +3504,8 @@ Current Weather:
           try { delete this.controlState.windSpeed; } catch (_) {}
         }
         log.info('Loaded control state from scene flags');
+        // Force one rapid-custom apply on next _applyControlState for this scene.
+        this._lastWeatherControlFingerprint = null;
         return true;
       }
     } catch (error) {
@@ -3244,7 +3524,11 @@ Current Weather:
       const scene = canvas?.scene;
       if (!scene || !game.user?.isGM) return;
 
+      extendMsaLocalFlagWriteGuard();
       await scene.setFlag('map-shine-advanced', 'controlState', this.controlState);
+      // One Foundry darkness write after persist — avoids hammering canvas.scene.update
+      // on every clock tick / 100ms transition frame (can grey-break V2 rendering).
+      await stateApplier.syncFoundryDarknessFromMapShineTime();
       log.debug('Saved control state to scene flags');
     } catch (error) {
       log.warn('Failed to save control state:', error);
@@ -3293,6 +3577,11 @@ Current Weather:
     
     // Update clock to current state
     this._updateClock(this.controlState.timeOfDay);
+
+    this._wireLiveWeatherOverrideBindingsIfReady();
+    try {
+      hydrateControlPanelLiveOverridesFromController(resolveWeatherController());
+    } catch (_) {}
 
     // Ensure status panel is up to date immediately.
     this._updateStatusPanel();
@@ -3416,6 +3705,11 @@ Current Weather:
     this._isMinimized = false;
     this._sunLatitudeBinding = null;
     this._tileMotionSpeedBinding = null;
+
+    this._liveWeatherOverrideDomBuilt = false;
+    this._rapidWeatherBindingTarget = null;
+    this._liveWeatherOverrideFolder = null;
+    this._liveWeatherOverrideDom = null;
 
     log.info('Control panel destroyed');
   }

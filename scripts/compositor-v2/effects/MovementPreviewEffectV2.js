@@ -168,14 +168,42 @@ export class MovementPreviewEffectV2 {
     const tileH = Math.max(8, Number(grid?.sizeY ?? gridSize));
 
     const snapNodeToCell = (node) => {
-      const snappedTopLeft = (typeof grid?.getTopLeft === 'function')
-        ? grid.getTopLeft(Number(node?.x ?? 0), Number(node?.y ?? 0))
-        : [
-            Math.floor(Number(node?.x ?? 0) / tileW) * tileW,
-            Math.floor(Number(node?.y ?? 0) / tileH) * tileH
-          ];
-      const cellX = Number(Array.isArray(snappedTopLeft) ? snappedTopLeft[0] : snappedTopLeft?.x ?? 0);
-      const cellY = Number(Array.isArray(snappedTopLeft) ? snappedTopLeft[1] : snappedTopLeft?.y ?? 0);
+      const px = Number(node?.x ?? 0);
+      const py = Number(node?.y ?? 0);
+      let cellX = Math.floor(px / tileW) * tileW;
+      let cellY = Math.floor(py / tileH) * tileH;
+
+      // Prefer non-deprecated grid APIs in Foundry v13+.
+      try {
+        let offset = null;
+        if (typeof grid?.getOffset === 'function') {
+          offset = grid.getOffset({ x: px, y: py })
+            ?? grid.getOffset(px, py)
+            ?? null;
+        }
+        const ox = Number(offset?.i ?? offset?.x);
+        const oy = Number(offset?.j ?? offset?.y);
+        if (Number.isFinite(ox) && Number.isFinite(oy) && typeof grid?.getTopLeftPoint === 'function') {
+          const topLeft = grid.getTopLeftPoint({ i: ox, j: oy })
+            ?? grid.getTopLeftPoint(ox, oy)
+            ?? null;
+          const tx = Number(topLeft?.x ?? (Array.isArray(topLeft) ? topLeft[0] : NaN));
+          const ty = Number(topLeft?.y ?? (Array.isArray(topLeft) ? topLeft[1] : NaN));
+          if (Number.isFinite(tx) && Number.isFinite(ty)) {
+            cellX = tx;
+            cellY = ty;
+          }
+        }
+      } catch (_) {
+      }
+
+      if ((!Number.isFinite(cellX) || !Number.isFinite(cellY)) && typeof grid?.getTopLeft === 'function') {
+        // Legacy fallback for older Foundry builds.
+        const legacyTopLeft = grid.getTopLeft(px, py);
+        cellX = Number(Array.isArray(legacyTopLeft) ? legacyTopLeft[0] : legacyTopLeft?.x ?? 0);
+        cellY = Number(Array.isArray(legacyTopLeft) ? legacyTopLeft[1] : legacyTopLeft?.y ?? 0);
+      }
+
       return {
         cellX,
         cellY,

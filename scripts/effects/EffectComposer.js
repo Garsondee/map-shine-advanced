@@ -350,7 +350,7 @@ export class EffectComposer {
 
     const initPromises = toInit.map(async (effect) => {
       await acquire();
-      console.log(` ▶ Effect INIT START: ${effect.id}`);
+      log.debug(`Effect init start: ${effect.id}`);
       const t0 = performance.now();
       const spanId = doLoadProfile ? `effect:${effect.id}:initialize` : null;
       if (doLoadProfile) {
@@ -367,7 +367,7 @@ export class EffectComposer {
       const dt = performance.now() - t0;
       timings.push({ id: effect.id, durationMs: dt });
       completed++;
-      console.log(` ✔ Effect INIT DONE:  ${effect.id} (${dt.toFixed(1)}ms) [${completed}/${total}]`);
+      log.debug(`Effect init done: ${effect.id} (${dt.toFixed(1)}ms) [${completed}/${total}]`);
       if (onProgress) {
         try { onProgress(completed, total, effect.id); } catch (_) {}
       }
@@ -653,13 +653,19 @@ export class EffectComposer {
    * @param {(label: string, index: number, total: number) => void} [options.onProgress]
    *   Forwarded to FloorCompositor.initialize() for loading-screen progress updates.
    *   Only used on the first call (when the compositor is actually created).
+   * @param {{maskIds?: string[]|Set<string>}|null} [options.effectHints]
+   *   Optional scene-level hints (e.g. discovered mask IDs) used by V2 warmup
+   *   to avoid compiling mask-driven shaders that the scene cannot use.
    * @returns {FloorCompositor}
    * @private
    */
   _getFloorCompositorV2(options = {}) {
     if (!this._floorCompositorV2) {
       this._floorCompositorV2 = new FloorCompositor(this.renderer, this.scene, this.camera);
-      this._floorCompositorV2.initialize({ onProgress: options?.onProgress });
+      this._floorCompositorV2.initialize({
+        onProgress: options?.onProgress,
+        effectHints: options?.effectHints ?? null,
+      });
       log.info('FloorCompositor V2 created and initialized');
 
       // Expose FloorCompositor V2 and its effects for runtime diagnostics and

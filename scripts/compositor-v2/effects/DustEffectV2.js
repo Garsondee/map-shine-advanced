@@ -478,7 +478,7 @@ export class DustEffectV2 {
     this._activateCurrentFloor();
 
     if (this._floorStates.size === 0) {
-      log.warn('DustEffectV2: no spawn points found from _Dust masks or dust map points');
+      log.debug('DustEffectV2: no spawn points found from _Dust masks or dust map points');
     }
 
     log.info('DustEffectV2 populated', {

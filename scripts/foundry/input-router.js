@@ -51,7 +51,9 @@ export class InputRouter {
       'TemplateLayer',
       'DrawingsLayer',
       'NotesLayer',
-      'RegionLayer'
+      'RegionLayer',
+      'WallsLayer',
+      'WallLayer'
     ]);
     
     /**
@@ -68,7 +70,10 @@ export class InputRouter {
       // Drawing tools
       'select', 'polygon', 'freehand', 'text', 'ellipse', 'rect', 'rectangle',
       // Region tools
-      'region'
+      'region',
+      // Wall tools (Foundry + common module aliases)
+      'wall', 'walls', 'terrain', 'invisible', 'ethereal',
+      'door', 'doors', 'secret', 'window'
     ]);
     
     /**
@@ -163,11 +168,22 @@ export class InputRouter {
       || activeLayerName === 'region'
       || activeLayerCtor === 'regionlayer';
 
-    const isPixiContext = isDrawingsContext || isLightingContext || isSoundsContext || isNotesContext || isTemplatesContext || isRegionsContext;
+    const isWallsContext =
+      !!canvas?.walls?.active
+      || activeControl === 'walls'
+      || activeControl === 'wall'
+      || activeControlLayer === 'walls'
+      || activeControlLayer === 'wall'
+      || activeLayerName === 'walls'
+      || activeLayerName === 'wall'
+      || activeLayerCtor === 'wallslayer'
+      || activeLayerCtor === 'walllayer';
+
+    const isPixiContext = isDrawingsContext || isLightingContext || isSoundsContext || isNotesContext || isTemplatesContext || isRegionsContext || isWallsContext;
     const pixiVisualOpacity = (isV2Active && !isPixiContext) ? '0' : '1';
     // Only force PIXI overlay when actually in PIXI mode (for layers we haven't
-    // replaced yet like drawings, regions, sounds, notes, templates, and now lights).
-    // Walls and tokens are fully Three.js-native now.
+    // replaced yet like drawings, regions, sounds, notes, templates, lights, walls).
+    // Tokens remain Three.js-native for gameplay.
     const forcePixiOverlay = mode === InputMode.PIXI;
     if (window.MapShine) {
       window.MapShine.__forcePixiEditorOverlay = forcePixiOverlay;
@@ -483,9 +499,9 @@ export class InputRouter {
       activeControlLayer === 'region';
 
     // UI overlays are Foundry-native PIXI workflows. Prioritize this check before
-    // token/wall/tile ownership to survive transient stale activeLayer state
+    // token/tile ownership to survive transient stale activeLayer state
     // immediately after control switches.
-    if (isDrawingsLayer || isLightingLayer || isSoundsLayer || isNotesLayer || isTemplatesLayer || isRegionsLayer) {
+    if (isDrawingsLayer || isLightingLayer || isSoundsLayer || isNotesLayer || isTemplatesLayer || isRegionsLayer || isWallsLayer) {
       return InputMode.PIXI;
     }
 
@@ -504,11 +520,7 @@ export class InputRouter {
       return InputMode.PIXI;
     }
 
-    // Three.js handles wall placement (click-to-place with chaining), wall
-    // endpoint dragging, and door interactions. No PIXI overlay needed.
-    if (isWallsLayer) {
-      return InputMode.THREE;
-    }
+    // Walls: native Foundry PIXI (marquee, placement, endpoints, doors) like drawings/templates.
     
     // Check if tool explicitly requires Three.js
     if (activeTool && this.threeOnlyTools.has(activeTool)) {

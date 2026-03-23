@@ -12,14 +12,122 @@ import {
   CurlNoiseField,
   SizeOverLife,
   PiecewiseBezier,
-  Bezier
+  Bezier,
+  PointEmitter
 } from '../libs/three.quarks.module.js';
 import { OVERLAY_THREE_LAYER } from '../core/render-layers.js';
 import { createLogger } from '../core/log.js';
 import { weatherController } from '../core/WeatherController.js';
+import { RoofDripGpuSilhouetteReadback } from './RoofDripGpuSilhouetteReadback.js';
+import {
+  labelOpaqueComponents4,
+  componentOpaqueCentroids,
+  collectSilhouetteEdgePixels,
+  pickEvenlyPerComponentEdges
+} from './RoofDripEdgeSampling.js';
 
 const log = createLogger('WeatherParticles');
 const MAX_SPLASHES = 5000;
+
+// Match TileManager Z_OVERHEAD_OFFSET — overhead tile sprites sit at groundZ + this (+ elevation).
+const Z_OVERHEAD_TILE_OFFSET = 4.0;
+/** Nudge spawn slightly under the overhead plane (world units). */
+const ROOF_DRIP_SPAWN_BELOW = 2.0;
+/**
+ * Mix of -Z into camera “screen-down” gravity for roof drips. Higher = faster approach to
+ * groundZ kill; too high and top-down motion looks wrong — balance with ROOF_DRIP_GRAVITY_SCALE + life.
+ */
+const ROOF_DRIP_SCREEN_DOWN_Z_MIX = 0.65;
+/** Shift particle center opposite to fall dir (toward roof) so streak hangs from eaves; positive was pushing spawns downslope. */
+const ROOF_DRIP_STREAK_ANCHOR_HALF = 4.0;
+/** Pull spawn UV slightly toward pool centroid then randomize — softens clumps and fills small gaps. */
+const ROOF_DRIP_SPAWN_INWARD_PULL = 0.0;
+const ROOF_DRIP_SPAWN_UV_JITTER = 0.0;
+/** Soft global budget for fair per-source caps (tiles + trees); used with round-robin merge. */
+const ROOF_DRIP_GLOBAL_POINT_BUDGET = 90000;
+/** Drip-only kill floor: below strict groundZ so −Z motion does not instant-cull (see WorldVolumeKillBehavior). */
+const ROOF_DRIP_KILL_Z_MARGIN = 220.0;
+const ROOF_DRIP_ALPHA_THRESHOLD = 0.16;
+const ROOF_DRIP_TEX_STRIDE_PX = 2;
+/** Skip exterior flood on huge textures (BFS cost); falls back to all alpha edges (may clump on holes). */
+const ROOF_DRIP_MAX_FLOOD_PIXELS = 4096 * 4096;
+/** Max side for CPU drip edge labeling/collect (full-res getImageData stays for normals/world; union-find only on work²). */
+const ROOF_DRIP_CPU_EDGE_WORK_MAX = 1024;
+/** Schema default for `rainDropSize`; scales min/max together so the master slider is visible. */
+const RAIN_DROP_SIZE_REF = 3.1;
+/** Max queued rain-hit splash bursts per frame (each may spawn 1–2 particles). */
+const RAIN_IMPACT_MAX_QUEUE = 512;
+const ROOF_DRIP_MAX_POINTS_PER_TILE = 4000;
+/** Particles/sec scale while raining (Quarks emissionOverTime). Keep modest — maxParticles cap causes hot recycling if too high. */
+const ROOF_DRIP_EMISSION_RAIN_MULT = 300;
+/** Particles/sec scale during post-rain tail. */
+const ROOF_DRIP_EMISSION_TAIL_MULT = 260;
+/** Extra multiplier when `debugRoofDrip` is on (was 15× → visible “firehose”). */
+const ROOF_DRIP_DEBUG_EMISSION_MUL = 2.5;
+/** Spacing along AABB fallback when texture edge scan fails (world-ish / UV steps). */
+const ROOF_DRIP_RECT_EDGE_SPACING = 20;
+/** Bump when roof-drip spawn algorithm changes to invalidate cached point pools. */
+const ROOF_DRIP_SPAWN_ALGO_REV = 3;
+/** Poll interval for roof/tile source changes; rebuild only when source signature changes. */
+const ROOF_DRIP_POINTS_REFRESH_SEC = 0.75;
+/** Scaled below rain; paired with startLife for total travel (relaxed kill floor allows longer visible fall). */
+const ROOF_DRIP_GRAVITY_SCALE = 0.64;
+/** Base wind coupling (final mag also × update() scalar); keep low so screen-down gravity reads as “fall”. */
+const ROOF_DRIP_WIND_BASE = 14;
+
+/**
+ * Magenta + boosted emission for roof/tree drip investigation.
+ * Opt-out: set `window.MapShine.debugRoofDrip = false` for normal (non-magenta) drips.
+ * (Using `=== true` only made debug off when unset — full mask then discarded almost all drips.)
+ */
+function roofDripDebugEnabled() {
+  try {
+    return window.MapShine?.debugRoofDrip === true;
+  } catch (_) {
+    return false;
+  }
+}
+
+/**
+ * Periodic roof-drip console diagnostics (opt-out): set `window.MapShine.debugRoofDripDiag = false` to silence.
+ * Separate from magenta debug so logging still runs in normal play.
+ */
+function roofDripDiagLogsEnabled() {
+  try {
+    return window.MapShine?.debugRoofDripDiag === true;
+  } catch (_) {
+    return false;
+  }
+}
+
+/**
+ * While debug is on (default), skip shader mask uniforms for drips so they stay visible while tuning.
+ * Opt-in to real masks during debug: `debugRoofDripNoMask = false`.
+ */
+/** @param {string} key @param {number|boolean} fallback */
+function _roofDripTuningVal(key, fallback) {
+  try {
+    const v = weatherController?.roofDripTuning?.[key];
+    if (typeof fallback === 'boolean') {
+      if (v === false) return false;
+      if (v === true) return true;
+      return fallback;
+    }
+    const n = Number(v);
+    return Number.isFinite(n) ? n : fallback;
+  } catch (_) {
+    return fallback;
+  }
+}
+
+function roofDripDebugNoMask() {
+  if (!roofDripDebugEnabled()) return false;
+  try {
+    return window.MapShine?.debugRoofDripNoMask === true;
+  } catch (_) {
+    return false;
+  }
+}
 
 // Avoid per-frame allocations in update(): splash tuning reads are table-driven.
 const SPLASH_TUNING_KEYS = [
@@ -840,6 +948,13 @@ class WaterMaskedSplashEmitter {
   update(system, delta) { /* no-op for now */ }
 }
 
+/**
+ * Roof/tree drip spawns: pool of scene-UV + outward normal + Z. Roof uses GPU readback of the same
+ * `roofVisibilityTarget` as masking when enabled (`useGpuRoofDripEdges`), with per-component silhouette
+ * sampling; CPU fallback uses per-tile alpha contours. Trees use sprite alpha on the tree quad when possible,
+ * else rect perimeter fallback.
+ * Each new particle picks one random pool entry. Emission = `emissionOverTime` in update().
+ */
 class RoofEdgeDripEmitter {
   constructor(parameters = {}) {
     this.type = 'roof-edge-drip';
@@ -852,43 +967,91 @@ class RoofEdgeDripEmitter {
     this.centerY = parameters.centerY ?? (this.sceneY + this.height / 2);
     this._offsetY = (this.totalHeight - this.sceneY - this.height);
     this._points = null;
+    /** @type {THREE.Object3D|null} set by WeatherParticles — used for per-point world Z */
+    this.emitter = null;
+    this._tmpWorld = null;
+    /** @type {object|null} WeatherParticles instance — streak anchor + fall dir */
+    this._host = null;
+    this._fallDirScratch = null;
+    this._cursor = 0;
+    this._step = 1;
+    this._countForStep = 0;
   }
 
   setPoints(points) {
-    this._points = points && points.length ? points : null;
+    if (!points || points.length === 0) {
+      this._points = null;
+      return;
+    }
+    this._points = (points.length >= 5 && points.length % 5 === 0) ? points : null;
   }
 
   clearPoints() {
     this._points = null;
   }
 
-  initialize(particle) {
+  initialize(particle, _emissionState) {
+    const THREE = window.THREE;
     const pts = this._points;
-    if (pts && pts.length >= 4) {
-      const count = Math.floor(pts.length / 4);
-      const idx = (Math.floor(Math.random() * count) * 4);
+    if (pts && pts.length >= 5) {
+      const count = Math.floor(pts.length / 5);
+      if (count !== this._countForStep) {
+        this._countForStep = count;
+        this._step = Math.max(1, ((count * 0.61803398875) | 0) | 1);
+        this._cursor = this._cursor % Math.max(1, count);
+      }
+      const pick = this._cursor;
+      this._cursor = (this._cursor + this._step) % Math.max(1, count);
+      const idx = pick * 5;
       const u = pts[idx];
       const v = pts[idx + 1];
       const nx = pts[idx + 2];
       const ny = pts[idx + 3];
+      const spawnZWorld = pts[idx + 4];
 
       const worldX = this.sceneX + u * this.width;
       const worldY = this._offsetY + (1.0 - v) * this.height;
-      const normalJitter = (Math.random() - 0.5) * 20.0;
+      const jN = this._host && typeof this._host._tuningRoofDrip === 'function'
+        ? this._host._tuningRoofDrip('emitterNormalJitter', 1.0)
+        : 1.0;
+      const jT = this._host && typeof this._host._tuningRoofDrip === 'function'
+        ? this._host._tuningRoofDrip('emitterTangentialJitter', 0.6)
+        : 0.6;
+      const normalJitter = (Math.random() - 0.5) * jN;
+      const tangentialJitter = (Math.random() - 0.5) * jT;
+      const tx = -ny;
+      const ty = nx;
 
-      particle.position.x = (worldX + nx * normalJitter) - this.centerX;
-      particle.position.y = (worldY + ny * normalJitter) - this.centerY;
-      particle.position.z = 0;
+      if (THREE && this.emitter && typeof this.emitter.worldToLocal === 'function') {
+        if (!this._tmpWorld) this._tmpWorld = new THREE.Vector3();
+        this._tmpWorld.set(
+          worldX + nx * normalJitter + tx * tangentialJitter,
+          worldY + ny * normalJitter + ty * tangentialJitter,
+          spawnZWorld
+        );
+        const host = this._host;
+        if (host && typeof host._computeRoofDripFallDirWorld === 'function') {
+          if (!this._fallDirScratch) this._fallDirScratch = new THREE.Vector3();
+          host._computeRoofDripFallDirWorld(this._fallDirScratch);
+          const anchor = typeof host._tuningRoofDrip === 'function'
+            ? host._tuningRoofDrip('streakAnchorHalf', ROOF_DRIP_STREAK_ANCHOR_HALF)
+            : ROOF_DRIP_STREAK_ANCHOR_HALF;
+          this._tmpWorld.addScaledVector(this._fallDirScratch, -anchor);
+        }
+        this.emitter.worldToLocal(this._tmpWorld);
+        particle.position.copy(this._tmpWorld);
+      } else {
+        particle.position.x = (worldX + nx * normalJitter + tx * tangentialJitter) - this.centerX;
+        particle.position.y = (worldY + ny * normalJitter + ty * tangentialJitter) - this.centerY;
+        particle.position.z = 0;
+      }
       particle.velocity.set(0, 0, particle.startSpeed);
       return;
     }
 
-    const x = (Math.random() - 0.5) * this.width;
-    const y = (Math.random() - 0.5) * this.height;
-    particle.position.x = x;
-    particle.position.y = y;
-    particle.position.z = 0;
-    particle.velocity.set(0, 0, particle.startSpeed);
+    // No edge samples (e.g. nothing in camera view): do not fall back to a full-scene rectangle.
+    if (typeof particle.life === 'number') particle.age = particle.life;
+    else particle.age = 1e9;
   }
 
   update(system, delta) { /* no-op */ }
@@ -930,14 +1093,15 @@ class WorldVolumeKillBehavior {
     const p = particle.position;
     if (!p) return;
 
-    // Convert to world space using the emitter's matrixWorld when available,
-    // so this behavior works whether the system uses local or world space.
+    // Quarks: worldSpace=false → particle.position is emitter-local; worldSpace=true → world space
+    // (see ParticleSystem.spawn when worldSpace applies emitter.matrixWorld once).
     let wx = p.x;
     let wy = p.y;
     let wz = p.z;
 
-    if (system && system.emitter && system.emitter.matrixWorld) {
-      // PERFORMANCE: Reuse _tempVec instead of allocating new Vector3
+    if (system?.worldSpace === true) {
+      // Already world space — do not multiply by matrixWorld again.
+    } else if (system && system.emitter && system.emitter.matrixWorld) {
       this._tempVec.set(p.x, p.y, p.z);
       this._tempVec.applyMatrix4(system.emitter.matrixWorld);
       wx = this._tempVec.x;
@@ -1635,7 +1799,21 @@ export class WeatherParticles {
     this.ashEmberSystem = null;
     this.splashSystem = null;
     this.splashSystems = [];
+    /** Point-sized splash bursts when rain particles die near the ground (see `particleDied`). */
+    this._rainImpactSplashSystem = null;
+    this._rainImpactSplashWind = null;
+    this._rainImpactSplashAlpha = null;
+    this._rainImpactQueue = new Float32Array(RAIN_IMPACT_MAX_QUEUE * 3);
+    this._rainImpactQueuedCount = 0;
+    this._rainImpactSplashMatrix = null;
+    this._boundRainParticleDied = null;
+    this._boundRoofDripParticleDied = null;
     this.rainTexture = this._createRainTexture();
+    // Separate Texture instance for roof/tree drips — three.quarks BatchedRenderer merges
+    // SpriteBatches when BatchedRenderer.equals() matches, including material.map by **reference**.
+    // Sharing this.rainTexture with rain would merge both systems into one batch and ignore drip materials.
+    this._roofDripTexture = this.rainTexture.clone();
+    this._roofDripTexture.needsUpdate = true;
     this.snowTexture = this._createSnowTexture();
     this.ashTexture = this._createAshTexture();
     this.splashTexture = this._createSplashTexture();
@@ -1709,6 +1887,26 @@ export class WeatherParticles {
     this._waterFoamLastViewQU1 = null;
     this._waterFoamLastViewQV0 = null;
     this._waterFoamLastViewQV1 = null;
+
+    /** Full-map roof/tree drip edge samples; view-filtered each control tick (see _getViewFilteredRoofDripPoints). */
+    this._roofDripBasePoints = null;
+    this._roofDripViewBuffer = null;
+    this._roofDripViewCount = 0;
+    this._roofDripViewSourceRef = null;
+    this._roofDripLastViewQU0 = null;
+    this._roofDripLastViewQU1 = null;
+    this._roofDripLastViewQV0 = null;
+    this._roofDripLastViewQV1 = null;
+    this._roofDripSourceSignature = null;
+    this._roofDripActivePointsRef = null;
+    /** GPU path: roof alpha RT → downscaled edge pass → readPixels → exterior flood (same space as drip masking). */
+    this._roofDripGpuReadback = new RoofDripGpuSilhouetteReadback();
+    this._roofDripTreeLocal = null;
+    this._roofDripTreeNormal = null;
+    this._roofDripWorkCanvas = null;
+    this._roofDripWorkCtx = null;
+    this._roofDripWorkReachScratch = null;
+    this._roofDripWorkBfsQueue = null;
 
     // Tile-driven foam.webp spawning:
     // We allow per-tile _Water masks to contribute *additional* spawn locations.
@@ -1819,6 +2017,8 @@ export class WeatherParticles {
     this._snowCurlBaseStrength = null;
     this._rainCurl = null;
     this._rainCurlBaseStrength = null;
+    this._roofDripCurl = null;
+    this._roofDripCurlBaseStrength = null;
 
     /** @type {SplashAlphaBehavior|null} */
     this._splashAlphaBehavior = null;
@@ -1890,6 +2090,8 @@ export class WeatherParticles {
     // PERFORMANCE FIX: Reuse Vector3 for wind direction calculations in update()
     // instead of allocating a new one every frame.
     this._tempWindDir = new window.THREE.Vector3();
+    /** Camera-local screen-down (0,-1,0) transformed to world; used for roof-drip gravity XY. */
+    this._roofDripScreenDownScratch = new window.THREE.Vector3();
 
     // PERF: Cache pixel readbacks for mask textures (getImageData is expensive and allocates).
     // Many point-generation functions were creating a new canvas + ImageData on each call.
@@ -1944,7 +2146,13 @@ export class WeatherParticles {
     // Roof/tree drips keep running for a while after rain stops.
     this._roofDripTailDurationSec = 300.0;
     this._roofDripTailRemainingSec = 0.0;
+    this._roofDripTailHoldRemainingSec = 0.0;
+    this._roofDripTailTaperRemainingSec = 0.0;
+    // Remembers recent rain level (0..1-ish) to keep post-rain drip rates substantial.
+    this._roofDripRecentRain01 = 0.0;
     this._roofDripPointsRefreshSec = 0.0;
+    this._roofDripLastDiagMs = null;
+    this._roofDripDebugStyleApplied = false;
 
     this._initSystems();
     // Defensive: ensure all quarks systems created in _initSystems are actually
@@ -1980,6 +2188,7 @@ export class WeatherParticles {
     if (this.splashSystems && this.splashSystems.length) {
       for (const s of this.splashSystems) this._ensureSystemRegistered(s);
     }
+    this._ensureSystemRegistered(this._rainImpactSplashSystem);
     if (this._waterHitSplashSystems && this._waterHitSplashSystems.length) {
       for (const entry of this._waterHitSplashSystems) this._ensureSystemRegistered(entry?.system);
     }
@@ -2022,9 +2231,140 @@ export class WeatherParticles {
     if (this.splashSystems && this.splashSystems.length) {
       for (const s of this.splashSystems) clearSystem(s);
     }
+    clearSystem(this._rainImpactSplashSystem);
     if (this._waterHitSplashSystems && this._waterHitSplashSystems.length) {
       for (const entry of this._waterHitSplashSystems) clearSystem(entry?.system);
     }
+    this._rainImpactQueuedCount = 0;
+  }
+
+  _queueImpactSplash(worldX, worldY, spawnZ, probability = 0.25) {
+    const p = Number.isFinite(probability) ? probability : 0.25;
+    if (Math.random() > Math.max(0.01, Math.min(1.0, p))) return;
+    const n = this._rainImpactQueuedCount | 0;
+    if (n >= RAIN_IMPACT_MAX_QUEUE) return;
+    const o = n * 3;
+    const q = this._rainImpactQueue;
+    q[o] = worldX;
+    q[o + 1] = worldY;
+    q[o + 2] = spawnZ;
+    this._rainImpactQueuedCount = n + 1;
+  }
+
+  /**
+   * Quarks fires `particleDied` after a rain particle is culled. Queue a sampled
+   * splash burst regardless of Z so kill-plane mismatches cannot suppress impacts.
+   */
+  _onRainParticleDied(ev) {
+    try {
+      if (!ev || ev.particleSystem !== this.rainSystem) return;
+      const wc = weatherController;
+      if (wc && (wc.enabled === false || wc.elevationWeatherSuppressed === true)) return;
+      const ms = window.MapShine;
+      if (ms?.debugDisableWeatherSplashes === true) return;
+      const p = ev.particle;
+      if (!p?.position) return;
+      const groundZ = window.MapShine?.sceneComposer?.groundZ ?? 1000;
+      const wx = p.position.x;
+      const wy = p.position.y;
+      const rainTuning = weatherController?.rainTuning || {};
+      const intensityScale = Number.isFinite(rainTuning.intensityScale) ? rainTuning.intensityScale : 1.0;
+      const sampleP = Math.max(0.1, Math.min(0.85, 0.24 * intensityScale));
+      this._queueImpactSplash(wx, wy, groundZ, sampleP);
+    } catch (_) {
+    }
+  }
+
+  _onRoofDripParticleDied(ev) {
+    try {
+      if (!ev || ev.particleSystem !== this.roofDripSystem) return;
+      const wc = weatherController;
+      if (wc && (wc.enabled === false || wc.elevationWeatherSuppressed === true)) return;
+      const ms = window.MapShine;
+      if (ms?.debugDisableWeatherSplashes === true) return;
+      const p = ev.particle;
+      if (!p?.position) return;
+      const groundZ = window.MapShine?.sceneComposer?.groundZ ?? 1000;
+      const wx = p.position.x;
+      const wy = p.position.y;
+      const rainTuning = weatherController?.rainTuning || {};
+      const intensityScale = Number.isFinite(rainTuning.intensityScale) ? rainTuning.intensityScale : 1.0;
+      const sampleP = Math.max(0.08, Math.min(0.65, 0.20 * intensityScale));
+      this._queueImpactSplash(wx, wy, groundZ, sampleP);
+    } catch (_) {
+    }
+  }
+
+  _queueRoofDripSyntheticImpacts(sampleCount) {
+    const n = Math.max(0, Math.floor(sampleCount));
+    if (n <= 0) return;
+    const pts = this._roofDripShape?._points;
+    if (!pts || pts.length < 5) return;
+    const count = Math.floor(pts.length / 5);
+    if (count <= 0) return;
+    const sceneX = this._roofDripShape.sceneX ?? 0;
+    const sceneW = this._roofDripShape.width ?? 1;
+    const offsetY = this._roofDripShape._offsetY ?? 0;
+    const sceneH = this._roofDripShape.height ?? 1;
+    const groundZ = window.MapShine?.sceneComposer?.groundZ ?? 1000;
+    for (let i = 0; i < n; i++) {
+      const pick = (Math.random() * count) | 0;
+      const o = pick * 5;
+      const u = pts[o];
+      const v = pts[o + 1];
+      const wx = sceneX + u * sceneW;
+      const wy = offsetY + (1.0 - v) * sceneH;
+      this._queueImpactSplash(wx, wy, groundZ, 1.0);
+    }
+  }
+
+  /**
+   * Spawn queued rain-impact splashes using splash-tile-0 tuning. Runs before the
+   * control-throttle early-return so impacts are not delayed a frame when control Hz is low.
+   */
+  _flushRainImpactSplashes() {
+    const sys = this._rainImpactSplashSystem;
+    const n = this._rainImpactQueuedCount | 0;
+    if (!sys || !sys.spawn || n <= 0) {
+      this._rainImpactQueuedCount = 0;
+      return;
+    }
+    const ms = window.MapShine;
+    if (ms?.debugDisableWeatherSplashes === true) {
+      this._rainImpactQueuedCount = 0;
+      return;
+    }
+
+    const rainTuning = weatherController.rainTuning || {};
+    const keys = SPLASH_TUNING_KEYS[0];
+    const lifeMin = Math.max(0.001, rainTuning[keys.lifeMin] ?? 0.1);
+    const lifeMax = Math.max(lifeMin, rainTuning[keys.lifeMax] ?? 0.2);
+    if (sys.startLife && typeof sys.startLife.a === 'number') {
+      sys.startLife.a = lifeMin;
+      sys.startLife.b = lifeMax;
+    }
+    const sizeMin = rainTuning[keys.sizeMin] ?? 12.0;
+    const sizeMax = Math.max(sizeMin, rainTuning[keys.sizeMax] ?? 24.0);
+    if (sys.startSize && typeof sys.startSize.a === 'number') {
+      sys.startSize.a = sizeMin;
+      sys.startSize.b = sizeMax;
+    }
+    const dbs = this._getDarknessBrightnessScale();
+    const peak = (rainTuning[keys.peak] ?? 0.10) * dbs;
+    if (this._rainImpactSplashAlpha) {
+      this._rainImpactSplashAlpha.peakOpacity = peak;
+    }
+
+    const m = this._rainImpactSplashMatrix;
+    const q = this._rainImpactQueue;
+    for (let i = 0; i < n; i++) {
+      const o = i * 3;
+      const gz = q[o + 2];
+      m.makeTranslation(q[o], q[o + 1], gz + 10);
+      const bursts = (Math.random() < 0.42) ? 2 : 1;
+      sys.spawn(bursts, sys.emissionState, m);
+    }
+    this._rainImpactQueuedCount = 0;
   }
 
   clearWaterCaches() {
@@ -2104,6 +2444,158 @@ export class WeatherParticles {
     }
   }
 
+  /** Read merged roof-drip tuning (WeatherController + safe fallbacks). */
+  _tuningRoofDrip(key, fallback) {
+    return _roofDripTuningVal(key, fallback);
+  }
+
+  _getFloorCompositorV2() {
+    try {
+      return window.MapShine?.floorCompositorV2 ?? window.MapShine?.effectComposer?._floorCompositorV2 ?? null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /** True when OverheadShadows roof RT + WebGL renderer + scene camera exist (for GPU drip extraction). */
+  _roofDripGpuInfraReady() {
+    try {
+      const fc = this._getFloorCompositorV2();
+      const ose = fc?._overheadShadowEffect;
+      const tex = ose?.roofAlphaTexture;
+      const rt = ose?.roofVisibilityTarget;
+      if (!tex || !rt || rt.width < 8 || rt.height < 8) return false;
+      const gCanvas = (typeof canvas !== 'undefined' && canvas) || (typeof globalThis !== 'undefined' ? globalThis.canvas : null);
+      const r = gCanvas?.app?.renderer ?? window.MapShine?.sceneComposer?.renderer;
+      if (!r || typeof r.readRenderTargetPixels !== 'function') return false;
+      const cam = window.MapShine?.sceneComposer?.camera;
+      return !!(cam && cam.isCamera);
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /**
+   * Fair interleave of per-source stride-5 point runs so one large roof does not dominate the buffer.
+   * @param {number[][]} segments
+   * @param {number} maxGroups
+   * @returns {number[]}
+   */
+  _mergeRoofDripSegmentsRoundRobin(segments, maxGroups) {
+    const cap = Math.max(1, maxGroups | 0);
+    if (!segments || !segments.length) return [];
+    const groupCounts = segments.map((s) => Math.floor((s?.length || 0) / 5));
+    const totalGroups = groupCounts.reduce((a, b) => a + b, 0);
+    if (totalGroups <= 0) return [];
+
+    const quotas = new Array(segments.length).fill(0);
+    let used = 0;
+    for (let i = 0; i < segments.length; i++) {
+      const n = groupCounts[i];
+      if (n <= 0) continue;
+      const q = Math.max(1, Math.min(n, Math.floor((cap * n) / totalGroups)));
+      quotas[i] = q;
+      used += q;
+    }
+    if (used < cap) {
+      for (let i = 0; i < segments.length && used < cap; i++) {
+        const n = groupCounts[i];
+        if (n <= quotas[i]) continue;
+        quotas[i]++;
+        used++;
+      }
+    }
+
+    const out = [];
+    for (let i = 0; i < segments.length; i++) {
+      const s = segments[i];
+      const n = groupCounts[i];
+      const q = Math.min(quotas[i], n);
+      if (!s || n <= 0 || q <= 0) continue;
+      for (let k = 0; k < q; k++) {
+        const srcIdx = q === 1 ? 0 : Math.floor((k * (n - 1)) / (q - 1));
+        const o = srcIdx * 5;
+        for (let m = 0; m < 5; m++) out.push(s[o + m]);
+      }
+    }
+    return out.length > cap * 5 ? out.slice(0, cap * 5) : out;
+  }
+
+  /** Evenly subsample stride-5 groups in-place to preserve perimeter continuity. */
+  _truncateRoofDripPointGroupsInPlace(arr, maxGroups) {
+    const n = Math.floor(arr.length / 5);
+    const cap = maxGroups | 0;
+    if (n <= cap || cap < 1) return;
+    const out = [];
+    for (let i = 0; i < cap; i++) {
+      const srcIdx = cap === 1 ? 0 : Math.floor((i * (n - 1)) / (cap - 1));
+      const o = srcIdx * 5;
+      for (let k = 0; k < 5; k++) out.push(arr[o + k]);
+    }
+    arr.length = 0;
+    for (const v of out) arr.push(v);
+  }
+
+  /**
+   * Softens clumped stride-5 UV pools: optional pull toward UV centroid (single-segment pools only),
+   * then random jitter. Mutates `buf` in place.
+   */
+  _applyRoofDripSpawnDiffuse(buf, useInwardPull) {
+    const THREE = window.THREE;
+    const n = Math.floor(buf.length / 5);
+    if (n < 1 || !THREE) return;
+    let cx = 0;
+    let cy = 0;
+    for (let i = 0; i < n; i++) {
+      cx += buf[i * 5];
+      cy += buf[i * 5 + 1];
+    }
+    cx /= n;
+    cy /= n;
+    const pull = useInwardPull ? _roofDripTuningVal('spawnInwardPull', ROOF_DRIP_SPAWN_INWARD_PULL) : 0;
+    const jit = _roofDripTuningVal('spawnUvJitter', ROOF_DRIP_SPAWN_UV_JITTER);
+    for (let i = 0; i < n; i++) {
+      const o = i * 5;
+      let u = buf[o];
+      let v = buf[o + 1];
+      if (pull > 0) {
+        u += pull * (cx - u);
+        v += pull * (cy - v);
+      }
+      u += (Math.random() - 0.5) * 2 * jit;
+      v += (Math.random() - 0.5) * 2 * jit;
+      buf[o] = THREE.MathUtils.clamp(u, 0, 1);
+      buf[o + 1] = THREE.MathUtils.clamp(v, 0, 1);
+    }
+  }
+
+  /**
+   * Drop points close to scene UV borders to reduce "all drips at map edge" artifacts.
+   * Keeps the original buffer if trimming would over-prune.
+   */
+  _trimRoofDripSceneEdgePoints(buf, marginUv = 0.01) {
+    if (!buf || buf.length < 10) return buf;
+    const m = Math.max(0.0, Math.min(0.25, marginUv));
+    const n = Math.floor(buf.length / 5);
+    let kept = 0;
+    const out = new Float32Array(buf.length);
+    for (let i = 0; i < n; i++) {
+      const o = i * 5;
+      const u = buf[o];
+      const v = buf[o + 1];
+      if (u <= m || u >= 1.0 - m || v <= m || v >= 1.0 - m) continue;
+      const oo = kept * 5;
+      out[oo] = buf[o];
+      out[oo + 1] = buf[o + 1];
+      out[oo + 2] = buf[o + 2];
+      out[oo + 3] = buf[o + 3];
+      out[oo + 4] = buf[o + 4];
+      kept++;
+    }
+    if (kept <= 0) return buf;
+    return out.subarray(0, kept * 5);
+  }
+
   _worldToSceneUv(worldX, worldY) {
     const sb = this._sceneBounds;
     if (!sb) return null;
@@ -2116,7 +2608,10 @@ export class WeatherParticles {
     return { u, v };
   }
 
-  _pushRectEdgeUvPoints(out, cx, cy, w, h, rotation = 0, spacing = 96) {
+  /**
+   * @param {number} zWorld - spawn Z in world space (three.js) for roof drips
+   */
+  _pushRectEdgeUvPoints(out, cx, cy, w, h, rotation = 0, spacing = 96, zWorld = 0) {
     if (!out || w <= 2 || h <= 2) return;
     const hw = w * 0.5;
     const hh = h * 0.5;
@@ -2128,13 +2623,14 @@ export class WeatherParticles {
       const wy = cy + (lx * sinR + ly * cosR);
       const uv = this._worldToSceneUv(wx, wy);
       if (!uv) return;
-      if (uv.u < -0.05 || uv.u > 1.05 || uv.v < -0.05 || uv.v > 1.05) return;
+      if (uv.u < 0.0 || uv.u > 1.0 || uv.v < 0.0 || uv.v > 1.0) return;
       const nwx = nx * cosR - ny * sinR;
       const nwy = nx * sinR + ny * cosR;
-      out.push(Math.max(0, Math.min(1, uv.u)));
-      out.push(Math.max(0, Math.min(1, uv.v)));
+      out.push(uv.u);
+      out.push(uv.v);
       out.push(nwx);
       out.push(nwy);
+      out.push(zWorld);
     };
 
     const sampleEdge = (x0, y0, x1, y1, nx, ny) => {
@@ -2154,56 +2650,894 @@ export class WeatherParticles {
     sampleEdge(-hw, -hh, -hw, hh, -1, 0); // Left
   }
 
-  _rebuildRoofDripPoints() {
-    const points = [];
-    const d = canvas?.dimensions;
-    if (!d || !this._sceneBounds) return null;
-    const totalH = d.height ?? ((d.sceneY ?? 0) + (d.sceneHeight ?? 0));
+  /**
+   * Random interior samples on a rotated rectangle (canopy undersides / diffuse drip sources).
+   * @param {number} nx Local normal X (e.g. 0)
+   * @param {number} ny Local normal Y (e.g. -1 “map south”)
+   */
+  _pushRectInteriorUvPoints(out, cx, cy, w, h, rotation, count, zWorld, nx = 0, ny = -1) {
+    if (!out || w <= 2 || h <= 2 || count < 1) return;
+    const hw = w * 0.5;
+    const hh = h * 0.5;
+    const cosR = Math.cos(rotation || 0);
+    const sinR = Math.sin(rotation || 0);
+    const pushPoint = (lx, ly, nnx, nny) => {
+      const wx = cx + (lx * cosR - ly * sinR);
+      const wy = cy + (lx * sinR + ly * cosR);
+      const uv = this._worldToSceneUv(wx, wy);
+      if (!uv) return;
+      if (uv.u < 0.0 || uv.u > 1.0 || uv.v < 0.0 || uv.v > 1.0) return;
+      const nwx = nnx * cosR - nny * sinR;
+      const nwy = nnx * sinR + nny * cosR;
+      out.push(uv.u);
+      out.push(uv.v);
+      out.push(nwx);
+      out.push(nwy);
+      out.push(zWorld);
+    };
+    for (let i = 0; i < count; i++) {
+      const lx = (Math.random() * 2 - 1) * hw;
+      const ly = (Math.random() * 2 - 1) * hh;
+      pushPoint(lx, ly, nx, ny);
+    }
+  }
 
-    // 1) Overhead/roof tile edges.
-    const tileDocs = canvas?.scene?.tiles?.contents ?? [];
-    for (const tile of tileDocs) {
-      const isOverhead = !!(tile?.overhead ?? tile?._source?.overhead ?? tile?._source?.flags?.levels?.overhead);
-      const isRoof = !!(tile?.getFlag?.('map-shine-advanced', 'overheadIsRoof')
-        ?? tile?.flags?.['map-shine-advanced']?.overheadIsRoof);
-      if (!isOverhead && !isRoof) continue;
+  /**
+   * World Z for drip spawn: just below overhead tile depth (matches TileManager overhead plane).
+   * @param {object} doc - TileDocument
+   * @returns {number}
+   */
+  _roofDripTileSpawnZ(doc) {
+    const groundZ = window.MapShine?.sceneComposer?.groundZ ?? 1000;
+    const sortKey = Number(doc?.sort ?? doc?.z ?? 0) || 0;
+    const sortOffset = sortKey * 0.001;
+    const elev = Number.isFinite(doc?.elevation) ? doc.elevation : 0;
+    return groundZ + Z_OVERHEAD_TILE_OFFSET + elev + sortOffset - ROOF_DRIP_SPAWN_BELOW;
+  }
 
-      const w = Number(tile?.width ?? 0);
-      const h = Number(tile?.height ?? 0);
-      if (w <= 8 || h <= 8) continue;
-      const x = Number(tile?.x ?? 0);
-      const y = Number(tile?.y ?? 0);
-      const cx = x + w * 0.5;
-      const cy = totalH - (y + h * 0.5);
-      const rot = (Number(tile?.rotation ?? 0) * Math.PI) / 180.0;
-      this._pushRectEdgeUvPoints(points, cx, cy, w, h, rot, 96);
+  /**
+   * World-space unit vector for roof-drip gravity / “fall” (matches per-frame ApplyForce direction).
+   * @param {THREE.Vector3} out
+   * @returns {THREE.Vector3}
+   */
+  _computeRoofDripFallDirWorld(out) {
+    const cam = window.MapShine?.sceneComposer?.camera;
+    const v = this._roofDripScreenDownScratch;
+    const d = out;
+    if (cam && cam.quaternion && v) {
+      v.set(0, -1, 0);
+      v.applyQuaternion(cam.quaternion);
+      const hx = v.x;
+      const hy = v.y;
+      const len = Math.hypot(hx, hy);
+      const kz = ROOF_DRIP_SCREEN_DOWN_Z_MIX;
+      if (len > 1e-5) {
+        const inv = 1.0 / len;
+        const s = Math.sqrt(Math.max(0.0, 1.0 - kz * kz));
+        d.set(hx * inv * s, hy * inv * s, -kz);
+      } else {
+        d.set(0, 0, -1);
+      }
+    } else {
+      d.set(0, 0, -1);
+    }
+    d.normalize();
+    return d;
+  }
+
+  /**
+   * Map a pixel in tile texture image space to Foundry/THREE world XY (Y-up).
+   * @returns {{ wx: number, wy: number, rot: number }|null}
+   */
+  _pixelToRoofDripWorld(doc, tile, px, py, imgW, imgH, totalH) {
+    const w = Number(tile?.width ?? doc?.width ?? 0);
+    const h = Number(tile?.height ?? doc?.height ?? 0);
+    if (w <= 2 || h <= 2 || !imgW || !imgH) return null;
+    const x = Number(tile?.x ?? doc?.x ?? 0);
+    const y = Number(tile?.y ?? doc?.y ?? 0);
+    const cx = x + w * 0.5;
+    const cy = totalH - (y + h * 0.5);
+    const rot = (Number(tile?.rotation ?? doc?.rotation ?? 0) * Math.PI) / 180.0;
+    const tx = (px + 0.5) / imgW;
+    const ty = (py + 0.5) / imgH;
+    const lx = (tx - 0.5) * w;
+    const ly = (0.5 - ty) * h;
+    const cosR = Math.cos(rot);
+    const sinR = Math.sin(rot);
+    const wx = cx + (lx * cosR - ly * sinR);
+    const wy = cy + (lx * sinR + ly * cosR);
+    return { wx, wy, rot };
+  }
+
+  /**
+   * Mark transparent pixels connected to the image border (4-neighbor).
+   * Used so only the outer silhouette of the sprite contributes drips — not internal alpha holes
+   * (which otherwise read as “edges” and create dense facet clumps).
+   * @param {Uint8ClampedArray} data - getImageData().data
+   * @param {number} iw
+   * @param {number} ih
+   * @param {number} alphaT - opaque if >= this (0..255)
+   * @param {Uint8Array} reach - length iw*ih, written 0/1
+   * @param {Int32Array} queue - length iw*ih
+   */
+  _floodRoofDripExteriorTransparent(data, iw, ih, alphaT, reach, queue) {
+    const n = iw * ih;
+    reach.fill(0);
+    let qt = 0;
+    const push = (x, y) => {
+      if (x < 0 || x >= iw || y < 0 || y >= ih) return;
+      const i = y * iw + x;
+      if (reach[i]) return;
+      if (data[i * 4 + 3] >= alphaT) return;
+      reach[i] = 1;
+      queue[qt++] = i;
+    };
+    for (let x = 0; x < iw; x++) {
+      push(x, 0);
+      push(x, ih - 1);
+    }
+    for (let y = 0; y < ih; y++) {
+      push(0, y);
+      push(iw - 1, y);
+    }
+    let qh = 0;
+    while (qh < qt) {
+      const i = queue[qh++];
+      const x = i % iw;
+      const y = (i / iw) | 0;
+      push(x - 1, y);
+      push(x + 1, y);
+      push(x, y - 1);
+      push(x, y + 1);
+    }
+  }
+
+  /**
+   * Downscaled RGBA for CPU drip component labeling (union-find is O(work²), not full texture²).
+   * @returns {{ wdata: Uint8ClampedArray, workW: number, workH: number, fullIw: number, fullIh: number }|null}
+   */
+  _roofDripDownsampledAlphaForEdges(img) {
+    const fullIw = img.width || img.naturalWidth;
+    const fullIh = img.height || img.naturalHeight;
+    if (!fullIw || !fullIh) return null;
+    const workW = Math.min(fullIw, ROOF_DRIP_CPU_EDGE_WORK_MAX);
+    const workH = Math.min(fullIh, ROOF_DRIP_CPU_EDGE_WORK_MAX);
+    if (typeof document === 'undefined') return null;
+    let wc = this._roofDripWorkCanvas;
+    let wctx = this._roofDripWorkCtx;
+    if (!wc || wc.width !== workW || wc.height !== workH) {
+      wc = document.createElement('canvas');
+      wc.width = workW;
+      wc.height = workH;
+      wctx = wc.getContext('2d', { willReadFrequently: true });
+      this._roofDripWorkCanvas = wc;
+      this._roofDripWorkCtx = wctx;
+    }
+    try {
+      wctx.clearRect(0, 0, workW, workH);
+      wctx.imageSmoothingEnabled = false;
+      wctx.drawImage(img, 0, 0, workW, workH);
+      const wdata = wctx.getImageData(0, 0, workW, workH).data;
+      return { wdata, workW, workH, fullIw, fullIh };
+    } catch (_) {
+      return null;
+    }
+  }
+
+  _roofDripWorkPxToFull(sx, sy, workW, workH, fullIw, fullIh) {
+    const px = Math.min(
+      fullIw - 1,
+      Math.max(0, Math.round((sx + 0.5) * (fullIw / Math.max(1, workW)) - 0.5))
+    );
+    const py = Math.min(
+      fullIh - 1,
+      Math.max(0, Math.round((sy + 0.5) * (fullIh / Math.max(1, workH)) - 0.5))
+    );
+    return { px, py };
+  }
+
+  /** Keep edge points in a stable perimeter-like order for deterministic sampling. */
+  _orderHaloPairsByAngle(halo) {
+    if (!halo || halo.length < 4) return halo || [];
+    const n = Math.floor(halo.length / 2);
+    let cx = 0;
+    let cy = 0;
+    for (let i = 0; i < n; i++) {
+      cx += halo[i * 2];
+      cy += halo[i * 2 + 1];
+    }
+    cx /= n;
+    cy /= n;
+    const idx = new Array(n);
+    for (let i = 0; i < n; i++) idx[i] = i;
+    idx.sort((a, b) => {
+      const aa = Math.atan2(halo[a * 2 + 1] - cy, halo[a * 2] - cx);
+      const bb = Math.atan2(halo[b * 2 + 1] - cy, halo[b * 2] - cx);
+      return aa - bb;
+    });
+    const out = [];
+    for (let i = 0; i < n; i++) {
+      const j = idx[i] * 2;
+      out.push(halo[j], halo[j + 1]);
+    }
+    return out;
+  }
+
+  /**
+   * Append drip spawn points along the overhead tile texture alpha contour (webp alpha).
+   * Uses TileManager's live sprite texture image when available.
+   * @returns {number} points added
+   */
+  _appendTileAlphaRoofDripPoints(out, doc, tile, totalH, maxKOverride) {
+    const tm = window.MapShine?.tileManager;
+    const id = doc?.id;
+    const entry = id && tm?.tileSprites?.get ? tm.tileSprites.get(id) : null;
+    const tex = entry?.sprite?.material?.map;
+    const img = tex?.image;
+    if (!img) return 0;
+
+    const iw = img.width || img.naturalWidth;
+    const ih = img.height || img.naturalHeight;
+    if (!iw || !ih) return 0;
+
+    let canvas = this._roofDripAlphaCanvas;
+    let ctx = this._roofDripAlphaCtx;
+    if (!canvas || canvas.width !== iw || canvas.height !== ih) {
+      canvas = typeof document !== 'undefined' ? document.createElement('canvas') : null;
+      if (!canvas) return 0;
+      canvas.width = iw;
+      canvas.height = ih;
+      ctx = canvas.getContext('2d', { willReadFrequently: true });
+      this._roofDripAlphaCanvas = canvas;
+      this._roofDripAlphaCtx = ctx;
     }
 
-    // 2) Tree canopy edges (if TreeEffectV2 is active).
+    let data;
     try {
-      const overlays = window.MapShine?.floorCompositorV2?._treeEffect?._overlays;
-      if (overlays && typeof overlays.values === 'function') {
+      ctx.clearRect(0, 0, iw, ih);
+      ctx.drawImage(img, 0, 0, iw, ih);
+      data = ctx.getImageData(0, 0, iw, ih).data;
+    } catch (_) {
+      return 0;
+    }
+
+    const zSpawn = this._roofDripTileSpawnZ(doc);
+    const alphaT = ROOF_DRIP_ALPHA_THRESHOLD * 255;
+    let added = 0;
+
+    const w = Number(tile?.width ?? doc?.width ?? 0);
+    const h = Number(tile?.height ?? doc?.height ?? 0);
+
+    const alphaAt = (qx, qy) => {
+      if (qx < 0 || qx >= iw || qy < 0 || qy >= ih) return 0;
+      return data[(qy * iw + qx) * 4 + 3];
+    };
+
+    const dirs = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+
+    const area = iw * ih;
+    let reach = null;
+    if (area <= ROOF_DRIP_MAX_FLOOD_PIXELS) {
+      if (!this._roofDripReachScratch || this._roofDripReachScratch.length < area) {
+        this._roofDripReachScratch = new Uint8Array(area);
+        this._roofDripBfsQueue = new Int32Array(area);
+      }
+      reach = this._roofDripReachScratch;
+      this._floodRoofDripExteriorTransparent(data, iw, ih, alphaT, reach, this._roofDripBfsQueue);
+    }
+
+    const maxK = Math.max(8, Math.min(ROOF_DRIP_MAX_POINTS_PER_TILE, Number(maxKOverride) || ROOF_DRIP_MAX_POINTS_PER_TILE));
+    const maxRaw = Math.min(240000, Math.max(maxK * 96, 8192));
+
+    let wdata;
+    let workW;
+    let workH;
+    let reachW;
+    if (iw <= ROOF_DRIP_CPU_EDGE_WORK_MAX && ih <= ROOF_DRIP_CPU_EDGE_WORK_MAX) {
+      wdata = data;
+      workW = iw;
+      workH = ih;
+      reachW = reach;
+    } else {
+      const edgeWork = this._roofDripDownsampledAlphaForEdges(img);
+      if (!edgeWork) return 0;
+      wdata = edgeWork.wdata;
+      workW = edgeWork.workW;
+      workH = edgeWork.workH;
+      const workArea = workW * workH;
+      reachW = null;
+      if (workArea <= ROOF_DRIP_MAX_FLOOD_PIXELS) {
+        if (!this._roofDripWorkReachScratch || this._roofDripWorkReachScratch.length < workArea) {
+          this._roofDripWorkReachScratch = new Uint8Array(workArea);
+          this._roofDripWorkBfsQueue = new Int32Array(workArea);
+        }
+        reachW = this._roofDripWorkReachScratch;
+        this._floodRoofDripExteriorTransparent(wdata, workW, workH, alphaT, reachW, this._roofDripWorkBfsQueue);
+      }
+    }
+
+    const labels = labelOpaqueComponents4(wdata, workW, workH, alphaT, 3);
+    const centroids = componentOpaqueCentroids(labels, workW, workH);
+
+    const rawPx = [];
+    const rawPy = [];
+    let scanStride = 1;
+    const collect = () => {
+      rawPx.length = 0;
+      rawPy.length = 0;
+      collectSilhouetteEdgePixels(wdata, workW, workH, alphaT, reachW, rawPx, rawPy, maxRaw, scanStride, 3);
+    };
+    collect();
+    while (rawPx.length >= maxRaw && scanStride < 2) {
+      scanStride++;
+      collect();
+    }
+
+    if (rawPx.length < 1) return 0;
+
+    let halo = pickEvenlyPerComponentEdges(rawPx, rawPy, rawPx.length, labels, workW, centroids, maxK);
+    if (halo.length < 8) {
+      const m = rawPx.length;
+      const K = Math.min(maxK, m);
+      halo = [];
+      for (let t = 0; t < K; t++) {
+        const j = m === 1 ? 0 : Math.floor((t * (m - 1)) / Math.max(1, K - 1));
+        halo.push(rawPx[j], rawPy[j]);
+      }
+    }
+    halo = this._orderHaloPairsByAngle(halo);
+    halo = this._orderHaloPairsByAngle(halo);
+
+    const rot = (Number(tile?.rotation ?? doc?.rotation ?? 0) * Math.PI) / 180.0;
+    const cosR = Math.cos(rot);
+    const sinR = Math.sin(rot);
+
+    const edgeNormalAt = (px, py) => {
+      let nxPx = 0;
+      let nyPx = 0;
+      let edge = false;
+      for (let d = 0; d < dirs.length; d++) {
+        const qx = px + dirs[d][0];
+        const qy = py + dirs[d][1];
+        let exterior = false;
+        if (qx < 0 || qx >= iw || qy < 0 || qy >= ih) {
+          exterior = true;
+        } else if (alphaAt(qx, qy) < alphaT) {
+          if (!reach || reach[qy * iw + qx]) exterior = true;
+        }
+        if (exterior) {
+          edge = true;
+          nxPx += dirs[d][0];
+          nyPx += dirs[d][1];
+        }
+      }
+      return edge ? { nxPx, nyPx } : null;
+    };
+
+    for (let i = 0; i < halo.length; i += 2) {
+      const sx = halo[i];
+      const sy = halo[i + 1];
+      const { px, py } = this._roofDripWorkPxToFull(sx, sy, workW, workH, iw, ih);
+      const en = edgeNormalAt(px, py);
+      if (!en) continue;
+      const nxPx = en.nxPx;
+      const nyPx = en.nyPx;
+      const dlx = nxPx * (w / Math.max(1, iw));
+      const dly = -nyPx * (h / Math.max(1, ih));
+      const nLenL = Math.hypot(dlx, dly) || 1;
+      const nwx = (dlx * cosR - dly * sinR) / nLenL;
+      const nwy = (dlx * sinR + dly * cosR) / nLenL;
+
+      const wxy = this._pixelToRoofDripWorld(doc, tile, px, py, iw, ih, totalH);
+      if (!wxy) continue;
+      const uv = this._worldToSceneUv(wxy.wx, wxy.wy);
+      if (!uv) continue;
+      if (uv.u < 0.0 || uv.u > 1.0 || uv.v < 0.0 || uv.v > 1.0) continue;
+      const nLen = Math.hypot(nwx, nwy);
+      const nnx = nLen > 1e-6 ? nwx / nLen : 0;
+      const nny = nLen > 1e-6 ? nwy / nLen : 1;
+      out.push(uv.u);
+      out.push(uv.v);
+      out.push(nnx);
+      out.push(nny);
+      out.push(zSpawn);
+      added++;
+
+      // Near-edge bleed band (small inward offset) for softer, denser edge rain without deep interior points.
+      if (((i / 2) % 6) === 0) {
+        const mag = Math.hypot(nxPx, nyPx) || 1;
+        const inPx = 1.5;
+        const pxi = Math.max(0, Math.min(iw - 1, Math.round(px - (nxPx / mag) * inPx)));
+        const pyi = Math.max(0, Math.min(ih - 1, Math.round(py - (nyPx / mag) * inPx)));
+        if (alphaAt(pxi, pyi) >= alphaT) {
+          const wxyIn = this._pixelToRoofDripWorld(doc, tile, pxi, pyi, iw, ih, totalH);
+          const uvIn = wxyIn ? this._worldToSceneUv(wxyIn.wx, wxyIn.wy) : null;
+          if (uvIn && uvIn.u >= 0 && uvIn.u <= 1 && uvIn.v >= 0 && uvIn.v <= 1) {
+            out.push(uvIn.u, uvIn.v, nnx, nny, zSpawn);
+            added++;
+          }
+        }
+      }
+    }
+
+    return added;
+  }
+
+  /**
+   * Tree canopy drips from sprite alpha on the tree mesh (same silhouette rules as roof tiles).
+   * @returns {number} points added
+   */
+  _appendTreeMeshAlphaRoofDripPoints(out, mesh, maxKOverride, zTree, THREE) {
+    const tex = mesh?.material?.uniforms?.uTreeMask?.value || mesh?.material?.map || null;
+    const img = tex?.image;
+    const gp = mesh?.geometry?.parameters;
+    const bw = Number(gp?.width ?? 0);
+    const bh = Number(gp?.height ?? 0);
+    if (!img || !THREE || bw <= 8 || bh <= 8) return 0;
+
+    const iw = img.width || img.naturalWidth;
+    const ih = img.height || img.naturalHeight;
+    if (!iw || !ih) return 0;
+
+    let canvas = this._roofDripAlphaCanvas;
+    let ctx = this._roofDripAlphaCtx;
+    if (!canvas || canvas.width !== iw || canvas.height !== ih) {
+      canvas = typeof document !== 'undefined' ? document.createElement('canvas') : null;
+      if (!canvas) return 0;
+      canvas.width = iw;
+      canvas.height = ih;
+      ctx = canvas.getContext('2d', { willReadFrequently: true });
+      this._roofDripAlphaCanvas = canvas;
+      this._roofDripAlphaCtx = ctx;
+    }
+
+    let data;
+    try {
+      ctx.clearRect(0, 0, iw, ih);
+      ctx.drawImage(img, 0, 0, iw, ih);
+      data = ctx.getImageData(0, 0, iw, ih).data;
+    } catch (_) {
+      return 0;
+    }
+
+    // Mirror TreeEffectV2 safeAlpha(): some tree masks are opaque PNG/WebP with
+    // white background and derive alpha from rgb luminance/chroma.
+    let deriveAlpha = true;
+    for (let i = 3; i < data.length; i += 4) {
+      if (data[i] < 250) { deriveAlpha = false; break; }
+    }
+    const alphaEval = (arr, idx4) => {
+      let a = arr[idx4 + 3] / 255.0;
+      if (deriveAlpha && a > 0.99) {
+        const r = arr[idx4] / 255.0;
+        const g = arr[idx4 + 1] / 255.0;
+        const b = arr[idx4 + 2] / 255.0;
+        const lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+        const maxC = Math.max(r, g, b);
+        const minC = Math.min(r, g, b);
+        const chroma = maxC - minC;
+        const isBright = lum >= 0.85 ? 1.0 : 0.0;
+        const isDesat = chroma < 0.06 ? 1.0 : 0.0;
+        const bg = isBright * isDesat;
+        a *= (1.0 - bg);
+      }
+      return a;
+    };
+    const alphaT01 = ROOF_DRIP_ALPHA_THRESHOLD;
+    const maxK = Math.max(8, Math.min(ROOF_DRIP_MAX_POINTS_PER_TILE, Number(maxKOverride) || ROOF_DRIP_MAX_POINTS_PER_TILE));
+    const maxRaw = Math.min(240000, Math.max(maxK * 96, 8192));
+
+    // For derived-alpha trees, prefer full-res CPU classification for accuracy.
+    const workW = iw;
+    const workH = ih;
+    const workData = data;
+    const labels = labelOpaqueComponents4(workData, workW, workH, 1, 3);
+    const centroids = componentOpaqueCentroids(labels, workW, workH);
+
+    const rawPx = [];
+    const rawPy = [];
+    let scanStride = 1;
+    const collect = () => {
+      rawPx.length = 0;
+      rawPy.length = 0;
+      // Collect candidate silhouette pixels, then keep only those matching safeAlpha logic.
+      const tmpX = [];
+      const tmpY = [];
+      collectSilhouetteEdgePixels(workData, workW, workH, 1, null, tmpX, tmpY, maxRaw * 2, scanStride, 3);
+      for (let i = 0; i < tmpX.length; i++) {
+        const x = tmpX[i];
+        const y = tmpY[i];
+        const idx4 = (y * workW + x) * 4;
+        if (alphaEval(workData, idx4) < alphaT01) continue;
+        rawPx.push(x);
+        rawPy.push(y);
+        if (rawPx.length >= maxRaw) break;
+      }
+    };
+    collect();
+    while (rawPx.length >= maxRaw && scanStride < 2) {
+      scanStride++;
+      collect();
+    }
+
+    if (rawPx.length < 1) return 0;
+
+    let halo = pickEvenlyPerComponentEdges(rawPx, rawPy, rawPx.length, labels, workW, centroids, maxK);
+    if (halo.length < 8) {
+      const m = rawPx.length;
+      const K = Math.min(maxK, m);
+      halo = [];
+      for (let t = 0; t < K; t++) {
+        const j = m === 1 ? 0 : Math.floor((t * (m - 1)) / Math.max(1, K - 1));
+        halo.push(rawPx[j], rawPy[j]);
+      }
+    }
+
+    if (!this._roofDripTreeLocal) this._roofDripTreeLocal = new THREE.Vector3();
+    if (!this._roofDripTreeNormal) this._roofDripTreeNormal = new THREE.Vector3();
+    const vLoc = this._roofDripTreeLocal;
+    const nLoc = this._roofDripTreeNormal;
+    mesh.updateWorldMatrix(true, false);
+
+    const alphaAt = (qx, qy) => {
+      if (qx < 0 || qx >= iw || qy < 0 || qy >= ih) return 0;
+      return alphaEval(data, (qy * iw + qx) * 4);
+    };
+    const dirs = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+
+    let added = 0;
+    for (let i = 0; i < halo.length; i += 2) {
+      const sx = halo[i];
+      const sy = halo[i + 1];
+      const { px, py } = this._roofDripWorkPxToFull(sx, sy, workW, workH, iw, ih);
+      let nxPx = 0;
+      let nyPx = 0;
+      let edge = false;
+      for (let d = 0; d < dirs.length; d++) {
+        const qx = px + dirs[d][0];
+        const qy = py + dirs[d][1];
+        let exterior = false;
+        if (qx < 0 || qx >= iw || qy < 0 || qy >= ih) {
+          exterior = true;
+        } else if (alphaAt(qx, qy) < alphaT01) {
+          exterior = true;
+        }
+        if (exterior) {
+          edge = true;
+          nxPx += dirs[d][0];
+          nyPx += dirs[d][1];
+        }
+      }
+      if (!edge) continue;
+
+      const u = (px + 0.5) / iw;
+      const v = (py + 0.5) / ih;
+      const lx = (u - 0.5) * bw;
+      const ly = (0.5 - v) * bh;
+      vLoc.set(lx, ly, 0);
+      vLoc.applyMatrix4(mesh.matrixWorld);
+
+      const dlx = nxPx * (bw / Math.max(1, iw));
+      const dly = -nyPx * (bh / Math.max(1, ih));
+      nLoc.set(dlx, dly, 0);
+      const nLenL = nLoc.length();
+      if (nLenL > 1e-6) nLoc.multiplyScalar(1 / nLenL);
+      else nLoc.set(0, 1, 0);
+      nLoc.transformDirection(mesh.matrixWorld);
+
+      const uv = this._worldToSceneUv(vLoc.x, vLoc.y);
+      if (!uv) continue;
+      if (uv.u < 0.0 || uv.u > 1.0 || uv.v < 0.0 || uv.v > 1.0) continue;
+      const nnx = nLoc.x;
+      const nny = nLoc.y;
+      const nLen = Math.hypot(nnx, nny);
+      const nnxU = nLen > 1e-6 ? nnx / nLen : 0;
+      const nnyU = nLen > 1e-6 ? nny / nLen : 1;
+      out.push(uv.u);
+      out.push(uv.v);
+      out.push(nnxU);
+      out.push(nnyU);
+      out.push(zTree);
+      added++;
+
+      if (((i / 2) % 6) === 0) {
+        const mag = Math.hypot(nxPx, nyPx) || 1;
+        const inPx = 1.25;
+        const pxi = Math.max(0, Math.min(iw - 1, Math.round(px - (nxPx / mag) * inPx)));
+        const pyi = Math.max(0, Math.min(ih - 1, Math.round(py - (nyPx / mag) * inPx)));
+        if (alphaAt(pxi, pyi) >= alphaT01) {
+          const uu = (pxi + 0.5) / iw;
+          const vv = (pyi + 0.5) / ih;
+          const lxi = (uu - 0.5) * bw;
+          const lyi = (0.5 - vv) * bh;
+          vLoc.set(lxi, lyi, 0);
+          vLoc.applyMatrix4(mesh.matrixWorld);
+          const uvIn = this._worldToSceneUv(vLoc.x, vLoc.y);
+          if (uvIn && uvIn.u >= 0 && uvIn.u <= 1 && uvIn.v >= 0 && uvIn.v <= 1) {
+            out.push(uvIn.u, uvIn.v, nnxU, nnyU, zTree);
+            added++;
+          }
+        }
+      }
+    }
+
+    return added;
+  }
+
+  _rebuildRoofDripPoints() {
+    const gCanvas = (typeof canvas !== 'undefined' && canvas) || (typeof globalThis !== 'undefined' ? globalThis.canvas : null);
+    const d = gCanvas?.dimensions;
+    if (!d || !this._sceneBounds) return null;
+    const totalH = d.height ?? ((d.sceneY ?? 0) + (d.sceneHeight ?? 0));
+    const THREE = window.THREE;
+    const tileDocs = gCanvas?.scene?.tiles?.contents ?? [];
+
+    const tileEligible = [];
+    for (const tile of tileDocs) {
+      const doc = tile?.document ?? tile;
+      const src = doc?._source;
+      const srcOverhead = src?.overhead;
+      const levelsOverhead = src?.flags?.levels?.overhead;
+      const isExplicitOverhead =
+        typeof srcOverhead === 'boolean'
+          ? srcOverhead
+          : typeof levelsOverhead === 'boolean'
+            ? levelsOverhead
+            : false;
+      const isRoof = !!(doc?.getFlag?.('map-shine-advanced', 'overheadIsRoof')
+        ?? tile?.getFlag?.('map-shine-advanced', 'overheadIsRoof')
+        ?? doc?.flags?.['map-shine-advanced']?.overheadIsRoof
+        ?? tile?.flags?.['map-shine-advanced']?.overheadIsRoof);
+      if (!isExplicitOverhead && !isRoof) continue;
+      const w = Number(tile?.width ?? doc?.width ?? 0);
+      const h = Number(tile?.height ?? doc?.height ?? 0);
+      if (w <= 8 || h <= 8) continue;
+      tileEligible.push({ tile, doc });
+    }
+
+    let treeCount = 0;
+    try {
+      const overlays = this._getFloorCompositorV2()?._treeEffect?._overlays;
+      if (overlays && typeof overlays.values === 'function' && THREE) {
         for (const entry of overlays.values()) {
           const mesh = entry?.mesh;
-          const geo = mesh?.geometry;
-          const gp = geo?.parameters;
-          const w = Number(gp?.width ?? 0);
-          const h = Number(gp?.height ?? 0);
-          if (w <= 8 || h <= 8) continue;
-          this._pushRectEdgeUvPoints(
-            points,
-            Number(mesh.position?.x ?? 0),
-            Number(mesh.position?.y ?? 0),
-            w,
-            h,
-            Number(mesh.rotation?.z ?? 0),
-            140
-          );
+          const gp = mesh?.geometry?.parameters;
+          const bw = Number(gp?.width ?? 0);
+          const bh = Number(gp?.height ?? 0);
+          if (bw <= 8 || bh <= 8) continue;
+          treeCount++;
         }
       }
     } catch (_) {}
 
-    return points.length >= 4 ? new Float32Array(points) : null;
+    const globalB = _roofDripTuningVal('globalPointBudget', ROOF_DRIP_GLOBAL_POINT_BUDGET);
+    const maxPerTile = _roofDripTuningVal('maxPointsPerTile', ROOF_DRIP_MAX_POINTS_PER_TILE);
+    const gpuSpawnCap = _roofDripTuningVal('gpuMaxSpawnCap', 60000);
+    const alphaThresh = _roofDripTuningVal('alphaThresholdGpu', ROOF_DRIP_ALPHA_THRESHOLD);
+
+    const useGpu =
+      THREE &&
+      window.MapShine?.useGpuRoofDripEdges !== false &&
+      _roofDripTuningVal('useGpuRoofDripEdges', true) &&
+      this._roofDripGpuInfraReady();
+    const nRoofSources = useGpu ? 1 : tileEligible.length;
+    const nSources = nRoofSources + treeCount;
+    if (nSources <= 0) return null;
+    const fairK = Math.max(
+      8,
+      Math.min(maxPerTile, Math.floor(globalB / nSources))
+    );
+    const roofBudget = Math.max(1600, Math.floor(globalB * 0.7));
+    const roofFairK = Math.max(256, Math.min(maxPerTile, Math.floor(roofBudget / Math.max(1, nRoofSources))));
+    const treeBudget = Math.max(800, globalB - roofBudget);
+    const treeFairK = Math.max(96, Math.min(maxPerTile, Math.floor(treeBudget / Math.max(1, treeCount || 1))));
+
+    const tilesById = new Map();
+    for (const t of tileDocs) {
+      const doc = t?.document ?? t;
+      const id = doc?.id ?? t?.id;
+      if (id == null) continue;
+      tilesById.set(String(id), { tile: t, doc });
+    }
+
+    const segments = [];
+    let gpuRoofOk = false;
+
+    if (useGpu && this._roofDripGpuReadback) {
+      try {
+        const fc = this._getFloorCompositorV2();
+        const ose = fc?._overheadShadowEffect;
+        const roofTex = ose?.roofAlphaTexture;
+        const rt = ose?.roofVisibilityTarget;
+        const r = gCanvas?.app?.renderer ?? window.MapShine?.sceneComposer?.renderer;
+        const cam = window.MapShine?.sceneComposer?.camera;
+        const groundZ = window.MapShine?.sceneComposer?.groundZ ?? 1000;
+        const spawnZGpu = groundZ + Z_OVERHEAD_TILE_OFFSET - ROOF_DRIP_SPAWN_BELOW;
+        if (roofTex && rt && r && cam) {
+          const gpuSeg = this._roofDripGpuReadback.extractSpawnStride5({
+            THREE,
+            renderer: r,
+            roofAlphaTexture: roofTex,
+            srcW: rt.width,
+            srcH: rt.height,
+            alphaThreshold: alphaThresh,
+            maxSpawnPoints: Math.min(gpuSpawnCap, roofFairK),
+            spawnZWorld: spawnZGpu,
+            camera: cam,
+            worldToSceneUv: (wx, wy) => this._worldToSceneUv(wx, wy)
+          });
+          if (gpuSeg && gpuSeg.length >= 5) {
+            segments.push(gpuSeg);
+            gpuRoofOk = true;
+          }
+        }
+      } catch (e) {
+        log.warn('GPU roof drip extraction failed, falling back to tile canvas path', e);
+      }
+    }
+
+    if (!gpuRoofOk) {
+      for (const { tile, doc } of tileEligible) {
+        const seg = [];
+        const w = Number(tile?.width ?? doc?.width ?? 0);
+        const h = Number(tile?.height ?? doc?.height ?? 0);
+        const n = this._appendTileAlphaRoofDripPoints(seg, doc, tile, totalH, roofFairK);
+        if (n <= 0) continue;
+        if (seg.length > roofFairK * 5) this._truncateRoofDripPointGroupsInPlace(seg, roofFairK);
+        if (seg.length >= 5) segments.push(seg);
+      }
+    }
+
+    const groundZ = window.MapShine?.sceneComposer?.groundZ ?? 1000;
+    try {
+      const overlays = this._getFloorCompositorV2()?._treeEffect?._overlays;
+      if (overlays && typeof overlays.values === 'function' && THREE) {
+        const wp = new THREE.Vector3();
+        const ws = new THREE.Vector3();
+        for (const entry of overlays.values()) {
+          const mesh = entry?.mesh;
+          const geo = mesh?.geometry;
+          const gp = geo?.parameters;
+          const bw = Number(gp?.width ?? 0);
+          const bh = Number(gp?.height ?? 0);
+          if (bw <= 8 || bh <= 8 || !mesh) continue;
+          mesh.updateWorldMatrix(true, false);
+          mesh.getWorldPosition(wp);
+          mesh.getWorldScale(ws);
+          let w = bw * Math.max(1e-6, Math.abs(ws.x));
+          let h = bh * Math.max(1e-6, Math.abs(ws.y));
+          let cx = wp.x;
+          let cy = wp.y;
+          let rot = Math.atan2(mesh.matrixWorld.elements[4], mesh.matrixWorld.elements[0]);
+          const tileId = mesh.userData?.mapShineTreeTileId;
+          if (tileId && !String(tileId).startsWith('__')) {
+            const hit = tilesById.get(String(tileId));
+            if (hit) {
+              const doc = hit.doc;
+              const t = hit.tile;
+              const tw = Number(t?.width ?? doc?.width ?? 0);
+              const th = Number(t?.height ?? doc?.height ?? 0);
+              if (tw > 8 && th > 8) {
+                const x0 = Number(t?.x ?? doc?.x ?? 0);
+                const y0 = Number(t?.y ?? doc?.y ?? 0);
+                cx = x0 + tw * 0.5;
+                cy = totalH - (y0 + th * 0.5);
+                w = tw;
+                h = th;
+                rot = (Number(t?.rotation ?? doc?.rotation ?? 0) * Math.PI) / 180.0;
+              }
+            }
+          }
+          let zTree = groundZ + 6.0;
+          if (Number.isFinite(wp.z)) zTree = wp.z - 2.25;
+          const seg = [];
+          const nTreeAlpha = this._appendTreeMeshAlphaRoofDripPoints(seg, mesh, treeFairK, zTree, THREE);
+          if (nTreeAlpha <= 0) continue;
+          if (seg.length > treeFairK * 5) this._truncateRoofDripPointGroupsInPlace(seg, treeFairK);
+          if (seg.length >= 5) segments.push(seg);
+        }
+      }
+    } catch (_) {}
+
+    let merged = this._mergeRoofDripSegmentsRoundRobin(segments, globalB);
+    if (merged.length < 5) return null;
+    // Preserve edge continuity: avoid FPS thinning which can over-emphasize corners/extremities.
+    let buf = new Float32Array(merged);
+    // Remove pathological scene-border points that appear as persistent map-edge drips.
+    buf = this._trimRoofDripSceneEdgePoints(buf, 0.008);
+    const singleSegmentPool = segments.length === 1;
+    const pullNow = singleSegmentPool ? _roofDripTuningVal('spawnInwardPull', ROOF_DRIP_SPAWN_INWARD_PULL) : 0;
+    const jitNow = _roofDripTuningVal('spawnUvJitter', ROOF_DRIP_SPAWN_UV_JITTER);
+    if (pullNow > 1e-6 || jitNow > 1e-6) {
+      this._applyRoofDripSpawnDiffuse(buf, singleSegmentPool);
+    }
+    return buf;
+  }
+
+  _computeRoofDripSourceSignature() {
+    const gCanvas = (typeof canvas !== 'undefined' && canvas) || (typeof globalThis !== 'undefined' ? globalThis.canvas : null);
+    const tileDocs = gCanvas?.scene?.tiles?.contents ?? [];
+    let n = 0;
+    let acc = 2166136261 >>> 0;
+    for (const tile of tileDocs) {
+      const doc = tile?.document ?? tile;
+      const src = doc?._source;
+      const srcOverhead = src?.overhead;
+      const levelsOverhead = src?.flags?.levels?.overhead;
+      const isExplicitOverhead =
+        typeof srcOverhead === 'boolean'
+          ? srcOverhead
+          : typeof levelsOverhead === 'boolean'
+            ? levelsOverhead
+            : false;
+      const isRoof = !!(doc?.getFlag?.('map-shine-advanced', 'overheadIsRoof')
+        ?? tile?.getFlag?.('map-shine-advanced', 'overheadIsRoof')
+        ?? doc?.flags?.['map-shine-advanced']?.overheadIsRoof
+        ?? tile?.flags?.['map-shine-advanced']?.overheadIsRoof);
+      if (!isExplicitOverhead && !isRoof) continue;
+      n++;
+      const id = String(doc?.id ?? tile?.id ?? n);
+      for (let i = 0; i < id.length; i++) {
+        acc ^= id.charCodeAt(i) & 0xff;
+        acc = Math.imul(acc, 16777619) >>> 0;
+      }
+      const x = (Number(tile?.x ?? doc?.x ?? 0) * 10) | 0;
+      const y = (Number(tile?.y ?? doc?.y ?? 0) * 10) | 0;
+      const w = (Number(tile?.width ?? doc?.width ?? 0) * 10) | 0;
+      const h = (Number(tile?.height ?? doc?.height ?? 0) * 10) | 0;
+      const r = (Number(tile?.rotation ?? doc?.rotation ?? 0) * 10) | 0;
+      acc ^= (x ^ y ^ w ^ h ^ r) >>> 0;
+      acc = Math.imul(acc, 16777619) >>> 0;
+    }
+
+    let treeN = 0;
+    try {
+      const THREE = window.THREE;
+      const overlays = this._getFloorCompositorV2()?._treeEffect?._overlays;
+      if (overlays && typeof overlays.values === 'function' && THREE) {
+        const wp = new THREE.Vector3();
+        for (const entry of overlays.values()) {
+          const mesh = entry?.mesh;
+          if (!mesh) continue;
+          treeN++;
+          mesh.updateWorldMatrix(true, false);
+          mesh.getWorldPosition(wp);
+          const e = mesh.matrixWorld.elements;
+          const r = (Math.atan2(e[4], e[0]) * 10) | 0;
+          const x = (wp.x * 10) | 0;
+          const y = (wp.y * 10) | 0;
+          const z = (wp.z * 10) | 0;
+          acc ^= (x ^ y ^ z ^ r) >>> 0;
+          acc = Math.imul(acc, 16777619) >>> 0;
+        }
+      }
+    } catch (_) {}
+
+    let vk = '';
+    try {
+      if (
+        window.MapShine?.useGpuRoofDripEdges !== false &&
+        this._roofDripGpuInfraReady() &&
+        this._viewMinX != null &&
+        Number.isFinite(this._viewMaxX)
+      ) {
+        vk = `|v${((this._viewMinX * 4) | 0)}:${((this._viewMaxX * 4) | 0)}:${((this._viewMinY * 4) | 0)}:${((this._viewMaxY * 4) | 0)}`;
+      }
+    } catch (_) {}
+
+    const rtEpoch = Number(weatherController?._roofDripTuningEpoch) || 0;
+    const tun = weatherController?.roofDripTuning || {};
+    const tunSig = [
+      tun.useGpuRoofDripEdges ? 1 : 0,
+      Math.round((Number(tun.globalPointBudget) || 0) / 10),
+      Math.round((Number(tun.maxPointsPerTile) || 0) / 10),
+      Math.round((Number(tun.gpuMaxSpawnCap) || 0) / 10),
+      Math.round((Number(tun.spawnInwardPull) || 0) * 1000),
+      Math.round((Number(tun.spawnUvJitter) || 0) * 1000),
+      Math.round((Number(tun.emitterNormalJitter) || 0) * 100),
+      Math.round((Number(tun.emitterTangentialJitter) || 0) * 100)
+    ].join(':');
+    return `${n}|${treeN}|${acc >>> 0}${vk}|t${rtEpoch}|r${ROOF_DRIP_SPAWN_ALGO_REV}|s${tunSig}`;
   }
 
   _getViewFilteredEdgePoints(pts) {
@@ -2299,6 +3633,116 @@ export class WeatherParticles {
     return filled > 0 ? this._shoreFoamViewBuffer.subarray(0, filled * 4) : null;
   }
 
+  /** Fisher–Yates shuffle of [stride] float groups in-place (used to vary drip spawn order each tick). */
+  _shuffleFloat32Stride5(buf, nGroups) {
+    if (!buf || nGroups < 2) return;
+    for (let i = nGroups - 1; i > 0; i--) {
+      const j = (Math.random() * (i + 1)) | 0;
+      if (i === j) continue;
+      const oi = i * 5;
+      const oj = j * 5;
+      for (let k = 0; k < 5; k++) {
+        const t = buf[oi + k];
+        buf[oi + k] = buf[oj + k];
+        buf[oj + k] = t;
+      }
+    }
+  }
+
+  /**
+   * Filter packed roof drip points [u,v,nx,ny,spawnZ,...] (stride 5) to scene UVs inside the camera view rect.
+   * Matches rain/snow: only sample edges the player can currently see (same bounds as _viewMinX/_viewMaxX).
+   */
+  _getViewFilteredRoofDripPoints(pts) {
+    if (!pts || pts.length < 5) return null;
+
+    const minX = this._viewMinX;
+    const maxX = this._viewMaxX;
+    const minY = this._viewMinY;
+    const maxY = this._viewMaxY;
+    const sceneX = this._viewSceneX;
+    const sceneY = this._viewSceneY;
+    const sceneW = this._viewSceneW;
+    const sceneH = this._viewSceneH;
+
+    if (
+      !Number.isFinite(minX) || !Number.isFinite(maxX) ||
+      !Number.isFinite(minY) || !Number.isFinite(maxY) ||
+      !Number.isFinite(sceneX) || !Number.isFinite(sceneY) ||
+      !Number.isFinite(sceneW) || !Number.isFinite(sceneH) ||
+      sceneW <= 1e-6 || sceneH <= 1e-6
+    ) {
+      return pts;
+    }
+
+    let u0 = (minX - sceneX) / sceneW;
+    let u1 = (maxX - sceneX) / sceneW;
+    const vTop = 1.0 - ((maxY - sceneY) / sceneH);
+    const vBottom = 1.0 - ((minY - sceneY) / sceneH);
+    let v0 = Math.min(vTop, vBottom);
+    let v1 = Math.max(vTop, vBottom);
+
+    u0 = Math.max(0.0, Math.min(1.0, u0));
+    u1 = Math.max(0.0, Math.min(1.0, u1));
+    v0 = Math.max(0.0, Math.min(1.0, v0));
+    v1 = Math.max(0.0, Math.min(1.0, v1));
+
+    const q = 256;
+    const qU0 = Math.floor(u0 * q);
+    const qU1 = Math.floor(u1 * q);
+    const qV0 = Math.floor(v0 * q);
+    const qV1 = Math.floor(v1 * q);
+    if (
+      pts === this._roofDripViewSourceRef &&
+      qU0 === this._roofDripLastViewQU0 &&
+      qU1 === this._roofDripLastViewQU1 &&
+      qV0 === this._roofDripLastViewQV0 &&
+      qV1 === this._roofDripLastViewQV1
+    ) {
+      return (this._roofDripViewBuffer && this._roofDripViewCount > 0)
+        ? this._roofDripViewBuffer.subarray(0, this._roofDripViewCount * 5)
+        : new Float32Array(0);
+    }
+
+    this._roofDripViewSourceRef = pts;
+    this._roofDripLastViewQU0 = qU0;
+    this._roofDripLastViewQU1 = qU1;
+    this._roofDripLastViewQV0 = qV0;
+    this._roofDripLastViewQV1 = qV1;
+
+    const maxPoints = 120000;
+    if (!this._roofDripViewBuffer || this._roofDripViewBuffer.length < maxPoints * 5) {
+      this._roofDripViewBuffer = new Float32Array(maxPoints * 5);
+    }
+
+    const count = Math.floor(pts.length / 5);
+    let eligible = 0;
+    const eligibleIdx = [];
+    for (let i = 0; i < count; i++) {
+      const o = i * 5;
+      const u = pts[o];
+      const v = pts[o + 1];
+      if (u < u0 || u > u1 || v < v0 || v > v1) continue;
+      eligibleIdx.push(i);
+      eligible++;
+    }
+    let filled = 0;
+    const take = Math.min(eligible, maxPoints);
+    for (let t = 0; t < take; t++) {
+      const srcI = take === 1 ? eligibleIdx[0] : eligibleIdx[Math.floor((t * (eligible - 1)) / (take - 1))];
+      const o = srcI * 5;
+      const oo = filled * 5;
+      this._roofDripViewBuffer[oo] = pts[o];
+      this._roofDripViewBuffer[oo + 1] = pts[o + 1];
+      this._roofDripViewBuffer[oo + 2] = pts[o + 2];
+      this._roofDripViewBuffer[oo + 3] = pts[o + 3];
+      this._roofDripViewBuffer[oo + 4] = pts[o + 4];
+      filled++;
+    }
+    this._roofDripViewCount = filled;
+    return filled > 0 ? this._roofDripViewBuffer.subarray(0, filled * 5) : new Float32Array(0);
+  }
+
   _setWeatherSystemsVisible(visible) {
     const v = !!visible;
 
@@ -2314,6 +3758,7 @@ export class WeatherParticles {
         if (s?.emitter) s.emitter.visible = v;
       }
     }
+    if (this._rainImpactSplashSystem?.emitter) this._rainImpactSplashSystem.emitter.visible = v;
 
     if (this._waterHitSplashSystems && this._waterHitSplashSystems.length) {
       for (const entry of this._waterHitSplashSystems) {
@@ -2887,6 +4332,7 @@ export class WeatherParticles {
 
     this._splashShape = new RandomRectangleEmitter({ width: sceneW, height: sceneH });
     this._roofDripShape = new RoofEdgeDripEmitter(maskParams);
+    this._roofDripShape._host = this;
     this._waterHitShape = new WaterMaskedSplashEmitter(maskParams);
     this._waterFoamShape = new WaterMaskedSplashEmitter(maskParams);
     this._shoreFoamShape = new ShorelineFoamEmitter(maskParams);
@@ -2911,6 +4357,10 @@ export class WeatherParticles {
     // manage their lifetime once they land.
     const snowVolumeMin = new THREE.Vector3(sceneX, sceneYWorld, groundZ - 100);
     const snowKillBehavior = new WorldVolumeKillBehavior(snowVolumeMin, volumeMax);
+
+    const roofDripVolumeMin = new THREE.Vector3(sceneX, sceneYWorld, groundZ - ROOF_DRIP_KILL_Z_MARGIN);
+    const roofDripKillBehavior = new WorldVolumeKillBehavior(roofDripVolumeMin, volumeMax);
+    this._roofDripKillBehavior = roofDripKillBehavior;
     
     // --- COMMON OVER-LIFE BEHAVIORS ---
     // Rain: keep chroma and alpha roughly constant over life; fade handled by RainFadeInBehavior.
@@ -3011,48 +4461,92 @@ export class WeatherParticles {
      }
 
      // --- ROOF / TREE DRIPS ---
-     // Reuses the rain look but spawns from roof + canopy edges and decays over time.
+     // Reuses the rain streak texture (cloned) but spawns from roof + canopy edges and decays over time.
+     const roofDripDbg = roofDripDebugEnabled();
      const roofDripMaterial = new THREE.MeshBasicMaterial({
-       map: this.rainTexture,
+       map: this._roofDripTexture,
        transparent: true,
+       // Same as rain: depthTest off + overlay layer 31 so V2 FloorRenderBus actually draws the batch.
+       // (Layer-0-only batches were invisible: compositor pass matches rain/snow on OVERLAY_THREE_LAYER.)
+       // Occlusion under roofs uses uRoofAlphaMap when available, not depth.
        depthWrite: false,
        depthTest: false,
        blending: THREE.NormalBlending,
-       color: 0xffffff,
-       opacity: 0.8,
+       color: roofDripDbg ? 0xff00ff : 0xffffff,
+       opacity: roofDripDbg ? 1.0 : 0.8,
        side: THREE.DoubleSide
      });
      this._roofDripMaterial = roofDripMaterial;
+     roofDripMaterial.userData.msRoofEdgeDrip = true;
      this._patchRoofMaskMaterial(this._roofDripMaterial);
 
-     const roofDripGravity = new ApplyForce(new THREE.Vector3(0, 0, -1), new ConstantValue(this._rainBaseGravity * 0.85));
-     const roofDripWind = new ApplyForce(new THREE.Vector3(1, 0, 0), new ConstantValue(1600));
+     const roofDripGravity = new ApplyForce(new THREE.Vector3(0, 0, -1), new ConstantValue(this._rainBaseGravity * ROOF_DRIP_GRAVITY_SCALE));
+     const roofDripWind = new ApplyForce(new THREE.Vector3(1, 0, 0), new ConstantValue(ROOF_DRIP_WIND_BASE));
+     const roofDripCurl = new CurlNoiseField(
+       new THREE.Vector3(420, 420, 950),
+       new THREE.Vector3(22, 22, 12),
+       0.1
+     );
+
+     // Must match rain/snow batches: OVERLAY_THREE_LAYER (31) or drips never render in the V2 weather pass.
+     const roofDripLayers = new THREE.Layers();
+     roofDripLayers.set(OVERLAY_THREE_LAYER);
+
+     const roofDripColorOL = roofDripDbg
+       ? new ColorOverLife(
+         new ColorRange(
+           new Vector4(1.0, 0.0, 1.0, 1.0),
+           new Vector4(1.0, 0.0, 1.0, 1.0)
+         )
+       )
+       : new ColorOverLife(
+         new ColorRange(
+           new Vector4(0.6, 0.7, 1.0, 0.98),
+           new Vector4(0.6, 0.7, 1.0, 0.0)
+         )
+       );
 
      this.roofDripSystem = new ParticleSystem({
        duration: 1,
        looping: true,
        prewarm: false,
-       startLife: new IntervalValue(0.9, 1.8),
-       startSpeed: new IntervalValue(900, 1400),
-       startSize: new IntervalValue(0.9, 1.8),
-       startColor: new ColorRange(new Vector4(0.6, 0.7, 1.0, 0.95), new Vector4(0.6, 0.7, 1.0, 0.75)),
+       layers: roofDripLayers,
+      // ~4× travel vs shortest pass: longer life + relaxed kill floor + streak anchor offset.
+      startLife: new IntervalValue(1.9, 3.85),
+      startSpeed: new IntervalValue(40, 115),
+       startSize: roofDripDbg
+         ? new IntervalValue(4.5, 8.5)
+         : new IntervalValue(0.28, 0.52),
+       startColor: roofDripDbg
+         ? new ColorRange(new Vector4(1.0, 0.0, 1.0, 1.0), new Vector4(1.0, 0.0, 1.0, 1.0))
+         : new ColorRange(new Vector4(0.6, 0.7, 1.0, 0.98), new Vector4(0.6, 0.7, 1.0, 0.0)),
        worldSpace: true,
        maxParticles: 5000,
        emissionOverTime: new ConstantValue(0),
        shape: this._roofDripShape,
        material: roofDripMaterial,
-       renderOrder: 50,
+       // Same band as rain (50): draw after albedo tiles / effect overlays in the bus scene.
+       renderOrder: 49,
        renderMode: RenderMode.StretchedBillBoard,
-       speedFactor: 0.012,
+      speedFactor: roofDripDbg ? 0.02 : 0.0125,
        startRotation: new ConstantValue(0),
-       behaviors: [roofDripGravity, roofDripWind, rainColorOverLife, killBehavior, new RainFadeInBehavior()]
+       behaviors: [roofDripGravity, roofDripWind, roofDripCurl, roofDripColorOL, roofDripKillBehavior, (() => {
+         const b = new RainFadeInBehavior();
+         b.fadeDuration = 0.045;
+         return b;
+       })()]
      });
 
-     const dripEmitterZ = Math.max(groundZ + 700, safeEmitterZ - 1200);
+     const dripEmitterZ = groundZ + 12;
      this.roofDripSystem.emitter.position.set(centerX, centerY, dripEmitterZ);
      this.roofDripSystem.emitter.rotation.set(Math.PI, 0, 0);
+     // V2 frustum cull uses emitter Z; drips sit near groundZ — can false-negative vs rain's high-Z emitter.
+     try {
+       this.roofDripSystem.emitter.userData.msAutoCull = false;
+     } catch (_) {}
      if (this.scene) this.scene.add(this.roofDripSystem.emitter);
      this.batchRenderer.addSystem(this.roofDripSystem);
+     this._roofDripShape.emitter = this.roofDripSystem.emitter;
 
      try {
        const idx = this.batchRenderer.systemToBatchIndex?.get(this.roofDripSystem);
@@ -3060,6 +4554,7 @@ export class WeatherParticles {
          const batch = this.batchRenderer.batches[idx];
          if (batch.material) {
            this._roofDripBatchMaterial = batch.material;
+           this._roofDripBatchMaterial.userData.msRoofEdgeDrip = true;
            this._patchRoofMaskMaterial(this._roofDripBatchMaterial);
          }
        }
@@ -3248,6 +4743,55 @@ export class WeatherParticles {
     createWaterHitSplashSystemForTile(1);
     createWaterHitSplashSystemForTile(2);
     createWaterHitSplashSystemForTile(3);
+
+    const rainImpactSplashWind = new ApplyForce(new THREE.Vector3(1, 0, 0), new ConstantValue(0));
+    this._rainImpactSplashWind = rainImpactSplashWind;
+    const rainImpactSplashAlpha = new SplashAlphaBehavior(0.10);
+    this._rainImpactSplashAlpha = rainImpactSplashAlpha;
+
+    this._rainImpactSplashMatrix = new THREE.Matrix4();
+    this._rainImpactSplashSystem = new ParticleSystem({
+      duration: 1,
+      looping: true,
+      prewarm: false,
+      startLife: new IntervalValue(0.1, 0.2),
+      startSpeed: new ConstantValue(0),
+      startSize: new IntervalValue(12, 24),
+      startColor: new ColorRange(new Vector4(0.8, 0.9, 1.0, 1.0), new Vector4(0.8, 0.9, 1.0, 1.0)),
+      worldSpace: true,
+      maxParticles: 3000,
+      emissionOverTime: new ConstantValue(0),
+      onlyUsedByOther: true,
+      uTileCount: 2,
+      vTileCount: 2,
+      startTileIndex: new IntervalValue(0, 4),
+      shape: new PointEmitter(),
+      material: splashMaterial,
+      renderOrder: 50,
+      renderMode: RenderMode.BillBoard,
+      startRotation: new IntervalValue(0, Math.PI * 2),
+      behaviors: [rainImpactSplashAlpha, splashSizeOverLife, rainImpactSplashWind, killBehavior]
+    });
+    this._rainImpactSplashSystem.emitter.position.set(centerX, centerY, groundZ + 10);
+    this._rainImpactSplashSystem.emitter.rotation.set(0, 0, 0);
+    if (this.scene) this.scene.add(this._rainImpactSplashSystem.emitter);
+    this.batchRenderer.addSystem(this._rainImpactSplashSystem);
+    try {
+      const idx = this.batchRenderer.systemToBatchIndex?.get(this._rainImpactSplashSystem);
+      if (idx !== undefined && this.batchRenderer.batches && this.batchRenderer.batches[idx]) {
+        const batch = this.batchRenderer.batches[idx];
+        if (batch.material) {
+          this._patchRoofMaskMaterial(batch.material);
+        }
+      }
+    } catch (e) {
+      log.warn('Failed to patch rain-impact splash batch material for roof mask:', e);
+    }
+
+    this._boundRainParticleDied = (ev) => this._onRainParticleDied(ev);
+    this.rainSystem.addEventListener('particleDied', this._boundRainParticleDied);
+    this._boundRoofDripParticleDied = (ev) => this._onRoofDripParticleDied(ev);
+    this.roofDripSystem.addEventListener('particleDied', this._boundRoofDripParticleDied);
 
     const foamMaterial = new THREE.MeshBasicMaterial({
       map: this.foamTexture,
@@ -3499,6 +5043,8 @@ export class WeatherParticles {
     this._snowFlutter = snowFlutter;
     this._rainCurl = rainCurl;
     this._rainCurlBaseStrength = rainCurl.strength.clone();
+    this._roofDripCurl = roofDripCurl;
+    this._roofDripCurlBaseStrength = roofDripCurl.strength.clone();
 
     // --- ASH ---
     // Ash precipitation: slower, heavier than snow, grey/charcoal colored
@@ -3686,6 +5232,79 @@ export class WeatherParticles {
   }
 
   /**
+   * Upgrade legacy roof-mask fragment shaders that lack uRoofEdgeDrip.
+   * Roof-edge drips spawn under roof footprints where the dual-mask often discards
+   * (indoors in world mask + no roof alpha at the fragment's screen pixel).
+   * @param {string} fs
+   * @returns {string}
+   * @private
+   */
+  _migrateRoofEdgeDripShader(fs) {
+    if (typeof fs !== 'string') return fs;
+    let out = fs;
+    if (!out.includes('uniform float uRoofEdgeDrip')) {
+      out = out.replace(
+        /uniform float uHasRoofAlphaMap;\s*\r?\n/,
+        'uniform float uHasRoofAlphaMap;\nuniform float uRoofEdgeDrip;\n'
+      );
+    }
+    out = out.replace(
+      /bool showPrecip = roofVisible \|\| isOutdoors;\s+if \(!showPrecip\) \{\s*discard;\s*\}/,
+      'bool showPrecip = roofVisible || isOutdoors;\n    \n    if (uRoofEdgeDrip < 0.5) {\n      if (!showPrecip) {\n        discard;\n      }\n    }'
+    );
+
+    // Roof drips: old shaders used OOB uvMask discard for all particles — kills edge drips (see fragmentMaskCode).
+    if (out.includes('if (msAnyMaskEnabled) {') && !out.includes('msAnyMaskEnabled && uRoofEdgeDrip < 0.5')) {
+      out = out.replace(
+        /if \(msAnyMaskEnabled\) \{\s*if \(uvMask\.x < 0\.0 \|\| uvMask\.x > 1\.0 \|\| uvMask\.y < 0\.0 \|\| uvMask\.y > 1\.0\) \{\s*discard;\s*\}\s*\}/,
+        'if (msAnyMaskEnabled && uRoofEdgeDrip < 0.5) {\n      if (uvMask.x < 0.0 || uvMask.x > 1.0 || uvMask.y < 0.0 || uvMask.y > 1.0) {\n        discard;\n      }\n    }'
+      );
+    }
+
+    // Dual-sample max(roofA0, roofA1) could saturate roofAlpha across the screen → invisible drips.
+    if (out.includes('roofAlpha = max(roofA0, roofA1)')) {
+      out = out.replace(
+        /float roofA0 = texture2D\(uRoofAlphaMap, screenUv\)\.a;\s*\/\/[^\n]*\n\s*float roofA1 = texture2D\(uRoofAlphaMap, vec2\(screenUv\.x, 1\.0 - screenUv\.y\)\)\.a;\s*roofAlpha = max\(roofA0, roofA1\);/,
+        'roofAlpha = texture2D(uRoofAlphaMap, screenUv).a;'
+      );
+      out = out.replace(
+        /float roofA0 = texture2D\(uRoofAlphaMap, screenUv\)\.a;\s*\n\s*float roofA1 = texture2D\(uRoofAlphaMap, vec2\(screenUv\.x, 1\.0 - screenUv\.y\)\)\.a;\s*\n\s*roofAlpha = max\(roofA0, roofA1\);/,
+        'roofAlpha = texture2D(uRoofAlphaMap, screenUv).a;'
+      );
+      if (out.includes('roofAlpha = max(roofA0, roofA1)')) {
+        out = out.replace(
+          /float roofA0 = texture2D\(uRoofAlphaMap, screenUv\)\.a;[\s\S]*?roofAlpha = max\(roofA0, roofA1\);/,
+          'roofAlpha = texture2D(uRoofAlphaMap, screenUv).a;'
+        );
+      }
+    }
+
+    // Ensure roof-edge drips are alpha-masked by overhead alpha even when depth path differs.
+    if (!out.includes('if (uRoofEdgeDrip > 0.5 && uHasRoofAlphaMap > 0.5)')) {
+      out = out.replace(
+        'if (uWaterMaskEnabled > 0.5) {',
+        'if (uRoofEdgeDrip > 0.5 && uHasRoofAlphaMap > 0.5) {\n      float ra = clamp(roofAlpha, 0.0, 1.0);\n      float under = 1.0 - smoothstep(0.012, 0.14, ra);\n      msWaterFade *= pow(max(under, 0.0), 1.35);\n      if (msWaterFade <= 0.001) discard;\n    }\n    if (uWaterMaskEnabled > 0.5) {'
+      );
+    }
+    out = out.replace(
+      /float under = 1\.0 - smoothstep\(0\.02, 0\.22, ra\);\s*msWaterFade \*= under;/g,
+      'float under = 1.0 - smoothstep(0.012, 0.14, ra);\n      msWaterFade *= pow(max(under, 0.0), 1.35);'
+    );
+    return out;
+  }
+
+  /**
+   * Console diagnostics for roof/tree drip state (see `roofDripDiagLogsEnabled`).
+   * @private
+   */
+  _emitRoofDripDiag(payload) {
+    if (!roofDripDiagLogsEnabled()) return;
+    try {
+      console.warn('[WeatherParticles][roofDrip·diag]', payload);
+    } catch (_) {}
+  }
+
+  /**
    * Patch a MeshBasicMaterial to support sampling the roof/_Outdoors mask.
    * This keeps the existing lighting and texturing logic intact and only adds
    * a late discard based on uRoofMap/uSceneBounds/uRoofMaskEnabled.
@@ -3726,6 +5345,8 @@ export class WeatherParticles {
       uRoofMaskEnabled: { value: 0.0 },
       // 0.0 = no roof alpha map, 1.0 = has roof alpha map
       uHasRoofAlphaMap: { value: 0.0 },
+      // 1.0 = roof/tree edge drips: skip dual-mask "indoor + no roof pixel" discard (see fragmentMaskCode).
+      uRoofEdgeDrip: { value: 0.0 },
       // Screen size for gl_FragCoord -> UV conversion
       uScreenSize: { value: new THREE.Vector2(1920, 1080) },
       uWaterMask: { value: null },
@@ -3804,10 +5425,12 @@ export class WeatherParticles {
     if (!uniforms.uFoamWindDir) uniforms.uFoamWindDir = { value: new THREE.Vector2(1.0, 0.0) };
     if (!uniforms.uFoamWindOffsetUv) uniforms.uFoamWindOffsetUv = { value: new THREE.Vector2(0.0, 0.0) };
     if (!uniforms.uFoamWindTime) uniforms.uFoamWindTime = { value: 0.0 };
+    if (!uniforms.uRoofEdgeDrip) uniforms.uRoofEdgeDrip = { value: 0.0 };
 
     // Store for per-frame updates in update()
     material.userData = material.userData || {};
     material.userData.roofUniforms = uniforms;
+    uniforms.uRoofEdgeDrip.value = (material.userData?.msRoofEdgeDrip === true) ? 1.0 : 0.0;
 
     const isShaderMat = material.isShaderMaterial === true;
 
@@ -3831,7 +5454,10 @@ export class WeatherParticles {
       '    // When all mask features are disabled (debugging / fallback mode),\n' +
       '    // we must not discard purely due to uSceneBounds/vRoofWorldPos mismatch.\n' +
       '    bool msAnyMaskEnabled = (uRoofMaskEnabled > 0.5) || (uWaterMaskEnabled > 0.5) || (uHasWaterOccluderAlpha > 0.5);\n' +
-      '    if (msAnyMaskEnabled) {\n' +
+      '    // Roof drips: skip OOB discard — stretched billboards at roof edges often have quad\n' +
+      '    // corners outside the scene UV rect, which discards every fragment (invisible).\n' +
+      '    // Rain/snow still use the bounds check.\n' +
+      '    if (msAnyMaskEnabled && uRoofEdgeDrip < 0.5) {\n' +
       '      if (uvMask.x < 0.0 || uvMask.x > 1.0 || uvMask.y < 0.0 || uvMask.y > 1.0) {\n' +
       '        discard;\n' +
       '      }\n' +
@@ -3867,8 +5493,19 @@ export class WeatherParticles {
       '    // Rain shows on visible roofs OR in outdoor areas without roofs\n' +
       '    bool showPrecip = roofVisible || isOutdoors;\n' +
       '    \n' +
-      '    if (!showPrecip) {\n' +
-      '      discard;\n' +
+      '    // Roof/tree edge drips: do not apply this discard — spawn points are often\n' +
+      '    // under roof in the world mask while screen-space roof alpha is 0 at the fragment.\n' +
+      '    if (uRoofEdgeDrip < 0.5) {\n' +
+      '      if (!showPrecip) {\n' +
+      '        discard;\n' +
+      '      }\n' +
+      '    }\n' +
+      '    // Roof edge drips: fade under opaque overhead (screen-space); depth alone often fails vs overlay pass.\n' +
+      '    if (uRoofEdgeDrip > 0.5 && uHasRoofAlphaMap > 0.5) {\n' +
+      '      float ra = clamp(roofAlpha, 0.0, 1.0);\n' +
+      '      float under = 1.0 - smoothstep(0.012, 0.14, ra);\n' +
+      '      msWaterFade *= pow(max(under, 0.0), 1.35);\n' +
+      '      if (msWaterFade <= 0.001) discard;\n' +
       '    }\n' +
       '    if (uWaterMaskEnabled > 0.5) {\n' +
       '      vec2 uvWater = uvMask;\n' +
@@ -4051,6 +5688,7 @@ export class WeatherParticles {
       uni.uSceneBounds = uniforms.uSceneBounds;
       uni.uRoofMaskEnabled = uniforms.uRoofMaskEnabled;
       uni.uHasRoofAlphaMap = uniforms.uHasRoofAlphaMap;
+      uni.uRoofEdgeDrip = uniforms.uRoofEdgeDrip;
       uni.uScreenSize = uniforms.uScreenSize;
       uni.uWaterMask = uniforms.uWaterMask;
       uni.uWaterMaskEnabled = uniforms.uWaterMaskEnabled;
@@ -4165,6 +5803,7 @@ export class WeatherParticles {
             'uniform vec4 uSceneBounds;\n' +
             'uniform float uRoofMaskEnabled;\n' +
             'uniform float uHasRoofAlphaMap;\n' +
+            'uniform float uRoofEdgeDrip;\n' +
             'uniform vec2 uScreenSize;\n' +
             'uniform sampler2D uWaterMask;\n' +
             'uniform float uWaterMaskEnabled;\n' +
@@ -4190,6 +5829,14 @@ export class WeatherParticles {
 
           material.fragmentShader = fs;
           shaderChanged = true;
+        }
+
+        if (typeof material.fragmentShader === 'string') {
+          const fsM = this._migrateRoofEdgeDripShader(material.fragmentShader);
+          if (fsM !== material.fragmentShader) {
+            material.fragmentShader = fsM;
+            shaderChanged = true;
+          }
         }
 
         if (isFoamPlume && !material.fragmentShader.includes(foamMarker)) {
@@ -4236,6 +5883,7 @@ export class WeatherParticles {
       shader.uniforms.uSceneBounds = uniforms.uSceneBounds;
       shader.uniforms.uRoofMaskEnabled = uniforms.uRoofMaskEnabled;
       shader.uniforms.uHasRoofAlphaMap = uniforms.uHasRoofAlphaMap;
+      shader.uniforms.uRoofEdgeDrip = uniforms.uRoofEdgeDrip;
       shader.uniforms.uScreenSize = uniforms.uScreenSize;
       shader.uniforms.uWaterMask = uniforms.uWaterMask;
       shader.uniforms.uWaterMaskEnabled = uniforms.uWaterMaskEnabled;
@@ -4319,6 +5967,7 @@ export class WeatherParticles {
           'uniform vec4 uSceneBounds;\n' +
           'uniform float uRoofMaskEnabled;\n' +
           'uniform float uHasRoofAlphaMap;\n' +
+          'uniform float uRoofEdgeDrip;\n' +
           'uniform vec2 uScreenSize;\n' +
           'uniform sampler2D uWaterMask;\n' +
           'uniform float uWaterMaskEnabled;\n' +
@@ -4337,6 +5986,9 @@ export class WeatherParticles {
           fs = fs.replace(/\n}\s*$/, '\n  gl_FragColor.a *= msWaterFade;\n}');
         }
 
+        shader.fragmentShader = fs;
+      } else {
+        fs = this._migrateRoofEdgeDripShader(shader.fragmentShader);
         shader.fragmentShader = fs;
       }
 
@@ -4375,12 +6027,22 @@ export class WeatherParticles {
       mat.userData = mat.userData || {};
       mat.userData.msFoamPlume = true;
     }
+    if (cacheProp === '_roofDripBatchMaterial') {
+      mat.userData = mat.userData || {};
+      mat.userData.msRoofEdgeDrip = true;
+    }
 
-    // Ensure the actual rendered VFXBatch/SpriteBatch object is on the overlay layer.
-    // EffectComposer renders layer 31 in a dedicated overlay pass.
+    // Rain/snow/foam: overlay layer 31 so they draw above the map without fighting tile depth.
+    // Roof drips: default layer 0 + depthTest so overhead tiles (depthWrite, renderOrder 10) can occlude them.
     try {
       if (batch && batch.layers && typeof batch.layers.set === 'function') {
+        // Roof drips must use the same overlay layer as rain or they are culled from the V2 particle pass.
         batch.layers.set(OVERLAY_THREE_LAYER);
+      }
+      if (cacheProp === '_roofDripBatchMaterial' && mat) {
+        mat.depthTest = false;
+        mat.depthWrite = false;
+        mat.needsUpdate = true;
       }
     } catch (_) {
     }
@@ -4425,7 +6087,39 @@ export class WeatherParticles {
         }
       }
     }
+    // Roof-drip batch: migrate fragment even when _patchRoofMaskMaterial was skipped (alreadyPatched),
+    // so OOB-uv and other shader fixes apply to previously cached programs.
+    if (cacheProp === '_roofDripBatchMaterial' && isShaderMat && typeof mat.fragmentShader === 'string') {
+      const migrated = this._migrateRoofEdgeDripShader(mat.fragmentShader);
+      if (migrated !== mat.fragmentShader) {
+        mat.fragmentShader = migrated;
+        mat.needsUpdate = true;
+        if (mat.userData) mat.userData._msRoofMaskPatchedFs = mat.fragmentShader;
+      }
+    }
     return mat;
+  }
+
+  /**
+   * Shared 0..1 scene darkness → particle brightness scale (matches legacy update() mapping).
+   */
+  _getDarknessBrightnessScale() {
+    const THREE = window.THREE;
+    let sceneDarkness = 0;
+    try {
+      const le = window.MapShine?.lightingEffect;
+      if (le && typeof le.getEffectiveDarkness === 'function') {
+        sceneDarkness = le.getEffectiveDarkness();
+      } else if (typeof canvas !== 'undefined' && canvas?.scene?.environment?.darknessLevel !== undefined) {
+        sceneDarkness = canvas.scene.environment.darknessLevel;
+      }
+    } catch (e) {
+    }
+    sceneDarkness = Math.max(0, Math.min(1, sceneDarkness));
+    if (THREE) {
+      return THREE.MathUtils.lerp(1.0, 0.3, sceneDarkness);
+    }
+    return 1.0 - 0.7 * sceneDarkness;
   }
 
   update(dt, sceneBoundsVec4) {
@@ -4460,6 +6154,7 @@ export class WeatherParticles {
             if (s?.emitter) s.emitter.visible = false;
           }
         }
+        if (this._rainImpactSplashSystem?.emitter) this._rainImpactSplashSystem.emitter.visible = false;
         if (this._waterHitSplashSystems && this._waterHitSplashSystems.length) {
           for (const entry of this._waterHitSplashSystems) {
             if (entry?.system?.emitter) entry.system.emitter.visible = false;
@@ -4478,6 +6173,10 @@ export class WeatherParticles {
     // ParticleSystem references to be missing from the BatchedRenderer map,
     // re-register them so they can render.
     this._ensureAllSystemsRegistered();
+
+    // Rain impacts are spawned from `particleDied` events (after batch.update). Flush here
+    // so splashes appear even when the control path below is throttled this frame.
+    this._flushRainImpactSplashes();
 
     // T2-A: Control-rate throttle — the expensive control path (emission bounds,
     // sizing, emission rates, uniform updates, mask lookups) only runs at _controlHz.
@@ -4653,6 +6352,12 @@ export class WeatherParticles {
         this.snowSystem.emitter.position.y = emitCY;
       }
 
+      // Roof drips: same XY follow as rain so spawn distribution tracks the camera (per-point UVs stay full-scene).
+      if (this.roofDripSystem?.emitter) {
+        this.roofDripSystem.emitter.position.x = emitCX;
+        this.roofDripSystem.emitter.position.y = emitCY;
+      }
+
       // Ash emitters cover the full scene (same as rain/snow) to avoid visible
       // hard-edged rectangles. Density variation comes from temporal clusterBoost
       // on the emission rate, not from shrinking/repositioning the emitter.
@@ -4697,24 +6402,7 @@ export class WeatherParticles {
     // We use this as a scalar on particle brightness/opacity so that
     // weather is not self-illuminated in dark scenes, while still
     // remaining faintly visible at full darkness.
-    let sceneDarkness = 0;
-    try {
-      const le = window.MapShine?.lightingEffect;
-      if (le && typeof le.getEffectiveDarkness === 'function') {
-        sceneDarkness = le.getEffectiveDarkness();
-      } else if (typeof canvas !== 'undefined' && canvas?.scene?.environment?.darknessLevel !== undefined) {
-        sceneDarkness = canvas.scene.environment.darknessLevel;
-      }
-    } catch (e) {
-      // If canvas is not ready, keep previous/default darkness.
-    }
-    sceneDarkness = Math.max(0, Math.min(1, sceneDarkness));
-
-    // Map 0..1 darkness to a brightness scale of ~1.0 -> 0.3. This keeps
-    // particles readable but clearly dimmer in night scenes.
-    const darknessBrightnessScale = THREE
-      ? THREE.MathUtils.lerp(1.0, 0.3, sceneDarkness)
-      : (1.0 - 0.7 * sceneDarkness);
+    const darknessBrightnessScale = this._getDarknessBrightnessScale();
 
     // Cache scene bounds for mask projection
     if (sceneBoundsVec4 && THREE) {
@@ -5106,7 +6794,7 @@ export class WeatherParticles {
     //   would never run on maps without an _Outdoors asset.
     const outdoorsMaskAvailable = !weatherController?.roofMaskData || !!roofTex;
     
-    // Get the roof alpha texture from LightingEffect (screen-space overhead tile visibility)
+    // Roof alpha: mask registry (optional), then OverheadShadowsEffectV2.roofVisibilityTarget (authoritative for V2), then legacy lightingEffect.
     let roofAlphaTexture = null;
     let screenWidth = 1920;
     let screenHeight = 1080;
@@ -5118,18 +6806,51 @@ export class WeatherParticles {
         screenWidth = rec.width || 1920;
         screenHeight = rec.height || 1080;
       } else {
-        const le = window.MapShine?.lightingEffect;
-        if (le && le.weatherRoofAlphaTarget && le.weatherRoofAlphaTarget.texture) {
-          roofAlphaTexture = le.weatherRoofAlphaTarget.texture;
-          // Get screen size from the render target dimensions
-          screenWidth = le.weatherRoofAlphaTarget.width || 1920;
-          screenHeight = le.weatherRoofAlphaTarget.height || 1080;
+        const fc = window.MapShine?.floorCompositorV2 ?? window.MapShine?.effectComposer?._floorCompositorV2;
+        const ose = fc?._overheadShadowEffect;
+        const oseAlpha = ose && ose.roofAlphaTexture ? ose.roofAlphaTexture : null;
+        if (oseAlpha) {
+          roofAlphaTexture = oseAlpha;
+          const rt = ose.roofVisibilityTarget;
+          if (rt && rt.width > 0 && rt.height > 0) {
+            screenWidth = rt.width;
+            screenHeight = rt.height;
+          }
+        } else {
+          const le = window.MapShine?.lightingEffect;
+          if (le && le.weatherRoofAlphaTarget && le.weatherRoofAlphaTarget.texture) {
+            roofAlphaTexture = le.weatherRoofAlphaTarget.texture;
+            screenWidth = le.weatherRoofAlphaTarget.width || 1920;
+            screenHeight = le.weatherRoofAlphaTarget.height || 1080;
+          }
         }
       }
     } catch (e) {
-      // LightingEffect not available
+      // Roof alpha sources unavailable
     }
     const hasRoofAlphaMap = !!roofAlphaTexture;
+    // uScreenSize must match the pass that emits gl_FragCoord (drawing buffer). Roof alpha RT from
+    // OverheadShadowsEffectV2 should match those dimensions when the overhead pass shares viewport scale.
+    try {
+      const gCanvas = (typeof canvas !== 'undefined' && canvas) || (typeof globalThis !== 'undefined' ? globalThis.canvas : null);
+      const r = gCanvas?.app?.renderer ?? window.MapShine?.sceneComposer?.renderer;
+      if (r && typeof r.getDrawingBufferSize === 'function') {
+        const sz = new window.THREE.Vector2();
+        r.getDrawingBufferSize(sz);
+        if (sz.x > 0 && sz.y > 0) {
+          screenWidth = sz.x;
+          screenHeight = sz.y;
+        }
+      } else if (r?.domElement) {
+        const w = r.domElement.width;
+        const h = r.domElement.height;
+        if (w > 0 && h > 0) {
+          screenWidth = w;
+          screenHeight = h;
+        }
+      }
+    } catch (_) {
+    }
 
     let cloudShadowTexture = null;
     try {
@@ -5166,21 +6887,77 @@ export class WeatherParticles {
     const snowIntensity = precip * freeze * (snowTuning.intensityScale ?? 1.0);
 
     // Roof/canopy drip tail: keeps dripping for a long time after rain ends.
-    if (baseRainIntensity > 0.001) {
-      this._roofDripTailRemainingSec = this._roofDripTailDurationSec;
+    const roofDripTailDurRaw = _roofDripTuningVal('tailDurationSec', this._roofDripTailDurationSec);
+    const roofDripTailDur = roofDripTailDurRaw > 0 ? roofDripTailDurRaw : this._roofDripTailDurationSec;
+    const roofTailHoldSec = Math.min(60.0, Math.max(0.0, roofDripTailDur));
+    const roofTailTaperSec = Math.max(0.0, roofDripTailDur - roofTailHoldSec);
+    const rainLevel01 = THREE
+      ? THREE.MathUtils.clamp(precip * (1.0 - freeze), 0.0, 1.0)
+      : Math.max(0.0, Math.min(1.0, precip * (1.0 - freeze)));
+    if (rainLevel01 > 0.001) {
+      this._roofDripTailHoldRemainingSec = roofTailHoldSec;
+      this._roofDripTailTaperRemainingSec = roofTailTaperSec;
+      this._roofDripTailRemainingSec = roofDripTailDur;
+      // Rain immediately refreshes the remembered wetness level.
+      this._roofDripRecentRain01 = Math.max(this._roofDripRecentRain01 ?? 0.0, rainLevel01);
     } else {
-      this._roofDripTailRemainingSec = Math.max(0, (this._roofDripTailRemainingSec ?? 0) - safeDt);
+      let hold = Math.max(0, this._roofDripTailHoldRemainingSec ?? 0);
+      let taper = Math.max(0, this._roofDripTailTaperRemainingSec ?? 0);
+      if (hold > 0) {
+        const use = Math.min(hold, safeDt);
+        hold -= use;
+      } else if (taper > 0) {
+        taper = Math.max(0, taper - safeDt);
+      }
+      this._roofDripTailHoldRemainingSec = hold;
+      this._roofDripTailTaperRemainingSec = taper;
+      this._roofDripTailRemainingSec = hold + taper;
+      // Slow decay so post-rain drips remain strong for much longer.
+      const tau = Math.max(120.0, roofDripTailDur * 0.8);
+      const decay = Math.exp(-safeDt / tau);
+      this._roofDripRecentRain01 = (this._roofDripRecentRain01 ?? 0.0) * decay;
     }
-    const roofDripTail01 = this._roofDripTailDurationSec > 0
-      ? Math.max(0, Math.min(1, this._roofDripTailRemainingSec / this._roofDripTailDurationSec))
-      : 0;
+    const roofDripTail01 = (() => {
+      const hold = Math.max(0, this._roofDripTailHoldRemainingSec ?? 0);
+      const taper = Math.max(0, this._roofDripTailTaperRemainingSec ?? 0);
+      if (hold > 1e-6) return 1.0;
+      if (roofTailTaperSec > 1e-6) return Math.max(0, Math.min(1, taper / roofTailTaperSec));
+      return 0;
+    })();
 
-    // Rebuild drip edge points infrequently (tile/tree topology changes slowly).
+    // Rebuild full-map drip edge points infrequently; filter to camera view every control tick (like rain bounds).
+    const dripRefreshSec = _roofDripTuningVal('pointsRefreshSec', ROOF_DRIP_POINTS_REFRESH_SEC);
     this._roofDripPointsRefreshSec = (this._roofDripPointsRefreshSec ?? 0) - safeDt;
-    if (this._roofDripPointsRefreshSec <= 0) {
-      const dripPoints = this._rebuildRoofDripPoints();
-      this._roofDripShape?.setPoints?.(dripPoints);
-      this._roofDripPointsRefreshSec = 1.5;
+    if (this._roofDripPointsRefreshSec <= 0 || !this._roofDripBasePoints) {
+      this._roofDripPointsRefreshSec = dripRefreshSec;
+      const sig = this._computeRoofDripSourceSignature();
+      if (!this._roofDripBasePoints || sig !== this._roofDripSourceSignature) {
+        this._roofDripSourceSignature = sig;
+        this._roofDripBasePoints = this._rebuildRoofDripPoints();
+        this._roofDripViewSourceRef = null;
+        this._roofDripLastViewQU0 = null;
+        this._roofDripLastViewQU1 = null;
+        this._roofDripLastViewQV0 = null;
+        this._roofDripLastViewQV1 = null;
+      }
+    }
+    if (this._roofDripShape) {
+      const base = this._roofDripBasePoints;
+      if (!base || base.length < 5) {
+        if (this._roofDripActivePointsRef !== null) {
+          this._roofDripActivePointsRef = null;
+          this._roofDripShape.setPoints(null);
+        }
+      } else {
+        // During post-rain tail-only phase, use the full point pool so drips can
+        // appear from many more locations while precipitation systems are lighter.
+        const tailOnly = rainLevel01 <= 0.001 && roofDripTail01 > 0.0001;
+        const viewPts = tailOnly ? base : this._getViewFilteredRoofDripPoints(base);
+        if (viewPts !== this._roofDripActivePointsRef) {
+          this._roofDripActivePointsRef = viewPts;
+          this._roofDripShape.setPoints(viewPts);
+        }
+      }
     }
 
     this._ensureBatchMaterialPatched(this.rainSystem, '_rainBatchMaterial');
@@ -5200,18 +6977,21 @@ export class WeatherParticles {
         // --- EFFICIENT TUNING UPDATES ---
         // Only update system properties if the specific tuning value has changed.
 
-        // 1. Drop Size -> startSize (configurable min/max, with sane fallbacks)
-        const currentDropSize = rainTuning.dropSize ?? 1.0;
-        const currentDropSizeMin = rainTuning.dropSizeMin ?? (1.2 * currentDropSize);
-        const currentDropSizeMax = rainTuning.dropSizeMax ?? (2.2 * currentDropSize);
+        // 1. Drop Size -> startSize. Master `dropSize` scales min/max together (same schema defaults).
+        const ds = rainTuning.dropSize ?? RAIN_DROP_SIZE_REF;
+        const rawMin = rainTuning.dropSizeMin ?? 1.4;
+        const rawMax = rainTuning.dropSizeMax ?? 13.8;
+        if (ds !== this._lastRainTuning.dropSize ||
+            rawMin !== this._lastRainTuning.dropSizeMin ||
+            rawMax !== this._lastRainTuning.dropSizeMax) {
 
-        if (currentDropSize !== this._lastRainTuning.dropSize ||
-            currentDropSizeMin !== this._lastRainTuning.dropSizeMin ||
-            currentDropSizeMax !== this._lastRainTuning.dropSizeMax) {
+          this._lastRainTuning.dropSize = ds;
+          this._lastRainTuning.dropSizeMin = rawMin;
+          this._lastRainTuning.dropSizeMax = rawMax;
 
-          this._lastRainTuning.dropSize = currentDropSize;
-          this._lastRainTuning.dropSizeMin = currentDropSizeMin;
-          this._lastRainTuning.dropSizeMax = currentDropSizeMax;
+          const scale = ds / RAIN_DROP_SIZE_REF;
+          const currentDropSizeMin = rawMin * scale;
+          const currentDropSizeMax = Math.max(currentDropSizeMin, rawMax * scale);
 
           // PERFORMANCE: Mutate existing IntervalValue instead of creating new one
           if (this.rainSystem.startSize && typeof this.rainSystem.startSize.a === 'number') {
@@ -5229,7 +7009,7 @@ export class WeatherParticles {
           this.rainSystem.speedFactor = 0.02 * currentStreakLen;
         }
 
-        // 3. Brightness -> material opacity & startColor alpha
+        // 3. Brightness -> material opacity; RGB comes from per-frame block below (rain debug magenta).
         const currentBrightness = (rainTuning.brightness ?? 1.0) * darknessBrightnessScale;
         if (currentBrightness !== this._lastRainTuning.brightness &&
             (this._rainMaterial || this.rainSystem.material)) {
@@ -5247,17 +7027,30 @@ export class WeatherParticles {
           if (this.rainSystem.material) {
             this.rainSystem.material.opacity = targetOpacity;
           }
+        }
 
-          // Particle alpha
-          // PERFORMANCE: Mutate existing ColorRange Vector4s instead of creating new ones
-          const baseMinAlpha = 1.0;
-          const baseMaxAlpha = 0.7;
-          const minA = baseMinAlpha * alphaScale;
-          const maxA = baseMaxAlpha * alphaScale;
-          if (this.rainSystem.startColor && this.rainSystem.startColor.a && this.rainSystem.startColor.b) {
+        const rainDbg = !!window.MapShine?.debugRainHighlight;
+        const clampedBRain = THREE.MathUtils.clamp(currentBrightness, 0.0, 3.0);
+        const alphaScaleRain = clampedBRain / 3.0;
+        const minA = 1.0 * alphaScaleRain;
+        const maxA = 0.7 * alphaScaleRain;
+        if (this.rainSystem.startColor && this.rainSystem.startColor.a && this.rainSystem.startColor.b) {
+          if (rainDbg) {
+            this.rainSystem.startColor.a.set(1.0, 0.0, 1.0, minA);
+            this.rainSystem.startColor.b.set(1.0, 0.0, 1.0, maxA);
+          } else {
             this.rainSystem.startColor.a.set(0.6, 0.7, 1.0, minA);
             this.rainSystem.startColor.b.set(0.6, 0.7, 1.0, maxA);
           }
+        }
+        if (this._rainMaterial && this._rainMaterial.color) {
+          this._rainMaterial.color.setHex(rainDbg ? 0xff00ff : 0xffffff);
+        }
+        if (this.rainSystem.material?.color) {
+          this.rainSystem.material.color.setHex(rainDbg ? 0xff00ff : 0xffffff);
+        }
+        if (this._rainBatchMaterial?.color) {
+          this._rainBatchMaterial.color.setHex(rainDbg ? 0xff00ff : 0xffffff);
         }
         // Apply roof mask uniforms for rain (base material)
         if (this._rainMaterial && this._rainMaterial.userData && this._rainMaterial.userData.roofUniforms) {
@@ -5287,36 +7080,201 @@ export class WeatherParticles {
     }
 
     if (this.roofDripSystem) {
-      const dripEmission = this.roofDripSystem.emissionOverTime;
-      if (dripEmission && typeof dripEmission.value === 'number') {
-        const duringRain = 600 * Math.max(0, baseRainIntensity);
-        const decayTail = 450 * roofDripTail01;
-        const dripRate = duringRain + decayTail;
-        dripEmission.value = dripRate;
+      const dripOn = _roofDripTuningVal('enabled', true);
+      if (this.roofDripSystem.emitter) {
+        this.roofDripSystem.emitter.visible = dripOn && !suppressPrecip;
       }
 
-      if (this._roofDripMaterial && this.rainSystem?.material) {
+      const dripDbg = roofDripDebugEnabled();
+      const dripNoMask = roofDripDebugNoMask();
+      const dripMaskU = dripNoMask ? 0.0 : (effectiveRoofMaskEnabled ? 1.0 : 0.0);
+      const dripHasRoofAlphaUniform = effectiveHasRoofAlphaMap ? 1.0 : 0.0;
+
+      const dripEmission = this.roofDripSystem.emissionOverTime;
+      if (dripEmission && typeof dripEmission.value === 'number') {
+        let dripRate = 0;
+        if (dripOn && !suppressPrecip) {
+          const emR = _roofDripTuningVal('emissionRainMult', ROOF_DRIP_EMISSION_RAIN_MULT);
+          const emT = _roofDripTuningVal('emissionTailMult', ROOF_DRIP_EMISSION_TAIL_MULT);
+          // Tail behavior: 60s full strength hold, then slow 240s taper.
+          const tailCurve = roofDripTail01;
+          const rememberedWetness = Math.max(0.9, this._roofDripRecentRain01 ?? 0.0);
+          const postRainBoost = (rainLevel01 <= 0.001 && roofDripTail01 > 0.0001) ? 2.5 : 1.0;
+          const tailRate = emT * tailCurve * rememberedWetness * postRainBoost;
+          dripRate = emR * Math.max(0, baseRainIntensity) + tailRate;
+          // Guard rail: if rain just stopped, never collapse to near-zero immediately.
+          if (rainLevel01 <= 0.001 && roofDripTail01 > 0.0001) {
+            const minTailRate = emT * 0.35 * tailCurve;
+            dripRate = Math.max(dripRate, minTailRate);
+          }
+          if (dripDbg) dripRate *= _roofDripTuningVal('debugEmissionMul', ROOF_DRIP_DEBUG_EMISSION_MUL);
+        }
+        dripEmission.value = dripRate;
+        // Roof-drip "end-of-life" splashes: supplement event-based impacts with
+        // synthetic samples from active drip points so impacts remain visible.
+        if (dripRate > 0.001 && !debugDisableWeatherSplashes) {
+          const syntheticPerTick = dripRate * safeDt * 0.14;
+          this._queueRoofDripSyntheticImpacts(syntheticPerTick);
+        }
+      }
+
+      const gZKill = window.MapShine?.sceneComposer?.groundZ ?? 1000;
+      const killM = _roofDripTuningVal('killZMargin', ROOF_DRIP_KILL_Z_MARGIN);
+      if (this._roofDripKillBehavior?.min) {
+        this._roofDripKillBehavior.min.z = gZKill - killM;
+      }
+
+      const dbgSpd = roofDripDebugEnabled();
+      const tunSpd = _roofDripTuningVal('speedFactor', 0.0125);
+      const dripSpeedFactor = dbgSpd ? Math.max(tunSpd, 0.018) : tunSpd;
+      if (this.roofDripSystem.speedFactor !== dripSpeedFactor) {
+        this.roofDripSystem.speedFactor = dripSpeedFactor;
+      }
+      const mp = Math.max(200, Math.floor(_roofDripTuningVal('maxParticles', 5000)));
+      if (this.roofDripSystem.maxParticles !== mp) {
+        this.roofDripSystem.maxParticles = mp;
+      }
+      const lifeA = _roofDripTuningVal('lifeMin', 1.9);
+      const lifeB = Math.max(lifeA, _roofDripTuningVal('lifeMax', 3.85));
+      if (this.roofDripSystem.startLife && typeof this.roofDripSystem.startLife.a === 'number') {
+        if (this.roofDripSystem.startLife.a !== lifeA || this.roofDripSystem.startLife.b !== lifeB) {
+          this.roofDripSystem.startLife.a = lifeA;
+          this.roofDripSystem.startLife.b = lifeB;
+        }
+      }
+      const spA = _roofDripTuningVal('particleSpeedMin', 40);
+      const spB = Math.max(spA, _roofDripTuningVal('particleSpeedMax', 115));
+      if (this.roofDripSystem.startSpeed && typeof this.roofDripSystem.startSpeed.a === 'number') {
+        if (this.roofDripSystem.startSpeed.a !== spA || this.roofDripSystem.startSpeed.b !== spB) {
+          this.roofDripSystem.startSpeed.a = spA;
+          this.roofDripSystem.startSpeed.b = spB;
+        }
+      }
+      if (this.roofDripSystem.startSize && typeof this.roofDripSystem.startSize.a === 'number') {
+        const szA = _roofDripTuningVal('sizeMin', 0.28);
+        const szB = Math.max(szA, _roofDripTuningVal('sizeMax', 0.52));
+        if (this.roofDripSystem.startSize.a !== szA || this.roofDripSystem.startSize.b !== szB) {
+          this.roofDripSystem.startSize.a = szA;
+          this.roofDripSystem.startSize.b = szB;
+        }
+      }
+
+      if (dripDbg) {
+        if (this._roofDripMaterial) {
+          this._roofDripMaterial.color.setHex(0xff00ff);
+          this._roofDripMaterial.opacity = 1.0;
+        }
+        try {
+          if (this._roofDripBatchMaterial?.color) this._roofDripBatchMaterial.color.setHex(0xff00ff);
+          if (this._roofDripBatchMaterial?.uniforms?.color?.value) {
+            this._roofDripBatchMaterial.uniforms.color.value.setHex(0xff00ff);
+          }
+        } catch (_) {}
+        if (this.roofDripSystem.startColor?.a && this.roofDripSystem.startColor?.b) {
+          this.roofDripSystem.startColor.a.set(1, 0, 1, 1);
+          this.roofDripSystem.startColor.b.set(1, 0, 1, 1);
+        }
+      } else if (this._roofDripMaterial && this.rainSystem?.material) {
         this._roofDripMaterial.opacity = this.rainSystem.material.opacity;
+        this._roofDripMaterial.color.setHex(0xffffff);
+        if (THREE && this.roofDripSystem.startColor?.a && this.roofDripSystem.startColor?.b) {
+          const rb = THREE.MathUtils.clamp((rainTuning.brightness ?? 1.0) * darknessBrightnessScale, 0.0, 3.0);
+          const as = rb / 3.0;
+          const topA = 1.0 * as * 0.98;
+          this.roofDripSystem.startColor.a.set(0.6, 0.7, 1.0, topA);
+          this.roofDripSystem.startColor.b.set(0.6, 0.7, 1.0, 0.0);
+        }
       }
 
       if (this._roofDripMaterial?.userData?.roofUniforms) {
         const uniforms = this._roofDripMaterial.userData.roofUniforms;
-        uniforms.uRoofMaskEnabled.value = effectiveRoofMaskEnabled ? 1.0 : 0.0;
-        uniforms.uHasRoofAlphaMap.value = effectiveHasRoofAlphaMap ? 1.0 : 0.0;
+        uniforms.uRoofMaskEnabled.value = dripMaskU;
+        uniforms.uHasRoofAlphaMap.value = dripHasRoofAlphaUniform;
+        if (uniforms.uRoofEdgeDrip) uniforms.uRoofEdgeDrip.value = 1.0;
         if (this._sceneBounds) uniforms.uSceneBounds.value.copy(this._sceneBounds);
         uniforms.uRoofMap.value = this._roofTexture;
         uniforms.uRoofAlphaMap.value = effectiveHasRoofAlphaMap ? roofAlphaTexture : null;
         uniforms.uScreenSize.value.set(screenWidth, screenHeight);
+        if (uniforms.uWaterMaskEnabled) uniforms.uWaterMaskEnabled.value = 0.0;
+        if (uniforms.uHasWaterOccluderAlpha) uniforms.uHasWaterOccluderAlpha.value = 0.0;
       }
 
       if (this._roofDripBatchMaterial?.userData?.roofUniforms) {
         const uniforms = this._roofDripBatchMaterial.userData.roofUniforms;
-        uniforms.uRoofMaskEnabled.value = effectiveRoofMaskEnabled ? 1.0 : 0.0;
-        uniforms.uHasRoofAlphaMap.value = effectiveHasRoofAlphaMap ? 1.0 : 0.0;
+        uniforms.uRoofMaskEnabled.value = dripMaskU;
+        uniforms.uHasRoofAlphaMap.value = dripHasRoofAlphaUniform;
+        if (uniforms.uRoofEdgeDrip) uniforms.uRoofEdgeDrip.value = 1.0;
         if (this._sceneBounds) uniforms.uSceneBounds.value.copy(this._sceneBounds);
         uniforms.uRoofMap.value = this._roofTexture;
         uniforms.uRoofAlphaMap.value = effectiveHasRoofAlphaMap ? roofAlphaTexture : null;
         uniforms.uScreenSize.value.set(screenWidth, screenHeight);
+        // Drips are precipitation, not water-surface foam — never clip against _Water / occluder.
+        if (uniforms.uWaterMaskEnabled) uniforms.uWaterMaskEnabled.value = 0.0;
+        if (uniforms.uHasWaterOccluderAlpha) uniforms.uHasWaterOccluderAlpha.value = 0.0;
+        const smu = this._roofDripBatchMaterial.uniforms;
+        if (smu?.uRoofEdgeDrip && uniforms.uRoofEdgeDrip) smu.uRoofEdgeDrip.value = uniforms.uRoofEdgeDrip.value;
+        if (smu?.uRoofMaskEnabled) smu.uRoofMaskEnabled.value = dripMaskU;
+        if (smu?.uHasRoofAlphaMap) smu.uHasRoofAlphaMap.value = dripHasRoofAlphaUniform;
+        if (smu?.uSceneBounds && this._sceneBounds) smu.uSceneBounds.value.copy(this._sceneBounds);
+        if (smu?.uRoofMap) smu.uRoofMap.value = this._roofTexture;
+        if (smu?.uRoofAlphaMap) smu.uRoofAlphaMap.value = uniforms.uRoofAlphaMap.value;
+        if (smu?.uScreenSize) smu.uScreenSize.value.set(screenWidth, screenHeight);
+        if (smu?.uWaterMaskEnabled) smu.uWaterMaskEnabled.value = 0.0;
+        if (smu?.uHasWaterOccluderAlpha) smu.uHasWaterOccluderAlpha.value = 0.0;
+        if (smu?.tWaterOccluderAlpha) smu.tWaterOccluderAlpha.value = null;
+      }
+
+      if (roofDripDiagLogsEnabled()) {
+        const now = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+        const due = this._roofDripLastDiagMs == null || now - this._roofDripLastDiagMs >= 5000;
+        if (due) {
+          this._roofDripLastDiagMs = now;
+          const pts = this._roofDripShape?._points;
+          const ptN = pts && pts.length >= 5 ? Math.floor(pts.length / 5) : 0;
+          this._emitRoofDripDiag({
+            rainLevels: {
+              precipitation: weather?.precipitation,
+              freezeLevel: weather?.freezeLevel,
+              baseRainIntensity
+            },
+            tail: {
+              roofDripTail01,
+              roofDripTailRemainingSec: this._roofDripTailRemainingSec
+            },
+            roofDrip: {
+              emission: dripEmission?.value ?? null,
+              particleNum: this.roofDripSystem.particleNum,
+              maxParticles: this.roofDripSystem.maxParticles ?? 5000,
+              edgeSampleCount: ptN
+            },
+            wiring: {
+              debugRoofDrip: window.MapShine?.debugRoofDrip,
+              debugRoofDripDiag: window.MapShine?.debugRoofDripDiag,
+              debugRoofDripNoMask: window.MapShine?.debugRoofDripNoMask,
+              suppressPrecip,
+              weatherControllerEnabled: weatherController?.enabled,
+              elevationWeatherSuppressed: weatherController?.elevationWeatherSuppressed,
+              emitterVisible: this.roofDripSystem.emitter?.visible,
+              emitterInScene: !!this.roofDripSystem.emitter?.parent,
+              batchRegistered: !!(this.batchRenderer?.systemToBatchIndex?.has?.(this.roofDripSystem)),
+              quarksBatches: this.batchRenderer?.batches?.length ?? null,
+              rainBatchIndex: (this.batchRenderer?.systemToBatchIndex?.get?.(this.rainSystem)),
+              dripBatchIndex: (this.batchRenderer?.systemToBatchIndex?.get?.(this.roofDripSystem)),
+              dripMergedIntoRainBatch: (() => {
+                const ri = this.batchRenderer?.systemToBatchIndex?.get?.(this.rainSystem);
+                const di = this.batchRenderer?.systemToBatchIndex?.get?.(this.roofDripSystem);
+                return ri !== undefined && di !== undefined && ri === di;
+              })(),
+              uRoofEdgeDrip: this._roofDripMaterial?.userData?.roofUniforms?.uRoofEdgeDrip?.value,
+              dripUniformsMask: { uRoofMaskEnabled: dripMaskU, uHasRoofAlphaMap: dripHasRoofAlphaUniform },
+              rainMaterialOpacity: this.rainSystem?.material?.opacity ?? null,
+              dripMaterialOpacity: this._roofDripMaterial?.opacity ?? null
+            },
+            sceneBounds: this._sceneBounds ? [this._sceneBounds.x, this._sceneBounds.y, this._sceneBounds.z, this._sceneBounds.w] : null,
+            hint: 'dripMergedIntoRainBatch must be false. Default: magenta+noMask (debugRoofDrip/debugRoofDripNoMask unset). Production: debugRoofDrip=false. Silence logs: debugRoofDripDiag=false',
+            roofDripDebug: { dripDbg, dripNoMask, dripMaskU, dripHasRoofAlphaUniform }
+          });
+        }
       }
     }
     
@@ -6410,27 +8368,38 @@ export class WeatherParticles {
         this._rainWindForce.direction.set(baseDir.x, baseDir.y, 0);
         // PERFORMANCE: Mutate existing ConstantValue instead of creating new one
         if (this._rainWindForce.magnitude && typeof this._rainWindForce.magnitude.value === 'number') {
-          this._rainWindForce.magnitude.value = 3000 * windSpeed * rainWindInfluence;
+          const w = THREE.MathUtils.clamp(windSpeed, 0, 1);
+          const mag = 4800 * w * rainWindInfluence;
+          this._rainWindForce.magnitude.value = mag;
         }
       }
       if (this._roofDripWindForce && this._roofDripWindForce.direction) {
         this._roofDripWindForce.direction.set(baseDir.x, baseDir.y, 0);
         if (this._roofDripWindForce.magnitude && typeof this._roofDripWindForce.magnitude.value === 'number') {
-          this._roofDripWindForce.magnitude.value = 1600 * windSpeed * rainWindInfluence;
+          const wBase = _roofDripTuningVal('windBase', ROOF_DRIP_WIND_BASE);
+          const wCouple = _roofDripTuningVal('windCoupling', 0.12);
+          this._roofDripWindForce.magnitude.value = wBase * windSpeed * rainWindInfluence * wCouple;
         }
       }
 
-      // Rain curl turbulence: very low at calm, grows with wind speed.
+      // Rain curl turbulence: ramps from low wind upward (no hard cliff at 0.5).
       if (this._rainCurl && this._rainCurlBaseStrength) {
-        // Start introducing turbulence once windSpeed exceeds 0.5, ramping to full at 1.0.
-        let windTurbulenceFactor = 0;
-        if (windSpeed > 0.5) {
-          windTurbulenceFactor = THREE.MathUtils.clamp((windSpeed - 0.5) / 0.5, 0, 1);
-        }
+        const w = THREE.MathUtils.clamp(windSpeed, 0, 1);
+        const windTurbulenceFactor = 0.12 + 0.88 * THREE.MathUtils.clamp((w - 0.06) / 0.94, 0, 1);
 
         const curlStrength = debugDisableWeatherBehaviors ? 0.0 : (rainTuning.curlStrength ?? 1.0);
         const curlScale = windTurbulenceFactor * curlStrength;
         this._rainCurl.strength.copy(this._rainCurlBaseStrength).multiplyScalar(curlScale);
+      }
+
+      if (this._roofDripCurl && this._roofDripCurlBaseStrength) {
+        let dripTurb = 0;
+        if (windSpeed > 0.25) {
+          dripTurb = THREE.MathUtils.clamp((windSpeed - 0.25) / 0.75, 0, 1);
+        }
+        const curlMul = _roofDripTuningVal('curlMul', 0.38);
+        const dripCurl = debugDisableWeatherBehaviors ? 0.0 : (rainTuning.curlStrength ?? 1.0) * curlMul;
+        this._roofDripCurl.strength.copy(this._roofDripCurlBaseStrength).multiplyScalar(dripTurb * dripCurl);
       }
 
       // Snow: align large-scale drift with global wind; fine-grained turbulence now
@@ -6456,7 +8425,30 @@ export class WeatherParticles {
         this._rainGravityForce.magnitude.value = this._rainBaseGravity * rainGravScale;
       }
       if (this._roofDripGravityForce && this._roofDripGravityForce.magnitude && typeof this._roofDripGravityForce.magnitude.value === 'number') {
-        this._roofDripGravityForce.magnitude.value = this._rainBaseGravity * 0.85 * rainGravScale;
+        const dGrav = _roofDripTuningVal('dripGravityMul', ROOF_DRIP_GRAVITY_SCALE);
+        this._roofDripGravityForce.magnitude.value = this._rainBaseGravity * dGrav * rainGravScale;
+      }
+      // Top-down / oblique map camera: pure world -Z gravity barely moves particles in screen XY.
+      // Map "fall" for roof drips to camera screen-down projected onto the map plane (+ small -Z).
+      if (this._roofDripGravityForce && this._roofDripGravityForce.direction) {
+        const cam = window.MapShine?.sceneComposer?.camera;
+        const v = this._roofDripScreenDownScratch;
+        const d = this._roofDripGravityForce.direction;
+        if (cam && cam.quaternion && v && d) {
+          v.set(0, -1, 0);
+          v.applyQuaternion(cam.quaternion);
+          const hx = v.x;
+          const hy = v.y;
+          const len = Math.hypot(hx, hy);
+          const kz = _roofDripTuningVal('screenDownZMix', ROOF_DRIP_SCREEN_DOWN_Z_MIX);
+          if (len > 1e-5) {
+            const inv = 1.0 / len;
+            const s = Math.sqrt(Math.max(0.0, 1.0 - kz * kz));
+            d.set(hx * inv * s, hy * inv * s, -kz);
+          } else {
+            d.set(0, 0, -1);
+          }
+        }
       }
 
       const snowGravScale = snowTuning.gravityScale ?? 1.0;
@@ -6514,16 +8506,30 @@ export class WeatherParticles {
             force.magnitude.value = splashWindMag;
           }
         }
+        if (this._rainImpactSplashWind?.magnitude && typeof this._rainImpactSplashWind.magnitude.value === 'number') {
+          this._rainImpactSplashWind.direction.set(baseDir.x, baseDir.y, 0);
+          this._rainImpactSplashWind.magnitude.value = splashWindMag;
+        }
       }
     }
   }
 
   dispose() {
     if (this.rainSystem) {
+      try {
+        if (this._boundRainParticleDied) {
+          this.rainSystem.removeEventListener('particleDied', this._boundRainParticleDied);
+        }
+      } catch (_) {}
       this.batchRenderer.deleteSystem(this.rainSystem);
       if (this.rainSystem.emitter.parent) this.rainSystem.emitter.parent.remove(this.rainSystem.emitter);
     }
     if (this.roofDripSystem) {
+      try {
+        if (this._boundRoofDripParticleDied) {
+          this.roofDripSystem.removeEventListener('particleDied', this._boundRoofDripParticleDied);
+        }
+      } catch (_) {}
       this.batchRenderer.deleteSystem(this.roofDripSystem);
       if (this.roofDripSystem.emitter?.parent) this.roofDripSystem.emitter.parent.remove(this.roofDripSystem.emitter);
     }
@@ -6550,6 +8556,13 @@ export class WeatherParticles {
       }
     }
 
+    if (this._rainImpactSplashSystem) {
+      this.batchRenderer.deleteSystem(this._rainImpactSplashSystem);
+      if (this._rainImpactSplashSystem.emitter?.parent) {
+        this._rainImpactSplashSystem.emitter.parent.remove(this._rainImpactSplashSystem.emitter);
+      }
+    }
+
     if (this._waterHitSplashSystems && this._waterHitSplashSystems.length) {
       for (const entry of this._waterHitSplashSystems) {
         const sys = entry?.system;
@@ -6570,6 +8583,7 @@ export class WeatherParticles {
     }
 
     if (this.rainTexture) this.rainTexture.dispose();
+    if (this._roofDripTexture) this._roofDripTexture.dispose();
     if (this.snowTexture) this.snowTexture.dispose();
     if (this.ashTexture) this.ashTexture.dispose();
     if (this.splashTexture) this.splashTexture.dispose();
@@ -6580,6 +8594,10 @@ export class WeatherParticles {
     this._maskPixelCacheBytes = 0;
     this._maskReadCanvas = null;
     this._maskReadCtx = null;
+
+    try {
+      this._roofDripGpuReadback?.dispose?.();
+    } catch (_) {}
   }
 
   _getStableSrc(src) {

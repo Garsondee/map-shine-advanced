@@ -313,6 +313,48 @@ export class WeatherController {
       splash4OpacityPeak: 0.02
     };
 
+    /**
+     * Roof / tree canopy drips (WeatherParticles roofDripSystem).
+     * Bumped from Tweakpane → `_roofDripTuningEpoch` invalidates spawn pools.
+     */
+    this.roofDripTuning = {
+      enabled: true,
+      emissionRainMult: 300,
+      emissionTailMult: 260,
+      debugEmissionMul: 2.5,
+      globalPointBudget: 90000,
+      maxPointsPerTile: 4000,
+      gpuMaxSpawnCap: 60000,
+      alphaThresholdGpu: 0.16,
+      pointsRefreshSec: 0.75,
+      tailDurationSec: 300,
+      dripGravityMul: 0.64,
+      screenDownZMix: 0.65,
+      windBase: 14,
+      windCoupling: 0.12,
+      curlMul: 0.38,
+      speedFactor: 0.0065,
+      streakAnchorHalf: 4,
+      lifeMin: 1.9,
+      lifeMax: 3.85,
+      particleSpeedMin: 40,
+      particleSpeedMax: 115,
+      sizeMin: 0.28,
+      sizeMax: 0.52,
+      spawnInwardPull: 0.0,
+      spawnUvJitter: 0.0,
+      emitterNormalJitter: 1.0,
+      emitterTangentialJitter: 0.6,
+      killZMargin: 220,
+      tileRectEdgeSpacing: 20,
+      treeEdgeSpacing: 36,
+      treeInteriorSamples: 280,
+      useGpuRoofDripEdges: false,
+      maxParticles: 22000
+    };
+    /** @type {number} Incremented when any roofDripTuning field changes (rebuild drip point pool). */
+    this._roofDripTuningEpoch = 0;
+
     this.snowTuning = {
       intensityScale: 1.0,
       flakeSize: 1.5,
@@ -2461,6 +2503,8 @@ export class WeatherController {
   static getControlSchema() {
     return {
       enabled: true,
+      /** Bump when adding/removing Tweakpane params so the Weather folder can rebuild (see canvas-replacement). */
+      uiRevision: 3,
       parameters: {
         presetTransitionDurationMinutes: {
           label: 'Preset Transition (min)',
@@ -2744,6 +2788,273 @@ export class WeatherController {
           max: 4.0,
           step: 0.05,
           group: 'rain'
+        },
+        debugRainHighlight: {
+          label: 'Rain highlight (magenta)',
+          default: false,
+          type: 'boolean',
+          group: 'rain'
+        },
+
+        roofDripEnabled: {
+          label: 'Drips Enabled',
+          default: true,
+          type: 'boolean',
+          group: 'roofDrips'
+        },
+        roofDripEmissionRainMult: {
+          label: 'Drip Emission (rain)',
+          default: 300,
+          min: 0,
+          max: 2000,
+          step: 1,
+          group: 'roofDrips'
+        },
+        roofDripEmissionTailMult: {
+          label: 'Drip Emission (tail)',
+          default: 260,
+          min: 0,
+          max: 2000,
+          step: 1,
+          group: 'roofDrips'
+        },
+        roofDripDebugEmissionMul: {
+          label: 'Drip Debug Emission ×',
+          default: 2.5,
+          min: 0.1,
+          max: 20,
+          step: 0.1,
+          group: 'roofDrips'
+        },
+        roofDripGlobalBudget: {
+          label: 'Spawn Pool Budget',
+          default: 90000,
+          min: 500,
+          max: 200000,
+          step: 500,
+          group: 'roofDrips'
+        },
+        roofDripMaxPerTile: {
+          label: 'Max Points / Source',
+          default: 4000,
+          min: 16,
+          max: 20000,
+          step: 16,
+          group: 'roofDrips'
+        },
+        roofDripGpuMaxSpawnCap: {
+          label: 'GPU Roof Max Spawns',
+          default: 60000,
+          min: 512,
+          max: 120000,
+          step: 256,
+          group: 'roofDrips'
+        },
+        roofDripAlphaThresholdGpu: {
+          label: 'GPU Alpha Threshold',
+          default: 0.16,
+          min: 0.02,
+          max: 0.6,
+          step: 0.01,
+          group: 'roofDrips'
+        },
+        roofDripPointsRefreshSec: {
+          label: 'Pool Rebuild Interval (s)',
+          default: 0.75,
+          min: 0.15,
+          max: 8,
+          step: 0.05,
+          group: 'roofDrips'
+        },
+        roofDripTailDurationSec: {
+          label: 'Post-Rain Drip Tail (s)',
+          default: 300,
+          min: 0,
+          max: 900,
+          step: 5,
+          group: 'roofDrips'
+        },
+        roofDripGravityMul: {
+          label: 'Drip Gravity × (vs rain)',
+          default: 0.64,
+          min: 0.05,
+          max: 3.0,
+          step: 0.01,
+          group: 'roofDrips'
+        },
+        roofDripScreenDownZMix: {
+          label: 'Screen-Down Z Mix',
+          default: 0.65,
+          min: 0.05,
+          max: 0.95,
+          step: 0.01,
+          group: 'roofDrips'
+        },
+        roofDripWindBase: {
+          label: 'Drip Wind Base',
+          default: 14,
+          min: 0,
+          max: 120,
+          step: 1,
+          group: 'roofDrips'
+        },
+        roofDripWindCoupling: {
+          label: 'Drip Wind × Precip/Wind',
+          default: 0.12,
+          min: 0,
+          max: 1.0,
+          step: 0.01,
+          group: 'roofDrips'
+        },
+        roofDripCurlMul: {
+          label: 'Drip Turb × Rain Turb',
+          default: 0.38,
+          min: 0,
+          max: 2.0,
+          step: 0.01,
+          group: 'roofDrips'
+        },
+        roofDripSpeedFactor: {
+          label: 'Drip Streak Length',
+          default: 0.0065,
+          min: 0.002,
+          max: 0.08,
+          step: 0.0005,
+          group: 'roofDrips'
+        },
+        roofDripStreakAnchorHalf: {
+          label: 'Streak Anchor (world)',
+          default: 4,
+          min: 0,
+          max: 80,
+          step: 0.5,
+          group: 'roofDrips'
+        },
+        roofDripLifeMin: {
+          label: 'Particle Life Min (s)',
+          default: 1.9,
+          min: 0.2,
+          max: 12,
+          step: 0.05,
+          group: 'roofDrips'
+        },
+        roofDripLifeMax: {
+          label: 'Particle Life Max (s)',
+          default: 3.85,
+          min: 0.2,
+          max: 16,
+          step: 0.05,
+          group: 'roofDrips'
+        },
+        roofDripParticleSpeedMin: {
+          label: 'Start Speed Min',
+          default: 40,
+          min: 0,
+          max: 400,
+          step: 1,
+          group: 'roofDrips'
+        },
+        roofDripParticleSpeedMax: {
+          label: 'Start Speed Max',
+          default: 115,
+          min: 0,
+          max: 600,
+          step: 1,
+          group: 'roofDrips'
+        },
+        roofDripSizeMin: {
+          label: 'Drop Size Min',
+          default: 0.28,
+          min: 0.02,
+          max: 8,
+          step: 0.02,
+          group: 'roofDrips'
+        },
+        roofDripSizeMax: {
+          label: 'Drop Size Max',
+          default: 0.52,
+          min: 0.02,
+          max: 12,
+          step: 0.02,
+          group: 'roofDrips'
+        },
+        roofDripSpawnInwardPull: {
+          label: 'UV Centroid Pull',
+          default: 0.0,
+          min: 0,
+          max: 0.45,
+          step: 0.01,
+          group: 'roofDrips'
+        },
+        roofDripSpawnUvJitter: {
+          label: 'UV Spawn Jitter',
+          default: 0.0,
+          min: 0,
+          max: 0.2,
+          step: 0.002,
+          group: 'roofDrips'
+        },
+        roofDripEmitterNormalJitter: {
+          label: 'Emitter Normal Jitter',
+          default: 1.0,
+          min: 0,
+          max: 30,
+          step: 0.25,
+          group: 'roofDrips'
+        },
+        roofDripEmitterTangentialJitter: {
+          label: 'Emitter Edge Jitter',
+          default: 0.6,
+          min: 0,
+          max: 30,
+          step: 0.25,
+          group: 'roofDrips'
+        },
+        roofDripKillZMargin: {
+          label: 'Kill Floor Margin (Z)',
+          default: 220,
+          min: 0,
+          max: 800,
+          step: 5,
+          group: 'roofDrips'
+        },
+        roofDripTileEdgeSpacing: {
+          label: 'Tile Fallback Edge Spacing',
+          default: 20,
+          min: 8,
+          max: 256,
+          step: 2,
+          group: 'roofDrips'
+        },
+        roofDripTreeEdgeSpacing: {
+          label: 'Tree Edge Spacing',
+          default: 36,
+          min: 8,
+          max: 256,
+          step: 2,
+          group: 'roofDrips'
+        },
+        roofDripTreeInteriorSamples: {
+          label: 'Tree Interior Samples',
+          default: 280,
+          min: 0,
+          max: 2000,
+          step: 8,
+          group: 'roofDrips'
+        },
+        roofDripUseGpuRoofEdges: {
+          label: 'Use GPU Roof Edges',
+          default: false,
+          type: 'boolean',
+          group: 'roofDrips'
+        },
+        roofDripMaxParticles: {
+          label: 'Max Particles',
+          default: 22000,
+          min: 200,
+          max: 80000,
+          step: 100,
+          group: 'roofDrips'
         },
 
         // Per-splash (per atlas tile) tuning
@@ -3080,7 +3391,43 @@ export class WeatherController {
           'rainBrightness',
           'rainGravityScale',
           'rainWindInfluence',
-          'rainCurlStrength'
+          'rainCurlStrength',
+          'debugRainHighlight'
+        ] },
+        { label: 'Roof & tree drips', type: 'folder', expanded: false, parameters: [
+          'roofDripEnabled',
+          'roofDripUseGpuRoofEdges',
+          'roofDripEmissionRainMult',
+          'roofDripEmissionTailMult',
+          'roofDripDebugEmissionMul',
+          'roofDripGlobalBudget',
+          'roofDripMaxPerTile',
+          'roofDripGpuMaxSpawnCap',
+          'roofDripAlphaThresholdGpu',
+          'roofDripPointsRefreshSec',
+          'roofDripTailDurationSec',
+          'roofDripGravityMul',
+          'roofDripScreenDownZMix',
+          'roofDripWindBase',
+          'roofDripWindCoupling',
+          'roofDripCurlMul',
+          'roofDripSpeedFactor',
+          'roofDripStreakAnchorHalf',
+          'roofDripLifeMin',
+          'roofDripLifeMax',
+          'roofDripParticleSpeedMin',
+          'roofDripParticleSpeedMax',
+          'roofDripSizeMin',
+          'roofDripSizeMax',
+          'roofDripSpawnInwardPull',
+          'roofDripSpawnUvJitter',
+          'roofDripEmitterNormalJitter',
+          'roofDripEmitterTangentialJitter',
+          'roofDripKillZMargin',
+          'roofDripTileEdgeSpacing',
+          'roofDripTreeEdgeSpacing',
+          'roofDripTreeInteriorSamples',
+          'roofDripMaxParticles'
         ] },
         { label: 'Rain Splashes', type: 'folder', parameters: [
           'rainSplash1IntensityScale',

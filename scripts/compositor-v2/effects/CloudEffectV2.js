@@ -1359,7 +1359,7 @@ export class CloudEffectV2 {
         }
 
         float readDensity(vec2 uv) {
-          vec4 t = texture2D(tCloudDensity, uv);
+          vec4 t = texture2DLodEXT(tCloudDensity, uv, 0.0);
           return (uDensityMode < 0.5) ? t.r : t.a;
         }
 
@@ -1433,6 +1433,7 @@ export class CloudEffectV2 {
         }
       `,
       depthWrite: false, depthTest: false,
+      extensions: { shaderTextureLOD: true },
     });
     this._shadowMat.toneMapped = false;
   }

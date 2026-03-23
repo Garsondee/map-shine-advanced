@@ -3698,13 +3698,28 @@ export class InteractionManager {
           // MapShine Enhanced Lights: always allow select/drag when LightingLayer is active
           // (matches Foundry UX: you can always grab an existing light handle).
           const enhancedLightIconManager = window.MapShine?.enhancedLightIconManager;
+          const resolveHitByUserDataKey = (hits, key) => {
+            if (!Array.isArray(hits) || !key) return null;
+            for (const h of hits) {
+              let obj = h?.object || null;
+              while (obj) {
+                const value = obj?.userData?.[key];
+                if (value !== undefined && value !== null && value !== '') {
+                  return { hit: h, object: obj, id: String(value) };
+                }
+                obj = obj.parent || null;
+              }
+            }
+            return null;
+          };
           if (enhancedLightIconManager) {
             const enhancedLightIcons = Array.from(enhancedLightIconManager.lights.values());
-            const intersects = this.raycaster.intersectObjects(enhancedLightIcons, false);
-            if (intersects.length > 0) {
-              const hit = intersects[0];
-              const sprite = hit.object;
-              const enhancedLightId = sprite.userData.enhancedLightId;
+            const intersects = this.raycaster.intersectObjects(enhancedLightIcons, true);
+            const lightHit = resolveHitByUserDataKey(intersects, 'enhancedLightId');
+            if (lightHit) {
+              const hit = lightHit.hit;
+              const sprite = lightHit.object;
+              const enhancedLightId = lightHit.id;
 
               if (enhancedLightId) {
                 // Handle Selection (anyone can select/view; only GM can drag/edit)
@@ -3736,12 +3751,13 @@ export class InteractionManager {
           // Standard Foundry Light Tool: Check Foundry light icons
           if (this.lightIconManager) {
             const lightIcons = Array.from(this.lightIconManager.lights.values());
-            const intersects = this.raycaster.intersectObjects(lightIcons, false);
-            
-            if (intersects.length > 0) {
-              const hit = intersects[0];
-              const sprite = hit.object;
-              const lightId = sprite.userData.lightId;
+            const intersects = this.raycaster.intersectObjects(lightIcons, true);
+            const lightHit = resolveHitByUserDataKey(intersects, 'lightId');
+
+            if (lightHit) {
+              const hit = lightHit.hit;
+              const sprite = lightHit.object;
+              const lightId = lightHit.id;
               const lightDoc = canvas.lighting.get(lightId)?.document;
 
               // Selection should work with LIMITED permission; editing/dragging requires update permission.

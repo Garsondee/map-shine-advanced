@@ -64,6 +64,9 @@ void main() {
 
 export function getFragmentShader() {
   return /* glsl */`
+// tNoiseMap: use texture2DLodEXT(..., 0.0) so sampling does not rely on implicit
+// screen-space gradients inside loops (ANGLE/D3D X3595). Three maps this to textureLod on WebGL2.
+
 // ── Texture samplers ─────────────────────────────────────────────────────
 uniform sampler2D tDiffuse;       // Scene RT (post-lighting)
 uniform sampler2D tNoiseMap;      // 512x512 RGBA seeded noise
@@ -390,10 +393,10 @@ float valueNoise2D(vec2 p) {
   vec2 i = floor(p);
   vec2 f = fract(p);
   vec2 u = f * f * (3.0 - 2.0 * f);
-  float a = texture2D(tNoiseMap, (i + 0.5) * NOISE_INV).r;
-  float b = texture2D(tNoiseMap, (i + vec2(1.5, 0.5)) * NOISE_INV).r;
-  float c = texture2D(tNoiseMap, (i + vec2(0.5, 1.5)) * NOISE_INV).r;
-  float d = texture2D(tNoiseMap, (i + vec2(1.5, 1.5)) * NOISE_INV).r;
+  float a = texture2DLodEXT(tNoiseMap, (i + 0.5) * NOISE_INV, 0.0).r;
+  float b = texture2DLodEXT(tNoiseMap, (i + vec2(1.5, 0.5)) * NOISE_INV, 0.0).r;
+  float c = texture2DLodEXT(tNoiseMap, (i + vec2(0.5, 1.5)) * NOISE_INV, 0.0).r;
+  float d = texture2DLodEXT(tNoiseMap, (i + vec2(1.5, 1.5)) * NOISE_INV, 0.0).r;
   return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
 }
 
@@ -414,40 +417,40 @@ float fbmNoise(vec2 p) {
   i = floor(p); f = fract(p); u = f * f * (3.0 - 2.0 * f);
   i = mod(i, NOISE_SIZE);
   float n0 = mix(mix(
-    texture2D(tNoiseMap, (i + 0.5) * NOISE_INV).r,
-    texture2D(tNoiseMap, (i + vec2(1.5, 0.5)) * NOISE_INV).r, u.x), mix(
-    texture2D(tNoiseMap, (i + vec2(0.5, 1.5)) * NOISE_INV).r,
-    texture2D(tNoiseMap, (i + vec2(1.5, 1.5)) * NOISE_INV).r, u.x), u.y);
+    texture2DLodEXT(tNoiseMap, (i + 0.5) * NOISE_INV, 0.0).r,
+    texture2DLodEXT(tNoiseMap, (i + vec2(1.5, 0.5)) * NOISE_INV, 0.0).r, u.x), mix(
+    texture2DLodEXT(tNoiseMap, (i + vec2(0.5, 1.5)) * NOISE_INV, 0.0).r,
+    texture2DLodEXT(tNoiseMap, (i + vec2(1.5, 1.5)) * NOISE_INV, 0.0).r, u.x), u.y);
 
   p = octRot * p * 2.0;
   p = mod(p, NOISE_SIZE);
   i = floor(p); f = fract(p); u = f * f * (3.0 - 2.0 * f);
   i = mod(i, NOISE_SIZE);
   float n1 = mix(mix(
-    texture2D(tNoiseMap, (i + 0.5) * NOISE_INV).g,
-    texture2D(tNoiseMap, (i + vec2(1.5, 0.5)) * NOISE_INV).g, u.x), mix(
-    texture2D(tNoiseMap, (i + vec2(0.5, 1.5)) * NOISE_INV).g,
-    texture2D(tNoiseMap, (i + vec2(1.5, 1.5)) * NOISE_INV).g, u.x), u.y);
+    texture2DLodEXT(tNoiseMap, (i + 0.5) * NOISE_INV, 0.0).g,
+    texture2DLodEXT(tNoiseMap, (i + vec2(1.5, 0.5)) * NOISE_INV, 0.0).g, u.x), mix(
+    texture2DLodEXT(tNoiseMap, (i + vec2(0.5, 1.5)) * NOISE_INV, 0.0).g,
+    texture2DLodEXT(tNoiseMap, (i + vec2(1.5, 1.5)) * NOISE_INV, 0.0).g, u.x), u.y);
 
   p = octRot * p * 2.0;
   p = mod(p, NOISE_SIZE);
   i = floor(p); f = fract(p); u = f * f * (3.0 - 2.0 * f);
   i = mod(i, NOISE_SIZE);
   float n2 = mix(mix(
-    texture2D(tNoiseMap, (i + 0.5) * NOISE_INV).b,
-    texture2D(tNoiseMap, (i + vec2(1.5, 0.5)) * NOISE_INV).b, u.x), mix(
-    texture2D(tNoiseMap, (i + vec2(0.5, 1.5)) * NOISE_INV).b,
-    texture2D(tNoiseMap, (i + vec2(1.5, 1.5)) * NOISE_INV).b, u.x), u.y);
+    texture2DLodEXT(tNoiseMap, (i + 0.5) * NOISE_INV, 0.0).b,
+    texture2DLodEXT(tNoiseMap, (i + vec2(1.5, 0.5)) * NOISE_INV, 0.0).b, u.x), mix(
+    texture2DLodEXT(tNoiseMap, (i + vec2(0.5, 1.5)) * NOISE_INV, 0.0).b,
+    texture2DLodEXT(tNoiseMap, (i + vec2(1.5, 1.5)) * NOISE_INV, 0.0).b, u.x), u.y);
 
   p = octRot * p * 2.0;
   p = mod(p, NOISE_SIZE);
   i = floor(p); f = fract(p); u = f * f * (3.0 - 2.0 * f);
   i = mod(i, NOISE_SIZE);
   float n3 = mix(mix(
-    texture2D(tNoiseMap, (i + 0.5) * NOISE_INV).a,
-    texture2D(tNoiseMap, (i + vec2(1.5, 0.5)) * NOISE_INV).a, u.x), mix(
-    texture2D(tNoiseMap, (i + vec2(0.5, 1.5)) * NOISE_INV).a,
-    texture2D(tNoiseMap, (i + vec2(1.5, 1.5)) * NOISE_INV).a, u.x), u.y);
+    texture2DLodEXT(tNoiseMap, (i + 0.5) * NOISE_INV, 0.0).a,
+    texture2DLodEXT(tNoiseMap, (i + vec2(1.5, 0.5)) * NOISE_INV, 0.0).a, u.x), mix(
+    texture2DLodEXT(tNoiseMap, (i + vec2(0.5, 1.5)) * NOISE_INV, 0.0).a,
+    texture2DLodEXT(tNoiseMap, (i + vec2(1.5, 1.5)) * NOISE_INV, 0.0).a, u.x), u.y);
 
   return (n0 - 0.5) * 1.1 + (n1 - 0.5) * 0.605
        + (n2 - 0.5) * 0.33275 + (n3 - 0.5) * 0.183;

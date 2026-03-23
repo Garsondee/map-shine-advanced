@@ -55,22 +55,14 @@ const BELOW_FLOOR_PRESENCE_LAYER = 24;
  * 1) Respect persisted source overhead flags when present (legacy/core scenes).
  * 2) Fall back to elevation >= scene.foregroundElevation.
  *
- * We intentionally read from _source/flags first so we avoid triggering
- * deprecation getters in systems that shim tileDoc.overhead.
+ * We only read _source/flags — never TileDocument#overhead (deprecated on PF2e v12+).
  *
  * @param {object} tileDoc - The tile document
  * @returns {boolean}
  */
 export function isTileOverhead(tileDoc) {
-  // Foundry's native document getter is the most reliable way to determine
-  // overhead status across v11 and v12.
-  if (typeof tileDoc?.overhead === 'boolean') {
-    return tileDoc.overhead;
-  }
-
+  // Read persisted data only — do not use TileDocument#overhead (deprecated on PF2e v12+).
   // Legacy/core persisted overhead marker.
-  // Keep this authoritative when present because many scenes still rely on it
-  // even when elevation is not above foregroundElevation.
   const sourceOverhead = tileDoc?._source?.overhead;
   if (typeof sourceOverhead === 'boolean') return sourceOverhead;
 

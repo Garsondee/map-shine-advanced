@@ -1238,6 +1238,8 @@ export class WaterEffectV2 {
       depthTest: false,
       depthWrite: false,
       transparent: false,
+      // Required for GL_EXT_shader_texture_lod / texture2DLodEXT in water-shader.js (noise map).
+      extensions: { shaderTextureLOD: true },
     });
     const _matEndMs = performance?.now?.() ?? Date.now();
     try {

@@ -5373,7 +5373,23 @@ async function createThreeCanvas(scene) {
             WeatherController?.getControlSchema?.() ||
             weatherController?.constructor?.getControlSchema?.();
           if (!weatherSchema || !uiManager) return;
-          if (uiManager.effectFolders?.weather) return;
+          // Weather registers once per session; rebuild when schema uiRevision changes
+          // (otherwise new parameters never appear until a full page reload clears JS state).
+          const existingWeather = uiManager.effectFolders?.weather;
+          if (existingWeather) {
+            const oldRev = existingWeather.schema?.uiRevision ?? 0;
+            const newRev = weatherSchema.uiRevision ?? 0;
+            if (oldRev === newRev) return;
+            try {
+              existingWeather.folder?.dispose?.();
+            } catch (e) {
+              log.warn('Weather Tweakpane folder dispose failed (rebuilding schema):', e);
+            }
+            delete uiManager.effectFolders.weather;
+            try {
+              uiManager.effectCallbacks?.delete?.('weather');
+            } catch (_) {}
+          }
           const onWeatherUpdate = (_effectId, paramId, value) => {
             try {
               if (paramId === 'enabled' || paramId === 'masterEnabled') {
@@ -5434,6 +5450,12 @@ async function createThreeCanvas(scene) {
                 return;
               }
 
+              if (paramId === 'debugRainHighlight') {
+                if (!window.MapShine) window.MapShine = {};
+                window.MapShine.debugRainHighlight = !!value;
+                return;
+              }
+
               const rainMap = {
                 rainIntensityScale: 'intensityScale',
                 rainStreakLength: 'streakLength',
@@ -5485,6 +5507,60 @@ async function createThreeCanvas(scene) {
               };
               if (Object.prototype.hasOwnProperty.call(snowMap, paramId)) {
                 weatherController.snowTuning[snowMap[paramId]] = Number(value) || 0;
+                return;
+              }
+
+              const roofDripMap = {
+                roofDripEmissionRainMult: 'emissionRainMult',
+                roofDripEmissionTailMult: 'emissionTailMult',
+                roofDripDebugEmissionMul: 'debugEmissionMul',
+                roofDripGlobalBudget: 'globalPointBudget',
+                roofDripMaxPerTile: 'maxPointsPerTile',
+                roofDripGpuMaxSpawnCap: 'gpuMaxSpawnCap',
+                roofDripAlphaThresholdGpu: 'alphaThresholdGpu',
+                roofDripPointsRefreshSec: 'pointsRefreshSec',
+                roofDripTailDurationSec: 'tailDurationSec',
+                roofDripGravityMul: 'dripGravityMul',
+                roofDripScreenDownZMix: 'screenDownZMix',
+                roofDripWindBase: 'windBase',
+                roofDripWindCoupling: 'windCoupling',
+                roofDripCurlMul: 'curlMul',
+                roofDripSpeedFactor: 'speedFactor',
+                roofDripStreakAnchorHalf: 'streakAnchorHalf',
+                roofDripLifeMin: 'lifeMin',
+                roofDripLifeMax: 'lifeMax',
+                roofDripParticleSpeedMin: 'particleSpeedMin',
+                roofDripParticleSpeedMax: 'particleSpeedMax',
+                roofDripSizeMin: 'sizeMin',
+                roofDripSizeMax: 'sizeMax',
+                roofDripSpawnInwardPull: 'spawnInwardPull',
+                roofDripSpawnUvJitter: 'spawnUvJitter',
+                roofDripEmitterNormalJitter: 'emitterNormalJitter',
+                roofDripEmitterTangentialJitter: 'emitterTangentialJitter',
+                roofDripKillZMargin: 'killZMargin',
+                roofDripTileEdgeSpacing: 'tileRectEdgeSpacing',
+                roofDripTreeEdgeSpacing: 'treeEdgeSpacing',
+                roofDripTreeInteriorSamples: 'treeInteriorSamples',
+                roofDripMaxParticles: 'maxParticles'
+              };
+              if (paramId === 'roofDripEnabled') {
+                if (!weatherController.roofDripTuning) weatherController.roofDripTuning = {};
+                weatherController.roofDripTuning.enabled = !!value;
+                weatherController._roofDripTuningEpoch = (weatherController._roofDripTuningEpoch || 0) + 1;
+                return;
+              }
+              if (paramId === 'roofDripUseGpuRoofEdges') {
+                if (!weatherController.roofDripTuning) weatherController.roofDripTuning = {};
+                weatherController.roofDripTuning.useGpuRoofDripEdges = !!value;
+                weatherController._roofDripTuningEpoch = (weatherController._roofDripTuningEpoch || 0) + 1;
+                return;
+              }
+              if (Object.prototype.hasOwnProperty.call(roofDripMap, paramId)) {
+                if (!weatherController.roofDripTuning) weatherController.roofDripTuning = {};
+                const key = roofDripMap[paramId];
+                const n = Number(value);
+                weatherController.roofDripTuning[key] = Number.isFinite(n) ? n : 0;
+                weatherController._roofDripTuningEpoch = (weatherController._roofDripTuningEpoch || 0) + 1;
                 return;
               }
             } catch (_) {}

@@ -2152,6 +2152,8 @@ export class FloorCompositor {
     const windowCloudShadowTex = (this._cloudEffect.enabled && this._cloudEffect.params.enabled)
       ? (this._cloudEffect.cloudShadowRawTexture ?? this._cloudEffect.cloudShadowTexture)
       : null;
+    // Back-compat alias for any nearby call sites still using the prior name.
+    const cloudShadowRawTex = windowCloudShadowTex;
     const windowCloudShadowViewBounds = (this._cloudEffect.enabled && this._cloudEffect.params.enabled)
       ? (this._cloudEffect.cloudShadowViewBounds ?? null)
       : null;
@@ -2174,7 +2176,7 @@ export class FloorCompositor {
     this._skyColorEffect?.setOverheadRoofAlphaTexture?.(overheadRoofAlphaTex);
     if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: lighting.render(sceneRT→postA)'); } catch (_) {} }
     if (_profiling) _profileT0 = performance.now();
-    this._lightingEffect.render(this.renderer, this.camera, currentInput, this._postA, winScene, cloudShadowTex, buildingShadowTex, overheadShadowTex, buildingShadowOpacity, overheadRoofAlphaTex, overheadRoofBlockTex);
+    this._lightingEffect.render(this.renderer, this.camera, currentInput, this._postA, winScene, cloudShadowTex, cloudShadowRawTex, buildingShadowTex, overheadShadowTex, buildingShadowOpacity, overheadRoofAlphaTex, overheadRoofBlockTex);
     if (_profiling) this._recordPassTiming('lightingRender', _profileT0);
     if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: lighting.render(sceneRT→postA) DONE'); } catch (_) {} }
 

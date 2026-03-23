@@ -173,6 +173,7 @@ export class FloorRenderBus {
       // Within each floor-group, tiles are ordered by Foundry sort (ascending),
       // with a cap to preserve a stable token headroom at top of floor band.
       const isOverhead = this._isOverheadForBusTile(tileDoc, tileId);
+      const cloudShadowBlockerEnabled = this._shouldTileBlockCloudShadows(tileDoc, isOverhead);
       const motionRenderAboveTokens = !!window.MapShine?.tileMotionManager?.getTileConfig?.(tileId)?.renderAboveTokens;
       floorCounts[floorIndex] = floorCounts[floorIndex] ?? { regular: 0, overhead: 0 };
       const groupCounts = floorCounts[floorIndex];
@@ -193,7 +194,7 @@ export class FloorRenderBus {
       }
 
       // Create mesh immediately with null texture (invisible until loaded).
-      this._addTileMesh(tileId, floorIndex, null, centerX, centerY, z, tileW, tileH, rotation, alpha, renderOrder, isOverhead);
+      this._addTileMesh(tileId, floorIndex, null, centerX, centerY, z, tileW, tileH, rotation, alpha, renderOrder, isOverhead, cloudShadowBlockerEnabled);
 
       // Load texture via THREE.TextureLoader — HTML <img>, straight alpha.
       this._loader.load(src, (tex) => {
@@ -531,6 +532,7 @@ export class FloorRenderBus {
       ? (tileDoc.rotation * Math.PI) / 180
       : 0;
     const isOverhead = this._isOverheadForBusTile(tileDoc, tileId);
+    const cloudShadowBlockerEnabled = this._shouldTileBlockCloudShadows(tileDoc, isOverhead);
     const motionRenderAboveTokens = !!window.MapShine?.tileMotionManager?.getTileConfig?.(tileId)?.renderAboveTokens;
 
     const sortWithinFloor = this._computeSortWithinFloor(tileDoc);
@@ -548,7 +550,7 @@ export class FloorRenderBus {
 
     let entry = this._tiles.get(tileId);
     if (!entry) {
-      this._addTileMesh(tileId, floorIndex, null, centerX, centerY, z, tileW, tileH, rotation, alpha, renderOrder, isOverhead);
+      this._addTileMesh(tileId, floorIndex, null, centerX, centerY, z, tileW, tileH, rotation, alpha, renderOrder, isOverhead, cloudShadowBlockerEnabled);
       entry = this._tiles.get(tileId);
       if (!entry) return false;
     }
@@ -576,7 +578,8 @@ export class FloorRenderBus {
       entry.mesh.layers.set(0);
       if (isOverhead) {
         entry.mesh.layers.enable(20);
-        entry.mesh.layers.enable(TILE_FEATURE_LAYERS.CLOUD_SHADOW_BLOCKER);
+        if (cloudShadowBlockerEnabled) entry.mesh.layers.enable(TILE_FEATURE_LAYERS.CLOUD_SHADOW_BLOCKER);
+        else entry.mesh.layers.disable(TILE_FEATURE_LAYERS.CLOUD_SHADOW_BLOCKER);
       } else {
         entry.mesh.layers.disable(20);
         entry.mesh.layers.disable(TILE_FEATURE_LAYERS.CLOUD_SHADOW_BLOCKER);
@@ -588,7 +591,8 @@ export class FloorRenderBus {
       root.layers.set(0);
       if (isOverhead) {
         root.layers.enable(20);
-        root.layers.enable(TILE_FEATURE_LAYERS.CLOUD_SHADOW_BLOCKER);
+        if (cloudShadowBlockerEnabled) root.layers.enable(TILE_FEATURE_LAYERS.CLOUD_SHADOW_BLOCKER);
+        else root.layers.disable(TILE_FEATURE_LAYERS.CLOUD_SHADOW_BLOCKER);
       } else {
         root.layers.disable(20);
         root.layers.disable(TILE_FEATURE_LAYERS.CLOUD_SHADOW_BLOCKER);
@@ -968,6 +972,25 @@ export class FloorRenderBus {
   }
 
   /**
+   * Determine whether this tile should clip cloud shadows in CloudEffect.
+   *
+   * @param {object} tileDoc
+   * @param {boolean} isOverhead
+   * @returns {boolean}
+   * @private
+   */
+  _shouldTileBlockCloudShadows(tileDoc, isOverhead) {
+    if (!isOverhead || !tileDoc) return false;
+    const moduleId = 'map-shine-advanced';
+    const getFlag = (key) => tileDoc.getFlag?.(moduleId, key) ?? tileDoc.flags?.[moduleId]?.[key];
+    const isWeatherRoof = !!getFlag('overheadIsRoof');
+    if (isWeatherRoof) return false;
+    const cloudShadowsEnabledRaw = getFlag('cloudShadowsEnabled');
+    const cloudShadowsEnabled = (cloudShadowsEnabledRaw === undefined) ? true : !!cloudShadowsEnabledRaw;
+    return !cloudShadowsEnabled;
+  }
+
+  /**
    * Add a solid-colour plane covering the full world canvas at the lowest Z.
    * Ensures no transparent black shows in padding areas.
    * @param {object} fd - foundrySceneData
@@ -1068,7 +1091,7 @@ export class FloorRenderBus {
    * @param {number} alpha
    * @private
    */
-  _addTileMesh(tileId, floorIndex, texture, cx, cy, z, w, h, rotation, alpha, renderOrder = 0, isOverhead = false) {
+  _addTileMesh(tileId, floorIndex, texture, cx, cy, z, w, h, rotation, alpha, renderOrder = 0, isOverhead = false, cloudShadowBlockerEnabled = false) {
     const THREE = window.THREE;
 
     const mat = new THREE.MeshBasicMaterial({
@@ -1109,8 +1132,13 @@ export class FloorRenderBus {
       mesh.layers.enable(20);
       // Cloud shadow blocker layer — CloudEffectV2 renders only this layer
       // to build the blocker mask, avoiding per-frame full-scene traversal.
-      root.layers.enable(TILE_FEATURE_LAYERS.CLOUD_SHADOW_BLOCKER);
-      mesh.layers.enable(TILE_FEATURE_LAYERS.CLOUD_SHADOW_BLOCKER);
+      if (cloudShadowBlockerEnabled) {
+        root.layers.enable(TILE_FEATURE_LAYERS.CLOUD_SHADOW_BLOCKER);
+        mesh.layers.enable(TILE_FEATURE_LAYERS.CLOUD_SHADOW_BLOCKER);
+      } else {
+        root.layers.disable(TILE_FEATURE_LAYERS.CLOUD_SHADOW_BLOCKER);
+        mesh.layers.disable(TILE_FEATURE_LAYERS.CLOUD_SHADOW_BLOCKER);
+      }
     }
 
     root.position.set(cx, cy, z);

@@ -305,6 +305,8 @@ export class LightingEffectV2 {
         // lights (which add on top) still punch through the shadow.
         tCloudShadow:    { value: null },
         uHasCloudShadow: { value: 0 },
+        tCloudShadowRaw:    { value: null },
+        uHasCloudShadowRaw: { value: 0 },
         // Building shadow: greyscale factor from BuildingShadowsEffectV2.
         // Applied after cloud shadow — dims only the ambient component.
         tBuildingShadow:     { value: null },
@@ -362,6 +364,8 @@ export class LightingEffectV2 {
         uniform sampler2D tDarkness;
         uniform sampler2D tCloudShadow;
         uniform float uHasCloudShadow;
+        uniform sampler2D tCloudShadowRaw;
+        uniform float uHasCloudShadowRaw;
         uniform sampler2D tBuildingShadow;
         uniform float uHasBuildingShadow;
         uniform float uBuildingShadowOpacity;
@@ -446,6 +450,15 @@ export class LightingEffectV2 {
           // Dynamic lights are NOT gated so torches/lamps still punch through clouds.
           if (uHasCloudShadow > 0.5) {
             float shadowFactor = clamp(texture2D(tCloudShadow, vUv).r, 0.0, 1.0);
+            // Roof tiles can be authored as "indoors" in the outdoors mask. On
+            // visible roof pixels, prefer the raw cloud shadow (before outdoors
+            // masking) so rooftops still receive moving cloud shadows.
+            if (uHasCloudShadowRaw > 0.5 && uHasOverheadRoofAlpha > 0.5) {
+              float rawShadowFactor = clamp(texture2D(tCloudShadowRaw, vUv).r, 0.0, 1.0);
+              vec4 roofSample = texture2D(tOverheadRoofAlpha, vUv);
+              float roofAlpha = clamp(max(roofSample.a, max(roofSample.r, max(roofSample.g, roofSample.b))), 0.0, 1.0);
+              shadowFactor = mix(shadowFactor, rawShadowFactor, roofAlpha);
+            }
             // Only dim the ambient portion; keep dynamic-light additive intact.
             vec3 ambientPortion = ambientAfterDark;
             totalIllumination = ambientPortion * shadowFactor + directLight;
@@ -821,7 +834,7 @@ export class LightingEffectV2 {
    *   overhead roof blocker mask. Used for hard direct-light blocking so lights
    *   do not leak through overhead tiles that block light.
    */
-  render(renderer, camera, sceneRT, outputRT, windowLightScene = null, cloudShadowTexture = null, buildingShadowTexture = null, overheadShadowTexture = null, buildingShadowOpacity = 0.75, overheadRoofAlphaTexture = null, overheadRoofBlockTexture = null) {
+  render(renderer, camera, sceneRT, outputRT, windowLightScene = null, cloudShadowTexture = null, cloudShadowRawTexture = null, buildingShadowTexture = null, overheadShadowTexture = null, buildingShadowOpacity = 0.75, overheadRoofAlphaTexture = null, overheadRoofBlockTexture = null) {
     if (!this._initialized || !this._enabled || !sceneRT) return;
     if (!this._lightRT || !this._darknessRT || !this._composeMaterial) return;
 
@@ -909,6 +922,13 @@ export class LightingEffectV2 {
     } else {
       cu.tCloudShadow.value    = null;
       cu.uHasCloudShadow.value = 0;
+    }
+    if (cloudShadowRawTexture) {
+      cu.tCloudShadowRaw.value = cloudShadowRawTexture;
+      cu.uHasCloudShadowRaw.value = 1;
+    } else {
+      cu.tCloudShadowRaw.value = null;
+      cu.uHasCloudShadowRaw.value = 0;
     }
     // Bind building shadow factor texture (null-safe: shader gates on uHasBuildingShadow).
     if (buildingShadowTexture) {

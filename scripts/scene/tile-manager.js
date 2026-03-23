@@ -4063,7 +4063,7 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
       if (isWeatherRoof) sprite.layers.enable(WEATHER_ROOF_LAYER);
       else sprite.layers.disable(WEATHER_ROOF_LAYER);
 
-      if (!cloudShadowsEnabled) sprite.layers.enable(TILE_FEATURE_LAYERS.CLOUD_SHADOW_BLOCKER);
+      if (!isWeatherRoof && !cloudShadowsEnabled) sprite.layers.enable(TILE_FEATURE_LAYERS.CLOUD_SHADOW_BLOCKER);
       else sprite.layers.disable(TILE_FEATURE_LAYERS.CLOUD_SHADOW_BLOCKER);
       if (!cloudTopsEnabled) sprite.layers.enable(TILE_FEATURE_LAYERS.CLOUD_TOP_BLOCKER);
       else sprite.layers.disable(TILE_FEATURE_LAYERS.CLOUD_TOP_BLOCKER);

@@ -3516,16 +3516,14 @@ export class WeatherParticles {
       }
     } catch (_) {}
 
-    let vk = '';
+    // IMPORTANT: keep source signature independent from camera view. View bounds are
+    // handled by _getViewFilteredRoofDripPoints; including them here can force expensive
+    // full-pool rebuilds while panning/zooming and cause visible main-thread hitches.
+    let gpuModeSig = 0;
     try {
-      if (
-        window.MapShine?.useGpuRoofDripEdges !== false &&
-        this._roofDripGpuInfraReady() &&
-        this._viewMinX != null &&
-        Number.isFinite(this._viewMaxX)
-      ) {
-        vk = `|v${((this._viewMinX * 4) | 0)}:${((this._viewMaxX * 4) | 0)}:${((this._viewMinY * 4) | 0)}:${((this._viewMaxY * 4) | 0)}`;
-      }
+      const gpuTuneEnabled = window.MapShine?.useGpuRoofDripEdges !== false;
+      const gpuInfraReady = this._roofDripGpuInfraReady();
+      gpuModeSig = gpuTuneEnabled && gpuInfraReady ? 1 : 0;
     } catch (_) {}
 
     const rtEpoch = Number(weatherController?._roofDripTuningEpoch) || 0;
@@ -3540,7 +3538,7 @@ export class WeatherParticles {
       Math.round((Number(tun.emitterNormalJitter) || 0) * 100),
       Math.round((Number(tun.emitterTangentialJitter) || 0) * 100)
     ].join(':');
-    return `${n}|${treeN}|${acc >>> 0}${vk}|t${rtEpoch}|r${ROOF_DRIP_SPAWN_ALGO_REV}|s${tunSig}`;
+    return `${n}|${treeN}|${acc >>> 0}|g${gpuModeSig}|t${rtEpoch}|r${ROOF_DRIP_SPAWN_ALGO_REV}|s${tunSig}`;
   }
 
   _getViewFilteredEdgePoints(pts) {

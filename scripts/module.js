@@ -964,17 +964,17 @@ Hooks.once('init', async function() {
 
       const group = $(
         `<div class="form-group">
-           <label>Overhead = Roof (Map Shine)</label>
+           <label>Roof (Map Shine)</label>
            <div class="form-fields">
              <input type="checkbox" name="flags.${moduleId}.${flagKey}" ${current ? 'checked' : ''} />
            </div>
-           <p class="notes">Treat this overhead tile as a roof for weather visibility.</p>
+           <p class="notes">Treat this overhead tile as a roof for weather and cloud shadow coverage.</p>
          </div>`
       );
 
       const bypassGroup = $(
         `<div class="form-group">
-           <label>Bypass Map Shine Effects</label>
+           <label>Bypass Effects (Map Shine)</label>
            <div class="form-fields">
              <input type="checkbox" name="flags.${moduleId}.${bypassFlagKey}" ${bypassCurrent ? 'checked' : ''} />
            </div>
@@ -984,21 +984,21 @@ Hooks.once('init', async function() {
 
       const cloudShadowsGroup = $(
         `<div class="form-group">
-           <label>Cloud Shadows (Map Shine)</label>
+           <label>Cloud Shadows</label>
            <div class="form-fields">
              <input type="checkbox" name="flags.${moduleId}.${cloudShadowsFlagKey}" ${cloudShadowsCurrent ? 'checked' : ''} />
            </div>
-           <p class="notes">Allow CloudEffect shadows to affect this tile.</p>
+           <p class="notes">Allow cloud shadow darkening on this tile.</p>
          </div>`
       );
 
       const cloudTopsGroup = $(
         `<div class="form-group">
-           <label>Cloud Tops (Map Shine)</label>
+           <label>Cloud Tops</label>
            <div class="form-fields">
              <input type="checkbox" name="flags.${moduleId}.${cloudTopsFlagKey}" ${cloudTopsCurrent ? 'checked' : ''} />
            </div>
-           <p class="notes">Allow CloudEffect cloud-top overlay to render over this tile.</p>
+           <p class="notes">Allow cloud-top overlay on this tile.</p>
          </div>`
       );
 

@@ -3743,6 +3743,8 @@ export class InteractionManager {
                 this._pendingLight.startClientX = event.clientX;
                 this._pendingLight.startClientY = event.clientY;
                 this._pendingLight.forceSheet = false;
+                // Consume so Foundry's native LightingLayer doesn't also start drag-create.
+                safeCall(() => { event.preventDefault(); event.stopPropagation(); event.stopImmediatePropagation?.(); }, 'pointerDown.consumeEnhancedLightInteraction', Severity.COSMETIC);
                 return;
               }
             }
@@ -3785,6 +3787,8 @@ export class InteractionManager {
                 this._pendingLight.startClientX = event.clientX;
                 this._pendingLight.startClientY = event.clientY;
                 this._pendingLight.forceSheet = !!(event.altKey || event.ctrlKey || event.metaKey);
+                // Consume so Foundry's native LightingLayer doesn't also start drag-create.
+                safeCall(() => { event.preventDefault(); event.stopPropagation(); event.stopImmediatePropagation?.(); }, 'pointerDown.consumeFoundryLightInteraction', Severity.COSMETIC);
                 return;
               }
             }
@@ -3836,6 +3840,9 @@ export class InteractionManager {
           if (window.MapShine?.cameraController) {
              window.MapShine.cameraController.enabled = false;
           }
+
+          // Consume to prevent duplicate native light placement in parallel.
+          safeCall(() => { event.preventDefault(); event.stopPropagation(); event.stopImmediatePropagation?.(); }, 'pointerDown.consumeLightPlacementStart', Severity.COSMETIC);
 
           // Do not start token selection when placing a light
           return;
@@ -5832,6 +5839,9 @@ export class InteractionManager {
             }, 'pointerUp.lightEditorShow', Severity.COSMETIC);
           }
 
+          // Consume to avoid native LightingLayer click handling in parallel.
+          safeCall(() => { event.preventDefault(); event.stopPropagation(); event.stopImmediatePropagation?.(); }, 'pointerUp.consumePendingLightClick', Severity.COSMETIC);
+
           return;
         }
 
@@ -5907,6 +5917,9 @@ export class InteractionManager {
             if (window.MapShine?.cameraController) {
                 window.MapShine.cameraController.enabled = true;
             }
+
+            // Always consume this pointerup: placement lifecycle is owned here.
+            safeCall(() => { event.preventDefault(); event.stopPropagation(); event.stopImmediatePropagation?.(); }, 'pointerUp.consumeLightPlacementEnd', Severity.COSMETIC);
 
             // If the pointer is released over UI (dialogs/filepickers), never create a light.
             if (this._isEventFromUI(event)) {

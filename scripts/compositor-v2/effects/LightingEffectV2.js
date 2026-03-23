@@ -415,20 +415,29 @@ export class LightingEffectV2 {
           // Light contribution (additive accumulation from ThreeLightSources).
           vec3 safeLights = max(lightSample.rgb, vec3(0.0));
           float lightI = max(max(safeLights.r, safeLights.g), safeLights.b);
+          // Dynamic light should be masked by currently visible overhead/tree
+          // coverage, not by the hard blocker map used for precipitation.
           float roofLightVisibility = 1.0;
-          if (uHasOverheadRoofBlock > 0.5) {
-            vec4 roofSample = texture2D(tOverheadRoofBlock, vUv);
-            // Use alpha for the blocker pass; this target is authored as
-            // forced-opaque roof coverage in direct screen UV.
-            float roofAlpha = clamp(roofSample.a, 0.0, 1.0);
-            roofLightVisibility = 1.0 - roofAlpha;
+          if (uHasOverheadRoofAlpha > 0.5) {
+            vec4 roofSample = texture2D(tOverheadRoofAlpha, vUv);
+            float roofAlpha = clamp(max(roofSample.a, max(roofSample.r, max(roofSample.g, roofSample.b))), 0.0, 1.0);
+            // Use hard blocker silhouette for strict light occlusion, but gate it
+            // by runtime visibility so hover-faded reveal still works.
+            float roofBlockAlpha = roofAlpha;
+            if (uHasOverheadRoofBlock > 0.5) {
+              vec4 roofBlockSample = texture2D(tOverheadRoofBlock, vUv);
+              roofBlockAlpha = clamp(max(roofBlockSample.a, max(roofBlockSample.r, max(roofBlockSample.g, roofBlockSample.b))), 0.0, 1.0);
+            }
+            float visibleGate = step(0.03, roofAlpha);
+            float visibleOcclusion = clamp(roofBlockAlpha * visibleGate, 0.0, 1.0);
+            roofLightVisibility = 1.0 - visibleOcclusion;
           }
-          float occludedLightI = lightI * roofLightVisibility;
-          vec3 directLight = vec3(occludedLightI) * master;
+          float lightIVisible = lightI * roofLightVisibility;
+          vec3 directLight = vec3(lightIVisible) * master;
 
           // Darkness punch: strong nearby lights reduce the effective darkness
           // level locally, letting the ambient brighten under torches/lamps.
-          float lightTermI = max(occludedLightI * master, 0.0);
+          float lightTermI = max(lightIVisible * master, 0.0);
           float punch = 1.0 - exp(-lightTermI * max(uDarknessPunchGain, 0.0));
           float localDarknessLevel = clamp(
             baseDarknessLevel * (1.0 - punch * max(uNegativeDarknessStrength, 0.0)),

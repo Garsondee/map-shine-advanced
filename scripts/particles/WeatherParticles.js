@@ -1834,6 +1834,7 @@ export class WeatherParticles {
     this._controlAccum = 0;
     /** @type {boolean} Whether a full control update has run at least once */
     this._controlInitialized = false;
+    this._lastRoofMaskDebugKey = null;
 
     this._splashShape = null;
     this._roofDripShape = null;
@@ -2120,8 +2121,10 @@ export class WeatherParticles {
     // Dirty-check state for roof-mask uniform propagation to batch materials.
     this._lastSplashRoofMaskEnabled = null;
     this._lastSplashHasRoofAlphaMap = null;
+    this._lastSplashRainHardBlockEnabled = null;
     this._lastSplashRoofTexUuid = null;
     this._lastSplashRoofAlphaUuid = null;
+    this._lastSplashRoofBlockUuid = null;
     this._lastSplashScreenW = null;
     this._lastSplashScreenH = null;
     this._lastSplashSceneBoundsX = null;
@@ -5248,6 +5251,24 @@ export class WeatherParticles {
         'uniform float uHasRoofAlphaMap;\nuniform float uRoofEdgeDrip;\n'
       );
     }
+    if (!out.includes('uniform sampler2D uRoofBlockMap')) {
+      out = out.replace(
+        /uniform sampler2D uRoofAlphaMap;\s*\r?\n/,
+        'uniform sampler2D uRoofAlphaMap;\nuniform sampler2D uRoofBlockMap;\n'
+      );
+    }
+    if (!out.includes('uniform float uHasRoofBlockMap')) {
+      out = out.replace(
+        /uniform float uHasRoofAlphaMap;\s*\r?\n/,
+        'uniform float uHasRoofAlphaMap;\nuniform float uHasRoofBlockMap;\n'
+      );
+    }
+    if (!out.includes('uniform float uRoofRainHardBlockEnabled')) {
+      out = out.replace(
+        /uniform float uHasRoofBlockMap;\s*\r?\n/,
+        'uniform float uHasRoofBlockMap;\nuniform float uRoofRainHardBlockEnabled;\n'
+      );
+    }
     out = out.replace(
       /bool showPrecip = roofVisible \|\| isOutdoors;\s+if \(!showPrecip\) \{\s*discard;\s*\}/,
       'bool showPrecip = roofVisible || isOutdoors;\n    \n    if (uRoofEdgeDrip < 0.5) {\n      if (!showPrecip) {\n        discard;\n      }\n    }'
@@ -5290,6 +5311,18 @@ export class WeatherParticles {
       /float under = 1\.0 - smoothstep\(0\.02, 0\.22, ra\);\s*msWaterFade \*= under;/g,
       'float under = 1.0 - smoothstep(0.012, 0.14, ra);\n      msWaterFade *= pow(max(under, 0.0), 1.35);'
     );
+    if (!out.includes('float roofBlockAlpha = roofAlpha;')) {
+      out = out.replace(
+        '}\n    \n    // VISIBILITY LOGIC:',
+        '}\n    float roofBlockAlpha = roofAlpha;\n    if (uHasRoofBlockMap > 0.5) {\n      vec2 screenUvB = gl_FragCoord.xy / uScreenSize;\n      roofBlockAlpha = texture2D(uRoofBlockMap, screenUvB).a;\n    }\n    \n    // VISIBILITY LOGIC:'
+      );
+    }
+    if (!out.includes('hiddenBlock = rb * (1.0 - rv)')) {
+      out = out.replace(
+        'bool isOutdoors = outdoorsMask > 0.5;',
+        'bool isOutdoors = outdoorsMask > 0.5;\n    if (uRoofRainHardBlockEnabled > 0.5 && uRoofEdgeDrip < 0.5) {\n      float rb = clamp(roofBlockAlpha, 0.0, 1.0);\n      float rv = clamp(roofAlpha, 0.0, 1.0);\n      float hiddenBlock = rb * (1.0 - rv);\n      hiddenBlock = smoothstep(0.02, 0.28, hiddenBlock);\n      msWaterFade *= (1.0 - hiddenBlock);\n      if (msWaterFade <= 0.001) discard;\n    }'
+      );
+    }
     return out;
   }
 
@@ -5339,12 +5372,17 @@ export class WeatherParticles {
     const uniforms = existingUniforms || {
       uRoofMap: { value: null },
       uRoofAlphaMap: { value: null },
+      uRoofBlockMap: { value: null },
       // (sceneX, sceneY, sceneWidth, sceneHeight) in world units
       uSceneBounds: { value: new THREE.Vector4(0, 0, 1, 1) },
       // 0.0 = disabled, 1.0 = enabled
       uRoofMaskEnabled: { value: 0.0 },
       // 0.0 = no roof alpha map, 1.0 = has roof alpha map
       uHasRoofAlphaMap: { value: 0.0 },
+      // 0.0 = no forced-opaque roof blocker map, 1.0 = available
+      uHasRoofBlockMap: { value: 0.0 },
+      // 1.0 = hard-block rain under roof blockers during hover/fade reveal.
+      uRoofRainHardBlockEnabled: { value: 0.0 },
       // 1.0 = roof/tree edge drips: skip dual-mask "indoor + no roof pixel" discard (see fragmentMaskCode).
       uRoofEdgeDrip: { value: 0.0 },
       // Screen size for gl_FragCoord -> UV conversion
@@ -5396,6 +5434,9 @@ export class WeatherParticles {
 
     // Upgrade older cached uniform packs in-place.
     // (We reuse material.userData.roofUniforms to keep this patcher idempotent.)
+    if (!uniforms.uRoofBlockMap) uniforms.uRoofBlockMap = { value: null };
+    if (!uniforms.uHasRoofBlockMap) uniforms.uHasRoofBlockMap = { value: 0.0 };
+    if (!uniforms.uRoofRainHardBlockEnabled) uniforms.uRoofRainHardBlockEnabled = { value: 0.0 };
     if (!uniforms.tWaterOccluderAlpha) uniforms.tWaterOccluderAlpha = { value: null };
     if (!uniforms.uHasWaterOccluderAlpha) uniforms.uHasWaterOccluderAlpha = { value: 0.0 };
     if (!uniforms.tCloudShadow) uniforms.tCloudShadow = { value: null };
@@ -5479,6 +5520,11 @@ export class WeatherParticles {
       '      vec2 screenUv = gl_FragCoord.xy / uScreenSize;\n' +
       '      roofAlpha = texture2D(uRoofAlphaMap, screenUv).a;\n' +
       '    }\n' +
+      '    float roofBlockAlpha = roofAlpha;\n' +
+      '    if (uHasRoofBlockMap > 0.5) {\n' +
+      '      vec2 screenUvB = gl_FragCoord.xy / uScreenSize;\n' +
+      '      roofBlockAlpha = texture2D(uRoofBlockMap, screenUvB).a;\n' +
+      '    }\n' +
       '    \n' +
       '    // VISIBILITY LOGIC:\n' +
       '    // Show rain if:\n' +
@@ -5489,6 +5535,16 @@ export class WeatherParticles {
       '    \n' +
       '    bool roofVisible = roofAlpha > 0.1;\n' +
       '    bool isOutdoors = outdoorsMask > 0.5;\n' +
+      '    // Hover/fade reveal: fade in blocking under roof/tree blockers as runtime\n' +
+      '    // visibility alpha fades out.\n' +
+      '    if (uRoofRainHardBlockEnabled > 0.5 && uRoofEdgeDrip < 0.5) {\n' +
+      '      float rb = clamp(roofBlockAlpha, 0.0, 1.0);\n' +
+      '      float rv = clamp(roofAlpha, 0.0, 1.0);\n' +
+      '      float hiddenBlock = rb * (1.0 - rv);\n' +
+      '      hiddenBlock = smoothstep(0.02, 0.28, hiddenBlock);\n' +
+      '      msWaterFade *= (1.0 - hiddenBlock);\n' +
+      '      if (msWaterFade <= 0.001) discard;\n' +
+      '    }\n' +
       '    \n' +
       '    // Rain shows on visible roofs OR in outdoor areas without roofs\n' +
       '    bool showPrecip = roofVisible || isOutdoors;\n' +
@@ -5685,9 +5741,12 @@ export class WeatherParticles {
       const uni = material.uniforms || (material.uniforms = {});
       uni.uRoofMap = uniforms.uRoofMap;
       uni.uRoofAlphaMap = uniforms.uRoofAlphaMap;
+      uni.uRoofBlockMap = uniforms.uRoofBlockMap;
       uni.uSceneBounds = uniforms.uSceneBounds;
       uni.uRoofMaskEnabled = uniforms.uRoofMaskEnabled;
       uni.uHasRoofAlphaMap = uniforms.uHasRoofAlphaMap;
+      uni.uHasRoofBlockMap = uniforms.uHasRoofBlockMap;
+      uni.uRoofRainHardBlockEnabled = uniforms.uRoofRainHardBlockEnabled;
       uni.uRoofEdgeDrip = uniforms.uRoofEdgeDrip;
       uni.uScreenSize = uniforms.uScreenSize;
       uni.uWaterMask = uniforms.uWaterMask;
@@ -5792,7 +5851,13 @@ export class WeatherParticles {
 
         // Only (re)inject if missing. Prevents runaway growth if _patchRoofMaskMaterial
         // is called repeatedly (which it is).
-        const needsInject = !fs.includes(maskMarker);
+        const needsInject = (
+          !fs.includes(maskMarker)
+          || !fs.includes('uRoofBlockMap')
+          || !fs.includes('uHasRoofBlockMap')
+          || !fs.includes('uRoofRainHardBlockEnabled')
+          || !fs.includes('hiddenBlock = rb * (1.0 - rv)')
+        );
 
         if (needsInject) {
           fs = fs.replace(
@@ -5800,9 +5865,12 @@ export class WeatherParticles {
             'varying vec3 vRoofWorldPos;\n' +
             'uniform sampler2D uRoofMap;\n' +
             'uniform sampler2D uRoofAlphaMap;\n' +
+            'uniform sampler2D uRoofBlockMap;\n' +
             'uniform vec4 uSceneBounds;\n' +
             'uniform float uRoofMaskEnabled;\n' +
             'uniform float uHasRoofAlphaMap;\n' +
+            'uniform float uHasRoofBlockMap;\n' +
+            'uniform float uRoofRainHardBlockEnabled;\n' +
             'uniform float uRoofEdgeDrip;\n' +
             'uniform vec2 uScreenSize;\n' +
             'uniform sampler2D uWaterMask;\n' +
@@ -5819,12 +5887,12 @@ export class WeatherParticles {
           // may not. If the include isn't present, fall back to injecting the mask block
           // at the top of main().
           if (fs.includes('#include <soft_fragment>')) {
-            fs = fs.replace('#include <soft_fragment>', fragmentMaskCode + '#include <soft_fragment>\n  gl_FragColor.a *= msWaterFade;\n');
+            fs = fs.replace('#include <soft_fragment>', fragmentMaskCode + '#include <soft_fragment>\n  gl_FragColor.rgb *= msWaterFade;\n  gl_FragColor.a *= msWaterFade;\n');
           } else {
             fs = fs.replace('void main() {', 'void main() {\n  float msWaterFade = 1.0;\n' + fragmentMaskCode);
             // Fallback: best-effort alpha multiply near the end of main.
             // (Most quarks shader variants include <soft_fragment>, so this should rarely trigger.)
-            fs = fs.replace(/\n}\s*$/, '\n  gl_FragColor.a *= msWaterFade;\n}');
+            fs = fs.replace(/\n}\s*$/, '\n  gl_FragColor.rgb *= msWaterFade;\n  gl_FragColor.a *= msWaterFade;\n}');
           }
 
           material.fragmentShader = fs;
@@ -5880,9 +5948,12 @@ export class WeatherParticles {
     const fn = (shader) => {
       shader.uniforms.uRoofMap = uniforms.uRoofMap;
       shader.uniforms.uRoofAlphaMap = uniforms.uRoofAlphaMap;
+      shader.uniforms.uRoofBlockMap = uniforms.uRoofBlockMap;
       shader.uniforms.uSceneBounds = uniforms.uSceneBounds;
       shader.uniforms.uRoofMaskEnabled = uniforms.uRoofMaskEnabled;
       shader.uniforms.uHasRoofAlphaMap = uniforms.uHasRoofAlphaMap;
+      shader.uniforms.uHasRoofBlockMap = uniforms.uHasRoofBlockMap;
+      shader.uniforms.uRoofRainHardBlockEnabled = uniforms.uRoofRainHardBlockEnabled;
       shader.uniforms.uRoofEdgeDrip = uniforms.uRoofEdgeDrip;
       shader.uniforms.uScreenSize = uniforms.uScreenSize;
       shader.uniforms.uWaterMask = uniforms.uWaterMask;
@@ -5964,9 +6035,12 @@ export class WeatherParticles {
           'varying vec3 vRoofWorldPos;\n' +
           'uniform sampler2D uRoofMap;\n' +
           'uniform sampler2D uRoofAlphaMap;\n' +
+          'uniform sampler2D uRoofBlockMap;\n' +
           'uniform vec4 uSceneBounds;\n' +
           'uniform float uRoofMaskEnabled;\n' +
           'uniform float uHasRoofAlphaMap;\n' +
+          'uniform float uHasRoofBlockMap;\n' +
+          'uniform float uRoofRainHardBlockEnabled;\n' +
           'uniform float uRoofEdgeDrip;\n' +
           'uniform vec2 uScreenSize;\n' +
           'uniform sampler2D uWaterMask;\n' +
@@ -5980,10 +6054,10 @@ export class WeatherParticles {
         );
 
         if (fs.includes('#include <soft_fragment>')) {
-          fs = fs.replace('#include <soft_fragment>', fragmentMaskCode + '#include <soft_fragment>\n  gl_FragColor.a *= msWaterFade;\n');
+          fs = fs.replace('#include <soft_fragment>', fragmentMaskCode + '#include <soft_fragment>\n  gl_FragColor.rgb *= msWaterFade;\n  gl_FragColor.a *= msWaterFade;\n');
         } else {
           fs = fs.replace('void main() {', 'void main() {\n  float msWaterFade = 1.0;\n' + fragmentMaskCode);
-          fs = fs.replace(/\n}\s*$/, '\n  gl_FragColor.a *= msWaterFade;\n}');
+          fs = fs.replace(/\n}\s*$/, '\n  gl_FragColor.rgb *= msWaterFade;\n  gl_FragColor.a *= msWaterFade;\n}');
         }
 
         shader.fragmentShader = fs;
@@ -6796,26 +6870,28 @@ export class WeatherParticles {
     
     // Roof alpha: mask registry (optional), then OverheadShadowsEffectV2.roofVisibilityTarget (authoritative for V2), then legacy lightingEffect.
     let roofAlphaTexture = null;
+    let roofBlockTexture = null;
     let screenWidth = 1920;
     let screenHeight = 1080;
     try {
       const mm = window.MapShine?.maskManager;
-      const rec = mm ? mm.getRecord('weatherRoofAlpha.screen') : null;
-      if (rec && rec.texture) {
-        roofAlphaTexture = rec.texture;
-        screenWidth = rec.width || 1920;
-        screenHeight = rec.height || 1080;
+      const fc = window.MapShine?.floorCompositorV2 ?? window.MapShine?.effectComposer?._floorCompositorV2;
+      const ose = fc?._overheadShadowEffect;
+      roofBlockTexture = ose && ose.roofBlockTexture ? ose.roofBlockTexture : null;
+      const oseAlpha = ose && ose.roofAlphaTexture ? ose.roofAlphaTexture : null;
+      if (oseAlpha) {
+        roofAlphaTexture = oseAlpha;
+        const rt = ose.roofVisibilityTarget;
+        if (rt && rt.width > 0 && rt.height > 0) {
+          screenWidth = rt.width;
+          screenHeight = rt.height;
+        }
       } else {
-        const fc = window.MapShine?.floorCompositorV2 ?? window.MapShine?.effectComposer?._floorCompositorV2;
-        const ose = fc?._overheadShadowEffect;
-        const oseAlpha = ose && ose.roofAlphaTexture ? ose.roofAlphaTexture : null;
-        if (oseAlpha) {
-          roofAlphaTexture = oseAlpha;
-          const rt = ose.roofVisibilityTarget;
-          if (rt && rt.width > 0 && rt.height > 0) {
-            screenWidth = rt.width;
-            screenHeight = rt.height;
-          }
+        const rec = mm ? mm.getRecord('weatherRoofAlpha.screen') : null;
+        if (rec && rec.texture) {
+          roofAlphaTexture = rec.texture;
+          screenWidth = rec.width || 1920;
+          screenHeight = rec.height || 1080;
         } else {
           const le = window.MapShine?.lightingEffect;
           if (le && le.weatherRoofAlphaTarget && le.weatherRoofAlphaTarget.texture) {
@@ -6870,6 +6946,62 @@ export class WeatherParticles {
     const debugDisableWeatherRoofMask = window.MapShine?.disableWeatherRoofMask === true;
     const effectiveRoofMaskEnabled = roofMaskEnabled && !debugDisableWeatherRoofMask;
     const effectiveHasRoofAlphaMap = hasRoofAlphaMap && !debugDisableWeatherRoofMask;
+    let treeHoverRevealActive = false;
+    try {
+      const fc = window.MapShine?.floorCompositorV2 ?? window.MapShine?.effectComposer?._floorCompositorV2;
+      const treeEffect = fc?._treeEffect;
+      if (treeEffect && typeof treeEffect.isHoverRevealActive === 'function') {
+        treeHoverRevealActive = !!treeEffect.isHoverRevealActive();
+      }
+    } catch (_) {
+      treeHoverRevealActive = false;
+    }
+    const hoverRevealActive = !!weatherController?.roofMaskActive || treeHoverRevealActive;
+    // Fallback: if tree hover reveal is active but a dedicated hard blocker map is
+    // unavailable, reuse the visibility alpha texture as blocker source.
+    // This keeps the hard-block path active for tree canopy fade scenes.
+    const rainRoofBlockTexture = roofBlockTexture || (treeHoverRevealActive ? roofAlphaTexture : null);
+    // Keep hard-block active whenever both maps are present. The shader already
+    // keys suppression to visibility delta (rb * (1-rv)), so this is safe and
+    // avoids relying on hover-state signals that can desync in some V2 paths.
+    const rainHardBlockActive = !!rainRoofBlockTexture && !!roofAlphaTexture && !debugDisableWeatherRoofMask;
+    // Keep runtime visibility and forced-opaque blocker as separate signals:
+    // - uRoofAlphaMap: current visible/faded roof/tree alpha
+    // - uRoofBlockMap: full blocker silhouette
+    const rainRoofAlphaTexture = roofAlphaTexture;
+    const rainHasRoofAlphaMap = !!rainRoofAlphaTexture && !debugDisableWeatherRoofMask;
+    const rainHasRoofBlockMap = !!rainRoofBlockTexture && !debugDisableWeatherRoofMask;
+    const debugWeatherRoofMask = ms?.debugWeatherRoofMask === true;
+    if (debugWeatherRoofMask) {
+      const roofDbgKey = [
+        hoverRevealActive ? 1 : 0,
+        treeHoverRevealActive ? 1 : 0,
+        rainHardBlockActive ? 1 : 0,
+        rainHasRoofAlphaMap ? 1 : 0,
+        rainHasRoofBlockMap ? 1 : 0,
+        rainRoofAlphaTexture?.uuid ?? 'null',
+        rainRoofBlockTexture?.uuid ?? 'null',
+        `${screenWidth}x${screenHeight}`
+      ].join('|');
+      if (roofDbgKey !== this._lastRoofMaskDebugKey) {
+        this._lastRoofMaskDebugKey = roofDbgKey;
+        try {
+          console.log('[WeatherParticles] Roof mask debug', {
+            hoverRevealActive,
+            treeHoverRevealActive,
+            roofMaskActive: !!weatherController?.roofMaskActive,
+            rainHardBlockActive,
+            rainHasRoofAlphaMap,
+            rainHasRoofBlockMap,
+            roofAlphaUuid: rainRoofAlphaTexture?.uuid ?? null,
+            roofBlockUuid: rainRoofBlockTexture?.uuid ?? null,
+            screenWidth,
+            screenHeight
+          });
+        } catch (_) {
+        }
+      }
+    }
 
     const precip = weather.precipitation || 0;
 
@@ -7056,12 +7188,15 @@ export class WeatherParticles {
         if (this._rainMaterial && this._rainMaterial.userData && this._rainMaterial.userData.roofUniforms) {
           const uniforms = this._rainMaterial.userData.roofUniforms;
           uniforms.uRoofMaskEnabled.value = effectiveRoofMaskEnabled ? 1.0 : 0.0;
-          uniforms.uHasRoofAlphaMap.value = effectiveHasRoofAlphaMap ? 1.0 : 0.0;
+          uniforms.uHasRoofAlphaMap.value = rainHasRoofAlphaMap ? 1.0 : 0.0;
+          if (uniforms.uHasRoofBlockMap) uniforms.uHasRoofBlockMap.value = rainHasRoofBlockMap ? 1.0 : 0.0;
+          if (uniforms.uRoofRainHardBlockEnabled) uniforms.uRoofRainHardBlockEnabled.value = rainHardBlockActive ? 1.0 : 0.0;
           if (this._sceneBounds) {
             uniforms.uSceneBounds.value.copy(this._sceneBounds);
           }
           uniforms.uRoofMap.value = this._roofTexture;
-          uniforms.uRoofAlphaMap.value = effectiveHasRoofAlphaMap ? roofAlphaTexture : null;
+          uniforms.uRoofAlphaMap.value = rainHasRoofAlphaMap ? rainRoofAlphaTexture : null;
+          if (uniforms.uRoofBlockMap) uniforms.uRoofBlockMap.value = rainHasRoofBlockMap ? rainRoofBlockTexture : null;
           uniforms.uScreenSize.value.set(screenWidth, screenHeight);
         }
 
@@ -7069,12 +7204,15 @@ export class WeatherParticles {
         if (this._rainBatchMaterial && this._rainBatchMaterial.userData && this._rainBatchMaterial.userData.roofUniforms) {
           const uniforms = this._rainBatchMaterial.userData.roofUniforms;
           uniforms.uRoofMaskEnabled.value = effectiveRoofMaskEnabled ? 1.0 : 0.0;
-          uniforms.uHasRoofAlphaMap.value = effectiveHasRoofAlphaMap ? 1.0 : 0.0;
+          uniforms.uHasRoofAlphaMap.value = rainHasRoofAlphaMap ? 1.0 : 0.0;
+          if (uniforms.uHasRoofBlockMap) uniforms.uHasRoofBlockMap.value = rainHasRoofBlockMap ? 1.0 : 0.0;
+          if (uniforms.uRoofRainHardBlockEnabled) uniforms.uRoofRainHardBlockEnabled.value = rainHardBlockActive ? 1.0 : 0.0;
           if (this._sceneBounds) {
             uniforms.uSceneBounds.value.copy(this._sceneBounds);
           }
           uniforms.uRoofMap.value = this._roofTexture;
-          uniforms.uRoofAlphaMap.value = effectiveHasRoofAlphaMap ? roofAlphaTexture : null;
+          uniforms.uRoofAlphaMap.value = rainHasRoofAlphaMap ? rainRoofAlphaTexture : null;
+          if (uniforms.uRoofBlockMap) uniforms.uRoofBlockMap.value = rainHasRoofBlockMap ? rainRoofBlockTexture : null;
           uniforms.uScreenSize.value.set(screenWidth, screenHeight);
         }
     }
@@ -7190,10 +7328,13 @@ export class WeatherParticles {
         const uniforms = this._roofDripMaterial.userData.roofUniforms;
         uniforms.uRoofMaskEnabled.value = dripMaskU;
         uniforms.uHasRoofAlphaMap.value = dripHasRoofAlphaUniform;
+        if (uniforms.uHasRoofBlockMap) uniforms.uHasRoofBlockMap.value = 0.0;
+        if (uniforms.uRoofRainHardBlockEnabled) uniforms.uRoofRainHardBlockEnabled.value = 0.0;
         if (uniforms.uRoofEdgeDrip) uniforms.uRoofEdgeDrip.value = 1.0;
         if (this._sceneBounds) uniforms.uSceneBounds.value.copy(this._sceneBounds);
         uniforms.uRoofMap.value = this._roofTexture;
         uniforms.uRoofAlphaMap.value = effectiveHasRoofAlphaMap ? roofAlphaTexture : null;
+        if (uniforms.uRoofBlockMap) uniforms.uRoofBlockMap.value = null;
         uniforms.uScreenSize.value.set(screenWidth, screenHeight);
         if (uniforms.uWaterMaskEnabled) uniforms.uWaterMaskEnabled.value = 0.0;
         if (uniforms.uHasWaterOccluderAlpha) uniforms.uHasWaterOccluderAlpha.value = 0.0;
@@ -7203,10 +7344,13 @@ export class WeatherParticles {
         const uniforms = this._roofDripBatchMaterial.userData.roofUniforms;
         uniforms.uRoofMaskEnabled.value = dripMaskU;
         uniforms.uHasRoofAlphaMap.value = dripHasRoofAlphaUniform;
+        if (uniforms.uHasRoofBlockMap) uniforms.uHasRoofBlockMap.value = 0.0;
+        if (uniforms.uRoofRainHardBlockEnabled) uniforms.uRoofRainHardBlockEnabled.value = 0.0;
         if (uniforms.uRoofEdgeDrip) uniforms.uRoofEdgeDrip.value = 1.0;
         if (this._sceneBounds) uniforms.uSceneBounds.value.copy(this._sceneBounds);
         uniforms.uRoofMap.value = this._roofTexture;
         uniforms.uRoofAlphaMap.value = effectiveHasRoofAlphaMap ? roofAlphaTexture : null;
+        if (uniforms.uRoofBlockMap) uniforms.uRoofBlockMap.value = null;
         uniforms.uScreenSize.value.set(screenWidth, screenHeight);
         // Drips are precipitation, not water-surface foam — never clip against _Water / occluder.
         if (uniforms.uWaterMaskEnabled) uniforms.uWaterMaskEnabled.value = 0.0;
@@ -7215,9 +7359,11 @@ export class WeatherParticles {
         if (smu?.uRoofEdgeDrip && uniforms.uRoofEdgeDrip) smu.uRoofEdgeDrip.value = uniforms.uRoofEdgeDrip.value;
         if (smu?.uRoofMaskEnabled) smu.uRoofMaskEnabled.value = dripMaskU;
         if (smu?.uHasRoofAlphaMap) smu.uHasRoofAlphaMap.value = dripHasRoofAlphaUniform;
+        if (smu?.uHasRoofBlockMap) smu.uHasRoofBlockMap.value = 0.0;
         if (smu?.uSceneBounds && this._sceneBounds) smu.uSceneBounds.value.copy(this._sceneBounds);
         if (smu?.uRoofMap) smu.uRoofMap.value = this._roofTexture;
         if (smu?.uRoofAlphaMap) smu.uRoofAlphaMap.value = uniforms.uRoofAlphaMap.value;
+        if (smu?.uRoofBlockMap) smu.uRoofBlockMap.value = null;
         if (smu?.uScreenSize) smu.uScreenSize.value.set(screenWidth, screenHeight);
         if (smu?.uWaterMaskEnabled) smu.uWaterMaskEnabled.value = 0.0;
         if (smu?.uHasWaterOccluderAlpha) smu.uHasWaterOccluderAlpha.value = 0.0;
@@ -7365,7 +7511,8 @@ export class WeatherParticles {
         // --- Mask Uniforms ---
         // PERF: Dirty-check to avoid per-frame uniform updates when nothing changed.
         const roofTexUuid = this._roofTexture?.uuid ?? null;
-        const roofAlphaUuid = roofAlphaTexture?.uuid ?? null;
+        const roofAlphaUuid = rainRoofAlphaTexture?.uuid ?? null;
+        const roofBlockUuid = rainRoofBlockTexture?.uuid ?? null;
         const sbX = this._sceneBounds?.x ?? null;
         const sbY = this._sceneBounds?.y ?? null;
         const sbW = this._sceneBounds?.z ?? null;
@@ -7373,9 +7520,11 @@ export class WeatherParticles {
 
         const splashRoofUniformsDirty = (
           effectiveRoofMaskEnabled !== this._lastSplashRoofMaskEnabled
-          || effectiveHasRoofAlphaMap !== this._lastSplashHasRoofAlphaMap
+          || rainHasRoofAlphaMap !== this._lastSplashHasRoofAlphaMap
+          || rainHardBlockActive !== this._lastSplashRainHardBlockEnabled
           || roofTexUuid !== this._lastSplashRoofTexUuid
           || roofAlphaUuid !== this._lastSplashRoofAlphaUuid
+          || roofBlockUuid !== this._lastSplashRoofBlockUuid
           || screenWidth !== this._lastSplashScreenW
           || screenHeight !== this._lastSplashScreenH
           || sbX !== this._lastSplashSceneBoundsX
@@ -7386,9 +7535,11 @@ export class WeatherParticles {
 
         if (splashRoofUniformsDirty) {
           this._lastSplashRoofMaskEnabled = effectiveRoofMaskEnabled;
-          this._lastSplashHasRoofAlphaMap = effectiveHasRoofAlphaMap;
+          this._lastSplashHasRoofAlphaMap = rainHasRoofAlphaMap;
+          this._lastSplashRainHardBlockEnabled = rainHardBlockActive;
           this._lastSplashRoofTexUuid = roofTexUuid;
           this._lastSplashRoofAlphaUuid = roofAlphaUuid;
+          this._lastSplashRoofBlockUuid = roofBlockUuid;
           this._lastSplashScreenW = screenWidth;
           this._lastSplashScreenH = screenHeight;
           this._lastSplashSceneBoundsX = sbX;
@@ -7399,10 +7550,13 @@ export class WeatherParticles {
           if (this._splashMaterial && this._splashMaterial.userData.roofUniforms) {
              const u = this._splashMaterial.userData.roofUniforms;
              u.uRoofMaskEnabled.value = effectiveRoofMaskEnabled ? 1.0 : 0.0;
-             u.uHasRoofAlphaMap.value = effectiveHasRoofAlphaMap ? 1.0 : 0.0;
+             u.uHasRoofAlphaMap.value = rainHasRoofAlphaMap ? 1.0 : 0.0;
+             if (u.uHasRoofBlockMap) u.uHasRoofBlockMap.value = rainHasRoofBlockMap ? 1.0 : 0.0;
+             if (u.uRoofRainHardBlockEnabled) u.uRoofRainHardBlockEnabled.value = rainHardBlockActive ? 1.0 : 0.0;
              if (this._sceneBounds) u.uSceneBounds.value.copy(this._sceneBounds);
              u.uRoofMap.value = this._roofTexture;
-             u.uRoofAlphaMap.value = effectiveHasRoofAlphaMap ? roofAlphaTexture : null;
+             u.uRoofAlphaMap.value = rainHasRoofAlphaMap ? rainRoofAlphaTexture : null;
+             if (u.uRoofBlockMap) u.uRoofBlockMap.value = rainHasRoofBlockMap ? rainRoofBlockTexture : null;
              u.uScreenSize.value.set(screenWidth, screenHeight);
           }
 
@@ -7411,10 +7565,13 @@ export class WeatherParticles {
               if (!mat || !mat.userData || !mat.userData.roofUniforms) continue;
               const u = mat.userData.roofUniforms;
               u.uRoofMaskEnabled.value = effectiveRoofMaskEnabled ? 1.0 : 0.0;
-              u.uHasRoofAlphaMap.value = effectiveHasRoofAlphaMap ? 1.0 : 0.0;
+              u.uHasRoofAlphaMap.value = rainHasRoofAlphaMap ? 1.0 : 0.0;
+              if (u.uHasRoofBlockMap) u.uHasRoofBlockMap.value = rainHasRoofBlockMap ? 1.0 : 0.0;
+              if (u.uRoofRainHardBlockEnabled) u.uRoofRainHardBlockEnabled.value = rainHardBlockActive ? 1.0 : 0.0;
               if (this._sceneBounds) u.uSceneBounds.value.copy(this._sceneBounds);
               u.uRoofMap.value = this._roofTexture;
-              u.uRoofAlphaMap.value = effectiveHasRoofAlphaMap ? roofAlphaTexture : null;
+              u.uRoofAlphaMap.value = rainHasRoofAlphaMap ? rainRoofAlphaTexture : null;
+              if (u.uRoofBlockMap) u.uRoofBlockMap.value = rainHasRoofBlockMap ? rainRoofBlockTexture : null;
               u.uScreenSize.value.set(screenWidth, screenHeight);
             }
           }
@@ -7948,9 +8105,11 @@ export class WeatherParticles {
       ? splashRoofUniformsDirty
       : (
           effectiveRoofMaskEnabled !== this._lastSplashRoofMaskEnabled
-          || effectiveHasRoofAlphaMap !== this._lastSplashHasRoofAlphaMap
+          || rainHasRoofAlphaMap !== this._lastSplashHasRoofAlphaMap
+          || rainHardBlockActive !== this._lastSplashRainHardBlockEnabled
           || (this._roofTexture?.uuid ?? null) !== this._lastSplashRoofTexUuid
-          || (roofAlphaTexture?.uuid ?? null) !== this._lastSplashRoofAlphaUuid
+          || (rainRoofAlphaTexture?.uuid ?? null) !== this._lastSplashRoofAlphaUuid
+          || (rainRoofBlockTexture?.uuid ?? null) !== this._lastSplashRoofBlockUuid
           || screenWidth !== this._lastSplashScreenW
           || screenHeight !== this._lastSplashScreenH
         );
@@ -7960,10 +8119,13 @@ export class WeatherParticles {
         if (!mat || !mat.userData || !mat.userData.roofUniforms) continue;
         const u = mat.userData.roofUniforms;
         u.uRoofMaskEnabled.value = effectiveRoofMaskEnabled ? 1.0 : 0.0;
-        u.uHasRoofAlphaMap.value = effectiveHasRoofAlphaMap ? 1.0 : 0.0;
+        u.uHasRoofAlphaMap.value = rainHasRoofAlphaMap ? 1.0 : 0.0;
+        if (u.uHasRoofBlockMap) u.uHasRoofBlockMap.value = rainHasRoofBlockMap ? 1.0 : 0.0;
+        if (u.uRoofRainHardBlockEnabled) u.uRoofRainHardBlockEnabled.value = rainHardBlockActive ? 1.0 : 0.0;
         if (this._sceneBounds) u.uSceneBounds.value.copy(this._sceneBounds);
         u.uRoofMap.value = this._roofTexture;
-        u.uRoofAlphaMap.value = effectiveHasRoofAlphaMap ? roofAlphaTexture : null;
+        u.uRoofAlphaMap.value = rainHasRoofAlphaMap ? rainRoofAlphaTexture : null;
+        if (u.uRoofBlockMap) u.uRoofBlockMap.value = rainHasRoofBlockMap ? rainRoofBlockTexture : null;
         u.uScreenSize.value.set(screenWidth, screenHeight);
       }
     }

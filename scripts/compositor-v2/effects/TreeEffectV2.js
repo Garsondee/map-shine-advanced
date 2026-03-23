@@ -61,6 +61,7 @@ export class TreeEffectV2 {
     this._currentWindSpeed = 0.0;
     this._lastFrameTime = 0.0;
     this._hoverHidden = false;
+    this._hoverFadeInProgress = false;
     this._worldSamplePoint = null;
     this._localSamplePoint = null;
 
@@ -350,6 +351,7 @@ export class TreeEffectV2 {
     }
 
     const tileManager = window.MapShine?.tileManager;
+    let hoverFadeInProgress = false;
     for (const [tileId, entry] of this._overlays) {
       const hoverUniform = entry?.material?.uniforms?.uHoverFade;
       if (!hoverUniform) continue;
@@ -364,11 +366,13 @@ export class TreeEffectV2 {
         hoverUniform.value = targetFade;
         continue;
       }
+      hoverFadeInProgress = true;
 
       const maxStep = delta / 2.0;
       const step = Math.sign(diff) * Math.min(absDiff, maxStep);
       hoverUniform.value = currentFade + step;
     }
+    this._hoverFadeInProgress = hoverFadeInProgress;
 
     this._lastFrameTime = time;
   }
@@ -383,6 +387,14 @@ export class TreeEffectV2 {
 
   setHoverHidden(hidden) {
     this._hoverHidden = !!hidden;
+  }
+
+  /**
+   * True while tree canopy reveal/hide is active or still fading.
+   * @returns {boolean}
+   */
+  isHoverRevealActive() {
+    return !!this._hoverHidden || !!this._hoverFadeInProgress;
   }
 
   getHoverMeshes() {
@@ -888,7 +900,9 @@ export class TreeEffectV2 {
 
           vec2 shadowDir = normalize(vec2(uSunDir.x, -uSunDir.y));
           if (length(shadowDir) < 0.01) shadowDir = -windDir;
-          vec2 shadowOffset = shadowDir * uShadowLength;
+          // Tree canopy shadow should not appear as a detached offset blob.
+          // Keep the soft shadow lobe centered on canopy pixels.
+          vec2 shadowOffset = vec2(0.0);
           float shadowBlur = max(0.0001, uShadowSoftness * 0.0008);
           vec2 shadowBaseUv = vUv - distortion - shadowOffset;
           vec2 step1 = vec2(shadowBlur);
@@ -942,14 +956,17 @@ export class TreeEffectV2 {
           shadowWeight += 0.04;
 
           float shadowA = (shadowWeight > 0.0) ? (shadowAccum / shadowWeight) : 0.0;
-          // Keep tree shadows visible when canopy hover fade hides the foliage.
-          // Hover fade should only affect the canopy color/alpha, not shadowing.
-          shadowA *= clamp(uShadowOpacity, 0.0, 1.0) * uIntensity * edgeFade;
+          // Fade tree shadow contribution together with canopy hover fade to avoid
+          // detached "dark ghost" shapes when the canopy is hidden.
+          shadowA *= clamp(uShadowOpacity, 0.0, 1.0) * uIntensity * edgeFade * clamp(uHoverFade, 0.0, 1.0);
 
           vec4 treeSample = texture2D(uTreeMask, vUv - distortion);
 
           float mainAlpha = safeAlpha(treeSample) * uIntensity * clamp(uHoverFade, 0.0, 1.0);
-          float shadowOnlyAlpha = shadowA * (1.0 - clamp(mainAlpha, 0.0, 1.0));
+          // Prevent soft shadow bloom from extending beyond canopy edges.
+          // Gate shadow contribution by local canopy coverage.
+          float canopyGate = smoothstep(0.03, 0.35, clamp(mainAlpha, 0.0, 1.0));
+          float shadowOnlyAlpha = shadowA * (1.0 - clamp(mainAlpha, 0.0, 1.0)) * canopyGate;
           float a = clamp(mainAlpha + shadowOnlyAlpha, 0.0, 1.0);
           if (a <= 0.001) discard;
 

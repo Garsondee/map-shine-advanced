@@ -2256,6 +2256,14 @@ export class FloorCompositor {
       if (typeof this._waterEffect?.setCloudShadowTexture === 'function') {
         this._waterEffect.setCloudShadowTexture(cloudShadowTex);
       }
+      // Feed structural shadow textures so water specular/foam respond to
+      // building and overhead shadows as well.
+      if (typeof this._waterEffect?.setBuildingShadowTexture === 'function') {
+        this._waterEffect.setBuildingShadowTexture(buildingShadowTex);
+      }
+      if (typeof this._waterEffect?.setOverheadShadowTexture === 'function') {
+        this._waterEffect.setOverheadShadowTexture(overheadShadowTex);
+      }
     } catch (_) {}
 
     // Water pass: refracts/tints/specular the fully graded scene.

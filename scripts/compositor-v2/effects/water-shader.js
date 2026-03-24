@@ -1736,6 +1736,27 @@ void main() {
     cloudDarken = dStrength * pow(cloudShadow, dCurve);
   }
 
+  // Structural shadows (building + overhead): used to darken foam and fully suppress specular.
+  // Match LightingEffectV2 conventions:
+  // - Building shadow is scene-space (sceneUv) factor in [0..1], where 1 = lit.
+  // - Overhead shadow uses RGB factor modulated by alpha tile-projection.
+  float buildingShadow = 0.0;
+  if (uHasBuildingShadow > 0.5) {
+    float bldLit = clamp(texture2D(tBuildingShadow, sceneUv).r, 0.0, 1.0);
+    buildingShadow = 1.0 - bldLit;
+  }
+  float overheadShadow = 0.0;
+  if (uHasOverheadShadow > 0.5) {
+    vec4 ov = texture2D(tOverheadShadow, vUv);
+    vec3 ovRgb = clamp(ov.rgb, vec3(0.0), vec3(1.0));
+    float ovA = clamp(ov.a, 0.0, 1.0);
+    vec3 ovCombined = ovRgb * ovA;
+    float ovLit = clamp(dot(ovCombined, vec3(0.3333333)), 0.0, 1.0);
+    overheadShadow = 1.0 - ovLit;
+  }
+  float structuralShadow = max(buildingShadow, overheadShadow);
+  float foamStructuralDarken = mix(1.0, 0.35, structuralShadow);
+
   // Murk
   float murkFactor = 0.0;
   col = applyMurk(sceneUv, uTime, inside, shore, outdoorStrength, col, murkFactor);
@@ -1873,6 +1894,7 @@ void main() {
     
     // Apply lighting to color
     shoreFoamColor *= shoreLightFactor;
+    shoreFoamColor *= foamStructuralDarken;
     
     // Opacity and blending
     float shoreOpacity = clamp(uShoreFoamOpacity, 0.0, 1.0);
@@ -1887,8 +1909,9 @@ void main() {
   // Apply floating foam with independent color and FULL opacity control
   if (floatingFoam.amount > 0.01) {
     float floatingAlpha = clamp(floatingFoam.amount * floatingFoam.opacity, 0.0, 1.0);
+    vec3 floatingFoamColor = floatingFoam.color * foamStructuralDarken;
     // Blend foam color first (without darkness)
-    col = mix(col, floatingFoam.color, floatingAlpha);
+    col = mix(col, floatingFoamColor, floatingAlpha);
     // THEN apply darkness to the final result for proper night darkening
     col *= floatingFoam.darkScale;
   }
@@ -1896,7 +1919,7 @@ void main() {
   // Shader flecks (drive by combined foam presence)
   float fleckDriver = clamp(max(shoreFoamAmount, floatingFoam.amount), 0.0, 1.0);
   float shaderFlecks = getShaderFlecks(sceneUv, inside, shore, fleckDriver, rainOffPx);
-  vec3 fleckCol = mix(uShoreFoamColor, floatingFoam.color, clamp(floatingFoam.amount, 0.0, 1.0));
+  vec3 fleckCol = mix(uShoreFoamColor, floatingFoam.color, clamp(floatingFoam.amount, 0.0, 1.0)) * foamStructuralDarken;
   col += fleckCol * shaderFlecks * 0.8;
 
   // Apply screen-space cloud shadows globally to water + foam + caustics + murk
@@ -2041,17 +2064,8 @@ void main() {
     combinedShadow = max(combinedShadow, cloudShadow);
   }
   
-  // Building shadow (world-space sampled)
-  if (uHasBuildingShadow > 0.5) {
-    float buildingShadowVal = 1.0 - texture2D(tBuildingShadow, vUv).r;
-    combinedShadow = max(combinedShadow, buildingShadowVal);
-  }
-  
-  // Overhead shadow (screen-space sampled)
-  if (uHasOverheadShadow > 0.5) {
-    float overheadShadowVal = 1.0 - texture2D(tOverheadShadow, vUv).r;
-    combinedShadow = max(combinedShadow, overheadShadowVal);
-  }
+  // Structural shadows (building + overhead) are already sampled above.
+  combinedShadow = max(combinedShadow, structuralShadow);
   
   // Apply combined shadow to specular
   if (combinedShadow > 1e-5) {
@@ -2060,6 +2074,8 @@ void main() {
     float litPow = pow(clamp(1.0 - combinedShadow, 0.0, 1.0), kCurve);
     spec *= mix(1.0, litPow, kStrength);
   }
+  // Structural shadows suppress 75% of specular at full shadow.
+  spec *= (1.0 - 0.75 * structuralShadow);
   if (uSpecDisableMasking < 0.5) {
     float specMask = pow(clamp(distInside, 0.0, 1.0), clamp(uSpecMaskGamma, 0.05, 12.0));
     spec *= specMask;

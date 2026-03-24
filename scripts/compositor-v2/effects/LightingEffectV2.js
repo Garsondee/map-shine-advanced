@@ -366,6 +366,7 @@ export class LightingEffectV2 {
         // uAllowRoofGate there — compose must still suppress leaks onto water/lower views).
         uApplyRoofOcclusionToSources: { value: 1.0 },
         uApplyRoofOcclusionToWindow:  { value: 0.0 },
+        uApplyRoofOcclusionToBuilding: { value: 1.0 },
       },
       vertexShader: /* glsl */`
         varying vec2 vUv;
@@ -412,6 +413,7 @@ export class LightingEffectV2 {
         uniform float uDarknessPunchGain;
         uniform float uApplyRoofOcclusionToSources;
         uniform float uApplyRoofOcclusionToWindow;
+        uniform float uApplyRoofOcclusionToBuilding;
         varying vec2 vUv;
 
         float perceivedBrightness(vec3 c) {
@@ -520,7 +522,8 @@ export class LightingEffectV2 {
             if (uHasOverheadRoofAlpha > 0.5) {
               vec4 roofSample = texture2D(tOverheadRoofAlpha, vUv);
               float roofAlpha = clamp(max(roofSample.a, max(roofSample.r, max(roofSample.g, roofSample.b))), 0.0, 1.0);
-              shadowMix = mix(shadowMix, 1.0, roofAlpha);
+              float roofSuppress = mix(0.0, roofAlpha, clamp(uApplyRoofOcclusionToBuilding, 0.0, 1.0));
+              shadowMix = mix(shadowMix, 1.0, roofSuppress);
             }
             // Apply only to ambient contribution; dynamic lights punch through.
             vec3 ambientComponent = totalIllumination - directLight;
@@ -906,19 +909,29 @@ export class LightingEffectV2 {
 
     try {
       const activeFloor = window.MapShine?.floorStack?.getActiveFloor?.();
+      const floors = window.MapShine?.floorStack?.getFloors?.() ?? [];
+      const topFloorIndex = Math.max(0, Number(floors.length) - 1);
       const fi = typeof activeFloor?.index === 'number' && Number.isFinite(activeFloor.index)
         ? activeFloor.index
         : 0;
       const cu0 = this._composeMaterial.uniforms;
-      cu0.uApplyRoofOcclusionToSources.value = fi <= 0 ? 1.0 : 0.0;
+      // Disable compose-level roof gating for Foundry source lights.
+      // In multi-floor scenes this screen-space gate can imprint upper-floor
+      // roof silhouettes onto lower floors even when shadow effects are off.
+      cu0.uApplyRoofOcclusionToSources.value = 0.0;
       // Window overlays are floor-isolated by WindowLightEffectV2 visibility and
       // per-overlay shader gating. Compose-level roof gating here can suppress
       // valid upper-floor window light when a roof alpha exists on that floor.
       cu0.uApplyRoofOcclusionToWindow.value = 0.0;
+      // In multi-floor scenes, lower-floor views still sample upper-floor roof
+      // alpha in screen space; applying that alpha to building-shadow suppression
+      // creates an upper-floor-shaped cutout on the lower floor.
+      cu0.uApplyRoofOcclusionToBuilding.value = (floors.length <= 1 || fi >= topFloorIndex) ? 1.0 : 0.0;
     } catch (_) {
       const cu0 = this._composeMaterial.uniforms;
-      cu0.uApplyRoofOcclusionToSources.value = 1.0;
+      cu0.uApplyRoofOcclusionToSources.value = 0.0;
       cu0.uApplyRoofOcclusionToWindow.value = 0.0;
+      cu0.uApplyRoofOcclusionToBuilding.value = 1.0;
     }
 
     // ── Pass 1: Accumulate Foundry light mesh contributions ───────────

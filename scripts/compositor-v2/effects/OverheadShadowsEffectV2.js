@@ -153,6 +153,53 @@ export class OverheadShadowsEffectV2 {
   }
 
   /**
+   * Temporarily force upper-floor overhead casters visible for roof capture.
+   * FloorRenderBus hides floors above the active band for albedo rendering, but
+   * overhead shadow captures should still include those casters so lower floors
+   * receive their shadow silhouettes.
+   *
+   * @returns {Array<{object: THREE.Object3D, visible: boolean}>}
+   * @private
+   */
+  _forceUpperOverheadCasterVisibility() {
+    const overrides = [];
+    const floorStack = window.MapShine?.floorStack;
+    const activeFloor = floorStack?.getActiveFloor?.() ?? null;
+    const activeIndex = Number.isFinite(Number(activeFloor?.index)) ? Number(activeFloor.index) : 0;
+    if (!this.mainScene || !Number.isFinite(activeIndex)) return overrides;
+
+    this.mainScene.traverse((object) => {
+      if (!object?.layers || typeof object.visible !== 'boolean') return;
+      const isOverheadLayer = (object.layers.mask & (1 << 20)) !== 0;
+      if (!isOverheadLayer) return;
+
+      const floorIndexRaw = object?.userData?.floorIndex;
+      const floorIndex = Number(floorIndexRaw);
+      if (!Number.isFinite(floorIndex) || floorIndex <= activeIndex) return;
+
+      if (!object.visible) {
+        overrides.push({ object, visible: object.visible });
+        object.visible = true;
+      }
+    });
+
+    return overrides;
+  }
+
+  /**
+   * Temporarily reveal above-active overhead casters for the roof caster pass.
+   * Unlike _forceUpperOverheadCasterVisibility(), this is intentionally scoped to
+   * the roof shadow caster capture only and must NOT be used for roof visibility/
+   * blocker captures (those drive independent lighting occlusion paths).
+   *
+   * @returns {Array<{object: THREE.Object3D, visible: boolean}>}
+   * @private
+   */
+  _forceUpperOverheadCasterVisibilityForRoofPass() {
+    return this._forceUpperOverheadCasterVisibility();
+  }
+
+  /**
    * Temporarily expand camera view for roof capture, then return a restore callback.
    * @param {number} scale
    * @returns {() => void}
@@ -760,7 +807,10 @@ export class OverheadShadowsEffectV2 {
           if (uOutdoorsMaskFlipY > 0.5) {
             suv.y = 1.0 - suv.y;
           }
-          return clamp(texture2D(uOutdoorsMask, suv).r, 0.0, 1.0);
+          // Per-floor outdoors masks can be sparse. Outside valid coverage, alpha
+          // may be 0 while RGB is black; interpret that as default outdoors (1.0).
+          vec4 m = texture2D(uOutdoorsMask, suv);
+          return clamp(mix(1.0, m.r, m.a), 0.0, 1.0);
         }
 
         // Compute how far we can travel along delta before leaving [0,1].
@@ -1439,7 +1489,15 @@ export class OverheadShadowsEffectV2 {
         u.uZoom.value = this._getEffectiveZoom();
       }
       // Indoor shadow uniforms — resolve the selected mask from MaskManager
-      if (u.uIndoorShadowEnabled) u.uIndoorShadowEnabled.value = this.params.indoorShadowEnabled ? 1.0 : 0.0;
+      // Avoid double-applying _Outdoors-derived building shadow when the
+      // dedicated BuildingShadowsEffectV2 is active. Keep legacy path for scenes
+      // where building-shadow effect is disabled.
+      let useLegacyIndoorShadow = !!this.params.indoorShadowEnabled;
+      try {
+        const buildingEnabled = !!window.MapShine?.floorCompositorV2?._buildingShadowEffect?.params?.enabled;
+        if (buildingEnabled) useLegacyIndoorShadow = false;
+      } catch (_) {}
+      if (u.uIndoorShadowEnabled) u.uIndoorShadowEnabled.value = useLegacyIndoorShadow ? 1.0 : 0.0;
       if (u.uOutdoorBuildingShadowOpacity) u.uOutdoorBuildingShadowOpacity.value = outdoorBuildingShadowOpacity;
       if (u.uOutdoorBuildingShadowLengthScale) u.uOutdoorBuildingShadowLengthScale.value = outdoorBuildingShadowLengthScale;
       if (u.uIndoorShadowSoftness) u.uIndoorShadowSoftness.value = this.params.indoorShadowSoftness;
@@ -1718,6 +1776,7 @@ export class OverheadShadowsEffectV2 {
     const nonFluidVisibilityOverrides = [];
     const roofCasterTreeVisibilityOverrides = [];
     const roofSpriteVisibilityOverrides = [];
+    const roofUpperCasterVisibilityOverrides = [];
     const tileProjectionVisibilityOverrides = [];
     const tileProjectionOpacityOverrides = [];
     const tileReceiverVisibilityOverrides = [];
@@ -1797,6 +1856,10 @@ export class OverheadShadowsEffectV2 {
     }
 
       // Pass 1 should be based on overhead tile sprites only (exclude fluid overlays).
+      // Re-enable above-active overhead casters ONLY for this caster capture pass
+      // so lower floors receive their shadow contribution without polluting
+      // visibility/blocker textures used elsewhere.
+      roofUpperCasterVisibilityOverrides.push(...this._forceUpperOverheadCasterVisibilityForRoofPass());
       this.mainScene.traverse((object) => {
         if (!object.layers || (object.layers.mask & roofCaptureMaskBits) === 0) return;
         const isFluidOverlay = !!(object.material?.uniforms?.tFluidMask);
@@ -1835,6 +1898,9 @@ export class OverheadShadowsEffectV2 {
     } finally {
       for (const entry of roofCasterTreeVisibilityOverrides) {
         if (entry.object) entry.object.visible = entry.visible;
+      }
+      for (const entry of roofUpperCasterVisibilityOverrides) {
+        if (entry?.object) entry.object.visible = entry.visible;
       }
       restoreRoofCaptureCamera();
     }
@@ -2127,7 +2193,6 @@ export class OverheadShadowsEffectV2 {
       if (entry.object.layers) entry.object.layers.mask = entry.layersMask;
       if (typeof entry.visible === 'boolean') entry.object.visible = entry.visible;
     }
-
     // Restore previous render target
     renderer.setRenderTarget(previousTarget);
   }

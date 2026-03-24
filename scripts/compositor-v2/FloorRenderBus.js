@@ -753,7 +753,12 @@ export class FloorRenderBus {
           node.visible = false;
           continue;
         }
-        node.visible = true;
+        // Respect the node's current visibility (set by floor isolation and
+        // runtime feature toggles). This prevents hidden upper-floor geometry
+        // from being force-included in mask passes.
+        const wasVisible = savedVisibility.get(tileId) === true;
+        node.visible = wasVisible;
+        if (!node.visible) continue;
         // Render with real texture alpha so transparent areas are genuine openings.
         savedMaterialState.set(tileId, {
           transparent: mat.transparent,

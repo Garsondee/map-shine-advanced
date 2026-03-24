@@ -208,7 +208,10 @@ export class BuildingShadowsEffectV2 {
           if (uOutdoorsMaskFlipY > 0.5) {
             suv.y = 1.0 - suv.y;
           }
-          return clamp(texture2D(uOutdoorsMask, suv).r, 0.0, 1.0);
+          // Treat transparent texels as default outdoors (1.0). Some per-floor
+          // masks are sparse and encode valid coverage in alpha.
+          vec4 m = texture2D(uOutdoorsMask, suv);
+          return clamp(mix(1.0, m.r, m.a), 0.0, 1.0);
         }
 
         float readReceiverOutdoorsMask(vec2 uv) {
@@ -217,7 +220,8 @@ export class BuildingShadowsEffectV2 {
           if (uReceiverOutdoorsMaskFlipY > 0.5) {
             suv.y = 1.0 - suv.y;
           }
-          return clamp(texture2D(uReceiverOutdoorsMask, suv).r, 0.0, 1.0);
+          vec4 m = texture2D(uReceiverOutdoorsMask, suv);
+          return clamp(mix(1.0, m.r, m.a), 0.0, 1.0);
         }
 
         void main() {
@@ -235,11 +239,11 @@ export class BuildingShadowsEffectV2 {
           vec2 maskTexel = uTexelSize;
           vec2 baseOffsetUv = dir * pxLen * maskTexel;
 
-          // Receiver gating must come from the active/view floor mask, not the
-          // current caster floor. This prevents upper-floor holes from cutting
-          // out projected shadow on lower floors.
+          // Use a continuous receiver outdoors gate from the active/view floor.
+          // This avoids abrupt binary cut lines while still preventing indoor
+          // receivers from being fully darkened by projected building shadow.
           float receiverOutdoors = readReceiverOutdoorsMask(vUv);
-          float receiverOutdoorGate = step(0.5, receiverOutdoors);
+          float receiverOutdoorGate = clamp(receiverOutdoors, 0.0, 1.0);
 
           float accum = 0.0;
           float weightSum = 0.0;
@@ -585,8 +589,7 @@ export class BuildingShadowsEffectV2 {
       : null;
     const activeBottom = Number(ctx?.bottom);
 
-    // Preferred source of truth: compositor cache keys that actually have
-    // outdoors textures available this frame.
+    // Compositor cache keys with textures available this frame.
     const cachedEntries = [];
     try {
       const floorMeta = compositor?._floorMeta;
@@ -601,17 +604,6 @@ export class BuildingShadowsEffectV2 {
         }
       }
     } catch (_) {}
-
-    if (cachedEntries.length > 0) {
-      cachedEntries.sort((a, b) => a.bottom - b.bottom);
-      if (Number.isFinite(activeBottom)) {
-        const filtered = cachedEntries
-          .filter((entry) => entry.bottom >= activeBottom)
-          .map((entry) => entry.key);
-        if (filtered.length > 0) return filtered;
-      }
-      return cachedEntries.map((entry) => entry.key);
-    }
 
     const floorStack = window.MapShine?.floorStack;
     const activeFloor = floorStack?.getActiveFloor?.() ?? null;
@@ -668,6 +660,19 @@ export class BuildingShadowsEffectV2 {
     // Non-level fallback used by some scenes.
     if (keys.length === 0) {
       pushKey('ground');
+    }
+
+    // If floor-stack selection produced no valid textures yet, use currently
+    // cached floor masks so the effect still renders while warmup completes.
+    if (keys.length === 0 && cachedEntries.length > 0) {
+      cachedEntries.sort((a, b) => a.bottom - b.bottom);
+      if (Number.isFinite(activeBottom)) {
+        const filtered = cachedEntries
+          .filter((entry) => entry.bottom >= activeBottom)
+          .map((entry) => entry.key);
+        if (filtered.length > 0) return filtered;
+      }
+      return cachedEntries.map((entry) => entry.key);
     }
 
     return keys;

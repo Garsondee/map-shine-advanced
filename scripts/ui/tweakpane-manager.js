@@ -1395,6 +1395,10 @@ export class TweakpaneManager {
       if (this.diagnosticCenter) this.diagnosticCenter.toggle();
     });
 
+    addGridButton('Breaker Box', () => {
+      window.MapShine?.breakerBoxDialog?.toggle?.();
+    });
+
     addGridButton('🎯 Map Points', () => {
       this.openMapPointsManagerDialog();
     });

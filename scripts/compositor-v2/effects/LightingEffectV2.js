@@ -1,6 +1,12 @@
 /**
  * @fileoverview LightingEffectV2 — V2 lighting post-processing pass.
  *
+ * HEALTH-WIRING BADGE (Map Shine Breaker Box):
+ * If you change this effect's lifecycle, lightRT/darkness targets, compose shader,
+ * or inputs from cloud / overhead / building shadows / window light, you MUST
+ * update HealthEvaluator contracts/wiring for `LightingEffectV2` and any related
+ * dependency edges to prevent silent failures.
+ *
  * Reads the bus scene RT (albedo + overlays) and applies ambient light,
  * dynamic light sources, darkness sources, and coloration to produce the
  * final lit image.
@@ -86,8 +92,10 @@ export class LightingEffectV2 {
     this._lightScene = null;
     /** @type {THREE.Scene|null} Scene containing ThreeDarknessSource meshes */
     this._darknessScene = null;
-    /** @type {THREE.WebGLRenderTarget|null} Light accumulation RT */
+    /** @type {THREE.WebGLRenderTarget|null} Foundry light mesh accumulation RT */
     this._lightRT = null;
+    /** @type {THREE.WebGLRenderTarget|null} Window glow accumulation RT (compose combines with {@link #_lightRT}) */
+    this._windowLightRT = null;
     /** @type {THREE.WebGLRenderTarget|null} Darkness accumulation RT */
     this._darknessRT = null;
 
@@ -281,6 +289,8 @@ export class LightingEffectV2 {
     this._lightRT = new THREE.WebGLRenderTarget(w, h, rtOpts);
     // Linear storage: light accumulation is additive in linear space.
     this._lightRT.texture.colorSpace = THREE.LinearSRGBColorSpace;
+    this._windowLightRT = new THREE.WebGLRenderTarget(w, h, rtOpts);
+    this._windowLightRT.texture.colorSpace = THREE.LinearSRGBColorSpace;
     this._darknessRT = new THREE.WebGLRenderTarget(w, h, {
       ...rtOpts,
       type: THREE.UnsignedByteType,
@@ -298,7 +308,8 @@ export class LightingEffectV2 {
     this._composeMaterial = new THREE.ShaderMaterial({
       uniforms: {
         tScene:   { value: null },
-        tLight:   { value: null },
+        tLightSources: { value: null },
+        tLightWindow:  { value: null },
         tDarkness: { value: null },
         // Cloud shadow: factor texture from CloudEffectV2 (1.0=lit, 0.0=shadowed).
         // Multiplies totalIllumination so ambient dims under clouds while dynamic
@@ -350,6 +361,11 @@ export class LightingEffectV2 {
         uColorationStrength: { value: 1.0 },
         uNegativeDarknessStrength: { value: 1.0 },
         uDarknessPunchGain:        { value: 2.0 },
+        // Screen-space roof mask: apply to Foundry lights only on ground floor;
+        // apply to window-glow channel only on upper floors (window shader disables
+        // uAllowRoofGate there — compose must still suppress leaks onto water/lower views).
+        uApplyRoofOcclusionToSources: { value: 1.0 },
+        uApplyRoofOcclusionToWindow:  { value: 0.0 },
       },
       vertexShader: /* glsl */`
         varying vec2 vUv;
@@ -360,7 +376,8 @@ export class LightingEffectV2 {
       `,
       fragmentShader: /* glsl */`
         uniform sampler2D tScene;
-        uniform sampler2D tLight;
+        uniform sampler2D tLightSources;
+        uniform sampler2D tLightWindow;
         uniform sampler2D tDarkness;
         uniform sampler2D tCloudShadow;
         uniform float uHasCloudShadow;
@@ -393,6 +410,8 @@ export class LightingEffectV2 {
         uniform float uColorationStrength;
         uniform float uNegativeDarknessStrength;
         uniform float uDarknessPunchGain;
+        uniform float uApplyRoofOcclusionToSources;
+        uniform float uApplyRoofOcclusionToWindow;
         varying vec2 vUv;
 
         float perceivedBrightness(vec3 c) {
@@ -401,7 +420,8 @@ export class LightingEffectV2 {
 
         void main() {
           vec4 baseColor = texture2D(tScene, vUv);
-          vec4 lightSample = texture2D(tLight, vUv);
+          vec3 srcLights = max(texture2D(tLightSources, vUv).rgb, vec3(0.0));
+          vec3 winLights = max(texture2D(tLightWindow, vUv).rgb, vec3(0.0));
           float darknessMask = clamp(texture2D(tDarkness, vUv).r, 0.0, 1.0);
 
           float master = max(uLightIntensity, 0.0);
@@ -412,17 +432,12 @@ export class LightingEffectV2 {
           vec3 ambientNight = uAmbientDarkness  * max(uGlobalIllumination, 0.0);
           vec3 ambient = mix(ambientDay, ambientNight, baseDarknessLevel);
 
-          // Light contribution (additive accumulation from ThreeLightSources).
-          vec3 safeLights = max(lightSample.rgb, vec3(0.0));
-          float lightI = max(max(safeLights.r, safeLights.g), safeLights.b);
-          // Dynamic light should be masked by currently visible overhead/tree
-          // coverage, not by the hard blocker map used for precipitation.
+          // Roof / overhead stamp: gate Foundry lights on ground floor only; gate
+          // window glow on upper floors (WindowLightEffectV2 disables roof gating in-shader).
           float roofLightVisibility = 1.0;
           if (uHasOverheadRoofAlpha > 0.5) {
             vec4 roofSample = texture2D(tOverheadRoofAlpha, vUv);
             float roofAlpha = clamp(max(roofSample.a, max(roofSample.r, max(roofSample.g, roofSample.b))), 0.0, 1.0);
-            // Use hard blocker silhouette for strict light occlusion, but gate it
-            // by runtime visibility so hover-faded reveal still works.
             float roofBlockAlpha = roofAlpha;
             if (uHasOverheadRoofBlock > 0.5) {
               vec4 roofBlockSample = texture2D(tOverheadRoofBlock, vUv);
@@ -432,7 +447,11 @@ export class LightingEffectV2 {
             float visibleOcclusion = clamp(roofBlockAlpha * visibleGate, 0.0, 1.0);
             roofLightVisibility = 1.0 - visibleOcclusion;
           }
-          float lightIVisible = lightI * roofLightVisibility;
+          float visS = mix(1.0, roofLightVisibility, clamp(uApplyRoofOcclusionToSources, 0.0, 1.0));
+          float visW = mix(1.0, roofLightVisibility, clamp(uApplyRoofOcclusionToWindow, 0.0, 1.0));
+          vec3 safeLights = srcLights * visS + winLights * visW;
+          float lightI = max(max(safeLights.r, safeLights.g), safeLights.b);
+          float lightIVisible = lightI;
           vec3 directLight = vec3(lightIVisible) * master;
 
           // Darkness punch: strong nearby lights reduce the effective darkness
@@ -532,7 +551,7 @@ export class LightingEffectV2 {
 
           // Coloration: lights tint the surface proportional to surface brightness.
           float reflection = perceivedBrightness(baseColor.rgb);
-          vec3 coloration = safeLights * master * reflection * max(uColorationStrength, 0.0) * roofLightVisibility;
+          vec3 coloration = safeLights * master * reflection * max(uColorationStrength, 0.0);
           litColor += coloration;
 
           gl_FragColor = vec4(litColor, baseColor.a);
@@ -814,21 +833,22 @@ export class LightingEffectV2 {
 
   /**
    * Execute the lighting post-processing pass:
-   *   1. Render light meshes → lightRT (additive accumulation)
-   *   1b. Render windowLightScene → lightRT (additive, no clear)
+   *   1. Render light meshes → lightRT (Foundry sources only)
+   *   1b. Render windowLightScene → windowLightRT
    *   2. Render darkness meshes → darknessRT
    *   3. Compose: sceneRT * (ambient + lights - darkness) → outputRT
    *
-   * Window light is fed into the light accumulation buffer so the compose
-   * shader applies it as `albedo * totalIllumination` — this tints the glow
-   * by the surface colour, preserving hue instead of washing it out.
+   * Compose merges `lightRT` + `windowLightRT` into total illumination so window
+   * glow tints by surface albedo. Roof masks gate channels independently (sources
+   * vs window) by active floor so upper-floor lights stay visible without window
+   * glow washing water and other areas.
    *
    * @param {THREE.WebGLRenderer} renderer
    * @param {THREE.Camera} camera - The main perspective camera
    * @param {THREE.WebGLRenderTarget} sceneRT - Bus scene input
    * @param {THREE.WebGLRenderTarget} outputRT - Where to write the lit result
-   * @param {THREE.Scene|null} [windowLightScene=null] - Optional extra scene
-   *   rendered additively into lightRT after ThreeLightSource meshes.
+   * @param {THREE.Scene|null} [windowLightScene=null] - Optional scene rendered
+   *   into `windowLightRT` (not combined with Foundry lights until compose).
    * @param {THREE.Texture|null} [cloudShadowTexture=null] - Shadow factor from
    *   CloudEffectV2 (1.0=lit, 0.0=shadowed). Dims ambient illumination under clouds.
    * @param {THREE.Texture|null} [buildingShadowTexture=null] - Shadow factor from
@@ -845,7 +865,7 @@ export class LightingEffectV2 {
    */
   render(renderer, camera, sceneRT, outputRT, windowLightScene = null, cloudShadowTexture = null, cloudShadowRawTexture = null, buildingShadowTexture = null, overheadShadowTexture = null, buildingShadowOpacity = 0.75, overheadRoofAlphaTexture = null, overheadRoofBlockTexture = null) {
     if (!this._initialized || !this._enabled || !sceneRT) return;
-    if (!this._lightRT || !this._darknessRT || !this._composeMaterial) return;
+    if (!this._lightRT || !this._windowLightRT || !this._darknessRT || !this._composeMaterial) return;
 
     // Lazy sync lights on first render frame
     if (!this._lightsSynced) {
@@ -854,6 +874,7 @@ export class LightingEffectV2 {
       log.info('LightingEffectV2 first render:',
         'sceneRT', sceneRT?.width, 'x', sceneRT?.height,
         '| lightRT', this._lightRT?.width, 'x', this._lightRT?.height,
+        '| windowLightRT', this._windowLightRT?.width, 'x', this._windowLightRT?.height,
         '| outputRT', outputRT?.width, 'x', outputRT?.height,
         '| windowLightScene children', windowLightScene?.children?.length ?? 'none'
       );
@@ -876,13 +897,31 @@ export class LightingEffectV2 {
     const h = Math.max(1, this._sizeVec.y);
     if (this._lightRT.width !== w || this._lightRT.height !== h) {
       this._lightRT.setSize(w, h);
+      this._windowLightRT.setSize(w, h);
       this._darknessRT.setSize(w, h);
     }
 
     const prevTarget = renderer.getRenderTarget();
     const prevAutoClear = renderer.autoClear;
 
-    // ── Pass 1: Accumulate light contributions ────────────────────────
+    try {
+      const activeFloor = window.MapShine?.floorStack?.getActiveFloor?.();
+      const fi = typeof activeFloor?.index === 'number' && Number.isFinite(activeFloor.index)
+        ? activeFloor.index
+        : 0;
+      const cu0 = this._composeMaterial.uniforms;
+      cu0.uApplyRoofOcclusionToSources.value = fi <= 0 ? 1.0 : 0.0;
+      // Window overlays are floor-isolated by WindowLightEffectV2 visibility and
+      // per-overlay shader gating. Compose-level roof gating here can suppress
+      // valid upper-floor window light when a roof alpha exists on that floor.
+      cu0.uApplyRoofOcclusionToWindow.value = 0.0;
+    } catch (_) {
+      const cu0 = this._composeMaterial.uniforms;
+      cu0.uApplyRoofOcclusionToSources.value = 1.0;
+      cu0.uApplyRoofOcclusionToWindow.value = 0.0;
+    }
+
+    // ── Pass 1: Accumulate Foundry light mesh contributions ───────────
     // Save camera layer mask — ThreeLightSource meshes live on layer 0.
     const prevLayerMask = camera.layers.mask;
     camera.layers.enableAll();
@@ -894,17 +933,15 @@ export class LightingEffectV2 {
       renderer.render(this._lightScene, camera);
     }
 
-    // ── Pass 1b: Window light → lightRT (additive, no clear) ─────────
-    // Window light overlays use AdditiveBlending so they accumulate on top
-    // of the ThreeLightSource contributions without clearing the buffer.
+    // ── Pass 1b: Window glow → separate RT (compose merges with roof gating) ─
+    renderer.setRenderTarget(this._windowLightRT);
+    renderer.setClearColor(0x000000, 1);
+    renderer.autoClear = true;
     if (windowLightScene) {
       try {
-        renderer.autoClear = false;
         renderer.render(windowLightScene, camera);
       } catch (err) {
         log.error('LightingEffectV2: window light render failed:', err);
-      } finally {
-        renderer.autoClear = true;
       }
     }
 
@@ -922,7 +959,8 @@ export class LightingEffectV2 {
     // ── Pass 3: Compose ───────────────────────────────────────────────
     const cu = this._composeMaterial.uniforms;
     cu.tScene.value = sceneRT.texture;
-    cu.tLight.value = this._lightRT.texture;
+    cu.tLightSources.value = this._lightRT.texture;
+    cu.tLightWindow.value = this._windowLightRT.texture;
     cu.tDarkness.value = this._darknessRT.texture;
     // Bind cloud shadow factor texture (null-safe: shader gates on uHasCloudShadow).
     if (cloudShadowTexture) {
@@ -1096,6 +1134,7 @@ export class LightingEffectV2 {
     const rw = Math.max(1, w);
     const rh = Math.max(1, h);
     if (this._lightRT) this._lightRT.setSize(rw, rh);
+    if (this._windowLightRT) this._windowLightRT.setSize(rw, rh);
     if (this._darknessRT) this._darknessRT.setSize(rw, rh);
   }
 
@@ -1131,6 +1170,7 @@ export class LightingEffectV2 {
 
     // Dispose GPU resources
     try { this._lightRT?.dispose(); } catch (_) {}
+    try { this._windowLightRT?.dispose(); } catch (_) {}
     try { this._darknessRT?.dispose(); } catch (_) {}
     try { this._composeMaterial?.dispose(); } catch (_) {}
     try { this._composeQuad?.geometry?.dispose(); } catch (_) {}
@@ -1138,6 +1178,7 @@ export class LightingEffectV2 {
     this._lightScene = null;
     this._darknessScene = null;
     this._lightRT = null;
+    this._windowLightRT = null;
     this._darknessRT = null;
     this._composeScene = null;
     this._composeCamera = null;

@@ -5,6 +5,11 @@
  * masks (indoors/buildings), then feeds a scene-space shadow-factor texture to
  * LightingEffectV2.
  *
+ * HEALTH-WIRING BADGE (Map Shine Breaker Box):
+ * If you change `shadowTarget` / `_strengthTarget` lifecycle, render cadence, or
+ * LightingEffectV2 uniform wiring, you MUST update HealthEvaluator contracts for
+ * `BuildingShadowsEffectV2` and the edge into `LightingEffectV2` to prevent silent failures.
+ *
  * Multi-level behavior:
  * - Combines the active floor + all floors above it into one shadow field.
  * - As perspective moves upward, lower floors are excluded.

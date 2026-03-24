@@ -229,6 +229,125 @@ function _parseLevelRangeRecord(item) {
   return { valid: true, swapped, bottom, top };
 }
 
+function _formatNumber(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function _getCollectionArray(collection) {
+  if (!collection) return [];
+  if (Array.isArray(collection)) return collection;
+  try {
+    return Array.from(collection);
+  } catch (_) {
+    return [];
+  }
+}
+
+function _docLabel(doc) {
+  const id = String(doc?.id || doc?._id || '(unknown)');
+  const name = String(doc?.name || '').trim();
+  return name ? `${name} [${id}]` : id;
+}
+
+function _normalizeLevelBands(availableLevels) {
+  const levels = Array.isArray(availableLevels) ? availableLevels : [];
+  return levels.map((lvl, index) => ({
+    index,
+    levelId: String(lvl?.levelId || `idx-${index}`),
+    label: String(lvl?.label || lvl?.levelId || `Level ${index}`),
+    bottom: _formatNumber(lvl?.bottom),
+    top: _formatNumber(lvl?.top),
+    center: _formatNumber(lvl?.center),
+  }));
+}
+
+function _findLevelIndexesForRange(levelBands, bottom, top) {
+  if (!Array.isArray(levelBands) || levelBands.length === 0) return [];
+  const b = _formatNumber(bottom);
+  const t = _formatNumber(top);
+  if (!Number.isFinite(b) && !Number.isFinite(t)) return [];
+  const min = Number.isFinite(b) ? b : t;
+  const max = Number.isFinite(t) ? t : b;
+  if (!Number.isFinite(min) || !Number.isFinite(max)) return [];
+  const out = [];
+  for (const band of levelBands) {
+    if (!Number.isFinite(band.bottom) || !Number.isFinite(band.top)) continue;
+    const overlaps = !(max < band.bottom || min > band.top);
+    if (overlaps) out.push(band.index);
+  }
+  return out;
+}
+
+function _findLevelIndexForElevation(levelBands, elevation) {
+  const n = _formatNumber(elevation);
+  if (!Number.isFinite(n)) return -1;
+  for (const band of levelBands) {
+    if (!Number.isFinite(band.bottom) || !Number.isFinite(band.top)) continue;
+    if (n >= band.bottom && n <= band.top) return band.index;
+  }
+  return -1;
+}
+
+function _pushPerLevelHit(levelRows, levelIndexes, kind, label) {
+  if (!Array.isArray(levelRows) || levelRows.length === 0) return;
+  if (!Array.isArray(levelIndexes) || levelIndexes.length === 0) return;
+  for (const idx of levelIndexes) {
+    const row = levelRows[idx];
+    if (!row) continue;
+    if (!Array.isArray(row.sampleHits)) row.sampleHits = [];
+    row.counts[kind] = (row.counts[kind] || 0) + 1;
+    if (row.sampleHits.length < 14) {
+      row.sampleHits.push(`${kind}: ${label}`);
+    }
+  }
+}
+
+function _pickFiniteNumber(...values) {
+  for (const value of values) {
+    const n = Number(value);
+    if (Number.isFinite(n)) return n;
+  }
+  return null;
+}
+
+function _serializeUniformValue(value) {
+  if (value === null || value === undefined) return value;
+  const t = typeof value;
+  if (t === 'number' || t === 'string' || t === 'boolean') return value;
+  if (Array.isArray(value)) return value.slice(0, 32).map((v) => _serializeUniformValue(v));
+  if (value && t === 'object') {
+    if (value.isVector2) return { type: 'Vector2', x: Number(value.x), y: Number(value.y) };
+    if (value.isVector3) return { type: 'Vector3', x: Number(value.x), y: Number(value.y), z: Number(value.z) };
+    if (value.isVector4) return { type: 'Vector4', x: Number(value.x), y: Number(value.y), z: Number(value.z), w: Number(value.w) };
+    if (value.isColor) return { type: 'Color', r: Number(value.r), g: Number(value.g), b: Number(value.b) };
+    const isTextureLike = Boolean(value?.isTexture || value?.image || value?.source);
+    if (isTextureLike) {
+      return {
+        type: value?.constructor?.name || 'TextureLike',
+        isTexture: Boolean(value?.isTexture),
+        uuid: value?.uuid ?? null,
+        width: Number(value?.image?.width) || Number(value?.source?.data?.width) || null,
+        height: Number(value?.image?.height) || Number(value?.source?.data?.height) || null,
+      };
+    }
+  }
+  return { type: value?.constructor?.name || t, note: 'non-primitive value' };
+}
+
+function _serializeWaterUniforms(uniforms) {
+  if (!uniforms || typeof uniforms !== 'object') return null;
+  const out = {};
+  for (const [key, entry] of Object.entries(uniforms)) {
+    try {
+      out[key] = _serializeUniformValue(entry?.value);
+    } catch (_) {
+      out[key] = { error: 'failed_to_serialize' };
+    }
+  }
+  return out;
+}
+
 function _collectSceneLevelFlagDiagnostics(scene) {
   const rawLevels = readSceneLevelsFlag(scene);
   const levelsEnabled = isLevelsEnabledForScene(scene);
@@ -478,6 +597,16 @@ export class DiagnosticCenterDialog {
           }
           const html = this._exportAsHTML(this._lastReport);
           await _copyTextToClipboard(html, 'HTML report copied to clipboard');
+        });
+
+        addGridButton('Copy Levels Wiring', async () => {
+          try {
+            const text = this._buildLevelsWiringClipboardReport();
+            await _copyTextToClipboard(text, 'Levels wiring report copied');
+          } catch (e) {
+            ui?.notifications?.warn?.('Failed to build levels wiring report (see console)');
+            console.warn('[MapShine] Failed to build levels wiring report', e);
+          }
         });
 
         contentElement.appendChild(grid);
@@ -2361,5 +2490,547 @@ export class DiagnosticCenterDialog {
     const div = document.createElement('div');
     div.textContent = text;
     return div.innerHTML;
+  }
+
+  _buildLevelsWiringClipboardReport() {
+    const ms = window.MapShine || {};
+    const scene = canvas?.scene || null;
+    const sceneId = String(scene?.id || '(none)');
+    const sceneName = String(scene?.name || '(Unnamed Scene)');
+
+    const levelController = ms?.levelNavigationController || null;
+    const floorStack = ms?.floorStack || null;
+    const effectComposer = ms?.effectComposer || null;
+    const availableLevelsRaw = levelController?.getAvailableLevels?.() || ms?.availableLevels || [];
+    const activeContext = levelController?.getActiveLevelContext?.() || ms?.activeLevelContext || null;
+    const levelBands = _normalizeLevelBands(availableLevelsRaw);
+
+    const floorBands = Array.isArray(floorStack?._floors)
+      ? floorStack._floors.map((f, index) => ({
+        index,
+        elevationMin: _formatNumber(f?.elevationMin),
+        elevationMax: _formatNumber(f?.elevationMax),
+        compositorKey: String(f?.compositorKey || ''),
+        isActive: Boolean(f?.isActive),
+      }))
+      : [];
+    const activeFloorIndex = Number.isInteger(floorStack?._activeFloorIndex) ? floorStack._activeFloorIndex : -1;
+    const activeFloorBand = (activeFloorIndex >= 0 && activeFloorIndex < floorBands.length) ? floorBands[activeFloorIndex] : null;
+
+    const perLevel = levelBands.map((band) => ({
+      index: band.index,
+      levelId: band.levelId,
+      label: band.label,
+      bottom: band.bottom,
+      top: band.top,
+      center: band.center,
+      isCurrentContext: String(activeContext?.levelId || '') === String(band.levelId),
+      counts: {
+        tokens: 0,
+        tiles: 0,
+        tilesNoCollision: 0,
+        tilesNoFogHide: 0,
+        walls: 0,
+        lights: 0,
+        sounds: 0,
+        notes: 0,
+        drawings: 0,
+        templates: 0
+      },
+      sampleHits: []
+    }));
+
+    const unmatched = [];
+    const addUnmatched = (kind, label, details = null) => {
+      if (unmatched.length >= 80) return;
+      unmatched.push({ kind, label, details });
+    };
+
+    for (const tokenDoc of _getCollectionArray(scene?.tokens)) {
+      const label = _docLabel(tokenDoc);
+      const idx = _findLevelIndexForElevation(levelBands, tokenDoc?.elevation);
+      if (idx >= 0) _pushPerLevelHit(perLevel, [idx], 'tokens', label);
+      else addUnmatched('token', label, { elevation: _formatNumber(tokenDoc?.elevation) });
+    }
+
+    for (const tileDoc of _getCollectionArray(scene?.tiles)) {
+      const flags = readTileLevelsFlags(tileDoc);
+      const label = _docLabel(tileDoc);
+      const rangeBottom = _formatNumber(flags?.rangeBottom);
+      const rangeTop = _formatNumber(flags?.rangeTop);
+      const indexes = (Number.isFinite(rangeBottom) || Number.isFinite(rangeTop))
+        ? _findLevelIndexesForRange(levelBands, rangeBottom, rangeTop)
+        : (() => {
+          const single = _findLevelIndexForElevation(levelBands, tileDoc?.elevation);
+          return single >= 0 ? [single] : [];
+        })();
+      if (indexes.length > 0) {
+        _pushPerLevelHit(perLevel, indexes, 'tiles', label);
+        if (flags?.noCollision) _pushPerLevelHit(perLevel, indexes, 'tilesNoCollision', label);
+        if (flags?.noFogHide) _pushPerLevelHit(perLevel, indexes, 'tilesNoFogHide', label);
+      } else {
+        addUnmatched('tile', label, {
+          elevation: _formatNumber(tileDoc?.elevation),
+          rangeBottom,
+          rangeTop
+        });
+      }
+    }
+
+    for (const wallDoc of _getCollectionArray(scene?.walls)) {
+      const flags = readWallHeightFlags(wallDoc);
+      const label = _docLabel(wallDoc);
+      const idxs = _findLevelIndexesForRange(levelBands, flags?.bottom, flags?.top);
+      if (idxs.length > 0) _pushPerLevelHit(perLevel, idxs, 'walls', label);
+      else addUnmatched('wall', label, { bottom: _formatNumber(flags?.bottom), top: _formatNumber(flags?.top) });
+    }
+
+    const rangeCollections = [
+      ['lights', scene?.lights],
+      ['sounds', scene?.sounds],
+      ['notes', scene?.notes],
+      ['drawings', scene?.drawings],
+      ['templates', scene?.templates],
+    ];
+    for (const [kind, collection] of rangeCollections) {
+      for (const doc of _getCollectionArray(collection)) {
+        const label = _docLabel(doc);
+        const range = readDocLevelsRange(doc);
+        const idxs = _findLevelIndexesForRange(levelBands, range?.rangeBottom, range?.rangeTop);
+        if (idxs.length > 0) _pushPerLevelHit(perLevel, idxs, kind, label);
+        else addUnmatched(kind.slice(0, -1), label, {
+          rangeBottom: _formatNumber(range?.rangeBottom),
+          rangeTop: _formatNumber(range?.rangeTop),
+          elevation: _formatNumber(doc?.elevation)
+        });
+      }
+    }
+
+    const floorCompositorV2 = ms?.floorCompositorV2 || effectComposer?._floorCompositorV2 || null;
+
+    const effectStates = [];
+    const pushEffectState = (effect, keyHint = null, source = 'unknown') => {
+      if (!effect) return;
+      const id = String(effect?.id || keyHint || effect?.constructor?.name || '(unknown)');
+      const floorRaw = effect?.floorIndex
+        ?? effect?.floor
+        ?? effect?._floorIndex
+        ?? effect?._activeFloorIndex
+        ?? effect?._maxFloorIndex
+        ?? effect?._currentFloorIndex
+        ?? null;
+      const floorNorm = Number.isFinite(Number(floorRaw)) ? Number(floorRaw) : null;
+      effectStates.push({
+        id,
+        source,
+        enabled: Boolean(effect?.enabled),
+        initialized: Boolean(effect?._initialized || effect?.initialized),
+        visible: (typeof effect?.visible === 'boolean') ? effect.visible : null,
+        continuous: Boolean(effect?.requiresContinuousRender),
+        hasOnFloorChange: typeof effect?.onFloorChange === 'function',
+        floorState: {
+          floorIndex: _pickFiniteNumber(effect?.floorIndex),
+          floor: _pickFiniteNumber(effect?.floor),
+          _floorIndex: _pickFiniteNumber(effect?._floorIndex),
+          _activeFloorIndex: _pickFiniteNumber(effect?._activeFloorIndex),
+          _maxFloorIndex: _pickFiniteNumber(effect?._maxFloorIndex),
+          _currentFloorIndex: _pickFiniteNumber(effect?._currentFloorIndex),
+          _visibleMaxFloorIndex: _pickFiniteNumber(effect?._visibleMaxFloorIndex),
+        },
+        floor: floorNorm,
+        levelId: effect?.levelId ?? effect?._levelId ?? null,
+        lazyInitPending: Boolean(effect?.lazyInitPending),
+      });
+    };
+
+    try {
+      for (const [key, effect] of (effectComposer?.effects?.entries?.() || [])) {
+        pushEffectState(effect, key, 'effectComposer.effects');
+      }
+    } catch (_) {}
+
+    const v2EffectKeys = [
+      '_specularEffect', '_fluidEffect', '_iridescenceEffect', '_prismEffect',
+      '_bushEffect', '_treeEffect', '_fireEffect', '_dustEffect', '_windowLightEffect',
+      '_lightingEffect', '_skyColorEffect', '_colorCorrectionEffect', '_bloomEffect',
+      '_sharpenEffect', '_filterEffect', '_cloudEffect', '_waterEffect',
+      '_waterSplashesEffect', '_underwaterBubblesEffect', '_weatherParticles',
+      '_ashDisturbanceEffect', '_smellyFliesEffect', '_lightningEffect',
+      '_candleFlamesEffect', '_playerLightEffect', '_overheadShadowEffect',
+      '_buildingShadowEffect', '_dotScreenEffect', '_halftoneEffect',
+      '_asciiEffect', '_dazzleOverlayEffect', '_visionModeEffect',
+      '_invertEffect', '_sepiaEffect', '_lensEffect', '_fogEffect',
+      '_atmosphericFogEffect', '_movementPreviewEffect', '_floorDepthBlurEffect'
+    ];
+    const seenV2Ids = new Set();
+    if (floorCompositorV2) {
+      for (const key of v2EffectKeys) {
+        const eff = floorCompositorV2[key];
+        if (!eff) continue;
+        const dedupeId = `${key}:${eff?.id || eff?.constructor?.name || 'effect'}`;
+        if (seenV2Ids.has(dedupeId)) continue;
+        seenV2Ids.add(dedupeId);
+        pushEffectState(eff, key, 'floorCompositorV2');
+      }
+    }
+
+    const floorRenderBusState = (() => {
+      try {
+        const bus = floorCompositorV2?._renderBus || ms?.floorRenderBus || null;
+        if (!bus) return null;
+        const entries = Array.from(bus?._tiles?.entries?.() || []);
+        const byFloor = {};
+        const byKind = {
+          baseTiles: 0,
+          attachedOverlays: 0,
+          internalEntries: 0
+        };
+        const samples = [];
+        for (const [key, value] of entries) {
+          const floorIndex = Number.isFinite(Number(value?.floorIndex)) ? Number(value.floorIndex) : null;
+          const k = String(key || '');
+          const isInternal = k.startsWith('__');
+          const isAttachedOverlay = !isInternal && k.includes('_') && !k.startsWith('Tile_') && !k.startsWith('BusTile_');
+          if (isInternal) byKind.internalEntries += 1;
+          else if (isAttachedOverlay) byKind.attachedOverlays += 1;
+          else byKind.baseTiles += 1;
+          const floorKey = String(floorIndex ?? '(none)');
+          byFloor[floorKey] = (byFloor[floorKey] || 0) + 1;
+          const rootVisible = (typeof value?.root?.visible === 'boolean') ? value.root.visible : null;
+          const meshVisible = (typeof value?.mesh?.visible === 'boolean') ? value.mesh.visible : null;
+          const effectiveVisible = (rootVisible === false) ? false : (meshVisible === false ? false : true);
+          if (samples.length < 24) {
+            samples.push({
+              key: k,
+              floorIndex,
+              rootVisible,
+              meshVisible,
+              effectiveVisible,
+              hasMap: Boolean(value?.material?.map),
+              attachedToTileId: value?.attachedToTileId ?? null
+            });
+          }
+        }
+        return {
+          initialized: Boolean(bus?._initialized),
+          totalEntries: entries.length,
+          visibleMaxFloorIndex: bus?._visibleMaxFloorIndex ?? null,
+          suppressTileAlbedoForEditing: Boolean(bus?._suppressTileAlbedoForEditing),
+          byFloor,
+          byKind,
+          samples
+        };
+      } catch (_) {
+        return null;
+      }
+    })();
+
+    const waterState = (() => {
+      try {
+        const water = floorCompositorV2?._waterEffect || null;
+        if (!water) return null;
+        const viewFloorIndex = Number.isFinite(Number(floorStack?._activeFloorIndex))
+          ? Number(floorStack._activeFloorIndex)
+          : _pickFiniteNumber(activeContext?.index, 0) ?? 0;
+        const uniforms = water?._composeMaterial?.uniforms || null;
+        const texSize = (tex) => {
+          const w = Number(tex?.image?.width) || Number(tex?.source?.data?.width) || null;
+          const h = Number(tex?.image?.height) || Number(tex?.source?.data?.height) || null;
+          return { width: w, height: h };
+        };
+        const textureInfo = (texOrRt) => {
+          if (!texOrRt) return null;
+          const tex = texOrRt?.texture || texOrRt;
+          return {
+            type: tex?.constructor?.name || texOrRt?.constructor?.name || 'Unknown',
+            width: Number(tex?.image?.width) || Number(tex?.source?.data?.width) || Number(texOrRt?.width) || null,
+            height: Number(tex?.image?.height) || Number(tex?.source?.data?.height) || Number(texOrRt?.height) || null,
+            hasTexture: Boolean(tex),
+            uuid: tex?.uuid ?? null,
+          };
+        };
+        const floorWaterEntriesRaw = Array.from(water?._floorWater?.entries?.() || []);
+        const floorWaterEntries = Array.from(water?._floorWater?.entries?.() || []).map(([floorIndex, data]) => ({
+          floorIndex: Number.isFinite(Number(floorIndex)) ? Number(floorIndex) : floorIndex,
+          hasMaskRT: Boolean(data?.maskRT),
+          hasWaterData: Boolean(data?.waterData),
+          hasRawMask: Boolean(data?.rawMask),
+          maskRTInfo: textureInfo(data?.maskRT),
+          waterDataInfo: textureInfo(data?.waterData),
+          rawMaskInfo: textureInfo(data?.rawMask),
+        }));
+        const floorWaterKeysSorted = floorWaterEntriesRaw
+          .map(([floorIndex]) => Number(floorIndex))
+          .filter((n) => Number.isFinite(n))
+          .sort((a, b) => a - b);
+        const fallbackFloorForView = floorWaterKeysSorted
+          .filter((f) => f <= viewFloorIndex)
+          .reduce((best, f) => (f > best ? f : best), -1);
+        const activeFloorData = water?._floorWater?.get?.(water?._activeFloorIndex) || null;
+        return {
+          exists: true,
+          enabled: Boolean(water?.enabled),
+          initialized: Boolean(water?._initialized),
+          activeFloorIndex: Number.isFinite(Number(water?._activeFloorIndex)) ? Number(water._activeFloorIndex) : null,
+          discoveredWaterTiles: Array.isArray(water?._waterTiles) ? water._waterTiles.length : null,
+          discoveredTileSamples: Array.isArray(water?._waterTiles) ? water._waterTiles.slice(0, 12) : [],
+          floorWaterEntries,
+          params: {
+            debugView: water?.params?.debugView ?? null,
+            cloudShadowEnabled: water?.params?.cloudShadowEnabled ?? null,
+            useOverheadShadowMask: water?.params?.useOverheadShadowMask ?? null,
+            useCloudShadowMask: water?.params?.useCloudShadowMask ?? null,
+            useBuildingShadowMask: water?.params?.useBuildingShadowMask ?? null,
+          },
+          composeUniformState: uniforms ? {
+            hasWaterData: Number(uniforms?.uHasWaterData?.value ?? 0),
+            hasWaterRawMask: Number(uniforms?.uHasWaterRawMask?.value ?? 0),
+            hasWaterOccluderAlpha: Number(uniforms?.uHasWaterOccluderAlpha?.value ?? 0),
+            hasCloudShadow: Number(uniforms?.uHasCloudShadow?.value ?? 0),
+            cloudShadowEnabled: Number(uniforms?.uCloudShadowEnabled?.value ?? 0),
+            hasBuildingShadow: Number(uniforms?.uHasBuildingShadow?.value ?? 0),
+            hasOverheadShadow: Number(uniforms?.uHasOverheadShadow?.value ?? 0),
+            hasOutdoorsMask: Number(uniforms?.uHasOutdoorsMask?.value ?? 0),
+            cloudShadowTexSize: texSize(uniforms?.tCloudShadow?.value),
+            buildingShadowTexSize: texSize(uniforms?.tBuildingShadow?.value),
+            overheadShadowTexSize: texSize(uniforms?.tOverheadShadow?.value),
+            outdoorsMaskTexSize: texSize(uniforms?.tOutdoorsMask?.value),
+            waterOccluderTexSize: texSize(uniforms?.tWaterOccluderAlpha?.value),
+          } : null,
+          occluderPolicy: {
+            viewedFloorIndex: viewFloorIndex,
+            shouldUseOccluderByFloor: viewFloorIndex > 0,
+            hasDataForViewedFloor: (typeof water?.hasFloorWaterData === 'function')
+              ? water.hasFloorWaterData(viewFloorIndex)
+              : null,
+          },
+          deepDive: {
+            version: 1,
+            activeFloorDataExists: Boolean(activeFloorData),
+            floorKeys: floorWaterKeysSorted,
+            fallbackFloorForViewedFloor: fallbackFloorForView >= 0 ? fallbackFloorForView : null,
+            fallbackActive: fallbackFloorForView >= 0 && fallbackFloorForView !== viewFloorIndex,
+            privateState: {
+              _hasAnyWaterData: Boolean(water?._hasAnyWaterData),
+              _debugSignatureLogged: Boolean(water?._debugSignatureLogged),
+              _debugSignatureUpdateLogged: Boolean(water?._debugSignatureUpdateLogged),
+              _windOffsetUvX: _pickFiniteNumber(water?._windOffsetUvX),
+              _windOffsetUvY: _pickFiniteNumber(water?._windOffsetUvY),
+              _prevWindDirX: _pickFiniteNumber(water?._prevWindDirX),
+              _prevWindDirY: _pickFiniteNumber(water?._prevWindDirY),
+              _targetWindDirX: _pickFiniteNumber(water?._targetWindDirX),
+              _targetWindDirY: _pickFiniteNumber(water?._targetWindDirY),
+              _cachedSunDirX: _pickFiniteNumber(water?._cachedSunDirX),
+              _cachedSunDirY: _pickFiniteNumber(water?._cachedSunDirY),
+              _cachedSunDirZ: _pickFiniteNumber(water?._cachedSunDirZ),
+            },
+            paramsSnapshot: (() => {
+              try {
+                return JSON.parse(JSON.stringify(water?.params || {}));
+              } catch (_) {
+                return null;
+              }
+            })(),
+            uniformDump: _serializeWaterUniforms(uniforms),
+            activeFloorTextureInfo: {
+              maskRT: textureInfo(activeFloorData?.maskRT),
+              waterData: textureInfo(activeFloorData?.waterData),
+              rawMask: textureInfo(activeFloorData?.rawMask),
+            },
+          },
+        };
+      } catch (_) {
+        return null;
+      }
+    })();
+
+    const cloudShadowWiring = (() => {
+      try {
+        const cloud = floorCompositorV2?._cloudEffect || null;
+        if (!cloud) return null;
+        const tex = cloud?.cloudShadowTexture || null;
+        const rawTex = cloud?.cloudShadowRawTexture || null;
+        const texSize = (t) => ({
+          width: Number(t?.image?.width) || Number(t?.source?.data?.width) || null,
+          height: Number(t?.image?.height) || Number(t?.source?.data?.height) || null
+        });
+        return {
+          enabled: Boolean(cloud?.enabled),
+          paramsEnabled: Boolean(cloud?.params?.enabled),
+          hasShadowTexture: Boolean(tex),
+          hasRawShadowTexture: Boolean(rawTex),
+          shadowTextureSize: texSize(tex),
+          rawShadowTextureSize: texSize(rawTex),
+          viewBounds: cloud?.cloudShadowViewBounds ?? null,
+          activeFloorIndex: _pickFiniteNumber(cloud?._activeFloorIndex, cloud?.activeFloorIndex),
+        };
+      } catch (_) {
+        return null;
+      }
+    })();
+
+    const maskRegistryMetrics = (() => {
+      try {
+        const reg = ms?.effectMaskRegistry || floorCompositorV2?._effectMaskRegistry || null;
+        return typeof reg?.getMetrics === 'function' ? reg.getMetrics() : null;
+      } catch (_) {
+        return null;
+      }
+    })();
+
+    const maskCompositorState = (() => {
+      try {
+        const compositor = ms?.maskCompositor || floorCompositorV2?._maskCompositor || null;
+        return compositor ? {
+          activeFloorKey: compositor?._activeFloorKey ?? null,
+          belowFloorKey: compositor?._belowFloorKey ?? null,
+          floorMaskCacheSize: compositor?._floorMaskCache?.size ?? 0,
+          floorMetaSize: compositor?._floorMeta?.size ?? 0,
+          cpuPixelCacheSize: compositor?._cpuPixelCache?.size ?? 0,
+        } : null;
+      } catch (_) {
+        return null;
+      }
+    })();
+
+    const diagnostics = (() => {
+      const issues = [];
+      const currentFloor = Number.isFinite(Number(activeFloorIndex)) ? Number(activeFloorIndex) : null;
+      if (currentFloor !== null && waterState?.exists) {
+        const waterFloor = Number.isFinite(Number(waterState.activeFloorIndex)) ? Number(waterState.activeFloorIndex) : null;
+        const floorEntries = Array.isArray(waterState.floorWaterEntries) ? waterState.floorWaterEntries : [];
+        const hasCurrentFloorWater = floorEntries.some((e) => Number(e.floorIndex) === currentFloor);
+        const hasAnyWaterAtOrBelowCurrent = floorEntries.some((e) => {
+          const fi = Number(e.floorIndex);
+          return Number.isFinite(fi) && fi <= currentFloor;
+        });
+        if (waterFloor !== null && waterFloor !== currentFloor) {
+          if (!hasCurrentFloorWater && hasAnyWaterAtOrBelowCurrent) {
+            issues.push({
+              severity: 'info',
+              code: 'water.floorIndex.fallback',
+              message: `Water is using lower-floor fallback (${waterFloor}) because current floor (${currentFloor}) has no water data`,
+            });
+          } else {
+            issues.push({
+              severity: 'warn',
+              code: 'water.floorIndex.mismatch',
+              message: `Water active floor index (${waterFloor}) differs from current floor (${currentFloor})`,
+            });
+          }
+        }
+      }
+      if (waterState?.exists && Array.isArray(waterState.floorWaterEntries)) {
+        const hasCurrentFloorWater = currentFloor === null
+          ? false
+          : waterState.floorWaterEntries.some((e) => Number(e.floorIndex) === currentFloor);
+        if (!hasCurrentFloorWater) {
+          issues.push({
+            severity: 'info',
+            code: 'water.floorData.missingForCurrentFloor',
+            message: 'No per-floor water data entry exists for current floor',
+          });
+        }
+      }
+      if (waterState?.composeUniformState && waterState?.occluderPolicy) {
+        const hasOccUniform = Number(waterState.composeUniformState.hasWaterOccluderAlpha) > 0.5;
+        const shouldUseOcc = Boolean(waterState.occluderPolicy.shouldUseOccluderByFloor);
+        if (shouldUseOcc && !hasOccUniform) {
+          issues.push({
+            severity: 'warn',
+            code: 'water.occluder.expectedButMissing',
+            message: 'Viewed floor expects occluder masking, but water occluder uniform is disabled',
+          });
+        }
+        if (!shouldUseOcc && hasOccUniform) {
+          issues.push({
+            severity: 'info',
+            code: 'water.occluder.unexpectedOnGround',
+            message: 'Ground-floor view has occluder uniform enabled (usually expected only on upper floors)',
+          });
+        }
+      }
+      const floorAwareEnabledEffects = effectStates.filter((e) => e.enabled && e.hasOnFloorChange);
+      const stuckEffects = floorAwareEnabledEffects.filter((e) => {
+        const s = e.floorState || {};
+        const candidate = [s.floorIndex, s.floor, s._floorIndex, s._activeFloorIndex, s._maxFloorIndex, s._currentFloorIndex]
+          .find((v) => Number.isFinite(Number(v)));
+        return Number.isFinite(Number(candidate)) && currentFloor !== null && Number(candidate) !== currentFloor;
+      });
+      if (stuckEffects.length > 0) {
+        issues.push({
+          severity: 'warn',
+          code: 'effects.floorState.possibleMismatch',
+          message: `${stuckEffects.length} enabled effect(s) expose a floor state that does not match current floor`,
+          effectIds: stuckEffects.map((e) => e.id).slice(0, 20),
+        });
+      }
+      return { issues };
+    })();
+
+    const payload = {
+      title: 'Map Shine Levels Wiring Report',
+      generatedAt: new Date().toISOString(),
+      scene: {
+        id: sceneId,
+        name: sceneName,
+        levelsEnabled: isLevelsEnabledForScene(scene),
+      },
+      currentFloor: {
+        activeLevelContext: activeContext ? {
+          levelId: activeContext.levelId ?? null,
+          index: activeContext.index ?? null,
+          label: activeContext.label ?? null,
+          bottom: activeContext.bottom ?? null,
+          top: activeContext.top ?? null,
+          center: activeContext.center ?? null,
+          source: activeContext.source ?? null,
+        } : null,
+        floorStack: {
+          activeFloorIndex,
+          activeFloorBand,
+          floors: floorBands,
+        }
+      },
+      levelBands,
+      perLevel,
+      unmatched,
+      effects: {
+        total: effectStates.length,
+        enabled: effectStates.filter((e) => e.enabled).length,
+        initialized: effectStates.filter((e) => e.initialized).length,
+        sourceCounts: effectStates.reduce((acc, e) => {
+          const k = String(e.source || '(unknown)');
+          acc[k] = (acc[k] || 0) + 1;
+          return acc;
+        }, {}),
+        byLevelId: effectStates.reduce((acc, e) => {
+          const k = String(e.levelId || '(none)');
+          acc[k] = (acc[k] || 0) + 1;
+          return acc;
+        }, {}),
+        byFloorIndex: effectStates.reduce((acc, e) => {
+          const k = String(Number.isFinite(Number(e.floor)) ? Number(e.floor) : '(none)');
+          acc[k] = (acc[k] || 0) + 1;
+          return acc;
+        }, {}),
+        entries: effectStates
+      },
+      runtime: {
+        hasMapShine: Boolean(window.MapShine),
+        hasEffectComposer: Boolean(effectComposer),
+        hasFloorCompositorV2: Boolean(floorCompositorV2),
+      },
+      floorRenderBus: floorRenderBusState,
+      water: waterState,
+      cloudShadowWiring,
+      masks: {
+        registryMetrics: maskRegistryMetrics,
+        compositor: maskCompositorState,
+      },
+      diagnostics,
+    };
+
+    return JSON.stringify(payload, null, 2);
   }
 }

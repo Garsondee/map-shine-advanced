@@ -1,0 +1,24 @@
+/**
+ * @typedef {'healthy'|'degraded'|'broken'|'critical'|'unknown'} HealthStatus
+ * @typedef {'structural'|'behavioral'|'visual'} HealthTier
+ * @typedef {'info'|'warn'|'error'|'critical'} HealthSeverity
+ *
+ * @typedef {Object} HealthCheckResult
+ * @property {string} ruleId
+ * @property {HealthTier} tier
+ * @property {'pass'|'fail'|'skipped'} result
+ * @property {HealthSeverity} severity
+ * @property {string} message
+ * @property {Object<string, any>} [evidence]
+ *
+ * @typedef {Object} HealthRecord
+ * @property {string} effectId
+ * @property {string} levelKey
+ * @property {HealthStatus} status
+ * @property {number} firstSeenMs
+ * @property {number} lastSeenMs
+ * @property {number} [lastRecoveredMs]
+ * @property {boolean} rootCause
+ * @property {HealthCheckResult[]} checks
+ */
+

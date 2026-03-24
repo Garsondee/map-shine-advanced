@@ -24,6 +24,11 @@ import {
 import { SmartWindBehavior } from '../../particles/SmartWindBehavior.js';
 import { ThreeLightSource } from '../../effects/ThreeLightSource.js';
 
+// HEALTH-WIRING BADGE (Map Shine Breaker Box):
+// If you change this effect's lifecycle, token/wall behavior, dynamic-light
+// bridge, or mode-specific output logic, you MUST update HealthEvaluator
+// contracts/wiring for `PlayerLightEffectV2` to prevent silent failures.
+
 // NOTE: Avoid importing EffectBase/RenderLayers from EffectComposer here.
 // EffectComposer -> FloorCompositor -> PlayerLightEffectV2 -> EffectComposer
 // created a circular dependency that triggered a TDZ error at class definition.

@@ -134,6 +134,10 @@ export class IntroZoomEffect {
       return;
     }
 
+    // Keep level context aligned with intro targets so upper-floor single-token
+    // intros do not begin on the wrong floor.
+    await this._syncLevelForIntroTargets(tokens);
+
     const {
       framingPadding = 320,
       flashFadeInMs  = 350,
@@ -267,6 +271,78 @@ export class IntroZoomEffect {
       );
     } catch (_) {
       return [];
+    }
+  }
+
+  /**
+   * Ensure active floor context matches intro target elevations.
+   *
+   * Rules:
+   * - Single target token: switch to that token's floor.
+   * - Multiple target tokens spanning floors: use the lowest floor.
+   *
+   * @param {Token[]} tokens
+   * @returns {Promise<void>}
+   */
+  async _syncLevelForIntroTargets(tokens) {
+    try {
+      const controller = window.MapShine?.levelNavigationController ?? window.MapShine?.cameraFollower;
+      if (!controller || typeof controller.getAvailableLevels !== 'function' || typeof controller.setActiveLevel !== 'function') {
+        return;
+      }
+
+      const levels = controller.getAvailableLevels?.() || [];
+      if (!Array.isArray(levels) || levels.length <= 1) return;
+
+      const elevations = [];
+      for (const token of tokens) {
+        const elev = Number(token?.document?.elevation);
+        if (Number.isFinite(elev)) elevations.push(elev);
+      }
+      if (!elevations.length) return;
+
+      const targetElevation = elevations.length === 1
+        ? elevations[0]
+        : Math.min(...elevations);
+
+      const findIndex = (elevation) => {
+        if (typeof controller._findBestLevelIndexForElevation === 'function') {
+          return controller._findBestLevelIndexForElevation(elevation);
+        }
+        let bestIdx = 0;
+        let bestDist = Infinity;
+        for (let i = 0; i < levels.length; i += 1) {
+          const lvl = levels[i] || {};
+          const bottom = Number(lvl.bottom);
+          const top = Number(lvl.top);
+          const center = Number(lvl.center);
+          if (Number.isFinite(bottom) && Number.isFinite(top) && elevation >= bottom && elevation <= top) {
+            return i;
+          }
+          const d = Number.isFinite(center) ? Math.abs(center - elevation) : Infinity;
+          if (d < bestDist) {
+            bestDist = d;
+            bestIdx = i;
+          }
+        }
+        return bestIdx;
+      };
+
+      const nextIndex = findIndex(targetElevation);
+      const current = controller.getActiveLevelContext?.();
+      const currentIndex = Number(current?.index);
+      if (Number.isFinite(currentIndex) && currentIndex === nextIndex) return;
+
+      controller.setActiveLevel(nextIndex, { reason: 'intro-zoom-target-floor' });
+      await this._waitForAnimationFrames(1);
+
+      log.debug('IntroZoom: synced level context before zoom', {
+        tokenCount: elevations.length,
+        targetElevation,
+        targetLevelIndex: nextIndex,
+      });
+    } catch (err) {
+      log.warn('IntroZoom: failed to sync level before zoom', err);
     }
   }
 

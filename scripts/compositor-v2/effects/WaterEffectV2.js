@@ -1,6 +1,11 @@
 /**
  * @fileoverview WaterEffectV2 — V2 water post-processing pass.
  *
+ * HEALTH-WIRING BADGE (Map Shine Breaker Box):
+ * If you change this effect's lifecycle, core resources, floor behavior, or
+ * dependency bindings, you MUST update HealthEvaluator contracts/wiring for
+ * `WaterEffectV2` to prevent silent failures.
+ *
  * Applies water tint, wave distortion, caustics, specular (GGX), foam, murk,
  * rain ripples, and chromatic aberration to water areas defined by
  * `_Water` mask textures.
@@ -2864,6 +2869,19 @@ export class WaterEffectV2 {
   }
 
   /**
+   * Returns whether water data exists for an exact floor index.
+   * Useful for deciding whether floor-specific occlusion should apply.
+   *
+   * @param {number} floorIndex
+   * @returns {boolean}
+   */
+  hasFloorWaterData(floorIndex) {
+    const idx = Number(floorIndex);
+    if (!Number.isFinite(idx)) return false;
+    return this._floorWater.has(idx);
+  }
+
+  /**
    * Resize handler (no internal RTs to resize for the compose pass itself,
    * but mask RTs may need rebuilding if we ever tie them to screen resolution).
    */
@@ -3377,19 +3395,39 @@ export class WaterEffectV2 {
   }
 
   /**
-   * Resolve the floor index for a tile document (same logic as SpecularEffectV2).
+   * Resolve the floor index for a tile document.
+   *
+   * **Must stay aligned with `FloorRenderBus._resolveFloorIndex`** so water mask
+   * compositing keys (`_floorWater`) use the same floor band as tile placement.
+   * The previous implementation compared ad-hoc `flr.elevation` to the tile's
+   * range flags, which mis-bucketed masks when Levels bands changed and made
+   * ground water appear to “change” with the active level/floor view.
+   *
    * @private
    */
   _resolveFloorIndex(tileDoc, floors) {
+    if (!floors || floors.length <= 1) return 0;
+
     if (tileHasLevelsRange(tileDoc)) {
       const flags = readTileLevelsFlags(tileDoc);
-      if (flags) {
-        for (let i = 0; i < floors.length; i++) {
-          const flr = floors[i];
-          const elevation = flr.elevation ?? flr.rangeBottom ?? 0;
-          if (elevation >= flags.rangeBottom && elevation < flags.rangeTop) return i;
-        }
+      const tileBottom = Number(flags.rangeBottom);
+      const tileTop = Number(flags.rangeTop);
+      const tileMid = (tileBottom + tileTop) / 2;
+
+      for (let i = 0; i < floors.length; i++) {
+        const f = floors[i];
+        if (tileMid >= f.elevationMin && tileMid < f.elevationMax) return i;
       }
+      for (let i = 0; i < floors.length; i++) {
+        const f = floors[i];
+        if (tileBottom <= f.elevationMax && f.elevationMin <= tileTop) return i;
+      }
+    }
+
+    const elev = Number.isFinite(Number(tileDoc?.elevation)) ? Number(tileDoc.elevation) : 0;
+    for (let i = 0; i < floors.length; i++) {
+      const f = floors[i];
+      if (elev >= f.elevationMin && elev <= f.elevationMax) return i;
     }
     return 0;
   }

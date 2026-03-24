@@ -393,25 +393,24 @@ z = 1000 + floorIndex + 0.5  Overhead tiles for floor N
    1. `OverheadShadowsEffectV2` — overhead tile shadow projection (depth-pass gated)
    2. `BuildingShadowsEffectV2` — raymarched building shadows (cached world-space RT)
    3. `CloudEffectV2` — generates shadow RT (fed into Lighting) + cloud-top RT
-   4. `WindowLightEffectV2` — window light overlays fed into lighting accumulation RT
-   5. `LightingEffectV2` — `Final = Albedo × Light` (ambient + dynamic + cloud shadow + window)
-   6. Cloud tops blit
-   7. `WaterEffectV2` — water tint/distortion/specular/foam driven by `_Water` masks
-   8. `SkyColorEffectV2` — time-of-day atmospheric color grading
-   9. `BloomEffectV2` — HDR bloom via `UnrealBloomPass`
-   10. `ColorCorrectionEffectV2` — user color grade
-   11. `FilterEffectV2` — multiplicative overlay (ink, AO)
-   12. `AtmosphericFogEffectV2` — weather-driven distance fog
-   13. `DistortionManager` — heat haze, water ripple, magic swirl
-   14. `DotScreenEffectV2` / `HalftoneEffectV2` / `AsciiEffectV2` — stylistic filters
-   15. `DazzleOverlayEffectV2` — bright-light dazzle
-   16. `VisionModeEffectV2` — vision mode adjustments
-   17. `InvertEffectV2` / `SepiaEffectV2` — color transforms
-   18. `SharpenEffectV2` — unsharp mask
-   19. `FloorDepthBlurEffect` — Kawase blur on below-active floors
-   20. PIXI world channel composite (drawings, templates, notes, etc.)
-   21. `FogOfWarEffectV2` — LOS + exploration fog overlay
-   22. `LensEffectV2` — lens distortion, chromatic aberration, grime
+   4. `LightingEffectV2` — `Final = Albedo × Light` (ambient + dynamic + cloud shadow). **Sub-pass:** `WindowLightEffectV2`'s isolated scene is rendered into the light accumulation RT (additive) before the compose step, so window glow is multiplied by surface albedo.
+   5. Cloud tops blit
+   6. `WaterEffectV2` — water tint/distortion/specular/foam driven by `_Water` masks
+   7. `SkyColorEffectV2` — time-of-day atmospheric color grading
+   8. `BloomEffectV2` — HDR bloom via `UnrealBloomPass`
+   9. `ColorCorrectionEffectV2` — user color grade
+   10. `FilterEffectV2` — multiplicative overlay (ink, AO)
+   11. `AtmosphericFogEffectV2` — weather-driven distance fog
+   12. `DistortionManager` — heat haze, water ripple, magic swirl
+   13. `DotScreenEffectV2` / `HalftoneEffectV2` / `AsciiEffectV2` — stylistic filters
+   14. `DazzleOverlayEffectV2` — bright-light dazzle
+   15. `VisionModeEffectV2` — vision mode adjustments
+   16. `InvertEffectV2` / `SepiaEffectV2` — color transforms
+   17. `SharpenEffectV2` — unsharp mask
+   18. `FloorDepthBlurEffect` — Kawase blur on below-active floors
+   19. PIXI world channel composite (drawings, templates, notes, etc.)
+   20. `FogOfWarEffectV2` — LOS + exploration fog overlay
+   21. `LensEffectV2` — lens distortion, chromatic aberration, grime
 6. **Late Overlays** — Rendered directly to screen in Three Layer 31:
    - `MovementPreviewEffectV2` path lines/ghost tokens
    - `SelectionBoxEffectV2` drag-select rectangle
@@ -495,7 +494,7 @@ A standalone `THREE.Scene` that holds all tile meshes:
 **Post-Processing Effects** (fullscreen passes in step 5):
 - `LightingEffectV2` — Ambient + Foundry token lights + darkness + cloud shadow + window light. Reconstructs world XY from screen UVs via `uViewBounds`. `Final = Albedo × Light`. Roof alpha pre-pass for indoor occlusion.
 - `CloudEffectV2` — Procedural density field → shadow RT + cloud-top RT. Shadow RT fed to Lighting; cloud tops blitted after Lighting. Overhead-tile blocker pass for floor-aware shadow occlusion.
-- `WaterEffectV2` — Complete water system: noise, rain ripples, storm distortion, waves, foam, sand, murk (advected dual-FBM with wind), specular (GGX), chromatic aberration. Per-floor water data is built internally from composited `_Water` masks. Murk grain uses animated multi-octave `valueNoise` with wind advection via `uWindOffsetUv`.
+- `WaterEffectV2` — Complete water system: noise, rain ripples, storm distortion, waves, foam, sand, murk (advected dual-FBM with wind), specular (GGX), chromatic aberration. Per-floor water data is built internally from composited `_Water` masks; **tile→floor classification uses the same `_resolveFloorIndex` rules as `FloorRenderBus`** (elevation bands / Levels flags) so masks stay aligned with tile placement. Murk grain uses animated multi-octave `valueNoise` with wind advection via `uWindOffsetUv`.
 - `OverheadShadowsEffectV2` — Drop-shadow from overhead tiles. Depth-pass gated for tile projection shadows only; roof/indoor overhead contribution uses mask-derived depth (not `depthMod`).
 - `BuildingShadowsEffectV2` — Raymarched building shadows, baked to 2048² world-space RT; re-renders only on time/param change
 - `SkyColorEffectV2` — Time-of-day color tinting (dawn pink → dusk orange → night blue)
@@ -513,7 +512,7 @@ A standalone `THREE.Scene` that holds all tile meshes:
 - `MovementPreviewEffectV2` — Path lines, ghost token positions, drag preview
 - `SelectionBoxEffectV2` — GPU drag-select rectangle (Blueprint, Marching Ants, Neon presets)
 - `PlayerLightEffectV2` — Token-attached torch/flashlight. Wall collision via Foundry `checkCollision` with prioritized types `['sight','light','move']`. Dynamic flashlight aims clamped to wall-blocked target.
-- `CandleFlamesEffectV2` / `LightningEffectV2` / `SmellyFliesEffect` / `WindowLightEffectV2` — Map-point effects
+- `CandleFlamesEffectV2` / `LightningEffectV2` / `SmellyFliesEffect` — Map-point effects (`WindowLightEffectV2` is **not** here; it contributes via `LightingEffectV2` light RT)
 
 ### TimeManager (`core/time.js`)
 
@@ -560,6 +559,25 @@ Replaces the old `SceneComposer`-based mask pipeline with a GPU-accelerated per-
 - **`level-navigation-keybindings`** — Keyboard shortcuts (PgUp/PgDn) for floor navigation
 - **Wall manager floor filtering** — `WallManager` filters visible wall segments by floor elevation range
 - **`PortalDetector`** — Detects wall portals (stairs, elevators) for multi-floor traversal in pathfinding
+
+### Breaker Box render stack (Phase 1 diagnostics)
+
+The in-game **Breaker Box** panel includes a **render stack** column (metadata-only): ordered passes mirroring `FloorCompositor.render()`, with subpasses under `LightingEffectV2` (including **WindowLightEffectV2 → lightRT**). It explains that window glow is **not** drawn under bus albedo; it accumulates in the light buffer and is applied in the lighting compose step (`albedo × illumination`). Data is produced by `RenderStackSnapshotService` and stack rules by `RenderStackRules` (see `scripts/core/diagnostics/`).
+
+For **WindowLightEffectV2**, the snapshot also carries a capped **per-overlay inventory** (`tileId`, `floorIndex`, `renderOrder`, `visible`, `uMaskReady`) surfaced in the Breaker Box pipeline detail panel. `RenderStackRules` emits extra findings when the **active floor** has no matching overlays but other tiles do, or when every overlay is still classified as floor `0` while a higher floor is active — typical clues for Levels / floor-index wiring issues.
+
+**Health propagation (dependency graph):** degradation only flows along **`required`** / **`optional`** edges, not **`contextual`** (loose coupling). Propagation is **level-key scoped** (e.g. `floor:1` upstream does not stamp `floor:0` downstream). Stale rows for **active-floor-only** effects are **pruned** when the GM changes floors so the UI does not show misleading side-by-side `floor:0` / `floor:1` history. The Breaker Box shows **aggregate** status vs **current floor** status; the header dot follows **current floor** first.
+
+### Window light vs Breaker Box “healthy” (multi-floor)
+
+`WindowLightEffectV2` draws **transparent additive** quads in an isolated scene; `LightingEffectV2` renders that scene into the light RT, then **multiplies** `sceneRT` albedo by total illumination. A Breaker Box **healthy** result means masks loaded, meshes visible for the current floor slice, and key uniforms plausible — **not** a guarantee of correct final pixels.
+
+Common reasons window glow can look “wrong” on an upper floor while still “healthy”:
+
+1. **Draw order** — With `transparent: true`, Three.js may reorder draws unless `scene.sortObjects` is off and `renderOrder` encodes floor priority. Lower-floor quads overlapping the same footprint can otherwise win the blend on some frames or camera positions.
+2. **Albedo multiply** — The same light field × different `sceneRT` content (different floor visible under the window) changes perceived brightness/color; this is expected compositor math, not a mask failure.
+3. **Downstream passes** — `WaterEffectV2`, `DistortionManager`, `FloorDepthBlurEffect`, bloom, etc. run **after** lighting and change only some regions; they can make window-adjacent areas look floor-dependent.
+4. **Screen-space gating** — Floor-0 overlays still use roof-alpha gating (`uAllowRoofGate`) in **screen UVs**; when multiple floors are visible, that can interact oddly with upper-floor views (upper-floor overlays disable roof gate by design).
 
 ---
 

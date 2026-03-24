@@ -123,6 +123,9 @@ import { installLevelsApiFacade } from './levels-api-facade.js';
 import { ZoneManager } from './zone-manager.js';
 import { LevelsPerspectiveBridge } from './levels-perspective-bridge.js';
 import { IntroZoomEffect } from './intro-zoom-effect.js';
+import { HealthEvaluatorService } from '../core/diagnostics/HealthEvaluatorService.js';
+import { BreakerBoxDialog } from '../ui/breaker-box-dialog.js';
+import { BreakerBoxHeaderIndicator } from '../ui/breaker-box-header-indicator.js';
 
 const log = createLogger('Canvas');
 
@@ -521,6 +524,9 @@ let _threeContextLost = false;
 /** @type {import('three').WebGLRenderer|null} */
 let renderer = null;
 let effectComposer = null;
+let healthEvaluator = null;
+let breakerBoxDialog = null;
+let breakerBoxHeaderIndicator = null;
 
 /** @type {RenderLoop|null} */
 let renderLoop = null;
@@ -5287,6 +5293,29 @@ async function createThreeCanvas(scene) {
     // Attach to canvas as well for convenience (used by console snippets)
     safeCall(() => { canvas.mapShine = mapShine; }, 'canvas.mapShine', Severity.COSMETIC);
 
+    // Initialize diagnostics health evaluator once compositors/managers exist.
+    safeCall(() => {
+      const floorCompositor = window.MapShine?.floorCompositorV2 ?? effectComposer?._floorCompositorV2 ?? null;
+      if (!healthEvaluator) {
+        healthEvaluator = new HealthEvaluatorService({
+          floorCompositor,
+          effectComposer,
+          timeManager: effectComposer?.getTimeManager?.() ?? null,
+          maskManager: window.MapShine?.maskManager ?? null,
+          gpuSceneMaskCompositor: window.MapShine?.gpuSceneMaskCompositor ?? null,
+          weatherController: window.MapShine?.weatherController ?? null,
+        });
+        healthEvaluator.initialize();
+      } else {
+        // Scene reset path: refresh evaluator pointers.
+        healthEvaluator.floorCompositor = floorCompositor;
+        healthEvaluator.effectComposer = effectComposer;
+        healthEvaluator.timeManager = effectComposer?.getTimeManager?.() ?? null;
+      }
+      floorCompositor?.setHealthEvaluator?.(healthEvaluator);
+      window.MapShine.healthEvaluator = healthEvaluator;
+    }, 'healthEvaluator.initialize', Severity.DEGRADED);
+
     // Ensure initial light gizmo visibility is correct. ControlsIntegration computes
     // visibility based on active layer/tool, but it can run before managers are
     // attached to window.MapShine during startup.
@@ -5365,6 +5394,24 @@ async function createThreeCanvas(scene) {
           await new Promise(r => setTimeout(r, 0)); // yield
           if (window.MapShine) window.MapShine.uiManager = uiManager;
         }
+
+        // Breaker Box UI stubs: dialog + header bulb indicator.
+        safeCall(() => {
+          if (healthEvaluator && !breakerBoxDialog) {
+            breakerBoxDialog = new BreakerBoxDialog(healthEvaluator);
+            breakerBoxDialog.initialize();
+            if (window.MapShine) window.MapShine.breakerBoxDialog = breakerBoxDialog;
+          }
+          if (healthEvaluator && breakerBoxDialog && !breakerBoxHeaderIndicator) {
+            breakerBoxHeaderIndicator = new BreakerBoxHeaderIndicator({
+              healthEvaluator,
+              dialog: breakerBoxDialog,
+            });
+            const mountRoot = uiManager?.headerOverlay || uiManager?.pane?.element || uiManager?.container || null;
+            breakerBoxHeaderIndicator.attach(mountRoot);
+            if (window.MapShine) window.MapShine.breakerBoxHeaderIndicator = breakerBoxHeaderIndicator;
+          }
+        }, 'breakerBox.initialize', Severity.COSMETIC);
 
         // Weather should register before the GM control panel so `hydrateMainWeatherTweakpaneFromController`
         // and live-override DOM sync see `effectFolders.weather` + WC in a consistent order.
@@ -6695,6 +6742,28 @@ function destroyThreeCanvas() {
     uiManager = null;
     log.debug('UI manager disposed');
   }
+
+  if (breakerBoxHeaderIndicator) {
+    safeDispose(() => breakerBoxHeaderIndicator.dispose(), 'breakerBoxHeaderIndicator.dispose');
+    breakerBoxHeaderIndicator = null;
+  }
+
+  if (breakerBoxDialog) {
+    safeDispose(() => breakerBoxDialog.dispose(), 'breakerBoxDialog.dispose');
+    breakerBoxDialog = null;
+  }
+
+  if (healthEvaluator) {
+    safeDispose(() => healthEvaluator.dispose(), 'healthEvaluator.dispose');
+    healthEvaluator = null;
+  }
+
+  safeCall(() => {
+    if (!window.MapShine) return;
+    window.MapShine.healthEvaluator = null;
+    window.MapShine.breakerBoxDialog = null;
+    window.MapShine.breakerBoxHeaderIndicator = null;
+  }, 'destroyThreeCanvas.clearHealthGlobals', Severity.COSMETIC);
 
   // Dispose Enhanced Light Inspector
   if (enhancedLightInspector) {

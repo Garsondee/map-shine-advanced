@@ -100,6 +100,8 @@ export class FloorCompositor {
     this.scene = scene;
     /** @type {THREE.PerspectiveCamera} */
     this.camera = camera;
+    /** @type {any|null} */
+    this._healthEvaluator = null;
 
     /**
      * FloorRenderBus: owns a single THREE.Scene containing all tile meshes
@@ -538,6 +540,14 @@ export class FloorCompositor {
     this._hasOverlayLayerContent = false;
 
     log.debug('FloorCompositor created');
+  }
+
+  /**
+   * Attach optional health evaluator for diagnostics callbacks.
+   * @param {any|null} evaluator
+   */
+  setHealthEvaluator(evaluator) {
+    this._healthEvaluator = evaluator || null;
   }
 
   /**
@@ -2053,6 +2063,17 @@ export class FloorCompositor {
     // P4: Per-pass profiler — toggled via MapShine.__v2PassProfiler.
     // When active, each _profileStart/_profileEnd pair records wall-clock ms.
     const _profiling = !!window.MapShine?.__v2PassProfiler;
+    // Runtime alpha/isolation bisect flags (all optional, all default false).
+    // Usage: window.MapShine.__alphaIsolationDebug = { skipLensPass: true, ... }.
+    const _alphaIsoDebug = window.MapShine?.__alphaIsolationDebug ?? null;
+    const _skipCloudPass = _alphaIsoDebug?.skipCloudPass === true;
+    const _skipOverheadShadowPass = _alphaIsoDebug?.skipOverheadShadowPass === true;
+    const _skipBuildingShadowPass = _alphaIsoDebug?.skipBuildingShadowPass === true;
+    const _disableOverheadInLighting = _alphaIsoDebug?.disableOverheadInLighting === true;
+    const _disableRoofInLighting = _alphaIsoDebug?.disableRoofInLighting === true;
+    const _skipWaterPass = _alphaIsoDebug?.skipWaterPass === true;
+    const _disableWaterOccluder = _alphaIsoDebug?.disableWaterOccluder === true;
+    const _skipLensPass = _alphaIsoDebug?.skipLensPass === true;
     if (_profiling && !this._passTimings) {
       this._passTimings = {};
     } else if (!_profiling && this._passTimings) {
@@ -2072,20 +2093,24 @@ export class FloorCompositor {
     // Capture overhead tile alpha + compute soft shadow factor (V1 signature)
     if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: overheadShadows.render'); } catch (_) {} }
     if (_profiling) _profileT0 = performance.now();
-    try {
-      this._overheadShadowEffect?.render?.(this.renderer, this._renderBus._scene, this.camera);
-    } catch (err) {
-      log.warn('OverheadShadowsEffectV2 render threw, skipping overhead shadow pass:', err);
+    if (!_skipOverheadShadowPass) {
+      try {
+        this._overheadShadowEffect?.render?.(this.renderer, this._renderBus._scene, this.camera);
+      } catch (err) {
+        log.warn('OverheadShadowsEffectV2 render threw, skipping overhead shadow pass:', err);
+      }
     }
     if (_profiling) this._recordPassTiming('overheadShadowsRender', _profileT0);
     if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: overheadShadows.render DONE'); } catch (_) {} }
 
     if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: buildingShadows.render'); } catch (_) {} }
     if (_profiling) _profileT0 = performance.now();
-    try {
-      this._buildingShadowEffect?.render?.(this.renderer, this.camera);
-    } catch (err) {
-      log.warn('BuildingShadowsEffectV2 render threw, skipping building shadow pass:', err);
+    if (!_skipBuildingShadowPass) {
+      try {
+        this._buildingShadowEffect?.render?.(this.renderer, this.camera);
+      } catch (err) {
+        log.warn('BuildingShadowsEffectV2 render threw, skipping building shadow pass:', err);
+      }
     }
     if (_profiling) this._recordPassTiming('buildingShadowsRender', _profileT0);
     if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: buildingShadows.render DONE'); } catch (_) {} }
@@ -2128,7 +2153,7 @@ export class FloorCompositor {
     //          _cloudEffect._cloudTopRT        (blitted after lighting)
     if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: cloud.render'); } catch (_) {} }
     if (_profiling) _profileT0 = performance.now();
-    if (this._cloudEffect.enabled && this._cloudEffect.params.enabled) {
+    if (!_skipCloudPass && this._cloudEffect.enabled && this._cloudEffect.params.enabled) {
       this._cloudEffect.render(this.renderer);
     }
     if (_profiling) this._recordPassTiming('cloudRender', _profileT0);
@@ -2140,10 +2165,8 @@ export class FloorCompositor {
     let currentInput = this._sceneRT;
 
     // Lighting pass: sceneRT → postA.
-    // Window light scene is passed in so it accumulates into the light RT
-    // alongside ThreeLightSources — the compose shader then applies
-    // litColor = albedo * totalIllumination, which tints the glow by the
-    // surface colour instead of washing it out with pure white addition.
+    // Window scene renders to its own RT; compose merges it with Foundry lights
+    // (per-channel roof gating by active floor).
     // Cloud shadow RT is also passed so illumination is multiplied by the shadow factor.
     const winScene = this._windowLightEffect.enabled
       ? this._windowLightEffect._scene : null;
@@ -2164,10 +2187,10 @@ export class FloorCompositor {
       ? this._buildingShadowEffect.shadowFactorTexture : null;
     const buildingShadowOpacity = Number.isFinite(this._buildingShadowEffect?.params?.opacity)
       ? this._buildingShadowEffect.params.opacity : 0.75;
-    const overheadShadowTex = (this._overheadShadowEffect?.params?.enabled)
+    const overheadShadowTex = (!_disableOverheadInLighting && this._overheadShadowEffect?.params?.enabled)
       ? this._overheadShadowEffect.shadowFactorTexture : null;
-    const overheadRoofAlphaTex = this._overheadShadowEffect?.roofAlphaTexture ?? null;
-    const overheadRoofBlockTex = this._overheadShadowEffect?.roofBlockTexture ?? null;
+    const overheadRoofAlphaTex = _disableRoofInLighting ? null : (this._overheadShadowEffect?.roofAlphaTexture ?? null);
+    const overheadRoofBlockTex = _disableRoofInLighting ? null : (this._overheadShadowEffect?.roofBlockTexture ?? null);
     this._windowLightEffect?.setOverheadRoofAlphaTexture?.(
       overheadRoofAlphaTex,
       this._sceneRT?.width || 1,
@@ -2238,13 +2261,13 @@ export class FloorCompositor {
     // Water pass: refracts/tints/specular the fully graded scene.
     // Occlusion is handled via a deterministic occluder mask (upper floor tiles)
     // plus depth pass fallback inside the shader.
-    if (this._waterEffect?.enabled) {
+    if (!_skipWaterPass && this._waterEffect?.enabled) {
       // Build occluder mask for the *currently viewed* floor.
       // If on floor 0, no occluder needed.
       let occluderRT = null;
       try {
         const viewFloor = window.MapShine?.floorStack?.getActiveFloor()?.index ?? 0;
-        if (viewFloor > 0 && this._waterOccluderRT) {
+        if (!_disableWaterOccluder && viewFloor > 0 && this._waterOccluderRT) {
           this._renderBus.renderFloorMaskTo(this.renderer, this.camera, viewFloor, this._waterOccluderRT);
           occluderRT = this._waterOccluderRT;
         }
@@ -2372,7 +2395,7 @@ export class FloorCompositor {
     // We can't use _sceneRT (raw albedo) because it's too dark, and we can't use
     // currentInput (final graded output) because darkness level has already been applied.
     if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: lens.render'); } catch (_) {} }
-    if (this._lensEffect?.enabled && this._lensEffect?.params?.enabled) {
+    if (!_skipLensPass && this._lensEffect?.enabled && this._lensEffect?.params?.enabled) {
       const lensOutput = (currentInput === this._postA) ? this._postB : this._postA;
       if (this._lensEffect.render(this.renderer, this.camera, currentInput, lensOutput, this._postA)) {
         currentInput = lensOutput;
@@ -2691,12 +2714,36 @@ export class FloorCompositor {
     try {
       const resolved = this._resolveOutdoorsMask(context);
       let outdoorsTex = resolved.texture ?? null;
+      let waterOutdoorsTex = outdoorsTex;
 
       // Do not clobber a valid outdoors texture with transient null while floor
       // caches are still warming asynchronously.
       if (!outdoorsTex && this._lastOutdoorsTexture) {
         outdoorsTex = this._lastOutdoorsTexture;
       }
+
+      // Water can run in floor-fallback mode (for example only ground has _Water
+      // data while viewing an upper floor). In that case, sampling outdoors from
+      // the viewed floor can alter wave/rain response and make the same water body
+      // appear different per view floor. Prefer outdoors for the active water floor
+      // when available so fallback water remains visually consistent.
+      try {
+        const waterFloorIndex = Number(this._waterEffect?._activeFloorIndex);
+        if (Number.isFinite(waterFloorIndex)) {
+          const floors = window.MapShine?.floorStack?.getFloors?.() ?? [];
+          const waterFloor = floors.find((f) => Number(f?.index) === waterFloorIndex) ?? null;
+          const waterFloorKey = waterFloor?.compositorKey ?? null;
+          const compositor = window.MapShine?.sceneComposer?._sceneMaskCompositor;
+          const waterFloorTex = (compositor && waterFloorKey)
+            ? (compositor.getFloorTexture?.(waterFloorKey, 'outdoors') ?? null)
+            : null;
+          if (waterFloorTex) {
+            waterOutdoorsTex = waterFloorTex;
+          } else if (!waterOutdoorsTex && this._lastOutdoorsTexture) {
+            waterOutdoorsTex = this._lastOutdoorsTexture;
+          }
+        }
+      } catch (_) {}
 
       if (!force && outdoorsTex === this._lastOutdoorsTexture) return;
 
@@ -2705,7 +2752,7 @@ export class FloorCompositor {
 
       // Always propagate (including null) so consumers cannot keep stale masks.
       this._cloudEffect?.setOutdoorsMask?.(outdoorsTex);
-      this._waterEffect?.setOutdoorsMask?.(outdoorsTex);
+      this._waterEffect?.setOutdoorsMask?.(waterOutdoorsTex);
       this._skyColorEffect?.setOutdoorsMask?.(outdoorsTex);
       this._filterEffect?.setOutdoorsMask?.(outdoorsTex);
       this._atmosphericFogEffect?.setOutdoorsMask?.(outdoorsTex);
@@ -2771,13 +2818,19 @@ export class FloorCompositor {
       const floors = floorStack.getFloors?.() ?? [];
       const b = Number(ctx?.bottom);
       const t = Number(ctx?.top);
-      if (floors.length > 1 && Number.isFinite(b) && Number.isFinite(t)) {
-        const mid = (b + t) / 2;
+      // Levels commonly represents the top-most band as [bottom, Infinity].
+      // Accept finite-bottom contexts even when top is non-finite so active
+      // floor switching still works on the highest level.
+      if (floors.length > 1 && Number.isFinite(b)) {
+        const hasFiniteTop = Number.isFinite(t);
+        const mid = hasFiniteTop ? ((b + t) / 2) : b;
         let bestIdx = 0;
         let foundExactMatch = false;
         for (let i = 0; i < floors.length; i++) {
           const f = floors[i];
-          if (Number(f?.elevationMin) === b && Number(f?.elevationMax) === t) {
+          const fMin = Number(f?.elevationMin);
+          const fMax = Number(f?.elevationMax);
+          if (fMin === b && (!hasFiniteTop || fMax === t)) {
             bestIdx = i;
             foundExactMatch = true;
             break;
@@ -2785,7 +2838,7 @@ export class FloorCompositor {
           // If we haven't found an exact match, check if mid is within bounds.
           // Ignore infinity bounds for the mid check to avoid jumping to a
           // "catch-all" floor if a tighter floor contains the center.
-          if (mid >= Number(f?.elevationMin) && mid <= Number(f?.elevationMax)) {
+          if (!foundExactMatch && mid >= fMin && mid <= fMax) {
             bestIdx = i;
           }
         }
@@ -2851,6 +2904,12 @@ export class FloorCompositor {
     this._fireHeatMaskOutput = null;
     this._fireHeatMaskBlurRadius = -1;
     this._fireHeatMaskBlurPasses = -1;
+    try {
+      this._healthEvaluator?.handleFloorChange?.(
+        maxFloorIndex,
+        payload?.context ?? window.MapShine?.activeLevelContext ?? null
+      );
+    } catch (_) {}
     log.info(`FloorCompositor: visibility set to floors 0–${maxFloorIndex}`);
   }
 

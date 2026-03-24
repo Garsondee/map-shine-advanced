@@ -14,7 +14,7 @@
  *   - Depth pass occlusion
  *   - Cloud shadow integration (tCloudShadow)
  *   - Outdoors mask / indoor damping (tOutdoorsMask)
- *   - Water occluder alpha (tWaterOccluderAlpha)
+ *   - Water occluder alpha (tWaterOccluderAlpha; screen-space tile union, not tWaterData SDF)
  *
  * Preserved from V1 (all visual features):
  *   - Texture-based noise (replaces procedural hash for fast compile)
@@ -1444,6 +1444,20 @@ vec3 applyMurk(vec2 sceneUv, float t, float inside, float shore, float outdoorSt
   return mix(baseColor, muckyCol, murkFactor);
 }
 
+// Upper-floor screen mask: 5-tap cross filter + shared smooth band. The RT is a
+// union of axis-aligned tile quads; without filtering + soft transition the
+// silhouette shows stair-stepping (often mistaken for water SDF issues).
+float waterOccluderAlphaSoft(vec2 screenUv) {
+  if (uHasWaterOccluderAlpha < 0.5) return 0.0;
+  vec2 px = 1.0 / max(uResolution, vec2(1.0));
+  float c = texture2D(tWaterOccluderAlpha, screenUv).a;
+  float n = texture2D(tWaterOccluderAlpha, screenUv + vec2(0.0, px.y)).a;
+  float s = texture2D(tWaterOccluderAlpha, screenUv - vec2(0.0, px.y)).a;
+  float e = texture2D(tWaterOccluderAlpha, screenUv + vec2(px.x, 0.0)).a;
+  float w = texture2D(tWaterOccluderAlpha, screenUv - vec2(px.x, 0.0)).a;
+  return 0.52 * c + 0.12 * (n + s + e + w);
+}
+
 // Safe sampling for refraction/distortion taps.
 // Prevents pulling pixels from:
 //   - Occluded (upper-floor) regions
@@ -1452,9 +1466,8 @@ float refractTapValid(vec2 screenUv) {
   float vOcc = 1.0;
   // Occluder gating in screen UV.
   if (uHasWaterOccluderAlpha > 0.5) {
-    float occ = texture2D(tWaterOccluderAlpha, screenUv).a;
-    // Soft cutoff so refraction smoothly pins at the silhouette edge.
-    vOcc = 1.0 - smoothstep(0.45, 0.55, occ);
+    float occ = waterOccluderAlphaSoft(screenUv);
+    vOcc = 1.0 - smoothstep(0.34, 0.66, occ);
   }
 
   // Water-body gating: if the shifted UV lands outside the water mask,
@@ -1483,14 +1496,13 @@ void main() {
   vec4 base = texture2D(tDiffuse, vUv);
   float isEnabled = step(0.5, uWaterEnabled) * step(0.5, uHasWaterData);
   if (isEnabled < 0.5) { gl_FragColor = base; return; }
-  // Occluder mask: when viewing upper floors, we render upper-floor tiles
-  // into this mask. Any non-zero alpha means the current pixel is covered
-  // by an upper-floor tile and should not receive water shading.
+  // Occluder mask: upper-floor tiles rendered to screen-space RT (tile union →
+  // stair-step edges). Soft-filter + blend instead of a hard 0.5 test.
+  float occluderBlend = 0.0;
   if (uHasWaterOccluderAlpha > 0.5) {
-    float occ = texture2D(tWaterOccluderAlpha, vUv).a;
-    // Use a relatively high cutoff so soft alpha edges / shadows in upper-floor
-    // art don't suppress water far away from the visible tile silhouette.
-    if (occ > 0.5) {
+    float occ = waterOccluderAlphaSoft(vUv);
+    occluderBlend = smoothstep(0.36, 0.64, occ);
+    if (occluderBlend > 0.995) {
       gl_FragColor = base;
       return;
     }
@@ -1561,7 +1573,7 @@ void main() {
     // 7 = Distortion, 8 = Occluder
     if (d < 7.5) { gl_FragColor = vec4(vec3(distMask), 1.0); return; }
     if (d < 8.5) {
-      float occ = (uHasWaterOccluderAlpha > 0.5) ? texture2D(tWaterOccluderAlpha, vUv).a : 0.0;
+      float occ = (uHasWaterOccluderAlpha > 0.5) ? waterOccluderAlphaSoft(vUv) : 0.0;
       gl_FragColor = vec4(vec3(occ), 1.0);
       return;
     }
@@ -2068,6 +2080,7 @@ void main() {
   }
   col += specCol;
 
+  col = mix(col, base.rgb, occluderBlend);
   gl_FragColor = vec4(col, base.a);
 }
 `;

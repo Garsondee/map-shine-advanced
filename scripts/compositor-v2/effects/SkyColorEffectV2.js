@@ -1,6 +1,11 @@
 /**
  * @fileoverview SkyColorEffectV2 — V2 screen-space color grading post-processing pass.
  *
+ * HEALTH-WIRING BADGE (Map Shine Breaker Box):
+ * If you change init/render, `_composeMaterial`, or consumers (water / dust / window
+ * light sky buffers), you MUST update HealthEvaluator contracts for `SkyColorEffectV2`
+ * and dependency edges to prevent silent failures.
+ *
  * Applies time-of-day atmospheric color grading to the lit scene:
  *   - Exposure, white balance (temperature + tint)
  *   - Brightness, contrast, saturation, vibrance

@@ -1287,6 +1287,55 @@ export const consoleHelpers = {
   },
 
   /**
+   * Alpha/isolation bisect toggles (runtime, no reload required).
+   * Usage:
+   *   MapShine.debug.alphaIsolationSet({ skipLensPass: true })
+   *   MapShine.debug.alphaIsolationReset()
+   */
+  alphaIsolationStatus() {
+    return { ...(window.MapShine?.__alphaIsolationDebug ?? {}) };
+  },
+
+  alphaIsolationSet(flags = {}) {
+    if (!window.MapShine) window.MapShine = {};
+    const prev = window.MapShine.__alphaIsolationDebug ?? {};
+    window.MapShine.__alphaIsolationDebug = { ...prev, ...flags };
+    return { ...window.MapShine.__alphaIsolationDebug };
+  },
+
+  alphaIsolationReset() {
+    if (window.MapShine) delete window.MapShine.__alphaIsolationDebug;
+    return true;
+  },
+
+  alphaIsolationPreset(name = 'off') {
+    const n = String(name || 'off').toLowerCase();
+    if (!window.MapShine) window.MapShine = {};
+    if (n === 'off' || n === 'reset') {
+      delete window.MapShine.__alphaIsolationDebug;
+      return {};
+    }
+    const presets = {
+      noLens: { skipLensPass: true },
+      noStamp: { skipFinalAlphaStamp: true },
+      noWaterOccluder: { disableWaterOccluder: true },
+      noWater: { skipWaterPass: true },
+      noOverhead: { skipOverheadShadowPass: true, disableOverheadInLighting: true, disableRoofInLighting: true },
+      noCloud: { skipCloudPass: true },
+      noBuilding: { skipBuildingShadowPass: true },
+    };
+    const chosen = presets[n];
+    if (!chosen) {
+      return {
+        error: `Unknown preset '${name}'`,
+        available: Object.keys(presets),
+      };
+    }
+    window.MapShine.__alphaIsolationDebug = { ...(window.MapShine.__alphaIsolationDebug ?? {}), ...chosen };
+    return { ...window.MapShine.__alphaIsolationDebug };
+  },
+
+  /**
    * Show help
    */
   help() {
@@ -1300,6 +1349,10 @@ Available commands (access via MapShine.debug):
   .diagnoseFloorRendering() - Comprehensive floor rendering report
   .diagnoseFloorDeepdive()  - Deep-dive: _floorCache RTs, uniform snapshot, tile overlays, _tileEffectMasks
   .diagnoseFloorMasks()     - Quick snapshot of per-effect mask bindings
+  .alphaIsolationStatus()   - Read active alpha/isolation debug flags
+  .alphaIsolationSet(obj)   - Merge alpha/isolation debug flags
+  .alphaIsolationPreset(id) - Apply a bisect preset (noLens/noStamp/noWaterOccluder/noWater/noOverhead/noCloud/noBuilding/off)
+  .alphaIsolationReset()    - Clear alpha/isolation debug flags
   .diagnoseSpecular()       - Check specular effect health
   .resetSpecular()          - Reset to defaults
   .exportParameters()       - Export current params as JSON

@@ -42,6 +42,7 @@ const MOTION_ABOVE_TOKENS_OFFSET = 9950;
 // Effects (specular/prism/iridescence) inherit tile renderOrder and add a small
 // positive delta, so keep tile indices well below token order slots.
 const MAX_SORT_WITHIN_FLOOR_GROUP = 4800;
+const UPPER_FLOOR_ALPHA_CUTOFF = 0.4;
 
 // ─── FloorRenderBus ──────────────────────────────────────────────────────────
 
@@ -198,9 +199,7 @@ export class FloorRenderBus {
 
       // Load texture via THREE.TextureLoader — HTML <img>, straight alpha.
       this._loader.load(src, (tex) => {
-        tex.colorSpace = window.THREE.SRGBColorSpace;
-        tex.flipY = true; // Default Three.js convention for image textures.
-        tex.needsUpdate = true;
+        this._configureTileAlbedoTexture(tex);
         const entry = this._tiles.get(tileId);
         if (entry) {
           entry.material.map = tex;
@@ -485,6 +484,18 @@ export class FloorRenderBus {
       if (!Number.isFinite(currentOpacity) || Math.abs(currentOpacity - targetOpacity) > 0.0005) {
         entry.material.opacity = targetOpacity;
       }
+      const desiredAlphaTest = (entry.floorIndex > 0 && targetOpacity >= 0.95)
+        ? UPPER_FLOOR_ALPHA_CUTOFF
+        : 0.0;
+      const desiredPremultipliedAlpha = entry.floorIndex > 0;
+      if (entry.material.premultipliedAlpha !== desiredPremultipliedAlpha) {
+        entry.material.premultipliedAlpha = desiredPremultipliedAlpha;
+        entry.material.needsUpdate = true;
+      }
+      if (Math.abs(Number(entry.material.alphaTest ?? 0) - desiredAlphaTest) > 0.0001) {
+        entry.material.alphaTest = desiredAlphaTest;
+        entry.material.needsUpdate = true;
+      }
 
       // Shader overlays (e.g. FluidEffectV2) can carry their own tile-opacity
       // uniform path. Keep it in sync with the same runtime tile fade.
@@ -602,7 +613,11 @@ export class FloorRenderBus {
 
     if (entry.material) {
       entry.material.opacity = alpha;
+      entry.material.alphaTest = (floorIndex > 0 && Number(alpha) >= 0.95)
+        ? UPPER_FLOOR_ALPHA_CUTOFF
+        : 0.0;
       entry.material.transparent = true;
+      entry.material.premultipliedAlpha = floorIndex > 0;
       entry.material.needsUpdate = true;
     }
 
@@ -664,6 +679,18 @@ export class FloorRenderBus {
       const currentOpacity = Number(entry.material.opacity);
       if (!Number.isFinite(currentOpacity) || Math.abs(currentOpacity - staticAlpha) > 0.0005) {
         entry.material.opacity = staticAlpha;
+      }
+      const desiredAlphaTest = (entry.floorIndex > 0 && staticAlpha >= 0.95)
+        ? UPPER_FLOOR_ALPHA_CUTOFF
+        : 0.0;
+      const desiredPremultipliedAlpha = entry.floorIndex > 0;
+      if (entry.material.premultipliedAlpha !== desiredPremultipliedAlpha) {
+        entry.material.premultipliedAlpha = desiredPremultipliedAlpha;
+        entry.material.needsUpdate = true;
+      }
+      if (Math.abs(Number(entry.material.alphaTest ?? 0) - desiredAlphaTest) > 0.0001) {
+        entry.material.alphaTest = desiredAlphaTest;
+        entry.material.needsUpdate = true;
       }
 
       const uniforms = entry.material.uniforms;
@@ -1093,7 +1120,6 @@ export class FloorRenderBus {
    */
   _addTileMesh(tileId, floorIndex, texture, cx, cy, z, w, h, rotation, alpha, renderOrder = 0, isOverhead = false, cloudShadowBlockerEnabled = false) {
     const THREE = window.THREE;
-
     const mat = new THREE.MeshBasicMaterial({
       map: texture || null,
       transparent: true,
@@ -1101,6 +1127,8 @@ export class FloorRenderBus {
       depthWrite: false,
       side: THREE.DoubleSide,
       opacity: alpha,
+      alphaTest: (floorIndex > 0 && Number(alpha) >= 0.95) ? UPPER_FLOOR_ALPHA_CUTOFF : 0.0,
+      premultipliedAlpha: floorIndex > 0,
     });
 
     const geom = new THREE.PlaneGeometry(w, h);
@@ -1168,9 +1196,7 @@ export class FloorRenderBus {
       const current = this._tiles.get(tileId);
       if (!current || current.textureSrc !== src) return;
 
-      tex.colorSpace = window.THREE.SRGBColorSpace;
-      tex.flipY = true;
-      tex.needsUpdate = true;
+      this._configureTileAlbedoTexture(tex);
 
       try { current.material?.map?.dispose?.(); } catch (_) {}
       current.material.map = tex;
@@ -1179,6 +1205,30 @@ export class FloorRenderBus {
     }, undefined, (err) => {
       log.warn(`FloorRenderBus: failed to load texture for tile ${tileId}: ${src}`, err);
     });
+  }
+
+  /**
+   * Configure tile albedo texture sampling to reduce alpha fringe growth.
+   *
+   * Transparent tile textures can show stepped dark halos when mipmaps are
+   * generated from dark RGB in fully-transparent texels. Disable mipmaps for
+   * bus tile albedo and clamp edge sampling to keep silhouettes stable.
+   *
+   * @param {import('three').Texture|null} tex
+   * @private
+   */
+  _configureTileAlbedoTexture(tex) {
+    if (!tex) return;
+    const THREE = window.THREE;
+    tex.colorSpace = THREE?.SRGBColorSpace ?? tex.colorSpace;
+    tex.flipY = true;
+    tex.generateMipmaps = false;
+    tex.minFilter = THREE?.LinearFilter ?? tex.minFilter;
+    tex.magFilter = THREE?.LinearFilter ?? tex.magFilter;
+    tex.wrapS = THREE?.ClampToEdgeWrapping ?? tex.wrapS;
+    tex.wrapT = THREE?.ClampToEdgeWrapping ?? tex.wrapT;
+    tex.premultiplyAlpha = true;
+    tex.needsUpdate = true;
   }
 
   /**

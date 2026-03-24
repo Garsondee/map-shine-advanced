@@ -1,6 +1,11 @@
 /**
  * @fileoverview V2 Fire Sparks Effect — per-floor particle systems from _Fire masks.
  *
+ * HEALTH-WIRING BADGE (Map Shine Breaker Box):
+ * If you change this effect's lifecycle, floor-state activation, particle
+ * registration, or dependency bindings, you MUST update HealthEvaluator
+ * contracts/wiring for `FireEffectV2` to prevent silent failures.
+ *
  * Architecture:
  *   Owns a three.quarks BatchedRenderer added to the FloorRenderBus scene.
  *   For each tile with a `_Fire` mask, scans the mask on the CPU to build spawn
@@ -56,6 +61,7 @@ const GROUND_Z = 1000;
 const RENDER_ORDER_PER_FLOOR = 10000;
 const OVERHEAD_OFFSET = 5000;
 const FIRE_RENDER_ORDER_BASE = OVERHEAD_OFFSET - 4;
+const FIRE_RENDER_ORDER_ABOVE_OVERHEAD_BASE = 9955;
 
 // Spatial bucket size for splitting large fire masks into smaller emitters (px).
 const BUCKET_SIZE = 2000;
@@ -949,7 +955,10 @@ export class FireEffectV2 {
     if (!this._batchRenderer) return;
     const safeFloorIndex = Number.isFinite(Number(maxFloorIndex)) ? Number(maxFloorIndex) : 0;
     const floorBandStart = safeFloorIndex * RENDER_ORDER_PER_FLOOR;
-    this._batchRenderer.renderOrder = floorBandStart + (OVERHEAD_OFFSET - 1);
+    // Upper-floor fire should sit above same-floor overhead tiles so it cannot
+    // appear visually "under" the active upper level.
+    const base = safeFloorIndex > 0 ? FIRE_RENDER_ORDER_ABOVE_OVERHEAD_BASE : (OVERHEAD_OFFSET - 1);
+    this._batchRenderer.renderOrder = floorBandStart + base;
   }
 
   /**
@@ -961,7 +970,8 @@ export class FireEffectV2 {
     const safeFloorIndex = Number.isFinite(Number(floorIndex)) ? Number(floorIndex) : 0;
     const floorBandStart = safeFloorIndex * RENDER_ORDER_PER_FLOOR;
     const safeTypeOffset = Math.max(0, Math.min(2, Number(typeOffset) || 0));
-    return floorBandStart + FIRE_RENDER_ORDER_BASE + safeTypeOffset;
+    const base = safeFloorIndex > 0 ? FIRE_RENDER_ORDER_ABOVE_OVERHEAD_BASE : FIRE_RENDER_ORDER_BASE;
+    return floorBandStart + base + safeTypeOffset;
   }
 
   /** Add a floor's systems to the BatchedRenderer + scene. @private */
@@ -1206,11 +1216,32 @@ export class FireEffectV2 {
       const flags = readTileLevelsFlags(tileDoc);
       const tileBottom = Number(flags.rangeBottom);
       const tileTop = Number(flags.rangeTop);
-      const tileMid = (tileBottom + tileTop) / 2;
-      for (let i = 0; i < floors.length; i++) {
-        const f = floors[i];
-        if (tileMid >= f.elevationMin && tileMid <= f.elevationMax) return i;
+      const topFinite = Number.isFinite(tileTop);
+      const tileMid = topFinite ? ((tileBottom + tileTop) / 2) : tileBottom;
+
+      // Prefer anchoring by the tile's bottom elevation (Levels-authoritative).
+      // This avoids misrouting open-ended ranges and boundary-aligned ranges to
+      // the lower floor band.
+      if (Number.isFinite(tileBottom)) {
+        for (let i = 0; i < floors.length; i++) {
+          const f = floors[i];
+          const isLast = i === floors.length - 1;
+          if (tileBottom >= f.elevationMin && (tileBottom < f.elevationMax || (isLast && tileBottom <= f.elevationMax))) {
+            return i;
+          }
+        }
       }
+
+      if (Number.isFinite(tileMid)) {
+        for (let i = 0; i < floors.length; i++) {
+          const f = floors[i];
+          const isLast = i === floors.length - 1;
+          if (tileMid >= f.elevationMin && (tileMid < f.elevationMax || (isLast && tileMid <= f.elevationMax))) {
+            return i;
+          }
+        }
+      }
+
       for (let i = 0; i < floors.length; i++) {
         const f = floors[i];
         if (tileBottom <= f.elevationMax && f.elevationMin <= tileTop) return i;

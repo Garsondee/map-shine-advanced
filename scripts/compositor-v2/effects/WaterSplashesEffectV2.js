@@ -1,6 +1,11 @@
 /**
  * @fileoverview V2 Water Splashes Effect — per-floor particle systems from _Water masks.
  *
+ * HEALTH-WIRING BADGE (Map Shine Breaker Box):
+ * If you change populate/init, BatchedRenderer wiring, per-floor `_floorStates`,
+ * or the water-enabled gating path, you MUST update HealthEvaluator contracts for
+ * `WaterSplashesEffectV2` (and edges from `WaterEffectV2`) to prevent silent failures.
+ *
  * Architecture:
  *   Owns a three.quarks BatchedRenderer added to the FloorRenderBus scene via
  *   addEffectOverlay(). For each tile with a `_Water` mask, scans the mask on

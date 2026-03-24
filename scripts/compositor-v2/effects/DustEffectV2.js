@@ -1,6 +1,11 @@
 /**
  * @fileoverview V2 Dust effect — per-floor Quarks particles from _Dust masks.
  *
+ * HEALTH-WIRING BADGE (Map Shine Breaker Box):
+ * If you change lifecycle, `_floorStates`, BatchedRenderer integration, or sky-tint
+ * inputs, you MUST update HealthEvaluator contracts for `DustEffectV2` (and contextual
+ * edges from `SkyColorEffectV2`) to prevent silent failures.
+ *
  * Architecture mirrors FireEffectV2:
  * - Discovers `_Dust` masks from scene background + tiles
  * - CPU scans masks once per populate and stores world-space spawn points

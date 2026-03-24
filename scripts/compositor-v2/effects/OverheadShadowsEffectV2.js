@@ -1,5 +1,9 @@
 /**
  * @fileoverview Overhead Shadows Effect V2 (adapted from V1)
+ * HEALTH-WIRING BADGE (Map Shine Breaker Box):
+ * If you change this effect's capture passes, temporary override restoration,
+ * floor/context behavior, or output textures, you MUST update HealthEvaluator
+ * contracts/wiring for `OverheadShadowsEffectV2` to prevent silent failures.
  * Renders soft, directional shadows cast by overhead tiles onto the ground.
  * @module compositor-v2/effects/OverheadShadowsEffectV2
  */

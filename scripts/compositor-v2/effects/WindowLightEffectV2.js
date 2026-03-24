@@ -1,6 +1,11 @@
 /**
  * @fileoverview V2 Window Light Effect — per-tile additive window glow overlays.
  *
+ * HEALTH-WIRING BADGE (Map Shine Breaker Box):
+ * If you change this effect's lifecycle, floor visibility logic, shader inputs,
+ * or cross-effect texture dependencies, you MUST update HealthEvaluator
+ * contracts/wiring for `WindowLightEffectV2` to prevent silent failures.
+ *
  * Architecture:
  *   - For each tile that has a `_Windows` (or legacy `_Structural`) mask, create
  *     an additive overlay mesh in an ISOLATED scene (NOT the FloorRenderBus scene).
@@ -46,7 +51,7 @@ export class WindowLightEffectV2 {
     this._scene = null;
 
     /** @type {number} Active floor index for visibility gating. */
-    this._activeMaxFloor = Infinity;
+    this._activeFloorIndex = 0;
 
     /**
      * Per-tile overlay entries.
@@ -255,6 +260,11 @@ export class WindowLightEffectV2 {
 
     this._scene = new THREE.Scene();
     this._scene.name = 'WindowLightScene';
+    // Transparent additive quads: if sortObjects stays true, Three.js may reorder
+    // draws every frame by camera distance. That can make stacked floor overlays
+    // (same footprint, different Z) appear to "lose" upper-floor light when the
+    // active floor / camera changes. Use explicit renderOrder per floor instead.
+    this._scene.sortObjects = false;
 
     this._buildSharedUniforms();
 
@@ -284,9 +294,13 @@ export class WindowLightEffectV2 {
    * @param {number} maxFloorIndex
    */
   onFloorChange(maxFloorIndex) {
-    this._activeMaxFloor = maxFloorIndex;
+    const prev = this._activeFloorIndex;
+    this._activeFloorIndex = Number.isFinite(Number(maxFloorIndex)) ? Number(maxFloorIndex) : 0;
     for (const entry of this._overlays.values()) {
-      entry.mesh.visible = entry.floorIndex <= maxFloorIndex;
+      entry.mesh.visible = this._isFloorVisible(entry.floorIndex);
+    }
+    if (prev !== this._activeFloorIndex) {
+      log.info(`WindowLightEffectV2 floor visibility switched: ${prev} -> ${this._activeFloorIndex}`);
     }
   }
 
@@ -306,6 +320,7 @@ export class WindowLightEffectV2 {
     const worldH = foundrySceneData?.height ?? canvas?.scene?.height ?? 0;
 
     let overlayCount = 0;
+    const perFloorCounts = new Map();
 
     // ── Process scene background image ────────────────────────────────────
     // The background is not in canvas.scene.tiles.contents — it's handled
@@ -344,6 +359,7 @@ export class WindowLightEffectV2 {
         });
 
         overlayCount++;
+        perFloorCounts.set(0, (perFloorCounts.get(0) ?? 0) + 1);
         this.params.hasWindowMask = true;
         log.info(`WindowLightEffectV2: created background overlay (${sceneW}x${sceneH})`);
       }
@@ -385,7 +401,11 @@ export class WindowLightEffectV2 {
       // Z in bus coordinates.
       const GROUND_Z = 1000;
       const z = GROUND_Z + floorIndex + WINDOW_Z_OFFSET;
-      const intensityMultiplier = isOverheadTile
+      // Levels-aware overhead handling:
+      // On upper floors, "overhead" is often used for floor reveal behavior, not
+      // roof semantics. Do not attenuate those window overlays as roof-light.
+      const treatAsRoofOverhead = isOverheadTile && floorIndex <= 0;
+      const intensityMultiplier = treatAsRoofOverhead
         ? Math.max(0.0, Math.min(1.0, Number(this.params.overheadLightIntensity) || 0.0))
         : 1.0;
 
@@ -401,8 +421,23 @@ export class WindowLightEffectV2 {
       });
 
       overlayCount++;
+      perFloorCounts.set(floorIndex, (perFloorCounts.get(floorIndex) ?? 0) + 1);
       this.params.hasWindowMask = true;
     }
+
+    // Re-apply visibility after repopulate so overlays created while on an
+    // upper floor do not flash lower-floor window light for a frame.
+    const activeFloor = window.MapShine?.floorStack?.getActiveFloor?.();
+    const busVisibleFloor = Number(window.MapShine?.floorCompositorV2?._renderBus?._visibleMaxFloorIndex);
+    const activeIdx = Number.isFinite(Number(activeFloor?.index))
+      ? Number(activeFloor.index)
+      : (Number.isFinite(busVisibleFloor) ? busVisibleFloor : this._activeFloorIndex);
+    this.onFloorChange(activeIdx);
+    const floorBreakdown = Array.from(perFloorCounts.entries())
+      .sort((a, b) => a[0] - b[0])
+      .map(([fi, count]) => `f${fi}:${count}`)
+      .join(', ');
+    log.info(`WindowLightEffectV2 floor assignment: active=${activeIdx}, overlays=[${floorBreakdown || 'none'}]`);
 
     log.info(`WindowLightEffectV2 populated: ${overlayCount} overlay(s) (${bgSrc ? '1 bg + ' : ''}${overlayCount - (bgSrc && overlayCount > 0 ? 1 : 0)} tiles)`);
   }
@@ -416,6 +451,14 @@ export class WindowLightEffectV2 {
 
     if (this._sharedUniforms?.uTime) {
       this._sharedUniforms.uTime.value = typeof timeInfo?.elapsed === 'number' ? timeInfo.elapsed : 0;
+    }
+
+    // This effect uses an isolated scene (not FloorRenderBus), so rely on a
+    // per-frame floor poll as a safety net in case floor-change events arrive
+    // out of order or are skipped during context transitions.
+    const polledActiveFloor = Number(window.MapShine?.floorStack?.getActiveFloor?.()?.index);
+    if (Number.isFinite(polledActiveFloor) && polledActiveFloor !== this._activeFloorIndex) {
+      this.onFloorChange(polledActiveFloor);
     }
 
     // Sync params → uniforms (cheap; shared uniforms update all overlays).
@@ -505,7 +548,9 @@ export class WindowLightEffectV2 {
     u.uOverheadLightIntensity.value = overheadIntensity;
     for (const entry of this._overlays.values()) {
       const overlayIntensity = entry.isOverhead
-        ? (overheadEnabled ? overheadIntensity : 0.0)
+        // Levels-aware overhead handling:
+        // Upper-floor overhead tiles should still emit window light.
+        ? ((entry.floorIndex <= 0) ? (overheadEnabled ? overheadIntensity : 0.0) : 1.0)
         : 1.0;
       const overlayUniform = entry.material?.uniforms?.uOverlayIntensity;
       if (overlayUniform) overlayUniform.value = overlayIntensity;
@@ -656,6 +701,13 @@ export class WindowLightEffectV2 {
       uMask: { value: null },
       uMaskReady: { value: 0.0 },
       uOverlayIntensity: { value: Math.max(0.0, Number(intensityMultiplier) || 0.0) },
+      // Overhead roof gating is only intended for non-overhead overlays
+      // (e.g. background windows), not overhead-tile window overlays.
+      uIsOverheadOverlay: { value: isOverhead ? 1.0 : 0.0 },
+      // Ground-floor-only roof gating: upper-floor window overlays should not
+      // be suppressed by a screen-space roof-alpha map authored for single-floor
+      // leakage prevention.
+      uAllowRoofGate: { value: floorIndex <= 0 ? 1.0 : 0.0 },
       // 1/texWidth, 1/texHeight — set once texture loads.
       uWindowTexelSize: { value: new THREE.Vector2(1.0 / w, 1.0 / h) },
     };
@@ -716,6 +768,8 @@ export class WindowLightEffectV2 {
         uniform float uRgbShiftAmount;
         uniform float uRgbShiftAngle;
         uniform float uOverlayIntensity;
+        uniform float uIsOverheadOverlay;
+        uniform float uAllowRoofGate;
         uniform vec2  uWindowTexelSize;
         uniform sampler2D uMask;
         uniform float uMaskReady;
@@ -749,7 +803,11 @@ export class WindowLightEffectV2 {
 
           vec2 baseUv = clamp(vUv + sunOffset + rainOffset, 0.001, 0.999);
           vec4 mCenter = texture2D(uMask, baseUv);
-          if (mCenter.a < 0.01) discard;
+          // Strict alpha coverage: transparent mask pixels emit no light.
+          // This prevents full-tile leakage when RGB contains residual values
+          // outside intended window bounds.
+          float boundaryCoverage = mCenter.a;
+          if (boundaryCoverage < 0.01) discard;
 
           // RGB Shift (chromatic dispersion / refraction):
           // Sample the mask three times — R channel offset forward along the
@@ -759,9 +817,12 @@ export class WindowLightEffectV2 {
           vec2 rOffset  = shiftDir * uRgbShiftAmount * uWindowTexelSize;
           vec2 bOffset  = -rOffset;
 
-          vec3 sampleR = texture2D(uMask, clamp(baseUv + rOffset, 0.001, 0.999)).rgb;
-          vec3 sampleC = mCenter.rgb;
-          vec3 sampleB = texture2D(uMask, clamp(baseUv + bOffset, 0.001, 0.999)).rgb;
+          vec4 tapR = texture2D(uMask, clamp(baseUv + rOffset, 0.001, 0.999));
+          vec4 tapC = mCenter;
+          vec4 tapB = texture2D(uMask, clamp(baseUv + bOffset, 0.001, 0.999));
+          vec3 sampleR = tapR.rgb;
+          vec3 sampleC = tapC.rgb;
+          vec3 sampleB = tapB.rgb;
           // Preserve mask chroma when available (_Windows/_Structural can be tinted).
           // Keep RGB shift behaviour by taking channel-aligned taps.
           vec3 maskRgb = vec3(sampleR.r, sampleC.g, sampleB.b);
@@ -770,9 +831,15 @@ export class WindowLightEffectV2 {
           float maskScalar = msLuminance(maskRgb);
           if (maskScalar <= 0.001) discard;
 
+          // Shift taps must also obey strict alpha to prevent fringe leakage.
+          float alphaCovR = tapR.a;
+          float alphaCovC = tapC.a;
+          float alphaCovB = tapB.a;
+          vec3 alphaGate = vec3(alphaCovR, alphaCovC, alphaCovB);
+
           // Shape with gamma-like falloff — matches V1 uFalloff usage.
           // Apply falloff per-channel so mask tint and RGB split remain visible.
-          vec3 shaped = pow(clamp(maskRgb, 0.0, 1.0), vec3(uFalloff));
+          vec3 shaped = pow(clamp(maskRgb, 0.0, 1.0), vec3(uFalloff)) * clamp(alphaGate, 0.0, 1.0);
 
           // Optional subtle flicker.
           float flicker = 1.0;
@@ -814,7 +881,8 @@ export class WindowLightEffectV2 {
           float rainDarkenMul = 1.0 - clamp(uRainDarken, 0.0, 1.0) * clamp(uRainAmount, 0.0, 1.0) * 0.35;
 
           float overheadGate = 1.0;
-          if (uHasOverheadRoofAlphaTex > 0.5) {
+          // Apply roof gating only to non-overhead overlays.
+          if (uAllowRoofGate > 0.5 && uIsOverheadOverlay < 0.5 && uHasOverheadRoofAlphaTex > 0.5) {
             vec2 roofUv = gl_FragCoord.xy / max(uScreenSize, vec2(1.0));
             vec4 roofSample = texture2D(uOverheadRoofAlphaTex, clamp(roofUv, 0.0, 1.0));
             float roofAlpha = clamp(max(roofSample.r, roofSample.a), 0.0, 1.0);
@@ -844,10 +912,14 @@ export class WindowLightEffectV2 {
     const mesh = new THREE.Mesh(geo, material);
     mesh.position.set(centerX, centerY, z);
     mesh.rotation.z = rotation;
-    mesh.renderOrder = 40;
+    // Background sits under per-tile overlays; higher floors draw after lower so
+    // stacked buildings don't lose upper-floor window light to sort instability.
+    const fi = Math.max(0, Number(floorIndex) || 0);
+    mesh.renderOrder = (tileId === '__bg_image__' ? 30 : 40) + fi * 100;
 
     // Add to the isolated window light scene (not the bus scene).
     // Floor visibility is managed by onFloorChange() instead of the bus.
+    mesh.visible = this._isFloorVisible(floorIndex);
     this._scene.add(mesh);
     this._overlays.set(tileId, { mesh, material, floorIndex, isOverhead: !!isOverhead });
 
@@ -887,11 +959,26 @@ export class WindowLightEffectV2 {
       const flags = readTileLevelsFlags(tileDoc);
       const tileBottom = Number(flags.rangeBottom);
       const tileTop = Number(flags.rangeTop);
-      const tileMid = (tileBottom + tileTop) / 2;
+      const topFinite = Number.isFinite(tileTop);
+      const tileMid = topFinite ? ((tileBottom + tileTop) / 2) : tileBottom;
 
-      for (let i = 0; i < floors.length; i++) {
-        const f = floors[i];
-        if (tileMid >= f.elevationMin && tileMid <= f.elevationMax) return i;
+      // Prefer anchoring by rangeBottom (Levels semantics), then midpoint.
+      // This prevents open-ended or boundary-aligned upper-floor ranges from
+      // being classified into lower floor bands.
+      if (Number.isFinite(tileBottom)) {
+        for (let i = 0; i < floors.length; i++) {
+          const f = floors[i];
+          const isLast = i === floors.length - 1;
+          if (tileBottom >= f.elevationMin && (tileBottom < f.elevationMax || (isLast && tileBottom <= f.elevationMax))) return i;
+        }
+      }
+
+      if (Number.isFinite(tileMid)) {
+        for (let i = 0; i < floors.length; i++) {
+          const f = floors[i];
+          const isLast = i === floors.length - 1;
+          if (tileMid >= f.elevationMin && (tileMid < f.elevationMax || (isLast && tileMid <= f.elevationMax))) return i;
+        }
       }
       for (let i = 0; i < floors.length; i++) {
         const f = floors[i];
@@ -905,5 +992,10 @@ export class WindowLightEffectV2 {
       if (elev >= f.elevationMin && elev <= f.elevationMax) return i;
     }
     return 0;
+  }
+
+  _isFloorVisible(floorIndex) {
+    const active = Number.isFinite(this._activeFloorIndex) ? this._activeFloorIndex : 0;
+    return Number(floorIndex) === active;
   }
 }

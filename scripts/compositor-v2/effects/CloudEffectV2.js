@@ -1,6 +1,11 @@
 /**
  * @fileoverview CloudEffectV2 — V2 procedural cloud system.
  *
+ * HEALTH-WIRING BADGE (Map Shine Breaker Box):
+ * If you change this effect's lifecycle, render targets, floor/context gating,
+ * or downstream texture outputs, you MUST update HealthEvaluator contracts/wiring
+ * for `CloudEffectV2` to prevent silent failures.
+ *
  * Outputs:
  *   - _shadowRT  : Shadow factor (1.0=lit, 0.0=shadowed). Fed into LightingEffectV2
  *                  as a multiplier so cloud shadow darkens scene illumination.

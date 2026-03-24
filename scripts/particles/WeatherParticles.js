@@ -101,6 +101,23 @@ function roofDripDiagLogsEnabled() {
 }
 
 /**
+ * Overhead roof tiles: Foundry V12+ exposes `overhead` on the live document/tile.
+ * `_source.overhead` alone can be stale or unset after data migrations / partial loads.
+ * @param {*} tile
+ * @param {*} doc
+ * @returns {boolean}
+ */
+function roofDripTileIsExplicitOverhead(tile, doc) {
+  const live = tile?.overhead ?? doc?.overhead;
+  if (typeof live === 'boolean') return live;
+  const src = doc?._source;
+  if (typeof src?.overhead === 'boolean') return src.overhead;
+  const levelsOverhead = src?.flags?.levels?.overhead;
+  if (typeof levelsOverhead === 'boolean') return levelsOverhead;
+  return false;
+}
+
+/**
  * While debug is on (default), skip shader mask uniforms for drips so they stay visible while tuning.
  * Opt-in to real masks during debug: `debugRoofDripNoMask = false`.
  */
@@ -3278,15 +3295,7 @@ export class WeatherParticles {
     const tileEligible = [];
     for (const tile of tileDocs) {
       const doc = tile?.document ?? tile;
-      const src = doc?._source;
-      const srcOverhead = src?.overhead;
-      const levelsOverhead = src?.flags?.levels?.overhead;
-      const isExplicitOverhead =
-        typeof srcOverhead === 'boolean'
-          ? srcOverhead
-          : typeof levelsOverhead === 'boolean'
-            ? levelsOverhead
-            : false;
+      const isExplicitOverhead = roofDripTileIsExplicitOverhead(tile, doc);
       const isRoof = !!(doc?.getFlag?.('map-shine-advanced', 'overheadIsRoof')
         ?? tile?.getFlag?.('map-shine-advanced', 'overheadIsRoof')
         ?? doc?.flags?.['map-shine-advanced']?.overheadIsRoof
@@ -3321,7 +3330,7 @@ export class WeatherParticles {
     const useGpu =
       THREE &&
       window.MapShine?.useGpuRoofDripEdges !== false &&
-      _roofDripTuningVal('useGpuRoofDripEdges', true) &&
+      _roofDripTuningVal('useGpuRoofDripEdges', false) &&
       this._roofDripGpuInfraReady();
     const nRoofSources = useGpu ? 1 : tileEligible.length;
     const nSources = nRoofSources + treeCount;
@@ -3464,15 +3473,7 @@ export class WeatherParticles {
     let acc = 2166136261 >>> 0;
     for (const tile of tileDocs) {
       const doc = tile?.document ?? tile;
-      const src = doc?._source;
-      const srcOverhead = src?.overhead;
-      const levelsOverhead = src?.flags?.levels?.overhead;
-      const isExplicitOverhead =
-        typeof srcOverhead === 'boolean'
-          ? srcOverhead
-          : typeof levelsOverhead === 'boolean'
-            ? levelsOverhead
-            : false;
+      const isExplicitOverhead = roofDripTileIsExplicitOverhead(tile, doc);
       const isRoof = !!(doc?.getFlag?.('map-shine-advanced', 'overheadIsRoof')
         ?? tile?.getFlag?.('map-shine-advanced', 'overheadIsRoof')
         ?? doc?.flags?.['map-shine-advanced']?.overheadIsRoof
@@ -3521,24 +3522,35 @@ export class WeatherParticles {
     // full-pool rebuilds while panning/zooming and cause visible main-thread hitches.
     let gpuModeSig = 0;
     try {
-      const gpuTuneEnabled = window.MapShine?.useGpuRoofDripEdges !== false;
-      const gpuInfraReady = this._roofDripGpuInfraReady();
-      gpuModeSig = gpuTuneEnabled && gpuInfraReady ? 1 : 0;
+      const THREE = window.THREE;
+      const gpuAsRebuild = !!(
+        THREE &&
+        window.MapShine?.useGpuRoofDripEdges !== false &&
+        _roofDripTuningVal('useGpuRoofDripEdges', false) &&
+        this._roofDripGpuInfraReady()
+      );
+      gpuModeSig = gpuAsRebuild ? 1 : 0;
     } catch (_) {}
 
-    const rtEpoch = Number(weatherController?._roofDripTuningEpoch) || 0;
+    // Do NOT use a monotonic UI epoch here: Tweakpane used to bump
+    // `_roofDripTuningEpoch` on every slider (emission, size, etc.), which forced
+    // `_rebuildRoofDripPoints()` and caused multi-second hitches. Only keys that
+    // change the edge **pool** need to appear in `tunSig`.
     const tun = weatherController?.roofDripTuning || {};
+    // Omit runtime-only tuning (emission, life, size, wind, emitter jitter at spawn, …).
     const tunSig = [
       tun.useGpuRoofDripEdges ? 1 : 0,
       Math.round((Number(tun.globalPointBudget) || 0) / 10),
       Math.round((Number(tun.maxPointsPerTile) || 0) / 10),
       Math.round((Number(tun.gpuMaxSpawnCap) || 0) / 10),
+      Math.round((Number(tun.alphaThresholdGpu ?? ROOF_DRIP_ALPHA_THRESHOLD) || 0) * 200),
       Math.round((Number(tun.spawnInwardPull) || 0) * 1000),
       Math.round((Number(tun.spawnUvJitter) || 0) * 1000),
-      Math.round((Number(tun.emitterNormalJitter) || 0) * 100),
-      Math.round((Number(tun.emitterTangentialJitter) || 0) * 100)
+      Math.round((Number(tun.tileRectEdgeSpacing) || 0) / 2),
+      Math.round((Number(tun.treeEdgeSpacing) || 0) / 2),
+      Math.round((Number(tun.treeInteriorSamples) || 0) / 10)
     ].join(':');
-    return `${n}|${treeN}|${acc >>> 0}|g${gpuModeSig}|t${rtEpoch}|r${ROOF_DRIP_SPAWN_ALGO_REV}|s${tunSig}`;
+    return `${n}|${treeN}|${acc >>> 0}|g${gpuModeSig}|r${ROOF_DRIP_SPAWN_ALGO_REV}|s${tunSig}`;
   }
 
   _getViewFilteredEdgePoints(pts) {
@@ -4467,9 +4479,7 @@ export class WeatherParticles {
      const roofDripMaterial = new THREE.MeshBasicMaterial({
        map: this._roofDripTexture,
        transparent: true,
-       // Same as rain: depthTest off + overlay layer 31 so V2 FloorRenderBus actually draws the batch.
-       // (Layer-0-only batches were invisible: compositor pass matches rain/snow on OVERLAY_THREE_LAYER.)
-       // Occlusion under roofs uses uRoofAlphaMap when available, not depth.
+       // Layer 0 + floor-band renderOrder (WeatherParticlesV2): draw under overhead + tree overlays.
        depthWrite: false,
        depthTest: false,
        blending: THREE.NormalBlending,
@@ -4489,9 +4499,8 @@ export class WeatherParticles {
        0.1
      );
 
-     // Must match rain/snow batches: OVERLAY_THREE_LAYER (31) or drips never render in the V2 weather pass.
      const roofDripLayers = new THREE.Layers();
-     roofDripLayers.set(OVERLAY_THREE_LAYER);
+     roofDripLayers.set(0);
 
      const roofDripColorOL = roofDripDbg
        ? new ColorOverLife(
@@ -4846,6 +4855,7 @@ export class WeatherParticles {
     try {
       this._foamSystem.emitter.userData = this._foamSystem.emitter.userData || {};
       this._foamSystem.emitter.userData.msAutoCull = false;
+      this._foamSystem.emitter.userData.msOverlayLayer = true;
     } catch (_) {}
     if (this.scene) this.scene.add(this._foamSystem.emitter);
     this.batchRenderer.addSystem(this._foamSystem);
@@ -4909,6 +4919,7 @@ export class WeatherParticles {
     try {
       this._foamFleckSystem.emitter.userData = this._foamFleckSystem.emitter.userData || {};
       this._foamFleckSystem.emitter.userData.msAutoCull = false;
+      this._foamFleckSystem.emitter.userData.msOverlayLayer = true;
     } catch (_) {}
     if (this.scene) this.scene.add(this._foamFleckSystem.emitter);
     this.batchRenderer.addSystem(this._foamFleckSystem);
@@ -6104,12 +6115,12 @@ export class WeatherParticles {
       mat.userData.msRoofEdgeDrip = true;
     }
 
-    // Rain/snow/foam: overlay layer 31 so they draw above the map without fighting tile depth.
-    // Roof drips: default layer 0 + depthTest so overhead tiles (depthWrite, renderOrder 10) can occlude them.
+    // Precipitation + drips: layer 0 (main bus pass, under overhead/trees). Foam stays on layer 31.
     try {
       if (batch && batch.layers && typeof batch.layers.set === 'function') {
-        // Roof drips must use the same overlay layer as rain or they are culled from the V2 particle pass.
-        batch.layers.set(OVERLAY_THREE_LAYER);
+        const useOverlay =
+          cacheProp === '_foamBatchMaterial';
+        batch.layers.set(useOverlay ? OVERLAY_THREE_LAYER : 0);
       }
       if (cacheProp === '_roofDripBatchMaterial' && mat) {
         mat.depthTest = false;
@@ -7224,7 +7235,12 @@ export class WeatherParticles {
       const dripDbg = roofDripDebugEnabled();
       const dripNoMask = roofDripDebugNoMask();
       const dripMaskU = dripNoMask ? 0.0 : (effectiveRoofMaskEnabled ? 1.0 : 0.0);
-      const dripHasRoofAlphaUniform = effectiveHasRoofAlphaMap ? 1.0 : 0.0;
+      // Do not set uHasRoofAlphaMap for roof drips: the fragment path that samples
+      // screen-space roof alpha at gl_FragCoord and then fades/discards when ra is high
+      // wipes almost every pixel on stretched drip billboards (canopy coverage is mostly
+      // high ra). Simulation still runs (high particleNum) but nothing draws. Rain/snow
+      // keep roof alpha; drip spawn sites already come from roof/tree edges.
+      const dripHasRoofAlphaUniform = 0.0;
 
       const dripEmission = this.roofDripSystem.emissionOverTime;
       if (dripEmission && typeof dripEmission.value === 'number') {

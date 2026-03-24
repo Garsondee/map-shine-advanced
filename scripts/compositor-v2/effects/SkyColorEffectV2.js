@@ -495,14 +495,10 @@ export class SkyColorEffectV2 {
             color += (noise - 0.5) * uGrainStrength;
           }
 
-          // Blend graded result with original based on intensity.
+          // Blend graded result with original based on intensity only.
+          // Roof/outdoors-driven masking here created oversized dark halos when
+          // roof alpha/blocker silhouettes were broader than visible canopy.
           float mask = clamp(uIntensity, 0.0, 1.0);
-          float outdoorsMask = sampleOutdoorsMask(vUv);
-          float roofAlpha = sampleOverheadRoofAlpha(vUv);
-          // Treat any visible roof coverage as a full occluder for outdoors-only
-          // grading so indoor/outdoor transitions cannot bleed through roofs.
-          float roofPresence = step(0.01, roofAlpha);
-          mask *= outdoorsMask * (1.0 - roofPresence);
           vec3 finalColor = mix(base, color, mask);
 
           gl_FragColor = vec4(finalColor, sceneColor.a);
@@ -870,8 +866,9 @@ export class SkyColorEffectV2 {
         const stormMul = 1.0 - clamp01(envFallback?.stormFactor ?? 0) * 0.25;
         let localSceneDarkness = 0.0;
         try { localSceneDarkness = clamp01(canvas?.environment?.darknessLevel ?? 0.0); } catch (_) {}
-        const darkMul = 1.0 - localSceneDarkness * 0.85;
-        const localSkyIntensity = clamp01((0.15 + 0.85 * localDayFactor) * overcastMul * stormMul * darkMul);
+        // Keep sky grading active at night; previous darkness attenuation made
+        // the effect almost vanish after dusk, so nighttime no longer darkened.
+        const localSkyIntensity = clamp01((0.55 + 0.45 * localDayFactor) * overcastMul * stormMul);
         const strength = clamp01(this.params.autoIntensityStrength);
         effectiveIntensity *= lerp(1.0, localSkyIntensity, strength);
       }

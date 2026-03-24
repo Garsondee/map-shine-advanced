@@ -436,17 +436,13 @@ export class LightingEffectV2 {
 
           // Roof / overhead stamp: gate Foundry lights on ground floor only; gate
           // window glow on upper floors (WindowLightEffectV2 disables roof gating in-shader).
+          // Use runtime visibility alpha with a binary threshold so lighting
+          // matches visible canopy/roof silhouettes and avoids oversized dark halos.
           float roofLightVisibility = 1.0;
           if (uHasOverheadRoofAlpha > 0.5) {
             vec4 roofSample = texture2D(tOverheadRoofAlpha, vUv);
             float roofAlpha = clamp(max(roofSample.a, max(roofSample.r, max(roofSample.g, roofSample.b))), 0.0, 1.0);
-            float roofBlockAlpha = roofAlpha;
-            if (uHasOverheadRoofBlock > 0.5) {
-              vec4 roofBlockSample = texture2D(tOverheadRoofBlock, vUv);
-              roofBlockAlpha = clamp(max(roofBlockSample.a, max(roofBlockSample.r, max(roofBlockSample.g, roofBlockSample.b))), 0.0, 1.0);
-            }
-            float visibleGate = step(0.03, roofAlpha);
-            float visibleOcclusion = clamp(roofBlockAlpha * visibleGate, 0.0, 1.0);
+            float visibleOcclusion = step(0.20, roofAlpha);
             roofLightVisibility = 1.0 - visibleOcclusion;
           }
           float visS = mix(1.0, roofLightVisibility, clamp(uApplyRoofOcclusionToSources, 0.0, 1.0));

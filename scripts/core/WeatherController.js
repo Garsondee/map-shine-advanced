@@ -315,7 +315,7 @@ export class WeatherController {
 
     /**
      * Roof / tree canopy drips (WeatherParticles roofDripSystem).
-     * Bumped from Tweakpane → `_roofDripTuningEpoch` invalidates spawn pools.
+     * Pool rebuild key: `_computeRoofDripSourceSignature()` tunSig (not a global epoch).
      */
     this.roofDripTuning = {
       enabled: true,
@@ -352,8 +352,6 @@ export class WeatherController {
       useGpuRoofDripEdges: false,
       maxParticles: 22000
     };
-    /** @type {number} Incremented when any roofDripTuning field changes (rebuild drip point pool). */
-    this._roofDripTuningEpoch = 0;
 
     this.snowTuning = {
       intensityScale: 1.0,

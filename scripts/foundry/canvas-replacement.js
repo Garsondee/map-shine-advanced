@@ -5593,13 +5593,11 @@ async function createThreeCanvas(scene) {
               if (paramId === 'roofDripEnabled') {
                 if (!weatherController.roofDripTuning) weatherController.roofDripTuning = {};
                 weatherController.roofDripTuning.enabled = !!value;
-                weatherController._roofDripTuningEpoch = (weatherController._roofDripTuningEpoch || 0) + 1;
                 return;
               }
               if (paramId === 'roofDripUseGpuRoofEdges') {
                 if (!weatherController.roofDripTuning) weatherController.roofDripTuning = {};
                 weatherController.roofDripTuning.useGpuRoofDripEdges = !!value;
-                weatherController._roofDripTuningEpoch = (weatherController._roofDripTuningEpoch || 0) + 1;
                 return;
               }
               if (Object.prototype.hasOwnProperty.call(roofDripMap, paramId)) {
@@ -5607,7 +5605,6 @@ async function createThreeCanvas(scene) {
                 const key = roofDripMap[paramId];
                 const n = Number(value);
                 weatherController.roofDripTuning[key] = Number.isFinite(n) ? n : 0;
-                weatherController._roofDripTuningEpoch = (weatherController._roofDripTuningEpoch || 0) + 1;
                 return;
               }
             } catch (_) {}

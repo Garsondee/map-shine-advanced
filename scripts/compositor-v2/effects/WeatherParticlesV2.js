@@ -18,10 +18,12 @@
  *   5. Provides frustum-culling via the FloorRenderBus camera.
  *
  * ## Render pipeline position
- * The BatchedRenderer is added to the FloorRenderBus scene with
- * `renderOrder = 50` and `depthWrite = false`, matching the V1 contract.
- * Particles appear on top of albedo tiles and all effect overlays (specular,
- * window light) because those overlays use `renderOrder` < 50.
+ * Precipitation uses **layer 0** and a **floor-band renderOrder** just below
+ * `OVERHEAD_OFFSET` (see FloorRenderBus), matching FireEffectV2: drawn in the
+ * main `renderTo()` pass **under** overhead roof tiles and tree overlays.
+ * Putting quarks on OVERLAY_THREE_LAYER (31) made weather draw only in
+ * `_renderLateWorldOverlay`, on top of the entire scene (wrong for drips).
+ * Foam plume batches opt into layer 31 via `emitter.userData.msOverlayLayer`.
  *
  * ## Floor isolation
  * WeatherParticles is inherently global (rain/snow falls everywhere). It reads
@@ -39,10 +41,14 @@ import { BatchedRenderer } from '../../libs/three.quarks.module.js';
 
 const log = createLogger('WeatherParticlesV2');
 
-// Overlay layer constant — mirrors OVERLAY_THREE_LAYER from EffectComposer.
-// Quarks batches are forced onto this layer so they render in the FloorCompositor's
-// bus scene pass (which enables all layers including the overlay layer).
+// Layer 31 — only for batches that must draw in FloorCompositor._renderLateWorldOverlay.
 const OVERLAY_THREE_LAYER = 31;
+
+// Align with FloorRenderBus / FireEffectV2: sort above ground tiles, below overhead + trees.
+const RENDER_ORDER_PER_FLOOR = 10000;
+const OVERHEAD_OFFSET = 5000;
+/** One step below overhead band so rain/drips/snow draw under roof + tree quads. */
+const WEATHER_BATCH_RENDER_ORDER_BASE = OVERHEAD_OFFSET - 1;
 
 // ─── WeatherParticlesV2 ───────────────────────────────────────────────────────
 
@@ -209,15 +215,15 @@ export class WeatherParticlesV2 {
     this._busScene = busScene;
 
     // Create shared three.quarks BatchedRenderer and add it to the bus scene.
-    // renderOrder=50 places particles above albedo tiles and effect overlays.
+    // Layer 0 + renderOrder in (ground, overhead) band: main bus pass draws weather
+    // under overhead tiles / TreeEffectV2 (see FloorRenderBus.renderTo vs late overlay).
     this._batchRenderer = new BatchedRenderer();
-    this._batchRenderer.renderOrder = 50;
-    // Enable the overlay layer so the bus render pass includes batches.
     try {
-      if (this._batchRenderer.layers?.enable) {
-        this._batchRenderer.layers.enable(OVERLAY_THREE_LAYER);
+      if (this._batchRenderer.layers?.set) {
+        this._batchRenderer.layers.set(0);
       }
     } catch (_) {}
+    this._refreshWeatherBatchRenderOrder();
     busScene.add(this._batchRenderer);
 
     // Instantiate the V1 WeatherParticles system, pointed at our bus scene.
@@ -332,6 +338,9 @@ export class WeatherParticlesV2 {
       }
     } catch (_) {}
 
+    // Keep draw order under overhead for the active viewed floor (same band as fire).
+    try { this._refreshWeatherBatchRenderOrder(); } catch (_) {}
+
     // ── 3. Tick WeatherParticles (emission rates, masking, sizing) ───────
     if (this._weatherParticles) {
       try {
@@ -367,7 +376,19 @@ export class WeatherParticlesV2 {
    * handles suppression below covered ceilings via TileManager.
    */
   onFloorChange(_maxFloorIndex) {
-    // No-op: weather is inherently global (rain falls on all visible floors).
+    try { this._refreshWeatherBatchRenderOrder(); } catch (_) {}
+  }
+
+  /**
+   * @private
+   */
+  _refreshWeatherBatchRenderOrder() {
+    if (!this._batchRenderer) return;
+    const fs = window.MapShine?.floorStack;
+    const active = fs?.getActiveFloor?.();
+    const fi = Number.isFinite(Number(active?.index)) ? Number(active.index) : 0;
+    const floorBandStart = Math.max(0, fi) * RENDER_ORDER_PER_FLOOR;
+    this._batchRenderer.renderOrder = floorBandStart + WEATHER_BATCH_RENDER_ORDER_BASE;
   }
 
   // ── Resize ──────────────────────────────────────────────────────────────────
@@ -461,14 +482,12 @@ export class WeatherParticlesV2 {
       const emitter = ps.emitter;
       const ud = emitter.userData || (emitter.userData = {});
 
-      // Force quarks batches onto the requested render layer so the correct
-      // bus pass includes them. Most systems stay on OVERLAY_THREE_LAYER,
-      // but specific systems can opt into layer 0 for full depth integration
-      // with tiles/tokens in the main scene pass.
+      // Default: layer 0 so precipitation renders in FloorRenderBus.renderTo (under
+      // overhead + trees). Foam plume sets msOverlayLayer=true to stay on layer 31.
       try {
         const idx = systemMap.get(ps);
         const batch = (idx !== undefined && batches) ? batches[idx] : null;
-        const layer = (ud.msOverlayLayer === false) ? 0 : OVERLAY_THREE_LAYER;
+        const layer = (ud.msOverlayLayer === true) ? OVERLAY_THREE_LAYER : 0;
         if (batch?.layers?.set) batch.layers.set(layer);
       } catch (_) {}
 

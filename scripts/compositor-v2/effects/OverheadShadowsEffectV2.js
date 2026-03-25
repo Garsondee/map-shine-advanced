@@ -1570,6 +1570,50 @@ export class OverheadShadowsEffectV2 {
   }
 
   /**
+   * Resolve Outdoor Building Shadow controls with legacy-key compatibility.
+   * Older scenes may only persist indoorShadowOpacity/indoorShadowLengthScale.
+   * @returns {{ opacity: number, lengthScale: number }}
+   * @private
+   */
+  _resolveOutdoorBuildingShadowParams() {
+    const defaultOpacity = 0.5;
+    const defaultLengthScale = 1.0;
+
+    const modernOpacityRaw = Number(this.params.outdoorBuildingShadowOpacity);
+    const legacyOpacityRaw = Number(this.params.indoorShadowOpacity);
+    const modernLengthRaw = Number(this.params.outdoorBuildingShadowLengthScale);
+    const legacyLengthRaw = Number(this.params.indoorShadowLengthScale);
+
+    const hasModernOpacity = Number.isFinite(modernOpacityRaw);
+    const hasLegacyOpacity = Number.isFinite(legacyOpacityRaw);
+    const hasModernLength = Number.isFinite(modernLengthRaw);
+    const hasLegacyLength = Number.isFinite(legacyLengthRaw);
+
+    // If both exist but modern is still default while legacy was authored,
+    // prefer legacy so old saved scenes keep their tuned look.
+    const opacityPreferLegacy = hasLegacyOpacity
+      && hasModernOpacity
+      && Math.abs(modernOpacityRaw - defaultOpacity) < 0.00001
+      && Math.abs(legacyOpacityRaw - defaultOpacity) >= 0.00001;
+    const lengthPreferLegacy = hasLegacyLength
+      && hasModernLength
+      && Math.abs(modernLengthRaw - defaultLengthScale) < 0.00001
+      && Math.abs(legacyLengthRaw - defaultLengthScale) >= 0.00001;
+
+    const resolvedOpacity = opacityPreferLegacy
+      ? legacyOpacityRaw
+      : (hasModernOpacity ? modernOpacityRaw : (hasLegacyOpacity ? legacyOpacityRaw : defaultOpacity));
+    const resolvedLengthScale = lengthPreferLegacy
+      ? legacyLengthRaw
+      : (hasModernLength ? modernLengthRaw : (hasLegacyLength ? legacyLengthRaw : defaultLengthScale));
+
+    return {
+      opacity: Math.max(0.0, Math.min(1.0, resolvedOpacity)),
+      lengthScale: Math.max(0.0, resolvedLengthScale),
+    };
+  }
+
+  /**
    * Update sun direction from current time of day.
    *
    * We use WeatherController.timeOfDay (0-24h) which is driven by the
@@ -1603,7 +1647,8 @@ export class OverheadShadowsEffectV2 {
 
     // Optimization: Skip update if params haven't changed
     const camZoom = this._getEffectiveZoom();
-    const updateHash = `${hour.toFixed(3)}_${this.params.sunLatitude}_${this.params.opacity}_${this.params.length}_${this.params.softness}_${this.params.outdoorShadowLengthScale}_${this.params.indoorReceiverShadowLengthScale}_${camZoom.toFixed(4)}_${this.params.indoorShadowEnabled}_${this.params.outdoorBuildingShadowOpacity}_${this.params.outdoorBuildingShadowLengthScale}_${this.params.indoorShadowSoftness}_${this.params.indoorFluidShadowSoftness}_${this.params.indoorFluidShadowIntensityBoost}_${this.params.indoorFluidColorSaturation}_${this.params.tileProjectionEnabled}_${this.params.tileProjectionOpacity}_${this.params.tileProjectionLengthScale}_${this.params.tileProjectionSoftness}_${this.params.tileProjectionThreshold}_${this.params.tileProjectionPower}_${this.params.tileProjectionOutdoorOpacityScale}_${this.params.tileProjectionIndoorOpacityScale}_${this.params.tileProjectionSortBias}_${this.params.fluidColorEnabled}_${this.params.fluidEffectTransparency}_${this.params.fluidShadowIntensityBoost}_${this.params.fluidShadowSoftness}_${this.params.fluidColorBoost}_${this.params.fluidColorSaturation}_${hoverRevealActive ? 1 : 0}`;
+    const outdoorBuildingShadow = this._resolveOutdoorBuildingShadowParams();
+    const updateHash = `${hour.toFixed(3)}_${this.params.sunLatitude}_${this.params.opacity}_${this.params.length}_${this.params.softness}_${this.params.outdoorShadowLengthScale}_${this.params.indoorReceiverShadowLengthScale}_${camZoom.toFixed(4)}_${this.params.indoorShadowEnabled}_${outdoorBuildingShadow.opacity}_${outdoorBuildingShadow.lengthScale}_${this.params.indoorShadowSoftness}_${this.params.indoorFluidShadowSoftness}_${this.params.indoorFluidShadowIntensityBoost}_${this.params.indoorFluidColorSaturation}_${this.params.tileProjectionEnabled}_${this.params.tileProjectionOpacity}_${this.params.tileProjectionLengthScale}_${this.params.tileProjectionSoftness}_${this.params.tileProjectionThreshold}_${this.params.tileProjectionPower}_${this.params.tileProjectionOutdoorOpacityScale}_${this.params.tileProjectionIndoorOpacityScale}_${this.params.tileProjectionSortBias}_${this.params.fluidColorEnabled}_${this.params.fluidEffectTransparency}_${this.params.fluidShadowIntensityBoost}_${this.params.fluidShadowSoftness}_${this.params.fluidColorBoost}_${this.params.fluidColorSaturation}_${hoverRevealActive ? 1 : 0}`;
     
     // Floor/mask transitions can swap outdoorsMask without changing any scalar params.
     // Do not short-circuit in that case or uOutdoorsMask/uHasOutdoorsMask goes stale.
@@ -1638,9 +1683,8 @@ export class OverheadShadowsEffectV2 {
     // Drive basic uniforms from params and camera zoom.
     if (this.material) {
       const u = this.material.uniforms;
-      // Back-compat aliases so existing scenes that only have older keys keep behavior.
-      const outdoorBuildingShadowOpacity = this.params.outdoorBuildingShadowOpacity ?? this.params.indoorShadowOpacity ?? 0.5;
-      const outdoorBuildingShadowLengthScale = this.params.outdoorBuildingShadowLengthScale ?? this.params.indoorShadowLengthScale ?? 1.0;
+      const outdoorBuildingShadowOpacity = outdoorBuildingShadow.opacity;
+      const outdoorBuildingShadowLengthScale = outdoorBuildingShadow.lengthScale;
       if (u.uOpacity) u.uOpacity.value = this.params.opacity;
       if (u.uLength)  u.uLength.value  = this.params.length;
       if (u.uSoftness) u.uSoftness.value = this.params.softness;
@@ -1650,16 +1694,9 @@ export class OverheadShadowsEffectV2 {
       if (u.uZoom && this.mainCamera) {
         u.uZoom.value = this._getEffectiveZoom();
       }
-      // Indoor shadow uniforms — resolve the selected mask from MaskManager
-      // Avoid double-applying _Outdoors-derived building shadow when the
-      // dedicated BuildingShadowsEffectV2 is active. Keep legacy path for scenes
-      // where building-shadow effect is disabled.
-      let useLegacyIndoorShadow = !!this.params.indoorShadowEnabled;
-      try {
-        const buildingEnabled = !!window.MapShine?.floorCompositorV2?._buildingShadowEffect?.params?.enabled;
-        if (buildingEnabled) useLegacyIndoorShadow = false;
-      } catch (_) {}
-      if (u.uIndoorShadowEnabled) u.uIndoorShadowEnabled.value = useLegacyIndoorShadow ? 1.0 : 0.0;
+      // Keep overhead's own _Outdoors building contribution controllable from
+      // this effect even when BuildingShadowsEffectV2 is enabled.
+      if (u.uIndoorShadowEnabled) u.uIndoorShadowEnabled.value = this.params.indoorShadowEnabled ? 1.0 : 0.0;
       if (u.uOutdoorBuildingShadowOpacity) u.uOutdoorBuildingShadowOpacity.value = outdoorBuildingShadowOpacity;
       if (u.uOutdoorBuildingShadowLengthScale) u.uOutdoorBuildingShadowLengthScale.value = outdoorBuildingShadowLengthScale;
       if (u.uIndoorShadowSoftness) u.uIndoorShadowSoftness.value = this.params.indoorShadowSoftness;

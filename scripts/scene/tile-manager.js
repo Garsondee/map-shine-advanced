@@ -3999,10 +3999,25 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
       treatAsCurrentFloor = false;
     }
 
+    // Explicit `levelRole` (Levels editor / migration) overrides overlap-based
+    // floor classification: ceiling art must stay on the roof path (hover-hide,
+    // overhead alpha), and floor slabs must not.
+    const msaLevelRole = String(tileDoc?.flags?.['map-shine-advanced']?.levelRole ?? '')
+      .trim()
+      .toLowerCase();
+    if (msaLevelRole === 'ceiling') {
+      treatAsCurrentFloor = false;
+    }
+
     // Per-tile motion toggle can force overhead-style draw ordering so the tile
     // participates in the proven roof-style depth/render path (avoids custom band
     // ordering regressions with post effects).
-    const naturalOverhead = isTileOverhead(tileDoc) && !treatAsCurrentFloor;
+    let naturalOverhead = isTileOverhead(tileDoc) && !treatAsCurrentFloor;
+    if (msaLevelRole === 'ceiling') {
+      naturalOverhead = true;
+    } else if (msaLevelRole === 'floor') {
+      naturalOverhead = false;
+    }
     const isOverhead = naturalOverhead || renderAboveTokens;
     const wasOverhead = !!sprite.userData.isOverhead;
 

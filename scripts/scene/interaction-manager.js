@@ -775,6 +775,21 @@ export class InteractionManager {
       ? path.filter((n) => n instanceof Element)
       : (target instanceof Element ? [target] : []);
 
+    // Canvas exemption:
+    // Foundry's `#ui` wraps the canvas area, so elementsFromPoint/composedPath can
+    // include `#ui` even for genuine canvas clicks. Treat events targeting the
+    // actual render canvases as scene interaction, not UI.
+    const pixiCanvas = canvas?.app?.view || null;
+    const boardCanvas = document.getElementById('board');
+    const threeCanvas = document.getElementById('map-shine-canvas');
+    const isCanvasEl = (el) => {
+      if (!el || !(el instanceof Element)) return false;
+      if (threeCanvas && (el === threeCanvas || threeCanvas.contains(el))) return true;
+      if (pixiCanvas && (el === pixiCanvas || pixiCanvas.contains(el))) return true;
+      if (boardCanvas && (el === boardCanvas || boardCanvas.contains(el))) return true;
+      return false;
+    };
+
     // IMPORTANT:
     // We listen on `window` in capture phase, so `event.target` can be unreliable in some
     // cases (e.g. when other frameworks intercept/re-target events). To ensure we never
@@ -793,9 +808,32 @@ export class InteractionManager {
       }
     }, 'isOverUI.elementsFromPoint', Severity.COSMETIC);
 
+    // If any probed element is a render canvas, treat it as scene interaction
+    // unless a hard UI blocker is present (dialogs, inputs, etc.).
+    const overCanvas = elements.some((el) => isCanvasEl(el));
+    if (overCanvas) {
+      // Hard UI blockers still win even over canvas.
+      for (const el of elements) {
+        if (el.closest('.window-app, .app.window-app, .application, dialog, .dialog, .filepicker')) return true;
+        if (el.closest('button, a, input, select, textarea, label')) return true;
+        if (el.closest('#map-shine-ui, #map-shine-texture-manager, #map-shine-effect-stack, #map-shine-control-panel, #map-shine-loading-overlay')) return true;
+        if (el.closest('#map-point-context-menu')) return true;
+        if (el.closest('#map-shine-overlay-root')) return true;
+        if (el.closest('[data-overlay-id], .map-shine-overlay-ui')) return true;
+        const classList = el.classList;
+        if (classList && classList.length) {
+          for (const cls of classList) {
+            if (typeof cls === 'string' && cls.startsWith('tp-')) return true;
+          }
+        }
+      }
+      return false;
+    }
+
     for (const el of elements) {
       // Foundry VTT UI windows/dialogs (v11/v12+)
-      if (el.closest('.window-app, .app.window-app, .application, dialog, .dialog, .filepicker, #ui, #sidebar, #navigation')) return true;
+      // NOTE: Do not treat `#ui` as a UI hit by itself; it wraps the entire canvas area.
+      if (el.closest('.window-app, .app.window-app, .application, dialog, .dialog, .filepicker, #sidebar, #navigation')) return true;
       if (el.closest('button, a, input, select, textarea, label')) return true;
 
       if (el.closest('#map-shine-ui, #map-shine-texture-manager, #map-shine-effect-stack, #map-shine-control-panel, #map-shine-loading-overlay')) return true;
@@ -2048,13 +2086,28 @@ export class InteractionManager {
         // 1.5 Check Lights (Lighting Layer)
         // Open the light editor UI on selection. Hold Alt (or Ctrl/Cmd) to force the Foundry sheet.
         const _isLightingLayer = this._isLightingContextActive();
+        if (_isLightingLayer && !this._canHandleThreeLightingInteractions()) {
+          // No Three-side light icon managers in this runtime path.
+          // Defer lighting double-click behavior to Foundry native handlers.
+          return;
+        }
         if (_isLightingLayer && this.lightIconManager) {
+            const prevLightRayMask = this.raycaster.layers?.mask;
+            safeCall(() => {
+              if (!this.raycaster.layers) this.raycaster.layers = new window.THREE.Layers();
+              this.raycaster.layers.mask = 0xffffffff;
+            }, 'dblClick.lightHitRayLayers', Severity.COSMETIC);
             const lightIcons = Array.from(this.lightIconManager.lights.values());
-            const intersects = this.raycaster.intersectObjects(lightIcons, false);
-            if (intersects.length > 0) {
-                const hit = intersects[0];
-                const sprite = hit.object;
-                const lightId = sprite.userData.lightId;
+            const intersects = this.raycaster.intersectObjects(lightIcons, true);
+            const lightAtPointer = this._resolveFoundryLightAtPointer(event, intersects);
+            safeCall(() => {
+              if (typeof prevLightRayMask === 'number' && this.raycaster.layers) {
+                this.raycaster.layers.mask = prevLightRayMask;
+              }
+            }, 'dblClick.restoreLightHitRayLayers', Severity.COSMETIC);
+            if (lightAtPointer?.id) {
+                const sprite = lightAtPointer.sprite || intersects?.[0]?.object;
+                const lightId = lightAtPointer.id;
                 const light = canvas.lighting.get(lightId);
                 
                 if (light && light.document.testUserPermission(game.user, "LIMITED")) {
@@ -2498,11 +2551,90 @@ export class InteractionManager {
     return lightDrawTools.has(tool);
   }
 
+  /**
+   * Resolve a Foundry ambient light either from icon-ray hits or pointer proximity.
+   * This protects lighting interactions when icon mesh hierarchy or ray layers change.
+   * @param {MouseEvent|PointerEvent} event
+   * @param {Array<any>} [iconHits=[]]
+   * @param {number} [maxDistancePx=28]
+   * @returns {{id: string, sprite: any}|null}
+   */
+  _resolveFoundryLightAtPointer(event, iconHits = [], maxDistancePx = 60) {
+    const resolveHitByUserDataKey = (hits, key) => {
+      if (!Array.isArray(hits) || !key) return null;
+      for (const h of hits) {
+        let obj = h?.object || null;
+        while (obj) {
+          const value = obj?.userData?.[key];
+          if (value !== undefined && value !== null && value !== '') {
+            return { id: String(value), object: obj };
+          }
+          obj = obj.parent || null;
+        }
+      }
+      return null;
+    };
+
+    const directHit = resolveHitByUserDataKey(iconHits, 'lightId');
+    if (directHit?.id) {
+      const directSprite = this.lightIconManager?.lights?.get?.(directHit.id) || directHit.object || null;
+      return { id: directHit.id, sprite: directSprite };
+    }
+
+    const pointerWorld = this.screenToWorld(event?.clientX, event?.clientY);
+    if (!pointerWorld) return null;
+    const pointerF = Coordinates.toFoundry(pointerWorld.x, pointerWorld.y);
+    const maxDistSq = maxDistancePx * maxDistancePx;
+
+    // Proximity fallback: iterate actual light icon sprites we render in Three.js.
+    // This avoids relying on V12 canvas internals like `canvas.scene.lights.contents`.
+    const THREE = window.THREE;
+    const spriteMap = this.lightIconManager?.lights;
+    if (!spriteMap || !spriteMap.values) return null;
+
+    const v = new THREE.Vector3();
+    let nearestId = null;
+    let nearestDistSq = Infinity;
+    for (const [id, sprite] of spriteMap.entries()) {
+      if (!sprite) continue;
+      try {
+        if (sprite.getWorldPosition) sprite.getWorldPosition(v);
+        else v.copy?.(sprite.position || { x: 0, y: 0, z: 0 }) || v.set(0, 0, 0);
+      } catch (_) {
+        continue;
+      }
+
+      const spriteF = Coordinates.toFoundry(v.x, v.y);
+      const dx = Number(spriteF.x) - Number(pointerF.x);
+      const dy = Number(spriteF.y) - Number(pointerF.y);
+      const d2 = dx * dx + dy * dy;
+      if (!Number.isFinite(d2) || d2 > maxDistSq) continue;
+      if (d2 < nearestDistSq) {
+        nearestDistSq = d2;
+        nearestId = String(id);
+      }
+    }
+
+    if (!nearestId) return null;
+    return { id: nearestId, sprite: this.lightIconManager?.lights?.get?.(nearestId) || null };
+  }
+
   _isSoundDrawTool(toolName) {
     const tool = String(toolName || '').toLowerCase();
     if (!tool) return true;
     const soundDrawTools = new Set(['sound', 'ambientsound', 'ambient', 'draw', 'create', 'place']);
     return soundDrawTools.has(tool);
+  }
+
+  /**
+   * Whether Three-side lighting interaction primitives are available.
+   * When false, Lighting-layer interactions should be left to Foundry PIXI.
+   * @returns {boolean}
+   */
+  _canHandleThreeLightingInteractions() {
+    const hasFoundryIcons = !!(this.lightIconManager && this.lightIconManager.lights);
+    const hasEnhancedIcons = !!(window.MapShine?.enhancedLightIconManager?.lights);
+    return hasFoundryIcons || hasEnhancedIcons;
   }
 
   _ensureSoundPlacementPreview() {
@@ -3692,6 +3824,11 @@ export class InteractionManager {
         const isLightingLayer = this._isLightingContextActive();
         const isLightDrawTool = this._isLightDrawTool(currentTool);
         if (isLightingLayer) {
+          if (!this._canHandleThreeLightingInteractions()) {
+            // Without Three-side icon managers, this branch cannot select/move
+            // existing lights correctly. Let Foundry own Lighting interactions.
+            return;
+          }
 
           // 2.5a Check for Existing Lights (Select/Drag)
           // Prioritize interacting with existing lights over placing new ones
@@ -3753,13 +3890,23 @@ export class InteractionManager {
           // Standard Foundry Light Tool: Check Foundry light icons
           if (this.lightIconManager) {
             const lightIcons = Array.from(this.lightIconManager.lights.values());
+            const prevLightRayMask = this.raycaster.layers?.mask;
+            safeCall(() => {
+              if (!this.raycaster.layers) this.raycaster.layers = new window.THREE.Layers();
+              this.raycaster.layers.mask = 0xffffffff;
+            }, 'pointerDown.foundryLightHitRayLayers', Severity.COSMETIC);
             const intersects = this.raycaster.intersectObjects(lightIcons, true);
-            const lightHit = resolveHitByUserDataKey(intersects, 'lightId');
+            const lightAtPointer = this._resolveFoundryLightAtPointer(event, intersects);
+            safeCall(() => {
+              if (typeof prevLightRayMask === 'number' && this.raycaster.layers) {
+                this.raycaster.layers.mask = prevLightRayMask;
+              }
+            }, 'pointerDown.restoreFoundryLightHitRayLayers', Severity.COSMETIC);
 
-            if (lightHit) {
-              const hit = lightHit.hit;
-              const sprite = lightHit.object;
-              const lightId = lightHit.id;
+            if (lightAtPointer?.id) {
+              const hit = intersects?.[0] || null;
+              const lightId = lightAtPointer.id;
+              const sprite = lightAtPointer.sprite || hit?.object || this.lightIconManager?.lights?.get?.(lightId) || null;
               const lightDoc = canvas.lighting.get(lightId)?.document;
 
               // Selection should work with LIMITED permission; editing/dragging requires update permission.
@@ -3782,7 +3929,7 @@ export class InteractionManager {
                 this._pendingLight.type = 'foundry';
                 this._pendingLight.id = String(lightId);
                 this._pendingLight.sprite = sprite;
-                this._pendingLight.hitPoint = hit.point?.clone?.() ?? hit.point;
+                this._pendingLight.hitPoint = hit?.point?.clone?.() ?? hit?.point ?? this._getSelectedLightWorldPos({ type: 'foundry', id: String(lightId) });
                 this._pendingLight.canEdit = canEdit;
                 this._pendingLight.startClientX = event.clientX;
                 this._pendingLight.startClientY = event.clientY;

@@ -995,6 +995,16 @@ export class FloorRenderBus {
    * @private
    */
   _isOverheadForBusTile(tileDoc, tileId = null) {
+    // Keep in sync with TileManager naturalOverhead / levelRole overrides so V2
+    // bus renderOrder bands (OVERHEAD_OFFSET) match sprite-side classification.
+    // Otherwise ceiling-tagged tiles stay in the sub-5000 band and door meshes
+    // at OVERHEAD_OFFSET-2 draw on top of roofs.
+    const msaRole = String(tileDoc?.flags?.['map-shine-advanced']?.levelRole ?? '')
+      .trim()
+      .toLowerCase();
+    if (msaRole === 'ceiling') return true;
+    if (msaRole === 'floor') return false;
+
     const resolvedTileId = tileId ?? tileDoc?.id ?? tileDoc?._id ?? null;
     const motionConfig = resolvedTileId
       ? window.MapShine?.tileMotionManager?.getTileConfig?.(resolvedTileId)

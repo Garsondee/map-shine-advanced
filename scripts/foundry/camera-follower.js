@@ -19,6 +19,7 @@
 
 import { createLogger } from '../core/log.js';
 import { readSceneLevelsFlag } from './levels-scene-flags.js';
+import { elevationInBand } from '../ui/levels-editor/level-boundaries.js';
 
 const log = createLogger('CameraFollower');
 
@@ -494,7 +495,8 @@ export class CameraFollower {
     const containing = [];
     for (let i = 0; i < levels.length; i += 1) {
       const level = levels[i];
-      if (elevation >= level.bottom && elevation <= level.top) {
+      const includeUpperBound = i === (levels.length - 1);
+      if (elevationInBand(elevation, level.bottom, level.top, includeUpperBound)) {
         containing.push({ i, span: Math.abs(level.top - level.bottom) });
       }
     }
@@ -502,18 +504,6 @@ export class CameraFollower {
     if (containing.length) {
       // Sort by smallest span first (tightest-fitting level wins).
       containing.sort((a, b) => a.span - b.span);
-
-      // Shared-boundary tiebreaker: when multiple levels have the same span
-      // and contain the elevation, prefer the level whose bottom matches the
-      // elevation. Stairs send tokens to to.bottom, so picking the level that
-      // starts at that elevation correctly selects the upper floor.
-      // Example: Ground=[0,10], First=[10,20], elevation=10 → pick First.
-      if (containing.length > 1 && containing[0].span === containing[1].span) {
-        const atBottom = containing.find(
-          (c) => levels[c.i].bottom === elevation
-        );
-        if (atBottom) return atBottom.i;
-      }
 
       return containing[0].i;
     }

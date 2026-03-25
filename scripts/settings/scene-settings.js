@@ -18,6 +18,7 @@ const FLAG_NAMESPACE = 'map-shine-advanced';
 /** Module setting keys */
 const DEBUG_LOADING_MODE_SETTING = 'debugLoadingMode';
 const LEVELS_COMPATIBILITY_MODE_SETTING = 'levelsCompatibilityMode';
+const LEVELS_EDITOR_V2_SETTING = 'levelsEditorV2Enabled';
 const LIGHT_ICON_LEVEL_VISIBILITY_MODE_SETTING = 'lightIconLevelVisibilityMode';
 const TOKEN_RENDERING_MODE_SETTING = 'tokenRenderingMode';
 const LOADING_SCREEN_ENABLED_SETTING = 'loadingScreenEnabled';
@@ -99,6 +100,18 @@ export function getLightIconLevelVisibilityMode() {
     return LIGHT_ICON_LEVEL_VISIBILITY_MODES.ALL;
   } catch (_) {
     return LIGHT_ICON_LEVEL_VISIBILITY_MODES.ALL;
+  }
+}
+
+/**
+ * Read whether the new Levels Editor V2 should be used.
+ * @returns {boolean}
+ */
+export function getUseLevelsEditorV2() {
+  try {
+    return !!game.settings.get(FLAG_NAMESPACE, LEVELS_EDITOR_V2_SETTING);
+  } catch (_) {
+    return true;
   }
 }
 
@@ -718,6 +731,16 @@ export function registerSettings() {
       [LEVELS_COMPATIBILITY_MODES.DIAGNOSTIC_INTEROP]: 'Diagnostic Interop (migration debugging)',
     },
     default: LEVELS_COMPATIBILITY_MODES.IMPORT_ONLY,
+  });
+
+  game.settings.register(FLAG_NAMESPACE, LEVELS_EDITOR_V2_SETTING, {
+    name: 'Use Levels Editor V2',
+    hint: 'Use the redesigned Levels authoring UI with vertical stack editing and floor/ceiling roles.',
+    scope: 'world',
+    config: true,
+    restricted: true,
+    type: Boolean,
+    default: true,
   });
 
   game.settings.register(FLAG_NAMESPACE, LIGHT_ICON_LEVEL_VISIBILITY_MODE_SETTING, {

@@ -17,6 +17,8 @@ import { readSceneLevelsFlag, isLevelsEnabledForScene, readTileLevelsFlags, tile
 import { detectLevelsRuntimeInteropState, getLevelsCompatibilityMode, detectKnownModuleConflicts } from '../foundry/levels-compatibility.js';
 import { getPerspectiveElevation } from '../foundry/elevation-context.js';
 import { peekSnapshot } from '../core/levels-import/LevelsSnapshotStore.js';
+import { getTileLevelRole } from './levels-editor/levels-domain.js';
+import { elevationInBand, rangesOverlap } from './levels-editor/level-boundaries.js';
 
 const log = createLogger('DiagnosticCenter');
 
@@ -110,6 +112,74 @@ function _extractBasePath(src) {
   const lastDot = s.lastIndexOf('.');
   if (lastDot > 0) return s.substring(0, lastDot);
   return s;
+}
+
+/**
+ * Classify a wall's vertical bounds against FloorStack bands (door layering / gating).
+ * @param {object|null|undefined} wallDoc
+ * @param {Array<{index:number, elevationMin:number, elevationMax:number}>} floors
+ * @returns {{category:'attached', floorIndex:number, mode?:string}|{category:'unbounded'}|{category:'misaligned', bottom?:number, top?:number, endpoint?:number}}
+ */
+function _classifyWallHeightVsFloors(wallDoc, floors) {
+  const bounds = readWallHeightFlags(wallDoc);
+  let wb = Number(bounds?.bottom);
+  let wt = Number(bounds?.top);
+  if (!Number.isFinite(wb)) wb = -Infinity;
+  if (!Number.isFinite(wt)) wt = Infinity;
+  if (wt < wb) {
+    const t = wb;
+    wb = wt;
+    wt = t;
+  }
+
+  if (wb === -Infinity && wt === Infinity) {
+    return { category: 'unbounded' };
+  }
+  if (!floors || floors.length === 0) {
+    return { category: 'misaligned', bottom: wb, top: wt };
+  }
+
+  if (floors.length === 1) {
+    const f = floors[0];
+    if (Number.isFinite(wb) && Number.isFinite(wt)) {
+      if (rangesOverlap(wb, wt, f.elevationMin, f.elevationMax)) {
+        return { category: 'attached', floorIndex: 0, mode: 'overlap' };
+      }
+      return { category: 'misaligned', bottom: wb, top: wt };
+    }
+    const elev = Number.isFinite(wb) ? wb : wt;
+    if (Number.isFinite(elev) && elevationInBand(elev, f.elevationMin, f.elevationMax, true)) {
+      return { category: 'attached', floorIndex: 0, mode: 'endpoint' };
+    }
+    return { category: 'misaligned', bottom: wb, top: wt, endpoint: elev };
+  }
+
+  if (Number.isFinite(wb) && Number.isFinite(wt)) {
+    const mid = (wb + wt) / 2;
+    for (let i = 0; i < floors.length; i++) {
+      const f = floors[i];
+      if (mid >= f.elevationMin && mid < f.elevationMax) {
+        return { category: 'attached', floorIndex: i, mode: 'midpoint' };
+      }
+    }
+    for (let i = 0; i < floors.length; i++) {
+      const f = floors[i];
+      if (wb < f.elevationMax && f.elevationMin <= wt) {
+        return { category: 'attached', floorIndex: i, mode: 'overlap' };
+      }
+    }
+    return { category: 'misaligned', bottom: wb, top: wt };
+  }
+
+  const elev = Number.isFinite(wb) ? wb : wt;
+  for (let i = 0; i < floors.length; i++) {
+    const f = floors[i];
+    const includeUpperBound = i === floors.length - 1;
+    if (Number.isFinite(elev) && elevationInBand(elev, f.elevationMin, f.elevationMax, includeUpperBound)) {
+      return { category: 'attached', floorIndex: i, mode: 'endpoint' };
+    }
+  }
+  return { category: 'misaligned', bottom: wb, top: wt, endpoint: elev };
 }
 
 function _filename(path) {
@@ -1340,6 +1410,101 @@ export class DiagnosticCenterDialog {
     } catch (_) {
     }
 
+    // Wall vertical bounds vs FloorStack bands (doors, level-scoped walls)
+    try {
+      const walls = canvas?.scene?.walls;
+      const floors = window.MapShine?.floorStack?.getFloors?.() ?? [];
+      if (walls && walls.size > 0) {
+        const wallDoorNone = (typeof CONST !== 'undefined' && CONST.WALL_DOOR_TYPES)
+          ? CONST.WALL_DOOR_TYPES.NONE
+          : 0;
+
+        let attached = 0;
+        let unbounded = 0;
+        let misaligned = 0;
+        /** @type {Array<{id:string, bottom?:number, top?:number}>} */
+        const misalignedSamples = [];
+
+        let doorTotal = 0;
+        let doorAttached = 0;
+        let doorUnbounded = 0;
+        let doorMisaligned = 0;
+        /** @type {Array<{id:string, bottom?:number, top?:number}>} */
+        const doorMisalignedSamples = [];
+
+        for (const w of walls) {
+          const doc = w.document ?? w;
+          const isDoor = doc?.door != null && doc.door !== wallDoorNone;
+          if (isDoor) doorTotal++;
+
+          const c = _classifyWallHeightVsFloors(doc, floors);
+          if (c.category === 'unbounded') {
+            unbounded++;
+            if (isDoor) doorUnbounded++;
+          } else if (c.category === 'misaligned') {
+            misaligned++;
+            if (misalignedSamples.length < 16) {
+              misalignedSamples.push({
+                id: String(doc?.id ?? ''),
+                bottom: c.bottom,
+                top: c.top,
+                endpoint: c.endpoint,
+              });
+            }
+            if (isDoor) {
+              doorMisaligned++;
+              if (doorMisalignedSamples.length < 16) {
+                doorMisalignedSamples.push({
+                  id: String(doc?.id ?? ''),
+                  bottom: c.bottom,
+                  top: c.top,
+                });
+              }
+            }
+          } else {
+            attached++;
+            if (isDoor) doorAttached++;
+          }
+        }
+
+        const status = (misaligned > 0 || doorMisaligned > 0) ? 'WARN' : 'PASS';
+        checks.push(_mkCheck(
+          'Levels',
+          'levels.walls.floorBands',
+          status,
+          `Walls vs floor bands: ${attached} attached, ${unbounded} unbounded height, ${misaligned} misaligned (${doorTotal} doors: ${doorAttached} ok, ${doorUnbounded} unbounded, ${doorMisaligned} misaligned)`,
+          {
+            wallCount: walls.size,
+            doorTotal,
+            attached,
+            unbounded,
+            misaligned,
+            misalignedSamples,
+            doorsAttached: doorAttached,
+            doorsUnbounded: doorUnbounded,
+            doorsMisaligned: doorMisaligned,
+            doorMisalignedSamples,
+            floorBands: floors.map((f) => ({
+              index: f.index,
+              elevationMin: f.elevationMin,
+              elevationMax: f.elevationMax,
+            })),
+          },
+        ));
+
+        if (doorUnbounded > 0) {
+          checks.push(_mkCheck(
+            'Levels',
+            'levels.walls.doorsUnbounded',
+            'INFO',
+            `${doorUnbounded} door wall(s) use full vertical span (no wall-height / Levels bounds). MapShine treats them as ground-floor for mesh layering; consider scoping heights per level.`,
+            { doorUnbounded },
+          ));
+        }
+      }
+    } catch (_) {
+    }
+
     // Generic doc range summary (lights/sounds/notes/drawings/templates)
     try {
       const scene = canvas?.scene;
@@ -2541,6 +2706,12 @@ export class DiagnosticCenterDialog {
     }));
 
     const unmatched = [];
+    const roleDiagnostics = {
+      missingRoleTiles: [],
+      floorRoleConflicts: {},
+      ceilingRoleConflicts: {},
+      lightsOutsideAnyLevel: []
+    };
     const addUnmatched = (kind, label, details = null) => {
       if (unmatched.length >= 80) return;
       unmatched.push({ kind, label, details });
@@ -2556,6 +2727,7 @@ export class DiagnosticCenterDialog {
     for (const tileDoc of _getCollectionArray(scene?.tiles)) {
       const flags = readTileLevelsFlags(tileDoc);
       const label = _docLabel(tileDoc);
+      const role = getTileLevelRole(tileDoc);
       const rangeBottom = _formatNumber(flags?.rangeBottom);
       const rangeTop = _formatNumber(flags?.rangeTop);
       const indexes = (Number.isFinite(rangeBottom) || Number.isFinite(rangeTop))
@@ -2574,6 +2746,21 @@ export class DiagnosticCenterDialog {
           rangeBottom,
           rangeTop
         });
+      }
+      if (role === 'none') {
+        roleDiagnostics.missingRoleTiles.push({ id: tileDoc?.id ?? null, label });
+      } else if (role === 'floor' && indexes.length > 0) {
+        for (const idx of indexes) {
+          const key = String(idx);
+          if (!roleDiagnostics.floorRoleConflicts[key]) roleDiagnostics.floorRoleConflicts[key] = [];
+          roleDiagnostics.floorRoleConflicts[key].push({ id: tileDoc?.id ?? null, label });
+        }
+      } else if (role === 'ceiling' && indexes.length > 0) {
+        for (const idx of indexes) {
+          const key = String(idx);
+          if (!roleDiagnostics.ceilingRoleConflicts[key]) roleDiagnostics.ceilingRoleConflicts[key] = [];
+          roleDiagnostics.ceilingRoleConflicts[key].push({ id: tileDoc?.id ?? null, label });
+        }
       }
     }
 
@@ -2603,7 +2790,17 @@ export class DiagnosticCenterDialog {
           rangeTop: _formatNumber(range?.rangeTop),
           elevation: _formatNumber(doc?.elevation)
         });
+        if (kind === 'lights' && idxs.length === 0) {
+          roleDiagnostics.lightsOutsideAnyLevel.push({ id: doc?.id ?? null, label });
+        }
       }
+    }
+
+    for (const [k, arr] of Object.entries(roleDiagnostics.floorRoleConflicts)) {
+      if (Array.isArray(arr) && arr.length <= 1) delete roleDiagnostics.floorRoleConflicts[k];
+    }
+    for (const [k, arr] of Object.entries(roleDiagnostics.ceilingRoleConflicts)) {
+      if (Array.isArray(arr) && arr.length <= 1) delete roleDiagnostics.ceilingRoleConflicts[k];
     }
 
     const floorCompositorV2 = ms?.floorCompositorV2 || effectComposer?._floorCompositorV2 || null;
@@ -3029,6 +3226,12 @@ export class DiagnosticCenterDialog {
         compositor: maskCompositorState,
       },
       diagnostics,
+      levelAuthoringDiagnostics: {
+        missingRoleTiles: roleDiagnostics.missingRoleTiles.slice(0, 120),
+        floorRoleConflicts: roleDiagnostics.floorRoleConflicts,
+        ceilingRoleConflicts: roleDiagnostics.ceilingRoleConflicts,
+        lightsOutsideAnyLevel: roleDiagnostics.lightsOutsideAnyLevel.slice(0, 120),
+      },
     };
 
     return JSON.stringify(payload, null, 2);

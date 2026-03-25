@@ -118,7 +118,9 @@ export class MouseStateManager {
    * @returns {{x:number,y:number}|null}
    */
   screenToWorld(clientX, clientY) {
-    const groundZ = this.sceneComposer?.groundZ ?? 1000;
+    // Default to Z=0 when groundZ is not yet available. Using a large fallback
+    // Z causes pointer projections (and all proximity-based picking) to miss.
+    const groundZ = this.sceneComposer?.groundZ ?? 0;
     const world = this.viewportToWorld(clientX, clientY, groundZ);
     if (!world) return null;
     return { x: world.x, y: world.y };

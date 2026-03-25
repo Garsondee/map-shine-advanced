@@ -26,6 +26,7 @@
 import { createLogger } from '../core/log.js';
 import { tileHasLevelsRange, readTileLevelsFlags } from '../foundry/levels-scene-flags.js';
 import { OVERLAY_THREE_LAYER, GLOBAL_SCENE_LAYER } from '../core/render-layers.js';
+import { elevationInBand, resolveFloorIndexForElevation, rangesOverlap } from '../ui/levels-editor/level-boundaries.js';
 
 const log = createLogger('FloorLayerManager');
 
@@ -283,17 +284,13 @@ export class FloorLayerManager {
       const tileMid = (tileBottom + tileTop) / 2;
 
       // Find the best floor by midpoint containment, preferring lower floors.
-      for (let i = 0; i < floors.length; i++) {
-        const f = floors[i];
-        if (tileMid >= f.elevationMin && tileMid < f.elevationMax) {
-          return Math.min(i, MAX_FLOOR_LAYERS - 1);
-        }
-      }
+      const byMid = resolveFloorIndexForElevation(tileMid, floors);
+      if (byMid >= 0) return Math.min(byMid, MAX_FLOOR_LAYERS - 1);
 
       // Fallback: first floor whose band overlaps the tile range.
       for (let i = 0; i < floors.length; i++) {
         const f = floors[i];
-        if (tileBottom <= f.elevationMax && f.elevationMin <= tileTop) {
+        if (rangesOverlap(tileBottom, tileTop, f.elevationMin, f.elevationMax)) {
           return Math.min(i, MAX_FLOOR_LAYERS - 1);
         }
       }
@@ -301,12 +298,8 @@ export class FloorLayerManager {
 
     // No Levels range: use tile elevation.
     const elev = Number.isFinite(Number(tileDoc?.elevation)) ? Number(tileDoc.elevation) : 0;
-    for (let i = 0; i < floors.length; i++) {
-      const f = floors[i];
-      if (elev >= f.elevationMin && elev < f.elevationMax) {
-        return Math.min(i, MAX_FLOOR_LAYERS - 1);
-      }
-    }
+    const byElev = resolveFloorIndexForElevation(elev, floors);
+    if (byElev >= 0) return Math.min(byElev, MAX_FLOOR_LAYERS - 1);
 
     return 0;
   }
@@ -326,7 +319,8 @@ export class FloorLayerManager {
 
     for (let i = 0; i < floors.length; i++) {
       const f = floors[i];
-      if (elev >= f.elevationMin && elev < f.elevationMax) {
+      const includeUpperBound = i === (floors.length - 1);
+      if (elevationInBand(elev, f.elevationMin, f.elevationMax, includeUpperBound)) {
         return Math.min(i, MAX_FLOOR_LAYERS - 1);
       }
     }

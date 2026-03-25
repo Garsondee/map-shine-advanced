@@ -53,6 +53,7 @@ import { ControlPanelManager } from '../ui/control-panel-manager.js';
 import { CameraPanelManager } from '../ui/camera-panel-manager.js';
 import { LevelNavigatorOverlay } from '../ui/level-navigator-overlay.js';
 import { LevelsAuthoringDialog } from '../ui/levels-authoring-dialog.js';
+import { LevelsEditorV2 } from '../ui/levels-editor/levels-editor-v2.js';
 import { TokenManager } from '../scene/token-manager.js';
 import { VisibilityController } from '../vision/VisibilityController.js';
 import { DetectionFilterEffect } from '../effects/DetectionFilterEffect.js';
@@ -5637,7 +5638,8 @@ async function createThreeCanvas(scene) {
 
         // Levels Authoring Dialog (GM only) ->-> required to validate tile floor assignments.
         if (!levelsAuthoring && game.user?.isGM) {
-          levelsAuthoring = new LevelsAuthoringDialog();
+          const useV2 = sceneSettings.getUseLevelsEditorV2?.() !== false;
+          levelsAuthoring = useV2 ? new LevelsEditorV2() : new LevelsAuthoringDialog();
           levelsAuthoring.initialize();
           safeCall(() => { if (window.MapShine) window.MapShine.levelsAuthoring = levelsAuthoring; }, 'exposeLevelsAuthoring', Severity.COSMETIC);
         }

@@ -16,11 +16,11 @@
  * to a dedicated light accumulation RT.
  *
  * Simplified compared to V1 LightingEffect:
- *   - No outdoors mask differentiation (Step 7+)
- *   - No overhead/building/bush/tree shadow integration (Step 8+)
- *   - No upper floor transmission (later)
- *   - No roof alpha pass (later)
- *   - No rope/token mask passes (later)
+ *   - Levels-aware Foundry light/darkness mesh visibility via
+ *     `isLightVisibleForPerspective` each frame (matches Levels light masking).
+ *   - Screen-space roof/ceiling gating applies to dynamic lights on **all** floors
+ *     by default (`restrictRoofScreenLightOcclusionToTopFloor` = false). Legacy
+ *     mode can gate only on the top floor index if that cutout workaround is needed.
  *
  * Cloud shadow IS integrated: a shadow factor texture (1.0=lit, 0.0=shadowed)
  * is passed in from CloudEffectV2 and multiplies totalIllumination so the scene
@@ -33,10 +33,57 @@
 import { createLogger } from '../../core/log.js';
 import { ThreeLightSource } from '../../effects/ThreeLightSource.js';
 import { ThreeDarknessSource } from '../../effects/ThreeDarknessSource.js';
+import { isLightVisibleForPerspective } from '../../foundry/elevation-context.js';
+import { getFoundryTimePhaseHours, getFoundrySunlightFactor, getWrappedHourProgress } from '../../core/foundry-time-phases.js';
 
 const log = createLogger('LightingEffectV2');
 const MODULE_ID = 'map-shine-advanced';
 const LIGHT_ENHANCEMENT_FLAG_KEY = 'lightEnhancements';
+
+const clamp01 = (n) => Math.max(0, Math.min(1, n));
+
+const readFoundryDarkness01 = () => {
+  try {
+    const sceneLevel = canvas?.scene?.environment?.darknessLevel;
+    if (Number.isFinite(sceneLevel)) return clamp01(sceneLevel);
+  } catch (_) {}
+  try {
+    const envLevel = canvas?.environment?.darknessLevel;
+    if (Number.isFinite(envLevel)) return clamp01(envLevel);
+  } catch (_) {}
+  return 0.0;
+};
+
+const computeTimeOfDayDarkness01 = (hourRaw) => {
+  const h = Number(hourRaw);
+  if (!Number.isFinite(h)) return null;
+
+  const safeHour = ((h % 24) + 24) % 24;
+  const phases = getFoundryTimePhaseHours();
+
+  // Match StateApplier._updateSceneDarkness() anchors.
+  const dawnDuskDarkness = 0.55;
+  const noonDarkness = 0.0;
+  const midnightDarkness = 0.95;
+
+  const dayProgress = getWrappedHourProgress(safeHour, phases.sunrise, phases.sunset);
+  let targetDarkness;
+
+  if (Number.isFinite(dayProgress)) {
+    const sunlight = Math.pow(getFoundrySunlightFactor(safeHour, phases), 0.85);
+    targetDarkness = dawnDuskDarkness + ((noonDarkness - dawnDuskDarkness) * sunlight);
+  } else {
+    const nightProgress = getWrappedHourProgress(safeHour, phases.sunset, phases.sunrise);
+    if (Number.isFinite(nightProgress)) {
+      const moonArc = Math.pow(Math.max(0, Math.sin(Math.PI * nightProgress)), 0.8);
+      targetDarkness = dawnDuskDarkness + ((midnightDarkness - dawnDuskDarkness) * moonArc);
+    } else {
+      targetDarkness = midnightDarkness;
+    }
+  }
+
+  return clamp01(targetDarkness);
+};
 
 export class LightingEffectV2 {
   constructor() {
@@ -59,6 +106,12 @@ export class LightingEffectV2 {
       upperFloorTransmissionEnabled: false,
       upperFloorTransmissionStrength: 0.6,
       upperFloorTransmissionSoftness: 1.5,
+      /**
+       * When true, screen-space roof/ceiling light gating applies only on the top
+       * floor index (legacy). When false (default), gating runs on every floor so
+       * lights are not left unmultiplied under overhead tiles on lower levels.
+       */
+      restrictRoofScreenLightOcclusionToTopFloor: false,
       darknessEffect: 1.0,
       outdoorBrightness: 1.0,
       lightAnimWindInfluence: 1.0,
@@ -222,7 +275,7 @@ export class LightingEffectV2 {
       enabled: true,
       groups: [
         { name: 'illumination', label: 'Global Illumination', type: 'inline', parameters: ['globalIllumination', 'lightIntensity', 'colorationStrength'] },
-        { name: 'occlusion', label: 'Occlusion', type: 'inline', parameters: ['wallInsetPx', 'upperFloorTransmissionEnabled', 'upperFloorTransmissionStrength', 'upperFloorTransmissionSoftness'] },
+        { name: 'occlusion', label: 'Occlusion', type: 'inline', parameters: ['wallInsetPx', 'restrictRoofScreenLightOcclusionToTopFloor', 'upperFloorTransmissionEnabled', 'upperFloorTransmissionStrength', 'upperFloorTransmissionSoftness'] },
         { name: 'darkness', label: 'Darkness Response', type: 'inline', parameters: ['darknessEffect', 'outdoorBrightness', 'negativeDarknessStrength', 'darknessPunchGain'] },
         { name: 'sun', label: 'Sun Lights (Indoor Fill)', type: 'inline', parameters: ['sunIndoorGain', 'sunBlurRadiusPx'] },
         { name: 'lightAnim', label: 'Light Animation Behaviour', type: 'inline', parameters: ['lightAnimWindInfluence', 'lightAnimOutdoorPower'] },
@@ -238,6 +291,12 @@ export class LightingEffectV2 {
         lightIntensity: { type: 'slider', min: 0, max: 2, step: 0.05, default: 0.25, label: 'Light Intensity' },
         colorationStrength: { type: 'slider', min: 0, max: 500, step: 0.05, default: 1.0, label: 'Coloration Strength' },
         wallInsetPx: { type: 'slider', min: 0, max: 40, step: 0.5, default: 6.0, label: 'Wall Inset (px)' },
+        restrictRoofScreenLightOcclusionToTopFloor: {
+          type: 'boolean',
+          default: false,
+          label: 'Roof light gate: top floor only (legacy)',
+          tooltip: 'If enabled, Foundry/window lights skip roof/ceiling screen gating unless you are on the highest floor — can let lights show through overhead tiles on lower floors.',
+        },
         upperFloorTransmissionEnabled: { type: 'boolean', default: false, label: 'Upper Floor Through-Gaps' },
         upperFloorTransmissionStrength: { type: 'slider', min: 0, max: 2, step: 0.05, default: 0.6, label: 'Upper Light Strength' },
         upperFloorTransmissionSoftness: { type: 'slider', min: 0.25, max: 4, step: 0.05, default: 1.5, label: 'Upper Light Softness' },
@@ -367,6 +426,14 @@ export class LightingEffectV2 {
         uApplyRoofOcclusionToSources: { value: 1.0 },
         uApplyRoofOcclusionToWindow:  { value: 0.0 },
         uApplyRoofOcclusionToBuilding: { value: 1.0 },
+        // _Outdoors mask (scene UV): gate roof/tree *light* occlusion so interior
+        // pixels under overhead stamps still receive Foundry lights (see fragment).
+        tOutdoorsForRoofLight: { value: null },
+        uHasOutdoorsForRoofLight: { value: 0 },
+        uOutdoorsForRoofLightFlipY: { value: 0 },
+        // Half-res T from OverheadShadowsEffectV2: single source for geometric ceiling gate.
+        tCeilingLightTransmittance: { value: null },
+        uHasCeilingLightTransmittance: { value: 0 },
       },
       vertexShader: /* glsl */`
         varying vec2 vUv;
@@ -414,6 +481,11 @@ export class LightingEffectV2 {
         uniform float uApplyRoofOcclusionToSources;
         uniform float uApplyRoofOcclusionToWindow;
         uniform float uApplyRoofOcclusionToBuilding;
+        uniform sampler2D tOutdoorsForRoofLight;
+        uniform float uHasOutdoorsForRoofLight;
+        uniform float uOutdoorsForRoofLightFlipY;
+        uniform sampler2D tCeilingLightTransmittance;
+        uniform float uHasCeilingLightTransmittance;
         varying vec2 vUv;
 
         float perceivedBrightness(vec3 c) {
@@ -434,16 +506,76 @@ export class LightingEffectV2 {
           vec3 ambientNight = uAmbientDarkness  * max(uGlobalIllumination, 0.0);
           vec3 ambient = mix(ambientDay, ambientNight, baseDarknessLevel);
 
-          // Roof / overhead stamp: gate Foundry lights on ground floor only; gate
-          // window glow on upper floors (WindowLightEffectV2 disables roof gating in-shader).
-          // Use runtime visibility alpha with a binary threshold so lighting
-          // matches visible canopy/roof silhouettes and avoids oversized dark halos.
-          float roofLightVisibility = 1.0;
-          if (uHasOverheadRoofAlpha > 0.5) {
-            vec4 roofSample = texture2D(tOverheadRoofAlpha, vUv);
-            float roofAlpha = clamp(max(roofSample.a, max(roofSample.r, max(roofSample.g, roofSample.b))), 0.0, 1.0);
-            float visibleOcclusion = step(0.20, roofAlpha);
-            roofLightVisibility = 1.0 - visibleOcclusion;
+          // Scene UV (Foundry space) for masks authored in scene rect — shared by
+          // building shadow and _Outdoors–gated roof light occlusion.
+          vec2 w0s = mix(uBldViewCorner00, uBldViewCorner10, vUv.x);
+          vec2 w1s = mix(uBldViewCorner01, uBldViewCorner11, vUv.x);
+          vec2 worldXYs = mix(w0s, w1s, vUv.y);
+          float foundryXs = worldXYs.x;
+          float foundryYs = uSceneDimensions.y - worldXYs.y;
+          vec2 sceneUvFoundry = (vec2(foundryXs, foundryYs) - uBldSceneOrigin) / max(uBldSceneSize, vec2(1e-5));
+          sceneUvFoundry = clamp(sceneUvFoundry, 0.0, 1.0);
+
+          // Roof / tree canopy: prefer packed ceiling transmittance T (half-res blit from
+          // OverheadShadows) so geometric gating matches one source; else derive from
+          // roof alpha + block. _Outdoors still applies bounded indoor relief.
+          float stampedVis = 1.0;
+          float roofAlphaComposite = 0.0;
+          float roofBlockComposite = 0.0;
+          if (uHasCeilingLightTransmittance > 0.5) {
+            stampedVis = clamp(texture2D(tCeilingLightTransmittance, vUv).r, 0.0, 1.0);
+            roofAlphaComposite = 1.0 - stampedVis;
+          } else {
+            if (uHasOverheadRoofAlpha > 0.5) {
+              vec4 roofSample = texture2D(tOverheadRoofAlpha, vUv);
+              float roofAlpha = clamp(max(roofSample.a, max(roofSample.r, max(roofSample.g, roofSample.b))), 0.0, 1.0);
+              roofAlphaComposite = roofAlpha;
+              float roofOcc = smoothstep(0.10, 0.14, roofAlpha);
+              stampedVis = 1.0 - roofOcc;
+            }
+            if (uHasOverheadRoofBlock > 0.5) {
+              vec4 roofBlockSample = texture2D(tOverheadRoofBlock, vUv);
+              float roofBlock = clamp(max(roofBlockSample.a, max(roofBlockSample.r, max(roofBlockSample.g, roofBlockSample.b))), 0.0, 1.0);
+              roofBlockComposite = roofBlock;
+              float roofBlockOcc = smoothstep(0.42, 0.48, roofBlock);
+              stampedVis *= (1.0 - roofBlockOcc);
+            }
+          }
+          float roofLightVisibility = stampedVis;
+          if (uHasOutdoorsForRoofLight > 0.5) {
+            vec2 ouv = sceneUvFoundry;
+            if (uOutdoorsForRoofLightFlipY > 0.5) ouv.y = 1.0 - ouv.y;
+            vec4 od = texture2D(tOutdoorsForRoofLight, ouv);
+            float odA = clamp(od.a, 0.0, 1.0);
+            float indoorReliefRaw = (odA > 0.08) ? (1.0 - step(0.45, od.r)) : 0.0;
+            float isOutdoorSample = (odA > 0.08) ? step(0.45, od.r) : 0.0;
+            float ceilingPresent = (uHasCeilingLightTransmittance > 0.5)
+              ? smoothstep(0.16, 0.20, 1.0 - stampedVis)
+              : max(
+                smoothstep(0.10, 0.14, roofAlphaComposite),
+                smoothstep(0.42, 0.48, roofBlockComposite)
+              );
+            float occ = 1.0 - stampedVis;
+            float albedoB = perceivedBrightness(baseColor.rgb);
+            // Occluded + typically-dark receiver (roof art) — block mask relief / porch lift.
+            // Use smoothstep so mid-gray ground under eaves is not treated like a roof tile.
+            float roofLikeDark = 1.0 - smoothstep(0.11, 0.29, albedoB);
+            float suppressRoofLeak = smoothstep(0.12, 0.16, occ) * roofLikeDark;
+            // Cap relief under ceiling, but brighter receivers (ground under eaves) recover more.
+            float reliefAtten = mix(1.0, 0.22, ceilingPresent);
+            reliefAtten = mix(reliefAtten, 1.0, smoothstep(0.14, 0.34, albedoB) * ceilingPresent * 0.92);
+            float indoorRelief = indoorReliefRaw * reliefAtten;
+            indoorRelief *= (1.0 - suppressRoofLeak);
+            roofLightVisibility = mix(stampedVis, 1.0, indoorRelief);
+            // Outdoor-classified pixels get indoorReliefRaw = 0 but still sit under overhead
+            // capture (porch, courtyard under balcony): restore lights unless dark roof art.
+            float underOverhead = smoothstep(0.06, 0.10, occ);
+            float porchLift = isOutdoorSample * underOverhead * (1.0 - suppressRoofLeak);
+            roofLightVisibility = max(roofLightVisibility, porchLift * 0.92);
+            // Indoor mask under overhead (room below ceiling capture) still needs playable light
+            // when the receiver is not classified as dark roof art.
+            float interiorUnderHang = (1.0 - isOutdoorSample) * underOverhead * (1.0 - suppressRoofLeak);
+            roofLightVisibility = max(roofLightVisibility, interiorUnderHang * 0.52);
           }
           float visS = mix(1.0, roofLightVisibility, clamp(uApplyRoofOcclusionToSources, 0.0, 1.0));
           float visW = mix(1.0, roofLightVisibility, clamp(uApplyRoofOcclusionToWindow, 0.0, 1.0));
@@ -496,19 +628,7 @@ export class LightingEffectV2 {
           // normalise by scene rect to get scene UV (0..1 = scene rect).
           // This matches CloudEffectV2's uViewBoundsMin/Max approach exactly.
           if (uHasBuildingShadow > 0.5) {
-            // Reconstruct world XY at this fragment using bilinear interpolation
-            // over the four ground-plane frustum corners.
-            vec2 w0 = mix(uBldViewCorner00, uBldViewCorner10, vUv.x);
-            vec2 w1 = mix(uBldViewCorner01, uBldViewCorner11, vUv.x);
-            vec2 worldXY = mix(w0, w1, vUv.y);
-            // Convert Three world → Foundry scene UV (verbatim contract used by CloudEffectV2).
-            float foundryX = worldXY.x;
-            float foundryY = uSceneDimensions.y - worldXY.y;
-            vec2 sceneUvFoundry = (vec2(foundryX, foundryY) - uBldSceneOrigin) / max(uBldSceneSize, vec2(1e-5));
-            sceneUvFoundry = clamp(sceneUvFoundry, 0.0, 1.0);
-
-            // BuildingShadowsEffectV2 now outputs scene-space UV directly aligned
-            // with sceneUvFoundry, so do not apply an additional Y flip here.
+            // BuildingShadowsEffectV2 outputs scene-space UV aligned with sceneUvFoundry.
             float bldShadow = clamp(texture2D(tBuildingShadow, sceneUvFoundry).r, 0.0, 1.0);
 
             float shadowMix = mix(1.0, bldShadow, uBuildingShadowOpacity);
@@ -623,6 +743,43 @@ export class LightingEffectV2 {
 
     this._lightsSynced = true;
     log.info(`LightingEffectV2: synced ${this._lights.size} lights, ${this._darknessSources.size} darkness sources`);
+  }
+
+  /**
+   * Toggle Three.js light/darkness mesh visibility from Levels elevation rules
+   * (`isLightVisibleForPerspective`). Uses live `canvas.scene.lights` docs when
+   * available so token/level changes apply without a full resync.
+   * @private
+   */
+  _refreshLightsForLevelsPerspective() {
+    if (!this._initialized) return;
+    const lightsCollection = canvas?.scene?.lights;
+
+    for (const light of this._lights.values()) {
+      if (!light?.mesh) continue;
+      let doc = light.document;
+      try {
+        const id = light.id ?? light.document?.id;
+        if (lightsCollection && id != null) {
+          const live = lightsCollection.get?.(id) ?? lightsCollection.get?.(String(id));
+          if (live) doc = live;
+        }
+      } catch (_) {}
+      light.mesh.visible = isLightVisibleForPerspective(doc);
+    }
+
+    for (const ds of this._darknessSources.values()) {
+      if (!ds?.mesh) continue;
+      let doc = ds.document;
+      try {
+        const id = ds.id ?? ds.document?.id;
+        if (lightsCollection && id != null) {
+          const live = lightsCollection.get?.(id) ?? lightsCollection.get?.(String(id));
+          if (live) doc = live;
+        }
+      } catch (_) {}
+      ds.mesh.visible = isLightVisibleForPerspective(doc);
+    }
   }
 
   /**
@@ -772,7 +929,7 @@ export class LightingEffectV2 {
     try {
       const env = canvas?.environment;
       if (env) {
-        this.params.darknessLevel = env.darknessLevel ?? 0;
+        this.params.darknessLevel = readFoundryDarkness01();
 
         // Sync ambient colors if Foundry exposes them (v11+).
         // ambientBrightest / ambientDarkness are Color objects or hex strings.
@@ -802,11 +959,33 @@ export class LightingEffectV2 {
       }
     } catch (_) {}
 
-    const sceneDarkness = this.params.darknessLevel;
+    let sceneDarkness = clamp01(this.params.darknessLevel);
+    try {
+      const wc = window.MapShine?.weatherController;
+      const timeDark = computeTimeOfDayDarkness01(wc?.timeOfDay);
+
+      // Prefer the darker of:
+      // - Foundry scene darkness (if it is being updated)
+      // - Map Shine time-of-day darkness (always available from control state)
+      if (Number.isFinite(timeDark)) {
+        sceneDarkness = Math.max(sceneDarkness, timeDark);
+      }
+
+      // Optional weather responsiveness: allow Map Shine effectiveDarkness to
+      // increase darkness further under heavy weather.
+      const envState = wc?.getEnvironment?.();
+      const eff = Number(envState?.effectiveDarkness);
+      if (Number.isFinite(eff)) sceneDarkness = Math.max(sceneDarkness, clamp01(eff));
+    } catch (_) {}
+    this.params.darknessLevel = sceneDarkness;
 
     // Update light animations
     for (const light of this._lights.values()) {
       try {
+        const visibleForPerspective = isLightVisibleForPerspective(light?.document);
+        if (light?.mesh) {
+          light.mesh.visible = visibleForPerspective && (light?.document?.hidden !== true);
+        }
         light.updateAnimation(timeInfo, sceneDarkness);
       } catch (_) {}
     }
@@ -819,7 +998,12 @@ export class LightingEffectV2 {
     // Update compose uniforms
     const u = this._composeMaterial?.uniforms;
     if (u) {
-      u.uDarknessLevel.value = this.params.darknessLevel;
+      // `uDarknessLevel` drives the ambient day/night blend in the compose
+      // shader. Use the computed MapShine/Foundry-aligned darkness directly;
+      // the `darknessEffect` parameter may be intended for additional
+      // tuning elsewhere, but scaling it here was preventing midnight from
+      // reaching a sufficiently dark ambient blend in some setups.
+      u.uDarknessLevel.value = clamp01(sceneDarkness);
       u.uGlobalIllumination.value = this.params.globalIllumination;
       u.uLightIntensity.value = this.params.lightIntensity;
       u.uColorationStrength.value = this.params.colorationStrength;
@@ -861,8 +1045,13 @@ export class LightingEffectV2 {
    * @param {THREE.Texture|null} [overheadRoofBlockTexture=null] - Screen-space
    *   overhead roof blocker mask. Used for hard direct-light blocking so lights
    *   do not leak through overhead tiles that block light.
+   * @param {THREE.Texture|null} [outdoorsMaskTexture=null] - _Outdoors mask in
+   *   scene UV (same as CloudEffectV2). When set, roof/tree light occlusion
+   *   applies only on outdoor pixels so interior lights survive under roofs.
+   * @param {THREE.Texture|null} [ceilingTransmittanceTexture=null] - Half-res R
+   *   packed T from OverheadShadowsEffectV2 (1 = pass light, 0 = ceiling blocks).
    */
-  render(renderer, camera, sceneRT, outputRT, windowLightScene = null, cloudShadowTexture = null, cloudShadowRawTexture = null, buildingShadowTexture = null, overheadShadowTexture = null, buildingShadowOpacity = 0.75, overheadRoofAlphaTexture = null, overheadRoofBlockTexture = null) {
+  render(renderer, camera, sceneRT, outputRT, windowLightScene = null, cloudShadowTexture = null, cloudShadowRawTexture = null, buildingShadowTexture = null, overheadShadowTexture = null, buildingShadowOpacity = 0.75, overheadRoofAlphaTexture = null, overheadRoofBlockTexture = null, outdoorsMaskTexture = null, ceilingTransmittanceTexture = null) {
     if (!this._initialized || !this._enabled || !sceneRT) return;
     if (!this._lightRT || !this._windowLightRT || !this._darknessRT || !this._composeMaterial) return;
 
@@ -911,24 +1100,29 @@ export class LightingEffectV2 {
         ? activeFloor.index
         : 0;
       const cu0 = this._composeMaterial.uniforms;
-      // Disable compose-level roof gating for Foundry source lights.
-      // In multi-floor scenes this screen-space gate can imprint upper-floor
-      // roof silhouettes onto lower floors even when shadow effects are off.
-      cu0.uApplyRoofOcclusionToSources.value = 0.0;
-      // Window overlays are floor-isolated by WindowLightEffectV2 visibility and
-      // per-overlay shader gating. Compose-level roof gating here can suppress
-      // valid upper-floor window light when a roof alpha exists on that floor.
-      cu0.uApplyRoofOcclusionToWindow.value = 0.0;
-      // In multi-floor scenes, lower-floor views still sample upper-floor roof
-      // alpha in screen space; applying that alpha to building-shadow suppression
-      // creates an upper-floor-shaped cutout on the lower floor.
-      cu0.uApplyRoofOcclusionToBuilding.value = (floors.length <= 1 || fi >= topFloorIndex) ? 1.0 : 0.0;
+      const transmissionEnabled = this.params.upperFloorTransmissionEnabled === true;
+      const rawTransmission = Number(this.params.upperFloorTransmissionStrength);
+      const transmission = transmissionEnabled && Number.isFinite(rawTransmission)
+        ? Math.max(0, Math.min(1, rawTransmission))
+        : 0;
+      const occlusionWeight = 1.0 - transmission;
+      // Legacy option: disable roof light gating on non-top floors to avoid upper-ceiling
+      // stamps cutting lower-floor lights. Default OFF so overhead tiles always gate.
+      const restrictRoofToTop = this.params.restrictRoofScreenLightOcclusionToTopFloor === true;
+      const roofScreenOcclusionScale = (restrictRoofToTop && floors.length > 1 && fi < topFloorIndex)
+        ? 0.0
+        : 1.0;
+      cu0.uApplyRoofOcclusionToSources.value = occlusionWeight * roofScreenOcclusionScale;
+      cu0.uApplyRoofOcclusionToWindow.value = occlusionWeight * roofScreenOcclusionScale;
+      cu0.uApplyRoofOcclusionToBuilding.value = roofScreenOcclusionScale;
     } catch (_) {
       const cu0 = this._composeMaterial.uniforms;
-      cu0.uApplyRoofOcclusionToSources.value = 0.0;
-      cu0.uApplyRoofOcclusionToWindow.value = 0.0;
+      cu0.uApplyRoofOcclusionToSources.value = 1.0;
+      cu0.uApplyRoofOcclusionToWindow.value = 1.0;
       cu0.uApplyRoofOcclusionToBuilding.value = 1.0;
     }
+
+    this._refreshLightsForLevelsPerspective();
 
     // ── Pass 1: Accumulate Foundry light mesh contributions ───────────
     // Save camera layer mask — ThreeLightSource meshes live on layer 0.
@@ -986,7 +1180,83 @@ export class LightingEffectV2 {
       cu.tCloudShadowRaw.value = null;
       cu.uHasCloudShadowRaw.value = 0;
     }
-    // Bind building shadow factor texture (null-safe: shader gates on uHasBuildingShadow).
+    // View→scene UV uniforms for compose (building shadow + _Outdoors roof-light gate).
+    try {
+      const dims = canvas?.dimensions;
+      const sc = window.MapShine?.sceneComposer;
+      const cam = camera;
+      if (cam && dims) {
+        let vMinX = 0, vMinY = 0, vMaxX = 1, vMaxY = 1;
+        let c00x = 0, c00y = 0, c10x = 1, c10y = 0, c01x = 0, c01y = 1, c11x = 1, c11y = 1;
+        if (cam.isOrthographicCamera) {
+          vMinX = cam.position.x + cam.left   / cam.zoom;
+          vMinY = cam.position.y + cam.bottom / cam.zoom;
+          vMaxX = cam.position.x + cam.right  / cam.zoom;
+          vMaxY = cam.position.y + cam.top    / cam.zoom;
+
+          c00x = vMinX; c00y = vMinY;
+          c10x = vMaxX; c10y = vMinY;
+          c01x = vMinX; c01y = vMaxY;
+          c11x = vMaxX; c11y = vMaxY;
+        } else {
+          const THREE = window.THREE;
+          const groundZ = sc?.basePlaneMesh?.position?.z ?? (sc?.groundZ ?? 0);
+          if (THREE) {
+            const ndc = new THREE.Vector3();
+            const world = new THREE.Vector3();
+            const dir = new THREE.Vector3();
+            let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+
+            const corners = [
+              { ndcX: -1, ndcY: -1, key: '00' },
+              { ndcX:  1, ndcY: -1, key: '10' },
+              { ndcX: -1, ndcY:  1, key: '01' },
+              { ndcX:  1, ndcY:  1, key: '11' },
+            ];
+
+            for (const c of corners) {
+              ndc.set(c.ndcX, c.ndcY, 0.5);
+              world.copy(ndc).unproject(cam);
+              dir.copy(world).sub(cam.position);
+              const dz = dir.z;
+              if (Math.abs(dz) < 1e-6) continue;
+              const t = (groundZ - cam.position.z) / dz;
+              if (!Number.isFinite(t) || t <= 0) continue;
+              const ix = cam.position.x + dir.x * t;
+              const iy = cam.position.y + dir.y * t;
+              if (ix < minX) minX = ix; if (iy < minY) minY = iy;
+              if (ix > maxX) maxX = ix; if (iy > maxY) maxY = iy;
+
+              if (c.key === '00') { c00x = ix; c00y = iy; }
+              else if (c.key === '10') { c10x = ix; c10y = iy; }
+              else if (c.key === '01') { c01x = ix; c01y = iy; }
+              else if (c.key === '11') { c11x = ix; c11y = iy; }
+            }
+
+            if (minX !== Infinity) {
+              vMinX = minX; vMinY = minY; vMaxX = maxX; vMaxY = maxY;
+            }
+          }
+        }
+        cu.uBldViewBoundsMin.value.set(vMinX, vMinY);
+        cu.uBldViewBoundsMax.value.set(vMaxX, vMaxY);
+        cu.uBldViewCorner00.value.set(c00x, c00y);
+        cu.uBldViewCorner10.value.set(c10x, c10y);
+        cu.uBldViewCorner01.value.set(c01x, c01y);
+        cu.uBldViewCorner11.value.set(c11x, c11y);
+        const sr = dims.sceneRect ?? dims;
+        cu.uBldSceneOrigin.value.set(sr.x ?? 0, sr.y ?? 0);
+        cu.uBldSceneSize.value.set(
+          sr.width  ?? dims.sceneWidth  ?? 1,
+          sr.height ?? dims.sceneHeight ?? 1
+        );
+        cu.uSceneDimensions.value.set(
+          dims.width  ?? 1,
+          dims.height ?? 1
+        );
+      }
+    } catch (_) {}
+
     if (buildingShadowTexture) {
       cu.tBuildingShadow.value    = buildingShadowTexture;
       cu.uHasBuildingShadow.value = 1;
@@ -1005,98 +1275,19 @@ export class LightingEffectV2 {
           );
         } catch (_) {}
       }
-      // World-stable UV reconstruction — same approach as CloudEffectV2:
-      // Pass camera frustum world-space corners + scene rect so the fragment
-      // shader can reconstruct world XY and convert to scene UV per-pixel.
-      // This is view-stable at any pan/zoom level.
-      try {
-        const dims = canvas?.dimensions;
-        const sc = window.MapShine?.sceneComposer;
-        const cam = camera;
-        if (cam && dims) {
-          let vMinX = 0, vMinY = 0, vMaxX = 1, vMaxY = 1;
-          // Default corners derived from min/max (orthographic / fallback).
-          let c00x = 0, c00y = 0, c10x = 1, c10y = 0, c01x = 0, c01y = 1, c11x = 1, c11y = 1;
-          if (cam.isOrthographicCamera) {
-            vMinX = cam.position.x + cam.left   / cam.zoom;
-            vMinY = cam.position.y + cam.bottom / cam.zoom;
-            vMaxX = cam.position.x + cam.right  / cam.zoom;
-            vMaxY = cam.position.y + cam.top    / cam.zoom;
-
-            c00x = vMinX; c00y = vMinY;
-            c10x = vMaxX; c10y = vMinY;
-            c01x = vMinX; c01y = vMaxY;
-            c11x = vMaxX; c11y = vMaxY;
-          } else {
-            // Perspective camera: compute stable bounds at the ground plane using
-            // NDC unprojection (same approach as WaterEffectV2). This avoids any
-            // mismatch between FOV/aspect assumptions and the camera projection.
-            const THREE = window.THREE;
-            const groundZ = sc?.basePlaneMesh?.position?.z ?? (sc?.groundZ ?? 0);
-            if (THREE) {
-              const ndc = new THREE.Vector3();
-              const world = new THREE.Vector3();
-              const dir = new THREE.Vector3();
-              let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-
-              // Map NDC corners to our vUv corner convention:
-              // (-1,-1) -> (0,0), (1,-1)->(1,0), (-1,1)->(0,1), (1,1)->(1,1)
-              const corners = [
-                { ndcX: -1, ndcY: -1, key: '00' },
-                { ndcX:  1, ndcY: -1, key: '10' },
-                { ndcX: -1, ndcY:  1, key: '01' },
-                { ndcX:  1, ndcY:  1, key: '11' },
-              ];
-
-              for (const c of corners) {
-                ndc.set(c.ndcX, c.ndcY, 0.5);
-                world.copy(ndc).unproject(cam);
-                dir.copy(world).sub(cam.position);
-                const dz = dir.z;
-                if (Math.abs(dz) < 1e-6) continue;
-                const t = (groundZ - cam.position.z) / dz;
-                if (!Number.isFinite(t) || t <= 0) continue;
-                const ix = cam.position.x + dir.x * t;
-                const iy = cam.position.y + dir.y * t;
-                if (ix < minX) minX = ix; if (iy < minY) minY = iy;
-                if (ix > maxX) maxX = ix; if (iy > maxY) maxY = iy;
-
-                if (c.key === '00') { c00x = ix; c00y = iy; }
-                else if (c.key === '10') { c10x = ix; c10y = iy; }
-                else if (c.key === '01') { c01x = ix; c01y = iy; }
-                else if (c.key === '11') { c11x = ix; c11y = iy; }
-              }
-
-              if (minX !== Infinity) {
-                vMinX = minX; vMinY = minY; vMaxX = maxX; vMaxY = maxY;
-              }
-            }
-          }
-          cu.uBldViewBoundsMin.value.set(vMinX, vMinY);
-          cu.uBldViewBoundsMax.value.set(vMaxX, vMaxY);
-          cu.uBldViewCorner00.value.set(c00x, c00y);
-          cu.uBldViewCorner10.value.set(c10x, c10y);
-          cu.uBldViewCorner01.value.set(c01x, c01y);
-          cu.uBldViewCorner11.value.set(c11x, c11y);
-          // Scene rect in Foundry world coords (Y-down). The bake canvas is
-          // authored in this space (see OutdoorsMaskProviderV2: flipY=false).
-          // Three.js camera Y is also world-space Y (matching Foundry scene coords
-          // after Coordinates.toWorld conversion), so no extra flip needed here.
-          const sr = dims.sceneRect ?? dims;
-          cu.uBldSceneOrigin.value.set(sr.x ?? 0, sr.y ?? 0);
-          cu.uBldSceneSize.value.set(
-            sr.width  ?? dims.sceneWidth  ?? 1,
-            sr.height ?? dims.sceneHeight ?? 1
-          );
-          cu.uSceneDimensions.value.set(
-            dims.width  ?? 1,
-            dims.height ?? 1
-          );
-        }
-      } catch (_) {}
     } else {
       cu.tBuildingShadow.value    = null;
       cu.uHasBuildingShadow.value = 0;
+    }
+
+    if (outdoorsMaskTexture) {
+      cu.tOutdoorsForRoofLight.value = outdoorsMaskTexture;
+      cu.uHasOutdoorsForRoofLight.value = 1;
+      cu.uOutdoorsForRoofLightFlipY.value = outdoorsMaskTexture.flipY ? 1.0 : 0.0;
+    } else {
+      cu.tOutdoorsForRoofLight.value = null;
+      cu.uHasOutdoorsForRoofLight.value = 0;
+      cu.uOutdoorsForRoofLightFlipY.value = 0;
     }
     if (overheadRoofAlphaTexture) {
       cu.tOverheadRoofAlpha.value = overheadRoofAlphaTexture;
@@ -1111,6 +1302,13 @@ export class LightingEffectV2 {
     } else {
       cu.tOverheadRoofBlock.value = null;
       cu.uHasOverheadRoofBlock.value = 0;
+    }
+    if (ceilingTransmittanceTexture) {
+      cu.tCeilingLightTransmittance.value = ceilingTransmittanceTexture;
+      cu.uHasCeilingLightTransmittance.value = 1;
+    } else {
+      cu.tCeilingLightTransmittance.value = null;
+      cu.uHasCeilingLightTransmittance.value = 0;
     }
     // Bind overhead shadow texture (screen-space, sampled directly at vUv).
     if (overheadShadowTexture) {

@@ -636,14 +636,25 @@ export class TreeEffectV2 {
     if (!floors || floors.length <= 1) return 0;
     if (tileHasLevelsRange(tileDoc)) {
       const flags = readTileLevelsFlags(tileDoc);
-      const mid = (Number(flags.rangeBottom) + Number(flags.rangeTop)) / 2;
+      const tileBottom = Number(flags.rangeBottom);
+      const tileTop = Number(flags.rangeTop);
+      const tileMid = (tileBottom + tileTop) / 2;
       for (let i = 0; i < floors.length; i++) {
-        if (mid >= floors[i].elevationMin && mid <= floors[i].elevationMax) return i;
+        const f = floors[i];
+        if (tileMid >= f.elevationMin && tileMid < f.elevationMax) return i;
+      }
+      for (let i = 0; i < floors.length; i++) {
+        const f = floors[i];
+        if (tileBottom <= f.elevationMax && f.elevationMin <= tileTop) return i;
       }
     }
     const elev = Number.isFinite(Number(tileDoc?.elevation)) ? Number(tileDoc.elevation) : 0;
     for (let i = 0; i < floors.length; i++) {
-      if (elev >= floors[i].elevationMin && elev <= floors[i].elevationMax) return i;
+      const f = floors[i];
+      const includeUpperBound = i === floors.length - 1;
+      if (elev >= f.elevationMin && (includeUpperBound ? elev <= f.elevationMax : elev < f.elevationMax)) {
+        return i;
+      }
     }
     return 0;
   }

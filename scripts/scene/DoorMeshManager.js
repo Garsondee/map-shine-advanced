@@ -15,6 +15,7 @@
  */
 
 import { createLogger } from '../core/log.js';
+import { readWallHeightFlags } from '../foundry/levels-scene-flags.js';
 import Coordinates from '../utils/coordinates.js';
 import { weatherController } from '../core/WeatherController.js';
 
@@ -53,11 +54,62 @@ const RENDER_ORDER_PER_FLOOR = 10000;
 const OVERHEAD_OFFSET = 5000;
 const DOOR_RENDER_ORDER_WITHIN_FLOOR = OVERHEAD_OFFSET - 2;
 const DOOR_BASE_Z_V1 = 1.0;
-const DOOR_BASE_Z_V2 = 1004.0;
+// Match FloorRenderBus GROUND_Z + small lift so doors sit just above that floor's tile plane.
+const BUS_GROUND_Z = 1000;
+const BUS_Z_PER_FLOOR = 1;
+const DOOR_Z_LIFT_ABOVE_FLOOR = 4;
 
-function getDoorRenderOrder() {
-  const activeFloorIndex = Number(window.MapShine?.floorStack?.getActiveFloor?.()?.index);
-  const safeFloorIndex = Number.isFinite(activeFloorIndex) ? activeFloorIndex : 0;
+/**
+ * Map a door wall to a floor index using wall-height bounds (same idea as
+ * FloorRenderBus._resolveFloorIndex for tiles). Using the *active* floor here
+ * wrongly puts upstairs doors in a higher render band so they paint over
+ * lower-floor roofs during the stacked-floor composite.
+ *
+ * @param {object|null|undefined} wallDoc
+ * @returns {number}
+ */
+function resolveDoorFloorIndex(wallDoc) {
+  const floors = window.MapShine?.floorStack?.getFloors?.() ?? [];
+  if (!floors.length || floors.length <= 1) return 0;
+
+  const bounds = readWallHeightFlags(wallDoc);
+  let wb = Number(bounds?.bottom);
+  let wt = Number(bounds?.top);
+  if (!Number.isFinite(wb)) wb = -Infinity;
+  if (!Number.isFinite(wt)) wt = Infinity;
+  if (wt < wb) {
+    const s = wb;
+    wb = wt;
+    wt = s;
+  }
+
+  // Full-height walls: treat as ground-floor doors (legacy / no level data).
+  if (wb === -Infinity && wt === Infinity) return 0;
+
+  if (Number.isFinite(wb) && Number.isFinite(wt)) {
+    const mid = (wb + wt) / 2;
+    for (let i = 0; i < floors.length; i++) {
+      const f = floors[i];
+      if (mid >= f.elevationMin && mid < f.elevationMax) return i;
+    }
+    for (let i = 0; i < floors.length; i++) {
+      const f = floors[i];
+      if (wb < f.elevationMax && f.elevationMin <= wt) return i;
+    }
+    return 0;
+  }
+
+  const elev = Number.isFinite(wb) ? wb : (Number.isFinite(wt) ? wt : 0);
+  for (let i = 0; i < floors.length; i++) {
+    const f = floors[i];
+    if (elev >= f.elevationMin && elev <= f.elevationMax) return i;
+  }
+  return 0;
+}
+
+function getDoorRenderOrder(wallDoc) {
+  const floorIndex = resolveDoorFloorIndex(wallDoc);
+  const safeFloorIndex = Number.isFinite(floorIndex) && floorIndex >= 0 ? floorIndex : 0;
   return safeFloorIndex * RENDER_ORDER_PER_FLOOR + DOOR_RENDER_ORDER_WITHIN_FLOOR;
 }
 
@@ -243,7 +295,7 @@ class DoorMesh {
     
     // Draw doors after regular tile albedo but below overhead tiles in the
     // active floor's render-order band.
-    this.mesh.renderOrder = getDoorRenderOrder();
+    this.mesh.renderOrder = getDoorRenderOrder(this.wallDoc);
     
     // Add to scene
     this.scene.add(this.mesh);
@@ -258,9 +310,8 @@ class DoorMesh {
   _applyAnimationState(progress) {
     if (!this.mesh) return;
 
-    // Re-anchor to the active floor band so doors keep correct layering when
-    // level changes occur after mesh creation.
-    this.mesh.renderOrder = getDoorRenderOrder();
+    // Re-anchor render order / Z to this wall's floor band (wall-height / Levels).
+    this.mesh.renderOrder = getDoorRenderOrder(this.wallDoc);
     
     const closed = this._closedPosition;
     const type = this.animation.type;
@@ -325,10 +376,12 @@ class DoorMesh {
     // Apply to mesh
     const groundZ = window.MapShine?.sceneComposer?.groundZ ?? 0;
     const busScene = window.MapShine?.effectComposer?._floorCompositorV2?._renderBus?._scene ?? null;
-    // V2 bus uses absolute world Z values around 1000 (not ground-relative).
-    // Adding groundZ here can push doors behind the camera (e.g. z=2004 with
-    // camera at z=2000), making them fully invisible.
-    const z = busScene ? DOOR_BASE_Z_V2 : (groundZ + DOOR_BASE_Z_V1);
+    // V2 bus: Z matches FloorRenderBus tile planes per floor index (see BUS_*).
+    // Do not add sceneComposer.groundZ — it can push meshes behind the camera.
+    const doorFloorIndex = resolveDoorFloorIndex(this.wallDoc);
+    const z = busScene
+      ? (BUS_GROUND_Z + doorFloorIndex * BUS_Z_PER_FLOOR + DOOR_Z_LIFT_ABOVE_FLOOR)
+      : (groundZ + DOOR_BASE_Z_V1);
     this.mesh.position.set(x, y, z);
     this.mesh.rotation.z = rotation;
     this.mesh.scale.set(scaleX, scaleY, 1);
@@ -372,24 +425,23 @@ class DoorMesh {
    * @param {Object} timeInfo - Time info from TimeManager
    */
   update(timeInfo) {
-    if (!this._animating) return;
+    if (this._animating) {
+      const dt = (timeInfo && typeof timeInfo.delta === 'number') ? timeInfo.delta : 0;
+      this._animationElapsedS += dt;
+      const rawProgress = this._animationDurationS > 0 ? (this._animationElapsedS / this._animationDurationS) : 1.0;
 
-    const dt = (timeInfo && typeof timeInfo.delta === 'number') ? timeInfo.delta : 0;
-    this._animationElapsedS += dt;
-    const rawProgress = this._animationDurationS > 0 ? (this._animationElapsedS / this._animationDurationS) : 1.0;
-    
-    if (rawProgress >= 1.0) {
-      // Animation complete
-      this._animationProgress = this._animationTargetProgress;
-      this._animating = false;
-    } else {
-      // Interpolate with easing
-      const eased = easeInOutCosine(rawProgress);
-      const start = this._animationStartProgress;
-      const end = this._animationTargetProgress;
-      this._animationProgress = start + (end - start) * eased;
+      if (rawProgress >= 1.0) {
+        this._animationProgress = this._animationTargetProgress;
+        this._animating = false;
+      } else {
+        const eased = easeInOutCosine(rawProgress);
+        const start = this._animationStartProgress;
+        const end = this._animationTargetProgress;
+        this._animationProgress = start + (end - start) * eased;
+      }
     }
-    
+    // Always refresh: floor stack / wall-height edits must update renderOrder + Z
+    // even when the door is not animating.
     this._applyAnimationState(this._animationProgress);
   }
   

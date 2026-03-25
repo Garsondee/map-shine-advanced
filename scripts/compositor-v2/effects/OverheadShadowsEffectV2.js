@@ -2,8 +2,9 @@
  * @fileoverview Overhead Shadows Effect V2 (adapted from V1)
  * HEALTH-WIRING BADGE (Map Shine Breaker Box):
  * If you change this effect's capture passes, temporary override restoration,
- * floor/context behavior, or output textures, you MUST update HealthEvaluator
- * contracts/wiring for `OverheadShadowsEffectV2` to prevent silent failures.
+ * floor/context behavior, or output textures (including ceilingTransmittance),
+ * you MUST update HealthEvaluator contracts/wiring for `OverheadShadowsEffectV2`
+ * to prevent silent failures.
  * Renders soft, directional shadows cast by overhead tiles onto the ground.
  * @module compositor-v2/effects/OverheadShadowsEffectV2
  */
@@ -16,7 +17,9 @@ const log = createLogger('OverheadShadowsEffect');
 /**
  * Overhead Shadows Effect V2 (adapted from V1).
  *
- * - Uses ROOF_LAYER (20) overhead tiles as a stamp.
+ * - Uses ROOF_LAYER (20) overhead tiles as a stamp; tree canopies use
+ *   WEATHER_ROOF_LAYER (21) in roofVisibility/roofBlock passes so LightingEffectV2
+ *   can occlude through foliage while caster passes can still hide trees where needed.
  * - Casts a short, soft shadow "downwards" from roofs by sampling an
  *   offset version of the roof mask.
  * - Only darkens the region outside the roof by subtracting the base roof
@@ -34,6 +37,24 @@ export class OverheadShadowsEffectV2 {
 
     /** @type {THREE.WebGLRenderTarget|null} */
     this.roofVisibilityTarget = null; // Runtime roof visibility alpha for LightingEffectV2 suppression
+
+    /**
+     * Half-res packed ceiling light transmittance T in R (1 = lights pass, 0 = blocked).
+     * Derived from roofVisibility + roofBlock with the same thresholds as LightingEffectV2
+     * so geometric gating has a single source of truth (see _renderCeilingTransmittancePass).
+     * @type {THREE.WebGLRenderTarget|null}
+     */
+    this.ceilingTransmittanceTarget = null;
+
+    /** @type {THREE.Scene|null} */
+    this._ceilingTransmittanceScene = null;
+    /** @type {THREE.OrthographicCamera|null} */
+    this._ceilingTransmittanceCamera = null;
+    /** @type {THREE.ShaderMaterial|null} */
+    this._ceilingTransmittanceMaterial = null;
+
+    /** True after _renderCeilingTransmittancePass this frame (avoids binding cleared-white RT as valid T). */
+    this._ceilingTransmittanceWritten = false;
 
     /** @type {THREE.WebGLRenderTarget|null} */
     this.shadowTarget = null; // Final overhead shadow factor texture
@@ -292,6 +313,115 @@ export class OverheadShadowsEffectV2 {
    */
   get roofBlockTexture() {
     return this.roofBlockTarget?.texture || null;
+  }
+
+  /**
+   * Half-res transmittance for dynamic lights under ceilings (R channel, linear 0..1).
+   * @returns {THREE.Texture|null}
+   */
+  get ceilingTransmittanceTexture() {
+    return this.ceilingTransmittanceTarget?.texture || null;
+  }
+
+  /**
+   * Texture for LightingEffectV2 only after a successful blit this frame.
+   * @returns {THREE.Texture|null}
+   */
+  get ceilingTransmittanceTextureForLighting() {
+    return (this._ceilingTransmittanceWritten && this.ceilingTransmittanceTarget?.texture)
+      ? this.ceilingTransmittanceTarget.texture
+      : null;
+  }
+
+  /**
+   * Lazy fullscreen pass: roofVisibility + roofBlock → T (matches lighting thresholds).
+   * @private
+   */
+  _ensureCeilingTransmittancePass() {
+    const THREE = window.THREE;
+    if (!THREE || this._ceilingTransmittanceScene) return;
+
+    this._ceilingTransmittanceCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+    this._ceilingTransmittanceScene = new THREE.Scene();
+    this._ceilingTransmittanceMaterial = new THREE.ShaderMaterial({
+      depthWrite: false,
+      depthTest: false,
+      uniforms: {
+        tRoofVis: { value: null },
+        tRoofBlock: { value: null },
+        uHasRoofVis: { value: 0 },
+        uHasRoofBlock: { value: 0 },
+      },
+      vertexShader: /* glsl */`
+        varying vec2 vUv;
+        void main() {
+          vUv = uv;
+          gl_Position = vec4(position.xy, 0.0, 1.0);
+        }
+      `,
+      fragmentShader: /* glsl */`
+        uniform sampler2D tRoofVis;
+        uniform sampler2D tRoofBlock;
+        uniform float uHasRoofVis;
+        uniform float uHasRoofBlock;
+        varying vec2 vUv;
+        void main() {
+          float T = 1.0;
+          if (uHasRoofVis > 0.5) {
+            vec4 rv = texture2D(tRoofVis, vUv);
+            float a = clamp(max(rv.a, max(rv.r, max(rv.g, rv.b))), 0.0, 1.0);
+            // Slightly lower threshold than legacy 0.20 so faint roof art / half-res
+            // soften still registers as occluding for lights.
+            // Smooth the occlusion ramp so roof/tree hover fading doesn't produce
+            // a hard binary "light on vs light off" transition.
+            float roofOcc = smoothstep(0.10, 0.14, a);
+            T *= (1.0 - roofOcc);
+          }
+          if (uHasRoofBlock > 0.5) {
+            vec4 rb = texture2D(tRoofBlock, vUv);
+            float b = clamp(max(rb.a, max(rb.r, max(rb.g, rb.b))), 0.0, 1.0);
+            float roofBlockOcc = smoothstep(0.42, 0.48, b);
+            T *= (1.0 - roofBlockOcc);
+          }
+          gl_FragColor = vec4(T, T, T, 1.0);
+        }
+      `,
+    });
+    const mesh = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), this._ceilingTransmittanceMaterial);
+    mesh.frustumCulled = false;
+    this._ceilingTransmittanceScene.add(mesh);
+  }
+
+  /**
+   * @param {THREE.WebGLRenderer} renderer
+   * @private
+   */
+  _renderCeilingTransmittancePass(renderer) {
+    if (!renderer || !this.roofVisibilityTarget?.texture || !this.roofBlockTarget?.texture
+      || !this.ceilingTransmittanceTarget) {
+      return;
+    }
+    this._ensureCeilingTransmittancePass();
+    if (!this._ceilingTransmittanceMaterial || !this._ceilingTransmittanceScene
+      || !this._ceilingTransmittanceCamera) {
+      return;
+    }
+    const m = this._ceilingTransmittanceMaterial;
+    m.uniforms.tRoofVis.value = this.roofVisibilityTarget.texture;
+    m.uniforms.tRoofBlock.value = this.roofBlockTarget.texture;
+    m.uniforms.uHasRoofVis.value = 1.0;
+    m.uniforms.uHasRoofBlock.value = 1.0;
+
+    const prev = renderer.getRenderTarget();
+    try {
+      renderer.setRenderTarget(this.ceilingTransmittanceTarget);
+      renderer.setClearColor(0xffffff, 1);
+      renderer.clear();
+      renderer.render(this._ceilingTransmittanceScene, this._ceilingTransmittanceCamera);
+      this._ceilingTransmittanceWritten = true;
+    } finally {
+      renderer.setRenderTarget(prev);
+    }
   }
 
   /**
@@ -1236,6 +1366,28 @@ export class OverheadShadowsEffectV2 {
       this.roofVisibilityTarget.setSize(width, height);
     }
 
+    const ctW = Math.max(1, Math.floor(width / 2));
+    const ctH = Math.max(1, Math.floor(height / 2));
+    if (!this.ceilingTransmittanceTarget) {
+      this.ceilingTransmittanceTarget = new THREE.WebGLRenderTarget(ctW, ctH, {
+        minFilter: THREE.LinearFilter,
+        magFilter: THREE.LinearFilter,
+        format: THREE.RGBAFormat,
+        type: THREE.UnsignedByteType,
+      });
+    } else {
+      this.ceilingTransmittanceTarget.setSize(ctW, ctH);
+    }
+    try {
+      if (this.renderer && this.ceilingTransmittanceTarget) {
+        const prevTarget = this.renderer.getRenderTarget();
+        this.renderer.setRenderTarget(this.ceilingTransmittanceTarget);
+        this.renderer.setClearColor(0xffffff, 1);
+        this.renderer.clear();
+        this.renderer.setRenderTarget(prevTarget);
+      }
+    } catch (_) {}
+
     if (this.material && this.material.uniforms && this.material.uniforms.uTexelSize) {
       this.material.uniforms.uTexelSize.value.set(1 / width, 1 / height);
     }
@@ -1552,6 +1704,8 @@ export class OverheadShadowsEffectV2 {
     if (scene) this.mainScene = scene;
     if (camera) this.mainCamera = camera;
 
+    this._ceilingTransmittanceWritten = false;
+
     // If not initialized, force a neutral (white) shadow target so
     // LightingEffectV2 doesn't multiply the scene to black.
     if (!this.material || !this.mainCamera || !this.mainScene || !this.shadowScene) {
@@ -1571,6 +1725,7 @@ export class OverheadShadowsEffectV2 {
     if (!this.roofTarget
       || !this.roofBlockTarget
       || !this.roofVisibilityTarget
+      || !this.ceilingTransmittanceTarget
       || !this.shadowTarget
       || !this.fluidRoofTarget
       || !this.tileProjectionTarget
@@ -1735,6 +1890,8 @@ export class OverheadShadowsEffectV2 {
         renderer.setClearColor(0x000000, 0);
         renderer.clear();
         renderer.render(this.mainScene, this.mainCamera);
+
+        this._renderCeilingTransmittancePass(renderer);
 
         for (const entry of disabledTreeBlockerUniformOverrides) {
           if (entry?.uniform) entry.uniform.value = entry.value;
@@ -1905,17 +2062,31 @@ export class OverheadShadowsEffectV2 {
       restoreRoofCaptureCamera();
     }
 
-    // Pass 1b: capture a non-guard, forced-opaque roof blocker map for
-    // LightingEffectV2 hard occlusion. This must remain in direct screen UV.
+    // Restore per-sprite opacity now that roofTarget capture is done.
+    // roofBlockTarget/ceilingTransmittance should follow hover-visible roof
+    // tiles/canopies so light suppression can fade in/out correctly.
+    for (const entry of overrides) {
+      if (entry.object && entry.object.material) {
+        entry.object.material.opacity = entry.opacity;
+      }
+    }
+    for (const entry of opacityUniformOverrides) {
+      if (entry?.uniform) entry.uniform.value = entry.value;
+    }
+    for (const entry of tileOpacityUniformOverrides) {
+      if (entry?.uniform) entry.uniform.value = entry.value;
+    }
+    for (const entry of roofSpriteVisibilityOverrides) {
+      if (entry.object) entry.object.visible = entry.visible;
+    }
+
+    // Pass 1b: capture a non-guard roof blocker map for LightingEffectV2 hard
+    // occlusion. This must remain in direct screen UV.
     const treeBlockerUniformOverrides = [];
     this.mainScene.traverse((object) => {
       if (!object?.userData?.mapShineTreeTileId) return;
       const uniforms = object?.material?.uniforms;
       if (!uniforms) return;
-      if (uniforms.uHoverFade && typeof uniforms.uHoverFade.value === 'number') {
-        treeBlockerUniformOverrides.push({ uniform: uniforms.uHoverFade, value: uniforms.uHoverFade.value });
-        uniforms.uHoverFade.value = 1.0;
-      }
       if (uniforms.uShadowOpacity && typeof uniforms.uShadowOpacity.value === 'number') {
         treeBlockerUniformOverrides.push({ uniform: uniforms.uShadowOpacity, value: uniforms.uShadowOpacity.value });
         uniforms.uShadowOpacity.value = 0.0;
@@ -1954,22 +2125,7 @@ export class OverheadShadowsEffectV2 {
       }
     }
 
-    // Restore per-sprite opacity now that roof mask capture is done.
-    // Tile projection should use each tile's true alpha/opacity settings.
-    for (const entry of overrides) {
-      if (entry.object && entry.object.material) {
-        entry.object.material.opacity = entry.opacity;
-      }
-    }
-    for (const entry of opacityUniformOverrides) {
-      if (entry?.uniform) entry.uniform.value = entry.value;
-    }
-    for (const entry of tileOpacityUniformOverrides) {
-      if (entry?.uniform) entry.uniform.value = entry.value;
-    }
-    for (const entry of roofSpriteVisibilityOverrides) {
-      if (entry.object) entry.object.visible = entry.visible;
-    }
+    this._renderCeilingTransmittancePass(renderer);
 
     // IMPORTANT: restore camera layers before rendering the world-pinned
     // shadow mesh so the base plane is visible to the camera again.
@@ -2212,6 +2368,20 @@ export class OverheadShadowsEffectV2 {
       this.roofVisibilityTarget.dispose();
       this.roofVisibilityTarget = null;
     }
+    if (this.ceilingTransmittanceTarget) {
+      this.ceilingTransmittanceTarget.dispose();
+      this.ceilingTransmittanceTarget = null;
+    }
+    if (this._ceilingTransmittanceMaterial) {
+      this._ceilingTransmittanceMaterial.dispose();
+      this._ceilingTransmittanceMaterial = null;
+    }
+    if (this._ceilingTransmittanceScene) {
+      const ch = this._ceilingTransmittanceScene.children?.[0];
+      if (ch?.geometry) ch.geometry.dispose();
+      this._ceilingTransmittanceScene = null;
+    }
+    this._ceilingTransmittanceCamera = null;
     if (this.shadowTarget) {
       this.shadowTarget.dispose();
       this.shadowTarget = null;

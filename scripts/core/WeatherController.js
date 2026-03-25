@@ -2110,7 +2110,11 @@ export class WeatherController {
 
     let sceneDarkness = 0.0;
     try {
-      sceneDarkness = canvas?.environment?.darknessLevel ?? 0.0;
+      const sceneLevel = canvas?.scene?.environment?.darknessLevel;
+      const envLevel = canvas?.environment?.darknessLevel;
+      sceneDarkness = Number.isFinite(sceneLevel)
+        ? sceneLevel
+        : (Number.isFinite(envLevel) ? envLevel : 0.0);
     } catch (e) {
       sceneDarkness = 0.0;
     }

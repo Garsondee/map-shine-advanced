@@ -2189,8 +2189,16 @@ export class FloorCompositor {
       ? this._buildingShadowEffect.params.opacity : 0.75;
     const overheadShadowTex = (!_disableOverheadInLighting && this._overheadShadowEffect?.params?.enabled)
       ? this._overheadShadowEffect.shadowFactorTexture : null;
+    // Rain/roof masking uses a hard blocker map that intentionally keeps
+    // suppression active while roof/tree art is being hover-revealed. Lighting
+    // should instead follow live visibility alpha during reveal so light does
+    // not remain blocked under faded trees/overheads.
+    const treeHoverRevealActive = !!this._treeEffect?.isHoverRevealActive?.();
+    const roofRevealActiveForLighting = !!weatherController?.roofMaskActive || treeHoverRevealActive;
     const overheadRoofAlphaTex = _disableRoofInLighting ? null : (this._overheadShadowEffect?.roofAlphaTexture ?? null);
-    const overheadRoofBlockTex = _disableRoofInLighting ? null : (this._overheadShadowEffect?.roofBlockTexture ?? null);
+    const overheadRoofBlockTex = (_disableRoofInLighting || roofRevealActiveForLighting)
+      ? null
+      : (this._overheadShadowEffect?.roofBlockTexture ?? null);
     this._windowLightEffect?.setOverheadRoofAlphaTexture?.(
       overheadRoofAlphaTex,
       this._sceneRT?.width || 1,
@@ -2199,7 +2207,12 @@ export class FloorCompositor {
     this._skyColorEffect?.setOverheadRoofAlphaTexture?.(overheadRoofAlphaTex);
     if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: lighting.render(sceneRT→postA)'); } catch (_) {} }
     if (_profiling) _profileT0 = performance.now();
-    this._lightingEffect.render(this.renderer, this.camera, currentInput, this._postA, winScene, cloudShadowTex, cloudShadowRawTex, buildingShadowTex, overheadShadowTex, buildingShadowOpacity, overheadRoofAlphaTex, overheadRoofBlockTex);
+    const lightingCtx = window.MapShine?.activeLevelContext ?? null;
+    const outdoorsForLightingTex = this._resolveOutdoorsMask(lightingCtx, { allowWeatherRoofMap: false }).texture ?? null;
+    const ceilingTransmittanceTex = (!_disableRoofInLighting && !roofRevealActiveForLighting && this._overheadShadowEffect?.ceilingTransmittanceTextureForLighting)
+      ? this._overheadShadowEffect.ceilingTransmittanceTextureForLighting
+      : null;
+    this._lightingEffect.render(this.renderer, this.camera, currentInput, this._postA, winScene, cloudShadowTex, cloudShadowRawTex, buildingShadowTex, overheadShadowTex, buildingShadowOpacity, overheadRoofAlphaTex, overheadRoofBlockTex, outdoorsForLightingTex, ceilingTransmittanceTex);
     if (_profiling) this._recordPassTiming('lightingRender', _profileT0);
     if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: lighting.render(sceneRT→postA) DONE'); } catch (_) {} }
 
@@ -2659,10 +2672,13 @@ export class FloorCompositor {
    * 4) Ground floor outdoors texture
    *
    * @param {{bottom:number,top:number}|null} context
+   * @param {{allowWeatherRoofMap?: boolean}} [options] When false (lighting pass), never use
+   *   `weatherController.roofMap` — it is not an indoor/outdoor floor mask and wrongly gates lights.
    * @returns {{texture: THREE.Texture|null, floorKey: string|null}}
    * @private
    */
-  _resolveOutdoorsMask(context = null) {
+  _resolveOutdoorsMask(context = null, options = {}) {
+    const { allowWeatherRoofMap = true } = options;
     const sc = window.MapShine?.sceneComposer;
     const compositor = sc?._sceneMaskCompositor;
     if (!compositor) {
@@ -2671,6 +2687,11 @@ export class FloorCompositor {
       if (bundleMask) return { texture: bundleMask, floorKey: 'bundle' };
       const mmMask = window.MapShine?.maskManager?.getTexture?.('outdoors.scene') ?? null;
       if (mmMask) return { texture: mmMask, floorKey: 'maskManager' };
+      if (!allowWeatherRoofMap) {
+        const regMask = window.MapShine?.effectMaskRegistry?.getMask?.('outdoors') ?? null;
+        if (regMask) return { texture: regMask, floorKey: 'registry' };
+        return { texture: null, floorKey: null };
+      }
       const roofMap = weatherController?.roofMap ?? null;
       return { texture: roofMap, floorKey: roofMap ? 'weatherController' : null };
     }
@@ -2706,6 +2727,11 @@ export class FloorCompositor {
     const mmMask = window.MapShine?.maskManager?.getTexture?.('outdoors.scene') ?? null;
     if (mmMask) return { texture: mmMask, floorKey: 'maskManager' };
 
+    if (!allowWeatherRoofMap) {
+      const regMask = window.MapShine?.effectMaskRegistry?.getMask?.('outdoors') ?? null;
+      if (regMask) return { texture: regMask, floorKey: 'registry' };
+      return { texture: null, floorKey: null };
+    }
     const roofMap = weatherController?.roofMap ?? null;
     return { texture: roofMap, floorKey: roofMap ? 'weatherController' : null };
   }

@@ -23,6 +23,7 @@
 
 import { createLogger } from '../core/log.js';
 import { tileHasLevelsRange, readTileLevelsFlags } from '../foundry/levels-scene-flags.js';
+import { elevationInBand, rangesOverlap } from '../ui/levels-editor/level-boundaries.js';
 
 const log = createLogger('FloorStack');
 
@@ -331,13 +332,13 @@ export class FloorStack {
       const flags = readTileLevelsFlags(tileDoc);
       const tileBottom = Number(flags.rangeBottom);
       const tileTop = Number(flags.rangeTop);
-      // Standard interval overlap: [a,b] overlaps [c,d] iff a<=d && c<=b
-      return tileBottom <= floor.elevationMax && floor.elevationMin <= tileTop;
+      return rangesOverlap(tileBottom, tileTop, floor.elevationMin, floor.elevationMax);
     }
 
     // No Levels range: use tile's elevation to find its floor.
     const elev = Number.isFinite(Number(tileDoc?.elevation)) ? Number(tileDoc.elevation) : 0;
-    return elev >= floor.elevationMin && elev <= floor.elevationMax;
+    const includeUpperBound = floor.index >= (this._floors.length - 1);
+    return elevationInBand(elev, floor.elevationMin, floor.elevationMax, includeUpperBound);
   }
 
   /**
@@ -361,8 +362,8 @@ export class FloorStack {
     const rawElev = tokenDoc?.elevation ?? tokenDoc?.document?.elevation ?? 0;
     const elev = Number.isFinite(Number(rawElev)) ? Number(rawElev) : 0;
 
-    // Edge case: token exactly on floor boundary belongs to the lower floor.
-    return elev >= floor.elevationMin && elev <= floor.elevationMax;
+    const includeUpperBound = floor.index >= (this._floors.length - 1);
+    return elevationInBand(elev, floor.elevationMin, floor.elevationMax, includeUpperBound);
   }
 
   /**

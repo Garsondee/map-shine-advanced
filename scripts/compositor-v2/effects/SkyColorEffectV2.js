@@ -13,10 +13,9 @@
  *   - Optional tone mapping (ACES Filmic, Reinhard)
  *   - Vignette + film grain
  *
- * Two automation modes:
- *   - **Analytic** (mode 1): Sunrise/sunset-aware sun model + weather integration
+ * Automation mode:
+ *   - **Analytic**: Sunrise/sunset-aware sun model + weather integration
  *     (turbidity, Rayleigh, Mie, overcast desaturation, etc.)
- *   - **Preset Blend** (mode 0): Weighted blend of dawn/day/dusk/night presets.
  *
  * Exposes `currentSkyTintColor` for downstream systems (e.g., Darkness Response
  * lights adopt the sky hue during golden hour / blue hour).
@@ -60,6 +59,18 @@ const peakHour = (hour, center, widthHours) => {
 
 const lerp = (a, b, t) => a + (b - a) * t;
 
+const readSceneDarkness01 = () => {
+  try {
+    const sceneLevel = canvas?.scene?.environment?.darknessLevel;
+    if (Number.isFinite(sceneLevel)) return clamp01(sceneLevel);
+  } catch (_) {}
+  try {
+    const envLevel = canvas?.environment?.darknessLevel;
+    if (Number.isFinite(envLevel)) return clamp01(envLevel);
+  } catch (_) {}
+  return 0.0;
+};
+
 // ── SkyColorEffectV2 ────────────────────────────────────────────────────────
 
 export class SkyColorEffectV2 {
@@ -74,7 +85,6 @@ export class SkyColorEffectV2 {
       saturationBoost: 0.35,
       vibranceBoost: 0.0,
 
-      automationMode: 1,
       sunriseHour: 6.0,
       sunsetHour: 18.0,
       goldenHourWidth: 2.5,
@@ -104,44 +114,13 @@ export class SkyColorEffectV2 {
 
       autoIntensityEnabled: true,
       autoIntensityStrength: 1.0,
+      goldenOutdoorRecolorStrength: 2.2,
+      goldenOutdoorRecolorColor: { r: 1.35, g: 0.80, b: 0.50 },
 
       skyTintDarknessLightsEnabled: true,
       skyTintDarknessLightsIntensity: 1.0,
 
-      // Dawn preset
-      dawnExposure: 0.70, dawnTemperature: 1.00, dawnTint: 0.00,
-      dawnBrightness: -0.05, dawnContrast: 0.90, dawnSaturation: 1.15, dawnVibrance: 0.00,
-      dawnLiftColor: { r: 0, g: 0, b: 0 },
-      dawnGammaColor: { r: 1, g: 1, b: 1 },
-      dawnGainColor: { r: 1, g: 1, b: 1 },
-      dawnMasterGamma: 1.00, dawnToneMapping: 0,
-      dawnVignetteStrength: 0.72, dawnVignetteSoftness: 1.00, dawnGrainStrength: 0.0,
-
-      // Day preset
-      dayExposure: 0.5, dayTemperature: 0.0, dayTint: 0.0,
-      dayBrightness: 0.0, dayContrast: 1.02, daySaturation: 1.02, dayVibrance: 0.0,
-      dayLiftColor: { r: 0, g: 0, b: 0 },
-      dayGammaColor: { r: 0.50, g: 0.50, b: 0.50 },
-      dayGainColor: { r: 1, g: 1, b: 1 },
-      dayMasterGamma: 2.0, dayToneMapping: 0,
       dayVignetteStrength: 0.0, dayVignetteSoftness: 0.5, dayGrainStrength: 0.0,
-
-      // Dusk preset
-      duskExposure: 0.7, duskTemperature: 1.0, duskTint: 0.05,
-      duskBrightness: -0.05, duskContrast: 0.9, duskSaturation: 1.15, duskVibrance: 0.15,
-      duskLiftColor: { r: 0, g: 0, b: 0 },
-      duskGammaColor: { r: 0.54, g: 0.52, b: 0.50 },
-      duskGainColor: { r: 1.08, g: 1.02, b: 0.95 },
-      duskMasterGamma: 1.00, duskToneMapping: 0,
-      duskVignetteStrength: 0.72, duskVignetteSoftness: 1.0, duskGrainStrength: 0.0,
-
-      // Night preset
-      nightExposure: 0.0, nightTemperature: -0.5, nightTint: 0.0,
-      nightBrightness: 0.0, nightContrast: 1.00, nightSaturation: 0.33, nightVibrance: -0.58,
-      nightLiftColor: { r: 0, g: 0, b: 0 },
-      nightGammaColor: { r: 1, g: 1, b: 1 },
-      nightGainColor: { r: 1, g: 1, b: 1 },
-      nightMasterGamma: 1.0, nightToneMapping: 0,
       nightVignetteStrength: 0.25, nightVignetteSoftness: 1.00, nightGrainStrength: 0.0,
 
       debugOverride: false,
@@ -190,69 +169,11 @@ export class SkyColorEffectV2 {
   // ── UI schema (moved from V1 SkyColorEffect) ─────────────────────────────
 
   static getControlSchema() {
-    const stageParams = (prefix, labelPrefix) => {
-      const p = (name) => `${prefix}${name}`;
-      return {
-        groups: [
-          { name: `${prefix.toLowerCase()}-exposure-wb`, label: `${labelPrefix} Exposure & WB`, type: 'inline', parameters: [p('Exposure'), p('Temperature'), p('Tint')] },
-          { name: `${prefix.toLowerCase()}-basics`, label: `${labelPrefix} Basic Adjustments`, type: 'inline', parameters: [p('Contrast'), p('Brightness'), p('Saturation'), p('Vibrance')] },
-          { name: `${prefix.toLowerCase()}-grading`, label: `${labelPrefix} Color Grading`, type: 'folder', expanded: false, parameters: [p('ToneMapping'), p('LiftColor'), p('GammaColor'), p('GainColor'), p('MasterGamma')] },
-          { name: `${prefix.toLowerCase()}-artistic`, label: `${labelPrefix} Effects (Vignette/Grain)`, type: 'folder', expanded: false, parameters: [p('VignetteStrength'), p('VignetteSoftness'), p('GrainStrength')] }
-        ],
-        parameters: {
-          [p('Exposure')]: { type: 'slider', min: -1, max: 1, step: 0.01, default: 0.0 },
-          [p('Temperature')]: { type: 'slider', min: -1, max: 1, step: 0.01, default: 0.0 },
-          [p('Tint')]: { type: 'slider', min: -1, max: 1, step: 0.01, default: 0.0 },
-          [p('Brightness')]: { type: 'slider', min: -0.5, max: 0.5, step: 0.01, default: 0.0 },
-          [p('Contrast')]: { type: 'slider', min: 0, max: 2, step: 0.01, default: 1.0 },
-          [p('Saturation')]: { type: 'slider', min: 0, max: 2, step: 0.01, default: 1.0 },
-          [p('Vibrance')]: { type: 'slider', min: -1, max: 1, step: 0.01, default: 0.0 },
-          [p('LiftColor')]: { type: 'color', default: { r: 0, g: 0, b: 0 } },
-          [p('GammaColor')]: { type: 'color', default: { r: 0.5, g: 0.5, b: 0.5 } },
-          [p('GainColor')]: { type: 'color', default: { r: 1, g: 1, b: 1 } },
-          [p('MasterGamma')]: { type: 'slider', min: 0.1, max: 3, step: 0.01, default: 1.0 },
-          [p('ToneMapping')]: { type: 'list', options: { 'None': 0, 'ACES Filmic': 1, 'Reinhard': 2 }, default: 0 },
-          [p('VignetteStrength')]: { type: 'slider', min: 0, max: 2, step: 0.01, default: 0.0 },
-          [p('VignetteSoftness')]: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.5 },
-          [p('GrainStrength')]: { type: 'slider', min: 0, max: 0.5, step: 0.01, default: 0.0 }
-        }
-      };
-    };
-
-    const dawn = stageParams('dawn', 'Dawn');
-    const day = stageParams('day', 'Day');
-    const dusk = stageParams('dusk', 'Dusk');
-    const night = stageParams('night', 'Night');
-
-    dawn.parameters.dawnExposure.default = 0.70; dawn.parameters.dawnTemperature.default = 1.00;
-    dawn.parameters.dawnBrightness.default = -0.05; dawn.parameters.dawnContrast.default = 0.90;
-    dawn.parameters.dawnSaturation.default = 1.15; dawn.parameters.dawnVignetteStrength.default = 0.72;
-    dawn.parameters.dawnVignetteSoftness.default = 1.00; dawn.parameters.dawnGammaColor.default = { r: 1.00, g: 1.00, b: 1.00 };
-    dawn.parameters.dawnGainColor.default = { r: 1.00, g: 1.00, b: 1.00 }; dawn.parameters.dawnMasterGamma.default = 1.00;
-    day.parameters.dayExposure.default = 0.50; day.parameters.dayMasterGamma.default = 2.00;
-    dusk.parameters.duskExposure.default = 0.70; dusk.parameters.duskTemperature.default = 1.00;
-    dusk.parameters.duskBrightness.default = -0.05; dusk.parameters.duskContrast.default = 0.90;
-    dusk.parameters.duskSaturation.default = 1.15; dusk.parameters.duskVignetteStrength.default = 0.72;
-    dusk.parameters.duskVignetteSoftness.default = 1.00;
-    night.parameters.nightExposure.default = 0.00; night.parameters.nightTemperature.default = -0.50;
-    night.parameters.nightSaturation.default = 0.33; night.parameters.nightVibrance.default = -0.58;
-    night.parameters.nightGammaColor.default = { r: 1.00, g: 1.00, b: 1.00 }; night.parameters.nightMasterGamma.default = 1.00;
-    night.parameters.nightVignetteStrength.default = 0.25; night.parameters.nightVignetteSoftness.default = 1.00;
-
     return {
       enabled: true,
       groups: [
         { name: 'sky-color', label: 'Sky Color', type: 'inline', parameters: ['intensity', 'saturationBoost', 'vibranceBoost', 'skyTintDarknessLightsEnabled', 'skyTintDarknessLightsIntensity'] },
-        { name: 'sky-automation', label: 'Automation (Analytic)', type: 'folder', expanded: false, parameters: ['automationMode', 'sunriseHour', 'sunsetHour', 'goldenHourWidth', 'goldenStrength', 'goldenPower', 'nightFloor', 'analyticStrength', 'turbidity', 'rayleighStrength', 'mieStrength', 'forwardScatter', 'weatherInfluence', 'cloudToTurbidity', 'precipToTurbidity', 'overcastDesaturate', 'overcastContrastReduce', 'tempWarmAtHorizon', 'tempCoolAtNoon', 'nightCoolBoost', 'goldenSaturationBoost', 'nightSaturationFloor', 'hazeLift', 'hazeContrastLoss', 'autoIntensityEnabled', 'autoIntensityStrength'] },
-        { name: 'time-of-day', label: 'Time of Day Grading', type: 'folder', expanded: false, parameters: [] },
-        { name: 'dawn', label: 'Dawn', type: 'folder', expanded: false, parameters: [] },
-        ...dawn.groups,
-        { name: 'day', label: 'Day', type: 'folder', expanded: false, parameters: [] },
-        ...day.groups,
-        { name: 'dusk', label: 'Dusk', type: 'folder', expanded: false, parameters: [] },
-        ...dusk.groups,
-        { name: 'night', label: 'Night', type: 'folder', expanded: false, parameters: [] },
-        ...night.groups,
+        { name: 'sky-automation', label: 'Sky Automation', type: 'folder', expanded: false, parameters: ['sunriseHour', 'sunsetHour', 'goldenHourWidth', 'goldenStrength', 'goldenPower', 'goldenOutdoorRecolorStrength', 'goldenOutdoorRecolorColor', 'nightFloor', 'analyticStrength', 'turbidity', 'rayleighStrength', 'mieStrength', 'forwardScatter', 'weatherInfluence', 'cloudToTurbidity', 'precipToTurbidity', 'overcastDesaturate', 'overcastContrastReduce', 'tempWarmAtHorizon', 'tempCoolAtNoon', 'nightCoolBoost', 'goldenSaturationBoost', 'nightSaturationFloor', 'hazeLift', 'hazeContrastLoss', 'autoIntensityEnabled', 'autoIntensityStrength'] },
         { name: 'automation', label: 'Automation vs Manual', type: 'inline', separator: true, parameters: ['debugOverride', 'exposure', 'saturation', 'contrast'] }
       ],
       parameters: {
@@ -260,12 +181,13 @@ export class SkyColorEffectV2 {
         intensity: { type: 'slider', min: 0, max: 1, step: 0.01, default: 1.0, label: 'Intensity', throttle: 50 },
         saturationBoost: { type: 'slider', min: -0.5, max: 0.5, step: 0.01, default: 0.35, label: 'Sat Boost', throttle: 50 },
         vibranceBoost: { type: 'slider', min: -0.5, max: 0.5, step: 0.01, default: 0.0, label: 'Vibrance', throttle: 50 },
-        automationMode: { type: 'list', options: { 'Preset Blend (Legacy)': 0, 'Analytic (Sun + Weather)': 1 }, default: 1, label: 'Automation Mode' },
         sunriseHour: { type: 'slider', min: 0, max: 24, step: 0.05, default: 6.0, label: 'Sunrise', throttle: 50 },
         sunsetHour: { type: 'slider', min: 0, max: 24, step: 0.05, default: 18.0, label: 'Sunset', throttle: 50 },
         goldenHourWidth: { type: 'slider', min: 0.25, max: 6.0, step: 0.05, default: 2.5, label: 'Golden Width', throttle: 50 },
         goldenStrength: { type: 'slider', min: 0.0, max: 4.0, step: 0.01, default: 2.0, label: 'Golden Strength', throttle: 50 },
         goldenPower: { type: 'slider', min: 0.5, max: 3.0, step: 0.01, default: 1.35, label: 'Golden Power', throttle: 50 },
+        goldenOutdoorRecolorStrength: { type: 'slider', min: 0.0, max: 6.0, step: 0.05, default: 2.2, label: 'Golden Recolor', throttle: 50 },
+        goldenOutdoorRecolorColor: { type: 'color', default: { r: 1.35, g: 0.80, b: 0.50 }, label: 'Golden Recolor Color' },
         nightFloor: { type: 'slider', min: 0.0, max: 0.5, step: 0.01, default: 0.0, label: 'Night Floor', throttle: 50 },
         analyticStrength: { type: 'slider', min: 0.0, max: 4.0, step: 0.01, default: 1.75, label: 'Analytic Strength', throttle: 50 },
         turbidity: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.22, label: 'Turbidity', throttle: 50 },
@@ -288,10 +210,6 @@ export class SkyColorEffectV2 {
         autoIntensityStrength: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 1.0, label: 'Auto Strength', throttle: 50 },
         skyTintDarknessLightsEnabled: { type: 'boolean', default: true, label: 'Tint Sun Lights' },
         skyTintDarknessLightsIntensity: { type: 'slider', min: 0.0, max: 5.0, step: 0.01, default: 1.0, label: 'Sun Light Tint Intensity', throttle: 50 },
-        ...dawn.parameters,
-        ...day.parameters,
-        ...dusk.parameters,
-        ...night.parameters,
         debugOverride: { type: 'boolean', default: false, label: 'Manual Override' },
         exposure: { type: 'slider', min: -1, max: 1, step: 0.01, default: 0.0, label: 'Exposure (Manual)', throttle: 50 },
         saturation: { type: 'slider', min: 0, max: 2, step: 0.01, default: 1.0, label: 'Saturation (Manual)', throttle: 50 },
@@ -344,6 +262,8 @@ export class SkyColorEffectV2 {
         uVignetteStrength: { value: 0.0 },
         uVignetteSoftness: { value: 0.5 },
         uGrainStrength:    { value: 0.0 },
+        uGoldenRecolorStrength: { value: 0.0 },
+        uGoldenRecolorColor: { value: new THREE.Vector3(1.35, 0.80, 0.50) },
 
         uIntensity: { value: 1.0 },
       },
@@ -383,6 +303,8 @@ export class SkyColorEffectV2 {
         uniform float uVignetteStrength;
         uniform float uVignetteSoftness;
         uniform float uGrainStrength;
+        uniform float uGoldenRecolorStrength;
+        uniform vec3 uGoldenRecolorColor;
         uniform float uIntensity;
 
         varying vec2 vUv;
@@ -495,6 +417,16 @@ export class SkyColorEffectV2 {
             color += (noise - 0.5) * uGrainStrength;
           }
 
+          // Dramatic golden-hour recolor for outdoors.
+          if (uGoldenRecolorStrength > 0.0001) {
+            float outdoors = sampleOutdoorsMask(vUv);
+            float roofOcc = sampleOverheadRoofAlpha(vUv);
+            float outdoorVis = clamp(outdoors * (1.0 - roofOcc), 0.0, 1.0);
+            float recolorAmt = clamp(uGoldenRecolorStrength * outdoorVis, 0.0, 1.0);
+            vec3 warmShift = color * uGoldenRecolorColor;
+            color = mix(color, warmShift, recolorAmt);
+          }
+
           // Blend graded result with original based on intensity only.
           // Roof/outdoors-driven masking here created oversized dark halos when
           // roof alpha/blocker silhouettes were broader than visible canopy.
@@ -584,12 +516,13 @@ export class SkyColorEffectV2 {
       let gammaR = 1.0, gammaG = 1.0, gammaB = 1.0;
       let gainR = 1.0, gainG = 1.0, gainB = 1.0;
       let masterGamma = 1.0;
-      let toneMapping = this.params.dayToneMapping;
+      let toneMapping = 0;
       let vignetteStrength = 0.0;
       let vignetteSoftness = 0.5;
       let grainStrength = 0.0;
+      let goldenEnergy = 0.0;
 
-      if (this.params.automationMode === 1) {
+      {
         // ── Analytic automation ──────────────────────────────────────
         const isFoundryLinked = window.MapShine?.controlPanel?.controlState?.linkTimeToFoundry === true;
         const foundryPhases = isFoundryLinked ? getFoundryTimePhaseHours() : null;
@@ -622,6 +555,7 @@ export class SkyColorEffectV2 {
         const goldenBase = clamp01(peakHour(hour, sunrise, goldenWidth) + peakHour(hour, sunset, goldenWidth));
         const goldenPow = Math.pow(goldenBase, Math.max(0.0001, this.params.goldenPower ?? 1.0));
         const golden = clamp01(goldenPow * Math.max(0.0, this.params.goldenStrength ?? 1.0));
+        goldenEnergy = Math.max(0.0, Math.min(3.0, goldenPow * Math.max(0.0, this.params.goldenStrength ?? 1.0)));
 
         // Extend dayFactor into golden hour transition zones
         const dayFactor = Math.max(dayFactorBase, golden * 0.45);
@@ -639,8 +573,7 @@ export class SkyColorEffectV2 {
           if (Number.isFinite(env.stormFactor)) storm = clamp01(env.stormFactor);
         }
 
-        let sceneDarkness = 0.0;
-        try { sceneDarkness = clamp01(canvas?.environment?.darknessLevel ?? 0.0); } catch (_) {}
+        let sceneDarkness = readSceneDarkness01();
         if (env && Number.isFinite(env.sceneDarkness)) sceneDarkness = clamp01(env.sceneDarkness);
 
         const weatherInfluence = clamp01(this.params.weatherInfluence);
@@ -720,52 +653,6 @@ export class SkyColorEffectV2 {
         vignetteStrength = lerp(this.params.dayVignetteStrength ?? 0.0, this.params.nightVignetteStrength ?? 0.0, tNight);
         vignetteSoftness = lerp(this.params.dayVignetteSoftness ?? 0.5, this.params.nightVignetteSoftness ?? 0.5, tNight);
         grainStrength = lerp(this.params.dayGrainStrength ?? 0.0, this.params.nightGrainStrength ?? 0.0, tNight);
-      } else {
-        // ── Preset blend automation ─────────────────────────────────
-        const wDawn = peakHour(hour, 6.0, 3.0);
-        const wDay = peakHour(hour, 12.0, 5.5);
-        const wDusk = peakHour(hour, 18.0, 3.0);
-        const wNight = peakHour(hour, 0.0, 6.5);
-        const wSum = Math.max(0.0001, wDawn + wDay + wDusk + wNight);
-        const wd = wDawn / wSum;
-        const wday = wDay / wSum;
-        const wdu = wDusk / wSum;
-        const wn = wNight / wSum;
-
-        const p = this.params;
-
-        exposure = p.dawnExposure * wd + p.dayExposure * wday + p.duskExposure * wdu + p.nightExposure * wn;
-        temperature = p.dawnTemperature * wd + p.dayTemperature * wday + p.duskTemperature * wdu + p.nightTemperature * wn;
-        tint = p.dawnTint * wd + p.dayTint * wday + p.duskTint * wdu + p.nightTint * wn;
-        brightness = p.dawnBrightness * wd + p.dayBrightness * wday + p.duskBrightness * wdu + p.nightBrightness * wn;
-        contrast = p.dawnContrast * wd + p.dayContrast * wday + p.duskContrast * wdu + p.nightContrast * wn;
-        saturation = p.dawnSaturation * wd + p.daySaturation * wday + p.duskSaturation * wdu + p.nightSaturation * wn;
-        vibrance = p.dawnVibrance * wd + p.dayVibrance * wday + p.duskVibrance * wdu + p.nightVibrance * wn;
-
-        const blend3 = (dawn, day, dusk, night) => ({
-          r: dawn.r * wd + day.r * wday + dusk.r * wdu + night.r * wn,
-          g: dawn.g * wd + day.g * wday + dusk.g * wdu + night.g * wn,
-          b: dawn.b * wd + day.b * wday + dusk.b * wdu + night.b * wn,
-        });
-
-        const lift = blend3(p.dawnLiftColor, p.dayLiftColor, p.duskLiftColor, p.nightLiftColor);
-        liftR = lift.r; liftG = lift.g; liftB = lift.b;
-        const gamma = blend3(p.dawnGammaColor, p.dayGammaColor, p.duskGammaColor, p.nightGammaColor);
-        gammaR = gamma.r; gammaG = gamma.g; gammaB = gamma.b;
-        const gain = blend3(p.dawnGainColor, p.dayGainColor, p.duskGainColor, p.nightGainColor);
-        gainR = gain.r; gainG = gain.g; gainB = gain.b;
-
-        masterGamma = p.dawnMasterGamma * wd + p.dayMasterGamma * wday + p.duskMasterGamma * wdu + p.nightMasterGamma * wn;
-        vignetteStrength = p.dawnVignetteStrength * wd + p.dayVignetteStrength * wday + p.duskVignetteStrength * wdu + p.nightVignetteStrength * wn;
-        vignetteSoftness = p.dawnVignetteSoftness * wd + p.dayVignetteSoftness * wday + p.duskVignetteSoftness * wdu + p.nightVignetteSoftness * wn;
-        grainStrength = p.dawnGrainStrength * wd + p.dayGrainStrength * wday + p.duskGrainStrength * wdu + p.nightGrainStrength * wn;
-
-        // Dominant tone mapping
-        let wMax = wday;
-        toneMapping = p.dayToneMapping;
-        if (wd > wMax) { wMax = wd; toneMapping = p.dawnToneMapping; }
-        if (wdu > wMax) { wMax = wdu; toneMapping = p.duskToneMapping; }
-        if (wn > wMax) { wMax = wn; toneMapping = p.nightToneMapping; }
       }
 
       // Manual override
@@ -856,21 +743,36 @@ export class SkyColorEffectV2 {
       u.uVignetteStrength.value = vignetteStrength;
       u.uVignetteSoftness.value = vignetteSoftness;
       u.uGrainStrength.value = grainStrength;
+      const rc = this.params.goldenOutdoorRecolorColor ?? { r: 1.35, g: 0.80, b: 0.50 };
+      u.uGoldenRecolorStrength.value = clamp01(
+        goldenEnergy * Math.max(0.0, Number(this.params.goldenOutdoorRecolorStrength ?? 0.0))
+      );
+      u.uGoldenRecolorColor.value.set(
+        Math.max(0.01, Number(rc.r) || 1.35),
+        Math.max(0.01, Number(rc.g) || 0.80),
+        Math.max(0.01, Number(rc.b) || 0.50)
+      );
 
       // Auto-intensity
       let effectiveIntensity = this.params.intensity;
-      if (this.params.automationMode === 1 && this.params.autoIntensityEnabled) {
+      if (this.params.autoIntensityEnabled) {
         const localDayFactor = clamp01(this._lastDayFactor ?? 0.5);
-        const envFallback = weatherController?.getEnvironment?.();
-        const overcastMul = 1.0 - clamp01(envFallback?.overcastFactor ?? 0) * 0.55;
-        const stormMul = 1.0 - clamp01(envFallback?.stormFactor ?? 0) * 0.25;
-        let localSceneDarkness = 0.0;
-        try { localSceneDarkness = clamp01(canvas?.environment?.darknessLevel ?? 0.0); } catch (_) {}
-        // Keep sky grading active at night; previous darkness attenuation made
-        // the effect almost vanish after dusk, so nighttime no longer darkened.
-        const localSkyIntensity = clamp01((0.55 + 0.45 * localDayFactor) * overcastMul * stormMul);
+        const localSceneDarkness = readSceneDarkness01();
+        // Auto-intensity should NOT behave like “sky brightness”.
+        // We want the grade to stay strong at night (to actually darken),
+        // and be gentler at noon.
+        //
+        // localDayFactor: 0 at night → 1 at noon
+        // localGradeIntensity: 1 at night → ~0.35 at noon
+        //
+        // Also keep a small responsiveness to Foundry scene darkness so that
+        // explicit darkness changes still read as stronger grading.
+        const localGradeIntensity = clamp01(
+          (0.35 + 0.65 * (1.0 - localDayFactor)) *
+          (0.85 + 0.15 * (1.0 - localSceneDarkness))
+        );
         const strength = clamp01(this.params.autoIntensityStrength);
-        effectiveIntensity *= lerp(1.0, localSkyIntensity, strength);
+        effectiveIntensity *= lerp(1.0, localGradeIntensity, strength);
       }
 
       u.uIntensity.value = effectiveIntensity;

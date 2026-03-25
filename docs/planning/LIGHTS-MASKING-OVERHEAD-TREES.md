@@ -118,18 +118,27 @@ After `WindowLightEffectV2` still wasn’t reappearing as expected, I updated th
 - In `scripts/compositor-v2/effects/OverheadShadowsEffectV2.js` (ceiling transmittance pass), replaced `step()` thresholds with `smoothstep()` so hover fading yields a gradual change in light transmittance `T`.
 - In `scripts/compositor-v2/effects/LightingEffectV2.js`, replaced roof-alpha/roof-block `step()` thresholds (and related occlusion relief helpers) with `smoothstep()` so the fallback roof gating path also transitions smoothly.
 
-## Rain-Mask Decoupling Fix (Trees/Overheads Hover Reveal)
-Given the tree regression and the rain-mask hard blocker relationship, I added a lighting-side guard in `scripts/compositor-v2/FloorCompositor.js`:
+## Rain-Mask Relationship and Final Direction
+The blanket runtime decoupling approach in `FloorCompositor` (nulling blocker/transmittance during reveal) was too broad and let lights leak through visible trees/overheads.
 
-- Detect active reveal state:
-  - `weatherController.roofMaskActive` (overhead reveal/fade)
-  - `TreeEffectV2.isHoverRevealActive()` (tree canopy reveal/fade)
-- While reveal is active, LightingEffectV2 now receives:
-  - `overheadRoofAlphaTex`: still provided (live visibility)
-  - `overheadRoofBlockTex`: forced to `null`
-  - `ceilingTransmittanceTex`: forced to `null`
+Final direction now:
+- Keep normal texture wiring in `FloorCompositor` (alpha + blocker + transmittance always available).
+- Fix the occlusion math so hard blocker contribution is conditioned by live visibility:
+  - In `OverheadShadowsEffectV2` transmittance pass, roof-block occlusion is multiplied by roof-visibility occlusion.
+  - In `LightingEffectV2` fallback path, roof-block occlusion is multiplied by a roof-visibility weight.
 
-This keeps lighting tied to live roof/tree visibility alpha during hover reveal, while leaving hard blocker behavior available outside reveal states (for rain/roof masking stability).
+Result intent:
+- Visible trees/overheads block lights.
+- Hover-faded trees/overheads fade that block out with them, instead of leaving a dark “stuck mask.”
+
+## Invariant (Do Not Break)
+Do not reintroduce runtime “decoupling” that nulls `roofBlockTexture` and/or `ceilingTransmittanceTextureForLighting` during hover-reveal.
+
+The current behavior depends on shader-side gating:
+- `OverheadShadowsEffectV2` multiplies roof-block occlusion by `roofVisOcc`
+- `LightingEffectV2` multiplies roof-block occlusion by `roofVisWeight`
+
+Changing those multiplications (or nulling inputs at runtime) will bring back either stuck suppression under faded canopies or light leakage through visible roofs.
 
 ## Controls to Watch During Further Research
 - `LightingEffectV2` occlusion controls:

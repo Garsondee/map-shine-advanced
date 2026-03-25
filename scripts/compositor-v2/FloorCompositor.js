@@ -2189,16 +2189,14 @@ export class FloorCompositor {
       ? this._buildingShadowEffect.params.opacity : 0.75;
     const overheadShadowTex = (!_disableOverheadInLighting && this._overheadShadowEffect?.params?.enabled)
       ? this._overheadShadowEffect.shadowFactorTexture : null;
-    // Rain/roof masking uses a hard blocker map that intentionally keeps
-    // suppression active while roof/tree art is being hover-revealed. Lighting
-    // should instead follow live visibility alpha during reveal so light does
-    // not remain blocked under faded trees/overheads.
-    const treeHoverRevealActive = !!this._treeEffect?.isHoverRevealActive?.();
-    const roofRevealActiveForLighting = !!weatherController?.roofMaskActive || treeHoverRevealActive;
     const overheadRoofAlphaTex = _disableRoofInLighting ? null : (this._overheadShadowEffect?.roofAlphaTexture ?? null);
-    const overheadRoofBlockTex = (_disableRoofInLighting || roofRevealActiveForLighting)
-      ? null
-      : (this._overheadShadowEffect?.roofBlockTexture ?? null);
+    // IMPORTANT INVARIANT:
+    // Do NOT null `roofBlockTexture` / `ceilingTransmittanceTextureForLighting` during
+    // hover-reveal. The shader-side occlusion math in `OverheadShadowsEffectV2` +
+    // `LightingEffectV2` explicitly gates the hard blocker contribution by the *live*
+    // roof visibility weight, so keeping these textures wired avoids “stuck mask”
+    // behavior under faded trees/overheads.
+    const overheadRoofBlockTex = _disableRoofInLighting ? null : (this._overheadShadowEffect?.roofBlockTexture ?? null);
     this._windowLightEffect?.setOverheadRoofAlphaTexture?.(
       overheadRoofAlphaTex,
       this._sceneRT?.width || 1,
@@ -2209,7 +2207,10 @@ export class FloorCompositor {
     if (_profiling) _profileT0 = performance.now();
     const lightingCtx = window.MapShine?.activeLevelContext ?? null;
     const outdoorsForLightingTex = this._resolveOutdoorsMask(lightingCtx, { allowWeatherRoofMap: false }).texture ?? null;
-    const ceilingTransmittanceTex = (!_disableRoofInLighting && !roofRevealActiveForLighting && this._overheadShadowEffect?.ceilingTransmittanceTextureForLighting)
+    // IMPORTANT INVARIANT:
+    // Keep ceiling transmittance available during hover-reveal; blocker/occlusion
+    // fade is handled in shader via roof visibility weights (not by runtime nulling).
+    const ceilingTransmittanceTex = (!_disableRoofInLighting && this._overheadShadowEffect?.ceilingTransmittanceTextureForLighting)
       ? this._overheadShadowEffect.ceilingTransmittanceTextureForLighting
       : null;
     this._lightingEffect.render(this.renderer, this.camera, currentInput, this._postA, winScene, cloudShadowTex, cloudShadowRawTex, buildingShadowTex, overheadShadowTex, buildingShadowOpacity, overheadRoofAlphaTex, overheadRoofBlockTex, outdoorsForLightingTex, ceilingTransmittanceTex);

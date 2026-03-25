@@ -346,6 +346,10 @@ export class OverheadShadowsEffectV2 {
     this._ceilingTransmittanceMaterial = new THREE.ShaderMaterial({
       depthWrite: false,
       depthTest: false,
+      // IMPORTANT:
+      // These shader sources are authored inside JS template literals (backticks).
+      // Do NOT use backticks inside shader comments/strings, or the module will fail
+      // to parse (template literal termination bug).
       uniforms: {
         tRoofVis: { value: null },
         tRoofBlock: { value: null },
@@ -367,6 +371,7 @@ export class OverheadShadowsEffectV2 {
         varying vec2 vUv;
         void main() {
           float T = 1.0;
+          float roofVisOcc = 0.0;
           if (uHasRoofVis > 0.5) {
             vec4 rv = texture2D(tRoofVis, vUv);
             float a = clamp(max(rv.a, max(rv.r, max(rv.g, rv.b))), 0.0, 1.0);
@@ -374,13 +379,18 @@ export class OverheadShadowsEffectV2 {
             // soften still registers as occluding for lights.
             // Smooth the occlusion ramp so roof/tree hover fading doesn't produce
             // a hard binary "light on vs light off" transition.
-            float roofOcc = smoothstep(0.10, 0.14, a);
-            T *= (1.0 - roofOcc);
+            roofVisOcc = smoothstep(0.10, 0.14, a);
+            T *= (1.0 - roofVisOcc);
           }
           if (uHasRoofBlock > 0.5) {
             vec4 rb = texture2D(tRoofBlock, vUv);
             float b = clamp(max(rb.a, max(rb.r, max(rb.g, rb.b))), 0.0, 1.0);
-            float roofBlockOcc = smoothstep(0.42, 0.48, b);
+            // IMPORTANT INVARIANT:
+            // Keep hard blocker tied to live roof visibility (roofVisOcc) so it
+            // fades out with hover-revealed trees/overheads instead of staying
+            // dark while hidden. This prevents hover reveal from leaving lights
+            // permanently suppressed.
+            float roofBlockOcc = smoothstep(0.42, 0.48, b) * roofVisOcc;
             T *= (1.0 - roofBlockOcc);
           }
           gl_FragColor = vec4(T, T, T, 1.0);

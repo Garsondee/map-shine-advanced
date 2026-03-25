@@ -435,6 +435,9 @@ export class LightingEffectV2 {
         tCeilingLightTransmittance: { value: null },
         uHasCeilingLightTransmittance: { value: 0 },
       },
+      // IMPORTANT:
+      // These shader sources are embedded in JS template literals (backticks).
+      // Never include backticks inside shader comments/strings; it will break JS parsing.
       vertexShader: /* glsl */`
         varying vec2 vUv;
         void main() {
@@ -522,6 +525,11 @@ export class LightingEffectV2 {
           float stampedVis = 1.0;
           float roofAlphaComposite = 0.0;
           float roofBlockComposite = 0.0;
+          float roofAlphaLive = 0.0;
+          if (uHasOverheadRoofAlpha > 0.5) {
+            vec4 roofSampleLive = texture2D(tOverheadRoofAlpha, vUv);
+            roofAlphaLive = clamp(max(roofSampleLive.a, max(roofSampleLive.r, max(roofSampleLive.g, roofSampleLive.b))), 0.0, 1.0);
+          }
           if (uHasCeilingLightTransmittance > 0.5) {
             stampedVis = clamp(texture2D(tCeilingLightTransmittance, vUv).r, 0.0, 1.0);
             roofAlphaComposite = 1.0 - stampedVis;
@@ -537,12 +545,23 @@ export class LightingEffectV2 {
               vec4 roofBlockSample = texture2D(tOverheadRoofBlock, vUv);
               float roofBlock = clamp(max(roofBlockSample.a, max(roofBlockSample.r, max(roofBlockSample.g, roofBlockSample.b))), 0.0, 1.0);
               roofBlockComposite = roofBlock;
-              float roofBlockOcc = smoothstep(0.42, 0.48, roofBlock);
+              // IMPORTANT INVARIANT:
+              // The hard blocker MUST be multiplied by the live roof visibility weight
+              // (roofVisWeight). If this multiplication is removed or roofVisWeight
+              // comes from non-live alpha, hover-revealed trees/overheads will leave a
+              // persistent “stuck mask” that either over-suppresses or leaks lights.
+              float roofVisWeight = smoothstep(0.08, 0.14, roofAlphaComposite);
+              float roofBlockOcc = smoothstep(0.42, 0.48, roofBlock) * roofVisWeight;
               stampedVis *= (1.0 - roofBlockOcc);
             }
           }
           float roofLightVisibility = stampedVis;
           if (uHasOutdoorsForRoofLight > 0.5) {
+            // Relief is intended to prevent “stuck dark” indoor pixels under overhead capture
+            // while roofs/trees are being hover-revealed. When the occluder is visibly present,
+            // lights should remain masked. Gate relief by live roof alpha so it ramps in only
+            // as the roof/tree fades out.
+            float revealWeight = 1.0 - smoothstep(0.20, 0.60, roofAlphaLive);
             vec2 ouv = sceneUvFoundry;
             if (uOutdoorsForRoofLightFlipY > 0.5) ouv.y = 1.0 - ouv.y;
             vec4 od = texture2D(tOutdoorsForRoofLight, ouv);
@@ -553,7 +572,7 @@ export class LightingEffectV2 {
               ? smoothstep(0.16, 0.20, 1.0 - stampedVis)
               : max(
                 smoothstep(0.10, 0.14, roofAlphaComposite),
-                smoothstep(0.42, 0.48, roofBlockComposite)
+                smoothstep(0.42, 0.48, roofBlockComposite) * smoothstep(0.08, 0.14, roofAlphaComposite)
               );
             float occ = 1.0 - stampedVis;
             float albedoB = perceivedBrightness(baseColor.rgb);
@@ -566,16 +585,16 @@ export class LightingEffectV2 {
             reliefAtten = mix(reliefAtten, 1.0, smoothstep(0.14, 0.34, albedoB) * ceilingPresent * 0.92);
             float indoorRelief = indoorReliefRaw * reliefAtten;
             indoorRelief *= (1.0 - suppressRoofLeak);
-            roofLightVisibility = mix(stampedVis, 1.0, indoorRelief);
+            roofLightVisibility = mix(stampedVis, 1.0, indoorRelief * revealWeight);
             // Outdoor-classified pixels get indoorReliefRaw = 0 but still sit under overhead
             // capture (porch, courtyard under balcony): restore lights unless dark roof art.
             float underOverhead = smoothstep(0.06, 0.10, occ);
             float porchLift = isOutdoorSample * underOverhead * (1.0 - suppressRoofLeak);
-            roofLightVisibility = max(roofLightVisibility, porchLift * 0.92);
+            roofLightVisibility = max(roofLightVisibility, porchLift * 0.92 * revealWeight);
             // Indoor mask under overhead (room below ceiling capture) still needs playable light
             // when the receiver is not classified as dark roof art.
             float interiorUnderHang = (1.0 - isOutdoorSample) * underOverhead * (1.0 - suppressRoofLeak);
-            roofLightVisibility = max(roofLightVisibility, interiorUnderHang * 0.52);
+            roofLightVisibility = max(roofLightVisibility, interiorUnderHang * 0.52 * revealWeight);
           }
           float visS = mix(1.0, roofLightVisibility, clamp(uApplyRoofOcclusionToSources, 0.0, 1.0));
           float visW = mix(1.0, roofLightVisibility, clamp(uApplyRoofOcclusionToWindow, 0.0, 1.0));

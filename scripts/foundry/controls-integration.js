@@ -89,6 +89,9 @@ export class ControlsIntegration {
 
     /** @type {number} */
     this._interactionSnapshotSeq = 0;
+
+    /** @type {Function|null} */
+    this._wallVisualClampTicker = null;
   }
 
   _getActiveLayerMeta() {
@@ -487,6 +490,7 @@ export class ControlsIntegration {
       
       // Register hooks
       this.registerHooks();
+      this._startWallVisualClampTicker();
       
       // Initial state sync
       this.layerVisibility?.update();
@@ -597,6 +601,7 @@ export class ControlsIntegration {
     // Re-hide visibility layer after sight refresh (Foundry may re-show it)
     Hooks.on('sightRefresh', () => {
       this._hideVisibilityLayer();
+      this._reassertWallTransparencyAfterPerception();
     });
     
     log.debug('PIXI overlay configured: opacity 0, z-index 10 (on top but transparent)');
@@ -1162,7 +1167,10 @@ export class ControlsIntegration {
   _updateWallsVisualState() {
     if (!canvas?.ready || !canvas.walls?.placeables) return;
 
-    const isWallsActive = this._isWallsContextActive();
+    const isWallsContext = this._isWallsContextActive();
+    const movementManager = window.MapShine?.tokenManager?.movementManager;
+    const movingTokenCount = Number(movementManager?.activeTracks?.size || 0);
+    const isWallsActive = isWallsContext && movingTokenCount === 0;
 
     try {
       const wallManager = window.MapShine?.wallManager;
@@ -1200,6 +1208,76 @@ export class ControlsIntegration {
 
     // Re-assert Foundry's vision-based door visibility after wall visual updates.
     this._refreshFoundryDoorControlVisibility();
+  }
+
+  /**
+   * During token movement, Foundry perception refresh can briefly restore native
+   * wall alphas for one frame. Re-apply gameplay transparency immediately unless
+   * the user is actively editing walls.
+   * @private
+   */
+  _reassertWallTransparencyAfterPerception() {
+    if (!canvas?.ready || !canvas?.walls?.placeables) return;
+    const isWallsActive = this._isWallsContextActive();
+    if (isWallsActive) {
+      this._updateWallsVisualState();
+      return;
+    }
+
+    for (const wall of canvas.walls.placeables) {
+      this._makeWallTransparent(wall);
+    }
+    this._wallsAreTransparent = true;
+  }
+
+  /**
+   * Hard gameplay clamp for native PIXI wall edit visuals.
+   * This runs on the PIXI ticker to prevent one-frame flashes caused by
+   * refresh-order races during high-frequency movement/perception updates.
+   * @private
+   */
+  _clampGameplayWallVisuals() {
+    if (this.state !== IntegrationState.ACTIVE) return;
+    if (!canvas?.ready || !canvas?.walls?.placeables) return;
+    if (this._isWallsContextActive()) return;
+
+    for (const wall of canvas.walls.placeables) {
+      if (!wall) continue;
+      try {
+        if (wall.line) {
+          wall.line.visible = false;
+          wall.line.alpha = 0;
+        }
+        if (wall.direction) {
+          wall.direction.visible = false;
+          wall.direction.alpha = 0;
+        }
+        if (wall.endpoints) {
+          wall.endpoints.visible = false;
+          wall.endpoints.alpha = 0;
+        }
+      } catch (_) {
+      }
+    }
+  }
+
+  _startWallVisualClampTicker() {
+    if (this._wallVisualClampTicker) return;
+    const ticker = canvas?.app?.ticker;
+    if (!ticker || typeof ticker.add !== 'function') return;
+
+    this._wallVisualClampTicker = () => {
+      this._clampGameplayWallVisuals();
+    };
+    ticker.add(this._wallVisualClampTicker);
+  }
+
+  _stopWallVisualClampTicker() {
+    const ticker = canvas?.app?.ticker;
+    if (this._wallVisualClampTicker && ticker && typeof ticker.remove === 'function') {
+      try { ticker.remove(this._wallVisualClampTicker); } catch (_) {}
+    }
+    this._wallVisualClampTicker = null;
   }
   
   /**
@@ -1452,6 +1530,7 @@ export class ControlsIntegration {
       if (this.state !== IntegrationState.ACTIVE) return;
       try {
         this._refreshFoundryDoorControlVisibility();
+        this._reassertWallTransparencyAfterPerception();
       } catch (_) {
       }
     });
@@ -1461,10 +1540,11 @@ export class ControlsIntegration {
     const refreshWallHookId = Hooks.on('refreshWall', (wall) => {
       if (this.state !== IntegrationState.ACTIVE) return;
       try {
-        if (this._wallsAreTransparent) {
+        const isWallsActiveNow = this._isWallsContextActive();
+        if (!isWallsActiveNow) {
           this._makeWallTransparent(wall);
         } else {
-          // Walls layer is active — apply floor filter to this refreshed wall
+          // Walls layer is active -> apply floor filter to this refreshed wall.
           if (this._isWallOnCurrentFloor(wall)) {
             this._restoreWallVisuals(wall);
           } else {
@@ -1485,10 +1565,11 @@ export class ControlsIntegration {
           const wall = canvas.walls?.get(doc.id);
           if (!wall) return;
 
-          if (this._wallsAreTransparent) {
+          const isWallsActiveNow = this._isWallsContextActive();
+          if (!isWallsActiveNow) {
             this._makeWallTransparent(wall);
           } else {
-            // Walls layer is active — apply floor filter to this new wall
+            // Walls layer is active -> apply floor filter to this new wall.
             if (this._isWallOnCurrentFloor(wall)) {
               this._restoreWallVisuals(wall);
             } else {
@@ -1827,6 +1908,7 @@ export class ControlsIntegration {
     log.info('Disabling controls integration');
     
     this.unregisterHooks();
+    this._stopWallVisualClampTicker();
     this.restoreAllLayers();
     
     // Reset PIXI canvas

@@ -33,7 +33,7 @@ import { VisionSDF } from '../../vision/VisionSDF.js';
 import { VisionPolygonComputer } from '../../vision/VisionPolygonComputer.js';
 import { debugLoadingProfiler } from '../../core/debug-loading-profiler.js';
 import { getLevelsCompatibilityMode, LEVELS_COMPATIBILITY_MODES } from '../../foundry/levels-compatibility.js';
-import { isLevelsEnabledForScene, readTileLevelsFlags, tileHasLevelsRange } from '../../foundry/levels-scene-flags.js';
+import { isLevelsEnabledForScene, readTileLevelsFlags, tileHasLevelsRange, readWallHeightFlags } from '../../foundry/levels-scene-flags.js';
 import { getPerspectiveElevation, isLightVisibleForPerspective } from '../../foundry/elevation-context.js';
 import Coordinates from '../../utils/coordinates.js';
 import { flattenWallUpdateChanges } from '../../utils/wall-update-classify.js';
@@ -1375,15 +1375,13 @@ export class FogOfWarEffectV2 {
     
     // We'll trigger updates on these hooks
     this._hookIds.push(['controlToken', Hooks.on('controlToken', (token, controlled) => {
-      // When token control changes, ensure Foundry recomputes
-      // perception so that vision polygons exist before we
-      // render the vision mask for the newly controlled token.
-      log.debug(`controlToken hook: ${token?.name} controlled=${controlled}, forcing perception update`);
-      frameCoordinator.forcePerceptionUpdate();
+      log.debug(`controlToken hook: ${token?.name} controlled=${controlled}`);
       this._needsVisionUpdate = true;
       this._hasValidVision = false; // Reset until we get valid LOS polygons
     })]);
-    this._hookIds.push(['updateToken', Hooks.on('updateToken', () => { this._needsVisionUpdate = true; })]);
+    this._hookIds.push(['updateToken', Hooks.on('updateToken', (_doc, changes) => {
+      this._needsVisionUpdate = true;
+    })]);
     this._hookIds.push(['sightRefresh', Hooks.on('sightRefresh', () => { this._needsVisionUpdate = true; })]);
     this._hookIds.push(['lightingRefresh', Hooks.on('lightingRefresh', () => { this._needsVisionUpdate = true; })]);
     this._hookIds.push(['createWall', Hooks.on('createWall', () => {
@@ -1562,6 +1560,52 @@ export class FogOfWarEffectV2 {
     this.resetExploration();
     this._needsVisionUpdate = true;
     this._hasValidVision = false;
+  }
+
+  /**
+   * Keep fog LOS occlusion scoped to the active Levels elevation band.
+   * Walls fully outside the current band cannot block vision for this floor.
+   *
+   * @param {Array<object>} walls
+   * @returns {Array<object>}
+   * @private
+   */
+  _filterWallsForActiveElevationBand(walls) {
+    const list = Array.isArray(walls) ? walls : [];
+    if (!list.length) return list;
+    if (getLevelsCompatibilityMode() === LEVELS_COMPATIBILITY_MODES.OFF) return list;
+    if (!isLevelsEnabledForScene(canvas?.scene)) return list;
+
+    const levelCtx = window.MapShine?.activeLevelContext;
+    const rawBottom = Number(levelCtx?.bottom);
+    const rawTop = Number(levelCtx?.top);
+    if (!Number.isFinite(rawBottom) || !Number.isFinite(rawTop)) return list;
+
+    const bandBottom = Math.min(rawBottom, rawTop);
+    const bandTop = Math.max(rawBottom, rawTop);
+
+    // Degenerate bands should not suppress all walls; keep original list.
+    if (!(bandTop > bandBottom)) return list;
+
+    return list.filter((wallLike) => {
+      const doc = wallLike?.document || wallLike;
+      if (!doc) return false;
+
+      const bounds = readWallHeightFlags(doc);
+      let wallBottom = Number(bounds?.bottom);
+      let wallTop = Number(bounds?.top);
+      wallBottom = Number.isFinite(wallBottom) ? wallBottom : -Infinity;
+      wallTop = Number.isFinite(wallTop) ? wallTop : Infinity;
+      if (wallTop < wallBottom) {
+        const swap = wallBottom;
+        wallBottom = wallTop;
+        wallTop = swap;
+      }
+
+      // Top-exclusive overlap test, matching Levels-style wall range handling.
+      return (wallTop === Infinity || wallTop > bandBottom)
+        && (wallBottom < bandTop);
+    });
   }
 
   _onDoorWallUpdated(doc, changes) {
@@ -1797,10 +1841,12 @@ export class FogOfWarEffectV2 {
     const levelsActive = getLevelsCompatibilityMode() !== LEVELS_COMPATIBILITY_MODES.OFF
       && isLevelsEnabledForScene(canvas?.scene);
     const baseWalls = canvas?.walls?.placeables ?? [];
-    const levelWalls = levelsActive ? baseWalls : null;
+    const levelWalls = levelsActive ? this._filterWallsForActiveElevationBand(baseWalls) : null;
     const nowMs = performance.now();
     const doorTransitionData = this._buildDoorTransitionBlockingWalls(nowMs);
-    const doorTransitionBlockers = doorTransitionData.blockers;
+    const doorTransitionBlockers = levelsActive
+      ? this._filterWallsForActiveElevationBand(doorTransitionData.blockers)
+      : doorTransitionData.blockers;
     const transitioningDoorWallIds = doorTransitionData.transitioningWallIds;
     const hasDoorTransitionLOSBlockers = doorTransitionBlockers.length > 0;
     const polygonWalls = (levelsActive ? (levelWalls ?? []) : baseWalls).filter((w) => {
@@ -2621,6 +2667,37 @@ export class FogOfWarEffectV2 {
       ? this.params.exploredOpacity
       : 0.0;
 
+  }
+
+  /**
+   * Force an immediate fog sync for a movement step.
+   *
+   * Path-walk can emit authoritative token updates faster than the normal fog
+   * render cadence. This helper lets movement sequencing explicitly render LOS
+   * and accumulate exploration per step so fog reveal does not collapse to the
+   * final endpoint.
+   */
+  syncMovementStepFog() {
+    if (!this._initialized || !this.params?.enabled) return false;
+    if (!this._fullResTargetsReady) return false;
+
+    try {
+      this._needsVisionUpdate = true;
+      this._renderVisionMask();
+
+      const explorationEnabled = canvas?.scene?.fog?.exploration ?? false;
+      this._ensureExplorationLoadedFromFoundry();
+      const canAccumulate = explorationEnabled && this._explorationLoadedFromFoundry;
+      if (canAccumulate && !this._visionIsFullSceneFallback) {
+        this._accumulateExploration();
+        this._markExplorationDirty();
+      }
+
+      this._pendingAccumulation = false;
+      return true;
+    } catch (_) {
+      return false;
+    }
   }
 
   /**

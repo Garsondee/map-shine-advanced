@@ -2750,6 +2750,11 @@ export class FloorCompositor {
       const resolved = this._resolveOutdoorsMask(context);
       let outdoorsTex = resolved.texture ?? null;
       let waterOutdoorsTex = outdoorsTex;
+      // Sky grading is very sensitive to mask source quality/alignment.
+      // Resolve a strict floor outdoors texture for sky that never falls back to
+      // weather roof maps and never reuses stale previous masks.
+      const skyResolved = this._resolveOutdoorsMask(context, { allowWeatherRoofMap: false });
+      const skyOutdoorsTex = skyResolved.texture ?? null;
 
       // Do not clobber a valid outdoors texture with transient null while floor
       // caches are still warming asynchronously.
@@ -2788,7 +2793,7 @@ export class FloorCompositor {
       // Always propagate (including null) so consumers cannot keep stale masks.
       this._cloudEffect?.setOutdoorsMask?.(outdoorsTex);
       this._waterEffect?.setOutdoorsMask?.(waterOutdoorsTex);
-      this._skyColorEffect?.setOutdoorsMask?.(outdoorsTex);
+      this._skyColorEffect?.setOutdoorsMask?.(skyOutdoorsTex);
       this._filterEffect?.setOutdoorsMask?.(outdoorsTex);
       this._atmosphericFogEffect?.setOutdoorsMask?.(outdoorsTex);
       this._overheadShadowEffect?.setOutdoorsMask?.(outdoorsTex);

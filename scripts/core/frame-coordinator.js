@@ -209,7 +209,7 @@ export class FrameCoordinator {
     this._perceptionActiveUntilMs = performance.now() + this._perceptionActiveDurationMs;
   }
 
-  forcePerceptionUpdate() {
+  forcePerceptionUpdate({ bypassThrottle = false } = {}) {
     try {
       const now = performance.now();
 
@@ -218,7 +218,7 @@ export class FrameCoordinator {
         ? this._perceptionActiveIntervalMs
         : this._perceptionIdleIntervalMs;
 
-      if (this._lastPerceptionUpdateTime && (now - this._lastPerceptionUpdateTime) < this._perceptionUpdateMinIntervalMs) {
+      if (!bypassThrottle && this._lastPerceptionUpdateTime && (now - this._lastPerceptionUpdateTime) < this._perceptionUpdateMinIntervalMs) {
         this._metrics.perceptionUpdateSkipped++;
 
         if (!this._perceptionUpdateWindowStart) {

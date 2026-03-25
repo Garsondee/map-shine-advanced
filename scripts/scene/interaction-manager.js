@@ -1405,7 +1405,9 @@ export class InteractionManager {
             method,
             ignoreWalls: unconstrainedMovement,
             ignoreCost: unconstrainedMovement,
-            includeMovementPayload: unconstrainedMovement,
+            // Keep Foundry movement payload on for sequenced path-walk so
+            // region/fog systems can react to each traversed step.
+            includeMovementPayload: true,
             suppressFoundryMovementUI: !unconstrainedMovement,
             destinationFloorBottom: hasFloorBounds ? floorBottom : undefined,
             destinationFloorTop: hasFloorBounds ? floorTop : undefined,
@@ -1486,7 +1488,9 @@ export class InteractionManager {
             method,
             ignoreWalls: unconstrainedMovement,
             ignoreCost: unconstrainedMovement,
-            includeMovementPayload: unconstrainedMovement,
+            // Keep Foundry movement payload on for sequenced path-walk so
+            // region/fog systems can react to each traversed step.
+            includeMovementPayload: true,
             groupAnchorTokenId: leaderId,
             groupAnchorTopLeft: {
               x: Number(leaderDestinationTopLeft.x || 0),
@@ -4312,7 +4316,11 @@ export class InteractionManager {
     // keep Three wall/light visuals aligned with the currently active editing context.
     safeCall(() => {
       const showLighting = this._isLightingContextActive();
-      const showWalls = this._isWallsContextActive();
+      const movementManager = this.tokenManager?.movementManager || window.MapShine?.tokenManager?.movementManager || null;
+      const movingTokenCount = Number(movementManager?.activeTracks?.size || 0);
+      // Prevent transient layer-state races during path-walk from flashing wall
+      // edit visuals in gameplay.
+      const showWalls = this._isWallsContextActive() && movingTokenCount === 0;
       const showSounds = this._isSoundsContextActive();
 
       this.lightIconManager?.setVisibility?.(showLighting);
@@ -6646,7 +6654,9 @@ export class InteractionManager {
                     method: 'path-walk',
                     ignoreWalls: unconstrainedMovement,
                     ignoreCost: unconstrainedMovement,
-                    includeMovementPayload: unconstrainedMovement,
+                    // Keep Foundry movement payload on for sequenced path-walk so
+                    // region/fog systems can react to each traversed step.
+                    includeMovementPayload: true,
                     suppressFoundryMovementUI: true,
                     destinationFloorBottom: hasFloorBounds ? floorBottom : undefined,
                     destinationFloorTop: hasFloorBounds ? floorTop : undefined,
@@ -6680,7 +6690,9 @@ export class InteractionManager {
                       method: 'path-walk',
                       ignoreWalls: unconstrainedMovement,
                       ignoreCost: unconstrainedMovement,
-                      includeMovementPayload: unconstrainedMovement,
+                      // Keep Foundry movement payload on for sequenced path-walk so
+                      // region/fog systems can react to each traversed step.
+                      includeMovementPayload: true,
                       suppressFoundryMovementUI: true,
                       destinationFloorBottom: hasFloorBounds ? floorBottom : undefined,
                       destinationFloorTop: hasFloorBounds ? floorTop : undefined,
@@ -7165,36 +7177,47 @@ export class InteractionManager {
             const nextX = startX + (intent.dx * gridStep);
             const nextY = startY + (intent.dy * gridStep);
 
-            const update = { x: nextX, y: nextY };
             const activeCtx = window.MapShine?.activeLevelContext;
             const floorBottom = Number(activeCtx?.bottom);
             const floorTop = Number(activeCtx?.top);
             const hasFloorBounds = Number.isFinite(floorBottom) && Number.isFinite(floorTop);
-            const updateOptions = {
-              animate: false,
-              animation: { duration: 0 },
+            const moveOptions = {
               method: 'keyboard',
-              mapShineMovement: {
-                animated: true,
-                method: 'keyboard',
-                constrainOptions: hasFloorBounds
-                  ? {
-                    destinationFloorBottom: floorBottom,
-                    destinationFloorTop: floorTop
-                  }
-                  : undefined
-              }
+              includeMovementPayload: true,
+              preferFoundryCheckpointMove: true,
+              ignoreWalls: false,
+              ignoreCost: false,
+              destinationFloorBottom: hasFloorBounds ? floorBottom : undefined,
+              destinationFloorTop: hasFloorBounds ? floorTop : undefined
             };
 
             this._pathfindingLog('debug', 'keyboard outbound constrain options', {
               tokenId,
-              update,
-              constrainOptions: updateOptions?.mapShineMovement?.constrainOptions || null
+              destinationTopLeft: { x: nextX, y: nextY },
+              constrainOptions: hasFloorBounds
+                ? { destinationFloorBottom: floorBottom, destinationFloorTop: floorTop }
+                : null
             });
 
             safeCall(async () => {
               this._keyboardStepInFlight.set(tokenId, performance.now());
-              await tokenDoc.update(update, updateOptions);
+              try {
+                if (movementManager?.executeDoorAwareTokenMove) {
+                  await movementManager.executeDoorAwareTokenMove({
+                    tokenDoc,
+                    destinationTopLeft: { x: nextX, y: nextY },
+                    options: moveOptions
+                  });
+                } else {
+                  await tokenDoc.update({ x: nextX, y: nextY }, {
+                    method: 'keyboard',
+                    animate: false,
+                    animation: { duration: 0 }
+                  });
+                }
+              } finally {
+                this._keyboardStepInFlight.delete(tokenId);
+              }
             }, `keyboardMove.${tokenId}`, Severity.COSMETIC);
           }
 

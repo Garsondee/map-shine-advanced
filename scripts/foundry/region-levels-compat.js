@@ -179,26 +179,40 @@ async function _applyRegionMovement(tokenDocument, elevation, movement) {
   if (!Number.isFinite(targetElevation)) return false;
 
   try {
-    const pending = movement?.pending?.waypoints;
-    const hasPending = Array.isArray(pending) && pending.length > 0 && (typeof tokenDocument.move === 'function');
+    const hasMovementContext = !!movement;
+    if (hasMovementContext) {
+      const tokenId = String(tokenDocument.id || '');
+      const initialX = Number(tokenDocument.x ?? NaN);
+      const initialY = Number(tokenDocument.y ?? NaN);
 
-    if (hasPending) {
-      tokenDocument.stopMovement?.();
-      if (tokenDocument.rendered && tokenDocument.object?.movementAnimationPromise) {
-        await tokenDocument.object.movementAnimationPromise;
-      }
+      // During click-to-move/pathfinding, defer the elevation swap until the
+      // token emits its next real position update. This aligns the stair
+      // transition with the token physically reaching the stair step.
+      const movedPromise = new Promise((resolve) => {
+        const timeoutId = setTimeout(() => {
+          try { Hooks.off('updateToken', hookId); } catch (_) {}
+          resolve(false);
+        }, 1200);
 
-      const adjustedWaypoints = pending
-        .filter((w) => !w?.intermediate)
-        .map((w) => ({ ...w, elevation: targetElevation, action: 'displace' }));
+        const hookId = Hooks.on('updateToken', (updatedDoc, changes) => {
+          if (String(updatedDoc?.id || '') !== tokenId) return;
+          if (!('x' in (changes || {})) && !('y' in (changes || {}))) return;
 
-      if (adjustedWaypoints.length > 0) {
-        await tokenDocument.move(adjustedWaypoints, {
-          ...(movement?.updateOptions || {}),
-          constrainOptions: movement?.constrainOptions,
-          autoRotate: movement?.autoRotate,
-          showRuler: movement?.showRuler,
+          const nextX = Number(changes?.x ?? updatedDoc?.x ?? NaN);
+          const nextY = Number(changes?.y ?? updatedDoc?.y ?? NaN);
+          const changed = (!Number.isFinite(initialX) || !Number.isFinite(initialY))
+            || (nextX !== initialX) || (nextY !== initialY);
+          if (!changed) return;
+
+          clearTimeout(timeoutId);
+          try { Hooks.off('updateToken', hookId); } catch (_) {}
+          resolve(true);
         });
+      });
+
+      await movedPromise;
+      if (typeof tokenDocument.update === 'function') {
+        await tokenDocument.update({ elevation: targetElevation });
         return true;
       }
     }

@@ -20,6 +20,7 @@ import { NavMeshBuilder } from './nav-mesh-builder.js';
 import { NavMeshPathfinder } from './nav-mesh-pathfinder.js';
 import { PortalDetector } from './portal-detector.js';
 import { MultiFloorGraph } from './multi-floor-graph.js';
+import { frameCoordinator } from '../core/frame-coordinator.js';
 
 const log = createLogger('TokenMovementManager');
 
@@ -326,9 +327,6 @@ export class TokenMovementManager {
     const floorBottom = asNumber(options?.destinationFloorBottom, NaN);
     const floorTop = asNumber(options?.destinationFloorTop, NaN);
     const hasFloorBounds = Number.isFinite(floorBottom) && Number.isFinite(floorTop);
-    // Keep movement constrain context attached whenever floor bounds are present.
-    // This preserves multi-floor collision parity during sequenced step updates.
-    if (hasFloorBounds) return true;
 
     // If caller explicitly sets includeMovementPayload, honor that override.
     if (Object.prototype.hasOwnProperty.call(options, 'includeMovementPayload')) {
@@ -6995,7 +6993,11 @@ export class TokenMovementManager {
       let crossFloorSegments = [];
       const ignoreWalls = optionsBoolean(tracedOptions?.ignoreWalls, false);
       const ignoreCost = optionsBoolean(tracedOptions?.ignoreCost, false);
-      if (!ignoreWalls) {
+      if (ignoreWalls) {
+        pathNodes = (typeof this._interpolatePathForWalking === 'function')
+          ? this._interpolatePathForWalking([startCenter, endCenter])
+          : [startCenter, endCenter];
+      } else {
         const constrainedPath = this._computeConstrainedPathWithDirectAndEscalation({
           tokenDoc: currentDoc,
           startTopLeft: { x: currentDoc.x, y: currentDoc.y },
@@ -7040,39 +7042,6 @@ export class TokenMovementManager {
         }, context);
       };
 
-      if (ignoreWalls) {
-        const direct = await moveToPoint(endCenter, {
-          tokenId,
-          stepIndex: -1,
-          phase: 'DIRECT_MOVE',
-          plan: null
-        });
-
-        if (!direct?.ok) {
-          this._pathfindingLog('warn', 'executeDoorAwareTokenMove direct move failed', {
-            token: this._pathfindingTokenMeta(currentDoc),
-            destinationTopLeft: targetTopLeft,
-            reason: direct?.reason || 'direct-move-failed',
-            options: tracedOptions,
-            trace: this._traceSummary(movementTrace)
-          });
-        }
-
-        return {
-          ok: !!direct?.ok,
-          tokenId,
-          reason: direct?.reason || null,
-          transitions: [],
-          plan: {
-            pathNodes,
-            doorSteps: [],
-            doorRevision: this._doorStateRevision,
-            inCombat: this._inCombat
-          },
-          pathNodes
-        };
-      }
-
       // Cross-floor execution (foundation): walk to portal entry, perform
       // portal transition (position/elevation update), then continue on target
       // floor. If this fails, fall back to single-segment path execution.
@@ -7105,6 +7074,38 @@ export class TokenMovementManager {
           options: tracedOptions,
           trace: this._traceSummary(movementTrace)
         });
+      }
+
+      const builtPlan = this.buildDoorAwarePlan(pathNodes || []);
+      const hasDoorSteps = Array.isArray(builtPlan?.doorSteps) && builtPlan.doorSteps.length > 0;
+      const allowNativeCheckpointMove = optionsBoolean(tracedOptions?.preferFoundryCheckpointMove, true);
+      if (allowNativeCheckpointMove && !hasDoorSteps) {
+        const nativeWaypoints = this._buildCheckpointWaypointsFromPathNodes(pathNodes, currentDoc, tracedOptions);
+        if (nativeWaypoints.length > 0) {
+          const nativeMoveResult = await this._executeFoundryCheckpointMove({
+            tokenDoc: currentDoc,
+            waypoints: nativeWaypoints,
+            options: tracedOptions,
+            movementTrace
+          });
+          if (nativeMoveResult?.ok) {
+            return {
+              ok: true,
+              tokenId,
+              reason: null,
+              transitions: [],
+              plan: builtPlan,
+              pathNodes
+            };
+          }
+          this._pathfindingLog('warn', 'executeDoorAwareTokenMove Foundry checkpoint move failed; falling back to sequenced updates', {
+            token: this._pathfindingTokenMeta(currentDoc),
+            destinationTopLeft: targetTopLeft,
+            reason: nativeMoveResult?.reason || 'foundry-checkpoint-move-failed',
+            options: tracedOptions,
+            trace: this._traceSummary(movementTrace)
+          });
+        }
       }
 
       const sequenceResult = await this.runDoorAwareMovementSequence({
@@ -10288,6 +10289,19 @@ export class TokenMovementManager {
 
     try {
       const updateResult = await canvas.scene.updateEmbeddedDocuments('Token', [update], updateOptions);
+      try {
+        const movementMethod = String(options?.method || context?.phase || '').toLowerCase();
+        const isPathWalkStep = movementMethod === 'path-walk' || movementMethod === 'walk' || movementMethod === 'path_segment';
+        if (isPathWalkStep) {
+          const sightRefreshAck = this._awaitNextSightRefresh(
+            asNumber(options?.perStepSightRefreshTimeoutMs, 500)
+          );
+          frameCoordinator.requestActivePerception?.();
+          frameCoordinator.forcePerceptionUpdate({ bypassThrottle: true });
+          await sightRefreshAck;
+        }
+      } catch (_) {
+      }
       if (groupCancelToken?.cancelled) {
         this._pathfindingLog('warn', '_moveTokenToFoundryPoint stopped: cancelled after token update', {
           tokenId,
@@ -10437,6 +10451,41 @@ export class TokenMovementManager {
     const jitter = ((seed * 2) - 1) * (varianceMs * 0.5);
 
     return clamp(baseMs + jitter, 0, 260);
+  }
+
+  /**
+   * Wait for one sight refresh tick so fog/perception can catch up with a step.
+   *
+   * @param {number} timeoutMs
+   * @returns {Promise<boolean>}
+   * @private
+   */
+  async _awaitNextSightRefresh(timeoutMs = 500) {
+    const timeout = clamp(asNumber(timeoutMs, 500), 40, 4000);
+    return new Promise((resolve) => {
+      let done = false;
+      let hookId = null;
+      let timerId = null;
+
+      const finish = (ok) => {
+        if (done) return;
+        done = true;
+        if (timerId) clearTimeout(timerId);
+        if (hookId != null) {
+          try { Hooks.off('sightRefresh', hookId); } catch (_) {}
+        }
+        resolve(!!ok);
+      };
+
+      try {
+        hookId = Hooks.on('sightRefresh', () => finish(true));
+      } catch (_) {
+        finish(false);
+        return;
+      }
+
+      timerId = setTimeout(() => finish(false), timeout);
+    });
   }
 
   /**
@@ -10616,6 +10665,94 @@ export class TokenMovementManager {
   }
 
   /**
+   * Convert center-space path nodes into Foundry movement payload waypoints.
+   * The first node is the current token position, so it is omitted.
+   *
+   * @param {Array<{x:number,y:number}>} pathNodes
+   * @param {TokenDocument|object} tokenDoc
+   * @param {object} options
+   * @returns {Array<object>}
+   */
+  _buildCheckpointWaypointsFromPathNodes(pathNodes, tokenDoc, options = {}) {
+    const nodes = Array.isArray(pathNodes) ? pathNodes : [];
+    if (nodes.length < 2) return [];
+
+    const waypointElevation = this._resolveMovementPayloadElevation(tokenDoc, options);
+    const action = (typeof tokenDoc?.movementAction === 'string') ? tokenDoc.movementAction : 'move';
+    /** @type {Array<object>} */
+    const waypoints = [];
+
+    for (let i = 1; i < nodes.length; i += 1) {
+      const center = nodes[i];
+      const topLeft = this._snapTokenTopLeftToGrid(this._tokenCenterToTopLeft(center, tokenDoc), tokenDoc);
+      const waypoint = {
+        x: asNumber(topLeft?.x, asNumber(tokenDoc?.x, 0)),
+        y: asNumber(topLeft?.y, asNumber(tokenDoc?.y, 0)),
+        explicit: true,
+        checkpoint: true,
+        action
+      };
+      if (Number.isFinite(waypointElevation)) waypoint.elevation = waypointElevation;
+      if (Number.isFinite(asNumber(tokenDoc?.width, NaN))) waypoint.width = asNumber(tokenDoc?.width, 1);
+      if (Number.isFinite(asNumber(tokenDoc?.height, NaN))) waypoint.height = asNumber(tokenDoc?.height, 1);
+      if (tokenDoc?.shape != null) waypoint.shape = tokenDoc.shape;
+
+      const previous = waypoints[waypoints.length - 1] || null;
+      const duplicatePrevious = previous
+        && Math.abs(asNumber(previous?.x, NaN) - waypoint.x) < 0.5
+        && Math.abs(asNumber(previous?.y, NaN) - waypoint.y) < 0.5;
+      if (!duplicatePrevious) waypoints.push(waypoint);
+    }
+
+    return waypoints;
+  }
+
+  /**
+   * Delegate movement progression to Foundry's checkpoint continuation pipeline.
+   *
+   * @param {object} params
+   * @param {TokenDocument|object} params.tokenDoc
+   * @param {Array<object>} params.waypoints
+   * @param {object} [params.options]
+   * @param {object} [params.movementTrace]
+   * @returns {Promise<{ok:boolean, reason?:string}>}
+   */
+  async _executeFoundryCheckpointMove({ tokenDoc, waypoints, options = {}, movementTrace = null } = {}) {
+    const liveDoc = this._resolveTokenDocumentById(tokenDoc?.id, tokenDoc);
+    if (!liveDoc) return { ok: false, reason: 'missing-token-doc' };
+    if (typeof liveDoc.move !== 'function') return { ok: false, reason: 'foundry-move-unavailable' };
+
+    const routeWaypoints = Array.isArray(waypoints) ? waypoints : [];
+    if (routeWaypoints.length === 0) return { ok: true };
+
+    const method = normalizeFoundryMovementMethod(options?.method, 'dragging');
+    const constrainOptions = this._getFoundryConstrainOptions(options);
+    const moveOptions = {
+      preview: false,
+      history: false,
+      delay: 0,
+      method,
+      ...constrainOptions,
+      constrainOptions
+    };
+
+    try {
+      frameCoordinator.requestActivePerception?.();
+      await liveDoc.move(routeWaypoints, moveOptions);
+      return { ok: true };
+    } catch (error) {
+      this._pathfindingLog('warn', '_executeFoundryCheckpointMove failed', {
+        token: this._pathfindingTokenMeta(liveDoc),
+        waypointCount: routeWaypoints.length,
+        method,
+        constrainOptions,
+        trace: this._traceSummary(movementTrace)
+      }, error);
+      return { ok: false, reason: 'foundry-move-failed' };
+    }
+  }
+
+  /**
    * @param {TokenDocument|object} tokenDoc
    * @param {{_id:string,x:number,y:number}} update
    * @param {object} options
@@ -10626,6 +10763,9 @@ export class TokenMovementManager {
     const updateOptions = (options?.updateOptions && typeof options.updateOptions === 'object')
       ? { ...options.updateOptions }
       : {};
+    const floorBottom = asNumber(options?.destinationFloorBottom, NaN);
+    const floorTop = asNumber(options?.destinationFloorTop, NaN);
+    const hasFloorBounds = Number.isFinite(floorBottom) && Number.isFinite(floorTop);
 
     // Always include an animation hint so other modules (FX, combat trackers)
     // can distinguish animated path-walk updates from teleports, even when the
@@ -10639,6 +10779,25 @@ export class TokenMovementManager {
         method: String(options?.method || context?.phase || 'path-walk'),
         phase: String(context?.phase || '')
       };
+    }
+
+    // Keep floor/context constraints available to movement guards and diagnostics
+    // even when Foundry's movement payload is intentionally suppressed.
+    if (hasFloorBounds) {
+      const mapShineConstrain = updateOptions.mapShineMovement?.constrainOptions;
+      if (!mapShineConstrain || typeof mapShineConstrain !== 'object') {
+        updateOptions.mapShineMovement.constrainOptions = {
+          destinationFloorBottom: floorBottom,
+          destinationFloorTop: floorTop
+        };
+      } else {
+        if (!Number.isFinite(asNumber(mapShineConstrain?.destinationFloorBottom, NaN))) {
+          mapShineConstrain.destinationFloorBottom = floorBottom;
+        }
+        if (!Number.isFinite(asNumber(mapShineConstrain?.destinationFloorTop, NaN))) {
+          mapShineConstrain.destinationFloorTop = floorTop;
+        }
+      }
     }
 
     const hasExplicitIncludePayload = Object.prototype.hasOwnProperty.call(options, 'includeMovementPayload');
@@ -10666,7 +10825,10 @@ export class TokenMovementManager {
     if (typeof context?.phase === 'string') waypoint.phase = context.phase;
 
     const rawMethod = String(options?.method || context?.phase || '').toLowerCase();
-    const foundryMethodFallback = (rawMethod === 'path-walk' || rawMethod === 'walk') ? 'api' : 'dragging';
+    // Use dragging semantics for sequenced path-walk steps so Foundry applies
+    // traversal-driven systems (fog/exploration, movement hooks) per step
+    // rather than collapsing updates as API-style teleports.
+    const foundryMethodFallback = 'dragging';
 
     const movementEntry = {
       waypoints: [waypoint],

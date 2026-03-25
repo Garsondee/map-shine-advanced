@@ -81,35 +81,35 @@ export class SkyColorEffectV2 {
     // ── Tuning parameters (match V1 defaults) ──────────────────────────
     this.params = {
       enabled: true,
-      intensity: 1.0,
+      intensity: 0.8,
       saturationBoost: 0.35,
       vibranceBoost: 0.0,
 
       sunriseHour: 6.0,
       sunsetHour: 18.0,
-      goldenHourWidth: 2.5,
-      goldenStrength: 2.0,
-      goldenPower: 1.35,
-      nightFloor: 0.0,
+      goldenHourWidth: 6.0,
+      goldenStrength: 2.9,
+      goldenPower: 2.01,
+      nightFloor: 0.5,
 
-      analyticStrength: 1.75,
+      analyticStrength: 0.85,
       turbidity: 0.22,
       rayleighStrength: 0.63,
       mieStrength: 0.35,
       forwardScatter: 0.3,
 
-      weatherInfluence: 0.7,
+      weatherInfluence: 0.67,
       cloudToTurbidity: 0.25,
       precipToTurbidity: 0.72,
-      overcastDesaturate: 0.2,
-      overcastContrastReduce: 0.22,
+      overcastDesaturate: 0.3,
+      overcastContrastReduce: 0.38,
 
       tempWarmAtHorizon: 0.85,
       tempCoolAtNoon: -0.45,
       nightCoolBoost: -0.25,
       goldenSaturationBoost: 0.18,
       nightSaturationFloor: 0.33,
-      hazeLift: 0.12,
+      hazeLift: 0.08,
       hazeContrastLoss: 0.0,
 
       autoIntensityEnabled: true,
@@ -118,15 +118,15 @@ export class SkyColorEffectV2 {
       goldenOutdoorRecolorColor: { r: 1.35, g: 0.80, b: 0.50 },
 
       skyTintDarknessLightsEnabled: true,
-      skyTintDarknessLightsIntensity: 1.0,
+      skyTintDarknessLightsIntensity: 1.01,
 
       dayVignetteStrength: 0.0, dayVignetteSoftness: 0.5, dayGrainStrength: 0.0,
       nightVignetteStrength: 0.25, nightVignetteSoftness: 1.00, nightGrainStrength: 0.0,
 
-      debugOverride: false,
-      exposure: 0.0,
-      saturation: 1.0,
-      contrast: 1.0,
+      debugOverride: true,
+      exposure: 0.51,
+      saturation: 0.21,
+      contrast: 0.98,
     };
 
     /**
@@ -178,42 +178,42 @@ export class SkyColorEffectV2 {
       ],
       parameters: {
         enabled: { type: 'boolean', default: true },
-        intensity: { type: 'slider', min: 0, max: 1, step: 0.01, default: 1.0, label: 'Intensity', throttle: 50 },
+        intensity: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.8, label: 'Intensity', throttle: 50 },
         saturationBoost: { type: 'slider', min: -0.5, max: 0.5, step: 0.01, default: 0.35, label: 'Sat Boost', throttle: 50 },
         vibranceBoost: { type: 'slider', min: -0.5, max: 0.5, step: 0.01, default: 0.0, label: 'Vibrance', throttle: 50 },
         sunriseHour: { type: 'slider', min: 0, max: 24, step: 0.05, default: 6.0, label: 'Sunrise', throttle: 50 },
         sunsetHour: { type: 'slider', min: 0, max: 24, step: 0.05, default: 18.0, label: 'Sunset', throttle: 50 },
-        goldenHourWidth: { type: 'slider', min: 0.25, max: 6.0, step: 0.05, default: 2.5, label: 'Golden Width', throttle: 50 },
-        goldenStrength: { type: 'slider', min: 0.0, max: 4.0, step: 0.01, default: 2.0, label: 'Golden Strength', throttle: 50 },
-        goldenPower: { type: 'slider', min: 0.5, max: 3.0, step: 0.01, default: 1.35, label: 'Golden Power', throttle: 50 },
-        goldenOutdoorRecolorStrength: { type: 'slider', min: 0.0, max: 6.0, step: 0.05, default: 2.2, label: 'Golden Recolor', throttle: 50 },
+        goldenHourWidth: { type: 'slider', min: 0.25, max: 6.0, step: 0.05, default: 6.0, label: 'Golden Width', throttle: 50 },
+        goldenStrength: { type: 'slider', min: 0.0, max: 4.0, step: 0.01, default: 2.9, label: 'Golden Strength', throttle: 50 },
+        goldenPower: { type: 'slider', min: 0.5, max: 3.0, step: 0.01, default: 2.01, label: 'Golden Power', throttle: 50 },
+        goldenOutdoorRecolorStrength: { type: 'slider', min: 0.0, max: 6.0, step: 0.05, default: 3.25, label: 'Golden Recolor', throttle: 50 },
         goldenOutdoorRecolorColor: { type: 'color', default: { r: 1.35, g: 0.80, b: 0.50 }, label: 'Golden Recolor Color' },
-        nightFloor: { type: 'slider', min: 0.0, max: 0.5, step: 0.01, default: 0.0, label: 'Night Floor', throttle: 50 },
-        analyticStrength: { type: 'slider', min: 0.0, max: 4.0, step: 0.01, default: 1.75, label: 'Analytic Strength', throttle: 50 },
+        nightFloor: { type: 'slider', min: 0.0, max: 0.5, step: 0.01, default: 0.5, label: 'Night Floor', throttle: 50 },
+        analyticStrength: { type: 'slider', min: 0.0, max: 4.0, step: 0.01, default: 0.85, label: 'Analytic Strength', throttle: 50 },
         turbidity: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.22, label: 'Turbidity', throttle: 50 },
         rayleighStrength: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.63, label: 'Rayleigh', throttle: 50 },
         mieStrength: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.35, label: 'Mie', throttle: 50 },
         forwardScatter: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.3, label: 'Forward Scatter', throttle: 50 },
-        weatherInfluence: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.7, label: 'Weather Influence', throttle: 50 },
+        weatherInfluence: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.67, label: 'Weather Influence', throttle: 50 },
         cloudToTurbidity: { type: 'slider', min: 0.0, max: 2.0, step: 0.01, default: 0.25, label: 'Cloud→Turbidity', throttle: 50 },
         precipToTurbidity: { type: 'slider', min: 0.0, max: 2.0, step: 0.01, default: 0.72, label: 'Precip→Turbidity', throttle: 50 },
-        overcastDesaturate: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.2, label: 'Overcast Desat', throttle: 50 },
-        overcastContrastReduce: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.22, label: 'Overcast Contrast', throttle: 50 },
+        overcastDesaturate: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.3, label: 'Overcast Desat', throttle: 50 },
+        overcastContrastReduce: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.38, label: 'Overcast Contrast', throttle: 50 },
         tempWarmAtHorizon: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.85, label: 'Warm Horizon', throttle: 50 },
         tempCoolAtNoon: { type: 'slider', min: -1.0, max: 0.0, step: 0.01, default: -0.45, label: 'Cool Noon', throttle: 50 },
         nightCoolBoost: { type: 'slider', min: -1.0, max: 0.0, step: 0.01, default: -0.25, label: 'Night Cool', throttle: 50 },
         goldenSaturationBoost: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.18, label: 'Golden Sat', throttle: 50 },
         nightSaturationFloor: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.33, label: 'Night Sat Floor', throttle: 50 },
-        hazeLift: { type: 'slider', min: 0.0, max: 0.5, step: 0.01, default: 0.12, label: 'Haze Lift', throttle: 50 },
+        hazeLift: { type: 'slider', min: 0.0, max: 0.5, step: 0.01, default: 0.08, label: 'Haze Lift', throttle: 50 },
         hazeContrastLoss: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.0, label: 'Haze Contrast', throttle: 50 },
         autoIntensityEnabled: { type: 'boolean', default: true, label: 'Auto Intensity' },
         autoIntensityStrength: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 1.0, label: 'Auto Strength', throttle: 50 },
         skyTintDarknessLightsEnabled: { type: 'boolean', default: true, label: 'Tint Sun Lights' },
-        skyTintDarknessLightsIntensity: { type: 'slider', min: 0.0, max: 5.0, step: 0.01, default: 1.0, label: 'Sun Light Tint Intensity', throttle: 50 },
-        debugOverride: { type: 'boolean', default: false, label: 'Manual Override' },
-        exposure: { type: 'slider', min: -1, max: 1, step: 0.01, default: 0.0, label: 'Exposure (Manual)', throttle: 50 },
-        saturation: { type: 'slider', min: 0, max: 2, step: 0.01, default: 1.0, label: 'Saturation (Manual)', throttle: 50 },
-        contrast: { type: 'slider', min: 0.5, max: 1.5, step: 0.01, default: 1.0, label: 'Contrast (Manual)', throttle: 50 }
+        skyTintDarknessLightsIntensity: { type: 'slider', min: 0.0, max: 5.0, step: 0.01, default: 1.01, label: 'Sun Light Tint Intensity', throttle: 50 },
+        debugOverride: { type: 'boolean', default: true, label: 'Manual Override' },
+        exposure: { type: 'slider', min: -1, max: 1, step: 0.01, default: 0.51, label: 'Exposure (Manual)', throttle: 50 },
+        saturation: { type: 'slider', min: 0, max: 2, step: 0.01, default: 0.21, label: 'Saturation (Manual)', throttle: 50 },
+        contrast: { type: 'slider', min: 0.5, max: 1.5, step: 0.01, default: 0.98, label: 'Contrast (Manual)', throttle: 50 }
       }
     };
   }
@@ -239,6 +239,7 @@ export class SkyColorEffectV2 {
         uHasOutdoorsMask: { value: 0.0 },
         uHasOverheadRoofAlpha: { value: 0.0 },
         uOutdoorsMaskFlipY: { value: 0.0 },
+        uActiveFloorIndex: { value: 0.0 },
         uViewBoundsMin: { value: new THREE.Vector2(0, 0) },
         uViewBoundsMax: { value: new THREE.Vector2(1, 1) },
         uSceneBounds: { value: new THREE.Vector4(0, 0, 1, 1) },
@@ -283,6 +284,7 @@ export class SkyColorEffectV2 {
         uniform float uHasOutdoorsMask;
         uniform float uHasOverheadRoofAlpha;
         uniform float uOutdoorsMaskFlipY;
+        uniform float uActiveFloorIndex;
         uniform vec2 uViewBoundsMin;
         uniform vec2 uViewBoundsMax;
         uniform vec4 uSceneBounds;
@@ -343,7 +345,24 @@ export class SkyColorEffectV2 {
           );
           if (uOutdoorsMaskFlipY > 0.5) sceneUv.y = 1.0 - sceneUv.y;
           sceneUv = clamp(sceneUv, vec2(0.0), vec2(1.0));
-          return texture2D(tOutdoorsMask, sceneUv).r;
+          // Why this is correct:
+          // Per-floor _Outdoors masks are not guaranteed to have valid RGB everywhere.
+          // On upper floors, "unwritten" regions are commonly RGBA=(0,0,0,0):
+          //   - RGB black does NOT mean "indoors"
+          //   - alpha=0 means "no authored data at this pixel"
+          //
+          // If we read only m.r, those no-data pixels are misclassified as indoors,
+          // producing the exact artifact we saw: a bloated, blocky indoor silhouette
+          // that expands around upper-floor geometry when SkyColor gating is enabled.
+          //
+          // Treat alpha as validity and RGB as value:
+          //   alpha=0 -> default outdoors (1.0)
+          //   alpha=1 -> trust m.r
+          // This matches OverheadShadowsEffectV2 behavior and keeps sparse floor masks
+          // from contaminating sky gating.
+          vec4 m = texture2D(tOutdoorsMask, sceneUv);
+          float outdoors = mix(1.0, m.r, m.a);
+          return step(0.5, clamp(outdoors, 0.0, 1.0));
         }
 
         float sampleOverheadRoofAlpha(vec2 screenUv) {
@@ -363,8 +382,20 @@ export class SkyColorEffectV2 {
           }
 
           vec3 color = base;
-          float outdoors = sampleOutdoorsMask(vUv);
-          float outdoorVis = clamp(outdoors, 0.0, 1.0);
+          float roofAlpha = sampleOverheadRoofAlpha(vUv);
+          // Hard roof gate: any meaningful roof coverage suppresses sky grade.
+          float roofOcclusion = step(0.05, roofAlpha);
+          float roofOutdoorVis = 1.0 - roofOcclusion;
+
+          float outdoorVis = clamp(sampleOutdoorsMask(vUv), 0.0, 1.0);
+          // Levels-aware mask policy:
+          // - Ground floor: world-space _Outdoors + roof gate (normal behavior).
+          // - Upper floors: still apply _Outdoors (for indoor/outdoor correctness),
+          //   but pair it with screen-space roof visibility to stabilize edge behavior
+          //   in the same sampling space as this fullscreen pass.
+          float skyEligible = (uActiveFloorIndex > 0.5)
+            ? min(outdoorVis, roofOutdoorVis)
+            : (outdoorVis * roofOutdoorVis);
 
           // 1) Exposure (stops)
           color *= exp2(uExposure);
@@ -420,14 +451,14 @@ export class SkyColorEffectV2 {
 
           // Dramatic golden-hour recolor for outdoors.
           if (uGoldenRecolorStrength > 0.0001) {
-            float recolorAmt = clamp(uGoldenRecolorStrength * outdoorVis, 0.0, 1.0);
+            float recolorAmt = clamp(uGoldenRecolorStrength * skyEligible, 0.0, 1.0);
             vec3 warmShift = color * uGoldenRecolorColor;
             color = mix(color, warmShift, recolorAmt);
           }
 
           // Blend grade only where outdoor visibility says the sky should apply.
           // This keeps interiors neutral when a valid _Outdoors mask is present.
-          float mask = clamp(uIntensity * outdoorVis, 0.0, 1.0);
+          float mask = clamp(uIntensity * skyEligible, 0.0, 1.0);
           vec3 finalColor = mix(base, color, mask);
 
           gl_FragColor = vec4(finalColor, sceneColor.a);
@@ -518,6 +549,7 @@ export class SkyColorEffectV2 {
       let vignetteSoftness = 0.5;
       let grainStrength = 0.0;
       let goldenEnergy = 0.0;
+      let nightSatFloor = clamp01(this.params.nightSaturationFloor);
 
       {
         // ── Analytic automation ──────────────────────────────────────
@@ -605,11 +637,17 @@ export class SkyColorEffectV2 {
         saturation += (this.params.goldenSaturationBoost ?? 0.0) * golden;
         saturation *= 1.0 - overcastDesat * overcast * weatherInfluence;
         saturation *= 1.0 - (turbidityEff * mie) * 0.35;
-        const satFloor = clamp01(this.params.nightSaturationFloor);
-        saturation = Math.max(satFloor, lerp(saturation, satFloor, effectiveDarkness * 0.75));
+        nightSatFloor = clamp01(this.params.nightSaturationFloor);
+        // NOTE: apply the night saturation floor *after* analyticStrength scaling.
+        // Otherwise, scaling can drive saturation below zero at night, clamp it,
+        // and wash the whole frame toward gray.
 
         contrast = 1.0;
-        contrast *= 1.0 - overcastContrast * overcast * weatherInfluence;
+        // Overcast haze should flatten contrast mostly during daytime.
+        // At night, applying full overcast contrast loss produces a broad gray wash.
+        const overcastContrastNightWeight = 0.2;
+        const overcastContrastWeight = lerp(overcastContrastNightWeight, 1.0, dayFactor);
+        contrast *= 1.0 - overcastContrast * overcast * weatherInfluence * overcastContrastWeight;
         contrast *= 1.0 - turbidityEff * mie * hazeLoss;
         contrast *= 1.0 - effectiveDarkness * 0.2;
         contrast = Math.max(0.5, Math.min(1.5, contrast));
@@ -630,6 +668,11 @@ export class SkyColorEffectV2 {
         saturation = Math.max(0.0, Math.min(2.0, 1.0 + (saturation - 1.0) * analyticStrength));
         contrast = Math.max(0.5, Math.min(1.5, 1.0 + (contrast - 1.0) * analyticStrength));
         vibrance = Math.max(-1.0, Math.min(1.0, vibrance * analyticStrength));
+
+        // Now enforce the night saturation floor with darkness weighting.
+        // Keeps nights from becoming unintentionally grayscale under strong analyticStrength.
+        const satFloor = nightSatFloor;
+        saturation = Math.max(satFloor, lerp(saturation, satFloor, effectiveDarkness * 0.75));
 
         this._lastDayFactor = dayFactor;
 
@@ -692,6 +735,7 @@ export class SkyColorEffectV2 {
 
       // Keep post-pass screen UV -> world -> scene UV mapping in sync for outdoors masking.
       const sc = window.MapShine?.sceneComposer;
+      const activeFloorIndex = Number(window.MapShine?.floorStack?.getActiveFloor?.()?.index);
       const sceneRect = canvas?.dimensions?.sceneRect;
       const sceneX = sceneRect?.x ?? 0;
       const sceneY = sceneRect?.y ?? 0;
@@ -723,6 +767,7 @@ export class SkyColorEffectV2 {
       u.uViewBoundsMax.value.set(vMaxX, vMaxY);
       u.uSceneBounds.value.set(sceneX, sceneY, sceneW, sceneH);
       u.uSceneDimensions.value.set(canvas?.dimensions?.width ?? sceneW, canvas?.dimensions?.height ?? sceneH);
+      u.uActiveFloorIndex.value = Number.isFinite(activeFloorIndex) ? Math.max(0, activeFloorIndex) : 0.0;
 
       u.uExposure.value = exposure;
       u.uTemperature.value = temperature;

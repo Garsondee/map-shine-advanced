@@ -133,6 +133,23 @@ export class ControlsIntegration {
       || sceneControlLayer === 'wall';
   }
 
+  /**
+   * Strict wall-editor gate. Use this for visual restoration decisions so token
+   * selection/movement can never be misclassified as walls-edit mode.
+   * @returns {boolean}
+   * @private
+   */
+  _isWallsEditingMode() {
+    const controlName = String(ui?.controls?.control?.name || ui?.controls?.activeControl || '').toLowerCase();
+    const controlLayer = String(ui?.controls?.control?.layer || '').toLowerCase();
+    const activeTool = String(ui?.controls?.tool?.name || ui?.controls?.activeTool || '').toLowerCase();
+    if (controlName === 'walls' || controlName === 'wall') return true;
+    if (controlLayer === 'walls' || controlLayer === 'wall') return true;
+    if (controlName === 'token' || controlName === 'tokens') return false;
+    if (activeTool === 'select' || activeTool === 'target') return false;
+    return false;
+  }
+
   _isSoundsContextActive() {
     if (canvas?.sounds?.active) return true;
     const { optionsName, name, ctor, sceneControlName, sceneControlLayer } = this._getActiveLayerMeta();
@@ -229,7 +246,7 @@ export class ControlsIntegration {
    */
   _refreshFoundryDoorControlVisibility() {
     try {
-      if (this._isWallsContextActive()) {
+      if (this._isWallsEditingMode()) {
         const controlsDoors = canvas?.controls?.doors;
         if (controlsDoors) {
           controlsDoors.visible = true;
@@ -988,7 +1005,7 @@ export class ControlsIntegration {
       this._isNotesContextActive() ||
       this._isTemplatesContextActive() ||
       this._isRegionsContextActive() ||
-      this._isWallsContextActive();
+      this._isWallsEditingMode();
 
     if (!isActive) return;
 
@@ -1052,17 +1069,22 @@ export class ControlsIntegration {
     if (!wall) return;
 
     try {
-      const ALPHA = 0.01;
-
       // Wall line graphics
-      if (wall.line) wall.line.alpha = ALPHA;
+      if (wall.line) {
+        wall.line.alpha = 0;
+        wall.line.visible = false;
+      }
 
       // Direction arrow graphics (if present)
-      if (wall.direction) wall.direction.alpha = ALPHA;
+      if (wall.direction) {
+        wall.direction.alpha = 0;
+        wall.direction.visible = false;
+      }
 
       // Endpoints (if present)
       if (wall.endpoints) {
-        wall.endpoints.alpha = ALPHA;
+        wall.endpoints.alpha = 0;
+        wall.endpoints.visible = false;
       }
 
       // Door controls: only show if the wall is on the current floor.
@@ -1090,9 +1112,18 @@ export class ControlsIntegration {
     if (!wall) return;
 
     try {
-      if (wall.line) wall.line.alpha = 1;
-      if (wall.direction) wall.direction.alpha = 1;
-      if (wall.endpoints) wall.endpoints.alpha = 1;
+      if (wall.line) {
+        wall.line.alpha = 1;
+        wall.line.visible = true;
+      }
+      if (wall.direction) {
+        wall.direction.alpha = 1;
+        wall.direction.visible = true;
+      }
+      if (wall.endpoints) {
+        wall.endpoints.alpha = 1;
+        wall.endpoints.visible = true;
+      }
       if (wall.doorControl) {
         wall.doorControl.visible = true;
         wall.doorControl.alpha = 1;
@@ -1167,7 +1198,7 @@ export class ControlsIntegration {
   _updateWallsVisualState() {
     if (!canvas?.ready || !canvas.walls?.placeables) return;
 
-    const isWallsContext = this._isWallsContextActive();
+    const isWallsContext = this._isWallsEditingMode();
     const movementManager = window.MapShine?.tokenManager?.movementManager;
     const movingTokenCount = Number(movementManager?.activeTracks?.size || 0);
     const isWallsActive = isWallsContext && movingTokenCount === 0;
@@ -1218,7 +1249,7 @@ export class ControlsIntegration {
    */
   _reassertWallTransparencyAfterPerception() {
     if (!canvas?.ready || !canvas?.walls?.placeables) return;
-    const isWallsActive = this._isWallsContextActive();
+    const isWallsActive = this._isWallsEditingMode();
     if (isWallsActive) {
       this._updateWallsVisualState();
       return;
@@ -1239,7 +1270,7 @@ export class ControlsIntegration {
   _clampGameplayWallVisuals() {
     if (this.state !== IntegrationState.ACTIVE) return;
     if (!canvas?.ready || !canvas?.walls?.placeables) return;
-    if (this._isWallsContextActive()) return;
+    if (this._isWallsEditingMode()) return;
 
     for (const wall of canvas.walls.placeables) {
       if (!wall) continue;
@@ -1498,6 +1529,9 @@ export class ControlsIntegration {
     // Also re-apply floor filtering since the perspective elevation may change.
     const controlTokenHookId = Hooks.on('controlToken', () => {
       if (this.state !== IntegrationState.ACTIVE) return;
+      // Apply gameplay wall suppression immediately to avoid one-frame flashes
+      // before deferred post-control sync work runs.
+      try { this._reassertWallTransparencyAfterPerception(); } catch (_) {}
       setTimeout(() => {
         try {
           // Token interactions are Three-owned. Foundry can transiently refresh
@@ -1540,7 +1574,7 @@ export class ControlsIntegration {
     const refreshWallHookId = Hooks.on('refreshWall', (wall) => {
       if (this.state !== IntegrationState.ACTIVE) return;
       try {
-        const isWallsActiveNow = this._isWallsContextActive();
+        const isWallsActiveNow = this._isWallsEditingMode();
         if (!isWallsActiveNow) {
           this._makeWallTransparent(wall);
         } else {
@@ -1565,7 +1599,7 @@ export class ControlsIntegration {
           const wall = canvas.walls?.get(doc.id);
           if (!wall) return;
 
-          const isWallsActiveNow = this._isWallsContextActive();
+          const isWallsActiveNow = this._isWallsEditingMode();
           if (!isWallsActiveNow) {
             this._makeWallTransparent(wall);
           } else {

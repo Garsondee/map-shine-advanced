@@ -289,13 +289,20 @@ export class WallManager {
 
   _shouldShowWallLines() {
     try {
-      // Native PIXI owns wall segments on the Walls layer; Three.js lines are for gameplay only.
+      // Native PIXI owns wall segments on the Walls layer; hide Three.js duplicates.
       if (canvas?.walls?.active) return false;
       const active = canvas?.activeLayer;
+      if (active === canvas?.walls) return false;
+
+      // IMPORTANT: Only show Three.js wall edit geometry when the user is explicitly
+      // in the Walls tool. Returning true for generic "token gameplay" caused
+      // controlToken + sightRefresh (frequent after checkpoint movement / fog) to
+      // call updateVisibility() and briefly show wall lines until the next
+      // InteractionManager frame forced them off again — visible flicker.
       const activeName = String(active?.options?.name || active?.name || active?.constructor?.name || '').toLowerCase();
       const activeControlName = String(ui?.controls?.control?.name || ui?.controls?.activeControl || '').toLowerCase();
       const activeControlLayer = String(ui?.controls?.control?.layer || '').toLowerCase();
-      if (active === canvas?.walls) return false;
+
       const wallsEditing =
         activeName === 'wallslayer'
         || activeName === 'walllayer'
@@ -305,9 +312,10 @@ export class WallManager {
         || activeControlName === 'wall'
         || activeControlLayer === 'walls'
         || activeControlLayer === 'wall';
-      return !wallsEditing;
+
+      return !!wallsEditing;
     } catch (_) {
-      return true;
+      return false;
     }
   }
 

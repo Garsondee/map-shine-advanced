@@ -2456,6 +2456,14 @@ export class InteractionManager {
       || sceneControlLayer === 'wall';
   }
 
+  _isWallsEditingMode() {
+    const controlName = String(ui?.controls?.control?.name || ui?.controls?.activeControl || '').toLowerCase();
+    const controlLayer = String(ui?.controls?.control?.layer || '').toLowerCase();
+    if (controlName === 'walls' || controlName === 'wall') return true;
+    if (controlLayer === 'walls' || controlLayer === 'wall') return true;
+    return false;
+  }
+
   _isSoundsContextActive() {
     if (canvas?.sounds?.active) return true;
     const { optionsName, name, ctor, sceneControlName, sceneControlLayer } = this._getActiveLayerMeta();
@@ -4320,7 +4328,7 @@ export class InteractionManager {
       const movingTokenCount = Number(movementManager?.activeTracks?.size || 0);
       // Prevent transient layer-state races during path-walk from flashing wall
       // edit visuals in gameplay.
-      const showWalls = this._isWallsContextActive() && movingTokenCount === 0;
+      const showWalls = this._isWallsEditingMode() && movingTokenCount === 0;
       const showSounds = this._isSoundsContextActive();
 
       this.lightIconManager?.setVisibility?.(showLighting);

@@ -102,6 +102,31 @@ export class WindowLightEffectV2 {
       rgbShiftAngle: 76.0,  // degrees
     };
 
+    /**
+     * Last foundrySceneData passed into populate(). Used for one-time
+     * repopulation if floor bands were not available during initial populate.
+     * @type {object|null}
+     */
+    this._lastFoundrySceneData = null;
+
+    /**
+     * Floor band count used by the most recent populate().
+     * If this was <= 1 and later FloorStack provides > 1 bands, upper-floor
+     * overlays would have been assigned to floor 0. We repopulate in that case.
+     * @type {number}
+     */
+    this._lastPopulatedFloorBandCount = 0;
+
+    /** @type {Promise<void>|null} One-time repopulation in-flight. */
+    this._repopulatePromise = null;
+
+    /**
+     * Incremented each populate() call; async texture callbacks from older
+     * populates are ignored if the generation no longer matches.
+     * @type {number}
+     */
+    this._populateGeneration = 0;
+
     log.debug('WindowLightEffectV2 created');
   }
 
@@ -311,10 +336,14 @@ export class WindowLightEffectV2 {
    */
   async populate(foundrySceneData) {
     if (!this._initialized) { log.warn('populate: not initialized'); return; }
+    this._lastFoundrySceneData = foundrySceneData;
+    this._populateGeneration += 1;
+    const gen = this._populateGeneration;
     this.clear();
     this.params.hasWindowMask = false;
 
     const floors = window.MapShine?.floorStack?.getFloors?.() ?? [];
+    this._lastPopulatedFloorBandCount = floors.length;
     // worldH must match FloorRenderBus and SpecularEffectV2: use foundrySceneData.height
     // (full canvas height including padding), NOT canvas.scene.height (scene rect only).
     const worldH = foundrySceneData?.height ?? canvas?.scene?.height ?? 0;
@@ -356,6 +385,7 @@ export class WindowLightEffectV2 {
           rotation: 0,
           intensityMultiplier: 1.0,
           isOverhead: false,
+          gen,
         });
 
         overlayCount++;
@@ -418,6 +448,7 @@ export class WindowLightEffectV2 {
         rotation,
         intensityMultiplier,
         isOverhead: isOverheadTile,
+        gen,
       });
 
       overlayCount++;
@@ -460,6 +491,21 @@ export class WindowLightEffectV2 {
     if (Number.isFinite(polledActiveFloor) && polledActiveFloor !== this._activeFloorIndex) {
       this.onFloorChange(polledActiveFloor);
     }
+
+    // Auto-heal: if initial populate ran while FloorStack had only the fallback
+    // single band (so all overlays were assigned to floor 0), repopulate once
+    // real multi-floor bands appear.
+    try {
+      const floorCount = Number(window.MapShine?.floorStack?.getFloors?.()?.length ?? 0);
+      if (floorCount > 1
+        && this._lastPopulatedFloorBandCount <= 1
+        && !this._repopulatePromise
+        && this._lastFoundrySceneData) {
+        this._repopulatePromise = this.populate(this._lastFoundrySceneData)
+          .catch((err) => log.warn('WindowLightEffectV2 repopulate after floor bands failed:', err))
+          .finally(() => { this._repopulatePromise = null; });
+      }
+    } catch (_) {}
 
     // Sync params → uniforms (cheap; shared uniforms update all overlays).
     const u = this._sharedUniforms;
@@ -685,7 +731,7 @@ export class WindowLightEffectV2 {
     };
   }
 
-  _createOverlay(tileId, floorIndex, { maskUrl, centerX, centerY, w, h, z, rotation, intensityMultiplier = 1.0, isOverhead = false }) {
+  _createOverlay(tileId, floorIndex, { maskUrl, centerX, centerY, w, h, z, rotation, intensityMultiplier = 1.0, isOverhead = false, gen = null }) {
     const THREE = window.THREE;
     if (!THREE || !this._sharedUniforms) return;
 
@@ -926,6 +972,7 @@ export class WindowLightEffectV2 {
     // Load texture asynchronously.
     const loader = new THREE.TextureLoader();
     loader.load(maskUrl, (tex) => {
+      if (gen != null && this._populateGeneration !== gen) return;
       // Window masks are greyscale luminance/shape data — treat as linear.
       // Setting SRGBColorSpace would gamma-decode the mask values, making the
       // shape brighter than intended and breaking the luminance-driven falloff.
@@ -947,6 +994,7 @@ export class WindowLightEffectV2 {
       material.uniforms.uMaskReady.value = 1.0;
       material.needsUpdate = true;
     }, undefined, () => {
+      if (gen != null && this._populateGeneration !== gen) return;
       log.warn(`Failed to load window mask for tile ${tileId}: ${maskUrl}`);
     });
   }

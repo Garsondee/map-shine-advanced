@@ -21,10 +21,10 @@
  * lights adopt the sky hue during golden hour / blue hour).
  *
  * Simplifications vs V1:
- *   - No outdoors mask gating (grading applied globally for now)
- *   - No roof alpha, rope mask, or token mask
+ *   - No rope mask or token mask
  *   - No cloud top mask
- *   These will be layered in as the corresponding V2 effects come online.
+ *   - Outdoors gating is currently limited to the final grade blend
+ *     (full V1-style multi-mask layering remains out of scope for now)
  *
  * @module compositor-v2/effects/SkyColorEffectV2
  */
@@ -356,14 +356,15 @@ export class SkyColorEffectV2 {
           vec4 sceneColor = texture2D(tDiffuse, vUv);
           vec3 base = sceneColor.rgb;
 
-          // V2 simplified: no outdoors/roof/rope/token masks yet.
-          // Grading applied globally, gated only by uIntensity.
+          // Fast early-out: nothing to blend.
           if (uIntensity <= 0.0) {
             gl_FragColor = sceneColor;
             return;
           }
 
           vec3 color = base;
+          float outdoors = sampleOutdoorsMask(vUv);
+          float outdoorVis = clamp(outdoors, 0.0, 1.0);
 
           // 1) Exposure (stops)
           color *= exp2(uExposure);
@@ -419,18 +420,14 @@ export class SkyColorEffectV2 {
 
           // Dramatic golden-hour recolor for outdoors.
           if (uGoldenRecolorStrength > 0.0001) {
-            float outdoors = sampleOutdoorsMask(vUv);
-            float roofOcc = sampleOverheadRoofAlpha(vUv);
-            float outdoorVis = clamp(outdoors * (1.0 - roofOcc), 0.0, 1.0);
             float recolorAmt = clamp(uGoldenRecolorStrength * outdoorVis, 0.0, 1.0);
             vec3 warmShift = color * uGoldenRecolorColor;
             color = mix(color, warmShift, recolorAmt);
           }
 
-          // Blend graded result with original based on intensity only.
-          // Roof/outdoors-driven masking here created oversized dark halos when
-          // roof alpha/blocker silhouettes were broader than visible canopy.
-          float mask = clamp(uIntensity, 0.0, 1.0);
+          // Blend grade only where outdoor visibility says the sky should apply.
+          // This keeps interiors neutral when a valid _Outdoors mask is present.
+          float mask = clamp(uIntensity * outdoorVis, 0.0, 1.0);
           vec3 finalColor = mix(base, color, mask);
 
           gl_FragColor = vec4(finalColor, sceneColor.a);

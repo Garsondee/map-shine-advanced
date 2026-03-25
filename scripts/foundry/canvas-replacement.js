@@ -1366,6 +1366,9 @@ let _webglContextRestoredHandler = null;
  /** @type {boolean} */
  let transitionsInstalled = false;
 
+/** @type {boolean} */
+let fogSaveSafetyPatchInstalled = false;
+
 /** @type {number|null} - Safety net timer ID to force-dismiss stuck overlay after tearDown */
 let _overlayDismissSafetyTimerId = null;
 
@@ -2128,6 +2131,7 @@ export function initialize() {
     // Install transition wrapper so we can fade-to-black BEFORE Foundry tears down the old scene.
     // This must wrap an awaited method (Canvas.tearDown) to actually block the teardown.
     installCanvasTransitionWrapper();
+    installFogSaveSafetyPatch();
 
     // Install draw wrapper so we can detect stalls that occur before drawCanvas/canvasReady.
     // This must be low-impact and should not change behavior beyond logging.
@@ -2908,6 +2912,33 @@ function installCanvasTransitionWrapper() {
     // XM-3: Wrapper function that fades to black before tearDown.
     // Used by both libWrapper and direct-wrap paths.
     const _tearDownWrapper = async function(wrapped, ...args) {
+      try {
+        if (!window.MapShine) window.MapShine = {};
+        window.MapShine.__sceneTransitionActive = true;
+      } catch (_) {}
+
+      // Best effort: silence fog persistence work on this canvas instance while
+      // Foundry tears down scene state.
+      const fogMgr = this?.fog ?? canvas?.fog ?? null;
+      const fogMethodRestorers = [];
+      const _suppressInstanceMethod = (name) => {
+        try {
+          if (!fogMgr || typeof fogMgr[name] !== 'function') return;
+          const original = fogMgr[name];
+          fogMgr[name] = function mapShineNoopFogMethod() { return undefined; };
+          fogMethodRestorers.push(() => {
+            try { fogMgr[name] = original; } catch (_) {}
+          });
+        } catch (_) {}
+      };
+      _suppressInstanceMethod('save');
+      _suppressInstanceMethod('commit');
+      for (const k of ['_debouncedSave', '_debouncedCommit', 'debouncedSave', 'debouncedCommit']) {
+        try {
+          const fn = fogMgr?.[k];
+          if (fn?.cancel) fn.cancel();
+        } catch (_) {}
+      }
 
       await safeCallAsync(async () => {
         loadingOverlay.showLoading('Switching scenes...');
@@ -2926,6 +2957,10 @@ function installCanvasTransitionWrapper() {
       } catch (err) {
         log.warn('Canvas.tearDown() threw during scene transition (non-fatal, transition continues):', err?.message ?? String(err));
         // Return undefined so Canvas.draw() sees a resolved tearDown and continues normally.
+      } finally {
+        for (const restore of fogMethodRestorers) {
+          try { restore(); } catch (_) {}
+        }
       }
 
       // BLANK-CANVAS SAFETY: When canvas.draw(null) is called (scene deleted,
@@ -2975,6 +3010,79 @@ function installCanvasTransitionWrapper() {
     proto.tearDown = directWrapped;
     log.info('Installed Canvas.tearDown transition wrapper (direct prototype wrap)');
   }, 'installCanvasTransitionWrapper', Severity.DEGRADED);
+}
+
+/**
+ * Guard Foundry FogManager persistence so fog compression failures do not
+ * abort scene transitions. This is intentionally narrow:
+ * - skip fog save during active scene transition
+ * - swallow known fog extraction/compression size errors
+ */
+function installFogSaveSafetyPatch() {
+  if (fogSaveSafetyPatchInstalled) return;
+
+  const installed = safeCall(() => {
+    const candidates = [
+      globalThis?.foundry?.canvas?.perception?.FogManager,
+      globalThis?.CONFIG?.Canvas?.fogManager,
+    ];
+
+    const classes = [];
+    for (const cls of candidates) {
+      if (!cls || typeof cls !== 'function') continue;
+      if (!classes.includes(cls)) classes.push(cls);
+    }
+    if (!classes.length) return false;
+
+    const isKnownFogSizeError = (err) => {
+      const msg = String(err?.message ?? err ?? '');
+      return /Index or size is negative|FogExtractor|Buffer compression has failed|DOMException/i.test(msg);
+    };
+
+    const wrapMethod = (proto, methodName) => {
+      const original = proto?.[methodName];
+      if (typeof original !== 'function') return;
+      if (original.__mapShineFogSafeWrapped) return;
+
+      const wrapped = function mapShineFogSafeWrapper(...args) {
+        const transitionActive = !!window?.MapShine?.__sceneTransitionActive;
+        if (transitionActive) return undefined;
+        try {
+          const out = original.apply(this, args);
+          if (out && typeof out.then === 'function') {
+            return out.catch((err) => {
+              if (isKnownFogSizeError(err)) {
+                log.warn(`Suppressed FogManager.${methodName} failure during scene lifecycle`, err?.message ?? err);
+                return undefined;
+              }
+              throw err;
+            });
+          }
+          return out;
+        } catch (err) {
+          if (isKnownFogSizeError(err)) {
+            log.warn(`Suppressed FogManager.${methodName} sync failure`, err?.message ?? err);
+            return undefined;
+          }
+          throw err;
+        }
+      };
+      wrapped.__mapShineFogSafeWrapped = true;
+      wrapped.__mapShineFogSafeOriginal = original;
+      proto[methodName] = wrapped;
+    };
+
+    for (const cls of classes) {
+      const proto = cls?.prototype;
+      if (!proto) continue;
+      wrapMethod(proto, 'save');
+      wrapMethod(proto, 'commit');
+    }
+
+    return true;
+  }, 'installFogSaveSafetyPatch', Severity.DEGRADED, { fallback: false });
+
+  fogSaveSafetyPatchInstalled = installed === true;
 }
 
 function installAmbientSoundAudibilityPatch() {
@@ -3372,6 +3480,12 @@ async function _waitForFoundryCanvasReady({ timeoutMs = 15000 } = {}) {
  * @private
  */
 async function onCanvasReady(canvas) {
+  installFogSaveSafetyPatch();
+  try {
+    if (!window.MapShine) window.MapShine = {};
+    window.MapShine.__sceneTransitionActive = false;
+  } catch (_) {}
+
   // Authoritative boot diagnostics: this is the single decision point which
   // chooses UI-only vs full Map Shine. Log all relevant state BEFORE branching.
   safeCall(() => {
@@ -3649,6 +3763,11 @@ async function onCanvasReady(canvas) {
  */
 function onCanvasTearDown(canvas) {
   log.info('Tearing down Map Shine canvas');
+  installFogSaveSafetyPatch();
+  try {
+    if (!window.MapShine) window.MapShine = {};
+    window.MapShine.__sceneTransitionActive = true;
+  } catch (_) {}
 
   safeCall(() => _teardownPixiLayerDebugMode(), 'pixiDebug.teardownOnCanvasTearDown', Severity.COSMETIC);
 

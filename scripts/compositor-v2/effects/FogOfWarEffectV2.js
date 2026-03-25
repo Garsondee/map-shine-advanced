@@ -197,6 +197,12 @@ export class FogOfWarEffectV2 {
     this._isSavingExploration = false;
     this._isLoadingExploration = false;
 
+    // Scene-transition guard: Foundry fog extraction/compression can run
+    // during canvas teardown; avoid writing FogExploration while tearing down.
+    this._isSceneTransitioning = false;
+    // Increments to invalidate in-flight save/encode work.
+    this._explorationSaveGeneration = 0;
+
     // PERF: Saving fog exploration requires a GPU->CPU readback + image encode.
     // On large scenes, this can stall the renderer for ~1s. Rate-limit saves so
     // they cannot happen repeatedly and create periodic hitching.
@@ -1450,6 +1456,16 @@ export class FogOfWarEffectV2 {
       }
     } catch (_) {}
 
+    // Pause V2 persistence writes during Foundry canvas teardown / scene switch.
+    // Foundry's fog compression worker may fail when canvas dimensions/state
+    // are temporarily invalid, so avoid kicking off additional fog saves.
+    this._hookIds.push(['canvasTearDown', Hooks.on('canvasTearDown', () => {
+      try { this._suspendExplorationSaves('canvasTearDown'); } catch (_) {}
+    })]);
+    this._hookIds.push(['canvasReady', Hooks.on('canvasReady', () => {
+      try { this._resumeExplorationSaves(); } catch (_) {}
+    })]);
+
     // Initial render: force perception so that any starting
     // controlled token (or vision source) has a valid LOS
     // polygon before the first fog mask is drawn.
@@ -2666,6 +2682,7 @@ export class FogOfWarEffectV2 {
   }
 
   _markExplorationDirty() {
+    if (this._isSceneTransitioning) return;
     this._explorationDirty = true;
     this._explorationCommitCount++;
 
@@ -2674,6 +2691,29 @@ export class FogOfWarEffectV2 {
       this._explorationCommitCount = 0;
       if (this._saveExplorationDebounced) this._saveExplorationDebounced();
     }
+  }
+
+  /**
+   * Suspend V2 FogExploration persistence during Foundry canvas teardown.
+   * @private
+   */
+  _suspendExplorationSaves(reason = 'unknown') {
+    this._isSceneTransitioning = true;
+    this._explorationSaveGeneration++;
+    this._explorationDirty = false;
+    this._explorationCommitCount = 0;
+    if (this._saveExplorationDebounced?.cancel) {
+      try { this._saveExplorationDebounced.cancel(); } catch (_) {}
+    }
+    log.debug('[FOG] Exploration saves suspended:', reason);
+  }
+
+  /**
+   * Resume V2 FogExploration persistence after canvas is ready.
+   * @private
+   */
+  _resumeExplorationSaves() {
+    this._isSceneTransitioning = false;
   }
 
   _ensureExplorationLoadedFromFoundry() {
@@ -2814,6 +2854,10 @@ export class FogOfWarEffectV2 {
 
   async _saveExplorationToFoundry() {
     if (!this._initialized) return;
+    if (this._isSceneTransitioning) return;
+
+    const saveGeneration = this._explorationSaveGeneration;
+
     const tokenVisionEnabled = canvas?.scene?.tokenVision ?? false;
     const explorationEnabled = canvas?.scene?.fog?.exploration ?? false;
     if (!tokenVisionEnabled || !explorationEnabled) return;
@@ -2869,6 +2913,9 @@ export class FogOfWarEffectV2 {
       const readbackOk = await this._readRenderTargetPixelsTiled(explorationTarget, width, height, buffer);
       if (!readbackOk) return;
 
+      // Scene transition invalidated this save before persistence is invoked.
+      if (saveGeneration !== this._explorationSaveGeneration) return;
+
       // Scene changed while reading back -> skip persistence for stale scene data.
       if (sceneIdAtStart !== canvas?.scene?.id) return;
 
@@ -2877,6 +2924,9 @@ export class FogOfWarEffectV2 {
 
       // Scene changed while encoding -> avoid writing stale data to the new scene.
       if (sceneIdAtStart !== canvas?.scene?.id) return;
+
+      // Extra guard in case teardown began during encoding.
+      if (saveGeneration !== this._explorationSaveGeneration) return;
 
       const fogMgr = canvas?.fog;
       if (!fogMgr) return;

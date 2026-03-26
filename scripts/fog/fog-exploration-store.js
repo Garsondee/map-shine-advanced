@@ -15,6 +15,16 @@ function getTokenActorId(tokenLike) {
   return doc?.actorId ?? doc?.actor?.id ?? tokenLike?.actor?.id ?? null;
 }
 
+function chooseSingleActor(actorIds, isGM) {
+  const ids = Array.from(new Set((actorIds || []).map(String).filter(Boolean)));
+  if (!ids.length) return [];
+  if (ids.length === 1) return [ids[0]];
+  // Player-friendly fallback: choose one deterministic owned actor when multiple
+  // are available, rather than stalling fog context entirely.
+  if (!isGM) return [ids.sort()[0]];
+  return [];
+}
+
 function clampNumber(n, min, max) {
   n = Number(n);
   if (!Number.isFinite(n)) return min;
@@ -27,9 +37,44 @@ function normalizeBandKey({ bottom, top }) {
   if (!Number.isFinite(b) || !Number.isFinite(t)) return 'default';
   const lo = Math.min(b, t);
   const hi = Math.max(b, t);
-  // Stable keying: avoid excessive precision drift.
-  const round = (x) => Math.round(x * 1000) / 1000;
+  // Stable keying: quantize to avoid tiny float jitter creating duplicate keys.
+  const round = (x) => Math.round(x * 100) / 100;
   return `bottom:${round(lo)}|top:${round(hi)}`;
+}
+
+function getSceneLevelBands(scene) {
+  const out = [];
+  const fromNative = scene?.flags?.['map-shine-advanced']?.levels?.sceneLevels;
+  const fromLevels = scene?.flags?.levels?.sceneLevels;
+  const raw = Array.isArray(fromNative) ? fromNative : (Array.isArray(fromLevels) ? fromLevels : []);
+  for (let i = 0; i < raw.length; i += 1) {
+    const entry = raw[i];
+    const bottom = Number(entry?.bottom ?? entry?.rangeBottom ?? (Array.isArray(entry) ? entry[0] : NaN));
+    const top = Number(entry?.top ?? entry?.rangeTop ?? (Array.isArray(entry) ? entry[1] : NaN));
+    if (!Number.isFinite(bottom) || !Number.isFinite(top)) continue;
+    out.push({
+      index: i,
+      bottom: Math.min(bottom, top),
+      top: Math.max(bottom, top),
+      label: String(entry?.label ?? entry?.name ?? (Array.isArray(entry) ? entry[2] : `Level ${i + 1}`)),
+    });
+  }
+  return out;
+}
+
+function resolveAuthoredBandKey(scene, levelCtx) {
+  const bands = getSceneLevelBands(scene);
+  if (!bands.length) return null;
+  const b = Number(levelCtx?.bottom);
+  const t = Number(levelCtx?.top);
+  if (!Number.isFinite(b) || !Number.isFinite(t)) return null;
+  const lo = Math.min(b, t);
+  const hi = Math.max(b, t);
+  const eps = 0.05;
+  const match = bands.find((band) => Math.abs(band.bottom - lo) <= eps && Math.abs(band.top - hi) <= eps);
+  if (!match) return null;
+  const label = String(match.label || '').replace(/[^a-zA-Z0-9_-]+/g, '_').slice(0, 32) || `Level_${match.index + 1}`;
+  return `level:${match.index}:${label}|${normalizeBandKey(match)}`;
 }
 
 export function getActiveElevationBandKey() {
@@ -38,10 +83,16 @@ export function getActiveElevationBandKey() {
     const scene = canvas?.scene;
     if (!scene || !isLevelsEnabledForScene(scene)) return 'default';
     const levelCtx = window.MapShine?.activeLevelContext;
-    if (!levelCtx) return 'default';
+    // Do not collapse unresolved Levels context into a shared default bucket.
+    if (!levelCtx) return null;
+    const authored = resolveAuthoredBandKey(scene, levelCtx);
+    if (authored) return authored;
+    // Safety-first: if authored floor bands exist but current context does not
+    // match one, refuse to resolve a key to avoid cross-floor contamination.
+    if (getSceneLevelBands(scene).length > 0) return null;
     return normalizeBandKey(levelCtx);
   } catch (_) {
-    return 'default';
+    return null;
   }
 }
 
@@ -61,7 +112,8 @@ export function getRelevantActorIdsForFog() {
         if (actorId) fromSelection.push(String(actorId));
       }
     }
-    if (fromSelection.length) return Array.from(new Set(fromSelection));
+    const selectedActor = chooseSingleActor(fromSelection, isGM);
+    if (selectedActor.length) return selectedActor;
 
     const controlled = canvas?.tokens?.controlled || [];
     const fromControlled = [];
@@ -69,7 +121,8 @@ export function getRelevantActorIdsForFog() {
       const actorId = getTokenActorId(token);
       if (actorId) fromControlled.push(String(actorId));
     }
-    if (fromControlled.length) return Array.from(new Set(fromControlled));
+    const controlledActor = chooseSingleActor(fromControlled, isGM);
+    if (controlledActor.length) return controlledActor;
 
     // Player fallback when nothing is selected/controlled: owned tokens.
     if (!isGM) {
@@ -80,19 +133,21 @@ export function getRelevantActorIdsForFog() {
         const actorId = getTokenActorId(token);
         if (actorId) owned.push(String(actorId));
       }
-      if (owned.length) return Array.from(new Set(owned));
+      const ownedActor = chooseSingleActor(owned, false);
+      if (ownedActor.length) return ownedActor;
     }
   } catch (_) {
   }
 
-  // GM/no-token fallback: keep exploration user-scoped under sentinel key.
-  return [FOG_USER_SENTINEL_ACTOR_ID];
+  // Strict fail-closed model: no explicit single actor context -> unresolved.
+  return [];
 }
 
 export function buildFogStoreContextKey(actorIds, bandKey) {
   const ids = Array.isArray(actorIds) ? actorIds.map(String).filter(Boolean) : [];
   ids.sort();
-  return `${String(bandKey || 'default')}::${ids.join(',')}`;
+  const band = (bandKey === null || bandKey === undefined || bandKey === '') ? 'unresolved' : String(bandKey);
+  return `${band}::${ids.join(',')}`;
 }
 
 async function dataUrlToBlob(dataUrl) {
@@ -232,7 +287,8 @@ export async function saveExplorationForActors({
   const doc = await ensureFogExplorationDoc(sceneId, userId);
   if (!doc) return false;
 
-  const key = String(bandKey || 'default');
+  if (bandKey === null || bandKey === undefined || bandKey === '') return false;
+  const key = String(bandKey);
   const scaled = await downscaleDataUrlWebp(exploredDataUrl, maxDim, 0.8);
   if (!scaled) return false;
 
@@ -267,6 +323,7 @@ export async function loadUnionExplorationForActors({
   actorIds,
   bandKey
 }) {
+  if (bandKey === null || bandKey === undefined || bandKey === '') return null;
   const FogExplorationCls = CONFIG?.FogExploration?.documentClass;
   if (!FogExplorationCls || typeof FogExplorationCls.load !== 'function') return null;
 
@@ -279,7 +336,7 @@ export async function loadUnionExplorationForActors({
   const ids = Array.isArray(actorIds) ? actorIds.map(String).filter(Boolean) : [];
   if (!ids.length) return null;
 
-  const key = String(bandKey || 'default');
+  const key = String(bandKey);
   const imgs = [];
   for (const actorId of ids) {
     const entry = root.actors?.[actorId]?.[key] ?? null;

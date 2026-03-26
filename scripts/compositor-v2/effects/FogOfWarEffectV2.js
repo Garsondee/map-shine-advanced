@@ -678,6 +678,7 @@ export class FogOfWarEffectV2 {
       explorationEnabled: canvas?.scene?.fog?.exploration ?? false,
       explorationLoaded: this._explorationLoadedFromFoundry,
       explorationLoadGeneration: this._explorationLoadGeneration,
+      fogStoreContextResolved: this._computeFogStoreContext().resolved,
       fogStoreContextKey: this._lastFogStoreContextKey,
       fogStoreLoadKey: this._lastFogStoreLoadKey,
       fogStoreSaveKey: this._lastFogStoreSaveKey,
@@ -725,7 +726,8 @@ export class FogOfWarEffectV2 {
     const bandKey = getActiveElevationBandKey();
     const actorIds = getRelevantActorIdsForFog();
     const key = buildFogStoreContextKey(actorIds, bandKey);
-    return { bandKey, actorIds, key };
+    const resolved = !!(bandKey && Array.isArray(actorIds) && actorIds.length === 1);
+    return { bandKey, actorIds, key, resolved };
   }
 
   _handleFogStoreContextChange() {
@@ -1598,8 +1600,18 @@ export class FogOfWarEffectV2 {
     const loadGeneration = this._explorationLoadGeneration;
 
     try {
-      const { bandKey, actorIds, key } = this._computeFogStoreContext();
+      const { bandKey, actorIds, key, resolved } = this._computeFogStoreContext();
       this._lastFogStoreLoadKey = key;
+      if (!resolved) {
+        // Floor/token context not fully resolved yet; retry shortly without committing to blank.
+        setTimeout(() => {
+          try {
+            if (loadGeneration !== this._explorationLoadGeneration) return;
+            void this._ensureExplorationLoadedFromStore();
+          } catch (_) {}
+        }, 120);
+        return;
+      }
       const base64 = await loadUnionExplorationForActors({ actorIds, bandKey });
 
       // Stale?
@@ -1680,6 +1692,7 @@ export class FogOfWarEffectV2 {
     this._lastElevationBandBottom = bandBottom;
     this._lastElevationBandTop = bandTop;
 
+    this.resetExploration({ markLoaded: false });
     this._explorationLoadedFromFoundry = false;
     this._explorationLoadAttempts = 0;
     this._pendingAccumulation = false;
@@ -2724,7 +2737,9 @@ export class FogOfWarEffectV2 {
     // OR when we have a pending catch-up accumulation from a frame where
     // vision rendered but exploration wasn't loaded yet.
     void this._ensureExplorationLoadedFromStore();
-    const canAccumulate = explorationEnabled && this._explorationLoadedFromFoundry;
+    const canAccumulate = explorationEnabled
+      && this._explorationLoadedFromFoundry
+      && this._computeFogStoreContext().resolved;
 
     if (visionRenderedThisFrame && !canAccumulate) {
       // Vision rendered but exploration not ready ->-> remember to catch up later
@@ -3051,13 +3066,16 @@ export class FogOfWarEffectV2 {
       // Extra guard in case teardown began during encoding.
       if (saveGeneration !== this._explorationSaveGeneration) return;
 
-      const bandKey = getActiveElevationBandKey();
-      const actorIds = getRelevantActorIdsForFog();
-      this._lastFogStoreSaveKey = buildFogStoreContextKey(actorIds, bandKey);
+      const context = this._computeFogStoreContext();
+      this._lastFogStoreSaveKey = context.key;
+      if (!context.resolved) {
+        // Keep dirty; we'll persist once floor/token context is resolved.
+        return;
+      }
       const maxDim = getFogPersistenceMaxDim();
       const ok = await saveExplorationForActors({
-        actorIds,
-        bandKey,
+        actorIds: context.actorIds,
+        bandKey: context.bandKey,
         exploredDataUrl: base64,
         maxDim
       });

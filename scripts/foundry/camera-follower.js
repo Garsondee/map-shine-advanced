@@ -18,10 +18,12 @@
  */
 
 import { createLogger } from '../core/log.js';
+import { moveTrace } from '../core/movement-trace-log.js';
 import { readSceneLevelsFlag } from './levels-scene-flags.js';
 import { elevationInBand } from '../ui/levels-editor/level-boundaries.js';
 
 const log = createLogger('CameraFollower');
+const FLOOR_FOLLOW_SUPPRESSION_DEFAULT_MS = 800;
 
 function isEditableTarget(target) {
   if (!(target instanceof Element)) return false;
@@ -70,6 +72,9 @@ export class CameraFollower {
     /** @type {Array<{name:string,id:number}>} */
     this._hookIds = [];
 
+    /** @type {Map<string, {until:number, reason:string}>} */
+    this._floorFollowSuppressionByTokenId = new Map();
+
     this._onKeyDown = this._onKeyDown.bind(this);
     
     // Cache last known state to avoid unnecessary updates
@@ -113,7 +118,7 @@ export class CameraFollower {
     
     this._syncFromPixi();
 
-    if (this._shouldAutoFollowControlledToken()) {
+    if (this._shouldAutoFollowControlledToken() && !this._isControlledTokenFloorFollowSuppressed()) {
       this._syncToControlledTokenLevel({ emit: false, reason: 'follow-update' });
     }
   }
@@ -149,6 +154,7 @@ export class CameraFollower {
     // currently selected floor.
     const controlTokenId = Hooks.on('controlToken', (_token, controlled) => {
       if (!controlled) return;
+      if (this._isControlledTokenFloorFollowSuppressed()) return;
       if (!this._shouldAutoSyncControlledTokenEvents()) return;
       this._syncToControlledTokenLevel({ emit: true, reason: 'control-token' });
     });
@@ -158,9 +164,24 @@ export class CameraFollower {
     // control-token events so manual floor selection stays authoritative.
     const updateTokenId = Hooks.on('updateToken', (tokenDoc, changes) => {
       if (!('elevation' in (changes || {}))) return;
+      const tid = String(tokenDoc?.id || '');
       const controlled = canvas?.tokens?.controlled || [];
-      if (!controlled.some((t) => t?.document?.id === tokenDoc?.id)) return;
-      if (!this._shouldAutoSyncControlledTokenEvents()) return;
+      const isControlled = controlled.some((t) => t?.document?.id === tokenDoc?.id);
+      const suppressed = this.isFloorFollowSuppressedForToken(tid);
+      const policyOk = this._shouldAutoSyncControlledTokenEvents();
+      const willSync = isControlled && !suppressed && policyOk;
+      moveTrace('cameraFollower.updateToken.elevation', {
+        tokenId: tid,
+        newElevation: changes?.elevation,
+        isControlled,
+        floorFollowSuppressed: suppressed,
+        policyAllowsSync: policyOk,
+        willSyncToLevel: willSync,
+        lockMode: this._lockMode
+      });
+      if (!isControlled) return;
+      if (suppressed) return;
+      if (!policyOk) return;
       this._syncToControlledTokenLevel({ emit: true, reason: 'token-elevation-update' });
     });
     this._hookIds.push({ name: 'updateToken', id: updateTokenId });
@@ -636,7 +657,78 @@ export class CameraFollower {
     return Number.isFinite(elev) ? elev : null;
   }
 
+  _getControlledTokenId() {
+    const controlled = canvas?.tokens?.controlled || [];
+    const token = controlled[0] || null;
+    const id = String(token?.document?.id || token?.id || '');
+    return id || null;
+  }
+
+  _cleanupExpiredFloorFollowSuppressions() {
+    if (this._floorFollowSuppressionByTokenId.size === 0) return;
+    const now = Date.now();
+    for (const [tokenId, data] of this._floorFollowSuppressionByTokenId.entries()) {
+      const until = Number(data?.until ?? 0);
+      if (!Number.isFinite(until) || until <= now) {
+        this._floorFollowSuppressionByTokenId.delete(tokenId);
+      }
+    }
+  }
+
+  _isControlledTokenFloorFollowSuppressed() {
+    const tokenId = this._getControlledTokenId();
+    if (!tokenId) return false;
+    return this.isFloorFollowSuppressedForToken(tokenId);
+  }
+
+  /**
+   * Temporarily suppress auto floor-follow for a token.
+   * @param {string} tokenId
+   * @param {{durationMs?: number, reason?: string}} [options]
+   * @returns {number} Expiry timestamp (ms since epoch), or 0 if not set
+   */
+  beginFloorFollowSuppression(tokenId, options = {}) {
+    const key = String(tokenId || '');
+    if (!key) return 0;
+    this._cleanupExpiredFloorFollowSuppressions();
+    const durationMs = Math.max(0, Number(options?.durationMs ?? FLOOR_FOLLOW_SUPPRESSION_DEFAULT_MS));
+    const reason = String(options?.reason || 'floor-follow-suppressed');
+    const until = Date.now() + durationMs;
+    this._floorFollowSuppressionByTokenId.set(key, { until, reason });
+    moveTrace('cameraFollower.floorFollowSuppression.begin', {
+      tokenId: key,
+      reason,
+      until,
+      durationMs
+    });
+    return until;
+  }
+
+  /**
+   * End auto floor-follow suppression for a token.
+   * @param {string} tokenId
+   */
+  endFloorFollowSuppression(tokenId) {
+    const key = String(tokenId || '');
+    if (!key) return;
+    this._floorFollowSuppressionByTokenId.delete(key);
+    moveTrace('cameraFollower.floorFollowSuppression.end', { tokenId: key });
+  }
+
+  /**
+   * Check whether auto floor-follow is currently suppressed for a token.
+   * @param {string} tokenId
+   * @returns {boolean}
+   */
+  isFloorFollowSuppressedForToken(tokenId) {
+    const key = String(tokenId || '');
+    if (!key) return false;
+    this._cleanupExpiredFloorFollowSuppressions();
+    return this._floorFollowSuppressionByTokenId.has(key);
+  }
+
   _syncToControlledTokenLevel(options = {}) {
+    if (this._isControlledTokenFloorFollowSuppressed()) return false;
     const tokenElevation = this._getControlledTokenElevation();
     if (!Number.isFinite(tokenElevation)) return false;
     const nextIndex = this._findBestLevelIndexForElevation(tokenElevation);

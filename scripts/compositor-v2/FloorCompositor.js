@@ -2000,10 +2000,24 @@ export class FloorCompositor {
         log.warn('WaterEffectV2 update threw, skipping water update:', err);
       }
       this._skyColorEffect.update(timeInfo);
+      const skyIntensity01 = Number(this._skyColorEffect?._composeMaterial?.uniforms?.uIntensity?.value);
+      const weatherEnv = weatherController?.getEnvironment?.() ?? null;
+      const sceneDarknessRaw = Number(canvas?.scene?.environment?.darknessLevel);
+      const envDarknessRaw = Number(canvas?.environment?.darknessLevel);
+      const sceneDarkness01 = Number.isFinite(sceneDarknessRaw)
+        ? Math.max(0.0, Math.min(1.0, sceneDarknessRaw))
+        : (Number.isFinite(envDarknessRaw) ? Math.max(0.0, Math.min(1.0, envDarknessRaw)) : undefined);
+      const effectiveDarknessRaw = Number(weatherEnv?.effectiveDarkness);
+      const effectiveDarkness01 = Number.isFinite(effectiveDarknessRaw)
+        ? Math.max(0.0, Math.min(1.0, effectiveDarknessRaw))
+        : undefined;
       try {
         this._windowLightEffect?.setSkyState?.({
           skyTintColor: this._skyColorEffect?.currentSkyTintColor,
           sunAzimuthDeg: this._skyColorEffect?.currentSunAzimuthDeg,
+          skyIntensity01: Number.isFinite(skyIntensity01) ? Math.max(0.0, Math.min(1.0, skyIntensity01)) : 1.0,
+          sceneDarkness01,
+          effectiveDarkness01,
         });
       } catch (_) {}
       try {

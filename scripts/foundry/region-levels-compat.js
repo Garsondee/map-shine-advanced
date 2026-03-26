@@ -12,9 +12,11 @@
  */
 
 import { createLogger } from '../core/log.js';
+import { moveTrace } from '../core/movement-trace-log.js';
 import * as sceneSettings from '../settings/scene-settings.js';
 import { getLevelsCompatibilityMode, LEVELS_COMPATIBILITY_MODES } from './levels-compatibility.js';
 import { isLevelsEnabledForScene } from './levels-scene-flags.js';
+import { switchToLevelForElevation } from '../scene/level-interaction-service.js';
 
 const log = createLogger('RegionLevelsCompat');
 
@@ -27,8 +29,51 @@ const REGION_BEHAVIOR_KINDS = Object.freeze({
 
 let patchInstalled = false;
 const elevatorDialogsByTokenId = new Map();
+const STAIR_TRANSITION_PAUSE_MS = 220;
+const STAIR_FLOOR_FOLLOW_SUPPRESSION_BUFFER_MS = 800;
 
 let _pendingRetryHookId = null;
+
+function _sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(ms) || 0)));
+}
+
+function _isTokenControlled(tokenDocument) {
+  const tokenId = String(tokenDocument?.id || tokenDocument?._id || '');
+  if (!tokenId) return false;
+  const controlled = Array.isArray(canvas?.tokens?.controlled) ? canvas.tokens.controlled : [];
+  return controlled.some((token) => String(token?.document?.id || token?.id || '') === tokenId);
+}
+
+function _beginStairFloorFollowSuppression(tokenDocument, reason = 'stair-transition') {
+  const tokenId = String(tokenDocument?.id || tokenDocument?._id || '');
+  if (!tokenId) return false;
+  try {
+    window.MapShine?.cameraFollower?.beginFloorFollowSuppression?.(tokenId, {
+      durationMs: STAIR_TRANSITION_PAUSE_MS + STAIR_FLOOR_FOLLOW_SUPPRESSION_BUFFER_MS,
+      reason,
+    });
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+function _endStairFloorFollowSuppression(tokenDocument) {
+  const tokenId = String(tokenDocument?.id || tokenDocument?._id || '');
+  if (!tokenId) return;
+  try {
+    window.MapShine?.cameraFollower?.endFloorFollowSuppression?.(tokenId);
+  } catch (_) {
+  }
+}
+
+function _followControlledTokenFloorAfterStair(tokenDocument, elevation, reason = 'region-levels-stair-follow') {
+  if (!_isTokenControlled(tokenDocument)) return;
+  const target = Number(elevation);
+  if (!Number.isFinite(target)) return;
+  switchToLevelForElevation(target + 0.001, reason);
+}
 
 function _getExecuteScriptRegionBehaviorProto() {
   try {
@@ -172,56 +217,181 @@ function _closeElevatorDialog(tokenId) {
   elevatorDialogsByTokenId.delete(key);
 }
 
-async function _applyRegionMovement(tokenDocument, elevation, movement) {
+function _normalizeStairElevation(raw, region) {
+  let n = Number(raw);
+  if (!Number.isFinite(n)) return raw;
+
+  try {
+    const b = Number(region?.elevation?.bottom);
+    const t = Number(region?.elevation?.top);
+    if (Number.isFinite(b) && Math.abs(n - b) < 0.02) n = b;
+    if (Number.isFinite(t) && Math.abs(n - t) < 0.02) n = t;
+  } catch (_) {
+  }
+
+  const r = Math.round(n);
+  if (Math.abs(n - r) < 0.02) n = r;
+  return n;
+}
+
+function _syncMapShineTokenAfterDocElevation(tokenDocument, elevation) {
+  try {
+    const tm = window.MapShine?.tokenManager;
+    if (tm?.updateTokenSprite && tokenDocument) {
+      tm.updateTokenSprite(tokenDocument, { elevation }, { animate: false });
+    }
+  } catch (_) {
+  }
+  try {
+    const t = canvas?.tokens?.get?.(tokenDocument?.id);
+    t?.refresh?.();
+  } catch (_) {
+  }
+}
+
+function _resyncMapShineMovementSprite(tokenDocument, reason = 'region-levels-compat') {
+  const tokenId = String(tokenDocument?.id || tokenDocument?._id || '');
+  if (!tokenId) return;
+  try {
+    window.MapShine?.tokenManager?.movementManager?.resyncSpriteToDocument?.(
+      tokenId,
+      tokenDocument,
+      { reason }
+    );
+  } catch (_) {
+  }
+}
+
+async function _awaitTokenMovementAnimation(tokenDocument) {
+  const obj = tokenDocument?.object;
+  if (!tokenDocument?.rendered || !obj?.movementAnimationPromise) return;
+  try {
+    await obj.movementAnimationPromise;
+  } catch (_) {
+  }
+}
+
+/**
+ * @param {object|null} movement - Foundry region event movement payload (optional)
+ * @param {object|null} region - Region document (optional, for elevation snapping)
+ */
+async function _applyRegionMovement(tokenDocument, elevation, movement, region = null) {
   if (!tokenDocument) return false;
 
-  const targetElevation = Number(elevation);
-  if (!Number.isFinite(targetElevation)) return false;
+  const targetElevation = _normalizeStairElevation(Number(elevation), region);
+  if (!Number.isFinite(Number(targetElevation))) return false;
 
   try {
     const hasMovementContext = !!movement;
+    const pendingWaypointsRaw = movement?.pending?.waypoints;
+    const pendingSnapshot = Array.isArray(pendingWaypointsRaw)
+      ? pendingWaypointsRaw.filter((w) => !w?.intermediate).map((w) => ({ ...w }))
+      : [];
+
+    moveTrace('regionStair.apply.start', {
+      tokenId: String(tokenDocument?.id || ''),
+      targetElevation,
+      hasMovementContext,
+      docXYE: {
+        x: tokenDocument?.x,
+        y: tokenDocument?.y,
+        elevation: tokenDocument?.elevation
+      },
+      pendingCount: pendingSnapshot.length,
+      passedCount: Array.isArray(movement?.passed?.waypoints) ? movement.passed.waypoints.length : -1,
+      regionId: region?.id ?? region?._id ?? null
+    });
+
+    // Mirror Levels `RegionHandler.updateMovement`: waiving this path and only calling
+    // `update({ elevation })` during an active checkpointed `move()` leaves pending
+    // horizontal waypoints evaluated at the wrong elevation (lower-floor walls, route
+    // truncation). Snapshot `pending` from the region event, stop the in-flight route,
+    // pause for UX, then re-issue `move()` with displace waypoints at the stair elevation
+    // and Foundry's original constrain options.
     if (hasMovementContext) {
-      const tokenId = String(tokenDocument.id || '');
-      const initialX = Number(tokenDocument.x ?? NaN);
-      const initialY = Number(tokenDocument.y ?? NaN);
+      await _awaitTokenMovementAnimation(tokenDocument);
 
-      // During click-to-move/pathfinding, defer the elevation swap until the
-      // token emits its next real position update. This aligns the stair
-      // transition with the token physically reaching the stair step.
-      const movedPromise = new Promise((resolve) => {
-        const timeoutId = setTimeout(() => {
-          try { Hooks.off('updateToken', hookId); } catch (_) {}
-          resolve(false);
-        }, 1200);
+      if (typeof tokenDocument.stopMovement === 'function') {
+        tokenDocument.stopMovement();
+      }
 
-        const hookId = Hooks.on('updateToken', (updatedDoc, changes) => {
-          if (String(updatedDoc?.id || '') !== tokenId) return;
-          if (!('x' in (changes || {})) && !('y' in (changes || {}))) return;
-
-          const nextX = Number(changes?.x ?? updatedDoc?.x ?? NaN);
-          const nextY = Number(changes?.y ?? updatedDoc?.y ?? NaN);
-          const changed = (!Number.isFinite(initialX) || !Number.isFinite(initialY))
-            || (nextX !== initialX) || (nextY !== initialY);
-          if (!changed) return;
-
-          clearTimeout(timeoutId);
-          try { Hooks.off('updateToken', hookId); } catch (_) {}
-          resolve(true);
-        });
+      await _awaitTokenMovementAnimation(tokenDocument);
+      moveTrace('regionStair.afterStopMovement', {
+        tokenId: String(tokenDocument?.id || ''),
+        pendingSnapshotCount: pendingSnapshot.length
       });
+      _resyncMapShineMovementSprite(tokenDocument, 'region-stair-after-stopMovement');
 
-      await movedPromise;
-      if (typeof tokenDocument.update === 'function') {
-        await tokenDocument.update({ elevation: targetElevation });
+      await _sleep(STAIR_TRANSITION_PAUSE_MS);
+
+      const hasSuppression = _beginStairFloorFollowSuppression(tokenDocument, 'region-stair-transition');
+      try {
+        if (pendingSnapshot.length > 0 && typeof tokenDocument.move === 'function') {
+          const adjustedWaypoints = pendingSnapshot.map((w) => ({
+            ...w,
+            elevation: targetElevation,
+            action: 'displace',
+          }));
+
+          moveTrace('regionStair.foundryMove.pending', {
+            tokenId: String(tokenDocument?.id || ''),
+            adjustedCount: adjustedWaypoints.length,
+            firstAdj: adjustedWaypoints[0],
+            lastAdj: adjustedWaypoints[adjustedWaypoints.length - 1]
+          });
+          await tokenDocument.move(adjustedWaypoints, {
+            ...(movement?.updateOptions || {}),
+            constrainOptions: movement?.constrainOptions ?? {},
+            autoRotate: movement?.autoRotate,
+            showRuler: movement?.showRuler,
+          });
+        } else if (typeof tokenDocument.update === 'function') {
+          moveTrace('regionStair.updateElevationOnly', {
+            tokenId: String(tokenDocument?.id || ''),
+            targetElevation
+          });
+          await tokenDocument.update({ elevation: targetElevation });
+        } else {
+          moveTrace('regionStair.apply.abort', { reason: 'no-move-no-update' });
+          return false;
+        }
+
+        _syncMapShineTokenAfterDocElevation(tokenDocument, targetElevation);
+        _resyncMapShineMovementSprite(tokenDocument, 'region-stair-after-transition');
+        moveTrace('regionStair.apply.done', {
+          tokenId: String(tokenDocument?.id || ''),
+          targetElevation,
+          docXYE: {
+            x: tokenDocument?.x,
+            y: tokenDocument?.y,
+            elevation: tokenDocument?.elevation
+          }
+        });
+        _followControlledTokenFloorAfterStair(tokenDocument, targetElevation, 'region-stair-floor-follow');
         return true;
+      } finally {
+        if (hasSuppression) _endStairFloorFollowSuppression(tokenDocument);
       }
     }
 
     if (typeof tokenDocument.update === 'function') {
-      await tokenDocument.update({ elevation: targetElevation });
-      return true;
+      await _sleep(STAIR_TRANSITION_PAUSE_MS);
+      const hasSuppression = _beginStairFloorFollowSuppression(tokenDocument, 'region-direct-transition');
+      try {
+        await tokenDocument.update({ elevation: targetElevation });
+        _syncMapShineTokenAfterDocElevation(tokenDocument, targetElevation);
+        _resyncMapShineMovementSprite(tokenDocument, 'region-direct-after-elevation');
+        _followControlledTokenFloorAfterStair(tokenDocument, targetElevation, 'region-direct-floor-follow');
+        return true;
+      } finally {
+        if (hasSuppression) _endStairFloorFollowSuppression(tokenDocument);
+      }
     }
   } catch (err) {
+    moveTrace('regionStair.apply.error', {
+      tokenId: String(tokenDocument?.id || ''),
+      message: err?.message || String(err)
+    });
     log.warn('Failed to apply region elevation movement', err);
   }
 
@@ -274,6 +444,13 @@ async function _handleLevelsRegionBehavior(parsed, region, event) {
   if (!tokenDocument) return;
 
   const movement = event?.data?.movement || null;
+  moveTrace('regionCompat.event', {
+    kind: parsed?.kind,
+    regionId: region?.id ?? region?._id,
+    tokenId: String(tokenDocument?.id || ''),
+    eventName: event?.name || event?.type || '(unknown)',
+    hasMovement: !!movement
+  });
 
   let bottom = Number(region?.elevation?.bottom);
   let top = Number(region?.elevation?.top);
@@ -290,19 +467,19 @@ async function _handleLevelsRegionBehavior(parsed, region, event) {
 
   if (parsed.kind === REGION_BEHAVIOR_KINDS.STAIR) {
     if ((elevation !== bottom) && (elevation !== top)) return;
-    await _applyRegionMovement(tokenDocument, elevation === top ? bottom : top, movement);
+    await _applyRegionMovement(tokenDocument, elevation === top ? bottom : top, movement, region);
     return;
   }
 
   if (parsed.kind === REGION_BEHAVIOR_KINDS.STAIR_DOWN) {
     if ((elevation > top) || (elevation <= bottom)) return;
-    await _applyRegionMovement(tokenDocument, bottom, movement);
+    await _applyRegionMovement(tokenDocument, bottom, movement, region);
     return;
   }
 
   if (parsed.kind === REGION_BEHAVIOR_KINDS.STAIR_UP) {
     if ((elevation < bottom) || (elevation >= top)) return;
-    await _applyRegionMovement(tokenDocument, top, movement);
+    await _applyRegionMovement(tokenDocument, top, movement, region);
     return;
   }
 
@@ -491,16 +668,25 @@ async function _handleLegacyDrawingStairs(tokenDoc, changes) {
     Hooks.once('updateToken', (updatedDoc) => {
       if (String(updatedDoc.id) !== tokenId) return;
       const animation = canvas?.tokens?.get?.(tokenId)?._animation;
-      const doUpdate = () => {
-        updatedDoc.update?.({
-          elevation: newElevation,
-          flags: { levels: { stairUpdate: true } },
-        });
+      const doUpdate = async () => {
+        await _sleep(STAIR_TRANSITION_PAUSE_MS);
+        const hasSuppression = _beginStairFloorFollowSuppression(updatedDoc, 'legacy-drawing-stair-transition');
+        try {
+          await updatedDoc.update?.({
+            elevation: newElevation,
+            flags: { levels: { stairUpdate: true } },
+          });
+          _syncMapShineTokenAfterDocElevation(updatedDoc, newElevation);
+          _resyncMapShineMovementSprite(updatedDoc, 'legacy-drawing-stair-after-elevation');
+          _followControlledTokenFloorAfterStair(updatedDoc, newElevation, 'legacy-drawing-stair-floor-follow');
+        } finally {
+          if (hasSuppression) _endStairFloorFollowSuppression(updatedDoc);
+        }
       };
       if (animation) {
-        animation.then(doUpdate).catch(doUpdate);
+        animation.then(() => doUpdate()).catch(() => doUpdate());
       } else {
-        doUpdate();
+        void doUpdate();
       }
     });
   }

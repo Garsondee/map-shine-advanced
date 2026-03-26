@@ -17,9 +17,12 @@
  */
 
 import { createLogger } from '../core/log.js';
+import { moveTrace } from '../core/movement-trace-log.js';
 import { switchToLevelForElevation } from '../scene/level-interaction-service.js';
 
 const log = createLogger('ZoneManager');
+const STAIR_TRANSITION_PAUSE_MS = 220;
+const STAIR_FLOOR_FOLLOW_SUPPRESSION_BUFFER_MS = 800;
 
 // ---------------------------------------------------------------------------
 //  Zone type constants
@@ -75,6 +78,10 @@ function pointInPolygon(px, py, polygon) {
  */
 function generateZoneId() {
   return `zone-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function _sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(ms) || 0)));
 }
 
 // ---------------------------------------------------------------------------
@@ -1061,6 +1068,66 @@ export class ZoneManager {
     switchToLevelForElevation(Number(targetElev) + 0.001, reason);
   }
 
+  _beginStairFloorFollowSuppression(tokenDoc, reason = 'zone-transition') {
+    const tokenId = String(tokenDoc?.id || tokenDoc?._id || '');
+    if (!tokenId) return false;
+    try {
+      window.MapShine?.cameraFollower?.beginFloorFollowSuppression?.(tokenId, {
+        durationMs: STAIR_TRANSITION_PAUSE_MS + STAIR_FLOOR_FOLLOW_SUPPRESSION_BUFFER_MS,
+        reason,
+      });
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  _endStairFloorFollowSuppression(tokenDoc) {
+    const tokenId = String(tokenDoc?.id || tokenDoc?._id || '');
+    if (!tokenId) return;
+    try {
+      window.MapShine?.cameraFollower?.endFloorFollowSuppression?.(tokenId);
+    } catch (_) {
+    }
+  }
+
+  async _applyStairChoreographedElevationTransition(tokenDoc, targetElev, floorFollowReason = 'zone-floor-follow') {
+    if (!tokenDoc || !Number.isFinite(Number(targetElev))) return false;
+    const tokenId = String(tokenDoc?.id || tokenDoc?._id || '');
+    moveTrace('zoneStair.transition.start', {
+      tokenId,
+      targetElev,
+      floorFollowReason,
+      docBefore: { x: tokenDoc?.x, y: tokenDoc?.y, elevation: tokenDoc?.elevation }
+    });
+    await _sleep(STAIR_TRANSITION_PAUSE_MS);
+    const hasSuppression = this._beginStairFloorFollowSuppression(tokenDoc, floorFollowReason);
+    try {
+      await tokenDoc.update({ elevation: targetElev });
+      try {
+        window.MapShine?.tokenManager?.movementManager?.resyncSpriteToDocument?.(
+          tokenId,
+          tokenDoc,
+          { reason: `zone-stair:${floorFollowReason}` }
+        );
+      } catch (_) {
+      }
+      moveTrace('zoneStair.transition.done', {
+        tokenId,
+        targetElev,
+        docAfter: {
+          x: tokenDoc?.x,
+          y: tokenDoc?.y,
+          elevation: tokenDoc?.elevation
+        }
+      });
+      this._followControlledTokenFloorTransition(tokenDoc, targetElev, floorFollowReason);
+      return true;
+    } finally {
+      if (hasSuppression) this._endStairFloorFollowSuppression(tokenDoc);
+    }
+  }
+
   /**
    * Handle stair zone behavior: toggle token elevation between two levels.
    * Uses inclusive range checks `[bottom, top]` so tokens exactly at a
@@ -1155,8 +1222,7 @@ export class ZoneManager {
       `Stair zone "${zone.name}": moving token ${tokenId} from elevation ` +
       `${currentElev} → ${targetElev}`
     );
-    await doc.update({ elevation: targetElev });
-    this._followControlledTokenFloorTransition(doc, targetElev, 'zone-stair-floor-follow');
+    await this._applyStairChoreographedElevationTransition(doc, targetElev, 'zone-stair-floor-follow');
   }
 
   /**
@@ -1240,8 +1306,7 @@ export class ZoneManager {
       `Elevator zone "${zone.name}": moving token ${tokenId} from elevation ` +
       `${currentElev} → ${targetElev}`
     );
-    await doc.update({ elevation: targetElev });
-    this._followControlledTokenFloorTransition(doc, targetElev, 'zone-elevator-floor-follow');
+    await this._applyStairChoreographedElevationTransition(doc, targetElev, 'zone-elevator-floor-follow');
   }
 
   // -------------------------------------------------------------------------

@@ -11,6 +11,7 @@ import { isLevelsEnabledForScene } from '../foundry/levels-scene-flags.js';
 import { applyTokenLevelDefaults } from '../foundry/levels-create-defaults.js';
 import { getPerspectiveElevation } from '../foundry/elevation-context.js';
 import { getTokenRenderingMode, TOKEN_RENDERING_MODES } from '../settings/scene-settings.js';
+import { moveTrace, moveTraceConstrainSnapshot } from '../core/movement-trace-log.js';
 
 const log = createLogger('TokenManager');
 
@@ -1356,6 +1357,41 @@ vec3 ms_applySceneLighting(vec3 color) {
     const { sprite } = spriteData;
     
     log.debug(`updateTokenSprite: ${tokenDoc.id} | changes:`, changes);
+
+    if (('x' in changes) || ('y' in changes) || ('elevation' in changes)) {
+      let movementMethod = '';
+      try {
+        const mid = String(tokenDoc?.id || '');
+        const m = options?.movement;
+        if (m && typeof m === 'object') {
+          const ent = mid ? m[mid] : null;
+          movementMethod = String(ent?.method || '');
+          if (!movementMethod) {
+            for (const v of Object.values(m)) {
+              if (v && typeof v.method === 'string') {
+                movementMethod = v.method;
+                break;
+              }
+            }
+          }
+        }
+      } catch (_) {
+      }
+      moveTrace('tokenManager.updateTokenSprite', {
+        tokenId: tokenDoc.id,
+        changeKeys: Object.keys(changes),
+        targetXYE: {
+          x: 'x' in changes ? changes.x : tokenDoc.x,
+          y: 'y' in changes ? changes.y : tokenDoc.y,
+          elevation: 'elevation' in changes ? changes.elevation : tokenDoc.elevation
+        },
+        animate: options.animate !== false,
+        movementMethod: movementMethod || options?.mapShineMovement?.method || options?.method || '(none)',
+        mapShineAnimated: options?.mapShineMovement?.animated,
+        hasFoundryMovementPayload: !!options?.movement,
+        constrainSnapshot: moveTraceConstrainSnapshot(options?.mapShineMovement?.constrainOptions)
+      });
+    }
 
     // Compositor V2: reassign token to correct floor layer when elevation changes.
     if ('elevation' in changes) {

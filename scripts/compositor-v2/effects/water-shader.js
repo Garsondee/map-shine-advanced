@@ -637,6 +637,13 @@ vec3 calculateWaveForWind(vec2 sceneUv, float t, float motion01, vec2 windDirInp
   vec2 uv = warpUv(sceneUv, motion01) * max(0.01, uWaveScale);
   uv = vec2(uv.x * sceneAspect, uv.y);
 
+  // Patchwise spread + wavelength: breaks uniform parallel wavefronts without extra Gerstner loops.
+  vec2 spreadUv = uv * 0.11 + vec2(uWindTime * 0.042, -uWindTime * 0.031);
+  float patchSpread = (valueNoise2D(spreadUv + vec2(17.2, 8.4)) - 0.5) * 2.0;
+  directionalSpread = clamp(directionalSpread + patchSpread * (0.24 + 0.16 * m01), 0.10, 1.22);
+  float wlPatch = 0.86 + 0.28 * (valueNoise2D(uv * 0.09 + vec2(-uWindTime * 0.038, uWindTime * 0.045) + vec2(3.7, 29.1)) - 0.5);
+  wlPatch = clamp(wlPatch, 0.72, 1.18);
+
   float totalH = 0.0;
   vec2 totalDxy = vec2(0.0);
   float totalDz = 0.0;
@@ -652,7 +659,7 @@ vec3 calculateWaveForWind(vec2 sceneUv, float t, float motion01, vec2 windDirInp
   for (int i = 0; i < WAVE_COUNT; i++) {
     float octave = float(i);
     float angle = waveAngleOffsetSeed(i) * directionalSpread;
-    float wavelength = max(0.08, baseWavelength * waveWavelengthMul(i));
+    float wavelength = max(0.08, baseWavelength * waveWavelengthMul(i) * wlPatch);
     
     // Distribute strict steepness budget 
     float steepnessWeight = pow(0.75, octave) / steepnessSum;
@@ -1582,8 +1589,10 @@ void main() {
 
   if (inside < 0.01) { gl_FragColor = base; return; }
 
-  // Animated distortion
-  vec2 waveGrad = waveGrad2D(sceneUv, uWaveTime, waveMotion01);
+  // Animated distortion (single calculateWave: reuse height + gradient)
+  vec3 waveState = calculateWave(sceneUv, uWaveTime, waveMotion01);
+  vec2 waveGrad = waveState.yz;
+  float waveH = waveState.x;
   waveGrad = rotate2D(waveGrad, uWaveAppearanceRotRad);
   vec2 flowN = smoothFlow2D(sceneUv);
   
@@ -1598,12 +1607,25 @@ void main() {
     float waveMult = mix(1.0, mix(minFactor, 1.0, outdoorStrength), dampStrength);
     waveStrength *= waveMult;
   }
+
+  // Crest/trough + micro-hash modulate refraction (height is already computed).
+  float hn = clamp(waveH * 3.1, -1.0, 1.0);
+  float crestMod = smoothstep(-0.4, 0.62, 0.5 + 0.5 * hn);
+  float sceneAspectW = (uHasSceneRect > 0.5) ? (uSceneRect.z / max(1.0, uSceneRect.w)) : (uResolution.x / max(1.0, uResolution.y));
+  vec2 basisW = vec2(sceneUv.x * sceneAspectW, sceneUv.y);
+  float ampHash = 0.90 + 0.14 * ((valueNoise2D(basisW * 8.1 + vec2(-uWindTime * 0.041, uWindTime * 0.033)) - 0.5) * 2.0);
+  float waveStrengthEff = waveStrength * mix(0.93, 1.09, crestMod) * clamp(ampHash, 0.82, 1.12);
+
+  // Perpendicular noise warps fronts so Gerstner sums read less like stripes.
+  float lateralChaos = (valueNoise2D(basisW * 5.0 + vec2(uWindTime * 0.063, -uWindTime * 0.051)) - 0.5) * 2.0;
+  vec2 perpG = vec2(-waveGrad.y, waveGrad.x);
+  float latWt = 0.15 * (0.42 + 0.58 * crestMod);
   
   // Apply a mild power curve to distortionPx to boost strong distortion while
   // keeping low settings subtle.
   float distortionPx = uDistortionStrengthPx * 1.5;
   
-  vec2 combinedVec = waveGrad * waveStrength + flowN * 0.35;
+  vec2 combinedVec = waveGrad * waveStrengthEff + perpG * (lateralChaos * latWt) + flowN * 0.35;
   // Less aggressive normalization so strong waves can actually warp the UV significantly
   combinedVec = combinedVec / (1.0 + 0.35 * length(combinedVec));
   float m = length(combinedVec);

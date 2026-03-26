@@ -17,6 +17,7 @@ import { safeCall, safeDispose, Severity } from '../core/safe-call.js';
 import { readWallHeightFlags, readTileLevelsFlags, tileHasLevelsRange, isLevelsEnabledForScene } from '../foundry/levels-scene-flags.js';
 import { applyAmbientLightLevelDefaults, applyAmbientSoundLevelDefaults, applyTileLevelDefaults, applyWallLevelDefaults } from '../foundry/levels-create-defaults.js';
 import { getPerspectiveElevation } from '../foundry/elevation-context.js';
+import { moveTrace } from '../core/movement-trace-log.js';
 
 const log = createLogger('InteractionManager');
 
@@ -6613,10 +6614,6 @@ export class InteractionManager {
               game?.user?.isGM &&
               game?.settings?.get?.('core', 'unconstrainedMovement')
             );
-            const activeCtx = window.MapShine?.activeLevelContext;
-            const floorBottom = Number(activeCtx?.bottom);
-            const floorTop = Number(activeCtx?.top);
-            const hasFloorBounds = Number.isFinite(floorBottom) && Number.isFinite(floorTop);
 
             const movementManager = window.MapShine?.tokenMovementManager;
             const canRunTokenSequencer = !!(
@@ -6649,6 +6646,11 @@ export class InteractionManager {
             }
 
             if (canRunGroupSequencer && sequencerCandidates.length > 1) {
+              moveTrace('interaction.pointerUp.groupMove.start', {
+                tokenCount: sequencerCandidates.length,
+                unconstrainedMovement,
+                ids: sequencerCandidates.map((c) => String(c.update?._id || ''))
+              });
               const groupResult = await safeCall(async () => {
                 return movementManager.executeDoorAwareGroupMove({
                   tokenMoves: sequencerCandidates.map((item) => ({
@@ -6666,8 +6668,6 @@ export class InteractionManager {
                     // region/fog systems can react to each traversed step.
                     includeMovementPayload: true,
                     suppressFoundryMovementUI: true,
-                    destinationFloorBottom: hasFloorBounds ? floorBottom : undefined,
-                    destinationFloorTop: hasFloorBounds ? floorTop : undefined,
                     updateOptions: {}
                   }
                 });
@@ -6675,6 +6675,10 @@ export class InteractionManager {
                 fallback: { ok: false, reason: 'door-aware-group-sequencer-error' }
               });
 
+              moveTrace('interaction.pointerUp.groupMove.done', {
+                ok: !!groupResult?.ok,
+                reason: groupResult?.reason || null
+              });
               if (groupResult?.ok) {
                 tokenUpdateSucceeded = true;
               } else if (unconstrainedMovement) {
@@ -6690,6 +6694,16 @@ export class InteractionManager {
                 const tokenDoc = item.tokenDoc;
                 const id = String(upd?._id ?? '');
 
+                moveTrace('interaction.pointerUp.tokenMove.start', {
+                  tokenId: id,
+                  destinationTopLeft: { x: upd.x, y: upd.y },
+                  unconstrainedMovement,
+                  docXYE: {
+                    x: tokenDoc?.x,
+                    y: tokenDoc?.y,
+                    elevation: tokenDoc?.elevation
+                  }
+                });
                 const sequencerResult = await safeCall(async () => {
                   return movementManager.executeDoorAwareTokenMove({
                     tokenDoc,
@@ -6702,8 +6716,6 @@ export class InteractionManager {
                       // region/fog systems can react to each traversed step.
                       includeMovementPayload: true,
                       suppressFoundryMovementUI: true,
-                      destinationFloorBottom: hasFloorBounds ? floorBottom : undefined,
-                      destinationFloorTop: hasFloorBounds ? floorTop : undefined,
                       updateOptions: {}
                     }
                   });
@@ -6711,6 +6723,11 @@ export class InteractionManager {
                   fallback: { ok: false, reason: 'door-aware-sequencer-error' }
                 });
 
+                moveTrace('interaction.pointerUp.tokenMove.done', {
+                  tokenId: id,
+                  ok: !!sequencerResult?.ok,
+                  reason: sequencerResult?.reason || null
+                });
                 if (sequencerResult?.ok) {
                   tokenUpdateSucceeded = true;
                 } else if (unconstrainedMovement) {
@@ -7211,10 +7228,27 @@ export class InteractionManager {
               this._keyboardStepInFlight.set(tokenId, performance.now());
               try {
                 if (movementManager?.executeDoorAwareTokenMove) {
-                  await movementManager.executeDoorAwareTokenMove({
+                  moveTrace('interaction.keyboard.step.start', {
+                    tokenId,
+                    destinationTopLeft: { x: nextX, y: nextY },
+                    hasFloorBounds,
+                    destinationFloorBottom: moveOptions.destinationFloorBottom,
+                    destinationFloorTop: moveOptions.destinationFloorTop,
+                    docXYE: {
+                      x: tokenDoc?.x,
+                      y: tokenDoc?.y,
+                      elevation: tokenDoc?.elevation
+                    }
+                  });
+                  const kbResult = await movementManager.executeDoorAwareTokenMove({
                     tokenDoc,
                     destinationTopLeft: { x: nextX, y: nextY },
                     options: moveOptions
+                  });
+                  moveTrace('interaction.keyboard.step.done', {
+                    tokenId,
+                    ok: !!kbResult?.ok,
+                    reason: kbResult?.reason || null
                   });
                 } else {
                   await tokenDoc.update({ x: nextX, y: nextY }, {

@@ -34,6 +34,19 @@ const log = createLogger('WindowLightEffectV2');
 
 // Z offset above albedo + specular. Must remain within the 1.0-per-floor Z band.
 const WINDOW_Z_OFFSET = 0.2;
+const clamp01 = (n) => Math.max(0.0, Math.min(1.0, Number(n) || 0.0));
+
+const readSceneDarkness01 = () => {
+  try {
+    const sceneLevel = canvas?.scene?.environment?.darknessLevel;
+    if (Number.isFinite(sceneLevel)) return clamp01(sceneLevel);
+  } catch (_) {}
+  try {
+    const envLevel = canvas?.environment?.darknessLevel;
+    if (Number.isFinite(envLevel)) return clamp01(envLevel);
+  } catch (_) {}
+  return 0.0;
+};
 
 export class WindowLightEffectV2 {
   constructor() {
@@ -62,10 +75,13 @@ export class WindowLightEffectV2 {
     /** @type {object|null} */
     this._sharedUniforms = null;
 
-    /** @type {{ skyTintColor: {r:number,g:number,b:number}, sunAzimuthDeg: number }} */
+    /** @type {{ skyTintColor: {r:number,g:number,b:number}, sunAzimuthDeg: number, skyIntensity01: number, sceneDarkness01: (number|null), effectiveDarkness01: (number|null) }} */
     this._skyState = {
       skyTintColor: { r: 1.0, g: 1.0, b: 1.0 },
       sunAzimuthDeg: 180.0,
+      skyIntensity01: 1.0,
+      sceneDarkness01: null,
+      effectiveDarkness01: null,
     };
 
     this.params = {
@@ -536,9 +552,16 @@ export class WindowLightEffectV2 {
       Math.max(0.01, Number(skyTint.b) || 1.0)
     );
     u.uUseSkyTint.value = this.params.useSkyTint ? 1.0 : 0.0;
-    u.uSkyTintStrength.value = Math.max(0.0, Number(this.params.skyTintStrength) || 0.0);
+    const skyIntensity01 = clamp01(this._skyState.skyIntensity01);
+    u.uSkyTintStrength.value = Math.max(0.0, Number(this.params.skyTintStrength) || 0.0) * skyIntensity01;
 
-    const darkness = Math.max(0.0, Math.min(1.0, Number(canvas?.environment?.darknessLevel) || 0.0));
+    const stateDarkness = Number(this._skyState.sceneDarkness01);
+    const stateEffectiveDarkness = Number(this._skyState.effectiveDarkness01);
+    const sceneDarkness01 = Number.isFinite(stateDarkness) ? clamp01(stateDarkness) : readSceneDarkness01();
+    const effectiveDarkness01 = Number.isFinite(stateEffectiveDarkness) ? clamp01(stateEffectiveDarkness) : 0.0;
+    // Use the strongest darkness signal so weather/time-driven night also dims
+    // window light even when Foundry scene darkness remains low.
+    const darkness = Math.max(sceneDarkness01, effectiveDarkness01);
     const nightDimming = Math.max(0.0, Math.min(1.0, Number(this.params.nightDimming) || 0.0));
     u.uNightFactor.value = Math.max(0.0, 1.0 - darkness * nightDimming);
 
@@ -616,7 +639,13 @@ export class WindowLightEffectV2 {
 
   /**
    * Receives environment data from FloorCompositor/SkyColorEffectV2.
-   * @param {{ skyTintColor?: {r:number,g:number,b:number}, sunAzimuthDeg?: number }} state
+   * @param {{
+   *   skyTintColor?: {r:number,g:number,b:number},
+   *   sunAzimuthDeg?: number,
+   *   skyIntensity01?: number,
+   *   sceneDarkness01?: number,
+   *   effectiveDarkness01?: number
+   * }} state
    */
   setSkyState(state = {}) {
     if (!state || typeof state !== 'object') return;
@@ -631,6 +660,15 @@ export class WindowLightEffectV2 {
     if (Number.isFinite(Number(state.sunAzimuthDeg))) {
       this._skyState.sunAzimuthDeg = Number(state.sunAzimuthDeg);
     }
+    if (Number.isFinite(Number(state.skyIntensity01))) {
+      this._skyState.skyIntensity01 = clamp01(state.skyIntensity01);
+    }
+    this._skyState.sceneDarkness01 = Number.isFinite(Number(state.sceneDarkness01))
+      ? clamp01(state.sceneDarkness01)
+      : null;
+    this._skyState.effectiveDarkness01 = Number.isFinite(Number(state.effectiveDarkness01))
+      ? clamp01(state.effectiveDarkness01)
+      : null;
   }
 
   /**

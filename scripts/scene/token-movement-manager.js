@@ -21,6 +21,7 @@ import { NavMeshPathfinder } from './nav-mesh-pathfinder.js';
 import { PortalDetector } from './portal-detector.js';
 import { MultiFloorGraph } from './multi-floor-graph.js';
 import { frameCoordinator } from '../core/frame-coordinator.js';
+import { moveTrace, moveTraceConstrainSnapshot } from '../core/movement-trace-log.js';
 
 const log = createLogger('TokenMovementManager');
 
@@ -366,21 +367,20 @@ export class TokenMovementManager {
         return Number.isFinite(docElevation) ? docElevation : min;
       }
 
-      // Keep payload elevation inside the target floor band and off boundary seams.
-      // Some collision paths treat boundary values inconsistently across modules.
-      const seamEpsilon = Math.min(0.001, span * 0.25);
-      const safeMin = min + seamEpsilon;
-      const safeMax = max - seamEpsilon;
-
-      if (Number.isFinite(docElevation) && docElevation >= safeMin && docElevation <= safeMax) {
+      // Levels-style top-exclusive band: [min, max). Avoid adding a visible seam
+      // offset like min+0.001 (that was producing token elevations such as 10.001).
+      if (Number.isFinite(docElevation) && docElevation >= min && docElevation < max) {
         return docElevation;
       }
 
-      if (safeMax >= safeMin) {
-        return safeMin;
+      // Inside band but doc slightly out of range from float noise — snap to band.
+      if (Number.isFinite(docElevation)) {
+        if (docElevation < min && docElevation >= min - 0.02) return min;
+        if (docElevation >= max && docElevation <= max + 0.02) return max - Number.EPSILON * 10;
       }
 
-      return min + (span * 0.5);
+      // Default: floor bottom (integer-friendly; matches common Levels slabs).
+      return min;
     }
 
     if (Number.isFinite(docElevation)) return docElevation;
@@ -2613,6 +2613,109 @@ export class TokenMovementManager {
   }
 
   /**
+   * Cancel MapShine movement tracks and snap the Three.js sprite to the live
+   * TokenDocument. Used when Foundry stopMovement / stair replay leaves the
+   * document authoritative but the sprite still mid-animation.
+   *
+   * @param {string} tokenId
+   * @param {TokenDocument|object|null} [tokenDoc]
+   * @param {object} [context]
+   * @param {string} [context.reason]
+   * @returns {boolean}
+   */
+  resyncSpriteToDocument(tokenId, tokenDoc = null, context = {}) {
+    const id = String(tokenId || '');
+    if (!id) return false;
+
+    const hadTrack = this.activeTracks.has(id);
+    moveTrace('resyncSprite.start', {
+      tokenId: id,
+      reason: context?.reason,
+      hadActiveTrack: hadTrack
+    });
+
+    const existing = this.activeTracks.get(id);
+    if (existing) {
+      this._cancelTrack(existing);
+      this.activeTracks.delete(id);
+    }
+    this._clearKeyboardMoveQueue(id);
+
+    if (this.isFlying(id)) {
+      try {
+        this.clearFlyingState(id);
+      } catch (_) {
+      }
+    }
+
+    const liveDoc = this._resolveTokenDocumentById(id, tokenDoc);
+    if (!liveDoc) {
+      moveTrace('resyncSprite.noDoc', { tokenId: id, reason: context?.reason });
+      this._pathfindingLog('debug', 'resyncSpriteToDocument: missing live document', {
+        tokenId: id,
+        reason: context?.reason
+      });
+      return false;
+    }
+
+    const tm = this.tokenManager;
+    if (tm?.updateTokenSprite) {
+      try {
+        tm.updateTokenSprite(liveDoc, {
+          x: liveDoc.x,
+          y: liveDoc.y,
+          elevation: liveDoc.elevation,
+          width: liveDoc.width,
+          height: liveDoc.height,
+          rotation: liveDoc.rotation
+        }, { animate: false });
+      } catch (err) {
+        this._pathfindingLog('warn', 'resyncSpriteToDocument: updateTokenSprite failed', {
+          tokenId: id,
+          reason: context?.reason
+        }, err);
+        moveTrace('resyncSprite.updateTokenSpriteFailed', { tokenId: id, reason: context?.reason });
+        return false;
+      }
+    } else {
+      const spriteData = tm?.tokenSprites?.get?.(id);
+      const sprite = spriteData?.sprite;
+      if (!sprite) {
+        moveTrace('resyncSprite.noSprite', { tokenId: id, reason: context?.reason });
+        return false;
+      }
+
+      const target = this._computeTargetTransform(liveDoc);
+      if (!target) return false;
+
+      sprite.position.set(target.x, target.y, target.z);
+      sprite.scale.set(target.scaleX, target.scaleY, 1);
+      if (sprite.material) sprite.material.rotation = target.rotation;
+      if (sprite.matrixAutoUpdate === false) sprite.updateMatrix();
+      if (spriteData) {
+        spriteData.tokenDoc = liveDoc;
+        spriteData.lastUpdate = Date.now();
+      }
+    }
+
+    try {
+      canvas?.tokens?.get?.(id)?.refresh?.();
+    } catch (_) {
+    }
+
+    this._pathfindingLog('debug', 'resyncSpriteToDocument: applied', {
+      tokenId: id,
+      reason: context?.reason
+    });
+    moveTrace('resyncSprite.ok', {
+      tokenId: id,
+      reason: context?.reason,
+      doc: { x: liveDoc.x, y: liveDoc.y, elevation: liveDoc.elevation }
+    });
+    return true;
+  }
+
+  /**
    * Called by TokenManager when an authoritative token transform update arrives.
    *
    * @param {object} payload
@@ -2643,6 +2746,23 @@ export class TokenMovementManager {
     const shouldAnimate = animate || optionsBoolean(options?.mapShineMovement?.animated, false);
     const movementMethod = this._resolveIncomingMovementMethod(tokenDoc, options);
     const isKeyboardMove = movementMethod === 'keyboard';
+
+    moveTrace('handleTokenSprite.incoming', {
+      tokenId,
+      movementMethod: movementMethod || '(none)',
+      styleId,
+      hadActiveTrack: !!existingTrack,
+      shouldAnimate,
+      targetDoc: {
+        x: targetDoc?.x,
+        y: targetDoc?.y,
+        elevation: targetDoc?.elevation
+      },
+      spriteXY: sprite?.position
+        ? { x: sprite.position.x, y: sprite.position.y, z: sprite.position.z }
+        : null,
+      hasFoundryMovementPayload: !!options?.movement
+    });
 
     if (!isKeyboardMove) {
       // Any non-keyboard movement mode supersedes pending keyboard backlog.
@@ -2850,6 +2970,14 @@ export class TokenMovementManager {
     } catch (_) {
     }
 
+    moveTrace('pickUpDropTrack.start', {
+      tokenId,
+      movementMethod: resolvedMovementMethod || '(none)',
+      durationMs,
+      from: { x: startX, y: startY, z: startZ },
+      to: { x: target.x, y: target.y, z: target.z }
+    });
+
     this.activeTracks.set(tokenId, {
       tokenId,
       styleId: 'pick-up-drop',
@@ -3007,6 +3135,16 @@ export class TokenMovementManager {
       else rl?.requestRender?.();
     } catch (_) {
     }
+
+    moveTrace('walkTrack.start', {
+      tokenId,
+      walkStyleId,
+      movementMethod: resolvedMovementMethod || '(none)',
+      durationMs,
+      from: { x: startX, y: startY, z: startZ },
+      to: { x: target.x, y: target.y, z: target.z },
+      gridDist: distance / Math.max(1, gridSize)
+    });
 
     this.activeTracks.set(tokenId, {
       tokenId,
@@ -3779,6 +3917,14 @@ export class TokenMovementManager {
 
         if (tNorm >= 1) {
           const movementMethod = String(track?.movementMethod || '').toLowerCase();
+          moveTrace('movementTrack.complete', {
+            tokenId,
+            styleId: track?.styleId,
+            movementMethod: movementMethod || '(none)',
+            target: track?.target
+              ? { x: track.target.x, y: track.target.y, z: track.target.z }
+              : null
+          });
           this._finalizeTrack(track);
           this.activeTracks.delete(tokenId);
           if (movementMethod === 'keyboard') {
@@ -4972,9 +5118,18 @@ export class TokenMovementManager {
     if (Number.isFinite(floorBottom) && Number.isFinite(floorTop)) {
       const min = Math.min(floorBottom, floorTop);
       const max = Math.max(floorBottom, floorTop);
+      const rangeEpsilon = 0.001;
       // Prefer token elevation when it is inside the target floor band.
       // Use half-open [min, max) so seam elevations map to the upper floor.
       if (Number.isFinite(docElevation) && docElevation >= min && docElevation < max) {
+        return docElevation;
+      }
+
+      // If explicit floor bounds are from a stale UI context, do not force
+      // collision checks to the wrong band. Keep checks on the token's
+      // document elevation when it is clearly outside the provided range.
+      if (Number.isFinite(docElevation)
+        && ((docElevation < (min - rangeEpsilon)) || (docElevation >= (max + rangeEpsilon)))) {
         return docElevation;
       }
 
@@ -6988,11 +7143,24 @@ export class TokenMovementManager {
         source: 'execute-token-move'
       });
       const tracedOptions = this._withMovementTraceOptions(options, movementTrace, 'execute-token-move');
+      const ignoreWalls = optionsBoolean(tracedOptions?.ignoreWalls, false);
+      const ignoreCost = optionsBoolean(tracedOptions?.ignoreCost, false);
+
+      moveTrace('executeDoorAware.start', {
+        tokenId,
+        dest: targetTopLeft,
+        startCenter,
+        endCenter,
+        ignoreWalls,
+        ignoreCost,
+        preferFoundryCheckpointMove: optionsBoolean(tracedOptions?.preferFoundryCheckpointMove, true),
+        destinationFloorBottom: tracedOptions?.destinationFloorBottom,
+        destinationFloorTop: tracedOptions?.destinationFloorTop,
+        method: tracedOptions?.method
+      });
 
       let pathNodes = [startCenter, endCenter];
       let crossFloorSegments = [];
-      const ignoreWalls = optionsBoolean(tracedOptions?.ignoreWalls, false);
-      const ignoreCost = optionsBoolean(tracedOptions?.ignoreCost, false);
       if (ignoreWalls) {
         pathNodes = (typeof this._interpolatePathForWalking === 'function')
           ? this._interpolatePathForWalking([startCenter, endCenter])
@@ -7010,6 +7178,11 @@ export class TokenMovementManager {
         });
 
         if (!constrainedPath?.ok || !Array.isArray(constrainedPath?.pathNodes) || constrainedPath.pathNodes.length < 2) {
+          moveTrace('executeDoorAware.pathFailed', {
+            tokenId,
+            reason: constrainedPath?.reason || 'no-path',
+            pathLen: Array.isArray(constrainedPath?.pathNodes) ? constrainedPath.pathNodes.length : -1
+          });
           this._pathfindingLog('warn', 'executeDoorAwareTokenMove path selection failed', {
             token: this._pathfindingTokenMeta(currentDoc),
             destinationTopLeft: targetTopLeft,
@@ -7032,6 +7205,14 @@ export class TokenMovementManager {
         if (crossFloor?.ok && Array.isArray(crossFloor?.segments)) {
           crossFloorSegments = crossFloor.segments.slice();
         }
+        const lastNode = pathNodes[pathNodes.length - 1];
+        moveTrace('executeDoorAware.pathOk', {
+          tokenId,
+          pathNodeCount: pathNodes.length,
+          firstCenter: pathNodes[0],
+          lastCenter: lastNode,
+          crossFloorSegmentCount: crossFloorSegments.length
+        });
       }
 
       const moveToPoint = async (point, context = {}) => {
@@ -7046,6 +7227,10 @@ export class TokenMovementManager {
       // portal transition (position/elevation update), then continue on target
       // floor. If this fails, fall back to single-segment path execution.
       if (crossFloorSegments.length >= 3) {
+        moveTrace('executeDoorAware.crossFloor.try', {
+          tokenId,
+          segmentCount: crossFloorSegments.length
+        });
         const routeResult = await this._executeCrossFloorRouteSegments({
           tokenId,
           tokenDoc: currentDoc,
@@ -7056,6 +7241,7 @@ export class TokenMovementManager {
           ignoreCost
         });
         if (routeResult?.ok) {
+          moveTrace('executeDoorAware.crossFloor.ok', { tokenId });
           return {
             ok: true,
             tokenId,
@@ -7074,6 +7260,10 @@ export class TokenMovementManager {
           options: tracedOptions,
           trace: this._traceSummary(movementTrace)
         });
+        moveTrace('executeDoorAware.crossFloor.fail', {
+          tokenId,
+          reason: routeResult?.reason || 'cross-floor-route-failed'
+        });
       }
 
       const builtPlan = this.buildDoorAwarePlan(pathNodes || []);
@@ -7082,13 +7272,34 @@ export class TokenMovementManager {
       if (allowNativeCheckpointMove && !hasDoorSteps) {
         const nativeWaypoints = this._buildCheckpointWaypointsFromPathNodes(pathNodes, currentDoc, tracedOptions);
         if (nativeWaypoints.length > 0) {
+          const foundryCheckpointOptions = !ignoreWalls
+            ? { ...tracedOptions, ignoreWalls: true }
+            : tracedOptions;
+          moveTrace('executeDoorAware.foundryCheckpoint.try', {
+            tokenId,
+            waypointCount: nativeWaypoints.length,
+            mapShineIgnoreWalls: ignoreWalls,
+            foundryOptionsIgnoreWalls: foundryCheckpointOptions?.ignoreWalls === true,
+            firstWaypoint: nativeWaypoints[0],
+            lastWaypoint: nativeWaypoints[nativeWaypoints.length - 1]
+          });
           const nativeMoveResult = await this._executeFoundryCheckpointMove({
             tokenDoc: currentDoc,
             waypoints: nativeWaypoints,
-            options: tracedOptions,
+            options: foundryCheckpointOptions,
             movementTrace
           });
           if (nativeMoveResult?.ok) {
+            const afterDoc = this._resolveTokenDocumentById(tokenId, currentDoc);
+            moveTrace('executeDoorAware.foundryCheckpoint.ok', {
+              tokenId,
+              waypointCount: nativeWaypoints.length,
+              docAfter: {
+                x: afterDoc?.x,
+                y: afterDoc?.y,
+                elevation: afterDoc?.elevation
+              }
+            });
             return {
               ok: true,
               tokenId,
@@ -7098,6 +7309,11 @@ export class TokenMovementManager {
               pathNodes
             };
           }
+          moveTrace('executeDoorAware.foundryCheckpoint.fail', {
+            tokenId,
+            reason: nativeMoveResult?.reason || 'unknown',
+            fallbackToSequence: true
+          });
           this._pathfindingLog('warn', 'executeDoorAwareTokenMove Foundry checkpoint move failed; falling back to sequenced updates', {
             token: this._pathfindingTokenMeta(currentDoc),
             destinationTopLeft: targetTopLeft,
@@ -7108,6 +7324,11 @@ export class TokenMovementManager {
         }
       }
 
+      moveTrace('executeDoorAware.sequenced.start', {
+        tokenId,
+        pathNodeCount: pathNodes?.length,
+        hasDoorSteps
+      });
       const sequenceResult = await this.runDoorAwareMovementSequence({
         tokenId,
         pathNodes,
@@ -7116,6 +7337,12 @@ export class TokenMovementManager {
       });
 
       if (!sequenceResult?.ok) {
+        moveTrace('executeDoorAware.sequenced.fail', {
+          tokenId,
+          reason: sequenceResult?.reason || 'door-sequence-failed',
+          failedStepIndex: sequenceResult?.failedStepIndex,
+          transitionCount: Array.isArray(sequenceResult?.transitions) ? sequenceResult.transitions.length : 0
+        });
         this._pathfindingLog('warn', 'executeDoorAwareTokenMove sequence failed', {
           token: this._pathfindingTokenMeta(currentDoc),
           destinationTopLeft: targetTopLeft,
@@ -7134,6 +7361,12 @@ export class TokenMovementManager {
         };
       }
 
+      const afterSeq = this._resolveTokenDocumentById(tokenId, currentDoc);
+      moveTrace('executeDoorAware.sequenced.ok', {
+        tokenId,
+        transitionCount: Array.isArray(sequenceResult?.transitions) ? sequenceResult.transitions.length : 0,
+        docAfter: { x: afterSeq?.x, y: afterSeq?.y, elevation: afterSeq?.elevation }
+      });
       return {
         ok: true,
         tokenId,
@@ -7143,6 +7376,10 @@ export class TokenMovementManager {
         pathNodes
       };
     } catch (error) {
+      moveTrace('executeDoorAware.throw', {
+        tokenId,
+        message: error?.message || String(error)
+      });
       this._pathfindingLog('error', 'executeDoorAwareTokenMove threw unexpectedly', {
         tokenId,
         destinationTopLeft,
@@ -10219,6 +10456,14 @@ export class TokenMovementManager {
     // slightly from the A*-snapped center and can cause false "blocked-by-wall"
     // rejections on valid path steps, stopping tokens mid-path (BUG-2).
     const targetTopLeft = this._snapTokenTopLeftToGrid(this._tokenCenterToTopLeft(point, liveDoc), liveDoc);
+    moveTrace('moveTokenToFoundryPoint.step', {
+      tokenId,
+      phase: context?.phase,
+      currentTopLeft,
+      targetTopLeft,
+      pointCenter: point,
+      method: options?.method
+    });
     if (!this._isTokenTopLeftWithinScene(targetTopLeft, liveDoc)) {
       this._pathfindingLog('warn', '_moveTokenToFoundryPoint blocked: step target outside scene bounds', {
         tokenId,
@@ -10289,6 +10534,12 @@ export class TokenMovementManager {
 
     try {
       const updateResult = await canvas.scene.updateEmbeddedDocuments('Token', [update], updateOptions);
+      moveTrace('moveTokenToFoundryPoint.embeddedUpdated', {
+        tokenId,
+        update,
+        includeMovementPayload,
+        movementEntryKeys: updateOptions?.movement ? Object.keys(updateOptions.movement) : []
+      });
       try {
         const movementMethod = String(options?.method || context?.phase || '').toLowerCase();
         const isPathWalkStep = movementMethod === 'path-walk' || movementMethod === 'walk' || movementMethod === 'path_segment';
@@ -10385,11 +10636,29 @@ export class TokenMovementManager {
             reason: 'step-landed-short-of-target',
             trace: this._traceSummary(movementTrace)
           });
+          moveTrace('moveTokenToFoundryPoint.landedShort', {
+            tokenId,
+            targetTopLeft,
+            landedTopLeft,
+            landedDelta: { x: landedDx, y: landedDy },
+            clampCollisionDiagnostics,
+            payloadConstrain: moveTraceConstrainSnapshot(payloadEntry?.constrainOptions),
+            payloadWaypointCount: Array.isArray(payloadEntry?.waypoints) ? payloadEntry.waypoints.length : 0
+          });
           return { ok: false, reason: 'step-landed-short-of-target' };
         }
       }
+      moveTrace('moveTokenToFoundryPoint.stepOk', {
+        tokenId,
+        landedTopLeft,
+        targetTopLeft
+      });
       return { ok: true };
     } catch (error) {
+      moveTrace('moveTokenToFoundryPoint.embeddedError', {
+        tokenId,
+        message: error?.message || String(error)
+      });
       this._pathfindingLog('warn', 'Door-aware move update failed for token', {
         tokenId,
         update,
@@ -10726,7 +10995,7 @@ export class TokenMovementManager {
     if (routeWaypoints.length === 0) return { ok: true };
 
     const method = normalizeFoundryMovementMethod(options?.method, 'dragging');
-    const constrainOptions = this._getFoundryConstrainOptions(options);
+    const constrainOptions = this._getFoundryConstrainOptions(options, liveDoc);
     const moveOptions = {
       preview: false,
       history: false,
@@ -10736,11 +11005,30 @@ export class TokenMovementManager {
       constrainOptions
     };
 
+    moveTrace('foundryCheckpointMove.start', {
+      tokenId: String(liveDoc?.id || ''),
+      waypointCount: routeWaypoints.length,
+      method,
+      docBefore: { x: liveDoc?.x, y: liveDoc?.y, elevation: liveDoc?.elevation },
+      firstWp: routeWaypoints[0],
+      lastWp: routeWaypoints[routeWaypoints.length - 1],
+      constrain: moveTraceConstrainSnapshot(constrainOptions)
+    });
+
     try {
       frameCoordinator.requestActivePerception?.();
       await liveDoc.move(routeWaypoints, moveOptions);
+      const after = this._resolveTokenDocumentById(liveDoc?.id, liveDoc);
+      moveTrace('foundryCheckpointMove.done', {
+        tokenId: String(liveDoc?.id || ''),
+        docAfter: { x: after?.x, y: after?.y, elevation: after?.elevation }
+      });
       return { ok: true };
     } catch (error) {
+      moveTrace('foundryCheckpointMove.error', {
+        tokenId: String(liveDoc?.id || ''),
+        message: error?.message || String(error)
+      });
       this._pathfindingLog('warn', '_executeFoundryCheckpointMove failed', {
         token: this._pathfindingTokenMeta(liveDoc),
         waypointCount: routeWaypoints.length,
@@ -10837,7 +11125,7 @@ export class TokenMovementManager {
       method: normalizeFoundryMovementMethod(options?.method, foundryMethodFallback)
     };
 
-    const constrainOptions = this._getFoundryConstrainOptions(options);
+    const constrainOptions = this._getFoundryConstrainOptions(options, tokenDoc);
     const movementMethod = String(options?.method || context?.phase || '').toLowerCase();
     const isSequencedStepMethod = movementMethod === 'path-walk' || movementMethod === 'walk';
     if (isSequencedStepMethod) {
@@ -10863,9 +11151,10 @@ export class TokenMovementManager {
 
   /**
    * @param {object} options
+   * @param {TokenDocument|object|null} [tokenDoc]
    * @returns {{ignoreWalls?:boolean, ignoreCost?:boolean, destinationFloorBottom?:number, destinationFloorTop?:number}}
    */
-  _getFoundryConstrainOptions(options = {}) {
+  _getFoundryConstrainOptions(options = {}, tokenDoc = null) {
     /** @type {{ignoreWalls?:boolean, ignoreCost?:boolean, destinationFloorBottom?:number, destinationFloorTop?:number}} */
     const constrainOptions = {};
     if (optionsBoolean(options?.ignoreWalls, false)) constrainOptions.ignoreWalls = true;
@@ -10873,8 +11162,18 @@ export class TokenMovementManager {
     const floorBottom = asNumber(options?.destinationFloorBottom, NaN);
     const floorTop = asNumber(options?.destinationFloorTop, NaN);
     if (Number.isFinite(floorBottom) && Number.isFinite(floorTop)) {
-      constrainOptions.destinationFloorBottom = floorBottom;
-      constrainOptions.destinationFloorTop = floorTop;
+      const min = Math.min(floorBottom, floorTop);
+      const max = Math.max(floorBottom, floorTop);
+      const rangeEpsilon = 0.001;
+      const docEl = asNumber(tokenDoc?.elevation, NaN);
+      if (Number.isFinite(docEl)
+        && ((docEl < (min - rangeEpsilon)) || (docEl >= (max + rangeEpsilon)))) {
+        // Caller band disagrees with the moving token (e.g. UI floor vs token elevation).
+        // Omit destination floor so Foundry constrains using the token's real elevation.
+      } else {
+        constrainOptions.destinationFloorBottom = floorBottom;
+        constrainOptions.destinationFloorTop = floorTop;
+      }
     }
     return constrainOptions;
   }
@@ -10947,7 +11246,7 @@ export class TokenMovementManager {
         ignoreCost,
         destinationFloorBottom,
         destinationFloorTop
-      })
+      }, tokenDoc)
     };
 
     try {
@@ -11043,7 +11342,7 @@ export class TokenMovementManager {
         ignoreCost,
         destinationFloorBottom,
         destinationFloorTop
-      })
+      }, tokenDoc)
     };
 
     try {

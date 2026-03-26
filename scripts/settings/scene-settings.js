@@ -701,6 +701,17 @@ export function registerSettings() {
     default: false
   });
 
+  game.settings.register('map-shine-advanced', 'fogPersistenceMaxDim', {
+    name: 'Fog Persistence Max Dimension',
+    hint: 'Maximum saved fog mask dimension in pixels when using Map Shine fog persistence. Lower values reduce database size at the cost of mask sharpness after reload.',
+    scope: 'world',
+    config: true,
+    restricted: true,
+    type: Number,
+    default: 1024,
+    range: { min: 256, max: 4096, step: 128 }
+  });
+
   game.settings.register(FLAG_NAMESPACE, DEBUG_LOADING_MODE_SETTING, {
     name: 'Debug Loading Mode',
     hint: 'When enabled, scene loading pauses at completion and shows a copyable loading log until you press the continue button.',

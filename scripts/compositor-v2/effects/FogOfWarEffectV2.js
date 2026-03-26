@@ -37,8 +37,24 @@ import { isLevelsEnabledForScene, readTileLevelsFlags, tileHasLevelsRange, readW
 import { getPerspectiveElevation, isLightVisibleForPerspective } from '../../foundry/elevation-context.js';
 import Coordinates from '../../utils/coordinates.js';
 import { flattenWallUpdateChanges } from '../../utils/wall-update-classify.js';
+import {
+  getActiveElevationBandKey,
+  buildFogStoreContextKey,
+  getRelevantActorIdsForFog,
+  loadUnionExplorationForActors,
+  saveExplorationForActors,
+} from '../../fog/fog-exploration-store.js';
 
 const log = createLogger('FogOfWarEffectV2');
+
+function getFogPersistenceMaxDim() {
+  try {
+    const n = Number(game?.settings?.get?.('map-shine-advanced', 'fogPersistenceMaxDim'));
+    return Number.isFinite(n) ? n : 1024;
+  } catch (_) {
+    return 1024;
+  }
+}
 
 function easeInOutCosine(t) {
   return (1 - Math.cos(Math.max(0, Math.min(1, t)) * Math.PI)) / 2;
@@ -186,6 +202,10 @@ export class FogOfWarEffectV2 {
     this._explorationLoadedFromFoundry = false;
     this._explorationLoadAttempts = 0;
     this._explorationDirty = false;
+    this._lastFogStoreContextKey = '';
+    this._lastFogStoreLoadKey = '';
+    this._lastFogStoreSaveKey = '';
+    this._lastFogStoreLoadFoundData = false;
     // Generation counter: incremented on every reset/re-init to detect stale
     // async TextureLoader callbacks that should no longer overwrite exploration.
     this._explorationLoadGeneration = 0;
@@ -207,7 +227,7 @@ export class FogOfWarEffectV2 {
     // On large scenes, this can stall the renderer for ~1s. Rate-limit saves so
     // they cannot happen repeatedly and create periodic hitching.
     this._lastExplorationSaveMs = 0;
-    this._minExplorationSaveIntervalMs = 30000;
+    this._minExplorationSaveIntervalMs = 4000;
 
     // PERF: Reuse buffers for fog exploration saves to reduce GC pressure.
     // Note: this does NOT eliminate the GPU->CPU stall from readRenderTargetPixels,
@@ -486,7 +506,7 @@ export class FogOfWarEffectV2 {
     return { blockers: out, transitioningWallIds };
   }
 
-  resetExploration() {
+  resetExploration({ markLoaded = true } = {}) {
     if (!this._initialized) return;
     if (!this.renderer) return;
     if (!this._explorationTargetA || !this._explorationTargetB) return;
@@ -515,12 +535,11 @@ export class FogOfWarEffectV2 {
     this._explorationDirty = false;
     this._explorationCommitCount = 0;
 
-    // If Foundry resets fog exploration, the authoritative state is now "blank".
-    // Mark exploration as loaded so we don't stall accumulation while repeatedly
-    // trying to load a now-deleted FogExploration document.
-    this._explorationLoadedFromFoundry = true;
+    // Mark exploration loaded for explicit resets; callers can opt out when
+    // they are about to load a different actor/floor context.
+    this._explorationLoadedFromFoundry = !!markLoaded;
     // Bump generation so any in-flight async TextureLoader callbacks from a
-    // prior _ensureExplorationLoadedFromFoundry() call are silently ignored.
+    // prior _ensureExplorationLoadedFromStore() call are silently ignored.
     this._explorationLoadGeneration++;
   }
 
@@ -659,6 +678,10 @@ export class FogOfWarEffectV2 {
       explorationEnabled: canvas?.scene?.fog?.exploration ?? false,
       explorationLoaded: this._explorationLoadedFromFoundry,
       explorationLoadGeneration: this._explorationLoadGeneration,
+      fogStoreContextKey: this._lastFogStoreContextKey,
+      fogStoreLoadKey: this._lastFogStoreLoadKey,
+      fogStoreSaveKey: this._lastFogStoreSaveKey,
+      fogStoreLoadFoundData: this._lastFogStoreLoadFoundData,
       visionIsFullSceneFallback: this._visionIsFullSceneFallback,
       pendingAccumulation: this._pendingAccumulation,
       explorationDirty: this._explorationDirty,
@@ -696,6 +719,26 @@ export class FogOfWarEffectV2 {
       console.table(info.tokenDiag);
     }
     return info;
+  }
+
+  _computeFogStoreContext() {
+    const bandKey = getActiveElevationBandKey();
+    const actorIds = getRelevantActorIdsForFog();
+    const key = buildFogStoreContextKey(actorIds, bandKey);
+    return { bandKey, actorIds, key };
+  }
+
+  _handleFogStoreContextChange() {
+    const { key } = this._computeFogStoreContext();
+    if (key === this._lastFogStoreContextKey) return;
+    this._lastFogStoreContextKey = key;
+    this._explorationLoadAttempts = 0;
+    this._pendingAccumulation = false;
+    // Prevent leaking previous token exploration while we wait for the new key.
+    this.resetExploration({ markLoaded: false });
+    this._needsVisionUpdate = true;
+    this._hasValidVision = false;
+    void this._ensureExplorationLoadedFromStore();
   }
 
   _createMinimalTargets() {
@@ -1378,6 +1421,7 @@ export class FogOfWarEffectV2 {
       log.debug(`controlToken hook: ${token?.name} controlled=${controlled}`);
       this._needsVisionUpdate = true;
       this._hasValidVision = false; // Reset until we get valid LOS polygons
+      this._handleFogStoreContextChange();
     })]);
     this._hookIds.push(['updateToken', Hooks.on('updateToken', (_doc, changes) => {
       this._needsVisionUpdate = true;
@@ -1455,9 +1499,16 @@ export class FogOfWarEffectV2 {
     } catch (_) {}
 
     // Pause V2 persistence writes during Foundry canvas teardown / scene switch.
-    // Foundry's fog compression worker may fail when canvas dimensions/state
-    // are temporarily invalid, so avoid kicking off additional fog saves.
+    // However: if the user reloads Foundry quickly after exploring, cancelling
+    // the pending save can prevent the latest explored mask from ever being
+    // written to FogExploration. So we do a best-effort flush BEFORE
+    // suspending/cancelling.
     this._hookIds.push(['canvasTearDown', Hooks.on('canvasTearDown', () => {
+      try {
+        // Best-effort only (async). We intentionally do not await: teardown
+        // should not be blocked by GPU readbacks or encoding stalls.
+        void this._flushExplorationSaveOnTearDown('canvasTearDown');
+      } catch (_) {}
       try { this._suspendExplorationSaves('canvasTearDown'); } catch (_) {}
     })]);
     this._hookIds.push(['canvasReady', Hooks.on('canvasReady', () => {
@@ -1517,8 +1568,80 @@ export class FogOfWarEffectV2 {
     this._explorationLoadedFromFoundry = false;
     this._explorationLoadAttempts = 0;
     this._pendingAccumulation = false;
+    this._lastFogStoreContextKey = '';
     this._explorationLoadGeneration++;
-    this._ensureExplorationLoadedFromFoundry();
+    void this._ensureExplorationLoadedFromStore();
+  }
+
+  async _ensureExplorationLoadedFromStore() {
+    if (this._explorationLoadedFromFoundry) return;
+    if (this._isLoadingExploration) return;
+
+    const tokenVisionEnabled = canvas?.scene?.tokenVision ?? false;
+    const explorationEnabled = canvas?.scene?.fog?.exploration ?? false;
+    if (!tokenVisionEnabled || !explorationEnabled) {
+      this._explorationLoadedFromFoundry = true;
+      return;
+    }
+
+    // Must match scene-sized exploration RTs; loading into 1x1 minimal targets corrupts the mask.
+    if (!this._fullResTargetsReady) {
+      setTimeout(() => {
+        try {
+          void this._ensureExplorationLoadedFromStore();
+        } catch (_) {}
+      }, 100);
+      return;
+    }
+
+    this._isLoadingExploration = true;
+    const loadGeneration = this._explorationLoadGeneration;
+
+    try {
+      const { bandKey, actorIds, key } = this._computeFogStoreContext();
+      this._lastFogStoreLoadKey = key;
+      const base64 = await loadUnionExplorationForActors({ actorIds, bandKey });
+
+      // Stale?
+      if (loadGeneration !== this._explorationLoadGeneration) return;
+
+      // No data -> treat as successful blank load.
+      if (typeof base64 !== 'string' || base64.length === 0) {
+        this._lastFogStoreLoadFoundData = false;
+        this._explorationLoadedFromFoundry = true;
+        return;
+      }
+
+      this._lastFogStoreLoadFoundData = true;
+      this._explorationLoadedFromFoundry = true;
+      const THREE = window.THREE;
+      const loader = new THREE.TextureLoader();
+      loader.load(
+        base64,
+        (texture) => {
+          try {
+            if (loadGeneration !== this._explorationLoadGeneration) return;
+            texture.flipY = false;
+            texture.needsUpdate = true;
+            this._renderLoadedExplorationTexture(texture);
+          } catch (e) {
+            log.warn('Failed to apply stored fog exploration texture', e);
+          } finally {
+            try { texture.dispose?.(); } catch (_) {}
+          }
+        },
+        undefined,
+        (err) => {
+          log.warn('Failed to load stored fog exploration texture', err);
+        }
+      );
+    } catch (e) {
+      log.warn('[FOG] Exploration store load failed', e);
+      this._explorationLoadAttempts++;
+      this._explorationLoadedFromFoundry = true;
+    } finally {
+      this._isLoadingExploration = false;
+    }
   }
 
   /**
@@ -1552,12 +1675,16 @@ export class FogOfWarEffectV2 {
       return;
     }
 
-    // Band changed ->-> reset exploration for the new floor
-    log.info(`[MS-LVL-060] Elevation band changed: [${this._lastElevationBandBottom}, ${this._lastElevationBandTop}] -> [${bandBottom}, ${bandTop}] -- resetting fog exploration for new floor`);
+    // Band changed ->-> load persisted exploration for this floor (Map Shine store).
+    log.info(`[MS-LVL-060] Elevation band changed: [${this._lastElevationBandBottom}, ${this._lastElevationBandTop}] -> [${bandBottom}, ${bandTop}]`);
     this._lastElevationBandBottom = bandBottom;
     this._lastElevationBandTop = bandTop;
 
-    this.resetExploration();
+    this._explorationLoadedFromFoundry = false;
+    this._explorationLoadAttempts = 0;
+    this._pendingAccumulation = false;
+    this._explorationLoadGeneration++;
+    void this._ensureExplorationLoadedFromStore();
     this._needsVisionUpdate = true;
     this._hasValidVision = false;
   }
@@ -2497,13 +2624,7 @@ export class FogOfWarEffectV2 {
     const bypassFog = this._shouldBypassFog();
     this.fogMaterial.uniforms.uBypassFog.value = bypassFog ? 1.0 : 0.0;
 
-    // Prewarm exploration loading even while fog is bypassed so the first
-    // token selection doesn't stall.
     const explorationEnabled = canvas?.scene?.fog?.exploration ?? false;
-    if (this.params.enabled && explorationEnabled) {
-      this._ensureExplorationLoadedFromFoundry();
-    }
-    
     if (!this.params.enabled || bypassFog) {
       this.fogPlane.visible = false;
       this._visionRetryFrames = 0;
@@ -2538,6 +2659,7 @@ export class FogOfWarEffectV2 {
         this._needsVisionUpdate = true;
         this._hasValidVision = false;
         this._visionRetryFrames = 0;
+        this._handleFogStoreContextChange();
       }
     } catch (_) {
       // Ignore MapShine selection errors
@@ -2601,7 +2723,7 @@ export class FogOfWarEffectV2 {
     // PERF: Only accumulate when vision was actually re-rendered this frame,
     // OR when we have a pending catch-up accumulation from a frame where
     // vision rendered but exploration wasn't loaded yet.
-    this._ensureExplorationLoadedFromFoundry();
+    void this._ensureExplorationLoadedFromStore();
     const canAccumulate = explorationEnabled && this._explorationLoadedFromFoundry;
 
     if (visionRenderedThisFrame && !canAccumulate) {
@@ -2686,7 +2808,7 @@ export class FogOfWarEffectV2 {
       this._renderVisionMask();
 
       const explorationEnabled = canvas?.scene?.fog?.exploration ?? false;
-      this._ensureExplorationLoadedFromFoundry();
+      void this._ensureExplorationLoadedFromStore();
       const canAccumulate = explorationEnabled && this._explorationLoadedFromFoundry;
       if (canAccumulate && !this._visionIsFullSceneFallback) {
         this._accumulateExploration();
@@ -2756,18 +2878,19 @@ export class FogOfWarEffectV2 {
     this._needsVisionUpdate = true;
     this._explorationLoadedFromFoundry = false;
     this._explorationLoadAttempts = 0;
+    this._lastFogStoreContextKey = '';
+
+    try {
+      void this._ensureExplorationLoadedFromStore();
+    } catch (_) {}
   }
 
   _markExplorationDirty() {
     if (this._isSceneTransitioning) return;
     this._explorationDirty = true;
     this._explorationCommitCount++;
-
-    const threshold = canvas?.fog?.constructor?.COMMIT_THRESHOLD ?? 70;
-    if (this._explorationCommitCount >= threshold) {
-      this._explorationCommitCount = 0;
-      if (this._saveExplorationDebounced) this._saveExplorationDebounced();
-    }
+    // Always schedule a debounced save; save() still rate-limits expensive IO.
+    if (this._saveExplorationDebounced) this._saveExplorationDebounced();
   }
 
   /**
@@ -2786,107 +2909,30 @@ export class FogOfWarEffectV2 {
   }
 
   /**
+   * Best-effort fog persistence flush during canvas teardown.
+   * @private
+   */
+  async _flushExplorationSaveOnTearDown(reason = 'unknown') {
+    if (!this._initialized) return;
+    if (!this.renderer) return;
+    if (!this._explorationDirty) return;
+    if (this._isSavingExploration) return;
+
+    try {
+      await this._saveExplorationToFoundry({ force: true, reason });
+      // If flush succeeded, _saveExplorationToFoundry will clear dirty.
+    } catch (e) {
+      // Best-effort only; teardown should proceed.
+      try { log.warn('[FOG] Failed to flush exploration on tearDown', e); } catch (_) {}
+    }
+  }
+
+  /**
    * Resume V2 FogExploration persistence after canvas is ready.
    * @private
    */
   _resumeExplorationSaves() {
     this._isSceneTransitioning = false;
-  }
-
-  _ensureExplorationLoadedFromFoundry() {
-    if (this._explorationLoadedFromFoundry) return;
-    if (this._isLoadingExploration) return;
-
-    const tokenVisionEnabled = canvas?.scene?.tokenVision ?? false;
-    const explorationEnabled = canvas?.scene?.fog?.exploration ?? false;
-
-    if (!tokenVisionEnabled) {
-      this._explorationLoadedFromFoundry = true;
-      return;
-    }
-    if (!explorationEnabled) {
-      this._explorationLoadedFromFoundry = true;
-      return;
-    }
-
-    if (this._explorationLoadAttempts > 600) {
-      this._explorationLoadedFromFoundry = true;
-      return;
-    }
-
-    this._isLoadingExploration = true;
-
-    const FogExplorationCls = CONFIG?.FogExploration?.documentClass;
-    if (!FogExplorationCls || typeof FogExplorationCls.load !== 'function') {
-      this._explorationLoadedFromFoundry = true;
-      this._isLoadingExploration = false;
-      return;
-    }
-
-    // Capture generation before async work so we can detect stale callbacks
-    // (e.g. resetExploration() called while the load is in flight).
-    const loadGeneration = this._explorationLoadGeneration;
-
-    FogExplorationCls.load().then((doc) => {
-      try {
-        // Stale? A reset happened while we were loading ->-> discard.
-        if (loadGeneration !== this._explorationLoadGeneration) {
-          log.debug('[FOG DIAG] Discarding stale FogExploration load (generation mismatch)');
-          return;
-        }
-
-        const base64 = doc?.explored;
-        if (!doc || !base64) {
-          // No persisted fog exists yet for this user+scene (or it was reset).
-          // Treat this as a successful "load" of a blank state.
-          this._explorationLoadedFromFoundry = true;
-          return;
-        }
-
-        // Expose it for consistency with Foundry's own fog manager state.
-        try {
-          if (canvas?.fog && !canvas.fog.exploration) canvas.fog.exploration = doc;
-        } catch (_) {
-          // Ignore
-        }
-
-        this._explorationLoadedFromFoundry = true;
-
-        const THREE = window.THREE;
-        const loader = new THREE.TextureLoader();
-        loader.load(
-          base64,
-          (texture) => {
-            try {
-              // Second stale check: the image decode is also async and a reset
-              // could have happened between the document load and texture decode.
-              if (loadGeneration !== this._explorationLoadGeneration) {
-                log.debug('[FOG DIAG] Discarding stale exploration texture (generation mismatch)');
-                return;
-              }
-              // Avoid double Y-flips: our fog shader already flips explored sampling.
-              texture.flipY = false;
-              texture.needsUpdate = true;
-              this._renderLoadedExplorationTexture(texture);
-            } catch (e) {
-              log.warn('Failed to apply saved fog exploration texture', e);
-            } finally {
-              try { texture.dispose?.(); } catch (_) {}
-            }
-          },
-          undefined,
-          (err) => {
-            log.warn('Failed to load saved fog exploration texture', err);
-          }
-        );
-      } finally {
-        this._isLoadingExploration = false;
-      }
-    }).catch((e) => {
-      this._isLoadingExploration = false;
-      this._explorationLoadAttempts++;
-      if (Math.random() < 0.1) log.warn('FogExploration.load() failed', e);
-    });
   }
 
   _renderLoadedExplorationTexture(texture) {
@@ -2929,9 +2975,9 @@ export class FogOfWarEffectV2 {
     this._currentExplorationTarget = 'A';
   }
 
-  async _saveExplorationToFoundry() {
+  async _saveExplorationToFoundry({ force = false, reason = 'unknown' } = {}) {
     if (!this._initialized) return;
-    if (this._isSceneTransitioning) return;
+    if (this._isSceneTransitioning && !force) return;
 
     const saveGeneration = this._explorationSaveGeneration;
 
@@ -2949,7 +2995,7 @@ export class FogOfWarEffectV2 {
     // Keep exploration dirty so it will eventually persist.
     const nowMs = Date.now();
     const minInterval = Number(this._minExplorationSaveIntervalMs) || 0;
-    if (minInterval > 0 && (nowMs - (Number(this._lastExplorationSaveMs) || 0)) < minInterval) {
+    if (!force && minInterval > 0 && (nowMs - (Number(this._lastExplorationSaveMs) || 0)) < minInterval) {
       return;
     }
 
@@ -3005,34 +3051,20 @@ export class FogOfWarEffectV2 {
       // Extra guard in case teardown began during encoding.
       if (saveGeneration !== this._explorationSaveGeneration) return;
 
-      const fogMgr = canvas?.fog;
-      if (!fogMgr) return;
-
-      let doc = fogMgr.exploration;
-      const FogExplorationCls = CONFIG?.FogExploration?.documentClass;
-      if (!FogExplorationCls) return;
-
-      const updateData = {
-        scene: sceneIdAtStart,
-        user: game?.user?.id,
-        explored: base64,
-        timestamp: Date.now()
-      };
-
-      if (!doc) {
-        // Match Foundry: create a new document and persist it
-        const tmp = new FogExplorationCls();
-        tmp.updateSource(updateData);
-        doc = await FogExplorationCls.create(tmp.toJSON(), { loadFog: false });
-        try { fogMgr.exploration = doc; } catch (_) {}
-      } else if (!doc.id) {
-        doc.updateSource(updateData);
-        doc = await doc.constructor.create(doc.toJSON(), { loadFog: false });
-        try { fogMgr.exploration = doc; } catch (_) {}
-      } else {
-        await doc.update(updateData, { loadFog: false });
+      const bandKey = getActiveElevationBandKey();
+      const actorIds = getRelevantActorIdsForFog();
+      this._lastFogStoreSaveKey = buildFogStoreContextKey(actorIds, bandKey);
+      const maxDim = getFogPersistenceMaxDim();
+      const ok = await saveExplorationForActors({
+        actorIds,
+        bandKey,
+        exploredDataUrl: base64,
+        maxDim
+      });
+      if (!ok) {
+        log.warn('[FOG] saveExplorationForActors returned false (permission or encode failure)');
+        return;
       }
-
       this._explorationDirty = false;
     } catch (e) {
       log.warn('Failed to save fog exploration', e);

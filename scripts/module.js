@@ -525,6 +525,14 @@ MapShine.applyPasswordManagerIgnores = _applyPasswordManagerIgnores;
 MapShine.installTokenHudPasswordManagerGuard = _installTokenHudPasswordManagerGuard;
 MapShine.installGlobalPasswordManagerInsertGuard = _installGlobalPasswordManagerInsertGuard;
 
+// Map Shine persists fog via FogExploration flags; prevent Foundry FogManager from
+// writing `explored` to the database (single writer).
+Hooks.on('canvasReady', () => {
+  import('./fog/fog-native-exploration-suppression.js')
+    .then((m) => m.suppressNativeFogExplorationPersistence())
+    .catch(() => {});
+});
+
 
 /**
  * Foundry VTT 'init' hook - Called when Foundry initializes

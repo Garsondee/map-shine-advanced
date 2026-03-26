@@ -5986,14 +5986,29 @@ export class TokenMovementManager {
       const dy = asNumber(curr.y, 0) - asNumber(prev.y, 0);
       const segLen = Math.hypot(dx, dy);
 
-      if (segLen <= stepSize * 1.5) {
-        // Segment is short enough — keep as-is.
+      if (segLen <= 0.0001) {
+        // Degenerate segment.
         result.push(curr);
         continue;
       }
 
-      // Insert intermediate points at stepSize intervals.
-      const steps = Math.max(1, Math.round(segLen / stepSize));
+      // Ensure we insert enough intermediate nodes so that along-diagonal
+      // motion doesn't skip grid-cell crossings (important for fog updates
+      // which are triggered per sequenced node).
+      //
+      // We choose step count based on the larger axis delta relative to the
+      // grid size, not just on total segment length.
+      const steps = Math.max(
+        1,
+        Math.ceil(Math.max(Math.abs(dx) / stepSize, Math.abs(dy) / stepSize))
+      );
+
+      if (steps <= 1) {
+        // Segment is within one cell crossing — keep as-is.
+        result.push(curr);
+        continue;
+      }
+
       const nx = dx / segLen;
       const ny = dy / segLen;
       const actualStep = segLen / steps;
@@ -7971,6 +7986,16 @@ export class TokenMovementManager {
   async _hardenFinalTokenVisualAndCameraSync(tokenId, tokenDoc, options = {}) {
     const id = String(tokenId || tokenDoc?.id || '');
     if (!id) return;
+
+    // Avoid hard-snapping mid-walk. If a track is still active, wait a
+    // bounded amount for it to complete before resync attempts.
+    if (this.activeTracks?.has?.(id) === true) {
+      const maxWaitMs = clamp(Math.round(asNumber(options?.finalVisualTrackWaitMs, 600)), 0, 5000);
+      const deadline = Date.now() + maxWaitMs;
+      while (this.activeTracks?.has?.(id) === true && Date.now() < deadline) {
+        await _sleep(16);
+      }
+    }
     const attempts = clamp(Math.round(asNumber(options?.finalVisualCameraSyncAttempts, 4)), 1, 8);
     const intervalMs = clamp(Math.round(asNumber(options?.finalVisualCameraSyncIntervalMs, 26)), 8, 120);
     const forceFloor = optionsBoolean(options?._forceSelectedFloorSwitch, false);
@@ -11108,19 +11133,6 @@ export class TokenMovementManager {
         includeMovementPayload,
         movementEntryKeys: updateOptions?.movement ? Object.keys(updateOptions.movement) : []
       });
-      try {
-        const movementMethod = String(options?.method || context?.phase || '').toLowerCase();
-        const isPathWalkStep = movementMethod === 'path-walk' || movementMethod === 'walk' || movementMethod === 'path_segment';
-        if (isPathWalkStep) {
-          const sightRefreshAck = this._awaitNextSightRefresh(
-            asNumber(options?.perStepSightRefreshTimeoutMs, 500)
-          );
-          frameCoordinator.requestActivePerception?.();
-          frameCoordinator.forcePerceptionUpdate({ bypassThrottle: true });
-          await sightRefreshAck;
-        }
-      } catch (_) {
-      }
       if (groupCancelToken?.cancelled) {
         this._pathfindingLog('warn', '_moveTokenToFoundryPoint stopped: cancelled after token update', {
           tokenId,
@@ -11147,6 +11159,30 @@ export class TokenMovementManager {
 
       if (targetFloor && !this._shouldDeferSelectedLevelSwitch(options)) {
         this._followSelectedTokenFloorTransition(liveDoc, sourceFloor, targetFloor);
+      }
+
+      // Fog-of-war update ordering:
+      // Arrival is confirmed by sequenced step settle (wait for walk track).
+      // Only then request perception and wait for the next sightRefresh.
+      try {
+        const movementMethod = String(options?.method || context?.phase || '').toLowerCase();
+        const isPathWalkStep = movementMethod === 'path-walk' || movementMethod === 'walk' || movementMethod === 'path_segment';
+        if (isPathWalkStep) {
+          const sightRefreshAck = this._awaitNextSightRefresh(
+            asNumber(options?.perStepSightRefreshTimeoutMs, 500)
+          );
+          frameCoordinator.requestActivePerception?.();
+          frameCoordinator.forcePerceptionUpdate({ bypassThrottle: true });
+          await sightRefreshAck;
+
+          // Foundry's `sightRefresh` hook can fire before the Compositor V2
+          // fog effect has actually rendered the new vision mask to its
+          // GPU targets. Yield one small frame so fog updates apply between
+          // grid steps rather than collapsing into the last step.
+          const fogSettleMs = clamp(asNumber(options?.perStepFogSettleMs, 20), 0, 120);
+          if (fogSettleMs > 0) await _sleep(fogSettleMs);
+        }
+      } catch (_) {
       }
 
       if (stepPauseMs > 0) {
@@ -11385,7 +11421,19 @@ export class TokenMovementManager {
     if (cancelled()) return;
 
     if (sawTrack) {
-      const finishDeadline = Date.now() + waitForTrackFinishMs;
+      // If we know the track duration, wait long enough that we don't
+      // hard-resync while the sprite is still animating.
+      const getTrackDurationMs = () => {
+        const track = this.activeTracks?.get?.(tokenId);
+        const durationSec = asNumber(track?.durationSec, NaN);
+        return Number.isFinite(durationSec) ? (durationSec * 1000) : NaN;
+      };
+      const trackDurationMs = getTrackDurationMs();
+      const finishBufferMs = clamp(asNumber(options?.trackFinishBufferMs, 180), 0, 2000);
+      const waitExtraMs = Number.isFinite(trackDurationMs)
+        ? (trackDurationMs + finishBufferMs)
+        : waitForTrackFinishMs;
+      const finishDeadline = Date.now() + Math.max(waitForTrackFinishMs, waitExtraMs);
       while (hasTrack() && Date.now() < finishDeadline && !cancelled()) {
         await _sleep(pollMs);
       }
@@ -11393,6 +11441,8 @@ export class TokenMovementManager {
         this._pathfindingLog('debug', '_awaitSequencedStepSettle timed out waiting for track to finish', {
           tokenId,
           waitForTrackFinishMs,
+          trackDurationMs,
+          finishBufferMs,
           pollMs
         });
       }
@@ -11400,8 +11450,19 @@ export class TokenMovementManager {
     }
 
     if (fallbackDelayMs > 0 && !cancelled()) {
+      // The track might start just after our "start" window expires.
+      // During the fallback delay, keep polling: if a track starts, switch
+      // to the normal "wait for finish" behavior.
       const fallbackDeadline = Date.now() + fallbackDelayMs;
       while (Date.now() < fallbackDeadline && !cancelled()) {
+        if (hasTrack()) {
+          // Recurse via the normal branch by faking sawTrack behavior.
+          // (Simpler than duplicating logic; depth is bounded by a single track.)
+          return this._awaitSequencedStepSettle(tokenId, 0, {
+            ...options,
+            waitForTrackStartMs: 0
+          }, context);
+        }
         await _sleep(Math.min(pollMs, Math.max(4, fallbackDeadline - Date.now())));
       }
     }

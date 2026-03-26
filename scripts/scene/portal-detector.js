@@ -14,6 +14,23 @@ function floorKey(bottom, top) {
   return `${b}:${t}`;
 }
 
+function readPoint(point) {
+  const x = asNumber(point?.x, NaN);
+  const y = asNumber(point?.y, NaN);
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+  return { x, y };
+}
+
+function mirrorPointAroundCenter(point, center) {
+  const p = readPoint(point);
+  const c = readPoint(center);
+  if (!p || !c) return null;
+  return {
+    x: (2 * c.x) - p.x,
+    y: (2 * c.y) - p.y
+  };
+}
+
 /**
  * PortalDetector (foundation)
  *
@@ -42,14 +59,17 @@ export class PortalDetector {
     const out = [];
 
     for (const c of candidates) {
-      const center = c?.center && Number.isFinite(c.center.x) && Number.isFinite(c.center.y)
-        ? { x: Number(c.center.x), y: Number(c.center.y) }
-        : null;
+      const center = readPoint(c?.center);
       if (!center) continue;
 
       const from = this._resolveFloorKey(c?.fromFloor, bands);
       const to = this._resolveFloorKey(c?.toFloor, bands);
       if (!from || !to || from === to) continue;
+
+      const rawEntry = readPoint(c?.entry);
+      const rawExit = readPoint(c?.exit);
+      const entry = rawEntry || (rawExit ? mirrorPointAroundCenter(rawExit, center) : null) || { ...center };
+      const exit = rawExit || (rawEntry ? mirrorPointAroundCenter(rawEntry, center) : null) || { ...center };
 
       out.push({
         portalId: String(c?.portalId || ''),
@@ -57,10 +77,8 @@ export class PortalDetector {
         bidirectional: c?.bidirectional !== false,
         fromFloorKey: from,
         toFloorKey: to,
-        entry: { ...center },
-        exit: c?.exit && Number.isFinite(c.exit.x) && Number.isFinite(c.exit.y)
-          ? { x: Number(c.exit.x), y: Number(c.exit.y) }
-          : { ...center },
+        entry,
+        exit,
         travelTimeMs: Math.max(0, asNumber(c?.travelTimeMs, 400) || 400)
       });
     }

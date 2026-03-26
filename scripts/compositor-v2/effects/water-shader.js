@@ -1804,9 +1804,33 @@ void main() {
     float shoreBoost = clamp(shore, 0.0, 1.0);
     float coverage = max(shallow, mix(baseCoverage, 1.0, shoreBoost));
 
+    // Wave-following caustics:
+    // Use the same UV offset field as refraction (offsetUvRaw) so caustics
+    // visibly "track" wave motion, breaking up regular/parallel patterns.
+    // Wind-aware caustics: bias distortion by how local crest direction aligns
+    // with wind, so caustics "feel" advected in a more coherent direction.
+    float windLen = length(uWindDir);
+    vec2 windBasis = (windLen > 1e-6)
+      ? normalize(vec2(uWindDir.x * sceneAspectW, uWindDir.y))
+      : vec2(1.0, 0.0);
+    float crestsAlign = abs(dot(safeNormalize2(perpG), windBasis)); // perpG ~= crest direction
+    float alignW = mix(0.85, 1.15, crestsAlign);
+
+    float caWarpStrength = (0.16 + 0.28 * crestMod) * alignW;
+    vec2 causticsUv = sceneUv + offsetUvRaw * caWarpStrength;
+    // Add a small perpendicular component for extra breakup without changing
+    // the dominant travel direction.
+    causticsUv += perpG * (px * texel) * amp * 0.06 * (0.35 + 0.65 * crestMod) * alignW;
+
+    float causticsSharpEff = clamp(uCausticsSharpness * (0.55 + 1.25 * crestMod), 0.05, 2.0);
+    coverage *= (0.65 + 0.70 * crestMod);
+
     // V1-accurate dual-layer blend: soft base + sharp detail.
-    float cSharp = causticsPattern(sceneUv, uTime, uCausticsScale, uCausticsSpeed, uCausticsSharpness);
-    float cSoft  = causticsPattern(sceneUv, uTime * 0.85, uCausticsScale * 0.55, uCausticsSpeed * 0.65, max(0.1, uCausticsSharpness * 0.35));
+    // Wind-speed coupling: gustier wind speeds up underwater highlight motion.
+    float wind01 = clamp(uWindSpeed, 0.0, 1.0);
+    float caWind = 1.0 + 0.65 * wind01;
+    float cSharp = causticsPattern(causticsUv, uTime * caWind, uCausticsScale, uCausticsSpeed, causticsSharpEff);
+    float cSoft  = causticsPattern(causticsUv, uTime * (0.85 * caWind), uCausticsScale * 0.55, uCausticsSpeed * 0.65, max(0.1, causticsSharpEff * 0.35));
     float c = clamp(0.65 * cSoft + 0.95 * cSharp, 0.0, 1.0);
 
     // V1-accurate cloud-shadow caustics kill.
@@ -2023,6 +2047,15 @@ void main() {
   float rMax = clamp(uSpecRoughnessMax, 0.001, 1.0);
   float rough = mix(max(rMax, min(rMin, rMax) + 1e-4), min(rMin, rMax), p01);
 
+  // High-fidelity roughness modulation:
+  // - Increase roughness when the surface is more turbulent (wave distortion energy).
+  // - Increase roughness near shore where foam/murk breaks up smooth reflections.
+  float waveTurb01 = clamp(m, 0.0, 1.0);
+  float foamAmt = clamp(max(shoreFoamAmount, floatingFoam.amount), 0.0, 1.0);
+  float shallow01 = clamp(shore, 0.0, 1.0);
+  float dynRough = 0.07 * waveTurb01 + 0.11 * shallow01 + 0.08 * foamAmt;
+  rough = clamp(rough + dynRough, 0.001, 1.0);
+
   // Specular AA: if the normal/slope varies too fast across pixels, GGX produces
   // sub-pixel sparkles (thin scratchy lines). Increase roughness locally to
   // band-limit the highlight.
@@ -2053,8 +2086,27 @@ void main() {
     float f0 = clamp(uSpecF0, 0.0, 1.0);
     vec3 F0 = vec3(f0);
     vec3 F = F0 + (1.0 - F0) * pow(1.0 - VoH, 5.0);
-    vec3 specBRDF = (D * G) * F / max(1e-6, 4.0 * NoV * NoL);
-    spec = specBRDF * NoL;
+
+    vec3 specPrimary = (((D * G) * F) / max(1e-6, 4.0 * NoV * NoL)) * NoL;
+
+    // Second broader lobe ("sheen"): adds water-like body on top of mirror glints.
+    // Weight is driven by wave turbulence + crestiness; energy is normalized
+    // to avoid blowing out specular.
+    float sheenW = clamp(0.10 + 0.40 * waveTurb01 + 0.18 * crestMod - 0.08 * shallow01, 0.0, 0.65);
+    float rough2 = clamp(rough * (1.55 + 0.75 * waveTurb01) + 0.02 + 0.10 * shallow01, 0.001, 1.0);
+    float alpha2 = max(0.001, rough2 * rough2);
+    float a22 = alpha2 * alpha2;
+    float dDen2 = (NoH * NoH) * (a22 - 1.0) + 1.0;
+    float D2 = a22 / max(1e-6, 3.14159265 * dDen2 * dDen2);
+    float ggxK2 = (rough2 + 1.0); ggxK2 = (ggxK2 * ggxK2) / 8.0;
+    float Gv2 = NoV / max(1e-6, NoV * (1.0 - ggxK2) + ggxK2);
+    float Gl2 = NoL / max(1e-6, NoL * (1.0 - ggxK2) + ggxK2);
+    float G2 = Gv2 * Gl2;
+    vec3 specSheen = (((D2 * G2) * F) / max(1e-6, 4.0 * NoV * NoL)) * NoL;
+
+    spec = specPrimary + specSheen * sheenW;
+    // Simple energy normalization for stability.
+    spec *= 1.0 / (1.0 + sheenW * 0.85);
   }
 
   // Sun elevation falloff: reduce specular at low sun angles (dawn/dusk)

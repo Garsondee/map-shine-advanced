@@ -25,6 +25,22 @@ function readFloorRange(obj, bottomKeys, topKeys) {
   return { bottom, top };
 }
 
+function readPoint(obj, xKeys, yKeys) {
+  if (!obj || typeof obj !== 'object') return null;
+  let x = NaN;
+  let y = NaN;
+  for (const key of xKeys) {
+    x = asNumber(obj?.[key], NaN);
+    if (Number.isFinite(x)) break;
+  }
+  for (const key of yKeys) {
+    y = asNumber(obj?.[key], NaN);
+    if (Number.isFinite(y)) break;
+  }
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+  return { x, y };
+}
+
 /**
  * NavMeshBuilder (foundation)
  *
@@ -148,11 +164,23 @@ export class NavMeshBuilder {
         const center = shape && Number.isFinite(shape?.x) && Number.isFinite(shape?.y)
           ? { x: asNumber(shape.x, 0), y: asNumber(shape.y, 0) }
           : null;
+        const entry = readPoint(
+          behaviorSystem,
+          ['entryX', 'fromX', 'sourceX', 'startX'],
+          ['entryY', 'fromY', 'sourceY', 'startY']
+        );
+        const exit = readPoint(
+          behaviorSystem,
+          ['exitX', 'toX', 'targetX', 'destX', 'endX'],
+          ['exitY', 'toY', 'targetY', 'destY', 'endY']
+        );
 
         portals.push({
           portalId: String(region?.id || behavior?.id || ''),
           source: 'levels-region',
           center,
+          entry,
+          exit,
           fromFloor,
           toFloor,
           travelTimeMs: asNumber(behaviorSystem?.travelTimeMs, 400),
@@ -192,6 +220,16 @@ export class NavMeshBuilder {
           portalId: String(tileId || ''),
           source: 'tile-tag',
           center: { x: x + (w * 0.5), y: y + (h * 0.5) },
+          entry: readPoint(
+            msFlags,
+            ['portalEntryX', 'entryX', 'stairsEntryX', 'fromX', 'portalFromX'],
+            ['portalEntryY', 'entryY', 'stairsEntryY', 'fromY', 'portalFromY']
+          ),
+          exit: readPoint(
+            msFlags,
+            ['portalExitX', 'exitX', 'stairsExitX', 'toX', 'portalToX'],
+            ['portalExitY', 'exitY', 'stairsExitY', 'toY', 'portalToY']
+          ),
           fromFloor,
           toFloor,
           travelTimeMs: asNumber(msFlags?.portalTravelTimeMs, 400),

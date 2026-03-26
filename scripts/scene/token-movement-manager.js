@@ -225,6 +225,8 @@ export class TokenMovementManager {
 
     /** @type {Map<string, Array<{styleId:string,target:any,options:object}>>} */
     this._keyboardMoveQueues = new Map();
+    /** @type {Map<string, number>} */
+    this._forceTransformSnapUntilByTokenId = new Map();
 
     /** @type {Array<[string, number]>} */
     this._hookIds = [];
@@ -325,10 +327,6 @@ export class TokenMovementManager {
    * @returns {boolean}
    */
   _shouldIncludeMovementPayloadForStep(options = {}, context = {}) {
-    const floorBottom = asNumber(options?.destinationFloorBottom, NaN);
-    const floorTop = asNumber(options?.destinationFloorTop, NaN);
-    const hasFloorBounds = Number.isFinite(floorBottom) && Number.isFinite(floorTop);
-
     // If caller explicitly sets includeMovementPayload, honor that override.
     if (Object.prototype.hasOwnProperty.call(options, 'includeMovementPayload')) {
       return optionsBoolean(options?.includeMovementPayload, false);
@@ -337,7 +335,18 @@ export class TokenMovementManager {
     if (optionsBoolean(options?.suppressFoundryMovementUI, false)) return false;
 
     const method = String(options?.method || '').toLowerCase();
-    if (method === 'path-walk' || method === 'walk') return false;
+    if (method === 'path-walk' || method === 'walk' || method === 'path_segment') return false;
+
+    const phase = String(context?.phase || '').toUpperCase();
+    const sequencedPhases = new Set([
+      'PATH_SEGMENT',
+      'PATH_TO_DOOR',
+      'PRE_DOOR_HOLD',
+      'CROSS_DOOR',
+      'RESUME_PATH',
+      'GROUP_PATH_SEGMENT'
+    ]);
+    if (sequencedPhases.has(phase)) return false;
 
     // Default behavior for legacy call sites.
     return optionsBoolean(options?.ignoreWalls, false)
@@ -2574,6 +2583,24 @@ export class TokenMovementManager {
     return false;
   }
 
+  _beginForceTransformSnapWindow(tokenId, durationMs = 220) {
+    const id = String(tokenId || '');
+    if (!id) return;
+    const until = Date.now() + Math.max(0, Math.round(asNumber(durationMs, 220)));
+    this._forceTransformSnapUntilByTokenId.set(id, until);
+  }
+
+  _isInForceTransformSnapWindow(tokenId) {
+    const id = String(tokenId || '');
+    if (!id) return false;
+    const until = asNumber(this._forceTransformSnapUntilByTokenId.get(id), 0);
+    if (!Number.isFinite(until) || until <= Date.now()) {
+      this._forceTransformSnapUntilByTokenId.delete(id);
+      return false;
+    }
+    return true;
+  }
+
   /**
    * @param {string} tokenId
    * @param {string|null} styleId
@@ -2626,6 +2653,25 @@ export class TokenMovementManager {
   resyncSpriteToDocument(tokenId, tokenDoc = null, context = {}) {
     const id = String(tokenId || '');
     if (!id) return false;
+    const reasonStr = String(context?.reason || '');
+    const hasActiveDoorAwareMove = this._activeMoveLocks.has(id);
+    if (hasActiveDoorAwareMove) {
+      this._pathfindingLog('debug', 'resyncSpriteToDocument invoked during active move lock', {
+        tokenId: id,
+        reason: context?.reason
+      });
+    }
+    const isZoneStairOrFloorFollowResync = /zone-stair|floor-follow|selected-floor-follow|token-movement-selected-floor-follow/i.test(reasonStr);
+    const isPartialResync = hasActiveDoorAwareMove && isZoneStairOrFloorFollowResync;
+    const shouldForceWindow = (
+      Object.prototype.hasOwnProperty.call(context || {}, 'forceTransformSnapWindowMs')
+      || /final|hard-snap|repair/i.test(reasonStr)
+    );
+    if (shouldForceWindow && !isPartialResync) {
+      this._beginForceTransformSnapWindow(id, asNumber(context?.forceTransformSnapWindowMs, 260));
+    } else {
+      this._forceTransformSnapUntilByTokenId.delete(id);
+    }
 
     const hadTrack = this.activeTracks.has(id);
     moveTrace('resyncSprite.start', {
@@ -2635,11 +2681,13 @@ export class TokenMovementManager {
     });
 
     const existing = this.activeTracks.get(id);
-    if (existing) {
-      this._cancelTrack(existing);
-      this.activeTracks.delete(id);
+    if (!isPartialResync) {
+      if (existing) {
+        this._cancelTrack(existing);
+        this.activeTracks.delete(id);
+      }
+      this._clearKeyboardMoveQueue(id);
     }
-    this._clearKeyboardMoveQueue(id);
 
     if (this.isFlying(id)) {
       try {
@@ -2677,30 +2725,45 @@ export class TokenMovementManager {
         moveTrace('resyncSprite.updateTokenSpriteFailed', { tokenId: id, reason: context?.reason });
         return false;
       }
-    } else {
-      const spriteData = tm?.tokenSprites?.get?.(id);
-      const sprite = spriteData?.sprite;
-      if (!sprite) {
-        moveTrace('resyncSprite.noSprite', { tokenId: id, reason: context?.reason });
-        return false;
-      }
+    }
 
-      const target = this._computeTargetTransform(liveDoc);
-      if (!target) return false;
-
-      sprite.position.set(target.x, target.y, target.z);
-      sprite.scale.set(target.scaleX, target.scaleY, 1);
-      if (sprite.material) sprite.material.rotation = target.rotation;
-      if (sprite.matrixAutoUpdate === false) sprite.updateMatrix();
-      if (spriteData) {
-        spriteData.tokenDoc = liveDoc;
-        spriteData.lastUpdate = Date.now();
-      }
+    // Hard-stop any residual visual drift by applying a direct transform snap
+    // after TokenManager reconciliation, regardless of which update path ran.
+    const spriteData = tm?.tokenSprites?.get?.(id);
+    const sprite = spriteData?.sprite;
+    if (!sprite) {
+      moveTrace('resyncSprite.noSprite', { tokenId: id, reason: context?.reason });
+      return false;
     }
 
     try {
-      canvas?.tokens?.get?.(id)?.refresh?.();
+      window.MapShine?.floorLayerManager?.assignTokenToFloor?.(sprite, liveDoc);
     } catch (_) {
+    }
+    const target = this._computeTargetTransform(liveDoc);
+    if (!target) return false;
+
+    if (isPartialResync) {
+      // During in-flight door-aware moves, stair/floor-follow side effects
+      // should only adjust elevation/scale; snapping x/y can restart walk
+      // tracks from mid-animation and visually teleport the token.
+      sprite.position.set(sprite.position.x, sprite.position.y, target.z);
+    } else {
+      sprite.position.set(target.x, target.y, target.z);
+    }
+    sprite.scale.set(target.scaleX, target.scaleY, 1);
+    if (sprite.material) sprite.material.rotation = target.rotation;
+    if (sprite.matrixAutoUpdate === false) sprite.updateMatrix();
+    if (spriteData) {
+      spriteData.tokenDoc = liveDoc;
+      spriteData.lastUpdate = Date.now();
+    }
+
+    if (!isPartialResync) {
+      try {
+        canvas?.tokens?.get?.(id)?.refresh?.();
+      } catch (_) {
+      }
     }
 
     this._pathfindingLog('debug', 'resyncSpriteToDocument: applied', {
@@ -2733,6 +2796,7 @@ export class TokenMovementManager {
       sprite,
       tokenDoc,
       targetDoc,
+      changes = {},
       options = {},
       animate = true,
       fallback
@@ -2743,8 +2807,111 @@ export class TokenMovementManager {
     const styleId = this.getStyleForToken(tokenDoc, options);
     const tokenId = tokenDoc.id;
     let existingTrack = this.activeTracks.get(tokenId);
-    const shouldAnimate = animate || optionsBoolean(options?.mapShineMovement?.animated, false);
+    if (this._isInForceTransformSnapWindow(tokenId)) {
+      this._clearKeyboardMoveQueue(tokenId);
+      if (existingTrack) {
+        this._cancelTrack(existingTrack);
+        this.activeTracks.delete(tokenId);
+      }
+      const target = this._computeTargetTransform(targetDoc);
+      if (target) {
+        sprite.position.set(target.x, target.y, target.z);
+        sprite.scale.set(target.scaleX, target.scaleY, 1);
+        if (sprite.material) sprite.material.rotation = target.rotation;
+        if (sprite.matrixAutoUpdate === false) sprite.updateMatrix();
+      } else {
+        this._pathfindingLog('debug', 'handleTokenSpriteUpdate fallback: missing target during force snap window', {
+          tokenId,
+          styleId,
+          movementMethod: '(force-snap-window)'
+        });
+        fallback();
+      }
+      return true;
+    }
+    const mapShineMethod = String(options?.mapShineMovement?.method || '').toLowerCase();
+    const isExplicitSnap = mapShineMethod === 'snap';
+
+    let shouldAnimate = animate || optionsBoolean(options?.mapShineMovement?.animated, false);
+    // Foundry may mark updates "non-animated" when our updateOptions.animation.duration
+    // is 0. In that case we still want MapShine's sprite tracks for walk/fly
+    // so the sprite doesn't instantly jump start->end.
+    if (!shouldAnimate && !isExplicitSnap) {
+      if (this._isWalkStyle(styleId) || this._isFlyingStyle(styleId) || styleId === 'pick-up-drop') {
+        shouldAnimate = true;
+        this._pathfindingLog('warn', 'handleTokenSpriteUpdate: overriding shouldAnimate for custom tracks', {
+          tokenId,
+          styleId,
+          animateFlag: animate,
+          mapShineMethod,
+          mapShineAnimated: options?.mapShineMovement?.animated
+        });
+      }
+    }
     const movementMethod = this._resolveIncomingMovementMethod(tokenDoc, options);
+    const fallbackWithLog = (reason, extra = {}) => {
+      this._pathfindingLog('debug', 'handleTokenSpriteUpdate delegated to fallback', {
+        tokenId,
+        styleId,
+        reason,
+        movementMethod: movementMethod || '(none)',
+        hasActiveDoorAwareMove,
+        changes: Object.keys(changes || {}),
+        ...extra
+      });
+      fallback();
+    };
+    const hasActiveDoorAwareMove = this._activeMoveLocks.has(String(tokenId || ''));
+    const isUnattributedUpdate = !movementMethod || movementMethod === '(none)';
+    if (hasActiveDoorAwareMove && isUnattributedUpdate) {
+      // During an in-flight door-aware/path-walk move, ignore unattributed visual
+      // updates (often emitted by stair/zone side effects) so they cannot start
+      // a competing walk animation from stale sprite coordinates.
+      this._clearKeyboardMoveQueue(tokenId);
+      const hasXYChange = Object.prototype.hasOwnProperty.call(changes || {}, 'x')
+        || Object.prototype.hasOwnProperty.call(changes || {}, 'y');
+      const hasElevationChange = Object.prototype.hasOwnProperty.call(changes || {}, 'elevation');
+      const hasRotationChange = Object.prototype.hasOwnProperty.call(changes || {}, 'rotation');
+      const hasSizeChange = Object.prototype.hasOwnProperty.call(changes || {}, 'width')
+        || Object.prototype.hasOwnProperty.call(changes || {}, 'height');
+      const hasAnyTransformChange = hasXYChange || hasElevationChange || hasRotationChange || hasSizeChange;
+
+      if (!hasAnyTransformChange) {
+        // Ignore unrelated document updates (flags, light, status effects, etc.)
+        // so they cannot interrupt an in-flight choreographed walk.
+        return true;
+      }
+
+      // Transform-only unattributed updates (elevation/scale/rotation) during an
+      // active move should not cancel the current track. Update the track target
+      // so the running interpolation converges to the new transform.
+      if (!hasXYChange && (hasElevationChange || hasRotationChange || hasSizeChange) && existingTrack?.target) {
+        const nextTarget = this._computeTargetTransform(targetDoc);
+        if (nextTarget) {
+          existingTrack.target.z = nextTarget.z;
+          existingTrack.target.rotation = nextTarget.rotation;
+          existingTrack.target.scaleX = nextTarget.scaleX;
+          existingTrack.target.scaleY = nextTarget.scaleY;
+          return true;
+        }
+      }
+
+      if (existingTrack) {
+        this._cancelTrack(existingTrack);
+        this.activeTracks.delete(tokenId);
+      }
+
+      const target = this._computeTargetTransform(targetDoc);
+      if (target) {
+        sprite.position.set(target.x, target.y, target.z);
+        sprite.scale.set(target.scaleX, target.scaleY, 1);
+        if (sprite.material) sprite.material.rotation = target.rotation;
+        if (sprite.matrixAutoUpdate === false) sprite.updateMatrix();
+      } else {
+        fallbackWithLog('active-move-unattributed-update-missing-target');
+      }
+      return true;
+    }
     const isKeyboardMove = movementMethod === 'keyboard';
 
     moveTrace('handleTokenSprite.incoming', {
@@ -2805,7 +2972,7 @@ export class TokenMovementManager {
         this._cancelTrack(existingTrack);
         this.activeTracks.delete(tokenId);
       }
-      fallback();
+      fallbackWithLog('unknown-style');
       return true;
     }
 
@@ -2819,7 +2986,7 @@ export class TokenMovementManager {
       if (this._isFlyingStyle(styleId)) {
         const target = this._computeTargetTransform(targetDoc);
         if (!target) {
-          fallback();
+          fallbackWithLog('non-animated-flying-missing-target');
           return true;
         }
 
@@ -2846,9 +3013,16 @@ export class TokenMovementManager {
       }
 
       if (this._isWalkStyle(styleId) || styleId === 'pick-up-drop') {
+        this._pathfindingLog('warn', 'handleTokenSpriteUpdate: non-animated walk snap executed', {
+          tokenId,
+          styleId,
+          animateFlag: animate,
+          mapShineMethod,
+          mapShineAnimated: options?.mapShineMovement?.animated
+        });
         const target = this._computeTargetTransform(targetDoc);
         if (!target) {
-          fallback();
+          fallbackWithLog('non-animated-walk-missing-target');
           return true;
         }
         sprite.position.set(target.x, target.y, target.z);
@@ -2858,13 +3032,13 @@ export class TokenMovementManager {
         return true;
       }
 
-      fallback();
+      fallbackWithLog('non-animated-unknown-style');
       return true;
     }
 
     const target = this._computeTargetTransform(targetDoc);
     if (!target) {
-      fallback();
+      fallbackWithLog('animated-missing-target');
       return true;
     }
 
@@ -2900,7 +3074,7 @@ export class TokenMovementManager {
     const dy = target.y - sprite.position.y;
     const dist = Math.hypot(dx, dy);
     if (dist < 1) {
-      fallback();
+      fallbackWithLog('pickup-drop-short-distance');
       return true;
     }
 
@@ -2931,7 +3105,7 @@ export class TokenMovementManager {
 
     const startX = asNumber(sprite.position.x, target.x);
     const startY = asNumber(sprite.position.y, target.y);
-    const startZ = asNumber(sprite.position.z, target.z);
+    const startZ = asNumber(target.z, asNumber(sprite.position.z, 0));
     const startRotation = asNumber(sprite.material?.rotation, target.rotation);
 
     const distance = Math.hypot(target.x - startX, target.y - startY);
@@ -2965,7 +3139,7 @@ export class TokenMovementManager {
 
     try {
       const rl = window.MapShine?.renderLoop;
-      if (rl?.requestContinuousRender) rl.requestContinuousRender(durationMs + 80);
+      if (rl?.requestContinuousRender) rl.requestContinuousRender(deliberateDurationMs + 80);
       else rl?.requestRender?.();
     } catch (_) {
     }
@@ -3010,7 +3184,7 @@ export class TokenMovementManager {
 
     const startX = asNumber(sprite.position.x, target.x);
     const startY = asNumber(sprite.position.y, target.y);
-    const startZ = asNumber(sprite.position.z, target.z);
+    const startZ = asNumber(target.z, asNumber(sprite.position.z, 0));
     const startRotation = asNumber(sprite.material?.rotation, target.rotation);
 
     const distance = Math.hypot(target.x - startX, target.y - startY);
@@ -3043,6 +3217,12 @@ export class TokenMovementManager {
         120,
         1800
       );
+
+    // “Deliberate” walk pacing: halve walk speed by doubling duration for
+    // sequenced path-walk updates (common in door-aware choreography).
+    const methodLower = String(movementMethod || options?.method || options?.mapShineMovement?.method || '').toLowerCase();
+    const isPathWalk = methodLower === 'path-walk' || methodLower === 'walk' || methodLower === 'path_segment';
+    const deliberateDurationMs = isPathWalk ? clamp(durationMs * 2, 120, 3600) : durationMs;
     const bobAmplitude = clamp(
       asNumber(options?.mapShineWalkBobAmplitude, profile.bobAmplitude),
       0,
@@ -3140,7 +3320,7 @@ export class TokenMovementManager {
       tokenId,
       walkStyleId,
       movementMethod: resolvedMovementMethod || '(none)',
-      durationMs,
+      durationMs: deliberateDurationMs,
       from: { x: startX, y: startY, z: startZ },
       to: { x: target.x, y: target.y, z: target.z },
       gridDist: distance / Math.max(1, gridSize)
@@ -3156,7 +3336,7 @@ export class TokenMovementManager {
       startZ,
       startRotation,
       target,
-      durationSec: durationMs / 1000,
+      durationSec: deliberateDurationMs / 1000,
       elapsedSec: 0,
       bobAmplitude: randomizedBobAmplitude,
       bobCycles,
@@ -3787,7 +3967,10 @@ export class TokenMovementManager {
    * @param {object} timeInfo
    */
   update(timeInfo) {
-    const deltaSec = Math.max(0, asNumber(timeInfo?.delta, 0));
+    const rawDeltaSec = Math.max(0, asNumber(timeInfo?.delta, 0));
+    // Effects elsewhere clamp dt to prevent a single long frame from instantly
+    // completing interpolations (which looks like teleportation).
+    const deltaSec = Math.min(rawDeltaSec, 0.1);
     if (deltaSec <= 0) return;
 
     if (this.activeTracks.size > 0) {
@@ -3946,7 +4129,8 @@ export class TokenMovementManager {
    */
   _cancelTrack(track) {
     if (!track?.sprite) return;
-    // Intentionally no snap on cancel; next movement update will drive pose.
+    // Keep cancellation lightweight so normal path-walk updates can blend
+    // naturally without visible teleport snaps between sequential steps.
   }
 
   /**
@@ -7145,6 +7329,9 @@ export class TokenMovementManager {
       const tracedOptions = this._withMovementTraceOptions(options, movementTrace, 'execute-token-move');
       const ignoreWalls = optionsBoolean(tracedOptions?.ignoreWalls, false);
       const ignoreCost = optionsBoolean(tracedOptions?.ignoreCost, false);
+      const controlledAtMoveStart = Array.isArray(canvas?.tokens?.controlled) ? canvas.tokens.controlled : [];
+      const wasSelectedAtMoveStart = controlledAtMoveStart
+        .some((t) => String(t?.document?.id || t?.id || '') === tokenId);
 
       moveTrace('executeDoorAware.start', {
         tokenId,
@@ -7222,6 +7409,279 @@ export class TokenMovementManager {
           ignoreCost
         }, context);
       };
+      const finalPositionTolerancePx = 0.5;
+      const readEndpointDelta = () => {
+        const liveDoc = this._resolveTokenDocumentById(tokenId, currentDoc);
+        if (!liveDoc) return { liveDoc: null, dx: Number.POSITIVE_INFINITY, dy: Number.POSITIVE_INFINITY };
+        return {
+          liveDoc,
+          dx: Math.abs(asNumber(liveDoc?.x, 0) - asNumber(targetTopLeft?.x, 0)),
+          dy: Math.abs(asNumber(liveDoc?.y, 0) - asNumber(targetTopLeft?.y, 0))
+        };
+      };
+      const finalizeSuccessfulMove = async ({ phase = 'unknown', transitions = [], plan = null, resultPathNodes = pathNodes } = {}) => {
+        const forceGraphicSync = async (liveDoc, reasonSuffix = '') => {
+          const reason = `execute-door-aware-complete${reasonSuffix ? `:${reasonSuffix}` : ''}`;
+          this.resyncSpriteToDocument(tokenId, liveDoc, { reason });
+          // Allow one render tick so a just-switched level can materialize its token
+          // object before applying a second hard snap.
+          await _sleep(20);
+          const afterDoc = this._resolveTokenDocumentById(tokenId, liveDoc);
+          this.resyncSpriteToDocument(tokenId, afterDoc || liveDoc, { reason: `${reason}:retry` });
+        };
+
+        const endpointDelta = readEndpointDelta();
+        if (!endpointDelta?.liveDoc) {
+          this._pathfindingLog('warn', 'executeDoorAwareTokenMove finalization failed: missing token document', {
+            tokenId,
+            destinationTopLeft: targetTopLeft,
+            phase,
+            options: tracedOptions,
+            trace: this._traceSummary(movementTrace)
+          });
+          return {
+            ok: false,
+            tokenId,
+            reason: 'missing-token-doc',
+            transitions: transitions || [],
+            plan,
+            pathNodes: resultPathNodes || pathNodes || []
+          };
+        }
+
+        if (endpointDelta.dx < finalPositionTolerancePx && endpointDelta.dy < finalPositionTolerancePx) {
+          await forceGraphicSync(endpointDelta.liveDoc, phase);
+          const finalizeSyncOptions = {
+            ...tracedOptions,
+            _forceSelectedFloorSwitch: wasSelectedAtMoveStart
+          };
+          if (this._shouldDeferSelectedLevelSwitch(tracedOptions)) {
+            await this._followSelectedTokenFloorTransitionAfterMove(endpointDelta.liveDoc, finalizeSyncOptions);
+          }
+          await this._hardenFinalTokenVisualAndCameraSync(tokenId, endpointDelta.liveDoc, finalizeSyncOptions);
+          moveTrace('executeDoorAware.complete', {
+            tokenId,
+            phase,
+            docAfter: {
+              x: endpointDelta.liveDoc?.x,
+              y: endpointDelta.liveDoc?.y,
+              elevation: endpointDelta.liveDoc?.elevation
+            }
+          });
+          return {
+            ok: true,
+            tokenId,
+            reason: null,
+            transitions: transitions || [],
+            plan,
+            pathNodes: resultPathNodes || pathNodes || []
+          };
+        }
+
+        moveTrace('executeDoorAware.finalStepRepair.start', {
+          tokenId,
+          phase,
+          destinationTopLeft: targetTopLeft,
+          liveTopLeft: { x: endpointDelta.liveDoc?.x, y: endpointDelta.liveDoc?.y },
+          delta: { x: endpointDelta.dx, y: endpointDelta.dy }
+        });
+        this._pathfindingLog('warn', 'executeDoorAwareTokenMove endpoint short; forcing final step repair', {
+          token: this._pathfindingTokenMeta(endpointDelta.liveDoc),
+          destinationTopLeft: targetTopLeft,
+          phase,
+          delta: { x: endpointDelta.dx, y: endpointDelta.dy },
+          options: tracedOptions,
+          trace: this._traceSummary(movementTrace)
+        });
+
+        const repairStartTopLeft = {
+          x: asNumber(endpointDelta.liveDoc?.x, 0),
+          y: asNumber(endpointDelta.liveDoc?.y, 0)
+        };
+        const repairStartCenter = this._tokenTopLeftToCenter(repairStartTopLeft, endpointDelta.liveDoc);
+        const repairEndCenter = this._tokenTopLeftToCenter(targetTopLeft, endpointDelta.liveDoc);
+
+        let repairPathNodes = [repairStartCenter, repairEndCenter];
+        if (ignoreWalls) {
+          repairPathNodes = (typeof this._interpolatePathForWalking === 'function')
+            ? this._interpolatePathForWalking([repairStartCenter, repairEndCenter])
+            : [repairStartCenter, repairEndCenter];
+        } else {
+          const repairPath = this._computeConstrainedPathWithDirectAndEscalation({
+            tokenDoc: endpointDelta.liveDoc,
+            startTopLeft: repairStartTopLeft,
+            endTopLeft: targetTopLeft,
+            startCenter: repairStartCenter,
+            endCenter: repairEndCenter,
+            ignoreCost,
+            options: tracedOptions,
+            preferLongRange: false
+          });
+          if (repairPath?.ok && Array.isArray(repairPath?.pathNodes) && repairPath.pathNodes.length >= 2) {
+            repairPathNodes = repairPath.pathNodes;
+          } else {
+            moveTrace('executeDoorAware.finalStepRepair.pathFallback', {
+              tokenId,
+              phase,
+              reason: repairPath?.reason || 'no-path'
+            });
+          }
+        }
+
+        const repairResult = await this.runDoorAwareMovementSequence({
+          tokenId,
+          pathNodes: repairPathNodes,
+          moveToPoint,
+          options: tracedOptions
+        });
+        if (!repairResult?.ok) {
+          moveTrace('executeDoorAware.finalStepRepair.fail', {
+            tokenId,
+            phase,
+            reason: repairResult?.reason || 'door-sequence-failed'
+          });
+          return {
+            ok: false,
+            tokenId,
+            reason: repairResult?.reason || 'final-step-repair-failed',
+            transitions: (transitions || []).concat(repairResult?.transitions || []),
+            plan,
+            pathNodes: resultPathNodes || pathNodes || []
+          };
+        }
+
+        const repairedDelta = readEndpointDelta();
+        if (!repairedDelta?.liveDoc || repairedDelta.dx >= finalPositionTolerancePx || repairedDelta.dy >= finalPositionTolerancePx) {
+          moveTrace('executeDoorAware.finalStepRepair.landedShort', {
+            tokenId,
+            phase,
+            destinationTopLeft: targetTopLeft,
+            liveTopLeft: { x: repairedDelta?.liveDoc?.x, y: repairedDelta?.liveDoc?.y },
+            delta: { x: repairedDelta?.dx, y: repairedDelta?.dy }
+          });
+          const allowFinalHardSnap = optionsBoolean(tracedOptions?.allowFinalHardSnap, true);
+          if (!allowFinalHardSnap) {
+            return {
+              ok: false,
+              tokenId,
+              reason: 'final-step-repair-landed-short',
+              transitions: (transitions || []).concat(repairResult?.transitions || []),
+              plan,
+              pathNodes: resultPathNodes || pathNodes || []
+            };
+          }
+
+          const snapDoc = this._resolveTokenDocumentById(tokenId, repairedDelta?.liveDoc || currentDoc);
+          const snapUpdate = {
+            _id: tokenId,
+            x: targetTopLeft.x,
+            y: targetTopLeft.y
+          };
+          const snapElevation = this._resolveMovementPayloadElevation(snapDoc, tracedOptions);
+          if (Number.isFinite(snapElevation)) {
+            snapUpdate.elevation = snapElevation;
+          }
+          const snapUpdateOptions = this._buildTokenMoveUpdateOptions(snapDoc, snapUpdate, {
+            ...tracedOptions,
+            includeMovementPayload: false
+          }, {
+            tokenId,
+            phase: 'FINAL_HARD_SNAP'
+          });
+          try {
+            await canvas.scene.updateEmbeddedDocuments('Token', [snapUpdate], snapUpdateOptions);
+            await this._awaitSequencedStepSettle(tokenId, 90, tracedOptions, {
+              tokenId,
+              phase: 'FINAL_HARD_SNAP'
+            });
+            const snappedDoc = this._resolveTokenDocumentById(tokenId, snapDoc);
+            this.resyncSpriteToDocument(tokenId, snappedDoc, { reason: 'final-hard-snap' });
+            const snapDx = Math.abs(asNumber(snappedDoc?.x, 0) - asNumber(targetTopLeft?.x, 0));
+            const snapDy = Math.abs(asNumber(snappedDoc?.y, 0) - asNumber(targetTopLeft?.y, 0));
+            if (snapDx >= finalPositionTolerancePx || snapDy >= finalPositionTolerancePx) {
+              const retryOptions = this._buildTokenMoveUpdateOptions(snappedDoc, snapUpdate, {
+                ...tracedOptions,
+                includeMovementPayload: false
+              }, {
+                tokenId,
+                phase: 'FINAL_HARD_SNAP_RETRY'
+              });
+              await canvas.scene.updateEmbeddedDocuments('Token', [snapUpdate], retryOptions);
+              await this._awaitSequencedStepSettle(tokenId, 90, tracedOptions, {
+                tokenId,
+                phase: 'FINAL_HARD_SNAP_RETRY'
+              });
+              const retriedDoc = this._resolveTokenDocumentById(tokenId, snappedDoc);
+              this.resyncSpriteToDocument(tokenId, retriedDoc, { reason: 'final-hard-snap-retry' });
+            }
+            moveTrace('executeDoorAware.finalStepRepair.hardSnapOk', {
+              tokenId,
+              phase,
+              destinationTopLeft: targetTopLeft,
+              docAfter: { x: snappedDoc?.x, y: snappedDoc?.y, elevation: snappedDoc?.elevation }
+            });
+            const hardSnapTransitions = (transitions || []).concat(repairResult?.transitions || []);
+            return {
+              ok: true,
+              tokenId,
+              reason: null,
+              transitions: hardSnapTransitions,
+              plan: plan || repairResult?.plan || null,
+              pathNodes: resultPathNodes || pathNodes || []
+            };
+          } catch (snapError) {
+            this._pathfindingLog('warn', 'executeDoorAwareTokenMove final hard snap failed', {
+              token: this._pathfindingTokenMeta(snapDoc),
+              destinationTopLeft: targetTopLeft,
+              phase,
+              options: tracedOptions,
+              trace: this._traceSummary(movementTrace)
+            }, snapError);
+            return {
+              ok: false,
+              tokenId,
+              reason: 'final-hard-snap-failed',
+              transitions: (transitions || []).concat(repairResult?.transitions || []),
+              plan,
+              pathNodes: resultPathNodes || pathNodes || []
+            };
+          }
+        }
+
+        const mergedPathNodes = Array.isArray(resultPathNodes) && resultPathNodes.length > 0
+          ? resultPathNodes.slice()
+          : [];
+        if (Array.isArray(repairPathNodes) && repairPathNodes.length > 1) {
+          if (mergedPathNodes.length === 0) mergedPathNodes.push(...repairPathNodes);
+          else mergedPathNodes.push(...repairPathNodes.slice(1));
+        }
+        moveTrace('executeDoorAware.finalStepRepair.ok', {
+          tokenId,
+          phase,
+          docAfter: {
+            x: repairedDelta.liveDoc?.x,
+            y: repairedDelta.liveDoc?.y,
+            elevation: repairedDelta.liveDoc?.elevation
+          }
+        });
+        await forceGraphicSync(repairedDelta.liveDoc, `${phase}:repair`);
+        const finalizeRepairSyncOptions = {
+          ...tracedOptions,
+          _forceSelectedFloorSwitch: wasSelectedAtMoveStart
+        };
+        if (this._shouldDeferSelectedLevelSwitch(tracedOptions)) {
+          await this._followSelectedTokenFloorTransitionAfterMove(repairedDelta.liveDoc, finalizeRepairSyncOptions);
+        }
+        await this._hardenFinalTokenVisualAndCameraSync(tokenId, repairedDelta.liveDoc, finalizeRepairSyncOptions);
+        return {
+          ok: true,
+          tokenId,
+          reason: null,
+          transitions: (transitions || []).concat(repairResult?.transitions || []),
+          plan: plan || repairResult?.plan || null,
+          pathNodes: mergedPathNodes
+        };
+      };
 
       // Cross-floor execution (foundation): walk to portal entry, perform
       // portal transition (position/elevation update), then continue on target
@@ -7242,14 +7702,12 @@ export class TokenMovementManager {
         });
         if (routeResult?.ok) {
           moveTrace('executeDoorAware.crossFloor.ok', { tokenId });
-          return {
-            ok: true,
-            tokenId,
-            reason: null,
+          return finalizeSuccessfulMove({
+            phase: 'cross-floor-route',
             transitions: routeResult.transitions || [],
             plan: routeResult.plan || null,
-            pathNodes: routeResult.pathNodes || pathNodes
-          };
+            resultPathNodes: routeResult.pathNodes || pathNodes
+          });
         }
 
         this._pathfindingLog('warn', 'executeDoorAwareTokenMove cross-floor route failed; falling back to single-floor sequence', {
@@ -7268,7 +7726,14 @@ export class TokenMovementManager {
 
       const builtPlan = this.buildDoorAwarePlan(pathNodes || []);
       const hasDoorSteps = Array.isArray(builtPlan?.doorSteps) && builtPlan.doorSteps.length > 0;
-      const allowNativeCheckpointMove = optionsBoolean(tracedOptions?.preferFoundryCheckpointMove, true);
+      const methodLower = String(tracedOptions?.method || '').toLowerCase();
+      const isWalkyMethod = methodLower === 'path-walk'
+        || methodLower === 'walk'
+        || methodLower === 'path_segment';
+      // Foundry's checkpoint move path for walk styles appears to be the
+      // teleport trigger (it snaps the sprite/document without giving the
+      // sequenced walk-track choreography time to run).
+      const allowNativeCheckpointMove = optionsBoolean(tracedOptions?.preferFoundryCheckpointMove, true) && !isWalkyMethod;
       if (allowNativeCheckpointMove && !hasDoorSteps) {
         const nativeWaypoints = this._buildCheckpointWaypointsFromPathNodes(pathNodes, currentDoc, tracedOptions);
         if (nativeWaypoints.length > 0) {
@@ -7290,24 +7755,12 @@ export class TokenMovementManager {
             movementTrace
           });
           if (nativeMoveResult?.ok) {
-            const afterDoc = this._resolveTokenDocumentById(tokenId, currentDoc);
-            moveTrace('executeDoorAware.foundryCheckpoint.ok', {
-              tokenId,
-              waypointCount: nativeWaypoints.length,
-              docAfter: {
-                x: afterDoc?.x,
-                y: afterDoc?.y,
-                elevation: afterDoc?.elevation
-              }
-            });
-            return {
-              ok: true,
-              tokenId,
-              reason: null,
+            return finalizeSuccessfulMove({
+              phase: 'foundry-checkpoint',
               transitions: [],
               plan: builtPlan,
-              pathNodes
-            };
+              resultPathNodes: pathNodes
+            });
           }
           moveTrace('executeDoorAware.foundryCheckpoint.fail', {
             tokenId,
@@ -7322,6 +7775,12 @@ export class TokenMovementManager {
             trace: this._traceSummary(movementTrace)
           });
         }
+      }
+      else if (optionsBoolean(tracedOptions?.preferFoundryCheckpointMove, true) && !hasDoorSteps && isWalkyMethod) {
+        moveTrace('executeDoorAware.foundryCheckpoint.skipped', {
+          tokenId,
+          method: methodLower
+        });
       }
 
       moveTrace('executeDoorAware.sequenced.start', {
@@ -7367,14 +7826,12 @@ export class TokenMovementManager {
         transitionCount: Array.isArray(sequenceResult?.transitions) ? sequenceResult.transitions.length : 0,
         docAfter: { x: afterSeq?.x, y: afterSeq?.y, elevation: afterSeq?.elevation }
       });
-      return {
-        ok: true,
-        tokenId,
-        reason: null,
+      return finalizeSuccessfulMove({
+        phase: 'sequenced',
         transitions: sequenceResult.transitions || [],
         plan: sequenceResult.plan,
-        pathNodes
-      };
+        resultPathNodes: pathNodes
+      });
     } catch (error) {
       moveTrace('executeDoorAware.throw', {
         tokenId,
@@ -7439,6 +7896,106 @@ export class TokenMovementManager {
     switchToLevelForElevation(toBottom + 0.001, 'token-movement-selected-floor-follow');
   }
 
+  _shouldDeferSelectedLevelSwitch(options = {}) {
+    if (Object.prototype.hasOwnProperty.call(options || {}, 'deferSelectedLevelSwitch')) {
+      return optionsBoolean(options?.deferSelectedLevelSwitch, false);
+    }
+    const method = String(options?.method || '').toLowerCase();
+    return method === 'path-walk' || method === 'walk';
+  }
+
+  async _followSelectedTokenFloorTransitionAfterMove(tokenDoc, options = {}) {
+    let floorBottom = asNumber(options?.destinationFloorBottom, NaN);
+    let floorTop = asNumber(options?.destinationFloorTop, NaN);
+    let toFloor = null;
+    if (Number.isFinite(floorBottom) && Number.isFinite(floorTop)) {
+      toFloor = {
+        bottom: Math.min(floorBottom, floorTop),
+        top: Math.max(floorBottom, floorTop)
+      };
+    } else {
+      const liveDoc = this._resolveTokenDocumentById(String(tokenDoc?.id || ''), tokenDoc);
+      const floorKey = this._resolveFloorKeyForElevation(liveDoc?.elevation);
+      toFloor = this._parseFloorKey(floorKey);
+      if (!toFloor) return;
+      floorBottom = asNumber(toFloor?.bottom, NaN);
+      floorTop = asNumber(toFloor?.top, NaN);
+      if (!Number.isFinite(floorBottom) || !Number.isFinite(floorTop)) return;
+    }
+
+    const pauseMs = clamp(Math.round(asNumber(options?.levelSwitchAfterMovePauseMs, 90)), 0, 1200);
+    if (pauseMs > 0) await _sleep(pauseMs);
+    if (optionsBoolean(options?._forceSelectedFloorSwitch, false)) {
+      const toBottom = asNumber(toFloor?.bottom, NaN);
+      if (Number.isFinite(toBottom)) {
+        switchToLevelForElevation(toBottom + 0.001, 'token-movement-selected-floor-follow:deferred-force');
+      }
+      return;
+    }
+    this._followSelectedTokenFloorTransition(tokenDoc, null, toFloor);
+  }
+
+  _isTokenSpriteAlignedToDocument(tokenId, tokenDoc, tolerancePx = 0.75) {
+    const id = String(tokenId || tokenDoc?.id || '');
+    if (!id) return true;
+    const spriteData = this.tokenManager?.tokenSprites?.get?.(id);
+    const sprite = spriteData?.sprite;
+    if (!sprite) return true;
+    const target = this._computeTargetTransform(tokenDoc);
+    if (!target) return true;
+    const dx = Math.abs(asNumber(sprite?.position?.x, target.x) - target.x);
+    const dy = Math.abs(asNumber(sprite?.position?.y, target.y) - target.y);
+    return dx < tolerancePx && dy < tolerancePx;
+  }
+
+  _forceCameraFloorToTokenElevation(tokenDoc, reason = 'token-move-force-floor') {
+    const elevation = asNumber(tokenDoc?.elevation, NaN);
+    if (!Number.isFinite(elevation)) return false;
+    const cf = window.MapShine?.cameraFollower;
+    if (cf && typeof cf._findBestLevelIndexForElevation === 'function' && typeof cf.setActiveLevel === 'function') {
+      const idx = cf._findBestLevelIndexForElevation(elevation);
+      if (Number.isFinite(idx) && idx >= 0) {
+        try {
+          if (typeof cf.setLockMode === 'function') {
+            cf.setLockMode('manual', { emit: false, reason: `${reason}:manual` });
+          }
+        } catch (_) {
+        }
+        cf.setActiveLevel(idx, { reason, emit: true });
+        return true;
+      }
+    }
+    return !!switchToLevelForElevation(elevation + 0.001, reason);
+  }
+
+  async _hardenFinalTokenVisualAndCameraSync(tokenId, tokenDoc, options = {}) {
+    const id = String(tokenId || tokenDoc?.id || '');
+    if (!id) return;
+    const attempts = clamp(Math.round(asNumber(options?.finalVisualCameraSyncAttempts, 4)), 1, 8);
+    const intervalMs = clamp(Math.round(asNumber(options?.finalVisualCameraSyncIntervalMs, 26)), 8, 120);
+    const forceFloor = optionsBoolean(options?._forceSelectedFloorSwitch, false);
+
+    for (let i = 0; i < attempts; i++) {
+      const liveDoc = this._resolveTokenDocumentById(id, tokenDoc);
+      if (!liveDoc) break;
+      this.resyncSpriteToDocument(id, liveDoc, { reason: `final-harden-sync:${i + 1}` });
+      if (forceFloor) {
+        this._forceCameraFloorToTokenElevation(liveDoc, `token-move-final-floor-sync:${i + 1}`);
+      }
+
+      const spriteAligned = this._isTokenSpriteAlignedToDocument(id, liveDoc);
+      const activeCtx = window.MapShine?.activeLevelContext;
+      const levelAligned = !forceFloor
+        || (activeCtx
+          && Number.isFinite(asNumber(activeCtx?.bottom, NaN))
+          && Number.isFinite(asNumber(activeCtx?.top, NaN))
+          && asNumber(liveDoc?.elevation, NaN) >= asNumber(activeCtx?.bottom, NaN)
+          && asNumber(liveDoc?.elevation, NaN) < asNumber(activeCtx?.top, NaN));
+      if (spriteAligned && levelAligned) return;
+      await _sleep(intervalMs);
+    }
+  }
+
   async _applyPortalTransitionStep({ tokenId, tokenDoc, segment, options = {} } = {}) {
     const liveDoc = this._resolveTokenDocumentById(tokenId, tokenDoc);
     if (!liveDoc) return { ok: false, reason: 'missing-token-doc' };
@@ -7473,10 +8030,24 @@ export class TokenMovementManager {
 
     try {
       await canvas.scene.updateEmbeddedDocuments('Token', [update], updateOptions);
-      this._followSelectedTokenFloorTransition(liveDoc, this._parseFloorKey(segment?.fromFloorKey), toFloor);
+      if (!this._shouldDeferSelectedLevelSwitch(options)) {
+        this._followSelectedTokenFloorTransition(liveDoc, this._parseFloorKey(segment?.fromFloorKey), toFloor);
+      }
       await this._awaitSequencedStepSettle(tokenId, Math.max(80, asNumber(segment?.travelTimeMs, 400)), options, {
         tokenId,
         phase: 'PORTAL_TRANSITION'
+      });
+      // Stair/portal replay can leave the document authoritative while the token
+      // graphic remains one frame behind on the old floor view. Force a hard sync.
+      this.resyncSpriteToDocument(tokenId, liveDoc, { reason: 'portal-transition' });
+      await _sleep(20);
+      this.resyncSpriteToDocument(tokenId, this._resolveTokenDocumentById(tokenId, liveDoc), {
+        reason: 'portal-transition:retry'
+      });
+      await this._hardenFinalTokenVisualAndCameraSync(tokenId, liveDoc, {
+        _forceSelectedFloorSwitch: false,
+        finalVisualCameraSyncAttempts: 2,
+        finalVisualCameraSyncIntervalMs: 20
       });
       return { ok: true, targetTopLeft };
     } catch (_) {
@@ -7529,6 +8100,11 @@ export class TokenMovementManager {
       const walkStartCenter = this._tokenTopLeftToCenter({ x: liveDoc.x, y: liveDoc.y }, liveDoc);
       const walkEndCenter = this._tokenTopLeftToCenter(walkTopLeft, liveDoc);
       const floor = this._parseFloorKey(segment?.floorKey);
+      const segmentMoveOptions = {
+        ...options,
+        destinationFloorBottom: floor?.bottom,
+        destinationFloorTop: floor?.top
+      };
 
       const walkPathResult = this._computeConstrainedPathWithDirectAndEscalation({
         tokenDoc: liveDoc,
@@ -7537,11 +8113,7 @@ export class TokenMovementManager {
         startCenter: walkStartCenter,
         endCenter: walkEndCenter,
         ignoreCost,
-        options: {
-          ...options,
-          destinationFloorBottom: floor?.bottom,
-          destinationFloorTop: floor?.top
-        },
+        options: segmentMoveOptions,
         preferLongRange: true
       });
 
@@ -7551,7 +8123,7 @@ export class TokenMovementManager {
 
       const moveToPoint = async (point, context = {}) => {
         return this._moveTokenToFoundryPoint(tokenId, point, liveDoc, {
-          ...options,
+          ...segmentMoveOptions,
           ignoreWalls,
           ignoreCost
         }, context);
@@ -7561,11 +8133,7 @@ export class TokenMovementManager {
         tokenId,
         pathNodes: walkPathResult.pathNodes,
         moveToPoint,
-        options: {
-          ...options,
-          destinationFloorBottom: floor?.bottom,
-          destinationFloorTop: floor?.top
-        }
+        options: segmentMoveOptions
       });
 
       if (!walkSequence?.ok) {
@@ -10577,7 +11145,7 @@ export class TokenMovementManager {
         return { ok: false, reason: 'interrupted-by-new-move' };
       }
 
-      if (targetFloor) {
+      if (targetFloor && !this._shouldDeferSelectedLevelSwitch(options)) {
         this._followSelectedTokenFloorTransition(liveDoc, sourceFloor, targetFloor);
       }
 
@@ -10604,9 +11172,15 @@ export class TokenMovementManager {
         y: asNumber(landedDoc?.y, NaN)
       };
       if (Number.isFinite(landedTopLeft.x) && Number.isFinite(landedTopLeft.y)) {
+        const gridSize = Math.max(1, asNumber(canvas?.grid?.size, asNumber(canvas?.dimensions?.size, 100)));
+        const landedShortTolerancePx = clamp(
+          asNumber(options?.landedShortTolerancePx, gridSize * 0.1),
+          0.75,
+          Math.max(0.75, gridSize * 0.45)
+        );
         const landedDx = Math.abs(landedTopLeft.x - targetTopLeft.x);
         const landedDy = Math.abs(landedTopLeft.y - targetTopLeft.y);
-        if (landedDx >= 0.75 || landedDy >= 0.75) {
+        if (landedDx >= landedShortTolerancePx || landedDy >= landedShortTolerancePx) {
           const payloadEntry = updateOptions?.movement?.[tokenId] || updateOptions?._movement?.[tokenId] || null;
           const requestedElevation = asNumber(requestedUpdateSnapshot?.update?.elevation, asNumber(landedDoc?.elevation, NaN));
           const clampCollisionDiagnostics = this._collectStepClampCollisionDiagnostics(
@@ -10622,6 +11196,7 @@ export class TokenMovementManager {
             targetTopLeft,
             landedTopLeft,
             landedDelta: { x: landedDx, y: landedDy },
+            landedShortTolerancePx,
             update,
             requestedUpdateSnapshot,
             updateResult,
@@ -10710,6 +11285,27 @@ export class TokenMovementManager {
 
     const phase = String(context?.phase || options?.method || 'PATH_SEGMENT');
     const isGroupPhase = phase === 'GROUP_PATH_SEGMENT';
+    const methodLower = String(options?.method || context?.phase || '').toLowerCase();
+    const isPathWalkChoreo = (
+      methodLower === 'path-walk'
+      || methodLower === 'walk'
+      || methodLower === 'path_segment'
+      || /PATH_SEGMENT|PATH_TO_DOOR|PRE_DOOR_HOLD|CROSS_DOOR|RESUME_PATH|GROUP_PATH_SEGMENT/i.test(phase)
+    );
+
+    // Deliberate pacing: add a consistent “grid stop” pause for sequenced
+    // path-walk steps so motion feels more intentional.
+    if (isPathWalkChoreo) {
+      const gridPauseMs = clamp(Math.round(asNumber(options?.mapShineGridPauseMs, 120)), 0, 400);
+      const varianceMs = clamp(Math.round(asNumber(options?.mapShineGridPauseJitterMs, 25)), 0, 200);
+      // Preserve deterministic organic cadence without making each step random.
+      const stepIndex = Math.round(asNumber(context?.groupStepIndex, asNumber(context?.stepIndex, -1)));
+      const sceneId = String(canvas?.scene?.id || 'scene');
+      const distanceKey = Math.round(asNumber(stepDistancePx, 0));
+      const seed = hashStringToUnit(`${sceneId}|${tokenId}|${phase}|${stepIndex}|${distanceKey}|gridpause`);
+      const jitter = ((seed * 2) - 1) * (varianceMs * 0.5);
+      return clamp(gridPauseMs + jitter, 0, 260);
+    }
     const baseMs = clamp(asNumber(options?.stepPauseBaseMs, isGroupPhase ? 12 : 7), 0, 220);
     const varianceMs = clamp(asNumber(options?.stepPauseVarianceMs, isGroupPhase ? 34 : 18), 0, 220);
 
@@ -10772,7 +11368,8 @@ export class TokenMovementManager {
 
     if (cancelled()) return;
 
-    const waitForTrackStartMs = clamp(asNumber(options?.waitForTrackStartMs, 220), 0, 2000);
+    const inferredTrackStartWaitMs = Math.min(650, Math.max(220, Math.round(asNumber(fallbackDelayMs, 0) * 0.8)));
+    const waitForTrackStartMs = clamp(asNumber(options?.waitForTrackStartMs, inferredTrackStartWaitMs), 0, 2000);
     const waitForTrackFinishMs = clamp(asNumber(options?.waitForTrackFinishMs, 2400), 100, 10000);
     const pollMs = clamp(asNumber(options?.trackPollIntervalMs, 16), 8, 100);
 
@@ -11061,13 +11658,36 @@ export class TokenMovementManager {
     if (updateOptions.animation === undefined) {
       updateOptions.animation = { duration: 0 };
     }
+    const contextPhase = String(context?.phase || '');
+    const isForceSnapPhase = contextPhase === 'FINAL_HARD_SNAP' || contextPhase === 'FINAL_HARD_SNAP_RETRY';
     if (!updateOptions.mapShineMovement) {
       updateOptions.mapShineMovement = {
-        animated: true,
-        method: String(options?.method || context?.phase || 'path-walk'),
+        animated: !isForceSnapPhase,
+        method: isForceSnapPhase
+          ? 'snap'
+          : String(options?.method || context?.phase || 'path-walk'),
         phase: String(context?.phase || '')
       };
     }
+    if (isForceSnapPhase) {
+      updateOptions.mapShineMovement.animated = false;
+      updateOptions.animate = false;
+      updateOptions.animation = { duration: 0 };
+    }
+
+    // Ensure TokenManager receives `options.animate=true` when MapShine is
+    // controlling the sprite via tracks. Foundry may derive animate=false
+    // from animation.duration=0; without this, TokenManager may snap
+    // start->end visually.
+    const methodLower = String(options?.method || context?.phase || '').toLowerCase();
+    const contextPhaseUpper = String(contextPhase || '').toUpperCase();
+    const sequencedWalky = (
+      methodLower === 'path-walk'
+      || methodLower === 'walk'
+      || methodLower === 'path_segment'
+      || /PATH_SEGMENT|PATH_TO_DOOR|PRE_DOOR_HOLD|CROSS_DOOR|RESUME_PATH|GROUP_PATH_SEGMENT/.test(contextPhaseUpper)
+    );
+    if (!isForceSnapPhase && sequencedWalky) updateOptions.animate = true;
 
     // Keep floor/context constraints available to movement guards and diagnostics
     // even when Foundry's movement payload is intentionally suppressed.

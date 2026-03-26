@@ -2306,11 +2306,17 @@ export class WaterEffectV2 {
     // Wind always drives wave speed/strength. Min factors set the calm-water baseline.
     const speedMin = Math.max(0.0, p.waveSpeedWindMinFactor ?? 0.2);
     const strengthMin = Math.max(0.0, p.waveStrengthWindMinFactor ?? 0.55);
-    const waveSpeed = (speedMin + (1.0 - speedMin) * this._waveWindMotion01) * (p.waveSpeed ?? 1.0);
-    const waveStrength = (strengthMin + (1.0 - strengthMin) * this._waveWindMotion01) * (p.waveStrength ?? 0.6);
+    // Non-linear gust curve:
+    // - low/mod wind stays close to the calm baseline
+    // - high wind quickly ramps wave energy (faster + taller waves)
+    // Map windMotion into a "gust energy" curve that ramps more strongly
+    // as wind increases, while preserving calm=0 and gust=1.
+    const gust01 = 1.0 - Math.pow(1.0 - this._waveWindMotion01, 1.35);
+    const waveSpeed = (speedMin + (1.0 - speedMin) * gust01) * (p.waveSpeed ?? 1.0);
+    const waveStrength = (strengthMin + (1.0 - strengthMin) * gust01) * (p.waveStrength ?? 0.6);
 
     // Wind time: monotonic integration driven by the smoothed wave wind (never reverses).
-    this._windTime += dt * (0.1 + this._waveWindMotion01 * 0.9);
+    this._windTime += dt * (0.1 + gust01 * 0.9);
     this._waveTime += dt * waveSpeed;
     u.uWindTime.value = this._windTime;
     if (u.uWaveTime) u.uWaveTime.value = this._waveTime;
@@ -2321,7 +2327,7 @@ export class WaterEffectV2 {
     const waterWindDirX = windDirX;
     const waterWindDirY = windDirY;
     u.uWindDir.value.set(waterWindDirX, waterWindDirY);
-    u.uWindSpeed.value = this._waveWindMotion01;
+    u.uWindSpeed.value = gust01;
 
     // Debug arrow: visualize the wind direction vector actually used by water.
     this._updateWindDebugArrow(waterWindDirX, waterWindDirY, windMotion01, !!p.debugWindArrow);
@@ -2339,7 +2345,7 @@ export class WaterEffectV2 {
       const advMul = (advMulLegacy != null) ? advMulLegacy : (advSpeed01 * 4.0);
 
       // Drive advection strictly by smoothed wave wind speed (no constant base drift, no reversal).
-      const pxPerSec = (220.0 * this._waveWindMotion01) * advMul;
+      const pxPerSec = (220.0 * gust01) * advMul;
 
       const adDeg = Number.isFinite(p.advectionDirOffsetDeg) ? p.advectionDirOffsetDeg : 0.0;
       if (this._cachedAdvectionDirOffsetDeg !== adDeg) {
@@ -2379,7 +2385,7 @@ export class WaterEffectV2 {
     u.uWaveScale.value = safeNum(p.waveScale, 16.0);
     u.uWaveSpeed.value = waveSpeed;
     u.uWaveStrength.value = waveStrength;
-    if (u.uWaveMotion01) u.uWaveMotion01.value = this._waveWindMotion01;
+    if (u.uWaveMotion01) u.uWaveMotion01.value = gust01;
     u.uDistortionStrengthPx.value = safeNum(p.distortionStrengthPx, 24.0);
 
     // Wave breakup noise (new). If unset, fall back to legacy waveMicroNormal* params.
@@ -2389,19 +2395,28 @@ export class WaterEffectV2 {
     const breakupWarp = safeNum(p.waveBreakupWarp, safeNum(p.waveMicroNormalWarp, 0.0));
     const breakupDist = safeNum(p.waveBreakupDistortionStrength, safeNum(p.waveMicroNormalDistortionStrength, 0.0));
     const breakupSpec = safeNum(p.waveBreakupSpecularStrength, safeNum(p.waveMicroNormalSpecularStrength, 0.0));
+    // Extra turbulence coupling: faster/high-wind gusts should add more
+    // breakup energy without changing the authored "frequency" feel.
+    const turbStrengthMul = 0.85 + 0.65 * gust01; // up to ~1.5x at full gust
+    const turbSpeedMul = 0.90 + 0.80 * gust01;    // up to ~1.7x at full gust
+    const breakupStrengthEff = breakupStrength * turbStrengthMul;
+    const breakupSpeedEff = breakupSpeed * turbSpeedMul;
+    const breakupDistEff = breakupDist * turbStrengthMul;
+    const breakupSpecEff = breakupSpec * turbStrengthMul;
     if (u.uWaveBreakupStrength) u.uWaveBreakupStrength.value = breakupStrength;
     if (u.uWaveBreakupScale) u.uWaveBreakupScale.value = breakupScale;
-    if (u.uWaveBreakupSpeed) u.uWaveBreakupSpeed.value = breakupSpeed;
+    if (u.uWaveBreakupSpeed) u.uWaveBreakupSpeed.value = breakupSpeedEff;
     if (u.uWaveBreakupWarp) u.uWaveBreakupWarp.value = breakupWarp;
-    if (u.uWaveBreakupDistortionStrength) u.uWaveBreakupDistortionStrength.value = breakupDist;
-    if (u.uWaveBreakupSpecularStrength) u.uWaveBreakupSpecularStrength.value = breakupSpec;
+    if (u.uWaveBreakupStrength) u.uWaveBreakupStrength.value = breakupStrengthEff;
+    if (u.uWaveBreakupDistortionStrength) u.uWaveBreakupDistortionStrength.value = breakupDistEff;
+    if (u.uWaveBreakupSpecularStrength) u.uWaveBreakupSpecularStrength.value = breakupSpecEff;
 
-    if (u.uWaveMicroNormalStrength) u.uWaveMicroNormalStrength.value = safeNum(p.waveMicroNormalStrength, 0.0);
+    if (u.uWaveMicroNormalStrength) u.uWaveMicroNormalStrength.value = safeNum(p.waveMicroNormalStrength, 0.0) * turbStrengthMul;
     if (u.uWaveMicroNormalScale) u.uWaveMicroNormalScale.value = safeNum(p.waveMicroNormalScale, 1.0);
-    if (u.uWaveMicroNormalSpeed) u.uWaveMicroNormalSpeed.value = safeNum(p.waveMicroNormalSpeed, 0.0);
+    if (u.uWaveMicroNormalSpeed) u.uWaveMicroNormalSpeed.value = safeNum(p.waveMicroNormalSpeed, 0.0) * turbSpeedMul;
     if (u.uWaveMicroNormalWarp) u.uWaveMicroNormalWarp.value = safeNum(p.waveMicroNormalWarp, 0.0);
-    if (u.uWaveMicroNormalDistortionStrength) u.uWaveMicroNormalDistortionStrength.value = safeNum(p.waveMicroNormalDistortionStrength, 0.0);
-    if (u.uWaveMicroNormalSpecularStrength) u.uWaveMicroNormalSpecularStrength.value = safeNum(p.waveMicroNormalSpecularStrength, 0.0);
+    if (u.uWaveMicroNormalDistortionStrength) u.uWaveMicroNormalDistortionStrength.value = safeNum(p.waveMicroNormalDistortionStrength, 0.0) * turbStrengthMul;
+    if (u.uWaveMicroNormalSpecularStrength) u.uWaveMicroNormalSpecularStrength.value = safeNum(p.waveMicroNormalSpecularStrength, 0.0) * turbStrengthMul;
 
     u.uWaveWarpLargeStrength.value = safeNum(p.waveWarpLargeStrength, 0.15);
     u.uWaveWarpSmallStrength.value = safeNum(p.waveWarpSmallStrength, 0.08);

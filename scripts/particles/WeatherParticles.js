@@ -101,20 +101,31 @@ function roofDripDiagLogsEnabled() {
 }
 
 /**
- * Overhead roof tiles: Foundry V12+ exposes `overhead` on the live document/tile.
- * `_source.overhead` alone can be stale or unset after data migrations / partial loads.
+ * Determine whether a roof-drip tile should be treated as overhead without
+ * reading deprecated `TileDocument#overhead` (PF2e v12+).
+ *
+ * Priority:
+ * 1) Persisted source overhead flags (legacy/core scenes)
+ * 2) Levels overhead flag
+ * 3) Elevation >= scene.foregroundElevation (Foundry v12 behavior)
+ *
  * @param {*} tile
  * @param {*} doc
  * @returns {boolean}
  */
 function roofDripTileIsExplicitOverhead(tile, doc) {
-  const live = tile?.overhead ?? doc?.overhead;
-  if (typeof live === 'boolean') return live;
-  const src = doc?._source;
+  const d = doc ?? tile?.document ?? tile;
+  const src = d?._source;
   if (typeof src?.overhead === 'boolean') return src.overhead;
   const levelsOverhead = src?.flags?.levels?.overhead;
   if (typeof levelsOverhead === 'boolean') return levelsOverhead;
-  return false;
+  const foregroundElevation = Number.isFinite(Number(canvas?.scene?.foregroundElevation))
+    ? Number(canvas.scene.foregroundElevation)
+    : 0;
+  const tileElevation = Number.isFinite(Number(d?.elevation))
+    ? Number(d.elevation)
+    : 0;
+  return tileElevation >= foregroundElevation;
 }
 
 /**

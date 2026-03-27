@@ -3055,17 +3055,35 @@ function installFogSaveSafetyPatch() {
 
       const wrapped = function mapShineFogSafeWrapper(...args) {
         const transitionActive = !!window?.MapShine?.__sceneTransitionActive;
+        // commit() is always async in practice; return a Promise that never rejects so
+        // Foundry cannot produce an unhandled rejection from #extractPixels, etc.
+        if (methodName === 'commit') {
+          if (transitionActive) return Promise.resolve(undefined);
+          return new Promise((resolve) => {
+            try {
+              const out = original.apply(this, args);
+              Promise.resolve(out)
+                .then((v) => resolve(v))
+                .catch((err) => {
+                  try {
+                    log.debug('Suppressed FogManager.commit rejection (Map Shine V2 fog)', err?.message ?? err);
+                  } catch (_) {}
+                  resolve(undefined);
+                });
+            } catch (err) {
+              try {
+                log.debug('Suppressed FogManager.commit sync throw (Map Shine V2 fog)', err?.message ?? err);
+              } catch (_) {}
+              resolve(undefined);
+            }
+          });
+        }
+
         if (transitionActive) return undefined;
         try {
           const out = original.apply(this, args);
           if (out && typeof out.then === 'function') {
             return Promise.resolve(out).catch((err) => {
-              // V2 fog does not use Foundry's PIXI fog texture; commit() still runs from
-              // refreshVisibility and often rejects (e.g. #extractPixels) — never surface as unhandled.
-              if (methodName === 'commit') {
-                log.debug('Suppressed FogManager.commit rejection (Map Shine V2 fog)', err?.message ?? err);
-                return undefined;
-              }
               if (isKnownFogSizeError(err)) {
                 log.warn(`Suppressed FogManager.${methodName} failure during scene lifecycle`, err?.message ?? err);
                 return undefined;
@@ -3075,10 +3093,6 @@ function installFogSaveSafetyPatch() {
           }
           return out;
         } catch (err) {
-          if (methodName === 'commit') {
-            log.debug('Suppressed FogManager.commit sync throw (Map Shine V2 fog)', err?.message ?? err);
-            return undefined;
-          }
           if (isKnownFogSizeError(err)) {
             log.warn(`Suppressed FogManager.${methodName} sync failure`, err?.message ?? err);
             return undefined;

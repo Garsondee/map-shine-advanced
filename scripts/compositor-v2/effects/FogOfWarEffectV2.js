@@ -290,6 +290,11 @@ export class FogOfWarEffectV2 {
      * @type {boolean}
      */
     this._frameTokenOutsideActiveLevelBand = false;
+    /**
+     * Non-GM: scene id we already nudged CameraFollower for so fog store band key can resolve.
+     * @type {string|null}
+     */
+    this._playerLevelContextPrimeSceneId = null;
 
     // Door->fog transition sync: keep fog reveal/occlusion temporally aligned
     // with door visual opening/closing rather than snapping instantly on ds.
@@ -718,6 +723,8 @@ export class FogOfWarEffectV2 {
         }
       })(),
       frameTokenOutsideActiveLevelBand: this._frameTokenOutsideActiveLevelBand,
+      playerFogCanvasAndTokensReady: this._playerFogCanvasAndTokensReady(),
+      playerLevelContextPrimedSceneId: this._playerLevelContextPrimeSceneId,
       explorationLoadGeneration: this._explorationLoadGeneration,
       realUserIsGM: !!game?.user?.isGM,
       fogStoreContextResolved: this._computeFogStoreContext().resolved,
@@ -954,6 +961,7 @@ export class FogOfWarEffectV2 {
     this._explorationLoadedFromFoundry = false;
     this._explorationLoadAttempts = 0;
     this._explorationGpuBandKey = null;
+    this._playerLevelContextPrimeSceneId = null;
     this._needsVisionUpdate = true;
     this._hasValidVision = false;
 
@@ -1660,6 +1668,7 @@ export class FogOfWarEffectV2 {
       const { bandKey, actorIds, key, resolved } = this._computeFogStoreContext();
       this._lastFogStoreLoadKey = key;
       if (!resolved) {
+        if (nonGm) this._maybePrimePlayerLevelContextForFogStore();
         // Floor/token context not fully resolved yet; retry shortly without committing to blank.
         setTimeout(() => {
           try {
@@ -1678,7 +1687,10 @@ export class FogOfWarEffectV2 {
       if (typeof base64 !== 'string' || base64.length === 0) {
         this._lastFogStoreLoadFoundData = false;
         this._explorationLoadedFromFoundry = true;
-        if (nonGm) this._explorationPlayerGpuReady = true;
+        if (nonGm) {
+          this._explorationPlayerGpuReady = true;
+          this._kickPlayerPerceptionAfterExplorationReady();
+        }
         this._levelBandFogHold = false;
         return;
       }
@@ -1709,11 +1721,13 @@ export class FogOfWarEffectV2 {
               this._renderLoadedExplorationTexture(texture);
               this._explorationLoadedFromFoundry = true;
               this._explorationPlayerGpuReady = true;
+              this._kickPlayerPerceptionAfterExplorationReady();
             } catch (e) {
               log.warn('Failed to apply stored fog exploration texture', e);
               this._explorationLoadedFromFoundry = true;
               this._explorationPlayerGpuReady = true;
               this._levelBandFogHold = false;
+              this._kickPlayerPerceptionAfterExplorationReady();
             } finally {
               try { texture.dispose?.(); } catch (_) {}
               endPlayerAsyncLoad();
@@ -1725,6 +1739,7 @@ export class FogOfWarEffectV2 {
             this._explorationLoadedFromFoundry = true;
             this._explorationPlayerGpuReady = true;
             this._levelBandFogHold = false;
+            this._kickPlayerPerceptionAfterExplorationReady();
             endPlayerAsyncLoad();
           }
         );
@@ -1760,7 +1775,10 @@ export class FogOfWarEffectV2 {
       log.warn('[FOG] Exploration store load failed', e);
       this._explorationLoadAttempts++;
       this._explorationLoadedFromFoundry = true;
-      if (nonGm) this._explorationPlayerGpuReady = true;
+      if (nonGm) {
+        this._explorationPlayerGpuReady = true;
+        this._kickPlayerPerceptionAfterExplorationReady();
+      }
       this._levelBandFogHold = false;
     } finally {
       if (!asyncDecodePlayer) {
@@ -2588,6 +2606,62 @@ export class FogOfWarEffectV2 {
   }
 
   /**
+   * Non-GM: wait for Foundry canvas + token layer before first fog composite.
+   * @private
+   */
+  _playerFogCanvasAndTokensReady() {
+    try {
+      if (game?.user?.isGM) return true;
+      if (!canvas?.ready) return false;
+      if (!canvas?.scene?.id) return false;
+      if (!canvas?.tokens) return false;
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /**
+   * Non-GM: after persisted exploration is ready (or empty), force perception so
+   * owned-token LOS exists before we bind vision uniforms.
+   * @private
+   */
+  _kickPlayerPerceptionAfterExplorationReady() {
+    try {
+      frameCoordinator.forcePerceptionUpdate();
+      this._needsVisionUpdate = true;
+      this._hasValidVision = false;
+    } catch (_) {}
+  }
+
+  /**
+   * Levels: if band key is still null (context not emitted), fog store stays unresolved.
+   * One shot per scene: ask CameraFollower to sync from the controlled token.
+   * @private
+   */
+  _maybePrimePlayerLevelContextForFogStore() {
+    if (game?.user?.isGM) return;
+    const sid = canvas?.scene?.id;
+    if (!sid || this._playerLevelContextPrimeSceneId === sid) return;
+    if (!this._playerFogCanvasAndTokensReady()) return;
+    if (getLevelsCompatibilityMode() === LEVELS_COMPATIBILITY_MODES.OFF) return;
+    if (!isLevelsEnabledForScene(canvas?.scene)) return;
+    if (getActiveElevationBandKey() != null) return;
+    const actors = getRelevantActorIdsForFog();
+    if (!Array.isArray(actors) || actors.length === 0) return;
+    this._playerLevelContextPrimeSceneId = sid;
+    try {
+      const cf = window.MapShine?.cameraFollower;
+      if (cf && typeof cf._syncToControlledTokenLevel === 'function') {
+        cf._syncToControlledTokenLevel({
+          emit: true,
+          reason: 'mapshine-player-fog-bootstrap',
+        });
+      }
+    } catch (_) {}
+  }
+
+  /**
    * Add a full-scene white rectangle to the vision scene.
    * Used as a fallback when global illumination is active and a token's
    * LOS polygon is unavailable or too small (e.g. sight.range = 0).
@@ -2842,6 +2916,20 @@ export class FogOfWarEffectV2 {
   update(timeInfo) {
     if (!this._initialized || !this.fogPlane) return;
 
+    // Real GMs: V2 fog is player-safety infrastructure — never leave them on an
+    // opaque black hold (Levels sync, exploration load, etc.). Show the full map.
+    if (game?.user?.isGM) {
+      this._suppressNativeFogVisuals();
+      try {
+        if (this.fogMaterial?.uniforms?.uBypassFog) {
+          this.fogMaterial.uniforms.uBypassFog.value = 1.0;
+        }
+      } catch (_) {}
+      this.fogPlane.visible = false;
+      this._visionRetryFrames = 0;
+      return;
+    }
+
     // Keep the vision mask refreshing while any door transition is active.
     // Without this, we only render one frame at transition start and the door
     // sync overlay cannot progress over time.
@@ -2893,10 +2981,14 @@ export class FogOfWarEffectV2 {
       }
     }
 
-    // Non-GM + exploration memory: fail-closed until persisted exploration is
-    // decoded and copied into GPU RTs (no vision frame may precede that).
+    // Non-GM + exploration memory: fail-closed until canvas/tokens are ready and
+    // persisted exploration is decoded onto GPU (or empty store confirmed).
     if (!game?.user?.isGM && explorationEnabled) {
       void this._ensureExplorationLoadedFromStore();
+      if (!this._playerFogCanvasAndTokensReady()) {
+        this._holdOpaqueFogFrame();
+        return;
+      }
       if (!this._explorationLoadedFromFoundry || !this._explorationPlayerGpuReady) {
         this._holdOpaqueFogFrame();
         return;
@@ -3150,6 +3242,7 @@ export class FogOfWarEffectV2 {
     this._explorationLoadedFromFoundry = false;
     this._explorationLoadAttempts = 0;
     this._explorationGpuBandKey = null;
+    this._playerLevelContextPrimeSceneId = null;
     this._lastFogStoreContextKey = '';
 
     try {

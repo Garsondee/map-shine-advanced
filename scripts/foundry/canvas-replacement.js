@@ -3037,7 +3037,7 @@ function installFogSaveSafetyPatch() {
 
     const isKnownFogSizeError = (err) => {
       const msg = String(err?.message ?? err ?? '');
-      return /Index or size is negative|FogExtractor|Buffer compression has failed|DOMException/i.test(msg);
+      return /Index or size is negative|FogExtractor|Fog of War pixels extraction failed|pixels extraction failed|extractPixels|Buffer compression has failed|DOMException/i.test(msg);
     };
 
     const wrapMethod = (proto, methodName) => {

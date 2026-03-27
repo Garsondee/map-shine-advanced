@@ -97,10 +97,49 @@ export function getActiveElevationBandKey() {
   }
 }
 
+/**
+ * Ownership check for fog trust boundary — uses real Foundry GM flag, not
+ * {@link isGmLike} (debug parity), so player clients stay fail-closed.
+ * @param {Token|null|undefined} token
+ * @param {User|null|undefined} [user]
+ * @returns {boolean}
+ */
+export function tokenIsOwnedByActiveUser(token, user = globalThis.game?.user) {
+  try {
+    if (!user || !token) return false;
+    const doc = token?.document;
+    if (token?.isOwner === true || doc?.isOwner === true) return true;
+    if (typeof doc?.testUserPermission === 'function') {
+      try {
+        return doc.testUserPermission(user, 'OWNER');
+      } catch (_) {
+        return false;
+      }
+    }
+    return false;
+  } catch (_) {
+    return false;
+  }
+}
+
 export function getRelevantActorIdsForFog() {
   try {
-    const isGM = isGmLike();
+    const realGm = !!globalThis.game?.user?.isGM;
     const placeables = canvas?.tokens?.placeables || [];
+
+    // Non-GM clients: persistence and union keys must include every owned actor on
+    // this scene so exploration matches combined vision (multi-character players).
+    if (!realGm) {
+      const ownedIds = new Set();
+      for (const token of placeables) {
+        if (!tokenIsOwnedByActiveUser(token)) continue;
+        const actorId = getTokenActorId(token);
+        if (actorId) ownedIds.add(String(actorId));
+      }
+      return Array.from(ownedIds).sort();
+    }
+
+    const isGM = isGmLike();
     const byId = new Map(placeables.map((t) => [String(t?.document?.id ?? ''), t]));
 
     const fromSelection = [];
@@ -124,19 +163,6 @@ export function getRelevantActorIdsForFog() {
     }
     const controlledActor = chooseSingleActor(fromControlled, isGM);
     if (controlledActor.length) return controlledActor;
-
-    // Player fallback when nothing is selected/controlled: owned tokens.
-    if (!isGM) {
-      const owned = [];
-      for (const token of placeables) {
-        const doc = token?.document;
-        if (!(token?.isOwner === true || doc?.isOwner === true)) continue;
-        const actorId = getTokenActorId(token);
-        if (actorId) owned.push(String(actorId));
-      }
-      const ownedActor = chooseSingleActor(owned, false);
-      if (ownedActor.length) return ownedActor;
-    }
   } catch (_) {
   }
 

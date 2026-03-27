@@ -44,6 +44,7 @@ import {
   getRelevantActorIdsForFog,
   loadUnionExplorationForActors,
   saveExplorationForActors,
+  tokenIsOwnedByActiveUser,
 } from '../../fog/fog-exploration-store.js';
 
 const log = createLogger('FogOfWarEffectV2');
@@ -194,13 +195,18 @@ export class FogOfWarEffectV2 {
     // After a threshold we fall back to showing fog with whatever data we have
     // (prevents the fog plane being permanently hidden).
     this._visionRetryFrames = 0;
-    this._maxVisionRetryFrames = 30; // ~0.5s at 60fps
+    this._maxVisionRetryFrames = 30; // ~0.5s at 60fps (GM / parity)
+    // Players wait longer for Foundry perception; never use full-scene GI fallback (see token loop).
+    this._maxVisionRetryFramesPlayer = 120; // ~2s at 60fps
     // True when the vision mask contains a full-scene white rect (global
     // illumination fallback) instead of a real LOS polygon. When set,
     // exploration accumulation is skipped to avoid polluting it past walls.
     this._visionIsFullSceneFallback = false;
     
     this._explorationLoadedFromFoundry = false;
+    // Non-GM only: false while persisted exploration is decoding/uploading to GPU.
+    // Prevents a frame where accumulation is allowed but explored RT is still stale/blank.
+    this._explorationPlayerGpuReady = true;
     this._explorationLoadAttempts = 0;
     this._explorationDirty = false;
     this._lastFogStoreContextKey = '';
@@ -539,6 +545,8 @@ export class FogOfWarEffectV2 {
     // Mark exploration loaded for explicit resets; callers can opt out when
     // they are about to load a different actor/floor context.
     this._explorationLoadedFromFoundry = !!markLoaded;
+    // Cleared targets are a valid synchronous state for non-GM clients.
+    this._explorationPlayerGpuReady = true;
     // Bump generation so any in-flight async TextureLoader callbacks from a
     // prior _ensureExplorationLoadedFromStore() call are silently ignored.
     this._explorationLoadGeneration++;
@@ -678,7 +686,9 @@ export class FogOfWarEffectV2 {
       mapShineSelection: msSelection ? Array.from(msSelection) : [],
       explorationEnabled: canvas?.scene?.fog?.exploration ?? false,
       explorationLoaded: this._explorationLoadedFromFoundry,
+      explorationPlayerGpuReady: this._explorationPlayerGpuReady,
       explorationLoadGeneration: this._explorationLoadGeneration,
+      realUserIsGM: !!game?.user?.isGM,
       fogStoreContextResolved: this._computeFogStoreContext().resolved,
       fogStoreContextKey: this._lastFogStoreContextKey,
       fogStoreLoadKey: this._lastFogStoreLoadKey,
@@ -727,7 +737,17 @@ export class FogOfWarEffectV2 {
     const bandKey = getActiveElevationBandKey();
     const actorIds = getRelevantActorIdsForFog();
     const key = buildFogStoreContextKey(actorIds, bandKey);
-    const resolved = !!(bandKey && Array.isArray(actorIds) && actorIds.length === 1);
+    const realGm = !!game?.user?.isGM;
+    let resolved = false;
+    if (bandKey) {
+      if (realGm) {
+        resolved = Array.isArray(actorIds) && actorIds.length === 1;
+      } else {
+        // Players: band resolved; zero owned tokens still yields a stable empty key
+        // (no persistence) without spinning forever.
+        resolved = true;
+      }
+    }
     return { bandKey, actorIds, key, resolved };
   }
 
@@ -1569,6 +1589,7 @@ export class FogOfWarEffectV2 {
 
     // Reload from Foundry doc so external sync/corrections are reflected in V2.
     this._explorationLoadedFromFoundry = false;
+    if (!game?.user?.isGM) this._explorationPlayerGpuReady = false;
     this._explorationLoadAttempts = 0;
     this._pendingAccumulation = false;
     this._lastFogStoreContextKey = '';
@@ -1584,6 +1605,7 @@ export class FogOfWarEffectV2 {
     const explorationEnabled = canvas?.scene?.fog?.exploration ?? false;
     if (!tokenVisionEnabled || !explorationEnabled) {
       this._explorationLoadedFromFoundry = true;
+      this._explorationPlayerGpuReady = true;
       return;
     }
 
@@ -1599,6 +1621,8 @@ export class FogOfWarEffectV2 {
 
     this._isLoadingExploration = true;
     const loadGeneration = this._explorationLoadGeneration;
+    const nonGm = !game?.user?.isGM;
+    let asyncDecodePlayer = false;
 
     try {
       const { bandKey, actorIds, key, resolved } = this._computeFogStoreContext();
@@ -1622,18 +1646,65 @@ export class FogOfWarEffectV2 {
       if (typeof base64 !== 'string' || base64.length === 0) {
         this._lastFogStoreLoadFoundData = false;
         this._explorationLoadedFromFoundry = true;
+        if (nonGm) this._explorationPlayerGpuReady = true;
         return;
       }
 
       this._lastFogStoreLoadFoundData = true;
-      this._explorationLoadedFromFoundry = true;
       const THREE = window.THREE;
       const loader = new THREE.TextureLoader();
+
+      const endPlayerAsyncLoad = () => {
+        this._isLoadingExploration = false;
+      };
+
+      // Non-GM: do not mark exploration "loaded" until pixels are uploaded — avoids
+      // accumulating vision onto a stale/blank RT for one or more frames.
+      if (nonGm) {
+        this._explorationPlayerGpuReady = false;
+        asyncDecodePlayer = true;
+        loader.load(
+          base64,
+          (texture) => {
+            try {
+              if (loadGeneration !== this._explorationLoadGeneration) {
+                try { texture.dispose?.(); } catch (_) {}
+                return;
+              }
+              texture.flipY = false;
+              texture.needsUpdate = true;
+              this._renderLoadedExplorationTexture(texture);
+              this._explorationLoadedFromFoundry = true;
+              this._explorationPlayerGpuReady = true;
+            } catch (e) {
+              log.warn('Failed to apply stored fog exploration texture', e);
+              this._explorationLoadedFromFoundry = true;
+              this._explorationPlayerGpuReady = true;
+            } finally {
+              try { texture.dispose?.(); } catch (_) {}
+              endPlayerAsyncLoad();
+            }
+          },
+          undefined,
+          (err) => {
+            log.warn('Failed to load stored fog exploration texture', err);
+            this._explorationLoadedFromFoundry = true;
+            this._explorationPlayerGpuReady = true;
+            endPlayerAsyncLoad();
+          }
+        );
+        return;
+      }
+
+      this._explorationLoadedFromFoundry = true;
       loader.load(
         base64,
         (texture) => {
           try {
-            if (loadGeneration !== this._explorationLoadGeneration) return;
+            if (loadGeneration !== this._explorationLoadGeneration) {
+              try { texture.dispose?.(); } catch (_) {}
+              return;
+            }
             texture.flipY = false;
             texture.needsUpdate = true;
             this._renderLoadedExplorationTexture(texture);
@@ -1652,8 +1723,11 @@ export class FogOfWarEffectV2 {
       log.warn('[FOG] Exploration store load failed', e);
       this._explorationLoadAttempts++;
       this._explorationLoadedFromFoundry = true;
+      if (nonGm) this._explorationPlayerGpuReady = true;
     } finally {
-      this._isLoadingExploration = false;
+      if (!asyncDecodePlayer) {
+        this._isLoadingExploration = false;
+      }
     }
   }
 
@@ -1905,13 +1979,14 @@ export class FogOfWarEffectV2 {
     // Resolve vision tokens:
     // 1) Prefer MapShine's interactionManager selection (Three.js-driven UI)
     // 2) Fallback to Foundry's canvas.tokens.controlled
-    // 3) For non-GM users only: if nothing is selected/controlled, use all owned tokens
+    // 3) For real non-GM clients only: if nothing is selected/controlled, use all owned tokens
     let controlledTokens = [];
     const ms = window.MapShine;
     const interactionManager = ms?.interactionManager;
     const tokenManager = ms?.tokenManager;
     const selection = interactionManager?.selection;
-    const isGM = isGmLike();
+    const realGm = !!game?.user?.isGM;
+    const user = game?.user;
 
     if (selection && tokenManager?.tokenSprites) {
       const placeables = canvas?.tokens?.placeables || [];
@@ -1928,26 +2003,17 @@ export class FogOfWarEffectV2 {
       controlledTokens = canvas?.tokens?.controlled || [];
     }
 
+    // Non-GM trust boundary: never rasterize vision for tokens the user does not own.
+    if (!realGm && user) {
+      controlledTokens = controlledTokens.filter((t) => tokenIsOwnedByActiveUser(t, user));
+    }
+
     // Player default: when nothing is selected/controlled, show combined vision of owned tokens.
-    if (!isGM && !controlledTokens.length) {
+    if (!realGm && user && !controlledTokens.length) {
       try {
-        const user = game?.user;
         const placeables = canvas?.tokens?.placeables || [];
-        if (user && placeables.length) {
-          controlledTokens = placeables.filter(t => {
-            const doc = t?.document;
-            if (!doc) return false;
-            if (t?.isOwner === true) return true;
-            if (doc?.isOwner === true) return true;
-            if (typeof doc?.testUserPermission === 'function') {
-              try {
-                return doc.testUserPermission(user, 'OWNER');
-              } catch (_) {
-                return false;
-              }
-            }
-            return false;
-          });
+        if (placeables.length) {
+          controlledTokens = placeables.filter((t) => tokenIsOwnedByActiveUser(t, user));
         }
       } catch (_) {
         // Ignore ownership resolution errors
@@ -1972,10 +2038,10 @@ export class FogOfWarEffectV2 {
     // the token's actual LOS polygon when it exists.
     //
     // For tokens whose LOS is degenerate (e.g. sight.range=0), global
-    // illumination uses a full-scene rect so they aren't blind. However,
-    // the _visionIsFullSceneFallback flag prevents this from being
-    // accumulated into exploration (which would permanently mark areas
-    // behind walls as explored via the max() accumulator).
+    // illumination can use a full-scene rect on **GM clients only** so they
+    // aren't briefly blind while perception catches up. Real players never
+    // get that rect — it ignores walls in the vision mask. Exploration skips
+    // the GM GI fallback via _visionIsFullSceneFallback when accumulating.
     const globalIllumActive = this._isGlobalIlluminationActive();
     this._visionIsFullSceneFallback = false;
 
@@ -2037,15 +2103,14 @@ export class FogOfWarEffectV2 {
       if (!visionSource) {
         if (!hasSight) {
           tokensWithoutSight++;
-        } else if (globalIllumActive) {
-          // Sight enabled, no vision source yet, but global illumination is
-          // active ->-> render full-scene rect so the token isn't blind.
-          // Flag prevents this from polluting exploration.
+        } else if (globalIllumActive && realGm) {
+          // GM-only: full-scene rect spares a blind frame while perception spins up.
+          // Never for real players — it ignores walls and reads as "see everything".
           this._addFullSceneRect(THREE);
           this._visionIsFullSceneFallback = true;
           polygonsRendered++;
         } else {
-          // Sight is enabled but vision source hasn't been created yet ->-> wait.
+          // Real players (or no global illum): wait for a real vision source / LOS.
           tokensWaitingForLOS++;
           log.debug(`[FOG DIAG] Token "${token.name}" has sight enabled but no vision source yet ->-> waiting`);
         }
@@ -2059,15 +2124,13 @@ export class FogOfWarEffectV2 {
         if (!hasSight) {
           // Sight disabled ->-> token has a default/inactive vision source.
           tokensWithoutSight++;
-        } else if (globalIllumActive) {
-          // Sight enabled, LOS is tiny/missing (e.g. sight.range=0), but
-          // global illumination is active. Use full-scene rect so the
-          // token can see. Flag prevents exploration pollution.
+        } else if (globalIllumActive && realGm) {
+          // GM-only full-scene GI fallback (see !visionSource branch above).
           this._addFullSceneRect(THREE);
           this._visionIsFullSceneFallback = true;
           polygonsRendered++;
         } else {
-          // Sight enabled but polygon not ready yet.
+          // Sight enabled but polygon not ready yet (required for real players).
           tokensWaitingForLOS++;
           log.debug(`[FOG DIAG] Token "${token.name}" sight enabled, LOS not ready (points=${shape?.points?.length || 0})`);
         }
@@ -2408,11 +2471,11 @@ export class FogOfWarEffectV2 {
   }
 
   _shouldBypassFog() {
-    const isGM = isGmLike();
     const fogEnabled = canvas?.scene?.tokenVision ?? false;
 
     if (!fogEnabled) return true;
-    if (isGM) {
+    // Real GM only — debug GM parity must not disable fog for actual players.
+    if (game?.user?.isGM) {
       // If GM and NO tokens are controlled, bypass fog
       const controlled = canvas?.tokens?.controlled || [];
       if (controlled.length === 0) return true;
@@ -2673,6 +2736,16 @@ export class FogOfWarEffectV2 {
       this._holdOpaqueFogFrame();
       return;
     }
+
+    // Non-GM + exploration memory: fail-closed until persisted exploration is
+    // decoded and copied into GPU RTs (no vision frame may precede that).
+    if (!game?.user?.isGM && explorationEnabled) {
+      void this._ensureExplorationLoadedFromStore();
+      if (!this._explorationLoadedFromFoundry || !this._explorationPlayerGpuReady) {
+        this._holdOpaqueFogFrame();
+        return;
+      }
+    }
     
     // Detect MapShine selection changes (Three.js-driven UI) and trigger
     // a vision recompute when the set of selected token IDs changes.
@@ -2734,10 +2807,13 @@ export class FogOfWarEffectV2 {
     // prevents the fog plane from being permanently hidden when tokens
     // lack sight or Foundry's perception never provides valid LOS.
     const waitingForVision = this._needsVisionUpdate && !this._hasValidVision;
+    const visionRetryLimit = game?.user?.isGM
+      ? this._maxVisionRetryFrames
+      : Math.max(this._maxVisionRetryFrames, Number(this._maxVisionRetryFramesPlayer) || 120);
     if (waitingForVision) {
       this._visionRetryFrames++;
-      if (this._visionRetryFrames >= this._maxVisionRetryFrames) {
-        log.warn(`Vision retry limit reached (${this._maxVisionRetryFrames} frames). Forcing fog visible with current data.`);
+      if (this._visionRetryFrames >= visionRetryLimit) {
+        log.warn(`Vision retry limit reached (${visionRetryLimit} frames). Forcing fog visible with current data.`);
         this._needsVisionUpdate = false;
         this._hasValidVision = true;
         this._visionRetryFrames = 0;

@@ -2619,6 +2619,28 @@ export class FogOfWarEffectV2 {
     }
   }
 
+  /**
+   * Strict no-reveal guard.
+   * While waiting for a fresh vision mask (e.g. floor transition), keep the fog
+   * plane visible and force fully opaque fallback textures so no frame can show
+   * revealed map content.
+   * @private
+   */
+  _holdOpaqueFogFrame() {
+    if (!this.fogPlane || !this.fogMaterial?.uniforms) return;
+    this.fogPlane.visible = true;
+    if (this.fogMaterial.uniforms.tExplored) {
+      this.fogMaterial.uniforms.tExplored.value = this._fallbackBlack;
+    }
+    if (this.fogMaterial.uniforms.tVision) {
+      this.fogMaterial.uniforms.tVision.value = this._fallbackBlack;
+    }
+    if (this.fogMaterial.uniforms.uBypassFog) {
+      this.fogMaterial.uniforms.uBypassFog.value = 0.0;
+    }
+    this.fogMaterial.uniformsNeedUpdate = true;
+  }
+
   update(timeInfo) {
     if (!this._initialized || !this.fogPlane) return;
 
@@ -2647,7 +2669,7 @@ export class FogOfWarEffectV2 {
     // Don't attempt vision rendering until full-res render targets are ready.
     // The 1x1 minimal targets created during init produce garbage results.
     if (!this._fullResTargetsReady) {
-      this.fogPlane.visible = false;
+      this._holdOpaqueFogFrame();
       return;
     }
     
@@ -2719,8 +2741,9 @@ export class FogOfWarEffectV2 {
         this._hasValidVision = true;
         this._visionRetryFrames = 0;
       } else {
-        // Still waiting ->-> hide fog plane and skip the rest of the update
-        this.fogPlane.visible = false;
+        // Still waiting ->-> NEVER hide fog plane. Hold an opaque fallback so no
+        // reveal frame can occur while perception/vision catches up.
+        this._holdOpaqueFogFrame();
         return;
       }
     } else {

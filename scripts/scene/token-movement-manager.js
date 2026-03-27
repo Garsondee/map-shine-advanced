@@ -8077,7 +8077,7 @@ export class TokenMovementManager {
 
     const extreme = this._shouldUseExtremeStepSync(options);
     const timeoutDefault = extreme ? 3000 : 1400;
-    const dwellDefault = extreme ? 130 : 70;
+    const dwellDefault = extreme ? 32 : 70;
     const toleranceDefault = extreme ? 0.2 : 0.75;
     const timeoutMs = clamp(Math.round(asNumber(options?.spriteDocumentAlignTimeoutMs, timeoutDefault)), 0, 10000);
     if (timeoutMs <= 0) return true;
@@ -11316,7 +11316,7 @@ export class TokenMovementManager {
         const isPathWalkStep = movementMethod === 'path-walk' || movementMethod === 'walk' || movementMethod === 'path_segment';
         if (isPathWalkStep) {
           if (this._shouldUseExtremeStepSync(options)) {
-            const holdBeforeFogMs = clamp(asNumber(options?.extremeStepHoldBeforeFogMs, 1000), 0, 10000);
+            const holdBeforeFogMs = clamp(asNumber(options?.extremeStepHoldBeforeFogMs, 250), 0, 10000);
             if (holdBeforeFogMs > 0) await _sleep(holdBeforeFogMs);
           }
           const sightRefreshAck = this._awaitNextSightRefresh(
@@ -11331,7 +11331,7 @@ export class TokenMovementManager {
           // GPU targets. Yield one small frame so fog updates apply between
           // grid steps rather than collapsing into the last step.
           const fogSettleMs = clamp(
-            asNumber(options?.perStepFogSettleMs, this._shouldUseExtremeStepSync(options) ? 220 : 20),
+            asNumber(options?.perStepFogSettleMs, this._shouldUseExtremeStepSync(options) ? 55 : 20),
             0,
             1200
           );

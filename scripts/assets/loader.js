@@ -82,16 +82,6 @@ const textureCache = new Map();
 
 /** Negative result cache to prevent repeated 404 probing for masks that don't exist */
 const _probeMaskNegativeCache = new Map();
-/** Directory → FilePicker file list (empty array = known empty); avoids N browses per map folder */
-const _maskDirectoryListingCache = new Map();
-/** Log at most one “no listing” diagnostic per mask directory per session */
-const _emptyMaskDirLogged = new Set();
-
-function _maskAssetDirectoryKey(basePath) {
-  const s = String(basePath || '').trim().replace(/\\/g, '/');
-  const i = s.lastIndexOf('/');
-  return i >= 0 ? s.slice(0, i + 1) : s;
-}
 /** Structured missing-mask diagnostics cache by bundle key */
 const _missingMaskDiagnostics = new Map();
 /** Failed mask URL cache to suppress repeated 404 retries */
@@ -391,13 +381,14 @@ export async function loadAssetBundle(basePath, onProgress = null, options = {})
               cacheHit: true
             };
           }
+        } else {
+          if (_isDbg) _dlp.addDiagnostic('Asset Cache', { [`cache.${_shortBase}`]: `MISS (missing critical: ${missingCritical.join(', ')})` });
+          log.warn('Cached asset bundle missing critical masks; reloading', {
+            basePath,
+            missingCritical
+          });
+          assetCache.delete(cacheKey);
         }
-
-        if (_isDbg) _dlp.addDiagnostic('Asset Cache', { [`cache.${_shortBase}`]: `MISS (missing critical: ${missingCritical.join(', ')})` });
-        log.warn('Cached asset bundle missing critical masks; reloading', {
-          basePath,
-          missingCritical
-        });
       } else {
         // Trust empty cached bundles too. Without this, player clients with
         // genuinely missing masks will re-attempt every initialize and spam 404s.
@@ -658,10 +649,8 @@ async function probeMaskTexture(basePath, suffix, suppressProbeErrors = false) {
 }
 
 /**
- * Resolve optional mask path: FilePicker directory listing, then scene mask manifest.
- * Does not issue HEAD/GET convention probes (avoids 404 noise in devtools when masks
- * are absent). GMs can persist paths via mask texture manifest for player clients
- * when browse is unavailable.
+ * Probe for a mask file by attempting to load the expected suffix filename.
+ * This is intended for diagnostics and edge-case recovery.
  *
  * @param {string} basePath
  * @param {string} suffix
@@ -689,6 +678,11 @@ export async function probeMaskFile(basePath, suffix, options = {}) {
       const scene = typeof canvas !== 'undefined' ? canvas?.scene : null;
       resolvedPath = _pathFromSceneMaskTextureManifest(scene, basePath, suffix);
     }
+    // HEAD convention probes only when browse returned nothing. If we have a file list,
+    // missing optional masks are authoritative (do not exist on disk for this map).
+    if (!resolvedPath && !hasListing) {
+      resolvedPath = await _probeMaskPathByConvention(basePath, suffix);
+    }
 
     if (resolvedPath) {
       const result = { path: resolvedPath };
@@ -696,6 +690,10 @@ export async function probeMaskFile(basePath, suffix, options = {}) {
       return result;
     }
 
+    if (!hasListing) {
+      // Empty browse may be transient; do not negative-cache so the next probe can retry.
+      return null;
+    }
     _probeMaskNegativeCache.set(cacheKey, null);
     return null;
   } catch (_) {
@@ -722,25 +720,15 @@ export async function discoverMaskDirectoryFiles(basePath) {
     }
   }
   try {
-    const dirKey = _maskAssetDirectoryKey(basePath);
-    if (_maskDirectoryListingCache.has(dirKey)) {
-      return _maskDirectoryListingCache.get(dirKey).slice();
-    }
-
     const normalized = await _discoverFilesViaFilePicker(basePath);
-    _maskDirectoryListingCache.set(dirKey, normalized);
-
     if (normalized.length) {
       log.debug(`FilePicker found ${normalized.length} files for ${basePath}`);
-      return normalized.slice();
+      return normalized;
     }
 
-    if (!_emptyMaskDirLogged.has(dirKey)) {
-      _emptyMaskDirLogged.add(dirKey);
-      log.debug('FilePicker returned no files for mask directory (optional masks unavailable without listing or scene manifest):', dirKey);
-    }
+    log.warn('FilePicker returned no files for basePath:', basePath);
     return [];
-    
+
   } catch (error) {
     log.warn('Failed to discover files via FilePicker:', error.message);
     return [];
@@ -966,6 +954,26 @@ function _pathFromSceneMaskTextureManifest(scene, basePath, suffix) {
     const p = pb[maskId] || pb[String(maskId).toLowerCase()];
     if (typeof p === 'string' && p.trim()) return p.trim();
   } catch (_) {}
+  return null;
+}
+
+/**
+ * Last resort when FilePicker returns **no** directory listing (typical player clients).
+ * Not used when a listing exists — optional masks that are absent from the listing
+ * must not trigger HEAD probes (404 noise for GMs).
+ * @param {string} basePath
+ * @param {string} suffix
+ * @returns {Promise<string|null>}
+ */
+async function _probeMaskPathByConvention(basePath, suffix) {
+  for (const format of SUPPORTED_FORMATS) {
+    const candidate = `${basePath}${suffix}.${format}`;
+    const u = normalizePath(candidate);
+    try {
+      const r = await fetch(u, { method: 'HEAD', cache: 'force-cache' });
+      if (r.ok) return candidate;
+    } catch (_) {}
+  }
   return null;
 }
 
@@ -1318,8 +1326,6 @@ export function clearCache() {
   assetCache.clear();
   textureCache.clear();
   _probeMaskNegativeCache.clear();
-  _maskDirectoryListingCache.clear();
-  _emptyMaskDirLogged.clear();
   _failedMaskUrlCache.clear();
   _missingMaskDiagnostics.clear();
   log.info('Asset cache cleared');

@@ -16,7 +16,7 @@ import { moveTrace } from '../core/movement-trace-log.js';
 import * as sceneSettings from '../settings/scene-settings.js';
 import { getLevelsCompatibilityMode, LEVELS_COMPATIBILITY_MODES } from './levels-compatibility.js';
 import { isLevelsEnabledForScene } from './levels-scene-flags.js';
-import { switchToLevelForElevation } from '../scene/level-interaction-service.js';
+import { scheduleTokenLevelSwitch } from '../scene/level-interaction-service.js';
 
 const log = createLogger('RegionLevelsCompat');
 
@@ -29,8 +29,8 @@ const REGION_BEHAVIOR_KINDS = Object.freeze({
 
 let patchInstalled = false;
 const elevatorDialogsByTokenId = new Map();
-const STAIR_TRANSITION_PAUSE_MS = 220;
-const STAIR_FLOOR_FOLLOW_SUPPRESSION_BUFFER_MS = 800;
+const STAIR_TRANSITION_PAUSE_MS = 1000;
+const STAIR_FLOOR_FOLLOW_SUPPRESSION_BUFFER_MS = 1800;
 
 let _pendingRetryHookId = null;
 
@@ -68,11 +68,19 @@ function _endStairFloorFollowSuppression(tokenDocument) {
   }
 }
 
-function _followControlledTokenFloorAfterStair(tokenDocument, elevation, reason = 'region-levels-stair-follow') {
+async function _followControlledTokenFloorAfterStair(tokenDocument, elevation, reason = 'region-levels-stair-follow') {
   if (!_isTokenControlled(tokenDocument)) return;
   const target = Number(elevation);
   if (!Number.isFinite(target)) return;
-  switchToLevelForElevation(target + 0.001, reason);
+  _resyncMapShineMovementSprite(tokenDocument, `${reason}:pre-switch`);
+  await _sleep(20);
+  _resyncMapShineMovementSprite(tokenDocument, `${reason}:pre-switch-retry`);
+  await scheduleTokenLevelSwitch(tokenDocument, target + 0.001, {
+    reason,
+    dwellMs: 0,
+    dedupeMs: 1200,
+    requireControlled: true
+  });
 }
 
 function _getExecuteScriptRegionBehaviorProto() {
@@ -367,7 +375,7 @@ async function _applyRegionMovement(tokenDocument, elevation, movement, region =
             elevation: tokenDocument?.elevation
           }
         });
-        _followControlledTokenFloorAfterStair(tokenDocument, targetElevation, 'region-stair-floor-follow');
+        await _followControlledTokenFloorAfterStair(tokenDocument, targetElevation, 'region-stair-floor-follow');
         return true;
       } finally {
         if (hasSuppression) _endStairFloorFollowSuppression(tokenDocument);
@@ -381,7 +389,7 @@ async function _applyRegionMovement(tokenDocument, elevation, movement, region =
         await tokenDocument.update({ elevation: targetElevation });
         _syncMapShineTokenAfterDocElevation(tokenDocument, targetElevation);
         _resyncMapShineMovementSprite(tokenDocument, 'region-direct-after-elevation');
-        _followControlledTokenFloorAfterStair(tokenDocument, targetElevation, 'region-direct-floor-follow');
+        await _followControlledTokenFloorAfterStair(tokenDocument, targetElevation, 'region-direct-floor-follow');
         return true;
       } finally {
         if (hasSuppression) _endStairFloorFollowSuppression(tokenDocument);
@@ -678,7 +686,7 @@ async function _handleLegacyDrawingStairs(tokenDoc, changes) {
           });
           _syncMapShineTokenAfterDocElevation(updatedDoc, newElevation);
           _resyncMapShineMovementSprite(updatedDoc, 'legacy-drawing-stair-after-elevation');
-          _followControlledTokenFloorAfterStair(updatedDoc, newElevation, 'legacy-drawing-stair-floor-follow');
+          await _followControlledTokenFloorAfterStair(updatedDoc, newElevation, 'legacy-drawing-stair-floor-follow');
         } finally {
           if (hasSuppression) _endStairFloorFollowSuppression(updatedDoc);
         }

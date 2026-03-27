@@ -19,6 +19,12 @@
 
 import { readTileLevelsFlags, tileHasLevelsRange } from '../foundry/levels-scene-flags.js';
 
+const _tokenLevelSwitchState = new Map();
+
+function _sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(ms) || 0)));
+}
+
 // ---------------------------------------------------------------------------
 //  Active-level membership helpers
 // ---------------------------------------------------------------------------
@@ -127,6 +133,76 @@ export function switchToLevelForElevation(elevation, reason = 'level-interaction
   if (current === idx) return cf._activeLevelContext;
 
   return cf.setActiveLevel(idx, { reason });
+}
+
+/**
+ * Schedule a token-scoped level switch and coalesce competing callers.
+ *
+ * Single-source behavior:
+ * - Per token, only the latest requested switch may execute (older requests drop).
+ * - Recent duplicate target elevations are ignored (de-jitter).
+ * - Optional dwell delay allows visual settle before switching level/camera.
+ *
+ * @param {TokenDocument|object} tokenDoc
+ * @param {number} elevation
+ * @param {{
+ *  reason?: string,
+ *  dwellMs?: number,
+ *  dedupeMs?: number,
+ *  requireControlled?: boolean
+ * }} [options]
+ * @returns {Promise<object|null>}
+ */
+export async function scheduleTokenLevelSwitch(tokenDoc, elevation, options = {}) {
+  const tokenId = String(tokenDoc?.id || tokenDoc?._id || '');
+  if (!tokenId) return null;
+
+  const target = Number(elevation);
+  if (!Number.isFinite(target)) return null;
+
+  const reason = String(options?.reason || 'token-level-switch');
+  const dwellMs = Math.max(0, Math.min(5000, Math.round(Number(options?.dwellMs ?? 0) || 0)));
+  const dedupeMs = Math.max(0, Math.min(5000, Math.round(Number(options?.dedupeMs ?? 600) || 600)));
+  const requireControlled = options?.requireControlled !== false;
+
+  const controlled = Array.isArray(canvas?.tokens?.controlled) ? canvas.tokens.controlled : [];
+  if (requireControlled) {
+    const isControlled = controlled.some((t) => String(t?.document?.id || t?.id || '') === tokenId);
+    if (!isControlled) return null;
+  }
+
+  const existing = _tokenLevelSwitchState.get(tokenId) || {
+    seq: 0,
+    lastAppliedAt: 0,
+    lastElevation: NaN
+  };
+  const seq = Number(existing.seq || 0) + 1;
+  _tokenLevelSwitchState.set(tokenId, { ...existing, seq });
+
+  if (dwellMs > 0) await _sleep(dwellMs);
+
+  const latest = _tokenLevelSwitchState.get(tokenId);
+  if (!latest || Number(latest.seq || 0) !== seq) return null;
+
+  if (requireControlled) {
+    const controlledNow = Array.isArray(canvas?.tokens?.controlled) ? canvas.tokens.controlled : [];
+    const stillControlled = controlledNow.some((t) => String(t?.document?.id || t?.id || '') === tokenId);
+    if (!stillControlled) return null;
+  }
+
+  const now = Date.now();
+  const sameTarget = Number.isFinite(Number(latest.lastElevation))
+    && Math.abs(Number(latest.lastElevation) - target) <= 0.001;
+  const recent = (now - Number(latest.lastAppliedAt || 0)) < dedupeMs;
+  if (sameTarget && recent) return null;
+
+  const switched = switchToLevelForElevation(target, reason);
+  _tokenLevelSwitchState.set(tokenId, {
+    ...latest,
+    lastAppliedAt: now,
+    lastElevation: target
+  });
+  return switched;
 }
 
 // ---------------------------------------------------------------------------

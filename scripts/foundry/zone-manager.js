@@ -18,11 +18,13 @@
 
 import { createLogger } from '../core/log.js';
 import { moveTrace } from '../core/movement-trace-log.js';
-import { switchToLevelForElevation } from '../scene/level-interaction-service.js';
+import { scheduleTokenLevelSwitch } from '../scene/level-interaction-service.js';
+import { getLevelsCompatibilityMode, LEVELS_COMPATIBILITY_MODES } from './levels-compatibility.js';
+import { isLevelsEnabledForScene } from './levels-scene-flags.js';
 
 const log = createLogger('ZoneManager');
-const STAIR_TRANSITION_PAUSE_MS = 220;
-const STAIR_FLOOR_FOLLOW_SUPPRESSION_BUFFER_MS = 800;
+const STAIR_TRANSITION_PAUSE_MS = 1000;
+const STAIR_FLOOR_FOLLOW_SUPPRESSION_BUFFER_MS = 1800;
 
 // ---------------------------------------------------------------------------
 //  Zone type constants
@@ -905,6 +907,61 @@ export class ZoneManager {
   //  Token-enter detection (runtime)
   // -------------------------------------------------------------------------
 
+  _sceneHasLevelsRegionScriptStairs(scene) {
+    const regions = Array.isArray(scene?.regions?.contents)
+      ? scene.regions.contents
+      : (Array.isArray(scene?.regions) ? scene.regions : []);
+    if (!regions.length) return false;
+
+    for (const region of regions) {
+      const behaviors = Array.isArray(region?.behaviors?.contents)
+        ? region.behaviors.contents
+        : (Array.isArray(region?.behaviors) ? region.behaviors : []);
+      for (const behavior of behaviors) {
+        const source = String(
+          behavior?.source
+          ?? behavior?.script
+          ?? behavior?.data?.source
+          ?? behavior?.data?.script
+          ?? ''
+        );
+        if (!source) continue;
+        if (!source.includes('RegionHandler.')) continue;
+        if (
+          /\bRegionHandler\.(stair|stairUp|stairDown|elevator)\s*\(/i.test(source)
+        ) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  _sceneHasLegacyDrawingStairs(scene) {
+    const drawings = Array.isArray(scene?.drawings?.contents)
+      ? scene.drawings.contents
+      : (Array.isArray(scene?.drawings) ? scene.drawings : []);
+    if (!drawings.length) return false;
+
+    for (const drawing of drawings) {
+      const mode = Number(drawing?.flags?.levels?.drawingMode ?? 0);
+      if (mode === 2 || mode === 3 || mode === 21 || mode === 22) return true;
+    }
+    return false;
+  }
+
+  _shouldSuspendZoneStairRuntime() {
+    const scene = canvas?.scene;
+    if (!scene) return false;
+    if (getLevelsCompatibilityMode() === LEVELS_COMPATIBILITY_MODES.OFF) return false;
+    if (!isLevelsEnabledForScene(scene)) return false;
+
+    // Single-source-of-truth policy:
+    // If imported Levels stair engines exist in the scene, suspend bespoke zone
+    // stair runtime to prevent duplicate triggers.
+    return this._sceneHasLevelsRegionScriptStairs(scene) || this._sceneHasLegacyDrawingStairs(scene);
+  }
+
   /**
    * Compute the elevation span covered by a zone's connected levels.
    * Tokens outside this range are ignored (e.g. a floor-3 token shouldn't
@@ -936,6 +993,8 @@ export class ZoneManager {
    * - Tracks presence via `Set<"tokenId::zoneId">` to distinguish entry vs. re-move.
    */
   _onTokenPositionChanged(tokenDoc, changes, _options, _userId) {
+    if (this._shouldSuspendZoneStairRuntime()) return;
+
     const zones = this.getZones();
     if (!zones.length) return;
 
@@ -1054,7 +1113,7 @@ export class ZoneManager {
    * @param {number} targetElev
    * @param {string} reason
    */
-  _followControlledTokenFloorTransition(tokenDoc, targetElev, reason) {
+  async _followControlledTokenFloorTransition(tokenDoc, targetElev, reason) {
     if (!tokenDoc || !Number.isFinite(Number(targetElev))) return;
     const controlled = Array.isArray(canvas?.tokens?.controlled) ? canvas.tokens.controlled : [];
     const tokenId = String(tokenDoc?.id || tokenDoc?._id || '');
@@ -1063,9 +1122,27 @@ export class ZoneManager {
     const isControlled = controlled.some((t) => String(t?.document?.id || t?.id || '') === tokenId);
     if (!isControlled) return;
 
-    // Nudge above shared boundaries so half-open [min, max) floor ownership
-    // resolves to the destination band consistently.
-    switchToLevelForElevation(Number(targetElev) + 0.001, reason);
+    try {
+      window.MapShine?.tokenManager?.movementManager?.resyncSpriteToDocument?.(
+        tokenId,
+        tokenDoc,
+        { reason: `${reason}:pre-switch` }
+      );
+      await _sleep(20);
+      window.MapShine?.tokenManager?.movementManager?.resyncSpriteToDocument?.(
+        tokenId,
+        tokenDoc,
+        { reason: `${reason}:pre-switch-retry` }
+      );
+    } catch (_) {
+    }
+
+    await scheduleTokenLevelSwitch(tokenDoc, Number(targetElev) + 0.001, {
+      reason,
+      dwellMs: 0,
+      dedupeMs: 1200,
+      requireControlled: true
+    });
   }
 
   _beginStairFloorFollowSuppression(tokenDoc, reason = 'zone-transition') {
@@ -1121,7 +1198,7 @@ export class ZoneManager {
           elevation: tokenDoc?.elevation
         }
       });
-      this._followControlledTokenFloorTransition(tokenDoc, targetElev, floorFollowReason);
+      await this._followControlledTokenFloorTransition(tokenDoc, targetElev, floorFollowReason);
       return true;
     } finally {
       if (hasSuppression) this._endStairFloorFollowSuppression(tokenDoc);

@@ -15,7 +15,7 @@
 import { createLogger } from '../core/log.js';
 import { readWallHeightFlags } from '../foundry/levels-scene-flags.js';
 import { getPerspectiveElevation } from '../foundry/elevation-context.js';
-import { switchToLevelForElevation } from './level-interaction-service.js';
+import { scheduleTokenLevelSwitch, switchToLevelForElevation } from './level-interaction-service.js';
 import { NavMeshBuilder } from './nav-mesh-builder.js';
 import { NavMeshPathfinder } from './nav-mesh-pathfinder.js';
 import { PortalDetector } from './portal-detector.js';
@@ -222,6 +222,8 @@ export class TokenMovementManager {
 
     /** @type {Map<string, any>} */
     this.activeTracks = new Map();
+    /** @type {Map<string, number>} */
+    this._selectedFloorFollowRequestByTokenId = new Map();
 
     /** @type {Map<string, Array<{styleId:string,target:any,options:object}>>} */
     this._keyboardMoveQueues = new Map();
@@ -7243,7 +7245,8 @@ export class TokenMovementManager {
    * @returns {Promise<{ok: boolean, tokenId: string, transitions: Array<object>, failedStepIndex: number, reason?: string, plan: object}>}
    */
   async runDoorAwareMovementSequence({ tokenId, pathNodes, moveToPoint = null, options = {} } = {}) {
-    const plan = this.buildDoorAwarePlan(pathNodes || []);
+    const densePathNodes = this._densifyPathNodesForStepSync(pathNodes || [], options);
+    const plan = this.buildDoorAwarePlan(densePathNodes || []);
     const result = await this.runDoorStateMachineForPlan({
       tokenId,
       plan,
@@ -7416,6 +7419,8 @@ export class TokenMovementManager {
           crossFloorSegmentCount: crossFloorSegments.length
         });
       }
+
+      pathNodes = this._densifyPathNodesForStepSync(pathNodes, tracedOptions);
 
       const moveToPoint = async (point, context = {}) => {
         return this._moveTokenToFoundryPoint(tokenId, point, currentDoc, {
@@ -7888,7 +7893,52 @@ export class TokenMovementManager {
     return { bottom, top };
   }
 
-  _followSelectedTokenFloorTransition(tokenDoc, fromFloor, toFloor) {
+  _nextSelectedFloorFollowRequestToken(tokenId) {
+    const id = String(tokenId || '');
+    if (!id) return 0;
+    const next = asNumber(this._selectedFloorFollowRequestByTokenId.get(id), 0) + 1;
+    this._selectedFloorFollowRequestByTokenId.set(id, next);
+    return next;
+  }
+
+  _isSelectedFloorFollowRequestCurrent(tokenId, requestToken) {
+    const id = String(tokenId || '');
+    if (!id) return false;
+    return asNumber(this._selectedFloorFollowRequestByTokenId.get(id), 0) === asNumber(requestToken, -1);
+  }
+
+  async _awaitTokenSpriteArrivalDwell(tokenDoc, options = {}) {
+    const tokenId = String(tokenDoc?.id || tokenDoc?._id || '');
+    if (!tokenId) return false;
+
+    const dwellMs = clamp(Math.round(asNumber(options?.levelSwitchArrivalDwellMs, 500)), 0, 5000);
+    if (dwellMs <= 0) return true;
+
+    const timeoutMs = clamp(Math.round(asNumber(options?.levelSwitchArrivalTimeoutMs, 4500)), dwellMs, 15000);
+    const sampleMs = clamp(Math.round(asNumber(options?.levelSwitchArrivalSampleMs, 16)), 8, 120);
+    const tolerancePx = clamp(asNumber(options?.levelSwitchArrivalTolerancePx, 0.75), 0.1, 8);
+    const deadline = Date.now() + timeoutMs;
+
+    let alignedSinceMs = 0;
+    while (Date.now() <= deadline) {
+      const liveDoc = this._resolveTokenDocumentById(tokenId, tokenDoc);
+      if (!liveDoc) return false;
+
+      const aligned = this._isTokenSpriteAlignedToDocument(tokenId, liveDoc, tolerancePx);
+      if (aligned) {
+        if (alignedSinceMs <= 0) alignedSinceMs = Date.now();
+        if ((Date.now() - alignedSinceMs) >= dwellMs) return true;
+      } else {
+        alignedSinceMs = 0;
+      }
+
+      await _sleep(sampleMs);
+    }
+
+    return false;
+  }
+
+  async _followSelectedTokenFloorTransition(tokenDoc, fromFloor, toFloor, options = {}) {
     if (!tokenDoc || !toFloor) return;
 
     const toBottom = asNumber(toFloor?.bottom, NaN);
@@ -7908,7 +7958,21 @@ export class TokenMovementManager {
     const isSelected = controlled.some((t) => String(t?.document?.id || t?.id || '') === tokenId);
     if (!isSelected) return;
 
-    switchToLevelForElevation(toBottom + 0.001, 'token-movement-selected-floor-follow');
+    const requestToken = this._nextSelectedFloorFollowRequestToken(tokenId);
+    const arrived = await this._awaitTokenSpriteArrivalDwell(tokenDoc, options);
+    if (!this._isSelectedFloorFollowRequestCurrent(tokenId, requestToken)) return;
+    if (!arrived) return;
+
+    const controlledNow = Array.isArray(canvas?.tokens?.controlled) ? canvas.tokens.controlled : [];
+    const stillSelected = controlledNow.some((t) => String(t?.document?.id || t?.id || '') === tokenId);
+    if (!stillSelected) return;
+
+    await scheduleTokenLevelSwitch(tokenDoc, toBottom + 0.001, {
+      reason: 'token-movement-selected-floor-follow',
+      dwellMs: 0,
+      dedupeMs: 600,
+      requireControlled: true
+    });
   }
 
   _shouldDeferSelectedLevelSwitch(options = {}) {
@@ -7919,10 +7983,24 @@ export class TokenMovementManager {
     return method === 'path-walk' || method === 'walk';
   }
 
+  _shouldUseExtremeStepSync(options = {}) {
+    return optionsBoolean(options?.extremeStepSync, true);
+  }
+
+  _densifyPathNodesForStepSync(pathNodes, options = {}) {
+    if (!Array.isArray(pathNodes) || pathNodes.length < 2) return pathNodes;
+    const method = String(options?.method || '').toLowerCase();
+    const isSequencedWalk = method === 'path-walk' || method === 'walk' || method === 'path_segment';
+    if (!isSequencedWalk && !this._shouldUseExtremeStepSync(options)) return pathNodes;
+    if (typeof this._interpolatePathForWalking !== 'function') return pathNodes;
+    return this._interpolatePathForWalking(pathNodes);
+  }
+
   async _followSelectedTokenFloorTransitionAfterMove(tokenDoc, options = {}) {
     let floorBottom = asNumber(options?.destinationFloorBottom, NaN);
     let floorTop = asNumber(options?.destinationFloorTop, NaN);
     let toFloor = null;
+    const tokenId = String(tokenDoc?.id || '');
     if (Number.isFinite(floorBottom) && Number.isFinite(floorTop)) {
       toFloor = {
         bottom: Math.min(floorBottom, floorTop),
@@ -7938,16 +8016,43 @@ export class TokenMovementManager {
       if (!Number.isFinite(floorBottom) || !Number.isFinite(floorTop)) return;
     }
 
+    // If move options carry stale destination floor bounds from move start,
+    // but the live token ended on a different floor (e.g., stair transition),
+    // prefer the live floor to avoid camera flicker back to the previous band.
+    const liveDoc = this._resolveTokenDocumentById(tokenId, tokenDoc);
+    const liveElevation = asNumber(liveDoc?.elevation, NaN);
+    const explicitBandOwnsLiveElevation = Number.isFinite(liveElevation)
+      && Number.isFinite(floorBottom)
+      && Number.isFinite(floorTop)
+      && liveElevation >= floorBottom
+      && liveElevation < (floorTop - 0.001);
+    if (!explicitBandOwnsLiveElevation) {
+      const liveFloorKey = this._resolveFloorKeyForElevation(liveElevation);
+      const liveFloor = this._parseFloorKey(liveFloorKey);
+      const liveBottom = asNumber(liveFloor?.bottom, NaN);
+      const liveTop = asNumber(liveFloor?.top, NaN);
+      if (liveFloor && Number.isFinite(liveBottom) && Number.isFinite(liveTop)) {
+        toFloor = liveFloor;
+        floorBottom = liveBottom;
+        floorTop = liveTop;
+      }
+    }
+
     const pauseMs = clamp(Math.round(asNumber(options?.levelSwitchAfterMovePauseMs, 90)), 0, 1200);
     if (pauseMs > 0) await _sleep(pauseMs);
     if (optionsBoolean(options?._forceSelectedFloorSwitch, false)) {
       const toBottom = asNumber(toFloor?.bottom, NaN);
       if (Number.isFinite(toBottom)) {
-        switchToLevelForElevation(toBottom + 0.001, 'token-movement-selected-floor-follow:deferred-force');
+        await scheduleTokenLevelSwitch(tokenDoc, toBottom + 0.001, {
+          reason: 'token-movement-selected-floor-follow:deferred-force',
+          dwellMs: 0,
+          dedupeMs: 300,
+          requireControlled: true
+        });
       }
       return;
     }
-    this._followSelectedTokenFloorTransition(tokenDoc, null, toFloor);
+    await this._followSelectedTokenFloorTransition(tokenDoc, null, toFloor, options);
   }
 
   _isTokenSpriteAlignedToDocument(tokenId, tokenDoc, tolerancePx = 0.75) {
@@ -7961,6 +8066,48 @@ export class TokenMovementManager {
     const dx = Math.abs(asNumber(sprite?.position?.x, target.x) - target.x);
     const dy = Math.abs(asNumber(sprite?.position?.y, target.y) - target.y);
     return dx < tolerancePx && dy < tolerancePx;
+  }
+
+  async _awaitTokenSpriteDocumentAlignment(tokenId, tokenDoc = null, options = {}) {
+    const id = String(tokenId || tokenDoc?.id || tokenDoc?._id || '');
+    if (!id) return true;
+
+    const enabled = optionsBoolean(options?.syncSpriteToDocumentAfterStep, true);
+    if (!enabled) return true;
+
+    const extreme = this._shouldUseExtremeStepSync(options);
+    const timeoutDefault = extreme ? 3000 : 1400;
+    const dwellDefault = extreme ? 130 : 70;
+    const toleranceDefault = extreme ? 0.2 : 0.75;
+    const timeoutMs = clamp(Math.round(asNumber(options?.spriteDocumentAlignTimeoutMs, timeoutDefault)), 0, 10000);
+    if (timeoutMs <= 0) return true;
+    const dwellMs = clamp(Math.round(asNumber(options?.spriteDocumentAlignDwellMs, dwellDefault)), 0, 2000);
+    const pollMs = clamp(Math.round(asNumber(options?.spriteDocumentAlignPollMs, 16)), 8, 120);
+    const tolerancePx = clamp(asNumber(options?.spriteDocumentAlignTolerancePx, toleranceDefault), 0.1, 8);
+
+    const deadline = Date.now() + timeoutMs;
+    let alignedSinceMs = 0;
+    while (Date.now() <= deadline) {
+      const liveDoc = this._resolveTokenDocumentById(id, tokenDoc);
+      if (!liveDoc) return true;
+
+      const aligned = this._isTokenSpriteAlignedToDocument(id, liveDoc, tolerancePx);
+      if (aligned) {
+        if (alignedSinceMs <= 0) alignedSinceMs = Date.now();
+        if ((Date.now() - alignedSinceMs) >= dwellMs) return true;
+      } else {
+        alignedSinceMs = 0;
+      }
+      await _sleep(pollMs);
+    }
+
+    this._pathfindingLog('debug', '_awaitTokenSpriteDocumentAlignment timed out', {
+      tokenId: id,
+      timeoutMs,
+      dwellMs,
+      tolerancePx
+    });
+    return false;
   }
 
   _forceCameraFloorToTokenElevation(tokenDoc, reason = 'token-move-force-floor') {
@@ -8056,7 +8203,7 @@ export class TokenMovementManager {
     try {
       await canvas.scene.updateEmbeddedDocuments('Token', [update], updateOptions);
       if (!this._shouldDeferSelectedLevelSwitch(options)) {
-        this._followSelectedTokenFloorTransition(liveDoc, this._parseFloorKey(segment?.fromFloorKey), toFloor);
+        await this._followSelectedTokenFloorTransition(liveDoc, this._parseFloorKey(segment?.fromFloorKey), toFloor, options);
       }
       await this._awaitSequencedStepSettle(tokenId, Math.max(80, asNumber(segment?.travelTimeMs, 400)), options, {
         tokenId,
@@ -11158,7 +11305,7 @@ export class TokenMovementManager {
       }
 
       if (targetFloor && !this._shouldDeferSelectedLevelSwitch(options)) {
-        this._followSelectedTokenFloorTransition(liveDoc, sourceFloor, targetFloor);
+        await this._followSelectedTokenFloorTransition(liveDoc, sourceFloor, targetFloor, options);
       }
 
       // Fog-of-war update ordering:
@@ -11168,8 +11315,12 @@ export class TokenMovementManager {
         const movementMethod = String(options?.method || context?.phase || '').toLowerCase();
         const isPathWalkStep = movementMethod === 'path-walk' || movementMethod === 'walk' || movementMethod === 'path_segment';
         if (isPathWalkStep) {
+          if (this._shouldUseExtremeStepSync(options)) {
+            const holdBeforeFogMs = clamp(asNumber(options?.extremeStepHoldBeforeFogMs, 1000), 0, 10000);
+            if (holdBeforeFogMs > 0) await _sleep(holdBeforeFogMs);
+          }
           const sightRefreshAck = this._awaitNextSightRefresh(
-            asNumber(options?.perStepSightRefreshTimeoutMs, 500)
+            asNumber(options?.perStepSightRefreshTimeoutMs, this._shouldUseExtremeStepSync(options) ? 2500 : 500)
           );
           frameCoordinator.requestActivePerception?.();
           frameCoordinator.forcePerceptionUpdate({ bypassThrottle: true });
@@ -11179,7 +11330,11 @@ export class TokenMovementManager {
           // fog effect has actually rendered the new vision mask to its
           // GPU targets. Yield one small frame so fog updates apply between
           // grid steps rather than collapsing into the last step.
-          const fogSettleMs = clamp(asNumber(options?.perStepFogSettleMs, 20), 0, 120);
+          const fogSettleMs = clamp(
+            asNumber(options?.perStepFogSettleMs, this._shouldUseExtremeStepSync(options) ? 220 : 20),
+            0,
+            1200
+          );
           if (fogSettleMs > 0) await _sleep(fogSettleMs);
         }
       } catch (_) {
@@ -11329,6 +11484,12 @@ export class TokenMovementManager {
       || /PATH_SEGMENT|PATH_TO_DOOR|PRE_DOOR_HOLD|CROSS_DOOR|RESUME_PATH|GROUP_PATH_SEGMENT/i.test(phase)
     );
 
+    // Extreme debug stepping uses a fixed pre-fog hold per step, so suppress
+    // post-step jitter pauses to avoid doubling the idle interval.
+    if (isPathWalkChoreo && this._shouldUseExtremeStepSync(options)) {
+      return 0;
+    }
+
     // Deliberate pacing: add a consistent “grid stop” pause for sequenced
     // path-walk steps so motion feels more intentional.
     if (isPathWalkChoreo) {
@@ -11401,12 +11562,18 @@ export class TokenMovementManager {
   async _awaitSequencedStepSettle(tokenId, fallbackDelayMs, options = {}, context = {}) {
     const groupCancelToken = context?._groupCancelToken || options?._groupCancelToken || null;
     const cancelled = () => !!groupCancelToken?.cancelled;
+    const awaitVisualAlignment = async () => {
+      if (cancelled()) return;
+      const liveDoc = this._resolveTokenDocumentById(tokenId, null);
+      await this._awaitTokenSpriteDocumentAlignment(tokenId, liveDoc, options);
+    };
 
     if (cancelled()) return;
 
+    const extreme = this._shouldUseExtremeStepSync(options);
     const inferredTrackStartWaitMs = Math.min(650, Math.max(220, Math.round(asNumber(fallbackDelayMs, 0) * 0.8)));
     const waitForTrackStartMs = clamp(asNumber(options?.waitForTrackStartMs, inferredTrackStartWaitMs), 0, 2000);
-    const waitForTrackFinishMs = clamp(asNumber(options?.waitForTrackFinishMs, 2400), 100, 10000);
+    const waitForTrackFinishMs = clamp(asNumber(options?.waitForTrackFinishMs, extreme ? 5000 : 2400), 100, 10000);
     const pollMs = clamp(asNumber(options?.trackPollIntervalMs, 16), 8, 100);
 
     const hasTrack = () => this.activeTracks?.has?.(tokenId) === true;
@@ -11446,6 +11613,7 @@ export class TokenMovementManager {
           pollMs
         });
       }
+      await awaitVisualAlignment();
       return;
     }
 
@@ -11466,6 +11634,7 @@ export class TokenMovementManager {
         await _sleep(Math.min(pollMs, Math.max(4, fallbackDeadline - Date.now())));
       }
     }
+    await awaitVisualAlignment();
   }
 
   // ── Move Lock Helpers ──────────────────────────────────────────────────────

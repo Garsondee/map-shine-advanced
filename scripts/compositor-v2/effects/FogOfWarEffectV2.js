@@ -269,6 +269,20 @@ export class FogOfWarEffectV2 {
     this._lastElevationBandBottom = null;
     /** @type {number|null} Last known elevation band top */
     this._lastElevationBandTop = null;
+    /**
+     * Levels: after a floor/band change, keep an opaque fog hold until the new
+     * band's exploration mask is on the GPU (or confirmed empty). Prevents a
+     * one-frame composite with cleared RT + live vision (peek).
+     */
+    this._levelBandFogHold = false;
+    /**
+     * Levels: {@link getActiveElevationBandKey} for which exploration RT pixels
+     * are authoritative (cleared black or loaded texture). If the live band
+     * key differs, we must sync GPU before compositing — otherwise one frame can
+     * show the previous floor's explored mask on the new floor.
+     * @type {string|null}
+     */
+    this._explorationGpuBandKey = null;
 
     // Door->fog transition sync: keep fog reveal/occlusion temporally aligned
     // with door visual opening/closing rather than snapping instantly on ds.
@@ -687,6 +701,15 @@ export class FogOfWarEffectV2 {
       explorationEnabled: canvas?.scene?.fog?.exploration ?? false,
       explorationLoaded: this._explorationLoadedFromFoundry,
       explorationPlayerGpuReady: this._explorationPlayerGpuReady,
+      levelBandFogHold: this._levelBandFogHold,
+      explorationGpuBandKey: this._explorationGpuBandKey,
+      liveBandKey: (() => {
+        try {
+          return getActiveElevationBandKey();
+        } catch (_) {
+          return null;
+        }
+      })(),
       explorationLoadGeneration: this._explorationLoadGeneration,
       realUserIsGM: !!game?.user?.isGM,
       fogStoreContextResolved: this._computeFogStoreContext().resolved,
@@ -922,6 +945,7 @@ export class FogOfWarEffectV2 {
     this._fullResTargetsReady = true;
     this._explorationLoadedFromFoundry = false;
     this._explorationLoadAttempts = 0;
+    this._explorationGpuBandKey = null;
     this._needsVisionUpdate = true;
     this._hasValidVision = false;
 
@@ -1647,6 +1671,7 @@ export class FogOfWarEffectV2 {
         this._lastFogStoreLoadFoundData = false;
         this._explorationLoadedFromFoundry = true;
         if (nonGm) this._explorationPlayerGpuReady = true;
+        this._levelBandFogHold = false;
         return;
       }
 
@@ -1680,6 +1705,7 @@ export class FogOfWarEffectV2 {
               log.warn('Failed to apply stored fog exploration texture', e);
               this._explorationLoadedFromFoundry = true;
               this._explorationPlayerGpuReady = true;
+              this._levelBandFogHold = false;
             } finally {
               try { texture.dispose?.(); } catch (_) {}
               endPlayerAsyncLoad();
@@ -1690,6 +1716,7 @@ export class FogOfWarEffectV2 {
             log.warn('Failed to load stored fog exploration texture', err);
             this._explorationLoadedFromFoundry = true;
             this._explorationPlayerGpuReady = true;
+            this._levelBandFogHold = false;
             endPlayerAsyncLoad();
           }
         );
@@ -1710,6 +1737,7 @@ export class FogOfWarEffectV2 {
             this._renderLoadedExplorationTexture(texture);
           } catch (e) {
             log.warn('Failed to apply stored fog exploration texture', e);
+            this._levelBandFogHold = false;
           } finally {
             try { texture.dispose?.(); } catch (_) {}
           }
@@ -1717,6 +1745,7 @@ export class FogOfWarEffectV2 {
         undefined,
         (err) => {
           log.warn('Failed to load stored fog exploration texture', err);
+          this._levelBandFogHold = false;
         }
       );
     } catch (e) {
@@ -1724,6 +1753,7 @@ export class FogOfWarEffectV2 {
       this._explorationLoadAttempts++;
       this._explorationLoadedFromFoundry = true;
       if (nonGm) this._explorationPlayerGpuReady = true;
+      this._levelBandFogHold = false;
     } finally {
       if (!asyncDecodePlayer) {
         this._isLoadingExploration = false;
@@ -1771,7 +1801,8 @@ export class FogOfWarEffectV2 {
     this._explorationLoadedFromFoundry = false;
     this._explorationLoadAttempts = 0;
     this._pendingAccumulation = false;
-    this._explorationLoadGeneration++;
+    this._explorationGpuBandKey = getActiveElevationBandKey();
+    this._levelBandFogHold = true;
     void this._ensureExplorationLoadedFromStore();
     this._needsVisionUpdate = true;
     this._hasValidVision = false;
@@ -2103,9 +2134,10 @@ export class FogOfWarEffectV2 {
       if (!visionSource) {
         if (!hasSight) {
           tokensWithoutSight++;
-        } else if (globalIllumActive && realGm) {
+        } else if (globalIllumActive && realGm && !this._levelBandFogHold) {
           // GM-only: full-scene rect spares a blind frame while perception spins up.
           // Never for real players — it ignores walls and reads as "see everything".
+          // Never during a floor/band hold — LOS is often invalid for a frame on swap.
           this._addFullSceneRect(THREE);
           this._visionIsFullSceneFallback = true;
           polygonsRendered++;
@@ -2124,7 +2156,7 @@ export class FogOfWarEffectV2 {
         if (!hasSight) {
           // Sight disabled ->-> token has a default/inactive vision source.
           tokensWithoutSight++;
-        } else if (globalIllumActive && realGm) {
+        } else if (globalIllumActive && realGm && !this._levelBandFogHold) {
           // GM-only full-scene GI fallback (see !visionSource branch above).
           this._addFullSceneRect(THREE);
           this._visionIsFullSceneFallback = true;
@@ -2474,6 +2506,9 @@ export class FogOfWarEffectV2 {
     const fogEnabled = canvas?.scene?.tokenVision ?? false;
 
     if (!fogEnabled) return true;
+    // During a Levels floor/band transition hold, never bypass — controlled tokens
+    // are often empty for a frame and would otherwise hide the fog plane (full map flash).
+    if (this._levelBandFogHold) return false;
     // Real GM only — debug GM parity must not disable fog for actual players.
     if (game?.user?.isGM) {
       // If GM and NO tokens are controlled, bypass fog
@@ -2690,6 +2725,40 @@ export class FogOfWarEffectV2 {
    * revealed map content.
    * @private
    */
+  /**
+   * Levels + exploration: if the active band key does not match what was last
+   * written to exploration RTs, clear them synchronously before any composite.
+   * Runs at the start of {@link update} (after full-res targets exist) so we
+   * never draw one frame with a stale per-floor mask after `activeLevelContext`
+   * has already changed — even if `mapShineLevelContextChanged` has not fired yet.
+   * @returns {boolean} true if this frame must end after an opaque hold (caller returns)
+   * @private
+   */
+  _syncLevelsExplorationBandBeforeComposite() {
+    if (getLevelsCompatibilityMode() === LEVELS_COMPATIBILITY_MODES.OFF) return false;
+    if (!isLevelsEnabledForScene(canvas?.scene)) return false;
+    if (!(canvas?.scene?.fog?.exploration ?? false)) return false;
+
+    const bk = getActiveElevationBandKey();
+    if (bk == null) return false;
+
+    if (this._explorationGpuBandKey === bk) return false;
+
+    // Arm hold before full-res exists so _shouldBypassFog / GI cannot reveal for a frame.
+    this._levelBandFogHold = true;
+
+    if (!this._fullResTargetsReady || !this.renderer) return false;
+
+    this.resetExploration({ markLoaded: false });
+    this._explorationLoadedFromFoundry = false;
+    if (!game?.user?.isGM) this._explorationPlayerGpuReady = true;
+    this._pendingAccumulation = false;
+    this._explorationGpuBandKey = bk;
+    this._levelBandFogHold = true;
+    void this._ensureExplorationLoadedFromStore();
+    return true;
+  }
+
   _holdOpaqueFogFrame() {
     if (!this.fogPlane || !this.fogMaterial?.uniforms) return;
     this.fogPlane.visible = true;
@@ -2718,8 +2787,11 @@ export class FogOfWarEffectV2 {
     // Hard guard against native PIXI fog visuals resurfacing after Foundry
     // refresh hooks. Any resurfaced native fog appears camera-locked.
     this._suppressNativeFogVisuals();
-    
-    // Check if fog should be bypassed
+
+    // 1. Band sync first (arms _levelBandFogHold when key is stale, even before full-res).
+    const syncRequired = this._syncLevelsExplorationBandBeforeComposite();
+
+    // 2. Bypass respects hold — avoids GM "no controlled token" flash during floor swaps.
     const bypassFog = this._shouldBypassFog();
     this.fogMaterial.uniforms.uBypassFog.value = bypassFog ? 1.0 : 0.0;
 
@@ -2735,6 +2807,20 @@ export class FogOfWarEffectV2 {
     if (!this._fullResTargetsReady) {
       this._holdOpaqueFogFrame();
       return;
+    }
+
+    // 3. Opaque hold until exploration for this band is on GPU (or store empty).
+    if (syncRequired || this._levelBandFogHold) {
+      const levelsBandHoldActive = explorationEnabled
+        && getLevelsCompatibilityMode() !== LEVELS_COMPATIBILITY_MODES.OFF
+        && isLevelsEnabledForScene(canvas?.scene);
+      if (!levelsBandHoldActive) {
+        this._levelBandFogHold = false;
+      } else {
+        void this._ensureExplorationLoadedFromStore();
+        this._holdOpaqueFogFrame();
+        return;
+      }
     }
 
     // Non-GM + exploration memory: fail-closed until persisted exploration is
@@ -2993,6 +3079,7 @@ export class FogOfWarEffectV2 {
     this._needsVisionUpdate = true;
     this._explorationLoadedFromFoundry = false;
     this._explorationLoadAttempts = 0;
+    this._explorationGpuBandKey = null;
     this._lastFogStoreContextKey = '';
 
     try {
@@ -3051,8 +3138,10 @@ export class FogOfWarEffectV2 {
   }
 
   _renderLoadedExplorationTexture(texture) {
-    if (!this.renderer) return;
-    if (!this._explorationTargetA || !this._explorationTargetB) return;
+    if (!this.renderer || !this._explorationTargetA || !this._explorationTargetB) {
+      this._levelBandFogHold = false;
+      return;
+    }
 
     const THREE = window.THREE;
 
@@ -3088,6 +3177,12 @@ export class FogOfWarEffectV2 {
     copyMat.dispose();
 
     this._currentExplorationTarget = 'A';
+    this._levelBandFogHold = false;
+    try {
+      this._explorationGpuBandKey = getActiveElevationBandKey();
+    } catch (_) {
+      this._explorationGpuBandKey = null;
+    }
   }
 
   async _saveExplorationToFoundry({ force = false, reason = 'unknown' } = {}) {

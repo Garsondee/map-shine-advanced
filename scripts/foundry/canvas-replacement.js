@@ -3037,7 +3037,15 @@ function installFogSaveSafetyPatch() {
 
     const isKnownFogSizeError = (err) => {
       const msg = String(err?.message ?? err ?? '');
-      return /Index or size is negative|FogExtractor|Fog of War pixels extraction failed|pixels extraction failed|extractPixels|Buffer compression has failed|DOMException/i.test(msg);
+      const stack = String(err?.stack ?? '');
+      if (/Index or size is negative|FogExtractor|Fog of War pixels extraction failed|pixels extraction failed|extractPixels|Buffer compression has failed|DOMException/i.test(msg)) {
+        return true;
+      }
+      // Some builds reject with non-Error follow-ups; stack still points at #extractPixels.
+      if (/#extractPixels|Fog of War pixels extraction failed/i.test(stack)) {
+        return true;
+      }
+      return false;
     };
 
     const wrapMethod = (proto, methodName) => {
@@ -3051,7 +3059,13 @@ function installFogSaveSafetyPatch() {
         try {
           const out = original.apply(this, args);
           if (out && typeof out.then === 'function') {
-            return out.catch((err) => {
+            return Promise.resolve(out).catch((err) => {
+              // V2 fog does not use Foundry's PIXI fog texture; commit() still runs from
+              // refreshVisibility and often rejects (e.g. #extractPixels) — never surface as unhandled.
+              if (methodName === 'commit') {
+                log.debug('Suppressed FogManager.commit rejection (Map Shine V2 fog)', err?.message ?? err);
+                return undefined;
+              }
               if (isKnownFogSizeError(err)) {
                 log.warn(`Suppressed FogManager.${methodName} failure during scene lifecycle`, err?.message ?? err);
                 return undefined;
@@ -3061,6 +3075,10 @@ function installFogSaveSafetyPatch() {
           }
           return out;
         } catch (err) {
+          if (methodName === 'commit') {
+            log.debug('Suppressed FogManager.commit sync throw (Map Shine V2 fog)', err?.message ?? err);
+            return undefined;
+          }
           if (isKnownFogSizeError(err)) {
             log.warn(`Suppressed FogManager.${methodName} sync failure`, err?.message ?? err);
             return undefined;

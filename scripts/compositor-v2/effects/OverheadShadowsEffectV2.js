@@ -24,9 +24,13 @@ const log = createLogger('OverheadShadowsEffect');
  *   offset version of the roof mask.
  * - Only darkens the region outside the roof by subtracting the base roof
  *   alpha from the offset roof alpha.
+ * - Upper-floor slabs (`levelRole: floor` or tile flag `floorCastsOverheadShadow`)
+ *   use ROOF_LAYER like ceilings; FloorRenderBus reveals them during capture when
+ *   the active floor is below so downstairs still receives their shadow mask.
  */
 export class OverheadShadowsEffectV2 {
-  constructor() {
+  /** @param {import('./FloorRenderBus.js').FloorRenderBus|null} [renderBus] */
+  constructor(renderBus = null) {
     /** @type {THREE.ShaderMaterial|null} */
     this.material = null;
     /** @type {THREE.WebGLRenderTarget|null} */
@@ -81,6 +85,9 @@ export class OverheadShadowsEffectV2 {
 
     /** @type {import('../../scene/tile-motion-manager.js').TileMotionManager|null} */
     this._tileMotionManager = null;
+
+    /** @type {import('./FloorRenderBus.js').FloorRenderBus|null} */
+    this._renderBus = renderBus ?? null;
 
     /** @type {THREE.Texture|null} */
     this.outdoorsMask = null; // _Outdoors mask (bright outside, dark indoors)
@@ -143,6 +150,84 @@ export class OverheadShadowsEffectV2 {
      * @type {Map<string, {outdoorsMask: THREE.Texture|null}>}
      */
     this._floorStates = new Map();
+
+    /** @type {THREE.Texture|null} 1×1 RGBA white — valid sampler when an upper-floor mask slot is unused. */
+    this._whiteMaskPlaceholder = null;
+
+    /** Identity string for upper-floor _Outdoors textures bound for Outdoor Building Shadow casters. */
+    this._lastObUpperSig = '';
+
+    /** @type {THREE.Texture|null} */
+    this._lastOutdoorsMaskRef = null;
+  }
+
+  /**
+   * 1×1 opaque white texture for shader samplers that must stay valid in WebGL1.
+   * @returns {THREE.Texture|null}
+   * @private
+   */
+  _getWhiteMaskPlaceholder() {
+    const THREE = window.THREE;
+    if (!THREE) return null;
+    if (!this._whiteMaskPlaceholder) {
+      const data = new Uint8Array([255, 255, 255, 255]);
+      const tex = new THREE.DataTexture(data, 1, 1, THREE.RGBAFormat);
+      tex.needsUpdate = true;
+      tex.magFilter = THREE.NearestFilter;
+      tex.minFilter = THREE.NearestFilter;
+      this._whiteMaskPlaceholder = tex;
+    }
+    return this._whiteMaskPlaceholder;
+  }
+
+  /**
+   * Active (viewed) floor _Outdoors texture for receiver classification and roof/fluid region clip.
+   * @returns {THREE.Texture|null}
+   * @private
+   */
+  _resolveReceiverOutdoorsMaskTexture() {
+    let activeMask = this.outdoorsMask;
+    const activeFloor = window.MapShine?.floorStack?.getActiveFloor?.() ?? null;
+    const activeKey = activeFloor?.compositorKey ?? null;
+    if (activeKey && this._floorStates.has(activeKey)) {
+      activeMask = this._floorStates.get(activeKey).outdoorsMask ?? activeMask;
+    }
+    if (!activeMask && activeKey) {
+      const sc = window.MapShine?.sceneComposer;
+      activeMask = sc?._sceneMaskCompositor?.getFloorTexture?.(activeKey, 'outdoors') ?? this.outdoorsMask;
+    }
+    return activeMask ?? null;
+  }
+
+  /**
+   * _Outdoors textures for floors strictly above the active floor (Outdoor Building caster path).
+   * @returns {THREE.Texture[]}
+   * @private
+   */
+  _collectUpperFloorOutdoorsTextures() {
+    const compositor = window.MapShine?.sceneComposer?._sceneMaskCompositor;
+    if (!compositor) return [];
+    const floors = window.MapShine?.floorStack?.getFloors?.() ?? [];
+    const activeFloor = window.MapShine?.floorStack?.getActiveFloor?.() ?? null;
+    const activeIdx = Number(activeFloor?.index);
+    if (!Number.isFinite(activeIdx)) return [];
+    const upper = [];
+    for (const f of floors) {
+      const idx = Number(f?.index);
+      if (!Number.isFinite(idx) || idx <= activeIdx) continue;
+      let tex = null;
+      const ck = f?.compositorKey != null ? String(f.compositorKey) : '';
+      if (ck) tex = compositor.getFloorTexture?.(ck, 'outdoors') ?? null;
+      if (!tex) {
+        const b = Number(f?.elevationMin);
+        const t = Number(f?.elevationMax);
+        if (Number.isFinite(b) && Number.isFinite(t)) {
+          tex = compositor.getFloorTexture?.(`${b}:${t}`, 'outdoors') ?? null;
+        }
+      }
+      if (tex && upper.length < 3) upper.push(tex);
+    }
+    return upper;
   }
 
   /**
@@ -193,6 +278,10 @@ export class OverheadShadowsEffectV2 {
       if (!object?.layers || typeof object.visible !== 'boolean') return;
       const isOverheadLayer = (object.layers.mask & (1 << 20)) !== 0;
       if (!isOverheadLayer) return;
+
+      // Skip FloorRenderBus tiles — they are handled by beginOverheadShadowCaptureReveal
+      // in FloorRenderBus which properly manages their visibility lifecycle.
+      if (object?.userData?.mapShineBusTile) return;
 
       const floorIndexRaw = object?.userData?.floorIndex;
       const floorIndex = Number(floorIndexRaw);
@@ -466,17 +555,20 @@ export class OverheadShadowsEffectV2 {
     }
     const effectiveMask = floorMask ?? this.outdoorsMask ?? registryMask;
 
-    const cached = this._floorStates.get(floorKey);
-    if (cached) {
-      // Always restore the instance field — the previous floor's pass overwrites it.
-      // The render path reads this.outdoorsMask directly, so it must be correct
-      // for the floor currently being rendered.
-      this.outdoorsMask = cached.outdoorsMask;
-      return;
-    }
-
+    // Always cache this floor's mask for the render path to look up
     this._floorStates.set(floorKey, { outdoorsMask: effectiveMask });
-    this.outdoorsMask = effectiveMask;
+
+    // Only set this.outdoorsMask for the ACTIVE floor being viewed.
+    // The bindFloorMasks loop iterates through ALL floors, so if we set it for every
+    // floor, the last floor's mask "wins" and ground floor rendering would use the
+    // top floor's mask (incorrectly masking building shadows).
+    const activeFloor = window.MapShine?.floorStack?.getActiveFloor?.() ?? null;
+    const activeKey = activeFloor?.compositorKey ?? null;
+    const isActiveFloor = activeKey && String(floorKey) === String(activeKey);
+
+    if (isActiveFloor) {
+      this.outdoorsMask = effectiveMask;
+    }
   }
 
   /**
@@ -778,6 +870,8 @@ export class OverheadShadowsEffectV2 {
     const THREE = window.THREE;
     if (!THREE || !this.baseMesh) return;
 
+    const whiteOb = this._getWhiteMaskPlaceholder();
+
     // Dispose previous mesh/material if rebuilding
     if (this.shadowMesh && this.shadowScene) {
       this.shadowScene.remove(this.shadowMesh);
@@ -810,6 +904,14 @@ export class OverheadShadowsEffectV2 {
         uOutdoorsMask: { value: null },
         uHasOutdoorsMask: { value: 0.0 },
         uOutdoorsMaskFlipY: { value: 0.0 },
+        // Upper-floor _Outdoors for Outdoor Building Shadow casters only (min across levels above).
+        uObUpperOutdoors0: { value: whiteOb },
+        uObUpperOutdoors1: { value: whiteOb },
+        uObUpperOutdoors2: { value: whiteOb },
+        uObUpperOutdoorsFlipY0: { value: 0.0 },
+        uObUpperOutdoorsFlipY1: { value: 0.0 },
+        uObUpperOutdoorsFlipY2: { value: 0.0 },
+        uObUpperCount: { value: 0.0 },
         uIndoorShadowEnabled: { value: 0.0 },
         uOutdoorBuildingShadowOpacity: { value: this.params.outdoorBuildingShadowOpacity ?? this.params.indoorShadowOpacity ?? 0.5 },
         uOutdoorBuildingShadowLengthScale: { value: this.params.outdoorBuildingShadowLengthScale ?? this.params.indoorShadowLengthScale ?? 1.0 },
@@ -880,6 +982,13 @@ export class OverheadShadowsEffectV2 {
         uniform sampler2D uOutdoorsMask;
         uniform float uHasOutdoorsMask;
         uniform float uOutdoorsMaskFlipY;
+        uniform sampler2D uObUpperOutdoors0;
+        uniform sampler2D uObUpperOutdoors1;
+        uniform sampler2D uObUpperOutdoors2;
+        uniform float uObUpperOutdoorsFlipY0;
+        uniform float uObUpperOutdoorsFlipY1;
+        uniform float uObUpperOutdoorsFlipY2;
+        uniform float uObUpperCount;
         uniform float uIndoorShadowEnabled;
         uniform float uOutdoorBuildingShadowOpacity;
         uniform float uOutdoorBuildingShadowLengthScale;
@@ -951,6 +1060,33 @@ export class OverheadShadowsEffectV2 {
           // may be 0 while RGB is black; interpret that as default outdoors (1.0).
           vec4 m = texture2D(uOutdoorsMask, suv);
           return clamp(mix(1.0, m.r, m.a), 0.0, 1.0);
+        }
+
+        float readObUpperSample(sampler2D samp, float flipY, vec2 uv) {
+          vec2 suv = clamp(uv, 0.0, 1.0);
+          if (flipY > 0.5) suv.y = 1.0 - suv.y;
+          vec4 m = texture2D(samp, suv);
+          return clamp(mix(1.0, m.r, m.a), 0.0, 1.0);
+        }
+
+        // Outdoor Building Shadow caster: combine _Outdoors from levels above the viewer.
+        // min() => treat as "indoor caster" if ANY upper level marks this world XY dark/indoor.
+        // When uObUpperCount < 0.5, fall back to the receiver mask (single-floor / top floor).
+        float readOutdoorBuildingCasterOutdoors(vec2 uv) {
+          if (uObUpperCount < 0.5) {
+            return readOutdoorsMask(uv);
+          }
+          float o = 1.0;
+          if (uObUpperCount > 0.5) {
+            o = min(o, readObUpperSample(uObUpperOutdoors0, uObUpperOutdoorsFlipY0, uv));
+          }
+          if (uObUpperCount > 1.5) {
+            o = min(o, readObUpperSample(uObUpperOutdoors1, uObUpperOutdoorsFlipY1, uv));
+          }
+          if (uObUpperCount > 2.5) {
+            o = min(o, readObUpperSample(uObUpperOutdoors2, uObUpperOutdoorsFlipY2, uv));
+          }
+          return o;
         }
 
         // Compute how far we can travel along delta before leaving [0,1].
@@ -1107,6 +1243,12 @@ export class OverheadShadowsEffectV2 {
           vec2 maskOffsetUvBase = vUv + maskProjectDir * maskPixelLenBase * maskTexelSize;
           vec2 maskOffsetUvIndoor = vUv + maskProjectDir * maskPixelLenIndoor * maskTexelSize;
           vec2 maskOffsetUvProjected = vUv + maskProjectDir * maskPixelLenProjected * maskTexelSize;
+          // World/mesh UV travel for _Outdoors building shadow only — do not tie
+          // this to screen-space roof projection (baseEdgeFade). Short roof
+          // projection or viewport clamping was incorrectly zeroing building shadow.
+          vec2 outdoorBuildingMaskDelta = maskProjectDir * maskPixelLenIndoor * maskTexelSize;
+          float outdoorBuildingTravelScale = offsetTravelScale(vUv, outdoorBuildingMaskDelta);
+          float outdoorBuildingEdgeFade = mix(0.25, 1.0, smoothstep(0.0, 1.0, outdoorBuildingTravelScale));
 
           // Apply indoor/outdoor softness selection uniformly so all shadow
           // components (roof, indoor mask, and fluid tint) blur consistently.
@@ -1141,9 +1283,14 @@ export class OverheadShadowsEffectV2 {
               float roofStrengthTap = clamp(roofProjectedOnlyTap * uOpacity, 0.0, 1.0);
               roofStrengthTap *= baseEdgeFade;
 
-              // Region clipping: prevent shadows from crossing the
-              // indoor/outdoor boundary. If the projected caster tap lives in
-              // a different _Outdoors region than the receiver pixel, discard it.
+              // Region clipping (receiver floor _Outdoors only): mask-offset tap
+              // uses the VIEWED floor's mask at sun-offset UV — not the upstairs
+              // caster's classification. On outdoor ground under an upper slab,
+              // that offset often lands on "indoor" building footprint on the
+              // ground map while tRoof correctly captures the upper-floor caster;
+              // sameRegionTap would zero the stamp (felt like "upper mask" killing
+              // downstairs shadow). Skip offset clip for outdoor receivers; keep
+              // full clip for indoor receivers so overhead does not leak outdoors→indoors.
               vec2 maskJitterUv = vec2(float(dx), float(dy)) * maskStepUv;
               vec2 indoorMaskJitterUv = vec2(float(dx), float(dy)) * indoorMaskStepUv;
               float sameRegionTap = hasOutdoorsMask ? 0.0 : 1.0;
@@ -1158,7 +1305,8 @@ export class OverheadShadowsEffectV2 {
                   // indoor receivers and outdoor casters only to outdoor receivers.
                   sameRegionTap = receiverIsOutdoors * casterIsOutdoors + receiverIsIndoor * casterIsIndoor;
                 }
-                roofStrengthTap *= sameRegionTap;
+                float roofRegionTap = (receiverIsOutdoors > 0.5) ? 1.0 : sameRegionTap;
+                roofStrengthTap *= roofRegionTap;
               }
 
               // Dark-region tap (world-space _Outdoors mask)
@@ -1169,12 +1317,16 @@ export class OverheadShadowsEffectV2 {
                 vec2 mUvIndoor = maskOffsetUvIndoor + indoorMaskJitterUv;
                 float mUvIndoorValid = uvInBounds(mUvIndoor, maskTexelSize);
                 if (mUvIndoorValid > 0.5) {
-                  float casterOutdoorsIndoor = readOutdoorsMask(mUvIndoor);
+                  float casterOutdoorsIndoor = readOutdoorBuildingCasterOutdoors(mUvIndoor);
                   float casterIndoorsIndoor = 1.0 - casterOutdoorsIndoor;
                   indoorStrengthTap = clamp(casterIndoorsIndoor * uOutdoorBuildingShadowOpacity * receiverIsOutdoors, 0.0, 1.0);
-                  // Keep outdoor-building shadow below visible overhead tiles.
-                  indoorStrengthTap *= (1.0 - roofVisibilityAlpha);
-                  indoorStrengthTap *= baseEdgeFade;
+                  // Do NOT multiply by (1.0 - roofVisibilityAlpha): that uses the
+                  // same screen-space roof mask as upstairs floor slabs and classic
+                  // roofs, so lower-floor outdoor pixels under an upper deck read as
+                  // "under a roof" and the term vanishes until shadow length pushes
+                  // samples sideways. Screen-space roof suppression is for the roof
+                  // stamp pass (roofStrengthTap), not world _Outdoors projection.
+                  indoorStrengthTap *= outdoorBuildingEdgeFade;
                 }
               }
 
@@ -1274,6 +1426,9 @@ export class OverheadShadowsEffectV2 {
                     float casterOutdoorsFluid = readOutdoorsMask(mUvFluid);
                     float casterIsOutdoorsFluid = step(0.5, casterOutdoorsFluid);
                     sameRegionFluidTap = 1.0 - abs(casterIsOutdoorsFluid - receiverIsOutdoors);
+                  }
+                  if (receiverIsOutdoors > 0.5) {
+                    sameRegionFluidTap = 1.0;
                   }
                 }
 
@@ -1649,10 +1804,15 @@ export class OverheadShadowsEffectV2 {
     const camZoom = this._getEffectiveZoom();
     const outdoorBuildingShadow = this._resolveOutdoorBuildingShadowParams();
     const updateHash = `${hour.toFixed(3)}_${this.params.sunLatitude}_${this.params.opacity}_${this.params.length}_${this.params.softness}_${this.params.outdoorShadowLengthScale}_${this.params.indoorReceiverShadowLengthScale}_${camZoom.toFixed(4)}_${this.params.indoorShadowEnabled}_${outdoorBuildingShadow.opacity}_${outdoorBuildingShadow.lengthScale}_${this.params.indoorShadowSoftness}_${this.params.indoorFluidShadowSoftness}_${this.params.indoorFluidShadowIntensityBoost}_${this.params.indoorFluidColorSaturation}_${this.params.tileProjectionEnabled}_${this.params.tileProjectionOpacity}_${this.params.tileProjectionLengthScale}_${this.params.tileProjectionSoftness}_${this.params.tileProjectionThreshold}_${this.params.tileProjectionPower}_${this.params.tileProjectionOutdoorOpacityScale}_${this.params.tileProjectionIndoorOpacityScale}_${this.params.tileProjectionSortBias}_${this.params.fluidColorEnabled}_${this.params.fluidEffectTransparency}_${this.params.fluidShadowIntensityBoost}_${this.params.fluidShadowSoftness}_${this.params.fluidColorBoost}_${this.params.fluidColorSaturation}_${hoverRevealActive ? 1 : 0}`;
-    
+
+    const receiverMask = this._resolveReceiverOutdoorsMaskTexture();
+    const upperObTextures = this._collectUpperFloorOutdoorsTextures();
+    const obUpperSig = upperObTextures.map((t) => t?.uuid ?? '').join('|');
+
     // Floor/mask transitions can swap outdoorsMask without changing any scalar params.
-    // Do not short-circuit in that case or uOutdoorsMask/uHasOutdoorsMask goes stale.
-    const outdoorsMaskChanged = this._lastOutdoorsMaskRef !== this.outdoorsMask;
+    // Do not short-circuit in that case or uOutdoorsMask / upper caster masks go stale.
+    const outdoorsMaskChanged = this._lastOutdoorsMaskRef !== receiverMask
+      || this._lastObUpperSig !== obUpperSig;
     if (this._lastUpdateHash === updateHash && this.sunDir && !outdoorsMaskChanged) return;
     this._lastUpdateHash = updateHash;
 
@@ -1694,9 +1854,17 @@ export class OverheadShadowsEffectV2 {
       if (u.uZoom && this.mainCamera) {
         u.uZoom.value = this._getEffectiveZoom();
       }
-      // Keep overhead's own _Outdoors building contribution controllable from
-      // this effect even when BuildingShadowsEffectV2 is enabled.
-      if (u.uIndoorShadowEnabled) u.uIndoorShadowEnabled.value = this.params.indoorShadowEnabled ? 1.0 : 0.0;
+      // Outdoor Building Shadow: projected _Outdoors dark-region term (outdoor
+      // receivers). BuildingShadowsEffectV2 is a separate bake that handles the
+      // same contribution. When building shadows are enabled, disable the
+      // overhead shadow's outdoor building contribution to avoid double-counting.
+      // This maintains the behavior from 0.1.9.11 that worked correctly.
+      let useLegacyIndoorShadow = !!this.params.indoorShadowEnabled;
+      try {
+        const buildingEnabled = !!window.MapShine?.floorCompositorV2?._buildingShadowEffect?.params?.enabled;
+        if (buildingEnabled) useLegacyIndoorShadow = false;
+      } catch (_) {}
+      if (u.uIndoorShadowEnabled) u.uIndoorShadowEnabled.value = useLegacyIndoorShadow ? 1.0 : 0.0;
       if (u.uOutdoorBuildingShadowOpacity) u.uOutdoorBuildingShadowOpacity.value = outdoorBuildingShadowOpacity;
       if (u.uOutdoorBuildingShadowLengthScale) u.uOutdoorBuildingShadowLengthScale.value = outdoorBuildingShadowLengthScale;
       if (u.uIndoorShadowSoftness) u.uIndoorShadowSoftness.value = this.params.indoorShadowSoftness;
@@ -1733,13 +1901,31 @@ export class OverheadShadowsEffectV2 {
         } catch (_) { /* canvas may not be ready */ }
       }
 
-      // Indoor shadow is always sourced from _Outdoors.
-      // (White = outdoors, dark = indoors; shader inverts it for indoor weight.)
-      const activeMask = this.outdoorsMask;
-      if (u.uOutdoorsMask) u.uOutdoorsMask.value = activeMask;
-      if (u.uHasOutdoorsMask) u.uHasOutdoorsMask.value = activeMask ? 1.0 : 0.0;
-      if (u.uOutdoorsMaskFlipY) u.uOutdoorsMaskFlipY.value = activeMask?.flipY ? 1.0 : 0.0;
-      this._lastOutdoorsMaskRef = activeMask;
+      // Receiver + roof/fluid region clip: ACTIVE (viewed) floor _Outdoors only —
+      // keeps overhead / building contributions from leaking into current-level indoor.
+      if (u.uOutdoorsMask) u.uOutdoorsMask.value = receiverMask;
+      if (u.uHasOutdoorsMask) u.uHasOutdoorsMask.value = receiverMask ? 1.0 : 0.0;
+      if (u.uOutdoorsMaskFlipY) u.uOutdoorsMaskFlipY.value = receiverMask?.flipY ? 1.0 : 0.0;
+
+      // Outdoor Building Shadow casters: combine _Outdoors from levels above the viewer
+      // (min = indoor on any upper level at this world XY). Slots unused → white sampler.
+      const whiteOb = this._getWhiteMaskPlaceholder();
+      if (u.uObUpperOutdoors0) u.uObUpperOutdoors0.value = upperObTextures[0] ?? whiteOb;
+      if (u.uObUpperOutdoors1) u.uObUpperOutdoors1.value = upperObTextures[1] ?? whiteOb;
+      if (u.uObUpperOutdoors2) u.uObUpperOutdoors2.value = upperObTextures[2] ?? whiteOb;
+      if (u.uObUpperOutdoorsFlipY0) {
+        u.uObUpperOutdoorsFlipY0.value = upperObTextures[0]?.flipY ? 1.0 : 0.0;
+      }
+      if (u.uObUpperOutdoorsFlipY1) {
+        u.uObUpperOutdoorsFlipY1.value = upperObTextures[1]?.flipY ? 1.0 : 0.0;
+      }
+      if (u.uObUpperOutdoorsFlipY2) {
+        u.uObUpperOutdoorsFlipY2.value = upperObTextures[2]?.flipY ? 1.0 : 0.0;
+      }
+      if (u.uObUpperCount) u.uObUpperCount.value = upperObTextures.length;
+
+      this._lastOutdoorsMaskRef = receiverMask;
+      this._lastObUpperSig = obUpperSig;
     }
   }
 
@@ -1827,19 +2013,24 @@ export class OverheadShadowsEffectV2 {
     const useLinearGuardScale = !!this.mainCamera?.isOrthographicCamera;
     const roofCaptureScale = useLinearGuardScale ? Math.max(guardScaleX, guardScaleY) : 1.0;
 
+    // Tell FloorRenderBus to reveal upper-floor casters for shadow capture.
+    // This must happen before _forceUpperOverheadCasterVisibility so the bus
+    // tiles are already visible when that function captures the "previous" state.
+    const busRevealSnapshot = this._renderBus?.beginOverheadShadowCaptureReveal?.() ?? [];
+
     const treeCaptureOverrides = [];
     this.mainScene.traverse((object) => {
-      if (!object?.userData?.mapShineTreeTileId || !object.layers) return;
-      treeCaptureOverrides.push({
-        object,
-        layersMask: object.layers.mask,
-        visible: typeof object.visible === 'boolean' ? object.visible : undefined
+        if (!object?.userData?.mapShineTreeTileId || !object.layers) return;
+        treeCaptureOverrides.push({
+          object,
+          layersMask: object.layers.mask,
+          visible: typeof object.visible === 'boolean' ? object.visible : undefined
+        });
+        // Include tree overlays in weather visibility/blocker captures only.
+        // Roof shadow caster capture still explicitly hides tree overlays below.
+        object.layers.enable(WEATHER_ROOF_LAYER);
+        if (typeof object.visible === 'boolean') object.visible = true;
       });
-      // Include tree overlays in weather visibility/blocker captures only.
-      // Roof shadow caster capture still explicitly hides tree overlays below.
-      object.layers.enable(WEATHER_ROOF_LAYER);
-      if (typeof object.visible === 'boolean') object.visible = true;
-    });
 
     const roofVisibilityExclusions = [];
     this.mainScene.traverse((object) => {
@@ -2107,6 +2298,9 @@ export class OverheadShadowsEffectV2 {
         if (entry?.object) entry.object.visible = entry.visible;
       }
       restoreRoofCaptureCamera();
+      // Restore FloorRenderBus visibility after all other visibility overrides.
+      // Bus tiles were revealed by beginOverheadShadowCaptureReveal for this pass.
+      this._renderBus?.endOverheadShadowCaptureReveal?.(busRevealSnapshot);
     }
 
     // Restore per-sprite opacity now that roofTarget capture is done.
@@ -2403,6 +2597,7 @@ export class OverheadShadowsEffectV2 {
   dispose() {
     if (this._registryUnsub) { this._registryUnsub(); this._registryUnsub = null; }
     this._tileMotionManager = null;
+    this._renderBus = null;
     if (this.roofTarget) {
       this.roofTarget.dispose();
       this.roofTarget = null;
@@ -2456,6 +2651,10 @@ export class OverheadShadowsEffectV2 {
     if (this.material) {
       this.material.dispose();
       this.material = null;
+    }
+    if (this._whiteMaskPlaceholder) {
+      try { this._whiteMaskPlaceholder.dispose(); } catch (_) {}
+      this._whiteMaskPlaceholder = null;
     }
     if (this.shadowMesh && this.shadowScene) {
       this.shadowScene.remove(this.shadowMesh);

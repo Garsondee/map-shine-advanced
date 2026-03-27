@@ -582,6 +582,11 @@ export class BuildingShadowsEffectV2 {
     renderer.setRenderTarget(prevTarget);
   }
 
+  /**
+   * Active floor index comes from `floorStack` (and active-level key fallback) —
+   * same inputs as `createLightingPerspectiveContext()` in `LightingPerspectiveContext.js`.
+   * `FloorCompositor` refreshes that snapshot at frame start before this pass runs.
+   */
   _resolveSourceFloorKeys(compositor) {
     const ctx = window.MapShine?.activeLevelContext ?? null;
     const activeKey = (ctx && Number.isFinite(Number(ctx.bottom)) && Number.isFinite(Number(ctx.top)))
@@ -621,8 +626,8 @@ export class BuildingShadowsEffectV2 {
     };
 
     const floors = floorStack?.getFloors?.() ?? [];
+    let resolvedActiveIdx = activeIdx;
     if (Array.isArray(floors) && floors.length > 0) {
-      let resolvedActiveIdx = activeIdx;
       if (!Number.isFinite(resolvedActiveIdx) && activeKey) {
         const match = floors.find((floor) => {
           const b = Number(floor?.elevationMin);
@@ -631,20 +636,26 @@ export class BuildingShadowsEffectV2 {
         });
         if (Number.isFinite(match?.index)) resolvedActiveIdx = Number(match.index);
       }
-      if (!Number.isFinite(resolvedActiveIdx)) {
-        resolvedActiveIdx = 0;
-      }
+    }
+    if (!Number.isFinite(resolvedActiveIdx)) {
+      resolvedActiveIdx = 0;
+    }
 
+    if (Array.isArray(floors) && floors.length > 0) {
       for (const floor of floors) {
         if (!Number.isFinite(floor?.index) || floor.index < resolvedActiveIdx) continue;
+        const ck = floor?.compositorKey != null ? String(floor.compositorKey) : '';
+        if (ck) pushKey(ck);
         const b = Number(floor?.elevationMin);
         const t = Number(floor?.elevationMax);
-        if (!Number.isFinite(b) || !Number.isFinite(t)) continue;
-        pushKey(`${b}:${t}`);
+        if (Number.isFinite(b) && Number.isFinite(t)) {
+          pushKey(`${b}:${t}`);
+        }
       }
     }
 
     if (keys.length === 0 && activeFloor) {
+      if (activeFloor.compositorKey) pushKey(String(activeFloor.compositorKey));
       const b = Number(activeFloor?.elevationMin);
       const t = Number(activeFloor?.elevationMax);
       if (Number.isFinite(b) && Number.isFinite(t)) {
@@ -657,13 +668,11 @@ export class BuildingShadowsEffectV2 {
       pushKey(activeKey);
     }
 
-    // Non-level fallback used by some scenes.
-    if (keys.length === 0) {
-      pushKey('ground');
-    }
-
-    // If floor-stack selection produced no valid textures yet, use currently
-    // cached floor masks so the effect still renders while warmup completes.
+    // If floor-stack selection produced no valid keyed textures yet, prefer
+    // compositor cache filtered by the active level band BEFORE 'ground'.
+    // Otherwise pushKey('ground') often succeeds first while upper-floor keys
+    // are still warming, and we never reach this path — ground shadows leak
+    // onto upper floors.
     if (keys.length === 0 && cachedEntries.length > 0) {
       cachedEntries.sort((a, b) => a.bottom - b.bottom);
       if (Number.isFinite(activeBottom)) {
@@ -672,7 +681,15 @@ export class BuildingShadowsEffectV2 {
           .map((entry) => entry.key);
         if (filtered.length > 0) return filtered;
       }
-      return cachedEntries.map((entry) => entry.key);
+      if (floors.length <= 1 || resolvedActiveIdx <= 0) {
+        return cachedEntries.map((entry) => entry.key);
+      }
+    }
+
+    // Non-level fallback used by some scenes. Never use ground alone for an
+    // upper floor in a multi-floor stack — that projects the wrong silhouette.
+    if (keys.length === 0 && (floors.length <= 1 || resolvedActiveIdx <= 0)) {
+      pushKey('ground');
     }
 
     return keys;
@@ -691,6 +708,10 @@ export class BuildingShadowsEffectV2 {
 
     const activeFloor = window.MapShine?.floorStack?.getActiveFloor?.() ?? null;
     if (activeFloor) {
+      if (activeFloor.compositorKey) {
+        const texCk = compositor.getFloorTexture(String(activeFloor.compositorKey), 'outdoors');
+        if (texCk) return texCk;
+      }
       const b = Number(activeFloor?.elevationMin);
       const t = Number(activeFloor?.elevationMax);
       if (Number.isFinite(b) && Number.isFinite(t)) {

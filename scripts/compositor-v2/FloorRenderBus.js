@@ -174,7 +174,8 @@ export class FloorRenderBus {
       // Within each floor-group, tiles are ordered by Foundry sort (ascending),
       // with a cap to preserve a stable token headroom at top of floor band.
       const isOverhead = this._isOverheadForBusTile(tileDoc, tileId);
-      const cloudShadowBlockerEnabled = this._shouldTileBlockCloudShadows(tileDoc, isOverhead);
+      const roofShadowCaster = this._usesRoofShadowCaptureLayer(tileDoc, floorIndex, isOverhead);
+      const cloudShadowBlockerEnabled = this._shouldTileBlockCloudShadows(tileDoc, roofShadowCaster);
       const motionRenderAboveTokens = !!window.MapShine?.tileMotionManager?.getTileConfig?.(tileId)?.renderAboveTokens;
       floorCounts[floorIndex] = floorCounts[floorIndex] ?? { regular: 0, overhead: 0 };
       const groupCounts = floorCounts[floorIndex];
@@ -195,7 +196,7 @@ export class FloorRenderBus {
       }
 
       // Create mesh immediately with null texture (invisible until loaded).
-      this._addTileMesh(tileId, floorIndex, null, centerX, centerY, z, tileW, tileH, rotation, alpha, renderOrder, isOverhead, cloudShadowBlockerEnabled);
+      this._addTileMesh(tileId, floorIndex, null, centerX, centerY, z, tileW, tileH, rotation, alpha, renderOrder, isOverhead, roofShadowCaster, cloudShadowBlockerEnabled);
 
       // Load texture via THREE.TextureLoader — HTML <img>, straight alpha.
       this._loader.load(src, (tex) => {
@@ -407,6 +408,46 @@ export class FloorRenderBus {
 
   // ── Visibility ─────────────────────────────────────────────────────────────────
 
+  /**
+   * Temporarily show upper-floor roof shadow casters that are normally hidden
+   * while the camera is on a lower floor (`floorIndex > _visibleMaxFloorIndex`),
+   * so OverheadShadowsEffectV2 can render them into ROOF_LAYER RTs.
+   * Always pair with {@link #endOverheadShadowCaptureReveal} (e.g. try/finally).
+   *
+   * @returns {Array<{node: import('three').Object3D, wasVisible: boolean}>} snapshot
+   */
+  beginOverheadShadowCaptureReveal() {
+    const snapshot = [];
+    if (!this._initialized) return snapshot;
+    const maxV = Number.isFinite(Number(this._visibleMaxFloorIndex))
+      ? Number(this._visibleMaxFloorIndex)
+      : Infinity;
+    for (const [tileId, entry] of this._tiles) {
+      if (String(tileId).startsWith('__')) continue;
+      if (!entry?.roofShadowCaster) continue;
+      if (!(entry.floorIndex > maxV)) continue;
+      const node = entry.root || entry.mesh;
+      if (!node) continue;
+      // Capture current state before forcing visible
+      snapshot.push({ node, wasVisible: node.visible });
+      node.visible = true;
+    }
+    return snapshot;
+  }
+
+  /**
+   * Restore bus tile visibility after overhead shadow capture.
+   *
+   * @param {Array<{node: import('three').Object3D, wasVisible: boolean}>} snapshot
+   */
+  endOverheadShadowCaptureReveal(snapshot = []) {
+    if (!this._initialized) return;
+    // Restore each node to its captured state
+    for (const entry of snapshot) {
+      if (entry?.node) entry.node.visible = entry.wasVisible;
+    }
+  }
+
   _applyTileVisibility() {
     if (!this._initialized) return;
 
@@ -543,7 +584,8 @@ export class FloorRenderBus {
       ? (tileDoc.rotation * Math.PI) / 180
       : 0;
     const isOverhead = this._isOverheadForBusTile(tileDoc, tileId);
-    const cloudShadowBlockerEnabled = this._shouldTileBlockCloudShadows(tileDoc, isOverhead);
+    const roofShadowCaster = this._usesRoofShadowCaptureLayer(tileDoc, floorIndex, isOverhead);
+    const cloudShadowBlockerEnabled = this._shouldTileBlockCloudShadows(tileDoc, roofShadowCaster);
     const motionRenderAboveTokens = !!window.MapShine?.tileMotionManager?.getTileConfig?.(tileId)?.renderAboveTokens;
 
     const sortWithinFloor = this._computeSortWithinFloor(tileDoc);
@@ -561,7 +603,7 @@ export class FloorRenderBus {
 
     let entry = this._tiles.get(tileId);
     if (!entry) {
-      this._addTileMesh(tileId, floorIndex, null, centerX, centerY, z, tileW, tileH, rotation, alpha, renderOrder, isOverhead, cloudShadowBlockerEnabled);
+      this._addTileMesh(tileId, floorIndex, null, centerX, centerY, z, tileW, tileH, rotation, alpha, renderOrder, isOverhead, roofShadowCaster, cloudShadowBlockerEnabled);
       entry = this._tiles.get(tileId);
       if (!entry) return false;
     }
@@ -587,7 +629,7 @@ export class FloorRenderBus {
 
       entry.mesh.renderOrder = renderOrder;
       entry.mesh.layers.set(0);
-      if (isOverhead) {
+      if (roofShadowCaster) {
         entry.mesh.layers.enable(20);
         if (cloudShadowBlockerEnabled) entry.mesh.layers.enable(TILE_FEATURE_LAYERS.CLOUD_SHADOW_BLOCKER);
         else entry.mesh.layers.disable(TILE_FEATURE_LAYERS.CLOUD_SHADOW_BLOCKER);
@@ -600,7 +642,7 @@ export class FloorRenderBus {
 
     if (root) {
       root.layers.set(0);
-      if (isOverhead) {
+      if (roofShadowCaster) {
         root.layers.enable(20);
         if (cloudShadowBlockerEnabled) root.layers.enable(TILE_FEATURE_LAYERS.CLOUD_SHADOW_BLOCKER);
         else root.layers.disable(TILE_FEATURE_LAYERS.CLOUD_SHADOW_BLOCKER);
@@ -610,6 +652,8 @@ export class FloorRenderBus {
       }
       root.updateMatrix?.();
     }
+
+    entry.roofShadowCaster = !!roofShadowCaster;
 
     if (entry.material) {
       entry.material.opacity = alpha;
@@ -994,14 +1038,48 @@ export class FloorRenderBus {
    * @returns {boolean}
    * @private
    */
+  _getMsaLevelRole(tileDoc) {
+    return String(tileDoc?.flags?.['map-shine-advanced']?.levelRole ?? '')
+      .trim()
+      .toLowerCase();
+  }
+
+  /**
+   * Upper-floor walkable art (Levels `levelRole: floor`) is not "overhead" for
+   * token sorting, but it should still stamp ROOF_LAYER for overhead shadows
+   * when it reads as the deck above a lower view. Opt-in without levelRole via
+   * tile flag `floorCastsOverheadShadow`.
+   * @param {object} tileDoc
+   * @param {number} floorIndex
+   * @returns {boolean}
+   * @private
+   */
+  _isUpperFloorSlabRoofCaster(tileDoc, floorIndex) {
+    if (!(floorIndex > 0)) return false;
+    if (this._getMsaLevelRole(tileDoc) === 'floor') return true;
+    const moduleId = 'map-shine-advanced';
+    const raw = tileDoc?.getFlag?.(moduleId, 'floorCastsOverheadShadow')
+      ?? tileDoc?.flags?.[moduleId]?.floorCastsOverheadShadow;
+    return raw === true;
+  }
+
+  /**
+   * @param {object} tileDoc
+   * @param {number} floorIndex
+   * @param {boolean} isOverheadForBus
+   * @returns {boolean}
+   * @private
+   */
+  _usesRoofShadowCaptureLayer(tileDoc, floorIndex, isOverheadForBus) {
+    return !!isOverheadForBus || this._isUpperFloorSlabRoofCaster(tileDoc, floorIndex);
+  }
+
   _isOverheadForBusTile(tileDoc, tileId = null) {
     // Keep in sync with TileManager naturalOverhead / levelRole overrides so V2
     // bus renderOrder bands (OVERHEAD_OFFSET) match sprite-side classification.
     // Otherwise ceiling-tagged tiles stay in the sub-5000 band and door meshes
     // at OVERHEAD_OFFSET-2 draw on top of roofs.
-    const msaRole = String(tileDoc?.flags?.['map-shine-advanced']?.levelRole ?? '')
-      .trim()
-      .toLowerCase();
+    const msaRole = this._getMsaLevelRole(tileDoc);
     if (msaRole === 'ceiling') return true;
     if (msaRole === 'floor') return false;
 
@@ -1131,9 +1209,11 @@ export class FloorRenderBus {
    * @param {number} h  - tile height in world units
    * @param {number} rotation - radians around Z
    * @param {number} alpha
+   * @param {boolean} isOverhead - draw-order / userData (PIXI parity), not necessarily ROOF_LAYER
+   * @param {boolean} roofShadowCaster - ROOF_LAYER + optional cloud blocker (overhead or upper-floor slab)
    * @private
    */
-  _addTileMesh(tileId, floorIndex, texture, cx, cy, z, w, h, rotation, alpha, renderOrder = 0, isOverhead = false, cloudShadowBlockerEnabled = false) {
+  _addTileMesh(tileId, floorIndex, texture, cx, cy, z, w, h, rotation, alpha, renderOrder = 0, isOverhead = false, roofShadowCaster = false, cloudShadowBlockerEnabled = false) {
     const THREE = window.THREE;
     const mat = new THREE.MeshBasicMaterial({
       map: texture || null,
@@ -1167,7 +1247,7 @@ export class FloorRenderBus {
     // - Layer 20: roof capture pass for OverheadShadowsEffectV2
     root.layers.set(0);
     mesh.layers.set(0);
-    if (isOverhead) {
+    if (roofShadowCaster) {
       root.layers.enable(20);
       // IMPORTANT: camera layer tests are evaluated on renderable objects
       // (the mesh), not only parent groups. Keep ROOF_LAYER on the mesh so
@@ -1194,7 +1274,15 @@ export class FloorRenderBus {
 
     root.add(mesh);
     this._scene.add(root);
-    this._tiles.set(tileId, { mesh, material: mat, floorIndex, root, attachedToTileId: null, textureSrc: '' });
+    this._tiles.set(tileId, {
+      mesh,
+      material: mat,
+      floorIndex,
+      root,
+      attachedToTileId: null,
+      textureSrc: '',
+      roofShadowCaster: !!roofShadowCaster,
+    });
   }
 
   /**

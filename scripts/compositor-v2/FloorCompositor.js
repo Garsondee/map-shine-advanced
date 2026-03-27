@@ -62,6 +62,7 @@ import { BushEffectV2 } from './effects/BushEffectV2.js';
 import { TreeEffectV2 } from './effects/TreeEffectV2.js';
 import { OverheadShadowsEffectV2 } from './effects/OverheadShadowsEffectV2.js';
 import { BuildingShadowsEffectV2 } from './effects/BuildingShadowsEffectV2.js';
+import { createLightingPerspectiveContext } from './LightingPerspectiveContext.js';
 import { DustEffectV2 } from './effects/DustEffectV2.js';
 import { DotScreenEffectV2 } from './effects/DotScreenEffectV2.js';
 import { HalftoneEffectV2 } from './effects/HalftoneEffectV2.js';
@@ -336,6 +337,13 @@ export class FloorCompositor {
      * @type {BuildingShadowsEffectV2}
      */
     this._buildingShadowEffect = new BuildingShadowsEffectV2();
+
+    /**
+     * Frozen per-frame snapshot for Levels/floor-aware lighting (see `LightingPerspectiveContext`).
+     * Refreshed at the start of each `render()` before the lighting pass.
+     * @type {import('./LightingPerspectiveContext.js').LightingPerspectiveContext|null}
+     */
+    this._lightingPerspectiveContext = null;
 
     /**
      * V2 Dot Screen Effect: artistic dot-screen halftone filter.
@@ -2095,6 +2103,16 @@ export class FloorCompositor {
     }
     let _profileT0 = 0;
 
+    // Levels / floor snapshot for the whole frame — must exist before overhead and
+    // building shadow passes so they agree with lighting compose (same active floor).
+    try {
+      this._lightingPerspectiveContext = createLightingPerspectiveContext();
+      this._lightingEffect?.setLightingPerspectiveContext?.(this._lightingPerspectiveContext);
+    } catch (_) {
+      this._lightingPerspectiveContext = null;
+      this._lightingEffect?.setLightingPerspectiveContext?.(null);
+    }
+
     // Keep bus tile materials aligned to live TileManager sprite opacity before
     // shadow capture. OverheadShadowsEffectV2 now handles its own stable caster
     // capture internally (forced-opacity roofTarget pass), while the separate
@@ -2211,22 +2229,24 @@ export class FloorCompositor {
     // roof visibility weight, so keeping these textures wired avoids “stuck mask”
     // behavior under faded trees/overheads.
     const overheadRoofBlockTex = _disableRoofInLighting ? null : (this._overheadShadowEffect?.roofBlockTexture ?? null);
-    this._windowLightEffect?.setOverheadRoofAlphaTexture?.(
-      overheadRoofAlphaTex,
-      this._sceneRT?.width || 1,
-      this._sceneRT?.height || 1
-    );
-    this._skyColorEffect?.setOverheadRoofAlphaTexture?.(overheadRoofAlphaTex);
-    if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: lighting.render(sceneRT→postA)'); } catch (_) {} }
-    if (_profiling) _profileT0 = performance.now();
-    const lightingCtx = window.MapShine?.activeLevelContext ?? null;
-    const outdoorsForLightingTex = this._resolveOutdoorsMask(lightingCtx, { allowWeatherRoofMap: false }).texture ?? null;
     // IMPORTANT INVARIANT:
     // Keep ceiling transmittance available during hover-reveal; blocker/occlusion
     // fade is handled in shader via roof visibility weights (not by runtime nulling).
     const ceilingTransmittanceTex = (!_disableRoofInLighting && this._overheadShadowEffect?.ceilingTransmittanceTextureForLighting)
       ? this._overheadShadowEffect.ceilingTransmittanceTextureForLighting
       : null;
+    this._windowLightEffect?.setOverheadRoofAlphaTexture?.(
+      overheadRoofAlphaTex,
+      this._sceneRT?.width || 1,
+      this._sceneRT?.height || 1
+    );
+    this._windowLightEffect?.setCeilingTransmittanceTexture?.(ceilingTransmittanceTex);
+    this._windowLightEffect?.syncFrameOcclusion?.(this);
+    this._skyColorEffect?.setOverheadRoofAlphaTexture?.(overheadRoofAlphaTex);
+    if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: lighting.render(sceneRT→postA)'); } catch (_) {} }
+    if (_profiling) _profileT0 = performance.now();
+    const lightingCtx = window.MapShine?.activeLevelContext ?? null;
+    const outdoorsForLightingTex = this._resolveOutdoorsMask(lightingCtx, { allowWeatherRoofMap: false }).texture ?? null;
     this._lightingEffect.render(this.renderer, this.camera, currentInput, this._postA, winScene, cloudShadowTex, cloudShadowRawTex, buildingShadowTex, overheadShadowTex, buildingShadowOpacity, overheadRoofAlphaTex, overheadRoofBlockTex, outdoorsForLightingTex, ceilingTransmittanceTex);
     if (_profiling) this._recordPassTiming('lightingRender', _profileT0);
     if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: lighting.render(sceneRT→postA) DONE'); } catch (_) {} }
@@ -2694,14 +2714,28 @@ export class FloorCompositor {
    */
   _resolveOutdoorsMask(context = null, options = {}) {
     const { allowWeatherRoofMap = true } = options;
+
+    let floorStackFloors = [];
+    try {
+      floorStackFloors = window.MapShine?.floorStack?.getFloors?.() ?? [];
+    } catch (_) {
+      floorStackFloors = [];
+    }
+    const activeFloorForMask = window.MapShine?.floorStack?.getActiveFloor?.() ?? null;
+    const activeIdxForMask = Number(activeFloorForMask?.index);
+    const skipGroundGlobalFallback = floorStackFloors.length > 1
+      && Number.isFinite(activeIdxForMask)
+      && activeIdxForMask > 0;
+
     const sc = window.MapShine?.sceneComposer;
     const compositor = sc?._sceneMaskCompositor;
     if (!compositor) {
-      // Fallbacks when compositor cache is not ready yet.
-      const bundleMask = sc?.currentBundle?.masks?.find?.(m => (m?.id === 'outdoors' || m?.type === 'outdoors'))?.texture ?? null;
-      if (bundleMask) return { texture: bundleMask, floorKey: 'bundle' };
-      const mmMask = window.MapShine?.maskManager?.getTexture?.('outdoors.scene') ?? null;
-      if (mmMask) return { texture: mmMask, floorKey: 'maskManager' };
+      if (!skipGroundGlobalFallback) {
+        const bundleMask = sc?.currentBundle?.masks?.find?.(m => (m?.id === 'outdoors' || m?.type === 'outdoors'))?.texture ?? null;
+        if (bundleMask) return { texture: bundleMask, floorKey: 'bundle' };
+        const mmMask = window.MapShine?.maskManager?.getTexture?.('outdoors.scene') ?? null;
+        if (mmMask) return { texture: mmMask, floorKey: 'maskManager' };
+      }
       if (!allowWeatherRoofMap) {
         const regMask = window.MapShine?.effectMaskRegistry?.getMask?.('outdoors') ?? null;
         if (regMask) return { texture: regMask, floorKey: 'registry' };
@@ -2732,15 +2766,18 @@ export class FloorCompositor {
       if (tex) return { texture: tex, floorKey: key };
     }
 
-    const groundTex = compositor.getGroundFloorMaskTexture?.('outdoors') ?? null;
+    const groundTex = skipGroundGlobalFallback
+      ? null
+      : (compositor.getGroundFloorMaskTexture?.('outdoors') ?? null);
     if (groundTex) return { texture: groundTex, floorKey: 'ground' };
 
-    // Last-ditch fallbacks for transient compose timing windows.
-    const bundleMask = sc?.currentBundle?.masks?.find?.(m => (m?.id === 'outdoors' || m?.type === 'outdoors'))?.texture ?? null;
-    if (bundleMask) return { texture: bundleMask, floorKey: 'bundle' };
+    if (!skipGroundGlobalFallback) {
+      const bundleMask = sc?.currentBundle?.masks?.find?.(m => (m?.id === 'outdoors' || m?.type === 'outdoors'))?.texture ?? null;
+      if (bundleMask) return { texture: bundleMask, floorKey: 'bundle' };
 
-    const mmMask = window.MapShine?.maskManager?.getTexture?.('outdoors.scene') ?? null;
-    if (mmMask) return { texture: mmMask, floorKey: 'maskManager' };
+      const mmMask = window.MapShine?.maskManager?.getTexture?.('outdoors.scene') ?? null;
+      if (mmMask) return { texture: mmMask, floorKey: 'maskManager' };
+    }
 
     if (!allowWeatherRoofMap) {
       const regMask = window.MapShine?.effectMaskRegistry?.getMask?.('outdoors') ?? null;
@@ -2770,9 +2807,22 @@ export class FloorCompositor {
       const skyResolved = this._resolveOutdoorsMask(context, { allowWeatherRoofMap: false });
       const skyOutdoorsTex = skyResolved.texture ?? null;
 
+      let floorStackForSync = [];
+      try {
+        floorStackForSync = window.MapShine?.floorStack?.getFloors?.() ?? [];
+      } catch (_) {
+        floorStackForSync = [];
+      }
+      const activeFloorForSync = window.MapShine?.floorStack?.getActiveFloor?.() ?? null;
+      const activeIdxForSync = Number(activeFloorForSync?.index);
+      const multiFloorUpperView = floorStackForSync.length > 1
+        && Number.isFinite(activeIdxForSync)
+        && activeIdxForSync > 0;
+
       // Do not clobber a valid outdoors texture with transient null while floor
-      // caches are still warming asynchronously.
-      if (!outdoorsTex && this._lastOutdoorsTexture) {
+      // caches are still warming asynchronously. On upper floors, reusing the
+      // previous texture is usually stale ground-floor _Outdoors.
+      if (!outdoorsTex && this._lastOutdoorsTexture && !multiFloorUpperView) {
         outdoorsTex = this._lastOutdoorsTexture;
       }
 
@@ -3247,6 +3297,8 @@ export class FloorCompositor {
     try { this._dustEffect?.dispose?.(); } catch (_) {}
     try { this._windowLightEffect?.dispose?.(); } catch (_) {}
     try { this._cloudEffect?.dispose?.(); } catch (_) {}
+    this._lightingPerspectiveContext = null;
+    try { this._lightingEffect?.setLightingPerspectiveContext?.(null); } catch (_) {}
     try { this._lightingEffect?.dispose?.(); } catch (_) {}
     try { this._skyColorEffect?.dispose?.(); } catch (_) {}
     try { this._atmosphericFogEffect?.dispose?.(); } catch (_) {}

@@ -18,9 +18,11 @@
  * Simplified compared to V1 LightingEffect:
  *   - Levels-aware Foundry light/darkness mesh visibility via
  *     `isLightVisibleForPerspective` each frame (matches Levels light masking).
- *   - Screen-space roof/ceiling gating applies to dynamic lights on **all** floors
- *     by default (`restrictRoofScreenLightOcclusionToTopFloor` = false). Legacy
- *     mode can gate only on the top floor index if that cutout workaround is needed.
+ *   - Multi-floor: by default screen-space roof/ceiling gating and building-shadow
+ *     roof suppression apply **only on the top floor** (`restrictRoofScreenLightOcclusionToTopFloor`
+ *     = true). Otherwise upper-floor roof alpha in screen UV carves holes in building
+ *     shadows and Foundry lights on lower floors. Set the flag false for legacy
+ *     “gate on every floor” (can mis-mask downstairs).
  *
  * Cloud shadow IS integrated: a shadow factor texture (1.0=lit, 0.0=shadowed)
  * is passed in from CloudEffectV2 and multiplies totalIllumination so the scene
@@ -34,6 +36,7 @@ import { createLogger } from '../../core/log.js';
 import { ThreeLightSource } from '../../effects/ThreeLightSource.js';
 import { ThreeDarknessSource } from '../../effects/ThreeDarknessSource.js';
 import { isLightVisibleForPerspective } from '../../foundry/elevation-context.js';
+import { createLightingPerspectiveContext } from '../LightingPerspectiveContext.js';
 import { getFoundryTimePhaseHours, getFoundrySunlightFactor, getWrappedHourProgress } from '../../core/foundry-time-phases.js';
 
 const log = createLogger('LightingEffectV2');
@@ -107,11 +110,12 @@ export class LightingEffectV2 {
       upperFloorTransmissionStrength: 0.6,
       upperFloorTransmissionSoftness: 1.5,
       /**
-       * When true, screen-space roof/ceiling light gating applies only on the top
-       * floor index (legacy). When false (default), gating runs on every floor so
-       * lights are not left unmultiplied under overhead tiles on lower levels.
+       * When true (default), on multi-floor maps screen-space roof gating and
+       * roof→building-shadow suppression run only on the top floor — avoids
+       * upstairs roof stamps on lower views. When false, legacy full gating on
+       * all floors (can imprint upper ceilings on ground).
        */
-      restrictRoofScreenLightOcclusionToTopFloor: false,
+      restrictRoofScreenLightOcclusionToTopFloor: true,
       darknessEffect: 1.0,
       outdoorBrightness: 1.0,
       lightAnimWindInfluence: 1.0,
@@ -171,6 +175,20 @@ export class LightingEffectV2 {
 
     /** @type {THREE.Vector2|null} Reusable size vector */
     this._sizeVec = null;
+
+    /**
+     * Per-frame Levels/floor snapshot from `FloorCompositor` (optional).
+     * When null, `render()` falls back to {@link createLightingPerspectiveContext}.
+     * @type {import('../LightingPerspectiveContext.js').LightingPerspectiveContext|null}
+     */
+    this._lightingPerspectiveContext = null;
+  }
+
+  /**
+   * @param {import('../LightingPerspectiveContext.js').LightingPerspectiveContext|null} ctx
+   */
+  setLightingPerspectiveContext(ctx) {
+    this._lightingPerspectiveContext = ctx;
   }
 
   /** @private */
@@ -293,9 +311,9 @@ export class LightingEffectV2 {
         wallInsetPx: { type: 'slider', min: 0, max: 40, step: 0.5, default: 6.0, label: 'Wall Inset (px)' },
         restrictRoofScreenLightOcclusionToTopFloor: {
           type: 'boolean',
-          default: false,
-          label: 'Roof light gate: top floor only (legacy)',
-          tooltip: 'If enabled, Foundry/window lights skip roof/ceiling screen gating unless you are on the highest floor — can let lights show through overhead tiles on lower floors.',
+          default: true,
+          label: 'Multi-floor: roof gate & building roof-cutout top floor only',
+          tooltip: 'When on (recommended for 2+ floors), Foundry lights and building-shadow roof suppression use screen-space roof alpha only on the top floor — prevents upper-floor silhouettes from cutting lower-floor shadows and lights. Turn off for legacy “always gate” (single-floor maps are unaffected).',
         },
         upperFloorTransmissionEnabled: { type: 'boolean', default: false, label: 'Upper Floor Through-Gaps' },
         upperFloorTransmissionStrength: { type: 'slider', min: 0, max: 2, step: 0.05, default: 0.6, label: 'Upper Light Strength' },
@@ -1112,12 +1130,7 @@ export class LightingEffectV2 {
     const prevAutoClear = renderer.autoClear;
 
     try {
-      const activeFloor = window.MapShine?.floorStack?.getActiveFloor?.();
-      const floors = window.MapShine?.floorStack?.getFloors?.() ?? [];
-      const topFloorIndex = Math.max(0, Number(floors.length) - 1);
-      const fi = typeof activeFloor?.index === 'number' && Number.isFinite(activeFloor.index)
-        ? activeFloor.index
-        : 0;
+      const persp = this._lightingPerspectiveContext ?? createLightingPerspectiveContext();
       const cu0 = this._composeMaterial.uniforms;
       const transmissionEnabled = this.params.upperFloorTransmissionEnabled === true;
       const rawTransmission = Number(this.params.upperFloorTransmissionStrength);
@@ -1125,19 +1138,18 @@ export class LightingEffectV2 {
         ? Math.max(0, Math.min(1, rawTransmission))
         : 0;
       const occlusionWeight = 1.0 - transmission;
-      // Legacy option: disable roof light gating on non-top floors to avoid upper-ceiling
-      // stamps cutting lower-floor lights. Default OFF so overhead tiles always gate.
       const restrictRoofToTop = this.params.restrictRoofScreenLightOcclusionToTopFloor === true;
-      const roofScreenOcclusionScale = (restrictRoofToTop && floors.length > 1 && fi < topFloorIndex)
-        ? 0.0
-        : 1.0;
+      // 0f7b217: on lower floors of multi-floor scenes, screen-space roof alpha must not
+      // suppress building shadows or gate Foundry lights (upper roof still in tOverheadRoofAlpha).
+      const roofScreenOcclusionScale = persp.getRoofScreenOcclusionScale(restrictRoofToTop);
       cu0.uApplyRoofOcclusionToSources.value = occlusionWeight * roofScreenOcclusionScale;
-      cu0.uApplyRoofOcclusionToWindow.value = occlusionWeight * roofScreenOcclusionScale;
+      // Window overlays: floor-isolated elsewhere; compose-level roof gating off (0f7b217).
+      cu0.uApplyRoofOcclusionToWindow.value = 0.0;
       cu0.uApplyRoofOcclusionToBuilding.value = roofScreenOcclusionScale;
     } catch (_) {
       const cu0 = this._composeMaterial.uniforms;
       cu0.uApplyRoofOcclusionToSources.value = 1.0;
-      cu0.uApplyRoofOcclusionToWindow.value = 1.0;
+      cu0.uApplyRoofOcclusionToWindow.value = 0.0;
       cu0.uApplyRoofOcclusionToBuilding.value = 1.0;
     }
 
@@ -1413,6 +1425,7 @@ export class LightingEffectV2 {
     this._lightsSynced = false;
     this._lastEnhancementCount = -1;
     this._initialized = false;
+    this._lightingPerspectiveContext = null;
 
     log.info('LightingEffectV2 disposed');
   }

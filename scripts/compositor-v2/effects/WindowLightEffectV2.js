@@ -22,6 +22,12 @@
  * Floor isolation is handled by manually toggling mesh visibility in
  * onFloorChange() since the overlays are not in the bus scene.
  *
+ * Roof / ceiling occlusion for window glow uses the same half-res transmittance
+ * texture as `LightingEffectV2` when available (`setCeilingTransmittanceTexture`),
+ * else falls back to `uOverheadRoofAlphaTex`. `syncFrameOcclusion` applies
+ * `LightingPerspectiveContext.getRoofScreenOcclusionScale` so multi-floor
+ * “lower floor” behavior matches lighting (optional attenuation of screen-space gate).
+ *
  * @module compositor-v2/effects/WindowLightEffectV2
  */
 
@@ -714,6 +720,38 @@ export class WindowLightEffectV2 {
     u.uScreenSize.value.set(w, h);
   }
 
+  /**
+   * Half-res R = ceiling light transmittance (same RT as LightingEffectV2).
+   * When bound, the window shader prefers this over raw roof alpha for gating.
+   * @param {THREE.Texture|null} texture
+   */
+  setCeilingTransmittanceTexture(texture) {
+    const u = this._sharedUniforms;
+    if (!u) return;
+    if (u.uCeilingTransmittance) u.uCeilingTransmittance.value = texture ?? null;
+    if (u.uHasCeilingTransmittance) u.uHasCeilingTransmittance.value = texture ? 1.0 : 0.0;
+  }
+
+  /**
+   * Call once per frame after `FloorCompositor` builds `_lightingPerspectiveContext`
+   * so window roof gating matches lighting’s multi-floor scale.
+   * @param {{ _lightingPerspectiveContext?: object|null, _lightingEffect?: { params?: object }|null }} floorCompositor
+   */
+  syncFrameOcclusion(floorCompositor) {
+    const u = this._sharedUniforms;
+    if (!u?.uWindowRoofScreenOcclusionScale) return;
+    try {
+      const lp = floorCompositor?._lightingPerspectiveContext ?? null;
+      const restrict = floorCompositor?._lightingEffect?.params?.restrictRoofScreenLightOcclusionToTopFloor === true;
+      const scale = lp && typeof lp.getRoofScreenOcclusionScale === 'function'
+        ? lp.getRoofScreenOcclusionScale(restrict)
+        : 1.0;
+      u.uWindowRoofScreenOcclusionScale.value = scale;
+    } catch (_) {
+      u.uWindowRoofScreenOcclusionScale.value = 1.0;
+    }
+  }
+
   // ── Internals ──────────────────────────────────────────────────────────────
 
   _buildSharedUniforms() {
@@ -755,6 +793,9 @@ export class WindowLightEffectV2 {
       uCloudShadowMinLight: { value: Math.max(0.0, Math.min(1.0, Number(this.params.cloudShadowMinLight) || 0.0)) },
       uOverheadRoofAlphaTex: { value: null },
       uHasOverheadRoofAlphaTex: { value: 0.0 },
+      uCeilingTransmittance: { value: null },
+      uHasCeilingTransmittance: { value: 0.0 },
+      uWindowRoofScreenOcclusionScale: { value: 1.0 },
       uLightOverheadTiles: { value: this.params.lightOverheadTiles ? 1.0 : 0.0 },
       uOverheadLightIntensity: { value: Math.max(0.0, Math.min(1.0, Number(this.params.overheadLightIntensity) || 0.0)) },
       uRainAmount: { value: 0.0 },
@@ -788,10 +829,10 @@ export class WindowLightEffectV2 {
       // Overhead roof gating is only intended for non-overhead overlays
       // (e.g. background windows), not overhead-tile window overlays.
       uIsOverheadOverlay: { value: isOverhead ? 1.0 : 0.0 },
-      // Ground-floor-only roof gating: upper-floor window overlays should not
-      // be suppressed by a screen-space roof-alpha map authored for single-floor
-      // leakage prevention.
-      uAllowRoofGate: { value: floorIndex <= 0 ? 1.0 : 0.0 },
+      // All non-overhead window glow on the active floor must respect roof/ceiling
+      // (see syncFrameOcclusion + ceiling transmittance). Legacy ground-only gate
+      // left upper floors with uAllowRoofGate=0 so glow leaked through slabs.
+      uAllowRoofGate: { value: isOverhead ? 0.0 : 1.0 },
       // 1/texWidth, 1/texHeight — set once texture loads.
       uWindowTexelSize: { value: new THREE.Vector2(1.0 / w, 1.0 / h) },
     };
@@ -842,6 +883,9 @@ export class WindowLightEffectV2 {
         uniform float uCloudShadowMinLight;
         uniform sampler2D uOverheadRoofAlphaTex;
         uniform float uHasOverheadRoofAlphaTex;
+        uniform sampler2D uCeilingTransmittance;
+        uniform float uHasCeilingTransmittance;
+        uniform float uWindowRoofScreenOcclusionScale;
         uniform float uLightOverheadTiles;
         uniform float uOverheadLightIntensity;
         uniform float uRainAmount;
@@ -964,23 +1008,28 @@ export class WindowLightEffectV2 {
           }
           float rainDarkenMul = 1.0 - clamp(uRainDarken, 0.0, 1.0) * clamp(uRainAmount, 0.0, 1.0) * 0.35;
 
-          float overheadGate = 1.0;
-          // Apply roof gating only to non-overhead overlays.
-          if (uAllowRoofGate > 0.5 && uIsOverheadOverlay < 0.5 && uHasOverheadRoofAlphaTex > 0.5) {
+          float ceilingMul = 1.0;
+          // Apply roof / ceiling gating only to non-overhead overlays.
+          if (uAllowRoofGate > 0.5 && uIsOverheadOverlay < 0.5) {
             vec2 roofUv = gl_FragCoord.xy / max(uScreenSize, vec2(1.0));
-            vec4 roofSample = texture2D(uOverheadRoofAlphaTex, clamp(roofUv, 0.0, 1.0));
-            float roofAlpha = clamp(max(roofSample.r, roofSample.a), 0.0, 1.0);
-            if (uLightOverheadTiles < 0.5) {
-              // Hard block where overhead tiles are visible.
-              overheadGate = 1.0 - roofAlpha;
-            } else {
-              // Optional attenuation in overhead regions when enabled.
-              float overheadAllow = clamp(uOverheadLightIntensity, 0.0, 1.0);
-              overheadGate = mix(1.0 - roofAlpha, 1.0, overheadAllow);
+            if (uHasCeilingTransmittance > 0.5) {
+              // Same transmittance T as LightingEffectV2 (1 = light passes).
+              ceilingMul = clamp(texture2D(uCeilingTransmittance, clamp(roofUv, 0.0, 1.0)).r, 0.0, 1.0);
+            } else if (uHasOverheadRoofAlphaTex > 0.5) {
+              vec4 roofSample = texture2D(uOverheadRoofAlphaTex, clamp(roofUv, 0.0, 1.0));
+              float roofAlpha = clamp(max(roofSample.r, roofSample.a), 0.0, 1.0);
+              if (uLightOverheadTiles < 0.5) {
+                ceilingMul = 1.0 - roofAlpha;
+              } else {
+                float overheadAllow = clamp(uOverheadLightIntensity, 0.0, 1.0);
+                ceilingMul = mix(1.0 - roofAlpha, 1.0, overheadAllow);
+              }
             }
+            float gateScale = clamp(uWindowRoofScreenOcclusionScale, 0.0, 1.0);
+            ceilingMul = mix(1.0, ceilingMul, gateScale);
           }
 
-          vec3 lightOut = shaped * (uColor * envTintColor) * uIntensity * flicker * max(uNightFactor, 0.0) * cloudDimming * cloudShadow * rainDarkenMul * max(uOverlayIntensity, 0.0) * overheadGate;
+          vec3 lightOut = shaped * (uColor * envTintColor) * uIntensity * flicker * max(uNightFactor, 0.0) * cloudDimming * cloudShadow * rainDarkenMul * max(uOverlayIntensity, 0.0) * ceilingMul;
 
           // Output raw linear light — no tone mapping on additive overlays.
           // AdditiveBlending: dst += src.rgb * src.a. Alpha=1 so the full

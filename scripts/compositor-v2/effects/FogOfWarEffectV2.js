@@ -46,6 +46,7 @@ import {
   saveExplorationForActors,
   tokenIsOwnedByActiveUser,
 } from '../../fog/fog-exploration-store.js';
+import { elevationInBand } from '../../ui/levels-editor/level-boundaries.js';
 
 const log = createLogger('FogOfWarEffectV2');
 
@@ -283,6 +284,12 @@ export class FogOfWarEffectV2 {
      * @type {string|null}
      */
     this._explorationGpuBandKey = null;
+    /**
+     * Per-frame: controlled/owned sight token elevation outside activeLevelContext band
+     * (CameraFollower can lag the token document by a tick). Read in {@link update} only.
+     * @type {boolean}
+     */
+    this._frameTokenOutsideActiveLevelBand = false;
 
     // Door->fog transition sync: keep fog reveal/occlusion temporally aligned
     // with door visual opening/closing rather than snapping instantly on ds.
@@ -710,6 +717,7 @@ export class FogOfWarEffectV2 {
           return null;
         }
       })(),
+      frameTokenOutsideActiveLevelBand: this._frameTokenOutsideActiveLevelBand,
       explorationLoadGeneration: this._explorationLoadGeneration,
       realUserIsGM: !!game?.user?.isGM,
       fogStoreContextResolved: this._computeFogStoreContext().resolved,
@@ -2134,7 +2142,7 @@ export class FogOfWarEffectV2 {
       if (!visionSource) {
         if (!hasSight) {
           tokensWithoutSight++;
-        } else if (globalIllumActive && realGm && !this._levelBandFogHold) {
+        } else if (globalIllumActive && realGm && !this._levelBandFogHold && !this._frameTokenOutsideActiveLevelBand) {
           // GM-only: full-scene rect spares a blind frame while perception spins up.
           // Never for real players — it ignores walls and reads as "see everything".
           // Never during a floor/band hold — LOS is often invalid for a frame on swap.
@@ -2156,7 +2164,7 @@ export class FogOfWarEffectV2 {
         if (!hasSight) {
           // Sight disabled ->-> token has a default/inactive vision source.
           tokensWithoutSight++;
-        } else if (globalIllumActive && realGm && !this._levelBandFogHold) {
+        } else if (globalIllumActive && realGm && !this._levelBandFogHold && !this._frameTokenOutsideActiveLevelBand) {
           // GM-only full-scene GI fallback (see !visionSource branch above).
           this._addFullSceneRect(THREE);
           this._visionIsFullSceneFallback = true;
@@ -2502,6 +2510,61 @@ export class FogOfWarEffectV2 {
     return !!(token?.hasSight || token?.document?.sight?.enabled);
   }
 
+  /**
+   * Controlled tokens (or owned tokens for players) used for level-band sync checks.
+   * @private
+   */
+  _getTokensForLevelBandElevationCheck() {
+    const out = [];
+    try {
+      const realGm = !!game?.user?.isGM;
+      const user = game?.user;
+      const controlled = canvas?.tokens?.controlled || [];
+      if (controlled.length) {
+        for (const t of controlled) {
+          if (t) out.push(t);
+        }
+        return out;
+      }
+      if (!realGm && user) {
+        for (const t of (canvas?.tokens?.placeables || [])) {
+          if (tokenIsOwnedByActiveUser(t, user)) out.push(t);
+        }
+      }
+    } catch (_) {
+    }
+    return out;
+  }
+
+  /**
+   * True when a sight-capable token's elevation is outside `activeLevelContext`'s band.
+   * CameraFollower often updates context on the next tick after the token document,
+   * producing one frame where LOS/fog use the wrong floor.
+   * @private
+   */
+  _computeTokenOutsideActiveLevelBand() {
+    if (getLevelsCompatibilityMode() === LEVELS_COMPATIBILITY_MODES.OFF) return false;
+    if (!isLevelsEnabledForScene(canvas?.scene)) return false;
+    const ctx = window.MapShine?.activeLevelContext;
+    if (!ctx) return false;
+    const bottom = Number(ctx.bottom);
+    const top = Number(ctx.top);
+    if (!Number.isFinite(bottom) || !Number.isFinite(top)) return false;
+    const count = Number(ctx.count ?? window.MapShine?.availableLevels?.length ?? 0);
+    const idx = Number(ctx.index);
+    const includeUpperBound = Number.isFinite(count) && Number.isFinite(idx)
+      && count > 0 && idx === count - 1;
+
+    const tokens = this._getTokensForLevelBandElevationCheck();
+    for (const token of tokens) {
+      if (!this._tokenHasVisionCapability(token)) continue;
+      const elev = Number(token?.document?.elevation ?? token?.losHeight ?? token?.document?.losHeight);
+      if (!Number.isFinite(elev)) return true;
+      if (!elevationInBand(elev, bottom, top, includeUpperBound)) return true;
+    }
+    return false;
+  }
+
   _shouldBypassFog() {
     const fogEnabled = canvas?.scene?.tokenVision ?? false;
 
@@ -2509,6 +2572,8 @@ export class FogOfWarEffectV2 {
     // During a Levels floor/band transition hold, never bypass — controlled tokens
     // are often empty for a frame and would otherwise hide the fog plane (full map flash).
     if (this._levelBandFogHold) return false;
+    // Token elevation ahead of activeLevelContext: same as a transition for bypass purposes.
+    if (this._frameTokenOutsideActiveLevelBand) return false;
     // Real GM only — debug GM parity must not disable fog for actual players.
     if (game?.user?.isGM) {
       // If GM and NO tokens are controlled, bypass fog
@@ -2788,6 +2853,10 @@ export class FogOfWarEffectV2 {
     // refresh hooks. Any resurfaced native fog appears camera-locked.
     this._suppressNativeFogVisuals();
 
+    // Token document elevation can update before CameraFollower refreshes activeLevelContext.
+    // That frame must not composite fog (wrong band / bypass / GI leak).
+    this._frameTokenOutsideActiveLevelBand = this._computeTokenOutsideActiveLevelBand();
+
     // 1. Band sync first (arms _levelBandFogHold when key is stale, even before full-res).
     const syncRequired = this._syncLevelsExplorationBandBeforeComposite();
 
@@ -2810,14 +2879,15 @@ export class FogOfWarEffectV2 {
     }
 
     // 3. Opaque hold until exploration for this band is on GPU (or store empty).
-    if (syncRequired || this._levelBandFogHold) {
-      const levelsBandHoldActive = explorationEnabled
-        && getLevelsCompatibilityMode() !== LEVELS_COMPATIBILITY_MODES.OFF
+    if (syncRequired || this._levelBandFogHold || this._frameTokenOutsideActiveLevelBand) {
+      const levelsSemantic = getLevelsCompatibilityMode() !== LEVELS_COMPATIBILITY_MODES.OFF
         && isLevelsEnabledForScene(canvas?.scene);
-      if (!levelsBandHoldActive) {
+      if (!levelsSemantic) {
         this._levelBandFogHold = false;
       } else {
-        void this._ensureExplorationLoadedFromStore();
+        if (explorationEnabled && (syncRequired || this._levelBandFogHold)) {
+          void this._ensureExplorationLoadedFromStore();
+        }
         this._holdOpaqueFogFrame();
         return;
       }

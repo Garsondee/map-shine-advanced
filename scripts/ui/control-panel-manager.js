@@ -3,6 +3,8 @@
  * Compact Tweakpane-based UI for time-of-day and weather control during actual play
  * @module ui/control-panel-manager
  */
+import { canPersistSceneDocument, isGmLike } from '../core/gm-parity.js';
+
 
 import { createLogger } from '../core/log.js';
 import { stateApplier } from './state-applier.js';
@@ -1467,7 +1469,7 @@ export class ControlPanelManager {
     if (!els) return;
 
     const wc = coreWeatherController || window.MapShine?.weatherController || window.weatherController;
-    const isGM = game.user?.isGM === true;
+    const isGM = isGmLike();
     els.scopeText.textContent = isGM ? 'Scene (GM authoritative)' : 'Runtime only';
 
     if (!wc) {
@@ -2161,7 +2163,7 @@ export class ControlPanelManager {
     const linkChk = document.createElement('input');
     linkChk.type = 'checkbox';
     linkChk.checked = this.controlState.linkTimeToFoundry === true;
-    linkChk.disabled = !(game.user?.isGM === true);
+    linkChk.disabled = !(isGmLike());
     linkChk.style.cssText = 'width:12px;height:12px;cursor:pointer;flex-shrink:0;accent-color:rgba(90,200,250,1);';
     linkChk.addEventListener('change', (e) => {
       this.controlState.linkTimeToFoundry = e.target.checked;
@@ -2889,7 +2891,7 @@ export class ControlPanelManager {
     grid.style.marginTop = '4px';
 
     const scopeNote = document.createElement('div');
-    scopeNote.textContent = game.user?.isGM
+    scopeNote.textContent = isGmLike()
       ? 'Scope: Saves to scene'
       : 'Scope: Runtime only (GM required for scene persistence)';
     scopeNote.style.fontSize = '11px';
@@ -3008,7 +3010,7 @@ export class ControlPanelManager {
   }
 
   async _startTileMotion() {
-    if (!game.user?.isGM) {
+    if (!isGmLike()) {
       ui.notifications?.warn('Tile motion controls are GM-only');
       return;
     }
@@ -3030,7 +3032,7 @@ export class ControlPanelManager {
   }
 
   async _pauseTileMotion() {
-    if (!game.user?.isGM) {
+    if (!isGmLike()) {
       ui.notifications?.warn('Tile motion controls are GM-only');
       return;
     }
@@ -3052,7 +3054,7 @@ export class ControlPanelManager {
   }
 
   async _resumeTileMotion() {
-    if (!game.user?.isGM) {
+    if (!isGmLike()) {
       ui.notifications?.warn('Tile motion controls are GM-only');
       return;
     }
@@ -3074,7 +3076,7 @@ export class ControlPanelManager {
   }
 
   async _stopTileMotion() {
-    if (!game.user?.isGM) {
+    if (!isGmLike()) {
       ui.notifications?.warn('Tile motion controls are GM-only');
       return;
     }
@@ -3095,7 +3097,7 @@ export class ControlPanelManager {
   }
 
   async _resetTileMotionPhase() {
-    if (!game.user?.isGM) {
+    if (!isGmLike()) {
       ui.notifications?.warn('Tile motion controls are GM-only');
       return;
     }
@@ -3124,11 +3126,11 @@ export class ControlPanelManager {
     if (options?.registerTopLevel !== false && targetFolder === this.pane) this._registerTopLevelFolder(tileMotionFolder);
     this._ensureFolderTag(tileMotionFolder, 'tileMotion', `${Math.round(Number(this.controlState.tileMotionSpeedPercent) || 0)}%`);
 
-    const canEditTileMotion = game.user?.isGM === true && !!window.MapShine?.tileMotionManager;
+    const canEditTileMotion = isGmLike() && !!window.MapShine?.tileMotionManager;
     if (!canEditTileMotion) {
       const content = tileMotionFolder.element.querySelector('.tp-fldv_c') || tileMotionFolder.element;
       const reason = document.createElement('div');
-      reason.textContent = game.user?.isGM
+      reason.textContent = isGmLike()
         ? 'Unavailable: Tile motion manager is not ready yet.'
         : 'Unavailable: Tile motion controls are GM-only.';
       reason.style.fontSize = '11px';
@@ -3522,7 +3524,7 @@ Current Weather:
   async _saveControlState() {
     try {
       const scene = canvas?.scene;
-      if (!scene || !game.user?.isGM) return;
+      if (!scene || !canPersistSceneDocument()) return;
 
       extendMsaLocalFlagWriteGuard();
       await scene.setFlag('map-shine-advanced', 'controlState', this.controlState);

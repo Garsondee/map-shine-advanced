@@ -3,6 +3,7 @@
  * Follows the "Cinematic Plausibility over Physical Simulation" philosophy.
  * @module core/WeatherController
  */
+import { canPersistSceneDocument } from './gm-parity.js';
 
 import { createLogger } from './log.js';
 import { getFoundrySunlightFactor } from './foundry-time-phases.js';
@@ -1049,7 +1050,7 @@ export class WeatherController {
       const hasStoredDarkness = Number.isFinite(stored.sceneDarkness);
       const hasStoredTimeOfDay = Number.isFinite(stored.timeOfDay);
       const shouldRestoreStoredDarkness = hasStoredDarkness && !hasStoredTimeOfDay;
-      if (shouldRestoreStoredDarkness && game?.user?.isGM && canvas?.scene) {
+      if (shouldRestoreStoredDarkness && canPersistSceneDocument() && canvas?.scene) {
         try {
           await Promise.race([
             mapShinePushSceneDarknessLevel(stored.sceneDarkness),
@@ -1106,7 +1107,7 @@ export class WeatherController {
                 `applyTimeOfDay timed out after ${SCENE_UPDATE_TIMEOUT_MS}ms`
               )), SCENE_UPDATE_TIMEOUT_MS))
             ]);
-            if (game?.user?.isGM && typeof stateApplier.syncFoundryDarknessFromMapShineTime === 'function') {
+            if (canPersistSceneDocument() && typeof stateApplier.syncFoundryDarknessFromMapShineTime === 'function') {
               await Promise.race([
                 stateApplier.syncFoundryDarknessFromMapShineTime(),
                 new Promise((_, reject) => setTimeout(() => reject(new Error(
@@ -1432,7 +1433,7 @@ export class WeatherController {
 
   _scheduleSaveDynamicState() {
     try {
-      if (!game?.user?.isGM) return;
+      if (!this._canEditSceneFlags()) return;
       const scene = canvas?.scene;
       if (!scene) return;
 

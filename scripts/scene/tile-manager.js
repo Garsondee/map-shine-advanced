@@ -4,6 +4,8 @@
  * Support for Background, Foreground, and Overhead tile layers
  * @module scene/tile-manager
  */
+import { isGmLike } from '../core/gm-parity.js';
+
 
 import { createLogger } from '../core/log.js';
 import { weatherController } from '../core/WeatherController.js';
@@ -12,7 +14,7 @@ import { debugLoadingProfiler } from '../core/debug-loading-profiler.js';
 import { isTileVisibleForPerspective, isBackgroundVisibleForPerspective, isWeatherVisibleForPerspective } from '../foundry/elevation-context.js';
 import { tileHasLevelsRange, isLevelsEnabledForScene, readTileLevelsFlags } from '../foundry/levels-scene-flags.js';
 import { applyTileLevelDefaults } from '../foundry/levels-create-defaults.js';
-import { getEffectMaskRegistry, probeMaskFile as probeMaskFileFromLoader } from '../assets/loader.js';
+import { getEffectMaskRegistry } from '../assets/loader.js';
 import { getTextureBudgetTracker, estimateTextureBytes } from '../assets/TextureBudgetTracker.js';
 import { TileEffectBindingManager } from './TileEffectBindingManager.js';
 
@@ -866,8 +868,27 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
         const filePickerImpl = globalThis.foundry?.applications?.apps?.FilePicker?.implementation;
         const filePicker = filePickerImpl ?? globalThis.FilePicker;
         if (!filePicker) throw new Error('FilePicker is not available');
-        const result = await filePicker.browse('data', dir);
-        const files = Array.isArray(result?.files) ? result.files : [];
+        const normalizedDir = String(dir).replace(/^\/+/, '');
+        const lowerDir = normalizedDir.toLowerCase();
+        const candidates = lowerDir.startsWith('modules/') || lowerDir.startsWith('systems/')
+          ? [['public', normalizedDir], ['data', normalizedDir]]
+          : (lowerDir.startsWith('worlds/')
+            ? [['data', normalizedDir], ['public', normalizedDir]]
+            : [['public', normalizedDir], ['data', normalizedDir]]);
+
+        let files = [];
+        for (const [source, targetDir] of candidates) {
+          try {
+            const result = await filePicker.browse(source, targetDir);
+            const listed = Array.isArray(result?.files) ? result.files : [];
+            if (listed.length > 0) {
+              files = listed;
+              break;
+            }
+          } catch (_) {
+            // try next source candidate
+          }
+        }
         this._dirFileListCache.set(dir, files);
         return files;
       } catch (_) {
@@ -926,46 +947,8 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
    */
   async _resolveTileMaskUrl(tileDoc, suffix) {
     const src = tileDoc?.texture?.src;
-    const parts = this._splitUrl(src);
-    if (!parts || !suffix) return null;
-
-    const candidates = this._getMaskCandidates(parts, suffix);
-    if (!candidates.length) return null;
-
-    // Use FilePicker directory listing to confirm existence (no 404 probing).
-    let hasFilePickerListing = false;
-    try {
-      const dir = this._getDirectoryFromPath(parts.base);
-      const files = await this._listDirectoryFiles(dir);
-      hasFilePickerListing = Array.isArray(files) && files.length > 0;
-    } catch (_) {
-      hasFilePickerListing = false;
-    }
-
-    // If FilePicker browsing is unavailable (common for non-owner clients),
-    // fall back to the asset loader's probe helper which uses direct HEAD
-    // probing when directory listing returns no files.
-    if (!hasFilePickerListing) {
-      try {
-        const probe = await probeMaskFileFromLoader(parts.pathNoExt, suffix);
-        if (probe?.path) return probe.path;
-      } catch (_) {
-      }
-      return null;
-    }
-
-    for (const url of candidates) {
-      try {
-        const noQuery = url.split('?')[0];
-        const exists = await this._fileExistsViaFilePicker(noQuery);
-        if (exists) return url;
-      } catch (_) {}
-    }
-
-    // FilePicker listing exists, but none of our expected candidates were found.
-    // Trust the FilePicker result - the mask doesn't exist. Do NOT fall back to
-    // HTTP probing as that causes 404 spam for every optional mask on every tile.
-    return null;
+    if (typeof src !== 'string' || !src.trim() || !suffix) return null;
+    return this._insertSuffixBeforeExtension(src.trim(), suffix);
   }
 
   /**
@@ -1100,61 +1083,9 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     }
 
     const p = (async () => {
-      const exts = [parts.ext, '.webp', '.png', '.jpg', '.jpeg'];
-      const uniqueExts = [];
-      for (const e of exts) {
-        const ee = String(e || '').toLowerCase();
-        if (!ee) continue;
-        if (!uniqueExts.includes(ee)) uniqueExts.push(ee);
-      }
-
-      // Try without query first (most authored masks won't carry cache-buster query strings).
-      // Then try with query as a fallback.
-      const candidates = [];
-      for (const ext of uniqueExts) {
-        const baseNoQuery = `${parts.pathNoExt}_Water${ext}`;
-        candidates.push(baseNoQuery);
-        if (parts.query) candidates.push(`${baseNoQuery}${parts.query}`);
-      }
-
-      // Strict no-probing policy: do not make any network requests for optional
-      // masks unless we can confirm the file exists via FilePicker directory listing.
-      let hasFilePickerListing = false;
-      try {
-        const dir = this._getDirectoryFromPath(parts.base);
-        const files = await this._listDirectoryFiles(dir);
-        hasFilePickerListing = Array.isArray(files) && files.length > 0;
-      } catch (_) {
-        hasFilePickerListing = false;
-      }
-
-      if (!hasFilePickerListing) {
-        // Cannot confirm existence without probing; do nothing.
-        this._tileWaterMaskResolvedUrl.set(key, null);
-        return null;
-      }
-
-      for (let i = 0; i < candidates.length; i++) {
-        const url = candidates[i];
-        try {
-          if (hasFilePickerListing) {
-            // Only probe the no-query form against the directory listing.
-            const noQuery = url.split('?')[0];
-            const exists = await this._fileExistsViaFilePicker(noQuery);
-            if (!exists) continue;
-          }
-          const tex = await this.loadTileTexture(url, { role: 'DATA_MASK' });
-          if (tex) {
-            this._tileWaterMaskCache.set(url, tex);
-            this._tileWaterMaskResolvedUrl.set(key, url);
-            return url;
-          }
-        } catch (_) {
-        }
-      }
-
-      this._tileWaterMaskResolvedUrl.set(key, null);
-      return null;
+      const url = this._insertSuffixBeforeExtension(src, '_Water');
+      this._tileWaterMaskResolvedUrl.set(key, url || null);
+      return url || null;
     })();
 
     this._tileWaterMaskResolvePromises.set(key, p);
@@ -1219,76 +1150,9 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     }
 
     const p = (async () => {
-      // Specular masks are optional per tile (opt-in via enableSpecular), but when
-      // enabled we should tolerate the mask being authored in a different file
-      // format than the tile texture (png vs jpg/webp, etc.).
-      const exts = [
-        String(parts.ext || '').toLowerCase(),
-        '.webp',
-        '.png',
-        '.jpg',
-        '.jpeg'
-      ];
-      const uniqueExts = [];
-      for (const e of exts) {
-        const ee = String(e || '').toLowerCase();
-        if (!ee) continue;
-        if (!uniqueExts.includes(ee)) uniqueExts.push(ee);
-      }
-
-      // Try without query first (most authored masks won't carry cache-buster query strings).
-      // Then try with query as a fallback.
-      const candidates = [];
-      for (const ext of uniqueExts) {
-        const baseNoQuery = `${parts.pathNoExt}_Specular${ext}`;
-        candidates.push(baseNoQuery);
-        if (parts.query) candidates.push(`${baseNoQuery}${parts.query}`);
-      }
-
-      // Strict no-probing policy: do not make any network requests for optional
-      // masks unless we can confirm the file exists via FilePicker directory listing.
-      let hasFilePickerListing = false;
-      try {
-        const dir = this._getDirectoryFromPath(parts.base);
-        const files = await this._listDirectoryFiles(dir);
-        hasFilePickerListing = Array.isArray(files) && files.length > 0;
-      } catch (_) {
-        hasFilePickerListing = false;
-      }
-
-      if (!hasFilePickerListing) {
-        // Cannot confirm existence without probing; do nothing.
-        this._tileSpecularMaskResolvedUrl.set(key, null);
-        return null;
-      }
-
-      for (let i = 0; i < candidates.length; i++) {
-        const url = candidates[i];
-        try {
-          if (hasFilePickerListing) {
-            // Only probe the no-query form against the directory listing.
-            const noQuery = url.split('?')[0];
-            const exists = await this._fileExistsViaFilePicker(noQuery);
-            if (!exists) continue;
-          }
-          const tex = await this.loadTileTexture(url, { role: 'DATA_MASK' });
-          if (tex) {
-            this._tileSpecularMaskCache.set(url, tex);
-            this._tileSpecularMaskResolvedUrl.set(key, url);
-            return url;
-          }
-        } catch (_) {
-        }
-      }
-
-      this._tileSpecularMaskResolvedUrl.set(key, null);
-
-      try {
-        log.debug(`No _Specular mask found for enabled tile ${tileDoc?.id || '(unknown)'}: ${candidates.join(', ')}`);
-      } catch (_) {
-      }
-
-      return null;
+      const url = this._insertSuffixBeforeExtension(src, '_Specular');
+      this._tileSpecularMaskResolvedUrl.set(key, url || null);
+      return url || null;
     })();
 
     this._tileSpecularMaskResolvePromises.set(key, p);
@@ -1350,47 +1214,9 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     }
 
     const p = (async () => {
-      const candidates = this._getMaskCandidates(parts, '_Fluid');
-
-      // Strict no-probing policy: do not make any network requests for optional
-      // masks unless we can confirm the file exists via FilePicker directory listing.
-      let hasFilePickerListing = false;
-      try {
-        const dir = this._getDirectoryFromPath(parts.base);
-        const files = await this._listDirectoryFiles(dir);
-        hasFilePickerListing = Array.isArray(files) && files.length > 0;
-      } catch (_) {
-        hasFilePickerListing = false;
-      }
-
-      if (!hasFilePickerListing) {
-        this._tileFluidMaskResolvedUrl.set(key, null);
-        return null;
-      }
-
-      for (let i = 0; i < candidates.length; i++) {
-        const url = candidates[i];
-        try {
-          const noQuery = url.split('?')[0];
-          const exists = await this._fileExistsViaFilePicker(noQuery);
-          if (!exists) continue;
-
-          const tex = await this.loadTileTexture(url, { role: 'DATA_MASK' });
-          if (tex) {
-            this._tileFluidMaskCache.set(url, tex);
-            this._tileFluidMaskResolvedUrl.set(key, url);
-            return url;
-          }
-        } catch (_) {
-        }
-      }
-
-      this._tileFluidMaskResolvedUrl.set(key, null);
-      try {
-        log.debug(`No _Fluid mask found for tile ${tileDoc?.id || '(unknown)'}: ${candidates.join(', ')}`);
-      } catch (_) {
-      }
-      return null;
+      const url = this._insertSuffixBeforeExtension(src, '_Fluid');
+      this._tileFluidMaskResolvedUrl.set(key, url || null);
+      return url || null;
     })();
 
     this._tileFluidMaskResolvePromises.set(key, p);
@@ -4269,7 +4095,7 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
 
     // Hidden check
     const isHidden = tileDoc.hidden;
-    const isGM = game.user?.isGM;
+    const isGM = isGmLike();
     
     if (isHidden && !isGM) {
       sprite.visible = false;

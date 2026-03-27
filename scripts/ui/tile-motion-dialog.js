@@ -2,6 +2,7 @@
  * @fileoverview Tile Motion authoring dialog
  * @module ui/tile-motion-dialog
  */
+import { isGmLike } from '../core/gm-parity.js';
 
 import { createLogger } from '../core/log.js';
 import Coordinates from '../utils/coordinates.js';
@@ -896,7 +897,7 @@ export class TileMotionDialog {
     };
 
     const ok = await mgr.setTileConfig?.(tileId, patch, { persist });
-    if (!ok && persist && game.user?.isGM) {
+    if (!ok && persist && isGmLike()) {
       ui.notifications?.warn('Failed to save tile motion config');
     }
     return !!ok;

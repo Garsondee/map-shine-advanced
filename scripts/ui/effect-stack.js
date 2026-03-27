@@ -1,3 +1,4 @@
+import { isGmLike } from '../core/gm-parity.js';
 import { createLogger } from '../core/log.js';
 import { getEffectMaskRegistry, loadAssetBundle } from '../assets/loader.js';
 import * as sceneSettings from '../settings/scene-settings.js';
@@ -527,7 +528,7 @@ export class EffectStackUI {
       const scene = canvas?.scene;
       if (!scene) return;
 
-      if (game.user?.isGM) {
+      if (isGmLike()) {
         const allSettings = sceneSettings.getSceneSettings(scene);
 
         const mode = window.MapShine?.uiManager?.settingsMode || 'mapMaker';

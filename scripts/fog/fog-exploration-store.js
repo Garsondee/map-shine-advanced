@@ -1,3 +1,4 @@
+import { isGmLike } from '../core/gm-parity.js';
 import { createLogger } from '../core/log.js';
 import { getLevelsCompatibilityMode, LEVELS_COMPATIBILITY_MODES } from '../foundry/levels-compatibility.js';
 import { isLevelsEnabledForScene } from '../foundry/levels-scene-flags.js';
@@ -98,7 +99,7 @@ export function getActiveElevationBandKey() {
 
 export function getRelevantActorIdsForFog() {
   try {
-    const isGM = game?.user?.isGM ?? false;
+    const isGM = isGmLike();
     const placeables = canvas?.tokens?.placeables || [];
     const byId = new Map(placeables.map((t) => [String(t?.document?.id ?? ''), t]));
 

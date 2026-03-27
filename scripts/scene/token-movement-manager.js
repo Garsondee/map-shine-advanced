@@ -11,6 +11,7 @@
  *
  * @module scene/token-movement-manager
  */
+import { isGmLike } from '../core/gm-parity.js';
 
 import { createLogger } from '../core/log.js';
 import { readWallHeightFlags } from '../foundry/levels-scene-flags.js';
@@ -3220,11 +3221,14 @@ export class TokenMovementManager {
         1800
       );
 
-    // “Deliberate” walk pacing: halve walk speed by doubling duration for
-    // sequenced path-walk updates (common in door-aware choreography).
+    // “Deliberate” walk pacing: by default we slow sequenced path-walk updates.
+    // In extreme step-sync debug mode, reduce this slowdown so per-step movement
+    // remains inspectable without feeling stalled.
     const methodLower = String(movementMethod || options?.method || options?.mapShineMovement?.method || '').toLowerCase();
     const isPathWalk = methodLower === 'path-walk' || methodLower === 'walk' || methodLower === 'path_segment';
-    const deliberateDurationMs = isPathWalk ? clamp(durationMs * 2, 120, 3600) : durationMs;
+    const useExtremeStepSync = this._shouldUseExtremeStepSync(options);
+    const deliberateMultiplier = useExtremeStepSync ? 1 : 2;
+    const deliberateDurationMs = isPathWalk ? clamp(durationMs * deliberateMultiplier, 120, 3600) : durationMs;
     const bobAmplitude = clamp(
       asNumber(options?.mapShineWalkBobAmplitude, profile.bobAmplitude),
       0,
@@ -4511,7 +4515,7 @@ export class TokenMovementManager {
             // precomputed graph since it includes all cells regardless of
             // fog/exploration state.
             const fogPolicy = options?.fogPathPolicy || this.settings.fogPathPolicy;
-            if (fogPolicy === 'strictNoFogPath' && !game?.user?.isGM) {
+            if (fogPolicy === 'strictNoFogPath' && !isGmLike()) {
               useFogFilterInAStar = true;
             }
           }
@@ -5013,7 +5017,7 @@ export class TokenMovementManager {
 
     const fogPolicy = context.options?.fogPathPolicy || this.settings.fogPathPolicy;
     if (fogPolicy === 'strictNoFogPath') {
-      if (!game?.user?.isGM && !this.isPointVisibleToPlayer(node)) {
+      if (!isGmLike() && !this.isPointVisibleToPlayer(node)) {
         const isStart = node.key === context.startNode.key;
         const isEnd = node.key === context.endNode.key;
         if (!isStart && !isEnd) return false;
@@ -5642,7 +5646,7 @@ export class TokenMovementManager {
       if (hit.ds === DOOR_STATES.OPEN) continue;
 
       // Locked door is a hard blocker unless user is GM.
-      if (hit.ds === DOOR_STATES.LOCKED && !game?.user?.isGM) {
+      if (hit.ds === DOOR_STATES.LOCKED && !isGmLike()) {
         return Number.POSITIVE_INFINITY;
       }
 
@@ -6125,7 +6129,7 @@ export class TokenMovementManager {
       const maxIterations = Math.max(64, asNumber(options?.maxSearchIterations, 42000));
       const weight = clamp(asNumber(options?.weight, this.settings.weightedAStarWeight), 1, 4);
       const fogPolicy = options?.fogPathPolicy || this.settings.fogPathPolicy;
-      const useFogFilterInAStar = (fogPolicy === 'strictNoFogPath' && !game?.user?.isGM);
+      const useFogFilterInAStar = (fogPolicy === 'strictNoFogPath' && !isGmLike());
 
       const openHeap = new BinaryMinHeap();
       const closedSet = new Set();
@@ -7007,7 +7011,7 @@ export class TokenMovementManager {
     const doorType = asNumber(wallDoc.door, DOOR_TYPES.NONE);
     if (doorType <= DOOR_TYPES.NONE) return false;
 
-    if (game?.user?.isGM) return true;
+    if (isGmLike()) return true;
 
     try {
       if (typeof wallDoc.canUserModify === 'function' && game?.user) {
@@ -7066,7 +7070,7 @@ export class TokenMovementManager {
       };
     }
 
-    if (targetDoorState === DOOR_STATES.OPEN && currentState === DOOR_STATES.LOCKED && !game?.user?.isGM) {
+    if (targetDoorState === DOOR_STATES.OPEN && currentState === DOOR_STATES.LOCKED && !isGmLike()) {
       return {
         ok: false,
         wallId: wallDoc.id,
@@ -7190,7 +7194,7 @@ export class TokenMovementManager {
     if (!doorStep?.requiresOpen) return { ok: true, skipped: true, reason: 'no-open-required' };
     if (!this.settings.doorPolicy.autoOpen) return { ok: false, reason: 'auto-open-disabled' };
 
-    const isGM = !!game?.user?.isGM;
+    const isGM = !!isGmLike();
     if (!isGM && !this.settings.doorPolicy.playerAutoDoorEnabled) {
       return { ok: false, reason: 'player-auto-door-disabled' };
     }
@@ -11320,7 +11324,7 @@ export class TokenMovementManager {
             if (holdBeforeFogMs > 0) await _sleep(holdBeforeFogMs);
           }
           const sightRefreshAck = this._awaitNextSightRefresh(
-            asNumber(options?.perStepSightRefreshTimeoutMs, this._shouldUseExtremeStepSync(options) ? 2500 : 500)
+            asNumber(options?.perStepSightRefreshTimeoutMs, this._shouldUseExtremeStepSync(options) ? 1250 : 500)
           );
           frameCoordinator.requestActivePerception?.();
           frameCoordinator.forcePerceptionUpdate({ bypassThrottle: true });
@@ -11454,7 +11458,10 @@ export class TokenMovementManager {
     // Reduced multiplier 290→180 and base 140→80 — the old values added 430ms+ per
     // grid step, making multi-step paths feel sluggish even when the animation
     // completed faster. The poll loop against activeTracks exits early anyway (BUG-10).
-    const estMs = (gridSteps * 180) + 80;
+    const extreme = this._shouldUseExtremeStepSync(options);
+    const perStepMs = extreme ? 90 : 180;
+    const baseMs = extreme ? 40 : 80;
+    const estMs = (gridSteps * perStepMs) + baseMs;
     return clamp(estMs, 60, 1800);
   }
 
@@ -11573,7 +11580,7 @@ export class TokenMovementManager {
     const extreme = this._shouldUseExtremeStepSync(options);
     const inferredTrackStartWaitMs = Math.min(650, Math.max(220, Math.round(asNumber(fallbackDelayMs, 0) * 0.8)));
     const waitForTrackStartMs = clamp(asNumber(options?.waitForTrackStartMs, inferredTrackStartWaitMs), 0, 2000);
-    const waitForTrackFinishMs = clamp(asNumber(options?.waitForTrackFinishMs, extreme ? 5000 : 2400), 100, 10000);
+    const waitForTrackFinishMs = clamp(asNumber(options?.waitForTrackFinishMs, extreme ? 2500 : 2400), 100, 10000);
     const pollMs = clamp(asNumber(options?.trackPollIntervalMs, 16), 8, 100);
 
     const hasTrack = () => this.activeTracks?.has?.(tokenId) === true;
@@ -12449,7 +12456,7 @@ export class TokenMovementManager {
         const requiresOpen = hit.ds !== DOOR_STATES.OPEN;
         if (!requiresOpen) continue;
 
-        const isGM = !!game?.user?.isGM;
+        const isGM = !!isGmLike();
         const autoOpen = !!this.settings.doorPolicy.autoOpen;
         const autoDoorAllowedForUser = isGM || !!this.settings.doorPolicy.playerAutoDoorEnabled;
 
@@ -12535,7 +12542,7 @@ export class TokenMovementManager {
    */
   isPointVisibleToPlayer(point) {
     // GM always sees everything
-    if (game?.user?.isGM) return true;
+    if (isGmLike()) return true;
 
     const px = asNumber(point?.x, 0);
     const py = asNumber(point?.y, 0);
@@ -12570,7 +12577,7 @@ export class TokenMovementManager {
     }
 
     // GM bypass — no redaction needed
-    if (this.settings.fogPathPolicy === 'gmUnrestricted' || game?.user?.isGM) {
+    if (this.settings.fogPathPolicy === 'gmUnrestricted' || isGmLike()) {
       return {
         visiblePath: pathNodes.slice(),
         hasHiddenTail: false,

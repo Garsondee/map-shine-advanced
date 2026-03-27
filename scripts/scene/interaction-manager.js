@@ -3,6 +3,8 @@
  * Replaces Foundry's canvas interaction layer for THREE.js
  * @module scene/interaction-manager
  */
+import { isGmLike } from '../core/gm-parity.js';
+
 
 import { createLogger } from '../core/log.js';
 import Coordinates from '../utils/coordinates.js';
@@ -1157,7 +1159,7 @@ export class InteractionManager {
 
   _getUnconstrainedMovementEnabled() {
     return !!(
-      game?.user?.isGM &&
+      isGmLike() &&
       game?.settings?.get?.('core', 'unconstrainedMovement')
     );
   }
@@ -2147,7 +2149,7 @@ export class InteractionManager {
                 if (entry) {
                   // Permission check: _canView requires OBSERVER (or LIMITED for image pages)
                   const accessTest = page ?? entry;
-                  const canView = game?.user?.isGM || accessTest?.testUserPermission?.(game.user, 'OBSERVER');
+                  const canView = isGmLike() || accessTest?.testUserPermission?.(game.user, 'OBSERVER');
                   if (canView) {
                     const options = {};
                     if (page) {
@@ -3615,7 +3617,7 @@ export class InteractionManager {
             }
             
             // Process door interaction if found
-            if (doorControl && game.user.isGM && !isWallLayerContext) {
+            if (doorControl && isGmLike() && !isWallLayerContext) {
                 this.handleDoorRightClick(doorControl, event);
                 event.preventDefault();
                 event.stopPropagation();
@@ -3745,7 +3747,7 @@ export class InteractionManager {
             }
         }
 
-        const shouldCheckWalls = !isTokensLayer && (isWallLayer || game.user.isGM);
+        const shouldCheckWalls = !isTokensLayer && (isWallLayer || isGmLike());
         const wallIntersects = shouldCheckWalls ? this.raycaster.intersectObject(wallGroup, true) : [];
 
         log.debug('onPointerDown wallIntersects', {
@@ -3823,7 +3825,7 @@ export class InteractionManager {
                 }
 
                 if (candidateType === 'wallLine' || candidateType === 'wallLineBg' || candidateType === 'wallHitbox') {
-                    if (game.user.isGM || this._isWallsContextActive()) {
+                    if (isGmLike() || this._isWallsContextActive()) {
                         this.selectWall(candidate, event);
                         return;
                     }
@@ -3889,7 +3891,7 @@ export class InteractionManager {
                 this._pendingLight.id = String(enhancedLightId);
                 this._pendingLight.sprite = sprite;
                 this._pendingLight.hitPoint = hit.point?.clone?.() ?? hit.point;
-                this._pendingLight.canEdit = !!game.user.isGM;
+                this._pendingLight.canEdit = !!isGmLike();
                 this._pendingLight.startClientX = event.clientX;
                 this._pendingLight.startClientY = event.clientY;
                 this._pendingLight.forceSheet = false;
@@ -3958,7 +3960,7 @@ export class InteractionManager {
           if (!isLightDrawTool) return;
 
           // Only GM may place lights for now, matching Foundry's default behavior
-          if (!game.user.isGM) {
+          if (!isGmLike()) {
             ui.notifications.warn('Only the GM can place lights in this mode.');
             return;
           }
@@ -4045,7 +4047,7 @@ export class InteractionManager {
           }
 
           if (!isSoundDrawTool) return;
-          if (!game.user?.isGM) {
+          if (!isGmLike()) {
             ui.notifications?.warn?.('Only the GM can place ambient sounds in this mode.');
             return;
           }
@@ -6611,7 +6613,7 @@ export class InteractionManager {
             // `core.unconstrainedMovement`. When active (and the user is a GM), Foundry's
             // native drag workflow passes constrainOptions {ignoreWalls:true, ignoreCost:true}.
             const unconstrainedMovement = !!(
-              game?.user?.isGM &&
+              isGmLike() &&
               game?.settings?.get?.('core', 'unconstrainedMovement')
             );
 
@@ -7066,7 +7068,7 @@ export class InteractionManager {
 
     const canEditScene = safeCall(() => {
       if (!canvas?.scene || !game?.user) return false;
-      if (game.user.isGM) return true;
+      if (isGmLike()) return true;
       if (typeof canvas.scene.canUserModify === 'function') return canvas.scene.canUserModify(game.user, 'update');
       return false;
     }, 'pasteTiles.canEditScene', Severity.COSMETIC, { fallback: false });
@@ -7499,7 +7501,7 @@ export class InteractionManager {
 
         const canEditScene = safeCall(() => {
             if (!canvas?.scene || !game?.user) return false;
-            if (game.user.isGM) return true;
+            if (isGmLike()) return true;
             if (typeof canvas.scene.canUserModify === 'function') return canvas.scene.canUserModify(game.user, 'update');
             return false;
         }, 'paste.canEditScene', Severity.COSMETIC, { fallback: false });
@@ -7692,7 +7694,7 @@ export class InteractionManager {
             // Check MapShine Enhanced Light
             const enhancedLightIconManager = window.MapShine?.enhancedLightIconManager;
             if (enhancedLightIconManager && enhancedLightIconManager.lights.has(id)) {
-              if (game.user.isGM) {
+              if (isGmLike()) {
                 enhancedLightsToDelete.push(id);
               }
               continue;
@@ -8242,7 +8244,7 @@ export class InteractionManager {
    * @returns {boolean} true if the door is reachable at the current elevation
    */
   _isDoorWallAtTokenElevation(wallDoc) {
-    if (game?.user?.isGM) return true;
+    if (isGmLike()) return true;
     if (!wallDoc) return true;
 
     const perspective = getPerspectiveElevation();

@@ -16,6 +16,8 @@
  * 
  * @module foundry/camera-follower
  */
+import { isGmLike } from '../core/gm-parity.js';
+
 
 import { createLogger } from '../core/log.js';
 import { moveTrace } from '../core/movement-trace-log.js';
@@ -133,7 +135,7 @@ export class CameraFollower {
     // that token's elevation when control/elevation events fire.
     // Do NOT force per-frame sync in manual mode, or compact overlay +/- and
     // dropdown selections get immediately overwritten.
-    if (game?.user?.isGM === true) return false;
+    if (isGmLike()) return false;
     const controlled = canvas?.tokens?.controlled || [];
     return controlled.length > 0;
   }

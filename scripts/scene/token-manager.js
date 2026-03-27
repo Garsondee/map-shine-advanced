@@ -3,6 +3,8 @@
  * Handles creation, updates, and deletion of token sprites in the THREE.js scene
  * @module scene/token-manager
  */
+import { isGmLike } from '../core/gm-parity.js';
+
 
 import { createLogger } from '../core/log.js';
 import { OVERLAY_THREE_LAYER } from '../core/render-layers.js';
@@ -1813,7 +1815,7 @@ vec3 ms_applySceneLighting(vec3 color) {
 
     // Fallback when no VisibilityController is active (e.g. during init)
     if (tokenDoc.hidden) {
-      sprite.visible = game.user?.isGM || false;
+      sprite.visible = isGmLike() || false;
       sprite.material.opacity = 0.5;
     } else {
       sprite.visible = true;
@@ -2057,7 +2059,7 @@ vec3 ms_applySceneLighting(vec3 color) {
 
     let isSecret = false;
     try {
-      isSecret = !!token.document?.isSecret && !game?.user?.isGM && !token.document?.isOwner;
+      isSecret = !!token.document?.isSecret && !isGmLike() && !token.document?.isOwner;
     } catch (_) {
       isSecret = false;
     }
@@ -2290,7 +2292,7 @@ vec3 ms_applySceneLighting(vec3 color) {
 
       const isOwner = !!spriteData?.tokenDoc?.isOwner
         || !!spriteData?.tokenDoc?.actor?.testUserPermission?.(game.user, 'OWNER')
-        || !!game?.user?.isGM;
+        || !!isGmLike();
 
       if (m === CONST.TOKEN_DISPLAY_MODES.OWNER_HOVER) return isOwner && hover;
       if (m === CONST.TOKEN_DISPLAY_MODES.OWNER) return isOwner;
@@ -2306,9 +2308,9 @@ vec3 ms_applySceneLighting(vec3 color) {
 
     let isOwner = false;
     try {
-      isOwner = !!tokenDoc.isOwner || !!tokenDoc.actor?.testUserPermission?.(game.user, 'OWNER') || !!game?.user?.isGM;
+      isOwner = !!tokenDoc.isOwner || !!tokenDoc.actor?.testUserPermission?.(game.user, 'OWNER') || !!isGmLike();
     } catch (_) {
-      isOwner = !!game?.user?.isGM;
+      isOwner = !!isGmLike();
     }
 
     let isSecret = false;

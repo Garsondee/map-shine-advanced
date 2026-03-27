@@ -12,6 +12,8 @@
  *
  * @module foundry/cinematic-camera-manager
  */
+import { canPersistSceneDocument, isGmLike } from '../core/gm-parity.js';
+
 
 import { createLogger } from '../core/log.js';
 
@@ -279,7 +281,7 @@ export class CinematicCameraManager {
     playerToggle.className = 'map-shine-cinematic-toggle map-shine-overlay-ui';
     playerToggle.textContent = 'Exit Cinematic View';
     playerToggle.addEventListener('click', () => {
-      if (this.sceneState.strictFollow && !game.user?.isGM) {
+      if (this.sceneState.strictFollow && !isGmLike()) {
         ui.notifications?.warn?.('GM has enabled strict cinematic follow.');
         return;
       }
@@ -306,7 +308,7 @@ export class CinematicCameraManager {
 
     addHook('canvasPan', (_canvas, position) => {
       const isInternalPan = this._isApplyingRemotePan || this._isApplyingConstraintPan || this._isApplyingCohesionPan;
-      if (!game.user?.isGM && !isInternalPan) {
+      if (!isGmLike() && !isInternalPan) {
         this._lastManualInputAt = Date.now();
       }
 
@@ -445,7 +447,7 @@ export class CinematicCameraManager {
     if (this.isRuntimeTemporarilySuspended()) return;
     if (!this.sceneState.improvedModeEnabled) return;
     if (!this.sceneState.playerBoundsEnabled) return;
-    if (game.user?.isGM) return;
+    if (isGmLike()) return;
     if (this._isPlayerFollowLocked()) return;
     if (this._isApplyingConstraintPan) return;
 
@@ -481,7 +483,7 @@ export class CinematicCameraManager {
   }
 
   _schedulePersistSceneState() {
-    if (!game.user?.isGM) return;
+    if (!canPersistSceneDocument()) return;
 
     if (this._persistTimeout !== null) clearTimeout(this._persistTimeout);
     this._persistTimeout = setTimeout(async () => {
@@ -558,7 +560,7 @@ export class CinematicCameraManager {
 
     const cinematicActive = this.sceneState.cinematicActive === true;
 
-    const strictLockedLocally = !game.user?.isGM
+    const strictLockedLocally = !isGmLike()
       && cinematicActive
       && this.sceneState.lockPlayers
       && this.sceneState.strictFollow;
@@ -595,7 +597,7 @@ export class CinematicCameraManager {
 
   _isPlayerFollowLocked() {
     if (this.isRuntimeTemporarilySuspended()) return false;
-    if (game.user?.isGM) return false;
+    if (isGmLike()) return false;
     if (!this.sceneState.cinematicActive) return false;
     if (!this.sceneState.lockPlayers) return false;
     if (this.sceneState.strictFollow) return true;
@@ -638,7 +640,7 @@ export class CinematicCameraManager {
   }
 
   toggleLocalOptOut() {
-    if (!game.user?.isGM && this.sceneState.strictFollow && this.sceneState.cinematicActive && this.sceneState.lockPlayers) {
+    if (!isGmLike() && this.sceneState.strictFollow && this.sceneState.cinematicActive && this.sceneState.lockPlayers) {
       return false;
     }
 
@@ -788,7 +790,7 @@ export class CinematicCameraManager {
   }
 
   _shouldBroadcastCameraState() {
-    return game.user?.isGM
+    return isGmLike()
       && this.sceneState.cinematicActive
       && this.sceneState.lockPlayers;
   }
@@ -839,7 +841,7 @@ export class CinematicCameraManager {
   _onSocketMessage(payload) {
     if (!payload || payload.type !== CAMERA_SOCKET_TYPE) return;
     if (!payload.sceneId || payload.sceneId !== canvas?.scene?.id) return;
-    if (game.user?.isGM) return;
+    if (isGmLike()) return;
 
     const senderId = typeof payload.senderId === 'string' ? payload.senderId : null;
     if (senderId && senderId === game.user?.id) return;
@@ -891,7 +893,7 @@ export class CinematicCameraManager {
 
   _tickRemoteFollow(timeInfo = null) {
     if (this.isRuntimeTemporarilySuspended()) return;
-    if (game.user?.isGM) return;
+    if (isGmLike()) return;
     if (!this._isPlayerFollowLocked()) return;
     if (!this._remotePanTarget) return;
     if (!canvas?.stage?.pivot || !canvas?.stage?.scale || !canvas?.pan) return;
@@ -1032,7 +1034,7 @@ export class CinematicCameraManager {
     if (this.isRuntimeTemporarilySuspended()) return view;
     if (!this.sceneState.improvedModeEnabled) return view;
     if (!this.sceneState.playerBoundsEnabled) return view;
-    if (game.user?.isGM) return view;
+    if (isGmLike()) return view;
     if (this._isPlayerFollowLocked()) return view;
 
     const bounds = this._getOrComputePlayerBounds();
@@ -1078,7 +1080,7 @@ export class CinematicCameraManager {
     const placeables = canvas?.tokens?.placeables;
     if (!Array.isArray(placeables) || !placeables.length) return [];
 
-    if (game.user?.isGM) return [];
+    if (isGmLike()) return [];
 
     return placeables.filter((t) => t?.document?.actor?.isOwner === true);
   }

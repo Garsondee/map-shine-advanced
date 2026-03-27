@@ -1,3 +1,4 @@
+import { isGmLike } from '../../core/gm-parity.js';
 import { createLogger } from '../../core/log.js';
 import Coordinates from '../../utils/coordinates.js';
 import { readWallHeightFlags } from '../../foundry/levels-scene-flags.js';
@@ -1715,13 +1716,13 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
   }
 
   _isAllowedForUser(tokenDoc) {
-    const isGM = !!game?.user?.isGM;
+    const isGM = !!isGmLike();
     if (isGM) return true;
     return !!tokenDoc?.isOwner;
   }
 
   _getActiveTokenId() {
-    const isGM = !!game?.user?.isGM;
+    const isGM = !!isGmLike();
 
     try {
       const controlled = canvas?.tokens?.controlled;

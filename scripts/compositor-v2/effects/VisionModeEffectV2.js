@@ -1,3 +1,4 @@
+import { isGmLike } from '../../core/gm-parity.js';
 import { createLogger } from '../../core/log.js';
 
 const log = createLogger('VisionModeEffectV2');
@@ -129,7 +130,7 @@ export class VisionModeEffectV2 {
     try {
       // GM view should stay authorial/full-scene and must not inherit token
       // vision-mode post processing when selecting NPCs.
-      if (game?.user?.isGM) return 'basic';
+      if (isGmLike()) return 'basic';
 
       // Resolve from Foundry's active vision source, not selected token docs.
       // Selected tokens can have darkvision configured even when there is no

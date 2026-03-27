@@ -3,6 +3,8 @@
  * Shared logic for applying time and weather changes to avoid duplication
  * @module ui/state-applier
  */
+import { canPersistSceneDocument } from '../core/gm-parity.js';
+
 
 import { createLogger } from '../core/log.js';
 import { extendMsaLocalFlagWriteGuard } from '../utils/msa-local-flag-guard.js';
@@ -235,7 +237,7 @@ export class StateApplier {
    * @private
    */
   async _syncFoundryWorldTimeFromHour(hour) {
-    if (!game?.user?.isGM) return;
+    if (!canPersistSceneDocument()) return;
 
     const currentWorldTime = Number(game?.time?.worldTime);
     if (!Number.isFinite(currentWorldTime)) return;
@@ -284,7 +286,7 @@ export class StateApplier {
       }
 
       // Save to scene flags if requested and user is GM
-      if (saveToScene && game?.user?.isGM && canvas?.scene) {
+      if (saveToScene && canPersistSceneDocument() && canvas?.scene) {
         try {
           if (window.MapShine?.controlPanel?.controlState) {
             window.MapShine.controlPanel.controlState.timeOfDay = clampedHour;
@@ -373,7 +375,7 @@ export class StateApplier {
       }
 
       // Save to scene flags if requested and user is GM
-      if (saveToScene && game?.user?.isGM && canvas?.scene) {
+      if (saveToScene && canPersistSceneDocument() && canvas?.scene) {
         try {
           // Update control state if ControlPanel is available
           if (window.MapShine?.controlPanel) {
@@ -592,7 +594,7 @@ export class StateApplier {
    */
   async _updateSceneDarkness(hour) {
     try {
-      if (!game?.user?.isGM || !canvas?.scene) return;
+      if (!canPersistSceneDocument() || !canvas?.scene) return;
 
       const nowMs = Date.now();
 

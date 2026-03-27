@@ -1,3 +1,4 @@
+import { isGmLike } from '../core/gm-parity.js';
 import { createLogger } from '../core/log.js';
 import Coordinates from '../utils/coordinates.js';
 import { OVERLAY_THREE_LAYER } from '../core/render-layers.js';
@@ -46,7 +47,7 @@ export class NoteIconManager {
   _isNoteVisible(doc) {
     // Gameplay overlays should not depend on NotesLayer active-state visibility.
     // Keep baseline hidden/permission checks only.
-    return !doc?.hidden || !!game?.user?.isGM || !!doc?.isAuthor;
+    return !doc?.hidden || !!isGmLike() || !!doc?.isAuthor;
   }
 
   _resolveIconSrc(doc) {

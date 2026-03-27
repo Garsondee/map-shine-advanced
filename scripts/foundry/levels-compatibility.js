@@ -8,6 +8,7 @@
  * - authority enforcement in gameplay mode,
  * - warning message formatting.
  */
+import { isGmLike } from '../core/gm-parity.js';
 
 import { createLogger } from '../core/log.js';
 
@@ -265,7 +266,7 @@ export function emitModuleConflictWarnings() {
 
   // Surface a single UI notification if any warn-level conflicts exist
   const warnConflicts = conflicts.filter((c) => c.severity === 'warn');
-  if (warnConflicts.length > 0 && game?.user?.isGM) {
+  if (warnConflicts.length > 0 && isGmLike()) {
     const names = warnConflicts.map((c) => c.label).join(', ');
     ui?.notifications?.warn?.(
       `Map Shine: Potential compatibility overlap detected with ${names}. Check the Diagnostic Center for details.`,

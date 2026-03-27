@@ -1,3 +1,4 @@
+import { isGmLike } from '../core/gm-parity.js';
 import { createLogger } from '../core/log.js';
 import Coordinates from '../utils/coordinates.js';
 import { OVERLAY_THREE_LAYER } from '../core/render-layers.js';
@@ -54,7 +55,7 @@ export class TemplateAdornmentManager {
   _isTemplateVisible(doc) {
     // Gameplay overlays should not depend on TemplateLayer active-state visibility.
     // Keep baseline hidden/permission checks only.
-    return !doc?.hidden || !!game?.user?.isGM || !!doc?.isAuthor;
+    return !doc?.hidden || !!isGmLike() || !!doc?.isAuthor;
   }
 
   _distanceToPixels(distance) {

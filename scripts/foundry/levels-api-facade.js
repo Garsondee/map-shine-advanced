@@ -18,6 +18,7 @@
  *
  * @module foundry/levels-api-facade
  */
+import { isGmLike } from '../core/gm-parity.js';
 
 import { createLogger } from '../core/log.js';
 import { getLevelsCompatibilityMode, LEVELS_COMPATIBILITY_MODES } from './levels-compatibility.js';
@@ -781,7 +782,7 @@ async function migrateLevelsToNative(scene, options = {}) {
 async function migrateLevelsWorldWide(options = {}) {
   const { dryRun = true, force = false, scenePredicate } = options;
 
-  if (game.user?.isGM !== true) {
+  if (!isGmLike()) {
     return { dryRun, sceneCount: 0, totalMigrated: 0, totalSkipped: 0, totalErrors: 0, scenes: [], summary: 'Only GM can run world-wide migration.' };
   }
 

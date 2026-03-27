@@ -15,6 +15,7 @@
  *
  * @module masks/GpuSceneMaskCompositor
  */
+import { isGmLike } from '../core/gm-parity.js';
 
 import { createLogger } from '../core/log.js';
 import * as assetLoader from '../assets/loader.js';
@@ -22,8 +23,23 @@ import { getEffectMaskRegistry } from '../assets/loader.js';
 import { SceneMaskCompositor } from './scene-mask-compositor.js';
 import { isLevelsEnabledForScene, tileHasLevelsRange, readTileLevelsFlags, readSceneLevelsFlag } from '../foundry/levels-scene-flags.js';
 import { isTileOverhead } from '../scene/tile-manager.js';
+import { collectEnabledMaskIds, getMaskBundleOptionsFromFlagOnly } from '../settings/mask-manifest-flags.js';
 
 const log = createLogger('GpuSceneMaskCompositor');
+
+/** Scene bundle load aligned with SceneComposer flag-backed manifests (no convention spray for players). */
+function loadAssetBundleOptsFromScene(scene, basePath) {
+  const enabledIds = collectEnabledMaskIds(scene);
+  const o = getMaskBundleOptionsFromFlagOnly(scene, basePath, enabledIds, { skipMaskIds: ['water'] });
+  return {
+    skipBaseTexture: true,
+    suppressProbeErrors: true,
+    maskManifest: o.maskManifest,
+    maskIds: o.maskIds,
+    cacheKeySuffix: o.cacheKeySuffix,
+    skipMaskIds: o.skipMaskIds,
+  };
+}
 
 // ── Resolution classes ────────────────────────────────────────────────────────
 
@@ -313,6 +329,12 @@ export class GpuSceneMaskCompositor {
      * @type {Map<string, {masks: Array, basePath: string|null}>}
      */
     this._floorMeta = new Map();
+    /**
+     * Tracks one-shot stale-repair evictions for non-GM clients.
+     * Prevents infinite preload loops while still allowing a local self-heal pass.
+     * @type {Set<string>}
+     */
+    this._nonGmStaleRepairAttempted = new Set();
 
     /**
      * Fallback CPU compositor used when the WebGL renderer is unavailable.
@@ -676,9 +698,11 @@ export class GpuSceneMaskCompositor {
             let baseBundleMasks = [];
             if (primaryBasePath) {
               try {
-                const r = await assetLoader.loadAssetBundle(primaryBasePath, null, {
-                  skipBaseTexture: true, suppressProbeErrors: true
-                });
+                const r = await assetLoader.loadAssetBundle(
+                  primaryBasePath,
+                  null,
+                  loadAssetBundleOptsFromScene(sc, primaryBasePath)
+                );
                 if (r?.bundle?.masks?.length) {
                   const emr = window.MapShine?.effectMaskRegistry;
                   baseBundleMasks = r.bundle.masks.filter(m => {
@@ -722,9 +746,11 @@ export class GpuSceneMaskCompositor {
     // bundle masks are tile-space and can't map to scene-space correctly.
     if (!newMasks && primaryBasePath) {
       try {
-        const r = await assetLoader.loadAssetBundle(primaryBasePath, null, {
-          skipBaseTexture: true, suppressProbeErrors: true
-        });
+        const r = await assetLoader.loadAssetBundle(
+          primaryBasePath,
+          null,
+          loadAssetBundleOptsFromScene(sc, primaryBasePath)
+        );
         if (r?.bundle?.masks?.length) {
           const emr = window.MapShine?.effectMaskRegistry;
           newMasks = r.bundle.masks.filter(m => {
@@ -758,9 +784,11 @@ export class GpuSceneMaskCompositor {
       const fallbackPath = bgFallbackPath || lastMaskBasePath;
       if (fallbackPath) {
         try {
-          const r = await assetLoader.loadAssetBundle(fallbackPath, null, {
-            skipBaseTexture: true, suppressProbeErrors: true
-          });
+          const r = await assetLoader.loadAssetBundle(
+            fallbackPath,
+            null,
+            loadAssetBundleOptsFromScene(sc, fallbackPath)
+          );
           if (r?.bundle?.masks?.length) {
             newMasks = r.bundle.masks;
             primaryBasePath = fallbackPath;
@@ -912,6 +940,7 @@ export class GpuSceneMaskCompositor {
         await new Promise(resolve => setTimeout(resolve, 0));
       };
 
+      const isGM = isGmLike();
       for (const bandKey of bands) {
         await _yieldIfNeeded();
         const [bottom, top] = bandKey.split(':').map(Number);
@@ -942,8 +971,14 @@ export class GpuSceneMaskCompositor {
               }
             }
             if (anyCleared && this._floorMeta.has(bandKey)) {
+              // GM: allow repeated repair attempts. Player: permit one local
+              // stale-repair eviction per band to avoid infinite recompose loops.
+              if (!isGM && this._nonGmStaleRepairAttempted.has(bandKey)) {
+                continue;
+              }
               log.debug('preloadAllFloors: evicting stale floor bundle for band', bandKey, 'to allow re-composition');
               this._floorMeta.delete(bandKey);
+              if (!isGM) this._nonGmStaleRepairAttempted.add(bandKey);
               _recomposedBands.add(bandKey);
             }
           }
@@ -1453,6 +1488,7 @@ export class GpuSceneMaskCompositor {
     // Clear the per-floor metadata cache so composeFloor() re-evaluates
     // masksChanged correctly on the first call after a scene switch.
     this._floorMeta.clear();
+    this._nonGmStaleRepairAttempted.clear();
 
     // Dispose and clear cached GPU render targets. Floor keys (e.g. "0:5")
     // are not scene-unique, so keeping old RTs would cause getBelowFloorTexture()
@@ -1550,6 +1586,7 @@ export class GpuSceneMaskCompositor {
    */
   dispose() {
     this._floorMeta.clear();
+    this._nonGmStaleRepairAttempted.clear();
     this._activeFloorBasePath = null;
     this._activeFloorKey = null;
     for (const floorTargets of this._floorCache.values()) {

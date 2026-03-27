@@ -9,6 +9,7 @@
  *
  * @module ui/levels-authoring-dialog
  */
+import { isGmLike } from '../core/gm-parity.js';
 
 import { createLogger } from '../core/log.js';
 import {
@@ -1630,7 +1631,7 @@ export class LevelsAuthoringDialog {
   }
 
   async _applyTwoLayerPreset() {
-    if (game.user?.isGM !== true) return;
+    if (!isGmLike()) return;
     const scene = canvas?.scene;
     if (!scene) return;
 
@@ -1652,7 +1653,7 @@ export class LevelsAuthoringDialog {
   }
 
   async _addTwentyFootLayer() {
-    if (game.user?.isGM !== true) return;
+    if (!isGmLike()) return;
     const scene = canvas?.scene;
     if (!scene) return;
 
@@ -1679,7 +1680,7 @@ export class LevelsAuthoringDialog {
   }
 
   async _autoBuildLevels() {
-    if (game.user?.isGM !== true) return;
+    if (!isGmLike()) return;
     const scene = canvas?.scene;
     if (!scene) return;
 
@@ -1707,7 +1708,7 @@ export class LevelsAuthoringDialog {
   }
 
   async _addLevelBand() {
-    if (game.user?.isGM !== true) return;
+    if (!isGmLike()) return;
     const scene = canvas?.scene;
     if (!scene) return;
 
@@ -1728,7 +1729,7 @@ export class LevelsAuthoringDialog {
   }
 
   async _saveBandDefinition(bandIndex) {
-    if (game.user?.isGM !== true) return;
+    if (!isGmLike()) return;
     const scene = canvas?.scene;
     if (!scene) return;
 
@@ -1772,7 +1773,7 @@ export class LevelsAuthoringDialog {
   }
 
   async _deleteBandDefinition(bandIndex) {
-    if (game.user?.isGM !== true) return;
+    if (!isGmLike()) return;
     const scene = canvas?.scene;
     if (!scene) return;
 
@@ -1792,7 +1793,7 @@ export class LevelsAuthoringDialog {
   }
 
   async _prepareSceneForLevels() {
-    if (game.user?.isGM !== true) {
+    if (!isGmLike()) {
       ui.notifications?.warn?.('Only the GM can prepare scene Levels data.');
       return;
     }
@@ -1844,7 +1845,7 @@ export class LevelsAuthoringDialog {
   }
 
   async _updateSceneLevelsFlags(patch, successMessage) {
-    if (game.user?.isGM !== true) return false;
+    if (!isGmLike()) return false;
     const scene = canvas?.scene;
     if (!scene) return false;
 
@@ -1979,7 +1980,7 @@ export class LevelsAuthoringDialog {
   }
 
   async _saveSceneSurface(surfaceId) {
-    if (game.user?.isGM !== true) return;
+    if (!isGmLike()) return;
     const scene = canvas?.scene;
     if (!scene) return;
 
@@ -2051,7 +2052,7 @@ export class LevelsAuthoringDialog {
   }
 
   async _saveTileLevels(tileId) {
-    if (game.user?.isGM !== true) return;
+    if (!isGmLike()) return;
 
     const tileDoc = this._getTileDocById(tileId);
     if (!tileDoc) return;
@@ -2109,7 +2110,7 @@ export class LevelsAuthoringDialog {
   }
 
   async _clearTileLevels(tileId) {
-    if (game.user?.isGM !== true) return;
+    if (!isGmLike()) return;
     const tileDoc = this._getTileDocById(tileId);
     if (!tileDoc) return;
 
@@ -2154,7 +2155,7 @@ export class LevelsAuthoringDialog {
   }
 
   async _fixVisibleTiles() {
-    if (game.user?.isGM !== true) return;
+    if (!isGmLike()) return;
     const scene = canvas?.scene;
     if (!scene) return;
 
@@ -2209,7 +2210,7 @@ export class LevelsAuthoringDialog {
   }
 
   async _assignSelectedTilesToBand(bandIndex) {
-    if (game.user?.isGM !== true) return;
+    if (!isGmLike()) return;
     const scene = canvas?.scene;
     if (!scene) return;
 
@@ -2272,7 +2273,7 @@ export class LevelsAuthoringDialog {
   }
 
   async _assignSelectedDocsToBand(bandIndex) {
-    if (game.user?.isGM !== true) return;
+    if (!isGmLike()) return;
     const scene = canvas?.scene;
     if (!scene) return;
 
@@ -2347,7 +2348,7 @@ export class LevelsAuthoringDialog {
   }
 
   async _adoptUnassignedDocsToBand(bandIndex) {
-    if (game.user?.isGM !== true) return;
+    if (!isGmLike()) return;
     const scene = canvas?.scene;
     if (!scene) return;
 
@@ -2412,7 +2413,7 @@ export class LevelsAuthoringDialog {
   }
 
   async _adoptUnassignedTilesToBand(bandIndex) {
-    if (game.user?.isGM !== true) return;
+    if (!isGmLike()) return;
     const scene = canvas?.scene;
     if (!scene) return;
 
@@ -2452,7 +2453,7 @@ export class LevelsAuthoringDialog {
 
   async _fixTileRange(tileId, options = {}) {
     const { silent = false, refresh = true, reRender = true, force = false } = options || {};
-    if (game.user?.isGM !== true) return false;
+    if (!isGmLike()) return false;
     const scene = canvas?.scene;
     if (!scene) return false;
 
@@ -2529,7 +2530,7 @@ export class LevelsAuthoringDialog {
    * @param {'stair'|'stairUp'|'stairDown'|'elevator'} zoneType
    */
   _startZoneDrawing(zoneType) {
-    if (game.user?.isGM !== true) return;
+    if (!isGmLike()) return;
     const scene = canvas?.scene;
     if (!scene) return;
 

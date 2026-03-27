@@ -36,6 +36,7 @@
  *
  * @module compositor-v2/effects/MovementPreviewEffectV2
  */
+import { isGmLike } from '../../core/gm-parity.js';
 
 import { createLogger } from '../../core/log.js';
 import { OVERLAY_THREE_LAYER } from '../../core/render-layers.js';
@@ -250,7 +251,7 @@ export class MovementPreviewEffectV2 {
 
     // Fog-of-war occlusion for players: clip preview at the first hidden cell so
     // path UI cannot reveal geometry/routes beyond explored/visible space.
-    const shouldFogClip = !game?.user?.isGM;
+    const shouldFogClip = !isGmLike();
     let hiddenTailClipped = false;
     if (shouldFogClip && displayCells.length > 0) {
       const clippedCells = [];

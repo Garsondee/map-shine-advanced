@@ -15,6 +15,7 @@
  *
  * @module foundry/zone-manager
  */
+import { canPersistSceneDocument, isGmLike } from '../core/gm-parity.js';
 
 import { createLogger } from '../core/log.js';
 import { moveTrace } from '../core/movement-trace-log.js';
@@ -294,7 +295,7 @@ export class ZoneManager {
       const controlled = canvas?.tokens?.controlled || [];
       const token = controlled[0] || null;
       const canTest = !!canvas?.visibility?.testVisibility;
-      const defaultVisible = (game?.user?.isGM === true);
+      const defaultVisible = (isGmLike());
 
       const applyVisible = (entry, visible) => {
         if (!entry) return;
@@ -445,7 +446,7 @@ export class ZoneManager {
    */
   async addZone(zoneData) {
     const scene = canvas?.scene;
-    if (!scene || game.user?.isGM !== true) throw new Error('Cannot add zone: no scene or not GM');
+    if (!scene || !isGmLike()) throw new Error('Cannot add zone: no scene or not GM');
 
     const zone = {
       id: zoneData.id || generateZoneId(),
@@ -474,7 +475,7 @@ export class ZoneManager {
    */
   async updateZone(zoneId, changes) {
     const scene = canvas?.scene;
-    if (!scene || game.user?.isGM !== true) return;
+    if (!scene || !canPersistSceneDocument()) return;
 
     const zones = this.getZones().map(z => {
       if (z.id !== zoneId) return z;
@@ -490,7 +491,7 @@ export class ZoneManager {
    */
   async deleteZone(zoneId) {
     const scene = canvas?.scene;
-    if (!scene || game.user?.isGM !== true) return;
+    if (!scene || !canPersistSceneDocument()) return;
 
     const zones = this.getZones().filter(z => z.id !== zoneId);
     await scene.setFlag(MS_FLAG_SCOPE, ZONES_FLAG_KEY, zones);

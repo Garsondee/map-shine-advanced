@@ -2,6 +2,8 @@
  * @fileoverview Levels Editor V2
  * @module ui/levels-editor/levels-editor-v2
  */
+import { isGmLike } from '../../core/gm-parity.js';
+
 
 import { createLogger } from '../../core/log.js';
 import { getSceneBackgroundElevation } from '../../foundry/levels-scene-flags.js';
@@ -189,7 +191,7 @@ export class LevelsEditorV2 {
   async _updateSceneLevels(sceneLevels, userMessage = '') {
     const scene = this._currentScene();
     if (!scene) return;
-    if (game.user?.isGM !== true) {
+    if (!isGmLike()) {
       ui.notifications?.warn?.('Only the GM can edit level definitions.');
       return;
     }

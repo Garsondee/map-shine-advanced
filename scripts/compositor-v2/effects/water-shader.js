@@ -1556,6 +1556,9 @@ void main() {
   float distInside = (uUseSdfMask > 0.5)
     ? distortionInsideFromSdf(sdf01)
     : inside;
+  // Extra stability fade near the binary water-mask transition.
+  // Prevents bright specular/caustics edge flicker when the water boundary is thin.
+  float edgeStability = smoothstep(0.12, 0.42, clamp(distInside, 0.0, 1.0));
   float distMask = distInside * shoreFactor(shore);
   float waveMotion01 = clamp(uWaveMotion01, 0.0, 1.0);
   float outdoorStrength = 1.0;
@@ -1854,6 +1857,7 @@ void main() {
 
     float causticsAmt = clamp(uCausticsIntensity, 0.0, 8.0) * coverage;
     causticsAmt *= edge * causticsCloudLit * brightnessGate * inside;
+    causticsAmt *= edgeStability;
     // Treat caustics as LIGHT (illumination) instead of pigment.
     // WindowLightEffectV2 contributes to the lighting accumulation buffer, then
     // LightingEffect composes as: litColor = albedo * totalIllumination.
@@ -2153,6 +2157,7 @@ void main() {
   if (uSpecDisableMasking < 0.5) {
     float specMask = pow(clamp(distInside, 0.0, 1.0), clamp(uSpecMaskGamma, 0.05, 12.0));
     spec *= specMask;
+    spec *= edgeStability;
     float shoreBias = mix(1.0, shore, clamp(uSpecShoreBias, 0.0, 1.0));
     spec *= shoreBias;
   }

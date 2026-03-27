@@ -3,6 +3,7 @@
  * Manages the parameter control panel with performance optimizations
  * @module ui/tweakpane-manager
  */
+import { canPersistSceneDocument, isGmLike } from '../core/gm-parity.js';
 
 import { createLogger } from '../core/log.js';
 import { GradientEditor } from './gradient-editor.js';
@@ -768,7 +769,7 @@ export class TweakpaneManager {
 
     const scene = canvas?.scene ?? null;
     const sceneIsEnabled = !!scene && sceneSettings.isEnabled(scene);
-    const showOnboardingOnly = (game.user?.isGM ?? false) && !sceneIsEnabled;
+    const showOnboardingOnly = (isGmLike() ?? false) && !sceneIsEnabled;
 
     // Always keep core launchers near the top of the UI so they're accessible
     // regardless of which authoring section is currently expanded.
@@ -776,7 +777,7 @@ export class TweakpaneManager {
 
     if (_isDbg) _dlp.begin('tp.buildSections', 'finalize');
     // Build scene setup section (only for GMs)
-    if (game.user.isGM) {
+    if (isGmLike()) {
       if (showOnboardingOnly) this.buildFirstTimeEnableSection();
       else this.buildSceneSetupSection();
     }
@@ -1411,7 +1412,7 @@ export class TweakpaneManager {
       this.tokenMovementDialog?.toggle?.();
     });
 
-    if (game.user?.isGM) {
+    if (isGmLike()) {
       addGridButton('🧱 Levels Authoring', () => {
         const dlg = window.MapShine?.levelsAuthoring;
         if (!dlg) {
@@ -3132,7 +3133,7 @@ export class TweakpaneManager {
   buildParameterControl(effectId, container, paramId, paramDef, updateCallback, savedParams) {
     const effectData = this.effectFolders[effectId];
 
-    if (paramDef?.gmOnly === true && !game.user.isGM) {
+    if (paramDef?.gmOnly === true && !isGmLike()) {
       return;
     }
 
@@ -3520,7 +3521,7 @@ export class TweakpaneManager {
       }
 
       // Apply player overrides (client-local, disable only)
-      if (!game.user.isGM) {
+      if (!isGmLike()) {
         const playerOverrides = sceneSettings.getPlayerOverrides(scene);
         if (playerOverrides[effectId] !== undefined) {
           params.enabled = playerOverrides[effectId];
@@ -3587,7 +3588,7 @@ export class TweakpaneManager {
       const allSettings = sceneSettings.getSceneSettings(scene);
 
       // Save to appropriate tier based on user role and mode
-      if (game.user.isGM) {
+      if (isGmLike()) {
         // GM can save to Map Maker mode or GM override mode
         if (this.settingsMode === 'mapMaker') {
           // Save to Map Maker tier
@@ -3767,7 +3768,7 @@ export class TweakpaneManager {
       return;
     }
 
-    if (!game?.user?.isGM) {
+    if (!canPersistSceneDocument()) {
       ui.notifications?.warn?.('Map Shine: Only the GM can publish scene settings.');
       return;
     }
@@ -4390,7 +4391,7 @@ export class TweakpaneManager {
       return;
     }
 
-    if (!game.user?.isGM) {
+    if (!canPersistSceneDocument()) {
       ui.notifications?.warn?.('Map Shine: Only GMs can paste scene settings');
       return;
     }
@@ -4494,7 +4495,7 @@ export class TweakpaneManager {
       return;
     }
 
-    if (!game.user?.isGM) {
+    if (!isGmLike()) {
       ui.notifications?.warn?.('Map Shine: Only GMs can import effect settings');
       return;
     }
@@ -4830,7 +4831,7 @@ export class TweakpaneManager {
         return;
       }
 
-      if (!game.user.isGM) {
+      if (!isGmLike()) {
         log.error('Only GMs can revert settings');
         return;
       }
@@ -4952,7 +4953,7 @@ export class TweakpaneManager {
     } else if (effectId === 'weather') {
       depState = {
         dynamicEnabled: effectData.params.dynamicEnabled === true,
-        isGM: game.user.isGM
+        isGM: isGmLike()
       };
     } else {
       return; // No dependencies for other effects yet

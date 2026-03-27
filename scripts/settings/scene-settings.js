@@ -3,7 +3,7 @@
  * Handles Map Maker (author) → GM (game master) → Player (end user) settings hierarchy
  * @module settings/scene-settings
  */
-
+import { canPersistSceneDocument, isGmLike } from '../core/gm-parity.js';
 import { createLogger } from '../core/log.js';
 import { createDefaultStyledLoadingScreenConfig } from '../ui/loading-screen/loading-screen-config.js';
 
@@ -487,7 +487,7 @@ export function getEffectiveSettings(scene) {
   const settings = getSceneSettings(scene);
 
   // Determine user mode
-  const isGM = game.user.isGM;
+  const isGM = isGmLike();
   const mode = isGM ? 'gm' : 'player';
 
   // Get player overrides from client settings
@@ -523,7 +523,7 @@ export function getEffectiveSettings(scene) {
  * @public
  */
 export async function saveMapMakerSettings(scene, settings) {
-  if (!game.user.isGM) {
+  if (!canPersistSceneDocument()) {
     throw new Error('Only GMs can save Map Maker settings');
   }
 
@@ -548,7 +548,7 @@ export async function saveMapMakerSettings(scene, settings) {
  * @public
  */
 export async function saveGMSettings(scene, settings) {
-  if (!game.user.isGM) {
+  if (!canPersistSceneDocument()) {
     throw new Error('Only GMs can save GM settings');
   }
 
@@ -572,7 +572,7 @@ export async function saveGMSettings(scene, settings) {
  * @public
  */
 export async function revertToOriginal(scene) {
-  if (!game.user.isGM) {
+  if (!canPersistSceneDocument()) {
     throw new Error('Only GMs can revert settings');
   }
 

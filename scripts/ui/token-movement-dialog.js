@@ -2,6 +2,7 @@
  * @fileoverview Token Movement authoring dialog
  * @module ui/token-movement-dialog
  */
+import { isGmLike } from '../core/gm-parity.js';
 
 import { createLogger } from '../core/log.js';
 
@@ -136,7 +137,7 @@ export class TokenMovementDialog {
 
   _buildUI() {
     const mgr = this._getManager();
-    const canEdit = game.user?.isGM === true && !!mgr;
+    const canEdit = isGmLike() && !!mgr;
 
     const statusFolder = this.pane.addFolder({ title: 'Status', expanded: true });
     this._bindings.managerStatus = statusFolder.addBinding(this.uiState, 'managerStatus', {
@@ -153,7 +154,7 @@ export class TokenMovementDialog {
       options: styleOptions
     }).on('change', (ev) => {
       const manager = this._getManager();
-      if (!manager || !game.user?.isGM) return;
+      if (!manager || !isGmLike()) return;
       manager.setDefaultStyle(ev.value);
       this.uiState.defaultStyle = ev.value;
       this._setFolderTag('style', ev.value);
@@ -167,7 +168,7 @@ export class TokenMovementDialog {
       step: 0.01
     }).on('change', (ev) => {
       const manager = this._getManager();
-      if (!manager || !game.user?.isGM) return;
+      if (!manager || !isGmLike()) return;
       manager.settings.weightedAStarWeight = clamp(asNumber(ev.value, 1.15), 1, 2);
       manager.saveSettingsToGame?.();
     });
@@ -182,7 +183,7 @@ export class TokenMovementDialog {
       }
     }).on('change', (ev) => {
       const manager = this._getManager();
-      if (!manager || !game.user?.isGM) return;
+      if (!manager || !isGmLike()) return;
       manager.setFogPathPolicy(ev.value);
       manager.saveSettingsToGame?.();
     });
@@ -272,7 +273,7 @@ export class TokenMovementDialog {
 
   _patchDoorPolicy(patch) {
     const manager = this._getManager();
-    if (!manager || !game.user?.isGM) return;
+    if (!manager || !isGmLike()) return;
     manager.setDoorPolicy(patch);
     manager.saveSettingsToGame?.();
   }

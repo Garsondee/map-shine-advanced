@@ -7,6 +7,8 @@
 // Static import: keybindings MUST be registered synchronously during the init
 // hook, before any await. Dynamic imports yield control back to Foundry, which
 // then considers the init phase complete and rejects late registrations.
+import { canPersistSceneDocument, isGmLike } from './core/gm-parity.js';
+
 import { registerLevelNavigationKeybindings } from './foundry/level-navigation-keybindings.js';
 
 async function showExperimentalWarningDialog() {
@@ -601,9 +603,10 @@ Hooks.once('init', async function() {
   // Foundry v13+ uses Record<string, SceneControl> with tools as Record<string, SceneControlTool>
   Hooks.on('getSceneControlButtons', (controls) => {
     try {
-      const isGM = game.user?.isGM ?? false;
-      const allowPlayers = game.settings?.get?.('map-shine-advanced', 'allowPlayersToTogglePlayerLightMode') ?? true;
-      const playerToolsVisible = !!(isGM || allowPlayers);
+      const isGM = isGmLike();
+      // Player light toggles are part of core player runtime interaction.
+      // Keep them visible for all users; token ownership still governs writes.
+      const playerToolsVisible = true;
 
       // NOTE: In Foundry v13, accessing ui.controls.tool (and in some builds, game.activeTool)
       // can throw during early UI init because the SceneControls instance is not fully
@@ -847,11 +850,6 @@ Hooks.once('init', async function() {
         visible: playerToolsVisible,
         active: false,
         onChange: async () => {
-          if (!playerToolsVisible) {
-            ui.notifications?.warn?.('Only the GM can change Player Light mode.');
-            return;
-          }
-
           const playerLightEffect = getPlayerLightEffectInstance();
           if (!playerLightEffect?.enabled) {
             ui.notifications?.warn?.('Player Light is disabled for this map.');
@@ -888,11 +886,6 @@ Hooks.once('init', async function() {
         visible: playerToolsVisible,
         active: false,
         onChange: async () => {
-          if (!playerToolsVisible) {
-            ui.notifications?.warn?.('Only the GM can change Player Light mode.');
-            return;
-          }
-
           const playerLightEffect = getPlayerLightEffectInstance();
           if (playerLightEffect && !playerLightEffect.enabled) {
             ui.notifications?.warn?.('Player Light is disabled for this map.');
@@ -929,7 +922,7 @@ Hooks.once('init', async function() {
     try {
       const actor = app?.actor;
       if (!actor || !Array.isArray(buttons)) return;
-      if (!game.user?.isGM && !actor.isOwner) return;
+      if (!isGmLike() && !actor.isOwner) return;
 
       const existing = buttons.some((btn) => btn?.class === 'map-shine-movement-style');
       if (existing) return;
@@ -1108,7 +1101,7 @@ Hooks.once('init', async function() {
         if (!wasInjected && !hasImplied) continue;
 
         const enabled = scene.getFlag(NS, 'enabled');
-        if (enabled !== true) {
+        if (enabled !== true && canPersistSceneDocument()) {
           scene.setFlag(NS, 'enabled', true).catch(() => {});
           const reason = wasInjected ? 'injected during preImport' : 'has implied MSA config';
           console.log(`Map Shine: auto-enabled imported scene "${scene.name}" (${reason})`);

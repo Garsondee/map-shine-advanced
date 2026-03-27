@@ -16,6 +16,7 @@
  *
  * @module scene/light-interaction
  */
+import { isGmLike } from '../core/gm-parity.js';
 
 import { createLogger } from '../core/log.js';
 import Coordinates from '../utils/coordinates.js';
@@ -869,7 +870,7 @@ export class LightInteractionHandler {
   canEditSelectedLight(sel) {
     try {
       if (!sel) return false;
-      if (sel.type === 'enhanced') return !!game.user.isGM;
+      if (sel.type === 'enhanced') return !!isGmLike();
       if (sel.type === 'foundry') {
         const doc = canvas?.scene?.lights?.get?.(sel.id) || canvas?.lighting?.get?.(sel.id)?.document;
         return !!(doc && doc.canUserModify(game.user, 'update'));

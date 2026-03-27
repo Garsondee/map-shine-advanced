@@ -27,6 +27,7 @@ const OVERLAY_THREE_LAYER = 31;
 
 // Minimal layer descriptor matching EffectComposer.RenderLayers.ENVIRONMENTAL.
 const ENVIRONMENTAL_LAYER = { order: 400, name: 'Environmental', requiresDepth: false };
+import { isGmLike } from '../../core/gm-parity.js';
 import { createLogger } from '../../core/log.js';
 import { frameCoordinator } from '../../core/frame-coordinator.js';
 import { VisionSDF } from '../../vision/VisionSDF.js';
@@ -650,7 +651,7 @@ export class FogOfWarEffectV2 {
    */
   diagnose() {
     const fp = this.fogPlane;
-    const isGM = game?.user?.isGM ?? false;
+    const isGM = isGmLike();
     const controlled = canvas?.tokens?.controlled || [];
     const msSelection = window.MapShine?.interactionManager?.selection;
     const info = {
@@ -1910,7 +1911,7 @@ export class FogOfWarEffectV2 {
     const interactionManager = ms?.interactionManager;
     const tokenManager = ms?.tokenManager;
     const selection = interactionManager?.selection;
-    const isGM = game?.user?.isGM ?? false;
+    const isGM = isGmLike();
 
     if (selection && tokenManager?.tokenSprites) {
       const placeables = canvas?.tokens?.placeables || [];
@@ -2407,7 +2408,7 @@ export class FogOfWarEffectV2 {
   }
 
   _shouldBypassFog() {
-    const isGM = game?.user?.isGM;
+    const isGM = isGmLike();
     const fogEnabled = canvas?.scene?.tokenVision ?? false;
 
     if (!fogEnabled) return true;

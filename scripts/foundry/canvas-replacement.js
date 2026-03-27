@@ -3,6 +3,7 @@
  * Uses Libwrapper to intercept and replace Foundry's canvas rendering
  * @module foundry/canvas-replacement
  */
+import { isGmLike } from '../core/gm-parity.js';
 
 import { createLogger } from '../core/log.js';
 import { safeCall, safeCallAsync, safeDispose, Severity } from '../core/safe-call.js';
@@ -327,7 +328,7 @@ async function _cleanupMissingTextureReferencesForActiveScene(scene, { reason = 
   try {
     if (!scene?.id) return;
     if (_msaMissingTextureCleanupPromptedSceneIds.has(scene.id)) return;
-    if (!(game?.user?.isGM ?? false)) return;
+    if (!isGmLike()) return;
 
     // Only act if we have confirmed missing URLs for this session.
     const missing = Array.from(_msaConfirmedMissingTextureUrls);
@@ -3288,7 +3289,7 @@ async function onUpdateScene(scene, changes, _options, _userId) {
   const echoOnly = _msaMapShineFlagDiffIsEchoOnly(changes);
   const skipAuthoritativeMsaResync =
     localAuthor
-    || (game?.user?.isGM === true && echoOnly && performance.now() < guardUntil);
+    || (isGmLike() && echoOnly && performance.now() < guardUntil);
 
   // Weather authority sync (GM flags replicated to all clients)
   safeCall(() => {
@@ -3531,7 +3532,7 @@ async function onCanvasReady(canvas) {
   //
   // This is GM-only and prompts once per scene per session.
   try {
-    if ((game?.user?.isGM ?? false) && !_msaMissingTextureCleanupPromptedSceneIds.has(scene.id)) {
+    if (isGmLike() && !_msaMissingTextureCleanupPromptedSceneIds.has(scene.id)) {
       const missingCandidates = Array.from(_msaMissingTextureUrls);
       if (missingCandidates.length > 0) {
         // Confirm in the background so we only clean true 404/410 misses.
@@ -5756,7 +5757,7 @@ async function createThreeCanvas(scene) {
         }
 
         // Levels Authoring Dialog (GM only) ->-> required to validate tile floor assignments.
-        if (!levelsAuthoring && game.user?.isGM) {
+        if (!levelsAuthoring && isGmLike()) {
           const useV2 = sceneSettings.getUseLevelsEditorV2?.() !== false;
           levelsAuthoring = useV2 ? new LevelsEditorV2() : new LevelsAuthoringDialog();
           levelsAuthoring.initialize();
@@ -7308,7 +7309,7 @@ export async function resetScene(options = undefined) {
 }
 
 function applyMapMakerFogOverride() {
-  if (!game?.user?.isGM) return;
+  if (!isGmLike()) return;
   if (!canvas?.ready) return;
 
   // Capture prior state once per Map Maker entry.

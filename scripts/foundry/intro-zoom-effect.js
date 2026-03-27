@@ -18,6 +18,7 @@
  *
  * @module foundry/intro-zoom-effect
  */
+import { isGmLike } from '../core/gm-parity.js';
 
 import { createLogger } from '../core/log.js';
 
@@ -260,7 +261,7 @@ export class IntroZoomEffect {
       const controlled = canvas.tokens.controlled || [];
       if (controlled.length) return controlled;
 
-      if (game?.user?.isGM === true) {
+      if (isGmLike()) {
         const visible = placeables.filter((t) => t?.document?.hidden !== true);
         return visible.length ? visible : placeables;
       }

@@ -82,6 +82,199 @@ const textureCache = new Map();
 
 /** Negative result cache to prevent repeated 404 probing for masks that don't exist */
 const _probeMaskNegativeCache = new Map();
+/** Structured missing-mask diagnostics cache by bundle key */
+const _missingMaskDiagnostics = new Map();
+/** Failed mask URL cache to suppress repeated 404 retries */
+const _failedMaskUrlCache = new Set();
+
+function _normalizeFileList(files) {
+  const out = [];
+  const seen = new Set();
+  for (const f of Array.isArray(files) ? files : []) {
+    if (typeof f !== 'string') continue;
+    const s = f.trim();
+    if (!s || seen.has(s)) continue;
+    seen.add(s);
+    out.push(s);
+  }
+  return out;
+}
+
+async function _discoverFilesViaFilePicker(basePath) {
+  // Extract directory path from base path
+  const lastSlash = basePath.lastIndexOf('/');
+  const directory = lastSlash >= 0 ? basePath.substring(0, lastSlash + 1) : '';
+  if (!directory) return [];
+
+  const filePickerImpl = globalThis.foundry?.applications?.apps?.FilePicker?.implementation;
+  const filePicker = filePickerImpl ?? globalThis.FilePicker;
+  if (!filePicker) return [];
+
+  const tried = new Set();
+  const dirsToTry = [];
+  const pushDir = (d) => {
+    if (typeof d !== 'string') return;
+    const trimmed = d.trim();
+    if (!trimmed || tried.has(trimmed)) return;
+    tried.add(trimmed);
+    dirsToTry.push(trimmed);
+  };
+
+  pushDir(directory);
+  try {
+    if (directory.includes('%')) pushDir(decodeURIComponent(directory));
+  } catch (_) {}
+  try {
+    if (directory.includes(' ')) pushDir(encodeURI(directory));
+  } catch (_) {}
+
+  const buildBrowseCandidates = (dir) => {
+    const d = String(dir || '').trim().replace(/^\/+/, '');
+    const lower = d.toLowerCase();
+    if (lower.startsWith('modules/')) {
+      const stripped = d.replace(/^modules\//i, '');
+      return [['public', d], ['public', stripped], ['data', d]];
+    }
+    if (lower.startsWith('systems/')) {
+      const stripped = d.replace(/^systems\//i, '');
+      return [['public', d], ['public', stripped], ['data', d]];
+    }
+    if (lower.startsWith('worlds/')) {
+      const stripped = d.replace(/^worlds\//i, '');
+      return [['data', d], ['data', stripped], ['public', d]];
+    }
+    return [['public', d], ['data', d], ['public', d.replace(/^\/+/, '')]];
+  };
+
+  const allFiles = [];
+  for (const dir of dirsToTry) {
+    try {
+      const candidates = buildBrowseCandidates(dir);
+      for (const [source, targetDir] of candidates) {
+        let result = null;
+        try {
+          result = await filePicker.browse(source, targetDir);
+        } catch (_) {
+          result = null;
+        }
+        if (!result || !Array.isArray(result.files) || result.files.length === 0) continue;
+        for (const f of result.files) {
+          if (!allFiles.includes(f)) allFiles.push(f);
+        }
+        // First successful source is authoritative for this dir.
+        break;
+      }
+    } catch (_) {}
+  }
+  return _normalizeFileList(allFiles);
+}
+
+function _extractExtension(path) {
+  const src = String(path || '');
+  const noQuery = src.split('?')[0];
+  const dot = noQuery.lastIndexOf('.');
+  if (dot < 0) return '';
+  return noQuery.slice(dot + 1).toLowerCase();
+}
+
+function _buildBasePathVariants(basePath) {
+  const src = String(basePath || '').trim();
+  if (!src) return [];
+  const out = [];
+  const seen = new Set();
+  const push = (v) => {
+    const s = String(v || '').trim();
+    if (!s || seen.has(s)) return;
+    seen.add(s);
+    out.push(s);
+  };
+  push(src);
+  push(src.toLowerCase());
+  const slash = src.lastIndexOf('/');
+  if (slash >= 0) {
+    const dir = src.slice(0, slash + 1);
+    const name = src.slice(slash + 1);
+    if (name) push(`${dir}${name.toLowerCase()}`);
+  }
+  return out;
+}
+
+function _buildSuffixVariants(suffix) {
+  const src = String(suffix || '').trim();
+  if (!src) return [];
+  const out = [];
+  const seen = new Set();
+  const push = (v) => {
+    const s = String(v || '').trim();
+    if (!s || seen.has(s)) return;
+    seen.add(s);
+    out.push(s);
+  };
+  push(src);
+  push(src.toLowerCase());
+  return out;
+}
+
+function _buildExtensionVariants(preferredExt) {
+  const out = [];
+  const seen = new Set();
+  const push = (v) => {
+    const s = String(v || '').toLowerCase().replace(/^\./, '');
+    if (!s || seen.has(s)) return;
+    seen.add(s);
+    out.push(s);
+  };
+  push(preferredExt);
+  push('webp');
+  push('png');
+  push('jpg');
+  push('jpeg');
+  return out;
+}
+
+export function buildMaskManifest(basePath, options = {}) {
+  const src = String(basePath || '').trim();
+  if (!src) return {};
+  const ext = String(options?.extension || _extractExtension(canvas?.scene?.background?.src) || 'webp')
+    .toLowerCase()
+    .replace(/^\./, '');
+  const baseVariants = _buildBasePathVariants(src);
+  const extVariants = _buildExtensionVariants(ext);
+  const requestedMaskIds = (() => {
+    if (!Array.isArray(options?.maskIds) || options.maskIds.length === 0) return null;
+    return new Set(options.maskIds.map((v) => String(v || '').toLowerCase()).filter(Boolean));
+  })();
+  const manifest = {};
+  for (const [maskId, def] of Object.entries(EFFECT_MASKS)) {
+    if (!def?.suffix) continue;
+    if (requestedMaskIds && !requestedMaskIds.has(String(maskId).toLowerCase())) continue;
+    const suffixVariants = _buildSuffixVariants(def.suffix);
+    const candidates = [];
+    for (const b of baseVariants) {
+      for (const s of suffixVariants) {
+        for (const e of extVariants) {
+          const c = normalizePath(`${b}${s}.${e}`);
+          if (!candidates.includes(c)) candidates.push(c);
+        }
+      }
+    }
+    manifest[def.suffix] = candidates;
+  }
+  return manifest;
+}
+
+function _resolveMaskCandidates(maskManifest, maskSuffix) {
+  if (!maskManifest || typeof maskManifest !== 'object') return null;
+  const raw = maskManifest[maskSuffix];
+  if (Array.isArray(raw)) {
+    const out = raw
+      .map((v) => (typeof v === 'string' ? normalizePath(v.trim()) : ''))
+      .filter(Boolean);
+    return out.length ? out : null;
+  }
+  if (typeof raw === 'string' && raw.trim()) return [normalizePath(raw.trim())];
+  return null;
+}
 
 /**
  * Load a complete asset bundle for a scene
@@ -99,7 +292,11 @@ export async function loadAssetBundle(basePath, onProgress = null, options = {})
     skipBaseTexture = false,
     suppressProbeErrors = false,
     bypassCache = false,
-    skipMaskIds = null
+    skipMaskIds = null,
+    maskManifest = null,
+    maskExtension = null,
+    maskIds = null,
+    cacheKeySuffix = ''
   } = options || {};
 
   log.info(`Loading asset bundle: ${basePath}${skipBaseTexture ? ' (masks only)' : ''}`);
@@ -126,7 +323,8 @@ export async function loadAssetBundle(basePath, onProgress = null, options = {})
   try {
     // Check cache first
     const _skipKey = _skipMaskSet ? Array.from(_skipMaskSet).sort().join(',') : '';
-    const cacheKey = `${basePath}::${skipBaseTexture ? 'masks' : 'full'}::skip=${_skipKey}`;
+    const ckSuffix = String(cacheKeySuffix || 'default');
+    const cacheKey = `${basePath}::${skipBaseTexture ? 'masks' : 'full'}::skip=${_skipKey}::${ckSuffix}`;
     if (!bypassCache && assetCache.has(cacheKey)) {
       const cached = assetCache.get(cacheKey);
       const cachedMaskCount = Array.isArray(cached?.masks) ? cached.masks.length : 0;
@@ -144,6 +342,10 @@ export async function loadAssetBundle(basePath, onProgress = null, options = {})
         );
 
         const missingCritical = Array.from(CRITICAL_MASK_IDS).filter((id) => !cachedIds.has(id));
+        // Player clients often cannot browse directories reliably on hosted setups.
+        // In that mode, a missing "critical" mask (like _Specular) may be a real
+        // map condition or a permission-limited discovery artifact. Do not force
+        // perpetual cache invalidation for non-GM users.
         if (missingCritical.length === 0) {
           // Validate that cached textures still have valid image data.
           // After sceneComposer.dispose(), the GPU backing is removed but the JS
@@ -187,7 +389,17 @@ export async function loadAssetBundle(basePath, onProgress = null, options = {})
           missingCritical
         });
       } else {
-        if (_isDbg) _dlp.addDiagnostic('Asset Cache', { [`cache.${_shortBase}`]: `MISS (0 masks in cache)` });
+        // Trust empty cached bundles too. Without this, player clients with
+        // genuinely missing masks will re-attempt every initialize and spam 404s.
+        _cacheHits++;
+        if (_isDbg) _dlp.addDiagnostic('Asset Cache', { [`cache.${_shortBase}`]: 'HIT (0 masks cached)' });
+        return {
+          success: true,
+          bundle: cached,
+          warnings: [],
+          error: null,
+          cacheHit: true
+        };
       }
     } else {
       if (_isDbg) _dlp.addDiagnostic('Asset Cache', { [`cache.${_shortBase}`]: bypassCache ? 'BYPASSED' : 'MISS (no entry)' });
@@ -211,42 +423,20 @@ export async function loadAssetBundle(basePath, onProgress = null, options = {})
       if (onProgress) onProgress(1, Object.keys(EFFECT_MASKS).length + 1, 'Base texture');
     }
 
-    // Step 2: Discover available files in directory using FilePicker
-    let availableFiles = [];
-    if (doLoadProfile) {
-      try {
-        lp.begin(`assetLoader.discoverAvailableFiles:${spanToken}`, { basePath });
-      } catch (e) {
-      }
-    }
-    if (_isDbg) _dlp.begin(`al.discover[${_shortBase}]`, 'texture');
-    try {
-      availableFiles = await discoverAvailableFiles(basePath);
-    } finally {
-      if (_isDbg) _dlp.end(`al.discover[${_shortBase}]`, { files: availableFiles?.length ?? 0 });
-      if (doLoadProfile) {
-        try {
-          lp.end(`assetLoader.discoverAvailableFiles:${spanToken}`, { files: availableFiles?.length ?? 0 });
-        } catch (e) {
-        }
-      }
-    }
-    log.debug(`Discovered ${availableFiles.length} files in directory`);
+    // Step 2: Build a single authoritative exact-URL manifest.
+    const effectiveManifest = (maskManifest && typeof maskManifest === 'object')
+      ? maskManifest
+      : buildMaskManifest(basePath, { extension: maskExtension, maskIds });
 
     // Step 3: Load masks in parallel with concurrency limit
     const semaphore = new Semaphore(4);
-    const maskEntries = Object.entries(EFFECT_MASKS);
+    const manifestSuffixSet = new Set(Object.keys(effectiveManifest || {}));
+    const maskEntries = Object.entries(EFFECT_MASKS).filter(([, def]) => manifestSuffixSet.has(def?.suffix));
     let loaded = skipBaseTexture ? 0 : 1;
     const totalMasks = maskEntries.length;
 
-    // When FilePicker returned no files, fall back to direct URL probing.
-    // This is common for player clients that lack FilePicker browse permissions.
-    const useDirectProbe = availableFiles.length === 0;
-    if (useDirectProbe) {
-      log.info('FilePicker returned no files — falling back to direct URL probing');
-    }
-
-    if (_isDbg) _dlp.begin(`al.loadMasks[${_shortBase}]`, 'texture', { totalMasks, useDirectProbe });
+    if (_isDbg) _dlp.begin(`al.loadMasks[${_shortBase}]`, 'texture', { totalMasks });
+    const unresolvedRequired = [];
     const maskPromises = maskEntries.map(async ([maskId, maskDef]) => {
       await semaphore.acquire();
       const _maskDbgId = `al.mask.${maskId}[${_shortBase}]`;
@@ -261,31 +451,10 @@ export async function loadAssetBundle(basePath, onProgress = null, options = {})
           return null;
         }
 
-        // Resolve the mask file path: from FilePicker results or via direct URL probe.
-        // Robustness: if FilePicker returns some files but misses a CRITICAL mask
-        // (outdoors/tree/bush/specular), fall back to direct probing anyway. This
-        // prevents stale/partial directory listings from permanently hiding
-        // authored masks.
-        let maskFile = null;
-        if (useDirectProbe) {
-          // When FilePicker returns no files (hosted server, player permissions, etc.),
-          // ONLY probe for CRITICAL masks. Optional masks like _Bush, _Tree, _Water
-          // should be skipped to avoid 404 spam.
-          if (CRITICAL_MASK_IDS.has(String(maskId).toLowerCase())) {
-            maskFile = await probeMaskUrl(basePath, maskDef.suffix);
-          } else {
-            maskFile = null; // Skip optional masks when FilePicker unavailable
-          }
-        } else {
-          maskFile = findMaskInFiles(availableFiles, basePath, maskDef.suffix);
-          if (!maskFile && CRITICAL_MASK_IDS.has(String(maskId).toLowerCase())) {
-            try {
-              maskFile = await probeMaskUrl(basePath, maskDef.suffix);
-            } catch (_) {
-              maskFile = null;
-            }
-          }
-        }
+        // Single runtime path for all users: exact URL from manifest only.
+        const maskCandidates = _resolveMaskCandidates(effectiveManifest, maskDef.suffix) || [];
+        const candidateList = maskCandidates.filter((u) => !_failedMaskUrlCache.has(u));
+        const maskFile = candidateList.length ? candidateList[0] : null;
 
         // Fast-path: if an optional water mask is not present, skip the loading step entirely
         // so we don't stall on a map that doesn't use water at all.
@@ -305,40 +474,42 @@ export async function loadAssetBundle(basePath, onProgress = null, options = {})
         let maskTexture = null;
         let resolvedMaskPath = null;
         if (maskFile) {
-          resolvedMaskPath = maskFile;
-          try {
-            const spanId = doLoadProfile ? `assetLoader.maskTexture:${spanToken}:${maskId}` : null;
-            if (doLoadProfile) {
-              try {
-                lp.begin(spanId, { maskId, path: maskFile, direct: true });
-              } catch (e) {
-              }
-            }
+          for (const candidate of candidateList) {
+            resolvedMaskPath = candidate;
             try {
-              // Use direct loading (fetch + createImageBitmap) for off-thread decode.
-              // Bypasses PIXI, eliminates canvas clone, downscales large masks, and
-              // applies final texture settings (colorSpace, mipmaps, flipY) in one pass.
-              const isColorTexture = ['bush', 'tree'].includes(maskId);
-              const isVisualDetail = VISUAL_DETAIL_MASKS.has(maskId);
-              // Visual-detail masks (specular, normal, etc.) need full resolution
-              // to avoid visible quality loss on high-frequency patterns.
-              const maskMaxSize = (isColorTexture || isVisualDetail) ? VISUAL_MASK_MAX_SIZE : undefined;
-              maskTexture = await loadMaskTextureDirect(maskFile, { isColorTexture, maxSize: maskMaxSize });
-            } finally {
+              const spanId = doLoadProfile ? `assetLoader.maskTexture:${spanToken}:${maskId}` : null;
               if (doLoadProfile) {
                 try {
-                  lp.end(spanId, { ok: !!maskTexture });
+                  lp.begin(spanId, { maskId, path: candidate, direct: true });
                 } catch (e) {
                 }
               }
+              try {
+                // Use direct loading (fetch + createImageBitmap) for off-thread decode.
+                // Bypasses PIXI, eliminates canvas clone, downscales large masks, and
+                // applies final texture settings (colorSpace, mipmaps, flipY) in one pass.
+                const isColorTexture = ['bush', 'tree'].includes(maskId);
+                const isVisualDetail = VISUAL_DETAIL_MASKS.has(maskId);
+                // Visual-detail masks (specular, normal, etc.) need full resolution
+                // to avoid visible quality loss on high-frequency patterns.
+                const maskMaxSize = (isColorTexture || isVisualDetail) ? VISUAL_MASK_MAX_SIZE : undefined;
+                maskTexture = await loadMaskTextureDirect(candidate, { isColorTexture, maxSize: maskMaxSize });
+                break;
+              } finally {
+                if (doLoadProfile) {
+                  try {
+                    lp.end(spanId, { ok: !!maskTexture });
+                  } catch (e) {
+                  }
+                }
+              }
+            } catch (e) {
+              _failedMaskUrlCache.add(candidate);
+              maskTexture = null;
             }
-          } catch (e) {
-            const msg = `Failed to load mask: ${maskId} (${maskDef.suffix}) from ${maskFile}`;
-            if (maskDef.required) {
-              throw new Error(msg);
-            }
-            warnings.push(msg);
-            maskTexture = null;
+          }
+          if (!maskTexture && maskDef.required) {
+            throw new Error(`Failed to load required mask: ${maskId} (${maskDef.suffix})`);
           }
         }
 
@@ -359,6 +530,7 @@ export async function loadAssetBundle(basePath, onProgress = null, options = {})
             required: maskDef.required
           };
         } else if (maskDef.required) {
+          unresolvedRequired.push(maskId);
           warnings.push(`Required mask missing: ${maskId} (${maskDef.suffix})`);
         }
         if (_isDbg && !maskTexture) _dlp.end(_maskDbgId, { result: maskFile ? 'load failed' : 'not found' });
@@ -384,6 +556,17 @@ export async function loadAssetBundle(basePath, onProgress = null, options = {})
 
     // Step 4: Apply intelligent fallbacks
     applyIntelligentFallbacks(masks, warnings);
+
+    if (unresolvedRequired.length > 0) {
+      _missingMaskDiagnostics.set(cacheKey, {
+        basePath,
+        unresolvedRequired,
+        manifestKeys: Object.keys(effectiveManifest || {})
+      });
+      log.error('Required masks unresolved from manifest', { basePath, unresolvedRequired });
+    } else {
+      _missingMaskDiagnostics.delete(cacheKey);
+    }
 
     // Step 5: Create bundle
     /** @type {MapAssetBundle} */
@@ -475,34 +658,44 @@ async function probeMaskTexture(basePath, suffix, suppressProbeErrors = false) {
  */
 export async function probeMaskFile(basePath, suffix, options = {}) {
   void options;
-  
-  // Check negative cache first to avoid repeated 404 spam
+
   const cacheKey = `${basePath}::${suffix}`;
   if (_probeMaskNegativeCache.has(cacheKey)) {
-    const cached = _probeMaskNegativeCache.get(cacheKey);
-    // Return cached result (null for negative, or {path} for positive)
-    return cached;
+    return _probeMaskNegativeCache.get(cacheKey);
   }
-  
+
   try {
-    const availableFiles = await discoverAvailableFiles(basePath);
-    if (!Array.isArray(availableFiles) || availableFiles.length === 0) {
-      // FilePicker returned nothing (player client, permissions issue, hosted server, etc.).
-      // All masks probed via this function are optional. Rather than spamming HEAD requests
-      // for every format (causing 404 console noise), accept that the mask isn't available.
-      // IMPORTANT: Do NOT negative-cache this outcome. An empty file list can mean
-      // the client cannot browse the directory (permissions) or the FilePicker
-      // backend returned incomplete data transiently. If we cache null here,
-      // mask discovery can become permanently broken for the session.
+    const availableFiles = await discoverMaskDirectoryFiles(basePath);
+    const hasListing = Array.isArray(availableFiles) && availableFiles.length > 0;
+
+    let resolvedPath = null;
+    if (hasListing) {
+      resolvedPath = findMaskInFiles(availableFiles, basePath, suffix);
+    }
+
+    if (!resolvedPath) {
+      const scene = typeof canvas !== 'undefined' ? canvas?.scene : null;
+      resolvedPath = _pathFromSceneMaskTextureManifest(scene, basePath, suffix);
+    }
+    // HEAD convention probes only when browse returned nothing. If we have a file list,
+    // missing optional masks are authoritative (do not exist on disk for this map).
+    if (!resolvedPath && !hasListing) {
+      resolvedPath = await _probeMaskPathByConvention(basePath, suffix);
+    }
+
+    if (resolvedPath) {
+      const result = { path: resolvedPath };
+      _probeMaskNegativeCache.set(cacheKey, result);
+      return result;
+    }
+
+    if (!hasListing) {
+      // Empty browse may be transient; do not negative-cache so the next probe can retry.
       return null;
     }
-    const maskFile = findMaskInFiles(availableFiles, basePath, suffix);
-    const result = maskFile ? { path: maskFile } : null;
-    // Cache the result (positive or negative)
-    _probeMaskNegativeCache.set(cacheKey, result);
-    return result;
+    _probeMaskNegativeCache.set(cacheKey, null);
+    return null;
   } catch (_) {
-    // Cache negative result on error
     _probeMaskNegativeCache.set(cacheKey, null);
     return null;
   }
@@ -513,9 +706,9 @@ export async function probeMaskFile(basePath, suffix, options = {}) {
  * Uses Foundry's FilePicker API to avoid 404 spam
  * @param {string} basePath - Base path without extension (e.g., 'modules/mymodule/assets/map')
  * @returns {Promise<string[]>} Array of available file paths
- * @private
+ * @public
  */
-async function discoverAvailableFiles(basePath) {
+export async function discoverMaskDirectoryFiles(basePath) {
   const lp = globalLoadingProfiler;
   const doLoadProfile = !!lp?.enabled;
   const spanToken = doLoadProfile ? (++_lpSeq) : 0;
@@ -526,79 +719,14 @@ async function discoverAvailableFiles(basePath) {
     }
   }
   try {
-    // Extract directory path from base path
-    const lastSlash = basePath.lastIndexOf('/');
-    const directory = lastSlash >= 0 ? basePath.substring(0, lastSlash + 1) : '';
-    
-    if (!directory) {
-      log.warn('Could not determine directory from basePath:', basePath);
-      return [];
+    const normalized = await _discoverFilesViaFilePicker(basePath);
+    if (normalized.length) {
+      log.debug(`FilePicker found ${normalized.length} files for ${basePath}`);
+      return normalized;
     }
 
-    // Use Foundry's FilePicker to browse the directory
-    // This returns the actual files that exist
-    const filePickerImpl = globalThis.foundry?.applications?.apps?.FilePicker?.implementation;
-    const filePicker = filePickerImpl ?? globalThis.FilePicker;
-    if (!filePicker) {
-      throw new Error('FilePicker is not available');
-    }
-    const tried = new Set();
-    const dirsToTry = [];
-    const pushDir = (d) => {
-      if (typeof d !== 'string') return;
-      const trimmed = d.trim();
-      if (!trimmed) return;
-      if (tried.has(trimmed)) return;
-      tried.add(trimmed);
-      dirsToTry.push(trimmed);
-    };
-
-    pushDir(directory);
-    try {
-      if (directory.includes('%')) pushDir(decodeURIComponent(directory));
-    } catch (e) {
-    }
-    try {
-      if (directory.includes(' ')) pushDir(encodeURI(directory));
-    } catch (e) {
-    }
-
-    const allFiles = [];
-    let browseIndex = 0;
-    for (const dir of dirsToTry) {
-      try {
-        const spanId = doLoadProfile ? `assetLoader.filePicker.browse:${spanToken}:${browseIndex++}` : null;
-        if (doLoadProfile) {
-          try {
-            lp.begin(spanId, { dir });
-          } catch (e) {
-          }
-        }
-        const result = await filePicker.browse('data', dir);
-        if (doLoadProfile) {
-          try {
-            lp.end(spanId, { files: result?.files?.length ?? 0 });
-          } catch (e) {
-          }
-        }
-        if (!result || !result.files) {
-          continue;
-        }
-        for (const f of result.files) {
-          if (!allFiles.includes(f)) allFiles.push(f);
-        }
-      } catch (e) {
-        // Try next directory variant
-      }
-    }
-
-    if (!allFiles.length) {
-      log.warn('FilePicker returned no files for directory:', directory);
-      return [];
-    }
-
-    log.debug(`FilePicker found ${allFiles.length} files in ${directory}`);
-    return allFiles;
+    log.warn('FilePicker returned no files for basePath:', basePath);
+    return [];
     
   } catch (error) {
     log.warn('Failed to discover files via FilePicker:', error.message);
@@ -778,43 +906,6 @@ async function loadMaskTextureDirect(url, opts = {}) {
 }
 
 /**
- * Probe known suffix+format URLs directly when FilePicker browse returned no files.
- * This is common for player clients that lack FilePicker access.
- * Uses lightweight HEAD requests to avoid downloading full images just to check existence.
- * All formats are probed in parallel via Promise.any for minimal latency; the first
- * successful response wins (respecting SUPPORTED_FORMATS priority via a small delay trick).
- *
- * @param {string} basePath - Base path without extension (e.g., 'worlds/myworld/maps/BattleMap')
- * @param {string} suffix - Mask suffix (e.g., '_Specular')
- * @returns {Promise<string|null>} URL of the first format that exists, or null
- * @private
- */
-async function probeMaskUrl(basePath, suffix) {
-  // Build parallel probes — all formats fire simultaneously
-  const probes = SUPPORTED_FORMATS.map(async (format) => {
-    const url = normalizePath(`${basePath}${suffix}.${format}`);
-    try {
-      const resp = await fetch(url, { method: 'HEAD' });
-      if (!resp.ok) throw new Error(`${resp.status}`);
-      return url;
-    } catch (e) {
-      // Suppress console spam - 404s are expected for optional masks
-      throw e;
-    }
-  });
-
-  try {
-    // Promise.any resolves with the first success
-    const url = await Promise.any(probes);
-    log.debug(`Direct probe hit: ${url}`);
-    return url;
-  } catch (_) {
-    // All probes failed — mask doesn't exist in any format
-    return null;
-  }
-}
-
-/**
  * Find a mask file with the given suffix in the list of available files
  * @param {string[]} availableFiles - List of available file paths from FilePicker
  * @param {string} basePath - Base path without extension
@@ -822,6 +913,69 @@ async function probeMaskUrl(basePath, suffix) {
  * @returns {string|null} Full path to the mask file, or null if not found
  * @private
  */
+/** Scene flag written by GM during mask discovery — same schema as mask-manifest-flags.js */
+const MASK_TEX_MANIFEST_NS = 'map-shine-advanced';
+const MASK_TEX_MANIFEST_KEY = 'maskTextureManifest';
+const MASK_TEX_MANIFEST_VER = 1;
+
+function _normMaskBasePath(p) {
+  return String(p || '').trim().replace(/\\/g, '/');
+}
+
+function _maskIdForSuffix(suffix) {
+  const s = String(suffix || '');
+  for (const [id, def] of Object.entries(EFFECT_MASKS)) {
+    if (def?.suffix === s) return id;
+  }
+  return null;
+}
+
+/**
+ * When FilePicker returns no directory listing (common for players), use paths
+ * the GM already persisted on the Scene so clients can load without browsing.
+ * @param {Scene|null} scene
+ * @param {string} basePath
+ * @param {string} suffix
+ * @returns {string|null}
+ */
+function _pathFromSceneMaskTextureManifest(scene, basePath, suffix) {
+  try {
+    const raw = scene?.getFlag?.(MASK_TEX_MANIFEST_NS, MASK_TEX_MANIFEST_KEY);
+    if (!raw || typeof raw !== 'object') return null;
+    if (Number(raw.version) !== MASK_TEX_MANIFEST_VER) return null;
+    if (typeof raw.basePath !== 'string' || !raw.pathsByMaskId || typeof raw.pathsByMaskId !== 'object') {
+      return null;
+    }
+    if (_normMaskBasePath(raw.basePath) !== _normMaskBasePath(basePath)) return null;
+    const maskId = _maskIdForSuffix(suffix);
+    if (!maskId) return null;
+    const pb = raw.pathsByMaskId;
+    const p = pb[maskId] || pb[String(maskId).toLowerCase()];
+    if (typeof p === 'string' && p.trim()) return p.trim();
+  } catch (_) {}
+  return null;
+}
+
+/**
+ * Last resort when FilePicker returns **no** directory listing (typical player clients).
+ * Not used when a listing exists — optional masks that are absent from the listing
+ * must not trigger HEAD probes (404 noise for GMs).
+ * @param {string} basePath
+ * @param {string} suffix
+ * @returns {Promise<string|null>}
+ */
+async function _probeMaskPathByConvention(basePath, suffix) {
+  for (const format of SUPPORTED_FORMATS) {
+    const candidate = `${basePath}${suffix}.${format}`;
+    const u = normalizePath(candidate);
+    try {
+      const r = await fetch(u, { method: 'HEAD', cache: 'force-cache' });
+      if (r.ok) return candidate;
+    } catch (_) {}
+  }
+  return null;
+}
+
 function findMaskInFiles(availableFiles, basePath, suffix) {
   // Extract base filename (without directory)
   const lastSlash = basePath.lastIndexOf('/');
@@ -854,6 +1008,31 @@ function findMaskInFiles(availableFiles, basePath, suffix) {
   }
   
   return null;
+}
+
+/**
+ * Resolve mask paths from a GM FilePicker listing (authoritative filenames on disk).
+ * @param {string[]} availableFiles
+ * @param {string} basePath
+ * @param {string[]|null} maskIds - EFFECT_MASKS keys; null means all keys
+ * @returns {Record<string, string>} maskId → full Foundry path
+ * @public
+ */
+export function resolveMaskPathsFromListing(availableFiles, basePath, maskIds) {
+  const ids =
+    maskIds == null
+      ? Object.keys(EFFECT_MASKS)
+      : Array.isArray(maskIds)
+        ? maskIds
+        : [];
+  const out = {};
+  for (const id of ids) {
+    const def = EFFECT_MASKS[id];
+    if (!def?.suffix) continue;
+    const p = findMaskInFiles(availableFiles, basePath, def.suffix);
+    if (p) out[id] = p;
+  }
+  return out;
 }
 
 /**
@@ -1145,6 +1324,9 @@ export function clearCache() {
 
   assetCache.clear();
   textureCache.clear();
+  _probeMaskNegativeCache.clear();
+  _failedMaskUrlCache.clear();
+  _missingMaskDiagnostics.clear();
   log.info('Asset cache cleared');
 }
 

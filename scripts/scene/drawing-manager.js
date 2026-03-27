@@ -3,6 +3,8 @@
  * Handles text and shape drawings for Gameplay Mode visibility
  * @module scene/drawing-manager
  */
+import { isGmLike } from '../core/gm-parity.js';
+
 
 import { createLogger } from '../core/log.js';
 import { OVERLAY_THREE_LAYER, GLOBAL_SCENE_LAYER } from '../core/render-layers.js';
@@ -129,7 +131,7 @@ export class DrawingManager {
       if (placeable && ('isVisible' in placeable) && !placeable.isVisible) return false;
 
       if (!placeable) {
-        const isGM = game.user?.isGM;
+        const isGM = isGmLike();
         const isAuthor = doc.isAuthor;
         const hidden = doc.hidden;
         if (hidden && !isAuthor && !isGM) return false;

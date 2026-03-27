@@ -3,7 +3,6 @@
  * Provides backwards compatibility with v1.x map-shine flag data
  * @module scene/map-points-manager
  */
-
 import { createLogger } from '../core/log.js';
 import Coordinates from '../utils/coordinates.js';
 

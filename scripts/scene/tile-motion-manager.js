@@ -6,7 +6,6 @@
  *
  * @module scene/tile-motion-manager
  */
-
 import { createLogger } from '../core/log.js';
 
 const log = createLogger('TileMotionManager');

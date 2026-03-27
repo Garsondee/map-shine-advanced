@@ -25,6 +25,8 @@
  *
  * @module vision/VisibilityController
  */
+import { isGmLike } from '../core/gm-parity.js';
+
 
 import { createLogger } from '../core/log.js';
 import { getTokenRenderingMode, TOKEN_RENDERING_MODES } from '../settings/scene-settings.js';
@@ -341,7 +343,7 @@ export class VisibilityController {
       if (t.document?.id) placeableMap.set(t.document.id, t);
     }
 
-    const isGM = game?.user?.isGM ?? false;
+    const isGM = isGmLike();
 
     for (const [tokenId, spriteData] of this.tokenManager.tokenSprites) {
       const sprite = spriteData?.sprite;
@@ -376,9 +378,20 @@ export class VisibilityController {
           ? this._identifyDetectionFilter(foundryToken)
           : null;
       } catch (e) {
-        // If isVisible throws (e.g. vision not ready), fall back:
-        // GM sees everything, players see nothing until vision is ready.
-        visible = isGM;
+        // If isVisible throws (e.g. vision not ready), fail-soft for players:
+        // prefer prior state, then owner/control visibility. Avoids a hard
+        // "players see nothing" collapse during startup races.
+        const prior = this.detectionState.get(tokenId)?.visible;
+        if (typeof prior === 'boolean') {
+          visible = prior;
+        } else {
+          visible = !!(
+            isGM
+            || foundryToken?.controlled
+            || foundryToken?.isOwner
+            || foundryToken?.document?.isOwner
+          );
+        }
       }
 
       // Level-based filtering: hide tokens that are above the current level.

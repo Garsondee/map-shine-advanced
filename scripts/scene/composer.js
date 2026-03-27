@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @fileoverview Scene composer - creates 2.5D scene from battlemap assets
  * Handles scene setup, camera positioning, and grid alignment
  * @module scene/composer
@@ -12,6 +12,12 @@ import { debugLoadingProfiler } from '../core/debug-loading-profiler.js';
 import { isTileOverhead } from './tile-manager.js';
 import { isLevelsEnabledForScene, tileHasLevelsRange, readTileLevelsFlags, readSceneLevelsFlag } from '../foundry/levels-scene-flags.js';
 import { GpuSceneMaskCompositor } from '../masks/GpuSceneMaskCompositor.js';
+import * as sceneSettings from '../settings/scene-settings.js';
+import {
+  collectEnabledMaskIds,
+  getMaskBundleOptionsFromFlagOnly,
+  prepareSceneMaskManifestForLoad,
+} from '../settings/mask-manifest-flags.js';
 
 const log = createLogger('SceneComposer');
 
@@ -103,13 +109,36 @@ export class SceneComposer {
 
   async _loadMasksOnlyForBasePath(basePath, options = {}) {
     try {
-      const res = await assetLoader.loadAssetBundle(basePath, null, { skipBaseTexture: true, ...options });
+      const scene = options.scene;
+      let loadOpts = { skipBaseTexture: true, ...options };
+      if (scene) {
+        const enabledIds = collectEnabledMaskIds(scene);
+        const fromFlag = getMaskBundleOptionsFromFlagOnly(scene, basePath, enabledIds, {
+          skipMaskIds: options.skipMaskIds,
+        });
+        loadOpts = {
+          ...loadOpts,
+          maskManifest: fromFlag.maskManifest,
+          maskIds: fromFlag.maskIds,
+          cacheKeySuffix: fromFlag.cacheKeySuffix,
+          skipMaskIds: fromFlag.skipMaskIds,
+        };
+      }
+      const res = await assetLoader.loadAssetBundle(basePath, null, loadOpts);
       if (res?.success && res?.bundle?.masks && Array.isArray(res.bundle.masks)) {
         return res.bundle.masks;
       }
     } catch (e) {
     }
     return [];
+  }
+
+  _extractFileExtension(src) {
+    const s = String(src || '');
+    const noQuery = s.split('?')[0];
+    const dot = noQuery.lastIndexOf('.');
+    if (dot < 0) return '';
+    return noQuery.slice(dot + 1).toLowerCase();
   }
 
   _iterTileDocs(foundryScene = null) {
@@ -155,7 +184,10 @@ export class SceneComposer {
       let bestScore = -Infinity;
 
       for (const basePath of candidates) {
-        const masks = await this._loadMasksOnlyForBasePath(basePath, { suppressProbeErrors: true });
+        const masks = await this._loadMasksOnlyForBasePath(basePath, {
+          suppressProbeErrors: true,
+          scene: foundryScene,
+        });
         if (!Array.isArray(masks) || masks.length === 0) continue;
 
         const ids = new Set(masks.map((m) => String(m?.id ?? m?.type ?? '').toLowerCase()).filter(Boolean));
@@ -507,7 +539,15 @@ export class SceneComposer {
     
     // Load effect masks if we have a background path
     let result = { success: false, bundle: { masks: [] }, warnings: [] };
+    const enabledMaskIds = collectEnabledMaskIds(foundryScene);
+
     if (bgPath) {
+      const prepManifest = await prepareSceneMaskManifestForLoad(foundryScene, {
+        basePath: bgPath,
+        maskSourceSrc,
+        enabledMaskIds,
+      });
+
       // V2-only runtime: scene bundle no longer consumes legacy _Water mask.
       const _skipMaskIds = ['water'];
 
@@ -531,64 +571,15 @@ export class SceneComposer {
               log.warn('Asset progress callback failed:', e);
             }
           },
-          { skipBaseTexture: true, skipMaskIds: _skipMaskIds } // Skip base texture since we got it from Foundry
-        );
-
-        // If we got a partial/legacy cached bundle missing critical masks,
-        // retry once with bypassCache:true. This is especially important for
-        // optional-but-authored masks like _Tree/_Bush which can be omitted from
-        // a cached bundle built during a transient FilePicker/probe issue.
-        try {
-          const maskIds = new Set(
-            (result?.bundle?.masks || [])
-              .map((m) => String(m?.id || m?.type || '').toLowerCase())
-              .filter(Boolean)
-          );
-          const hasAny = maskIds.size > 0;
-          const hasOutdoors = maskIds.has('outdoors');
-          const hasTree = maskIds.has('tree');
-          const hasBush = maskIds.has('bush');
-          const hasFire = maskIds.has('fire');
-          
-          // Retry if we're missing ANY critical V1 masks (not just if we have some masks)
-          const missingCritical = !hasOutdoors || !hasTree || !hasBush || !hasFire;
-          
-          if (missingCritical) {
-            log.warn('Asset bundle missing critical V1 masks; retrying with bypassCache', {
-              basePath: bgPath,
-              currentMasks: [...maskIds],
-              hasOutdoors,
-              hasTree,
-              hasBush,
-              hasFire
-            });
-            
-            const retryResult = await assetLoader.loadAssetBundle(bgPath, null, {
-              skipBaseTexture: true,
-              suppressProbeErrors: true,
-              bypassCache: true,
-              skipMaskIds: _skipMaskIds
-            });
-            
-            log.info('Bypass-cache retry completed', {
-              success: retryResult?.success,
-              originalMaskCount: result?.bundle?.masks?.length ?? 0,
-              retryMaskCount: retryResult?.bundle?.masks?.length ?? 0,
-              originalMasks: (result?.bundle?.masks || []).map(m => m.id || m.type),
-              retryMasks: (retryResult?.bundle?.masks || []).map(m => m.id || m.type)
-            });
-            
-            // Use retry result if it found more masks
-            if (retryResult.success && retryResult.bundle?.masks?.length > (result?.bundle?.masks?.length ?? 0)) {
-              result = retryResult;
-              log.info('Using retry result (found more masks)');
-            } else {
-              log.warn('Retry did not find more masks, keeping original result');
-            }
+          {
+            skipBaseTexture: true,
+            skipMaskIds: _skipMaskIds,
+            maskManifest: prepManifest.maskManifest,
+            maskExtension: prepManifest.maskExtension,
+            maskIds: enabledMaskIds,
+            cacheKeySuffix: prepManifest.cacheKeySuffix,
           }
-        } catch (retryErr) {
-          log.error('Bypass-cache retry failed', retryErr);
-        }
+        );
       } finally {
         if (_isDbg) _dlp.end('sc.loadAssetBundle');
         if (doLoadProfile) {
@@ -600,32 +591,8 @@ export class SceneComposer {
       }
     }
 
-    // Robust fallback: if bgPath is missing OR the loaded bundle contains zero masks,
-    // probe tile basePaths to locate the basePath that actually has suffix masks.
-    // This makes mask loading independent of grid type and resilient to transient
-    // canvas/tile readiness during grid/dimension rebuilds.
-    if (!bgPath || !(result?.bundle?.masks?.length > 0)) {
-      if (_isDbg) _dlp.begin('sc.probeMaskBasePath', 'texture');
-      const maxAttempts = 6;
-      const retryDelayMs = 50;
-      for (let attempt = 0; attempt < maxAttempts; attempt++) {
-        try {
-          const probed = await this._probeBestMaskBasePath(foundryScene);
-          if (probed) {
-            bgPath = probed;
-            log.info(`Probed mask basePath: ${bgPath}`);
-            const _skipMaskIds = ['water'];
-            result = await assetLoader.loadAssetBundle(bgPath, null, { skipBaseTexture: true, suppressProbeErrors: true, skipMaskIds: _skipMaskIds });
-          }
-        } catch (e) {
-          // Ignore and retry
-        }
-
-        if (result?.bundle?.masks?.length > 0) break;
-        await new Promise((r) => setTimeout(r, retryDelayMs));
-      }
-      if (_isDbg) _dlp.end('sc.probeMaskBasePath');
-    }
+    // No alternate runtime branch: keep a single authoritative load pass from
+    // the manifest-derived base path for both GM and players.
 
     if (bgPath && (result?.bundle?.masks?.length > 0)) {
       this._lastMaskBasePath = bgPath;

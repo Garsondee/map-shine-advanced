@@ -3,6 +3,8 @@
  * Handles creation, updates, and deletion of wall objects for lighting/collision
  * @module scene/wall-manager
  */
+import { isGmLike } from '../core/gm-parity.js';
+
 
 import { createLogger } from '../core/log.js';
 import Coordinates from '../utils/coordinates.js';
@@ -404,7 +406,7 @@ export class WallManager {
   _getSelectedTokenDocs() {
     const docs = [];
     const seen = new Set();
-    const isGM = game?.user?.isGM ?? false;
+    const isGM = isGmLike();
 
     const addDoc = (tokenDoc) => {
       const tokenId = String(tokenDoc?.id || '');
@@ -466,7 +468,7 @@ export class WallManager {
   _getEffectiveVisionTokens() {
     const tokens = [];
     const seen = new Set();
-    const isGM = game?.user?.isGM ?? false;
+    const isGM = isGmLike();
     const addToken = (token) => {
       const tokenId = String(token?.document?.id || '');
       if (!tokenId || seen.has(tokenId)) return;
@@ -552,7 +554,7 @@ export class WallManager {
       return nativeVisibility;
     }
 
-    if ((wallDoc.door === CONST.WALL_DOOR_TYPES.SECRET) && !game.user.isGM) {
+    if ((wallDoc.door === CONST.WALL_DOOR_TYPES.SECRET) && !isGmLike()) {
       return false;
     }
 
@@ -593,7 +595,7 @@ export class WallManager {
     try {
       return points.some((point) => canvas.visibility.testVisibility(point, { tolerance: 0 }));
     } catch (_) {
-      return game.user.isGM;
+      return isGmLike();
     }
   }
 

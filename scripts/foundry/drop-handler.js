@@ -3,7 +3,7 @@
  * Replaces PIXI canvas interaction for token/tile placement
  * @module foundry/drop-handler
  */
-
+import { isGmLike } from '../core/gm-parity.js';
 import { createLogger } from '../core/log.js';
 import Coordinates from '../utils/coordinates.js';
 import { applyTileLevelDefaults, getFiniteActiveLevelBand } from './levels-create-defaults.js';
@@ -214,7 +214,7 @@ export class DropHandler {
 
       // Prepare token document
       const tokenData = await actor.getTokenDocument({
-        hidden: game.user.isGM && event.altKey, // Alt key for hidden
+        hidden: isGmLike() && event.altKey, // Alt key for hidden
         sort: Math.max(canvas.tokens.getMaxSort() + 1, 0)
       }, { parent: canvas.scene });
 

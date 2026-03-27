@@ -4,6 +4,7 @@
  *
  * @module ui/camera-panel-manager
  */
+import { isGmLike } from '../core/gm-parity.js';
 
 import { createLogger } from '../core/log.js';
 
@@ -248,7 +249,7 @@ export class CameraPanelManager {
 
   _applyRoleRestrictions() {
     if (!this.container) return;
-    const isGM = game.user?.isGM === true;
+    const isGM = isGmLike();
 
     const gmOnlyInputs = [
       'improvedModeEnabled',

@@ -12,6 +12,7 @@
  * 
  * @module foundry/mode-manager
  */
+import { isGmLike } from '../core/gm-parity.js';
 
 import { createLogger } from '../core/log.js';
 import { getConfiguredCanvasLayer } from './canvas-layer-resolve.js';
@@ -594,7 +595,7 @@ export class ModeManager {
    * @private
    */
   _applyMapMakerFogOverride() {
-    if (!game?.user?.isGM) return;
+    if (!isGmLike()) return;
     if (!canvas?.ready) return;
 
     if (!this._mapMakerFogState) {

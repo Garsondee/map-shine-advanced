@@ -2015,6 +2015,52 @@ export class FogOfWarEffectV2 {
   }
 
   /**
+   * Tokens that drive LOS / fog vision for this client (MapShine selection,
+   * then Foundry controlled; players fall back to all owned when empty).
+   * @returns {Token[]}
+   * @private
+   */
+  _getVisionDrivingTokens() {
+    let tokens = [];
+    const ms = window.MapShine;
+    const interactionManager = ms?.interactionManager;
+    const tokenManager = ms?.tokenManager;
+    const selection = interactionManager?.selection;
+    const realGm = !!game?.user?.isGM;
+    const user = game?.user;
+
+    if (selection && tokenManager?.tokenSprites) {
+      const placeables = canvas?.tokens?.placeables || [];
+      const selectedIds = Array.from(selection);
+      for (const id of selectedIds) {
+        if (!tokenManager.tokenSprites.has(id)) continue;
+        const token = placeables.find((t) => t.document?.id === id);
+        if (token) tokens.push(token);
+      }
+    }
+
+    if (!tokens.length) {
+      tokens = [...(canvas?.tokens?.controlled || [])];
+    }
+
+    if (!realGm && user) {
+      tokens = tokens.filter((t) => tokenIsOwnedByActiveUser(t, user));
+    }
+
+    if (!realGm && user && !tokens.length) {
+      try {
+        const placeables = canvas?.tokens?.placeables || [];
+        if (placeables.length) {
+          tokens = placeables.filter((t) => tokenIsOwnedByActiveUser(t, user));
+        }
+      } catch (_) {
+      }
+    }
+
+    return tokens;
+  }
+
+  /**
    * Render vision polygons to the world-space render target
    * @private
    */
@@ -2033,49 +2079,8 @@ export class FogOfWarEffectV2 {
       }
     }
     
-    // Resolve vision tokens:
-    // 1) Prefer MapShine's interactionManager selection (Three.js-driven UI)
-    // 2) Fallback to Foundry's canvas.tokens.controlled
-    // 3) For real non-GM clients only: if nothing is selected/controlled, use all owned tokens
-    let controlledTokens = [];
-    const ms = window.MapShine;
-    const interactionManager = ms?.interactionManager;
-    const tokenManager = ms?.tokenManager;
-    const selection = interactionManager?.selection;
+    const controlledTokens = this._getVisionDrivingTokens();
     const realGm = !!game?.user?.isGM;
-    const user = game?.user;
-
-    if (selection && tokenManager?.tokenSprites) {
-      const placeables = canvas?.tokens?.placeables || [];
-      const selectedIds = Array.from(selection);
-      for (const id of selectedIds) {
-        if (!tokenManager.tokenSprites.has(id)) continue;
-        const token = placeables.find(t => t.document?.id === id);
-        if (token) controlledTokens.push(token);
-      }
-    }
-
-    // Fallback: use Foundry's native controlled tokens if MapShine selection is empty
-    if (!controlledTokens.length) {
-      controlledTokens = canvas?.tokens?.controlled || [];
-    }
-
-    // Non-GM trust boundary: never rasterize vision for tokens the user does not own.
-    if (!realGm && user) {
-      controlledTokens = controlledTokens.filter((t) => tokenIsOwnedByActiveUser(t, user));
-    }
-
-    // Player default: when nothing is selected/controlled, show combined vision of owned tokens.
-    if (!realGm && user && !controlledTokens.length) {
-      try {
-        const placeables = canvas?.tokens?.placeables || [];
-        if (placeables.length) {
-          controlledTokens = placeables.filter((t) => tokenIsOwnedByActiveUser(t, user));
-        }
-      } catch (_) {
-        // Ignore ownership resolution errors
-      }
-    }
 
     // Always log when we have controlled tokens but no vision yet (state transition diagnostic)
     if (controlledTokens.length > 0 && !this._hasValidVision) {
@@ -2512,9 +2517,8 @@ export class FogOfWarEffectV2 {
     }
   }
 
-
   /**
-   * Check if fog should be bypassed (GM with no tokens selected)
+   * Whether the token contributes sight for fog / LOS (system hook or Foundry sight).
    * @private
    */
   _tokenHasVisionCapability(token) {
@@ -2533,25 +2537,11 @@ export class FogOfWarEffectV2 {
    * @private
    */
   _getTokensForLevelBandElevationCheck() {
-    const out = [];
     try {
-      const realGm = !!game?.user?.isGM;
-      const user = game?.user;
-      const controlled = canvas?.tokens?.controlled || [];
-      if (controlled.length) {
-        for (const t of controlled) {
-          if (t) out.push(t);
-        }
-        return out;
-      }
-      if (!realGm && user) {
-        for (const t of (canvas?.tokens?.placeables || [])) {
-          if (tokenIsOwnedByActiveUser(t, user)) out.push(t);
-        }
-      }
+      return this._getVisionDrivingTokens();
     } catch (_) {
+      return [];
     }
-    return out;
   }
 
   /**
@@ -2583,25 +2573,31 @@ export class FogOfWarEffectV2 {
     return false;
   }
 
+  /**
+   * When true, the fog plane is off and the shader bypasses fog (full map).
+   * GMs bypass unless a sighted token is driving vision; players use normal rules.
+   * @private
+   */
   _shouldBypassFog() {
     const fogEnabled = canvas?.scene?.tokenVision ?? false;
 
     if (!fogEnabled) return true;
+
+    // Real GM: full map unless a sighted token drives vision — even during Levels
+    // holds (players need the hold to avoid flashes; GMs are not on the fog plane
+    // when nothing is selected).
+    if (game?.user?.isGM) {
+      const driving = this._getVisionDrivingTokens();
+      if (driving.length === 0) return true;
+      const hasSightCapability = driving.some((t) => this._tokenHasVisionCapability(t));
+      if (!hasSightCapability) return true;
+    }
+
     // During a Levels floor/band transition hold, never bypass — controlled tokens
     // are often empty for a frame and would otherwise hide the fog plane (full map flash).
     if (this._levelBandFogHold) return false;
     // Token elevation ahead of activeLevelContext: same as a transition for bypass purposes.
     if (this._frameTokenOutsideActiveLevelBand) return false;
-    // Real GM only — debug GM parity must not disable fog for actual players.
-    if (game?.user?.isGM) {
-      // If GM and NO tokens are controlled, bypass fog
-      const controlled = canvas?.tokens?.controlled || [];
-      if (controlled.length === 0) return true;
-
-      // If GM and ALL controlled tokens lack sight capability, bypass fog.
-      const hasSightCapability = controlled.some((t) => this._tokenHasVisionCapability(t));
-      if (!hasSightCapability) return true;
-    }
     return false;
   }
 
@@ -2916,20 +2912,6 @@ export class FogOfWarEffectV2 {
   update(timeInfo) {
     if (!this._initialized || !this.fogPlane) return;
 
-    // Real GMs: V2 fog is player-safety infrastructure — never leave them on an
-    // opaque black hold (Levels sync, exploration load, etc.). Show the full map.
-    if (game?.user?.isGM) {
-      this._suppressNativeFogVisuals();
-      try {
-        if (this.fogMaterial?.uniforms?.uBypassFog) {
-          this.fogMaterial.uniforms.uBypassFog.value = 1.0;
-        }
-      } catch (_) {}
-      this.fogPlane.visible = false;
-      this._visionRetryFrames = 0;
-      return;
-    }
-
     // Keep the vision mask refreshing while any door transition is active.
     // Without this, we only render one frame at transition start and the door
     // sync overlay cannot progress over time.
@@ -2948,7 +2930,8 @@ export class FogOfWarEffectV2 {
     // 1. Band sync first (arms _levelBandFogHold when key is stale, even before full-res).
     const syncRequired = this._syncLevelsExplorationBandBeforeComposite();
 
-    // 2. Bypass respects hold — avoids GM "no controlled token" flash during floor swaps.
+    // 2. Bypass: players respect Levels hold; GMs with no vision-driving token bypass
+    // anyway so the map stays fully visible between selections.
     const bypassFog = this._shouldBypassFog();
     this.fogMaterial.uniforms.uBypassFog.value = bypassFog ? 1.0 : 0.0;
 
@@ -3055,9 +3038,10 @@ export class FogOfWarEffectV2 {
     // prevents the fog plane from being permanently hidden when tokens
     // lack sight or Foundry's perception never provides valid LOS.
     const waitingForVision = this._needsVisionUpdate && !this._hasValidVision;
-    const visionRetryLimit = game?.user?.isGM
-      ? this._maxVisionRetryFrames
-      : Math.max(this._maxVisionRetryFrames, Number(this._maxVisionRetryFramesPlayer) || 120);
+    const visionRetryLimit = Math.max(
+      this._maxVisionRetryFrames,
+      Number(this._maxVisionRetryFramesPlayer) || 120,
+    );
     if (waitingForVision) {
       this._visionRetryFrames++;
       if (this._visionRetryFrames >= visionRetryLimit) {

@@ -15,6 +15,61 @@
  */
 
 import { weatherController } from '../../core/WeatherController.js';
+import { CurlNoiseField, Vector3 } from '../../libs/quarks.core.module.js';
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// FixedCurlNoiseField — corrects three.quarks CurlNoiseField time integration
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// Upstream CurlNoiseField advances `this.time` inside update(), but ParticleSystem
+// calls update() once per alive particle per frame. That multiplies the noise
+// animation speed (and effective turbulence) by particle count and makes the field
+// unstable as density changes. Advance time once per frame in frameUpdate instead.
+
+export class FixedCurlNoiseField extends CurlNoiseField {
+  constructor(scale, strength, timeScale) {
+    super(scale, strength, timeScale);
+    this.type = 'FixedCurlNoiseField';
+    this._tempV = new Vector3();
+  }
+
+  frameUpdate(delta) {
+    let dt = delta;
+    if (!Number.isFinite(dt)) return;
+    dt = Math.min(Math.max(dt, 0), 0.1);
+    this.time += dt * this.timeScale;
+  }
+
+  update(particle, delta) {
+    if (!particle || !particle.position) return;
+    const px = particle.position.x / this.scale.x;
+    const py = particle.position.y / this.scale.y;
+    const t = this.time;
+    const e = this.epsilon;
+    const n1 = this.generator.noise3D(px, py + e, t);
+    const n2 = this.generator.noise3D(px, py - e, t);
+    const dNdy = (n1 - n2) / (2 * e);
+    const n3 = this.generator.noise3D(px + e, py, t);
+    const n4 = this.generator.noise3D(px - e, py, t);
+    const dNdx = (n3 - n4) / (2 * e);
+    const vx = dNdy * this.strength.x;
+    const vy = -dNdx * this.strength.y;
+    const vz = (n1 + n2) * 0.5 * this.strength.z * 0.5;
+    this._tempV.set(vx, vy, vz);
+    let dt = delta;
+    if (!Number.isFinite(dt)) return;
+    dt = Math.min(Math.max(dt, 0), 0.1);
+    particle.velocity.addScaledVector(this._tempV, dt);
+  }
+
+  reset() {
+    this.time = 0;
+  }
+
+  clone() {
+    return new FixedCurlNoiseField(this.scale.clone(), this.strength.clone(), this.timeScale);
+  }
+}
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Gradient Data Constants
@@ -272,8 +327,15 @@ export class FireMaskShape {
     if (outdoorFactor > 1) outdoorFactor = 1;
     p._windSusceptibility = outdoorFactor;
 
-    // Indoor time scaling.
     const params = this.ownerEffect?.params;
+
+    // Indoor smoke visibility (0 = no suppression; 1 = full suppression when fully under roof).
+    const smokeSup = params?.indoorSmokeSuppression;
+    const sup = Math.max(0, Math.min(1, Number.isFinite(smokeSup) ? smokeSup : 0));
+    const indoorBlend = clamp01(1.0 - outdoorFactor);
+    p._indoorSmokeScale = 1.0 - sup * indoorBlend;
+
+    // Indoor time scaling.
     const indoorTimeScale = Math.max(0.05, Math.min(1.0, params?.indoorTimeScale ?? 0.6));
     p._msTimeScaleFactor = indoorTimeScale + (1.0 - indoorTimeScale) * outdoorFactor;
 
@@ -554,7 +616,10 @@ export class SmokeLifecycleBehavior {
       const s = fadeT * fadeT * (3.0 - 2.0 * fadeT);
       alphaEnv = 1.0 - s;
     }
-    particle.color.w = alphaEnv * density * this._smokeOpacity * this._precipMult;
+    const indoorSmoke = typeof particle._indoorSmokeScale === 'number' && Number.isFinite(particle._indoorSmokeScale)
+      ? Math.max(0, Math.min(1, particle._indoorSmokeScale))
+      : 1.0;
+    particle.color.w = alphaEnv * density * this._smokeOpacity * this._precipMult * indoorSmoke;
 
     // Size growth: billow from startSize to startSize * sizeGrowth.
     const startSize = particle._smokeStartSize;

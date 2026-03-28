@@ -107,7 +107,7 @@ export class WindowLightEffectV2 {
       cloudShadowGamma: 2.28,
       cloudShadowMinLight: 0.0,
       useSkyTint: true,
-      skyTintStrength: 3.62,
+      skyTintStrength: 9.5,
       nightDimming: 1.0,
       sunLightEnabled: false,
       sunLightLength: 0.03,
@@ -194,9 +194,9 @@ export class WindowLightEffectV2 {
         falloff: { type: 'slider', label: 'Falloff (Gamma)', min: 0.1, max: 5.0, step: 0.1, default: 5 },
         color: { type: 'color', label: 'Light Color', default: { r: 1.0, g: 0.96, b: 0.85 } },
         cloudInfluence: { type: 'slider', label: 'Cloud Dimming', min: 0.0, max: 1.0, step: 0.01, default: 1.0 },
-        nightDimming: { type: 'slider', label: 'Night Dimming', min: 0.0, max: 1.0, step: 0.01, default: 1 },
+        nightDimming: { type: 'slider', label: 'Night Dimming', min: 0.0, max: 2.0, step: 0.01, default: 1 },
         useSkyTint: { type: 'boolean', label: 'Use Sky Tint', default: true },
-        skyTintStrength: { type: 'slider', label: 'Sky Tint Strength', min: 0.0, max: 25.0, step: 0.01, default: 3.62 },
+        skyTintStrength: { type: 'slider', label: 'Sky Tint Strength', min: 0.0, max: 25.0, step: 0.01, default: 9.5 },
         cloudShadowContrast: { type: 'slider', label: 'Shadow Contrast', min: 0.0, max: 4.0, step: 0.01, default: 4.0 },
         cloudShadowBias: { type: 'slider', label: 'Shadow Bias', min: -1.0, max: 1.0, step: 0.01, default: 0.05 },
         cloudShadowGamma: { type: 'slider', label: 'Shadow Gamma', min: 0.1, max: 4.0, step: 0.01, default: 2.28 },
@@ -568,8 +568,10 @@ export class WindowLightEffectV2 {
     // Use the strongest darkness signal so weather/time-driven night also dims
     // window light even when Foundry scene darkness remains low.
     const darkness = Math.max(sceneDarkness01, effectiveDarkness01);
-    const nightDimming = Math.max(0.0, Math.min(1.0, Number(this.params.nightDimming) || 0.0));
-    u.uNightFactor.value = Math.max(0.0, 1.0 - darkness * nightDimming);
+    const nightDimming = Math.max(0.0, Math.min(2.0, Number(this.params.nightDimming) || 0.0));
+    // Curve + up-to-2× slider so mid-range darkness and defaults read clearly “night”.
+    const nightDimAmount = Math.min(1.0, darkness * nightDimming * 2.15);
+    u.uNightFactor.value = Math.max(0.0, 1.0 - nightDimAmount);
 
     const sunAzimuthDeg = Number(this._skyState.sunAzimuthDeg) || 180.0;
     const sunAzimuthRad = sunAzimuthDeg * (Math.PI / 180.0);
@@ -986,12 +988,12 @@ export class WindowLightEffectV2 {
           float dayWarmth = clamp((uNightFactor - 0.55) / 0.45, 0.0, 1.0);
           vec3 skyTint = max(uSkyTintColor, vec3(0.01));
           skyTint.b = mix(skyTint.b, min(skyTint.b, 1.0), dayWarmth * 0.6);
-          float skyMix = (uUseSkyTint > 0.5) ? (1.0 - exp(-max(uSkyTintStrength, 0.0) * 0.16)) : 0.0;
+          float skyMix = (uUseSkyTint > 0.5) ? (1.0 - exp(-max(uSkyTintStrength, 0.0) * 0.42)) : 0.0;
           vec3 tintColor = mix(vec3(1.0), skyTint, clamp(skyMix, 0.0, 1.0));
           // Keep daytime windows from drifting too cool under strong sky tint.
           float warmDayFactor = clamp((uNightFactor - 0.45) / 0.55, 0.0, 1.0);
           vec3 daylightWarmTint = vec3(1.05, 1.0, 0.94);
-          vec3 envTintColor = mix(tintColor, tintColor * daylightWarmTint, 0.35 * warmDayFactor);
+          vec3 envTintColor = mix(tintColor, tintColor * daylightWarmTint, 0.16 * warmDayFactor);
 
           float cloudDimming = mix(1.0, clamp(uCloudFactor, 0.0, 1.0), clamp(uCloudInfluence, 0.0, 1.0));
           float cloudShadow = 1.0;

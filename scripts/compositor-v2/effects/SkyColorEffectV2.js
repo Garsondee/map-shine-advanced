@@ -550,6 +550,8 @@ export class SkyColorEffectV2 {
       let grainStrength = 0.0;
       let goldenEnergy = 0.0;
       let nightSatFloor = clamp01(this.params.nightSaturationFloor);
+      let dayProgress = -1.0;
+      let effectiveDarkness = 0.0;
 
       {
         // ── Analytic automation ──────────────────────────────────────
@@ -559,7 +561,7 @@ export class SkyColorEffectV2 {
         const sunset = wrapHour24(Number.isFinite(foundryPhases?.sunset) ? foundryPhases.sunset : this.params.sunsetHour);
 
         // Day progress: 0→1 from sunrise to sunset, -1 at night
-        let dayProgress = 0.0;
+        dayProgress = 0.0;
         if (sunrise < sunset) {
           if (hour >= sunrise && hour <= sunset) {
             dayProgress = (hour - sunrise) / Math.max(0.0001, sunset - sunrise);
@@ -613,7 +615,7 @@ export class SkyColorEffectV2 {
         );
         const turbidityEff = clamp01(turbidityBase + turbidityWeather);
 
-        const effectiveDarkness = clamp01(
+        effectiveDarkness = clamp01(
           sceneDarkness +
           (1.0 - dayFactor) * 0.25 +
           overcast * 0.15 +
@@ -724,9 +726,18 @@ export class SkyColorEffectV2 {
           tb = 1.0 + at * 0.4;
         }
         const tintShiftG = 1.0 + tint;
-        this.currentSkyTintColor.r = Math.max(0.01, tr);
-        this.currentSkyTintColor.g = Math.max(0.01, tg * tintShiftG);
-        this.currentSkyTintColor.b = Math.max(0.01, tb);
+        tr = Math.max(0.01, tr);
+        tg = Math.max(0.01, tg * tintShiftG);
+        tb = Math.max(0.01, tb);
+        // Deep blue night sky for downstream lights (window glow, dust, etc.).
+        const deepR = 0.22;
+        const deepG = 0.34;
+        const deepB = 0.92;
+        const calNightBoost = dayProgress < 0 ? 0.38 : 0.0;
+        const nightSkyMix = clamp01(effectiveDarkness * 0.82 + calNightBoost);
+        this.currentSkyTintColor.r = lerp(tr, deepR, nightSkyMix);
+        this.currentSkyTintColor.g = lerp(tg, deepG, nightSkyMix);
+        this.currentSkyTintColor.b = lerp(tb, deepB, nightSkyMix);
       }
 
       // ── Push to shader uniforms ─────────────────────────────────────

@@ -30,6 +30,7 @@ import { tileHasLevelsRange, readTileLevelsFlags } from '../../foundry/levels-sc
 import { SmartWindBehavior } from '../../particles/SmartWindBehavior.js';
 import {
   FireMaskShape,
+  FixedCurlNoiseField,
   FlameLifecycleBehavior,
   EmberLifecycleBehavior,
   SmokeLifecycleBehavior,
@@ -49,7 +50,6 @@ import {
   SizeOverLife,
   PiecewiseBezier,
   Bezier,
-  CurlNoiseField,
 } from '../../libs/three.quarks.module.js';
 
 const log = createLogger('FireEffectV2');
@@ -181,6 +181,7 @@ export class FireEffectV2 {
       smokeUpdraft: 1.1,
       smokeTurbulence: 0.4,
       smokeWindInfluence: 0.1,
+      indoorSmokeSuppression: 0,
       smokeAlphaStart: 0,
       smokeAlphaPeak: 0.5,
       smokeAlphaEnd: 1,
@@ -245,7 +246,7 @@ export class FireEffectV2 {
         { name: 'flames', label: 'Flames', type: 'folder', expanded: false, parameters: ['globalFireRate', 'fireHeight', 'fireTemperature', 'flamePeakOpacity', 'coreEmission', 'flameBrightnessFloor', 'fireSizeMin', 'fireSizeMax', 'fireLifeMin', 'fireLifeMax', 'fireSpinEnabled', 'fireSpinSpeedMin', 'fireSpinSpeedMax', 'fireUpdraft', 'fireCurlStrength'] },
         { name: 'flame-texture', label: 'Flame Texture', type: 'folder', expanded: false, parameters: ['flameTextureOpacity', 'flameTextureBrightness', 'flameTextureScaleX', 'flameTextureScaleY', 'flameTextureOffsetX', 'flameTextureOffsetY', 'flameTextureRotation', 'flameTextureFlipX', 'flameTextureFlipY'] },
         { name: 'embers', label: 'Embers', type: 'folder', expanded: false, parameters: ['emberRate', 'emberEmission', 'emberPeakOpacity', 'emberSizeMin', 'emberSizeMax', 'emberLifeMin', 'emberLifeMax', 'emberUpdraft', 'emberCurlStrength'] },
-        { name: 'smoke', label: 'Smoke', type: 'folder', expanded: true, parameters: ['smokeEnabled', 'smokeRatio', 'smokeOpacity', 'smokeColorWarmth', 'smokeColorBrightness', 'smokeDarknessResponse', 'smokeColorGradient', 'smokeEmissionGradient', 'smokeAlphaStart', 'smokeAlphaPeak', 'smokeAlphaEnd', 'smokeSizeMin', 'smokeSizeMax', 'smokeSizeOverLife', 'smokeLifeMin', 'smokeLifeMax', 'smokeUpdraft', 'smokeTurbulence', 'smokeWindInfluence'] },
+        { name: 'smoke', label: 'Smoke', type: 'folder', expanded: true, parameters: ['smokeEnabled', 'smokeRatio', 'smokeOpacity', 'indoorSmokeSuppression', 'smokeColorWarmth', 'smokeColorBrightness', 'smokeDarknessResponse', 'smokeColorGradient', 'smokeEmissionGradient', 'smokeAlphaStart', 'smokeAlphaPeak', 'smokeAlphaEnd', 'smokeSizeMin', 'smokeSizeMax', 'smokeSizeOverLife', 'smokeLifeMin', 'smokeLifeMax', 'smokeUpdraft', 'smokeTurbulence', 'smokeWindInfluence'] },
         { name: 'environment', label: 'Environment', type: 'folder', expanded: false, parameters: ['windInfluence', 'timeScale', 'lightIntensity', 'indoorLifeScale', 'indoorTimeScale', 'weatherPrecipKill', 'weatherWindKill'] },
         { name: 'heat-distortion', label: 'Heat Distortion', type: 'folder', expanded: false, parameters: ['heatDistortionEnabled', 'heatDistortionIntensity', 'heatDistortionFrequency', 'heatDistortionSpeed', 'heatDistortionEdgeSoftness'] }
       ],
@@ -287,6 +288,7 @@ export class FireEffectV2 {
         smokeEnabled: { type: 'checkbox', label: 'Enable Smoke', default: true },
         smokeRatio: { type: 'slider', label: 'Emission Density', min: 0.0, max: 3.0, step: 0.05, default: 1.7 },
         smokeOpacity: { type: 'slider', label: 'Peak Opacity', min: 0.0, max: 1.0, step: 0.01, default: 0.27 },
+        indoorSmokeSuppression: { type: 'slider', label: 'Indoor Smoke Suppression', min: 0.0, max: 1.0, step: 0.01, default: 0 },
         // Legacy colour controls — used when smokeColorGradient is null.
         smokeColorWarmth: { type: 'slider', label: 'Color Warmth', min: 0.0, max: 1.0, step: 0.01, default: 0.59 },
         smokeColorBrightness: { type: 'slider', label: 'Brightness', min: 0.05, max: 2.0, step: 0.01, default: 0.35 },
@@ -750,7 +752,7 @@ export class FireEffectV2 {
     ]));
     const buoyancy = new ApplyForce(new THREE.Vector3(0, 0, 1), new ConstantValue(p.fireHeight * 0.125));
     const windForce = new SmartWindBehavior();
-    const turbulence = new CurlNoiseField(
+    const turbulence = new FixedCurlNoiseField(
       new THREE.Vector3(150, 150, 50),
       new THREE.Vector3(80, 80, 30),
       1.5
@@ -819,7 +821,7 @@ export class FireEffectV2 {
     const buoyancy = new ApplyForce(new THREE.Vector3(0, 0, 1), new ConstantValue(p.fireHeight * 0.4));
     const windForce = new SmartWindBehavior();
     const emberCurlStrength = new THREE.Vector3(150, 150, 50);
-    const turbulence = new CurlNoiseField(new THREE.Vector3(30, 30, 30), emberCurlStrength.clone(), 4.0);
+    const turbulence = new FixedCurlNoiseField(new THREE.Vector3(30, 30, 30), emberCurlStrength.clone(), 4.0);
     const emberSizeOverLife = new SizeOverLife(new PiecewiseBezier([
       [new Bezier(1.0, 0.85, 0.5, 0.2), 0],
     ]));
@@ -897,7 +899,7 @@ export class FireEffectV2 {
     const windForce = new SmartWindBehavior();
     const smokeTurbMult = Math.max(0.0, p.smokeTurbulence ?? 1.0);
     const smokeCurlStrengthBase = new THREE.Vector3(200 * smokeTurbMult, 200 * smokeTurbMult, 80 * smokeTurbMult);
-    const turbulence = new CurlNoiseField(new THREE.Vector3(100, 100, 40), smokeCurlStrengthBase.clone(), 2.0);
+    const turbulence = new FixedCurlNoiseField(new THREE.Vector3(100, 100, 40), smokeCurlStrengthBase.clone(), 2.0);
 
     const system = new QuarksParticleSystem({
       duration: 1,
@@ -917,7 +919,13 @@ export class FireEffectV2 {
       renderMode: RenderMode.BillBoard,
       renderOrder: this._computeParticleRenderOrder(floorIndex, 2),
       startRotation: new IntervalValue(0, Math.PI * 2),
-      behaviors: [windForce, smokeUpdraft, turbulence, new FireSpinBehavior(), smokeLifecycle],
+      behaviors: [
+        windForce,
+        new ParticleTimeScaledBehavior(smokeUpdraft),
+        new ParticleTimeScaledBehavior(turbulence),
+        new FireSpinBehavior(),
+        smokeLifecycle,
+      ],
     });
 
     system.userData = {

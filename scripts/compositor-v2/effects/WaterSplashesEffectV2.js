@@ -1202,7 +1202,7 @@ export class WaterSplashesEffectV2 {
           bucketPoints, sceneW, sceneH, sceneX, sceneY,
           GROUND_Z + (Number(floorIndex) || 0), 0.3
         );
-        const sys = this._createFoamSystem(shape, weight);
+        const sys = this._createFoamSystem(shape, weight, floorIndex);
         if (sys) state.foamSystems.push(sys);
       }
     }
@@ -1236,7 +1236,7 @@ export class WaterSplashesEffectV2 {
           bucketPoints, sceneW, sceneH, sceneX, sceneY,
           GROUND_Z + (Number(floorIndex) || 0), 0.3
         );
-        const sys = this._createBubbleFoamSystem(shape, weight);
+        const sys = this._createBubbleFoamSystem(shape, weight, floorIndex);
         if (sys) state.foamSystems2.push(sys);
       }
     }
@@ -1262,7 +1262,7 @@ export class WaterSplashesEffectV2 {
   }
 
   /** @private */
-  _createFoamSystem(shape, weight) {
+  _createFoamSystem(shape, weight, floorIndex = 0) {
     const THREE = window.THREE;
     if (!THREE) return null;
 
@@ -1290,7 +1290,7 @@ export class WaterSplashesEffectV2 {
     const foamRateMult = 40.0;
     const foamRate = Math.max(0.0, Number(p.foamRate) || 0) * foamRateMult;
 
-    const foamLifecycle = new FoamPlumeLifecycleBehavior(this);
+    const foamLifecycle = new FoamPlumeLifecycleBehavior(this, floorIndex);
 
     const system = new QuarksParticleSystem({
       duration: 1,
@@ -1395,7 +1395,7 @@ export class WaterSplashesEffectV2 {
    * instance so the tint/opacity params are independent from splashes.
    * @private
    */
-  _createBubbleFoamSystem(shape, weight) {
+  _createBubbleFoamSystem(shape, weight, floorIndex = 0) {
     const THREE = window.THREE;
     if (!THREE) return null;
 
@@ -1419,8 +1419,10 @@ export class WaterSplashesEffectV2 {
     const foamRateMult = 20.0;
     const foamRate = Math.max(0.0, Number(p.foamRate) || 0) * foamRateMult;
 
-    // Lifecycle behavior reads from a params-like object — pass bubblesParams.
-    const foamLifecycle = new FoamPlumeLifecycleBehavior({ params: p });
+    // Lifecycle reads bubblesParams but needs `_sceneBounds` from this effect for outdoors sampling.
+    const bubbleFoamOwner = { params: p };
+    Object.defineProperty(bubbleFoamOwner, '_sceneBounds', { get: () => this._sceneBounds });
+    const foamLifecycle = new FoamPlumeLifecycleBehavior(bubbleFoamOwner, floorIndex);
 
     const system = new QuarksParticleSystem({
       duration: 1,

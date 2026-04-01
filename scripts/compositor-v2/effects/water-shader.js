@@ -1808,6 +1808,9 @@ void main() {
   }
   float structuralShadow = max(buildingShadow, overheadShadow);
   float foamStructuralDarken = mix(1.0, 0.35, structuralShadow);
+  // Reduce foam visibility under building shadows specifically.
+  // Keep a small floor so foam does not pop completely out.
+  float foamBuildingShadowFade = mix(1.0, 0.14, buildingShadow);
 
   // Murk
   float murkFactor = 0.0;
@@ -1976,6 +1979,7 @@ void main() {
     // Opacity and blending
     float shoreOpacity = clamp(uShoreFoamOpacity, 0.0, 1.0);
     float shoreAlpha = clamp(shoreFoamAmount * shoreOpacity, 0.0, 1.0);
+    shoreAlpha *= foamBuildingShadowFade;
     
     // Blend foam color first
     col = mix(col, shoreFoamColor, shoreAlpha);
@@ -1986,6 +1990,7 @@ void main() {
   // Apply floating foam with independent color and FULL opacity control
   if (floatingFoam.amount > 0.01) {
     float floatingAlpha = clamp(floatingFoam.amount * floatingFoam.opacity, 0.0, 1.0);
+    floatingAlpha *= foamBuildingShadowFade;
     vec3 floatingFoamColor = floatingFoam.color * foamStructuralDarken;
     // Blend foam color first (without darkness)
     col = mix(col, floatingFoamColor, floatingAlpha);
@@ -1994,7 +1999,7 @@ void main() {
   }
 
   // Shader flecks (drive by combined foam presence)
-  float fleckDriver = clamp(max(shoreFoamAmount, floatingFoam.amount), 0.0, 1.0);
+  float fleckDriver = clamp(max(shoreFoamAmount, floatingFoam.amount) * foamBuildingShadowFade, 0.0, 1.0);
   float shaderFlecks = getShaderFlecks(sceneUv, inside, shore, fleckDriver, rainOffPx, indoorWindMotion);
   vec3 fleckCol = mix(uShoreFoamColor, floatingFoam.color, clamp(floatingFoam.amount, 0.0, 1.0)) * foamStructuralDarken;
   col += fleckCol * shaderFlecks * 0.8;
@@ -2207,6 +2212,11 @@ void main() {
   }
   float strength = clamp(uSpecStrength, 0.0, 250.0) / 50.0;
   spec *= strength * clamp(uSpecSunIntensity, 0.0, 10.0);
+  // Indoor water should have much dimmer highlights.
+  // With outdoors mask: 0.0 (indoor) -> 10% spec, 1.0 (outdoor) -> full spec.
+  if (uHasOutdoorsMask > 0.5) {
+    spec *= mix(0.10, 1.0, clamp(outdoorStrength, 0.0, 1.0));
+  }
   spec *= mix(1.0, 0.05, clamp(uSceneDarkness, 0.0, 1.0));
   vec3 skyCol = clamp(uSkyColor, vec3(0.0), vec3(1.0));
   float skyI = clamp(uSkyIntensity, 0.0, 1.0);

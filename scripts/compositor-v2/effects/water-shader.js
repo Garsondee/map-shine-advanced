@@ -24,7 +24,7 @@
  *   - Shore foam with curl noise breakup + floating foam clumps
  *   - Shader-based foam flecks (ifdef USE_FOAM_FLECKS)
  *   - Murk (subsurface silt/algae)
- *   - GGX specular with anisotropy
+ *   - GGX specular with anisotropy + optional surface chaos (patchy roughness, capillary normals)
  *   - Chromatic aberration (runtime toggle + thresholded Kawase blur)
  *   - Multi-tap refraction (ifdef USE_WATER_REFRACTION_MULTITAP)
  *   - SDF-based edge masking for distortion and chromatic aberration
@@ -189,6 +189,7 @@ uniform float uSpecAAStrength;
 uniform float uSpecWaveStepMul;
 uniform float uSpecRoughnessMin;
 uniform float uSpecRoughnessMax;
+uniform float uSpecSurfaceChaos;
 uniform float uSpecF0;
 uniform float uSpecMaskGamma;
 uniform float uSpecSkyTint;
@@ -882,7 +883,26 @@ vec2 specFlowAlignedSlope2D(vec2 sceneUv, float t) {
 
   // ── Combine ───────────────────────────────────────────────────────────
   // L0 dominates (sets the windward "tilt"), L1 adds swirl, L2 adds sparkle.
-  vec2 combined = slopeL0 * 0.65 + curlSlope * 0.25 + microSlope * 0.10;
+  // uSpecSurfaceChaos shifts weight toward curl + micro and adds capillary-scale
+  // slope so highlights break up (river/sea) instead of one glassy sheet.
+  float ch = clamp(uSpecSurfaceChaos, 0.0, 1.0);
+  float w0 = 0.65 - 0.23 * ch;
+  float w1 = 0.25 + 0.15 * ch;
+  float w2 = 0.10 + 0.18 * ch;
+  vec2 combined = slopeL0 * w0 + curlSlope * w1 + microSlope * w2;
+
+  // Capillary / chop layer (spec-only): higher frequency than L2, advects with wind.
+  if (ch > 1e-4) {
+    float capEps = 0.35;
+    vec2 capP = basis * max(0.02, uSpecMicroScale * 3.6)
+              - windBasis * (t * 0.31) - windPerp * (t * 0.14);
+    float c0 = fbmNoise(capP);
+    float cpx = fbmNoise(capP + windBasis * capEps);
+    float cpy = fbmNoise(capP + windPerp * capEps);
+    vec2 capG = vec2(cpx - c0, cpy - c0) / max(capEps, 1e-4);
+    capG *= 1.15;
+    combined += capG * (0.22 * ch);
+  }
   return combined;
 }
 
@@ -2059,6 +2079,23 @@ void main() {
   float shallow01 = clamp(shore, 0.0, 1.0);
   float dynRough = 0.07 * waveTurb01 + 0.11 * shallow01 + 0.08 * foamAmt;
   rough = clamp(rough + dynRough, 0.001, 1.0);
+
+  // Spatial roughness variation: patchy "oil/silt/wind" micro-roughness so GGX
+  // isn't uniform across the surface (reads as natural water vs filtered pool).
+  float chR = clamp(uSpecSurfaceChaos, 0.0, 1.0);
+  if (chR > 1e-4) {
+    vec2 wfR = uWindDir;
+    float wlR = length(wfR);
+    wfR = (wlR > 1e-6) ? (wfR / wlR) : vec2(1.0, 0.0);
+    vec2 wbR = normalize(vec2(wfR.x * sceneAspectW, wfR.y));
+    vec2 wpR = vec2(-wbR.y, wbR.x);
+    vec2 basisR = vec2(sceneUv.x * sceneAspectW, sceneUv.y);
+    vec2 rDom = basisR * 2.8 - wbR * (uWindTime * 0.09) - wpR * (uWindTime * 0.044);
+    float rN = 0.5 + 0.5 * fbmNoise(rDom + vec2(101.3, 67.1));
+    float rN2 = 0.5 + 0.5 * fbmNoise(rDom * 1.87 - vec2(uWindTime * 0.062, uWindTime * 0.031));
+    float rPatch = mix(rN, rN2, 0.35);
+    rough = clamp(rough + chR * (0.032 + 0.145 * rPatch), 0.001, 1.0);
+  }
 
   // Specular AA: if the normal/slope varies too fast across pixels, GGX produces
   // sub-pixel sparkles (thin scratchy lines). Increase roughness locally to

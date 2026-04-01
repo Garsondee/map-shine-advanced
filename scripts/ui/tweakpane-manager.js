@@ -16,6 +16,11 @@ import { TileMotionDialog } from './tile-motion-dialog.js';
 import { TokenMovementDialog } from './token-movement-dialog.js';
 import { OVERLAY_THREE_LAYER, TILE_FEATURE_LAYERS } from '../core/render-layers.js';
 import * as sceneSettings from '../settings/scene-settings.js';
+import {
+  cloneAndSanitizeControlState,
+  getSanitizedControlStateForExport,
+  repairSceneControlStateFlag
+} from '../settings/control-state-sanitize.js';
 import Coordinates from '../utils/coordinates.js';
 import { debugLoadingProfiler } from '../core/debug-loading-profiler.js';
 import {
@@ -4341,6 +4346,8 @@ export class TweakpaneManager {
   /**
    * Copy the full Map Shine scene settings (all effect params + enabled flag) to
    * the clipboard as a JSON payload that can be pasted into another scene.
+   * Includes sanitized GM `controlState` when present so cross-scene paste does not
+   * carry invalid Tweakpane enum values from another map.
    * @returns {Promise<void>}
    * @public
    */
@@ -4353,12 +4360,14 @@ export class TweakpaneManager {
 
     const settings = sceneSettings.getSceneSettings(scene);
     const enabled = scene.getFlag('map-shine-advanced', 'enabled') ?? false;
+    const controlState = getSanitizedControlStateForExport(scene);
 
     const payload = {
       msaVersion: 'scene-settings-v1',
       sceneName: scene.name,
       enabled,
-      settings
+      settings,
+      ...(controlState ? { controlState } : {})
     };
 
     const json = JSON.stringify(payload, null, 2);
@@ -4425,12 +4434,17 @@ export class TweakpaneManager {
     }
 
     const sourceName = payload.sceneName || 'Unknown Scene';
+    const hasControlStatePaste =
+      payload.controlState && typeof payload.controlState === 'object' && !Array.isArray(payload.controlState);
 
     // Confirm before overwriting.
     const confirmed = await Dialog.confirm({
       title: 'Paste Map Shine Scene Settings',
       content: `<p>Apply Map Shine settings from <strong>${sourceName}</strong> to <strong>${scene.name}</strong>?</p>
-               <p>This will overwrite <em>all</em> current Map Shine effect settings for this scene.</p>`,
+               <p>This will overwrite <em>all</em> current Map Shine effect settings for this scene.</p>
+               ${hasControlStatePaste
+        ? '<p>GM live-play control state (time/weather mode) from the clipboard will be applied when valid.</p>'
+        : '<p>Existing GM control state on this scene will be checked and repaired if it contains invalid values.</p>'}`,
       yes: () => true,
       no: () => false,
       defaultYes: false
@@ -4441,6 +4455,14 @@ export class TweakpaneManager {
     try {
       await scene.setFlag('map-shine-advanced', 'enabled', !!payload.enabled);
       await sceneSettings.setSceneSettings(scene, payload.settings);
+
+      if (hasControlStatePaste) {
+        const clean = cloneAndSanitizeControlState(payload.controlState, { silent: true });
+        await scene.setFlag('map-shine-advanced', 'controlState', clean);
+      } else {
+        await repairSceneControlStateFlag(scene);
+      }
+
       ui.notifications.info(`Map Shine: Settings from "${sourceName}" applied to "${scene.name}". Reload the scene to see full changes.`);
     } catch (e) {
       log.warn('Failed to paste scene settings:', e);

@@ -19,6 +19,7 @@ import {
 import { debugLoadingProfiler } from '../core/debug-loading-profiler.js';
 import { getFoundryTimePhaseHours } from '../core/foundry-time-phases.js';
 import { extendMsaLocalFlagWriteGuard } from '../utils/msa-local-flag-guard.js';
+import { sanitizeControlStateInPlace } from '../settings/control-state-sanitize.js';
 
 const log = createLogger('ControlPanel');
 
@@ -1849,6 +1850,8 @@ export class ControlPanelManager {
     } catch (e) {
     }
 
+    this._sanitizeControlStateForTweakpaneBindings();
+
     // Build UI sections
     if (_isDbg) _dlp.begin('cp.buildSections', 'finalize');
     this._buildPhaseALayout();
@@ -3476,6 +3479,15 @@ Current Weather:
       log.error('Failed to copy weather state:', error);
       ui.notifications?.error('Failed to copy weather state');
     }
+  }
+
+  /**
+   * Coerce scene-persisted control fields so Tweakpane option bindings do not throw.
+   * @private
+   */
+  _sanitizeControlStateForTweakpaneBindings() {
+    sanitizeControlStateInPlace(this.controlState, { silent: false });
+    this._ensureDirectedCustomPreset();
   }
 
   /**

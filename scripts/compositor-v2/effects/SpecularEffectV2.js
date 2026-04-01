@@ -1,6 +1,11 @@
 /**
  * @fileoverview V2 Specular Effect — per-tile additive specular overlays.
  *
+ * HEALTH-WIRING BADGE (Map Shine Breaker Box):
+ * If you change outdoors / roof-map binding, per-floor mask resolution, or overlay
+ * lifecycle, update HealthEvaluator contracts for `SpecularEffectV2` and keep
+ * `_healthDiagnostics` in `render()` accurate for Breaker Box diagnostics.
+ *
  * Architecture:
  *   For each tile that has a `_Specular` mask, this effect creates an additive
  *   overlay mesh positioned identically to the albedo tile but at a slightly
@@ -94,6 +99,12 @@ export class SpecularEffectV2 {
 
     // Foundry hook IDs for light tracking.
     this._hookIds = {};
+
+    /**
+     * Last-frame diagnostics for Map Shine Breaker Box (updated in render()).
+     * @type {object|null}
+     */
+    this._healthDiagnostics = null;
 
     // Effect parameters — same defaults as V1 for visual parity.
     this.params = {
@@ -193,6 +204,33 @@ export class SpecularEffectV2 {
   }
 
   // ── Public API ─────────────────────────────────────────────────────────────
+
+  /**
+   * Snapshot for Breaker Box / export: specular overlays + _Outdoors binding state.
+   * Populated each frame while overlays exist; null if never rendered or cleared.
+   * @returns {object|null}
+   */
+  getHealthDiagnostics() {
+    const d = this._healthDiagnostics;
+    if (!d) return null;
+    return {
+      ...d,
+      floors: [...(d.floors || [])],
+      outdoorsSlots: [...(d.outdoorsSlots || [])],
+      overlayByFloor: d.overlayByFloor && typeof d.overlayByFloor === 'object'
+        ? { ...d.overlayByFloor }
+        : d.overlayByFloor,
+      outdoorsFloorIdxHistogram: d.outdoorsFloorIdxHistogram && typeof d.outdoorsFloorIdxHistogram === 'object'
+        ? { ...d.outdoorsFloorIdxHistogram }
+        : d.outdoorsFloorIdxHistogram,
+      wetCloudOutdoorFactor: d.wetCloudOutdoorFactor && typeof d.wetCloudOutdoorFactor === 'object'
+        ? { ...d.wetCloudOutdoorFactor }
+        : d.wetCloudOutdoorFactor,
+      activeFloorOutdoors: d.activeFloorOutdoors && typeof d.activeFloorOutdoors === 'object'
+        ? { ...d.activeFloorOutdoors }
+        : d.activeFloorOutdoors,
+    };
+  }
 
   get enabled() { return this._enabled; }
   set enabled(v) {
@@ -556,7 +594,15 @@ export class SpecularEffectV2 {
    * @param {THREE.Camera} camera
    */
   render(renderer, camera) {
-    if (!this._initialized || !this._sharedUniforms || this._overlays.size === 0) return;
+    if (!this._initialized || !this._sharedUniforms) return;
+    if (this._overlays.size === 0) {
+      this._healthDiagnostics = {
+        timestamp: Date.now(),
+        overlayCount: 0,
+        note: 'No specular overlays — no _Specular tiles or populate() not run.',
+      };
+      return;
+    }
     const THREE = window.THREE;
     const u = this._sharedUniforms;
 
@@ -599,13 +645,270 @@ export class SpecularEffectV2 {
     }
 
     // ── Roof / outdoor mask ───────────────────────────────────────────────
+    // Multi-floor: sample GpuSceneMaskCompositor per-floor _Outdoors (same source as
+    // CloudEffectV2). Legacy single-floor / no compositor: weatherController.roofMap.
     try {
-      const roofTex = weatherController?.roofMap || null;
+      const compositor = window.MapShine?.gpuSceneMaskCompositor
+        ?? window.MapShine?.sceneComposer?._sceneMaskCompositor;
+      const floorStackFloors = window.MapShine?.floorStack?.getFloors?.() ?? [];
+      /** @type {(THREE.Texture|null)[]} */
+      const perFloorTex = [null, null, null, null];
+      /** @type {(string|null)[]} */
+      const resolvedKeys = [null, null, null, null];
+      let usePerFloor = false;
+      if (compositor && floorStackFloors.length > 1) {
+        for (const floor of floorStackFloors) {
+          const idx = Number(floor?.index);
+          if (!Number.isFinite(idx) || idx < 0 || idx > 3) continue;
+          const meta = this._resolveOutdoorsTextureForFloorWithMeta(compositor, floor);
+          perFloorTex[idx] = meta.texture;
+          resolvedKeys[idx] = meta.resolvedKey;
+          if (meta.texture) usePerFloor = true;
+        }
+      }
+
+      const fw = this._fallbackWhite;
+      u.uUsePerFloorOutdoors.value = usePerFloor ? 1.0 : 0.0;
+      if (usePerFloor) {
+        u.uRoofMap0.value = perFloorTex[0] ?? fw;
+        u.uRoofMap1.value = perFloorTex[1] ?? fw;
+        u.uRoofMap2.value = perFloorTex[2] ?? fw;
+        u.uRoofMap3.value = perFloorTex[3] ?? fw;
+        const anyTex = perFloorTex.find((t) => !!t) ?? null;
+        u.uOutdoorsMaskFlipY.value = anyTex?.flipY ? 1.0 : 0.0;
+      } else {
+        u.uRoofMap0.value = fw;
+        u.uRoofMap1.value = fw;
+        u.uRoofMap2.value = fw;
+        u.uRoofMap3.value = fw;
+        u.uOutdoorsMaskFlipY.value = 0.0;
+      }
+
+      // Single-floor: FloorCompositor pushes _Outdoors into weatherController.roofMap, but
+      // registry races or missed sync can leave roofMap null while GpuSceneMaskCompositor
+      // already has a texture — mirror _resolveOutdoorsMask key order so specular still binds.
+      const roofTexWeather = weatherController?.roofMap || null;
+      let roofTex = roofTexWeather;
+      /** @type {string|null} */
+      let singleFloorRoofSource = roofTexWeather ? 'weatherController' : null;
+      /** @type {{ step: string, hit: boolean, key?: string|null, uuid?: string|null, note?: string }[]} */
+      const singleFloorOutdoorsAttempts = [];
+      const recordAttempt = (step, tex, key = null, note = null) => {
+        singleFloorOutdoorsAttempts.push({
+          step,
+          hit: !!tex,
+          key: key != null ? String(key) : null,
+          uuid: tex?.uuid ?? null,
+          note: note ? String(note) : null,
+        });
+      };
+      recordAttempt('weatherController.roofMap', roofTexWeather, null);
+      if (!usePerFloor && !roofTex && compositor) {
+        const activeFloorForRoof = window.MapShine?.floorStack?.getActiveFloor?.() ?? null;
+        // Reuse floor-band resolver so single-floor can still hit sibling keys
+        // when active compositor key does not match _floorMeta key exactly.
+        if (activeFloorForRoof) {
+          const resolved = this._resolveOutdoorsTextureForFloorWithMeta(compositor, activeFloorForRoof);
+          roofTex = resolved.texture ?? null;
+          recordAttempt(
+            'compositor.resolveFloorBand(activeFloor)',
+            roofTex,
+            resolved.resolvedKey ?? activeFloorForRoof?.compositorKey ?? null
+          );
+          if (roofTex) singleFloorRoofSource = `compositorFloorBand:${resolved.resolvedKey || 'active'}`;
+        }
+        if (!roofTex) {
+          const ctx = window.MapShine?.activeLevelContext;
+          const b = Number(ctx?.bottom);
+          const t = Number(ctx?.top);
+          if (Number.isFinite(b) && Number.isFinite(t)) {
+            const ctxBand = {
+              compositorKey: `${b}:${t}`,
+              elevationMin: b,
+              elevationMax: t,
+            };
+            const resolvedCtx = this._resolveOutdoorsTextureForFloorWithMeta(compositor, ctxBand);
+            roofTex = resolvedCtx.texture ?? null;
+            recordAttempt(
+              'compositor.resolveFloorBand(levelContext)',
+              roofTex,
+              resolvedCtx.resolvedKey ?? `${b}:${t}`
+            );
+            if (roofTex) singleFloorRoofSource = `compositorLevelContext:${resolvedCtx.resolvedKey || `${b}:${t}`}`;
+          }
+        }
+        if (!roofTex) {
+          const cak = compositor._activeFloorKey ?? null;
+          if (cak) {
+            roofTex = compositor.getFloorTexture?.(String(cak), 'outdoors') ?? null;
+            recordAttempt('compositor._activeFloorKey', roofTex, String(cak));
+            if (roofTex) singleFloorRoofSource = `compositorInternalActiveKey:${String(cak)}`;
+          }
+        }
+        if (!roofTex) {
+          roofTex = compositor.getGroundFloorMaskTexture?.('outdoors') ?? null;
+          recordAttempt('compositor.getGroundFloorMaskTexture', roofTex, 'ground');
+          if (roofTex) singleFloorRoofSource = 'compositorGroundFloor';
+        }
+        if (!roofTex) {
+          const bundleMask = window.MapShine?.sceneComposer?.currentBundle?.masks
+            ?.find?.((m) => (m?.id ?? m?.type) === 'outdoors')
+            ?.texture ?? null;
+          roofTex = bundleMask;
+          recordAttempt('sceneComposer.currentBundle.outdoors', roofTex, 'bundle');
+          if (roofTex) singleFloorRoofSource = 'sceneComposerBundle';
+        }
+        if (!roofTex) {
+          const mmMask = window.MapShine?.maskManager?.getTexture?.('outdoors.scene') ?? null;
+          roofTex = mmMask;
+          recordAttempt('maskManager.getTexture(outdoors.scene)', roofTex, 'outdoors.scene');
+          if (roofTex) singleFloorRoofSource = 'maskManager.outdoors.scene';
+        }
+        if (!roofTex) {
+          const regMask = window.MapShine?.effectMaskRegistry?.getMask?.('outdoors') ?? null;
+          roofTex = regMask;
+          recordAttempt('effectMaskRegistry.getMask(outdoors)', roofTex, 'outdoors');
+          if (roofTex) singleFloorRoofSource = 'effectMaskRegistry.outdoors';
+        }
+      }
+
+      if (!usePerFloor && roofTex) {
+        u.uOutdoorsMaskFlipY.value = roofTex.flipY ? 1.0 : 0.0;
+      }
+
       u.uRoofMap.value = roofTex || this._fallbackBlack;
-      u.uRoofMaskEnabled.value = roofTex ? 1.0 : 0.0;
-    } catch (_) {
+      u.uRoofMaskEnabled.value = (usePerFloor || roofTex) ? 1.0 : 0.0;
+
+      const overlayByFloor = {};
+      /** @type {Record<string, number>} */
+      const outdoorsFloorIdxHistogram = {};
+      for (const [, ent] of this._overlays) {
+        const fi = Number(ent.floorIndex) || 0;
+        overlayByFloor[fi] = (overlayByFloor[fi] || 0) + 1;
+        const ufi = ent.material?.uniforms?.uOutdoorsFloorIdx?.value;
+        const hk = String(Number.isFinite(Number(ufi)) ? Number(ufi) : fi);
+        outdoorsFloorIdxHistogram[hk] = (outdoorsFloorIdxHistogram[hk] || 0) + 1;
+      }
+      const activeFloor = window.MapShine?.floorStack?.getActiveFloor?.() ?? null;
+      const afi = Number.isFinite(Number(activeFloor?.index)) ? Number(activeFloor.index) : null;
+      const texSize = (tex) => {
+        if (!tex) return null;
+        const w = Number(tex.image?.width ?? tex.source?.data?.width ?? 0) || null;
+        const h = Number(tex.image?.height ?? tex.source?.data?.height ?? 0) || null;
+        return w && h ? `${w}×${h}` : null;
+      };
+      const outdoorsSlots = [0, 1, 2, 3].map((i) => ({
+        slot: i,
+        textureUuid: usePerFloor
+          ? (perFloorTex[i]?.uuid ?? null)
+          : (i === 0 ? (roofTex?.uuid ?? null) : null),
+        textureSize: usePerFloor
+          ? texSize(perFloorTex[i])
+          : (i === 0 ? texSize(roofTex) : null),
+        resolvedCompositorKey: resolvedKeys[i],
+        binding: usePerFloor
+          ? (perFloorTex[i] && perFloorTex[i] !== fw ? 'compositorOutdoors' : 'fallbackWhite')
+          : (i === 0
+            ? (roofTex
+              ? (roofTexWeather ? 'legacyWeatherRoofMap' : `singleFloor_${singleFloorRoofSource || 'compositor'}`)
+              : 'none')
+            : 'unusedSingleFloor'),
+        isFallbackWhite: !!(usePerFloor && (perFloorTex[i] === fw || !perFloorTex[i])),
+      }));
+      const activeTex = (afi != null && afi >= 0 && afi <= 3)
+        ? (usePerFloor ? perFloorTex[afi] : (afi === 0 ? roofTex : null))
+        : null;
+      const activeUsesRealOutdoors = usePerFloor
+        ? !!(activeTex && activeTex !== fw)
+        : !!roofTex;
+      const activeFloorOutdoors = (afi != null && afi >= 0 && afi <= 3)
+        ? {
+          activeFloorIndex: afi,
+          activeCompositorKey: activeFloor?.compositorKey ?? null,
+          slotIndex: afi,
+          resolvedCompositorKey: resolvedKeys[afi],
+          binding: outdoorsSlots[afi]?.binding ?? null,
+          textureUuid: usePerFloor
+            ? (perFloorTex[afi]?.uuid ?? null)
+            : (afi === 0 ? (roofTex?.uuid ?? null) : null),
+          textureSize: usePerFloor ? texSize(perFloorTex[afi]) : (afi === 0 ? texSize(roofTex) : null),
+          usesRealCompositorTexture: activeUsesRealOutdoors,
+          matchesFallbackWhiteTexture: usePerFloor && (!activeTex || activeTex === fw),
+          singleFloorRoofSource: !usePerFloor ? singleFloorRoofSource : null,
+        }
+        : null;
+      /** @type {string} */
+      let activeOutdoorsMaskStatus = 'unknown';
+      if (usePerFloor) {
+        if (afi == null || afi < 0 || afi > 3) activeOutdoorsMaskStatus = 'unknown_active_floor';
+        else if (activeUsesRealOutdoors) activeOutdoorsMaskStatus = 'valid_compositor_outdoors';
+        else activeOutdoorsMaskStatus = 'broken_fallback_white_treated_as_full_outdoor';
+      } else if (roofTex) {
+        activeOutdoorsMaskStatus = roofTexWeather ? 'legacy_weather_roof_map' : 'single_floor_compositor_uRoofMap';
+      } else {
+        activeOutdoorsMaskStatus = 'single_floor_no_roof_map';
+      }
+      const wetCloudOutdoorFactor = {
+        note: 'Wet specular, outdoor cloud specular, stripe outdoor mix, frost outdoor term, and wind ripple all multiply by outdoorFactor in the shader.',
+        outdoorCloudSpecularEnabled: !!u.uOutdoorCloudSpecularEnabled?.value,
+        outdoorStripeBlend: Number(u.uOutdoorStripeBlend?.value),
+        cloudSpecularIntensity: Number(u.uCloudSpecularIntensity?.value),
+        wetSpecularEnabled: !!u.uWetSpecularEnabled?.value,
+        rainWetnessUniform: Number(u.uRainWetness?.value),
+        wetSpecularIntensity: Number(u.uWetSpecularIntensity?.value),
+        wetBaseSheen: Number(u.uWetBaseSheen?.value),
+        wetWindRippleStrength: Number(u.uWetWindRippleStrength?.value),
+        stripeEnabled: !!u.uStripeEnabled?.value,
+        frostGlazeEnabled: !!u.uFrostGlazeEnabled?.value,
+        buildingShadowSuppressionEnabled: !!u.uBuildingShadowSuppressionEnabled?.value,
+      };
+      this._healthDiagnostics = {
+        timestamp: Date.now(),
+        overlayCount: this._overlays.size,
+        overlayByFloor,
+        outdoorsFloorIdxHistogram,
+        compositorPresent: !!compositor,
+        floorStackCount: floorStackFloors.length,
+        activeFloorIndex: afi,
+        activeCompositorKey: activeFloor?.compositorKey ?? null,
+        shaderOutdoorsMode: usePerFloor ? 'perFloorTextureArray' : 'legacySingle_uRoofMap',
+        activeOutdoorsMaskStatus,
+        decodeOutdoorsHint: 'Shader decodeOutdoorsMaskSample: max(rgb)*a; (0,0,0,0) => 1.0 (untreated). fallbackWhite RGB=1 => full outdoor.',
+        usePerFloor,
+        roofMaskEnabled: Number(u.uRoofMaskEnabled.value),
+        usePerFloorOutdoorsUniform: Number(u.uUsePerFloorOutdoors.value),
+        outdoorsMaskFlipY: Number(u.uOutdoorsMaskFlipY.value),
+        weatherRoofMapUuid: roofTexWeather?.uuid ?? null,
+        specularRoofMapUuid: roofTex?.uuid ?? null,
+        singleFloorRoofSource: !usePerFloor ? singleFloorRoofSource : null,
+        singleFloorOutdoorsAttempts: !usePerFloor ? singleFloorOutdoorsAttempts : [],
+        legacyRoofMapBound: !!roofTex,
+        floors: floorStackFloors.map((f) => ({
+          index: f.index,
+          compositorKey: f.compositorKey,
+          elevationMin: f.elevationMin,
+          elevationMax: f.elevationMax,
+        })),
+        outdoorsSlots,
+        activeFloorOutdoors,
+        wetCloudOutdoorFactor,
+      };
+    } catch (err) {
+      const fw = this._fallbackWhite;
       u.uRoofMap.value = this._fallbackBlack;
       u.uRoofMaskEnabled.value = 0.0;
+      u.uUsePerFloorOutdoors.value = 0.0;
+      u.uOutdoorsMaskFlipY.value = 0.0;
+      u.uRoofMap0.value = fw;
+      u.uRoofMap1.value = fw;
+      u.uRoofMap2.value = fw;
+      u.uRoofMap3.value = fw;
+      this._healthDiagnostics = {
+        timestamp: Date.now(),
+        error: true,
+        message: String(err?.message || err || 'roof mask bind failed'),
+        overlayCount: this._overlays.size,
+      };
     }
 
     // ── Building shadow texture ───────────────────────────────────────────
@@ -662,6 +965,7 @@ export class SpecularEffectV2 {
     }
     this._overlays.clear();
     this._lights.clear();
+    this._healthDiagnostics = null;
   }
 
   /**
@@ -695,6 +999,7 @@ export class SpecularEffectV2 {
     // Create material with shared uniforms + per-tile texture uniforms.
     // THREE.UniformsUtils.clone() deep-copies value objects, so we manually
     // reference the shared uniforms and only create new entries for per-tile data.
+    const floorIdx = Math.min(3, Math.max(0, Number(floorIndex) || 0));
     const perTileUniforms = {
       uAlbedoMap:      { value: this._fallbackWhite },
       uSpecularMap:    { value: this._fallbackBlack },
@@ -703,6 +1008,7 @@ export class SpecularEffectV2 {
       uHasRoughnessMap: { value: false },
       uHasNormalMap:    { value: false },
       uTileOpacity:     { value: 1.0 },
+      uOutdoorsFloorIdx: { value: floorIdx },
     };
 
     // Merge shared + per-tile uniforms. Shared uniforms are referenced (not cloned)
@@ -887,10 +1193,16 @@ export class SpecularEffectV2 {
       uWetBaseSheen: { value: this.params.wetBaseSheen },
       uWetWindRippleStrength: { value: this.params.wetWindRippleStrength },
 
-      // Roof / outdoor mask
+      // Roof / outdoor mask (legacy uRoofMap + optional per-floor compositor masks)
       uRoofMap: { value: this._fallbackBlack },
       uRoofMaskEnabled: { value: 0 },
       uSceneBounds: { value: new THREE.Vector4(0, 0, 1, 1) },
+      uRoofMap0: { value: this._fallbackWhite },
+      uRoofMap1: { value: this._fallbackWhite },
+      uRoofMap2: { value: this._fallbackWhite },
+      uRoofMap3: { value: this._fallbackWhite },
+      uUsePerFloorOutdoors: { value: 0.0 },
+      uOutdoorsMaskFlipY: { value: 0.0 },
 
       // Cloud shadow
       uHasCloudShadowMap: { value: false },
@@ -1108,6 +1420,77 @@ export class SpecularEffectV2 {
   }
 
   // ── Private: Floor resolution ──────────────────────────────────────────────
+
+  /**
+   * @param {object} compositor
+   * @param {{ compositorKey?: string, elevationMin?: number, elevationMax?: number }} floorBand
+   * @returns {{ texture: THREE.Texture|null, resolvedKey: string|null }}
+   * @private
+   */
+  _resolveOutdoorsTextureForFloorWithMeta(compositor, floorBand) {
+    const empty = { texture: null, resolvedKey: null };
+    if (!compositor || !floorBand) return empty;
+
+    const tryKey = (k) => {
+      if (k == null || k === '') return null;
+      return compositor.getFloorTexture?.(String(k), 'outdoors') ?? null;
+    };
+
+    const b = Number(floorBand.elevationMin);
+    const top = Number(floorBand.elevationMax);
+    const ck = floorBand.compositorKey;
+
+    // Try compositorKey first
+    let t = tryKey(ck);
+    if (t) return { texture: t, resolvedKey: String(ck) };
+
+    // Try explicit band key
+    if (Number.isFinite(b) && Number.isFinite(top)) {
+      const bandKey = `${b}:${top}`;
+      t = tryKey(bandKey);
+      if (t) return { texture: t, resolvedKey: bandKey };
+    }
+
+    // Try to find ANY key in _floorMeta or _floorCache that matches this elevation
+    if (!Number.isFinite(b)) return empty;
+
+    /** @type {Set<string>} */
+    const keySet = new Set();
+    try {
+      const meta = compositor._floorMeta;
+      if (meta && typeof meta.keys === 'function') {
+        for (const k of meta.keys()) keySet.add(String(k));
+      }
+    } catch (_) {}
+    try {
+      const cache = compositor._floorCache;
+      if (cache && typeof cache.keys === 'function') {
+        for (const k of cache.keys()) keySet.add(String(k));
+      }
+    } catch (_) {}
+
+    const matching = [...keySet].filter((key) => {
+      const kb = Number(String(key).split(':')[0]);
+      return kb === b;
+    }).sort();
+
+    for (const key of matching) {
+      t = tryKey(key);
+      if (t) return { texture: t, resolvedKey: key };
+    }
+
+    return empty;
+  }
+
+  /**
+   * @param {object} compositor
+   * @param {object} floorBand
+   * @returns {THREE.Texture|null}
+   * @private
+   */
+  _resolveOutdoorsTextureForFloor(compositor, floorBand) {
+    return this._resolveOutdoorsTextureForFloorWithMeta(compositor, floorBand).texture;
+  }
 
   /**
    * Resolve which floor a tile belongs to. Same logic as FloorRenderBus.

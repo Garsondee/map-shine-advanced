@@ -691,6 +691,14 @@ export class EffectComposer {
         }
       } catch (_) {}
 
+      try {
+        const he = window.MapShine?.healthEvaluator;
+        if (he) {
+          he.floorCompositor = this._floorCompositorV2;
+          he.refreshInstrumentation?.();
+        }
+      } catch (_) {}
+
       // ── Replay saved params ─────────────────────────────────────────────
       // The Tweakpane UI fires its initial callbacks (loadEffectParameters →
       // _propagateToV2) during initializeUI, which runs BEFORE the first

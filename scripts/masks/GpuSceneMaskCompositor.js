@@ -429,13 +429,30 @@ export class GpuSceneMaskCompositor {
     const floorKey = options.floorKey ??
       (ctx ? `${ctx.bottom}:${ctx.top}` : 'ground');
 
+    const registry = getEffectMaskRegistry();
+
     // Collect all mask types present across all tiles.
     const allMaskTypes = new Set();
     for (const entry of tileMaskEntries) {
       if (!entry.masks) continue;
       for (const key of entry.masks.keys()) allMaskTypes.add(key);
     }
-    if (allMaskTypes.size === 0) return null;
+    // Levels: always consider _Outdoors so we refresh or drop the GPU RT each compose.
+    // Otherwise a stale cleared RT wins in getFloorTexture() over file/bundle masks in
+    // _floorMeta, and decodeOutdoorsMaskSample treats empty texels like "full outdoor".
+    if (ctx != null && Number.isFinite(Number(ctx.bottom)) && Number.isFinite(Number(ctx.top))) {
+      if (registry?.outdoors) {
+        allMaskTypes.add('outdoors');
+        log.info(`compose[${floorKey}]: force-adding outdoors (Levels context)`);
+      } else {
+        log.warn(`compose[${floorKey}]: registry.outdoors missing, cannot force-add`);
+      }
+    }
+    log.info(`compose[${floorKey}]: mask types from tiles`, { types: [...allMaskTypes], tileCount: tileMaskEntries.length });
+    if (allMaskTypes.size === 0) {
+      log.warn(`compose[${floorKey}]: no mask types to compose`);
+      return null;
+    }
 
     // Sort tiles by Z-order: lowest elevation/sort first, upper tiles composite on top.
     const sortedEntries = [...tileMaskEntries].sort((a, b) => {
@@ -448,7 +465,6 @@ export class GpuSceneMaskCompositor {
     // Ensure GPU resources are ready.
     this._ensureGpuResources(THREE);
 
-    const registry = getEffectMaskRegistry();
     const maxTex = renderer.capabilities?.maxTextureSize ?? 16384;
 
     // Get or create the per-floor render target map.
@@ -512,13 +528,21 @@ export class GpuSceneMaskCompositor {
       // Skipping empty masks lets transitionToFloor either preserve (if
       // preserveAcrossFloors) or clear (falling back to default behavior,
       // e.g. no outdoors mask → treat everything as outdoors → caustics work).
+      //
+      // EXCEPTION — outdoors: _readbackIsNonEmpty() only inspects RGB. A valid
+      // "entire floor is indoors" _Outdoors map is often black RGB (sometimes with
+      // alpha cutouts). That is meaningful data for SpecularEffectV2 / per-floor
+      // bindings; discarding it leaves no GpuSceneMaskCompositor texture and
+      // effects fall back to "full outdoors". If we drew at least one outdoors
+      // tile (anyDrawn), always publish the RT even when RGB samples are zero.
       const emr = window.MapShine?.effectMaskRegistry;
       const maskPolicy = emr?.getPolicy?.(maskType);
       const skipReadbackCheck = isLighten && !maskPolicy?.preserveAcrossFloors;
       if (!skipReadbackCheck) {
         try {
           const isNonEmpty = this._readbackIsNonEmpty(renderer, rt);
-          if (!isNonEmpty) {
+          const keepAllZeroOutdoors = maskType === 'outdoors' && anyDrawn;
+          if (!isNonEmpty && !keepAllZeroOutdoors) {
             log.debug(`compose: skipping all-zero '${maskType}' mask`);
             continue;
           }
@@ -527,6 +551,7 @@ export class GpuSceneMaskCompositor {
 
       // The render target texture is the compositor output.
       const outTex = rt.texture;
+      log.info(`compose[${floorKey}]: produced mask '${maskType}' via GPU RT`);
 
       // Apply correct color space.
       if (COLOR_TEXTURE_IDS.has(maskType) && THREE.SRGBColorSpace) {
@@ -557,6 +582,15 @@ export class GpuSceneMaskCompositor {
       sceneX, sceneY, sceneW, sceneH, maxTex
     );
     if (floorAlphaEntry) compositeMasks.push(floorAlphaEntry);
+
+    // Drop GPU outdoors RT if this pass did not publish it — otherwise getFloorTexture()
+    // keeps returning stale/cleared pixels and mergeMasks file textures never bind.
+    const producedMaskIds = new Set(compositeMasks.map((m) => m.id ?? m.type));
+    if (!producedMaskIds.has('outdoors') && floorTargets.has('outdoors')) {
+      const oRt = floorTargets.get('outdoors');
+      try { oRt?.dispose?.(); } catch (_) {}
+      floorTargets.delete('outdoors');
+    }
 
     if (compositeMasks.length === 0) return null;
 
@@ -662,6 +696,9 @@ export class GpuSceneMaskCompositor {
 
     log.info('composeFloor: cache miss, compositing floor', { floorKey, bandBottom, bandTop });
 
+    // Stale outdoors RT must not shadow bundle/file masks merged into _floorMeta.
+    this._evictGpuMaskRtForFloor(floorKey, 'outdoors');
+
     let newMasks = null;
     let primaryBasePath = null;
 
@@ -728,10 +765,6 @@ export class GpuSceneMaskCompositor {
               } catch (_) {}
             }
             newMasks = this.mergeMasks(baseBundleMasks, compositorResult.masks);
-            log.info('composeFloor: GPU compositor produced masks', {
-              gpuCount: compositorResult.masks.length,
-              mergedTotal: newMasks.length
-            });
           }
         }
       } catch (e) {
@@ -764,7 +797,6 @@ export class GpuSceneMaskCompositor {
             return true;
           });
           if (!newMasks.length) newMasks = null;
-          log.info('composeFloor: fell back to single-tile bundle', { primaryBasePath });
         }
       } catch (e) {
         log.warn('composeFloor: single-tile bundle load failed', e);
@@ -812,6 +844,10 @@ export class GpuSceneMaskCompositor {
 
     // Store in per-floor metadata cache.
     this._floorMeta.set(floorKey, { masks: newMasks, basePath: primaryBasePath });
+    
+    // Single diagnostic log per floor composition - show what masks we have
+    const outdoorsEntry = newMasks.find(m => (m?.id || m?.type) === 'outdoors');
+    log.info(`composeFloor[${floorKey}]: stored ${newMasks.length} masks, outdoors=${outdoorsEntry ? (outdoorsEntry.texture ? 'texture' : 'no-texture') : 'missing'}`);
 
     if (cacheOnly) {
       log.info('composeFloor: preloaded (cacheOnly)', { floorKey, maskCount: newMasks.length });
@@ -911,9 +947,49 @@ export class GpuSceneMaskCompositor {
         }
       } catch (_) {}
 
-      if (bands.size <= 1) return;
+      // Single-band (and zero-band + active context) Levels scenes used to return here
+      // without ever calling composeFloor(). Multi-floor maps hit composeFloor via the
+      // loop below — so per-tile _Outdoors / GPU scene-space RTs never existed for
+      // ground-only maps, breaking BuildingShadows + specular roof sampling.
+      if (bands.size <= 1) {
+        const ctx = activeLevelContext || window.MapShine?.activeLevelContext;
+        let bandBottom = NaN;
+        let bandTop = NaN;
+        if (bands.size === 1) {
+          const sole = [...bands][0];
+          const parts = String(sole).split(':').map(Number);
+          bandBottom = parts[0];
+          bandTop = parts[1];
+        }
+        if ((!Number.isFinite(bandBottom) || !Number.isFinite(bandTop)) && ctx) {
+          bandBottom = Number(ctx.bottom);
+          bandTop = Number(ctx.top);
+        }
+        if (Number.isFinite(bandBottom) && Number.isFinite(bandTop)) {
+          const floorKey = `${bandBottom}:${bandTop}`;
+          try {
+            this._floorMeta.delete(floorKey);
+            await this.composeFloor({ bottom: bandBottom, top: bandTop }, sc, {
+              lastMaskBasePath,
+              cacheOnly: false,
+            });
+            log.info('preloadAllFloors: single-band — full composeFloor', { floorKey });
+          } catch (e) {
+            log.warn('preloadAllFloors: single-band composeFloor failed', e);
+          }
+        }
+        return;
+      }
 
       log.debug('preloadAllFloors: warming cache for', bands.size, 'level bands');
+
+      const sortedBandKeys = [...bands].sort((a, b) => {
+        const [ab, at] = String(a).split(':').map(Number);
+        const [bb, bt] = String(b).split(':').map(Number);
+        const db = (Number.isFinite(ab) ? ab : 0) - (Number.isFinite(bb) ? bb : 0);
+        if (db !== 0) return db;
+        return (Number.isFinite(at) ? at : 0) - (Number.isFinite(bt) ? bt : 0);
+      });
 
       // Derive the scene background image's basePath for ground-floor fallback.
       // lastMaskBasePath holds the ACTIVE floor's path — if the player loaded on
@@ -941,7 +1017,7 @@ export class GpuSceneMaskCompositor {
       };
 
       const isGM = isGmLike();
-      for (const bandKey of bands) {
+      for (const bandKey of sortedBandKeys) {
         await _yieldIfNeeded();
         const [bottom, top] = bandKey.split(':').map(Number);
 
@@ -1446,7 +1522,8 @@ export class GpuSceneMaskCompositor {
       }
     }
     if (!groundKey) return null;
-    return this.getMaskTextureForFloor(groundKey, maskType);
+    // Use getFloorTexture so GPU _floorCache RT wins over file-only meta (same as keyed lookups).
+    return this.getFloorTexture(groundKey, maskType);
   }
 
   /**
@@ -1515,7 +1592,8 @@ export class GpuSceneMaskCompositor {
    */
   getFloorTexture(floorKey, maskType) {
     // Primary: GPU render target produced by the compose() path.
-    const rt = this._floorCache.get(floorKey)?.get(maskType);
+    const floorTargets = this._floorCache.get(floorKey);
+    const rt = floorTargets?.get(maskType);
     if (rt?.texture) return rt.texture;
 
     // Fallback: file-based bundle in _floorMeta produced by the cacheOnly
@@ -1525,7 +1603,7 @@ export class GpuSceneMaskCompositor {
     const meta = this._floorMeta.get(floorKey);
     if (meta?.masks) {
       const entry = meta.masks.find(m => (m.id ?? m.type) === maskType);
-      return entry?.texture ?? null;
+      if (entry?.texture) return entry.texture;
     }
     return null;
   }
@@ -1576,8 +1654,9 @@ export class GpuSceneMaskCompositor {
   mergeMasks(originalMasks, compositorMasks) {
     if (!compositorMasks?.length) return originalMasks || [];
     if (!originalMasks?.length) return compositorMasks;
-    const compositorIds = new Set(compositorMasks.map(m => m.id));
-    const kept = originalMasks.filter(m => !compositorIds.has(m.id));
+    const semanticId = (m) => m?.id ?? m?.type;
+    const compositorIds = new Set(compositorMasks.map((m) => semanticId(m)));
+    const kept = originalMasks.filter((m) => !compositorIds.has(semanticId(m)));
     return [...kept, ...compositorMasks];
   }
 
@@ -1797,6 +1876,23 @@ export class GpuSceneMaskCompositor {
    * @returns {Map<string, THREE.WebGLRenderTarget>}
    * @private
    */
+  /**
+   * Remove one mask RT from the GPU floor cache (e.g. stale outdoors that would
+   * otherwise beat _floorMeta in getFloorTexture).
+   * @param {string} floorKey
+   * @param {string} maskType
+   * @private
+   */
+  _evictGpuMaskRtForFloor(floorKey, maskType) {
+    if (!floorKey || !maskType) return;
+    const map = this._floorCache.get(floorKey);
+    if (!map) return;
+    const rt = map.get(maskType);
+    if (!rt) return;
+    try { rt.dispose(); } catch (_) {}
+    map.delete(maskType);
+  }
+
   _getOrCreateFloorTargets(floorKey) {
     if (this._floorCache.has(floorKey)) {
       return this._floorCache.get(floorKey);

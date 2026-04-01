@@ -214,6 +214,7 @@ export class WaterEffectV2 {
       specDisableRainSlope: false,
       specRoughnessMin: 0.0,
       specRoughnessMax: 1.0,
+      specSurfaceChaos: 0.5,
       specF0: 0.249,
       specMaskGamma: 0.52,
       specSkyTint: 1.0,
@@ -757,7 +758,7 @@ export class WaterEffectV2 {
             'specNormalStrength', 'specNormalScale', 'specNormalMode',
             'specMicroStrength', 'specMicroScale', 'specAAStrength', 'specWaveStepMul',
             'specForceFlatNormal', 'specDisableMasking', 'specDisableRainSlope',
-            'specRoughnessMin', 'specRoughnessMax', 'specF0', 'specMaskGamma',
+            'specRoughnessMin', 'specRoughnessMax', 'specSurfaceChaos', 'specF0', 'specMaskGamma',
             'specSkyTint', 'skyIntensity', 'specShoreBias',
             'specDistortionNormalStrength', 'specAnisotropy', 'specAnisoRatio'
           ]
@@ -997,6 +998,11 @@ export class WaterEffectV2 {
         specDisableRainSlope: { type: 'boolean', default: false, label: 'Disable Rain Slope' },
         specRoughnessMin: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.05, label: 'Roughness Min' },
         specRoughnessMax: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.30, label: 'Roughness Max' },
+        specSurfaceChaos: {
+          type: 'slider', min: 0, max: 1, step: 0.01, default: 0.5,
+          label: 'Surface chaos',
+          tooltip: 'Breaks smooth specular: more curl/micro normals, capillary chop, and patchy roughness (river/sea vs pool glass). 0 = legacy glassy pool look.'
+        },
         specF0: { type: 'slider', min: 0, max: 1, step: 0.001, default: 0.04, label: 'F0' },
         specMaskGamma: { type: 'slider', min: 0.1, max: 4, step: 0.01, default: 0.5, label: 'Mask Gamma' },
         specSkyTint: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.3, label: 'Sky Tint' },
@@ -2250,8 +2256,10 @@ export class WaterEffectV2 {
       // Apply smoothstep easing to the blend factor
       const sBlend = this._windDirBlend01 * this._windDirBlend01 * (3.0 - 2.0 * this._windDirBlend01);
 
-      if (u.uPrevWindDir) u.uPrevWindDir.value.set(this._prevWindDirX, this._prevWindDirY);
-      if (u.uTargetWindDir) u.uTargetWindDir.value.set(this._targetWindDirX, this._targetWindDirY);
+      // Water shader operates in scene UV (Y-down). Weather/controller wind vectors
+      // are Y-up in world space, so convert only the shader-facing uniforms.
+      if (u.uPrevWindDir) u.uPrevWindDir.value.set(this._prevWindDirX, -this._prevWindDirY);
+      if (u.uTargetWindDir) u.uTargetWindDir.value.set(this._targetWindDirX, -this._targetWindDirY);
       if (u.uWindDirBlend) u.uWindDirBlend.value = sBlend;
     }
 
@@ -2321,11 +2329,10 @@ export class WaterEffectV2 {
     u.uWindTime.value = this._windTime;
     if (u.uWaveTime) u.uWaveTime.value = this._waveTime;
 
-    // Water uses Foundry/scene UV space (Y-down), matching CloudEffectV2.
-    // The water shader assumes uWindDir points toward the direction of travel
-    // ("blowing toward"). Do not flip Y here.
+    // Water shader samples scene UV in Y-down space, while weather/controller
+    // wind direction is world-space Y-up. Flip Y for shader-facing wind vectors.
     const waterWindDirX = windDirX;
-    const waterWindDirY = windDirY;
+    const waterWindDirY = -windDirY;
     u.uWindDir.value.set(waterWindDirX, waterWindDirY);
     u.uWindSpeed.value = gust01;
 
@@ -2516,6 +2523,7 @@ export class WaterEffectV2 {
     if (u.uSpecDisableRainSlope) u.uSpecDisableRainSlope.value = p.specDisableRainSlope ? 1.0 : 0.0;
     u.uSpecRoughnessMin.value = safeNum(p.specRoughnessMin, 0.0);
     u.uSpecRoughnessMax.value = safeNum(p.specRoughnessMax, 1.0);
+    u.uSpecSurfaceChaos.value = safeNum(p.specSurfaceChaos, 0.5);
     u.uSpecF0.value = safeNum(p.specF0, 0.249);
     u.uSpecMaskGamma.value = safeNum(p.specMaskGamma, 0.52);
     u.uSpecSkyTint.value = safeNum(p.specSkyTint, 1.0);
@@ -3193,6 +3201,7 @@ export class WaterEffectV2 {
       uSpecDisableRainSlope:{ value: p.specDisableRainSlope ? 1.0 : 0.0 },
       uSpecRoughnessMin:    { value: p.specRoughnessMin },
       uSpecRoughnessMax:    { value: p.specRoughnessMax },
+      uSpecSurfaceChaos:    { value: p.specSurfaceChaos ?? 0.5 },
       uSpecF0:              { value: p.specF0 },
       uSpecMaskGamma:       { value: p.specMaskGamma },
       uSpecSkyTint:         { value: p.specSkyTint },

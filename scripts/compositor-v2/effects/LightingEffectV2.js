@@ -534,8 +534,13 @@ export class LightingEffectV2 {
           vec2 worldXYs = mix(w0s, w1s, vUv.y);
           float foundryXs = worldXYs.x;
           float foundryYs = uSceneDimensions.y - worldXYs.y;
-          vec2 sceneUvFoundry = (vec2(foundryXs, foundryYs) - uBldSceneOrigin) / max(uBldSceneSize, vec2(1e-5));
-          sceneUvFoundry = clamp(sceneUvFoundry, 0.0, 1.0);
+          vec2 sceneUvRaw = (vec2(foundryXs, foundryYs) - uBldSceneOrigin) / max(uBldSceneSize, vec2(1e-5));
+          vec2 sceneUvFoundry = clamp(sceneUvRaw, 0.0, 1.0);
+          float inSceneBounds =
+            step(0.0, sceneUvRaw.x) *
+            step(0.0, sceneUvRaw.y) *
+            step(sceneUvRaw.x, 1.0) *
+            step(sceneUvRaw.y, 1.0);
 
           // Roof / tree canopy: prefer packed ceiling transmittance T (half-res blit from
           // OverheadShadows) so geometric gating matches one source; else derive from
@@ -667,6 +672,9 @@ export class LightingEffectV2 {
           if (uHasBuildingShadow > 0.5) {
             // BuildingShadowsEffectV2 outputs scene-space UV aligned with sceneUvFoundry.
             float bldShadow = clamp(texture2D(tBuildingShadow, sceneUvFoundry).r, 0.0, 1.0);
+            // Guard scene padding / outside-scene pixels: do NOT clamp-sample edge texels
+            // from tBuildingShadow there, otherwise dark bands appear at map borders.
+            bldShadow = mix(1.0, bldShadow, inSceneBounds);
 
             float shadowMix = mix(1.0, bldShadow, uBuildingShadowOpacity);
             // Suppress building shadow where visible overhead roof pixels exist.

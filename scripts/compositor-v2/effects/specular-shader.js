@@ -147,9 +147,18 @@ export function getFragmentShader(maxLights = 64) {
     uniform float uWetWindRippleStrength;
 
     // ── Outdoor/roof mask ─────────────────────────────────────────────────────
+    // Legacy single texture (weatherController.roofMap) when uUsePerFloorOutdoors < 0.5.
     uniform sampler2D uRoofMap;
     uniform float uRoofMaskEnabled;
     uniform vec4 uSceneBounds;         // (sceneX, sceneY_world, sceneW, sceneH)
+    uniform sampler2D uRoofMap0;
+    uniform sampler2D uRoofMap1;
+    uniform sampler2D uRoofMap2;
+    uniform sampler2D uRoofMap3;
+    uniform float uUsePerFloorOutdoors;
+    uniform float uOutdoorsMaskFlipY;
+    // Per-overlay: floor index 0..3 (merged from per-tile uniforms).
+    uniform float uOutdoorsFloorIdx;
 
     // ── Cloud shadow map ──────────────────────────────────────────────────────
     uniform bool uHasCloudShadowMap;
@@ -244,6 +253,17 @@ export function getFragmentShader(maxLights = 64) {
       g.x  = a0.x  * x0.x  + h.x  * x0.y;
       g.yz = a0.yz * x12.xz + h.yz * x12.yw;
       return 130.0 * dot(m, g);
+    }
+
+    // _Outdoors RTs store full RGBA (GpuSceneMaskCompositor source-over). Authors often use
+    // black RGB with alpha for indoor cutouts; sampling .r alone ignores alpha so
+    // semi-transparent blacks still read as 0 in R but bilinear / edge bleed can mis-classify.
+    // Weight by alpha like TILE_FRAG lighten: max(r,g,b)*a. Cleared RT texels are (0,0,0,0);
+    // treat as untouched → default outdoor so scenes without painted mask stay bright.
+    float decodeOutdoorsMaskSample(vec4 s) {
+      float lum = max(s.r, max(s.g, s.b));
+      if (lum < 1e-5 && s.a < 1e-5) return 1.0;
+      return clamp(lum * s.a, 0.0, 1.0);
     }
 
     // ── Stripe layer generator ────────────────────────────────────────────────
@@ -415,11 +435,20 @@ export function getFragmentShader(maxLights = 64) {
       // ── Outdoor factor ────────────────────────────────────────────────────
       float outdoorFactor = 1.0;
       if (uRoofMaskEnabled > 0.5) {
-        float u = (vWorldPosition.x - uSceneBounds.x) / max(1e-5, uSceneBounds.z);
-        float v = (vWorldPosition.y - uSceneBounds.y) / max(1e-5, uSceneBounds.w);
-        v = 1.0 - v; // Y-flip for roof mask UV convention
-        vec2 roofUv = clamp(vec2(u, v), 0.0, 1.0);
-        outdoorFactor = texture2D(uRoofMap, roofUv).r;
+        float ru = (vWorldPosition.x - uSceneBounds.x) / max(1e-5, uSceneBounds.z);
+        float rv = (vWorldPosition.y - uSceneBounds.y) / max(1e-5, uSceneBounds.w);
+        rv = 1.0 - rv; // Foundry scene-UV style (matches uSceneBounds / building shadow)
+        vec2 roofUvBase = clamp(vec2(ru, rv), 0.0, 1.0);
+        vec2 roofUv = vec2(roofUvBase.x, (uOutdoorsMaskFlipY > 0.5) ? (1.0 - roofUvBase.y) : roofUvBase.y);
+        if (uUsePerFloorOutdoors > 0.5) {
+          float fi = uOutdoorsFloorIdx;
+          if (fi < 0.5) outdoorFactor = decodeOutdoorsMaskSample(texture2D(uRoofMap0, roofUv));
+          else if (fi < 1.5) outdoorFactor = decodeOutdoorsMaskSample(texture2D(uRoofMap1, roofUv));
+          else if (fi < 2.5) outdoorFactor = decodeOutdoorsMaskSample(texture2D(uRoofMap2, roofUv));
+          else outdoorFactor = decodeOutdoorsMaskSample(texture2D(uRoofMap3, roofUv));
+        } else {
+          outdoorFactor = decodeOutdoorsMaskSample(texture2D(uRoofMap, roofUv));
+        }
       }
 
       // ── Wet surface mask ──────────────────────────────────────────────────

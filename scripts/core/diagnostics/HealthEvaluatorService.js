@@ -4,6 +4,8 @@ import { HealthContractRegistry } from './HealthContractRegistry.js';
 import { HealthDependencyGraph } from './HealthDependencyGraph.js';
 import { captureRenderStack } from './RenderStackSnapshotService.js';
 import { evaluateRenderStackFindings } from './RenderStackRules.js';
+import { isLevelsEnabledForScene } from '../../foundry/levels-scene-flags.js';
+import { collectEnabledMaskIds, getMaskTextureManifest } from '../../settings/mask-manifest-flags.js';
 
 const log = createLogger('HealthEvaluator');
 
@@ -54,6 +56,42 @@ export class HealthEvaluatorService {
     this._startScheduler();
     this._initialized = true;
     log.info('Health evaluator initialized');
+  }
+
+  /**
+   * Wrap effect instances that were null during the initial _installInstrumentation()
+   * pass (e.g. FloorCompositor V2 is created lazily on first render, after health init).
+   * Safe to call multiple times — skips methods already wrapped for (effectId, instance).
+   */
+  refreshInstrumentation() {
+    if (!this._initialized) return;
+    const liveFc = this.floorCompositor
+      ?? window.MapShine?.floorCompositorV2
+      ?? this.effectComposer?._floorCompositorV2
+      ?? null;
+    if (liveFc) this.floorCompositor = liveFc;
+
+    for (const contract of this.registry.getAll()) {
+      const instance = safeCall(
+        () => contract?.getInstance?.(this),
+        `health.refresh.getInstance.${contract.effectId}`,
+        Severity.COSMETIC,
+        { fallback: null }
+      );
+      if (!instance) continue;
+      const effectId = contract.effectId;
+      const tryWrap = (methodName, kind) => {
+        if (typeof instance[methodName] !== 'function') return;
+        const already = this._wrappedMethods.some(
+          (w) => w.effectId === effectId && w.instance === instance && w.name === methodName
+        );
+        if (already) return;
+        this._wrapHeartbeat(instance, methodName, effectId, kind);
+      };
+      tryWrap('update', 'update');
+      tryWrap('render', 'render');
+      tryWrap('onFloorChange', 'floorChange');
+    }
   }
 
   dispose() {
@@ -168,6 +206,408 @@ export class HealthEvaluatorService {
     return true;
   }
 
+  /**
+   * Rich diagnostics for Breaker Box detail pane (not part of getSnapshot JSON).
+   * @param {string} effectId
+   * @returns {object|null}
+   */
+  getEffectSurfaceDiagnostics(effectId) {
+    const id = String(effectId || '');
+    if (id === 'SpecularEffectV2') {
+      const inst = this.floorCompositor?._specularEffect ?? null;
+      return inst?.getHealthDiagnostics?.() ?? null;
+    }
+    if (id === 'GpuSceneMaskCompositor') {
+      return this._buildGpuCompositorOutdoorsDiagnostics();
+    }
+    if (id === 'BuildingShadowsEffectV2') {
+      const inst = this.floorCompositor?._buildingShadowEffect ?? null;
+      return inst?.getHealthDiagnostics?.() ?? null;
+    }
+    return null;
+  }
+
+  /**
+   * End-to-end _Outdoors trace for Breaker Box: manifest → tiles → GPU compositor → consumers.
+   * @returns {object}
+   */
+  getOutdoorsTraceDiagnostics() {
+    return this._buildOutdoorsTraceDiagnostics();
+  }
+
+  /** @private */
+  _texBrief(tex) {
+    if (!tex) return { present: false, uuid: null, size: null };
+    const w = Number(tex.image?.width ?? tex.source?.data?.width ?? 0) || null;
+    const h = Number(tex.image?.height ?? tex.source?.data?.height ?? 0) || null;
+    return {
+      present: true,
+      uuid: tex.uuid ?? null,
+      size: w && h ? `${w}×${h}` : null,
+    };
+  }
+
+  /** @private */
+  _buildOutdoorsTraceDiagnostics() {
+    const scene = canvas?.scene ?? null;
+    const ms = window.MapShine ?? null;
+    const fc = this.floorCompositor
+      ?? ms?.floorCompositorV2
+      ?? ms?.effectComposer?._floorCompositorV2
+      ?? null;
+    const scn = ms?.sceneComposer ?? null;
+    const comp = this.gpuSceneMaskCompositor
+      ?? scn?._sceneMaskCompositor
+      ?? null;
+    const ctx = ms?.activeLevelContext ?? null;
+    const activeFloor = ms?.floorStack?.getActiveFloor?.() ?? null;
+
+    /** @type {{ key: string, hit: boolean, uuid: string|null, note?: string }[]} */
+    const getFloorTextureAttempts = [];
+    if (comp && typeof comp.getFloorTexture === 'function') {
+      const keys = new Set();
+      const b = Number(ctx?.bottom);
+      const t = Number(ctx?.top);
+      if (Number.isFinite(b) && Number.isFinite(t)) keys.add(`${b}:${t}`);
+      if (activeFloor?.compositorKey) keys.add(String(activeFloor.compositorKey));
+      try {
+        const cak = comp._activeFloorKey;
+        if (cak) keys.add(String(cak));
+      } catch (_) {}
+      keys.add('ground');
+      for (const key of keys) {
+        if (!key) continue;
+        try {
+          const tex = comp.getFloorTexture(key, 'outdoors');
+          const br = this._texBrief(tex);
+          getFloorTextureAttempts.push({
+            key: String(key),
+            hit: !!tex,
+            uuid: br.uuid,
+            size: br.size,
+          });
+        } catch (e) {
+          getFloorTextureAttempts.push({ key: String(key), hit: false, uuid: null, size: null, note: String(e?.message || e) });
+        }
+      }
+    }
+
+    let manifestEnabledIds = [];
+    try {
+      manifestEnabledIds = collectEnabledMaskIds(scene) || [];
+    } catch (_) {
+      manifestEnabledIds = [];
+    }
+    const outdoorsInEnabledSet = manifestEnabledIds.some((id) => String(id).toLowerCase() === 'outdoors');
+
+    let manifestFlag = null;
+    try {
+      manifestFlag = getMaskTextureManifest(scene);
+    } catch (_) {
+      manifestFlag = null;
+    }
+    const pbm = manifestFlag?.pathsByMaskId ?? null;
+    const outdoorsManifestPath = pbm
+      ? (pbm.outdoors || pbm.Outdoors || pbm.OUTDOORS || null)
+      : null;
+
+    let bundleOutdoors = null;
+    try {
+      const masks = scn?.currentBundle?.masks;
+      const ent = Array.isArray(masks) ? masks.find((m) => (m?.id ?? m.type) === 'outdoors') : null;
+      if (ent?.texture) {
+        bundleOutdoors = { ...this._texBrief(ent.texture), fromBasePath: scn?.currentBundle?.basePath ?? null };
+      } else {
+        bundleOutdoors = { present: false, inBundleList: !!ent, fromBasePath: scn?.currentBundle?.basePath ?? null };
+      }
+    } catch (_) {
+      bundleOutdoors = { error: true };
+    }
+
+    const tm = ms?.tileManager ?? null;
+    let tileMaskCacheCount = 0;
+    let tilesWithOutdoorsLoaded = 0;
+    /** @type {object[]} */
+    const tileSamples = [];
+    try {
+      const map = tm?._tileEffectMasks;
+      if (map && typeof map.forEach === 'function') {
+        map.forEach((m, tileId) => {
+          tileMaskCacheCount++;
+          const row = m?.get?.('outdoors');
+          if (row?.texture) {
+            tilesWithOutdoorsLoaded++;
+            if (tileSamples.length < 12) {
+              tileSamples.push({
+                tileId: String(tileId),
+                urlTail: row.url ? String(row.url).split('/').slice(-2).join('/') : null,
+                ...this._texBrief(row.texture),
+              });
+            }
+          }
+        });
+      }
+    } catch (_) {}
+
+    /** @type {object[]} */
+    const floorMetaMaskTypes = [];
+    try {
+      if (comp?._floorMeta && typeof comp._floorMeta.entries === 'function') {
+        for (const [fk, meta] of comp._floorMeta.entries()) {
+          const list = meta?.masks ?? [];
+          const o = list.find((m) => (m?.id ?? m.type) === 'outdoors');
+          floorMetaMaskTypes.push({
+            floorKey: String(fk),
+            maskCount: list.length,
+            outdoorsInList: !!o,
+            outdoorsUuid: o?.texture?.uuid ?? null,
+            outdoorsSize: o?.texture ? (() => {
+              const w = Number(o.texture.image?.width ?? o.texture.source?.data?.width ?? 0);
+              const h = Number(o.texture.image?.height ?? o.texture.source?.data?.height ?? 0);
+              return w && h ? `${w}×${h}` : null;
+            })() : null,
+          });
+        }
+      }
+    } catch (_) {}
+
+    /** @type {object[]} */
+    const floorGpuRt = [];
+    try {
+      if (comp?._floorCache && typeof comp._floorCache.entries === 'function') {
+        for (const [fk, inner] of comp._floorCache.entries()) {
+          const rt = inner?.get?.('outdoors');
+          floorGpuRt.push({
+            floorKey: String(fk),
+            outdoorsRenderTarget: !!rt,
+            texUuid: rt?.texture?.uuid ?? null,
+          });
+        }
+      }
+    } catch (_) {}
+
+    const wc = ms?.weatherController ?? this.weatherController ?? null;
+    const roof = wc?.roofMap ?? null;
+
+    const reg = ms?.effectMaskRegistry ?? null;
+    let registryOutdoors = null;
+    try {
+      const t = reg?.getMask?.('outdoors');
+      registryOutdoors = { ...this._texBrief(t) };
+    } catch (_) {
+      registryOutdoors = { present: false, error: true };
+    }
+
+    const consumers = {};
+    try {
+      const bse = fc?._buildingShadowEffect;
+      consumers.buildingShadows = {
+        _outdoorsMaskSync: this._texBrief(bse?._outdoorsMask),
+        paramsEnabled: !!bse?.params?.enabled,
+      };
+    } catch (_) {
+      consumers.buildingShadows = { error: true };
+    }
+    try {
+      const we = fc?._waterEffect;
+      const u = we?._composeMaterial?.uniforms;
+      const tex = u?.tOutdoorsMask?.value;
+      consumers.water = {
+        uHasOutdoorsMask: Number(u?.uHasOutdoorsMask?.value ?? 0),
+        tOutdoorsMask: this._texBrief(tex),
+      };
+    } catch (_) {
+      consumers.water = { error: true };
+    }
+    try {
+      const sky = fc?._skyColorEffect;
+      const u = sky?._composeMaterial?.uniforms;
+      const tex = u?.tOutdoorsMask?.value;
+      consumers.skyColor = {
+        uHasOutdoorsMask: Number(u?.uHasOutdoorsMask?.value ?? 0),
+        tOutdoorsMask: this._texBrief(tex),
+      };
+    } catch (_) {
+      consumers.skyColor = { error: true };
+    }
+    try {
+      const le = fc?._lightingEffect;
+      const u = le?._composeMaterial?.uniforms;
+      const tex = u?.tOutdoorsForRoofLight?.value;
+      consumers.lighting = {
+        uHasOutdoorsForRoofLight: Number(u?.uHasOutdoorsForRoofLight?.value ?? 0),
+        tOutdoorsForRoofLight: this._texBrief(tex),
+      };
+    } catch (_) {
+      consumers.lighting = { error: true };
+    }
+    try {
+      const ce = fc?._cloudEffect;
+      const pf = [0, 1, 2, 3].map((i) => !!(ce?._outdoorsMasks?.[i]));
+      consumers.cloud = {
+        legacyOutdoorsMask: this._texBrief(ce?._outdoorsMask),
+        perFloorSlotsNonNull: pf,
+        anyPerFloor: pf.some(Boolean),
+      };
+    } catch (_) {
+      consumers.cloud = { error: true };
+    }
+    try {
+      const ohs = fc?._overheadShadowEffect;
+      consumers.overheadShadows = {
+        outdoorsMask: this._texBrief(ohs?.outdoorsMask),
+      };
+    } catch (_) {
+      consumers.overheadShadows = { error: true };
+    }
+
+    return {
+      timestamp: Date.now(),
+      scene: {
+        id: scene?.id ?? null,
+        name: scene?.name ?? null,
+        levelsEnabled: !!scene && isLevelsEnabledForScene(scene),
+        activeLevelContext: ctx
+          ? { bottom: ctx.bottom, top: ctx.top, key: `${ctx.bottom}:${ctx.top}` }
+          : null,
+        activeFloor: activeFloor
+          ? {
+            index: activeFloor.index,
+            compositorKey: activeFloor.compositorKey ?? null,
+            elevationMin: activeFloor.elevationMin,
+            elevationMax: activeFloor.elevationMax,
+          }
+          : null,
+        floorStackCount: ms?.floorStack?.getFloors?.()?.length ?? 0,
+      },
+      manifest: {
+        outdoorsInEnabledMaskIds: outdoorsInEnabledSet,
+        enabledMaskIds: manifestEnabledIds,
+        flagHasManifest: !!manifestFlag,
+        flagBasePath: manifestFlag?.basePath ?? null,
+        outdoorsPathInFlag: typeof outdoorsManifestPath === 'string' ? outdoorsManifestPath : null,
+      },
+      sceneComposerBundle: bundleOutdoors,
+      tileManager: {
+        cachedTileMaskMaps: tileMaskCacheCount,
+        tilesWithOutdoorsTexture: tilesWithOutdoorsLoaded,
+        effectMaskVramMb: tm ? Number((tm._tileEffectMaskVramBytes ?? 0) / (1024 * 1024)).toFixed(2) : null,
+        effectMaskVramBudgetMb: tm?.effectMaskVramBudget
+          ? Number(tm.effectMaskVramBudget / (1024 * 1024)).toFixed(0)
+          : null,
+        samples: tileSamples,
+      },
+      gpuCompositor: {
+        present: !!comp,
+        _activeFloorKey: (() => {
+          try { return comp?._activeFloorKey ?? null; } catch (_) { return null; }
+        })(),
+        getFloorTextureAttempts,
+        floorMetaByKey: floorMetaMaskTypes,
+        floorCacheGpuOutdoors: floorGpuRt,
+      },
+      registry: { outdoors: registryOutdoors },
+      weatherController: { roofMap: this._texBrief(roof) },
+      floorCompositorSync: {
+        lastOutdoorsFloorKey: fc?._lastOutdoorsFloorKey ?? null,
+        lastOutdoorsTexture: this._texBrief(fc?._lastOutdoorsTexture),
+      },
+      consumers,
+    };
+  }
+
+  /** @private */
+  _buildGpuCompositorOutdoorsDiagnostics() {
+    const comp = this.gpuSceneMaskCompositor
+      ?? window.MapShine?.sceneComposer?._sceneMaskCompositor
+      ?? null;
+    const floors = window.MapShine?.floorStack?.getFloors?.() ?? [];
+    const active = window.MapShine?.floorStack?.getActiveFloor?.() ?? null;
+    if (!comp) {
+      return { timestamp: Date.now(), compositorPresent: false, message: 'GpuSceneMaskCompositor not available' };
+    }
+    /** @type {object[]} */
+    const rows = [];
+    const metaKeys = (() => {
+      try {
+        return comp._floorMeta && typeof comp._floorMeta.keys === 'function'
+          ? [...comp._floorMeta.keys()].map(String).sort()
+          : [];
+      } catch (_) {
+        return [];
+      }
+    })();
+    const activeCk = String(active?.compositorKey ?? '');
+    const activeIdx = Number.isFinite(Number(active?.index)) ? Number(active.index) : null;
+    for (const f of floors) {
+      const ck = String(f?.compositorKey ?? '');
+      const inMeta = (() => {
+        try { return !!comp._floorMeta?.has?.(ck); } catch (_) { return false; }
+      })();
+      const texDirect = comp.getFloorTexture?.(ck, 'outdoors') ?? null;
+      const bottom = Number(f?.elevationMin);
+      const siblingKeys = metaKeys.filter((k) => Number(String(k).split(':')[0]) === bottom);
+      let resolvedTex = texDirect;
+      let resolvedNote = texDirect ? `getFloorTexture("${ck}")` : null;
+      if (!resolvedTex && Number.isFinite(bottom)) {
+        for (const sk of siblingKeys.sort()) {
+          const t = comp.getFloorTexture?.(sk, 'outdoors') ?? null;
+          if (t) {
+            resolvedTex = t;
+            resolvedNote = `getFloorTexture("${sk}") via same elevation bottom`;
+            break;
+          }
+        }
+      }
+      const maskInMetaBundle = (() => {
+        try {
+          const bundle = comp._floorMeta?.get?.(ck);
+          return !!(bundle?.masks?.some?.((m) => (m.id ?? m.type) === 'outdoors'));
+        } catch (_) {
+          return false;
+        }
+      })();
+      const isActiveFloorRow = activeCk && ck === activeCk;
+      rows.push({
+        floorIndex: f.index,
+        compositorKey: ck,
+        elevationMin: f.elevationMin,
+        elevationMax: f.elevationMax,
+        isActiveFloor: !!isActiveFloorRow,
+        bundleInMeta: inMeta,
+        outdoorsInMetaBundle: maskInMetaBundle,
+        getFloorTextureHit: !!texDirect,
+        resolvedOutdoors: !!resolvedTex,
+        outdoorsValidForSpecular: !!resolvedTex,
+        resolvedNote,
+        siblingMetaKeys: siblingKeys,
+        textureUuid: resolvedTex?.uuid ?? null,
+      });
+    }
+    const activeRow = rows.find((r) => r.isActiveFloor) ?? null;
+    return {
+      timestamp: Date.now(),
+      compositorPresent: true,
+      activeFloorIndex: activeIdx,
+      activeCompositorKey: activeCk || null,
+      activeFloorOutdoorsSummary: activeRow
+        ? {
+          compositorKey: activeRow.compositorKey,
+          resolvedOutdoors: activeRow.resolvedOutdoors,
+          outdoorsInMetaBundle: activeRow.outdoorsInMetaBundle,
+          getFloorTextureHit: activeRow.getFloorTextureHit,
+          textureUuid: activeRow.textureUuid,
+          resolvedNote: activeRow.resolvedNote,
+        }
+        : null,
+      metaKeyCount: metaKeys.length,
+      metaKeysSample: metaKeys.slice(0, 12),
+      floorRows: rows,
+      outdoorsHelp:
+        'Specular samples uRoofMap0..3 via uOutdoorsFloorIdx. White fallback texture => shader treats full scene as outdoor. Bundle column = outdoors entry in cached floor mask list; direct = getFloorTexture(activeKey).',
+    };
+  }
+
   exportDiagnostics() {
     const snapshot = this.getSnapshot();
     return {
@@ -205,6 +645,7 @@ export class HealthEvaluatorService {
         notes: snapshot.renderStack?.notes ?? [],
       },
       renderStackFindings: snapshot.renderStackFindings ?? [],
+      outdoorsTrace: this._buildOutdoorsTraceDiagnostics(),
     };
   }
 
@@ -499,6 +940,7 @@ export class HealthEvaluatorService {
     this.dependencyGraph.addEdge('SkyColorEffectV2', 'WaterEffectV2', 'contextual');
     this.dependencyGraph.addEdge('SkyColorEffectV2', 'WindowLightEffectV2', 'contextual');
     this.dependencyGraph.addEdge('SkyColorEffectV2', 'DustEffectV2', 'contextual');
+    this.dependencyGraph.addEdge('GpuSceneMaskCompositor', 'SpecularEffectV2', 'optional');
   }
 
   _registerBuiltInContracts() {
@@ -1074,7 +1516,194 @@ export class HealthEvaluatorService {
             };
           },
         },
+        {
+          id: 'buildingShadowsOutdoorsPass',
+          tier: 'behavioral',
+          severity: 'warn',
+          check: (instance) => {
+            if (instance?.params && instance.params.enabled === false) {
+              return { pass: true, skipped: true, message: 'Building shadows disabled' };
+            }
+            const diag = instance?.getHealthDiagnostics?.() ?? null;
+            if (!diag) {
+              return {
+                pass: true,
+                skipped: true,
+                message: 'No building-shadow render diagnostics yet',
+              };
+            }
+            if (!diag.compositorPresent) {
+              return {
+                pass: false,
+                message: 'Building shadows require GpuSceneMaskCompositor (missing)',
+                evidence: diag,
+              };
+            }
+            if (diag.drewAny) {
+              return {
+                pass: true,
+                message: diag.fallbackUsed
+                  ? 'Building shadow RT drawn using unified outdoors fallback'
+                  : `Building shadow RT drawn (${diag.floorKeyCount ?? 0} compositor key(s))`,
+                evidence: diag,
+              };
+            }
+            return {
+              pass: false,
+              message: diag.note || 'Building shadows did not draw — shadow factor RT stays white (no mask / wrong keys)',
+              evidence: diag,
+            };
+          },
+        },
         heartbeatRule('BuildingShadowsEffectV2', 8000),
+      ],
+    });
+
+    this.registry.register('SpecularEffectV2', {
+      effectId: 'SpecularEffectV2',
+      getInstance: (ctx) => ctx.floorCompositor?._specularEffect ?? null,
+      getLevelKeys: (_instance, ctx) => activeLevelKeys(ctx),
+      rules: [
+        {
+          id: 'initialized',
+          tier: 'structural',
+          severity: 'error',
+          check: (instance) => ({
+            pass: !!instance?._initialized,
+            message: instance?._initialized ? 'Initialized' : 'SpecularEffectV2 not initialized',
+          }),
+        },
+        {
+          id: 'sharedUniforms',
+          tier: 'structural',
+          severity: 'error',
+          check: (instance) => ({
+            pass: !!instance?._sharedUniforms,
+            message: instance?._sharedUniforms ? 'Shared uniforms allocated' : 'Missing shared uniforms',
+          }),
+        },
+        {
+          id: 'specularOutdoorsBinding',
+          tier: 'behavioral',
+          severity: 'warn',
+          check: (instance, ctx) => {
+            const diag = instance?.getHealthDiagnostics?.() ?? null;
+            if (!diag || diag.overlayCount === 0) {
+              return {
+                pass: true,
+                skipped: true,
+                message: 'No specular overlays — outdoors binding N/A',
+                evidence: { overlayCount: diag?.overlayCount ?? 0 },
+              };
+            }
+            if (diag.error) {
+              return {
+                pass: false,
+                message: `Outdoors uniform bind error: ${diag.message || 'unknown'}`,
+                evidence: diag,
+              };
+            }
+            const runtime = ctx._getRuntimeSnapshot();
+            const af = Number(runtime?.activeFloor ?? 0);
+            const slots = diag.outdoorsSlots || [];
+            const activeSlot = slots.find((s) => Number(s.slot) === af) || null;
+            const multi = Number(diag.floorStackCount || 0) > 1;
+            if (!multi) {
+              const ok = Number(diag.roofMaskEnabled || 0) > 0.5;
+              return {
+                pass: ok,
+                message: ok
+                  ? 'Single-floor: roof mask enabled (legacy weather roofMap or compositor)'
+                  : 'Single-floor: roof mask disabled — shader treats all pixels as outdoors',
+                evidence: {
+                  roofMaskEnabled: diag.roofMaskEnabled,
+                  weatherRoofMapUuid: diag.weatherRoofMapUuid,
+                  specularRoofMapUuid: diag.specularRoofMapUuid ?? null,
+                  singleFloorRoofSource: diag.singleFloorRoofSource ?? null,
+                  singleFloorOutdoorsAttempts: Array.isArray(diag.singleFloorOutdoorsAttempts)
+                    ? diag.singleFloorOutdoorsAttempts.slice(0, 16)
+                    : [],
+                },
+              };
+            }
+            if (!diag.compositorPresent) {
+              return {
+                pass: false,
+                message: 'Multi-floor scene but GpuSceneMaskCompositor missing — specular cannot resolve per-floor _Outdoors',
+                evidence: { floorStackCount: diag.floorStackCount },
+              };
+            }
+            if (!diag.usePerFloor) {
+              return {
+                pass: false,
+                message: 'Multi-floor: per-floor outdoors path off — likely no compositor textures resolved; legacy roofMap may be wrong floor',
+                evidence: { usePerFloor: diag.usePerFloor, weatherRoofMapUuid: diag.weatherRoofMapUuid },
+              };
+            }
+            const hasTex = !!(activeSlot?.textureUuid);
+            const isFallback = activeSlot?.binding === 'fallbackWhite';
+            const pass = hasTex && !isFallback;
+            return {
+              pass,
+              message: pass
+                ? `Active floor ${af}: bound compositor _Outdoors (uuid ${activeSlot.textureUuid})`
+                : `Active floor ${af}: no compositor _Outdoors resolved — slot uses ${activeSlot?.binding || 'unknown'} (white = full outdoor in shader)`,
+              evidence: {
+                activeFloor: af,
+                resolvedCompositorKey: activeSlot?.resolvedCompositorKey ?? null,
+                binding: activeSlot?.binding,
+                textureUuid: activeSlot?.textureUuid,
+                floors: diag.floors,
+              },
+            };
+          },
+        },
+        heartbeatRule('SpecularEffectV2', 8000),
+      ],
+    });
+
+    this.registry.register('GpuSceneMaskCompositor', {
+      effectId: 'GpuSceneMaskCompositor',
+      getInstance: (ctx) => ctx.gpuSceneMaskCompositor
+        ?? window.MapShine?.sceneComposer?._sceneMaskCompositor
+        ?? null,
+      getLevelKeys: () => ['global:scene'],
+      rules: [
+        {
+          id: 'compositorInstance',
+          tier: 'structural',
+          severity: 'warn',
+          check: (instance) => ({
+            pass: !!instance,
+            message: instance
+              ? 'GpuSceneMaskCompositor instance present'
+              : 'GpuSceneMaskCompositor not on HealthEvaluator / sceneComposer',
+          }),
+        },
+        {
+          id: 'activeFloorOutdoorsResolvable',
+          tier: 'behavioral',
+          severity: 'warn',
+          check: (_instance, ctx) => {
+            const diag = ctx._buildGpuCompositorOutdoorsDiagnostics();
+            if (!diag.compositorPresent) {
+              return { pass: false, message: 'Compositor missing', evidence: diag };
+            }
+            const af = Number(ctx._getRuntimeSnapshot()?.activeFloor ?? 0);
+            const row = (diag.floorRows || []).find((r) => Number(r.floorIndex) === af);
+            if (!row) {
+              return { pass: true, skipped: true, message: 'No floor row for active index' };
+            }
+            const pass = !!row.resolvedOutdoors;
+            return {
+              pass,
+              message: pass
+                ? `Floor ${af}: _Outdoors resolvable (${row.resolvedNote || 'direct key'})`
+                : `Floor ${af}: no _Outdoors RT for compositorKey "${row.compositorKey}" and no sibling key match — mask not loaded or band key mismatch`,
+              evidence: row,
+            };
+          },
+        },
       ],
     });
   }

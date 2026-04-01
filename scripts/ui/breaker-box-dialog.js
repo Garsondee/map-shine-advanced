@@ -16,6 +16,25 @@ const SOURCE_DEFS = [
   { id: 'src:dustParticles', label: 'Dust Particles (Quarks)', effects: ['DustEffectV2'], keywords: ['batchRenderer', 'initialized'] },
   { id: 'src:skyGrade', label: 'Sky Color Pass', effects: ['SkyColorEffectV2'], keywords: ['composeMaterial', 'initialized'] },
   { id: 'src:buildingShadowRTs', label: 'Building Shadow RTs', effects: ['BuildingShadowsEffectV2'], keywords: ['initializedTargets', 'shadow'] },
+  {
+    id: 'src:specularOutdoors',
+    label: 'Specular + _Outdoors (GPU masks)',
+    effects: ['SpecularEffectV2', 'GpuSceneMaskCompositor'],
+    keywords: [
+      'specularOutdoorsBinding',
+      'compositorInstance',
+      'outdoors',
+      'initialized',
+      'overlay',
+      'activeOutdoorsMaskStatus',
+      'wetCloudOutdoorFactor',
+      'fallback_white',
+      'outdoorFactor',
+      'outdoorsTrace',
+      'getFloorTextureAttempts',
+      'tileManager',
+    ],
+  },
 ];
 
 function copyText(text) {
@@ -405,6 +424,389 @@ export class BreakerBoxDialog {
       }
     }
     return html;
+  }
+
+  /**
+   * @param {string} status
+   * @returns {string}
+   */
+  _outdoorsStatusColor(status) {
+    const s = String(status || '');
+    if (s.includes('valid_compositor') || s.includes('legacy_weather')) return '#30d158';
+    if (s.includes('broken') || s.includes('fallback_white')) return '#ff453a';
+    if (s.includes('single_floor') || s.includes('unknown')) return '#ffcc00';
+    return '#8e8e93';
+  }
+
+  /**
+   * @param {object} d
+   * @returns {string}
+   */
+  _htmlSpecularOutdoorsDetail(d) {
+    if (d.error) {
+      return `<div class="muted" style="margin-top:8px">Specular — _Outdoors bind error</div>` +
+        `<p style="font-size:11px;color:#ff453a;margin:4px 0">${esc(d.message || 'Error')}</p>`;
+    }
+    if (d.note && Number(d.overlayCount) === 0) {
+      return `<div class="muted" style="margin-top:8px">Specular diagnostics</div><p style="font-size:11px;margin:4px 0">${esc(d.note)}</p>`;
+    }
+
+    const st = String(d.activeOutdoorsMaskStatus || 'unknown');
+    const stColor = this._outdoorsStatusColor(st);
+    const af = d.activeFloorOutdoors || null;
+    const wc = d.wetCloudOutdoorFactor || null;
+    const hist = d.outdoorsFloorIdxHistogram || {};
+    const obf = d.overlayByFloor || {};
+    const histRows = Object.keys(hist).sort((a, b) => Number(a) - Number(b)).map((k) =>
+      `<tr><td style="padding:2px 4px">uOutdoorsFloorIdx ${esc(k)}</td>` +
+      `<td style="text-align:right;padding:2px 4px">${esc(String(hist[k]))}</td></tr>`
+    ).join('');
+    const obfRows = Object.keys(obf).sort((a, b) => Number(a) - Number(b)).map((k) =>
+      `<tr><td style="padding:2px 4px">floor ${esc(k)}</td>` +
+      `<td style="text-align:right;padding:2px 4px">${esc(String(obf[k]))}</td></tr>`
+    ).join('');
+
+    const afBlock = af
+      ? `<div style="margin-top:8px;padding:8px;border-radius:6px;border:1px solid rgba(255,255,255,0.12);background:rgba(0,0,0,0.2)">` +
+        `<div style="font-size:11px;font-weight:600;margin-bottom:4px">Active floor — _Outdoors (what specular uses for this view)</div>` +
+        `<table style="width:100%;border-collapse:collapse;font-size:10px">` +
+        `<tr><td class="muted" style="padding:2px 0">Floor index</td><td style="padding:2px 4px">${esc(String(af.activeFloorIndex))}</td></tr>` +
+        `<tr><td class="muted" style="padding:2px 0">Compositor key</td><td style="padding:2px 4px"><code>${esc(String(af.activeCompositorKey || '—'))}</code></td></tr>` +
+        `<tr><td class="muted" style="padding:2px 0">Slot uRoofMapN</td><td style="padding:2px 4px">${esc(String(af.slotIndex))}</td></tr>` +
+        `<tr><td class="muted" style="padding:2px 0">Resolved mask key</td><td style="padding:2px 4px;font-size:9px"><code>${esc(String(af.resolvedCompositorKey || '—'))}</code></td></tr>` +
+        `<tr><td class="muted" style="padding:2px 0">Binding</td><td style="padding:2px 4px">${esc(String(af.binding || '—'))}</td></tr>` +
+        `<tr><td class="muted" style="padding:2px 0">Real compositor texture</td><td style="padding:2px 4px">${af.usesRealCompositorTexture ? '✓ yes' : '✗ no (see status)'}</td></tr>` +
+        `<tr><td class="muted" style="padding:2px 0">Texture UUID</td><td style="padding:2px 4px;font-size:9px;word-break:break-all">${esc(af.textureUuid || '—')}</td></tr>` +
+        `<tr><td class="muted" style="padding:2px 0">Size</td><td style="padding:2px 4px">${esc(af.textureSize || '—')}</td></tr>` +
+        `</table></div>`
+      : `<p class="muted" style="font-size:10px;margin-top:8px">No active floor outdoors snapshot (floor stack / index missing).</p>`;
+
+    const sfAttempts = Array.isArray(d.singleFloorOutdoorsAttempts) ? d.singleFloorOutdoorsAttempts : [];
+    const sfAttemptBlock = (!d.usePerFloor && sfAttempts.length)
+      ? `<div class="muted" style="margin-top:10px;font-size:10px">Single-floor bind attempts (ordered)</div>` +
+        `<table style="width:100%;border-collapse:collapse;font-size:10px;margin-top:2px"><thead><tr style="opacity:0.85">` +
+        `<th style="text-align:left;padding:2px 4px">step</th><th style="text-align:center;padding:2px 4px">hit</th>` +
+        `<th style="text-align:left;padding:2px 4px">key</th><th style="text-align:left;padding:2px 4px">uuid / note</th>` +
+        `</tr></thead><tbody>` +
+        sfAttempts.map((a) =>
+          `<tr${a.hit ? '' : ' style="background:rgba(255,69,58,0.06)"'}>` +
+          `<td style="padding:2px 4px;font-size:9px">${esc(String(a.step || ''))}</td>` +
+          `<td style="padding:2px 4px;text-align:center">${a.hit ? '✓' : '—'}</td>` +
+          `<td style="padding:2px 4px;font-size:9px"><code>${esc(String(a.key || '—'))}</code></td>` +
+          `<td style="padding:2px 4px;font-size:8px;word-break:break-all">${esc(a.uuid || a.note || '—')}</td>` +
+          `</tr>`
+        ).join('') +
+        `</tbody></table>`
+      : '';
+
+    const wcBlock = wc
+      ? `<div class="muted" style="margin-top:10px;font-size:10px;line-height:1.35">${esc(wc.note || '')}</div>` +
+        `<table style="width:100%;border-collapse:collapse;font-size:10px;margin-top:6px"><tbody>` +
+        `<tr><td class="muted" style="padding:2px 4px">Outdoor cloud specular</td><td style="padding:2px 4px">${wc.outdoorCloudSpecularEnabled ? 'on' : 'off'} · blend ${esc(String(wc.outdoorStripeBlend))} · intensity ${esc(String(wc.cloudSpecularIntensity))}</td></tr>` +
+        `<tr><td class="muted" style="padding:2px 4px">Wet specular</td><td style="padding:2px 4px">${wc.wetSpecularEnabled ? 'on' : 'off'} · rainWetness ${esc(String(wc.rainWetnessUniform))} · intensity ${esc(String(wc.wetSpecularIntensity))}</td></tr>` +
+        `<tr><td class="muted" style="padding:2px 4px">Wet base / wind ripple</td><td style="padding:2px 4px">sheen ${esc(String(wc.wetBaseSheen))} · wind ${esc(String(wc.wetWindRippleStrength))}</td></tr>` +
+        `<tr><td class="muted" style="padding:2px 4px">Stripes / frost / bldg shadow suppr.</td><td style="padding:2px 4px">stripes ${wc.stripeEnabled ? 'on' : 'off'} · frost ${wc.frostGlazeEnabled ? 'on' : 'off'} · bldg ${wc.buildingShadowSuppressionEnabled ? 'on' : 'off'}</td></tr>` +
+        `</tbody></table>` +
+        `<p style="font-size:10px;opacity:0.85;margin:6px 0 0">If <strong>rainWetness</strong> is 0, weather is dry or uniforms were not updated yet this frame (<code>update()</code> vs <code>render()</code> order).</p>`
+      : '';
+
+    const rows = (d.outdoorsSlots || []).map((s) =>
+      `<tr${s.isFallbackWhite ? ' style="background:rgba(255,69,58,0.08)"' : ''}>` +
+      `<td style="padding:2px 4px">${esc(String(s.slot))}</td>` +
+      `<td style="padding:2px 4px;font-size:10px">${esc(s.binding || '')}</td>` +
+      `<td style="text-align:center;padding:2px 4px;font-size:9px">${s.isFallbackWhite ? '⚠' : ''}</td>` +
+      `<td style="padding:2px 4px;font-size:10px;max-width:120px;overflow:hidden;text-overflow:ellipsis" title="${esc(s.resolvedCompositorKey || '')}">${esc(s.resolvedCompositorKey || '—')}</td>` +
+      `<td style="padding:2px 4px;font-size:9px;word-break:break-all">${esc(s.textureUuid || '—')}</td>` +
+      `<td style="padding:2px 4px;font-size:10px">${esc(s.textureSize || '—')}</td></tr>`
+    ).join('');
+    const fl = (d.floors || []).map((f) =>
+      `<li style="font-size:10px">[${esc(String(f.index))}] <code>${esc(f.compositorKey)}</code> · elev ${esc(f.elevationMin)}–${esc(f.elevationMax)}</li>`
+    ).join('');
+
+    return `<div class="muted" style="margin-top:8px">Specular V2 — _Outdoors &amp; outdoorFactor consumers</div>` +
+      `<p style="font-size:11px;margin:6px 0;line-height:1.4;padding:6px;border-radius:6px;border-left:3px solid ${esc(stColor)};background:rgba(255,255,255,0.04)">` +
+      `<strong style="color:${esc(stColor)}">Status:</strong> <code style="font-size:10px">${esc(st)}</code><br/>` +
+      `<span style="opacity:0.9">Shader mode: <code>${esc(String(d.shaderOutdoorsMode || '—'))}</code> · ` +
+      `uUsePerFloorOutdoors: <strong>${esc(String(d.usePerFloorOutdoorsUniform))}</strong> · ` +
+      `legacy <code>uRoofMap</code> bound: <strong>${esc(d.legacyRoofMapBound ? 'yes' : 'no')}</strong></span>` +
+      `</p>` +
+      `<p style="font-size:10px;margin:4px 0;opacity:0.88;line-height:1.35">${esc(d.decodeOutdoorsHint || '')}</p>` +
+      `<p style="font-size:11px;margin:4px 0">Overlays: <strong>${esc(String(d.overlayCount))}</strong> · compositor present: <strong>${esc(d.compositorPresent ? 'yes' : 'no')}</strong> · floor stack: <strong>${esc(String(d.floorStackCount))}</strong></p>` +
+      afBlock +
+      sfAttemptBlock +
+      wcBlock +
+      `<div class="muted" style="margin-top:10px;font-size:10px">Overlays per tile floor index</div>` +
+      `<table style="width:100%;border-collapse:collapse;font-size:10px;margin-top:2px"><tbody>${obfRows || '<tr><td class="muted">—</td></tr>'}</tbody></table>` +
+      `<div class="muted" style="margin-top:8px;font-size:10px">Shader slot selection (uOutdoorsFloorIdx per overlay)</div>` +
+      `<table style="width:100%;border-collapse:collapse;font-size:10px;margin-top:2px"><tbody>${histRows || '<tr><td class="muted">—</td></tr>'}</tbody></table>` +
+      `<div class="muted" style="margin-top:8px;font-size:10px">FloorStack bands</div><ul style="margin:2px 0 6px 12px">${fl || '<li class="muted">None</li>'}</ul>` +
+      `<div class="muted" style="margin-top:6px;font-size:10px">All uRoofMap0–3 slots (per-floor mode)</div>` +
+      `<table style="width:100%;border-collapse:collapse;font-size:10px;margin-top:4px"><thead><tr style="opacity:0.85">` +
+      `<th style="text-align:left;padding:2px 4px">slot</th><th style="text-align:left;padding:2px 4px">binding</th>` +
+      `<th style="text-align:center;padding:2px 4px">fb</th>` +
+      `<th style="text-align:left;padding:2px 4px">resolved key</th><th style="text-align:left;padding:2px 4px">uuid</th><th style="text-align:left;padding:2px 4px">size</th>` +
+      `</tr></thead><tbody>${rows || '<tr><td colspan="6" class="muted">No slot data</td></tr>'}</tbody></table>` +
+      `<p style="font-size:10px;opacity:0.8;margin:6px 0 0">Row highlight = <code>fallbackWhite</code> bound (full outdoor decode). <strong>fb</strong> column flags that slot.</p>`;
+  }
+
+  /**
+   * @param {object} d
+   * @returns {string}
+   */
+  _htmlGpuOutdoorsDetail(d) {
+    if (!d.compositorPresent) {
+      return `<div class="muted" style="margin-top:8px">GpuSceneMaskCompositor</div><p style="font-size:11px">${esc(d.message || 'Missing')}</p>`;
+    }
+    const sum = d.activeFloorOutdoorsSummary || null;
+    const sumHtml = sum
+      ? `<div style="margin-top:8px;padding:8px;border-radius:6px;border:1px solid rgba(139,197,255,0.25);background:rgba(139,197,255,0.06)">` +
+        `<div style="font-size:11px;font-weight:600;margin-bottom:4px">Active floor (viewer) — GPU _Outdoors</div>` +
+        `<table style="width:100%;border-collapse:collapse;font-size:10px">` +
+        `<tr><td class="muted" style="padding:2px 0">Compositor key</td><td style="padding:2px 4px"><code>${esc(String(sum.compositorKey || '—'))}</code></td></tr>` +
+        `<tr><td class="muted" style="padding:2px 0">Resolvable texture</td><td style="padding:2px 4px">${sum.resolvedOutdoors ? '✓ yes' : '✗ no'}</td></tr>` +
+        `<tr><td class="muted" style="padding:2px 0">outdoors in cached bundle list</td><td style="padding:2px 4px">${sum.outdoorsInMetaBundle ? '✓' : '—'}</td></tr>` +
+        `<tr><td class="muted" style="padding:2px 0">getFloorTexture(direct key)</td><td style="padding:2px 4px">${sum.getFloorTextureHit ? '✓' : '—'}</td></tr>` +
+        `<tr><td class="muted" style="padding:2px 0">Texture UUID</td><td style="padding:2px 4px;font-size:9px;word-break:break-all">${esc(sum.textureUuid || '—')}</td></tr>` +
+        `<tr><td class="muted" style="padding:2px 0">Note</td><td style="padding:2px 4px;font-size:9px">${esc(sum.resolvedNote || '—')}</td></tr>` +
+        `</table></div>`
+      : `<p class="muted" style="font-size:10px;margin-top:8px">No active floor row (floor stack empty).</p>`;
+
+    const fr = (d.floorRows || []).map((r) =>
+      `<tr${r.isActiveFloor ? ' style="background:rgba(139,197,255,0.1)"' : ''}>` +
+      `<td style="padding:2px 4px">${r.isActiveFloor ? '▶ ' : ''}${esc(String(r.floorIndex))}</td>` +
+      `<td style="padding:2px 4px;font-size:9px;max-width:88px;overflow:hidden;text-overflow:ellipsis" title="${esc(r.compositorKey)}">${esc(r.compositorKey)}</td>` +
+      `<td style="text-align:center;padding:2px 4px">${r.bundleInMeta ? '✓' : '—'}</td>` +
+      `<td style="text-align:center;padding:2px 4px">${r.outdoorsInMetaBundle ? '✓' : '—'}</td>` +
+      `<td style="text-align:center;padding:2px 4px">${r.getFloorTextureHit ? '✓' : '—'}</td>` +
+      `<td style="text-align:center;padding:2px 4px">${r.resolvedOutdoors ? '✓' : '—'}</td>` +
+      `<td style="padding:2px 4px;font-size:8px;max-width:72px;overflow:hidden;word-break:break-all" title="${esc(r.textureUuid || '')}">${esc(r.textureUuid ? String(r.textureUuid).slice(0, 10) + '…' : '—')}</td>` +
+      `<td style="padding:2px 4px;font-size:9px">${esc(r.resolvedNote || '')}</td></tr>`
+    ).join('');
+    const samp = (d.metaKeysSample || []).join(', ');
+    return `<div class="muted" style="margin-top:8px">GpuSceneMaskCompositor — _Outdoors (scene mask RTs)</div>` +
+      sumHtml +
+      `<p style="font-size:10px;margin:8px 0 4px;opacity:0.88;line-height:1.35">${esc(d.outdoorsHelp || '')}</p>` +
+      `<p style="font-size:10px;margin:4px 0;opacity:0.9">Active index ${esc(String(d.activeFloorIndex ?? '—'))} · key <code>${esc(String(d.activeCompositorKey || '—'))}</code> · _floorMeta keys: ${esc(String(d.metaKeyCount ?? 0))}</p>` +
+      `<p style="font-size:10px;margin:4px 0;opacity:0.9">_floorMeta keys (sample): <code style="word-break:break-all">${esc(samp || '—')}</code></p>` +
+      `<table style="width:100%;border-collapse:collapse;font-size:10px;margin-top:4px"><thead><tr style="opacity:0.85">` +
+      `<th style="text-align:left;padding:2px 4px">fl</th><th style="text-align:left;padding:2px 4px">key</th>` +
+      `<th style="text-align:center;padding:2px 4px">meta</th><th style="text-align:center;padding:2px 4px">out∈</th>` +
+      `<th style="text-align:center;padding:2px 4px">RT</th><th style="text-align:center;padding:2px 4px">ok</th>` +
+      `<th style="text-align:left;padding:2px 4px">uuid</th><th style="text-align:left;padding:2px 4px">note</th>` +
+      `</tr></thead><tbody>${fr || '<tr><td colspan="8" class="muted">No floors</td></tr>'}</tbody></table>` +
+      `<p style="font-size:10px;opacity:0.8;margin:6px 0 0"><strong>RT</strong> = <code>getFloorTexture</code> hit on compositor key. <strong>ok</strong> = resolvable for effects (incl. sibling key). ▶ row = active floor.</p>`;
+  }
+
+  /**
+   * @param {object} d
+   * @returns {string}
+   */
+  _htmlBuildingShadowsOutdoorsDetail(d) {
+    if (!d || typeof d !== 'object') return '';
+    const yn = (v) => (v ? '✓' : '—');
+    const keys = Array.isArray(d.floorKeys) ? d.floorKeys.map((k) => esc(String(k))).join(', ') : '—';
+    return (
+      `<div class="muted" style="margin-top:8px">BuildingShadowsEffectV2 — _Outdoors &amp; draw</div>` +
+      `<div style="margin-top:6px;padding:8px;border-radius:6px;border:1px solid rgba(255,200,120,0.25);background:rgba(255,200,120,0.06);font-size:10px;line-height:1.45">` +
+      `<table style="width:100%;border-collapse:collapse;font-size:10px"><tbody>` +
+      `<tr><td class="muted" style="padding:2px 0;width:40%">Enabled</td><td style="padding:2px 4px">${d.paramsEnabled === false ? 'off' : 'on'}</td></tr>` +
+      `<tr><td class="muted" style="padding:2px 0">Compositor</td><td style="padding:2px 4px">${yn(!!d.compositorPresent)}</td></tr>` +
+      `<tr><td class="muted" style="padding:2px 0">Drew shadow RT</td><td style="padding:2px 4px">${yn(!!d.drewAny)}</td></tr>` +
+      `<tr><td class="muted" style="padding:2px 0">Floor keys</td><td style="padding:2px 4px;font-size:9px"><code style="word-break:break-all">${keys}</code></td></tr>` +
+      `<tr><td class="muted" style="padding:2px 0">Fallback-only draw</td><td style="padding:2px 4px">${yn(!!d.fallbackUsed)}</td></tr>` +
+      `<tr><td class="muted" style="padding:2px 0">Unified resolve</td><td style="padding:2px 4px;font-size:9px">${esc(String(d.outdoorsResolveRoute || '—'))} · <code>${esc(String(d.outdoorsResolveKey || '—'))}</code></td></tr>` +
+      `<tr><td class="muted" style="padding:2px 0">Sync _outdoorsMask uuid</td><td style="padding:2px 4px;font-size:8px;word-break:break-all">${esc(d.syncOutdoorsMaskUuid || '—')}</td></tr>` +
+      `<tr><td class="muted" style="padding:2px 0">Shadow factor uuid</td><td style="padding:2px 4px;font-size:8px;word-break:break-all">${esc(d.shadowFactorTextureUuid || '—')}</td></tr>` +
+      `</tbody></table>` +
+      (d.note ? `<p class="muted" style="margin:8px 0 0;font-size:10px">${esc(d.note)}</p>` : '') +
+      `</div>`
+    );
+  }
+
+  /**
+   * End-to-end _Outdoors pipeline (manifest → tiles → GPU compositor → uniforms).
+   * @param {object|null} t
+   * @returns {string}
+   */
+  _htmlOutdoorsTrace(t) {
+    if (!t || typeof t !== 'object') {
+      return '<p class="muted" style="font-size:11px;margin-top:10px">Outdoors pipeline trace: unavailable.</p>';
+    }
+    const yn = (v) =>
+      v
+        ? '<span style="color:#30d158">yes</span>'
+        : '<span style="color:#ff453a">no</span>';
+    const briefTex = (b) => {
+      if (!b || !b.present) return '<span class="muted">—</span>';
+      return `<code style="font-size:8px;word-break:break-all">${esc(b.uuid || '')}</code><div class="muted" style="font-size:9px">${esc(b.size || '')}</div>`;
+    };
+
+    const sc = t.scene || {};
+    const mf = t.manifest || {};
+    const sb = t.sceneComposerBundle || {};
+    const tm = t.tileManager || {};
+    const gpu = t.gpuCompositor || {};
+    const reg = t.registry?.outdoors || {};
+    const wc = t.weatherController || {};
+    const fcs = t.floorCompositorSync || {};
+    const cons = t.consumers || {};
+
+    const ids = Array.isArray(mf.enabledMaskIds) ? mf.enabledMaskIds : [];
+    const idsShow = ids.slice(0, 24).map((id) => esc(String(id))).join(', ');
+    const idsTail = ids.length > 24 ? ` <span class="muted">(+${ids.length - 24} more)</span>` : '';
+
+    const bundleLine = sb.error
+      ? '<span style="color:#ff453a">Error reading scene composer bundle</span>'
+      : sb.present
+        ? `${briefTex(sb)}<div class="muted" style="font-size:9px;margin-top:2px">bundle base: ${esc(sb.fromBasePath || '—')}</div>`
+        : `<span class="muted">No texture on bundle entry</span> · in mask list: ${yn(!!sb.inBundleList)} · ${esc(sb.fromBasePath || '—')}`;
+
+    const tileSamples = (tm.samples || [])
+      .map(
+        (s) =>
+          `<tr><td style="padding:2px 4px;font-size:9px">${esc(s.tileId)}</td>` +
+          `<td style="padding:2px 4px;font-size:9px">${esc(s.urlTail || '—')}</td>` +
+          `<td style="padding:2px 4px;font-size:8px;word-break:break-all">${esc(s.uuid || '—')}</td>` +
+          `<td style="padding:2px 4px;font-size:9px">${esc(s.size || '—')}</td></tr>`
+      )
+      .join('');
+
+    const gft = (gpu.getFloorTextureAttempts || [])
+      .map(
+        (r) =>
+          `<tr${r.hit ? '' : ' style="background:rgba(255,69,58,0.06)"'}>` +
+          `<td style="padding:2px 4px;font-size:9px"><code>${esc(String(r.key))}</code></td>` +
+          `<td style="padding:2px 4px;text-align:center">${yn(!!r.hit)}</td>` +
+          `<td style="padding:2px 4px;font-size:8px;word-break:break-all">${esc(r.uuid || r.note || '—')}</td>` +
+          `<td style="padding:2px 4px;font-size:9px">${esc(r.size || '—')}</td></tr>`
+      )
+      .join('');
+
+    const fmeta = (gpu.floorMetaByKey || [])
+      .slice(0, 16)
+      .map(
+        (r) =>
+          `<tr>` +
+          `<td style="padding:2px 4px;font-size:9px"><code>${esc(String(r.floorKey))}</code></td>` +
+          `<td style="padding:2px 4px;text-align:center">${yn(!!r.outdoorsInList)}</td>` +
+          `<td style="padding:2px 4px;font-size:8px;word-break:break-all">${esc(r.outdoorsUuid || '—')}</td>` +
+          `<td style="padding:2px 4px;font-size:9px">${esc(r.outdoorsSize || '—')}</td></tr>`
+      )
+      .join('');
+
+    const frt = (gpu.floorCacheGpuOutdoors || [])
+      .slice(0, 16)
+      .map(
+        (r) =>
+          `<tr>` +
+          `<td style="padding:2px 4px;font-size:9px"><code>${esc(String(r.floorKey))}</code></td>` +
+          `<td style="padding:2px 4px;text-align:center">${yn(!!r.outdoorsRenderTarget)}</td>` +
+          `<td style="padding:2px 4px;font-size:8px;word-break:break-all">${esc(r.texUuid || '—')}</td></tr>`
+      )
+      .join('');
+
+    const cloud = cons.cloud || {};
+    const cloudPf = Array.isArray(cloud.perFloorSlotsNonNull)
+      ? cloud.perFloorSlotsNonNull.map((x) => (x ? '●' : '○')).join(' ')
+      : '—';
+
+    return (
+      `<div class="muted" style="margin-top:14px;font-weight:600">_Outdoors pipeline trace</div>` +
+      `<p class="muted" style="font-size:10px;margin:4px 0 8px;line-height:1.35">` +
+      `Follow the mask from <strong>settings / manifest</strong> into <strong>tile cache</strong>, ` +
+      `<strong>GPU floor meta</strong>, then each <strong>consumer</strong> uniform. ` +
+      `Red rows = <code>getFloorTexture</code> miss for that key.</p>` +
+      `<div style="padding:8px;border-radius:6px;border:1px solid rgba(255,255,255,0.1);background:rgba(0,0,0,0.18);font-size:10px;line-height:1.4">` +
+      `<div style="font-weight:600;margin-bottom:4px;opacity:0.9">Scene / Levels</div>` +
+      `<table style="width:100%;border-collapse:collapse;font-size:10px"><tbody>` +
+      `<tr><td class="muted" style="padding:2px 0;width:38%">Levels extension</td><td style="padding:2px 4px">${yn(!!sc.levelsEnabled)}</td></tr>` +
+      `<tr><td class="muted" style="padding:2px 0">Floor stack count</td><td style="padding:2px 4px">${esc(String(sc.floorStackCount ?? '—'))}</td></tr>` +
+      `<tr><td class="muted" style="padding:2px 0">Active level ctx</td><td style="padding:2px 4px;font-size:9px"><code>${esc(sc.activeLevelContext?.key ?? '—')}</code></td></tr>` +
+      `<tr><td class="muted" style="padding:2px 0">Active floor</td><td style="padding:2px 4px;font-size:9px">idx ${esc(String(sc.activeFloor?.index ?? '—'))} · key <code>${esc(String(sc.activeFloor?.compositorKey ?? '—'))}</code></td></tr>` +
+      `</tbody></table>` +
+      `<div style="font-weight:600;margin:10px 0 4px;opacity:0.9">Manifest</div>` +
+      `<table style="width:100%;border-collapse:collapse;font-size:10px"><tbody>` +
+      `<tr><td class="muted" style="padding:2px 0;width:38%"><code>outdoors</code> in enabled mask IDs</td><td style="padding:2px 4px">${yn(!!mf.outdoorsInEnabledMaskIds)}</td></tr>` +
+      `<tr><td class="muted" style="padding:2px 0">Flag manifest loaded</td><td style="padding:2px 4px">${yn(!!mf.flagHasManifest)} · base ${esc(mf.flagBasePath || '—')}</td></tr>` +
+      `<tr><td class="muted" style="padding:2px 0">Outdoors path in flag</td><td style="padding:2px 4px;font-size:9px;word-break:break-all">${esc(mf.outdoorsPathInFlag || '—')}</td></tr>` +
+      `<tr><td class="muted" style="padding:2px 0;vertical-align:top">Enabled mask IDs</td><td style="padding:2px 4px;font-size:9px">${idsShow || '<span class="muted">—</span>'}${idsTail}</td></tr>` +
+      `</tbody></table>` +
+      `<div style="font-weight:600;margin:10px 0 4px;opacity:0.9">Scene composer bundle (current)</div>` +
+      `<div style="font-size:10px">${bundleLine}</div>` +
+      `<div style="font-weight:600;margin:10px 0 4px;opacity:0.9">Tile manager (<code>_tileEffectMasks</code>)</div>` +
+      `<table style="width:100%;border-collapse:collapse;font-size:10px;margin-bottom:4px"><tbody>` +
+      `<tr><td class="muted" style="padding:2px 0;width:38%">Cached tile mask maps</td><td style="padding:2px 4px">${esc(String(tm.cachedTileMaskMaps ?? 0))}</td></tr>` +
+      `<tr><td class="muted" style="padding:2px 0">Tiles with loaded outdoors tex</td><td style="padding:2px 4px">${esc(String(tm.tilesWithOutdoorsTexture ?? 0))}</td></tr>` +
+      `<tr><td class="muted" style="padding:2px 0">VRAM (effect masks)</td><td style="padding:2px 4px">${esc(String(tm.effectMaskVramMb ?? '—'))} / ${esc(String(tm.effectMaskVramBudgetMb ?? '—'))} MB budget</td></tr>` +
+      `</tbody></table>` +
+      `<div class="muted" style="font-size:9px;margin-bottom:2px">Sample tiles (up to 12)</div>` +
+      `<table style="width:100%;border-collapse:collapse;font-size:10px;margin-bottom:6px"><thead><tr style="opacity:0.85">` +
+      `<th style="text-align:left;padding:2px 4px">tile</th><th style="text-align:left;padding:2px 4px">url</th>` +
+      `<th style="text-align:left;padding:2px 4px">uuid</th><th style="text-align:left;padding:2px 4px">size</th></tr></thead>` +
+      `<tbody>${tileSamples || '<tr><td colspan="4" class="muted">No loaded outdoors rows in cache</td></tr>'}</tbody></table>` +
+      `<div style="font-weight:600;margin:10px 0 4px;opacity:0.9">GPU compositor</div>` +
+      `<table style="width:100%;border-collapse:collapse;font-size:10px;margin-bottom:4px"><tbody>` +
+      `<tr><td class="muted" style="padding:2px 0;width:38%">Instance present</td><td style="padding:2px 4px">${yn(!!gpu.present)}</td></tr>` +
+      `<tr><td class="muted" style="padding:2px 0"><code>_activeFloorKey</code></td><td style="padding:2px 4px;font-size:9px"><code>${esc(String(gpu._activeFloorKey ?? '—'))}</code></td></tr>` +
+      `</tbody></table>` +
+      `<div class="muted" style="font-size:9px;margin-bottom:2px"><code>getFloorTexture(key, &apos;outdoors&apos;)</code> probe</div>` +
+      `<table style="width:100%;border-collapse:collapse;font-size:10px;margin-bottom:6px"><thead><tr style="opacity:0.85">` +
+      `<th style="text-align:left;padding:2px 4px">key</th><th style="text-align:center;padding:2px 4px">hit</th>` +
+      `<th style="text-align:left;padding:2px 4px">uuid / err</th><th style="text-align:left;padding:2px 4px">size</th></tr></thead>` +
+      `<tbody>${gft || '<tr><td colspan="4" class="muted">No probes (compositor missing)</td></tr>'}</tbody></table>` +
+      `<div class="muted" style="font-size:9px;margin-bottom:2px"><code>_floorMeta</code> outdoors entry (per key, first 16)</div>` +
+      `<table style="width:100%;border-collapse:collapse;font-size:10px;margin-bottom:6px"><thead><tr style="opacity:0.85">` +
+      `<th style="text-align:left;padding:2px 4px">floorKey</th><th style="text-align:center;padding:2px 4px">out∈</th>` +
+      `<th style="text-align:left;padding:2px 4px">uuid</th><th style="text-align:left;padding:2px 4px">size</th></tr></thead>` +
+      `<tbody>${fmeta || '<tr><td colspan="4" class="muted">No _floorMeta rows</td></tr>'}</tbody></table>` +
+      `<div class="muted" style="font-size:9px;margin-bottom:2px"><code>_floorCache</code> outdoors RT (first 16)</div>` +
+      `<table style="width:100%;border-collapse:collapse;font-size:10px;margin-bottom:6px"><thead><tr style="opacity:0.85">` +
+      `<th style="text-align:left;padding:2px 4px">floorKey</th><th style="text-align:center;padding:2px 4px">RT</th>` +
+      `<th style="text-align:left;padding:2px 4px">tex uuid</th></tr></thead>` +
+      `<tbody>${frt || '<tr><td colspan="3" class="muted">No cache rows</td></tr>'}</tbody></table>` +
+      `<div style="font-weight:600;margin:10px 0 4px;opacity:0.9">Registry &amp; weather</div>` +
+      `<table style="width:100%;border-collapse:collapse;font-size:10px;margin-bottom:6px"><tbody>` +
+      `<tr><td class="muted" style="padding:2px 0;width:38%"><code>getMask(&apos;outdoors&apos;)</code></td><td style="padding:2px 4px">${briefTex(reg)}</td></tr>` +
+      `<tr><td class="muted" style="padding:2px 0"><code>weatherController.roofMap</code></td><td style="padding:2px 4px">${briefTex(wc.roofMap)}</td></tr>` +
+      `<tr><td class="muted" style="padding:2px 0">FC <code>_lastOutdoorsTexture</code></td><td style="padding:2px 4px">${briefTex(fcs.lastOutdoorsTexture)} · key <code>${esc(String(fcs.lastOutdoorsFloorKey ?? '—'))}</code></td></tr>` +
+      `</tbody></table>` +
+      `<div style="font-weight:600;margin:10px 0 4px;opacity:0.9">Consumers (who bound a texture / flag)</div>` +
+      `<table style="width:100%;border-collapse:collapse;font-size:10px"><tbody>` +
+      `<tr><td class="muted" style="padding:2px 4px;vertical-align:top;width:34%">Building shadows</td><td style="padding:2px 4px">${briefTex(cons.buildingShadows?._outdoorsMaskSync)} · enabled ${yn(!!cons.buildingShadows?.paramsEnabled)}</td></tr>` +
+      `<tr><td class="muted" style="padding:2px 4px;vertical-align:top">Water</td><td style="padding:2px 4px">uHas ${esc(String(cons.water?.uHasOutdoorsMask ?? '—'))} · ${briefTex(cons.water?.tOutdoorsMask)}</td></tr>` +
+      `<tr><td class="muted" style="padding:2px 4px;vertical-align:top">Sky color</td><td style="padding:2px 4px">uHas ${esc(String(cons.skyColor?.uHasOutdoorsMask ?? '—'))} · ${briefTex(cons.skyColor?.tOutdoorsMask)}</td></tr>` +
+      `<tr><td class="muted" style="padding:2px 4px;vertical-align:top">Lighting (roof)</td><td style="padding:2px 4px">uHas ${esc(String(cons.lighting?.uHasOutdoorsForRoofLight ?? '—'))} · ${briefTex(cons.lighting?.tOutdoorsForRoofLight)}</td></tr>` +
+      `<tr><td class="muted" style="padding:2px 4px;vertical-align:top">Cloud</td><td style="padding:2px 4px">legacy ${briefTex(cloud.legacyOutdoorsMask)} · per-floor slots ${esc(cloudPf)}</td></tr>` +
+      `<tr><td class="muted" style="padding:2px 4px;vertical-align:top">Overhead shadows</td><td style="padding:2px 4px">${briefTex(cons.overheadShadows?.outdoorsMask)}</td></tr>` +
+      `</tbody></table>` +
+      `</div>` +
+      `<p class="muted" style="font-size:9px;margin:8px 0 0;line-height:1.35">` +
+      `Full JSON: Breaker Box → <strong>Copy full health JSON</strong> includes <code>outdoorsTrace</code>.</p>`
+    );
+  }
+
+  /**
+   * @param {string|null} effectId
+   * @returns {string}
+   */
+  _effectSurfaceDetailHtml(effectId) {
+    if (!effectId || !this.healthEvaluator?.getEffectSurfaceDiagnostics) return '';
+    const d = this.healthEvaluator.getEffectSurfaceDiagnostics(effectId);
+    if (!d) return '';
+
+    if (effectId === 'SpecularEffectV2') {
+      return this._htmlSpecularOutdoorsDetail(d);
+    }
+
+    if (effectId === 'GpuSceneMaskCompositor') {
+      return this._htmlGpuOutdoorsDetail(d);
+    }
+
+    if (effectId === 'BuildingShadowsEffectV2') {
+      return this._htmlBuildingShadowsOutdoorsDetail(d);
+    }
+
+    return '';
   }
 
   _renderStackPanel(snapshot) {
@@ -905,11 +1307,24 @@ export class BreakerBoxDialog {
         const effect = (snapshot.effects || []).find((e) => e.effectId === effectId);
         return `<li>${esc(effectId)}: <strong>${esc(effect?.status || 'unknown')}</strong></li>`;
       }).join('');
+      let specGpuBlock = '';
+      if (selected.id === 'src:specularOutdoors' && this.healthEvaluator?.getEffectSurfaceDiagnostics) {
+        const dSpec = this.healthEvaluator.getEffectSurfaceDiagnostics('SpecularEffectV2');
+        const dGpu = this.healthEvaluator.getEffectSurfaceDiagnostics('GpuSceneMaskCompositor');
+        const trace = this.healthEvaluator.getOutdoorsTraceDiagnostics?.() ?? null;
+        specGpuBlock =
+          '<div class="muted" style="margin-top:12px;font-weight:600">_Outdoors + specular (full dump)</div>' +
+          '<p class="muted" style="font-size:10px;margin:4px 0 8px">Same panels as selecting SpecularEffectV2 or GpuSceneMaskCompositor — shown here so the source bulb is enough.</p>' +
+          (dSpec ? this._htmlSpecularOutdoorsDetail(dSpec) : '<p class="muted">SpecularEffectV2: no render diagnostics yet.</p>') +
+          (dGpu ? this._htmlGpuOutdoorsDetail(dGpu) : '<p class="muted">GpuSceneMaskCompositor: unavailable.</p>') +
+          this._htmlOutdoorsTrace(trace);
+      }
       this._detail.innerHTML = `
         <div><strong>${esc(selected.label)}</strong> <span class="muted">(source)</span></div>
         <div>Status: <strong style="color:${colorForStatus(selected.status)}">${esc(selected.status)}</strong></div>
         <div class="muted">Linked effects:</div>
         <ul>${effectRows || '<li>None</li>'}</ul>
+        ${specGpuBlock}
       `;
       return;
     }
@@ -940,6 +1355,7 @@ export class BreakerBoxDialog {
       '<li class="muted">None — no dependency-graph propagation on this effect.</li>';
 
     const pipelineBlock = this._pipelineDetailHtml(snapshot, effect?.effectId);
+    const surfaceBlock = this._effectSurfaceDetailHtml(effect?.effectId);
 
     this._detail.innerHTML = `
       <div><strong>${esc(effect?.effectId || selected.label)}</strong> <span class="muted">(effect)</span></div>
@@ -952,6 +1368,7 @@ export class BreakerBoxDialog {
       <div class="muted" style="margin-top:6px">Graph propagation (upstream → this effect):</div>
       <ul style="margin-top:4px">${propBlock}</ul>
       ${pipelineBlock}
+      ${surfaceBlock}
     `;
   }
 
@@ -967,25 +1384,35 @@ export class BreakerBoxDialog {
     };
     if (!selected) return base;
     if (selected.kind === 'source') {
-      return {
-        ...base,
-        node: {
-          kind: 'source',
-          id: selected.id,
-          label: selected.label,
-          status: selected.status,
-          linkedEffects: selected.effects.map((effectId) => {
-            const effect = (snapshot?.effects || []).find((e) => e.effectId === effectId);
-            return {
-              effectId,
-              status: effect?.status || 'unknown',
-              byLevel: effect?.byLevel || [],
-            };
-          }),
-        },
+      const node = {
+        kind: 'source',
+        id: selected.id,
+        label: selected.label,
+        status: selected.status,
+        linkedEffects: selected.effects.map((effectId) => {
+          const effect = (snapshot?.effects || []).find((e) => e.effectId === effectId);
+          return {
+            effectId,
+            status: effect?.status || 'unknown',
+            byLevel: effect?.byLevel || [],
+          };
+        }),
       };
+      if (selected.id === 'src:specularOutdoors' && this.healthEvaluator?.getEffectSurfaceDiagnostics) {
+        node.specularOutdoorsDiagnostics = {
+          specularEffectV2: this.healthEvaluator.getEffectSurfaceDiagnostics('SpecularEffectV2'),
+          gpuSceneMaskCompositor: this.healthEvaluator.getEffectSurfaceDiagnostics('GpuSceneMaskCompositor'),
+        };
+        if (this.healthEvaluator.getOutdoorsTraceDiagnostics) {
+          node.outdoorsTrace = this.healthEvaluator.getOutdoorsTraceDiagnostics();
+        }
+      }
+      return { ...base, node };
     }
     const stackBinds = (snapshot?.renderStack?.bindings || []).filter((b) => b.effectId === selected.effectId);
+    const surfaceDx = ['SpecularEffectV2', 'GpuSceneMaskCompositor', 'BuildingShadowsEffectV2'].includes(selected.effectId)
+      ? (this.healthEvaluator?.getEffectSurfaceDiagnostics?.(selected.effectId) ?? null)
+      : null;
     return {
       ...base,
       node: {
@@ -994,6 +1421,7 @@ export class BreakerBoxDialog {
         effectId: selected.effectId,
         status: selected.status,
         payload: selected.effect || null,
+        surfaceDiagnostics: surfaceDx,
       },
       graphEdges: (snapshot?.edges || []).filter((e) =>
         e?.from === selected.effectId || e?.to === selected.effectId

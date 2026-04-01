@@ -21,6 +21,7 @@
 
 import { createLogger } from '../../core/log.js';
 import { weatherController } from '../../core/WeatherController.js';
+import { resolveCompositorOutdoorsTexture } from '../../masks/resolve-compositor-outdoors.js';
 
 const log = createLogger('BuildingShadowsEffectV2');
 
@@ -74,6 +75,22 @@ export class BuildingShadowsEffectV2 {
     this._floorPreloadPromise = null;
     /** @type {number} Last warmup attempt timestamp (ms) */
     this._lastFloorPreloadAttemptMs = 0;
+
+    /** @type {object|null} Last-frame diagnostics for Breaker Box / health */
+    this._healthDiagnostics = null;
+  }
+
+  /**
+   * Snapshot for health / Breaker Box (updated each render when compositor ran).
+   * @returns {object|null}
+   */
+  getHealthDiagnostics() {
+    const d = this._healthDiagnostics;
+    if (!d) return null;
+    return {
+      ...d,
+      floorKeys: [...(d.floorKeys || [])],
+    };
   }
 
   static getControlSchema() {
@@ -484,6 +501,13 @@ export class BuildingShadowsEffectV2 {
     }
 
     if (!this.params.enabled) {
+      this._healthDiagnostics = {
+        timestamp: Date.now(),
+        paramsEnabled: false,
+        compositorPresent: false,
+        drewAny: false,
+        note: 'Building shadows disabled',
+      };
       this._clearShadowTargetToWhite(renderer);
       return;
     }
@@ -491,9 +515,22 @@ export class BuildingShadowsEffectV2 {
     const sc = window.MapShine?.sceneComposer;
     const compositor = sc?._sceneMaskCompositor;
     if (!compositor) {
+      this._healthDiagnostics = {
+        timestamp: Date.now(),
+        paramsEnabled: true,
+        compositorPresent: false,
+        drewAny: false,
+        note: 'GpuSceneMaskCompositor missing',
+      };
       this._clearShadowTargetToWhite(renderer);
       return;
     }
+
+    const outdoorResolve = resolveCompositorOutdoorsTexture(
+      compositor,
+      window.MapShine?.activeLevelContext ?? null,
+      { skipGroundFallback: false, allowBundleFallback: true },
+    );
 
     const floorCount = Number(window.MapShine?.floorStack?.getFloors?.()?.length ?? 0);
     this._maybeWarmFloorMaskCache(compositor, floorCount);
@@ -503,14 +540,29 @@ export class BuildingShadowsEffectV2 {
     // (often ground) when per-floor keys are unavailable; that causes cross-floor
     // leakage on upper floors. Single-floor scenes still use fallbackMask.
     const allowFallbackMask = floorCount <= 1;
-    const fallbackMask = allowFallbackMask ? (this._outdoorsMask ?? null) : null;
+    let fallbackMask = allowFallbackMask ? (this._outdoorsMask ?? null) : null;
+    if (allowFallbackMask && !fallbackMask) {
+      fallbackMask = outdoorResolve.texture ?? null;
+    }
+
+    // If using bundle fallback and no floor keys, inject 'bundle' as a synthetic key
+    // so the render loop has something to iterate over. The loop will then use the
+    // fallbackMask texture directly for drawing.
+    if (floorKeys.length === 0 && fallbackMask && outdoorResolve.route === 'bundle') {
+      floorKeys.push('bundle');
+    }
+
+    // NO OUTDOORS MASK FALLBACK: if absolutely no outdoors mask exists (not in GPU cache,
+    // not in bundle, not ground), treat everything as outdoors and draw shadows everywhere.
+    // This matches specular behavior where "no outdoors mask = full outdoors".
     if (floorKeys.length === 0 && !fallbackMask) {
       if (!this._loggedNoMaskOnce) {
         this._loggedNoMaskOnce = true;
-        log.warn('BuildingShadowsEffectV2: no outdoors mask source (no floor keys and no fallback texture)');
+        log.warn('BuildingShadowsEffectV2: no _Outdoors mask found anywhere (GPU cache, bundle, or ground). Treating everything as outdoors.');
       }
-      this._clearShadowTargetToWhite(renderer);
-      return;
+      // Use "full outdoors" mode - inject a synthetic key that tells the render loop
+      // to draw shadows everywhere (white mask assumption)
+      floorKeys.push('full-outdoors');
     }
 
     // Building shadow is a world/scene-space texture consumed by LightingEffectV2
@@ -543,14 +595,28 @@ export class BuildingShadowsEffectV2 {
 
     this._quad.material = this._projectMaterial;
     let drewAny = false;
+    let keyedDrew = false;
     for (const key of floorKeys) {
-      const maskTex = compositor.getFloorTexture(key, 'outdoors');
+      if (key === 'full-outdoors') {
+        // No outdoors mask exists - treat everything as outdoors (white mask)
+        // Set hasMask to 0 so shader uses full outdoors assumption
+        this._projectMaterial.uniforms.uOutdoorsMask.value = null;
+        this._projectMaterial.uniforms.uHasMask.value = 0.0;
+        this._projectMaterial.uniforms.uOutdoorsMaskFlipY.value = 0.0;
+        renderer.render(this._scene, this._camera);
+        drewAny = true;
+        keyedDrew = true;
+        continue;
+      }
+      // Handle synthetic 'bundle' key by using the fallbackMask directly
+      const maskTex = key === 'bundle' ? fallbackMask : compositor.getFloorTexture(key, 'outdoors');
       if (!maskTex) continue;
       this._projectMaterial.uniforms.uOutdoorsMask.value = maskTex;
       this._projectMaterial.uniforms.uHasMask.value = 1.0;
       this._projectMaterial.uniforms.uOutdoorsMaskFlipY.value = maskTex?.flipY ? 1.0 : 0.0;
       renderer.render(this._scene, this._camera);
       drewAny = true;
+      keyedDrew = true;
     }
 
     // Fallback: if keyed lookups weren't ready this frame, still project from the
@@ -564,11 +630,55 @@ export class BuildingShadowsEffectV2 {
     }
 
     if (!drewAny) {
+      // Last-resort fallback when keys exist but none resolve this frame.
+      // Keep shadows active by treating missing mask as full-outdoors.
+      this._projectMaterial.uniforms.uOutdoorsMask.value = null;
+      this._projectMaterial.uniforms.uHasMask.value = 0.0;
+      this._projectMaterial.uniforms.uOutdoorsMaskFlipY.value = 0.0;
+      renderer.render(this._scene, this._camera);
+      drewAny = true;
+    }
+
+    if (!drewAny) {
+      this._healthDiagnostics = {
+        timestamp: Date.now(),
+        paramsEnabled: true,
+        compositorPresent: true,
+        floorKeys: [...floorKeys],
+        floorKeyCount: floorKeys.length,
+        syncOutdoorsMaskUuid: this._outdoorsMask?.uuid ?? null,
+        fallbackUsed: false,
+        outdoorsResolveRoute: outdoorResolve.route,
+        outdoorsResolveKey: outdoorResolve.resolvedKey,
+        drewAny: false,
+        note: 'Keyed passes produced no draw (mask textures null?)',
+      };
       this._clearShadowTargetToWhite(renderer);
       renderer.autoClear = prevAutoClear;
       renderer.setRenderTarget(prevTarget);
       return;
     }
+
+    // Track if bundle fallback or full-outdoors fallback was used
+    const usedBundleFallback = floorKeys.includes('bundle') || (outdoorResolve.route === 'bundle');
+    const usedFullOutdoorsFallback = floorKeys.includes('full-outdoors');
+    this._healthDiagnostics = {
+      timestamp: Date.now(),
+      paramsEnabled: true,
+      compositorPresent: true,
+      floorKeys: [...floorKeys],
+      floorKeyCount: floorKeys.length,
+      syncOutdoorsMaskUuid: this._outdoorsMask?.uuid ?? null,
+      fallbackUsed: drewAny && !keyedDrew && !!fallbackMask,
+      fallbackMaskUuid: (drewAny && !keyedDrew && fallbackMask) ? (fallbackMask?.uuid ?? null) : null,
+      bundleFallbackUsed: usedBundleFallback,
+      fullOutdoorsFallbackUsed: usedFullOutdoorsFallback,
+      outdoorsResolveRoute: outdoorResolve.route,
+      outdoorsResolveKey: outdoorResolve.resolvedKey,
+      drewAny: true,
+      receiverMaskUuid: receiverMaskTex?.uuid ?? null,
+      shadowFactorTextureUuid: this.shadowTarget?.texture?.uuid ?? null,
+    };
 
     this._quad.material = this._invertMaterial;
     this._invertMaterial.uniforms.tStrength.value = this._strengthTarget.texture;
@@ -692,7 +802,58 @@ export class BuildingShadowsEffectV2 {
       pushKey('ground');
     }
 
+    // Unified resolver: if stack/context keys missed but a sibling or ground
+    // texture exists, use that key so the projection pass matches FloorCompositor sync.
+    if (keys.length === 0 && compositor) {
+      const r = resolveCompositorOutdoorsTexture(
+        compositor,
+        window.MapShine?.activeLevelContext ?? null,
+        { skipGroundFallback: false },
+      );
+      if (r.resolvedKey && r.texture) {
+        pushKey(r.resolvedKey);
+      }
+    }
+
+    // EMERGENCY FALLBACK: if we STILL have no keys but the level context is valid,
+    // force-try the active context band even if getFloorTexture currently fails.
+    // This handles cases where FloorStack and LevelContext disagree (e.g., 0:10 vs 20:20).
+    if (keys.length === 0 && activeKey && compositor) {
+      if (!this._loggedEmergencyFallbackOnce) {
+        this._loggedEmergencyFallbackOnce = true;
+        log.warn('BuildingShadowsEffectV2: emergency fallback - using active context band directly', {
+          activeKey,
+          floorStackBand: activeFloor ? `${activeFloor.elevationMin}:${activeFloor.elevationMax}` : null,
+          metaKeys: cachedEntries.map((e) => e.key),
+        });
+      }
+      // Force-add the key without checking getFloorTexture - the render loop
+      // will try to fetch it and fallback to direct resolver if needed
+      if (!seen.has(activeKey)) {
+        seen.add(activeKey);
+        keys.push(activeKey);
+      }
+    }
+
     return keys;
+  }
+
+  /**
+   * When {@link #setOutdoorsMask} / FloorCompositor sync has not populated `_outdoorsMask`
+   * yet, still resolve _Outdoors from GpuSceneMaskCompositor using the same key order as
+   * FloorCompositor._resolveOutdoorsMask (single-floor / missed-sync safety).
+   * @param {object} compositor
+   * @returns {import('three').Texture|null}
+   * @private
+   */
+  _resolveCompositorOutdoorsDirect(compositor) {
+    if (!compositor) return null;
+    const r = resolveCompositorOutdoorsTexture(
+      compositor,
+      window.MapShine?.activeLevelContext ?? null,
+      { skipGroundFallback: false },
+    );
+    return r.texture ?? null;
   }
 
   _resolveReceiverMaskTexture(compositor) {
@@ -724,11 +885,12 @@ export class BuildingShadowsEffectV2 {
   }
 
   _maybeWarmFloorMaskCache(compositor, floorCount) {
-    if (!compositor || floorCount <= 1) return;
+    if (!compositor) return;
     if (this._floorPreloadPromise) return;
 
     const now = Date.now();
-    if ((now - this._lastFloorPreloadAttemptMs) < 1000) return;
+    const throttleMs = floorCount <= 1 ? 3500 : 1000;
+    if ((now - this._lastFloorPreloadAttemptMs) < throttleMs) return;
     this._lastFloorPreloadAttemptMs = now;
 
     const scene = canvas?.scene ?? null;
@@ -834,6 +996,7 @@ export class BuildingShadowsEffectV2 {
   }
 
   dispose() {
+    this._healthDiagnostics = null;
     try { this._strengthTarget?.dispose(); } catch (_) {}
     try { this.shadowTarget?.dispose(); } catch (_) {}
     try { this._projectMaterial?.dispose(); } catch (_) {}

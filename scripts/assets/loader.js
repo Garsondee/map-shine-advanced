@@ -425,9 +425,36 @@ export async function loadAssetBundle(basePath, onProgress = null, options = {})
     }
 
     // Step 2: Build a single authoritative exact-URL manifest.
-    const effectiveManifest = (maskManifest && typeof maskManifest === 'object')
+    // If a scene flag manifest is stale/incomplete (common after asset changes),
+    // supplement missing requested mask suffixes with conventional candidates so
+    // optional-but-important masks like _Outdoors are still attempted.
+    const baseManifest = (maskManifest && typeof maskManifest === 'object')
       ? maskManifest
       : buildMaskManifest(basePath, { extension: maskExtension, maskIds });
+    const effectiveManifest = { ...(baseManifest || {}) };
+    try {
+      const requestedMaskIds = Array.isArray(maskIds) && maskIds.length > 0
+        ? maskIds.map((v) => String(v || '').toLowerCase()).filter(Boolean)
+        : Object.keys(EFFECT_MASKS);
+      const fallbackManifest = buildMaskManifest(basePath, {
+        extension: maskExtension,
+        maskIds: requestedMaskIds,
+      });
+      for (const [maskId, def] of Object.entries(EFFECT_MASKS)) {
+        const idLower = String(maskId || '').toLowerCase();
+        if (!requestedMaskIds.includes(idLower)) continue;
+        const suffix = def?.suffix;
+        if (!suffix) continue;
+        const hasExisting = Array.isArray(effectiveManifest[suffix])
+          ? effectiveManifest[suffix].length > 0
+          : (typeof effectiveManifest[suffix] === 'string' && !!effectiveManifest[suffix].trim());
+        if (hasExisting) continue;
+        const fallbackCandidates = fallbackManifest?.[suffix];
+        if (Array.isArray(fallbackCandidates) && fallbackCandidates.length > 0) {
+          effectiveManifest[suffix] = fallbackCandidates;
+        }
+      }
+    } catch (_) {}
 
     // Step 3: Load masks in parallel with concurrency limit
     const semaphore = new Semaphore(4);

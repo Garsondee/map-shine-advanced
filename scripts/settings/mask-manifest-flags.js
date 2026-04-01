@@ -94,7 +94,9 @@ export function pathsByMaskIdToLoaderManifest(pathsByMaskId, enabledMaskIds) {
 export function collectEnabledMaskIds(scene) {
   const enabledEffects = sceneSettings.getEffectiveSettings(scene)?.effects || {};
   const isEnabled = (effectId) => !!enabledEffects?.[effectId]?.enabled;
-  const ids = new Set(['specular']);
+  // Outdoors is required for BuildingShadows / specular / sky gating — not optional
+  // like tree/bush; always allow manifest + bundle resolution alongside specular.
+  const ids = new Set(['specular', 'outdoors']);
 
   if (isEnabled('specular')) {
     ids.add('normal');
@@ -119,10 +121,6 @@ export function collectEnabledMaskIds(scene) {
     ids.add('fluid');
     ids.add('water');
   }
-  if (isEnabled('lighting') || isEnabled('sky-color')) {
-    ids.add('outdoors');
-  }
-
   return Array.from(ids);
 }
 

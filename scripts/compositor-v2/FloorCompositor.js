@@ -81,6 +81,7 @@ import { PlayerLightEffectV2 } from './effects/PlayerLightEffectV2.js';
 import { SmellyFliesEffect } from '../particles/SmellyFliesEffect.js';
 import { CandleFlamesEffectV2 } from './effects/CandleFlamesEffectV2.js';
 import { weatherController } from '../core/WeatherController.js';
+import { resolveCompositorOutdoorsTexture } from '../masks/resolve-compositor-outdoors.js';
 
 const log = createLogger('FloorCompositor');
 
@@ -2055,8 +2056,12 @@ export class FloorCompositor {
       try { this._overheadShadowEffect?.update?.(timeInfo); } catch (err) {
         log.warn('OverheadShadowsEffectV2 update threw, skipping overhead shadow update:', err);
       }
-      // Overhead shadows: no per-frame update needed — sun angles are pushed
-      // directly below from SkyColorEffectV2 before render().
+      // Building shadows: must run update() here — unlike most effects, render() can
+      // return before calling update() (no compositor / disabled / RT not ready).
+      // HealthEvaluator + uniform freshness rely on this path every frame.
+      try { this._buildingShadowEffect?.update?.(timeInfo); } catch (err) {
+        log.warn('BuildingShadowsEffectV2 update threw, skipping building shadow update:', err);
+      }
 
     }
 
@@ -2745,31 +2750,14 @@ export class FloorCompositor {
       return { texture: roofMap, floorKey: roofMap ? 'weatherController' : null };
     }
 
-    const candidateKeys = [];
-
-    const cb = Number(context?.bottom);
-    const ct = Number(context?.top);
-    if (Number.isFinite(cb) && Number.isFinite(ct)) candidateKeys.push(`${cb}:${ct}`);
-
-    try {
-      const activeFloor = window.MapShine?.floorStack?.getActiveFloor?.();
-      const activeCompositorKey = activeFloor?.compositorKey;
-      if (activeCompositorKey) candidateKeys.push(String(activeCompositorKey));
-    } catch (_) {}
-
-    const compositorActiveKey = compositor._activeFloorKey ?? null;
-    if (compositorActiveKey) candidateKeys.push(String(compositorActiveKey));
-
-    const uniqueKeys = [...new Set(candidateKeys.filter(Boolean))];
-    for (const key of uniqueKeys) {
-      const tex = compositor.getFloorTexture?.(key, 'outdoors') ?? null;
-      if (tex) return { texture: tex, floorKey: key };
+    const gpu = resolveCompositorOutdoorsTexture(
+      compositor,
+      context,
+      { skipGroundFallback: skipGroundGlobalFallback },
+    );
+    if (gpu.texture) {
+      return { texture: gpu.texture, floorKey: gpu.resolvedKey };
     }
-
-    const groundTex = skipGroundGlobalFallback
-      ? null
-      : (compositor.getGroundFloorMaskTexture?.('outdoors') ?? null);
-    if (groundTex) return { texture: groundTex, floorKey: 'ground' };
 
     if (!skipGroundGlobalFallback) {
       const bundleMask = sc?.currentBundle?.masks?.find?.(m => (m?.id === 'outdoors' || m?.type === 'outdoors'))?.texture ?? null;

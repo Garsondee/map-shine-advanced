@@ -30,9 +30,13 @@ export class BuildingShadowsEffectV2 {
     this.params = {
       enabled: true,
       opacity: 0.75,
-      length: 0.165,
+      length: 0.22,
       softness: 3.0,
       smear: 0.65,
+      resolutionScale: 1.25,
+      penumbra: 0.5,
+      shadowCurve: 0.9,
+      blurRadius: 1.6,
       sunLatitude: 0.1,
     };
 
@@ -45,6 +49,8 @@ export class BuildingShadowsEffectV2 {
     this._strengthTarget = null;
     /** @type {THREE.WebGLRenderTarget|null} Lighting-facing factor texture (1=lit, 0=shadowed) */
     this.shadowTarget = null;
+    /** @type {THREE.WebGLRenderTarget|null} Temp target for separable blur */
+    this._blurTarget = null;
 
     /** @type {THREE.Scene|null} */
     this._scene = null;
@@ -56,6 +62,8 @@ export class BuildingShadowsEffectV2 {
     this._projectMaterial = null;
     /** @type {THREE.ShaderMaterial|null} */
     this._invertMaterial = null;
+    /** @type {THREE.ShaderMaterial|null} */
+    this._blurMaterial = null;
 
     /** @type {THREE.Vector2|null} */
     this.sunDir = null;
@@ -101,7 +109,7 @@ export class BuildingShadowsEffectV2 {
           name: 'main',
           label: 'Building Shadows',
           type: 'inline',
-          parameters: ['opacity', 'length', 'softness', 'smear']
+          parameters: ['opacity', 'length', 'softness', 'smear', 'resolutionScale', 'penumbra', 'shadowCurve', 'blurRadius']
         }
       ],
       parameters: {
@@ -117,9 +125,9 @@ export class BuildingShadowsEffectV2 {
           type: 'slider',
           label: 'Length',
           min: 0.0,
-          max: 0.35,
+          max: 0.6,
           step: 0.005,
-          default: 0.165
+          default: 0.22
         },
         softness: {
           type: 'slider',
@@ -136,6 +144,38 @@ export class BuildingShadowsEffectV2 {
           max: 1.0,
           step: 0.01,
           default: 0.65
+        },
+        resolutionScale: {
+          type: 'slider',
+          label: 'Resolution',
+          min: 1.0,
+          max: 2.0,
+          step: 0.05,
+          default: 1.25
+        },
+        penumbra: {
+          type: 'slider',
+          label: 'Penumbra',
+          min: 0.0,
+          max: 1.0,
+          step: 0.01,
+          default: 0.5
+        },
+        shadowCurve: {
+          type: 'slider',
+          label: 'Shadow Curve',
+          min: 0.5,
+          max: 1.6,
+          step: 0.01,
+          default: 0.9
+        },
+        blurRadius: {
+          type: 'slider',
+          label: 'Blur',
+          min: 0.0,
+          max: 4.0,
+          step: 0.05,
+          default: 1.6
         }
       }
     };
@@ -185,6 +225,8 @@ export class BuildingShadowsEffectV2 {
         uLength: { value: this.params.length },
         uSoftness: { value: this.params.softness },
         uSmear: { value: this.params.smear },
+        uPenumbra: { value: this.params.penumbra },
+        uShadowCurve: { value: this.params.shadowCurve },
         uZoom: { value: 1.0 },
         uTexelSize: { value: new THREE.Vector2(1 / 1024, 1 / 1024) },
         uSceneDimensions: { value: new THREE.Vector2(1, 1) }
@@ -207,6 +249,8 @@ export class BuildingShadowsEffectV2 {
         uniform float uLength;
         uniform float uSoftness;
         uniform float uSmear;
+        uniform float uPenumbra;
+        uniform float uShadowCurve;
         uniform float uZoom;
         uniform vec2 uTexelSize;
         uniform vec2 uSceneDimensions;
@@ -241,6 +285,12 @@ export class BuildingShadowsEffectV2 {
           return clamp(mix(1.0, m.r, m.a), 0.0, 1.0);
         }
 
+        float sampleCasterIndoor(vec2 uv, float receiverOutdoorGate) {
+          float valid = uvInBounds(uv);
+          float casterOutdoors = readOutdoorsMask(uv);
+          return (1.0 - casterOutdoors) * receiverOutdoorGate * valid;
+        }
+
         void main() {
           if (uHasMask < 0.5) {
             gl_FragColor = vec4(0.0);
@@ -252,7 +302,7 @@ export class BuildingShadowsEffectV2 {
           // camera zoom. Scaling by zoom here causes visible shadow length
           // changes while zooming.
           vec2 dir = -normalize(uSunDir);
-          float pxLen = uLength * 1080.0;
+          float pxLen = uLength * 1400.0;
           vec2 maskTexel = uTexelSize;
           vec2 baseOffsetUv = dir * pxLen * maskTexel;
 
@@ -262,117 +312,43 @@ export class BuildingShadowsEffectV2 {
           float receiverOutdoors = readReceiverOutdoorsMask(vUv);
           float receiverOutdoorGate = clamp(receiverOutdoors, 0.0, 1.0);
 
+          // Directional ray integration with lateral penumbra spread.
+          // This replaces "stacked offset copies" with continuous transport along
+          // the projected sun direction for smoother and more natural elongation.
+          vec2 ortho = vec2(-dir.y, dir.x);
+          float smearAmount = clamp(uSmear, 0.0, 1.0);
+          float penumbraAmount = clamp(uPenumbra, 0.0, 1.0);
           float accum = 0.0;
           float weightSum = 0.0;
+          float peakHit = 0.0;
 
-          // Kawase-style multi-ring taps at several distances along projection.
-          // This yields smoother penumbra-like edges with fewer harsh box artifacts.
-          float smearAmount = clamp(uSmear, 0.0, 1.0);
-          for (int s = 0; s < 3; s++) {
-            float t = float(s) / 2.0;
-            float sigma = max(uSoftness, 0.5) * mix(0.8, 1.8, t * t);
-            vec2 step1 = maskTexel * sigma * 2.0;
-            vec2 step2 = step1 * 2.0;
-            vec2 centerUv = vUv + (baseOffsetUv * mix(0.25, 1.0, t));
-            float traceWeight = mix(1.0, 1.7, smearAmount * t);
+          const int RAY_STEPS = 12;
+          for (int i = 0; i < RAY_STEPS; i++) {
+            float t = (float(i) + 0.5) / float(RAY_STEPS);
+            // Spread toward far end for better long-shadow continuity.
+            float spreadT = mix(t, t * t, 0.45 + 0.4 * smearAmount);
+            vec2 centerUv = vUv + (baseOffsetUv * spreadT);
 
-            vec2 sampleUv = centerUv;
-            float valid = uvInBounds(sampleUv);
-            float w = 0.24 * traceWeight;
-            float casterOutdoors = readOutdoorsMask(sampleUv);
-            float casterIndoor = (1.0 - casterOutdoors) * receiverOutdoorGate * valid;
-            accum += casterIndoor * w;
-            weightSum += w * valid;
+            float sigma = max(uSoftness, 0.5) * mix(0.8, 2.8, (t * t) + (0.5 * penumbraAmount * t));
+            float lateral = sigma * maskTexel.x * mix(0.8, 1.6, penumbraAmount);
+            float distanceFade = mix(1.0, 0.55, t);
 
-            sampleUv = centerUv + vec2( step1.x,  step1.y);
-            valid = uvInBounds(sampleUv);
-            w = 0.12 * traceWeight;
-            casterOutdoors = readOutdoorsMask(sampleUv);
-            casterIndoor = (1.0 - casterOutdoors) * receiverOutdoorGate * valid;
-            accum += casterIndoor * w;
-            weightSum += w * valid;
+            float c0 = sampleCasterIndoor(centerUv, receiverOutdoorGate);
+            float c1 = sampleCasterIndoor(centerUv + ortho * lateral, receiverOutdoorGate);
+            float c2 = sampleCasterIndoor(centerUv - ortho * lateral, receiverOutdoorGate);
 
-            sampleUv = centerUv + vec2(-step1.x,  step1.y);
-            valid = uvInBounds(sampleUv);
-            casterOutdoors = readOutdoorsMask(sampleUv);
-            casterIndoor = (1.0 - casterOutdoors) * receiverOutdoorGate * valid;
-            accum += casterIndoor * w;
-            weightSum += w * valid;
+            float stepHit = c0 * 0.5 + c1 * 0.25 + c2 * 0.25;
+            peakHit = max(peakHit, stepHit);
 
-            sampleUv = centerUv + vec2( step1.x, -step1.y);
-            valid = uvInBounds(sampleUv);
-            casterOutdoors = readOutdoorsMask(sampleUv);
-            casterIndoor = (1.0 - casterOutdoors) * receiverOutdoorGate * valid;
-            accum += casterIndoor * w;
-            weightSum += w * valid;
-
-            sampleUv = centerUv + vec2(-step1.x, -step1.y);
-            valid = uvInBounds(sampleUv);
-            casterOutdoors = readOutdoorsMask(sampleUv);
-            casterIndoor = (1.0 - casterOutdoors) * receiverOutdoorGate * valid;
-            accum += casterIndoor * w;
-            weightSum += w * valid;
-
-            w = 0.07 * traceWeight;
-            sampleUv = centerUv + vec2( step2.x, 0.0);
-            valid = uvInBounds(sampleUv);
-            casterOutdoors = readOutdoorsMask(sampleUv);
-            casterIndoor = (1.0 - casterOutdoors) * receiverOutdoorGate * valid;
-            accum += casterIndoor * w;
-            weightSum += w * valid;
-
-            sampleUv = centerUv + vec2(-step2.x, 0.0);
-            valid = uvInBounds(sampleUv);
-            casterOutdoors = readOutdoorsMask(sampleUv);
-            casterIndoor = (1.0 - casterOutdoors) * receiverOutdoorGate * valid;
-            accum += casterIndoor * w;
-            weightSum += w * valid;
-
-            sampleUv = centerUv + vec2(0.0,  step2.y);
-            valid = uvInBounds(sampleUv);
-            casterOutdoors = readOutdoorsMask(sampleUv);
-            casterIndoor = (1.0 - casterOutdoors) * receiverOutdoorGate * valid;
-            accum += casterIndoor * w;
-            weightSum += w * valid;
-
-            sampleUv = centerUv + vec2(0.0, -step2.y);
-            valid = uvInBounds(sampleUv);
-            casterOutdoors = readOutdoorsMask(sampleUv);
-            casterIndoor = (1.0 - casterOutdoors) * receiverOutdoorGate * valid;
-            accum += casterIndoor * w;
-            weightSum += w * valid;
-
-            w = 0.04 * traceWeight;
-            sampleUv = centerUv + vec2( step2.x,  step2.y);
-            valid = uvInBounds(sampleUv);
-            casterOutdoors = readOutdoorsMask(sampleUv);
-            casterIndoor = (1.0 - casterOutdoors) * receiverOutdoorGate * valid;
-            accum += casterIndoor * w;
-            weightSum += w * valid;
-
-            sampleUv = centerUv + vec2(-step2.x,  step2.y);
-            valid = uvInBounds(sampleUv);
-            casterOutdoors = readOutdoorsMask(sampleUv);
-            casterIndoor = (1.0 - casterOutdoors) * receiverOutdoorGate * valid;
-            accum += casterIndoor * w;
-            weightSum += w * valid;
-
-            sampleUv = centerUv + vec2( step2.x, -step2.y);
-            valid = uvInBounds(sampleUv);
-            casterOutdoors = readOutdoorsMask(sampleUv);
-            casterIndoor = (1.0 - casterOutdoors) * receiverOutdoorGate * valid;
-            accum += casterIndoor * w;
-            weightSum += w * valid;
-
-            sampleUv = centerUv + vec2(-step2.x, -step2.y);
-            valid = uvInBounds(sampleUv);
-            casterOutdoors = readOutdoorsMask(sampleUv);
-            casterIndoor = (1.0 - casterOutdoors) * receiverOutdoorGate * valid;
-            accum += casterIndoor * w;
-            weightSum += w * valid;
+            float stepWeight = mix(1.1, 0.7, t) * distanceFade;
+            accum += stepHit * stepWeight;
+            weightSum += stepWeight;
           }
 
-          float strength = (weightSum > 0.0) ? (accum / weightSum) : 0.0;
+          float integrated = (weightSum > 0.0) ? (accum / weightSum) : 0.0;
+          float strength = mix(integrated, peakHit, 0.35 + 0.25 * smearAmount);
+          strength = smoothstep(0.0, 1.0, clamp(strength, 0.0, 1.0));
+          strength = pow(strength, max(uShadowCurve, 0.01));
           gl_FragColor = vec4(vec3(clamp(strength, 0.0, 1.0)), 1.0);
         }
       `,
@@ -418,6 +394,58 @@ export class BuildingShadowsEffectV2 {
     });
     this._invertMaterial.toneMapped = false;
 
+    this._blurMaterial = new THREE.ShaderMaterial({
+      uniforms: {
+        tInput: { value: null },
+        uTexelSize: { value: new THREE.Vector2(1 / 1024, 1 / 1024) },
+        uDirection: { value: new THREE.Vector2(1, 0) },
+        uRadius: { value: this.params.blurRadius },
+      },
+      vertexShader: `
+        varying vec2 vUv;
+        void main() {
+          vUv = uv;
+          gl_Position = vec4(position.xy, 0.0, 1.0);
+        }
+      `,
+      fragmentShader: `
+        uniform sampler2D tInput;
+        uniform vec2 uTexelSize;
+        uniform vec2 uDirection;
+        uniform float uRadius;
+        varying vec2 vUv;
+
+        void main() {
+          float r = clamp(uRadius, 0.0, 4.0);
+          vec2 stepUv = uDirection * uTexelSize * r;
+
+          // 9-tap separable Gaussian kernel.
+          float w0 = 0.227027;
+          float w1 = 0.1945946;
+          float w2 = 0.1216216;
+          float w3 = 0.054054;
+          float w4 = 0.016216;
+
+          float s = texture2D(tInput, vUv).r * w0;
+          s += texture2D(tInput, vUv + stepUv * 1.0).r * w1;
+          s += texture2D(tInput, vUv - stepUv * 1.0).r * w1;
+          s += texture2D(tInput, vUv + stepUv * 2.0).r * w2;
+          s += texture2D(tInput, vUv - stepUv * 2.0).r * w2;
+          s += texture2D(tInput, vUv + stepUv * 3.0).r * w3;
+          s += texture2D(tInput, vUv - stepUv * 3.0).r * w3;
+          s += texture2D(tInput, vUv + stepUv * 4.0).r * w4;
+          s += texture2D(tInput, vUv - stepUv * 4.0).r * w4;
+
+          gl_FragColor = vec4(vec3(clamp(s, 0.0, 1.0)), 1.0);
+        }
+      `,
+      depthTest: false,
+      depthWrite: false,
+      transparent: false,
+      blending: THREE.NoBlending,
+    });
+    this._blurMaterial.toneMapped = false;
+
     this._quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), this._projectMaterial);
     this._quad.frustumCulled = false;
     this._scene.add(this._quad);
@@ -431,9 +459,12 @@ export class BuildingShadowsEffectV2 {
   onResize(width, height) {
     const THREE = window.THREE;
     if (!THREE || !width || !height) return;
+    const rtSize = this._computeRenderTargetSize(width, height);
+    const rtWidth = rtSize.x;
+    const rtHeight = rtSize.y;
 
     if (!this._strengthTarget) {
-      this._strengthTarget = new THREE.WebGLRenderTarget(width, height, {
+      this._strengthTarget = new THREE.WebGLRenderTarget(rtWidth, rtHeight, {
         minFilter: THREE.LinearFilter,
         magFilter: THREE.LinearFilter,
         format: THREE.RGBAFormat,
@@ -442,11 +473,11 @@ export class BuildingShadowsEffectV2 {
         stencilBuffer: false,
       });
     } else {
-      this._strengthTarget.setSize(width, height);
+      this._strengthTarget.setSize(rtWidth, rtHeight);
     }
 
     if (!this.shadowTarget) {
-      this.shadowTarget = new THREE.WebGLRenderTarget(width, height, {
+      this.shadowTarget = new THREE.WebGLRenderTarget(rtWidth, rtHeight, {
         minFilter: THREE.LinearFilter,
         magFilter: THREE.LinearFilter,
         format: THREE.RGBAFormat,
@@ -455,11 +486,27 @@ export class BuildingShadowsEffectV2 {
         stencilBuffer: false,
       });
     } else {
-      this.shadowTarget.setSize(width, height);
+      this.shadowTarget.setSize(rtWidth, rtHeight);
+    }
+
+    if (!this._blurTarget) {
+      this._blurTarget = new THREE.WebGLRenderTarget(rtWidth, rtHeight, {
+        minFilter: THREE.LinearFilter,
+        magFilter: THREE.LinearFilter,
+        format: THREE.RGBAFormat,
+        type: THREE.UnsignedByteType,
+        depthBuffer: false,
+        stencilBuffer: false,
+      });
+    } else {
+      this._blurTarget.setSize(rtWidth, rtHeight);
     }
 
     if (this._projectMaterial?.uniforms?.uTexelSize) {
-      this._projectMaterial.uniforms.uTexelSize.value.set(1 / width, 1 / height);
+      this._projectMaterial.uniforms.uTexelSize.value.set(1 / rtWidth, 1 / rtHeight);
+    }
+    if (this._blurMaterial?.uniforms?.uTexelSize) {
+      this._blurMaterial.uniforms.uTexelSize.value.set(1 / rtWidth, 1 / rtHeight);
     }
 
     this._clearShadowTargetToWhite(this.renderer);
@@ -474,6 +521,8 @@ export class BuildingShadowsEffectV2 {
     u.uLength.value = this.params.length;
     u.uSoftness.value = this.params.softness;
     u.uSmear.value = this.params.smear;
+    u.uPenumbra.value = this.params.penumbra;
+    u.uShadowCurve.value = this.params.shadowCurve;
     u.uZoom.value = this._getEffectiveZoom();
     if (this.sunDir) u.uSunDir.value.copy(this.sunDir);
 
@@ -486,6 +535,9 @@ export class BuildingShadowsEffectV2 {
 
     if (this._invertMaterial?.uniforms?.uOpacity) {
       this._invertMaterial.uniforms.uOpacity.value = this.params.opacity;
+    }
+    if (this._blurMaterial?.uniforms?.uRadius) {
+      this._blurMaterial.uniforms.uRadius.value = this.params.blurRadius;
     }
   }
 
@@ -569,7 +621,8 @@ export class BuildingShadowsEffectV2 {
     // via scene UV reconstruction. Do NOT size this RT to the current screen.
     // Match scene/mask space instead so sampling is stable and not view-dependent.
     const targetSize = this._resolveSceneTargetSize(compositor, floorKeys, fallbackMask);
-    if (this._strengthTarget.width !== targetSize.x || this._strengthTarget.height !== targetSize.y) {
+    const rtSize = this._computeRenderTargetSize(targetSize.x, targetSize.y);
+    if (this._strengthTarget.width !== rtSize.x || this._strengthTarget.height !== rtSize.y) {
       this.onResize(targetSize.x, targetSize.y);
     }
 
@@ -680,8 +733,30 @@ export class BuildingShadowsEffectV2 {
       shadowFactorTextureUuid: this.shadowTarget?.texture?.uuid ?? null,
     };
 
+    const blurRadius = Number(this.params.blurRadius ?? 0);
+    const useBlur = !!this._blurMaterial && !!this._blurTarget && blurRadius > 0.01;
+    let finalStrengthTex = this._strengthTarget.texture;
+
+    if (useBlur) {
+      this._quad.material = this._blurMaterial;
+      this._blurMaterial.uniforms.tInput.value = this._strengthTarget.texture;
+      this._blurMaterial.uniforms.uDirection.value.set(1, 0);
+      renderer.setRenderTarget(this._blurTarget);
+      renderer.setClearColor(0x000000, 1);
+      renderer.clear();
+      renderer.render(this._scene, this._camera);
+
+      this._blurMaterial.uniforms.tInput.value = this._blurTarget.texture;
+      this._blurMaterial.uniforms.uDirection.value.set(0, 1);
+      renderer.setRenderTarget(this._strengthTarget);
+      renderer.setClearColor(0x000000, 1);
+      renderer.clear();
+      renderer.render(this._scene, this._camera);
+      finalStrengthTex = this._strengthTarget.texture;
+    }
+
     this._quad.material = this._invertMaterial;
-    this._invertMaterial.uniforms.tStrength.value = this._strengthTarget.texture;
+    this._invertMaterial.uniforms.tStrength.value = finalStrengthTex;
     renderer.setRenderTarget(this.shadowTarget);
     renderer.setClearColor(0xffffff, 1);
     renderer.clear();
@@ -945,6 +1020,15 @@ export class BuildingShadowsEffectV2 {
     };
   }
 
+  _computeRenderTargetSize(width, height) {
+    const scaleRaw = Number(this.params?.resolutionScale ?? 1.0);
+    const scale = Number.isFinite(scaleRaw) ? Math.min(2.0, Math.max(1.0, scaleRaw)) : 1.0;
+    return {
+      x: Math.max(1, Math.round(width * scale)),
+      y: Math.max(1, Math.round(height * scale)),
+    };
+  }
+
   _getEffectiveZoom() {
     const sceneComposer = window.MapShine?.sceneComposer;
     if (sceneComposer?.currentZoom !== undefined) {
@@ -999,14 +1083,18 @@ export class BuildingShadowsEffectV2 {
     this._healthDiagnostics = null;
     try { this._strengthTarget?.dispose(); } catch (_) {}
     try { this.shadowTarget?.dispose(); } catch (_) {}
+    try { this._blurTarget?.dispose(); } catch (_) {}
     try { this._projectMaterial?.dispose(); } catch (_) {}
     try { this._invertMaterial?.dispose(); } catch (_) {}
+    try { this._blurMaterial?.dispose(); } catch (_) {}
     try { this._quad?.geometry?.dispose(); } catch (_) {}
 
     this._strengthTarget = null;
     this.shadowTarget = null;
+    this._blurTarget = null;
     this._projectMaterial = null;
     this._invertMaterial = null;
+    this._blurMaterial = null;
     this._quad = null;
     this._scene = null;
     this._camera = null;

@@ -962,17 +962,17 @@ float chromaticInsideFromSdf(float sdf01) {
 
 // ── Foam flecks (shader-based) ───────────────────────────────────────────
 #ifdef USE_FOAM_FLECKS
-float getShaderFlecks(vec2 sceneUv, float inside, float shore, float rainAmt, vec2 rainOffPx) {
+float getShaderFlecks(vec2 sceneUv, float inside, float shore, float rainAmt, vec2 rainOffPx, float indoorWindMotion) {
   if (uFoamFlecksIntensity < 0.01) return 0.0;
   float sceneAspect = (uHasSceneRect > 0.5) ? (uSceneRect.z / max(1.0, uSceneRect.w)) : (uResolution.x / max(1.0, uResolution.y));
   vec2 windF = uWindDir; float windLen = length(windF);
   windF = (windLen > 1e-6) ? (windF / windLen) : vec2(1.0, 0.0);
   vec2 windDir = vec2(windF.x, windF.y);
   vec2 windBasis = normalize(vec2(windDir.x * sceneAspect, windDir.y));
-  float tWind = uWindTime;
+  float tWind = uWindTime * indoorWindMotion;
   float fleckSpeed = uShoreFoamSpeed * 2.5 + 0.15;
   vec2 fleckOffset = windBasis * (tWind * fleckSpeed);
-  vec2 foamWindOffsetUv = uWindOffsetUv;
+  vec2 foamWindOffsetUv = uWindOffsetUv * indoorWindMotion;
   vec2 foamSceneUv = sceneUv - (foamWindOffsetUv * 0.5);
   vec2 fleckBasis = vec2(foamSceneUv.x * sceneAspect, foamSceneUv.y);
   fleckBasis += windBasis * 0.02;
@@ -993,7 +993,7 @@ float getShaderFlecks(vec2 sceneUv, float inside, float shore, float rainAmt, ve
   return clamp(fleckDots * fleckMask * windFactor * clamp(uFoamFlecksIntensity, 0.0, 2.0), 0.0, 1.0);
 }
 #else
-float getShaderFlecks(vec2 sceneUv, float inside, float shore, float rainAmt, vec2 rainOffPx) { return 0.0; }
+float getShaderFlecks(vec2 sceneUv, float inside, float shore, float rainAmt, vec2 rainOffPx, float indoorWindMotion) { return 0.0; }
 #endif
 
 // V1-accurate FBM: layered value noise with lacunarity/gain, returns [-1..1].
@@ -1051,8 +1051,8 @@ struct FloatingFoamData {
 };
 
 // waveGradPre: pre-computed waveGrad2D result from main() to avoid redundant wave calculation.
-void getFoamData(vec2 sceneUv, float shore, float inside, vec2 rainOffPx, vec2 waveGradPre, float sceneLuma, float darkness, out float shoreFoamOut, out FloatingFoamData floatingOut) {
-  vec2 foamWindOffsetUv = uWindOffsetUv;
+void getFoamData(vec2 sceneUv, float shore, float inside, vec2 rainOffPx, vec2 waveGradPre, float sceneLuma, float darkness, float indoorWindMotion, out float shoreFoamOut, out FloatingFoamData floatingOut) {
+  vec2 foamWindOffsetUv = uWindOffsetUv * indoorWindMotion;
   vec2 foamSceneUv = sceneUv - (foamWindOffsetUv * 0.5);
   float sceneAspect = (uHasSceneRect > 0.5) ? (uSceneRect.z / max(1.0, uSceneRect.w)) : (uResolution.x / max(1.0, uResolution.y));
   vec2 foamBasis = vec2(foamSceneUv.x * sceneAspect, foamSceneUv.y);
@@ -1060,7 +1060,7 @@ void getFoamData(vec2 sceneUv, float shore, float inside, vec2 rainOffPx, vec2 w
   windF = (windLen > 1e-6) ? (windF / windLen) : vec2(1.0, 0.0);
   vec2 windDir = vec2(windF.x, windF.y);
   vec2 windBasis = normalize(vec2(windDir.x * sceneAspect, windDir.y));
-  float tWind = uWindTime;
+  float tWind = uWindTime * indoorWindMotion;
 
   // ═══════════════════════════════════════════════════════════════════════════
   // NEW ADVANCED SHORE FOAM SYSTEM (based on floating foam techniques)
@@ -1407,7 +1407,7 @@ void getFoamData(vec2 sceneUv, float shore, float inside, vec2 rainOffPx, vec2 w
 }
 
 // ── Murk (subsurface silt/algae) ─────────────────────────────────────────
-vec3 applyMurk(vec2 sceneUv, float t, float inside, float shore, float outdoorStrength, vec3 baseColor, out float murkFactorOut) {
+vec3 applyMurk(vec2 sceneUv, float t, float inside, float shore, float outdoorStrength, float indoorWindMotion, vec3 baseColor, out float murkFactorOut) {
   murkFactorOut = 0.0;
   if (uMurkEnabled < 0.5) return baseColor;
   float murkIntensity = clamp(uMurkIntensity, 0.0, 2.0);
@@ -1423,7 +1423,7 @@ vec3 applyMurk(vec2 sceneUv, float t, float inside, float shore, float outdoorSt
   windF = (windLen > 1e-6) ? (windF / windLen) : vec2(1.0, 0.0);
   vec2 windBasis = normalize(vec2(windF.x * sceneAspect, windF.y));
   vec2 windPerp = vec2(-windBasis.y, windBasis.x);
-  float tWind = uWindTime;
+  float tWind = uWindTime * indoorWindMotion;
   vec2 cloudUv = murkBasis * murkScale;
   vec2 cloudDrift = windBasis * (tWind * murkSpeed * 0.22);
   vec2 cloudWarp = curlNoise2D((cloudUv - cloudDrift) * 0.45) * 0.45;
@@ -1584,6 +1584,13 @@ void main() {
   float outdoorStrength = 1.0;
   if (uHasOutdoorsMask > 0.5) {
     outdoorStrength = sampleOutdoorsMask(worldSceneUv);
+  }
+  // Strongly suppress wind-driven motion indoors so water movement reads as sheltered.
+  // Keep a tiny baseline to avoid fully static temporal aliasing.
+  float indoorWindMotion = 1.0;
+  if (uHasOutdoorsMask > 0.5) {
+    float outdoorShaped = pow(clamp(outdoorStrength, 0.0, 1.0), 2.2);
+    indoorWindMotion = max(0.05, outdoorShaped);
   }
 
   // Debug views
@@ -1804,7 +1811,7 @@ void main() {
 
   // Murk
   float murkFactor = 0.0;
-  col = applyMurk(sceneUv, uTime, inside, shore, outdoorStrength, col, murkFactor);
+  col = applyMurk(sceneUv, uTime, inside, shore, outdoorStrength, indoorWindMotion, col, murkFactor);
 
   // Tint
   float effectiveTint = clamp(uTintStrength, 0.0, 1.0) * (1.0 - (murkFactor * 0.5));
@@ -1897,7 +1904,7 @@ void main() {
   
   float shoreFoamAmount;
   FloatingFoamData floatingFoam;
-  getFoamData(sceneUv, shore, inside, rainOffPx, waveGrad, sceneLuma, darkness, shoreFoamAmount, floatingFoam);
+  getFoamData(sceneUv, shore, inside, rainOffPx, waveGrad, sceneLuma, darkness, indoorWindMotion, shoreFoamAmount, floatingFoam);
   
   // Apply floating foam shadow to water surface BEFORE foam rendering
   // Shadow offset based on sun direction (like building shadows)
@@ -1910,7 +1917,7 @@ void main() {
     // Sample foam at offset position for directional shadow
     float shoreFoamShadow;
     FloatingFoamData shadowFoam;
-    getFoamData(shadowUv, shore, inside, rainOffPx, waveGrad, sceneLuma, darkness, shoreFoamShadow, shadowFoam);
+    getFoamData(shadowUv, shore, inside, rainOffPx, waveGrad, sceneLuma, darkness, indoorWindMotion, shoreFoamShadow, shadowFoam);
     
     float shadowDarken = shadowFoam.amount * floatingFoam.shadowStrength;
     col *= (1.0 - shadowDarken);
@@ -1929,7 +1936,7 @@ void main() {
     
     // Color variation
     if (uShoreFoamColorVariation > 0.01) {
-      vec2 colorVarUv = sceneUv * 3.0 + vec2(uWindTime * 0.05);
+      vec2 colorVarUv = sceneUv * 3.0 + vec2((uWindTime * indoorWindMotion) * 0.05);
       float colorVar = valueNoise(colorVarUv);
       float varAmount = clamp(uShoreFoamColorVariation, 0.0, 1.0);
       shoreFoamColor = mix(shoreFoamColor, shoreFoamColor * (0.8 + colorVar * 0.4), varAmount);
@@ -1988,7 +1995,7 @@ void main() {
 
   // Shader flecks (drive by combined foam presence)
   float fleckDriver = clamp(max(shoreFoamAmount, floatingFoam.amount), 0.0, 1.0);
-  float shaderFlecks = getShaderFlecks(sceneUv, inside, shore, fleckDriver, rainOffPx);
+  float shaderFlecks = getShaderFlecks(sceneUv, inside, shore, fleckDriver, rainOffPx, indoorWindMotion);
   vec3 fleckCol = mix(uShoreFoamColor, floatingFoam.color, clamp(floatingFoam.amount, 0.0, 1.0)) * foamStructuralDarken;
   col += fleckCol * shaderFlecks * 0.8;
 

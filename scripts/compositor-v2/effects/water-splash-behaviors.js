@@ -399,6 +399,7 @@ export class FoamPlumeLifecycleBehavior {
     this._foamColorG = 0.90;
     this._foamColorB = 0.88;
     this._windDriftScale = 0.0;
+    this._windDriftIndoorMul = 1.0;
     this._windX = 1.0;
     this._windY = 0.0;
     this._windSpeed01 = 0.0;
@@ -483,7 +484,7 @@ export class FoamPlumeLifecycleBehavior {
 
     // Wind drift — keeps foam flowing with the current/wind.
     if (particle.position && this._windDriftScale > 0.001) {
-      const driftSpeed = (15 + 80 * this._windSpeed01) * this._windDriftScale;
+      const driftSpeed = (15 + 80 * this._windSpeed01) * this._windDriftScale * this._windDriftIndoorMul;
       particle.position.x += this._windX * driftSpeed * delta;
       particle.position.y += this._windY * driftSpeed * delta;
     }
@@ -496,6 +497,7 @@ export class FoamPlumeLifecycleBehavior {
     this._foamColorG = p?.foamColorG ?? 0.90;
     this._foamColorB = p?.foamColorB ?? 0.88;
     this._windDriftScale = Math.max(0.0, p?.foamWindDriftScale ?? 0.3);
+    this._windDriftIndoorMul = 1.0;
 
     this._tintStrength = clamp01(p?.tintStrength ?? 0.0);
     this._tintJitter = clamp01(p?.tintJitter ?? 1.0) * 2.0;
@@ -523,6 +525,26 @@ export class FoamPlumeLifecycleBehavior {
           this._windY = len > 1e-6 ? (dir.y / len) : 0.0;
         }
         this._windSpeed01 = Number.isFinite(state.windSpeed) ? Math.max(0, Math.min(1, state.windSpeed)) : 0;
+      }
+    } catch (_) {}
+
+    // Best-effort indoor coupling: when WaterEffect indoor damping is active and an
+    // outdoors mask is bound, strongly reduce splash foam drift so indoor water
+    // appears sheltered from wind.
+    try {
+      const waterEffect = window.MapShine?.effectComposer?._floorCompositorV2?._waterEffect;
+      const wp = waterEffect?.params;
+      const u = waterEffect?._composeMaterial?.uniforms;
+      const hasOutdoorsMask = Number(u?.uHasOutdoorsMask?.value) > 0.5;
+      if (hasOutdoorsMask) {
+        const waveSupp = (wp?.waveIndoorDampingEnabled === true)
+          ? Math.max(0.0, Math.min(1.0, Number(wp?.waveIndoorDampingStrength) || 0.0))
+          : 0.0;
+        const rainSupp = (wp?.rainIndoorDampingEnabled === true)
+          ? Math.max(0.0, Math.min(1.0, Number(wp?.rainIndoorDampingStrength) || 0.0))
+          : 0.0;
+        const supp = Math.max(waveSupp, rainSupp);
+        if (supp > 0.0) this._windDriftIndoorMul = 1.0 - 0.9 * supp;
       }
     } catch (_) {}
   }

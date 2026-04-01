@@ -2788,7 +2788,11 @@ export class FloorCompositor {
     try {
       const resolved = this._resolveOutdoorsMask(context);
       let outdoorsTex = resolved.texture ?? null;
-      let waterOutdoorsTex = outdoorsTex;
+      // Water movement suppression must use a real _Outdoors mask.
+      // Do not seed this from the generic path because it may fall back to
+      // weatherController.roofMap (not floor-authored indoors/outdoors data).
+      const waterResolved = this._resolveOutdoorsMask(context, { allowWeatherRoofMap: false });
+      let waterOutdoorsTex = waterResolved.texture ?? null;
       // Sky grading is very sensitive to mask source quality/alignment.
       // Resolve a strict floor outdoors texture for sky that never falls back to
       // weather roof maps and never reuses stale previous masks.
@@ -2831,8 +2835,6 @@ export class FloorCompositor {
             : null;
           if (waterFloorTex) {
             waterOutdoorsTex = waterFloorTex;
-          } else if (!waterOutdoorsTex && this._lastOutdoorsTexture) {
-            waterOutdoorsTex = this._lastOutdoorsTexture;
           }
         }
       } catch (_) {}

@@ -27,6 +27,28 @@ function clamp(v, lo, hi) {
   return Math.max(lo, Math.min(hi, v));
 }
 
+/**
+ * Sort levels for the dropdown: highest band first (top of list), lowest last
+ * (bottom of list), matching architectural bottom→top reading order.
+ * Preserves canonical indices into `getAvailableLevels` for option values.
+ * @param {Array<object>} levels
+ * @returns {Array<{level: object, index: number}>}
+ */
+function orderLevelsForSelect(levels) {
+  if (!Array.isArray(levels) || !levels.length) return [];
+  const n = (v) => {
+    const x = Number(v);
+    return Number.isFinite(x) ? x : 0;
+  };
+  return levels
+    .map((level, index) => ({ level, index }))
+    .sort((a, b) => {
+      const db = n(b.level?.bottom) - n(a.level?.bottom);
+      if (db !== 0) return db;
+      return n(b.level?.top) - n(a.level?.top);
+    });
+}
+
 function getDefaultScreenPos() {
   const w = Math.max(320, window.innerWidth || 1280);
   const h = Math.max(240, window.innerHeight || 720);
@@ -382,11 +404,13 @@ export class LevelNavigatorOverlay {
 
     if (this._els.levelSelect) {
       const select = this._els.levelSelect;
-      const nextHtml = levels.map((level, i) => {
-        const label = escapeHtml(level?.label || `L${i + 1}`);
-        const range = `${Number(level?.bottom ?? 0).toFixed(0)}..${Number(level?.top ?? 0).toFixed(0)}`;
-        return `<option value="${i}">${label} (${range})</option>`;
-      }).join('');
+      const nextHtml = orderLevelsForSelect(levels)
+        .map(({ level, index: i }) => {
+          const label = escapeHtml(level?.label || `L${i + 1}`);
+          const range = `${Number(level?.bottom ?? 0).toFixed(0)}..${Number(level?.top ?? 0).toFixed(0)}`;
+          return `<option value="${i}">${label} (${range})</option>`;
+        })
+        .join('');
       select.innerHTML = nextHtml;
       const idx = Number(context?.index);
       if (Number.isFinite(idx)) {
@@ -415,7 +439,11 @@ export class LevelNavigatorOverlay {
       const raw = Number(diagnostics?.rawCount || 0);
       const parsed = Number(diagnostics?.parsedCount || levels.length || 0);
       const invalid = Number(diagnostics?.invalidCount || 0);
-      this._els.diagnostics.textContent = `Bands ${parsed}/${raw} • Invalid ${invalid}`;
+      const sceneImg = Number(diagnostics?.sceneImageBands || 0);
+      const ratio = raw
+        ? (sceneImg ? `Bands ${parsed}/${raw} (+${sceneImg} scene image${sceneImg > 1 ? 's' : ''})` : `Bands ${parsed}/${raw}`)
+        : `Bands ${parsed}`;
+      this._els.diagnostics.textContent = `${ratio} • Invalid ${invalid}`;
     }
   }
 

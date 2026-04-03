@@ -21,7 +21,11 @@ import { isGmLike } from '../core/gm-parity.js';
 
 import { createLogger } from '../core/log.js';
 import { moveTrace } from '../core/movement-trace-log.js';
-import { readSceneLevelsFlag } from './levels-scene-flags.js';
+import {
+  readSceneLevelsFlag,
+  getSceneBackgroundElevation,
+  getSceneForegroundElevationTop,
+} from './levels-scene-flags.js';
 import { elevationInBand } from '../ui/levels-editor/level-boundaries.js';
 
 const log = createLogger('CameraFollower');
@@ -53,13 +57,13 @@ export class CameraFollower {
     /** @type {boolean} */
     this._initialized = false;
 
-    /** @type {Array<{levelId:string,label:string,bottom:number,top:number,center:number,source:'sceneLevels'|'inferred'}>} */
+    /** @type {Array<{levelId:string,label:string,bottom:number,top:number,center:number,source:'sceneLevels'|'inferred'|'sceneImage'}>} */
     this._levels = [];
 
     /** @type {number} */
     this._activeLevelIndex = -1;
 
-    /** @type {{levelId:string,label:string,bottom:number,top:number,center:number,source:'sceneLevels'|'inferred',lockMode:'manual'|'follow-controlled-token',transitionMs:number,index:number,count:number}|null} */
+    /** @type {{levelId:string,label:string,bottom:number,top:number,center:number,source:'sceneLevels'|'inferred'|'sceneImage',lockMode:'manual'|'follow-controlled-token',transitionMs:number,index:number,count:number}|null} */
     this._activeLevelContext = null;
 
     /** @type {'manual'|'follow-controlled-token'} */
@@ -68,7 +72,7 @@ export class CameraFollower {
     /** @type {boolean} */
     this._keyboardShortcutsEnabled = true;
 
-    /** @type {{source:'sceneLevels'|'inferred', rawCount:number, parsedCount:number, invalidCount:number, swappedCount:number, inferredCenterCount?:number}|null} */
+    /** @type {{source:'sceneLevels'|'inferred', rawCount:number, parsedCount:number, invalidCount:number, swappedCount:number, inferredCenterCount?:number, sceneImageBands?:number}|null} */
     this._lastLevelBuildDiagnostics = null;
 
     /** @type {Array<{name:string,id:number}>} */
@@ -144,8 +148,9 @@ export class CameraFollower {
     const updateSceneId = Hooks.on('updateScene', (scene, changes) => {
       if (!scene || scene.id !== canvas.scene?.id) return;
       const levelFlagsChanged = changes?.flags?.levels !== undefined;
+      const foregroundElevChanged = 'foregroundElevation' in (changes || {});
       const dimensionsChanged = ('grid' in (changes || {})) || ('width' in (changes || {})) || ('height' in (changes || {}));
-      if (!levelFlagsChanged && !dimensionsChanged) return;
+      if (!levelFlagsChanged && !foregroundElevChanged && !dimensionsChanged) return;
       this.refreshLevelBands({ emit: true, reason: 'scene-update' });
     });
     this._hookIds.push({ name: 'updateScene', id: updateSceneId });
@@ -317,8 +322,12 @@ export class CameraFollower {
     });
 
     if (parsed.length) {
+      const before = parsed.length;
+      const merged = this._mergeSceneImageBands(scene, parsed);
+      diagnostics.parsedCount = merged.length;
+      diagnostics.sceneImageBands = merged.length - before;
       this._lastLevelBuildDiagnostics = diagnostics;
-      return parsed.map((entry, idx) => ({
+      return merged.map((entry, idx) => ({
         ...entry,
         levelId: entry.levelId || `scene-${idx}`,
       }));
@@ -334,6 +343,72 @@ export class CameraFollower {
       inferredCenterCount: inferredLevels.length,
     };
     return inferredLevels;
+  }
+
+  /**
+   * Inject navigation bands for the Foundry scene background / foreground images
+   * (from `backgroundElevation`, `foregroundElevation`, optional `foregroundElevationTop`)
+   * when they are not already represented in authored `sceneLevels`.
+   *
+   * @private
+   * @param {Scene|undefined|null} scene
+   * @param {Array<{levelId:string,label:string,bottom:number,top:number,center:number,source:string}>} parsed
+   * @returns {Array<{levelId:string,label:string,bottom:number,top:number,center:number,source:string}>}
+   */
+  _mergeSceneImageBands(scene, parsed) {
+    const out = parsed.map((p) => ({ ...p }));
+    const EPS = 1e-4;
+    const approxEqual = (a, b) => Math.abs(a - b) <= EPS;
+
+    const hasDuplicateBand = (lo, hi) => out.some(
+      (b) => approxEqual(b.bottom, lo) && approxEqual(b.top, hi)
+    );
+
+    /** @param {number} lo @param {number} hi */
+    const overlapsAny = (lo, hi) => out.some((b) => {
+      if (!Number.isFinite(b.bottom) || !Number.isFinite(b.top)) return false;
+      return lo < b.top && b.bottom < hi;
+    });
+
+    const bgLo = getSceneBackgroundElevation(scene);
+    const fgBoundary = Number(scene?.foregroundElevation);
+    const fgTop = getSceneForegroundElevationTop(scene);
+
+    if (Number.isFinite(bgLo) && Number.isFinite(fgBoundary) && bgLo < fgBoundary) {
+      if (!hasDuplicateBand(bgLo, fgBoundary) && !overlapsAny(bgLo, fgBoundary)) {
+        out.push({
+          levelId: 'msa-scene-background',
+          label: 'Scene background',
+          bottom: bgLo,
+          top: fgBoundary,
+          center: (bgLo + fgBoundary) * 0.5,
+          source: 'sceneImage',
+        });
+      }
+    }
+
+    if (Number.isFinite(fgBoundary) && Number.isFinite(fgTop) && fgTop !== Infinity && fgBoundary < fgTop) {
+      if (!hasDuplicateBand(fgBoundary, fgTop) && !overlapsAny(fgBoundary, fgTop)) {
+        out.push({
+          levelId: 'msa-scene-foreground',
+          label: 'Scene foreground',
+          bottom: fgBoundary,
+          top: fgTop,
+          center: (fgBoundary + fgTop) * 0.5,
+          source: 'sceneImage',
+        });
+      }
+    }
+
+    out.sort((a, b) => {
+      if (a.bottom !== b.bottom) return a.bottom - b.bottom;
+      return a.top - b.top;
+    });
+
+    return out.map((entry, idx) => ({
+      ...entry,
+      levelId: entry.levelId || `scene-${idx}`,
+    }));
   }
 
   /**

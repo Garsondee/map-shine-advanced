@@ -19,6 +19,7 @@ import {
   tileHasLevelsRange,
   readDocLevelsRange,
   getSceneBackgroundElevation,
+  getSceneForegroundElevationTop,
   getSceneWeatherElevation,
 } from '../foundry/levels-scene-flags.js';
 import { getLevelsCompatibilityMode, LEVELS_COMPATIBILITY_MODES } from '../foundry/levels-compatibility.js';
@@ -1104,13 +1105,14 @@ export class LevelsAuthoringDialog {
     }
 
     if (fgSrc) {
+      const fgTop = getSceneForegroundElevationTop(scene);
       assignments.push({
         id: 'scene-foreground',
         label: 'Foreground Image',
         src: fgSrc,
         bottom: fgElev,
-        top: Infinity,
-        topEditable: false,
+        top: fgTop,
+        topEditable: true,
       });
     }
 
@@ -1137,7 +1139,7 @@ export class LevelsAuthoringDialog {
               <input type="text" data-field="bottom" value="${escapeHtml(bottomInput)}" title="Elevation bottom for this scene image surface">
             </label>
             <label>Top
-              <input type="text" data-field="top" value="${escapeHtml(topInput)}" ${surface.topEditable ? '' : 'disabled'} title="${surface.topEditable ? 'For background, Top maps to scene foreground elevation' : 'Foreground top is effectively infinite'}">
+              <input type="text" data-field="top" value="${escapeHtml(topInput)}" ${surface.topEditable ? '' : 'disabled'} title="${surface.topEditable ? (surface.id === 'scene-background' ? 'For background, Top maps to scene foreground elevation' : 'Upper bound; leave empty for infinity') : 'Not editable'}">
             </label>
             <label>Type
               <input type="text" value="${escapeHtml(surface.id === 'scene-background' ? 'Scene Background Surface' : 'Scene Foreground Surface')}" disabled>
@@ -1259,12 +1261,16 @@ export class LevelsAuthoringDialog {
     const weatherText = weatherElev !== null ? `${weatherElev}` : 'not set';
     const lightMaskingEnabled = canvas?.scene?.flags?.levels?.lightMasking === true;
     const lightMasking = lightMaskingEnabled ? 'enabled' : 'disabled';
+    const fgBandTop = getSceneForegroundElevationTop(canvas?.scene);
+    const fgBandTopText = (Number.isFinite(fgBandTop) && fgBandTop !== Infinity)
+      ? formatElev(fgBandTop)
+      : '∞ (unbounded)';
 
     const sceneImageSection = sceneImageAssignments.length > 0
       ? `
         <div class="msa-la__scene-surfaces">
           <div class="msa-la__tile-tools">
-            <div class="msa-la__tile-tip">Scene image controls use tile-style bottom/top editing. For background, <strong>Top</strong> maps to scene foreground elevation.</div>
+            <div class="msa-la__tile-tip">Scene image controls use bottom/top bands. Background <strong>Top</strong> sets the boundary (<code>foregroundElevation</code>). Foreground <strong>Top</strong> is stored as <code>flags.levels.foregroundElevationTop</code> (optional ceiling; empty = ∞).</div>
           </div>
           <div class="msa-la__tile-list">
             ${sceneImageAssignments.map((s) => this._renderSceneImageRow(s)).join('')}
@@ -1277,7 +1283,8 @@ export class LevelsAuthoringDialog {
         <div class="msa-la__scene-row"><strong>Background Elevation:</strong> ${escapeHtml(bgText)}</div>
         <div class="msa-la__scene-row"><strong>Weather Elevation:</strong> ${escapeHtml(weatherText)}</div>
         <div class="msa-la__scene-row"><strong>Light Masking:</strong> ${escapeHtml(lightMasking)}</div>
-        <div class="msa-la__scene-row"><strong>Foreground Elevation:</strong> ${escapeHtml(formatElev(canvas?.scene?.foregroundElevation ?? 0))}</div>
+        <div class="msa-la__scene-row"><strong>Foreground Elevation (band bottom):</strong> ${escapeHtml(formatElev(canvas?.scene?.foregroundElevation ?? 0))}</div>
+        <div class="msa-la__scene-row"><strong>Foreground band top:</strong> ${escapeHtml(fgBandTopText)}</div>
         <div class="msa-la__scene-row"><strong>Defined Levels:</strong> ${bands.length}</div>
         <div class="msa-la__scene-row"><strong>Total Tiles:</strong> ${canvas?.scene?.tiles?.size ?? 0}</div>
         <div class="msa-la__scene-row"><strong>Total Lights:</strong> ${canvas?.scene?.lights?.size ?? 0}</div>
@@ -2029,21 +2036,40 @@ export class LevelsAuthoringDialog {
 
     if (surfaceId === 'scene-foreground') {
       const currentBottom = Number.isFinite(Number(scene?.foregroundElevation)) ? Number(scene.foregroundElevation) : 0;
+      const currentTop = getSceneForegroundElevationTop(scene);
       const bottomRaw = row.querySelector('[data-field="bottom"]')?.value;
-      const next = parseLevelInputValue(bottomRaw, { fallback: currentBottom, allowInfinity: false });
+      const topRaw = row.querySelector('[data-field="top"]')?.value;
+      const nextBottom = parseLevelInputValue(bottomRaw, { fallback: currentBottom, allowInfinity: false });
+      let nextTop = parseLevelInputValue(topRaw, { fallback: currentTop, allowInfinity: true });
 
-      if (!Number.isFinite(next)) {
-        ui.notifications?.warn?.('Foreground elevation must be a finite number.');
+      if (!Number.isFinite(nextBottom)) {
+        ui.notifications?.warn?.('Foreground bottom must be a finite number.');
         return;
       }
 
-      const clamped = Math.max(0, Math.round(next));
+      const clampedBottom = Math.max(0, Math.round(nextBottom));
+      if (Number.isFinite(nextTop) && nextTop !== Infinity && nextTop <= clampedBottom) {
+        nextTop = clampedBottom + 1;
+        ui.notifications?.warn?.('Foreground top must be above bottom. Top was adjusted.');
+      }
 
       try {
-        await scene.update({ foregroundElevation: clamped });
+        const levelsFlags = cloneLevelsFlags(scene);
+        if (!Number.isFinite(nextTop) || nextTop === Infinity) {
+          delete levelsFlags.foregroundElevationTop;
+        } else {
+          levelsFlags.foregroundElevationTop = Math.max(0, Math.round(nextTop));
+        }
+        await scene.update({
+          foregroundElevation: clampedBottom,
+          'flags.levels': levelsFlags,
+        });
         this._refreshRuntimeAfterAuthoringEdit();
         this._render();
-        ui.notifications?.info?.(`Updated foreground elevation to ${formatElev(clamped)}.`);
+        const topMsg = (!Number.isFinite(nextTop) || nextTop === Infinity)
+          ? '∞'
+          : formatElev(levelsFlags.foregroundElevationTop ?? nextTop);
+        ui.notifications?.info?.(`Updated foreground band (${formatElev(clampedBottom)}..${topMsg}).`);
       } catch (err) {
         log.warn('Save scene foreground surface failed', err);
         ui.notifications?.error?.('Failed to save scene foreground elevation (see console).');

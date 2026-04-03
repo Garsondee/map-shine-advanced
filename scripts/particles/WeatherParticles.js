@@ -7078,9 +7078,17 @@ export class WeatherParticles {
     })();
 
     // Rebuild full-map drip edge points infrequently; filter to camera view every control tick (like rain bounds).
-    const dripRefreshSec = _roofDripTuningVal('pointsRefreshSec', ROOF_DRIP_POINTS_REFRESH_SEC);
+    const rawDripRefresh = _roofDripTuningVal('pointsRefreshSec', ROOF_DRIP_POINTS_REFRESH_SEC);
+    // 0 or negative tuning used to make `_roofDripPointsRefreshSec <= 0` true every frame →
+    // `_computeRoofDripSourceSignature()` (all tiles + tree matrix walks) ran at 60Hz even when
+    // the point pool did not need rebuilding. Clamp to a sane minimum.
+    const dripRefreshSec = Math.max(0.35, Math.min(120, Number.isFinite(rawDripRefresh) && rawDripRefresh > 0 ? rawDripRefresh : ROOF_DRIP_POINTS_REFRESH_SEC));
     this._roofDripPointsRefreshSec = (this._roofDripPointsRefreshSec ?? 0) - safeDt;
-    if (this._roofDripPointsRefreshSec <= 0 || !this._roofDripBasePoints) {
+    // Never add `|| !this._roofDripBasePoints` here: when `_rebuildRoofDripPoints()` returns null
+    // (no-merge, transient GPU path, etc.), that made this block run *every frame* — full
+    // tile getImageData + heap churn → Firefox "Major GC" + single-digit FPS (profiler).
+    // First run still fires immediately: constructor sets `_roofDripPointsRefreshSec = 0`.
+    if (this._roofDripPointsRefreshSec <= 0) {
       this._roofDripPointsRefreshSec = dripRefreshSec;
       const sig = this._computeRoofDripSourceSignature();
       if (!this._roofDripBasePoints || sig !== this._roofDripSourceSignature) {

@@ -7,10 +7,18 @@
  */
 
 /**
+ * When true, CPU union-find / silhouette sampling is skipped (almost no drip spawn from tile alpha).
+ * Full sampling is very heavy on large textures and interacts badly with frequent pool refreshes.
+ * Opt-in quality: set false after tuning `pointsRefreshSec` ≥ 1–2s.
+ */
+export const ROOF_DRIP_EDGE_SAMPLING_DISABLED = true;
+
+/**
  * Label 4-connected opaque components. labels[i]=0 transparent; else canonical root index.
  * @param {number} alphaChan - 0 if alpha is in buf[i*4] (GPU readback), 3 for canvas RGBA.
  */
 export function labelOpaqueComponents4(buf, W, H, alphaByte, alphaChan = 0) {
+  if (ROOF_DRIP_EDGE_SAMPLING_DISABLED) return new Uint32Array(W * H);
   const n = W * H;
   const parent = new Int32Array(n);
   parent.fill(-1);
@@ -61,6 +69,7 @@ export function labelOpaqueComponents4(buf, W, H, alphaByte, alphaChan = 0) {
  * Centroid (sum x, sum y, count) per component root for opaque pixels.
  */
 export function componentOpaqueCentroids(labels, W, H) {
+  if (ROOF_DRIP_EDGE_SAMPLING_DISABLED) return new Map();
   const map = new Map();
   for (let y = 0; y < H; y++) {
     const row = y * W;
@@ -96,6 +105,11 @@ export function collectSilhouetteEdgePixels(
   scanStride,
   alphaChan = 0
 ) {
+  if (ROOF_DRIP_EDGE_SAMPLING_DISABLED) {
+    outPx.length = 0;
+    outPy.length = 0;
+    return;
+  }
   outPx.length = 0;
   outPy.length = 0;
   const dirs = [
@@ -143,6 +157,7 @@ export function collectSilhouetteEdgePixels(
  * Per-component polar sort + proportional K; returns interleaved px,py (screen/tex space).
  */
 export function pickEvenlyPerComponentEdges(px, py, n, labels, W, centroids, targetK) {
+  if (ROOF_DRIP_EDGE_SAMPLING_DISABLED) return [];
   if (n < 1 || targetK < 1) return [];
 
   const groups = new Map();
@@ -214,6 +229,7 @@ export function pickEvenlyPerComponentEdges(px, py, n, labels, W, centroids, tar
  * Farthest-point sampling in UV (stride-5 flat: u,v,nx,ny,z). Keeps first random seed, adds K-1 points.
  */
 export function farthestPointSampleStride5Uv(flat, targetK) {
+  if (ROOF_DRIP_EDGE_SAMPLING_DISABLED) return null;
   const n = Math.floor(flat.length / 5);
   if (n < 2 || targetK < 2) return null;
   const MAX_N = 3200;

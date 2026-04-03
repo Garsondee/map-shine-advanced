@@ -6,7 +6,7 @@ import { isGmLike } from '../../core/gm-parity.js';
 
 
 import { createLogger } from '../../core/log.js';
-import { getSceneBackgroundElevation } from '../../foundry/levels-scene-flags.js';
+import { getSceneBackgroundElevation, getSceneForegroundElevationTop } from '../../foundry/levels-scene-flags.js';
 import {
   TILE_LEVEL_ROLES,
   normalizeSceneLevelBands,
@@ -50,6 +50,13 @@ function _toFinite(value, fallback = 0) {
 function formatElev(value) {
   const n = Number(value);
   return Number.isFinite(n) ? String(Number(n.toFixed(2))) : '?';
+}
+
+function formatElevRange(lo, hi) {
+  const a = formatElev(lo);
+  const n = Number(hi);
+  const b = (n === Infinity || n === -Infinity) ? '∞' : formatElev(hi);
+  return `${a}..${b}`;
 }
 
 function sourceName(src, fallback = '(none)') {
@@ -274,6 +281,99 @@ export class LevelsEditorV2 {
     await this._updateSceneLevels(next, `Deleted level "${target.label}".`);
   }
 
+  async _saveGroundBackground() {
+    const scene = this._currentScene();
+    if (!scene) return;
+    if (!isGmLike()) {
+      ui.notifications?.warn?.('Only the GM can edit scene image elevations.');
+      return;
+    }
+    const zone = this._el?.querySelector?.('.msa-levels-editor__zone--scene-floor');
+    if (!zone) return;
+    const bottom = Number(zone.querySelector('[data-field="bgBottom"]')?.value);
+    let top = Number(zone.querySelector('[data-field="bgTop"]')?.value);
+    if (!Number.isFinite(bottom)) {
+      ui.notifications?.warn?.('Background bottom must be a number.');
+      return;
+    }
+    if (!Number.isFinite(top)) {
+      ui.notifications?.warn?.('Background top must be a number.');
+      return;
+    }
+    if (top <= bottom) {
+      top = Number((bottom + 0.01).toFixed(2));
+      ui.notifications?.warn?.('Background top must be above bottom. Top was adjusted.');
+    }
+    const levelsFlags = deepCloneObject(scene?.flags?.levels || {});
+    levelsFlags.backgroundElevation = Number(bottom.toFixed(2));
+    try {
+      await scene.update({
+        foregroundElevation: Number(top.toFixed(2)),
+        'flags.levels': levelsFlags,
+      });
+      this._refreshRuntimeAfterAuthoringEdit();
+      ui.notifications?.info?.(`Scene background band saved (${formatElev(bottom)}..${formatElev(top)}).`);
+      this.render();
+    } catch (err) {
+      log.warn('saveGroundBackground failed', err);
+      ui.notifications?.error?.('Failed to save scene background elevations.');
+    }
+  }
+
+  async _saveGroundForeground() {
+    const scene = this._currentScene();
+    if (!scene) return;
+    if (!isGmLike()) {
+      ui.notifications?.warn?.('Only the GM can edit scene image elevations.');
+      return;
+    }
+    const zone = this._el?.querySelector?.('.msa-levels-editor__zone--scene-ceiling');
+    if (!zone) return;
+    const bottom = Number(zone.querySelector('[data-field="fgBottom"]')?.value);
+    const topRaw = String(zone.querySelector('[data-field="fgTop"]')?.value ?? '').trim();
+    let top = topRaw === '' ? Infinity : Number(topRaw);
+
+    if (!Number.isFinite(bottom)) {
+      ui.notifications?.warn?.('Foreground bottom must be a number.');
+      return;
+    }
+    if (topRaw !== '' && !Number.isFinite(top)) {
+      ui.notifications?.warn?.('Foreground top must be a number or empty (∞).');
+      return;
+    }
+
+    const bgLo = getSceneBackgroundElevation(scene);
+    if (bottom < bgLo) {
+      ui.notifications?.warn?.('Foreground bottom is below background bottom; boundary may look wrong.');
+    }
+
+    if (Number.isFinite(top) && top <= bottom) {
+      top = Number((bottom + 0.01).toFixed(2));
+      ui.notifications?.warn?.('Foreground top must be above bottom. Top was adjusted.');
+    }
+
+    const levelsFlags = deepCloneObject(scene?.flags?.levels || {});
+    if (!Number.isFinite(top) || top === Infinity) {
+      delete levelsFlags.foregroundElevationTop;
+    } else {
+      levelsFlags.foregroundElevationTop = Number(top.toFixed(2));
+    }
+
+    try {
+      await scene.update({
+        foregroundElevation: Number(bottom.toFixed(2)),
+        'flags.levels': levelsFlags,
+      });
+      this._refreshRuntimeAfterAuthoringEdit();
+      const topMsg = Number.isFinite(top) && top !== Infinity ? formatElev(top) : '∞';
+      ui.notifications?.info?.(`Scene foreground band saved (${formatElev(bottom)}..${topMsg}).`);
+      this.render();
+    } catch (err) {
+      log.warn('saveGroundForeground failed', err);
+      ui.notifications?.error?.('Failed to save scene foreground elevations.');
+    }
+  }
+
   _collectViewModel() {
     const scene = this._currentScene();
     const bands = normalizeSceneLevelBands(scene);
@@ -290,10 +390,21 @@ export class LevelsEditorV2 {
     }
     const bgElevation = getSceneBackgroundElevation(scene);
     const fgElevation = _toFinite(scene?.foregroundElevation, 0);
+    const fgElevationTop = getSceneForegroundElevationTop(scene);
     const backgroundSrc = this._readSceneBackgroundSrc(scene);
     const foregroundSrc = this._readSceneForegroundSrc(scene);
     if (!this._selectedTileId && tiles.length > 0) this._selectedTileId = tiles[0].id;
-    return { scene, bands, tiles, byBand, bgElevation, fgElevation, backgroundSrc, foregroundSrc };
+    return {
+      scene,
+      bands,
+      tiles,
+      byBand,
+      bgElevation,
+      fgElevation,
+      fgElevationTop,
+      backgroundSrc,
+      foregroundSrc,
+    };
   }
 
   render() {
@@ -375,20 +486,34 @@ export class LevelsEditorV2 {
       ].join('');
     }).join('');
 
+    const fgTopInputVal = Number.isFinite(vm.fgElevationTop) ? formatElev(vm.fgElevationTop) : '';
+
     const groundLayer = [
       '<section class="msa-levels-editor__ground-layer">',
       '<header class="msa-levels-editor__ground-header">',
       '<div class="msa-levels-editor__band-label">Ground (bottom of stack)</div>',
-      '<div class="msa-levels-editor__band-range-hint">Immutable scene images</div>',
+      '<div class="msa-levels-editor__band-range-hint">Scene images · boundary = foreground elevation</div>',
       '</header>',
       '<div class="msa-levels-editor__ground-vertical">',
       '<div class="msa-levels-editor__zone msa-levels-editor__zone--scene-ceiling">',
-      '<div class="msa-levels-editor__zone-label">Scene foreground (ceiling of ground band)</div>',
-      `<div class="msa-levels-editor__ground-row">${esc(sourceName(vm.foregroundSrc, '(no foreground image)'))} · elev ${esc(formatElev(vm.fgElevation))}</div>`,
+      '<div class="msa-levels-editor__zone-label">Scene foreground image</div>',
+      `<div class="msa-levels-editor__ground-file">${esc(sourceName(vm.foregroundSrc, '(no foreground image)'))}</div>`,
+      `<div class="msa-levels-editor__ground-range-hint">${esc(formatElevRange(vm.fgElevation, vm.fgElevationTop))}</div>`,
+      '<div class="msa-levels-editor__ground-editor">',
+      `<label>Bottom <input type="number" step="0.01" data-field="fgBottom" value="${esc(formatElev(vm.fgElevation))}" title="Lower bound; same as scene foreground elevation (overhead threshold)"></label>`,
+      `<label>Top <input type="number" step="0.01" data-field="fgTop" value="${esc(fgTopInputVal)}" placeholder="∞" title="Upper bound; leave empty for unbounded (infinity)"></label>`,
+      '<button type="button" data-action="saveGroundForeground">Save</button>',
+      '</div>',
       '</div>',
       '<div class="msa-levels-editor__zone msa-levels-editor__zone--scene-floor">',
-      '<div class="msa-levels-editor__zone-label">Scene background (ground floor)</div>',
-      `<div class="msa-levels-editor__ground-row">${esc(sourceName(vm.backgroundSrc, '(scene background)'))} · elev ${esc(formatElev(vm.bgElevation))}</div>`,
+      '<div class="msa-levels-editor__zone-label">Scene background image</div>',
+      `<div class="msa-levels-editor__ground-file">${esc(sourceName(vm.backgroundSrc, '(no scene background)'))}</div>`,
+      `<div class="msa-levels-editor__ground-range-hint">${esc(formatElevRange(vm.bgElevation, vm.fgElevation))}</div>`,
+      '<div class="msa-levels-editor__ground-editor">',
+      `<label>Bottom <input type="number" step="0.01" data-field="bgBottom" value="${esc(formatElev(vm.bgElevation))}" title="Levels background elevation"></label>`,
+      `<label>Top <input type="number" step="0.01" data-field="bgTop" value="${esc(formatElev(vm.fgElevation))}" title="Top of background band; sets scene foreground elevation (boundary with foreground image)"></label>`,
+      '<button type="button" data-action="saveGroundBackground">Save</button>',
+      '</div>',
       '</div>',
       '</div>',
       '</section>',
@@ -521,6 +646,14 @@ export class LevelsEditorV2 {
     if (action === 'moveTile') {
       await this._moveTile(String(target.dataset.tileId || ''), Number(target.dataset.dir || 0));
       this.render();
+      return;
+    }
+    if (action === 'saveGroundBackground') {
+      await this._saveGroundBackground();
+      return;
+    }
+    if (action === 'saveGroundForeground') {
+      await this._saveGroundForeground();
     }
   }
 

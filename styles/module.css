@@ -1707,6 +1707,40 @@
   margin: 2px 0;
 }
 
+.msa-levels-editor__ground-file {
+  font-size: 12px;
+  opacity: 0.95;
+  margin: 2px 0 4px;
+  word-break: break-all;
+}
+
+.msa-levels-editor__ground-range-hint {
+  font-size: 11px;
+  opacity: 0.75;
+  margin-bottom: 6px;
+}
+
+.msa-levels-editor__ground-editor {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+  gap: 6px;
+  align-items: end;
+}
+
+.msa-levels-editor__ground-editor label {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 11px;
+  font-weight: 600;
+  opacity: 0.85;
+}
+
+.msa-levels-editor__ground-editor input {
+  width: 100%;
+  min-width: 0;
+}
+
 .msa-levels-editor__band {
   border: 1px solid rgba(255, 255, 255, 0.18);
   border-radius: 7px;

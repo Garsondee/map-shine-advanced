@@ -175,6 +175,21 @@ export function getSceneBackgroundElevation(scene) {
 }
 
 /**
+ * Top of the scene foreground image band (ceiling above {@link canvas#scene#foregroundElevation}).
+ * When unset, the foreground layer is treated as unbounded above (same as Infinity).
+ *
+ * @param {Scene|null|undefined} scene
+ * @returns {number} Finite top, or Infinity when not set
+ */
+export function getSceneForegroundElevationTop(scene) {
+  if (getLevelsCompatibilityMode() === LEVELS_COMPATIBILITY_MODES.OFF) return Infinity;
+  const raw = scene?.flags?.levels?.foregroundElevationTop;
+  if (raw === undefined || raw === null) return Infinity;
+  const num = Number(raw);
+  return Number.isFinite(num) ? num : Infinity;
+}
+
+/**
  * Read the Levels weatherElevation from a scene.
  *
  * @param {Scene|null|undefined} scene

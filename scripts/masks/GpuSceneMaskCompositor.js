@@ -337,6 +337,16 @@ export class GpuSceneMaskCompositor {
     this._nonGmStaleRepairAttempted = new Set();
 
     /**
+     * Single-band Levels: floorKeys that finished a successful preloadAllFloors → composeFloor.
+     * Outdoors may be file/bundle-only (no GPU RT); do not gate on GPU outdoors alone.
+     * @type {Set<string>}
+     */
+    this._singleBandPreloadDone = new Set();
+
+    /** @type {Promise<void>|null} Serialize concurrent preloadAllFloors (load + effects). */
+    this._preloadAllFloorsInFlight = null;
+
+    /**
      * Fallback CPU compositor used when the WebGL renderer is unavailable.
      * @type {SceneMaskCompositor}
      */
@@ -898,8 +908,13 @@ export class GpuSceneMaskCompositor {
    * @returns {Promise<void>}
    */
   async preloadAllFloors(scene, options = {}) {
-    const { lastMaskBasePath = null, initialMasks = null, activeLevelContext = null } = options;
-    try {
+    if (this._preloadAllFloorsInFlight) {
+      return this._preloadAllFloorsInFlight;
+    }
+    const opts = options;
+    this._preloadAllFloorsInFlight = (async () => {
+      const { lastMaskBasePath = null, initialMasks = null, activeLevelContext = null } = opts;
+      try {
       const sc = scene || canvas?.scene;
       if (!sc || !isLevelsEnabledForScene(sc)) return;
 
@@ -967,12 +982,25 @@ export class GpuSceneMaskCompositor {
         }
         if (Number.isFinite(bandBottom) && Number.isFinite(bandTop)) {
           const floorKey = `${bandBottom}:${bandTop}`;
+          if (this._singleBandPreloadDone.has(floorKey)) {
+            log.debug('preloadAllFloors: single-band — already warmed (session), skip', { floorKey });
+            return;
+          }
           try {
-            this._floorMeta.delete(floorKey);
-            await this.composeFloor({ bottom: bandBottom, top: bandTop }, sc, {
+            // Seeded _floorMeta from currentBundle can make composeFloor() cache-hit and
+            // skip the GPU path; delete only when GPU outdoors is not built yet so the
+            // first run still composites. Do NOT delete on every preload — that forced
+            // a full expensive recomposite whenever effects retried preloadAllFloors().
+            if (this._floorMeta.get(floorKey)?.masks?.length) {
+              this._floorMeta.delete(floorKey);
+            }
+            const cfResult = await this.composeFloor({ bottom: bandBottom, top: bandTop }, sc, {
               lastMaskBasePath,
               cacheOnly: false,
             });
+            if (cfResult?.masks?.length) {
+              this._singleBandPreloadDone.add(floorKey);
+            }
             log.info('preloadAllFloors: single-band — full composeFloor', { floorKey });
           } catch (e) {
             log.warn('preloadAllFloors: single-band composeFloor failed', e);
@@ -1152,6 +1180,10 @@ export class GpuSceneMaskCompositor {
     } catch (e) {
       log.debug('preloadAllFloors: error', e);
     }
+    })().finally(() => {
+      this._preloadAllFloorsInFlight = null;
+    });
+    return this._preloadAllFloorsInFlight;
   }
 
   /**
@@ -1566,6 +1598,8 @@ export class GpuSceneMaskCompositor {
     // masksChanged correctly on the first call after a scene switch.
     this._floorMeta.clear();
     this._nonGmStaleRepairAttempted.clear();
+    this._singleBandPreloadDone.clear();
+    this._preloadAllFloorsInFlight = null;
 
     // Dispose and clear cached GPU render targets. Floor keys (e.g. "0:5")
     // are not scene-unique, so keeping old RTs would cause getBelowFloorTexture()
@@ -1581,6 +1615,28 @@ export class GpuSceneMaskCompositor {
     this._lruOrder.length = 0;
 
     log.info('GpuSceneMaskCompositor: floor state cleared (RTs disposed)');
+  }
+
+  /**
+   * Whether this floor already has a GPU-composited _Outdoors render target.
+   * Used to avoid redundant preloadAllFloors / composeFloor work.
+   * @param {string} floorKey
+   * @returns {boolean}
+   */
+  hasGpuOutdoorsForFloor(floorKey) {
+    if (!floorKey) return false;
+    return !!(this._floorCache.get(floorKey)?.get('outdoors')?.texture);
+  }
+
+  /**
+   * Single-band Levels: true after preloadAllFloors successfully ran composeFloor for this key.
+   * (Outdoors may be bundle texture only, so prefer this over hasGpuOutdoorsForFloor.)
+   * @param {string} floorKey
+   * @returns {boolean}
+   */
+  hasSingleBandPreloadDone(floorKey) {
+    if (!floorKey) return false;
+    return this._singleBandPreloadDone.has(floorKey);
   }
 
   /**
@@ -1666,6 +1722,8 @@ export class GpuSceneMaskCompositor {
   dispose() {
     this._floorMeta.clear();
     this._nonGmStaleRepairAttempted.clear();
+    this._singleBandPreloadDone.clear();
+    this._preloadAllFloorsInFlight = null;
     this._activeFloorBasePath = null;
     this._activeFloorKey = null;
     for (const floorTargets of this._floorCache.values()) {

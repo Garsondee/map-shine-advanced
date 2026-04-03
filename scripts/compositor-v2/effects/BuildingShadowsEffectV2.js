@@ -25,6 +25,12 @@ import { resolveCompositorOutdoorsTexture } from '../../masks/resolve-compositor
 
 const log = createLogger('BuildingShadowsEffectV2');
 
+/**
+ * Building shadows ray-march the full outdoors mask per pixel. Uncapped RT size
+ * follows mask native resolution (often scene-sized, 4k–8k+); that tanks FPS on mid GPUs.
+ */
+const MAX_BUILDING_SHADOW_EDGE_PX = 2560;
+
 export class BuildingShadowsEffectV2 {
   constructor() {
     this.params = {
@@ -86,6 +92,11 @@ export class BuildingShadowsEffectV2 {
 
     /** @type {object|null} Last-frame diagnostics for Breaker Box / health */
     this._healthDiagnostics = null;
+
+    /** @type {string[]|null} Cached {@link #_computeSourceFloorKeys} result */
+    this._floorKeysCache = null;
+    /** @type {string} Signature when {@link #_floorKeysCache} remains valid */
+    this._floorKeysSigCache = '';
   }
 
   /**
@@ -322,7 +333,8 @@ export class BuildingShadowsEffectV2 {
           float weightSum = 0.0;
           float peakHit = 0.0;
 
-          const int RAY_STEPS = 12;
+          // 8 steps vs 12: ~35% less texture work in this hot pass (full-RT per floor).
+          const int RAY_STEPS = 8;
           for (int i = 0; i < RAY_STEPS; i++) {
             float t = (float(i) + 0.5) / float(RAY_STEPS);
             // Spread toward far end for better long-shadow continuity.
@@ -585,7 +597,10 @@ export class BuildingShadowsEffectV2 {
     );
 
     const floorCount = Number(window.MapShine?.floorStack?.getFloors?.()?.length ?? 0);
-    this._maybeWarmFloorMaskCache(compositor, floorCount);
+    // Warmup schedules async preload + GPU work — only when we truly have no outdoors yet.
+    if (!outdoorResolve.texture) {
+      this._maybeWarmFloorMaskCache(compositor, floorCount);
+    }
 
     const floorKeys = this._resolveSourceFloorKeys(compositor);
     // Multi-floor safety: never fall back to an ambiguous single outdoors texture
@@ -768,11 +783,42 @@ export class BuildingShadowsEffectV2 {
   }
 
   /**
+   * @param {object} compositor
+   * @returns {string}
+   */
+  _floorKeysSignature(compositor) {
+    const ctx = window.MapShine?.activeLevelContext ?? null;
+    const ak = (ctx && Number.isFinite(Number(ctx.bottom)) && Number.isFinite(Number(ctx.top)))
+      ? `${ctx.bottom}:${ctx.top}`
+      : '';
+    const floors = window.MapShine?.floorStack?.getFloors?.() ?? [];
+    const af = window.MapShine?.floorStack?.getActiveFloor?.() ?? null;
+    const floorPart = floors.map((f) => `${f?.index ?? ''}:${f?.compositorKey ?? ''}`).join('|');
+    const metaN = compositor?._floorMeta?.size ?? 0;
+    const cacheN = compositor?._floorCache?.size ?? 0;
+    return `${ak}#${floors.length}#${af?.index ?? ''}#${af?.compositorKey ?? ''}#m${metaN}c${cacheN}`;
+  }
+
+  /**
+   * Cached wrapper — cold path scans every _floorMeta key each frame (expensive).
+   */
+  _resolveSourceFloorKeys(compositor) {
+    const sig = this._floorKeysSignature(compositor);
+    if (this._floorKeysCache && sig === this._floorKeysSigCache) {
+      return this._floorKeysCache;
+    }
+    const keys = this._computeSourceFloorKeys(compositor);
+    this._floorKeysSigCache = sig;
+    this._floorKeysCache = keys;
+    return keys;
+  }
+
+  /**
    * Active floor index comes from `floorStack` (and active-level key fallback) —
    * same inputs as `createLightingPerspectiveContext()` in `LightingPerspectiveContext.js`.
    * `FloorCompositor` refreshes that snapshot at frame start before this pass runs.
    */
-  _resolveSourceFloorKeys(compositor) {
+  _computeSourceFloorKeys(compositor) {
     const ctx = window.MapShine?.activeLevelContext ?? null;
     const activeKey = (ctx && Number.isFinite(Number(ctx.bottom)) && Number.isFinite(Number(ctx.top)))
       ? `${ctx.bottom}:${ctx.top}`
@@ -963,6 +1009,23 @@ export class BuildingShadowsEffectV2 {
     if (!compositor) return;
     if (this._floorPreloadPromise) return;
 
+    // render() calls this every frame; preloadAllFloors used to bust _floorMeta on
+    // single-band maps every time, forcing expensive composeFloor on each retry (~throttle ms).
+    // At low FPS that still schedules full recomposites ~every few seconds and freezes the tab.
+    if (floorCount <= 1) {
+      try {
+        const ctx = window.MapShine?.activeLevelContext;
+        const b = Number(ctx?.bottom);
+        const t = Number(ctx?.top);
+        if (Number.isFinite(b) && Number.isFinite(t)) {
+          const k = `${b}:${t}`;
+          if (typeof compositor.hasSingleBandPreloadDone === 'function' && compositor.hasSingleBandPreloadDone(k)) {
+            return;
+          }
+        }
+      } catch (_) {}
+    }
+
     const now = Date.now();
     const throttleMs = floorCount <= 1 ? 3500 : 1000;
     if ((now - this._lastFloorPreloadAttemptMs) < throttleMs) return;
@@ -1023,10 +1086,15 @@ export class BuildingShadowsEffectV2 {
   _computeRenderTargetSize(width, height) {
     const scaleRaw = Number(this.params?.resolutionScale ?? 1.0);
     const scale = Number.isFinite(scaleRaw) ? Math.min(2.0, Math.max(1.0, scaleRaw)) : 1.0;
-    return {
-      x: Math.max(1, Math.round(width * scale)),
-      y: Math.max(1, Math.round(height * scale)),
-    };
+    let x = Math.max(1, Math.round(width * scale));
+    let y = Math.max(1, Math.round(height * scale));
+    const maxE = Math.max(x, y);
+    if (maxE > MAX_BUILDING_SHADOW_EDGE_PX) {
+      const s = MAX_BUILDING_SHADOW_EDGE_PX / maxE;
+      x = Math.max(1, Math.round(x * s));
+      y = Math.max(1, Math.round(y * s));
+    }
+    return { x, y };
   }
 
   _getEffectiveZoom() {
@@ -1081,6 +1149,8 @@ export class BuildingShadowsEffectV2 {
 
   dispose() {
     this._healthDiagnostics = null;
+    this._floorKeysCache = null;
+    this._floorKeysSigCache = '';
     try { this._strengthTarget?.dispose(); } catch (_) {}
     try { this.shadowTarget?.dispose(); } catch (_) {}
     try { this._blurTarget?.dispose(); } catch (_) {}

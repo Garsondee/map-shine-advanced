@@ -118,6 +118,7 @@ import {
   formatLevelsInteropWarning,
 } from './levels-compatibility.js';
 import { isSoundAudibleForPerspective } from './elevation-context.js';
+import { getFloorStackBandsSignature, getSceneBandsForFloorStack } from './levels-floor-stack-bands.js';
 import { emitModuleConflictWarnings } from './levels-compatibility.js';
 import { installLevelsRegionBehaviorCompatPatch } from './region-levels-compat.js';
 import { installSnapshotStoreHooks, getSnapshot as getLevelsSnapshot } from '../core/levels-import/LevelsSnapshotStore.js';
@@ -2082,15 +2083,29 @@ export function initialize() {
     // regeneration, water SDF, rain flow map) when re-selecting the same floor.
     Hooks.on('mapShineLevelContextChanged', (payload) => {
 
-      // Update FloorStack's active floor immediately so the per-floor depth
-      // capture in EffectComposer uses the correct floor on the very next frame.
+      // Update FloorStack from the same merged bands as level navigation (scene
+      // background / foreground + sceneLevels). Using levelsSnapshot.sceneLevels
+      // alone drops the underground band so V2 FloorRenderBus keeps upper tiles
+      // on floor index 0 and they stay visible on the lower level.
       safeCall(() => {
         const fs = floorStack ?? window.MapShine?.floorStack;
-        if (fs) {
-          fs.rebuildFloors(
-            window.MapShine?.levelsSnapshot?.sceneLevels ?? null,
-            payload?.context ?? null
-          );
+        if (!fs) return;
+        const bandsBefore = getFloorStackBandsSignature(fs);
+        fs.rebuildFloors(getSceneBandsForFloorStack(), payload?.context ?? null);
+        const bandsAfter = getFloorStackBandsSignature(fs);
+
+        if (bandsBefore !== bandsAfter) {
+          const bus = window.MapShine?.floorCompositorV2?._renderBus;
+          const fd = window.MapShine?.sceneComposer?.foundrySceneData;
+          const tiles = canvas?.scene?.tiles;
+          if (bus && typeof bus.upsertTileFromDocument === 'function' && fd && tiles) {
+            for (const td of tiles) {
+              bus.upsertTileFromDocument(td, { foundrySceneData: fd });
+            }
+          }
+          try {
+            window.MapShine?.floorCompositorV2?._applyCurrentFloorVisibility?.(payload);
+          } catch (_) {}
         }
       }, 'levelMaskRebuild.floorStackUpdate', Severity.COSMETIC);
 
@@ -2103,8 +2118,6 @@ export function initialize() {
         const tkm = window.MapShine?.tokenManager;
         if (flm && tm) {
           flm.reassignAllLayers(tm, tkm);
-          // V2: FloorRenderBus repopulates lazily on first render frame from tile docs.
-          // No manual populateRenderBus() call needed.
         }
       }, 'levelMaskRebuild.floorLayerReassign', Severity.COSMETIC);
 
@@ -4883,7 +4896,7 @@ async function createThreeCanvas(scene) {
     floorStack = new FloorStack();
     floorStack.setManagers(tileManager, tokenManager);
     floorStack.rebuildFloors(
-      window.MapShine?.levelsSnapshot?.sceneLevels ?? null,
+      getSceneBandsForFloorStack(),
       window.MapShine?.activeLevelContext ?? null
     );
     if (window.MapShine) window.MapShine.floorStack = floorStack;

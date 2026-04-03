@@ -14,7 +14,7 @@ import { debugLoadingProfiler } from '../core/debug-loading-profiler.js';
 import { isTileVisibleForPerspective, isBackgroundVisibleForPerspective, isWeatherVisibleForPerspective } from '../foundry/elevation-context.js';
 import { tileHasLevelsRange, isLevelsEnabledForScene, readTileLevelsFlags } from '../foundry/levels-scene-flags.js';
 import { applyTileLevelDefaults } from '../foundry/levels-create-defaults.js';
-import { getEffectMaskRegistry } from '../assets/loader.js';
+import { getEffectMaskRegistry, probeMaskFile } from '../assets/loader.js';
 import { getTextureBudgetTracker, estimateTextureBytes } from '../assets/TextureBudgetTracker.js';
 import { TileEffectBindingManager } from './TileEffectBindingManager.js';
 
@@ -810,20 +810,6 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     return this._tileAllowsSpecular(tileDoc) && !this._tileBypassesEffects(tileDoc);
   }
 
-  _deriveMaskPath(src, suffix) {
-    const s = String(src || '');
-    if (!s) return null;
-    const q = s.indexOf('?');
-    const base = q >= 0 ? s.slice(0, q) : s;
-    const query = q >= 0 ? s.slice(q) : '';
-
-    const dot = base.lastIndexOf('.');
-    if (dot < 0) return null;
-    const path = base.slice(0, dot);
-    const ext = base.slice(dot);
-    return `${path}${suffix}${ext}${query}`;
-  }
-
   _splitUrl(src) {
     const s = String(src || '');
     if (!s) return null;
@@ -936,19 +922,26 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
   }
 
   /**
-   * Generic per-tile mask URL resolver. Probes for a given suffix mask
-   * alongside the tile's texture URL using the same FilePicker-based
-   * directory listing pattern as the existing Water/Specular/Fluid resolvers.
+   * Resolve a per-tile suffix mask path only when the file exists (FilePicker
+   * listing / shared probe cache). Avoids Foundry loadTexture() on missing
+   * optional masks — which logged Invalid Asset + 404 spam for every registry type.
    *
    * @param {object} tileDoc - Tile document (needs texture.src)
    * @param {string} suffix - Mask suffix (e.g. '_Fire', '_Outdoors')
-   * @returns {Promise<string|null>} Resolved URL or null if not found
+   * @returns {Promise<string|null>} Resolved path or null if not found
    * @private
    */
   async _resolveTileMaskUrl(tileDoc, suffix) {
     const src = tileDoc?.texture?.src;
     if (typeof src !== 'string' || !src.trim() || !suffix) return null;
-    return this._insertSuffixBeforeExtension(src.trim(), suffix);
+    const parts = this._splitUrl(src.trim());
+    if (!parts?.pathNoExt) return null;
+    try {
+      const hit = await probeMaskFile(parts.pathNoExt, suffix, { suppressProbeErrors: true });
+      return hit?.path ?? null;
+    } catch (_) {
+      return null;
+    }
   }
 
   /**
@@ -965,9 +958,15 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     const tileId = tileDoc?.id;
     if (!tileId) return new Map();
 
-    // Return cached result if available.
+    // Return cached result if available and non-empty. An empty Map was stored when
+    // an early probe/load failed (timing, FilePicker) — GpuSceneMaskCompositor
+    // then skipped the tile forever ("EMPTY_MAP_poison"). Clear and re-probe.
     if (this._tileEffectMasks.has(tileId)) {
-      return this._tileEffectMasks.get(tileId);
+      const cached = this._tileEffectMasks.get(tileId);
+      if (cached instanceof Map && cached.size > 0) {
+        return cached;
+      }
+      this.clearTileEffectMasks(tileId);
     }
 
     // Budget guard: skip loading if per-tile effect mask VRAM exceeds budget.
@@ -1020,11 +1019,15 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
       }
 
       await Promise.all(promises);
-      this._tileEffectMasks.set(tileId, results);
 
-      // Track VRAM consumption for budget enforcement.
-      for (const entry of results.values()) {
-        this._tileEffectMaskVramBytes += this._estimateTextureBytes(entry?.texture);
+      // Do not cache an empty result: it poisons later compositor passes (tile
+      // skipped as "loaded" with zero masks). Tiles with no suffix files pay a
+      // re-probe on each composeFloor; that is rare and cheaper than a permanent miss.
+      if (results.size > 0) {
+        this._tileEffectMasks.set(tileId, results);
+        for (const entry of results.values()) {
+          this._tileEffectMaskVramBytes += this._estimateTextureBytes(entry?.texture);
+        }
       }
 
       return results;
@@ -1083,9 +1086,9 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     }
 
     const p = (async () => {
-      const url = this._insertSuffixBeforeExtension(src, '_Water');
-      this._tileWaterMaskResolvedUrl.set(key, url || null);
-      return url || null;
+      const url = await this._resolveTileMaskUrl(tileDoc, '_Water');
+      this._tileWaterMaskResolvedUrl.set(key, url);
+      return url;
     })();
 
     this._tileWaterMaskResolvePromises.set(key, p);
@@ -1150,9 +1153,9 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     }
 
     const p = (async () => {
-      const url = this._insertSuffixBeforeExtension(src, '_Specular');
-      this._tileSpecularMaskResolvedUrl.set(key, url || null);
-      return url || null;
+      const url = await this._resolveTileMaskUrl(tileDoc, '_Specular');
+      this._tileSpecularMaskResolvedUrl.set(key, url);
+      return url;
     })();
 
     this._tileSpecularMaskResolvePromises.set(key, p);
@@ -1214,9 +1217,9 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     }
 
     const p = (async () => {
-      const url = this._insertSuffixBeforeExtension(src, '_Fluid');
-      this._tileFluidMaskResolvedUrl.set(key, url || null);
-      return url || null;
+      const url = await this._resolveTileMaskUrl(tileDoc, '_Fluid');
+      this._tileFluidMaskResolvedUrl.set(key, url);
+      return url;
     })();
 
     this._tileFluidMaskResolvePromises.set(key, p);

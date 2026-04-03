@@ -1,6 +1,11 @@
 import { isGmLike } from '../core/gm-parity.js';
 import { createLogger } from '../core/log.js';
-import { getEffectMaskRegistry, loadAssetBundle } from '../assets/loader.js';
+import {
+  getEffectMaskRegistry,
+  discoverMaskDirectoryFiles,
+  resolveMaskPathsFromListing,
+} from '../assets/loader.js';
+import { collectEnabledMaskIds } from '../settings/mask-manifest-flags.js';
 import * as sceneSettings from '../settings/scene-settings.js';
 import { debugLoadingProfiler } from '../core/debug-loading-profiler.js';
 
@@ -683,7 +688,8 @@ export class EffectStackUI {
 
   async _buildTileRows(tiles, maskCompositeInfo) {
     const registry = getEffectMaskRegistry();
-    const maskIds = Object.keys(registry);
+    const maskIds = collectEnabledMaskIds(canvas?.scene);
+    const maskProbeCacheKey = `${canvas?.scene?.id || 'scene'}:${maskIds.slice().sort().join(',')}`;
 
     const results = [];
 
@@ -830,19 +836,27 @@ export class EffectStackUI {
     ));
 
     for (const bp of basePaths) {
-      if (this._bundleMaskCache.has(bp)) continue;
+      const rowCacheKey = `${maskProbeCacheKey}::${bp}`;
+      if (this._bundleMaskCache.has(rowCacheKey)) continue;
       const __dlp = debugLoadingProfiler;
       const __bpLabel = bp.split('/').pop() || bp;
-      if (__dlp.debugMode) __dlp.begin(`es.loadBundle[${__bpLabel}]`, 'finalize');
+      if (__dlp.debugMode) __dlp.begin(`es.tileMaskListing[${__bpLabel}]`, 'finalize');
       try {
-        const res = await loadAssetBundle(bp, null, { skipBaseTexture: true, suppressProbeErrors: true });
-        const masks = res?.bundle?.masks || [];
-        const foundIds = new Set(masks.map((m) => m?.id).filter(Boolean));
-        this._bundleMaskCache.set(bp, { foundIds, loadError: null });
+        let foundIds = new Set();
+        let probeKnown = false;
+        if (isGmLike()) {
+          const files = await discoverMaskDirectoryFiles(bp);
+          if (files?.length) {
+            const byId = resolveMaskPathsFromListing(files, bp, maskIds);
+            foundIds = new Set(Object.keys(byId));
+            probeKnown = true;
+          }
+        }
+        this._bundleMaskCache.set(rowCacheKey, { foundIds, loadError: null, probeKnown });
       } catch (e) {
-        this._bundleMaskCache.set(bp, { foundIds: new Set(), loadError: e });
+        this._bundleMaskCache.set(rowCacheKey, { foundIds: new Set(), loadError: e, probeKnown: false });
       }
-      if (__dlp.debugMode) __dlp.end(`es.loadBundle[${__bpLabel}]`);
+      if (__dlp.debugMode) __dlp.end(`es.tileMaskListing[${__bpLabel}]`);
     }
 
     const query = String(this._tileFilterState.query || '').trim().toLowerCase();
@@ -889,12 +903,15 @@ export class EffectStackUI {
       let found = [];
       let missing = [];
       let loadError = null;
+      let probeKnownForRow = false;
 
       if (basePath) {
-        const cached = this._bundleMaskCache.get(basePath) || null;
+        const rowCacheKey = `${maskProbeCacheKey}::${basePath}`;
+        const cached = this._bundleMaskCache.get(rowCacheKey) || null;
         const foundIds = cached?.foundIds || null;
+        probeKnownForRow = cached?.probeKnown === true;
         loadError = cached?.loadError || null;
-        if (foundIds) {
+        if (foundIds && probeKnownForRow) {
           for (const id of maskIds) {
             if (foundIds.has(id)) found.push(id);
             else missing.push(id);
@@ -936,7 +953,7 @@ export class EffectStackUI {
       if (!cloudShadowsEnabled) chips.push('noCloudShadow');
       if (!cloudTopsEnabled) chips.push('noCloudTop');
 
-      const issues = !!loadError || (missing.length > 0);
+      const issues = !!loadError || (probeKnownForRow && missing.length > 0);
       const matchQuery = !query || (
         title.toLowerCase().includes(query) ||
         basePath.toLowerCase().includes(query) ||

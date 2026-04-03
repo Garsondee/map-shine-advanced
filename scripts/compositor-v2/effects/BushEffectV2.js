@@ -751,20 +751,22 @@ export class BushEffectV2 {
           shadowA *= clamp(uShadowOpacity, 0.0, 1.0) * uIntensity * edgeFade;
 
           vec4 bushSample = texture2D(uBushMask, vUv - distortion);
-          float mainAlpha = safeAlpha(bushSample) * uIntensity;
+          float texA = safeAlpha(bushSample);
+          float mainAlpha = texA * uIntensity;
           float shadowOnlyAlpha = shadowA * (1.0 - clamp(mainAlpha, 0.0, 1.0));
           float finalAlpha = clamp(mainAlpha + shadowOnlyAlpha, 0.0, 1.0);
           if (finalAlpha <= 0.001) discard;
 
           float ccDelta = abs(uExposure) + abs(uBrightness) + abs(uContrast - 1.0)
                         + abs(uSaturation - 1.0) + abs(uTemperature) + abs(uTint);
-          vec3 color = bushSample.rgb;
-          if (ccDelta > 0.0001) color = applyCC(color);
-          vec3 finalColor = mix(vec3(0.0), color, mainAlpha / max(finalAlpha, 1e-4));
-          gl_FragColor = vec4(finalColor, finalAlpha);
+          vec3 c = bushSample.rgb;
+          if (ccDelta > 0.0001) c = applyCC(c);
+          c *= texA;
+          gl_FragColor = vec4(c * uIntensity, finalAlpha);
         }
       `,
       transparent: true,
+      premultipliedAlpha: true,
       depthWrite: false,
       depthTest: false,
       side: THREE.DoubleSide,

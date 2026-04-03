@@ -232,14 +232,18 @@ function _buildExtensionVariants(preferredExt) {
   return out;
 }
 
+/**
+ * @param {'minimal'|'full'} [options.probeMode='minimal'] — minimal: basePath + canonical suffix +
+ *   (source extension, then webp). full: legacy cartesian product of path/suffix/extension variants
+ *   (very noisy on 404; diagnostics / explicit opt-in only).
+ */
 export function buildMaskManifest(basePath, options = {}) {
   const src = String(basePath || '').trim();
   if (!src) return {};
+  const probeMode = options.probeMode === 'full' ? 'full' : 'minimal';
   const ext = String(options?.extension || _extractExtension(canvas?.scene?.background?.src) || 'webp')
     .toLowerCase()
     .replace(/^\./, '');
-  const baseVariants = _buildBasePathVariants(src);
-  const extVariants = _buildExtensionVariants(ext);
   const requestedMaskIds = (() => {
     if (!Array.isArray(options?.maskIds) || options.maskIds.length === 0) return null;
     return new Set(options.maskIds.map((v) => String(v || '').toLowerCase()).filter(Boolean));
@@ -248,17 +252,31 @@ export function buildMaskManifest(basePath, options = {}) {
   for (const [maskId, def] of Object.entries(EFFECT_MASKS)) {
     if (!def?.suffix) continue;
     if (requestedMaskIds && !requestedMaskIds.has(String(maskId).toLowerCase())) continue;
-    const suffixVariants = _buildSuffixVariants(def.suffix);
-    const candidates = [];
-    for (const b of baseVariants) {
-      for (const s of suffixVariants) {
-        for (const e of extVariants) {
-          const c = normalizePath(`${b}${s}.${e}`);
-          if (!candidates.includes(c)) candidates.push(c);
+
+    if (probeMode === 'full') {
+      const baseVariants = _buildBasePathVariants(src);
+      const extVariants = _buildExtensionVariants(ext);
+      const suffixVariants = _buildSuffixVariants(def.suffix);
+      const candidates = [];
+      for (const b of baseVariants) {
+        for (const s of suffixVariants) {
+          for (const e of extVariants) {
+            const c = normalizePath(`${b}${s}.${e}`);
+            if (!candidates.includes(c)) candidates.push(c);
+          }
         }
       }
+      manifest[def.suffix] = candidates;
+    } else {
+      const candidates = [];
+      const push = (rel) => {
+        const c = normalizePath(rel);
+        if (!candidates.includes(c)) candidates.push(c);
+      };
+      push(`${src}${def.suffix}.${ext}`);
+      if (ext !== 'webp') push(`${src}${def.suffix}.webp`);
+      manifest[def.suffix] = candidates;
     }
-    manifest[def.suffix] = candidates;
   }
   return manifest;
 }
@@ -296,8 +314,18 @@ export async function loadAssetBundle(basePath, onProgress = null, options = {})
     maskManifest = null,
     maskExtension = null,
     maskIds = null,
-    cacheKeySuffix = ''
+    cacheKeySuffix = '',
+    /**
+     * off: only load masks listed in maskManifest (no URL guessing; for players without a scene flag).
+     * minimal (default): at most two candidate URLs per mask (source ext + webp fallback).
+     * full: legacy high-cardinality probing (diagnostics / explicit opt-in only).
+     */
+    maskConventionFallback = 'minimal'
   } = options || {};
+
+  const convFallback =
+    maskConventionFallback === 'off' ? 'off' : maskConventionFallback === 'full' ? 'full' : 'minimal';
+  const probeMode = convFallback === 'full' ? 'full' : 'minimal';
 
   log.info(`Loading asset bundle: ${basePath}${skipBaseTexture ? ' (masks only)' : ''}`);
 
@@ -430,31 +458,34 @@ export async function loadAssetBundle(basePath, onProgress = null, options = {})
     // optional-but-important masks like _Outdoors are still attempted.
     const baseManifest = (maskManifest && typeof maskManifest === 'object')
       ? maskManifest
-      : buildMaskManifest(basePath, { extension: maskExtension, maskIds });
+      : buildMaskManifest(basePath, { extension: maskExtension, maskIds, probeMode });
     const effectiveManifest = { ...(baseManifest || {}) };
-    try {
-      const requestedMaskIds = Array.isArray(maskIds) && maskIds.length > 0
-        ? maskIds.map((v) => String(v || '').toLowerCase()).filter(Boolean)
-        : Object.keys(EFFECT_MASKS);
-      const fallbackManifest = buildMaskManifest(basePath, {
-        extension: maskExtension,
-        maskIds: requestedMaskIds,
-      });
-      for (const [maskId, def] of Object.entries(EFFECT_MASKS)) {
-        const idLower = String(maskId || '').toLowerCase();
-        if (!requestedMaskIds.includes(idLower)) continue;
-        const suffix = def?.suffix;
-        if (!suffix) continue;
-        const hasExisting = Array.isArray(effectiveManifest[suffix])
-          ? effectiveManifest[suffix].length > 0
-          : (typeof effectiveManifest[suffix] === 'string' && !!effectiveManifest[suffix].trim());
-        if (hasExisting) continue;
-        const fallbackCandidates = fallbackManifest?.[suffix];
-        if (Array.isArray(fallbackCandidates) && fallbackCandidates.length > 0) {
-          effectiveManifest[suffix] = fallbackCandidates;
+    if (convFallback !== 'off') {
+      try {
+        const requestedMaskIds = Array.isArray(maskIds) && maskIds.length > 0
+          ? maskIds.map((v) => String(v || '').toLowerCase()).filter(Boolean)
+          : Object.keys(EFFECT_MASKS);
+        const fallbackManifest = buildMaskManifest(basePath, {
+          extension: maskExtension,
+          maskIds: requestedMaskIds,
+          probeMode,
+        });
+        for (const [maskId, def] of Object.entries(EFFECT_MASKS)) {
+          const idLower = String(maskId || '').toLowerCase();
+          if (!requestedMaskIds.includes(idLower)) continue;
+          const suffix = def?.suffix;
+          if (!suffix) continue;
+          const hasExisting = Array.isArray(effectiveManifest[suffix])
+            ? effectiveManifest[suffix].length > 0
+            : (typeof effectiveManifest[suffix] === 'string' && !!effectiveManifest[suffix].trim());
+          if (hasExisting) continue;
+          const fallbackCandidates = fallbackManifest?.[suffix];
+          if (Array.isArray(fallbackCandidates) && fallbackCandidates.length > 0) {
+            effectiveManifest[suffix] = fallbackCandidates;
+          }
         }
-      }
-    } catch (_) {}
+      } catch (_) {}
+    }
 
     // Step 3: Load masks in parallel with concurrency limit
     const semaphore = new Semaphore(4);
@@ -993,7 +1024,16 @@ function _pathFromSceneMaskTextureManifest(scene, basePath, suffix) {
  * @returns {Promise<string|null>}
  */
 async function _probeMaskPathByConvention(basePath, suffix) {
-  for (const format of SUPPORTED_FORMATS) {
+  const preferred =
+    _extractExtension(typeof canvas !== 'undefined' ? canvas?.scene?.background?.src : '') || 'webp';
+  const formats = [];
+  const pushFmt = (f) => {
+    const s = String(f || '').toLowerCase().replace(/^\./, '');
+    if (s && !formats.includes(s)) formats.push(s);
+  };
+  pushFmt(preferred);
+  if (preferred !== 'webp') pushFmt('webp');
+  for (const format of formats) {
     const candidate = `${basePath}${suffix}.${format}`;
     const u = normalizePath(candidate);
     try {

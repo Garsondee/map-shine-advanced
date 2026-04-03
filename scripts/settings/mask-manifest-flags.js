@@ -35,6 +35,14 @@ function _normBasePath(p) {
   return String(p || '').trim().replace(/\\/g, '/');
 }
 
+/** File extension from a texture URL (lowercase, no dot), or null */
+export function extensionFromTextureSrc(src) {
+  const s = String(src || '');
+  const noQuery = s.split('?')[0];
+  const dot = noQuery.lastIndexOf('.');
+  return dot >= 0 ? noQuery.slice(dot + 1).toLowerCase() : null;
+}
+
 /**
  * @param {Scene|null} scene
  * @returns {{ version?: number, basePath?: string, maskSourceKey?: string, pathsByMaskId?: Record<string, string>, updatedAt?: number } | null}
@@ -159,31 +167,22 @@ export async function persistMaskTextureManifest(scene, payload) {
  *
  * @param {Scene} scene
  * @param {{ basePath: string, maskSourceSrc: string, enabledMaskIds: string[] }} params
- * @returns {Promise<{ maskManifest: Record<string, string>, maskExtension: string|null, maskIds: string[], cacheKeySuffix: string }>}
+ * @returns {Promise<{ maskManifest: Record<string, string>, maskExtension: string|null, maskIds: string[], cacheKeySuffix: string, maskConventionFallback: 'off'|'minimal'|'full' }>}
  */
 export async function prepareSceneMaskManifestForLoad(scene, { basePath, maskSourceSrc, enabledMaskIds }) {
   if (typeof sceneSettings.isEnabled === 'function' && !sceneSettings.isEnabled(scene)) {
-    const ext = (() => {
-      const s = String(maskSourceSrc || '');
-      const noQuery = s.split('?')[0];
-      const dot = noQuery.lastIndexOf('.');
-      return dot >= 0 ? noQuery.slice(dot + 1).toLowerCase() : null;
-    })();
+    const ext = extensionFromTextureSrc(maskSourceSrc);
     return {
       maskManifest: {},
       maskExtension: ext,
       maskIds: enabledMaskIds,
       cacheKeySuffix: 'mf:disabled',
+      maskConventionFallback: 'off',
     };
   }
 
   const maskSourceKey = normalizeMaskSourceKey(maskSourceSrc || '');
-  const ext = (() => {
-    const s = String(maskSourceSrc || '');
-    const noQuery = s.split('?')[0];
-    const dot = noQuery.lastIndexOf('.');
-    return dot >= 0 ? noQuery.slice(dot + 1).toLowerCase() : null;
-  })();
+  const ext = extensionFromTextureSrc(maskSourceSrc);
 
   const flag = getMaskTextureManifest(scene);
   const flagMatches = maskTextureManifestMatchesBasePath(flag, basePath);
@@ -195,6 +194,8 @@ export async function prepareSceneMaskManifestForLoad(scene, { basePath, maskSou
       maskExtension: ext,
       maskIds: enabledMaskIds,
       cacheKeySuffix: `mf:${flag.updatedAt || 0}`,
+      // Paths came from GM directory listing — do not convention-probe missing optional masks (404 spam).
+      maskConventionFallback: 'off',
     };
   }
 
@@ -205,6 +206,7 @@ export async function prepareSceneMaskManifestForLoad(scene, { basePath, maskSou
       maskExtension: ext,
       maskIds: enabledMaskIds,
       cacheKeySuffix: 'mf:none',
+      maskConventionFallback: 'off',
     };
   }
 
@@ -223,6 +225,7 @@ export async function prepareSceneMaskManifestForLoad(scene, { basePath, maskSou
       maskExtension: ext,
       maskIds: enabledMaskIds,
       cacheKeySuffix: `mf:${Date.now()}`,
+      maskConventionFallback: available.length > 0 ? 'off' : 'minimal',
     };
   } catch (e) {
     log.warn('Mask directory discovery failed', e?.message ?? e);
@@ -233,6 +236,7 @@ export async function prepareSceneMaskManifestForLoad(scene, { basePath, maskSou
     maskExtension: ext,
     maskIds: enabledMaskIds,
     cacheKeySuffix: 'mf:none',
+    maskConventionFallback: 'minimal',
   };
 }
 
@@ -241,25 +245,28 @@ export async function prepareSceneMaskManifestForLoad(scene, { basePath, maskSou
  * @param {Scene} scene
  * @param {string} basePath
  * @param {string[]} enabledMaskIds
- * @returns {{ maskManifest: Record<string, string>, maskExtension: null, maskIds: string[], cacheKeySuffix: string, skipMaskIds?: string[] }}
+ * @returns {{ maskManifest: Record<string, string>, maskExtension: string|null, maskIds: string[], cacheKeySuffix: string, skipMaskIds?: string[], maskConventionFallback: 'off'|'minimal'|'full' }}
  */
 export function getMaskBundleOptionsFromFlagOnly(scene, basePath, enabledMaskIds, { skipMaskIds = ['water'] } = {}) {
+  const bgExt = extensionFromTextureSrc(scene?.background?.src);
   const flag = getMaskTextureManifest(scene);
   if (!maskTextureManifestMatchesBasePath(flag, basePath) || !flag.pathsByMaskId) {
     return {
       maskManifest: {},
-      maskExtension: null,
+      maskExtension: bgExt,
       maskIds: enabledMaskIds,
       cacheKeySuffix: 'mf:none',
       skipMaskIds,
+      maskConventionFallback: 'off',
     };
   }
   const manifest = pathsByMaskIdToLoaderManifest(flag.pathsByMaskId, enabledMaskIds);
   return {
     maskManifest: manifest,
-    maskExtension: null,
+    maskExtension: bgExt,
     maskIds: enabledMaskIds,
     cacheKeySuffix: `mf:${flag.updatedAt || 0}`,
     skipMaskIds,
+    maskConventionFallback: 'off',
   };
 }

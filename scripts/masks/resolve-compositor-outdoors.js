@@ -2,8 +2,14 @@
  * Unified GpuSceneMaskCompositor _Outdoors resolution for FloorCompositor,
  * BuildingShadowsEffectV2, and diagnostics.
  *
- * Order: active level band key → active floor compositorKey → compositor._activeFloorKey,
- * then sibling keys (same band bottom in _floorMeta / _floorCache), then ground band.
+ * Order: **FloorStack active floor** (compositorKey + elevation band) → active level band key
+ * → compositor._activeFloorKey, then sibling keys (same band bottom in _floorMeta / _floorCache),
+ * then ground band.
+ *
+ * Rationale: GpuSceneMaskCompositor keys masks by rendered floor bands. `activeLevelContext`
+ * (CameraFollower) can briefly disagree with `floorStack` (e.g. scene-background vs upper
+ * tile floor). Trying level context first caused wrong-band _Outdoors (e.g. all-indoor
+ * underground) to win over the viewed floor's mask for BuildingShadowsEffectV2 and sync.
  *
  * @module masks/resolve-compositor-outdoors
  */
@@ -29,16 +35,20 @@ export function resolveCompositorOutdoorsTexture(compositor, levelContext = null
   };
 
   const candidateKeys = [];
-  const cb = Number(ctx?.bottom);
-  const ct = Number(ctx?.top);
-  if (Number.isFinite(cb) && Number.isFinite(ct)) candidateKeys.push(`${cb}:${ct}`);
 
   let activeFloor = null;
   try {
     activeFloor = window.MapShine?.floorStack?.getActiveFloor?.() ?? null;
     const ck = activeFloor?.compositorKey;
     if (ck) candidateKeys.push(String(ck));
+    const eb = Number(activeFloor?.elevationMin);
+    const et = Number(activeFloor?.elevationMax);
+    if (Number.isFinite(eb) && Number.isFinite(et)) candidateKeys.push(`${eb}:${et}`);
   } catch (_) {}
+
+  const cb = Number(ctx?.bottom);
+  const ct = Number(ctx?.top);
+  if (Number.isFinite(cb) && Number.isFinite(ct)) candidateKeys.push(`${cb}:${ct}`);
 
   const cak = compositor._activeFloorKey ?? null;
   if (cak) candidateKeys.push(String(cak));
@@ -49,8 +59,11 @@ export function resolveCompositorOutdoorsTexture(compositor, levelContext = null
     if (tex) return { texture: tex, resolvedKey: key, route: 'direct' };
   }
 
-  const bottom = Number.isFinite(cb) ? cb : Number(activeFloor?.elevationMin);
-  if (Number.isFinite(bottom)) {
+  // Prefer rendered floor band bottom (floor stack) so sibling scan matches the viewed band.
+  const siblingBottom = Number.isFinite(Number(activeFloor?.elevationMin))
+    ? Number(activeFloor.elevationMin)
+    : (Number.isFinite(cb) ? cb : Number.NaN);
+  if (Number.isFinite(siblingBottom)) {
     /** @type {Set<string>} */
     const keySet = new Set();
     try {
@@ -63,7 +76,7 @@ export function resolveCompositorOutdoorsTexture(compositor, levelContext = null
         for (const k of compositor._floorCache.keys()) keySet.add(String(k));
       }
     } catch (_) {}
-    const matching = [...keySet].filter((key) => Number(String(key).split(':')[0]) === bottom).sort();
+    const matching = [...keySet].filter((key) => Number(String(key).split(':')[0]) === siblingBottom).sort();
     for (const key of matching) {
       if (uniqueKeys.includes(key)) continue;
       tex = tryKey(key);

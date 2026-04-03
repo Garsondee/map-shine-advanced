@@ -978,26 +978,46 @@ export class BuildingShadowsEffectV2 {
   }
 
   _resolveReceiverMaskTexture(compositor) {
+    if (!compositor) return this._outdoorsMask ?? null;
+
+    const floorStackFloors = window.MapShine?.floorStack?.getFloors?.() ?? [];
+    const activeFloorForMask = window.MapShine?.floorStack?.getActiveFloor?.() ?? null;
+    const activeIdxForMask = Number(activeFloorForMask?.index);
+    const skipGroundGlobalFallback = floorStackFloors.length > 1
+      && Number.isFinite(activeIdxForMask)
+      && activeIdxForMask > 0;
+
+    const r = resolveCompositorOutdoorsTexture(
+      compositor,
+      window.MapShine?.activeLevelContext ?? null,
+      { skipGroundFallback: skipGroundGlobalFallback, allowBundleFallback: false },
+    );
+    if (r.texture) return r.texture;
+
+    // Fractional activeLevelContext vs integer compositor keys (same as FloorCompositor fire path).
     const ctx = window.MapShine?.activeLevelContext ?? null;
-    const activeKey = (ctx && Number.isFinite(Number(ctx.bottom)) && Number.isFinite(Number(ctx.top)))
-      ? `${ctx.bottom}:${ctx.top}`
-      : null;
-
-    if (activeKey) {
-      const tex = compositor.getFloorTexture(activeKey, 'outdoors');
-      if (tex) return tex;
-    }
-
-    const activeFloor = window.MapShine?.floorStack?.getActiveFloor?.() ?? null;
-    if (activeFloor) {
-      if (activeFloor.compositorKey) {
-        const texCk = compositor.getFloorTexture(String(activeFloor.compositorKey), 'outdoors');
-        if (texCk) return texCk;
+    const b = Number(ctx?.bottom);
+    const t = Number(ctx?.top);
+    if (Number.isFinite(b) && Number.isFinite(t) && compositor._floorCache) {
+      const mid = (b + t) * 0.5;
+      const cacheKeys = Array.from(compositor._floorCache.keys?.() ?? []);
+      let bestKey = null;
+      let bestDelta = Infinity;
+      for (const key of cacheKeys) {
+        const parts = String(key).split(':');
+        if (parts.length !== 2) continue;
+        const kb = Number(parts[0]);
+        const kt = Number(parts[1]);
+        if (!Number.isFinite(kb) || !Number.isFinite(kt)) continue;
+        if (mid < kb || mid > kt) continue;
+        const delta = Math.abs(kb - b) + Math.abs(kt - t);
+        if (delta < bestDelta) {
+          bestDelta = delta;
+          bestKey = key;
+        }
       }
-      const b = Number(activeFloor?.elevationMin);
-      const t = Number(activeFloor?.elevationMax);
-      if (Number.isFinite(b) && Number.isFinite(t)) {
-        const tex = compositor.getFloorTexture(`${b}:${t}`, 'outdoors');
+      if (bestKey) {
+        const tex = compositor.getFloorTexture(bestKey, 'outdoors');
         if (tex) return tex;
       }
     }

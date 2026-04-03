@@ -313,7 +313,7 @@ export class LightingEffectV2 {
           type: 'boolean',
           default: true,
           label: 'Multi-floor: roof gate & building roof-cutout top floor only',
-          tooltip: 'When on (recommended for 2+ floors), Foundry lights and building-shadow roof suppression use screen-space roof alpha only on the top floor — prevents upper-floor silhouettes from cutting lower-floor shadows and lights. Turn off for legacy “always gate” (single-floor maps are unaffected).',
+          tooltip: 'When on (recommended for 2+ floors), Foundry lights use screen-space roof alpha only on the top floor so upstairs stamps do not cut lower-floor lights. Building shadows skip roof-cutout on the uppermost band when 2+ floors exist (that band’s map art is often on the roof layer and would otherwise suppress all building shadows). Single-floor maps unchanged. Turn off for legacy “always gate” on lights.',
         },
         upperFloorTransmissionEnabled: { type: 'boolean', default: false, label: 'Upper Floor Through-Gaps' },
         upperFloorTransmissionStrength: { type: 'slider', min: 0, max: 2, step: 0.05, default: 0.6, label: 'Upper Light Strength' },
@@ -1153,7 +1153,17 @@ export class LightingEffectV2 {
       cu0.uApplyRoofOcclusionToSources.value = occlusionWeight * roofScreenOcclusionScale;
       // Window overlays: floor-isolated elsewhere; compose-level roof gating off (0f7b217).
       cu0.uApplyRoofOcclusionToWindow.value = 0.0;
-      cu0.uApplyRoofOcclusionToBuilding.value = roofScreenOcclusionScale;
+      // Building shadows are scene-UV; screen-space roof alpha still suppresses them where
+      // tOverheadRoofAlpha is high. On the *uppermost* band of a multi-floor map, the main
+      // level art often lives on ROOF_LAYER (tile over underground background) so the roof
+      // visibility pass covers the whole viewport and wipes building shadows entirely.
+      // Foundry light roof gating keeps using roofScreenOcclusionScale; building shadows rely
+      // on BuildingShadowsEffectV2's receiver _Outdoors gate instead for that case.
+      const onUppermostMultiFloor = persp.isMultiFloor
+        && persp.activeFloorIndex === persp.topFloorIndex
+        && persp.topFloorIndex > 0;
+      const buildingRoofOcclusionScale = onUppermostMultiFloor ? 0.0 : roofScreenOcclusionScale;
+      cu0.uApplyRoofOcclusionToBuilding.value = buildingRoofOcclusionScale;
     } catch (_) {
       const cu0 = this._composeMaterial.uniforms;
       cu0.uApplyRoofOcclusionToSources.value = 1.0;

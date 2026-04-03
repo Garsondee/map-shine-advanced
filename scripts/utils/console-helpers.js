@@ -7,6 +7,9 @@
 import { createLogger } from '../core/log.js';
 import { globalProfiler } from '../core/profiler.js';
 import { globalLoadingProfiler } from '../core/loading-profiler.js';
+import { probeMaskFile } from '../assets/loader.js';
+import { tileHasLevelsRange, readTileLevelsFlags } from '../foundry/levels-scene-flags.js';
+import { isTileOverhead } from '../scene/tile-manager.js';
 
 const log = createLogger('ConsoleHelpers');
 
@@ -56,6 +59,77 @@ function _collectContinuousCandidates(floorCompositor) {
     lensGrainAmount: _toFinite(floorCompositor?._lensEffect?.params?.grainAmount),
     lensGrainSpeed: _toFinite(floorCompositor?._lensEffect?.params?.grainSpeed),
   };
+}
+
+/** Same rules as GpuSceneMaskCompositor._isTileInLevelBand (diagnostics only). */
+function _isTileInLevelBandDiagnostic(tileDoc, levelContext) {
+  const bandBottom = Number(levelContext?.bottom);
+  const bandTop = Number(levelContext?.top);
+  if (!Number.isFinite(bandBottom) || !Number.isFinite(bandTop)) return true;
+
+  if (tileHasLevelsRange(tileDoc)) {
+    const flags = readTileLevelsFlags(tileDoc);
+    const tileBottom = Number(flags.rangeBottom);
+    const tileTop = Number(flags.rangeTop);
+    if (Number.isFinite(tileBottom) && Number.isFinite(tileTop)) {
+      return !(tileTop <= bandBottom || tileBottom >= bandTop);
+    }
+    if (Number.isFinite(tileBottom)) {
+      return tileBottom >= bandBottom && tileBottom < bandTop;
+    }
+  }
+
+  const elev = Number(tileDoc?.elevation);
+  if (Number.isFinite(elev)) return elev >= bandBottom && elev < bandTop;
+  return true;
+}
+
+function _extractBasePathDiagnostic(src) {
+  const s = String(src || '').trim();
+  const lastDot = s.lastIndexOf('.');
+  return lastDot > 0 ? s.substring(0, lastDot) : s;
+}
+
+function _texProof(tex) {
+  if (!tex) return null;
+  return {
+    uuid: tex.uuid ?? null,
+    flipY: tex.flipY,
+    w: tex.image?.width ?? null,
+    h: tex.image?.height ?? null,
+    name: tex.name ?? null,
+  };
+}
+
+function _collectTilesForLevelBand(scene, levelContext) {
+  const out = [];
+  if (!scene) return out;
+  let tiles = scene.tiles ?? null;
+  if (!tiles) return out;
+  const tileIter = Array.isArray(tiles)
+    ? tiles
+    : (Array.isArray(tiles?.contents) ? tiles.contents : (tiles?.values?.() ?? []));
+  const bandBottom = Number(levelContext?.bottom);
+  const bandTop = Number(levelContext?.top);
+  const hasLevelFilter = Number.isFinite(bandBottom) && Number.isFinite(bandTop);
+
+  for (const tileDoc of tileIter) {
+    if (!tileDoc) continue;
+    const src = tileDoc?.texture?.src;
+    if (typeof src !== 'string' || src.trim().length === 0) continue;
+    if (tileDoc.hidden) continue;
+    try { if (tileDoc.getFlag?.('map-shine-advanced', 'bypassEffects')) continue; } catch (_) {}
+    if (hasLevelFilter) {
+      try { if (!_isTileInLevelBandDiagnostic(tileDoc, levelContext)) continue; } catch (_) {}
+    } else {
+      try { if (isTileOverhead(tileDoc)) continue; } catch (_) {}
+    }
+    const w = Number.isFinite(tileDoc?.width) ? tileDoc.width : 0;
+    const h = Number.isFinite(tileDoc?.height) ? tileDoc.height : 0;
+    if (!w || !h) continue;
+    out.push(tileDoc);
+  }
+  return out;
 }
 
 function _buildWindowedPassRows(currentRaw, prevRaw) {
@@ -1250,6 +1324,180 @@ export const consoleHelpers = {
   },
 
   /**
+   * Proof-oriented report: disk probe vs TileManager cache vs GpuSceneMaskCompositor
+   * for `_Outdoors` (and specular) on each level band. Copy the logged JSON.
+   *
+   * Usage:
+   *   await MapShine.debug.diagnoseUpperFloorOutdoorsProof()
+   *   copy(await MapShine.debug.diagnoseUpperFloorOutdoorsProof()) // DevTools
+   *
+   * @returns {Promise<object>}
+   */
+  async diagnoseUpperFloorOutdoorsProof() {
+    const ms = window.MapShine;
+    const scene = typeof canvas !== 'undefined' ? canvas?.scene : null;
+    const compositor = ms?.sceneComposer?._sceneMaskCompositor ?? null;
+    const tm = ms?.tileManager ?? null;
+    const reg = ms?.effectMaskRegistry ?? null;
+    const specEff = ms?.specularEffect ?? ms?.effectComposer?.effects?.get?.('specular') ?? null;
+    const floorStack = ms?.floorStack ?? null;
+    const floors = floorStack?.getFloors?.() ?? [];
+
+    const report = {
+      capturedAt: new Date().toISOString(),
+      sceneId: scene?.id ?? null,
+      activeLevelContext: ms?.activeLevelContext ?? null,
+      sceneComposer_lastMaskBasePath: ms?.sceneComposer?._lastMaskBasePath ?? null,
+      compositor_activeFloorKey: compositor?._activeFloorKey ?? null,
+      compositor_activeFloorBasePath: compositor?._activeFloorBasePath ?? null,
+      tileManager_vramMb: tm
+        ? (tm._tileEffectMaskVramBytes ?? 0) / (1024 * 1024)
+        : null,
+      tileManager_vramBudgetMb: tm?.effectMaskVramBudget != null
+        ? tm.effectMaskVramBudget / (1024 * 1024)
+        : null,
+      registry_outdoorsSlot: null,
+      specularEffect: {
+        outdoorsMask: _texProof(specEff?.outdoorsMask),
+        specularMask: _texProof(specEff?.specularMask),
+        uSpecularMap: _texProof(specEff?.material?.uniforms?.uSpecularMap?.value),
+      },
+      bands: {},
+    };
+
+    try {
+      const slot = reg?.getSlot?.('outdoors');
+      if (slot) {
+        report.registry_outdoorsSlot = {
+          floorKey: slot.floorKey ?? null,
+          source: slot.source ?? null,
+          texture: _texProof(slot.texture),
+        };
+      }
+    } catch (_) {}
+
+    for (const f of floors) {
+      const key = f?.compositorKey != null ? String(f.compositorKey) : null;
+      if (!key) continue;
+      const parts = key.split(':').map(Number);
+      const bottom = parts[0];
+      const top = parts[1];
+      const ctx = { bottom, top };
+      const bandBottom = Number(bottom);
+      const isUpper = Number.isFinite(bandBottom) && bandBottom > 0;
+
+      const meta = compositor?._floorMeta?.get(key) ?? null;
+      const masks = meta?.masks ?? [];
+      const outdoorsEntry = masks.find((m) => (m?.id ?? m?.type) === 'outdoors');
+      const specularEntry = masks.find((m) => (m?.id ?? m?.type) === 'specular');
+      const rtMap = compositor?._floorCache?.get(key);
+      const rtTypes = rtMap ? [...rtMap.keys()] : [];
+
+      const bandReport = {
+        floorIndex: f.index,
+        elevationMin: f.elevationMin,
+        elevationMax: f.elevationMax,
+        isUpperBand: isUpper,
+        compositor_getFloorTexture: {
+          outdoors: _texProof(compositor?.getFloorTexture?.(key, 'outdoors')),
+          specular: _texProof(compositor?.getFloorTexture?.(key, 'specular')),
+        },
+        compositor_floorCache_maskTypes: rtTypes,
+        compositor_floorMeta_maskTypes: masks.map((m) => m?.id ?? m?.type).filter(Boolean),
+        compositor_floorMeta_outdoors: {
+          hasMetaEntry: !!outdoorsEntry,
+          texture: _texProof(outdoorsEntry?.texture),
+        },
+        compositor_floorMeta_specular: {
+          hasMetaEntry: !!specularEntry,
+          texture: _texProof(specularEntry?.texture),
+        },
+        tiles: [],
+      };
+
+      const tileDocs = _collectTilesForLevelBand(scene, ctx);
+      for (const tileDoc of tileDocs) {
+        const tid = tileDoc?.id ?? '';
+        const src = typeof tileDoc?.texture?.src === 'string' ? tileDoc.texture.src.trim() : '';
+        const basePath = _extractBasePathDiagnostic(src);
+        const cached = tm?._tileEffectMasks?.get(tid);
+        let cacheKeys = null;
+        let cacheNote = null;
+        if (cached instanceof Map) {
+          if (cached.size === 0) cacheNote = 'EMPTY_MAP_poison';
+          cacheKeys = [...cached.keys()];
+        } else if (tm && tid) {
+          cacheNote = 'not_in_cache_yet';
+        }
+
+        let loaded = null;
+        let loadError = null;
+        if (tm?.loadAllTileMasks) {
+          try {
+            loaded = await tm.loadAllTileMasks(tileDoc);
+          } catch (e) {
+            loadError = String(e?.message || e);
+          }
+        }
+        const afterKeys = loaded instanceof Map ? [...loaded.keys()] : null;
+        const outdoorsLoaded = loaded?.get?.('outdoors') ?? null;
+        const specLoaded = loaded?.get?.('specular') ?? null;
+
+        let probeOutdoors = null;
+        let probeSpecular = null;
+        if (basePath) {
+          try {
+            probeOutdoors = await probeMaskFile(basePath, '_Outdoors', { suppressProbeErrors: true });
+          } catch (_) { probeOutdoors = null; }
+          try {
+            probeSpecular = await probeMaskFile(basePath, '_Specular', { suppressProbeErrors: true });
+          } catch (_) { probeSpecular = null; }
+        }
+
+        bandReport.tiles.push({
+          tileIdSuffix: tid.length > 8 ? tid.slice(-8) : tid,
+          textureSrc: src || null,
+          basePath: basePath || null,
+          cacheBeforeLoad_keys: cacheKeys,
+          cacheBeforeLoad_note: cacheNote,
+          afterLoadAllTileMasks_keys: afterKeys,
+          loadAllTileMasks_error: loadError,
+          loaded_outdoors_url: outdoorsLoaded?.url ?? null,
+          loaded_outdoors_texture: _texProof(outdoorsLoaded?.texture),
+          loaded_specular_url: specLoaded?.url ?? null,
+          loaded_specular_texture: _texProof(specLoaded?.texture),
+          probeMaskFile_diskPath_outdoors: probeOutdoors?.path ?? null,
+          probeMaskFile_diskPath_specular: probeSpecular?.path ?? null,
+          interpretation_outdoors: (() => {
+            const diskO = !!probeOutdoors?.path;
+            const gotO = !!(outdoorsLoaded?.texture);
+            if (diskO && !gotO) return 'FILE_LISTED_BUT_loadAllTileMasks_DID_NOT_LOAD_outdoors';
+            if (!diskO && !gotO) return 'no_outdoors_file_found_for_basePath';
+            if (!diskO && gotO) return 'loaded_without_probe_hit_unusual';
+            return 'outdoors_ok';
+          })(),
+          interpretation_specular: (() => {
+            const diskS = !!probeSpecular?.path;
+            const gotS = !!(specLoaded?.texture);
+            if (diskS && !gotS) return 'FILE_LISTED_BUT_loadAllTileMasks_DID_NOT_LOAD_specular';
+            if (!diskS && !gotS) return 'no_specular_file_found_for_basePath';
+            if (!diskS && gotS) return 'loaded_without_probe_hit_unusual';
+            return 'specular_ok';
+          })(),
+        });
+      }
+
+      report.bands[key] = bandReport;
+    }
+
+    const json = JSON.stringify(report, null, 2);
+    console.group('MapShine diagnoseUpperFloorOutdoorsProof (copy JSON below)');
+    console.log(json);
+    console.groupEnd();
+    return report;
+  },
+
+  /**
    * Quick mask binding snapshot ->-> shows what texture each floor-scoped
    * effect currently has bound for each mask type.
    * Usage: MapShine.debug.diagnoseFloorMasks()
@@ -1348,6 +1596,7 @@ Available commands (access via MapShine.debug):
 
   .diagnoseFloorRendering() - Comprehensive floor rendering report
   .diagnoseFloorDeepdive()  - Deep-dive: _floorCache RTs, uniform snapshot, tile overlays, _tileEffectMasks
+  .diagnoseUpperFloorOutdoorsProof() - JSON: disk probe vs tile mask load vs compositor (async)
   .diagnoseFloorMasks()     - Quick snapshot of per-effect mask bindings
   .alphaIsolationStatus()   - Read active alpha/isolation debug flags
   .alphaIsolationSet(obj)   - Merge alpha/isolation debug flags
@@ -1368,6 +1617,9 @@ Floor debugging examples:
 
   // Quick mask binding snapshot
   MapShine.debug.diagnoseFloorMasks()
+
+  // Upper-floor _Outdoors / specular load proof (paste JSON to devs)
+  copy(await MapShine.debug.diagnoseUpperFloorOutdoorsProof())
 
 Other examples:
 

@@ -558,6 +558,24 @@ export class BuildingShadowsEffectV2 {
     this._sunElevationDeg = Number(elevationDeg);
   }
 
+  /**
+   * Align with {@link FloorCompositor#_resolveOutdoorsMask}: never use lowest-band ground
+   * (or scene background bundle) as a stand-in _Outdoors source while viewing an upper
+   * floor in a multi-floor stack — that masks the real upper-band mask and kills shadows.
+   * @returns {boolean}
+   */
+  _skipGroundAndBundleFallbackForUpperMultiFloor() {
+    let floorStackFloors = [];
+    try {
+      floorStackFloors = window.MapShine?.floorStack?.getFloors?.() ?? [];
+    } catch (_) {
+      floorStackFloors = [];
+    }
+    const af = window.MapShine?.floorStack?.getActiveFloor?.() ?? null;
+    const idx = Number(af?.index);
+    return floorStackFloors.length > 1 && Number.isFinite(idx) && idx > 0;
+  }
+
   render(renderer, camera) {
     if (camera) this.mainCamera = camera;
     if (!renderer || !this._projectMaterial || !this._invertMaterial || !this._scene || !this._quad || !this.shadowTarget || !this._strengthTarget) {
@@ -590,10 +608,14 @@ export class BuildingShadowsEffectV2 {
       return;
     }
 
+    const strictUpper = this._skipGroundAndBundleFallbackForUpperMultiFloor();
     const outdoorResolve = resolveCompositorOutdoorsTexture(
       compositor,
       window.MapShine?.activeLevelContext ?? null,
-      { skipGroundFallback: false, allowBundleFallback: true },
+      {
+        skipGroundFallback: strictUpper,
+        allowBundleFallback: !strictUpper,
+      },
     );
 
     const floorCount = Number(window.MapShine?.floorStack?.getFloors?.()?.length ?? 0);
@@ -872,6 +894,10 @@ export class BuildingShadowsEffectV2 {
       resolvedActiveIdx = 0;
     }
 
+    const skipGroundGlobalFallback = floors.length > 1
+      && Number.isFinite(resolvedActiveIdx)
+      && resolvedActiveIdx > 0;
+
     if (Array.isArray(floors) && floors.length > 0) {
       for (const floor of floors) {
         if (!Number.isFinite(floor?.index) || floor.index < resolvedActiveIdx) continue;
@@ -923,13 +949,17 @@ export class BuildingShadowsEffectV2 {
       pushKey('ground');
     }
 
-    // Unified resolver: if stack/context keys missed but a sibling or ground
-    // texture exists, use that key so the projection pass matches FloorCompositor sync.
+    // Unified resolver: sibling / extra keys only — never ground (or background bundle)
+    // on upper multi-floor; that yields floorKeys ["0:20"] while active is 20:30 and
+    // wipes correct upper-band building shadows until GPU meta repopulates.
     if (keys.length === 0 && compositor) {
       const r = resolveCompositorOutdoorsTexture(
         compositor,
         window.MapShine?.activeLevelContext ?? null,
-        { skipGroundFallback: false },
+        {
+          skipGroundFallback: skipGroundGlobalFallback,
+          allowBundleFallback: !skipGroundGlobalFallback,
+        },
       );
       if (r.resolvedKey && r.texture) {
         pushKey(r.resolvedKey);
@@ -969,10 +999,14 @@ export class BuildingShadowsEffectV2 {
    */
   _resolveCompositorOutdoorsDirect(compositor) {
     if (!compositor) return null;
+    const strictUpper = this._skipGroundAndBundleFallbackForUpperMultiFloor();
     const r = resolveCompositorOutdoorsTexture(
       compositor,
       window.MapShine?.activeLevelContext ?? null,
-      { skipGroundFallback: false },
+      {
+        skipGroundFallback: strictUpper,
+        allowBundleFallback: !strictUpper,
+      },
     );
     return r.texture ?? null;
   }
@@ -994,16 +1028,24 @@ export class BuildingShadowsEffectV2 {
     );
     if (r.texture) return r.texture;
 
-    // Fractional activeLevelContext vs integer compositor keys (same as FloorCompositor fire path).
+    // Fractional band vs integer compositor keys (FloorCompositor fire path). Include
+    // _floorMeta keys — _floorCache can be empty while file/bundle masks live in meta only.
     const ctx = window.MapShine?.activeLevelContext ?? null;
-    const b = Number(ctx?.bottom);
-    const t = Number(ctx?.top);
-    if (Number.isFinite(b) && Number.isFinite(t) && compositor._floorCache) {
+    const b = Number.isFinite(Number(activeFloorForMask?.elevationMin))
+      ? Number(activeFloorForMask.elevationMin)
+      : Number(ctx?.bottom);
+    const t = Number.isFinite(Number(activeFloorForMask?.elevationMax))
+      ? Number(activeFloorForMask.elevationMax)
+      : Number(ctx?.top);
+    if (Number.isFinite(b) && Number.isFinite(t)) {
       const mid = (b + t) * 0.5;
-      const cacheKeys = Array.from(compositor._floorCache.keys?.() ?? []);
+      const keySet = new Set([
+        ...Array.from(compositor._floorCache?.keys?.() ?? []),
+        ...Array.from(compositor._floorMeta?.keys?.() ?? []),
+      ]);
       let bestKey = null;
       let bestDelta = Infinity;
-      for (const key of cacheKeys) {
+      for (const key of keySet) {
         const parts = String(key).split(':');
         if (parts.length !== 2) continue;
         const kb = Number(parts[0]);

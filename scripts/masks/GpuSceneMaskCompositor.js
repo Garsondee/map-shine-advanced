@@ -38,6 +38,8 @@ function loadAssetBundleOptsFromScene(scene, basePath) {
     maskIds: o.maskIds,
     cacheKeySuffix: o.cacheKeySuffix,
     skipMaskIds: o.skipMaskIds,
+    maskExtension: o.maskExtension,
+    maskConventionFallback: o.maskConventionFallback,
   };
 }
 
@@ -342,6 +344,13 @@ export class GpuSceneMaskCompositor {
      * @type {Set<string>}
      */
     this._singleBandPreloadDone = new Set();
+
+    /**
+     * Bounded composeFloor cache invalidations when an upper band has tiles but
+     * getFloorTexture(_, 'outdoors') is null (stale _floorMeta from early preload).
+     * @type {Map<string, number>}
+     */
+    this._upperOutdoorsMetaRepairCount = new Map();
 
     /** @type {Promise<void>|null} Serialize concurrent preloadAllFloors (load + effects). */
     this._preloadAllFloorsInFlight = null;
@@ -658,7 +667,24 @@ export class GpuSceneMaskCompositor {
     const levelElevation = bandBottom;
 
     // Fast path: floor already composited — return cached metadata.
-    const cached = this._floorMeta.get(floorKey);
+    let cached = this._floorMeta.get(floorKey);
+    if (cached?.masks?.length) {
+      const needsUpperOutdoorsRepair =
+        bandBottom > 0
+        && !this.getFloorTexture(floorKey, 'outdoors')
+        && this._getActiveLevelTiles(sc, ctx).length > 0;
+      if (needsUpperOutdoorsRepair) {
+        const n = (this._upperOutdoorsMetaRepairCount.get(floorKey) ?? 0) + 1;
+        if (n <= 2) {
+          this._upperOutdoorsMetaRepairCount.set(floorKey, n);
+          log.info('composeFloor: evicting stale upper-floor meta without outdoors texture', { floorKey, attempt: n });
+          this._floorMeta.delete(floorKey);
+          cached = null;
+        }
+      } else if (bandBottom > 0 && this.getFloorTexture(floorKey, 'outdoors')) {
+        this._upperOutdoorsMetaRepairCount.delete(floorKey);
+      }
+    }
     if (cached?.masks?.length) {
       // Pass cached masks through directly. The compositor's _readbackIsNonEmpty
       // check already strips empty masks (black-RGB floor-boundary alphas), so
@@ -854,7 +880,10 @@ export class GpuSceneMaskCompositor {
 
     // Store in per-floor metadata cache.
     this._floorMeta.set(floorKey, { masks: newMasks, basePath: primaryBasePath });
-    
+    if (bandBottom > 0 && this.getFloorTexture(floorKey, 'outdoors')) {
+      this._upperOutdoorsMetaRepairCount.delete(floorKey);
+    }
+
     // Single diagnostic log per floor composition - show what masks we have
     const outdoorsEntry = newMasks.find(m => (m?.id || m?.type) === 'outdoors');
     log.info(`composeFloor[${floorKey}]: stored ${newMasks.length} masks, outdoors=${outdoorsEntry ? (outdoorsEntry.texture ? 'texture' : 'no-texture') : 'missing'}`);
@@ -1089,7 +1118,17 @@ export class GpuSceneMaskCompositor {
         } catch (_clearErr) {}
 
         // Skip if the band is already correctly cached (nothing was evicted above).
-        if (this._floorMeta.has(bandKey)) continue;
+        if (this._floorMeta.has(bandKey)) {
+          const bBot = Number(bottom);
+          const lacksOutdoors = !this.getFloorTexture(bandKey, 'outdoors');
+          const hasTiles = this._getActiveLevelTiles(sc, { bottom, top }).length > 0;
+          if (Number.isFinite(bBot) && bBot > 0 && lacksOutdoors && hasTiles) {
+            log.info('preloadAllFloors: evicting upper band meta without outdoors', { bandKey });
+            this._floorMeta.delete(bandKey);
+          } else {
+            continue;
+          }
+        }
 
         // For ground-floor bands, prefer the scene background image's basePath
         // so step 4 in composeFloor loads the correct masks, not an upper floor's.
@@ -1599,6 +1638,7 @@ export class GpuSceneMaskCompositor {
     this._floorMeta.clear();
     this._nonGmStaleRepairAttempted.clear();
     this._singleBandPreloadDone.clear();
+    this._upperOutdoorsMetaRepairCount.clear();
     this._preloadAllFloorsInFlight = null;
 
     // Dispose and clear cached GPU render targets. Floor keys (e.g. "0:5")
@@ -1723,6 +1763,7 @@ export class GpuSceneMaskCompositor {
     this._floorMeta.clear();
     this._nonGmStaleRepairAttempted.clear();
     this._singleBandPreloadDone.clear();
+    this._upperOutdoorsMetaRepairCount.clear();
     this._preloadAllFloorsInFlight = null;
     this._activeFloorBasePath = null;
     this._activeFloorKey = null;

@@ -122,6 +122,8 @@ export class SceneComposer {
           maskIds: fromFlag.maskIds,
           cacheKeySuffix: fromFlag.cacheKeySuffix,
           skipMaskIds: fromFlag.skipMaskIds,
+          maskExtension: fromFlag.maskExtension,
+          maskConventionFallback: fromFlag.maskConventionFallback,
         };
       }
       const res = await assetLoader.loadAssetBundle(basePath, null, loadOpts);
@@ -578,6 +580,7 @@ export class SceneComposer {
             maskExtension: prepManifest.maskExtension,
             maskIds: enabledMaskIds,
             cacheKeySuffix: prepManifest.cacheKeySuffix,
+            maskConventionFallback: prepManifest.maskConventionFallback,
           }
         );
       } finally {

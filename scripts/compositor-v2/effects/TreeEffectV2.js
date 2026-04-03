@@ -972,8 +972,8 @@ export class TreeEffectV2 {
           shadowA *= clamp(uShadowOpacity, 0.0, 1.0) * uIntensity * edgeFade * clamp(uHoverFade, 0.0, 1.0);
 
           vec4 treeSample = texture2D(uTreeMask, vUv - distortion);
-
-          float mainAlpha = safeAlpha(treeSample) * uIntensity * clamp(uHoverFade, 0.0, 1.0);
+          float texA = safeAlpha(treeSample);
+          float mainAlpha = texA * uIntensity * clamp(uHoverFade, 0.0, 1.0);
           // Prevent soft shadow bloom from extending beyond canopy edges.
           // Gate shadow contribution by local canopy coverage.
           float canopyGate = smoothstep(0.03, 0.35, clamp(mainAlpha, 0.0, 1.0));
@@ -983,13 +983,17 @@ export class TreeEffectV2 {
 
           float ccDelta = abs(uExposure) + abs(uBrightness) + abs(uContrast - 1.0)
                         + abs(uSaturation - 1.0) + abs(uTemperature) + abs(uTint);
-          vec3 color = treeSample.rgb;
-          if (ccDelta > 0.0001) color = applyCC(color);
-          vec3 finalColor = mix(vec3(0.0), color, mainAlpha / max(a, 1e-4));
-          gl_FragColor = vec4(finalColor, clamp(a, 0.0, 1.0));
+          vec3 c = treeSample.rgb;
+          if (ccDelta > 0.0001) c = applyCC(c);
+          // Kill white fringe: filtering blends RGB from empty/white texels while alpha
+          // drops; scaling by coverage makes premultiplied output match the mask energy.
+          c *= texA;
+          float ih = uIntensity * clamp(uHoverFade, 0.0, 1.0);
+          gl_FragColor = vec4(c * ih, clamp(a, 0.0, 1.0));
         }
       `,
       transparent: true,
+      premultipliedAlpha: true,
       depthWrite: false,
       depthTest: false,
       side: THREE.DoubleSide,

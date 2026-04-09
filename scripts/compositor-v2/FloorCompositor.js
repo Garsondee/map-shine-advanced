@@ -82,6 +82,7 @@ import { SmellyFliesEffect } from '../particles/SmellyFliesEffect.js';
 import { CandleFlamesEffectV2 } from './effects/CandleFlamesEffectV2.js';
 import { weatherController } from '../core/WeatherController.js';
 import { resolveCompositorOutdoorsTexture } from '../masks/resolve-compositor-outdoors.js';
+import { MaskDebugOverlayPass } from './MaskDebugOverlayPass.js';
 
 const log = createLogger('FloorCompositor');
 
@@ -231,6 +232,13 @@ export class FloorCompositor {
      * @type {BloomEffectV2}
      */
     this._bloomEffect = new BloomEffectV2();
+
+    /**
+     * Debug: composite mask textures (e.g. _Outdoors) over the final V2 frame before blit.
+     * Controlled from Tweakpane → Developer Tools → Mask overlay (V2).
+     * @type {MaskDebugOverlayPass}
+     */
+    this._maskDebugOverlayPass = new MaskDebugOverlayPass();
 
     /**
      * V2 Sharpen Effect: unsharp mask filter. Disabled by default.
@@ -454,6 +462,20 @@ export class FloorCompositor {
 
     /** @type {string|null} Last applied active level context key (bottom:top) */
     this._lastAppliedLevelContextKey = null;
+
+    /** @type {number} Number of runtime visibility drift corrections applied */
+    this._visibilityDriftCorrections = 0;
+    /** @type {number} Leak count observed on latest drift scan */
+    this._visibilityDriftLastLeakCount = 0;
+    /** @type {number|null} Timestamp of last drift correction */
+    this._visibilityDriftLastCorrectionMs = null;
+
+    /** @type {number} Number of tile-sprite visibility corrections applied */
+    this._tileSpriteVisibilityCorrections = 0;
+    /** @type {number} Last observed tile-sprite leak count */
+    this._tileSpriteVisibilityLastLeakCount = 0;
+    /** @type {number|null} Timestamp of last tile-sprite correction */
+    this._tileSpriteVisibilityLastCorrectionMs = null;
 
     /** @type {THREE.Texture|null} Last outdoors mask pushed to V2 consumers */
     this._lastOutdoorsTexture = null;
@@ -1476,7 +1498,7 @@ export class FloorCompositor {
     if (effect?.params?.enabled === false) return false;
 
     const maskDriven = {
-      _specularEffect: ['specular', 'roughness'],
+      _specularEffect: ['specular'],
       _fluidEffect: ['fluid'],
       _iridescenceEffect: ['iridescence'],
       _prismEffect: ['prism'],
@@ -1916,8 +1938,10 @@ export class FloorCompositor {
       const ctx = window.MapShine?.activeLevelContext ?? null;
       const b = Number(ctx?.bottom);
       const t = Number(ctx?.top);
-      // Only treat as a multi-floor context if both ends are finite.
-      const key = (Number.isFinite(b) && Number.isFinite(t)) ? `${b}:${t}` : 'single';
+      // Treat finite-bottom + non-finite-top as distinct (topmost Levels band).
+      const key = Number.isFinite(b)
+        ? `${b}:${Number.isFinite(t) ? t : 'inf'}`
+        : 'single';
       if (this._lastAppliedLevelContextKey !== key) {
         this._lastAppliedLevelContextKey = key;
         if (this._busPopulated) {
@@ -1925,6 +1949,13 @@ export class FloorCompositor {
         }
       }
     } catch (_) {}
+
+    // Enforce bus floor visibility every frame to prevent stale/leaked tile
+    // visibility after asynchronous tile upserts or late scene updates.
+    this._enforceBusVisibilityForActiveFloor(floorStack);
+    // Enforce TileManager sprite floor visibility in parallel. Even in V2, stale
+    // sprite visibility can leak upper-floor art if other paths render sprites.
+    this._enforceTileSpriteVisibilityForActiveFloor(floorStack);
 
     // Keep outdoors consumers in sync even when the compositor cache populates
     // asynchronously after initial render, or when floor-context hooks were missed.
@@ -2323,6 +2354,14 @@ export class FloorCompositor {
     // Occlusion is handled via a deterministic occluder mask (upper floor tiles)
     // plus depth pass fallback inside the shader.
     if (!_skipWaterPass && this._waterEffect?.enabled) {
+      try {
+        const _vm = Number.isFinite(this._renderBus._visibleMaxFloorIndex)
+          ? this._renderBus._visibleMaxFloorIndex
+          : 0;
+        const _blurOn = this._floorDepthBlurEffect?.params.enabled && _vm > 0;
+        this._waterEffect.syncFloorDepthBlurContext?.(_blurOn, _vm);
+      } catch (_) {}
+
       // Build occluder mask for the *currently viewed* floor.
       // If on floor 0, no occluder needed.
       let occluderRT = null;
@@ -2464,9 +2503,85 @@ export class FloorCompositor {
     }
     if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: lens.render DONE'); } catch (_) {} }
 
-    // ── Step 3: Blit final result to screen ──────────────────────────────
+    // ── Step 3: Optional mask debug overlay → blit to screen ────────────
     if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: blitToScreen'); } catch (_) {} }
-    this._blitToScreen(currentInput);
+    let blitSource = currentInput;
+    try {
+      const ui = window.MapShine?.uiManager ?? window.MapShine?.tweakpaneManager;
+      const tp = ui?.globalParams;
+      const dbgEnabled = tp?.maskDebugOverlayEnabled;
+      const dbgOn =
+        dbgEnabled === true ||
+        dbgEnabled === 1 ||
+        dbgEnabled === 'true';
+      const dbgMode = typeof tp?.maskDebugOverlayMode === 'string' ? tp.maskDebugOverlayMode : 'outdoors_current';
+      const op = Number(tp?.maskDebugOverlayOpacity);
+      const dbgOpacity = Number.isFinite(op) ? Math.max(0, Math.min(1, op)) : 0.35;
+      if (dbgOn && this._maskDebugOverlayPass) {
+        const ctx = window.MapShine?.activeLevelContext ?? null;
+        const { texture: dbgTex, floorKey: dbgFk, directScreenUv: dbgDirectScreenUv, replaceScene: dbgReplaceScene } = this._maskDebugOverlayPass.resolveMaskTexture(dbgMode, {
+          resolveOutdoorsMask: () => {
+            const strict = this._resolveOutdoorsMask(ctx, { allowWeatherRoofMap: false });
+            if (strict.texture) return strict;
+            const loose = this._resolveOutdoorsMask(ctx, { allowWeatherRoofMap: true });
+            if (loose.texture) return loose;
+            const rm = weatherController?.roofMap ?? null;
+            return { texture: rm, floorKey: rm ? 'weatherController.roofMap' : null };
+          },
+          resolveOverheadDebugTexture: (mode) => {
+            const ov = this._overheadShadowEffect;
+            if (!ov) return null;
+            switch (mode) {
+              case 'overhead_shadow_factor':
+                return ov.shadowFactorTexture ?? null;
+              case 'overhead_roof_coverage':
+                return ov.roofTarget?.texture ?? null;
+              case 'overhead_roof_visibility':
+                return ov.roofAlphaTexture ?? null;
+              case 'overhead_roof_block':
+                return ov.roofBlockTexture ?? null;
+              case 'overhead_fluid_roof':
+                return ov.fluidRoofTarget?.texture ?? null;
+              case 'overhead_tile_projection':
+                return ov.tileProjectionTarget?.texture ?? null;
+              default:
+                return null;
+            }
+          },
+        });
+        try {
+          if (window.MapShine) {
+            window.MapShine.__maskDebugOverlayFloorKey = dbgFk ?? null;
+            window.MapShine.__maskDebugOverlayHasTexture = !!dbgTex;
+          }
+        } catch (_) {}
+        if (dbgTex) {
+          const dbgOut = currentInput === this._postA ? this._postB : this._postA;
+          const gz = Number(window.MapShine?.sceneComposer?.groundZ);
+          const groundZ = Number.isFinite(gz) ? gz : 0;
+          if (
+            this._maskDebugOverlayPass.renderComposite(
+              this.renderer,
+              currentInput,
+              dbgOut,
+              dbgTex,
+              dbgOpacity,
+              this.camera,
+              groundZ,
+              {
+                directScreenUv: dbgDirectScreenUv === true,
+                replaceScene: dbgReplaceScene === true,
+              },
+            )
+          ) {
+            blitSource = dbgOut;
+          }
+        }
+      }
+    } catch (e) {
+      log.warn('FloorCompositor: mask debug overlay failed:', e);
+    }
+    this._blitToScreen(blitSource);
     if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: blitToScreen DONE'); } catch (_) {} }
 
     // Late UI/world overlay pass (layer 31) rendered after all post-FX.
@@ -2506,6 +2621,139 @@ export class FloorCompositor {
     if (_dbgStages) {
       this._debugFirstFrameStagesLogged = true;
       try { log.info('[V2 Frame] ✔ FloorCompositor.render: END'); } catch (_) {}
+    }
+  }
+
+  /**
+   * Runtime guard: keep FloorRenderBus visibility slice aligned with active floor
+   * and immediately correct leaked above-floor entries if they become visible.
+   * @param {object|null} floorStackArg
+   * @private
+   */
+  _enforceBusVisibilityForActiveFloor(floorStackArg = null) {
+    const bus = this._renderBus;
+    if (!bus || !this._busPopulated) return;
+
+    let desiredMax = 0;
+    try {
+      const fs = floorStackArg || window.MapShine?.floorStack || null;
+      const active = fs?.getActiveFloor?.() || null;
+      if (Number.isFinite(Number(active?.index))) {
+        desiredMax = Number(active.index);
+      } else if (Number.isFinite(Number(bus?._visibleMaxFloorIndex))) {
+        desiredMax = Number(bus._visibleMaxFloorIndex);
+      }
+    } catch (_) {}
+    if (!Number.isFinite(desiredMax) || desiredMax < 0) desiredMax = 0;
+
+    let corrected = false;
+    const currentMax = Number.isFinite(Number(bus?._visibleMaxFloorIndex))
+      ? Number(bus._visibleMaxFloorIndex)
+      : 0;
+    if (currentMax !== desiredMax) {
+      bus.setVisibleFloors(desiredMax);
+      corrected = true;
+    }
+
+    let leakCount = 0;
+    try {
+      const entries = bus?._tiles;
+      if (entries && typeof entries.forEach === 'function') {
+        entries.forEach((entry, key) => {
+          const k = String(key || '');
+          if (k.startsWith('__')) return;
+          const fi = Number(entry?.floorIndex);
+          if (!Number.isFinite(fi) || fi <= desiredMax) return;
+          const node = entry?.root || entry?.mesh || null;
+          const nodeVisible = Boolean(node?.visible);
+          const meshVisible = (typeof entry?.mesh?.visible === 'boolean') ? entry.mesh.visible : null;
+          const rootVisible = (typeof entry?.root?.visible === 'boolean') ? entry.root.visible : null;
+          const effectiveVisible = nodeVisible && meshVisible !== false && rootVisible !== false;
+          if (effectiveVisible) leakCount += 1;
+        });
+      }
+    } catch (_) {}
+
+    this._visibilityDriftLastLeakCount = leakCount;
+    if (leakCount > 0) {
+      try {
+        bus._applyTileVisibility?.();
+        corrected = true;
+      } catch (_) {}
+    }
+
+    if (corrected) {
+      this._visibilityDriftCorrections += 1;
+      this._visibilityDriftLastCorrectionMs = Date.now();
+    }
+  }
+
+  /**
+   * Runtime guard for TileManager sprite visibility by active floor.
+   * @param {object|null} floorStackArg
+   * @private
+   */
+  _enforceTileSpriteVisibilityForActiveFloor(floorStackArg = null) {
+    let activeFloorIndex = 0;
+    try {
+      const fs = floorStackArg || window.MapShine?.floorStack || null;
+      const af = fs?.getActiveFloor?.() || null;
+      if (Number.isFinite(Number(af?.index))) activeFloorIndex = Number(af.index);
+    } catch (_) {}
+    if (!Number.isFinite(activeFloorIndex) || activeFloorIndex < 0) activeFloorIndex = 0;
+
+    const tm = window.MapShine?.tileManager ?? null;
+    const flm = window.MapShine?.floorLayerManager ?? null;
+    const map = tm?.tileSprites;
+    if (!map || typeof map.entries !== 'function') return;
+
+    let leakCount = 0;
+    let correctedAny = false;
+    const expectedFloorFromDoc = (tileDoc) => {
+      const floors = window.MapShine?.floorStack?.getFloors?.() ?? [];
+      if (!Array.isArray(floors) || floors.length <= 1) return 0;
+      try {
+        const flags = tileDoc?.flags?.levels;
+        const b = Number(flags?.rangeBottom);
+        const t = Number(flags?.rangeTop);
+        if (Number.isFinite(b) && Number.isFinite(t)) {
+          const mid = (b + t) / 2;
+          for (let i = 0; i < floors.length; i += 1) {
+            const f = floors[i];
+            if (mid >= Number(f?.elevationMin) && mid < Number(f?.elevationMax)) return i;
+          }
+        }
+      } catch (_) {}
+      const elev = Number(tileDoc?.elevation ?? 0);
+      for (let i = 0; i < floors.length; i += 1) {
+        const f = floors[i];
+        const min = Number(f?.elevationMin);
+        const max = Number(f?.elevationMax);
+        if (Number.isFinite(min) && Number.isFinite(max) && elev >= min && elev <= max) return i;
+      }
+      return 0;
+    };
+
+    for (const [tileId, data] of map.entries()) {
+      const sprite = data?.sprite ?? null;
+      const tileDoc = data?.tileDoc ?? canvas?.scene?.tiles?.get?.(tileId) ?? null;
+      if (!sprite || !tileDoc) continue;
+      const mappedFloorRaw = flm?._spriteFloorMap?.get?.(sprite);
+      const mappedFloor = Number.isFinite(Number(mappedFloorRaw)) ? Number(mappedFloorRaw) : null;
+      const expectedFloor = mappedFloor ?? expectedFloorFromDoc(tileDoc);
+      const shouldBeVisible = expectedFloor <= activeFloorIndex;
+      const currentlyVisible = sprite.visible === true;
+      if (currentlyVisible && !shouldBeVisible) {
+        leakCount += 1;
+        sprite.visible = false;
+        correctedAny = true;
+      }
+    }
+
+    this._tileSpriteVisibilityLastLeakCount = leakCount;
+    if (correctedAny) {
+      this._tileSpriteVisibilityCorrections += 1;
+      this._tileSpriteVisibilityLastCorrectionMs = Date.now();
     }
   }
 
@@ -2726,11 +2974,11 @@ export class FloorCompositor {
     } catch (_) {
       floorStackFloors = [];
     }
-    const activeFloorForMask = window.MapShine?.floorStack?.getActiveFloor?.() ?? null;
-    const activeIdxForMask = Number(activeFloorForMask?.index);
-    const skipGroundGlobalFallback = floorStackFloors.length > 1
-      && Number.isFinite(activeIdxForMask)
-      && activeIdxForMask > 0;
+    // In multi-floor scenes, a "ground/global" outdoors fallback can resolve to
+    // whichever floor cache was composed first (or last persisted), which may be
+    // the wrong band during scene/floor transitions. Prefer null until the active
+    // floor's own outdoors texture is ready.
+    const skipGroundGlobalFallback = floorStackFloors.length > 1;
 
     const sc = window.MapShine?.sceneComposer;
     const compositor = sc?._sceneMaskCompositor;
@@ -2744,6 +2992,10 @@ export class FloorCompositor {
       if (!allowWeatherRoofMap) {
         const regMask = window.MapShine?.effectMaskRegistry?.getMask?.('outdoors') ?? null;
         if (regMask) return { texture: regMask, floorKey: 'registry' };
+        return { texture: null, floorKey: null };
+      }
+      // roofMap is global — on upper floors it may still be the previous band's _Outdoors.
+      if (skipGroundGlobalFallback) {
         return { texture: null, floorKey: null };
       }
       const roofMap = weatherController?.roofMap ?? null;
@@ -2770,6 +3022,9 @@ export class FloorCompositor {
     if (!allowWeatherRoofMap) {
       const regMask = window.MapShine?.effectMaskRegistry?.getMask?.('outdoors') ?? null;
       if (regMask) return { texture: regMask, floorKey: 'registry' };
+      return { texture: null, floorKey: null };
+    }
+    if (skipGroundGlobalFallback) {
       return { texture: null, floorKey: null };
     }
     const roofMap = weatherController?.roofMap ?? null;
@@ -2805,16 +3060,12 @@ export class FloorCompositor {
       } catch (_) {
         floorStackForSync = [];
       }
-      const activeFloorForSync = window.MapShine?.floorStack?.getActiveFloor?.() ?? null;
-      const activeIdxForSync = Number(activeFloorForSync?.index);
-      const multiFloorUpperView = floorStackForSync.length > 1
-        && Number.isFinite(activeIdxForSync)
-        && activeIdxForSync > 0;
+      const multiFloorScene = floorStackForSync.length > 1;
 
       // Do not clobber a valid outdoors texture with transient null while floor
       // caches are still warming asynchronously. On upper floors, reusing the
       // previous texture is usually stale ground-floor _Outdoors.
-      if (!outdoorsTex && this._lastOutdoorsTexture && !multiFloorUpperView) {
+      if (!outdoorsTex && this._lastOutdoorsTexture && !multiFloorScene) {
         outdoorsTex = this._lastOutdoorsTexture;
       }
 
@@ -2858,7 +3109,12 @@ export class FloorCompositor {
       try {
         const compositor = window.MapShine?.sceneComposer?._sceneMaskCompositor;
         if (compositor) {
-          const floors = window.MapShine?.floorStack?.getVisibleFloors?.() ?? [];
+          // floorIdTarget encodes the *topmost* floor index per world pixel, not the
+          // viewed floor. Binding only getVisibleFloors() leaves higher indices null;
+          // CloudEffectV2 then substitutes 1×1 white (= outdoors) for those samplers,
+          // so underground views show full cloud shadow / rain wherever an upper floor
+          // has tile coverage. Bind every band's _Outdoors that exists in the stack.
+          const floors = window.MapShine?.floorStack?.getFloors?.() ?? [];
           const perFloor = [null, null, null, null];
           let floorIdSupported = true;
           let anyPerFloorMask = false;
@@ -2903,6 +3159,50 @@ export class FloorCompositor {
     const floorStack = window.MapShine?.floorStack;
     if (!floorStack) return;
 
+    const resolveFloorIndexFromContext = (ctx, floors, fallbackIdx = 0) => {
+      if (!Array.isArray(floors) || floors.length === 0) return fallbackIdx;
+      const b = Number(ctx?.bottom);
+      const t = Number(ctx?.top);
+      if (!Number.isFinite(b)) return fallbackIdx;
+      const hasFiniteTop = Number.isFinite(t);
+      const mid = hasFiniteTop ? ((b + t) / 2) : b;
+      let bestIdx = fallbackIdx;
+      let foundExactMatch = false;
+      for (let i = 0; i < floors.length; i++) {
+        const f = floors[i];
+        const fMin = Number(f?.elevationMin);
+        const fMax = Number(f?.elevationMax);
+        if (fMin === b && (!hasFiniteTop || fMax === t)) {
+          bestIdx = i;
+          foundExactMatch = true;
+          break;
+        }
+        // If we haven't found an exact match, check if mid is within bounds.
+        // Ignore infinity bounds for the mid check to avoid jumping to a
+        // "catch-all" floor if a tighter floor contains the center.
+        if (!foundExactMatch && mid >= fMin && mid <= fMax) {
+          bestIdx = i;
+        }
+      }
+      return bestIdx;
+    };
+
+    const resolveFloorIndexFromElevation = (elevation, floors, fallbackIdx = 0) => {
+      const elev = Number(elevation);
+      if (!Array.isArray(floors) || floors.length === 0 || !Number.isFinite(elev)) return fallbackIdx;
+      let bestIdx = fallbackIdx;
+      for (let i = 0; i < floors.length; i++) {
+        const f = floors[i];
+        const fMin = Number(f?.elevationMin);
+        const fMax = Number(f?.elevationMax);
+        if (Number.isFinite(fMin) && Number.isFinite(fMax) && elev >= fMin && elev <= fMax) {
+          bestIdx = i;
+          break;
+        }
+      }
+      return bestIdx;
+    };
+
     // Prefer the hook payload's active level band (authoritative) to avoid
     // getting stuck when FloorStack.activeFloorIndex wasn't updated elsewhere.
     // CameraFollower._emitLevelContextChanged updates window.MapShine.activeLevelContext
@@ -2910,33 +3210,31 @@ export class FloorCompositor {
     try {
       const ctx = payload?.context ?? window.MapShine?.activeLevelContext ?? null;
       const floors = floorStack.getFloors?.() ?? [];
-      const b = Number(ctx?.bottom);
-      const t = Number(ctx?.top);
       // Levels commonly represents the top-most band as [bottom, Infinity].
       // Accept finite-bottom contexts even when top is non-finite so active
       // floor switching still works on the highest level.
-      if (floors.length > 1 && Number.isFinite(b)) {
-        const hasFiniteTop = Number.isFinite(t);
-        const mid = hasFiniteTop ? ((b + t) / 2) : b;
-        let bestIdx = 0;
-        let foundExactMatch = false;
-        for (let i = 0; i < floors.length; i++) {
-          const f = floors[i];
-          const fMin = Number(f?.elevationMin);
-          const fMax = Number(f?.elevationMax);
-          if (fMin === b && (!hasFiniteTop || fMax === t)) {
-            bestIdx = i;
-            foundExactMatch = true;
-            break;
-          }
-          // If we haven't found an exact match, check if mid is within bounds.
-          // Ignore infinity bounds for the mid check to avoid jumping to a
-          // "catch-all" floor if a tighter floor contains the center.
-          if (!foundExactMatch && mid >= fMin && mid <= fMax) {
-            bestIdx = i;
-          }
+      if (floors.length > 1) {
+        const currentIdx = Number(floorStack.getActiveFloor?.()?.index);
+        const safeCurrentIdx = Number.isFinite(currentIdx) ? currentIdx : 0;
+        let bestIdx = resolveFloorIndexFromContext(ctx, floors, safeCurrentIdx);
+
+        // Context can be transiently null/non-finite during rapid view changes.
+        // In that window, infer floor from controlled token elevation so we do
+        // not keep stale upper-floor state while rendering the ground view.
+        if (!Number.isFinite(Number(ctx?.bottom))) {
+          const controlledToken = canvas?.tokens?.controlled?.[0] ?? null;
+          const controlledElev = Number(controlledToken?.document?.elevation);
+          bestIdx = resolveFloorIndexFromElevation(controlledElev, floors, bestIdx);
         }
+
         floorStack.setActiveFloor(bestIdx);
+      }
+    } catch (_) {}
+
+    try {
+      const comp = window.MapShine?.sceneComposer?._sceneMaskCompositor;
+      if (comp && typeof comp.syncActiveFloorFromFloorStack === 'function') {
+        comp.syncActiveFloorFromFloorStack();
       }
     } catch (_) {}
 
@@ -3031,7 +3329,7 @@ export class FloorCompositor {
     }
 
     // Prefer checking whether the ACTIVE floor band has any fire systems.
-    // FireEffectV2 deactivates systems from the BatchedRenderer but keeps the
+    // FireEffectV2 deactivates systems from the per-floor BatchedRenderer but keeps the
     // per-floor arrays resident, so "any systems anywhere" is not enough to
     // decide whether heat should run this frame.
     let hasSystemsOnActiveBand = null;
@@ -3311,6 +3609,7 @@ export class FloorCompositor {
     try { this._lensEffect?.dispose?.(); } catch (_) {}
     try { this._distortionEffect?.dispose?.(); } catch (_) {}
     try { this._floorDepthBlurEffect?.dispose?.(); } catch (_) {}
+    try { this._maskDebugOverlayPass?.dispose?.(); } catch (_) {}
     try { this._renderBus?.dispose?.(); } catch (_) {}
     this._busPopulated = false;
     this._populateComplete = false;

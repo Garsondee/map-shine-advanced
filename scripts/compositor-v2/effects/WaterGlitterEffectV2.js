@@ -34,6 +34,7 @@ const GROUND_Z = 1000;
 
 // Keep render-order math aligned with FloorRenderBus floor bands.
 const RENDER_ORDER_PER_FLOOR = 10000;
+const OVERHEAD_OFFSET = 5000;
 
 // Spatial bucket size for splitting large water masks into smaller emitters (px).
 const BUCKET_SIZE = 2500;
@@ -276,7 +277,7 @@ export class WaterGlitterEffectV2 {
 
     // Create a dedicated BatchedRenderer for water glitter particles.
     this._batchRenderer = new BatchedRenderer();
-    this._batchRenderer.renderOrder = RENDER_ORDER_PER_FLOOR;
+    this._batchRenderer.renderOrder = OVERHEAD_OFFSET - 1; // Match WaterSplashesEffectV2
     this._batchRenderer.frustumCulled = false;
     
     // Set up render layers
@@ -470,6 +471,13 @@ export class WaterGlitterEffectV2 {
     // Start the system
     if (typeof system.play === 'function') system.play();
 
+    // Debug: Log system creation
+    log.info(`WaterGlitterEffectV2: Created glitter system for floor ${floorIndex}`, {
+      pointsCount: points.length,
+      emissionRate: p.spawnRate / bucketsCount,
+      maxParticles: 200
+    });
+
     return system;
   }
 
@@ -479,7 +487,20 @@ export class WaterGlitterEffectV2 {
    * @returns {Promise<void>}
    */
   async populate(foundrySceneData) {
-    if (!this._initialized || !this._enabled) return;
+    log.info('WaterGlitterEffectV2.populate called:', {
+      initialized: this._initialized,
+      enabled: this._enabled,
+      hasBatchRenderer: !!this._batchRenderer,
+      hasTexture: !!this._glitterTexture
+    });
+    
+    if (!this._initialized || !this._enabled) {
+      log.warn('WaterGlitterEffectV2.populate early return:', {
+        initialized: this._initialized,
+        enabled: this._enabled
+      });
+      return;
+    }
 
     // Wait for texture to load
     if (this._textureReady) {
@@ -517,12 +538,14 @@ export class WaterGlitterEffectV2 {
 
     // Process background image first (if it has a _Water mask)
     const bgSrc = canvas?.scene?.background?.src;
+    log.info(`WaterGlitterEffectV2: Checking background ${bgSrc ? bgSrc.substring(0, 50) + '...' : 'none'}`);
     if (bgSrc) {
       const dotIdx = bgSrc.lastIndexOf('.');
       const bgBasePath = dotIdx > 0 ? bgSrc.substring(0, dotIdx) : bgSrc;
 
       let bitmap = null;
       const waterResult = await probeMaskFile(bgBasePath, '_Water');
+      log.info(`WaterGlitterEffectV2: Background water probe result:`, waterResult);
       if (waterResult?.path) {
         try {
           const response = await fetch(waterResult.path);
@@ -546,6 +569,8 @@ export class WaterGlitterEffectV2 {
     }
 
     // Process tiles
+    log.info(`WaterGlitterEffectV2: Processing ${tileDocs.length} tiles`);
+    let waterTilesFound = 0;
     for (const tileDoc of tileDocs) {
       const src = tileDoc?.texture?.src ?? tileDoc?.img ?? '';
       if (!src) continue;
@@ -572,6 +597,7 @@ export class WaterGlitterEffectV2 {
       }
 
       if (bitmap) {
+        waterTilesFound++;
         // Determine floor index for this tile
         let floorIndex = 0;
         if (tileHasLevelsRange(tileDoc)) {
@@ -586,9 +612,10 @@ export class WaterGlitterEffectV2 {
           floorWaterData.set(floorIndex, { maskBitmaps: [] });
         }
         floorWaterData.get(floorIndex).maskBitmaps.push(bitmap);
-        log.debug(`  tile ${tileId} water mask loaded for floor ${floorIndex}`);
+        log.info(`  tile ${tileId} water mask loaded for floor ${floorIndex}`);
       }
     }
+    log.info(`WaterGlitterEffectV2: Found water masks on ${waterTilesFound} tiles`);
 
     // Create glitter systems for each floor
     for (const [floorIndex, floorData] of floorWaterData) {
@@ -608,10 +635,21 @@ export class WaterGlitterEffectV2 {
     }
 
     log.info(`WaterGlitterEffectV2: Created glitter systems for ${this._floorStates.size} floors`);
+    
+    // Debug: Log floor states
+    for (const [floorIndex, state] of this._floorStates) {
+      log.info(`  Floor ${floorIndex}: ${state.glitterSystems.length} systems`);
+    }
 
     // Add the BatchedRenderer to the bus scene via the overlay API.
     if (this._batchRenderer && this._floorStates.size > 0) {
       this._renderBus.addEffectOverlay('__water_glitter_batch__', this._batchRenderer, 0);
+      log.info('WaterGlitterEffectV2: Added BatchedRenderer to render bus');
+    } else {
+      log.warn('WaterGlitterEffectV2: Not adding BatchedRenderer:', {
+        hasBatchRenderer: !!this._batchRenderer,
+        floorStatesCount: this._floorStates.size
+      });
     }
   }
 
@@ -668,7 +706,14 @@ export class WaterGlitterEffectV2 {
    * @param {{ elapsed: number, delta: number }} timeInfo
    */
   update(timeInfo) {
-    if (!this._batchRenderer) return;
+    if (!this._batchRenderer) {
+      // Only log once per second to avoid spam
+      if (!this._lastUpdateLog || Date.now() - this._lastUpdateLog > 1000) {
+        log.warn('WaterGlitterEffectV2.update: No BatchedRenderer');
+        this._lastUpdateLog = Date.now();
+      }
+      return;
+    }
     
     const dt = Math.min(Math.max(0.0, Number(timeInfo?.delta) || 0), 0.1);
     

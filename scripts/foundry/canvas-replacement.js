@@ -43,6 +43,7 @@ import {
   CloudEffectV2,
   AsciiEffectV2,
   WaterEffectV2,
+  WaterGlitterEffectV2,
   AtmosphericFogEffectV2,
   FogOfWarEffectV2,
   PlayerLightEffectV2,
@@ -6259,6 +6260,12 @@ async function createThreeCanvas(scene) {
           // is the correct source of truth for persisted values.
         }, 'v2.registerWaterUI', Severity.DEGRADED);
 
+        safeCall(() => {
+          const waterGlitterSchema = WaterGlitterEffectV2.getControlSchema();
+          uiManager.registerEffect('water-glitter', 'Water Glitter',
+            waterGlitterSchema, _makeV2Callback('_waterGlitterEffect'), 'surface');
+        }, 'v2.registerWaterGlitterUI', Severity.CRITICAL);
+
         // Cloud controls: registered as a top-level effect in V2 mode.
         // The 'weather' parent effect is not registered in V2 (WeatherController
         // is not initialized in V2), so registerEffectUnderEffect would silently
@@ -6625,12 +6632,26 @@ async function createThreeCanvas(scene) {
     } else {
       stepLog(' -> Step: overlay.fadeIn / intro-zoom');
       await safeCallAsync(async () => {
+        const isTabHidden = () => (typeof document !== 'undefined' && document.hidden === true);
         const waitForCompiledPrograms = async ({ maxWaitMs = 90000, requiredStableFrames = 20 } = {}) => {
           const start = performance.now();
           let stable = 0;
           let readyStableTotal = -1;
           let lastTotal = 0;
           let lastReady = 0;
+
+          // Background tabs heavily throttle/stop frame production. This gate depends
+          // on render progress and should not block scene completion while unfocused.
+          if (isTabHidden()) {
+            return {
+              ok: false,
+              reason: 'tab-hidden',
+              total: 0,
+              ready: 0,
+              stableFrames: 0,
+              elapsedMs: 0,
+            };
+          }
 
           // Kick an extra warmup pass now that shader gate is open.
           safeCall(() => effectComposer.progressiveWarmup(), 'introZoom.readinessWarmup', Severity.DEGRADED);
@@ -6651,6 +6672,19 @@ async function createThreeCanvas(scene) {
           }, 'introZoom.waitForCompiledPrograms.lateWarmup', Severity.DEGRADED);
 
           while ((performance.now() - start) < maxWaitMs) {
+            // If the tab becomes hidden mid-gate, stop waiting and fall back to a
+            // standard overlay fade so loading can complete in the background.
+            if (isTabHidden()) {
+              return {
+                ok: false,
+                reason: 'tab-hidden',
+                total: lastTotal,
+                ready: lastReady,
+                stableFrames: stable,
+                elapsedMs: Math.round(performance.now() - start),
+              };
+            }
+
             window.MapShine?.renderLoop?.requestRender?.();
             window.MapShine?.renderLoop?.requestContinuousRender?.(100);
 
@@ -6696,6 +6730,7 @@ async function createThreeCanvas(scene) {
 
           return {
             ok: false,
+            reason: 'timeout',
             total: lastTotal,
             ready: lastReady,
             stableFrames: stable,
@@ -6716,7 +6751,10 @@ async function createThreeCanvas(scene) {
         });
 
         if (!compileGate.ok) {
-          log.warn('overlay.introZoom: shader readiness gate timed out; using standard fade-in to avoid stuttered intro', compileGate);
+          const reason = compileGate?.reason === 'tab-hidden'
+            ? 'tab hidden'
+            : 'shader readiness timeout';
+          log.warn(`overlay.introZoom: skipping intro readiness gate (${reason}); using standard fade-in`, compileGate);
           await Promise.race([
             loadingOverlay.fadeIn(2000, 800),
             new Promise((r) => setTimeout(r, 5000)),

@@ -881,6 +881,35 @@ export class WaterGlitterEffectV2 {
   }
 
   /**
+   * Test method to verify the effect is working
+   */
+  test() {
+    log.info('WaterGlitterEffectV2.test called:', {
+      initialized: this._initialized,
+      enabled: this.enabled,
+      hasBatchRenderer: !!this._batchRenderer,
+      hasTexture: !!this._glitterTexture,
+      floorStatesCount: this._floorStates.size,
+      activeFloorsCount: this._activeFloors.size,
+      params: this.params
+    });
+    
+    // Try to create a test particle system
+    if (this._batchRenderer && this._glitterTexture) {
+      log.info('WaterGlitterEffectV2: Creating test system...');
+      const testPoints = [{x: 100, y: 100}]; // Simple test point
+      try {
+        const system = this._createGlitterSystem(testPoints, 100, 100, 0, 1000, 1000, 0, 0);
+        if (system) {
+          log.info('WaterGlitterEffectV2: Test system created successfully');
+        }
+      } catch (err) {
+        log.error('WaterGlitterEffectV2: Failed to create test system:', err);
+      }
+    }
+  }
+
+  /**
    * Dispose of all resources.
    */
   dispose() {

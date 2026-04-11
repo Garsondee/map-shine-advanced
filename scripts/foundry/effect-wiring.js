@@ -32,6 +32,7 @@ import { AshDisturbanceEffectV2 } from '../compositor-v2/effects/AshDisturbanceE
 import { CloudEffectV2 } from '../compositor-v2/effects/CloudEffectV2.js';
 import { AsciiEffectV2 } from '../compositor-v2/effects/AsciiEffectV2.js';
 import { WaterEffectV2 } from '../compositor-v2/effects/WaterEffectV2.js';
+import { WaterGlitterEffectV2 } from '../compositor-v2/effects/WaterGlitterEffectV2.js';
 import { AtmosphericFogEffectV2 } from '../compositor-v2/effects/AtmosphericFogEffectV2.js';
 import { FogOfWarEffectV2 } from '../compositor-v2/effects/FogOfWarEffectV2.js';
 import { PlayerLightEffectV2 } from '../compositor-v2/effects/PlayerLightEffectV2.js';
@@ -62,6 +63,7 @@ export {
   CloudEffectV2,
   AsciiEffectV2,
   WaterEffectV2,
+  WaterGlitterEffectV2,
   AtmosphericFogEffectV2,
   FogOfWarEffectV2,
   PlayerLightEffectV2,

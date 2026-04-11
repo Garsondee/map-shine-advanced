@@ -20,6 +20,7 @@ import { createLogger } from '../core/log.js';
 import { weatherController } from '../core/WeatherController.js';
 import { RoofDripGpuSilhouetteReadback } from './RoofDripGpuSilhouetteReadback.js';
 import {
+  ROOF_DRIP_EDGE_SAMPLING_DISABLED,
   labelOpaqueComponents4,
   componentOpaqueCentroids,
   collectSilhouetteEdgePixels,
@@ -70,10 +71,15 @@ const ROOF_DRIP_RECT_EDGE_SPACING = 20;
 const ROOF_DRIP_SPAWN_ALGO_REV = 3;
 /** Poll interval for roof/tile source changes; rebuild only when source signature changes. */
 const ROOF_DRIP_POINTS_REFRESH_SEC = 0.75;
+/** Spread CPU tile getImageData work across control ticks when many overhead tiles exist. */
+const ROOF_DRIP_CPU_TILES_PER_CONTROL_TICK = 3;
 /** Scaled below rain; paired with startLife for total travel (relaxed kill floor allows longer visible fall). */
 const ROOF_DRIP_GRAVITY_SCALE = 0.64;
 /** Base wind coupling (final mag also × update() scalar); keep low so screen-down gravity reads as “fall”. */
 const ROOF_DRIP_WIND_BASE = 14;
+/** World-space streak width range (StretchedBillBoard); fixed defaults, not scaled by map size. */
+const ROOF_DRIP_SIZE_MIN_DEF = 3.0;
+const ROOF_DRIP_SIZE_MAX_DEF = 5.5;
 
 /**
  * Magenta + boosted emission for roof/tree drip investigation.
@@ -1928,6 +1934,8 @@ export class WeatherParticles {
     this._roofDripLastViewQV1 = null;
     this._roofDripSourceSignature = null;
     this._roofDripActivePointsRef = null;
+    /** Incremental CPU rebuild: { sig, phase, segments, tileIdx, ctx } — see _roofDripRebuildJobTick. */
+    this._roofDripRebuildJob = null;
     /** GPU path: roof alpha RT → downscaled edge pass → readPixels → exterior flood (same space as drip masking). */
     this._roofDripGpuReadback = new RoofDripGpuSilhouetteReadback();
     this._roofDripTreeLocal = null;
@@ -2900,6 +2908,7 @@ export class WeatherParticles {
    * @returns {number} points added
    */
   _appendTileAlphaRoofDripPoints(out, doc, tile, totalH, maxKOverride) {
+    if (ROOF_DRIP_EDGE_SAMPLING_DISABLED) return 0;
     const tm = window.MapShine?.tileManager;
     const id = doc?.id;
     const entry = id && tm?.tileSprites?.get ? tm.tileSprites.get(id) : null;
@@ -3099,6 +3108,7 @@ export class WeatherParticles {
    * @returns {number} points added
    */
   _appendTreeMeshAlphaRoofDripPoints(out, mesh, maxKOverride, zTree, THREE) {
+    if (ROOF_DRIP_EDGE_SAMPLING_DISABLED) return 0;
     const tex = mesh?.material?.uniforms?.uTreeMask?.value || mesh?.material?.map || null;
     const img = tex?.image;
     const gp = mesh?.geometry?.parameters;
@@ -3295,7 +3305,7 @@ export class WeatherParticles {
     return added;
   }
 
-  _rebuildRoofDripPoints() {
+  _roofDripCreateRebuildContext() {
     const gCanvas = (typeof canvas !== 'undefined' && canvas) || (typeof globalThis !== 'undefined' ? globalThis.canvas : null);
     const d = gCanvas?.dimensions;
     if (!d || !this._sceneBounds) return null;
@@ -3346,10 +3356,6 @@ export class WeatherParticles {
     const nRoofSources = useGpu ? 1 : tileEligible.length;
     const nSources = nRoofSources + treeCount;
     if (nSources <= 0) return null;
-    const fairK = Math.max(
-      8,
-      Math.min(maxPerTile, Math.floor(globalB / nSources))
-    );
     const roofBudget = Math.max(1600, Math.floor(globalB * 0.7));
     const roofFairK = Math.max(256, Math.min(maxPerTile, Math.floor(roofBudget / Math.max(1, nRoofSources))));
     const treeBudget = Math.max(800, globalB - roofBudget);
@@ -3363,54 +3369,63 @@ export class WeatherParticles {
       tilesById.set(String(id), { tile: t, doc });
     }
 
-    const segments = [];
-    let gpuRoofOk = false;
+    return {
+      gCanvas,
+      d,
+      totalH,
+      THREE,
+      tileDocs,
+      tileEligible,
+      treeCount,
+      globalB,
+      maxPerTile,
+      gpuSpawnCap,
+      alphaThresh,
+      useGpu,
+      roofFairK,
+      treeFairK,
+      tilesById
+    };
+  }
 
-    if (useGpu && this._roofDripGpuReadback) {
-      try {
-        const fc = this._getFloorCompositorV2();
-        const ose = fc?._overheadShadowEffect;
-        const roofTex = ose?.roofAlphaTexture;
-        const rt = ose?.roofVisibilityTarget;
-        const r = gCanvas?.app?.renderer ?? window.MapShine?.sceneComposer?.renderer;
-        const cam = window.MapShine?.sceneComposer?.camera;
-        const groundZ = window.MapShine?.sceneComposer?.groundZ ?? 1000;
-        const spawnZGpu = groundZ + Z_OVERHEAD_TILE_OFFSET - ROOF_DRIP_SPAWN_BELOW;
-        if (roofTex && rt && r && cam) {
-          const gpuSeg = this._roofDripGpuReadback.extractSpawnStride5({
-            THREE,
-            renderer: r,
-            roofAlphaTexture: roofTex,
-            srcW: rt.width,
-            srcH: rt.height,
-            alphaThreshold: alphaThresh,
-            maxSpawnPoints: Math.min(gpuSpawnCap, roofFairK),
-            spawnZWorld: spawnZGpu,
-            camera: cam,
-            worldToSceneUv: (wx, wy) => this._worldToSceneUv(wx, wy)
-          });
-          if (gpuSeg && gpuSeg.length >= 5) {
-            segments.push(gpuSeg);
-            gpuRoofOk = true;
-          }
+  _roofDripTryGpuRoofSegment(c) {
+    const THREE = c.THREE;
+    if (!c.useGpu || !this._roofDripGpuReadback || !THREE) return null;
+    try {
+      const fc = this._getFloorCompositorV2();
+      const ose = fc?._overheadShadowEffect;
+      const roofTex = ose?.roofAlphaTexture;
+      const rt = ose?.roofVisibilityTarget;
+      const r = c.gCanvas?.app?.renderer ?? window.MapShine?.sceneComposer?.renderer;
+      const cam = window.MapShine?.sceneComposer?.camera;
+      const groundZ = window.MapShine?.sceneComposer?.groundZ ?? 1000;
+      const spawnZGpu = groundZ + Z_OVERHEAD_TILE_OFFSET - ROOF_DRIP_SPAWN_BELOW;
+      if (roofTex && rt && r && cam) {
+        const gpuSeg = this._roofDripGpuReadback.extractSpawnStride5({
+          THREE,
+          renderer: r,
+          roofAlphaTexture: roofTex,
+          srcW: rt.width,
+          srcH: rt.height,
+          alphaThreshold: c.alphaThresh,
+          maxSpawnPoints: Math.min(c.gpuSpawnCap, c.roofFairK),
+          spawnZWorld: spawnZGpu,
+          camera: cam,
+          worldToSceneUv: (wx, wy) => this._worldToSceneUv(wx, wy)
+        });
+        if (gpuSeg && gpuSeg.length >= 5) {
+          return gpuSeg;
         }
-      } catch (e) {
-        log.warn('GPU roof drip extraction failed, falling back to tile canvas path', e);
       }
+    } catch (e) {
+      log.warn('GPU roof drip extraction failed, falling back to tile canvas path', e);
     }
+    return null;
+  }
 
-    if (!gpuRoofOk) {
-      for (const { tile, doc } of tileEligible) {
-        const seg = [];
-        const w = Number(tile?.width ?? doc?.width ?? 0);
-        const h = Number(tile?.height ?? doc?.height ?? 0);
-        const n = this._appendTileAlphaRoofDripPoints(seg, doc, tile, totalH, roofFairK);
-        if (n <= 0) continue;
-        if (seg.length > roofFairK * 5) this._truncateRoofDripPointGroupsInPlace(seg, roofFairK);
-        if (seg.length >= 5) segments.push(seg);
-      }
-    }
-
+  _roofDripAppendTreeDripSegments(c, segments) {
+    const THREE = c.THREE;
+    const totalH = c.totalH;
     const groundZ = window.MapShine?.sceneComposer?.groundZ ?? 1000;
     try {
       const overlays = this._getFloorCompositorV2()?._treeEffect?._overlays;
@@ -3434,7 +3449,7 @@ export class WeatherParticles {
           let rot = Math.atan2(mesh.matrixWorld.elements[4], mesh.matrixWorld.elements[0]);
           const tileId = mesh.userData?.mapShineTreeTileId;
           if (tileId && !String(tileId).startsWith('__')) {
-            const hit = tilesById.get(String(tileId));
+            const hit = c.tilesById.get(String(tileId));
             if (hit) {
               const doc = hit.doc;
               const t = hit.tile;
@@ -3454,27 +3469,162 @@ export class WeatherParticles {
           let zTree = groundZ + 6.0;
           if (Number.isFinite(wp.z)) zTree = wp.z - 2.25;
           const seg = [];
-          const nTreeAlpha = this._appendTreeMeshAlphaRoofDripPoints(seg, mesh, treeFairK, zTree, THREE);
+          const nTreeAlpha = this._appendTreeMeshAlphaRoofDripPoints(seg, mesh, c.treeFairK, zTree, THREE);
           if (nTreeAlpha <= 0) continue;
-          if (seg.length > treeFairK * 5) this._truncateRoofDripPointGroupsInPlace(seg, treeFairK);
+          if (seg.length > c.treeFairK * 5) this._truncateRoofDripPointGroupsInPlace(seg, c.treeFairK);
           if (seg.length >= 5) segments.push(seg);
         }
       }
     } catch (_) {}
+  }
 
-    let merged = this._mergeRoofDripSegmentsRoundRobin(segments, globalB);
+  _roofDripAppendCpuTileSlice(c, segments, from, toExclusive) {
+    const totalH = c.totalH;
+    const roofFairK = c.roofFairK;
+    for (let ti = from; ti < toExclusive; ti++) {
+      const { tile, doc } = c.tileEligible[ti];
+      const seg = [];
+      const n = this._appendTileAlphaRoofDripPoints(seg, doc, tile, totalH, roofFairK);
+      if (n <= 0) continue;
+      if (seg.length > roofFairK * 5) this._truncateRoofDripPointGroupsInPlace(seg, roofFairK);
+      if (seg.length >= 5) segments.push(seg);
+    }
+  }
+
+  _roofDripApplyRectPerimeterFallback(c, merged) {
+    if (merged.length >= 5 || !c.tileEligible.length) return merged;
+    const rectSeg = [];
+    const spacing = _roofDripTuningVal('tileRectEdgeSpacing', ROOF_DRIP_RECT_EDGE_SPACING);
+    const totalH = c.totalH;
+    for (const { tile, doc } of c.tileEligible) {
+      const w = Number(tile?.width ?? doc?.width ?? 0);
+      const h = Number(tile?.height ?? doc?.height ?? 0);
+      const x = Number(tile?.x ?? doc?.x ?? 0);
+      const y = Number(tile?.y ?? doc?.y ?? 0);
+      const cx = x + w * 0.5;
+      const cy = totalH - (y + h * 0.5);
+      const rot = (Number(tile?.rotation ?? doc?.rotation ?? 0) * Math.PI) / 180.0;
+      const zSpawn = this._roofDripTileSpawnZ(doc);
+      this._pushRectEdgeUvPoints(rectSeg, cx, cy, w, h, rot, spacing, zSpawn);
+    }
+    if (rectSeg.length < 5) return merged;
+    return this._mergeRoofDripSegmentsRoundRobin([rectSeg], c.globalB);
+  }
+
+  _roofDripMergeSegmentsToBuffer(c, segmentsIn) {
+    let merged = this._mergeRoofDripSegmentsRoundRobin(segmentsIn, c.globalB);
+    merged = this._roofDripApplyRectPerimeterFallback(c, merged);
     if (merged.length < 5) return null;
-    // Preserve edge continuity: avoid FPS thinning which can over-emphasize corners/extremities.
     let buf = new Float32Array(merged);
-    // Remove pathological scene-border points that appear as persistent map-edge drips.
     buf = this._trimRoofDripSceneEdgePoints(buf, 0.008);
-    const singleSegmentPool = segments.length === 1;
+    const singleSegmentPool = segmentsIn.length === 1;
     const pullNow = singleSegmentPool ? _roofDripTuningVal('spawnInwardPull', ROOF_DRIP_SPAWN_INWARD_PULL) : 0;
     const jitNow = _roofDripTuningVal('spawnUvJitter', ROOF_DRIP_SPAWN_UV_JITTER);
     if (pullNow > 1e-6 || jitNow > 1e-6) {
       this._applyRoofDripSpawnDiffuse(buf, singleSegmentPool);
     }
     return buf;
+  }
+
+  _roofDripRebuildJobTick() {
+    const job = this._roofDripRebuildJob;
+    if (!job) return true;
+    const c = job.ctx;
+    if (job.phase === 'tiles') {
+      const n = c.tileEligible.length;
+      const next = Math.min(n, job.tileIdx + ROOF_DRIP_CPU_TILES_PER_CONTROL_TICK);
+      this._roofDripAppendCpuTileSlice(c, job.segments, job.tileIdx, next);
+      job.tileIdx = next;
+      if (job.tileIdx < n) return false;
+      job.phase = 'trees';
+    }
+    if (job.phase === 'trees') {
+      this._roofDripAppendTreeDripSegments(c, job.segments);
+      job.phase = 'finalize';
+    }
+    if (job.phase === 'finalize') {
+      const buf = this._roofDripMergeSegmentsToBuffer(c, job.segments);
+      this._roofDripBasePoints = buf;
+      this._roofDripSourceSignature = job.sig;
+      this._roofDripRebuildJob = null;
+      this._roofDripViewSourceRef = null;
+      this._roofDripLastViewQU0 = null;
+      this._roofDripLastViewQU1 = null;
+      this._roofDripLastViewQV0 = null;
+      this._roofDripLastViewQV1 = null;
+      return true;
+    }
+    return false;
+  }
+
+  _roofDripInvalidateRoofDripViewCache() {
+    this._roofDripViewSourceRef = null;
+    this._roofDripLastViewQU0 = null;
+    this._roofDripLastViewQU1 = null;
+    this._roofDripLastViewQV0 = null;
+    this._roofDripLastViewQV1 = null;
+  }
+
+  /**
+   * Rebuild drip spawn pool (GPU, CPU tiles over multiple control ticks, trees, rect fallback).
+   * @param {string} sig - result of `_computeRoofDripSourceSignature()` for this attempt
+   */
+  _roofDripBeginPointsRebuild(sig) {
+    const c = this._roofDripCreateRebuildContext();
+    if (!c) {
+      this._roofDripBasePoints = null;
+      this._roofDripSourceSignature = sig;
+      this._roofDripRebuildJob = null;
+      this._roofDripInvalidateRoofDripViewCache();
+      return;
+    }
+    this._roofDripRebuildJob = null;
+    const segments = [];
+    const gpuSeg = this._roofDripTryGpuRoofSegment(c);
+    const nt = c.tileEligible.length;
+
+    if (gpuSeg) {
+      segments.push(gpuSeg);
+      this._roofDripAppendTreeDripSegments(c, segments);
+      const buf = this._roofDripMergeSegmentsToBuffer(c, segments);
+      this._roofDripBasePoints = buf;
+      this._roofDripSourceSignature = sig;
+      this._roofDripInvalidateRoofDripViewCache();
+      return;
+    }
+
+    if (nt > ROOF_DRIP_CPU_TILES_PER_CONTROL_TICK) {
+      this._roofDripSourceSignature = sig;
+      const interimMerged = this._roofDripApplyRectPerimeterFallback(c, []);
+      if (interimMerged.length >= 5) {
+        let ib = new Float32Array(interimMerged);
+        ib = this._trimRoofDripSceneEdgePoints(ib, 0.008);
+        this._roofDripBasePoints = ib;
+      }
+      this._roofDripRebuildJob = {
+        sig,
+        ctx: c,
+        segments: [],
+        tileIdx: 0,
+        phase: 'tiles'
+      };
+      this._roofDripRebuildJobTick();
+      this._roofDripInvalidateRoofDripViewCache();
+      return;
+    }
+
+    this._roofDripAppendCpuTileSlice(c, segments, 0, nt);
+    this._roofDripAppendTreeDripSegments(c, segments);
+    const buf = this._roofDripMergeSegmentsToBuffer(c, segments);
+    this._roofDripBasePoints = buf;
+    this._roofDripSourceSignature = sig;
+    this._roofDripInvalidateRoofDripViewCache();
+  }
+
+  _rebuildRoofDripPoints() {
+    const sig = this._computeRoofDripSourceSignature();
+    this._roofDripBeginPointsRebuild(sig);
+    return this._roofDripBasePoints;
   }
 
   _computeRoofDripSourceSignature() {
@@ -3723,9 +3873,10 @@ export class WeatherParticles {
       qV0 === this._roofDripLastViewQV0 &&
       qV1 === this._roofDripLastViewQV1
     ) {
-      return (this._roofDripViewBuffer && this._roofDripViewCount > 0)
-        ? this._roofDripViewBuffer.subarray(0, this._roofDripViewCount * 5)
-        : new Float32Array(0);
+      if (this._roofDripViewCount > 0) {
+        return this._roofDripViewBuffer.subarray(0, this._roofDripViewCount * 5);
+      }
+      return pts;
     }
 
     this._roofDripViewSourceRef = pts;
@@ -3764,7 +3915,11 @@ export class WeatherParticles {
       filled++;
     }
     this._roofDripViewCount = filled;
-    return filled > 0 ? this._roofDripViewBuffer.subarray(0, filled * 5) : new Float32Array(0);
+    if (filled > 0) {
+      return this._roofDripViewBuffer.subarray(0, filled * 5);
+    }
+    // View rect vs scene-UV mapping can disagree; empty filter would clear emitter points.
+    return pts;
   }
 
   _setWeatherSystemsVisible(visible) {
@@ -4537,7 +4692,7 @@ export class WeatherParticles {
       startSpeed: new IntervalValue(40, 115),
        startSize: roofDripDbg
          ? new IntervalValue(4.5, 8.5)
-         : new IntervalValue(0.28, 0.52),
+         : new IntervalValue(ROOF_DRIP_SIZE_MIN_DEF, ROOF_DRIP_SIZE_MAX_DEF),
        startColor: roofDripDbg
          ? new ColorRange(new Vector4(1.0, 0.0, 1.0, 1.0), new Vector4(1.0, 0.0, 1.0, 1.0))
          : new ColorRange(new Vector4(0.6, 0.7, 1.0, 0.98), new Vector4(0.6, 0.7, 1.0, 0.0)),
@@ -4564,6 +4719,11 @@ export class WeatherParticles {
      // V2 frustum cull uses emitter Z; drips sit near groundZ — can false-negative vs rain's high-Z emitter.
      try {
        this.roofDripSystem.emitter.userData.msAutoCull = false;
+     } catch (_) {}
+     // V2: rain stays on layer 0 (under overhead). Roof drips use layer 31 (late overlay) or they sit
+     // under opaque overhead quads and are invisible (working maps show msOverlayLayer + layersMask 2^31).
+     try {
+       this.roofDripSystem.emitter.userData.msOverlayLayer = true;
      } catch (_) {}
      if (this.scene) this.scene.add(this.roofDripSystem.emitter);
      this.batchRenderer.addSystem(this.roofDripSystem);
@@ -7083,22 +7243,48 @@ export class WeatherParticles {
     // `_computeRoofDripSourceSignature()` (all tiles + tree matrix walks) ran at 60Hz even when
     // the point pool did not need rebuilding. Clamp to a sane minimum.
     const dripRefreshSec = Math.max(0.35, Math.min(120, Number.isFinite(rawDripRefresh) && rawDripRefresh > 0 ? rawDripRefresh : ROOF_DRIP_POINTS_REFRESH_SEC));
-    this._roofDripPointsRefreshSec = (this._roofDripPointsRefreshSec ?? 0) - safeDt;
+    // Phase 0: no expensive drip-pool work while drips cannot emit (matches dripRate gating below).
+    // Keep running during live rain and the post-rain tail (roofDripTail01), not on precip alone.
+    const dripOn = _roofDripTuningVal('enabled', true);
+    const roofDripRebuildIdle =
+      !dripOn ||
+      suppressPrecip ||
+      (rainLevel01 <= 0.001 && roofDripTail01 <= 0.0001);
+
+    let roofDripJobFinished = false;
+    if (!roofDripRebuildIdle) {
+      if (this._roofDripRebuildJob) {
+        const curSig = this._computeRoofDripSourceSignature();
+        if (this._roofDripRebuildJob.sig !== curSig) {
+          this._roofDripRebuildJob = null;
+        } else {
+          roofDripJobFinished = this._roofDripRebuildJobTick();
+        }
+      }
+      if (!this._roofDripRebuildJob) {
+        this._roofDripPointsRefreshSec = (this._roofDripPointsRefreshSec ?? 0) - safeDt;
+      }
+    }
     // Never add `|| !this._roofDripBasePoints` here: when `_rebuildRoofDripPoints()` returns null
     // (no-merge, transient GPU path, etc.), that made this block run *every frame* — full
     // tile getImageData + heap churn → Firefox "Major GC" + single-digit FPS (profiler).
     // First run still fires immediately: constructor sets `_roofDripPointsRefreshSec = 0`.
-    if (this._roofDripPointsRefreshSec <= 0) {
+    if (!roofDripRebuildIdle && !this._roofDripRebuildJob && this._roofDripPointsRefreshSec <= 0) {
       this._roofDripPointsRefreshSec = dripRefreshSec;
       const sig = this._computeRoofDripSourceSignature();
       if (!this._roofDripBasePoints || sig !== this._roofDripSourceSignature) {
-        this._roofDripSourceSignature = sig;
-        this._roofDripBasePoints = this._rebuildRoofDripPoints();
-        this._roofDripViewSourceRef = null;
-        this._roofDripLastViewQU0 = null;
-        this._roofDripLastViewQU1 = null;
-        this._roofDripLastViewQV0 = null;
-        this._roofDripLastViewQV1 = null;
+        this._roofDripBeginPointsRebuild(sig);
+      }
+    }
+    if (roofDripJobFinished) {
+      this._roofDripPointsRefreshSec = dripRefreshSec;
+    }
+    if (roofDripRebuildIdle) {
+      if (this._roofDripRebuildJob) this._roofDripRebuildJob = null;
+      if (this._roofDripBasePoints) {
+        this._roofDripBasePoints = null;
+        this._roofDripSourceSignature = null;
+        this._roofDripInvalidateRoofDripViewCache();
       }
     }
     if (this._roofDripShape) {
@@ -7322,8 +7508,8 @@ export class WeatherParticles {
         }
       }
       if (this.roofDripSystem.startSize && typeof this.roofDripSystem.startSize.a === 'number') {
-        const szA = _roofDripTuningVal('sizeMin', 0.28);
-        const szB = Math.max(szA, _roofDripTuningVal('sizeMax', 0.52));
+        const szA = _roofDripTuningVal('sizeMin', ROOF_DRIP_SIZE_MIN_DEF);
+        const szB = Math.max(szA, _roofDripTuningVal('sizeMax', ROOF_DRIP_SIZE_MAX_DEF));
         if (this.roofDripSystem.startSize.a !== szA || this.roofDripSystem.startSize.b !== szB) {
           this.roofDripSystem.startSize.a = szA;
           this.roofDripSystem.startSize.b = szB;

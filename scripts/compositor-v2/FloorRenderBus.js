@@ -78,6 +78,18 @@ export class FloorRenderBus {
     /** @type {boolean} */
     this._suppressTileAlbedoForEditing = false;
 
+    // Visibility telemetry for diagnostics.
+    this._setVisibleFloorsCalls = 0;
+    this._applyTileVisibilityCalls = 0;
+    this._lastSetVisibleMaxFloorIndex = null;
+    this._lastApplyVisibilityAtMs = null;
+    this._lastPreApplyLeakCount = 0;
+    this._lastPreApplyLeakKeys = [];
+    this._renderToCalls = 0;
+    this._lastRenderToAtMs = null;
+    this._lastPreRenderLeakCount = 0;
+    this._lastPreRenderLeakKeys = [];
+
     log.debug('FloorRenderBus created');
   }
 
@@ -224,6 +236,9 @@ export class FloorRenderBus {
     if (overheadDiag.length > 0) {
       log.info(`FloorRenderBus: ${overheadDiag.length} overhead tiles:`, overheadDiag);
     }
+    // Ensure any entries created during populate() respect the current floor slice.
+    // setVisibleFloors() may have been called before populate completed.
+    this._applyTileVisibility();
     log.info(`FloorRenderBus populated: ${tileCount} tiles (${floors.length} floors)`, floorCounts);
   }
 
@@ -241,6 +256,26 @@ export class FloorRenderBus {
   renderTo(renderer, camera, target = null) {
     if (!this._initialized || !this._scene) return;
     const THREE = window.THREE;
+
+    // FINAL GUARD: enforce floor-slice visibility immediately before draw.
+    // Some async/runtime paths can flip node.visible after earlier floor updates.
+    this._applyTileVisibility();
+    this._renderToCalls += 1;
+    this._lastRenderToAtMs = Date.now();
+    const preRenderLeakKeys = [];
+    let preRenderLeakCount = 0;
+    for (const [tileId, entry] of this._tiles) {
+      if (String(tileId).startsWith('__')) continue;
+      const fi = Number(entry?.floorIndex);
+      if (!Number.isFinite(fi) || fi <= this._visibleMaxFloorIndex) continue;
+      const node = entry?.root || entry?.mesh;
+      if (node?.visible === true) {
+        preRenderLeakCount += 1;
+        if (preRenderLeakKeys.length < 40) preRenderLeakKeys.push(String(tileId));
+      }
+    }
+    this._lastPreRenderLeakCount = preRenderLeakCount;
+    this._lastPreRenderLeakKeys = preRenderLeakKeys;
 
     // Save renderer state.
     const prevTarget    = renderer.getRenderTarget();
@@ -450,6 +485,10 @@ export class FloorRenderBus {
 
   _applyTileVisibility() {
     if (!this._initialized) return;
+    this._applyTileVisibilityCalls += 1;
+    this._lastApplyVisibilityAtMs = Date.now();
+    let preApplyLeakCount = 0;
+    const preApplyLeakKeys = [];
 
     for (const [tileId, entry] of this._tiles) {
       const node = entry?.root || entry?.mesh;
@@ -462,8 +501,30 @@ export class FloorRenderBus {
       }
 
       const inVisibleFloorSlice = entry.floorIndex <= this._visibleMaxFloorIndex;
+      if (!tileId.startsWith('__') && !inVisibleFloorSlice && node.visible === true) {
+        preApplyLeakCount += 1;
+        if (preApplyLeakKeys.length < 40) preApplyLeakKeys.push(String(tileId));
+      }
       node.visible = inVisibleFloorSlice && !this._suppressTileAlbedoForEditing;
     }
+    this._lastPreApplyLeakCount = preApplyLeakCount;
+    this._lastPreApplyLeakKeys = preApplyLeakKeys;
+  }
+
+  /**
+   * Compute whether a bus entry should currently be visible for floor slicing.
+   * Internal/background entries (`__*`) always remain visible.
+   *
+   * @param {string} key
+   * @param {{floorIndex:number}|null} entry
+   * @returns {boolean}
+   * @private
+   */
+  _computeEntryVisibleForSlice(key, entry) {
+    if (String(key || '').startsWith('__')) return true;
+    const floorIndex = Number(entry?.floorIndex);
+    if (!Number.isFinite(floorIndex)) return !this._suppressTileAlbedoForEditing;
+    return floorIndex <= this._visibleMaxFloorIndex && !this._suppressTileAlbedoForEditing;
   }
 
   /**
@@ -493,6 +554,8 @@ export class FloorRenderBus {
   setVisibleFloors(maxFloorIndex) {
     if (!this._initialized) return;
     this._visibleMaxFloorIndex = Number.isFinite(Number(maxFloorIndex)) ? Number(maxFloorIndex) : Infinity;
+    this._setVisibleFloorsCalls += 1;
+    this._lastSetVisibleMaxFloorIndex = this._visibleMaxFloorIndex;
     this._applyTileVisibility();
     log.debug(`FloorRenderBus: showing floors 0–${maxFloorIndex}`);
   }
@@ -673,6 +736,14 @@ export class FloorRenderBus {
     entry.textureSrc = src;
     this._tiles.set(tileId, entry);
 
+    // IMPORTANT: upserts can happen after setVisibleFloors() (live edits, hooks).
+    // Enforce floor-slice visibility immediately so upper-floor tiles do not leak
+    // into lower-floor views until the next floor-change event.
+    const node = entry.root || entry.mesh || null;
+    if (node) {
+      node.visible = this._computeEntryVisibleForSlice(tileId, entry);
+    }
+
     if (src && prevSrc !== src) {
       this._loadTileTextureIntoEntry(tileId, src, floorIndex);
     }
@@ -762,10 +833,15 @@ export class FloorRenderBus {
    * @param {import('three').Camera} camera
    * @param {number} minFloorIndex - Minimum floor index to include in the mask
    * @param {import('three').WebGLRenderTarget} target - Render target for the mask
+   * @param {object} [options]
+   * @param {boolean} [options.includeHiddenAboveFloors=false] - When true, temporarily
+   *   include tiles hidden only by floor slicing (`floorIndex > _visibleMaxFloorIndex`).
+   *   Useful for cross-floor occlusion masks (e.g. cloud shadows under upper floors).
    */
-  renderFloorMaskTo(renderer, camera, minFloorIndex, target) {
+  renderFloorMaskTo(renderer, camera, minFloorIndex, target, options = {}) {
     if (!this._initialized || !this._scene) return;
     const THREE = window.THREE;
+    const includeHiddenAboveFloors = options?.includeHiddenAboveFloors === true;
 
     // Save each tile's current visibility so we can restore it after.
     const savedVisibility = new Map();
@@ -801,11 +877,13 @@ export class FloorRenderBus {
           node.visible = false;
           continue;
         }
-        // Respect the node's current visibility (set by floor isolation and
-        // runtime feature toggles). This prevents hidden upper-floor geometry
-        // from being force-included in mask passes.
+        // Respect the node's current visibility by default. Optionally reveal
+        // tiles hidden ONLY by floor slicing so above-floor geometry can still
+        // contribute to cross-floor occlusion masks.
         const wasVisible = savedVisibility.get(tileId) === true;
-        node.visible = wasVisible;
+        const hiddenByFloorSlice = entry.floorIndex > this._visibleMaxFloorIndex;
+        const forceRevealForMask = includeHiddenAboveFloors && hiddenByFloorSlice;
+        node.visible = wasVisible || forceRevealForMask;
         if (!node.visible) continue;
         // Render with real texture alpha so transparent areas are genuine openings.
         savedMaterialState.set(tileId, {
@@ -910,7 +988,8 @@ export class FloorRenderBus {
       savedVisibility.set(tileId, wasVisible);
 
       if (tileId.startsWith('__')) {
-        // Background planes: keep any pre-existing hidden state, then apply range intent.
+        // Background planes (__bg_*): visibility follows includeBackground only.
+        // Do not use "__" for floor-scoped effect overlays — they would skip inRange.
         node.visible = wasVisible && includeBackground;
         continue;
       }
@@ -970,7 +1049,9 @@ export class FloorRenderBus {
       this.removeEffectOverlay(key);
     }
     this._scene.add(mesh);
-    this._tiles.set(key, { mesh, material: mesh.material, floorIndex, root: null, attachedToTileId: null });
+    const entry = { mesh, material: mesh.material, floorIndex, root: null, attachedToTileId: null };
+    this._tiles.set(key, entry);
+    mesh.visible = this._computeEntryVisibleForSlice(key, entry);
     log.debug(`FloorRenderBus: added effect overlay '${key}' (floor ${floorIndex})`);
   }
 
@@ -997,13 +1078,15 @@ export class FloorRenderBus {
     const parent = tileEntry.root || tileEntry.mesh?.parent || this._scene;
     if (!parent) return false;
     parent.add(mesh);
-    this._tiles.set(key, {
+    const entry = {
       mesh,
       material: mesh.material,
       floorIndex,
       root: null,
       attachedToTileId: tileId
-    });
+    };
+    this._tiles.set(key, entry);
+    mesh.visible = this._computeEntryVisibleForSlice(key, entry);
     log.debug(`FloorRenderBus: added tile-attached overlay '${key}' -> ${tileId} (floor ${floorIndex})`);
     return true;
   }
@@ -1287,6 +1370,9 @@ export class FloorRenderBus {
       textureSrc: '',
       roofShadowCaster: !!roofShadowCaster,
     });
+
+    // New entries must immediately honor current visible floor slice.
+    root.visible = this._computeEntryVisibleForSlice(tileId, { floorIndex });
   }
 
   /**

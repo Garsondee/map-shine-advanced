@@ -2,8 +2,8 @@
  * @fileoverview Compact always-visible level navigator overlay.
  *
  * This overlay is intended for both players and GMs during gameplay when a
- * scene has Levels data enabled. It provides fast level stepping and key
- * level-focused controls without requiring the full camera panel.
+ * scene has Levels data enabled. It provides fast level stepping and follow-mode
+ * without duplicating grid debug toggles (adjacent-floor grids live on main Grid controls).
  */
 
 import { createLogger } from '../core/log.js';
@@ -105,8 +105,6 @@ export class LevelNavigatorOverlay {
       diagnostics: null,
       levelSelect: null,
       follow: null,
-      ghost: null,
-      tint: null,
     };
   }
 
@@ -263,26 +261,18 @@ export class LevelNavigatorOverlay {
     row1.appendChild(up);
     row1.appendChild(snap);
 
+    // Adjacent-floor grid visibility and ghost-line color cues live on the main
+    // Grid controls (Show Adjacent Floor Grids, Floor Color Tinting, etc.) — not
+    // here — to avoid misleading "no effect" toggles when only one level exists.
     const row2 = document.createElement('div');
-    row2.style.cssText = 'display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-top:6px;';
+    row2.style.cssText = 'display:flex;align-items:center;gap:8px;margin-top:6px;';
 
     const followWrap = this._makeCheckbox('Follow', (checked) => {
       this.levelNavigationController?.setLockMode?.(checked ? 'follow-controlled-token' : 'manual', { reason: 'compact-overlay-follow' });
     });
-
-    const ghostWrap = this._makeCheckbox('Ghost', (checked) => {
-      window.MapShine?.gridRenderer?.setGhostGridEnabled?.(checked);
-      this._syncFromState();
-    });
-
-    const tintWrap = this._makeCheckbox('Tint', (checked) => {
-      window.MapShine?.gridRenderer?.setFloorTintPresetsEnabled?.(checked);
-      this._syncFromState();
-    });
+    followWrap.root.title = 'Follow controlled token: keep the viewed level aligned with the token’s elevation band.';
 
     row2.appendChild(followWrap.root);
-    row2.appendChild(ghostWrap.root);
-    row2.appendChild(tintWrap.root);
 
     const status = document.createElement('div');
     status.style.cssText = 'margin-top:6px;font-size:11px;opacity:0.9;';
@@ -306,8 +296,6 @@ export class LevelNavigatorOverlay {
     this._els.diagnostics = diagnostics;
     this._els.levelSelect = levelSelect;
     this._els.follow = followWrap.input;
-    this._els.ghost = ghostWrap.input;
-    this._els.tint = tintWrap.input;
 
     const startPos = this._loadPosition();
     this.overlayManager.lockOverlay(OVERLAY_ID, startPos);
@@ -399,8 +387,6 @@ export class LevelNavigatorOverlay {
     const diagnostics = this._lastDiagnostics || this.levelNavigationController?.getLevelDiagnostics?.() || null;
 
     if (this._els.follow) this._els.follow.checked = lockMode === 'follow-controlled-token';
-    if (this._els.ghost) this._els.ghost.checked = window.MapShine?.gridRenderer?.isGhostGridEnabled?.() === true;
-    if (this._els.tint) this._els.tint.checked = window.MapShine?.gridRenderer?.isFloorTintPresetsEnabled?.() === true;
 
     if (this._els.levelSelect) {
       const select = this._els.levelSelect;

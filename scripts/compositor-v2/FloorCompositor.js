@@ -21,8 +21,8 @@
  *
  * Post-processing effects (step 2):
  *   - **CloudEffectV2**: Procedural clouds — generates shadow RT (fed into Lighting)
- *     and cloud-top RT (blitted after lighting). Shadow occlusion is floor-aware via
- *     the overhead-tile blocker pass.
+ *     and cloud-top RT (blitted after lighting). Shadow occlusion uses overhead
+ *     blockers plus a cross-floor mask for slabs above the active band.
  *   - **LightingEffectV2**: Ambient + dynamic lights + darkness, with cloud shadow.
  *     Window light overlays are fed into the light accumulation RT here so
  *     the compose shader tints them by surface albedo (preserving hue).
@@ -273,6 +273,15 @@ export class FloorCompositor {
     this._cloudEffect = new CloudEffectV2();
     /** @type {ShadowManagerV2} */
     this._shadowManagerEffect = new ShadowManagerV2();
+    /**
+     * Cloud shadow textures from the previous frame — combined with current
+     * overhead/building in ShadowManagerV2 before the bus draw so water splashes
+     * sample the same structural shadow field as the scene (cloud lags one frame).
+     * @type {THREE.Texture|null}
+     */
+    this._shadowManagerPrevFrameCloudTex = null;
+    /** @type {THREE.Texture|null} */
+    this._shadowManagerPrevFrameCloudRawTex = null;
 
     /**
      * V2 Water Effect: fullscreen post-process surface driven by composited _Water
@@ -551,8 +560,6 @@ export class FloorCompositor {
 
     /** @type {THREE.WebGLRenderTarget|null} Upper-floor occluder mask for water effect */
     this._waterOccluderRT = null;
-    /** @type {THREE.WebGLRenderTarget|null} Floors-above-active occluder mask for cloud shadows */
-    this._cloudUpperOccluderRT = null;
 
     /** @type {THREE.Scene|null} Dedicated scene for fullscreen blit quad */
     this._blitScene  = null;
@@ -1013,15 +1020,6 @@ export class FloorCompositor {
       depthBuffer: false,
       stencilBuffer: false,
     });
-    // Cloud shadow occluder mask: floors strictly above the currently viewed floor.
-    this._cloudUpperOccluderRT = new THREE.WebGLRenderTarget(w, h, {
-      minFilter: THREE.LinearFilter,
-      magFilter: THREE.LinearFilter,
-      format: THREE.RGBAFormat,
-      type: THREE.UnsignedByteType,
-      depthBuffer: false,
-      stencilBuffer: false,
-    });
 
     // ── Fullscreen blit quad ──────────────────────────────────────────────
     this._blitScene  = new THREE.Scene();
@@ -1228,6 +1226,16 @@ export class FloorCompositor {
     initEffect('WindowLightEffectV2', () => this._windowLightEffect.initialize());
     // Cloud effect needs the bus scene and main camera for the overhead blocker pass.
     this._cloudEffect.initialize(this.renderer, this._renderBus._scene, this.camera);
+    try {
+      this._cloudEffect.setUpperFloorMaskBuilder?.((r, cam, target) => {
+        const floors = window.MapShine?.floorStack?.getFloors?.() ?? [];
+        const activeIdx = Number(window.MapShine?.floorStack?.getActiveFloor?.()?.index ?? 0);
+        if (!Number.isFinite(activeIdx) || (activeIdx + 1) >= floors.length) return;
+        this._renderBus.renderFloorMaskTo(r, cam, activeIdx + 1, target, { includeHiddenAboveFloors: true });
+      });
+    } catch (err) {
+      log.warn('FloorCompositor: CloudEffectV2 upper-floor mask builder failed:', err);
+    }
     _reportProgress('CloudEffectV2');
     initEffect('ShadowManagerV2', () => this._shadowManagerEffect.initialize(this.renderer, w, h));
     // Water splashes: own BatchedRenderer added via addEffectOverlay.
@@ -1921,6 +1929,46 @@ export class FloorCompositor {
   }
 
   /**
+   * Combine cloud (may be null / previous frame) + overhead + building into
+   * ShadowManagerV2's screen-space RT for consumers that draw before the cloud pass.
+   * @param {THREE.Texture|null} cloudTex
+   * @param {THREE.Texture|null} cloudRawTex
+   * @param {boolean} disableOverheadInLighting
+   */
+  _runShadowManagerCombinePass(cloudTex, cloudRawTex, disableOverheadInLighting) {
+    const sm = this._shadowManagerEffect;
+    if (!sm || typeof sm.setInputs !== 'function' || typeof sm.render !== 'function') return;
+    const overheadTex = (!disableOverheadInLighting && this._overheadShadowEffect?.params?.enabled)
+      ? (this._overheadShadowEffect.shadowFactorTexture ?? null)
+      : null;
+    const buildingTex = (this._buildingShadowEffect?.params?.enabled)
+      ? (this._buildingShadowEffect.shadowFactorTexture ?? null)
+      : null;
+    sm.setInputs({
+      cloudShadowTexture: cloudTex ?? null,
+      cloudShadowRawTexture: cloudRawTex ?? null,
+      overheadShadowTexture: overheadTex,
+      buildingShadowTexture: buildingTex,
+    });
+    try {
+      const dims = globalThis.canvas?.dimensions;
+      if (dims) {
+        const rect = dims.sceneRect ?? dims;
+        const sx = rect?.x ?? dims.sceneX ?? 0;
+        const sy = rect?.y ?? dims.sceneY ?? 0;
+        const sw = rect?.width ?? dims.sceneWidth ?? dims.width ?? 1;
+        const sh = rect?.height ?? dims.sceneHeight ?? dims.height ?? 1;
+        sm.setSceneRect({ x: sx, y: sy, z: sw, w: sh });
+      }
+    } catch (_) {}
+    try {
+      sm.render(this.renderer);
+    } catch (err) {
+      log.warn('FloorCompositor: ShadowManagerV2 render failed:', err);
+    }
+  }
+
+  /**
    * Open the shader warmup gate, allowing time to advance in all effects.
    * Call this after warmupAsync() resolves so all systems start simultaneously
    * from t=0 rather than catching up on accumulated missed time.
@@ -2212,7 +2260,7 @@ export class FloorCompositor {
       this._renderBus?.syncRuntimeTileState?.();
     } catch (_) {}
 
-    // Capture overhead tile alpha + compute soft shadow factor (V1 signature)
+    // Capture overhead tile alpha + compute soft shadow factor for lighting / ShadowManager.
     if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: overheadShadows.render'); } catch (_) {} }
     if (_profiling) _profileT0 = performance.now();
     if (!_skipOverheadShadowPass) {
@@ -2236,6 +2284,22 @@ export class FloorCompositor {
     }
     if (_profiling) this._recordPassTiming('buildingShadowsRender', _profileT0);
     if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: buildingShadows.render DONE'); } catch (_) {} }
+
+    // ShadowManagerV2 (required): combine previous-frame cloud + current structural
+    // shadows so water splash/bubble particles can sample the same darkening the
+    // lit scene uses, before the bus draws them.
+    try {
+      this._runShadowManagerCombinePass(
+        this._shadowManagerPrevFrameCloudTex,
+        this._shadowManagerPrevFrameCloudRawTex ?? this._shadowManagerPrevFrameCloudTex,
+        _disableOverheadInLighting
+      );
+    } catch (err) {
+      log.warn('FloorCompositor: pre-bus ShadowManagerV2 combine failed:', err);
+    }
+    try { this._waterSplashesEffect?.syncShadowDarkeningUniforms?.(); } catch (err) {
+      log.warn('WaterSplashesEffectV2 syncShadowDarkeningUniforms threw, skipping:', err);
+    }
 
     // Runtime tile opacity already synced before shadow capture above. Keep the
     // value as-is for the main albedo render.
@@ -2270,66 +2334,29 @@ export class FloorCompositor {
     if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: bus.renderTo(sceneRT) DONE'); } catch (_) {} }
 
     // ── Cloud passes (before lighting) ───────────────────────────────────
-    // Must run after bus render so the blocker pass sees current tile visibility.
+    // Must run after bus render. Cloud shadow RT includes overhead blockers and
+    // a floors-above-active mask; ShadowManagerV2 still composes overhead + cloud.
     // Outputs: _cloudEffect.cloudShadowTexture (fed into lighting compose shader)
     //          _cloudEffect._cloudTopRT        (blitted after lighting)
     if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: cloud.render'); } catch (_) {} }
     if (_profiling) _profileT0 = performance.now();
     if (!_skipCloudPass && this._cloudEffect.enabled && this._cloudEffect.params.enabled) {
-      try {
-        let cloudUpperOccluderTex = null;
-        const viewFloor = Number.isFinite(this._renderBus?._visibleMaxFloorIndex)
-          ? this._renderBus._visibleMaxFloorIndex
-          : 0;
-        if (this._cloudUpperOccluderRT && this._renderBus?.renderFloorMaskTo) {
-          // Cloud shadows should be suppressed under floors above the active level.
-          this._renderBus.renderFloorMaskTo(
-            this.renderer,
-            this.camera,
-            viewFloor + 1,
-            this._cloudUpperOccluderRT,
-            { includeHiddenAboveFloors: true }
-          );
-          cloudUpperOccluderTex = this._cloudUpperOccluderRT.texture ?? null;
-        }
-        this._cloudEffect.setUpperFloorOccluderMask?.(cloudUpperOccluderTex);
-      } catch (_) {
-        this._cloudEffect.setUpperFloorOccluderMask?.(null);
-      }
       this._cloudEffect.render(this.renderer);
     }
-    if (this._shadowManagerEffect?.enabled && this._shadowManagerEffect?.params?.enabled) {
-      const cloudTex = (this._cloudEffect.enabled && this._cloudEffect.params.enabled)
+    {
+      const cloudTex = (!_skipCloudPass && this._cloudEffect.enabled && this._cloudEffect.params.enabled)
         ? this._cloudEffect.cloudShadowTexture
         : null;
-      const cloudRawTex = (this._cloudEffect.enabled && this._cloudEffect.params.enabled)
+      const cloudRawTex = (!_skipCloudPass && this._cloudEffect.enabled && this._cloudEffect.params.enabled)
         ? (this._cloudEffect.cloudShadowRawTexture ?? this._cloudEffect.cloudShadowTexture)
         : null;
-      const overheadTex = (!_disableOverheadInLighting && this._overheadShadowEffect?.params?.enabled)
-        ? this._overheadShadowEffect.shadowFactorTexture
-        : null;
-      const buildingTex = (this._buildingShadowEffect?.params?.enabled)
-        ? this._buildingShadowEffect.shadowFactorTexture
-        : null;
-      this._shadowManagerEffect.setInputs({
-        cloudShadowTexture: cloudTex,
-        cloudShadowRawTexture: cloudRawTex,
-        overheadShadowTexture: overheadTex,
-        buildingShadowTexture: buildingTex,
-      });
-      // Set scene rect for coordinate conversion (world-space building shadows)
       try {
-        const dims = globalThis.canvas?.dimensions;
-        if (dims) {
-          const rect = dims.sceneRect ?? dims;
-          const sx = rect?.x ?? dims.sceneX ?? 0;
-          const sy = rect?.y ?? dims.sceneY ?? 0;
-          const sw = rect?.width ?? dims.sceneWidth ?? dims.width ?? 1;
-          const sh = rect?.height ?? dims.sceneHeight ?? dims.height ?? 1;
-          this._shadowManagerEffect.setSceneRect({ x: sx, y: sy, z: sw, w: sh });
-        }
-      } catch (_) {}
-      this._shadowManagerEffect.render(this.renderer);
+        this._runShadowManagerCombinePass(cloudTex, cloudRawTex, _disableOverheadInLighting);
+      } catch (err) {
+        log.warn('FloorCompositor: post-cloud ShadowManagerV2 combine failed:', err);
+      }
+      this._shadowManagerPrevFrameCloudTex = cloudTex ?? null;
+      this._shadowManagerPrevFrameCloudRawTex = cloudRawTex ?? null;
     }
     if (_profiling) this._recordPassTiming('cloudRender', _profileT0);
     if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: cloud.render DONE'); } catch (_) {} }
@@ -2350,12 +2377,8 @@ export class FloorCompositor {
     const windowCloudShadowTexLegacy = (this._cloudEffect.enabled && this._cloudEffect.params.enabled)
       ? (this._cloudEffect.cloudShadowRawTexture ?? this._cloudEffect.cloudShadowTexture)
       : null;
-    const combinedShadowTex = (this._shadowManagerEffect?.enabled && this._shadowManagerEffect?.params?.enabled)
-      ? (this._shadowManagerEffect.combinedShadowTexture ?? cloudShadowTexLegacy)
-      : cloudShadowTexLegacy;
-    const combinedShadowRawTex = (this._shadowManagerEffect?.enabled && this._shadowManagerEffect?.params?.enabled)
-      ? (this._shadowManagerEffect.combinedShadowRawTexture ?? combinedShadowTex)
-      : windowCloudShadowTexLegacy;
+    const combinedShadowTex = this._shadowManagerEffect?.combinedShadowTexture ?? cloudShadowTexLegacy;
+    const combinedShadowRawTex = this._shadowManagerEffect?.combinedShadowRawTexture ?? combinedShadowTex;
     // Back-compat alias for nearby call sites that still use legacy names.
     const cloudShadowRawTexLegacy = windowCloudShadowTexLegacy;
     const windowCloudShadowViewBounds = (this._cloudEffect.enabled && this._cloudEffect.params.enabled)
@@ -2490,6 +2513,7 @@ export class FloorCompositor {
     // Water pass: refracts/tints/specular the fully graded scene.
     // Occlusion is handled via a deterministic occluder mask (upper floor tiles)
     // plus depth pass fallback inside the shader.
+    let _waterPassWrote = false;
     if (!_skipWaterPass && this._waterEffect?.enabled) {
       try {
         const _vm = Number.isFinite(this._renderBus._visibleMaxFloorIndex)
@@ -2516,11 +2540,18 @@ export class FloorCompositor {
       // is an unwritten (black) RT and advancing would black out the entire scene.
       if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: water.render'); } catch (_) {} }
       if (_profiling) _profileT0 = performance.now();
-      const waterWrote = this._waterEffect.render(this.renderer, this.camera, currentInput, waterOutput, occluderRT);
+      _waterPassWrote = this._waterEffect.render(this.renderer, this.camera, currentInput, waterOutput, occluderRT);
       if (_profiling) this._recordPassTiming('waterRender', _profileT0);
-      if (waterWrote) currentInput = waterOutput;
+      if (_waterPassWrote) currentInput = waterOutput;
       if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: water.render DONE'); } catch (_) {} }
     }
+
+    try {
+      const wt = (_waterPassWrote && typeof this._waterEffect?.getWaterSpecularBloomTexture === 'function')
+        ? this._waterEffect.getWaterSpecularBloomTexture()
+        : null;
+      this._bloomEffect?.setWaterSpecularBloomTexture?.(wt ?? null);
+    } catch (_) {}
 
     // Distortion pass (fire-driven heat haze).
     if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: distortion.render'); } catch (_) {} }
@@ -3677,7 +3708,6 @@ export class FloorCompositor {
     if (this._postA)   this._postA.setSize(w, h);
     if (this._postB)   this._postB.setSize(w, h);
     if (this._waterOccluderRT) this._waterOccluderRT.setSize(w, h);
-    if (this._cloudUpperOccluderRT) this._cloudUpperOccluderRT.setSize(w, h);
     try { this._shadowManagerEffect?.onResize?.(w, h); } catch (_) {}
     try { this._bushEffect?.onResize?.(w, h); } catch (_) {}
     try { this._treeEffect?.onResize?.(w, h); } catch (_) {}
@@ -3762,12 +3792,10 @@ export class FloorCompositor {
     try { this._postA?.dispose(); } catch (_) {}
     try { this._postB?.dispose(); } catch (_) {}
     try { this._waterOccluderRT?.dispose(); } catch (_) {}
-    try { this._cloudUpperOccluderRT?.dispose(); } catch (_) {}
     this._sceneRT = null;
     this._postA = null;
     this._postB = null;
     this._waterOccluderRT = null;
-    this._cloudUpperOccluderRT = null;
 
     // Dispose blit resources.
     try { this._blitMaterial?.dispose(); } catch (_) {}

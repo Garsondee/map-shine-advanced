@@ -38,36 +38,109 @@ export class DotScreenEffectV2 {
   }
 
   static getControlSchema() {
+    const centerDefault = { centerX: 0.5, centerY: 0.5 };
+
     return {
       enabled: false,
+      help: {
+        title: 'Dot screen (halftone)',
+        summary: [
+          'Stylized halftone: the image is mixed with a rotated sine grid so bright areas read as a dot pattern (print / comic look).',
+          'Purely artistic — no masks. Runs as fullscreen post-processing on the composited frame.',
+          'Performance: single fullscreen pass; typically inexpensive.',
+          'Persistence: settings save with the scene (not World Based).',
+        ].join('\n\n'),
+        glossary: {
+          Strength: 'Blend between the original image and the dot pattern (0 = original only).',
+          Scale: 'Dot density / fineness; higher values pack more pattern into the frame.',
+          Angle: 'Grid rotation in radians (0 to ~2π).',
+          'Center X / Y': 'Pattern origin in normalized UV (0–1), relative to the render.',
+        },
+      },
       groups: [
         {
-          name: 'dotScreen',
-          label: 'Dot Screen',
-          type: 'inline',
-          parameters: ['strength', 'scale', 'angle']
+          name: 'look',
+          label: 'Look',
+          type: 'folder',
+          expanded: true,
+          parameters: ['strength', 'scale', 'angle'],
         },
         {
           name: 'center',
           label: 'Center',
-          type: 'inline',
-          parameters: ['centerX', 'centerY']
-        }
+          type: 'folder',
+          expanded: false,
+          parameters: ['centerX', 'centerY'],
+        },
       ],
       parameters: {
         enabled: { type: 'boolean', default: false, hidden: true },
-        strength: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.85 },
-        scale: { type: 'slider', min: 0.1, max: 10.0, step: 0.05, default: 1.6 },
-        angle: { type: 'slider', min: 0.0, max: 6.283185307179586, step: 0.01, default: 1.57 },
-        centerX: { type: 'slider', min: 0.0, max: 1.0, step: 0.001, default: 0.5 },
-        centerY: { type: 'slider', min: 0.0, max: 1.0, step: 0.001, default: 0.5 }
+        strength: {
+          type: 'slider',
+          label: 'Strength',
+          min: 0.0,
+          max: 1.0,
+          step: 0.01,
+          default: 0.85,
+          tooltip: 'How much of the dot pattern is mixed in (0 = bypass).',
+        },
+        scale: {
+          type: 'slider',
+          label: 'Scale',
+          min: 0.1,
+          max: 10.0,
+          step: 0.05,
+          default: 1.6,
+          tooltip: 'Fineness of the dot grid (higher = smaller / denser dots).',
+        },
+        angle: {
+          type: 'slider',
+          label: 'Angle (rad)',
+          min: 0.0,
+          max: 6.283185307179586,
+          step: 0.01,
+          default: 1.57,
+          tooltip: 'Rotation of the halftone grid in radians.',
+        },
+        centerX: {
+          type: 'slider',
+          label: 'Center X',
+          min: 0.0,
+          max: 1.0,
+          step: 0.001,
+          default: 0.5,
+          tooltip: 'Horizontal pattern origin in UV space (0 = left, 1 = right).',
+        },
+        centerY: {
+          type: 'slider',
+          label: 'Center Y',
+          min: 0.0,
+          max: 1.0,
+          step: 0.001,
+          default: 0.5,
+          tooltip: 'Vertical pattern origin in UV space (0 = bottom, 1 = top).',
+        },
       },
       presets: {
-        Off: { strength: 0.0, scale: 1.6, angle: 1.57, centerX: 0.5, centerY: 0.5 },
-        Subtle: { strength: 0.35, scale: 1.8, angle: 1.57, centerX: 0.5, centerY: 0.5 },
-        Classic: { strength: 0.85, scale: 1.6, angle: 1.57, centerX: 0.5, centerY: 0.5 },
-        Diagonal: { strength: 0.85, scale: 1.6, angle: 0.785, centerX: 0.5, centerY: 0.5 }
-      }
+        Subtle: {
+          strength: 0.35,
+          scale: 1.8,
+          angle: 1.57,
+          ...centerDefault,
+        },
+        Classic: {
+          strength: 0.85,
+          scale: 1.6,
+          angle: 1.57,
+          ...centerDefault,
+        },
+        Diagonal: {
+          strength: 0.85,
+          scale: 1.6,
+          angle: 0.785,
+          ...centerDefault,
+        },
+      },
     };
   }
 

@@ -11,20 +11,15 @@
  *                  as a multiplier so cloud shadow darkens scene illumination.
  *   - _cloudTopRT: RGBA cloud-top texture source for elevated world-space cloud planes.
  *
- * ## Multi-Floor Shadow Occlusion
+ * ## Cloud shadow vs overhead / upper floors
  *
- * Cloud density is world-space and global (one procedural pass for the whole scene).
- * Shadows must be occluded by overhead tiles on the current floor so rooftops block
- * the shadow from reaching interior spaces below.
- *
- * Strategy:
- *   1. Before compositing shadows, render a blocker mask by traversing the
- *      FloorRenderBus scene for sprites with userData.isOverhead or
- *      userData.cloudShadowBlocker.  The bus already hides floors that aren't
- *      currently visible, so floor isolation is automatic.
- *   2. Shadow shader: shadowFactor = mix(shadowFactor, 1.0, blockerMask.a)
- *      — blocked pixels remain bright (unshadowed).
- *   3. Outdoors mask further gates shadow so interiors never receive it.
+ * The lit-scene shadow factor (`_shadowRT`) multiplies outdoors-masked cloud
+ * darkness by (1) an overhead-tile blocker mask (CLOUD_SHADOW_BLOCKER capture)
+ * and (2) a cross-floor mask of tile alpha for floors strictly above the active
+ * band (`renderFloorMaskTo` with `includeHiddenAboveFloors`), so cloud shadows
+ * do not leak under upper-floor slabs that are normally hidden by floor slicing.
+ * ShadowManagerV2 still composes cloud with separate overhead/building factors.
+ * The outdoors mask gates cloud shadow where authored.
  *
  * ## Pipeline position in FloorCompositor
  *
@@ -157,6 +152,8 @@ export class CloudEffectV2 {
     this._cloudTopRT      = null;
     /** @type {THREE.WebGLRenderTarget|null} Overhead-tile blocker mask for shadow occlusion */
     this._blockerRT       = null;
+    /** @type {THREE.WebGLRenderTarget|null} Tile alpha for floors above active (same res as shadow RTs) */
+    this._upperFloorOccluderRT = null;
 
     // ── Materials ─────────────────────────────────────────────────────
     this._densityMat      = null;
@@ -189,6 +186,18 @@ export class CloudEffectV2 {
 
     /** @type {THREE.Texture|null} World-space floor ID texture (topmost floor per pixel) */
     this._floorIdTex = null;
+    /** @type {THREE.Texture|null} Optional external upper-floor mask (overrides built-in RT when set) */
+    this._upperFloorOccluderMask = null;
+
+    /**
+     * Builds tile alpha into `_upperFloorOccluderRT` (same dimensions as shadow RTs).
+     * Assigned by FloorCompositor: delegates to FloorRenderBus.renderFloorMaskTo.
+     * @type {((renderer: import('three').WebGLRenderer, camera: import('three').Camera, target: import('three').WebGLRenderTarget) => void)|null}
+     */
+    this._upperFloorMaskBuilder = null;
+
+    /** @type {boolean} Whether `_upperFloorOccluderRT` was filled this frame for pass 2b */
+    this._upperFloorMaskValid = false;
 
     /** @type {THREE.DataTexture|null} */
     this._fallbackWhite = null;
@@ -311,6 +320,18 @@ export class CloudEffectV2 {
 
   /** Supply the compositor floor ID texture (GpuSceneMaskCompositor.floorIdTarget.texture). */
   setFloorIdTexture(texture) { this._floorIdTex = texture ?? null; }
+
+  /** Supply a screen-space mask for floors above active floor (alpha=occluded). */
+  setUpperFloorOccluderMask(texture) { this._upperFloorOccluderMask = texture ?? null; }
+
+  /**
+   * Register the mask builder (typically FloorRenderBus.renderFloorMaskTo wrapper).
+   * Target RT matches internal cloud shadow resolution.
+   * @param {((renderer: import('three').WebGLRenderer, camera: import('three').Camera, target: import('three').WebGLRenderTarget) => void)|null} fn
+   */
+  setUpperFloorMaskBuilder(fn) {
+    this._upperFloorMaskBuilder = typeof fn === 'function' ? fn : null;
+  }
 
   /** @private */
   _ensureFallbackWhite() {
@@ -495,7 +516,9 @@ export class CloudEffectV2 {
 
       // World-space shadow offset (sun-direction displacement)
       const offW = p.shadowOffsetScale * 5000;
-      su.uShadowOffsetWorld.value.set(this._sunDir.x * offW, this._sunDir.y * offW);
+      // Keep cast direction aligned with Building/Overhead conventions:
+      // shadows project opposite the sun direction in world UV.
+      su.uShadowOffsetWorld.value.set(-this._sunDir.x * offW, -this._sunDir.y * offW);
 
       // Overscanned density bounds so blur kernel stays inside density texture
       const iW = this._densityRT?.width ?? 1024;
@@ -529,6 +552,9 @@ export class CloudEffectV2 {
       // (This mirrors WaterEffectV2's uOutdoorsMaskFlipY concept.)
       const anyTex = this._outdoorsMasks.find(t => !!t) ?? this._outdoorsMask ?? null;
       su.uOutdoorsMaskFlipY.value = anyTex?.flipY ? 1.0 : 0.0;
+      su.tUpperFloorMask.value = null;
+      su.uHasUpperFloorMask.value = 0.0;
+      su.uSunDir.value.copy(this._sunDir);
     }
 
     const tu = this._cloudTopMat?.uniforms;
@@ -629,14 +655,10 @@ export class CloudEffectV2 {
         return;
       }
 
-      // ── Blocker pass: collect overhead tiles → blockerRT ────────────
-      // Sprites currently visible in the bus scene that are overhead tiles
-      // become the cloud-shadow blocker. Floor isolation is free because
-      // FloorRenderBus already hides tiles on non-visible floors.
-      this._renderBlockerMask(renderer);
-
       const du = this._densityMat.uniforms;
       const su = this._shadowMat.uniforms;
+
+      this._prepareShadowOcclusionMasks(renderer);
 
       // ── Pass 1a: Overscanned density for shadow offset+blur ──────────
       du.uClipToScene.value   = 0;
@@ -672,25 +694,38 @@ export class CloudEffectV2 {
       {
         const prevHasMask = su.uHasOutdoorsMask.value;
         const prevMaskTex = su.tOutdoorsMask.value;
+        const prevHasUpperMask = su.uHasUpperFloorMask.value;
+        const prevUpperMaskTex = su.tUpperFloorMask.value;
         su.uDensityMode.value    = 0;
         su.uHasOutdoorsMask.value = 0;
         su.tOutdoorsMask.value   = null;
         su.tCloudDensity.value   = this._shadowDensityRT.texture;
         su.tBlockerMask.value    = this._blockerRT?.texture ?? null;
         su.uHasBlockerMask.value = 0;
+        su.tUpperFloorMask.value = this._upperFloorOccluderMask ?? null;
+        su.uHasUpperFloorMask.value = 0;
         this._quad.material = this._shadowMat;
         renderer.setRenderTarget(this._shadowRawRT);
         renderer.setClearColor(0xffffff, 1); renderer.clear();
         renderer.render(this._quadScene, this._quadCam);
         su.uHasOutdoorsMask.value = prevHasMask;
         su.tOutdoorsMask.value    = prevMaskTex;
+        su.uHasUpperFloorMask.value = prevHasUpperMask;
+        su.tUpperFloorMask.value = prevUpperMaskTex;
       }
 
       // ── Pass 2b: Outdoors-masked shadow (fed into LightingEffectV2) ───
+      // Blocker + upper-floor masks remove cloud darkening under roofs / slabs.
       su.uDensityMode.value    = 0;
       su.tCloudDensity.value   = this._shadowDensityRT.texture;
       su.tBlockerMask.value    = this._blockerRT?.texture ?? null;
-      su.uHasBlockerMask.value = this._blockerRT ? 1 : 0;
+      su.uHasBlockerMask.value = this._blockerRT ? 1.0 : 0.0;
+      {
+        const upperTex = this._upperFloorOccluderMask
+          ?? (this._upperFloorMaskValid ? (this._upperFloorOccluderRT?.texture ?? null) : null);
+        su.tUpperFloorMask.value = upperTex;
+        su.uHasUpperFloorMask.value = upperTex ? 1.0 : 0.0;
+      }
       this._quad.material = this._shadowMat;
       renderer.setRenderTarget(this._shadowRT);
       renderer.setClearColor(0xffffff, 1); renderer.clear();
@@ -776,6 +811,59 @@ export class CloudEffectV2 {
   }
 
   // ── Blocker mask ───────────────────────────────────────────────────────────
+
+  /**
+   * Populate `_blockerRT` and `_upperFloorOccluderRT` before shadow passes.
+   * @param {THREE.WebGLRenderer} renderer
+   * @private
+   */
+  _prepareShadowOcclusionMasks(renderer) {
+    this._upperFloorMaskValid = false;
+    this._renderBlockerMask(renderer);
+
+    if (!this._upperFloorOccluderRT) return;
+
+    const floors = window.MapShine?.floorStack?.getFloors?.() ?? [];
+    const activeIdx = Number(window.MapShine?.floorStack?.getActiveFloor?.()?.index ?? 0);
+    const hasUpperFloors = floors.length > 1
+      && Number.isFinite(activeIdx)
+      && (activeIdx + 1) < floors.length;
+
+    const prevTarget = renderer.getRenderTarget();
+    if (!hasUpperFloors) {
+      try {
+        renderer.setRenderTarget(this._upperFloorOccluderRT);
+        renderer.setClearColor(0x000000, 0);
+        renderer.clear();
+      } catch (_) {}
+      renderer.setRenderTarget(prevTarget);
+      return;
+    }
+
+    if (!this._upperFloorMaskBuilder || !this._mainCamera) {
+      try {
+        renderer.setRenderTarget(this._upperFloorOccluderRT);
+        renderer.setClearColor(0x000000, 0);
+        renderer.clear();
+      } catch (_) {}
+      renderer.setRenderTarget(prevTarget);
+      return;
+    }
+
+    try {
+      this._upperFloorMaskBuilder(renderer, this._mainCamera, this._upperFloorOccluderRT);
+      this._upperFloorMaskValid = true;
+    } catch (e) {
+      log.warn('CloudEffectV2: upper-floor cloud shadow mask failed:', e);
+      try {
+        renderer.setRenderTarget(this._upperFloorOccluderRT);
+        renderer.setClearColor(0x000000, 0);
+        renderer.clear();
+      } catch (_) {}
+    } finally {
+      renderer.setRenderTarget(prevTarget);
+    }
+  }
 
   /**
    * Render the overhead-tile blocker mask for the current frame.
@@ -864,6 +952,11 @@ export class CloudEffectV2 {
     if (this._shadowDensityRT) { renderer.setRenderTarget(this._shadowDensityRT); renderer.setClearColor(0x000000, 1); renderer.clear(); }
     if (this._topDensityRT)    { renderer.setRenderTarget(this._topDensityRT); renderer.setClearColor(0x000000, 1); renderer.clear(); }
     if (this._cloudTopRT)      { renderer.setRenderTarget(this._cloudTopRT);  renderer.setClearColor(0x000000, 0); renderer.clear(); }
+    if (this._upperFloorOccluderRT) {
+      renderer.setRenderTarget(this._upperFloorOccluderRT);
+      renderer.setClearColor(0x000000, 0);
+      renderer.clear();
+    }
     void rt; // suppress unused warning
   }
 
@@ -902,6 +995,7 @@ export class CloudEffectV2 {
     this._shadowRawRT     = make(this._shadowRawRT);
     this._cloudTopRT      = make(this._cloudTopRT);
     this._blockerRT       = make(this._blockerRT);
+    this._upperFloorOccluderRT = make(this._upperFloorOccluderRT);
     this._cloudTopDensityValid = false;
 
     // Update texel-size uniforms
@@ -1116,11 +1210,34 @@ export class CloudEffectV2 {
 
   /** @private */
   _calcSunDir() {
-    let hour = 12;
-    try { if (typeof weatherController?.timeOfDay === 'number') hour = weatherController.timeOfDay; } catch (_) {}
-    const t = ((hour % 24) + 24) % 24 / 24;
-    const az = (t - 0.5) * Math.PI;
-    this._sunDir.set(-Math.sin(az), Math.cos(az) * 0.3);
+    // Keep cloud sun direction in lockstep with other V2 effects so shadow/light
+    // motion does not appear mirrored on one axis relative to trees/buildings.
+    let x = 0.0;
+    let y = -1.0;
+
+    const sky = window.MapShine?.effectComposer?._floorCompositorV2?._skyColorEffect;
+    const overhead = window.MapShine?.effectComposer?._floorCompositorV2?._overheadShadowEffect;
+    const latitude = Number(overhead?.params?.sunLatitude ?? 0.3);
+    const lat = Math.max(0.0, Math.min(1.0, latitude));
+
+    if (Number.isFinite(Number(sky?.currentSunAzimuthDeg))) {
+      const azimuthRad = Number(sky.currentSunAzimuthDeg) * (Math.PI / 180.0);
+      x = -Math.sin(azimuthRad);
+      y = -Math.cos(azimuthRad) * lat;
+    } else {
+      let hour = 12.0;
+      try {
+        if (weatherController && typeof weatherController.timeOfDay === 'number') {
+          hour = weatherController.timeOfDay;
+        }
+      } catch (_) {}
+      const t = ((hour % 24.0) + 24.0) % 24.0 / 24.0;
+      const azimuth = (t - 0.5) * Math.PI;
+      x = -Math.sin(azimuth);
+      y = -Math.cos(azimuth) * lat;
+    }
+
+    this._sunDir.set(x, y);
   }
 
   /** @private */
@@ -1306,6 +1423,9 @@ export class CloudEffectV2 {
         uOutdoorsMaskFlipY: { value: 0 },
         tBlockerMask:       { value: null },
         uHasBlockerMask:    { value: 0 },
+        tUpperFloorMask:    { value: null },
+        uHasUpperFloorMask: { value: 0 },
+        uSunDir:            { value: new THREE.Vector2(0, -1) },
         uShadowOpacity:     { value: 0.7 },
         uShadowSoftness:    { value: 0.9 },
         uTexelSize:         { value: new THREE.Vector2(1/512, 1/512) },
@@ -1339,6 +1459,9 @@ export class CloudEffectV2 {
         uniform float uOutdoorsMaskFlipY;
         uniform sampler2D tBlockerMask;
         uniform float uHasBlockerMask;
+        uniform sampler2D tUpperFloorMask;
+        uniform float uHasUpperFloorMask;
+        uniform vec2 uSunDir;
         uniform float uShadowOpacity;
         uniform float uShadowSoftness;
         uniform vec2  uTexelSize;
@@ -1385,6 +1508,12 @@ export class CloudEffectV2 {
           return texture2D(tOutdoorsMask, maskUv).r;
         }
 
+        float offsetScaleLimit(float uvCoord, float delta) {
+          if (abs(delta) < 1e-6) return 1.0;
+          if (delta > 0.0) return min(1.0, (1.0 - uvCoord) / delta);
+          return min(1.0, uvCoord / -delta);
+        }
+
         void main() {
           vec2 baseWorld = mix(uViewBoundsMin, uViewBoundsMax, vUv);
           vec2 sceneUvCheck = worldToSceneUv(baseWorld);
@@ -1420,15 +1549,41 @@ export class CloudEffectV2 {
           // Sample at scene UV derived from world position so the mask is
           // anchored to the world, not stretched across the screen (vUv).
           if (uHasOutdoorsMask > 0.5) {
-            vec2 sceneUvFoundry = clamp(worldToSceneUv(baseWorld), vec2(0.0), vec2(1.0));
+            vec2 sceneUvRaw = worldToSceneUv(baseWorld);
+            float outdoorsInScene =
+              step(0.0, sceneUvRaw.x) * step(sceneUvRaw.x, 1.0) *
+              step(0.0, sceneUvRaw.y) * step(sceneUvRaw.y, 1.0);
+            vec2 sceneUvFoundry = clamp(sceneUvRaw, vec2(0.0), vec2(1.0));
             float outdoors = readOutdoors(sceneUvFoundry);
-            factor = mix(1.0, factor, outdoors);
+            factor = mix(1.0, factor, mix(1.0, outdoors, outdoorsInScene));
           }
 
           // Blocker mask: overhead tiles cancel shadow (rooftops stay bright)
           if (uHasBlockerMask > 0.5) {
             float b = texture2D(tBlockerMask, vUv).a;
             factor = mix(factor, 1.0, clamp(b, 0.0, 1.0));
+          }
+
+          // Floors above the active level occlude cloud shadows beneath them.
+          if (uHasUpperFloorMask > 0.5) {
+            vec2 viewSpan = max(uViewBoundsMax - uViewBoundsMin, vec2(1e-3));
+            vec2 shadowDeltaUv = uShadowOffsetWorld / viewSpan;
+            // Use the exact cloud-shadow world offset projected into this pass UV,
+            // so upper-floor occlusion and cloud shadow travel stay phase-locked.
+            vec2 upperDeltaUv = shadowDeltaUv;
+            float upperScaleX = clamp(offsetScaleLimit(vUv.x, upperDeltaUv.x), 0.0, 1.0);
+            float upperScaleY = clamp(offsetScaleLimit(vUv.y, upperDeltaUv.y), 0.0, 1.0);
+            vec2 upperUv = vUv + vec2(
+              upperDeltaUv.x * upperScaleX,
+              upperDeltaUv.y * upperScaleY
+            );
+
+            vec4 ubTex0 = texture2D(tUpperFloorMask, clamp(vUv, 0.0, 1.0));
+            vec4 ubTex1 = texture2D(tUpperFloorMask, clamp(upperUv, 0.0, 1.0));
+            float ub0 = max(max(ubTex0.r, ubTex0.g), max(ubTex0.b, ubTex0.a));
+            float ub1 = max(max(ubTex1.r, ubTex1.g), max(ubTex1.b, ubTex1.a));
+            float ub = max(ub0, ub1);
+            factor = mix(factor, 1.0, clamp(ub, 0.0, 1.0));
           }
 
           // Blend shadow back toward 1.0 (lit) near scene rect edges so there is
@@ -1635,9 +1790,14 @@ export class CloudEffectV2 {
           if (uHasOutdoorsMask > 0.5) {
             // Reconstruct world position from vUv then convert to Foundry scene UV.
             vec2 worldPos = mix(uViewBoundsMin, uViewBoundsMax, vUv);
-            vec2 sceneUvFoundry = clamp(worldToSceneUv(worldPos), vec2(0.0), vec2(1.0));
+            vec2 sceneUvRaw = worldToSceneUv(worldPos);
+            float outdoorsInScene =
+              step(0.0, sceneUvRaw.x) * step(sceneUvRaw.x, 1.0) *
+              step(0.0, sceneUvRaw.y) * step(sceneUvRaw.y, 1.0);
+            vec2 sceneUvFoundry = clamp(sceneUvRaw, vec2(0.0), vec2(1.0));
             float o = readOutdoors(sceneUvFoundry);
-            alpha *= mix(1.0, o, clamp(uOutdoorsMaskStrength, 0.0, 1.0));
+            float oEff = mix(1.0, o, outdoorsInScene);
+            alpha *= mix(1.0, oEff, clamp(uOutdoorsMaskStrength, 0.0, 1.0));
           }
           if (uHasBlockerMask > 0.5) {
             vec4 bTex = texture2D(tBlockerMask, vUv);
@@ -1998,12 +2158,22 @@ export class CloudEffectV2 {
     }
   }
 
+  // ── Getters ────────────────────────────────────────────────────────────────
+
+  /**
+   * Get the cloud top render target texture for use by other effects
+   * @returns {THREE.Texture|null} The cloud top texture
+   */
+  get cloudTopTexture() {
+    return this._cloudTopRT?.texture ?? null;
+  }
+
   // ── Dispose ────────────────────────────────────────────────────────────────
 
   dispose() {
     const rts = [
       '_shadowDensityRT', '_densityRT', '_topDensityRT',
-      '_shadowRT', '_shadowRawRT', '_cloudTopRT', '_blockerRT',
+      '_shadowRT', '_shadowRawRT', '_cloudTopRT', '_blockerRT', '_upperFloorOccluderRT',
     ];
     for (const k of rts) { try { this[k]?.dispose(); } catch (_) {} this[k] = null; }
 
@@ -2022,6 +2192,9 @@ export class CloudEffectV2 {
     this._quad = null;
     this._quadScene = null;
     this._cloudLayerScene = null;
+
+    this._upperFloorMaskBuilder = null;
+    this._upperFloorMaskValid = false;
 
     this._initialized = false;
     log.info('CloudEffectV2 disposed');

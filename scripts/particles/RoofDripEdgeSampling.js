@@ -7,11 +7,10 @@
  */
 
 /**
- * When true, CPU union-find / silhouette sampling is skipped (almost no drip spawn from tile alpha).
- * Full sampling is very heavy on large textures and interacts badly with frequent pool refreshes.
- * Opt-in quality: set false after tuning `pointsRefreshSec` ≥ 1–2s.
+ * When true, CPU/GPU silhouette sampling is skipped (no tile/tree alpha drips; GPU readback path also yields nothing).
+ * Use only for temporary profiling or emergency jank isolation — production should keep this false.
  */
-export const ROOF_DRIP_EDGE_SAMPLING_DISABLED = true;
+export const ROOF_DRIP_EDGE_SAMPLING_DISABLED = false;
 
 /**
  * Label 4-connected opaque components. labels[i]=0 transparent; else canonical root index.

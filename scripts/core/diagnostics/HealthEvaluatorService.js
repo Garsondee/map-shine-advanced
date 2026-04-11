@@ -420,6 +420,42 @@ export class HealthEvaluatorService {
       consumers.water = { error: true };
     }
     try {
+      const ws = fc?._waterSplashesEffect;
+      const activeFloorIndex = Number(window.MapShine?.floorStack?.getActiveFloor?.()?.index);
+      const activeState = Number.isFinite(activeFloorIndex) ? ws?._floorStates?.get?.(activeFloorIndex) : null;
+      const sampleFoamSystem = activeState?.foamSystems?.[0] ?? activeState?.foamSystems2?.[0] ?? null;
+      const sampleBehavior = sampleFoamSystem?.behaviors?.find?.((b) => b?.type === 'FoamPlumeLifecycle') ?? null;
+      consumers.waterSplashes = {
+        enabled: !!ws?.enabled && !!ws?.params?.enabled,
+        initialized: !!ws?._initialized,
+        activeFloorIndex: Number.isFinite(activeFloorIndex) ? activeFloorIndex : null,
+        floorStateKeys: (() => {
+          try { return [...(ws?._floorStates?.keys?.() ?? [])]; } catch (_) { return []; }
+        })(),
+        activeFloorHasState: !!activeState,
+        activeFloorPointCounts: activeState
+          ? {
+            edgePoints: Array.isArray(activeState.edgePoints) ? activeState.edgePoints.length : null,
+            interiorPoints: Array.isArray(activeState.interiorPoints) ? activeState.interiorPoints.length : null,
+          }
+          : null,
+        foamLifecycleOutdoors: sampleBehavior
+          ? {
+            hasOutdoorsMask: !!sampleBehavior._hasOutdoorsMask,
+            outdoorsMaskTex: this._texBrief(sampleBehavior._outdoorsMaskTex),
+            outdoorsMaskFlipY: !!sampleBehavior._outdoorsMaskFlipY,
+            outdoorsMaskCpuPixels: !!sampleBehavior._outdoorsMaskData,
+            outdoorsMaskCpuDims: (sampleBehavior._outdoorsMaskW > 0 && sampleBehavior._outdoorsMaskH > 0)
+              ? `${sampleBehavior._outdoorsMaskW}×${sampleBehavior._outdoorsMaskH}`
+              : null,
+            indoorSuppressionStrength: Number(sampleBehavior._indoorSuppressionStrength ?? 0),
+          }
+          : null,
+      };
+    } catch (_) {
+      consumers.waterSplashes = { error: true };
+    }
+    try {
       const sky = fc?._skyColorEffect;
       const u = sky?._composeMaterial?.uniforms;
       const tex = u?.tOutdoorsMask?.value;
@@ -817,6 +853,22 @@ export class HealthEvaluatorService {
         this._records.delete(key);
       }
     }
+
+    // FireEffectV2 is multi-floor (skipped in the loop above) but rows must not linger for floors
+    // that no longer appear in getLevelKeys — e.g. after switching to a floor with no fire masks.
+    const fire = this.floorCompositor?._fireEffect;
+    const fireAllowed = new Set();
+    if (fire?._floorStates && typeof fire._floorStates.keys === 'function') {
+      for (const idx of fire._floorStates.keys()) fireAllowed.add(`floor:${idx}`);
+    }
+    fireAllowed.add(activeKey);
+    for (const key of [...this._records.keys()]) {
+      if (!key.startsWith('FireEffectV2|')) continue;
+      const pipe = key.indexOf('|');
+      const lk = key.slice(pipe + 1);
+      if (!lk.startsWith('floor:')) continue;
+      if (!fireAllowed.has(lk)) this._records.delete(key);
+    }
   }
 
   /**
@@ -938,6 +990,7 @@ export class HealthEvaluatorService {
     this.dependencyGraph.addEdge('PlayerLightEffectV2', 'LightingEffectV2', 'required');
     this.dependencyGraph.addEdge('FireEffectV2', 'LightingEffectV2', 'contextual');
     this.dependencyGraph.addEdge('SkyColorEffectV2', 'WaterEffectV2', 'contextual');
+    this.dependencyGraph.addEdge('WaterEffectV2', 'BloomEffectV2', 'contextual');
     this.dependencyGraph.addEdge('SkyColorEffectV2', 'WindowLightEffectV2', 'contextual');
     this.dependencyGraph.addEdge('SkyColorEffectV2', 'DustEffectV2', 'contextual');
     this.dependencyGraph.addEdge('GpuSceneMaskCompositor', 'SpecularEffectV2', 'optional');
@@ -1282,32 +1335,65 @@ export class HealthEvaluatorService {
       effectId: 'FireEffectV2',
       getInstance: (ctx) => ctx.floorCompositor?._fireEffect ?? null,
       getLevelKeys: (instance, ctx) => {
-        const keys = [];
+        const keysSet = new Set();
         const floorStates = instance?._floorStates;
         if (floorStates && typeof floorStates.keys === 'function') {
-          for (const idx of floorStates.keys()) keys.push(`floor:${idx}`);
+          for (const idx of floorStates.keys()) keysSet.add(`floor:${idx}`);
         }
-        if (keys.length === 0) keys.push(...activeLevelKeys(ctx));
-        return keys;
+        keysSet.add(`floor:${ctx._getRuntimeSnapshot().activeFloor}`);
+        return [...keysSet].sort((a, b) => {
+          const na = Number(String(a).replace(/^floor:/, ''));
+          const nb = Number(String(b).replace(/^floor:/, ''));
+          return (Number.isFinite(na) ? na : 0) - (Number.isFinite(nb) ? nb : 0);
+        });
       },
       rules: [
         {
           id: 'initialized',
           tier: 'structural',
           severity: 'error',
-          check: (instance) => ({
-            pass: !!instance?._initialized,
-            message: instance?._initialized ? 'Initialized' : 'Fire effect not initialized',
-          }),
+          check: (instance) => {
+            if (!instance?.enabled || !instance?.params?.enabled) {
+              return { pass: true, skipped: true, message: 'Fire disabled' };
+            }
+            return {
+              pass: !!instance?._initialized,
+              message: instance?._initialized ? 'Initialized' : 'Fire effect not initialized',
+            };
+          },
         },
         {
           id: 'batchRenderer',
           tier: 'structural',
           severity: 'error',
-          check: (instance) => ({
-            pass: !!instance?._batchRenderer,
-            message: instance?._batchRenderer ? 'Batch renderer present' : 'Fire batch renderer missing',
-          }),
+          check: (instance, _ctx, levelKey) => {
+            if (!instance?.enabled || !instance?.params?.enabled) {
+              return { pass: true, skipped: true, message: 'Fire disabled' };
+            }
+            const m = typeof levelKey === 'string' ? /^floor:(\d+)$/.exec(levelKey) : null;
+            const floorIndex = m ? Number(m[1]) : NaN;
+            if (!Number.isFinite(floorIndex)) {
+              return {
+                pass: !!instance?._batchRenderer,
+                message: instance?._batchRenderer ? 'Batch renderer present' : 'Fire batch renderer missing',
+              };
+            }
+            const st = instance._floorStates?.get(floorIndex);
+            if (!st) {
+              return { pass: true, skipped: true, message: 'No fire on this floor' };
+            }
+            const nSys =
+              (Number(st.systems?.length) || 0) +
+              (Number(st.emberSystems?.length) || 0) +
+              (Number(st.smokeSystems?.length) || 0);
+            if (st.batchRenderer) {
+              return { pass: true, message: 'Batch renderer present' };
+            }
+            if (nSys === 0) {
+              return { pass: true, skipped: true, message: 'No fire on this floor' };
+            }
+            return { pass: false, message: 'Fire batch renderer missing' };
+          },
         },
         heartbeatRule('FireEffectV2', 7000),
       ],

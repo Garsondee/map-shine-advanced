@@ -1,8 +1,10 @@
 # Ignore the Foundry source code bundle
 foundryvttsourcecode
+Foundry Virtual Tabletop v14
 node_modules
 gamesystemsourcecode
 oldmapshinemodulecode
 module-staging
 dist
 othermodules
+docs/

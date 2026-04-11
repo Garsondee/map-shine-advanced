@@ -323,7 +323,6 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
           type: 'folder',
           expanded: true,
           parameters: [
-            'enabled',
             'mode',
             'torchMaxDistanceUnits',
             'flashlightMaxDistanceUnits',
@@ -413,6 +412,8 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
             'flashlightIntensity',
             'flashlightBrokenness',
             'flashlightWobble',
+            'flashlightAngleDeg',
+            'flashlightLengthUnits',
             'flashlightBeamAngleDeg',
             'flashlightBeamLengthUnits',
             'flashlightBeamWidthScale',

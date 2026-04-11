@@ -15,6 +15,7 @@ import { DiagnosticCenterManager } from './diagnostic-center.js';
 import { TileMotionDialog } from './tile-motion-dialog.js';
 import { TokenMovementDialog } from './token-movement-dialog.js';
 import { OVERLAY_THREE_LAYER, TILE_FEATURE_LAYERS } from '../core/render-layers.js';
+import { MASK_DEBUG_OVERLAY_MODE_OPTIONS } from '../compositor-v2/MaskDebugOverlayPass.js';
 import * as sceneSettings from '../settings/scene-settings.js';
 import {
   cloneAndSanitizeControlState,
@@ -119,7 +120,11 @@ export class TweakpaneManager {
         screenU: 0.0,
         screenV: 0.0,
         lastProbeAgeSeconds: 0.0
-      }
+      },
+      /** V2 fullscreen mask debug (FloorCompositor); extend modes in MaskDebugOverlayPass.js */
+      maskDebugOverlayEnabled: false,
+      maskDebugOverlayMode: 'outdoors_current',
+      maskDebugOverlayOpacity: 0.35
     };
     
     /** @type {Object<string, any>} Accordion expanded states */
@@ -232,6 +237,9 @@ export class TweakpaneManager {
 
     /** @type {Array<any>|null} */
     this._dynamicExposureDebugBindings = null;
+
+    /** @type {boolean} */
+    this._didWarnMaskDebugOverlayOnInit = false;
 
     /** @type {boolean} */
     this._singleOpenPrimarySections = true;
@@ -768,6 +776,7 @@ export class TweakpaneManager {
     if (_isDbg) _dlp.begin('tp.loadUIState', 'finalize');
     await this.loadUIState();
     if (_isDbg) _dlp.end('tp.loadUIState');
+    this._warnIfMaskDebugOverlayActiveOnLoad();
 
     // Populate _worldBasedEffects from persisted game setting
     this._initWorldBasedEffects();
@@ -1650,6 +1659,10 @@ export class TweakpaneManager {
 
     debugFolder.addBlade({ view: 'separator' });
 
+    this._buildMaskOverlayV2DebugSection(debugFolder);
+
+    debugFolder.addBlade({ view: 'separator' });
+
     // P5-10: VRAM Budget debug panel
     this._buildVramBudgetDebugSection(debugFolder);
 
@@ -1800,6 +1813,57 @@ export class TweakpaneManager {
 
     folder.on('fold', (ev) => {
       this.accordionStates['debug_maskRegistry'] = ev.expanded;
+      this.saveUIState();
+    });
+  }
+
+  /**
+   * V2 compositor mask overlay (scene-rect UV). First mode: _Outdoors for active level.
+   * Add combined-mask modes in {@link MASK_DEBUG_OVERLAY_MODE_OPTIONS} + FloorCompositor hook.
+   * @param {Object} parentFolder
+   * @private
+   */
+  _buildMaskOverlayV2DebugSection(parentFolder) {
+    if (!parentFolder) return;
+
+    const folder = parentFolder.addFolder({
+      title: 'Mask overlay (V2)',
+      expanded: this.accordionStates['debug_maskOverlayV2'] ?? false
+    });
+
+    folder.addBinding(this.globalParams, 'maskDebugOverlayEnabled', {
+      label: 'Show overlay'
+    }).on('change', () => {
+      try {
+        window.MapShine?.renderLoop?.requestContinuousRender?.(120);
+      } catch (_) {}
+      this.saveUIState();
+    });
+
+    folder.addBinding(this.globalParams, 'maskDebugOverlayMode', {
+      label: 'Mask',
+      options: MASK_DEBUG_OVERLAY_MODE_OPTIONS
+    }).on('change', () => {
+      try {
+        window.MapShine?.renderLoop?.requestContinuousRender?.(120);
+      } catch (_) {}
+      this.saveUIState();
+    });
+
+    folder.addBinding(this.globalParams, 'maskDebugOverlayOpacity', {
+      label: 'Opacity',
+      min: 0,
+      max: 1,
+      step: 0.01
+    }).on('change', () => {
+      try {
+        window.MapShine?.renderLoop?.requestContinuousRender?.(120);
+      } catch (_) {}
+      this.saveUIState();
+    });
+
+    folder.on('fold', (ev) => {
+      this.accordionStates['debug_maskOverlayV2'] = ev.expanded;
       this.saveUIState();
     });
   }
@@ -2148,6 +2212,9 @@ export class TweakpaneManager {
     this.globalParams.mapMakerMode = false;
     this.globalParams.timeRate = 100;
     this.globalParams.sunLatitude = 0.1;
+    this.globalParams.maskDebugOverlayEnabled = false;
+    this.globalParams.maskDebugOverlayMode = 'outdoors_current';
+    this.globalParams.maskDebugOverlayOpacity = 0.35;
 
     // Reset UI scale
     this.uiScale = 1.0;
@@ -2669,6 +2736,8 @@ export class TweakpaneManager {
 
     this.addStatusIndicator(effectId, folder);
 
+    this._addSchemaHelpButton(folder, schema);
+
     if (schema.presets && typeof schema.presets === 'object') {
       const presetKeys = Object.keys(schema.presets);
       if (presetKeys.length > 0) {
@@ -2861,6 +2930,8 @@ export class TweakpaneManager {
     const validatedParams = validation.params;
 
     this.addStatusIndicator(effectId, folder);
+
+    this._addSchemaHelpButton(folder, schema);
 
     // World Based toggle — only for Lighting & Tone Mapping and Color Grading & VFX.
     // When enabled, this effect reads/writes from a single world-scoped game setting
@@ -3077,6 +3148,68 @@ export class TweakpaneManager {
   }
 
   /**
+   * Optional effect-level help from `schema.help` (summary + glossary). Opens in a Foundry dialog
+   * so it is keyboard-accessible, not hover-only.
+   * @param {*} folder - Tweakpane folder API
+   * @param {object} schema
+   * @private
+   */
+  _addSchemaHelpButton(folder, schema) {
+    const help = schema?.help;
+    if (!help || typeof help !== 'object') return;
+
+    const dialogTitle = typeof help.title === 'string' && help.title.trim()
+      ? help.title.trim()
+      : 'Effect help';
+
+    folder.addButton({ title: '(?) Effect help' }).on('click', () => {
+      const parts = [];
+
+      if (typeof help.summary === 'string' && help.summary.trim()) {
+        const paras = help.summary.trim().split(/\n\n+/);
+        for (const p of paras) {
+          parts.push(`<p style="margin:0.5em 0">${this._escHtml(p).replace(/\n/g, '<br/>')}</p>`);
+        }
+      }
+
+      const glossary = help.glossary;
+      if (glossary && typeof glossary === 'object') {
+        const rows = Object.entries(glossary)
+          .map(([k, v]) => {
+            if (typeof v !== 'string' || !v.trim()) return '';
+            return `<tr><td style="vertical-align:top;padding:0.25em 0.75em 0.25em 0;font-weight:600">${this._escHtml(k)}</td><td style="vertical-align:top;padding:0.25em 0">${this._escHtml(v)}</td></tr>`;
+          })
+          .filter(Boolean)
+          .join('');
+        if (rows) {
+          parts.push(
+            '<p style="margin:0.75em 0 0.35em;font-weight:600">Parameters</p>',
+            `<table style="border-collapse:collapse;width:100%">${rows}</table>`
+          );
+        }
+      }
+
+      const content = parts.length
+        ? `<div class="ms-effect-help" style="max-height:min(420px,70vh);overflow:auto">${parts.join('')}</div>`
+        : `<p>${this._escHtml('No help text was provided for this effect.')}</p>`;
+
+      new Dialog({
+        title: this._escHtml(dialogTitle),
+        content,
+        buttons: {
+          close: {
+            icon: '<i class="fas fa-times"></i>',
+            label: 'Close',
+            callback: () => true,
+          },
+        },
+        default: 'close',
+        close: () => {},
+      }).render(true);
+    });
+  }
+
+  /**
    * Build effect controls based on schema groups or flat structure
    * @private
    */
@@ -3172,6 +3305,10 @@ export class TweakpaneManager {
     const bindingOptions = {
       label: paramDef.label || paramId
     };
+
+    if (paramDef.tooltip) {
+      bindingOptions.title = paramDef.tooltip;
+    }
 
     // Check for dropdown options first
     if (paramDef.options) {
@@ -5504,6 +5641,16 @@ export class TweakpaneManager {
           this.globalParams.introZoomEnabled = true;
         }
 
+        if (this.globalParams.maskDebugOverlayEnabled === undefined) {
+          this.globalParams.maskDebugOverlayEnabled = false;
+        }
+        if (this.globalParams.maskDebugOverlayMode === undefined) {
+          this.globalParams.maskDebugOverlayMode = 'outdoors_current';
+        }
+        if (this.globalParams.maskDebugOverlayOpacity === undefined) {
+          this.globalParams.maskDebugOverlayOpacity = 0.35;
+        }
+
         // Backwards-compatible defaults for newly added Dynamic Exposure controls
         if (this.globalParams.dynamicExposure) {
           if (this.globalParams.dynamicExposure.enabled === undefined) this.globalParams.dynamicExposure.enabled = true;
@@ -5543,6 +5690,34 @@ export class TweakpaneManager {
       // Use defaults
       this.container.style.right = '20px';
       this.container.style.bottom = '20px';
+    }
+  }
+
+  /**
+   * Warn users when fullscreen mask debug overlay is persisted ON.
+   * This catches the common "scene looks black/white" confusion at load time.
+   * @private
+   */
+  _warnIfMaskDebugOverlayActiveOnLoad() {
+    if (this._didWarnMaskDebugOverlayOnInit) return;
+    const enabled = this.globalParams?.maskDebugOverlayEnabled === true
+      || this.globalParams?.maskDebugOverlayEnabled === 1
+      || this.globalParams?.maskDebugOverlayEnabled === 'true';
+    if (!enabled) return;
+
+    const mode = typeof this.globalParams?.maskDebugOverlayMode === 'string'
+      ? this.globalParams.maskDebugOverlayMode
+      : 'outdoors_current';
+    const rawOpacity = Number(this.globalParams?.maskDebugOverlayOpacity);
+    const opacity = Number.isFinite(rawOpacity) ? Math.max(0, Math.min(1, rawOpacity)) : 0.35;
+
+    this._didWarnMaskDebugOverlayOnInit = true;
+    try {
+      ui?.notifications?.warn?.(
+        `Map Shine: Debug mask overlay is ACTIVE (${mode}, opacity ${opacity.toFixed(2)}). ` +
+        'Disable "Mask Debug Overlay Enabled" in Tweakpane > Debug if scene visuals look wrong.'
+      );
+    } catch (_) {
     }
   }
 

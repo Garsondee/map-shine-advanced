@@ -228,15 +228,16 @@ export class ParameterValidator {
  */
 export function getSpecularEffectiveState(params) {
   const reasons = [];
-  
-  // Main effect disabled
-  if (!params.enabled) {
+
+  // Main effect disabled (treat missing flag as on for legacy payloads)
+  if (params.enabled === false) {
     return { effective: false, reasons: ['Effect is disabled'] };
   }
-  
-  // Missing required texture
-  if (params.hasSpecularMask === false) {
-    reasons.push('Missing specular mask (_Specular suffix)');
+
+  // Populate updates textureStatus when overlays are built
+  const status = params.textureStatus;
+  if (typeof status === 'string' && /inactive|no _specular/i.test(status)) {
+    reasons.push('No _Specular mask found for this scene');
   }
 
   // Zero intensity = no visible effect
@@ -318,11 +319,14 @@ export function createIridescenceSanityChecker(params, schema) {
     warnings.push(`Iridescence intensity very high (${params.intensity}), may wash out details`);
   }
   
-  if (params.noiseScale < 0.01) {
-    errors.push(`Noise scale too small (${params.noiseScale}), islands may collapse to flat color`);
-    fixes.noiseScale = 0.01;
-  } else if (params.noiseScale > 10.0) {
-    warnings.push(`Noise scale very large (${params.noiseScale}), glitter may alias or look noisy`);
+  if (params.noiseScale < 0.0) {
+    errors.push(`Noise scale below 0 (${params.noiseScale}) is invalid`);
+    fixes.noiseScale = 0.0;
+  } else if (params.noiseScale > 1.0) {
+    errors.push(`Noise scale above 1 (${params.noiseScale}) is invalid (UI is 0-1)`);
+    fixes.noiseScale = 1.0;
+  } else if (params.noiseScale < 0.02) {
+    warnings.push(`Noise scale very low (${params.noiseScale}), pattern may look nearly flat`);
   }
   
   if (params.phaseMult <= 0.0) {

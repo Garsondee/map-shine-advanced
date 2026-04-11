@@ -374,27 +374,23 @@ export class CameraFollower {
     const fgBoundary = Number(scene?.foregroundElevation);
     const fgTop = getSceneForegroundElevationTop(scene);
 
-    if (Number.isFinite(bgLo) && Number.isFinite(fgBoundary) && bgLo < fgBoundary) {
-      if (!hasDuplicateBand(bgLo, fgBoundary) && !overlapsAny(bgLo, fgBoundary)) {
-        out.push({
-          levelId: 'msa-scene-background',
-          label: 'Scene background',
-          bottom: bgLo,
-          top: fgBoundary,
-          center: (bgLo + fgBoundary) * 0.5,
-          source: 'sceneImage',
-        });
-      }
-    }
+    // Scene background + foreground should represent one authored scene-image
+    // band, never two synthetic navigation levels.
+    const sceneImageLo = Number.isFinite(bgLo) ? bgLo : null;
+    const sceneImageHi = (() => {
+      if (Number.isFinite(fgTop) && fgTop !== Infinity) return fgTop;
+      if (Number.isFinite(fgBoundary)) return fgBoundary;
+      return null;
+    })();
 
-    if (Number.isFinite(fgBoundary) && Number.isFinite(fgTop) && fgTop !== Infinity && fgBoundary < fgTop) {
-      if (!hasDuplicateBand(fgBoundary, fgTop) && !overlapsAny(fgBoundary, fgTop)) {
+    if (Number.isFinite(sceneImageLo) && Number.isFinite(sceneImageHi) && sceneImageLo < sceneImageHi) {
+      if (!hasDuplicateBand(sceneImageLo, sceneImageHi) && !overlapsAny(sceneImageLo, sceneImageHi)) {
         out.push({
-          levelId: 'msa-scene-foreground',
-          label: 'Scene foreground',
-          bottom: fgBoundary,
-          top: fgTop,
-          center: (fgBoundary + fgTop) * 0.5,
+          levelId: 'msa-scene-images',
+          label: 'Scene images',
+          bottom: sceneImageLo,
+          top: sceneImageHi,
+          center: (sceneImageLo + sceneImageHi) * 0.5,
           source: 'sceneImage',
         });
       }

@@ -32,7 +32,9 @@ export class IridescenceEffectV2 {
     this._sharedUniforms = null;
 
     this.params = {
+      enabled: true,
       textureStatus: 'Searching...',
+      /** Set in populate(); retained for scene state / tools (not a Tweakpane control). */
       hasIridescenceMask: true,
       intensity: 0.5,
       distortionStrength: 0.92,
@@ -52,6 +54,7 @@ export class IridescenceEffectV2 {
   get enabled() { return this._enabled; }
   set enabled(v) {
     this._enabled = !!v;
+    this.params.enabled = this._enabled;
     if (this._sharedUniforms?.uEffectEnabled) this._sharedUniforms.uEffectEnabled.value = this._enabled;
     for (const entry of this._overlays.values()) entry.mesh.visible = this._enabled;
   }
@@ -59,28 +62,223 @@ export class IridescenceEffectV2 {
   static getControlSchema() {
     return {
       enabled: true,
+      help: {
+        title: 'Iridescence (_Iridescence masks)',
+        summary: [
+          'Adds a **thin-film / holographic** layer on tiles (and the scene background) that ship a matching **`_Iridescence`** texture next to the art.',
+          'The shader blends **screen-space flow**, **world noise**, and **mask-driven distortion** into shifting spectral color. **Foundry lights** tint the result; **ignore darkness** keeps color visible in shadow.',
+          'One overlay per masked source, on the floor bus — visibility follows level/floor rules like Specular/Bush.',
+          '**Noise scale** is a **0–1 UI** value mapped internally to shader frequency (higher = finer detail).',
+          'Settings save with the scene (not World Based).',
+        ].join('\n\n'),
+        glossary: {
+          'Mask status': 'Whether the scene found at least one `_Iridescence` mask after load.',
+          Intensity: 'Strength of the iridescent color contribution.',
+          Opacity: 'Master alpha for the additive layer (`alpha` uniform).',
+          'Flow speed': 'How fast the phase field scrolls in screen UV space.',
+          'Parallax strength': 'How much the view offset shifts the pattern (camera parallax).',
+          'Ignore darkness': 'How much to resist Foundry darkness / night tint on the effect (0 = full scene darkening, 1 = mostly ignore).',
+          'Color cycle speed': 'Rate of hue rotation over time.',
+          'Noise type': 'Liquid = smoother bands; Glitter = grainier, sparklier noise.',
+          'Distortion strength': 'How strongly the mask warps UVs into the noise field.',
+          'Noise scale': 'UI 0–1 mapped to internal noise frequency (see summary).',
+          'Phase multiplier': 'Scales interference fringe density.',
+          'Mask threshold': 'Cutoff on the mask alpha — higher keeps only stronger mask regions.',
+        },
+      },
+      presetApplyDefaults: true,
       groups: [
-        { name: 'status', label: 'Effect Status', type: 'inline', parameters: ['textureStatus'] },
-        { name: 'main', label: 'Effect Properties', type: 'inline', parameters: ['intensity', 'alpha', 'flowSpeed', 'parallaxStrength', 'angle', 'maskThreshold'] },
-        { name: 'style', label: 'Style & Magic', type: 'inline', parameters: ['noiseType', 'ignoreDarkness', 'colorCycleSpeed'] },
-        { name: 'distortion', label: 'Distortion & Noise', type: 'folder', expanded: false, parameters: ['distortionStrength', 'noiseScale', 'phaseMult'] },
+        {
+          name: 'status',
+          label: 'Status',
+          type: 'folder',
+          expanded: true,
+          parameters: ['textureStatus'],
+        },
+        {
+          name: 'look',
+          label: 'Look',
+          type: 'folder',
+          expanded: true,
+          parameters: ['intensity', 'alpha'],
+        },
+        {
+          name: 'motion',
+          label: 'Motion & parallax',
+          type: 'folder',
+          expanded: true,
+          parameters: ['flowSpeed', 'angle', 'parallaxStrength'],
+        },
+        {
+          name: 'spectral',
+          label: 'Spectral & lighting',
+          type: 'folder',
+          expanded: false,
+          parameters: ['noiseType', 'ignoreDarkness', 'colorCycleSpeed'],
+        },
+        {
+          name: 'distortion',
+          label: 'Distortion & noise',
+          type: 'folder',
+          expanded: false,
+          parameters: ['distortionStrength', 'noiseScale', 'phaseMult'],
+        },
+        {
+          name: 'mask',
+          label: 'Mask',
+          type: 'folder',
+          expanded: false,
+          parameters: ['maskThreshold'],
+        },
       ],
       parameters: {
-        hasIridescenceMask: { type: 'boolean', default: true, hidden: true },
-        textureStatus: { type: 'string', label: 'Mask Status', default: 'Checking...', readonly: true },
-        intensity: { type: 'slider', label: 'Intensity', min: 0, max: 2, step: 0.01, default: 0.5 },
-        alpha: { type: 'slider', label: 'Opacity', min: 0, max: 1, step: 0.01, default: 0.9 },
-        noiseType: { type: 'list', label: 'Noise Type', options: { 'Liquid (Smooth)': 0, 'Glitter (Sand)': 1 }, default: 0 },
-        ignoreDarkness: { type: 'slider', label: 'Ignore Darkness', min: 0, max: 1, step: 0.01, default: 0.6 },
-        colorCycleSpeed: { type: 'slider', label: 'Color Cycle Speed', min: 0, max: 2, step: 0.01, default: 0.25 },
-        flowSpeed: { type: 'slider', label: 'Flow Speed', min: 0, max: 5, step: 0.01, default: 0.15 },
-        angle: { type: 'slider', label: 'Angle', min: 0, max: 360, step: 1, default: 0.0 },
-        distortionStrength: { type: 'slider', label: 'Distortion Strength', min: 0, max: 2, step: 0.01, default: 0.13 },
-        noiseScale: { type: 'slider', label: 'Noise Scale', min: 0.1, max: 4, step: 0.01, default: 0.44 },
-        phaseMult: { type: 'slider', label: 'Phase Multiplier', min: 0.5, max: 6, step: 0.1, default: 6.0 },
-        parallaxStrength: { type: 'slider', label: 'Parallax Strength', min: 0, max: 5, step: 0.01, default: 4.31 },
-        maskThreshold: { type: 'slider', label: 'Mask Threshold', min: 0, max: 1, step: 0.01, default: 0.4 },
-      }
+        textureStatus: {
+          type: 'string',
+          label: 'Mask status',
+          default: 'Searching...',
+          readonly: true,
+          tooltip: 'Updated when the scene loads: whether any `_Iridescence` mask was found.',
+        },
+        intensity: {
+          type: 'slider',
+          label: 'Intensity',
+          min: 0,
+          max: 2,
+          step: 0.01,
+          default: 0.5,
+          throttle: 100,
+          tooltip: 'Strength of the iridescent color.',
+        },
+        alpha: {
+          type: 'slider',
+          label: 'Opacity',
+          min: 0,
+          max: 1,
+          step: 0.01,
+          default: 0.5,
+          throttle: 100,
+          tooltip: 'Master alpha for the additive overlay.',
+        },
+        flowSpeed: {
+          type: 'slider',
+          label: 'Flow speed',
+          min: 0,
+          max: 5,
+          step: 0.01,
+          default: 1.5,
+          throttle: 100,
+          tooltip: 'Screen-space scroll speed of the interference pattern.',
+        },
+        angle: {
+          type: 'slider',
+          label: 'Angle',
+          min: 0,
+          max: 360,
+          step: 1,
+          default: 0,
+          throttle: 100,
+          tooltip: 'Flow direction in degrees.',
+        },
+        parallaxStrength: {
+          type: 'slider',
+          label: 'Parallax strength',
+          min: 0,
+          max: 5,
+          step: 0.01,
+          default: 3.0,
+          throttle: 100,
+          tooltip: 'How much the pattern shifts with camera movement.',
+        },
+        noiseType: {
+          type: 'list',
+          label: 'Noise type',
+          options: { 'Liquid (smooth)': 0, 'Glitter (grain)': 1 },
+          default: 0,
+          tooltip: 'Liquid = smoother bands; Glitter = sharper, grainier sparkle.',
+        },
+        ignoreDarkness: {
+          type: 'slider',
+          label: 'Ignore darkness',
+          min: 0,
+          max: 1,
+          step: 0.01,
+          default: 0.5,
+          throttle: 100,
+          tooltip: 'Higher = keep iridescence visible when the scene is dark or night-tinted.',
+        },
+        colorCycleSpeed: {
+          type: 'slider',
+          label: 'Color cycle speed',
+          min: 0,
+          max: 2,
+          step: 0.01,
+          default: 0.1,
+          throttle: 100,
+          tooltip: 'How fast hues shift over time.',
+        },
+        distortionStrength: {
+          type: 'slider',
+          label: 'Distortion strength',
+          min: 0,
+          max: 2,
+          step: 0.01,
+          default: 0.92,
+          throttle: 100,
+          tooltip: 'UV warp from the mask into the noise field.',
+        },
+        noiseScale: {
+          type: 'slider',
+          label: 'Noise scale',
+          min: 0,
+          max: 1,
+          step: 0.01,
+          default: 0.68,
+          throttle: 100,
+          tooltip: '0–1 UI mapped to internal noise frequency (higher = finer detail).',
+        },
+        phaseMult: {
+          type: 'slider',
+          label: 'Phase multiplier',
+          min: 0.5,
+          max: 6,
+          step: 0.1,
+          default: 4.0,
+          throttle: 100,
+          tooltip: 'Density of interference fringes.',
+        },
+        maskThreshold: {
+          type: 'slider',
+          label: 'Mask threshold',
+          min: 0,
+          max: 1,
+          step: 0.01,
+          default: 0.34,
+          throttle: 100,
+          tooltip: 'Minimum mask value to show iridescence; trims weak edges.',
+        },
+      },
+      presets: {
+        Calm: {
+          flowSpeed: 0.55,
+          colorCycleSpeed: 0.04,
+          distortionStrength: 0.55,
+          phaseMult: 3.2,
+        },
+        Vivid: {
+          intensity: 0.82,
+          flowSpeed: 2.1,
+          colorCycleSpeed: 0.42,
+          parallaxStrength: 3.8,
+          phaseMult: 5.2,
+        },
+        Subtle: {
+          intensity: 0.28,
+          alpha: 0.32,
+          flowSpeed: 0.9,
+          colorCycleSpeed: 0.06,
+          distortionStrength: 0.45,
+        },
+      },
     };
   }
 
@@ -106,6 +304,7 @@ export class IridescenceEffectV2 {
       }
     }
     this._overlays.clear();
+    this.params.textureStatus = 'Inactive (no _Iridescence mask)';
   }
 
   dispose() {
@@ -165,7 +364,9 @@ export class IridescenceEffectV2 {
     }
 
     this.params.hasIridescenceMask = overlayCount > 0;
-    this.params.textureStatus = overlayCount > 0 ? 'Ready (Texture Found)' : 'Inactive (No Texture Found)';
+    this.params.textureStatus = overlayCount > 0
+      ? 'Ready (_Iridescence mask found)'
+      : 'Inactive (no _Iridescence mask)';
     log.info(`IridescenceEffectV2 populated: ${overlayCount} overlay(s)`);
   }
 
@@ -301,7 +502,7 @@ export class IridescenceEffectV2 {
       uIntensity: { value: this.params.intensity },
       uAlpha: { value: this.params.alpha },
       uDistortionStrength: { value: this.params.distortionStrength },
-      uNoiseScale: { value: this.params.noiseScale },
+      uNoiseScale: { value: this._mapNoiseScale(this.params.noiseScale, this.params.noiseType) },
       uNoiseType: { value: this.params.noiseType },
       uFlowSpeed: { value: this.params.flowSpeed },
       uPhaseMult: { value: this.params.phaseMult },
@@ -314,7 +515,6 @@ export class IridescenceEffectV2 {
       uMaskThreshold: { value: this.params.maskThreshold },
       uAmbientDaylight: { value: new THREE.Color(1.0, 1.0, 1.0) },
       uAmbientDarkness: { value: new THREE.Color(0.14, 0.14, 0.28) },
-      uAmbientBrightest: { value: new THREE.Color(1.0, 1.0, 1.0) },
       numLights: { value: 0 },
       lightPosition: { value: new Float32Array(MAX_LIGHTS * 3) },
       lightColor: { value: new Float32Array(MAX_LIGHTS * 3) },
@@ -336,7 +536,6 @@ export class IridescenceEffectV2 {
       if (colors) {
         this._applyColor(colors.ambientDaylight, this._sharedUniforms.uAmbientDaylight.value);
         this._applyColor(colors.ambientDarkness, this._sharedUniforms.uAmbientDarkness.value);
-        this._applyColor(colors.ambientBrightest, this._sharedUniforms.uAmbientBrightest.value);
       }
     } catch (_) {}
   }
@@ -567,7 +766,6 @@ export class IridescenceEffectV2 {
       uniform float uMaskThreshold;
       uniform vec3 uAmbientDaylight;
       uniform vec3 uAmbientDarkness;
-      uniform vec3 uAmbientBrightest;
       uniform int numLights;
       uniform vec3 lightPosition[${MAX_LIGHTS}];
       uniform vec3 lightColor[${MAX_LIGHTS}];

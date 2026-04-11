@@ -37,26 +37,64 @@ export class SharpenEffectV2 {
   static getControlSchema() {
     return {
       enabled: false,
+      help: {
+        title: 'Sharpen (unsharp mask)',
+        summary: [
+          'Adds local contrast on edges by blending a high-pass (detail) signal back into the image. Useful for soft maps or slight post-scale blur.',
+          'No masks or tile data required — full-screen post-processing on the composited frame.',
+          'Performance: one extra fullscreen pass with a few taps; cost is modest. Very high radius samples a wider neighborhood (still cheap vs bloom).',
+          'Persistence: settings save with the scene (not World Based).',
+        ].join('\n\n'),
+        glossary: {
+          Amount: 'How strongly detail is boosted. 0 disables the filter in the shader.',
+          'Radius (px)': 'Edge detection neighborhood in screen pixels (larger = coarser detail).',
+          Threshold: 'Minimum edge strength before sharpening applies; reduces grain and noise halos.',
+        },
+      },
       groups: [
         {
-          name: 'sharpen',
-          label: 'Sharpen',
-          type: 'inline',
-          parameters: ['amount', 'radiusPx', 'threshold']
-        }
+          name: 'look',
+          label: 'Look',
+          type: 'folder',
+          expanded: true,
+          parameters: ['amount', 'radiusPx', 'threshold'],
+        },
       ],
       parameters: {
         enabled: { type: 'boolean', default: false, hidden: true },
-        amount: { type: 'slider', min: 0.0, max: 2.0, step: 0.01, default: 0.5 },
-        radiusPx: { type: 'slider', min: 0.0, max: 6.0, step: 0.1, default: 3.5 },
-        threshold: { type: 'slider', min: 0.0, max: 0.25, step: 0.005, default: 0.045 }
+        amount: {
+          type: 'slider',
+          label: 'Amount',
+          min: 0.0,
+          max: 2.0,
+          step: 0.01,
+          default: 0.5,
+          tooltip: 'Strength of the sharpen blend (0 = no effect).',
+        },
+        radiusPx: {
+          type: 'slider',
+          label: 'Radius (px)',
+          min: 0.0,
+          max: 6.0,
+          step: 0.1,
+          default: 3.5,
+          tooltip: 'Blur radius in pixels used for the unsharp mask.',
+        },
+        threshold: {
+          type: 'slider',
+          label: 'Threshold',
+          min: 0.0,
+          max: 0.25,
+          step: 0.005,
+          default: 0.045,
+          tooltip: 'Ignore weak edges below this luma delta to limit noise sharpening.',
+        },
       },
       presets: {
-        'Off': { amount: 0.0, radiusPx: 1.0, threshold: 0.0 },
-        'Subtle': { amount: 0.25, radiusPx: 1.0, threshold: 0.02 },
-        'Crisp': { amount: 0.55, radiusPx: 1.2, threshold: 0.015 },
-        'Strong': { amount: 1.0, radiusPx: 1.5, threshold: 0.02 }
-      }
+        Subtle: { amount: 0.25, radiusPx: 1.0, threshold: 0.02 },
+        Crisp: { amount: 0.55, radiusPx: 1.2, threshold: 0.015 },
+        Strong: { amount: 1.0, radiusPx: 1.5, threshold: 0.02 },
+      },
     };
   }
 

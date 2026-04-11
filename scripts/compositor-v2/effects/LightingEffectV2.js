@@ -43,6 +43,26 @@ const log = createLogger('LightingEffectV2');
 const MODULE_ID = 'map-shine-advanced';
 const LIGHT_ENHANCEMENT_FLAG_KEY = 'lightEnhancements';
 
+/** Dropped from UI/schema (never wired or obsolete) — remove if merged from old saves */
+const LEGACY_LIGHTING_PARAM_KEYS = [
+  'outdoorBrightness',
+  'darknessEffect',
+  'upperFloorTransmissionSoftness',
+  'sunIndoorGain',
+  'sunBlurRadiusPx',
+  'lightningOutsideEnabled',
+  'lightningOutsideGain',
+  'lightningOutsideShadowEnabled',
+  'lightningOutsideShadowStrength',
+  'lightningOutsideShadowRadiusPx',
+  'lightningOutsideShadowEdgeGain',
+  'lightningOutsideShadowInvert',
+  'debugShowLightBuffer',
+  'debugLightBufferExposure',
+  'debugShowDarknessBuffer',
+  'debugShowRopeMask',
+];
+
 const clamp01 = (n) => Math.max(0, Math.min(1, n));
 
 const readFoundryDarkness01 = () => {
@@ -108,7 +128,6 @@ export class LightingEffectV2 {
       wallInsetPx: 6.0,
       upperFloorTransmissionEnabled: false,
       upperFloorTransmissionStrength: 0.6,
-      upperFloorTransmissionSoftness: 1.5,
       /**
        * When true (default), on multi-floor maps screen-space roof gating and
        * roof→building-shadow suppression run only on the top floor — avoids
@@ -116,26 +135,13 @@ export class LightingEffectV2 {
        * all floors (can imprint upper ceilings on ground).
        */
       restrictRoofScreenLightOcclusionToTopFloor: true,
-      darknessEffect: 1.0,
-      outdoorBrightness: 1.0,
+      /** Extra ambient dim on _Outdoors-masked *interior* pixels (0 = off). Outdoors unchanged. */
+      interiorDarkness: 0.0,
       lightAnimWindInfluence: 1.0,
       lightAnimOutdoorPower: 2.0,
-      lightningOutsideEnabled: true,
-      lightningOutsideGain: 1.25,
-      lightningOutsideShadowEnabled: true,
-      lightningOutsideShadowStrength: 0.75,
-      lightningOutsideShadowRadiusPx: 520.0,
-      lightningOutsideShadowEdgeGain: 6.0,
-      lightningOutsideShadowInvert: false,
       darknessLevel: 0.0,
       negativeDarknessStrength: 1.0,
       darknessPunchGain: 2.0,
-      sunIndoorGain: 0.0,
-      sunBlurRadiusPx: 5.0,
-      debugShowLightBuffer: false,
-      debugLightBufferExposure: 1.0,
-      debugShowDarknessBuffer: false,
-      debugShowRopeMask: false,
     };
 
     // ── Light management ────────────────────────────────────────────────
@@ -293,19 +299,13 @@ export class LightingEffectV2 {
       enabled: true,
       groups: [
         { name: 'illumination', label: 'Global Illumination', type: 'inline', parameters: ['globalIllumination', 'lightIntensity', 'colorationStrength'] },
-        { name: 'occlusion', label: 'Occlusion', type: 'inline', parameters: ['wallInsetPx', 'restrictRoofScreenLightOcclusionToTopFloor', 'upperFloorTransmissionEnabled', 'upperFloorTransmissionStrength', 'upperFloorTransmissionSoftness'] },
-        { name: 'darkness', label: 'Darkness Response', type: 'inline', parameters: ['darknessEffect', 'outdoorBrightness', 'negativeDarknessStrength', 'darknessPunchGain'] },
-        { name: 'sun', label: 'Sun Lights (Indoor Fill)', type: 'inline', parameters: ['sunIndoorGain', 'sunBlurRadiusPx'] },
+        { name: 'occlusion', label: 'Occlusion', type: 'inline', parameters: ['wallInsetPx', 'restrictRoofScreenLightOcclusionToTopFloor', 'upperFloorTransmissionEnabled', 'upperFloorTransmissionStrength'] },
+        { name: 'darkness', label: 'Darkness Response', type: 'inline', parameters: ['interiorDarkness', 'negativeDarknessStrength', 'darknessPunchGain'] },
         { name: 'lightAnim', label: 'Light Animation Behaviour', type: 'inline', parameters: ['lightAnimWindInfluence', 'lightAnimOutdoorPower'] },
-        {
-          name: 'lightning', label: 'Lightning (Outside)', type: 'inline',
-          parameters: ['lightningOutsideEnabled', 'lightningOutsideGain', 'lightningOutsideShadowEnabled', 'lightningOutsideShadowStrength', 'lightningOutsideShadowRadiusPx', 'lightningOutsideShadowEdgeGain', 'lightningOutsideShadowInvert']
-        },
-        { name: 'debug', label: 'Debug', type: 'folder', expanded: false, parameters: ['debugShowLightBuffer', 'debugLightBufferExposure', 'debugShowDarknessBuffer', 'debugShowRopeMask'] }
       ],
       parameters: {
         enabled: { type: 'boolean', default: true, hidden: true },
-        globalIllumination: { type: 'slider', min: 0, max: 2, step: 0.1, default: 1.3 },
+        globalIllumination: { type: 'slider', min: 0, max: 2, step: 0.1, default: 1.3, label: 'Illumination scale' },
         lightIntensity: { type: 'slider', min: 0, max: 2, step: 0.05, default: 0.25, label: 'Light Intensity' },
         colorationStrength: { type: 'slider', min: 0, max: 500, step: 0.05, default: 1.0, label: 'Coloration Strength' },
         wallInsetPx: { type: 'slider', min: 0, max: 40, step: 0.5, default: 6.0, label: 'Wall Inset (px)' },
@@ -317,26 +317,11 @@ export class LightingEffectV2 {
         },
         upperFloorTransmissionEnabled: { type: 'boolean', default: false, label: 'Upper Floor Through-Gaps' },
         upperFloorTransmissionStrength: { type: 'slider', min: 0, max: 2, step: 0.05, default: 0.6, label: 'Upper Light Strength' },
-        upperFloorTransmissionSoftness: { type: 'slider', min: 0.25, max: 4, step: 0.05, default: 1.5, label: 'Upper Light Softness' },
-        darknessEffect: { type: 'slider', min: 0, max: 2, step: 0.05, default: 1.0, label: 'Darkness Effect' },
-        outdoorBrightness: { type: 'slider', min: 0.5, max: 2.5, step: 0.05, default: 1.0, label: 'Outdoor Brightness' },
+        interiorDarkness: { type: 'slider', min: 0, max: 1.5, step: 0.05, default: 0.0, label: 'Interior Darkness' },
         lightAnimWindInfluence: { type: 'slider', min: 0, max: 3, step: 0.05, default: 1.0, label: 'Wind Influence' },
         lightAnimOutdoorPower: { type: 'slider', min: 0, max: 6, step: 0.25, default: 2.0, label: 'Outdoor Power' },
-        lightningOutsideEnabled: { type: 'boolean', default: true, label: 'Enabled' },
-        lightningOutsideGain: { type: 'slider', min: 0, max: 3, step: 0.05, default: 1.25, label: 'Flash Gain' },
-        lightningOutsideShadowEnabled: { type: 'boolean', default: true, label: 'Edge Shadows' },
-        lightningOutsideShadowStrength: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.75, label: 'Shadow Strength' },
-        lightningOutsideShadowRadiusPx: { type: 'slider', min: 0, max: 2500, step: 10, default: 520.0, label: 'Shadow Radius (px)' },
-        lightningOutsideShadowEdgeGain: { type: 'slider', min: 0, max: 25, step: 0.25, default: 6.0, label: 'Edge Gain' },
-        lightningOutsideShadowInvert: { type: 'boolean', default: false, label: 'Invert Side' },
         negativeDarknessStrength: { type: 'slider', min: 0, max: 3, step: 0.1, default: 1.0, label: 'Negative Darkness Strength' },
         darknessPunchGain: { type: 'slider', min: 0, max: 10, step: 0.1, default: 2.0, label: 'Darkness Punch Gain' },
-        sunIndoorGain: { type: 'slider', min: 0, max: 20, step: 0.25, default: 0.0, label: 'Indoor Gain' },
-        sunBlurRadiusPx: { type: 'slider', min: 0, max: 40, step: 1, default: 5.0, label: 'Blur Radius (px)' },
-        debugShowLightBuffer: { type: 'boolean', default: false },
-        debugLightBufferExposure: { type: 'number', default: 1.0 },
-        debugShowDarknessBuffer: { type: 'boolean', default: false },
-        debugShowRopeMask: { type: 'boolean', default: false }
       }
     };
   }
@@ -395,6 +380,10 @@ export class LightingEffectV2 {
         uHasCloudShadow: { value: 0 },
         tCloudShadowRaw:    { value: null },
         uHasCloudShadowRaw: { value: 0 },
+        tCombinedShadow:    { value: null },
+        uHasCombinedShadow: { value: 0 },
+        tCombinedShadowRaw:    { value: null },
+        uHasCombinedShadowRaw: { value: 0 },
         // Building shadow: greyscale factor from BuildingShadowsEffectV2.
         // Applied after cloud shadow — dims only the ambient component.
         tBuildingShadow:     { value: null },
@@ -438,6 +427,7 @@ export class LightingEffectV2 {
         uColorationStrength: { value: 1.0 },
         uNegativeDarknessStrength: { value: 1.0 },
         uDarknessPunchGain:        { value: 2.0 },
+        uInteriorDarkness:         { value: 0.0 },
         // Screen-space roof mask: apply to Foundry lights only on ground floor;
         // apply to window-glow channel only on upper floors (window shader disables
         // uAllowRoofGate there — compose must still suppress leaks onto water/lower views).
@@ -472,6 +462,10 @@ export class LightingEffectV2 {
         uniform float uHasCloudShadow;
         uniform sampler2D tCloudShadowRaw;
         uniform float uHasCloudShadowRaw;
+        uniform sampler2D tCombinedShadow;
+        uniform float uHasCombinedShadow;
+        uniform sampler2D tCombinedShadowRaw;
+        uniform float uHasCombinedShadowRaw;
         uniform sampler2D tBuildingShadow;
         uniform float uHasBuildingShadow;
         uniform float uBuildingShadowOpacity;
@@ -499,6 +493,7 @@ export class LightingEffectV2 {
         uniform float uColorationStrength;
         uniform float uNegativeDarknessStrength;
         uniform float uDarknessPunchGain;
+        uniform float uInteriorDarkness;
         uniform float uApplyRoofOcclusionToSources;
         uniform float uApplyRoofOcclusionToWindow;
         uniform float uApplyRoofOcclusionToBuilding;
@@ -542,6 +537,16 @@ export class LightingEffectV2 {
             step(sceneUvRaw.x, 1.0) *
             step(sceneUvRaw.y, 1.0);
 
+          // Interior vs outdoor (_Outdoors mask) — dim ambient on indoor pixels only.
+          float isOutdoorForInteriorDim = 1.0;
+          if (uHasOutdoorsForRoofLight > 0.5) {
+            vec2 ouvId = sceneUvFoundry;
+            if (uOutdoorsForRoofLightFlipY > 0.5) ouvId.y = 1.0 - ouvId.y;
+            vec4 odId = texture2D(tOutdoorsForRoofLight, ouvId);
+            float odAId = clamp(odId.a, 0.0, 1.0);
+            isOutdoorForInteriorDim = (odAId > 0.08) ? step(0.45, odId.r) : 1.0;
+          }
+
           // Roof / tree canopy: prefer packed ceiling transmittance T (half-res blit from
           // OverheadShadows) so geometric gating matches one source; else derive from
           // roof alpha + block. _Outdoors still applies bounded indoor relief.
@@ -579,11 +584,13 @@ export class LightingEffectV2 {
             }
           }
           float roofLightVisibility = stampedVis;
-          if (uHasOutdoorsForRoofLight > 0.5) {
+          if (uHasOutdoorsForRoofLight > 0.5 && inSceneBounds > 0.5) {
             // Relief is intended to prevent “stuck dark” indoor pixels under overhead capture
             // while roofs/trees are being hover-revealed. When the occluder is visibly present,
             // lights should remain masked. Gate relief by live roof alpha so it ramps in only
             // as the roof/tree fades out.
+            // Outside sceneRect (canvas padding): sceneUvFoundry is clamped — do not sample
+            // _Outdoors there or roof relief bleeds from the mask border (see inSceneBounds).
             float revealWeight = 1.0 - smoothstep(0.20, 0.60, roofAlphaLive);
             vec2 ouv = sceneUvFoundry;
             if (uOutdoorsForRoofLightFlipY > 0.5) ouv.y = 1.0 - ouv.y;
@@ -642,22 +649,46 @@ export class LightingEffectV2 {
             0.0, 1.0
           );
           vec3 ambientAfterDark = punchedAmbient * (1.0 - punchedMask);
+          // Padding / outside sceneRect: sceneUvFoundry is clamped — _Outdoors would
+          // sample the map border and smear interior classification (horizontal bands
+          // in the grey margin). Match building-shadow guard.
+          float isOutdoorForInteriorDimSafe = mix(1.0, isOutdoorForInteriorDim, inSceneBounds);
+          ambientAfterDark *= max(0.0, 1.0 - uInteriorDarkness * (1.0 - isOutdoorForInteriorDimSafe));
 
           // Total illumination = ambient (after darkness) + dynamic lights.
           vec3 totalIllumination = ambientAfterDark + directLight;
 
-          // Cloud shadow: dims the ambient component only.
+          // Unified shadow path: cloud + overhead composition from ShadowManagerV2.
+          // Dynamic lights are NOT gated so torches/lamps still punch through.
+          if (uHasCombinedShadow > 0.5) {
+            float shadowFactor = clamp(texture2D(tCombinedShadow, vUv).r, 0.0, 1.0);
+            if (uHasCombinedShadowRaw > 0.5 && uHasOverheadRoofAlpha > 0.5) {
+              float rawShadowFactor = clamp(texture2D(tCombinedShadowRaw, vUv).r, 0.0, 1.0);
+              vec4 roofSample = texture2D(tOverheadRoofAlpha, vUv);
+              float roofAlpha = clamp(max(roofSample.a, max(roofSample.r, max(roofSample.g, roofSample.b))), 0.0, 1.0);
+              // Raw shadow has no outdoors / upper-floor masking. Interior pixels still
+              // get overhead roof alpha (ceiling capture); only blend raw on outdoor-classified
+              // pixels so multi-floor indoor rooms keep masked cloud shadow.
+              float rawMix = roofAlpha * isOutdoorForInteriorDimSafe;
+              shadowFactor = mix(shadowFactor, rawShadowFactor, rawMix);
+            }
+            vec3 ambientPortion = ambientAfterDark;
+            totalIllumination = ambientPortion * shadowFactor + directLight;
+          }
+
+          // Legacy cloud-only path: dims the ambient component only.
           // Dynamic lights are NOT gated so torches/lamps still punch through clouds.
-          if (uHasCloudShadow > 0.5) {
+          if (uHasCombinedShadow < 0.5 && uHasCloudShadow > 0.5) {
             float shadowFactor = clamp(texture2D(tCloudShadow, vUv).r, 0.0, 1.0);
-            // Roof tiles can be authored as "indoors" in the outdoors mask. On
-            // visible roof pixels, prefer the raw cloud shadow (before outdoors
-            // masking) so rooftops still receive moving cloud shadows.
+            // On outdoor pixels under overhead capture, prefer raw cloud (moving
+            // shadows on rooftops). Indoors, keep masked cloud only — roof alpha
+            // still stamps ceilings in screen space on upper floors.
             if (uHasCloudShadowRaw > 0.5 && uHasOverheadRoofAlpha > 0.5) {
               float rawShadowFactor = clamp(texture2D(tCloudShadowRaw, vUv).r, 0.0, 1.0);
               vec4 roofSample = texture2D(tOverheadRoofAlpha, vUv);
               float roofAlpha = clamp(max(roofSample.a, max(roofSample.r, max(roofSample.g, roofSample.b))), 0.0, 1.0);
-              shadowFactor = mix(shadowFactor, rawShadowFactor, roofAlpha);
+              float rawMix = roofAlpha * isOutdoorForInteriorDimSafe;
+              shadowFactor = mix(shadowFactor, rawShadowFactor, rawMix);
             }
             // Only dim the ambient portion; keep dynamic-light additive intact.
             vec3 ambientPortion = ambientAfterDark;
@@ -695,7 +726,7 @@ export class LightingEffectV2 {
           // Overhead shadow: screen-space shadow from overhead tiles.
           // RGB carries roof/fluid-tinted shadow factor, alpha carries tile-projection factor.
           // Dims ambient only — dynamic lights punch through.
-          if (uHasOverheadShadow > 0.5) {
+          if (uHasCombinedShadow < 0.5 && uHasOverheadShadow > 0.5) {
             vec4 ovSample = texture2D(tOverheadShadow, vUv);
             vec3 ovShadowRgb = clamp(ovSample.rgb, vec3(0.0), vec3(1.0));
             float tileProjectionFactor = clamp(ovSample.a, 0.0, 1.0);
@@ -1043,17 +1074,17 @@ export class LightingEffectV2 {
     // Update compose uniforms
     const u = this._composeMaterial?.uniforms;
     if (u) {
-      // `uDarknessLevel` drives the ambient day/night blend in the compose
-      // shader. Use the computed MapShine/Foundry-aligned darkness directly;
-      // the `darknessEffect` parameter may be intended for additional
-      // tuning elsewhere, but scaling it here was preventing midnight from
-      // reaching a sufficiently dark ambient blend in some setups.
+      for (const k of LEGACY_LIGHTING_PARAM_KEYS) {
+        if (Object.prototype.hasOwnProperty.call(this.params, k)) delete this.params[k];
+      }
+      // `uDarknessLevel` drives the ambient day/night blend in the compose shader.
       u.uDarknessLevel.value = clamp01(sceneDarkness);
       u.uGlobalIllumination.value = this.params.globalIllumination;
       u.uLightIntensity.value = this.params.lightIntensity;
       u.uColorationStrength.value = this.params.colorationStrength;
       u.uNegativeDarknessStrength.value = this.params.negativeDarknessStrength;
       u.uDarknessPunchGain.value = this.params.darknessPunchGain;
+      u.uInteriorDarkness.value = Math.max(0, Number(this.params.interiorDarkness) || 0);
     }
   }
 
@@ -1095,8 +1126,12 @@ export class LightingEffectV2 {
    *   applies only on outdoor pixels so interior lights survive under roofs.
    * @param {THREE.Texture|null} [ceilingTransmittanceTexture=null] - Half-res R
    *   packed T from OverheadShadowsEffectV2 (1 = pass light, 0 = ceiling blocks).
+   * @param {THREE.Texture|null} [combinedShadowTexture=null] - Unified shadow factor
+   *   from ShadowManagerV2 (cloud + overhead composition).
+   * @param {THREE.Texture|null} [combinedShadowRawTexture=null] - Optional unified
+   *   raw-shadow variant used on roof pixels.
    */
-  render(renderer, camera, sceneRT, outputRT, windowLightScene = null, cloudShadowTexture = null, cloudShadowRawTexture = null, buildingShadowTexture = null, overheadShadowTexture = null, buildingShadowOpacity = 0.75, overheadRoofAlphaTexture = null, overheadRoofBlockTexture = null, outdoorsMaskTexture = null, ceilingTransmittanceTexture = null) {
+  render(renderer, camera, sceneRT, outputRT, windowLightScene = null, cloudShadowTexture = null, cloudShadowRawTexture = null, buildingShadowTexture = null, overheadShadowTexture = null, buildingShadowOpacity = 0.75, overheadRoofAlphaTexture = null, overheadRoofBlockTexture = null, outdoorsMaskTexture = null, ceilingTransmittanceTexture = null, combinedShadowTexture = null, combinedShadowRawTexture = null) {
     if (!this._initialized || !this._enabled || !sceneRT) return;
     if (!this._lightRT || !this._windowLightRT || !this._darknessRT || !this._composeMaterial) return;
 
@@ -1228,6 +1263,20 @@ export class LightingEffectV2 {
     } else {
       cu.tCloudShadowRaw.value = null;
       cu.uHasCloudShadowRaw.value = 0;
+    }
+    if (combinedShadowTexture) {
+      cu.tCombinedShadow.value = combinedShadowTexture;
+      cu.uHasCombinedShadow.value = 1;
+    } else {
+      cu.tCombinedShadow.value = null;
+      cu.uHasCombinedShadow.value = 0;
+    }
+    if (combinedShadowRawTexture) {
+      cu.tCombinedShadowRaw.value = combinedShadowRawTexture;
+      cu.uHasCombinedShadowRaw.value = 1;
+    } else {
+      cu.tCombinedShadowRaw.value = null;
+      cu.uHasCombinedShadowRaw.value = 0;
     }
     // View→scene UV uniforms for compose (building shadow + _Outdoors roof-light gate).
     try {

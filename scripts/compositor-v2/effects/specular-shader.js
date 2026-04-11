@@ -50,25 +50,20 @@ export function getVertexShader() {
  */
 export function getFragmentShader(maxLights = 64) {
   return /* glsl */`
+    // Build: no uRoughnessMap / uNormalMap / uLightDirection (removed — were unused).
+
     // ── Texture samplers ──────────────────────────────────────────────────────
     uniform sampler2D uAlbedoMap;      // Tile albedo (needed for wet specular + alpha clip)
     uniform sampler2D uSpecularMap;    // _Specular mask (intensity)
-    uniform sampler2D uRoughnessMap;   // _Roughness mask (optional)
-    uniform sampler2D uNormalMap;      // _Normal map (optional, reserved for future)
-
-    uniform bool uHasRoughnessMap;
-    uniform bool uHasNormalMap;
 
     // ── Global toggles ────────────────────────────────────────────────────────
     uniform bool uEffectEnabled;
     uniform float uTileOpacity;
 
-    // ── PBR parameters ────────────────────────────────────────────────────────
+    // ── Strength & tint ───────────────────────────────────────────────────────
     uniform float uSpecularIntensity;
-    uniform float uRoughness;
 
     // ── Lighting ──────────────────────────────────────────────────────────────
-    uniform vec3 uLightDirection;
     uniform vec3 uLightColor;
     uniform vec3 uCameraPosition;
     uniform vec2 uCameraOffset;  // Camera pan offset for parallax
@@ -169,7 +164,6 @@ export function getFragmentShader(maxLights = 64) {
     uniform float uDarknessLevel;
     uniform vec3 uAmbientDaylight;
     uniform vec3 uAmbientDarkness;
-    uniform vec3 uAmbientBrightest;
 
     // ── Dynamic lights ────────────────────────────────────────────────────────
     uniform int numLights;
@@ -430,7 +424,6 @@ export function getFragmentShader(maxLights = 64) {
       vec3 totalIncidentLight = ambientLight + totalDynamicLight;
 
       vec4 specularMask = specularMaskSample;
-      float roughness = uHasRoughnessMap ? texture2D(uRoughnessMap, vUv).r : uRoughness;
 
       // ── Outdoor factor ────────────────────────────────────────────────────
       float outdoorFactor = 1.0;

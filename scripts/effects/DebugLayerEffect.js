@@ -71,7 +71,6 @@ export class DebugLayerEffect extends EffectBase {
           label: 'Debug Layer',
           type: 'inline',
           parameters: [
-            'enabled',
             'showPanel',
             'showTether',
             'showCollisionPoint',

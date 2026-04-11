@@ -21,9 +21,10 @@
  * Precipitation uses **layer 0** and a **floor-band renderOrder** just below
  * `OVERHEAD_OFFSET` (see FloorRenderBus), matching FireEffectV2: drawn in the
  * main `renderTo()` pass **under** overhead roof tiles and tree overlays.
- * Putting quarks on OVERLAY_THREE_LAYER (31) made weather draw only in
- * `_renderLateWorldOverlay`, on top of the entire scene (wrong for drips).
- * Foam plume batches opt into layer 31 via `emitter.userData.msOverlayLayer`.
+ * Roof/tree **drips** use `emitter.userData.msOverlayLayer` → batch layer 31 →
+ * `_renderLateWorldOverlay` (otherwise streaks are occluded by overhead art). Rain/snow stay on layer 0.
+ * Foam plumes use the same overlay flag. `WeatherParticlesV2._applyCulling` sets
+ * `FloorCompositor._hasOverlayLayerContent` when assigning layer 31 (batches nest under BatchedRenderer).
  *
  * ## Floor isolation
  * WeatherParticles is inherently global (rain/snow falls everywhere). It reads
@@ -488,7 +489,16 @@ export class WeatherParticlesV2 {
         const idx = systemMap.get(ps);
         const batch = (idx !== undefined && batches) ? batches[idx] : null;
         const layer = (ud.msOverlayLayer === true) ? OVERLAY_THREE_LAYER : 0;
-        if (batch?.layers?.set) batch.layers.set(layer);
+        if (batch?.layers?.set) {
+          batch.layers.set(layer);
+          // FloorCompositor._renderLateWorldOverlay only scanned top-level scene children for
+          // layer 31; quarks SpriteBatches live under BatchedRenderer, so without this the late
+          // pass could be skipped forever (roof drips + foam would never draw).
+          if (layer === OVERLAY_THREE_LAYER) {
+            const fc = window.MapShine?.floorCompositorV2 ?? window.MapShine?.effectComposer?._floorCompositorV2;
+            if (fc) fc._hasOverlayLayerContent = true;
+          }
+        }
       } catch (_) {}
 
       // Allow specific systems (e.g. full-scene foam overlays) to opt out of

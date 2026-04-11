@@ -22,6 +22,7 @@ export class DazzleOverlayEffectV2 {
     this._tempResolution = null;
 
     this.params = {
+      enabled: false,
       intensity: 0.0,
       exposureLift: 0.9,
       whiteAdd: 0.65,
@@ -35,6 +36,42 @@ export class DazzleOverlayEffectV2 {
   get enabled() { return this._enabled; }
   set enabled(v) {
     this._enabled = !!v;
+    if (this.params) this.params.enabled = this._enabled;
+  }
+
+  /**
+   * Tweakpane schema (DynamicExposureManager still drives intensity at runtime).
+   */
+  static getControlSchema() {
+    return {
+      enabled: false,
+      groups: [
+        {
+          name: 'dazzle',
+          label: 'Look',
+          type: 'inline',
+          parameters: [
+            'intensity',
+            'exposureLift',
+            'whiteAdd',
+            'desaturate',
+            'glareStrength',
+            'glarePower',
+            'rgbShiftPx',
+          ],
+        },
+      ],
+      parameters: {
+        enabled: { type: 'boolean', default: false, hidden: true },
+        intensity: { type: 'slider', label: 'Intensity', min: 0, max: 2, step: 0.01, default: 0 },
+        exposureLift: { type: 'slider', label: 'Exposure Lift', min: 0, max: 3, step: 0.01, default: 0.9 },
+        whiteAdd: { type: 'slider', label: 'White Add', min: 0, max: 2, step: 0.01, default: 0.65 },
+        desaturate: { type: 'slider', label: 'Desaturate', min: 0, max: 1, step: 0.01, default: 0.35 },
+        glareStrength: { type: 'slider', label: 'Glare Strength', min: 0, max: 2, step: 0.01, default: 0.55 },
+        glarePower: { type: 'slider', label: 'Glare Power', min: 0.1, max: 8, step: 0.05, default: 2 },
+        rgbShiftPx: { type: 'slider', label: 'RGB Shift (px)', min: 0, max: 8, step: 0.05, default: 1.35 },
+      },
+    };
   }
 
   initialize() {

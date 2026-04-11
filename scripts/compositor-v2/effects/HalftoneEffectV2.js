@@ -38,51 +38,137 @@ export class HalftoneEffectV2 {
   }
 
   static getControlSchema() {
+    const presetBase = {
+      strength: 0.69,
+      radius: 4.0,
+      shape: 1,
+      blendingMode: 1,
+      scatter: 0.0,
+      greyscale: false,
+    };
+
     return {
       enabled: false,
+      help: {
+        title: 'Halftone (print)',
+        summary: [
+          'Screen-space halftone: the scene is broken into dots/lines with optional scatter, evoking offset print and comic shading.',
+          'Artistic only — no masks. Fullscreen post on the composited image.',
+          'Performance: one fullscreen pass; cost is usually low.',
+          'Persistence: settings save with the scene (not World Based).',
+        ].join('\n\n'),
+        glossary: {
+          Strength: 'How strongly the halftone pattern replaces the original color.',
+          Radius: 'Screen-space size of halftone cells (larger = bigger dots).',
+          Shape: 'Dot, ellipse, line, or square halftone element.',
+          'Blend mode': 'How the halftone layer combines with the underlying image.',
+          Scatter: 'Random jitter of the pattern for a rougher print look.',
+          Greyscale: 'Convert to luminance before halftoning for a monochrome print read.',
+        },
+      },
       groups: [
         {
-          name: 'halftone',
-          label: 'Halftone',
-          type: 'inline',
-          parameters: ['strength', 'radius', 'shape', 'blendingMode', 'scatter', 'greyscale']
-        }
+          name: 'look',
+          label: 'Look',
+          type: 'folder',
+          expanded: true,
+          parameters: ['strength', 'radius', 'shape'],
+        },
+        {
+          name: 'mix',
+          label: 'Mix',
+          type: 'folder',
+          expanded: true,
+          parameters: ['blendingMode', 'scatter'],
+        },
+        {
+          name: 'output',
+          label: 'Output',
+          type: 'folder',
+          expanded: false,
+          parameters: ['greyscale'],
+        },
       ],
       parameters: {
         enabled: { type: 'boolean', default: false, hidden: true },
-        strength: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.69 },
-        radius: { type: 'slider', min: 1.0, max: 16.0, step: 0.25, default: 4.0 },
+        strength: {
+          type: 'slider',
+          label: 'Strength',
+          min: 0.0,
+          max: 1.0,
+          step: 0.01,
+          default: 0.69,
+          tooltip: 'Intensity of the halftone treatment (0 leaves the image unchanged in the shader).',
+        },
+        radius: {
+          type: 'slider',
+          label: 'Radius',
+          min: 1.0,
+          max: 16.0,
+          step: 0.25,
+          default: 4.0,
+          tooltip: 'Cell size in pixels (coarser halftone as this increases).',
+        },
         shape: {
           type: 'select',
+          label: 'Shape',
           options: {
             Dot: 1,
             Ellipse: 2,
             Line: 3,
-            Square: 4
+            Square: 4,
           },
-          default: 1
+          default: 1,
+          tooltip: 'Geometry of each halftone spot.',
         },
         blendingMode: {
           type: 'select',
+          label: 'Blend mode',
           options: {
             Linear: 1,
             Multiply: 2,
             Add: 3,
             Lighter: 4,
-            Darker: 5
+            Darker: 5,
           },
-          default: 1
+          default: 1,
+          tooltip: 'Compositing mode between source and halftone.',
         },
-        scatter: { type: 'slider', min: 0.0, max: 2.0, step: 0.01, default: 0.0 },
-        greyscale: { type: 'boolean', default: false }
+        scatter: {
+          type: 'slider',
+          label: 'Scatter',
+          min: 0.0,
+          max: 2.0,
+          step: 0.01,
+          default: 0.0,
+          tooltip: 'Random displacement of the halftone grid for an imperfect print feel.',
+        },
+        greyscale: {
+          type: 'boolean',
+          label: 'Greyscale',
+          default: false,
+          tooltip: 'Halftone from luminance only (monochrome output).',
+        },
       },
       presets: {
-        Off: { strength: 0.0, radius: 4.0, shape: 1, blendingMode: 1, scatter: 0.0, greyscale: false },
-        Subtle: { strength: 0.25, radius: 6.0, shape: 1, blendingMode: 1, scatter: 0.0, greyscale: false },
-        Comic: { strength: 0.85, radius: 4.0, shape: 1, blendingMode: 1, scatter: 0.0, greyscale: false },
-        Print: { strength: 1.0, radius: 3.0, shape: 2, blendingMode: 2, scatter: 0.15, greyscale: false },
-        Noir: { strength: 1.0, radius: 4.0, shape: 3, blendingMode: 1, scatter: 0.0, greyscale: true }
-      }
+        Subtle: { ...presetBase, strength: 0.25, radius: 6.0 },
+        Comic: { ...presetBase, strength: 0.85, radius: 4.0 },
+        Print: {
+          ...presetBase,
+          strength: 1.0,
+          radius: 3.0,
+          shape: 2,
+          blendingMode: 2,
+          scatter: 0.15,
+        },
+        Noir: {
+          ...presetBase,
+          strength: 1.0,
+          radius: 4.0,
+          shape: 3,
+          greyscale: true,
+        },
+      },
     };
   }
 

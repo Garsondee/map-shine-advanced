@@ -90,6 +90,51 @@ export function getFiniteActiveLevelBand() {
 }
 
 /**
+ * Get wall-height bounds for the active level.
+ *
+ * Wall-height uses half-open ranges [bottom, top) for filtering. To ensure
+ * walls block the entire floor including the top seam, we use the NEXT
+ * floor's bottom as the wall top (or Infinity if this is the top floor).
+ *
+ * Example:
+ *   Floor 0: band [0, 9]  -> wall-height [0, 10)  (uses floor 1's bottom)
+ *   Floor 1: band [10, 20] -> wall-height [10, 20) (or Infinity)
+ *
+ * @returns {{bottom:number, top:number}|null}
+ */
+export function getWallHeightBandForActiveLevel() {
+  const ctx = window.MapShine?.activeLevelContext;
+  if (!ctx) return null;
+
+  let bottom = Number(ctx?.bottom);
+  if (!Number.isFinite(bottom)) return null;
+
+  // Find the next floor's bottom to use as our top
+  const levels = window.MapShine?.availableLevels || [];
+  const currentIndex = Number(ctx?.index);
+
+  let top;
+  if (Number.isFinite(currentIndex) && levels.length > currentIndex + 1) {
+    const nextLevel = levels[currentIndex + 1];
+    top = Number(nextLevel?.bottom);
+  }
+
+  // If no next level, use the context top (top floor extends to Infinity)
+  if (!Number.isFinite(top)) {
+    top = Number(ctx?.top);
+    // If the floor's natural top is finite, extend it by 1 unit to ensure
+    // the seam elevation is included in the wall-height range
+    if (Number.isFinite(top)) {
+      top += 1;
+    } else {
+      top = Infinity;
+    }
+  }
+
+  return { bottom, top };
+}
+
+/**
  * Should active-level create defaults be applied for this scene?
  * @param {Scene|null|undefined} [scene]
  * @param {{allowWhenModeOff?: boolean}} [options]
@@ -120,6 +165,10 @@ export function shouldApplyLevelCreateDefaults(scene = canvas?.scene, options = 
 /**
  * Seed missing wall-height bounds from the active level band.
  *
+ * Uses getWallHeightBandForActiveLevel() to ensure the wall top is set to
+ * the next floor's bottom, which is required for proper half-open range
+ * filtering [bottom, top) in vision and movement systems.
+ *
  * @param {object} data
  * @param {{scene?: Scene|null|undefined}} [options]
  * @returns {object}
@@ -132,7 +181,9 @@ export function applyWallLevelDefaults(data, options = {}) {
   // OFF, as long as we have an explicit active floor context.
   if (!shouldApplyLevelCreateDefaults(scene, { allowWhenModeOff: true })) return data;
 
-  const band = getFiniteActiveLevelBand();
+  // Use wall-height specific band (next floor's bottom as top) rather than
+  // the raw floor band, to ensure half-open range [bottom, top) works correctly.
+  const band = getWallHeightBandForActiveLevel();
   if (!band) return data;
 
   const wallHeight = data.flags?.['wall-height'];

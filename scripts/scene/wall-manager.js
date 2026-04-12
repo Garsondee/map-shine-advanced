@@ -8,7 +8,7 @@ import { isGmLike } from '../core/gm-parity.js';
 
 import { createLogger } from '../core/log.js';
 import Coordinates from '../utils/coordinates.js';
-import { applyWallLevelDefaults, getFiniteActiveLevelBand, shouldApplyLevelCreateDefaults } from '../foundry/levels-create-defaults.js';
+import { applyWallLevelDefaults, getFiniteActiveLevelBand, getWallHeightBandForActiveLevel, shouldApplyLevelCreateDefaults } from '../foundry/levels-create-defaults.js';
 import { readWallHeightFlags } from '../foundry/levels-scene-flags.js';
 import { getPerspectiveElevation } from '../foundry/elevation-context.js';
 import { OVERLAY_THREE_LAYER } from '../core/render-layers.js';
@@ -266,7 +266,9 @@ export class WallManager {
       const hasTop = flags?.top !== undefined && flags?.top !== null && Number.isFinite(Number(flags.top));
       if (hasBottom && hasTop) return;
 
-      const band = getFiniteActiveLevelBand();
+      // Use wall-height specific band (next floor's bottom as top) for proper
+      // half-open range [bottom, top) filtering.
+      const band = getWallHeightBandForActiveLevel();
       if (!band) return;
 
       const patch = {};

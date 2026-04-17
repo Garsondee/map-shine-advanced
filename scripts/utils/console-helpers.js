@@ -61,6 +61,17 @@ function _collectContinuousCandidates(floorCompositor) {
   };
 }
 
+/**
+ * V2 FloorRenderBus lives on FloorCompositor, which is attached to the
+ * effect composer as `_floorCompositorV2` (not `MapShine.floorCompositor`).
+ * @returns {object|null}
+ */
+function _resolveFloorRenderBus() {
+  const ms = globalThis.MapShine ?? {};
+  const fc = ms.floorCompositorV2 ?? ms.effectComposer?._floorCompositorV2 ?? null;
+  return fc?._renderBus ?? null;
+}
+
 /** Same rules as GpuSceneMaskCompositor._isTileInLevelBand (diagnostics only). */
 function _isTileInLevelBandDiagnostic(tileDoc, levelContext) {
   const bandBottom = Number(levelContext?.bottom);
@@ -1628,6 +1639,729 @@ export const consoleHelpers = {
     return window.MapShine.renderStrictSyncEnabled;
   },
 
+  /**
+   * Diagnose the unified per-floor mask binding system.
+   *
+   * Returns the latest telemetry snapshot published by
+   * MaskBindingController.sync() — one row per consumer, with the bound
+   * texture summary per mask slot, and one row per visible floor showing
+   * which per-floor masks are currently live. Useful for verifying that
+   * every effect is receiving the correct version of every suffixed mask
+   * for every floor.
+   *
+   * Usage: MapShine.debug.diagnoseMaskBindings()
+   *
+   * @returns {object}
+   */
+  diagnoseMaskBindings() {
+    const ms = window?.MapShine ?? {};
+    const controller = ms.__maskBindingController ?? null;
+    const snapshot = {
+      enabled: ms.maskBindingControllerEnabled === true,
+      signature: null,
+      activeIndex: null,
+      cacheVersion: null,
+      floors: [],
+      consumers: [],
+    };
+    if (!controller) {
+      snapshot.error = 'controller-not-instantiated';
+      try { console.table(snapshot); } catch (_) {}
+      return snapshot;
+    }
+    const tele = controller.diagnose?.() ?? ms.__maskBindings ?? null;
+    if (!tele) {
+      snapshot.error = 'no-telemetry';
+      try { console.table(snapshot); } catch (_) {}
+      return snapshot;
+    }
+    snapshot.signature = tele.signature;
+    snapshot.activeIndex = tele.activeIndex;
+    snapshot.cacheVersion = tele.cacheVersion;
+    snapshot.floors = tele.visibleFloors ?? [];
+    snapshot.consumers = tele.consumers ?? [];
+    try {
+      const floorRows = snapshot.floors.map((f) => ({
+        index: f.index,
+        floorKey: f.floorKey,
+        ...Object.fromEntries(Object.entries(f.masks ?? {}).map(([id, v]) => [id, v ? 'ok' : '—'])),
+      }));
+      const consumerRows = snapshot.consumers.map((c) => {
+        const summary = (c.bindings ?? [])
+          .map((b) => `${b.consumes}→${b.maskId}(${b.path}${b.path === 'banded' ? `:${(b.present ?? []).map((p) => p ? '1' : '0').join('')}` : `:${b.present ? '1' : '0'}`})`)
+          .join(', ');
+        return { id: c.id, path: c.path, present: c.present, bindings: summary };
+      });
+      console.groupCollapsed(`[maskBindings] sig=${snapshot.signature?.slice(0, 80)}…`);
+      console.log(`enabled=${snapshot.enabled} activeIndex=${snapshot.activeIndex} cacheVersion=${snapshot.cacheVersion}`);
+      if (floorRows.length) { console.log('floors:'); console.table(floorRows); }
+      if (consumerRows.length) { console.log('consumers:'); console.table(consumerRows); }
+      console.groupEnd();
+    } catch (_) {}
+    return snapshot;
+  },
+
+  /**
+   * Sample the `skyReach` value at a world (x,y) for the given floor index by
+   * reading back one pixel from the per-floor skyReach render target.
+   *
+   * Returns `{ value: 0..1, outdoors, floorAlphaUpper, floorKey, floorIdx }`.
+   *
+   * Under a bridge on floor 0, where the bridge above is tile-opaque, the
+   * expected value is near 0. On the bridge's upper surface (floor 1 if the
+   * bridge is the top floor), the value should be near the authored outdoors
+   * value at that point.
+   *
+   * Usage: MapShine.debug.skyReachProbe(x, y, floorIdx)
+   *
+   * @param {number} x World X.
+   * @param {number} y World Y.
+   * @param {number} [floorIdx]  Defaults to the active floor.
+   * @returns {object}
+   */
+  skyReachProbe(x, y, floorIdx) {
+    const ms = window?.MapShine ?? {};
+    const compositor = ms.sceneComposer?._sceneMaskCompositor ?? null;
+    const renderer = ms.renderer ?? null;
+    const dims = canvas?.dimensions ?? null;
+    const sr = dims?.sceneRect ?? null;
+    const result = {
+      x, y, floorIdx: Number(floorIdx ?? NaN),
+      floorKey: null,
+      sceneRect: sr ? { x: sr.x, y: sr.y, w: sr.width, h: sr.height } : null,
+      value: null,
+      outdoors: null,
+      error: null,
+    };
+    if (!compositor || !renderer || !sr) {
+      result.error = 'no-compositor-or-renderer';
+      return result;
+    }
+    const floors = ms.floorStack?.getFloors?.() ?? [];
+    const idx = Number.isFinite(result.floorIdx)
+      ? result.floorIdx
+      : Number(ms.floorStack?.getActiveFloor?.()?.index ?? 0);
+    result.floorIdx = idx;
+    const floor = floors.find((f) => Number(f?.index) === idx) ?? null;
+    const floorKey = floor?.compositorKey ?? compositor?._activeFloorKey ?? 'ground';
+    result.floorKey = floorKey;
+
+    const skyReachRt = compositor._floorCache?.get(floorKey)?.get('skyReach') ?? null;
+    const outdoorsRt = compositor._floorCache?.get(floorKey)?.get('outdoors') ?? null;
+    if (!skyReachRt) {
+      result.error = 'no-skyReach-rt';
+      return result;
+    }
+    const uvX = (Number(x) - sr.x) / sr.width;
+    const uvYFoundry = (Number(y) - sr.y) / sr.height;
+    const uvY = 1.0 - uvYFoundry;
+    const px = Math.max(0, Math.min(skyReachRt.width - 1, Math.floor(uvX * skyReachRt.width)));
+    const py = Math.max(0, Math.min(skyReachRt.height - 1, Math.floor(uvY * skyReachRt.height)));
+    const buf = new Uint8Array(4);
+    try {
+      renderer.readRenderTargetPixels(skyReachRt, px, py, 1, 1, buf);
+      result.value = buf[0] / 255.0;
+    } catch (e) {
+      result.error = 'skyReach-readback-failed:' + (e?.message ?? String(e));
+    }
+    if (outdoorsRt) {
+      try {
+        const oPx = Math.max(0, Math.min(outdoorsRt.width - 1, Math.floor(uvX * outdoorsRt.width)));
+        const oPy = Math.max(0, Math.min(outdoorsRt.height - 1, Math.floor(uvY * outdoorsRt.height)));
+        const obuf = new Uint8Array(4);
+        renderer.readRenderTargetPixels(outdoorsRt, oPx, oPy, 1, 1, obuf);
+        result.outdoors = obuf[0] / 255.0;
+      } catch (_) {}
+    }
+    try { console.log('[skyReachProbe]', result); } catch (_) {}
+    return result;
+  },
+
+  /**
+   * Toggle the unified MaskBindingController rollout flag at runtime.
+   * When enabled, FloorCompositor routes per-frame mask fan-out through
+   * MaskBindingController (in addition to the legacy outdoors sync) so the
+   * controller can validate and publish telemetry. Disable to fall back to
+   * the legacy path only.
+   *
+   * Usage: MapShine.debug.setMaskBindingController(true|false)
+   *
+   * @param {boolean} enabled
+   * @returns {boolean} resolved flag state
+   */
+  setMaskBindingController(enabled) {
+    if (!window.MapShine) window.MapShine = {};
+    window.MapShine.maskBindingControllerEnabled = enabled === true;
+    try { window.MapShine.__maskBindingController?.invalidate?.(); } catch (_) {}
+    console.log(`[maskBindingController] ${enabled === true ? 'ENABLED' : 'DISABLED'}`);
+    return window.MapShine.maskBindingControllerEnabled;
+  },
+
+  /**
+   * Read back the RGBA of every per-level final RT (plus the water occluder
+   * RT if present) at screen pixel (x, y).
+   *
+   * Validates the multi-floor "sandwich" contract: on the upper floor's RT,
+   * the pixel alpha must be 1.0 where that floor has opaque art and 0.0
+   * where it is empty (so lower-floor composite shows through). On the
+   * ground floor, water regions should read alpha 1.0 after the water pass.
+   *
+   * If water is not appearing where it should, the usual culprit is the
+   * upper-floor RT having alpha = 1 at the "hole" pixel — meaning the
+   * authored alpha hole in your upper-bg art isn't actually present in the
+   * texture (often because the image was saved as JPEG or flattened on
+   * export). Compare the upper-level alpha here vs. the occluder alpha.
+   *
+   * Coordinates are CSS pixels on the canvas (top-left origin); they are
+   * translated to GL viewport space (bottom-left origin) internally.
+   *
+   * Usage: MapShine.debug.levelAlphaProbe(x, y)
+   *
+   * @param {number} x Canvas CSS pixel X (0 = left).
+   * @param {number} y Canvas CSS pixel Y (0 = top).
+   * @returns {object}
+   */
+  levelAlphaProbe(x, y) {
+    const ms = window?.MapShine ?? {};
+    const renderer = ms.renderer ?? null;
+    const diag = ms.__v2PerLevelDiag ?? null;
+    const finalRTs = Array.isArray(diag?.levelFinalRTs) ? diag.levelFinalRTs : [];
+    const sceneRTs = Array.isArray(diag?.levelSceneRTs) ? diag.levelSceneRTs : [];
+    const visibleFloors = Array.isArray(diag?.visibleFloors) ? diag.visibleFloors : [];
+    const result = {
+      x: Number(x),
+      y: Number(y),
+      levelIndices: Array.isArray(diag?.levelIndices) ? [...diag.levelIndices] : [],
+      // Each entry carries both:
+      //   .scene  — raw sceneRT alpha (authored solidity, pre-post-pass)
+      //   .final  — level RT alpha post-rebind (what the composite reads)
+      // A mismatch (scene.alpha=0 but final.alpha>0) means a post-pass
+      // widened alpha beyond authored content; the rebind pass should
+      // prevent that going forward, so expect them to match.
+      levels: [],
+      occluder: null,
+      error: null,
+    };
+    if (!renderer) { result.error = 'no-renderer'; return result; }
+    if (!finalRTs.length) { result.error = 'no-per-level-rts'; return result; }
+
+    const readPixel = (rt) => {
+      if (!rt || !Number.isFinite(rt.width) || !Number.isFinite(rt.height)) return null;
+      const px = Math.max(0, Math.min(rt.width - 1, Math.floor(Number(x))));
+      const pyTop = Math.max(0, Math.min(rt.height - 1, Math.floor(Number(y))));
+      const py = (rt.height - 1) - pyTop;
+      const buf = new Uint8Array(4);
+      try {
+        renderer.readRenderTargetPixels(rt, px, py, 1, 1, buf);
+        return {
+          rgba: [buf[0] / 255, buf[1] / 255, buf[2] / 255, buf[3] / 255],
+          alpha: buf[3] / 255,
+        };
+      } catch (e) {
+        return { error: 'readback-failed:' + (e?.message ?? String(e)) };
+      }
+    };
+
+    for (let i = 0; i < finalRTs.length; i++) {
+      const finalRT = finalRTs[i];
+      const sceneRT = sceneRTs[i] ?? null;
+      const floorIndex = Number.isFinite(visibleFloors[i]) ? visibleFloors[i] : null;
+      result.levels.push({
+        i,
+        levelIndex: result.levelIndices[i] ?? null,
+        floorIndex,
+        scene: sceneRT ? readPixel(sceneRT) : { error: 'no-scene-rt' },
+        final: finalRT ? readPixel(finalRT) : { error: 'no-final-rt' },
+      });
+    }
+
+    // Water occluder RT: tile-only alpha union of floors above the
+    // currently-rendering level. Typically bound when rendering the ground
+    // RT, so this reads whatever state it was in at the end of the last
+    // frame's per-level loop — useful for comparing with the upper RT's
+    // own alpha at the probed pixel.
+    const occluderRT = diag?.waterOccluderRT ?? null;
+    if (occluderRT) {
+      const hit = readPixel(occluderRT);
+      result.occluder = hit;
+    }
+
+    try { console.log('[levelAlphaProbe]', result); } catch (_) {}
+    return result;
+  },
+
+  /**
+   * Copy every per-level RT (scene AND final), plus the water occluder
+   * RT, to offscreen canvases and open each as a PNG data-URL in a new
+   * tab. Lets you verify visually whether authored alpha holes are
+   * preserved end-to-end.
+   *
+   * For each level you get TWO tabs:
+   *   - `sceneRT[i] floor=N`  — raw draw output of renderFloorRangeTo
+   *     (pre-any-pass). Its alpha is the authored solidity mask: if
+   *     this tab shows checkerboard where your WebP has authored
+   *     alpha=0, draw-time is preserving alpha correctly.
+   *   - `finalRT[i] floor=N`  — post-chain, post-rebind output. This
+   *     is what LevelCompositePass actually reads. If the alpha-rebind
+   *     pass is working, this tab's alpha should match the sceneRT's.
+   *
+   * If sceneRT shows checkered but finalRT is opaque, a post-pass is
+   * widening alpha and the rebind pass isn't taking effect. If both
+   * show opaque where your WebP should have holes, the issue is
+   * upstream (texture upload, bg vs tile routing, floorIndex mismatch)
+   * — in that case the authored alpha isn't reaching the bus.
+   *
+   * Tabs are labelled by their floor index. If popups are blocked, the
+   * data URLs are returned in the result object so they can be opened
+   * manually.
+   *
+   * Usage: MapShine.debug.dumpLevelRTs()
+   */
+  dumpLevelRTs() {
+    const ms = window?.MapShine ?? {};
+    const renderer = ms.renderer ?? null;
+    const diag = ms.__v2PerLevelDiag ?? null;
+    const finalRTs = Array.isArray(diag?.levelFinalRTs) ? diag.levelFinalRTs : [];
+    const sceneRTs = Array.isArray(diag?.levelSceneRTs) ? diag.levelSceneRTs : [];
+    const visibleFloors = Array.isArray(diag?.visibleFloors) ? diag.visibleFloors : [];
+    const result = { dumps: [], error: null };
+
+    if (!renderer) { result.error = 'no-renderer'; return result; }
+    if (!finalRTs.length) { result.error = 'no-per-level-rts'; return result; }
+
+    const makeDataUrl = (rt, label) => {
+      if (!rt || !(rt.width > 0) || !(rt.height > 0)) {
+        return { label, error: 'no-rt' };
+      }
+      const w = rt.width | 0;
+      const h = rt.height | 0;
+      const pixels = new Uint8Array(w * h * 4);
+      try {
+        renderer.readRenderTargetPixels(rt, 0, 0, w, h, pixels);
+      } catch (e) {
+        return { label, error: 'readback-failed:' + (e?.message ?? String(e)) };
+      }
+      const canvas = document.createElement('canvas');
+      canvas.width = w;
+      canvas.height = h;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return { label, error: 'no-2d-context' };
+      const img = ctx.createImageData(w, h);
+      // GL origin is bottom-left; flip rows so the PNG matches the
+      // on-screen orientation of the canvas.
+      for (let y = 0; y < h; y++) {
+        const srcRow = (h - 1 - y) * w * 4;
+        const dstRow = y * w * 4;
+        img.data.set(pixels.subarray(srcRow, srcRow + w * 4), dstRow);
+      }
+      ctx.putImageData(img, 0, 0);
+      let dataUrl = null;
+      try {
+        dataUrl = canvas.toDataURL('image/png');
+      } catch (e) {
+        return { label, error: 'toDataURL-failed:' + (e?.message ?? String(e)) };
+      }
+      try {
+        const win = window.open();
+        if (win) {
+          win.document.title = label;
+          // Checkerboard background so alpha holes are visually obvious.
+          win.document.body.style.background = 'repeating-conic-gradient(#555 0% 25%, #777 0% 50%) 50% / 20px 20px';
+          win.document.body.style.margin = '0';
+          const p = win.document.createElement('p');
+          p.textContent = label + '  (' + w + 'x' + h + ')';
+          p.style.color = '#fff';
+          p.style.font = '14px monospace';
+          p.style.padding = '6px';
+          p.style.margin = '0';
+          p.style.background = 'rgba(0,0,0,0.7)';
+          const im = win.document.createElement('img');
+          im.src = dataUrl;
+          im.style.display = 'block';
+          im.style.maxWidth = '100%';
+          win.document.body.appendChild(p);
+          win.document.body.appendChild(im);
+        }
+      } catch (_) {}
+      return { label, width: w, height: h, dataUrl };
+    };
+
+    // Dump sceneRT and finalRT in interleaved order so the tabs pair up
+    // visually (floor 0 scene, floor 0 final, floor 1 scene, floor 1
+    // final, ...) — makes side-by-side diffing trivial.
+    for (let i = 0; i < finalRTs.length; i++) {
+      const floorIndex = Number.isFinite(visibleFloors[i]) ? visibleFloors[i] : i;
+      const sceneRT = sceneRTs[i] ?? null;
+      if (sceneRT) {
+        const sceneLabel = 'sceneRT[' + i + ']  floor=' + floorIndex + '  (authored alpha; pre-passes)';
+        result.dumps.push(makeDataUrl(sceneRT, sceneLabel));
+      }
+      const finalLabel = 'finalRT[' + i + ']  floor=' + floorIndex + '  (post-chain + alpha-rebind)';
+      result.dumps.push(makeDataUrl(finalRTs[i], finalLabel));
+    }
+    const occluder = diag?.waterOccluderRT ?? null;
+    if (occluder) {
+      result.dumps.push(makeDataUrl(occluder, 'waterOccluderRT (tiles above rendering level)'));
+    }
+    try { console.log('[dumpLevelRTs]', result); } catch (_) {}
+    return result;
+  },
+
+  /**
+   * Tabular listing of every entry in `FloorRenderBus._tiles`. Tells you
+   * exactly what is registered on each floor (bg planes, solid fill,
+   * regular tiles), including the textureSrc and the material-state
+   * flags that determine alpha blending.
+   *
+   * Use this when the per-level RT dump shows the wrong alpha pattern
+   * to identify:
+   *   - Is the upper-floor WebP even loaded? (`__bg_image__1` with the
+   *     expected `textureSrc`?)
+   *   - Is it registered with the right `floorIndex` for the per-level
+   *     filter? (`floorIndex` must equal the floor's `index` in
+   *     `FloorStack`, otherwise `renderFloorRangeTo` filters it out.)
+   *   - Do the materials have the alpha flags we expect? (`alphaTest`,
+   *     `transparent`, `premultipliedAlpha`, `opacity`.)
+   *
+   * Usage: MapShine.debug.busInventory()
+   */
+  busInventory() {
+    const bus = _resolveFloorRenderBus();
+    if (!bus) {
+      const ms = globalThis.MapShine ?? {};
+      const fc = ms.floorCompositorV2 ?? ms.effectComposer?._floorCompositorV2 ?? null;
+      return {
+        error: 'no-bus',
+        hint: fc
+          ? 'FloorCompositor exists but _renderBus is missing (not initialized?)'
+          : 'No FloorCompositor: expected MapShine.effectComposer._floorCompositorV2 or MapShine.floorCompositorV2',
+      };
+    }
+    const tiles = bus._tiles;
+    if (!tiles || typeof tiles.forEach !== 'function') return { error: 'no-tiles-map' };
+    const rows = [];
+    tiles.forEach((entry, tileId) => {
+      const mat = entry?.material ?? null;
+      const tex = mat?.map ?? null;
+      const img = tex?.image ?? null;
+      rows.push({
+        tileId,
+        floorIndex: entry?.floorIndex,
+        visible: (entry?.root ?? entry?.mesh)?.visible === true,
+        isBg: typeof tileId === 'string' && tileId.startsWith('__'),
+        textureSrc: tex?.userData?.mapShineBackgroundSrc
+          ?? (typeof img?.src === 'string' ? img.src : null),
+        textureWidth: img?.width ?? img?.naturalWidth ?? null,
+        textureHeight: img?.height ?? img?.naturalHeight ?? null,
+        alphaTest: mat?.alphaTest,
+        transparent: mat?.transparent,
+        premultipliedAlpha: mat?.premultipliedAlpha,
+        texPremultiplyAlpha: tex?.premultiplyAlpha,
+        opacity: mat?.opacity,
+        blending: mat?.blending,
+        depthTest: mat?.depthTest,
+        colorSpace: tex?.colorSpace,
+      });
+    });
+    rows.sort((a, b) => {
+      const fa = Number(a.floorIndex); const fb = Number(b.floorIndex);
+      if (Number.isFinite(fa) && Number.isFinite(fb) && fa !== fb) return fa - fb;
+      return String(a.tileId).localeCompare(String(b.tileId));
+    });
+    const result = {
+      total: rows.length,
+      byFloor: rows.reduce((acc, r) => {
+        const k = Number.isFinite(Number(r.floorIndex)) ? Number(r.floorIndex) : 'n/a';
+        acc[k] = (acc[k] ?? 0) + 1; return acc;
+      }, {}),
+      rows,
+    };
+    try {
+      console.log('[busInventory]', result);
+      if (typeof console.table === 'function') {
+        console.table(rows.map((r) => ({
+          tileId: r.tileId,
+          floor: r.floorIndex,
+          vis: r.visible,
+          bg: r.isBg,
+          texW: r.textureWidth,
+          texH: r.textureHeight,
+          alphaTest: r.alphaTest,
+          transp: r.transparent,
+          premulMat: r.premultipliedAlpha,
+          premulTex: r.texPremultiplyAlpha,
+          opacity: r.opacity,
+          src: (typeof r.textureSrc === 'string' ? r.textureSrc.split('/').pop() : r.textureSrc),
+        })));
+      }
+    } catch (_) {}
+    return result;
+  },
+
+  /**
+   * Dump the source image (not the GPU upload) of every `__bg_image__*`
+   * entry's texture, rendered to a 2D canvas and opened as a PNG tab
+   * over a checkerboard. Lets you visually confirm that the loaded
+   * image actually carries the alpha channel you expect — separate
+   * from the render pipeline.
+   *
+   * If a tab shows the full image as opaque where your source WebP
+   * should be 45% transparent, the alpha was lost before the render
+   * pipeline — i.e. the WebP file itself, the <img> decode, or the
+   * load path stripped it. If the tab shows the correct alpha pattern,
+   * the problem is downstream (GPU upload flags, material blending,
+   * floor routing in `renderFloorRangeTo`).
+   *
+   * Usage: MapShine.debug.dumpBgTextures()
+   */
+  dumpBgTextures() {
+    const bus = _resolveFloorRenderBus();
+    if (!bus) {
+      const ms = globalThis.MapShine ?? {};
+      const fc = ms.floorCompositorV2 ?? ms.effectComposer?._floorCompositorV2 ?? null;
+      return {
+        error: 'no-bus',
+        hint: fc
+          ? 'FloorCompositor exists but _renderBus is missing (not initialized?)'
+          : 'No FloorCompositor: expected MapShine.effectComposer._floorCompositorV2 or MapShine.floorCompositorV2',
+      };
+    }
+    const tiles = bus._tiles;
+    if (!tiles) return { error: 'no-tiles-map' };
+
+    const dumps = [];
+
+    /**
+     * Draw a texture source to a checkerboard tab. Accepts:
+     *   - HTMLImageElement / ImageBitmap / HTMLCanvasElement (drawImage path)
+     *   - DataTexture-style `{ data: Uint8Array, width, height }` (putImageData
+     *     path — the canvas-decoded straight-alpha path used by
+     *     `_loadBgImageStraightAlpha`).
+     *
+     * Either way the output tab shows the authored alpha pattern independent
+     * of any GPU upload mutations — so if this tab shows the correct holes
+     * and `dumpBgTexturesGpu()` does not, the bug is in WebGL upload, not
+     * in the texture source itself.
+     */
+    const drawImageToTab = (img, label) => {
+      const isDataSource = img && img.data && ArrayBuffer.isView(img.data)
+        && Number(img.width) > 0 && Number(img.height) > 0;
+      const isDrawable = img && (img.naturalWidth > 0 || img.width > 0);
+      if (!isDataSource && !isDrawable) {
+        dumps.push({ label, error: 'no-image' });
+        return;
+      }
+      const w = isDataSource ? Number(img.width) : (img.naturalWidth || img.width);
+      const h = isDataSource ? Number(img.height) : (img.naturalHeight || img.height);
+      const cv = document.createElement('canvas');
+      cv.width = w; cv.height = h;
+      const cx = cv.getContext('2d');
+      if (!cx) { dumps.push({ label, error: 'no-2d-context' }); return; }
+      try {
+        cx.clearRect(0, 0, w, h);
+        if (isDataSource) {
+          // DataTexture path: the bytes are the authored straight-alpha
+          // RGBA from `_loadBgImageStraightAlpha`. `putImageData` preserves
+          // alpha exactly — unlike `drawImage`, which would reinterpret
+          // premultiplication on canvas writes.
+          const id = cx.createImageData(w, h);
+          id.data.set(img.data);
+          cx.putImageData(id, 0, 0);
+        } else {
+          cx.drawImage(img, 0, 0);
+        }
+      } catch (e) {
+        dumps.push({ label, error: 'drawImage-failed:' + (e?.message ?? String(e)) });
+        return;
+      }
+      let dataUrl = null;
+      try { dataUrl = cv.toDataURL('image/png'); } catch (e) {
+        dumps.push({ label, error: 'toDataURL-failed:' + (e?.message ?? String(e)) });
+        return;
+      }
+      try {
+        const win = window.open();
+        if (win) {
+          win.document.title = label;
+          win.document.body.style.background = 'repeating-conic-gradient(#555 0% 25%, #777 0% 50%) 50% / 20px 20px';
+          win.document.body.style.margin = '0';
+          const p = win.document.createElement('p');
+          p.textContent = label + '  (' + w + 'x' + h + ')';
+          p.style.color = '#fff';
+          p.style.font = '14px monospace';
+          p.style.padding = '6px';
+          p.style.margin = '0';
+          p.style.background = 'rgba(0,0,0,0.7)';
+          const im = win.document.createElement('img');
+          im.src = dataUrl;
+          im.style.display = 'block';
+          im.style.maxWidth = '100%';
+          win.document.body.appendChild(p);
+          win.document.body.appendChild(im);
+        }
+      } catch (_) {}
+      dumps.push({ label, width: w, height: h, dataUrl });
+    };
+
+    tiles.forEach((entry, tileId) => {
+      if (!tileId || typeof tileId !== 'string') return;
+      if (!tileId.startsWith('__bg_image__')) return;
+      const mat = entry?.material ?? null;
+      const tex = mat?.map ?? null;
+      const img = tex?.image ?? null;
+      const src = tex?.userData?.mapShineBackgroundSrc
+        ?? (typeof img?.src === 'string' ? img.src : '(no src)');
+      const shortSrc = (typeof src === 'string') ? (src.split('/').pop() ?? src) : '(no src)';
+      const label = tileId + '  floor=' + entry?.floorIndex + '  src=' + shortSrc;
+      drawImageToTab(img, label);
+    });
+
+    const result = { dumps };
+    try { console.log('[dumpBgTextures]', result); } catch (_) {}
+    return result;
+  },
+
+  /**
+   * Isolate texture-upload fidelity from the full render pipeline. Renders
+   * each `__bg_image__*` mesh by itself into a throwaway RGBA8 render
+   * target (same format as per-level RTs) with `clearAlpha: 0`, using
+   * identical material/blending to the per-level draw. Then reads the
+   * result back and opens it as a PNG on a checkerboard.
+   *
+   * If these tabs show the AUTHORED alpha pattern (checker everywhere the
+   * WebP has alpha=0), the GPU upload and single-mesh draw are fine —
+   * the bug is something hiding the mesh or overwriting alpha during
+   * the multi-step per-level pipeline.
+   *
+   * If these tabs show alpha=1 everywhere except the user-cut hole, the
+   * GPU upload or three.js blending is losing authored alpha at draw
+   * time — independent of any per-level pipeline step.
+   *
+   * Usage: MapShine.debug.dumpBgTexturesGpu()
+   */
+  dumpBgTexturesGpu() {
+    const ms = globalThis.MapShine ?? {};
+    const fc = ms.floorCompositorV2 ?? ms.effectComposer?._floorCompositorV2 ?? null;
+    const bus = fc?._renderBus ?? null;
+    const renderer = ms.renderer ?? null;
+    const camera = fc?.camera ?? null;
+    if (!bus || !renderer || !camera) {
+      return { error: 'missing-renderer-or-bus-or-camera' };
+    }
+    const THREE = window.THREE;
+    if (!THREE) return { error: 'no-THREE' };
+
+    const dumps = [];
+    const tiles = bus._tiles;
+    if (!tiles) return { error: 'no-tiles' };
+
+    // 1. Hide every entry, remember what we hid.
+    const priorVis = new Map();
+    tiles.forEach((entry, tileId) => {
+      const node = entry?.root ?? entry?.mesh;
+      if (!node) return;
+      priorVis.set(tileId, node.visible);
+      node.visible = false;
+    });
+
+    const prevTarget = renderer.getRenderTarget();
+    const prevAutoClear = renderer.autoClear;
+    const prevClearColor = renderer.getClearColor(new THREE.Color());
+    const prevClearAlpha = renderer.getClearAlpha();
+    const prevLayerMask = camera.layers.mask;
+
+    try {
+      // Match per-level camera layer setup (layers 0..19 as in
+      // FloorRenderBus.renderFloorRangeTo).
+      for (let i = 0; i <= 19; i++) camera.layers.enable(i);
+
+      tiles.forEach((entry, tileId) => {
+        if (typeof tileId !== 'string' || !tileId.startsWith('__bg_image__')) return;
+        const node = entry?.root ?? entry?.mesh;
+        const tex = entry?.material?.map ?? null;
+        if (!node || !tex) return;
+
+        const w = 512;
+        const h = Math.max(1, Math.round(512 * (tex.image?.height ?? 1) / Math.max(1, tex.image?.width ?? 1)));
+        const rt = new THREE.WebGLRenderTarget(w, h, {
+          format: THREE.RGBAFormat,
+          type: THREE.UnsignedByteType,
+          depthBuffer: false,
+          stencilBuffer: false,
+          minFilter: THREE.LinearFilter,
+          magFilter: THREE.LinearFilter,
+        });
+
+        node.visible = true;
+        renderer.setRenderTarget(rt);
+        renderer.setClearColor(0x000000, 0);
+        renderer.autoClear = true;
+        renderer.render(bus._scene, camera);
+        node.visible = false;
+
+        const pixels = new Uint8Array(w * h * 4);
+        try { renderer.readRenderTargetPixels(rt, 0, 0, w, h, pixels); } catch (_) {}
+
+        const cv = document.createElement('canvas');
+        cv.width = w; cv.height = h;
+        const cx = cv.getContext('2d');
+        const img = cx.createImageData(w, h);
+        for (let y = 0; y < h; y++) {
+          const src = (h - 1 - y) * w * 4;
+          const dst = y * w * 4;
+          img.data.set(pixels.subarray(src, src + w * 4), dst);
+        }
+        cx.putImageData(img, 0, 0);
+
+        let dataUrl = null;
+        try { dataUrl = cv.toDataURL('image/png'); } catch (_) {}
+
+        const srcName = (typeof tex.userData?.mapShineBackgroundSrc === 'string')
+          ? tex.userData.mapShineBackgroundSrc.split('/').pop() : '(no src)';
+        const label = tileId + ' floor=' + entry?.floorIndex + ' GPU-draw src=' + srcName;
+
+        if (dataUrl) {
+          try {
+            const win = window.open();
+            if (win) {
+              win.document.title = label;
+              win.document.body.style.background = 'repeating-conic-gradient(#555 0% 25%, #777 0% 50%) 50% / 20px 20px';
+              win.document.body.style.margin = '0';
+              const p = win.document.createElement('p');
+              p.textContent = label + '  (' + w + 'x' + h + ')';
+              p.style.color = '#fff'; p.style.font = '14px monospace';
+              p.style.padding = '6px'; p.style.margin = '0';
+              p.style.background = 'rgba(0,0,0,0.7)';
+              const im = win.document.createElement('img');
+              im.src = dataUrl; im.style.display = 'block'; im.style.maxWidth = '100%';
+              win.document.body.appendChild(p);
+              win.document.body.appendChild(im);
+            }
+          } catch (_) {}
+        }
+
+        dumps.push({ label, width: w, height: h, dataUrl });
+
+        try { rt.dispose(); } catch (_) {}
+      });
+    } finally {
+      // Restore visibilities and renderer state.
+      priorVis.forEach((v, tileId) => {
+        const entry = tiles.get(tileId);
+        const node = entry?.root ?? entry?.mesh;
+        if (node) node.visible = v;
+      });
+      camera.layers.mask = prevLayerMask;
+      renderer.setClearColor(prevClearColor, prevClearAlpha);
+      renderer.autoClear = prevAutoClear;
+      renderer.setRenderTarget(prevTarget);
+    }
+
+    const result = { dumps };
+    try { console.log('[dumpBgTexturesGpu]', result); } catch (_) {}
+    return result;
+  },
+
   alphaIsolationStatus() {
     return { ...(window.MapShine?.__alphaIsolationDebug ?? {}) };
   },
@@ -1688,6 +2422,14 @@ Available commands (access via MapShine.debug):
   .diagnoseFloorMasks()     - Quick snapshot of per-effect mask bindings
   .strictSyncStatus()       - Strict render sync counters + outdoors binding routes
   .setStrictSync(bool)      - Enable/disable strict render sync at runtime
+  .diagnoseMaskBindings()   - Per-floor mask fan-out snapshot (MaskBindingController)
+  .skyReachProbe(x,y,fIdx)  - Read back skyReach value at world (x,y) for a floor
+  .setMaskBindingController(bool) - Toggle the unified mask binding controller rollout
+  .levelAlphaProbe(x,y)     - Read scene+final RT alpha per level (+ water occluder) at canvas pixel (x,y)
+  .dumpLevelRTs()           - Dump each level's sceneRT (authored) AND finalRT (post-rebind) to PNG tabs
+  .busInventory()           - Console.table of every FloorRenderBus entry: floorIndex, textureSrc, alpha flags
+  .dumpBgTextures()         - Dump the raw <img> of every __bg_image__* entry to PNG tabs on a checkerboard
+  .dumpBgTexturesGpu()      - Render each __bg_image__* alone into a test RT and dump the GPU output
   .alphaIsolationStatus()   - Read active alpha/isolation debug flags
   .alphaIsolationSet(obj)   - Merge alpha/isolation debug flags
   .alphaIsolationPreset(id) - Apply a bisect preset (noLens/noStamp/noWaterOccluder/noWater/noOverhead/noCloud/noBuilding/off)

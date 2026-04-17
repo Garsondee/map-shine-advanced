@@ -45,7 +45,6 @@ import { DepthShaderChunks } from '../../effects/DepthShaderChunks.js';
 import { VisionSDF } from '../../vision/VisionSDF.js';
 import { getVertexShader, getFragmentShader, getFragmentShaderSafe } from './water-shader.js';
 import { safeBuildShaderMaterial } from '../../core/diagnostics/SafeShaderBuilder.js';
-import { getWaterLayerBisectState } from '../../ui/water-layering-bisect-dialog.js';
 
 const log = createLogger('WaterEffectV2');
 
@@ -3428,14 +3427,22 @@ static getControlSchema() {
       this.syncFloorDepthBlurContext(blurOn, vm);
     } catch (_) {}
 
-    // Bind screen-space occluder alpha (upper-floor coverage mask)
+    // Bind screen-space occluder alpha (upper-floor coverage mask).
+    // FloorCompositor._renderPerLevelPipeline renders the alpha union of every
+    // floor above `levelIndex` (tiles + __bg_image__ backgrounds) into the
+    // compositor's `_waterOccluderRT` just before each per-level water pass,
+    // then passes that RT here. Where the mask is 1 (upper-floor geometry
+    // covers this pixel), the shader suppresses water shading / alpha-widening
+    // — belt-and-braces with LevelCompositePass which also hides the ground
+    // water under opaque upper tiles through straight-alpha source-over.
+    // `null` is only passed for the topmost visible floor, which has nothing
+    // above it to occlude its water.
     try {
       if (u.tWaterOccluderAlpha && u.uHasWaterOccluderAlpha) {
         if (occluderRT?.texture) {
           u.tWaterOccluderAlpha.value = occluderRT.texture;
           u.uHasWaterOccluderAlpha.value = 1.0;
         } else {
-          // Leave fallback texture but mark as unavailable.
           u.uHasWaterOccluderAlpha.value = 0.0;
         }
       }
@@ -3601,11 +3608,11 @@ static getControlSchema() {
     this._perLevelOverride = idx;
     let dataFloor = idx;
     let crossSlice = false;
-    let borrowOff = false;
-    try {
-      borrowOff = getWaterLayerBisectState().crossSliceBorrow === 'off';
-    } catch (_) {}
-    if (!borrowOff && !this._floorWater.has(idx)) {
+    // When this level has no _Water pack, borrow the nearest lower floor's
+    // pack so the water surface visible through holes/bridges still renders
+    // correctly (composite + shader occluder will still suppress it under
+    // upper opaque geometry).
+    if (!this._floorWater.has(idx)) {
       const resolved = this._resolveWaterFloorForView(idx);
       if (resolved >= 0 && resolved !== idx) {
         dataFloor = resolved;

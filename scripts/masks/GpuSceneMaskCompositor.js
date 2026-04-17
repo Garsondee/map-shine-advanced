@@ -21,6 +21,7 @@ import { createLogger } from '../core/log.js';
 import * as assetLoader from '../assets/loader.js';
 import { getEffectMaskRegistry } from '../assets/loader.js';
 import { SceneMaskCompositor } from './scene-mask-compositor.js';
+import { SKY_REACH_VERT, SKY_REACH_FRAG, OVERHEAD_ACCUM_FRAG } from './shaders/skyReachShader.js';
 import { isLevelsEnabledForScene, tileHasLevelsRange, readTileLevelsFlags, readSceneLevelsFlag, hasV14NativeLevels, readV14SceneLevels, getViewedLevelBackgroundSrc } from '../foundry/levels-scene-flags.js';
 import { isTileOverhead } from '../scene/tile-manager.js';
 import { collectEnabledMaskIds, getMaskBundleOptionsFromFlagOnly } from '../settings/mask-manifest-flags.js';
@@ -466,6 +467,28 @@ export class GpuSceneMaskCompositor {
      * @type {THREE.WebGLRenderTarget|null}
      */
     this._waterPatchTempRt = null;
+
+    // ── Sky-reach derivation (per-floor) ──────────────────────────────────
+    /** @type {THREE.RawShaderMaterial|null} Final skyReach = outdoors * (1 - overhead). */
+    this._skyReachMaterial = null;
+    /** @type {THREE.Mesh|null} */
+    this._skyReachMesh = null;
+    /** @type {THREE.Scene|null} */
+    this._skyReachScene = null;
+
+    /** @type {THREE.RawShaderMaterial|null} Per-draw passthrough used under MAX blending. */
+    this._overheadAccumMaterial = null;
+    /** @type {THREE.Mesh|null} */
+    this._overheadAccumMesh = null;
+    /** @type {THREE.Scene|null} */
+    this._overheadAccumScene = null;
+
+    /**
+     * Scratch RT that accumulates the union of upper-floor `floorAlpha` textures.
+     * Reused across floors — cleared before each skyReach derivation.
+     * @type {THREE.WebGLRenderTarget|null}
+     */
+    this._overheadAccumRt = null;
   }
 
   // ── Public API ──────────────────────────────────────────────────────────────
@@ -671,6 +694,17 @@ export class GpuSceneMaskCompositor {
       try { oRt?.dispose?.(); } catch (_) {}
       floorTargets.delete('outdoors');
     }
+
+    // Derive per-floor `skyReach` for every cached floor. Runs AFTER the
+    // stale-outdoors drop so we never compose skyReach from a doomed RT. Must
+    // recompose every cached floor (not just the one being composed) because
+    // the just-composed floor's `floorAlpha` may become an occluder for any
+    // floor below it, and its authored outdoors may also have changed.
+    // Bumps _floorCacheVersion when any target is created or rewritten.
+    const skyReachEntry = this._composeSkyReachAllFloors(
+      renderer, THREE, floorKey, sceneW, sceneH
+    );
+    if (skyReachEntry) compositeMasks.push(skyReachEntry);
 
     if (compositeMasks.length === 0) return null;
 
@@ -2060,6 +2094,19 @@ export class GpuSceneMaskCompositor {
     try { this._waterPatchTempRt?.dispose(); } catch (_) {}
     this._waterPatchTempRt = null;
 
+    try { this._skyReachMaterial?.dispose(); } catch (_) {}
+    this._skyReachMaterial = null;
+    this._skyReachMesh = null;
+    this._skyReachScene = null;
+
+    try { this._overheadAccumMaterial?.dispose(); } catch (_) {}
+    this._overheadAccumMaterial = null;
+    this._overheadAccumMesh = null;
+    this._overheadAccumScene = null;
+
+    try { this._overheadAccumRt?.dispose(); } catch (_) {}
+    this._overheadAccumRt = null;
+
     this._quadMesh = null;
     this._quadScene = null;
     this._orthoCamera = null;
@@ -2202,6 +2249,52 @@ export class GpuSceneMaskCompositor {
     if (!this._waterPatchScene) {
       this._waterPatchScene = new THREE.Scene();
       this._waterPatchScene.add(this._waterPatchMesh);
+    }
+
+    // ── Sky-reach derivation materials ────────────────────────────────────
+    if (!this._overheadAccumMaterial) {
+      this._overheadAccumMaterial = new THREE.RawShaderMaterial({
+        vertexShader:   SKY_REACH_VERT,
+        fragmentShader: OVERHEAD_ACCUM_FRAG,
+        uniforms: {
+          tUpperAlpha: { value: null },
+        },
+        depthTest:  false,
+        depthWrite: false,
+        transparent: false,
+      });
+    }
+    if (!this._overheadAccumMesh) {
+      this._overheadAccumMesh = new THREE.Mesh(this._quadGeo, this._overheadAccumMaterial);
+      this._overheadAccumMesh.frustumCulled = false;
+    }
+    if (!this._overheadAccumScene) {
+      this._overheadAccumScene = new THREE.Scene();
+      this._overheadAccumScene.add(this._overheadAccumMesh);
+    }
+
+    if (!this._skyReachMaterial) {
+      this._skyReachMaterial = new THREE.RawShaderMaterial({
+        vertexShader:   SKY_REACH_VERT,
+        fragmentShader: SKY_REACH_FRAG,
+        uniforms: {
+          tOutdoors:      { value: null },
+          tOverheadAccum: { value: null },
+          uHasOverhead:   { value: 0.0 },
+        },
+        depthTest:  false,
+        depthWrite: false,
+        transparent: false,
+        blending:    THREE.NoBlending,
+      });
+    }
+    if (!this._skyReachMesh) {
+      this._skyReachMesh = new THREE.Mesh(this._quadGeo, this._skyReachMaterial);
+      this._skyReachMesh.frustumCulled = false;
+    }
+    if (!this._skyReachScene) {
+      this._skyReachScene = new THREE.Scene();
+      this._skyReachScene.add(this._skyReachMesh);
     }
   }
 
@@ -2723,6 +2816,209 @@ export class GpuSceneMaskCompositor {
       texture: rt.texture,
       required: false
     };
+  }
+
+  /**
+   * Parse a floor key string of the form `"${bottom}:${top}"` and return the
+   * bottom elevation. Non-numeric keys (e.g. `"ground"`) resolve to 0 so the
+   * caller treats them as the lowest floor with no occluders.
+   *
+   * @param {string} floorKey
+   * @returns {number}
+   * @private
+   */
+  _parseFloorBottom(floorKey) {
+    if (!floorKey || typeof floorKey !== 'string') return 0;
+    const idx = floorKey.indexOf(':');
+    if (idx < 0) return 0;
+    const n = Number(floorKey.substring(0, idx));
+    return Number.isFinite(n) ? n : 0;
+  }
+
+  /**
+   * Ensure the overhead-accumulator scratch RT exists and matches the scene
+   * dimensions at DATA_MAX resolution. Reused across all floors in a compose
+   * call to avoid per-floor allocations.
+   *
+   * @param {object} THREE
+   * @param {number} sceneW
+   * @param {number} sceneH
+   * @returns {THREE.WebGLRenderTarget}
+   * @private
+   */
+  _ensureOverheadAccumRt(THREE, sceneW, sceneH) {
+    const scale = Math.min(1.0, DATA_MAX / Math.max(1, sceneW), DATA_MAX / Math.max(1, sceneH));
+    const outW = Math.max(1, Math.round(sceneW * scale));
+    const outH = Math.max(1, Math.round(sceneH * scale));
+    let rt = this._overheadAccumRt;
+    if (!rt || rt.width !== outW || rt.height !== outH) {
+      try { rt?.dispose(); } catch (_) {}
+      rt = this._createRenderTarget(THREE, outW, outH, 'skyReach_overheadAccum');
+      rt.texture.colorSpace = THREE.NoColorSpace ?? '';
+      this._overheadAccumRt = rt;
+    }
+    return rt;
+  }
+
+  /**
+   * Derive the `skyReach` mask for a single floor.
+   *
+   *   skyReach = outdoors * (1 - union(floorAlpha_k for k > floorBottom))
+   *
+   * Looks up the floor's authored `outdoors` RT (if any) and unions every
+   * cached upper-floor `floorAlpha` under MAX blending into the scratch
+   * accumulator. Writes the result to `floorTargets.set('skyReach', rt)` and
+   * bumps `_floorCacheVersion`.
+   *
+   * Returns the skyReach texture (or null if this floor has no outdoors).
+   *
+   * @param {THREE.WebGLRenderer} renderer
+   * @param {object} THREE
+   * @param {string} floorKey
+   * @param {Map<string, THREE.WebGLRenderTarget>} floorTargets
+   * @param {number} sceneW
+   * @param {number} sceneH
+   * @returns {THREE.Texture|null}
+   * @private
+   */
+  _composeSkyReachForFloor(renderer, THREE, floorKey, floorTargets, sceneW, sceneH) {
+    const SKY_REACH_ID = 'skyReach';
+
+    // Authored outdoors for this floor. If absent, we cannot derive skyReach.
+    const outdoorsRt = floorTargets?.get('outdoors');
+    const outdoorsTex = outdoorsRt?.texture ?? null;
+    if (!outdoorsTex) {
+      // Remove any stale skyReach so consumers fall back to neutral.
+      const staleRt = floorTargets?.get(SKY_REACH_ID);
+      if (staleRt) {
+        try { staleRt.dispose(); } catch (_) {}
+        floorTargets.delete(SKY_REACH_ID);
+        this._floorCacheVersion++;
+      }
+      return null;
+    }
+
+    // Output RT sized to match outdoors (same resolution → same sampling).
+    const outW = outdoorsRt.width;
+    const outH = outdoorsRt.height;
+    let skyRt = floorTargets.get(SKY_REACH_ID);
+    if (!skyRt || skyRt.width !== outW || skyRt.height !== outH) {
+      try { skyRt?.dispose(); } catch (_) {}
+      skyRt = this._createRenderTarget(THREE, outW, outH, SKY_REACH_ID);
+      skyRt.texture.colorSpace = THREE.NoColorSpace ?? '';
+      floorTargets.set(SKY_REACH_ID, skyRt);
+      this._floorCacheVersion++;
+    }
+
+    // Collect upper-floor floorAlpha textures. Any key whose bottom elevation
+    // is strictly greater than this floor's bottom is an occluder candidate.
+    const thisBottom = this._parseFloorBottom(floorKey);
+    const upperAlphas = [];
+    for (const [otherKey, otherTargets] of this._floorCache.entries()) {
+      if (otherKey === floorKey) continue;
+      const otherBottom = this._parseFloorBottom(otherKey);
+      if (!(otherBottom > thisBottom)) continue;
+      const alphaRt = otherTargets?.get('floorAlpha');
+      const alphaTex = alphaRt?.texture ?? null;
+      if (alphaTex) upperAlphas.push(alphaTex);
+    }
+
+    const prevTarget = renderer.getRenderTarget();
+    const prevClearColor = new THREE.Color();
+    renderer.getClearColor(prevClearColor);
+    const prevClearAlpha = renderer.getClearAlpha();
+
+    let overheadTex = null;
+    if (upperAlphas.length > 0) {
+      const accumRt = this._ensureOverheadAccumRt(THREE, sceneW, sceneH);
+      renderer.setRenderTarget(accumRt);
+      renderer.setClearColor(0x000000, 0);
+      renderer.clear();
+
+      const m = this._overheadAccumMaterial;
+      m.blending = THREE.CustomBlending;
+      m.blendEquation = THREE.MaxEquation ?? THREE.AddEquation;
+      m.blendEquationAlpha = THREE.MaxEquation ?? THREE.AddEquation;
+      m.blendSrc = THREE.OneFactor;
+      m.blendDst = THREE.OneFactor;
+      m.blendSrcAlpha = THREE.OneFactor;
+      m.blendDstAlpha = THREE.OneFactor;
+      m.transparent = true;
+
+      for (const tex of upperAlphas) {
+        m.uniforms.tUpperAlpha.value = tex;
+        m.needsUpdate = true;
+        try {
+          renderer.render(this._overheadAccumScene, this._orthoCamera);
+        } catch (e) {
+          log.debug('_composeSkyReachForFloor: overhead accumulate draw failed', e);
+        }
+      }
+
+      overheadTex = accumRt.texture;
+    }
+
+    // Final multiply: skyReach = outdoors * (1 - overhead)
+    renderer.setRenderTarget(skyRt);
+    renderer.setClearColor(0x000000, 0);
+    renderer.clear();
+
+    const s = this._skyReachMaterial;
+    s.blending = THREE.NoBlending;
+    s.transparent = false;
+    s.uniforms.tOutdoors.value      = outdoorsTex;
+    s.uniforms.tOverheadAccum.value = overheadTex;
+    s.uniforms.uHasOverhead.value   = overheadTex ? 1.0 : 0.0;
+    s.needsUpdate = true;
+
+    try {
+      renderer.render(this._skyReachScene, this._orthoCamera);
+    } catch (e) {
+      log.debug('_composeSkyReachForFloor: skyReach pass failed', e);
+    }
+
+    renderer.setClearColor(prevClearColor, prevClearAlpha);
+    renderer.setRenderTarget(prevTarget);
+
+    return skyRt.texture;
+  }
+
+  /**
+   * Recompose `skyReach` for every floor currently in the cache. Called at the
+   * end of {@link GpuSceneMaskCompositor#compose} so that:
+   *
+   *   - The floor just composed gets an up-to-date `skyReach` that reflects
+   *     every known upper-floor alpha.
+   *   - Any lower floors already in the cache pick up the newly composed
+   *     floor as an occluder (bridge-above-river scenario).
+   *
+   * Returns a mask entry for the floor matching `activeFloorKey` (if any) so
+   * the caller can push it onto the compositeMasks list for that pass.
+   *
+   * @param {THREE.WebGLRenderer} renderer
+   * @param {object} THREE
+   * @param {string} activeFloorKey
+   * @param {number} sceneW
+   * @param {number} sceneH
+   * @returns {{id:string,type:string,texture:THREE.Texture,required:boolean}|null}
+   * @private
+   */
+  _composeSkyReachAllFloors(renderer, THREE, activeFloorKey, sceneW, sceneH) {
+    let activeEntry = null;
+    for (const [floorKey, floorTargets] of this._floorCache.entries()) {
+      const tex = this._composeSkyReachForFloor(
+        renderer, THREE, floorKey, floorTargets, sceneW, sceneH
+      );
+      if (tex && floorKey === activeFloorKey) {
+        activeEntry = {
+          id: 'skyReach',
+          type: 'skyReach',
+          texture: tex,
+          required: false,
+        };
+      }
+    }
+    return activeEntry;
   }
 
   /**

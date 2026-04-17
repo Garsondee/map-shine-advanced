@@ -112,8 +112,11 @@ export class FloorRenderBus {
     this._tiles = new Map();
 
     /**
-     * THREE.TextureLoader — loads via HTML <img>, preserving straight alpha
-     * without any canvas 2D intermediary (which premultiplies alpha).
+     * Tile-albedo loader. `THREE.TextureLoader` is fine for tiles because
+     * `_configureTileAlbedoTexture` explicitly sets `tex.premultiplyAlpha = true`
+     * and the tile compositor uses premultiplied blending.
+     * Background images use `this._bgImageLoader` instead — see its
+     * JSDoc for why.
      * @type {import('three').TextureLoader|null}
      */
     this._loader = null;
@@ -155,7 +158,17 @@ export class FloorRenderBus {
     const THREE = window.THREE;
     this._scene = new THREE.Scene();
     this._scene.name = 'FloorBusScene';
+    /**
+     * Primary loader for TILE albedo textures. Tiles go through
+     * `_configureTileAlbedoTexture` which expects an HTMLImageElement-backed
+     * texture and sets `premultiplyAlpha = true` on the texture itself —
+     * that path is unchanged.
+     */
     this._loader = new THREE.TextureLoader();
+    // Background images do NOT use `this._loader` — see `_loadBgImageStraightAlpha`
+    // for the canvas → getImageData → DataTexture decode path used for
+    // `__bg_image__*` entries. That path guarantees straight-alpha RGBA data
+    // regardless of browser image-decode quirks.
     this._initialized = true;
     log.info('FloorRenderBus initialized');
   }
@@ -218,17 +231,15 @@ export class FloorRenderBus {
     } else if (visibleBgSrcs.length > 0) {
       this._loadVisibleBackgroundStack(visibleBgSrcs, fd);
     } else if (bgSrc) {
-      this._loader.load(bgSrc, (tex) => {
-        tex.colorSpace = window.THREE.SRGBColorSpace;
-        tex.flipY = false;
-        tex.needsUpdate = true;
-        tex.userData = tex.userData || {};
-        tex.userData.mapShineBackgroundSrc = bgSrc;
-        this._addBackgroundImage(fd, tex, 0, '__bg_image__');
-        log.info('FloorRenderBus: bg image loaded via TextureLoader fallback');
-      }, undefined, (err) => {
-        log.warn('FloorRenderBus: TextureLoader background load failed:', bgSrc, err);
-      });
+      // Route legacy single-background load through the same
+      // `_loadVisibleBackgroundStack` path used for multi-level stacks.
+      // Keeps straight-alpha decode (ImageBitmap + premultiplyAlpha: 'none')
+      // consistent across every `__bg_image__*` entry so authored alpha
+      // holes survive to the GPU. Previously this fell back to
+      // `TextureLoader`, which silently flattens WebP alpha in browsers
+      // that decode HTMLImageElement with premultiplied RGB.
+      this._loadVisibleBackgroundStack([bgSrc], fd);
+      log.info('FloorRenderBus: bg image load routed through ImageBitmap stack loader');
     } else if (bgTexture) {
       let frames = 0;
       const maxFrames = 120;
@@ -1111,42 +1122,48 @@ export class FloorRenderBus {
     } = options;
 
     // Save each tile's current visibility so we can restore it after.
+    //
+    // IMPORTANT — visibility is set by floor-range membership here, NOT by
+    // ANDing with the tile's current `wasVisible`. The per-level pipeline
+    // renders EVERY level's RT in a loop, but the bus's slice state
+    // (`setVisibleFloors`) reflects only the currently-viewed floor: entries
+    // on non-viewed floors are sliced to `visible=false`. If we ANDed with
+    // that, every per-level RT except the viewed one would end up empty —
+    // the exact "lower floor RT is entirely transparent" symptom we were
+    // chasing. Render visibility per-call must depend only on:
+    //   1. floor-range membership vs [minFloorIndex, maxFloorIndex]
+    //   2. per-call `includeBackground` / `filterBackgroundByFloor` policy
+    //   3. the global tile-albedo editing suppression flag
+    // All other "wasVisible" state (user toggles, effect gating, warmups)
+    // is a view-slice concern and is faithfully restored after the render.
     const savedVisibility = new Map();
     for (const [tileId, entry] of this._tiles) {
       const node = entry?.root || entry?.mesh;
       if (!node) continue;
-      const wasVisible = node.visible === true;
-      savedVisibility.set(tileId, wasVisible);
+      savedVisibility.set(tileId, node.visible === true);
 
       if (tileId.startsWith('__')) {
         if (tileId === '__bg_solid__') {
-          // Per-level pipeline: include the opaque world-fill on floor 0 only.
-          // Floor 0 needs it so padding areas are not transparent black. Upper
-          // floors (minFloorIndex > 0) must NOT draw it — otherwise holes in
-          // upper-floor art (srcA=0) composite over opaque solid (dstA=1) and
-          // blended alpha becomes 1 everywhere, hiding lower-slice content.
-          const showSolid = wasVisible && includeBackground
+          // Include the opaque world-fill only when floor 0 is in range so
+          // upper-floor RTs preserve authored transparency.
+          const showSolid = includeBackground
             && (!filterBackgroundByFloor || minFloorIndex <= 0);
           node.visible = showSolid;
           continue;
         }
         if (filterBackgroundByFloor && tileId.startsWith('__bg_image__')) {
-          // Per-level pipeline: only include background images whose floorIndex
-          // falls within the requested range.
           const bgFloorIdx = Number(entry.floorIndex);
           const inRange = Number.isFinite(bgFloorIdx) && bgFloorIdx >= minFloorIndex && bgFloorIdx <= maxFloorIndex;
-          node.visible = wasVisible && inRange;
+          node.visible = includeBackground && inRange;
         } else {
-          // Legacy path: background planes follow includeBackground only.
-          node.visible = wasVisible && includeBackground;
+          // Legacy path (single-RT draw): all bg planes follow includeBackground.
+          node.visible = includeBackground;
         }
         continue;
       }
 
       const inRange = entry.floorIndex >= minFloorIndex && entry.floorIndex <= maxFloorIndex;
-      // Respect the node's existing visibility state (effect toggles, temporary hides,
-      // warmup/runtime guards, etc.) and only apply additional floor-range culling.
-      node.visible = wasVisible && inRange && !this._suppressTileAlbedoForEditing;
+      node.visible = inRange && !this._suppressTileAlbedoForEditing;
     }
 
     // Save and configure renderer state.
@@ -1508,18 +1525,151 @@ export class FloorRenderBus {
       const src = (typeof raw === 'string') ? raw.trim() : '';
       if (!src) continue;
       const key = i === 0 ? '__bg_image__' : `__bg_image__${i}`;
-      this._loader.load(src, (tex) => {
-        tex.colorSpace = window.THREE.SRGBColorSpace;
+      this._loadBgImageStraightAlpha(src, fd, i, key);
+    }
+  }
+
+  /**
+   * Load a `__bg_image__*` background layer and upload it to the GPU with
+   * *straight-alpha* pixel data, bypassing every browser-decode path that
+   * could premultiply alpha into RGB.
+   *
+   * ## Why this elaborate path exists
+   *
+   * Straight-alpha `WebP` backgrounds (authored with non-zero RGB under
+   * `alpha=0` texels — the normal case for maps painted in Photoshop /
+   * Affinity) lose their alpha channel at the GPU when decoded through
+   * the "normal" paths used across three.js:
+   *
+   *   - `THREE.TextureLoader` → wraps `HTMLImageElement`. Browsers decode
+   *     `<img>` into a premultiplied internal buffer as an optimisation.
+   *     `gl.texImage2D` then uploads premultiplied RGB tagged as
+   *     straight-alpha, producing sampled alpha = 1 wherever authored
+   *     RGB was non-zero but alpha was 0.
+   *   - `THREE.ImageBitmapLoader` + `premultiplyAlpha: 'none'` → *should*
+   *     produce straight-alpha data, but in practice the behaviour
+   *     depends on the browser's WebP decoder honouring that option. On
+   *     Firefox in particular, some WebP files still come through as
+   *     effectively premultiplied. We cannot rely on this path to fix
+   *     the alpha bug deterministically.
+   *
+   * ## How this path works
+   *
+   *   1. Load the source into an `HTMLImageElement` (uses the browser's
+   *      WebP decoder — same as before).
+   *   2. Draw it into a 2D canvas. The canvas backing store may or may
+   *      not premultiply internally — **we do not care**.
+   *   3. Call `CanvasRenderingContext2D.getImageData`. By W3C spec, this
+   *      *always* returns straight-alpha RGBA in `Uint8ClampedArray`,
+   *      regardless of the backing store's internal representation. Any
+   *      browser-side premultiply is undone here.
+   *   4. Wrap the byte buffer in a `THREE.DataTexture` with
+   *      `premultiplyAlpha: false`. `DataTexture` uploads the raw bytes
+   *      to the GPU via `gl.texImage2D(… , pixels)`, and with
+   *      `UNPACK_PREMULTIPLY_ALPHA_WEBGL = false` the GPU sees the
+   *      exact straight-alpha bytes we assembled in step 3.
+   *
+   * ## Memory cost
+   *
+   * One transient `Uint8ClampedArray` of size `4 * width * height`
+   * (~211 MB for a 10650×4950 map). That allocation is released after
+   * the DataTexture is constructed — the GPU keeps its own copy. Peak
+   * memory during load is higher than with `TextureLoader` but steady
+   * state is identical.
+   *
+   * @param {string} src
+   * @param {object} fd
+   * @param {number} zIndex
+   * @param {string} key
+   * @private
+   */
+  _loadBgImageStraightAlpha(src, fd, zIndex, key) {
+    const THREE = window.THREE;
+    if (!THREE) return;
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = () => {
+      try {
+        const w = img.naturalWidth || img.width;
+        const h = img.naturalHeight || img.height;
+        if (!(w > 0 && h > 0)) {
+          log.warn('FloorRenderBus: bg image has no dimensions after load:', src);
+          return;
+        }
+
+        // Decode → straight-alpha RGBA via 2D canvas.
+        // `willReadFrequently: false` is correct here — we read once then
+        // throw the canvas away. `colorSpaceConversion: 'none'` avoids
+        // the browser applying any display colour profile to the decoded
+        // pixels; our downstream pipeline does its own colour management
+        // via `tex.colorSpace = SRGBColorSpace`.
+        const cv = document.createElement('canvas');
+        cv.width = w;
+        cv.height = h;
+        const cx = cv.getContext('2d', {
+          willReadFrequently: false,
+          colorSpace: 'srgb',
+        });
+        if (!cx) {
+          log.warn('FloorRenderBus: could not acquire 2D context for bg decode:', src);
+          return;
+        }
+        cx.clearRect(0, 0, w, h);
+        cx.drawImage(img, 0, 0);
+        const imageData = cx.getImageData(0, 0, w, h);
+
+        // Copy into a plain Uint8Array — three.js's DataTexture path
+        // rejects Uint8ClampedArray in some builds because `instanceof
+        // Uint8Array` fails.
+        const bytes = new Uint8Array(imageData.data.buffer.slice(
+          imageData.data.byteOffset,
+          imageData.data.byteOffset + imageData.data.byteLength,
+        ));
+
+        const tex = new THREE.DataTexture(
+          bytes,
+          w,
+          h,
+          THREE.RGBAFormat,
+          THREE.UnsignedByteType,
+        );
+        tex.colorSpace = THREE.SRGBColorSpace;
+        // `DataTexture` defaults to `flipY = false`. Keep it that way —
+        // the mesh's `scale.y = -1` already handles the Y flip. Setting
+        // `flipY = true` on a DataTexture triggers a `[.WebGL-xxx] GL_INVALID_OPERATION`
+        // warning in three.js since r160.
         tex.flipY = false;
+        tex.generateMipmaps = false;
+        tex.minFilter = THREE.LinearFilter;
+        tex.magFilter = THREE.LinearFilter;
+        tex.wrapS = THREE.ClampToEdgeWrapping;
+        tex.wrapT = THREE.ClampToEdgeWrapping;
+        // Bytes written to `tex.image.data` are straight-alpha RGBA.
+        // Tell WebGL not to premultiply during upload so the GPU stores
+        // the exact same values. Combined with NormalBlending on the
+        // material (non-premultiplied), the per-level sceneRT receives
+        // `outA = srcA`, preserving authored holes.
+        tex.premultiplyAlpha = false;
         tex.needsUpdate = true;
         tex.userData = tex.userData || {};
         tex.userData.mapShineBackgroundSrc = src;
-        this._addBackgroundImage(fd, tex, i, key);
+        // Mark the decode path so diagnostics can distinguish this from
+        // legacy TextureLoader uploads.
+        tex.userData.mapShineBgDecodePath = 'canvas-getImageData';
+        log.info(
+          `FloorRenderBus: bg image decoded via canvas (straight-alpha) `
+          + `[${key}] (${w}x${h}, src=${src.split('/').pop()})`,
+        );
+        this._addBackgroundImage(fd, tex, zIndex, key);
         this._applyTileVisibility();
-      }, undefined, (err) => {
-        log.warn('FloorRenderBus: visible background layer load failed:', { src, index: i }, err);
-      });
-    }
+      } catch (err) {
+        log.warn('FloorRenderBus: straight-alpha bg decode failed:', { src, key }, err);
+      }
+    };
+    img.onerror = (err) => {
+      log.warn('FloorRenderBus: bg image load failed:', { src, key }, err);
+    };
+    img.src = src;
   }
 
   /**

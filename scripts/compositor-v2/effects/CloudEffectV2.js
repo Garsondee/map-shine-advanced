@@ -310,7 +310,19 @@ export class CloudEffectV2 {
   /** Supply the outdoors mask texture (legacy single-texture path). */
   setOutdoorsMask(texture) { this._outdoorsMask = texture ?? null; }
 
-  /** Supply per-floor outdoors masks (indices 0..3). Missing entries may be null. */
+  /**
+   * Supply per-floor outdoors-equivalent masks (indices 0..3). Missing entries
+   * may be null.
+   *
+   * NOTE ON SEMANTICS: when the unified `MaskBindingController` is enabled
+   * (`window.MapShine.maskBindingControllerEnabled === true`) the catalog
+   * routes the `'sky'` purpose through the derived `skyReach` mask instead of
+   * the authored `_Outdoors`. The uniform slots `tOutdoorsMask0..3` retain
+   * their legacy names for binary compatibility but receive `skyReach_N`
+   * textures — `_Outdoors_N ∧ ¬union(upperFloorAlpha)`. This is the intended
+   * behaviour for cloud shadows: shadows should not be cast into areas of a
+   * lower floor that are covered by a bridge/roof above.
+   */
   setOutdoorsMasks(textures) {
     if (!Array.isArray(textures)) return;
     for (let i = 0; i < 4; i++) this._outdoorsMasks[i] = textures[i] ?? null;

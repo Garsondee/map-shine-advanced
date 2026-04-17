@@ -10,7 +10,15 @@
  *   1. Global shadow/cloud passes, then each visible level: bus slice → level RTs,
  *      full post chain **per level** (lighting … water … bloom …) **before** any
  *      merge — effects are not applied to a single pre-merged canvas.
- *   2. **LevelCompositePass** blends those per-level final RTs bottom→top using alpha.
+ *   2. **LevelCompositePass** blends those per-level final RTs strictly bottom→top
+ *      using straight-alpha Porter–Duff source-over. The multi-floor "sandwich"
+ *      contract: each `levelFinalRTs[N]` carries content + post-chain output for
+ *      floor N with alpha preserved (alpha=1 only where that floor has opaque
+ *      tile/bus coverage). Any opaque pixel on an upper floor therefore
+ *      occludes the lower floors it covers (e.g. a bridge over a river hides
+ *      ground-floor water beneath it). Water on a lower floor receives an
+ *      additional shader-level upper-floor occluder (see Phase 3) so water
+ *      shading under upper geometry is suppressed before this composite runs.
  *   3. Distortion, PIXI/fog/lens, mask debug, blit to screen, late overlays.
  *
  * Current effects (bus overlays — rendered in step 1):
@@ -40,7 +48,6 @@
  */
 
 import { createLogger } from '../core/log.js';
-import { getWaterLayerBisectState } from '../ui/water-layering-bisect-dialog.js';
 import { yieldToMain } from '../core/yield-to-main.js';
 import { OVERLAY_THREE_LAYER } from '../core/render-layers.js';
 import { FloorRenderBus } from './FloorRenderBus.js';
@@ -86,9 +93,11 @@ import { SmellyFliesEffect } from '../particles/SmellyFliesEffect.js';
 import { CandleFlamesEffectV2 } from './effects/CandleFlamesEffectV2.js';
 import { weatherController } from '../core/WeatherController.js';
 import { resolveCompositorOutdoorsTexture } from '../masks/resolve-compositor-outdoors.js';
+import { MaskBindingController } from '../masks/mask-binding-controller.js';
 import { MaskDebugOverlayPass } from './MaskDebugOverlayPass.js';
 import { LevelRenderTargetPool } from './LevelRenderTargetPool.js';
 import { LevelCompositePass } from './LevelCompositePass.js';
+import { LevelAlphaRebindPass } from './LevelAlphaRebindPass.js';
 import { resolveEffectEnabled, resolveOverlayEffectActive, resolveFloorEffectActive } from '../effects/resolve-effect-enabled.js';
 
 const log = createLogger('FloorCompositor');
@@ -544,6 +553,16 @@ export class FloorCompositor {
     /** @type {THREE.Texture|null} 1x1 indoors fallback when floor-scoped outdoors is unavailable */
     this._neutralOutdoorsTexture = null;
 
+    /**
+     * MaskBindingController: unified per-floor mask fan-out engine. Wrapped
+     * in a lazy accessor so we can toggle it at runtime via
+     * `window.MapShine.maskBindingControllerEnabled` during rollout. The
+     * controller runs alongside the legacy `_syncOutdoorsMaskConsumers` path
+     * until every consumer is migrated to banded bindings.
+     * @type {import('../masks/mask-binding-controller.js').MaskBindingController|null}
+     */
+    this._maskBindingController = null;
+
     /** @type {THREE.Texture|null} Cached fire mask texture used for heat-haze blur */
     this._fireHeatMaskInput = null;
     /** @type {THREE.Texture|null} Cached blurred fire mask texture used by distortion */
@@ -589,10 +608,13 @@ export class FloorCompositor {
     this._levelRTPool = new LevelRenderTargetPool();
     /** @type {LevelCompositePass} Alpha-based bottom→top level compositor */
     this._levelCompositePass = new LevelCompositePass();
-    /** @type {boolean} One-shot log for __v2PerLevelTintDebug */
-    this._v2PerLevelTintDebugLogged = false;
-    /** @type {boolean} One-shot warn when tint requested but visible level count ≠ 2 */
-    this._v2PerLevelTintLengthWarned = false;
+    /**
+     * @type {LevelAlphaRebindPass} Final per-level pass that clamps a
+     * level's post-chain alpha to the authored solidity alpha captured
+     * in the raw sceneRT. Guarantees hole pixels stay holes regardless
+     * of post-pass alpha widening. See {@link LevelAlphaRebindPass}.
+     */
+    this._levelAlphaRebindPass = new LevelAlphaRebindPass();
 
     /** @type {THREE.Scene|null} Dedicated scene for fullscreen blit quad */
     this._blitScene  = null;
@@ -1058,6 +1080,7 @@ export class FloorCompositor {
     // ── Per-level RT infrastructure ───────────────────────────────────────
     this._levelRTPool.initialize(w, h, preferredType);
     this._levelCompositePass.initialize();
+    this._levelAlphaRebindPass.initialize();
 
     // ── Fullscreen blit quad ──────────────────────────────────────────────
     this._blitScene  = new THREE.Scene();
@@ -1751,6 +1774,34 @@ export class FloorCompositor {
     if (!this._neutralOutdoorsTexture && !this._lastOutdoorsTexture) {
       // Neutral is lazily created on first sync; not yet a failure.
       details.hasLastOutdoors = !!this._lastOutdoorsTexture;
+    }
+
+    // When the unified MaskBindingController is enabled, layer its readiness
+    // check on top of the legacy checks above. The controller probes the
+    // compositor for every banded mask required by the active floor; if any
+    // is missing, the gate trips and the RenderLoop holds the last valid
+    // frame. This is the foundation for "no half-correct frames" in a
+    // multi-floor scene with bridges/overhangs — the frame is only released
+    // once skyReach, outdoors, and floorAlpha are all live for the active
+    // floor.
+    if (this._isMaskBindingControllerEnabled()) {
+      try {
+        const controller = this._getMaskBindingController();
+        const ready = controller.isReadyForFrame();
+        if (!ready.valid) {
+          details.maskBinding = {
+            activeIndex: ready.activeIndex,
+            missing: ready.missing,
+          };
+          return {
+            valid: false,
+            reason: `mask-binding:${ready.reason}`,
+            details,
+          };
+        }
+      } catch (err) {
+        details.maskBindingError = String(err?.message ?? err);
+      }
     }
 
     return { valid: true, reason: null, details };
@@ -2588,6 +2639,20 @@ export class FloorCompositor {
       this._syncOutdoorsMaskConsumers({ context: _ctx });
     } catch (_) {}
 
+    // Unified per-floor mask fan-out. Behind the rollout flag so migration
+    // proceeds effect-by-effect; the controller short-circuits on signature
+    // match and is cheap to invoke every frame. When disabled, this is a
+    // no-op and the legacy outdoors path above owns all mask distribution.
+    try {
+      if (this._isMaskBindingControllerEnabled()) {
+        this._getMaskBindingController().sync({
+          activeFloorIndex: this._activeFloorIndex ?? 0,
+        });
+      }
+    } catch (err) {
+      log.warn('FloorCompositor: mask-binding-controller.sync failed:', err);
+    }
+
     const populateSlimRender = this._populateSlimRenderActive();
     try {
       if (window.MapShine) {
@@ -2605,19 +2670,6 @@ export class FloorCompositor {
               bottom: Number.isFinite(Number(ctx?.bottom)) ? Number(ctx.bottom) : null,
               top: Number.isFinite(Number(ctx?.top)) ? Number(ctx.top) : null,
             },
-            bisect: (() => {
-              try {
-                const s = getWaterLayerBisectState();
-                return {
-                  compositePreview: s?.compositePreview ?? null,
-                  crossSliceBorrow: s?.crossSliceBorrow ?? null,
-                  skipWaterUpper: s?.skipWaterUpper ?? null,
-                  perLevelTint: s?.perLevelTint ?? null,
-                };
-              } catch (_) {
-                return null;
-              }
-            })(),
           };
           if (!Array.isArray(window.MapShine.__v2FrameTrace)) window.MapShine.__v2FrameTrace = [];
           window.MapShine.__v2FrameTrace.push(trace);
@@ -3597,6 +3649,45 @@ export class FloorCompositor {
   }
 
   /**
+   * Lazily instantiate and return the MaskBindingController.
+   *
+   * The controller is shared across frames. It is safe to re-read the global
+   * rollout flag `window.MapShine.maskBindingControllerEnabled` on each
+   * `sync()` call — when disabled the legacy `_syncOutdoorsMaskConsumers`
+   * continues to own mask distribution.
+   *
+   * @returns {import('../masks/mask-binding-controller.js').MaskBindingController}
+   * @private
+   */
+  _getMaskBindingController() {
+    if (!this._maskBindingController) {
+      this._maskBindingController = new MaskBindingController({ floorCompositor: this });
+      try {
+        if (window?.MapShine) {
+          window.MapShine.__maskBindingController = this._maskBindingController;
+        }
+      } catch (_) {}
+    }
+    return this._maskBindingController;
+  }
+
+  /**
+   * Whether the unified MaskBindingController is enabled. Flag lookup is
+   * per-frame so the rollout can be toggled live from the console without a
+   * reload.
+   *
+   * @returns {boolean}
+   * @private
+   */
+  _isMaskBindingControllerEnabled() {
+    try {
+      return window?.MapShine?.maskBindingControllerEnabled === true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /**
    * Push outdoors mask texture to all V2 consumers.
    * Uses identity-based change detection to avoid redundant uniform writes.
    *
@@ -3951,6 +4042,7 @@ export class FloorCompositor {
       context: payload?.context ?? window.MapShine?.activeLevelContext ?? null,
       force: true,
     });
+    try { this._maskBindingController?.invalidate?.(); } catch (_) {}
     this._fireHeatMaskInput = null;
     this._fireHeatMaskOutput = null;
     this._fireHeatMaskBlurRadius = -1;
@@ -4261,6 +4353,9 @@ export class FloorCompositor {
     // Track which level indices are active so we can release stale pool entries.
     const activeLevels = new Set();
     const levelFinalRTs = [];
+    // Parallel array of raw sceneRTs (post-`renderFloorRangeTo`, pre-any-pass).
+    // Used by the rebind pass below and exposed via diag for dumpLevelRTs().
+    const levelSceneRTs = [];
 
     for (let li = 0; li < visibleFloors.length; li++) {
       const floor = visibleFloors[li];
@@ -4353,20 +4448,54 @@ export class FloorCompositor {
 
       // Water pass — per-level, using that level's water data
       let _waterPassWrote = false;
-      const _bisectWater = getWaterLayerBisectState();
-      const _skipUpperWater = _bisectWater.skipWaterUpper === 'on';
-      if (!_skipWaterPass && resolveEffectEnabled(this._waterEffect) && !(_skipUpperWater && levelIndex > 0)) {
+      if (!_skipWaterPass && resolveEffectEnabled(this._waterEffect)) {
         try {
           // Set per-level water context so the shader uses this level's mask data
           this._waterEffect.setLevelContext?.(levelIndex);
         } catch (_) {}
 
-        // Occluder RT is null here. Water may borrow a lower floor's mask pack on
-        // slices with no local _Water (see WaterEffectV2.setLevelContext); holes
-        // still composite over the lower slice in LevelCompositePass.
+        // Upper-floor occluder: screen-space alpha union of every WALKABLE tile
+        // on floors above `levelIndex`. Feeds the water shader's
+        // `tWaterOccluderAlpha` so water below a solid upper tile (bridge, deck,
+        // upper-floor slab) is suppressed inside the ground RT before the
+        // composite runs.
+        //
+        // Intentionally excludes `__bg_image__*` backgrounds. Full-scene upper
+        // backgrounds are *artwork*, not physical occluders — their visual
+        // coverage is already handled correctly by LevelCompositePass using the
+        // upper RT's own alpha channel (straight-alpha source-over). Feeding bg
+        // images into this shader-level occluder would kill water globally on
+        // any scene whose upper "floor" is represented as a full-scene image
+        // (the common case), because any opaque texel in that image maps to
+        // `occluderBlend ≈ 1` and short-circuits the water pass to passthrough.
+        // Net effect of that misconfiguration is water only appearing in pixels
+        // where BOTH the upper AND ground art have alpha = 0 — a failure mode
+        // we want to avoid.
+        //
+        // If the upper bg image genuinely authors opaque alpha over a
+        // water-masked region, the composite still hides the water below
+        // correctly. If it authors alpha holes, the composite reveals the
+        // ground RT's water through the hole. Either way, the user-chosen
+        // "opaque upper art hides water below" semantic is preserved by the
+        // composite alone.
+        let waterOccluder = null;
+        if (li < visibleFloors.length - 1 && this._waterOccluderRT) {
+          try {
+            this._renderBus.renderFloorMaskTo(
+              this.renderer, this.camera,
+              levelIndex + 1,
+              this._waterOccluderRT,
+              { includeHiddenAboveFloors: true, includeBackground: false },
+            );
+            waterOccluder = this._waterOccluderRT;
+          } catch (_) {
+            waterOccluder = null;
+          }
+        }
+
         const waterOut = (currentInput === levelPostA) ? levelPostB : levelPostA;
         if (_profiling) _profileT0 = performance.now();
-        _waterPassWrote = this._waterEffect.render(this.renderer, this.camera, currentInput, waterOut, null);
+        _waterPassWrote = this._waterEffect.render(this.renderer, this.camera, currentInput, waterOut, waterOccluder);
         if (_profiling) this._recordPassTiming(`perLevel_water_${levelIndex}`, _profileT0);
         if (_waterPassWrote) currentInput = waterOut;
       }
@@ -4435,7 +4564,36 @@ export class FloorCompositor {
         if (this._sepiaEffect.render(this.renderer, this.camera, currentInput, sepOut)) currentInput = sepOut;
       }
 
+      // ── Authoritative alpha rebind ─────────────────────────────────────
+      // Clamp the post-chain RT's alpha to the raw sceneRT alpha. The
+      // sceneRT was just drawn by `renderFloorRangeTo` with
+      // `clearAlpha: 0` and preserves authored texture alpha (tiles +
+      // `__bg_image__*`), so its alpha channel is the authoritative
+      // per-floor solidity mask. Clamping guarantees that pixels the
+      // floor author marked transparent (WebP alpha=0 holes) stay
+      // transparent on the level final RT even if a downstream pass
+      // widened alpha (water is the main culprit: `waterOutA = max(base.a, inside)`).
+      //
+      // Net result for the multi-level sandwich:
+      //   - Upper floor RT alpha == authored upper albedo alpha
+      //     (verified by `debug.dumpLevelRTs()` showing checkerboard
+      //     wherever the source WebP is transparent).
+      //   - LevelCompositePass source-over reveals the ground RT (and
+      //     any ground-floor effects like water) through every authored
+      //     hole, not just where both RGB and alpha were carved.
+      if (_profiling) _profileT0 = performance.now();
+      const rebindOut = (currentInput === levelPostA) ? levelPostB : levelPostA;
+      const rebound = this._levelAlphaRebindPass.render(
+        this.renderer,
+        currentInput,
+        levelSceneRT,
+        rebindOut,
+      );
+      if (_profiling) this._recordPassTiming(`perLevel_alphaRebind_${levelIndex}`, _profileT0);
+      if (rebound) currentInput = rebindOut;
+
       levelFinalRTs.push(currentInput);
+      levelSceneRTs.push(levelSceneRT);
 
       // Restore water to global state after this level's pass
       try { this._waterEffect?.clearLevelContext?.(); } catch (_) {}
@@ -4449,66 +4607,16 @@ export class FloorCompositor {
     // ── Composite all level RTs bottom→top ─────────────────────────────────
     if (_profiling) _profileT0 = performance.now();
 
-    // Debug: tint lower vs upper RGB in the two-level composite (alpha unchanged).
-    // Enable: `window.MapShine.__v2PerLevelTintDebug = true` or `{ enabled: true }`.
-    // Disable: `window.MapShine.__v2PerLevelTintDebug = false` or delete the property.
-    let _tintOn = false;
-    try {
-      const bisectTint = getWaterLayerBisectState().perLevelTint === 'on';
-      const d = window.MapShine?.__v2PerLevelTintDebug;
-      _tintOn = bisectTint || d === true || d?.enabled === true;
-      this._levelCompositePass?.setPerLevelTintDebug?.(_tintOn);
-      if (_tintOn && levelFinalRTs.length === 2 && !this._v2PerLevelTintDebugLogged) {
-        this._v2PerLevelTintDebugLogged = true;
-        log.info(
-          '[V2 PerLevelTintDebug] ON — subtle cool tint on lower RT, subtle warm on upper; '
-          + 'fully empty pixels show as dark purple. Reload if colors still look extreme.',
-        );
-      }
-      if (_tintOn && levelFinalRTs.length !== 2 && !this._v2PerLevelTintLengthWarned) {
-        this._v2PerLevelTintLengthWarned = true;
-        log.warn(
-          `[V2 PerLevelTintDebug] tint shader only runs for exactly 2 visible levels; this frame has ${levelFinalRTs.length}.`,
-        );
-      }
-      if (!_tintOn) {
-        this._v2PerLevelTintDebugLogged = false;
-        this._v2PerLevelTintLengthWarned = false;
-      }
-    } catch (_) {
-      try { this._levelCompositePass?.setPerLevelTintDebug?.(false); } catch (_) {}
-    }
-
     // Use the compositor's own _postA as the composite output, _postB as scratch.
-    const _bisect = getWaterLayerBisectState();
-    // Forced diagnostic mode: always swap base/upper roles in LevelCompositePass.
-    // This isolates whether upstairs "water behind everything" is primarily
-    // caused by per-level stack ordering.
-    const _cp = 'swapped';
-    if (_cp === 'swapped' && levelFinalRTs.length >= 2) {
-      // Forced diagnostic: keep swap behaviour deterministic even when the
-      // visible level count is >2, so we do not alternate between swapped
-      // and normal composite paths frame-to-frame.
-      this._levelCompositePass.compositeReversedTopBottom(
-        this.renderer,
-        levelFinalRTs[0],
-        levelFinalRTs[levelFinalRTs.length - 1],
-        this._postA,
-        _tintOn,
-      );
-    } else {
-      let stack = levelFinalRTs;
-      if (_cp === 'lowerOnly' && levelFinalRTs.length) stack = [levelFinalRTs[0]];
-      else if (_cp === 'upperOnly' && levelFinalRTs.length) {
-        stack = [levelFinalRTs[levelFinalRTs.length - 1]];
-      }
-      this._levelCompositePass.composite(
-        this.renderer,
-        stack,
-        this._postA,
-        this._postB,
-      );
-    }
+    // Bottom→top straight-alpha source-over: each `levelFinalRTs[i]` carries
+    // that floor's content with alpha preserved; `composite` handles 1, 2, and
+    // 3+ levels correctly (iterative ping-pong for 3+).
+    this._levelCompositePass.composite(
+      this.renderer,
+      levelFinalRTs,
+      this._postA,
+      this._postB,
+    );
     if (_profiling) this._recordPassTiming('perLevel_composite', _profileT0);
 
     // Expose per-level diagnostics on MapShine for console inspection
@@ -4518,6 +4626,24 @@ export class FloorCompositor {
           levelCount: visibleFloors.length,
           rtPoolAllocated: this._levelRTPool.allocatedCount,
           levelIndices: [...activeLevels],
+          // Live RT refs so debug probes (levelAlphaProbe, dumpLevelRTs) can
+          // read back per-level alpha without reaching into private state.
+          // `visibleFloors[i]` is the floor index for `levelFinalRTs[i]`.
+          visibleFloors: visibleFloors.slice(),
+          // Post-chain, alpha-rebound output for each level. This is the
+          // RT that LevelCompositePass actually reads from.
+          levelFinalRTs: levelFinalRTs.slice(),
+          // Raw sceneRT for each level — the direct output of
+          // `renderFloorRangeTo`, before any post-pass. Carries the
+          // authored content alpha (the authoritative per-floor solidity
+          // mask) and is consumed by `_levelAlphaRebindPass`. Useful for
+          // isolating draw-time alpha loss vs. post-pass widening in
+          // `dumpLevelRTs()` / `levelAlphaProbe()`.
+          levelSceneRTs: levelSceneRTs.slice(),
+          // Shared upper-floor water occluder RT (tile-only alpha union of
+          // floors above the currently-rendering level). `null` on single-floor
+          // scenes or before a frame has been composed.
+          waterOccluderRT: this._waterOccluderRT ?? null,
         };
       }
     } catch (_) {}
@@ -4589,6 +4715,7 @@ export class FloorCompositor {
     try { this._waterOccluderRT?.dispose(); } catch (_) {}
     try { this._levelRTPool?.dispose(); } catch (_) {}
     try { this._levelCompositePass?.dispose(); } catch (_) {}
+    try { this._levelAlphaRebindPass?.dispose(); } catch (_) {}
     this._sceneRT = null;
     this._postA = null;
     this._postB = null;

@@ -1195,13 +1195,6 @@ Hooks.once('ready', async function() {
   MapShine.bootstrapComplete = true;
   MapShine.bootstrapError = state?.error ?? null;
 
-  try {
-    const bisectMod = await import('./ui/water-layering-bisect-dialog.js');
-    bisectMod.installWaterLayerBisectTools?.(MapShine);
-  } catch (e) {
-    console.warn('Map Shine: water layering bisect UI not installed', e);
-  }
-
   info('Module ready');
 
 

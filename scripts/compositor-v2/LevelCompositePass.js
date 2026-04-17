@@ -39,36 +39,6 @@ const COMPOSITE_FRAGMENT = /* glsl */ `
   }
 `;
 
-/**
- * Same Porter–Duff as COMPOSITE_FRAGMENT, with subtle RGB bias for layer ID.
- * Uses a safer unpremul floor + explicit “double empty” fill so co-aligned holes
- * do not go to rgb≈0 / invA spikes (black voids + half-float flicker).
- */
-const COMPOSITE_FRAGMENT_DEBUG_TINT = /* glsl */ `
-  uniform sampler2D tBase;
-  uniform sampler2D tUpper;
-  varying vec2 vUv;
-  void main() {
-    vec4 base  = texture2D(tBase,  vUv);
-    vec4 upper = texture2D(tUpper, vUv);
-    // Subtle bias only — strong multipliers painted the whole frame red/orange.
-    vec3 baseRgb  = base.rgb  * vec3(0.94, 0.99, 1.03);
-    vec3 upperRgb = upper.rgb * vec3(1.02, 0.97, 0.96);
-    float outA = upper.a + base.a * (1.0 - upper.a);
-    vec3 premul = upperRgb * upper.a + baseRgb * base.a * (1.0 - upper.a);
-
-    // True double-transparent: outA≈0 and no premultiplied color → unpremul undefined.
-    if (outA < 0.0002 && dot(premul, premul) < 1e-10) {
-      gl_FragColor = vec4(0.16, 0.06, 0.22, 1.0);
-      return;
-    }
-
-    float invA = 1.0 / max(outA, 0.002);
-    vec3 rgb = clamp(premul * invA, vec3(0.0), vec3(65504.0));
-    gl_FragColor = vec4(rgb, outA);
-  }
-`;
-
 const BLIT_FRAGMENT = /* glsl */ `
   uniform sampler2D tBase;
   varying vec2 vUv;
@@ -86,18 +56,10 @@ export class LevelCompositePass {
     /** @type {THREE.ShaderMaterial|null} */
     this._compositeMaterial = null;
     /** @type {THREE.ShaderMaterial|null} */
-    this._compositeDebugTintMaterial = null;
-    /** @type {THREE.ShaderMaterial|null} */
     this._blitMaterial = null;
     /** @type {THREE.Mesh|null} */
     this._quad = null;
     this._initialized = false;
-    /**
-     * When true, two-level composite uses {@link COMPOSITE_FRAGMENT_DEBUG_TINT}.
-     * Set from FloorCompositor when `window.MapShine.__v2PerLevelTintDebug` is on.
-     * @type {boolean}
-     */
-    this._useDebugTintComposite = false;
   }
 
   initialize() {
@@ -120,20 +82,6 @@ export class LevelCompositePass {
       blending: THREE.NoBlending,
     });
     this._compositeMaterial.toneMapped = false;
-
-    this._compositeDebugTintMaterial = new THREE.ShaderMaterial({
-      uniforms: {
-        tBase:  { value: null },
-        tUpper: { value: null },
-      },
-      vertexShader: VERTEX_SHADER,
-      fragmentShader: COMPOSITE_FRAGMENT_DEBUG_TINT,
-      depthTest: false,
-      depthWrite: false,
-      transparent: false,
-      blending: THREE.NoBlending,
-    });
-    this._compositeDebugTintMaterial.toneMapped = false;
 
     this._blitMaterial = new THREE.ShaderMaterial({
       uniforms: {
@@ -160,14 +108,6 @@ export class LevelCompositePass {
   }
 
   /**
-   * Enable/disable debug tint for the **two-level** composite path only (same math, tinted RGB).
-   * @param {boolean} enabled
-   */
-  setPerLevelTintDebug(enabled) {
-    this._useDebugTintComposite = !!enabled;
-  }
-
-  /**
    * Composite level final RTs bottom→top into outputRT.
    *
    * @param {THREE.WebGLRenderer} renderer
@@ -189,8 +129,7 @@ export class LevelCompositePass {
     try {
       // Two levels: composite directly to outputRT
       if (levelFinalRTs.length === 2) {
-        const useTint = this._useDebugTintComposite;
-        this._compositeTwo(renderer, levelFinalRTs[0], levelFinalRTs[1], outputRT, useTint);
+        this._compositeTwo(renderer, levelFinalRTs[0], levelFinalRTs[1], outputRT);
         return;
       }
 
@@ -203,13 +142,7 @@ export class LevelCompositePass {
         const isLast = (i === levelFinalRTs.length - 1);
         writeTarget = isLast ? outputRT : scratchRT;
 
-        if (i === 1) {
-          // First composite: level 0 + level 1 → writeTarget
-          this._compositeTwo(renderer, currentBase, levelFinalRTs[i], writeTarget, false);
-        } else {
-          // Subsequent: accumulated result + next level → writeTarget
-          this._compositeTwo(renderer, currentBase, levelFinalRTs[i], writeTarget, false);
-        }
+        this._compositeTwo(renderer, currentBase, levelFinalRTs[i], writeTarget);
         currentBase = writeTarget;
       }
     } finally {
@@ -223,31 +156,16 @@ export class LevelCompositePass {
    * @param {THREE.WebGLRenderTarget} baseRT
    * @param {THREE.WebGLRenderTarget} upperRT
    * @param {THREE.WebGLRenderTarget} target
-   * @param {boolean} [useDebugTint=false]
    * @private
    */
-  _compositeTwo(renderer, baseRT, upperRT, target, useDebugTint = false) {
-    const mat = useDebugTint ? this._compositeDebugTintMaterial : this._compositeMaterial;
+  _compositeTwo(renderer, baseRT, upperRT, target) {
+    const mat = this._compositeMaterial;
     this._quad.material = mat;
     mat.uniforms.tBase.value = baseRT.texture;
     mat.uniforms.tUpper.value = upperRT.texture;
     renderer.setRenderTarget(target);
     renderer.autoClear = true;
     renderer.render(this._scene, this._camera);
-  }
-
-  /**
-   * Bisect helper: same shader as {@link _compositeTwo} but **swaps** which RT is
-   * treated as Porter–Duff base vs upper (inverts stacking for a quick sanity test).
-   *
-   * @param {THREE.WebGLRenderer} renderer
-   * @param {THREE.WebGLRenderTarget} bottomLevelRt - normally level 0
-   * @param {THREE.WebGLRenderTarget} topLevelRt - normally level 1
-   * @param {THREE.WebGLRenderTarget} target
-   * @param {boolean} [useDebugTint=false]
-   */
-  compositeReversedTopBottom(renderer, bottomLevelRt, topLevelRt, target, useDebugTint = false) {
-    this._compositeTwo(renderer, topLevelRt, bottomLevelRt, target, useDebugTint);
   }
 
   /**
@@ -272,13 +190,11 @@ export class LevelCompositePass {
 
   dispose() {
     try { this._compositeMaterial?.dispose(); } catch (_) {}
-    try { this._compositeDebugTintMaterial?.dispose(); } catch (_) {}
     try { this._blitMaterial?.dispose(); } catch (_) {}
     try { this._quad?.geometry?.dispose(); } catch (_) {}
     this._scene = null;
     this._camera = null;
     this._compositeMaterial = null;
-    this._compositeDebugTintMaterial = null;
     this._blitMaterial = null;
     this._quad = null;
     this._initialized = false;

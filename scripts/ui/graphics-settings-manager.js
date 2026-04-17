@@ -95,6 +95,10 @@ export class GraphicsSettingsManager {
       renderIdleFps: 15,
       renderActiveFps: 60,
       renderContinuousFps: 30,
+      // Strict render sync: PIXI and Three.js compositor are phase-locked 1:1.
+      // Guarantees correctness (no dropped compositor frames, no stale masks)
+      // at the cost of some GPU work. Default ON — this is the fool-proof path.
+      renderStrictSyncEnabled: true,
       // P4-02: When true, token sprites use depthTest/depthWrite so elevated foreground
       // tiles correctly occlude them. Default false preserves legacy always-on-top behaviour.
       tokenDepthInteraction: false,
@@ -298,6 +302,22 @@ export class GraphicsSettingsManager {
   }
 
   /**
+   * @returns {boolean} Whether strict render sync (PIXI↔compositor lockstep) is active.
+   */
+  getRenderStrictSyncEnabled() {
+    return this.state?.renderStrictSyncEnabled !== false;
+  }
+
+  /**
+   * @param {boolean} enabled
+   */
+  setRenderStrictSyncEnabled(enabled) {
+    this.state.renderStrictSyncEnabled = enabled !== false;
+    this.applyRenderPerformanceSettings();
+    this.saveState();
+  }
+
+  /**
    * Compute effective renderer pixel ratio based on a familiar resolution preset.
    *
    * Notes:
@@ -422,6 +442,7 @@ export class GraphicsSettingsManager {
       ms.renderIdleFps = this.getRenderIdleFps();
       ms.renderActiveFps = this.getRenderActiveFps();
       ms.renderContinuousFps = this.getRenderContinuousFps();
+      ms.renderStrictSyncEnabled = this.getRenderStrictSyncEnabled();
     } catch (e) {
       log.warn('Failed to apply render performance settings', e);
     }
@@ -647,6 +668,7 @@ export class GraphicsSettingsManager {
       if (typeof parsed.globalDisableAll === 'boolean') this.state.globalDisableAll = parsed.globalDisableAll;
       if (typeof parsed.renderResolutionPreset === 'string') this.state.renderResolutionPreset = parsed.renderResolutionPreset;
       if (typeof parsed.renderAdaptiveFpsEnabled === 'boolean') this.state.renderAdaptiveFpsEnabled = parsed.renderAdaptiveFpsEnabled;
+      if (typeof parsed.renderStrictSyncEnabled === 'boolean') this.state.renderStrictSyncEnabled = parsed.renderStrictSyncEnabled;
       if (parsed.renderIdleFps !== undefined) this.state.renderIdleFps = this._coerceFps(parsed.renderIdleFps, 15, 5, 60);
       if (parsed.renderActiveFps !== undefined) this.state.renderActiveFps = this._coerceFps(parsed.renderActiveFps, 60, 5, 120);
       if (parsed.renderContinuousFps !== undefined) this.state.renderContinuousFps = this._coerceFps(parsed.renderContinuousFps, 30, 5, 120);

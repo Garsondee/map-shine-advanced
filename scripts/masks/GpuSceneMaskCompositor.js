@@ -317,6 +317,18 @@ export class GpuSceneMaskCompositor {
     this._floorCache = new Map();
 
     /**
+     * Monotonic version counter bumped whenever the floor cache structure or
+     * an individual entry's underlying render target changes (composeFloor
+     * completion, preload, eviction). Consumers participate in the strict-sync
+     * outdoors signature via {@link getFloorCacheVersion} so async mask
+     * promotion (e.g. an upper-floor _Outdoors becoming available after the
+     * initial render) always triggers a resync even when individual texture
+     * identities alias between frames.
+     * @type {number}
+     */
+    this._floorCacheVersion = 0;
+
+    /**
      * LRU order: most-recently-used floor key is last.
      * @type {string[]}
      */
@@ -553,6 +565,9 @@ export class GpuSceneMaskCompositor {
         rt?.dispose();
         rt = this._createRenderTarget(THREE, outW, outH, maskType);
         floorTargets.set(maskType, rt);
+        // Bump cache version so strict-sync consumers observe this async
+        // promotion and refresh their outdoors bindings next frame.
+        this._floorCacheVersion++;
       }
 
       const mode = COMPOSITE_MODES[maskType] ?? 'source-over';
@@ -1860,6 +1875,7 @@ export class GpuSceneMaskCompositor {
       }
     }
     this._floorCache.clear();
+    this._floorCacheVersion++;
     this._outputDims.clear();
     // Reset LRU order so eviction logic starts fresh on the new scene.
     this._lruOrder.length = 0;
@@ -2236,6 +2252,7 @@ export class GpuSceneMaskCompositor {
     if (!rt) return;
     try { rt.dispose(); } catch (_) {}
     map.delete(maskType);
+    this._floorCacheVersion++;
   }
 
   /**
@@ -2252,6 +2269,7 @@ export class GpuSceneMaskCompositor {
       }
     }
     this._floorCache.clear();
+    this._floorCacheVersion++;
     this._lruOrder.length = 0;
 
     // Drop metadata + repair trackers tied to cached state.
@@ -2277,13 +2295,26 @@ export class GpuSceneMaskCompositor {
           try { rt.dispose(); } catch (_) {}
         }
         this._floorCache.delete(oldest);
+        this._floorCacheVersion++;
         log.debug(`GpuSceneMaskCompositor: evicted floor cache for '${oldest}'`);
       }
     }
 
     const targets = new Map();
     this._floorCache.set(floorKey, targets);
+    this._floorCacheVersion++;
     return targets;
+  }
+
+  /**
+   * Monotonic version counter bumped when the floor cache changes.
+   * Consumers (notably the FloorCompositor outdoors binding signature) include
+   * this in their cache key so async mask promotion always forces a resync.
+   *
+   * @returns {number}
+   */
+  getFloorCacheVersion() {
+    return this._floorCacheVersion;
   }
 
   /**
@@ -2626,6 +2657,7 @@ export class GpuSceneMaskCompositor {
       rt?.dispose();
       rt = this._createRenderTarget(THREE, outW, outH, FLOOR_ALPHA_ID);
       floorTargets.set(FLOOR_ALPHA_ID, rt);
+      this._floorCacheVersion++;
     }
 
     const mat = this._tileMaterial;

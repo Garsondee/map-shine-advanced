@@ -94,6 +94,25 @@ export class FrameCoordinator {
     this._syncThrottleHz = 30;
     /** @type {number} Timestamp of last sync callback execution (ms) */
     this._lastSyncRunMs = 0;
+
+    /**
+     * Strict sync lockstep tokening.
+     * On every PIXI tick we increment `_pendingPixiToken`. When the RenderLoop
+     * successfully completes a compositor render for a frame, it calls
+     * {@link consumePendingPixiToken} which advances `_consumedPixiToken`.
+     * A frame is "pending" iff `_pendingPixiToken > _consumedPixiToken`.
+     *
+     * Strict sync mode uses this to enforce one compositor render per PIXI frame
+     * (no adaptive skipping that can drop required frames).
+     */
+    this._pendingPixiToken = 0;
+    this._consumedPixiToken = 0;
+    /** @type {number} Count of PIXI frames produced while strict sync was active */
+    this._strictPixiTokensProduced = 0;
+    /** @type {number} Count of PIXI frames consumed (one-to-one with compositor renders) */
+    this._strictPixiTokensConsumed = 0;
+    /** @type {number} Tokens that expired because a newer token overwrote an unconsumed one (strict mode: should be zero) */
+    this._strictPixiTokenMissedCount = 0;
   }
 
   /**
@@ -277,6 +296,15 @@ export class FrameCoordinator {
     try {
       // Step 1: Capture camera state at frame start
       this._captureFrameState();
+
+      // Step 1b: Produce a lockstep token for strict sync consumers.
+      // If the previous token was never consumed, flag it as missed so strict
+      // mode can surface the drop in telemetry.
+      if (this._pendingPixiToken > this._consumedPixiToken) {
+        this._strictPixiTokenMissedCount++;
+      }
+      this._pendingPixiToken++;
+      this._strictPixiTokensProduced++;
       
       // Step 2: Run sync callbacks (managers pulling Foundry state)
       // T2-C: Throttle sync callbacks — they only need to run at ~render rate,
@@ -361,6 +389,56 @@ export class FrameCoordinator {
   }
 
   /**
+   * @returns {number} The current unconsumed PIXI frame token id (0 if none produced).
+   */
+  getPendingPixiToken() {
+    return this._pendingPixiToken;
+  }
+
+  /**
+   * @returns {number} The most recently consumed PIXI token id.
+   */
+  getConsumedPixiToken() {
+    return this._consumedPixiToken;
+  }
+
+  /**
+   * @returns {boolean} True if a PIXI tick has occurred that has not yet been
+   *   matched by a compositor render consumption.
+   */
+  hasPendingPixiToken() {
+    return this._pendingPixiToken > this._consumedPixiToken;
+  }
+
+  /**
+   * Mark the current pending PIXI token as consumed. Called by the compositor
+   * render path after a successful render completes in strict sync mode.
+   *
+   * @returns {number} The token id that was consumed (0 if none was pending).
+   */
+  consumePendingPixiToken() {
+    if (this._pendingPixiToken <= this._consumedPixiToken) return 0;
+    this._consumedPixiToken = this._pendingPixiToken;
+    this._strictPixiTokensConsumed++;
+    return this._consumedPixiToken;
+  }
+
+  /**
+   * Snapshot of strict-sync token counters for diagnostics.
+   * @returns {{produced:number, consumed:number, missed:number, pending:number, consumedId:number, pendingId:number}}
+   */
+  getStrictSyncTokenStats() {
+    return {
+      produced: this._strictPixiTokensProduced,
+      consumed: this._strictPixiTokensConsumed,
+      missed: this._strictPixiTokenMissedCount,
+      pending: this._pendingPixiToken - this._consumedPixiToken,
+      consumedId: this._consumedPixiToken,
+      pendingId: this._pendingPixiToken,
+    };
+  }
+
+  /**
    * Get performance metrics
    * @returns {Object} Metrics object
    */
@@ -370,7 +448,8 @@ export class FrameCoordinator {
       frameCount: this._frameCount,
       avgFrameTime: this._metrics.totalFrameTime,
       syncCallbacks: this._syncCallbacks.size,
-      postPixiCallbacks: this._postPixiCallbacks.size
+      postPixiCallbacks: this._postPixiCallbacks.size,
+      strictSync: this.getStrictSyncTokenStats()
     };
   }
 

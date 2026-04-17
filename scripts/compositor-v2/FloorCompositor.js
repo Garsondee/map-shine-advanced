@@ -510,6 +510,37 @@ export class FloorCompositor {
     this._lastOutdoorsFloorKey = null;
     /** @type {string|null} Last level-context key used for outdoors consumer sync */
     this._lastOutdoorsContextKey = null;
+    /**
+     * Comprehensive binding signature for outdoors mask propagation.
+     * Combines context key, resolved floor keys, and texture uuids for the main
+     * outdoors texture, water outdoors texture, sky outdoors texture, per-floor
+     * cloud outdoors array, and the floor-id texture. We use this instead of a
+     * single-texture identity check so that changes in any consumer's required
+     * binding trigger a re-sync (catches e.g. per-cloud-floor texture promotion
+     * when only the water floor texture actually changed).
+     * @type {string|null}
+     */
+    this._lastOutdoorsSignature = null;
+    /**
+     * Latest outdoors signature resolution route for diagnostics. Surfaces the
+     * route taken for each consumer (direct GPU cache / bundle / registry /
+     * neutral fallback / weatherController).
+     * @type {object|null}
+     */
+    this._lastOutdoorsRouteInfo = null;
+
+    /**
+     * Strict-sync frame hold counters. Incremented whenever the dependency
+     * gate rejects a frame so the last-valid output is held instead.
+     * @type {number}
+     */
+    this._strictFrameHoldCount = 0;
+    /** @type {string|null} Last reason reported by the dependency gate */
+    this._strictLastHoldReason = null;
+    /** @type {number|null} Timestamp of last hold (ms) */
+    this._strictLastHoldAtMs = null;
+    /** @type {number} Count of successful strict frames */
+    this._strictFramesRendered = 0;
     /** @type {THREE.Texture|null} 1x1 indoors fallback when floor-scoped outdoors is unavailable */
     this._neutralOutdoorsTexture = null;
 
@@ -1671,6 +1702,90 @@ export class FloorCompositor {
   }
 
   /**
+   * Build a snapshot of the render inputs this frame depends on. Used by the
+   * strict-sync dependency gate to decide whether the current frame has all
+   * the data required to produce a correct image. When the gate rejects a
+   * frame, the RenderLoop holds the previously-rendered output on screen.
+   *
+   * @returns {{valid:boolean, reason:string|null, details:object}}
+   * @private
+   */
+  _validateFrameInputs() {
+    const details = {};
+
+    if (!this._initialized) {
+      return { valid: false, reason: 'compositor-not-initialized', details };
+    }
+
+    if (!this._renderBus || !this._renderBus._scene) {
+      details.hasBus = !!this._renderBus;
+      return { valid: false, reason: 'render-bus-not-ready', details };
+    }
+
+    // A scene with tiles must have bus-populated data to render anything other
+    // than the slim path. The slim path is itself a valid partial render so we
+    // accept it here — only reject when neither full nor slim is available.
+    if (!this._populateComplete && !this._populateSlimRenderActive()) {
+      details.populateComplete = this._populateComplete;
+      return { valid: false, reason: 'populate-not-ready', details };
+    }
+
+    // In multi-floor scenes the active floor must be resolvable. If FloorStack
+    // has no active floor we cannot produce a correct outdoors / visibility
+    // binding and would likely sample stale state from the previous floor.
+    let floors = [];
+    let activeFloor = null;
+    try {
+      const floorStack = window.MapShine?.floorStack;
+      floors = floorStack?.getFloors?.() ?? [];
+      activeFloor = floorStack?.getActiveFloor?.() ?? null;
+    } catch (_) {}
+    if (floors.length > 1 && !activeFloor) {
+      details.floorCount = floors.length;
+      return { valid: false, reason: 'no-active-floor-multi-floor', details };
+    }
+
+    // Outdoors consumer sync requires at least a neutral fallback or a real
+    // texture so effects never read from an unbound sampler. A missing
+    // neutral generator is a critical failure we should surface via hold.
+    if (!this._neutralOutdoorsTexture && !this._lastOutdoorsTexture) {
+      // Neutral is lazily created on first sync; not yet a failure.
+      details.hasLastOutdoors = !!this._lastOutdoorsTexture;
+    }
+
+    return { valid: true, reason: null, details };
+  }
+
+  /**
+   * Write the strict-sync hold flag consumed by the RenderLoop. Called when
+   * the dependency gate rejects a frame so the next rAF can skip the
+   * compositor render entirely and keep the last valid frame on screen.
+   *
+   * @param {boolean} active
+   * @param {string|null} reason
+   * @private
+   */
+  _setStrictHoldFlag(active, reason = null) {
+    try {
+      if (!window?.MapShine) return;
+      const prev = window.MapShine.renderStrictHoldFrame;
+      if (active === true) {
+        window.MapShine.renderStrictHoldFrame = {
+          active: true,
+          reason: reason || 'unspecified',
+          updatedAtMs: performance.now(),
+        };
+      } else if (prev?.active === true) {
+        window.MapShine.renderStrictHoldFrame = {
+          active: false,
+          reason: null,
+          updatedAtMs: performance.now(),
+        };
+      }
+    } catch (_) {}
+  }
+
+  /**
    * Bus albedo + screen blit only (no lighting / water / bloom). All log lines
    * include POPULATE for filtering.
    *
@@ -2382,6 +2497,36 @@ export class FloorCompositor {
       return;
     }
 
+    // Strict-sync dependency gate. When enabled, we validate frame inputs up
+    // front and hold the previous image if any critical dependency is missing.
+    // This is the fool-proof path: we prefer a temporary pause over rendering
+    // with stale/partial state.
+    const strictSyncEnabled = (() => {
+      try { return window?.MapShine?.renderStrictSyncEnabled === true; } catch (_) { return false; }
+    })();
+    if (strictSyncEnabled) {
+      const validation = this._validateFrameInputs();
+      if (!validation.valid) {
+        this._strictFrameHoldCount++;
+        this._strictLastHoldReason = validation.reason;
+        this._strictLastHoldAtMs = performance.now();
+        this._setStrictHoldFlag(true, validation.reason);
+        try {
+          if (window?.MapShine) {
+            window.MapShine.__v2StrictHoldInfo = {
+              count: this._strictFrameHoldCount,
+              reason: validation.reason,
+              details: validation.details,
+              atMs: this._strictLastHoldAtMs,
+            };
+          }
+        } catch (_) {}
+        return;
+      }
+      // Clear any stale hold flag so subsequent rAFs proceed normally.
+      this._setStrictHoldFlag(false);
+    }
+
     // Update PIXI-content bridge once per compositor frame.
     try {
       const bridge = window.MapShine?.pixiContentLayerBridge ?? null;
@@ -2433,20 +2578,14 @@ export class FloorCompositor {
     // sprite visibility can leak upper-floor art if other paths render sprites.
     this._enforceTileSpriteVisibilityForActiveFloor(floorStack);
 
-    // Outdoors mask consumer sync can mutate multiple effect inputs at once.
-    // Running it every frame can clobber a visually-correct first frame with a
-    // transient fallback on frame 2. Re-sync when context changes, or while we
-    // still have no bound outdoors texture.
+    // Outdoors mask consumer sync runs every frame now. The internal binding
+    // signature short-circuits when nothing has changed, so this is cheap
+    // (string compare + quick lookups). Running unconditionally catches async
+    // mask promotion (e.g. an upper-floor _Outdoors texture becoming available
+    // mid-session) without requiring narrow gate conditions.
     try {
       const _ctx = window.MapShine?.activeLevelContext ?? null;
-      const _b = Number(_ctx?.bottom);
-      const _t = Number(_ctx?.top);
-      const _ctxKey = Number.isFinite(_b) ? `${_b}:${Number.isFinite(_t) ? _t : 'inf'}` : 'single';
-      const _needsOutdoorsSync = (this._lastOutdoorsContextKey !== _ctxKey) || !this._lastOutdoorsTexture;
-      if (_needsOutdoorsSync || window.MapShine?.__v2ForcePerFrameOutdoorsSync === true) {
-        this._lastOutdoorsContextKey = _ctxKey;
-        this._syncOutdoorsMaskConsumers({ context: _ctx });
-      }
+      this._syncOutdoorsMaskConsumers({ context: _ctx });
     } catch (_) {}
 
     const populateSlimRender = this._populateSlimRenderActive();
@@ -2965,6 +3104,21 @@ export class FloorCompositor {
       this._debugFirstFrameStagesLogged = true;
       try { log.info('[V2 Frame] ✔ FloorCompositor.render: END'); } catch (_) {}
     }
+
+    // Strict-sync: record a successful frame in telemetry.
+    if (strictSyncEnabled) {
+      this._strictFramesRendered++;
+      try {
+        if (window?.MapShine) {
+          window.MapShine.__v2StrictFrameStats = {
+            rendered: this._strictFramesRendered,
+            held: this._strictFrameHoldCount,
+            lastHoldReason: this._strictLastHoldReason,
+            lastHoldAtMs: this._strictLastHoldAtMs,
+          };
+        }
+      } catch (_) {}
+    }
   }
 
   /**
@@ -3459,6 +3613,7 @@ export class FloorCompositor {
       // weatherController.roofMap (not floor-authored indoors/outdoors data).
       const waterResolved = this._resolveOutdoorsMask(context, { allowWeatherRoofMap: false });
       let waterOutdoorsTex = waterResolved.texture ?? null;
+      let waterOutdoorsRoute = waterResolved.floorKey ?? null;
       // Sky grading is very sensitive to mask source quality/alignment.
       // Resolve a strict floor outdoors texture for sky that never falls back to
       // weather roof maps and never reuses stale previous masks.
@@ -3477,23 +3632,34 @@ export class FloorCompositor {
       // Do not clobber a valid outdoors texture with transient null while floor
       // caches are still warming asynchronously. On upper floors, reusing the
       // previous texture is usually stale ground-floor _Outdoors.
+      let mainRoute = resolved.floorKey ?? null;
       if (!outdoorsTex && this._lastOutdoorsTexture && !multiFloorScene) {
         outdoorsTex = this._lastOutdoorsTexture;
+        mainRoute = 'reused-last';
       }
-      if (!outdoorsTex && multiFloorScene && neutralOutdoorsTex) outdoorsTex = neutralOutdoorsTex;
-      if (!waterOutdoorsTex && multiFloorScene && neutralOutdoorsTex) waterOutdoorsTex = neutralOutdoorsTex;
+      if (!outdoorsTex && multiFloorScene && neutralOutdoorsTex) {
+        outdoorsTex = neutralOutdoorsTex;
+        mainRoute = 'neutral';
+      }
+      if (!waterOutdoorsTex && multiFloorScene && neutralOutdoorsTex) {
+        waterOutdoorsTex = neutralOutdoorsTex;
+        waterOutdoorsRoute = 'neutral';
+      }
       const skyOutdoorsFinal = (!skyOutdoorsTex && multiFloorScene && neutralOutdoorsTex)
         ? neutralOutdoorsTex
         : skyOutdoorsTex;
+      const skyRoute = skyOutdoorsTex ? (skyResolved.floorKey ?? null) : (skyOutdoorsFinal ? 'neutral' : null);
 
       // Water can run in floor-fallback mode (for example only ground has _Water
       // data while viewing an upper floor). In that case, sampling outdoors from
       // the viewed floor can alter wave/rain response and make the same water body
       // appear different per view floor. Prefer outdoors for the active water floor
       // when available so fallback water remains visually consistent.
+      let resolvedWaterFloorIndex = null;
       try {
         const waterFloorIndex = Number(this._waterEffect?._activeFloorIndex);
         if (Number.isFinite(waterFloorIndex)) {
+          resolvedWaterFloorIndex = waterFloorIndex;
           const floors = window.MapShine?.floorStack?.getFloors?.() ?? [];
           const waterFloor = floors.find((f) => Number(f?.index) === waterFloorIndex) ?? null;
           const waterFloorKey = waterFloor?.compositorKey ?? null;
@@ -3503,14 +3669,96 @@ export class FloorCompositor {
             : null;
           if (waterFloorTex) {
             waterOutdoorsTex = waterFloorTex;
+            waterOutdoorsRoute = `water-floor:${waterFloorKey}`;
           }
         }
       } catch (_) {}
 
-      if (!force && outdoorsTex === this._lastOutdoorsTexture) return;
+      // Resolve per-floor cloud outdoors masks and the floor-id texture up-front
+      // so their identities participate in the binding signature below. This
+      // ensures e.g. async promotion of a newly composed upper-floor outdoors
+      // mask triggers a full resync even when the main texture identity
+      // didn't change.
+      let cloudPerFloor = [null, null, null, null];
+      let cloudFloorIdTex = null;
+      let cloudFloorIdSupported = true;
+      let cloudAnyPerFloorMask = false;
+      try {
+        const compositor = window.MapShine?.sceneComposer?._sceneMaskCompositor;
+        if (compositor) {
+          const floors = window.MapShine?.floorStack?.getFloors?.() ?? [];
+          for (const floor of floors) {
+            const idx = Number(floor?.index);
+            const key = floor?.compositorKey;
+            if (!Number.isFinite(idx) || idx < 0 || idx > 3) {
+              cloudFloorIdSupported = false;
+              continue;
+            }
+            if (!key) continue;
+            cloudPerFloor[idx] = compositor.getFloorTexture?.(key, 'outdoors') ?? null;
+            if (cloudPerFloor[idx]) cloudAnyPerFloorMask = true;
+          }
+          if (cloudFloorIdSupported && cloudAnyPerFloorMask) {
+            cloudFloorIdTex = compositor.floorIdTarget?.texture ?? null;
+          }
+        }
+      } catch (_) {}
 
+      // Build a comprehensive binding signature. Any change to any consumer's
+      // input (main/water/sky/clouds/floorId) triggers a full resync. We still
+      // honour `force: true` from callers (e.g. floor-change path) which
+      // bypasses the signature entirely.
+      const _ctx = context ?? null;
+      const _b = Number(_ctx?.bottom);
+      const _t = Number(_ctx?.top);
+      const contextKey = Number.isFinite(_b) ? `${_b}:${Number.isFinite(_t) ? _t : 'inf'}` : 'single';
+      const texId = (tex) => (tex?.uuid ? tex.uuid : (tex ? 'anon' : 'null'));
+      // Include the compositor's floor-cache version. When composeFloor
+      // completes asynchronously and a new RT becomes available for any
+      // floor/mask combination, this version bumps so the signature changes
+      // even if the texture identity alias would otherwise cause a false
+      // early-return (e.g. a previously-fallback route promoting to a
+      // direct compositor texture that reuses a pooled texture uuid).
+      let cacheVersion = 0;
+      try {
+        cacheVersion = Number(window?.MapShine?.sceneComposer?._sceneMaskCompositor?.getFloorCacheVersion?.() ?? 0);
+      } catch (_) {
+        cacheVersion = 0;
+      }
+
+      const signature = [
+        `ctx:${contextKey}`,
+        `main:${texId(outdoorsTex)}@${mainRoute || 'none'}`,
+        `water:${texId(waterOutdoorsTex)}@${waterOutdoorsRoute || 'none'}#${resolvedWaterFloorIndex ?? 'none'}`,
+        `sky:${texId(skyOutdoorsFinal)}@${skyRoute || 'none'}`,
+        `cloud:${cloudPerFloor.map(texId).join('|')}@${cloudFloorIdSupported && cloudAnyPerFloorMask ? 'multi' : 'single'}`,
+        `floorId:${texId(cloudFloorIdTex)}`,
+        `activeFloor:${this._activeFloorIndex ?? 'none'}`,
+        `cacheV:${cacheVersion}`,
+      ].join('#');
+
+      if (!force && signature === this._lastOutdoorsSignature) return;
+
+      this._lastOutdoorsSignature = signature;
       this._lastOutdoorsTexture = outdoorsTex;
       this._lastOutdoorsFloorKey = resolved.floorKey;
+      this._lastOutdoorsContextKey = contextKey;
+      this._lastOutdoorsRouteInfo = {
+        contextKey,
+        main: { route: mainRoute, texture: !!outdoorsTex },
+        water: { route: waterOutdoorsRoute, texture: !!waterOutdoorsTex, floorIndex: resolvedWaterFloorIndex },
+        sky: { route: skyRoute, texture: !!skyOutdoorsFinal },
+        cloud: {
+          mode: cloudFloorIdSupported && cloudAnyPerFloorMask ? 'multi' : 'single',
+          perFloorPresent: cloudPerFloor.map((t) => !!t),
+          floorId: !!cloudFloorIdTex,
+        },
+      };
+      try {
+        if (window?.MapShine) {
+          window.MapShine.__v2OutdoorsRoute = this._lastOutdoorsRouteInfo;
+        }
+      } catch (_) {}
 
       // Always propagate (including null) so consumers cannot keep stale masks.
       this._cloudEffect?.setOutdoorsMask?.(outdoorsTex);
@@ -3521,42 +3769,15 @@ export class FloorCompositor {
       this._overheadShadowEffect?.setOutdoorsMask?.(outdoorsTex);
       this._buildingShadowEffect?.setOutdoorsMask?.(outdoorsTex);
 
-      // CloudEffectV2 supports floor-aware outdoors masking when provided with
-      // per-floor textures and the compositor floor-id texture.
+      // Apply the pre-resolved cloud per-floor bindings. If the visible floor
+      // set isn't representable, fall back to legacy single-mask mode.
       try {
-        const compositor = window.MapShine?.sceneComposer?._sceneMaskCompositor;
-        if (compositor) {
-          // floorIdTarget encodes the *topmost* floor index per world pixel, not the
-          // viewed floor. Binding only getVisibleFloors() leaves higher indices null;
-          // CloudEffectV2 then substitutes 1×1 white (= outdoors) for those samplers,
-          // so underground views show full cloud shadow / rain wherever an upper floor
-          // has tile coverage. Bind every band's _Outdoors that exists in the stack.
-          const floors = window.MapShine?.floorStack?.getFloors?.() ?? [];
-          const perFloor = [null, null, null, null];
-          let floorIdSupported = true;
-          let anyPerFloorMask = false;
-          for (const floor of floors) {
-            const idx = Number(floor?.index);
-            const key = floor?.compositorKey;
-            if (!Number.isFinite(idx) || idx < 0 || idx > 3) {
-              floorIdSupported = false;
-              continue;
-            }
-            if (!key) continue;
-            perFloor[idx] = compositor.getFloorTexture?.(key, 'outdoors') ?? null;
-            if (perFloor[idx]) anyPerFloorMask = true;
-          }
-
-          // CloudEffectV2 shader only has per-floor outdoors samplers for indices 0..3.
-          // If the visible floor set isn't representable, force legacy single-mask mode.
-          if (floorIdSupported && anyPerFloorMask) {
-            const floorIdTex = compositor.floorIdTarget?.texture ?? null;
-            this._cloudEffect?.setFloorIdTexture?.(floorIdTex);
-            this._cloudEffect?.setOutdoorsMasks?.(perFloor);
-          } else {
-            this._cloudEffect?.setFloorIdTexture?.(null);
-            this._cloudEffect?.setOutdoorsMasks?.([null, null, null, null]);
-          }
+        if (cloudFloorIdSupported && cloudAnyPerFloorMask) {
+          this._cloudEffect?.setFloorIdTexture?.(cloudFloorIdTex);
+          this._cloudEffect?.setOutdoorsMasks?.(cloudPerFloor);
+        } else {
+          this._cloudEffect?.setFloorIdTexture?.(null);
+          this._cloudEffect?.setOutdoorsMasks?.([null, null, null, null]);
         }
       } catch (_) {}
 
@@ -3701,12 +3922,6 @@ export class FloorCompositor {
     // Bush/Tree overlays are bus-managed; still notify for any internal floor state.
     try { this._bushEffect?.onFloorChange?.(maxFloorIndex); } catch (_) {}
     try { this._treeEffect?.onFloorChange?.(maxFloorIndex); } catch (_) {}
-    
-    this._syncOutdoorsMaskConsumers({
-      context: payload?.context ?? window.MapShine?.activeLevelContext ?? null,
-      force: true,
-    });
-    
     // Update window light overlay visibility (isolated scene, not bus-managed).
     this._windowLightEffect.onFloorChange(maxFloorIndex);
     // Cloud effect: blocker pass is automatically floor-isolated via bus visibility;
@@ -3721,9 +3936,21 @@ export class FloorCompositor {
     try { this._lightningEffect?.onFloorChange?.(maxFloorIndex); } catch (_) {}
     try { this._candleFlamesEffect?.onFloorChange?.(maxFloorIndex); } catch (_) {}
     try { this._playerLightEffect?.onFloorChange?.(maxFloorIndex); } catch (_) {}
-    // Outdoors mask floor changes are handled above via GpuSceneMaskCompositor
-    // Swap active water SDF data for the new floor.
+    // Swap active water SDF data for the new floor BEFORE the outdoors sync so
+    // that _syncOutdoorsMaskConsumers observes the final water floor index and
+    // binds the correct floor-scoped water outdoors texture on the same pass.
+    // Previously, water outdoors was bound against the old floor, which
+    // produced visible desync (wrong indoor/outdoor water damping) until the
+    // next per-frame resync tick.
     try { this._waterEffect?.onFloorChange?.(maxFloorIndex); } catch (_) {}
+
+    // Outdoors consumer sync runs after every consumer has been updated with
+    // its new floor index. Force=true ensures the signature is re-evaluated
+    // against the current floor state, not skipped by stale identity.
+    this._syncOutdoorsMaskConsumers({
+      context: payload?.context ?? window.MapShine?.activeLevelContext ?? null,
+      force: true,
+    });
     this._fireHeatMaskInput = null;
     this._fireHeatMaskOutput = null;
     this._fireHeatMaskBlurRadius = -1;

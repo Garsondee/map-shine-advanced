@@ -9,6 +9,56 @@ import { createLogger } from './log.js';
 const log = createLogger('RenderLoop');
 
 /**
+ * Read the current strict-sync mode flag from the shared MapShine namespace.
+ * Strict sync mode enforces one compositor render per PIXI tick (lockstep
+ * tokening) and disables adaptive FPS skipping. It is the fool-proof render
+ * coherence mode; tolerate slightly higher GPU cost for guaranteed correctness.
+ *
+ * @returns {boolean}
+ */
+function _isStrictSyncEnabled() {
+  try {
+    return window?.MapShine?.renderStrictSyncEnabled === true;
+  } catch (_) {
+    return false;
+  }
+}
+
+/**
+ * Read the strict-sync hold-last-frame state. When the FloorCompositor detects
+ * invalid frame inputs in strict mode it sets this flag to request the render
+ * loop to skip the next compositor render so the last valid frame remains on
+ * screen (browser keeps displaying the previous back-buffer).
+ *
+ * Includes an `updatedAtMs` field so the RenderLoop can cap the maximum hold
+ * duration — without a cap, a stuck flag would starve the compositor of the
+ * very invocation needed to re-validate and clear it.
+ *
+ * @returns {{active:boolean, reason:string|null, updatedAtMs:number}}
+ */
+function _readStrictHoldFrame() {
+  try {
+    const flag = window?.MapShine?.renderStrictHoldFrame;
+    if (flag && flag.active === true) {
+      return {
+        active: true,
+        reason: String(flag.reason || 'unspecified'),
+        updatedAtMs: Number.isFinite(Number(flag.updatedAtMs)) ? Number(flag.updatedAtMs) : 0,
+      };
+    }
+  } catch (_) {}
+  return { active: false, reason: null, updatedAtMs: 0 };
+}
+
+/**
+ * Maximum time (ms) the RenderLoop will suppress the compositor while the
+ * strict-sync hold flag is active. After this window we force the compositor
+ * to run so it can re-validate inputs and clear the flag. Without this cap,
+ * a stale flag would starve the compositor and freeze the scene indefinitely.
+ */
+const STRICT_HOLD_MAX_MS = 250;
+
+/**
  * Render loop manager
  */
 export class RenderLoop {
@@ -309,7 +359,19 @@ export class RenderLoop {
         // IMPORTANT: keep idle interval <= 100ms, otherwise TimeManager clamps delta
         // and animations will slow down when the user re-enables them.
         const ms = window.MapShine;
-        const adaptiveFpsEnabled = ms?.renderAdaptiveFpsEnabled !== false;
+        // Strict sync pins rendering to the PIXI tick rate, so adaptive FPS
+        // skipping is disabled for correctness. Adaptive FPS still works in
+        // non-strict mode.
+        const strictSync = _isStrictSyncEnabled();
+        const adaptiveFpsEnabled = strictSync ? false : (ms?.renderAdaptiveFpsEnabled !== false);
+
+        // Strict sync lockstep: if there's an unconsumed PIXI token we MUST
+        // render this rAF even if the camera hasn't moved. Pull the frame
+        // coordinator once; bypassing fast-path/adaptive skips below.
+        const fc = strictSync ? (() => {
+          try { return ms?.frameCoordinator ?? null; } catch (_) { return null; }
+        })() : null;
+        const pendingPixiToken = (strictSync && fc?.hasPendingPixiToken?.() === true);
         const idleFps = this._clampFps(ms?.renderIdleFps, this._idleFps, 5, 60);
         const activeFps = this._clampFps(ms?.renderActiveFps, this._activeFps, 5, 120);
         const continuousFps = this._clampFps(ms?.renderContinuousFps, this._continuousFps, 5, 120);
@@ -329,7 +391,9 @@ export class RenderLoop {
         // Fast path: when adaptive mode is on, nothing can render faster than the
         // highest configured mode cap. On high-refresh displays this avoids extra
         // per-RAF work (camera checks + effect scans) between allowed render ticks.
-        if (adaptiveFpsEnabled && !inCinematicMode && !this._forceNextRender) {
+        // Strict sync mode bypasses this because every PIXI token must produce a
+        // compositor render.
+        if (adaptiveFpsEnabled && !inCinematicMode && !this._forceNextRender && !pendingPixiToken) {
           const since = now - (this._lastComposerRenderTime || 0);
           const fastestFps = Math.max(idleFps, activeFps, effectiveContinuousFps);
           const minIntervalMs = 1000 / Math.max(1, fastestFps);
@@ -344,7 +408,9 @@ export class RenderLoop {
         }
 
         // Cinematic mode renders every rAF with no further checks.
-        let shouldRender = inCinematicMode || inContinuousWindow || effectWantsContinuous || this._forceNextRender || cameraChanged;
+        // Strict sync always renders when a PIXI token is pending so the two
+        // systems stay lockstep (no dropped compositor frames).
+        let shouldRender = inCinematicMode || inContinuousWindow || effectWantsContinuous || this._forceNextRender || cameraChanged || pendingPixiToken;
         if (!shouldRender) {
           const since = now - (this._lastComposerRenderTime || 0);
           if (since >= idleIntervalMs) shouldRender = true;
@@ -365,6 +431,48 @@ export class RenderLoop {
           const minIntervalMs = 1000 / Math.max(1, targetFps);
           const since = now - (this._lastComposerRenderTime || 0);
           if (since < minIntervalMs) shouldRender = false;
+        }
+
+        // Strict sync: never skip a pending PIXI token. This is an absolute
+        // override of the adaptive frame cap above so that the two systems
+        // remain phase-locked even when the adaptive path would have skipped.
+        if (strictSync && pendingPixiToken) {
+          shouldRender = true;
+        }
+
+        // Strict sync: if the FloorCompositor detected invalid frame inputs
+        // (e.g. a required mask is still being composed asynchronously), skip
+        // the compositor render so the last valid frame remains on screen.
+        // We still consume the PIXI token so the counters reflect coverage.
+        //
+        // Safety: we only honour the hold for STRICT_HOLD_MAX_MS so a stale
+        // flag can never permanently starve the compositor. When the cap
+        // trips we let the compositor run to re-validate and clear the flag.
+        const holdFrame = strictSync
+          ? _readStrictHoldFrame()
+          : { active: false, reason: null, updatedAtMs: 0 };
+        const holdAgeMs = holdFrame.active
+          ? (now - (holdFrame.updatedAtMs || now))
+          : 0;
+        const holdExpired = holdFrame.active && holdAgeMs > STRICT_HOLD_MAX_MS;
+        if (holdFrame.active && !holdExpired) {
+          shouldRender = false;
+          try {
+            const counters = ms.__renderStrictCounters ?? (ms.__renderStrictCounters = {});
+            counters.holdFrames = (counters.holdFrames || 0) + 1;
+            counters.lastHoldReason = holdFrame.reason;
+            counters.lastHoldAtMs = now;
+          } catch (_) {}
+          // Consume the pending token so strict sync telemetry shows coverage
+          // even while held — otherwise "missed" would inflate during holds.
+          try { fc?.consumePendingPixiToken?.(); } catch (_) {}
+        } else if (holdExpired) {
+          try {
+            const counters = ms.__renderStrictCounters ?? (ms.__renderStrictCounters = {});
+            counters.holdExpirations = (counters.holdExpirations || 0) + 1;
+            counters.lastHoldExpiryAtMs = now;
+          } catch (_) {}
+          shouldRender = true;
         }
 
         if (window.MapShine?.__v2StartupTraceEnabled === true && this.frameCount <= 8) {
@@ -399,6 +507,17 @@ export class RenderLoop {
           this.effectComposer.render(deltaTime);
           this._lastComposerRenderTime = now;
           this._forceNextRender = false;
+
+          // Strict sync lockstep consumption: ensure the PIXI token that
+          // triggered this render is marked as consumed so the coordinator
+          // can accurately report one-to-one PIXI→compositor coverage.
+          if (strictSync) {
+            try { fc?.consumePendingPixiToken?.(); } catch (_) {}
+            try {
+              const counters = ms.__renderStrictCounters ?? (ms.__renderStrictCounters = {});
+              counters.compositorRenders = (counters.compositorRenders || 0) + 1;
+            } catch (_) {}
+          }
           if (window.MapShine?.__v2StartupTraceEnabled === true && this.frameCount <= 8) {
             try {
               const entry = {

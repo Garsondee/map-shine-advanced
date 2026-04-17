@@ -202,8 +202,19 @@ function _collectPerfSnapshot() {
   const cinematicUntilMs = _toFinite(rl?._cinematicModeUntilMs, 0);
   const cinematicWindowRemainingMs = Math.max(0, cinematicUntilMs - nowPerf);
   const adaptiveEnabled = ms?.renderAdaptiveFpsEnabled !== false;
+  const strictSyncEnabled = ms?.renderStrictSyncEnabled === true;
   const floorCompositor = ms.floorCompositorV2 ?? ms.effectComposer?._floorCompositorV2 ?? null;
   const continuousCandidates = _collectContinuousCandidates(floorCompositor);
+
+  // Strict-sync telemetry: PIXI token lockstep + hold-frame counters.
+  let strictSyncTokens = null;
+  try {
+    strictSyncTokens = ms?.frameCoordinator?.getStrictSyncTokenStats?.() ?? null;
+  } catch (_) {}
+  const strictSyncHold = ms?.__v2StrictHoldInfo ?? null;
+  const strictSyncFrames = ms?.__v2StrictFrameStats ?? null;
+  const strictRenderCounters = ms?.__renderStrictCounters ?? null;
+  const outdoorsRoute = ms?.__v2OutdoorsRoute ?? null;
 
   return {
     ts: Date.now(),
@@ -225,9 +236,18 @@ function _collectPerfSnapshot() {
       continuousWindowRemainingMs,
       cinematicWindowRemainingMs,
       adaptiveEnabled,
+      strictSyncEnabled,
       idleFps: _toFinite(ms?.renderIdleFps, 15),
       activeFps: _toFinite(ms?.renderActiveFps, 60),
       continuousFps: _toFinite(ms?.renderContinuousFps, 30),
+    },
+    strictSync: {
+      enabled: strictSyncEnabled,
+      tokens: strictSyncTokens,
+      hold: strictSyncHold,
+      frames: strictSyncFrames,
+      counters: strictRenderCounters,
+      outdoorsRoute,
     },
     continuousCandidates,
     distortion: {
@@ -297,9 +317,21 @@ function _emitPeriodicPerfLog() {
     { key: 'renderLoop.continuousWindowRemainingMs', value: Math.round(snap.renderLoop.continuousWindowRemainingMs) },
     { key: 'renderLoop.cinematicWindowRemainingMs', value: Math.round(snap.renderLoop.cinematicWindowRemainingMs) },
     { key: 'renderLoop.adaptiveEnabled', value: snap.renderLoop.adaptiveEnabled },
+    { key: 'renderLoop.strictSyncEnabled', value: snap.renderLoop.strictSyncEnabled },
     { key: 'renderLoop.targetFps.idle', value: snap.renderLoop.idleFps },
     { key: 'renderLoop.targetFps.active', value: snap.renderLoop.activeFps },
     { key: 'renderLoop.targetFps.continuous', value: snap.renderLoop.continuousFps },
+    { key: 'strictSync.tokens.produced', value: snap.strictSync.tokens?.produced ?? 0 },
+    { key: 'strictSync.tokens.consumed', value: snap.strictSync.tokens?.consumed ?? 0 },
+    { key: 'strictSync.tokens.missed', value: snap.strictSync.tokens?.missed ?? 0 },
+    { key: 'strictSync.tokens.pending', value: snap.strictSync.tokens?.pending ?? 0 },
+    { key: 'strictSync.frames.rendered', value: snap.strictSync.frames?.rendered ?? 0 },
+    { key: 'strictSync.frames.held', value: snap.strictSync.frames?.held ?? 0 },
+    { key: 'strictSync.frames.lastHoldReason', value: snap.strictSync.frames?.lastHoldReason ?? 'none' },
+    { key: 'strictSync.outdoorsRoute.main', value: snap.strictSync.outdoorsRoute?.main?.route ?? 'n/a' },
+    { key: 'strictSync.outdoorsRoute.water', value: snap.strictSync.outdoorsRoute?.water?.route ?? 'n/a' },
+    { key: 'strictSync.outdoorsRoute.sky', value: snap.strictSync.outdoorsRoute?.sky?.route ?? 'n/a' },
+    { key: 'strictSync.outdoorsRoute.cloudMode', value: snap.strictSync.outdoorsRoute?.cloud?.mode ?? 'n/a' },
     { key: 'distortion.applyRatio.window', value: `${(distWindowRatio * 100).toFixed(1)}%` },
     { key: 'distortion.applyRatio.total', value: `${(snap.distortion.applyRatio * 100).toFixed(1)}%` },
     { key: 'distortion.earlyPassThrough.total', value: snap.distortion.earlyPassThrough },
@@ -1540,6 +1572,62 @@ export const consoleHelpers = {
    *   MapShine.debug.alphaIsolationSet({ skipLensPass: true })
    *   MapShine.debug.alphaIsolationReset()
    */
+  /**
+   * Strict render sync diagnostics snapshot.
+   * Shows PIXI token production/consumption, frame hold counts, and the
+   * current _Outdoors binding route per consumer. Use this to verify that
+   * strict sync is honoring the invariant that every PIXI token produces
+   * exactly one compositor render and that all consumers have a valid
+   * (non-stale) outdoors mask binding.
+   *
+   * Usage: MapShine.debug.strictSyncStatus()
+   *
+   * @returns {object}
+   */
+  strictSyncStatus() {
+    const ms = window?.MapShine ?? {};
+    const fc = ms.frameCoordinator ?? null;
+    const tokens = (() => {
+      try { return fc?.getStrictSyncTokenStats?.() ?? null; } catch (_) { return null; }
+    })();
+    const snapshot = {
+      enabled: ms.renderStrictSyncEnabled === true,
+      tokens,
+      frames: ms.__v2StrictFrameStats ?? null,
+      hold: ms.__v2StrictHoldInfo ?? null,
+      renderCounters: ms.__renderStrictCounters ?? null,
+      outdoorsRoute: ms.__v2OutdoorsRoute ?? null,
+      holdFlag: ms.renderStrictHoldFrame ?? null,
+      maskCacheVersion: (() => {
+        try {
+          return Number(ms.sceneComposer?._sceneMaskCompositor?.getFloorCacheVersion?.() ?? 0);
+        } catch (_) { return null; }
+      })(),
+    };
+    try { console.table(snapshot); } catch (_) {}
+    return snapshot;
+  },
+
+  /**
+   * Toggle strict render sync at runtime.
+   * Usage: MapShine.debug.setStrictSync(true|false)
+   *
+   * @param {boolean} enabled
+   */
+  setStrictSync(enabled) {
+    const gsm = window.MapShine?.graphicsSettings ?? window.MapShine?.graphicsSettingsManager ?? null;
+    if (gsm?.setRenderStrictSyncEnabled) {
+      gsm.setRenderStrictSyncEnabled(enabled === true);
+      console.log(`[strict sync] now ${enabled === true ? 'ENABLED' : 'DISABLED'} via GraphicsSettingsManager`);
+      return gsm.getRenderStrictSyncEnabled();
+    }
+    // Fallback: write directly to the runtime flag.
+    if (!window.MapShine) window.MapShine = {};
+    window.MapShine.renderStrictSyncEnabled = enabled === true;
+    console.log(`[strict sync] runtime flag set to ${enabled === true} (GraphicsSettingsManager unavailable)`);
+    return window.MapShine.renderStrictSyncEnabled;
+  },
+
   alphaIsolationStatus() {
     return { ...(window.MapShine?.__alphaIsolationDebug ?? {}) };
   },
@@ -1598,6 +1686,8 @@ Available commands (access via MapShine.debug):
   .diagnoseFloorDeepdive()  - Deep-dive: _floorCache RTs, uniform snapshot, tile overlays, _tileEffectMasks
   .diagnoseUpperFloorOutdoorsProof() - JSON: disk probe vs tile mask load vs compositor (async)
   .diagnoseFloorMasks()     - Quick snapshot of per-effect mask bindings
+  .strictSyncStatus()       - Strict render sync counters + outdoors binding routes
+  .setStrictSync(bool)      - Enable/disable strict render sync at runtime
   .alphaIsolationStatus()   - Read active alpha/isolation debug flags
   .alphaIsolationSet(obj)   - Merge alpha/isolation debug flags
   .alphaIsolationPreset(id) - Apply a bisect preset (noLens/noStamp/noWaterOccluder/noWater/noOverhead/noCloud/noBuilding/off)

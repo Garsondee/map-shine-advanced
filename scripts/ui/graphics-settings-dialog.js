@@ -136,6 +136,12 @@ export class GraphicsSettingsDialog {
       this.manager.setRenderResolutionPreset(ev.value);
     });
 
+    globalFolder.addBinding(this.manager.state, 'renderStrictSyncEnabled', {
+      label: 'Strict Render Sync'
+    }).on('change', (ev) => {
+      this.manager.setRenderStrictSyncEnabled(ev.value === true);
+    });
+
     globalFolder.addBinding(this.manager.state, 'renderAdaptiveFpsEnabled', {
       label: 'Adaptive Frame Cap'
     }).on('change', (ev) => {
@@ -227,6 +233,14 @@ export class GraphicsSettingsDialog {
         scopeNote.style.padding = '4px 6px 2px 6px';
         scopeNote.style.fontStyle = 'italic';
         contentElement.appendChild(scopeNote);
+
+        const strictSyncNote = document.createElement('div');
+        strictSyncNote.textContent = 'Strict Render Sync: locks compositor to PIXI tick (no dropped frames, no stale masks). Overrides Adaptive Frame Cap.';
+        strictSyncNote.style.fontSize = '10px';
+        strictSyncNote.style.opacity = '0.55';
+        strictSyncNote.style.padding = '2px 6px 4px 6px';
+        strictSyncNote.style.fontStyle = 'italic';
+        contentElement.appendChild(strictSyncNote);
 
         const framePacingNote = document.createElement('div');
         framePacingNote.textContent = 'Adaptive Frame Cap: Active = interactions, Continuous = animated effects, Idle = static scene refresh.';

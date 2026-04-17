@@ -11,6 +11,7 @@ import { createLogger } from '../../core/log.js';
 import { probeMaskFile } from '../../assets/loader.js';
 import Coordinates from '../../utils/coordinates.js';
 import { tileHasLevelsRange, readTileLevelsFlags } from '../../foundry/levels-scene-flags.js';
+import { tileRelativeEffectOrder } from '../LayerOrderPolicy.js';
 
 const log = createLogger('IridescenceEffectV2');
 
@@ -463,7 +464,10 @@ export class IridescenceEffectV2 {
     try {
       const baseEntry = this._renderBus?._tiles?.get?.(tileId);
       const baseOrder = Number(baseEntry?.mesh?.renderOrder);
-      if (Number.isFinite(baseOrder)) mesh.renderOrder = baseOrder + 5;
+      const isOverhead = !!baseEntry?.root?.userData?.isOverhead;
+      if (Number.isFinite(baseOrder)) {
+        mesh.renderOrder = tileRelativeEffectOrder(baseOrder, floorIndex, isOverhead, 5);
+      }
     } catch (_) {}
 
     this._renderBus.addEffectOverlay(`${tileId}_iridescence`, mesh, floorIndex);

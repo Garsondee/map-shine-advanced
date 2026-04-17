@@ -9,8 +9,7 @@ import { isGmLike } from '../core/gm-parity.js';
 import { createLogger } from '../core/log.js';
 import { OVERLAY_THREE_LAYER, GLOBAL_SCENE_LAYER } from '../core/render-layers.js';
 import { getPerspectiveElevation } from '../foundry/elevation-context.js';
-import { readDocLevelsRange, isLevelsEnabledForScene } from '../foundry/levels-scene-flags.js';
-import { getLevelsCompatibilityMode, LEVELS_COMPATIBILITY_MODES } from '../foundry/levels-compatibility.js';
+import { readDocLevelsRange, hasV14NativeLevels } from '../foundry/levels-scene-flags.js';
 
 const log = createLogger('DrawingManager');
 
@@ -142,8 +141,7 @@ export class DrawingManager {
 
     // MS-LVL-044: Elevation range gating for drawings.
     try {
-      if (getLevelsCompatibilityMode() !== LEVELS_COMPATIBILITY_MODES.OFF
-          && isLevelsEnabledForScene(canvas?.scene)) {
+      if (hasV14NativeLevels(canvas?.scene)) {
         const range = readDocLevelsRange(doc);
         if (Number.isFinite(range.rangeBottom) || Number.isFinite(range.rangeTop)) {
           const perspective = getPerspectiveElevation();

@@ -33,6 +33,23 @@ import {
 const log = createLogger('UI');
 
 /**
+ * Initial enabled state for an effect folder. Prefer saved flags, then schema,
+ * then `parameters.enabled.default`. Final fallback is **false** — the old
+ * `?? true` default incorrectly turned on optional post effects (e.g. ASCII)
+ * when nothing was saved.
+ * @param {object} schema
+ * @param {object} savedParams
+ * @returns {boolean}
+ */
+function resolveInitialEffectEnabled(schema, savedParams) {
+  if (savedParams && typeof savedParams.enabled === 'boolean') return savedParams.enabled;
+  if (typeof schema?.enabled === 'boolean') return schema.enabled;
+  const pe = schema?.parameters?.enabled;
+  if (pe && typeof pe.default === 'boolean') return pe.default;
+  return false;
+}
+
+/**
  * Effect IDs eligible for "World Based" mode (settings shared across all scenes).
  * Only Lighting & Tone Mapping and Color Grading & VFX support this toggle.
  */
@@ -2815,7 +2832,7 @@ export class TweakpaneManager {
       }
     }
 
-    this.effectFolders[effectId].params.enabled = savedParams.enabled ?? schema.enabled ?? true;
+    this.effectFolders[effectId].params.enabled = resolveInitialEffectEnabled(schema, savedParams);
     const enableBinding = folder.addBinding(
       this.effectFolders[effectId].params,
       'enabled',
@@ -3063,7 +3080,7 @@ export class TweakpaneManager {
     }
 
     // Enabled toggle
-    this.effectFolders[effectId].params.enabled = savedParams.enabled ?? schema.enabled ?? true;
+    this.effectFolders[effectId].params.enabled = resolveInitialEffectEnabled(schema, savedParams);
     const enableBinding = folder.addBinding(
       this.effectFolders[effectId].params,
       'enabled',
@@ -6144,7 +6161,8 @@ export class TweakpaneManager {
         if (!report || !scene || !tileManager) {
           results.push({ kind: 'surface', paramId: 'surfaceReport', status: 'SKIP', error: 'SurfaceRegistry/scene/tileManager not available' });
         } else {
-          const fgElev = Number.isFinite(scene?.foregroundElevation) ? scene.foregroundElevation : 0;
+          const fgTop = Number(scene?.firstLevel?.elevation?.top);
+          const fgElev = Number.isFinite(fgTop) ? fgTop : 0;
           const layerEnabled = (sprite, layer) => {
             const mask = sprite?.layers?.mask;
             if (typeof mask !== 'number') return false;

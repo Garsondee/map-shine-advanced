@@ -17,6 +17,7 @@ import {
 } from '../libs/three.quarks.module.js';
 import { OVERLAY_THREE_LAYER } from '../core/render-layers.js';
 import { createLogger } from '../core/log.js';
+import { getCanvasForegroundElevationSplit } from '../foundry/levels-scene-flags.js';
 import { weatherController } from '../core/WeatherController.js';
 import { RoofDripGpuSilhouetteReadback } from './RoofDripGpuSilhouetteReadback.js';
 import {
@@ -113,7 +114,7 @@ function roofDripDiagLogsEnabled() {
  * Priority:
  * 1) Persisted source overhead flags (legacy/core scenes)
  * 2) Levels overhead flag
- * 3) Elevation >= scene.foregroundElevation (Foundry v12 behavior)
+ * 3) Elevation >= active level foreground top (Foundry v14: Level#elevation.top)
  *
  * @param {*} tile
  * @param {*} doc
@@ -125,9 +126,7 @@ function roofDripTileIsExplicitOverhead(tile, doc) {
   if (typeof src?.overhead === 'boolean') return src.overhead;
   const levelsOverhead = src?.flags?.levels?.overhead;
   if (typeof levelsOverhead === 'boolean') return levelsOverhead;
-  const foregroundElevation = Number.isFinite(Number(canvas?.scene?.foregroundElevation))
-    ? Number(canvas.scene.foregroundElevation)
-    : 0;
+  const foregroundElevation = getCanvasForegroundElevationSplit();
   const tileElevation = Number.isFinite(Number(d?.elevation))
     ? Number(d.elevation)
     : 0;

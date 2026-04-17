@@ -6,8 +6,7 @@
  */
 
 import { createLogger } from '../core/log.js';
-import { getLevelsCompatibilityMode, LEVELS_COMPATIBILITY_MODES } from '../foundry/levels-compatibility.js';
-import { readTileLevelsFlags, tileHasLevelsRange, isLevelsEnabledForScene, readWallHeightFlags } from '../foundry/levels-scene-flags.js';
+import { readTileLevelsFlags, tileHasLevelsRange, hasV14NativeLevels, readWallHeightFlags } from '../foundry/levels-scene-flags.js';
 
 const log = createLogger('VisionPolygonComputer');
 
@@ -182,8 +181,7 @@ export class VisionPolygonComputer {
     // sight regardless of their wall type (overriding sight=0).
     let allBlockTileBounds = null;
     if (sense === 'sight'
-        && getLevelsCompatibilityMode() !== LEVELS_COMPATIBILITY_MODES.OFF
-        && isLevelsEnabledForScene(canvas?.scene)) {
+        && hasV14NativeLevels(canvas?.scene)) {
       const tiles = canvas?.scene?.tiles;
       if (tiles) {
         for (const tileDoc of tiles) {

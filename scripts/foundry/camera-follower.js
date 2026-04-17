@@ -22,9 +22,9 @@ import { isGmLike } from '../core/gm-parity.js';
 import { createLogger } from '../core/log.js';
 import { moveTrace } from '../core/movement-trace-log.js';
 import {
-  readSceneLevelsFlag,
-  getSceneBackgroundElevation,
-  getSceneForegroundElevationTop,
+  readV14SceneLevels,
+  hasV14NativeLevels,
+  getViewedV14Level,
 } from './levels-scene-flags.js';
 import { elevationInBand } from '../ui/levels-editor/level-boundaries.js';
 
@@ -104,6 +104,10 @@ export class CameraFollower {
 
     // Build initial level context from scene flags/imported data.
     this.refreshLevelBands({ emit: false, reason: 'initialize' });
+    // Initial canvas boot can occur before Scene._view is finalized, but Foundry
+    // already exposes the target level via canvas._viewOptions.level/canvas.level.
+    // Sync now so first paint uses the same viewed level that manual up/down selects.
+    this._syncToViewedLevel({ emit: false, reason: 'initialize-sync-viewed-level' });
     this._registerHooks();
     this._attachDomListeners();
     this._emitLevelContextChanged('initialize');
@@ -145,20 +149,32 @@ export class CameraFollower {
   }
 
   _registerHooks() {
+    // V14: scene.levels embedded collection changes (add/remove/update levels)
+    // and dimension changes should rebuild our band list.
     const updateSceneId = Hooks.on('updateScene', (scene, changes) => {
       if (!scene || scene.id !== canvas.scene?.id) return;
-      const levelFlagsChanged = changes?.flags?.levels !== undefined;
-      const foregroundElevChanged = 'foregroundElevation' in (changes || {});
+      const levelsChanged = changes?.levels !== undefined;
       const dimensionsChanged = ('grid' in (changes || {})) || ('width' in (changes || {})) || ('height' in (changes || {}));
-      if (!levelFlagsChanged && !foregroundElevChanged && !dimensionsChanged) return;
+      if (!levelsChanged && !dimensionsChanged) return;
       this.refreshLevelBands({ emit: true, reason: 'scene-update' });
     });
     this._hookIds.push({ name: 'updateScene', id: updateSceneId });
 
-    // Token control/elevation events should only auto-sync level context when
-    // policy allows it (follow mode, or player-controlled workflows).
-    // In manual GM workflows, selecting a token must not override the
-    // currently selected floor.
+    // V14: when Foundry redraws the canvas (including same-scene level
+    // switches via scene.view({ level })), sync our active level context
+    // to whichever level Foundry is now viewing.
+    const canvasReadyId = Hooks.on('canvasReady', () => {
+      this._syncToViewedLevel({ emit: true, reason: 'canvas-ready' });
+    });
+    this._hookIds.push({ name: 'canvasReady', id: canvasReadyId });
+
+    // V14: when edges are re-initialized (level add/remove), rebuild.
+    const initEdgesId = Hooks.on('initializeEdges', (scene) => {
+      if (!scene || scene.id !== canvas.scene?.id) return;
+      this.refreshLevelBands({ emit: true, reason: 'edges-initialized' });
+    });
+    this._hookIds.push({ name: 'initializeEdges', id: initEdgesId });
+
     const controlTokenId = Hooks.on('controlToken', (_token, controlled) => {
       if (!controlled) return;
       if (this._isControlledTokenFloorFollowSuppressed()) return;
@@ -167,19 +183,22 @@ export class CameraFollower {
     });
     this._hookIds.push({ name: 'controlToken', id: controlTokenId });
 
-    // Controlled token elevation changes use the same policy gate as
-    // control-token events so manual floor selection stays authoritative.
+    // V14: listen for both `elevation` and `level` field changes on tokens.
     const updateTokenId = Hooks.on('updateToken', (tokenDoc, changes) => {
-      if (!('elevation' in (changes || {}))) return;
+      const elevChanged = 'elevation' in (changes || {});
+      const levelChanged = 'level' in (changes || {});
+      if (!elevChanged && !levelChanged) return;
+
       const tid = String(tokenDoc?.id || '');
       const controlled = canvas?.tokens?.controlled || [];
       const isControlled = controlled.some((t) => t?.document?.id === tokenDoc?.id);
       const suppressed = this.isFloorFollowSuppressedForToken(tid);
       const policyOk = this._shouldAutoSyncControlledTokenEvents();
       const willSync = isControlled && !suppressed && policyOk;
-      moveTrace('cameraFollower.updateToken.elevation', {
+      moveTrace('cameraFollower.updateToken', {
         tokenId: tid,
         newElevation: changes?.elevation,
+        newLevel: changes?.level,
         isControlled,
         floorFollowSuppressed: suppressed,
         policyAllowsSync: policyOk,
@@ -189,6 +208,19 @@ export class CameraFollower {
       if (!isControlled) return;
       if (suppressed) return;
       if (!policyOk) return;
+
+      // V14: if the token's level field changed, prefer syncing by level id
+      if (levelChanged && changes.level) {
+        const levelIdx = this._levels.findIndex((l) => l.levelId === changes.level);
+        if (levelIdx >= 0) {
+          this._setActiveLevelByIndex(levelIdx, {
+            emit: true,
+            reason: 'token-level-changed',
+          });
+          return;
+        }
+      }
+
       this._syncToControlledTokenLevel({ emit: true, reason: 'token-elevation-update' });
     });
     this._hookIds.push({ name: 'updateToken', id: updateTokenId });
@@ -235,7 +267,9 @@ export class CameraFollower {
   }
 
   /**
-   * Re-read level bands from scene flags and preserve the closest active band.
+   * Re-read level bands and preserve the closest active band.
+   * For V14 native levels the viewed level (`canvas.level`) is preferred
+   * as the initial selection so Map Shine stays synchronized with Foundry.
    * @param {{emit?: boolean, reason?: string}} [options]
    */
   refreshLevelBands(options = {}) {
@@ -245,12 +279,19 @@ export class CameraFollower {
 
     let nextIndex = 0;
 
+    // V14 native: prefer the currently viewed level from Foundry
+    const viewedLevel = getViewedV14Level(canvas?.scene);
+    if (viewedLevel) {
+      const viewedIdx = nextLevels.findIndex((l) => l.levelId === viewedLevel.levelId);
+      if (viewedIdx >= 0) nextIndex = viewedIdx;
+    }
+
     if (this._lockMode === 'follow-controlled-token') {
       const tokenElevation = this._getControlledTokenElevation();
       if (Number.isFinite(tokenElevation)) {
         nextIndex = this._findBestLevelIndexForElevation(tokenElevation, nextLevels);
       }
-    } else if (this._activeLevelContext && Number.isFinite(this._activeLevelContext.center)) {
+    } else if (!viewedLevel && this._activeLevelContext && Number.isFinite(this._activeLevelContext.center)) {
       nextIndex = this._findNearestLevelIndexByCenter(this._activeLevelContext.center, nextLevels);
     }
 
@@ -259,317 +300,46 @@ export class CameraFollower {
   }
 
   /**
-   * @returns {Array<{levelId:string,label:string,bottom:number,top:number,center:number,source:'sceneLevels'|'inferred'}>}
+   * Build the level band list. V14 native levels are the primary source.
+   * Falls back to a single default band when the scene has no native levels.
+   * @returns {Array<{levelId:string,label:string,bottom:number,top:number,center:number,source:string}>}
    */
   _buildLevelBands() {
     const scene = canvas?.scene;
-    const rawLevels = readSceneLevelsFlag(scene);
-    const parsed = [];
-    const diagnostics = {
-      source: 'sceneLevels',
-      rawCount: Array.isArray(rawLevels) ? rawLevels.length : 0,
-      parsedCount: 0,
-      invalidCount: 0,
-      swappedCount: 0,
-    };
 
-    if (Array.isArray(rawLevels)) {
-      for (let i = 0; i < rawLevels.length; i += 1) {
-        const item = rawLevels[i];
-        let bottomRaw;
-        let topRaw;
-        let labelRaw;
-
-        if (Array.isArray(item)) {
-          bottomRaw = item[0];
-          topRaw = item[1];
-          labelRaw = item[2];
-        } else if (item && typeof item === 'object') {
-          bottomRaw = item.bottom ?? item.rangeBottom ?? item.min;
-          topRaw = item.top ?? item.rangeTop ?? item.max;
-          labelRaw = item.name ?? item.label;
-        }
-
-        let bottom = Number(bottomRaw);
-        let top = Number(topRaw);
-        if (!Number.isFinite(bottom) || !Number.isFinite(top)) {
-          diagnostics.invalidCount += 1;
-          continue;
-        }
-        if (bottom > top) {
-          const t = bottom;
-          bottom = top;
-          top = t;
-          diagnostics.swappedCount += 1;
-        }
-
-        parsed.push({
-          levelId: `scene-${i}`,
-          label: String(labelRaw ?? `Level ${i + 1}`),
-          bottom,
-          top,
-          center: (bottom + top) * 0.5,
-          source: 'sceneLevels'
-        });
+    // V14-native path: read directly from scene.levels
+    if (hasV14NativeLevels(scene)) {
+      const nativeLevels = readV14SceneLevels(scene);
+      if (nativeLevels.length) {
+        this._lastLevelBuildDiagnostics = {
+          source: 'v14-native',
+          rawCount: nativeLevels.length,
+          parsedCount: nativeLevels.length,
+          invalidCount: 0,
+          swappedCount: 0,
+        };
+        return nativeLevels;
       }
     }
 
-    diagnostics.parsedCount = parsed.length;
-
-    parsed.sort((a, b) => {
-      if (a.bottom !== b.bottom) return a.bottom - b.bottom;
-      return a.top - b.top;
-    });
-
-    if (parsed.length) {
-      const before = parsed.length;
-      const merged = this._mergeSceneImageBands(scene, parsed);
-      diagnostics.parsedCount = merged.length;
-      diagnostics.sceneImageBands = merged.length - before;
-      this._lastLevelBuildDiagnostics = diagnostics;
-      return merged.map((entry, idx) => ({
-        ...entry,
-        levelId: entry.levelId || `scene-${idx}`,
-      }));
-    }
-
-    const inferredLevels = this._buildInferredLevelBands(scene);
-    this._lastLevelBuildDiagnostics = {
-      source: 'inferred',
-      rawCount: diagnostics.rawCount,
-      parsedCount: inferredLevels.length,
-      invalidCount: diagnostics.invalidCount,
-      swappedCount: diagnostics.swappedCount,
-      inferredCenterCount: inferredLevels.length,
-    };
-    return inferredLevels;
-  }
-
-  /**
-   * Inject navigation bands for the Foundry scene background / foreground images
-   * (from `backgroundElevation`, `foregroundElevation`, optional `foregroundElevationTop`)
-   * when they are not already represented in authored `sceneLevels`.
-   *
-   * @private
-   * @param {Scene|undefined|null} scene
-   * @param {Array<{levelId:string,label:string,bottom:number,top:number,center:number,source:string}>} parsed
-   * @returns {Array<{levelId:string,label:string,bottom:number,top:number,center:number,source:string}>}
-   */
-  _mergeSceneImageBands(scene, parsed) {
-    const out = parsed.map((p) => ({ ...p }));
-    const EPS = 1e-4;
-    const approxEqual = (a, b) => Math.abs(a - b) <= EPS;
-
-    const hasDuplicateBand = (lo, hi) => out.some(
-      (b) => approxEqual(b.bottom, lo) && approxEqual(b.top, hi)
-    );
-
-    /** @param {number} lo @param {number} hi */
-    const overlapsAny = (lo, hi) => out.some((b) => {
-      if (!Number.isFinite(b.bottom) || !Number.isFinite(b.top)) return false;
-      return lo < b.top && b.bottom < hi;
-    });
-
-    const bgLo = getSceneBackgroundElevation(scene);
-    const fgBoundary = Number(scene?.foregroundElevation);
-    const fgTop = getSceneForegroundElevationTop(scene);
-
-    // Scene background + foreground should represent one authored scene-image
-    // band, never two synthetic navigation levels.
-    const sceneImageLo = Number.isFinite(bgLo) ? bgLo : null;
-    const sceneImageHi = (() => {
-      if (Number.isFinite(fgTop) && fgTop !== Infinity) return fgTop;
-      if (Number.isFinite(fgBoundary)) return fgBoundary;
-      return null;
-    })();
-
-    if (Number.isFinite(sceneImageLo) && Number.isFinite(sceneImageHi) && sceneImageLo < sceneImageHi) {
-      if (!hasDuplicateBand(sceneImageLo, sceneImageHi) && !overlapsAny(sceneImageLo, sceneImageHi)) {
-        out.push({
-          levelId: 'msa-scene-images',
-          label: 'Scene images',
-          bottom: sceneImageLo,
-          top: sceneImageHi,
-          center: (sceneImageLo + sceneImageHi) * 0.5,
-          source: 'sceneImage',
-        });
-      }
-    }
-
-    out.sort((a, b) => {
-      if (a.bottom !== b.bottom) return a.bottom - b.bottom;
-      return a.top - b.top;
-    });
-
-    return out.map((entry, idx) => ({
-      ...entry,
-      levelId: entry.levelId || `scene-${idx}`,
-    }));
-  }
-
-  /**
-   * Build inferred level bands from scene content when explicit sceneLevels are missing.
-   * @private
-   * @param {Scene|undefined|null} scene
-   * @returns {Array<{levelId:string,label:string,bottom:number,top:number,center:number,source:'inferred'}>}
-   */
-  _buildInferredLevelBands(scene) {
+    // Fallback: single default floor for scenes without native levels
     const defaultSingleFloor = {
       levelId: 'inferred-default',
       label: 'Ground',
       bottom: 0,
       top: 10,
       center: 5,
-      source: 'inferred'
+      source: 'inferred',
     };
-
-    const hasAuthoredLevelsMetadata = (() => {
-      const sceneLevelsFlags = scene?.flags?.levels;
-      if (sceneLevelsFlags?.enabled === true) return true;
-
-      const hasRangeFlags = (collection) => {
-        const placeables = Array.isArray(collection?.placeables) ? collection.placeables : [];
-        for (const placeable of placeables) {
-          const levels = placeable?.document?.flags?.levels;
-          if (!levels || typeof levels !== 'object') continue;
-          if (levels.rangeBottom !== undefined) return true;
-          if (levels.rangeTop !== undefined) return true;
-          if (levels.showIfAbove === true) return true;
-          if (levels.isBasement === true) return true;
-        }
-        return false;
-      };
-
-      if (hasRangeFlags(canvas?.tiles)) return true;
-      if (hasRangeFlags(canvas?.tokens)) return true;
-      if (hasRangeFlags(canvas?.drawings)) return true;
-      if (hasRangeFlags(canvas?.templates)) return true;
-      if (hasRangeFlags(canvas?.lighting)) return true;
-      if (hasRangeFlags(canvas?.sounds)) return true;
-      if (hasRangeFlags(canvas?.notes)) return true;
-
-      const walls = Array.isArray(canvas?.walls?.placeables) ? canvas.walls.placeables : [];
-      for (const wall of walls) {
-        const wh = wall?.document?.flags?.['wall-height'];
-        if (!wh || typeof wh !== 'object') continue;
-        if (wh.bottom !== undefined || wh.top !== undefined) return true;
-      }
-
-      return false;
-    })();
-
-    // Default for non-authored scenes: keep one implicit floor and rely on
-    // overhead layering (foregroundElevation) instead of creating many inferred bands.
-    if (!hasAuthoredLevelsMetadata) {
-      return [defaultSingleFloor];
-    }
-
-    const elevations = [];
-    const pushElevation = (value) => {
-      const n = Number(value);
-      if (!Number.isFinite(n)) return;
-      elevations.push(n);
+    this._lastLevelBuildDiagnostics = {
+      source: 'inferred',
+      rawCount: 0,
+      parsedCount: 1,
+      invalidCount: 0,
+      swappedCount: 0,
+      inferredCenterCount: 1,
     };
-
-    const pushFromPlaceables = (collection) => {
-      const placeables = Array.isArray(collection?.placeables) ? collection.placeables : [];
-      for (const placeable of placeables) {
-        const doc = placeable?.document;
-        if (!doc) continue;
-        // Only infer floors from explicit Levels range markers. Generic
-        // placeable elevation values alone should not create one floor per tile.
-        pushElevation(doc.flags?.levels?.rangeBottom);
-        pushElevation(doc.flags?.levels?.rangeTop);
-      }
-    };
-
-    // Scene-level elevation hints are only treated as floor markers when
-    // Levels is explicitly enabled on the scene.
-    if (scene?.flags?.levels?.enabled === true) {
-      pushElevation(scene?.flags?.levels?.backgroundElevation);
-      pushElevation(scene?.foregroundElevation);
-    }
-
-    // Infer from major placeable layers and relevant range flags.
-    pushFromPlaceables(canvas?.tiles);
-    pushFromPlaceables(canvas?.tokens);
-    pushFromPlaceables(canvas?.drawings);
-    pushFromPlaceables(canvas?.templates);
-    pushFromPlaceables(canvas?.lighting);
-    pushFromPlaceables(canvas?.sounds);
-    pushFromPlaceables(canvas?.notes);
-
-    // Wall-height contributes to vertical segmentation in many Levels worlds.
-    const walls = Array.isArray(canvas?.walls?.placeables) ? canvas.walls.placeables : [];
-    for (const wall of walls) {
-      const doc = wall?.document;
-      if (!doc) continue;
-      pushElevation(doc.flags?.['wall-height']?.bottom);
-      pushElevation(doc.flags?.['wall-height']?.top);
-    }
-
-    // De-duplicate using a small epsilon to avoid near-identical bands.
-    const sorted = elevations
-      .filter((v) => Number.isFinite(v))
-      .sort((a, b) => a - b);
-
-    const centers = [];
-    const EPS = 0.01;
-    for (const value of sorted) {
-      if (!centers.length || Math.abs(value - centers[centers.length - 1]) > EPS) {
-        centers.push(value);
-      }
-    }
-
-    if (!centers.length) {
-      return [defaultSingleFloor];
-    }
-
-    if (centers.length === 1) {
-      const center = centers[0];
-      return [{
-        levelId: 'inferred-0',
-        label: `Inferred 1 (${center.toFixed(1)})`,
-        bottom: center,
-        top: center,
-        center,
-        source: 'inferred'
-      }];
-    }
-
-    const levels = [];
-    for (let i = 0; i < centers.length; i += 1) {
-      const center = centers[i];
-      const prev = centers[i - 1];
-      const next = centers[i + 1];
-
-      let bottom;
-      let top;
-      if (i === 0) {
-        const span = Math.max(1, (next - center) * 0.5);
-        bottom = center - span;
-      } else {
-        bottom = (prev + center) * 0.5;
-      }
-
-      if (i === centers.length - 1) {
-        const span = Math.max(1, (center - prev) * 0.5);
-        top = center + span;
-      } else {
-        top = (center + next) * 0.5;
-      }
-
-      levels.push({
-        levelId: `inferred-${i}`,
-        label: `Inferred ${i + 1} (${center.toFixed(1)})`,
-        bottom,
-        top,
-        center,
-        source: 'inferred'
-      });
-    }
-
-    return levels;
+    return [defaultSingleFloor];
   }
 
   _findNearestLevelIndexByCenter(center, levels = this._levels) {
@@ -651,7 +421,19 @@ export class CameraFollower {
 
     const step = delta > 0 ? 1 : -1;
     const current = Number.isFinite(this._activeLevelIndex) ? this._activeLevelIndex : 0;
-    return this._setActiveLevelByIndex(current + step, {
+    const nextIndex = Math.max(0, Math.min(this._levels.length - 1, current + step));
+    const nextLevel = this._levels[nextIndex];
+
+    // V14: delegate to Foundry's native view transition when using native levels
+    if (nextLevel?.source === 'v14-native' && canvas?.scene?.view) {
+      canvas.scene.view({ level: nextLevel.levelId });
+      return this._setActiveLevelByIndex(nextIndex, {
+        emit: options.emit !== false,
+        reason: options.reason || 'step-level',
+      });
+    }
+
+    return this._setActiveLevelByIndex(nextIndex, {
       emit: options.emit !== false,
       reason: options.reason || 'step-level'
     });
@@ -668,6 +450,13 @@ export class CameraFollower {
 
     if (this._lockMode === 'follow-controlled-token' && options.keepLockMode !== true) {
       this.setLockMode('manual', { emit: false, reason: 'manual-select-level' });
+    }
+
+    const targetLevel = this._levels[index];
+
+    // V14: delegate to Foundry's native view transition
+    if (targetLevel?.source === 'v14-native' && canvas?.scene?.view) {
+      canvas.scene.view({ level: targetLevel.levelId });
     }
 
     return this._setActiveLevelByIndex(index, {
@@ -800,8 +589,57 @@ export class CameraFollower {
     return this._floorFollowSuppressionByTokenId.has(key);
   }
 
+  /**
+   * Sync Map Shine's active level to the Foundry viewed level (`canvas.level`).
+   * Called on `canvasReady` to catch same-scene level redraws.
+   * @param {{emit?: boolean, reason?: string}} [options]
+   */
+  _syncToViewedLevel(options = {}) {
+    const scene = canvas?.scene;
+    if (!scene) return;
+    const viewedLevel = getViewedV14Level(scene);
+    if (!viewedLevel) return;
+
+    // Rebuild bands in case levels changed during the redraw
+    const nextLevels = this._buildLevelBands();
+    if (!nextLevels.length) return;
+
+    const viewedIdx = nextLevels.findIndex((l) => l.levelId === viewedLevel.levelId);
+    if (viewedIdx < 0) return;
+
+    // Always replace `_levels` with the freshly built list. Foundry mutates
+    // per-LevelDocument flags such as `isView` / `isVisible` when the user
+    // changes the viewed level stack without altering level ids or count; if
+    // we only swapped `_levels` when ids changed, `getAvailableLevels()` would
+    // drift from `readV14SceneLevels()` and diagnostics would show contradictory
+    // view flags while `activeLevelContext` still tracked the correct index.
+    this._levels = nextLevels;
+
+    this._setActiveLevelByIndex(viewedIdx, {
+      emit: options.emit !== false,
+      reason: options.reason || 'sync-viewed-level',
+    });
+  }
+
   _syncToControlledTokenLevel(options = {}) {
     if (this._isControlledTokenFloorFollowSuppressed()) return false;
+
+    // V14: prefer the token's native level field over elevation-based lookup
+    const controlled = canvas?.tokens?.controlled || [];
+    const token = controlled[0] || null;
+    const tokenLevelId = token?.document?.level;
+    if (tokenLevelId) {
+      const levelIdx = this._levels.findIndex((l) => l.levelId === tokenLevelId);
+      if (levelIdx >= 0) {
+        this._setActiveLevelByIndex(levelIdx, {
+          emit: options.emit !== false,
+          reason: options.reason || 'follow-controlled-token',
+        });
+        return true;
+      }
+    }
+
+    // Fallback: elevation-based matching
     const tokenElevation = this._getControlledTokenElevation();
     if (!Number.isFinite(tokenElevation)) return false;
     const nextIndex = this._findBestLevelIndexForElevation(tokenElevation);

@@ -77,6 +77,7 @@ export class TimeManager {
     this._timeInfo = {
       elapsed: 0,
       delta: 0,
+      motionDelta: 0,
       frameCount: 0,
       fps: 0,
       scale: 1.0,
@@ -140,6 +141,10 @@ export class TimeManager {
     // Update cached object instead of creating new one
     this._timeInfo.elapsed = this.elapsed;
     this._timeInfo.delta = this.delta;
+    // Motion delta: authoritative integration step for animated effects.
+    // Currently aliases delta, but keeping a distinct field lets effects adopt
+    // stable semantics even if delta policy changes in one place later.
+    this._timeInfo.motionDelta = this.delta;
     this._timeInfo.frameCount = this.frameCount;
     this._timeInfo.fps = this.fps;
     this._timeInfo.scale = this.scale;
@@ -275,6 +280,7 @@ export class TimeManager {
  * @typedef {Object} TimeInfo
  * @property {number} elapsed - Total elapsed time in seconds
  * @property {number} delta - Time since last frame in seconds
+ * @property {number} motionDelta - Stable integration delta for animated effects
  * @property {number} frameCount - Current frame number
  * @property {number} fps - Current frames per second
  * @property {number} scale - Current time scale multiplier

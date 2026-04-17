@@ -418,7 +418,7 @@ export class HalftoneEffectV2 {
               r = g = b = (r + b + g) / 3.0;
             }
 
-            gl_FragColor = vec4(r, g, b, 1.0);
+            gl_FragColor = vec4(r, g, b, colour.a);
           } else {
             gl_FragColor = texture2D(tDiffuse, vUV);
           }

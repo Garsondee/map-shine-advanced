@@ -25,24 +25,73 @@
 
 import { createLogger } from '../core/log.js';
 import { TILE_FEATURE_LAYERS } from '../core/render-layers.js';
-import { tileHasLevelsRange, readTileLevelsFlags } from '../foundry/levels-scene-flags.js';
+import {
+  tileHasLevelsRange,
+  readTileLevelsFlags,
+  resolveV14NativeDocFloorIndexMin,
+  getViewedLevelBackgroundSrc,
+  getVisibleLevelBackgroundSrcs,
+  getVisibleLevelBackgroundLayers,
+  hasV14NativeLevels,
+} from '../foundry/levels-scene-flags.js';
 import { isTileOverhead } from '../scene/tile-manager.js';
+import {
+  RENDER_ORDER_PER_FLOOR,
+  GROUND_Z,
+  Z_PER_FLOOR,
+  MAX_INTRA_ROLE_OFFSET,
+  tileAlbedoOrder,
+  tileOverheadOrder,
+  motionAboveTokensOrder,
+  formatRenderOrder,
+} from './LayerOrderPolicy.js';
 
 const log = createLogger('FloorRenderBus');
 
-// Z base for ground floor tiles. Each floor adds 1 unit so upper floors
-// always render on top of lower floors with standard depth sorting.
-const GROUND_Z = 1000;
-const Z_PER_FLOOR = 1;
-const RENDER_ORDER_PER_FLOOR = 10000;
-const OVERHEAD_OFFSET = 5000;
-const MOTION_ABOVE_TOKENS_OFFSET = 9950;
-
-// Reserve headroom near the top of each floor band for token sprites.
-// Effects (specular/prism/iridescence) inherit tile renderOrder and add a small
-// positive delta, so keep tile indices well below token order slots.
-const MAX_SORT_WITHIN_FLOOR_GROUP = 4800;
+const MAX_SORT_WITHIN_FLOOR_GROUP = MAX_INTRA_ROLE_OFFSET;
 const UPPER_FLOOR_ALPHA_CUTOFF = 0.4;
+
+/**
+ * Strip query/hash for stable asset URL comparison (Foundry / CDN may append tokens).
+ * @param {string} s
+ * @returns {string}
+ */
+function _normalizeBgUrlKey(s) {
+  if (!s || typeof s !== 'string') return '';
+  try {
+    const u = new URL(s, globalThis.location?.origin || 'http://localhost');
+    let p = `${u.pathname || ''}`.toLowerCase();
+    const q = u.searchParams;
+    const v = q.get('v');
+    if (v) p += `?v=${v}`;
+    return p;
+  } catch (_) {
+    return s.split('?')[0].split('#')[0].trim().toLowerCase();
+  }
+}
+
+/**
+ * True if we should trust sceneComposer._albedoTexture for the current viewed level.
+ * @param {import('three').Texture|null} bgTexture
+ * @param {string} bgSrc trimmed viewed-level background src (may be empty)
+ */
+function _composerAlbedoMatchesViewedBg(bgTexture, bgSrc) {
+  if (!bgTexture) return false;
+  if (!bgSrc) return true;
+  try {
+    const stamped = bgTexture.userData?.mapShineBackgroundSrc;
+    if (typeof stamped === 'string' && stamped.trim()) {
+      return _normalizeBgUrlKey(stamped) === _normalizeBgUrlKey(bgSrc);
+    }
+  } catch (_) {}
+  try {
+    const img = bgTexture.image;
+    if (img && typeof img.src === 'string' && img.src.trim()) {
+      return _normalizeBgUrlKey(img.src) === _normalizeBgUrlKey(bgSrc);
+    }
+  } catch (_) {}
+  return false;
+}
 
 // ─── FloorRenderBus ──────────────────────────────────────────────────────────
 
@@ -133,19 +182,71 @@ export class FloorRenderBus {
     this._addSolidBackground(fd);
 
     // Scene background image — reuse SceneComposer's already-loaded texture
-    // if available, otherwise load independently.
+    // when GPU pixels exist, otherwise fall back to TextureLoader or a short
+    // rAF wait. SceneComposer often assigns `_albedoTexture` before the
+    // underlying image has non-zero dimensions; using it immediately skips
+    // `_addBackgroundImage` (sceneW/H from image) and never schedules a load,
+    // leaving only the solid #999999 bus plane (grey "empty" map under PIXI).
     const bgTexture = sceneComposer?._albedoTexture ?? null;
-    const bgSrc = canvas?.scene?.background?.src ?? '';
-    if (bgTexture) {
-      this._addBackgroundImage(fd, bgTexture);
+    // V14: prefer the viewed level's background; deprecated scene.background.src
+    // always returns the first level's image.
+    const scene = canvas?.scene ?? null;
+    const bgSrcRaw = getViewedLevelBackgroundSrc(scene) ?? scene?.background?.src ?? '';
+    const bgSrc = (bgSrcRaw && String(bgSrcRaw).trim()) ? String(bgSrcRaw).trim() : '';
+    const visibleBgLayers = getVisibleLevelBackgroundLayers(scene);
+    const visibleBgSrcs = visibleBgLayers.map((l) => l.src);
+    const albedoImageReady = !!(bgTexture?.image && bgTexture.image.width > 0 && bgTexture.image.height > 0);
+    // V14 multi-floor: never reuse SceneComposer._albedoTexture for the bus.
+    // Foundry can transiently show another level's composite in canvas.primary while URLs
+    // still match; TextureLoader reads the viewed level file directly.
+    //
+    // IMPORTANT: first populate() often runs before FloorStack is attached to MapShine,
+    // so `floors` is [] — still treat native multi-level scenes as multi-floor here.
+    const nativeLevelCount = scene?.levels?.size ?? 0;
+    const multiFloorV14 = !!(hasV14NativeLevels(scene) && (floors.length > 1 || nativeLevelCount > 1));
+    const reuseComposerAlbedo = !multiFloorV14
+      && albedoImageReady
+      && _composerAlbedoMatchesViewedBg(bgTexture, bgSrc);
+
+    if (reuseComposerAlbedo) {
+      this._addBackgroundImage(fd, bgTexture, 0, '__bg_image__');
+      if (visibleBgSrcs.length > 1) {
+        // Composer albedo only matches the viewed level texture; load other visible
+        // background layers explicitly so upper-floor views include lower levels.
+        this._loadVisibleBackgroundStack(visibleBgSrcs, fd, { skipFirst: true });
+      }
+    } else if (visibleBgSrcs.length > 0) {
+      this._loadVisibleBackgroundStack(visibleBgSrcs, fd);
     } else if (bgSrc) {
       this._loader.load(bgSrc, (tex) => {
         tex.colorSpace = window.THREE.SRGBColorSpace;
         tex.flipY = false;
         tex.needsUpdate = true;
-        this._addBackgroundImage(fd, tex);
+        tex.userData = tex.userData || {};
+        tex.userData.mapShineBackgroundSrc = bgSrc;
+        this._addBackgroundImage(fd, tex, 0, '__bg_image__');
         log.info('FloorRenderBus: bg image loaded via TextureLoader fallback');
+      }, undefined, (err) => {
+        log.warn('FloorRenderBus: TextureLoader background load failed:', bgSrc, err);
       });
+    } else if (bgTexture) {
+      let frames = 0;
+      const maxFrames = 120;
+      const tick = () => {
+        frames += 1;
+        try {
+          const img = bgTexture?.image;
+          if (img && img.width > 0 && img.height > 0) {
+            if (!this._tiles.has('__bg_image__')) {
+              this._addBackgroundImage(fd, bgTexture, 0, '__bg_image__');
+            }
+            return;
+          }
+        } catch (_) {}
+        if (frames < maxFrames) requestAnimationFrame(tick);
+        else log.warn('FloorRenderBus.populate: _albedoTexture never gained pixel dimensions (no bgSrc fallback)');
+      };
+      requestAnimationFrame(tick);
     }
 
     // Tile planes — read directly from Foundry, no TileManager dependency.
@@ -181,10 +282,6 @@ export class FloorRenderBus {
       const z = GROUND_Z + floorIndex * Z_PER_FLOOR;
       const tileId = tileDoc.id ?? tileDoc._id ?? `tile_${tileCount}`;
 
-      // Render order: ensures correct visual stacking within and across floors.
-      // Layout: [floor N regular 0..4999] [floor N overhead 5000..9999].
-      // Within each floor-group, tiles are ordered by Foundry sort (ascending),
-      // with a cap to preserve a stable token headroom at top of floor band.
       const isOverhead = this._isOverheadForBusTile(tileDoc, tileId);
       const roofShadowCaster = this._usesRoofShadowCaptureLayer(tileDoc, floorIndex, isOverhead);
       const cloudShadowBlockerEnabled = this._shouldTileBlockCloudShadows(tileDoc, roofShadowCaster);
@@ -196,15 +293,12 @@ export class FloorRenderBus {
       const sortWithinFloor = this._computeSortWithinFloor(tileDoc);
       let renderOrder;
       if (motionRenderAboveTokens) {
-        // Keep motion-forced tiles above same-floor tokens.
         const sort01 = Math.max(0, Math.min(1, sortWithinFloor / MAX_SORT_WITHIN_FLOOR_GROUP));
-        renderOrder = floorIndex * RENDER_ORDER_PER_FLOOR
-          + MOTION_ABOVE_TOKENS_OFFSET
-          + sort01 * 49;
+        renderOrder = motionAboveTokensOrder(floorIndex, Math.round(sort01 * 49));
+      } else if (isOverhead) {
+        renderOrder = tileOverheadOrder(floorIndex, sortWithinFloor);
       } else {
-        renderOrder = floorIndex * RENDER_ORDER_PER_FLOOR
-          + (isOverhead ? OVERHEAD_OFFSET : 0)
-          + sortWithinFloor;
+        renderOrder = tileAlbedoOrder(floorIndex, sortWithinFloor);
       }
 
       // Create mesh immediately with null texture (invisible until loaded).
@@ -358,6 +452,7 @@ export class FloorRenderBus {
           for (const m of mats) {
             if (!m) continue;
             try { m.map?.dispose?.(); } catch (_) {}
+            try { m.alphaMap?.dispose?.(); } catch (_) {}
             try { m.dispose?.(); } catch (_) {}
           }
         }
@@ -591,18 +686,13 @@ export class FloorRenderBus {
       if (!Number.isFinite(currentOpacity) || Math.abs(currentOpacity - targetOpacity) > 0.0005) {
         entry.material.opacity = targetOpacity;
       }
-      const desiredAlphaTest = (entry.floorIndex > 0 && targetOpacity >= 0.95)
-        ? UPPER_FLOOR_ALPHA_CUTOFF
-        : 0.0;
-      const desiredPremultipliedAlpha = entry.floorIndex > 0;
-      if (entry.material.premultipliedAlpha !== desiredPremultipliedAlpha) {
-        entry.material.premultipliedAlpha = desiredPremultipliedAlpha;
-        entry.material.needsUpdate = true;
-      }
-      if (Math.abs(Number(entry.material.alphaTest ?? 0) - desiredAlphaTest) > 0.0001) {
-        entry.material.alphaTest = desiredAlphaTest;
-        entry.material.needsUpdate = true;
-      }
+      // premultipliedAlpha and alphaTest are structural material properties that
+      // trigger a full shader recompile when changed (needsUpdate = true). They
+      // must only be set during tile creation/upsert, NOT per-frame. Flipping
+      // alphaTest between 0 and UPPER_FLOOR_ALPHA_CUTOFF each frame (when
+      // opacity oscillates near 0.95 during hover fades) causes visible flicker
+      // from repeated shader recompilation. The values are stable by floorIndex,
+      // which never changes for a given tile.
 
       // Shader overlays (e.g. FluidEffectV2) can carry their own tile-opacity
       // uniform path. Keep it in sync with the same runtime tile fade.
@@ -658,13 +748,11 @@ export class FloorRenderBus {
     let renderOrder;
     if (motionRenderAboveTokens) {
       const sort01 = Math.max(0, Math.min(1, sortWithinFloor / MAX_SORT_WITHIN_FLOOR_GROUP));
-      renderOrder = floorIndex * RENDER_ORDER_PER_FLOOR
-        + MOTION_ABOVE_TOKENS_OFFSET
-        + sort01 * 49;
+      renderOrder = motionAboveTokensOrder(floorIndex, Math.round(sort01 * 49));
+    } else if (isOverhead) {
+      renderOrder = tileOverheadOrder(floorIndex, sortWithinFloor);
     } else {
-      renderOrder = floorIndex * RENDER_ORDER_PER_FLOOR
-        + (isOverhead ? OVERHEAD_OFFSET : 0)
-        + sortWithinFloor;
+      renderOrder = tileAlbedoOrder(floorIndex, sortWithinFloor);
     }
 
     let entry = this._tiles.get(tileId);
@@ -837,11 +925,21 @@ export class FloorRenderBus {
    * @param {boolean} [options.includeHiddenAboveFloors=false] - When true, temporarily
    *   include tiles hidden only by floor slicing (`floorIndex > _visibleMaxFloorIndex`).
    *   Useful for cross-floor occlusion masks (e.g. cloud shadows under upper floors).
+   * @param {boolean} [options.roofCastersOnly=false] - When true, include only tiles
+   *   flagged as roof/overhead occluders (`entry.roofShadowCaster`). This avoids
+   *   full-screen occlusion from non-occluding upper-floor albedo layers.
+   * @param {boolean} [options.includeBackground=false] - When true, include
+   *   `__bg_image__*` entries using their stored floorIndex.
+   * @param {boolean} [options.backgroundOnly=false] - When true, include only
+   *   `__bg_image__*` entries (upper-level background alpha) and exclude tiles.
    */
   renderFloorMaskTo(renderer, camera, minFloorIndex, target, options = {}) {
     if (!this._initialized || !this._scene) return;
     const THREE = window.THREE;
     const includeHiddenAboveFloors = options?.includeHiddenAboveFloors === true;
+    const roofCastersOnly = options?.roofCastersOnly === true;
+    const includeBackground = options?.includeBackground === true;
+    const backgroundOnly = options?.backgroundOnly === true;
 
     // Save each tile's current visibility so we can restore it after.
     const savedVisibility = new Map();
@@ -851,10 +949,37 @@ export class FloorRenderBus {
       if (!node) continue;
       savedVisibility.set(tileId, node.visible);
 
-      // Background planes (__bg_*) should be hidden — they're not floor geometry.
-      // Effect overlays (__*) should also be hidden.
+      // Background planes are optional contributors. Internal effect overlays
+      // (`__*`, except `__bg_image__*` when includeBackground=true) stay hidden.
       if (tileId.startsWith('__')) {
-        node.visible = false;
+        const isBgImage = tileId.startsWith('__bg_image__');
+        if (!isBgImage || !includeBackground) {
+          node.visible = false;
+          continue;
+        }
+        const mat = entry.material;
+        const hasMap = !!mat?.map;
+        const isBelowFloor = entry.floorIndex < minFloorIndex;
+        if (isBelowFloor || !hasMap) {
+          node.visible = false;
+          continue;
+        }
+        node.visible = true;
+        savedMaterialState.set(tileId, {
+          transparent: mat.transparent,
+          opacity: mat.opacity,
+          color: mat.color ? mat.color.clone() : null,
+          map: mat.map,
+          depthTest: mat.depthTest,
+          depthWrite: mat.depthWrite,
+          blending: mat.blending,
+        });
+        if (mat.color) mat.color.set(1, 1, 1);
+        mat.transparent = true;
+        mat.depthTest = false;
+        mat.depthWrite = false;
+        mat.blending = THREE.NormalBlending;
+        mat.needsUpdate = true;
         continue;
       }
 
@@ -867,8 +992,9 @@ export class FloorRenderBus {
       const mat = entry.material;
       const hasMap = !!mat?.map;
       const isBelowFloor = entry.floorIndex < minFloorIndex;
+      const includeAsOccluder = !roofCastersOnly || !!entry.roofShadowCaster;
 
-      if (isBelowFloor) {
+      if (backgroundOnly || isBelowFloor || !includeAsOccluder) {
         // Below minFloorIndex: do not render into the occluder mask.
         node.visible = false;
       } else {
@@ -965,6 +1091,10 @@ export class FloorRenderBus {
    * @param {import('three').WebGLRenderTarget} target - Render target
    * @param {object} [options]
    * @param {boolean} [options.includeBackground=true] - Whether to include __bg_* background planes
+   * @param {boolean} [options.filterBackgroundByFloor=false] - When true, __bg_image__* planes
+   *   are culled by `floorIndex` vs `[minFloorIndex,maxFloorIndex]` and `__bg_solid__` is
+   *   always skipped so per-level slices preserve authored transparency holes for
+   *   LevelCompositePass (solid underlay would force blended alpha to 1).
    * @param {boolean} [options.clearBeforeRender=true] - Whether to clear target before rendering this range
    * @param {number} [options.clearAlpha=1] - Clear alpha (0 for transparent, 1 for opaque)
    * @param {number} [options.clearColor=0x000000] - Clear colour hex
@@ -977,6 +1107,7 @@ export class FloorRenderBus {
       clearBeforeRender = true,
       clearAlpha = 1,
       clearColor = 0x000000,
+      filterBackgroundByFloor = false,
     } = options;
 
     // Save each tile's current visibility so we can restore it after.
@@ -988,9 +1119,27 @@ export class FloorRenderBus {
       savedVisibility.set(tileId, wasVisible);
 
       if (tileId.startsWith('__')) {
-        // Background planes (__bg_*): visibility follows includeBackground only.
-        // Do not use "__" for floor-scoped effect overlays — they would skip inRange.
-        node.visible = wasVisible && includeBackground;
+        if (tileId === '__bg_solid__') {
+          // Per-level pipeline: include the opaque world-fill on floor 0 only.
+          // Floor 0 needs it so padding areas are not transparent black. Upper
+          // floors (minFloorIndex > 0) must NOT draw it — otherwise holes in
+          // upper-floor art (srcA=0) composite over opaque solid (dstA=1) and
+          // blended alpha becomes 1 everywhere, hiding lower-slice content.
+          const showSolid = wasVisible && includeBackground
+            && (!filterBackgroundByFloor || minFloorIndex <= 0);
+          node.visible = showSolid;
+          continue;
+        }
+        if (filterBackgroundByFloor && tileId.startsWith('__bg_image__')) {
+          // Per-level pipeline: only include background images whose floorIndex
+          // falls within the requested range.
+          const bgFloorIdx = Number(entry.floorIndex);
+          const inRange = Number.isFinite(bgFloorIdx) && bgFloorIdx >= minFloorIndex && bgFloorIdx <= maxFloorIndex;
+          node.visible = wasVisible && inRange;
+        } else {
+          // Legacy path: background planes follow includeBackground only.
+          node.visible = wasVisible && includeBackground;
+        }
         continue;
       }
 
@@ -1163,9 +1312,9 @@ export class FloorRenderBus {
 
   _isOverheadForBusTile(tileDoc, tileId = null) {
     // Keep in sync with TileManager naturalOverhead / levelRole overrides so V2
-    // bus renderOrder bands (OVERHEAD_OFFSET) match sprite-side classification.
-    // Otherwise ceiling-tagged tiles stay in the sub-5000 band and door meshes
-    // at OVERHEAD_OFFSET-2 draw on top of roofs.
+    // bus renderOrder bands (FLOOR_OVERHEAD) match sprite-side classification.
+    // Otherwise ceiling-tagged tiles stay in the albedo band and door meshes
+    // draw on top of roofs.
     const msaRole = this._getMsaLevelRole(tileDoc);
     if (msaRole === 'ceiling') return true;
     if (msaRole === 'floor') return false;
@@ -1243,7 +1392,7 @@ export class FloorRenderBus {
    * @param {import('three').Texture} texture
    * @private
    */
-  _addBackgroundImage(fd, texture) {
+  _addBackgroundImage(fd, texture, zIndex = 0, key = '__bg_image__') {
     const THREE = window.THREE;
     const sceneW = fd.sceneWidth ?? fd.width ?? 0;
     const sceneH = fd.sceneHeight ?? fd.height ?? 0;
@@ -1263,9 +1412,14 @@ export class FloorRenderBus {
 
     const mat = new THREE.MeshBasicMaterial({
       map: texture,
-      transparent: false,
+      // V14 visible-level stacks rely on texture alpha so upper level art can
+      // reveal lower levels through cutouts/openings.
+      transparent: true,
       depthTest: false,
       depthWrite: false,
+      // Rely on authored albedo alpha only (Foundry level alphaThreshold is not
+      // applied here). alphaTest would fight RGBA holes for per-level composite.
+      alphaTest: 0,
       // DoubleSide because scale.y=-1 reverses face winding.
       side: THREE.DoubleSide,
     });
@@ -1273,13 +1427,99 @@ export class FloorRenderBus {
     const mesh = new THREE.Mesh(geom, mat);
     mesh.name = 'BusBg_image';
     mesh.frustumCulled = false;
-    mesh.position.set(centerX, centerY, GROUND_Z - 1);
+    mesh.position.set(centerX, centerY, GROUND_Z - 1 + (Number(zIndex) || 0) * 0.01);
     // Negative Y scale to flip the image right-side up (matches basePlaneMesh).
     mesh.scale.set(1, -1, 1);
     this._scene.add(mesh);
     // Store in _tiles so clear() disposes it and setVisibleFloors always shows it.
-    this._tiles.set('__bg_image__', { mesh, material: mat, floorIndex: 0 });
-    log.info(`FloorRenderBus: bg image plane (${sceneW}x${sceneH} at ${centerX},${centerY})`);
+    // Preserve stack order as floor index so floor-aware mask passes (water occluder)
+    // can include only upper visible background layers.
+    const bgFloorIndex = Number.isFinite(Number(zIndex)) ? Number(zIndex) : 0;
+    this._tiles.set(key, { mesh, material: mat, floorIndex: bgFloorIndex });
+    log.info(`FloorRenderBus: bg image plane [${key}] (${sceneW}x${sceneH} at ${centerX},${centerY})`);
+  }
+
+  /**
+   * Replace the background image texture with a new one (e.g. when switching
+   * between V14 levels that have different per-level backgrounds).
+   *
+   * @param {string} src - New image path to load
+   * @param {object} fd  - foundrySceneData (for dimensions)
+   */
+  swapBackgroundImage(src, fd) {
+    if (!this._initialized || !fd) return;
+    const scene = globalThis.canvas?.scene ?? null;
+    const visibleLayers = getVisibleLevelBackgroundLayers(scene);
+    const stack = visibleLayers.map((l) => l.src);
+    if (stack.length > 0) {
+      this.swapVisibleLevelBackgroundImages(stack, fd);
+      return;
+    }
+    if (!src) return;
+    this.swapVisibleLevelBackgroundImages([src], fd);
+  }
+
+  /**
+   * Replace the entire visible-level background stack.
+   *
+   * @param {string[]} srcs
+   * @param {object} fd
+   */
+  swapVisibleLevelBackgroundImages(srcs, fd, options = {}) {
+    if (!this._initialized || !fd || !Array.isArray(srcs) || srcs.length === 0) return;
+    this._removeBackgroundImageEntries();
+    this._loadVisibleBackgroundStack(srcs, fd, options);
+  }
+
+  /**
+   * Remove all background image entries (`__bg_image__*`).
+   * @private
+   */
+  _removeBackgroundImageEntries() {
+    const keys = [];
+    for (const key of this._tiles.keys()) {
+      if (String(key).startsWith('__bg_image__')) keys.push(String(key));
+    }
+    for (const key of keys) {
+      const existing = this._tiles.get(key);
+      if (existing?.mesh) {
+        existing.mesh.removeFromParent();
+        existing.mesh.geometry?.dispose?.();
+        existing.material?.dispose?.();
+      }
+      this._tiles.delete(key);
+    }
+  }
+
+  /**
+   * Load and add all visible background layers in order.
+   * @param {string[]} srcs
+   * @param {object} fd
+   * @param {{skipFirst?: boolean}} [options]
+   * @private
+   */
+  _loadVisibleBackgroundStack(srcs, fd, options = {}) {
+    const list = Array.isArray(srcs) ? srcs : [];
+    const { skipFirst = false } = options;
+    if (!list.length) return;
+    for (let i = 0; i < list.length; i += 1) {
+      if (skipFirst && i === 0) continue;
+      const raw = list[i];
+      const src = (typeof raw === 'string') ? raw.trim() : '';
+      if (!src) continue;
+      const key = i === 0 ? '__bg_image__' : `__bg_image__${i}`;
+      this._loader.load(src, (tex) => {
+        tex.colorSpace = window.THREE.SRGBColorSpace;
+        tex.flipY = false;
+        tex.needsUpdate = true;
+        tex.userData = tex.userData || {};
+        tex.userData.mapShineBackgroundSrc = src;
+        this._addBackgroundImage(fd, tex, i, key);
+        this._applyTileVisibility();
+      }, undefined, (err) => {
+        log.warn('FloorRenderBus: visible background layer load failed:', { src, index: i }, err);
+      });
+    }
   }
 
   /**
@@ -1477,12 +1717,47 @@ export class FloorRenderBus {
       }
     }
 
+    const v14Idx = resolveV14NativeDocFloorIndexMin(tileDoc, globalThis.canvas?.scene);
+    if (v14Idx !== null) return v14Idx;
+
     const elev = Number.isFinite(Number(tileDoc?.elevation)) ? Number(tileDoc.elevation) : 0;
     for (let i = 0; i < floors.length; i++) {
       const f = floors[i];
       if (elev >= f.elevationMin && elev <= f.elevationMax) return i;
     }
     return 0;
+  }
+
+  // ── Layer Order Diagnostics ────────────────────────────────────────────────
+
+  /**
+   * Dump all bus scene children sorted by renderOrder with decoded role info.
+   * Call from console: `MapShine.renderBus.dumpLayerOrder()`
+   * @returns {Array<{name: string, renderOrder: number, floor: number, role: string, intraOffset: number, visible: boolean}>}
+   */
+  dumpLayerOrder() {
+    if (!this._scene) {
+      log.warn('dumpLayerOrder: no scene');
+      return [];
+    }
+    const entries = [];
+    this._scene.traverse((obj) => {
+      if (obj.renderOrder === undefined) return;
+      const decoded = formatRenderOrder(obj.renderOrder);
+      entries.push({
+        name: obj.name || obj.uuid?.slice(0, 8) || '(anon)',
+        renderOrder: obj.renderOrder,
+        decoded,
+        visible: obj.visible,
+        layerMask: obj.layers?.mask,
+      });
+    });
+    entries.sort((a, b) => a.renderOrder - b.renderOrder);
+    const lines = entries.map(e =>
+      `${String(e.renderOrder).padStart(8)} | ${e.decoded} | vis=${e.visible} | layers=0x${(e.layerMask ?? 0).toString(16)} | ${e.name}`
+    );
+    log.info(`Layer order dump (${entries.length} objects):\n` + lines.join('\n'));
+    return entries;
   }
 
 }

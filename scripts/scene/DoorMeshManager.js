@@ -18,6 +18,7 @@ import { createLogger } from '../core/log.js';
 import { readWallHeightFlags } from '../foundry/levels-scene-flags.js';
 import Coordinates from '../utils/coordinates.js';
 import { weatherController } from '../core/WeatherController.js';
+import { effectUnderOverheadOrder, GROUND_Z, Z_PER_FLOOR } from '../compositor-v2/LayerOrderPolicy.js';
 
 const log = createLogger('DoorMeshManager');
 
@@ -48,15 +49,9 @@ function normalizeDoorAnimationType(raw) {
   return s;
 }
 
-// In V2, FloorRenderBus uses per-floor render-order bands.
-// Keep doors above regular floor albedo but BELOW overhead tiles.
-const RENDER_ORDER_PER_FLOOR = 10000;
-const OVERHEAD_OFFSET = 5000;
-const DOOR_RENDER_ORDER_WITHIN_FLOOR = OVERHEAD_OFFSET - 2;
 const DOOR_BASE_Z_V1 = 1.0;
-// Match FloorRenderBus GROUND_Z + small lift so doors sit just above that floor's tile plane.
-const BUS_GROUND_Z = 1000;
-const BUS_Z_PER_FLOOR = 1;
+const BUS_GROUND_Z = GROUND_Z;
+const BUS_Z_PER_FLOOR = Z_PER_FLOOR;
 const DOOR_Z_LIFT_ABOVE_FLOOR = 4;
 
 /**
@@ -110,7 +105,7 @@ function resolveDoorFloorIndex(wallDoc) {
 function getDoorRenderOrder(wallDoc) {
   const floorIndex = resolveDoorFloorIndex(wallDoc);
   const safeFloorIndex = Number.isFinite(floorIndex) && floorIndex >= 0 ? floorIndex : 0;
-  return safeFloorIndex * RENDER_ORDER_PER_FLOOR + DOOR_RENDER_ORDER_WITHIN_FLOOR;
+  return effectUnderOverheadOrder(safeFloorIndex, 2000);
 }
 
 /**
@@ -570,6 +565,23 @@ export class DoorMeshManager {
     })]);
   }
   
+  /**
+   * Rebuild door meshes after Foundry replaces wall placeables (e.g. V14 same-scene level redraw).
+   * Hooks stay registered; mesh geometry is recreated from current {@link canvas.walls}.
+   * @public
+   */
+  resyncFromCanvas() {
+    for (const meshSet of this.doorMeshes.values()) {
+      for (const doorMesh of meshSet) {
+        try {
+          doorMesh.dispose();
+        } catch (_) {}
+      }
+    }
+    this.doorMeshes.clear();
+    this._syncAllDoors();
+  }
+
   /**
    * Sync all existing doors from the scene
    */

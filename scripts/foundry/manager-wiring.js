@@ -57,7 +57,7 @@ export function exposeGlobals(mapShine, refs) {
   // Expose managers directly from refs
   const MANAGER_EXPOSURES = [
     'sceneComposer', 'effectComposer', 'cameraFollower', 'pixiInputBridge',
-    'cinematicCameraManager', 'cameraPanel', 'levelsAuthoring', 'levelNavigatorOverlay',
+    'cinematicCameraManager', 'cameraPanel', 'levelsAuthoring',
     'tokenManager', 'tokenMovementManager', 'tileManager', 'wallManager', 'doorMeshManager',
     'drawingManager', 'enhancedLightInspector', 'interactionManager',
     'mouseStateManager',

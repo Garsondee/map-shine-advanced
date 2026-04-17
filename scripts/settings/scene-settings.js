@@ -730,18 +730,16 @@ export function registerSettings() {
   });
 
   game.settings.register(FLAG_NAMESPACE, LEVELS_COMPATIBILITY_MODE_SETTING, {
-    name: 'Levels Compatibility Mode',
-    hint: 'Controls how Map Shine handles Levels data/wrappers. Import-only is recommended for stable gameplay authority.',
+    name: 'Levels Compatibility Mode (V14: deprecated)',
+    hint: 'V14 uses native Level documents. This setting is retained for migration but always resolves to Off.',
     scope: 'world',
-    config: true,
+    config: false,
     restricted: true,
     type: String,
     choices: {
-      [LEVELS_COMPATIBILITY_MODES.OFF]: 'Off (ignore Levels import data)',
-      [LEVELS_COMPATIBILITY_MODES.IMPORT_ONLY]: 'Import-Only (recommended)',
-      [LEVELS_COMPATIBILITY_MODES.DIAGNOSTIC_INTEROP]: 'Diagnostic Interop (migration debugging)',
+      [LEVELS_COMPATIBILITY_MODES.OFF]: 'Off (V14 native)',
     },
-    default: LEVELS_COMPATIBILITY_MODES.IMPORT_ONLY,
+    default: LEVELS_COMPATIBILITY_MODES.OFF,
   });
 
   game.settings.register(FLAG_NAMESPACE, LEVELS_EDITOR_V2_SETTING, {

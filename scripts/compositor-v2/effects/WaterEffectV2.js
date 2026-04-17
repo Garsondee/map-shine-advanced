@@ -25,20 +25,35 @@
  *   - No token mask / cloud shadow / outdoors mask
  *   - No floor transition locks (bus visibility handles floor isolation)
  *
+ * Multi-floor: slices without local `_Water` may **borrow** the nearest lower
+ * floor's packed mask for that slice's post pass (`uCrossSliceWaterData`), gated
+ * by slice albedo alpha so river SDF does not run on opaque upper tiles.
+ *
  * @module compositor-v2/effects/WaterEffectV2
  */
 
 import { createLogger } from '../../core/log.js';
 import { weatherController } from '../../core/WeatherController.js';
 import { probeMaskFile } from '../../assets/loader.js';
-import { tileHasLevelsRange, readTileLevelsFlags } from '../../foundry/levels-scene-flags.js';
+import {
+  tileHasLevelsRange,
+  readTileLevelsFlags,
+  getViewedLevelBackgroundSrc,
+  getVisibleLevelBackgroundLayers,
+} from '../../foundry/levels-scene-flags.js';
 import { DepthShaderChunks } from '../../effects/DepthShaderChunks.js';
 import { VisionSDF } from '../../vision/VisionSDF.js';
 import { getVertexShader, getFragmentShader, getFragmentShaderSafe } from './water-shader.js';
+import { safeBuildShaderMaterial } from '../../core/diagnostics/SafeShaderBuilder.js';
+import { getWaterLayerBisectState } from '../../ui/water-layering-bisect-dialog.js';
 
 const log = createLogger('WaterEffectV2');
 
 const WATER_MASK_FORMATS = ['webp', 'png', 'jpg', 'jpeg'];
+
+// Heavy fragment shader: short timeouts yield false "failures" under GPU load.
+const WATER_SHADER_COMPILE_TIMEOUT_MS = 30000;
+const WATER_SHADER_COMPILE_MAX_ATTEMPTS = 4;
 
 // Bitmask flags for conditional shader defines.
 const DEF_FOAM_FLECKS = 1 << 0;
@@ -118,6 +133,18 @@ export class WaterEffectV2 {
     this._blitCopyQuad = null;
     /** @type {number} Cached 0/1 for USE_WATER_SPEC_BLOOM_RT define */
     this._lastBloomMrtModeKey = -1;
+
+    // Deferred shader compilation state
+    /** @type {boolean} True when heavy shader has been compiled */
+    this._realShaderCompiled = false;
+    /** @type {boolean} True when real shader compilation is in progress */
+    this._shaderCompilePending = false;
+    /** @type {Promise<void>|null} Promise tracking async shader readiness */
+    this._shaderReadyPromise = null;
+    /** @type {number} `performance.now()` — delay starting another compile after a timeout. */
+    this._waterCompileRetryAfterMs = 0;
+    /** @type {number} Consecutive timeout/fallback builds (reset on real success). */
+    this._waterShaderCompileFailures = 0;
 
     // ── Effect parameters ────────────────────────────────────────────────
     this.params = {
@@ -501,6 +528,13 @@ export class WaterEffectV2 {
     /** @type {number} */
     this._activeFloorIndex = 0;
 
+    /**
+     * Per-level pipeline override: when set (>= 0), render() uses this floor
+     * index for water data lookup instead of `_activeFloorIndex`.
+     * @type {number}
+     */
+    this._perLevelOverride = -1;
+
     // ── Discovered water tiles (populated in populate()) ─────────────────
     /** @type {Array<{tileId: string, basePath: string, floorIndex: number, maskPath: string}>} */
     this._waterTiles = [];
@@ -564,6 +598,8 @@ export class WaterEffectV2 {
     this._cachedAdvectionDirCos = 1.0;
     this._cachedAdvectionDirSin = 0.0;
     // _lastTimeValue removed: update() now uses TimeManager timeInfo directly.
+    /** @type {number|null} Last elapsed value used to derive motion dt. */
+    this._lastAnimElapsed = null;
     this._shaderTime = 0.0;
 
     // ── Cached sun direction ─────────────────────────────────────────────
@@ -609,6 +645,173 @@ export class WaterEffectV2 {
     // and storm 3x3 nested loops that trigger GPU compilation TDR on some systems.
     log.info('WaterEffectV2: using safe shader (rain loops disabled to prevent GPU hang)');
     return getFragmentShaderSafe();
+  }
+
+  /**
+   * Creates a minimal passthrough shader material for deferred compilation.
+   * This ~10-line shader compiles instantly vs the ~2400-line real shader.
+   * @param {object} THREE
+   * @returns {THREE.ShaderMaterial}
+   * @private
+   */
+  _createMinimalPassthroughMaterial(THREE) {
+    const passthroughVert = /* glsl */`
+      varying vec2 vUv;
+      void main() {
+        vUv = uv;
+        gl_Position = vec4(position, 1.0);
+      }
+    `;
+    const passthroughFrag = /* glsl */`
+      uniform sampler2D tDiffuse;
+      uniform float uWaterEnabled;
+      varying vec2 vUv;
+      void main() {
+        // Minimal passthrough: just copy input when water disabled
+        // Real shader compilation happens on first render() via _compileRealShaderNow
+        gl_FragColor = texture2D(tDiffuse, vUv);
+      }
+    `;
+    const uniforms = {
+      tDiffuse: { value: null },
+      uWaterEnabled: { value: 0.0 },
+    };
+    return new THREE.ShaderMaterial({
+      uniforms,
+      vertexShader: passthroughVert,
+      fragmentShader: passthroughFrag,
+      depthTest: false,
+      depthWrite: false,
+      transparent: false,
+    });
+  }
+
+  /**
+   * Compile the real heavy water shader on first render frame.
+   * This is where the ~2400-line GLSL compilation happens, not during init.
+   * 
+   * Uses SafeShaderBuilder with a long wall clock (see WATER_SHADER_COMPILE_TIMEOUT_MS).
+   * On timeout the passthrough material is kept and compile is retried with backoff
+   * instead of swapping in a minimal fallback that cannot run the water pass.
+   *
+   * @param {object} THREE
+   * @param {THREE.WebGLRenderer} renderer
+   * @private
+   */
+  async _compileRealShaderNow(THREE, renderer) {
+    if (this._realShaderCompiled || this._shaderCompilePending) return;
+    this._shaderCompilePending = true;
+
+    const _compileStart = performance?.now?.() ?? Date.now();
+    const attempt = this._waterShaderCompileFailures + 1;
+    const timeoutMs = Math.min(
+      90000,
+      WATER_SHADER_COMPILE_TIMEOUT_MS + (attempt - 1) * 15000,
+    );
+    log.warn(
+      `WaterEffectV2: compiling real shader (attempt ${attempt}/${WATER_SHADER_COMPILE_MAX_ATTEMPTS}, timeoutMs=${timeoutMs})...`,
+    );
+
+    try {
+      const fragSrc = this._getSafeWaterShader();
+      const defines = this._pendingDefines || {};
+
+      // Build full uniforms for real shader
+      const realUniforms = this._buildUniforms(THREE);
+
+      const result = await safeBuildShaderMaterial(
+        THREE,
+        'WaterEffectV2',
+        {
+          uniforms: realUniforms,
+          vertexShader: getVertexShader(),
+          fragmentShader: fragSrc,
+          defines,
+          depthTest: false,
+          depthWrite: false,
+          transparent: false,
+          extensions: { shaderTextureLOD: true },
+        },
+        {
+          timeoutMs,
+          fallbackParams: {
+            uniforms: { tDiffuse: { value: null } },
+            vertexShader: `
+              varying vec2 vUv;
+              void main() { vUv = uv; gl_Position = vec4(position, 1.0); }
+            `,
+            fragmentShader: `
+              uniform sampler2D tDiffuse;
+              varying vec2 vUv;
+              void main() { gl_FragColor = texture2D(tDiffuse, vUv); }
+            `,
+            depthTest: false,
+            depthWrite: false,
+            transparent: false,
+          },
+        }
+      );
+
+      const _compileEnd = performance?.now?.() ?? Date.now();
+      const duration = _compileEnd - _compileStart;
+
+      if (result.usedFallback) {
+        try { result.material?.dispose?.(); } catch (_) {}
+        this._shaderCompilePending = false;
+        this._shaderReadyPromise = null;
+        this._realShaderCompiled = false;
+        this._waterShaderCompileFailures += 1;
+        const now = performance?.now?.() ?? Date.now();
+        const backoff = Math.min(4000, 250 + this._waterShaderCompileFailures * 350);
+        this._waterCompileRetryAfterMs = now + backoff;
+        if (this._waterShaderCompileFailures >= WATER_SHADER_COMPILE_MAX_ATTEMPTS) {
+          log.error(
+            `[${duration.toFixed(1)}ms] WaterEffectV2: shader compile failed after ${WATER_SHADER_COMPILE_MAX_ATTEMPTS} attempts — disabling water pass`,
+          );
+          this.setEnabled(false);
+        } else {
+          log.warn(
+            `[${duration.toFixed(1)}ms] WaterEffectV2: compile timeout/error — retry in ${backoff.toFixed(0)}ms (failure ${this._waterShaderCompileFailures}/${WATER_SHADER_COMPILE_MAX_ATTEMPTS})`,
+          );
+        }
+        return;
+      }
+
+      const oldMaterial = this._composeMaterial;
+      this._composeMaterial = result.material;
+      this._composeQuad.material = result.material;
+
+      if (oldMaterial?.uniforms?.tDiffuse?.value) {
+        result.material.uniforms.tDiffuse.value = oldMaterial.uniforms.tDiffuse.value;
+      }
+
+      result.material.toneMapped = false;
+      oldMaterial?.dispose?.();
+
+      this._realShaderCompiled = true;
+      this._shaderCompilePending = false;
+      this._shaderReadyPromise = null;
+      this._waterShaderCompileFailures = 0;
+      this._waterCompileRetryAfterMs = 0;
+
+      try {
+        this._syncGlobalWaterBindingsFromViewedFloor();
+      } catch (_) {}
+
+      log.warn(`[${duration.toFixed(1)}ms] WaterEffectV2: real shader compiled successfully`);
+    } catch (err) {
+      this._shaderCompilePending = false;
+      this._shaderReadyPromise = null;
+      this._realShaderCompiled = false;
+      this._waterShaderCompileFailures += 1;
+      const now = performance?.now?.() ?? Date.now();
+      const backoff = Math.min(4000, 250 + this._waterShaderCompileFailures * 350);
+      this._waterCompileRetryAfterMs = now + backoff;
+      log.error('WaterEffectV2: unexpected error during shader compilation:', err);
+      if (this._waterShaderCompileFailures >= WATER_SHADER_COMPILE_MAX_ATTEMPTS) {
+        this.setEnabled(false);
+      }
+    }
   }
 
   _buildUniforms(THREE) {
@@ -1475,26 +1678,13 @@ static getControlSchema() {
     const defines = {};
     if (this.params.foamFlecksEnabled) defines.USE_FOAM_FLECKS = 1;
     if (this.params.refractionMultiTapEnabled) defines.USE_WATER_REFRACTION_MULTITAP = 1;
-    const fragSrc = this._getSafeWaterShader();
+    // DEFERRED: Create a minimal passthrough material now; heavy shader compiles on first render.
+    // This prevents loading hangs caused by ~2400-line GLSL compilation during init.
+    this._composeMaterial = this._createMinimalPassthroughMaterial(THREE);
+    this._realShaderCompiled = false;
+    this._pendingDefines = defines; // Store for real shader creation
 
-    // Create shader material with all uniforms
-    const _matStartMs = performance?.now?.() ?? Date.now();
-    this._composeMaterial = new THREE.ShaderMaterial({
-      uniforms: this._buildUniforms(THREE),
-      vertexShader: getVertexShader(),
-      fragmentShader: fragSrc,
-      defines,
-      depthTest: false,
-      depthWrite: false,
-      transparent: false,
-      // Required for GL_EXT_shader_texture_lod / texture2DLodEXT in water-shader.js (noise map).
-      extensions: { shaderTextureLOD: true },
-    });
-    const _matEndMs = performance?.now?.() ?? Date.now();
-    try {
-      log.warn(`[crisis] WaterEffectV2 ShaderMaterial created in ${(_matEndMs - _matStartMs).toFixed?.(1) ?? (_matEndMs - _matStartMs)}ms`);
-    } catch (_) {}
-    this._composeMaterial.toneMapped = false;
+    log.info('WaterEffectV2: using minimal passthrough shader (deferred heavy shader compilation)');
 
     // Fullscreen quad
     this._composeScene = new THREE.Scene();
@@ -1580,11 +1770,19 @@ static getControlSchema() {
     const sceneW = sceneRect?.width ?? sceneRect?.sceneWidth ?? 1;
     const sceneH = sceneRect?.height ?? sceneRect?.sceneHeight ?? 1;
 
-    // ── Step 0: Discover background _Water mask (if present) ─────────────
-    const bgSrc = canvas?.scene?.background?.src;
-    if (bgSrc) {
+    // ── Step 0: Discover background _Water mask(s) (if present) ──────────
+    // IMPORTANT: do not only check the currently viewed level background.
+    // Upper-floor views still need lower-floor background water (fallback render).
+    const bgLayers = getVisibleLevelBackgroundLayers(canvas?.scene);
+    const bgSrcCandidates = bgLayers.length
+      ? bgLayers.map((l) => String(l?.src || '').trim()).filter(Boolean)
+      : [getViewedLevelBackgroundSrc(canvas?.scene) ?? canvas?.scene?.background?.src].filter(Boolean);
+    const seenBgBasePaths = new Set();
+    for (const bgSrc of bgSrcCandidates) {
       const dotIdx = bgSrc.lastIndexOf('.');
       const bgBasePath = dotIdx > 0 ? bgSrc.substring(0, dotIdx) : bgSrc;
+      if (!bgBasePath || seenBgBasePaths.has(bgBasePath)) continue;
+      seenBgBasePaths.add(bgBasePath);
 
       let maskPath = null;
       const waterResult = await probeMaskFile(bgBasePath, '_Water');
@@ -1598,6 +1796,8 @@ static getControlSchema() {
         this._waterTiles.push({
           tileId: '__bg_image__',
           basePath: bgBasePath,
+          // Background _Water masks are scene-wide planes; assign floor 0 so
+          // upper-floor fallback keeps ground water visible when appropriate.
           floorIndex: 0,
           maskPath,
           // Synthetic tileDoc so _compositeFloorMask can treat background like a tile.
@@ -1635,7 +1835,10 @@ static getControlSchema() {
 
     if (this._waterTiles.length === 0) {
       log.warn('WaterEffectV2 populate: no _Water masks found in any tile. Checked', tileDocs.length, 'tiles.');
-      this.setEnabled(false);
+      // Do not auto-disable runtime gate on a no-data pass.
+      // Discovery can be transient during load races; disabling here leaves the
+      // effect stuck OFF even when data appears later.
+      this._hasAnyWaterData = false;
       return;
     }
     log.info(`WaterEffectV2 populate: found ${this._waterTiles.length} _Water mask(s)`, this._waterTiles.map(t => t.maskPath));
@@ -1674,14 +1877,22 @@ static getControlSchema() {
     // Let the shared canvas be GC'd after all floors are processed
     sharedCanvas = null;
 
-    // ── Step 4: Activate the current floor's water data ──────────────────
+    // ── Step 4: Activate water data for the viewed floor (with fallback) ─
+    // If the viewed floor has no water, keep rendering the nearest lower floor
+    // that does. This preserves ground-floor water when the user moves upstairs.
     const activeFloor = window.MapShine?.floorStack?.getActiveFloor();
-    this._activeFloorIndex = activeFloor?.index ?? 0;
-    this._applyFloorWaterData(this._activeFloorIndex);
-    this._hasAnyWaterData = this._floorWater.size > 0;
-    if (!this._hasAnyWaterData) {
-      this.setEnabled(false);
+    const viewedFloorIndex = Number.isFinite(Number(activeFloor?.index))
+      ? Number(activeFloor.index)
+      : 0;
+    const resolvedWaterFloor = this._resolveWaterFloorForView(viewedFloorIndex);
+    this._activeFloorIndex = resolvedWaterFloor >= 0 ? resolvedWaterFloor : viewedFloorIndex;
+    if (resolvedWaterFloor >= 0) this._applyFloorWaterData(resolvedWaterFloor);
+    else if (this._composeMaterial?.uniforms?.uHasWaterData && this._composeMaterial?.uniforms?.uHasWaterRawMask) {
+      this._composeMaterial.uniforms.uHasWaterData.value = 0.0;
+      this._composeMaterial.uniforms.uHasWaterRawMask.value = 0.0;
     }
+    this._hasAnyWaterData = this._floorWater.size > 0;
+    // Keep runtime enabled state stable; render path already checks uniforms/data.
 
     log.info(`WaterEffectV2 populated: ${this._waterTiles.length} tile(s), ${this._floorWater.size} floor(s)`);
   }
@@ -2242,6 +2453,9 @@ static getControlSchema() {
   _applyFloorWaterData(floorIndex) {
     if (!this._composeMaterial) return;
     const u = this._composeMaterial.uniforms;
+    if (!u?.tWaterData || !u?.uHasWaterData || !u?.tWaterRawMask || !u?.uHasWaterRawMask) {
+      return;
+    }
     const floorData = this._floorWater.get(floorIndex);
 
     // floorData = { waterData: { texture, rawMaskTexture, hasWater, ... }, rawMask }
@@ -2332,6 +2546,7 @@ static getControlSchema() {
   update(timeInfo) {
     if (!this._initialized || !this._composeMaterial) return;
     const u = this._composeMaterial.uniforms;
+    if (!this._realShaderCompiled || !u?.uTime) return;
     const p = this.params;
     // Derive pause from both TimeManager and Foundry global state.
     // This keeps water frozen even if pause propagation to TimeManager is delayed.
@@ -2348,10 +2563,22 @@ static getControlSchema() {
     }
     const elapsed = this._shaderTime;
 
-    // TimeManager already clamps delta to 100ms; apply an additional 1/20s clamp here
-    // to guard against large post-stall jumps in advection/wind integration.
-    const baseDt = Math.min(Math.max(0.0, Number(timeInfo?.delta) || 0.0), 1.0 / 20.0);
-    const dt = paused ? 0.0 : baseDt;
+    // Derive motion dt from elapsed time (authoritative clock) instead of relying
+    // purely on frame delta. This avoids a class of failures where elapsed/uTime
+    // advances (caustics animate) but delta is throttled/near-zero so wave/foam
+    // advection appears frozen.
+    let dt = 0.0;
+    if (!paused) {
+      const prevElapsed = Number(this._lastAnimElapsed);
+      if (Number.isFinite(prevElapsed)) {
+        dt = Math.max(0.0, elapsed - prevElapsed);
+      } else {
+        dt = Math.max(0.0, Number(timeInfo?.motionDelta ?? timeInfo?.delta) || 0.0);
+      }
+      // Clamp to avoid huge jumps after tab stall/context hiccup.
+      dt = Math.min(dt, 1.0 / 20.0);
+    }
+    this._lastAnimElapsed = elapsed;
 
     // Runtime signature: log once on first update with key Wind & Flow params.
     try {
@@ -2853,11 +3080,17 @@ static getControlSchema() {
     if (u.uCausticsBrightnessGamma) u.uCausticsBrightnessGamma.value = Number.isFinite(p.causticsBrightnessGamma) ? Math.max(0.01, p.causticsBrightnessGamma) : 1.0;
 
     // Shore Foam (Advanced)
+    const sceneDarkness = globalThis.canvas?.environment?.darknessLevel ?? 0;
     u.uShoreFoamEnabled.value = (p.shoreFoamEnabled ?? true) ? 1.0 : 0.0;
     u.uShoreFoamStrength.value = safeNum(p.shoreFoamStrength, 0.8);
     u.uShoreFoamThreshold.value = safeNum(p.shoreFoamThreshold, 0.28);
     u.uShoreFoamScale.value = safeNum(p.shoreFoamScale, 20.0);
     u.uShoreFoamSpeed.value = safeNum(p.shoreFoamSpeed, 0.1);
+    
+    // Modulate foam brightness by scene darkness so it doesn't "glow" at night
+    const shoreBrightnessBase = safeNum(p.shoreFoamBrightness, 0.6);
+    u.uShoreFoamBrightness.value = shoreBrightnessBase * Math.max(0.1, 1.0 - (sceneDarkness * safeNum(p.shoreFoamDarknessResponse, 0.78)));
+
     const shoreFoamColor = normalizeRgb01(p.shoreFoamColor, { r: 1.0, g: 1.0, b: 1.0 });
     u.uShoreFoamColor.value.set(shoreFoamColor.r, shoreFoamColor.g, shoreFoamColor.b);
     const shoreFoamTint = normalizeRgb01(p.shoreFoamTint, { r: 0.95, g: 0.97, b: 0.9 });
@@ -2865,13 +3098,15 @@ static getControlSchema() {
     u.uShoreFoamTintStrength.value = safeNum(p.shoreFoamTintStrength, 0.2);
     u.uShoreFoamColorVariation.value = safeNum(p.shoreFoamColorVariation, 0.15);
     u.uShoreFoamOpacity.value = safeNum(p.shoreFoamOpacity, 1.0);
-    u.uShoreFoamBrightness.value = safeNum(p.shoreFoamBrightness, 0.6);
     u.uShoreFoamContrast.value = safeNum(p.shoreFoamContrast, 1.5);
     u.uShoreFoamGamma.value = safeNum(p.shoreFoamGamma, 0.8);
     u.uShoreFoamLightingEnabled.value = (p.shoreFoamLightingEnabled ?? true) ? 1.0 : 0.0;
     u.uShoreFoamAmbientLight.value = safeNum(p.shoreFoamAmbientLight, 0.5);
     u.uShoreFoamSceneLightInfluence.value = safeNum(p.shoreFoamSceneLightInfluence, 0.8);
-    u.uShoreFoamDarknessResponse.value = safeNum(p.shoreFoamDarknessResponse, 0.7);
+    u.uShoreFoamDarknessResponse.value = safeNum(p.shoreFoamDarknessResponse, 0.78);
+
+
+
     u.uShoreFoamFilamentsEnabled.value = (p.shoreFoamFilamentsEnabled ?? true) ? 1.0 : 0.0;
     u.uShoreFoamFilamentsStrength.value = safeNum(p.shoreFoamFilamentsStrength, 0.5);
     u.uShoreFoamFilamentsScale.value = safeNum(p.shoreFoamFilamentsScale, 5.0);
@@ -2958,6 +3193,7 @@ static getControlSchema() {
     u.uFloatingFoamWaveDistortion.value = safeNum(p.floatingFoamWaveDistortion, 2.0);
     
     // Floating Foam Advanced (Phase 1)
+    const sceneDarknessFloat = globalThis.canvas?.environment?.darknessLevel ?? 0;
     const floatingFoamColor = normalizeRgb01(p.floatingFoamColor, { r: 1.0, g: 1.0, b: 1.0 });
     u.uFloatingFoamColor.value.set(floatingFoamColor.r, floatingFoamColor.g, floatingFoamColor.b);
     const floatingFoamTint = normalizeRgb01(p.floatingFoamTint, { r: 0.9, g: 0.95, b: 0.85 });
@@ -2965,14 +3201,18 @@ static getControlSchema() {
     u.uFloatingFoamTintStrength.value = safeNum(p.floatingFoamTintStrength, 0.3);
     u.uFloatingFoamColorVariation.value = safeNum(p.floatingFoamColorVariation, 0.2);
     u.uFloatingFoamOpacity.value = safeNum(p.floatingFoamOpacity, 1.0);
-    u.uFloatingFoamBrightness.value = safeNum(p.floatingFoamBrightness, 0.5);
+    
+    // Modulate floating foam brightness by scene darkness and response params
+    const floatBrightnessBase = safeNum(p.floatingFoamBrightness, 0.5);
+    u.uFloatingFoamBrightness.value = floatBrightnessBase * Math.max(0.05, 1.0 - (sceneDarknessFloat * safeNum(p.floatingFoamDarknessResponse, 0.7)));
+
     u.uFloatingFoamContrast.value = safeNum(p.floatingFoamContrast, 1.8);
     u.uFloatingFoamGamma.value = safeNum(p.floatingFoamGamma, 0.7);
     
     u.uFloatingFoamLightingEnabled.value = (p.floatingFoamLightingEnabled ?? true) ? 1.0 : 0.0;
     u.uFloatingFoamAmbientLight.value = safeNum(p.floatingFoamAmbientLight, 0.4);
     u.uFloatingFoamSceneLightInfluence.value = safeNum(p.floatingFoamSceneLightInfluence, 0.7);
-    u.uFloatingFoamDarknessResponse.value = safeNum(p.floatingFoamDarknessResponse, 0.6);
+    u.uFloatingFoamDarknessResponse.value = safeNum(p.floatingFoamDarknessResponse, 0.7);
     
     u.uFloatingFoamShadowEnabled.value = (p.floatingFoamShadowEnabled ?? true) ? 1.0 : 0.0;
     u.uFloatingFoamShadowStrength.value = safeNum(p.floatingFoamShadowStrength, 0.35);
@@ -3150,6 +3390,25 @@ static getControlSchema() {
     if (!this._initialized || !this._composeMaterial || !this._composeScene || !this._composeCamera) return false;
     if (!renderer || !inputRT || !outputRT) return false;
     if (!this.enabled) return false;
+
+    // LAZY: start compiling on first actual render frame, but never await it on
+    // the live render path. While pending, keep skipping the water pass instead
+    // of blocking the frame loop or touching incomplete uniform blocks.
+    if (!this._realShaderCompiled && !this._shaderCompilePending) {
+      const THREE = window.THREE;
+      const now = (typeof performance !== 'undefined' && performance.now)
+        ? performance.now()
+        : Date.now();
+      if (THREE && now >= (this._waterCompileRetryAfterMs || 0)) {
+        this._shaderReadyPromise = this._compileRealShaderNow(THREE, renderer).finally(() => {
+          try {
+            window.MapShine?.renderLoop?.requestRender?.();
+            window.MapShine?.renderLoop?.requestContinuousRender?.(250);
+          } catch (_) {}
+        });
+      }
+    }
+    if (!this._realShaderCompiled) return false;
     if (!this._hasAnyWaterData) return false;
 
     const u = this._composeMaterial.uniforms;
@@ -3300,26 +3559,115 @@ static getControlSchema() {
    */
   onFloorChange(maxFloorIndex) {
     if (!this._initialized) return;
-    // Find the highest floor index that has water data and is <= maxFloorIndex.
-    // This handles the common case where water is only on floor 0.
-    let bestFloor = -1;
-    for (const floorIndex of this._floorWater.keys()) {
-      if (floorIndex <= maxFloorIndex && floorIndex > bestFloor) {
-        bestFloor = floorIndex;
-      }
-    }
+    this._setCrossSliceWaterDataUniform(0);
+    const bestFloor = this._resolveWaterFloorForView(maxFloorIndex);
 
-    if (bestFloor >= 0 && bestFloor !== this._activeFloorIndex) {
+    if (bestFloor >= 0) {
+      // Always re-apply uniforms when a valid water floor is resolved.
+      // Floor-change events can transiently clear uniforms (bestFloor < 0);
+      // if the next valid resolution lands on the same floor index, a strict
+      // "index changed" guard would leave water disabled upstairs.
       this._activeFloorIndex = bestFloor;
       this._applyFloorWaterData(bestFloor);
     } else if (bestFloor < 0) {
       // No water on any visible floor — disable water data
-      if (this._composeMaterial) {
+      if (this._composeMaterial?.uniforms?.uHasWaterData && this._composeMaterial?.uniforms?.uHasWaterRawMask) {
         this._composeMaterial.uniforms.uHasWaterData.value = 0.0;
         this._composeMaterial.uniforms.uHasWaterRawMask.value = 0.0;
       }
     }
     this._hasAnyWaterData = this._floorWater.size > 0;
+  }
+
+  /**
+   * Set per-level pipeline context: which floor's packed `_floorWater` textures
+   * bind for the upcoming `render()` call.
+   *
+   * When this slice has no local masks but a lower visible floor does, we bind
+   * that floor's pack and set `uCrossSliceWaterData` so the shader only paints
+   * water where the **slice RT** is punched out (low `base.a`), and dampens
+   * refraction — avoiding the old “SDF over opaque deck” HDR blow-ups while
+   * giving the upper post chain a valid water pass over holes.
+   *
+   * @param {number} levelIndex
+   */
+  setLevelContext(levelIndex) {
+    const idx = Number(levelIndex);
+    if (!Number.isFinite(idx) || idx < 0) {
+      this._perLevelOverride = -1;
+      this._setCrossSliceWaterDataUniform(0);
+      return;
+    }
+    this._perLevelOverride = idx;
+    let dataFloor = idx;
+    let crossSlice = false;
+    let borrowOff = false;
+    try {
+      borrowOff = getWaterLayerBisectState().crossSliceBorrow === 'off';
+    } catch (_) {}
+    if (!borrowOff && !this._floorWater.has(idx)) {
+      const resolved = this._resolveWaterFloorForView(idx);
+      if (resolved >= 0 && resolved !== idx) {
+        dataFloor = resolved;
+        crossSlice = true;
+      }
+    }
+    this._applyFloorWaterData(dataFloor);
+    this._setCrossSliceWaterDataUniform(crossSlice ? 1 : 0);
+  }
+
+  /**
+   * @param {number} v 0 or 1
+   * @private
+   */
+  _setCrossSliceWaterDataUniform(v) {
+    try {
+      const u = this._composeMaterial?.uniforms?.uCrossSliceWaterData;
+      if (u) u.value = v ? 1.0 : 0.0;
+    } catch (_) {}
+  }
+
+  /**
+   * Clear per-level override and restore the global active floor's water data.
+   */
+  clearLevelContext() {
+    this._perLevelOverride = -1;
+    this._syncGlobalWaterBindingsFromViewedFloor();
+    this._setCrossSliceWaterDataUniform(0);
+  }
+
+  /**
+   * Re-bind packed water textures for **global** shader state after per-level passes
+   * or async shader swap. Uses the same “nearest floor ≤ viewed floor with water”
+   * rule as `populate()` / `onFloorChange()`, so we never leave `uHasWaterData` stuck
+   * at 0 after `setLevelContext(upper)` when water only exists downstairs.
+   * @private
+   */
+  _syncGlobalWaterBindingsFromViewedFloor() {
+    let viewedIdx = NaN;
+    try {
+      const n = Number(window.MapShine?.floorStack?.getActiveFloor?.()?.index);
+      if (Number.isFinite(n)) viewedIdx = n;
+    } catch (_) {}
+
+    const resolved = Number.isFinite(viewedIdx)
+      ? this._resolveWaterFloorForView(viewedIdx)
+      : -1;
+
+    if (resolved >= 0) {
+      this._activeFloorIndex = resolved;
+      this._applyFloorWaterData(resolved);
+      return;
+    }
+
+    if (this._activeFloorIndex >= 0 && this._floorWater.has(this._activeFloorIndex)) {
+      this._applyFloorWaterData(this._activeFloorIndex);
+      return;
+    }
+
+    const u = this._composeMaterial?.uniforms;
+    if (u?.uHasWaterData) u.uHasWaterData.value = 0.0;
+    if (u?.uHasWaterRawMask) u.uHasWaterRawMask.value = 0.0;
   }
 
   /**
@@ -3333,6 +3681,30 @@ static getControlSchema() {
     const idx = Number(floorIndex);
     if (!Number.isFinite(idx)) return false;
     return this._floorWater.has(idx);
+  }
+
+  /**
+   * Resolve which floor's water data should drive rendering for a viewed floor.
+   * Returns the highest floor index with water where index <= viewed floor.
+   *
+   * @param {number} viewedFloorIndex
+   * @returns {number} resolved floor index, or -1 if none
+   * @private
+   */
+  _resolveWaterFloorForView(viewedFloorIndex) {
+    const viewedIdx = Number(viewedFloorIndex);
+    const upperBound = Number.isFinite(viewedIdx)
+      ? viewedIdx
+      : Number.isFinite(Number(this._activeFloorIndex))
+        ? Number(this._activeFloorIndex)
+        : 0;
+    let bestFloor = -1;
+    for (const floorIndex of this._floorWater.keys()) {
+      const idx = Number(floorIndex);
+      if (!Number.isFinite(idx)) continue;
+      if (idx <= upperBound && idx > bestFloor) bestFloor = idx;
+    }
+    return bestFloor;
   }
 
   /**
@@ -3523,6 +3895,7 @@ static getControlSchema() {
       tWaterData:          { value: waterData ?? fallbacks.black },
       uHasWaterData:       { value: waterData ? 1.0 : 0.0 },
       uWaterEnabled:       { value: this.enabled ? 1.0 : 0.0 },
+      uCrossSliceWaterData: { value: 0.0 },
       uUseSdfMask:         { value: p.useSdfMask === false ? 0.0 : 1.0 },
       tWaterRawMask:       { value: waterRawMask ?? fallbacks.black },
       uHasWaterRawMask:    { value: waterRawMask ? 1.0 : 0.0 },

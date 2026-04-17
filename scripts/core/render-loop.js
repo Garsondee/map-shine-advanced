@@ -367,6 +367,28 @@ export class RenderLoop {
           if (since < minIntervalMs) shouldRender = false;
         }
 
+        if (window.MapShine?.__v2StartupTraceEnabled === true && this.frameCount <= 8) {
+          try {
+            const ctx = window.MapShine?.activeLevelContext ?? null;
+            const entry = {
+              phase: 'renderLoop.preComposer',
+              rafFrame: Number(this.frameCount ?? -1),
+              shouldRender: !!shouldRender,
+              forceNext: !!this._forceNextRender,
+              cameraChanged: !!cameraChanged,
+              inContinuousWindow: !!inContinuousWindow,
+              effectWantsContinuous: !!effectWantsContinuous,
+              activeLevel: {
+                index: Number.isFinite(Number(ctx?.index)) ? Number(ctx.index) : null,
+                bottom: Number.isFinite(Number(ctx?.bottom)) ? Number(ctx.bottom) : null,
+                top: Number.isFinite(Number(ctx?.top)) ? Number(ctx.top) : null,
+              },
+            };
+            if (!Array.isArray(window.MapShine.__v2StartupTrace)) window.MapShine.__v2StartupTrace = [];
+            window.MapShine.__v2StartupTrace.push(entry);
+            if (window.MapShine.__v2StartupTrace.length > 128) window.MapShine.__v2StartupTrace.shift();
+          } catch (_) {}
+        }
         if (shouldRender) {
           // Measure first-frame render time to detect residual shader compilation.
           // If compileAsync() worked, this should be ~10-50ms. If it's hundreds of
@@ -377,6 +399,19 @@ export class RenderLoop {
           this.effectComposer.render(deltaTime);
           this._lastComposerRenderTime = now;
           this._forceNextRender = false;
+          if (window.MapShine?.__v2StartupTraceEnabled === true && this.frameCount <= 8) {
+            try {
+              const entry = {
+                phase: 'renderLoop.postComposer',
+                rafFrame: Number(this.frameCount ?? -1),
+                compositorPath: window.MapShine?.__v2CompositorRenderPath ?? null,
+                populateComplete: window.MapShine?.__v2PopulateComplete ?? null,
+              };
+              if (!Array.isArray(window.MapShine.__v2StartupTrace)) window.MapShine.__v2StartupTrace = [];
+              window.MapShine.__v2StartupTrace.push(entry);
+              if (window.MapShine.__v2StartupTrace.length > 128) window.MapShine.__v2StartupTrace.shift();
+            } catch (_) {}
+          }
 
           if (_isFirstFrame) {
             this._firstFrameLogged = true;

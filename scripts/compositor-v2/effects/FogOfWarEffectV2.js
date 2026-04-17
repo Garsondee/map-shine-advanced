@@ -42,6 +42,7 @@ import {
   getActiveElevationBandKey,
   buildFogStoreContextKey,
   getRelevantActorIdsForFog,
+  isSceneFogExplorationEnabled,
   loadUnionExplorationForActors,
   saveExplorationForActors,
   tokenIsOwnedByActiveUser,
@@ -710,7 +711,7 @@ export class FogOfWarEffectV2 {
       isGM,
       foundryControlled: controlled.map(t => t.name),
       mapShineSelection: msSelection ? Array.from(msSelection) : [],
-      explorationEnabled: canvas?.scene?.fog?.exploration ?? false,
+      explorationEnabled: isSceneFogExplorationEnabled(canvas?.scene),
       explorationLoaded: this._explorationLoadedFromFoundry,
       explorationPlayerGpuReady: this._explorationPlayerGpuReady,
       levelBandFogHold: this._levelBandFogHold,
@@ -1642,7 +1643,7 @@ export class FogOfWarEffectV2 {
     if (this._isLoadingExploration) return;
 
     const tokenVisionEnabled = canvas?.scene?.tokenVision ?? false;
-    const explorationEnabled = canvas?.scene?.fog?.exploration ?? false;
+    const explorationEnabled = isSceneFogExplorationEnabled(canvas?.scene);
     if (!tokenVisionEnabled || !explorationEnabled) {
       this._explorationLoadedFromFoundry = true;
       this._explorationPlayerGpuReady = true;
@@ -2872,7 +2873,7 @@ export class FogOfWarEffectV2 {
   _syncLevelsExplorationBandBeforeComposite() {
     if (getLevelsCompatibilityMode() === LEVELS_COMPATIBILITY_MODES.OFF) return false;
     if (!isLevelsEnabledForScene(canvas?.scene)) return false;
-    if (!(canvas?.scene?.fog?.exploration ?? false)) return false;
+    if (!isSceneFogExplorationEnabled(canvas?.scene)) return false;
 
     const bk = getActiveElevationBandKey();
     if (bk == null) return false;
@@ -2935,7 +2936,7 @@ export class FogOfWarEffectV2 {
     const bypassFog = this._shouldBypassFog();
     this.fogMaterial.uniforms.uBypassFog.value = bypassFog ? 1.0 : 0.0;
 
-    const explorationEnabled = canvas?.scene?.fog?.exploration ?? false;
+    const explorationEnabled = isSceneFogExplorationEnabled(canvas?.scene);
     if (!this.params.enabled || bypassFog) {
       this.fogPlane.visible = false;
       this._visionRetryFrames = 0;
@@ -3154,7 +3155,7 @@ export class FogOfWarEffectV2 {
       this._needsVisionUpdate = true;
       this._renderVisionMask();
 
-      const explorationEnabled = canvas?.scene?.fog?.exploration ?? false;
+      const explorationEnabled = isSceneFogExplorationEnabled(canvas?.scene);
       void this._ensureExplorationLoadedFromStore();
       const canAccumulate = explorationEnabled && this._explorationLoadedFromFoundry;
       if (canAccumulate && !this._visionIsFullSceneFallback) {
@@ -3339,7 +3340,7 @@ export class FogOfWarEffectV2 {
     const saveGeneration = this._explorationSaveGeneration;
 
     const tokenVisionEnabled = canvas?.scene?.tokenVision ?? false;
-    const explorationEnabled = canvas?.scene?.fog?.exploration ?? false;
+    const explorationEnabled = isSceneFogExplorationEnabled(canvas?.scene);
     if (!tokenVisionEnabled || !explorationEnabled) return;
     if (!this._explorationDirty) return;
     if (this._isSavingExploration) return;

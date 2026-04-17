@@ -33,7 +33,11 @@
 
 import { createLogger } from '../../core/log.js';
 import { probeMaskFile } from '../../assets/loader.js';
-import { tileHasLevelsRange, readTileLevelsFlags } from '../../foundry/levels-scene-flags.js';
+import {
+  tileHasLevelsRange,
+  readTileLevelsFlags,
+  getViewedLevelBackgroundSrc,
+} from '../../foundry/levels-scene-flags.js';
 import { weatherController, PrecipitationType } from '../../core/WeatherController.js';
 
 const log = createLogger('WindowLightEffectV2');
@@ -377,7 +381,7 @@ export class WindowLightEffectV2 {
     // The background is not in canvas.scene.tiles.contents — it's handled
     // separately by FloorRenderBus as __bg_image__. Check for its _Windows
     // or _Structural mask and create an overlay if found.
-    const bgSrc = canvas?.scene?.background?.src ?? '';
+    const bgSrc = getViewedLevelBackgroundSrc(canvas?.scene) ?? canvas?.scene?.background?.src ?? '';
     if (bgSrc) {
       const dotIdx = bgSrc.lastIndexOf('.');
       const bgBasePath = dotIdx > 0 ? bgSrc.substring(0, dotIdx) : bgSrc;

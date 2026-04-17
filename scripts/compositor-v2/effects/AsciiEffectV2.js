@@ -622,6 +622,7 @@ export class AsciiEffectV2 {
       }
 
       void main() {
+        vec4 scenePx = texture2D(tDiffuse, vUv);
         vec2 cellCoord = floor(vUv * uGridSize);
         vec2 cellCenterUV = (cellCoord + 0.5) / uGridSize;
         vec4 texel = texture2D(tDiffuse, cellCenterUV);
@@ -669,10 +670,9 @@ export class AsciiEffectV2 {
         }
 
         if (uOpacity < 1.0) {
-          vec4 original = texture2D(tDiffuse, vUv);
-          gl_FragColor = mix(original, vec4(finalColor, 1.0), uOpacity);
+          gl_FragColor = mix(scenePx, vec4(finalColor, scenePx.a), uOpacity);
         } else {
-          gl_FragColor = vec4(finalColor, 1.0);
+          gl_FragColor = vec4(finalColor, scenePx.a);
         }
       }
     `;

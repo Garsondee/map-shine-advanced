@@ -10,7 +10,15 @@ import { weatherController } from '../core/WeatherController.js';
 import { globalLoadingProfiler } from '../core/loading-profiler.js';
 import { debugLoadingProfiler } from '../core/debug-loading-profiler.js';
 import { isTileOverhead } from './tile-manager.js';
-import { isLevelsEnabledForScene, tileHasLevelsRange, readTileLevelsFlags, readSceneLevelsFlag } from '../foundry/levels-scene-flags.js';
+import {
+  isLevelsEnabledForScene,
+  tileHasLevelsRange,
+  readTileLevelsFlags,
+  readSceneLevelsFlag,
+  getViewedLevelBackgroundSrc,
+  hasV14NativeLevels,
+  normalizeFoundryAssetUrlKey,
+} from '../foundry/levels-scene-flags.js';
 import { GpuSceneMaskCompositor } from '../masks/GpuSceneMaskCompositor.js';
 import * as sceneSettings from '../settings/scene-settings.js';
 import {
@@ -301,9 +309,13 @@ export class SceneComposer {
     } catch (e) {
     }
 
-    // Prefer the scene background image when available. Many premium/complex maps
-    // use multiple full-scene tiles (e.g. *-Overlay) which are not the correct
-    // source for suffix-mask discovery.
+    // V14: prefer the currently viewed level's background (each Level can have
+    // its own background.src). Falls back to the deprecated scene.background.src.
+    try {
+      const viewedBg = getViewedLevelBackgroundSrc(foundryScene);
+      if (viewedBg) return viewedBg;
+    } catch (_) {}
+
     try {
       const bg = foundryScene?.background?.src;
       if (typeof bg === 'string' && bg.trim().length > 0) {
@@ -486,10 +498,11 @@ export class SceneComposer {
     // Remove explicit scene background to rely on renderer clear color (which is forced to black)
     // this.scene.background = new THREE.Color(0x000000); 
     
-    // Check if scene has a background image
-    const hasBackgroundImage = foundryScene.background?.src && 
-                               typeof foundryScene.background.src === 'string' && 
-                               foundryScene.background.src.trim().length > 0;
+    const viewedBgSrc = getViewedLevelBackgroundSrc(foundryScene);
+    const hasBackgroundImage = !!(viewedBgSrc || (
+      typeof foundryScene.background?.src === 'string' &&
+      foundryScene.background.src.trim().length > 0
+    ));
     
     let baseTexture = null;
     let bgPath = null;
@@ -708,9 +721,8 @@ export class SceneComposer {
    */
   async getFoundryBackgroundTexture(foundryScene) {
     const THREE = window.THREE;
-    const bgSrc = (typeof foundryScene?.background?.src === 'string')
-      ? foundryScene.background.src.trim()
-      : '';
+    const bgSrc = getViewedLevelBackgroundSrc(foundryScene)
+      ?? ((typeof foundryScene?.background?.src === 'string') ? foundryScene.background.src.trim() : '');
 
     const toThreeTexture = (source, sourceLabel = 'unknown') => {
       if (!source) return null;
@@ -737,6 +749,12 @@ export class SceneComposer {
       threeTexture.minFilter = THREE.LinearFilter;
       threeTexture.magFilter = THREE.LinearFilter;
       threeTexture.generateMipmaps = false;
+      // FloorRenderBus.populate() reuses _albedoTexture only when this matches
+      // getViewedLevelBackgroundSrc(); avoids showing another level's art after V14 view changes.
+      threeTexture.userData = threeTexture.userData || {};
+      threeTexture.userData.mapShineBackgroundSrc = (typeof bgSrc === 'string' && bgSrc.trim())
+        ? bgSrc.trim()
+        : '';
       return threeTexture;
     };
     
@@ -746,19 +764,30 @@ export class SceneComposer {
       return null;
     }
 
-    // Primary path: Foundry's already-loaded PIXI background texture.
-    // This can be transiently unavailable during scene rebuilds.
-    try {
-      const pixiTexture = canvas.primary.background?.texture;
-      const pixiSource = pixiTexture?.baseTexture?.resource?.source;
-      const fromPixi = toThreeTexture(pixiSource, 'canvas.primary.background.texture');
-      if (fromPixi) {
-        log.debug('Converted Foundry texture to THREE.Texture');
-        return fromPixi;
+    // Primary path: reuse Foundry's already-uploaded PIXI background as a THREE texture.
+    //
+    // V14 multi-level: **never** use this path. Foundry can briefly expose the same
+    // logical URL while the WebGL/Canvas backing still contains the *previous* level's
+    // pixels (same cache line, wrong texels). URL string comparison is not sufficient.
+    // Always decode the viewed level via explicit load below so first paint matches
+    // `getViewedLevelBackgroundSrc` / `canvas.level`.
+    const v14MultiFloor =
+      hasV14NativeLevels(foundryScene) && (foundryScene?.levels?.size ?? 0) > 1;
+    if (!v14MultiFloor) {
+      try {
+        const pixiTexture = canvas.primary.background?.texture;
+        const pixiSource = pixiTexture?.baseTexture?.resource?.source;
+        const fromPixi = toThreeTexture(pixiSource, 'canvas.primary.background.texture');
+        if (fromPixi) {
+          log.debug('Converted Foundry texture to THREE.Texture');
+          return fromPixi;
+        }
+        log.warn('Foundry background texture not ready from PIXI path; trying fallback loader');
+      } catch (e) {
+        log.warn('Failed to read PIXI background texture; trying fallback loader', e);
       }
-      log.warn('Foundry background texture not ready from PIXI path; trying fallback loader');
-    } catch (e) {
-      log.warn('Failed to read PIXI background texture; trying fallback loader', e);
+    } else {
+      log.info('V14 multi-level: skipping PIXI background reuse; loading viewed level texture by URL');
     }
 
     if (!bgSrc) {
@@ -800,6 +829,10 @@ export class SceneComposer {
         tex.magFilter = THREE.LinearFilter;
         tex.generateMipmaps = false;
         this._markOwnedTexture(tex);
+        tex.userData = tex.userData || {};
+        tex.userData.mapShineBackgroundSrc = (typeof bgSrc === 'string' && bgSrc.trim())
+          ? bgSrc.trim()
+          : '';
         log.info('Loaded background texture via THREE.TextureLoader fallback');
         return tex;
       }

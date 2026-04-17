@@ -11,15 +11,13 @@
  *                  as a multiplier so cloud shadow darkens scene illumination.
  *   - _cloudTopRT: RGBA cloud-top texture source for elevated world-space cloud planes.
  *
- * ## Cloud shadow vs overhead / upper floors
+ * ## Cloud shadow vs _Outdoors
  *
- * The lit-scene shadow factor (`_shadowRT`) multiplies outdoors-masked cloud
- * darkness by (1) an overhead-tile blocker mask (CLOUD_SHADOW_BLOCKER capture)
- * and (2) a cross-floor mask of tile alpha for floors strictly above the active
- * band (`renderFloorMaskTo` with `includeHiddenAboveFloors`), so cloud shadows
- * do not leak under upper-floor slabs that are normally hidden by floor slicing.
+ * The lit-scene shadow factor (`_shadowRT`) is darkened by cloud density then
+ * gated only by the _Outdoors mask (dark / indoor regions stay fully lit).
+ * Overhead blocker layers and upper-floor slab masks are not applied to cloud
+ * shadow so alignment stays consistent with other shadow systems.
  * ShadowManagerV2 still composes cloud with separate overhead/building factors.
- * The outdoors mask gates cloud shadow where authored.
  *
  * ## Pipeline position in FloorCompositor
  *
@@ -85,8 +83,8 @@ export class CloudEffectV2 {
       shadowSoftness: 0.9,
       shadowOffsetScale: 0.3,
       minShadowBrightness: 0.0,
+      /** Scene-rect clip: soft edge width in normalized scene UV (0 = hard clip at padding). */
       shadowSceneFadeSoftness: 0.025,
-
       // Cloud tops
       cloudTopMode: 'aboveEverything',
       cloudTopOpacity: 1.0,
@@ -503,7 +501,7 @@ export class CloudEffectV2 {
       su.uShadowOpacity.value  = p.shadowOpacity;
       su.uShadowSoftness.value = p.shadowSoftness;
       su.uMinBrightness.value  = p.minShadowBrightness;
-      su.uSceneFadeSoftness.value = Math.max(0, p.shadowSceneFadeSoftness ?? 0.025);
+      su.uSceneFadeSoftness.value = Math.max(0.0, Number(p.shadowSceneFadeSoftness ?? 0.025));
       su.uZoom.value           = zoom;
       su.uSceneOrigin.value.set(sceneX, sceneY);
       su.uSceneSize.value.set(sceneW, sceneH);
@@ -552,8 +550,6 @@ export class CloudEffectV2 {
       // (This mirrors WaterEffectV2's uOutdoorsMaskFlipY concept.)
       const anyTex = this._outdoorsMasks.find(t => !!t) ?? this._outdoorsMask ?? null;
       su.uOutdoorsMaskFlipY.value = anyTex?.flipY ? 1.0 : 0.0;
-      su.tUpperFloorMask.value = null;
-      su.uHasUpperFloorMask.value = 0.0;
       su.uSunDir.value.copy(this._sunDir);
     }
 
@@ -658,8 +654,6 @@ export class CloudEffectV2 {
       const du = this._densityMat.uniforms;
       const su = this._shadowMat.uniforms;
 
-      this._prepareShadowOcclusionMasks(renderer);
-
       // ── Pass 1a: Overscanned density for shadow offset+blur ──────────
       du.uClipToScene.value   = 0;
       du.uParallaxScale.value = 0;
@@ -688,44 +682,26 @@ export class CloudEffectV2 {
       renderer.setClearColor(0x000000, 1); renderer.clear();
       renderer.render(this._quadScene, this._quadCam);
 
-      // ── Pass 2a: Raw shadow (no outdoors mask, no blocker mask) ─────
-      // Used by indoor consumers (e.g. window-light projection) that should
-      // still respond to cloud coverage even under overhead blockers.
+      // ── Pass 2a: Raw shadow (no _Outdoors gating) ─────────────────────
+      // Used by indoor consumers (e.g. window-light projection).
       {
         const prevHasMask = su.uHasOutdoorsMask.value;
         const prevMaskTex = su.tOutdoorsMask.value;
-        const prevHasUpperMask = su.uHasUpperFloorMask.value;
-        const prevUpperMaskTex = su.tUpperFloorMask.value;
         su.uDensityMode.value    = 0;
         su.uHasOutdoorsMask.value = 0;
         su.tOutdoorsMask.value   = null;
         su.tCloudDensity.value   = this._shadowDensityRT.texture;
-        su.tBlockerMask.value    = this._blockerRT?.texture ?? null;
-        su.uHasBlockerMask.value = 0;
-        su.tUpperFloorMask.value = this._upperFloorOccluderMask ?? null;
-        su.uHasUpperFloorMask.value = 0;
         this._quad.material = this._shadowMat;
         renderer.setRenderTarget(this._shadowRawRT);
         renderer.setClearColor(0xffffff, 1); renderer.clear();
         renderer.render(this._quadScene, this._quadCam);
         su.uHasOutdoorsMask.value = prevHasMask;
         su.tOutdoorsMask.value    = prevMaskTex;
-        su.uHasUpperFloorMask.value = prevHasUpperMask;
-        su.tUpperFloorMask.value = prevUpperMaskTex;
       }
 
-      // ── Pass 2b: Outdoors-masked shadow (fed into LightingEffectV2) ───
-      // Blocker + upper-floor masks remove cloud darkening under roofs / slabs.
+      // ── Pass 2b: _Outdoors-masked shadow (fed into LightingEffectV2) ─
       su.uDensityMode.value    = 0;
       su.tCloudDensity.value   = this._shadowDensityRT.texture;
-      su.tBlockerMask.value    = this._blockerRT?.texture ?? null;
-      su.uHasBlockerMask.value = this._blockerRT ? 1.0 : 0.0;
-      {
-        const upperTex = this._upperFloorOccluderMask
-          ?? (this._upperFloorMaskValid ? (this._upperFloorOccluderRT?.texture ?? null) : null);
-        su.tUpperFloorMask.value = upperTex;
-        su.uHasUpperFloorMask.value = upperTex ? 1.0 : 0.0;
-      }
       this._quad.material = this._shadowMat;
       renderer.setRenderTarget(this._shadowRT);
       renderer.setClearColor(0xffffff, 1); renderer.clear();
@@ -764,12 +740,6 @@ export class CloudEffectV2 {
         this._cloudTopMat.uniforms.tCloudDensity.value = usePacked
           ? this._topDensityRT.texture
           : this._densityRT.texture;
-        // Overhead blocker mask is for shadow occlusion only.
-        // Applying it to cloud-top alpha punches tile-shaped holes in the cloud layer,
-        // which makes underlying post effects/world content show through even at
-        // cloudCover=1 and cloudTopOpacity=1.
-        this._cloudTopMat.uniforms.tBlockerMask.value    = null;
-        this._cloudTopMat.uniforms.uHasBlockerMask.value = 0;
         this._quad.material = this._cloudTopMat;
         renderer.setRenderTarget(this._cloudTopRT);
         renderer.setClearColor(0x000000, 0); renderer.clear();
@@ -1051,7 +1021,7 @@ export class CloudEffectV2 {
         shadowSoftness:       { type: 'slider', label: 'Shadow Softness',   min: 0.5,  max: 10.0, step: 0.1,   default: 0.9   },
         shadowOffsetScale:    { type: 'slider', label: 'Shadow Offset',     min: 0.0,  max: 0.3,  step: 0.01,  default: 0.3   },
         minShadowBrightness:  { type: 'slider', label: 'Min Brightness',    min: 0.0,  max: 0.5,  step: 0.01,  default: 0.0   },
-        shadowSceneFadeSoftness:{ type: 'slider', label: 'Scene Edge Fade',   min: 0.0,  max: 0.15, step: 0.005, default: 0.025 },
+        shadowSceneFadeSoftness:{ type: 'slider', label: 'Scene edge fade', min: 0.0,  max: 0.15, step: 0.005, default: 0.025, tooltip: 'Softens the clip at the scene rect so cloud shadow does not appear in padded margin. 0 = hard edge.' },
         cloudTopMode:         { type: 'list',   label: 'Cloud Top Mode',    options: { 'Outdoors Only': 'outdoorsOnly', 'Above Everything (Fade Mask)': 'aboveEverything' }, default: 'aboveEverything' },
         cloudTopOpacity:      { type: 'slider', label: 'Cloud Top Opacity', min: 0.0,  max: 1.0,  step: 0.01,  default: 1.0   },
         cloudTopAlphaStart:   { type: 'slider', label: 'Edge Fade Start',    min: 0.0,  max: 0.8,  step: 0.01,  default: 0.2   },
@@ -1421,10 +1391,6 @@ export class CloudEffectV2 {
         tOutdoorsMask3:     { value: null },
         uHasOutdoorsMask:   { value: 0 },
         uOutdoorsMaskFlipY: { value: 0 },
-        tBlockerMask:       { value: null },
-        uHasBlockerMask:    { value: 0 },
-        tUpperFloorMask:    { value: null },
-        uHasUpperFloorMask: { value: 0 },
         uSunDir:            { value: new THREE.Vector2(0, -1) },
         uShadowOpacity:     { value: 0.7 },
         uShadowSoftness:    { value: 0.9 },
@@ -1457,10 +1423,6 @@ export class CloudEffectV2 {
         uniform sampler2D tOutdoorsMask3;
         uniform float uHasOutdoorsMask;
         uniform float uOutdoorsMaskFlipY;
-        uniform sampler2D tBlockerMask;
-        uniform float uHasBlockerMask;
-        uniform sampler2D tUpperFloorMask;
-        uniform float uHasUpperFloorMask;
         uniform vec2 uSunDir;
         uniform float uShadowOpacity;
         uniform float uShadowSoftness;
@@ -1508,23 +1470,14 @@ export class CloudEffectV2 {
           return texture2D(tOutdoorsMask, maskUv).r;
         }
 
-        float offsetScaleLimit(float uvCoord, float delta) {
-          if (abs(delta) < 1e-6) return 1.0;
-          if (delta > 0.0) return min(1.0, (1.0 - uvCoord) / delta);
-          return min(1.0, uvCoord / -delta);
-        }
-
         void main() {
           vec2 baseWorld = mix(uViewBoundsMin, uViewBoundsMax, vUv);
-          vec2 sceneUvCheck = worldToSceneUv(baseWorld);
-          // Soft scene boundary fade: shadow fades smoothly to 1.0 (fully lit) outside
-          // the scene rect. Hard discard creates a sharp rectangular edge at the
-          // scene/padding boundary visible as a box in the middle of the viewport.
+          vec2 sceneUvRaw = worldToSceneUv(baseWorld);
+          // No cloud shadow in canvas padding: fade to fully lit outside scene rect [0,1]^2.
           float sf = max(uSceneFadeSoftness, 0.001);
-          float sfX = smoothstep(-sf, 0.0, sceneUvCheck.x) * smoothstep(1.0 + sf, 1.0, sceneUvCheck.x);
-          float sfY = smoothstep(-sf, 0.0, sceneUvCheck.y) * smoothstep(1.0 + sf, 1.0, sceneUvCheck.y);
+          float sfX = smoothstep(-sf, 0.0, sceneUvRaw.x) * smoothstep(1.0 + sf, 1.0, sceneUvRaw.x);
+          float sfY = smoothstep(-sf, 0.0, sceneUvRaw.y) * smoothstep(1.0 + sf, 1.0, sceneUvRaw.y);
           float sceneMask = sfX * sfY;
-          if (sceneMask < 0.001) { gl_FragColor = vec4(1.0); return; }
 
           // Sample density at sun-offset world position
           vec2 shadowWorld = baseWorld + uShadowOffsetWorld;
@@ -1549,7 +1502,6 @@ export class CloudEffectV2 {
           // Sample at scene UV derived from world position so the mask is
           // anchored to the world, not stretched across the screen (vUv).
           if (uHasOutdoorsMask > 0.5) {
-            vec2 sceneUvRaw = worldToSceneUv(baseWorld);
             float outdoorsInScene =
               step(0.0, sceneUvRaw.x) * step(sceneUvRaw.x, 1.0) *
               step(0.0, sceneUvRaw.y) * step(sceneUvRaw.y, 1.0);
@@ -1558,36 +1510,6 @@ export class CloudEffectV2 {
             factor = mix(1.0, factor, mix(1.0, outdoors, outdoorsInScene));
           }
 
-          // Blocker mask: overhead tiles cancel shadow (rooftops stay bright)
-          if (uHasBlockerMask > 0.5) {
-            float b = texture2D(tBlockerMask, vUv).a;
-            factor = mix(factor, 1.0, clamp(b, 0.0, 1.0));
-          }
-
-          // Floors above the active level occlude cloud shadows beneath them.
-          if (uHasUpperFloorMask > 0.5) {
-            vec2 viewSpan = max(uViewBoundsMax - uViewBoundsMin, vec2(1e-3));
-            vec2 shadowDeltaUv = uShadowOffsetWorld / viewSpan;
-            // Use the exact cloud-shadow world offset projected into this pass UV,
-            // so upper-floor occlusion and cloud shadow travel stay phase-locked.
-            vec2 upperDeltaUv = shadowDeltaUv;
-            float upperScaleX = clamp(offsetScaleLimit(vUv.x, upperDeltaUv.x), 0.0, 1.0);
-            float upperScaleY = clamp(offsetScaleLimit(vUv.y, upperDeltaUv.y), 0.0, 1.0);
-            vec2 upperUv = vUv + vec2(
-              upperDeltaUv.x * upperScaleX,
-              upperDeltaUv.y * upperScaleY
-            );
-
-            vec4 ubTex0 = texture2D(tUpperFloorMask, clamp(vUv, 0.0, 1.0));
-            vec4 ubTex1 = texture2D(tUpperFloorMask, clamp(upperUv, 0.0, 1.0));
-            float ub0 = max(max(ubTex0.r, ubTex0.g), max(ubTex0.b, ubTex0.a));
-            float ub1 = max(max(ubTex1.r, ubTex1.g), max(ubTex1.b, ubTex1.a));
-            float ub = max(ub0, ub1);
-            factor = mix(factor, 1.0, clamp(ub, 0.0, 1.0));
-          }
-
-          // Blend shadow back toward 1.0 (lit) near scene rect edges so there is
-          // no hard rectangular transition between shadow and the padding area.
           factor = mix(1.0, factor, sceneMask);
           gl_FragColor = vec4(factor, factor, factor, 1.0);
         }
@@ -1622,8 +1544,6 @@ export class CloudEffectV2 {
         uSceneOrigin:          { value: new THREE.Vector2(0, 0) },
         uSceneSize:            { value: new THREE.Vector2(4000, 3000) },
         uSceneDimensions:      { value: new THREE.Vector2(4000, 3000) },
-        tBlockerMask:          { value: null },
-        uHasBlockerMask:       { value: 0 },
         uCloudTopOpacity:      { value: 1 },
         uAlphaStart:           { value: 0.2 },
         uAlphaEnd:             { value: 0.6 },
@@ -1671,8 +1591,6 @@ export class CloudEffectV2 {
         uniform vec2  uSceneOrigin;
         uniform vec2  uSceneSize;
         uniform vec2  uSceneDimensions;
-        uniform sampler2D tBlockerMask;
-        uniform float uHasBlockerMask;
         uniform float uCloudTopOpacity;
         uniform float uAlphaStart;
         uniform float uAlphaEnd;
@@ -1798,12 +1716,6 @@ export class CloudEffectV2 {
             float o = readOutdoors(sceneUvFoundry);
             float oEff = mix(1.0, o, outdoorsInScene);
             alpha *= mix(1.0, oEff, clamp(uOutdoorsMaskStrength, 0.0, 1.0));
-          }
-          if (uHasBlockerMask > 0.5) {
-            vec4 bTex = texture2D(tBlockerMask, vUv);
-            float b = max(max(bTex.r, bTex.g), max(bTex.b, bTex.a));
-            // Soft fade at tile boundaries instead of a hard binary step.
-            alpha *= (1.0 - smoothstep(0.01, 0.15, b));
           }
           if (alpha < 0.001) discard;
           gl_FragColor = vec4(color, alpha);

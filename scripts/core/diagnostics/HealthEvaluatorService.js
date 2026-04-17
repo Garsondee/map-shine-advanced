@@ -6,6 +6,7 @@ import { captureRenderStack } from './RenderStackSnapshotService.js';
 import { evaluateRenderStackFindings } from './RenderStackRules.js';
 import { isLevelsEnabledForScene } from '../../foundry/levels-scene-flags.js';
 import { collectEnabledMaskIds, getMaskTextureManifest } from '../../settings/mask-manifest-flags.js';
+import { getShaderCompileMonitor } from './ShaderCompileMonitor.js';
 
 const log = createLogger('HealthEvaluator');
 
@@ -53,9 +54,50 @@ export class HealthEvaluatorService {
     this._registerBuiltInContracts();
     this._registerBuiltInEdges();
     this._installInstrumentation();
+    this._installShaderMonitor();
     this._startScheduler();
     this._initialized = true;
     log.info('Health evaluator initialized');
+  }
+
+  /**
+   * Connect ShaderCompileMonitor to health reporting.
+   * @private
+   */
+  _installShaderMonitor() {
+    const monitor = getShaderCompileMonitor();
+    monitor.initialize();
+    monitor.setHealthCallback((effectId, record) => {
+      // Create health record for shader compile failures/timeouts
+      if (record.status === 'timeout' || record.status === 'error') {
+        this._recordShaderIssue(effectId, record);
+      }
+    });
+  }
+
+  /**
+   * Record shader compile issues in health system.
+   * @private
+   */
+  _recordShaderIssue(effectId, record) {
+    const id = `${effectId}|shader|${record.shaderType}`;
+    const status = record.status === 'timeout' ? 'degraded' : 'broken';
+    const now = Date.now();
+
+    this._records.set(id, {
+      effectId: `${effectId}.shader`,
+      levelKey: 'global:active',
+      status,
+      checks: [{
+        name: `${record.shaderType}_compile`,
+        status,
+        message: `${record.shaderType} shader ${record.status} after ${Math.round(record.durationMs || 0)}ms: ${record.errorMessage || 'unknown'}`,
+        lines: record.shaderLines,
+        usedFallback: record.usedFallback,
+      }],
+      firstSeenMs: now,
+      lastSeenMs: now,
+    });
   }
 
   /**
@@ -172,6 +214,23 @@ export class HealthEvaluatorService {
       edges: this.dependencyGraph.getAllEdges(),
       renderStack,
       renderStackFindings,
+      shaderCompiles: this._getShaderCompileDiagnostics(),
+    };
+  }
+
+  /**
+   * Get shader compilation diagnostics.
+   * @private
+   */
+  _getShaderCompileDiagnostics() {
+    const monitor = getShaderCompileMonitor();
+    const snapshot = monitor.getDiagnosticSnapshot();
+    const stats = monitor.getStats();
+
+    return {
+      ...snapshot,
+      status: stats.timeouts > 0 ? 'degraded' : stats.errors > 0 ? 'degraded' : 'healthy',
+      issues: stats.timeouts > 0 ? [`${stats.timeouts} shader compile timeout(s) detected`] : [],
     };
   }
 
@@ -682,6 +741,7 @@ export class HealthEvaluatorService {
       },
       renderStackFindings: snapshot.renderStackFindings ?? [],
       outdoorsTrace: this._buildOutdoorsTraceDiagnostics(),
+      shaderCompiles: snapshot.shaderCompiles,
     };
   }
 

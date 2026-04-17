@@ -395,7 +395,10 @@ export class LightningEffectV2 {
         env = 1.0;
       }
 
-      if (this._randFloat(strike.rng) < this.params.flickerChance * timeInfo.delta * 60.0) {
+      const motionDelta = (typeof timeInfo?.motionDelta === 'number')
+        ? timeInfo.motionDelta
+        : (typeof timeInfo?.delta === 'number' ? timeInfo.delta : 0.016);
+      if (this._randFloat(strike.rng) < this.params.flickerChance * motionDelta * 60.0) {
         env *= this._randFloatRange(strike.rng, 0.35, 0.9);
       }
 

@@ -32,8 +32,13 @@
 import { createLogger } from '../../core/log.js';
 import { weatherController } from '../../core/WeatherController.js';
 import { probeMaskFile } from '../../assets/loader.js';
-import { tileHasLevelsRange, readTileLevelsFlags } from '../../foundry/levels-scene-flags.js';
-import { OVERLAY_THREE_LAYER } from '../../core/render-layers.js';
+import {
+  tileHasLevelsRange,
+  readTileLevelsFlags,
+  getViewedLevelBackgroundSrc,
+} from '../../foundry/levels-scene-flags.js';
+// OVERLAY_THREE_LAYER intentionally not imported — splashes use layer 0 only
+// and rely on LayerOrderPolicy FLOOR_EFFECTS band for correct stacking.
 import {
   WaterEdgeMaskShape,
   WaterInteriorMaskShape,
@@ -52,14 +57,12 @@ import {
   ConstantValue,
 } from '../../libs/three.quarks.module.js';
 
+import {
+  GROUND_Z,
+  effectUnderOverheadOrder,
+} from '../LayerOrderPolicy.js';
+
 const log = createLogger('WaterSplashesV2');
-
-// Ground Z for the bus scene (matches FloorRenderBus GROUND_Z).
-const GROUND_Z = 1000;
-
-// Keep render-order math aligned with FloorRenderBus floor bands.
-const RENDER_ORDER_PER_FLOOR = 10000;
-const OVERHEAD_OFFSET = 5000;
 
 /** Detect legacy splash darken block for one-shot shader upgrade. */
 const SHADOW_DARKEN_V1_ANCHOR = '// MS_WATER_SPLASHES_SHADOW_DARKEN_V1';
@@ -594,8 +597,7 @@ export class WaterSplashesEffectV2 {
   _updateBatchRenderOrder(maxFloorIndex) {
     if (!this._batchRenderer) return;
     const safeFloorIndex = Number.isFinite(Number(maxFloorIndex)) ? Number(maxFloorIndex) : 0;
-    const floorBandStart = safeFloorIndex * RENDER_ORDER_PER_FLOOR;
-    this._batchRenderer.renderOrder = floorBandStart + (OVERHEAD_OFFSET - 1);
+    this._batchRenderer.renderOrder = effectUnderOverheadOrder(safeFloorIndex, 50);
   }
 
   // ── Lifecycle ──────────────────────────────────────────────────────────────
@@ -606,16 +608,15 @@ export class WaterSplashesEffectV2 {
     if (!THREE) { log.warn('initialize: THREE not available'); return; }
 
     // Create a dedicated BatchedRenderer for water splash particles.
-    // IMPORTANT (V2): FloorRenderBus tiles use very large renderOrder values
-    // (floorIndex * 10000 + sort). Starting at 49 causes all tile draws to
-    // fully overwrite particle pixels. Match FireEffectV2: start above the
-    // overhead tile offset (5000) so particles are visible above regular tiles.
+    // Uses FLOOR_EFFECTS role so splashes sit between albedo and overhead.
+    // Layer 0 only — no OVERLAY_THREE_LAYER; floor-band ordering handles
+    // stacking correctly without a late-overlay bypass.
     this._batchRenderer = new BatchedRenderer();
-    this._batchRenderer.renderOrder = OVERHEAD_OFFSET - 1; // Matches FireEffectV2 initial value
+    this._batchRenderer.renderOrder = effectUnderOverheadOrder(0, 50);
     this._batchRenderer.frustumCulled = false;
     try {
-      if (this._batchRenderer.layers && typeof this._batchRenderer.layers.enable === 'function') {
-        this._batchRenderer.layers.enable(OVERLAY_THREE_LAYER);
+      if (this._batchRenderer.layers && typeof this._batchRenderer.layers.set === 'function') {
+        this._batchRenderer.layers.set(0);
       }
     } catch (_) {}
 
@@ -667,7 +668,7 @@ export class WaterSplashesEffectV2 {
     const floorWaterData = new Map();
 
     // ── Process background image first (if it has a _Water mask) ─────────────
-    const bgSrc = canvas?.scene?.background?.src;
+    const bgSrc = getViewedLevelBackgroundSrc(canvas?.scene) ?? canvas?.scene?.background?.src;
     if (bgSrc) {
       const dotIdx = bgSrc.lastIndexOf('.');
       const bgBasePath = dotIdx > 0 ? bgSrc.substring(0, dotIdx) : bgSrc;
@@ -999,7 +1000,9 @@ export class WaterSplashesEffectV2 {
     } catch (_) {}
 
     // Compute dt for three.quarks (matches FireEffectV2 time scaling).
-    const deltaSec = typeof timeInfo.delta === 'number' ? timeInfo.delta : 0.016;
+    const deltaSec = typeof timeInfo?.motionDelta === 'number'
+      ? timeInfo.motionDelta
+      : (typeof timeInfo?.delta === 'number' ? timeInfo.delta : 0.016);
     const clampedDelta = Math.min(deltaSec, 0.1);
     const simSpeed = (weatherController && typeof weatherController.simulationSpeed === 'number')
       ? weatherController.simulationSpeed : 2.0;

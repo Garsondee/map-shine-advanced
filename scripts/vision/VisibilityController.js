@@ -30,7 +30,7 @@ import { isGmLike } from '../core/gm-parity.js';
 
 import { createLogger } from '../core/log.js';
 import { getTokenRenderingMode, TOKEN_RENDERING_MODES } from '../settings/scene-settings.js';
-import { isLevelsEnabledForScene } from '../foundry/levels-scene-flags.js';
+import { isLevelsEnabledForScene, hasV14NativeLevels } from '../foundry/levels-scene-flags.js';
 
 const log = createLogger('VisibilityController');
 
@@ -239,32 +239,33 @@ export class VisibilityController {
   _isTokenAboveCurrentLevel(tokenDoc) {
     try {
       const levelContext = window.MapShine?.activeLevelContext;
-      // No active level context (single-level scene or levels not configured)
-      // → don't filter, let normal Foundry visibility decide.
-      if (!levelContext || !Number.isFinite(levelContext.top)) return false;
+      if (!levelContext) return false;
 
-      // Do not apply strict level gating unless the scene is explicitly
-      // Levels-enabled. Inferred runtime bands are useful for navigation/UI,
-      // but can otherwise hide all tokens in non-Levels scenes.
-      if (!isLevelsEnabledForScene(canvas?.scene)) return false;
-
-      // Inferred contexts are not authoritative wall-height levels.
-      // Fail-open to avoid filtering tokens from synthetic floor bands.
+      const scene = canvas?.scene;
+      if (!hasV14NativeLevels(scene) && !isLevelsEnabledForScene(scene)) return false;
       if (String(levelContext?.source || '') === 'inferred') return false;
-
-      // Only filter when there are multiple levels — single-level scenes
-      // should never hide tokens via this path.
       if ((levelContext.count ?? 0) <= 1) return false;
 
+      // V14 native: tokens have `level` (singular ID). Use Foundry's
+      // includedInLevel which respects the level visibility graph.
+      if (hasV14NativeLevels(scene)) {
+        const activeLevelId = levelContext?.levelId;
+        if (typeof activeLevelId === 'string') {
+          const td = tokenDoc?.document ?? tokenDoc;
+          if (typeof td?.includedInLevel === 'function') {
+            return !td.includedInLevel(activeLevelId);
+          }
+          const tokenLevelId = td?.level ?? td?._source?.level;
+          if (typeof tokenLevelId === 'string') {
+            return tokenLevelId !== activeLevelId;
+          }
+        }
+      }
+
+      // Legacy elevation-based filtering
+      if (!Number.isFinite(levelContext.top)) return false;
       const tokenElev = Number(tokenDoc?.elevation ?? 0);
       if (!Number.isFinite(tokenElev)) return false;
-
-      // Token is above if its elevation exceeds the active level's top.
-      // Use a small epsilon to avoid floating-point edge cases at boundaries.
-      // IMPORTANT: Shared-boundary semantics.
-      // If level A is [0,10] and level B is [10,20], elevation=10 should be treated
-      // as belonging to the UPPER level (B). So when viewing level A, tokens at
-      // elevation==top should be hidden.
       return tokenElev >= levelContext.top - 0.01;
     } catch (_) {
       return false;

@@ -12,7 +12,7 @@ import { weatherController } from '../core/WeatherController.js';
 import { OVERLAY_THREE_LAYER, TILE_FEATURE_LAYERS } from '../core/render-layers.js';
 import { debugLoadingProfiler } from '../core/debug-loading-profiler.js';
 import { isTileVisibleForPerspective, isBackgroundVisibleForPerspective, isWeatherVisibleForPerspective } from '../foundry/elevation-context.js';
-import { tileHasLevelsRange, isLevelsEnabledForScene, readTileLevelsFlags } from '../foundry/levels-scene-flags.js';
+import { tileHasLevelsRange, isLevelsEnabledForScene, readTileLevelsFlags, hasV14NativeLevels, getCanvasForegroundElevationSplit } from '../foundry/levels-scene-flags.js';
 import { applyTileLevelDefaults } from '../foundry/levels-create-defaults.js';
 import { getEffectMaskRegistry, probeMaskFile } from '../assets/loader.js';
 import { getTextureBudgetTracker, estimateTextureBytes } from '../assets/TextureBudgetTracker.js';
@@ -55,7 +55,7 @@ const BELOW_FLOOR_PRESENCE_LAYER = 24;
  *
  * Priority:
  * 1) Respect persisted source overhead flags when present (legacy/core scenes).
- * 2) Fall back to elevation >= scene.foregroundElevation.
+ * 2) Fall back to elevation >= active level foreground top (Foundry v14 Level#elevation.top).
  *
  * We only read _source/flags — never TileDocument#overhead (deprecated on PF2e v12+).
  *
@@ -72,9 +72,7 @@ export function isTileOverhead(tileDoc) {
   const levelsOverhead = tileDoc?._source?.flags?.levels?.overhead;
   if (typeof levelsOverhead === 'boolean') return levelsOverhead;
 
-  const foregroundElevation = Number.isFinite(canvas.scene?.foregroundElevation)
-    ? canvas.scene.foregroundElevation
-    : 0;
+  const foregroundElevation = getCanvasForegroundElevationSplit();
   const elev = Number.isFinite(tileDoc?.elevation) ? tileDoc.elevation : 0;
   return elev >= foregroundElevation;
 }
@@ -2075,8 +2073,8 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     this._hookIds.push(['updateScene', Hooks.on('updateScene', (scene, changes) => {
       if (scene.id !== canvas.scene?.id) return;
       
-      if ('foregroundElevation' in changes) {
-        log.info('Foreground elevation changed, refreshing all tile transforms');
+      if ('foregroundElevation' in changes || 'levels' in changes) {
+        log.info('Foreground elevation / levels changed, refreshing all tile transforms');
         for (const { sprite, tileDoc } of this.tileSprites.values()) {
           this.updateSpriteTransform(sprite, tileDoc);
         }
@@ -3804,37 +3802,30 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     // rangeTop (i.e. it is a floor-like level tile, not a roof), treat it as a
     // regular floor layer so tokens on that level render above it.
     //
-    // Without this, tiles elevated above scene.foregroundElevation are always
+    // Without this, tiles elevated above the active level foreground top are always
     // classified as overhead, which causes same-floor tokens to appear "under"
     // their floor art after stair elevation changes.
     let treatAsCurrentFloor = false;
     try {
       const activeLevelContext = window.MapShine?.activeLevelContext;
-      if (isLevelsEnabledForScene(canvas?.scene) && hasFiniteActiveLevelBand(activeLevelContext)) {
+      const _scene = canvas?.scene;
+      if ((hasV14NativeLevels(_scene) || isLevelsEnabledForScene(_scene)) && hasFiniteActiveLevelBand(activeLevelContext)) {
         const bandBottom = Number(activeLevelContext.bottom);
         const bandTop = Number(activeLevelContext.top);
         const tileElevation = Number(tileDoc?.elevation);
 
-        if (tileHasLevelsRange(tileDoc)) {
+        // V14-native: check level membership directly
+        if (hasV14NativeLevels(_scene) && activeLevelContext.levelId && tileDoc?.levels?.size) {
+          treatAsCurrentFloor = tileDoc.levels.has(activeLevelContext.levelId);
+        } else if (tileHasLevelsRange(tileDoc)) {
           const flags = readTileLevelsFlags(tileDoc);
           const tileBottom = Number(flags.rangeBottom);
           const tileTop = Number(flags.rangeTop);
 
-          // Finite rangeTop => floor/platform-like tile. Overlap with active band
-          // means this is the current floor and should not use roof layering.
           if (Number.isFinite(tileBottom) && Number.isFinite(tileTop)) {
-            // Inclusive overlap test to handle shared boundaries (e.g. tile top
-            // exactly equals band bottom). This must be inclusive so same-floor
-            // tiles at boundary elevations don't get misclassified as overhead.
-            // IMPORTANT: Use an exclusive top boundary to match the Levels
-            // visibility semantics used elsewhere in MapShine.
-            // A tile whose bottom == bandTop belongs to the floor above.
-            // A tile whose top == bandBottom belongs to the floor below.
             treatAsCurrentFloor = !(tileTop <= bandBottom || tileBottom >= bandTop);
           }
         } else if (Number.isFinite(tileElevation)) {
-          // Fallback for tiles without explicit Levels flags.
-          // Exclusive top boundary: elevation==bandTop belongs to the floor above.
           treatAsCurrentFloor = tileElevation >= bandBottom && tileElevation < bandTop;
         }
       }

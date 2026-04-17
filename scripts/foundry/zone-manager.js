@@ -20,8 +20,7 @@ import { canPersistSceneDocument, isGmLike } from '../core/gm-parity.js';
 import { createLogger } from '../core/log.js';
 import { moveTrace } from '../core/movement-trace-log.js';
 import { scheduleTokenLevelSwitch } from '../scene/level-interaction-service.js';
-import { getLevelsCompatibilityMode, LEVELS_COMPATIBILITY_MODES } from './levels-compatibility.js';
-import { isLevelsEnabledForScene } from './levels-scene-flags.js';
+import { hasV14NativeLevels } from './levels-scene-flags.js';
 
 const log = createLogger('ZoneManager');
 const STAIR_TRANSITION_PAUSE_MS = 1000;
@@ -954,8 +953,7 @@ export class ZoneManager {
   _shouldSuspendZoneStairRuntime() {
     const scene = canvas?.scene;
     if (!scene) return false;
-    if (getLevelsCompatibilityMode() === LEVELS_COMPATIBILITY_MODES.OFF) return false;
-    if (!isLevelsEnabledForScene(scene)) return false;
+    if (!hasV14NativeLevels(scene)) return false;
 
     // Single-source-of-truth policy:
     // If imported Levels stair engines exist in the scene, suspend bespoke zone

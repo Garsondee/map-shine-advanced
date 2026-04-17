@@ -39,6 +39,36 @@ const BURST_Z_OFFSET = 5;
 
 const ASH_MASK_FORMATS = ['webp', 'png', 'jpg', 'jpeg'];
 
+/** Parallel mask probe + CPU scan; serial per-tile was starving Foundry's websocket during populate. */
+const ASH_TILE_PROBE_CONCURRENCY = 8;
+
+/**
+ * @template T, R
+ * @param {T[]} items
+ * @param {number} limit
+ * @param {(item: T, index: number) => Promise<R>} fn
+ * @returns {Promise<R[]>}
+ */
+async function mapWithConcurrency(items, limit, fn) {
+  if (!items.length) return [];
+  const cap = Math.max(1, Math.min(limit, items.length));
+  const results = new Array(items.length);
+  let next = 0;
+  async function worker() {
+    for (;;) {
+      const i = next++;
+      if (i >= items.length) break;
+      results[i] = await fn(items[i], i);
+    }
+  }
+  await Promise.all(Array.from({ length: cap }, () => worker()));
+  return results;
+}
+
+async function yieldToEventLoop() {
+  await new Promise((r) => setTimeout(r, 0));
+}
+
 class AshBurstShape {
   /**
    * @param {Float32Array} pointsWorld - packed [x, y, brightness, ...] in world space
@@ -250,6 +280,18 @@ export class AshDisturbanceEffectV2 {
   async populate(foundrySceneData) {
     void foundrySceneData;
 
+    const popT0 = (typeof performance !== 'undefined' && performance.now)
+      ? performance.now()
+      : Date.now();
+    const popPhase = (phase, extra = {}) => {
+      const now = (typeof performance !== 'undefined' && performance.now)
+        ? performance.now()
+        : Date.now();
+      log.warn(`[POPULATE] AshDisturbanceEffectV2 | ${phase} | +${(now - popT0).toFixed(0)}ms`, extra);
+    };
+
+    popPhase('enter populate()');
+
     // Ensure our BatchedRenderer is attached to the bus scene AFTER the bus has
     // populated/cleared its internal tile map.
     try {
@@ -258,14 +300,26 @@ export class AshDisturbanceEffectV2 {
       }
     } catch (_) {}
 
+    popPhase('after bus overlay attach attempt');
+
     // Build per-floor spawn point clouds.
+    const tTex0 = (typeof performance !== 'undefined' && performance.now)
+      ? performance.now()
+      : Date.now();
     try {
       await this._ensureTextures();
     } catch (_) {
     }
+    const tTex1 = (typeof performance !== 'undefined' && performance.now)
+      ? performance.now()
+      : Date.now();
+    popPhase('after ensureTextures()', { ensureTexturesMs: (tTex1 - tTex0).toFixed(0) });
 
     const THREE = window.THREE;
-    if (!THREE) return;
+    if (!THREE) {
+      popPhase('abort: THREE missing');
+      return;
+    }
 
     const floors = window.MapShine?.floorStack?.getFloors?.() ?? [];
     const worldH = canvas?.dimensions?.height ?? 0;
@@ -273,31 +327,41 @@ export class AshDisturbanceEffectV2 {
     // Background image source.
     const bgSrc = canvas?.scene?.background?.src ?? '';
     if (bgSrc) {
-      await this._accumulateMaskPointsForSource({
+      const tBg0 = (typeof performance !== 'undefined' && performance.now)
+        ? performance.now()
+        : Date.now();
+      const bgPts = await this._probeScanPointsForSource({
         baseSrc: bgSrc,
         isBackground: true,
         floorIndex: 0,
-        // Scene rect in Foundry coords
         x: canvas?.dimensions?.sceneX ?? 0,
         y: canvas?.dimensions?.sceneY ?? 0,
         w: canvas?.dimensions?.sceneWidth ?? 0,
         h: canvas?.dimensions?.sceneHeight ?? 0,
         worldH,
       });
+      const tBg1 = (typeof performance !== 'undefined' && performance.now)
+        ? performance.now()
+        : Date.now();
+      if (bgPts) this._mergePointsIntoFloor(0, bgPts);
+      popPhase('after background _Ash probe+scan', {
+        bgProbeMs: (tBg1 - tBg0).toFixed(0),
+        mergedPoints: !!bgPts,
+      });
+    } else {
+      popPhase('skip background (no bg src)');
     }
 
-    // Tiles.
     const tileDocs = canvas?.scene?.tiles?.contents ?? [];
+    const jobs = [];
     for (const tileDoc of tileDocs) {
       const src = tileDoc?.texture?.src ?? tileDoc?.img ?? '';
       if (!src) continue;
 
       const floorIndex = this._resolveFloorIndex(tileDoc, floors);
-
-      await this._accumulateMaskPointsForSource({
-        baseSrc: src,
-        isBackground: false,
+      jobs.push({
         floorIndex,
+        baseSrc: src,
         x: Number(tileDoc.x) || 0,
         y: Number(tileDoc.y) || 0,
         w: Number(tileDoc.width) || 0,
@@ -306,19 +370,108 @@ export class AshDisturbanceEffectV2 {
       });
     }
 
-    // After building point sets, rebuild systems for every floor.
-    for (const [floorIndex, st] of this._floorStates) {
-      this._rebuildSystemsForFloor(floorIndex, st.points);
-    }
+    popPhase('tile job list built', {
+      tileDocCount: tileDocs.length,
+      jobsWithSrc: jobs.length,
+      concurrency: ASH_TILE_PROBE_CONCURRENCY,
+    });
 
-    // Apply initial visibility based on current active floor.
+    const tPar0 = (typeof performance !== 'undefined' && performance.now)
+      ? performance.now()
+      : Date.now();
+    const probeRows = await mapWithConcurrency(
+      jobs,
+      ASH_TILE_PROBE_CONCURRENCY,
+      async (job) => {
+        const pts = await this._probeScanPointsForSource({
+          baseSrc: job.baseSrc,
+          isBackground: false,
+          floorIndex: job.floorIndex,
+          x: job.x,
+          y: job.y,
+          w: job.w,
+          h: job.h,
+          worldH: job.worldH,
+        });
+        return pts ? { floorIndex: job.floorIndex, points: pts } : null;
+      },
+    );
+    const tPar1 = (typeof performance !== 'undefined' && performance.now)
+      ? performance.now()
+      : Date.now();
+    const hits = probeRows.filter((r) => r != null).length;
+    popPhase('after parallel probe+scan', {
+      parallelWallMs: (tPar1 - tPar0).toFixed(0),
+      jobs: jobs.length,
+      rowsWithMaskHits: hits,
+    });
+
+    const tMerge0 = (typeof performance !== 'undefined' && performance.now)
+      ? performance.now()
+      : Date.now();
+    let mergeCount = 0;
+    for (const row of probeRows) {
+      if (!row) continue;
+      this._mergePointsIntoFloor(row.floorIndex, row.points);
+      mergeCount++;
+      if (mergeCount % 32 === 0) {
+        await yieldToEventLoop();
+      }
+    }
+    const tMerge1 = (typeof performance !== 'undefined' && performance.now)
+      ? performance.now()
+      : Date.now();
+    popPhase('after merge pass', {
+      mergeWallMs: (tMerge1 - tMerge0).toFixed(0),
+      mergedRows: mergeCount,
+    });
+
+    const tRb0 = (typeof performance !== 'undefined' && performance.now)
+      ? performance.now()
+      : Date.now();
+    let rebuildIdx = 0;
+    for (const [floorIndex, st] of this._floorStates) {
+      const tOne = (typeof performance !== 'undefined' && performance.now)
+        ? performance.now()
+        : Date.now();
+      this._rebuildSystemsForFloor(floorIndex, st.points);
+      const tOneEnd = (typeof performance !== 'undefined' && performance.now)
+        ? performance.now()
+        : Date.now();
+      const oneMs = tOneEnd - tOne;
+      if (oneMs > 50) {
+        log.warn(`[POPULATE] AshDisturbanceEffectV2 | slow _rebuildSystemsForFloor | floor=${floorIndex} | ms=${oneMs.toFixed(0)} | +${(tOneEnd - popT0).toFixed(0)}ms since populate start`);
+      }
+      rebuildIdx++;
+      if (rebuildIdx % 2 === 0) {
+        await yieldToEventLoop();
+      }
+    }
+    const tRb1 = (typeof performance !== 'undefined' && performance.now)
+      ? performance.now()
+      : Date.now();
+    popPhase('after all _rebuildSystemsForFloor', {
+      rebuildTotalMs: (tRb1 - tRb0).toFixed(0),
+      floors: rebuildIdx,
+    });
+
+    const tFc0 = (typeof performance !== 'undefined' && performance.now)
+      ? performance.now()
+      : Date.now();
     const activeFloor = window.MapShine?.floorStack?.getActiveFloor?.();
     const maxFloorIdx = Number.isFinite(activeFloor?.index) ? activeFloor.index : 0;
     this.onFloorChange(maxFloorIdx);
+    const tFc1 = (typeof performance !== 'undefined' && performance.now)
+      ? performance.now()
+      : Date.now();
+    popPhase('after onFloorChange', { onFloorChangeMs: (tFc1 - tFc0).toFixed(0), maxFloorIdx });
 
-    log.info('AshDisturbanceEffectV2 populated', {
+    const popT1 = (typeof performance !== 'undefined' && performance.now)
+      ? performance.now()
+      : Date.now();
+    log.warn(`[POPULATE] AshDisturbanceEffectV2 | populate() COMPLETE | totalMs=${(popT1 - popT0).toFixed(0)}`, {
       floors: this._floorStates.size,
-      pointsByFloor: Array.from(this._floorStates.entries()).map(([k, v]) => [k, Math.floor((v.points?.length ?? 0) / 3)])
+      pointsByFloor: Array.from(this._floorStates.entries()).map(([k, v]) => [k, Math.floor((v.points?.length ?? 0) / 3)]),
     });
   }
 
@@ -351,9 +504,13 @@ export class AshDisturbanceEffectV2 {
     const ashIntensity = Number(weather.ashIntensity) || 0;
     if (ashIntensity <= 0) return;
 
+    const motionDelta = (typeof timeInfo?.motionDelta === 'number')
+      ? timeInfo.motionDelta
+      : (typeof timeInfo?.delta === 'number' ? timeInfo.delta : 0.016);
+
     // Quarks tick.
     try {
-      this._batchRenderer.update(timeInfo?.delta ?? 0.016);
+      this._batchRenderer.update(motionDelta);
     } catch (_) {
     }
 
@@ -374,7 +531,7 @@ export class AshDisturbanceEffectV2 {
 
         const t = Number(system.userData.burstTime) || 0;
         if (t > 0) {
-          system.userData.burstTime = Math.max(0, t - (timeInfo?.delta || 0));
+          system.userData.burstTime = Math.max(0, t - motionDelta);
           if (system.userData.burstTime <= 0) {
             const emission = system.emissionOverTime;
             if (emission && typeof emission.value === 'number') emission.value = 0;
@@ -640,15 +797,21 @@ export class AshDisturbanceEffectV2 {
     return 0;
   }
 
-  async _accumulateMaskPointsForSource({ baseSrc, isBackground, floorIndex, x, y, w, h, worldH }) {
-    if (!baseSrc) return;
-    if (!(w > 0 && h > 0)) return;
+  /**
+   * Probe `_Ash` mask and scan pixels to world-space spawn points (no `_floorStates` mutation).
+   * @returns {Promise<Float32Array|null>}
+   * @private
+   */
+  async _probeScanPointsForSource({ baseSrc, isBackground, floorIndex, x, y, w, h, worldH }) {
+    void floorIndex;
+    if (!baseSrc) return null;
+    if (!(w > 0 && h > 0)) return null;
 
     const basePath = this._extractBasePath(baseSrc);
-    if (!basePath) return;
+    if (!basePath) return null;
 
     const mask = await this._probeDirectMask(basePath, '_Ash', { suppressProbeErrors: true });
-    if (!mask?.image) return;
+    if (!mask?.image) return null;
 
     const points = this._scanMaskToWorldPoints(mask.image, {
       isBackground,
@@ -659,15 +822,21 @@ export class AshDisturbanceEffectV2 {
       worldH,
     });
 
-    if (!points || points.length === 0) return;
+    if (!points || points.length === 0) return null;
+    return points;
+  }
 
+  /**
+   * Append packed spawn points for a floor (called sequentially after parallel probe).
+   * @private
+   */
+  _mergePointsIntoFloor(floorIndex, points) {
     const existing = this._floorStates.get(floorIndex);
     if (!existing) {
       this._floorStates.set(floorIndex, { points, systems: [] });
       return;
     }
 
-    // Merge (append) packed arrays.
     const a = existing.points;
     const b = points;
     const merged = new Float32Array(a.length + b.length);

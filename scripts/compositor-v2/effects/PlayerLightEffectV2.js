@@ -1173,7 +1173,9 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
     // This mirrors FireEffectV2's explicit BatchedRenderer.update() flow.
     try {
       if (this._torchBatchRenderer && typeof this._torchBatchRenderer.update === 'function') {
-        const deltaSec = typeof timeInfo?.delta === 'number' ? timeInfo.delta : 0.016;
+        const deltaSec = typeof timeInfo?.motionDelta === 'number'
+          ? timeInfo.motionDelta
+          : (typeof timeInfo?.delta === 'number' ? timeInfo.delta : 0.016);
         const clampedDelta = Math.min(deltaSec, 0.1);
         const simSpeed = (weatherController && typeof weatherController.simulationSpeed === 'number')
           ? weatherController.simulationSpeed
@@ -1462,7 +1464,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
         type,
         source: tokenObj,
         token: tokenObj,
-        wallDirectionMode: 0,   // NORMAL — respect one-way wall direction (MS-LVL-074)
+        edgeDirectionMode: CONST.EDGE_DIRECTION_MODES.NORMAL,
         useThreshold: true      // Evaluate proximity/distance walls (MS-LVL-073)
       });
       if (!Array.isArray(allHits) || allHits.length === 0) return null;
@@ -2491,7 +2493,9 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
   _updateTorch(timeInfo, tokenCenterWorld, cursorWorld, blocked, distanceUnits, groundZ, distanceFade = 1.0, maxDistanceUnitsOverride = null, snapNow = false) {
     if (!this._torchParticleSystem || !this._torchPos || !this._torchVel) return;
 
-    const dt = typeof timeInfo?.delta === 'number' ? timeInfo.delta : 0.016;
+    const dt = typeof timeInfo?.motionDelta === 'number'
+      ? timeInfo.motionDelta
+      : (typeof timeInfo?.delta === 'number' ? timeInfo.delta : 0.016);
     const t = typeof timeInfo?.elapsed === 'number' ? timeInfo.elapsed : 0;
 
     if (snapNow) {
@@ -2641,7 +2645,9 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
 
     const lighting = this._getLightingEffect();
 
-    const dt = typeof timeInfo?.delta === 'number' ? timeInfo.delta : 0.016;
+    const dt = typeof timeInfo?.motionDelta === 'number'
+      ? timeInfo.motionDelta
+      : (typeof timeInfo?.delta === 'number' ? timeInfo.delta : 0.016);
     const t = typeof timeInfo?.elapsed === 'number' ? timeInfo.elapsed : 0;
 
     const pxToUnits = this._pxToUnits();

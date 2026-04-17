@@ -40,16 +40,14 @@ import { weatherController } from '../../core/WeatherController.js';
 import { WeatherParticles } from '../../particles/WeatherParticles.js';
 import { BatchedRenderer } from '../../libs/three.quarks.module.js';
 
+import {
+  effectUnderOverheadOrder,
+} from '../LayerOrderPolicy.js';
+
 const log = createLogger('WeatherParticlesV2');
 
 // Layer 31 — only for batches that must draw in FloorCompositor._renderLateWorldOverlay.
 const OVERLAY_THREE_LAYER = 31;
-
-// Align with FloorRenderBus / FireEffectV2: sort above ground tiles, below overhead + trees.
-const RENDER_ORDER_PER_FLOOR = 10000;
-const OVERHEAD_OFFSET = 5000;
-/** One step below overhead band so rain/drips/snow draw under roof + tree quads. */
-const WEATHER_BATCH_RENDER_ORDER_BASE = OVERHEAD_OFFSET - 1;
 
 // ─── WeatherParticlesV2 ───────────────────────────────────────────────────────
 
@@ -216,8 +214,8 @@ export class WeatherParticlesV2 {
     this._busScene = busScene;
 
     // Create shared three.quarks BatchedRenderer and add it to the bus scene.
-    // Layer 0 + renderOrder in (ground, overhead) band: main bus pass draws weather
-    // under overhead tiles / TreeEffectV2 (see FloorRenderBus.renderTo vs late overlay).
+    // Layer 0 + FLOOR_EFFECTS role: main bus pass draws weather under overhead
+    // tiles / TreeEffectV2 (see LayerOrderPolicy + FloorRenderBus.renderTo).
     this._batchRenderer = new BatchedRenderer();
     try {
       if (this._batchRenderer.layers?.set) {
@@ -262,7 +260,9 @@ export class WeatherParticlesV2 {
   update(timeInfo) {
     if (!this._initialized || !this.enabled) return;
 
-    const deltaSec = typeof timeInfo?.delta === 'number' ? timeInfo.delta : 0.016;
+    const deltaSec = typeof timeInfo?.motionDelta === 'number'
+      ? timeInfo.motionDelta
+      : (typeof timeInfo?.delta === 'number' ? timeInfo.delta : 0.016);
 
     // Re-attach BatchedRenderer and emitters if FloorRenderBus.clear() evicted them.
     // This is the ROOT CAUSE fix: clear() wipes all bus scene children (including
@@ -388,8 +388,7 @@ export class WeatherParticlesV2 {
     const fs = window.MapShine?.floorStack;
     const active = fs?.getActiveFloor?.();
     const fi = Number.isFinite(Number(active?.index)) ? Number(active.index) : 0;
-    const floorBandStart = Math.max(0, fi) * RENDER_ORDER_PER_FLOOR;
-    this._batchRenderer.renderOrder = floorBandStart + WEATHER_BATCH_RENDER_ORDER_BASE;
+    this._batchRenderer.renderOrder = effectUnderOverheadOrder(fi, 100);
   }
 
   // ── Resize ──────────────────────────────────────────────────────────────────

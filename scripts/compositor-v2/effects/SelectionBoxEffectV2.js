@@ -655,7 +655,7 @@ export class SelectionBoxEffectV2 {
 
     if (!ov?.strokeRect || !ov?.svg) return;
 
-    const dt = Number(timeInfo?.delta) || 0;
+    const dt = Number(timeInfo?.motionDelta ?? timeInfo?.delta) || 0;
     ov.time += dt;
 
     // Keep illumination animated even if other overlay animations are disabled.

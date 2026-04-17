@@ -5,8 +5,8 @@
  * Layer instances are created under their parent group; `CanvasGroupMixin` only defines
  * `canvas[name]` when `!(name in canvas)`, so `grid` never aliases the layer on `canvas`.
  *
- * @see foundryvttsourcecode/resources/app/client/canvas/board.mjs — `get grid()`
- * @see foundryvttsourcecode/resources/app/client/canvas/groups/canvas-group-mixin.mjs
+ * @see foundryvttsourcecode_v13/resources/app/client/canvas/board.mjs — `get grid()`
+ * @see foundryvttsourcecode_v13/resources/app/client/canvas/groups/canvas-group-mixin.mjs
  * @module foundry/canvas-layer-resolve
  */
 

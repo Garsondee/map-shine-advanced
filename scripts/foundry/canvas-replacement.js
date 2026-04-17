@@ -17,15 +17,9 @@ import { CandleFlamesEffectV2 } from '../compositor-v2/effects/CandleFlamesEffec
 import { LightningEffectV2 } from '../compositor-v2/effects/LightningEffectV2.js';
 import { MaskManager } from '../masks/MaskManager.js';
 import { ParticleSystem } from '../particles/ParticleSystem.js';
-// Effect wiring ->-> tables, helpers, and re-exported effect classes (for static getControlSchema() calls)
+// Effect wiring: capabilities registry + V2 class re-exports for static getControlSchema() calls
 import {
-  getIndependentEffectDefs,
   registerAllCapabilities,
-  wireGraphicsSettings,
-  readLazySkipIds,
-  wireBaseMeshes,
-  exposeEffectsEarly,
-  // V2 effect classes for initializeUI's static getControlSchema() calls
   SpecularEffectV2,
   FluidEffectV2,
   IridescenceEffectV2,
@@ -38,12 +32,10 @@ import {
   LightingEffectV2,
   FireEffectV2,
   DustEffectV2,
-  AshDisturbanceEffectV2,
   SmellyFliesEffect,
   CloudEffectV2,
   AsciiEffectV2,
   WaterEffectV2,
-  WaterGlitterEffectV2,
   AtmosphericFogEffectV2,
   FogOfWarEffectV2,
   PlayerLightEffectV2,
@@ -53,9 +45,6 @@ import { RenderLoop } from '../core/render-loop.js';
 import { TweakpaneManager } from '../ui/tweakpane-manager.js';
 import { ControlPanelManager } from '../ui/control-panel-manager.js';
 import { CameraPanelManager } from '../ui/camera-panel-manager.js';
-import { LevelNavigatorOverlay } from '../ui/level-navigator-overlay.js';
-import { LevelsAuthoringDialog } from '../ui/levels-authoring-dialog.js';
-import { LevelsEditorV2 } from '../ui/levels-editor/levels-editor-v2.js';
 import { TokenManager } from '../scene/token-manager.js';
 import { VisibilityController } from '../vision/VisibilityController.js';
 import { DetectionFilterEffect } from '../effects/DetectionFilterEffect.js';
@@ -108,24 +97,18 @@ import { EffectCapabilitiesRegistry } from '../effects/effect-capabilities-regis
 import { GraphicsSettingsManager } from '../ui/graphics-settings-manager.js';
 import { TokenMovementManager } from '../scene/token-movement-manager.js';
 import { LoadSession } from '../core/load-session.js';
+import { loadCoordinator, CoordinatorState } from '../core/LoadCoordinator.js';
+import { resolveEffectEnabled } from '../effects/resolve-effect-enabled.js';
 import { ResizeHandler } from './resize-handler.js';
 import { ModeManager } from './mode-manager.js';
 import { getConfiguredCanvasLayer } from './canvas-layer-resolve.js';
 import { exposeGlobals } from './manager-wiring.js';
 import { DepthPassManager } from '../scene/depth-pass-manager.js';
-import {
-  detectLevelsRuntimeInteropState,
-  enforceMapShineRuntimeAuthority,
-  formatLevelsInteropWarning,
-} from './levels-compatibility.js';
 import { isSoundAudibleForPerspective } from './elevation-context.js';
 import { getFloorStackBandsSignature, getSceneBandsForFloorStack } from './levels-floor-stack-bands.js';
-import { emitModuleConflictWarnings } from './levels-compatibility.js';
-import { installLevelsRegionBehaviorCompatPatch } from './region-levels-compat.js';
+import { hasV14NativeLevels, getViewedLevelBackgroundSrc } from './levels-scene-flags.js';
 import { installSnapshotStoreHooks, getSnapshot as getLevelsSnapshot } from '../core/levels-import/LevelsSnapshotStore.js';
-import { installLevelsApiFacade } from './levels-api-facade.js';
 import { ZoneManager } from './zone-manager.js';
-import { LevelsPerspectiveBridge } from './levels-perspective-bridge.js';
 import { IntroZoomEffect } from './intro-zoom-effect.js';
 import { HealthEvaluatorService } from '../core/diagnostics/HealthEvaluatorService.js';
 import { BreakerBoxDialog } from '../ui/breaker-box-dialog.js';
@@ -512,9 +495,14 @@ function _setCreateThreeCanvasProgress(step) {
 let _createThreeCanvasProgressTimeout = null;
 
 // Prevents concurrent createThreeCanvas calls (recovery + real canvasReady racing).
-// If a second call arrives while one is already running, it is dropped to avoid
-// double-initialization and the watchdog confusion that causes the 60s fadeIn timeout.
+// If a second call arrives while one is already running, queue the latest request
+// and replay it after the current run exits.
 let _createThreeCanvasRunning = false;
+/** @type {{scene:any, createOptions:object}|null} */
+let _createThreeCanvasPendingRequest = null;
+/** @type {{sceneId:string, atMs:number, reason:string}|null} */
+let _lastCreateThreeCanvasFailure = null;
+const CREATE_THREE_CANVAS_FAILURE_COOLDOWN_MS = 3000;
 
 // Tracks whether a Three.js canvas was actually attached to the DOM during the
 // current scene's lifetime. Used to guard renderer disposal in destroyThreeCanvas:
@@ -555,12 +543,6 @@ let controlPanel = null;
 
 /** @type {CameraPanelManager|null} */
 let cameraPanel = null;
-
-/** @type {LevelNavigatorOverlay|null} */
-let levelNavigatorOverlay = null;
-
-/** @type {LevelsPerspectiveBridge|null} - Syncs floor context between MapShine and Levels module */
-let levelsPerspectiveBridge = null;
 
 /** @type {CinematicCameraManager|null} */
 let cinematicCameraManager = null;
@@ -632,9 +614,6 @@ function _resolveInitialViewportCssPixels(canvasEl) {
 
 /** @type {EnhancedLightInspector|null} */
 let enhancedLightInspector = null;
-
-/** @type {LevelsAuthoringDialog|null} */
-let levelsAuthoring = null;
 
 /** @type {OverlayUIManager|null} */
 let overlayUIManager = null;
@@ -840,6 +819,63 @@ function _isPixiLayerDebugEnabled() {
 }
 
 /**
+ * Whether a Region document represents a legacy MeasuredTemplate (Foundry v14+).
+ * @param {object|null|undefined} doc
+ * @returns {boolean}
+ * @private
+ */
+function _msIsMeasuredTemplateRegionDoc(doc) {
+  try {
+    return !!foundry?.utils?.getProperty(doc, 'flags.core.MeasuredTemplate');
+  } catch (_) {
+    return false;
+  }
+}
+
+/**
+ * Region placeables that back template visuals (v14). Falls back to deprecated
+ * {@link canvas#templates#placeables} only when {@link canvas#regions} is absent (v12–v13).
+ * @returns {any[]}
+ * @private
+ */
+function _msMeasuredTemplateOverlayPlaceables() {
+  try {
+    if (canvas?.regions && Array.isArray(canvas.regions.placeables)) {
+      return canvas.regions.placeables.filter((p) => _msIsMeasuredTemplateRegionDoc(p?.document));
+    }
+  } catch (_) {}
+  try {
+    if (canvas?.templates && Array.isArray(canvas.templates.placeables)) {
+      return canvas.templates.placeables;
+    }
+  } catch (_) {}
+  return [];
+}
+
+/**
+ * True if the scene embeds at least one template-backed region (v14), or legacy templates (v13).
+ * @returns {boolean}
+ * @private
+ */
+function _msSceneHasMeasuredTemplateRegions() {
+  try {
+    const coll = canvas?.scene?.regions;
+    if (coll && typeof coll[Symbol.iterator] === 'function') {
+      for (const doc of coll) {
+        if (_msIsMeasuredTemplateRegionDoc(doc)) return true;
+      }
+      return false;
+    }
+  } catch (_) {}
+  try {
+    if (!canvas?.regions && canvas?.scene?.templates) {
+      return (Number(canvas.scene.templates.size) || 0) > 0;
+    }
+  } catch (_) {}
+  return false;
+}
+
+/**
  * Re-apply native MeasuredTemplate grid/ruler rendering after scene refresh.
  * This keeps wall-aware highlighted cells consistent with the "new template"
  * path and restores ruler text visibility in gameplay mode.
@@ -849,7 +885,7 @@ function _isPixiLayerDebugEnabled() {
 function _rehydrateNativeTemplateOverlays(reason = 'unspecified') {
   if (!canvas?.ready) return false;
   if (window?.MapShine?.__usePixiContentLayerBridge === true) return false;
-  const templates = Array.isArray(canvas?.templates?.placeables) ? canvas.templates.placeables : [];
+  const templates = _msMeasuredTemplateOverlayPlaceables();
   if (templates.length <= 0) return false;
 
   let touched = 0;
@@ -859,7 +895,11 @@ function _rehydrateNativeTemplateOverlays(reason = 'unspecified') {
       if (tpl.renderFlags?.set) {
         // Avoid refreshState here: Foundry ties controlIcon/ruler visibility to
         // active-layer state, which causes periodic icon/text flicker.
-        tpl.renderFlags.set({ refreshGrid: true, refreshText: true });
+        if (typeof tpl.highlightGrid === 'function') {
+          tpl.renderFlags.set({ refreshGrid: true, refreshText: true });
+        } else {
+          tpl.renderFlags.set({ refreshGeometry: true, refreshMeasurements: true });
+        }
       }
     } catch (_) {}
     try { if (typeof tpl.highlightGrid === 'function') tpl.highlightGrid(); } catch (_) {}
@@ -1451,9 +1491,19 @@ function refreshLevelsInteropDiagnostics(options = {}) {
     reason = 'runtime-check',
   } = options;
 
-  const state = gameplayMode
-    ? enforceMapShineRuntimeAuthority({ gameplayMode: true })
-    : detectLevelsRuntimeInteropState({ gameplayMode: false });
+  const state = {
+    mode: 'v14-native-only',
+    gameplayMode: !!gameplayMode,
+    levelsModuleActive: false,
+    wrappersLikelyActive: false,
+    hasRuntimeConflict: false,
+    shouldWarnInGameplay: false,
+    runtimeAuthority: {
+      visibility: 'foundry-v14-levels',
+      fog: 'foundry-v14-levels',
+      renderLayering: 'foundry-v14-levels',
+    },
+  };
 
   if (window.MapShine) {
     window.MapShine.levelsInteropDiagnostics = {
@@ -1463,22 +1513,8 @@ function refreshLevelsInteropDiagnostics(options = {}) {
     };
   }
 
-  if (emitWarning && state.shouldWarnInGameplay) {
-    const warning = formatLevelsInteropWarning(state);
-    const warningKey = [
-      String(state.mode || ''),
-      String(state.levelsModuleActive || false),
-      String(state.fogManagerTakeover || false),
-      String(state.canvasFogTakeover || false),
-      String(state.wrappersLikelyActive || false),
-    ].join('|');
-
-    if (warningKey !== lastLevelsInteropWarningKey) {
-      lastLevelsInteropWarningKey = warningKey;
-      log.warn(`${warning} [reason=${reason}]`, state);
-      safeCall(() => ui?.notifications?.warn?.(warning), 'levelsInterop.warnNotification', Severity.COSMETIC);
-    }
-  }
+  void emitWarning;
+  void lastLevelsInteropWarningKey;
 
   return state;
 }
@@ -2122,12 +2158,69 @@ export function initialize() {
         }
       }, 'levelMaskRebuild.floorLayerReassign', Severity.COSMETIC);
 
+      // V14 per-level backgrounds: when the viewed level's background differs
+      // from the current Three.js background, swap the bus background and
+      // reload mask bundles for the new art.
       safeCallAsync(async () => {
         const ms = window.MapShine;
         if (!sceneSettings.isEnabled(canvas?.scene)) return;
 
-        // V2-only path: no mask compositing or registry redistribution.
-        log.info('Level context changed: skipping legacy mask compositing + redistribution');
+        const sc = ms?.sceneComposer;
+        const bus = ms?.floorCompositorV2?._renderBus;
+        const fd = sc?.foundrySceneData;
+
+        if (hasV14NativeLevels(canvas?.scene) && sc && bus && fd) {
+          const viewedBgSrc = getViewedLevelBackgroundSrc(canvas.scene);
+          const currentBasePath = sc._lastMaskBasePath ?? sc.extractBasePath?.(
+            canvas.scene?.background?.src ?? ''
+          ) ?? '';
+          const newBasePath = viewedBgSrc ? sc.extractBasePath?.(viewedBgSrc) ?? '' : '';
+          const levelId = payload?.context?.levelId
+            ?? canvas?.level?.id
+            ?? canvas?.scene?._view
+            ?? null;
+          const pathChanged = !!(viewedBgSrc && newBasePath && newBasePath !== currentBasePath);
+          const levelChanged = !!(levelId && levelId !== sc._lastV14BusBgLevelId);
+
+          // Path-only swap misses the common case where two levels share the same image file
+          // (same basePath) but Foundry's viewed composite was stale on first paint.
+          if (viewedBgSrc && newBasePath && (pathChanged || levelChanged)) {
+            if (pathChanged) {
+              log.info(`Level background changed: ${currentBasePath} → ${newBasePath}`);
+            } else if (levelChanged) {
+              log.info(`V14 viewed level changed (${levelId}); refreshing bus bg for shared art: ${newBasePath}`);
+            }
+
+            if (levelId) sc._lastV14BusBgLevelId = levelId;
+
+            bus.swapBackgroundImage(viewedBgSrc, fd);
+
+            if (pathChanged) {
+              try {
+                const result = await sc._loadMasksOnlyForBasePath(newBasePath);
+                if (result?.masks?.length) {
+                  sc._lastMaskBasePath = newBasePath;
+                  log.info(`Reloaded ${result.masks.length} mask(s) for ${newBasePath}`);
+                }
+              } catch (err) {
+                log.warn('Failed to reload masks for new level background:', err);
+              }
+            }
+
+            const compositor = ms?.floorCompositorV2;
+            if (compositor && typeof compositor._syncOutdoorsMaskConsumers === 'function') {
+              compositor._syncOutdoorsMaskConsumers({
+                context: payload?.context ?? ms?.activeLevelContext ?? null,
+                force: true,
+              });
+            }
+            if (compositor && typeof compositor.forceRepopulate === 'function') {
+              await compositor.forceRepopulate({ source: 'level-context-resync' });
+            }
+          }
+        }
+
+        log.info('Level context changed: requesting render');
         ms?.renderLoop?.requestRender?.();
         ms?.renderLoop?.requestContinuousRender?.(300);
       }, 'levelMaskRebuild', Severity.DEGRADED);
@@ -2162,26 +2255,8 @@ export function initialize() {
     // range flags can gate ambient sound playback by elevation in gameplay mode.
     installAmbientSoundAudibilityPatch();
 
-    // MS-LVL-080..082: Intercept imported Levels region executeScript behaviors
-    // (stair/stairUp/stairDown/elevator) so they keep functioning in Map Shine
-    // gameplay mode without Levels runtime ownership.
-    installLevelsRegionBehaviorCompatPatch();
-
-    // MS-LVL-016: Install LevelsSnapshotStore auto-invalidation hooks so the
-    // immutable per-scene snapshot is rebuilt when tiles/walls/lights/etc change.
-    // The snapshot is exposed on window.MapShine.levelsSnapshot for diagnostics.
+    // Snapshot store hooks remain active for diagnostics.
     installSnapshotStoreHooks();
-
-    // MS-LVL-090: Install read-only Levels API compatibility facade at
-    // CONFIG.Levels.API so third-party modules/macros that call common
-    // Levels API methods get correct answers from Map Shine's own data.
-    // Only installs when Levels module is not active (avoids conflicts).
-    installLevelsApiFacade();
-
-    // MS-LVL-114: Emit one-time warnings for known modules that overlap
-    // with Map Shine's Levels compatibility features (e.g., elevatedvision,
-    // betterroofs). Only fires when compatibility mode is not 'off'.
-    emitModuleConflictWarnings();
 
     isHooked = true;
     log.info('Canvas replacement hooks registered');
@@ -2669,6 +2744,36 @@ function _collectCanvasStateDiagnostic() {
   return snap;
 }
 
+/**
+ * Foundry V14 redraws the canvas on same-scene level changes via {@link Scene#view}.
+ * {@link Canvas#tearDown} is invoked with no arguments, so transition code cannot
+ * infer the target scene from tearDown args — capture intent here at draw entry.
+ * @param {unknown[]} drawArgs - arguments passed to {@link Canvas#draw}
+ * @returns {boolean}
+ */
+function computeNativeSameSceneLevelSwitch(drawArgs) {
+  try {
+    let drawTarget = drawArgs?.[0];
+    if (drawTarget === undefined) {
+      try {
+        drawTarget = game.scenes?.current ?? null;
+      } catch (_) {
+        drawTarget = null;
+      }
+    }
+    if (!drawTarget || drawTarget === null) return false;
+    const cur = canvas?.scene;
+    if (!cur || drawTarget?.id !== cur?.id) return false;
+    if (!hasV14NativeLevels(cur)) return false;
+    const vo = canvas?._viewOptions;
+    if (!vo || vo.level === undefined) return false;
+    if (vo.level === canvas?.level?.id) return false;
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
 function installCanvasDrawWrapper() {
   if (globalThis.__msaCanvasDrawWrapped) return;
   globalThis.__msaCanvasDrawWrapped = true;
@@ -2678,6 +2783,11 @@ function installCanvasDrawWrapper() {
 
   safeCall(() => {
     const _drawWrapper = async function(wrapped, ...args) {
+      try {
+        if (!window.MapShine) window.MapShine = {};
+        window.MapShine.__nativeSameSceneLevelSwitch = computeNativeSameSceneLevelSwitch(args);
+      } catch (_) {}
+
       // ->->->-> Diagnostic state poller: logs canvas internals every 2s while draw is pending ->->->->
       let _pollerId = null;
       let _pollCount = 0;
@@ -2933,6 +3043,15 @@ function installCanvasTransitionWrapper() {
     // XM-3: Wrapper function that fades to black before tearDown.
     // Used by both libWrapper and direct-wrap paths.
     const _tearDownWrapper = async function(wrapped, ...args) {
+      // V14: same-scene level switches call canvas.draw(sameScene) which runs
+      // tearDown() with no args. {@link computeNativeSameSceneLevelSwitch} sets
+      // __nativeSameSceneLevelSwitch on draw entry — use that here.
+      try {
+        if (window.MapShine?.__nativeSameSceneLevelSwitch) {
+          return wrapped(...args);
+        }
+      } catch (_) {}
+
       try {
         if (!window.MapShine) window.MapShine = {};
         window.MapShine.__sceneTransitionActive = true;
@@ -3339,6 +3458,8 @@ async function onUpdateScene(scene, changes, _options, _userId) {
   const localAuthor = !!(originatingUserId && game?.user?.id === originatingUserId);
   const guardUntil = Number(window.MapShine?._msaLocalFlagWriteGuardUntil) || 0;
   const echoOnly = _msaMapShineFlagDiffIsEchoOnly(changes);
+  const nsDiff = changes?.flags?.['map-shine-advanced'];
+  const hasMsaSettingsDiff = !!(nsDiff && Object.prototype.hasOwnProperty.call(nsDiff, 'settings'));
   const skipAuthoritativeMsaResync =
     localAuthor
     || (isGmLike() && echoOnly && performance.now() < guardUntil);
@@ -3458,6 +3579,16 @@ async function onUpdateScene(scene, changes, _options, _userId) {
       weatherController._loadWeatherSnapshotFromScene?.();
     }
   }, 'updateScene.weatherSync', Severity.DEGRADED);
+
+  // IMPORTANT: live effect toggles (for example Lighting enabled/disabled in the
+  // panel) persist through `flags.map-shine-advanced.settings`. Those updates are
+  // intended to be hot-applied and must not force a full scene re-init/loading
+  // overlay cycle. Rebuilding here causes the exact "entire map reloads when I
+  // tick a checkbox" bug.
+  if (hasMsaSettingsDiff) {
+    log.debug('updateScene: settings-flag change detected -> skipping full scene reinit');
+    return;
+  }
   
   // Grid changes should NOT require a full Three.js scene rebuild.
   // Rebuilding can race with Foundry's internal canvas updates and briefly leave `canvas.ready=false`,
@@ -3494,6 +3625,164 @@ async function onUpdateScene(scene, changes, _options, _userId) {
     setTimeout(async () => {
       await createThreeCanvas(scene);
     }, 0);
+  }
+}
+
+/**
+ * (Re)install V2 gameplay PIXI visibility suppression hooks + throttled ticker hook.
+ * Used after full scene init and after native same-scene level redraws.
+ */
+function _installPixiSuppressionHooksForV2() {
+  safeCall(() => {
+    for (const h of _pixiSuppressionHookIds) {
+      try { Hooks.off(h.hook, h.id); } catch (_) {}
+    }
+    _pixiSuppressionHookIds = [];
+
+    if (_pixiSuppressionTickerFn) {
+      try { canvas?.app?.ticker?.remove?.(_pixiSuppressionTickerFn); } catch (_) {}
+      _pixiSuppressionTickerFn = null;
+      _pixiSuppressionTickerLastMs = 0;
+    }
+
+    const install = (hook) => {
+      try {
+        const id = Hooks.on(hook, () => {
+          try { _enforceGameplayPixiSuppression(); } catch (_) {}
+          try { _updateFoundrySelectRectSuppression(); } catch (_) {}
+        });
+        _pixiSuppressionHookIds.push({ hook, id });
+      } catch (_) {}
+    };
+
+    install('sightRefresh');
+    install('controlToken');
+    install('refreshToken');
+    install('updateToken');
+    install('activateCanvasLayer');
+    install('renderSceneControls');
+
+    try {
+      const ticker = canvas?.app?.ticker;
+      if (ticker?.add) {
+        _pixiSuppressionTickerFn = () => {
+          const now = performance.now();
+          if ((now - _pixiSuppressionTickerLastMs) < 33) return;
+          _pixiSuppressionTickerLastMs = now;
+          try { _enforceGameplayPixiSuppression(); } catch (_) {}
+          try { _updateFoundrySelectRectSuppression(); } catch (_) {}
+        };
+        ticker.add(_pixiSuppressionTickerFn, null, -75);
+      }
+    } catch (_) {}
+  }, 'pixiSuppress.installHooks', Severity.COSMETIC);
+}
+
+/**
+ * (Re)attach FrameCoordinator post-PIXI callback; updates window.MapShine.frameCoordinator.
+ */
+function _attachFrameCoordinatorPostPixiForV2() {
+  const mapShine = window.MapShine;
+  if (!mapShine) return;
+
+  if (!frameCoordinatorInitialized) {
+    safeCall(() => {
+      frameCoordinatorInitialized = frameCoordinator.initialize() === true;
+    }, 'frameCoordinator.initialize(v2)', Severity.DEGRADED);
+  }
+
+  if (typeof frameCoordinatorPostPixiUnsubscribe === 'function') {
+    try { frameCoordinatorPostPixiUnsubscribe(); } catch (_) {}
+    frameCoordinatorPostPixiUnsubscribe = null;
+  }
+
+  if (frameCoordinatorInitialized) {
+    let lastX = NaN;
+    let lastY = NaN;
+    let lastScale = NaN;
+    frameCoordinatorPostPixiUnsubscribe = frameCoordinator.onPostPixi((frameState) => {
+      const rl = window.MapShine?.renderLoop;
+      if (!rl) return;
+
+      const x = Number(frameState?.cameraX);
+      const y = Number(frameState?.cameraY);
+      const scale = Number(frameState?.zoom);
+      const valid = Number.isFinite(x) && Number.isFinite(y) && Number.isFinite(scale);
+
+      try { rl.requestRender?.(); } catch (_) {}
+      if (!valid) return;
+
+      const moved = (
+        Math.abs(x - lastX) > 0.001 ||
+        Math.abs(y - lastY) > 0.001 ||
+        Math.abs(scale - lastScale) > 0.000001
+      );
+
+      if (moved) {
+        lastX = x;
+        lastY = y;
+        lastScale = scale;
+        try { rl.requestContinuousRender?.(120); } catch (_) {}
+      }
+    });
+  }
+  mapShine.frameCoordinator = frameCoordinatorInitialized ? frameCoordinator : null;
+}
+
+/**
+ * Foundry V14 native level redraw tears down PIXI placeables; keep WebGL + managers
+ * and rebind Three.js sprites/meshes to the new {@link canvas} state.
+ * @param {*} scene
+ */
+async function resyncMapShineAfterNativeLevelRedraw(scene) {
+  try {
+    const ec = effectComposer;
+    const sc = sceneComposer;
+    if (!ec || !sc || !threeCanvas || !renderLoop) {
+      log.warn('[level-resync] Missing core refs — falling back to full createThreeCanvas');
+      await createThreeCanvas(scene, { skipLoadingOverlay: true });
+      return;
+    }
+
+    log.info('[level-resync] Native same-scene level redraw — resyncing Map Shine (no full teardown)');
+
+    const cf = window.MapShine?.cameraFollower;
+    if (cf && typeof cf._syncToViewedLevel === 'function') {
+      cf._syncToViewedLevel({ emit: true, reason: 'native-level-redraw' });
+    }
+
+    const tm = tokenManager;
+    if (tm?.tokenSprites?.size) {
+      const ids = [...tm.tokenSprites.keys()];
+      for (const id of ids) tm.removeTokenSprite(id);
+    }
+    if (tm && typeof tm.syncAllTokensAsync === 'function') {
+      await tm.syncAllTokensAsync({ yieldEvery: 40 });
+    }
+
+    wallManager?.syncAllWalls?.();
+    tileManager?.syncAllTiles?.();
+    doorMeshManager?.resyncFromCanvas?.();
+
+    try {
+      window.MapShine?.visibilityController?._refreshAllVisibility?.();
+    } catch (_) {}
+
+    _installPixiSuppressionHooksForV2();
+    _attachFrameCoordinatorPostPixiForV2();
+
+    try {
+      ec.timeManager?.resume?.();
+    } catch (_) {}
+
+    try { _enforceGameplayPixiSuppression(); } catch (_) {}
+    try { _updateFoundrySelectRectSuppression(); } catch (_) {}
+
+    renderLoop?.requestRender?.();
+    renderLoop?.requestContinuousRender?.(400);
+  } catch (e) {
+    log.error('[level-resync] failed; falling back to full scene init', e);
+    await createThreeCanvas(scene, { skipLoadingOverlay: true });
   }
 }
 
@@ -3534,10 +3823,23 @@ async function _waitForFoundryCanvasReady({ timeoutMs = 15000 } = {}) {
  */
 async function onCanvasReady(canvas) {
   installFogSaveSafetyPatch();
+  let skipNativeLevelSwitchOverlay = false;
   try {
     if (!window.MapShine) window.MapShine = {};
     window.MapShine.__sceneTransitionActive = false;
+    skipNativeLevelSwitchOverlay = !!window.MapShine.__nativeSameSceneLevelSwitch;
+    window.MapShine.__nativeSameSceneLevelSwitch = false;
   } catch (_) {}
+
+  // LoadCoordinator: begin tracking this scene load.
+  // If createThreeCanvas is already active, defer beginSceneLoad to the replayed
+  // createThreeCanvas entry point so we don't reset coordinator state mid-run.
+  const sceneForCoordinator = canvas?.scene;
+  if (sceneForCoordinator && !_createThreeCanvasRunning) {
+    loadCoordinator.beginSceneLoad(sceneForCoordinator.id, sceneForCoordinator.name);
+  } else if (sceneForCoordinator && _createThreeCanvasRunning) {
+    log.debug('LoadCoordinator: deferring beginSceneLoad during active createThreeCanvas');
+  }
 
   // Authoritative boot diagnostics: this is the single decision point which
   // chooses UI-only vs full Map Shine. Log all relevant state BEFORE branching.
@@ -3726,28 +4028,36 @@ async function onCanvasReady(canvas) {
 
   log.info(`Initializing Map Shine canvas for scene: ${scene.name}`);
 
-  safeCall(() => {
-    // Scene name is rendered by the dedicated scene-name element/subtitle when present.
-    const displayName = getSceneLoadingDisplayName(scene);
-    loadingOverlay.showBlack('Loading...');
-    loadingOverlay.setSceneName(displayName);
-    loadingOverlay.configureStages([
-      { id: 'assets.discover', label: 'Discovering assets...', weight: 3  },
-      { id: 'assets.load',     label: 'Loading textures...',   weight: 20 },
-      { id: 'effects.core',    label: 'Core effects...',       weight: 25 },
-      { id: 'effects.deps',    label: 'Dependent effects...',  weight: 1  },
-      { id: 'effects.wire',    label: 'Wiring effects...',     weight: 1  },
-      { id: 'scene.managers',  label: 'Scene managers...',     weight: 12 },
-      { id: 'scene.sync',      label: 'Syncing scene...',      weight: 3  },
-      { id: 'ui.init',         label: 'Initializing UI...',    weight: 8  },
-      { id: 'scene.prepare',   label: 'Preparing scene...',    weight: 10 },
-      { id: 'shaders.compile', label: 'Compiling shaders...',  weight: 15 },
-      { id: 'final',           label: 'Finalizing...',         weight: 2  },
-    ]);
-    loadingOverlay.startStages();
-    loadingOverlay.setStage('assets.discover', 0.0, undefined, { immediate: true });
-    loadingOverlay.startAutoProgress(0.04, 0.05);
-  }, 'overlay.configureStages', Severity.COSMETIC);
+  if (!skipNativeLevelSwitchOverlay) {
+    safeCall(() => {
+      // Scene name is rendered by the dedicated scene-name element/subtitle when present.
+      const displayName = getSceneLoadingDisplayName(scene);
+      loadingOverlay.showBlack('Loading...');
+      loadingOverlay.setSceneName(displayName);
+      loadingOverlay.configureStages([
+        { id: 'assets.discover', label: 'Discovering assets...', weight: 3  },
+        { id: 'assets.load',     label: 'Loading textures...',   weight: 20 },
+        { id: 'effects.core',    label: 'Core effects...',       weight: 25 },
+        { id: 'effects.deps',    label: 'Dependent effects...',  weight: 1  },
+        { id: 'effects.wire',    label: 'Wiring effects...',     weight: 1  },
+        { id: 'scene.managers',  label: 'Scene managers...',     weight: 12 },
+        { id: 'scene.sync',      label: 'Syncing scene...',      weight: 3  },
+        { id: 'ui.init',         label: 'Initializing UI...',    weight: 8  },
+        { id: 'scene.prepare',   label: 'Preparing scene...',    weight: 10 },
+        { id: 'shaders.compile', label: 'Compiling shaders...',  weight: 15 },
+        { id: 'final',           label: 'Finalizing...',         weight: 2  },
+      ]);
+      loadingOverlay.startStages();
+      loadingOverlay.setStage('assets.discover', 0.0, undefined, { immediate: true });
+      loadingOverlay.startAutoProgress(0.04, 0.05);
+    }, 'overlay.configureStages', Severity.COSMETIC);
+  }
+
+  // V14 native same-scene level redraw: resync placeables + hooks without destroying WebGL.
+  if (skipNativeLevelSwitchOverlay) {
+    await resyncMapShineAfterNativeLevelRedraw(scene);
+    return;
+  }
 
   // Create three.js canvas overlay.
   // Safety net: watchdog checks every 15s whether loading is still progressing.
@@ -3799,7 +4109,7 @@ async function onCanvasReady(canvas) {
   }, WATCHDOG_INTERVAL_MS);
 
   try {
-    await createThreeCanvas(scene);
+    await createThreeCanvas(scene, { skipLoadingOverlay: false });
   } finally {
     clearInterval(_watchdogId);
     if (_loadingTimedOut) {
@@ -3815,11 +4125,28 @@ async function onCanvasReady(canvas) {
  * @private
  */
 function onCanvasTearDown(canvas) {
-  log.info('Tearing down Map Shine canvas');
+  const lightNativeLevelSwitch = !!window.MapShine?.__nativeSameSceneLevelSwitch;
+  log.info(lightNativeLevelSwitch
+    ? 'Map Shine: canvasTearDown for native level redraw (light teardown)'
+    : 'Tearing down Map Shine canvas');
+
+  // Cancellation boundary: canvasTearDown must abort any in-flight load work.
+  // Without this, createThreeCanvas can continue into late phases and attempt
+  // coordinator transitions after tearDown has already reset state to IDLE.
+  safeCall(() => {
+    LoadSession.current()?.abort?.();
+  }, 'loadSession.abortOnCanvasTearDown', Severity.COSMETIC);
+
+  // LoadCoordinator: cancel any in-progress load and return to idle
+  loadCoordinator.tearDown(lightNativeLevelSwitch ? 'native-level-redraw' : 'scene-change');
+
   installFogSaveSafetyPatch();
   try {
     if (!window.MapShine) window.MapShine = {};
-    window.MapShine.__sceneTransitionActive = true;
+    // Same-scene V14 level redraw: do not flag a full scene transition (fog patch / UX).
+    if (!window.MapShine.__nativeSameSceneLevelSwitch) {
+      window.MapShine.__sceneTransitionActive = true;
+    }
   } catch (_) {}
 
   safeCall(() => _teardownPixiLayerDebugMode(), 'pixiDebug.teardownOnCanvasTearDown', Severity.COSMETIC);
@@ -3828,8 +4155,8 @@ function onCanvasTearDown(canvas) {
   // so it doesn't get stranded in the DOM if a scene change fires mid-sequence.
   safeDispose(() => introZoomEffect.dispose(), 'introZoomEffect.dispose');
 
-  // CRITICAL: Pause time manager immediately to stop all animations
-  if (effectComposer?.timeManager) {
+  // CRITICAL: Pause time manager immediately to stop all animations (full scene teardown only).
+  if (!lightNativeLevelSwitch && effectComposer?.timeManager) {
     safeDispose(() => effectComposer.timeManager.pause(), 'timeManager.pause');
   }
 
@@ -3864,7 +4191,7 @@ function onCanvasTearDown(canvas) {
 
   // EffectMaskRegistry removed - GpuSceneMaskCompositor handles all masks
 
-  if (window.MapShine?.maskManager && typeof window.MapShine.maskManager.dispose === 'function') {
+  if (!lightNativeLevelSwitch && window.MapShine?.maskManager && typeof window.MapShine.maskManager.dispose === 'function') {
     safeDispose(() => window.MapShine.maskManager.dispose(), 'MaskManager.dispose');
   }
 
@@ -3879,61 +4206,63 @@ function onCanvasTearDown(canvas) {
     }
   }, 'compositor.clearFloorState');
 
-  // Cleanup three.js canvas
-  destroyThreeCanvas();
-  
-  // Clear global references to prevent stale state
-  if (window.MapShine) {
-    window.MapShine.sceneComposer = null;
-    window.MapShine.effectComposer = null;
-    window.MapShine.maskManager = null;
-    window.MapShine.tokenManager = null;
-    window.MapShine.visibilityController = null;
-    window.MapShine.detectionFilterEffect = null;
-    window.MapShine.floorStack = null;
-    if (window.MapShine.floorLayerManager) {
-      window.MapShine.floorLayerManager.dispose();
-      window.MapShine.floorLayerManager = null;
+  if (!lightNativeLevelSwitch) {
+    // Cleanup three.js canvas
+    destroyThreeCanvas();
+
+    // Clear global references to prevent stale state
+    if (window.MapShine) {
+      window.MapShine.sceneComposer = null;
+      window.MapShine.effectComposer = null;
+      window.MapShine.maskManager = null;
+      window.MapShine.tokenManager = null;
+      window.MapShine.visibilityController = null;
+      window.MapShine.detectionFilterEffect = null;
+      window.MapShine.floorStack = null;
+      if (window.MapShine.floorLayerManager) {
+        window.MapShine.floorLayerManager.dispose();
+        window.MapShine.floorLayerManager = null;
+      }
+      window.MapShine.tileManager = null;
+      window.MapShine.tileMotionManager = null;
+      window.MapShine.surfaceRegistry = null;
+      window.MapShine.surfaceReport = null;
+      window.MapShine.wallManager = null;
+      window.MapShine.doorMeshManager = null;
+      window.MapShine.lightingEffect = null;
+      window.MapShine.candleFlamesEffect = null;
+      window.MapShine.renderLoop = null;
+      window.MapShine.cameraFollower = null;
+      window.MapShine.levelNavigationController = null;
+      window.MapShine.levelNavigatorOverlay = null;
+      window.MapShine.cameraController = null;
+      window.MapShine.activeLevelContext = null;
+      window.MapShine.availableLevels = null;
+      window.MapShine.levelNavigationDiagnostics = null;
+      window.MapShine.levelsInteropDiagnostics = null;
+      delete window.MapShine.levelsSnapshot;
+      window.MapShine.pixiInputBridge = null;
+      window.MapShine.interactionManager = null;
+      window.MapShine.mouseStateManager = null;
+      window.MapShine.pixiContentLayerBridge = null;
+      window.MapShine.noteManager = null;
+      window.MapShine.gridRenderer = null;
+      window.MapShine.mapPointsManager = null;
+      window.MapShine.physicsRopeManager = null;
+      window.MapShine.cinematicCameraManager = null;
+      window.MapShine.cameraPanel = null;
+      window.MapShine.frameCoordinator = null;
+      window.MapShine.waterEffect = null;
+      window.MapShine.distortionManager = null;
+      // effectMaskRegistry removed
+      window.MapShine.textureBudgetTracker = null;
+      // Keep renderer and capabilities - they're reusable
     }
-    window.MapShine.tileManager = null;
-    window.MapShine.tileMotionManager = null;
-    window.MapShine.surfaceRegistry = null;
-    window.MapShine.surfaceReport = null;
-    window.MapShine.wallManager = null;
-    window.MapShine.doorMeshManager = null;
-    window.MapShine.lightingEffect = null;
-    window.MapShine.candleFlamesEffect = null;
-    window.MapShine.renderLoop = null;
-    window.MapShine.cameraFollower = null;
-    window.MapShine.levelNavigationController = null;
-    window.MapShine.levelNavigatorOverlay = null;
-    window.MapShine.cameraController = null;
-    window.MapShine.activeLevelContext = null;
-    window.MapShine.availableLevels = null;
-    window.MapShine.levelNavigationDiagnostics = null;
-    window.MapShine.levelsInteropDiagnostics = null;
-    delete window.MapShine.levelsSnapshot;
-    window.MapShine.pixiInputBridge = null;
-    window.MapShine.interactionManager = null;
-    window.MapShine.mouseStateManager = null;
-    window.MapShine.pixiContentLayerBridge = null;
-    window.MapShine.noteManager = null;
-    window.MapShine.gridRenderer = null;
-    window.MapShine.mapPointsManager = null;
-    window.MapShine.physicsRopeManager = null;
-    window.MapShine.cinematicCameraManager = null;
-    window.MapShine.cameraPanel = null;
-    window.MapShine.frameCoordinator = null;
-    window.MapShine.waterEffect = null;
-    window.MapShine.distortionManager = null;
-    // effectMaskRegistry removed
-    window.MapShine.textureBudgetTracker = null;
-    // Keep renderer and capabilities - they're reusable
-  }
-  candleFlamesEffect = null;
-  if (pixiContentLayerBridge) {
-    safeDispose(() => pixiContentLayerBridge.dispose(), 'pixiContentLayerBridge.dispose');
-    pixiContentLayerBridge = null;
+    candleFlamesEffect = null;
+    if (pixiContentLayerBridge) {
+      safeDispose(() => pixiContentLayerBridge.dispose(), 'pixiContentLayerBridge.dispose');
+      pixiContentLayerBridge = null;
+    }
   }
 
   // SAFETY NET: Schedule a delayed fallback check. If the overlay is still
@@ -4047,29 +4376,100 @@ function restoreFoundryStateFromSnapshot() {
   foundryStateSnapshot = null;
 }
 
-async function createThreeCanvas(scene) {
+/** @param {*} scene @param {{ skipLoadingOverlay?: boolean }} [createOptions] */
+async function createThreeCanvas(scene, createOptions = {}) {
+  const skipLoadingOverlay = !!createOptions?.skipLoadingOverlay;
+  // Runtime testing/isolation modes disabled: always execute the full load path.
+  const isolateCanvasOnly = false;
+  const isolateProbeOnly = false;
+  const isolateWarmupOnly = false;
+  const isolateCompositorOnly = false;
+  const isolateFloorsOnly = false;
+  const isolateBindingOnly = false;
+  const isolateShaderOnly = false;
+  const sceneId = String(scene?.id ?? '');
+
+  // Prevent tight fail/retry loops for the same scene.
+  if (_lastCreateThreeCanvasFailure && _lastCreateThreeCanvasFailure.sceneId === sceneId) {
+    const ageMs = performance.now() - _lastCreateThreeCanvasFailure.atMs;
+    if (ageMs >= 0 && ageMs < CREATE_THREE_CANVAS_FAILURE_COOLDOWN_MS) {
+      log.warn(
+        `[loading] Suppressing immediate createThreeCanvas retry for scene "${scene?.name ?? sceneId}" ` +
+        `(${Math.round(ageMs)}ms since last failure: ${_lastCreateThreeCanvasFailure.reason})`
+      );
+      return;
+    }
+  }
   // Guard against concurrent calls — can happen when tearDown throws and both the
   // recovery path AND the real canvasReady hook fire createThreeCanvas simultaneously.
-  // The second call is dropped; the first one owns the initialization.
+  // For the same scene, ignore duplicate calls. For a different scene, keep only
+  // the newest request and replay it as soon as the current run exits.
   if (_createThreeCanvasRunning) {
-    log.warn('[loading] createThreeCanvas already in progress — ignoring concurrent call (recovery race).');
+    const pendingSceneId = String(scene?.id ?? '');
+    const currentSceneId = String(loadCoordinator.sceneId ?? '');
+    if (pendingSceneId && pendingSceneId === currentSceneId) {
+      log.warn('[loading] createThreeCanvas already in progress for same scene — ignoring duplicate call.');
+      return;
+    }
+
+    _createThreeCanvasPendingRequest = {
+      scene,
+      createOptions: { ...(createOptions || {}) },
+    };
+    log.warn('[loading] createThreeCanvas already in progress — queued latest request for different scene.');
     return;
   }
   _createThreeCanvasRunning = true;
+  let _createThreeCanvasFailed = false;
 
   try {
     if (window.MapShine) window.MapShine.__msaSceneLoading = true;
   } catch (_) {
   }
 
+  // Coordinator normalization: createThreeCanvas can be entered via replayed
+  // calls that do not pass through onCanvasReady. Ensure the coordinator is
+  // tracking this scene load before phase transitions begin.
+  safeCall(() => {
+    const sid = scene?.id ?? null;
+    if (!sid) return;
+    if (loadCoordinator.sceneId !== sid || loadCoordinator.state !== CoordinatorState.AWAITING_CANVAS_READY) {
+      loadCoordinator.beginSceneLoad(sid, scene?.name);
+    }
+  }, 'loadCoordinator.normalizeAtCreateStart', Severity.COSMETIC);
+
+  const _transitionOrBail = (nextState, reason, label) => {
+    const ok = loadCoordinator.transition(nextState, reason);
+    if (!ok) {
+      // Soft-fail transition handling: keep loading so we don't strand users
+      // in a half-initialized overlay state due to coordinator race noise.
+      log.warn(`LoadCoordinator transition failed at ${label}; continuing load path`);
+    }
+    return true;
+  };
+  const _finishIsolation = (message) => {
+    safeCall(() => {
+      loadingOverlay.setStage?.('final', 1.0, message, { immediate: true });
+      loadingOverlay.fadeIn?.(200)?.catch?.(() => {});
+    }, 'overlay.isolation.finish', Severity.COSMETIC);
+    loadCoordinator.enterDegraded('isolation-mode');
+    session.finish();
+    if (window.MapShine) window.MapShine._loadSession = session;
+  };
+
   _setCreateThreeCanvasProgress('entered');
+  _transitionOrBail(CoordinatorState.PREPARING_CONTEXT, 'createThreeCanvas entered', 'preparing_context');
   console.log(' ->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->');
   console.log(' Scene load started:', scene?.name ?? 'unknown');
   console.log(' ->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->');
 
+  // Expose LoadCoordinator on window.MapShine for diagnostics
+  if (window.MapShine) window.MapShine.loadCoordinator = loadCoordinator;
+
   // Periodic progress heartbeat ->-> helps diagnose stalls even when the loading
   // overlay UI is frozen or before the hard timeout fires.
   let _progressHeartbeatId = null;
+  let _overlaySceneReadyDismissTimer = null;
   const isProgressHeartbeatVerbose = (
     debugLoadingProfiler?.debugMode === true ||
     window.MapShine?.__debugLoadingHeartbeat === true
@@ -4161,6 +4561,20 @@ async function createThreeCanvas(scene) {
   // LoadSession replaces the old generation-counter closure.
   // It provides isStale(), AbortSignal, and diagnostics.
   const session = LoadSession.start(scene);
+  const _bailIfSessionStale = (label = 'createThreeCanvas') => {
+    if (!session.isStale()) return false;
+    log.info(`[loading] ${label}: stale/aborted load session -> bailing out`);
+    // Ensure stale exits cannot strand coordinator/overlay in a loading state.
+    safeCall(() => {
+      _setCreateThreeCanvasProgress(`${label}:stale`);
+      loadCoordinator.tearDown(`stale-session:${label}`);
+    }, 'loadCoordinator.staleBailTearDown', Severity.COSMETIC);
+    safeCall(() => {
+      try { loadingOverlay.fadeIn?.(300, 100)?.catch?.(() => {}); } catch (_) {}
+      try { loadingOverlay.hide?.(); } catch (_) {}
+    }, 'overlay.staleBailDismiss', Severity.COSMETIC);
+    return true;
+  };
 
   _setCreateThreeCanvasProgress('bootstrap/renderer');
 
@@ -4168,11 +4582,11 @@ async function createThreeCanvas(scene) {
   // early exits (missing THREE, bootstrap failure, etc.) to prevent the overlay
   // from staying visible forever when createThreeCanvas aborts before the main
   // try/catch block that normally handles overlay dismissal on errors.
-  const _failEarly = (reason) => {
+    const _failEarly = (reason) => {
     log.error(`createThreeCanvas aborting: ${reason}`);
+    loadCoordinator.enterFailed(reason);
     safeCall(() => {
-      loadingOverlay.setStage?.('final', 1.0, `Init failed: ${reason}`, { immediate: true });
-      loadingOverlay.fadeIn(500).catch(() => {});
+      loadingOverlay.surfaceLoadFailure(reason, loadCoordinator.getDiagnostics());
     }, 'overlay.failEarly', Severity.COSMETIC);
   };
 
@@ -4198,7 +4612,7 @@ async function createThreeCanvas(scene) {
       return true;
     }, 'lazyBootstrap', Severity.CRITICAL);
     if (!bootstrapOk) { _failEarly('lazy bootstrap failed'); return; }
-    if (session.isStale()) return; // New scene is loading — its canvasReady will handle overlay.
+    if (_bailIfSessionStale('lazyBootstrap.post')) return;
     if (!mapShine.renderer) {
       _failEarly('renderer unavailable after lazy bootstrap');
       return;
@@ -4249,7 +4663,7 @@ async function createThreeCanvas(scene) {
       return;
     }
 
-    if (session.isStale()) return; // New scene loading — its canvasReady will handle overlay.
+    if (_bailIfSessionStale('waitForCanvasReady.post')) return;
 
     safeCall(() => {
       refreshLevelsInteropDiagnostics({
@@ -4272,35 +4686,37 @@ async function createThreeCanvas(scene) {
       }
     }, 'levelsSnapshot.expose', Severity.COSMETIC);
 
-    safeCall(() => {
-      // Scene name is rendered by the dedicated scene-name element/subtitle when present.
-      const displayName = getSceneLoadingDisplayName(scene);
-      loadingOverlay.showBlack('Loading...');
-      loadingOverlay.setSceneName(displayName);
-      loadingOverlay.configureStages([
-        { id: 'assets.discover', label: 'Discovering assets...', weight: 3  },
-        { id: 'assets.load',     label: 'Loading textures...',   weight: 20 },
-        { id: 'effects.core',    label: 'Core effects...',       weight: 25 },
-        { id: 'effects.deps',    label: 'Dependent effects...',  weight: 1  },
-        { id: 'effects.wire',    label: 'Wiring effects...',     weight: 1  },
-        { id: 'scene.managers',  label: 'Scene managers...',     weight: 12 },
-        { id: 'scene.sync',      label: 'Syncing scene...',      weight: 3  },
-        { id: 'ui.init',         label: 'Initializing UI...',    weight: 8  },
-        { id: 'scene.prepare',   label: 'Preparing scene...',    weight: 10 },
-        { id: 'shaders.compile', label: 'Compiling shaders...',  weight: 15 },
-        { id: 'final',           label: 'Finalizing...',         weight: 2  },
-      ]);
-      loadingOverlay.startStages();
-      loadingOverlay.setStage('assets.discover', 0.0, undefined, { immediate: true });
-      loadingOverlay.startAutoProgress(0.04, 0.05);
-    }, 'overlay.configureStages(create)', Severity.COSMETIC);
+    if (!skipLoadingOverlay) {
+      safeCall(() => {
+        // Scene name is rendered by the dedicated scene-name element/subtitle when present.
+        const displayName = getSceneLoadingDisplayName(scene);
+        loadingOverlay.showBlack('Loading...');
+        loadingOverlay.setSceneName(displayName);
+        loadingOverlay.configureStages([
+          { id: 'assets.discover', label: 'Discovering assets...', weight: 3  },
+          { id: 'assets.load',     label: 'Loading textures...',   weight: 20 },
+          { id: 'effects.core',    label: 'Core effects...',       weight: 25 },
+          { id: 'effects.deps',    label: 'Dependent effects...',  weight: 1  },
+          { id: 'effects.wire',    label: 'Wiring effects...',     weight: 1  },
+          { id: 'scene.managers',  label: 'Scene managers...',     weight: 12 },
+          { id: 'scene.sync',      label: 'Syncing scene...',      weight: 3  },
+          { id: 'ui.init',         label: 'Initializing UI...',    weight: 8  },
+          { id: 'scene.prepare',   label: 'Preparing scene...',    weight: 10 },
+          { id: 'shaders.compile', label: 'Compiling shaders...',  weight: 15 },
+          { id: 'final',           label: 'Finalizing...',         weight: 2  },
+        ]);
+        loadingOverlay.startStages();
+        loadingOverlay.setStage('assets.discover', 0.0, undefined, { immediate: true });
+        loadingOverlay.startAutoProgress(0.04, 0.05);
+      }, 'overlay.configureStages(create)', Severity.COSMETIC);
+    }
 
     // Proactively validate and normalize the scene settings flag.
     // Older scenes may contain corrupted or legacy-shaped payloads (including JSON strings),
     // which can crash downstream UI/effect parameter loading.
     _setCreateThreeCanvasProgress('sceneSettings.ensureValid');
     await safeCallAsync(async () => {
-      if (session.isStale()) return;
+      if (_bailIfSessionStale('sceneSettings.ensureValid')) return;
       if (typeof sceneSettings?.ensureValidSceneSettings === 'function') {
         await sceneSettings.ensureValidSceneSettings(scene, { autoRepair: true });
       }
@@ -4373,17 +4789,28 @@ async function createThreeCanvas(scene) {
     }
     
     // Hide replaced PIXI layers immediately (background, grid, etc.)
-    // These are rendered by Three.js, so they must be hidden
-    if (canvas.background) canvas.background.visible = false;
-    _setGridVisualSuppressed(true);
-    if (canvas.primary) {
-      canvas.primary.visible = true;
-      if (canvas.primary.background) canvas.primary.background.visible = false;
-      if (canvas.primary.foreground) canvas.primary.foreground.visible = false;
-      if (canvas.primary.tiles) canvas.primary.tiles.visible = false;
+    // These are rendered by Three.js, so they must be hidden.
+    // In isolation mode we keep PIXI visible to avoid black-screening while
+    // we validate the load pipeline scaffolding.
+    if (!isolateCanvasOnly) {
+      if (canvas.background) canvas.background.visible = false;
+      _setGridVisualSuppressed(true);
+      if (canvas.primary) {
+        canvas.primary.visible = true;
+        if (canvas.primary.background) canvas.primary.background.visible = false;
+        if (canvas.primary.foreground) canvas.primary.foreground.visible = false;
+        if (canvas.primary.tiles) canvas.primary.tiles.visible = false;
+        if (Array.isArray(canvas.primary.levelTextures)) {
+          for (const lt of canvas.primary.levelTextures) {
+            if (lt) lt.visible = false;
+          }
+        }
+      }
+      if (canvas.weather) canvas.weather.visible = false;
+      if (canvas.environment) canvas.environment.visible = false;
+    } else {
+      _setGridVisualSuppressed(false);
     }
-    if (canvas.weather) canvas.weather.visible = false;
-    if (canvas.environment) canvas.environment.visible = false;
     
     // CRITICAL: Tokens layer needs special handling
     // - Visual rendering is done by Three.js (TokenManager)
@@ -4465,6 +4892,12 @@ async function createThreeCanvas(scene) {
     safeCall(() => renderer.setSize(viewport.width, viewport.height, false), 'renderer.setSize', Severity.DEGRADED, {
       onError: () => renderer.setSize(viewport.width, viewport.height)
     });
+
+    // Isolation baseline: stop after core canvas+renderer attach.
+    if (isolateCanvasOnly) {
+      _finishIsolation('Isolation mode: canvas-only ready');
+      return;
+    }
 
     // Robustness: Handle WebGL context loss/restoration.
     // Some UI operations or GPU resets can trigger a context loss; in that case we must
@@ -4575,6 +5008,10 @@ async function createThreeCanvas(scene) {
     dlp.event(`sceneComposer: DONE ->-> ${bundle?.masks?.length ?? 0} masks loaded`);
     stepLog(' -> Step: sceneComposer.initialize DONE (' + (bundle?.masks?.length ?? 0) + ' masks)');
     _sectionEnd('sceneComposer.initialize');
+    if (isolateProbeOnly) {
+      _finishIsolation('Isolation mode: probe-only ready');
+      return;
+    }
 
     // Capture asset cache stats for the debug profiler
     if (isDebugLoad) {
@@ -4629,7 +5066,7 @@ async function createThreeCanvas(scene) {
       }, 'dlp.gpuDiagnostic', Severity.COSMETIC);
     }
 
-    if (session.isStale()) {
+    if (_bailIfSessionStale('sceneComposer.initialize.post')) {
       safeDispose(() => destroyThreeCanvas(), 'destroyThreeCanvas(stale)');
       return;
     }
@@ -4662,12 +5099,21 @@ async function createThreeCanvas(scene) {
     // all V1 mask infrastructure. V2 renders raw geometry only ->-> skip.
 
     // Step 2: Initialize effect composer
+    if (!_transitionOrBail(CoordinatorState.INITIALIZING_COMPOSITOR, 'effectComposer + FloorCompositor', 'initializing_compositor')) return;
     stepLog(' -> Step: effectComposer.initialize');
     if (isDebugLoad) dlp.begin('effectComposer.initialize', 'setup');
     effectComposer = new EffectComposer(renderer, threeScene, camera);
     effectComposer.initialize(mapShine.capabilities);
     if (isDebugLoad) dlp.end('effectComposer.initialize');
     stepLog(' -> Step: effectComposer.initialize DONE');
+    if (isolateWarmupOnly) {
+      _finishIsolation('Isolation mode: warmup-only ready');
+      return;
+    }
+    if (isolateCompositorOnly) {
+      _finishIsolation('Isolation mode: compositor-only ready');
+      return;
+    }
 
     // Ensure TimeManager immediately matches Foundry's current pause state.
     safeCall(() => {
@@ -4717,7 +5163,7 @@ async function createThreeCanvas(scene) {
 
     safeCall(() => loadingOverlay.setStage('effects.core', 0.05, 'Weather initialized...', { keepAuto: true }), 'overlay.weather', Severity.COSMETIC);
 
-    if (session.isStale()) {
+    if (_bailIfSessionStale('postManagerInit')) {
       safeDispose(() => destroyThreeCanvas(), 'destroyThreeCanvas(stale)');
       return;
     }
@@ -4769,6 +5215,8 @@ async function createThreeCanvas(scene) {
         });
         log.info('V2 FloorCompositor instance created');
       }, 'v2.floorCompositor.create', Severity.DEGRADED);
+
+      await effectComposer.ensureFloorCompositorV2Initialized();
       
       // Yield again after creation to let the browser breathe.
       await new Promise(resolve => setTimeout(resolve, 10));
@@ -4889,10 +5337,8 @@ async function createThreeCanvas(scene) {
     _setCreateThreeCanvasProgress('scene.managers.yield.afterTiles');
     await new Promise(r => setTimeout(r, 0));
 
-    // Step 4b.0: Initialize FloorStack ->-> derives per-floor elevation bands from
-    // the LevelsImportSnapshot and provides the setFloorVisible() API used by
-    // the per-floor render loop (Phase 2) and depth captures.
-    // KEEP for V2 ->-> FloorStack is essential for floor band discovery.
+    // Step 4b.0: Initialize FloorStack
+    if (!_transitionOrBail(CoordinatorState.POPULATING_FLOORS, 'FloorStack + managers', 'populating_floors')) return;
     _setCreateThreeCanvasProgress('scene.managers.floorStack.init');
     floorStack = new FloorStack();
     floorStack.setManagers(tileManager, tokenManager);
@@ -4902,6 +5348,10 @@ async function createThreeCanvas(scene) {
     );
     if (window.MapShine) window.MapShine.floorStack = floorStack;
     log.info('FloorStack initialized');
+    if (isolateFloorsOnly) {
+      _finishIsolation('Isolation mode: floors-only ready');
+      return;
+    }
 
     // Step 4b.0.1: Initialize FloorLayerManager (Compositor V2).
     // KEEP for V2 ->-> essential for assigning tiles to floor layers.
@@ -5079,30 +5529,6 @@ async function createThreeCanvas(scene) {
     log.info('Interaction manager initialized');
     safeCall(() => loadingOverlay.setStage('scene.managers', 0.80, 'Building interaction systems...', { keepAuto: true }), 'overlay.interaction', Severity.COSMETIC);
 
-    // Wire token movement hook for ash disturbance.
-    // V2: Route into the V2 ash disturbance effect if present.
-    safeCall(() => {
-      if (window.MapShine?.__msaAshDisturbanceHookId) {
-        try { Hooks.off('updateToken', window.MapShine.__msaAshDisturbanceHookId); } catch (_) {}
-        window.MapShine.__msaAshDisturbanceHookId = null;
-      }
-
-      // Use updateToken hook so we also catch server-confirmed movements.
-      const hookId = Hooks.on('updateToken', (tokenDoc, changes) => {
-        try {
-          if (!tokenDoc?.id) return;
-          if (!('x' in (changes || {})) && !('y' in (changes || {}))) return;
-          const fc = window.MapShine?.effectComposer?._floorCompositorV2;
-          const ash = fc?._ashDisturbanceEffect;
-          if (ash && typeof ash.handleTokenMovement === 'function') {
-            ash.handleTokenMovement(tokenDoc.id);
-          }
-        } catch (_) {}
-      });
-
-      if (window.MapShine) window.MapShine.__msaAshDisturbanceHookId = hookId;
-    }, 'wireAshDisturbanceHook(V2)', Severity.COSMETIC);
-
     // Sync Selection Box UI params (loaded from scene settings) into the InteractionManager.
     // initializeUI() runs earlier during startup, before InteractionManager exists.
     safeCall(() => {
@@ -5170,6 +5596,74 @@ async function createThreeCanvas(scene) {
     cameraFollower = new CameraFollower({ sceneComposer });
     cameraFollower.initialize();
     effectComposer.addUpdatable(cameraFollower); // Per-frame sync
+    // FloorStack was built earlier with null activeLevelContext; CameraFollower now
+    // sets activeLevelContext + emits initialize. Rebuild + visibility immediately so
+    // V2 compositor/bus do not stick on a stale upper-floor slice until a hook runs.
+    safeCall(() => {
+      const fs = floorStack ?? window.MapShine?.floorStack;
+      if (fs && typeof fs.rebuildFloors === 'function') {
+        fs.rebuildFloors(
+          getSceneBandsForFloorStack(),
+          window.MapShine?.activeLevelContext ?? null
+        );
+      }
+      const fc = window.MapShine?.floorCompositorV2 ?? effectComposer?._floorCompositorV2 ?? null;
+      if (fc && typeof fc._applyCurrentFloorVisibility === 'function') {
+        fc._applyCurrentFloorVisibility({
+          context: window.MapShine?.activeLevelContext ?? null,
+        });
+      }
+      // V14 cold load: FloorRenderBus may have populated before FloorStack existed or before
+      // Foundry finalized `canvas.level`, reusing a stale composer albedo. Navigating floors
+      // fixes it because swapBackgroundImage runs — mirror that once after level sync.
+      const sc = window.MapShine?.sceneComposer;
+      const bus = fc?._renderBus;
+      const fd = sc?.foundrySceneData;
+      const v14Scene = canvas?.scene;
+      if (
+        hasV14NativeLevels(v14Scene)
+        && (v14Scene?.levels?.size ?? 0) > 1
+        && sc
+        && bus
+        && typeof bus.swapBackgroundImage === 'function'
+        && fd
+      ) {
+        const viewedBg = getViewedLevelBackgroundSrc(v14Scene);
+        if (viewedBg) {
+          const runSwap = () => {
+            try {
+              bus.swapBackgroundImage(viewedBg, fd);
+              const lid = window.MapShine?.activeLevelContext?.levelId ?? canvas?.level?.id ?? null;
+              if (lid) sc._lastV14BusBgLevelId = lid;
+              if (typeof sc.extractBasePath === 'function' && typeof sc._loadMasksOnlyForBasePath === 'function') {
+                const bp = sc.extractBasePath(viewedBg);
+                if (bp) {
+                  sc._loadMasksOnlyForBasePath(bp)
+                    .then((r) => {
+                      if (r?.masks?.length) sc._lastMaskBasePath = bp;
+                    })
+                    .catch(() => {});
+                }
+              }
+              if (typeof fc._syncOutdoorsMaskConsumers === 'function') {
+                fc._syncOutdoorsMaskConsumers({
+                  context: window.MapShine?.activeLevelContext ?? null,
+                  force: true,
+                });
+              }
+              if (typeof fc.forceRepopulate === 'function') {
+                void fc.forceRepopulate({ source: 'cold-load-bg-resync' });
+              }
+              window.MapShine?.renderLoop?.requestRender?.();
+              window.MapShine?.renderLoop?.requestContinuousRender?.(300);
+            } catch (_) {}
+          };
+          requestAnimationFrame(() => {
+            requestAnimationFrame(runSwap);
+          });
+        }
+      }
+    }, 'floorStack.syncAfterCameraFollowerInit', Severity.COSMETIC);
     safeCall(() => {
       if (window.MapShine) {
         window.MapShine.levelNavigationController = cameraFollower;
@@ -5179,32 +5673,7 @@ async function createThreeCanvas(scene) {
     console.log(' -> Manager: CameraFollower DONE');
     log.info('Camera follower initialized - Three.js follows PIXI');
 
-    // Step 6.05: Compact level navigator overlay (always visible on levels-enabled scenes).
-    if (isDebugLoad) dlp.begin('manager.LevelNavigatorOverlay.init', 'manager');
-    _setCreateThreeCanvasProgress('scene.managers.levelNavigatorOverlay.init');
-    if (!levelNavigatorOverlay && overlayUIManager) {
-      levelNavigatorOverlay = new LevelNavigatorOverlay(overlayUIManager, cameraFollower);
-      levelNavigatorOverlay.initialize();
-    } else {
-      levelNavigatorOverlay?.setLevelNavigationController?.(cameraFollower);
-    }
-    safeCall(() => {
-      if (window.MapShine) window.MapShine.levelNavigatorOverlay = levelNavigatorOverlay;
-    }, 'exposeLevelNavigatorOverlay', Severity.COSMETIC);
-    if (isDebugLoad) dlp.end('manager.LevelNavigatorOverlay.init');
-
-    // Step 6.06: Initialize Levels Perspective Bridge.
-    // Syncs floor context bidirectionally between MapShine and the Levels module
-    // so movement, vision, and wall filtering all use the same elevation.
-    safeCall(() => {
-      if (levelsPerspectiveBridge) {
-        levelsPerspectiveBridge.dispose();
-      }
-      levelsPerspectiveBridge = new LevelsPerspectiveBridge();
-      levelsPerspectiveBridge.initialize();
-      if (window.MapShine) window.MapShine.levelsPerspectiveBridge = levelsPerspectiveBridge;
-      log.info('Levels perspective bridge initialized');
-    }, 'LevelsPerspectiveBridge.init', Severity.DEGRADED);
+    // Legacy Levels perspective bridge removed. V14 native levels are authoritative.
 
     // Step 6a: Initialize PIXI Input Bridge
     // Handles pan/zoom input on Three canvas and applies to PIXI stage.
@@ -5254,56 +5723,7 @@ async function createThreeCanvas(scene) {
 
     // V2: Re-apply PIXI suppression on common Foundry vision/token events.
     // Foundry can re-show board/fog/visibility containers during these updates.
-    safeCall(() => {
-      // Clear any previous installs (scene resets / recovery init).
-      for (const h of _pixiSuppressionHookIds) {
-        try { Hooks.off(h.hook, h.id); } catch (_) {}
-      }
-      _pixiSuppressionHookIds = [];
-
-      // Also clear any previous ticker enforcement so we don't double-install.
-      if (_pixiSuppressionTickerFn) {
-        try { canvas?.app?.ticker?.remove?.(_pixiSuppressionTickerFn); } catch (_) {}
-        _pixiSuppressionTickerFn = null;
-        _pixiSuppressionTickerLastMs = 0;
-      }
-
-      const install = (hook) => {
-        try {
-          const id = Hooks.on(hook, () => {
-            try { _enforceGameplayPixiSuppression(); } catch (_) {}
-            try { _updateFoundrySelectRectSuppression(); } catch (_) {}
-          });
-          _pixiSuppressionHookIds.push({ hook, id });
-        } catch (_) {}
-      };
-
-      install('sightRefresh');
-      install('controlToken');
-      install('refreshToken');
-      install('updateToken');
-      install('activateCanvasLayer');
-      install('renderSceneControls');
-
-      // V2 baseline: Foundry can re-enable controls.doors and per-wall DoorControl
-      // visibility continuously as part of its own ControlsLayer workflows.
-      // Enforce suppression every PIXI tick (throttled) to prevent duplicate
-      // door icons stuck at (0,0) when PIXI transforms drift.
-      try {
-        const ticker = canvas?.app?.ticker;
-        if (ticker?.add) {
-          _pixiSuppressionTickerFn = () => {
-            const now = performance.now();
-            if ((now - _pixiSuppressionTickerLastMs) < 33) return;
-            _pixiSuppressionTickerLastMs = now;
-            try { _enforceGameplayPixiSuppression(); } catch (_) {}
-            try { _updateFoundrySelectRectSuppression(); } catch (_) {}
-          };
-          ticker.add(_pixiSuppressionTickerFn, null, -75);
-        }
-      } catch (_) {
-      }
-    }, 'pixiSuppress.installHooks', Severity.COSMETIC);
+    _installPixiSuppressionHooksForV2();
 
     dlp.event('sceneSync: DONE ->-> entering finalization');
     safeCall(() => loadingOverlay.setStage('scene.sync', 1.0, 'Scene synced', { immediate: true }), 'overlay.sceneSync.done', Severity.COSMETIC);
@@ -5353,11 +5773,14 @@ async function createThreeCanvas(scene) {
       if (rw >= 1 && rh >= 1) resizeHandler.resize(rw, rh);
     }, 'resizeHandler.syncAfterSetup', Severity.COSMETIC);
 
-    // Step 8.5: Start render loop (after ResizeObserver is live + one sync resize)
-    stepLog(' -> Step: renderLoop.start');
+    // Step 8.5: Create render loop (start is deferred — see post-`prewarmForLoading` block
+    // in finalization). If RAF begins before async bus/effect populate finishes,
+    // FloorCompositor paints `[POPULATE RENDER-SLIM]` (bus + blit only, no lighting /
+    // water / level-composite), which can look like a "good first frame" then snap
+    // once populate completes and the real post chain runs every frame thereafter.
+    stepLog(' -> Step: renderLoop.create (start deferred)');
     renderLoop = new RenderLoop(renderer, threeScene, camera, effectComposer);
-    renderLoop.start();
-    stepLog(' -> Step: renderLoop.start DONE');
+    stepLog(' -> Step: renderLoop.create DONE (start deferred)');
     // Update ModeManager with the now-created renderLoop reference
     if (modeManager) modeManager._deps.renderLoop = renderLoop;
 
@@ -5365,9 +5788,6 @@ async function createThreeCanvas(scene) {
     if (isMapMakerMode && modeManager) {
       safeCall(() => modeManager.setMapMakerMode(true), 'modeManager.restoreNativeMode', Severity.COSMETIC);
     }
-
-    dlp.event('renderLoop: STARTED ->-> first rAF frame queued');
-    log.info('Render loop started');
 
     // P0.4: Set up WebGL context loss/restore handlers
     // On context restore, trigger full scene rebuild to recreate GPU resources
@@ -5388,55 +5808,7 @@ async function createThreeCanvas(scene) {
     }
 
     // Keep FrameCoordinator active in V2 for post-PIXI camera/frame timing sync.
-    // Even though V2 does not sample PIXI fog textures, coordinated post-PIXI
-    // callbacks help align Three rendering cadence with pan/zoom updates.
-    if (!frameCoordinatorInitialized) {
-      safeCall(() => {
-        frameCoordinatorInitialized = frameCoordinator.initialize() === true;
-      }, 'frameCoordinator.initialize(v2)', Severity.DEGRADED);
-    }
-
-    if (typeof frameCoordinatorPostPixiUnsubscribe === 'function') {
-      try { frameCoordinatorPostPixiUnsubscribe(); } catch (_) {}
-      frameCoordinatorPostPixiUnsubscribe = null;
-    }
-
-    if (frameCoordinatorInitialized) {
-      let lastX = NaN;
-      let lastY = NaN;
-      let lastScale = NaN;
-      frameCoordinatorPostPixiUnsubscribe = frameCoordinator.onPostPixi((frameState) => {
-        const rl = window.MapShine?.renderLoop;
-        if (!rl) return;
-
-        const x = Number(frameState?.cameraX);
-        const y = Number(frameState?.cameraY);
-        const scale = Number(frameState?.zoom);
-        const valid = Number.isFinite(x) && Number.isFinite(y) && Number.isFinite(scale);
-
-        // Always request at least one follow-up render after PIXI finishes its tick.
-        // This reduces stale-camera frames where Three renders just before PIXI updates.
-        try { rl.requestRender?.(); } catch (_) {}
-
-        if (!valid) return;
-
-        const moved = (
-          Math.abs(x - lastX) > 0.001 ||
-          Math.abs(y - lastY) > 0.001 ||
-          Math.abs(scale - lastScale) > 0.000001
-        );
-
-        if (moved) {
-          lastX = x;
-          lastY = y;
-          lastScale = scale;
-          // Hold a short continuous window while camera is actively changing so
-          // adaptive throttling does not under-sample motion between PIXI ticks.
-          try { rl.requestContinuousRender?.(120); } catch (_) {}
-        }
-      });
-    }
-    mapShine.frameCoordinator = frameCoordinatorInitialized ? frameCoordinator : null;
+    _attachFrameCoordinatorPostPixiForV2();
 
     // V2 fog is owned by FloorCompositor._fogEffect; no legacy fog-manager wrapping.
 
@@ -5444,8 +5816,7 @@ async function createThreeCanvas(scene) {
     exposeGlobals(mapShine, {
       effectMap,
       sceneComposer, effectComposer, cameraFollower, pixiInputBridge,
-      cinematicCameraManager, cameraPanel, levelsAuthoring,
-      levelNavigatorOverlay,
+      cinematicCameraManager, cameraPanel,
       tokenManager, tokenMovementManager, tileManager, visibilityController, detectionFilterEffect,
       wallManager, doorMeshManager,
       drawingManager, noteManager, templateManager, lightIconManager,
@@ -5516,6 +5887,7 @@ async function createThreeCanvas(scene) {
     }, 5000);
 
     // Initialize Tweakpane UI
+    if (!_transitionOrBail(CoordinatorState.BINDING_EFFECTS, 'UI + effect wiring', 'binding_effects')) return;
     // V2: We still need UI so we can validate layering / debugging, but we do NOT
     // register effect controls or apply weather snapshots.
     _sectionStart('fin.initializeUI');
@@ -5523,7 +5895,7 @@ async function createThreeCanvas(scene) {
     _setCreateThreeCanvasProgress('initializeUI');
     stepLog(' -> Step: initializeUI');
     await safeCallAsync(async () => {
-      if (session.isStale()) return;
+      if (_bailIfSessionStale('initializeUI')) return;
 
       safeCall(() => loadingOverlay.setStage('ui.init', 0.05, 'Graphics settings...', { keepAuto: false }), 'overlay.uiInit.graphicsSettings', Severity.COSMETIC);
       safeCall(() => { if (window.MapShine) window.MapShine.stateApplier = stateApplier; }, 'exposeStateApplier', Severity.COSMETIC);
@@ -5816,13 +6188,7 @@ async function createThreeCanvas(scene) {
           safeCall(() => cameraPanel.setCinematicManager(cinematicCameraManager), 'cameraPanel.sync', Severity.COSMETIC);
         }
 
-        // Levels Authoring Dialog (GM only) ->-> required to validate tile floor assignments.
-        if (!levelsAuthoring && isGmLike()) {
-          const useV2 = sceneSettings.getUseLevelsEditorV2?.() !== false;
-          levelsAuthoring = useV2 ? new LevelsEditorV2() : new LevelsAuthoringDialog();
-          levelsAuthoring.initialize();
-          safeCall(() => { if (window.MapShine) window.MapShine.levelsAuthoring = levelsAuthoring; }, 'exposeLevelsAuthoring', Severity.COSMETIC);
-        }
+        // Legacy custom levels authoring UI removed. Use Foundry V14 native levels UI.
 
         safeCall(() => loadingOverlay.setStage('ui.init', 0.65, 'Registering effects...', { keepAuto: false }), 'overlay.uiInit.registerEffects', Severity.COSMETIC);
 
@@ -5835,6 +6201,10 @@ async function createThreeCanvas(scene) {
         // Reject NaN/Infinity numbers that would corrupt effect.params and GPU uniforms.
         // Objects (colors), booleans, strings, etc. pass through unchanged.
         const _isFiniteOrNonNumeric = (v) => typeof v !== 'number' || Number.isFinite(v);
+        const _STYLISTIC_FC_KEYS_OUTER = new Set([
+          '_asciiEffect', '_dotScreenEffect', '_halftoneEffect',
+          '_visionModeEffect', '_invertEffect', '_sepiaEffect', '_dazzleOverlayEffect',
+        ]);
 
         const _propagateToV2 = (effectKey, paramId, value) => {
           try {
@@ -5846,11 +6216,17 @@ async function createThreeCanvas(scene) {
             // In V2 mode the compositor is created lazily on first render; UI can
             // initialize (and users can tweak values) before it exists.
             // Without this queue, early UI changes are dropped and appear to do nothing.
+            // Stylistic effects must NOT queue enabled/masterEnabled — the per-frame
+            // scene-flag gate is authoritative, and stale queued values cause flicker.
             if (window.MapShine) {
-              if (!window.MapShine.__pendingV2EffectParams) window.MapShine.__pendingV2EffectParams = {};
-              const pendAll = window.MapShine.__pendingV2EffectParams;
-              if (!pendAll[effectKey]) pendAll[effectKey] = {};
-              pendAll[effectKey][paramId] = value;
+              const _skipQueue = _STYLISTIC_FC_KEYS_OUTER.has(effectKey)
+                && (paramId === 'enabled' || paramId === 'masterEnabled');
+              if (!_skipQueue) {
+                if (!window.MapShine.__pendingV2EffectParams) window.MapShine.__pendingV2EffectParams = {};
+                const pendAll = window.MapShine.__pendingV2EffectParams;
+                if (!pendAll[effectKey]) pendAll[effectKey] = {};
+                pendAll[effectKey][paramId] = value;
+              }
             }
 
             const fc = window.MapShine?.effectComposer?._floorCompositorV2;
@@ -5859,12 +6235,18 @@ async function createThreeCanvas(scene) {
             if (!effect) return;
 
             // Flush any queued params for this effect now that it exists.
+            const _STYLISTIC_FC_KEYS = _STYLISTIC_FC_KEYS_OUTER;
             try {
               const pend = window.MapShine?.__pendingV2EffectParams?.[effectKey];
               if (pend && typeof pend === 'object') {
                 for (const [k, v] of Object.entries(pend)) {
                   // Prefer effect.enabled setter when present.
+                  // Never flush enabled/masterEnabled for stylistic effects — the
+                  // per-frame scene-flag gate in EffectComposer.render() is
+                  // authoritative. Flushing stale queued enabled:true here causes
+                  // ASCII/dot/halftone to flicker on for random frames.
                   if (k === 'enabled' || k === 'masterEnabled') {
+                    if (_STYLISTIC_FC_KEYS.has(effectKey)) continue;
                     if (typeof effect.enabled !== 'undefined') {
                       try { effect.enabled = !!v; } catch (_) {}
                     }
@@ -5887,7 +6269,10 @@ async function createThreeCanvas(scene) {
 
             // Prefer effect.enabled setter when present (several V2 overlay effects
             // keep enabled state on the instance and mirror it into params).
+            // Stylistic effects are gated by scene flags per-frame in
+            // EffectComposer.render() — do not let UI callbacks override that.
             if (paramId === 'enabled' || paramId === 'masterEnabled') {
+              if (_STYLISTIC_FC_KEYS.has(effectKey)) return;
               if (typeof effect.enabled !== 'undefined') {
                 try { effect.enabled = !!value; } catch (_) {}
               }
@@ -5974,11 +6359,6 @@ async function createThreeCanvas(scene) {
           uiManager.registerEffect('underwater-bubbles', 'Underwater Bubbles',
             WaterSplashesEffectV2.getBubblesControlSchema(), _makeV2Callback('_underwaterBubblesEffect'), 'particle');
         }, 'v2.registerUnderwaterBubblesUI', Severity.DEGRADED);
-
-        safeCall(() => {
-          uiManager.registerEffect('ash-disturbance', 'Ash Disturbance',
-            AshDisturbanceEffectV2.getControlSchema(), _makeV2Callback('_ashDisturbanceEffect'), 'particle');
-        }, 'v2.registerAshDisturbanceUI(V2)', Severity.DEGRADED);
 
         safeCall(() => {
           uiManager.registerEffect('smelly-flies', 'Smelly Flies',
@@ -6244,8 +6624,6 @@ async function createThreeCanvas(scene) {
           );
         }, 'v2.registerAshWeatherUI', Severity.DEGRADED);
 
-        // ash-disturbance is already registered above via AshDisturbanceEffectV2.getControlSchema()
-
         safeCall(() => {
           const waterSchema = WaterEffectV2.getControlSchema();
           uiManager.registerEffect('water', 'Water',
@@ -6259,12 +6637,6 @@ async function createThreeCanvas(scene) {
           // params are replayed by _getFloorCompositorV2() after lazy creation, which
           // is the correct source of truth for persisted values.
         }, 'v2.registerWaterUI', Severity.DEGRADED);
-
-        safeCall(() => {
-          const waterGlitterSchema = WaterGlitterEffectV2.getControlSchema();
-          uiManager.registerEffect('water-glitter', 'Water Glitter',
-            waterGlitterSchema, _makeV2Callback('_waterGlitterEffect'), 'surface');
-        }, 'v2.registerWaterGlitterUI', Severity.CRITICAL);
 
         // Cloud controls: registered as a top-level effect in V2 mode.
         // The 'weather' parent effect is not registered in V2 (WeatherController
@@ -6339,6 +6711,18 @@ async function createThreeCanvas(scene) {
     stepLog(' -> Step: initializeUI DONE');
     if (isDebugLoad) dlp.end('fin.initializeUI');
     _sectionEnd('fin.initializeUI');
+    if (isolateBindingOnly) {
+      // Normal startup defers renderLoop.start until compositor populate completes;
+      // this early-exit path skips that block, so start RAF here.
+      if (renderLoop && !renderLoop.running()) {
+        try {
+          renderLoop.start();
+          log.info('Render loop started (isolateBindingOnly early exit)');
+        } catch (_) {}
+      }
+      _finishIsolation('Isolation mode: binding-only ready');
+      return;
+    }
 
     stepLog(' -> Step: overlay.finalProgress');
     // Only begin fading-in once we have proof that Three has actually rendered.
@@ -6455,6 +6839,18 @@ async function createThreeCanvas(scene) {
     }, 'v2.prewarmForLoading.await', Severity.DEGRADED);
     safeCall(() => loadingOverlay.setStage('scene.prepare', 0.55, 'Compositor ready', { immediate: true }), 'overlay.prewarm.done', Severity.COSMETIC);
 
+    // Now that `_populateComplete` is true (or fc missing / no-op), start RAF so
+    // `FloorCompositor.render` never paints the slim populate path to a live loop.
+    if (renderLoop && !renderLoop.running()) {
+      stepLog(' -> Step: renderLoop.start (post-populate)');
+      renderLoop.start();
+      stepLog(' -> Step: renderLoop.start DONE (post-populate)');
+      try {
+        dlp.event('renderLoop: STARTED ->-> first rAF frame queued (post-populate)');
+      } catch (_) {}
+      log.info('Render loop started (post compositor populate)');
+    }
+
     stepLog(' -> Step: preloadAllFloors DONE');
     if (isDebugLoad) dlp.end('fin.preloadAllFloors');
 
@@ -6482,7 +6878,14 @@ async function createThreeCanvas(scene) {
 
       const originalContext = controller.getActiveLevelContext?.() ?? null;
       const originalIndexRaw = Number(originalContext?.index);
-      const originalIndex = Number.isFinite(originalIndexRaw) ? Math.max(0, Math.min(levels.length - 1, originalIndexRaw)) : 0;
+      const originalIndex = Number.isFinite(originalIndexRaw)
+        ? Math.max(0, Math.min(levels.length - 1, originalIndexRaw))
+        : 0;
+      // Keep prewarm side-effect free for the final viewed level:
+      // restore whichever level Foundry/MapShine had before synthetic stepping.
+      const originalLevelId = (typeof originalContext?.levelId === 'string' && originalContext.levelId)
+        ? originalContext.levelId
+        : null;
       const previousLockMode = controller.getLockMode?.() ?? 'manual';
 
       if (previousLockMode === 'follow-controlled-token') {
@@ -6522,9 +6925,14 @@ async function createThreeCanvas(scene) {
         await new Promise(resolve => setTimeout(resolve, 34));
       }
 
-      // Honor requested loading behavior: end on ground floor.
-      controller.setActiveLevel(0, {
-        reason: 'loading-floor-prewarm-return-ground',
+      // Restore original level so prewarm cannot silently force floor 0.
+      let restoreTarget = originalIndex;
+      if (originalLevelId) {
+        const idIndex = levels.findIndex((lvl) => lvl?.levelId === originalLevelId);
+        if (idIndex >= 0) restoreTarget = idIndex;
+      }
+      controller.setActiveLevel(restoreTarget, {
+        reason: 'loading-floor-prewarm-restore-original',
         keepLockMode: true,
         emit: true,
       });
@@ -6536,7 +6944,20 @@ async function createThreeCanvas(scene) {
       window.MapShine?.renderLoop?.requestRender?.();
       window.MapShine?.renderLoop?.requestContinuousRender?.(180);
     }, 'fin.floorStepPrewarm', Severity.DEGRADED);
-    safeCall(() => loadingOverlay.setStage('scene.prepare', 1.0, 'Scene ready', { immediate: true }), 'overlay.scenePrepare.done', Severity.COSMETIC);
+    safeCall(() => {
+      loadingOverlay.setStage('scene.prepare', 1.0, 'Scene ready', { immediate: true });
+      // Hard UI safety: once we announce Scene ready, guarantee overlay dismissal
+      // even if downstream warmup/intro bookkeeping keeps running.
+      try {
+        if (_overlaySceneReadyDismissTimer) clearTimeout(_overlaySceneReadyDismissTimer);
+      } catch (_) {}
+      _overlaySceneReadyDismissTimer = setTimeout(() => {
+        safeCall(() => {
+          try { loadingOverlay.fadeIn?.(600, 200)?.catch?.(() => {}); } catch (_) {}
+          try { loadingOverlay.hide?.(); } catch (_) {}
+        }, 'overlay.sceneReady.forceDismiss', Severity.COSMETIC);
+      }, 3500);
+    }, 'overlay.scenePrepare.done', Severity.COSMETIC);
     stepLog(' -> Step: floorStepPrewarm DONE');
     if (isDebugLoad) dlp.end('fin.floorStepPrewarm');
     _sectionEnd('fin.floorStepPrewarm');
@@ -6545,12 +6966,15 @@ async function createThreeCanvas(scene) {
     // Awaits non-blocking GPU shader compilation (KHR_parallel_shader_compile) before
     // revealing the scene. This prevents the first-frame stutter that occurs when
     // shaders compile lazily on first draw. Reports progress to the shaders.compile stage.
+    if (_bailIfSessionStale('fin.shaderCompile.pre')) return;
+    if (!_transitionOrBail(CoordinatorState.COMPILING_WARMUP, 'shader compile + warmup', 'compiling_warmup')) return;
     _sectionStart('fin.shaderCompile');
     if (isDebugLoad) dlp.begin('fin.shaderCompile', 'finalize');
     safeCall(() => loadingOverlay.setStage('shaders.compile', 0.0, 'Compiling shaders...', { immediate: true }), 'overlay.shaderCompile.start', Severity.COSMETIC);
     _setCreateThreeCanvasProgress('shaderCompile');
     stepLog(' -> Step: shaderCompile');
     await safeCallAsync(async () => {
+      await effectComposer.ensureFloorCompositorV2Initialized();
       const fc = window.MapShine?.effectComposer?._floorCompositorV2;
       if (!fc || typeof fc.warmupAsync !== 'function') {
         log.warn('fin.shaderCompile: no FloorCompositor available, shaders will compile lazily');
@@ -6563,7 +6987,7 @@ async function createThreeCanvas(scene) {
       await fc.prewarmForLoading({ prewarmAllFloors: false, awaitPopulate: true });
 
       // One render frame to force-submit any lazily-created materials to the GPU.
-      safeCall(() => effectComposer.progressiveWarmup(), 'shaderCompile.progressiveWarmup', Severity.DEGRADED);
+      await effectComposer.progressiveWarmup();
       await new Promise(r => setTimeout(r, 16));
 
       // Await non-blocking async compilation, polling KHR_parallel_shader_compile.
@@ -6590,6 +7014,28 @@ async function createThreeCanvas(scene) {
     stepLog(' -> Step: shaderCompile DONE');
     if (isDebugLoad) dlp.end('fin.shaderCompile');
     _sectionEnd('fin.shaderCompile');
+    if (isolateShaderOnly) {
+      _finishIsolation('Isolation mode: shader-only ready');
+      return;
+    }
+
+    // LoadCoordinator: transition to ACTIVATING and check pre-running invariants
+    if (_bailIfSessionStale('fin.activating.pre')) return;
+    if (!_transitionOrBail(CoordinatorState.ACTIVATING, 'shader warmup complete', 'activating')) return;
+    safeCall(() => {
+      const busPopulated = !!(fc?._populateComplete ?? fc?._renderBus?._populateComplete);
+      const invariants = loadCoordinator.checkPreRunningInvariants({
+        foundrySceneId: scene?.id,
+        busPopulated,
+        enablementConsensus: true,
+      });
+      if (!invariants.ok) {
+        for (const f of invariants.failures) {
+          log.warn(`Pre-running invariant failed: ${f}`);
+        }
+        loadCoordinator.enterDegraded(`invariant failures: ${invariants.failures.join('; ')}`);
+      }
+    }, 'loadCoordinator.preRunningInvariants', Severity.DEGRADED);
 
     _sectionStart('fin.fadeIn');
     dlp.event('fin.fadeIn: loading pipeline complete ->-> preparing overlay transition');
@@ -6629,6 +7075,12 @@ async function createThreeCanvas(scene) {
 
       // Expose the profiler on window.MapShine for console access
       if (window.MapShine) window.MapShine.debugLoadingProfiler = dlp;
+    } else if (skipLoadingOverlay) {
+      // Same-scene native level switch: stages were never configured; skip intro zoom / long fades.
+      safeCall(() => {
+        try { loadingOverlay.hide?.(); } catch (_) {}
+        try { loadingOverlay.fadeIn(0).catch(() => {}); } catch (_) {}
+      }, 'overlay.nativeLevelSwitchDismiss', Severity.COSMETIC);
     } else {
       stepLog(' -> Step: overlay.fadeIn / intro-zoom');
       await safeCallAsync(async () => {
@@ -6654,7 +7106,9 @@ async function createThreeCanvas(scene) {
           }
 
           // Kick an extra warmup pass now that shader gate is open.
-          safeCall(() => effectComposer.progressiveWarmup(), 'introZoom.readinessWarmup', Severity.DEGRADED);
+          await safeCallAsync(async () => {
+            await effectComposer.progressiveWarmup();
+          }, 'introZoom.readinessWarmup', Severity.DEGRADED);
 
           // Late warmup pass: some effect programs are only created after the first
           // post-gate renders or async setup settles. Run one additional compile pass
@@ -6668,7 +7122,7 @@ async function createThreeCanvas(scene) {
             } catch (_) {}
 
             await fcLate.warmupAsync(15000);
-            safeCall(() => effectComposer.progressiveWarmup(), 'introZoom.readinessWarmup.late', Severity.DEGRADED);
+            await effectComposer.progressiveWarmup();
           }, 'introZoom.waitForCompiledPrograms.lateWarmup', Severity.DEGRADED);
 
           while ((performance.now() - start) < maxWaitMs) {
@@ -6766,7 +7220,8 @@ async function createThreeCanvas(scene) {
         // It handles its own fallback to a standard fadeIn when disabled or when
         // no owned tokens are found. The effect temporarily locks user pan/zoom
         // input and restores the cinematic camera manager's blocker on completion.
-        await introZoomEffect.run(loadingOverlay, {
+        await Promise.race([
+          introZoomEffect.run(loadingOverlay, {
           onBlockInput: () => {
             try { cinematicCameraManager?.suspendTemporaryRuntimeControl?.(); } catch (_) {}
             pixiInputBridge?.setInputBlocker(() => true);
@@ -6778,7 +7233,16 @@ async function createThreeCanvas(scene) {
             // player-follow-lock and bounds-constraint features work after the sequence.
             try { cinematicCameraManager?._bindInputBridge?.(); } catch (_) {}
           },
-        });
+          }),
+          new Promise((resolve) => setTimeout(resolve, 12000)),
+        ]);
+
+        // Hard safety: regardless of intro outcome, never leave the overlay stuck.
+        await Promise.race([
+          loadingOverlay.fadeIn(1200, 400),
+          new Promise((resolve) => setTimeout(resolve, 4000)),
+        ]);
+        try { loadingOverlay.hide?.(); } catch (_) {}
       }, 'overlay.introZoom', Severity.COSMETIC);
       stepLog(' -> Step: overlay.introZoom DONE');
     }
@@ -6790,6 +7254,14 @@ async function createThreeCanvas(scene) {
     console.log(' ->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->');
     console.log(' Scene load COMPLETE:', scene?.name ?? 'unknown');
     console.log(' ->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->');
+
+    // LoadCoordinator: enter RUNNING (or stay DEGRADED if invariants failed)
+    if (_bailIfSessionStale('fin.running.pre')) return;
+    if (loadCoordinator.state === CoordinatorState.ACTIVATING) {
+      if (!_transitionOrBail(CoordinatorState.RUNNING, 'scene load complete', 'running')) return;
+    } else if (loadCoordinator.isDegraded) {
+      log.warn('LoadCoordinator: remaining in DEGRADED after scene load (invariant failures logged above)');
+    }
 
     // Mark the load session as successfully completed (records duration).
     session.finish();
@@ -6907,7 +7379,13 @@ async function createThreeCanvas(scene) {
     }, 'wallClockTimer', Severity.COSMETIC);
 
   } catch (error) {
+    _createThreeCanvasFailed = true;
     log.error('Failed to initialize three.js scene:', error);
+    _lastCreateThreeCanvasFailure = {
+      sceneId: String(scene?.id ?? ''),
+      atMs: performance.now(),
+      reason: String(error?.message ?? error ?? 'unknown-error'),
+    };
     session.abort();
     destroyThreeCanvas();
 
@@ -6923,10 +7401,36 @@ async function createThreeCanvas(scene) {
     _createThreeCanvasRunning = false;
     try { if (_progressHeartbeatId) clearInterval(_progressHeartbeatId); } catch (_) {}
     try {
+      if (_overlaySceneReadyDismissTimer) {
+        clearTimeout(_overlaySceneReadyDismissTimer);
+        _overlaySceneReadyDismissTimer = null;
+      }
+    } catch (_) {}
+    try {
       if (window.MapShine) window.MapShine.__msaSceneLoading = false;
     } catch (_) {
     }
     if (doLoadProfile) safeCall(() => lp.end('sceneLoad'), 'lp.end(sceneLoad)', Severity.COSMETIC);
+
+    // If a newer request for a DIFFERENT scene arrived while this run was active,
+    // replay it now.
+    const pending = _createThreeCanvasPendingRequest;
+    _createThreeCanvasPendingRequest = null;
+    const pendingSceneId = String(pending?.scene?.id ?? '');
+    const currentSceneId = String(scene?.id ?? '');
+    if (pending?.scene && !_createThreeCanvasFailed && pendingSceneId && pendingSceneId !== currentSceneId) {
+      safeCall(() => {
+        // Replayed calls bypass onCanvasReady; re-seed coordinator scene context.
+        loadCoordinator.beginSceneLoad(pending.scene?.id, pending.scene?.name);
+        setTimeout(() => {
+          void createThreeCanvas(pending.scene, pending.createOptions);
+        }, 0);
+      }, 'createThreeCanvas.replayPending', Severity.COSMETIC);
+    } else if (pending?.scene && !_createThreeCanvasFailed && pendingSceneId === currentSceneId) {
+      log.debug('[loading] Ignoring queued replay for same scene');
+    } else if (pending?.scene && _createThreeCanvasFailed) {
+      log.warn('[loading] Dropping queued createThreeCanvas replay because the active run failed');
+    }
   }
 }
 
@@ -6997,16 +7501,6 @@ function destroyThreeCanvas() {
     lightEditor = null;
   }
 
-  if (levelNavigatorOverlay) {
-    safeDispose(() => levelNavigatorOverlay.dispose(), 'levelNavigatorOverlay.dispose');
-    levelNavigatorOverlay = null;
-  }
-
-  if (levelsPerspectiveBridge) {
-    safeDispose(() => levelsPerspectiveBridge.dispose(), 'levelsPerspectiveBridge.dispose');
-    levelsPerspectiveBridge = null;
-  }
-
   if (overlayUIManager) {
     safeDispose(() => { if (effectComposer) effectComposer.removeUpdatable(overlayUIManager); }, 'removeUpdatable(overlayUI)');
     safeDispose(() => overlayUIManager.dispose(), 'overlayUIManager.dispose');
@@ -7025,13 +7519,6 @@ function destroyThreeCanvas() {
     cameraPanel.destroy();
     cameraPanel = null;
     log.debug('Camera Panel manager disposed');
-  }
-
-  // Dispose Levels Authoring Dialog
-  if (levelsAuthoring) {
-    levelsAuthoring.destroy();
-    levelsAuthoring = null;
-    log.debug('Levels Authoring Dialog disposed');
   }
 
   // Dispose cinematic camera manager
@@ -7706,10 +8193,10 @@ function _enforceGameplayPixiSuppression() {
     const hasPersistentPixiOverlays =
       ((Number(canvas?.scene?.drawings?.size) || 0) > 0) ||
       ((Number(canvas?.scene?.notes?.size) || 0) > 0) ||
-      ((Number(canvas?.scene?.templates?.size) || 0) > 0) ||
+      _msSceneHasMeasuredTemplateRegions() ||
       !!canvas?.drawings?.placeables?.length ||
       !!canvas?.notes?.placeables?.length ||
-      !!canvas?.templates?.placeables?.length;
+      !!_msMeasuredTemplateOverlayPlaceables().length;
     const nativeOverlayShouldStayVisible = useNativePersistentPixiOverlays && hasPersistentPixiOverlays;
     // Tokens stay Three.js-native in gameplay. Walls/drawings/etc. need PIXI fail-open
     // when InputRouter is null or briefly stale so the #board canvas receives marquee/drag.
@@ -7778,6 +8265,11 @@ function _enforceGameplayPixiSuppression() {
           if (canvas.primary.background) canvas.primary.background.visible = false;
           if (canvas.primary.foreground) canvas.primary.foreground.visible = false;
           if (canvas.primary.tiles) canvas.primary.tiles.visible = !!tilesEditContext;
+          if (Array.isArray(canvas.primary.levelTextures)) {
+            for (const lt of canvas.primary.levelTextures) {
+              if (lt) lt.visible = false;
+            }
+          }
         }, 'pixiSuppress.primary(editorOverlayV2)', Severity.COSMETIC);
         safeCall(() => { if (canvas.fog) canvas.fog.visible = false; }, 'pixiSuppress.fog(editorOverlayV2)', Severity.COSMETIC);
         safeCall(() => {
@@ -7850,6 +8342,17 @@ function _enforceGameplayPixiSuppression() {
     // Selective system: keep PIXI board visible for compatibility overlays while
     // scene-bearing layers are suppressed surgically below.
     safeCall(() => {
+      // #board stacks above #map-shine-canvas (z-index 10 vs 1). Foundry resets
+      // Application.renderer.background.alpha to 1 on many redraw paths (native
+      // level changes, resize, layer activation). An opaque clear then fills the
+      // whole board with the scene background colour and hides Three.js entirely
+      // even when FloorRenderBus + blit are healthy (misread as "Three not rendering").
+      if (canvas.app?.renderer?.background) {
+        canvas.app.renderer.background.alpha = 0;
+      }
+    }, 'pixiSuppress.rendererTransparentSelective', Severity.COSMETIC);
+
+    safeCall(() => {
       const pixiCanvas = canvas.app?.view;
       if (pixiCanvas) {
         pixiCanvas.style.display = '';
@@ -7888,14 +8391,31 @@ function _enforceGameplayPixiSuppression() {
     }, 'pixiSuppress.boardCanvasSelectiveVisible', Severity.COSMETIC);
 
     // V12+: primary can render tiles/overheads/roofs. Keep it hidden in gameplay.
+    // V14: PrimaryCanvasGroup draws per-Level background/foreground meshes as
+    // children (levelTextures[]). Map Shine owns scene rendering via Three.js,
+    // so ALL level textures must be suppressed — not just the viewed level's
+    // .background / .foreground properties.
     safeCall(() => { 
       if (canvas.primary) {
         canvas.primary.visible = true;
         if (canvas.primary.background) canvas.primary.background.visible = false;
         if (canvas.primary.foreground) canvas.primary.foreground.visible = false;
         if (canvas.primary.tiles) canvas.primary.tiles.visible = false;
+        if (Array.isArray(canvas.primary.levelTextures)) {
+          for (const lt of canvas.primary.levelTextures) {
+            if (lt) lt.visible = false;
+          }
+        }
       }
     }, 'pixiSuppress.primary', Severity.COSMETIC);
+
+    // V2: mirror createThreeCanvas / editor-overlay policy — native redraws can
+    // re-enable canvas.background or the grid mesh; both sit on #board above Three.
+    safeCall(() => {
+      if (window.MapShine?.__v2Active !== true) return;
+      if (canvas.background) canvas.background.visible = false;
+      _setGridVisualSuppressed(true);
+    }, 'pixiSuppress.backgroundAndGridV2', Severity.COSMETIC);
 
     // Fog of war / visibility: in V2 we do not use Foundry's fog visuals.
     // Leaving these visible can produce a fullscreen, camera-locked semi-transparent
@@ -8006,17 +8526,32 @@ function _enforcePersistentOverlayAdornments() {
     forceVisible(tpl.ruler);
   };
 
+  const touchRegionTemplate = (region) => {
+    if (!region) return;
+    forceVisible(region);
+    try {
+      if (Array.isArray(region.children)) {
+        for (const ch of region.children) forceVisible(ch);
+      }
+    } catch (_) {}
+  };
+
   // Measured templates must stay fully drawn (outline + highlighted cells) even
   // when the template layer is not active; the PIXI bridge reads native cells.
   try {
+    if (canvas.regions) {
+      canvas.regions.visible = true;
+      canvas.regions.renderable = true;
+      for (const r of _msMeasuredTemplateOverlayPlaceables()) touchRegionTemplate(r);
+    }
     if (canvas.templates) {
       canvas.templates.visible = true;
       canvas.templates.renderable = true;
-      const templateObjs = [
-        ...(Array.isArray(canvas.templates.placeables) ? canvas.templates.placeables : []),
-        ...(Array.isArray(canvas.templates.objects?.children) ? canvas.templates.objects.children : []),
-      ];
-      for (const t of templateObjs) touchTemplate(t);
+      const legacyTemplateObjs = (!canvas.regions && Array.isArray(canvas.templates.placeables))
+        ? [...canvas.templates.placeables,
+          ...(Array.isArray(canvas.templates.objects?.children) ? canvas.templates.objects.children : [])]
+        : (Array.isArray(canvas.templates.preview?.children) ? canvas.templates.preview.children : []);
+      for (const t of legacyTemplateObjs) touchTemplate(t);
     }
   } catch (_) {}
 

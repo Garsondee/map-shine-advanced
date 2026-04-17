@@ -57,7 +57,7 @@ export class SurfaceRegistry {
         this.refresh();
         return;
       }
-      if ('foregroundElevation' in changes || 'background' in changes || 'backgroundColor' in changes) {
+      if ('foregroundElevation' in changes || 'levels' in changes || 'background' in changes || 'backgroundColor' in changes) {
         this.refresh();
       }
     };
@@ -140,7 +140,10 @@ export class SurfaceRegistry {
         id: sceneId,
         name: sceneName,
         sceneRect,
-        foregroundElevation: Number.isFinite(scene?.foregroundElevation) ? scene.foregroundElevation : null
+        foregroundElevation: (() => {
+          const top = Number(canvas?.level?.elevation?.top);
+          return Number.isFinite(top) ? top : null;
+        })()
       },
       surfaces,
       stacks
@@ -177,10 +180,8 @@ export class SurfaceRegistry {
     const basePath = src ? this._extractBasePath(src) : '';
 
     const elev = Number.isFinite(tileDoc?.elevation) ? tileDoc.elevation : 0;
-    const fgElev = Number.isFinite(canvas?.scene?.foregroundElevation)
-      ? canvas.scene.foregroundElevation
-      : Number.POSITIVE_INFINITY;
-    const isOverhead = Number.isFinite(fgElev) ? (elev >= fgElev) : false;
+    const fgTop = Number(canvas?.level?.elevation?.top);
+    const isOverhead = Number.isFinite(fgTop) ? (elev >= fgTop) : false;
 
     const roofFlag = tileDoc?.getFlag?.(moduleId, 'overheadIsRoof') ?? tileDoc?.flags?.[moduleId]?.overheadIsRoof;
     const isWeatherRoof = isOverhead && !!roofFlag;

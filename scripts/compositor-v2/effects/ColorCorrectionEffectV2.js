@@ -443,7 +443,10 @@ export class ColorCorrectionEffectV2 {
             color += (noise - 0.5) * uGrainStrength;
           }
 
-          gl_FragColor = vec4(color, 1.0);
+          // Preserve input alpha so V14 per-level slices (authored map/background
+          // transparency) survive into LevelCompositePass; forcing 1.0 made upper
+          // floors fully opaque and hid lower-slice water through deck holes.
+          gl_FragColor = vec4(color, texel.a);
         }
       `,
       depthTest: false,

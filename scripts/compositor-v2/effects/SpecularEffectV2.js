@@ -30,9 +30,14 @@
 import { createLogger } from '../../core/log.js';
 import { weatherController } from '../../core/WeatherController.js';
 import { probeMaskFile } from '../../assets/loader.js';
-import { tileHasLevelsRange, readTileLevelsFlags } from '../../foundry/levels-scene-flags.js';
+import {
+  tileHasLevelsRange,
+  readTileLevelsFlags,
+  getViewedLevelBackgroundSrc,
+} from '../../foundry/levels-scene-flags.js';
 import Coordinates from '../../utils/coordinates.js';
 import { getVertexShader, getFragmentShader } from './specular-shader.js';
+import { safeBuildShaderMaterial } from '../../core/diagnostics/SafeShaderBuilder.js';
 
 const log = createLogger('SpecularEffectV2');
 
@@ -41,14 +46,50 @@ const log = createLogger('SpecularEffectV2');
 // but large enough to consistently render on top of the albedo tile.
 const SPECULAR_Z_OFFSET = 0.1;
 
-// Render-order offset for tile-attached specular overlays.
-// Keep this fractional so the overlay renders immediately after its own tile,
-// but before the next tile's integer sort slot (prevents leakage through stacked
-// tiles when neighboring docs have adjacent sort values).
-const SPECULAR_RENDER_ORDER_OFFSET = 0.1;
+import { tileRelativeEffectOrder } from '../LayerOrderPolicy.js';
+
+// Intra-band delta for specular overlays relative to their tile.
+const SPECULAR_EFFECT_DELTA = 1;
 
 // Maximum number of dynamic lights the shader supports (compile-time constant).
 const MAX_LIGHTS = 64;
+
+/**
+ * Parallel async map with a fixed worker pool. Used so `probeMaskFile` does not
+ * run strictly one-after-another across hundreds of tiles (which exceeds the
+ * FloorCompositor populate race during heavy FilePicker / mask discovery).
+ *
+ * @template T, R
+ * @param {T[]} items
+ * @param {number} limit
+ * @param {(item: T, index: number) => Promise<R>} fn
+ * @returns {Promise<R[]>}
+ */
+async function mapWithConcurrency(items, limit, fn) {
+  if (!items.length) return [];
+  const cap = Math.max(1, Math.min(limit, items.length));
+  const results = new Array(items.length);
+  let next = 0;
+
+  async function worker() {
+    for (;;) {
+      const i = next++;
+      if (i >= items.length) break;
+      results[i] = await fn(items[i], i);
+    }
+  }
+
+  await Promise.all(Array.from({ length: cap }, () => worker()));
+  return results;
+}
+
+/** How many `probeMaskFile` calls run at once during populate. */
+const SPECULAR_MASK_PROBE_CONCURRENCY = 8;
+
+/** Yield to the browser so sockets/timers stay healthy on huge maps. */
+async function yieldPopulateEventLoop() {
+  await new Promise((resolve) => setTimeout(resolve, 0));
+}
 
 // ─── SpecularEffectV2 ────────────────────────────────────────────────────────
 
@@ -96,6 +137,14 @@ export class SpecularEffectV2 {
     // Wind accumulation state (integrated from WeatherController each frame).
     this._windAccumX = 0;
     this._windAccumY = 0;
+
+    // Deferred shader compilation state
+    /** @type {boolean} True when heavy shader has been compiled */
+    this._realShaderCompiled = false;
+    /** @type {boolean} True when real shader compilation is in progress */
+    this._shaderCompilePending = false;
+    /** @type {Array<{tileId: string, opts: object}>} Pending overlay creations waiting for shader */
+    this._pendingOverlays = [];
 
     // Foundry hook IDs for light tracking.
     this._hookIds = {};
@@ -233,11 +282,13 @@ export class SpecularEffectV2 {
 
   get enabled() { return this._enabled; }
   set enabled(v) {
-    this._enabled = v;
-    this.params.enabled = !!v;
+    const next = !!v;
+    this._enabled = next;
+    this.params.enabled = next;
     if (this._sharedUniforms?.uEffectEnabled) {
-      this._sharedUniforms.uEffectEnabled.value = v;
+      this._sharedUniforms.uEffectEnabled.value = next;
     }
+    this._syncOverlayVisibility();
   }
 
   // ── UI schema (moved from V1 SpecularEffect) ─────────────────────────────
@@ -559,6 +610,7 @@ export class SpecularEffectV2 {
   async populate(foundrySceneData) {
     if (!this._initialized) { log.warn('populate: not initialized'); return; }
     this.clear();
+    this._syncOverlayVisibility();
 
     const floors = window.MapShine?.floorStack?.getFloors() ?? [];
     const worldH = foundrySceneData?.height ?? 0;
@@ -572,7 +624,7 @@ export class SpecularEffectV2 {
     // The background is not in canvas.scene.tiles.contents — it's handled
     // separately by FloorRenderBus as __bg_image__. Check for its _Specular
     // mask and create an overlay if found.
-    const bgSrc = canvas?.scene?.background?.src ?? '';
+    const bgSrc = getViewedLevelBackgroundSrc(canvas?.scene) ?? canvas?.scene?.background?.src ?? '';
     if (bgSrc) {
       const dotIdx = bgSrc.lastIndexOf('.');
       const bgBasePath = dotIdx > 0 ? bgSrc.substring(0, dotIdx) : bgSrc;
@@ -591,7 +643,7 @@ export class SpecularEffectV2 {
         const GROUND_Z = 1000;
         const z = GROUND_Z - 1 + SPECULAR_Z_OFFSET;
 
-        this._createOverlay('__bg_image__', 0, {
+        await this._createOverlay('__bg_image__', 0, {
           specularUrl: bgSpecResult.path,
           albedoUrl: bgSrc,
           centerX, centerY, z,
@@ -605,7 +657,7 @@ export class SpecularEffectV2 {
 
     // ── Process placed tiles ──────────────────────────────────────────────
     const tileDocs = canvas?.scene?.tiles?.contents ?? [];
-
+    const candidates = [];
     for (const tileDoc of tileDocs) {
       const src = tileDoc?.texture?.src ?? tileDoc?.img ?? '';
       if (!src) continue;
@@ -613,18 +665,33 @@ export class SpecularEffectV2 {
       const tileId = tileDoc.id ?? tileDoc._id;
       if (!tileId) continue;
 
-      // Extract base path (without extension) for mask probing.
       const dotIdx = src.lastIndexOf('.');
       const basePath = dotIdx > 0 ? src.substring(0, dotIdx) : src;
+      candidates.push({ tileDoc, tileId, basePath, src });
+    }
 
-      // Probe for _Specular mask. Skip tile if not found.
-      const specResult = await probeMaskFile(basePath, '_Specular');
-      if (!specResult?.path) continue;
+    log.warn(
+      `[POPULATE] SpecularEffectV2: parallel _Specular probe | tileCandidates=${candidates.length} | concurrency=${SPECULAR_MASK_PROBE_CONCURRENCY}`,
+    );
 
-      // Resolve floor index for this tile.
+    const probeRows = await mapWithConcurrency(
+      candidates,
+      SPECULAR_MASK_PROBE_CONCURRENCY,
+      async ({ tileDoc, tileId, basePath, src }) => {
+        const specResult = await probeMaskFile(basePath, '_Specular');
+        return { tileDoc, tileId, basePath, src, specResult };
+      },
+    );
+
+    let tilesWithSpecular = 0;
+    for (let i = 0; i < probeRows.length; i++) {
+      const row = probeRows[i];
+      if (!row.specResult?.path) continue;
+
+      const { tileDoc, tileId, src } = row;
+
       const floorIndex = this._resolveFloorIndex(tileDoc, floors);
 
-      // Compute tile geometry in world space (same logic as FloorRenderBus).
       const tileW = tileDoc.width ?? 0;
       const tileH = tileDoc.height ?? 0;
       const centerX = (tileDoc.x ?? 0) + tileW / 2;
@@ -632,17 +699,21 @@ export class SpecularEffectV2 {
       const rotation = typeof tileDoc.rotation === 'number'
         ? (tileDoc.rotation * Math.PI) / 180 : 0;
 
-      // Z position: same floor Z as the albedo tile + small offset.
       const GROUND_Z = 1000;
       const z = GROUND_Z + floorIndex + SPECULAR_Z_OFFSET;
 
-      this._createOverlay(tileId, floorIndex, {
-        specularUrl: specResult.path,
+      await this._createOverlay(tileId, floorIndex, {
+        specularUrl: row.specResult.path,
         albedoUrl: src,
         centerX, centerY, z, tileW, tileH, rotation,
       });
 
       overlayCount++;
+      tilesWithSpecular++;
+
+      if (tilesWithSpecular % 24 === 0) {
+        await yieldPopulateEventLoop();
+      }
     }
 
     const totalCount = overlayCount;
@@ -650,6 +721,21 @@ export class SpecularEffectV2 {
       ? 'Ready (_Specular mask found)'
       : 'Inactive (no _Specular mask)';
     log.info(`SpecularEffectV2 populated: ${totalCount} overlay(s) (${bgSrc ? '1 bg + ' : ''}${overlayCount - (bgSrc && overlayCount > 0 ? 1 : 0)} tiles)`);
+
+    // DEFERRED: Compile real shader after all overlays created with passthrough materials
+    if (totalCount > 0 && !this._realShaderCompiled && !this._shaderCompilePending) {
+      // Use setTimeout to allow populate() to complete and UI to update
+      setTimeout(() => this._compileRealShaderForOverlays(), 0);
+    }
+    this._syncOverlayVisibility();
+  }
+
+  /**
+   * Wrapper to create overlay - calls async _createOverlayMesh.
+   * @private
+   */
+  async _createOverlay(tileId, floorIndex, opts) {
+    await this._createOverlayMesh(tileId, { ...opts, floorIndex });
   }
 
   /**
@@ -684,8 +770,11 @@ export class SpecularEffectV2 {
           const wd = weather.windDirection;
           const dx = (wd && typeof wd.x === 'number') ? wd.x : 1;
           const dy = (wd && typeof wd.y === 'number') ? wd.y : 0;
-          this._windAccumX += dx * ws * timeInfo.delta * 0.01;
-          this._windAccumY += dy * ws * timeInfo.delta * 0.01;
+          const motionDelta = (typeof timeInfo?.motionDelta === 'number')
+            ? timeInfo.motionDelta
+            : (typeof timeInfo?.delta === 'number' ? timeInfo.delta : 0.016);
+          this._windAccumX += dx * ws * motionDelta * 0.01;
+          this._windAccumY += dy * ws * motionDelta * 0.01;
         }
       }
     } catch (_) { /* WeatherController may not be ready */ }
@@ -1135,15 +1224,22 @@ export class SpecularEffectV2 {
   clear() {
     for (const [tileId, entry] of this._overlays) {
       this._renderBus.removeEffectOverlay(`${tileId}_specular`);
-      entry.material.dispose();
-      entry.mesh.geometry.dispose();
-      // Dispose per-tile textures (albedo, specular).
-      for (const key of ['uAlbedoMap', 'uSpecularMap']) {
-        const tex = entry.material.uniforms[key]?.value;
-        if (tex && tex !== this._fallbackBlack && tex !== this._fallbackWhite) {
-          tex.dispose();
+      const material = entry?.material ?? null;
+      const uniforms = material?.uniforms ?? null;
+
+      // MeshBasicMaterial bootstrap path has no shader uniforms.
+      if (uniforms) {
+        // Dispose per-tile textures (albedo, specular).
+        for (const key of ['uAlbedoMap', 'uSpecularMap']) {
+          const tex = uniforms[key]?.value;
+          if (tex && tex !== this._fallbackBlack && tex !== this._fallbackWhite) {
+            tex.dispose();
+          }
         }
       }
+
+      try { material?.dispose?.(); } catch (_) {}
+      try { entry?.mesh?.geometry?.dispose?.(); } catch (_) {}
     }
     this._overlays.clear();
     this._lights.clear();
@@ -1170,40 +1266,42 @@ export class SpecularEffectV2 {
 
   /**
    * Create a specular overlay mesh for a single tile.
+   *
+   * DEFERRED: Uses a minimal passthrough material initially, compiles real shader
+   * on first render to prevent populate() hangs from ~1000+ line GLSL compilation.
+   *
    * @private
    */
-  _createOverlay(tileId, floorIndex, opts) {
-    const THREE = window.THREE;
+  async _createOverlayMesh(tileId, opts) {
     const {
-      specularUrl, albedoUrl,
-      centerX, centerY, z, tileW, tileH, rotation,
+      centerX, centerY, tileW, tileH, rotation, z, floorIndex,
+      albedoUrl, specularUrl
     } = opts;
 
-    // Create material with shared uniforms + per-tile texture uniforms.
-    // THREE.UniformsUtils.clone() deep-copies value objects, so we manually
-    // reference the shared uniforms and only create new entries for per-tile data.
+    const THREE = window.THREE;
     const floorIdx = Math.min(3, Math.max(0, Number(floorIndex) || 0));
-    const perTileUniforms = {
-      uAlbedoMap:      { value: this._fallbackWhite },
-      uSpecularMap:    { value: this._fallbackBlack },
-      uTileOpacity:     { value: 1.0 },
-      uOutdoorsFloorIdx: { value: floorIdx },
-    };
 
-    // Merge shared + per-tile uniforms. Shared uniforms are referenced (not cloned)
-    // so updating _sharedUniforms propagates to all materials automatically.
-    const uniforms = { ...this._sharedUniforms, ...perTileUniforms };
-
-    const material = new THREE.ShaderMaterial({
-      uniforms,
-      vertexShader: getVertexShader(),
-      fragmentShader: getFragmentShader(MAX_LIGHTS),
+    // DEFERRED: Use MeshBasicMaterial (no shader compile) initially.
+    // Real ShaderMaterial with full GLSL will be created and swapped in later
+    // by _compileRealShaderForOverlays(). This prevents populate() hangs.
+    //
+    // IMPORTANT: placeholder must be visually neutral. A white additive fallback
+    // can appear as a full-screen bright overlay if shader upgrade is delayed or
+    // skipped (e.g. compile timeout/error). Use additive BLACK so the placeholder
+    // contributes nothing until real textures/shader are bound.
+    const material = new THREE.MeshBasicMaterial({
+      color: 0x000000,
       transparent: true,
+      opacity: 1.0,
       depthWrite: false,
       depthTest: false,
       side: THREE.DoubleSide,
       blending: THREE.AdditiveBlending,
     });
+    // Store texture URLs for later shader upgrade
+    material._tempAlbedoUrl = albedoUrl;
+    material._tempSpecularUrl = specularUrl;
+    material._tempTileId = tileId;
 
     const geometry = new THREE.PlaneGeometry(tileW, tileH);
     const mesh = new THREE.Mesh(geometry, material);
@@ -1221,13 +1319,12 @@ export class SpecularEffectV2 {
       mesh.rotation.z = rotation;
     }
 
-    // Ensure the specular overlay renders immediately above its corresponding
-    // albedo tile in the FloorRenderBus scene. The bus uses renderOrder to
-    // guarantee deterministic stacking for transparent materials.
+    // Place specular in the correct role band via LayerOrderPolicy.
     try {
       const baseOrder = Number(baseEntry?.mesh?.renderOrder);
+      const isOverhead = !!baseEntry?.root?.userData?.isOverhead;
       if (Number.isFinite(baseOrder)) {
-        mesh.renderOrder = baseOrder + SPECULAR_RENDER_ORDER_OFFSET;
+        mesh.renderOrder = tileRelativeEffectOrder(baseOrder, floorIndex, isOverhead, SPECULAR_EFFECT_DELTA);
       }
     } catch (_) {}
 
@@ -1237,31 +1334,136 @@ export class SpecularEffectV2 {
       attached = this._renderBus.addTileAttachedOverlay(tileId, `${tileId}_specular`, mesh, floorIndex) === true;
     }
     if (!attached) {
+      // Store for lazy shader upgrade
+      this._pendingOverlays.push({ tileId, mesh, material, floorIdx });
+    }
+
+    if (!attached) {
       this._renderBus.addEffectOverlay(`${tileId}_specular`, mesh, floorIndex);
     }
     this._overlays.set(tileId, { mesh, material, floorIndex });
+    this._syncOverlayVisibility();
 
-    // Load textures asynchronously via THREE.TextureLoader.
-    const loader = new THREE.TextureLoader();
+    // Textures will be loaded after real shader is compiled.
+    // Placeholder is additive black (neutral) until upgrade.
+  }
 
-    // Albedo (needed by wet specular to derive reflectivity from grayscale).
-    loader.load(albedoUrl, (tex) => {
-      tex.colorSpace = THREE.SRGBColorSpace;
-      tex.flipY = true;
-      tex.needsUpdate = true;
-      if (this._overlays.has(tileId)) {
-        material.uniforms.uAlbedoMap.value = tex;
+  /**
+   * Compile the real heavy specular shader once and upgrade all overlays.
+   * DEFERRED: Only called after all overlays created with passthrough materials.
+   * @private
+   */
+  async _compileRealShaderForOverlays() {
+    if (this._realShaderCompiled || this._shaderCompilePending) return;
+    this._shaderCompilePending = true;
+
+    const THREE = window.THREE;
+    if (!THREE) return;
+
+    const startMs = performance?.now?.() ?? Date.now();
+    log.warn('SpecularEffectV2: compiling real shader (deferred from populate)...');
+
+    try {
+      // Build shared uniforms for real shader
+      const sharedUniforms = this._buildSharedUniforms();
+
+      // Use SafeShaderBuilder for timeout protection
+      const result = await safeBuildShaderMaterial(
+        THREE,
+        'SpecularEffectV2',
+        {
+          uniforms: sharedUniforms,
+          vertexShader: getVertexShader(),
+          fragmentShader: getFragmentShader(MAX_LIGHTS),
+          transparent: true,
+          depthWrite: false,
+          depthTest: false,
+          side: THREE.DoubleSide,
+          blending: THREE.AdditiveBlending,
+        },
+        {
+          timeoutMs: 5000,
+          fallbackParams: null, // Use default fallback
+        }
+      );
+
+      // Upgrade all overlays with the new real shader material
+      const loader = new THREE.TextureLoader();
+      for (const [tileId, overlay] of this._overlays) {
+        const oldMat = overlay.material;
+
+        // Create new material with real shader
+        const newUniforms = { ...sharedUniforms };
+        // Set per-tile uniforms
+        newUniforms.uAlbedoMap = { value: this._fallbackWhite };
+        newUniforms.uSpecularMap = { value: this._fallbackBlack };
+        newUniforms.uTileOpacity = { value: 1.0 };
+        newUniforms.uOutdoorsFloorIdx = { value: overlay.floorIndex };
+
+        const newMat = result.material.clone();
+        newMat.uniforms = newUniforms;
+
+        // Swap material on mesh
+        overlay.mesh.material = newMat;
+        overlay.material = newMat;
+
+        // Load textures now that shader is ready
+        const albedoUrl = oldMat._tempAlbedoUrl;
+        const specularUrl = oldMat._tempSpecularUrl;
+
+        if (albedoUrl) {
+          loader.load(albedoUrl, (tex) => {
+            tex.colorSpace = THREE.SRGBColorSpace;
+            tex.flipY = true;
+            tex.needsUpdate = true;
+            if (this._overlays.has(tileId)) {
+              newMat.uniforms.uAlbedoMap.value = tex;
+            }
+          }, undefined, (err) => log.warn(`Failed to load albedo for ${tileId}:`, err));
+        }
+
+        if (specularUrl) {
+          loader.load(specularUrl, (tex) => {
+            tex.flipY = true;
+            tex.needsUpdate = true;
+            if (this._overlays.has(tileId)) {
+              newMat.uniforms.uSpecularMap.value = tex;
+            }
+          }, undefined, (err) => log.warn(`Failed to load specular mask for ${tileId}:`, err));
+        }
+
+        // Dispose old MeshBasicMaterial
+        oldMat.dispose();
       }
-    }, undefined, (err) => log.warn(`Failed to load albedo for ${tileId}:`, err));
 
-    // Specular mask.
-    loader.load(specularUrl, (tex) => {
-      tex.flipY = true;
-      tex.needsUpdate = true;
-      if (this._overlays.has(tileId)) {
-        material.uniforms.uSpecularMap.value = tex;
+      this._realShaderCompiled = true;
+      this._shaderCompilePending = false;
+      this._syncOverlayVisibility();
+
+      const elapsed = (performance?.now?.() ?? Date.now()) - startMs;
+      if (result.usedFallback) {
+        log.error(`[${elapsed.toFixed(0)}ms] SpecularEffectV2: real shader FAILED/TIMED OUT - using fallback (specular visuals disabled)`);
+      } else {
+        log.warn(`[${elapsed.toFixed(0)}ms] SpecularEffectV2: real shader compiled successfully for ${this._overlays.size} overlays`);
       }
-    }, undefined, (err) => log.warn(`Failed to load specular mask for ${tileId}:`, err));
+    } catch (err) {
+      this._shaderCompilePending = false;
+      log.error('SpecularEffectV2: unexpected error during deferred shader compile:', err);
+    }
+  }
+
+  /**
+   * Specular overlays are bus-resident geometry. Disabling this effect must
+   * explicitly hide those meshes, otherwise placeholders can still render.
+   * @private
+   */
+  _syncOverlayVisibility() {
+    const visible = !!(this._enabled && this.params?.enabled !== false);
+    for (const [, entry] of this._overlays) {
+      const mesh = entry?.mesh;
+      if (!mesh) continue;
+      mesh.visible = visible;
+    }
   }
 
   // ── Private: Shared uniforms ───────────────────────────────────────────────

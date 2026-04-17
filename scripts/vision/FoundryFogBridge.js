@@ -15,6 +15,7 @@
  */
 
 import { createLogger } from '../core/log.js';
+import { isSceneFogExplorationEnabled } from '../fog/fog-exploration-store.js';
 
 const log = createLogger('FoundryFogBridge');
 
@@ -281,7 +282,7 @@ export class FoundryFogBridge {
    * @returns {boolean}
    */
   isExplorationEnabled() {
-    return canvas?.scene?.fog?.exploration ?? false;
+    return isSceneFogExplorationEnabled(canvas?.scene);
   }
 
   /**

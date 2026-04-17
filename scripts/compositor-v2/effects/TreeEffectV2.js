@@ -12,14 +12,16 @@ import { probeMaskFile } from '../../assets/loader.js';
 import { tileHasLevelsRange, readTileLevelsFlags } from '../../foundry/levels-scene-flags.js';
 import { weatherController } from '../../core/WeatherController.js';
 
+import {
+  GROUND_Z,
+  RENDER_ORDER_PER_FLOOR,
+  effectAboveOverheadOrder,
+  FLOOR_OVERHEAD_FX_OFFSET,
+} from '../LayerOrderPolicy.js';
+
 const log = createLogger('TreeEffectV2');
 
-const GROUND_Z = 1000;
-const TREE_Z_OFFSET = 0.18; // above bushes/specular but still within same floor band
-// Keep in sync with FloorRenderBus / TokenManager ordering.
-const RENDER_ORDER_PER_FLOOR = 10000;
-const TOKEN_RENDER_ORDER_WITHIN_FLOOR = 9900;
-const TREE_RENDER_ORDER_WITHIN_FLOOR = 9950;
+const TREE_Z_OFFSET = 0.18;
 
 export class TreeEffectV2 {
   /**
@@ -714,9 +716,11 @@ export class TreeEffectV2 {
     const time = Number.isFinite(timeInfo?.elapsed)
       ? Number(timeInfo.elapsed)
       : Number(timeInfo?.time ?? 0);
-    const delta = Number.isFinite(timeInfo?.delta)
+    const delta = Number.isFinite(timeInfo?.motionDelta)
+      ? Number(timeInfo.motionDelta)
+      : (Number.isFinite(timeInfo?.delta)
       ? Number(timeInfo.delta)
-      : 0.016;
+      : 0.016);
 
     const weather = weatherController?.currentState;
     const windDir = weather?.windDirection;
@@ -1439,18 +1443,8 @@ export class TreeEffectV2 {
     mesh.rotation.z = rotation;
 
     try {
-      const baseEntry = this._renderBus?._tiles?.get?.(tileId);
-      const baseOrder = Number(baseEntry?.mesh?.renderOrder);
-      const floorOrderBase = Number.isFinite(floorIndex) ? (floorIndex * RENDER_ORDER_PER_FLOOR) : 0;
-      const minTreeOrder = floorOrderBase + TREE_RENDER_ORDER_WITHIN_FLOOR;
-      if (Number.isFinite(baseOrder)) {
-        mesh.renderOrder = Math.max(baseOrder + 3, minTreeOrder);
-      } else {
-        mesh.renderOrder = minTreeOrder;
-      }
-      if (mesh.renderOrder <= floorOrderBase + TOKEN_RENDER_ORDER_WITHIN_FLOOR) {
-        mesh.renderOrder = floorOrderBase + TOKEN_RENDER_ORDER_WITHIN_FLOOR + 1;
-      }
+      // Trees are above-overhead (canopy over rooftops).
+      mesh.renderOrder = effectAboveOverheadOrder(floorIndex, 200);
     } catch (_) {}
 
     this._renderBus.addEffectOverlay(`${tileId}_tree`, mesh, floorIndex);

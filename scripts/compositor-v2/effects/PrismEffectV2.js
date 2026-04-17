@@ -10,6 +10,7 @@
 import { createLogger } from '../../core/log.js';
 import { probeMaskFile } from '../../assets/loader.js';
 import { tileHasLevelsRange, readTileLevelsFlags } from '../../foundry/levels-scene-flags.js';
+import { tileRelativeEffectOrder } from '../LayerOrderPolicy.js';
 
 const log = createLogger('PrismEffectV2');
 
@@ -302,7 +303,10 @@ export class PrismEffectV2 {
     try {
       const baseEntry = this._renderBus?._tiles?.get?.(tileId);
       const baseOrder = Number(baseEntry?.mesh?.renderOrder);
-      if (Number.isFinite(baseOrder)) mesh.renderOrder = baseOrder + 6;
+      const isOverhead = !!baseEntry?.root?.userData?.isOverhead;
+      if (Number.isFinite(baseOrder)) {
+        mesh.renderOrder = tileRelativeEffectOrder(baseOrder, floorIndex, isOverhead, 6);
+      }
     } catch (_) {}
 
     this._renderBus.addEffectOverlay(`${tileId}_prism`, mesh, floorIndex);

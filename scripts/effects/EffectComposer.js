@@ -99,6 +99,9 @@ export class EffectComposer {
     /** @type {FloorCompositor|null} */
     this._floorCompositorV2 = null;
 
+    /** @type {Promise<void>|null} Pending first-time FloorCompositor.initialize() */
+    this._floorCompositorV2InitPromise = null;
+
     // PERFORMANCE: Cache for resolved render order to avoid per-frame allocations
     this._cachedRenderOrder = [];
     this._renderOrderDirty = true;
@@ -604,6 +607,26 @@ export class EffectComposer {
     // during createThreeCanvas() via the _v2Active flag.
     // See docs/planning/V2-MILESTONE-1-ALBEDO-ONLY.md for full rationale.
     const _floorStackEarly = window.MapShine?.floorStack ?? null;
+    if (window.MapShine?.__v2StartupTraceEnabled === true && Number(timeInfo?.frameCount ?? 0) <= 8) {
+      try {
+        const ctx = window.MapShine?.activeLevelContext ?? null;
+        const entry = {
+          phase: 'effectComposer.preUpdatables',
+          frame: Number(timeInfo?.frameCount ?? -1),
+          activeLevel: {
+            index: Number.isFinite(Number(ctx?.index)) ? Number(ctx.index) : null,
+            bottom: Number.isFinite(Number(ctx?.bottom)) ? Number(ctx.bottom) : null,
+            top: Number.isFinite(Number(ctx?.top)) ? Number(ctx.top) : null,
+          },
+          floorStackCount: (() => {
+            try { return Number(window.MapShine?.floorStack?.getFloors?.()?.length ?? 0); } catch (_) { return 0; }
+          })(),
+        };
+        if (!Array.isArray(window.MapShine.__v2StartupTrace)) window.MapShine.__v2StartupTrace = [];
+        window.MapShine.__v2StartupTrace.push(entry);
+        if (window.MapShine.__v2StartupTrace.length > 128) window.MapShine.__v2StartupTrace.shift();
+      } catch (_) {}
+    }
     // ── Run updatables (camera, interaction, movement, etc.) ──────────
     for (const updatable of this.updatables) {
       try {
@@ -629,6 +652,77 @@ export class EffectComposer {
         log.error('Error updating updatable (V2 path):', error);
       }
     }
+    if (window.MapShine?.__v2StartupTraceEnabled === true && Number(timeInfo?.frameCount ?? 0) <= 8) {
+      try {
+        const ctx = window.MapShine?.activeLevelContext ?? null;
+        const entry = {
+          phase: 'effectComposer.postUpdatables',
+          frame: Number(timeInfo?.frameCount ?? -1),
+          activeLevel: {
+            index: Number.isFinite(Number(ctx?.index)) ? Number(ctx.index) : null,
+            bottom: Number.isFinite(Number(ctx?.bottom)) ? Number(ctx.bottom) : null,
+            top: Number.isFinite(Number(ctx?.top)) ? Number(ctx.top) : null,
+          },
+        };
+        if (!Array.isArray(window.MapShine.__v2StartupTrace)) window.MapShine.__v2StartupTrace = [];
+        window.MapShine.__v2StartupTrace.push(entry);
+        if (window.MapShine.__v2StartupTrace.length > 128) window.MapShine.__v2StartupTrace.shift();
+      } catch (_) {}
+    }
+
+    // ── Per-frame stylistic effect gate ─────────────────────────────────
+    // Pending-param flushes or stale Tweakpane memory can re-enable ASCII,
+    // dot screen, halftone, etc. between frames. Re-apply the scene-flag
+    // authoritative gate every frame so a single rogue write cannot persist.
+    try {
+      const _fc = this._floorCompositorV2;
+      if (_fc) {
+        const _scene = globalThis.canvas?.scene;
+        const _allSettings = sceneSettings.getSceneSettings(_scene);
+        const _mm = _allSettings?.mapMaker?.effects || {};
+        const _gm = _allSettings?.gm?.effects || {};
+        const _stylisticGates = [
+          ['ascii', '_asciiEffect'],
+          ['dotScreen', '_dotScreenEffect'],
+          ['halftone', '_halftoneEffect'],
+          ['visionMode', '_visionModeEffect'],
+          ['invert', '_invertEffect'],
+          ['sepia', '_sepiaEffect'],
+          ['dazzleOverlay', '_dazzleOverlayEffect'],
+        ];
+        for (const [effectId, fcKey] of _stylisticGates) {
+          const explicitOn = _mm[effectId]?.enabled === true || _gm[effectId]?.enabled === true;
+          const eff = _fc[fcKey];
+          if (!eff) continue;
+          if (typeof eff.enabled !== 'undefined') eff.enabled = explicitOn;
+          if (eff.params && Object.prototype.hasOwnProperty.call(eff.params, 'enabled')) {
+            eff.params.enabled = explicitOn;
+          }
+        }
+        if (window.MapShine?.__v2FrameTraceEnabled === true) {
+          const gateDiag = {};
+          for (const [effectId, fcKey] of _stylisticGates) {
+            const eff = _fc?.[fcKey];
+            gateDiag[effectId] = {
+              explicitOn: _mm[effectId]?.enabled === true || _gm[effectId]?.enabled === true,
+              enabled: typeof eff?.enabled === 'boolean' ? !!eff.enabled : null,
+              paramsEnabled: typeof eff?.params?.enabled === 'boolean' ? !!eff.params.enabled : null,
+            };
+          }
+          const entry = {
+            frame: Number(timeInfo?.frameCount ?? -1),
+            gateDiag,
+          };
+          if (!Array.isArray(window.MapShine.__v2FrameTraceStylistic)) {
+            window.MapShine.__v2FrameTraceStylistic = [];
+          }
+          window.MapShine.__v2FrameTraceStylistic.push(entry);
+          if (window.MapShine.__v2FrameTraceStylistic.length > 32) {
+            window.MapShine.__v2FrameTraceStylistic.shift();
+          }
+        }
+      }
+    } catch (_) {}
 
     // ── Render: FloorCompositor only (no effects, no overlay) ─────────
     const _compositorV2 = this._getFloorCompositorV2();
@@ -662,11 +756,11 @@ export class EffectComposer {
   _getFloorCompositorV2(options = {}) {
     if (!this._floorCompositorV2) {
       this._floorCompositorV2 = new FloorCompositor(this.renderer, this.scene, this.camera);
-      this._floorCompositorV2.initialize({
+      this._floorCompositorV2InitPromise = this._floorCompositorV2.initialize({
         onProgress: options?.onProgress,
         effectHints: options?.effectHints ?? null,
       });
-      log.info('FloorCompositor V2 created and initialized');
+      log.info('FloorCompositor V2 created and initializing (async)');
 
       // Expose FloorCompositor V2 and its effects for runtime diagnostics and
       // console debugging. In V2 mode, effects are not registered in the legacy
@@ -748,6 +842,22 @@ export class EffectComposer {
         'lens':             '_lensEffect',
       };
 
+      // Stylistic fullscreen passes: `enabled` must not be taken from Tweakpane
+      // in-memory folders on lazy compositor init — those folders can retain
+      // stale `enabled: true` when callbacks were dropped before V2 existed,
+      // which turns on Ascii/Dot/Halftone/etc. and reads as a "broken pipeline"
+      // failure state. Scene flags (below) are authoritative for `enabled`.
+      const STYLISTIC_SCENE_FLAG_TO_FC = [
+        ['ascii', '_asciiEffect'],
+        ['dotScreen', '_dotScreenEffect'],
+        ['halftone', '_halftoneEffect'],
+        ['visionMode', '_visionModeEffect'],
+        ['invert', '_invertEffect'],
+        ['sepia', '_sepiaEffect'],
+        ['dazzleOverlay', '_dazzleOverlayEffect'],
+      ];
+      const STYLISTIC_EFFECT_ID_SET = new Set(STYLISTIC_SCENE_FLAG_TO_FC.map(([id]) => id));
+
       try {
         const uiManager = window.MapShine?.uiManager;
         if (uiManager?.effectFolders) {
@@ -755,6 +865,9 @@ export class EffectComposer {
             const effectData = uiManager.effectFolders[effectId];
             if (!effectData?.params) continue;
             for (const [paramId, value] of Object.entries(effectData.params)) {
+              if (STYLISTIC_EFFECT_ID_SET.has(effectId) && (paramId === 'enabled' || paramId === 'masterEnabled')) {
+                continue;
+              }
               this._floorCompositorV2.applyParam(effectKey, paramId, value);
             }
           }
@@ -784,6 +897,28 @@ export class EffectComposer {
         } catch (err) {
           log.warn('FloorCompositor V2: water flag replay failed:', err);
         }
+
+        // Stylistic `enabled`: mapMaker / gm scene flags only (strict `=== true`),
+        // then sync Tweakpane folder state so UI matches runtime.
+        try {
+          const scene = globalThis.canvas?.scene;
+          const allSettings = sceneSettings.getSceneSettings(scene);
+          const mm = allSettings?.mapMaker?.effects || {};
+          const gm = allSettings?.gm?.effects || {};
+          const ui = window.MapShine?.uiManager;
+          for (const [effectId, fcKey] of STYLISTIC_SCENE_FLAG_TO_FC) {
+            const explicitOn = mm[effectId]?.enabled === true || gm[effectId]?.enabled === true;
+            this._floorCompositorV2.applyParam(fcKey, 'enabled', explicitOn);
+            try {
+              const fd = ui?.effectFolders?.[effectId];
+              if (fd?.params && Object.prototype.hasOwnProperty.call(fd.params, 'enabled')) {
+                fd.params.enabled = explicitOn;
+              }
+            } catch (_) {}
+          }
+        } catch (err) {
+          log.warn('FloorCompositor V2: stylistic effect gate failed:', err);
+        }
       } catch (err) {
         log.warn('FloorCompositor V2: param replay failed:', err);
       }
@@ -795,12 +930,28 @@ export class EffectComposer {
   }
 
   /**
+   * Await first-time {@link FloorCompositor#initialize} if still in flight.
+   * @returns {Promise<void>}
+   */
+  async ensureFloorCompositorV2Initialized() {
+    if (!this._floorCompositorV2InitPromise) return;
+    try {
+      await this._floorCompositorV2InitPromise;
+    } catch (err) {
+      log.error('FloorCompositor V2 initialization failed:', err);
+    } finally {
+      this._floorCompositorV2InitPromise = null;
+    }
+  }
+
+  /**
    * V2 warmup path.
    * Executes a single FloorCompositor V2 render to trigger lazy initialization.
    * @param {function} [onProgress]
    * @returns {Promise<{totalMs: number, programsCompiled: number, totalPrograms: number}>}
    */
   async progressiveWarmup(onProgress) {
+    await this.ensureFloorCompositorV2Initialized();
     const t0 = performance.now();
     const programCount = () => Array.isArray(this.renderer.info?.programs) ? this.renderer.info.programs.length : 0;
     const startPrograms = programCount();
@@ -1031,6 +1182,7 @@ export class EffectComposer {
 
     // Dispose Compositor V2 resources
     try {
+      this._floorCompositorV2InitPromise = null;
       if (this._floorCompositorV2) { this._floorCompositorV2.dispose(); this._floorCompositorV2 = null; }
     } catch (e) {
     }

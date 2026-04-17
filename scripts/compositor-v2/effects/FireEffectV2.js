@@ -55,16 +55,13 @@ import {
   Bezier,
 } from '../../libs/three.quarks.module.js';
 
+import {
+  GROUND_Z,
+  RENDER_ORDER_PER_FLOOR,
+  effectUnderOverheadOrder,
+} from '../LayerOrderPolicy.js';
+
 const log = createLogger('FireEffectV2');
-
-// Ground Z for the bus scene (matches FloorRenderBus GROUND_Z).
-const GROUND_Z = 1000;
-
-// Keep render-order math aligned with FloorRenderBus floor bands.
-const RENDER_ORDER_PER_FLOOR = 10000;
-const OVERHEAD_OFFSET = 5000;
-const FIRE_RENDER_ORDER_BASE = OVERHEAD_OFFSET - 4;
-const FIRE_RENDER_ORDER_ABOVE_OVERHEAD_BASE = 9955;
 
 // Spatial bucket size for splitting large fire masks into smaller emitters (px).
 const BUCKET_SIZE = 2000;
@@ -577,7 +574,9 @@ export class FireEffectV2 {
     } catch (_) {}
 
     // Compute dt for three.quarks (matches V1 time scaling).
-    const deltaSec = typeof timeInfo.delta === 'number' ? timeInfo.delta : 0.016;
+    const deltaSec = typeof timeInfo?.motionDelta === 'number'
+      ? timeInfo.motionDelta
+      : (typeof timeInfo?.delta === 'number' ? timeInfo.delta : 0.016);
     const clampedDelta = Math.min(deltaSec, 0.1);
     const simSpeed = (weatherController && typeof weatherController.simulationSpeed === 'number')
       ? weatherController.simulationSpeed : 2.0;
@@ -668,10 +667,7 @@ export class FireEffectV2 {
   _createBatchedRendererForFloor(floorIndex) {
     const br = new BatchedRenderer();
     br.frustumCulled = false;
-    const fi = Number(floorIndex) || 0;
-    const floorBandStart = fi * RENDER_ORDER_PER_FLOOR;
-    const base = fi > 0 ? FIRE_RENDER_ORDER_ABOVE_OVERHEAD_BASE : (OVERHEAD_OFFSET - 1);
-    br.renderOrder = floorBandStart + base;
+    br.renderOrder = effectUnderOverheadOrder(floorIndex, 0);
     try {
       if (br.layers && typeof br.layers.set === 'function') {
         br.layers.set(0);
@@ -986,24 +982,18 @@ export class FireEffectV2 {
     for (const f of this._floorStates.keys()) {
       const state = this._floorStates.get(f);
       if (!state?.batchRenderer) continue;
-      const fi = Number(f) || 0;
-      const floorBandStart = fi * RENDER_ORDER_PER_FLOOR;
-      const base = fi > 0 ? FIRE_RENDER_ORDER_ABOVE_OVERHEAD_BASE : (OVERHEAD_OFFSET - 1);
-      state.batchRenderer.renderOrder = floorBandStart + base;
+      state.batchRenderer.renderOrder = effectUnderOverheadOrder(Number(f) || 0, 0);
     }
   }
 
   /**
    * Compute particle-system render order within a floor band.
-   * Must stay below OVERHEAD_OFFSET so ground fire cannot sort above roof tiles.
+   * Uses FLOOR_EFFECTS role so fire always sits between albedo and overhead.
    * @private
    */
   _computeParticleRenderOrder(floorIndex, typeOffset = 0) {
-    const safeFloorIndex = Number.isFinite(Number(floorIndex)) ? Number(floorIndex) : 0;
-    const floorBandStart = safeFloorIndex * RENDER_ORDER_PER_FLOOR;
     const safeTypeOffset = Math.max(0, Math.min(2, Number(typeOffset) || 0));
-    const base = safeFloorIndex > 0 ? FIRE_RENDER_ORDER_ABOVE_OVERHEAD_BASE : FIRE_RENDER_ORDER_BASE;
-    return floorBandStart + base + safeTypeOffset;
+    return effectUnderOverheadOrder(floorIndex, safeTypeOffset);
   }
 
   /** Add a floor's systems to that floor's BatchedRenderer + scene. @private */

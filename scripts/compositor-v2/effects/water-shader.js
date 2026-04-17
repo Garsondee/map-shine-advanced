@@ -82,6 +82,8 @@ uniform sampler2D tNoiseMap;      // 512x512 RGBA seeded noise
 uniform sampler2D tWaterData;     // SDF data (R=SDF, G=exposure, BA=normals)
 uniform float uHasWaterData;      // 1.0 when tWaterData is valid
 uniform float uWaterEnabled;      // Master enable
+// 1 when this slice borrows another floor's packed water mask (upper band + river below).
+uniform float uCrossSliceWaterData;
 
 uniform sampler2D tWaterRawMask;  // Raw composited water mask (for foam edge)
 uniform float uHasWaterRawMask;   // 1.0 when tWaterRawMask is valid
@@ -460,6 +462,8 @@ float valueNoise(vec2 p) {
   return valueNoise2D(p);
 }
 
+// Three octaves (RGB) — fourth octave removed vs V1 FBM: fewer texture fetches
+// and faster compile, with weights nudged to keep similar contrast in warp/rain/murk.
 float fbmNoise(vec2 p) {
   const mat2 octRot = mat2(0.8, 0.6, -0.6, 0.8);
   vec2 i, f, u;
@@ -497,18 +501,7 @@ float fbmNoise(vec2 p) {
     texture2DLodEXT(tNoiseMap, (i + vec2(0.5, 1.5)) * NOISE_INV, 0.0).b,
     texture2DLodEXT(tNoiseMap, (i + vec2(1.5, 1.5)) * NOISE_INV, 0.0).b, u.x), u.y);
 
-  p = octRot * p * 2.0;
-  p = mod(p, NOISE_SIZE);
-  i = floor(p); f = fract(p); u = f * f * (3.0 - 2.0 * f);
-  i = mod(i, NOISE_SIZE);
-  float n3 = mix(mix(
-    texture2DLodEXT(tNoiseMap, (i + 0.5) * NOISE_INV, 0.0).a,
-    texture2DLodEXT(tNoiseMap, (i + vec2(1.5, 0.5)) * NOISE_INV, 0.0).a, u.x), mix(
-    texture2DLodEXT(tNoiseMap, (i + vec2(0.5, 1.5)) * NOISE_INV, 0.0).a,
-    texture2DLodEXT(tNoiseMap, (i + vec2(1.5, 1.5)) * NOISE_INV, 0.0).a, u.x), u.y);
-
-  return (n0 - 0.5) * 1.1 + (n1 - 0.5) * 0.605
-       + (n2 - 0.5) * 0.33275 + (n3 - 0.5) * 0.183;
+  return (n0 - 0.5) * 1.14 + (n1 - 0.5) * 0.62 + (n2 - 0.5) * 0.36;
 }
 
 float safe01(float v) { return clamp(v, 0.0, 1.0); }
@@ -551,16 +544,16 @@ vec2 computeRainOffsetPx(vec2 uv) {
   float sp = max(0.0, uRainDistortionSpeed);
   float px = clamp(uRainDistortionStrengthPx, 0.0, 24.0);
 
-  // Two offset FBM layers with different drift rates for organic motion
+  // Primary layer: fbmNoise; secondary: valueNoise2D (cheaper, still organic at rain scales).
   float t = uTime * sp;
   vec2 domain = uv * sc;
   float n1x = fbmNoise(domain + vec2(t * 0.13, -t * 0.09) + vec2(11.7, 7.3));
   float n1y = fbmNoise(domain + vec2(-t * 0.11, t * 0.14) + vec2(31.1, 19.9));
-  float n2x = fbmNoise(domain * 1.73 + vec2(t * 0.17, t * 0.07) + vec2(5.3, 41.1));
-  float n2y = fbmNoise(domain * 1.73 + vec2(-t * 0.08, -t * 0.15) + vec2(23.7, 3.9));
+  vec2 dom2 = domain * 1.73 + vec2(t * 0.17, t * 0.07) + vec2(5.3, 41.1);
+  float n2x = (valueNoise2D(dom2) - 0.5) * 2.0;
+  float n2y = (valueNoise2D(domain * 1.73 + vec2(-t * 0.08, -t * 0.15) + vec2(23.7, 3.9)) - 0.5) * 2.0;
 
-  // Blend two layers for complex motion without cellular artifacts
-  vec2 offset = vec2(n1x * 0.6 + n2x * 0.4, n1y * 0.6 + n2y * 0.4);
+  vec2 offset = vec2(n1x * 0.58 + n2x * 0.42, n1y * 0.58 + n2y * 0.42);
 
   // Precipitation ramps in smoothly — light rain = subtle, heavy rain = strong
   float ramp = smoothstep(0.0, 0.6, p) * (0.5 + 0.5 * p);
@@ -577,6 +570,18 @@ vec2 curlNoise2D(vec2 p) {
   return vec2((n1 - n2) / (2.0 * e), -(n3 - n4) / (2.0 * e));
 }
 
+float sceneAspectRatio() {
+  return (uHasSceneRect > 0.5)
+    ? (uSceneRect.z / max(1.0, uSceneRect.w))
+    : (uResolution.x / max(1.0, uResolution.y));
+}
+
+vec2 effectUv(vec2 sceneUv) {
+  // Keep procedural domains isotropic on non-square maps.
+  float sceneAspect = sceneAspectRatio();
+  return vec2(sceneUv.x * sceneAspect, sceneUv.y);
+}
+
 // ── Wave / Warp ──────────────────────────────────────────────────────────
 vec2 warpUv(vec2 sceneUv, float motion01) {
   float m = clamp(motion01, 0.0, 1.0);
@@ -590,7 +595,7 @@ vec2 warpUv(vec2 sceneUv, float motion01) {
   // This keeps all warp motion locked to the wind: as wind increases the
   // warp pattern advances faster, and it never reverses direction.
   float warpT = uWindTime * inShelter * max(0.0, uWaveWarpTimeSpeed) * m;
-  float sceneAspect = (uHasSceneRect > 0.5) ? (uSceneRect.z / max(1.0, uSceneRect.w)) : (uResolution.x / max(1.0, uResolution.y));
+  float sceneAspect = sceneAspectRatio();
   vec2 windF = uWindDir;
   float wl = length(windF);
   windF = (wl > 1e-6) ? (windF / wl) : vec2(1.0, 0.0);
@@ -618,8 +623,9 @@ vec2 warpUv(vec2 sceneUv, float motion01) {
   float n1 = fbmNoise((uv * 2.1) + vec2(13.7, 9.2) - windBasis * (warpT * 0.11));
   float n2 = fbmNoise((uv * 2.1) + vec2(41.3, 27.9) - windPerp  * (warpT * 0.06));
   uv += (windBasis * n1 + windPerp * n2) * clamp(uWaveWarpSmallStrength, 0.0, 1.0);
-  float n3 = fbmNoise(uv * 4.7 + vec2(7.9, 19.1) - windBasis * (warpT * 0.15));
-  float n4 = fbmNoise(uv * 4.7 + vec2(29.4, 3.3) - windPerp  * (warpT * 0.05));
+  // Micro warp: single value-noise octaves (4 taps each) — visually similar, less work than fbmNoise.
+  float n3 = (valueNoise2D(uv * 4.7 + vec2(7.9, 19.1) - windBasis * (warpT * 0.15)) - 0.5) * 2.0;
+  float n4 = (valueNoise2D(uv * 4.7 + vec2(29.4, 3.3) - windPerp  * (warpT * 0.05)) - 0.5) * 2.0;
   uv += (windBasis * n3 + windPerp * n4) * clamp(uWaveWarpMicroStrength, 0.0, 1.0);
   return uv;
 }
@@ -631,7 +637,8 @@ float waveSeaState(vec2 sceneUv, float motion01) {
   float inShelter = waterIndoorWindMotion01(sceneUv);
   // Sample spatially-varying noise to break up the evolution into patches.
   // Use uWindTime so the pattern only advances with wind, never reverses.
-  float n = fbmNoise(sceneUv * sc + vec2(uWindTime * inShelter * sp * 0.23, -uWindTime * inShelter * sp * 0.19));
+  vec2 evoUv = effectUv(sceneUv);
+  float n = fbmNoise(evoUv * sc + vec2(uWindTime * inShelter * sp * 0.23, -uWindTime * inShelter * sp * 0.19));
   // Map each pixel's noise to a slowly-crawling phase, then use a smooth periodic
   // envelope. This keeps modulation non-negative while removing cusp-like seam bands.
   float phase = fract(uWindTime * inShelter * sp * 0.05 + n);
@@ -950,7 +957,7 @@ float waterFbm(vec2 p, int octaves, float lacunarity, float gain) {
   float amp = 1.0;
   float freq = 1.0;
   float maxAmp = 0.0;
-  for (int i = 0; i < 8; i++) {
+  for (int i = 0; i < 6; i++) {
     if (i >= octaves) break;
     // valueNoise returns [0..1]; remap to [-1..1] for signed accumulation.
     sum += (valueNoise(p * freq) * 2.0 - 1.0) * amp;
@@ -964,9 +971,9 @@ float waterFbm(vec2 p, int octaves, float lacunarity, float gain) {
 // V1-accurate caustics: ridged FBM produces thin bright filaments, not blobs.
 // Matches DistortionManager causticsPattern() exactly.
 float causticsPattern(vec2 sceneUv, float t, float scale, float speed, float sharpness) {
-  vec2 p = sceneUv * scale;
+  vec2 p = effectUv(sceneUv) * scale;
   float tt = t * speed;
-  float n1 = waterFbm(p + vec2(tt * 0.12, -tt * 0.09), 4, 2.0, 0.5);
+  float n1 = waterFbm(p + vec2(tt * 0.12, -tt * 0.09), 3, 2.0, 0.5);
   float n2 = waterFbm(p * 1.7 + vec2(-tt * 0.08, tt * 0.11), 3, 2.1, 0.55);
   // Blend two FBM layers, then remap to [0..1].
   float n = 0.6 * n1 + 0.4 * n2;
@@ -1643,6 +1650,14 @@ void main() {
     ? distortionInsideFromSdf(sdf01)
     : inside;
   distInside *= rawAuth;
+  // Borrowing a lower floor's water pack on an upper slice: only treat pixels as
+  // water where this slice is punched out (low alpha). Suppresses river SDF over
+  // opaque bridge deck texels (same scene UV as the river below).
+  if (uCrossSliceWaterData > 0.5) {
+    float sheetOpaque = smoothstep(0.05, 0.96, base.a);
+    inside *= (1.0 - sheetOpaque);
+    distInside *= (1.0 - sheetOpaque);
+  }
   // Extra stability fade near the binary water-mask transition.
   // Prevents bright specular/caustics edge flicker when the water boundary is thin.
   float edgeStability = smoothstep(0.12, 0.42, clamp(distInside, 0.0, 1.0));
@@ -1761,6 +1776,9 @@ void main() {
     rainOffPx *= indoorMult;
   }
   offsetUvRaw += (rainOffPx * texel) * zoom;
+  if (uCrossSliceWaterData > 0.5) {
+    offsetUvRaw *= 0.14;
+  }
   vec2 offsetUv = offsetUvRaw * distMask;
   vec2 uv1 = clamp(vUv + offsetUv, vec2(0.001), vec2(0.999));
 
@@ -1772,18 +1790,14 @@ void main() {
   vec4 centerSample = texture2D(tDiffuse, uv1);
 
   #ifdef USE_WATER_REFRACTION_MULTITAP
-  vec2 uv0 = clamp(vUv + offsetUv * 0.55, vec2(0.001), vec2(0.999));
-  vec2 uv2 = clamp(vUv + offsetUv * 1.55, vec2(0.001), vec2(0.999));
-  float v0 = refractTapValid(uv0);
-  float v2 = refractTapValid(uv2);
-  vec4 tap0 = (v0 > 0.5) ? texture2D(tDiffuse, uv0) : centerSample;
-  vec4 tap2 = (v2 > 0.5) ? texture2D(tDiffuse, uv2) : centerSample;
-  // Renormalize weights so partial invalid taps don't create edge halos.
-  float w0 = 0.25 * v0;
-  float w1 = 0.50;
-  float w2 = 0.25 * v2;
-  float wSum = max(1e-6, w0 + w1 + w2);
-  vec4 refracted = (tap0 * w0 + centerSample * w1 + tap2 * w2) / wSum;
+  // Two-sample kernel along distortion: center (uv1) + outer — one fewer tap/valid than 3-point.
+  vec2 uvO = clamp(vUv + offsetUv * 1.18, vec2(0.001), vec2(0.999));
+  float vo = refractTapValid(uvO);
+  vec4 tapO = (vo > 0.5) ? texture2D(tDiffuse, uvO) : centerSample;
+  float wc = 0.56;
+  float wo = 0.44 * vo;
+  float wSum = max(1e-6, wc + wo);
+  vec4 refracted = (centerSample * wc + tapO * wo) / wSum;
   #else
   vec4 refracted = centerSample;
   #endif
@@ -2047,7 +2061,7 @@ void main() {
     
     // Color variation
     if (uShoreFoamColorVariation > 0.01) {
-      vec2 colorVarUv = sceneUv * 3.0 + vec2((uWindTime * indoorWindMotion) * 0.05);
+      vec2 colorVarUv = effectUv(sceneUv) * 3.0 + vec2((uWindTime * indoorWindMotion) * 0.05);
       float colorVar = valueNoise(colorVarUv);
       float varAmount = clamp(uShoreFoamColorVariation, 0.0, 1.0);
       shoreFoamColor = mix(shoreFoamColor, shoreFoamColor * (0.8 + colorVar * 0.4), varAmount);
@@ -2389,13 +2403,7 @@ void main() {
   if (uCloudReflectionEnabled > 0.5 && uHasCloudTopTexture > 0.5) {
     // Sample the combined cloud tops from CloudEffectV2
     vec4 cloudTopColor = texture2D(tCloudTopTexture, vUv);
-    
-    // DEBUG: Make clouds visible as bright red for testing
-    if (cloudTopColor.a > 0.01) {
-      cloudTopColor.rgb = vec3(1.0, 0.0, 0.0); // Bright red for debugging
-      cloudTopColor.a = 1.0; // Full opacity
-    }
-    
+
     // Simple Fresnel effect for reflection
     float fresnel = pow(1.0 - NoV, 3.0);
     
@@ -2421,7 +2429,12 @@ void main() {
   col = mix(col, base.rgb, occluderBlend);
   specBloomAccum *= (1.0 - occluderBlend);
   MSA_BLOOM_RT_COMMIT(specBloomAccum * clamp(uBloomSpecularEmitMul, 0.0, 12.0));
-  gl_FragColor = vec4(col, base.a);
+  // LevelCompositePass is straight-alpha source-over. If we keep output a = base.a,
+  // punched-through tile holes (base.a ≈ 0) zero out premultiplied contribution even
+  // when col holds water — upper-floor holes then show void instead of lower water.
+  float waterOutA = max(base.a, clamp(inside, 0.0, 1.0));
+  waterOutA = mix(waterOutA, base.a, occluderBlend);
+  gl_FragColor = vec4(col, waterOutA);
 }
 `;
 }

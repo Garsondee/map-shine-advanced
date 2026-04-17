@@ -11,6 +11,7 @@ import { createLogger } from '../../core/log.js';
 import { probeMaskFile } from '../../assets/loader.js';
 import { tileHasLevelsRange, readTileLevelsFlags } from '../../foundry/levels-scene-flags.js';
 import { weatherController } from '../../core/WeatherController.js';
+import { tileRelativeEffectOrder } from '../LayerOrderPolicy.js';
 
 const log = createLogger('BushEffectV2');
 
@@ -683,9 +684,11 @@ export class BushEffectV2 {
     const time = Number.isFinite(timeInfo?.elapsed)
       ? Number(timeInfo.elapsed)
       : Number(timeInfo?.time ?? 0);
-    const delta = Number.isFinite(timeInfo?.delta)
+    const delta = Number.isFinite(timeInfo?.motionDelta)
+      ? Number(timeInfo.motionDelta)
+      : (Number.isFinite(timeInfo?.delta)
       ? Number(timeInfo.delta)
-      : 0.016;
+      : 0.016);
 
     // Wind coupling — use WeatherController's smoothed state.
     const weather = weatherController?.currentState;
@@ -1193,11 +1196,13 @@ export class BushEffectV2 {
     mesh.position.set(centerX, centerY, z);
     mesh.rotation.z = rotation;
 
-    // Tie render order to base tile when possible.
     try {
       const baseEntry = this._renderBus?._tiles?.get?.(tileId);
       const baseOrder = Number(baseEntry?.mesh?.renderOrder);
-      if (Number.isFinite(baseOrder)) mesh.renderOrder = baseOrder + 2;
+      const isOverhead = !!baseEntry?.root?.userData?.isOverhead;
+      if (Number.isFinite(baseOrder)) {
+        mesh.renderOrder = tileRelativeEffectOrder(baseOrder, floorIndex, isOverhead, 2);
+      }
     } catch (_) {}
 
     this._renderBus.addEffectOverlay(`${tileId}_bush`, mesh, floorIndex);

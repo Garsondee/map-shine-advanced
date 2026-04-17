@@ -8,9 +8,8 @@ import { isGmLike } from '../core/gm-parity.js';
 
 import { createLogger } from '../core/log.js';
 import Coordinates from '../utils/coordinates.js';
-import { applyWallLevelDefaults, getFiniteActiveLevelBand, shouldApplyLevelCreateDefaults } from '../foundry/levels-create-defaults.js';
-import { readWallHeightFlags } from '../foundry/levels-scene-flags.js';
-import { getPerspectiveElevation } from '../foundry/elevation-context.js';
+import { applyWallV14LevelDefaults, getFiniteActiveLevelBand } from '../foundry/levels-create-defaults.js';
+import { hasV14NativeLevels, isWallOnV14Level } from '../foundry/levels-scene-flags.js';
 import { OVERLAY_THREE_LAYER } from '../core/render-layers.js';
 import { flattenWallUpdateChanges, isWallDoorStateOnlyUpdate } from '../utils/wall-update-classify.js';
 
@@ -203,8 +202,7 @@ export class WallManager {
     try {
       if (userId && game?.user?.id && userId !== game.user.id) return;
 
-      // Foundry requires integer wall endpoints. Some legacy wall data and copy/paste
-      // workflows can carry float coordinates; coerce here before model validation.
+      // Foundry requires integer wall endpoints
       if (Array.isArray(data?.c) && data.c.length >= 4) {
         const intCoords = data.c.slice(0, 4).map((v) => Math.round(Number(v) || 0));
         data.c = intCoords;
@@ -214,78 +212,53 @@ export class WallManager {
         }
       }
 
-      const hasBottom = data?.flags?.['wall-height']?.bottom !== undefined
-        && data?.flags?.['wall-height']?.bottom !== null;
-      const hasTop = data?.flags?.['wall-height']?.top !== undefined
-        && data?.flags?.['wall-height']?.top !== null;
-      if (hasBottom && hasTop) return;
+      const scene = doc?.parent ?? canvas?.scene;
 
-      const defaults = {};
-      applyWallLevelDefaults(defaults, { scene: doc?.parent ?? canvas?.scene });
-      const seeded = defaults?.flags?.['wall-height'];
-      if (!seeded) return;
+      // V14-native: seed the native `levels` field
+      if (hasV14NativeLevels(scene)) {
+        applyWallV14LevelDefaults(data, { scene });
+        if (data.levels) {
+          try {
+            doc.updateSource({ levels: data.levels });
+          } catch (_) {
+          }
+        }
+        return;
+      }
 
-      const nextWallHeight = {
-        bottom: hasBottom ? data.flags['wall-height'].bottom : seeded.bottom,
-        top: hasTop ? data.flags['wall-height'].top : seeded.top,
-      };
-
-      // Mutate the pending create data directly so all downstream preCreate
-      // consumers see the same wall-height bounds in this transaction.
-      data.flags = (data.flags && typeof data.flags === 'object') ? data.flags : {};
-      data.flags['wall-height'] = {
-        ...(data.flags['wall-height'] && typeof data.flags['wall-height'] === 'object' ? data.flags['wall-height'] : {}),
-        bottom: nextWallHeight.bottom,
-        top: nextWallHeight.top,
-      };
-
-      doc.updateSource({
-        'flags.wall-height.bottom': nextWallHeight.bottom,
-        'flags.wall-height.top': nextWallHeight.top,
-      });
+      return;
     } catch (_) {
     }
   }
 
   /**
    * Post-create integrity guard: if a wall was created in a multi-level scene
-   * but somehow landed without wall-height bounds (e.g. preCreate hook was
-   * bypassed, or a module created the wall programmatically), patch it now.
-   *
-   * This is a safety net — the preCreateWall hook should handle the normal case.
+   * but somehow landed without level membership, patch it now.
    * @param {WallDocument} doc
    * @private
    */
   _postCreateWallIntegrityGuard(doc) {
     try {
       if (!doc?.id) return;
-      if (!shouldApplyLevelCreateDefaults(doc.parent ?? canvas?.scene, { allowWhenModeOff: true })) return;
+      const scene = doc.parent ?? canvas?.scene;
 
-      const flags = doc.flags?.['wall-height'];
-      const hasBottom = flags?.bottom !== undefined && flags?.bottom !== null && Number.isFinite(Number(flags.bottom));
-      const hasTop = flags?.top !== undefined && flags?.top !== null && Number.isFinite(Number(flags.top));
-      if (hasBottom && hasTop) return;
+      // V14-native: check native levels membership
+      if (hasV14NativeLevels(scene)) {
+        const levelsSet = doc.levels;
+        if (levelsSet && levelsSet.size > 0) return;
+        const viewedLevelId = scene._view;
+        if (!viewedLevelId) return;
+        log.warn(`Post-create guard: wall ${doc.id} missing V14 level membership — assigning to viewed level ${viewedLevelId}`);
+        setTimeout(() => {
+          try { doc.update({ levels: [viewedLevelId] }); } catch (e) {
+            log.warn('Post-create V14 levels patch failed:', e);
+          }
+        }, 50);
+        return;
+      }
 
-      const band = getFiniteActiveLevelBand();
-      if (!band) return;
-
-      const patch = {};
-      if (!hasBottom) patch['flags.wall-height.bottom'] = band.bottom;
-      if (!hasTop) patch['flags.wall-height.top'] = band.top;
-
-      log.warn(`Post-create guard: wall ${doc.id} missing wall-height bounds — patching with band [${band.bottom}, ${band.top}]`);
-
-      // Defer the update to avoid re-entrant document mutations during the
-      // createWall hook chain.
-      setTimeout(() => {
-        try {
-          doc.update(patch);
-        } catch (e) {
-          log.warn('Post-create wall-height patch failed:', e);
-        }
-      }, 50);
+      return;
     } catch (_) {
-      // Guard must never throw and disrupt the createWall flow
     }
   }
 
@@ -385,22 +358,17 @@ export class WallManager {
   _isWallVisibleAtPerspective(wallDoc) {
     if (!wallDoc) return true;
 
-    const perspective = getPerspectiveElevation();
-    const elevation = Number(perspective?.elevation);
-    if (!Number.isFinite(elevation)) return true;
-
-    const bounds = readWallHeightFlags(wallDoc);
-    let bottom = Number(bounds?.bottom);
-    let top = Number(bounds?.top);
-    if (!Number.isFinite(bottom)) bottom = -Infinity;
-    if (!Number.isFinite(top)) top = Infinity;
-    if (top < bottom) {
-      const swap = bottom;
-      bottom = top;
-      top = swap;
+    // V14-native: use level membership as the primary visibility test
+    const scene = canvas?.scene;
+    if (hasV14NativeLevels(scene)) {
+      const viewedLevelId = scene._view;
+      if (viewedLevelId) {
+        const doc = wallDoc?.document ?? wallDoc;
+        return isWallOnV14Level(doc, viewedLevelId);
+      }
     }
 
-    return (bottom <= elevation) && (elevation <= top);
+    return true;
   }
 
   _getSelectedTokenDocs() {

@@ -94,11 +94,31 @@ export class FilterEffectV2 {
   static getControlSchema() {
     return {
       enabled: true,
+      help: {
+        title: 'Filter (multiply / ink AO)',
+        summary: [
+          'Multiplies the composited scene by a global tint and intensity, with optional ink-line “ambient occlusion” style darkening driven from the scene image, plus an optional multiply vignette.',
+          'Best on high-contrast linework maps; ink AO reads dark regions and edges from the current render. Optional **Only _Outdoors Dark Regions** uses the outdoors mask when available.',
+          'Fullscreen post-processing after the main composite.',
+          'Performance: usually modest; higher spread/blur adds work. Lower intensity or disable sub-features if a map is heavy.',
+          'Persistence: scene-based (not World Based).',
+        ].join('\n\n'),
+        glossary: {
+          Intensity: 'Master strength of the multiply filter (0 = no multiply contribution).',
+          'Tint (Multiply)': 'Per-channel multiplier on the image (white = no change).',
+          'Ink AO': 'Darkens ink-like regions using thresholds and edge detection on the scene texture.',
+          'Spread (px)': 'Screen-space reach of the ink shading.',
+          'Spread Blur (px)': 'Softens the spread sample for smoother shading.',
+          'Only _Outdoors Dark Regions': 'When an outdoors mask is present, limit ink AO to dark areas outside.',
+          Vignette: 'Edge darkening as an extra multiply pass.',
+        },
+      },
       groups: [
         {
-          name: 'filter',
-          label: 'Filter',
-          type: 'inline',
+          name: 'look',
+          label: 'Look',
+          type: 'folder',
+          expanded: true,
           parameters: ['intensity', 'tintColor'],
         },
         {
@@ -130,33 +150,148 @@ export class FilterEffectV2 {
       parameters: {
         enabled: { type: 'boolean', default: false, hidden: true },
 
-        intensity: { type: 'slider', label: 'Intensity', min: 0, max: 1, step: 0.01, default: 1.0 },
-        tintColor: { type: 'color', label: 'Tint (Multiply)', default: { r: 1, g: 1, b: 1 } },
+        intensity: {
+          type: 'slider',
+          label: 'Intensity',
+          min: 0,
+          max: 1,
+          step: 0.01,
+          default: 1.0,
+          tooltip: 'How strongly the multiply filter is applied (0 disables the pass output).',
+        },
+        tintColor: {
+          type: 'color',
+          colorType: 'float',
+          label: 'Tint (Multiply)',
+          default: { r: 1, g: 1, b: 1 },
+          tooltip: 'Multiplies the scene color per channel; white keeps the map neutral.',
+        },
 
-        inkAoEnabled: { type: 'boolean', label: 'Enabled', default: true },
-        inkAoStrength: { type: 'slider', label: 'Strength', min: 0, max: 2, step: 0.01, default: 0.65 },
-        inkDarkThreshold: { type: 'slider', label: 'Dark Threshold', min: 0, max: 1, step: 0.01, default: 0.72 },
-        inkDarkSoftness: { type: 'slider', label: 'Dark Softness', min: 0.001, max: 0.5, step: 0.01, default: 0.08 },
-        inkEdgeStrength: { type: 'slider', label: 'Edge Strength', min: 0, max: 4, step: 0.01, default: 1.0 },
-        inkEdgePower: { type: 'slider', label: 'Edge Power', min: 0.25, max: 4, step: 0.01, default: 1.25 },
-        inkSpreadPx: { type: 'slider', label: 'Spread (px)', min: 0, max: 96, step: 0.5, default: 12.0 },
-        inkBlurPx: { type: 'slider', label: 'Spread Blur (px)', min: 0, max: 24, step: 0.25, default: 2.0 },
-        inkOutdoorsDarkOnly: { type: 'boolean', label: 'Only _Outdoors Dark Regions', default: false },
-        inkTintColor: { type: 'color', label: 'AO Tint', default: { r: 0, g: 0, b: 0 } },
+        inkAoEnabled: {
+          type: 'boolean',
+          label: 'Enabled',
+          default: true,
+          tooltip: 'Turn ink-line AO darkening on or off (independent of the effect Enabled toggle).',
+        },
+        inkAoStrength: {
+          type: 'slider',
+          label: 'Strength',
+          min: 0,
+          max: 2,
+          step: 0.01,
+          default: 0.65,
+          tooltip: 'Overall strength of ink AO darkening.',
+        },
+        inkDarkThreshold: {
+          type: 'slider',
+          label: 'Dark Threshold',
+          min: 0,
+          max: 1,
+          step: 0.01,
+          default: 0.72,
+          tooltip: 'How dark a pixel must be to count as “ink” for the AO response.',
+        },
+        inkDarkSoftness: {
+          type: 'slider',
+          label: 'Dark Softness',
+          min: 0.001,
+          max: 0.5,
+          step: 0.01,
+          default: 0.08,
+          tooltip: 'Softens the transition at the dark threshold.',
+        },
+        inkEdgeStrength: {
+          type: 'slider',
+          label: 'Edge Strength',
+          min: 0,
+          max: 4,
+          step: 0.01,
+          default: 1.0,
+          tooltip: 'How much detected edges boost the ink shading.',
+        },
+        inkEdgePower: {
+          type: 'slider',
+          label: 'Edge Power',
+          min: 0.25,
+          max: 4,
+          step: 0.01,
+          default: 1.25,
+          tooltip: 'Exponent on edge response (higher = sharper, more contrasty edges).',
+        },
+        inkSpreadPx: {
+          type: 'slider',
+          label: 'Spread (px)',
+          min: 0,
+          max: 96,
+          step: 0.5,
+          default: 12.0,
+          tooltip: 'Neighborhood size in pixels for ink darkening spread.',
+        },
+        inkBlurPx: {
+          type: 'slider',
+          label: 'Spread Blur (px)',
+          min: 0,
+          max: 24,
+          step: 0.25,
+          default: 2.0,
+          tooltip: 'Blur radius applied when sampling the spread (smoother contact shadows).',
+        },
+        inkOutdoorsDarkOnly: {
+          type: 'boolean',
+          label: 'Only _Outdoors Dark Regions',
+          default: false,
+          tooltip: 'If an outdoors mask is available, apply ink AO only where the mask marks outdoors and the image is dark.',
+        },
+        inkTintColor: {
+          type: 'color',
+          colorType: 'float',
+          label: 'AO Tint',
+          default: { r: 0, g: 0, b: 0 },
+          tooltip: 'Color mixed into shaded ink regions (black is typical).',
+        },
 
-        vignetteEnabled: { type: 'boolean', label: 'Enabled', default: false },
-        vignetteStrength: { type: 'slider', label: 'Strength', min: 0, max: 2, step: 0.01, default: 0.35 },
-        vignetteInner: { type: 'slider', label: 'Inner', min: 0, max: 2, step: 0.01, default: 0.55 },
-        vignetteOuter: { type: 'slider', label: 'Outer', min: 0.01, max: 2.5, step: 0.01, default: 1.15 },
-        vignetteTintColor: { type: 'color', label: 'Tint', default: { r: 0, g: 0, b: 0 } },
+        vignetteEnabled: {
+          type: 'boolean',
+          label: 'Enabled',
+          default: false,
+          tooltip: 'Enable multiply vignette darkening toward the edges.',
+        },
+        vignetteStrength: {
+          type: 'slider',
+          label: 'Strength',
+          min: 0,
+          max: 2,
+          step: 0.01,
+          default: 0.35,
+          tooltip: 'How strong the vignette multiply is.',
+        },
+        vignetteInner: {
+          type: 'slider',
+          label: 'Inner',
+          min: 0,
+          max: 2,
+          step: 0.01,
+          default: 0.55,
+          tooltip: 'Radius where vignette falloff begins (normalized radial space).',
+        },
+        vignetteOuter: {
+          type: 'slider',
+          label: 'Outer',
+          min: 0.01,
+          max: 2.5,
+          step: 0.01,
+          default: 1.15,
+          tooltip: 'Radius where vignette reaches full strength.',
+        },
+        vignetteTintColor: {
+          type: 'color',
+          colorType: 'float',
+          label: 'Tint',
+          default: { r: 0, g: 0, b: 0 },
+          tooltip: 'Color bias for vignette darkening (black = neutral darken).',
+        },
       },
       presets: {
-        Off: {
-          intensity: 1.0,
-          tintColor: { r: 1, g: 1, b: 1 },
-          inkAoEnabled: false,
-          vignetteEnabled: false,
-        },
         'Ink AO — Subtle': {
           intensity: 1.0,
           tintColor: { r: 1, g: 1, b: 1 },
@@ -167,8 +302,14 @@ export class FilterEffectV2 {
           inkEdgeStrength: 1.15,
           inkEdgePower: 1.2,
           inkSpreadPx: 2.0,
+          inkBlurPx: 2.0,
+          inkOutdoorsDarkOnly: false,
           inkTintColor: { r: 0.0, g: 0.0, b: 0.0 },
           vignetteEnabled: false,
+          vignetteStrength: 0.35,
+          vignetteInner: 0.55,
+          vignetteOuter: 1.15,
+          vignetteTintColor: { r: 0, g: 0, b: 0 },
         },
         'Ink AO — Bold': {
           intensity: 1.0,
@@ -180,8 +321,14 @@ export class FilterEffectV2 {
           inkEdgeStrength: 1.6,
           inkEdgePower: 1.0,
           inkSpreadPx: 3.5,
+          inkBlurPx: 2.0,
+          inkOutdoorsDarkOnly: false,
           inkTintColor: { r: 0.0, g: 0.0, b: 0.0 },
           vignetteEnabled: false,
+          vignetteStrength: 0.35,
+          vignetteInner: 0.55,
+          vignetteOuter: 1.15,
+          vignetteTintColor: { r: 0, g: 0, b: 0 },
         },
       },
     };
@@ -293,16 +440,20 @@ export class FilterEffectV2 {
 
           // Map to sceneRect UV for world-space _Outdoors sampling.
           // Match V2 SkyColor/Cloud convention: world Y-up -> scene UV with V flip.
-          vec2 maskUv = vec2(
+          vec2 maskUvRaw = vec2(
             (worldX - uSceneBounds.x) / max(uSceneBounds.z, 1.0),
             1.0 - ((worldY - uSceneBounds.y) / max(uSceneBounds.w, 1.0))
           );
-          maskUv = clamp(maskUv, 0.0, 1.0);
+          float inScene =
+            step(0.0, maskUvRaw.x) * step(maskUvRaw.x, 1.0) *
+            step(0.0, maskUvRaw.y) * step(maskUvRaw.y, 1.0);
+          vec2 maskUv = clamp(maskUvRaw, 0.0, 1.0);
 
           // Optional compatibility flip for mask sources that require it.
           if (uOutdoorsMaskFlipY > 0.5) maskUv.y = 1.0 - maskUv.y;
 
-          return clamp(texture2D(uOutdoorsMask, maskUv).r, 0.0, 1.0);
+          float r = clamp(texture2D(uOutdoorsMask, maskUv).r, 0.0, 1.0);
+          return mix(1.0, r, inScene);
         }
 
         void main() {

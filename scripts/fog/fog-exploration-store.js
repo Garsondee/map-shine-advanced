@@ -1,7 +1,6 @@
 import { isGmLike } from '../core/gm-parity.js';
 import { createLogger } from '../core/log.js';
-import { getLevelsCompatibilityMode, LEVELS_COMPATIBILITY_MODES } from '../foundry/levels-compatibility.js';
-import { isLevelsEnabledForScene } from '../foundry/levels-scene-flags.js';
+import { hasV14NativeLevels, readV14SceneLevels } from '../foundry/levels-scene-flags.js';
 
 const log = createLogger('FogExplorationStore');
 
@@ -10,6 +9,23 @@ const FLAGS_KEY = 'fogPersistenceV1';
 
 /** When no token actor can be resolved (e.g. GM with no selection), persist under this key. */
 export const FOG_USER_SENTINEL_ACTOR_ID = '__mapshine_user__';
+
+/**
+ * Whether the scene has fog exploration memory enabled.
+ * Foundry v14+ uses `fog.mode` ({@link CONST.FOG_EXPLORATION_MODES}); avoid `fog.exploration` (removed in v16).
+ *
+ * @param {foundry.documents.BaseScene|null|undefined} scene
+ * @returns {boolean}
+ */
+export function isSceneFogExplorationEnabled(scene) {
+  const fog = scene?.fog;
+  if (!fog) return false;
+  if (typeof fog.mode === 'number') {
+    const disabled = CONST.FOG_EXPLORATION_MODES?.DISABLED ?? 0;
+    return fog.mode > disabled;
+  }
+  return Boolean(fog.exploration);
+}
 
 function getTokenActorId(tokenLike) {
   const doc = tokenLike?.document;
@@ -44,23 +60,19 @@ function normalizeBandKey({ bottom, top }) {
 }
 
 function getSceneLevelBands(scene) {
-  const out = [];
-  const fromNative = scene?.flags?.['map-shine-advanced']?.levels?.sceneLevels;
-  const fromLevels = scene?.flags?.levels?.sceneLevels;
-  const raw = Array.isArray(fromNative) ? fromNative : (Array.isArray(fromLevels) ? fromLevels : []);
-  for (let i = 0; i < raw.length; i += 1) {
-    const entry = raw[i];
-    const bottom = Number(entry?.bottom ?? entry?.rangeBottom ?? (Array.isArray(entry) ? entry[0] : NaN));
-    const top = Number(entry?.top ?? entry?.rangeTop ?? (Array.isArray(entry) ? entry[1] : NaN));
-    if (!Number.isFinite(bottom) || !Number.isFinite(top)) continue;
-    out.push({
+  // V14-native: read from scene.levels
+  if (hasV14NativeLevels(scene)) {
+    const native = readV14SceneLevels(scene);
+    return native.map((lvl, i) => ({
       index: i,
-      bottom: Math.min(bottom, top),
-      top: Math.max(bottom, top),
-      label: String(entry?.label ?? entry?.name ?? (Array.isArray(entry) ? entry[2] : `Level ${i + 1}`)),
-    });
+      bottom: Number.isFinite(lvl.bottom) ? lvl.bottom : 0,
+      top: Number.isFinite(lvl.top) ? lvl.top : 0,
+      label: lvl.label || `Level ${i + 1}`,
+      levelId: lvl.levelId,
+    }));
   }
-  return out;
+
+  return [];
 }
 
 function resolveAuthoredBandKey(scene, levelCtx) {
@@ -80,16 +92,20 @@ function resolveAuthoredBandKey(scene, levelCtx) {
 
 export function getActiveElevationBandKey() {
   try {
-    if (getLevelsCompatibilityMode() === LEVELS_COMPATIBILITY_MODES.OFF) return 'default';
     const scene = canvas?.scene;
-    if (!scene || !isLevelsEnabledForScene(scene)) return 'default';
+
+    // V14-native: use level document ID as the fog key
+    if (hasV14NativeLevels(scene)) {
+      const levelCtx = window.MapShine?.activeLevelContext;
+      if (!levelCtx?.levelId) return null;
+      return `v14-level:${levelCtx.levelId}`;
+    }
+
+    if (!scene) return 'default';
     const levelCtx = window.MapShine?.activeLevelContext;
-    // Do not collapse unresolved Levels context into a shared default bucket.
     if (!levelCtx) return null;
     const authored = resolveAuthoredBandKey(scene, levelCtx);
     if (authored) return authored;
-    // Safety-first: if authored floor bands exist but current context does not
-    // match one, refuse to resolve a key to avoid cross-floor contamination.
     if (getSceneLevelBands(scene).length > 0) return null;
     return normalizeBandKey(levelCtx);
   } catch (_) {

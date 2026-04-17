@@ -21,7 +21,7 @@ import { createLogger } from '../core/log.js';
 import * as assetLoader from '../assets/loader.js';
 import { getEffectMaskRegistry } from '../assets/loader.js';
 import { SceneMaskCompositor } from './scene-mask-compositor.js';
-import { isLevelsEnabledForScene, tileHasLevelsRange, readTileLevelsFlags, readSceneLevelsFlag } from '../foundry/levels-scene-flags.js';
+import { isLevelsEnabledForScene, tileHasLevelsRange, readTileLevelsFlags, readSceneLevelsFlag, hasV14NativeLevels, readV14SceneLevels, getViewedLevelBackgroundSrc } from '../foundry/levels-scene-flags.js';
 import { isTileOverhead } from '../scene/tile-manager.js';
 import { collectEnabledMaskIds, getMaskBundleOptionsFromFlagOnly } from '../settings/mask-manifest-flags.js';
 
@@ -268,10 +268,47 @@ const WATER_PATCH_FRAG = /* glsl */`
   }
 `;
 
+function _toBasePathFromSrc(src) {
+  const s = String(src || '').trim();
+  if (!s) return null;
+  return s.replace(/\?.*$/, '').replace(/\.[^/.]+$/, '');
+}
+
+function _resolveBandBackgroundBasePath(scene, bandBottom, bandTop) {
+  try {
+    if (hasV14NativeLevels(scene)) {
+      const levels = readV14SceneLevels(scene);
+      const match = levels.find((lvl) => Number(lvl?.bottom) === Number(bandBottom) && Number(lvl?.top) === Number(bandTop));
+      if (match?.levelId) {
+        const lvlDoc = scene?.levels?.get?.(match.levelId) ?? null;
+        const src = lvlDoc?.background?.src;
+        const bp = _toBasePathFromSrc(src);
+        if (bp) return bp;
+      }
+      // Safe fallback for transitions where band mapping is not yet stable.
+      const viewed = getViewedLevelBackgroundSrc(scene);
+      const viewedBp = _toBasePathFromSrc(viewed);
+      if (viewedBp) return viewedBp;
+    }
+  } catch (_) {}
+
+  try {
+    const bg = scene?.background?.src || scene?.img || null;
+    return _toBasePathFromSrc(bg);
+  } catch (_) {
+    return null;
+  }
+}
+
 // ── GpuSceneMaskCompositor ────────────────────────────────────────────────────
 
 export class GpuSceneMaskCompositor {
   constructor() {
+    /**
+     * Floor cache kill-switch for diagnostics.
+     * Default OFF because full per-frame recomposition causes visible hitching.
+     */
+    this._disableFloorCaching = !!window?.MapShine?.__debugDisableFloorCaching;
     /**
      * Per-floor render target cache.
      * Key: floorKey ("${bottom}:${top}"), Value: Map<maskType, WebGLRenderTarget>
@@ -351,6 +388,15 @@ export class GpuSceneMaskCompositor {
      * @type {Map<string, number>}
      */
     this._upperOutdoorsMetaRepairCount = new Map();
+
+    /**
+     * Upper-floor bands where a full composeFloor completed but getFloorTexture(_, 'outdoors')
+     * remains null — a valid outcome when the map has no _Outdoors art on that band.
+     * Without this, preloadAllFloors would delete _floorMeta on every run (~1s throttle)
+     * and re-compose forever ("cache miss" spam + visible flicker).
+     * @type {Set<string>}
+     */
+    this._upperBandNoOutdoorsAccepted = new Set();
 
     /** @type {Promise<void>|null} Serialize concurrent preloadAllFloors (load + effects). */
     this._preloadAllFloorsInFlight = null;
@@ -657,7 +703,7 @@ export class GpuSceneMaskCompositor {
     if (!ctx) return null;
 
     const sc = scene || canvas?.scene;
-    if (!sc || !isLevelsEnabledForScene(sc)) return null;
+    if (!sc || (!hasV14NativeLevels(sc) && !isLevelsEnabledForScene(sc))) return null;
 
     const bandBottom = Number(ctx.bottom);
     const bandTop = Number(ctx.top);
@@ -666,22 +712,27 @@ export class GpuSceneMaskCompositor {
     const floorKey = `${bandBottom}:${bandTop}`;
     const levelElevation = bandBottom;
 
+    if (this._disableFloorCaching) {
+      this._purgeAllFloorCaches();
+    }
+
     // Fast path: floor already composited — return cached metadata.
-    let cached = this._floorMeta.get(floorKey);
+    let cached = this._disableFloorCaching ? null : this._floorMeta.get(floorKey);
     if (cached?.masks?.length) {
       const needsUpperOutdoorsRepair =
         bandBottom > 0
         && !this.getFloorTexture(floorKey, 'outdoors')
         && this._getActiveLevelTiles(sc, ctx).length > 0;
-      if (needsUpperOutdoorsRepair) {
-        const n = (this._upperOutdoorsMetaRepairCount.get(floorKey) ?? 0) + 1;
-        if (n <= 2) {
-          this._upperOutdoorsMetaRepairCount.set(floorKey, n);
-          log.info('composeFloor: evicting stale upper-floor meta without outdoors texture', { floorKey, attempt: n });
-          this._floorMeta.delete(floorKey);
-          cached = null;
-        }
-      } else if (bandBottom > 0 && this.getFloorTexture(floorKey, 'outdoors')) {
+        if (needsUpperOutdoorsRepair) {
+          const n = (this._upperOutdoorsMetaRepairCount.get(floorKey) ?? 0) + 1;
+          if (n <= 2) {
+            this._upperOutdoorsMetaRepairCount.set(floorKey, n);
+            log.info('composeFloor: evicting stale upper-floor meta without outdoors texture', { floorKey, attempt: n });
+            this._floorMeta.delete(floorKey);
+            this._upperBandNoOutdoorsAccepted.delete(floorKey);
+            cached = null;
+          }
+        } else if (bandBottom > 0 && this.getFloorTexture(floorKey, 'outdoors')) {
         this._upperOutdoorsMetaRepairCount.delete(floorKey);
       }
     }
@@ -843,26 +894,102 @@ export class GpuSceneMaskCompositor {
     // Prefer the path derived from the scene's background image over
     // lastMaskBasePath — lastMaskBasePath holds the active floor's path and
     // may point to an upper floor's tile when the user loaded on an upper floor.
-    if (!newMasks && bandBottom <= 0) {
+    //
+    // IMPORTANT:
+    // Ground floors can end up with a partial mask set from tile-derived bundles
+    // (e.g. only specular) that omits _Outdoors. If we only run this fallback
+    // when `newMasks` is null, active floor 0 can be cached without _Outdoors and
+    // every consumer degrades (building shadows, water indoor suppression, etc.).
+    const hasOutdoorsInNewMasks = Array.isArray(newMasks)
+      && newMasks.some((m) => (m?.id ?? m?.type) === 'outdoors' && !!m?.texture);
+    const needsGroundOutdoorsBackfill = bandBottom <= 0 && (!newMasks || !hasOutdoorsInNewMasks);
+    if (needsGroundOutdoorsBackfill) {
       let bgFallbackPath = null;
       try {
-        const bgSrc = sc?.background?.src || sc?.img || null;
-        if (bgSrc) bgFallbackPath = this._extractBasePath(bgSrc);
+        // Use level-band specific background resolution for ground-floor fallback.
+        bgFallbackPath = _resolveBandBackgroundBasePath(sc, bandBottom, bandTop);
       } catch (_) {}
       const fallbackPath = bgFallbackPath || lastMaskBasePath;
       if (fallbackPath) {
         try {
-          const r = await assetLoader.loadAssetBundle(
+          let r = await assetLoader.loadAssetBundle(
             fallbackPath,
             null,
             loadAssetBundleOptsFromScene(sc, fallbackPath)
           );
+          // Non-GM clients can fail flag-only loads when the persisted manifest
+          // basePath does not match this floor's background. In that case, do a
+          // minimal convention probe for this one critical ground-floor fallback
+          // so _Outdoors can still be bound for active floor consumers.
+          if (!r?.bundle?.masks?.length) {
+            const enabledIds = collectEnabledMaskIds(sc);
+            r = await assetLoader.loadAssetBundle(
+              fallbackPath,
+              null,
+              {
+                skipBaseTexture: true,
+                suppressProbeErrors: true,
+                maskManifest: {},
+                maskIds: enabledIds,
+                cacheKeySuffix: 'ground-probe',
+                skipMaskIds: ['water'],
+                maskExtension: null,
+                maskConventionFallback: 'minimal',
+              },
+            );
+          }
           if (r?.bundle?.masks?.length) {
-            newMasks = r.bundle.masks;
+            // If we already have some masks (e.g. tile bundle specular), merge the
+            // background bundle so missing _Outdoors is backfilled for ground floor.
+            // `mergeMasks(a, b)` keeps `a` entries for ids not present in `b`, and
+            // prefers `b` for overlapping ids.
+            newMasks = newMasks?.length
+              ? this.mergeMasks(newMasks, r.bundle.masks)
+              : r.bundle.masks;
             primaryBasePath = fallbackPath;
-            log.info('composeFloor: fell back to background basePath', {
-              fallbackPath, fromScene: !!bgFallbackPath
+            const mergedHasOutdoors = Array.isArray(newMasks)
+              && newMasks.some((m) => (m?.id ?? m?.type) === 'outdoors' && !!m?.texture);
+            log.info('composeFloor: ground-floor background backfill', {
+              fallbackPath,
+              fromScene: !!bgFallbackPath,
+              hadMasksBeforeBackfill: !!hasOutdoorsInNewMasks || !!newMasks,
+              mergedHasOutdoors,
             });
+          }
+
+          // Hard recovery: if bundle resolution still fails to include _Outdoors
+          // for ground-floor composition, probe and load _Outdoors directly.
+          const stillMissingOutdoors = !Array.isArray(newMasks)
+            || !newMasks.some((m) => (m?.id ?? m?.type) === 'outdoors' && !!m?.texture);
+          if (stillMissingOutdoors) {
+            try {
+              const probed = await assetLoader.probeMaskFile(fallbackPath, '_Outdoors', { suppressProbeErrors: true });
+              const outdoorsPath = probed?.path ?? null;
+              if (outdoorsPath) {
+                const outdoorsTex = await assetLoader.loadTexture(outdoorsPath, { suppressProbeErrors: true });
+                if (outdoorsTex) {
+                  const outdoorsMask = {
+                    id: 'outdoors',
+                    type: 'outdoors',
+                    suffix: '_Outdoors',
+                    path: outdoorsPath,
+                    texture: outdoorsTex,
+                    required: false,
+                  };
+                  newMasks = newMasks?.length
+                    ? this.mergeMasks(newMasks, [outdoorsMask])
+                    : [outdoorsMask];
+                  primaryBasePath = fallbackPath;
+                  log.info('composeFloor: ground-floor explicit outdoors recovery succeeded', {
+                    floorKey,
+                    fallbackPath,
+                    outdoorsPath,
+                  });
+                }
+              }
+            } catch (e) {
+              log.warn('composeFloor: ground-floor explicit outdoors recovery failed', e);
+            }
           }
         } catch (e) {
           log.warn('composeFloor: background basePath fallback failed', e);
@@ -945,12 +1072,12 @@ export class GpuSceneMaskCompositor {
       const { lastMaskBasePath = null, initialMasks = null, activeLevelContext = null } = opts;
       try {
       const sc = scene || canvas?.scene;
-      if (!sc || !isLevelsEnabledForScene(sc)) return;
+      if (!sc || (!hasV14NativeLevels(sc) && !isLevelsEnabledForScene(sc))) return;
 
       // Seed the current floor's masks so switching back is instant.
       try {
         const activeLvl = activeLevelContext || window.MapShine?.activeLevelContext;
-        if (activeLvl && initialMasks?.length) {
+        if (!this._disableFloorCaching && activeLvl && initialMasks?.length) {
           const ab = Number(activeLvl.bottom);
           const at = Number(activeLvl.top);
           if (Number.isFinite(ab) && Number.isFinite(at)) {
@@ -966,30 +1093,44 @@ export class GpuSceneMaskCompositor {
 
       // Collect all unique level bands.
       const bands = new Set();
-      try {
-        const sceneLevels = readSceneLevelsFlag(sc);
-        if (Array.isArray(sceneLevels)) {
-          for (const entry of sceneLevels) {
-            const b = Number(entry?.bottom ?? entry?.[0]);
-            const t = Number(entry?.top ?? entry?.[1]);
-            if (Number.isFinite(b) && Number.isFinite(t)) bands.add(`${b}:${t}`);
+
+      // V14-native: read from scene.levels
+      if (hasV14NativeLevels(sc)) {
+        try {
+          const nativeLevels = readV14SceneLevels(sc);
+          for (const lvl of nativeLevels) {
+            const b = Number.isFinite(lvl.bottom) ? lvl.bottom : 0;
+            const t = Number.isFinite(lvl.top) ? lvl.top : b;
+            bands.add(`${b}:${t}`);
           }
-        }
-      } catch (_) {}
-      try {
-        const tiles = sc?.tiles;
-        const iter = Array.isArray(tiles) ? tiles
-          : (Array.isArray(tiles?.contents) ? tiles.contents : (tiles?.values?.() ?? []));
-        for (const tileDoc of iter) {
-          if (!tileDoc) continue;
-          if (tileHasLevelsRange(tileDoc)) {
-            const flags = readTileLevelsFlags(tileDoc);
-            const b = Number(flags.rangeBottom);
-            const t = Number(flags.rangeTop);
-            if (Number.isFinite(b) && Number.isFinite(t)) bands.add(`${b}:${t}`);
+        } catch (_) {}
+      } else {
+        // Legacy: read from flags
+        try {
+          const sceneLevels = readSceneLevelsFlag(sc);
+          if (Array.isArray(sceneLevels)) {
+            for (const entry of sceneLevels) {
+              const b = Number(entry?.bottom ?? entry?.[0]);
+              const t = Number(entry?.top ?? entry?.[1]);
+              if (Number.isFinite(b) && Number.isFinite(t)) bands.add(`${b}:${t}`);
+            }
           }
-        }
-      } catch (_) {}
+        } catch (_) {}
+        try {
+          const tiles = sc?.tiles;
+          const iter = Array.isArray(tiles) ? tiles
+            : (Array.isArray(tiles?.contents) ? tiles.contents : (tiles?.values?.() ?? []));
+          for (const tileDoc of iter) {
+            if (!tileDoc) continue;
+            if (tileHasLevelsRange(tileDoc)) {
+              const flags = readTileLevelsFlags(tileDoc);
+              const b = Number(flags.rangeBottom);
+              const t = Number(flags.rangeTop);
+              if (Number.isFinite(b) && Number.isFinite(t)) bands.add(`${b}:${t}`);
+            }
+          }
+        } catch (_) {}
+      }
 
       // Single-band (and zero-band + active context) Levels scenes used to return here
       // without ever calling composeFloor(). Multi-floor maps hit composeFloor via the
@@ -997,42 +1138,78 @@ export class GpuSceneMaskCompositor {
       // ground-only maps, breaking BuildingShadows + specular roof sampling.
       if (bands.size <= 1) {
         const ctx = activeLevelContext || window.MapShine?.activeLevelContext;
-        let bandBottom = NaN;
-        let bandTop = NaN;
-        if (bands.size === 1) {
-          const sole = [...bands][0];
-          const parts = String(sole).split(':').map(Number);
-          bandBottom = parts[0];
-          bandTop = parts[1];
+        const targets = [];
+
+        // Always include discovered band(s) from scene flags/tiles.
+        for (const bandKey of bands) {
+          const parts = String(bandKey).split(':').map(Number);
+          if (Number.isFinite(parts[0]) && Number.isFinite(parts[1])) {
+            targets.push({ bottom: parts[0], top: parts[1] });
+          }
         }
-        if ((!Number.isFinite(bandBottom) || !Number.isFinite(bandTop)) && ctx) {
-          bandBottom = Number(ctx.bottom);
-          bandTop = Number(ctx.top);
+
+        // Also include the active context band (scene-image floor can exist even
+        // when sceneLevels/tile ranges only describe one upper band).
+        if (ctx) {
+          const cb = Number(ctx.bottom);
+          const ct = Number(ctx.top);
+          if (Number.isFinite(cb) && Number.isFinite(ct)) {
+            targets.push({ bottom: cb, top: ct });
+          }
         }
-        if (Number.isFinite(bandBottom) && Number.isFinite(bandTop)) {
-          const floorKey = `${bandBottom}:${bandTop}`;
-          if (this._singleBandPreloadDone.has(floorKey)) {
+
+        // Also include runtime-available levels from the navigation controller.
+        // On some scene boots, activeLevelContext can still be null here while
+        // level parsing already discovered the scene-image floor (e.g. 0:10).
+        // Without this, single-band preload can warm only an upper tile band.
+        try {
+          const levels = window.MapShine?.levelNavigationController?.getAvailableLevels?.() ?? [];
+          for (const lvl of levels) {
+            const lb = Number(lvl?.bottom);
+            const lt = Number(lvl?.top);
+            if (Number.isFinite(lb) && Number.isFinite(lt)) {
+              targets.push({ bottom: lb, top: lt });
+            }
+          }
+        } catch (_) {}
+
+        // Deduplicate and compose each target key.
+        const uniqueTargets = [];
+        const seenKeys = new Set();
+        for (const t of targets) {
+          const k = `${t.bottom}:${t.top}`;
+          if (seenKeys.has(k)) continue;
+          seenKeys.add(k);
+          uniqueTargets.push({ ...t, key: k });
+        }
+
+        for (const target of uniqueTargets) {
+          const floorKey = target.key;
+          if (!this._disableFloorCaching && this._singleBandPreloadDone.has(floorKey)) {
             log.debug('preloadAllFloors: single-band — already warmed (session), skip', { floorKey });
-            return;
+            continue;
           }
           try {
             // Seeded _floorMeta from currentBundle can make composeFloor() cache-hit and
-            // skip the GPU path; delete only when GPU outdoors is not built yet so the
-            // first run still composites. Do NOT delete on every preload — that forced
-            // a full expensive recomposite whenever effects retried preloadAllFloors().
+            // skip the GPU path; clear once so the first run composites true floor masks.
             if (this._floorMeta.get(floorKey)?.masks?.length) {
               this._floorMeta.delete(floorKey);
+              this._upperBandNoOutdoorsAccepted.delete(floorKey);
             }
-            const cfResult = await this.composeFloor({ bottom: bandBottom, top: bandTop }, sc, {
-              lastMaskBasePath,
-              cacheOnly: false,
-            });
-            if (cfResult?.masks?.length) {
+            const cfResult = await this.composeFloor(
+              { bottom: target.bottom, top: target.top },
+              sc,
+              { lastMaskBasePath, cacheOnly: false },
+            );
+            if (!this._disableFloorCaching) {
+              // Mark done regardless of whether masks were found. A null result
+              // means no masks exist for this band — retrying every cycle just
+              // produces "cache miss" spam + wasted GPU work.
               this._singleBandPreloadDone.add(floorKey);
             }
             log.info('preloadAllFloors: single-band — full composeFloor', { floorKey });
           } catch (e) {
-            log.warn('preloadAllFloors: single-band composeFloor failed', e);
+            log.warn('preloadAllFloors: single-band composeFloor failed', { floorKey, error: e });
           }
         }
         return;
@@ -1054,8 +1231,9 @@ export class GpuSceneMaskCompositor {
       // as the ground-floor background, causing cross-floor mask bleed.
       let sceneBackgroundBasePath = null;
       try {
-        const bgSrc = sc?.background?.src || sc?.img || null;
-        if (bgSrc) sceneBackgroundBasePath = this._extractBasePath(bgSrc);
+        // Ground fallback must follow the viewed/background level art, not the
+        // deprecated scene.background.src (which can point at another level).
+        sceneBackgroundBasePath = _resolveBandBackgroundBasePath(sc, 0, 0);
       } catch (_) {}
 
       // Track bands that were evicted and re-composed so we can push updated masks
@@ -1111,6 +1289,7 @@ export class GpuSceneMaskCompositor {
               }
               log.debug('preloadAllFloors: evicting stale floor bundle for band', bandKey, 'to allow re-composition');
               this._floorMeta.delete(bandKey);
+              this._upperBandNoOutdoorsAccepted.delete(bandKey);
               if (!isGM) this._nonGmStaleRepairAttempted.add(bandKey);
               _recomposedBands.add(bandKey);
             }
@@ -1122,9 +1301,24 @@ export class GpuSceneMaskCompositor {
           const bBot = Number(bottom);
           const lacksOutdoors = !this.getFloorTexture(bandKey, 'outdoors');
           const hasTiles = this._getActiveLevelTiles(sc, { bottom, top }).length > 0;
-          if (Number.isFinite(bBot) && bBot > 0 && lacksOutdoors && hasTiles) {
-            log.info('preloadAllFloors: evicting upper band meta without outdoors', { bandKey });
+          const isUpperBandMissingOutdoors = Number.isFinite(bBot) && bBot > 0 && lacksOutdoors && hasTiles;
+          const isGroundBandMissingOutdoors = Number.isFinite(bBot) && bBot <= 0 && lacksOutdoors;
+          // Upper floors often have tiles but no _Outdoors art — getFloorTexture stays null
+          // forever. Evicting _floorMeta every preload pass forces composeFloor cache misses
+          // on every BuildingShadows throttle (~1s) and flickers the scene. Once we have
+          // accepted a stable no-outdoors upper band, keep the cached meta.
+          if (isUpperBandMissingOutdoors && this._upperBandNoOutdoorsAccepted.has(bandKey)) {
+            continue;
+          }
+          if (isUpperBandMissingOutdoors || isGroundBandMissingOutdoors) {
+            log.info('preloadAllFloors: evicting band meta without outdoors', {
+              bandKey,
+              bandBottom: bBot,
+              hasTiles,
+              isGroundBand: bBot <= 0,
+            });
             this._floorMeta.delete(bandKey);
+            this._upperBandNoOutdoorsAccepted.delete(bandKey);
           } else {
             continue;
           }
@@ -1132,12 +1326,27 @@ export class GpuSceneMaskCompositor {
 
         // For ground-floor bands, prefer the scene background image's basePath
         // so step 4 in composeFloor loads the correct masks, not an upper floor's.
-        const floorBasePath = (bottom <= 0 && sceneBackgroundBasePath)
-          ? sceneBackgroundBasePath
+        const bandBackgroundBasePath = _resolveBandBackgroundBasePath(sc, bottom, top);
+        const floorBasePath = (bottom <= 0 && (bandBackgroundBasePath || sceneBackgroundBasePath))
+          ? (bandBackgroundBasePath || sceneBackgroundBasePath)
           : lastMaskBasePath;
         try {
-          await this.composeFloor({ bottom, top }, sc, { lastMaskBasePath: floorBasePath, cacheOnly: true });
+          const cfResult = await this.composeFloor({ bottom, top }, sc, { lastMaskBasePath: floorBasePath, cacheOnly: true });
           _recomposedBands.add(bandKey);
+          // composeFloor returning null means no masks were found for this
+          // band. Store an empty sentinel so the skip guard at the top of the
+          // loop prevents retrying this band on every preload cycle (~1s from
+          // BuildingShadows), which was the source of endless "cache miss" logs.
+          if (!this._floorMeta.has(bandKey)) {
+            this._floorMeta.set(bandKey, { masks: [], basePath: null });
+          }
+          // Stop the "missing outdoors" eviction loop for upper bands after one
+          // successful compose that still yields no outdoors sampler. This
+          // covers BOTH the case where compose returned masks but no outdoors,
+          // AND the case where compose returned null (no masks at all).
+          if (Number(bottom) > 0 && !this.getFloorTexture(bandKey, 'outdoors')) {
+            this._upperBandNoOutdoorsAccepted.add(bandKey);
+          }
           await _yieldIfNeeded();
         } catch (e) {
           log.debug('preloadAllFloors: failed for band', bandKey, e);
@@ -1639,6 +1848,7 @@ export class GpuSceneMaskCompositor {
     this._nonGmStaleRepairAttempted.clear();
     this._singleBandPreloadDone.clear();
     this._upperOutdoorsMetaRepairCount.clear();
+    this._upperBandNoOutdoorsAccepted.clear();
     this._preloadAllFloorsInFlight = null;
 
     // Dispose and clear cached GPU render targets. Floor keys (e.g. "0:5")
@@ -1729,6 +1939,39 @@ export class GpuSceneMaskCompositor {
   }
 
   /**
+   * Align `_activeFloorKey` with FloorStack's viewed band. `preloadAllFloors` uses
+   * `composeFloor(..., { cacheOnly: true })`, which returns before updating this
+   * field, so it can stay on the last precomposed band and desync from the player
+   * level (breaks getCpuPixels() and diagnostics).
+   */
+  syncActiveFloorFromFloorStack() {
+    let af = null;
+    try {
+      af = window.MapShine?.floorStack?.getActiveFloor?.() ?? null;
+    } catch (_) {
+      af = null;
+    }
+    const fk = af?.compositorKey != null ? String(af.compositorKey) : null;
+    if (!fk) return;
+    if (fk === this._activeFloorKey) return;
+    const bandBottom = Number(fk.split(':')[0]);
+    if (!Number.isFinite(bandBottom)) return;
+
+    const prevKey = this._activeFloorKey;
+    const prevBandBottom = prevKey ? Number(prevKey.split(':')[0]) : -Infinity;
+    this._belowFloorKey = (bandBottom > prevBandBottom) ? prevKey : null;
+    if (!this._belowFloorKey) {
+      this._belowFloorKey = this._findBestBelowFloorKey(bandBottom);
+    }
+
+    const meta = this._floorMeta.get(fk);
+    if (meta?.basePath) this._activeFloorBasePath = meta.basePath;
+    this._activeFloorKey = fk;
+    this._cpuPixelCache.clear();
+    log.debug('syncActiveFloorFromFloorStack', { floorKey: fk });
+  }
+
+  /**
    * Get the output dimensions for a mask type.
    * @param {string} maskType
    * @returns {{width: number, height: number}|null}
@@ -1764,6 +2007,7 @@ export class GpuSceneMaskCompositor {
     this._nonGmStaleRepairAttempted.clear();
     this._singleBandPreloadDone.clear();
     this._upperOutdoorsMetaRepairCount.clear();
+    this._upperBandNoOutdoorsAccepted.clear();
     this._preloadAllFloorsInFlight = null;
     this._activeFloorBasePath = null;
     this._activeFloorKey = null;
@@ -1966,6 +2210,8 @@ export class GpuSceneMaskCompositor {
     });
     rt.texture.flipY = false;
     rt.texture.name = `SceneMask_${maskType}`;
+    rt.texture.wrapS = THREE.ClampToEdgeWrapping;
+    rt.texture.wrapT = THREE.ClampToEdgeWrapping;
     return rt;
   }
 
@@ -1990,6 +2236,31 @@ export class GpuSceneMaskCompositor {
     if (!rt) return;
     try { rt.dispose(); } catch (_) {}
     map.delete(maskType);
+  }
+
+  /**
+   * TEMP DEBUG: aggressively clear all cached per-floor mask state.
+   * Used when `_disableFloorCaching` is enabled so each composeFloor call starts
+   * from a clean slate.
+   * @private
+   */
+  _purgeAllFloorCaches() {
+    // Dispose all GPU RTs.
+    for (const targets of this._floorCache.values()) {
+      for (const rt of targets.values()) {
+        try { rt?.dispose?.(); } catch (_) {}
+      }
+    }
+    this._floorCache.clear();
+    this._lruOrder.length = 0;
+
+    // Drop metadata + repair trackers tied to cached state.
+    this._floorMeta.clear();
+    this._upperOutdoorsMetaRepairCount.clear();
+    this._upperBandNoOutdoorsAccepted.clear();
+    this._singleBandPreloadDone.clear();
+    this._nonGmStaleRepairAttempted.clear();
+    this._cpuPixelCache.clear();
   }
 
   _getOrCreateFloorTargets(floorKey) {
@@ -2049,19 +2320,26 @@ export class GpuSceneMaskCompositor {
    * @private
    */
   _isTileInLevelBand(tileDoc, levelContext) {
+    // V14-native: use level membership
+    if (levelContext?.levelId && tileDoc?.levels?.size) {
+      return tileDoc.levels.has(levelContext.levelId);
+    }
+    if (typeof tileDoc?.includedInLevel === 'function' && levelContext?.levelId) {
+      return tileDoc.includedInLevel(levelContext.levelId);
+    }
+
     const bandBottom = Number(levelContext.bottom);
     const bandTop = Number(levelContext.top);
     if (!Number.isFinite(bandBottom) || !Number.isFinite(bandTop)) return true;
 
+    // Legacy: Levels range flags
     if (tileHasLevelsRange(tileDoc)) {
       const flags = readTileLevelsFlags(tileDoc);
       const tileBottom = Number(flags.rangeBottom);
       const tileTop = Number(flags.rangeTop);
       if (Number.isFinite(tileBottom) && Number.isFinite(tileTop)) {
-        // Exclusive boundaries: tile whose rangeBottom == bandTop belongs to the floor above.
         return !(tileTop <= bandBottom || tileBottom >= bandTop);
       } else if (Number.isFinite(tileBottom)) {
-        // Roof tile: belongs to its originating floor.
         return tileBottom >= bandBottom && tileBottom < bandTop;
       }
     }

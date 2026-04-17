@@ -16,7 +16,7 @@ import { SelectionBoxHandler } from './selection-box-interaction.js';
 import { TokenSelectionController } from './token-selection-controller.js';
 import { MouseStateManager } from './mouse-state-manager.js';
 import { safeCall, safeDispose, Severity } from '../core/safe-call.js';
-import { readWallHeightFlags, readTileLevelsFlags, tileHasLevelsRange, isLevelsEnabledForScene } from '../foundry/levels-scene-flags.js';
+import { readWallHeightFlags, readTileLevelsFlags, tileHasLevelsRange, isLevelsEnabledForScene, getCanvasForegroundElevationSplit } from '../foundry/levels-scene-flags.js';
 import { applyAmbientLightLevelDefaults, applyAmbientSoundLevelDefaults, applyTileLevelDefaults, applyWallLevelDefaults } from '../foundry/levels-create-defaults.js';
 import { getPerspectiveElevation } from '../foundry/elevation-context.js';
 import { moveTrace } from '../core/movement-trace-log.js';
@@ -2824,9 +2824,7 @@ export class InteractionManager {
       const sourceOverhead = tileDoc?._source?.overhead;
       const getterOverhead = tileDoc?.overhead;
       const levelsOverhead = tileDoc?._source?.flags?.levels?.overhead;
-      const sceneForegroundElevation = Number.isFinite(Number(canvas?.scene?.foregroundElevation))
-        ? Number(canvas.scene.foregroundElevation)
-        : 0;
+      const sceneForegroundElevation = getCanvasForegroundElevationSplit();
       const tileElevation = Number.isFinite(Number(tileDoc?.elevation))
         ? Number(tileDoc.elevation)
         : 0;

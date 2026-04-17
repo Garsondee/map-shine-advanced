@@ -67,15 +67,28 @@ export function getFragmentShader() {
 // tNoiseMap: use texture2DLodEXT(..., 0.0) so sampling does not rely on implicit
 // screen-space gradients inside loops (ANGLE/D3D X3595). Three maps this to textureLod on WebGL2.
 
+#ifdef USE_WATER_SPEC_BLOOM_RT
+layout(location = 1) out highp vec4 pc_fragColor1;
+#define MSA_BLOOM_RT_ZERO pc_fragColor1 = vec4(0.0)
+#define MSA_BLOOM_RT_COMMIT(rgb) pc_fragColor1 = vec4(max((rgb), vec3(0.0)), 1.0)
+#else
+#define MSA_BLOOM_RT_ZERO
+#define MSA_BLOOM_RT_COMMIT(rgb)
+#endif
+
 // ── Texture samplers ─────────────────────────────────────────────────────
 uniform sampler2D tDiffuse;       // Scene RT (post-lighting)
 uniform sampler2D tNoiseMap;      // 512x512 RGBA seeded noise
 uniform sampler2D tWaterData;     // SDF data (R=SDF, G=exposure, BA=normals)
 uniform float uHasWaterData;      // 1.0 when tWaterData is valid
 uniform float uWaterEnabled;      // Master enable
+// 1 when this slice borrows another floor's packed water mask (upper band + river below).
+uniform float uCrossSliceWaterData;
 
 uniform sampler2D tWaterRawMask;  // Raw composited water mask (for foam edge)
 uniform float uHasWaterRawMask;   // 1.0 when tWaterRawMask is valid
+uniform float uWaterRawMaskThreshold; // [0..1], matches mask binarization (authoritative coverage)
+uniform vec2 uWaterRawMaskTexelSize;  // 1 / dimensions of composited _Water RT (edge AA in UV)
 
 uniform sampler2D tWaterOccluderAlpha; // Screen-space upper-floor occluder mask
 uniform float uHasWaterOccluderAlpha;  // 1.0 when occluder mask is valid
@@ -197,6 +210,28 @@ uniform float uSpecShoreBias;
 uniform float uSpecDistortionNormalStrength;
 uniform float uSpecAnisotropy;
 uniform float uSpecAnisoRatio;
+
+// ── Specular Highlights (additive sharp highlights) ────────────────────
+uniform float uSpecHighlightsEnabled;
+uniform float uSpecHighlightsStrength;
+uniform float uSpecHighlightsPower;
+uniform float uSpecHighlightsClamp;
+uniform vec3 uSpecHighlightsSunDir;
+uniform float uSpecHighlightsSunAzimuthDeg;
+uniform float uSpecHighlightsSunElevationDeg;
+uniform float uSpecHighlightsSunIntensity;
+uniform float uSpecHighlightsNormalStrength;
+uniform float uSpecHighlightsNormalScale;
+uniform float uSpecHighlightsRoughnessMin;
+uniform float uSpecHighlightsRoughnessMax;
+uniform float uSpecHighlightsF0;
+uniform float uSpecHighlightsSkyTint;
+uniform float uSpecHighlightsMaskGamma;
+uniform float uSpecHighlightsShoreBias;
+
+// Extra linear energy written to bloom specular RT (beauty pass unchanged)
+uniform float uBloomSpecularEmitMul;
+
 uniform float uSpecUseSunAngle;
 uniform float uSpecSunElevationFalloffEnabled;
 uniform float uSpecSunElevationFalloffStart;
@@ -213,6 +248,19 @@ uniform sampler2D tBuildingShadow;
 uniform float uHasBuildingShadow;
 uniform sampler2D tOverheadShadow;
 uniform float uHasOverheadShadow;
+
+// ShadowManagerV2 Combined Shadow (for murk darkening)
+uniform sampler2D tCombinedShadow;
+uniform float uHasCombinedShadow;
+uniform float uMurkShadowEnabled;
+uniform float uMurkShadowStrength;
+
+
+// ── Cloud Reflection ───────────────────────────────────────────────────────────
+uniform float uCloudReflectionEnabled;
+uniform float uCloudReflectionStrength;
+uniform sampler2D tCloudTopTexture;
+uniform float uHasCloudTopTexture;
 
 // ── Caustics ─────────────────────────────────────────────────────────────
 uniform float uCausticsEnabled;
@@ -362,6 +410,14 @@ uniform vec3 uSkyColor;
 uniform float uSkyIntensity;
 uniform float uSceneDarkness;
 uniform float uActiveLevelElevation;
+// 1 when floor-depth blur is active and water mask floor is below the viewed top floor
+// (that water sits on a Kawase-blurred composite — soften sharp procedural layers).
+uniform float uFloorDepthBlurWaterSoft;
+
+// Water depth shadow
+uniform float uWaterDepthShadowEnabled;
+uniform float uWaterDepthShadowStrength;
+uniform float uWaterDepthShadowMinBrightness;
 
 uniform float uUseSdfMask;
 
@@ -406,6 +462,8 @@ float valueNoise(vec2 p) {
   return valueNoise2D(p);
 }
 
+// Three octaves (RGB) — fourth octave removed vs V1 FBM: fewer texture fetches
+// and faster compile, with weights nudged to keep similar contrast in warp/rain/murk.
 float fbmNoise(vec2 p) {
   const mat2 octRot = mat2(0.8, 0.6, -0.6, 0.8);
   vec2 i, f, u;
@@ -443,18 +501,7 @@ float fbmNoise(vec2 p) {
     texture2DLodEXT(tNoiseMap, (i + vec2(0.5, 1.5)) * NOISE_INV, 0.0).b,
     texture2DLodEXT(tNoiseMap, (i + vec2(1.5, 1.5)) * NOISE_INV, 0.0).b, u.x), u.y);
 
-  p = octRot * p * 2.0;
-  p = mod(p, NOISE_SIZE);
-  i = floor(p); f = fract(p); u = f * f * (3.0 - 2.0 * f);
-  i = mod(i, NOISE_SIZE);
-  float n3 = mix(mix(
-    texture2DLodEXT(tNoiseMap, (i + 0.5) * NOISE_INV, 0.0).a,
-    texture2DLodEXT(tNoiseMap, (i + vec2(1.5, 0.5)) * NOISE_INV, 0.0).a, u.x), mix(
-    texture2DLodEXT(tNoiseMap, (i + vec2(0.5, 1.5)) * NOISE_INV, 0.0).a,
-    texture2DLodEXT(tNoiseMap, (i + vec2(1.5, 1.5)) * NOISE_INV, 0.0).a, u.x), u.y);
-
-  return (n0 - 0.5) * 1.1 + (n1 - 0.5) * 0.605
-       + (n2 - 0.5) * 0.33275 + (n3 - 0.5) * 0.183;
+  return (n0 - 0.5) * 1.14 + (n1 - 0.5) * 0.62 + (n2 - 0.5) * 0.36;
 }
 
 float safe01(float v) { return clamp(v, 0.0, 1.0); }
@@ -470,6 +517,21 @@ vec2 safeNormalize2(vec2 v) {
   return (l > 1e-6) ? (v / l) : vec2(0.0);
 }
 
+// _Outdoors mask (scene UV). Declared before warp/wave so indoor shelter can
+// scale wind time consistently with foam/murk (see main() indoorWindMotion).
+float sampleOutdoorsMask(vec2 sceneUv01) {
+  float y = (uOutdoorsMaskFlipY > 0.5) ? (1.0 - sceneUv01.y) : sceneUv01.y;
+  vec2 uv = vec2(sceneUv01.x, y);
+  return texture2D(tOutdoorsMask, uv).r;
+}
+
+// Same shaping as main(): strong shelter indoors, tiny baseline to avoid 0-time seams.
+float waterIndoorWindMotion01(vec2 sceneUv01) {
+  if (uHasOutdoorsMask < 0.5) return 1.0;
+  float o = clamp(sampleOutdoorsMask(sceneUv01), 0.0, 1.0);
+  return max(0.05, pow(o, 2.2));
+}
+
 // ── Precipitation distortion ─────────────────────────────────────────────
 // Simple noise-based surface agitation driven by precipitation amount.
 // No nested loops — GPU-safe on all drivers.
@@ -482,16 +544,16 @@ vec2 computeRainOffsetPx(vec2 uv) {
   float sp = max(0.0, uRainDistortionSpeed);
   float px = clamp(uRainDistortionStrengthPx, 0.0, 24.0);
 
-  // Two offset FBM layers with different drift rates for organic motion
+  // Primary layer: fbmNoise; secondary: valueNoise2D (cheaper, still organic at rain scales).
   float t = uTime * sp;
   vec2 domain = uv * sc;
   float n1x = fbmNoise(domain + vec2(t * 0.13, -t * 0.09) + vec2(11.7, 7.3));
   float n1y = fbmNoise(domain + vec2(-t * 0.11, t * 0.14) + vec2(31.1, 19.9));
-  float n2x = fbmNoise(domain * 1.73 + vec2(t * 0.17, t * 0.07) + vec2(5.3, 41.1));
-  float n2y = fbmNoise(domain * 1.73 + vec2(-t * 0.08, -t * 0.15) + vec2(23.7, 3.9));
+  vec2 dom2 = domain * 1.73 + vec2(t * 0.17, t * 0.07) + vec2(5.3, 41.1);
+  float n2x = (valueNoise2D(dom2) - 0.5) * 2.0;
+  float n2y = (valueNoise2D(domain * 1.73 + vec2(-t * 0.08, -t * 0.15) + vec2(23.7, 3.9)) - 0.5) * 2.0;
 
-  // Blend two layers for complex motion without cellular artifacts
-  vec2 offset = vec2(n1x * 0.6 + n2x * 0.4, n1y * 0.6 + n2y * 0.4);
+  vec2 offset = vec2(n1x * 0.58 + n2x * 0.42, n1y * 0.58 + n2y * 0.42);
 
   // Precipitation ramps in smoothly — light rain = subtle, heavy rain = strong
   float ramp = smoothstep(0.0, 0.6, p) * (0.5 + 0.5 * p);
@@ -508,9 +570,22 @@ vec2 curlNoise2D(vec2 p) {
   return vec2((n1 - n2) / (2.0 * e), -(n3 - n4) / (2.0 * e));
 }
 
+float sceneAspectRatio() {
+  return (uHasSceneRect > 0.5)
+    ? (uSceneRect.z / max(1.0, uSceneRect.w))
+    : (uResolution.x / max(1.0, uResolution.y));
+}
+
+vec2 effectUv(vec2 sceneUv) {
+  // Keep procedural domains isotropic on non-square maps.
+  float sceneAspect = sceneAspectRatio();
+  return vec2(sceneUv.x * sceneAspect, sceneUv.y);
+}
+
 // ── Wave / Warp ──────────────────────────────────────────────────────────
 vec2 warpUv(vec2 sceneUv, float motion01) {
   float m = clamp(motion01, 0.0, 1.0);
+  float inShelter = waterIndoorWindMotion01(sceneUv);
   // Important: do NOT advect the wave *domain* using uWindOffsetUv.
   // The waves already travel via the phase term in addWave() (omega * uWindTime).
   // Advecting the domain as well can partially cancel / overtake the phase travel
@@ -519,8 +594,8 @@ vec2 warpUv(vec2 sceneUv, float motion01) {
   // Use uWindTime (monotonically wind-driven) for warp drift speed.
   // This keeps all warp motion locked to the wind: as wind increases the
   // warp pattern advances faster, and it never reverses direction.
-  float warpT = uWindTime * max(0.0, uWaveWarpTimeSpeed) * m;
-  float sceneAspect = (uHasSceneRect > 0.5) ? (uSceneRect.z / max(1.0, uSceneRect.w)) : (uResolution.x / max(1.0, uResolution.y));
+  float warpT = uWindTime * inShelter * max(0.0, uWaveWarpTimeSpeed) * m;
+  float sceneAspect = sceneAspectRatio();
   vec2 windF = uWindDir;
   float wl = length(windF);
   windF = (wl > 1e-6) ? (windF / wl) : vec2(1.0, 0.0);
@@ -548,8 +623,9 @@ vec2 warpUv(vec2 sceneUv, float motion01) {
   float n1 = fbmNoise((uv * 2.1) + vec2(13.7, 9.2) - windBasis * (warpT * 0.11));
   float n2 = fbmNoise((uv * 2.1) + vec2(41.3, 27.9) - windPerp  * (warpT * 0.06));
   uv += (windBasis * n1 + windPerp * n2) * clamp(uWaveWarpSmallStrength, 0.0, 1.0);
-  float n3 = fbmNoise(uv * 4.7 + vec2(7.9, 19.1) - windBasis * (warpT * 0.15));
-  float n4 = fbmNoise(uv * 4.7 + vec2(29.4, 3.3) - windPerp  * (warpT * 0.05));
+  // Micro warp: single value-noise octaves (4 taps each) — visually similar, less work than fbmNoise.
+  float n3 = (valueNoise2D(uv * 4.7 + vec2(7.9, 19.1) - windBasis * (warpT * 0.15)) - 0.5) * 2.0;
+  float n4 = (valueNoise2D(uv * 4.7 + vec2(29.4, 3.3) - windPerp  * (warpT * 0.05)) - 0.5) * 2.0;
   uv += (windBasis * n3 + windPerp * n4) * clamp(uWaveWarpMicroStrength, 0.0, 1.0);
   return uv;
 }
@@ -558,12 +634,14 @@ float waveSeaState(vec2 sceneUv, float motion01) {
   if (uWaveEvolutionEnabled < 0.5) return 0.5;
   float sp = max(0.0, uWaveEvolutionSpeed) * clamp(motion01, 0.0, 1.0);
   float sc = max(0.01, uWaveEvolutionScale);
+  float inShelter = waterIndoorWindMotion01(sceneUv);
   // Sample spatially-varying noise to break up the evolution into patches.
   // Use uWindTime so the pattern only advances with wind, never reverses.
-  float n = fbmNoise(sceneUv * sc + vec2(uWindTime * sp * 0.23, -uWindTime * sp * 0.19));
+  vec2 evoUv = effectUv(sceneUv);
+  float n = fbmNoise(evoUv * sc + vec2(uWindTime * inShelter * sp * 0.23, -uWindTime * inShelter * sp * 0.19));
   // Map each pixel's noise to a slowly-crawling phase, then use a smooth periodic
   // envelope. This keeps modulation non-negative while removing cusp-like seam bands.
-  float phase = fract(uWindTime * sp * 0.05 + n);
+  float phase = fract(uWindTime * inShelter * sp * 0.05 + n);
   return smoothCycle01(phase);
 }
 
@@ -580,18 +658,22 @@ float msLuminance(vec3 rgb) {
 
 float waveAngleOffsetSeed(int i) {
   if (i == 0) return 0.00;
-  if (i == 1) return 0.37;
-  if (i == 2) return -0.41;
-  if (i == 3) return 0.73;
-  return -0.85;
+  if (i == 1) return 0.25;
+  if (i == 2) return -0.32;
+  if (i == 3) return 0.58;
+  if (i == 4) return -0.71;
+  if (i == 5) return 0.94;
+  return -1.15;
 }
 
 float waveWavelengthMul(int i) {
-  if (i == 0) return 1.00;
-  if (i == 1) return 0.61;
-  if (i == 2) return 0.37;
-  if (i == 3) return 0.22;
-  return 0.13;
+  if (i == 0) return 1.00; // Primary Swell
+  if (i == 1) return 0.52; // Secondary Swell
+  if (i == 2) return 0.29; // Large Chop
+  if (i == 3) return 0.14; // Medium Chop
+  if (i == 4) return 0.08; // Small Chop
+  if (i == 5) return 0.04; // Micro Ripples
+  return 0.02;
 }
 
 vec4 gerstnerWave(vec2 uv, vec2 dir, float wavelength, float steepness, float t, float phaseOffset) {
@@ -612,150 +694,146 @@ vec4 gerstnerWave(vec2 uv, vec2 dir, float wavelength, float steepness, float t,
 }
 
 vec3 calculateWaveForWind(vec2 sceneUv, float t, float motion01, vec2 windDirInput) {
-  float sceneAspect = (uHasSceneRect > 0.5) ? (uSceneRect.z / max(1.0, uSceneRect.w)) : (uResolution.x / max(1.0, uResolution.y));
-  
-  vec2 windBasis = safeNormalize2(windDirInput);
-  if (dot(windBasis, windBasis) < 1e-6) windBasis = vec2(1.0, 0.0);
+    float sceneAspect = (uHasSceneRect > 0.5) ? (uSceneRect.z / max(1.0, uSceneRect.w)) : (uResolution.x / max(1.0, uResolution.y));
 
-  float travelRot = (uLockWaveTravelToWind > 0.5) ? 0.0 : uWaveDirOffsetRad;
-  vec2 wind = rotate2D(windBasis, travelRot);
-  windBasis = safeNormalize2(wind);
-
-  float m01 = clamp(motion01, 0.0, 1.0);
-  float sea01 = waveSeaState(sceneUv, motion01);
-  float evoAmt = clamp(uWaveEvolutionAmount, 0.0, 1.0);
-  float evo = mix(1.0 - evoAmt, 1.0 + evoAmt, sea01);
-
-  float baseWavelength = mix(3.0, 12.0, m01);
-  float directionalSpread = mix(0.9, 0.3, m01);
-  
-  // CRITICAL: Max global steepness must stay strictly below 1.0 or the wave will loop 
-  // onto itself, causing infinite gradients, shaking, and surface intersection.
-  float globalSteepness = clamp(mix(0.3, 0.85, m01) * evo, 0.01, 0.95);
-
-  // Apply domain warping to base UV to retain organic shape
-  // warpUv gives a slowly drifting offset based on uWindTime
-  vec2 uv = warpUv(sceneUv, motion01) * max(0.01, uWaveScale);
-  uv = vec2(uv.x * sceneAspect, uv.y);
-
-  // Patchwise spread + wavelength: breaks uniform parallel wavefronts without extra Gerstner loops.
-  vec2 spreadUv = uv * 0.11 + vec2(uWindTime * 0.042, -uWindTime * 0.031);
-  float patchSpread = (valueNoise2D(spreadUv + vec2(17.2, 8.4)) - 0.5) * 2.0;
-  directionalSpread = clamp(directionalSpread + patchSpread * (0.24 + 0.16 * m01), 0.10, 1.22);
-  float wlPatch = 0.86 + 0.28 * (valueNoise2D(uv * 0.09 + vec2(-uWindTime * 0.038, uWindTime * 0.045) + vec2(3.7, 29.1)) - 0.5);
-  wlPatch = clamp(wlPatch, 0.72, 1.18);
-
-  float totalH = 0.0;
-  vec2 totalDxy = vec2(0.0);
-  float totalDz = 0.0;
-
-  const int WAVE_COUNT = 5;
-  
-  // Calculate normalization sum so total steepness across all octaves == globalSteepness
-  float steepnessSum = 0.0;
-  for (int i = 0; i < WAVE_COUNT; i++) {
-    steepnessSum += pow(0.75, float(i));
-  }
-
-  for (int i = 0; i < WAVE_COUNT; i++) {
-    float octave = float(i);
-    float angle = waveAngleOffsetSeed(i) * directionalSpread;
-    float wavelength = max(0.08, baseWavelength * waveWavelengthMul(i) * wlPatch);
+    // Travel basis: live wind (optionally) + authored heading offset (deg).
+    // uWaveAppearanceRotRad is applied later to slopes in main() so crests/normals
+    // can be corrected without changing this propagation axis.
+    vec2 wRaw = safeNormalize2(windDirInput);
+    if (length(wRaw) < 1e-5) wRaw = vec2(1.0, 0.0);
+    vec2 wBase = (uLockWaveTravelToWind > 0.5) ? wRaw : vec2(1.0, 0.0);
+    vec2 wTravel = rotate2D(wBase, uWaveDirOffsetRad);
+    if (length(wTravel) < 1e-5) wTravel = vec2(1.0, 0.0);
+    wTravel = normalize(wTravel);
     
-    // Distribute strict steepness budget 
-    float steepnessWeight = pow(0.75, octave) / steepnessSum;
-    float steepness = globalSteepness * steepnessWeight;
+    // 1. GLOBAL TURBULENCE (Optimized)
+    float windStrength = clamp(uWindSpeed, 0.0, 1.5);
+    float turbulenceAmt = mix(0.05, 0.3, windStrength); 
+
+    // 2. DOMAIN COORDINATES
+    vec2 uv = warpUv(sceneUv, motion01) * max(0.01, uWaveScale);
+    uv = vec2(uv.x * sceneAspect, uv.y);
+
+    // 3. LOCAL WIND ROTATION (Simplified)
+    float windNoise = valueNoise2D(uv * 0.08 + vec2(t * 0.01, -t * 0.005));
+    float localRotation = (windNoise - 0.5) * turbulenceAmt * 1.57;
+    vec2 windBasis = rotate2D(wTravel, localRotation);
+
+    // 4. SPATIAL PHASE JITTER (Simplified)
+    float jitterField = valueNoise2D(uv * 0.2 + vec2(-t * 0.02, t * 0.01));
+
+    float totalH = 0.0;
+    vec2 totalDxy = vec2(0.0);
+    float totalDz = 0.0;
+
+    const int WAVE_COUNT = 7;
+    float globalSteepness = clamp(mix(0.3, 1.2, motion01), 0.1, 1.6);
+
+    for (int i = 0; i < WAVE_COUNT; i++) {
+        float octave = float(i);
+        
+        // Vary direction per octave + add a "turbulence" offset
+        float octaveAngle = waveAngleOffsetSeed(i) * mix(0.4, 1.2, windStrength);
+        vec2 dir = rotate2D(windBasis, octaveAngle);
+        
+        float wavelength = max(0.02, 2.0 * waveWavelengthMul(i));
+        float k = 6.2831853 / wavelength;
+        
+        // Dispersion: shorter waves move slower, longer move faster
+        float omega = sqrt(9.8 * k); 
+
+        // Apply Phase Jitter: 
+        // Higher octaves (smaller waves) get jittered more aggressively by noise field
+        float phaseJitter = jitterField * mix(1.0, 4.0, octave / 7.0);
+        float phase = k * dot(dir, uv) - (omega * t * uWaveSpeed) + phaseJitter;
+        
+        // Steepness logic
+        float steepnessWeight = pow(0.78, octave);
+        float octaveSteepness = (globalSteepness * steepnessWeight) / 7.0;
+
+        float cosP = cos(phase);
+        float sinP = sin(phase);
+
+        // Standard Gerstner
+        totalH += (octaveSteepness / k) * sinP;
+        totalDxy += dir * (octaveSteepness * cosP);
+        totalDz += octaveSteepness * sinP;
+    }
+
+    // 5. HIGH-FREQUENCY GRAINY NOISE BREAKUP
+    // Add very fine, grainy noise to break up perfectly smooth surfaces
+    vec2 grainUv = uv * 25.0 + vec2(t * 2.3, -t * 1.7);
+    float grainNoise = valueNoise2D(grainUv) * 0.03;
+    float grainNoise2 = valueNoise2D(grainUv * 1.73 + vec2(0.5, 0.3)) * 0.02;
+    totalH += grainNoise + grainNoise2;
+
+    // 6. SECONDARY GERSTNER LAYER (Different Angle)
+    // Overlay second set of waves at slightly different angle for more complexity
+    vec2 windBasis2 = rotate2D(windBasis, 0.4); // 23 degrees offset
+    float totalH2 = 0.0;
+    vec2 totalDxy2 = vec2(0.0);
     
-    vec2 dir = rotate2D(windBasis, angle);
+    for (int i = 0; i < 3; i++) { // Only 3 octaves for secondary layer
+        float octave = float(i);
+        float angle = waveAngleOffsetSeed(i + 3) * 0.6 * windStrength;
+        vec2 dir = rotate2D(windBasis2, angle);
+        float wavelength = max(0.05, 1.5 * waveWavelengthMul(i + 3));
+        float k = 6.2831853 / wavelength;
+        float omega = sqrt(9.8 * k);
+        
+        float phaseJitter2 = jitterField * mix(0.5, 2.0, octave / 3.0);
+        float phase = k * dot(dir, uv) - (omega * t * uWaveSpeed * 0.8) + phaseJitter2;
+        
+        float steepnessWeight = pow(0.7, octave);
+        float octaveSteepness = (globalSteepness * steepnessWeight * 0.4) / 3.0;
+        
+        float cosP = cos(phase);
+        float sinP = sin(phase);
+        
+        totalH2 += (octaveSteepness / k) * sinP;
+        totalDxy2 += dir * (octaveSteepness * cosP);
+    }
     
-    // Pseudo-random phase offset to break repetitive grid patterns
-    float phaseOffset = fract(sin(octave * 12.9898) * 43758.5453) * 6.2831853;
+    // Blend secondary layer
+    totalH += totalH2 * 0.3;
+    totalDxy += totalDxy2 * 0.3;
 
-    vec4 w = gerstnerWave(uv, dir, wavelength, steepness, t, phaseOffset);
-    
-    totalH += w.x;
-    totalDxy += w.yz;
-    totalDz += w.w;
-  }
+    // 7. TROCHOIDAL PEAK SHARPENING
+    // This ensures peaks are sharp and troughs are wide (less like a sine wave)
+    float pinchMod = mix(0.7, 0.25, motion01);
+    float pinch = max(pinchMod, 1.0 - abs(totalDz));
+    vec2 slope = totalDxy / pinch;
 
-  // Calculate sharp slopes safely
-  float pinch = max(0.05, 1.0 - totalDz);
-  vec2 slope = totalDxy / pinch;
+    // 8. FINAL GRAINY BREAKUP ON SLOPES
+    // Add high-frequency noise directly to slopes for specular breakup
+    vec2 slopeGrainUv = uv * 40.0 + vec2(t * 3.1, -t * 2.1);
+    vec2 slopeGrain = vec2(
+        valueNoise2D(slopeGrainUv) - 0.5,
+        valueNoise2D(slopeGrainUv + vec2(0.7, 0.3)) - 0.5
+    ) * 0.015;
+    slope += slopeGrain;
 
-  return vec3(totalH, slope.x, slope.y);
-}
-
-vec2 waveDetailPerturbGrad(vec2 sceneUv, float motion01, vec2 windDirInput) {
-  float m01 = clamp(motion01, 0.0, 1.0);
-  float sceneAspect = (uHasSceneRect > 0.5) ? (uSceneRect.z / max(1.0, uSceneRect.w)) : (uResolution.x / max(1.0, uResolution.y));
-  vec2 wind = safeNormalize2(windDirInput);
-  if (dot(wind, wind) < 1e-6) wind = vec2(1.0, 0.0);
-  vec2 windBasis = normalize(vec2(wind.x * sceneAspect, wind.y));
-  vec2 windPerp = vec2(-windBasis.y, windBasis.x);
-  vec2 basis = vec2(sceneUv.x * sceneAspect, sceneUv.y);
-  vec2 detailG = vec2(0.0);
-
-  float breakupStrength = clamp(uWaveBreakupStrength, 0.0, 1.0);
-  float breakupDist = clamp(uWaveBreakupDistortionStrength, 0.0, 1.0);
-  if (breakupStrength > 1e-4 && breakupDist > 1e-4) {
-    float bScale = max(0.01, uWaveBreakupScale);
-    float bSpeed = max(0.0, uWaveBreakupSpeed) * m01;
-    float bWarp = clamp(uWaveBreakupWarp, 0.0, 2.0);
-    vec2 bUv = basis * bScale - windBasis * (uWaveTime * bSpeed * 0.11) - windPerp * (uWaveTime * bSpeed * 0.05);
-    float bw = valueNoise2D(bUv * 0.17 + vec2(13.1, 9.7)) - 0.5;
-    bUv += (windBasis + windPerp * 0.65) * (bw * 0.65 * bWarp);
-    float bn1 = valueNoise2D(bUv + vec2(17.3, 5.9));
-    float bn2 = valueNoise2D(bUv + vec2(3.1, 29.7));
-    vec2 bVec = (vec2(bn1, bn2) - 0.5);
-    bVec.x *= sceneAspect;
-    float bAmt = clamp(breakupStrength * breakupDist, 0.0, 1.0);
-    bAmt = bAmt * (1.15 + 1.85 * bAmt);
-    detailG += bVec * (0.95 * bAmt);
-  }
-
-  float microStrength = clamp(uWaveMicroNormalStrength, 0.0, 1.0);
-  float microDist = clamp(uWaveMicroNormalDistortionStrength, 0.0, 1.0);
-  if (microStrength > 1e-4 && microDist > 1e-4) {
-    float mScale = max(0.01, uWaveMicroNormalScale);
-    float mSpeed = max(0.0, uWaveMicroNormalSpeed) * m01;
-    float mWarp = clamp(uWaveMicroNormalWarp, 0.0, 2.0);
-    vec2 mUv = basis * mScale - windBasis * (uWaveTime * mSpeed * 0.15) - windPerp * (uWaveTime * mSpeed * 0.07);
-    float mw = valueNoise2D(mUv * 0.27 + vec2(41.7, 12.4)) - 0.5;
-    mUv += (windPerp + windBasis * 0.4) * (mw * 0.55 * mWarp);
-    float mn1 = valueNoise2D(mUv + vec2(7.3, 37.1));
-    float mn2 = valueNoise2D(mUv + vec2(29.9, 11.6));
-    vec2 mVec = (vec2(mn1, mn2) - 0.5);
-    mVec.x *= sceneAspect;
-    float mAmt = clamp(microStrength * microDist, 0.0, 1.0);
-    mAmt = mAmt * (1.25 + 2.15 * mAmt);
-    detailG += mVec * (0.78 * mAmt);
-  }
-
-  return detailG;
+    return vec3(totalH, slope.x, slope.y);
 }
 
 vec3 calculateWave(vec2 sceneUv, float t, float motion01) {
   // Dual-spectrum wind direction blending: evaluate wavefield for the previous
   // and target wind directions and blend height + gradient.
-  // This prevents the low-frequency wave domain from “snapping” when wind rotates.
+  // This prevents low-frequency wave domain from "snapping" when wind rotates.
   float s = clamp(uWindDirBlend, 0.0, 1.0);
   if (s < 1e-4) {
     vec3 w = calculateWaveForWind(sceneUv, t, motion01, uPrevWindDir);
-    w.yz += waveDetailPerturbGrad(sceneUv, motion01, uPrevWindDir);
     return w;
   }
   if (s > 0.9999) {
     vec3 w = calculateWaveForWind(sceneUv, t, motion01, uTargetWindDir);
-    w.yz += waveDetailPerturbGrad(sceneUv, motion01, uTargetWindDir);
     return w;
   }
 
   vec3 a = calculateWaveForWind(sceneUv, t, motion01, uPrevWindDir);
   vec3 b = calculateWaveForWind(sceneUv, t, motion01, uTargetWindDir);
-  vec3 w = mix(a, b, s);
   vec2 blendWind = safeNormalize2(mix(uPrevWindDir, uTargetWindDir, s));
-  w.yz += waveDetailPerturbGrad(sceneUv, motion01, blendWind);
-  return w;
+  return mix(a, b, s);
 }
 
 float waveHeight(vec2 sceneUv, float t, float motion01) { return calculateWave(sceneUv, t, motion01).x; }
@@ -763,147 +841,15 @@ vec2 waveGrad2D(vec2 sceneUv, float t, float motion01) { return calculateWave(sc
 
 vec2 smoothFlow2D(vec2 sceneUv) {
   // NOTE: We intentionally do NOT use tWaterData.ba as a flow/normal field.
-  // It has produced stable diagonal artifacts in specular.
-  // tWaterData is still used for sdf/exposure in .r/.g.
+  // waveGradPre is already the analytical dH/dSceneUv from calculateWave.
+  // Scale it gently; the caller applies uSpecNormalStrength * uSpecNormalScale.
   return vec2(0.0);
 }
 
-vec2 specMicroSlope2D(vec2 sceneUv, float t) {
-  float sceneAspect = (uHasSceneRect > 0.5) ? (uSceneRect.z / max(1.0, uSceneRect.w)) : (uResolution.x / max(1.0, uResolution.y));
-  vec2 basis = vec2(sceneUv.x * sceneAspect, sceneUv.y);
-  vec2 windF = uWindDir; float wl = length(windF);
-  windF = (wl > 1e-6) ? (windF / wl) : vec2(1.0, 0.0);
-  // Keep wind in Foundry/scene UV space (Y-down).
-  vec2 windBasis = normalize(vec2(windF.x * sceneAspect, windF.y));
-
-  float scale = max(0.01, uSpecMicroScale);
-  vec2 p = basis * scale - windBasis * (t * 0.12);
-
-  float eps = 0.75;
-  float n0 = fbmNoise(p);
-  float nx = fbmNoise(p + vec2(eps, 0.0));
-  float ny = fbmNoise(p + vec2(0.0, eps));
-  vec2 g = vec2(nx - n0, ny - n0) / eps;
-  g *= 2.25;
-  return g;
-}
-
- // Reuses the pre-computed waveGrad2D result instead of the extremely expensive
- // 4-tap finite difference (which called waveHeight 4 times = 40 wave evaluations).
- // The analytical gradient from calculateWave is mathematically equivalent and
- // visually indistinguishable, but ~40x cheaper.
- vec2 specWaveSlopeFromGrad(vec2 waveGradPre) {
+vec2 specWaveSlopeFromGrad(vec2 waveGradPre) {
   // waveGradPre is already the analytical dH/dSceneUv from calculateWave.
   // Scale it gently; the caller applies uSpecNormalStrength * uSpecNormalScale.
   return waveGradPre * 2.0;
- }
-
-// ── Flow-aligned specular slope (Mode 4) ────────────────────────────────
-// Produces a specular normal field whose dominant direction is always
-// windward. Unlike wave-gradient normals (which oscillate due to wave
-// interference) or combinedVec (coupled to refractive distortion), this
-// field is built from a monotonically-advected FBM domain, so the highlight
-// never "boomerangs" even as individual wave crests pass through.
-//
-// Three-layer construction:
-//   L0  Low-freq base flow  — FBM domain advected by uWindOffsetUv (CPU
-//       accumulator: always increases along wind, never reverses). Finite
-//       differences give a gradient that has a net component pointing in
-//       the downwind half-plane on every frame.
-//   L1  Mid-freq curl warp  — curl noise over the advected domain adds
-//       organic lateral swirl without reversing the dominant direction.
-//   L2  High-freq micro     — specMicroSlope2D at low weight for sparkle.
-//
-// All arithmetic stays in the wind-aligned (windBasis, windPerp) basis so
-// per-frame sign changes due to multi-wave interference are eliminated.
-vec2 specFlowAlignedSlope2D(vec2 sceneUv, float t) {
-  float sceneAspect = (uHasSceneRect > 0.5)
-    ? (uSceneRect.z / max(1.0, uSceneRect.w))
-    : (uResolution.x / max(1.0, uResolution.y));
-
-  // Wind basis in scene UV space (Y-down, matches CloudEffectV2 convention).
-  vec2 windF = uWindDir;
-  float wl = length(windF);
-  windF = (wl > 1e-6) ? (windF / wl) : vec2(1.0, 0.0);
-  vec2 windBasis = normalize(vec2(windF.x * sceneAspect, windF.y));
-  vec2 windPerp  = vec2(-windBasis.y, windBasis.x);
-
-  // Aspect-corrected scene position.
-  vec2 basis = vec2(sceneUv.x * sceneAspect, sceneUv.y);
-
-  // ── L0: Low-frequency base flow ───────────────────────────────────────
-  // Shift the FBM domain by the monotonic CPU-side wind offset.
-  // uWindOffsetUv grows strictly in the wind direction, so this domain
-  // never reverses — the resulting gradient always has a positive projection
-  // onto windBasis.
-  //
-  // We project the offset onto the wind/perp axes independently so the
-  // domain shift is always coherent with the wind frame (avoids arbitrary-
-  // angle drift that could partially cancel the base flow).
-  float flowScale = max(0.01, uSpecMicroScale * 0.45);
-  vec2 windOff = uWindOffsetUv; // monotonic (x,y) in scene-UV units
-  float offAlong  = dot(windOff, windBasis);
-  float offAcross = dot(windOff, windPerp);
-  // Stretch more along wind than across to produce elongated streaks.
-  vec2 flowDomain = basis * flowScale
-                  - windBasis * (offAlong  * 2.5)
-                  - windPerp  * (offAcross * 0.8);
-
-  // Finite-difference gradient of the FBM — gives slope direction.
-  // We use a relatively large epsilon so the gradient captures the
-  // low-frequency surface tilt rather than noise texture detail.
-  float eps0 = 0.55;
-  float f0  = fbmNoise(flowDomain);
-  float fx0 = fbmNoise(flowDomain + windBasis * eps0);
-  float fy0 = fbmNoise(flowDomain + windPerp  * eps0);
-  // Gradient in (along, across) space then convert back to sceneUv.
-  vec2 gradL0 = vec2((fx0 - f0) / eps0, (fy0 - f0) / eps0);
-  // Bias toward wind direction: add a small constant component so the net
-  // slope is always partially "downwind" regardless of the noise value.
-  // This is the key difference from Mode 1/2: even in calm areas the
-  // specular highlight tilts slightly windward instead of sitting flat.
-  gradL0 += vec2(0.30, 0.0); // constant downwind component
-  // Convert from wind-basis to sceneUv basis.
-  vec2 slopeL0 = windBasis * gradL0.x + windPerp * gradL0.y;
-
-  // ── L1: Mid-frequency curl detail ────────────────────────────────────
-  // Curl noise over the same advected domain — produces lateral swirl that
-  // reads as water surface turbulence. Curl of a scalar field is guaranteed
-  // divergence-free, so it adds variation without cancelling the base flow.
-  float curlScale = max(0.01, uSpecMicroScale * 1.2);
-  // Advance the curl domain with uWindTime (also monotonic) at a slower rate
-  // so the swirl patterns evolve smoothly over time.
-  vec2 curlDomain = basis * curlScale - windBasis * (t * 0.07) - windPerp * (t * 0.031);
-  vec2 curlSlope  = curlNoise2D(curlDomain) * 0.5;
-
-  // ── L2: High-frequency micro sparkle ─────────────────────────────────
-  // The existing specMicroSlope2D is kept at low weight so individual sun
-  // sparkles remain on the surface. It already uses uWindTime monotonically.
-  vec2 microSlope = specMicroSlope2D(sceneUv, t) * 0.25;
-
-  // ── Combine ───────────────────────────────────────────────────────────
-  // L0 dominates (sets the windward "tilt"), L1 adds swirl, L2 adds sparkle.
-  // uSpecSurfaceChaos shifts weight toward curl + micro and adds capillary-scale
-  // slope so highlights break up (river/sea) instead of one glassy sheet.
-  float ch = clamp(uSpecSurfaceChaos, 0.0, 1.0);
-  float w0 = 0.65 - 0.23 * ch;
-  float w1 = 0.25 + 0.15 * ch;
-  float w2 = 0.10 + 0.18 * ch;
-  vec2 combined = slopeL0 * w0 + curlSlope * w1 + microSlope * w2;
-
-  // Capillary / chop layer (spec-only): higher frequency than L2, advects with wind.
-  if (ch > 1e-4) {
-    float capEps = 0.35;
-    vec2 capP = basis * max(0.02, uSpecMicroScale * 3.6)
-              - windBasis * (t * 0.31) - windPerp * (t * 0.14);
-    float c0 = fbmNoise(capP);
-    float cpx = fbmNoise(capP + windBasis * capEps);
-    float cpy = fbmNoise(capP + windPerp * capEps);
-    vec2 capG = vec2(cpx - c0, cpy - c0) / max(capEps, 1e-4);
-    capG *= 1.15;
-    combined += capG * (0.22 * ch);
-  }
-  return combined;
 }
 
 // ── Coordinate conversion ────────────────────────────────────────────────
@@ -919,12 +865,6 @@ vec2 foundryToSceneUv(vec2 foundryPos) {
 
 float remap01(float v, float lo, float hi) { return clamp((v - lo) / max(1e-5, hi - lo), 0.0, 1.0); }
 
-float sampleOutdoorsMask(vec2 sceneUv01) {
-  float y = (uOutdoorsMaskFlipY > 0.5) ? (1.0 - sceneUv01.y) : sceneUv01.y;
-  vec2 uv = vec2(sceneUv01.x, y);
-  return texture2D(tOutdoorsMask, uv).r;
-}
-
 float shoreFactor(float shore01) {
   float lo = clamp(uDistortionShoreRemapLo, 0.0, 1.0);
   float hi = clamp(uDistortionShoreRemapHi, 0.0, 1.0);
@@ -936,6 +876,20 @@ float shoreFactor(float shore01) {
 }
 
 float waterInsideFromSdf(float sdf01) { return smoothstep(0.52, 0.48, sdf01); }
+
+// Coverage from composited _Water only (linear sample + sub-texel smoothstep).
+// Nearest+step looked blocky when the composited mask is lower-res than the screen; SDF alone can sit past the art.
+float waterRawMaskAuthoritative(vec2 sceneUv01) {
+  if (uHasWaterRawMask < 0.5) return 1.0;
+  float w = texture2D(tWaterRawMask, sceneUv01).r;
+  float t = uWaterRawMaskThreshold;
+  float tex = max(uWaterRawMaskTexelSize.x, uWaterRawMaskTexelSize.y);
+  // ~1 texel transition in mask UV so upscaling stays smooth; clamp hi edge below 1.0.
+  float soft = max(1e-5, tex * 1.25);
+  float hi = min(t + soft, 0.999);
+  if (hi <= t) return step(t, w);
+  return smoothstep(t, hi, w);
+}
 
 float distortionInsideFromSdf(float sdf01) {
   float c = clamp(uDistortionEdgeCenter, 0.0, 1.0);
@@ -1003,7 +957,7 @@ float waterFbm(vec2 p, int octaves, float lacunarity, float gain) {
   float amp = 1.0;
   float freq = 1.0;
   float maxAmp = 0.0;
-  for (int i = 0; i < 8; i++) {
+  for (int i = 0; i < 6; i++) {
     if (i >= octaves) break;
     // valueNoise returns [0..1]; remap to [-1..1] for signed accumulation.
     sum += (valueNoise(p * freq) * 2.0 - 1.0) * amp;
@@ -1017,9 +971,9 @@ float waterFbm(vec2 p, int octaves, float lacunarity, float gain) {
 // V1-accurate caustics: ridged FBM produces thin bright filaments, not blobs.
 // Matches DistortionManager causticsPattern() exactly.
 float causticsPattern(vec2 sceneUv, float t, float scale, float speed, float sharpness) {
-  vec2 p = sceneUv * scale;
+  vec2 p = effectUv(sceneUv) * scale;
   float tt = t * speed;
-  float n1 = waterFbm(p + vec2(tt * 0.12, -tt * 0.09), 4, 2.0, 0.5);
+  float n1 = waterFbm(p + vec2(tt * 0.12, -tt * 0.09), 3, 2.0, 0.5);
   float n2 = waterFbm(p * 1.7 + vec2(-tt * 0.08, tt * 0.11), 3, 2.1, 0.55);
   // Blend two FBM layers, then remap to [0..1].
   float n = 0.6 * n1 + 0.4 * n2;
@@ -1032,6 +986,7 @@ float causticsPattern(vec2 sceneUv, float t, float scale, float speed, float sha
   float c = smoothstep(1.0 - w, 1.0, ridge);
   return c;
 }
+
 ` + getFragmentShaderPart2();
 }
 
@@ -1465,9 +1420,19 @@ vec3 applyMurk(vec2 sceneUv, float t, float inside, float shore, float outdoorSt
   float murkDarkScale = mix(1.0, 0.22, darkness);
   float baseLuma = dot(baseColor, vec3(0.299, 0.587, 0.114));
   float localLight = clamp(0.35 + baseLuma * 0.85, 0.2, 1.0);
+  
+  // Apply ShadowManagerV2 combined shadow darkening to murk
+  float shadowDarken = 1.0;
+  if (uMurkShadowEnabled > 0.5 && uHasCombinedShadow > 0.5) {
+    float shadowLit = texture2D(tCombinedShadow, vUv).r;
+    float shadowOcclusion = clamp(1.0 - shadowLit, 0.0, 1.0);
+    float shadowStrength = clamp(uMurkShadowStrength, 0.0, 2.0);
+    shadowDarken = 1.0 - (shadowOcclusion * shadowStrength);
+  }
+  
   vec3 muckyCol = mix(murkColor * 0.6, murkColor, cloud);
-  muckyCol *= murkDarkScale * localLight;
-  muckyCol += grain * 0.35 * murkDarkScale * localLight;
+  muckyCol *= murkDarkScale * localLight * shadowDarken;
+  muckyCol += grain * 0.35 * murkDarkScale * localLight * shadowDarken;
   return mix(baseColor, muckyCol, murkFactor);
 }
 
@@ -1508,6 +1473,7 @@ float refractTapValid(vec2 screenUv) {
     float insideS = (uUseSdfMask > 0.5)
       ? waterInsideFromSdf(wdS.r)
       : smoothstep(0.02, 0.08, wdS.g);
+    insideS *= waterRawMaskAuthoritative(suv);
     return insideS * vOcc;
   }
 
@@ -1518,11 +1484,114 @@ vec4 sampleRefractedSafe(vec2 screenUv, vec4 fallback) {
   return (refractTapValid(screenUv) > 0.5) ? texture2D(tDiffuse, screenUv) : fallback;
 }
 
+// ── Specular Highlights Function ─────────────────────────────────────────────
+vec3 calculateSpecularHighlights(
+  vec2 sceneUv, float inside, vec3 N, vec3 V, vec3 L, float NoL, float NoV,
+  float distInside, float edgeStability, float shore, vec2 waveGrad,
+  vec2 rainOffPx, float indoorWindMotion, float outdoorStrength, float sceneLuma,
+  float darkness, float combinedShadow, float structuralShadow
+) {
+  // Use tighter roughness range for sharper highlights
+  float p01 = clamp((uSpecHighlightsPower - 1.0) / 127.0, 0.0, 1.0);
+  float rMin = clamp(uSpecHighlightsRoughnessMin, 0.001, 1.0);
+  float rMax = clamp(uSpecHighlightsRoughnessMax, 0.001, 1.0);
+  float rough = mix(rMax, rMin, p01);
+
+  // Enhanced normal for highlights (stronger response to waves)
+  vec2 waveSlope = specWaveSlopeFromGrad(waveGrad) * clamp(uSpecHighlightsNormalStrength, 0.0, 10.0);
+  waveSlope *= clamp(uSpecHighlightsNormalScale, 0.0, 1.0);
+  vec3 waveNormal = normalize(vec3(-waveSlope.x, -waveSlope.y, 1.0));
+  vec3 Nhl = normalize(mix(N, waveNormal, clamp(uSpecHighlightsNormalStrength, 0.0, 1.0)));
+
+  // GGX calculation for highlights (same sun-angle toggle as main specular)
+  vec3 Lhl = (uSpecUseSunAngle > 0.5) ? normalize(uSpecHighlightsSunDir) : vec3(0.0, 0.0, 1.0);
+  vec3 Hhl = normalize(Lhl + V);
+  float NoLhl = clamp(dot(Nhl, Lhl), 0.0, 1.0);
+  float NoVhl = clamp(dot(Nhl, V), 0.0, 1.0);
+  float NoHhl = clamp(dot(Nhl, Hhl), 0.0, 1.0);
+  float VoHhl = clamp(dot(V, Hhl), 0.0, 1.0);
+
+  float alpha = max(0.001, rough * rough);
+  float alpha2 = alpha * alpha;
+
+  // GGX Normal Distribution Function
+  float denom = NoHhl * NoHhl * (alpha2 - 1.0) + 1.0;
+  float D = alpha2 / (3.14159265 * denom * denom);
+
+  // Geometry function
+  float k = rough * 0.5;
+  float G1V = NoVhl / max(1e-6, NoVhl * (1.0 - k) + k);
+  float G1L = NoLhl / max(1e-6, NoLhl * (1.0 - k) + k);
+  float G = G1V * G1L;
+
+  // Fresnel
+  float f0 = clamp(uSpecHighlightsF0, 0.0, 1.0);
+  vec3 F0 = vec3(f0);
+  vec3 F = F0 + (1.0 - F0) * pow(1.0 - VoHhl, 5.0);
+
+  // Specular calculation
+  vec3 specHighlights = (((D * G) * F) / max(1e-6, 4.0 * NoVhl * NoLhl)) * NoLhl;
+
+  // Apply sun elevation falloff for highlights
+  if (uSpecUseSunAngle > 0.5 && uSpecSunElevationFalloffEnabled > 0.5) {
+    float elevation = uSpecHighlightsSunElevationDeg;
+    float elevationFactor = 1.0;
+    if (elevation < uSpecSunElevationFalloffStart) {
+      elevationFactor = smoothstep(uSpecSunElevationFalloffEnd, uSpecSunElevationFalloffStart, elevation);
+    }
+    specHighlights *= elevationFactor;
+  }
+
+  // Shadow suppression for highlights
+  if (uCloudShadowEnabled > 0.5 && uHasCloudShadow > 0.5) {
+    float cloudShadow = texture2D(tCloudShadow, sceneUv).r;
+    float kStrength = clamp(uCloudShadowSpecularKill, 0.0, 1.0);
+    float kCurve = max(0.01, uCloudShadowSpecularCurve);
+    float litPow = pow(clamp(1.0 - combinedShadow, 0.0, 1.0), kCurve);
+    specHighlights *= mix(1.0, litPow, kStrength);
+  }
+  specHighlights *= (1.0 - 0.75 * structuralShadow);
+
+  // Masking for highlights (stricter than main specular)
+  if (uSpecHighlightsEnabled > 0.5) {
+    float specMask = pow(clamp(distInside, 0.0, 1.0), clamp(uSpecHighlightsMaskGamma, 0.05, 12.0));
+    specHighlights *= specMask;
+    specHighlights *= edgeStability;
+    float shoreBias = mix(1.0, shore, clamp(uSpecHighlightsShoreBias, 0.0, 1.0));
+    specHighlights *= shoreBias;
+  }
+
+  // Strength and intensity for highlights
+  float strength = clamp(uSpecHighlightsStrength, 0.0, 250.0) / 50.0;
+  specHighlights *= strength * clamp(uSpecHighlightsSunIntensity, 0.0, 10.0);
+
+  // Indoor/outdoor modulation for highlights
+  if (uHasOutdoorsMask > 0.5) {
+    specHighlights *= mix(0.15, 1.0, clamp(outdoorStrength, 0.0, 1.0));
+  }
+  specHighlights *= mix(1.0, 0.1, clamp(uSceneDarkness, 0.0, 1.0));
+
+  // Sky tint for highlights
+  vec3 skyCol = clamp(uSkyColor, vec3(0.0), vec3(1.0));
+  float skyI = clamp(uSkyIntensity, 0.0, 1.0);
+  float skySpecI = mix(0.08, 1.0, skyI);
+  vec3 tint = mix(vec3(1.0), skyCol, clamp(uSpecHighlightsSkyTint, 0.0, 1.0));
+  vec3 specHighlightsCol = specHighlights * tint * skySpecI;
+
+  // Clamping for highlights
+  float sClamp = max(0.0, uSpecHighlightsClamp);
+  if (sClamp > 0.0) {
+    specHighlightsCol = min(specHighlightsCol, vec3(sClamp));
+  }
+
+  return specHighlightsCol;
+}
+
 // ── Main ─────────────────────────────────────────────────────────────────
 void main() {
   vec4 base = texture2D(tDiffuse, vUv);
   float isEnabled = step(0.5, uWaterEnabled) * step(0.5, uHasWaterData);
-  if (isEnabled < 0.5) { gl_FragColor = base; return; }
+  if (isEnabled < 0.5) { MSA_BLOOM_RT_ZERO; gl_FragColor = base; return; }
   // Occluder mask: upper-floor tiles rendered to screen-space RT (tile union →
   // stair-step edges). Soft-filter + blend instead of a hard 0.5 test.
   float occluderBlend = 0.0;
@@ -1530,6 +1599,7 @@ void main() {
     float occ = waterOccluderAlphaSoft(vUv);
     occluderBlend = smoothstep(0.36, 0.64, occ);
     if (occluderBlend > 0.995) {
+      MSA_BLOOM_RT_ZERO;
       gl_FragColor = base;
       return;
     }
@@ -1549,6 +1619,7 @@ void main() {
       float aboveActiveFloor = aboveGround - uActiveLevelElevation;
       // Relative threshold so upper-floor tiles don't fully cull lower-floor water.
       if (ratio < 0.99995 && aboveActiveFloor > 0.5) {
+        MSA_BLOOM_RT_ZERO;
         gl_FragColor = base;
         return;
       }
@@ -1562,7 +1633,7 @@ void main() {
     sceneUv = foundryToSceneUv(foundryPos);
     worldSceneUv = sceneUv;
     float inScene = step(0.0, sceneUv.x) * step(sceneUv.x, 1.0) * step(0.0, sceneUv.y) * step(sceneUv.y, 1.0);
-    if (inScene < 0.5) { gl_FragColor = base; return; }
+    if (inScene < 0.5) { MSA_BLOOM_RT_ZERO; gl_FragColor = base; return; }
     sceneUv = clamp(sceneUv, vec2(0.0), vec2(1.0));
   }
 
@@ -1572,10 +1643,21 @@ void main() {
   float inside = (uUseSdfMask > 0.5)
     ? waterInsideFromSdf(sdf01)
     : smoothstep(0.02, 0.08, exposure01);
+  float rawAuth = waterRawMaskAuthoritative(sceneUv);
+  inside *= rawAuth;
   float shore = clamp(exposure01, 0.0, 1.0);
   float distInside = (uUseSdfMask > 0.5)
     ? distortionInsideFromSdf(sdf01)
     : inside;
+  distInside *= rawAuth;
+  // Borrowing a lower floor's water pack on an upper slice: only treat pixels as
+  // water where this slice is punched out (low alpha). Suppresses river SDF over
+  // opaque bridge deck texels (same scene UV as the river below).
+  if (uCrossSliceWaterData > 0.5) {
+    float sheetOpaque = smoothstep(0.05, 0.96, base.a);
+    inside *= (1.0 - sheetOpaque);
+    distInside *= (1.0 - sheetOpaque);
+  }
   // Extra stability fade near the binary water-mask transition.
   // Prevents bright specular/caustics edge flicker when the water boundary is thin.
   float edgeStability = smoothstep(0.12, 0.42, clamp(distInside, 0.0, 1.0));
@@ -1585,44 +1667,58 @@ void main() {
   if (uHasOutdoorsMask > 0.5) {
     outdoorStrength = sampleOutdoorsMask(worldSceneUv);
   }
-  // Strongly suppress wind-driven motion indoors so water movement reads as sheltered.
-  // Keep a tiny baseline to avoid fully static temporal aliasing.
-  float indoorWindMotion = 1.0;
-  if (uHasOutdoorsMask > 0.5) {
-    float outdoorShaped = pow(clamp(outdoorStrength, 0.0, 1.0), 2.2);
-    indoorWindMotion = max(0.05, outdoorShaped);
-  }
+  // Same factor for foam/murk drift and Gerstner phase (see waterIndoorWindMotion01).
+  float waveShelter01 = waterIndoorWindMotion01(sceneUv);
+  float indoorWindMotion = waveShelter01;
+
+  // Placeholder for sky reflection (will be calculated later)
+  vec3 skyReflection = vec3(0.0);
 
   // Debug views
   if (uDebugView > 0.5) {
     float d = floor(uDebugView + 0.5);
     if (d < 1.5) {
+      MSA_BLOOM_RT_ZERO;
       if (uHasWaterRawMask < 0.5) gl_FragColor = vec4(1.0, 0.0, 1.0, 1.0);
       else gl_FragColor = vec4(vec3(texture2D(tWaterRawMask, sceneUv).r), 1.0);
       return;
     }
-    if (d < 2.5) { gl_FragColor = vec4(vec3(inside), 1.0); return; }
-    if (d < 3.5) { gl_FragColor = vec4(vec3(sdf01), 1.0); return; }
-    if (d < 4.5) { gl_FragColor = vec4(vec3(exposure01), 1.0); return; }
-    if (d < 5.5) { vec2 nn = smoothFlow2D(sceneUv); gl_FragColor = vec4(nn * 0.5 + 0.5, 0.0, 1.0); return; }
-    if (d < 6.5) { float wv = 0.5 + 0.5 * waveHeight(sceneUv, uWaveTime, waveMotion01); gl_FragColor = vec4(vec3(wv), 1.0); return; }
-    // DebugView mapping matches the UI schema:
-    // 7 = Distortion, 8 = Occluder
-    if (d < 7.5) { gl_FragColor = vec4(vec3(distMask), 1.0); return; }
+    if (d < 2.5) { MSA_BLOOM_RT_ZERO; gl_FragColor = vec4(vec3(inside), 1.0); return; }
+    if (d < 3.5) { MSA_BLOOM_RT_ZERO; gl_FragColor = vec4(vec3(sdf01), 1.0); return; }
+    if (d < 4.5) { MSA_BLOOM_RT_ZERO; gl_FragColor = vec4(vec3(exposure01), 1.0); return; }
+    if (d < 5.5) { MSA_BLOOM_RT_ZERO; vec2 nn = smoothFlow2D(sceneUv); gl_FragColor = vec4(nn * 0.5 + 0.5, 0.0, 1.0); return; }
+    if (d < 6.5) {
+      MSA_BLOOM_RT_ZERO;
+      float wv = 0.5 + 0.5 * waveHeight(sceneUv, uWaveTime * waveShelter01, waveMotion01);
+      gl_FragColor = vec4(vec3(wv), 1.0);
+      return;
+    }
+    if (d < 7.5) { MSA_BLOOM_RT_ZERO; gl_FragColor = vec4(vec3(distMask), 1.0); return; }
     if (d < 8.5) {
+      MSA_BLOOM_RT_ZERO;
       float occ = (uHasWaterOccluderAlpha > 0.5) ? waterOccluderAlphaSoft(vUv) : 0.0;
       gl_FragColor = vec4(vec3(occ), 1.0);
       return;
     }
+    if (d < 9.5) {
+      MSA_BLOOM_RT_ZERO;
+      gl_FragColor = vec4(skyReflection, base.a);
+      return;
+    }
+    MSA_BLOOM_RT_ZERO;
     gl_FragColor = vec4(1.0, 0.0, 1.0, 1.0); return;
   }
 
-  if (inside < 0.01) { gl_FragColor = base; return; }
+  if (inside < 0.01) { MSA_BLOOM_RT_ZERO; gl_FragColor = base; return; }
 
-  // Animated distortion (single calculateWave: reuse height + gradient)
-  vec3 waveState = calculateWave(sceneUv, uWaveTime, waveMotion01);
+  // Animated distortion (single calculateWave: reuse height + gradient).
+  // waveShelter01: per-pixel _Outdoors shelter (computed above with indoorWindMotion).
+  float waveTimePix = uWaveTime * waveShelter01;
+  vec3 waveState = calculateWave(sceneUv, waveTimePix, waveMotion01);
   vec2 waveGrad = waveState.yz;
   float waveH = waveState.x;
+  // Rotate analytical slopes for refraction/specular without changing travel axis
+  // (Gerstner dirs use wind + waveDirOffsetDeg; this is purely visual correction).
   waveGrad = rotate2D(waveGrad, uWaveAppearanceRotRad);
   vec2 flowN = smoothFlow2D(sceneUv);
   
@@ -1643,11 +1739,12 @@ void main() {
   float crestMod = smoothstep(-0.4, 0.62, 0.5 + 0.5 * hn);
   float sceneAspectW = (uHasSceneRect > 0.5) ? (uSceneRect.z / max(1.0, uSceneRect.w)) : (uResolution.x / max(1.0, uResolution.y));
   vec2 basisW = vec2(sceneUv.x * sceneAspectW, sceneUv.y);
-  float ampHash = 0.90 + 0.14 * ((valueNoise2D(basisW * 8.1 + vec2(-uWindTime * 0.041, uWindTime * 0.033)) - 0.5) * 2.0);
+  float wTurb = uWindTime * waveShelter01;
+  float ampHash = 0.90 + 0.14 * ((valueNoise2D(basisW * 8.1 + vec2(-wTurb * 0.041, wTurb * 0.033)) - 0.5) * 2.0);
   float waveStrengthEff = waveStrength * mix(0.93, 1.09, crestMod) * clamp(ampHash, 0.82, 1.12);
 
   // Perpendicular noise warps fronts so Gerstner sums read less like stripes.
-  float lateralChaos = (valueNoise2D(basisW * 5.0 + vec2(uWindTime * 0.063, -uWindTime * 0.051)) - 0.5) * 2.0;
+  float lateralChaos = (valueNoise2D(basisW * 5.0 + vec2(wTurb * 0.063, -wTurb * 0.051)) - 0.5) * 2.0;
   vec2 perpG = vec2(-waveGrad.y, waveGrad.x);
   float latWt = 0.15 * (0.42 + 0.58 * crestMod);
   
@@ -1679,6 +1776,9 @@ void main() {
     rainOffPx *= indoorMult;
   }
   offsetUvRaw += (rainOffPx * texel) * zoom;
+  if (uCrossSliceWaterData > 0.5) {
+    offsetUvRaw *= 0.14;
+  }
   vec2 offsetUv = offsetUvRaw * distMask;
   vec2 uv1 = clamp(vUv + offsetUv, vec2(0.001), vec2(0.999));
 
@@ -1690,18 +1790,14 @@ void main() {
   vec4 centerSample = texture2D(tDiffuse, uv1);
 
   #ifdef USE_WATER_REFRACTION_MULTITAP
-  vec2 uv0 = clamp(vUv + offsetUv * 0.55, vec2(0.001), vec2(0.999));
-  vec2 uv2 = clamp(vUv + offsetUv * 1.55, vec2(0.001), vec2(0.999));
-  float v0 = refractTapValid(uv0);
-  float v2 = refractTapValid(uv2);
-  vec4 tap0 = (v0 > 0.5) ? texture2D(tDiffuse, uv0) : centerSample;
-  vec4 tap2 = (v2 > 0.5) ? texture2D(tDiffuse, uv2) : centerSample;
-  // Renormalize weights so partial invalid taps don't create edge halos.
-  float w0 = 0.25 * v0;
-  float w1 = 0.50;
-  float w2 = 0.25 * v2;
-  float wSum = max(1e-6, w0 + w1 + w2);
-  vec4 refracted = (tap0 * w0 + centerSample * w1 + tap2 * w2) / wSum;
+  // Two-sample kernel along distortion: center (uv1) + outer — one fewer tap/valid than 3-point.
+  vec2 uvO = clamp(vUv + offsetUv * 1.18, vec2(0.001), vec2(0.999));
+  float vo = refractTapValid(uvO);
+  vec4 tapO = (vo > 0.5) ? texture2D(tDiffuse, uvO) : centerSample;
+  float wc = 0.56;
+  float wo = 0.44 * vo;
+  float wSum = max(1e-6, wc + wo);
+  vec4 refracted = (centerSample * wc + tapO * wo) / wSum;
   #else
   vec4 refracted = centerSample;
   #endif
@@ -1812,14 +1908,32 @@ void main() {
   // Keep a small floor so foam does not pop completely out.
   float foamBuildingShadowFade = mix(1.0, 0.14, buildingShadow);
 
+  // ShadowManagerV2 combined map (screen vUv, R = lit factor). When bound, shore +
+  // floating foam use this for color and alpha so they track cloud + overhead + building
+  // the same way as water particles and murk (avoids double-applying structural).
+  float foamColorLitMul = foamStructuralDarken;
+  float foamAlphaLitMul = foamBuildingShadowFade;
+  if (uHasCombinedShadow > 0.5) {
+    float cl = clamp(texture2D(tCombinedShadow, vUv).r, 0.0, 1.0);
+    foamColorLitMul = cl;
+    foamAlphaLitMul = cl;
+  }
+
   // Murk
   float murkFactor = 0.0;
   col = applyMurk(sceneUv, uTime, inside, shore, outdoorStrength, indoorWindMotion, col, murkFactor);
 
-  // Tint
-  float effectiveTint = clamp(uTintStrength, 0.0, 1.0) * (1.0 - (murkFactor * 0.5));
+  // Tint - use darkening approach instead of brightening
+  float sceneDarkness = clamp(uSceneDarkness, 0.0, 1.0);
+  // Reduce tint strength significantly at night
+  float tintStrengthMultiplier = mix(1.0, 0.01, sceneDarkness);
+  float effectiveTint = clamp(uTintStrength, 0.0, 1.0) * tintStrengthMultiplier * (1.0 - (murkFactor * 0.5));
   float k = effectiveTint * inside * shore;
-  col = mix(col, uTintColor, k);
+  
+  // Darken the water with tint instead of brightening
+  vec3 darkenedTintColor = mix(uTintColor, uTintColor * 0.01, sceneDarkness);
+  // Use multiply instead of mix to darken
+  col = mix(col, col * darkenedTintColor, k);
 
   // Caustics (underwater highlight patterns) — V1-accurate ridged-FBM filaments.
   if (uCausticsEnabled > 0.5) {
@@ -1894,6 +2008,9 @@ void main() {
     // We approximate that behaviour here by multiplying the current colour by a
     // caustics illumination term, which preserves underlying albedo detail.
     float cLight = c * causticsAmt * 1.35;
+    // Caustics are razor-thin FBM filaments — like extra specular; Kawase-blurred
+    // tiles underneath need the same energy reduction as spec/foam softening.
+    cLight *= mix(1.0, 0.10, uFloorDepthBlurWaterSoft);
     vec3 warm = vec3(1.0, 1.0, 0.85);
     vec3 causticsTint = mix(vec3(1.0), warm, 0.85);
     // Small tint toward water hue, but keep it mostly warm-white so it reads as light.
@@ -1908,6 +2025,10 @@ void main() {
   float shoreFoamAmount;
   FloatingFoamData floatingFoam;
   getFoamData(sceneUv, shore, inside, rainOffPx, waveGrad, sceneLuma, darkness, indoorWindMotion, shoreFoamAmount, floatingFoam);
+  // Softer foam presence + less pop vs blurred bus (mask still drives physics above).
+  float fdbFoam = uFloorDepthBlurWaterSoft;
+  float shoreFoamVis = shoreFoamAmount * mix(1.0, 0.58, fdbFoam);
+  float floatFoamAmtVis = floatingFoam.amount * mix(1.0, 0.58, fdbFoam);
   
   // Apply floating foam shadow to water surface BEFORE foam rendering
   // Shadow offset based on sun direction (like building shadows)
@@ -1923,11 +2044,12 @@ void main() {
     getFoamData(shadowUv, shore, inside, rainOffPx, waveGrad, sceneLuma, darkness, indoorWindMotion, shoreFoamShadow, shadowFoam);
     
     float shadowDarken = shadowFoam.amount * floatingFoam.shadowStrength;
+    shadowDarken *= mix(1.0, 0.22, uFloorDepthBlurWaterSoft);
     col *= (1.0 - shadowDarken);
   }
   
   // Shore foam rendering (NEW ADVANCED SYSTEM)
-  if (shoreFoamAmount > 0.01) {
+  if (shoreFoamVis > 0.01) {
     // Color processing
     vec3 shoreFoamColor = uShoreFoamColor;
     
@@ -1939,7 +2061,7 @@ void main() {
     
     // Color variation
     if (uShoreFoamColorVariation > 0.01) {
-      vec2 colorVarUv = sceneUv * 3.0 + vec2((uWindTime * indoorWindMotion) * 0.05);
+      vec2 colorVarUv = effectUv(sceneUv) * 3.0 + vec2((uWindTime * indoorWindMotion) * 0.05);
       float colorVar = valueNoise(colorVarUv);
       float varAmount = clamp(uShoreFoamColorVariation, 0.0, 1.0);
       shoreFoamColor = mix(shoreFoamColor, shoreFoamColor * (0.8 + colorVar * 0.4), varAmount);
@@ -1974,12 +2096,14 @@ void main() {
     
     // Apply lighting to color
     shoreFoamColor *= shoreLightFactor;
-    shoreFoamColor *= foamStructuralDarken;
+    shoreFoamColor *= foamColorLitMul;
+    shoreFoamColor = mix(shoreFoamColor, col, 0.42 * fdbFoam);
     
     // Opacity and blending
     float shoreOpacity = clamp(uShoreFoamOpacity, 0.0, 1.0);
-    float shoreAlpha = clamp(shoreFoamAmount * shoreOpacity, 0.0, 1.0);
-    shoreAlpha *= foamBuildingShadowFade;
+    float shoreAlpha = clamp(shoreFoamVis * shoreOpacity, 0.0, 1.0);
+    shoreAlpha *= foamAlphaLitMul;
+    shoreAlpha *= mix(1.0, 0.20, uFloorDepthBlurWaterSoft);
     
     // Blend foam color first
     col = mix(col, shoreFoamColor, shoreAlpha);
@@ -1988,10 +2112,11 @@ void main() {
   }
   
   // Apply floating foam with independent color and FULL opacity control
-  if (floatingFoam.amount > 0.01) {
-    float floatingAlpha = clamp(floatingFoam.amount * floatingFoam.opacity, 0.0, 1.0);
-    floatingAlpha *= foamBuildingShadowFade;
-    vec3 floatingFoamColor = floatingFoam.color * foamStructuralDarken;
+  if (floatFoamAmtVis > 0.01) {
+    float floatingAlpha = clamp(floatFoamAmtVis * floatingFoam.opacity, 0.0, 1.0);
+    floatingAlpha *= foamAlphaLitMul;
+    floatingAlpha *= mix(1.0, 0.20, uFloorDepthBlurWaterSoft);
+    vec3 floatingFoamColor = mix(floatingFoam.color, col, 0.42 * fdbFoam) * foamColorLitMul;
     // Blend foam color first (without darkness)
     col = mix(col, floatingFoamColor, floatingAlpha);
     // THEN apply darkness to the final result for proper night darkening
@@ -1999,39 +2124,27 @@ void main() {
   }
 
   // Shader flecks (drive by combined foam presence)
-  float fleckDriver = clamp(max(shoreFoamAmount, floatingFoam.amount) * foamBuildingShadowFade, 0.0, 1.0);
+  float fleckDriver = clamp(max(shoreFoamVis, floatFoamAmtVis) * foamAlphaLitMul, 0.0, 1.0);
   float shaderFlecks = getShaderFlecks(sceneUv, inside, shore, fleckDriver, rainOffPx, indoorWindMotion);
-  vec3 fleckCol = mix(uShoreFoamColor, floatingFoam.color, clamp(floatingFoam.amount, 0.0, 1.0)) * foamStructuralDarken;
-  col += fleckCol * shaderFlecks * 0.8;
+  vec3 fleckCol = mix(uShoreFoamColor, floatingFoam.color, clamp(floatFoamAmtVis, 0.0, 1.0)) * foamColorLitMul;
+  col += fleckCol * shaderFlecks * 0.8 * mix(1.0, 0.07, uFloorDepthBlurWaterSoft);
 
   // Apply screen-space cloud shadows globally to water + foam + caustics + murk
   col *= max(0.0, 1.0 - cloudDarken);
 
   // Specular (GGX)
   vec2 slope;
-  if (uSpecNormalMode > 3.5) {
-    // Mode 4 (default): flow-aligned slope.
-    // Built from a monotonically-advected FBM domain (uWindOffsetUv) so the
-    // dominant highlight direction is always windward and never ping-pongs.
-    // curl noise adds organic lateral swirl; specMicroSlope2D adds sparkle.
-    slope = specFlowAlignedSlope2D(sceneUv, uWindTime) * clamp(uSpecNormalStrength, 0.0, 10.0);
-    slope *= clamp(uSpecNormalScale, 0.0, 1.0);
-  } else if (uSpecNormalMode > 2.5) {
-    // Mode 3: use the stabilized distortion vector as the specular slope.
-    // This is intentionally coupled to the same field that drives refraction,
-    // and avoids the problematic wave normal/height gradients.
-    slope = combinedVec * (0.90 * clamp(uSpecNormalStrength, 0.0, 10.0));
-    slope *= clamp(uSpecNormalScale, 0.0, 1.0);
-  } else if (uSpecNormalMode > 1.5) {
-    // Mode 2: wave slope from analytical gradient. Reuses the waveGrad already
-    // computed for distortion — eliminates the old 4-tap finite difference that
+  // Pure Gerstner wave system - all surface detail from mathematical waves
+  if (uSpecNormalMode > 1.5) {
+    // Mode 2+: wave slope from analytical gradient. Reuses the waveGrad already
+    // computed for distortion - eliminates the old 4-tap finite difference that
     // called waveHeight 4 times (= 40 wave evaluations per pixel).
     slope = specWaveSlopeFromGrad(waveGrad) * clamp(uSpecNormalStrength, 0.0, 10.0);
     slope *= clamp(uSpecNormalScale, 0.0, 1.0);
   } else if (uSpecNormalMode > 0.5) {
-    // Mode 1: flat/camera-facing normal + smooth procedural micro-normal.
+    // Mode 1: flat/camera-facing normal (simplified - no micro-normal)
     // This avoids the hard-edged artifacts from wave-gradient normals.
-    slope = specMicroSlope2D(sceneUv, uWindTime) * clamp(uSpecMicroStrength, 0.0, 10.0);
+    slope = vec2(0.0, 0.0);
   } else {
     // Mode 0: legacy wave-gradient slope.
     slope = (waveGrad * waveStrength) * clamp(uSpecNormalStrength, 0.0, 10.0);
@@ -2090,6 +2203,16 @@ void main() {
   float foamAmt = clamp(max(shoreFoamAmount, floatingFoam.amount), 0.0, 1.0);
   float shallow01 = clamp(shore, 0.0, 1.0);
   float dynRough = 0.07 * waveTurb01 + 0.11 * shallow01 + 0.08 * foamAmt;
+  
+  // Additional roughness for low sun angles (dawn/dusk)
+  // Prevents sharp glancing highlights when sun is near horizon
+  if (uSpecSunElevationFalloffEnabled > 0.5 && uSpecUseSunAngle > 0.5) {
+    float sunElevationRad = asin(clamp(uSpecSunDir.z, -1.0, 1.0));
+    float sunElevationDeg = sunElevationRad * 57.2957795;
+    float lowSunRough = smoothstep(25.0, 5.0, sunElevationDeg) * 0.3;
+    dynRough += lowSunRough;
+  }
+  
   rough = clamp(rough + dynRough, 0.001, 1.0);
 
   // Spatial roughness variation: patchy "oil/silt/wind" micro-roughness so GGX
@@ -2116,16 +2239,20 @@ void main() {
   float slopeFw = clamp(length(fw), 0.0, 1.0);
   float aa = slopeFw * clamp(uSpecAAStrength, 0.0, 10.0);
   rough = clamp(rough + aa, 0.001, 1.0);
+  // Widen highlight lobe when underlying scene was Kawase-blurred (matches softer bus).
+  rough = mix(rough, clamp(rough * 3.35 + 0.14, 0.001, 0.98), uFloorDepthBlurWaterSoft);
 
   vec3 spec;
   if (uSpecModel > 0.5) {
     // Stable fallback model: Blinn-Phong style specular.
     // This cannot explode like GGX and is useful for debugging.
     float shininess = mix(16.0, 512.0, p01);
+    shininess = mix(shininess, max(5.0, shininess * 0.22), uFloorDepthBlurWaterSoft);
     float blinn = pow(max(NoH, 0.0), shininess);
     float f0 = clamp(uSpecF0, 0.0, 1.0);
     float fres = f0 + (1.0 - f0) * pow(1.0 - VoH, 5.0);
     spec = vec3(blinn * fres) * NoL;
+    spec *= mix(1.0, 0.42, uFloorDepthBlurWaterSoft);
   } else {
     // Default model: GGX microfacet.
     float alpha = max(0.001, rough * rough);
@@ -2141,11 +2268,13 @@ void main() {
     vec3 F = F0 + (1.0 - F0) * pow(1.0 - VoH, 5.0);
 
     vec3 specPrimary = (((D * G) * F) / max(1e-6, 4.0 * NoV * NoL)) * NoL;
+    specPrimary *= mix(1.0, 0.42, uFloorDepthBlurWaterSoft);
 
     // Second broader lobe ("sheen"): adds water-like body on top of mirror glints.
     // Weight is driven by wave turbulence + crestiness; energy is normalized
     // to avoid blowing out specular.
     float sheenW = clamp(0.10 + 0.40 * waveTurb01 + 0.18 * crestMod - 0.08 * shallow01, 0.0, 0.65);
+    sheenW *= mix(1.0, 0.18, uFloorDepthBlurWaterSoft);
     float rough2 = clamp(rough * (1.55 + 0.75 * waveTurb01) + 0.02 + 0.10 * shallow01, 0.001, 1.0);
     float alpha2 = max(0.001, rough2 * rough2);
     float a22 = alpha2 * alpha2;
@@ -2162,7 +2291,7 @@ void main() {
     spec *= 1.0 / (1.0 + sheenW * 0.85);
   }
 
-  // Sun elevation falloff: reduce specular at low sun angles (dawn/dusk)
+  // Sun elevation falloff: dramatically reduce specular at low sun angles (dawn/dusk)
   if (uSpecSunElevationFalloffEnabled > 0.5 && uSpecUseSunAngle > 0.5) {
     // Extract sun elevation from uSpecSunDir.z (normalized, so Z is sin(elevation))
     float sunElevationRad = asin(clamp(uSpecSunDir.z, -1.0, 1.0));
@@ -2176,9 +2305,24 @@ void main() {
     float rangeStart = max(falloffStart, falloffEnd + 0.1);
     float rangeEnd = min(falloffEnd, falloffStart - 0.1);
     
-    // Smoothstep from full specular (above start) to zero (below end)
+    // Much more aggressive falloff curve
     float elevationFactor = smoothstep(rangeEnd, rangeStart, sunElevationDeg);
     elevationFactor = pow(elevationFactor, falloffCurve);
+    
+    // Additional aggressive falloff for very low sun angles
+    // Below 15°, reduce specular dramatically
+    if (sunElevationDeg < 15.0) {
+      float lowSunFactor = smoothstep(0.0, 15.0, sunElevationDeg);
+      lowSunFactor = pow(lowSunFactor, 4.0); // Very steep curve
+      elevationFactor = min(elevationFactor, lowSunFactor);
+    }
+    
+    // Near horizon (below 8°), almost eliminate specular
+    if (sunElevationDeg < 8.0) {
+      float horizonFactor = smoothstep(0.0, 8.0, sunElevationDeg);
+      horizonFactor = pow(horizonFactor, 6.0); // Extremely steep
+      elevationFactor = min(elevationFactor, horizonFactor * 0.1);
+    }
     
     spec *= elevationFactor;
   }
@@ -2227,10 +2371,70 @@ void main() {
   if (sClamp > 0.0) {
     specCol = min(specCol, vec3(sClamp));
   }
+  specCol *= mix(1.0, 0.18, uFloorDepthBlurWaterSoft);
   col += specCol;
 
+  // ── Specular Highlights (additive sharp highlights) ─────────────────────
+  vec3 specHighlightsCol = vec3(0.0);
+  if (uSpecHighlightsEnabled > 0.5) {
+    specHighlightsCol = calculateSpecularHighlights(
+      sceneUv, inside, N, V, L, NoL, NoV, distInside, edgeStability, shore, 
+      waveGrad, rainOffPx, indoorWindMotion, outdoorStrength, sceneLuma, 
+      darkness, combinedShadow, structuralShadow
+    );
+    col += specHighlightsCol;
+  }
+
+  vec3 specBloomAccum = specCol + specHighlightsCol;
+
+  // Subtle ambient shadow for water depth
+  // Reduces brightness in deeper water and adds gentle curvature falloff
+  float waterDepthAmbientMul = 1.0;
+  if (uWaterDepthShadowEnabled > 0.5) {
+    float waterDepth = max(0.0, 1.0 - distInside);
+    float ambientShadow = 1.0 - uWaterDepthShadowStrength * waterDepth * waterDepth;
+    ambientShadow = max(uWaterDepthShadowMinBrightness, ambientShadow);
+    col *= ambientShadow;
+    waterDepthAmbientMul = ambientShadow;
+  }
+  specBloomAccum *= waterDepthAmbientMul;
+
+  // ── Cloud Reflection ───────────────────────────────────────────────────────
+  if (uCloudReflectionEnabled > 0.5 && uHasCloudTopTexture > 0.5) {
+    // Sample the combined cloud tops from CloudEffectV2
+    vec4 cloudTopColor = texture2D(tCloudTopTexture, vUv);
+
+    // Simple Fresnel effect for reflection
+    float fresnel = pow(1.0 - NoV, 3.0);
+    
+    // Calculate reflection strength
+    float reflectionStrength = clamp(uCloudReflectionStrength, 0.0, 1.0);
+    reflectionStrength *= fresnel;
+    
+    // Apply shadow suppression
+    reflectionStrength *= (1.0 - combinedShadow * 0.5);
+    
+    // Indoor damping
+    if (uHasOutdoorsMask > 0.5) {
+      reflectionStrength *= mix(0.1, 1.0, clamp(outdoorStrength, 0.0, 1.0));
+    }
+    
+    // Scene darkness affects reflection
+    reflectionStrength *= mix(1.0, 0.1, clamp(uSceneDarkness, 0.0, 1.0));
+    
+    // Blend cloud reflection with water color
+    col = mix(col, cloudTopColor.rgb, clamp(reflectionStrength * cloudTopColor.a, 0.0, 1.0));
+  }
+
   col = mix(col, base.rgb, occluderBlend);
-  gl_FragColor = vec4(col, base.a);
+  specBloomAccum *= (1.0 - occluderBlend);
+  MSA_BLOOM_RT_COMMIT(specBloomAccum * clamp(uBloomSpecularEmitMul, 0.0, 12.0));
+  // LevelCompositePass is straight-alpha source-over. If we keep output a = base.a,
+  // punched-through tile holes (base.a ≈ 0) zero out premultiplied contribution even
+  // when col holds water — upper-floor holes then show void instead of lower water.
+  float waterOutA = max(base.a, clamp(inside, 0.0, 1.0));
+  waterOutA = mix(waterOutA, base.a, occluderBlend);
+  gl_FragColor = vec4(col, waterOutA);
 }
 `;
 }

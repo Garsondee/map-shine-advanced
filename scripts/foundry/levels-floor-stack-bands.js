@@ -1,36 +1,32 @@
 /**
- * @fileoverview FloorStack band list: align with level navigation (CameraFollower)
- * including synthesized scene background / foreground bands.
+ * @fileoverview FloorStack band list: V14-native authority.
+ *
+ * Reads directly from Foundry's `scene.levels` embedded collection.
+ * Legacy fallback paths (availableLevels, levelsSnapshot) removed — V14 only.
+ *
  * @module foundry/levels-floor-stack-bands
  */
 
+import { readV14SceneLevels, hasV14NativeLevels } from './levels-scene-flags.js';
+
 /**
  * Elevation bands for {@link FloorStack#rebuildFloors}.
- * Prefers `window.MapShine.availableLevels` (merged navigation list) so underground
- * scene-background spans match tile levels inCompositor V2 floor indexing.
+ * V14-only: reads from scene.levels. Returns null for scenes without levels.
  *
- * @returns {Array<{bottom:number,top:number,name:string}>|null}
+ * @returns {Array<{bottom:number,top:number,name:string,levelId:string}>|null}
  */
 export function getSceneBandsForFloorStack() {
-  const nav = window.MapShine?.availableLevels;
-  if (Array.isArray(nav) && nav.length > 0) {
-    const out = [];
-    for (let i = 0; i < nav.length; i += 1) {
-      const lvl = nav[i];
-      const bottom = Number(lvl?.bottom);
-      const top = Number(lvl?.top);
-      if (!Number.isFinite(bottom) || !Number.isFinite(top)) continue;
-      const label = lvl?.label ?? lvl?.levelId;
-      out.push({
-        bottom,
-        top,
-        name: String(label != null && String(label) !== '' ? label : `Level ${i + 1}`),
-      });
-    }
-    if (out.length) return out;
-  }
-  const snap = window.MapShine?.levelsSnapshot?.sceneLevels ?? null;
-  return Array.isArray(snap) && snap.length > 0 ? snap : null;
+  const scene = globalThis.canvas?.scene;
+  if (!hasV14NativeLevels(scene)) return null;
+
+  const native = readV14SceneLevels(scene);
+  if (!native.length) return null;
+
+  return native.map((lvl) => {
+    const bottom = Number.isFinite(lvl.bottom) ? lvl.bottom : 0;
+    const top = Number.isFinite(lvl.top) ? lvl.top : bottom;
+    return { bottom, top, name: lvl.label || lvl.levelId, levelId: lvl.levelId };
+  });
 }
 
 /**

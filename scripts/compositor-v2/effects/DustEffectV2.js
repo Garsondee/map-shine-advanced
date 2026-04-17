@@ -20,7 +20,8 @@ import { createLogger } from '../../core/log.js';
 import { weatherController } from '../../core/WeatherController.js';
 import { probeMaskFile } from '../../assets/loader.js';
 import { tileHasLevelsRange, readTileLevelsFlags } from '../../foundry/levels-scene-flags.js';
-import { OVERLAY_THREE_LAYER } from '../../core/render-layers.js';
+// OVERLAY_THREE_LAYER not needed — dust uses layer 0 only; stacking handled
+// by LayerOrderPolicy FLOOR_EFFECTS band.
 import {
   ParticleSystem as QuarksParticleSystem,
   BatchedRenderer,
@@ -33,11 +34,13 @@ import {
   CurlNoiseField,
 } from '../../libs/three.quarks.module.js';
 
+import {
+  GROUND_Z,
+  effectUnderOverheadOrder,
+} from '../LayerOrderPolicy.js';
+
 const log = createLogger('DustEffectV2');
 
-const GROUND_Z = 1000;
-const RENDER_ORDER_PER_FLOOR = 10000;
-const OVERHEAD_OFFSET = 5000;
 const BUCKET_SIZE = 2200;
 
 const DUST_MASK_FORMATS = ['webp', 'png', 'jpg', 'jpeg'];
@@ -340,11 +343,11 @@ export class DustEffectV2 {
     }
 
     this._batchRenderer = new BatchedRenderer();
-    this._batchRenderer.renderOrder = OVERHEAD_OFFSET - 2;
+    this._batchRenderer.renderOrder = effectUnderOverheadOrder(0, 30);
     this._batchRenderer.frustumCulled = false;
     try {
-      if (this._batchRenderer.layers && typeof this._batchRenderer.layers.enable === 'function') {
-        this._batchRenderer.layers.enable(OVERLAY_THREE_LAYER);
+      if (this._batchRenderer.layers && typeof this._batchRenderer.layers.set === 'function') {
+        this._batchRenderer.layers.set(0);
       }
     } catch (_) {
     }
@@ -497,7 +500,9 @@ export class DustEffectV2 {
   update(timeInfo) {
     if (!this._initialized || !this._batchRenderer || !this._enabled || !this.params.enabled) return;
 
-    const deltaSec = typeof timeInfo?.delta === 'number' ? timeInfo.delta : 0.016;
+    const deltaSec = typeof timeInfo?.motionDelta === 'number'
+      ? timeInfo.motionDelta
+      : (typeof timeInfo?.delta === 'number' ? timeInfo.delta : 0.016);
     const clampedDelta = Math.min(deltaSec, 0.1);
     const simSpeed = (weatherController && typeof weatherController.simulationSpeed === 'number')
       ? weatherController.simulationSpeed : 2.0;
@@ -619,8 +624,7 @@ export class DustEffectV2 {
   _updateBatchRenderOrder(maxFloorIndex) {
     if (!this._batchRenderer) return;
     const safeFloorIndex = Number.isFinite(Number(maxFloorIndex)) ? Number(maxFloorIndex) : 0;
-    const floorBandStart = safeFloorIndex * RENDER_ORDER_PER_FLOOR;
-    this._batchRenderer.renderOrder = floorBandStart + (OVERHEAD_OFFSET - 2);
+    this._batchRenderer.renderOrder = effectUnderOverheadOrder(safeFloorIndex, 30);
   }
 
   _activateFloor(floorIndex) {

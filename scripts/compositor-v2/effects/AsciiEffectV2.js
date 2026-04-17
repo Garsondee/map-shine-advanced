@@ -22,11 +22,14 @@ export class AsciiEffectV2 {
     this._fontTexture2 = null;
     this._lastCharSet = null;
 
-    this._tempResolution = null;
     this._lastGridResolution = null;
     this._lastLineHeight = null;
     this._lastPadX = null;
     this._lastPadY = null;
+    /** @type {number|null} */
+    this._lastGridPixelW = null;
+    /** @type {number|null} */
+    this._lastGridPixelH = null;
 
     this.params = {
       enabled: false,
@@ -75,61 +78,165 @@ export class AsciiEffectV2 {
   static getControlSchema() {
     return {
       enabled: false,
+      help: {
+        title: 'ASCII art',
+        summary: [
+          'Turns the map into letters and symbols, like old computer art or a “hacker” screen. It looks at your picture, picks matching characters, and can gently shuffle them over time.',
+          'Works on the whole finished image. No special map layers needed.',
+          'If letters keep changing, the scene may run a bit more often for smooth motion — turn **Letter shuffle** down to zero for a still image.',
+          'Settings save with the scene (not World Based).',
+        ].join('\n\n'),
+        glossary: {
+          'Grid detail': 'How many letter columns you get — higher means smaller letters.',
+          'Row height': 'How tall each row of letters is.',
+          'Effect strength': 'How much you see the letters versus the normal map.',
+          'Letter shuffle': 'How often letters are re-picked (living / glitchy look).',
+          'Hybrid mode': 'A style that mixes shaded blocks with simple text on top.',
+        },
+      },
+      presetApplyDefaults: true,
       groups: [
         {
-          name: 'settings',
-          label: 'ASCII Settings',
-          type: 'inline',
+          name: 'picture',
+          label: 'Picture',
+          type: 'folder',
+          expanded: true,
           parameters: ['resolution', 'lineHeight', 'opacity'],
         },
         {
-          name: 'glyph',
-          label: 'Glyph Size',
-          type: 'inline',
+          name: 'letterShape',
+          label: 'Letter shape',
+          type: 'folder',
+          expanded: true,
           parameters: ['glyphScaleX', 'glyphScaleY'],
         },
         {
           name: 'spacing',
-          label: 'Cell Spacing',
-          type: 'inline',
+          label: 'Spacing',
+          type: 'folder',
+          expanded: false,
           parameters: ['cellPaddingX', 'cellPaddingY'],
         },
         {
-          name: 'style',
-          label: 'Style',
-          type: 'inline',
+          name: 'look',
+          label: 'Look & motion',
+          type: 'folder',
+          expanded: true,
           parameters: ['charSet', 'color', 'invert', 'churn', 'churnSpeed'],
         },
         {
           name: 'hybrid',
-          label: 'Hybrid Mode',
+          label: 'Hybrid mode',
           type: 'folder',
           expanded: false,
           parameters: ['blockOpacity', 'textOpacity'],
         },
         {
-          name: 'cc',
-          label: 'Correction',
+          name: 'tone',
+          label: 'Brightness & contrast',
           type: 'folder',
-          expanded: true,
+          expanded: false,
           parameters: ['blackPoint', 'whitePoint', 'contrast', 'brightness'],
         },
       ],
       parameters: {
         enabled: { type: 'boolean', default: false, hidden: true },
-        resolution: { type: 'slider', min: 0.05, max: 0.5, step: 0.01, default: 0.12 },
-        lineHeight: { type: 'slider', min: 0.5, max: 4.0, step: 0.1, default: 1.5 },
-        opacity: { type: 'slider', min: 0, max: 1, step: 0.05, default: 0.95 },
-        glyphScaleX: { type: 'slider', min: 0.25, max: 1.5, step: 0.05, default: 1.15 },
-        glyphScaleY: { type: 'slider', min: 0.25, max: 1.5, step: 0.05, default: 0.95 },
-        cellPaddingX: { type: 'slider', min: 0.0, max: 0.45, step: 0.01, default: 0.15 },
-        cellPaddingY: { type: 'slider', min: 0.0, max: 0.45, step: 0.01, default: 0.15 },
-        churn: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.72 },
-        churnSpeed: { type: 'slider', min: 0.25, max: 30.0, step: 0.25, default: 0.75 },
-        color: { type: 'boolean', default: true },
-        invert: { type: 'boolean', default: false },
+        resolution: {
+          type: 'slider',
+          label: 'Grid detail',
+          min: 0.05,
+          max: 0.5,
+          step: 0.01,
+          default: 0.12,
+          tooltip: 'How many letter columns across the screen. Higher means smaller letters and more detail.',
+        },
+        lineHeight: {
+          type: 'slider',
+          label: 'Row height',
+          min: 0.5,
+          max: 4.0,
+          step: 0.1,
+          default: 1.5,
+          tooltip: 'How tall each row is. Higher spreads rows apart and changes the letter shapes.',
+        },
+        opacity: {
+          type: 'slider',
+          label: 'Effect strength',
+          min: 0,
+          max: 1,
+          step: 0.05,
+          default: 0.95,
+          tooltip: 'How strong the letter picture is compared to the normal map underneath.',
+        },
+        glyphScaleX: {
+          type: 'slider',
+          label: 'Letter width',
+          min: 0.25,
+          max: 1.5,
+          step: 0.05,
+          default: 1.15,
+          tooltip: 'Stretch letters wider or narrower inside each cell.',
+        },
+        glyphScaleY: {
+          type: 'slider',
+          label: 'Letter height',
+          min: 0.25,
+          max: 1.5,
+          step: 0.05,
+          default: 0.95,
+          tooltip: 'Stretch letters taller or shorter inside each cell.',
+        },
+        cellPaddingX: {
+          type: 'slider',
+          label: 'Side padding',
+          min: 0.0,
+          max: 0.45,
+          step: 0.01,
+          default: 0.15,
+          tooltip: 'Empty space on the left and right inside each letter box.',
+        },
+        cellPaddingY: {
+          type: 'slider',
+          label: 'Top/bottom padding',
+          min: 0.0,
+          max: 0.45,
+          step: 0.01,
+          default: 0.15,
+          tooltip: 'Empty space above and below inside each letter box.',
+        },
+        churn: {
+          type: 'slider',
+          label: 'Letter shuffle',
+          min: 0.0,
+          max: 1.0,
+          step: 0.01,
+          default: 0.72,
+          tooltip: 'How much letters keep changing. Zero keeps a steady picture.',
+        },
+        churnSpeed: {
+          type: 'slider',
+          label: 'Shuffle speed',
+          min: 0.25,
+          max: 30.0,
+          step: 0.25,
+          default: 0.75,
+          tooltip: 'How fast letters change when shuffle is turned up.',
+        },
+        color: {
+          type: 'boolean',
+          label: 'Keep map colors',
+          default: true,
+          tooltip: 'On: letters keep your map’s colors. Off: gray shades only.',
+        },
+        invert: {
+          type: 'boolean',
+          label: 'Invert light/dark',
+          default: false,
+          tooltip: 'Swap bright and dark areas, like a photo negative.',
+        },
         charSet: {
           type: 'list',
+          label: 'Character style',
           options: {
             Simple: 'simple',
             Detailed: 'detailed',
@@ -138,13 +245,85 @@ export class AsciiEffectV2 {
             'Hybrid (Block+Simple)': 'hybrid',
           },
           default: 'detailed',
+          tooltip: 'Which symbols are used to draw the picture. Hybrid mixes blocks and simple letters.',
         },
-        blockOpacity: { type: 'slider', min: 0, max: 1, step: 0.05, default: 0.4 },
-        textOpacity: { type: 'slider', min: 0, max: 1, step: 0.05, default: 1.0 },
-        blackPoint: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.0 },
-        whitePoint: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.82 },
-        contrast: { type: 'slider', min: 0.0, max: 2.0, step: 0.01, default: 1.66 },
-        brightness: { type: 'slider', min: -0.5, max: 0.5, step: 0.01, default: 0.18 },
+        blockOpacity: {
+          type: 'slider',
+          label: 'Block strength',
+          min: 0,
+          max: 1,
+          step: 0.05,
+          default: 0.4,
+          tooltip: 'For Hybrid style: how strong the shaded block layer is behind the letters.',
+        },
+        textOpacity: {
+          type: 'slider',
+          label: 'Letter strength',
+          min: 0,
+          max: 1,
+          step: 0.05,
+          default: 1.0,
+          tooltip: 'For Hybrid style: how strong the letters are on top of the blocks.',
+        },
+        blackPoint: {
+          type: 'slider',
+          label: 'Shadow depth',
+          min: 0.0,
+          max: 1.0,
+          step: 0.01,
+          default: 0.0,
+          tooltip: 'Treat more of the dark areas as “fully black” before picking letters.',
+        },
+        whitePoint: {
+          type: 'slider',
+          label: 'Highlight point',
+          min: 0.0,
+          max: 1.0,
+          step: 0.01,
+          default: 0.82,
+          tooltip: 'How bright something must be before it counts as a full highlight.',
+        },
+        contrast: {
+          type: 'slider',
+          label: 'Contrast',
+          min: 0.0,
+          max: 2.0,
+          step: 0.01,
+          default: 1.66,
+          tooltip: 'More contrast: shadows and lights look farther apart. Less: flatter, softer.',
+        },
+        brightness: {
+          type: 'slider',
+          label: 'Brightness',
+          min: -0.5,
+          max: 0.5,
+          step: 0.01,
+          default: 0.18,
+          tooltip: 'Lighten or darken the whole picture before it becomes letters.',
+        },
+      },
+      presets: {
+        'Chunky letters': {
+          resolution: 0.07,
+          lineHeight: 1.8,
+          charSet: 'simple',
+          churn: 0.2,
+          churnSpeed: 0.75,
+        },
+        'Fine detail': {
+          resolution: 0.22,
+          lineHeight: 1.35,
+          charSet: 'detailed',
+          churn: 0.35,
+        },
+        'Code rain look': {
+          charSet: 'matrix',
+          color: false,
+          invert: false,
+          churn: 0.85,
+          churnSpeed: 2.5,
+          brightness: 0.05,
+        },
       },
     };
   }
@@ -158,8 +337,6 @@ export class AsciiEffectV2 {
 
     this._quadScene = new THREE.Scene();
     this._quadCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
-
-    this._tempResolution = new THREE.Vector2(1, 1);
 
     this._updateFontTexture(this.params.charSet);
     this._lastCharSet = this.params.charSet;
@@ -241,13 +418,11 @@ export class AsciiEffectV2 {
 
     this._material.uniforms.tDiffuse.value = inputRT.texture;
 
-    if (this._tempResolution) {
-      renderer.getDrawingBufferSize(this._tempResolution);
-      const w = Math.max(1, this._tempResolution.x);
-      const h = Math.max(1, this._tempResolution.y);
-      this._material.uniforms.uResolution.value.set(w, h);
-      this._updateGridSize(w, h);
-    }
+    // Match the texture being sampled (post RT), not the drawing buffer — they can differ (DPR, sizing).
+    const w = Math.max(1, inputRT.width | 0);
+    const h = Math.max(1, inputRT.height | 0);
+    this._material.uniforms.uResolution.value.set(w, h);
+    this._updateGridSize(w, h);
 
     renderer.setRenderTarget(outputRT);
     renderer.autoClear = false;
@@ -293,7 +468,6 @@ export class AsciiEffectV2 {
 
     this._quadScene = null;
     this._quadCamera = null;
-    this._tempResolution = null;
     this._initialized = false;
   }
 
@@ -306,6 +480,8 @@ export class AsciiEffectV2 {
     const padY = this.params.cellPaddingY ?? 0.0;
 
     if (
+      this._lastGridPixelW === width &&
+      this._lastGridPixelH === height &&
       this._lastGridResolution === resolution &&
       this._lastLineHeight === lineHeight &&
       this._lastPadX === padX &&
@@ -321,6 +497,8 @@ export class AsciiEffectV2 {
     const rows = Math.max(1, Math.floor((height * resolution * padScaleY) / lineHeight));
     this._material.uniforms.uGridSize.value.set(cols, rows);
 
+    this._lastGridPixelW = width;
+    this._lastGridPixelH = height;
     this._lastGridResolution = resolution;
     this._lastLineHeight = lineHeight;
     this._lastPadX = padX;
@@ -343,7 +521,9 @@ export class AsciiEffectV2 {
       const ctx = canvas.getContext('2d');
       if (!ctx) return null;
 
-      ctx.clearRect(0, 0, width, height);
+      // Opaque black backing so glyph coverage lives in .rgb; transparent canvas + WebGL alpha upload is unreliable for masks.
+      ctx.fillStyle = '#000000';
+      ctx.fillRect(0, 0, width, height);
       ctx.font = `bold ${fontSize}px monospace`;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
@@ -354,9 +534,11 @@ export class AsciiEffectV2 {
       }
 
       const texture = new THREE.CanvasTexture(canvas);
+      texture.colorSpace = THREE.SRGBColorSpace;
       texture.minFilter = THREE.NearestFilter;
       texture.magFilter = THREE.NearestFilter;
       texture.generateMipmaps = false;
+      texture.premultiplyAlpha = false;
       return texture;
     };
 
@@ -440,6 +622,7 @@ export class AsciiEffectV2 {
       }
 
       void main() {
+        vec4 scenePx = texture2D(tDiffuse, vUv);
         vec2 cellCoord = floor(vUv * uGridSize);
         vec2 cellCenterUV = (cellCoord + 0.5) / uGridSize;
         vec4 texel = texture2D(tDiffuse, cellCenterUV);
@@ -470,14 +653,15 @@ export class AsciiEffectV2 {
 
         vec2 fontUV1 = vec2((charIndex + innerUV.x) / max(uCharCount, 1.0), innerUV.y);
         vec4 fontColor1 = texture2D(tFont, fontUV1);
-        float charMask1 = fontColor1.a;
+        // Atlas is white-on-black; use luminance from RGB (alpha from 2D canvas is often wrong in WebGL uploads).
+        float charMask1 = max(max(fontColor1.r, fontColor1.g), fontColor1.b);
         vec3 baseColor = uColor ? texel.rgb : vec3(1.0);
         vec3 finalColor;
 
         if (uHybrid && uCharCount2 > 0.0) {
           vec2 fontUV2 = vec2((charIndex + innerUV.x) / max(uCharCount2, 1.0), innerUV.y);
           vec4 fontColor2 = texture2D(tFont2, fontUV2);
-          float charMask2 = fontColor2.a;
+          float charMask2 = max(max(fontColor2.r, fontColor2.g), fontColor2.b);
           vec3 blockLayer = baseColor * charMask2 * uBlockOpacity;
           vec3 textLayer = baseColor * charMask1 * uTextOpacity;
           finalColor = blockLayer + textLayer;
@@ -486,10 +670,9 @@ export class AsciiEffectV2 {
         }
 
         if (uOpacity < 1.0) {
-          vec4 original = texture2D(tDiffuse, vUv);
-          gl_FragColor = mix(original, vec4(finalColor, 1.0), uOpacity);
+          gl_FragColor = mix(scenePx, vec4(finalColor, scenePx.a), uOpacity);
         } else {
-          gl_FragColor = vec4(finalColor, 1.0);
+          gl_FragColor = vec4(finalColor, scenePx.a);
         }
       }
     `;

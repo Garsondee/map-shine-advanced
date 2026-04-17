@@ -340,8 +340,8 @@ export class WeatherController {
       lifeMax: 3.85,
       particleSpeedMin: 40,
       particleSpeedMax: 115,
-      sizeMin: 0.28,
-      sizeMax: 0.52,
+      sizeMin: 3.0,
+      sizeMax: 5.5,
       spawnInwardPull: 0.0,
       spawnUvJitter: 0.0,
       emitterNormalJitter: 1.0,
@@ -556,13 +556,75 @@ export class WeatherController {
   setRoofMap(texture) {
     this.roofMap = texture;
     log.info('Roof Map set from _Outdoors texture');
-    
-    if (texture && texture.image) {
-      this._extractRoofMaskData(texture.image);
-    } else {
+
+    if (!texture) {
       this.roofMaskData = null;
       this.roofMaskSize = { width: 0, height: 0 };
       this._disposeRoofDistanceMap();
+      return;
+    }
+    if (texture.image) {
+      this._extractRoofMaskData(texture.image);
+      return;
+    }
+    if (this._extractRoofMaskDataFromGpuOutdoors(texture)) {
+      return;
+    }
+    this.roofMaskData = null;
+    this.roofMaskSize = { width: 0, height: 0 };
+    this._disposeRoofDistanceMap();
+  }
+
+  /**
+   * WebGL RT textures often have no `image`; read red channel via compositor readback.
+   * @param {import('three').Texture} texture
+   * @returns {boolean}
+   * @private
+   */
+  _extractRoofMaskDataFromGpuOutdoors(texture) {
+    try {
+      const comp = window.MapShine?.sceneComposer?._sceneMaskCompositor;
+      if (!comp || typeof comp.getCpuPixelsForFloor !== 'function') return false;
+      let fk = null;
+      try {
+        const af = window.MapShine?.floorStack?.getActiveFloor?.();
+        if (af?.compositorKey != null) fk = String(af.compositorKey);
+      } catch (_) {}
+      if (!fk) fk = comp._activeFloorKey ?? null;
+      if (!fk) return false;
+      const floorTargets = comp._floorCache?.get(fk);
+      const rt = floorTargets?.get?.('outdoors');
+      const srcW = rt?.width ?? 0;
+      const srcH = rt?.height ?? 0;
+      if (srcW < 1 || srcH < 1) return false;
+      const rgba = comp.getCpuPixelsForFloor(fk, 'outdoors');
+      if (!(rgba instanceof Uint8Array) || rgba.length < srcW * srcH * 4) return false;
+
+      let w = srcW;
+      let h = srcH;
+      const maxDim = 1024;
+      if (w > maxDim || h > maxDim) {
+        const scale = maxDim / Math.max(w, h);
+        w = Math.max(1, Math.floor(w * scale));
+        h = Math.max(1, Math.floor(h * scale));
+      }
+      const data = new Uint8Array(w * h);
+      for (let y = 0; y < h; y++) {
+        const sy = Math.min(srcH - 1, Math.floor((y / Math.max(h - 1, 1)) * (srcH - 1)));
+        for (let x = 0; x < w; x++) {
+          const sx = Math.min(srcW - 1, Math.floor((x / Math.max(w - 1, 1)) * (srcW - 1)));
+          const si = (sy * srcW + sx) * 4;
+          data[y * w + x] = rgba[si];
+        }
+      }
+      this.roofMaskData = data;
+      this.roofMaskSize = { width: w, height: h };
+      log.info(`Roof mask data from GPU readback: ${w}x${h} (floor ${fk})`);
+      this._buildRoofDistanceMap();
+      return true;
+    } catch (e) {
+      log.warn('GPU outdoors readback for roof mask failed:', e);
+      return false;
     }
   }
 
@@ -2967,7 +3029,7 @@ export class WeatherController {
         },
         roofDripSizeMin: {
           label: 'Drop Size Min',
-          default: 0.28,
+          default: 3.0,
           min: 0.02,
           max: 8,
           step: 0.02,
@@ -2975,7 +3037,7 @@ export class WeatherController {
         },
         roofDripSizeMax: {
           label: 'Drop Size Max',
-          default: 0.52,
+          default: 5.5,
           min: 0.02,
           max: 12,
           step: 0.02,

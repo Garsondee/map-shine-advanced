@@ -24,7 +24,7 @@
  */
 
 import { createLogger } from '../core/log.js';
-import { tileHasLevelsRange, readTileLevelsFlags } from '../foundry/levels-scene-flags.js';
+import { tileHasLevelsRange, readTileLevelsFlags, resolveV14NativeDocFloorIndexMin } from '../foundry/levels-scene-flags.js';
 import { OVERLAY_THREE_LAYER, GLOBAL_SCENE_LAYER } from '../core/render-layers.js';
 import { elevationInBand, resolveFloorIndexForElevation, rangesOverlap } from '../ui/levels-editor/level-boundaries.js';
 
@@ -277,23 +277,29 @@ export class FloorLayerManager {
     const floors = this._floorStack?.getFloors() ?? [];
     if (floors.length <= 1) return 0;
 
+    const scene = canvas?.scene;
+
+    // Legacy: Levels range flags
     if (tileHasLevelsRange(tileDoc)) {
       const flags = readTileLevelsFlags(tileDoc);
       const tileBottom = Number(flags.rangeBottom);
       const tileTop = Number(flags.rangeTop);
       const tileMid = (tileBottom + tileTop) / 2;
 
-      // Find the best floor by midpoint containment, preferring lower floors.
       const byMid = resolveFloorIndexForElevation(tileMid, floors);
       if (byMid >= 0) return Math.min(byMid, MAX_FLOOR_LAYERS - 1);
 
-      // Fallback: first floor whose band overlaps the tile range.
       for (let i = 0; i < floors.length; i++) {
         const f = floors[i];
         if (rangesOverlap(tileBottom, tileTop, f.elevationMin, f.elevationMax)) {
           return Math.min(i, MAX_FLOOR_LAYERS - 1);
         }
       }
+    }
+
+    const v14TileIdx = resolveV14NativeDocFloorIndexMin(tileDoc, scene);
+    if (v14TileIdx !== null) {
+      return Math.min(v14TileIdx, MAX_FLOOR_LAYERS - 1);
     }
 
     // No Levels range: use tile elevation.
@@ -313,6 +319,11 @@ export class FloorLayerManager {
   _resolveTokenFloorIndex(tokenDoc) {
     const floors = this._floorStack?.getFloors() ?? [];
     if (floors.length <= 1) return 0;
+
+    const v14Idx = resolveV14NativeDocFloorIndexMin(tokenDoc, canvas?.scene);
+    if (v14Idx !== null) {
+      return Math.min(v14Idx, MAX_FLOOR_LAYERS - 1);
+    }
 
     const rawElev = tokenDoc?.elevation ?? tokenDoc?.document?.elevation ?? 0;
     const elev = Number.isFinite(Number(rawElev)) ? Number(rawElev) : 0;

@@ -416,7 +416,9 @@ export class LightInteractionHandler {
       const g = this._im._lightTranslate?.group;
       if (!g) return;
 
-      const showGizmo = window.MapShine?.tweakpaneManager?.globalParams?.showLightTranslateGizmo ?? true;
+      const showGizmo = window.MapShine?.uiManager?.globalParams?.showLightTranslateGizmo
+        ?? window.MapShine?.tweakpaneManager?.globalParams?.showLightTranslateGizmo
+        ?? true;
       if (!showGizmo) {
         g.visible = false;
         return;
@@ -536,7 +538,9 @@ export class LightInteractionHandler {
       // 3D gizmo is disabled; we use the HTML slider overlay instead.
       g.visible = false;
 
-      const showRings = window.MapShine?.tweakpaneManager?.globalParams?.showLightRadiusRings ?? true;
+      const showRings = window.MapShine?.uiManager?.globalParams?.showLightRadiusRings
+        ?? window.MapShine?.tweakpaneManager?.globalParams?.showLightRadiusRings
+        ?? true;
       if (!showRings) {
         g.visible = false;
         return;

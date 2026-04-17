@@ -466,7 +466,7 @@ export class TokenMovementManager {
         const hit = moveBackend.testCollision(rayA, rayB, {
           type: 'move',
           mode: 'all',
-          wallDirectionMode: 0,
+          edgeDirectionMode: CONST.EDGE_DIRECTION_MODES.NORMAL,
           useThreshold: true
         });
         const details = this._collectBlockingWallDetailsFromHit(hit, elevation);
@@ -5105,7 +5105,7 @@ export class TokenMovementManager {
     // MS-LVL-073: useThreshold enables proximity/distance wall evaluation so
     //   WALL_SENSE_TYPES.PROXIMITY (30) and DISTANCE (40) walls are conditionally
     //   bypassed based on source-to-wall distance instead of always blocking.
-    // MS-LVL-074: wallDirectionMode uses numeric 0 (NORMAL) so one-way walls
+    // MS-LVL-074: edgeDirectionMode NORMAL so one-way edges
     //   are respected during pathfinding. Only 'move' type is tested for physical
     //   movement collision — sight/light are for vision, not movement. Terrain
     //   walls (LIMITED sense type) are handled natively by Foundry's move backend.
@@ -5125,7 +5125,7 @@ export class TokenMovementManager {
             type: 'move',
             source: tokenObj,
             token: tokenObj,
-            wallDirectionMode: 0,   // NORMAL — respect one-way wall direction
+            edgeDirectionMode: CONST.EDGE_DIRECTION_MODES.NORMAL,
             useThreshold: true      // MS-LVL-073: evaluate proximity/distance walls
           });
           if (!hit) continue;
@@ -5156,7 +5156,7 @@ export class TokenMovementManager {
             type: 'move',
             source: tokenObj,
             token: tokenObj,
-            wallDirectionMode: 0,
+            edgeDirectionMode: CONST.EDGE_DIRECTION_MODES.NORMAL,
             useThreshold: true
           });
           const allHitDetails = this._collectBlockingWallDetailsFromHit(allHits, collisionElevation);
@@ -5207,7 +5207,7 @@ export class TokenMovementManager {
               type: 'move',
               source: tokenObj,
               token: tokenObj,
-              wallDirectionMode: 0,
+              edgeDirectionMode: CONST.EDGE_DIRECTION_MODES.NORMAL,
               useThreshold: true
             });
             const probeDetails = this._collectBlockingWallDetailsFromHit(probeHits, collisionElevation);

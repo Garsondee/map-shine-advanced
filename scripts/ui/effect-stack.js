@@ -822,9 +822,8 @@ export class EffectStackUI {
     const secOverhead = makeSection('overhead', 'Overhead Tiles');
     const secRoof = makeSection('roof', 'Roof Tiles');
 
-    const fgElev = Number.isFinite(canvas?.scene?.foregroundElevation)
-      ? canvas.scene.foregroundElevation
-      : Number.POSITIVE_INFINITY;
+    const fgTop = Number(canvas?.level?.elevation?.top);
+    const fgElev = Number.isFinite(fgTop) ? fgTop : Number.POSITIVE_INFINITY;
 
     const basePaths = Array.from(new Set(
       tiles

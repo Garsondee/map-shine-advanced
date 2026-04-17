@@ -22,7 +22,7 @@
  */
 
 import { createLogger } from '../core/log.js';
-import { tileHasLevelsRange, readTileLevelsFlags } from '../foundry/levels-scene-flags.js';
+import { tileHasLevelsRange, readTileLevelsFlags, hasV14NativeLevels, isDocMemberOfV14LevelSet } from '../foundry/levels-scene-flags.js';
 import { elevationInBand, rangesOverlap } from '../ui/levels-editor/level-boundaries.js';
 
 const log = createLogger('FloorStack');
@@ -43,6 +43,7 @@ const DEFAULT_FALLBACK_TOP = 10;
  * @property {string} key          - Stable string key: `floor_${index}_${elevationMin}`
  * @property {string} compositorKey - Key matching GpuSceneMaskCompositor: `"${bottom}:${top}"`
  * @property {boolean} isActive    - Whether this is the player's current floor
+ * @property {string|null} [levelId] - Foundry V14 native Level document id (when known)
  */
 
 // ─── FloorStack ───────────────────────────────────────────────────────────────
@@ -124,6 +125,7 @@ export class FloorStack {
         // Matches GpuSceneMaskCompositor._floorMeta key format used in composeFloor().
         compositorKey: `${band.bottom ?? ''}:${band.top ?? ''}`,
         isActive: false,
+        levelId: (band && band.levelId) ? String(band.levelId) : null,
       }));
     } else {
       // No valid scene level bands: use a deterministic default floor so
@@ -135,6 +137,7 @@ export class FloorStack {
         key: 'floor_0_default',
         compositorKey: `${DEFAULT_FALLBACK_BOTTOM}:${DEFAULT_FALLBACK_TOP}`,
         isActive: true,
+        levelId: null,
       }];
     }
 
@@ -327,6 +330,13 @@ export class FloorStack {
       return true;
     }
 
+    const scene = globalThis.canvas?.scene;
+    if (floor.levelId && hasV14NativeLevels(scene)) {
+      const td = tileDoc?.document ?? tileDoc;
+      if (!td) return false;
+      return isDocMemberOfV14LevelSet(td, floor.levelId);
+    }
+
     if (tileHasLevelsRange(tileDoc)) {
       // Tile has explicit Levels range: check overlap with floor band.
       const flags = readTileLevelsFlags(tileDoc);
@@ -356,6 +366,15 @@ export class FloorStack {
     // Single-floor fallback: all tokens belong to floor 0.
     if (this._floors.length <= 1) {
       return true;
+    }
+
+    const scene = globalThis.canvas?.scene;
+    if (floor.levelId && hasV14NativeLevels(scene)) {
+      const td = tokenDoc?.document ?? tokenDoc;
+      if (!td) return false;
+      // isDocMemberOfV14LevelSet checks td.level (singular) for tokens and
+      // td.levels (Set) for other document types — handles both correctly.
+      return isDocMemberOfV14LevelSet(td, floor.levelId);
     }
 
     // Token elevation can be on the root doc or under `.document`

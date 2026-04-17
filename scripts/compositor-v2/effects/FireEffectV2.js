@@ -7,11 +7,14 @@
  * contracts/wiring for `FireEffectV2` to prevent silent failures.
  *
  * Architecture:
- *   Owns a three.quarks BatchedRenderer added to the FloorRenderBus scene.
+ *   One three.quarks BatchedRenderer per floor that has fire, each registered on
+ *   the FloorRenderBus with that floor's index (overlay keys use ms_fire_batch_* —
+ *   keys starting with "__" are treated like backgrounds in renderFloorRangeTo and
+ *   never get floor-range culling). FloorDepthBlurEffect then only draws fire for the
+ *   floor pass that matches that index.
  *   For each tile with a `_Fire` mask, scans the mask on the CPU to build spawn
- *   point lists, then creates fire + ember + smoke particle systems. Systems are
- *   grouped by floor index. Floor isolation is achieved by swapping active
- *   systems in/out of the BatchedRenderer on floor change.
+ *   point lists, then creates fire + ember + smoke particle systems. Floor
+ *   isolation for simulation uses swapping active systems in/out per batch on floor change.
  *
  * V1 → V2 cleanup:
  *   - No EffectMaskRegistry / GpuSceneMaskCompositor (masks loaded per tile)
@@ -52,19 +55,20 @@ import {
   Bezier,
 } from '../../libs/three.quarks.module.js';
 
+import {
+  GROUND_Z,
+  RENDER_ORDER_PER_FLOOR,
+  effectUnderOverheadOrder,
+} from '../LayerOrderPolicy.js';
+
 const log = createLogger('FireEffectV2');
-
-// Ground Z for the bus scene (matches FloorRenderBus GROUND_Z).
-const GROUND_Z = 1000;
-
-// Keep render-order math aligned with FloorRenderBus floor bands.
-const RENDER_ORDER_PER_FLOOR = 10000;
-const OVERHEAD_OFFSET = 5000;
-const FIRE_RENDER_ORDER_BASE = OVERHEAD_OFFSET - 4;
-const FIRE_RENDER_ORDER_ABOVE_OVERHEAD_BASE = 9955;
 
 // Spatial bucket size for splitting large fire masks into smaller emitters (px).
 const BUCKET_SIZE = 2000;
+
+// Must NOT start with "__" — FloorRenderBus.renderFloorRangeTo treats "__*" keys like
+// background planes (visibility = includeBackground only), ignoring floorIndex.
+const FIRE_BATCH_OVERLAY_PREFIX = 'ms_fire_batch_';
 
 const FIRE_MASK_FORMATS = ['webp', 'png', 'jpg', 'jpeg'];
 const REBUILD_PARAM_KEYS = [
@@ -90,12 +94,9 @@ export class FireEffectV2 {
     // Key: basePathWithSuffix (no extension). Value: { url, image } or null when missing.
     this._directMaskCache = new Map();
 
-    /** @type {BatchedRenderer|null} three.quarks batch renderer */
-    this._batchRenderer = null;
-
     /**
      * Per-floor cached system sets. Key: floorIndex.
-     * Value: { systems: QuarksParticleSystem[], emberSystems: [], smokeSystems: [] }
+     * Value: { systems, emberSystems, smokeSystems, batchRenderer }
      * @type {Map<number, object>}
      */
     this._floorStates = new Map();
@@ -220,6 +221,17 @@ export class FireEffectV2 {
     if (this.params && Object.prototype.hasOwnProperty.call(this.params, 'enabled')) {
       this.params.enabled = this._enabled;
     }
+  }
+
+  /**
+   * Diagnostics / HealthEvaluator: first non-null per-floor BatchedRenderer.
+   * @returns {BatchedRenderer|null}
+   */
+  get _batchRenderer() {
+    for (const [, st] of this._floorStates) {
+      if (st?.batchRenderer) return st.batchRenderer;
+    }
+    return null;
   }
 
   /**
@@ -352,23 +364,7 @@ export class FireEffectV2 {
     const THREE = window.THREE;
     if (!THREE) { log.warn('initialize: THREE not available'); return; }
 
-    // Create a dedicated BatchedRenderer for V2 fire particles.
-    this._batchRenderer = new BatchedRenderer();
-    // IMPORTANT (V2): FloorRenderBus tiles use very large renderOrder values
-    // (floorIndex * 10000 + sort). If we keep the quarks renderer at ~50 it will
-    // render BEFORE tiles and get fully overwritten by tile draws.
-    // Fire should sit under overhead tiles by default, but above regular tiles
-    // on the active floor band.
-    this._batchRenderer.renderOrder = OVERHEAD_OFFSET - 1;
-    this._batchRenderer.frustumCulled = false;
-    // Keep fire strictly in the main world pass (layer 0). If this object is also
-    // on OVERLAY_THREE_LAYER it gets drawn again in FloorCompositor's late overlay
-    // pass, which makes ground fire appear above overhead tiles.
-    try {
-      if (this._batchRenderer.layers && typeof this._batchRenderer.layers.set === 'function') {
-        this._batchRenderer.layers.set(0);
-      }
-    } catch (_) {}
+    // BatchedRenderers are created per floor in _buildFloorSystems (populate).
 
     // Start loading sprite textures (populate() will await this).
     this._texturesReady = this._loadTextures();
@@ -536,15 +532,11 @@ export class FireEffectV2 {
       );
       this._floorStates.set(floorIndex, state);
       totalSystems += state.systems.length + state.emberSystems.length + state.smokeSystems.length;
-    }
-
-    // Add the BatchedRenderer to the bus scene so it renders in the same pass.
-    // We add it directly to the bus's internal scene via the overlay API.
-    // The batch renderer is a single mesh — we register it at floor 0 but
-    // manage its content (active systems) ourselves on floor change.
-    if (this._batchRenderer) {
-      this._renderBus.addEffectOverlay('__fire_batch__', this._batchRenderer, 0);
-      log.info(`FireEffectV2: BatchedRenderer added to bus scene, parent=${this._batchRenderer.parent?.type}`);
+      if (state.batchRenderer) {
+        const key = `${FIRE_BATCH_OVERLAY_PREFIX}${floorIndex}`;
+        this._renderBus.addEffectOverlay(key, state.batchRenderer, floorIndex);
+        log.info(`FireEffectV2: ${key} added to bus (floor ${floorIndex}), parent=${state.batchRenderer.parent?.type}`);
+      }
     }
 
     // Activate the current floor's systems.
@@ -569,7 +561,7 @@ export class FireEffectV2 {
    * @param {{ elapsed: number, delta: number }} timeInfo
    */
   update(timeInfo) {
-    if (!this._initialized || !this._batchRenderer || !this._enabled) return;
+    if (!this._initialized || !this._enabled) return;
 
     // Step WeatherController so weather state is current.
     try {
@@ -582,7 +574,9 @@ export class FireEffectV2 {
     } catch (_) {}
 
     // Compute dt for three.quarks (matches V1 time scaling).
-    const deltaSec = typeof timeInfo.delta === 'number' ? timeInfo.delta : 0.016;
+    const deltaSec = typeof timeInfo?.motionDelta === 'number'
+      ? timeInfo.motionDelta
+      : (typeof timeInfo?.delta === 'number' ? timeInfo.delta : 0.016);
     const clampedDelta = Math.min(deltaSec, 0.1);
     const simSpeed = (weatherController && typeof weatherController.simulationSpeed === 'number')
       ? weatherController.simulationSpeed : 2.0;
@@ -591,11 +585,13 @@ export class FireEffectV2 {
     // Update per-frame emission rates based on params.
     this._updateSystemParams();
 
-    // Step the BatchedRenderer.
-    try {
-      this._batchRenderer.update(dt);
-    } catch (err) {
-      log.warn('FireEffectV2: BatchedRenderer.update threw, skipping frame:', err);
+    for (const [, st] of this._floorStates) {
+      if (!st.batchRenderer) continue;
+      try {
+        st.batchRenderer.update(dt);
+      } catch (err) {
+        log.warn('FireEffectV2: BatchedRenderer.update threw, skipping frame:', err);
+      }
     }
   }
 
@@ -639,14 +635,14 @@ export class FireEffectV2 {
     }
     this._activeFloors.clear();
 
-    // Dispose all floor states.
+    const floorIds = [...this._floorStates.keys()];
+    for (const f of floorIds) {
+      this._renderBus.removeEffectOverlay(`${FIRE_BATCH_OVERLAY_PREFIX}${f}`);
+    }
     for (const [, state] of this._floorStates) {
       this._disposeFloorState(state);
     }
     this._floorStates.clear();
-
-    // Remove batch renderer from bus.
-    this._renderBus.removeEffectOverlay('__fire_batch__');
 
     this._structuralSignature = '';
   }
@@ -657,7 +653,6 @@ export class FireEffectV2 {
     this._emberTexture?.dispose();
     this._fireTexture = null;
     this._emberTexture = null;
-    this._batchRenderer = null;
     this._initialized = false;
     log.info('FireEffectV2 disposed');
   }
@@ -665,14 +660,34 @@ export class FireEffectV2 {
   // ── Private: System building ───────────────────────────────────────────────
 
   /**
+   * @param {number} floorIndex
+   * @returns {BatchedRenderer}
+   * @private
+   */
+  _createBatchedRendererForFloor(floorIndex) {
+    const br = new BatchedRenderer();
+    br.frustumCulled = false;
+    br.renderOrder = effectUnderOverheadOrder(floorIndex, 0);
+    try {
+      if (br.layers && typeof br.layers.set === 'function') {
+        br.layers.set(0);
+      }
+    } catch (_) {}
+    return br;
+  }
+
+  /**
    * Build fire + ember + smoke systems from merged points for a single floor.
    * Points are spatially bucketed for culling efficiency.
    * @private
    */
   _buildFloorSystems(points, sceneW, sceneH, sceneX, sceneY, floorIndex) {
-    const state = { systems: [], emberSystems: [], smokeSystems: [] };
     const totalCount = points.length / 3;
-    if (totalCount === 0) return state;
+    if (totalCount === 0) {
+      return { systems: [], emberSystems: [], smokeSystems: [], batchRenderer: null };
+    }
+    const batchRenderer = this._createBatchedRendererForFloor(floorIndex);
+    const state = { systems: [], emberSystems: [], smokeSystems: [], batchRenderer };
 
     // Spatial bucketing.
     const buckets = new Map();
@@ -958,35 +973,35 @@ export class FireEffectV2 {
     this.onFloorChange(maxFloorIndex);
   }
 
-  /** Keep batched particle draw order aligned with the active floor band. @private */
-  _updateBatchRenderOrder(maxFloorIndex) {
-    if (!this._batchRenderer) return;
-    const safeFloorIndex = Number.isFinite(Number(maxFloorIndex)) ? Number(maxFloorIndex) : 0;
-    const floorBandStart = safeFloorIndex * RENDER_ORDER_PER_FLOOR;
-    // Upper-floor fire should sit above same-floor overhead tiles so it cannot
-    // appear visually "under" the active upper level.
-    const base = safeFloorIndex > 0 ? FIRE_RENDER_ORDER_ABOVE_OVERHEAD_BASE : (OVERHEAD_OFFSET - 1);
-    this._batchRenderer.renderOrder = floorBandStart + base;
+  /**
+   * Keep each floor's BatchedRenderer mesh sort band aligned with that floor's tiles.
+   * @param {number} _maxFloorIndex - retained for call-site compatibility (unused)
+   * @private
+   */
+  _updateBatchRenderOrder(_maxFloorIndex) {
+    for (const f of this._floorStates.keys()) {
+      const state = this._floorStates.get(f);
+      if (!state?.batchRenderer) continue;
+      state.batchRenderer.renderOrder = effectUnderOverheadOrder(Number(f) || 0, 0);
+    }
   }
 
   /**
    * Compute particle-system render order within a floor band.
-   * Must stay below OVERHEAD_OFFSET so ground fire cannot sort above roof tiles.
+   * Uses FLOOR_EFFECTS role so fire always sits between albedo and overhead.
    * @private
    */
   _computeParticleRenderOrder(floorIndex, typeOffset = 0) {
-    const safeFloorIndex = Number.isFinite(Number(floorIndex)) ? Number(floorIndex) : 0;
-    const floorBandStart = safeFloorIndex * RENDER_ORDER_PER_FLOOR;
     const safeTypeOffset = Math.max(0, Math.min(2, Number(typeOffset) || 0));
-    const base = safeFloorIndex > 0 ? FIRE_RENDER_ORDER_ABOVE_OVERHEAD_BASE : FIRE_RENDER_ORDER_BASE;
-    return floorBandStart + base + safeTypeOffset;
+    return effectUnderOverheadOrder(floorIndex, safeTypeOffset);
   }
 
-  /** Add a floor's systems to the BatchedRenderer + scene. @private */
+  /** Add a floor's systems to that floor's BatchedRenderer + scene. @private */
   _activateFloor(floorIndex) {
     const state = this._floorStates.get(floorIndex);
-    if (!state || !this._batchRenderer) {
-      log.warn(`FireEffectV2: _activateFloor(${floorIndex}) failed - state=${!!state}, batchRenderer=${!!this._batchRenderer}`);
+    const br = state?.batchRenderer;
+    if (!state || !br) {
+      log.warn(`FireEffectV2: _activateFloor(${floorIndex}) failed - state=${!!state}, batchRenderer=${!!br}`);
       return;
     }
 
@@ -995,7 +1010,7 @@ export class FireEffectV2 {
     
     for (const sys of allSystems) {
       try { 
-        this._batchRenderer.addSystem(sys);
+        br.addSystem(sys);
       } catch (err) {
         log.warn(`  addSystem() failed:`, err);
       }
@@ -1005,7 +1020,7 @@ export class FireEffectV2 {
       // private scene reference.
       if (sys.emitter) {
         try {
-          this._batchRenderer.add(sys.emitter);
+          br.add(sys.emitter);
         } catch (err) {
           log.warn(`  Failed to add emitter:`, err);
         }
@@ -1013,29 +1028,30 @@ export class FireEffectV2 {
     }
   }
 
-  /** Remove a specific floor's systems from the BatchedRenderer. @private */
+  /** Remove a specific floor's systems from its BatchedRenderer. @private */
   _deactivateFloor(floorIndex) {
-    if (!this._batchRenderer) return;
     const state = this._floorStates.get(floorIndex);
-    if (!state) return;
+    const br = state?.batchRenderer;
+    if (!br) return;
 
     const allSystems = [...state.systems, ...state.emberSystems, ...state.smokeSystems];
     for (const sys of allSystems) {
-      try { this._batchRenderer.deleteSystem(sys); } catch (_) {}
-      if (sys.emitter) this._batchRenderer.remove(sys.emitter);
+      try { br.deleteSystem(sys); } catch (_) {}
+      if (sys.emitter) br.remove(sys.emitter);
     }
     log.debug(`FireEffectV2: deactivated floor ${floorIndex}`);
   }
 
   /** Dispose all systems in a floor state. @private */
   _disposeFloorState(state) {
+    const br = state.batchRenderer;
     const allSystems = [...state.systems, ...state.emberSystems, ...state.smokeSystems];
     for (const sys of allSystems) {
       try {
-        if (this._batchRenderer) this._batchRenderer.deleteSystem(sys);
+        if (br) br.deleteSystem(sys);
       } catch (_) {}
-      if (sys.emitter && this._batchRenderer) {
-        this._batchRenderer.remove(sys.emitter);
+      if (sys.emitter && br) {
+        br.remove(sys.emitter);
       }
       // Dispose material.
       try { sys.material?.dispose(); } catch (_) {}
@@ -1043,6 +1059,7 @@ export class FireEffectV2 {
     state.systems.length = 0;
     state.emberSystems.length = 0;
     state.smokeSystems.length = 0;
+    state.batchRenderer = null;
   }
 
   // ── Private: Per-frame param sync ──────────────────────────────────────────
@@ -1217,44 +1234,30 @@ export class FireEffectV2 {
 
   // ── Private: Floor resolution ──────────────────────────────────────────────
 
-  /** Same logic as SpecularEffectV2 and FloorRenderBus. @private */
+  /**
+   * Must match FloorRenderBus._resolveFloorIndex exactly so _Fire buckets share
+   * the same floor band as albedo tiles (floor-depth blur culling depends on it).
+   * @private
+   */
   _resolveFloorIndex(tileDoc, floors) {
     if (!floors || floors.length <= 1) return 0;
+
     if (tileHasLevelsRange(tileDoc)) {
       const flags = readTileLevelsFlags(tileDoc);
       const tileBottom = Number(flags.rangeBottom);
       const tileTop = Number(flags.rangeTop);
-      const topFinite = Number.isFinite(tileTop);
-      const tileMid = topFinite ? ((tileBottom + tileTop) / 2) : tileBottom;
+      const tileMid = (tileBottom + tileTop) / 2;
 
-      // Prefer anchoring by the tile's bottom elevation (Levels-authoritative).
-      // This avoids misrouting open-ended ranges and boundary-aligned ranges to
-      // the lower floor band.
-      if (Number.isFinite(tileBottom)) {
-        for (let i = 0; i < floors.length; i++) {
-          const f = floors[i];
-          const isLast = i === floors.length - 1;
-          if (tileBottom >= f.elevationMin && (tileBottom < f.elevationMax || (isLast && tileBottom <= f.elevationMax))) {
-            return i;
-          }
-        }
+      for (let i = 0; i < floors.length; i++) {
+        const f = floors[i];
+        if (tileMid >= f.elevationMin && tileMid < f.elevationMax) return i;
       }
-
-      if (Number.isFinite(tileMid)) {
-        for (let i = 0; i < floors.length; i++) {
-          const f = floors[i];
-          const isLast = i === floors.length - 1;
-          if (tileMid >= f.elevationMin && (tileMid < f.elevationMax || (isLast && tileMid <= f.elevationMax))) {
-            return i;
-          }
-        }
-      }
-
       for (let i = 0; i < floors.length; i++) {
         const f = floors[i];
         if (tileBottom <= f.elevationMax && f.elevationMin <= tileTop) return i;
       }
     }
+
     const elev = Number.isFinite(Number(tileDoc?.elevation)) ? Number(tileDoc.elevation) : 0;
     for (let i = 0; i < floors.length; i++) {
       const f = floors[i];

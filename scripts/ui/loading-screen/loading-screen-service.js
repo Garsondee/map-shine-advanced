@@ -249,6 +249,35 @@ class LoadingScreenService {
   showDebugDismiss(callback) { this._active().showDebugDismiss?.(callback); }
   getElapsedSeconds() { return this._active().getElapsedSeconds?.() ?? 0; }
 
+  /**
+   * Surface a load failure through the loading UI so users see what went wrong
+   * instead of a stuck overlay.
+   *
+   * @param {string} reason - Human-readable failure reason
+   * @param {Object} [diagnostics] - LoadCoordinator diagnostic snapshot
+   */
+  surfaceLoadFailure(reason, diagnostics) {
+    try {
+      const active = this._active();
+      const msg = `Load failed: ${reason}`;
+      active.setStage?.('final', 1.0, msg, { immediate: true });
+      if (diagnostics) {
+        const lines = [
+          `State: ${diagnostics.state}`,
+          `Scene: ${diagnostics.sceneName ?? diagnostics.sceneId ?? 'unknown'}`,
+          `Uptime: ${diagnostics.stateAgeMs ?? 0}ms`,
+        ];
+        for (const line of lines) {
+          active.appendDebugLine?.(line);
+        }
+      }
+      active.fadeIn?.(500)?.catch?.(() => {});
+    } catch (_) {
+      // Last resort: try to dismiss anyway
+      try { this._active().hide?.(); } catch (__) {}
+    }
+  }
+
   _renderer() {
     return this.shouldHandleLoading() ? this._activeRenderer : this.noop;
   }

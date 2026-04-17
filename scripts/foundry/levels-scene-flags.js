@@ -1,12 +1,382 @@
 /**
- * @fileoverview Helpers for reading and normalizing Levels scene/tile/doc flag payloads.
+ * @fileoverview Helpers for reading scene level data.
  *
- * All flag reading is gated on the Levels compatibility mode — when mode is
- * 'off', every reader returns safe defaults so the rest of the codebase never
- * needs to check the mode itself.
+ * V14-native path: reads directly from `scene.levels` (EmbeddedCollection of
+ * Level documents). Legacy flag readers are retained as migration/fallback
+ * helpers only and are no longer authoritative at runtime.
  */
 
-import { getLevelsCompatibilityMode, LEVELS_COMPATIBILITY_MODES } from './levels-compatibility.js';
+// ---------------------------------------------------------------------------
+//  V14-native scene level readers
+// ---------------------------------------------------------------------------
+
+/**
+ * @typedef {object} V14LevelBand
+ * @property {string} levelId       - Native Level document ID
+ * @property {number} index         - Level sort index assigned during scene prep
+ * @property {string} label         - Display name
+ * @property {number} bottom        - Elevation band bottom (grid units, may be -Infinity)
+ * @property {number} top           - Elevation band top (grid units, may be Infinity)
+ * @property {number} center        - Midpoint (or base elevation when bounds are infinite)
+ * @property {boolean} isView       - Currently viewed level
+ * @property {boolean} isVisible    - Visible in current view stack
+ * @property {'v14-native'} source  - Always 'v14-native'
+ */
+
+/**
+ * Read V14 native Level documents from a scene and return them as Map Shine
+ * band objects. This is the primary floor authority for V14-only builds.
+ *
+ * @param {Scene|null|undefined} scene
+ * @returns {V14LevelBand[]}
+ */
+export function readV14SceneLevels(scene) {
+  if (!scene?.levels?.size) return [];
+  const sorted = scene.levels.sorted;
+  if (!sorted?.length) return [];
+
+  return sorted.map((level) => {
+    const bottom = level.elevation?.bottom ?? -Infinity;
+    const top = level.elevation?.top ?? Infinity;
+    const finiteBottom = Number.isFinite(bottom) ? bottom : 0;
+    const finiteTop = Number.isFinite(top) ? top : finiteBottom;
+    const center = (finiteBottom + finiteTop) * 0.5;
+    return {
+      levelId: level.id,
+      index: level.index ?? 0,
+      label: level.name || `Level ${(level.index ?? 0) + 1}`,
+      bottom,
+      top,
+      center,
+      isView: !!level.isView,
+      isVisible: !!level.isVisible,
+      source: 'v14-native',
+    };
+  });
+}
+
+/**
+ * Check whether a scene has V14 native levels configured.
+ * @param {Scene|null|undefined} scene
+ * @returns {boolean}
+ */
+export function hasV14NativeLevels(scene) {
+  return (scene?.levels?.size ?? 0) > 0;
+}
+
+/**
+ * Strip query/hash for stable asset URL comparison (Foundry / CDN may append tokens).
+ * @param {string} s
+ * @returns {string}
+ */
+export function normalizeFoundryAssetUrlKey(s) {
+  if (!s || typeof s !== 'string') return '';
+  try {
+    const u = new URL(s, globalThis.location?.origin || 'http://localhost');
+    let p = `${u.pathname || ''}`.toLowerCase();
+    const q = u.searchParams;
+    const v = q.get('v');
+    if (v) p += `?v=${v}`;
+    return p;
+  } catch (_) {
+    return s.split('?')[0].split('#')[0].trim().toLowerCase();
+  }
+}
+
+/**
+ * Resolve the current viewed level document from authoritative Foundry signals.
+ * Priority:
+ * 1) `canvas.level.id` — Level the canvas is **actually rendering** (authoritative on cold load;
+ *    `scene._view` can still point at the previous band until Foundry commits the redraw).
+ * 2) `scene._view` — persisted Scene document field once committed.
+ * 3) `canvas._viewOptions.level` — pending same-scene redraw target; can disagree with `canvas.level`
+ *    during transitions, so keep it after live `canvas.level`.
+ * 4) native `isView` flags as a last resort.
+ *
+ * @param {Scene|null|undefined} scene
+ * @returns {any|null}
+ */
+function _resolveViewedV14LevelDoc(scene) {
+  if (!scene?.levels?.size) return null;
+
+  const tried = new Set();
+  const tryLevelId = (levelId) => {
+    const id = typeof levelId === 'string' ? levelId.trim() : '';
+    if (!id || tried.has(id)) return null;
+    tried.add(id);
+    try {
+      return scene.levels.get(id) ?? null;
+    } catch (_) {
+      return null;
+    }
+  };
+
+  let level = null;
+
+  try {
+    level = tryLevelId(globalThis.canvas?.level?.id);
+    if (level) return level;
+  } catch (_) {}
+
+  level = tryLevelId(scene?._view);
+  if (level) return level;
+
+  try {
+    level = tryLevelId(globalThis.canvas?._viewOptions?.level);
+    if (level) return level;
+  } catch (_) {}
+
+  try {
+    const sorted = scene.levels.sorted;
+    if (sorted?.length) return sorted.find((l) => l?.isView) ?? null;
+  } catch (_) {}
+
+  return null;
+}
+
+/**
+ * Get the currently viewed V14 Level document for a scene.
+ * @param {Scene|null|undefined} scene
+ * @returns {{levelId:string, index:number, label:string, bottom:number, top:number, center:number}|null}
+ */
+export function getViewedV14Level(scene) {
+  const level = _resolveViewedV14LevelDoc(scene);
+  if (!level) return null;
+  const bottom = level.elevation?.bottom ?? -Infinity;
+  const top = level.elevation?.top ?? Infinity;
+  const finiteBottom = Number.isFinite(bottom) ? bottom : 0;
+  const finiteTop = Number.isFinite(top) ? top : finiteBottom;
+  return {
+    levelId: level.id,
+    index: level.index ?? 0,
+    label: level.name || `Level ${(level.index ?? 0) + 1}`,
+    bottom,
+    top,
+    center: (finiteBottom + finiteTop) * 0.5,
+  };
+}
+
+/**
+ * Get the currently viewed level's background image src.
+ * In V14 each Level document has its own `background.src`. This is the
+ * authoritative source for per-level art — `scene.background.src` is
+ * deprecated and always returns the first level's background.
+ *
+ * Falls back to the deprecated `scene.background.src` when the viewed level
+ * has no background image (e.g. a level that only modifies elevation).
+ *
+ * @param {Scene|null|undefined} scene
+ * @returns {string|null}
+ */
+export function getViewedLevelBackgroundSrc(scene) {
+  if (!scene) return null;
+  // Same source Foundry uses for `canvas.primary.background`: the active Level doc.
+  // Prefer this over re-resolving from scene.levels during init races.
+  try {
+    const cv = globalThis.canvas;
+    if (cv?.scene?.id === scene.id && hasV14NativeLevels(scene)) {
+      const direct = cv.level?.background?.src;
+      if (typeof direct === 'string' && direct.trim()) return direct.trim();
+    }
+  } catch (_) {}
+  try {
+    const level = _resolveViewedV14LevelDoc(scene);
+    const src = level?.background?.src;
+    if (typeof src === 'string' && src.trim()) return src.trim();
+  } catch (_) {}
+  // Deprecated fallback for scenes without per-level backgrounds
+  try {
+    const bg = scene.background?.src ?? scene.img;
+    if (typeof bg === 'string' && bg.trim()) return bg.trim();
+  } catch (_) {}
+  return null;
+}
+
+/**
+ * Get ordered background sources for currently visible V14 levels.
+ *
+ * Uses Foundry's internal scene texture configuration path so visibility rules
+ * match native rendering behavior (viewed level + visible related levels).
+ *
+ * Returned order is bottom-to-top according to Foundry's level sort.
+ *
+ * @param {Scene|null|undefined} scene
+ * @returns {string[]}
+ */
+export function getVisibleLevelBackgroundSrcs(scene) {
+  if (!scene) return [];
+  const out = [];
+  const seen = new Set();
+
+  try {
+    // Foundry core helper used by TextureLoader.loadSceneTextures.
+    const configured = (typeof scene._configureLevelTextures === 'function')
+      ? scene._configureLevelTextures()
+      : [];
+    for (const entry of configured) {
+      if (!entry || entry.name !== 'background') continue;
+      const src = String(entry.src || '').trim();
+      if (!src || seen.has(src)) continue;
+      seen.add(src);
+      out.push(src);
+    }
+  } catch (_) {}
+
+  if (out.length) return out;
+
+  // Fallback: at least return the active viewed level background.
+  const viewed = getViewedLevelBackgroundSrc(scene);
+  if (viewed) out.push(viewed);
+  return out;
+}
+
+/**
+ * Get ordered visible background layer metadata from Foundry's level config.
+ *
+ * @param {Scene|null|undefined} scene
+ * @returns {Array<{src:string, alphaThreshold:number}>}
+ */
+export function getVisibleLevelBackgroundLayers(scene) {
+  if (!scene) return [];
+  /** @type {Array<{src:string, alphaThreshold:number}>} */
+  const out = [];
+  try {
+    const configured = (typeof scene._configureLevelTextures === 'function')
+      ? scene._configureLevelTextures()
+      : [];
+    for (const entry of configured) {
+      if (!entry || entry.name !== 'background') continue;
+      const src = String(entry.src || '').trim();
+      if (!src) continue;
+      const rawThreshold = Number(entry.alphaThreshold);
+      const alphaThreshold = Number.isFinite(rawThreshold)
+        ? Math.max(0, Math.min(1, rawThreshold))
+        : 0;
+      out.push({ src, alphaThreshold });
+    }
+  } catch (_) {}
+  if (out.length) return out;
+  const viewed = getViewedLevelBackgroundSrc(scene);
+  if (viewed) out.push({ src: viewed, alphaThreshold: 0 });
+  return out;
+}
+
+/**
+ * Whether a canvas document is assigned to a V14 level via its native
+ * {@link foundry.documents.BaseCanvasDocument#levels} set only.
+ *
+ * Empty `levels` means the document is global (treated as on every level).
+ * Use this for floor bucketing and compositor membership — not for
+ * {@link foundry.documents.TokenDocument#includedInLevel}, which encodes
+ * scene visibility between levels rather than set membership.
+ *
+ * @param {foundry.documents.BaseCanvasDocument|object} doc
+ * @param {string} levelId
+ * @returns {boolean}
+ */
+export function isDocMemberOfV14LevelSet(doc, levelId) {
+  const docObj = doc?.document ?? doc;
+  if (!docObj || !levelId) return true;
+
+  // V14 tokens use `doc.level` (singular DocumentIdField) — the one level the
+  // token is on — rather than a `levels` Set.  Check it first so tokens are
+  // never treated as "global" just because their Set is empty/absent.
+  const singleLevel = docObj.level ?? docObj._source?.level;
+  if (typeof singleLevel === 'string' && singleLevel.length > 0) {
+    return singleLevel === levelId;
+  }
+
+  const levelsSet = docObj.levels;
+  if (!levelsSet || levelsSet.size === 0) return true;
+  return levelsSet.has(levelId);
+}
+
+/**
+ * Test whether a wall document is included in a specific V14 level.
+ * Empty `levels` set means the wall is global (included in all levels).
+ * @param {WallDocument|object} wallDoc
+ * @param {string} levelId
+ * @returns {boolean}
+ */
+export function isWallOnV14Level(wallDoc, levelId) {
+  return isDocMemberOfV14LevelSet(wallDoc, levelId);
+}
+
+/**
+ * Test whether any canvas document is included in a specific V14 level for
+ * **view / visibility** semantics (delegates to {@link TokenDocument#includedInLevel}
+ * when present). For **floor stack assignment**, prefer
+ * {@link isDocMemberOfV14LevelSet} so tokens use their `levels` set, not the
+ * visibility graph.
+ * @param {object} doc
+ * @param {string} levelId
+ * @returns {boolean}
+ */
+export function isDocOnV14Level(doc, levelId) {
+  if (typeof doc?.includedInLevel === 'function') {
+    return doc.includedInLevel(levelId);
+  }
+  const docObj = doc?.document ?? doc;
+  if (!docObj || !levelId) return true;
+  const levelsSet = docObj.levels;
+  if (!levelsSet || levelsSet.size === 0) return true;
+  return levelsSet.has(levelId);
+}
+
+/**
+ * Lowest FloorStack band index (0-based) for a placeable document using V14
+ * native {@link foundry.documents.BaseCanvasDocument#levels} membership.
+ * Bands must be ordered bottom-to-top the same way as {@link readV14SceneLevels}
+ * after sorting by finite bottom (matches {@link FloorStack#rebuildFloors}).
+ *
+ * - Empty / missing native `levels` on the doc → `null` (caller falls back to
+ *   legacy Levels range flags and/or elevation).
+ * - Non-V14 scene → `null`.
+ *
+ * @param {foundry.documents.BaseDocument|object|null|undefined} doc
+ * @param {Scene|null|undefined} [scene=globalThis.canvas?.scene]
+ * @returns {number|null}
+ */
+export function resolveV14NativeDocFloorIndexMin(doc, scene = globalThis.canvas?.scene) {
+  if (!hasV14NativeLevels(scene)) return null;
+  const docObj = doc?.document ?? doc;
+  if (!docObj) return null;
+
+  // Tokens: singular `level` field (DocumentIdField)
+  const singleLevel = docObj.level ?? docObj._source?.level;
+  const hasLevelSingular = typeof singleLevel === 'string' && singleLevel.length > 0;
+
+  // Tiles/walls/etc.: `levels` Set (SceneLevelsSetField)
+  const levelsSet = docObj.levels;
+  const hasLevelsSet = levelsSet && levelsSet.size > 0;
+
+  if (!hasLevelSingular && !hasLevelsSet) return null;
+
+  const sorted = [...readV14SceneLevels(scene)].sort((a, b) => {
+    const ab = Number(a.bottom);
+    const bb = Number(b.bottom);
+    const fa = Number.isFinite(ab) ? ab : 0;
+    const fb = Number.isFinite(bb) ? bb : 0;
+    return fa - fb;
+  });
+  if (!sorted.length) return null;
+
+  // Fast path for tokens: direct level-id match against sorted bands.
+  if (hasLevelSingular) {
+    for (let i = 0; i < sorted.length; i++) {
+      if (sorted[i]?.levelId === singleLevel) return i;
+    }
+    return null;
+  }
+
+  let best = Infinity;
+  for (let i = 0; i < sorted.length; i++) {
+    const lid = sorted[i]?.levelId;
+    if (!lid) continue;
+    if (isDocMemberOfV14LevelSet(docObj, lid) && i < best) best = i;
+  }
+  return Number.isFinite(best) ? best : null;
+}
 
 // ---------------------------------------------------------------------------
 //  MS-LVL-015: Flag-reader diagnostic collector
@@ -95,19 +465,8 @@ export function normalizeSceneLevels(rawValue) {
  * @returns {Array<any>}
  */
 export function readSceneLevelsFlag(scene) {
-  if (getLevelsCompatibilityMode() === LEVELS_COMPATIBILITY_MODES.OFF) return [];
-
-  // getFlag throws when the 'levels' module scope isn't registered (module
-  // not installed or not active). Fall back to direct flag access which
-  // always works regardless of module activation state.
-  let viaGetter;
-  try {
-    viaGetter = scene?.getFlag?.('levels', 'sceneLevels');
-  } catch (_) {
-    // Scope not active — expected when Levels module is absent.
-  }
-  const direct = scene?.flags?.levels?.sceneLevels;
-  return normalizeSceneLevels(viaGetter ?? direct);
+  // Legacy reader is retained strictly for import tooling; runtime is V14-native.
+  return normalizeSceneLevels(scene?.flags?.levels?.sceneLevels);
 }
 
 /**
@@ -117,43 +476,7 @@ export function readSceneLevelsFlag(scene) {
  * @returns {boolean}
  */
 export function isLevelsEnabledForScene(scene) {
-  if (getLevelsCompatibilityMode() === LEVELS_COMPATIBILITY_MODES.OFF) return false;
-  if (!scene) return false;
-  if (scene?.flags?.levels?.enabled === true) return true;
-  if (readSceneLevelsFlag(scene).length > 0) return true;
-
-  // Detect scenes that have Levels data on individual documents (tiles, walls,
-  // lights) but no explicit sceneLevels bands. This catches maps that were
-  // configured with the Levels module but never had bands formally defined —
-  // for example, a compendium scene with tile/wall elevation ranges set.
-  const levelsFlags = scene?.flags?.levels;
-  if (levelsFlags) {
-    // Scene-level flags like backgroundElevation or lightMasking indicate setup
-    if (levelsFlags.backgroundElevation !== undefined && levelsFlags.backgroundElevation !== 0) return true;
-    if (levelsFlags.weatherElevation !== undefined) return true;
-    if (levelsFlags.lightMasking !== undefined) return true;
-  }
-
-  // Check tiles for any Levels range flags
-  const tiles = scene.tiles ?? scene.collections?.tiles;
-  if (tiles) {
-    for (const tileDoc of tiles) {
-      if (tileDoc?.flags?.levels?.rangeTop !== undefined) return true;
-      if (tileDoc?.flags?.levels?.isBasement === true) return true;
-      if (tileDoc?.flags?.levels?.showIfAbove === true) return true;
-    }
-  }
-
-  // Check walls for wall-height flags (Levels companion module)
-  const walls = scene.walls ?? scene.collections?.walls;
-  if (walls) {
-    for (const wallDoc of walls) {
-      const wh = wallDoc?.flags?.['wall-height'];
-      if (wh && (wh.bottom !== undefined || wh.top !== undefined)) return true;
-    }
-  }
-
-  return false;
+  return hasV14NativeLevels(scene);
 }
 
 // ---------------------------------------------------------------------------
@@ -168,25 +491,37 @@ export function isLevelsEnabledForScene(scene) {
  * @returns {number}
  */
 export function getSceneBackgroundElevation(scene) {
-  if (getLevelsCompatibilityMode() === LEVELS_COMPATIBILITY_MODES.OFF) return 0;
-  const raw = scene?.flags?.levels?.backgroundElevation;
-  const num = Number(raw);
-  return Number.isFinite(num) ? num : 0;
+  const level = scene?.levels?.get?.(scene?._view) ?? null;
+  return Number(level?.elevation?.bottom ?? 0) || 0;
 }
 
 /**
- * Top of the scene foreground image band (ceiling above {@link canvas#scene#foregroundElevation}).
+ * Top of the scene foreground image band (active level {@link Level#elevation.top}).
  * When unset, the foreground layer is treated as unbounded above (same as Infinity).
  *
  * @param {Scene|null|undefined} scene
  * @returns {number} Finite top, or Infinity when not set
  */
 export function getSceneForegroundElevationTop(scene) {
-  if (getLevelsCompatibilityMode() === LEVELS_COMPATIBILITY_MODES.OFF) return Infinity;
-  const raw = scene?.flags?.levels?.foregroundElevationTop;
-  if (raw === undefined || raw === null) return Infinity;
-  const num = Number(raw);
-  return Number.isFinite(num) ? num : Infinity;
+  const level = scene?.levels?.get?.(scene?._view) ?? null;
+  const top = Number(level?.elevation?.top);
+  return Number.isFinite(top) ? top : Infinity;
+}
+
+/**
+ * Foreground/overhead elevation split for the currently viewed level (Foundry v14+).
+ * Use instead of deprecated {@link Scene#foregroundElevation}. Matches the legacy
+ * coercion used by tile overhead checks: non-finite top (undefined / Infinity) → 0.
+ *
+ * @returns {number}
+ */
+export function getCanvasForegroundElevationSplit() {
+  try {
+    const top = Number(canvas?.level?.elevation?.top);
+    return Number.isFinite(top) ? top : 0;
+  } catch (_) {
+    return 0;
+  }
 }
 
 /**
@@ -196,11 +531,9 @@ export function getSceneForegroundElevationTop(scene) {
  * @returns {number|null} null if not set
  */
 export function getSceneWeatherElevation(scene) {
-  if (getLevelsCompatibilityMode() === LEVELS_COMPATIBILITY_MODES.OFF) return null;
-  const raw = scene?.flags?.levels?.weatherElevation;
-  if (raw === undefined || raw === null) return null;
-  const num = Number(raw);
-  return Number.isFinite(num) ? num : null;
+  const level = scene?.levels?.get?.(scene?._view) ?? null;
+  const top = Number(level?.elevation?.top);
+  return Number.isFinite(top) ? top : null;
 }
 
 /**
@@ -210,8 +543,7 @@ export function getSceneWeatherElevation(scene) {
  * @returns {boolean}
  */
 export function getSceneLightMasking(scene) {
-  if (getLevelsCompatibilityMode() === LEVELS_COMPATIBILITY_MODES.OFF) return false;
-  return scene?.flags?.levels?.lightMasking === true;
+  return hasV14NativeLevels(scene);
 }
 
 // ---------------------------------------------------------------------------
@@ -269,7 +601,6 @@ export function readTileLevelsFlags(tileDoc) {
     rangeBottom: safeElevation,
   };
 
-  if (getLevelsCompatibilityMode() === LEVELS_COMPATIBILITY_MODES.OFF) return defaults;
   if (!tileDoc?.flags?.levels) return defaults;
 
   const flags = tileDoc.flags.levels;
@@ -332,7 +663,6 @@ export function readTileLevelsFlags(tileDoc) {
  * @returns {boolean}
  */
 export function tileHasLevelsRange(tileDoc) {
-  if (getLevelsCompatibilityMode() === LEVELS_COMPATIBILITY_MODES.OFF) return false;
   if (!tileDoc?.flags?.levels) return false;
   const flags = tileDoc.flags.levels;
   // Levels V12+ may store the authoritative bottom elevation in rangeBottom
@@ -360,7 +690,6 @@ export function tileHasLevelsRange(tileDoc) {
  */
 export function readDocLevelsRange(doc) {
   const defaults = { rangeBottom: -Infinity, rangeTop: Infinity };
-  if (getLevelsCompatibilityMode() === LEVELS_COMPATIBILITY_MODES.OFF) return defaults;
   if (!doc?.flags?.levels) return defaults;
 
   const flags = doc.flags.levels;

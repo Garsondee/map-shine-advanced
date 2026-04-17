@@ -21,9 +21,10 @@
  * Precipitation uses **layer 0** and a **floor-band renderOrder** just below
  * `OVERHEAD_OFFSET` (see FloorRenderBus), matching FireEffectV2: drawn in the
  * main `renderTo()` pass **under** overhead roof tiles and tree overlays.
- * Putting quarks on OVERLAY_THREE_LAYER (31) made weather draw only in
- * `_renderLateWorldOverlay`, on top of the entire scene (wrong for drips).
- * Foam plume batches opt into layer 31 via `emitter.userData.msOverlayLayer`.
+ * Roof/tree **drips** use `emitter.userData.msOverlayLayer` → batch layer 31 →
+ * `_renderLateWorldOverlay` (otherwise streaks are occluded by overhead art). Rain/snow stay on layer 0.
+ * Foam plumes use the same overlay flag. `WeatherParticlesV2._applyCulling` sets
+ * `FloorCompositor._hasOverlayLayerContent` when assigning layer 31 (batches nest under BatchedRenderer).
  *
  * ## Floor isolation
  * WeatherParticles is inherently global (rain/snow falls everywhere). It reads
@@ -39,16 +40,14 @@ import { weatherController } from '../../core/WeatherController.js';
 import { WeatherParticles } from '../../particles/WeatherParticles.js';
 import { BatchedRenderer } from '../../libs/three.quarks.module.js';
 
+import {
+  effectUnderOverheadOrder,
+} from '../LayerOrderPolicy.js';
+
 const log = createLogger('WeatherParticlesV2');
 
 // Layer 31 — only for batches that must draw in FloorCompositor._renderLateWorldOverlay.
 const OVERLAY_THREE_LAYER = 31;
-
-// Align with FloorRenderBus / FireEffectV2: sort above ground tiles, below overhead + trees.
-const RENDER_ORDER_PER_FLOOR = 10000;
-const OVERHEAD_OFFSET = 5000;
-/** One step below overhead band so rain/drips/snow draw under roof + tree quads. */
-const WEATHER_BATCH_RENDER_ORDER_BASE = OVERHEAD_OFFSET - 1;
 
 // ─── WeatherParticlesV2 ───────────────────────────────────────────────────────
 
@@ -215,8 +214,8 @@ export class WeatherParticlesV2 {
     this._busScene = busScene;
 
     // Create shared three.quarks BatchedRenderer and add it to the bus scene.
-    // Layer 0 + renderOrder in (ground, overhead) band: main bus pass draws weather
-    // under overhead tiles / TreeEffectV2 (see FloorRenderBus.renderTo vs late overlay).
+    // Layer 0 + FLOOR_EFFECTS role: main bus pass draws weather under overhead
+    // tiles / TreeEffectV2 (see LayerOrderPolicy + FloorRenderBus.renderTo).
     this._batchRenderer = new BatchedRenderer();
     try {
       if (this._batchRenderer.layers?.set) {
@@ -261,7 +260,9 @@ export class WeatherParticlesV2 {
   update(timeInfo) {
     if (!this._initialized || !this.enabled) return;
 
-    const deltaSec = typeof timeInfo?.delta === 'number' ? timeInfo.delta : 0.016;
+    const deltaSec = typeof timeInfo?.motionDelta === 'number'
+      ? timeInfo.motionDelta
+      : (typeof timeInfo?.delta === 'number' ? timeInfo.delta : 0.016);
 
     // Re-attach BatchedRenderer and emitters if FloorRenderBus.clear() evicted them.
     // This is the ROOT CAUSE fix: clear() wipes all bus scene children (including
@@ -387,8 +388,7 @@ export class WeatherParticlesV2 {
     const fs = window.MapShine?.floorStack;
     const active = fs?.getActiveFloor?.();
     const fi = Number.isFinite(Number(active?.index)) ? Number(active.index) : 0;
-    const floorBandStart = Math.max(0, fi) * RENDER_ORDER_PER_FLOOR;
-    this._batchRenderer.renderOrder = floorBandStart + WEATHER_BATCH_RENDER_ORDER_BASE;
+    this._batchRenderer.renderOrder = effectUnderOverheadOrder(fi, 100);
   }
 
   // ── Resize ──────────────────────────────────────────────────────────────────
@@ -488,7 +488,16 @@ export class WeatherParticlesV2 {
         const idx = systemMap.get(ps);
         const batch = (idx !== undefined && batches) ? batches[idx] : null;
         const layer = (ud.msOverlayLayer === true) ? OVERLAY_THREE_LAYER : 0;
-        if (batch?.layers?.set) batch.layers.set(layer);
+        if (batch?.layers?.set) {
+          batch.layers.set(layer);
+          // FloorCompositor._renderLateWorldOverlay only scanned top-level scene children for
+          // layer 31; quarks SpriteBatches live under BatchedRenderer, so without this the late
+          // pass could be skipped forever (roof drips + foam would never draw).
+          if (layer === OVERLAY_THREE_LAYER) {
+            const fc = window.MapShine?.floorCompositorV2 ?? window.MapShine?.effectComposer?._floorCompositorV2;
+            if (fc) fc._hasOverlayLayerContent = true;
+          }
+        }
       } catch (_) {}
 
       // Allow specific systems (e.g. full-scene foam overlays) to opt out of

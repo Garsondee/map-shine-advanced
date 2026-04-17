@@ -12,7 +12,7 @@ import { weatherController } from '../core/WeatherController.js';
 import { OVERLAY_THREE_LAYER, TILE_FEATURE_LAYERS } from '../core/render-layers.js';
 import { debugLoadingProfiler } from '../core/debug-loading-profiler.js';
 import { isTileVisibleForPerspective, isBackgroundVisibleForPerspective, isWeatherVisibleForPerspective } from '../foundry/elevation-context.js';
-import { tileHasLevelsRange, isLevelsEnabledForScene, readTileLevelsFlags } from '../foundry/levels-scene-flags.js';
+import { tileHasLevelsRange, isLevelsEnabledForScene, readTileLevelsFlags, hasV14NativeLevels, getCanvasForegroundElevationSplit } from '../foundry/levels-scene-flags.js';
 import { applyTileLevelDefaults } from '../foundry/levels-create-defaults.js';
 import { getEffectMaskRegistry, probeMaskFile } from '../assets/loader.js';
 import { getTextureBudgetTracker, estimateTextureBytes } from '../assets/TextureBudgetTracker.js';
@@ -55,7 +55,7 @@ const BELOW_FLOOR_PRESENCE_LAYER = 24;
  *
  * Priority:
  * 1) Respect persisted source overhead flags when present (legacy/core scenes).
- * 2) Fall back to elevation >= scene.foregroundElevation.
+ * 2) Fall back to elevation >= active level foreground top (Foundry v14 Level#elevation.top).
  *
  * We only read _source/flags — never TileDocument#overhead (deprecated on PF2e v12+).
  *
@@ -72,9 +72,7 @@ export function isTileOverhead(tileDoc) {
   const levelsOverhead = tileDoc?._source?.flags?.levels?.overhead;
   if (typeof levelsOverhead === 'boolean') return levelsOverhead;
 
-  const foregroundElevation = Number.isFinite(canvas.scene?.foregroundElevation)
-    ? canvas.scene.foregroundElevation
-    : 0;
+  const foregroundElevation = getCanvasForegroundElevationSplit();
   const elev = Number.isFinite(tileDoc?.elevation) ? tileDoc.elevation : 0;
   return elev >= foregroundElevation;
 }
@@ -2075,8 +2073,8 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     this._hookIds.push(['updateScene', Hooks.on('updateScene', (scene, changes) => {
       if (scene.id !== canvas.scene?.id) return;
       
-      if ('foregroundElevation' in changes) {
-        log.info('Foreground elevation changed, refreshing all tile transforms');
+      if ('foregroundElevation' in changes || 'levels' in changes) {
+        log.info('Foreground elevation / levels changed, refreshing all tile transforms');
         for (const { sprite, tileDoc } of this.tileSprites.values()) {
           this.updateSpriteTransform(sprite, tileDoc);
         }
@@ -2705,43 +2703,25 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
       if (!sprite.visible) continue;
 
       if (sprite.material) {
-        // Overhead tiles should respect the same outdoors brightness/dim response
-        // as the main LightingEffect composite (otherwise outdoor roofs stay too
-        // bright as darkness increases).
+        // Match LightingEffectV2 interior ambient dim on overhead sprites (see _interiorDarknessOverheadScalar).
         let overheadTint = globalTint;
-        if (!skipDarknessTint) try {
+        try {
           const le = window.MapShine?.lightingEffect;
-          if (le && le.params && typeof le.params.outdoorBrightness === 'number' && weatherController && typeof weatherController.getRoofMaskIntensity === 'function') {
+          const idim = (le?.params && typeof le.params.interiorDarkness === 'number')
+            ? Math.max(0, le.params.interiorDarkness)
+            : 0;
+          if (idim > 0) {
             const d = canvas.dimensions;
             const sceneX = d?.sceneRect?.x ?? d?.sceneX ?? 0;
             const sceneY = d?.sceneRect?.y ?? d?.sceneY ?? 0;
             const sceneW = d?.sceneRect?.width ?? d?.sceneWidth ?? d?.width ?? 10000;
             const sceneH = d?.sceneRect?.height ?? d?.sceneHeight ?? d?.height ?? 10000;
-
-            // Tile docs are in Foundry top-left (Y-down) space.
-            // The authored _Outdoors mask is also in sceneRect top-left UV space.
-            const tileCenterX = tileDoc.x + tileDoc.width / 2;
-            const tileCenterY = tileDoc.y + tileDoc.height / 2;
-            const u = (tileCenterX - sceneX) / sceneW;
-            const v = (tileCenterY - sceneY) / sceneH;
-
-            const outdoorStrength = weatherController.getRoofMaskIntensity(u, v);
-            if (outdoorStrength > 0.001) {
-              let darkness = canvas?.scene?.environment?.darknessLevel ?? 0.0;
-              if (typeof le.getEffectiveDarkness === 'function') {
-                darkness = le.getEffectiveDarkness();
-              }
-
-              const dayBoost = le.params.outdoorBrightness;
-              const nightDim = 2.0 - le.params.outdoorBrightness;
-              const outdoorMultiplier = (1.0 - darkness) * dayBoost + darkness * nightDim;
-              const finalMultiplier = (1.0 - outdoorStrength) * 1.0 + outdoorStrength * outdoorMultiplier;
-
-              // PERFORMANCE: reuse cached THREE.Color (avoid per-tile allocations)
-              if (!this._tempOverheadTint) {
-                this._tempOverheadTint = new THREE.Color(1, 1, 1);
-              }
-              overheadTint = this._tempOverheadTint.copy(globalTint).multiplyScalar(finalMultiplier);
+            const u = (tileDoc.x + tileDoc.width / 2 - sceneX) / sceneW;
+            const v = (tileDoc.y + tileDoc.height / 2 - sceneY) / sceneH;
+            const interiorMul = this._interiorDarknessOverheadScalar(u, v, idim);
+            if (interiorMul < 0.999) {
+              if (!this._tempOverheadTint) this._tempOverheadTint = new THREE.Color(1, 1, 1);
+              overheadTint = this._tempOverheadTint.copy(globalTint).multiplyScalar(interiorMul);
             }
           }
         } catch (_) {
@@ -3007,6 +2987,38 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
       log.warn('Failed to extract mask data:', e.message);
       return null;
     }
+  }
+
+  /**
+   * Match LightingEffectV2 interior ambient dim on overhead sprites (CPU _Outdoors sample).
+   * @param {number} u - scene UV
+   * @param {number} v - scene UV
+   * @param {number} interiorDarkness - same units as {@link LightingEffectV2} param
+   * @returns {number} multiplier in [0, 1]
+   * @private
+   */
+  _interiorDarknessOverheadScalar(u, v, interiorDarkness) {
+    if (!(interiorDarkness > 0)) return 1.0;
+    const wle = this.windowLightEffect;
+    if (!wle?.outdoorsMask) return 1.0;
+    if (!this._outdoorsMaskData && !this._outdoorsMaskExtractFailed) {
+      const extracted = this._extractMaskData(wle.outdoorsMask);
+      if (extracted) {
+        this._outdoorsMaskData = extracted.data;
+        this._outdoorsMaskWidth = extracted.width;
+        this._outdoorsMaskHeight = extracted.height;
+      } else {
+        this._outdoorsMaskExtractFailed = true;
+      }
+    }
+    if (!this._outdoorsMaskData || !this._outdoorsMaskWidth) return 1.0;
+    const oix = Math.floor(Math.max(0, Math.min(1, u)) * (this._outdoorsMaskWidth - 1));
+    const oiy = Math.floor(Math.max(0, Math.min(1, v)) * (this._outdoorsMaskHeight - 1));
+    const oIndex = (oiy * this._outdoorsMaskWidth + oix) * 4;
+    const odA = this._outdoorsMaskData[oIndex + 3] / 255;
+    const odR = this._outdoorsMaskData[oIndex] / 255;
+    const isOutdoor = (odA > 0.08) ? (odR >= 0.45 ? 1 : 0) : 1;
+    return Math.max(0, 1 - interiorDarkness * (1 - isOutdoor));
   }
 
   /**
@@ -3790,37 +3802,30 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     // rangeTop (i.e. it is a floor-like level tile, not a roof), treat it as a
     // regular floor layer so tokens on that level render above it.
     //
-    // Without this, tiles elevated above scene.foregroundElevation are always
+    // Without this, tiles elevated above the active level foreground top are always
     // classified as overhead, which causes same-floor tokens to appear "under"
     // their floor art after stair elevation changes.
     let treatAsCurrentFloor = false;
     try {
       const activeLevelContext = window.MapShine?.activeLevelContext;
-      if (isLevelsEnabledForScene(canvas?.scene) && hasFiniteActiveLevelBand(activeLevelContext)) {
+      const _scene = canvas?.scene;
+      if ((hasV14NativeLevels(_scene) || isLevelsEnabledForScene(_scene)) && hasFiniteActiveLevelBand(activeLevelContext)) {
         const bandBottom = Number(activeLevelContext.bottom);
         const bandTop = Number(activeLevelContext.top);
         const tileElevation = Number(tileDoc?.elevation);
 
-        if (tileHasLevelsRange(tileDoc)) {
+        // V14-native: check level membership directly
+        if (hasV14NativeLevels(_scene) && activeLevelContext.levelId && tileDoc?.levels?.size) {
+          treatAsCurrentFloor = tileDoc.levels.has(activeLevelContext.levelId);
+        } else if (tileHasLevelsRange(tileDoc)) {
           const flags = readTileLevelsFlags(tileDoc);
           const tileBottom = Number(flags.rangeBottom);
           const tileTop = Number(flags.rangeTop);
 
-          // Finite rangeTop => floor/platform-like tile. Overlap with active band
-          // means this is the current floor and should not use roof layering.
           if (Number.isFinite(tileBottom) && Number.isFinite(tileTop)) {
-            // Inclusive overlap test to handle shared boundaries (e.g. tile top
-            // exactly equals band bottom). This must be inclusive so same-floor
-            // tiles at boundary elevations don't get misclassified as overhead.
-            // IMPORTANT: Use an exclusive top boundary to match the Levels
-            // visibility semantics used elsewhere in MapShine.
-            // A tile whose bottom == bandTop belongs to the floor above.
-            // A tile whose top == bandBottom belongs to the floor below.
             treatAsCurrentFloor = !(tileTop <= bandBottom || tileBottom >= bandTop);
           }
         } else if (Number.isFinite(tileElevation)) {
-          // Fallback for tiles without explicit Levels flags.
-          // Exclusive top boundary: elevation==bandTop belongs to the floor above.
           treatAsCurrentFloor = tileElevation >= bandBottom && tileElevation < bandTop;
         }
       }

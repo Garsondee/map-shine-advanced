@@ -8,8 +8,7 @@ import { isGmLike } from '../core/gm-parity.js';
 
 import { createLogger } from '../core/log.js';
 import { OVERLAY_THREE_LAYER } from '../core/render-layers.js';
-import { getLevelsCompatibilityMode, LEVELS_COMPATIBILITY_MODES } from '../foundry/levels-compatibility.js';
-import { isLevelsEnabledForScene } from '../foundry/levels-scene-flags.js';
+import { getCanvasForegroundElevationSplit, hasV14NativeLevels, resolveV14NativeDocFloorIndexMin } from '../foundry/levels-scene-flags.js';
 import { applyTokenLevelDefaults } from '../foundry/levels-create-defaults.js';
 import { getPerspectiveElevation } from '../foundry/elevation-context.js';
 import { getTokenRenderingMode, TOKEN_RENDERING_MODES } from '../settings/scene-settings.js';
@@ -34,16 +33,15 @@ function _isFoundryNativeTokenRenderingMode() {
 const TOKEN_BASE_Z_V1 = 3.0;
 const TOKEN_BASE_Z_V2 = 1003.0;
 
-// Keep in sync with FloorRenderBus floor render-order layout.
-const RENDER_ORDER_PER_FLOOR = 10000;
-// Tokens at/above scene foregroundElevation (same threshold as overhead tiles in
-// tile-manager) draw here — above overhead bus albedo (5000..9800) and same-floor
-// effects keyed to token order.
-const TOKEN_RENDER_ORDER_WITHIN_FLOOR = 9900;
-// Sub-foreground tokens: above regular bus tiles (sort cap 4800) but below overhead
-// offset (5000) so roof/overhead albedo occludes them. Below fire/dust batch slots
-// (~4998–4999) so foot-level particles still read naturally.
-const TOKEN_GROUND_BELOW_OVERHEAD_RENDER_ORDER = 4940;
+import {
+  effectUnderOverheadOrder,
+  effectAboveOverheadOrder,
+} from '../compositor-v2/LayerOrderPolicy.js';
+
+// Ground tokens: near top of FLOOR_EFFECTS band, below overhead.
+const TOKEN_GROUND_INTRA_OFFSET = 2200;
+// Elevated/flying tokens: in FLOOR_OVERHEAD_FX band, above overhead.
+const TOKEN_ABOVE_OVERHEAD_INTRA_OFFSET = 100;
 
 /**
  * TokenManager - Synchronizes Foundry VTT tokens to THREE.js sprites
@@ -699,6 +697,9 @@ vec3 ms_applySceneLighting(vec3 color) {
       const floors = window.MapShine?.floorStack?.getFloors?.() ?? [];
       if (!Array.isArray(floors) || floors.length <= 1) return 0;
 
+      const v14Idx = resolveV14NativeDocFloorIndexMin(tokenDoc, canvas?.scene);
+      if (v14Idx !== null) return v14Idx;
+
       const rawElev = tokenDoc?.elevation ?? tokenDoc?.document?.elevation ?? 0;
       const elev = Number.isFinite(Number(rawElev)) ? Number(rawElev) : 0;
 
@@ -724,16 +725,12 @@ vec3 ms_applySceneLighting(vec3 color) {
    * @private
    */
   _resolveSceneForegroundElevation() {
-    try {
-      const fe = Number(canvas?.scene?.foregroundElevation);
-      return Number.isFinite(fe) ? fe : 0;
-    } catch (_) {
-      return 0;
-    }
+    return getCanvasForegroundElevationSplit();
   }
 
   /**
-   * Apply deterministic token renderOrder in V2. Uses scene foregroundElevation:
+   * Apply deterministic token renderOrder in V2. Uses active level foreground top
+   * ({@link canvas#level#elevation.top}, same split as tile overhead):
    * ground-band tokens sort below overhead bus albedo; at/above that threshold they
    * use the legacy above-overlays slot (balconies, flying tokens).
    * @param {THREE.Sprite} sprite
@@ -743,14 +740,12 @@ vec3 ms_applySceneLighting(vec3 color) {
   _applyV2TokenRenderOrder(sprite, tokenDoc) {
     if (!sprite || !this._getV2BusScene()) return;
     const floorIndex = this._resolveTokenFloorIndex(tokenDoc);
-    const floorBase = floorIndex * RENDER_ORDER_PER_FLOOR;
     const rawElev = tokenDoc?.elevation ?? tokenDoc?.document?.elevation ?? 0;
     const tokenElev = Number.isFinite(Number(rawElev)) ? Number(rawElev) : 0;
     const fgElev = this._resolveSceneForegroundElevation();
-    const slot = (tokenElev >= fgElev)
-      ? TOKEN_RENDER_ORDER_WITHIN_FLOOR
-      : TOKEN_GROUND_BELOW_OVERHEAD_RENDER_ORDER;
-    sprite.renderOrder = floorBase + slot;
+    sprite.renderOrder = (tokenElev >= fgElev)
+      ? effectAboveOverheadOrder(floorIndex, TOKEN_ABOVE_OVERHEAD_INTRA_OFFSET)
+      : effectUnderOverheadOrder(floorIndex, TOKEN_GROUND_INTRA_OFFSET);
   }
 
   /**
@@ -1656,8 +1651,8 @@ vec3 ms_applySceneLighting(vec3 color) {
     // scaleFactor = min(multiplier / (abs(tokenElev - viewerElev) / 8), 1)
     let elevScaleFactor = 1;
     try {
-      if (getLevelsCompatibilityMode() !== LEVELS_COMPATIBILITY_MODES.OFF
-          && isLevelsEnabledForScene(canvas?.scene)) {
+      const _sc = canvas?.scene;
+      if (hasV14NativeLevels(_sc)) {
         const tokenElev = Number(tokenDoc.elevation ?? 0);
         const perspective = getPerspectiveElevation();
         const viewerElev = Number(perspective.elevation ?? tokenElev);
@@ -1822,26 +1817,39 @@ vec3 ms_applySceneLighting(vec3 color) {
       sprite.material.opacity = 1.0;
     }
 
-    // Level-based filtering: hide tokens above the current active level.
-    // This mirrors VisibilityController._isTokenAboveCurrentLevel for
-    // the fallback path when the VC is not yet initialized.
+    // Level-based filtering: hide tokens not on the viewed level.
+    // V14 tokens have `tokenDoc.level` (the level ID they belong to).
+    // Fall back to elevation comparison for non-V14 scenes.
     if (sprite.visible) {
       try {
+        const scene = canvas?.scene;
         const levelContext = window.MapShine?.activeLevelContext;
-        if (
-          levelContext
-          && Number.isFinite(levelContext.top)
-          && (levelContext.count ?? 0) > 1
-          && isLevelsEnabledForScene(canvas?.scene)
-          && String(levelContext?.source || '') !== 'inferred'
-        ) {
-          const tokenElev = Number(tokenDoc?.elevation ?? 0);
-          if (Number.isFinite(tokenElev) && tokenElev >= levelContext.top - 0.01) {
-            sprite.visible = false;
+        if (levelContext && (levelContext.count ?? 0) > 1) {
+          if (hasV14NativeLevels(scene) && String(levelContext?.source || '') !== 'inferred') {
+            const tokenLevelId = tokenDoc?.level ?? tokenDoc?._source?.level ?? tokenDoc?.document?.level;
+            const activeLevelId = levelContext?.levelId;
+            if (typeof tokenLevelId === 'string' && typeof activeLevelId === 'string'
+                && tokenLevelId !== activeLevelId) {
+              // Token is on a different V14 level than the active one.
+              // Use Foundry's native includedInLevel to respect the visibility graph
+              // (upper-floor tokens can be visible from lower floors if configured).
+              const td = tokenDoc?.document ?? tokenDoc;
+              if (typeof td?.includedInLevel === 'function') {
+                if (!td.includedInLevel(activeLevelId)) {
+                  sprite.visible = false;
+                }
+              } else {
+                sprite.visible = false;
+              }
+            }
+          } else if (Number.isFinite(levelContext.top)) {
+            const tokenElev = Number(tokenDoc?.elevation ?? 0);
+            if (Number.isFinite(tokenElev) && tokenElev >= levelContext.top - 0.01) {
+              sprite.visible = false;
+            }
           }
         }
       } catch (_) {
-        // Fail-open: if level context is unavailable, keep visibility as-is
       }
     }
   }

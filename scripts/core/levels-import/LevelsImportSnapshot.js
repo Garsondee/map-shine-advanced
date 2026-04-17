@@ -1,39 +1,18 @@
 /**
- * @fileoverview LevelsImportSnapshot — immutable, normalized snapshot of all
- * Levels-related flag data for a single scene.
+ * @fileoverview LevelsImportSnapshot — immutable, normalized snapshot of scene
+ * level data for Map Shine subsystems.
  *
- * This is the canonical data contract that all Levels-aware systems in Map
- * Shine should consume. It replaces ad-hoc per-call flag reading with a
- * single, strictly coerced, frozen data object built once per scene load
- * (or on-demand after flag mutations).
- *
- * Design goals (MS-LVL-010):
- * - Strict numeric coercion: every numeric field is validated via Number()
- *   + Number.isFinite(), with explicit safe defaults and diagnostic recording.
- * - Immutable: the snapshot is Object.freeze'd so consumers cannot mutate it.
- * - Fail-safe: malformed or missing flags produce safe defaults, never throw.
- * - Diagnostic-rich: every coercion fallback is recorded for the Diagnostic
- *   Center to surface.
+ * V14-native path: the snapshot is built primarily from `scene.levels`
+ * (EmbeddedCollection of Level documents). Legacy Levels-flag readers are
+ * retained as a migration fallback only.
  *
  * @module core/levels-import/LevelsImportSnapshot
  */
 
 import {
-  readSceneLevelsFlag,
-  normalizeSceneLevels,
-  getSceneBackgroundElevation,
-  getSceneWeatherElevation,
-  getSceneLightMasking,
-  readTileLevelsFlags,
-  tileHasLevelsRange,
-  readDocLevelsRange,
-  readWallHeightFlags,
-  wallHasHeightBounds,
-  isLevelsEnabledForScene,
-  getFlagReaderDiagnostics,
-  clearFlagReaderDiagnostics,
+  readV14SceneLevels,
+  hasV14NativeLevels,
 } from '../../foundry/levels-scene-flags.js';
-import { getLevelsCompatibilityMode, LEVELS_COMPATIBILITY_MODES } from '../../foundry/levels-compatibility.js';
 
 // ---------------------------------------------------------------------------
 //  Strict numeric coercion helpers
@@ -149,9 +128,9 @@ function clampElevation(value) {
 /**
  * Build an immutable LevelsImportSnapshot for the given scene.
  *
- * This reads all Levels-related flags from the scene and its embedded
- * documents, applies strict numeric coercion with clamping, and returns
- * a frozen snapshot object.
+ * V14-native path: when the scene has native Level documents, the snapshot
+ * is built from `scene.levels` and the native `levels` set fields on walls,
+ * tiles, etc. Legacy Levels-flag reading is used as a migration fallback.
  *
  * @param {Scene|null|undefined} scene - The Foundry scene document
  * @returns {LevelsImportSnapshot}
@@ -160,166 +139,109 @@ export function buildLevelsImportSnapshot(scene) {
   const sceneId = scene?.id ?? '';
   const timestamp = Date.now();
 
-  // If Levels compatibility is off, return a minimal empty snapshot
-  if (getLevelsCompatibilityMode() === LEVELS_COMPATIBILITY_MODES.OFF || !scene) {
+  if (!scene) {
+    return _emptySnapshot(sceneId, timestamp);
+  }
+
+  // V14-native path
+  if (hasV14NativeLevels(scene)) {
+    return _buildV14NativeSnapshot(scene, sceneId, timestamp);
+  }
+
+  return _emptySnapshot(sceneId, timestamp);
+}
+
+function _emptySnapshot(sceneId, timestamp) {
+  return Object.freeze({
+    sceneId,
+    timestamp,
+    levelsEnabled: false,
+    backgroundElevation: 0,
+    weatherElevation: null,
+    lightMasking: false,
+    sceneLevels: Object.freeze([]),
+    tiles: Object.freeze([]),
+    docRanges: Object.freeze([]),
+    walls: Object.freeze([]),
+    diagnostics: Object.freeze({ coercionFallbacks: 0, invalidBands: 0, tileCount: 0, wallCount: 0, docRangeCount: 0, source: 'empty' }),
+  });
+}
+
+/**
+ * Build a snapshot from V14 native Level documents.
+ */
+function _buildV14NativeSnapshot(scene, sceneId, timestamp) {
+  const nativeLevels = readV14SceneLevels(scene);
+
+  const sceneLevels = nativeLevels.map((lvl) => {
+    const bottom = Number.isFinite(lvl.bottom) ? lvl.bottom : 0;
+    const top = Number.isFinite(lvl.top) ? lvl.top : bottom;
     return Object.freeze({
-      sceneId,
-      timestamp,
-      levelsEnabled: false,
-      backgroundElevation: 0,
-      weatherElevation: null,
-      lightMasking: false,
-      sceneLevels: Object.freeze([]),
-      tiles: Object.freeze([]),
-      docRanges: Object.freeze([]),
-      walls: Object.freeze([]),
-      diagnostics: Object.freeze({ coercionFallbacks: 0, invalidBands: 0, tileCount: 0, wallCount: 0, docRangeCount: 0 }),
+      bottom,
+      top,
+      name: lvl.label,
+      levelId: lvl.levelId,
     });
-  }
+  });
 
-  // Clear diagnostics before building so we capture only this snapshot's issues
-  clearFlagReaderDiagnostics();
-
-  const levelsEnabled = isLevelsEnabledForScene(scene);
-  const backgroundElevation = clampElevation(getSceneBackgroundElevation(scene));
-  const weatherElevation = (() => {
-    const raw = getSceneWeatherElevation(scene);
-    if (raw === null) return null;
-    return clampElevation(strictFinite(raw, 0));
-  })();
-  const lightMasking = getSceneLightMasking(scene);
-
-  // --- Scene Levels (elevation bands) ---
-  const rawBands = readSceneLevelsFlag(scene);
-  let invalidBands = 0;
-  const sceneLevels = [];
-
-  for (let i = 0; i < rawBands.length; i++) {
-    const band = rawBands[i];
-    if (!band || typeof band !== 'object') {
-      invalidBands++;
-      continue;
-    }
-
-    // Levels stores bands as arrays [bottom, top, name] or objects {bottom, top, name}
-    let bottom, top, name;
-    if (Array.isArray(band)) {
-      bottom = strictFinite(band[0], null);
-      top = strictFinite(band[1], null);
-      name = String(band[2] ?? `Level ${i}`);
-    } else {
-      bottom = strictFinite(band.bottom ?? band.rangeBottom, null);
-      top = strictFinite(band.top ?? band.rangeTop, null);
-      name = String(band.name ?? band.label ?? `Level ${i}`);
-    }
-
-    if (bottom === null || top === null) {
-      invalidBands++;
-      continue;
-    }
-
-    // Ensure bottom <= top
-    if (top < bottom) {
-      const swap = bottom;
-      bottom = top;
-      top = swap;
-    }
-
-    sceneLevels.push(Object.freeze({
-      bottom: clampElevation(bottom),
-      top: clampElevation(top),
-      name,
-    }));
-  }
-
-  // --- Tiles ---
-  const tileSnapshots = [];
-  const sceneTiles = scene.tiles ?? [];
-  for (const tileDoc of sceneTiles) {
-    if (!tileDoc) continue;
-    if (!tileHasLevelsRange(tileDoc)) continue;
-
-    const flags = readTileLevelsFlags(tileDoc);
-    tileSnapshots.push(Object.freeze({
-      id: String(tileDoc.id ?? tileDoc._id ?? ''),
-      rangeBottom: clampElevation(flags.rangeBottom),
-      rangeTop: strictNumeric(flags.rangeTop, Infinity),
-      showIfAbove: strictBool(flags.showIfAbove),
-      showAboveRange: strictNumeric(flags.showAboveRange, Infinity),
-      isBasement: strictBool(flags.isBasement),
-      noCollision: strictBool(flags.noCollision),
-      noFogHide: strictBool(flags.noFogHide),
-      allWallBlockSight: strictBool(flags.allWallBlockSight),
-      excludeFromChecker: strictBool(flags.excludeFromChecker),
-    }));
-  }
-
-  // --- Doc ranges (lights, sounds, notes, drawings, templates) ---
-  const docRangeSnapshots = [];
-  const docCollections = [
-    { collection: scene.lights, type: 'AmbientLight' },
-    { collection: scene.sounds, type: 'AmbientSound' },
-    { collection: scene.notes, type: 'Note' },
-    { collection: scene.drawings, type: 'Drawing' },
-    { collection: scene.templates, type: 'MeasuredTemplate' },
-  ];
-
-  for (const { collection, type } of docCollections) {
-    if (!collection) continue;
-    for (const doc of collection) {
-      if (!doc) continue;
-      if (!doc.flags?.levels) continue;
-
-      const range = readDocLevelsRange(doc);
-      // Only include docs that have at least one finite range bound
-      if (!Number.isFinite(range.rangeBottom) && !Number.isFinite(range.rangeTop)) continue;
-
-      docRangeSnapshots.push(Object.freeze({
-        id: String(doc.id ?? doc._id ?? ''),
-        type,
-        rangeBottom: strictNumeric(range.rangeBottom, -Infinity),
-        rangeTop: strictNumeric(range.rangeTop, Infinity),
-      }));
-    }
-  }
-
-  // --- Walls with height bounds ---
+  // Walls: use V14 native levels membership
   const wallSnapshots = [];
   const sceneWalls = scene.walls ?? [];
   for (const wallDoc of sceneWalls) {
     if (!wallDoc) continue;
-    if (!wallHasHeightBounds(wallDoc)) continue;
-
-    const bounds = readWallHeightFlags(wallDoc);
+    const levelsSet = wallDoc.levels;
+    const levelIds = levelsSet?.size ? Array.from(levelsSet) : [];
     wallSnapshots.push(Object.freeze({
-      id: String(wallDoc.id ?? wallDoc._id ?? ''),
-      bottom: strictNumeric(bounds.bottom, -Infinity),
-      top: strictNumeric(bounds.top, Infinity),
+      id: String(wallDoc.id ?? ''),
+      bottom: -Infinity,
+      top: Infinity,
+      levelIds: Object.freeze(levelIds),
     }));
   }
 
-  // --- Diagnostics ---
-  const flagDiags = getFlagReaderDiagnostics();
+  // Tiles: use native level membership where available
+  const tileSnapshots = [];
+  const sceneTiles = scene.tiles ?? [];
+  for (const tileDoc of sceneTiles) {
+    if (!tileDoc) continue;
+    const elevation = Number(tileDoc.elevation ?? 0);
+    const safeElev = Number.isFinite(elevation) ? elevation : 0;
+    const levelsSet = tileDoc.levels;
+    const levelIds = levelsSet?.size ? Array.from(levelsSet) : [];
+    tileSnapshots.push(Object.freeze({
+      id: String(tileDoc.id ?? ''),
+      rangeBottom: safeElev,
+      rangeTop: Infinity,
+      showIfAbove: false,
+      showAboveRange: Infinity,
+      isBasement: false,
+      noCollision: false,
+      noFogHide: false,
+      allWallBlockSight: false,
+      excludeFromChecker: false,
+      levelIds: Object.freeze(levelIds),
+    }));
+  }
 
-  const snapshot = Object.freeze({
+  return Object.freeze({
     sceneId,
     timestamp,
-    levelsEnabled,
-    backgroundElevation,
-    weatherElevation,
-    lightMasking,
+    levelsEnabled: true,
+    backgroundElevation: 0,
+    weatherElevation: null,
+    lightMasking: false,
     sceneLevels: Object.freeze(sceneLevels),
     tiles: Object.freeze(tileSnapshots),
-    docRanges: Object.freeze(docRangeSnapshots),
+    docRanges: Object.freeze([]),
     walls: Object.freeze(wallSnapshots),
     diagnostics: Object.freeze({
-      coercionFallbacks: flagDiags.length,
-      invalidBands,
+      coercionFallbacks: 0,
+      invalidBands: 0,
       tileCount: tileSnapshots.length,
       wallCount: wallSnapshots.length,
-      docRangeCount: docRangeSnapshots.length,
+      docRangeCount: 0,
+      source: 'v14-native',
     }),
   });
-
-  return snapshot;
 }
+

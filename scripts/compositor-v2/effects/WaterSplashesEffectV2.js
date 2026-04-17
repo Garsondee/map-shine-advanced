@@ -32,8 +32,13 @@
 import { createLogger } from '../../core/log.js';
 import { weatherController } from '../../core/WeatherController.js';
 import { probeMaskFile } from '../../assets/loader.js';
-import { tileHasLevelsRange, readTileLevelsFlags } from '../../foundry/levels-scene-flags.js';
-import { OVERLAY_THREE_LAYER } from '../../core/render-layers.js';
+import {
+  tileHasLevelsRange,
+  readTileLevelsFlags,
+  getViewedLevelBackgroundSrc,
+} from '../../foundry/levels-scene-flags.js';
+// OVERLAY_THREE_LAYER intentionally not imported — splashes use layer 0 only
+// and rely on LayerOrderPolicy FLOOR_EFFECTS band for correct stacking.
 import {
   WaterEdgeMaskShape,
   WaterInteriorMaskShape,
@@ -52,14 +57,65 @@ import {
   ConstantValue,
 } from '../../libs/three.quarks.module.js';
 
+import {
+  GROUND_Z,
+  effectUnderOverheadOrder,
+} from '../LayerOrderPolicy.js';
+
 const log = createLogger('WaterSplashesV2');
 
-// Ground Z for the bus scene (matches FloorRenderBus GROUND_Z).
-const GROUND_Z = 1000;
+/** Detect legacy splash darken block for one-shot shader upgrade. */
+const SHADOW_DARKEN_V1_ANCHOR = '// MS_WATER_SPLASHES_SHADOW_DARKEN_V1';
 
-// Keep render-order math aligned with FloorRenderBus floor bands.
-const RENDER_ORDER_PER_FLOOR = 10000;
-const OVERHEAD_OFFSET = 5000;
+/**
+ * GLSL appended after `#include <tonemapping_fragment>` so shadow response is not
+ * undone by tone mapping; scales RGB and alpha for additive foam/splashes/bubbles.
+ */
+const SHADOW_DARKEN_FS = `
+  // MS_WATER_SPLASHES_SHADOW_DARKEN_V3
+  {
+    vec2 msUv = vec2(
+      (gl_FragCoord.x + 0.5) / max(uResolution.x, 1.0),
+      (gl_FragCoord.y + 0.5) / max(uResolution.y, 1.0)
+    );
+    float csh = clamp(texture2D(uCombinedShadowMap, msUv).r, 0.0, 1.0);
+    gl_FragColor.rgb *= csh;
+    gl_FragColor.a = clamp(gl_FragColor.a * csh, 0.0, 1.0);
+  }
+`;
+
+/**
+ * Strip misplaced V2/V3 darken blocks, then append darken after tonemapping when present.
+ * @param {string} fs
+ * @returns {string}
+ */
+function injectShadowDarkenAfterTonemapping(fs) {
+  let s = fs
+    .replace(/\/\/ MS_WATER_SPLASHES_SHADOW_DARKEN_V2\s*\{[\s\S]*?\}\s*/g, '')
+    .replace(/\/\/ MS_WATER_SPLASHES_SHADOW_DARKEN_V3\s*\{[\s\S]*?\}\s*/g, '');
+  const tonemap = '#include <tonemapping_fragment>';
+  if (s.includes(tonemap)) {
+    return s.replace(tonemap, `${tonemap}\n${SHADOW_DARKEN_FS}`);
+  }
+  if (s.includes('#include <soft_fragment>')) {
+    return s.replace('#include <soft_fragment>', `#include <soft_fragment>${SHADOW_DARKEN_FS}`);
+  }
+  return `${s}${SHADOW_DARKEN_FS}`;
+}
+
+/** Legacy uniform block injected before V2 (removed from new patches). */
+const SHADOW_DECL_V1_LEGACY =
+  'uniform sampler2D uBuildingShadowMap;\n' +
+  'uniform float uHasBuildingShadow;\n' +
+  'uniform float uBuildingShadowOpacity;\n' +
+  'uniform vec2 uBldSceneOrigin;\n' +
+  'uniform vec2 uBldSceneSize;\n' +
+  'uniform vec2 uCanvasDimensions;\n' +
+  'uniform sampler2D uOverheadShadowMap;\n' +
+  'uniform float uHasOverheadShadow;\n' +
+  'uniform float uOverheadShadowOpacity;\n' +
+  'uniform sampler2D uCombinedShadowMap;\n' +
+  'uniform float uHasCombinedScreenShadow;\n';
 
 // Spatial bucket size for splitting large water masks into smaller emitters (px).
 const BUCKET_SIZE = 2500;
@@ -125,6 +181,9 @@ export class WaterSplashesEffectV2 {
 
     /** @type {THREE.Vector2|null} reused drawing-buffer size vector */
     this._tempVec2 = null;
+
+    /** 1×1 white — bound when combined shadow RT is not ready so the shader always samples a valid texture. */
+    this._combinedShadowFallbackTex = null;
 
     /** @type {{ sx:number, syWorld:number, sw:number, sh:number }|null} cached scene bounds for mask sampling */
     this._sceneBounds = null;
@@ -242,32 +301,48 @@ export class WaterSplashesEffectV2 {
   _patchFloorPresenceMaterial(material) {
     const THREE = window.THREE;
     if (!material || !THREE) return;
-    // Re-patch if we already patched an older version (before water-mask clipping).
-    const existing = material.userData?._msFloorPresenceUniforms;
-    if (existing && existing.uWaterMask && existing.uSceneBounds) return;
-
-    const uniforms = {
-      uFloorPresenceMap: { value: null },
-      uHasFloorPresenceMap: { value: 0.0 },
-      uResolution: { value: new THREE.Vector2(1, 1) },
-
-      // Water mask clipping (scene-UV space raw water mask, R channel)
-      uWaterMask: { value: null },
-      uHasWaterMask: { value: 0.0 },
-      // 1 = clip to water, 0 = do not clip (used for surface splash rings)
-      uUseWaterMaskClip: { value: 1.0 },
-      // Matches legacy foam: flip V based on mask metadata / THREE.Texture.flipY
-      uWaterFlipV: { value: 0.0 },
-
-      // Scene bounds for world->sceneUV conversion: (sceneX, sceneY, sceneW, sceneH) in world coords (Y-up)
-      uSceneBounds: { value: new THREE.Vector4(0, 0, 1, 1) },
-    };
 
     material.userData = material.userData || {};
-    material.userData._msFloorPresenceUniforms = uniforms;
+    let uniforms = material.userData._msFloorPresenceUniforms;
+    if (!uniforms) {
+      uniforms = {
+        uFloorPresenceMap: { value: null },
+        uHasFloorPresenceMap: { value: 0.0 },
+        uResolution: { value: new THREE.Vector2(1, 1) },
+        uWaterMask: { value: null },
+        uHasWaterMask: { value: 0.0 },
+        uUseWaterMaskClip: { value: 1.0 },
+        uWaterFlipV: { value: 0.0 },
+        uSceneBounds: { value: new THREE.Vector4(0, 0, 1, 1) },
+        uCombinedShadowMap: { value: null },
+      };
+      material.userData._msFloorPresenceUniforms = uniforms;
+    } else {
+      if (!uniforms.uCombinedShadowMap) {
+        uniforms.uCombinedShadowMap = { value: null };
+      }
+    }
 
     const isShaderMat = material.isShaderMaterial === true;
     const marker = '/* MS_WATER_SPLASHES_MASKING_V1 */';
+    const shadowDecl = 'uniform sampler2D uCombinedShadowMap;\n';
+
+    // Sprite batch ShaderMaterial: nothing to do once mask + V3 shadow darken are present.
+    if (isShaderMat && typeof material.fragmentShader === 'string'
+      && material.fragmentShader.includes(marker)
+      && material.fragmentShader.includes('MS_WATER_SPLASHES_SHADOW_DARKEN_V3')) {
+      const uni = material.uniforms || (material.uniforms = {});
+      uni.uFloorPresenceMap = uniforms.uFloorPresenceMap;
+      uni.uHasFloorPresenceMap = uniforms.uHasFloorPresenceMap;
+      uni.uResolution = uniforms.uResolution;
+      uni.uWaterMask = uniforms.uWaterMask;
+      uni.uHasWaterMask = uniforms.uHasWaterMask;
+      uni.uUseWaterMaskClip = uniforms.uUseWaterMaskClip;
+      uni.uWaterFlipV = uniforms.uWaterFlipV;
+      uni.uSceneBounds = uniforms.uSceneBounds;
+      uni.uCombinedShadowMap = uniforms.uCombinedShadowMap;
+      return;
+    }
 
     // Direct patch path for three.quarks SpriteBatch ShaderMaterial.
     // onBeforeCompile does NOT run for already-compiled ShaderMaterials.
@@ -282,6 +357,7 @@ export class WaterSplashesEffectV2 {
       uni.uUseWaterMaskClip = uniforms.uUseWaterMaskClip;
       uni.uWaterFlipV = uniforms.uWaterFlipV;
       uni.uSceneBounds = uniforms.uSceneBounds;
+      uni.uCombinedShadowMap = uniforms.uCombinedShadowMap;
 
       let shaderChanged = false;
 
@@ -329,6 +405,21 @@ export class WaterSplashesEffectV2 {
         const beforeFS = material.fragmentShader;
         let fs = material.fragmentShader;
 
+        if (fs.includes(SHADOW_DARKEN_V1_ANCHOR)) {
+          const v1Body = /\/\/ MS_WATER_SPLASHES_SHADOW_DARKEN_V1\s*\{[\s\S]*?gl_FragColor\.rgb \*= msShadowMul;\s*\}/m;
+          fs = fs.replace(v1Body, '');
+          if (fs.includes('uniform sampler2D uBuildingShadowMap')) {
+            fs = fs.replace(SHADOW_DECL_V1_LEGACY, shadowDecl);
+          } else if (!fs.includes('uniform sampler2D uCombinedShadowMap')) {
+            fs = fs.replace(marker + '\n', marker + '\n' + shadowDecl);
+          }
+          fs = injectShadowDarkenAfterTonemapping(fs);
+          material.fragmentShader = fs;
+          shaderChanged = true;
+        }
+
+        fs = material.fragmentShader;
+
         if (!fs.includes(marker)) {
           // NOTE: Do not rely on a specific uniform anchor like `uniform sampler2D map;`.
           // three.quarks batch shaders may not include that symbol.
@@ -343,7 +434,8 @@ export class WaterSplashesEffectV2 {
             'uniform float uUseWaterMaskClip;\n' +
             'uniform float uWaterFlipV;\n' +
             'uniform vec4 uSceneBounds;\n' +
-            marker + '\n';
+            marker + '\n' +
+            shadowDecl;
 
           // Place after the last precision statement if present, otherwise at start.
           const precRE = /precision\s+(?:lowp|mediump|highp)\s+float\s*;\s*/g;
@@ -389,7 +481,16 @@ export class WaterSplashesEffectV2 {
             fs = fs.replace(marker + '\n', marker + '\n' + maskBlock);
           }
 
+          fs = injectShadowDarkenAfterTonemapping(fs);
           material.fragmentShader = fs;
+          shaderChanged = true;
+        } else if (!fs.includes('MS_WATER_SPLASHES_SHADOW_DARKEN_V3')) {
+          let fsUp = fs;
+          if (!fsUp.includes('uniform sampler2D uCombinedShadowMap')) {
+            fsUp = fsUp.replace(marker + '\n', marker + '\n' + shadowDecl);
+          }
+          fsUp = injectShadowDarkenAfterTonemapping(fsUp);
+          material.fragmentShader = fsUp;
           shaderChanged = true;
         }
 
@@ -411,6 +512,8 @@ export class WaterSplashesEffectV2 {
       shader.uniforms.uWaterFlipV = uniforms.uWaterFlipV;
       shader.uniforms.uSceneBounds = uniforms.uSceneBounds;
 
+      shader.uniforms.uCombinedShadowMap = uniforms.uCombinedShadowMap;
+
       // Inject world position varying (works for quarks SpriteBatch and MeshBasicMaterial)
       shader.vertexShader = shader.vertexShader
         .replace(
@@ -422,39 +525,42 @@ export class WaterSplashesEffectV2 {
           '#include <soft_vertex>\n  vMsWorldPos = (modelMatrix * vec4(offset, 1.0)).xyz;'
         );
 
-      shader.fragmentShader = shader.fragmentShader
-        .replace(
-          'void main() {',
-          'varying vec3 vMsWorldPos;\n' +
-          'uniform sampler2D uFloorPresenceMap;\nuniform float uHasFloorPresenceMap;\nuniform vec2 uResolution;\n' +
-          'uniform sampler2D uWaterMask;\nuniform float uHasWaterMask;\nuniform float uUseWaterMaskClip;\nuniform float uWaterFlipV;\nuniform vec4 uSceneBounds;\n' +
-          'void main() {'
-        )
-        .replace(
-          '#include <soft_fragment>',
-          '  // Water mask clip: suppress particles outside the raw _Water mask (prevents land leaks).\n' +
-          '  if (uUseWaterMaskClip > 0.5 && uHasWaterMask > 0.5) {\n' +
-          '    vec2 uvMask = vec2(\n' +
-          '      (vMsWorldPos.x - uSceneBounds.x) / uSceneBounds.z,\n' +
-          '      (vMsWorldPos.y - uSceneBounds.y) / uSceneBounds.w\n' +
-          '    );\n' +
-          '    if (uWaterFlipV > 0.5) uvMask.y = 1.0 - uvMask.y;\n' +
-          '    if (uvMask.x < 0.0 || uvMask.x > 1.0 || uvMask.y < 0.0 || uvMask.y > 1.0) {\n' +
-          '      gl_FragColor.a *= 0.0;\n' +
-          '    } else {\n' +
-          '      float m = texture2D(uWaterMask, uvMask).r;\n' +
-          '      gl_FragColor.a *= m;\n' +
-          '    }\n' +
-          '  }\n' +
-          '  // Floor-presence gate: occlude particles under the current floor\'s solid tiles.\n' +
-          '  if (uHasFloorPresenceMap > 0.5) {\n' +
-          '    vec2 fpScreenUV = gl_FragCoord.xy / uResolution;\n' +
-          '    // V2 uses a screen-space occluder alpha RT (same as WaterEffectV2).\n' +
-          '    float floorPresence = texture2D(uFloorPresenceMap, fpScreenUV).a;\n' +
-          '    gl_FragColor.a *= (1.0 - floorPresence);\n' +
-          '  }\n' +
-          '#include <soft_fragment>'
-        );
+      shader.fragmentShader = injectShadowDarkenAfterTonemapping(
+        shader.fragmentShader
+          .replace(
+            'void main() {',
+            'varying vec3 vMsWorldPos;\n' +
+            'uniform sampler2D uFloorPresenceMap;\nuniform float uHasFloorPresenceMap;\nuniform vec2 uResolution;\n' +
+            'uniform sampler2D uWaterMask;\nuniform float uHasWaterMask;\nuniform float uUseWaterMaskClip;\nuniform float uWaterFlipV;\nuniform vec4 uSceneBounds;\n' +
+            shadowDecl +
+            'void main() {'
+          )
+          .replace(
+            '#include <soft_fragment>',
+            '  // Water mask clip: suppress particles outside the raw _Water mask (prevents land leaks).\n' +
+            '  if (uUseWaterMaskClip > 0.5 && uHasWaterMask > 0.5) {\n' +
+            '    vec2 uvMask = vec2(\n' +
+            '      (vMsWorldPos.x - uSceneBounds.x) / uSceneBounds.z,\n' +
+            '      (vMsWorldPos.y - uSceneBounds.y) / uSceneBounds.w\n' +
+            '    );\n' +
+            '    if (uWaterFlipV > 0.5) uvMask.y = 1.0 - uvMask.y;\n' +
+            '    if (uvMask.x < 0.0 || uvMask.x > 1.0 || uvMask.y < 0.0 || uvMask.y > 1.0) {\n' +
+            '      gl_FragColor.a *= 0.0;\n' +
+            '    } else {\n' +
+            '      float m = texture2D(uWaterMask, uvMask).r;\n' +
+            '      gl_FragColor.a *= m;\n' +
+            '    }\n' +
+            '  }\n' +
+            '  // Floor-presence gate: occlude particles under the current floor\'s solid tiles.\n' +
+            '  if (uHasFloorPresenceMap > 0.5) {\n' +
+            '    vec2 fpScreenUV = gl_FragCoord.xy / uResolution;\n' +
+            '    // V2 uses a screen-space occluder alpha RT (same as WaterEffectV2).\n' +
+            '    float floorPresence = texture2D(uFloorPresenceMap, fpScreenUV).a;\n' +
+            '    gl_FragColor.a *= (1.0 - floorPresence);\n' +
+            '  }\n' +
+            '#include <soft_fragment>'
+          )
+      );
     };
 
     material.needsUpdate = true;
@@ -491,8 +597,7 @@ export class WaterSplashesEffectV2 {
   _updateBatchRenderOrder(maxFloorIndex) {
     if (!this._batchRenderer) return;
     const safeFloorIndex = Number.isFinite(Number(maxFloorIndex)) ? Number(maxFloorIndex) : 0;
-    const floorBandStart = safeFloorIndex * RENDER_ORDER_PER_FLOOR;
-    this._batchRenderer.renderOrder = floorBandStart + (OVERHEAD_OFFSET - 1);
+    this._batchRenderer.renderOrder = effectUnderOverheadOrder(safeFloorIndex, 50);
   }
 
   // ── Lifecycle ──────────────────────────────────────────────────────────────
@@ -503,16 +608,15 @@ export class WaterSplashesEffectV2 {
     if (!THREE) { log.warn('initialize: THREE not available'); return; }
 
     // Create a dedicated BatchedRenderer for water splash particles.
-    // IMPORTANT (V2): FloorRenderBus tiles use very large renderOrder values
-    // (floorIndex * 10000 + sort). Starting at 49 causes all tile draws to
-    // fully overwrite particle pixels. Match FireEffectV2: start above the
-    // overhead tile offset (5000) so particles are visible above regular tiles.
+    // Uses FLOOR_EFFECTS role so splashes sit between albedo and overhead.
+    // Layer 0 only — no OVERLAY_THREE_LAYER; floor-band ordering handles
+    // stacking correctly without a late-overlay bypass.
     this._batchRenderer = new BatchedRenderer();
-    this._batchRenderer.renderOrder = OVERHEAD_OFFSET - 1; // Matches FireEffectV2 initial value
+    this._batchRenderer.renderOrder = effectUnderOverheadOrder(0, 50);
     this._batchRenderer.frustumCulled = false;
     try {
-      if (this._batchRenderer.layers && typeof this._batchRenderer.layers.enable === 'function') {
-        this._batchRenderer.layers.enable(OVERLAY_THREE_LAYER);
+      if (this._batchRenderer.layers && typeof this._batchRenderer.layers.set === 'function') {
+        this._batchRenderer.layers.set(0);
       }
     } catch (_) {}
 
@@ -564,7 +668,7 @@ export class WaterSplashesEffectV2 {
     const floorWaterData = new Map();
 
     // ── Process background image first (if it has a _Water mask) ─────────────
-    const bgSrc = canvas?.scene?.background?.src;
+    const bgSrc = getViewedLevelBackgroundSrc(canvas?.scene) ?? canvas?.scene?.background?.src;
     if (bgSrc) {
       const dotIdx = bgSrc.lastIndexOf('.');
       const bgBasePath = dotIdx > 0 ? bgSrc.substring(0, dotIdx) : bgSrc;
@@ -741,6 +845,107 @@ export class WaterSplashesEffectV2 {
   }
 
   /**
+   * White 1×1 texture — `texture2D(...).r` is 1.0 so splashes stay un-tinted until a real combined shadow RT exists.
+   * @returns {import('three').Texture|null}
+   * @private
+   */
+  _ensureCombinedShadowFallbackTexture() {
+    const THREE = window.THREE;
+    if (!THREE) return null;
+    if (this._combinedShadowFallbackTex) return this._combinedShadowFallbackTex;
+    const data = new Uint8Array([255, 255, 255, 255]);
+    const tex = new THREE.DataTexture(data, 1, 1, THREE.RGBAFormat);
+    tex.magFilter = THREE.NearestFilter;
+    tex.minFilter = THREE.NearestFilter;
+    tex.wrapS = THREE.ClampToEdgeWrapping;
+    tex.wrapT = THREE.ClampToEdgeWrapping;
+    tex.generateMipmaps = false;
+    tex.needsUpdate = true;
+    if ('flipY' in tex) tex.flipY = false;
+    this._combinedShadowFallbackTex = tex;
+    return tex;
+  }
+
+  /**
+   * After ShadowManagerV2 pre-bus combine, bind `combinedShadowTexture` so foam,
+   * rain splashes, and underwater bubbles dim with the same factor as lit terrain.
+   * Invoked from FloorCompositor immediately before the bus scene draw.
+   */
+  syncShadowDarkeningUniforms() {
+    if (!this._initialized || !this._batchRenderer) return;
+    const splashesEnabled = !!this.params?.enabled;
+    const bubblesEnabled = !!this.bubblesParams?.enabled;
+    const parentWaterEnabled = this._isParentWaterEffectEnabled();
+    const shouldRender = this._enabled && parentWaterEnabled && (splashesEnabled || bubblesEnabled);
+    if (!shouldRender) return;
+
+    let fc = null;
+    try { fc = window.MapShine?.effectComposer?._floorCompositorV2 ?? null; } catch (_) {}
+
+    const smFx = fc?._shadowManagerEffect ?? null;
+    const combinedTex = smFx?.combinedShadowTexture ?? null;
+    const texForShader = combinedTex ?? this._ensureCombinedShadowFallbackTexture();
+
+    const renderer = window.MapShine?.renderer || window.canvas?.app?.renderer;
+    let resX = 1;
+    let resY = 1;
+    if (renderer && window.THREE) {
+      if (!this._tempVec2) this._tempVec2 = new window.THREE.Vector2();
+      const size = this._tempVec2;
+      if (typeof renderer.getDrawingBufferSize === 'function') {
+        renderer.getDrawingBufferSize(size);
+      } else if (typeof renderer.getSize === 'function') {
+        renderer.getSize(size);
+        const dpr = typeof renderer.getPixelRatio === 'function'
+          ? renderer.getPixelRatio()
+          : (window.devicePixelRatio || 1);
+        size.multiplyScalar(dpr);
+      }
+      resX = size.x || 1;
+      resY = size.y || 1;
+    }
+
+    const systems = this._tempSystems;
+    systems.length = 0;
+    for (const floorIndex of this._activeFloors) {
+      const st = this._floorStates.get(floorIndex);
+      if (!st) continue;
+      if (st.foamSystems && st.foamSystems.length) systems.push(...st.foamSystems);
+      if (st.splashSystems && st.splashSystems.length) systems.push(...st.splashSystems);
+      if (st.foamSystems2 && st.foamSystems2.length) systems.push(...st.foamSystems2);
+      if (st.splashSystems2 && st.splashSystems2.length) systems.push(...st.splashSystems2);
+    }
+
+    const br = this._batchRenderer;
+    const batches = br?.batches;
+    const map = br?.systemToBatchIndex;
+
+    const applyU = (u) => {
+      if (!u) return;
+      if (u.uCombinedShadowMap) u.uCombinedShadowMap.value = texForShader;
+      if (u.uResolution) u.uResolution.value.set(resX, resY);
+    };
+
+    for (const sys of systems) {
+      if (!sys) continue;
+      if (sys.material) {
+        this._patchFloorPresenceMaterial(sys.material);
+        applyU(sys.material.userData?._msFloorPresenceUniforms);
+      }
+      const idx = (map && typeof map.get === 'function') ? map.get(sys) : undefined;
+      const batch = (idx !== undefined && batches) ? batches[idx] : null;
+      const batchMat = batch?.material;
+      if (batchMat) {
+        this._patchFloorPresenceMaterial(batchMat);
+        applyU(batchMat.userData?._msFloorPresenceUniforms);
+        const bu = batchMat.uniforms;
+        if (bu?.uCombinedShadowMap) bu.uCombinedShadowMap.value = texForShader;
+        if (bu?.uResolution) bu.uResolution.value.set(resX, resY);
+      }
+    }
+  }
+
+  /**
    * Per-frame update. Steps the BatchedRenderer simulation.
    * @param {{ elapsed: number, delta: number }} timeInfo
    */
@@ -795,7 +1000,9 @@ export class WaterSplashesEffectV2 {
     } catch (_) {}
 
     // Compute dt for three.quarks (matches FireEffectV2 time scaling).
-    const deltaSec = typeof timeInfo.delta === 'number' ? timeInfo.delta : 0.016;
+    const deltaSec = typeof timeInfo?.motionDelta === 'number'
+      ? timeInfo.motionDelta
+      : (typeof timeInfo?.delta === 'number' ? timeInfo.delta : 0.016);
     const clampedDelta = Math.min(deltaSec, 0.1);
     const simSpeed = (weatherController && typeof weatherController.simulationSpeed === 'number')
       ? weatherController.simulationSpeed : 2.0;
@@ -1172,8 +1379,10 @@ export class WaterSplashesEffectV2 {
     this.clear();
     this._foamTexture?.dispose();
     this._splashTexture?.dispose();
+    this._combinedShadowFallbackTex?.dispose?.();
     this._foamTexture = null;
     this._splashTexture = null;
+    this._combinedShadowFallbackTex = null;
     this._batchRenderer = null;
     this._initialized = false;
     log.info('WaterSplashesEffectV2 disposed');

@@ -1,63 +1,83 @@
 /**
- * @fileoverview Shared helpers to seed Levels-compatible defaults for newly created placeables.
+ * @fileoverview Shared helpers to seed level defaults for newly created placeables.
  *
- * These helpers are intentionally conservative:
- * - they only apply when Levels compatibility is active for the current scene,
- * - they only fill missing fields,
- * - they never overwrite explicit user-provided values.
+ * V14-native path: uses the viewed Level document id to populate the native
+ * `levels` SetField on new walls/tiles/etc. Legacy wall-height/flag helpers
+ * are retained as fallbacks only.
  */
 
-import { getLevelsCompatibilityMode, LEVELS_COMPATIBILITY_MODES } from './levels-compatibility.js';
-import { isLevelsEnabledForScene } from './levels-scene-flags.js';
+import { hasV14NativeLevels } from './levels-scene-flags.js';
 
 function _isMissing(value) {
   return value === undefined || value === null;
 }
 
-function _getFallbackCreateBandForTileData(data) {
-  const isOverhead = data?.overhead === true
-    || data?.isOverhead === true
-    || data?.flags?.levels?.overhead === true;
-  if (isOverhead) {
-    return { bottom: 10, top: 20, center: 15 };
-  }
-  return { bottom: 0, top: 10, center: 5 };
-}
-
-function _getFallbackCreateBandForLightData(_data) {
-  return { bottom: 0, top: 10, center: 5 };
+/**
+ * Get the currently viewed V14 Level document ID.
+ * @returns {string|null}
+ */
+function _getViewedV14LevelId() {
+  const scene = globalThis.canvas?.scene;
+  if (!hasV14NativeLevels(scene)) return null;
+  return scene._view ?? null;
 }
 
 /**
- * Read the currently selected Levels UI range when the Levels range UI is active.
+ * Seed the V14 native `levels` array field on new wall creation data when
+ * the scene uses native levels. This assigns the wall to the currently
+ * viewed level. Does nothing if levels are already specified.
  *
- * This keeps create-default seeding aligned with users who are navigating floors
- * through the Levels module UI instead of MapShine's level navigator.
- *
- * @returns {{bottom:number, top:number, center:number}|null}
+ * @param {object} data - The pending wall create data
+ * @param {{scene?: Scene|null|undefined}} [options]
+ * @returns {object} The mutated data
  */
-function _getLevelsUiActiveBand() {
-  const levelsUi = globalThis.CONFIG?.Levels?.UI;
-  if (!levelsUi || levelsUi.rangeEnabled !== true) return null;
+export function applyWallV14LevelDefaults(data, options = {}) {
+  if (!data || typeof data !== 'object') return data;
+  const scene = options.scene ?? globalThis.canvas?.scene;
+  if (!hasV14NativeLevels(scene)) return data;
 
-  const range = levelsUi.range;
-  if (!Array.isArray(range) || range.length < 2) return null;
+  // Only seed when the data doesn't already have levels assigned
+  if (data.levels && (Array.isArray(data.levels) ? data.levels.length : data.levels.size)) return data;
 
-  let bottom = Number(range[0]);
-  let top = Number(range[1]);
-  if (!Number.isFinite(bottom) || !Number.isFinite(top)) return null;
+  const levelId = _getViewedV14LevelId();
+  if (!levelId) return data;
 
-  if (top < bottom) {
-    const swap = bottom;
-    bottom = top;
-    top = swap;
-  }
+  data.levels = [levelId];
+  return data;
+}
 
-  return {
-    bottom,
-    top,
-    center: (bottom + top) * 0.5,
-  };
+/**
+ * Seed the V14 native `levels` array field on new tile creation data.
+ * @param {object} data
+ * @param {{scene?: Scene|null|undefined}} [options]
+ * @returns {object}
+ */
+export function applyTileV14LevelDefaults(data, options = {}) {
+  if (!data || typeof data !== 'object') return data;
+  const scene = options.scene ?? globalThis.canvas?.scene;
+  if (!hasV14NativeLevels(scene)) return data;
+  if (data.levels && (Array.isArray(data.levels) ? data.levels.length : data.levels.size)) return data;
+  const levelId = _getViewedV14LevelId();
+  if (!levelId) return data;
+  data.levels = [levelId];
+  return data;
+}
+
+/**
+ * Seed V14 native token `level` field with the currently viewed level.
+ * @param {object} data
+ * @param {{scene?: Scene|null|undefined}} [options]
+ * @returns {object}
+ */
+export function applyTokenV14LevelDefaults(data, options = {}) {
+  if (!data || typeof data !== 'object') return data;
+  const scene = options.scene ?? globalThis.canvas?.scene;
+  if (!hasV14NativeLevels(scene)) return data;
+  if (data.level) return data;
+  const levelId = _getViewedV14LevelId();
+  if (!levelId) return data;
+  data.level = levelId;
+  return data;
 }
 
 /**
@@ -65,12 +85,6 @@ function _getLevelsUiActiveBand() {
  * @returns {{bottom:number, top:number, center:number}|null}
  */
 export function getFiniteActiveLevelBand() {
-  // Prefer Levels UI range when active, then fall back to MapShine context.
-  // This ensures floor-scoped wall defaults work regardless of which floor UI
-  // the user is currently driving.
-  const levelsUiBand = _getLevelsUiActiveBand();
-  if (levelsUiBand) return levelsUiBand;
-
   const ctx = window.MapShine?.activeLevelContext;
   let bottom = Number(ctx?.bottom);
   let top = Number(ctx?.top);
@@ -90,35 +104,69 @@ export function getFiniteActiveLevelBand() {
 }
 
 /**
+ * Get wall-height bounds for the active level.
+ *
+ * Wall-height uses half-open ranges [bottom, top) for filtering. To ensure
+ * walls block the entire floor including the top seam, we use the NEXT
+ * floor's bottom as the wall top (or Infinity if this is the top floor).
+ *
+ * Example:
+ *   Floor 0: band [0, 9]  -> wall-height [0, 10)  (uses floor 1's bottom)
+ *   Floor 1: band [10, 20] -> wall-height [10, 20) (or Infinity)
+ *
+ * @returns {{bottom:number, top:number}|null}
+ */
+export function getWallHeightBandForActiveLevel() {
+  const ctx = window.MapShine?.activeLevelContext;
+  if (!ctx) return null;
+
+  let bottom = Number(ctx?.bottom);
+  if (!Number.isFinite(bottom)) return null;
+
+  // Find the next floor's bottom to use as our top
+  const levels = window.MapShine?.availableLevels || [];
+  const currentIndex = Number(ctx?.index);
+
+  let top;
+  if (Number.isFinite(currentIndex) && levels.length > currentIndex + 1) {
+    const nextLevel = levels[currentIndex + 1];
+    top = Number(nextLevel?.bottom);
+  }
+
+  // If no next level, use the context top (top floor extends to Infinity)
+  if (!Number.isFinite(top)) {
+    top = Number(ctx?.top);
+    // If the floor's natural top is finite, extend it by 1 unit to ensure
+    // the seam elevation is included in the wall-height range
+    if (Number.isFinite(top)) {
+      top += 1;
+    } else {
+      top = Infinity;
+    }
+  }
+
+  return { bottom, top };
+}
+
+/**
  * Should active-level create defaults be applied for this scene?
  * @param {Scene|null|undefined} [scene]
  * @param {{allowWhenModeOff?: boolean}} [options]
  * @returns {boolean}
  */
 export function shouldApplyLevelCreateDefaults(scene = canvas?.scene, options = {}) {
-  const { allowWhenModeOff = false } = options;
-  if (!allowWhenModeOff && getLevelsCompatibilityMode() === LEVELS_COMPATIBILITY_MODES.OFF) return false;
-
-  // If Levels' own range UI is active, respect it regardless of scene-flag
-  // completeness. This matches the user's explicit floor-selection intent.
-  if (_getLevelsUiActiveBand()) return true;
-
-  // If MapShine has an active multi-level context, allow default seeding even
-  // when a scene's Levels flags are sparse or inferred at runtime.
+  void options;
+  if (!hasV14NativeLevels(scene)) return false;
   const mapShineCtx = window.MapShine?.activeLevelContext;
   const mapShineLevelCount = Number(mapShineCtx?.count ?? 0);
   if (Number.isFinite(mapShineLevelCount) && mapShineLevelCount > 1) return true;
-
-  // Fallback: if an explicit finite active band exists, honor it even when
-  // count metadata is unavailable.
   if (getFiniteActiveLevelBand()) return true;
-
-  if (!scene) return false;
-  return isLevelsEnabledForScene(scene);
+  return false;
 }
 
 /**
- * Seed missing wall-height bounds from the active level band.
+ * Seed wall level defaults. V14-native scenes use the `levels` document field;
+ * legacy scenes fall back to `wall-height` flag bounds.
  *
  * @param {object} data
  * @param {{scene?: Scene|null|undefined}} [options]
@@ -126,30 +174,7 @@ export function shouldApplyLevelCreateDefaults(scene = canvas?.scene, options = 
  */
 export function applyWallLevelDefaults(data, options = {}) {
   if (!data || typeof data !== 'object') return data;
-
-  const scene = options.scene ?? canvas?.scene;
-  // Wall-height scoping should keep working even when compatibility mode is
-  // OFF, as long as we have an explicit active floor context.
-  if (!shouldApplyLevelCreateDefaults(scene, { allowWhenModeOff: true })) return data;
-
-  const band = getFiniteActiveLevelBand();
-  if (!band) return data;
-
-  const wallHeight = data.flags?.['wall-height'];
-  const hasBottom = !_isMissing(wallHeight?.bottom);
-  const hasTop = !_isMissing(wallHeight?.top);
-  if (hasBottom && hasTop) return data;
-
-  data.flags = (data.flags && typeof data.flags === 'object') ? data.flags : {};
-  const nextWallHeight = (data.flags['wall-height'] && typeof data.flags['wall-height'] === 'object')
-    ? data.flags['wall-height']
-    : {};
-
-  if (!hasBottom) nextWallHeight.bottom = band.bottom;
-  if (!hasTop) nextWallHeight.top = band.top;
-
-  data.flags['wall-height'] = nextWallHeight;
-  return data;
+  return applyWallV14LevelDefaults(data, options);
 }
 
 /**
@@ -165,35 +190,25 @@ export function applyAmbientSoundLevelDefaults(data, options = {}) {
   const scene = options.scene ?? canvas?.scene;
   if (!shouldApplyLevelCreateDefaults(scene)) return data;
 
-  const band = getFiniteActiveLevelBand() || _getFallbackCreateBandForLightData(data);
+  const band = getFiniteActiveLevelBand();
   if (!band) return data;
 
   const hasElevation = !_isMissing(data.elevation);
-  const hasRangeBottom = !_isMissing(data.flags?.levels?.rangeBottom);
-  const hasRangeTop = !_isMissing(data.flags?.levels?.rangeTop);
-  if (hasElevation && hasRangeBottom && hasRangeTop) return data;
+  const hasLevels = Array.isArray(data.levels) ? data.levels.length > 0 : !!data.levels?.size;
+  if (hasElevation && hasLevels) return data;
 
   if (!hasElevation) {
     data.elevation = band.center;
   }
 
-  if (!hasRangeBottom || !hasRangeTop) {
-    data.flags = (data.flags && typeof data.flags === 'object') ? data.flags : {};
-    data.flags.levels = (data.flags.levels && typeof data.flags.levels === 'object')
-      ? data.flags.levels
-      : {};
-    if (!hasRangeBottom) data.flags.levels.rangeBottom = band.bottom;
-    if (!hasRangeTop) data.flags.levels.rangeTop = band.top;
-  }
+  if (!hasLevels) data.levels = [_getViewedV14LevelId()].filter(Boolean);
 
   return data;
 }
 
 /**
- * Seed missing tile elevation/range defaults from the active level band.
- *
- * This keeps newly created tiles (including drag/drop creates) scoped to the
- * currently selected floor in the Levels mini UI / MapShine level context.
+ * Seed missing tile level defaults. V14-native: sets `levels` field.
+ * Legacy: sets elevation and range flags.
  *
  * @param {object} data
  * @param {{scene?: Scene|null|undefined}} [options]
@@ -201,38 +216,12 @@ export function applyAmbientSoundLevelDefaults(data, options = {}) {
  */
 export function applyTileLevelDefaults(data, options = {}) {
   if (!data || typeof data !== 'object') return data;
-
-  const scene = options.scene ?? canvas?.scene;
-  // Tile floor scoping should keep working when we have explicit active-floor
-  // context, even if compatibility mode is set to OFF.
-  if (!shouldApplyLevelCreateDefaults(scene, { allowWhenModeOff: true })) return data;
-
-  const band = getFiniteActiveLevelBand() || _getFallbackCreateBandForTileData(data);
-  if (!band) return data;
-
-  const hasElevation = !_isMissing(data.elevation);
-  const hasRangeBottom = !_isMissing(data.flags?.levels?.rangeBottom);
-  const hasRangeTop = !_isMissing(data.flags?.levels?.rangeTop);
-  if (hasElevation && hasRangeBottom && hasRangeTop) return data;
-
-  if (!hasElevation) {
-    data.elevation = band.center;
-  }
-
-  if (!hasRangeBottom || !hasRangeTop) {
-    data.flags = (data.flags && typeof data.flags === 'object') ? data.flags : {};
-    data.flags.levels = (data.flags.levels && typeof data.flags.levels === 'object')
-      ? data.flags.levels
-      : {};
-    if (!hasRangeBottom) data.flags.levels.rangeBottom = band.bottom;
-    if (!hasRangeTop) data.flags.levels.rangeTop = band.top;
-  }
-
-  return data;
+  return applyTileV14LevelDefaults(data, options);
 }
 
 /**
- * Seed missing token elevation/range defaults from the active level band.
+ * Seed missing token level defaults. V14-native: sets `level` field.
+ * Legacy: sets elevation from active band.
  *
  * @param {object} data
  * @param {{scene?: Scene|null|undefined}} [options]
@@ -240,38 +229,7 @@ export function applyTileLevelDefaults(data, options = {}) {
  */
 export function applyTokenLevelDefaults(data, options = {}) {
   if (!data || typeof data !== 'object') return data;
-
-  // In single-floor contexts, token range flags are unnecessary and can
-  // destabilize Levels perspective evaluation for some actor prototypes.
-  // Keep token creation on core elevation semantics in this mode.
-  try {
-    const levelCount = Number(window.MapShine?.activeLevelContext?.count ?? 0);
-    if (Number.isFinite(levelCount) && levelCount <= 1) {
-      const levelsFlags = data.flags?.levels;
-      if (levelsFlags && typeof levelsFlags === 'object') {
-        delete levelsFlags.rangeBottom;
-        delete levelsFlags.rangeTop;
-      }
-    }
-  } catch (_) {
-  }
-
-  const scene = options.scene ?? canvas?.scene;
-  // Token floor scoping should keep working when explicit active-floor context
-  // exists, even if compatibility mode is OFF.
-  if (!shouldApplyLevelCreateDefaults(scene, { allowWhenModeOff: true })) return data;
-
-  const band = getFiniteActiveLevelBand() || _getFallbackCreateBandForLightData(data);
-  if (!band) return data;
-
-  const hasElevation = !_isMissing(data.elevation);
-  if (hasElevation) return data;
-
-  if (!hasElevation) {
-    data.elevation = band.center;
-  }
-
-  return data;
+  return applyTokenV14LevelDefaults(data, options);
 }
 
 /**
@@ -287,26 +245,20 @@ export function applyAmbientLightLevelDefaults(data, options = {}) {
   const scene = options.scene ?? canvas?.scene;
   if (!shouldApplyLevelCreateDefaults(scene)) return data;
 
-  const band = getFiniteActiveLevelBand() || _getFallbackCreateBandForLightData(data);
+  const band = getFiniteActiveLevelBand();
   if (!band) return data;
 
   const hasElevation = !_isMissing(data.elevation);
-  const hasRangeBottom = !_isMissing(data.flags?.levels?.rangeBottom);
-  const hasRangeTop = !_isMissing(data.flags?.levels?.rangeTop);
-  if (hasElevation && hasRangeBottom && hasRangeTop) return data;
+  const hasLevels = Array.isArray(data.levels) ? data.levels.length > 0 : !!data.levels?.size;
+  if (hasElevation && hasLevels) return data;
 
   if (!hasElevation) {
     data.elevation = band.center;
   }
 
-  if (!hasRangeBottom || !hasRangeTop) {
-    data.flags = (data.flags && typeof data.flags === 'object') ? data.flags : {};
-    data.flags.levels = (data.flags.levels && typeof data.flags.levels === 'object')
-      ? data.flags.levels
-      : {};
-    if (!hasRangeBottom) data.flags.levels.rangeBottom = band.bottom;
-    if (!hasRangeTop) data.flags.levels.rangeTop = band.top;
-  }
+  if (!hasLevels) data.levels = [_getViewedV14LevelId()].filter(Boolean);
 
   return data;
 }
+
+

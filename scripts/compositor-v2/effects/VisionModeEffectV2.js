@@ -214,7 +214,9 @@ export class VisionModeEffectV2 {
       this._updateTargetFromMode(newMode);
     }
 
-    const dt = timeInfo?.delta ?? 0.016;
+    const dt = (typeof timeInfo?.motionDelta === 'number')
+      ? timeInfo.motionDelta
+      : (timeInfo?.delta ?? 0.016);
     const alpha = Math.min(1.0, this._lerpSpeed * dt);
 
     this._current.saturation   += (this._target.saturation   - this._current.saturation)   * alpha;

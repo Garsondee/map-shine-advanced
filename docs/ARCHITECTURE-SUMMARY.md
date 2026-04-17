@@ -118,6 +118,7 @@ scripts/
 ├── compositor-v2/               # V2 rendering pipeline (the primary runtime)
 │   ├── FloorCompositor.js       # V2 render orchestrator — owns FloorRenderBus, drives all passes
 │   ├── FloorRenderBus.js        # Separate THREE.Scene with all tile meshes Z-ordered by floor
+│   ├── LayerOrderPolicy.js      # Centralized render-order role bands (albedo/effects/overhead/overhead-fx)
 │   ├── FloorLayerManager.js     # Assigns tiles/tokens to Three.js layers (1-19) by floor index
 │   └── effects/                 # All V2 effect implementations (~40 classes)
 │       ├── SpecularEffectV2.js      # Per-tile additive specular overlays (_Specular mask)
@@ -372,6 +373,29 @@ z = 1000 + elev/100     Token sprites (elevation mapped to sub-integer Z)
 z = 1000 + floorIndex + 0.5  Overhead tiles for floor N
 ```
 
+### Render-Order Role Bands (LayerOrderPolicy)
+
+`LayerOrderPolicy.js` assigns each bus-scene mesh a `renderOrder` based on floor
+index and visual role. Each floor occupies a 10 000-slot band (N × 10 000) divided
+into five role sub-bands:
+
+```
+Per floor (ascending):
+  FLOOR_ALBEDO        0 – 2399   regular (non-overhead) tiles
+  FLOOR_EFFECTS    2400 – 4799   effects above albedo, below overhead (default)
+  FLOOR_OVERHEAD   4800 – 7199   overhead / roof tiles
+  FLOOR_OVERHEAD_FX 7200 – 9599  effects above overhead (trees, canopy)
+  FLOOR_MOTION_TOP 9600 – 9999   motion-forced above-tokens, reserved
+```
+
+All effects default to `FLOOR_EFFECTS` (under overhead) unless they explicitly
+request `FLOOR_OVERHEAD_FX` (e.g. tree canopy). Per-tile surface effects
+(specular, bush, prism, iridescence) use `tileRelativeEffectOrder()` which maps
+the tile's band into the corresponding effects band.
+
+Console diagnostic: `MapShine.floorRenderBus.dumpLayerOrder()` dumps every bus
+scene object sorted by renderOrder with decoded role, floor, and visibility.
+
 ### Per-Frame Render Sequence (`FloorCompositor.render()`)
 
 1. **Time Update** — `TimeManager.update()` produces `TimeInfo` (elapsed, delta, fps, paused, scale)
@@ -473,7 +497,8 @@ The V2 render orchestrator. It owns `FloorRenderBus`, `FloorLayerManager`, and a
 
 A standalone `THREE.Scene` that holds all tile meshes:
 - **Texture loading**: Uses `THREE.TextureLoader` (HTML `<img>` element), which delivers **straight-alpha** data. This avoids the canvas-2D premultiplied-alpha corruption that plagued earlier approaches.
-- **Z ordering**: Floor 0 tiles at Z=1000, floor 1 at Z=1001, etc. Standard depth sorting handles layering without any explicit render order tricks.
+- **Z ordering**: Floor 0 tiles at Z=1000, floor 1 at Z=1001, etc. `depthTest` is off; stacking is entirely via `renderOrder` using `LayerOrderPolicy` role bands.
+- **Render-order policy**: All tiles and effects obtain their `renderOrder` from `LayerOrderPolicy.js`. Albedo tiles use `FLOOR_ALBEDO`, effects default to `FLOOR_EFFECTS` (between albedo and overhead), overhead tiles use `FLOOR_OVERHEAD`, and above-overhead effects (trees) use `FLOOR_OVERHEAD_FX`.
 - **Bus overlay effects**: `SpecularEffectV2`, `FireEffectV2`, and other overlay effects add meshes to the same bus scene. They automatically benefit from the floor visibility system via the shared render loop.
 - **Tile editing suppression**: Suppresses tile meshes that are being edited to prevent double-rendering
 

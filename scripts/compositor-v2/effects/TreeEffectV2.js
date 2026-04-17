@@ -12,14 +12,16 @@ import { probeMaskFile } from '../../assets/loader.js';
 import { tileHasLevelsRange, readTileLevelsFlags } from '../../foundry/levels-scene-flags.js';
 import { weatherController } from '../../core/WeatherController.js';
 
+import {
+  GROUND_Z,
+  RENDER_ORDER_PER_FLOOR,
+  effectAboveOverheadOrder,
+  FLOOR_OVERHEAD_FX_OFFSET,
+} from '../LayerOrderPolicy.js';
+
 const log = createLogger('TreeEffectV2');
 
-const GROUND_Z = 1000;
-const TREE_Z_OFFSET = 0.18; // above bushes/specular but still within same floor band
-// Keep in sync with FloorRenderBus / TokenManager ordering.
-const RENDER_ORDER_PER_FLOOR = 10000;
-const TOKEN_RENDER_ORDER_WITHIN_FLOOR = 9900;
-const TREE_RENDER_ORDER_WITHIN_FLOOR = 9950;
+const TREE_Z_OFFSET = 0.18;
 
 export class TreeEffectV2 {
   /**
@@ -68,6 +70,7 @@ export class TreeEffectV2 {
     // Public params (mirrors V1 schema / defaults)
     this.params = {
       enabled: true,
+      textureStatus: 'Searching...',
       intensity: 1.0,
 
       // -- Wind Physics --
@@ -113,7 +116,7 @@ export class TreeEffectV2 {
       temperature: 0.0,
       tint: 0.0,
 
-      // Shadow params retained for UI parity (not applied in V2 yet)
+      // Canopy shadow (offset sample + blur in fragment shader)
       shadowOpacity: 0.5,
       shadowLength: 0.02,
       shadowSoftness: 1.42,
@@ -125,100 +128,524 @@ export class TreeEffectV2 {
   get enabled() { return this._enabled; }
   set enabled(v) {
     this._enabled = !!v;
+    this.params.enabled = this._enabled;
     for (const entry of this._overlays.values()) {
       entry.mesh.visible = this._enabled;
-    }
-    if (this._sharedUniforms?.uEffectEnabled) {
-      this._sharedUniforms.uEffectEnabled.value = this._enabled;
     }
   }
 
   static getControlSchema() {
     return {
       enabled: true,
+      help: {
+        title: 'Tree canopy (_Tree masks)',
+        summary: [
+          'Animates **high-canopy motion** on tiles (and the scene background) that ship a matching **`_Tree`** texture next to the art.',
+          'Like **Bush**, weather **wind** drives waves, bend, and flutter; trees add **turbulence** noise on top. **Sun direction** (sky / overhead / time) feeds a soft **canopy shadow** pass.',
+          'Render order is tuned so canopies sit above bushes/specular on the same floor.',
+          'Cost scales with overlay count and shadow taps; reduce shadow softness or intensity on heavy maps.',
+          'Settings save with the scene (not World Based).',
+        ].join('\n\n'),
+        glossary: {
+          'Mask status': 'Whether the scene found at least one `_Tree` texture after load.',
+          Turbulence: 'Extra high-frequency wobble mixed into distortion (trees only).',
+          'Canopy shadow': 'Darkening from a blurred, offset sample of the mask opposite the sun.',
+          'Hover fade': 'When token hover-hide is active, trees can fade via runtime uniform (not a Tweakpane slider).',
+        },
+      },
+      presetApplyDefaults: true,
       groups: [
         {
-          name: 'tree-phys',
-          label: 'Wind Physics',
-          type: 'inline',
-          parameters: ['windSpeedGlobal', 'windRampSpeed', 'gustFrequency', 'gustSpeed', 'waveSpatialFrequency', 'waveTravelSpeed', 'waveSharpness', 'waveInfluence', 'turbulence', 'turbulenceScale', 'minRustleSpeed', 'branchBend', 'elasticity']
-        },
-        {
-          name: 'tree-flutter',
-          label: 'Leaf Flutter',
-          type: 'inline',
-          parameters: ['flutterIntensity', 'flutterSpeed', 'flutterScale']
-        },
-        {
-          name: 'tree-response',
-          label: 'Response Curves',
+          name: 'status',
+          label: 'Status',
           type: 'folder',
+          expanded: true,
+          parameters: ['textureStatus'],
+        },
+        {
+          name: 'look',
+          label: 'Look',
+          type: 'folder',
+          expanded: true,
+          parameters: ['intensity'],
+        },
+        {
+          name: 'wind',
+          label: 'Wind & waves',
+          type: 'folder',
+          expanded: true,
+          parameters: [
+            'windSpeedGlobal', 'windRampSpeed', 'gustFrequency', 'gustSpeed',
+            'waveSpatialFrequency', 'waveTravelSpeed', 'waveSharpness', 'waveInfluence',
+            'turbulence', 'turbulenceScale', 'minRustleSpeed',
+          ],
+        },
+        {
+          name: 'branch',
+          label: 'Branch motion',
+          type: 'folder',
+          expanded: false,
+          parameters: ['branchBend', 'elasticity'],
+        },
+        {
+          name: 'flutter',
+          label: 'Leaf flutter',
+          type: 'folder',
+          expanded: false,
+          parameters: ['flutterIntensity', 'flutterSpeed', 'flutterScale'],
+        },
+        {
+          name: 'response',
+          label: 'Response curves',
+          type: 'folder',
+          expanded: false,
           parameters: [
             'ambientMotion', 'rustleFloorScale',
             'flutterBaseDrive', 'flutterWindStart', 'flutterWindFull', 'flutterLowWindBoost', 'flutterLowWindFadeEnd', 'flutterGustFloor',
-            'bendMinStrength', 'bendWindStart', 'bendWindFull'
-          ]
+            'bendMinStrength', 'bendWindStart', 'bendWindFull',
+          ],
         },
         {
-          name: 'tree-color',
+          name: 'color',
           label: 'Color',
           type: 'folder',
-          parameters: ['exposure', 'brightness', 'contrast', 'saturation', 'temperature', 'tint']
+          expanded: false,
+          parameters: ['exposure', 'brightness', 'contrast', 'saturation', 'temperature', 'tint'],
         },
         {
-          name: 'tree-shadow',
-          label: 'Shadow',
-          type: 'inline',
-          parameters: ['shadowOpacity', 'shadowLength', 'shadowSoftness']
+          name: 'shadow',
+          label: 'Canopy shadow',
+          type: 'folder',
+          expanded: false,
+          parameters: ['shadowOpacity', 'shadowLength', 'shadowSoftness'],
         },
         {
-          name: 'tree-edges',
-          label: 'Edge Safety',
-          type: 'inline',
-          parameters: ['edgeFadeStart', 'edgeFadeEnd']
-        }
+          name: 'edges',
+          label: 'Edge safety',
+          type: 'folder',
+          expanded: false,
+          parameters: ['edgeFadeStart', 'edgeFadeEnd'],
+        },
       ],
       parameters: {
-        intensity: { type: 'slider', min: 0.0, max: 2.0, default: 1.0 },
-        windSpeedGlobal: { type: 'slider', label: 'Wind Strength', min: 0.0, max: 3.0, default: 0.06 },
-        windRampSpeed: { type: 'slider', label: 'Wind Responsiveness', min: 0.1, max: 10.0, default: 1.32 },
-        gustFrequency: { type: 'slider', label: 'Gust Frequency', min: 0.0, max: 0.05, step: 0.0001, default: 0.0022 },
-        gustSpeed: { type: 'slider', label: 'Gust Speed', min: 0.0, max: 2.0, step: 0.0001, default: 0.15 },
-        waveSpatialFrequency: { type: 'slider', label: 'Wave Spacing', min: 0.0001, max: 0.01, step: 0.0001, default: 0.0014 },
-        waveTravelSpeed: { type: 'slider', label: 'Wave Travel Speed', min: 0.05, max: 4.0, default: 0.7 },
-        waveSharpness: { type: 'slider', label: 'Wave Crest Sharpness', min: 0.5, max: 6.0, default: 2.0 },
-        waveInfluence: { type: 'slider', label: 'Wave Influence', min: 0.0, max: 1.0, default: 0.6 },
-        ambientMotion: { type: 'slider', label: 'Ambient Motion', min: 0.0, max: 0.35, step: 0.005, default: 0.07 },
-        rustleFloorScale: { type: 'slider', label: 'Rustle Floor Scale', min: 0.0, max: 1.0, step: 0.01, default: 0.25 },
-        flutterBaseDrive: { type: 'slider', label: 'Flutter Base Drive', min: 0.0, max: 1.0, step: 0.01, default: 0.1 },
-        flutterWindStart: { type: 'slider', label: 'Flutter Wind Start', min: 0.0, max: 0.4, step: 0.01, default: 0.0 },
-        flutterWindFull: { type: 'slider', label: 'Flutter Wind Full', min: 0.01, max: 0.6, step: 0.01, default: 0.12 },
-        flutterLowWindBoost: { type: 'slider', label: 'Flutter Low-Wind Boost', min: 1.0, max: 2.5, step: 0.01, default: 1.67 },
-        flutterLowWindFadeEnd: { type: 'slider', label: 'Flutter Boost Fade End', min: 0.05, max: 1.0, step: 0.01, default: 0.37 },
-        flutterGustFloor: { type: 'slider', label: 'Flutter Gust Floor', min: 0.0, max: 1.0, step: 0.01, default: 0.49 },
-        bendMinStrength: { type: 'slider', label: 'Bend Min Strength', min: 0.0, max: 1.0, step: 0.01, default: 0.19 },
-        bendWindStart: { type: 'slider', label: 'Bend Wind Start', min: 0.0, max: 0.8, step: 0.01, default: 0.22 },
-        bendWindFull: { type: 'slider', label: 'Bend Wind Full', min: 0.1, max: 1.0, step: 0.01, default: 0.78 },
-        turbulence: { type: 'slider', label: 'Turbulence', min: 0.0, max: 2.0, step: 0.01, default: 0.45 },
-        turbulenceScale: { type: 'slider', label: 'Turbulence Scale', min: 0.00005, max: 0.003, step: 0.00001, default: 0.00022 },
-        minRustleSpeed: { type: 'slider', label: 'Low-Wind Rustle Floor', min: 0.0, max: 0.6, default: 0.12 },
-        branchBend: { type: 'slider', label: 'Branch Bend', min: 0.0, max: 0.1, step: 0.001, default: 0.05 },
-        elasticity: { type: 'slider', label: 'Springiness', min: 0.5, max: 5.0, default: 5.0 },
-        flutterIntensity: { type: 'slider', label: 'Leaf Flutter Amount', min: 0.0, max: 0.005, step: 0.0001, default: 0.0007 },
-        flutterSpeed: { type: 'slider', label: 'Leaf Flutter Speed', min: 1.0, max: 20.0, default: 6.64 },
-        flutterScale: { type: 'slider', label: 'Leaf Cluster Size', min: 0.005, max: 0.1, default: 0.02 },
-        exposure: { type: 'slider', min: -2.0, max: 2.0, default: 0.0 },
-        brightness: { type: 'slider', min: -0.5, max: 0.5, default: 0.0 },
-        contrast: { type: 'slider', min: 0.5, max: 2.0, default: 1.0 },
-        saturation: { type: 'slider', min: 0.0, max: 2.0, default: 1.0 },
-        temperature: { type: 'slider', min: -1.0, max: 1.0, default: 0.0 },
-        tint: { type: 'slider', min: -1.0, max: 1.0, default: 0.0 },
-        shadowOpacity: { type: 'slider', label: 'Shadow Opacity', min: 0.0, max: 1.0, default: 0.5 },
-        shadowLength: { type: 'slider', label: 'Shadow Length', min: 0.0, max: 0.2, default: 0.02 },
-        shadowSoftness: { type: 'slider', label: 'Shadow Softness', min: 0.5, max: 10.0, default: 1.42 },
-        edgeFadeStart: { type: 'slider', label: 'Edge Fade Start', min: 0.0, max: 0.2, default: 0.0 },
-        edgeFadeEnd: { type: 'slider', label: 'Edge Fade End', min: 0.02, max: 0.4, default: 0.04 }
-      }
+        textureStatus: {
+          type: 'string',
+          label: 'Mask status',
+          default: 'Searching...',
+          readonly: true,
+          tooltip: 'Updated when the scene loads: whether any `_Tree` mask was found.',
+        },
+        intensity: {
+          type: 'slider',
+          label: 'Intensity',
+          min: 0.0,
+          max: 2.0,
+          step: 0.01,
+          default: 1.0,
+          throttle: 100,
+          tooltip: 'Master strength of the tree layer and its shadow pass.',
+        },
+        windSpeedGlobal: {
+          type: 'slider',
+          label: 'Wind scale',
+          min: 0.0,
+          max: 3.0,
+          step: 0.001,
+          default: 0.05666,
+          throttle: 100,
+          tooltip: 'Multiplies scene wind speed before driving motion.',
+        },
+        windRampSpeed: {
+          type: 'slider',
+          label: 'Wind catch-up',
+          min: 0.1,
+          max: 10.0,
+          step: 0.05,
+          default: 1.49174,
+          throttle: 100,
+          tooltip: 'Higher = canopy motion follows weather wind changes faster.',
+        },
+        gustFrequency: {
+          type: 'slider',
+          label: 'Gust frequency',
+          min: 0.0,
+          max: 0.05,
+          step: 0.0001,
+          default: 0.0022,
+          throttle: 100,
+          tooltip: 'Spatial scale of the pseudo-gust noise field.',
+        },
+        gustSpeed: {
+          type: 'slider',
+          label: 'Gust travel',
+          min: 0.0,
+          max: 2.0,
+          step: 0.01,
+          default: 0.15,
+          throttle: 100,
+          tooltip: 'How fast the gust field scrolls with wind.',
+        },
+        waveSpatialFrequency: {
+          type: 'slider',
+          label: 'Wave spacing',
+          min: 0.0001,
+          max: 0.01,
+          step: 0.0001,
+          default: 0.0014,
+          throttle: 100,
+          tooltip: 'Spacing of large wind waves along the wind direction.',
+        },
+        waveTravelSpeed: {
+          type: 'slider',
+          label: 'Wave speed',
+          min: 0.05,
+          max: 4.0,
+          step: 0.01,
+          default: 0.7,
+          throttle: 100,
+          tooltip: 'Animation speed of the traveling wave carrier.',
+        },
+        waveSharpness: {
+          type: 'slider',
+          label: 'Wave sharpness',
+          min: 0.5,
+          max: 6.0,
+          step: 0.05,
+          default: 2.0,
+          throttle: 100,
+          tooltip: 'Exponent on the wave carrier — higher = crisper gust fronts.',
+        },
+        waveInfluence: {
+          type: 'slider',
+          label: 'Wave mix',
+          min: 0.0,
+          max: 1.0,
+          step: 0.01,
+          default: 0.6,
+          throttle: 100,
+          tooltip: 'How much the traveling wave modulates bend and flutter.',
+        },
+        turbulence: {
+          type: 'slider',
+          label: 'Turbulence',
+          min: 0.0,
+          max: 2.0,
+          step: 0.01,
+          default: 1.06,
+          throttle: 100,
+          tooltip: 'Strength of extra procedural chop layered on wind distortion.',
+        },
+        turbulenceScale: {
+          type: 'slider',
+          label: 'Turbulence scale',
+          min: 0.00005,
+          max: 0.003,
+          step: 0.00001,
+          default: 0.00146,
+          throttle: 100,
+          tooltip: 'World-space frequency of the turbulence noise.',
+        },
+        ambientMotion: {
+          type: 'slider',
+          label: 'Ambient motion',
+          min: 0.0,
+          max: 0.35,
+          step: 0.005,
+          default: 0.07,
+          throttle: 100,
+          tooltip: 'Baseline motion when wind is calm.',
+        },
+        rustleFloorScale: {
+          type: 'slider',
+          label: 'Rustle floor scale',
+          min: 0.0,
+          max: 1.0,
+          step: 0.01,
+          default: 0.25,
+          throttle: 100,
+          tooltip: 'Scales the low-wind rustle floor.',
+        },
+        flutterBaseDrive: {
+          type: 'slider',
+          label: 'Flutter base drive',
+          min: 0.0,
+          max: 1.0,
+          step: 0.01,
+          default: 0.1,
+          throttle: 100,
+          tooltip: 'Minimum flutter response before wind ramps it up.',
+        },
+        flutterWindStart: {
+          type: 'slider',
+          label: 'Flutter wind start',
+          min: 0.0,
+          max: 0.4,
+          step: 0.01,
+          default: 0.0,
+          throttle: 100,
+          tooltip: 'Scene wind level where flutter begins to ramp.',
+        },
+        flutterWindFull: {
+          type: 'slider',
+          label: 'Flutter wind full',
+          min: 0.01,
+          max: 0.6,
+          step: 0.01,
+          default: 0.12,
+          throttle: 100,
+          tooltip: 'Scene wind level where flutter reaches full drive.',
+        },
+        flutterLowWindBoost: {
+          type: 'slider',
+          label: 'Low-wind flutter boost',
+          min: 1.0,
+          max: 2.5,
+          step: 0.01,
+          default: 1.67,
+          throttle: 100,
+          tooltip: 'Extra flutter when wind is barely moving.',
+        },
+        flutterLowWindFadeEnd: {
+          type: 'slider',
+          label: 'Boost fade end',
+          min: 0.05,
+          max: 1.0,
+          step: 0.01,
+          default: 0.37,
+          throttle: 100,
+          tooltip: 'Wind level where the low-wind boost has faded out.',
+        },
+        flutterGustFloor: {
+          type: 'slider',
+          label: 'Flutter gust floor',
+          min: 0.0,
+          max: 1.0,
+          step: 0.01,
+          default: 0.49,
+          throttle: 100,
+          tooltip: 'Minimum gust modulation on flutter in calm wind.',
+        },
+        bendMinStrength: {
+          type: 'slider',
+          label: 'Bend minimum',
+          min: 0.0,
+          max: 1.0,
+          step: 0.01,
+          default: 0.19,
+          throttle: 100,
+          tooltip: 'Floor on bend strength in light wind.',
+        },
+        bendWindStart: {
+          type: 'slider',
+          label: 'Bend wind start',
+          min: 0.0,
+          max: 0.8,
+          step: 0.01,
+          default: 0.22,
+          throttle: 100,
+          tooltip: 'Wind level where branch bending starts ramping.',
+        },
+        bendWindFull: {
+          type: 'slider',
+          label: 'Bend wind full',
+          min: 0.1,
+          max: 1.0,
+          step: 0.01,
+          default: 0.78,
+          throttle: 100,
+          tooltip: 'Wind level where bend drive reaches full strength.',
+        },
+        minRustleSpeed: {
+          type: 'slider',
+          label: 'Low-wind rustle',
+          min: 0.0,
+          max: 0.6,
+          step: 0.01,
+          default: 0.12347,
+          throttle: 100,
+          tooltip: 'Minimum effective wind speed when the scene reports calm air.',
+        },
+        branchBend: {
+          type: 'slider',
+          label: 'Branch bend',
+          min: 0.0,
+          max: 0.1,
+          step: 0.001,
+          default: 0.072,
+          throttle: 100,
+          tooltip: 'How far UVs shift along wind when bending.',
+        },
+        elasticity: {
+          type: 'slider',
+          label: 'Springiness',
+          min: 0.5,
+          max: 5.0,
+          step: 0.01,
+          default: 1.38,
+          throttle: 100,
+          tooltip: 'Oscillation speed of the orbital sway term.',
+        },
+        flutterIntensity: {
+          type: 'slider',
+          label: 'Flutter amount',
+          min: 0.0,
+          max: 0.005,
+          step: 0.0001,
+          default: 0.0007,
+          throttle: 100,
+          tooltip: 'Strength of high-frequency leaf jitter.',
+        },
+        flutterSpeed: {
+          type: 'slider',
+          label: 'Flutter speed',
+          min: 1.0,
+          max: 20.0,
+          step: 0.05,
+          default: 6.64492,
+          throttle: 100,
+          tooltip: 'How fast the flutter phase advances.',
+        },
+        flutterScale: {
+          type: 'slider',
+          label: 'Flutter scale',
+          min: 0.005,
+          max: 0.1,
+          step: 0.0001,
+          default: 0.02351,
+          throttle: 100,
+          tooltip: 'World-space scale of noise driving flutter.',
+        },
+        exposure: {
+          type: 'slider',
+          label: 'Exposure',
+          min: -2.0,
+          max: 2.0,
+          step: 0.02,
+          default: 0.0,
+          throttle: 100,
+          tooltip: 'Stops-style exposure before other color tweaks.',
+        },
+        brightness: {
+          type: 'slider',
+          label: 'Brightness',
+          min: -0.5,
+          max: 0.5,
+          step: 0.01,
+          default: 0.0,
+          throttle: 100,
+          tooltip: 'Linear offset after temperature/tint bias.',
+        },
+        contrast: {
+          type: 'slider',
+          label: 'Contrast',
+          min: 0.5,
+          max: 2.0,
+          step: 0.01,
+          default: 1.0,
+          throttle: 100,
+          tooltip: 'Contrast around mid gray.',
+        },
+        saturation: {
+          type: 'slider',
+          label: 'Saturation',
+          min: 0.0,
+          max: 2.0,
+          step: 0.01,
+          default: 1.0,
+          throttle: 100,
+          tooltip: '1 = unchanged; 0 = grayscale.',
+        },
+        temperature: {
+          type: 'slider',
+          label: 'Temperature',
+          min: -1.0,
+          max: 1.0,
+          step: 0.01,
+          default: 0.0,
+          throttle: 100,
+          tooltip: 'Warm/cool bias (red vs blue).',
+        },
+        tint: {
+          type: 'slider',
+          label: 'Green/magenta',
+          min: -1.0,
+          max: 1.0,
+          step: 0.01,
+          default: 0.0,
+          throttle: 100,
+          tooltip: 'Shifts green vs magenta before brightness.',
+        },
+        shadowOpacity: {
+          type: 'slider',
+          label: 'Shadow strength',
+          min: 0.0,
+          max: 1.0,
+          step: 0.01,
+          default: 0.5,
+          throttle: 100,
+          tooltip: 'Opacity of the offset canopy shadow pass.',
+        },
+        shadowLength: {
+          type: 'slider',
+          label: 'Shadow offset',
+          min: 0.0,
+          max: 0.2,
+          step: 0.001,
+          default: 0.02,
+          throttle: 100,
+          tooltip: 'How far the shadow sample is pushed opposite the sun.',
+        },
+        shadowSoftness: {
+          type: 'slider',
+          label: 'Shadow softness',
+          min: 0.5,
+          max: 10.0,
+          step: 0.05,
+          default: 1.42,
+          throttle: 100,
+          tooltip: 'Blur radius of the multi-tap shadow sample.',
+        },
+        edgeFadeStart: {
+          type: 'slider',
+          label: 'Edge fade start',
+          min: 0.0,
+          max: 0.2,
+          step: 0.005,
+          default: 0.0,
+          throttle: 100,
+          tooltip: 'Scene-edge band where motion begins to fall off.',
+        },
+        edgeFadeEnd: {
+          type: 'slider',
+          label: 'Edge fade end',
+          min: 0.02,
+          max: 0.4,
+          step: 0.005,
+          default: 0.04,
+          throttle: 100,
+          tooltip: 'Scene-edge distance where motion and shadow are fully suppressed.',
+        },
+      },
+      presets: {
+        Calm: {
+          windSpeedGlobal: 0.03,
+          turbulence: 0.55,
+          flutterIntensity: 0.00045,
+          branchBend: 0.045,
+        },
+        Windy: {
+          windSpeedGlobal: 0.11,
+          gustSpeed: 0.42,
+          waveTravelSpeed: 1.05,
+          turbulence: 1.35,
+          branchBend: 0.09,
+        },
+        'Soft shadow': {
+          shadowOpacity: 0.35,
+          shadowLength: 0.014,
+          shadowSoftness: 2.0,
+        },
+      },
     };
   }
 
@@ -276,7 +703,11 @@ export class TreeEffectV2 {
       this._createOverlay(tileId, floorIndex, { url, centerX, centerY, z, tileW, tileH, rotation });
     }
 
-    log.info(`TreeEffectV2 populated: ${this._overlays.size} overlays`);
+    const n = this._overlays.size;
+    this.params.textureStatus = n > 0
+      ? 'Ready (_Tree mask found)'
+      : 'Inactive (no _Tree mask)';
+    log.info(`TreeEffectV2 populated: ${n} overlays`);
   }
 
   update(timeInfo) {
@@ -285,9 +716,11 @@ export class TreeEffectV2 {
     const time = Number.isFinite(timeInfo?.elapsed)
       ? Number(timeInfo.elapsed)
       : Number(timeInfo?.time ?? 0);
-    const delta = Number.isFinite(timeInfo?.delta)
+    const delta = Number.isFinite(timeInfo?.motionDelta)
+      ? Number(timeInfo.motionDelta)
+      : (Number.isFinite(timeInfo?.delta)
       ? Number(timeInfo.delta)
-      : 0.016;
+      : 0.016);
 
     const weather = weatherController?.currentState;
     const windDir = weather?.windDirection;
@@ -551,6 +984,7 @@ export class TreeEffectV2 {
     this._overlays.clear();
     this._deriveAlphaByTileId.clear();
     this._alphaSampleByTileId.clear();
+    this.params.textureStatus = 'Inactive (no _Tree mask)';
   }
 
   dispose() {
@@ -566,7 +1000,6 @@ export class TreeEffectV2 {
   _buildSharedUniforms() {
     const THREE = window.THREE;
     this._sharedUniforms = {
-      uEffectEnabled: { value: this._enabled },
       uTreeMask: { value: null },
       uTime: { value: 0.0 },
       uWindDir: { value: new THREE.Vector2(1.0, 0.0) },
@@ -1010,18 +1443,8 @@ export class TreeEffectV2 {
     mesh.rotation.z = rotation;
 
     try {
-      const baseEntry = this._renderBus?._tiles?.get?.(tileId);
-      const baseOrder = Number(baseEntry?.mesh?.renderOrder);
-      const floorOrderBase = Number.isFinite(floorIndex) ? (floorIndex * RENDER_ORDER_PER_FLOOR) : 0;
-      const minTreeOrder = floorOrderBase + TREE_RENDER_ORDER_WITHIN_FLOOR;
-      if (Number.isFinite(baseOrder)) {
-        mesh.renderOrder = Math.max(baseOrder + 3, minTreeOrder);
-      } else {
-        mesh.renderOrder = minTreeOrder;
-      }
-      if (mesh.renderOrder <= floorOrderBase + TOKEN_RENDER_ORDER_WITHIN_FLOOR) {
-        mesh.renderOrder = floorOrderBase + TOKEN_RENDER_ORDER_WITHIN_FLOOR + 1;
-      }
+      // Trees are above-overhead (canopy over rooftops).
+      mesh.renderOrder = effectAboveOverheadOrder(floorIndex, 200);
     } catch (_) {}
 
     this._renderBus.addEffectOverlay(`${tileId}_tree`, mesh, floorIndex);

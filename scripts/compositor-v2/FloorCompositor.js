@@ -7,9 +7,11 @@
  * visibility system.
  *
  * Render pipeline:
- *   1. Bus scene (albedo + overlays) → **sceneRT** (offscreen)
- *   2. Post-processing chain reads sceneRT, writes through ping-pong RTs
- *   3. Final blit to screen framebuffer
+ *   1. Global shadow/cloud passes, then each visible level: bus slice → level RTs,
+ *      full post chain **per level** (lighting … water … bloom …) **before** any
+ *      merge — effects are not applied to a single pre-merged canvas.
+ *   2. **LevelCompositePass** blends those per-level final RTs bottom→top using alpha.
+ *   3. Distortion, PIXI/fog/lens, mask debug, blit to screen, late overlays.
  *
  * Current effects (bus overlays — rendered in step 1):
  *   - **SpecularEffectV2**: Per-tile additive overlays driven by _Specular masks.
@@ -19,10 +21,10 @@
  *   - **WeatherParticlesV2**: Rain, snow, and ash particles via
  *     shared BatchedRenderer in the bus scene.
  *
- * Post-processing effects (step 2):
+ * Post-processing effects (per-level and composite passes):
  *   - **CloudEffectV2**: Procedural clouds — generates shadow RT (fed into Lighting)
- *     and cloud-top RT (blitted after lighting). Shadow occlusion is floor-aware via
- *     the overhead-tile blocker pass.
+ *     and cloud-top RT (blitted after lighting). Shadow occlusion uses overhead
+ *     blockers plus a cross-floor mask for slabs above the active band.
  *   - **LightingEffectV2**: Ambient + dynamic lights + darkness, with cloud shadow.
  *     Window light overlays are fed into the light accumulation RT here so
  *     the compose shader tints them by surface albedo (preserving hue).
@@ -38,6 +40,8 @@
  */
 
 import { createLogger } from '../core/log.js';
+import { getWaterLayerBisectState } from '../ui/water-layering-bisect-dialog.js';
+import { yieldToMain } from '../core/yield-to-main.js';
 import { OVERLAY_THREE_LAYER } from '../core/render-layers.js';
 import { FloorRenderBus } from './FloorRenderBus.js';
 import { SpecularEffectV2 } from './effects/SpecularEffectV2.js';
@@ -52,9 +56,9 @@ import { FloorDepthBlurEffect } from './effects/FloorDepthBlurEffect.js';
 import { FilterEffectV2 } from './effects/FilterEffectV2.js';
 import { WaterEffectV2 } from './effects/WaterEffectV2.js';
 import { CloudEffectV2 } from './effects/CloudEffectV2.js';
+import { ShadowManagerV2 } from './effects/ShadowManagerV2.js';
 import { WeatherParticlesV2 } from './effects/WeatherParticlesV2.js';
 import { WaterSplashesEffectV2 } from './effects/WaterSplashesEffectV2.js';
-import { AshDisturbanceEffectV2 } from './effects/AshDisturbanceEffectV2.js';
 import { FluidEffectV2 } from './effects/FluidEffectV2.js';
 import { IridescenceEffectV2 } from './effects/IridescenceEffectV2.js';
 import { PrismEffectV2 } from './effects/PrismEffectV2.js';
@@ -82,8 +86,20 @@ import { SmellyFliesEffect } from '../particles/SmellyFliesEffect.js';
 import { CandleFlamesEffectV2 } from './effects/CandleFlamesEffectV2.js';
 import { weatherController } from '../core/WeatherController.js';
 import { resolveCompositorOutdoorsTexture } from '../masks/resolve-compositor-outdoors.js';
+import { MaskDebugOverlayPass } from './MaskDebugOverlayPass.js';
+import { LevelRenderTargetPool } from './LevelRenderTargetPool.js';
+import { LevelCompositePass } from './LevelCompositePass.js';
+import { resolveEffectEnabled, resolveOverlayEffectActive, resolveFloorEffectActive } from '../effects/resolve-effect-enabled.js';
 
 const log = createLogger('FloorCompositor');
+
+/**
+ * Per-effect wall-clock ceiling while `_ensureBusPopulated` runs jobs in series.
+ * If populate() awaits many slow network probes (e.g. Specular mask checks), the
+ * work should still interleave with timers unless the main thread is blocked.
+ */
+/** Per-effect ceiling; specular mask discovery can still be heavy on huge maps. */
+const POPULATE_JOB_TIMEOUT_MS = 90000;
 
 // ─── FloorCompositor ─────────────────────────────────────────────────────────
 
@@ -233,6 +249,13 @@ export class FloorCompositor {
     this._bloomEffect = new BloomEffectV2();
 
     /**
+     * Debug: composite mask textures (e.g. _Outdoors) over the final V2 frame before blit.
+     * Controlled from Tweakpane → Developer Tools → Mask overlay (V2).
+     * @type {MaskDebugOverlayPass}
+     */
+    this._maskDebugOverlayPass = new MaskDebugOverlayPass();
+
+    /**
      * V2 Sharpen Effect: unsharp mask filter. Disabled by default.
      * @type {SharpenEffectV2}
      */
@@ -254,6 +277,17 @@ export class FloorCompositor {
      * @type {CloudEffectV2}
      */
     this._cloudEffect = new CloudEffectV2();
+    /** @type {ShadowManagerV2} */
+    this._shadowManagerEffect = new ShadowManagerV2();
+    /**
+     * Cloud shadow textures from the previous frame — combined with current
+     * overhead/building in ShadowManagerV2 before the bus draw so water splashes
+     * sample the same structural shadow field as the scene (cloud lags one frame).
+     * @type {THREE.Texture|null}
+     */
+    this._shadowManagerPrevFrameCloudTex = null;
+    /** @type {THREE.Texture|null} */
+    this._shadowManagerPrevFrameCloudRawTex = null;
 
     /**
      * V2 Water Effect: fullscreen post-process surface driven by composited _Water
@@ -285,12 +319,9 @@ export class FloorCompositor {
      */
     this._weatherParticles = new WeatherParticlesV2();
 
-    /**
-     * V2 Ash Disturbance Effect: token-movement driven ash bursts from _Ash masks.
-     * Own BatchedRenderer lives in the bus scene.
-     * @type {AshDisturbanceEffectV2}
-     */
-    this._ashDisturbanceEffect = new AshDisturbanceEffectV2(this._renderBus);
+    // Temporarily disable Ash Disturbance while investigating load hangs.
+    // Leave the implementation on disk so it can be re-enabled after diagnosis.
+    this._ashDisturbanceEffect = null;
 
     /**
      * V2 Smelly Flies Effect: map-point-driven ambient fly swarms.
@@ -426,6 +457,9 @@ export class FloorCompositor {
     /** @type {boolean} Whether bus/effect populate has completed at least once. */
     this._populateComplete = false;
 
+    /** @type {number} Throttle anchor for `[POPULATE RENDER-SLIM]` logs. */
+    this._populateSlimRenderLogNextAt = 0;
+
     /** @type {boolean} Whether initialize() has been called */
     this._initialized = false;
 
@@ -455,11 +489,29 @@ export class FloorCompositor {
     /** @type {string|null} Last applied active level context key (bottom:top) */
     this._lastAppliedLevelContextKey = null;
 
+    /** @type {number} Number of runtime visibility drift corrections applied */
+    this._visibilityDriftCorrections = 0;
+    /** @type {number} Leak count observed on latest drift scan */
+    this._visibilityDriftLastLeakCount = 0;
+    /** @type {number|null} Timestamp of last drift correction */
+    this._visibilityDriftLastCorrectionMs = null;
+
+    /** @type {number} Number of tile-sprite visibility corrections applied */
+    this._tileSpriteVisibilityCorrections = 0;
+    /** @type {number} Last observed tile-sprite leak count */
+    this._tileSpriteVisibilityLastLeakCount = 0;
+    /** @type {number|null} Timestamp of last tile-sprite correction */
+    this._tileSpriteVisibilityLastCorrectionMs = null;
+
     /** @type {THREE.Texture|null} Last outdoors mask pushed to V2 consumers */
     this._lastOutdoorsTexture = null;
 
     /** @type {string|null} Last resolved floor key used for outdoors sync diagnostics */
     this._lastOutdoorsFloorKey = null;
+    /** @type {string|null} Last level-context key used for outdoors consumer sync */
+    this._lastOutdoorsContextKey = null;
+    /** @type {THREE.Texture|null} 1x1 indoors fallback when floor-scoped outdoors is unavailable */
+    this._neutralOutdoorsTexture = null;
 
     /** @type {THREE.Texture|null} Cached fire mask texture used for heat-haze blur */
     this._fireHeatMaskInput = null;
@@ -500,6 +552,16 @@ export class FloorCompositor {
 
     /** @type {THREE.WebGLRenderTarget|null} Upper-floor occluder mask for water effect */
     this._waterOccluderRT = null;
+
+    // ── Per-Level RT Pipeline ─────────────────────────────────────────────────
+    /** @type {LevelRenderTargetPool} Per-level RT allocation pool */
+    this._levelRTPool = new LevelRenderTargetPool();
+    /** @type {LevelCompositePass} Alpha-based bottom→top level compositor */
+    this._levelCompositePass = new LevelCompositePass();
+    /** @type {boolean} One-shot log for __v2PerLevelTintDebug */
+    this._v2PerLevelTintDebugLogged = false;
+    /** @type {boolean} One-shot warn when tint requested but visible level count ≠ 2 */
+    this._v2PerLevelTintLengthWarned = false;
 
     /** @type {THREE.Scene|null} Dedicated scene for fullscreen blit quad */
     this._blitScene  = null;
@@ -823,7 +885,7 @@ export class FloorCompositor {
    */
   _compositeFogOverlayToRT(inputRT, outputRT) {
     const fog = this._fogEffect;
-    if (!fog?.enabled || fog?.params?.enabled === false) return false;
+    if (!resolveEffectEnabled(fog)) return false;
     const scene = this._fogOverlayScene;
     const camera = this.camera;
     const renderer = this.renderer;
@@ -886,8 +948,9 @@ export class FloorCompositor {
    *   `index` is 1-based; `total` is the expected total number of init steps.
    * @param {{maskIds?: string[]|Set<string>}|null} [options.effectHints]
    *   Advisory scene hints used by warmupAsync to skip unnecessary compile targets.
+   * @returns {Promise<void>}
    */
-  initialize(options = {}) {
+  async initialize(options = {}) {
     const _onProgress = typeof options?.onProgress === 'function' ? options.onProgress : null;
     this._effectHints = options?.effectHints ?? null;
     // Total number of named effect init steps in this method — update when adding/removing effects.
@@ -960,6 +1023,10 @@ export class FloorCompositor {
       depthBuffer: false,
       stencilBuffer: false,
     });
+
+    // ── Per-level RT infrastructure ───────────────────────────────────────
+    this._levelRTPool.initialize(w, h, preferredType);
+    this._levelCompositePass.initialize();
 
     // ── Fullscreen blit quad ──────────────────────────────────────────────
     this._blitScene  = new THREE.Scene();
@@ -1119,8 +1186,12 @@ export class FloorCompositor {
     this._fogOverlayScene.name = 'FogOverlaySceneV2';
     this._fogOverlayCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
 
+    // Let the browser run timers / websocket heartbeats after heavy RT + shader setup.
+    await yieldToMain();
+
     // ── Effects + hooks ───────────────────────────────────────────────────
     this._renderBus.initialize();
+    await yieldToMain();
 
     // Movement preview UI: path lines, tile highlights, ghost tokens, drag ghosts.
     // Must initialize after _renderBus so _scene is available.
@@ -1129,6 +1200,7 @@ export class FloorCompositor {
     } catch (err) {
       log.warn('FloorCompositor: MovementPreviewEffectV2 initialize failed:', err);
     }
+    await yieldToMain();
 
     // Door meshes are still managed by the legacy DoorMeshManager, but in V2
     // only the FloorRenderBus scene is rendered. Re-target existing and future
@@ -1139,50 +1211,60 @@ export class FloorCompositor {
     } catch (err) {
       log.warn('FloorCompositor: failed to route door meshes to V2 render bus scene:', err);
     }
+    await yieldToMain();
 
     // Keep compositor startup resilient: a single effect init failure should not
     // abort V2 rendering entirely. Each effect is isolated and logged.
     // `_reportProgress` is called after each init to advance the loading overlay.
-    const initEffect = (label, fn) => {
+    const initEffect = async (label, fn) => {
       try {
         fn?.();
       } catch (err) {
         log.warn(`FloorCompositor: ${label} initialize failed:`, err);
       }
       _reportProgress(label);
+      await yieldToMain();
     };
 
     // Initialize floor depth blur with the same RT type as the rest of the pipeline.
-    initEffect('FloorDepthBlurEffect', () =>
+    await initEffect('FloorDepthBlurEffect', () =>
       this._floorDepthBlurEffect.initialize(this.renderer, w, h, preferredType));
-    initEffect('SpecularEffectV2', () => this._specularEffect.initialize());
-    initEffect('FluidEffectV2', () => this._fluidEffect.initialize());
-    initEffect('IridescenceEffectV2', () => this._iridescenceEffect.initialize());
-    initEffect('PrismEffectV2', () => this._prismEffect.initialize());
-    initEffect('BushEffectV2', () => this._bushEffect.initialize());
-    initEffect('TreeEffectV2', () => this._treeEffect.initialize());
-    initEffect('FireEffectV2', () => this._fireEffect.initialize());
-    initEffect('DustEffectV2', () => this._dustEffect.initialize());
-    initEffect('WindowLightEffectV2', () => this._windowLightEffect.initialize());
+    await initEffect('SpecularEffectV2', () => this._specularEffect.initialize());
+    await initEffect('FluidEffectV2', () => this._fluidEffect.initialize());
+    await initEffect('IridescenceEffectV2', () => this._iridescenceEffect.initialize());
+    await initEffect('PrismEffectV2', () => this._prismEffect.initialize());
+    await initEffect('BushEffectV2', () => this._bushEffect.initialize());
+    await initEffect('TreeEffectV2', () => this._treeEffect.initialize());
+    await initEffect('FireEffectV2', () => this._fireEffect.initialize());
+    await initEffect('DustEffectV2', () => this._dustEffect.initialize());
+    await initEffect('WindowLightEffectV2', () => this._windowLightEffect.initialize());
     // Cloud effect needs the bus scene and main camera for the overhead blocker pass.
     this._cloudEffect.initialize(this.renderer, this._renderBus._scene, this.camera);
+    try {
+      this._cloudEffect.setUpperFloorMaskBuilder?.((r, cam, target) => {
+        const floors = window.MapShine?.floorStack?.getFloors?.() ?? [];
+        const activeIdx = Number(window.MapShine?.floorStack?.getActiveFloor?.()?.index ?? 0);
+        if (!Number.isFinite(activeIdx) || (activeIdx + 1) >= floors.length) return;
+        this._renderBus.renderFloorMaskTo(r, cam, activeIdx + 1, target, { includeHiddenAboveFloors: true });
+      });
+    } catch (err) {
+      log.warn('FloorCompositor: CloudEffectV2 upper-floor mask builder failed:', err);
+    }
     _reportProgress('CloudEffectV2');
+    await yieldToMain();
+    await initEffect('ShadowManagerV2', () => this._shadowManagerEffect.initialize(this.renderer, w, h));
     // Water splashes: own BatchedRenderer added via addEffectOverlay.
     try { this._waterSplashesEffect?.initialize?.(); } catch (err) {
       log.warn('FloorCompositor: WaterSplashesEffectV2 initialize failed:', err);
     }
     _reportProgress('WaterSplashesEffectV2');
+    await yieldToMain();
     // Weather particles live in the bus scene so they render in the same pass as tiles.
     try { this._weatherParticles?.initialize?.(this._renderBus._scene); } catch (err) {
       log.warn('FloorCompositor: WeatherParticlesV2 initialize failed:', err);
     }
     _reportProgress('WeatherParticlesV2');
-
-    // Ash disturbance bursts: owns its own batch renderer and registers it via renderBus overlay.
-    try { this._ashDisturbanceEffect?.initialize?.(); } catch (err) {
-      log.warn('FloorCompositor: AshDisturbanceEffectV2 initialize failed:', err);
-    }
-    _reportProgress('AshDisturbanceEffectV2');
+    await yieldToMain();
 
     // Smelly flies uses the particles bridge batch renderer and should render
     // in the bus scene for V2.
@@ -1190,11 +1272,13 @@ export class FloorCompositor {
       log.warn('FloorCompositor: SmellyFliesEffect initialize failed:', err);
     }
     _reportProgress('SmellyFliesEffect');
+    await yieldToMain();
     // Lightning renders procedural strike meshes in the bus scene.
     try { this._lightningEffect?.initialize?.(this.renderer, this._renderBus._scene, this.camera); } catch (err) {
       log.warn('FloorCompositor: LightningEffectV2 initialize failed:', err);
     }
     _reportProgress('LightningEffectV2');
+    await yieldToMain();
 
     // Candle flames render in bus scene and push glow into lighting lightScene.
     try {
@@ -1204,6 +1288,7 @@ export class FloorCompositor {
       log.warn('FloorCompositor: CandleFlamesEffectV2 initialize failed:', err);
     }
     _reportProgress('CandleFlamesEffectV2');
+    await yieldToMain();
 
     // Player light renders token-attached flashlight/torch effects and drives
     // gameplay-facing dynamic light behavior.
@@ -1213,6 +1298,7 @@ export class FloorCompositor {
       log.warn('FloorCompositor: PlayerLightEffectV2 initialize failed:', err);
     }
     _reportProgress('PlayerLightEffectV2');
+    await yieldToMain();
 
     // Subscribe outdoors mask consumers so they receive the texture as soon as
     // populate() builds it, and again on every floor change.
@@ -1220,12 +1306,12 @@ export class FloorCompositor {
     // We set both the legacy single-texture path (setOutdoorsMask, which is the one
     // Outdoors mask subscribers now wired via EffectMaskRegistry in initialize()
 
-    initEffect('LightingEffectV2', () => this._lightingEffect.initialize(w, h));
-    initEffect('SkyColorEffectV2', () => this._skyColorEffect.initialize());
-    initEffect('ColorCorrectionEffectV2', () => this._colorCorrectionEffect.initialize());
-    initEffect('FilterEffectV2', () => this._filterEffect.initialize());
-    initEffect('AtmosphericFogEffectV2', () => this._atmosphericFogEffect.initialize(this.renderer, this._renderBus._scene, this.camera));
-    initEffect('FogOfWarEffectV2', () => this._fogEffect.initialize(this.renderer, this.scene, this.camera));
+    await initEffect('LightingEffectV2', () => this._lightingEffect.initialize(w, h));
+    await initEffect('SkyColorEffectV2', () => this._skyColorEffect.initialize());
+    await initEffect('ColorCorrectionEffectV2', () => this._colorCorrectionEffect.initialize());
+    await initEffect('FilterEffectV2', () => this._filterEffect.initialize());
+    await initEffect('AtmosphericFogEffectV2', () => this._atmosphericFogEffect.initialize(this.renderer, this._renderBus._scene, this.camera));
+    await initEffect('FogOfWarEffectV2', () => this._fogEffect.initialize(this.renderer, this.scene, this.camera));
     try {
       const fogPlane = this._fogEffect.fogPlane ?? null;
       if (fogPlane) {
@@ -1236,12 +1322,13 @@ export class FloorCompositor {
     } catch (err) {
       log.warn('FloorCompositor: FogOfWarEffectV2 overlay setup failed:', err);
     }
-    initEffect('BloomEffectV2', () => this._bloomEffect.initialize(w, h));
-    initEffect('SharpenEffectV2', () => this._sharpenEffect.initialize());
+    await initEffect('BloomEffectV2', () => this._bloomEffect.initialize(w, h));
+    await initEffect('SharpenEffectV2', () => this._sharpenEffect.initialize());
     if (this._waterEffect) {
-      initEffect('WaterEffectV2', () => this._waterEffect.initialize());
+      await initEffect('WaterEffectV2', () => this._waterEffect.initialize());
     } else {
       _reportProgress('WaterEffectV2');
+      await yieldToMain();
     }
     // OverheadShadowsEffectV2 initialization
     try { 
@@ -1250,47 +1337,57 @@ export class FloorCompositor {
       log.warn('FloorCompositor: OverheadShadowsEffectV2 initialize failed:', err);
     }
     _reportProgress('OverheadShadowsEffectV2');
+    await yieldToMain();
     try {
       this._buildingShadowEffect?.initialize?.(this.renderer, this.camera);
     } catch (err) {
       log.warn('FloorCompositor: BuildingShadowsEffectV2 initialize failed:', err);
     }
     _reportProgress('BuildingShadowsEffectV2');
+    await yieldToMain();
 
     // Artistic post-processing effects (disabled by default)
     try { this._dotScreenEffect?.initialize?.(); } catch (err) {
       log.warn('FloorCompositor: DotScreenEffectV2 initialize failed:', err);
     }
     _reportProgress('DotScreenEffectV2');
+    await yieldToMain();
     try { this._halftoneEffect?.initialize?.(); } catch (err) {
       log.warn('FloorCompositor: HalftoneEffectV2 initialize failed:', err);
     }
     _reportProgress('HalftoneEffectV2');
+    await yieldToMain();
     try { this._asciiEffect?.initialize?.(); } catch (err) {
       log.warn('FloorCompositor: AsciiEffectV2 initialize failed:', err);
     }
     _reportProgress('AsciiEffectV2');
+    await yieldToMain();
     try { this._dazzleOverlayEffect?.initialize?.(); } catch (err) {
       log.warn('FloorCompositor: DazzleOverlayEffectV2 initialize failed:', err);
     }
     _reportProgress('DazzleOverlayEffectV2');
+    await yieldToMain();
     try { this._visionModeEffect?.initialize?.(); } catch (err) {
       log.warn('FloorCompositor: VisionModeEffectV2 initialize failed:', err);
     }
     _reportProgress('VisionModeEffectV2');
+    await yieldToMain();
     try { this._invertEffect?.initialize?.(); } catch (err) {
       log.warn('FloorCompositor: InvertEffectV2 initialize failed:', err);
     }
     _reportProgress('InvertEffectV2');
+    await yieldToMain();
     try { this._sepiaEffect?.initialize?.(); } catch (err) {
       log.warn('FloorCompositor: SepiaEffectV2 initialize failed:', err);
     }
     _reportProgress('SepiaEffectV2');
+    await yieldToMain();
     try { this._lensEffect?.initialize?.(); } catch (err) {
       log.warn('FloorCompositor: LensEffectV2 initialize failed:', err);
     }
     _reportProgress('LensEffectV2');
-    initEffect('DistortionManagerV2', () => this._distortionEffect.initialize(this.renderer, this._renderBus._scene, this.camera));
+    await yieldToMain();
+    await initEffect('DistortionManagerV2', () => this._distortionEffect.initialize(this.renderer, this._renderBus._scene, this.camera));
 
     try {
       if (window.MapShine) window.MapShine.distortionManager = this._distortionEffect;
@@ -1327,67 +1424,81 @@ export class FloorCompositor {
       // Animated shader overlay: if any fluid overlays exist, we need continuous
       // render so uTime advances and the effect animates.
       const fluid = this._fluidEffect;
-      if (fluid?.enabled && fluid?.params?.enabled !== false && hasVisibleOverlay(fluid)) {
+      if (resolveOverlayEffectActive(fluid)) {
         reason = 'fluid:overlays';
         if (window.MapShine) window.MapShine.__v2ContinuousRenderReason = reason;
         return true;
       }
       const iridescence = this._iridescenceEffect;
-      if (iridescence?.enabled && iridescence?.params?.enabled !== false && hasVisibleOverlay(iridescence)) {
+      if (resolveOverlayEffectActive(iridescence)) {
         reason = 'iridescence:overlays';
         if (window.MapShine) window.MapShine.__v2ContinuousRenderReason = reason;
         return true;
       }
       const prism = this._prismEffect;
-      if (prism?.enabled && prism?.params?.enabled !== false && hasVisibleOverlay(prism)) {
+      if (resolveOverlayEffectActive(prism)) {
         reason = 'prism:overlays';
         if (window.MapShine) window.MapShine.__v2ContinuousRenderReason = reason;
         return true;
       }
       const bush = this._bushEffect;
-      if (bush?.enabled && bush?.params?.enabled !== false && hasVisibleOverlay(bush)) {
+      if (resolveOverlayEffectActive(bush)) {
         reason = 'bush:overlays';
         if (window.MapShine) window.MapShine.__v2ContinuousRenderReason = reason;
         return true;
       }
       const tree = this._treeEffect;
-      if (tree?.enabled && tree?.params?.enabled !== false && hasVisibleOverlay(tree)) {
+      if (resolveOverlayEffectActive(tree)) {
         reason = 'tree:overlays';
         if (window.MapShine) window.MapShine.__v2ContinuousRenderReason = reason;
         return true;
       }
       const fire = this._fireEffect;
-      if (fire?.enabled && fire._activeFloors?.size > 0) {
+      if (resolveFloorEffectActive(fire)) {
         reason = 'fire:active-floors';
         if (window.MapShine) window.MapShine.__v2ContinuousRenderReason = reason;
         return true;
       }
       const dust = this._dustEffect;
-      if (dust?.enabled && dust._activeFloors?.size > 0) {
+      if (resolveFloorEffectActive(dust)) {
         reason = 'dust:active-floors';
         if (window.MapShine) window.MapShine.__v2ContinuousRenderReason = reason;
         return true;
       }
+      const water = this._waterEffect;
+      const waterActive = !!(
+        resolveEffectEnabled(water)
+        && (
+          (typeof water?.hasRenderableWater === 'function' ? water.hasRenderableWater() : false)
+          || ((Number(water?._composeMaterial?.uniforms?.uHasWaterData?.value) || 0) > 0)
+          || ((Number(water?._composeMaterial?.uniforms?.uHasWaterRawMask?.value) || 0) > 0)
+        )
+      );
+      if (waterActive) {
+        reason = 'water:active-data';
+        if (window.MapShine) window.MapShine.__v2ContinuousRenderReason = reason;
+        return true;
+      }
       const splash = this._waterSplashesEffect;
-      if (splash?.enabled && splash._activeFloors?.size > 0) {
+      if (resolveFloorEffectActive(splash)) {
         reason = 'splashes:active-floors';
         if (window.MapShine) window.MapShine.__v2ContinuousRenderReason = reason;
         return true;
       }
       const flies = this._smellyFliesEffect;
-      if (flies?.enabled && (flies?.flySystems?.size ?? 0) > 0) {
+      if (resolveEffectEnabled(flies) && (flies?.flySystems?.size ?? 0) > 0) {
         reason = 'flies:systems';
         if (window.MapShine) window.MapShine.__v2ContinuousRenderReason = reason;
         return true;
       }
       const lightning = this._lightningEffect;
-      if (lightning?.enabled && lightning?.wantsContinuousRender?.()) {
+      if (resolveEffectEnabled(lightning) && lightning?.wantsContinuousRender?.()) {
         reason = 'lightning:wants-continuous';
         if (window.MapShine) window.MapShine.__v2ContinuousRenderReason = reason;
         return true;
       }
       const candles = this._candleFlamesEffect;
-      if (candles?.enabled && ((candles?._sourceFlameCount ?? 0) > 0 || (candles?._glowBuckets?.size ?? 0) > 0)) {
+      if (resolveEffectEnabled(candles) && ((candles?._sourceFlameCount ?? 0) > 0 || (candles?._glowBuckets?.size ?? 0) > 0)) {
         reason = 'candles:active-sources';
         if (window.MapShine) window.MapShine.__v2ContinuousRenderReason = reason;
         return true;
@@ -1433,7 +1544,7 @@ export class FloorCompositor {
   getPreferredContinuousFps() {
     try {
       const fluid = this._fluidEffect;
-      if (fluid?.enabled && (fluid?._overlays?.size ?? 0) > 0) {
+      if (resolveOverlayEffectActive(fluid)) {
         // Fluid shader animation looks noticeably stepped at 30fps.
         // Prefer 60fps while fluid overlays are active.
         return 60;
@@ -1471,12 +1582,10 @@ export class FloorCompositor {
     const effect = this[effectKey];
     if (!effect) return false;
 
-    // Respect explicit runtime disable states when available.
-    if (effect?.enabled === false) return false;
-    if (effect?.params?.enabled === false) return false;
+    if (!resolveEffectEnabled(effect)) return false;
 
     const maskDriven = {
-      _specularEffect: ['specular', 'roughness'],
+      _specularEffect: ['specular'],
       _fluidEffect: ['fluid'],
       _iridescenceEffect: ['iridescence'],
       _prismEffect: ['prism'],
@@ -1516,6 +1625,100 @@ export class FloorCompositor {
   }
 
   /**
+   * When scene `effectHints.maskIds` is non-empty, mask-driven populate jobs
+   * can be pruned to match `_shouldWarmupEffectKey` semantics. When hints are
+   * absent or empty, keep all mask-driven jobs for backward compatibility.
+   *
+   * @returns {boolean}
+   * @private
+   */
+  _effectHintsDrivePopulateMaskPruning() {
+    // Cold-load level/background races can produce stale/incomplete sceneEffectHints.
+    // Pruning mask-driven populate jobs from those hints permanently drops effects
+    // for the session (clouds still render, tile effects do not). Keep populate
+    // authoritative by always running mask-driven jobs.
+    return false;
+  }
+
+  /**
+   * Force a full populate replay on the next ensure pass.
+   *
+   * Used after late level/background synchronization on cold load so mask-driven
+   * effects (specular/fire/fluid/windows/etc.) are rebuilt from final runtime state.
+   *
+   * @param {object} [options]
+   * @param {string} [options.source='runtime-refresh']
+   * @returns {Promise<boolean>}
+   */
+  async forceRepopulate(options = {}) {
+    const { source = 'runtime-refresh' } = options;
+    this._populateComplete = false;
+    this._populatePromise = null;
+    this._busPopulated = false;
+    return this._ensureBusPopulated({ source });
+  }
+
+  /**
+   * While the async populate IIFE is in flight, skip heavy per-frame effect
+   * updates and the full post chain so `setTimeout(0)` yields are not filled
+   * by concurrent shader work.
+   *
+   * @returns {boolean}
+   * @private
+   */
+  _populateSlimRenderActive() {
+    return !!this._populatePromise && !this._populateComplete;
+  }
+
+  /**
+   * Bus albedo + screen blit only (no lighting / water / bloom). All log lines
+   * include POPULATE for filtering.
+   *
+   * @private
+   */
+  _runPopulateSlimRenderFrame() {
+    const now = (typeof performance !== 'undefined' && performance.now)
+      ? performance.now()
+      : Date.now();
+    if (!this._populateSlimRenderLogNextAt || now >= this._populateSlimRenderLogNextAt) {
+      this._populateSlimRenderLogNextAt = now + 2500;
+      log.warn(
+        `[POPULATE RENDER-SLIM] skipping full effect updates + post chain until populate completes | busPopulated=${this._busPopulated}`,
+      );
+    }
+    try {
+      this._renderBus?.syncRuntimeTileState?.();
+    } catch (err) {
+      log.warn('[POPULATE RENDER-SLIM] syncRuntimeTileState threw:', err);
+    }
+    const activeFloorIndex = Number.isFinite(this._renderBus?._visibleMaxFloorIndex)
+      ? this._renderBus._visibleMaxFloorIndex
+      : 0;
+    const blurEnabled = this._floorDepthBlurEffect?.params?.enabled && activeFloorIndex > 0;
+    try {
+      if (blurEnabled) {
+        this._floorDepthBlurEffect.render(
+          this.renderer, this.camera, this._renderBus, activeFloorIndex, this._sceneRT);
+      } else {
+        this._renderBus.renderTo(this.renderer, this.camera, this._sceneRT);
+      }
+    } catch (err) {
+      log.warn('[POPULATE RENDER-SLIM] bus render threw:', err);
+    }
+    this._blitToScreen(this._sceneRT);
+    try {
+      this._renderLateWorldOverlay();
+    } catch (err) {
+      log.warn('[POPULATE RENDER-SLIM] late overlay threw:', err);
+    }
+    try {
+      this._renderPixiUiOverlay();
+    } catch (err) {
+      log.warn('[POPULATE RENDER-SLIM] PIXI UI overlay threw:', err);
+    }
+  }
+
+  /**
    * Explicit loading-time prewarm entrypoint.
    *
    * Runs the one-time populate work that used to happen lazily on first render,
@@ -1528,16 +1731,116 @@ export class FloorCompositor {
    * @returns {Promise<boolean>}
    */
   async prewarmForLoading(options = {}) {
-    const { prewarmAllFloors = false, awaitPopulate = false } = options;
+    const { awaitPopulate = false } = options;
     const populatePromise = this._ensureBusPopulated({ source: 'loading' });
     if (!awaitPopulate) {
       return true;
     }
-    const ok = await populatePromise;
-    if (ok && prewarmAllFloors) {
-      this._prewarmFloorVisibilityPasses();
+    return await populatePromise;
+  }
+
+  /**
+   * Structured snapshot for populate / load troubleshooting (safe, no throws).
+   *
+   * @param {object} [opts]
+   * @param {string} [opts.source]
+   * @param {object|null} [opts.sceneComposer]
+   * @param {string} [opts.phase]
+   * @param {string|null} [opts.effectLabel]
+   * @param {number|null} [opts.jobIndex] 1-based
+   * @param {number|null} [opts.jobTotal]
+   * @returns {object}
+   * @private
+   */
+  _gatherPopulateDiagnostics(opts = {}) {
+    const {
+      source = 'unknown',
+      sceneComposer = null,
+      phase = 'snapshot',
+      effectLabel = null,
+      jobIndex = null,
+      jobTotal = null,
+    } = opts;
+
+    const scene = typeof canvas !== 'undefined' ? canvas?.scene : null;
+    const tiles = scene?.tiles?.contents ?? [];
+    const fd = sceneComposer?.foundrySceneData ?? null;
+    const floorStack = window.MapShine?.floorStack;
+    const floorsList = floorStack?.getFloors?.() ?? [];
+    const busScene = this._renderBus?._scene;
+
+    let busChildCount = null;
+    try {
+      busChildCount = busScene?.children?.length ?? null;
+    } catch (_) {
+      busChildCount = null;
     }
-    return ok;
+
+    const fdSummary = fd && typeof fd === 'object'
+      ? {
+        width: fd.width,
+        height: fd.height,
+        sceneWidth: fd.sceneWidth,
+        sceneHeight: fd.sceneHeight,
+        sceneX: fd.sceneX,
+        sceneY: fd.sceneY,
+        keyCount: Object.keys(fd).length,
+      }
+      : null;
+
+    let mem = null;
+    try {
+      if (typeof performance !== 'undefined' && performance.memory) {
+        mem = {
+          usedJSHeapMB: Math.round(performance.memory.usedJSHeapSize / 1048576),
+          totalJSHeapMB: Math.round(performance.memory.totalJSHeapSize / 1048576),
+          limitJSHeapMB: Math.round(performance.memory.jsHeapSizeLimit / 1048576),
+        };
+      }
+    } catch (_) {}
+
+    const vis = typeof document !== 'undefined' ? document.visibilityState : null;
+
+    return {
+      phase,
+      source,
+      effectLabel,
+      jobProgress:
+        jobIndex != null && jobTotal != null ? `${jobIndex}/${jobTotal}` : null,
+      flags: {
+        populateComplete: this._populateComplete,
+        busPopulated: this._busPopulated,
+        hasInFlightPopulatePromise: !!this._populatePromise,
+        initialized: this._initialized,
+      },
+      effectHints: this._effectHints ?? null,
+      foundry: {
+        gameReady: typeof game !== 'undefined' ? !!game?.ready : null,
+        canvasReady: typeof canvas !== 'undefined' ? !!canvas?.ready : null,
+        sceneId: scene?.id ?? null,
+        sceneName: scene?.name ?? null,
+        tileDocCount: Array.isArray(tiles) ? tiles.length : null,
+        hasBackgroundSrc: !!(canvas?.scene?.background?.src),
+      },
+      floors: {
+        count: floorsList.length,
+        activeLevelBottom: window.MapShine?.activeLevelContext?.bottom,
+        activeLevelTop: window.MapShine?.activeLevelContext?.top,
+      },
+      foundrySceneDataSummary: fdSummary,
+      busSceneSummary: {
+        hasBusScene: !!busScene,
+        directChildCount: busChildCount,
+      },
+      renderer: {
+        hasRenderer: !!this.renderer,
+        hasCompileAsync: !!(this.renderer && typeof this.renderer.compileAsync === 'function'),
+      },
+      host: {
+        visibilityState: vis,
+        memory: mem,
+      },
+    };
   }
 
   /**
@@ -1554,15 +1857,55 @@ export class FloorCompositor {
     if (this._populatePromise) return this._populatePromise;
 
     this._populatePromise = (async () => {
+      const populateWallStart = (typeof performance !== 'undefined' && performance.now)
+        ? performance.now()
+        : Date.now();
+      const sincePopulateStart = () => {
+        const now = (typeof performance !== 'undefined' && performance.now)
+          ? performance.now()
+          : Date.now();
+        return now - populateWallStart;
+      };
+
       const sc = window.MapShine?.sceneComposer ?? null;
       if (!sc) {
-        log.warn(`FloorCompositor: no sceneComposer available for populate (${source})`);
+        log.warn(
+          `FloorCompositor: no sceneComposer available for populate (source=${source})`,
+          this._gatherPopulateDiagnostics({
+            source,
+            sceneComposer: null,
+            phase: 'missing-sceneComposer',
+          }),
+        );
         return false;
       }
 
+      log.warn(
+        `[POPULATE LOAD] begin (source=${source})`,
+        this._gatherPopulateDiagnostics({
+          source,
+          sceneComposer: sc,
+          phase: 'begin',
+        }),
+      );
+
       if (!this._busPopulated) {
+        const tBus0 = (typeof performance !== 'undefined' && performance.now)
+          ? performance.now()
+          : Date.now();
         this._renderBus.populate(sc);
         this._busPopulated = true;
+        const tBus1 = (typeof performance !== 'undefined' && performance.now)
+          ? performance.now()
+          : Date.now();
+        log.warn(
+          `[POPULATE TIMELINE] FloorRenderBus.populate() finished (sync) | busPopulateMs=${(tBus1 - tBus0).toFixed(0)} | sincePopulateStartMs=${sincePopulateStart().toFixed(0)} | source=${source}`,
+        );
+        await yieldToMain();
+      } else {
+        log.warn(
+          `[POPULATE TIMELINE] FloorRenderBus already populated (skipped) | sincePopulateStartMs=${sincePopulateStart().toFixed(0)} | source=${source}`,
+        );
       }
 
       // Wire basePlaneMesh into V1-based shadow effects once it exists.
@@ -1577,40 +1920,150 @@ export class FloorCompositor {
 
       // Apply initial floor visibility for albedo tiles (synchronous).
       this._applyCurrentFloorVisibility();
+      await yieldToMain();
 
-      const populateJobs = [
-        ['SpecularEffectV2', () => this._specularEffect.populate(sc.foundrySceneData)],
-        ['FluidEffectV2', () => this._fluidEffect.populate(sc.foundrySceneData)],
-        ['IridescenceEffectV2', () => this._iridescenceEffect.populate(sc.foundrySceneData)],
-        ['PrismEffectV2', () => this._prismEffect.populate(sc.foundrySceneData)],
-        ['BushEffectV2', () => this._bushEffect.populate(sc.foundrySceneData)],
-        ['TreeEffectV2', () => this._treeEffect.populate(sc.foundrySceneData)],
-        ['FireEffectV2', () => this._fireEffect.populate(sc.foundrySceneData)],
-        ['DustEffectV2', () => this._dustEffect.populate(sc.foundrySceneData)],
-        ['WindowLightEffectV2', () => this._windowLightEffect.populate(sc.foundrySceneData)],
+      const hintPruneMasks = this._effectHintsDrivePopulateMaskPruning();
+      const maskJobDefs = [
+        ['SpecularEffectV2', '_specularEffect', () => this._specularEffect.populate(sc.foundrySceneData)],
+        ['FluidEffectV2', '_fluidEffect', () => this._fluidEffect.populate(sc.foundrySceneData)],
+        ['IridescenceEffectV2', '_iridescenceEffect', () => this._iridescenceEffect.populate(sc.foundrySceneData)],
+        ['PrismEffectV2', '_prismEffect', () => this._prismEffect.populate(sc.foundrySceneData)],
+        ['BushEffectV2', '_bushEffect', () => this._bushEffect.populate(sc.foundrySceneData)],
+        ['TreeEffectV2', '_treeEffect', () => this._treeEffect.populate(sc.foundrySceneData)],
+        ['FireEffectV2', '_fireEffect', () => this._fireEffect.populate(sc.foundrySceneData)],
+        ['DustEffectV2', '_dustEffect', () => this._dustEffect.populate(sc.foundrySceneData)],
+        ['WindowLightEffectV2', '_windowLightEffect', () => this._windowLightEffect.populate(sc.foundrySceneData)],
       ];
 
+      const populateJobs = [];
+      for (const row of maskJobDefs) {
+        const [label, effectKey, fn] = row;
+        if (!hintPruneMasks || this._shouldWarmupEffectKey(effectKey)) {
+          populateJobs.push([label, fn]);
+        }
+      }
+      // Water / splashes must always run populate when present: `_shouldWarmupEffectKey`
+      // uses `hasRenderableWater()`, which is only true *after* populate — gating here
+      // would skip discovery entirely (water never appears, no error).
       if (this._waterEffect) {
         populateJobs.push(['WaterEffectV2', () => this._waterEffect.populate(sc.foundrySceneData)]);
       }
       if (this._waterSplashesEffect) {
         populateJobs.push(['WaterSplashesEffectV2', () => this._waterSplashesEffect.populate(sc.foundrySceneData)]);
       }
-      if (this._ashDisturbanceEffect) {
-        populateJobs.push(['AshDisturbanceEffectV2', () => this._ashDisturbanceEffect.populate(sc.foundrySceneData)]);
-      }
+      log.warn(
+        `[POPULATE LOAD] effect queue ready | source=${source} | jobs=${populateJobs.length} | maskHintPruneActive=${hintPruneMasks} | perJobTimeoutMs=${POPULATE_JOB_TIMEOUT_MS}`,
+        this._gatherPopulateDiagnostics({
+          source,
+          sceneComposer: sc,
+          phase: 'before-effect-queue',
+        }),
+      );
 
-      for (const [label, fn] of populateJobs) {
-        try {
-          await fn();
-        } catch (err) {
-          log.error(`${label} populate failed:`, err);
+      let lastPopulateJobFnSettledMs = (typeof performance !== 'undefined' && performance.now)
+        ? performance.now()
+        : Date.now();
+
+      for (let idx = 0; idx < populateJobs.length; idx++) {
+        const [label, fn] = populateJobs[idx];
+        const jobIndex = idx + 1;
+        const jobTotal = populateJobs.length;
+        if (idx > 0) {
+          const tGap0 = (typeof performance !== 'undefined' && performance.now)
+            ? performance.now()
+            : Date.now();
+          const gapSincePrevJobSettledMs = tGap0 - lastPopulateJobFnSettledMs;
+          log.warn(
+            `[POPULATE INTER-JOB] gap since previous populate() settled | beforeJob=(${jobIndex}/${jobTotal}) ${label} | gapMs=${gapSincePrevJobSettledMs.toFixed(0)} | sincePopulateStartMs=${sincePopulateStart().toFixed(0)} | source=${source} | note=includes_applyFloorVisibility_setTimeout0_and_other_main_thread_work`,
+          );
         }
+        const startMs = performance?.now?.() ?? Date.now();
+        log.warn(
+          `[POPULATE TIMELINE] START job (${jobIndex}/${jobTotal}) ${label} | sincePopulateStartMs=${sincePopulateStart().toFixed(0)} | perJobTimeoutMs=${POPULATE_JOB_TIMEOUT_MS} | source=${source} | queuePosition=${jobIndex === jobTotal ? 'LAST' : `${jobIndex} of ${jobTotal}`}`,
+        );
+        log.warn(
+          `[POPULATE START] (${jobIndex}/${jobTotal}) ${label} | source=${source} | perJobTimeoutMs=${POPULATE_JOB_TIMEOUT_MS}`,
+          this._gatherPopulateDiagnostics({
+            source,
+            sceneComposer: sc,
+            phase: 'job-start',
+            effectLabel: label,
+            jobIndex,
+            jobTotal,
+          }),
+        );
+        try {
+          await Promise.race([
+            fn(),
+            new Promise((_, reject) => {
+              setTimeout(() => reject(new Error('TIMEOUT')), POPULATE_JOB_TIMEOUT_MS);
+            }),
+          ]);
+          const elapsed = (performance?.now?.() ?? Date.now()) - startMs;
+          log.warn(
+            `[POPULATE TIMELINE] DONE job (${jobIndex}/${jobTotal}) ${label} | jobDurationMs=${elapsed.toFixed(0)} | sincePopulateStartMs=${sincePopulateStart().toFixed(0)} | source=${source}`,
+          );
+          log.warn(
+            `[POPULATE DONE] (${jobIndex}/${jobTotal}) ${label} in ${elapsed.toFixed(0)}ms | source=${source}`,
+          );
+        } catch (err) {
+          const elapsed = (performance?.now?.() ?? Date.now()) - startMs;
+          const isTimeout = err?.message === 'TIMEOUT';
+          const timerSkewMs = elapsed - POPULATE_JOB_TIMEOUT_MS;
+          const mainThreadLikelyBlocked = isTimeout && timerSkewMs > 1500;
+          const timerRoughlyOnTime = isTimeout && Math.abs(timerSkewMs) <= 2000;
+          const specularHint = (isTimeout && label === 'SpecularEffectV2')
+            ? 'SpecularEffectV2.populate() runs sequential await probeMaskFile() for the background and every tile; stalled fetches or an enormous tile count can keep this step alive until timeout.'
+            : null;
+          const ashHint = (isTimeout && label === 'AshDisturbanceEffectV2')
+            ? 'This timeout only proves AshDisturbanceEffectV2.populate() did not resolve before the per-job wall clock. Check [POPULATE] lines from AshDisturbanceEffectV2 for the last phase logged; long sync work (mask scan / Quarks rebuild) can fill the whole budget. Earlier jobs already completed — root cause may still be cumulative load or this effect’s CPU-heavy paths.'
+            : null;
+          const correlationNote =
+            'Per-job TIMEOUT marks which populate() Promise.race lost — not definitive proof that effect is solely responsible; compare [POPULATE TIMELINE] DONE lines for jobs 1..N-1 and cumulative sincePopulateStartMs.';
+          const diagnostics = this._gatherPopulateDiagnostics({
+            source,
+            sceneComposer: sc,
+            phase: isTimeout ? 'populate-timeout' : 'populate-failed',
+            effectLabel: label,
+            jobIndex,
+            jobTotal,
+          });
+          log.error(
+            `[POPULATE ${isTimeout ? 'TIMEOUT' : 'FAILED'}] (${jobIndex}/${jobTotal}) ${label} | source=${source} | elapsedMs=${elapsed.toFixed(0)} | configuredTimeoutMs=${POPULATE_JOB_TIMEOUT_MS}` +
+            (mainThreadLikelyBlocked
+              ? ` | timerFiredLateByApproxMs=${timerSkewMs.toFixed(0)} (main thread may have been blocked — timeout callbacks only run when the event loop is free)`
+              : (timerRoughlyOnTime && isTimeout
+                ? ` | timerRoughlyOnSchedule=true (this job ran ~full ${POPULATE_JOB_TIMEOUT_MS}ms wall — likely long async chain or heavy sync sections inside this effect)`
+                : '')),
+            {
+              err,
+              diagnostics,
+              interpretation: correlationNote,
+              ...(specularHint ? { likelyCauseHint: specularHint } : {}),
+              ...(ashHint ? { likelyCauseHintAsh: ashHint } : {}),
+            },
+          );
+          if (err?.stack) {
+            log.error(`[POPULATE ${isTimeout ? 'TIMEOUT' : 'FAILED'}] ${label} stack:`, err.stack);
+          }
+        }
+        lastPopulateJobFnSettledMs = (typeof performance !== 'undefined' && performance.now)
+          ? performance.now()
+          : Date.now();
         try { this._applyCurrentFloorVisibility(); } catch (_) {}
         // Give the browser/event loop a chance to process socket + UI work
         // between heavy floor/effect populate steps.
-        await new Promise(resolve => setTimeout(resolve, 0));
+        await yieldToMain();
       }
+
+      log.warn(
+        `[POPULATE LOAD] all effect jobs finished (success or caught errors) | source=${source} | totalPopulateWallMs=${sincePopulateStart().toFixed(0)}`,
+        this._gatherPopulateDiagnostics({
+          source,
+          sceneComposer: sc,
+          phase: 'after-effect-queue',
+        }),
+      );
 
       // Initial attempt; render-time guard above re-attempts when globals land.
       this._wireMapPointConsumers();
@@ -1641,21 +2094,19 @@ export class FloorCompositor {
    *
    * @private
    */
+  /**
+   * V14 refactor: level-mutating prewarm removed.
+   *
+   * Previously cycled floor visibility across all bands to touch floor-scoped
+   * systems. This mutated the viewed level and could desync the bus state on
+   * cold load (see V14-COLD-LOAD-LEVEL-RENDER-POSTMORTEM). Shader warmup now
+   * runs via warmupAsync() which compiles all materials without changing floor
+   * visibility state.
+   */
   _prewarmFloorVisibilityPasses() {
-    const floorStack = window.MapShine?.floorStack;
-    const floors = floorStack?.getFloors?.() ?? [];
-    if (!floors.length) return;
-
-    const originalContext = window.MapShine?.activeLevelContext ?? null;
-    for (const floor of floors) {
-      this._applyCurrentFloorVisibility({
-        context: {
-          bottom: Number(floor?.elevationMin),
-          top: Number(floor?.elevationMax),
-        },
-      });
-    }
-    this._applyCurrentFloorVisibility({ context: originalContext });
+    // Intentional no-op — callers preserved for compatibility but
+    // the level-mutating behavior is removed per V14 refactor.
+    log.info('_prewarmFloorVisibilityPasses: skipped (V14 refactor — non-destructive warmup only)');
   }
 
   // ── Render ──────────────────────────────────────────────────────────────────
@@ -1677,8 +2128,9 @@ export class FloorCompositor {
    * @returns {Promise<boolean>} True if completed fully, false if timed out or failed
    */
   async warmupAsync(timeoutMs = 8000, onProgress = null) {
-    if (!this.renderer || typeof this.renderer.compileAsync !== 'function') {
-      log.warn('warmupAsync: renderer.compileAsync is not available');
+    const canWarmup = this.renderer && typeof this.renderer.compile === 'function';
+    if (!canWarmup) {
+      log.warn('warmupAsync: renderer has no compile()');
       return false;
     }
 
@@ -1709,8 +2161,8 @@ export class FloorCompositor {
       '_bushEffect', '_treeEffect', '_fireEffect', '_dustEffect', '_windowLightEffect',
       '_lightingEffect', '_skyColorEffect', '_colorCorrectionEffect',
       '_filterEffect', '_atmosphericFogEffect', '_fogEffect', '_bloomEffect',
-      '_sharpenEffect', '_cloudEffect', '_waterEffect', '_waterSplashesEffect',
-      '_underwaterBubblesEffect', '_ashDisturbanceEffect', '_smellyFliesEffect',
+      '_sharpenEffect', '_cloudEffect', '_shadowManagerEffect', '_waterEffect', '_waterSplashesEffect',
+      '_underwaterBubblesEffect', '_smellyFliesEffect',
       '_lightningEffect', '_candleFlamesEffect', '_playerLightEffect',
       '_overheadShadowEffect', '_buildingShadowEffect', '_dotScreenEffect',
       '_halftoneEffect', '_asciiEffect', '_dazzleOverlayEffect',
@@ -1766,58 +2218,63 @@ export class FloorCompositor {
       // Compile with all layers enabled so hidden floors also warm up.
       enableAllLayers(this.camera);
 
-      // Submit all compile jobs. renderer.compileAsync calls renderer.compile()
-      // synchronously inside, which submits all programs to the GPU driver.
-      // After these calls, all programs exist in renderer.info.programs.
-      const promises = [];
-      for (const target of targets) {
-        enableAllLayers(target.camera);
+      const getPrograms = () => (this.renderer.info?.programs ?? []).filter(Boolean);
+      const deadline = Date.now() + timeoutMs;
+
+      // One compile target at a time so the event loop can run heartbeats between
+      // submissions. Use sync compile() only: WebGLRenderer.compileAsync() can throw
+      // from an internal setTimeout when materialProperties.currentProgram is still
+      // undefined for a tracked material (uncaught — try/catch around await does not
+      // receive it). We already poll KHR_parallel_shader_compile readiness below.
+      const compileOneTarget = async (target) => {
+        const { scene, camera, label } = target;
         try {
-          const p = this.renderer.compileAsync(target.scene, target.camera)
-            .catch((err) => {
-              log.warn(`warmupAsync: compileAsync failed for target ${target.label}`, err);
-            });
-          promises.push(p);
+          if (typeof this.renderer.compile === 'function') {
+            await yieldToMain();
+            this.renderer.compile(scene, camera);
+            await yieldToMain();
+          }
         } catch (err) {
-          log.warn(`warmupAsync: compileAsync threw synchronously for target ${target.label}`, err);
+          log.warn(`warmupAsync: compile threw for target ${label}`, err);
         }
+      };
+
+      let compileAttempts = 0;
+      for (const target of targets) {
+        if (Date.now() >= deadline) break;
+        enableAllLayers(target.camera);
+        compileAttempts++;
+        await compileOneTarget(target);
+        await yieldToMain();
       }
 
-      if (promises.length === 0) {
+      if (compileAttempts === 0) {
         log.warn('warmupAsync: no valid compile targets');
         return false;
       }
 
-      // Snapshot total program count now that compile() has submitted them.
-      const getPrograms = () => this.renderer.info?.programs ?? [];
       const totalAtSubmit = getPrograms().length;
       log.info(`warmupAsync: ${totalAtSubmit} programs submitted`);
 
-      // Parallel polling loop: report KHR_parallel_shader_compile readiness at ~30fps.
-      // Without the extension isReady() returns true immediately (programs stall on
-      // first draw instead) — progress still jumps to 100% quickly, which is correct.
+      // Poll KHR_parallel_shader_compile readiness at ~30fps until done or timeout.
       _pollingActive = true;
-      const pollLoop = (async () => {
-        while (_pollingActive) {
-          if (onProgress) {
-            const progs = getPrograms();
-            const total = Math.max(progs.length, totalAtSubmit, 1);
-            let ready = 0;
-            for (const p of progs) {
-              try { if (typeof p.isReady === 'function' ? p.isReady() : true) ready++; } catch (_) { ready++; }
-            }
-            try { onProgress(Math.min(ready / total, 1.0), `Shaders: ${ready}/${total}`); } catch (_) {}
-            if (ready >= total) break;
-          }
-          await new Promise(r => setTimeout(r, 32));
+      while (_pollingActive && Date.now() < deadline) {
+        const progs = getPrograms();
+        const total = Math.max(progs.length, totalAtSubmit, 1);
+        let ready = 0;
+        for (const p of progs) {
+          if (!p) continue;
+          try { if (typeof p.isReady === 'function' ? p.isReady() : true) ready++; } catch (_) { ready++; }
         }
-      })();
-
-      const timeoutPromise = new Promise((resolve) => setTimeout(() => resolve('timeout'), timeoutMs));
-      const result = await Promise.race([Promise.all([...promises, pollLoop]), timeoutPromise]);
+        if (onProgress) {
+          try { onProgress(Math.min(ready / total, 1.0), `Shaders: ${ready}/${total}`); } catch (_) {}
+        }
+        if (ready >= total) break;
+        await new Promise(r => setTimeout(r, 32));
+      }
       _pollingActive = false;
 
-      if (result === 'timeout') {
+      if (Date.now() >= deadline) {
         log.warn(`warmupAsync: shader compilation timed out after ${timeoutMs}ms, proceeding with lazy compilation`);
         // Report final achieved progress on timeout.
         if (onProgress) {
@@ -1825,6 +2282,7 @@ export class FloorCompositor {
           const total = Math.max(progs.length, 1);
           let ready = 0;
           for (const p of progs) {
+            if (!p) continue;
             try { if (typeof p.isReady === 'function' ? p.isReady() : true) ready++; } catch (_) { ready++; }
           }
           try { onProgress(Math.min(ready / total, 1.0), `Shaders: ${ready}/${total} (timeout)`); } catch (_) {}
@@ -1846,6 +2304,46 @@ export class FloorCompositor {
       for (const [camera, mask] of cameraMasks.entries()) {
         try { camera.layers.mask = mask; } catch (_) {}
       }
+    }
+  }
+
+  /**
+   * Combine cloud (may be null / previous frame) + overhead + building into
+   * ShadowManagerV2's screen-space RT for consumers that draw before the cloud pass.
+   * @param {THREE.Texture|null} cloudTex
+   * @param {THREE.Texture|null} cloudRawTex
+   * @param {boolean} disableOverheadInLighting
+   */
+  _runShadowManagerCombinePass(cloudTex, cloudRawTex, disableOverheadInLighting) {
+    const sm = this._shadowManagerEffect;
+    if (!sm || typeof sm.setInputs !== 'function' || typeof sm.render !== 'function') return;
+    const overheadTex = (!disableOverheadInLighting && this._overheadShadowEffect?.params?.enabled)
+      ? (this._overheadShadowEffect.shadowFactorTexture ?? null)
+      : null;
+    const buildingTex = (this._buildingShadowEffect?.params?.enabled)
+      ? (this._buildingShadowEffect.shadowFactorTexture ?? null)
+      : null;
+    sm.setInputs({
+      cloudShadowTexture: cloudTex ?? null,
+      cloudShadowRawTexture: cloudRawTex ?? null,
+      overheadShadowTexture: overheadTex,
+      buildingShadowTexture: buildingTex,
+    });
+    try {
+      const dims = globalThis.canvas?.dimensions;
+      if (dims) {
+        const rect = dims.sceneRect ?? dims;
+        const sx = rect?.x ?? dims.sceneX ?? 0;
+        const sy = rect?.y ?? dims.sceneY ?? 0;
+        const sw = rect?.width ?? dims.sceneWidth ?? dims.width ?? 1;
+        const sh = rect?.height ?? dims.sceneHeight ?? dims.height ?? 1;
+        sm.setSceneRect({ x: sx, y: sy, z: sw, w: sh });
+      }
+    } catch (_) {}
+    try {
+      sm.render(this.renderer);
+    } catch (err) {
+      log.warn('FloorCompositor: ShadowManagerV2 render failed:', err);
     }
   }
 
@@ -1916,8 +2414,10 @@ export class FloorCompositor {
       const ctx = window.MapShine?.activeLevelContext ?? null;
       const b = Number(ctx?.bottom);
       const t = Number(ctx?.top);
-      // Only treat as a multi-floor context if both ends are finite.
-      const key = (Number.isFinite(b) && Number.isFinite(t)) ? `${b}:${t}` : 'single';
+      // Treat finite-bottom + non-finite-top as distinct (topmost Levels band).
+      const key = Number.isFinite(b)
+        ? `${b}:${Number.isFinite(t) ? t : 'inf'}`
+        : 'single';
       if (this._lastAppliedLevelContextKey !== key) {
         this._lastAppliedLevelContextKey = key;
         if (this._busPopulated) {
@@ -1926,18 +2426,78 @@ export class FloorCompositor {
       }
     } catch (_) {}
 
-    // Keep outdoors consumers in sync even when the compositor cache populates
-    // asynchronously after initial render, or when floor-context hooks were missed.
-    this._syncOutdoorsMaskConsumers({ context: window.MapShine?.activeLevelContext ?? null });
+    // Enforce bus floor visibility every frame to prevent stale/leaked tile
+    // visibility after asynchronous tile upserts or late scene updates.
+    this._enforceBusVisibilityForActiveFloor(floorStack);
+    // Enforce TileManager sprite floor visibility in parallel. Even in V2, stale
+    // sprite visibility can leak upper-floor art if other paths render sprites.
+    this._enforceTileSpriteVisibilityForActiveFloor(floorStack);
+
+    // Outdoors mask consumer sync can mutate multiple effect inputs at once.
+    // Running it every frame can clobber a visually-correct first frame with a
+    // transient fallback on frame 2. Re-sync when context changes, or while we
+    // still have no bound outdoors texture.
+    try {
+      const _ctx = window.MapShine?.activeLevelContext ?? null;
+      const _b = Number(_ctx?.bottom);
+      const _t = Number(_ctx?.top);
+      const _ctxKey = Number.isFinite(_b) ? `${_b}:${Number.isFinite(_t) ? _t : 'inf'}` : 'single';
+      const _needsOutdoorsSync = (this._lastOutdoorsContextKey !== _ctxKey) || !this._lastOutdoorsTexture;
+      if (_needsOutdoorsSync || window.MapShine?.__v2ForcePerFrameOutdoorsSync === true) {
+        this._lastOutdoorsContextKey = _ctxKey;
+        this._syncOutdoorsMaskConsumers({ context: _ctx });
+      }
+    } catch (_) {}
+
+    const populateSlimRender = this._populateSlimRenderActive();
+    try {
+      if (window.MapShine) {
+        window.MapShine.__v2CompositorRenderPath = populateSlimRender ? 'populate-slim' : 'full';
+        window.MapShine.__v2PopulateComplete = !!this._populateComplete;
+        if (window.MapShine.__v2FrameTraceEnabled === true) {
+          const ctx = window.MapShine?.activeLevelContext ?? null;
+          const trace = {
+            frame: Number(timeInfo?.frameCount ?? -1),
+            renderPath: populateSlimRender ? 'populate-slim' : 'full',
+            populateComplete: !!this._populateComplete,
+            shaderGateOpen: !!this._shaderWarmupGateOpen,
+            activeLevel: {
+              index: Number.isFinite(Number(ctx?.index)) ? Number(ctx.index) : null,
+              bottom: Number.isFinite(Number(ctx?.bottom)) ? Number(ctx.bottom) : null,
+              top: Number.isFinite(Number(ctx?.top)) ? Number(ctx.top) : null,
+            },
+            bisect: (() => {
+              try {
+                const s = getWaterLayerBisectState();
+                return {
+                  compositePreview: s?.compositePreview ?? null,
+                  crossSliceBorrow: s?.crossSliceBorrow ?? null,
+                  skipWaterUpper: s?.skipWaterUpper ?? null,
+                  perLevelTint: s?.perLevelTint ?? null,
+                };
+              } catch (_) {
+                return null;
+              }
+            })(),
+          };
+          if (!Array.isArray(window.MapShine.__v2FrameTrace)) window.MapShine.__v2FrameTrace = [];
+          window.MapShine.__v2FrameTrace.push(trace);
+          if (window.MapShine.__v2FrameTrace.length > 32) window.MapShine.__v2FrameTrace.shift();
+          if ((window.MapShine.__v2FrameTrace?.length ?? 0) <= 8) {
+            try { log.warn('[V2 FrameTrace]', trace); } catch (_) {}
+          }
+        }
+      }
+    } catch (_) {}
 
     // ── Update effects (time-varying uniforms) ───────────────────────────
     // Freeze delta to 0 while the shader warmup gate is closed. This prevents
     // particles, wind, and waves from accumulating time during the warmup window
     // so all systems start cleanly from t=0 when the scene first becomes visible.
-    if (!this._shaderWarmupGateOpen && timeInfo) {
+    if (!populateSlimRender && !this._shaderWarmupGateOpen && timeInfo) {
       timeInfo = { ...timeInfo, delta: 0 };
     }
-    if (timeInfo) {
+    if (!populateSlimRender && timeInfo) {
       // Wind must advance before update() so accumulation is 1× per frame.
       this._cloudEffect.advanceWind(timeInfo.delta ?? 0.016);
       this._specularEffect.update(timeInfo);
@@ -1992,11 +2552,6 @@ export class FloorCompositor {
         this._playerLightEffect?.update?.(timeInfo);
       } catch (err) {
         log.warn('PlayerLightEffectV2 update threw, skipping frame:', err);
-      }
-      try {
-        this._ashDisturbanceEffect?.update?.(timeInfo);
-      } catch (err) {
-        log.warn('AshDisturbanceEffectV2 update threw, skipping frame:', err);
       }
       this._cloudEffect.update(timeInfo);
       this._lightingEffect.update(timeInfo);
@@ -2065,6 +2620,11 @@ export class FloorCompositor {
 
     }
 
+    if (populateSlimRender) {
+      this._runPopulateSlimRenderFrame();
+      return;
+    }
+
     // ── Bind per-frame textures and camera to effects ────────────────────────
     this._specularEffect.render(this.renderer, this.camera);
     this._iridescenceEffect.render(this.renderer, this.camera);
@@ -2127,7 +2687,7 @@ export class FloorCompositor {
       this._renderBus?.syncRuntimeTileState?.();
     } catch (_) {}
 
-    // Capture overhead tile alpha + compute soft shadow factor (V1 signature)
+    // Capture overhead tile alpha + compute soft shadow factor for lighting / ShadowManager.
     if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: overheadShadows.render'); } catch (_) {} }
     if (_profiling) _profileT0 = performance.now();
     if (!_skipOverheadShadowPass) {
@@ -2152,284 +2712,106 @@ export class FloorCompositor {
     if (_profiling) this._recordPassTiming('buildingShadowsRender', _profileT0);
     if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: buildingShadows.render DONE'); } catch (_) {} }
 
+    // ShadowManagerV2 (required): combine previous-frame cloud + current structural
+    // shadows so water splash/bubble particles can sample the same darkening the
+    // lit scene uses, before the bus draws them.
+    try {
+      this._runShadowManagerCombinePass(
+        this._shadowManagerPrevFrameCloudTex,
+        this._shadowManagerPrevFrameCloudRawTex ?? this._shadowManagerPrevFrameCloudTex,
+        _disableOverheadInLighting
+      );
+    } catch (err) {
+      log.warn('FloorCompositor: pre-bus ShadowManagerV2 combine failed:', err);
+    }
+    try { this._waterSplashesEffect?.syncShadowDarkeningUniforms?.(); } catch (err) {
+      log.warn('WaterSplashesEffectV2 syncShadowDarkeningUniforms threw, skipping:', err);
+    }
+
     // Runtime tile opacity already synced before shadow capture above. Keep the
     // value as-is for the main albedo render.
 
-    // ── Step 1: Render bus scene → sceneRT ───────────────────────────────
-    // The bus scene contains albedo tiles + specular/fire overlays.
-    // Window light is NOT in the bus scene — it renders after lighting.
-    //
-    // When floor depth blur is enabled and the player is above floor 0,
-    // FloorDepthBlurEffect handles the bus render internally: it renders
-    // each below-floor separately, applies progressive Kawase blur, composites
-    // them, then renders the active+above floors sharp on top — all writing
-    // the final result into _sceneRT.
-    if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: bus.renderTo(sceneRT)'); } catch (_) {} }
-    if (_profiling) _profileT0 = performance.now();
-    {
-      // Use the bus's already-authoritative value (set by _applyCurrentFloorVisibility).
-      // Guard against the Infinity default (single-floor / not yet initialised) to prevent
-      // the per-floor loop in FloorDepthBlurEffect from running indefinitely.
-      const activeFloorIndex = Number.isFinite(this._renderBus._visibleMaxFloorIndex)
-        ? this._renderBus._visibleMaxFloorIndex
-        : 0;
-      const blurEnabled = this._floorDepthBlurEffect?.params.enabled && activeFloorIndex > 0;
-      if (blurEnabled) {
-        this._floorDepthBlurEffect.render(
-          this.renderer, this.camera, this._renderBus, activeFloorIndex, this._sceneRT);
-      } else {
-        this._renderBus.renderTo(this.renderer, this.camera, this._sceneRT);
-      }
-    }
-    if (_profiling) this._recordPassTiming('busRender', _profileT0);
-    if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: bus.renderTo(sceneRT) DONE'); } catch (_) {} }
-
-    // ── Cloud passes (before lighting) ───────────────────────────────────
-    // Must run after bus render so the blocker pass sees current tile visibility.
-    // Outputs: _cloudEffect.cloudShadowTexture (fed into lighting compose shader)
-    //          _cloudEffect._cloudTopRT        (blitted after lighting)
+    // ── Cloud passes (global — feeds lighting on each level) ───────────────
+    // Cloud shadow RT includes overhead blockers and a floors-above-active mask;
+    // ShadowManagerV2 still composes overhead + cloud.
     if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: cloud.render'); } catch (_) {} }
     if (_profiling) _profileT0 = performance.now();
-    if (!_skipCloudPass && this._cloudEffect.enabled && this._cloudEffect.params.enabled) {
+    const cloudEnabled = !_skipCloudPass && resolveEffectEnabled(this._cloudEffect);
+    if (cloudEnabled) {
       this._cloudEffect.render(this.renderer);
+    }
+    {
+      const cloudTex = cloudEnabled
+        ? this._cloudEffect.cloudShadowTexture
+        : null;
+      const cloudRawTex = cloudEnabled
+        ? (this._cloudEffect.cloudShadowRawTexture ?? this._cloudEffect.cloudShadowTexture)
+        : null;
+      try {
+        this._runShadowManagerCombinePass(cloudTex, cloudRawTex, _disableOverheadInLighting);
+      } catch (err) {
+        log.warn('FloorCompositor: post-cloud ShadowManagerV2 combine failed:', err);
+      }
+      this._shadowManagerPrevFrameCloudTex = cloudTex ?? null;
+      this._shadowManagerPrevFrameCloudRawTex = cloudRawTex ?? null;
     }
     if (_profiling) this._recordPassTiming('cloudRender', _profileT0);
     if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: cloud.render DONE'); } catch (_) {} }
 
-    // ── Step 2: Post-processing chain ────────────────────────────────────
-    // Post effects read sceneRT and chain through _postA/_postB.
-    // `currentInput` tracks which RT holds the latest result.
-    let currentInput = this._sceneRT;
-
-    // Lighting pass: sceneRT → postA.
-    // Window scene renders to its own RT; compose merges it with Foundry lights
-    // (per-channel roof gating by active floor).
-    // Cloud shadow RT is also passed so illumination is multiplied by the shadow factor.
-    const winScene = this._windowLightEffect.enabled
-      ? this._windowLightEffect._scene : null;
-    const cloudShadowTex = (this._cloudEffect.enabled && this._cloudEffect.params.enabled)
+    // Shadow/cloud texture references for per-level lighting passes.
+    const cloudShadowTexLegacy = cloudEnabled
       ? this._cloudEffect.cloudShadowTexture : null;
-    const windowCloudShadowTex = (this._cloudEffect.enabled && this._cloudEffect.params.enabled)
+    const windowCloudShadowTexLegacy = cloudEnabled
       ? (this._cloudEffect.cloudShadowRawTexture ?? this._cloudEffect.cloudShadowTexture)
       : null;
-    // Back-compat alias for any nearby call sites still using the prior name.
-    const cloudShadowRawTex = windowCloudShadowTex;
-    const windowCloudShadowViewBounds = (this._cloudEffect.enabled && this._cloudEffect.params.enabled)
-      ? (this._cloudEffect.cloudShadowViewBounds ?? null)
-      : null;
-    const shadowW = Number(windowCloudShadowTex?.image?.width) || this._sceneRT?.width || 1;
-    const shadowH = Number(windowCloudShadowTex?.image?.height) || this._sceneRT?.height || 1;
-    this._windowLightEffect?.setCloudShadowTexture?.(windowCloudShadowTex, shadowW, shadowH, windowCloudShadowViewBounds);
-    const buildingShadowTex = (this._buildingShadowEffect?.params?.enabled)
+    const combinedShadowTex = this._shadowManagerEffect?.combinedShadowTexture ?? cloudShadowTexLegacy;
+    const combinedShadowRawTex = this._shadowManagerEffect?.combinedShadowRawTexture ?? combinedShadowTex;
+    const cloudShadowRawTexLegacy = windowCloudShadowTexLegacy;
+    const windowCloudShadowViewBounds = cloudEnabled
+      ? (this._cloudEffect.cloudShadowViewBounds ?? null) : null;
+    const buildingShadowTex = resolveEffectEnabled(this._buildingShadowEffect)
       ? this._buildingShadowEffect.shadowFactorTexture : null;
     const buildingShadowOpacity = Number.isFinite(this._buildingShadowEffect?.params?.opacity)
       ? this._buildingShadowEffect.params.opacity : 0.75;
-    const overheadShadowTex = (!_disableOverheadInLighting && this._overheadShadowEffect?.params?.enabled)
+    const overheadShadowTexLegacy = (!_disableOverheadInLighting && resolveEffectEnabled(this._overheadShadowEffect))
       ? this._overheadShadowEffect.shadowFactorTexture : null;
     const overheadRoofAlphaTex = _disableRoofInLighting ? null : (this._overheadShadowEffect?.roofAlphaTexture ?? null);
-    // IMPORTANT INVARIANT:
-    // Do NOT null `roofBlockTexture` / `ceilingTransmittanceTextureForLighting` during
-    // hover-reveal. The shader-side occlusion math in `OverheadShadowsEffectV2` +
-    // `LightingEffectV2` explicitly gates the hard blocker contribution by the *live*
-    // roof visibility weight, so keeping these textures wired avoids “stuck mask”
-    // behavior under faded trees/overheads.
     const overheadRoofBlockTex = _disableRoofInLighting ? null : (this._overheadShadowEffect?.roofBlockTexture ?? null);
-    // IMPORTANT INVARIANT:
-    // Keep ceiling transmittance available during hover-reveal; blocker/occlusion
-    // fade is handled in shader via roof visibility weights (not by runtime nulling).
     const ceilingTransmittanceTex = (!_disableRoofInLighting && this._overheadShadowEffect?.ceilingTransmittanceTextureForLighting)
-      ? this._overheadShadowEffect.ceilingTransmittanceTextureForLighting
-      : null;
-    this._windowLightEffect?.setOverheadRoofAlphaTexture?.(
+      ? this._overheadShadowEffect.ceilingTransmittanceTextureForLighting : null;
+
+    // ── Per-level scene RTs + composite (sole V2 render path) ───────────────
+    const _compositeOut = this._renderPerLevelPipeline({
+      _profiling,
+      _dbgStages,
+      _skipWaterPass,
+      cloudShadowTexLegacy,
+      cloudShadowRawTexLegacy,
+      combinedShadowTex,
+      combinedShadowRawTex,
+      buildingShadowTex,
+      buildingShadowOpacity,
+      overheadShadowTexLegacy,
       overheadRoofAlphaTex,
-      this._sceneRT?.width || 1,
-      this._sceneRT?.height || 1
-    );
-    this._windowLightEffect?.setCeilingTransmittanceTexture?.(ceilingTransmittanceTex);
-    this._windowLightEffect?.syncFrameOcclusion?.(this);
-    this._skyColorEffect?.setOverheadRoofAlphaTexture?.(overheadRoofAlphaTex);
-    if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: lighting.render(sceneRT→postA)'); } catch (_) {} }
-    if (_profiling) _profileT0 = performance.now();
-    const lightingCtx = window.MapShine?.activeLevelContext ?? null;
-    const outdoorsForLightingTex = this._resolveOutdoorsMask(lightingCtx, { allowWeatherRoofMap: false }).texture ?? null;
-    this._lightingEffect.render(this.renderer, this.camera, currentInput, this._postA, winScene, cloudShadowTex, cloudShadowRawTex, buildingShadowTex, overheadShadowTex, buildingShadowOpacity, overheadRoofAlphaTex, overheadRoofBlockTex, outdoorsForLightingTex, ceilingTransmittanceTex);
-    if (_profiling) this._recordPassTiming('lightingRender', _profileT0);
-    if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: lighting.render(sceneRT→postA) DONE'); } catch (_) {} }
-
-    currentInput = this._postA;
-
-    // Sky color grading pass (time-of-day atmospheric grading). Ping-pongs.
-    if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: skyColor.render'); } catch (_) {} }
-    if (this._skyColorEffect.params.enabled) {
-      const skyOutput = (currentInput === this._postA) ? this._postB : this._postA;
-      this._skyColorEffect.render(this.renderer, currentInput, skyOutput);
-      currentInput = skyOutput;
+      overheadRoofBlockTex,
+      ceilingTransmittanceTex,
+      windowCloudShadowViewBounds,
+    });
+    if (!_compositeOut) {
+      log.warn('FloorCompositor.render: per-level pipeline produced no output');
+      if (_dbgStages) this._debugFirstFrameStagesLogged = true;
+      return;
     }
-    if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: skyColor.render DONE'); } catch (_) {} }
+    let currentInput = _compositeOut;
 
-    // Color correction pass: global user-authored grade (exposure, contrast, saturation, etc.).
-    // Ping-pongs: whichever is current → the other.
-    if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: colorCorrection.render'); } catch (_) {} }
-    if (this._colorCorrectionEffect.params.enabled) {
-      const ccOutput = (currentInput === this._postA) ? this._postB : this._postA;
-      this._colorCorrectionEffect.render(this.renderer, currentInput, ccOutput);
-      currentInput = ccOutput;
-    }
-    if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: colorCorrection.render DONE'); } catch (_) {} }
-
-    // Filter pass: multiplicative overlay (ink AO / multiply tint). Runs after
-    // color correction and before water/bloom.
-    if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: filter.render'); } catch (_) {} }
-    if (this._filterEffect.enabled && this._filterEffect.params.enabled) {
-      const fOutput = (currentInput === this._postA) ? this._postB : this._postA;
-      this._filterEffect.render(this.renderer, currentInput, fOutput);
-      currentInput = fOutput;
-    }
-    if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: filter.render DONE'); } catch (_) {} }
-
-    // Feed sky state + cloud shadow into water after sky+CC have updated.
-    // Water runs after grading so caustics/specular add onto the final image and bloom can pick them up.
-    try {
-      const sky = this._skyColorEffect;
-      const tint = sky?.currentSkyTintColor;
-      if (tint && typeof this._waterEffect?.setSkyColor === 'function') {
-        this._waterEffect.setSkyColor(tint.r, tint.g, tint.b);
-      }
-      const skyIntensity01 = sky?._composeMaterial?.uniforms?.uIntensity?.value;
-      if (typeof this._waterEffect?.setSkyIntensity01 === 'function' && Number.isFinite(skyIntensity01)) {
-        this._waterEffect.setSkyIntensity01(skyIntensity01);
-      }
-      // Drive specular sun direction from live time-of-day so the highlight
-      // angle changes as the sun moves across the sky.
-      if (sky && typeof this._waterEffect?.setSunAngles === 'function') {
-        this._waterEffect.setSunAngles(sky.currentSunAzimuthDeg, sky.currentSunElevationDeg);
-      }
-      // Feed cloud shadow texture so water darkening, caustics kill, and
-      // specular kill all respond to cloud coverage.
-      if (typeof this._waterEffect?.setCloudShadowTexture === 'function') {
-        this._waterEffect.setCloudShadowTexture(cloudShadowTex);
-      }
-      // Feed structural shadow textures so water specular/foam respond to
-      // building and overhead shadows as well.
-      if (typeof this._waterEffect?.setBuildingShadowTexture === 'function') {
-        this._waterEffect.setBuildingShadowTexture(buildingShadowTex);
-      }
-      if (typeof this._waterEffect?.setOverheadShadowTexture === 'function') {
-        this._waterEffect.setOverheadShadowTexture(overheadShadowTex);
-      }
-    } catch (_) {}
-
-    // Water pass: refracts/tints/specular the fully graded scene.
-    // Occlusion is handled via a deterministic occluder mask (upper floor tiles)
-    // plus depth pass fallback inside the shader.
-    if (!_skipWaterPass && this._waterEffect?.enabled) {
-      // Build occluder mask for the *currently viewed* floor.
-      // If on floor 0, no occluder needed.
-      let occluderRT = null;
-      try {
-        const viewFloor = window.MapShine?.floorStack?.getActiveFloor()?.index ?? 0;
-        if (!_disableWaterOccluder && viewFloor > 0 && this._waterOccluderRT) {
-          this._renderBus.renderFloorMaskTo(this.renderer, this.camera, viewFloor, this._waterOccluderRT);
-          occluderRT = this._waterOccluderRT;
-        }
-      } catch (_) {}
-
-      const waterOutput = (currentInput === this._postA) ? this._postB : this._postA;
-      // render() returns true if it wrote to waterOutput, false if it returned early.
-      // Only advance currentInput when the pass actually ran — otherwise waterOutput
-      // is an unwritten (black) RT and advancing would black out the entire scene.
-      if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: water.render'); } catch (_) {} }
-      if (_profiling) _profileT0 = performance.now();
-      const waterWrote = this._waterEffect.render(this.renderer, this.camera, currentInput, waterOutput, occluderRT);
-      if (_profiling) this._recordPassTiming('waterRender', _profileT0);
-      if (waterWrote) currentInput = waterOutput;
-      if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: water.render DONE'); } catch (_) {} }
-    }
-
-    // Distortion pass (fire-driven heat haze).
-    if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: distortion.render'); } catch (_) {} }
-    if (this._distortionEffect?.enabled && this._distortionEffect?.params?.enabled) {
+    // Distortion pass (runs once on composite; not inside per-level loop)
+    if (resolveEffectEnabled(this._distortionEffect)) {
       this._syncFireHeatDistortionSource();
-      const distOutput = (currentInput === this._postA) ? this._postB : this._postA;
-      this._distortionEffect.setBuffers(currentInput, distOutput);
+      const distOut = (currentInput === this._postA) ? this._postB : this._postA;
+      this._distortionEffect.setBuffers(currentInput, distOut);
       this._distortionEffect.setRenderToScreen(false);
-      if (_profiling) _profileT0 = performance.now();
       this._distortionEffect.render(this.renderer, this._renderBus?._scene ?? this.scene, this.camera);
-      if (_profiling) this._recordPassTiming('distortionRender', _profileT0);
-      currentInput = distOutput;
-    }
-    if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: distortion.render DONE'); } catch (_) {} }
-
-    // Atmospheric fog pass: weather-driven distance haze over the graded scene.
-    if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: atmosphericFog.render'); } catch (_) {} }
-    if (this._atmosphericFogEffect?.enabled && this._atmosphericFogEffect?.params?.enabled) {
-      const fogOutput = (currentInput === this._postA) ? this._postB : this._postA;
-      if (this._atmosphericFogEffect.render(this.renderer, this.camera, currentInput, fogOutput)) {
-        currentInput = fogOutput;
-      }
-    }
-    if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: atmosphericFog.render DONE'); } catch (_) {} }
-
-    // Bloom pass: screen-space glow (threshold → mip blur → additive composite).
-    if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: bloom.render'); } catch (_) {} }
-    if (this._bloomEffect.params.enabled) {
-      const bloomOutput = (currentInput === this._postA) ? this._postB : this._postA;
-      this._bloomEffect.render(this.renderer, currentInput, bloomOutput);
-      currentInput = bloomOutput;
-    }
-    if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: bloom.render DONE'); } catch (_) {} }
-
-    // Sharpen pass (disabled by default — optional artistic effect).
-    if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: sharpen.render'); } catch (_) {} }
-    if (this._sharpenEffect.params.enabled) {
-      const shOutput = (currentInput === this._postA) ? this._postB : this._postA;
-      this._sharpenEffect.render(this.renderer, currentInput, shOutput);
-      currentInput = shOutput;
-    }
-    if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: sharpen.render DONE'); } catch (_) {} }
-
-    // Artistic post-processing effects (disabled by default).
-    if (this._dotScreenEffect?.enabled) {
-      const dsOutput = (currentInput === this._postA) ? this._postB : this._postA;
-      if (this._dotScreenEffect.render(this.renderer, this.camera, currentInput, dsOutput)) {
-        currentInput = dsOutput;
-      }
-    }
-    if (this._halftoneEffect?.enabled) {
-      const htOutput = (currentInput === this._postA) ? this._postB : this._postA;
-      if (this._halftoneEffect.render(this.renderer, this.camera, currentInput, htOutput)) {
-        currentInput = htOutput;
-      }
-    }
-    if (this._asciiEffect?.enabled) {
-      const asciiOutput = (currentInput === this._postA) ? this._postB : this._postA;
-      if (this._asciiEffect.render(this.renderer, this.camera, currentInput, asciiOutput)) {
-        currentInput = asciiOutput;
-      }
-    }
-    if (this._dazzleOverlayEffect?.enabled) {
-      const dzOutput = (currentInput === this._postA) ? this._postB : this._postA;
-      if (this._dazzleOverlayEffect.render(this.renderer, this.camera, currentInput, dzOutput)) {
-        currentInput = dzOutput;
-      }
-    }
-    if (this._visionModeEffect?.enabled) {
-      const vmOutput = (currentInput === this._postA) ? this._postB : this._postA;
-      if (this._visionModeEffect.render(this.renderer, this.camera, currentInput, vmOutput)) {
-        currentInput = vmOutput;
-      }
-    }
-    if (this._invertEffect?.enabled) {
-      const invOutput = (currentInput === this._postA) ? this._postB : this._postA;
-      if (this._invertEffect.render(this.renderer, this.camera, currentInput, invOutput)) {
-        currentInput = invOutput;
-      }
-    }
-    if (this._sepiaEffect?.enabled) {
-      const sepOutput = (currentInput === this._postA) ? this._postB : this._postA;
-      if (this._sepiaEffect.render(this.renderer, this.camera, currentInput, sepOutput)) {
-        currentInput = sepOutput;
-      }
+      currentInput = distOut;
     }
 
     // PIXI world-channel composite: inject bridge drawings late so they are
@@ -2453,10 +2835,10 @@ export class FloorCompositor {
     // This now runs after fog composition so lens artifacts remain on top of FOW.
     // CRITICAL: Pass _postA as the luma sample source so the lens effect can detect
     // actual light intensity (albedo × lighting) BEFORE sky color grading darkens it.
-    // We can't use _sceneRT (raw albedo) because it's too dark, and we can't use
-    // currentInput (final graded output) because darkness level has already been applied.
+    // We can't use the raw per-level albedo RT because it is too dark, and we can't use
+    // currentInput (final graded composite) because darkness has already been applied.
     if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: lens.render'); } catch (_) {} }
-    if (!_skipLensPass && this._lensEffect?.enabled && this._lensEffect?.params?.enabled) {
+    if (!_skipLensPass && resolveEffectEnabled(this._lensEffect)) {
       const lensOutput = (currentInput === this._postA) ? this._postB : this._postA;
       if (this._lensEffect.render(this.renderer, this.camera, currentInput, lensOutput, this._postA)) {
         currentInput = lensOutput;
@@ -2464,9 +2846,85 @@ export class FloorCompositor {
     }
     if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: lens.render DONE'); } catch (_) {} }
 
-    // ── Step 3: Blit final result to screen ──────────────────────────────
+    // ── Step 3: Optional mask debug overlay → blit to screen ────────────
     if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: blitToScreen'); } catch (_) {} }
-    this._blitToScreen(currentInput);
+    let blitSource = currentInput;
+    try {
+      const ui = window.MapShine?.uiManager ?? window.MapShine?.tweakpaneManager;
+      const tp = ui?.globalParams;
+      const dbgEnabled = tp?.maskDebugOverlayEnabled;
+      const dbgOn =
+        dbgEnabled === true ||
+        dbgEnabled === 1 ||
+        dbgEnabled === 'true';
+      const dbgMode = typeof tp?.maskDebugOverlayMode === 'string' ? tp.maskDebugOverlayMode : 'outdoors_current';
+      const op = Number(tp?.maskDebugOverlayOpacity);
+      const dbgOpacity = Number.isFinite(op) ? Math.max(0, Math.min(1, op)) : 0.35;
+      if (dbgOn && this._maskDebugOverlayPass) {
+        const ctx = window.MapShine?.activeLevelContext ?? null;
+        const { texture: dbgTex, floorKey: dbgFk, directScreenUv: dbgDirectScreenUv, replaceScene: dbgReplaceScene } = this._maskDebugOverlayPass.resolveMaskTexture(dbgMode, {
+          resolveOutdoorsMask: () => {
+            const strict = this._resolveOutdoorsMask(ctx, { allowWeatherRoofMap: false });
+            if (strict.texture) return strict;
+            const loose = this._resolveOutdoorsMask(ctx, { allowWeatherRoofMap: true });
+            if (loose.texture) return loose;
+            const rm = weatherController?.roofMap ?? null;
+            return { texture: rm, floorKey: rm ? 'weatherController.roofMap' : null };
+          },
+          resolveOverheadDebugTexture: (mode) => {
+            const ov = this._overheadShadowEffect;
+            if (!ov) return null;
+            switch (mode) {
+              case 'overhead_shadow_factor':
+                return ov.shadowFactorTexture ?? null;
+              case 'overhead_roof_coverage':
+                return ov.roofTarget?.texture ?? null;
+              case 'overhead_roof_visibility':
+                return ov.roofAlphaTexture ?? null;
+              case 'overhead_roof_block':
+                return ov.roofBlockTexture ?? null;
+              case 'overhead_fluid_roof':
+                return ov.fluidRoofTarget?.texture ?? null;
+              case 'overhead_tile_projection':
+                return ov.tileProjectionTarget?.texture ?? null;
+              default:
+                return null;
+            }
+          },
+        });
+        try {
+          if (window.MapShine) {
+            window.MapShine.__maskDebugOverlayFloorKey = dbgFk ?? null;
+            window.MapShine.__maskDebugOverlayHasTexture = !!dbgTex;
+          }
+        } catch (_) {}
+        if (dbgTex) {
+          const dbgOut = currentInput === this._postA ? this._postB : this._postA;
+          const gz = Number(window.MapShine?.sceneComposer?.groundZ);
+          const groundZ = Number.isFinite(gz) ? gz : 0;
+          if (
+            this._maskDebugOverlayPass.renderComposite(
+              this.renderer,
+              currentInput,
+              dbgOut,
+              dbgTex,
+              dbgOpacity,
+              this.camera,
+              groundZ,
+              {
+                directScreenUv: dbgDirectScreenUv === true,
+                replaceScene: dbgReplaceScene === true,
+              },
+            )
+          ) {
+            blitSource = dbgOut;
+          }
+        }
+      }
+    } catch (e) {
+      log.warn('FloorCompositor: mask debug overlay failed:', e);
+    }
+    this._blitToScreen(blitSource);
     if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: blitToScreen DONE'); } catch (_) {} }
 
     // Late UI/world overlay pass (layer 31) rendered after all post-FX.
@@ -2481,7 +2939,7 @@ export class FloorCompositor {
     // drawing overlays, interaction aids routed through OVERLAY_THREE_LAYER).
     // Keep PIXI UI overlay above clouds so HUD/control affordances stay readable.
     if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: cloudTops.blit'); } catch (_) {} }
-    if (this._cloudEffect.enabled && this._cloudEffect.params.enabled) {
+    if (resolveEffectEnabled(this._cloudEffect)) {
       this._cloudEffect.blitCloudTops(this.renderer, null);
     }
     if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: cloudTops.blit DONE'); } catch (_) {} }
@@ -2506,6 +2964,161 @@ export class FloorCompositor {
     if (_dbgStages) {
       this._debugFirstFrameStagesLogged = true;
       try { log.info('[V2 Frame] ✔ FloorCompositor.render: END'); } catch (_) {}
+    }
+  }
+
+  /**
+   * Runtime guard: keep FloorRenderBus visibility slice aligned with active floor
+   * and immediately correct leaked above-floor entries if they become visible.
+   * @param {object|null} floorStackArg
+   * @private
+   */
+  _enforceBusVisibilityForActiveFloor(floorStackArg = null) {
+    const bus = this._renderBus;
+    if (!bus || !this._busPopulated) return;
+
+    let desiredMax = 0;
+    try {
+      const fs = floorStackArg || window.MapShine?.floorStack || null;
+      const active = fs?.getActiveFloor?.() || null;
+      if (Number.isFinite(Number(active?.index))) {
+        desiredMax = Number(active.index);
+      } else if (Number.isFinite(Number(bus?._visibleMaxFloorIndex))) {
+        desiredMax = Number(bus._visibleMaxFloorIndex);
+      }
+    } catch (_) {}
+    if (!Number.isFinite(desiredMax) || desiredMax < 0) desiredMax = 0;
+
+    let corrected = false;
+    const currentMax = Number.isFinite(Number(bus?._visibleMaxFloorIndex))
+      ? Number(bus._visibleMaxFloorIndex)
+      : 0;
+    if (currentMax !== desiredMax) {
+      bus.setVisibleFloors(desiredMax);
+      corrected = true;
+    }
+
+    let leakCount = 0;
+    try {
+      const entries = bus?._tiles;
+      if (entries && typeof entries.forEach === 'function') {
+        entries.forEach((entry, key) => {
+          const k = String(key || '');
+          if (k.startsWith('__')) return;
+          const fi = Number(entry?.floorIndex);
+          if (!Number.isFinite(fi) || fi <= desiredMax) return;
+          const node = entry?.root || entry?.mesh || null;
+          const nodeVisible = Boolean(node?.visible);
+          const meshVisible = (typeof entry?.mesh?.visible === 'boolean') ? entry.mesh.visible : null;
+          const rootVisible = (typeof entry?.root?.visible === 'boolean') ? entry.root.visible : null;
+          const effectiveVisible = nodeVisible && meshVisible !== false && rootVisible !== false;
+          if (effectiveVisible) leakCount += 1;
+        });
+      }
+    } catch (_) {}
+
+    this._visibilityDriftLastLeakCount = leakCount;
+    if (leakCount > 0) {
+      try {
+        bus._applyTileVisibility?.();
+        corrected = true;
+      } catch (_) {}
+    }
+
+    if (corrected) {
+      this._visibilityDriftCorrections += 1;
+      this._visibilityDriftLastCorrectionMs = Date.now();
+    }
+  }
+
+  /**
+   * Runtime guard for TileManager sprite visibility by active floor.
+   * @param {object|null} floorStackArg
+   * @private
+   */
+  _enforceTileSpriteVisibilityForActiveFloor(floorStackArg = null) {
+    let activeFloorIndex = 0;
+    try {
+      const fs = floorStackArg || window.MapShine?.floorStack || null;
+      const af = fs?.getActiveFloor?.() || null;
+      if (Number.isFinite(Number(af?.index))) activeFloorIndex = Number(af.index);
+    } catch (_) {}
+    if (!Number.isFinite(activeFloorIndex) || activeFloorIndex < 0) activeFloorIndex = 0;
+
+    const tm = window.MapShine?.tileManager ?? null;
+    const flm = window.MapShine?.floorLayerManager ?? null;
+    const map = tm?.tileSprites;
+    if (!map || typeof map.entries !== 'function') return;
+
+    let leakCount = 0;
+    let correctedAny = false;
+    const expectedFloorFromDoc = (tileDoc) => {
+      const floors = window.MapShine?.floorStack?.getFloors?.() ?? [];
+      if (!Array.isArray(floors) || floors.length <= 1) return 0;
+
+      // V14-native: resolve via native levels membership (tiles use `levels` Set,
+      // tokens use singular `level`). This guard runs on tiles only but handles
+      // both for safety.
+      try {
+        const singleLevel = tileDoc?.level ?? tileDoc?._source?.level;
+        if (typeof singleLevel === 'string' && singleLevel.length > 0) {
+          for (let i = 0; i < floors.length; i += 1) {
+            if (floors[i].levelId === singleLevel) return i;
+          }
+        }
+        const levelsSet = tileDoc?.levels;
+        if (levelsSet?.size) {
+          for (const lid of levelsSet) {
+            for (let i = 0; i < floors.length; i += 1) {
+              if (floors[i].levelId === lid) return i;
+            }
+          }
+        }
+      } catch (_) {}
+
+      // Legacy: Levels range flags
+      try {
+        const flags = tileDoc?.flags?.levels;
+        const b = Number(flags?.rangeBottom);
+        const t = Number(flags?.rangeTop);
+        if (Number.isFinite(b) && Number.isFinite(t)) {
+          const mid = (b + t) / 2;
+          for (let i = 0; i < floors.length; i += 1) {
+            const f = floors[i];
+            if (mid >= Number(f?.elevationMin) && mid < Number(f?.elevationMax)) return i;
+          }
+        }
+      } catch (_) {}
+      const elev = Number(tileDoc?.elevation ?? 0);
+      for (let i = 0; i < floors.length; i += 1) {
+        const f = floors[i];
+        const min = Number(f?.elevationMin);
+        const max = Number(f?.elevationMax);
+        if (Number.isFinite(min) && Number.isFinite(max) && elev >= min && elev <= max) return i;
+      }
+      return 0;
+    };
+
+    for (const [tileId, data] of map.entries()) {
+      const sprite = data?.sprite ?? null;
+      const tileDoc = data?.tileDoc ?? canvas?.scene?.tiles?.get?.(tileId) ?? null;
+      if (!sprite || !tileDoc) continue;
+      const mappedFloorRaw = flm?._spriteFloorMap?.get?.(sprite);
+      const mappedFloor = Number.isFinite(Number(mappedFloorRaw)) ? Number(mappedFloorRaw) : null;
+      const expectedFloor = mappedFloor ?? expectedFloorFromDoc(tileDoc);
+      const shouldBeVisible = expectedFloor <= activeFloorIndex;
+      const currentlyVisible = sprite.visible === true;
+      if (currentlyVisible && !shouldBeVisible) {
+        leakCount += 1;
+        sprite.visible = false;
+        correctedAny = true;
+      }
+    }
+
+    this._tileSpriteVisibilityLastLeakCount = leakCount;
+    if (correctedAny) {
+      this._tileSpriteVisibilityCorrections += 1;
+      this._tileSpriteVisibilityLastCorrectionMs = Date.now();
     }
   }
 
@@ -2726,24 +3339,46 @@ export class FloorCompositor {
     } catch (_) {
       floorStackFloors = [];
     }
-    const activeFloorForMask = window.MapShine?.floorStack?.getActiveFloor?.() ?? null;
-    const activeIdxForMask = Number(activeFloorForMask?.index);
-    const skipGroundGlobalFallback = floorStackFloors.length > 1
-      && Number.isFinite(activeIdxForMask)
-      && activeIdxForMask > 0;
+    // In multi-floor scenes, a "ground/global" outdoors fallback can resolve to
+    // whichever floor cache was composed first (or last persisted), which may be
+    // the wrong band during scene/floor transitions. Prefer null until the active
+    // floor's own outdoors texture is ready.
+    const skipGroundGlobalFallback = floorStackFloors.length > 1;
 
     const sc = window.MapShine?.sceneComposer;
     const compositor = sc?._sceneMaskCompositor;
+    const bundleMask = sc?.currentBundle?.masks?.find?.(m => (m?.id === 'outdoors' || m?.type === 'outdoors'))?.texture ?? null;
+
+    // Multi-floor scenes intentionally avoid global "ground" fallbacks because
+    // they can be stale from another band. However, if the per-floor GPU cache
+    // is still empty, forcing neutral-indoor fallback makes every consumer look
+    // wrong at once (lighting/water/cloud/shadows). In that transient state,
+    // prefer bundle _Outdoors over the neutral synthetic texture.
+    let compositorHasFloorMasks = false;
+    if (compositor) {
+      try {
+        const cacheSize = Number(compositor?._floorCache?.size ?? 0);
+        const metaSize = Number(compositor?._floorMeta?.size ?? 0);
+        compositorHasFloorMasks = (cacheSize > 0) || (metaSize > 0);
+      } catch (_) {
+        compositorHasFloorMasks = false;
+      }
+    }
+    const allowBundleFallback = !skipGroundGlobalFallback || !compositorHasFloorMasks;
+
     if (!compositor) {
+      if (bundleMask) return { texture: bundleMask, floorKey: 'bundle' };
       if (!skipGroundGlobalFallback) {
-        const bundleMask = sc?.currentBundle?.masks?.find?.(m => (m?.id === 'outdoors' || m?.type === 'outdoors'))?.texture ?? null;
-        if (bundleMask) return { texture: bundleMask, floorKey: 'bundle' };
         const mmMask = window.MapShine?.maskManager?.getTexture?.('outdoors.scene') ?? null;
         if (mmMask) return { texture: mmMask, floorKey: 'maskManager' };
       }
       if (!allowWeatherRoofMap) {
         const regMask = window.MapShine?.effectMaskRegistry?.getMask?.('outdoors') ?? null;
         if (regMask) return { texture: regMask, floorKey: 'registry' };
+        return { texture: null, floorKey: null };
+      }
+      // roofMap is global — on upper floors it may still be the previous band's _Outdoors.
+      if (skipGroundGlobalFallback) {
         return { texture: null, floorKey: null };
       }
       const roofMap = weatherController?.roofMap ?? null;
@@ -2753,16 +3388,20 @@ export class FloorCompositor {
     const gpu = resolveCompositorOutdoorsTexture(
       compositor,
       context,
-      { skipGroundFallback: skipGroundGlobalFallback },
+      {
+        skipGroundFallback: skipGroundGlobalFallback,
+        allowBundleFallback,
+      },
     );
     if (gpu.texture) {
       return { texture: gpu.texture, floorKey: gpu.resolvedKey };
     }
 
-    if (!skipGroundGlobalFallback) {
-      const bundleMask = sc?.currentBundle?.masks?.find?.(m => (m?.id === 'outdoors' || m?.type === 'outdoors'))?.texture ?? null;
-      if (bundleMask) return { texture: bundleMask, floorKey: 'bundle' };
+    if (allowBundleFallback && bundleMask) {
+      return { texture: bundleMask, floorKey: 'bundle' };
+    }
 
+    if (!skipGroundGlobalFallback) {
       const mmMask = window.MapShine?.maskManager?.getTexture?.('outdoors.scene') ?? null;
       if (mmMask) return { texture: mmMask, floorKey: 'maskManager' };
     }
@@ -2772,8 +3411,35 @@ export class FloorCompositor {
       if (regMask) return { texture: regMask, floorKey: 'registry' };
       return { texture: null, floorKey: null };
     }
+    if (skipGroundGlobalFallback) {
+      return { texture: null, floorKey: null };
+    }
     const roofMap = weatherController?.roofMap ?? null;
     return { texture: roofMap, floorKey: roofMap ? 'weatherController' : null };
+  }
+
+  /**
+   * Build (once) a tiny indoors-classified outdoors mask fallback.
+   * R=0, A=1 => shader decoders classify as indoor, never "all outdoors".
+   *
+   * @returns {THREE.Texture|null}
+   * @private
+   */
+  _getNeutralOutdoorsTexture() {
+    if (this._neutralOutdoorsTexture) return this._neutralOutdoorsTexture;
+    try {
+      const THREE = window.THREE;
+      if (!THREE?.DataTexture || !THREE?.RGBAFormat || !THREE?.UnsignedByteType) return null;
+      const data = new Uint8Array([0, 0, 0, 255]);
+      const tex = new THREE.DataTexture(data, 1, 1, THREE.RGBAFormat, THREE.UnsignedByteType);
+      tex.name = 'MapShineNeutralOutdoorsMask';
+      tex.needsUpdate = true;
+      tex.flipY = false;
+      this._neutralOutdoorsTexture = tex;
+      return tex;
+    } catch (_) {
+      return null;
+    }
   }
 
   /**
@@ -2805,18 +3471,20 @@ export class FloorCompositor {
       } catch (_) {
         floorStackForSync = [];
       }
-      const activeFloorForSync = window.MapShine?.floorStack?.getActiveFloor?.() ?? null;
-      const activeIdxForSync = Number(activeFloorForSync?.index);
-      const multiFloorUpperView = floorStackForSync.length > 1
-        && Number.isFinite(activeIdxForSync)
-        && activeIdxForSync > 0;
+      const multiFloorScene = floorStackForSync.length > 1;
+      const neutralOutdoorsTex = this._getNeutralOutdoorsTexture();
 
       // Do not clobber a valid outdoors texture with transient null while floor
       // caches are still warming asynchronously. On upper floors, reusing the
       // previous texture is usually stale ground-floor _Outdoors.
-      if (!outdoorsTex && this._lastOutdoorsTexture && !multiFloorUpperView) {
+      if (!outdoorsTex && this._lastOutdoorsTexture && !multiFloorScene) {
         outdoorsTex = this._lastOutdoorsTexture;
       }
+      if (!outdoorsTex && multiFloorScene && neutralOutdoorsTex) outdoorsTex = neutralOutdoorsTex;
+      if (!waterOutdoorsTex && multiFloorScene && neutralOutdoorsTex) waterOutdoorsTex = neutralOutdoorsTex;
+      const skyOutdoorsFinal = (!skyOutdoorsTex && multiFloorScene && neutralOutdoorsTex)
+        ? neutralOutdoorsTex
+        : skyOutdoorsTex;
 
       // Water can run in floor-fallback mode (for example only ground has _Water
       // data while viewing an upper floor). In that case, sampling outdoors from
@@ -2847,7 +3515,7 @@ export class FloorCompositor {
       // Always propagate (including null) so consumers cannot keep stale masks.
       this._cloudEffect?.setOutdoorsMask?.(outdoorsTex);
       this._waterEffect?.setOutdoorsMask?.(waterOutdoorsTex);
-      this._skyColorEffect?.setOutdoorsMask?.(skyOutdoorsTex);
+      this._skyColorEffect?.setOutdoorsMask?.(skyOutdoorsFinal);
       this._filterEffect?.setOutdoorsMask?.(outdoorsTex);
       this._atmosphericFogEffect?.setOutdoorsMask?.(outdoorsTex);
       this._overheadShadowEffect?.setOutdoorsMask?.(outdoorsTex);
@@ -2858,7 +3526,12 @@ export class FloorCompositor {
       try {
         const compositor = window.MapShine?.sceneComposer?._sceneMaskCompositor;
         if (compositor) {
-          const floors = window.MapShine?.floorStack?.getVisibleFloors?.() ?? [];
+          // floorIdTarget encodes the *topmost* floor index per world pixel, not the
+          // viewed floor. Binding only getVisibleFloors() leaves higher indices null;
+          // CloudEffectV2 then substitutes 1×1 white (= outdoors) for those samplers,
+          // so underground views show full cloud shadow / rain wherever an upper floor
+          // has tile coverage. Bind every band's _Outdoors that exists in the stack.
+          const floors = window.MapShine?.floorStack?.getFloors?.() ?? [];
           const perFloor = [null, null, null, null];
           let floorIdSupported = true;
           let anyPerFloorMask = false;
@@ -2901,7 +3574,67 @@ export class FloorCompositor {
    */
   _applyCurrentFloorVisibility(payload = null) {
     const floorStack = window.MapShine?.floorStack;
-    if (!floorStack) return;
+    if (!floorStack) {
+      // Fallback: floorStack may be transiently unavailable during load races.
+      // Keep a deterministic floor context so effects do not remain unbound.
+      const fallbackIdx = Number.isFinite(Number(this._renderBus?._visibleMaxFloorIndex))
+        ? Number(this._renderBus._visibleMaxFloorIndex)
+        : 0;
+      this._activeFloorIndex = fallbackIdx;
+      try { this._renderBus.setVisibleFloors(fallbackIdx); } catch (_) {}
+      try { this._fireEffect?.onFloorChange?.(fallbackIdx); } catch (_) {}
+      try { this._dustEffect?.onFloorChange?.(fallbackIdx); } catch (_) {}
+      try { this._waterSplashesEffect?.onFloorChange?.(fallbackIdx); } catch (_) {}
+      try { this._windowLightEffect?.onFloorChange?.(fallbackIdx); } catch (_) {}
+      try { this._cloudEffect?.onFloorChange?.(fallbackIdx); } catch (_) {}
+      try { this._waterEffect?.onFloorChange?.(fallbackIdx); } catch (_) {}
+      log.warn(`FloorCompositor: floorStack unavailable, using fallback floor index ${fallbackIdx}`);
+      return;
+    }
+
+    const resolveFloorIndexFromContext = (ctx, floors, fallbackIdx = 0) => {
+      if (!Array.isArray(floors) || floors.length === 0) return fallbackIdx;
+      const b = Number(ctx?.bottom);
+      const t = Number(ctx?.top);
+      if (!Number.isFinite(b)) return fallbackIdx;
+      const hasFiniteTop = Number.isFinite(t);
+      const mid = hasFiniteTop ? ((b + t) / 2) : b;
+      let bestIdx = fallbackIdx;
+      let foundExactMatch = false;
+      for (let i = 0; i < floors.length; i++) {
+        const f = floors[i];
+        const fMin = Number(f?.elevationMin);
+        const fMax = Number(f?.elevationMax);
+        if (fMin === b && (!hasFiniteTop || fMax === t)) {
+          bestIdx = i;
+          foundExactMatch = true;
+          break;
+        }
+        // If we haven't found an exact match, check if mid is within bounds.
+        // Ignore infinity bounds for the mid check to avoid jumping to a
+        // "catch-all" floor if a tighter floor contains the center.
+        if (!foundExactMatch && mid >= fMin && mid <= fMax) {
+          bestIdx = i;
+        }
+      }
+      return bestIdx;
+    };
+
+    const resolveFloorIndexFromElevation = (elevation, floors, fallbackIdx = 0) => {
+      const elev = Number(elevation);
+      if (!Array.isArray(floors) || floors.length === 0 || !Number.isFinite(elev)) return fallbackIdx;
+      let bestIdx = fallbackIdx;
+      for (let i = 0; i < floors.length; i++) {
+        const f = floors[i];
+        const fMin = Number(f?.elevationMin);
+        const fMax = Number(f?.elevationMax);
+        if (Number.isFinite(fMin) && Number.isFinite(fMax) && elev >= fMin && elev <= fMax) {
+          bestIdx = i;
+          break;
+        }
+      }
+      return bestIdx;
+    };
 
     // Prefer the hook payload's active level band (authoritative) to avoid
     // getting stuck when FloorStack.activeFloorIndex wasn't updated elsewhere.
@@ -2910,33 +3643,31 @@ export class FloorCompositor {
     try {
       const ctx = payload?.context ?? window.MapShine?.activeLevelContext ?? null;
       const floors = floorStack.getFloors?.() ?? [];
-      const b = Number(ctx?.bottom);
-      const t = Number(ctx?.top);
       // Levels commonly represents the top-most band as [bottom, Infinity].
       // Accept finite-bottom contexts even when top is non-finite so active
       // floor switching still works on the highest level.
-      if (floors.length > 1 && Number.isFinite(b)) {
-        const hasFiniteTop = Number.isFinite(t);
-        const mid = hasFiniteTop ? ((b + t) / 2) : b;
-        let bestIdx = 0;
-        let foundExactMatch = false;
-        for (let i = 0; i < floors.length; i++) {
-          const f = floors[i];
-          const fMin = Number(f?.elevationMin);
-          const fMax = Number(f?.elevationMax);
-          if (fMin === b && (!hasFiniteTop || fMax === t)) {
-            bestIdx = i;
-            foundExactMatch = true;
-            break;
-          }
-          // If we haven't found an exact match, check if mid is within bounds.
-          // Ignore infinity bounds for the mid check to avoid jumping to a
-          // "catch-all" floor if a tighter floor contains the center.
-          if (!foundExactMatch && mid >= fMin && mid <= fMax) {
-            bestIdx = i;
-          }
+      if (floors.length > 1) {
+        const currentIdx = Number(floorStack.getActiveFloor?.()?.index);
+        const safeCurrentIdx = Number.isFinite(currentIdx) ? currentIdx : 0;
+        let bestIdx = resolveFloorIndexFromContext(ctx, floors, safeCurrentIdx);
+
+        // Context can be transiently null/non-finite during rapid view changes.
+        // In that window, infer floor from controlled token elevation so we do
+        // not keep stale upper-floor state while rendering the ground view.
+        if (!Number.isFinite(Number(ctx?.bottom))) {
+          const controlledToken = canvas?.tokens?.controlled?.[0] ?? null;
+          const controlledElev = Number(controlledToken?.document?.elevation);
+          bestIdx = resolveFloorIndexFromElevation(controlledElev, floors, bestIdx);
         }
+
         floorStack.setActiveFloor(bestIdx);
+      }
+    } catch (_) {}
+
+    try {
+      const comp = window.MapShine?.sceneComposer?._sceneMaskCompositor;
+      if (comp && typeof comp.syncActiveFloorFromFloorStack === 'function') {
+        comp.syncActiveFloorFromFloorStack();
       }
     } catch (_) {}
 
@@ -2956,6 +3687,7 @@ export class FloorCompositor {
     } else {
       log.info(`FloorCompositor: active floor index = ${maxFloorIndex}`);
     }
+    this._activeFloorIndex = maxFloorIndex;
     
     this._renderBus.setVisibleFloors(maxFloorIndex);
     // Notify fire effect of floor change so it can swap active particle systems.
@@ -2966,8 +3698,6 @@ export class FloorCompositor {
     try { this._iridescenceEffect?.onFloorChange?.(maxFloorIndex); } catch (_) {}
     // Notify water splashes of floor change so it can swap active systems.
     try { this._waterSplashesEffect?.onFloorChange?.(maxFloorIndex); } catch (_) {}
-    // Notify ash disturbance so it can swap active burst system sets.
-    try { this._ashDisturbanceEffect?.onFloorChange?.(maxFloorIndex); } catch (_) {}
     // Bush/Tree overlays are bus-managed; still notify for any internal floor state.
     try { this._bushEffect?.onFloorChange?.(maxFloorIndex); } catch (_) {}
     try { this._treeEffect?.onFloorChange?.(maxFloorIndex); } catch (_) {}
@@ -3031,7 +3761,7 @@ export class FloorCompositor {
     }
 
     // Prefer checking whether the ACTIVE floor band has any fire systems.
-    // FireEffectV2 deactivates systems from the BatchedRenderer but keeps the
+    // FireEffectV2 deactivates systems from the per-floor BatchedRenderer but keeps the
     // per-floor arrays resident, so "any systems anywhere" is not enough to
     // decide whether heat should run this frame.
     let hasSystemsOnActiveBand = null;
@@ -3240,6 +3970,8 @@ export class FloorCompositor {
     if (this._postA)   this._postA.setSize(w, h);
     if (this._postB)   this._postB.setSize(w, h);
     if (this._waterOccluderRT) this._waterOccluderRT.setSize(w, h);
+    try { this._levelRTPool?.onResize?.(w, h); } catch (_) {}
+    try { this._shadowManagerEffect?.onResize?.(w, h); } catch (_) {}
     try { this._bushEffect?.onResize?.(w, h); } catch (_) {}
     try { this._treeEffect?.onResize?.(w, h); } catch (_) {}
     this._cloudEffect.onResize(w, h);
@@ -3261,6 +3993,311 @@ export class FloorCompositor {
     try { this._distortionEffect?.onResize?.(w, h); } catch (_) {}
     try { this._floorDepthBlurEffect?.onResize?.(w, h); } catch (_) {}
     log.debug(`FloorCompositor.onResize: RTs resized to ${w}x${h}`);
+  }
+
+  // ── Per-Level RT Pipeline ──────────────────────────────────────────────────
+
+  /**
+   * Renders each visible level independently, applies the full effect chain
+   * per level, then composites them bottom→top using upper-level alpha.
+   *
+   * @param {Object} ctx - Shared render context from the main render() method.
+   * @returns {THREE.WebGLRenderTarget|null} The final composited RT, or null on failure.
+   * @private
+   */
+  _renderPerLevelPipeline(ctx) {
+    const {
+      _profiling,
+      _dbgStages,
+      _skipWaterPass,
+      cloudShadowTexLegacy,
+      cloudShadowRawTexLegacy,
+      combinedShadowTex,
+      combinedShadowRawTex,
+      buildingShadowTex,
+      buildingShadowOpacity,
+      overheadShadowTexLegacy,
+      overheadRoofAlphaTex,
+      overheadRoofBlockTex,
+      ceilingTransmittanceTex,
+      windowCloudShadowViewBounds,
+    } = ctx;
+    let _profileT0 = 0;
+
+    // Collect visible levels bottom→top.
+    const floorStack = window.MapShine?.floorStack;
+    const visibleFloors = floorStack?.getVisibleFloors?.() ?? [];
+    if (!visibleFloors.length) return null;
+
+    if (_dbgStages) { try { log.info(`[V2 PerLevel] rendering ${visibleFloors.length} level(s)`); } catch (_) {} }
+
+    // Track which level indices are active so we can release stale pool entries.
+    const activeLevels = new Set();
+    const levelFinalRTs = [];
+
+    for (let li = 0; li < visibleFloors.length; li++) {
+      const floor = visibleFloors[li];
+      const levelIndex = Number(floor?.index ?? li);
+      activeLevels.add(levelIndex);
+
+      const rts = this._levelRTPool.acquire(levelIndex);
+      if (!rts) continue;
+
+      const { sceneRT: levelSceneRT, postA: levelPostA, postB: levelPostB } = rts;
+
+      // ── Bus render for this single level ───────────────────────────────
+      if (_profiling) _profileT0 = performance.now();
+      this._renderBus.renderFloorRangeTo(
+        this.renderer, this.camera,
+        levelIndex, levelIndex,
+        levelSceneRT,
+        {
+          includeBackground: true,
+          filterBackgroundByFloor: true,
+          clearBeforeRender: true,
+          clearAlpha: 0,
+          clearColor: 0x000000,
+        },
+      );
+      if (_profiling) this._recordPassTiming(`perLevel_busRender_${levelIndex}`, _profileT0);
+
+      // ── Post-processing chain for this level ───────────────────────────
+      let currentInput = levelSceneRT;
+
+      // Lighting pass
+      if (resolveEffectEnabled(this._lightingEffect)) {
+        if (_profiling) _profileT0 = performance.now();
+        const winScene = resolveEffectEnabled(this._windowLightEffect)
+          ? this._windowLightEffect._scene : null;
+        const shadowW = Number(combinedShadowRawTex?.image?.width) || levelSceneRT.width || 1;
+        const shadowH = Number(combinedShadowRawTex?.image?.height) || levelSceneRT.height || 1;
+        this._windowLightEffect?.setCloudShadowTexture?.(combinedShadowRawTex, shadowW, shadowH, windowCloudShadowViewBounds);
+        this._windowLightEffect?.setOverheadRoofAlphaTexture?.(overheadRoofAlphaTex, levelSceneRT.width || 1, levelSceneRT.height || 1);
+        this._windowLightEffect?.setCeilingTransmittanceTexture?.(ceilingTransmittanceTex);
+        this._windowLightEffect?.syncFrameOcclusion?.(this);
+        this._skyColorEffect?.setOverheadRoofAlphaTexture?.(overheadRoofAlphaTex);
+
+        let outdoorsForLightingTex = null;
+        try {
+          const lightingCtx = window.MapShine?.activeLevelContext ?? null;
+          outdoorsForLightingTex = this._resolveOutdoorsMask(lightingCtx, { allowWeatherRoofMap: false }).texture ?? null;
+          if (!outdoorsForLightingTex) {
+            const floorCount = (floorStack?.getFloors?.() ?? []).length;
+            if (floorCount > 1) outdoorsForLightingTex = this._getNeutralOutdoorsTexture();
+          }
+        } catch (_) {}
+
+        this._lightingEffect.render(
+          this.renderer, this.camera,
+          currentInput, levelPostA,
+          winScene,
+          cloudShadowTexLegacy, cloudShadowRawTexLegacy,
+          buildingShadowTex, overheadShadowTexLegacy,
+          buildingShadowOpacity,
+          overheadRoofAlphaTex, overheadRoofBlockTex,
+          outdoorsForLightingTex,
+          ceilingTransmittanceTex,
+          combinedShadowTex, combinedShadowRawTex,
+        );
+        if (_profiling) this._recordPassTiming(`perLevel_lighting_${levelIndex}`, _profileT0);
+        currentInput = levelPostA;
+      }
+
+      // Sky color grading
+      if (resolveEffectEnabled(this._skyColorEffect)) {
+        const skyOut = (currentInput === levelPostA) ? levelPostB : levelPostA;
+        this._skyColorEffect.render(this.renderer, currentInput, skyOut);
+        currentInput = skyOut;
+      }
+
+      // Color correction
+      if (resolveEffectEnabled(this._colorCorrectionEffect)) {
+        const ccOut = (currentInput === levelPostA) ? levelPostB : levelPostA;
+        this._colorCorrectionEffect.render(this.renderer, currentInput, ccOut);
+        currentInput = ccOut;
+      }
+
+      // Filter
+      if (resolveEffectEnabled(this._filterEffect)) {
+        const fOut = (currentInput === levelPostA) ? levelPostB : levelPostA;
+        this._filterEffect.render(this.renderer, currentInput, fOut);
+        currentInput = fOut;
+      }
+
+      // Water pass — per-level, using that level's water data
+      let _waterPassWrote = false;
+      const _bisectWater = getWaterLayerBisectState();
+      const _skipUpperWater = _bisectWater.skipWaterUpper === 'on';
+      if (!_skipWaterPass && resolveEffectEnabled(this._waterEffect) && !(_skipUpperWater && levelIndex > 0)) {
+        try {
+          // Set per-level water context so the shader uses this level's mask data
+          this._waterEffect.setLevelContext?.(levelIndex);
+        } catch (_) {}
+
+        // Occluder RT is null here. Water may borrow a lower floor's mask pack on
+        // slices with no local _Water (see WaterEffectV2.setLevelContext); holes
+        // still composite over the lower slice in LevelCompositePass.
+        const waterOut = (currentInput === levelPostA) ? levelPostB : levelPostA;
+        if (_profiling) _profileT0 = performance.now();
+        _waterPassWrote = this._waterEffect.render(this.renderer, this.camera, currentInput, waterOut, null);
+        if (_profiling) this._recordPassTiming(`perLevel_water_${levelIndex}`, _profileT0);
+        if (_waterPassWrote) currentInput = waterOut;
+      }
+
+      // Feed water specular bloom texture (only meaningful from the last level that had water)
+      try {
+        const wt = (_waterPassWrote && typeof this._waterEffect?.getWaterSpecularBloomTexture === 'function')
+          ? this._waterEffect.getWaterSpecularBloomTexture() : null;
+        this._bloomEffect?.setWaterSpecularBloomTexture?.(wt ?? null);
+      } catch (_) {}
+
+      // Distortion (fire heat haze): skipped per-level because aux-pass
+      // caching in DistortionManager assumes one render per frame. Applied
+      // once globally after composite in the late pass section.
+
+      // Atmospheric fog
+      if (resolveEffectEnabled(this._atmosphericFogEffect)) {
+        const fogOut = (currentInput === levelPostA) ? levelPostB : levelPostA;
+        if (this._atmosphericFogEffect.render(this.renderer, this.camera, currentInput, fogOut)) {
+          currentInput = fogOut;
+        }
+      }
+
+      // Bloom
+      if (resolveEffectEnabled(this._bloomEffect)) {
+        const bloomOut = (currentInput === levelPostA) ? levelPostB : levelPostA;
+        this._bloomEffect.render(this.renderer, currentInput, bloomOut);
+        currentInput = bloomOut;
+      }
+
+      // Sharpen
+      if (resolveEffectEnabled(this._sharpenEffect)) {
+        const shOut = (currentInput === levelPostA) ? levelPostB : levelPostA;
+        this._sharpenEffect.render(this.renderer, currentInput, shOut);
+        currentInput = shOut;
+      }
+
+      // Artistic post-processing — use resolveEffectEnabled (instance + params)
+      // so registry/UI cannot disagree with FilterEffectV2-style gating.
+      if (resolveEffectEnabled(this._dotScreenEffect)) {
+        const dsOut = (currentInput === levelPostA) ? levelPostB : levelPostA;
+        if (this._dotScreenEffect.render(this.renderer, this.camera, currentInput, dsOut)) currentInput = dsOut;
+      }
+      if (resolveEffectEnabled(this._halftoneEffect)) {
+        const htOut = (currentInput === levelPostA) ? levelPostB : levelPostA;
+        if (this._halftoneEffect.render(this.renderer, this.camera, currentInput, htOut)) currentInput = htOut;
+      }
+      if (resolveEffectEnabled(this._asciiEffect)) {
+        const ascOut = (currentInput === levelPostA) ? levelPostB : levelPostA;
+        if (this._asciiEffect.render(this.renderer, this.camera, currentInput, ascOut)) currentInput = ascOut;
+      }
+      if (resolveEffectEnabled(this._dazzleOverlayEffect)) {
+        const dzOut = (currentInput === levelPostA) ? levelPostB : levelPostA;
+        if (this._dazzleOverlayEffect.render(this.renderer, this.camera, currentInput, dzOut)) currentInput = dzOut;
+      }
+      if (resolveEffectEnabled(this._visionModeEffect)) {
+        const vmOut = (currentInput === levelPostA) ? levelPostB : levelPostA;
+        if (this._visionModeEffect.render(this.renderer, this.camera, currentInput, vmOut)) currentInput = vmOut;
+      }
+      if (resolveEffectEnabled(this._invertEffect)) {
+        const invOut = (currentInput === levelPostA) ? levelPostB : levelPostA;
+        if (this._invertEffect.render(this.renderer, this.camera, currentInput, invOut)) currentInput = invOut;
+      }
+      if (resolveEffectEnabled(this._sepiaEffect)) {
+        const sepOut = (currentInput === levelPostA) ? levelPostB : levelPostA;
+        if (this._sepiaEffect.render(this.renderer, this.camera, currentInput, sepOut)) currentInput = sepOut;
+      }
+
+      levelFinalRTs.push(currentInput);
+
+      // Restore water to global state after this level's pass
+      try { this._waterEffect?.clearLevelContext?.(); } catch (_) {}
+    }
+
+    // Release pool entries for levels no longer visible.
+    this._levelRTPool.releaseStale(activeLevels);
+
+    if (!levelFinalRTs.length) return null;
+
+    // ── Composite all level RTs bottom→top ─────────────────────────────────
+    if (_profiling) _profileT0 = performance.now();
+
+    // Debug: tint lower vs upper RGB in the two-level composite (alpha unchanged).
+    // Enable: `window.MapShine.__v2PerLevelTintDebug = true` or `{ enabled: true }`.
+    // Disable: `window.MapShine.__v2PerLevelTintDebug = false` or delete the property.
+    let _tintOn = false;
+    try {
+      const bisectTint = getWaterLayerBisectState().perLevelTint === 'on';
+      const d = window.MapShine?.__v2PerLevelTintDebug;
+      _tintOn = bisectTint || d === true || d?.enabled === true;
+      this._levelCompositePass?.setPerLevelTintDebug?.(_tintOn);
+      if (_tintOn && levelFinalRTs.length === 2 && !this._v2PerLevelTintDebugLogged) {
+        this._v2PerLevelTintDebugLogged = true;
+        log.info(
+          '[V2 PerLevelTintDebug] ON — subtle cool tint on lower RT, subtle warm on upper; '
+          + 'fully empty pixels show as dark purple. Reload if colors still look extreme.',
+        );
+      }
+      if (_tintOn && levelFinalRTs.length !== 2 && !this._v2PerLevelTintLengthWarned) {
+        this._v2PerLevelTintLengthWarned = true;
+        log.warn(
+          `[V2 PerLevelTintDebug] tint shader only runs for exactly 2 visible levels; this frame has ${levelFinalRTs.length}.`,
+        );
+      }
+      if (!_tintOn) {
+        this._v2PerLevelTintDebugLogged = false;
+        this._v2PerLevelTintLengthWarned = false;
+      }
+    } catch (_) {
+      try { this._levelCompositePass?.setPerLevelTintDebug?.(false); } catch (_) {}
+    }
+
+    // Use the compositor's own _postA as the composite output, _postB as scratch.
+    const _bisect = getWaterLayerBisectState();
+    // Forced diagnostic mode: always swap base/upper roles in LevelCompositePass.
+    // This isolates whether upstairs "water behind everything" is primarily
+    // caused by per-level stack ordering.
+    const _cp = 'swapped';
+    if (_cp === 'swapped' && levelFinalRTs.length >= 2) {
+      // Forced diagnostic: keep swap behaviour deterministic even when the
+      // visible level count is >2, so we do not alternate between swapped
+      // and normal composite paths frame-to-frame.
+      this._levelCompositePass.compositeReversedTopBottom(
+        this.renderer,
+        levelFinalRTs[0],
+        levelFinalRTs[levelFinalRTs.length - 1],
+        this._postA,
+        _tintOn,
+      );
+    } else {
+      let stack = levelFinalRTs;
+      if (_cp === 'lowerOnly' && levelFinalRTs.length) stack = [levelFinalRTs[0]];
+      else if (_cp === 'upperOnly' && levelFinalRTs.length) {
+        stack = [levelFinalRTs[levelFinalRTs.length - 1]];
+      }
+      this._levelCompositePass.composite(
+        this.renderer,
+        stack,
+        this._postA,
+        this._postB,
+      );
+    }
+    if (_profiling) this._recordPassTiming('perLevel_composite', _profileT0);
+
+    // Expose per-level diagnostics on MapShine for console inspection
+    try {
+      if (window.MapShine) {
+        window.MapShine.__v2PerLevelDiag = {
+          levelCount: visibleFloors.length,
+          rtPoolAllocated: this._levelRTPool.allocatedCount,
+          levelIndices: [...activeLevels],
+        };
+      }
+    } catch (_) {}
+
+    if (_dbgStages) { try { log.info('[V2 PerLevel] composite complete'); } catch (_) {} }
+
+    return this._postA;
   }
 
   // ── Cleanup ────────────────────────────────────────────────────────────────
@@ -3287,6 +4324,7 @@ export class FloorCompositor {
     try { this._dustEffect?.dispose?.(); } catch (_) {}
     try { this._windowLightEffect?.dispose?.(); } catch (_) {}
     try { this._cloudEffect?.dispose?.(); } catch (_) {}
+    try { this._shadowManagerEffect?.dispose?.(); } catch (_) {}
     this._lightingPerspectiveContext = null;
     try { this._lightingEffect?.setLightingPerspectiveContext?.(null); } catch (_) {}
     try { this._lightingEffect?.dispose?.(); } catch (_) {}
@@ -3311,6 +4349,7 @@ export class FloorCompositor {
     try { this._lensEffect?.dispose?.(); } catch (_) {}
     try { this._distortionEffect?.dispose?.(); } catch (_) {}
     try { this._floorDepthBlurEffect?.dispose?.(); } catch (_) {}
+    try { this._maskDebugOverlayPass?.dispose?.(); } catch (_) {}
     try { this._renderBus?.dispose?.(); } catch (_) {}
     this._busPopulated = false;
     this._populateComplete = false;
@@ -3321,6 +4360,8 @@ export class FloorCompositor {
     try { this._postA?.dispose(); } catch (_) {}
     try { this._postB?.dispose(); } catch (_) {}
     try { this._waterOccluderRT?.dispose(); } catch (_) {}
+    try { this._levelRTPool?.dispose(); } catch (_) {}
+    try { this._levelCompositePass?.dispose(); } catch (_) {}
     this._sceneRT = null;
     this._postA = null;
     this._postB = null;
@@ -3347,6 +4388,8 @@ export class FloorCompositor {
     this._pixiUiOverlayQuad = null;
     this._fogOverlayScene = null;
     this._fogOverlayCamera = null;
+    try { this._neutralOutdoorsTexture?.dispose?.(); } catch (_) {}
+    this._neutralOutdoorsTexture = null;
 
     this._initialized = false;
     log.info('FloorCompositor disposed');

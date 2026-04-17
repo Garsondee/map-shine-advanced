@@ -128,26 +128,64 @@ export class FloorDepthBlurEffect {
   static getControlSchema() {
     return {
       enabled: false,
+      help: {
+        title: 'Floor depth blur',
+        summary: [
+          'When you are on an upper floor, the floors **below** you can be drawn softer (more blurred the further down they are), like a camera focused on your level. Your current floor stays sharp.',
+          'Only matters in **multi-floor** scenes. On the ground floor nothing changes.',
+          'Uses several fullscreen blur steps per lower level — **stronger blur or more repeats** can cost more GPU time. The **safety cap** keeps worst-case work bounded.',
+          'Settings save with the scene (not World Based).',
+        ].join('\n\n'),
+        glossary: {
+          'Blur per level': 'How strong the blur is for each step down (adds up for deeper floors).',
+          'Smoothness passes': 'How many blur passes run per level — higher looks smoother, costs more.',
+          'Work limit': 'Upper limit on total blur passes so performance stays under control.',
+        },
+      },
+      presetApplyDefaults: true,
       groups: [
         {
-          name: 'floorDepthBlur',
-          label: 'Floor Depth Blur',
-          type: 'inline',
+          name: 'look',
+          label: 'Look',
+          type: 'folder',
+          expanded: true,
           parameters: ['blurRadiusPx', 'itersPerDepth', 'maxIters'],
         },
       ],
       parameters: {
-        blurRadiusPx:  { type: 'slider', min: 1, max: 30, step: 0.5, default: 6,
-                         label: 'Blur Radius (px/floor)' },
-        itersPerDepth: { type: 'slider', min: 1, max: 4, step: 1, default: 2,
-                         label: 'Iterations/Floor' },
-        maxIters:      { type: 'slider', min: 2, max: 12, step: 1, default: 6,
-                         label: 'Max Iterations (cap)' },
+        enabled: { type: 'boolean', default: false, hidden: true },
+        blurRadiusPx: {
+          type: 'slider',
+          min: 1,
+          max: 30,
+          step: 0.5,
+          default: 6,
+          label: 'Blur per level (px)',
+          tooltip: 'How blurry each lower floor looks. Each floor down adds the same amount again.',
+        },
+        itersPerDepth: {
+          type: 'slider',
+          min: 1,
+          max: 4,
+          step: 1,
+          default: 2,
+          label: 'Smoothness passes',
+          tooltip: 'More passes make the blur softer and less blocky; each pass is extra drawing work.',
+        },
+        maxIters: {
+          type: 'slider',
+          min: 2,
+          max: 12,
+          step: 1,
+          default: 6,
+          label: 'Work limit',
+          tooltip: 'Stops the blur from running too many passes total, to protect frame rate.',
+        },
       },
       presets: {
-        'Subtle':   { blurRadiusPx: 3,  itersPerDepth: 1 },
-        'Moderate': { blurRadiusPx: 6,  itersPerDepth: 2 },
-        'Heavy':    { blurRadiusPx: 12, itersPerDepth: 3 },
+        Subtle: { blurRadiusPx: 3, itersPerDepth: 1, maxIters: 6 },
+        Moderate: { blurRadiusPx: 6, itersPerDepth: 2, maxIters: 6 },
+        Heavy: { blurRadiusPx: 12, itersPerDepth: 3, maxIters: 8 },
       },
     };
   }

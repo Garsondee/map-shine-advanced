@@ -33,18 +33,44 @@ export class SepiaEffectV2 {
   static getControlSchema() {
     return {
       enabled: false,
+      help: {
+        title: 'Sepia tone',
+        summary: [
+          'Warm brown photo grade by mixing the scene toward a classic sepia transform (photographic-style matrix).',
+          'Stylistic only — no masks. One fullscreen post pass on the composited image.',
+          'Performance: very cheap (single pass, simple shader).',
+          'Persistence: settings save with the scene (not World Based).',
+        ].join('\n\n'),
+        glossary: {
+          Strength: 'Blend between the original image and full sepia (0 = original, 1 = full sepia).',
+        },
+      },
       groups: [
         {
-          name: 'sepia',
-          label: 'Sepia Tone',
-          type: 'inline',
-          parameters: ['strength']
-        }
+          name: 'look',
+          label: 'Look',
+          type: 'folder',
+          expanded: true,
+          parameters: ['strength'],
+        },
       ],
       parameters: {
         enabled: { type: 'boolean', default: false, hidden: true },
-        strength: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 1.0 }
-      }
+        strength: {
+          type: 'slider',
+          label: 'Strength',
+          min: 0.0,
+          max: 1.0,
+          step: 0.01,
+          default: 1.0,
+          tooltip: 'How much sepia is mixed in (0 leaves the image unchanged).',
+        },
+      },
+      presets: {
+        Soft: { strength: 0.35 },
+        Balanced: { strength: 0.65 },
+        Full: { strength: 1.0 },
+      },
     };
   }
 

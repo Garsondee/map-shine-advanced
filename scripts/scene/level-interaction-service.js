@@ -17,7 +17,7 @@
  * @module scene/level-interaction-service
  */
 
-import { readTileLevelsFlags, tileHasLevelsRange } from '../foundry/levels-scene-flags.js';
+import { readTileLevelsFlags, tileHasLevelsRange, hasV14NativeLevels } from '../foundry/levels-scene-flags.js';
 
 const _tokenLevelSwitchState = new Map();
 
@@ -30,14 +30,10 @@ function _sleep(ms) {
 // ---------------------------------------------------------------------------
 
 /**
- * Check whether a token belongs to the currently active level band.
+ * Check whether a token belongs to the currently active/viewed level.
  *
- * Returns true (token is on this floor) when:
- *   - There is no multi-level context (single-floor scene)
- *   - The token's elevation falls within [bottom, top) of the active band
- *
- * Shared-boundary semantics: elevation == top belongs to the UPPER level,
- * matching VisibilityController._isTokenAboveCurrentLevel.
+ * V14-native: compares `tokenDoc.level` against the viewed level id.
+ * Legacy fallback: elevation band containment.
  *
  * @param {TokenDocument|object} tokenDoc
  * @returns {boolean}
@@ -46,15 +42,23 @@ export function isTokenOnActiveLevel(tokenDoc) {
   const levelCtx = window.MapShine?.activeLevelContext;
   if (!levelCtx || (levelCtx.count ?? 0) <= 1) return true;
 
+  // V14-native: compare token's level field to the active level id
+  const scene = canvas?.scene;
+  if (hasV14NativeLevels(scene)) {
+    const tokenLevelId = tokenDoc?.level ?? tokenDoc?.document?.level;
+    if (tokenLevelId) {
+      return tokenLevelId === levelCtx.levelId;
+    }
+  }
+
+  // Legacy fallback: elevation band containment
   const tokenElev = Number(tokenDoc?.elevation ?? 0);
   if (!Number.isFinite(tokenElev)) return true;
 
   const bottom = Number(levelCtx.bottom);
   const top = Number(levelCtx.top);
 
-  // Token above active level top (shared-boundary: == top is upper floor)
   if (Number.isFinite(top) && tokenElev >= top - 0.01) return false;
-  // Token below active level bottom
   if (Number.isFinite(bottom) && tokenElev < bottom) return false;
 
   return true;
@@ -128,11 +132,23 @@ export function switchToLevelForElevation(elevation, reason = 'level-interaction
   const idx = getLevelIndexForElevation(elevation);
   if (idx < 0) return null;
 
-  // Avoid switching if we're already on this level
   const current = cf._activeLevelIndex;
   if (current === idx) return cf._activeLevelContext;
 
   return cf.setActiveLevel(idx, { reason });
+}
+
+/**
+ * Switch the active level view to a specific V14 Level document ID.
+ * @param {string} levelId - V14 Level document ID
+ * @param {string} [reason='level-interaction-switch-by-id']
+ * @returns {object|null}
+ */
+export function switchToV14Level(levelId, reason = 'level-interaction-switch-by-id') {
+  if (!levelId) return null;
+  const cf = window.MapShine?.cameraFollower;
+  if (!cf || typeof cf.setActiveLevel !== 'function') return null;
+  return cf.setActiveLevel(levelId, { reason });
 }
 
 /**
@@ -320,16 +336,11 @@ export function isTokenDragSelectable(sprite, tileManager, options = {}) {
 
 /**
  * After drag-select completes, determine if ALL selected tokens are on a single
- * floor that is different from the current floor. If so, returns that floor's
- * elevation so the caller can auto-switch.
- *
- * Returns null if:
- * - No tokens selected
- * - Tokens span multiple floors
- * - All tokens are already on the active floor
+ * floor that is different from the current floor. If so, returns the switch
+ * target (elevation or level ID).
  *
  * @param {Array<TokenDocument|object>} tokenDocs - Selected token documents
- * @returns {number|null} The common elevation to switch to, or null
+ * @returns {{elevation?: number, levelId?: string}|null}
  */
 export function getAutoSwitchElevation(tokenDocs) {
   if (!tokenDocs || tokenDocs.length === 0) return null;
@@ -337,16 +348,35 @@ export function getAutoSwitchElevation(tokenDocs) {
   const levelCtx = window.MapShine?.activeLevelContext;
   if (!levelCtx || (levelCtx.count ?? 0) <= 1) return null;
 
+  // V14-native: check by level ID
+  const scene = canvas?.scene;
+  if (hasV14NativeLevels(scene)) {
+    let commonLevelId = null;
+    for (const doc of tokenDocs) {
+      const tokenLevelId = doc?.level ?? doc?.document?.level;
+      if (!tokenLevelId) return null;
+      if (tokenLevelId === levelCtx.levelId) return null;
+      if (commonLevelId === null) {
+        commonLevelId = tokenLevelId;
+      } else if (commonLevelId !== tokenLevelId) {
+        return null;
+      }
+    }
+    if (commonLevelId) return { levelId: commonLevelId };
+    return null;
+  }
+
+  // Legacy: elevation-based
   let commonLevelIndex = null;
   let anyOnActiveLevel = false;
 
   for (const doc of tokenDocs) {
     const elev = Number(doc?.elevation ?? 0);
-    if (!Number.isFinite(elev)) return null; // Can't determine floor → no switch
+    if (!Number.isFinite(elev)) return null;
 
     if (isTokenOnActiveLevel(doc)) {
       anyOnActiveLevel = true;
-      break; // Mixed selection (some on active floor) → don't switch
+      break;
     }
 
     const idx = getLevelIndexForElevation(elev);
@@ -355,17 +385,14 @@ export function getAutoSwitchElevation(tokenDocs) {
     if (commonLevelIndex === null) {
       commonLevelIndex = idx;
     } else if (commonLevelIndex !== idx) {
-      return null; // Tokens on different non-active floors → don't switch
+      return null;
     }
   }
 
-  // If any token is on the active level, don't switch
   if (anyOnActiveLevel) return null;
 
-  // All tokens are on the same non-active floor
   if (commonLevelIndex !== null) {
-    // Return the elevation of the first token as the switch target
-    return Number(tokenDocs[0]?.elevation ?? 0);
+    return { elevation: Number(tokenDocs[0]?.elevation ?? 0) };
   }
 
   return null;

@@ -13,10 +13,11 @@
 
 import { createLogger } from '../core/log.js';
 import { getEffectMaskRegistry, loadAssetBundle, probeMaskFile, clearCache } from '../assets/loader.js';
-import { readSceneLevelsFlag, isLevelsEnabledForScene, readTileLevelsFlags, tileHasLevelsRange, readWallHeightFlags, wallHasHeightBounds, readDocLevelsRange, getSceneBackgroundElevation, getSceneWeatherElevation, getSceneLightMasking, getFlagReaderDiagnostics } from '../foundry/levels-scene-flags.js';
+import { readSceneLevelsFlag, isLevelsEnabledForScene, readTileLevelsFlags, tileHasLevelsRange, readWallHeightFlags, wallHasHeightBounds, readDocLevelsRange, getSceneBackgroundElevation, getSceneWeatherElevation, getSceneLightMasking, getFlagReaderDiagnostics, getCanvasForegroundElevationSplit, readV14SceneLevels, getViewedV14Level, hasV14NativeLevels } from '../foundry/levels-scene-flags.js';
 import { detectLevelsRuntimeInteropState, getLevelsCompatibilityMode, detectKnownModuleConflicts } from '../foundry/levels-compatibility.js';
 import { getPerspectiveElevation } from '../foundry/elevation-context.js';
-import { peekSnapshot } from '../core/levels-import/LevelsSnapshotStore.js';
+import { peekSnapshot, getSnapshot } from '../core/levels-import/LevelsSnapshotStore.js';
+import { EFFECT_SOURCE_OPTIONS } from '../scene/map-points-manager.js';
 import { getTileLevelRole } from './levels-editor/levels-domain.js';
 import { elevationInBand, rangesOverlap } from './levels-editor/level-boundaries.js';
 
@@ -418,6 +419,20 @@ function _serializeWaterUniforms(uniforms) {
   return out;
 }
 
+function _textureBrief(texLike) {
+  if (!texLike) return { present: false, uuid: null, width: null, height: null };
+  const tex = texLike?.isTexture ? texLike : (texLike?.texture || texLike);
+  const w = Number(tex?.image?.width) || Number(tex?.source?.data?.width) || Number(texLike?.width) || null;
+  const h = Number(tex?.image?.height) || Number(tex?.source?.data?.height) || Number(texLike?.height) || null;
+  return {
+    present: Boolean(tex),
+    uuid: tex?.uuid ?? null,
+    width: w,
+    height: h,
+    type: tex?.constructor?.name || texLike?.constructor?.name || null,
+  };
+}
+
 function _collectSceneLevelFlagDiagnostics(scene) {
   const rawLevels = readSceneLevelsFlag(scene);
   const levelsEnabled = isLevelsEnabledForScene(scene);
@@ -448,6 +463,146 @@ function _collectSceneLevelFlagDiagnostics(scene) {
     invalidCount,
     swappedCount,
   };
+}
+
+/**
+ * Synthetic level context for MapPointsManager filtering (mirrors activeLevelContext shape).
+ * @param {{bottom:number|null,top:number|null,levelId:string,index:number}} band
+ * @param {number} levelCount
+ */
+function _syntheticLevelContextFromBand(band, levelCount) {
+  return {
+    bottom: band?.bottom ?? null,
+    top: band?.top ?? null,
+    levelId: band?.levelId ?? null,
+    index: band?.index ?? 0,
+    count: Math.max(1, Number(levelCount) || 1),
+  };
+}
+
+/**
+ * Map-point effect source groups reachable on each level band (uses MapPointsManager level binding rules).
+ * @param {import('../scene/map-points-manager.js').MapPointsManager|null} mapPointsManager
+ * @param {Array<{index:number,levelId:string,bottom:number|null,top:number|null}>} levelBands
+ * @returns {{effectTargetsConsidered:string[], perLevel:object[]}|null}
+ */
+function _collectMapPointsPerLevelEffectCounts(mapPointsManager, levelBands) {
+  if (!mapPointsManager || typeof mapPointsManager.getGroupsByEffectForContext !== 'function') return null;
+  if (!Array.isArray(levelBands) || levelBands.length === 0) return null;
+
+  const targets = new Set();
+  try {
+    for (const g of mapPointsManager.groups?.values?.() || []) {
+      if (g?.isEffectSource && typeof g.effectTarget === 'string' && g.effectTarget.trim()) {
+        targets.add(g.effectTarget.trim());
+      }
+    }
+  } catch (_) {
+  }
+  for (const k of Object.keys(EFFECT_SOURCE_OPTIONS || {})) {
+    if (k) targets.add(k);
+  }
+  const effectTargetsConsidered = Array.from(targets).sort();
+
+  const perLevel = levelBands.map((band) => {
+    const ctx = _syntheticLevelContextFromBand(band, levelBands.length);
+    const byEffectTarget = {};
+    let total = 0;
+    for (const t of effectTargetsConsidered) {
+      let n = 0;
+      try {
+        n = mapPointsManager.getGroupsByEffectForContext(t, ctx)?.length ?? 0;
+      } catch (_) {
+        n = 0;
+      }
+      if (n > 0) byEffectTarget[t] = n;
+      total += n;
+    }
+    return {
+      levelIndex: band.index,
+      levelId: band.levelId,
+      totalEffectSourceGroups: total,
+      byEffectTarget,
+    };
+  });
+
+  return { effectTargetsConsidered, perLevel };
+}
+
+function _compactLevelsImportSnapshot(snapshot) {
+  if (!snapshot || typeof snapshot !== 'object') return null;
+  try {
+    return {
+      sceneId: snapshot.sceneId ?? null,
+      timestamp: snapshot.timestamp ?? null,
+      levelsEnabled: snapshot.levelsEnabled,
+      backgroundElevation: snapshot.backgroundElevation ?? null,
+      weatherElevation: snapshot.weatherElevation ?? null,
+      lightMasking: snapshot.lightMasking ?? null,
+      sceneLevelsCount: snapshot.sceneLevels?.length ?? 0,
+      sceneLevels: Array.isArray(snapshot.sceneLevels)
+        ? snapshot.sceneLevels.map((b) => ({
+          bottom: b?.bottom ?? null,
+          top: b?.top ?? null,
+          name: b?.name ?? null,
+          levelId: b?.levelId ?? null,
+        }))
+        : [],
+      tileSnapCount: snapshot.tiles?.length ?? 0,
+      wallSnapCount: snapshot.walls?.length ?? 0,
+      docRangesCount: snapshot.docRanges?.length ?? 0,
+      diagnostics: snapshot.diagnostics ?? null,
+    };
+  } catch (_) {
+    return { error: 'compactLevelsImportSnapshot_failed' };
+  }
+}
+
+function _groupEffectStatesByFloorIndex(effectStates) {
+  const byFloor = {};
+  for (const e of effectStates || []) {
+    const fi = Number.isFinite(Number(e?.floor)) ? Number(e.floor) : null;
+    const k = fi === null ? 'unbound' : String(fi);
+    if (!byFloor[k]) byFloor[k] = [];
+    byFloor[k].push({
+      id: e.id,
+      source: e.source,
+      enabled: e.enabled,
+      initialized: e.initialized,
+      lazyInitPending: e.lazyInitPending,
+      levelId: e.levelId ?? null,
+    });
+  }
+  return byFloor;
+}
+
+function _collectV2EffectLastFrameDiagnostics(floorCompositorV2) {
+  if (!floorCompositorV2) return null;
+  const v2EffectKeys = [
+    '_specularEffect', '_fluidEffect', '_iridescenceEffect', '_prismEffect',
+    '_bushEffect', '_treeEffect', '_fireEffect', '_dustEffect', '_windowLightEffect',
+    '_lightingEffect', '_skyColorEffect', '_colorCorrectionEffect', '_bloomEffect',
+    '_sharpenEffect', '_filterEffect', '_cloudEffect', '_shadowManagerEffect', '_waterEffect',
+    '_waterSplashesEffect', '_underwaterBubblesEffect', '_weatherParticles',
+    '_ashDisturbanceEffect', '_smellyFliesEffect', '_lightningEffect',
+    '_candleFlamesEffect', '_playerLightEffect', '_overheadShadowEffect',
+    '_buildingShadowEffect', '_dotScreenEffect', '_halftoneEffect',
+    '_asciiEffect', '_dazzleOverlayEffect', '_visionModeEffect',
+    '_invertEffect', '_sepiaEffect', '_lensEffect', '_fogEffect',
+    '_atmosphericFogEffect', '_movementPreviewEffect', '_floorDepthBlurEffect',
+  ];
+  const effects = {};
+  for (const key of v2EffectKeys) {
+    const eff = floorCompositorV2[key];
+    if (!eff || eff._healthDiagnostics == null) continue;
+    const slot = key.replace(/^_/, '');
+    try {
+      effects[slot] = JSON.parse(JSON.stringify(eff._healthDiagnostics));
+    } catch (_) {
+      effects[slot] = eff._healthDiagnostics;
+    }
+  }
+  return { slotCount: Object.keys(effects).length, effects };
 }
 
 export class DiagnosticCenterDialog {
@@ -834,6 +989,21 @@ export class DiagnosticCenterDialog {
   async _buildReport() {
     const checks = [];
 
+    /** @type {object|undefined} Cached result of _buildSceneLevelsAndEffectsPayload(). */
+    let _sceneLevelsAndEffectsPayload;
+    const getSceneLevelsAndEffectsPayload = () => {
+      if (_sceneLevelsAndEffectsPayload !== undefined) return _sceneLevelsAndEffectsPayload;
+      try {
+        _sceneLevelsAndEffectsPayload = this._buildSceneLevelsAndEffectsPayload();
+      } catch (e) {
+        _sceneLevelsAndEffectsPayload = {
+          title: 'Map Shine Levels Wiring Report',
+          error: String(e?.message || e),
+        };
+      }
+      return _sceneLevelsAndEffectsPayload;
+    };
+
     const ms = window.MapShine;
     const surfaceReport = ms?.surfaceRegistry?.refresh?.() || ms?.surfaceReport || null;
 
@@ -843,6 +1013,14 @@ export class DiagnosticCenterDialog {
     const threeCamera = effectComposer?.camera || ms?.camera || null;
 
     const now = Date.now();
+    let jankProbe = null;
+    try {
+      if (typeof this.manager?.collectJankChurnProbe === 'function') {
+        jankProbe = await this.manager.collectJankChurnProbe({ durationMs: 2200, sampleEveryMs: 120 });
+      }
+    } catch (e) {
+      jankProbe = { error: String(e?.message || e) };
+    }
 
     const levelController = ms?.levelNavigationController || null;
     const floorStack = ms?.floorStack || null;
@@ -908,9 +1086,12 @@ export class DiagnosticCenterDialog {
       }
     } catch (_) {}
 
+    const v2Compositor = effectComposer?._floorCompositorV2 ?? null;
+    const isV2Mode = Boolean(v2Compositor);
+
     // --- Pipeline mode ---
     try {
-      const v2Enabled = Boolean(effectComposer?._floorCompositorV2);
+      const v2Enabled = isV2Mode;
       const floorLoopEnabled = false;
       const modeLabel = 'V2 compositor';
       checks.push(_mkCheck('Runtime', 'runtime.pipeline.mode', 'INFO', `Pipeline: ${modeLabel}`, {
@@ -984,12 +1165,61 @@ export class DiagnosticCenterDialog {
       } catch (_) {
       }
 
-      checks.push(_mkCheck('Runtime', 'runtime.effects.summary', total > 0 ? 'PASS' : 'WARN', `Effects registered: ${total} (enabled: ${enabledCount})`, {
+      const effectSummaryStatus = total > 0 ? 'PASS' : (isV2Mode ? 'INFO' : 'WARN');
+      const effectSummaryMessage = total > 0
+        ? `Effects registered: ${total} (enabled: ${enabledCount})`
+        : (isV2Mode
+            ? 'Legacy EffectComposer registry is empty in V2 mode (expected in current architecture)'
+            : 'Effects registered: 0 (enabled: 0)');
+      checks.push(_mkCheck('Runtime', 'runtime.effects.summary', effectSummaryStatus, effectSummaryMessage, {
         total,
         enabledCount,
         continuousCount,
-        enabled: enabled.slice(0, 50)
+        enabled: enabled.slice(0, 50),
+        v2Mode: isV2Mode,
       }));
+
+      if (isV2Mode) {
+        const fc = v2Compositor;
+        const criticalSlots = [
+          '_renderBus',
+          '_lightingEffect',
+          '_windowLightEffect',
+          '_waterEffect',
+          '_cloudEffect',
+          '_shadowManagerEffect',
+          '_specularEffect',
+        ];
+        const missingCriticalSlots = criticalSlots.filter((k) => !fc?.[k]);
+        const inventory = {
+          initialized: Boolean(fc?._initialized),
+          criticalPresent: {
+            renderBus: Boolean(fc?._renderBus),
+            lighting: Boolean(fc?._lightingEffect),
+            windowLight: Boolean(fc?._windowLightEffect),
+            water: Boolean(fc?._waterEffect),
+            cloud: Boolean(fc?._cloudEffect),
+            shadowManager: Boolean(fc?._shadowManagerEffect),
+            specular: Boolean(fc?._specularEffect),
+          },
+          optionalPresentCount: [
+            '_skyColorEffect',
+            '_colorCorrectionEffect',
+            '_filterEffect',
+            '_bloomEffect',
+            '_sharpenEffect',
+            '_fogEffect',
+            '_movementPreviewEffect',
+            '_playerLightEffect',
+          ].filter((k) => Boolean(fc?.[k])).length,
+          missingCriticalSlots,
+        };
+        const status = (!inventory.initialized || missingCriticalSlots.length > 0) ? 'FAIL' : 'PASS';
+        const message = status === 'PASS'
+          ? 'V2 compositor effect inventory is present'
+          : `V2 compositor effect inventory incomplete (${missingCriticalSlots.length} critical slot(s) missing)`;
+        checks.push(_mkCheck('Runtime', 'runtime.v2.effectInventory', status, message, inventory));
+      }
 
       // Per-effect health snapshot (instrumented in EffectComposer)
       try {
@@ -1050,7 +1280,7 @@ export class DiagnosticCenterDialog {
       // Render target health
       try {
         const rts = effectComposer.renderTargets || null;
-        const sceneRT = effectComposer.sceneRenderTarget || null;
+        const sceneRT = (isV2Mode ? v2Compositor?._sceneRT : effectComposer.sceneRenderTarget) || null;
         const viewportWidth = renderer?.domElement?.width ?? 0;
         const viewportHeight = renderer?.domElement?.height ?? 0;
         
@@ -1077,10 +1307,13 @@ export class DiagnosticCenterDialog {
         }
         
         const sizeMismatch = sceneRT && (sceneRT.width !== viewportWidth || sceneRT.height !== viewportHeight);
-        const status = sizeMismatch ? 'WARN' : 'PASS';
+        const missingSceneRTInV2 = isV2Mode && !sceneRT;
+        const status = missingSceneRTInV2 ? 'FAIL' : (sizeMismatch ? 'WARN' : 'PASS');
         
         checks.push(_mkCheck('Runtime', 'runtime.renderTargets.summary', status, 
-          `Composer RTs: ${rts?.size ?? 0} (${(totalRTMemory / 1024 / 1024).toFixed(1)} MB)`, {
+          missingSceneRTInV2
+            ? `Composer RTs: ${rts?.size ?? 0} (${(totalRTMemory / 1024 / 1024).toFixed(1)} MB) — sceneRT missing in V2`
+            : `Composer RTs: ${rts?.size ?? 0} (${(totalRTMemory / 1024 / 1024).toFixed(1)} MB)`, {
           mapSize: rts?.size ?? 0,
           totalMemoryMB: (totalRTMemory / 1024 / 1024).toFixed(2),
           sceneRenderTarget: sceneRT ? { 
@@ -1092,12 +1325,51 @@ export class DiagnosticCenterDialog {
           viewportSize: { width: viewportWidth, height: viewportHeight },
           topRTs: rtDetails.sort((a, b) => b.bytes - a.bytes).slice(0, 10),
         }));
+
+        if (missingSceneRTInV2) {
+          checks.push(_mkCheck(
+            'Runtime',
+            'runtime.renderTargets.sceneRTMissing',
+            'FAIL',
+            'V2 compositor active but EffectComposer.sceneRenderTarget is missing'
+          ));
+        }
         
         if (sizeMismatch) {
           checks.push(_mkCheck('Runtime', 'runtime.renderTargets.sizeMismatch', 'WARN', 
             `Scene RT size mismatch: ${sceneRT.width}x${sceneRT.height} vs viewport ${viewportWidth}x${viewportHeight}`));
         }
       } catch (_) {
+      }
+
+      if (isV2Mode) {
+        try {
+          const ui = ms?.uiManager ?? ms?.tweakpaneManager ?? null;
+          const gp = ui?.globalParams ?? null;
+          const dbgEnabled = gp?.maskDebugOverlayEnabled === true
+            || gp?.maskDebugOverlayEnabled === 1
+            || gp?.maskDebugOverlayEnabled === 'true';
+          const dbgMode = typeof gp?.maskDebugOverlayMode === 'string' ? gp.maskDebugOverlayMode : 'outdoors_current';
+          const dbgOpacityRaw = Number(gp?.maskDebugOverlayOpacity);
+          const dbgOpacity = Number.isFinite(dbgOpacityRaw) ? Math.max(0, Math.min(1, dbgOpacityRaw)) : 0.35;
+          const debugOverlayStatus = !dbgEnabled
+            ? 'PASS'
+            : (dbgOpacity >= 0.95 ? 'FAIL' : 'WARN');
+          checks.push(_mkCheck(
+            'Runtime',
+            'runtime.maskDebugOverlay',
+            debugOverlayStatus,
+            dbgEnabled
+              ? `Mask debug overlay is enabled (${dbgMode}, opacity=${dbgOpacity.toFixed(2)})`
+              : 'Mask debug overlay is disabled',
+            {
+              enabled: dbgEnabled,
+              mode: dbgMode,
+              opacity: dbgOpacity,
+              canFullyReplaceVisualOutput: dbgEnabled && dbgOpacity >= 0.95,
+            }
+          ));
+        } catch (_) {}
       }
     } else {
       checks.push(_mkCheck('Runtime', 'runtime.effects.summary', 'WARN', 'EffectComposer not found; effects may not be initialized'));
@@ -1793,20 +2065,999 @@ export class DiagnosticCenterDialog {
               perFloor,
               sceneChildren: sceneRef?.children?.length ?? 0,
             }));
+
+          // Detect floor-visibility leaks: entries above visible max that are still visible.
+          const visibleMax = Number.isFinite(Number(floorRenderBus?._visibleMaxFloorIndex))
+            ? Number(floorRenderBus._visibleMaxFloorIndex)
+            : Number.POSITIVE_INFINITY;
+          const leaked = [];
+          tileEntries.forEach((entry, key) => {
+            const k = String(key || '');
+            if (k.startsWith('__')) return;
+            const fi = Number(entry?.floorIndex);
+            if (!Number.isFinite(fi) || fi <= visibleMax) return;
+            const node = entry?.root || entry?.mesh || null;
+            const nodeVisible = Boolean(node?.visible);
+            const meshVisible = (typeof entry?.mesh?.visible === 'boolean') ? entry.mesh.visible : null;
+            const rootVisible = (typeof entry?.root?.visible === 'boolean') ? entry.root.visible : null;
+            const effectiveVisible = nodeVisible && meshVisible !== false && rootVisible !== false;
+            if (!effectiveVisible) return;
+            if (leaked.length < 40) {
+              leaked.push({
+                key: k,
+                floorIndex: fi,
+                visibleMaxFloorIndex: visibleMax,
+                rootVisible,
+                meshVisible,
+                renderOrder: Number.isFinite(Number(entry?.mesh?.renderOrder)) ? Number(entry.mesh.renderOrder) : null,
+                attachedToTileId: entry?.attachedToTileId ?? null,
+              });
+            }
+          });
+          checks.push(_mkCheck(
+            'Floor',
+            'floor.renderBus.visibilityLeak',
+            leaked.length > 0 ? 'FAIL' : 'PASS',
+            leaked.length > 0
+              ? `${leaked.length} above-floor bus entr${leaked.length === 1 ? 'y is' : 'ies are'} visible (cross-floor leak)`
+              : 'No above-floor visible entries detected in FloorRenderBus',
+            {
+              visibleMaxFloorIndex: Number.isFinite(visibleMax) ? visibleMax : null,
+              leakCount: leaked.length,
+              samples: leaked,
+            }
+          ));
+
+          checks.push(_mkCheck(
+            'Floor',
+            'floor.renderBus.visibilityTelemetry',
+            'INFO',
+            'FloorRenderBus visibility lifecycle counters',
+            {
+              setVisibleFloorsCalls: Number(floorRenderBus?._setVisibleFloorsCalls ?? 0),
+              applyTileVisibilityCalls: Number(floorRenderBus?._applyTileVisibilityCalls ?? 0),
+              lastSetVisibleMaxFloorIndex: floorRenderBus?._lastSetVisibleMaxFloorIndex ?? null,
+              lastApplyVisibilityAtMs: floorRenderBus?._lastApplyVisibilityAtMs ?? null,
+              lastPreApplyLeakCount: Number(floorRenderBus?._lastPreApplyLeakCount ?? 0),
+              lastPreApplyLeakKeys: Array.isArray(floorRenderBus?._lastPreApplyLeakKeys)
+                ? floorRenderBus._lastPreApplyLeakKeys.slice(0, 40)
+                : [],
+              renderToCalls: Number(floorRenderBus?._renderToCalls ?? 0),
+              lastRenderToAtMs: floorRenderBus?._lastRenderToAtMs ?? null,
+              lastPreRenderLeakCount: Number(floorRenderBus?._lastPreRenderLeakCount ?? 0),
+              lastPreRenderLeakKeys: Array.isArray(floorRenderBus?._lastPreRenderLeakKeys)
+                ? floorRenderBus._lastPreRenderLeakKeys.slice(0, 40)
+                : [],
+            }
+          ));
+
+          // Probe whether a forced visibility reapply immediately fixes the leak.
+          // This distinguishes stale-state drift from persistent external overrides.
+          if (leaked.length > 0) {
+            try {
+              const beforeIds = leaked.map((r) => String(r.key));
+              const canReapply = typeof floorRenderBus?._applyTileVisibility === 'function';
+              if (canReapply) {
+                floorRenderBus._applyTileVisibility();
+              }
+              const leakedAfter = [];
+              if (canReapply) {
+                tileEntries.forEach((entry, key) => {
+                  const k = String(key || '');
+                  if (k.startsWith('__')) return;
+                  const fi = Number(entry?.floorIndex);
+                  if (!Number.isFinite(fi) || fi <= visibleMax) return;
+                  const node = entry?.root || entry?.mesh || null;
+                  const nodeVisible = Boolean(node?.visible);
+                  const meshVisible = (typeof entry?.mesh?.visible === 'boolean') ? entry.mesh.visible : null;
+                  const rootVisible = (typeof entry?.root?.visible === 'boolean') ? entry.root.visible : null;
+                  const effectiveVisible = nodeVisible && meshVisible !== false && rootVisible !== false;
+                  if (!effectiveVisible) return;
+                  leakedAfter.push(k);
+                });
+              }
+              const healed = beforeIds.filter((id) => !leakedAfter.includes(id));
+              const status = !canReapply
+                ? 'WARN'
+                : (leakedAfter.length === 0 ? 'WARN' : 'FAIL');
+              checks.push(_mkCheck(
+                'Floor',
+                'floor.renderBus.visibilityLeak.reapplyProbe',
+                status,
+                !canReapply
+                  ? 'Could not run visibility reapply probe'
+                  : (leakedAfter.length === 0
+                      ? 'Forced _applyTileVisibility() clears leak (suggests stale visibility state/timing)'
+                      : 'Leak persists even after forced _applyTileVisibility() (visibility likely being overridden elsewhere)'),
+                {
+                  canReapply,
+                  beforeLeakCount: beforeIds.length,
+                  afterLeakCount: leakedAfter.length,
+                  healedIds: healed,
+                  stillLeakingIds: leakedAfter.slice(0, 40),
+                }
+              ));
+            } catch (e) {
+              checks.push(_mkCheck(
+                'Floor',
+                'floor.renderBus.visibilityLeak.reapplyProbe',
+                'WARN',
+                'Failed to run visibility reapply probe',
+                { error: String(e?.message || e) }
+              ));
+            }
+          }
+
+          // Cross-check bus leakage against TileManager sprite state to identify
+          // whether both render paths are active or only bus is leaking.
+          if (leaked.length > 0) {
+            try {
+              const tm = ms?.tileManager ?? null;
+              const samples = [];
+              for (const row of leaked.slice(0, 40)) {
+                const tileId = String(row.key || '');
+                const spriteData = tm?.tileSprites?.get?.(tileId) ?? null;
+                const sprite = spriteData?.sprite ?? null;
+                const tileDoc = spriteData?.tileDoc ?? canvas?.scene?.tiles?.get?.(tileId) ?? null;
+                samples.push({
+                  tileId,
+                  busFloorIndex: row.floorIndex,
+                  busRootVisible: row.rootVisible,
+                  busMeshVisible: row.meshVisible,
+                  tileDocHidden: tileDoc?.hidden ?? null,
+                  tileDocAlpha: Number.isFinite(Number(tileDoc?.alpha)) ? Number(tileDoc.alpha) : null,
+                  tileSpritePresent: !!sprite,
+                  tileSpriteVisible: (typeof sprite?.visible === 'boolean') ? sprite.visible : null,
+                  tileSpriteOpacity: Number.isFinite(Number(sprite?.material?.opacity))
+                    ? Number(sprite.material.opacity)
+                    : null,
+                });
+              }
+              checks.push(_mkCheck(
+                'Floor',
+                'floor.renderBus.visibilityLeak.renderPathCrosscheck',
+                'WARN',
+                'Leak cross-check between FloorRenderBus and TileManager sprite state',
+                {
+                  sampleCount: samples.length,
+                  samples,
+                }
+              ));
+            } catch (e) {
+              checks.push(_mkCheck(
+                'Floor',
+                'floor.renderBus.visibilityLeak.renderPathCrosscheck',
+                'WARN',
+                'Failed leak render-path cross-check',
+                { error: String(e?.message || e) }
+              ));
+            }
+          }
         }
       }
 
-      if (effectComposer?._floorCompositorV2) {
-        const v2 = effectComposer._floorCompositorV2;
-        const flm = v2._floorLayerManager || null;
-        const frb = v2._renderBus || null;
-        const status = (flm && frb) ? 'PASS' : 'WARN';
-        checks.push(_mkCheck('Floor', 'floor.v2.pipeline', status, 'V2 floor compositor wiring', {
-          hasFloorLayerManager: Boolean(flm),
-          hasRenderBus: Boolean(frb),
-          hasFloorStack: Boolean(v2._floorStack),
-          hasSceneComposer: Boolean(v2._sceneComposer),
+      // TileManager sprite-path leak audit (separate from FloorRenderBus mesh visibility).
+      try {
+        const tm = ms?.tileManager ?? null;
+        const flm = ms?.floorLayerManager ?? null;
+        const activeFloorIndex = Number.isFinite(Number(floorStack?._activeFloorIndex))
+          ? Number(floorStack._activeFloorIndex)
+          : Number.isFinite(Number(activeContext?.index))
+            ? Number(activeContext.index)
+            : 0;
+        const spriteLeaks = [];
+        let checkedSprites = 0;
+        const expectedFloorForTile = (tileDoc) => {
+          const floors = Array.isArray(floorStack?._floors) ? floorStack._floors : [];
+          if (floors.length <= 1) return 0;
+          if (tileHasLevelsRange(tileDoc)) {
+            const flags = readTileLevelsFlags(tileDoc);
+            const b = Number(flags?.rangeBottom);
+            const t = Number(flags?.rangeTop);
+            if (Number.isFinite(b) && Number.isFinite(t)) {
+              const mid = (b + t) / 2;
+              for (let i = 0; i < floors.length; i += 1) {
+                const f = floors[i] || {};
+                if (mid >= Number(f.elevationMin) && mid < Number(f.elevationMax)) return i;
+              }
+              for (let i = 0; i < floors.length; i += 1) {
+                const f = floors[i] || {};
+                if (b <= Number(f.elevationMax) && Number(f.elevationMin) <= t) return i;
+              }
+            }
+          }
+          const elev = Number(tileDoc?.elevation ?? 0);
+          for (let i = 0; i < floors.length; i += 1) {
+            const f = floors[i] || {};
+            const min = Number(f.elevationMin);
+            const max = Number(f.elevationMax);
+            if (Number.isFinite(min) && Number.isFinite(max) && elev >= min && elev <= max) return i;
+          }
+          return 0;
+        };
+        for (const [tileId, data] of (tm?.tileSprites?.entries?.() || [])) {
+          const sprite = data?.sprite ?? null;
+          const tileDoc = data?.tileDoc ?? canvas?.scene?.tiles?.get?.(tileId) ?? null;
+          if (!sprite || !tileDoc) continue;
+          checkedSprites += 1;
+          const mappedFloor = (flm?._spriteFloorMap?.get?.(sprite));
+          const floorFromLayerMap = Number.isFinite(Number(mappedFloor)) ? Number(mappedFloor) : null;
+          const expectedFloor = expectedFloorForTile(tileDoc);
+          const effectiveFloor = floorFromLayerMap ?? expectedFloor;
+          const spriteVisible = Boolean(sprite.visible);
+          if (spriteVisible && Number.isFinite(effectiveFloor) && effectiveFloor > activeFloorIndex) {
+            if (spriteLeaks.length < 40) {
+              spriteLeaks.push({
+                tileId: String(tileId),
+                activeFloorIndex,
+                effectiveFloor,
+                expectedFloor,
+                layerMappedFloor: floorFromLayerMap,
+                spriteVisible: true,
+                spriteOpacity: Number.isFinite(Number(sprite?.material?.opacity)) ? Number(sprite.material.opacity) : null,
+              });
+            }
+          }
+        }
+        checks.push(_mkCheck(
+          'Floor',
+          'floor.tileManager.visibilityLeak',
+          spriteLeaks.length > 0 ? 'FAIL' : 'PASS',
+          spriteLeaks.length > 0
+            ? `${spriteLeaks.length} tile sprite(s) above active floor are still visible`
+            : 'No TileManager sprite visibility leaks above active floor',
+          {
+            activeFloorIndex,
+            checkedSprites,
+            leakCount: spriteLeaks.length,
+            samples: spriteLeaks,
+          }
+        ));
+      } catch (e) {
+        checks.push(_mkCheck('Floor', 'floor.tileManager.visibilityLeak', 'WARN', 'Failed TileManager sprite visibility leak audit', {
+          error: String(e?.message || e),
         }));
+      }
+
+      // Compare tile -> floor assignment between scene flags and bus entries.
+      try {
+        const sceneTiles = canvas?.scene?.tiles?.contents ?? [];
+        const floors = Array.isArray(floorStack?._floors) ? floorStack._floors : [];
+        const resolveExpectedFloorIndex = (tileDoc) => {
+          if (!Array.isArray(floors) || floors.length <= 1) return 0;
+          if (tileHasLevelsRange(tileDoc)) {
+            const flags = readTileLevelsFlags(tileDoc);
+            const tileBottom = Number(flags?.rangeBottom);
+            const tileTop = Number(flags?.rangeTop);
+            const hasBottom = Number.isFinite(tileBottom);
+            const hasTop = Number.isFinite(tileTop);
+            if (hasBottom && hasTop) {
+              const tileMid = (tileBottom + tileTop) / 2;
+              for (let i = 0; i < floors.length; i += 1) {
+                const f = floors[i] || {};
+                if (tileMid >= Number(f.elevationMin) && tileMid < Number(f.elevationMax)) return i;
+              }
+              for (let i = 0; i < floors.length; i += 1) {
+                const f = floors[i] || {};
+                if (tileBottom <= Number(f.elevationMax) && Number(f.elevationMin) <= tileTop) return i;
+              }
+            }
+          }
+          const elev = Number(tileDoc?.elevation ?? 0);
+          for (let i = 0; i < floors.length; i += 1) {
+            const f = floors[i] || {};
+            const min = Number(f.elevationMin);
+            const max = Number(f.elevationMax);
+            if (Number.isFinite(min) && Number.isFinite(max) && elev >= min && elev <= max) return i;
+          }
+          return 0;
+        };
+        const assignmentMismatches = [];
+        const missingBusEntries = [];
+        for (const tileDoc of sceneTiles) {
+          const tileId = String(tileDoc?.id || '');
+          if (!tileId) continue;
+          const expectedFloor = resolveExpectedFloorIndex(tileDoc);
+          const busEntry = floorRenderBus?._tiles?.get?.(tileId) ?? null;
+          if (!busEntry) {
+            if (missingBusEntries.length < 30) {
+              missingBusEntries.push({
+                tileId,
+                srcTail: (() => {
+                  const s = String(tileDoc?.texture?.src || '');
+                  return s ? s.split('/').slice(-2).join('/') : null;
+                })(),
+                expectedFloor,
+              });
+            }
+            continue;
+          }
+          const actualFloor = Number(busEntry?.floorIndex);
+          if (!Number.isFinite(actualFloor) || actualFloor !== expectedFloor) {
+            if (assignmentMismatches.length < 40) {
+              assignmentMismatches.push({
+                tileId,
+                expectedFloor,
+                actualFloor: Number.isFinite(actualFloor) ? actualFloor : null,
+                tileElevation: Number(tileDoc?.elevation ?? 0),
+                rangeBottom: Number(readTileLevelsFlags(tileDoc)?.rangeBottom ?? NaN),
+                rangeTop: Number(readTileLevelsFlags(tileDoc)?.rangeTop ?? NaN),
+              });
+            }
+          }
+        }
+        const assignmentStatus = assignmentMismatches.length > 0 ? 'WARN' : 'PASS';
+        checks.push(_mkCheck(
+          'Floor',
+          'floor.renderBus.tileAssignment',
+          assignmentStatus,
+          assignmentMismatches.length > 0
+            ? `${assignmentMismatches.length} tile(s) have expected-floor vs bus-floor mismatch`
+            : 'Tile expected floor assignment matches FloorRenderBus floor indices',
+          {
+            sceneTileCount: sceneTiles.length,
+            mismatchCount: assignmentMismatches.length,
+            mismatches: assignmentMismatches,
+            missingBusEntryCount: missingBusEntries.length,
+            missingBusEntries,
+          }
+        ));
+      } catch (e) {
+        checks.push(_mkCheck('Floor', 'floor.renderBus.tileAssignment', 'WARN', 'Failed tile assignment audit', {
+          error: String(e?.message || e),
+        }));
+      }
+
+      if (isV2Mode) {
+        const v2 = v2Compositor;
+        const renderBus = v2?._renderBus ?? null;
+        const required = {
+          initialized: Boolean(v2?._initialized),
+          renderBus: Boolean(renderBus),
+          renderBusScene: Boolean(renderBus?._scene),
+          sceneRenderTarget: Boolean(v2?._sceneRT),
+          postA: Boolean(v2?._postA),
+          postB: Boolean(v2?._postB),
+          blitMaterial: Boolean(v2?._blitMaterial),
+          blitScene: Boolean(v2?._blitScene),
+          blitCamera: Boolean(v2?._blitCamera),
+        };
+        const missing = Object.entries(required).filter(([, ok]) => !ok).map(([k]) => k);
+        const status = missing.length === 0 ? 'PASS' : 'FAIL';
+        checks.push(_mkCheck('Floor', 'floor.v2.pipeline', status, 'V2 floor compositor readiness', {
+          ...required,
+          missing,
+        }));
+
+        // Grey-screen triage: V2 draws the map from FloorRenderBus (__bg_image__), not
+        // SceneComposer's base plane. Missing image while a src exists usually means
+        // populate ran before the albedo texture had GPU dimensions.
+        try {
+          const sc2 = ms?.sceneComposer ?? null;
+          const fd2 = sc2?.foundrySceneData ?? null;
+          const albedo = sc2?._albedoTexture ?? null;
+          const busTiles = renderBus?._tiles;
+          const hasSolid = !!(busTiles?.has?.('__bg_solid__'));
+          const hasImage = !!(busTiles?.has?.('__bg_image__'));
+          const imgEntry = busTiles?.get?.('__bg_image__');
+          const map = imgEntry?.material?.map ?? null;
+          const bgSrc = _getBackgroundSrc();
+          const albedoReady = !!(albedo?.image && albedo.image.width > 0 && albedo.image.height > 0);
+          const mapReady = !!(map?.image && map.image.width > 0 && map.image.height > 0);
+          let split = null;
+          try { split = getCanvasForegroundElevationSplit(); } catch (_) { split = null; }
+          let threeEl = null;
+          let boardEl = null;
+          try { threeEl = document.getElementById('map-shine-canvas'); } catch (_) {}
+          try { boardEl = document.getElementById('board'); } catch (_) {}
+          const rectOf = (el) => {
+            if (!el || typeof el.getBoundingClientRect !== 'function') return null;
+            try {
+              const r = el.getBoundingClientRect();
+              return { w: r.width, h: r.height, top: r.top, left: r.left };
+            } catch (_) {
+              return null;
+            }
+          };
+          const domStack = {
+            three: threeEl ? {
+              zIndex: threeEl.style?.zIndex || null,
+              opacity: threeEl.style?.opacity || null,
+              display: threeEl.style?.display || null,
+              rect: rectOf(threeEl),
+            } : null,
+            board: boardEl ? {
+              tag: boardEl.tagName,
+              zIndex: boardEl.style?.zIndex || null,
+              opacity: boardEl.style?.opacity || null,
+              display: boardEl.style?.display || null,
+              rect: rectOf(boardEl),
+            } : null,
+          };
+          let pixiRendererBgAlpha = null;
+          try {
+            pixiRendererBgAlpha = canvas?.app?.renderer?.background?.alpha;
+          } catch (_) {
+            pixiRendererBgAlpha = null;
+          }
+          const zThreeNum = Number(threeEl?.style?.zIndex);
+          const zBoardNum = Number(boardEl?.style?.zIndex);
+          const boardLikelyOccludesThree = Number.isFinite(zBoardNum) && Number.isFinite(zThreeNum)
+            ? zBoardNum > zThreeNum
+            : null;
+          let busStatus = 'PASS';
+          let busMessage = 'V2 FloorRenderBus background state looks consistent';
+          if (bgSrc && hasSolid && !hasImage && albedoReady) {
+            busStatus = 'FAIL';
+            busMessage = 'Background src set and albedo texture has pixels, but bus has no __bg_image__ (populate/layout bug)';
+          } else if (bgSrc && hasSolid && !hasImage && !albedoReady && !!v2?._populateComplete) {
+            busStatus = 'WARN';
+            busMessage = 'Background src set but bus has no __bg_image__ after populate (check TextureLoader errors / scene rect)';
+          } else if (bgSrc && hasImage && !mapReady) {
+            busStatus = 'WARN';
+            busMessage = '__bg_image__ exists but map has no GPU pixels yet';
+          } else if (!bgSrc && !hasImage && hasSolid) {
+            busStatus = 'INFO';
+            busMessage = 'No scene background image — solid colour bus fill only';
+          }
+          if (
+            busStatus === 'PASS'
+            && boardLikelyOccludesThree === true
+            && typeof pixiRendererBgAlpha === 'number'
+            && pixiRendererBgAlpha > 0.001
+          ) {
+            busStatus = 'WARN';
+            busMessage = 'Bus OK but PIXI Application renderer.background.alpha > 0 while #board is above #map-shine-canvas — opaque clear hides Three.js';
+          }
+          checks.push(_mkCheck('Floor', 'floor.v2.busBackground', busStatus, busMessage, {
+            bgSrc: bgSrc || null,
+            hasSolidBgPlane: hasSolid,
+            hasImageBgPlane: hasImage,
+            foundrySceneData: fd2 ? {
+              width: fd2.width ?? null,
+              height: fd2.height ?? null,
+              sceneWidth: fd2.sceneWidth ?? null,
+              sceneHeight: fd2.sceneHeight ?? null,
+            } : null,
+            albedoTexturePresent: !!albedo,
+            albedoImageReady: albedoReady,
+            albedoDims: albedo?.image ? { w: albedo.image.width, h: albedo.image.height } : null,
+            mapReady,
+            mapDims: map?.image ? { w: map.image.width, h: map.image.height } : null,
+            v2Initialized: !!v2?._initialized,
+            v2PopulateComplete: !!v2?._populateComplete,
+            canvasForegroundElevationSplit: split,
+            domStack,
+            pixiRendererBackgroundAlpha: pixiRendererBgAlpha,
+            boardLikelyOccludesThree,
+            canvasBackgroundLayerVisible: !!canvas?.background?.visible,
+            pixiPrimaryBgVisible: !!canvas?.primary?.background?.visible,
+          }));
+        } catch (e) {
+          checks.push(_mkCheck('Floor', 'floor.v2.busBackground', 'WARN', 'Failed V2 bus background probe', {
+            error: String(e?.message || e),
+          }));
+        }
+
+        try {
+          const rb = renderBus;
+          const visibleMax = Number.isFinite(Number(rb?._visibleMaxFloorIndex))
+            ? Number(rb._visibleMaxFloorIndex)
+            : null;
+          let leakedAboveVisible = 0;
+          if (rb?._tiles && typeof rb._tiles.forEach === 'function' && visibleMax !== null) {
+            rb._tiles.forEach((entry, key) => {
+              const k = String(key || '');
+              if (k.startsWith('__')) return;
+              const fi = Number(entry?.floorIndex);
+              if (!Number.isFinite(fi) || fi <= visibleMax) return;
+              const node = entry?.root || entry?.mesh || null;
+              const nodeVisible = Boolean(node?.visible);
+              const meshVisible = (typeof entry?.mesh?.visible === 'boolean') ? entry.mesh.visible : null;
+              const rootVisible = (typeof entry?.root?.visible === 'boolean') ? entry.root.visible : null;
+              const effectiveVisible = nodeVisible && meshVisible !== false && rootVisible !== false;
+              if (effectiveVisible) leakedAboveVisible += 1;
+            });
+          }
+          const driftCorrections = Number(v2?._visibilityDriftCorrections ?? 0);
+          const lastLeakCount = Number(v2?._visibilityDriftLastLeakCount ?? 0);
+          const lastCorrectionMs = Number(v2?._visibilityDriftLastCorrectionMs ?? 0) || null;
+          const driftStatus = leakedAboveVisible > 0 ? 'FAIL' : (driftCorrections > 0 ? 'WARN' : 'PASS');
+          checks.push(_mkCheck(
+            'Floor',
+            'floor.v2.visibilityDriftGuard',
+            driftStatus,
+            leakedAboveVisible > 0
+              ? `Detected ${leakedAboveVisible} visible above-floor entries even after per-frame guard`
+              : (driftCorrections > 0
+                  ? `Per-frame visibility guard has corrected drift ${driftCorrections} time(s)`
+                  : 'No visibility drift detected by per-frame guard'),
+            {
+              visibleMaxFloorIndex: visibleMax,
+              leakedAboveVisible,
+              driftCorrections,
+              lastLeakCount,
+              lastCorrectionMs,
+            }
+          ));
+        } catch (e) {
+          checks.push(_mkCheck('Floor', 'floor.v2.visibilityDriftGuard', 'WARN', 'Failed to evaluate visibility drift guard state', {
+            error: String(e?.message || e),
+          }));
+        }
+
+        try {
+          const spriteCorrections = Number(v2?._tileSpriteVisibilityCorrections ?? 0);
+          const spriteLastLeak = Number(v2?._tileSpriteVisibilityLastLeakCount ?? 0);
+          const spriteLastCorrectionMs = Number(v2?._tileSpriteVisibilityLastCorrectionMs ?? 0) || null;
+          const status = spriteLastLeak > 0 ? 'WARN' : (spriteCorrections > 0 ? 'INFO' : 'PASS');
+          checks.push(_mkCheck(
+            'Floor',
+            'floor.v2.tileSpriteVisibilityGuard',
+            status,
+            spriteLastLeak > 0
+              ? `Tile sprite guard observed ${spriteLastLeak} leak(s) on latest frame`
+              : (spriteCorrections > 0
+                  ? `Tile sprite guard has corrected drift ${spriteCorrections} time(s)`
+                  : 'No tile sprite visibility drift detected by guard'),
+            {
+              corrections: spriteCorrections,
+              lastLeakCount: spriteLastLeak,
+              lastCorrectionMs: spriteLastCorrectionMs,
+            }
+          ));
+        } catch (e) {
+          checks.push(_mkCheck('Floor', 'floor.v2.tileSpriteVisibilityGuard', 'WARN', 'Failed to evaluate tile sprite visibility guard state', {
+            error: String(e?.message || e),
+          }));
+        }
+
+        // V2 sceneRT health: catches missing/invalid core albedo target early.
+        const sceneRT = v2?._sceneRT ?? null;
+        const sceneTex = sceneRT?.texture ?? null;
+        const rtW = Number(sceneRT?.width ?? 0);
+        const rtH = Number(sceneRT?.height ?? 0);
+        const vpW = Number(renderer?.domElement?.width ?? 0);
+        const vpH = Number(renderer?.domElement?.height ?? 0);
+        const rtMissing = !sceneRT;
+        const rtDegenerate = !rtMissing && (!Number.isFinite(rtW) || !Number.isFinite(rtH) || rtW < 1 || rtH < 1);
+        const rtSizeMismatch = !rtMissing && !rtDegenerate && vpW > 0 && vpH > 0 && (rtW !== vpW || rtH !== vpH);
+        const rtStatus = rtMissing || rtDegenerate ? 'FAIL' : (rtSizeMismatch ? 'WARN' : 'PASS');
+        checks.push(_mkCheck('Floor', 'floor.v2.sceneRT.health', rtStatus,
+          rtMissing
+            ? 'V2 sceneRT missing'
+            : (rtDegenerate
+                ? `V2 sceneRT invalid size (${rtW}x${rtH})`
+                : (rtSizeMismatch ? `V2 sceneRT size mismatch (${rtW}x${rtH} vs viewport ${vpW}x${vpH})` : 'V2 sceneRT is allocated and sized')),
+        {
+          present: !rtMissing,
+          width: rtW || null,
+          height: rtH || null,
+          viewportWidth: vpW || null,
+          viewportHeight: vpH || null,
+          matchesViewport: !rtSizeMismatch,
+          texture: _textureBrief(sceneTex),
+          depthBuffer: Boolean(sceneRT?.depthBuffer),
+        }));
+
+        // Outdoors source resolution probes (strict + fallback) for active level context.
+        try {
+          const ctx = ms?.activeLevelContext ?? null;
+          const sc = ms?.sceneComposer ?? null;
+          const gpuComp = sc?._sceneMaskCompositor ?? null;
+          const strict = (typeof v2?._resolveOutdoorsMask === 'function')
+            ? v2._resolveOutdoorsMask(ctx, { allowWeatherRoofMap: false })
+            : null;
+          const loose = (typeof v2?._resolveOutdoorsMask === 'function')
+            ? v2._resolveOutdoorsMask(ctx, { allowWeatherRoofMap: true })
+            : null;
+          const strictTex = strict?.texture ?? null;
+          const looseTex = loose?.texture ?? null;
+          const expectedKeys = new Set();
+          if (ctx && Number.isFinite(Number(ctx?.bottom)) && Number.isFinite(Number(ctx?.top))) {
+            expectedKeys.add(`${Number(ctx.bottom)}:${Number(ctx.top)}`);
+          }
+          const activeBand = floorStack?.getActiveFloor?.() || null;
+          if (activeBand?.compositorKey) expectedKeys.add(String(activeBand.compositorKey));
+          const strictFloorKey = strict?.floorKey ?? null;
+          const strictKeyMismatch = Boolean(strictTex && strictFloorKey && expectedKeys.size > 0 && !expectedKeys.has(String(strictFloorKey)));
+
+          const floors = Array.isArray(floorStack?.getFloors?.()) ? floorStack.getFloors() : [];
+          const allLevelOutdoors = [];
+          const compositorMetaKeys = [];
+          try {
+            if (gpuComp?._floorMeta && typeof gpuComp._floorMeta.keys === 'function') {
+              for (const key of gpuComp._floorMeta.keys()) compositorMetaKeys.push(String(key));
+            }
+          } catch (_) {}
+          for (const floor of floors) {
+            const fb = Number(floor?.elevationMin);
+            const ft = Number(floor?.elevationMax);
+            const floorCtx = (Number.isFinite(fb) && Number.isFinite(ft))
+              ? { bottom: fb, top: ft }
+              : null;
+            const floorKey = floor?.compositorKey != null ? String(floor.compositorKey) : null;
+
+            let strictProbe = null;
+            let looseProbe = null;
+            if (typeof v2?._resolveOutdoorsMask === 'function') {
+              strictProbe = v2._resolveOutdoorsMask(floorCtx, { allowWeatherRoofMap: false });
+              looseProbe = v2._resolveOutdoorsMask(floorCtx, { allowWeatherRoofMap: true });
+            }
+
+            let directTex = null;
+            try {
+              if (gpuComp && typeof gpuComp.getFloorTexture === 'function' && floorKey) {
+                directTex = gpuComp.getFloorTexture(floorKey, 'outdoors') ?? null;
+              }
+            } catch (_) {}
+
+            const siblingKeys = Number.isFinite(fb)
+              ? compositorMetaKeys.filter((key) => Number(String(key).split(':')[0]) === fb)
+              : [];
+
+            allLevelOutdoors.push({
+              index: Number.isFinite(Number(floor?.index)) ? Number(floor.index) : null,
+              floorKey,
+              contextKey: floorCtx ? `${floorCtx.bottom}:${floorCtx.top}` : null,
+              isActiveFloor: floor?.isActive === true,
+              strict: {
+                floorKey: strictProbe?.floorKey ?? null,
+                texture: _textureBrief(strictProbe?.texture ?? null),
+              },
+              fallbackAllowed: {
+                floorKey: looseProbe?.floorKey ?? null,
+                texture: _textureBrief(looseProbe?.texture ?? null),
+              },
+              compositorDirect: {
+                texture: _textureBrief(directTex),
+              },
+              compositorSiblingKeysSameBottom: siblingKeys,
+            });
+          }
+          const outdoorsStatus = !strictTex
+            ? (looseTex ? 'WARN' : 'FAIL')
+            : (strictKeyMismatch ? 'FAIL' : 'PASS');
+          checks.push(_mkCheck('Floor', 'floor.v2.outdoors.resolve', outdoorsStatus,
+            strictTex
+              ? (strictKeyMismatch
+                  ? `Resolved outdoors mask but with mismatched floor key (${strictFloorKey})`
+                  : 'Resolved active-floor outdoors mask (strict compositor/registry path)')
+              : (looseTex
+                  ? 'Resolved outdoors only via fallback path (weather roofMap/loose mode)'
+                  : 'Failed to resolve outdoors mask for active context'),
+          {
+            activeContext: ctx
+              ? { bottom: ctx.bottom, top: ctx.top, index: ctx.index, source: ctx.source }
+              : null,
+            strict: {
+              floorKey: strict?.floorKey ?? null,
+              texture: _textureBrief(strictTex),
+            },
+            fallbackAllowed: {
+              floorKey: loose?.floorKey ?? null,
+              texture: _textureBrief(looseTex),
+            },
+            expectedFloorKeys: Array.from(expectedKeys),
+            strictKeyMismatch,
+            floorStack: floors.map((f) => ({
+              index: Number.isFinite(Number(f?.index)) ? Number(f.index) : null,
+              floorKey: f?.compositorKey != null ? String(f.compositorKey) : null,
+              elevationMin: Number.isFinite(Number(f?.elevationMin)) ? Number(f.elevationMin) : null,
+              elevationMax: Number.isFinite(Number(f?.elevationMax)) ? Number(f.elevationMax) : null,
+              isActiveFloor: f?.isActive === true,
+            })),
+            compositorMetaFloorKeys: compositorMetaKeys,
+            allLevelOutdoors,
+          }));
+
+          // Deep outdoors diagnostics: source inventory -> compositor state -> consumer bindings.
+          const weatherController = ms?.weatherController ?? null;
+          const roofMap = weatherController?.roofMap ?? null;
+          const bundleOutdoors = sc?.currentBundle?.masks?.find?.((m) => (m?.id === 'outdoors' || m?.type === 'outdoors'))?.texture ?? null;
+          const maskManagerOutdoors = ms?.maskManager?.getTexture?.('outdoors.scene') ?? null;
+          const registryOutdoors = ms?.effectMaskRegistry?.getMask?.('outdoors') ?? null;
+
+          const compositorMetaRows = [];
+          try {
+            if (gpuComp?._floorMeta && typeof gpuComp._floorMeta.entries === 'function') {
+              for (const [metaKey, meta] of gpuComp._floorMeta.entries()) {
+                const masks = Array.isArray(meta?.masks) ? meta.masks : [];
+                const outdoorsMask = masks.find((m) => (m?.id === 'outdoors' || m?.type === 'outdoors')) ?? null;
+                compositorMetaRows.push({
+                  floorKey: String(metaKey),
+                  maskCount: masks.length,
+                  outdoorsInMasks: !!outdoorsMask,
+                  outdoorsTexture: _textureBrief(outdoorsMask?.texture ?? null),
+                });
+              }
+            }
+          } catch (_) {}
+
+          const compositorCacheRows = [];
+          try {
+            if (gpuComp?._floorCache && typeof gpuComp._floorCache.entries === 'function') {
+              for (const [cacheKey, cacheByType] of gpuComp._floorCache.entries()) {
+                const outdoorsRt = cacheByType?.get?.('outdoors') ?? null;
+                compositorCacheRows.push({
+                  floorKey: String(cacheKey),
+                  outdoorsRT: Boolean(outdoorsRt),
+                  outdoorsTexture: _textureBrief(outdoorsRt?.texture ?? null),
+                });
+              }
+            }
+          } catch (_) {}
+
+          const consumers = {
+            floorCompositorSync: {
+              lastOutdoorsFloorKey: v2?._lastOutdoorsFloorKey ?? null,
+              lastOutdoorsTexture: _textureBrief(v2?._lastOutdoorsTexture ?? null),
+            },
+            weatherController: {
+              roofMap: _textureBrief(roofMap),
+              roofMapEnabled: weatherController?.roofMapEnabled ?? null,
+            },
+            buildingShadows: {
+              enabled: v2?._buildingShadowEffect?.params?.enabled ?? null,
+              outdoorsMask: _textureBrief(v2?._buildingShadowEffect?._outdoorsMask ?? null),
+            },
+            overheadShadows: {
+              outdoorsMask: _textureBrief(v2?._overheadShadowEffect?.outdoorsMask ?? null),
+            },
+            lighting: {
+              uHasOutdoorsForRoofLight: Number(v2?._lightingEffect?._composeMaterial?.uniforms?.uHasOutdoorsForRoofLight?.value ?? 0),
+              tOutdoorsForRoofLight: _textureBrief(v2?._lightingEffect?._composeMaterial?.uniforms?.tOutdoorsForRoofLight?.value ?? null),
+            },
+            water: {
+              uHasOutdoorsMask: Number(v2?._waterEffect?._composeMaterial?.uniforms?.uHasOutdoorsMask?.value ?? 0),
+              tOutdoorsMask: _textureBrief(v2?._waterEffect?._composeMaterial?.uniforms?.tOutdoorsMask?.value ?? null),
+            },
+            skyColor: {
+              uHasOutdoorsMask: Number(v2?._skyColorEffect?._composeMaterial?.uniforms?.uHasOutdoorsMask?.value ?? 0),
+              tOutdoorsMask: _textureBrief(v2?._skyColorEffect?._composeMaterial?.uniforms?.tOutdoorsMask?.value ?? null),
+            },
+            cloud: {
+              legacyOutdoorsMask: _textureBrief(v2?._cloudEffect?._outdoorsMask ?? null),
+              perFloorMasks: [0, 1, 2, 3].map((i) => _textureBrief(v2?._cloudEffect?._outdoorsMasks?.[i] ?? null)),
+            },
+          };
+
+          const hasActiveStrict = !!strictTex;
+          const hasDirectAnyFloor = allLevelOutdoors.some((r) => !!r?.compositorDirect?.texture?.present);
+          const hasAnySource = [bundleOutdoors, maskManagerOutdoors, registryOutdoors, roofMap].some(Boolean) || hasDirectAnyFloor;
+          const hasAnyConsumerTex = [
+            consumers.floorCompositorSync.lastOutdoorsTexture.present,
+            consumers.buildingShadows.outdoorsMask.present,
+            consumers.overheadShadows.outdoorsMask.present,
+            consumers.lighting.tOutdoorsForRoofLight.present,
+            consumers.water.tOutdoorsMask.present,
+            consumers.skyColor.tOutdoorsMask.present,
+            consumers.cloud.legacyOutdoorsMask.present,
+            ...consumers.cloud.perFloorMasks.map((p) => !!p.present),
+          ].some(Boolean);
+          const deepStatus = hasActiveStrict ? 'INFO' : (hasAnySource ? 'WARN' : 'FAIL');
+          checks.push(_mkCheck(
+            'Floor',
+            'floor.v2.outdoors.deep',
+            deepStatus,
+            hasActiveStrict
+              ? 'Deep outdoors diagnostics captured (active strict resolve present)'
+              : (hasAnySource
+                  ? 'Deep outdoors diagnostics captured (sources exist but active strict resolve failed)'
+                  : 'Deep outdoors diagnostics captured (no outdoors sources detected)'),
+            {
+              resolverInputs: {
+                activeContext: ctx
+                  ? { bottom: ctx.bottom, top: ctx.top, index: ctx.index, source: ctx.source }
+                  : null,
+                activeFloorIndex: Number.isFinite(Number(activeBand?.index)) ? Number(activeBand.index) : null,
+                activeFloorKey: activeBand?.compositorKey != null ? String(activeBand.compositorKey) : null,
+                floorCount: floors.length,
+              },
+              sources: {
+                bundleOutdoors: _textureBrief(bundleOutdoors),
+                maskManagerOutdoorsScene: _textureBrief(maskManagerOutdoors),
+                registryOutdoors: _textureBrief(registryOutdoors),
+                weatherRoofMap: _textureBrief(roofMap),
+              },
+              compositor: {
+                present: !!gpuComp,
+                activeFloorKey: gpuComp?._activeFloorKey ?? null,
+                metaKeys: compositorMetaKeys,
+                metaRows: compositorMetaRows,
+                cacheRows: compositorCacheRows,
+              },
+              perFloor: allLevelOutdoors,
+              consumers,
+              aggregate: {
+                hasAnySource,
+                hasDirectAnyFloor,
+                hasAnyConsumerTex,
+                hasActiveStrict,
+              },
+            }
+          ));
+
+          // Indoors-water deep trace: WaterEffect + WaterSplashes outdoors coupling.
+          try {
+            const activeFloorIndex = Number.isFinite(Number(activeBand?.index)) ? Number(activeBand.index) : 0;
+            const activeFloorKey = activeBand?.compositorKey != null ? String(activeBand.compositorKey) : null;
+            const waterEffect = v2?._waterEffect ?? null;
+            const waterUniforms = waterEffect?._composeMaterial?.uniforms ?? null;
+            const waterOutdoorsTex = waterUniforms?.tOutdoorsMask?.value ?? null;
+            const waterHasOutdoors = Number(waterUniforms?.uHasOutdoorsMask?.value ?? 0) > 0.5;
+
+            const waterParams = waterEffect?.params ?? {};
+            const waveIndoorEnabled = waterParams?.waveIndoorDampingEnabled === true;
+            const rainIndoorEnabled = waterParams?.rainIndoorDampingEnabled === true;
+            const waveIndoorStrength = Number.isFinite(Number(waterParams?.waveIndoorDampingStrength))
+              ? Number(waterParams.waveIndoorDampingStrength)
+              : null;
+            const rainIndoorStrength = Number.isFinite(Number(waterParams?.rainIndoorDampingStrength))
+              ? Number(waterParams.rainIndoorDampingStrength)
+              : null;
+
+            let compositorOutdoorsCpu = null;
+            try {
+              if (gpuComp && activeFloorKey && typeof gpuComp.getCpuPixelsForFloor === 'function') {
+                const buf = gpuComp.getCpuPixelsForFloor(activeFloorKey, 'outdoors');
+                const dims = gpuComp.getOutputDims?.('outdoors');
+                compositorOutdoorsCpu = {
+                  present: !!buf,
+                  byteLength: buf?.length ?? 0,
+                  dims: (dims?.width > 0 && dims?.height > 0) ? `${dims.width}x${dims.height}` : null,
+                };
+              }
+            } catch (e) {
+              compositorOutdoorsCpu = { present: false, error: String(e?.message || e) };
+            }
+
+            const splashes = v2?._waterSplashesEffect ?? null;
+            const splashState = splashes?._floorStates?.get?.(activeFloorIndex) ?? null;
+            const sampleFoamSystem = splashState?.foamSystems?.[0] ?? splashState?.foamSystems2?.[0] ?? null;
+            const sampleFoamBehavior = sampleFoamSystem?.behaviors?.find?.((b) => b?.type === 'FoamPlumeLifecycle') ?? null;
+            const sampleSplashSystem = splashState?.splashSystems?.[0] ?? splashState?.splashSystems2?.[0] ?? null;
+            const sampleSplashBehavior = sampleSplashSystem?.behaviors?.find?.((b) => b?.type === 'SplashRingLifecycle') ?? null;
+
+            const splashesDetail = {
+              enabled: !!splashes?.enabled && !!splashes?.params?.enabled,
+              initialized: !!splashes?._initialized,
+              activeFloorIndex,
+              activeFloorHasState: !!splashState,
+              floorStateKeys: (() => {
+                try { return [...(splashes?._floorStates?.keys?.() ?? [])]; } catch (_) { return []; }
+              })(),
+              activeFloorPointCounts: splashState ? {
+                edgePoints: Array.isArray(splashState.edgePoints) ? splashState.edgePoints.length : null,
+                interiorPoints: Array.isArray(splashState.interiorPoints) ? splashState.interiorPoints.length : null,
+                foamSystems: Array.isArray(splashState.foamSystems) ? splashState.foamSystems.length : null,
+                splashSystems: Array.isArray(splashState.splashSystems) ? splashState.splashSystems.length : null,
+                foamSystemsBubbles: Array.isArray(splashState.foamSystems2) ? splashState.foamSystems2.length : null,
+                splashSystemsBubbles: Array.isArray(splashState.splashSystems2) ? splashState.splashSystems2.length : null,
+              } : null,
+              foamLifecycle: sampleFoamBehavior ? {
+                hasOutdoorsMask: !!sampleFoamBehavior._hasOutdoorsMask,
+                outdoorsMaskTex: _textureBrief(sampleFoamBehavior._outdoorsMaskTex ?? null),
+                outdoorsMaskFlipY: !!sampleFoamBehavior._outdoorsMaskFlipY,
+                outdoorsCpuPixelsPresent: !!sampleFoamBehavior._outdoorsMaskData,
+                outdoorsCpuDims: (sampleFoamBehavior._outdoorsMaskW > 0 && sampleFoamBehavior._outdoorsMaskH > 0)
+                  ? `${sampleFoamBehavior._outdoorsMaskW}x${sampleFoamBehavior._outdoorsMaskH}`
+                  : null,
+                outdoorsGpuRowOrder: !!sampleFoamBehavior._outdoorsMaskGpuRowOrder,
+                indoorSuppressionStrength: Number(sampleFoamBehavior._indoorSuppressionStrength ?? 0),
+              } : null,
+              splashLifecyclePresent: !!sampleSplashBehavior,
+            };
+
+            const waterIndoorRequested = waveIndoorEnabled || rainIndoorEnabled;
+            const waterSuppressionPipelineReady = waterIndoorRequested
+              ? (waterHasOutdoors && !!waterOutdoorsTex)
+              : true;
+            const splashSuppressionPipelineReady = waterIndoorRequested
+              ? !!(sampleFoamBehavior?._hasOutdoorsMask && sampleFoamBehavior?._outdoorsMaskData)
+              : true;
+
+            const waterDiagStatus = (!waterHasOutdoors && waterIndoorRequested) ? 'FAIL' : (waterIndoorRequested ? 'WARN' : 'INFO');
+            checks.push(_mkCheck(
+              'Floor',
+              'floor.v2.water.indoorsSuppression',
+              waterDiagStatus,
+              waterIndoorRequested
+                ? (waterHasOutdoors
+                    ? 'Water indoor suppression is configured and outdoors uniform is bound'
+                    : 'Water indoor suppression is configured but outdoors uniform is NOT bound')
+                : 'Water indoor suppression toggles are disabled (diagnostic trace only)',
+              {
+                activeFloorKey,
+                waterUniforms: {
+                  uHasOutdoorsMask: Number(waterUniforms?.uHasOutdoorsMask?.value ?? 0),
+                  uOutdoorsMaskFlipY: Number(waterUniforms?.uOutdoorsMaskFlipY?.value ?? 0),
+                  tOutdoorsMask: _textureBrief(waterOutdoorsTex),
+                },
+                indoorSuppressionConfig: {
+                  waveIndoorDampingEnabled: waveIndoorEnabled,
+                  waveIndoorDampingStrength: waveIndoorStrength,
+                  rainIndoorDampingEnabled: rainIndoorEnabled,
+                  rainIndoorDampingStrength: rainIndoorStrength,
+                  requested: waterIndoorRequested,
+                },
+                compositorOutdoorsCpu,
+                pipelineReady: {
+                  waterSuppressionPipelineReady,
+                  splashSuppressionPipelineReady,
+                },
+                waterSplashes: splashesDetail,
+              }
+            ));
+          } catch (e) {
+            checks.push(_mkCheck(
+              'Floor',
+              'floor.v2.water.indoorsSuppression',
+              'WARN',
+              'Failed indoor-water suppression deep diagnostics',
+              { error: String(e?.message || e) }
+            ));
+          }
+        } catch (e) {
+          checks.push(_mkCheck('Floor', 'floor.v2.outdoors.resolve', 'WARN', 'Failed outdoors resolve probe', {
+            error: String(e?.message || e),
+          }));
+        }
+
+        // Tile albedo sanity: detect tiles whose visible map UUID equals known mask UUIDs.
+        try {
+          const tm = ms?.tileManager ?? null;
+          const tileSprites = tm?.tileSprites;
+          const tileMaskCache = tm?._tileEffectMasks;
+          let checked = 0;
+          let withSpriteMap = 0;
+          const suspicious = [];
+          const maskIds = ['outdoors', 'specular', 'water', 'fire', 'roughness', 'normal'];
+          if (tileSprites && typeof tileSprites.entries === 'function') {
+            for (const [tileId, data] of tileSprites.entries()) {
+              checked += 1;
+              const sprite = data?.sprite ?? null;
+              const tileDoc = data?.tileDoc ?? canvas?.scene?.tiles?.get?.(tileId) ?? null;
+              const spriteMap = sprite?.material?.map ?? null;
+              const spriteMapUuid = spriteMap?.uuid ?? null;
+              if (!spriteMapUuid) continue;
+              withSpriteMap += 1;
+              const row = tileMaskCache?.get?.(tileId) ?? null;
+              const collidedMaskIds = [];
+              for (const maskId of maskIds) {
+                const m = row?.get?.(maskId);
+                const tex = m?.texture ?? null;
+                if (tex?.uuid && tex.uuid === spriteMapUuid) collidedMaskIds.push(maskId);
+              }
+              if (collidedMaskIds.length > 0) {
+                suspicious.push({
+                  tileId: String(tileId),
+                  tileSrcTail: (() => {
+                    const s = String(tileDoc?.texture?.src || '');
+                    return s ? s.split('/').slice(-2).join('/') : null;
+                  })(),
+                  spriteMap: _textureBrief(spriteMap),
+                  collidedMaskIds,
+                });
+              }
+            }
+          }
+          const tileStatus = suspicious.length > 0 ? 'FAIL' : 'PASS';
+          checks.push(_mkCheck('Floor', 'floor.v2.tileAlbedoBinding', tileStatus,
+            suspicious.length > 0
+              ? `${suspicious.length} tile sprite map(s) match mask texture UUIDs (possible albedo->mask binding corruption)`
+              : `Checked ${checked} tile sprite binding(s); no albedo/mask UUID collisions detected`,
+          {
+            checkedTiles: checked,
+            tilesWithSpriteMap: withSpriteMap,
+            suspiciousCount: suspicious.length,
+            suspiciousSamples: suspicious.slice(0, 16),
+          }));
+        } catch (e) {
+          checks.push(_mkCheck('Floor', 'floor.v2.tileAlbedoBinding', 'WARN', 'Failed tile albedo-binding probe', {
+            error: String(e?.message || e),
+          }));
+        }
       }
       
       if (registry) {
@@ -1844,6 +3095,164 @@ export class DiagnosticCenterDialog {
           floorMetaSize,
           cpuCacheSize,
           belowFloorKey,
+        }));
+      }
+
+      // Multi-second runtime churn probe for jank investigation (Incremental CC / cache thrash clues).
+      try {
+        if (jankProbe && !jankProbe.error) {
+          const rates = jankProbe.counterPerSec || {};
+          const composeFloorRate = Number(rates.compositorComposeFloorCalls ?? 0);
+          const composeRate = Number(rates.compositorComposeCalls ?? 0);
+          const evictRate = Number(rates.compositorEvictOutdoorsRtCalls ?? 0);
+          const promoteRate = Number(rates.compositorPromoteMetaToRtCalls ?? 0);
+          const syncRate = Number(rates.floorSyncOutdoorsCalls ?? 0);
+          const resolveRate = Number(rates.floorResolveOutdoorsCalls ?? 0);
+          const flipFloor = Number(jankProbe?.keyFlips?.compositorActiveFloorKeyFlips ?? 0);
+          const flipOutdoors = Number(jankProbe?.keyFlips?.floorCompositorOutdoorsFloorKeyFlips ?? 0);
+          const metaRange = jankProbe?.cacheSizeRange?.floorMeta ?? {};
+          const cacheRange = jankProbe?.cacheSizeRange?.floorCache ?? {};
+
+          const likelyThrash = (
+            composeFloorRate > 1.5 ||
+            composeRate > 3.0 ||
+            evictRate > 0.8 ||
+            promoteRate > 0.4 ||
+            flipFloor > 0 ||
+            flipOutdoors > 1
+          );
+          const likelyResolverHot = (syncRate > 25 || resolveRate > 55);
+
+          const status = likelyThrash ? 'WARN' : (likelyResolverHot ? 'INFO' : 'PASS');
+          checks.push(_mkCheck(
+            'Floor',
+            'floor.v2.jank.churnProbe',
+            status,
+            likelyThrash
+              ? 'Churn probe observed elevated compositor/cache activity that can cause jank'
+              : (likelyResolverHot
+                  ? 'Churn probe observed high resolver/sync call volume (monitor for allocator pressure)'
+                  : 'Churn probe did not observe elevated compositor/cache churn'),
+            {
+              durationMs: jankProbe.durationMs,
+              sampleEveryMs: jankProbe.sampleEveryMs,
+              samples: jankProbe.samples,
+              frameDelta: jankProbe.frameDelta,
+              approxFps: jankProbe.approxFps,
+              ratesPerSec: rates,
+              keyFlips: jankProbe.keyFlips,
+              cacheSizeRange: {
+                floorMeta: metaRange,
+                floorCache: cacheRange,
+              },
+              likelyThrash,
+              likelyResolverHot,
+              sampleRows: jankProbe.sampleRows ?? [],
+              tailRows: jankProbe.tailRows ?? [],
+            }
+          ));
+        } else if (jankProbe?.error) {
+          checks.push(_mkCheck('Floor', 'floor.v2.jank.churnProbe', 'WARN', 'Churn probe failed', {
+            error: String(jankProbe.error),
+          }));
+        } else {
+          checks.push(_mkCheck('Floor', 'floor.v2.jank.churnProbe', 'INFO', 'Churn probe unavailable'));
+        }
+      } catch (e) {
+        checks.push(_mkCheck('Floor', 'floor.v2.jank.churnProbe', 'WARN', 'Failed to evaluate churn probe', {
+          error: String(e?.message || e),
+        }));
+      }
+
+      // Deep Levels/Render wiring probe (same payload as "Copy Levels Wiring" / sceneLevelsAndEffects).
+      try {
+        const wiring = getSceneLevelsAndEffectsPayload();
+        if (wiring && !wiring.error) {
+          const issues = Array.isArray(wiring?.diagnostics?.issues) ? wiring.diagnostics.issues : [];
+          const warnIssues = issues.filter((i) => String(i?.severity || '').toLowerCase() === 'warn');
+          const infoIssues = issues.filter((i) => String(i?.severity || '').toLowerCase() !== 'warn');
+          checks.push(_mkCheck(
+            'Levels',
+            'levels.wiring.issues',
+            warnIssues.length > 0 ? 'WARN' : 'PASS',
+            warnIssues.length > 0
+              ? `Levels wiring probe found ${warnIssues.length} warning issue(s)`
+              : `Levels wiring probe found ${infoIssues.length} informational issue(s)`,
+            {
+              total: issues.length,
+              warn: warnIssues.length,
+              info: infoIssues.length,
+              issues: issues.slice(0, 40),
+            }
+          ));
+
+          const unmatched = Array.isArray(wiring?.unmatched) ? wiring.unmatched : [];
+          checks.push(_mkCheck(
+            'Levels',
+            'levels.wiring.unmatchedDocs',
+            unmatched.length > 0 ? 'WARN' : 'PASS',
+            unmatched.length > 0
+              ? `${unmatched.length} document(s) are outside all detected level bands`
+              : 'All inspected documents map to at least one level band',
+            {
+              count: unmatched.length,
+              samples: unmatched.slice(0, 30),
+            }
+          ));
+
+          const lad = wiring?.levelAuthoringDiagnostics || {};
+          const missingRoleTiles = Array.isArray(lad?.missingRoleTiles) ? lad.missingRoleTiles : [];
+          const floorRoleConflicts = lad?.floorRoleConflicts && typeof lad.floorRoleConflicts === 'object' ? lad.floorRoleConflicts : {};
+          const ceilingRoleConflicts = lad?.ceilingRoleConflicts && typeof lad.ceilingRoleConflicts === 'object' ? lad.ceilingRoleConflicts : {};
+          const conflictFloorCount = Object.keys(floorRoleConflicts).length;
+          const conflictCeilingCount = Object.keys(ceilingRoleConflicts).length;
+          const roleStatus = (missingRoleTiles.length > 0 || conflictFloorCount > 0 || conflictCeilingCount > 0) ? 'WARN' : 'PASS';
+          checks.push(_mkCheck(
+            'Levels',
+            'levels.wiring.roleAuthoring',
+            roleStatus,
+            roleStatus === 'PASS'
+              ? 'Tile role authoring looks consistent'
+              : 'Tile role authoring issues detected (missing roles or cross-band conflicts)',
+            {
+              missingRoleTiles: missingRoleTiles.slice(0, 30),
+              floorRoleConflicts,
+              ceilingRoleConflicts,
+            }
+          ));
+
+          const bus = wiring?.floorRenderBus || null;
+          if (bus) {
+            const byKind = bus?.byKind || {};
+            const baseTiles = Number(byKind.baseTiles || 0);
+            const overlays = Number(byKind.attachedOverlays || 0);
+            const status = (baseTiles <= 0 && overlays > 0) ? 'WARN' : 'PASS';
+            checks.push(_mkCheck(
+              'Floor',
+              'floor.renderBus.population',
+              status,
+              status === 'PASS'
+                ? 'Render bus has base tile population'
+                : 'Render bus has overlays but no base tiles (possible scene-albedo suppression state)',
+              {
+                initialized: Boolean(bus.initialized),
+                totalEntries: Number(bus.totalEntries || 0),
+                byKind,
+                byFloor: bus.byFloor || {},
+                visibleMaxFloorIndex: bus.visibleMaxFloorIndex ?? null,
+              }
+            ));
+          }
+        } else if (wiring?.error) {
+          checks.push(_mkCheck('Levels', 'levels.wiring.probe', 'WARN', 'Levels wiring probe failed to build payload', {
+            error: String(wiring.error),
+          }));
+        } else {
+          checks.push(_mkCheck('Levels', 'levels.wiring.probe', 'WARN', 'Levels wiring probe returned no payload'));
+        }
+      } catch (e) {
+        checks.push(_mkCheck('Levels', 'levels.wiring.probe', 'WARN', 'Failed to evaluate deep levels wiring probe', {
+          error: String(e?.message || e),
         }));
       }
     } catch (e) {
@@ -2332,6 +3741,7 @@ export class DiagnosticCenterDialog {
         scenesWithFlags: worldSceneSummaries.length,
         totals: worldLevelTotals,
       },
+      sceneLevelsAndEffects: getSceneLevelsAndEffectsPayload(),
       summary,
       checks
     };
@@ -2657,7 +4067,7 @@ export class DiagnosticCenterDialog {
     return div.innerHTML;
   }
 
-  _buildLevelsWiringClipboardReport() {
+  _buildSceneLevelsAndEffectsPayload() {
     const ms = window.MapShine || {};
     const scene = canvas?.scene || null;
     const sceneId = String(scene?.id || '(none)');
@@ -2669,6 +4079,50 @@ export class DiagnosticCenterDialog {
     const availableLevelsRaw = levelController?.getAvailableLevels?.() || ms?.availableLevels || [];
     const activeContext = levelController?.getActiveLevelContext?.() || ms?.activeLevelContext || null;
     const levelBands = _normalizeLevelBands(availableLevelsRaw);
+
+    const v14ViewSyncAudit = (() => {
+      try {
+        if (!hasV14NativeLevels(scene)) return { applicable: false };
+        const fresh = readV14SceneLevels(scene);
+        const ctrl = Array.isArray(availableLevelsRaw) ? availableLevelsRaw : [];
+        const freshById = new Map(fresh.map((l) => [String(l.levelId), l]));
+        const rows = [];
+        for (const row of ctrl) {
+          const id = String(row?.levelId || '');
+          if (!id) continue;
+          const nat = freshById.get(id);
+          if (!nat) {
+            rows.push({ levelId: id, issue: 'missing_in_scene_levels_read' });
+            continue;
+          }
+          if (Boolean(row.isView) !== Boolean(nat.isView) || Boolean(row.isVisible) !== Boolean(nat.isVisible)) {
+            rows.push({
+              levelId: id,
+              label: row.label,
+              cachedControllerList: { isView: !!row.isView, isVisible: !!row.isVisible },
+              liveSceneLevelsRead: { isView: !!nat.isView, isVisible: !!nat.isVisible },
+            });
+          }
+        }
+        let viewedId = null;
+        try {
+          viewedId = scene?._view ?? null;
+        } catch (_) {
+          viewedId = null;
+        }
+        return {
+          applicable: true,
+          sceneViewLevelId: viewedId,
+          driftDetected: rows.length > 0,
+          note: rows.length > 0
+            ? 'LevelNavigationController list disagrees with readV14SceneLevels (often stale isView after Foundry view change). Fixed in camera-follower _syncToViewedLevel.'
+            : null,
+          rows,
+        };
+      } catch (e) {
+        return { applicable: true, error: String(e?.message || e) };
+      }
+    })();
 
     const floorBands = Array.isArray(floorStack?._floors)
       ? floorStack._floors.map((f, index) => ({
@@ -2850,7 +4304,7 @@ export class DiagnosticCenterDialog {
       '_specularEffect', '_fluidEffect', '_iridescenceEffect', '_prismEffect',
       '_bushEffect', '_treeEffect', '_fireEffect', '_dustEffect', '_windowLightEffect',
       '_lightingEffect', '_skyColorEffect', '_colorCorrectionEffect', '_bloomEffect',
-      '_sharpenEffect', '_filterEffect', '_cloudEffect', '_waterEffect',
+      '_sharpenEffect', '_filterEffect', '_cloudEffect', '_shadowManagerEffect', '_waterEffect',
       '_waterSplashesEffect', '_underwaterBubblesEffect', '_weatherParticles',
       '_ashDisturbanceEffect', '_smellyFliesEffect', '_lightningEffect',
       '_candleFlamesEffect', '_playerLightEffect', '_overheadShadowEffect',
@@ -2921,6 +4375,47 @@ export class DiagnosticCenterDialog {
         return null;
       }
     })();
+
+    const mapPointsPerLevel = _collectMapPointsPerLevelEffectCounts(ms?.mapPointsManager ?? null, levelBands);
+    let rawSceneLevelsForFlags = null;
+    try {
+      rawSceneLevelsForFlags = readSceneLevelsFlag(scene);
+    } catch (_) {
+      rawSceneLevelsForFlags = null;
+    }
+    let v14BandsAll = [];
+    try {
+      v14BandsAll = hasV14NativeLevels(scene) ? readV14SceneLevels(scene) : [];
+    } catch (_) {
+      v14BandsAll = [];
+    }
+
+    for (let pi = 0; pi < perLevel.length; pi += 1) {
+      const row = perLevel[pi];
+      const idx = row.index;
+      row.renderBusTileCount = floorRenderBusState?.byFloor?.[String(idx)] ?? null;
+      row.floorStackBand = floorBands[idx] ?? null;
+      row.legacySceneLevelsFlagEntry = Array.isArray(rawSceneLevelsForFlags) ? (rawSceneLevelsForFlags[idx] ?? null) : null;
+      const v14Match = (Array.isArray(v14BandsAll) ? v14BandsAll : []).find((vb) => String(vb?.levelId || '') === String(row.levelId || ''))
+        || (Array.isArray(v14BandsAll) ? v14BandsAll[idx] : null)
+        || null;
+      row.v14NativeLevel = v14Match
+        ? {
+          levelId: v14Match.levelId,
+          label: v14Match.label,
+          index: v14Match.index,
+          bottom: v14Match.bottom,
+          top: v14Match.top,
+          center: v14Match.center,
+          isView: v14Match.isView,
+          isVisible: v14Match.isVisible,
+          source: v14Match.source,
+        }
+        : null;
+      row.mapPoints = mapPointsPerLevel?.perLevel?.[pi] ?? null;
+    }
+
+    const effectsGroupedByFloorIndex = _groupEffectStatesByFloorIndex(effectStates);
 
     const waterState = (() => {
       try {
@@ -3066,6 +4561,35 @@ export class DiagnosticCenterDialog {
       }
     })();
 
+    const unifiedShadowWiring = (() => {
+      try {
+        const manager = floorCompositorV2?._shadowManagerEffect || null;
+        if (!manager) return null;
+        const tex = manager?.combinedShadowTexture || null;
+        const rawTex = manager?.combinedShadowRawTexture || null;
+        const texSize = (t) => ({
+          width: Number(t?.image?.width) || Number(t?.source?.data?.width) || null,
+          height: Number(t?.image?.height) || Number(t?.source?.data?.height) || null
+        });
+        return {
+          enabled: Boolean(manager?.enabled),
+          paramsEnabled: true,
+          hasCombinedShadowTexture: Boolean(tex),
+          hasCombinedRawShadowTexture: Boolean(rawTex),
+          combinedShadowTextureSize: texSize(tex),
+          combinedRawShadowTextureSize: texSize(rawTex),
+          params: {
+            cloudWeight: _pickFiniteNumber(manager?.params?.cloudWeight),
+            cloudOpacity: _pickFiniteNumber(manager?.params?.cloudOpacity),
+            overheadOpacity: _pickFiniteNumber(manager?.params?.overheadOpacity),
+            overheadOcclusionStrength: _pickFiniteNumber(manager?.params?.overheadOcclusionStrength),
+          },
+        };
+      } catch (_) {
+        return null;
+      }
+    })();
+
     const maskRegistryMetrics = (() => {
       try {
         const reg = ms?.effectMaskRegistry || floorCompositorV2?._effectMaskRegistry || null;
@@ -3165,6 +4689,98 @@ export class DiagnosticCenterDialog {
       return { issues };
     })();
 
+    const levelsSnapshotForReport = (() => {
+      try {
+        const p = peekSnapshot();
+        if (p) return _compactLevelsImportSnapshot(p);
+        return _compactLevelsImportSnapshot(getSnapshot());
+      } catch (e) {
+        return { error: String(e?.message || e) };
+      }
+    })();
+
+    let healthEvaluatorExport = null;
+    try {
+      if (typeof ms?.healthEvaluator?.exportDiagnostics === 'function') {
+        healthEvaluatorExport = ms.healthEvaluator.exportDiagnostics();
+      }
+    } catch (e) {
+      healthEvaluatorExport = { error: String(e?.message || e) };
+    }
+
+    let effectHealthSnapshot = null;
+    try {
+      if (typeof effectComposer?.getEffectHealthSnapshot === 'function') {
+        effectHealthSnapshot = effectComposer.getEffectHealthSnapshot();
+      }
+    } catch (e) {
+      effectHealthSnapshot = { error: String(e?.message || e) };
+    }
+
+    const v14SceneSummary = (() => {
+      try {
+        return {
+          hasV14NativeLevels: hasV14NativeLevels(scene),
+          viewedLevel: getViewedV14Level(scene),
+          bands: hasV14NativeLevels(scene) ? readV14SceneLevels(scene) : [],
+        };
+      } catch (e) {
+        return { error: String(e?.message || e) };
+      }
+    })();
+
+    const legacySceneLevelsFlagAudit = (() => {
+      try {
+        const raw = readSceneLevelsFlag(scene);
+        if (!Array.isArray(raw)) {
+          return { count: 0, entries: [] };
+        }
+        const entries = raw.slice(0, 40).map((item, i) => ({
+          index: i,
+          raw: item,
+          parsed: _parseLevelRangeRecord(item),
+        }));
+        return { count: raw.length, entries, truncated: raw.length > 40 };
+      } catch (e) {
+        return { error: String(e?.message || e) };
+      }
+    })();
+
+    const floorCompositorRuntime = (() => {
+      try {
+        if (!floorCompositorV2) return null;
+        return {
+          lastOutdoorsFloorKey: floorCompositorV2._lastOutdoorsFloorKey ?? null,
+          populateComplete: floorCompositorV2._populateComplete ?? null,
+          busPopulated: floorCompositorV2._busPopulated ?? null,
+          hasInFlightPopulatePromise: Boolean(floorCompositorV2._populatePromise),
+          populateDiagnosticsSnapshot: typeof floorCompositorV2._gatherPopulateDiagnostics === 'function'
+            ? floorCompositorV2._gatherPopulateDiagnostics({ source: 'diagnostic-center', phase: 'levelsPayload' })
+            : null,
+        };
+      } catch (e) {
+        return { error: String(e?.message || e) };
+      }
+    })();
+
+    const v2FrameDiagnostics = _collectV2EffectLastFrameDiagnostics(floorCompositorV2);
+
+    const weatherSnapshot = (() => {
+      try {
+        const w = ms?.weatherController;
+        if (!w || typeof w !== 'object') return null;
+        return {
+          present: true,
+          type: w.constructor?.name || 'unknown',
+          publicMethodNames: Object.getOwnPropertyNames(Object.getPrototypeOf(w))
+            .filter((k) => k !== 'constructor' && typeof w[k] === 'function')
+            .slice(0, 48),
+        };
+      } catch (e) {
+        return { error: String(e?.message || e) };
+      }
+    })();
+
     const payload = {
       title: 'Map Shine Levels Wiring Report',
       generatedAt: new Date().toISOString(),
@@ -3190,6 +4806,8 @@ export class DiagnosticCenterDialog {
         }
       },
       levelBands,
+      navigationAvailableLevels: Array.isArray(availableLevelsRaw) ? availableLevelsRaw : [],
+      v14ViewSyncAudit,
       perLevel,
       unmatched,
       effects: {
@@ -3221,6 +4839,7 @@ export class DiagnosticCenterDialog {
       floorRenderBus: floorRenderBusState,
       water: waterState,
       cloudShadowWiring,
+      unifiedShadowWiring,
       masks: {
         registryMetrics: maskRegistryMetrics,
         compositor: maskCompositorState,
@@ -3232,8 +4851,33 @@ export class DiagnosticCenterDialog {
         ceilingRoleConflicts: roleDiagnostics.ceilingRoleConflicts,
         lightsOutsideAnyLevel: roleDiagnostics.lightsOutsideAnyLevel.slice(0, 120),
       },
+      mapPointsOverview: mapPointsPerLevel,
+      v14SceneLevels: v14SceneSummary,
+      legacySceneLevelsFlagAudit,
+      levelsImportSnapshot: levelsSnapshotForReport,
+      healthEvaluatorExport,
+      effectComposerHealthSnapshot: effectHealthSnapshot,
+      floorCompositorRuntime,
+      v2EffectLastFrameDiagnostics: v2FrameDiagnostics,
+      effectsGroupedByFloorIndex,
+      weatherController: weatherSnapshot,
     };
 
-    return JSON.stringify(payload, null, 2);
+    return payload;
+  }
+
+  /**
+   * JSON string for clipboard — same object as _buildSceneLevelsAndEffectsPayload().
+   * @returns {string}
+   */
+  _buildLevelsWiringClipboardReport() {
+    try {
+      return JSON.stringify(this._buildSceneLevelsAndEffectsPayload(), null, 2);
+    } catch (e) {
+      return JSON.stringify({
+        title: 'Map Shine Levels Wiring Report',
+        error: String(e?.message || e),
+      }, null, 2);
+    }
   }
 }

@@ -13,8 +13,7 @@
  * globals on each call. No caching or subscription is needed.
  */
 
-import { getSceneBackgroundElevation, getSceneWeatherElevation, readTileLevelsFlags, tileHasLevelsRange, readDocLevelsRange, getSceneLightMasking } from './levels-scene-flags.js';
-import { getLevelsCompatibilityMode, LEVELS_COMPATIBILITY_MODES } from './levels-compatibility.js';
+import { getSceneBackgroundElevation, getSceneWeatherElevation, readTileLevelsFlags, tileHasLevelsRange, readDocLevelsRange, getSceneLightMasking, hasV14NativeLevels } from './levels-scene-flags.js';
 
 // ---------------------------------------------------------------------------
 //  Controlled token helpers
@@ -200,8 +199,7 @@ export function isElevationRangeVisible(params) {
     perspective: perspectiveOverride,
   } = params;
 
-  // If Levels compatibility is off, everything is visible
-  if (getLevelsCompatibilityMode() === LEVELS_COMPATIBILITY_MODES.OFF) return true;
+  if (!hasV14NativeLevels(canvas?.scene)) return true;
 
   const perspective = perspectiveOverride || getPerspectiveElevation();
   const bgElevation = params.backgroundElevation ?? perspective.backgroundElevation ?? 0;
@@ -283,7 +281,7 @@ export function isTileVisibleForPerspective(tileDoc, tileFlags) {
  * @returns {boolean} Whether the light should be visible
  */
 export function isLightVisibleForPerspective(lightDoc) {
-  if (getLevelsCompatibilityMode() === LEVELS_COMPATIBILITY_MODES.OFF) return true;
+  if (!hasV14NativeLevels(canvas?.scene)) return true;
   if (!lightDoc) return true;
 
   const perspective = getPerspectiveElevation();
@@ -332,7 +330,7 @@ export function isLightVisibleForPerspective(lightDoc) {
  * @returns {boolean} Whether the background should be visible
  */
 export function isBackgroundVisibleForPerspective(scene) {
-  if (getLevelsCompatibilityMode() === LEVELS_COMPATIBILITY_MODES.OFF) return true;
+  if (!hasV14NativeLevels(canvas?.scene)) return true;
 
   const s = scene ?? canvas?.scene;
   if (!s) return true;
@@ -363,7 +361,7 @@ export function isBackgroundVisibleForPerspective(scene) {
  * @returns {boolean} Whether weather effects should be visible
  */
 export function isWeatherVisibleForPerspective(scene) {
-  if (getLevelsCompatibilityMode() === LEVELS_COMPATIBILITY_MODES.OFF) return true;
+  if (!hasV14NativeLevels(canvas?.scene)) return true;
 
   const s = scene ?? canvas?.scene;
   if (!s) return true;
@@ -398,7 +396,7 @@ export function isWeatherVisibleForPerspective(scene) {
  * @returns {boolean} True if the tile blocks this vertical movement
  */
 export function doesTileBlockElevationMovement(tileDoc, fromElevation, toElevation) {
-  if (getLevelsCompatibilityMode() === LEVELS_COMPATIBILITY_MODES.OFF) return false;
+  if (!hasV14NativeLevels(canvas?.scene)) return false;
   if (!tileDoc) return false;
   if (!tileHasLevelsRange(tileDoc)) return false;
 
@@ -433,7 +431,7 @@ export function doesTileBlockElevationMovement(tileDoc, fromElevation, toElevati
  * @returns {boolean} True if any tile blocks this movement
  */
 export function isElevationMovementBlockedByTiles(foundryX, foundryY, fromElevation, toElevation) {
-  if (getLevelsCompatibilityMode() === LEVELS_COMPATIBILITY_MODES.OFF) return false;
+  if (!hasV14NativeLevels(canvas?.scene)) return false;
 
   const tiles = canvas?.scene?.tiles;
   if (!tiles) return false;
@@ -474,7 +472,7 @@ export function isElevationMovementBlockedByTiles(foundryX, foundryY, fromElevat
  * @returns {boolean} Whether the sound should be audible
  */
 export function isSoundAudibleForPerspective(soundDoc) {
-  if (getLevelsCompatibilityMode() === LEVELS_COMPATIBILITY_MODES.OFF) return true;
+  if (!hasV14NativeLevels(canvas?.scene)) return true;
   if (!soundDoc) return true;
 
   const perspective = getPerspectiveElevation();

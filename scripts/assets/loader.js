@@ -47,6 +47,8 @@ const EFFECT_MASKS = {
   ash: { suffix: '_Ash', required: false, description: 'Ash disturbance mask' },
   dust: { suffix: '_Dust', required: false, description: 'Dust motes mask' },
   outdoors: { suffix: '_Outdoors', required: false, description: 'Indoor/outdoor area mask' },
+  outdoors0: { suffix: '_Outdoors_0', required: false, description: 'Outdoors mask for level 0' },
+  outdoors1: { suffix: '_Outdoors_1', required: false, description: 'Outdoors mask for level 1' },
   iridescence: { suffix: '_Iridescence', required: false, description: 'Iridescence effect mask' },
   fluid: { suffix: '_Fluid', required: false, description: 'Fluid flow mask (data)' },
   prism: { suffix: '_Prism', required: false, description: 'Prism/refraction mask' },
@@ -82,6 +84,7 @@ const textureCache = new Map();
 
 /** Negative result cache to prevent repeated 404 probing for masks that don't exist */
 const _probeMaskNegativeCache = new Map();
+const PROBE_NEGATIVE_CACHE_TTL_MS = 15000;
 /** Structured missing-mask diagnostics cache by bundle key */
 const _missingMaskDiagnostics = new Map();
 /** Failed mask URL cache to suppress repeated 404 retries */
@@ -295,6 +298,29 @@ function _resolveMaskCandidates(maskManifest, maskSuffix) {
 }
 
 /**
+ * Ensure a resolved mask URL matches the same map stem as `basePath` (filename without ext).
+ * Prevents multi-map folders from binding e.g. `Tower_Bridge_Underground_Water` when the
+ * active albedo is `Tower_Bridge_Middle`.
+ * @param {string} resolvedPath
+ * @param {string} basePath
+ * @param {string} suffix e.g. `_Water`
+ * @returns {boolean}
+ */
+function _maskResolvedStemMatchesBase(resolvedPath, basePath, suffix) {
+  try {
+    const lastSlash = basePath.lastIndexOf('/');
+    const baseFilename = lastSlash >= 0 ? basePath.substring(lastSlash + 1) : basePath;
+    const expected = `${baseFilename}${suffix}`.toLowerCase();
+    const file = String(resolvedPath).substring(String(resolvedPath).lastIndexOf('/') + 1);
+    const dot = file.lastIndexOf('.');
+    const stem = (dot >= 0 ? file.substring(0, dot) : file).toLowerCase();
+    return stem === expected;
+  } catch (_) {
+    return false;
+  }
+}
+
+/**
  * Load a complete asset bundle for a scene
  * @param {string} basePath - Base path to scene image (without extension)
  * @param {AssetLoadProgressCallback} [onProgress] - Progress callback
@@ -323,8 +349,10 @@ export async function loadAssetBundle(basePath, onProgress = null, options = {})
     maskConventionFallback = 'minimal'
   } = options || {};
 
-  const convFallback =
-    maskConventionFallback === 'off' ? 'off' : maskConventionFallback === 'full' ? 'full' : 'minimal';
+  const allowConventionProbe = options?.allowConventionProbe === true;
+  const convFallback = allowConventionProbe
+    ? (maskConventionFallback === 'off' ? 'off' : maskConventionFallback === 'full' ? 'full' : 'minimal')
+    : 'off';
   const probeMode = convFallback === 'full' ? 'full' : 'minimal';
 
   log.info(`Loading asset bundle: ${basePath}${skipBaseTexture ? ' (masks only)' : ''}`);
@@ -360,62 +388,55 @@ export async function loadAssetBundle(basePath, onProgress = null, options = {})
       // FilePicker browsing was unavailable (common on player clients). Bypass
       // cache so we can probe known suffix filenames directly.
       if (cachedMaskCount > 0) {
-        // Only trust cache if it contains all critical masks.
-        // If a critical mask was missing due to a transient FilePicker issue,
-        // we must re-probe so the effect can become active.
-        const cachedIds = new Set(
-          cached.masks
-            .map((m) => String(m?.id || m?.type || '').toLowerCase())
-            .filter(Boolean)
-        );
+        // Validate that cached textures still have valid image data.
+        // After sceneComposer.dispose(), the GPU backing is removed but the JS
+        // Texture object and its .image remain. We must verify .image is present
+        // and has non-zero dimensions — otherwise the cache entry is truly stale.
+        const staleTextures = cached.masks.filter(m => {
+          const img = m?.texture?.image ?? m?.texture?.source?.data;
+          if (!img) return true;
+          const w = img.width ?? img.naturalWidth ?? 0;
+          return w <= 0;
+        });
 
-        const missingCritical = Array.from(CRITICAL_MASK_IDS).filter((id) => !cachedIds.has(id));
-        // Player clients often cannot browse directories reliably on hosted setups.
-        // In that mode, a missing "critical" mask (like _Specular) may be a real
-        // map condition or a permission-limited discovery artifact. Do not force
-        // perpetual cache invalidation for non-GM users.
-        if (missingCritical.length === 0) {
-          // Validate that cached textures still have valid image data.
-          // After sceneComposer.dispose(), the GPU backing is removed but the JS
-          // Texture object and its .image remain. We must verify .image is present
-          // and has non-zero dimensions — otherwise the cache entry is truly stale.
-          const staleTextures = cached.masks.filter(m => {
-            const img = m?.texture?.image ?? m?.texture?.source?.data;
-            if (!img) return true;
-            const w = img.width ?? img.naturalWidth ?? 0;
-            return w <= 0;
+        if (staleTextures.length > 0) {
+          if (_isDbg) _dlp.addDiagnostic('Asset Cache', {
+            [`cache.${_shortBase}`]: `MISS (${staleTextures.length} stale textures: ${staleTextures.map(m => m.id).join(', ')})`
           });
-
-          if (staleTextures.length > 0) {
-            if (_isDbg) _dlp.addDiagnostic('Asset Cache', {
-              [`cache.${_shortBase}`]: `MISS (${staleTextures.length} stale textures: ${staleTextures.map(m => m.id).join(', ')})`
-            });
-            log.warn('Cached textures have stale image data; reloading', { basePath, stale: staleTextures.map(m => m.id) });
-            assetCache.delete(cacheKey);
-          } else {
-            // Mark all cached textures for GPU re-upload (they were GPU-disposed
-            // but still have valid JS image data).
-            for (const m of cached.masks) {
-              if (m?.texture) m.texture.needsUpdate = true;
-            }
-            _cacheHits++;
-            if (_isDbg) _dlp.addDiagnostic('Asset Cache', { [`cache.${_shortBase}`]: `HIT (${cachedMaskCount} masks, re-upload)` });
-            log.info(`Asset bundle cache hit (${cachedMaskCount} masks): ${basePath}`);
-            return {
-              success: true,
-              bundle: cached,
-              warnings: [],
-              error: null,
-              cacheHit: true
-            };
-          }
-        } else {
-          if (_isDbg) _dlp.addDiagnostic('Asset Cache', { [`cache.${_shortBase}`]: `MISS (missing critical: ${missingCritical.join(', ')})` });
-          log.warn('Cached asset bundle missing critical masks; reloading', {
-            basePath,
-            missingCritical
-          });
+          log.warn('Cached textures have stale image data; reloading', { basePath, stale: staleTextures.map(m => m.id) });
           assetCache.delete(cacheKey);
+        } else {
+          // Do NOT invalidate just because a "critical" mask is absent.
+          // Absent masks are often intentional on hosted scenes and forcing reloads
+          // creates repeat probe/load loops and 404 spam.
+          const cachedIds = new Set(
+            cached.masks
+              .map((m) => String(m?.id || m?.type || '').toLowerCase())
+              .filter(Boolean)
+          );
+          const missingCritical = Array.from(CRITICAL_MASK_IDS).filter((id) => !cachedIds.has(id));
+          if (missingCritical.length > 0) {
+            log.debug('Cache hit with missing critical masks (trusted to avoid probe loops)', {
+              basePath,
+              missingCritical
+            });
+          }
+
+          // Mark all cached textures for GPU re-upload (they were GPU-disposed
+          // but still have valid JS image data).
+          for (const m of cached.masks) {
+            if (m?.texture) m.texture.needsUpdate = true;
+          }
+          _cacheHits++;
+          if (_isDbg) _dlp.addDiagnostic('Asset Cache', { [`cache.${_shortBase}`]: `HIT (${cachedMaskCount} masks, re-upload)` });
+          log.info(`Asset bundle cache hit (${cachedMaskCount} masks): ${basePath}`);
+          return {
+            success: true,
+            bundle: cached,
+            warnings: [],
+            error: null,
+            cacheHit: true
+          };
         }
       } else {
         // Trust empty cached bundles too. Without this, player clients with
@@ -453,13 +474,48 @@ export async function loadAssetBundle(basePath, onProgress = null, options = {})
     }
 
     // Step 2: Build a single authoritative exact-URL manifest.
-    // If a scene flag manifest is stale/incomplete (common after asset changes),
-    // supplement missing requested mask suffixes with conventional candidates so
-    // optional-but-important masks like _Outdoors are still attempted.
-    const baseManifest = (maskManifest && typeof maskManifest === 'object')
-      ? maskManifest
-      : buildMaskManifest(basePath, { extension: maskExtension, maskIds, probeMode });
+    //
+    // Safety policy (404 spam control):
+    // - Prefer explicit scene manifest paths when available.
+    // - Otherwise, prefer FilePicker directory listing (authoritative existing files).
+    // - Only fall back to conventional URL guessing when neither is available.
+    //
+    // Optional masks are NOT convention-probed in the fallback path because that
+    // creates large GET/HEAD 404 storms on hosted setups.
+    const explicitManifest = (maskManifest && typeof maskManifest === 'object') ? maskManifest : null;
+    const hasExplicitManifest = !!explicitManifest && Object.keys(explicitManifest).length > 0;
+    let manifestAuthority = hasExplicitManifest ? 'explicit' : 'convention';
+    let baseManifest = hasExplicitManifest ? explicitManifest : null;
+
+    if (!baseManifest) {
+      try {
+        const listed = await discoverMaskDirectoryFiles(basePath);
+        if (Array.isArray(listed) && listed.length > 0) {
+          const requestedIds = Array.isArray(maskIds) && maskIds.length > 0
+            ? maskIds.map((v) => String(v || '').toLowerCase()).filter(Boolean)
+            : Object.keys(EFFECT_MASKS);
+          const byId = resolveMaskPathsFromListing(listed, basePath, requestedIds);
+          const bySuffix = {};
+          for (const [maskId, path] of Object.entries(byId)) {
+            const suffix = EFFECT_MASKS?.[maskId]?.suffix;
+            if (!suffix || typeof path !== 'string' || !path.trim()) continue;
+            bySuffix[suffix] = [normalizePath(path.trim())];
+          }
+          baseManifest = bySuffix;
+          manifestAuthority = 'listing';
+          log.debug(`Asset manifest authority: FilePicker listing (${Object.keys(bySuffix).length} masks)`);
+        }
+      } catch (_) {
+      }
+    }
+
+    if (!baseManifest) {
+      baseManifest = buildMaskManifest(basePath, { extension: maskExtension, maskIds, probeMode });
+      manifestAuthority = 'convention';
+      log.debug('Asset manifest authority: convention fallback');
+    }
     const effectiveManifest = { ...(baseManifest || {}) };
+    const baseManifestSuffixSet = new Set(Object.keys(baseManifest || {}));
     if (convFallback !== 'off') {
       try {
         const requestedMaskIds = Array.isArray(maskIds) && maskIds.length > 0
@@ -480,6 +536,13 @@ export async function loadAssetBundle(basePath, onProgress = null, options = {})
             : (typeof effectiveManifest[suffix] === 'string' && !!effectiveManifest[suffix].trim());
           if (hasExisting) continue;
           const fallbackCandidates = fallbackManifest?.[suffix];
+          // Optional masks should be quiet-by-default: if a suffix is missing from
+          // the authoritative/base manifest, do not synthesize guessed URLs for
+          // optional masks (that causes noisy 404 floods for absent files).
+          //
+          // Exception: critical masks can still be synthesized in convention mode.
+          const critical = CRITICAL_MASK_IDS.has(String(maskId || '').toLowerCase());
+          if (!def.required && !critical) continue;
           if (Array.isArray(fallbackCandidates) && fallbackCandidates.length > 0) {
             effectiveManifest[suffix] = fallbackCandidates;
           }
@@ -511,7 +574,28 @@ export async function loadAssetBundle(basePath, onProgress = null, options = {})
         }
 
         // Single runtime path for all users: exact URL from manifest only.
-        const maskCandidates = _resolveMaskCandidates(effectiveManifest, maskDef.suffix) || [];
+        const maskCandidates = (_resolveMaskCandidates(effectiveManifest, maskDef.suffix) || []).filter((u) =>
+          _maskResolvedStemMatchesBase(u, basePath, maskDef.suffix)
+        );
+        const fromBaseManifest = baseManifestSuffixSet.has(maskDef.suffix);
+        const maskIdLower = String(maskId || '').toLowerCase();
+        const criticalMask = CRITICAL_MASK_IDS.has(maskIdLower);
+
+        // Hard anti-spam guard:
+        // In convention fallback mode, skip optional non-critical masks entirely.
+        // This prevents broad URL-guess probes from spamming 404s.
+        if (manifestAuthority === 'convention' && !maskDef.required && !criticalMask) {
+          loaded++;
+          if (_isDbg) _dlp.end(_maskDbgId, { result: 'skipped (optional, convention fallback)' });
+          return null;
+        }
+
+        if (!maskDef.required && !fromBaseManifest && !criticalMask) {
+          // Optional + synthesized-only candidate list -> skip silently.
+          loaded++;
+          if (_isDbg) _dlp.end(_maskDbgId, { result: 'skipped (optional, no manifest entry)' });
+          return null;
+        }
         const candidateList = maskCandidates.filter((u) => !_failedMaskUrlCache.has(u));
         const maskFile = candidateList.length ? candidateList[0] : null;
 
@@ -716,11 +800,21 @@ async function probeMaskTexture(basePath, suffix, suppressProbeErrors = false) {
  * @returns {Promise<{path: string} | null>}
  */
 export async function probeMaskFile(basePath, suffix, options = {}) {
-  void options;
+  const allowConventionProbe = options?.allowConventionProbe === true;
 
   const cacheKey = `${basePath}::${suffix}`;
   if (_probeMaskNegativeCache.has(cacheKey)) {
-    return _probeMaskNegativeCache.get(cacheKey);
+    const cached = _probeMaskNegativeCache.get(cacheKey);
+    if (cached && typeof cached === 'object' && Object.prototype.hasOwnProperty.call(cached, 'value')) {
+      if (cached.value) return cached.value;
+      const age = performance.now() - Number(cached.atMs ?? 0);
+      if (age >= 0 && age < PROBE_NEGATIVE_CACHE_TTL_MS) return null;
+      // Expired negative entry: allow one retry.
+      _probeMaskNegativeCache.delete(cacheKey);
+    } else {
+      // Backward compatibility for old cache value shape (result|null).
+      return cached;
+    }
   }
 
   try {
@@ -736,26 +830,29 @@ export async function probeMaskFile(basePath, suffix, options = {}) {
       const scene = typeof canvas !== 'undefined' ? canvas?.scene : null;
       resolvedPath = _pathFromSceneMaskTextureManifest(scene, basePath, suffix);
     }
-    // HEAD convention probes only when browse returned nothing. If we have a file list,
-    // missing optional masks are authoritative (do not exist on disk for this map).
-    if (!resolvedPath && !hasListing) {
+    // Optional diagnostics-only fallback: exact-name HEAD probe by convention.
+    // Runtime default is OFF to avoid 404 spam and request storms.
+    if (!resolvedPath && allowConventionProbe) {
       resolvedPath = await _probeMaskPathByConvention(basePath, suffix);
+    }
+
+    if (resolvedPath && !_maskResolvedStemMatchesBase(resolvedPath, basePath, suffix)) {
+      log.warn('probeMaskFile: stem mismatch — ignoring path', { basePath, suffix, resolvedPath });
+      resolvedPath = null;
     }
 
     if (resolvedPath) {
       const result = { path: resolvedPath };
-      _probeMaskNegativeCache.set(cacheKey, result);
+      _probeMaskNegativeCache.set(cacheKey, { value: result, atMs: performance.now() });
       return result;
     }
 
-    if (!hasListing) {
-      // Empty browse may be transient; do not negative-cache so the next probe can retry.
-      return null;
-    }
-    _probeMaskNegativeCache.set(cacheKey, null);
+    // Negative-cache misses briefly to prevent hot-loop re-probing when effects
+    // repeatedly ask for the same absent mask during load/render transitions.
+    _probeMaskNegativeCache.set(cacheKey, { value: null, atMs: performance.now() });
     return null;
   } catch (_) {
-    _probeMaskNegativeCache.set(cacheKey, null);
+    _probeMaskNegativeCache.set(cacheKey, { value: null, atMs: performance.now() });
     return null;
   }
 }
@@ -1010,7 +1107,10 @@ function _pathFromSceneMaskTextureManifest(scene, basePath, suffix) {
     if (!maskId) return null;
     const pb = raw.pathsByMaskId;
     const p = pb[maskId] || pb[String(maskId).toLowerCase()];
-    if (typeof p === 'string' && p.trim()) return p.trim();
+    if (typeof p === 'string' && p.trim()) {
+      const trimmed = p.trim();
+      if (_maskResolvedStemMatchesBase(trimmed, basePath, suffix)) return trimmed;
+    }
   } catch (_) {}
   return null;
 }

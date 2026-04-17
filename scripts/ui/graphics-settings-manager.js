@@ -40,7 +40,6 @@ const V2_EFFECT_KEY_BY_ID = Object.freeze({
   'fire-sparks': '_fireEffect',
   'water-splashes': '_waterSplashesEffect',
   'underwater-bubbles': '_underwaterBubblesEffect',
-  'ash-disturbance': '_ashDisturbanceEffect',
   bloom: '_bloomEffect',
   colorCorrection: '_colorCorrectionEffect',
   filter: '_filterEffect',

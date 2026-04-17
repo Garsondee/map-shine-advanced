@@ -8,11 +8,27 @@
  *
  * Rationale: GpuSceneMaskCompositor keys masks by rendered floor bands. `activeLevelContext`
  * (CameraFollower) can briefly disagree with `floorStack` (e.g. scene-background vs upper
- * tile floor). Trying level context first caused wrong-band _Outdoors (e.g. all-indoor
- * underground) to win over the viewed floor's mask for BuildingShadowsEffectV2 and sync.
+ * tile floor). Including a stale level band in the candidate list after floor-stack keys
+ * caused wrong-band _Outdoors (e.g. all-black underground) to win whenever the viewed
+ * floor's texture was not found yet (async compose): tryKey(underground) succeeded before
+ * the correct floor's RT existed.
  *
  * @module masks/resolve-compositor-outdoors
  */
+
+/**
+ * String key for a Levels band — must match FloorStack `compositorKey`
+ * (`${bottom}:${top}`, including `Infinity` for open-top bands).
+ * @param {{ bottom?: unknown, top?: unknown }|null|undefined} ctx
+ * @returns {string|null}
+ */
+function levelsBandKeyFromContext(ctx) {
+  if (!ctx) return null;
+  const b = ctx.bottom;
+  if (b == null && b !== 0) return null;
+  const t = ctx.top;
+  return `${b}:${t ?? ''}`;
+}
 
 /**
  * @param {object} compositor - GpuSceneMaskCompositor instance
@@ -36,6 +52,13 @@ export function resolveCompositorOutdoorsTexture(compositor, levelContext = null
 
   const candidateKeys = [];
 
+  let multiFloor = false;
+  try {
+    multiFloor = (window.MapShine?.floorStack?.getFloors?.() ?? []).length > 1;
+  } catch (_) {
+    multiFloor = false;
+  }
+
   let activeFloor = null;
   try {
     activeFloor = window.MapShine?.floorStack?.getActiveFloor?.() ?? null;
@@ -47,11 +70,21 @@ export function resolveCompositorOutdoorsTexture(compositor, levelContext = null
   } catch (_) {}
 
   const cb = Number(ctx?.bottom);
-  const ct = Number(ctx?.top);
-  if (Number.isFinite(cb) && Number.isFinite(ct)) candidateKeys.push(`${cb}:${ct}`);
+  const ctxBandKey = levelsBandKeyFromContext(ctx);
+  if (ctxBandKey != null) {
+    const activeCk = activeFloor ? String(activeFloor.compositorKey) : '';
+    if (!multiFloor || !activeFloor || ctxBandKey === activeCk) {
+      candidateKeys.push(ctxBandKey);
+    }
+  }
 
   const cak = compositor._activeFloorKey ?? null;
-  if (cak) candidateKeys.push(String(cak));
+  if (cak) {
+    const activeCk = activeFloor ? String(activeFloor.compositorKey) : '';
+    if (!multiFloor || !activeFloor || String(cak) === activeCk) {
+      candidateKeys.push(String(cak));
+    }
+  }
 
   const uniqueKeys = [...new Set(candidateKeys.filter(Boolean))];
   for (const key of uniqueKeys) {

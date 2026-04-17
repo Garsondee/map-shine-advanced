@@ -33,18 +33,44 @@ export class InvertEffectV2 {
   static getControlSchema() {
     return {
       enabled: false,
+      help: {
+        title: 'Color invert',
+        summary: [
+          'Blends each pixel toward its photographic inverse (1 − RGB) for negative / sci-fi / puzzle-map looks.',
+          'Stylistic only — no masks. One fullscreen post pass on the composited image.',
+          'Performance: very cheap (single pass, simple shader).',
+          'Persistence: settings save with the scene (not World Based).',
+        ].join('\n\n'),
+        glossary: {
+          Strength: 'Blend between the original image and full inversion (0 = original, 1 = full invert).',
+        },
+      },
       groups: [
         {
-          name: 'invert',
-          label: 'Color Inversion',
-          type: 'inline',
-          parameters: ['strength']
-        }
+          name: 'look',
+          label: 'Look',
+          type: 'folder',
+          expanded: true,
+          parameters: ['strength'],
+        },
       ],
       parameters: {
         enabled: { type: 'boolean', default: false, hidden: true },
-        strength: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 1.0 }
-      }
+        strength: {
+          type: 'slider',
+          label: 'Strength',
+          min: 0.0,
+          max: 1.0,
+          step: 0.01,
+          default: 1.0,
+          tooltip: 'How much inversion is mixed in (0 leaves the image unchanged).',
+        },
+      },
+      presets: {
+        Partial: { strength: 0.35 },
+        Half: { strength: 0.5 },
+        Full: { strength: 1.0 },
+      },
     };
   }
 

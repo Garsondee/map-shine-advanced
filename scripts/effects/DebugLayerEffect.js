@@ -71,7 +71,6 @@ export class DebugLayerEffect extends EffectBase {
           label: 'Debug Layer',
           type: 'inline',
           parameters: [
-            'enabled',
             'showPanel',
             'showTether',
             'showCollisionPoint',
@@ -393,7 +392,7 @@ export class DebugLayerEffect extends EffectBase {
         type,
         source: tokenObj,
         token: tokenObj,
-        wallDirectionMode: 0,   // NORMAL — respect one-way wall direction (MS-LVL-074)
+        edgeDirectionMode: CONST.EDGE_DIRECTION_MODES.NORMAL,
         useThreshold: true      // Evaluate proximity/distance walls (MS-LVL-073)
       });
       if (!Array.isArray(allHits) || allHits.length === 0) return null;

@@ -339,10 +339,14 @@ export class SkyColorEffectV2 {
         float sampleOutdoorsMask(vec2 screenUv) {
           if (uHasOutdoorsMask < 0.5) return 1.0;
           vec2 worldXY = mix(uViewBoundsMin, uViewBoundsMax, screenUv);
-          vec2 sceneUv = vec2(
+          vec2 sceneUvRaw = vec2(
             (worldXY.x - uSceneBounds.x) / max(1e-5, uSceneBounds.z),
             1.0 - ((worldXY.y - uSceneBounds.y) / max(1e-5, uSceneBounds.w))
           );
+          float inScene =
+            step(0.0, sceneUvRaw.x) * step(sceneUvRaw.x, 1.0) *
+            step(0.0, sceneUvRaw.y) * step(sceneUvRaw.y, 1.0);
+          vec2 sceneUv = sceneUvRaw;
           if (uOutdoorsMaskFlipY > 0.5) sceneUv.y = 1.0 - sceneUv.y;
           sceneUv = clamp(sceneUv, vec2(0.0), vec2(1.0));
           // Why this is correct:
@@ -362,7 +366,8 @@ export class SkyColorEffectV2 {
           // from contaminating sky gating.
           vec4 m = texture2D(tOutdoorsMask, sceneUv);
           float outdoors = mix(1.0, m.r, m.a);
-          return step(0.5, clamp(outdoors, 0.0, 1.0));
+          float outdoorMaskSample = step(0.5, clamp(outdoors, 0.0, 1.0));
+          return mix(1.0, outdoorMaskSample, inScene);
         }
 
         float sampleOverheadRoofAlpha(vec2 screenUv) {

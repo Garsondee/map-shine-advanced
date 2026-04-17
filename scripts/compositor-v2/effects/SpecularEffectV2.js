@@ -30,9 +30,14 @@
 import { createLogger } from '../../core/log.js';
 import { weatherController } from '../../core/WeatherController.js';
 import { probeMaskFile } from '../../assets/loader.js';
-import { tileHasLevelsRange, readTileLevelsFlags } from '../../foundry/levels-scene-flags.js';
+import {
+  tileHasLevelsRange,
+  readTileLevelsFlags,
+  getViewedLevelBackgroundSrc,
+} from '../../foundry/levels-scene-flags.js';
 import Coordinates from '../../utils/coordinates.js';
 import { getVertexShader, getFragmentShader } from './specular-shader.js';
+import { safeBuildShaderMaterial } from '../../core/diagnostics/SafeShaderBuilder.js';
 
 const log = createLogger('SpecularEffectV2');
 
@@ -41,14 +46,50 @@ const log = createLogger('SpecularEffectV2');
 // but large enough to consistently render on top of the albedo tile.
 const SPECULAR_Z_OFFSET = 0.1;
 
-// Render-order offset for tile-attached specular overlays.
-// Keep this fractional so the overlay renders immediately after its own tile,
-// but before the next tile's integer sort slot (prevents leakage through stacked
-// tiles when neighboring docs have adjacent sort values).
-const SPECULAR_RENDER_ORDER_OFFSET = 0.1;
+import { tileRelativeEffectOrder } from '../LayerOrderPolicy.js';
+
+// Intra-band delta for specular overlays relative to their tile.
+const SPECULAR_EFFECT_DELTA = 1;
 
 // Maximum number of dynamic lights the shader supports (compile-time constant).
 const MAX_LIGHTS = 64;
+
+/**
+ * Parallel async map with a fixed worker pool. Used so `probeMaskFile` does not
+ * run strictly one-after-another across hundreds of tiles (which exceeds the
+ * FloorCompositor populate race during heavy FilePicker / mask discovery).
+ *
+ * @template T, R
+ * @param {T[]} items
+ * @param {number} limit
+ * @param {(item: T, index: number) => Promise<R>} fn
+ * @returns {Promise<R[]>}
+ */
+async function mapWithConcurrency(items, limit, fn) {
+  if (!items.length) return [];
+  const cap = Math.max(1, Math.min(limit, items.length));
+  const results = new Array(items.length);
+  let next = 0;
+
+  async function worker() {
+    for (;;) {
+      const i = next++;
+      if (i >= items.length) break;
+      results[i] = await fn(items[i], i);
+    }
+  }
+
+  await Promise.all(Array.from({ length: cap }, () => worker()));
+  return results;
+}
+
+/** How many `probeMaskFile` calls run at once during populate. */
+const SPECULAR_MASK_PROBE_CONCURRENCY = 8;
+
+/** Yield to the browser so sockets/timers stay healthy on huge maps. */
+async function yieldPopulateEventLoop() {
+  await new Promise((resolve) => setTimeout(resolve, 0));
+}
 
 // ─── SpecularEffectV2 ────────────────────────────────────────────────────────
 
@@ -97,6 +138,14 @@ export class SpecularEffectV2 {
     this._windAccumX = 0;
     this._windAccumY = 0;
 
+    // Deferred shader compilation state
+    /** @type {boolean} True when heavy shader has been compiled */
+    this._realShaderCompiled = false;
+    /** @type {boolean} True when real shader compilation is in progress */
+    this._shaderCompilePending = false;
+    /** @type {Array<{tileId: string, opts: object}>} Pending overlay creations waiting for shader */
+    this._pendingOverlays = [];
+
     // Foundry hook IDs for light tracking.
     this._hookIds = {};
 
@@ -106,11 +155,11 @@ export class SpecularEffectV2 {
      */
     this._healthDiagnostics = null;
 
-    // Effect parameters — same defaults as V1 for visual parity.
+    // Effect parameters — same defaults as V1 for visual parity (minus retired unused fields).
     this.params = {
+      enabled: true,
+      textureStatus: 'Searching...',
       intensity: 0.4,
-      roughness: 0.0,
-      lightDirection: { x: 0.6, y: 0.4, z: 0.7 },
       lightColor: { r: 1.0, g: 1.0, b: 1.0 },
 
       // Multi-layer stripe system
@@ -169,7 +218,6 @@ export class SpecularEffectV2 {
 
       // Wet Surface (Rain)
       wetSpecularEnabled: true,
-      wetSpecularThreshold: 0.5,
       wetInputBrightness: 0.0,
       wetInputGamma: 1.0,
       wetSpecularContrast: 3.0,
@@ -234,102 +282,301 @@ export class SpecularEffectV2 {
 
   get enabled() { return this._enabled; }
   set enabled(v) {
-    this._enabled = v;
+    const next = !!v;
+    this._enabled = next;
+    this.params.enabled = next;
     if (this._sharedUniforms?.uEffectEnabled) {
-      this._sharedUniforms.uEffectEnabled.value = v;
+      this._sharedUniforms.uEffectEnabled.value = next;
     }
+    this._syncOverlayVisibility();
   }
 
   // ── UI schema (moved from V1 SpecularEffect) ─────────────────────────────
 
   static getControlSchema() {
+    const white = { r: 1, g: 1, b: 1 };
     return {
       enabled: true,
+      help: {
+        title: 'Metallic / specular (tile overlays)',
+        summary: [
+          'Draws **additive shine** on top of map tiles (and the scene background) wherever a matching **`_Specular`** texture exists beside the art.',
+          'Stripes, sparkles, rain wetness, frost, outdoor/cloud response, and Foundry lights all multiply into that mask — there is no separate PBR roughness or normal-map path.',
+          'Uses one overlay mesh per masked tile, rendered through the floor bus so level visibility stays correct.',
+          'Performance scales with how many `_Specular` overlays exist and how busy the stripe/sparkle math is; heavy maps benefit from fewer stripe layers or lower intensities.',
+          'Settings are stored on the scene (not World Based).',
+        ].join('\n\n'),
+        glossary: {
+          'Mask status': 'Whether the scene found at least one `_Specular` texture after load.',
+          Intensity: 'Overall strength of the shine pass.',
+          'Specular tint': 'Color multiplied into highlights (white keeps the map neutral).',
+          'World scale': 'How large world-space stripe patterns are — higher = bigger, calmer bands.',
+          'Outdoor blend': 'How much outdoor areas mix stripe modulation with cloud-lit specular.',
+          'Wet surface': 'Rain-driven sheen from albedo brightness, strongest on outdoor pixels.',
+          'Building shadow suppression': 'Pulls specular down where the building shadow map is dark.',
+        },
+      },
+      presetApplyDefaults: true,
       groups: [
-        { name: 'status', label: 'Effect Status', type: 'inline', parameters: ['textureStatus'] },
-        { name: 'material', label: 'Material Properties', type: 'inline', parameters: ['intensity', 'roughness'] },
-        { name: 'stripe-settings', label: 'Stripe Settings', type: 'inline', separator: true, parameters: ['stripeEnabled', 'stripeBlendMode', 'parallaxStrength', 'stripeMaskThreshold', 'worldPatternScale'] },
-        { name: 'layer1', label: 'Layer 1', type: 'folder', separator: true, expanded: false, parameters: ['stripe1Enabled', 'stripe1Frequency', 'stripe1Speed', 'stripe1Angle', 'stripe1Width', 'stripe1Intensity', 'stripe1Parallax', 'stripe1Wave', 'stripe1Gaps', 'stripe1Softness'] },
-        { name: 'layer2', label: 'Layer 2', type: 'folder', expanded: false, parameters: ['stripe2Enabled', 'stripe2Frequency', 'stripe2Speed', 'stripe2Angle', 'stripe2Width', 'stripe2Intensity', 'stripe2Parallax', 'stripe2Wave', 'stripe2Gaps', 'stripe2Softness'] },
-        { name: 'layer3', label: 'Layer 3', type: 'folder', expanded: false, parameters: ['stripe3Enabled', 'stripe3Frequency', 'stripe3Speed', 'stripe3Angle', 'stripe3Width', 'stripe3Intensity', 'stripe3Parallax', 'stripe3Wave', 'stripe3Gaps', 'stripe3Softness'] },
-        { name: 'sparkle', label: 'Micro Sparkle', type: 'folder', expanded: false, parameters: ['sparkleEnabled', 'sparkleIntensity', 'sparkleScale', 'sparkleSpeed'] },
-        { name: 'outdoor-cloud-specular', label: 'Outdoor Cloud Specular', type: 'folder', expanded: false, parameters: ['outdoorCloudSpecularEnabled', 'outdoorStripeBlend', 'cloudSpecularIntensity'] },
-        { name: 'wet-surface', label: 'Wet Surface (Rain)', type: 'folder', expanded: false, parameters: ['wetSpecularEnabled', 'wetInputBrightness', 'wetInputGamma', 'wetSpecularContrast', 'wetBlackPoint', 'wetWhitePoint', 'wetSpecularIntensity', 'wetOutputMax', 'wetOutputGamma', 'wetBaseSheen', 'wetWindRippleStrength'] },
-        { name: 'frost-glaze', label: 'Frost / Ice Glaze', type: 'folder', expanded: false, parameters: ['frostGlazeEnabled', 'frostThreshold', 'frostIntensity', 'frostTintStrength'] },
-        { name: 'dynamic-light-tint', label: 'Dynamic Light Tinting', type: 'folder', expanded: false, parameters: ['dynamicLightTintEnabled', 'dynamicLightTintStrength'] },
-        { name: 'wind-driven-stripes', label: 'Wind-Driven Stripes', type: 'folder', expanded: false, parameters: ['windDrivenStripesEnabled', 'windStripeInfluence'] },
-        { name: 'building-shadow-suppression', label: 'Building Shadow Suppression', type: 'folder', expanded: false, parameters: ['buildingShadowSuppressionEnabled', 'buildingShadowSuppressionStrength'] }
+        {
+          name: 'status',
+          label: 'Status',
+          type: 'folder',
+          expanded: true,
+          parameters: ['textureStatus'],
+        },
+        {
+          name: 'look',
+          label: 'Look',
+          type: 'folder',
+          expanded: true,
+          parameters: ['intensity', 'lightColor'],
+        },
+        {
+          name: 'stripes',
+          label: 'Stripes',
+          type: 'folder',
+          expanded: true,
+          parameters: [
+            'stripeEnabled', 'stripeBlendMode', 'parallaxStrength', 'stripeMaskThreshold', 'worldPatternScale',
+          ],
+        },
+        {
+          name: 'layer1',
+          label: 'Stripe layer 1',
+          type: 'folder',
+          expanded: false,
+          parameters: [
+            'stripe1Enabled', 'stripe1Frequency', 'stripe1Speed', 'stripe1Angle', 'stripe1Width', 'stripe1Intensity',
+            'stripe1Parallax', 'stripe1Wave', 'stripe1Gaps', 'stripe1Softness',
+          ],
+        },
+        {
+          name: 'layer2',
+          label: 'Stripe layer 2',
+          type: 'folder',
+          expanded: false,
+          parameters: [
+            'stripe2Enabled', 'stripe2Frequency', 'stripe2Speed', 'stripe2Angle', 'stripe2Width', 'stripe2Intensity',
+            'stripe2Parallax', 'stripe2Wave', 'stripe2Gaps', 'stripe2Softness',
+          ],
+        },
+        {
+          name: 'layer3',
+          label: 'Stripe layer 3',
+          type: 'folder',
+          expanded: false,
+          parameters: [
+            'stripe3Enabled', 'stripe3Frequency', 'stripe3Speed', 'stripe3Angle', 'stripe3Width', 'stripe3Intensity',
+            'stripe3Parallax', 'stripe3Wave', 'stripe3Gaps', 'stripe3Softness',
+          ],
+        },
+        {
+          name: 'sparkle',
+          label: 'Micro sparkle',
+          type: 'folder',
+          expanded: false,
+          parameters: ['sparkleEnabled', 'sparkleIntensity', 'sparkleScale', 'sparkleSpeed'],
+        },
+        {
+          name: 'outdoorCloud',
+          label: 'Outdoor & clouds',
+          type: 'folder',
+          expanded: false,
+          parameters: ['outdoorCloudSpecularEnabled', 'outdoorStripeBlend', 'cloudSpecularIntensity'],
+        },
+        {
+          name: 'wet',
+          label: 'Wet surface (rain)',
+          type: 'folder',
+          expanded: false,
+          parameters: [
+            'wetSpecularEnabled', 'wetInputBrightness', 'wetInputGamma', 'wetSpecularContrast', 'wetBlackPoint', 'wetWhitePoint',
+            'wetSpecularIntensity', 'wetOutputMax', 'wetOutputGamma', 'wetBaseSheen', 'wetWindRippleStrength',
+          ],
+        },
+        {
+          name: 'frost',
+          label: 'Frost / ice',
+          type: 'folder',
+          expanded: false,
+          parameters: ['frostGlazeEnabled', 'frostThreshold', 'frostIntensity', 'frostTintStrength'],
+        },
+        {
+          name: 'lightTint',
+          label: 'Dynamic light tint',
+          type: 'folder',
+          expanded: false,
+          parameters: ['dynamicLightTintEnabled', 'dynamicLightTintStrength'],
+        },
+        {
+          name: 'windStripes',
+          label: 'Wind-driven stripes',
+          type: 'folder',
+          expanded: false,
+          parameters: ['windDrivenStripesEnabled', 'windStripeInfluence'],
+        },
+        {
+          name: 'buildingShadow',
+          label: 'Building shadow suppression',
+          type: 'folder',
+          expanded: false,
+          parameters: ['buildingShadowSuppressionEnabled', 'buildingShadowSuppressionStrength'],
+        },
       ],
       parameters: {
-        hasSpecularMask: { type: 'boolean', default: true },
-        textureStatus: { type: 'string', label: 'Mask Status', default: 'Checking...', readonly: true },
-        intensity: { type: 'slider', label: 'Specular Intensity', min: 0, max: 2, step: 0.01, default: 0.4, throttle: 100 },
-        roughness: { type: 'slider', label: 'Roughness', min: 0, max: 1, step: 0.01, default: 0.0, throttle: 100 },
-        stripeEnabled: { type: 'boolean', label: 'Enable Stripes', default: true },
-        stripeBlendMode: { type: 'list', label: 'Stripe Blend Mode', options: { 'Add': 0, 'Multiply': 1, 'Screen': 2, 'Overlay': 3 }, default: 0 },
-        stripeMaskThreshold: { type: 'slider', label: 'Stripe Brightness Threshold', min: 0, max: 1, step: 0.01, default: 0.1, throttle: 100 },
-        worldPatternScale: { type: 'slider', label: 'Specular World Scale', min: 256, max: 8192, step: 16, default: 5808, throttle: 100 },
-        parallaxStrength: { type: 'slider', label: 'Parallax Strength', min: 0, max: 2, step: 0.1, default: 1.5, throttle: 100 },
-        stripe1Enabled: { type: 'boolean', label: 'Layer 1 Enabled', default: true },
-        stripe1Frequency: { type: 'slider', label: 'Layer 1 Frequency', min: 0.5, max: 20, step: 0.5, default: 11.0, throttle: 100 },
-        stripe1Speed: { type: 'slider', label: 'Layer 1 Speed', min: -1, max: 1, step: 0.001, default: 0, throttle: 100 },
-        stripe1Angle: { type: 'slider', label: 'Layer 1 Angle', min: 0, max: 360, step: 1, default: 115, throttle: 100 },
-        stripe1Width: { type: 'slider', label: 'Layer 1 Width', min: 0, max: 1, step: 0.01, default: 0.21, throttle: 100 },
-        stripe1Intensity: { type: 'slider', label: 'Layer 1 Intensity', min: 0, max: 5, step: 0.01, default: 5.0, throttle: 100 },
-        stripe1Parallax: { type: 'slider', label: 'Layer 1 Parallax', min: -2, max: 2, step: 0.1, default: 0.2, throttle: 100 },
-        stripe1Wave: { type: 'slider', label: 'Layer 1 Wave', min: 0, max: 2, step: 0.1, default: 1.7, throttle: 100 },
-        stripe1Gaps: { type: 'slider', label: 'Layer 1 Gaps', min: 0, max: 1, step: 0.01, default: 0.31, throttle: 100 },
-        stripe1Softness: { type: 'slider', label: 'Layer 1 Softness', min: 0, max: 5, step: 0.01, default: 2.14, throttle: 100 },
-        stripe2Enabled: { type: 'boolean', label: 'Layer 2 Enabled', default: true },
-        stripe2Frequency: { type: 'slider', label: 'Layer 2 Frequency', min: 0.5, max: 20, step: 0.5, default: 15.5, throttle: 100 },
-        stripe2Speed: { type: 'slider', label: 'Layer 2 Speed', min: -1, max: 1, step: 0.001, default: 0, throttle: 100 },
-        stripe2Angle: { type: 'slider', label: 'Layer 2 Angle', min: 0, max: 360, step: 1, default: 111, throttle: 100 },
-        stripe2Width: { type: 'slider', label: 'Layer 2 Width', min: 0, max: 1, step: 0.01, default: 0.38, throttle: 100 },
-        stripe2Intensity: { type: 'slider', label: 'Layer 2 Intensity', min: 0, max: 5, step: 0.01, default: 5.0, throttle: 100 },
-        stripe2Parallax: { type: 'slider', label: 'Layer 2 Parallax', min: -2, max: 2, step: 0.1, default: 0.1, throttle: 100 },
-        stripe2Wave: { type: 'slider', label: 'Layer 2 Wave', min: 0, max: 2, step: 0.1, default: 1.6, throttle: 100 },
-        stripe2Gaps: { type: 'slider', label: 'Layer 2 Gaps', min: 0, max: 1, step: 0.01, default: 0.5, throttle: 100 },
-        stripe2Softness: { type: 'slider', label: 'Layer 2 Softness', min: 0, max: 5, step: 0.01, default: 3.93, throttle: 100 },
-        stripe3Enabled: { type: 'boolean', label: 'Layer 3 Enabled', default: true },
-        stripe3Frequency: { type: 'slider', label: 'Layer 3 Frequency', min: 0.5, max: 20, step: 0.5, default: 5.0, throttle: 100 },
-        stripe3Speed: { type: 'slider', label: 'Layer 3 Speed', min: -1, max: 1, step: 0.001, default: 0, throttle: 100 },
-        stripe3Angle: { type: 'slider', label: 'Layer 3 Angle', min: 0, max: 360, step: 1, default: 162, throttle: 100 },
-        stripe3Width: { type: 'slider', label: 'Layer 3 Width', min: 0, max: 1, step: 0.01, default: 0.09, throttle: 100 },
-        stripe3Intensity: { type: 'slider', label: 'Layer 3 Intensity', min: 0, max: 5, step: 0.01, default: 5.0, throttle: 100 },
-        stripe3Parallax: { type: 'slider', label: 'Layer 3 Parallax', min: -2, max: 2, step: 0.1, default: -0.1, throttle: 100 },
-        stripe3Wave: { type: 'slider', label: 'Layer 3 Wave', min: 0, max: 2, step: 0.1, default: 0.4, throttle: 100 },
-        stripe3Gaps: { type: 'slider', label: 'Layer 3 Gaps', min: 0, max: 1, step: 0.01, default: 0.37, throttle: 100 },
-        stripe3Softness: { type: 'slider', label: 'Layer 3 Softness', min: 0, max: 5, step: 0.01, default: 3.44, throttle: 100 },
-        sparkleEnabled: { type: 'boolean', label: 'Enable Sparkle', default: false },
-        sparkleIntensity: { type: 'slider', label: 'Sparkle Intensity', min: 0, max: 2, step: 0.01, default: 0.95, throttle: 100 },
-        sparkleScale: { type: 'slider', label: 'Sparkle Scale', min: 100, max: 10000, step: 1, default: 2460, throttle: 100 },
-        sparkleSpeed: { type: 'slider', label: 'Sparkle Speed', min: 0, max: 5, step: 0.01, default: 1.38, throttle: 100 },
-        outdoorCloudSpecularEnabled: { type: 'boolean', label: 'Enable Cloud Specular', default: true },
-        outdoorStripeBlend: { type: 'slider', label: 'Outdoor Stripe Blend', min: 0, max: 1, step: 0.01, default: 0.8, throttle: 100 },
-        cloudSpecularIntensity: { type: 'slider', label: 'Cloud Specular Intensity', min: 0, max: 3, step: 0.01, default: 3, throttle: 100 },
-        wetSpecularEnabled: { type: 'boolean', label: 'Enable Wet Surface', default: true },
-        wetSpecularThreshold: { type: 'slider', label: 'Rain Threshold', min: 0, max: 1, step: 0.01, default: 0.5, throttle: 100 },
-        wetInputBrightness: { type: 'slider', label: 'Input Brightness', min: -0.5, max: 0.5, step: 0.01, default: 0.0, throttle: 100 },
-        wetInputGamma: { type: 'slider', label: 'Input Gamma', min: 0.1, max: 3.0, step: 0.01, default: 1.0, throttle: 100 },
-        wetSpecularContrast: { type: 'slider', label: 'Input Contrast', min: 1, max: 10, step: 0.1, default: 3.0, throttle: 100 },
-        wetBlackPoint: { type: 'slider', label: 'Black Point', min: 0.0, max: 1.0, step: 0.01, default: 0.2, throttle: 100 },
-        wetWhitePoint: { type: 'slider', label: 'White Point', min: 0.0, max: 1.0, step: 0.01, default: 1.0, throttle: 100 },
-        wetSpecularIntensity: { type: 'slider', label: 'Output Intensity', min: 0, max: 5, step: 0.01, default: 1.5, throttle: 100 },
-        wetOutputMax: { type: 'slider', label: 'Output Max (Clamp)', min: 0.0, max: 3.0, step: 0.01, default: 1.0, throttle: 100 },
-        wetOutputGamma: { type: 'slider', label: 'Output Gamma', min: 0.1, max: 3.0, step: 0.01, default: 1.0, throttle: 100 },
-        wetBaseSheen: { type: 'slider', label: 'Outdoor Base Sheen', min: 0.0, max: 2.0, step: 0.01, default: 0.3, throttle: 100 },
-        wetWindRippleStrength: { type: 'slider', label: 'Wind Ripple Strength', min: 0.0, max: 3.0, step: 0.01, default: 1.0, throttle: 100 },
-        frostGlazeEnabled: { type: 'boolean', label: 'Enable Frost Glaze', default: true },
-        frostThreshold: { type: 'slider', label: 'Freeze Threshold', min: 0, max: 1, step: 0.01, default: 0.55, throttle: 100 },
-        frostIntensity: { type: 'slider', label: 'Frost Intensity', min: 0, max: 3, step: 0.01, default: 1.2, throttle: 100 },
-        frostTintStrength: { type: 'slider', label: 'Blue Tint Strength', min: 0, max: 1, step: 0.01, default: 0.4, throttle: 100 },
-        dynamicLightTintEnabled: { type: 'boolean', label: 'Enable Light Tinting', default: true },
-        dynamicLightTintStrength: { type: 'slider', label: 'Tint Strength', min: 0, max: 1, step: 0.01, default: 0.6, throttle: 100 },
-        windDrivenStripesEnabled: { type: 'boolean', label: 'Enable Wind Stripes', default: true },
-        windStripeInfluence: { type: 'slider', label: 'Wind Influence', min: 0, max: 1, step: 0.01, default: 0.5, throttle: 100 },
-        buildingShadowSuppressionEnabled: { type: 'boolean', label: 'Enable Shadow Suppression', default: true },
-        buildingShadowSuppressionStrength: { type: 'slider', label: 'Suppression Strength', min: 0, max: 1, step: 0.01, default: 0.8, throttle: 100 }
-      }
+        textureStatus: {
+          type: 'string',
+          label: 'Mask status',
+          default: 'Searching...',
+          readonly: true,
+          tooltip: 'Updated when the scene loads: whether any `_Specular` mask was found for tiles or the background.',
+        },
+        intensity: {
+          type: 'slider',
+          label: 'Intensity',
+          min: 0,
+          max: 2,
+          step: 0.01,
+          default: 0.4,
+          throttle: 100,
+          tooltip: 'Master strength of the additive specular pass.',
+        },
+        lightColor: {
+          type: 'color',
+          colorType: 'float',
+          label: 'Specular tint',
+          default: { ...white },
+          tooltip: 'Tint multiplied into specular highlights (linear 0–1 per channel).',
+        },
+        stripeEnabled: {
+          type: 'boolean',
+          label: 'Stripes on',
+          default: true,
+          tooltip: 'Animated stripe bands modulate shine in world space.',
+        },
+        stripeBlendMode: {
+          type: 'list',
+          label: 'Layer blend',
+          options: { Add: 0, Multiply: 1, Screen: 2, Overlay: 3 },
+          default: 0,
+          tooltip: 'How stripe layers 2–3 combine with layer 1.',
+        },
+        stripeMaskThreshold: {
+          type: 'slider',
+          label: 'Brightness gate',
+          min: 0,
+          max: 1,
+          step: 0.01,
+          default: 0.1,
+          throttle: 100,
+          tooltip: 'Stripes only where the specular mask is brighter than this (reduces shine in dark mask areas).',
+        },
+        worldPatternScale: {
+          type: 'slider',
+          label: 'World scale (px)',
+          min: 256,
+          max: 8192,
+          step: 16,
+          default: 5808,
+          throttle: 100,
+          tooltip: 'Size of world-space stripe pattern — larger values stretch bands wider.',
+        },
+        parallaxStrength: {
+          type: 'slider',
+          label: 'Parallax',
+          min: 0,
+          max: 2,
+          step: 0.1,
+          default: 1.5,
+          throttle: 100,
+          tooltip: 'How much the camera shifts stripe coordinates (depth illusion).',
+        },
+        stripe1Enabled: { type: 'boolean', label: 'On', default: true },
+        stripe1Frequency: { type: 'slider', label: 'Frequency', min: 0.5, max: 20, step: 0.5, default: 11.0, throttle: 100, tooltip: 'How often bands repeat.' },
+        stripe1Speed: { type: 'slider', label: 'Speed', min: -1, max: 1, step: 0.001, default: 0, throttle: 100, tooltip: 'Scroll speed along the pattern.' },
+        stripe1Angle: { type: 'slider', label: 'Angle (°)', min: 0, max: 360, step: 1, default: 115, throttle: 100, tooltip: 'Band direction in degrees.' },
+        stripe1Width: { type: 'slider', label: 'Width', min: 0, max: 1, step: 0.01, default: 0.21, throttle: 100, tooltip: 'Thickness of each bright band.' },
+        stripe1Intensity: { type: 'slider', label: 'Strength', min: 0, max: 5, step: 0.01, default: 5.0, throttle: 100, tooltip: 'How strong this layer is before blending.' },
+        stripe1Parallax: { type: 'slider', label: 'Parallax mix', min: -2, max: 2, step: 0.1, default: 0.2, throttle: 100, tooltip: 'Per-layer parallax weight vs global parallax.' },
+        stripe1Wave: { type: 'slider', label: 'Wave', min: 0, max: 2, step: 0.1, default: 1.7, throttle: 100, tooltip: 'Waviness along the bands.' },
+        stripe1Gaps: { type: 'slider', label: 'Gaps', min: 0, max: 1, step: 0.01, default: 0.31, throttle: 100, tooltip: 'Noise-driven breaks in the bands.' },
+        stripe1Softness: { type: 'slider', label: 'Softness', min: 0, max: 5, step: 0.01, default: 2.14, throttle: 100, tooltip: 'Edge softness of each band.' },
+        stripe2Enabled: { type: 'boolean', label: 'On', default: true },
+        stripe2Frequency: { type: 'slider', label: 'Frequency', min: 0.5, max: 20, step: 0.5, default: 15.5, throttle: 100, tooltip: 'How often bands repeat.' },
+        stripe2Speed: { type: 'slider', label: 'Speed', min: -1, max: 1, step: 0.001, default: 0, throttle: 100, tooltip: 'Scroll speed along the pattern.' },
+        stripe2Angle: { type: 'slider', label: 'Angle (°)', min: 0, max: 360, step: 1, default: 111, throttle: 100, tooltip: 'Band direction in degrees.' },
+        stripe2Width: { type: 'slider', label: 'Width', min: 0, max: 1, step: 0.01, default: 0.38, throttle: 100, tooltip: 'Thickness of each bright band.' },
+        stripe2Intensity: { type: 'slider', label: 'Strength', min: 0, max: 5, step: 0.01, default: 5.0, throttle: 100, tooltip: 'How strong this layer is before blending.' },
+        stripe2Parallax: { type: 'slider', label: 'Parallax mix', min: -2, max: 2, step: 0.1, default: 0.1, throttle: 100, tooltip: 'Per-layer parallax weight vs global parallax.' },
+        stripe2Wave: { type: 'slider', label: 'Wave', min: 0, max: 2, step: 0.1, default: 1.6, throttle: 100, tooltip: 'Waviness along the bands.' },
+        stripe2Gaps: { type: 'slider', label: 'Gaps', min: 0, max: 1, step: 0.01, default: 0.5, throttle: 100, tooltip: 'Noise-driven breaks in the bands.' },
+        stripe2Softness: { type: 'slider', label: 'Softness', min: 0, max: 5, step: 0.01, default: 3.93, throttle: 100, tooltip: 'Edge softness of each band.' },
+        stripe3Enabled: { type: 'boolean', label: 'On', default: true },
+        stripe3Frequency: { type: 'slider', label: 'Frequency', min: 0.5, max: 20, step: 0.5, default: 5.0, throttle: 100, tooltip: 'How often bands repeat.' },
+        stripe3Speed: { type: 'slider', label: 'Speed', min: -1, max: 1, step: 0.001, default: 0, throttle: 100, tooltip: 'Scroll speed along the pattern.' },
+        stripe3Angle: { type: 'slider', label: 'Angle (°)', min: 0, max: 360, step: 1, default: 162, throttle: 100, tooltip: 'Band direction in degrees.' },
+        stripe3Width: { type: 'slider', label: 'Width', min: 0, max: 1, step: 0.01, default: 0.09, throttle: 100, tooltip: 'Thickness of each bright band.' },
+        stripe3Intensity: { type: 'slider', label: 'Strength', min: 0, max: 5, step: 0.01, default: 5.0, throttle: 100, tooltip: 'How strong this layer is before blending.' },
+        stripe3Parallax: { type: 'slider', label: 'Parallax mix', min: -2, max: 2, step: 0.1, default: -0.1, throttle: 100, tooltip: 'Per-layer parallax weight vs global parallax.' },
+        stripe3Wave: { type: 'slider', label: 'Wave', min: 0, max: 2, step: 0.1, default: 0.4, throttle: 100, tooltip: 'Waviness along the bands.' },
+        stripe3Gaps: { type: 'slider', label: 'Gaps', min: 0, max: 1, step: 0.01, default: 0.37, throttle: 100, tooltip: 'Noise-driven breaks in the bands.' },
+        stripe3Softness: { type: 'slider', label: 'Softness', min: 0, max: 5, step: 0.01, default: 3.44, throttle: 100, tooltip: 'Edge softness of each band.' },
+        sparkleEnabled: { type: 'boolean', label: 'Sparkle on', default: false, tooltip: 'Tiny glints on top of stripe modulation.' },
+        sparkleIntensity: { type: 'slider', label: 'Strength', min: 0, max: 2, step: 0.01, default: 0.95, throttle: 100, tooltip: 'Brightness of sparkle cells.' },
+        sparkleScale: { type: 'slider', label: 'Density', min: 100, max: 10000, step: 1, default: 2460, throttle: 100, tooltip: 'Higher = smaller, busier sparkles.' },
+        sparkleSpeed: { type: 'slider', label: 'Twinkle speed', min: 0, max: 5, step: 0.01, default: 1.38, throttle: 100, tooltip: 'How fast sparkles blink.' },
+        outdoorCloudSpecularEnabled: { type: 'boolean', label: 'Cloud specular', default: true, tooltip: 'Brighten outdoor specular where the cloud shadow map says “lit”. Requires cloud shadows from the cloud effect.' },
+        outdoorStripeBlend: { type: 'slider', label: 'Outdoor stripe mix', min: 0, max: 1, step: 0.01, default: 0.8, throttle: 100, tooltip: 'How much `_Outdoors` reduces stripe modulation (outdoor areas stay punchier).' },
+        cloudSpecularIntensity: { type: 'slider', label: 'Cloud lit boost', min: 0, max: 3, step: 0.01, default: 3, throttle: 100, tooltip: 'Extra additive specular on sunlit outdoor pixels from the cloud pass.' },
+        wetSpecularEnabled: { type: 'boolean', label: 'Wet sheen', default: true, tooltip: 'Rain wetness (from weather) adds sheen from albedo brightness.' },
+        wetInputBrightness: { type: 'slider', label: 'Input lift', min: -0.5, max: 0.5, step: 0.01, default: 0.0, throttle: 100, tooltip: 'Brightness bias before wet mask extraction.' },
+        wetInputGamma: { type: 'slider', label: 'Input gamma', min: 0.1, max: 3.0, step: 0.01, default: 1.0, throttle: 100, tooltip: 'Gamma on albedo grayscale before contrast.' },
+        wetSpecularContrast: { type: 'slider', label: 'Input contrast', min: 1, max: 10, step: 0.1, default: 3.0, throttle: 100, tooltip: 'Contrast of the wet mask source.' },
+        wetBlackPoint: { type: 'slider', label: 'Black point', min: 0.0, max: 1.0, step: 0.01, default: 0.2, throttle: 100, tooltip: 'Floor for wet mask smoothstep.' },
+        wetWhitePoint: { type: 'slider', label: 'White point', min: 0.0, max: 1.0, step: 0.01, default: 1.0, throttle: 100, tooltip: 'Ceiling for wet mask smoothstep.' },
+        wetSpecularIntensity: { type: 'slider', label: 'Wet strength', min: 0, max: 5, step: 0.01, default: 1.5, throttle: 100, tooltip: 'How bright the wet layer is after processing.' },
+        wetOutputMax: { type: 'slider', label: 'Wet clamp', min: 0.0, max: 3.0, step: 0.01, default: 1.0, throttle: 100, tooltip: 'Hard cap on wet specular RGB.' },
+        wetOutputGamma: { type: 'slider', label: 'Wet output gamma', min: 0.1, max: 3.0, step: 0.01, default: 1.0, throttle: 100, tooltip: 'Gamma after clamp (1 = linear).' },
+        wetBaseSheen: { type: 'slider', label: 'Outdoor baseline', min: 0.0, max: 2.0, step: 0.01, default: 0.3, throttle: 100, tooltip: 'Minimum wet modulation outdoors so rain still reads when stripes/clouds are subtle.' },
+        wetWindRippleStrength: { type: 'slider', label: 'Wind ripple', min: 0.0, max: 3.0, step: 0.01, default: 1.0, throttle: 100, tooltip: 'Animated ripple on wet outdoor surfaces from wind integration.' },
+        frostGlazeEnabled: { type: 'boolean', label: 'Frost on', default: true, tooltip: 'Ice glaze on specular when freeze level passes the threshold.' },
+        frostThreshold: { type: 'slider', label: 'Freeze threshold', min: 0, max: 1, step: 0.01, default: 0.55, throttle: 100, tooltip: 'Weather freeze level must pass this before frost ramps in.' },
+        frostIntensity: { type: 'slider', label: 'Frost strength', min: 0, max: 3, step: 0.01, default: 1.2, throttle: 100, tooltip: 'Brightness of the frost pass.' },
+        frostTintStrength: { type: 'slider', label: 'Blue tint', min: 0, max: 1, step: 0.01, default: 0.4, throttle: 100, tooltip: 'How icy-blue the frost appears.' },
+        dynamicLightTintEnabled: { type: 'boolean', label: 'Tint from lights', default: true, tooltip: 'Shift specular tint toward the strongest nearby Foundry light color.' },
+        dynamicLightTintStrength: { type: 'slider', label: 'Tint mix', min: 0, max: 1, step: 0.01, default: 0.6, throttle: 100, tooltip: 'How far specular tint follows dynamic lights vs the base tint above.' },
+        windDrivenStripesEnabled: { type: 'boolean', label: 'Wind ripples', default: true, tooltip: 'Weather wind nudges stripe/wet coordinates for moving rain sparkle.' },
+        windStripeInfluence: { type: 'slider', label: 'Wind amount', min: 0, max: 1, step: 0.01, default: 0.5, throttle: 100, tooltip: 'How strongly accumulated wind shifts patterns.' },
+        buildingShadowSuppressionEnabled: { type: 'boolean', label: 'Suppress in shadow', default: true, tooltip: 'Reduce specular where the building shadow map is dark.' },
+        buildingShadowSuppressionStrength: { type: 'slider', label: 'Shadow mix', min: 0, max: 1, step: 0.01, default: 0.8, throttle: 100, tooltip: 'How strongly building shadows multiply specular down.' },
+      },
+      presets: {
+        Gentle: {
+          intensity: 0.22,
+          outdoorStripeBlend: 0.45,
+          cloudSpecularIntensity: 1.4,
+          stripe1Intensity: 3.2,
+          stripe2Intensity: 3.2,
+          stripe3Intensity: 3.2,
+          lightColor: { ...white },
+        },
+        'Rainy sheen': {
+          wetSpecularIntensity: 2.1,
+          wetBaseSheen: 0.55,
+          outdoorStripeBlend: 0.92,
+          wetWindRippleStrength: 1.35,
+          lightColor: { ...white },
+        },
+        'Calmer stripes': {
+          stripe1Intensity: 3.0,
+          stripe2Intensity: 3.0,
+          stripe3Intensity: 3.0,
+          sparkleEnabled: false,
+          parallaxStrength: 1.0,
+          lightColor: { ...white },
+        },
+      },
     };
   }
 
@@ -363,6 +610,7 @@ export class SpecularEffectV2 {
   async populate(foundrySceneData) {
     if (!this._initialized) { log.warn('populate: not initialized'); return; }
     this.clear();
+    this._syncOverlayVisibility();
 
     const floors = window.MapShine?.floorStack?.getFloors() ?? [];
     const worldH = foundrySceneData?.height ?? 0;
@@ -376,16 +624,13 @@ export class SpecularEffectV2 {
     // The background is not in canvas.scene.tiles.contents — it's handled
     // separately by FloorRenderBus as __bg_image__. Check for its _Specular
     // mask and create an overlay if found.
-    const bgSrc = canvas?.scene?.background?.src ?? '';
+    const bgSrc = getViewedLevelBackgroundSrc(canvas?.scene) ?? canvas?.scene?.background?.src ?? '';
     if (bgSrc) {
       const dotIdx = bgSrc.lastIndexOf('.');
       const bgBasePath = dotIdx > 0 ? bgSrc.substring(0, dotIdx) : bgSrc;
       const bgSpecResult = await probeMaskFile(bgBasePath, '_Specular');
 
       if (bgSpecResult?.path) {
-        const bgRoughResult = await probeMaskFile(bgBasePath, '_Roughness');
-        const bgNormalResult = await probeMaskFile(bgBasePath, '_Normal');
-
         // Background geometry: scene rect in world space.
         const sceneW = foundrySceneData?.sceneWidth ?? foundrySceneData?.width ?? 0;
         const sceneH = foundrySceneData?.sceneHeight ?? foundrySceneData?.height ?? 0;
@@ -398,10 +643,8 @@ export class SpecularEffectV2 {
         const GROUND_Z = 1000;
         const z = GROUND_Z - 1 + SPECULAR_Z_OFFSET;
 
-        this._createOverlay('__bg_image__', 0, {
+        await this._createOverlay('__bg_image__', 0, {
           specularUrl: bgSpecResult.path,
-          roughnessUrl: bgRoughResult?.path ?? null,
-          normalUrl: bgNormalResult?.path ?? null,
           albedoUrl: bgSrc,
           centerX, centerY, z,
           tileW: sceneW, tileH: sceneH, rotation: 0,
@@ -414,7 +657,7 @@ export class SpecularEffectV2 {
 
     // ── Process placed tiles ──────────────────────────────────────────────
     const tileDocs = canvas?.scene?.tiles?.contents ?? [];
-
+    const candidates = [];
     for (const tileDoc of tileDocs) {
       const src = tileDoc?.texture?.src ?? tileDoc?.img ?? '';
       if (!src) continue;
@@ -422,22 +665,33 @@ export class SpecularEffectV2 {
       const tileId = tileDoc.id ?? tileDoc._id;
       if (!tileId) continue;
 
-      // Extract base path (without extension) for mask probing.
       const dotIdx = src.lastIndexOf('.');
       const basePath = dotIdx > 0 ? src.substring(0, dotIdx) : src;
+      candidates.push({ tileDoc, tileId, basePath, src });
+    }
 
-      // Probe for _Specular mask. Skip tile if not found.
-      const specResult = await probeMaskFile(basePath, '_Specular');
-      if (!specResult?.path) continue;
+    log.warn(
+      `[POPULATE] SpecularEffectV2: parallel _Specular probe | tileCandidates=${candidates.length} | concurrency=${SPECULAR_MASK_PROBE_CONCURRENCY}`,
+    );
 
-      // Also probe for optional _Roughness and _Normal masks.
-      const roughResult = await probeMaskFile(basePath, '_Roughness');
-      const normalResult = await probeMaskFile(basePath, '_Normal');
+    const probeRows = await mapWithConcurrency(
+      candidates,
+      SPECULAR_MASK_PROBE_CONCURRENCY,
+      async ({ tileDoc, tileId, basePath, src }) => {
+        const specResult = await probeMaskFile(basePath, '_Specular');
+        return { tileDoc, tileId, basePath, src, specResult };
+      },
+    );
 
-      // Resolve floor index for this tile.
+    let tilesWithSpecular = 0;
+    for (let i = 0; i < probeRows.length; i++) {
+      const row = probeRows[i];
+      if (!row.specResult?.path) continue;
+
+      const { tileDoc, tileId, src } = row;
+
       const floorIndex = this._resolveFloorIndex(tileDoc, floors);
 
-      // Compute tile geometry in world space (same logic as FloorRenderBus).
       const tileW = tileDoc.width ?? 0;
       const tileH = tileDoc.height ?? 0;
       const centerX = (tileDoc.x ?? 0) + tileW / 2;
@@ -445,23 +699,43 @@ export class SpecularEffectV2 {
       const rotation = typeof tileDoc.rotation === 'number'
         ? (tileDoc.rotation * Math.PI) / 180 : 0;
 
-      // Z position: same floor Z as the albedo tile + small offset.
       const GROUND_Z = 1000;
       const z = GROUND_Z + floorIndex + SPECULAR_Z_OFFSET;
 
-      this._createOverlay(tileId, floorIndex, {
-        specularUrl: specResult.path,
-        roughnessUrl: roughResult?.path ?? null,
-        normalUrl: normalResult?.path ?? null,
+      await this._createOverlay(tileId, floorIndex, {
+        specularUrl: row.specResult.path,
         albedoUrl: src,
         centerX, centerY, z, tileW, tileH, rotation,
       });
 
       overlayCount++;
+      tilesWithSpecular++;
+
+      if (tilesWithSpecular % 24 === 0) {
+        await yieldPopulateEventLoop();
+      }
     }
 
     const totalCount = overlayCount;
+    this.params.textureStatus = totalCount > 0
+      ? 'Ready (_Specular mask found)'
+      : 'Inactive (no _Specular mask)';
     log.info(`SpecularEffectV2 populated: ${totalCount} overlay(s) (${bgSrc ? '1 bg + ' : ''}${overlayCount - (bgSrc && overlayCount > 0 ? 1 : 0)} tiles)`);
+
+    // DEFERRED: Compile real shader after all overlays created with passthrough materials
+    if (totalCount > 0 && !this._realShaderCompiled && !this._shaderCompilePending) {
+      // Use setTimeout to allow populate() to complete and UI to update
+      setTimeout(() => this._compileRealShaderForOverlays(), 0);
+    }
+    this._syncOverlayVisibility();
+  }
+
+  /**
+   * Wrapper to create overlay - calls async _createOverlayMesh.
+   * @private
+   */
+  async _createOverlay(tileId, floorIndex, opts) {
+    await this._createOverlayMesh(tileId, { ...opts, floorIndex });
   }
 
   /**
@@ -496,8 +770,11 @@ export class SpecularEffectV2 {
           const wd = weather.windDirection;
           const dx = (wd && typeof wd.x === 'number') ? wd.x : 1;
           const dy = (wd && typeof wd.y === 'number') ? wd.y : 0;
-          this._windAccumX += dx * ws * timeInfo.delta * 0.01;
-          this._windAccumY += dy * ws * timeInfo.delta * 0.01;
+          const motionDelta = (typeof timeInfo?.motionDelta === 'number')
+            ? timeInfo.motionDelta
+            : (typeof timeInfo?.delta === 'number' ? timeInfo.delta : 0.016);
+          this._windAccumX += dx * ws * motionDelta * 0.01;
+          this._windAccumY += dy * ws * motionDelta * 0.01;
         }
       }
     } catch (_) { /* WeatherController may not be ready */ }
@@ -509,13 +786,7 @@ export class SpecularEffectV2 {
     // ── Effect parameters ─────────────────────────────────────────────────
     u.uEffectEnabled.value = this._enabled;
     u.uSpecularIntensity.value = this.params.intensity;
-    u.uRoughness.value = this.params.roughness;
 
-    u.uLightDirection.value.set(
-      this.params.lightDirection.x,
-      this.params.lightDirection.y,
-      this.params.lightDirection.z
-    ).normalize();
     u.uLightColor.value.set(
       this.params.lightColor.r,
       this.params.lightColor.g,
@@ -629,16 +900,16 @@ export class SpecularEffectV2 {
       u.uSceneBounds.value.set(sx, syWorld, sw, sh);
     }
 
-    // ── Cloud shadow texture ──────────────────────────────────────────────
-    // V2: CloudEffectV2 lives under EffectComposer._floorCompositorV2.
+    // ── Unified shadow texture ────────────────────────────────────────────
+    // Prefer ShadowManagerV2 output; fall back to CloudEffectV2 for compatibility.
     try {
-      const v2Cloud = window.MapShine?.effectComposer?._floorCompositorV2?._cloudEffect;
-      const cloud = v2Cloud;
-      const cloudTex = (cloud?.enabled)
-        ? (cloud.cloudShadowTexture ?? cloud.cloudShadowTarget?.texture ?? null)
-        : null;
-      u.uHasCloudShadowMap.value = !!cloudTex;
-      u.uCloudShadowMap.value = cloudTex || this._fallbackBlack;
+      const floorComp = window.MapShine?.effectComposer?._floorCompositorV2;
+      const manager = floorComp?._shadowManagerEffect ?? null;
+      const cloud = floorComp?._cloudEffect ?? null;
+      const shadowTex = manager?.combinedShadowTexture
+        ?? ((cloud?.enabled) ? (cloud.cloudShadowTexture ?? cloud.cloudShadowTarget?.texture ?? null) : null);
+      u.uHasCloudShadowMap.value = !!shadowTex;
+      u.uCloudShadowMap.value = shadowTex || this._fallbackBlack;
     } catch (_) {
       u.uHasCloudShadowMap.value = false;
       u.uCloudShadowMap.value = this._fallbackBlack;
@@ -953,19 +1224,27 @@ export class SpecularEffectV2 {
   clear() {
     for (const [tileId, entry] of this._overlays) {
       this._renderBus.removeEffectOverlay(`${tileId}_specular`);
-      entry.material.dispose();
-      entry.mesh.geometry.dispose();
-      // Dispose per-tile textures (albedo, specular, roughness, normal).
-      for (const key of ['uAlbedoMap', 'uSpecularMap', 'uRoughnessMap', 'uNormalMap']) {
-        const tex = entry.material.uniforms[key]?.value;
-        if (tex && tex !== this._fallbackBlack && tex !== this._fallbackWhite) {
-          tex.dispose();
+      const material = entry?.material ?? null;
+      const uniforms = material?.uniforms ?? null;
+
+      // MeshBasicMaterial bootstrap path has no shader uniforms.
+      if (uniforms) {
+        // Dispose per-tile textures (albedo, specular).
+        for (const key of ['uAlbedoMap', 'uSpecularMap']) {
+          const tex = uniforms[key]?.value;
+          if (tex && tex !== this._fallbackBlack && tex !== this._fallbackWhite) {
+            tex.dispose();
+          }
         }
       }
+
+      try { material?.dispose?.(); } catch (_) {}
+      try { entry?.mesh?.geometry?.dispose?.(); } catch (_) {}
     }
     this._overlays.clear();
     this._lights.clear();
     this._healthDiagnostics = null;
+    this.params.textureStatus = 'Inactive (no _Specular mask)';
   }
 
   /**
@@ -987,44 +1266,42 @@ export class SpecularEffectV2 {
 
   /**
    * Create a specular overlay mesh for a single tile.
+   *
+   * DEFERRED: Uses a minimal passthrough material initially, compiles real shader
+   * on first render to prevent populate() hangs from ~1000+ line GLSL compilation.
+   *
    * @private
    */
-  _createOverlay(tileId, floorIndex, opts) {
-    const THREE = window.THREE;
+  async _createOverlayMesh(tileId, opts) {
     const {
-      specularUrl, roughnessUrl, normalUrl, albedoUrl,
-      centerX, centerY, z, tileW, tileH, rotation,
+      centerX, centerY, tileW, tileH, rotation, z, floorIndex,
+      albedoUrl, specularUrl
     } = opts;
 
-    // Create material with shared uniforms + per-tile texture uniforms.
-    // THREE.UniformsUtils.clone() deep-copies value objects, so we manually
-    // reference the shared uniforms and only create new entries for per-tile data.
+    const THREE = window.THREE;
     const floorIdx = Math.min(3, Math.max(0, Number(floorIndex) || 0));
-    const perTileUniforms = {
-      uAlbedoMap:      { value: this._fallbackWhite },
-      uSpecularMap:    { value: this._fallbackBlack },
-      uRoughnessMap:   { value: this._fallbackBlack },
-      uNormalMap:      { value: this._fallbackBlack },
-      uHasRoughnessMap: { value: false },
-      uHasNormalMap:    { value: false },
-      uTileOpacity:     { value: 1.0 },
-      uOutdoorsFloorIdx: { value: floorIdx },
-    };
 
-    // Merge shared + per-tile uniforms. Shared uniforms are referenced (not cloned)
-    // so updating _sharedUniforms propagates to all materials automatically.
-    const uniforms = { ...this._sharedUniforms, ...perTileUniforms };
-
-    const material = new THREE.ShaderMaterial({
-      uniforms,
-      vertexShader: getVertexShader(),
-      fragmentShader: getFragmentShader(MAX_LIGHTS),
+    // DEFERRED: Use MeshBasicMaterial (no shader compile) initially.
+    // Real ShaderMaterial with full GLSL will be created and swapped in later
+    // by _compileRealShaderForOverlays(). This prevents populate() hangs.
+    //
+    // IMPORTANT: placeholder must be visually neutral. A white additive fallback
+    // can appear as a full-screen bright overlay if shader upgrade is delayed or
+    // skipped (e.g. compile timeout/error). Use additive BLACK so the placeholder
+    // contributes nothing until real textures/shader are bound.
+    const material = new THREE.MeshBasicMaterial({
+      color: 0x000000,
       transparent: true,
+      opacity: 1.0,
       depthWrite: false,
       depthTest: false,
       side: THREE.DoubleSide,
       blending: THREE.AdditiveBlending,
     });
+    // Store texture URLs for later shader upgrade
+    material._tempAlbedoUrl = albedoUrl;
+    material._tempSpecularUrl = specularUrl;
+    material._tempTileId = tileId;
 
     const geometry = new THREE.PlaneGeometry(tileW, tileH);
     const mesh = new THREE.Mesh(geometry, material);
@@ -1042,13 +1319,12 @@ export class SpecularEffectV2 {
       mesh.rotation.z = rotation;
     }
 
-    // Ensure the specular overlay renders immediately above its corresponding
-    // albedo tile in the FloorRenderBus scene. The bus uses renderOrder to
-    // guarantee deterministic stacking for transparent materials.
+    // Place specular in the correct role band via LayerOrderPolicy.
     try {
       const baseOrder = Number(baseEntry?.mesh?.renderOrder);
+      const isOverhead = !!baseEntry?.root?.userData?.isOverhead;
       if (Number.isFinite(baseOrder)) {
-        mesh.renderOrder = baseOrder + SPECULAR_RENDER_ORDER_OFFSET;
+        mesh.renderOrder = tileRelativeEffectOrder(baseOrder, floorIndex, isOverhead, SPECULAR_EFFECT_DELTA);
       }
     } catch (_) {}
 
@@ -1058,54 +1334,135 @@ export class SpecularEffectV2 {
       attached = this._renderBus.addTileAttachedOverlay(tileId, `${tileId}_specular`, mesh, floorIndex) === true;
     }
     if (!attached) {
+      // Store for lazy shader upgrade
+      this._pendingOverlays.push({ tileId, mesh, material, floorIdx });
+    }
+
+    if (!attached) {
       this._renderBus.addEffectOverlay(`${tileId}_specular`, mesh, floorIndex);
     }
     this._overlays.set(tileId, { mesh, material, floorIndex });
+    this._syncOverlayVisibility();
 
-    // Load textures asynchronously via THREE.TextureLoader.
-    const loader = new THREE.TextureLoader();
+    // Textures will be loaded after real shader is compiled.
+    // Placeholder is additive black (neutral) until upgrade.
+  }
 
-    // Albedo (needed by wet specular to derive reflectivity from grayscale).
-    loader.load(albedoUrl, (tex) => {
-      tex.colorSpace = THREE.SRGBColorSpace;
-      tex.flipY = true;
-      tex.needsUpdate = true;
-      if (this._overlays.has(tileId)) {
-        material.uniforms.uAlbedoMap.value = tex;
-      }
-    }, undefined, (err) => log.warn(`Failed to load albedo for ${tileId}:`, err));
+  /**
+   * Compile the real heavy specular shader once and upgrade all overlays.
+   * DEFERRED: Only called after all overlays created with passthrough materials.
+   * @private
+   */
+  async _compileRealShaderForOverlays() {
+    if (this._realShaderCompiled || this._shaderCompilePending) return;
+    this._shaderCompilePending = true;
 
-    // Specular mask.
-    loader.load(specularUrl, (tex) => {
-      tex.flipY = true;
-      tex.needsUpdate = true;
-      if (this._overlays.has(tileId)) {
-        material.uniforms.uSpecularMap.value = tex;
-      }
-    }, undefined, (err) => log.warn(`Failed to load specular mask for ${tileId}:`, err));
+    const THREE = window.THREE;
+    if (!THREE) return;
 
-    // Optional roughness.
-    if (roughnessUrl) {
-      loader.load(roughnessUrl, (tex) => {
-        tex.flipY = true;
-        tex.needsUpdate = true;
-        if (this._overlays.has(tileId)) {
-          material.uniforms.uRoughnessMap.value = tex;
-          material.uniforms.uHasRoughnessMap.value = true;
+    const startMs = performance?.now?.() ?? Date.now();
+    log.warn('SpecularEffectV2: compiling real shader (deferred from populate)...');
+
+    try {
+      // Build shared uniforms for real shader
+      const sharedUniforms = this._buildSharedUniforms();
+
+      // Use SafeShaderBuilder for timeout protection
+      const result = await safeBuildShaderMaterial(
+        THREE,
+        'SpecularEffectV2',
+        {
+          uniforms: sharedUniforms,
+          vertexShader: getVertexShader(),
+          fragmentShader: getFragmentShader(MAX_LIGHTS),
+          transparent: true,
+          depthWrite: false,
+          depthTest: false,
+          side: THREE.DoubleSide,
+          blending: THREE.AdditiveBlending,
+        },
+        {
+          timeoutMs: 5000,
+          fallbackParams: null, // Use default fallback
         }
-      }, undefined, (err) => log.warn(`Failed to load roughness for ${tileId}:`, err));
+      );
+
+      // Upgrade all overlays with the new real shader material
+      const loader = new THREE.TextureLoader();
+      for (const [tileId, overlay] of this._overlays) {
+        const oldMat = overlay.material;
+
+        // Create new material with real shader
+        const newUniforms = { ...sharedUniforms };
+        // Set per-tile uniforms
+        newUniforms.uAlbedoMap = { value: this._fallbackWhite };
+        newUniforms.uSpecularMap = { value: this._fallbackBlack };
+        newUniforms.uTileOpacity = { value: 1.0 };
+        newUniforms.uOutdoorsFloorIdx = { value: overlay.floorIndex };
+
+        const newMat = result.material.clone();
+        newMat.uniforms = newUniforms;
+
+        // Swap material on mesh
+        overlay.mesh.material = newMat;
+        overlay.material = newMat;
+
+        // Load textures now that shader is ready
+        const albedoUrl = oldMat._tempAlbedoUrl;
+        const specularUrl = oldMat._tempSpecularUrl;
+
+        if (albedoUrl) {
+          loader.load(albedoUrl, (tex) => {
+            tex.colorSpace = THREE.SRGBColorSpace;
+            tex.flipY = true;
+            tex.needsUpdate = true;
+            if (this._overlays.has(tileId)) {
+              newMat.uniforms.uAlbedoMap.value = tex;
+            }
+          }, undefined, (err) => log.warn(`Failed to load albedo for ${tileId}:`, err));
+        }
+
+        if (specularUrl) {
+          loader.load(specularUrl, (tex) => {
+            tex.flipY = true;
+            tex.needsUpdate = true;
+            if (this._overlays.has(tileId)) {
+              newMat.uniforms.uSpecularMap.value = tex;
+            }
+          }, undefined, (err) => log.warn(`Failed to load specular mask for ${tileId}:`, err));
+        }
+
+        // Dispose old MeshBasicMaterial
+        oldMat.dispose();
+      }
+
+      this._realShaderCompiled = true;
+      this._shaderCompilePending = false;
+      this._syncOverlayVisibility();
+
+      const elapsed = (performance?.now?.() ?? Date.now()) - startMs;
+      if (result.usedFallback) {
+        log.error(`[${elapsed.toFixed(0)}ms] SpecularEffectV2: real shader FAILED/TIMED OUT - using fallback (specular visuals disabled)`);
+      } else {
+        log.warn(`[${elapsed.toFixed(0)}ms] SpecularEffectV2: real shader compiled successfully for ${this._overlays.size} overlays`);
+      }
+    } catch (err) {
+      this._shaderCompilePending = false;
+      log.error('SpecularEffectV2: unexpected error during deferred shader compile:', err);
     }
+  }
 
-    // Optional normal map.
-    if (normalUrl) {
-      loader.load(normalUrl, (tex) => {
-        tex.flipY = true;
-        tex.needsUpdate = true;
-        if (this._overlays.has(tileId)) {
-          material.uniforms.uNormalMap.value = tex;
-          material.uniforms.uHasNormalMap.value = true;
-        }
-      }, undefined, (err) => log.warn(`Failed to load normal for ${tileId}:`, err));
+  /**
+   * Specular overlays are bus-resident geometry. Disabling this effect must
+   * explicitly hide those meshes, otherwise placeholders can still render.
+   * @private
+   */
+  _syncOverlayVisibility() {
+    const visible = !!(this._enabled && this.params?.enabled !== false);
+    for (const [, entry] of this._overlays) {
+      const mesh = entry?.mesh;
+      if (!mesh) continue;
+      mesh.visible = visible;
     }
   }
 
@@ -1118,8 +1475,6 @@ export class SpecularEffectV2 {
       uEffectEnabled: { value: this._enabled },
 
       uSpecularIntensity: { value: this.params.intensity },
-      uRoughness: { value: this.params.roughness },
-      uLightDirection: { value: new THREE.Vector3(0.6, 0.4, 0.7).normalize() },
       uLightColor: { value: new THREE.Vector3(1, 1, 1) },
       uCameraPosition: { value: new THREE.Vector3(0, 0, 100) },
       uCameraOffset: { value: new THREE.Vector2(0, 0) },
@@ -1213,7 +1568,6 @@ export class SpecularEffectV2 {
       uDarknessLevel: { value: 0 },
       uAmbientDaylight: { value: new THREE.Color(1, 1, 1) },
       uAmbientDarkness: { value: new THREE.Color(0.14, 0.14, 0.28) },
-      uAmbientBrightest: { value: new THREE.Color(1, 1, 1) },
 
       // Dynamic lights
       numLights: { value: 0 },
@@ -1414,7 +1768,6 @@ export class SpecularEffectV2 {
         };
         apply(colors.ambientDaylight, u.uAmbientDaylight.value);
         apply(colors.ambientDarkness, u.uAmbientDarkness.value);
-        apply(colors.ambientBrightest, u.uAmbientBrightest.value);
       }
     } catch (_) { /* canvas may not be ready */ }
   }

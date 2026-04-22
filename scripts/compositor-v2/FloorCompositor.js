@@ -2850,7 +2850,11 @@ export class FloorCompositor {
     const _disableOverheadInLighting = _alphaIsoDebug?.disableOverheadInLighting === true;
     const _disableRoofInLighting = _alphaIsoDebug?.disableRoofInLighting === true;
     const _skipWaterPass = _alphaIsoDebug?.skipWaterPass === true;
-    const _disableWaterOccluder = _alphaIsoDebug?.disableWaterOccluder === true;
+    // Default OFF to match V3 semantics: water visibility across floors is
+    // driven by per-floor authored alpha/composite, not a tile-only occluder.
+    // Set `window.MapShine.__alphaIsolationDebug.disableWaterOccluder = false`
+    // to re-enable the legacy tile occluder for diagnostics.
+    const _disableWaterOccluder = _alphaIsoDebug?.disableWaterOccluder !== false;
     const _skipLensPass = _alphaIsoDebug?.skipLensPass === true;
     if (_profiling && !this._passTimings) {
       this._passTimings = {};
@@ -2976,6 +2980,7 @@ export class FloorCompositor {
       _profiling,
       _dbgStages,
       _skipWaterPass,
+      _disableWaterOccluder,
       cloudShadowTexLegacy,
       cloudShadowRawTexLegacy,
       combinedShadowTex,
@@ -4333,6 +4338,7 @@ export class FloorCompositor {
       _profiling,
       _dbgStages,
       _skipWaterPass,
+      _disableWaterOccluder,
       cloudShadowTexLegacy,
       cloudShadowRawTexLegacy,
       combinedShadowTex,
@@ -4518,7 +4524,7 @@ export class FloorCompositor {
         // "opaque upper art hides water below" semantic is preserved by the
         // composite alone.
         let waterOccluder = null;
-        if (li < visibleFloors.length - 1 && this._waterOccluderRT) {
+        if (!_disableWaterOccluder && li < visibleFloors.length - 1 && this._waterOccluderRT) {
           try {
             this._renderBus.renderFloorMaskTo(
               this.renderer, this.camera,
@@ -4534,7 +4540,14 @@ export class FloorCompositor {
 
         const waterOut = (currentInput === levelPostA) ? levelPostB : levelPostA;
         if (_profiling) _profileT0 = performance.now();
-        _waterPassWrote = this._waterEffect.render(this.renderer, this.camera, currentInput, waterOut, waterOccluder);
+        _waterPassWrote = this._waterEffect.render(
+          this.renderer,
+          this.camera,
+          currentInput,
+          waterOut,
+          waterOccluder,
+          levelSceneRT?.texture ?? null,
+        );
         if (_profiling) this._recordPassTiming(`perLevel_water_${levelIndex}`, _profileT0);
         if (_waterPassWrote) currentInput = waterOut;
       }
@@ -4620,16 +4633,25 @@ export class FloorCompositor {
       //   - LevelCompositePass source-over reveals the ground RT (and
       //     any ground-floor effects like water) through every authored
       //     hole, not just where both RGB and alpha were carved.
-      if (_profiling) _profileT0 = performance.now();
-      const rebindOut = (currentInput === levelPostA) ? levelPostB : levelPostA;
-      const rebound = this._levelAlphaRebindPass.render(
-        this.renderer,
-        currentInput,
-        levelSceneRT,
-        rebindOut,
-      );
-      if (_profiling) this._recordPassTiming(`perLevel_alphaRebind_${levelIndex}`, _profileT0);
-      if (rebound) currentInput = rebindOut;
+      // Cross-slice water (borrowing lower-floor water data) intentionally
+      // injects coverage into upper-floor holes. Rebinding alpha to authored
+      // scene alpha would erase that injected layer and make upstairs views
+      // look like water is "behind" lower art. Keep authored rebind for normal
+      // slices, but skip it when cross-slice water is active.
+      const crossSliceActive =
+        Number(this._waterEffect?._composeMaterial?.uniforms?.uCrossSliceWaterData?.value ?? 0) > 0.5;
+      if (!crossSliceActive) {
+        if (_profiling) _profileT0 = performance.now();
+        const rebindOut = (currentInput === levelPostA) ? levelPostB : levelPostA;
+        const rebound = this._levelAlphaRebindPass.render(
+          this.renderer,
+          currentInput,
+          levelSceneRT,
+          rebindOut,
+        );
+        if (_profiling) this._recordPassTiming(`perLevel_alphaRebind_${levelIndex}`, _profileT0);
+        if (rebound) currentInput = rebindOut;
+      }
 
       levelFinalRTs.push(currentInput);
       levelSceneRTs.push(levelSceneRT);

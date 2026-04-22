@@ -1773,15 +1773,30 @@ static getControlSchema() {
     // IMPORTANT: do not only check the currently viewed level background.
     // Upper-floor views still need lower-floor background water (fallback render).
     const bgLayers = getVisibleLevelBackgroundLayers(canvas?.scene);
-    const bgSrcCandidates = bgLayers.length
-      ? bgLayers.map((l) => String(l?.src || '').trim()).filter(Boolean)
-      : [getViewedLevelBackgroundSrc(canvas?.scene) ?? canvas?.scene?.background?.src].filter(Boolean);
+    const bgLayerRows = bgLayers.length
+      ? bgLayers
+          .map((l, i) => ({
+            src: String(l?.src || '').trim(),
+            // Background stack order is bottom->top and is routed into the bus
+            // with this same index; keep water floor ownership aligned.
+            floorIndex: i,
+          }))
+          .filter((r) => !!r.src)
+      : [{
+          src: String(getViewedLevelBackgroundSrc(canvas?.scene) ?? canvas?.scene?.background?.src ?? '').trim(),
+          floorIndex: Number.isFinite(Number(window.MapShine?.floorStack?.getActiveFloor?.()?.index))
+            ? Number(window.MapShine.floorStack.getActiveFloor().index)
+            : 0,
+        }].filter((r) => !!r.src);
     const seenBgBasePaths = new Set();
-    for (const bgSrc of bgSrcCandidates) {
+    for (const row of bgLayerRows) {
+      const bgSrc = row.src;
       const dotIdx = bgSrc.lastIndexOf('.');
       const bgBasePath = dotIdx > 0 ? bgSrc.substring(0, dotIdx) : bgSrc;
-      if (!bgBasePath || seenBgBasePaths.has(bgBasePath)) continue;
-      seenBgBasePaths.add(bgBasePath);
+      const bgFloorIndex = Number.isFinite(Number(row.floorIndex)) ? Number(row.floorIndex) : 0;
+      const bgKey = `${bgFloorIndex}|${bgBasePath}`;
+      if (!bgBasePath || seenBgBasePaths.has(bgKey)) continue;
+      seenBgBasePaths.add(bgKey);
 
       let maskPath = null;
       const waterResult = await probeMaskFile(bgBasePath, '_Water');
@@ -1795,9 +1810,9 @@ static getControlSchema() {
         this._waterTiles.push({
           tileId: '__bg_image__',
           basePath: bgBasePath,
-          // Background _Water masks are scene-wide planes; assign floor 0 so
-          // upper-floor fallback keeps ground water visible when appropriate.
-          floorIndex: 0,
+          // Keep scene-wide background water bound to the same floor stack slot
+          // as this background layer (bottom->top).
+          floorIndex: bgFloorIndex,
           maskPath,
           // Synthetic tileDoc so _compositeFloorMask can treat background like a tile.
           tileDoc: { x: sceneX, y: sceneY, width: sceneW, height: sceneH, rotation: 0 },
@@ -3383,9 +3398,10 @@ static getControlSchema() {
    * @param {THREE.WebGLRenderTarget} inputRT
    * @param {THREE.WebGLRenderTarget} outputRT
    * @param {THREE.WebGLRenderTarget|null} [occluderRT=null]
+   * @param {THREE.Texture|null} [sliceAlphaTex=null] Authoritative slice alpha texture.
    * @returns {boolean} true when the pass wrote to outputRT
    */
-  render(renderer, camera, inputRT, outputRT, occluderRT = null) {
+  render(renderer, camera, inputRT, outputRT, occluderRT = null, sliceAlphaTex = null) {
     if (!this._initialized || !this._composeMaterial || !this._composeScene || !this._composeCamera) return false;
     if (!renderer || !inputRT || !outputRT) return false;
     if (!this.enabled) return false;
@@ -3444,6 +3460,16 @@ static getControlSchema() {
           u.uHasWaterOccluderAlpha.value = 1.0;
         } else {
           u.uHasWaterOccluderAlpha.value = 0.0;
+        }
+      }
+    } catch (_) {}
+    try {
+      if (u.tSliceAlpha && u.uHasSliceAlpha) {
+        if (sliceAlphaTex) {
+          u.tSliceAlpha.value = sliceAlphaTex;
+          u.uHasSliceAlpha.value = 1.0;
+        } else {
+          u.uHasSliceAlpha.value = 0.0;
         }
       }
     } catch (_) {}
@@ -3913,6 +3939,8 @@ static getControlSchema() {
       uWaterRawMaskTexelSize: { value: new THREE.Vector2(1 / 2048, 1 / 2048) },
       tWaterOccluderAlpha: { value: waterOccluderAlpha ?? fallbacks.black },
       uHasWaterOccluderAlpha: { value: waterOccluderAlpha ? 1.0 : 0.0 },
+      tSliceAlpha:        { value: fallbacks.black },
+      uHasSliceAlpha:     { value: 0.0 },
       uWaterDataTexelSize: { value: new THREE.Vector2(1 / 2048, 1 / 2048) },
 
       // Tint

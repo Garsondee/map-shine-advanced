@@ -92,6 +92,8 @@ uniform vec2 uWaterRawMaskTexelSize;  // 1 / dimensions of composited _Water RT 
 
 uniform sampler2D tWaterOccluderAlpha; // Screen-space upper-floor occluder mask
 uniform float uHasWaterOccluderAlpha;  // 1.0 when occluder mask is valid
+uniform sampler2D tSliceAlpha;         // Authoritative per-level albedo alpha (pre-post chain)
+uniform float uHasSliceAlpha;          // 1.0 when tSliceAlpha is valid
 
 uniform vec2 uWaterDataTexelSize; // 1.0 / tWaterData dimensions
 
@@ -1654,9 +1656,18 @@ void main() {
   // water where this slice is punched out (low alpha). Suppresses river SDF over
   // opaque bridge deck texels (same scene UV as the river below).
   if (uCrossSliceWaterData > 0.5) {
-    float sheetOpaque = smoothstep(0.05, 0.96, base.a);
-    inside *= (1.0 - sheetOpaque);
-    distInside *= (1.0 - sheetOpaque);
+    // Only apply "opaque sheet" suppression when an explicit upper-floor
+    // occluder is bound. Without that occluder, suppressing by slice alpha
+    // hides borrowed lower-floor water on upper views (the failure case where
+    // water appears to sit behind the ground layer).
+    if (uHasWaterOccluderAlpha > 0.5) {
+      float sliceAlpha = (uHasSliceAlpha > 0.5)
+        ? texture2D(tSliceAlpha, vUv).a
+        : base.a;
+      float sheetOpaque = smoothstep(0.05, 0.96, sliceAlpha);
+      inside *= (1.0 - sheetOpaque);
+      distInside *= (1.0 - sheetOpaque);
+    }
   }
   // Extra stability fade near the binary water-mask transition.
   // Prevents bright specular/caustics edge flicker when the water boundary is thin.

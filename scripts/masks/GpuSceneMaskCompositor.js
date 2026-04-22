@@ -848,6 +848,16 @@ export class GpuSceneMaskCompositor {
         primaryBasePath = this._extractBasePath(firstSrc.trim());
       }
     }
+    // Background-only floors (common in V14 multi-level scenes) may have zero
+    // active tiles. Resolve a band-specific background basePath so upper floors
+    // still load authored masks (especially _Outdoors) into floor metadata.
+    if (!primaryBasePath) {
+      try {
+        primaryBasePath = _resolveBandBackgroundBasePath(sc, bandBottom, bandTop) || null;
+      } catch (_) {
+        primaryBasePath = null;
+      }
+    }
 
     // Step 2: GPU compositor pipeline.
     const tileManager = window.MapShine?.tileManager;

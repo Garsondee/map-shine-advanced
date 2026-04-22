@@ -1,0 +1,95 @@
+/**
+ * @fileoverview GPU capability detection for Map Shine Advanced
+ * @module core/capabilities
+ */
+
+import { createLogger } from './log.js';
+
+const log = createLogger('Capabilities');
+
+/**
+ * Detect GPU capabilities and determine rendering tier
+ * @returns {Promise<GPUCapabilities>} Detected capabilities and computed tier
+ * @public
+ */
+export async function detect() {
+  /** @type {GPUCapabilities} */
+  const capabilities = {
+    webgl2: false,
+    webgl: false,
+    tier: 'none'
+  };
+
+  // Check WebGL2 availability.
+  // IMPORTANT: Use a minimal 1x1 canvas and explicitly release the context
+  // after probing. Leaked WebGL contexts exhaust the browser's context limit
+  // (typically 8-16), causing other contexts (e.g. PIXI's) to be evicted with
+  // a "WebGL context was lost" error that freezes the loading screen.
+  const probeCanvas = document.createElement('canvas');
+  probeCanvas.width = 1;
+  probeCanvas.height = 1;
+  const gl2 = probeCanvas.getContext('webgl2');
+  capabilities.webgl2 = !!gl2;
+
+  if (gl2) {
+    log.debug('WebGL2 context created successfully');
+    // Explicitly release the probe context so the slot is freed immediately.
+    const loseCtx = gl2.getExtension('WEBGL_lose_context');
+    if (loseCtx) loseCtx.loseContext();
+  }
+
+  // Check WebGL 1.0 availability (only if WebGL2 failed)
+  if (!capabilities.webgl2) {
+    const gl = probeCanvas.getContext('webgl') || probeCanvas.getContext('experimental-webgl');
+    capabilities.webgl = !!gl;
+
+    if (gl) {
+      log.debug('WebGL 1.0 context created successfully');
+      const loseCtx = gl.getExtension('WEBGL_lose_context');
+      if (loseCtx) loseCtx.loseContext();
+    }
+  }
+
+  // Remove the probe canvas from any potential DOM attachment and allow GC.
+  probeCanvas.remove();
+
+  // Determine rendering tier based on capabilities (WebGL-only)
+  if (capabilities.webgl2) {
+    capabilities.tier = 'high';
+  } else if (capabilities.webgl) {
+    capabilities.tier = 'low';
+  }
+
+  log.info('GPU Capabilities:', capabilities);
+
+  return capabilities;
+}
+
+/**
+ * Get human-readable tier description
+ * @param {'high'|'medium'|'low'|'none'} tier - Rendering tier
+ * @returns {string} Description of what this tier supports
+ * @public
+ */
+export function getTierDescription(tier) {
+  const descriptions = {
+    high: 'Full effects enabled with WebGL 2.0 (PBR, post-processing, advanced effects)',
+    medium: 'Standard effects enabled with WebGL 2.0 (core effects)',
+    low: 'Basic effects enabled with WebGL 1.0 (limited features, upgrade recommended)',
+    none: 'No GPU acceleration available'
+  };
+  
+  return descriptions[tier] || 'Unknown tier';
+}
+
+/**
+ * Check if a specific feature tier is supported
+ * @param {GPUCapabilities} capabilities - Detected capabilities
+ * @param {'high'|'medium'|'low'} minimumTier - Minimum required tier
+ * @returns {boolean} Whether the minimum tier is met
+ * @public
+ */
+export function supportsMinimumTier(capabilities, minimumTier) {
+  const tierRanking = { high: 3, medium: 2, low: 1, none: 0 };
+  return tierRanking[capabilities.tier] >= tierRanking[minimumTier];
+}

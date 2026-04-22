@@ -3603,7 +3603,7 @@ static getControlSchema() {
     if (!Number.isFinite(idx) || idx < 0) {
       this._perLevelOverride = -1;
       this._setCrossSliceWaterDataUniform(0);
-      return;
+      return -1;
     }
     this._perLevelOverride = idx;
     let dataFloor = idx;
@@ -3621,6 +3621,7 @@ static getControlSchema() {
     }
     this._applyFloorWaterData(dataFloor);
     this._setCrossSliceWaterDataUniform(crossSlice ? 1 : 0);
+    return dataFloor;
   }
 
   /**

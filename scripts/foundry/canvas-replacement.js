@@ -4126,19 +4126,47 @@ async function onCanvasReady(canvas) {
  */
 function onCanvasTearDown(canvas) {
   const lightNativeLevelSwitch = !!window.MapShine?.__nativeSameSceneLevelSwitch;
-  log.info(lightNativeLevelSwitch
-    ? 'Map Shine: canvasTearDown for native level redraw (light teardown)'
-    : 'Tearing down Map Shine canvas');
+  const tearDownSceneId = canvas?.scene?.id ?? null;
+  const session = LoadSession.current();
+  // canvasReady clears __nativeSameSceneLevelSwitch before some tearDown paths run.
+  // If we still have an in-flight createThreeCanvas for the same Foundry scene,
+  // do not abort the session or reset LoadCoordinator — that leaves the coordinator
+  // in idle with _sceneId=null while createThreeCanvas continues, producing:
+  //   ILLEGAL transition idle → compiling_warmup
+  //   invariant failures: coordinator=null vs foundry scene
+  // and skipping UI attach (session stale) or stranding the load machine.
+  const preserveInFlightSameSceneLoad = !!(
+    lightNativeLevelSwitch
+    || (
+      _createThreeCanvasRunning
+      && session
+      && !session.aborted
+      && tearDownSceneId
+      && String(session.sceneId) === String(tearDownSceneId)
+    )
+  );
+
+  log.info(
+    preserveInFlightSameSceneLoad
+      ? 'Map Shine: canvasTearDown (preserving in-flight same-scene load / native level redraw)'
+      : 'Tearing down Map Shine canvas'
+  );
 
   // Cancellation boundary: canvasTearDown must abort any in-flight load work.
   // Without this, createThreeCanvas can continue into late phases and attempt
   // coordinator transitions after tearDown has already reset state to IDLE.
+  //
+  // V14 same-scene native level redraw (and same-scene load races): see preserveInFlightSameSceneLoad.
   safeCall(() => {
-    LoadSession.current()?.abort?.();
+    if (!preserveInFlightSameSceneLoad) {
+      LoadSession.current()?.abort?.();
+    }
   }, 'loadSession.abortOnCanvasTearDown', Severity.COSMETIC);
 
-  // LoadCoordinator: cancel any in-progress load and return to idle
-  loadCoordinator.tearDown(lightNativeLevelSwitch ? 'native-level-redraw' : 'scene-change');
+  // LoadCoordinator: cancel any in-progress load and return to idle (unless preserved above).
+  if (!preserveInFlightSameSceneLoad) {
+    loadCoordinator.tearDown('scene-change');
+  }
 
   installFogSaveSafetyPatch();
   try {

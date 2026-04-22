@@ -3756,7 +3756,11 @@ export class FloorCompositor {
           const waterFloorKey = waterFloor?.compositorKey ?? null;
           const compositor = window.MapShine?.sceneComposer?._sceneMaskCompositor;
           const waterFloorTex = (compositor && waterFloorKey)
-            ? (compositor.getFloorTexture?.(waterFloorKey, 'outdoors') ?? null)
+            ? (
+              compositor.getFloorTexture?.(waterFloorKey, 'skyReach')
+              ?? compositor.getFloorTexture?.(waterFloorKey, 'outdoors')
+              ?? null
+            )
             : null;
           if (waterFloorTex) {
             waterOutdoorsTex = waterFloorTex;
@@ -4347,6 +4351,26 @@ export class FloorCompositor {
     const floorStack = window.MapShine?.floorStack;
     const visibleFloors = floorStack?.getVisibleFloors?.() ?? [];
     if (!visibleFloors.length) return null;
+    const floorsByIndex = new Map(
+      (floorStack?.getFloors?.() ?? []).map((f) => [Number(f?.index), f]),
+    );
+    const resolveWaterOutdoorsForFloor = (floorIndex) => {
+      try {
+        const idx = Number(floorIndex);
+        if (!Number.isFinite(idx)) return null;
+        const compositor = window.MapShine?.sceneComposer?._sceneMaskCompositor ?? null;
+        const floor = floorsByIndex.get(idx) ?? null;
+        const floorKey = floor?.compositorKey ?? null;
+        if (compositor && floorKey) {
+          return (
+            compositor.getFloorTexture?.(floorKey, 'skyReach')
+            ?? compositor.getFloorTexture?.(floorKey, 'outdoors')
+            ?? null
+          );
+        }
+      } catch (_) {}
+      return null;
+    };
 
     if (_dbgStages) { try { log.info(`[V2 PerLevel] rendering ${visibleFloors.length} level(s)`); } catch (_) {} }
 
@@ -4449,9 +4473,24 @@ export class FloorCompositor {
       // Water pass — per-level, using that level's water data
       let _waterPassWrote = false;
       if (!_skipWaterPass && resolveEffectEnabled(this._waterEffect)) {
+        let waterDataFloorIndex = levelIndex;
         try {
           // Set per-level water context so the shader uses this level's mask data
-          this._waterEffect.setLevelContext?.(levelIndex);
+          const resolvedDataFloor = this._waterEffect.setLevelContext?.(levelIndex);
+          if (Number.isFinite(Number(resolvedDataFloor))) {
+            waterDataFloorIndex = Number(resolvedDataFloor);
+          }
+        } catch (_) {}
+        try {
+          // Mirror V3 overlay floor-binding semantics:
+          // bind outdoors per rendered level (skyReach-first), and when this
+          // slice borrows lower-floor water data bind that lower floor's mask.
+          const perLevelWaterOutdoors = resolveWaterOutdoorsForFloor(waterDataFloorIndex);
+          if (perLevelWaterOutdoors) {
+            this._waterEffect.setOutdoorsMask?.(perLevelWaterOutdoors);
+          } else if (visibleFloors.length > 1) {
+            this._waterEffect.setOutdoorsMask?.(this._getNeutralOutdoorsTexture());
+          }
         } catch (_) {}
 
         // Upper-floor occluder: screen-space alpha union of every WALKABLE tile

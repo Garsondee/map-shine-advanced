@@ -155,7 +155,7 @@ export const CONSUMER_CATALOG = Object.freeze({
     bindings: [
       {
         consumes: 'outdoors',
-        outdoorsPurpose: 'surface',
+        outdoorsPurpose: 'sky',
         singleField: '_outdoorsMask',
         singleSetter: 'setOutdoorsMask',
       },

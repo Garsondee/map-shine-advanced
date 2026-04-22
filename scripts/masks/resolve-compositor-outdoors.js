@@ -135,6 +135,42 @@ export function resolveCompositorOutdoorsTexture(compositor, levelContext = null
     }
   }
 
+  // Multi-floor fallback: if the active/view floor has no direct outdoors
+  // texture, prefer the nearest lower floor band that does have one.
+  // This supports "look down" rendering where upper floors are view layers but
+  // authored outdoors masks only exist on lower map floors.
+  const activeBottom = Number(activeFloor?.elevationMin);
+  if (Number.isFinite(activeBottom)) {
+    /** @type {Array<{key:string,bottom:number}>} */
+    const keyed = [];
+    try {
+      if (compositor._floorMeta && typeof compositor._floorMeta.keys === 'function') {
+        for (const k of compositor._floorMeta.keys()) {
+          const key = String(k);
+          const kb = Number(key.split(':')[0]);
+          if (Number.isFinite(kb)) keyed.push({ key, bottom: kb });
+        }
+      }
+    } catch (_) {}
+    try {
+      if (compositor._floorCache && typeof compositor._floorCache.keys === 'function') {
+        for (const k of compositor._floorCache.keys()) {
+          const key = String(k);
+          const kb = Number(key.split(':')[0]);
+          if (Number.isFinite(kb)) keyed.push({ key, bottom: kb });
+        }
+      }
+    } catch (_) {}
+    const uniqueSorted = [...new Map(keyed.map((r) => [r.key, r])).values()]
+      .filter((r) => r.bottom <= activeBottom)
+      .sort((a, b) => b.bottom - a.bottom);
+    for (const row of uniqueSorted) {
+      if (uniqueKeys.includes(row.key)) continue;
+      tex = tryKey(row.key);
+      if (tex) return { texture: tex, resolvedKey: row.key, route: 'lower-floor' };
+    }
+  }
+
   // BUNDLE FALLBACK: if GPU compositor has no outdoors texture for this level,
   // try to load directly from the scene's asset bundle (for single-floor scenes
   // or levels where _Outdoors comes from bundle, not per-tile composition).

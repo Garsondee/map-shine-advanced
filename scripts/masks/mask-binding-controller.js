@@ -443,11 +443,57 @@ export class MaskBindingController {
       return { valid: false, reason: 'no-active-floor-key', missing: ['activeKey'], activeIndex };
     }
 
+    // Build fallback keys for multi-floor "look down" semantics:
+    // when the active/viewed floor has no authored/derived mask yet, allow the
+    // nearest lower visible floor that does have the mask. This mirrors the
+    // per-level render fallback used by water and prevents strict-sync from
+    // holding the entire frame on scenes where only lower floors author masks.
+    const floorList = (() => {
+      try {
+        const list = floorStack?.getFloors?.() ?? [];
+        return Array.isArray(list) ? list : [];
+      } catch (_) {
+        return [];
+      }
+    })();
+    const byIndex = new Map(
+      floorList
+        .map((f) => [Number(f?.index), f])
+        .filter(([idx]) => Number.isFinite(idx)),
+    );
+    const visibleIndices = (() => {
+      try {
+        const vis = floorStack?.getVisibleFloors?.() ?? [];
+        if (!Array.isArray(vis) || vis.length === 0) return [activeIndex];
+        return vis
+          .map((f) => Number(f?.index))
+          .filter((idx) => Number.isFinite(idx))
+          .sort((a, b) => b - a);
+      } catch (_) {
+        return [activeIndex];
+      }
+    })();
+    /** @type {string[]} */
+    const candidateKeys = [String(activeKey)];
+    for (const idx of visibleIndices) {
+      if (idx > activeIndex) continue;
+      const k = byIndex.get(idx)?.compositorKey;
+      if (k) candidateKeys.push(String(k));
+    }
+    const uniqueCandidateKeys = [...new Set(candidateKeys)];
+
     const REQUIRED = ['outdoors', 'floorAlpha', 'skyReach'];
     const missing = [];
     for (const id of REQUIRED) {
-      const tex = compositor.getFloorTexture?.(activeKey, id) ?? null;
-      if (!tex) missing.push(id);
+      let found = false;
+      for (const key of uniqueCandidateKeys) {
+        const tex = compositor.getFloorTexture?.(key, id) ?? null;
+        if (tex) {
+          found = true;
+          break;
+        }
+      }
+      if (!found) missing.push(id);
     }
     if (missing.length === 0) {
       return { valid: true, reason: 'ok', missing: [], activeIndex };

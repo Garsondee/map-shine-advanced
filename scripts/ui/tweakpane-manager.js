@@ -709,16 +709,23 @@ export class TweakpaneManager {
     const _dlp = debugLoadingProfiler;
     const _isDbg = _dlp.debugMode;
 
-    // Wait for Tweakpane to be available (up to 5 seconds)
+    // Wait for Tweakpane to be available (up to 5 seconds).
+    // tweakpane-loader sets window.Tweakpane = null on import failure; typeof is then
+    // "object", not "undefined", so we must wait for a real Pane constructor.
     if (_isDbg) _dlp.begin('tp.waitForLib', 'finalize');
     log.info('Waiting for Tweakpane library to load...');
     const startTime = Date.now();
-    while (typeof Tweakpane === 'undefined' && (Date.now() - startTime) < 5000) {
+    const _tweakpaneReady = () => (
+      typeof Tweakpane !== 'undefined'
+      && Tweakpane != null
+      && typeof Tweakpane.Pane === 'function'
+    );
+    while (!_tweakpaneReady() && (Date.now() - startTime) < 5000) {
       await new Promise(resolve => setTimeout(resolve, 100));
     }
     if (_isDbg) _dlp.end('tp.waitForLib');
 
-    if (typeof Tweakpane === 'undefined') {
+    if (!_tweakpaneReady()) {
       log.error('Tweakpane library failed to load after 5 seconds');
       throw new Error('Tweakpane library not available');
     }

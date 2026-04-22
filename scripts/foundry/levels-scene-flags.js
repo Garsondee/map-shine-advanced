@@ -262,6 +262,42 @@ export function getVisibleLevelBackgroundLayers(scene) {
 }
 
 /**
+ * Get ordered visible foreground layer metadata from Foundry's level config.
+ *
+ * Returned order follows Foundry level sort (bottom-to-top). Each entry includes
+ * the source image and the originating level sort index so floor-aware render
+ * passes can correctly include/exclude per-floor foreground planes.
+ *
+ * @param {Scene|null|undefined} scene
+ * @returns {Array<{src:string, sort:number}>}
+ */
+export function getVisibleLevelForegroundLayers(scene) {
+  if (!scene) return [];
+  /** @type {Array<{src:string, sort:number}>} */
+  const out = [];
+  try {
+    const configured = (typeof scene._configureLevelTextures === 'function')
+      ? scene._configureLevelTextures()
+      : [];
+    for (const entry of configured) {
+      if (!entry || entry.name !== 'foreground') continue;
+      const src = String(entry.src || '').trim();
+      if (!src) continue;
+      const sortRaw = Number(entry.sort);
+      const sort = Number.isFinite(sortRaw) ? Math.max(0, Math.floor(sortRaw)) : out.length;
+      out.push({ src, sort });
+    }
+  } catch (_) {}
+  if (out.length) return out;
+  try {
+    const level = _resolveViewedV14LevelDoc(scene);
+    const src = String(level?.foreground?.src || '').trim();
+    if (src) out.push({ src, sort: Number(level?.index) || 0 });
+  } catch (_) {}
+  return out;
+}
+
+/**
  * Whether a canvas document is assigned to a V14 level via its native
  * {@link foundry.documents.BaseCanvasDocument#levels} set only.
  *

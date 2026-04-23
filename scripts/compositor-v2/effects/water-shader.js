@@ -94,6 +94,12 @@ uniform sampler2D tWaterOccluderAlpha; // Screen-space upper-floor occluder mask
 uniform float uHasWaterOccluderAlpha;  // 1.0 when occluder mask is valid
 uniform sampler2D tSliceAlpha;         // Authoritative per-level albedo alpha (pre-post chain)
 uniform float uHasSliceAlpha;          // 1.0 when tSliceAlpha is valid
+// Bus background map for the active floor only (post-merge experiment): punch
+// water with (1 - alpha) so opaque art clips without reusing scene RT stacks.
+uniform sampler2D tWaterActiveBgImage;
+uniform float uHasWaterActiveBgImage;
+// Debug: 0 off; 3 = fullscreen yellow (water gate skipped). 1/2 = magenta/cyan only where water mask inside>0 (not uniforms — those are global per pass).
+uniform float uDebugWaterPassTint;
 
 uniform vec2 uWaterDataTexelSize; // 1.0 / tWaterData dimensions
 
@@ -1449,7 +1455,9 @@ float waterOccluderAlphaSoft(vec2 screenUv) {
   float s = texture2D(tWaterOccluderAlpha, screenUv - vec2(0.0, px.y)).a;
   float e = texture2D(tWaterOccluderAlpha, screenUv + vec2(px.x, 0.0)).a;
   float w = texture2D(tWaterOccluderAlpha, screenUv - vec2(px.x, 0.0)).a;
-  return 0.52 * c + 0.12 * (n + s + e + w);
+  // Center-heavy blend: previous 0.52/0.12 cross-filter dilated occlusion into
+  // authored alpha holes (bridge gaps) and clipped ground water from above.
+  return 0.72 * c + 0.07 * (n + s + e + w);
 }
 
 // Safe sampling for refraction/distortion taps.
@@ -1592,6 +1600,15 @@ vec3 calculateSpecularHighlights(
 // ── Main ─────────────────────────────────────────────────────────────────
 void main() {
   vec4 base = texture2D(tDiffuse, vUv);
+  // Mode 3 only at top: fullscreen yellow (water gate skipped alarm).
+  // Modes 1–2 are handled after per-pixel inside exists — uHasWaterData is a
+  // uniform (true for the whole quad whenever any water exists), so gating on
+  // it alone still tints every pixel cyan/magenta.
+  if (uDebugWaterPassTint > 2.5) {
+    MSA_BLOOM_RT_ZERO;
+    gl_FragColor = vec4(1.0, 1.0, 0.0, 1.0);
+    return;
+  }
   float isEnabled = step(0.5, uWaterEnabled) * step(0.5, uHasWaterData);
   if (isEnabled < 0.5) { MSA_BLOOM_RT_ZERO; gl_FragColor = base; return; }
   // Occluder mask: upper-floor tiles rendered to screen-space RT (tile union →
@@ -1652,22 +1669,54 @@ void main() {
     ? distortionInsideFromSdf(sdf01)
     : inside;
   distInside *= rawAuth;
-  // Borrowing a lower floor's water pack on an upper slice: only treat pixels as
-  // water where this slice is punched out (low alpha). Suppresses river SDF over
-  // opaque bridge deck texels (same scene UV as the river below).
+  if (uHasWaterActiveBgImage > 0.5) {
+    // sceneUv: map 0-1 (Foundry scene rect), same as tWaterData — not screen vUv,
+    // or the bg mask slides with pan/zoom while the river stays world-locked.
+    float bgA = texture2D(tWaterActiveBgImage, sceneUv).a;
+    float throughBg = 1.0 - smoothstep(0.04, 0.22, bgA);
+    inside *= throughBg;
+    distInside *= throughBg;
+  }
+  // Borrowed lower-floor water on this slice: suppress wherever **this** slice's
+  // bus levelSceneRT is opaque (tiles / deck over river holes).
+  // Sample tSliceAlpha at **vUv** like tDiffuse / base — it is the same
+  // camera-rendered RT in screen projection. tWaterData stays in **sceneUv**
+  // (map 0–1 texture space); mixing the two UV spaces caused a sliding blank
+  // that followed the camera.
+  // Do NOT require uHasWaterOccluderAlpha: that mask is built only from *higher*
+  // floors, so middle slices never got slice punch when the roof mask was weak.
+  //
+  // Do not punch native water with slice alpha: even a narrow smoothstep(0.93…)
+  // on levelSceneRT can be ~1 across most pixels (opaque bg / PM), which removed
+  // all water on every floor. Borrowed-only path below is the supported case.
   if (uCrossSliceWaterData > 0.5) {
-    // Only apply "opaque sheet" suppression when an explicit upper-floor
-    // occluder is bound. Without that occluder, suppressing by slice alpha
-    // hides borrowed lower-floor water on upper views (the failure case where
-    // water appears to sit behind the ground layer).
-    if (uHasWaterOccluderAlpha > 0.5) {
-      float sliceAlpha = (uHasSliceAlpha > 0.5)
-        ? texture2D(tSliceAlpha, vUv).a
-        : base.a;
-      float sheetOpaque = smoothstep(0.05, 0.96, sliceAlpha);
-      inside *= (1.0 - sheetOpaque);
-      distInside *= (1.0 - sheetOpaque);
+    float sheetOpaque = 0.0;
+    if (uHasSliceAlpha > 0.5) {
+      float sliceA = texture2D(tSliceAlpha, vUv).a;
+      // Softer ramp than 0.05–0.96: mid-alpha is sensitive to filtering / PM RTs and
+      // was causing “swimming” at punch boundaries on borrowed middle-floor water.
+      sheetOpaque = smoothstep(0.10, 0.88, sliceA);
+    } else if (uHasWaterOccluderAlpha > 0.5) {
+      sheetOpaque = smoothstep(0.10, 0.88, base.a);
     }
+    inside *= (1.0 - sheetOpaque);
+    distInside *= (1.0 - sheetOpaque);
+  }
+  // Occluder plumbing debug: 1 = magenta (RT bound), 2 = cyan (no RT). Uses
+  // per-pixel inside from tWaterData — not the uHasWaterData uniform.
+  // Mix toward base where the occluder mask is strong so debug matches culling.
+  if (uDebugWaterPassTint > 0.5 && uDebugWaterPassTint <= 2.5) {
+    MSA_BLOOM_RT_ZERO;
+    if (inside > 0.01) {
+      vec3 dbg = (uDebugWaterPassTint > 1.5) ? vec3(0.0, 1.0, 1.0) : vec3(1.0, 0.0, 1.0);
+      float occVis = (uHasWaterOccluderAlpha > 0.5) ? waterOccluderAlphaSoft(vUv) : 0.0;
+      float occBlend = smoothstep(0.36, 0.64, occVis);
+      vec3 rgb = mix(dbg, base.rgb, occBlend);
+      gl_FragColor = vec4(rgb, 1.0);
+    } else {
+      gl_FragColor = base;
+    }
+    return;
   }
   // Extra stability fade near the binary water-mask transition.
   // Prevents bright specular/caustics edge flicker when the water boundary is thin.

@@ -26,8 +26,11 @@
  *   - No floor transition locks (bus visibility handles floor isolation)
  *
  * Multi-floor: slices without local `_Water` may **borrow** the nearest lower
- * floor's packed mask for that slice's post pass (`uCrossSliceWaterData`), gated
- * by slice albedo alpha so river SDF does not run on opaque upper tiles.
+ * floor's packed mask for that slice's post pass (`uCrossSliceWaterData`). The
+ * water shader punches opaque deck/tiles over **borrowed** water using
+ * per-slice `tSliceAlpha` at the same vUv as `tDiffuse` (camera RT), with a softer
+ * smoothstep than the original 0.05–0.96 ramp. Native water is not slice-punched
+ * (levelSceneRT alpha is not reliable vs river holes on many maps).
  *
  * @module compositor-v2/effects/WaterEffectV2
  */
@@ -3405,6 +3408,7 @@ static getControlSchema() {
     if (!this._initialized || !this._composeMaterial || !this._composeScene || !this._composeCamera) return false;
     if (!renderer || !inputRT || !outputRT) return false;
     if (!this.enabled) return false;
+    const debugPassRequested = window.MapShine?.__waterDebugForceOccluderMagenta === true;
 
     // LAZY: start compiling on first actual render frame, but never await it on
     // the live render path. While pending, keep skipping the water pass instead
@@ -3424,12 +3428,8 @@ static getControlSchema() {
       }
     }
     if (!this._realShaderCompiled) return false;
-    if (!this._hasAnyWaterData) return false;
 
     const u = this._composeMaterial.uniforms;
-    if ((Number(u?.uHasWaterData?.value) || 0) <= 0 && (Number(u?.uHasWaterRawMask?.value) || 0) <= 0) {
-      return false;
-    }
     u.tDiffuse.value = inputRT.texture;
     u.uWaterEnabled.value = this.enabled ? 1.0 : 0.0;
 
@@ -3473,6 +3473,33 @@ static getControlSchema() {
         }
       }
     } catch (_) {}
+
+    try {
+      if (u.uDebugWaterPassTint) {
+        if (!debugPassRequested) {
+          u.uDebugWaterPassTint.value = 0.0;
+        } else {
+          const occOn = (Number(u?.uHasWaterOccluderAlpha?.value) || 0) > 0.5;
+          const waterGateOk = !!this._hasAnyWaterData
+            && ((Number(u?.uHasWaterData?.value) || 0) > 0
+              || (Number(u?.uHasWaterRawMask?.value) || 0) > 0);
+          if (!waterGateOk) {
+            u.uDebugWaterPassTint.value = 3.0;
+          } else if (occOn) {
+            u.uDebugWaterPassTint.value = 1.0;
+          } else {
+            u.uDebugWaterPassTint.value = 2.0;
+          }
+        }
+      }
+    } catch (_) {}
+
+    if (!this._hasAnyWaterData) {
+      if (!debugPassRequested) return false;
+    }
+    if ((Number(u?.uHasWaterData?.value) || 0) <= 0 && (Number(u?.uHasWaterRawMask?.value) || 0) <= 0) {
+      if (!debugPassRequested) return false;
+    }
 
     // Bind resolution and zoom — required by the wave distortion formula.
     // uZoom scales pixel offsets so distortion magnitude is visually consistent
@@ -3625,6 +3652,7 @@ static getControlSchema() {
    * @param {number} levelIndex
    */
   setLevelContext(levelIndex) {
+    this.setActiveLevelBackgroundImageTex(null);
     const idx = Number(levelIndex);
     if (!Number.isFinite(idx) || idx < 0) {
       this._perLevelOverride = -1;
@@ -3668,6 +3696,49 @@ static getControlSchema() {
     this._perLevelOverride = -1;
     this._syncGlobalWaterBindingsFromViewedFloor();
     this._setCrossSliceWaterDataUniform(0);
+    this.setActiveLevelBackgroundImageTex(null);
+  }
+
+  /**
+   * Bind the bus background image map for the **active** scene floor (alpha only
+   * used in shader when enabled). Pass null to disable.
+   * @param {import('three').Texture|null} tex
+   */
+  setActiveLevelBackgroundImageTex(tex) {
+    try {
+      const u = this._composeMaterial?.uniforms;
+      if (u?.tWaterActiveBgImage) {
+        u.tWaterActiveBgImage.value = tex ?? this._fallbackBlack;
+      }
+      if (u?.uHasWaterActiveBgImage) {
+        u.uHasWaterActiveBgImage.value = tex ? 1.0 : 0.0;
+      }
+    } catch (_) {}
+  }
+
+  /**
+   * Fullscreen water over the **merged** multi-floor composite (`tDiffuse` already
+   * stacks levels with straight-alpha). Holes and deck occlusion are encoded in
+   * that image — do not use cross-slice punch (`tSliceAlpha` / borrowed-slice
+   * heuristics), which targeted per-slice RTs and fought the merge.
+   *
+   * @param {number} viewedFloorIndex - FloorStack active floor index (top of stack).
+   * @returns {number} Packed-water data floor bound for outdoors/mask, or -1.
+   */
+  setPostMergeWaterContext(viewedFloorIndex) {
+    const v = Number(viewedFloorIndex);
+    this._perLevelOverride = -1;
+    if (!Number.isFinite(v) || v < 0) {
+      this._setCrossSliceWaterDataUniform(0);
+      return -1;
+    }
+    const dataFloor = this._resolveWaterFloorForView(v);
+    if (dataFloor >= 0) {
+      this._activeFloorIndex = dataFloor;
+      this._applyFloorWaterData(dataFloor);
+    }
+    this._setCrossSliceWaterDataUniform(0);
+    return dataFloor;
   }
 
   /**
@@ -3939,6 +4010,9 @@ static getControlSchema() {
       uWaterRawMaskTexelSize: { value: new THREE.Vector2(1 / 2048, 1 / 2048) },
       tWaterOccluderAlpha: { value: waterOccluderAlpha ?? fallbacks.black },
       uHasWaterOccluderAlpha: { value: waterOccluderAlpha ? 1.0 : 0.0 },
+      tWaterActiveBgImage: { value: fallbacks.black },
+      uHasWaterActiveBgImage: { value: 0.0 },
+      uDebugWaterPassTint: { value: 0.0 },
       tSliceAlpha:        { value: fallbacks.black },
       uHasSliceAlpha:     { value: 0.0 },
       uWaterDataTexelSize: { value: new THREE.Vector2(1 / 2048, 1 / 2048) },

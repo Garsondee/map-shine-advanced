@@ -986,6 +986,9 @@ export class FloorRenderBus {
           blending: mat.blending,
         });
         if (mat.color) mat.color.set(1, 1, 1);
+        // Occluder pass should encode pure authored texture alpha, unaffected
+        // by runtime fading/opacity state from the main render path.
+        mat.opacity = 1;
         mat.transparent = true;
         mat.depthTest = false;
         mat.depthWrite = false;
@@ -1033,6 +1036,9 @@ export class FloorRenderBus {
           blending: mat.blending,
         });
         if (mat.color) mat.color.set(1, 1, 1);
+        // Occluder pass should encode pure authored texture alpha, unaffected
+        // by runtime fading/opacity state from the main render path.
+        mat.opacity = 1;
         mat.transparent = true;
         mat.depthTest = false;
         mat.depthWrite = false;
@@ -1195,6 +1201,27 @@ export class FloorRenderBus {
       const node = entry?.root || entry?.mesh;
       if (node) node.visible = wasVisible;
     }
+  }
+
+  /**
+   * Map texture for the bus `__bg_image__*` plane whose `floorIndex` matches the
+   * given scene floor index (same field used by `renderFloorRangeTo` when
+   * `filterBackgroundByFloor` is true). Used for experiments such as post-merge
+   * water punched by the **current** level background alpha only.
+   *
+   * @param {number} floorIndex - `FloorBand.index` / per-level `levelIndex`
+   * @returns {import('three').Texture|null}
+   */
+  getBackgroundImageMapForFloorIndex(floorIndex) {
+    const fi = Number(floorIndex);
+    if (!Number.isFinite(fi)) return null;
+    for (const [tileId, entry] of this._tiles) {
+      if (!String(tileId).startsWith('__bg_image__')) continue;
+      if (Number(entry?.floorIndex) !== fi) continue;
+      const map = entry?.material?.map ?? null;
+      return map || null;
+    }
+    return null;
   }
 
   // ── Effect Overlay API ──────────────────────────────────────────────────────

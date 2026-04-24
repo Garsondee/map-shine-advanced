@@ -608,6 +608,19 @@ export class FloorCompositor {
     /** @type {THREE.Mesh|null} Fullscreen quad for upper-alpha occluder union */
     this._waterOccluderUnionQuad = null;
 
+    /** @type {THREE.WebGLRenderTarget|null} Ping-pong A: post-merge bg stack → water mask */
+    this._waterBgProductRT = null;
+    /** @type {THREE.WebGLRenderTarget|null} Ping-pong B */
+    this._waterBgProductScratchRT = null;
+    /** @type {THREE.Scene|null} */
+    this._waterBgProductScene = null;
+    /** @type {THREE.OrthographicCamera|null} */
+    this._waterBgProductCamera = null;
+    /** @type {THREE.ShaderMaterial|null} */
+    this._waterBgProductMaterial = null;
+    /** @type {THREE.Mesh|null} */
+    this._waterBgProductQuad = null;
+
     // ── Per-Level RT Pipeline ─────────────────────────────────────────────────
     /** @type {LevelRenderTargetPool} Per-level RT allocation pool */
     this._levelRTPool = new LevelRenderTargetPool();
@@ -1135,6 +1148,79 @@ export class FloorCompositor {
     );
     this._waterOccluderUnionQuad.frustumCulled = false;
     this._waterOccluderUnionScene.add(this._waterOccluderUnionQuad);
+
+    const bgProdRtOpts = {
+      minFilter: THREE.LinearFilter,
+      magFilter: THREE.LinearFilter,
+      format: THREE.RGBAFormat,
+      type: THREE.UnsignedByteType,
+      depthBuffer: false,
+      stencilBuffer: false,
+    };
+    this._waterBgProductRT = new THREE.WebGLRenderTarget(w, h, bgProdRtOpts);
+    this._waterBgProductScratchRT = new THREE.WebGLRenderTarget(w, h, bgProdRtOpts);
+    this._waterBgProductScene = new THREE.Scene();
+    this._waterBgProductCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+    this._waterBgProductMaterial = new THREE.ShaderMaterial({
+      uniforms: {
+        tAccum: { value: null },
+        tLayer: { value: null },
+        uHasAccum: { value: 0.0 },
+        uViewBounds: { value: new THREE.Vector4(0, 0, 1, 1) },
+        uSceneDimensions: { value: new THREE.Vector2(1, 1) },
+        uSceneRect: { value: new THREE.Vector4(0, 0, 1, 1) },
+        uHasSceneRect: { value: 0.0 },
+      },
+      vertexShader: /* glsl */`
+        varying vec2 vUv;
+        void main() {
+          vUv = uv;
+          gl_Position = vec4(position.xy, 0.0, 1.0);
+        }
+      `,
+      fragmentShader: /* glsl */`
+        uniform sampler2D tAccum;
+        uniform sampler2D tLayer;
+        uniform float uHasAccum;
+        uniform vec4 uViewBounds;
+        uniform vec2 uSceneDimensions;
+        uniform vec4 uSceneRect;
+        uniform float uHasSceneRect;
+        varying vec2 vUv;
+
+        vec2 screenUvToFoundry(vec2 screenUv) {
+          float threeX = mix(uViewBounds.x, uViewBounds.z, screenUv.x);
+          float threeY = mix(uViewBounds.y, uViewBounds.w, screenUv.y);
+          return vec2(threeX, uSceneDimensions.y - threeY);
+        }
+        vec2 foundryToSceneUv(vec2 foundryPos) {
+          return (foundryPos - uSceneRect.xy) / max(uSceneRect.zw, vec2(1e-5));
+        }
+
+        void main() {
+          float prev = (uHasAccum > 0.5) ? texture2D(tAccum, vUv).r : 1.0;
+          vec2 sceneUv = vUv;
+          if (uHasSceneRect > 0.5) {
+            sceneUv = foundryToSceneUv(screenUvToFoundry(vUv));
+          }
+          float a = texture2D(tLayer, sceneUv).a;
+          float trans = 1.0 - smoothstep(0.04, 0.22, a);
+          float outR = prev * trans;
+          gl_FragColor = vec4(outR, outR, outR, 1.0);
+        }
+      `,
+      depthTest: false,
+      depthWrite: false,
+      transparent: false,
+      blending: THREE.NoBlending,
+    });
+    this._waterBgProductMaterial.toneMapped = false;
+    this._waterBgProductQuad = new THREE.Mesh(
+      new THREE.PlaneGeometry(2, 2),
+      this._waterBgProductMaterial,
+    );
+    this._waterBgProductQuad.frustumCulled = false;
+    this._waterBgProductScene.add(this._waterBgProductQuad);
 
     // ── Per-level RT infrastructure ───────────────────────────────────────
     this._levelRTPool.initialize(w, h, preferredType);
@@ -4357,6 +4443,8 @@ export class FloorCompositor {
     if (this._postB)   this._postB.setSize(w, h);
     if (this._waterOccluderRT) this._waterOccluderRT.setSize(w, h);
     if (this._waterOccluderScratchRT) this._waterOccluderScratchRT.setSize(w, h);
+    if (this._waterBgProductRT) this._waterBgProductRT.setSize(w, h);
+    if (this._waterBgProductScratchRT) this._waterBgProductScratchRT.setSize(w, h);
     try { this._levelRTPool?.onResize?.(w, h); } catch (_) {}
     try { this._shadowManagerEffect?.onResize?.(w, h); } catch (_) {}
     try { this._bushEffect?.onResize?.(w, h); } catch (_) {}
@@ -4380,6 +4468,79 @@ export class FloorCompositor {
     try { this._distortionEffect?.onResize?.(w, h); } catch (_) {}
     try { this._floorDepthBlurEffect?.onResize?.(w, h); } catch (_) {}
     log.debug(`FloorCompositor.onResize: RTs resized to ${w}x${h}`);
+  }
+
+  /**
+   * Copy viewport / scene-rect uniforms from WaterEffectV2 compose material into
+   * the post-merge bg product pass (must run after {@link WaterEffectV2#syncComposeViewportUniforms}).
+   * @private
+   */
+  _syncWaterBgProductUniformsFromWaterCompose() {
+    const src = this._waterEffect?._composeMaterial?.uniforms;
+    const dst = this._waterBgProductMaterial?.uniforms;
+    if (!src || !dst) return;
+    try {
+      if (src.uViewBounds?.value && dst.uViewBounds?.value) {
+        dst.uViewBounds.value.copy(src.uViewBounds.value);
+      }
+      if (src.uSceneDimensions?.value && dst.uSceneDimensions?.value) {
+        dst.uSceneDimensions.value.copy(src.uSceneDimensions.value);
+      }
+      if (src.uSceneRect?.value && dst.uSceneRect?.value) {
+        dst.uSceneRect.value.copy(src.uSceneRect.value);
+      }
+      if (src.uHasSceneRect && dst.uHasSceneRect) {
+        dst.uHasSceneRect.value = src.uHasSceneRect.value;
+      }
+    } catch (_) {}
+  }
+
+  /**
+   * Bake transmittance ∏(1 - smoothstep(bg alpha)) into a single fullscreen RT (R channel),
+   * two textures per draw to stay under fragment sampler limits in the water shader.
+   * @param {Array<import('three').Texture>} stackTextures
+   * @returns {import('three').WebGLRenderTarget|null}
+   * @private
+   */
+  _buildWaterBackgroundAlphaMaskRT(stackTextures) {
+    const THREE = window.THREE;
+    const arr = Array.isArray(stackTextures) ? stackTextures.filter((t) => t) : [];
+    if (!THREE || !this.renderer || !arr.length) return null;
+    if (!this._waterBgProductRT || !this._waterBgProductScratchRT
+      || !this._waterBgProductScene || !this._waterBgProductCamera || !this._waterBgProductMaterial) {
+      return null;
+    }
+    const renderer = this.renderer;
+    const prevTarget = renderer.getRenderTarget();
+    const prevAutoClear = renderer.autoClear;
+    const prevColor = renderer.getClearColor(new THREE.Color());
+    const prevAlpha = renderer.getClearAlpha();
+    const mat = this._waterBgProductMaterial.uniforms;
+    const dummy = this._waterEffect?._fallbackBlack ?? null;
+    const outA = this._waterBgProductRT;
+    const outB = this._waterBgProductScratchRT;
+    let lastRT = null;
+    try {
+      for (let i = 0; i < arr.length; i++) {
+        const writeRT = (i % 2 === 0) ? outA : outB;
+        mat.uHasAccum.value = i > 0 ? 1.0 : 0.0;
+        mat.tAccum.value = i > 0 && lastRT ? lastRT.texture : dummy;
+        mat.tLayer.value = arr[i];
+        renderer.setRenderTarget(writeRT);
+        renderer.setClearColor(0x000000, 1);
+        renderer.autoClear = true;
+        renderer.render(this._waterBgProductScene, this._waterBgProductCamera);
+        lastRT = writeRT;
+      }
+    } finally {
+      renderer.autoClear = prevAutoClear;
+      renderer.setClearColor(prevColor, prevAlpha);
+      if (typeof renderer.setClearAlpha === 'function') {
+        try { renderer.setClearAlpha(prevAlpha); } catch (_) {}
+      }
+      renderer.setRenderTarget(prevTarget);
+    }
+    return lastRT;
   }
 
   /**
@@ -4813,13 +4974,43 @@ export class FloorCompositor {
           this._waterEffect.setOutdoorsMask?.(this._getNeutralOutdoorsTexture());
         }
       } catch (_) {}
-      // Post-merge water: no occluder / no slice alpha (Option 1 baseline). Clip
-      // with the **active** floor's bus `__bg_image__` map alpha only (experiment).
+      // Post-merge: punch water with every bus background **between** the water
+      // data floor (e.g. ground) and the viewer — e.g. levels 1+2 when source is 0
+      // and you stand on the roof. Resolve each slice by FloorBand.index first,
+      // then stack index j as fallback.
       try {
-        const bgTex = typeof this._renderBus?.getBackgroundImageMapForFloorIndex === 'function'
-          ? this._renderBus.getBackgroundImageMapForFloorIndex(ai)
-          : null;
-        this._waterEffect.setActiveLevelBackgroundImageTex?.(bgTex ?? null);
+        const bus = this._renderBus;
+        let sourceSi = visibleFloors.findIndex(
+          (f) => Number(f?.index) === Number(dataFloor),
+        );
+        if (sourceSi < 0) {
+          // Water source below the lowest visible slice: mask the whole visible stack.
+          sourceSi = -1;
+        }
+        const stackTex = [];
+        for (let j = sourceSi + 1; j < visibleFloors.length; j++) {
+          const li = Number(visibleFloors[j]?.index);
+          let t = null;
+          if (Number.isFinite(li) && typeof bus?.getBackgroundImageMapForFloorIndex === 'function') {
+            t = bus.getBackgroundImageMapForFloorIndex(li);
+          }
+          if (!t && typeof bus?.getBackgroundImageMapForStackIndex === 'function') {
+            t = bus.getBackgroundImageMapForStackIndex(j);
+          }
+          if (t) stackTex.push(t);
+        }
+        const layers = stackTex.slice(0, 8);
+        let maskRt = null;
+        if (layers.length) {
+          try {
+            this._waterEffect.syncComposeViewportUniforms?.(this.renderer, this.camera);
+          } catch (_) {}
+          this._syncWaterBgProductUniformsFromWaterCompose();
+          maskRt = this._buildWaterBackgroundAlphaMaskRT(layers);
+        }
+        this._waterEffect.setWaterBackgroundAlphaMaskTexture?.(
+          maskRt?.texture ?? null,
+        );
       } catch (_) {}
       let postMergeWaterWrote = false;
       if (_profiling) _profileT0 = performance.now();
@@ -4835,7 +5026,7 @@ export class FloorCompositor {
       } catch (_) {
         postMergeWaterWrote = false;
       } finally {
-        try { this._waterEffect.setActiveLevelBackgroundImageTex?.(null); } catch (_) {}
+        try { this._waterEffect.setWaterBackgroundAlphaMaskTexture?.(null); } catch (_) {}
       }
       if (_profiling) this._recordPassTiming('postMerge_water', _profileT0);
       if (postMergeWaterWrote) mergedCompositeOut = this._postB;
@@ -4938,6 +5129,8 @@ export class FloorCompositor {
     try { this._postB?.dispose(); } catch (_) {}
     try { this._waterOccluderRT?.dispose(); } catch (_) {}
     try { this._waterOccluderScratchRT?.dispose(); } catch (_) {}
+    try { this._waterBgProductRT?.dispose(); } catch (_) {}
+    try { this._waterBgProductScratchRT?.dispose(); } catch (_) {}
     try { this._levelRTPool?.dispose(); } catch (_) {}
     try { this._levelCompositePass?.dispose(); } catch (_) {}
     try { this._levelAlphaRebindPass?.dispose(); } catch (_) {}
@@ -4946,12 +5139,20 @@ export class FloorCompositor {
     this._postB = null;
     this._waterOccluderRT = null;
     this._waterOccluderScratchRT = null;
+    this._waterBgProductRT = null;
+    this._waterBgProductScratchRT = null;
     try { this._waterOccluderUnionMaterial?.dispose?.(); } catch (_) {}
     try { this._waterOccluderUnionQuad?.geometry?.dispose?.(); } catch (_) {}
     this._waterOccluderUnionScene = null;
     this._waterOccluderUnionCamera = null;
     this._waterOccluderUnionMaterial = null;
     this._waterOccluderUnionQuad = null;
+    try { this._waterBgProductMaterial?.dispose?.(); } catch (_) {}
+    try { this._waterBgProductQuad?.geometry?.dispose?.(); } catch (_) {}
+    this._waterBgProductScene = null;
+    this._waterBgProductCamera = null;
+    this._waterBgProductMaterial = null;
+    this._waterBgProductQuad = null;
 
     // Dispose blit resources.
     try { this._blitMaterial?.dispose(); } catch (_) {}

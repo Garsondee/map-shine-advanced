@@ -94,10 +94,9 @@ uniform sampler2D tWaterOccluderAlpha; // Screen-space upper-floor occluder mask
 uniform float uHasWaterOccluderAlpha;  // 1.0 when occluder mask is valid
 uniform sampler2D tSliceAlpha;         // Authoritative per-level albedo alpha (pre-post chain)
 uniform float uHasSliceAlpha;          // 1.0 when tSliceAlpha is valid
-// Bus background map for the active floor only (post-merge experiment): punch
-// water with (1 - alpha) so opaque art clips without reusing scene RT stacks.
-uniform sampler2D tWaterActiveBgImage;
-uniform float uHasWaterActiveBgImage;
+// Post-merge: pre-multiplied transmittance from all upper bg layers (baked RT).
+uniform sampler2D tWaterBgAlphaMask;
+uniform float uHasWaterBgAlphaMask;
 // Debug: 0 off; 3 = fullscreen yellow (water gate skipped). 1/2 = magenta/cyan only where water mask inside>0 (not uniforms — those are global per pass).
 uniform float uDebugWaterPassTint;
 
@@ -1669,13 +1668,10 @@ void main() {
     ? distortionInsideFromSdf(sdf01)
     : inside;
   distInside *= rawAuth;
-  if (uHasWaterActiveBgImage > 0.5) {
-    // sceneUv: map 0-1 (Foundry scene rect), same as tWaterData — not screen vUv,
-    // or the bg mask slides with pan/zoom while the river stays world-locked.
-    float bgA = texture2D(tWaterActiveBgImage, sceneUv).a;
-    float throughBg = 1.0 - smoothstep(0.04, 0.22, bgA);
-    inside *= throughBg;
-    distInside *= throughBg;
+  if (uHasWaterBgAlphaMask > 0.5) {
+    float m = texture2D(tWaterBgAlphaMask, vUv).r;
+    inside *= m;
+    distInside *= m;
   }
   // Borrowed lower-floor water on this slice: suppress wherever **this** slice's
   // bus levelSceneRT is opaque (tiles / deck over river holes).

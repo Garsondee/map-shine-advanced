@@ -3393,6 +3393,79 @@ static getControlSchema() {
   }
 
   /**
+   * Resolution, Foundry scene rect, and view frustum uniforms used by the water
+   * compose shader for screen → scene UV. FloorCompositor calls this before
+   * baking the post-merge bg stack mask so coordinates match {@link #render}.
+   * @param {import('three').WebGLRenderer} renderer
+   * @param {import('three').Camera} camera
+   */
+  syncComposeViewportUniforms(renderer, camera) {
+    const u = this._composeMaterial?.uniforms;
+    if (!u || !renderer) return;
+    try {
+      if (u.uResolution && this._sizeVec) {
+        renderer.getDrawingBufferSize(this._sizeVec);
+        u.uResolution.value.set(Math.max(1, this._sizeVec.x), Math.max(1, this._sizeVec.y));
+      }
+      if (u.uZoom && camera) {
+        const zoom = camera.isOrthographicCamera
+          ? (camera.zoom ?? 1.0)
+          : (window.MapShine?.sceneComposer?.currentZoom ?? 1.0);
+        u.uZoom.value = Math.max(0.001, zoom);
+      }
+    } catch (_) {}
+    try {
+      const dims = globalThis.canvas?.dimensions;
+      if (dims && u.uSceneDimensions && u.uSceneRect && u.uHasSceneRect) {
+        const totalW = dims.width ?? 1;
+        const totalH = dims.height ?? 1;
+        u.uSceneDimensions.value.set(totalW, totalH);
+        const rect = dims.sceneRect ?? null;
+        const sx = rect?.x ?? dims.sceneX ?? 0;
+        const sy = rect?.y ?? dims.sceneY ?? 0;
+        const sw = rect?.width ?? dims.sceneWidth ?? totalW;
+        const sh = rect?.height ?? dims.sceneHeight ?? totalH;
+        u.uSceneRect.value.set(sx, sy, sw, sh);
+        u.uHasSceneRect.value = 1.0;
+      }
+    } catch (_) {}
+    try {
+      const THREE = window.THREE;
+      if (camera && THREE && u.uViewBounds) {
+        if (camera.isOrthographicCamera) {
+          const camPos = camera.position;
+          u.uViewBounds.value.set(
+            camPos.x + camera.left / camera.zoom,
+            camPos.y + camera.bottom / camera.zoom,
+            camPos.x + camera.right / camera.zoom,
+            camPos.y + camera.top / camera.zoom
+          );
+        } else if (camera.isPerspectiveCamera) {
+          const groundZ = window.MapShine?.sceneComposer?.groundZ ?? 0;
+          const ndc = new THREE.Vector3();
+          const world = new THREE.Vector3();
+          const dir = new THREE.Vector3();
+          let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+          for (const c of [[-1, -1], [1, -1], [-1, 1], [1, 1]]) {
+            ndc.set(c[0], c[1], 0.5);
+            world.copy(ndc).unproject(camera);
+            dir.copy(world).sub(camera.position);
+            const dz = dir.z;
+            if (Math.abs(dz) < 1e-6) continue;
+            const t = (groundZ - camera.position.z) / dz;
+            if (!Number.isFinite(t) || t <= 0) continue;
+            const ix = camera.position.x + dir.x * t;
+            const iy = camera.position.y + dir.y * t;
+            if (ix < minX) minX = ix; if (iy < minY) minY = iy;
+            if (ix > maxX) maxX = ix; if (iy > maxY) maxY = iy;
+          }
+          if (minX !== Infinity) u.uViewBounds.value.set(minX, minY, maxX, maxY);
+        }
+      }
+    } catch (_) {}
+  }
+
+  /**
    * Minimal post-processing render pass.
    * For bisection: this is an unconditional passthrough blit (inputRT -> outputRT).
    *
@@ -3501,77 +3574,7 @@ static getControlSchema() {
       if (!debugPassRequested) return false;
     }
 
-    // Bind resolution and zoom — required by the wave distortion formula.
-    // uZoom scales pixel offsets so distortion magnitude is visually consistent
-    // at all zoom levels, matching the full water shader's behaviour exactly.
-    try {
-      if (u.uResolution && this._sizeVec) {
-        renderer.getDrawingBufferSize(this._sizeVec);
-        u.uResolution.value.set(Math.max(1, this._sizeVec.x), Math.max(1, this._sizeVec.y));
-      }
-      if (u.uZoom && camera) {
-        // Orthographic: camera.zoom is the actual zoom factor.
-        // Perspective: use sceneComposer.currentZoom (FOV-based).
-        const zoom = camera.isOrthographicCamera
-          ? (camera.zoom ?? 1.0)
-          : (window.MapShine?.sceneComposer?.currentZoom ?? 1.0);
-        u.uZoom.value = Math.max(0.001, zoom);
-      }
-    } catch (_) {}
-
-    // Bind coordinate conversion uniforms so the debug shader can map
-    // screen UV → Foundry world → scene UV to correctly sample the water mask.
-    try {
-      const dims = globalThis.canvas?.dimensions;
-      if (dims && u.uSceneDimensions && u.uSceneRect && u.uHasSceneRect) {
-        const totalW = dims.width ?? 1;
-        const totalH = dims.height ?? 1;
-        u.uSceneDimensions.value.set(totalW, totalH);
-        const rect = dims.sceneRect ?? null;
-        const sx = rect?.x ?? dims.sceneX ?? 0;
-        const sy = rect?.y ?? dims.sceneY ?? 0;
-        const sw = rect?.width ?? dims.sceneWidth ?? totalW;
-        const sh = rect?.height ?? dims.sceneHeight ?? totalH;
-        u.uSceneRect.value.set(sx, sy, sw, sh);
-        u.uHasSceneRect.value = 1.0;
-      }
-    } catch (_) {}
-
-    // Bind view bounds (Three.js world-space frustum corners at ground plane).
-    try {
-      const THREE = window.THREE;
-      if (camera && THREE && u.uViewBounds) {
-        if (camera.isOrthographicCamera) {
-          const camPos = camera.position;
-          u.uViewBounds.value.set(
-            camPos.x + camera.left / camera.zoom,
-            camPos.y + camera.bottom / camera.zoom,
-            camPos.x + camera.right / camera.zoom,
-            camPos.y + camera.top / camera.zoom
-          );
-        } else if (camera.isPerspectiveCamera) {
-          const groundZ = window.MapShine?.sceneComposer?.groundZ ?? 0;
-          const ndc = new THREE.Vector3();
-          const world = new THREE.Vector3();
-          const dir = new THREE.Vector3();
-          let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-          for (const c of [[-1,-1],[1,-1],[-1,1],[1,1]]) {
-            ndc.set(c[0], c[1], 0.5);
-            world.copy(ndc).unproject(camera);
-            dir.copy(world).sub(camera.position);
-            const dz = dir.z;
-            if (Math.abs(dz) < 1e-6) continue;
-            const t = (groundZ - camera.position.z) / dz;
-            if (!Number.isFinite(t) || t <= 0) continue;
-            const ix = camera.position.x + dir.x * t;
-            const iy = camera.position.y + dir.y * t;
-            if (ix < minX) minX = ix; if (iy < minY) minY = iy;
-            if (ix > maxX) maxX = ix; if (iy > maxY) maxY = iy;
-          }
-          if (minX !== Infinity) u.uViewBounds.value.set(minX, minY, maxX, maxY);
-        }
-      }
-    } catch (_) {}
+    this.syncComposeViewportUniforms(renderer, camera);
 
     const prevTarget = renderer.getRenderTarget();
     const prevAutoClear = renderer.autoClear;
@@ -3652,7 +3655,7 @@ static getControlSchema() {
    * @param {number} levelIndex
    */
   setLevelContext(levelIndex) {
-    this.setActiveLevelBackgroundImageTex(null);
+    this.setWaterBackgroundAlphaMaskTexture(null);
     const idx = Number(levelIndex);
     if (!Number.isFinite(idx) || idx < 0) {
       this._perLevelOverride = -1;
@@ -3696,22 +3699,24 @@ static getControlSchema() {
     this._perLevelOverride = -1;
     this._syncGlobalWaterBindingsFromViewedFloor();
     this._setCrossSliceWaterDataUniform(0);
-    this.setActiveLevelBackgroundImageTex(null);
+    this.setWaterBackgroundAlphaMaskTexture(null);
   }
 
   /**
-   * Bind the bus background image map for the **active** scene floor (alpha only
-   * used in shader when enabled). Pass null to disable.
-   * @param {import('three').Texture|null} tex
+   * Post-merge: baked fullscreen transmittance (R) from upper bg layers.
+   * @param {import('three').Texture|null|undefined} tex
    */
-  setActiveLevelBackgroundImageTex(tex) {
+  setWaterBackgroundAlphaMaskTexture(tex) {
     try {
       const u = this._composeMaterial?.uniforms;
-      if (u?.tWaterActiveBgImage) {
-        u.tWaterActiveBgImage.value = tex ?? this._fallbackBlack;
-      }
-      if (u?.uHasWaterActiveBgImage) {
-        u.uHasWaterActiveBgImage.value = tex ? 1.0 : 0.0;
+      if (!u) return;
+      const fb = this._fallbackBlack;
+      if (tex && u.tWaterBgAlphaMask) {
+        u.tWaterBgAlphaMask.value = tex;
+        if (u.uHasWaterBgAlphaMask) u.uHasWaterBgAlphaMask.value = 1.0;
+      } else {
+        u.tWaterBgAlphaMask.value = fb;
+        if (u.uHasWaterBgAlphaMask) u.uHasWaterBgAlphaMask.value = 0.0;
       }
     } catch (_) {}
   }
@@ -4010,8 +4015,8 @@ static getControlSchema() {
       uWaterRawMaskTexelSize: { value: new THREE.Vector2(1 / 2048, 1 / 2048) },
       tWaterOccluderAlpha: { value: waterOccluderAlpha ?? fallbacks.black },
       uHasWaterOccluderAlpha: { value: waterOccluderAlpha ? 1.0 : 0.0 },
-      tWaterActiveBgImage: { value: fallbacks.black },
-      uHasWaterActiveBgImage: { value: 0.0 },
+      tWaterBgAlphaMask: { value: fallbacks.black },
+      uHasWaterBgAlphaMask: { value: 0.0 },
       uDebugWaterPassTint: { value: 0.0 },
       tSliceAlpha:        { value: fallbacks.black },
       uHasSliceAlpha:     { value: 0.0 },

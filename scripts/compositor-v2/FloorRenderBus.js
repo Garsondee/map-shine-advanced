@@ -1224,6 +1224,24 @@ export class FloorRenderBus {
     return null;
   }
 
+  /**
+   * Map texture for the Nth loaded visible background (`__bg_image__` for 0,
+   * `__bg_image__1` for 1, …). `entry.floorIndex` on those planes is this stack
+   * index from `_loadVisibleBackgroundStack`, **not** `FloorBand.index`, so
+   * post-merge water should align masks with `visibleFloors` position (e.g.
+   * length-1 = active roof, length-2 = middle) rather than band index alone.
+   *
+   * @param {number} stackIndex - integer >= 0, typically `visibleFloors.length - 1 - k`
+   * @returns {import('three').Texture|null}
+   */
+  getBackgroundImageMapForStackIndex(stackIndex) {
+    const si = Math.max(0, Math.floor(Number(stackIndex)));
+    if (!Number.isFinite(si)) return null;
+    const key = si === 0 ? '__bg_image__' : `__bg_image__${si}`;
+    const entry = this._tiles.get(key);
+    return entry?.material?.map ?? null;
+  }
+
   // ── Effect Overlay API ──────────────────────────────────────────────────────
 
   /**

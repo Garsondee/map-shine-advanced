@@ -154,6 +154,11 @@ export function configure(renderer, options = {}) {
   // Configure color space and tone mapping for correct brightness matching with Foundry PIXI
   // See docs/CONTRAST-DARKNESS-ANALYSIS.md for rationale
   const THREE = window.THREE;
+  // Match V3ThreeSceneHost: explicit color management + sRGB drawing buffer. Albedo maps use
+  // SRGBColorSpace; compositor RTs choose LinearSRGB vs NoColorSpace per buffer role.
+  if (THREE?.ColorManagement && typeof THREE.ColorManagement.enabled === 'boolean') {
+    THREE.ColorManagement.enabled = true;
+  }
   if (THREE && THREE.SRGBColorSpace) {
     renderer.outputColorSpace = THREE.SRGBColorSpace;
   }
@@ -163,5 +168,5 @@ export function configure(renderer, options = {}) {
     renderer.toneMapping = THREE.NoToneMapping;
   }
 
-  log.debug(`Renderer configured: ${width}x${height}, pixelRatio: ${pixelRatio}, outputColorSpace: sRGB`);
+  log.debug(`Renderer configured: ${width}x${height}, pixelRatio: ${pixelRatio}, outputColorSpace: sRGB, ColorManagement: ${THREE?.ColorManagement?.enabled === true}`);
 }

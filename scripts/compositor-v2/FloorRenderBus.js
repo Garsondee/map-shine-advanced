@@ -1115,6 +1115,11 @@ export class FloorRenderBus {
    * @param {boolean} [options.clearBeforeRender=true] - Whether to clear target before rendering this range
    * @param {number} [options.clearAlpha=1] - Clear alpha (0 for transparent, 1 for opaque)
    * @param {number} [options.clearColor=0x000000] - Clear colour hex
+   * @param {number|null} [options.topVisibleFloorIndexForFire=null] - When non-null and
+   *   `minFloorIndex===maxFloorIndex`, `ms_fire_batch_*` uses stacked visibility: a batch at
+   *   floor `fi` is drawn into slice `L` iff `fi <= L` (fire on the mask floor and every higher
+   *   slice), while other tiles stay strict `L` only. Callers that omit this (e.g. blur) keep
+   *   strict `[min,max]` for fire.
    */
   renderFloorRangeTo(renderer, camera, minFloorIndex, maxFloorIndex, target, options = {}) {
     if (!this._initialized || !this._scene) return;
@@ -1125,6 +1130,7 @@ export class FloorRenderBus {
       clearAlpha = 1,
       clearColor = 0x000000,
       filterBackgroundByFloor = false,
+      topVisibleFloorIndexForFire = null,
     } = options;
 
     // Save each tile's current visibility so we can restore it after.
@@ -1168,7 +1174,23 @@ export class FloorRenderBus {
         continue;
       }
 
-      const inRange = entry.floorIndex >= minFloorIndex && entry.floorIndex <= maxFloorIndex;
+      const fi = Number(entry?.floorIndex);
+      const minFI = Number(minFloorIndex);
+      const fireHint = topVisibleFloorIndexForFire;
+      let inRange;
+      if (
+        String(tileId).startsWith('ms_fire_batch_')
+        && fireHint != null
+        && Number.isFinite(Number(fireHint))
+        && Number.isFinite(minFI) && Number.isFinite(Number(maxFloorIndex))
+        && minFI === Number(maxFloorIndex)
+      ) {
+        const L = minFI;
+        // Stacked fire: show batch F whenever slice L is at or above F (L >= F).
+        inRange = Number.isFinite(fi) && fi <= L;
+      } else {
+        inRange = Number.isFinite(fi) && fi >= minFloorIndex && fi <= maxFloorIndex;
+      }
       node.visible = inRange && !this._suppressTileAlbedoForEditing;
     }
 

@@ -1037,6 +1037,10 @@ export class FloorCompositor {
       return;
     }
 
+    if (THREE.ColorManagement && typeof THREE.ColorManagement.enabled === 'boolean') {
+      THREE.ColorManagement.enabled = true;
+    }
+
     this._sizeVec = new THREE.Vector2();
     this.renderer.getDrawingBufferSize(this._sizeVec);
     const w = Math.max(1, this._sizeVec.x);
@@ -1047,9 +1051,13 @@ export class FloorCompositor {
     // but fall back to UnsignedByte on GPUs/browsers that can't render to half-float.
     // A hard failure here can trigger webglcontextlost during startup.
     //
-    // IMPORTANT: All intermediate RTs must use LinearSRGBColorSpace so that
-    // Three.js does NOT apply sRGB encoding on write or decoding on read.
-    // The sRGB encode happens exactly once: in the final blit to the screen.
+    // Color space (aligned with V3ThreeSceneHost / V3EffectChain conventions):
+    // - Scene + post ping-pong RTs: LinearSRGBColorSpace — Three renders into RTs in
+    //   linear working space; materials sample SRGB albedo textures with correct decode.
+    //   Final sRGB encode for the canvas comes from renderer.outputColorSpace + the
+    //   fullscreen blit path (see renderer-strategy configure()).
+    // - Mask / non-color data RTs: NoColorSpace — same rationale as V3 mask passes and
+    //   V3EffectChain ping-pong targets (avoid automatic transfer on read/write).
     const makeRt = (type, depthBuffer) => ({
       minFilter: THREE.LinearFilter,
       magFilter: THREE.LinearFilter,
@@ -1057,13 +1065,13 @@ export class FloorCompositor {
       type,
       depthBuffer: !!depthBuffer,
       stencilBuffer: false,
+      colorSpace: THREE.LinearSRGBColorSpace,
     });
 
     let preferredType = THREE.HalfFloatType;
     // Quick capability probe: if we can't create a half-float RT, fall back.
     try {
       const probe = new THREE.WebGLRenderTarget(4, 4, makeRt(THREE.HalfFloatType, false));
-      probe.texture.colorSpace = THREE.LinearSRGBColorSpace;
       probe.dispose();
     } catch (e) {
       preferredType = THREE.UnsignedByteType;
@@ -1072,14 +1080,11 @@ export class FloorCompositor {
 
     const rtOpts = makeRt(preferredType, true);
     this._sceneRT = new THREE.WebGLRenderTarget(w, h, rtOpts);
-    this._sceneRT.texture.colorSpace = THREE.LinearSRGBColorSpace;
 
     // Ping-pong pair for post-processing chain. No depth needed for post passes.
     const postOpts = makeRt(preferredType, false);
     this._postA = new THREE.WebGLRenderTarget(w, h, postOpts);
-    this._postA.texture.colorSpace = THREE.LinearSRGBColorSpace;
     this._postB = new THREE.WebGLRenderTarget(w, h, postOpts);
-    this._postB.texture.colorSpace = THREE.LinearSRGBColorSpace;
 
     // Water occluder mask: screen-space alpha mask of currently viewed floor tiles.
     // Validated approach: this mask is sampled directly in the water post shader
@@ -1093,6 +1098,7 @@ export class FloorCompositor {
       type: THREE.UnsignedByteType,
       depthBuffer: false,
       stencilBuffer: false,
+      colorSpace: THREE.NoColorSpace,
     });
     this._waterOccluderScratchRT = new THREE.WebGLRenderTarget(w, h, {
       minFilter: THREE.LinearFilter,
@@ -1101,6 +1107,7 @@ export class FloorCompositor {
       type: THREE.UnsignedByteType,
       depthBuffer: false,
       stencilBuffer: false,
+      colorSpace: THREE.NoColorSpace,
     });
     this._waterOccluderUnionScene = new THREE.Scene();
     this._waterOccluderUnionCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
@@ -1156,6 +1163,7 @@ export class FloorCompositor {
       type: THREE.UnsignedByteType,
       depthBuffer: false,
       stencilBuffer: false,
+      colorSpace: THREE.NoColorSpace,
     };
     this._waterBgProductRT = new THREE.WebGLRenderTarget(w, h, bgProdRtOpts);
     this._waterBgProductScratchRT = new THREE.WebGLRenderTarget(w, h, bgProdRtOpts);
@@ -4666,6 +4674,10 @@ export class FloorCompositor {
 
     if (_dbgStages) { try { log.info(`[V2 PerLevel] rendering ${visibleFloors.length} level(s)`); } catch (_) {} }
 
+    // Hint for bus per-level prepass: enables stacked fire visibility (`fi <= slice L`).
+    // Value must be a finite number (we use the active top index); semantics are in FloorRenderBus.
+    const topVisibleFloorIndexForFire = Number(visibleFloors[visibleFloors.length - 1]?.index ?? 0);
+
     // Track which level indices are active so we can release stale pool entries.
     const activeLevels = new Set();
     const levelFinalRTs = [];
@@ -4697,6 +4709,7 @@ export class FloorCompositor {
           clearBeforeRender: true,
           clearAlpha: 0,
           clearColor: 0x000000,
+          topVisibleFloorIndexForFire,
         },
       );
       if (_profiling) this._recordPassTiming(`perLevel_busRender_${levelIndex}`, _profileT0);

@@ -268,6 +268,12 @@ export class LightingEffectV2 {
     if (baseConfig.darknessResponse && enhancement.darknessResponse && typeof enhancement.darknessResponse === 'object') {
       nextConfig.darknessResponse = { ...baseConfig.darknessResponse, ...enhancement.darknessResponse };
     }
+    // Shallow spread would replace the whole `animation` object with a partial enhancement
+    // (e.g. only speed), dropping `type` / `intensity` and breaking ThreeLightSource torch detection.
+    if (baseConfig.animation && typeof baseConfig.animation === 'object'
+        && enhancement.animation && typeof enhancement.animation === 'object') {
+      nextConfig.animation = { ...baseConfig.animation, ...enhancement.animation };
+    }
 
     // Preserve the live runtime document when possible, but provide a plain
     // doc-shaped object with guaranteed id/config fields for ThreeLightSource.

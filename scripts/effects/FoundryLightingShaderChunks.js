@@ -554,8 +554,8 @@ export const FoundryLightingShaderChunks = {
 
             float tt = time * 0.4;
             float fade = pow(1.0 - dist,
-              mix(fbm(uv, 1.0 + inten * 0.4),
-                  max(fbm(uv + tt, 1.0), fbm(uv - tt, 1.0)),
+              mix(fbmSmooth(uv, 1.0 + inten * 0.4),
+                  max(fbmSmooth(uv + tt, 1.0), fbmSmooth(uv - tt, 1.0)),
                   pow(dist, inten * 0.5)));
 
             outColor = color;
@@ -563,27 +563,22 @@ export const FoundryLightingShaderChunks = {
   `
 
   ,
-  torch: `
-            outColor *= uIntensity;
-  `
+  // Torch colour/falloff is implemented in ThreeLightSource (tight core + boost); keep empty.
+  torch: ``
 
   ,
   flame: `
+            // Time-only tint (no spatial fbm here — avoids rectangular cells on top-down fire).
             float inten = clamp(uAnimIntensity, 0.0, 10.0);
-            vec2 uv = vUvs * (10.0 * (0.35 + 0.65 * clamp(uBrightRadius / max(uRadius, 1.0), 0.0, 1.0)));
-            float n1 = fbm(vec2(uv.x + uTime * 8.01, uv.y + uTime * 10.72), 1.0);
-            float n2 = fbm(vec2(uv.x + uTime * 7.04, uv.y + uTime * 9.51), 2.0);
-
-            float edgeInner = 1.0 - smoothstep(0.65 - 0.15 * inten * 0.1, 1.0, dist + 0.08 * n1);
-            float edgeOuter = 1.0 - smoothstep(0.85 - 0.10 * inten * 0.1, 1.0, dist + 0.10 * n2);
-            float core = clamp(edgeInner * 0.85 + edgeOuter * 0.35, 0.0, 1.0);
-
-            vec3 hot = uColor * 8.0;
-            vec3 warm = uColor * 1.2;
-            outColor = mix(uColor, warm, core);
-            outColor = mix(outColor, hot, edgeInner * edgeInner);
-            outColor *= uIntensity;
-            animAlphaMul *= clamp(core, 0.0, 1.0);
+            float tc0 = 0.5 + 0.5 * sin(uTime * 7.1 + uSeed * 13.17);
+            float tc1 = 0.5 + 0.5 * sin(uTime * 4.9 + uSeed * 27.03);
+            float tc2 = 0.5 + 0.5 * sin(uTime * 2.3 + uSeed * 41.0);
+            float co = 0.42 + 0.33 * (tc0 + tc1) * 0.5 + 0.12 * tc2;
+            vec3 hot = uColor * 2.75;
+            vec3 warm = uColor * 1.1;
+            outColor = mix(mix(uColor, warm, clamp(co, 0.0, 1.0)), hot, tc0 * tc0 * (0.26 + 0.05 * inten * 0.1));
+            float rimKeep = pow(max(0.0, 1.0 - dist), 0.48);
+            animAlphaMul *= clamp(0.4 + 0.55 * rimKeep, 0.42, 1.0);
   `
 
   ,

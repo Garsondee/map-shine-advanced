@@ -12,6 +12,13 @@ import { createLogger } from '../core/log.js';
 const _lightLosComputer = new VisionPolygonComputer();
 const log = createLogger('ThreeLightSource');
 
+// Torch/flame: fragment uses uTime in many sin() terms. Float32 uniforms quantize
+// unbounded animation.time, so tiny per-frame phase steps (especially at low Foundry
+// speed) collapse to zero then jump — reads as single-frame pops. CPU-side wrap
+// in float64 keeps uploaded values in a well-conditioned range; SmoothNoise still
+// uses full this.animation.time via animateTorch().
+const FIRE_SHADER_TIME_WRAP = Math.PI * 2 * 256;
+
 class SmoothNoise {
   constructor({ amplitude = 1, scale = 1, maxReferences = 256 } = {}) {
     this.amplitude = amplitude;
@@ -445,8 +452,9 @@ export class ThreeLightSource {
           return total;
         }
 
-        // Foundry VTT FBMHQ (ported 1:1 from base-shader-mixin.mjs)
-        float fbm(in vec2 uv, in float smoothness) {
+        // Foundry VTT FBMHQ (ported 1:1 from base-shader-mixin.mjs).
+        // Must not overload fbm(vec2) — GLSL ES 1.0 (WebGL1) rejects duplicate function names.
+        float fbmSmooth(in vec2 uv, in float smoothness) {
           float s = exp2(-smoothness);
           float f = 1.0;
           float a = 1.0;
@@ -495,37 +503,112 @@ export class ThreeLightSource {
 
           if (r >= 1.0) discard;
 
+          // 20 = torch, 21 = flame - both are fire lights: tight screen-space core, not the full dim disk.
+          float isTorch = step(19.5, uAnimType) * (1.0 - step(20.5, uAnimType));
+          float isFlame = step(20.5, uAnimType) * (1.0 - step(21.5, uAnimType));
+          float isFireCore = max(isTorch, isFlame);
+
           // uAttenuation acts as a "Softness" factor [0..1]
           // 0.0 = Hard Edges (Plateaus)
           // 1.0 = Soft Edges (Linear Gradients)
-          float softness = uAttenuation; 
+          float softness = uAttenuation;
 
-          // 1. OUTER CIRCLE (Dim Radius)
-          // At softness 0: Hard cut at r=1.0
-          // At softness 1: Fades linearly from center (r=0) to edge (r=1)
-          float outerStart = 1.0 - softness;
-          float outerEnd = 1.0 + 0.0001; // Epsilon to avoid div/0
-          float outerAlpha = 1.0 - smoothstep(outerStart, outerEnd, r);
+          float intensity;
 
-          // 2. INNER CIRCLE (Bright Radius)
-          // This adds the "core" brightness.
-          // Normalized Bright Radius
-          float b = uBrightRadius / uRadius;
-          // Interpolate the transition window based on softness
-          // Softness expands the gradient outward from the bright radius border
-          float innerStart = b * (1.0 - softness);
-          float innerEnd = b + (softness * (1.0 - b)) + 0.0001;
-          float innerAlpha = 1.0 - smoothstep(innerStart, innerEnd, r);
+          // Torch (20) + flame (21): tight ember + dim disk; flicker is TIME-ONLY (spatial dot/radius waves read as pinwheel/rings).
+          if (isFireCore > 0.5) {
+            float ai = clamp(uAnimIntensity * 0.1, 0.02, 1.0);
+            float brPx = max(uBrightRadius, 1.5);
+            float uRad = max(uRadius, 1.0);
+            float ballPx = mix(2.8, 6.2, ai) + brPx * mix(0.04, 0.22, ai);
+            ballPx = min(ballPx, mix(18.0, 30.0, ai));
+            ballPx *= mix(1.0, 1.18, isFlame);
+            ballPx *= 1.75 * 1.5;
+            float fallPow = mix(12.0, 8.0, isFlame);
+            float t = distPx / max(ballPx, 0.5);
+            float ember = pow(max(0.0, 1.0 - t), fallPow);
 
-          // 3. COMPOSITION
-          // Foundry lights are essentially stacked layers.
-          // Base Dim Layer = 0.5 intensity.
-          // Bright Boost Layer = 0.5 intensity.
-          // Total Center Intensity = 1.0.
-          float wOuter = max(uOuterWeight, 0.0);
-          float wInner = max(uInnerWeight, 0.0);
-          float wSum = max(0.0001, wOuter + wInner);
-          float intensity = (wOuter * outerAlpha + wInner * innerAlpha) / wSum;
+            float rn = distPx / uRad;
+            float dOut = max(0.0, 1.0 - rn);
+            float disk = pow(dOut, 0.88) * 0.62 + pow(dOut, 1.75) * 0.22;
+
+            float twoPi = 6.283185307179586;
+            float ph1 = fract(uSeed * 0.1031 + 0.17) * twoPi;
+            float ph2 = fract(uSeed * 0.2707 + 0.53) * twoPi;
+            float ph3 = fract(uSeed * 0.6113 + 0.09) * twoPi;
+            float ph4 = fract(uSeed * 0.881 + 0.31) * twoPi;
+            float ph5 = fract(uSeed * 0.337 + 0.61) * twoPi;
+
+            // Global brightness: clkSlow baseline + bursts (per uSeed); chop + modulated pow for irregular bursts.
+            float clkSlow = uTime * 0.055;
+            float clkEnv = uTime * 0.52;
+            float hz1 = 1.05 + 0.42 * fract(uSeed * 0.419);
+            float hz2 = 1.48 + 0.52 * fract(uSeed * 0.733);
+            float hz3 = 0.72 + 0.38 * fract(uSeed * 0.257);
+
+            float wE0 = 0.14 + 0.22 * fract(uSeed * 0.047);
+            float wE1 = 0.17 + 0.26 * fract(uSeed * 0.163);
+            float wE2 = 0.19 + 0.24 * fract(uSeed * 0.281);
+            float wE3 = 0.11 + 0.19 * fract(uSeed * 0.409);
+            float wE4 = 0.08 + 0.16 * fract(uSeed * 0.523);
+            float ev1 = 0.5 + 0.5 * sin(clkEnv * wE0 + ph1);
+            float ev2 = 0.5 + 0.5 * sin(clkEnv * wE1 + ph2 * 1.63);
+            float ev3 = 0.5 + 0.5 * sin(clkEnv * wE2 + ph3 * 0.91);
+            float ev4 = 0.5 + 0.5 * sin(clkEnv * wE3 + ph4 * 2.07 + 0.52 * sin(clkEnv * 0.031 + ph1 * 1.3));
+            float ev5 = 0.5 + 0.5 * sin(clkEnv * wE4 + ph5 * 1.21 + 0.38 * sin(clkEnv * 0.044 + ph3 * 0.7));
+            float burstCore = max(0.0, ev1 * ev2 * ev3);
+            float sideCore = max(0.0, ev4 * ev5);
+            float bpBurst = 1.12 + 0.82 * (0.5 + 0.5 * sin(clkSlow * 0.016 + ph2 * 1.4)) * (0.5 + 0.5 * sin(clkEnv * 0.019 + ph4 * 0.93));
+            float bpSide = 1.22 + 0.88 * (0.5 + 0.5 * sin(clkEnv * 0.017 + ph1 * 1.1)) * (0.5 + 0.5 * sin(clkSlow * 0.022 + ph5 * 1.2));
+            float burst = pow(burstCore, bpBurst);
+            float sideGate = pow(sideCore, bpSide);
+            float chaosPre = clamp(burst * 0.82 + sideGate * 0.36, 0.0, 1.0);
+            float chop = 0.5 + 0.5 * (0.5 + 0.5 * sin(clkSlow * 0.025 + ph3 * 1.1)) * (0.5 + 0.5 * sin(clkEnv * 0.029 + ph1 * 1.5)) * (0.5 + 0.5 * sin(clkEnv * 0.015 + ph2 * 0.88));
+            float chaosMix = clamp(chaosPre * chop, 0.0, 1.0) * 0.52;
+
+            float clkEff = clkSlow * mix(1.0, 4.15, chaosMix);
+
+            float driftA = 0.72 + 0.28 * (0.5 + 0.5 * sin(clkEff * 0.11 + ph1));
+            float driftB = 0.78 + 0.22 * sin(clkEff * 0.15 + ph2 * 1.4);
+            float te = clkEff * driftA + 0.31 * sin(clkEff * 0.22 + ph3) * driftB;
+            float te2 = clkEff * (1.04 + 0.12 * sin(clkEff * 0.07 + ph4)) + 0.18 * sin(clkEff * 0.14 + ph1 * 2.0);
+            float te3 = clkEff * (0.9 + 0.14 * sin(clkEff * 0.12 + ph2)) + 0.22 * sin(clkEff * 0.18 + ph3 * 0.7);
+
+            float fm = mix(0.07, 0.145, chaosMix) * sin(clkEff * (0.55 + 0.35 * fract(uSeed * 0.67)) + ph1);
+            float s1 = 0.5 + 0.5 * sin(te * hz1 + ph1 + fm * hz1);
+            float s2 = 0.5 + 0.5 * sin(te2 * hz2 + ph2 - mix(0.12, 0.175, chaosMix) * sin(clkEff * mix(0.28, 0.56, chaosMix) + ph3) * hz2);
+            float s3 = 0.5 + 0.5 * sin(te3 * hz3 + ph3);
+
+            float sum3 = s1 * 0.34 + s2 * 0.33 + s3 * 0.33;
+            float prod = s1 * s2 * s3;
+            float overlap = clamp(sum3 * mix(0.62, 0.52, chaosMix) + prod * mix(0.28, 0.58, chaosMix), 0.0, 1.0);
+            float flickMul = max(0.1, 0.1 + 1.22 * overlap);
+            flickMul *= 0.84 + 0.16 * (0.5 + 0.5 * sin(clkEff * mix(0.09, 0.34, chaosMix) + uSeed * 19.7));
+            float shimA = sin(clkEff * mix(0.29, 0.78, chaosMix) + ph2 * 1.4);
+            float shimB = sin(clkEff * mix(0.33, 0.9, chaosMix) + ph4 * 1.05 + 0.45 * sin(clkEnv * 0.12 + ph5));
+            flickMul *= mix(1.0, 0.94 + 0.11 * shimA * shimB, 0.48 + 0.52 * chaosMix);
+            flickMul = clamp(flickMul, 0.1, 1.52);
+
+            float radialBase = ember + disk * 0.52;
+            intensity = radialBase * 1.95 * flickMul;
+          } else {
+            // 1. OUTER CIRCLE (Dim Radius)
+            float outerStart = 1.0 - softness;
+            float outerEnd = 1.0 + 0.0001;
+            float outerAlpha = 1.0 - smoothstep(outerStart, outerEnd, r);
+
+            // 2. INNER CIRCLE (Bright Radius)
+            float b = uBrightRadius / uRadius;
+            float innerStart = b * (1.0 - softness);
+            float innerEnd = b + (softness * (1.0 - b)) + 0.0001;
+            float innerAlpha = 1.0 - smoothstep(innerStart, innerEnd, r);
+
+            // 3. COMPOSITION
+            float wOuter = max(uOuterWeight, 0.0);
+            float wInner = max(uInnerWeight, 0.0);
+            float wSum = max(0.0001, wOuter + wInner);
+            intensity = (wOuter * outerAlpha + wInner * innerAlpha) / wSum;
+          }
 
           // Shader-driven animation factor and potential color shift.
           float animAlphaMul = 1.0;
@@ -634,7 +717,6 @@ export class ThreeLightSource {
             // Foundry VTT smoke patch (ported from smoke-patch.mjs).
             ${FoundryLightingShaderChunks.smokePatch}
           } else if (uAnimType > 19.5 && uAnimType < 20.5) {
-            // Foundry VTT torch (mimic coloration: brightnessPulse scales color).
             ${FoundryLightingShaderChunks.torch}
           } else if (uAnimType > 20.5 && uAnimType < 21.5) {
             // Foundry VTT flame (mimic coloration: noisy inner/outer flame lobes).
@@ -645,17 +727,27 @@ export class ThreeLightSource {
           }
 
           // Final Alpha calculation
-          float alpha = intensity * uAlpha * uIntensity * animAlphaMul * cookieFactor * max(uOutputGain, 0.0);
+          float uAlphaEff = mix(uAlpha, min(1.0, max(uAlpha, 0.92)), isFireCore);
+          float alpha = intensity * uAlphaEff * uIntensity * animAlphaMul * cookieFactor * max(uOutputGain, 0.0);
 
           float fairyBoost = (uAnimType > 1.5 && uAnimType < 2.5) ? 3.0 : 1.0;
           alpha *= fairyBoost;
+          // Torch + flame: intensity path already boosts ember; keep alpha punch modest.
+          alpha *= mix(1.0, 1.75, isFireCore);
 
           // Apply cookie factor to color output to keep cookies visible even if
           // downstream compositing ignores alpha modulation for the light buffer.
           float cookieColorMul = (uHasCookie > 0.5) ? cookieFactor : 1.0;
 
+          vec3 rgbOut = outColor * uBrightness * (0.75 + 0.25 * fairyBoost) * cookieColorMul;
+          if (isFireCore > 0.5) {
+            float hot = 7.1 + 2.4 * clamp(uAnimIntensity * 0.1, 0.0, 1.0);
+            vec3 fire = vec3(1.0, 0.52, 0.14);
+            rgbOut = mix(rgbOut * hot, rgbOut * fire * hot * 0.42, 0.38);
+          }
+
           // Additive Output
-          gl_FragColor = vec4(outColor * uBrightness * (0.75 + 0.25 * fairyBoost) * cookieColorMul, alpha);
+          gl_FragColor = vec4(rgbOut, alpha);
         }
       `,
       transparent: true,
@@ -712,16 +804,18 @@ export class ThreeLightSource {
       ? this._renderRadiusPx
       : prevRadiusPx;
 
-    // 1. Color Parsing
+    // 1. Color parsing — match V3 / Foundry v14: authored tints are display-referred sRGB;
+    // decode to linear working RGB for the WebGL light shader (THREE.ColorManagement).
     const c = new THREE.Color(1, 1, 1);
-    const colorInput = config.color;
+    const srgb = THREE.SRGBColorSpace;
+    const colorInput = config?.color ?? config?.tint ?? doc?.tint ?? null;
 
     if (colorInput) {
       try {
         if (typeof colorInput === 'string') {
           c.set(colorInput);
         } else if (typeof colorInput === 'number') {
-          c.setHex(colorInput);
+          c.setHex(colorInput >>> 0, srgb);
         } else if (typeof colorInput === 'object') {
           // Foundry color payloads vary by code path:
           // - {r,g,b}
@@ -730,16 +824,16 @@ export class ThreeLightSource {
           // - serializable payloads accepted by foundry.utils.Color.from
           if (Array.isArray(colorInput.rgb)) {
             const [r = 1, g = 1, b = 1] = colorInput.rgb;
-            c.setRGB(r, g, b);
+            c.setRGB(r, g, b, srgb);
           } else if (typeof colorInput.r === 'number' && typeof colorInput.g === 'number' && typeof colorInput.b === 'number') {
-            c.setRGB(colorInput.r, colorInput.g, colorInput.b);
+            c.setRGB(colorInput.r, colorInput.g, colorInput.b, srgb);
           } else if (typeof colorInput.toArray === 'function') {
             const arr = colorInput.toArray();
-            c.setRGB(arr?.[0] ?? 1, arr?.[1] ?? 1, arr?.[2] ?? 1);
+            c.setRGB(arr?.[0] ?? 1, arr?.[1] ?? 1, arr?.[2] ?? 1, srgb);
           } else if (foundry?.utils?.Color?.from) {
             const fc = foundry.utils.Color.from(colorInput);
             if (fc && typeof fc.r === 'number' && typeof fc.g === 'number' && typeof fc.b === 'number') {
-              c.setRGB(fc.r, fc.g, fc.b);
+              c.setRGB(fc.r, fc.g, fc.b, srgb);
             }
           }
         }
@@ -747,12 +841,6 @@ export class ThreeLightSource {
       }
     }
 
-    // Keep authored color unchanged for closer Foundry parity.
-    const hsl = {};
-    c.getHSL(hsl);
-    if (hsl.s > 0) {
-      c.setHSL(hsl.h, hsl.s, hsl.l);
-    }
     this.material.uniforms.uColor.value.copy(c);
 
     // Cache the untinted base color so sky-tint in updateAnimation can be applied
@@ -1177,12 +1265,81 @@ export class ThreeLightSource {
     attemptLoad();
   }
 
+  /**
+   * Prefer the live scene AmbientLight document so per-frame animation reads see UI edits
+   * immediately; {@link this.document} can lag one update behind Foundry hooks.
+   * @returns {object|null}
+   * @private
+   */
+  _resolveLiveLightDoc() {
+    const id = this.id;
+    try {
+      const col = typeof canvas !== 'undefined' ? canvas?.scene?.lights : null;
+      if (!col || id == null) return null;
+      const placeable = col.get?.(id) ?? col.get?.(String(id));
+      const d = placeable?.document;
+      if (d && typeof d === 'object') return d;
+    } catch (_) {}
+    return null;
+  }
+
+  /**
+   * @param {unknown} raw Foundry `config.animation.type` (string, or numeric index in some builds)
+   * @returns {string|null} normalized id for our `type === '…'` branches
+   * @private
+   */
+  _normalizeAnimationType(raw) {
+    if (raw == null || raw === '') return null;
+    if (typeof raw === 'string') {
+      return raw.trim().toLowerCase();
+    }
+    if (typeof raw === 'number' && Number.isFinite(raw) && raw >= 0) {
+      try {
+        const list = typeof CONFIG !== 'undefined' ? CONFIG?.Canvas?.lightAnimations : null;
+        if (Array.isArray(list) && raw < list.length) {
+          const id = list[raw]?.id ?? list[raw]?.type;
+          if (typeof id === 'string' && id.length) return id.trim().toLowerCase();
+        }
+        if (list && typeof list === 'object' && !Array.isArray(list)) {
+          const keys = Object.keys(list);
+          const k = keys[Math.floor(raw)];
+          if (typeof k === 'string' && k.length) return k.trim().toLowerCase();
+        }
+      } catch (_) {}
+    }
+    return null;
+  }
+
+  _parseAnimNumber(v, fallback) {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : fallback;
+  }
+
+  _shaderFireClock(animTime) {
+    const w = FIRE_SHADER_TIME_WRAP;
+    let t = Number(animTime);
+    if (!Number.isFinite(t)) t = 0;
+    return ((t % w) + w) % w;
+  }
+
   _getAnimationOptions() {
-    const a = this.document?.config?.animation;
-    const type = a?.type ?? null;
-    const speed = typeof a?.speed === 'number' ? a.speed : 5;
-    const intensity = typeof a?.intensity === 'number' ? a.intensity : 5;
-    const reverse = !!a?.reverse;
+    const doc = this._resolveLiveLightDoc() || this.document;
+    const cfg = (doc?.config && typeof doc.config === 'object') ? doc.config : {};
+    const a = (cfg.animation && typeof cfg.animation === 'object') ? cfg.animation : {};
+
+    const type = this._normalizeAnimationType(a.type);
+    const speed = this._parseAnimNumber(a.speed, 5);
+
+    let intensity = this._parseAnimNumber(a.intensity, NaN);
+    if (!Number.isFinite(intensity)) {
+      intensity = this._parseAnimNumber(a.animationIntensity, NaN);
+    }
+    if (!Number.isFinite(intensity)) {
+      intensity = this._parseAnimNumber(cfg.animationIntensity, 5);
+    }
+    intensity = this._clamp(intensity, 0, 10);
+
+    const reverse = !!a.reverse;
     return { type, speed, intensity, reverse };
   }
 
@@ -1193,24 +1350,56 @@ export class ThreeLightSource {
     return this.animation.time;
   }
 
-  animateFlickering(tMs, { speed = 5, intensity = 5, reverse = false, amplification = 1 } = {}) {
+  animateFlickering(tMs, {
+    speed = 5,
+    intensity = 5,
+    reverse = false,
+    amplification = 1,
+    ratioOscillationScale = 1,
+    noiseScale = 3,
+  } = {}) {
     this.animateTime(tMs, { speed, intensity, reverse });
 
     const amplitude = amplification * 0.45;
+    const ns = (Number.isFinite(noiseScale) && noiseScale > 0) ? noiseScale : 3;
     if (!this.animation.noise) {
-      this.animation.noise = new SmoothNoise({ amplitude, scale: 3, maxReferences: 2048 });
-    } else if (this.animation.noise.amplitude !== amplitude) {
-      this.animation.noise.amplitude = amplitude;
+      this.animation.noise = new SmoothNoise({ amplitude, scale: ns, maxReferences: 2048 });
+    } else {
+      if (this.animation.noise.amplitude !== amplitude) {
+        this.animation.noise.amplitude = amplitude;
+      }
+      if (this.animation.noise.scale !== ns) {
+        this.animation.noise.scale = ns;
+      }
     }
 
     const n = this.animation.noise.generate(this.animation.time);
     const brightnessPulse = 0.55 + n;
-    const ratioPulse = this._clamp(this._baseRatio * (0.9 + (n * 0.25)), 0, 1);
+    const ro = Math.max(0, ratioOscillationScale);
+    const ratioPulse = this._clamp(this._baseRatio * (0.9 + (n * 0.25 * ro)), 0, 1);
     return { brightnessPulse, ratioPulse };
   }
 
-  animateTorch(tMs, { speed = 5, intensity = 5, reverse = false } = {}) {
-    return this.animateFlickering(tMs, { speed, intensity, reverse, amplification: intensity / 5 });
+  /**
+   * Foundry torch: animation **intensity** (0–10) scales how strong the flicker is and
+   * how much the bright core “breathes” (see Foundry lighting article / in-app tooltips).
+   */
+  animateTorch(tMs, { speed = 5, intensity = 5, reverse = false, noiseScale: noiseScaleOverride } = {}) {
+    const intNorm = this._clamp(intensity, 0, 10) / 10;
+    const amplification = 0.05 + intNorm * 1.95;
+    const ratioOscillationScale = 0.15 + intNorm * 1.85;
+    // Lower noise scale = longer wavelength along animation.time (less frame-to-frame pop on uIntensity).
+    const noiseScale = Number.isFinite(noiseScaleOverride)
+      ? noiseScaleOverride
+      : (0.28 + intNorm * 0.55);
+    return this.animateFlickering(tMs, {
+      speed,
+      intensity,
+      reverse,
+      amplification,
+      ratioOscillationScale,
+      noiseScale,
+    });
   }
 
   animatePulse(tMs, { speed = 5, intensity = 5, reverse = false } = {}) {
@@ -1682,7 +1871,8 @@ export class ThreeLightSource {
   }
 
   updateAnimation(timeInfo, globalDarkness, skyTint) {
-    const dtMs = (timeInfo && typeof timeInfo.delta === 'number') ? (timeInfo.delta * 1000) : 0;
+    const dtSec = (timeInfo && typeof timeInfo.delta === 'number') ? timeInfo.delta : 0;
+    const dtMs = dtSec * 1000;
     const tMs = (timeInfo && typeof timeInfo.elapsed === 'number') ? (timeInfo.elapsed * 1000) : 0;
     const tSec = (timeInfo && typeof timeInfo.elapsed === 'number') ? timeInfo.elapsed : 0;
     const { type, speed, intensity, reverse } = this._getAnimationOptions();
@@ -1853,26 +2043,41 @@ export class ThreeLightSource {
     }
 
     if (type === 'torch') {
-      const { brightnessPulse, ratioPulse } = this.animateTorch(tMs, { speed, intensity, reverse });
-      u.uIntensity.value = brightnessPulse * darknessMul;
-      u.uBrightRadius.value = this._baseRadiusPx * this._clamp(ratioPulse, 0, 1);
+      const { brightnessPulse } = this.animateTorch(tMs, { speed, intensity, reverse });
+      // Main beat is in the fragment shader; uIntensity follows SmoothNoise — ease jumps at cell boundaries.
+      const target = Math.max(0.62, Math.min(1.28, brightnessPulse));
+      if (typeof this._fireBrightnessSmoothed !== 'number' || !Number.isFinite(this._fireBrightnessSmoothed)) {
+        this._fireBrightnessSmoothed = target;
+      } else {
+        const alpha = 1 - Math.exp(-Math.max(0, dtSec) * 1.6);
+        this._fireBrightnessSmoothed += (target - this._fireBrightnessSmoothed) * Math.min(0.08, Math.max(0.02, alpha));
+      }
+      u.uIntensity.value = this._fireBrightnessSmoothed * darknessMul;
+      u.uAnimIntensity.value = this._clamp(intensity, 0, 10);
       u.uAnimType.value = 20;
-      u.uTime.value = this.animation.time;
+      u.uTime.value = this._shaderFireClock(this.animation.time);
     } else if (type === 'siren') {
       // Foundry siren uses animateTorch for brightnessPulse and a shader beam pattern.
-      const { brightnessPulse, ratioPulse } = this.animateTorch(tMs, { speed, intensity, reverse });
+      const { brightnessPulse, ratioPulse } = this.animateTorch(tMs, { speed, intensity, reverse, noiseScale: 3 });
       u.uIntensity.value = brightnessPulse * darknessMul;
       u.uBrightRadius.value = this._baseRadiusPx * this._clamp(ratioPulse, 0, 1);
       u.uAnimType.value = 7;
       u.uAnimIntensity.value = this._clamp(intensity, 0, 10);
       u.uTime.value = this.animation.time;
     } else if (type === 'flame') {
-      const { brightnessPulse, ratioPulse } = this.animateFlickering(tMs, { speed, intensity, reverse });
-      u.uIntensity.value = brightnessPulse * darknessMul;
-      u.uBrightRadius.value = this._baseRadiusPx * this._clamp(ratioPulse, 0, 1);
+      // Match torch: flicker on uIntensity only; keep authored bright/dim radii (no full-disk “breathing”).
+      const { brightnessPulse } = this.animateTorch(tMs, { speed, intensity, reverse });
+      const target = Math.max(0.62, Math.min(1.28, brightnessPulse));
+      if (typeof this._fireBrightnessSmoothed !== 'number' || !Number.isFinite(this._fireBrightnessSmoothed)) {
+        this._fireBrightnessSmoothed = target;
+      } else {
+        const alpha = 1 - Math.exp(-Math.max(0, dtSec) * 1.6);
+        this._fireBrightnessSmoothed += (target - this._fireBrightnessSmoothed) * Math.min(0.08, Math.max(0.02, alpha));
+      }
+      u.uIntensity.value = this._fireBrightnessSmoothed * darknessMul;
       u.uAnimType.value = 21;
       u.uAnimIntensity.value = this._clamp(intensity, 0, 10);
-      u.uTime.value = this.animation.time;
+      u.uTime.value = this._shaderFireClock(this.animation.time);
     } else if (type === 'pulse') {
       const { pulse, ratioPulse } = this.animatePulse(tMs, { speed, intensity, reverse });
       // Pulse drives a separate shader uniform; keep base intensity stable.

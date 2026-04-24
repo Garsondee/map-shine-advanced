@@ -10,8 +10,12 @@
  *   One three.quarks BatchedRenderer per floor that has fire, each registered on
  *   the FloorRenderBus with that floor's index (overlay keys use ms_fire_batch_* —
  *   keys starting with "__" are treated like backgrounds in renderFloorRangeTo and
- *   never get floor-range culling). FloorDepthBlurEffect then only draws fire for the
- *   floor pass that matches that index.
+ *   never get floor-range culling). For per-level prepass slices (min=max=floor),
+ *   FloorRenderBus draws each `ms_fire_batch_*` into every per-level slice `L` with
+ *   `L >= maskFloor` (`fi <= L`) so flames stay visible from the mask floor and above.
+ *   `_updateBatchRenderOrder` then lifts the BatchedRenderer (and quarks systems) into
+ *   `max(maskFloor, activeViewTop)`'s FLOOR_EFFECTS band so upper-floor albedo does not
+ *   paint over lower-floor fire (depthTest is off; painter's order would hide it).
  *   For each tile with a `_Fire` mask, scans the mask on the CPU to build spawn
  *   point lists, then creates fire + ember + smoke particle systems. Floor
  *   isolation for simulation uses swapping active systems in/out per batch on floor change.
@@ -29,7 +33,13 @@
 import { createLogger } from '../../core/log.js';
 import { weatherController } from '../../core/WeatherController.js';
 import { probeMaskFile } from '../../assets/loader.js';
-import { tileHasLevelsRange, readTileLevelsFlags } from '../../foundry/levels-scene-flags.js';
+import {
+  tileHasLevelsRange,
+  readTileLevelsFlags,
+  resolveV14NativeDocFloorIndexMin,
+  getViewedLevelBackgroundSrc,
+  hasV14NativeLevels,
+} from '../../foundry/levels-scene-flags.js';
 import { SmartWindBehavior } from '../../particles/SmartWindBehavior.js';
 import {
   FireMaskShape,
@@ -410,57 +420,92 @@ export class FireEffectV2 {
     // Key: floorIndex, Value: {points: Float32Array[]}
     const floorFireData = new Map();
 
-    // ── Process background image first (if it has a _Fire mask) ──────────────
-    const bgSrc = canvas?.scene?.background?.src;
-    log.info(`populate: checking background src=${bgSrc}`);
-    if (bgSrc) {
+    // ── Process background image(s) (if they have _Fire masks) ────────────────
+    // V14: each Level has its own background.src — scene.background.src is not
+    // authoritative. Mirror WaterEffectV2: bind each discovered _Fire mask to the
+    // FloorStack index for that level so upper-floor views are not stuck with
+    // particles at GROUND_Z + 0 under the map.
+    const scene = canvas?.scene ?? null;
+    const seenBgFireKeys = new Set();
+
+    /**
+     * @param {string} bgSrcRaw
+     * @param {number} floorIndex
+     */
+    const ingestBackgroundFire = async (bgSrcRaw, floorIndex) => {
+      const bgSrc = typeof bgSrcRaw === 'string' ? bgSrcRaw.trim() : '';
+      if (!bgSrc) return;
       const dotIdx = bgSrc.lastIndexOf('.');
       const bgBasePath = dotIdx > 0 ? bgSrc.substring(0, dotIdx) : bgSrc;
+      const dedupeKey = `${floorIndex}|${bgBasePath}`;
+      if (seenBgFireKeys.has(dedupeKey)) return;
 
+      log.info(`populate: checking background _Fire for floor ${floorIndex}, src=${bgSrc}`);
       log.info(`  probing for _Fire mask at: ${bgBasePath}`);
-      let image = null;
-      let resolvedPath = null;
       const fireResult = await probeMaskFile(bgBasePath, '_Fire');
       log.info(`  probeMaskFile result: ${fireResult?.path ?? 'null'}`);
+      let image = null;
       if (fireResult?.path) {
-        resolvedPath = fireResult.path;
-        log.info(`  loading image from: ${resolvedPath}`);
-        image = await this._loadImage(resolvedPath);
+        log.info(`  loading image from: ${fireResult.path}`);
+        image = await this._loadImage(fireResult.path);
       }
-      // probeMaskFile already checked all formats and cached the result.
-      // No need for fallback GET probing - it just causes 404 spam.
-
       log.info(`  image loaded: ${image ? `${image.width}x${image.height}` : 'null'}`);
-      if (image) {
-        log.info(`  calling generateFirePoints with threshold=0.01`);
-        const bgLocalPoints = generateFirePoints(image, 0.01);
-        log.info(`  generateFirePoints returned: ${bgLocalPoints ? `${bgLocalPoints.length / 3} points` : 'null'}`);
-        if (bgLocalPoints && bgLocalPoints.length > 0) {
-          log.info(`  background _Fire mask: found ${bgLocalPoints.length / 3} points from ${image.width}x${image.height} image`);
-          // Background fills the entire scene rect.
-          const bgX = foundrySceneX;
-          const bgY = foundrySceneY;
-          const bgW = sceneWidth;
-          const bgH = sceneHeight;
+      if (!image) return;
 
-          const sceneGlobalPoints = new Float32Array(bgLocalPoints.length);
-          for (let i = 0; i < bgLocalPoints.length; i += 3) {
-            const foundryPx = bgX + bgLocalPoints[i] * bgW;
-            const foundryPy = bgY + bgLocalPoints[i + 1] * bgH;
-            sceneGlobalPoints[i]     = (foundryPx - foundrySceneX) / sceneWidth;
-            sceneGlobalPoints[i + 1] = (foundryPy - foundrySceneY) / sceneHeight;
-            sceneGlobalPoints[i + 2] = bgLocalPoints[i + 2]; // brightness unchanged
-          }
+      log.info(`  calling generateFirePoints with threshold=0.01`);
+      const bgLocalPoints = generateFirePoints(image, 0.01);
+      log.info(`  generateFirePoints returned: ${bgLocalPoints ? `${bgLocalPoints.length / 3} points` : 'null'}`);
+      if (!bgLocalPoints || bgLocalPoints.length === 0) return;
 
-          // Background is always floor 0.
-          const floorIndex = 0;
-          if (!floorFireData.has(floorIndex)) {
-            floorFireData.set(floorIndex, { pointArrays: [] });
-          }
-          floorFireData.get(floorIndex).pointArrays.push(sceneGlobalPoints);
-          log.info(`  background → floor ${floorIndex}, ${sceneGlobalPoints.length / 3} fire points (scene ${bgW}x${bgH})`);
-        }
+      log.info(`  background _Fire mask: found ${bgLocalPoints.length / 3} points from ${image.width}x${image.height} image`);
+      const bgX = foundrySceneX;
+      const bgY = foundrySceneY;
+      const bgW = sceneWidth;
+      const bgH = sceneHeight;
+
+      const sceneGlobalPoints = new Float32Array(bgLocalPoints.length);
+      for (let i = 0; i < bgLocalPoints.length; i += 3) {
+        const foundryPx = bgX + bgLocalPoints[i] * bgW;
+        const foundryPy = bgY + bgLocalPoints[i + 1] * bgH;
+        sceneGlobalPoints[i]     = (foundryPx - foundrySceneX) / sceneWidth;
+        sceneGlobalPoints[i + 1] = (foundryPy - foundrySceneY) / sceneHeight;
+        sceneGlobalPoints[i + 2] = bgLocalPoints[i + 2];
       }
+
+      const fi = Number.isFinite(Number(floorIndex)) ? Math.max(0, Math.floor(Number(floorIndex))) : 0;
+      if (!floorFireData.has(fi)) {
+        floorFireData.set(fi, { pointArrays: [] });
+      }
+      floorFireData.get(fi).pointArrays.push(sceneGlobalPoints);
+      seenBgFireKeys.add(dedupeKey);
+      log.info(`  background → floor ${fi}, ${sceneGlobalPoints.length / 3} fire points (scene ${bgW}x${bgH})`);
+    };
+
+    if (hasV14NativeLevels(scene) && floors.length > 0) {
+      for (const f of floors) {
+        const lid = f?.levelId;
+        if (typeof lid !== 'string' || !lid.length) continue;
+        let bgSrc = '';
+        try {
+          const lvl = scene.levels?.get?.(lid);
+          bgSrc = String(lvl?.background?.src || '').trim();
+        } catch (_) {}
+        if (!bgSrc) continue;
+        await ingestBackgroundFire(bgSrc, f.index);
+      }
+    }
+    // Always also probe the viewed-level background on the active floor index.
+    // Covers bands without levelId on FloorStack, init races, and dedupes when
+    // the same file was already ingested for that floor in the loop above.
+    {
+      const fallbackSrc = getViewedLevelBackgroundSrc(scene)
+        ?? canvas?.scene?.background?.src
+        ?? '';
+      const activeFi = window.MapShine?.floorStack?.getActiveFloor?.();
+      const fi = (floors.length > 1 && Number.isFinite(Number(activeFi?.index)))
+        ? Number(activeFi.index)
+        : 0;
+      await ingestBackgroundFire(String(fallbackSrc || ''), fi);
     }
 
     // ── Process tiles ─────────────────────────────────────────────────────────
@@ -974,15 +1019,32 @@ export class FireEffectV2 {
   }
 
   /**
-   * Keep each floor's BatchedRenderer mesh sort band aligned with that floor's tiles.
-   * @param {number} _maxFloorIndex - retained for call-site compatibility (unused)
+   * Keep each floor's BatchedRenderer + quarks systems in a sort band that survives
+   * upper-floor bus draws: lower-floor effects must sort after that floor's albedo,
+   * so use max(authoredFloor, visibleTopFloor) for the FLOOR_EFFECTS tier.
+   * @param {number} maxFloorIndex - highest visible floor index (from FloorCompositor / stack)
    * @private
    */
-  _updateBatchRenderOrder(_maxFloorIndex) {
+  _updateBatchRenderOrder(maxFloorIndex) {
+    const top = Number.isFinite(Number(maxFloorIndex)) ? Math.max(0, Math.floor(Number(maxFloorIndex))) : 0;
     for (const f of this._floorStates.keys()) {
       const state = this._floorStates.get(f);
       if (!state?.batchRenderer) continue;
-      state.batchRenderer.renderOrder = effectUnderOverheadOrder(Number(f) || 0, 0);
+      const fi = Number(f) || 0;
+      const sortBandFloor = Math.max(fi, top);
+      const br = state.batchRenderer;
+      br.renderOrder = effectUnderOverheadOrder(sortBandFloor, 0);
+      const syncSys = (arr, typeOffset) => {
+        for (const sys of arr) {
+          if (!sys) continue;
+          try {
+            sys.renderOrder = this._computeParticleRenderOrder(sortBandFloor, typeOffset);
+          } catch (_) {}
+        }
+      };
+      syncSys(state.systems, 0);
+      syncSys(state.emberSystems, 1);
+      syncSys(state.smokeSystems, 2);
     }
   }
 
@@ -1257,6 +1319,29 @@ export class FireEffectV2 {
         if (tileBottom <= f.elevationMax && f.elevationMin <= tileTop) return i;
       }
     }
+
+    const v14Idx = resolveV14NativeDocFloorIndexMin(tileDoc, globalThis.canvas?.scene);
+    if (v14Idx !== null) return v14Idx;
+
+    // Same FloorCompositor fallback: native level id on the tile vs FloorStack bands.
+    try {
+      if (hasV14NativeLevels(globalThis.canvas?.scene)) {
+        const singleLevel = tileDoc?.level ?? tileDoc?._source?.level;
+        if (typeof singleLevel === 'string' && singleLevel.length > 0) {
+          for (let i = 0; i < floors.length; i += 1) {
+            if (floors[i].levelId === singleLevel) return i;
+          }
+        }
+        const levelsSet = tileDoc?.levels;
+        if (levelsSet?.size) {
+          for (const lid of levelsSet) {
+            for (let i = 0; i < floors.length; i += 1) {
+              if (floors[i].levelId === lid) return i;
+            }
+          }
+        }
+      }
+    } catch (_) {}
 
     const elev = Number.isFinite(Number(tileDoc?.elevation)) ? Number(tileDoc.elevation) : 0;
     for (let i = 0; i < floors.length; i++) {

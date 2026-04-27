@@ -784,19 +784,46 @@ export function readDocLevelsRange(doc) {
  */
 export function readWallHeightFlags(wallDoc) {
   const defaults = { bottom: -Infinity, top: Infinity };
+  const docObj = wallDoc?.document ?? wallDoc;
 
   // IMPORTANT: wall-height must remain authoritative even when Levels
   // compatibility mode is OFF so floor-scoped walls don't regress into
   // full-height blockers across all levels.
-  const wallHeightFlags = wallDoc?.flags?.['wall-height']
-    ?? wallDoc?.document?.flags?.['wall-height'];
-  const levelsFlags = wallDoc?.flags?.levels
-    ?? wallDoc?.document?.flags?.levels;
+  const wallHeightFlags = docObj?.flags?.['wall-height'];
+  const levelsFlags = docObj?.flags?.levels;
 
   // Prefer wall-height module bounds when present. If absent, fall back to
   // Levels wall ranges so level-scoped walls are not treated as full-height.
   const flags = wallHeightFlags || levelsFlags;
-  if (!flags) return defaults;
+  if (!flags) {
+    // V14-native fallback: walls can be level-scoped via the built-in `levels`
+    // set even when no legacy flags exist.
+    const scene = docObj?.parent ?? canvas?.scene ?? null;
+    if (hasV14NativeLevels(scene)) {
+      const levelsSet = docObj?.levels;
+      if (levelsSet?.size > 0) {
+        let bottom = Infinity;
+        let top = -Infinity;
+        for (const levelId of levelsSet) {
+          if (!levelId) continue;
+          const level = scene?.levels?.get?.(levelId);
+          if (!level) continue;
+          const levelBottomRaw = Number(level?.elevation?.bottom);
+          const levelTopRaw = Number(level?.elevation?.top);
+          const levelBottom = Number.isFinite(levelBottomRaw) ? levelBottomRaw : -Infinity;
+          const levelTop = Number.isFinite(levelTopRaw) ? levelTopRaw : Infinity;
+          if (levelBottom < bottom) bottom = levelBottom;
+          if (levelTop > top) top = levelTop;
+        }
+        if (Number.isFinite(bottom) || Number.isFinite(top)) {
+          if (!Number.isFinite(bottom)) bottom = -Infinity;
+          if (!Number.isFinite(top)) top = Infinity;
+          return { bottom, top };
+        }
+      }
+    }
+    return defaults;
+  }
 
   let bottom = -Infinity;
   let top = Infinity;
@@ -838,12 +865,14 @@ export function readWallHeightFlags(wallDoc) {
  * @returns {boolean}
  */
 export function wallHasHeightBounds(wallDoc) {
-  const wallHeightFlags = wallDoc?.flags?.['wall-height']
-    ?? wallDoc?.document?.flags?.['wall-height'];
-  const levelsFlags = wallDoc?.flags?.levels
-    ?? wallDoc?.document?.flags?.levels;
+  const docObj = wallDoc?.document ?? wallDoc;
+  const wallHeightFlags = docObj?.flags?.['wall-height'];
+  const levelsFlags = docObj?.flags?.levels;
   const flags = wallHeightFlags || levelsFlags;
-  if (!flags) return false;
+  if (!flags) {
+    const scene = docObj?.parent ?? canvas?.scene ?? null;
+    return !!(hasV14NativeLevels(scene) && docObj?.levels?.size > 0);
+  }
   const rawBottom = (flags.bottom !== undefined && flags.bottom !== null)
     ? flags.bottom
     : flags.rangeBottom;

@@ -515,20 +515,38 @@ export class ThreeLightSource {
 
           float intensity;
 
-          // Torch (20) + flame (21): tight ember + dim disk; flicker is TIME-ONLY (spatial dot/radius waves read as pinwheel/rings).
+          // Torch (20) + flame (21): wind-warped ember + dim disk (local warp on p only; vUvs/cookies unchanged).
           if (isFireCore > 0.5) {
             float ai = clamp(uAnimIntensity * 0.1, 0.02, 1.0);
             float brPx = max(uBrightRadius, 1.5);
             float uRad = max(uRadius, 1.0);
+
+            float wTime = uTime * (6.0 + ai * 8.0);
+            float seedK = fract(uSeed * 0.001 + 0.37) * 200.0;
+            vec2 whipOffset = vec2(
+              noise2(vec2(wTime * 0.8, seedK + 1.7)) * 2.0 - 1.0,
+              noise2(vec2(wTime * 0.9 + 17.4, seedK + 43.1)) * 2.0 - 1.0
+            );
+            // ~10x subtler than original whip so the core stays near center (avoids LOS circle clip / hard edge).
+            vec2 fireP = p + whipOffset * (brPx * (0.02 + ai * 0.05));
+            float lenFp = length(fireP);
+            // Angular variation without atan (avoids -x seam + atan(0,0) on some GLES1/ANGLE paths).
+            vec2 fdir = fireP * (1.0 / max(lenFp, 0.001));
+            float aWarp = dot(fdir, vec2(0.882, -0.472)) * 6.5 + dot(fdir, vec2(0.415, 0.910)) * 4.3;
+            float edgeNoise = 0.5 * noise2(vec2(aWarp, wTime * 1.2))
+              + 0.5 * noise2(vec2(aWarp * 1.37 + 2.1, wTime * 1.08 + 1.7));
+            float distMod = 1.0 - (edgeNoise * (0.03 + ai * 0.04));
+            float fireDistPx = lenFp * distMod;
+
             float ballPx = mix(2.8, 6.2, ai) + brPx * mix(0.04, 0.22, ai);
             ballPx = min(ballPx, mix(18.0, 30.0, ai));
             ballPx *= mix(1.0, 1.18, isFlame);
             ballPx *= 1.75 * 1.5;
             float fallPow = mix(12.0, 8.0, isFlame);
-            float t = distPx / max(ballPx, 0.5);
+            float t = fireDistPx / max(ballPx, 0.5);
             float ember = pow(max(0.0, 1.0 - t), fallPow);
 
-            float rn = distPx / uRad;
+            float rn = fireDistPx / uRad;
             float dOut = max(0.0, 1.0 - rn);
             float disk = pow(dOut, 0.88) * 0.62 + pow(dOut, 1.75) * 0.22;
 
@@ -1384,15 +1402,21 @@ export class ThreeLightSource {
    * Foundry torch: animation **intensity** (0–10) scales how strong the flicker is and
    * how much the bright core “breathes” (see Foundry lighting article / in-app tooltips).
    */
-  animateTorch(tMs, { speed = 5, intensity = 5, reverse = false, noiseScale: noiseScaleOverride } = {}) {
+  animateTorch(tMs, {
+    speed = 5,
+    intensity = 5,
+    reverse = false,
+    noiseScale: noiseScaleOverride,
+    windGusts = true,
+  } = {}) {
     const intNorm = this._clamp(intensity, 0, 10) / 10;
     const amplification = 0.05 + intNorm * 1.95;
     const ratioOscillationScale = 0.15 + intNorm * 1.85;
-    // Lower noise scale = longer wavelength along animation.time (less frame-to-frame pop on uIntensity).
     const noiseScale = Number.isFinite(noiseScaleOverride)
       ? noiseScaleOverride
       : (0.28 + intNorm * 0.55);
-    return this.animateFlickering(tMs, {
+
+    const res = this.animateFlickering(tMs, {
       speed,
       intensity,
       reverse,
@@ -1400,6 +1424,25 @@ export class ThreeLightSource {
       ratioOscillationScale,
       noiseScale,
     });
+
+    if (!windGusts) {
+      return res;
+    }
+
+    const tSec = this.animation.time;
+    const windStutter = Math.sin(tSec * 19.3) * Math.sin(tSec * 31.7 + 2.1) * Math.cos(tSec * 7.1);
+    let gustMul = 1.0 + (windStutter * 0.85 * intNorm);
+    if (windStutter < -0.4) {
+      gustMul *= 0.45;
+    }
+    if (windStutter > 0.6) {
+      gustMul *= 1.35;
+    }
+
+    return {
+      brightnessPulse: Math.max(0.1, res.brightnessPulse * gustMul),
+      ratioPulse: this._clamp(Math.max(0.1, res.ratioPulse * gustMul), 0, 1),
+    };
   }
 
   animatePulse(tMs, { speed = 5, intensity = 5, reverse = false } = {}) {
@@ -2058,7 +2101,13 @@ export class ThreeLightSource {
       u.uTime.value = this._shaderFireClock(this.animation.time);
     } else if (type === 'siren') {
       // Foundry siren uses animateTorch for brightnessPulse and a shader beam pattern.
-      const { brightnessPulse, ratioPulse } = this.animateTorch(tMs, { speed, intensity, reverse, noiseScale: 3 });
+      const { brightnessPulse, ratioPulse } = this.animateTorch(tMs, {
+        speed,
+        intensity,
+        reverse,
+        noiseScale: 3,
+        windGusts: false,
+      });
       u.uIntensity.value = brightnessPulse * darknessMul;
       u.uBrightRadius.value = this._baseRadiusPx * this._clamp(ratioPulse, 0, 1);
       u.uAnimType.value = 7;

@@ -1506,7 +1506,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
         top = swap;
       }
 
-      if (bottom <= elevation && elevation <= top) return true;
+      if (bottom <= elevation && elevation < top) return true;
     }
 
     return false;

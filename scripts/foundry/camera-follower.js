@@ -209,8 +209,18 @@ export class CameraFollower {
       if (suppressed) return;
       if (!policyOk) return;
 
-      // V14: if the token's level field changed, prefer syncing by level id
+      // V14: if the token's level field changed, prefer syncing by level id.
+      // Route through setActiveLevel so both token-driven and UI-driven changes
+      // share the same Foundry scene.view({ level }) transition path.
       if (levelChanged && changes.level) {
+        const levelCtx = this.setActiveLevel(changes.level, {
+          keepLockMode: true,
+          emit: true,
+          reason: 'token-level-changed',
+        });
+        if (levelCtx) {
+          return;
+        }
         const levelIdx = this._levels.findIndex((l) => l.levelId === changes.level);
         if (levelIdx >= 0) {
           this._setActiveLevelByIndex(levelIdx, {
@@ -629,6 +639,15 @@ export class CameraFollower {
     const token = controlled[0] || null;
     const tokenLevelId = token?.document?.level;
     if (tokenLevelId) {
+      const levelCtx = this.setActiveLevel(tokenLevelId, {
+        keepLockMode: true,
+        emit: options.emit !== false,
+        reason: options.reason || 'follow-controlled-token',
+      });
+      if (levelCtx) {
+        return true;
+      }
+
       const levelIdx = this._levels.findIndex((l) => l.levelId === tokenLevelId);
       if (levelIdx >= 0) {
         this._setActiveLevelByIndex(levelIdx, {

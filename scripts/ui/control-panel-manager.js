@@ -1688,11 +1688,13 @@ export class ControlPanelManager {
       const minsNum = typeof transitionMinutes === 'number' ? transitionMinutes : Number(transitionMinutes);
       const safeMinutes = Number.isFinite(minsNum) ? Math.max(0.1, Math.min(60.0, minsNum)) : 5.0;
 
-      // Persist immediately so other clients can't overwrite with old state mid-transition.
+      // Do not persist time targets to scene flags here.
+      // In Foundry V14, scene flag writes on the viewed scene can trigger same-scene
+      // redraw paths that surface as full loading transitions.
       this.controlState.timeOfDay = ((targetHour % 24) + 24) % 24;
-      await this._saveControlState();
 
-      await stateApplier.startTimeOfDayTransition(this.controlState.timeOfDay, safeMinutes, true, false);
+      // Runtime-only time transition; avoid StateApplier's saveToScene controlState write.
+      await stateApplier.startTimeOfDayTransition(this.controlState.timeOfDay, safeMinutes, false, false);
       this._updateClockTarget(this.controlState.timeOfDay);
     } catch (error) {
       log.error('Failed to start time-of-day transition:', error);
@@ -3538,8 +3540,17 @@ Current Weather:
       const scene = canvas?.scene;
       if (!scene || !canPersistSceneDocument()) return;
 
+      // V14 regression guard:
+      // Persisting `timeOfDay` to Scene flags causes document updates that can
+      // trigger same-scene redraw/transition paths. Keep time runtime-local and
+      // persist only non-time control fields.
+      const persistedControlState = { ...this.controlState };
+      try { delete persistedControlState.timeOfDay; } catch (_) {}
+      try { delete persistedControlState.timeTransitionMinutes; } catch (_) {}
+      try { delete persistedControlState.linkTimeToFoundry; } catch (_) {}
+
       extendMsaLocalFlagWriteGuard();
-      await scene.setFlag('map-shine-advanced', 'controlState', this.controlState);
+      await scene.setFlag('map-shine-advanced', 'controlState', persistedControlState);
       // One Foundry darkness write after persist — avoids hammering canvas.scene.update
       // on every clock tick / 100ms transition frame (can grey-break V2 rendering).
       await stateApplier.syncFoundryDarknessFromMapShineTime();

@@ -53,9 +53,16 @@ export async function mapShinePushSceneDarknessLevel(level) {
   const v = Number(level);
   if (!Number.isFinite(v) || !canvas?.scene) return;
   const pending = Math.max(0, Math.min(1, v));
-  if (isMapShineV2CanvasActive()) {
-    applySceneDarknessLocalOnly(pending);
-    return;
-  }
-  await canvas.scene.update({ 'environment.darknessLevel': pending });
+  // V14: scene.update({ environment.darknessLevel }) can trigger full same-scene
+  // canvas redraws. For time-of-day driven darkness, we only need an immediate
+  // local visual update; persistence already flows through Map Shine control flags.
+  applySceneDarknessLocalOnly(pending);
+
+  // Keep the Scene document instance locally aligned without forcing a network
+  // document update / draw cycle.
+  try {
+    if (typeof canvas.scene.updateSource === 'function') {
+      canvas.scene.updateSource({ environment: { darknessLevel: pending } });
+    }
+  } catch (_) {}
 }

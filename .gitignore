@@ -1,5 +1,4 @@
 # Ignore the Foundry source code bundle
-foundryvttsourcecode_v14
 .idea/
 node_modules
 gamesystemsourcecode
@@ -8,3 +7,4 @@ module-staging
 dist
 othermodules
 docs/
+foundryvttsourcecode_v14/

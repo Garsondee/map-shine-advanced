@@ -2745,13 +2745,19 @@ function _collectCanvasStateDiagnostic() {
 }
 
 /**
- * Foundry V14 redraws the canvas on same-scene level changes via {@link Scene#view}.
- * {@link Canvas#tearDown} is invoked with no arguments, so transition code cannot
- * infer the target scene from tearDown args — capture intent here at draw entry.
+ * Foundry V14 redraws the canvas for several same-scene operations (for example:
+ * native level switches, certain scene environment updates, or other document
+ * updates that request a redraw). `Canvas#tearDown` is invoked with no args, so
+ * transition code cannot infer draw intent at tearDown time.
+ *
+ * Capture draw intent at draw entry:
+ * - `sameSceneRedraw`: any draw targeting the currently viewed scene.
+ * - `sameSceneLevelSwitch`: same-scene redraw specifically caused by native level switch.
+ *
  * @param {unknown[]} drawArgs - arguments passed to {@link Canvas#draw}
- * @returns {boolean}
+ * @returns {{sameSceneRedraw:boolean, sameSceneLevelSwitch:boolean}}
  */
-function computeNativeSameSceneLevelSwitch(drawArgs) {
+function computeNativeSameSceneDrawIntent(drawArgs) {
   try {
     let drawTarget = drawArgs?.[0];
     if (drawTarget === undefined) {
@@ -2761,16 +2767,27 @@ function computeNativeSameSceneLevelSwitch(drawArgs) {
         drawTarget = null;
       }
     }
-    if (!drawTarget || drawTarget === null) return false;
+    if (!drawTarget || drawTarget === null) {
+      return { sameSceneRedraw: false, sameSceneLevelSwitch: false };
+    }
     const cur = canvas?.scene;
-    if (!cur || drawTarget?.id !== cur?.id) return false;
-    if (!hasV14NativeLevels(cur)) return false;
+    const sameSceneRedraw = !!(cur && drawTarget?.id === cur?.id);
+    if (!sameSceneRedraw) {
+      return { sameSceneRedraw: false, sameSceneLevelSwitch: false };
+    }
+    if (!hasV14NativeLevels(cur)) {
+      return { sameSceneRedraw: true, sameSceneLevelSwitch: false };
+    }
     const vo = canvas?._viewOptions;
-    if (!vo || vo.level === undefined) return false;
-    if (vo.level === canvas?.level?.id) return false;
-    return true;
+    if (!vo || vo.level === undefined) {
+      return { sameSceneRedraw: true, sameSceneLevelSwitch: false };
+    }
+    if (vo.level === canvas?.level?.id) {
+      return { sameSceneRedraw: true, sameSceneLevelSwitch: false };
+    }
+    return { sameSceneRedraw: true, sameSceneLevelSwitch: true };
   } catch (_) {
-    return false;
+    return { sameSceneRedraw: false, sameSceneLevelSwitch: false };
   }
 }
 
@@ -2785,7 +2802,9 @@ function installCanvasDrawWrapper() {
     const _drawWrapper = async function(wrapped, ...args) {
       try {
         if (!window.MapShine) window.MapShine = {};
-        window.MapShine.__nativeSameSceneLevelSwitch = computeNativeSameSceneLevelSwitch(args);
+        const drawIntent = computeNativeSameSceneDrawIntent(args);
+        window.MapShine.__nativeSameSceneRedraw = drawIntent.sameSceneRedraw === true;
+        window.MapShine.__nativeSameSceneLevelSwitch = drawIntent.sameSceneLevelSwitch === true;
       } catch (_) {}
 
       // ->->->-> Diagnostic state poller: logs canvas internals every 2s while draw is pending ->->->->
@@ -3043,11 +3062,12 @@ function installCanvasTransitionWrapper() {
     // XM-3: Wrapper function that fades to black before tearDown.
     // Used by both libWrapper and direct-wrap paths.
     const _tearDownWrapper = async function(wrapped, ...args) {
-      // V14: same-scene level switches call canvas.draw(sameScene) which runs
-      // tearDown() with no args. {@link computeNativeSameSceneLevelSwitch} sets
-      // __nativeSameSceneLevelSwitch on draw entry — use that here.
+      // V14: same-scene redraws call canvas.draw(sameScene) which runs tearDown()
+      // with no args. Use draw-entry intent markers to skip transition/loading
+      // overlay for same-scene redraws (darkness/time/environment updates, native
+      // level switches, etc.).
       try {
-        if (window.MapShine?.__nativeSameSceneLevelSwitch) {
+        if (window.MapShine?.__nativeSameSceneRedraw || window.MapShine?.__nativeSameSceneLevelSwitch) {
           return wrapped(...args);
         }
       } catch (_) {}
@@ -3828,6 +3848,7 @@ async function onCanvasReady(canvas) {
     if (!window.MapShine) window.MapShine = {};
     window.MapShine.__sceneTransitionActive = false;
     skipNativeLevelSwitchOverlay = !!window.MapShine.__nativeSameSceneLevelSwitch;
+    window.MapShine.__nativeSameSceneRedraw = false;
     window.MapShine.__nativeSameSceneLevelSwitch = false;
   } catch (_) {}
 
@@ -4126,6 +4147,8 @@ async function onCanvasReady(canvas) {
  */
 function onCanvasTearDown(canvas) {
   const lightNativeLevelSwitch = !!window.MapShine?.__nativeSameSceneLevelSwitch;
+  const lightNativeSameSceneRedraw = !!window.MapShine?.__nativeSameSceneRedraw;
+  const lightNativeSameScenePath = lightNativeLevelSwitch || lightNativeSameSceneRedraw;
   const tearDownSceneId = canvas?.scene?.id ?? null;
   const session = LoadSession.current();
   // canvasReady clears __nativeSameSceneLevelSwitch before some tearDown paths run.
@@ -4136,7 +4159,7 @@ function onCanvasTearDown(canvas) {
   //   invariant failures: coordinator=null vs foundry scene
   // and skipping UI attach (session stale) or stranding the load machine.
   const preserveInFlightSameSceneLoad = !!(
-    lightNativeLevelSwitch
+    lightNativeSameScenePath
     || (
       _createThreeCanvasRunning
       && session
@@ -4171,8 +4194,9 @@ function onCanvasTearDown(canvas) {
   installFogSaveSafetyPatch();
   try {
     if (!window.MapShine) window.MapShine = {};
-    // Same-scene V14 level redraw: do not flag a full scene transition (fog patch / UX).
-    if (!window.MapShine.__nativeSameSceneLevelSwitch) {
+    // Same-scene V14 redraws (level switch or environment redraw): do not flag
+    // a full scene transition (prevents loading overlay/reload UX for time/darkness).
+    if (!window.MapShine.__nativeSameSceneRedraw && !window.MapShine.__nativeSameSceneLevelSwitch) {
       window.MapShine.__sceneTransitionActive = true;
     }
   } catch (_) {}
@@ -4184,7 +4208,7 @@ function onCanvasTearDown(canvas) {
   safeDispose(() => introZoomEffect.dispose(), 'introZoomEffect.dispose');
 
   // CRITICAL: Pause time manager immediately to stop all animations (full scene teardown only).
-  if (!lightNativeLevelSwitch && effectComposer?.timeManager) {
+  if (!lightNativeSameScenePath && effectComposer?.timeManager) {
     safeDispose(() => effectComposer.timeManager.pause(), 'timeManager.pause');
   }
 
@@ -4219,7 +4243,7 @@ function onCanvasTearDown(canvas) {
 
   // EffectMaskRegistry removed - GpuSceneMaskCompositor handles all masks
 
-  if (!lightNativeLevelSwitch && window.MapShine?.maskManager && typeof window.MapShine.maskManager.dispose === 'function') {
+  if (!lightNativeSameScenePath && window.MapShine?.maskManager && typeof window.MapShine.maskManager.dispose === 'function') {
     safeDispose(() => window.MapShine.maskManager.dispose(), 'MaskManager.dispose');
   }
 
@@ -4234,7 +4258,7 @@ function onCanvasTearDown(canvas) {
     }
   }, 'compositor.clearFloorState');
 
-  if (!lightNativeLevelSwitch) {
+  if (!lightNativeSameScenePath) {
     // Cleanup three.js canvas
     destroyThreeCanvas();
 

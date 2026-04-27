@@ -675,11 +675,15 @@ export class FloorCompositor {
 
     /**
      * P2: Whether the bus scene has any objects on OVERLAY_THREE_LAYER (31).
-     * Checked cheaply each frame to skip the late overlay render pass when empty.
-     * Set to true when overlay content is added; reset/recomputed on populate.
+     * Revalidated periodically to avoid paying a permanent late-overlay render
+     * cost after transient overlay emitters/descriptors are removed.
      * @type {boolean}
      */
     this._hasOverlayLayerContent = false;
+    /** @type {number} Next timestamp (performance.now) for overlay-layer re-scan */
+    this._overlayLayerScanNextAt = 0;
+    /** @type {number} Min interval between overlay-layer scans in ms */
+    this._overlayLayerScanIntervalMs = 350;
 
     log.debug('FloorCompositor created');
   }
@@ -909,12 +913,16 @@ export class FloorCompositor {
     const camera = this.camera;
     if (!scene || !camera || !this.renderer) return;
 
-    // P2: Skip the late overlay render call when no objects are on OVERLAY_THREE_LAYER.
-    // This avoids an unnecessary renderer.render() call per frame on scenes without
-    // door icons or other late-overlay objects.
-    if (!this._hasOverlayLayerContent) {
-      // Cheap refresh: check if any bus scene child has the overlay layer enabled.
-      // Only scan top-level children (not full traverse) to keep this O(N-floors).
+    // P2: Skip the late overlay render call when no objects are on
+    // OVERLAY_THREE_LAYER. Re-scan periodically (or when currently false) so the
+    // flag can both promote and demote as overlay content appears/disappears.
+    const now = (typeof performance !== 'undefined' && typeof performance.now === 'function')
+      ? performance.now()
+      : Date.now();
+    const shouldRescan = !this._hasOverlayLayerContent || now >= this._overlayLayerScanNextAt;
+    if (shouldRescan) {
+      // Cheap refresh: check if any bus scene child has overlay layer enabled.
+      // Only scans top-level children (not full traverse) to keep this O(N-floors).
       const children = scene.children;
       let found = false;
       const overlayBit = 1 << OVERLAY_THREE_LAYER;
@@ -925,8 +933,10 @@ export class FloorCompositor {
         }
       }
       this._hasOverlayLayerContent = found;
-      if (!found) return;
+      const scanEvery = Math.max(100, Number(this._overlayLayerScanIntervalMs) || 350);
+      this._overlayLayerScanNextAt = now + scanEvery;
     }
+    if (!this._hasOverlayLayerContent) return;
 
     const renderer = this.renderer;
     const prevTarget = renderer.getRenderTarget();
@@ -2394,6 +2404,16 @@ export class FloorCompositor {
       });
 
       this._populateComplete = true;
+      // Ensure at least one fresh frame after async populate finishes.
+      // Without this, first-load occlusion/shadow masks can remain stale until a
+      // user camera interaction (pan/zoom) triggers another compositor render.
+      try {
+        const ms = window.MapShine;
+        ms?.cameraFollower?.forceSync?.();
+        ms?.unifiedCamera?.syncFromPixi?.('populate-complete');
+        ms?.renderLoop?.requestRender?.();
+        ms?.renderLoop?.requestContinuousRender?.(180);
+      } catch (_) {}
       return true;
     })().finally(() => {
       // Allow retry if the attempt failed or aborted before completion.
@@ -3279,7 +3299,9 @@ export class FloorCompositor {
     // This keeps interactive world controls (e.g. Three door icons) above
     // fog, bloom, color correction, and any screen-space passes.
     if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: lateOverlay.render'); } catch (_) {} }
+    if (_profiling) _profileT0 = performance.now();
     this._renderLateWorldOverlay();
+    if (_profiling) this._recordPassTiming('lateOverlayRender', _profileT0);
     if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: lateOverlay.render DONE'); } catch (_) {} }
 
     // Cloud-top blit: render after late world overlay so atmospheric cloud tops
@@ -3675,7 +3697,15 @@ export class FloorCompositor {
    */
   _onLevelContextChanged(payload) {
     if (!this._busPopulated) return;
+    try {
+      this._overheadShadowEffect?.invalidateDynamicCaches?.('level-context-changed');
+    } catch (_) {}
     this._applyCurrentFloorVisibility(payload);
+    try {
+      const ms = window.MapShine;
+      ms?.renderLoop?.requestRender?.();
+      ms?.renderLoop?.requestContinuousRender?.(220);
+    } catch (_) {}
   }
 
   /**

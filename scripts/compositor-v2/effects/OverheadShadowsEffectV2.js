@@ -1917,7 +1917,27 @@ export class OverheadShadowsEffectV2 {
     // Optimization: Skip update if params haven't changed
     const camZoom = this._getEffectiveZoom();
     const outdoorBuildingShadow = this._resolveOutdoorBuildingShadowParams();
-    const updateHash = `${hour.toFixed(3)}_${this.params.sunLatitude}_${this.params.opacity}_${this.params.length}_${this.params.softness}_${this.params.outdoorShadowLengthScale}_${this.params.indoorReceiverShadowLengthScale}_${camZoom.toFixed(4)}_${this.params.indoorShadowEnabled}_${outdoorBuildingShadow.opacity}_${outdoorBuildingShadow.lengthScale}_${this.params.indoorShadowSoftness}_${this.params.indoorFluidShadowSoftness}_${this.params.indoorFluidShadowIntensityBoost}_${this.params.indoorFluidColorSaturation}_${this.params.tileProjectionEnabled}_${this.params.tileProjectionOpacity}_${this.params.tileProjectionLengthScale}_${this.params.tileProjectionSoftness}_${this.params.tileProjectionThreshold}_${this.params.tileProjectionPower}_${this.params.tileProjectionOutdoorOpacityScale}_${this.params.tileProjectionIndoorOpacityScale}_${this.params.tileProjectionSortBias}_${this.params.fluidColorEnabled}_${this.params.fluidEffectTransparency}_${this.params.fluidShadowIntensityBoost}_${this.params.fluidShadowSoftness}_${this.params.fluidColorBoost}_${this.params.fluidColorSaturation}_${this.params.debugView}_${hoverRevealActive ? 1 : 0}`;
+    // Floor changes must invalidate this cache even when scalar params/camera are
+    // unchanged, otherwise wall/roof occlusion uniforms can remain one floor behind
+    // until a pan/zoom modifies camZoom and forces an update.
+    let floorContextSig = 'nofloor';
+    try {
+      const fs = window.MapShine?.floorStack ?? null;
+      const active = fs?.getActiveFloor?.() ?? null;
+      const activeKey = active?.compositorKey != null
+        ? String(active.compositorKey)
+        : `${Number(active?.elevationMin)}:${Number(active?.elevationMax)}`;
+      const activeIdx = Number.isFinite(Number(active?.index)) ? Number(active.index) : -1;
+      const floors = fs?.getFloors?.() ?? [];
+      const upperSig = Array.isArray(floors)
+        ? floors
+          .filter((f) => Number.isFinite(Number(f?.index)) && Number(f.index) > activeIdx)
+          .map((f) => (f?.compositorKey != null ? String(f.compositorKey) : `${Number(f?.elevationMin)}:${Number(f?.elevationMax)}`))
+          .join('|')
+        : '';
+      floorContextSig = `${activeIdx}:${activeKey}:${upperSig}`;
+    } catch (_) {}
+    const updateHash = `${hour.toFixed(3)}_${this.params.sunLatitude}_${this.params.opacity}_${this.params.length}_${this.params.softness}_${this.params.outdoorShadowLengthScale}_${this.params.indoorReceiverShadowLengthScale}_${camZoom.toFixed(4)}_${this.params.indoorShadowEnabled}_${outdoorBuildingShadow.opacity}_${outdoorBuildingShadow.lengthScale}_${this.params.indoorShadowSoftness}_${this.params.indoorFluidShadowSoftness}_${this.params.indoorFluidShadowIntensityBoost}_${this.params.indoorFluidColorSaturation}_${this.params.tileProjectionEnabled}_${this.params.tileProjectionOpacity}_${this.params.tileProjectionLengthScale}_${this.params.tileProjectionSoftness}_${this.params.tileProjectionThreshold}_${this.params.tileProjectionPower}_${this.params.tileProjectionOutdoorOpacityScale}_${this.params.tileProjectionIndoorOpacityScale}_${this.params.tileProjectionSortBias}_${this.params.fluidColorEnabled}_${this.params.fluidEffectTransparency}_${this.params.fluidShadowIntensityBoost}_${this.params.fluidShadowSoftness}_${this.params.fluidColorBoost}_${this.params.fluidColorSaturation}_${this.params.debugView}_${hoverRevealActive ? 1 : 0}_${floorContextSig}`;
 
     const receiverMask = this._resolveReceiverOutdoorsMaskTexture();
     const upperObTextures = this._collectUpperFloorOutdoorsTextures();
@@ -2052,6 +2072,22 @@ export class OverheadShadowsEffectV2 {
       this._lastOutdoorsMaskRef = receiverMask;
       this._lastObUpperSig = obUpperSig;
     }
+  }
+
+  /**
+   * Force the next update() to recompute dynamic uniforms/mask bindings.
+   * Use this on scene or level transitions where visual context can change
+   * without camera/time parameter deltas.
+   *
+   * @param {string} [reason='manual']
+   */
+  invalidateDynamicCaches(reason = 'manual') {
+    this._lastUpdateHash = null;
+    this._lastOutdoorsMaskRef = null;
+    this._lastObUpperSig = '';
+    try {
+      log.debug(`OverheadShadowsEffectV2: invalidated dynamic caches (${String(reason)})`);
+    } catch (_) {}
   }
 
   /**

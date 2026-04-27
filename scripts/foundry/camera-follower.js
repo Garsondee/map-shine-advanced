@@ -165,6 +165,10 @@ export class CameraFollower {
     // to whichever level Foundry is now viewing.
     const canvasReadyId = Hooks.on('canvasReady', () => {
       this._syncToViewedLevel({ emit: true, reason: 'canvas-ready' });
+      // Scene transitions can keep the same level-id/index values; force a
+      // resync broadcast so render caches are invalidated even when context
+      // appears "unchanged" by value comparison.
+      this._emitLevelContextChanged('canvas-ready-force-resync');
     });
     this._hookIds.push({ name: 'canvasReady', id: canvasReadyId });
 

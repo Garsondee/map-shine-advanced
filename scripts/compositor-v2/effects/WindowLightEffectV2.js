@@ -37,6 +37,8 @@ import {
   tileHasLevelsRange,
   readTileLevelsFlags,
   getViewedLevelBackgroundSrc,
+  getVisibleLevelBackgroundLayers,
+  resolveV14NativeDocFloorIndexMin,
 } from '../../foundry/levels-scene-flags.js';
 import { weatherController, PrecipitationType } from '../../core/WeatherController.js';
 
@@ -75,6 +77,8 @@ export class WindowLightEffectV2 {
 
     /** @type {number} Active floor index for visibility gating. */
     this._activeFloorIndex = 0;
+    /** @type {number|null} Per-pass render floor override (set by FloorCompositor). */
+    this._renderFloorIndex = null;
 
     /**
      * Per-tile overlay entries.
@@ -85,13 +89,15 @@ export class WindowLightEffectV2 {
     /** @type {object|null} */
     this._sharedUniforms = null;
 
-    /** @type {{ skyTintColor: {r:number,g:number,b:number}, sunAzimuthDeg: number, skyIntensity01: number, sceneDarkness01: (number|null), effectiveDarkness01: (number|null) }} */
+    /** @type {{ skyTintColor: {r:number,g:number,b:number}, sunAzimuthDeg: number, skyIntensity01: number, sceneDarkness01: (number|null), effectiveDarkness01: (number|null), skyTintDarknessLightsEnabled: (boolean|null), skyTintDarknessLightsIntensity: (number|null) }} */
     this._skyState = {
       skyTintColor: { r: 1.0, g: 1.0, b: 1.0 },
       sunAzimuthDeg: 180.0,
       skyIntensity01: 1.0,
       sceneDarkness01: null,
       effectiveDarkness01: null,
+      skyTintDarknessLightsEnabled: null,
+      skyTintDarknessLightsIntensity: null,
     };
 
     this.params = {
@@ -356,6 +362,20 @@ export class WindowLightEffectV2 {
   }
 
   /**
+   * Set/clear the current render floor index for per-level lighting passes.
+   * When finite, this overrides active-floor visibility so each slice receives
+   * only its own window overlays.
+   * @param {number|null} floorIndex
+   */
+  setRenderFloorIndex(floorIndex = null) {
+    const next = Number(floorIndex);
+    this._renderFloorIndex = Number.isFinite(next) ? next : null;
+    for (const entry of this._overlays.values()) {
+      entry.mesh.visible = this._isFloorVisible(entry.floorIndex);
+    }
+  }
+
+  /**
    * Populate window overlays for all tiles in the scene.
    *
    * @param {object} foundrySceneData
@@ -381,44 +401,52 @@ export class WindowLightEffectV2 {
     // The background is not in canvas.scene.tiles.contents — it's handled
     // separately by FloorRenderBus as __bg_image__. Check for its _Windows
     // or _Structural mask and create an overlay if found.
-    const bgSrc = getViewedLevelBackgroundSrc(canvas?.scene) ?? canvas?.scene?.background?.src ?? '';
-    if (bgSrc) {
+    const scene = canvas?.scene ?? null;
+    const visibleBgLayers = getVisibleLevelBackgroundLayers(scene);
+    const fallbackBgSrc = getViewedLevelBackgroundSrc(scene) ?? scene?.background?.src ?? '';
+    const bgLayers = visibleBgLayers.length
+      ? visibleBgLayers.map((l, i) => ({ src: String(l?.src || '').trim(), floorIndex: i }))
+      : (fallbackBgSrc ? [{ src: String(fallbackBgSrc).trim(), floorIndex: 0 }] : []);
+    for (let i = 0; i < bgLayers.length; i += 1) {
+      const bgSrc = bgLayers[i]?.src;
+      const bgFloorIndex = Number.isFinite(Number(bgLayers[i]?.floorIndex))
+        ? Number(bgLayers[i].floorIndex)
+        : i;
+      if (!bgSrc) continue;
       const dotIdx = bgSrc.lastIndexOf('.');
       const bgBasePath = dotIdx > 0 ? bgSrc.substring(0, dotIdx) : bgSrc;
       const bgWinResult = await probeMaskFile(bgBasePath, '_Windows');
       const bgStructResult = bgWinResult?.path ? null : await probeMaskFile(bgBasePath, '_Structural');
       const bgMaskPath = bgWinResult?.path ?? bgStructResult?.path;
+      if (!bgMaskPath) continue;
 
-      if (bgMaskPath) {
-        // Background geometry: scene rect in world space.
-        const sceneW = foundrySceneData?.sceneWidth ?? foundrySceneData?.width ?? 0;
-        const sceneH = foundrySceneData?.sceneHeight ?? foundrySceneData?.height ?? 0;
-        const sceneX = foundrySceneData?.sceneX ?? 0;
-        const sceneY = foundrySceneData?.sceneY ?? 0;
-        const centerX = sceneX + sceneW / 2;
-        const centerY = worldH - (sceneY + sceneH / 2);
+      // Background geometry: scene rect in world space.
+      const sceneW = foundrySceneData?.sceneWidth ?? foundrySceneData?.width ?? 0;
+      const sceneH = foundrySceneData?.sceneHeight ?? foundrySceneData?.height ?? 0;
+      const sceneX = foundrySceneData?.sceneX ?? 0;
+      const sceneY = foundrySceneData?.sceneY ?? 0;
+      const centerX = sceneX + sceneW / 2;
+      const centerY = worldH - (sceneY + sceneH / 2);
 
-        // Background is always floor 0, Z just above the bg image plane.
-        const GROUND_Z = 1000;
-        const z = GROUND_Z - 1 + WINDOW_Z_OFFSET;
+      const GROUND_Z = 1000;
+      const z = GROUND_Z + bgFloorIndex + WINDOW_Z_OFFSET;
+      const bgId = i === 0 ? '__bg_image__' : `__bg_image__${i}`;
 
-        this._createOverlay('__bg_image__', 0, {
-          maskUrl: bgMaskPath,
-          centerX, centerY,
-          w: sceneW,
-          h: sceneH,
-          z,
-          rotation: 0,
-          intensityMultiplier: 1.0,
-          isOverhead: false,
-          gen,
-        });
+      this._createOverlay(bgId, bgFloorIndex, {
+        maskUrl: bgMaskPath,
+        centerX, centerY,
+        w: sceneW,
+        h: sceneH,
+        z,
+        rotation: 0,
+        intensityMultiplier: 1.0,
+        isOverhead: false,
+        gen,
+      });
 
-        overlayCount++;
-        perFloorCounts.set(0, (perFloorCounts.get(0) ?? 0) + 1);
-        this.params.hasWindowMask = true;
-        log.info(`WindowLightEffectV2: created background overlay (${sceneW}x${sceneH})`);
-      }
+      overlayCount++;
+      perFloorCounts.set(bgFloorIndex, (perFloorCounts.get(bgFloorIndex) ?? 0) + 1);
+      this.params.hasWindowMask = true;
     }
 
     // ── Process placed tiles ──────────────────────────────────────────────
@@ -496,7 +524,8 @@ export class WindowLightEffectV2 {
       .join(', ');
     log.info(`WindowLightEffectV2 floor assignment: active=${activeIdx}, overlays=[${floorBreakdown || 'none'}]`);
 
-    log.info(`WindowLightEffectV2 populated: ${overlayCount} overlay(s) (${bgSrc ? '1 bg + ' : ''}${overlayCount - (bgSrc && overlayCount > 0 ? 1 : 0)} tiles)`);
+    const bgCount = bgLayers.length;
+    log.info(`WindowLightEffectV2 populated: ${overlayCount} overlay(s) (${bgCount > 0 ? `${bgCount} bg + ` : ''}${Math.max(0, overlayCount - bgCount)} tiles)`);
   }
 
   /**
@@ -556,14 +585,22 @@ export class WindowLightEffectV2 {
     u.uFlickerAmount.value = Math.max(0.0, Number(this.params.flickerAmount) || 0);
 
     const skyTint = this._skyState.skyTintColor;
+    const tintR = Number(skyTint.r);
+    const tintG = Number(skyTint.g);
+    const tintB = Number(skyTint.b);
     u.uSkyTintColor.value.setRGB(
-      Math.max(0.01, Number(skyTint.r) || 1.0),
-      Math.max(0.01, Number(skyTint.g) || 1.0),
-      Math.max(0.01, Number(skyTint.b) || 1.0)
+      Math.max(0.01, Number.isFinite(tintR) ? tintR : 1.0),
+      Math.max(0.01, Number.isFinite(tintG) ? tintG : 1.0),
+      Math.max(0.01, Number.isFinite(tintB) ? tintB : 1.0)
     );
-    u.uUseSkyTint.value = this.params.useSkyTint ? 1.0 : 0.0;
+    const skyTintBySkyColorEnabled = this._skyState.skyTintDarknessLightsEnabled !== false;
+    const skyTintBySkyColorIntensity = Number(this._skyState.skyTintDarknessLightsIntensity);
+    const skyTintBySkyColorMul = Number.isFinite(skyTintBySkyColorIntensity)
+      ? Math.max(0.0, skyTintBySkyColorIntensity)
+      : 1.0;
+    u.uUseSkyTint.value = (this.params.useSkyTint && skyTintBySkyColorEnabled) ? 1.0 : 0.0;
     const skyIntensity01 = clamp01(this._skyState.skyIntensity01);
-    u.uSkyTintStrength.value = Math.max(0.0, Number(this.params.skyTintStrength) || 0.0) * skyIntensity01;
+    u.uSkyTintStrength.value = Math.max(0.0, Number(this.params.skyTintStrength) || 0.0) * skyIntensity01 * skyTintBySkyColorMul;
 
     const stateDarkness = Number(this._skyState.sceneDarkness01);
     const stateEffectiveDarkness = Number(this._skyState.effectiveDarkness01);
@@ -663,10 +700,13 @@ export class WindowLightEffectV2 {
     if (!state || typeof state !== 'object') return;
 
     if (state.skyTintColor && typeof state.skyTintColor === 'object') {
+      const sr = Number(state.skyTintColor.r);
+      const sg = Number(state.skyTintColor.g);
+      const sb = Number(state.skyTintColor.b);
       this._skyState.skyTintColor = {
-        r: Number(state.skyTintColor.r) || 1.0,
-        g: Number(state.skyTintColor.g) || 1.0,
-        b: Number(state.skyTintColor.b) || 1.0,
+        r: Number.isFinite(sr) ? sr : 1.0,
+        g: Number.isFinite(sg) ? sg : 1.0,
+        b: Number.isFinite(sb) ? sb : 1.0,
       };
     }
     if (Number.isFinite(Number(state.sunAzimuthDeg))) {
@@ -680,6 +720,12 @@ export class WindowLightEffectV2 {
       : null;
     this._skyState.effectiveDarkness01 = Number.isFinite(Number(state.effectiveDarkness01))
       ? clamp01(state.effectiveDarkness01)
+      : null;
+    this._skyState.skyTintDarknessLightsEnabled = (typeof state.skyTintDarknessLightsEnabled === 'boolean')
+      ? state.skyTintDarknessLightsEnabled
+      : null;
+    this._skyState.skyTintDarknessLightsIntensity = Number.isFinite(Number(state.skyTintDarknessLightsIntensity))
+      ? Number(state.skyTintDarknessLightsIntensity)
       : null;
   }
 
@@ -1127,6 +1173,9 @@ export class WindowLightEffectV2 {
       }
     }
 
+    const v14Idx = resolveV14NativeDocFloorIndexMin(tileDoc, globalThis.canvas?.scene);
+    if (v14Idx !== null) return v14Idx;
+
     const elev = Number.isFinite(Number(tileDoc?.elevation)) ? Number(tileDoc.elevation) : 0;
     for (let i = 0; i < floors.length; i++) {
       const f = floors[i];
@@ -1136,6 +1185,8 @@ export class WindowLightEffectV2 {
   }
 
   _isFloorVisible(floorIndex) {
+    const renderFloor = Number(this._renderFloorIndex);
+    if (Number.isFinite(renderFloor)) return Number(floorIndex) === renderFloor;
     const active = Number.isFinite(this._activeFloorIndex) ? this._activeFloorIndex : 0;
     return Number(floorIndex) === active;
   }

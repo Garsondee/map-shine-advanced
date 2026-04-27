@@ -2946,6 +2946,8 @@ export class FloorCompositor {
           skyIntensity01: Number.isFinite(skyIntensity01) ? Math.max(0.0, Math.min(1.0, skyIntensity01)) : 1.0,
           sceneDarkness01,
           effectiveDarkness01,
+          skyTintDarknessLightsEnabled: this._skyColorEffect?.params?.skyTintDarknessLightsEnabled,
+          skyTintDarknessLightsIntensity: this._skyColorEffect?.params?.skyTintDarknessLightsIntensity,
         });
       } catch (_) {}
       try {
@@ -4756,6 +4758,7 @@ export class FloorCompositor {
       // Lighting pass
       if (resolveEffectEnabled(this._lightingEffect)) {
         if (_profiling) _profileT0 = performance.now();
+        this._windowLightEffect?.setRenderFloorIndex?.(levelIndex);
         const winScene = resolveEffectEnabled(this._windowLightEffect)
           ? this._windowLightEffect._scene : null;
         const shadowW = Number(combinedShadowRawTex?.image?.width) || levelSceneRT.width || 1;
@@ -4971,6 +4974,7 @@ export class FloorCompositor {
       // Restore water to global state after this level's pass
       try { this._waterEffect?.clearLevelContext?.(); } catch (_) {}
     }
+    this._windowLightEffect?.setRenderFloorIndex?.(null);
 
     // Release pool entries for levels no longer visible.
     this._levelRTPool.releaseStale(activeLevels);

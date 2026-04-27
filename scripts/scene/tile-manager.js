@@ -3017,8 +3017,23 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     const oIndex = (oiy * this._outdoorsMaskWidth + oix) * 4;
     const odA = this._outdoorsMaskData[oIndex + 3] / 255;
     const odR = this._outdoorsMaskData[oIndex] / 255;
-    const isOutdoor = (odA > 0.08) ? (odR >= 0.45 ? 1 : 0) : 1;
-    return Math.max(0, 1 - interiorDarkness * (1 - isOutdoor));
+    const odG = this._outdoorsMaskData[oIndex + 1] / 255;
+    const odB = this._outdoorsMaskData[oIndex + 2] / 255;
+
+    // Keep CPU overhead dim decode consistent with LightingEffectV2:
+    // - transparent/invalid mask pixels should behave as outdoors (no dim)
+    // - ignore low-level mask noise that can produce thin row artifacts
+    const outdoorRaw = Math.max(0, Math.min(1, Math.max(odR, Math.max(odG, odB))));
+    const outdoorMid = Math.max(0, Math.min(1, (outdoorRaw - 0.18) / (0.82 - 0.18)));
+    const outdoorSmooth = outdoorMid * outdoorMid * (3 - 2 * outdoorMid); // smoothstep
+    const outdoorLoHi = (outdoorRaw <= 0.10) ? 0 : ((outdoorRaw >= 0.90) ? 1 : outdoorSmooth);
+    const alphaValid = odA >= 0.5 ? 1 : 0;
+    const isOutdoor = (alphaValid > 0) ? outdoorLoHi : 1.0;
+
+    const indoorSignal = Math.max(0, Math.min(1, 1 - isOutdoor));
+    const indoorMid = Math.max(0, Math.min(1, (indoorSignal - 0.30) / (0.70 - 0.30)));
+    const indoorConfidence = indoorMid * indoorMid * (3 - 2 * indoorMid); // smoothstep
+    return Math.max(0, 1 - interiorDarkness * indoorConfidence);
   }
 
   /**

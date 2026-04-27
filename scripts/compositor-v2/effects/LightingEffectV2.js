@@ -445,6 +445,7 @@ export class LightingEffectV2 {
         tOutdoorsForRoofLight: { value: null },
         uHasOutdoorsForRoofLight: { value: 0 },
         uOutdoorsForRoofLightFlipY: { value: 0 },
+        uOutdoorsForRoofLightTexelSize: { value: new THREE.Vector2(0, 0) },
         // Half-res T from OverheadShadowsEffectV2: single source for geometric ceiling gate.
         tCeilingLightTransmittance: { value: null },
         uHasCeilingLightTransmittance: { value: 0 },
@@ -453,6 +454,8 @@ export class LightingEffectV2 {
       // These shader sources are embedded in JS template literals (backticks).
       // Never include backticks inside shader comments/strings; it will break JS parsing.
       vertexShader: /* glsl */`
+        precision highp float;
+        precision highp int;
         varying vec2 vUv;
         void main() {
           vUv = uv;
@@ -460,6 +463,8 @@ export class LightingEffectV2 {
         }
       `,
       fragmentShader: /* glsl */`
+        precision highp float;
+        precision highp int;
         uniform sampler2D tScene;
         uniform sampler2D tLightSources;
         uniform sampler2D tLightWindow;
@@ -506,6 +511,7 @@ export class LightingEffectV2 {
         uniform sampler2D tOutdoorsForRoofLight;
         uniform float uHasOutdoorsForRoofLight;
         uniform float uOutdoorsForRoofLightFlipY;
+        uniform vec2 uOutdoorsForRoofLightTexelSize;
         uniform sampler2D tCeilingLightTransmittance;
         uniform float uHasCeilingLightTransmittance;
         varying vec2 vUv;
@@ -548,9 +554,32 @@ export class LightingEffectV2 {
           if (uHasOutdoorsForRoofLight > 0.5) {
             vec2 ouvId = sceneUvFoundry;
             if (uOutdoorsForRoofLightFlipY > 0.5) ouvId.y = 1.0 - ouvId.y;
-            vec4 odId = texture2D(tOutdoorsForRoofLight, ouvId);
-            float odAId = clamp(odId.a, 0.0, 1.0);
-            isOutdoorForInteriorDim = (odAId > 0.08) ? step(0.45, odId.r) : 1.0;
+            // Vertical neighborhood max suppresses isolated 1px horizontal rows
+            // from mask composition/filtering while preserving authored regions.
+            vec2 oy = vec2(0.0, uOutdoorsForRoofLightTexelSize.y);
+            vec4 odIdC = texture2D(tOutdoorsForRoofLight, clamp(ouvId, 0.0, 1.0));
+            vec4 odIdU = texture2D(tOutdoorsForRoofLight, clamp(ouvId + oy, 0.0, 1.0));
+            vec4 odIdD = texture2D(tOutdoorsForRoofLight, clamp(ouvId - oy, 0.0, 1.0));
+            vec4 odId = max(odIdC, max(odIdU, odIdD));
+            // Robust decode for interior dimming:
+            // - outdoors masks are authored mostly binary (0/1)
+            // - composed/filtered textures can introduce tiny mid-tone rows
+            //   that become visible as horizontal dark bands when scaled by
+            //   uInteriorDarkness.
+            // Snap near-extremes to remove seam/banding noise while preserving
+            // real indoor/outdoor transitions.
+            float outdoorRaw = clamp(max(odId.r, max(odId.g, odId.b)), 0.0, 1.0);
+            float outdoorMid = smoothstep(0.18, 0.82, outdoorRaw);
+            float outdoorLoHi = (outdoorRaw <= 0.10) ? 0.0 : ((outdoorRaw >= 0.90) ? 1.0 : outdoorMid);
+            // Transparent/invalid outdoors pixels should not darken ambient.
+            // In those regions treat as "outdoors" (1.0), then blend toward the
+            // decoded RGB classification only where alpha is confidently present.
+            // Interior-darkness should only trust clearly authored alpha.
+            // Soft alpha ramps (from filtering/composition) can form thin
+            // horizontal rows that interiorDarkness amplifies; treat those as
+            // outdoors to avoid residual banding.
+            float outdoorsAlphaValid = step(0.5, clamp(odId.a, 0.0, 1.0));
+            isOutdoorForInteriorDim = mix(1.0, outdoorLoHi, outdoorsAlphaValid);
           }
 
           // Roof / tree canopy: prefer packed ceiling transmittance T (half-res blit from
@@ -659,7 +688,12 @@ export class LightingEffectV2 {
           // sample the map border and smear interior classification (horizontal bands
           // in the grey margin). Match building-shadow guard.
           float isOutdoorForInteriorDimSafe = mix(1.0, isOutdoorForInteriorDim, inSceneBounds);
-          ambientAfterDark *= max(0.0, 1.0 - uInteriorDarkness * (1.0 - isOutdoorForInteriorDimSafe));
+          // Only apply interior-darkness where the mask confidently indicates
+          // "indoors". This rejects low-level mask noise/seams that otherwise
+          // become visible as broad banding when interior darkness is increased.
+          float indoorSignal = clamp(1.0 - isOutdoorForInteriorDimSafe, 0.0, 1.0);
+          float indoorConfidence = smoothstep(0.30, 0.70, indoorSignal);
+          ambientAfterDark *= max(0.0, 1.0 - uInteriorDarkness * indoorConfidence);
 
           // Total illumination = ambient (after darkness) + dynamic lights.
           vec3 totalIllumination = ambientAfterDark + directLight;
@@ -836,6 +870,7 @@ export class LightingEffectV2 {
   _refreshLightsForLevelsPerspective() {
     if (!this._initialized) return;
     const lightsCollection = canvas?.scene?.lights;
+    const sceneDarkness = readFoundryDarkness01();
 
     for (const light of this._lights.values()) {
       if (!light?.mesh) continue;
@@ -847,7 +882,7 @@ export class LightingEffectV2 {
           if (live) doc = live;
         }
       } catch (_) {}
-      light.mesh.visible = isLightVisibleForPerspective(doc);
+      light.mesh.visible = this._isDocVisibleForLighting(doc, sceneDarkness);
     }
 
     for (const ds of this._darknessSources.values()) {
@@ -860,8 +895,40 @@ export class LightingEffectV2 {
           if (live) doc = live;
         }
       } catch (_) {}
-      ds.mesh.visible = isLightVisibleForPerspective(doc);
+      ds.mesh.visible = this._isDocVisibleForLighting(doc, sceneDarkness);
     }
+  }
+
+  /**
+   * Foundry visibility gate for AmbientLight docs:
+   * - Levels/perspective visibility
+   * - hidden flag
+   * - darkness activation range (`config.darkness.{min,max}`)
+   * @private
+   * @param {object|null|undefined} doc
+   * @param {number} sceneDarkness
+   * @returns {boolean}
+   */
+  _isDocVisibleForLighting(doc, sceneDarkness) {
+    if (!doc) return false;
+    if (!isLightVisibleForPerspective(doc)) return false;
+    if (doc.hidden === true) return false;
+
+    const d = clamp01(Number.isFinite(sceneDarkness) ? sceneDarkness : readFoundryDarkness01());
+    const darknessRange = doc?.config?.darkness ?? doc?.darkness;
+    if (!darknessRange || typeof darknessRange !== 'object') return true;
+
+    const minRaw = Number(darknessRange.min);
+    const maxRaw = Number(darknessRange.max);
+    const hasMin = Number.isFinite(minRaw);
+    const hasMax = Number.isFinite(maxRaw);
+    if (!hasMin && !hasMax) return true;
+
+    const min = hasMin ? clamp01(minRaw) : 0;
+    const max = hasMax ? clamp01(maxRaw) : 1;
+    const low = Math.min(min, max);
+    const high = Math.max(min, max);
+    return d >= low && d <= high;
   }
 
   /**
@@ -1062,17 +1129,20 @@ export class LightingEffectV2 {
     this.params.darknessLevel = sceneDarkness;
 
     // Update light animations
+    const foundrySceneDarkness = readFoundryDarkness01();
     for (const light of this._lights.values()) {
       try {
-        const visibleForPerspective = isLightVisibleForPerspective(light?.document);
         if (light?.mesh) {
-          light.mesh.visible = visibleForPerspective && (light?.document?.hidden !== true);
+          light.mesh.visible = this._isDocVisibleForLighting(light?.document, foundrySceneDarkness);
         }
         light.updateAnimation(timeInfo, sceneDarkness);
       } catch (_) {}
     }
     for (const ds of this._darknessSources.values()) {
       try {
+        if (ds?.mesh) {
+          ds.mesh.visible = this._isDocVisibleForLighting(ds?.document, foundrySceneDarkness);
+        }
         ds.updateAnimation(timeInfo);
       } catch (_) {}
     }
@@ -1317,6 +1387,7 @@ export class LightingEffectV2 {
               { ndcX: -1, ndcY:  1, key: '01' },
               { ndcX:  1, ndcY:  1, key: '11' },
             ];
+            let validCornerCount = 0;
 
             for (const c of corners) {
               ndc.set(c.ndcX, c.ndcY, 0.5);
@@ -1330,6 +1401,7 @@ export class LightingEffectV2 {
               const iy = cam.position.y + dir.y * t;
               if (ix < minX) minX = ix; if (iy < minY) minY = iy;
               if (ix > maxX) maxX = ix; if (iy > maxY) maxY = iy;
+              validCornerCount += 1;
 
               if (c.key === '00') { c00x = ix; c00y = iy; }
               else if (c.key === '10') { c10x = ix; c10y = iy; }
@@ -1339,6 +1411,15 @@ export class LightingEffectV2 {
 
             if (minX !== Infinity) {
               vMinX = minX; vMinY = minY; vMaxX = maxX; vMaxY = maxY;
+            }
+            // If any corner ray misses the ground plane, never keep mixed
+            // default 0..1 corners; that can create horizontal/diagonal UV bands.
+            // Fall back to axis-aligned bounds corners for a stable mapping.
+            if (validCornerCount < 4 && minX !== Infinity) {
+              c00x = minX; c00y = minY;
+              c10x = maxX; c10y = minY;
+              c01x = minX; c01y = maxY;
+              c11x = maxX; c11y = maxY;
             }
           }
         }
@@ -1385,13 +1466,51 @@ export class LightingEffectV2 {
     }
 
     if (outdoorsMaskTexture) {
+      // Floor-authored/bundle outdoors textures can arrive with mipmapped minFilter
+      // or wrap modes that are fine for sprites but unstable for scene-UV mask
+      // sampling (visible as horizontal/row banding when interiorDarkness scales
+      // ambient). Force deterministic non-mip clamp sampling for this pass.
+      try {
+        const THREE = window.THREE;
+        if (THREE) {
+          let texChanged = false;
+          if (outdoorsMaskTexture.wrapS !== THREE.ClampToEdgeWrapping) {
+            outdoorsMaskTexture.wrapS = THREE.ClampToEdgeWrapping;
+            texChanged = true;
+          }
+          if (outdoorsMaskTexture.wrapT !== THREE.ClampToEdgeWrapping) {
+            outdoorsMaskTexture.wrapT = THREE.ClampToEdgeWrapping;
+            texChanged = true;
+          }
+          if (outdoorsMaskTexture.minFilter !== THREE.LinearFilter) {
+            outdoorsMaskTexture.minFilter = THREE.LinearFilter;
+            texChanged = true;
+          }
+          if (outdoorsMaskTexture.magFilter !== THREE.LinearFilter) {
+            outdoorsMaskTexture.magFilter = THREE.LinearFilter;
+            texChanged = true;
+          }
+          if (outdoorsMaskTexture.generateMipmaps !== false) {
+            outdoorsMaskTexture.generateMipmaps = false;
+            texChanged = true;
+          }
+          if (texChanged) outdoorsMaskTexture.needsUpdate = true;
+        }
+      } catch (_) {}
       cu.tOutdoorsForRoofLight.value = outdoorsMaskTexture;
       cu.uHasOutdoorsForRoofLight.value = 1;
       cu.uOutdoorsForRoofLightFlipY.value = outdoorsMaskTexture.flipY ? 1.0 : 0.0;
+      const tw = Number(outdoorsMaskTexture?.image?.width) || Number(outdoorsMaskTexture?.source?.data?.width) || 0;
+      const th = Number(outdoorsMaskTexture?.image?.height) || Number(outdoorsMaskTexture?.source?.data?.height) || 0;
+      cu.uOutdoorsForRoofLightTexelSize.value.set(
+        tw > 0 ? 1.0 / tw : 0.0,
+        th > 0 ? 1.0 / th : 0.0,
+      );
     } else {
       cu.tOutdoorsForRoofLight.value = null;
       cu.uHasOutdoorsForRoofLight.value = 0;
       cu.uOutdoorsForRoofLightFlipY.value = 0;
+      cu.uOutdoorsForRoofLightTexelSize.value.set(0, 0);
     }
     if (overheadRoofAlphaTexture) {
       cu.tOverheadRoofAlpha.value = overheadRoofAlphaTexture;

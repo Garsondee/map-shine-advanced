@@ -1459,6 +1459,14 @@ float waterOccluderAlphaSoft(vec2 screenUv) {
   return 0.72 * c + 0.07 * (n + s + e + w);
 }
 
+// Post-merge background transmittance mask in screen UV.
+// 1.0 = no upper/background coverage between water source floor and viewer.
+// 0.0 = fully blocked by stacked background albedo above the water source.
+float waterBgTransmittanceAt(vec2 screenUv) {
+  if (uHasWaterBgAlphaMask < 0.5) return 1.0;
+  return clamp(texture2D(tWaterBgAlphaMask, screenUv).r, 0.0, 1.0);
+}
+
 // Safe sampling for refraction/distortion taps.
 // Prevents pulling pixels from:
 //   - Occluded (upper-floor) regions
@@ -1470,6 +1478,7 @@ float refractTapValid(vec2 screenUv) {
     float occ = waterOccluderAlphaSoft(screenUv);
     vOcc = 1.0 - smoothstep(0.34, 0.66, occ);
   }
+  float vBg = waterBgTransmittanceAt(screenUv);
 
   // Water-body gating: if the shifted UV lands outside the water mask,
   // reject it so we don't pull pixels from above-water areas.
@@ -1483,10 +1492,10 @@ float refractTapValid(vec2 screenUv) {
       ? waterInsideFromSdf(wdS.r)
       : smoothstep(0.02, 0.08, wdS.g);
     insideS *= waterRawMaskAuthoritative(suv);
-    return insideS * vOcc;
+    return insideS * vOcc * vBg;
   }
 
-  return vOcc;
+  return vOcc * vBg;
 }
 
 vec4 sampleRefractedSafe(vec2 screenUv, vec4 fallback) {

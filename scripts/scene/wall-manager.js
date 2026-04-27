@@ -1071,6 +1071,7 @@ export class WallManager {
   setHighlight(id, active) {
       const group = this.walls.get(id);
       if (!group) return;
+      const wallDoc = canvas?.walls?.get?.(id)?.document || null;
       
       // If active is false, but it is selected, keep it active (highlighted)
       const shouldBeHighlighted = active || this.selected.has(id);
@@ -1080,9 +1081,8 @@ export class WallManager {
           if (shouldBeHighlighted) {
              line.material.color.setHex(0xff9829); // Orange highlight
           } else {
-             const doc = canvas.walls.get(id)?.document;
-             if (doc) {
-                 line.material.color.setHex(this.getWallColor(doc));
+             if (wallDoc) {
+                 line.material.color.setHex(this.getWallColor(wallDoc));
              }
           }
           line.material.needsUpdate = true;
@@ -1097,7 +1097,11 @@ export class WallManager {
       // Highlight endpoint center fill while preserving black outer ring.
       group.children.forEach(c => {
           if (c.userData.type === 'wallEndpoint') {
-              c.material.color.setHex(shouldBeHighlighted ? 0xff9829 : this.getWallColor(canvas.walls.get(id).document));
+              if (shouldBeHighlighted) {
+                c.material.color.setHex(0xff9829);
+              } else if (wallDoc) {
+                c.material.color.setHex(this.getWallColor(wallDoc));
+              }
               c.material.needsUpdate = true;
           }
       });

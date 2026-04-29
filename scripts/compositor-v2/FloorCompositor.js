@@ -461,6 +461,13 @@ export class FloorCompositor {
     /** @type {boolean} Whether bus/effect populate has completed at least once. */
     this._populateComplete = false;
 
+    /** @type {number} Last forceRepopulate wall-clock ms (for coalescing) */
+    this._lastForceRepopulateAtMs = 0;
+    /** @type {string|null} Scene id associated with last forceRepopulate */
+    this._lastForceRepopulateSceneId = null;
+    /** @type {string|null} Last forceRepopulate source tag */
+    this._lastForceRepopulateSource = null;
+
     /** @type {number} Throttle anchor for `[POPULATE RENDER-SLIM]` logs. */
     this._populateSlimRenderLogNextAt = 0;
 
@@ -1869,6 +1876,38 @@ export class FloorCompositor {
    */
   async forceRepopulate(options = {}) {
     const { source = 'runtime-refresh' } = options;
+
+    // Coalesce duplicate repopulate requests emitted during cold-load/level-sync
+    // bootstrap paths (e.g. cold-load-bg-resync + level-context-resync). Without
+    // this, effects are cleared/rebuilt multiple times in quick succession and
+    // can briefly flash wrong-floor overlays before final visibility settles.
+    if (this._populatePromise && !this._populateComplete) {
+      log.info(`FloorCompositor: forceRepopulate coalesced into in-flight populate (source=${source})`);
+      return this._populatePromise;
+    }
+
+    const nowMs = Date.now();
+    const sceneId = canvas?.scene?.id ? String(canvas.scene.id) : null;
+    const sameScene = !!sceneId && sceneId === this._lastForceRepopulateSceneId;
+    const elapsedMs = nowMs - Number(this._lastForceRepopulateAtMs || 0);
+    if (sameScene && elapsedMs >= 0 && elapsedMs < 900) {
+      log.info(
+        `FloorCompositor: skipping duplicate forceRepopulate (source=${source}, previous=${this._lastForceRepopulateSource || 'unknown'}, elapsedMs=${elapsedMs})`
+      );
+      return this._ensureBusPopulated({ source: `${source}:coalesced` });
+    }
+
+    this._lastForceRepopulateAtMs = nowMs;
+    this._lastForceRepopulateSceneId = sceneId;
+    this._lastForceRepopulateSource = String(source);
+
+    // Prevent stale canopy overlays from rendering while the async populate
+    // queue is replaying. Tree/Bush populate jobs run later in the queue, so
+    // without this early clear old-floor overlays can flash for a few frames
+    // during floor/level transitions.
+    try { this._treeEffect?.clear?.(); } catch (_) {}
+    try { this._bushEffect?.clear?.(); } catch (_) {}
+
     this._populateComplete = false;
     this._populatePromise = null;
     this._busPopulated = false;

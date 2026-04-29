@@ -134,9 +134,7 @@ export class TreeEffectV2 {
   set enabled(v) {
     this._enabled = !!v;
     this.params.enabled = this._enabled;
-    for (const entry of this._overlays.values()) {
-      entry.mesh.visible = this._enabled;
-    }
+    this._applyOverlayFloorVisibility();
   }
 
   static getControlSchema() {
@@ -668,6 +666,8 @@ export class TreeEffectV2 {
     this.clear();
 
     const floors = window.MapShine?.floorStack?.getFloors() ?? [];
+    const activeFloorIdxRaw = Number(window.MapShine?.floorStack?.getActiveFloor?.()?.index);
+    const activeFloorIdx = Number.isFinite(activeFloorIdxRaw) ? activeFloorIdxRaw : 0;
     const worldH = Number(foundrySceneData?.height) || 0;
 
     // Background overlays: prefer native scene.levels so every floor's authored
@@ -675,13 +675,31 @@ export class TreeEffectV2 {
     // Fallback to visible configured backgrounds for non-level scenes.
     const scene = canvas?.scene ?? null;
     const bgEntries = [];
+    const floorIndexByLevelId = new Map();
+    try {
+      for (const f of floors) {
+        const levelId = (f?.levelId != null) ? String(f.levelId) : '';
+        const idx = Number(f?.index);
+        if (!levelId || !Number.isFinite(idx)) continue;
+        floorIndexByLevelId.set(levelId, idx);
+      }
+    } catch (_) {}
     try {
       const sortedLevels = scene?.levels?.sorted ?? [];
       if (Array.isArray(sortedLevels) && sortedLevels.length > 0) {
         for (let i = 0; i < sortedLevels.length; i += 1) {
-          const src = String(sortedLevels[i]?.background?.src || '').trim();
+          const level = sortedLevels[i];
+          const src = String(level?.background?.src || '').trim();
           if (!src) continue;
-          bgEntries.push({ src, floorIndex: i, key: (i === 0) ? '__bg_image__' : `__bg_image__${i}` });
+          const levelId = (level?.id != null) ? String(level.id) : '';
+          const mappedFloorIndex = levelId ? floorIndexByLevelId.get(levelId) : undefined;
+          const floorIndex = Number.isFinite(Number(mappedFloorIndex))
+            ? Number(mappedFloorIndex)
+            : i;
+          const keyIndex = Math.max(0, Math.floor(Number(level?.index)));
+          const key = (keyIndex === 0) ? '__bg_image__' : `__bg_image__${keyIndex}`;
+          if (Number.isFinite(activeFloorIdx) && floorIndex !== activeFloorIdx) continue;
+          bgEntries.push({ src, floorIndex, key });
         }
       }
     } catch (_) {}
@@ -690,6 +708,7 @@ export class TreeEffectV2 {
       for (let i = 0; i < bgLayers.length; i += 1) {
         const src = String(bgLayers[i]?.src || '').trim();
         if (!src) continue;
+        if (Number.isFinite(activeFloorIdx) && i !== activeFloorIdx) continue;
         bgEntries.push({ src, floorIndex: i, key: (i === 0) ? '__bg_image__' : `__bg_image__${i}` });
       }
     }
@@ -739,6 +758,9 @@ export class TreeEffectV2 {
 
   update(timeInfo) {
     if (!this._enabled || !this._initialized) return;
+
+    // Clamp overlay visibility to active floor every frame to avoid transition flashes.
+    this._applyOverlayFloorVisibility();
 
     const time = Number.isFinite(timeInfo?.elapsed)
       ? Number(timeInfo.elapsed)
@@ -838,7 +860,7 @@ export class TreeEffectV2 {
   }
 
   onFloorChange(_maxFloorIndex) {
-    // Bus overlay visibility is handled by FloorRenderBus.setVisibleFloors().
+    this._applyOverlayFloorVisibility();
   }
 
   wantsContinuousRender() {
@@ -1484,6 +1506,7 @@ export class TreeEffectV2 {
 
     this._renderBus.addEffectOverlay(`${tileId}_tree`, mesh, floorIndex);
     this._overlays.set(tileId, { mesh, material, floorIndex });
+    this._applyOverlayFloorVisibility();
 
     // Load mask texture.
     this._loader.load(url, (tex) => {
@@ -1546,5 +1569,21 @@ export class TreeEffectV2 {
       const data = ctx.getImageData(0, 0, width, height).data;
       this._alphaSampleByTileId.set(tileId, { width, height, data });
     } catch (_) {}
+  }
+
+  _getSafeVisibleMaxFloorIndex() {
+    const busIdx = Number(this._renderBus?._visibleMaxFloorIndex);
+    const activeIdx = Number(window.MapShine?.floorStack?.getActiveFloor?.()?.index);
+    if (Number.isFinite(busIdx)) return busIdx;
+    if (Number.isFinite(activeIdx)) return activeIdx;
+    return 0;
+  }
+
+  _applyOverlayFloorVisibility() {
+    const maxFloor = this._getSafeVisibleMaxFloorIndex();
+    for (const entry of this._overlays.values()) {
+      if (!entry?.mesh) continue;
+      entry.mesh.visible = this._enabled && Number(entry.floorIndex) <= maxFloor;
+    }
   }
 }

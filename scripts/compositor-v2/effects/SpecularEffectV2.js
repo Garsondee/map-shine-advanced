@@ -37,7 +37,7 @@ import {
 } from '../../foundry/levels-scene-flags.js';
 import Coordinates from '../../utils/coordinates.js';
 import { getVertexShader, getFragmentShader } from './specular-shader.js';
-import { safeBuildShaderMaterial } from '../../core/diagnostics/SafeShaderBuilder.js';
+import { createMaterialDeferred } from '../../core/diagnostics/SafeShaderBuilder.js';
 
 const log = createLogger('SpecularEffectV2');
 
@@ -145,6 +145,10 @@ export class SpecularEffectV2 {
     this._shaderCompilePending = false;
     /** @type {Array<{tileId: string, opts: object}>} Pending overlay creations waiting for shader */
     this._pendingOverlays = [];
+    /** @type {number} Count of deferred compile failures */
+    this._shaderCompileFailures = 0;
+    /** @type {string|null} Last deferred compile error */
+    this._lastShaderCompileError = null;
 
     // Foundry hook IDs for light tracking.
     this._hookIds = {};
@@ -613,6 +617,10 @@ export class SpecularEffectV2 {
     this._syncOverlayVisibility();
 
     const floors = window.MapShine?.floorStack?.getFloors() ?? [];
+    const activeFloor = window.MapShine?.floorStack?.getActiveFloor?.() ?? null;
+    const activeFloorIndex = Number.isFinite(Number(activeFloor?.index))
+      ? Number(activeFloor.index)
+      : 0;
     const worldH = foundrySceneData?.height ?? 0;
 
     // Sync all existing lights on scene load.
@@ -639,11 +647,15 @@ export class SpecularEffectV2 {
         const centerX = sceneX + sceneW / 2;
         const centerY = worldH - (sceneY + sceneH / 2);
 
-        // Background is always floor 0, Z just above the bg image plane.
-        const GROUND_Z = 1000;
-        const z = GROUND_Z - 1 + SPECULAR_Z_OFFSET;
+        // In multi-floor scenes the viewed level background belongs to the
+        // active floor band, not always floor 0.
+        const bgFloorIndex = floors.length > 1 ? Math.max(0, Math.min(3, activeFloorIndex)) : 0;
 
-        await this._createOverlay('__bg_image__', 0, {
+        // Keep background below tile plane within its floor band.
+        const GROUND_Z = 1000;
+        const z = GROUND_Z + bgFloorIndex - 1 + SPECULAR_Z_OFFSET;
+
+        await this._createOverlay('__bg_image__', bgFloorIndex, {
           specularUrl: bgSpecResult.path,
           albedoUrl: bgSrc,
           centerX, centerY, z,
@@ -1052,10 +1064,18 @@ export class SpecularEffectV2 {
 
       const overlayByFloor = {};
       /** @type {Record<string, number>} */
+      const overlayMaterialKinds = {};
+      let overlaysWithShaderUniforms = 0;
+      /** @type {Record<string, number>} */
       const outdoorsFloorIdxHistogram = {};
       for (const [, ent] of this._overlays) {
         const fi = Number(ent.floorIndex) || 0;
         overlayByFloor[fi] = (overlayByFloor[fi] || 0) + 1;
+        const mk = String(ent.material?.type || 'UnknownMaterial');
+        overlayMaterialKinds[mk] = (overlayMaterialKinds[mk] || 0) + 1;
+        if (ent.material?.uniforms?.uSpecularMap && ent.material?.uniforms?.uAlbedoMap) {
+          overlaysWithShaderUniforms++;
+        }
         const ufi = ent.material?.uniforms?.uOutdoorsFloorIdx?.value;
         const hk = String(Number.isFinite(Number(ufi)) ? Number(ufi) : fi);
         outdoorsFloorIdxHistogram[hk] = (outdoorsFloorIdxHistogram[hk] || 0) + 1;
@@ -1136,7 +1156,13 @@ export class SpecularEffectV2 {
       this._healthDiagnostics = {
         timestamp: Date.now(),
         overlayCount: this._overlays.size,
+        realShaderCompiled: this._realShaderCompiled,
+        shaderCompilePending: this._shaderCompilePending,
+        shaderCompileFailures: this._shaderCompileFailures || 0,
+        lastShaderCompileError: this._lastShaderCompileError ?? null,
         overlayByFloor,
+        overlayMaterialKinds,
+        overlaysWithShaderUniforms,
         outdoorsFloorIdxHistogram,
         compositorPresent: !!compositor,
         floorStackCount: floorStackFloors.length,
@@ -1358,7 +1384,10 @@ export class SpecularEffectV2 {
     this._shaderCompilePending = true;
 
     const THREE = window.THREE;
-    if (!THREE) return;
+    if (!THREE) {
+      this._shaderCompilePending = false;
+      return;
+    }
 
     const startMs = performance?.now?.() ?? Date.now();
     log.warn('SpecularEffectV2: compiling real shader (deferred from populate)...');
@@ -1366,26 +1395,34 @@ export class SpecularEffectV2 {
     try {
       // Build shared uniforms for real shader
       const sharedUniforms = this._buildSharedUniforms();
+      if (!sharedUniforms || typeof sharedUniforms !== 'object') {
+        throw new Error('SpecularEffectV2: failed to build shared uniforms for deferred shader compile');
+      }
 
-      // Use SafeShaderBuilder for timeout protection
-      const result = await safeBuildShaderMaterial(
-        THREE,
-        'SpecularEffectV2',
-        {
-          uniforms: sharedUniforms,
-          vertexShader: getVertexShader(),
-          fragmentShader: getFragmentShader(MAX_LIGHTS),
-          transparent: true,
-          depthWrite: false,
-          depthTest: false,
-          side: THREE.DoubleSide,
-          blending: THREE.AdditiveBlending,
-        },
-        {
-          timeoutMs: 5000,
-          fallbackParams: null, // Use default fallback
-        }
-      );
+      // Create deferred ShaderMaterial without forced compile pass.
+      // Forced compilation can timeout on large shaders and silently replace the
+      // effect with fallback material (appears as "specular does nothing").
+      const baseMaterial = createMaterialDeferred(THREE, 'SpecularEffectV2', {
+        uniforms: sharedUniforms,
+        vertexShader: getVertexShader(),
+        fragmentShader: getFragmentShader(MAX_LIGHTS),
+        transparent: true,
+        depthWrite: false,
+        depthTest: false,
+        side: THREE.DoubleSide,
+        blending: THREE.AdditiveBlending,
+      });
+      const baseUniforms = baseMaterial?.uniforms ?? null;
+      if (!baseMaterial?.isShaderMaterial || !baseUniforms?.uEffectEnabled) {
+        throw new Error(
+          'SpecularEffectV2: deferred shader material invalid/fallback; refusing to replace overlays with non-specular material'
+        );
+      }
+
+      this._lastShaderCompileError = null;
+      this._shaderCompileFailures = 0;
+      this._realShaderCompiled = true;
+      this._shaderCompilePending = false;
 
       // Upgrade all overlays with the new real shader material
       const loader = new THREE.TextureLoader();
@@ -1400,7 +1437,7 @@ export class SpecularEffectV2 {
         newUniforms.uTileOpacity = { value: 1.0 };
         newUniforms.uOutdoorsFloorIdx = { value: overlay.floorIndex };
 
-        const newMat = result.material.clone();
+        const newMat = baseMaterial.clone();
         newMat.uniforms = newUniforms;
 
         // Swap material on mesh
@@ -1436,19 +1473,21 @@ export class SpecularEffectV2 {
         oldMat.dispose();
       }
 
-      this._realShaderCompiled = true;
-      this._shaderCompilePending = false;
       this._syncOverlayVisibility();
 
       const elapsed = (performance?.now?.() ?? Date.now()) - startMs;
-      if (result.usedFallback) {
-        log.error(`[${elapsed.toFixed(0)}ms] SpecularEffectV2: real shader FAILED/TIMED OUT - using fallback (specular visuals disabled)`);
-      } else {
-        log.warn(`[${elapsed.toFixed(0)}ms] SpecularEffectV2: real shader compiled successfully for ${this._overlays.size} overlays`);
-      }
+      log.warn(`[${elapsed.toFixed(0)}ms] SpecularEffectV2: real shader material attached for ${this._overlays.size} overlays`);
     } catch (err) {
       this._shaderCompilePending = false;
+      this._realShaderCompiled = false;
+      this._shaderCompileFailures = (this._shaderCompileFailures || 0) + 1;
+      this._lastShaderCompileError = String(err?.message || err || 'unknown deferred compile error');
       log.error('SpecularEffectV2: unexpected error during deferred shader compile:', err);
+
+      // Retry a few times in case scene resources were still warming up.
+      if (this._overlays.size > 0 && this._shaderCompileFailures < 3) {
+        setTimeout(() => this._compileRealShaderForOverlays(), 250);
+      }
     }
   }
 
@@ -1600,6 +1639,7 @@ export class SpecularEffectV2 {
       uHasTokenMask: { value: false },
       uTokenMask: { value: this._fallbackBlack },
     };
+    return this._sharedUniforms;
   }
 
   // ── Private: Fallback textures ─────────────────────────────────────────────

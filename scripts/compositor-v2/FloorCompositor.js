@@ -4128,6 +4128,7 @@ export class FloorCompositor {
       try { this._renderBus.setVisibleFloors(fallbackIdx); } catch (_) {}
       try { this._fireEffect?.onFloorChange?.(fallbackIdx); } catch (_) {}
       try { this._dustEffect?.onFloorChange?.(fallbackIdx); } catch (_) {}
+      try { this._specularEffect?.onFloorChange?.(fallbackIdx); } catch (_) {}
       try { this._waterSplashesEffect?.onFloorChange?.(fallbackIdx); } catch (_) {}
       try { this._windowLightEffect?.onFloorChange?.(fallbackIdx); } catch (_) {}
       try { this._cloudEffect?.onFloorChange?.(fallbackIdx); } catch (_) {}
@@ -4238,6 +4239,8 @@ export class FloorCompositor {
     this._fireEffect.onFloorChange(maxFloorIndex);
     // Notify dust effect of floor change so it can swap active particle systems.
     this._dustEffect.onFloorChange(maxFloorIndex);
+    // Specular background overlay needs floor rebinding on level changes.
+    try { this._specularEffect?.onFloorChange?.(maxFloorIndex); } catch (_) {}
     // Iridescence overlays are bus-managed but we still notify for parity.
     try { this._iridescenceEffect?.onFloorChange?.(maxFloorIndex); } catch (_) {}
     // Notify water splashes of floor change so it can swap active systems.

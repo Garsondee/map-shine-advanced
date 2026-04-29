@@ -37,7 +37,6 @@ import {
 } from '../../foundry/levels-scene-flags.js';
 import Coordinates from '../../utils/coordinates.js';
 import { getVertexShader, getFragmentShader } from './specular-shader.js';
-import { createMaterialDeferred } from '../../core/diagnostics/SafeShaderBuilder.js';
 
 const log = createLogger('SpecularEffectV2');
 
@@ -141,6 +140,8 @@ export class SpecularEffectV2 {
     // Deferred shader compilation state
     /** @type {boolean} True when heavy shader has been compiled */
     this._realShaderCompiled = false;
+    /** @type {THREE.ShaderMaterial|null} Template material for post-compile overlay clones */
+    this._compiledBaseMaterial = null;
     /** @type {boolean} True when real shader compilation is in progress */
     this._shaderCompilePending = false;
     /** @type {Array<{tileId: string, opts: object}>} Pending overlay creations waiting for shader */
@@ -293,6 +294,17 @@ export class SpecularEffectV2 {
       this._sharedUniforms.uEffectEnabled.value = next;
     }
     this._syncOverlayVisibility();
+  }
+
+  /**
+   * Floor visibility changes do not always trigger a full repopulate immediately.
+   * Keep the background specular overlay aligned with the newly active floor so
+   * per-floor outdoors sampling and bus visibility remain correct across level switches.
+   * @param {number} maxFloorIndex
+   */
+  onFloorChange(maxFloorIndex) {
+    const nextFloor = Math.max(0, Math.min(3, Number(maxFloorIndex) || 0));
+    this._rebindBackgroundOverlayFloor(nextFloor);
   }
 
   // ── UI schema (moved from V1 SpecularEffect) ─────────────────────────────
@@ -1279,6 +1291,8 @@ export class SpecularEffectV2 {
   dispose() {
     this.clear();
     this._unregisterLightHooks();
+    try { this._compiledBaseMaterial?.dispose?.(); } catch (_) {}
+    this._compiledBaseMaterial = null;
     this._fallbackBlack?.dispose();
     this._fallbackWhite?.dispose();
     this._fallbackBlack = null;
@@ -1307,27 +1321,66 @@ export class SpecularEffectV2 {
     const THREE = window.THREE;
     const floorIdx = Math.min(3, Math.max(0, Number(floorIndex) || 0));
 
-    // DEFERRED: Use MeshBasicMaterial (no shader compile) initially.
-    // Real ShaderMaterial with full GLSL will be created and swapped in later
-    // by _compileRealShaderForOverlays(). This prevents populate() hangs.
-    //
-    // IMPORTANT: placeholder must be visually neutral. A white additive fallback
-    // can appear as a full-screen bright overlay if shader upgrade is delayed or
-    // skipped (e.g. compile timeout/error). Use additive BLACK so the placeholder
-    // contributes nothing until real textures/shader are bound.
-    const material = new THREE.MeshBasicMaterial({
-      color: 0x000000,
-      transparent: true,
-      opacity: 1.0,
-      depthWrite: false,
-      depthTest: false,
-      side: THREE.DoubleSide,
-      blending: THREE.AdditiveBlending,
-    });
-    // Store texture URLs for later shader upgrade
-    material._tempAlbedoUrl = albedoUrl;
-    material._tempSpecularUrl = specularUrl;
-    material._tempTileId = tileId;
+    let material;
+    const canUseCompiledShader = !!(this._realShaderCompiled && this._compiledBaseMaterial && this._sharedUniforms);
+    if (canUseCompiledShader) {
+      // Repopulates after first successful compile must create overlays with the
+      // already-compiled shader immediately; otherwise they remain black placeholders.
+      const newUniforms = { ...this._sharedUniforms };
+      newUniforms.uAlbedoMap = { value: this._fallbackWhite };
+      newUniforms.uSpecularMap = { value: this._fallbackBlack };
+      newUniforms.uTileOpacity = { value: 1.0 };
+      newUniforms.uOutdoorsFloorIdx = { value: floorIdx };
+      material = this._compiledBaseMaterial.clone();
+      material.uniforms = newUniforms;
+
+      const loader = new THREE.TextureLoader();
+      if (albedoUrl) {
+        loader.load(albedoUrl, (tex) => {
+          tex.colorSpace = THREE.SRGBColorSpace;
+          tex.flipY = true;
+          tex.needsUpdate = true;
+          if (this._overlays.has(tileId)) {
+            material.uniforms.uAlbedoMap.value = tex;
+          } else {
+            try { tex.dispose?.(); } catch (_) {}
+          }
+        }, undefined, (err) => log.warn(`Failed to load albedo for ${tileId}:`, err));
+      }
+      if (specularUrl) {
+        loader.load(specularUrl, (tex) => {
+          tex.flipY = true;
+          tex.needsUpdate = true;
+          if (this._overlays.has(tileId)) {
+            material.uniforms.uSpecularMap.value = tex;
+          } else {
+            try { tex.dispose?.(); } catch (_) {}
+          }
+        }, undefined, (err) => log.warn(`Failed to load specular mask for ${tileId}:`, err));
+      }
+    } else {
+      // DEFERRED: Use MeshBasicMaterial (no shader compile) initially.
+      // Real ShaderMaterial with full GLSL will be created and swapped in later
+      // by _compileRealShaderForOverlays(). This prevents populate() hangs.
+      //
+      // IMPORTANT: placeholder must be visually neutral. A white additive fallback
+      // can appear as a full-screen bright overlay if shader upgrade is delayed or
+      // skipped (e.g. compile timeout/error). Use additive BLACK so the placeholder
+      // contributes nothing until real textures/shader are bound.
+      material = new THREE.MeshBasicMaterial({
+        color: 0x000000,
+        transparent: true,
+        opacity: 1.0,
+        depthWrite: false,
+        depthTest: false,
+        side: THREE.DoubleSide,
+        blending: THREE.AdditiveBlending,
+      });
+      // Store texture URLs for later shader upgrade
+      material._tempAlbedoUrl = albedoUrl;
+      material._tempSpecularUrl = specularUrl;
+      material._tempTileId = tileId;
+    }
 
     const geometry = new THREE.PlaneGeometry(tileW, tileH);
     const mesh = new THREE.Mesh(geometry, material);
@@ -1402,7 +1455,7 @@ export class SpecularEffectV2 {
       // Create deferred ShaderMaterial without forced compile pass.
       // Forced compilation can timeout on large shaders and silently replace the
       // effect with fallback material (appears as "specular does nothing").
-      const baseMaterial = createMaterialDeferred(THREE, 'SpecularEffectV2', {
+      const baseMaterial = new THREE.ShaderMaterial({
         uniforms: sharedUniforms,
         vertexShader: getVertexShader(),
         fragmentShader: getFragmentShader(MAX_LIGHTS),
@@ -1418,6 +1471,7 @@ export class SpecularEffectV2 {
           'SpecularEffectV2: deferred shader material invalid/fallback; refusing to replace overlays with non-specular material'
         );
       }
+      this._compiledBaseMaterial = baseMaterial;
 
       this._lastShaderCompileError = null;
       this._shaderCompileFailures = 0;
@@ -1503,6 +1557,38 @@ export class SpecularEffectV2 {
       if (!mesh) continue;
       mesh.visible = visible;
     }
+  }
+
+  /**
+   * Move the background specular overlay to a different floor band and update
+   * its shader floor index uniform so `_Outdoors` slot selection follows the
+   * active floor.
+   * @param {number} floorIndex
+   * @private
+   */
+  _rebindBackgroundOverlayFloor(floorIndex) {
+    const bg = this._overlays.get('__bg_image__');
+    if (!bg?.mesh) return;
+    const nextFloor = Math.max(0, Math.min(3, Number(floorIndex) || 0));
+    const overlayKey = '__bg_image___specular';
+
+    bg.floorIndex = nextFloor;
+
+    // Background is absolute-positioned (not tile-attached); keep it in the
+    // same floor Z band as the active floor.
+    const GROUND_Z = 1000;
+    bg.mesh.position.z = GROUND_Z + nextFloor - 1 + SPECULAR_Z_OFFSET;
+
+    if (bg.material?.uniforms?.uOutdoorsFloorIdx) {
+      bg.material.uniforms.uOutdoorsFloorIdx.value = nextFloor;
+    }
+
+    if (typeof this._renderBus?.removeEffectOverlay === 'function'
+      && typeof this._renderBus?.addEffectOverlay === 'function') {
+      this._renderBus.removeEffectOverlay(overlayKey);
+      this._renderBus.addEffectOverlay(overlayKey, bg.mesh, nextFloor);
+    }
+    this._syncOverlayVisibility();
   }
 
   // ── Private: Shared uniforms ───────────────────────────────────────────────

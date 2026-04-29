@@ -1152,6 +1152,24 @@ export class WeatherController {
         this.transitionElapsed = 0;
       }
 
+      // Normalize stale serialized wetness on dry scene load.
+      // Wetness should lag while rain transitions inside a running scene, but
+      // when restored state is fully dry (no active/target rain), carrying
+      // forward old wetness makes freshly loaded dry scenes look permanently wet.
+      const dryThreshold = Number(this.wetnessTuning?.precipThreshold) || 0.05;
+      const currentIsRain = Number(this.currentState?.precipType) === PrecipitationType.RAIN;
+      const targetIsRain = Number(this.targetState?.precipType) === PrecipitationType.RAIN;
+      const currentPrecip = Math.max(0, Number(this.currentState?.precipitation) || 0);
+      const targetPrecip = Math.max(0, Number(this.targetState?.precipitation) || 0);
+      const sceneHasNoRain = (!currentIsRain || currentPrecip <= dryThreshold)
+        && (!targetIsRain || targetPrecip <= dryThreshold)
+        && !this.isTransitioning;
+      if (sceneHasNoRain) {
+        this.currentState.wetness = 0.0;
+        this.startState.wetness = 0.0;
+        this.targetState.wetness = 0.0;
+      }
+
       this._updateEnvironmentOutputs();
       
       // Ensure time-driven systems (color grading, scene darkness) update with restored time.

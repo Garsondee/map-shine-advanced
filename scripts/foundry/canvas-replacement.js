@@ -3072,6 +3072,16 @@ function installCanvasTransitionWrapper() {
         }
       } catch (_) {}
 
+      // Local flag-write guard: when Map Shine just wrote scene flags from this client,
+      // Foundry may issue a same-scene redraw without stable draw-intent markers.
+      // Treat this as same-scene and skip transition fade to avoid "full reload" UX.
+      try {
+        const guardUntil = Number(window.MapShine?._msaLocalFlagWriteGuardUntil) || 0;
+        if (performance.now() < guardUntil) {
+          return wrapped(...args);
+        }
+      } catch (_) {}
+
       try {
         if (!window.MapShine) window.MapShine = {};
         window.MapShine.__sceneTransitionActive = true;

@@ -270,6 +270,21 @@ export class TweakpaneManager {
     /** @type {HTMLElement|null} Filter bar wrapper element */
     this._filterBarEl = null;
 
+    /** @type {HTMLElement|null} */
+    this._sceneEnableQuickSectionEl = null;
+
+    /** @type {HTMLButtonElement|null} */
+    this._sceneEnableQuickToggleButtonEl = null;
+
+    /** @type {string|null} */
+    this._sceneEnableQuickToggleSceneId = null;
+
+    /** @type {boolean|null} */
+    this._sceneEnableQuickToggleState = null;
+
+    /** @type {boolean} */
+    this._sceneEnableQuickToggleBusy = false;
+
     /** @type {Array<Object>} Accumulated DOM highlight items awaiting cleanup */
     this._filterHighlighted = [];
 
@@ -812,6 +827,9 @@ export class TweakpaneManager {
     // Always keep core launchers near the top of the UI so they're accessible
     // regardless of which authoring section is currently expanded.
     this.buildQuickActionsSection();
+    // Build after at least one folder exists so we can insert this headerless
+    // section directly above Quick Actions in the top-level list.
+    this.buildSceneEnableQuickSection();
 
     if (_isDbg) _dlp.begin('tp.buildSections', 'finalize');
     // Build scene setup section (only for GMs)
@@ -1503,6 +1521,160 @@ export class TweakpaneManager {
       this.accordionStates['quick_actions'] = ev.expanded;
       this.saveUIState();
     });
+  }
+
+  /**
+   * Build an always-visible, headerless scene master toggle section that lives
+   * above the Quick Actions folder.
+   * @private
+   */
+  buildSceneEnableQuickSection() {
+    if (!this.pane?.element) return;
+
+    const paneEl = this.pane.element;
+    const firstFolderEl = paneEl.querySelector('.tp-fldv');
+    const listHost = firstFolderEl?.parentElement;
+    if (!firstFolderEl || !listHost) return;
+
+    if (this._sceneEnableQuickSectionEl?.parentElement) {
+      this._sceneEnableQuickSectionEl.remove();
+    }
+
+    const wrap = document.createElement('div');
+    wrap.className = 'ms-scene-enable-quick';
+    wrap.style.display = 'flex';
+    wrap.style.padding = '4px 0 6px 0';
+
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.style.width = '100%';
+    button.style.padding = '6px 10px';
+    button.style.borderRadius = '6px';
+    button.style.border = '1px solid rgba(255,255,255,0.18)';
+    button.style.background = 'rgba(255,255,255,0.08)';
+    button.style.color = 'inherit';
+    button.style.cursor = 'pointer';
+    button.style.fontWeight = '600';
+    button.style.textAlign = 'left';
+    button.style.transition = 'background 120ms ease, border-color 120ms ease';
+
+    button.addEventListener('click', async (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      await this._onSceneEnableQuickToggleClick();
+    });
+
+    for (const evt of ['mousedown', 'pointerdown', 'dblclick', 'contextmenu']) {
+      button.addEventListener(evt, (e) => e.stopPropagation());
+    }
+
+    wrap.appendChild(button);
+    listHost.insertBefore(wrap, firstFolderEl);
+
+    this._sceneEnableQuickSectionEl = wrap;
+    this._sceneEnableQuickToggleButtonEl = button;
+    this._sceneEnableQuickToggleSceneId = null;
+    this._sceneEnableQuickToggleState = null;
+    this._refreshSceneEnableQuickToggle({ force: true });
+  }
+
+  /**
+   * Handle quick toggle click for active scene enable/disable.
+   * @returns {Promise<void>}
+   * @private
+   */
+  async _onSceneEnableQuickToggleClick() {
+    if (this._sceneEnableQuickToggleBusy) return;
+
+    const scene = canvas?.scene;
+    if (!scene) {
+      ui.notifications?.warn?.('Map Shine: No active scene to toggle.');
+      return;
+    }
+
+    if (!canPersistSceneDocument()) {
+      ui.notifications?.warn?.('Map Shine: Only GMs can toggle scene enabled state.');
+      return;
+    }
+
+    this._sceneEnableQuickToggleBusy = true;
+    this._refreshSceneEnableQuickToggle({ force: true });
+
+    try {
+      const enabled = sceneSettings.isEnabled(scene);
+      if (enabled) {
+        await sceneSettings.disable(scene);
+        ui.notifications?.info?.('Map Shine: Disabled for this scene. Advanced effects are bypassed.');
+      } else {
+        await sceneSettings.enable(scene);
+        ui.notifications?.info?.('Map Shine: Enabled for this scene.');
+      }
+
+      this._refreshSceneEnableQuickToggle({ force: true });
+
+      try {
+        await canvas.draw(scene);
+      } catch (drawErr) {
+        console.warn('MapShine scene toggle: canvas.draw() threw; skipping forced page reload:', drawErr);
+        ui.notifications?.warn?.('Map Shine: Scene redraw failed. Try switching scenes or reloading manually if visuals look incorrect.');
+      }
+    } catch (e) {
+      log.error('MapShine scene quick toggle failed:', e);
+      ui.notifications?.error?.('Map Shine: Failed to toggle scene enabled state. Check console for details.');
+    } finally {
+      this._sceneEnableQuickToggleBusy = false;
+      this._refreshSceneEnableQuickToggle({ force: true });
+    }
+  }
+
+  /**
+   * Refresh quick scene enable toggle visuals from current scene flag state.
+   * @param {{force?: boolean}} [options]
+   * @private
+   */
+  _refreshSceneEnableQuickToggle(options = {}) {
+    const { force = false } = options;
+    const button = this._sceneEnableQuickToggleButtonEl;
+    if (!button) return;
+
+    const scene = canvas?.scene ?? null;
+    const sceneId = scene?.id ?? null;
+    const enabled = !!scene && sceneSettings.isEnabled(scene);
+
+    if (!force && sceneId === this._sceneEnableQuickToggleSceneId && enabled === this._sceneEnableQuickToggleState) {
+      return;
+    }
+
+    this._sceneEnableQuickToggleSceneId = sceneId;
+    this._sceneEnableQuickToggleState = enabled;
+
+    const hasScene = !!scene;
+    const canEdit = hasScene && canPersistSceneDocument();
+    const busy = this._sceneEnableQuickToggleBusy;
+
+    button.disabled = !hasScene || !canEdit || busy;
+
+    if (!hasScene) {
+      button.textContent = 'Map Shine Enabled: No Active Scene';
+      button.style.background = 'rgba(255,255,255,0.06)';
+      button.style.borderColor = 'rgba(255,255,255,0.16)';
+      button.title = 'No active scene';
+      return;
+    }
+
+    button.textContent = `Map Shine Enabled: ${enabled ? 'ON' : 'OFF'}`;
+    button.style.background = enabled ? 'rgba(46, 166, 86, 0.28)' : 'rgba(166, 62, 46, 0.28)';
+    button.style.borderColor = enabled ? 'rgba(78, 210, 126, 0.65)' : 'rgba(230, 100, 84, 0.65)';
+
+    if (busy) {
+      button.title = 'Applying scene toggle...';
+    } else if (!canEdit) {
+      button.title = 'Only GMs can toggle this scene flag';
+    } else {
+      button.title = enabled
+        ? 'Click to disable Map Shine Advanced for this scene'
+        : 'Click to enable Map Shine Advanced for this scene';
+    }
   }
 
   /**
@@ -2608,20 +2780,8 @@ export class TweakpaneManager {
         try {
           await canvas.draw(s);
         } catch (drawErr) {
-          console.warn('MapShine enable button: canvas.draw() threw — falling back to page reload:', drawErr);
-          // Fallback: reload the page if canvas.draw() fails outright
-          setTimeout(() => {
-            try {
-              const utils = globalThis.foundry?.utils;
-              if (typeof utils?.debouncedReload === 'function') {
-                utils.debouncedReload();
-              } else {
-                globalThis.location?.reload?.();
-              }
-            } catch (_) {
-              globalThis.location?.reload?.();
-            }
-          }, 250);
+          console.warn('MapShine enable button: canvas.draw() threw; skipping forced page reload:', drawErr);
+          ui.notifications?.warn?.('Map Shine: Scene redraw failed after enabling. You can reload manually if the scene looks wrong.');
         }
       } catch (e) {
         log.error('Failed to enable Map Shine Advanced for scene:', e);
@@ -5419,6 +5579,9 @@ export class TweakpaneManager {
       } catch (_) {
       }
 
+      // Keep the scene-level quick toggle in sync across scene changes/flag edits.
+      this._refreshSceneEnableQuickToggle();
+
       // Continue loop
       this.rafHandle = requestAnimationFrame(uiLoop);
     };
@@ -5852,6 +6015,11 @@ export class TweakpaneManager {
     this._clearFilterHighlights();
     this._filterSavedExpanded.clear();
     this._filterBarEl = null;
+    this._sceneEnableQuickSectionEl = null;
+    this._sceneEnableQuickToggleButtonEl = null;
+    this._sceneEnableQuickToggleSceneId = null;
+    this._sceneEnableQuickToggleState = null;
+    this._sceneEnableQuickToggleBusy = false;
     
     if (this.tileMotionDialog) {
       this.tileMotionDialog.dispose();

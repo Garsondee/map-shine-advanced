@@ -591,8 +591,14 @@ export class OverheadShadowsEffectV2 {
     }
     const effectiveMask = floorMask ?? this.outdoorsMask ?? registryMask;
 
-    // Always cache this floor's mask for the render path to look up
-    this._floorStates.set(floorKey, { outdoorsMask: effectiveMask });
+    // Always cache this floor's mask for the render path to look up.
+    // Reuse existing entry objects to reduce churn in long sessions.
+    const fk = String(floorKey ?? '');
+    if (fk) {
+      const existing = this._floorStates.get(fk);
+      if (existing) existing.outdoorsMask = effectiveMask;
+      else this._floorStates.set(fk, { outdoorsMask: effectiveMask });
+    }
 
     // Only set this.outdoorsMask for the ACTIVE floor being viewed.
     // The bindFloorMasks loop iterates through ALL floors, so if we set it for every
@@ -1986,7 +1992,7 @@ export class OverheadShadowsEffectV2 {
       if (u.uOutdoorShadowLengthScale) u.uOutdoorShadowLengthScale.value = this.params.outdoorShadowLengthScale ?? 1.0;
       if (u.uIndoorReceiverShadowLengthScale) u.uIndoorReceiverShadowLengthScale.value = this.params.indoorReceiverShadowLengthScale ?? 1.0;
       if (u.uZoom && this.mainCamera) {
-        u.uZoom.value = this._getEffectiveZoom();
+        u.uZoom.value = camZoom;
       }
       // Outdoor Building Shadow: projected _Outdoors dark-region term (outdoor
       // receivers) that helps visually connect overhead-only roof details
@@ -2085,6 +2091,9 @@ export class OverheadShadowsEffectV2 {
     this._lastUpdateHash = null;
     this._lastOutdoorsMaskRef = null;
     this._lastObUpperSig = '';
+    // Drop cached per-floor texture refs so scene/floor transitions cannot
+    // accumulate stale references over long runtimes.
+    this._floorStates.clear();
     try {
       log.debug(`OverheadShadowsEffectV2: invalidated dynamic caches (${String(reason)})`);
     } catch (_) {}
@@ -2760,6 +2769,7 @@ export class OverheadShadowsEffectV2 {
     if (this._registryUnsub) { this._registryUnsub(); this._registryUnsub = null; }
     this._tileMotionManager = null;
     this._renderBus = null;
+    this._floorStates.clear();
     if (this.roofTarget) {
       this.roofTarget.dispose();
       this.roofTarget = null;

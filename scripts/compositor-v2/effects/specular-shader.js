@@ -260,6 +260,16 @@ export function getFragmentShader(maxLights = 64) {
       return clamp(lum * s.a, 0.0, 1.0);
     }
 
+    // Specular authoring often ships grayscale RGB without meaningful alpha.
+    // If alpha is missing/zero but luminance exists, treat it as opaque instead
+    // of collapsing highlights to zero.
+    float decodeSpecularMaskStrength(vec4 s) {
+      float lum = clamp(dot(s.rgb, vec3(0.299, 0.587, 0.114)), 0.0, 1.0);
+      float a = clamp(s.a, 0.0, 1.0);
+      if (a < 1e-4) return lum;
+      return lum * a;
+    }
+
     // ── Stripe layer generator ────────────────────────────────────────────────
 
     float generateStripeLayer(
@@ -457,7 +467,7 @@ export function getFragmentShader(maxLights = 64) {
       }
 
       // ── Specular mask strength ────────────────────────────────────────────
-      float specularStrength = dot(specularMask.rgb, vec3(0.299, 0.587, 0.114)) * specularMask.a;
+      float specularStrength = decodeSpecularMaskStrength(specularMask);
 
       // ── Cloud lighting ────────────────────────────────────────────────────
       float cloudLit = 1.0;
@@ -562,7 +572,7 @@ export function getFragmentShader(maxLights = 64) {
       }
 
       // ── Base specular color ───────────────────────────────────────────────
-      vec3 specularColor = specularMask.rgb * specularMask.a
+      vec3 specularColor = vec3(specularStrength)
         * totalModulator * uSpecularIntensity
         * effectiveLightColor * totalIncidentLight * buildingShadowFactor;
 

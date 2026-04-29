@@ -234,6 +234,14 @@ export class ControlPanelManager {
      */
     this._lastWeatherControlFingerprint = null;
 
+    /**
+     * One-shot guard: skip next Scene `controlState` flag persist when save came
+     * from live weather sliders. Frequent same-scene flag writes can trigger V14
+     * redraw/tearDown cycles that look like full scene reloads.
+     * @type {boolean}
+     */
+    this._skipNextControlStateSceneFlagPersist = false;
+
     this._boundHandlers = {
       onFaceMouseDown: (e) => this._onClockMouseDown(e),
       onFaceTouchStart: (e) => this._onClockTouchStart(e),
@@ -871,7 +879,10 @@ export class ControlPanelManager {
     }
 
     this._mirrorLiveWeatherDomPair(paramId, value);
-    if (opts.save) this.debouncedSave();
+    if (opts.save) {
+      this._skipNextControlStateSceneFlagPersist = true;
+      this.debouncedSave();
+    }
   }
 
   /**
@@ -956,6 +967,7 @@ export class ControlPanelManager {
         this._commitLiveWeatherOverrideScalar(pid, v, { save: false });
       });
       range.addEventListener('change', () => {
+        this._skipNextControlStateSceneFlagPersist = true;
         this.debouncedSave();
       });
 
@@ -969,6 +981,7 @@ export class ControlPanelManager {
         if (Number.isFinite(v)) {
           this._commitLiveWeatherOverrideScalar(pid, v, { save: false });
         }
+        this._skipNextControlStateSceneFlagPersist = true;
         this.debouncedSave();
       });
 
@@ -3539,6 +3552,16 @@ Current Weather:
     try {
       const scene = canvas?.scene;
       if (!scene || !canPersistSceneDocument()) return;
+
+      if (this._skipNextControlStateSceneFlagPersist === true) {
+        this._skipNextControlStateSceneFlagPersist = false;
+        try {
+          const wc = resolveWeatherController();
+          wc?.scheduleSaveWeatherSnapshot?.();
+        } catch (_) {}
+        log.debug('Skipped Scene controlState flag persist for live weather slider save');
+        return;
+      }
 
       // V14 regression guard:
       // Persisting `timeOfDay` to Scene flags causes document updates that can

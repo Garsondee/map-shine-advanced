@@ -127,6 +127,8 @@ export class ThreeLightSource {
     this._lastInsetWorldPx = null;
     this._lastInsetUpdateAtSec = -Infinity;
     this._lastInsetZoom = null;
+    // Reused scratch vector for perspective zoom estimation (avoid per-frame allocs).
+    this._tmpDrawingBufferSize = null;
 
     // Motion animation state (e.g. wind-driven cable swing)
     this._motion = {
@@ -195,14 +197,14 @@ export class ThreeLightSource {
     }
   }
 
-  _getWallInsetWorldPx() {
+  _getWallInsetWorldPx(zoomOverride = null) {
     const insetPx = this._getWallInsetPx();
     if (!insetPx) return 0;
 
     // Keep the occlusion inset stable in SCREEN pixels.
     // World units are Foundry pixels; convert screen-pixel inset to world units
     // using the current zoom.
-    const zoom = this._getEffectiveZoom();
+    const zoom = Number.isFinite(zoomOverride) ? zoomOverride : this._getEffectiveZoom();
     if (!Number.isFinite(zoom) || zoom <= 0) return insetPx;
     return insetPx / zoom;
   }
@@ -227,7 +229,11 @@ export class ThreeLightSource {
           if (THREE && renderer && typeof camZ === 'number' && isFinite(camZ) && typeof fovDeg === 'number' && isFinite(fovDeg)) {
             const dist = Math.abs(camZ - groundZ);
             if (dist > 0.0001) {
-              const size = new THREE.Vector2();
+              let size = this._tmpDrawingBufferSize;
+              if (!size) {
+                size = new THREE.Vector2();
+                this._tmpDrawingBufferSize = size;
+              }
               renderer.getDrawingBufferSize(size);
               const hPx = size.y;
               const fovRad = fovDeg * (Math.PI / 180);
@@ -288,6 +294,11 @@ export class ThreeLightSource {
         uIntensity: { value: 1.0 },
         uPulse: { value: 0.0 },
         uBrightness: { value: 1.0 },
+        // Foundry photometric controls:
+        // - uLuminosity scales emitted strength
+        // - uColoration controls how much authored tint contributes
+        uLuminosity: { value: 1.0 },
+        uColoration: { value: 1.0 },
         // Cookie/gobo texture (optional)
         tCookie: { value: null },
         uHasCookie: { value: 0.0 },
@@ -327,6 +338,8 @@ export class ThreeLightSource {
         uniform float uIntensity;
         uniform float uPulse;
         uniform float uBrightness;
+        uniform float uLuminosity;
+        uniform float uColoration;
         uniform sampler2D tCookie;
         uniform float uHasCookie;
         uniform float uCookieRotation;
@@ -746,18 +759,32 @@ export class ThreeLightSource {
 
           // Final Alpha calculation
           float uAlphaEff = mix(uAlpha, min(1.0, max(uAlpha, 0.92)), isFireCore);
-          float alpha = intensity * uAlphaEff * uIntensity * animAlphaMul * cookieFactor * max(uOutputGain, 0.0);
+          float alphaBase = intensity * uAlphaEff * uIntensity * animAlphaMul * cookieFactor * max(uOutputGain, 0.0);
 
           float fairyBoost = (uAnimType > 1.5 && uAnimType < 2.5) ? 3.0 : 1.0;
-          alpha *= fairyBoost;
+          alphaBase *= fairyBoost;
           // Torch + flame: intensity path already boosts ember; keep alpha punch modest.
-          alpha *= mix(1.0, 1.75, isFireCore);
+          alphaBase *= mix(1.0, 1.75, isFireCore);
+
+          // Apply Foundry-like luminosity as a direct strength control.
+          // This ensures low luminosity visibly reduces emitted light.
+          float lumMul = clamp(uLuminosity, 0.0, 1.0);
+          float alpha = alphaBase * lumMul;
 
           // Apply cookie factor to color output to keep cookies visible even if
           // downstream compositing ignores alpha modulation for the light buffer.
           float cookieColorMul = (uHasCookie > 0.5) ? cookieFactor : 1.0;
 
-          vec3 rgbOut = outColor * uBrightness * (0.75 + 0.25 * fairyBoost) * cookieColorMul;
+          // Color intensity / coloration:
+          // - 1.0 = full authored tint
+          // - 0.0 = desaturated/neutralized output
+          float coloration = clamp(uColoration, 0.0, 1.0);
+          float outLum = dot(outColor, vec3(0.2126, 0.7152, 0.0722));
+          vec3 tintedColor = mix(vec3(outLum), outColor, coloration);
+          vec3 rgbOut = tintedColor * uBrightness * (0.75 + 0.25 * fairyBoost) * cookieColorMul;
+          // Keep color falloff/shape attenuation identical to the white channel profile,
+          // but do not multiply by luminosity so "color-only" lights remain visible.
+          rgbOut *= alphaBase;
           if (isFireCore > 0.5) {
             float hot = 7.1 + 2.4 * clamp(uAnimIntensity * 0.1, 0.0, 1.0);
             vec3 fire = vec3(1.0, 0.52, 0.14);
@@ -769,11 +796,19 @@ export class ThreeLightSource {
         }
       `,
       transparent: true,
-      // Standard additive: SrcAlpha * color + 1 * dest
+      // Split-channel additive:
+      // - RGB uses src color directly (so colored-only lights can render even when
+      //   luminosity drives alpha to 0)
+      // - Alpha accumulates separately as the white/direct-light channel read by
+      //   LightingEffectV2 compose.
       blending: THREE.CustomBlending,
       blendEquation: THREE.AddEquation,
-      blendSrc: THREE.SrcAlphaFactor,
+      blendSrc: THREE.OneFactor,
       blendDst: THREE.OneFactor,
+      // Keep destination alpha as linear accumulation of source alpha so
+      // compose can read it as the direct/white-light channel.
+      blendSrcAlpha: THREE.OneFactor,
+      blendDstAlpha: THREE.OneFactor,
       depthWrite: false,
       depthTest: false,
     });
@@ -867,9 +902,22 @@ export class ThreeLightSource {
     this._baseLightColor.copy(c);
 
     // 2. Brightness / intensity logic (Foundry-like luminosity mapping)
-    const luminosity = config.luminosity ?? 0.5;
+    const luminosityRaw = Number(config.luminosity);
+    const luminosity = Number.isFinite(luminosityRaw) ? luminosityRaw : 0.5;
+    // Foundry worlds may provide luminosity as either:
+    // - normalized [0..1] (common in authored docs)
+    // - signed [-1..1] in some pipelines/tools
+    const luminosity01 = (luminosity >= 0 && luminosity <= 1)
+      ? luminosity
+      : this._clamp((luminosity + 1.0) * 0.5, 0.0, 1.0);
     const satBonus = 0.0;
-    this.material.uniforms.uBrightness.value = Math.max(0.2, 1.0 + ((luminosity * 2.0 - 1.0) * 0.35)) + satBonus;
+    this.material.uniforms.uBrightness.value = Math.max(0.2, 1.0 + ((luminosity01 * 2.0 - 1.0) * 0.35)) + satBonus;
+    this.material.uniforms.uLuminosity.value = luminosity01;
+
+    // Foundry color intensity / coloration amount.
+    const colorationRaw = Number(config.coloration);
+    const coloration = Number.isFinite(colorationRaw) ? this._clamp(colorationRaw, 0.0, 1.0) : 1.0;
+    this.material.uniforms.uColoration.value = coloration;
 
     const dim = config.dim || 0;
     const bright = config.bright || 0;
@@ -928,7 +976,8 @@ export class ThreeLightSource {
 
     this.material.uniforms.uRadius.value = rPxBase;
     this.material.uniforms.uBrightRadius.value = brightPxBase;
-    this.material.uniforms.uAlpha.value = config.alpha ?? 0.5;
+    const alphaRaw = Number(config.alpha);
+    this.material.uniforms.uAlpha.value = Number.isFinite(alphaRaw) ? this._clamp(alphaRaw, 0.0, 1.0) : 0.5;
 
     // Additional shaping/boost controls
     // These are MapShine-only controls (Foundry documents won't set them), so we
@@ -1953,22 +2002,35 @@ export class ThreeLightSource {
     } catch (_) {
     }
 
-    const insetWorldPx = this._getWallInsetWorldPx();
+    // Calculate zoom once per light/frame and reuse it for inset conversion and
+    // zoom-change checks. This prevents duplicate camera/renderer probing.
     const zoomNow = this._getEffectiveZoom();
+    const insetPx = this._getWallInsetPx();
+    const hasScreenStableInset = Number.isFinite(insetPx) && insetPx > 0.0001;
+    const insetWorldPx = hasScreenStableInset ? this._getWallInsetWorldPx(zoomNow) : 0;
     const zoomPrev = this._lastInsetZoom;
     const zoomChanged = (zoomPrev === null)
       || (!Number.isFinite(zoomPrev))
       || (!Number.isFinite(zoomNow))
       || (Math.abs(zoomNow - zoomPrev) / Math.max(1e-6, Math.abs(zoomPrev)) > 0.01);
 
+    // Rebuilds for inset/zoom are only meaningful when:
+    // - wall inset is actually enabled, and
+    // - we are using a wall-clipped polygon (not circle fallback).
+    // Otherwise this can trigger expensive geometry churn with no visual change.
+    const insetRebuildRelevant = hasScreenStableInset && !this._usingCircleFallback;
+
     // Inset is SCREEN-pixel stable, so the world-space inset changes with zoom.
     // Rebuild the wall-clipped geometry when zoom changes so the perceived thickness remains stable.
-    const needsInsetUpdate = (this._lastInsetWorldPx === null)
+    const needsInsetUpdate = insetRebuildRelevant && (
+      (this._lastInsetWorldPx === null)
       || (Math.abs(insetWorldPx - this._lastInsetWorldPx) > 0.25)
-      || zoomChanged;
+      || zoomChanged
+    );
 
-    // Throttle rebuilds while zooming; we only need ~10Hz.
-    if (needsInsetUpdate && (tSec - this._lastInsetUpdateAtSec) > 0.1) {
+    // Throttle rebuilds while zooming; ~5Hz is sufficient for inset stability and
+    // significantly reduces rebuild pressure on scenes with many lights.
+    if (needsInsetUpdate && (tSec - this._lastInsetUpdateAtSec) > 0.2) {
       try {
         this._lastInsetWorldPx = insetWorldPx;
         this._lastInsetUpdateAtSec = tSec;
@@ -1976,6 +2038,10 @@ export class ThreeLightSource {
         this.updateData(this.document, true);
       } catch (_) {
       }
+    } else if (!insetRebuildRelevant) {
+      // Keep trackers coherent without forcing geometry rebuilds.
+      this._lastInsetWorldPx = insetWorldPx;
+      this._lastInsetZoom = Number.isFinite(zoomNow) ? zoomNow : null;
     }
 
     // Optional runtime debug (off by default):

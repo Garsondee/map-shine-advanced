@@ -9,7 +9,8 @@
 
 import { createLogger } from '../../core/log.js';
 import { probeMaskFile } from '../../assets/loader.js';
-import { tileHasLevelsRange, readTileLevelsFlags } from '../../foundry/levels-scene-flags.js';
+import { tileHasLevelsRange, readTileLevelsFlags, resolveV14NativeDocFloorIndexMin } from '../../foundry/levels-scene-flags.js';
+import { getVisibleLevelBackgroundLayers } from '../../foundry/levels-scene-flags.js';
 import { weatherController } from '../../core/WeatherController.js';
 import { tileRelativeEffectOrder } from '../LayerOrderPolicy.js';
 
@@ -633,19 +634,39 @@ export class BushEffectV2 {
     const floors = window.MapShine?.floorStack?.getFloors() ?? [];
     const worldH = Number(foundrySceneData?.height) || 0;
 
-    // Background first
-    const bgSrc = canvas?.scene?.background?.src ?? '';
-    if (bgSrc) {
-      const basePath = bgSrc.replace(/\.[^.]+$/, '');
-      const url = await this._probeMask(basePath, '_Bush');
-      if (url) {
-        const centerX = Number(foundrySceneData?.sceneX ?? 0) + Number(foundrySceneData?.sceneWidth ?? 0) / 2;
-        const centerY = worldH - (Number(foundrySceneData?.sceneY ?? 0) + Number(foundrySceneData?.sceneHeight ?? 0) / 2);
-        const tileW = Number(foundrySceneData?.sceneWidth ?? 0);
-        const tileH = Number(foundrySceneData?.sceneHeight ?? 0);
-        const z = GROUND_Z - 1 + BUSH_Z_OFFSET;
-        this._createOverlay('__bg_image__', 0, { url, centerX, centerY, z, tileW, tileH, rotation: 0 });
+    // Background overlays: prefer native scene.levels so every floor's authored
+    // background can get a corresponding _Bush overlay regardless of current view.
+    // Fallback to visible configured backgrounds for non-level scenes.
+    const scene = canvas?.scene ?? null;
+    const bgEntries = [];
+    try {
+      const sortedLevels = scene?.levels?.sorted ?? [];
+      if (Array.isArray(sortedLevels) && sortedLevels.length > 0) {
+        for (let i = 0; i < sortedLevels.length; i += 1) {
+          const src = String(sortedLevels[i]?.background?.src || '').trim();
+          if (!src) continue;
+          bgEntries.push({ src, floorIndex: i, key: (i === 0) ? '__bg_image__' : `__bg_image__${i}` });
+        }
       }
+    } catch (_) {}
+    if (bgEntries.length === 0) {
+      const bgLayers = getVisibleLevelBackgroundLayers(scene);
+      for (let i = 0; i < bgLayers.length; i += 1) {
+        const src = String(bgLayers[i]?.src || '').trim();
+        if (!src) continue;
+        bgEntries.push({ src, floorIndex: i, key: (i === 0) ? '__bg_image__' : `__bg_image__${i}` });
+      }
+    }
+    for (const bg of bgEntries) {
+      const basePath = bg.src.replace(/\.[^.]+$/, '');
+      const url = await this._probeMask(basePath, '_Bush');
+      if (!url) continue;
+      const centerX = Number(foundrySceneData?.sceneX ?? 0) + Number(foundrySceneData?.sceneWidth ?? 0) / 2;
+      const centerY = worldH - (Number(foundrySceneData?.sceneY ?? 0) + Number(foundrySceneData?.sceneHeight ?? 0) / 2);
+      const tileW = Number(foundrySceneData?.sceneWidth ?? 0);
+      const tileH = Number(foundrySceneData?.sceneHeight ?? 0);
+      const z = GROUND_Z - 1 + BUSH_Z_OFFSET;
+      this._createOverlay(bg.key, bg.floorIndex, { url, centerX, centerY, z, tileW, tileH, rotation: 0 });
     }
 
     // Tiles
@@ -861,6 +882,12 @@ export class BushEffectV2 {
 
   _resolveFloorIndex(tileDoc, floors) {
     if (!floors || floors.length <= 1) return 0;
+
+    // Prefer V14 native level assignment first. Legacy Levels ranges may still
+    // exist on migrated content but not reflect the current native floor mapping.
+    const v14Idx = resolveV14NativeDocFloorIndexMin(tileDoc, globalThis.canvas?.scene);
+    if (v14Idx !== null) return v14Idx;
+
     if (tileHasLevelsRange(tileDoc)) {
       const flags = readTileLevelsFlags(tileDoc);
       const mid = (Number(flags.rangeBottom) + Number(flags.rangeTop)) / 2;
@@ -1193,6 +1220,8 @@ export class BushEffectV2 {
     const mesh = new THREE.Mesh(geometry, material);
     mesh.name = `BushV2_${tileId}`;
     mesh.frustumCulled = false;
+    mesh.userData = mesh.userData || {};
+    mesh.userData.floorIndex = floorIndex;
     mesh.position.set(centerX, centerY, z);
     mesh.rotation.z = rotation;
 

@@ -522,7 +522,8 @@ export class LightingEffectV2 {
 
         void main() {
           vec4 baseColor = texture2D(tScene, vUv);
-          vec3 srcLights = max(texture2D(tLightSources, vUv).rgb, vec3(0.0));
+          vec4 srcSample = texture2D(tLightSources, vUv);
+          vec3 srcLights = max(srcSample.rgb, vec3(0.0));
           vec3 winLights = max(texture2D(tLightWindow, vUv).rgb, vec3(0.0));
           float darknessMask = clamp(texture2D(tDarkness, vUv).r, 0.0, 1.0);
 
@@ -664,7 +665,12 @@ export class LightingEffectV2 {
           float visS = mix(1.0, roofLightVisibility, clamp(uApplyRoofOcclusionToSources, 0.0, 1.0));
           float visW = mix(1.0, roofLightVisibility, clamp(uApplyRoofOcclusionToWindow, 0.0, 1.0));
           vec3 safeLights = srcLights * visS + winLights * visW;
-          float lightI = max(max(safeLights.r, safeLights.g), safeLights.b);
+          // White/direct illumination channel:
+          // - Foundry lights: read from accumulated alpha (luminosity-aware in ThreeLightSource)
+          // - Window light: continue deriving from RGB
+          float srcWhite = max(srcSample.a, 0.0) * visS;
+          float winWhite = max(max(winLights.r, winLights.g), winLights.b) * visW;
+          float lightI = max(srcWhite, winWhite);
           float lightIVisible = lightI;
           vec3 directLight = vec3(lightIVisible) * master;
 

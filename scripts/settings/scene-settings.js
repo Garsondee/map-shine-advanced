@@ -221,6 +221,10 @@ function _silentlyPersistEnabled(scene) {
 export function isEnabled(scene) {
   const val = scene.getFlag(FLAG_NAMESPACE, 'enabled');
   if (val === true) return true;
+  // Explicit user/GM disable must always win. Without this guard, scenes that
+  // contain authored Map Shine data could be auto-reactivated by implied-config
+  // detection, making "off" impossible for those scenes.
+  if (val === false) return false;
 
   // Auto-detect pre-configured scenes (e.g. packaged module maps where the
   // `enabled` flag was not included in the compendium export).

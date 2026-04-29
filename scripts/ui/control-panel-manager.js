@@ -3577,13 +3577,11 @@ Current Weather:
         this._syncDarknessOnSkippedPersist = false;
         if (syncDarkness) {
           await stateApplier.syncFoundryDarknessFromMapShineTime();
-        } else {
-          try {
-            const wc = resolveWeatherController();
-            wc?.scheduleSaveWeatherSnapshot?.();
-          } catch (_) {}
         }
-        log.debug('Skipped Scene controlState flag persist for live weather slider save');
+        // V14 regression guard:
+        // skipped-persist saves must not perform *any* Scene flag writes, otherwise
+        // the same-scene redraw/reload path can still be triggered (e.g. cloud slider).
+        log.debug('Skipped Scene controlState flag persist for live/time-only save');
         return;
       }
 

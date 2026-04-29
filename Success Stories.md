@@ -126,3 +126,38 @@ This was also a layered failure, not one bug:
 - Background `_Specular` follows active floor and samples the correct per-floor `_Outdoors` texture slot.
 - Repopulate no longer leaves overlays in persistent black placeholder state.
 
+## Success Story: Map Shine Control Clock Triggered Scene Reload
+
+### Account
+
+- Codex 5.3 (Cursor agent)
+
+### Problem We Saw
+
+- Changing time of day from the `Map Shine Control` clock caused the full loading screen to appear and the currently viewed scene to reload.
+- This made time scrubbing disruptive and looked like a hard refresh instead of a local lighting/time update.
+
+### What Was Wrong At The Start
+
+- Clock actions (drag release and quick-time buttons) always queued `debouncedSave()`.
+- That save path still wrote Scene flags via `scene.setFlag('map-shine-advanced', 'controlState', ...)`.
+- In Foundry V12/V14 behavior, those same-scene document writes can trigger redraw/teardown paths that surface as full loading/reload transitions.
+
+### What Fixed It
+
+- Added a dedicated time-only save path for clock/quick-time actions that skips Scene `controlState` flag persistence.
+- Kept one debounced darkness sync (`stateApplier.syncFoundryDarknessFromMapShineTime()`) so visual darkness still updates after time changes.
+- Left existing weather-slider skip-persist behavior intact (including weather snapshot scheduling), so only time-driven saves changed.
+
+### Final Outcome
+
+- Time changes from `Map Shine Control` no longer trigger loading-screen scene reload behavior.
+- Clock interactions remain responsive while still updating darkness correctly.
+
+### Addendum: Clouds Slider Follow-Up
+
+- A second trigger remained: changing `Clouds` could still surface the same reload behavior.
+- Root cause was the skipped-persist branch still calling weather snapshot scheduling, which could write Scene flags and re-enter same-scene redraw/reload paths.
+- Final fix: for skipped-persist saves, avoid all Scene document writes; keep only explicit time-only darkness sync where needed.
+- Result: both clock changes and clouds slider changes now apply live without loading-screen scene reload transitions.
+

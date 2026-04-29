@@ -17,9 +17,9 @@ const log = createLogger('OverheadShadowsEffect');
 /**
  * Overhead Shadows Effect V2 (adapted from V1).
  *
- * - Uses ROOF_LAYER (20) overhead tiles as a stamp; tree canopies use
- *   WEATHER_ROOF_LAYER (21) in roofVisibility/roofBlock passes so LightingEffectV2
- *   can occlude through foliage while caster passes can still hide trees where needed.
+ * - Uses ROOF_LAYER (20) overhead tiles as a stamp.
+ * - Tree canopies are intentionally excluded from weather roof visibility/blocker
+ *   captures to avoid canopy-alpha halos suppressing lighting around trees.
  * - Casts a short, soft shadow "downwards" from roofs by sampling an
  *   offset version of the roof mask.
  * - Only darkens the region outside the roof by subtracting the base roof
@@ -2181,19 +2181,20 @@ export class OverheadShadowsEffectV2 {
     // projection has real off-screen source coverage at viewport edges.
     const roofCaptureScale = Math.max(guardScaleX, guardScaleY);
 
+    const INCLUDE_TREE_CANOPY_IN_WEATHER_ROOF_CAPTURES = false;
     const treeCaptureOverrides = [];
-    this.mainScene.traverse((object) => {
+    if (INCLUDE_TREE_CANOPY_IN_WEATHER_ROOF_CAPTURES) {
+      this.mainScene.traverse((object) => {
         if (!object?.userData?.mapShineTreeTileId || !object.layers) return;
         treeCaptureOverrides.push({
           object,
           layersMask: object.layers.mask,
           visible: typeof object.visible === 'boolean' ? object.visible : undefined
         });
-        // Include tree overlays in weather visibility/blocker captures only.
-        // Roof shadow caster capture still explicitly hides tree overlays below.
         object.layers.enable(WEATHER_ROOF_LAYER);
         if (typeof object.visible === 'boolean') object.visible = true;
       });
+    }
 
     const roofVisibilityExclusions = [];
     this.mainScene.traverse((object) => {

@@ -8,6 +8,7 @@ import { isGmLike } from '../core/gm-parity.js';
 import { createLogger } from '../core/log.js';
 import { safeCall, safeCallAsync, safeDispose, Severity } from '../core/safe-call.js';
 import * as sceneSettings from '../settings/scene-settings.js';
+import { wipeMapShineAdvancedFlagsFireAndForget } from '../settings/scene-msa-flag-wipe.js';
 import { SceneComposer } from '../scene/composer.js';
 import { CameraFollower } from './camera-follower.js';
 import { PixiInputBridge } from './pixi-input-bridge.js';
@@ -420,39 +421,7 @@ async function _cleanupMissingTextureReferencesForActiveScene(scene, { reason = 
 /** Scene IDs cleaned this session (runtime guard for canvasReady). */
 const _cleanedSceneIds = new Set();
 
-/**
- * Strip ALL map-shine-advanced flags from a scene document.
- * The update is async / fire-and-forget ->-> it persists to the DB in the
- * background. Returns true if the wipe was initiated.
- * @param {object} scene - A Foundry Scene document
- * @param {string} [reason] - Reason logged to console
- * @returns {boolean}
- */
-function _cleanSceneMSAFlags(scene, reason = 'auto-clean') {
-  try {
-    if (!scene?.id) return false;
-    const msaFlags = scene?.flags?.['map-shine-advanced'];
-    if (!msaFlags || Object.keys(msaFlags).length === 0) {
-      console.log(`MapShine cleanScene: ${scene.name ?? scene.id} -- no MSA flags to clean`);
-      return false;
-    }
-    const flagKeys = Object.keys(msaFlags);
-    const flagSize = JSON.stringify(msaFlags).length;
-    console.warn(`MapShine cleanScene [${reason}]: wiping ${flagKeys.length} MSA flag keys (${flagSize} bytes) from "${scene.name ?? scene.id}" (${scene.id})`);
-    console.warn(`MapShine cleanScene: flag keys being removed: [${flagKeys.join(', ')}]`);
-
-    // Fire-and-forget: delete the entire map-shine-advanced flag namespace.
-    // Foundry's '-=' prefix deletes the key.
-    scene.update({ 'flags.-=map-shine-advanced': null }).then(
-      () => console.warn(`MapShine cleanScene: successfully wiped MSA flags from "${scene.name ?? scene.id}"`),
-      (err) => console.error(`MapShine cleanScene: failed to wipe MSA flags from "${scene.name ?? scene.id}":`, err)
-    );
-    return true;
-  } catch (e) {
-    console.error('MapShine cleanScene: error during flag wipe:', e);
-    return false;
-  }
-}
+// Full-namespace wipe implementation: ../settings/scene-msa-flag-wipe.js (wipeMapShineAdvancedFlagsFireAndForget).
 
 /**
  * Track Foundry's native fog/visibility state so we can temporarily bypass it
@@ -1551,7 +1520,7 @@ export function initialize() {
           console.error('MapShine.cleanScene: no scene found' + (sceneId ? ` for id "${sceneId}"` : ''));
           return;
         }
-        _cleanSceneMSAFlags(scene, 'manual console command');
+        wipeMapShineAdvancedFlagsFireAndForget(scene, 'manual console command');
       } catch (e) {
         console.error('MapShine.cleanScene error:', e);
       }
@@ -1565,7 +1534,7 @@ export function initialize() {
         const scenes = game.scenes?.contents ?? [];
         let cleaned = 0;
         for (const scene of scenes) {
-          if (_cleanSceneMSAFlags(scene, 'cleanAllScenes')) cleaned++;
+          if (wipeMapShineAdvancedFlagsFireAndForget(scene, 'cleanAllScenes')) cleaned++;
         }
         console.warn(`MapShine.cleanAllScenes: initiated cleanup of ${cleaned} scene(s) out of ${scenes.length} total`);
       } catch (e) {
@@ -3647,10 +3616,23 @@ async function onUpdateScene(scene, changes, _options, _userId) {
   ].some(key => key in changes);
 
   const shouldReinit = requiresReinit || gridGeometryChanged;
-  
+
+  // Scene activation often batches `active` with dimension/grid fields. Eager
+  // createThreeCanvas from updateScene races canvasTearDown (which disposes the
+  // renderer) and can throw "renderer is null" at attach time. Full init runs via
+  // canvasReady — skip the redundant deferred rebuild on activation.
+  const looksLikeActivation =
+    'active' in changes && scene.active === true;
+
   if (shouldReinit) {
+    if (looksLikeActivation) {
+      log.debug(
+        'updateScene: dimension/grid reinit keys present on activation — skipping eager createThreeCanvas (canvasReady handles load)'
+      );
+      return;
+    }
     log.info('Scene configuration changed, reinitializing Map Shine canvas');
-    
+
     // Defer to next frame to ensure Foundry has finished updating
     setTimeout(async () => {
       await createThreeCanvas(scene);
@@ -4783,6 +4765,7 @@ async function createThreeCanvas(scene, createOptions = {}) {
         await sceneSettings.ensureValidSceneSettings(scene, { autoRepair: true });
       }
     }, 'sceneSettings.ensureValid', Severity.DEGRADED);
+    if (_bailIfSessionStale('sceneSettings.ensureValid.post')) return;
 
     // P0.3: Capture Foundry state before modifying it
     captureFoundryStateSnapshot();
@@ -4900,6 +4883,30 @@ async function createThreeCanvas(scene, createOptions = {}) {
     if (isDebugLoad) dlp.begin('renderer.attach', 'setup');
     _setCreateThreeCanvasProgress('renderer.attach');
     stepLog(' -> Step: renderer.attach');
+    mapShine = window.MapShine;
+    if (_bailIfSessionStale('renderer.attach.pre')) return;
+    if (!mapShine?.renderer) {
+      log.warn('MapShine renderer missing at attach (likely torn down mid-load); attempting lazy bootstrap...');
+      const attachBootstrapOk = await safeCallAsync(async () => {
+        const mod = await import('../core/bootstrap.js');
+        const state = await mod.bootstrap({ verbose: false, skipSceneInit: true });
+        Object.assign(window.MapShine, state);
+        mapShine = window.MapShine;
+        return true;
+      }, 'lazyBootstrap.rendererAttach', Severity.CRITICAL);
+      if (!attachBootstrapOk || _bailIfSessionStale('lazyBootstrap.rendererAttach.post')) return;
+      if (!mapShine?.renderer) {
+        safeCall(() => {
+          if (threeCanvas?.parentElement) threeCanvas.remove();
+        }, 'renderer.attach.removePlaceholder', Severity.COSMETIC);
+        threeCanvas = null;
+        _threeCanvasWasActive = false;
+        _failEarly('renderer unavailable at attach after lazy bootstrap');
+        safeCall(() => restoreFoundryStateFromSnapshot(), 'restoreSnapshot.rendererAttachFail', Severity.COSMETIC);
+        _createThreeCanvasFailed = true;
+        return;
+      }
+    }
     renderer = mapShine.renderer;
     const rendererCanvas = renderer.domElement;
 

@@ -822,7 +822,8 @@ export class TweakpaneManager {
 
     const scene = canvas?.scene ?? null;
     const sceneIsEnabled = !!scene && sceneSettings.isEnabled(scene);
-    const showOnboardingOnly = (isGmLike() ?? false) && !sceneIsEnabled;
+    // Onboarding must require a real GM so debug GM-parity cannot show Enable without persistence.
+    const showOnboardingOnly = !!globalThis.game?.user?.isGM && !sceneIsEnabled;
 
     // Always keep core launchers near the top of the UI so they're accessible
     // regardless of which authoring section is currently expanded.
@@ -1606,14 +1607,20 @@ export class TweakpaneManager {
         await sceneSettings.disable(scene);
         ui.notifications?.info?.('Map Shine: Disabled for this scene. Advanced effects are bypassed.');
       } else {
-        await sceneSettings.enable(scene);
+        await sceneSettings.enable(scene, { reset: 'none' });
+        const refreshed = game.scenes?.get?.(scene.id) ?? scene;
+        if (!sceneSettings.isExplicitlyEnabled(refreshed)) {
+          ui.notifications?.error?.('Map Shine: Enabled flag did not persist. Check console for details.');
+          return;
+        }
         ui.notifications?.info?.('Map Shine: Enabled for this scene.');
       }
 
       this._refreshSceneEnableQuickToggle({ force: true });
 
       try {
-        await canvas.draw(scene);
+        const drawScene = game.scenes?.get?.(scene.id) ?? scene;
+        await canvas.draw(drawScene);
       } catch (drawErr) {
         console.warn('MapShine scene toggle: canvas.draw() threw; skipping forced page reload:', drawErr);
         ui.notifications?.warn?.('Map Shine: Scene redraw failed. Try switching scenes or reloading manually if visuals look incorrect.');
@@ -2710,6 +2717,53 @@ export class TweakpaneManager {
   }
 
   /**
+   * Ask GM how to enable: repair existing data vs full reset.
+   * @param {{ hasLegacy?: boolean }} [opts]
+   * @returns {Promise<'none'|'full'|null>} reset mode, or null if cancelled
+   * @private
+   */
+  _promptEnableMapShineMode(opts = {}) {
+    const { hasLegacy = false } = opts;
+    const legacyNote = hasLegacy
+      ? '<p>This scene may carry data from the legacy <strong>map-shine</strong> module; repair or reset will also clear that namespace when possible.</p>'
+      : '';
+
+    return new Promise((resolve) => {
+      const dialog = new Dialog({
+        title: 'Enable Map Shine Advanced',
+        content: `
+          <p>Choose how to handle existing Map Shine data on this scene:</p>
+          <ul style="margin:8px 0 8px 18px;line-height:1.45;">
+            <li><strong>Repair and enable</strong> — normalize settings and control state; keep effect parameters where possible.</li>
+            <li><strong>Reset and enable</strong> — remove <em>all</em> Map Shine Advanced flags for this scene, then enable with defaults. Use for corrupted or incompatible saves.</li>
+          </ul>
+          ${legacyNote}
+        `,
+        buttons: {
+          repair: {
+            icon: '<i class="fas fa-wrench"></i>',
+            label: 'Repair and enable',
+            callback: () => resolve('none')
+          },
+          reset: {
+            icon: '<i class="fas fa-eraser"></i>',
+            label: 'Reset and enable',
+            callback: () => resolve('full')
+          },
+          cancel: {
+            icon: '<i class="fas fa-times"></i>',
+            label: 'Cancel',
+            callback: () => resolve(null)
+          }
+        },
+        default: 'repair',
+        close: () => resolve(null)
+      });
+      dialog.render(true);
+    });
+  }
+
+  /**
    * Add the scene enable/upgrade control button to a folder.
    * @param {any} folder
    * @private
@@ -2727,8 +2781,11 @@ export class TweakpaneManager {
     try {
       hasLegacy = scene.getFlag('map-shine', 'enabled') === true;
     } catch (e) {
-      // Flag scope not available; treat as no legacy data present.
       hasLegacy = false;
+    }
+    if (!hasLegacy) {
+      const leg = scene.flags?.['map-shine'];
+      hasLegacy = !!(leg && typeof leg === 'object' && Object.keys(leg).length > 0);
     }
 
     if (isEnabled) {
@@ -2747,6 +2804,18 @@ export class TweakpaneManager {
       title
     });
 
+    const canEditScene = canPersistSceneDocument();
+    try {
+      enableButton.disabled = !canEditScene;
+    } catch (_) {
+    }
+    if (!canEditScene) {
+      try {
+        enableButton.element?.setAttribute?.('title', 'Only GMs can enable Map Shine on a scene.');
+      } catch (_) {
+      }
+    }
+
     enableButton.on('click', async () => {
       const s = canvas?.scene;
       if (!s) {
@@ -2754,31 +2823,29 @@ export class TweakpaneManager {
         return;
       }
 
-      try {
-        await sceneSettings.enable(s);
+      if (!canPersistSceneDocument()) {
+        ui.notifications?.warn?.('Map Shine: Only GMs can enable Map Shine on a scene.');
+        return;
+      }
 
-        // Verify the flag actually persisted before proceeding
-        const verified = sceneSettings.isEnabled(s);
+      const reset = await this._promptEnableMapShineMode({ hasLegacy });
+      if (reset == null) return;
+
+      try {
+        await sceneSettings.enable(s, { reset });
+
+        const refreshed = game.scenes?.get?.(s.id) ?? s;
+        const verified = sceneSettings.isExplicitlyEnabled(refreshed);
         if (!verified) {
-          console.error('MapShine enable button: flag did NOT persist after enable(). Aborting.');
+          console.error('MapShine enable button: explicit enabled flag did NOT persist after enable(). Aborting.');
           ui.notifications?.error?.('Map Shine: Failed to persist scene flag. Check console for details.');
           return;
         }
 
         ui.notifications?.info?.('Map Shine: Scene enabled — activating 3D canvas…');
 
-        // Redraw the canvas instead of reloading the page. This is more
-        // robust because it avoids the reload-dependent failure path where
-        // a missing tile texture crashes Foundry's Canvas.#draw() and
-        // prevents the canvasReady hook from ever firing.
-        //
-        // canvas.draw() triggers our _drawWrapper → Foundry's #draw →
-        // canvasReady (or our recovery sentinel) → onCanvasReady →
-        // createThreeCanvas. The PIXI background alpha is set to 0 at
-        // runtime by createThreeCanvas, so canvasConfig transparency
-        // from the initial page load is not required.
         try {
-          await canvas.draw(s);
+          await canvas.draw(refreshed);
         } catch (drawErr) {
           console.warn('MapShine enable button: canvas.draw() threw; skipping forced page reload:', drawErr);
           ui.notifications?.warn?.('Map Shine: Scene redraw failed after enabling. You can reload manually if the scene looks wrong.');

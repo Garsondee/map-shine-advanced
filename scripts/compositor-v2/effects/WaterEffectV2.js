@@ -11,7 +11,7 @@
  * `_Water` mask textures.
  *
  * Architecture:
- *   1. `populate()` discovers per-tile `_Water` masks via `probeMaskFile()`.
+ *   1. `populate()` discovers background + tile `_Water` masks via `probeMaskFile()`.
  *   2. Per-floor masks are composited into a single RT by rendering white quads
  *      masked by the water texture into a scene-sized render target.
  *   3. An internal water-data builder converts the composited mask into
@@ -1760,37 +1760,84 @@ static getControlSchema() {
     this._waterTiles = [];
     this._hasAnyWaterData = false;
 
+    const scene = canvas?.scene ?? null;
     const tileDocs = canvas?.scene?.tiles?.contents ?? [];
 
     const floors = window.MapShine?.floorStack?.getFloors() ?? [];
     const worldH = foundrySceneData?.height ?? canvas?.dimensions?.height ?? 0;
 
-    // Scene rect in Foundry coords (top-left origin, Y-down)
+    // Scene rect in Foundry coords (top-left origin, Y-down). Prefer
+    // `foundrySceneData` so the synthetic `__bg_image__` rect matches
+    // `FloorRenderBus` / tile placement (same as SceneComposer).
     const sceneRect = canvas?.dimensions?.sceneRect ?? canvas?.dimensions;
-    const sceneX = sceneRect?.x ?? 0;
-    const sceneY = sceneRect?.y ?? 0;
-    const sceneW = sceneRect?.width ?? sceneRect?.sceneWidth ?? 1;
-    const sceneH = sceneRect?.height ?? sceneRect?.sceneHeight ?? 1;
+    const sceneX = Number.isFinite(Number(foundrySceneData?.sceneX))
+      ? Number(foundrySceneData.sceneX)
+      : (sceneRect?.x ?? 0);
+    const sceneY = Number.isFinite(Number(foundrySceneData?.sceneY))
+      ? Number(foundrySceneData.sceneY)
+      : (sceneRect?.y ?? 0);
+    const sceneW = (Number.isFinite(Number(foundrySceneData?.sceneWidth)) && Number(foundrySceneData.sceneWidth) > 0)
+      ? Number(foundrySceneData.sceneWidth)
+      : (sceneRect?.width ?? sceneRect?.sceneWidth ?? 1);
+    const sceneH = (Number.isFinite(Number(foundrySceneData?.sceneHeight)) && Number(foundrySceneData.sceneHeight) > 0)
+      ? Number(foundrySceneData.sceneHeight)
+      : (sceneRect?.height ?? sceneRect?.sceneHeight ?? 1);
 
     // ── Step 0: Discover background _Water mask(s) (if present) ──────────
     // IMPORTANT: do not only check the currently viewed level background.
     // Upper-floor views still need lower-floor background water (fallback render).
-    const bgLayers = getVisibleLevelBackgroundLayers(canvas?.scene);
-    const bgLayerRows = bgLayers.length
-      ? bgLayers
-          .map((l, i) => ({
-            src: String(l?.src || '').trim(),
-            // Background stack order is bottom->top and is routed into the bus
-            // with this same index; keep water floor ownership aligned.
-            floorIndex: i,
-          }))
-          .filter((r) => !!r.src)
-      : [{
-          src: String(getViewedLevelBackgroundSrc(canvas?.scene) ?? canvas?.scene?.background?.src ?? '').trim(),
-          floorIndex: Number.isFinite(Number(window.MapShine?.floorStack?.getActiveFloor?.()?.index))
-            ? Number(window.MapShine.floorStack.getActiveFloor().index)
-            : 0,
-        }].filter((r) => !!r.src);
+    //
+    // Floor index MUST match `_resolveFloorIndex()` for tiles: the bus stores
+    // `__bg_image__*` planes with stack index i, but MapShine floor bands use
+    // `FloorBand.index` from levelId / elevation. If we bucket background water
+    // by stack index while tiles use band index, the viewed floor can show tile
+    // masks only and ignore the scene background _Water (or vice versa).
+    /** @type {Array<{ src: string, floorIndex: number }>} */
+    const bgLayerRows = [];
+    const floorIndexByLevelId = new Map();
+    try {
+      for (const f of floors) {
+        const levelId = (f?.levelId != null) ? String(f.levelId) : '';
+        const idx = Number(f?.index);
+        if (!levelId || !Number.isFinite(idx)) continue;
+        floorIndexByLevelId.set(levelId, idx);
+      }
+    } catch (_) {}
+
+    try {
+      const sortedLevels = scene?.levels?.sorted ?? [];
+      if (Array.isArray(sortedLevels) && sortedLevels.length > 0) {
+        for (let i = 0; i < sortedLevels.length; i += 1) {
+          const level = sortedLevels[i];
+          const src = String(level?.background?.src || '').trim();
+          if (!src) continue;
+          const levelId = (level?.id != null) ? String(level.id) : '';
+          const mappedFloorIndex = levelId ? floorIndexByLevelId.get(levelId) : undefined;
+          const bgFloorIndex = Number.isFinite(Number(mappedFloorIndex))
+            ? Number(mappedFloorIndex)
+            : i;
+          bgLayerRows.push({ src, floorIndex: bgFloorIndex });
+        }
+      }
+    } catch (_) {}
+
+    if (bgLayerRows.length === 0) {
+      const bgLayers = getVisibleLevelBackgroundLayers(scene);
+      if (bgLayers.length > 0) {
+        for (let i = 0; i < bgLayers.length; i += 1) {
+          const src = String(bgLayers[i]?.src || '').trim();
+          if (!src) continue;
+          bgLayerRows.push({ src, floorIndex: i });
+        }
+      } else {
+        const bgSrc = String(getViewedLevelBackgroundSrc(scene) ?? scene?.background?.src ?? '').trim();
+        if (bgSrc) {
+          const activeFloorIdxRaw = Number(window.MapShine?.floorStack?.getActiveFloor?.()?.index);
+          const floorIndex = Number.isFinite(activeFloorIdxRaw) ? activeFloorIdxRaw : 0;
+          bgLayerRows.push({ src: bgSrc, floorIndex });
+        }
+      }
+    }
     const seenBgBasePaths = new Set();
     for (const row of bgLayerRows) {
       const bgSrc = row.src;
@@ -1813,8 +1860,8 @@ static getControlSchema() {
         this._waterTiles.push({
           tileId: '__bg_image__',
           basePath: bgBasePath,
-          // Keep scene-wide background water bound to the same floor stack slot
-          // as this background layer (bottom->top).
+          // `floorIndex` is MapShine `FloorBand.index` when we could resolve the
+          // Foundry level → band mapping; otherwise the visible-stack index fallback.
           floorIndex: bgFloorIndex,
           maskPath,
           // Synthetic tileDoc so _compositeFloorMask can treat background like a tile.
@@ -1824,7 +1871,14 @@ static getControlSchema() {
     }
 
     // ── Step 1: Discover _Water masks per tile ───────────────────────────
-    for (const tileDoc of tileDocs) {
+    // Match FloorRenderBus tile order (sort asc = back → front) so canvas
+    // compositing matches how albedo stacks under overlapping tiles.
+    const sortedTileDocs = [...tileDocs].sort((a, b) => {
+      const sa = Number(a?.sort ?? a?.z);
+      const sb = Number(b?.sort ?? b?.z);
+      return (Number.isFinite(sa) ? sa : 0) - (Number.isFinite(sb) ? sb : 0);
+    });
+    for (const tileDoc of sortedTileDocs) {
       const src = tileDoc?.texture?.src ?? tileDoc?.img ?? '';
       if (!src) continue;
       const tileId = tileDoc.id ?? tileDoc._id;
@@ -1851,7 +1905,7 @@ static getControlSchema() {
     }
 
     if (this._waterTiles.length === 0) {
-      log.warn('WaterEffectV2 populate: no _Water masks found in any tile. Checked', tileDocs.length, 'tiles.');
+      log.warn('WaterEffectV2 populate: no _Water masks found (background or tiles). Checked', tileDocs.length, 'tiles.');
       // Do not auto-disable runtime gate on a no-data pass.
       // Discovery can be transient during load races; disabling here leaves the
       // effect stuck OFF even when data appears later.
@@ -1974,6 +2028,10 @@ static getControlSchema() {
       return null;
     }
     ctx.clearRect(0, 0, cvW, cvH);
+    // Standard Porter-Duff source-over: opaque RGB paints water/land; alpha 0 in
+    // a source mask leaves the destination unchanged (tiles can "punch" or add
+    // water only where authored).
+    ctx.globalCompositeOperation = 'source-over';
 
     for (const { entry, img } of validPairs) {
       const td = entry.tileDoc;

@@ -4606,9 +4606,10 @@ export class InteractionManager {
     // A stale camera matrixWorld can cause systematic pick offsets.
     safeCall(() => { const cam = this.sceneComposer?.camera; cam?.updateMatrixWorld?.(true); cam?.updateProjectionMatrix?.(); }, 'hover.updateCameraMatrix', Severity.COSMETIC);
 
-    // Tiles have matrixAutoUpdate=false. Ensure the scene graph is up to date so
-    // Raycaster sees correct matrixWorld values.
-    safeCall(() => this.sceneComposer?.scene?.updateMatrixWorld?.(true), 'hover.updateSceneMatrix', Severity.COSMETIC);
+    // Tiles often use matrixAutoUpdate=false with manual updateMatrix(). The main
+    // render pass already runs scene.updateMatrixWorld(false); avoid forcing a
+    // full-scene matrix refresh on every hover sample (very hot during pointermove).
+    safeCall(() => this.sceneComposer?.scene?.updateMatrixWorld?.(), 'hover.updateSceneMatrix', Severity.COSMETIC);
 
     // Keep the central mouse snapshot fresh for this hover sample and derive all
     // downstream tests from this single source.
@@ -8228,8 +8229,10 @@ export class InteractionManager {
     target.position.x = centerW.x;
     target.position.y = centerW.y;
     if (typeof target.updateMatrix === 'function') target.updateMatrix();
-    if (target.parent && typeof target.parent.updateMatrixWorld === 'function') {
-      target.parent.updateMatrixWorld(true);
+    // Refresh only this tile's branch; parent.updateMatrixWorld(true) walked the
+    // entire parent subtree (often scene-scale) per tile sync.
+    if (typeof target.updateWorldMatrix === 'function') {
+      target.updateWorldMatrix(false, true);
     }
   }
 

@@ -5,6 +5,7 @@
  * @module settings/control-state-sanitize
  */
 
+import { canPersistSceneDocument } from '../core/gm-parity.js';
 import { createLogger } from '../core/log.js';
 
 const log = createLogger('ControlStateSanitize');
@@ -214,6 +215,7 @@ export function getSanitizedControlStateForExport(scene) {
  * @returns {Promise<boolean>} true when a write was attempted
  */
 export async function repairSceneControlStateFlag(scene) {
+  if (!canPersistSceneDocument()) return false;
   if (!scene || typeof scene.setFlag !== 'function') return false;
   try {
     const raw = scene.getFlag('map-shine-advanced', 'controlState');

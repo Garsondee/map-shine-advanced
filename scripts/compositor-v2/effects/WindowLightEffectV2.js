@@ -36,7 +36,6 @@ import { probeMaskFile } from '../../assets/loader.js';
 import {
   tileHasLevelsRange,
   readTileLevelsFlags,
-  getViewedLevelBackgroundSrc,
   getVisibleLevelBackgroundLayers,
   resolveV14NativeDocFloorIndexMin,
 } from '../../foundry/levels-scene-flags.js';
@@ -394,24 +393,62 @@ export class WindowLightEffectV2 {
     // (full canvas height including padding), NOT canvas.scene.height (scene rect only).
     const worldH = foundrySceneData?.height ?? canvas?.scene?.height ?? 0;
 
+    const activeFloorIdxRaw = Number(window.MapShine?.floorStack?.getActiveFloor?.()?.index);
+    const activeFloorIdx = Number.isFinite(activeFloorIdxRaw) ? activeFloorIdxRaw : 0;
+
     let overlayCount = 0;
     const perFloorCounts = new Map();
 
     // ── Process scene background image ────────────────────────────────────
-    // The background is not in canvas.scene.tiles.contents — it's handled
-    // separately by FloorRenderBus as __bg_image__. Check for its _Windows
-    // or _Structural mask and create an overlay if found.
+    // Same active-floor-only background policy as TreeEffectV2 (Success Stories:
+    // Trees/Bushes floor leakage): only build a background _Windows overlay for
+    // the currently active floor so multi-level backgrounds cannot leak across
+    // floor transitions or underground views.
     const scene = canvas?.scene ?? null;
-    const visibleBgLayers = getVisibleLevelBackgroundLayers(scene);
-    const fallbackBgSrc = getViewedLevelBackgroundSrc(scene) ?? scene?.background?.src ?? '';
-    const bgLayers = visibleBgLayers.length
-      ? visibleBgLayers.map((l, i) => ({ src: String(l?.src || '').trim(), floorIndex: i }))
-      : (fallbackBgSrc ? [{ src: String(fallbackBgSrc).trim(), floorIndex: 0 }] : []);
-    for (let i = 0; i < bgLayers.length; i += 1) {
-      const bgSrc = bgLayers[i]?.src;
-      const bgFloorIndex = Number.isFinite(Number(bgLayers[i]?.floorIndex))
-        ? Number(bgLayers[i].floorIndex)
-        : i;
+    const bgEntries = [];
+    const floorIndexByLevelId = new Map();
+    try {
+      for (const f of floors) {
+        const levelId = (f?.levelId != null) ? String(f.levelId) : '';
+        const idx = Number(f?.index);
+        if (!levelId || !Number.isFinite(idx)) continue;
+        floorIndexByLevelId.set(levelId, idx);
+      }
+    } catch (_) {}
+    try {
+      const sortedLevels = scene?.levels?.sorted ?? [];
+      if (Array.isArray(sortedLevels) && sortedLevels.length > 0) {
+        for (let i = 0; i < sortedLevels.length; i += 1) {
+          const level = sortedLevels[i];
+          const src = String(level?.background?.src || '').trim();
+          if (!src) continue;
+          const levelId = (level?.id != null) ? String(level.id) : '';
+          const mappedFloorIndex = levelId ? floorIndexByLevelId.get(levelId) : undefined;
+          const floorIndex = Number.isFinite(Number(mappedFloorIndex))
+            ? Number(mappedFloorIndex)
+            : i;
+          const keyIndex = Math.max(0, Math.floor(Number(level?.index)));
+          const key = (keyIndex === 0) ? '__bg_image__' : `__bg_image__${keyIndex}`;
+          if (Number.isFinite(activeFloorIdx) && floorIndex !== activeFloorIdx) continue;
+          bgEntries.push({ src, floorIndex, key });
+        }
+      }
+    } catch (_) {}
+    if (bgEntries.length === 0) {
+      const bgLayers = getVisibleLevelBackgroundLayers(scene);
+      for (let i = 0; i < bgLayers.length; i += 1) {
+        const src = String(bgLayers[i]?.src || '').trim();
+        if (!src) continue;
+        if (Number.isFinite(activeFloorIdx) && i !== activeFloorIdx) continue;
+        bgEntries.push({ src, floorIndex: i, key: (i === 0) ? '__bg_image__' : `__bg_image__${i}` });
+      }
+    }
+
+    for (let bi = 0; bi < bgEntries.length; bi += 1) {
+      const bg = bgEntries[bi];
+      const bgSrc = bg.src;
+      const bgFloorIndex = Number.isFinite(Number(bg.floorIndex)) ? Number(bg.floorIndex) : bi;
+      const bgId = bg.key;
       if (!bgSrc) continue;
       const dotIdx = bgSrc.lastIndexOf('.');
       const bgBasePath = dotIdx > 0 ? bgSrc.substring(0, dotIdx) : bgSrc;
@@ -430,7 +467,6 @@ export class WindowLightEffectV2 {
 
       const GROUND_Z = 1000;
       const z = GROUND_Z + bgFloorIndex + WINDOW_Z_OFFSET;
-      const bgId = i === 0 ? '__bg_image__' : `__bg_image__${i}`;
 
       this._createOverlay(bgId, bgFloorIndex, {
         maskUrl: bgMaskPath,
@@ -524,7 +560,7 @@ export class WindowLightEffectV2 {
       .join(', ');
     log.info(`WindowLightEffectV2 floor assignment: active=${activeIdx}, overlays=[${floorBreakdown || 'none'}]`);
 
-    const bgCount = bgLayers.length;
+    const bgCount = bgEntries.length;
     log.info(`WindowLightEffectV2 populated: ${overlayCount} overlay(s) (${bgCount > 0 ? `${bgCount} bg + ` : ''}${Math.max(0, overlayCount - bgCount)} tiles)`);
   }
 
@@ -1097,10 +1133,12 @@ export class WindowLightEffectV2 {
     const mesh = new THREE.Mesh(geo, material);
     mesh.position.set(centerX, centerY, z);
     mesh.rotation.z = rotation;
+    mesh.userData.floorIndex = Math.max(0, Number(floorIndex) || 0);
     // Background sits under per-tile overlays; higher floors draw after lower so
     // stacked buildings don't lose upper-floor window light to sort instability.
-    const fi = Math.max(0, Number(floorIndex) || 0);
-    mesh.renderOrder = (tileId === '__bg_image__' ? 30 : 40) + fi * 100;
+    const fi = mesh.userData.floorIndex;
+    const isBgKey = typeof tileId === 'string' && tileId.startsWith('__bg_image__');
+    mesh.renderOrder = (isBgKey ? 30 : 40) + fi * 100;
 
     // Add to the isolated window light scene (not the bus scene).
     // Floor visibility is managed by onFloorChange() instead of the bus.

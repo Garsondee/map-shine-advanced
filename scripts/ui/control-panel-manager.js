@@ -241,6 +241,13 @@ export class ControlPanelManager {
      * @type {boolean}
      */
     this._skipNextControlStateSceneFlagPersist = false;
+    /**
+     * When true, skipped persist should still push one Foundry darkness sync.
+     * Used for time-only updates (clock/quick-time) so we avoid scene flag writes
+     * while still applying darkness after scrubbing.
+     * @type {boolean}
+     */
+    this._syncDarknessOnSkippedPersist = false;
 
     this._boundHandlers = {
       onFaceMouseDown: (e) => this._onClockMouseDown(e),
@@ -2103,9 +2110,9 @@ export class ControlPanelManager {
         this._revealTimeTargetUI();
         const mins = Number(this.controlState.timeTransitionMinutes) || 0;
         if (mins > 0) {
-          void this._startTimeOfDayTransition(hour, mins).then(() => this.debouncedSave());
+          void this._startTimeOfDayTransition(hour, mins).then(() => this._queueTimeOnlySave());
         } else {
-          void this._setTimeOfDay(hour).then(() => this.debouncedSave());
+          void this._setTimeOfDay(hour).then(() => this._queueTimeOnlySave());
         }
       });
       btnGrid.appendChild(btn);
@@ -2455,12 +2462,12 @@ export class ControlPanelManager {
       if (typeof target === 'number' && Number.isFinite(target)) {
         const mins = Number(this.controlState.timeTransitionMinutes) || 0;
         if (mins > 0) {
-          void this._startTimeOfDayTransition(target, mins).then(() => this.debouncedSave());
+          void this._startTimeOfDayTransition(target, mins).then(() => this._queueTimeOnlySave());
         } else {
-          void this._setTimeOfDay(target).then(() => this.debouncedSave());
+          void this._setTimeOfDay(target).then(() => this._queueTimeOnlySave());
         }
       } else {
-        this.debouncedSave();
+        this._queueTimeOnlySave();
       }
     }
   }
@@ -2583,6 +2590,17 @@ export class ControlPanelManager {
     this._updateClockTarget(this.controlState.timeOfDay);
     this._updateClock(hour);
     await this._applyControlState();
+  }
+
+  /**
+   * Queue a save after time-only edits without writing Scene controlState flags.
+   * This avoids same-scene redraw/reload paths while still syncing darkness once.
+   * @private
+   */
+  _queueTimeOnlySave() {
+    this._skipNextControlStateSceneFlagPersist = true;
+    this._syncDarknessOnSkippedPersist = true;
+    this.debouncedSave();
   }
 
   /**
@@ -3555,10 +3573,16 @@ Current Weather:
 
       if (this._skipNextControlStateSceneFlagPersist === true) {
         this._skipNextControlStateSceneFlagPersist = false;
-        try {
-          const wc = resolveWeatherController();
-          wc?.scheduleSaveWeatherSnapshot?.();
-        } catch (_) {}
+        const syncDarkness = this._syncDarknessOnSkippedPersist === true;
+        this._syncDarknessOnSkippedPersist = false;
+        if (syncDarkness) {
+          await stateApplier.syncFoundryDarknessFromMapShineTime();
+        } else {
+          try {
+            const wc = resolveWeatherController();
+            wc?.scheduleSaveWeatherSnapshot?.();
+          } catch (_) {}
+        }
         log.debug('Skipped Scene controlState flag persist for live weather slider save');
         return;
       }

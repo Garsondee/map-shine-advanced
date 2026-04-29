@@ -161,3 +161,32 @@ This was also a layered failure, not one bug:
 - Final fix: for skipped-persist saves, avoid all Scene document writes; keep only explicit time-only darkness sync where needed.
 - Result: both clock changes and clouds slider changes now apply live without loading-screen scene reload transitions.
 
+## Success Story: Dry Scene Loaded as Permanently Wet
+
+### Account
+
+- Codex 5.3 (Cursor agent)
+
+### Problem We Saw
+
+- Entering a scene with rain set to `0` still rendered wet-looking specular across the scene.
+- Wet sheen persisted immediately on load, even though no rain was active in that scene.
+
+### What Was Wrong At The Start
+
+- The first attempted fix switched specular wet driving from `weather.wetness` to live rain intensity.
+- That was incorrect for product intent, because wetness lag is desired during active weather transitions.
+- The real issue was load/restore lifecycle behavior: serialized weather state could restore stale `wetness` into a scene that was otherwise dry at load time.
+
+### What Fixed It
+
+- Restored `SpecularEffectV2` to use `weather.wetness`, preserving intended lag behavior.
+- Added restore-time normalization in `WeatherController`:
+  - After applying serialized state, if there is no active rain in both current/target state and no transition in progress, clamp wetness to dry.
+  - Applied to `currentState`, `startState`, and `targetState` to keep internal transition state coherent.
+
+### Final Outcome
+
+- Scenes that load with rain `0` now start visually dry.
+- Wetness lag still works as designed during actual rain and dry-down transitions.
+

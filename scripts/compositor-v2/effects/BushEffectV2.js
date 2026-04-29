@@ -1157,6 +1157,9 @@ export class BushEffectV2 {
           float edgeFade = smoothstep(0.0, max(uEdgeFadeStart + 1e-4, uEdgeFadeEnd), edgeDist);
           distortion *= edgeFade;
 
+          vec4 bushSample = texture2D(uBushMask, vUv - distortion);
+          float texA = safeAlpha(bushSample);
+
           vec2 shadowDir = normalize(vec2(uSunDir.x, -uSunDir.y));
           if (length(shadowDir) < 0.01) shadowDir = -windDir;
           vec2 shadowOffset = shadowDir * uShadowLength;
@@ -1215,8 +1218,6 @@ export class BushEffectV2 {
           float shadowA = (shadowWeight > 0.0) ? (shadowAccum / shadowWeight) : 0.0;
           shadowA *= clamp(uShadowOpacity, 0.0, 1.0) * uIntensity * edgeFade;
 
-          vec4 bushSample = texture2D(uBushMask, vUv - distortion);
-          float texA = safeAlpha(bushSample);
           float mainAlpha = texA * uIntensity;
           float shadowOnlyAlpha = shadowA * (1.0 - clamp(mainAlpha, 0.0, 1.0));
           float finalAlpha = clamp(mainAlpha + shadowOnlyAlpha, 0.0, 1.0);

@@ -153,7 +153,7 @@ export class TreeEffectV2 {
           'Mask status': 'Whether the scene found at least one `_Tree` texture after load.',
           Turbulence: 'Extra high-frequency wobble mixed into distortion (trees only).',
           'Canopy shadow': 'Darkening from a blurred, offset sample of the mask opposite the sun.',
-          'Hover fade': 'When token hover-hide is active, trees can fade via runtime uniform (not a Tweakpane slider).',
+          'Hover fade': 'When token hover-hide is active, the **canopy** fades via runtime uniform; **ground shadow** stays so tokens do not look like they are floating in cleared air.',
         },
       },
       presetApplyDefaults: true,
@@ -1398,11 +1398,14 @@ export class TreeEffectV2 {
           float edgeFade = smoothstep(0.0, max(uEdgeFadeStart + 1e-4, uEdgeFadeEnd), edgeDist);
           distortion *= edgeFade;
 
+          // Sample canopy coverage once; shadow pass uses the same footprint so hover
+          // fade can zero mainAlpha while shadowGate still sees full mask coverage.
+          vec4 treeSample = texture2D(uTreeMask, vUv - distortion);
+          float texA = safeAlpha(treeSample);
+
           vec2 shadowDir = normalize(vec2(uSunDir.x, -uSunDir.y));
           if (length(shadowDir) < 0.01) shadowDir = -windDir;
-          // Tree canopy shadow should not appear as a detached offset blob.
-          // Keep the soft shadow lobe centered on canopy pixels.
-          vec2 shadowOffset = vec2(0.0);
+          vec2 shadowOffset = shadowDir * uShadowLength;
           float shadowBlur = max(0.0001, uShadowSoftness * 0.0008);
           vec2 shadowBaseUv = vUv - distortion - shadowOffset;
           vec2 step1 = vec2(shadowBlur);
@@ -1456,17 +1459,14 @@ export class TreeEffectV2 {
           shadowWeight += 0.04;
 
           float shadowA = (shadowWeight > 0.0) ? (shadowAccum / shadowWeight) : 0.0;
-          // Fade tree shadow contribution together with canopy hover fade to avoid
-          // detached "dark ghost" shapes when the canopy is hidden.
-          shadowA *= clamp(uShadowOpacity, 0.0, 1.0) * uIntensity * edgeFade * clamp(uHoverFade, 0.0, 1.0);
+          // Shadow stays at full strength during hover-hide so the ground still reads
+          // like shaded foliage (same idea as building/overhead shadows under tokens).
+          shadowA *= clamp(uShadowOpacity, 0.0, 1.0) * uIntensity * edgeFade;
 
-          vec4 treeSample = texture2D(uTreeMask, vUv - distortion);
-          float texA = safeAlpha(treeSample);
           float mainAlpha = texA * uIntensity * clamp(uHoverFade, 0.0, 1.0);
-          // Prevent soft shadow bloom from extending beyond canopy edges.
-          // Gate shadow contribution by local canopy coverage.
-          float canopyGate = smoothstep(0.03, 0.35, clamp(mainAlpha, 0.0, 1.0));
-          float shadowOnlyAlpha = shadowA * (1.0 - clamp(mainAlpha, 0.0, 1.0)) * canopyGate;
+          float coverageForShadow = clamp(texA * uIntensity, 0.0, 1.0);
+          float shadowGate = smoothstep(0.03, 0.35, coverageForShadow);
+          float shadowOnlyAlpha = shadowA * (1.0 - clamp(mainAlpha, 0.0, 1.0)) * shadowGate;
           float a = clamp(mainAlpha + shadowOnlyAlpha, 0.0, 1.0);
           if (a <= 0.001) discard;
 

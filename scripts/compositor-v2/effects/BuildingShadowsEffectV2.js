@@ -36,9 +36,9 @@ export class BuildingShadowsEffectV2 {
     this.params = {
       enabled: true,
       opacity: 0.75,
-      length: 0.22,
-      softness: 3.0,
-      smear: 0.65,
+      length: 0.060,
+      softness: 1.0,
+      smear: 1.0,
       resolutionScale: 1.25,
       penumbra: 0.5,
       shadowCurve: 0.9,
@@ -138,7 +138,7 @@ export class BuildingShadowsEffectV2 {
           min: 0.0,
           max: 0.6,
           step: 0.005,
-          default: 0.22
+          default: 0.060
         },
         softness: {
           type: 'slider',
@@ -146,7 +146,7 @@ export class BuildingShadowsEffectV2 {
           min: 0.5,
           max: 8.0,
           step: 0.1,
-          default: 3.0
+          default: 1.0
         },
         smear: {
           type: 'slider',
@@ -154,7 +154,7 @@ export class BuildingShadowsEffectV2 {
           min: 0.0,
           max: 1.0,
           step: 0.01,
-          default: 0.65
+          default: 1.0
         },
         resolutionScale: {
           type: 'slider',

@@ -10,12 +10,11 @@
  *   One three.quarks BatchedRenderer per floor that has fire, each registered on
  *   the FloorRenderBus with that floor's index (overlay keys use ms_fire_batch_* —
  *   keys starting with "__" are treated like backgrounds in renderFloorRangeTo and
- *   never get floor-range culling). For per-level prepass slices (min=max=floor),
- *   FloorRenderBus draws each `ms_fire_batch_*` into every per-level slice `L` with
- *   `L >= maskFloor` (`fi <= L`) so flames stay visible from the mask floor and above.
- *   `_updateBatchRenderOrder` then lifts the BatchedRenderer (and quarks systems) into
- *   `max(maskFloor, activeViewTop)`'s FLOOR_EFFECTS band so upper-floor albedo does not
- *   paint over lower-floor fire (depthTest is off; painter's order would hide it).
+ *   never get floor-range culling). Per-level rendering keeps each fire batch in its
+ *   authored floor slice so upper-floor backgrounds/tiles can occlude lower-floor fire.
+ *   `_updateBatchRenderOrder` keeps each BatchedRenderer (and quarks systems) pinned to
+ *   its authored mask floor's FLOOR_EFFECTS band so upper-floor tile/overhead layers can
+ *   still occlude lower-floor flames correctly.
  *   For each tile with a `_Fire` mask, scans the mask on the CPU to build spawn
  *   point lists, then creates fire + ember + smoke particle systems. Floor
  *   isolation for simulation uses swapping active systems in/out per batch on floor change.
@@ -1019,26 +1018,26 @@ export class FireEffectV2 {
   }
 
   /**
-   * Keep each floor's BatchedRenderer + quarks systems in a sort band that survives
-   * upper-floor bus draws: lower-floor effects must sort after that floor's albedo,
-   * so use max(authoredFloor, visibleTopFloor) for the FLOOR_EFFECTS tier.
-   * @param {number} maxFloorIndex - highest visible floor index (from FloorCompositor / stack)
+   * Keep each floor's BatchedRenderer + quarks systems in that authored floor's
+   * FLOOR_EFFECTS band (between albedo and overhead for the same floor).
+   * This preserves expected occlusion by upper layers and avoids globally-lifted
+   * fire drawing above geometry that should hide it.
+   * @param {number} maxFloorIndex - highest visible floor index (unused; retained for API parity)
    * @private
    */
   _updateBatchRenderOrder(maxFloorIndex) {
-    const top = Number.isFinite(Number(maxFloorIndex)) ? Math.max(0, Math.floor(Number(maxFloorIndex))) : 0;
+    void maxFloorIndex;
     for (const f of this._floorStates.keys()) {
       const state = this._floorStates.get(f);
       if (!state?.batchRenderer) continue;
       const fi = Number(f) || 0;
-      const sortBandFloor = Math.max(fi, top);
       const br = state.batchRenderer;
-      br.renderOrder = effectUnderOverheadOrder(sortBandFloor, 0);
+      br.renderOrder = effectUnderOverheadOrder(fi, 0);
       const syncSys = (arr, typeOffset) => {
         for (const sys of arr) {
           if (!sys) continue;
           try {
-            sys.renderOrder = this._computeParticleRenderOrder(sortBandFloor, typeOffset);
+            sys.renderOrder = this._computeParticleRenderOrder(fi, typeOffset);
           } catch (_) {}
         }
       };

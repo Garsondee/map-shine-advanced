@@ -5033,25 +5033,19 @@ export class FloorCompositor {
       //   - LevelCompositePass source-over reveals the ground RT (and
       //     any ground-floor effects like water) through every authored
       //     hole, not just where both RGB and alpha were carved.
-      // Cross-slice water (borrowing lower-floor water data) intentionally
-      // injects coverage into upper-floor holes. Rebinding alpha to authored
-      // scene alpha would erase that injected layer and make upstairs views
-      // look like water is "behind" lower art. Keep authored rebind for normal
-      // slices, but skip it when cross-slice water is active.
-      const crossSliceActive =
-        Number(this._waterEffect?._composeMaterial?.uniforms?.uCrossSliceWaterData?.value ?? 0) > 0.5;
-      if (!crossSliceActive) {
-        if (_profiling) _profileT0 = performance.now();
-        const rebindOut = (currentInput === levelPostA) ? levelPostB : levelPostA;
-        const rebound = this._levelAlphaRebindPass.render(
-          this.renderer,
-          currentInput,
-          levelSceneRT,
-          rebindOut,
-        );
-        if (_profiling) this._recordPassTiming(`perLevel_alphaRebind_${levelIndex}`, _profileT0);
-        if (rebound) currentInput = rebindOut;
-      }
+      // Always run alpha rebind so effect alpha cannot accidentally flatten
+      // authored holes and mask lower floors.
+      if (_profiling) _profileT0 = performance.now();
+      const rebindOut = (currentInput === levelPostA) ? levelPostB : levelPostA;
+      const rebound = this._levelAlphaRebindPass.render(
+        this.renderer,
+        currentInput,
+        levelSceneRT,
+        rebindOut,
+        { allowAlphaWiden: _waterPassWrote === true },
+      );
+      if (_profiling) this._recordPassTiming(`perLevel_alphaRebind_${levelIndex}`, _profileT0);
+      if (rebound) currentInput = rebindOut;
 
       levelFinalRTs.push(currentInput);
 

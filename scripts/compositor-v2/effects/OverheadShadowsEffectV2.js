@@ -106,32 +106,32 @@ export class OverheadShadowsEffectV2 {
     this.params = {
       enabled: true,
       opacity: 0.4,
-      length: 0.165,
-      softness: 3.0,
-      outdoorShadowLengthScale: 1.0,
-      indoorReceiverShadowLengthScale: 1.0,
+      length: 0.040,
+      softness: 1.0,
+      outdoorShadowLengthScale: 2.0,
+      indoorReceiverShadowLengthScale: 0.25,
       verticalOnly: true,  // v1: primarily vertical motion in screen space
-      affectsLights: 0.0,
+      affectsLights: 0.75,
       sunLatitude: 0.1,    // 0=flat east/west, 1=maximum north/south arc
       indoorShadowEnabled: true, // Back-compat toggle; controls projected _Outdoors dark-region building shadow contribution on outdoor receivers
-      indoorShadowOpacity: 0.5,   // Back-compat alias for outdoorBuildingShadowOpacity
-      outdoorBuildingShadowOpacity: 0.5,
-      indoorShadowLengthScale: 1.0, // Back-compat alias for outdoorBuildingShadowLengthScale
-      outdoorBuildingShadowLengthScale: 1.0,
-      indoorShadowSoftness: 3.0,
-      indoorFluidShadowSoftness: 3.0,
-      indoorFluidShadowIntensityBoost: 1.0,
+      indoorShadowOpacity: 0.42,   // Back-compat alias for outdoorBuildingShadowOpacity
+      outdoorBuildingShadowOpacity: 0.42,
+      indoorShadowLengthScale: 4.70, // Back-compat alias for outdoorBuildingShadowLengthScale
+      outdoorBuildingShadowLengthScale: 4.70,
+      indoorShadowSoftness: 3.8,
+      indoorFluidShadowSoftness: 3.1,
+      indoorFluidShadowIntensityBoost: 0.81,
       indoorFluidColorSaturation: 1.2,
-      tileProjectionEnabled: false,
+      tileProjectionEnabled: true,
       tileProjectionOpacity: 0.5,
       tileProjectionLengthScale: 1.0,
       tileProjectionSoftness: 3.0,
       tileProjectionThreshold: 0.05,
       tileProjectionPower: 1.0,
-      tileProjectionOutdoorOpacityScale: 1.0,
+      tileProjectionOutdoorOpacityScale: 0.10,
       tileProjectionIndoorOpacityScale: 1.0,
       tileProjectionSortBias: 0.002,
-      fluidColorEnabled: false,
+      fluidColorEnabled: true,
       fluidEffectTransparency: 0.35,
       fluidShadowIntensityBoost: 1.0,
       fluidShadowSoftness: 3.0,
@@ -666,7 +666,7 @@ export class OverheadShadowsEffectV2 {
           min: 0.0,
           max: 0.3,
           step: 0.005,
-          default: 0.165
+          default: 0.040
         },
         softness: {
           type: 'slider',
@@ -674,7 +674,7 @@ export class OverheadShadowsEffectV2 {
           min: 0.5,
           max: 5.0,
           step: 0.1,
-          default: 3.0
+          default: 1.0
         },
         outdoorShadowLengthScale: {
           type: 'slider',
@@ -682,7 +682,7 @@ export class OverheadShadowsEffectV2 {
           min: 0.0,
           max: 30.0,
           step: 1.00,
-          default: 1.0,
+          default: 2.0,
           tooltip: 'Scales projected overhead shadow distance on outdoor receivers'
         },
         indoorReceiverShadowLengthScale: {
@@ -691,7 +691,7 @@ export class OverheadShadowsEffectV2 {
           min: 0.0,
           max: 30.0,
           step: 0.01,
-          default: 1.0,
+          default: 0.25,
           tooltip: 'Scales projected overhead shadow distance on indoor receivers'
         },
         affectsLights: {
@@ -705,7 +705,7 @@ export class OverheadShadowsEffectV2 {
         fluidColorEnabled: {
           type: 'checkbox',
           label: 'Use Fluid Effect Colour',
-          default: false,
+          default: true,
           tooltip: 'Tints overhead shadows with FluidEffect colour when fluid overlays are attached to overhead tiles'
         },
         fluidEffectTransparency: {
@@ -756,7 +756,7 @@ export class OverheadShadowsEffectV2 {
         tileProjectionEnabled: {
           type: 'checkbox',
           label: 'Enable Tile Shadow Projection',
-          default: false,
+          default: true,
           tooltip: 'Adds tile alpha from Tile Motion (per-tile Shadow Projection) as an extra projected shadow source'
         },
         tileProjectionOpacity: {
@@ -810,7 +810,7 @@ export class OverheadShadowsEffectV2 {
           min: 0.0,
           max: 2.0,
           step: 0.01,
-          default: 1.0,
+          default: 0.10,
           tooltip: 'Additional multiplier applied to tile-projected shadow strength on outdoor receivers'
         },
         tileProjectionIndoorOpacityScale: {
@@ -834,7 +834,7 @@ export class OverheadShadowsEffectV2 {
           min: 0.0,
           max: 1.0,
           step: 0.01,
-          default: 0.5,
+          default: 0.42,
           tooltip: 'Strength of projected _Outdoors dark-region contribution on outdoor receivers'
         },
         outdoorBuildingShadowLengthScale: {
@@ -843,7 +843,7 @@ export class OverheadShadowsEffectV2 {
           min: 0.0,
           max: 30.0,
           step: 0.01,
-          default: 1.0,
+          default: 4.70,
           tooltip: 'Scale factor for _Outdoors dark-region projection distance'
         },
         indoorShadowSoftness: {
@@ -852,7 +852,7 @@ export class OverheadShadowsEffectV2 {
           min: 0.5,
           max: 5.0,
           step: 0.1,
-          default: 3.0,
+          default: 3.8,
           tooltip: 'Indoor blur radius for overhead and fluid shadow contributions'
         },
         indoorFluidShadowSoftness: {
@@ -861,7 +861,7 @@ export class OverheadShadowsEffectV2 {
           min: 0.5,
           max: 10.0,
           step: 0.1,
-          default: 3.0,
+          default: 3.1,
           tooltip: 'Blur radius for FluidEffect tint on indoor receivers (up to 2x regular shadow softness range)'
         },
         indoorFluidShadowIntensityBoost: {
@@ -870,7 +870,7 @@ export class OverheadShadowsEffectV2 {
           min: 0.0,
           max: 5.0,
           step: 0.01,
-          default: 1.0,
+          default: 0.81,
           tooltip: 'Boost multiplier for FluidEffect colour contribution on indoor receivers (up to 500%)'
         },
         indoorFluidColorSaturation: {

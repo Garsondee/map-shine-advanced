@@ -190,3 +190,54 @@ This was also a layered failure, not one bug:
 - Scenes that load with rain `0` now start visually dry.
 - Wetness lag still works as designed during actual rain and dry-down transitions.
 
+## Success Story: Roof Background Failed to Occlude Lower-Floor Fire
+
+### Account
+
+- Codex 5.3 (Cursor agent)
+
+### Problem We Saw
+
+- On an upper roof level, fire particles authored on the floor below appeared on top of roof background art that should occlude them.
+- A first attempted fix over-corrected and hid lower-floor fire entirely when viewing above floors.
+
+### What Was Wrong At The Start
+
+This issue was a layered ordering/slice interaction, not just one render-order value:
+
+1. **Fire had stacked per-level visibility by design**  
+   In per-level prepass, `ms_fire_batch_*` could be injected into every higher slice (`fi <= L`) so lower-floor fire remained visible from above.
+
+2. **Background planes were not floor-band ordered**  
+   `__bg_image__*` planes had no explicit floor-aware `renderOrder`, so they could fail to sort above lower-floor fire overlays in the relevant slices.
+
+3. **Blunt disable of stacked fire visibility was incorrect**  
+   Removing stacked-fire prepass inclusion made occlusion look “fixed” only by fully suppressing below-floor fire in upper views, which is not intended behavior.
+
+### What Fixed It
+
+1. **Keep intended stacked fire visibility (do not suppress lower-floor fire globally)**
+
+- Kept `topVisibleFloorIndexForFire` in per-level bus rendering so lower-floor fire still appears from upper views where intended.
+
+2. **Make roof backgrounds truly occluding**
+
+- Assigned floor-aware `renderOrder` to bus background planes (`__bg_image__*`) using `tileAlbedoOrder(bgFloorIndex, 0)`.
+- Pinned solid background fill behind floor content with a stable low albedo-band order.
+
+3. **The decisive fix: constrain alpha widening in LevelAlphaRebindPass**
+
+- Root cause of the "middle floor turns lower floor black" regression was alpha widening being accepted too broadly in `LevelAlphaRebindPass`.
+- Fire/effect passes on the middle level could trigger widened alpha preservation, making that slice too opaque and hiding the ground floor in source-over composite.
+- Final fix:
+  - Added an explicit `uAllowAlphaWiden` gate in `LevelAlphaRebindPass`.
+  - Enabled that gate only when the level water pass actually wrote output (`_waterPassWrote === true`) from `FloorCompositor`.
+  - All non-water passes (including fire) now remain clamped to authored alpha, preserving holes/reveal to lower floors.
+
+### Final Outcome
+
+- Lower-floor fire is visible from upper floors where it should be.
+- Roof/background art now correctly occludes that fire where authored alpha is opaque.
+- Middle (fire) floor no longer blacks out the floor below.
+- Multi-floor rendering now behaves correctly on all tested floors (roof, fire floor, ground).
+

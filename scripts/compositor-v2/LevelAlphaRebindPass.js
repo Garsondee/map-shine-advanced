@@ -62,13 +62,16 @@ const VERTEX_SHADER = /* glsl */ `
 const REBIND_FRAGMENT = /* glsl */ `
   uniform sampler2D tDiffuse;
   uniform sampler2D tAuthoredAlpha;
+  uniform float uAllowAlphaWiden;
   varying vec2 vUv;
   void main() {
     vec4 c = texture2D(tDiffuse, vUv);
     float authored = texture2D(tAuthoredAlpha, vUv).a;
     float outA = min(c.a, authored);
     // Epsilon: ignore tiny filtering deltas; water widen is much larger.
-    if (c.a > authored + 0.02) {
+    // Restrict widened-alpha preservation to known passes (water), otherwise
+    // VFX alpha (e.g. fire) can flatten holes and hide lower floors.
+    if (uAllowAlphaWiden > 0.5 && c.a > authored + 0.02) {
       outA = c.a;
     }
     gl_FragColor = vec4(c.rgb, clamp(outA, 0.0, 1.0));
@@ -95,6 +98,7 @@ export class LevelAlphaRebindPass {
       uniforms: {
         tDiffuse: { value: null },
         tAuthoredAlpha: { value: null },
+        uAllowAlphaWiden: { value: 0.0 },
       },
       vertexShader: VERTEX_SHADER,
       fragmentShader: REBIND_FRAGMENT,
@@ -121,9 +125,10 @@ export class LevelAlphaRebindPass {
    * @param {THREE.WebGLRenderTarget} inputRT - post-chain output
    * @param {THREE.WebGLRenderTarget} authoredAlphaRT - raw sceneRT for this level
    * @param {THREE.WebGLRenderTarget} outputRT - destination
+   * @param {{allowAlphaWiden?: boolean}} [options]
    * @returns {boolean} true on success
    */
-  render(renderer, inputRT, authoredAlphaRT, outputRT) {
+  render(renderer, inputRT, authoredAlphaRT, outputRT, options = {}) {
     if (!this._initialized || !renderer || !inputRT || !authoredAlphaRT || !outputRT) return false;
 
     const prevTarget = renderer.getRenderTarget();
@@ -131,6 +136,7 @@ export class LevelAlphaRebindPass {
 
     this._material.uniforms.tDiffuse.value = inputRT.texture;
     this._material.uniforms.tAuthoredAlpha.value = authoredAlphaRT.texture;
+    this._material.uniforms.uAllowAlphaWiden.value = options?.allowAlphaWiden === true ? 1.0 : 0.0;
 
     renderer.setRenderTarget(outputRT);
     renderer.autoClear = true;

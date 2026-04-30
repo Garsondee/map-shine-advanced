@@ -1197,9 +1197,10 @@ export class FloorRenderBus {
       const fi = Number(entry?.floorIndex);
       const minFI = Number(minFloorIndex);
       const fireHint = topVisibleFloorIndexForFire;
+      const isFireOverlay = String(tileId).startsWith('ms_fire_batch_');
       let inRange;
       if (
-        String(tileId).startsWith('ms_fire_batch_')
+        isFireOverlay
         && fireHint != null
         && Number.isFinite(Number(fireHint))
         && Number.isFinite(minFI) && Number.isFinite(Number(maxFloorIndex))
@@ -1492,6 +1493,8 @@ export class FloorRenderBus {
     const mesh = new THREE.Mesh(geom, mat);
     mesh.name = 'BusBg_solid';
     mesh.frustumCulled = false;
+    // Keep the opaque world-fill behind all floor content.
+    mesh.renderOrder = tileAlbedoOrder(0, 0);
     // Center of world canvas in Three Y-up space.
     mesh.position.set(worldW / 2, worldH / 2, GROUND_Z - 2);
     this._scene.add(mesh);
@@ -1547,6 +1550,10 @@ export class FloorRenderBus {
     const mesh = new THREE.Mesh(geom, mat);
     mesh.name = 'BusBg_image';
     mesh.frustumCulled = false;
+    const bgFloorIndex = Number.isFinite(Number(zIndex)) ? Number(zIndex) : 0;
+    // Background images participate in per-floor albedo ordering so upper-floor
+    // background art can occlude lower-floor effect overlays (e.g. fire).
+    mesh.renderOrder = tileAlbedoOrder(bgFloorIndex, 0);
     mesh.position.set(centerX, centerY, GROUND_Z - 1 + (Number(zIndex) || 0) * 0.01);
     // Negative Y scale to flip the image right-side up (matches basePlaneMesh).
     mesh.scale.set(1, -1, 1);
@@ -1554,7 +1561,6 @@ export class FloorRenderBus {
     // Store in _tiles so clear() disposes it and setVisibleFloors always shows it.
     // Preserve stack order as floor index so floor-aware mask passes (water occluder)
     // can include only upper visible background layers.
-    const bgFloorIndex = Number.isFinite(Number(zIndex)) ? Number(zIndex) : 0;
     this._tiles.set(key, { mesh, material: mat, floorIndex: bgFloorIndex });
     log.info(`FloorRenderBus: bg image plane [${key}] (${sceneW}x${sceneH} at ${centerX},${centerY})`);
   }

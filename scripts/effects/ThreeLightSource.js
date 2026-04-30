@@ -296,9 +296,10 @@ export class ThreeLightSource {
         uBrightness: { value: 1.0 },
         // Foundry photometric controls:
         // - uLuminosity scales emitted strength
-        // - uColoration controls how much authored tint contributes
+        // - uColoration = Foundry "Color Intensity" (0..1), from config.colorIntensity
+        //   (not config.coloration, which is the coloration *technique* id)
         uLuminosity: { value: 1.0 },
-        uColoration: { value: 1.0 },
+        uColoration: { value: 0.5 },
         // Cookie/gobo texture (optional)
         tCookie: { value: null },
         uHasCookie: { value: 0.0 },
@@ -530,7 +531,10 @@ export class ThreeLightSource {
 
           // Torch (20) + flame (21): wind-warped ember + dim disk (local warp on p only; vUvs/cookies unchanged).
           if (isFireCore > 0.5) {
+            // Keep a perceptibly small fire core around intensity=1.0, then
+            // grow the core area as authored intensity increases.
             float ai = clamp(uAnimIntensity * 0.1, 0.02, 1.0);
+            float coreGrowth = smoothstep(1.0, 10.0, clamp(uAnimIntensity, 0.0, 10.0));
             float brPx = max(uBrightRadius, 1.5);
             float uRad = max(uRadius, 1.0);
 
@@ -551,8 +555,8 @@ export class ThreeLightSource {
             float distMod = 1.0 - (edgeNoise * (0.03 + ai * 0.04));
             float fireDistPx = lenFp * distMod;
 
-            float ballPx = mix(2.8, 6.2, ai) + brPx * mix(0.04, 0.22, ai);
-            ballPx = min(ballPx, mix(18.0, 30.0, ai));
+            float ballPx = mix(1.35, 3.4, coreGrowth) + brPx * mix(0.015, 0.26, coreGrowth);
+            ballPx = min(ballPx, mix(11.0, 32.0, coreGrowth));
             ballPx *= mix(1.0, 1.18, isFlame);
             ballPx *= 1.75 * 1.5;
             float fallPow = mix(12.0, 8.0, isFlame);
@@ -775,12 +779,17 @@ export class ThreeLightSource {
           // downstream compositing ignores alpha modulation for the light buffer.
           float cookieColorMul = (uHasCookie > 0.5) ? cookieFactor : 1.0;
 
-          // Color intensity / coloration:
-          // - 1.0 = full authored tint
-          // - 0.0 = desaturated/neutralized output
-          float coloration = clamp(uColoration, 0.0, 1.0);
+          // Foundry "Color Intensity" (uniform uColoration): tint vs neutral luma.
+          float ci = clamp(uColoration, 0.0, 1.0);
           float outLum = dot(outColor, vec3(0.2126, 0.7152, 0.0722));
-          vec3 tintedColor = mix(vec3(outLum), outColor, coloration);
+          vec3 tintedColor = mix(vec3(outLum), outColor, ci);
+          // Compose treats RGB as a separate coloration path (scaled by albedo); a plain
+          // luma blend at ci=1 matches hue but can read weaker than Foundry. Emphasize
+          // chroma at high ci so max slider gives clearly saturated tints (HDR-safe).
+          vec3 lumaAxis = vec3(outLum);
+          vec3 chr = tintedColor - lumaAxis;
+          float chromaEmphasis = 1.0 + 0.72 * ci * ci;
+          tintedColor = lumaAxis + chr * chromaEmphasis;
           vec3 rgbOut = tintedColor * uBrightness * (0.75 + 0.25 * fairyBoost) * cookieColorMul;
           // Keep color falloff/shape attenuation identical to the white channel profile,
           // but do not multiply by luminosity so "color-only" lights remain visible.
@@ -914,10 +923,9 @@ export class ThreeLightSource {
     this.material.uniforms.uBrightness.value = Math.max(0.2, 1.0 + ((luminosity01 * 2.0 - 1.0) * 0.35)) + satBonus;
     this.material.uniforms.uLuminosity.value = luminosity01;
 
-    // Foundry color intensity / coloration amount.
-    const colorationRaw = Number(config.coloration);
-    const coloration = Number.isFinite(colorationRaw) ? this._clamp(colorationRaw, 0.0, 1.0) : 1.0;
-    this.material.uniforms.uColoration.value = coloration;
+    // Foundry "Color Intensity" slider → config.colorIntensity (0..1). Do not use
+    // config.coloration here: that field is the coloration technique enum (integer).
+    this.material.uniforms.uColoration.value = this._colorIntensity01FromConfig(config);
 
     const dim = config.dim || 0;
     const bright = config.bright || 0;
@@ -1053,6 +1061,21 @@ export class ThreeLightSource {
 
     this._lastDocX = docX;
     this._lastDocY = docY;
+  }
+
+  /**
+   * Foundry ambient light: "Color Intensity" is stored as `colorIntensity` on the
+   * light config. `coloration` names the rendering technique (integer), not this slider.
+   * @param {object|null|undefined} config
+   * @returns {number}
+   * @private
+   */
+  _colorIntensity01FromConfig(config) {
+    if (!config || typeof config !== 'object') return 0.5;
+    let v = Number(config.colorIntensity);
+    if (!Number.isFinite(v)) v = Number(config.colourIntensity);
+    if (Number.isFinite(v)) return this._clamp(v, 0.0, 1.0);
+    return 0.5;
   }
 
   _clamp(value, min, max) {
@@ -1968,6 +1991,17 @@ export class ThreeLightSource {
     const tMs = (timeInfo && typeof timeInfo.elapsed === 'number') ? (timeInfo.elapsed * 1000) : 0;
     const tSec = (timeInfo && typeof timeInfo.elapsed === 'number') ? timeInfo.elapsed : 0;
     const { type, speed, intensity, reverse } = this._getAnimationOptions();
+
+    // Match Foundry UI responsiveness: color intensity reads from the live placeable
+    // document (same pattern as _getAnimationOptions), not only cached updateData.
+    try {
+      const liveDoc = this._resolveLiveLightDoc() || this.document;
+      const liveCfg = liveDoc?.config && typeof liveDoc.config === 'object' ? liveDoc.config : null;
+      if (liveCfg && this.material?.uniforms?.uColoration) {
+        this.material.uniforms.uColoration.value = this._colorIntensity01FromConfig(liveCfg);
+      }
+    } catch (_) {
+    }
 
     // "Sun Light" / darkness-driven intensity response.
     // This is a MapShine enhancement which modulates the light intensity based on

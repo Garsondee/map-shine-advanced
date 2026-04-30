@@ -10,6 +10,7 @@
 import { canPersistSceneDocument, isGmLike } from './core/gm-parity.js';
 
 import { registerLevelNavigationKeybindings } from './foundry/level-navigation-keybindings.js';
+import './scene/level-transition-curtain.js';
 
 async function showExperimentalWarningDialog() {
   try {

@@ -103,7 +103,11 @@ import { resolveEffectEnabled } from '../effects/resolve-effect-enabled.js';
 import { ResizeHandler } from './resize-handler.js';
 import { ModeManager } from './mode-manager.js';
 import { getConfiguredCanvasLayer } from './canvas-layer-resolve.js';
-import { exposeGlobals } from './manager-wiring.js';
+import {
+  exposeGlobals,
+  registerLevelTransitionCurtain,
+  disposeLevelTransitionCurtain,
+} from './manager-wiring.js';
 import { DepthPassManager } from '../scene/depth-pass-manager.js';
 import { isSoundAudibleForPerspective } from './elevation-context.js';
 import { getFloorStackBandsSignature, getSceneBandsForFloorStack } from './levels-floor-stack-bands.js';
@@ -5900,6 +5904,12 @@ async function createThreeCanvas(scene, createOptions = {}) {
       setMapMakerMode, resetScene, isMapMakerMode
     });
 
+    safeCall(
+      () => registerLevelTransitionCurtain(mapShine, cameraFollower),
+      'levelTransitionCurtain.register',
+      Severity.COSMETIC,
+    );
+
     // Dev authoring API for MapShine-native enhanced lights (scene-flag stored).
     mapShine.enhancedLights = safeCall(() => createEnhancedLightsApi(), 'createEnhancedLightsApi', Severity.DEGRADED, { fallback: null });
 
@@ -7493,6 +7503,8 @@ function destroyThreeCanvas() {
     safeDispose(() => graphicsSettings.dispose(), 'graphicsSettings.dispose');
     graphicsSettings = null;
   }
+
+  safeCall(() => disposeLevelTransitionCurtain(), 'levelTransitionCurtain.dispose', Severity.COSMETIC);
 
   // Dispose camera follower
   if (cameraFollower) {

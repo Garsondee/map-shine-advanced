@@ -2719,6 +2719,9 @@ export class FloorCompositor {
       }
     } catch (_) {}
     try {
+      sm.applyBuildingShadowUvRemap?.(this.camera);
+    } catch (_) {}
+    try {
       sm.render(this.renderer);
     } catch (err) {
       log.warn('FloorCompositor: ShadowManagerV2 render failed:', err);
@@ -4687,6 +4690,40 @@ export class FloorCompositor {
     return readRT;
   }
 
+  /**
+   * Mirror lighting shadow textures into WaterEffectV2 so foam/murk/specular
+   * sample the same factors as LightingEffectV2.
+   * When ShadowManagerV2 is enabled, bind its combined RT to tCombinedShadow
+   * (never use cloud-only texture as a false "combined" for foam).
+   * @param {object} o
+   * @param {THREE.Texture|null} [o.cloudShadowTexLegacy]
+   * @param {THREE.Texture|null} [o.buildingShadowTex]
+   * @param {THREE.Texture|null} [o.overheadShadowTexLegacy]
+   * @private
+   */
+  _bindWaterShadowUniforms({
+    cloudShadowTexLegacy = null,
+    buildingShadowTex = null,
+    overheadShadowTexLegacy = null,
+  } = {}) {
+    const water = this._waterEffect;
+    if (!water) return;
+    const sm = this._shadowManagerEffect;
+    const smCombined = (resolveEffectEnabled(sm) && sm?.combinedShadowTexture)
+      ? sm.combinedShadowTexture
+      : null;
+    try {
+      if (smCombined) {
+        water.setShadowManagerCombinedTexture?.(smCombined);
+      } else {
+        water.setShadowManagerCombinedTexture?.(null);
+      }
+      water.setCloudShadowTexture?.(cloudShadowTexLegacy ?? null);
+      water.setBuildingShadowTexture?.(buildingShadowTex ?? null);
+      water.setOverheadShadowTexture?.(overheadShadowTexLegacy ?? null);
+    } catch (_) {}
+  }
+
   // ── Per-Level RT Pipeline ──────────────────────────────────────────────────
 
   /**
@@ -4896,6 +4933,11 @@ export class FloorCompositor {
 
         const waterOut = (currentInput === levelPostA) ? levelPostB : levelPostA;
         if (_profiling) _profileT0 = performance.now();
+        this._bindWaterShadowUniforms({
+          cloudShadowTexLegacy,
+          buildingShadowTex,
+          overheadShadowTexLegacy,
+        });
         _waterPassWrote = this._waterEffect.render(
           this.renderer,
           this.camera,
@@ -5104,6 +5146,11 @@ export class FloorCompositor {
       let postMergeWaterWrote = false;
       if (_profiling) _profileT0 = performance.now();
       try {
+        this._bindWaterShadowUniforms({
+          cloudShadowTexLegacy,
+          buildingShadowTex,
+          overheadShadowTexLegacy,
+        });
         postMergeWaterWrote = this._waterEffect.render(
           this.renderer,
           this.camera,

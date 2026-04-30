@@ -43,6 +43,9 @@ import {
   readTileLevelsFlags,
   getViewedLevelBackgroundSrc,
   getVisibleLevelBackgroundLayers,
+  resolveV14NativeDocFloorIndexMin,
+  readV14SceneLevels,
+  hasV14NativeLevels,
 } from '../../foundry/levels-scene-flags.js';
 import { DepthShaderChunks } from '../../effects/DepthShaderChunks.js';
 import { VisionSDF } from '../../vision/VisionSDF.js';
@@ -363,7 +366,7 @@ export class WaterEffectV2 {
       // Shore Foam Appearance
       shoreFoamColor: { r: 1.0, g: 1.0, b: 1.0 },
       shoreFoamOpacity: 1.0,
-      shoreFoamBrightness: 2.0,
+      shoreFoamBrightness: 1.0,
       shoreFoamContrast: 1.98,
       shoreFoamGamma: 0.8,
       shoreFoamTint: { r: 0.95, g: 0.97, b: 0.9 },
@@ -1519,7 +1522,7 @@ static getControlSchema() {
         shoreFoamTintStrength: { type: 'slider', min: 0, max: 1, step: 0.01, default: 1.0, label: 'Tint Strength' },
         shoreFoamColorVariation: { type: 'slider', min: 0, max: 1, step: 0.01, default: 1.0, label: 'Variation' },
         shoreFoamOpacity: { type: 'slider', min: 0, max: 1, step: 0.01, default: 1.0, label: 'Opacity' },
-        shoreFoamBrightness: { type: 'slider', min: 0, max: 4, step: 0.01, default: 2.0, label: 'Brightness' },
+        shoreFoamBrightness: { type: 'slider', min: 0, max: 1.5, step: 0.01, default: 1.0, label: 'Brightness' },
         shoreFoamContrast: { type: 'slider', min: 0, max: 4, step: 0.01, default: 1.98, label: 'Contrast' },
         shoreFoamGamma: { type: 'slider', min: 0.1, max: 4, step: 0.01, default: 0.8, label: 'Gamma' },
         shoreFoamLightingEnabled: { type: 'boolean', default: true, label: 'Enable Lighting' },
@@ -1804,6 +1807,22 @@ static getControlSchema() {
       }
     } catch (_) {}
 
+    // Elevation-sorted V14 levelId → band index (matches FloorStack + resolveV14NativeDocFloorIndexMin).
+    /** @type {Map<string, number>} */
+    const v14LevelIdToSortedBandIdx = new Map();
+    try {
+      if (hasV14NativeLevels(scene)) {
+        const sortedV14 = [...readV14SceneLevels(scene)].sort((a, b) => {
+          const ab = Number(a.bottom);
+          const bb = Number(b.bottom);
+          return (Number.isFinite(ab) ? ab : 0) - (Number.isFinite(bb) ? bb : 0);
+        });
+        sortedV14.forEach((row, si) => {
+          if (row?.levelId != null) v14LevelIdToSortedBandIdx.set(String(row.levelId), si);
+        });
+      }
+    } catch (_) {}
+
     try {
       const sortedLevels = scene?.levels?.sorted ?? [];
       if (Array.isArray(sortedLevels) && sortedLevels.length > 0) {
@@ -1813,9 +1832,15 @@ static getControlSchema() {
           if (!src) continue;
           const levelId = (level?.id != null) ? String(level.id) : '';
           const mappedFloorIndex = levelId ? floorIndexByLevelId.get(levelId) : undefined;
-          const bgFloorIndex = Number.isFinite(Number(mappedFloorIndex))
-            ? Number(mappedFloorIndex)
-            : i;
+          let bgFloorIndex;
+          if (Number.isFinite(Number(mappedFloorIndex))) {
+            bgFloorIndex = Number(mappedFloorIndex);
+          } else if (levelId && v14LevelIdToSortedBandIdx.has(levelId)) {
+            bgFloorIndex = v14LevelIdToSortedBandIdx.get(levelId);
+          } else {
+            // Last resort: Foundry's sorted array index (can diverge from elevation order).
+            bgFloorIndex = i;
+          }
           bgLayerRows.push({ src, floorIndex: bgFloorIndex });
         }
       }
@@ -4451,10 +4476,8 @@ static getControlSchema() {
    * Resolve the floor index for a tile document.
    *
    * **Must stay aligned with `FloorRenderBus._resolveFloorIndex`** so water mask
-   * compositing keys (`_floorWater`) use the same floor band as tile placement.
-   * The previous implementation compared ad-hoc `flr.elevation` to the tile's
-   * range flags, which mis-bucketed masks when Levels bands changed and made
-   * ground water appear to “change” with the active level/floor view.
+   * compositing keys (`_floorWater`) use the same floor band as tile placement
+   * (legacy Levels range → V14 `resolveV14NativeDocFloorIndexMin` → elevation).
    *
    * @private
    */
@@ -4476,6 +4499,9 @@ static getControlSchema() {
         if (tileBottom <= f.elevationMax && f.elevationMin <= tileTop) return i;
       }
     }
+
+    const v14Idx = resolveV14NativeDocFloorIndexMin(tileDoc, globalThis.canvas?.scene);
+    if (v14Idx !== null) return v14Idx;
 
     const elev = Number.isFinite(Number(tileDoc?.elevation)) ? Number(tileDoc.elevation) : 0;
     for (let i = 0; i < floors.length; i++) {

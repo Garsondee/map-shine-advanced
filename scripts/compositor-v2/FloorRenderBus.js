@@ -24,6 +24,7 @@
  */
 
 import { createLogger } from '../core/log.js';
+import { DOOR_FLOOR_INDEX_GLOBAL } from '../scene/DoorMeshManager.js';
 import { TILE_FEATURE_LAYERS } from '../core/render-layers.js';
 import {
   tileHasLevelsRange,
@@ -613,6 +614,15 @@ export class FloorRenderBus {
       }
       node.visible = inVisibleFloorSlice && !this._suppressTileAlbedoForEditing;
     }
+
+    for (const ch of this._scene?.children ?? []) {
+      if (ch?.userData?.type !== 'doorMesh') continue;
+      const fi = Number(ch.userData?.floorIndex);
+      const globalDoor = fi === DOOR_FLOOR_INDEX_GLOBAL;
+      const inSlice = globalDoor
+        || (Number.isFinite(fi) && fi <= this._visibleMaxFloorIndex);
+      ch.visible = inSlice && !this._suppressTileAlbedoForEditing;
+    }
     this._lastPreApplyLeakCount = preApplyLeakCount;
     this._lastPreApplyLeakKeys = preApplyLeakKeys;
   }
@@ -955,6 +965,7 @@ export class FloorRenderBus {
     // Save each tile's current visibility so we can restore it after.
     const savedVisibility = new Map();
     const savedMaterialState = new Map();
+    const savedDoorMaskVisibility = new Map();
     for (const [tileId, entry] of this._tiles) {
       const node = entry?.root || entry?.mesh;
       if (!node) continue;
@@ -1047,6 +1058,12 @@ export class FloorRenderBus {
       }
     }
 
+    for (const ch of this._scene?.children ?? []) {
+      if (ch?.userData?.type !== 'doorMesh') continue;
+      savedDoorMaskVisibility.set(ch, ch.visible === true);
+      ch.visible = false;
+    }
+
     // Save and configure renderer state.
     const prevTarget = renderer.getRenderTarget();
     const prevAutoClear = renderer.autoClear;
@@ -1078,6 +1095,9 @@ export class FloorRenderBus {
       const entry = this._tiles.get(tileId);
       const node = entry?.root || entry?.mesh;
       if (node) node.visible = wasVisible;
+    }
+    for (const [doorNode, wasDoorVis] of savedDoorMaskVisibility) {
+      if (doorNode) doorNode.visible = wasDoorVis;
     }
 
     // Restore original material state.
@@ -1194,6 +1214,19 @@ export class FloorRenderBus {
       node.visible = inRange && !this._suppressTileAlbedoForEditing;
     }
 
+    // Door meshes live on the bus scene but are not in `_tiles`; gate them the
+    // same way as tiles so per-level RTs do not paint every door on every slice.
+    const savedDoorVisibility = new Map();
+    for (const ch of this._scene?.children ?? []) {
+      if (ch?.userData?.type !== 'doorMesh') continue;
+      savedDoorVisibility.set(ch, ch.visible === true);
+      const fi = Number(ch.userData?.floorIndex);
+      const globalDoor = fi === DOOR_FLOOR_INDEX_GLOBAL;
+      const inRange = globalDoor
+        || (Number.isFinite(fi) && fi >= minFloorIndex && fi <= maxFloorIndex);
+      ch.visible = inRange && !this._suppressTileAlbedoForEditing;
+    }
+
     // Save and configure renderer state.
     const prevTarget    = renderer.getRenderTarget();
     const prevAutoClear = renderer.autoClear;
@@ -1222,6 +1255,9 @@ export class FloorRenderBus {
       const entry = this._tiles.get(tileId);
       const node = entry?.root || entry?.mesh;
       if (node) node.visible = wasVisible;
+    }
+    for (const [doorNode, wasDoorVis] of savedDoorVisibility) {
+      if (doorNode) doorNode.visible = wasDoorVis;
     }
   }
 

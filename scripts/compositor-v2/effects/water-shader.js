@@ -1361,7 +1361,8 @@ void getFoamData(vec2 sceneUv, float shore, float inside, vec2 rainOffPx, vec2 w
   }
   
   floatingOut.amount = floatingBase;
-  floatingOut.color = foamColor;
+  // Match shore foam: bake scene-luminance response into albedo (lightFactor was computed but unused).
+  floatingOut.color = foamColor * lightFactor;
   floatingOut.opacity = opacity;
   floatingOut.shadowStrength = shadowStr;
   floatingOut.lightFactor = lightFactor;
@@ -1948,6 +1949,11 @@ void main() {
     float dCurve = max(0.01, uCloudShadowDarkenCurve);
     cloudDarken = dStrength * pow(cloudShadow, dCurve);
   }
+  // ShadowManager combined already folds cloud into the lit factor (foam/murk).
+  // Applying legacy cloudDarken on top would double-darken vs the lit scene in tDiffuse.
+  if (uHasCombinedShadow > 0.5) {
+    cloudDarken = 0.0;
+  }
 
   // Structural shadows (building + overhead): used to darken foam and fully suppress specular.
   // Match LightingEffectV2 conventions:
@@ -1968,10 +1974,10 @@ void main() {
     overheadShadow = 1.0 - ovLit;
   }
   float structuralShadow = max(buildingShadow, overheadShadow);
-  float foamStructuralDarken = mix(1.0, 0.35, structuralShadow);
+  // Legacy path (no tCombinedShadow): crush foam in deep shadow — reads shiny in light, not emissive in shade.
+  float foamStructuralDarken = mix(1.0, 0.06, pow(structuralShadow, 1.15));
   // Reduce foam visibility under building shadows specifically.
-  // Keep a small floor so foam does not pop completely out.
-  float foamBuildingShadowFade = mix(1.0, 0.14, buildingShadow);
+  float foamBuildingShadowFade = mix(1.0, 0.06, pow(buildingShadow, 1.1));
 
   // ShadowManagerV2 combined map (screen vUv, R = lit factor). When bound, shore +
   // floating foam use this for color and alpha so they track cloud + overhead + building
@@ -2086,6 +2092,19 @@ void main() {
   // Foam (pass pre-computed waveGrad to avoid redundant calculateWave call)
   float sceneLuma = dot(col, vec3(0.299, 0.587, 0.114));
   float darkness = clamp(uSceneDarkness, 0.0, 1.0);
+
+  // WaterSplashesEffectV2 MS_WATER_SPLASHES_SHADOW_DARKEN_V3: combined shadow at
+  // pixel UV (gl_FragCoord / uResolution), then rgb *= csh and a *= csh. Advanced
+  // floating foam uses this path so it tracks the same grid as bus particles (vUv
+  // can sit off the combined RT in some viewport/post setups).
+  float splashCombinedCsh = 1.0;
+  if (uHasCombinedShadow > 0.5) {
+    vec2 msUvSplash = vec2(
+      (gl_FragCoord.x + 0.5) / max(uResolution.x, 1.0),
+      (gl_FragCoord.y + 0.5) / max(uResolution.y, 1.0)
+    );
+    splashCombinedCsh = clamp(texture2D(tCombinedShadow, msUvSplash).r, 0.0, 1.0);
+  }
   
   float shoreFoamAmount;
   FloatingFoamData floatingFoam;
@@ -2132,15 +2151,15 @@ void main() {
       shoreFoamColor = mix(shoreFoamColor, shoreFoamColor * (0.8 + colorVar * 0.4), varAmount);
     }
     
-    // Brightness, contrast, gamma
-    float brightness = clamp(uShoreFoamBrightness, 0.0, 2.0);
+    // Brightness, contrast, gamma (cap brightness so foam cannot blow past scene albedo)
+    float brightness = clamp(uShoreFoamBrightness, 0.0, 1.25);
     float contrast = clamp(uShoreFoamContrast, 0.0, 2.0);
     float gamma = max(0.1, uShoreFoamGamma);
     
     shoreFoamColor = shoreFoamColor * brightness;
     shoreFoamColor = ((shoreFoamColor - 0.5) * contrast) + 0.5;
     shoreFoamColor = pow(max(shoreFoamColor, vec3(0.0)), vec3(gamma));
-    shoreFoamColor = clamp(shoreFoamColor, vec3(0.0), vec3(1.0));
+    shoreFoamColor = clamp(shoreFoamColor, vec3(0.0), vec3(0.92));
     
     // Lighting calculation
     float shoreLightFactor = 1.0;
@@ -2179,20 +2198,33 @@ void main() {
   // Apply floating foam with independent color and FULL opacity control
   if (floatFoamAmtVis > 0.01) {
     float floatingAlpha = clamp(floatFoamAmtVis * floatingFoam.opacity, 0.0, 1.0);
-    floatingAlpha *= foamAlphaLitMul;
     floatingAlpha *= mix(1.0, 0.20, uFloorDepthBlurWaterSoft);
-    vec3 floatingFoamColor = mix(floatingFoam.color, col, 0.42 * fdbFoam) * foamColorLitMul;
+    vec3 floatingFoamColor = mix(floatingFoam.color, col, 0.42 * fdbFoam);
+    if (uHasCombinedShadow > 0.5) {
+      floatingFoamColor *= splashCombinedCsh;
+      floatingAlpha = clamp(floatingAlpha * splashCombinedCsh, 0.0, 1.0);
+    } else {
+      floatingAlpha *= foamAlphaLitMul;
+      floatingFoamColor *= foamColorLitMul;
+    }
     // Blend foam color first (without darkness)
     col = mix(col, floatingFoamColor, floatingAlpha);
     // THEN apply darkness to the final result for proper night darkening
     col *= floatingFoam.darkScale;
   }
 
-  // Shader flecks (drive by combined foam presence)
-  float fleckDriver = clamp(max(shoreFoamVis, floatFoamAmtVis) * foamAlphaLitMul, 0.0, 1.0);
+  // Shader flecks (drive by combined foam presence) — same lit factor as splashes when combined
+  float fleckShadowMul = foamColorLitMul;
+  if (uHasCombinedShadow > 0.5) {
+    fleckShadowMul = splashCombinedCsh;
+  }
+  float fleckDriver = clamp(max(shoreFoamVis, floatFoamAmtVis) * (uHasCombinedShadow > 0.5 ? splashCombinedCsh : foamAlphaLitMul), 0.0, 1.0);
   float shaderFlecks = getShaderFlecks(sceneUv, inside, shore, fleckDriver, rainOffPx, indoorWindMotion);
-  vec3 fleckCol = mix(uShoreFoamColor, floatingFoam.color, clamp(floatFoamAmtVis, 0.0, 1.0)) * foamColorLitMul;
-  col += fleckCol * shaderFlecks * 0.8 * mix(1.0, 0.07, uFloorDepthBlurWaterSoft);
+  vec3 fleckCol = mix(uShoreFoamColor, floatingFoam.color, clamp(floatFoamAmtVis, 0.0, 1.0)) * fleckShadowMul;
+  float fleckW = shaderFlecks * 0.45 * mix(1.0, 0.07, uFloorDepthBlurWaterSoft);
+  vec3 fleckAdd = fleckCol * fleckW;
+  fleckAdd = min(fleckAdd, vec3(0.28));
+  col += fleckAdd;
 
   // Apply screen-space cloud shadows globally to water + foam + caustics + murk
   col *= max(0.0, 1.0 - cloudDarken);

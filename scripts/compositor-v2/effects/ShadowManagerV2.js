@@ -61,6 +61,10 @@ export class ShadowManagerV2 {
         // Coordinate conversion uniforms for building shadows (world space)
         uSceneRect: { value: new THREE.Vector4() },
         uHasSceneRect: { value: 0.0 },
+        // Match water-shader.js + LightingEffectV2: vUv → Foundry → sceneUv for tBuildingShadow.
+        uViewBounds: { value: new THREE.Vector4(0, 0, 1, 1) },
+        uSceneDimensions: { value: new THREE.Vector2(1, 1) },
+        uHasBuildingUvRemap: { value: 0.0 },
       },
       vertexShader: /* glsl */`
         varying vec2 vUv;
@@ -86,7 +90,20 @@ export class ShadowManagerV2 {
         // Coordinate conversion uniforms for building shadows (world space)
         uniform vec4 uSceneRect;
         uniform float uHasSceneRect;
+        uniform vec4 uViewBounds;
+        uniform vec2 uSceneDimensions;
+        uniform float uHasBuildingUvRemap;
         varying vec2 vUv;
+
+        vec2 smScreenUvToFoundry(vec2 screenUv) {
+          float threeX = mix(uViewBounds.x, uViewBounds.z, screenUv.x);
+          float threeY = mix(uViewBounds.y, uViewBounds.w, screenUv.y);
+          return vec2(threeX, uSceneDimensions.y - threeY);
+        }
+
+        vec2 smFoundryToSceneUv(vec2 foundryPos) {
+          return (foundryPos - uSceneRect.xy) / max(uSceneRect.zw, vec2(1e-5));
+        }
 
         float readCloudShadow() {
           if (uUseRawCloud > 0.5 && uHasCloudShadowRaw > 0.5) {
@@ -103,18 +120,20 @@ export class ShadowManagerV2 {
           vec4 ov = texture2D(tOverheadShadow, vUv);
           vec3 rgb = clamp(ov.rgb, vec3(0.0), vec3(1.0));
           float projection = clamp(ov.a, 0.0, 1.0);
-          float combined = clamp(max(rgb.r, max(rgb.g, rgb.b)) * projection, 0.0, 1.0);
-          return combined;
+          // Match water-shader + LightingEffectV2: lit factor from mean of (RGB × projection),
+          // not max(RGB) (max stays too bright vs ambient dimming under tinted roofs).
+          vec3 combinedRgb = rgb * projection;
+          return clamp(dot(combinedRgb, vec3(0.3333333)), 0.0, 1.0);
         }
 
         float readBuildingShadow() {
           if (uHasBuildingShadow < 0.5) return 1.0;
-          // Building shadows are in scene/world space, need to convert screen UV to scene UV
-          // Use the same conversion as the water shader
           vec2 sceneUv = vUv;
-          if (uHasSceneRect > 0.5) {
-            // Convert screen UV to scene UV: same as water shader approach
-            sceneUv = (vUv * uSceneRect.zw) + uSceneRect.xy;
+          if (uHasBuildingUvRemap > 0.5 && uHasSceneRect > 0.5) {
+            vec2 foundryPos = smScreenUvToFoundry(vUv);
+            sceneUv = clamp(smFoundryToSceneUv(foundryPos), vec2(0.0), vec2(1.0));
+          } else if (uHasSceneRect > 0.5) {
+            sceneUv = clamp((vUv * uSceneRect.zw) + uSceneRect.xy, vec2(0.0), vec2(1.0));
           }
           return clamp(texture2D(tBuildingShadow, sceneUv).r, 0.0, 1.0);
         }
@@ -180,6 +199,83 @@ export class ShadowManagerV2 {
    */
   setSceneRect(sceneRect) {
     this._sceneRect = sceneRect;
+  }
+
+  /**
+   * Match water-shader.js / LightingEffectV2 building UV: screen vUv → Foundry XY →
+   * normalized scene UV into BuildingShadowsEffectV2.shadowFactorTexture.
+   * Call after {@link #setSceneRect} each frame before {@link #render}.
+   * @param {import('three').Camera|null} camera
+   */
+  applyBuildingShadowUvRemap(camera) {
+    const u = this._material?.uniforms;
+    if (!u?.uHasBuildingUvRemap) return;
+    if (!camera) {
+      u.uHasBuildingUvRemap.value = 0.0;
+      return;
+    }
+    const THREE = window.THREE;
+    if (!THREE) {
+      u.uHasBuildingUvRemap.value = 0.0;
+      return;
+    }
+    try {
+      const dims = globalThis.canvas?.dimensions;
+      if (!dims || !this._sceneRect) {
+        u.uHasBuildingUvRemap.value = 0.0;
+        return;
+      }
+      const totalW = Math.max(1, Number(dims.width) || 1);
+      const totalH = Math.max(1, Number(dims.height) || 1);
+      u.uSceneDimensions.value.set(totalW, totalH);
+
+      if (camera.isOrthographicCamera) {
+        const camPos = camera.position;
+        const zoom = Math.max(0.001, camera.zoom ?? 1.0);
+        u.uViewBounds.value.set(
+          camPos.x + camera.left / zoom,
+          camPos.y + camera.bottom / zoom,
+          camPos.x + camera.right / zoom,
+          camPos.y + camera.top / zoom,
+        );
+      } else if (camera.isPerspectiveCamera) {
+        const groundZ = window.MapShine?.sceneComposer?.groundZ ?? 0;
+        const ndc = new THREE.Vector3();
+        const world = new THREE.Vector3();
+        const dir = new THREE.Vector3();
+        let minX = Infinity;
+        let minY = Infinity;
+        let maxX = -Infinity;
+        let maxY = -Infinity;
+        const corners = [[-1, -1], [1, -1], [-1, 1], [1, 1]];
+        for (let i = 0; i < 4; i++) {
+          ndc.set(corners[i][0], corners[i][1], 0.5);
+          world.copy(ndc).unproject(camera);
+          dir.copy(world).sub(camera.position);
+          const dz = dir.z;
+          if (Math.abs(dz) < 1e-6) continue;
+          const t = (groundZ - camera.position.z) / dz;
+          if (!Number.isFinite(t) || t <= 0) continue;
+          const ix = camera.position.x + dir.x * t;
+          const iy = camera.position.y + dir.y * t;
+          if (ix < minX) minX = ix;
+          if (iy < minY) minY = iy;
+          if (ix > maxX) maxX = ix;
+          if (iy > maxY) maxY = iy;
+        }
+        if (minX === Infinity) {
+          u.uHasBuildingUvRemap.value = 0.0;
+          return;
+        }
+        u.uViewBounds.value.set(minX, minY, maxX, maxY);
+      } else {
+        u.uHasBuildingUvRemap.value = 0.0;
+        return;
+      }
+      u.uHasBuildingUvRemap.value = 1.0;
+    } catch (_) {
+      u.uHasBuildingUvRemap.value = 0.0;
+    }
   }
 
   _renderOne(renderer, target, useRawCloud) {

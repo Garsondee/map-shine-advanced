@@ -35,7 +35,9 @@ import { probeMaskFile } from '../../assets/loader.js';
 import {
   tileHasLevelsRange,
   readTileLevelsFlags,
+  resolveV14NativeDocFloorIndexMin,
   getViewedLevelBackgroundSrc,
+  hasV14NativeLevels,
 } from '../../foundry/levels-scene-flags.js';
 // OVERLAY_THREE_LAYER intentionally not imported — splashes use layer 0 only
 // and rely on LayerOrderPolicy FLOOR_EFFECTS band for correct stacking.
@@ -121,6 +123,7 @@ const SHADOW_DECL_V1_LEGACY =
 const BUCKET_SIZE = 2500;
 
 const WATER_MASK_FORMATS = ['webp', 'png', 'jpg', 'jpeg'];
+const WATER_SPLASH_BATCH_OVERLAY_PREFIX = 'ms_water_splash_batch_';
 
 // ─── WaterSplashesEffectV2 ──────────────────────────────────────────────────
 
@@ -150,8 +153,8 @@ export class WaterSplashesEffectV2 {
     // Key: basePathWithSuffix + formats. Value: { url, image } or null when missing.
     this._directMaskCache = new Map();
 
-    /** @type {BatchedRenderer|null} three.quarks batch renderer */
-    this._batchRenderer = null;
+    /** @type {Map<number, BatchedRenderer>} per-floor quarks batch renderers */
+    this._batchRenderers = new Map();
 
     /**
      * Per-floor cached system sets. Key: floorIndex.
@@ -331,6 +334,15 @@ export class WaterSplashesEffectV2 {
     if (isShaderMat && typeof material.fragmentShader === 'string'
       && material.fragmentShader.includes(marker)
       && material.fragmentShader.includes('MS_WATER_SPLASHES_SHADOW_DARKEN_V3')) {
+      // One-shot hot upgrade: older masked shaders sampled floor presence from
+      // alpha only. Some occluder passes encode coverage in R, so use max(R, A).
+      if (material.fragmentShader.includes('texture2D(uFloorPresenceMap, fpScreenUV).a')) {
+        material.fragmentShader = material.fragmentShader.replace(
+          /float floorPresence = texture2D\(uFloorPresenceMap, fpScreenUV\)\.a;/g,
+          'vec4 fpSample = texture2D(uFloorPresenceMap, fpScreenUV);\n    float floorPresence = max(fpSample.r, fpSample.a);'
+        );
+        material.needsUpdate = true;
+      }
       const uni = material.uniforms || (material.uniforms = {});
       uni.uFloorPresenceMap = uniforms.uFloorPresenceMap;
       uni.uHasFloorPresenceMap = uniforms.uHasFloorPresenceMap;
@@ -470,7 +482,8 @@ export class WaterSplashesEffectV2 {
             '  // Floor occluder: suppress particles under upper floors (screen-space).\n' +
             '  if (uHasFloorPresenceMap > 0.5) {\n' +
             '    vec2 fpScreenUV = gl_FragCoord.xy / uResolution;\n' +
-            '    float floorPresence = texture2D(uFloorPresenceMap, fpScreenUV).a;\n' +
+            '    vec4 fpSample = texture2D(uFloorPresenceMap, fpScreenUV);\n' +
+            '    float floorPresence = max(fpSample.r, fpSample.a);\n' +
             '    gl_FragColor.a *= (1.0 - floorPresence);\n' +
             '  }\n';
 
@@ -554,8 +567,9 @@ export class WaterSplashesEffectV2 {
             '  // Floor-presence gate: occlude particles under the current floor\'s solid tiles.\n' +
             '  if (uHasFloorPresenceMap > 0.5) {\n' +
             '    vec2 fpScreenUV = gl_FragCoord.xy / uResolution;\n' +
-            '    // V2 uses a screen-space occluder alpha RT (same as WaterEffectV2).\n' +
-            '    float floorPresence = texture2D(uFloorPresenceMap, fpScreenUV).a;\n' +
+            '    // Coverage can be encoded in either R (presence masks) or A (scene RTs).\n' +
+            '    vec4 fpSample = texture2D(uFloorPresenceMap, fpScreenUV);\n' +
+            '    float floorPresence = max(fpSample.r, fpSample.a);\n' +
             '    gl_FragColor.a *= (1.0 - floorPresence);\n' +
             '  }\n' +
             '#include <soft_fragment>'
@@ -593,11 +607,90 @@ export class WaterSplashesEffectV2 {
     }
   }
 
-  /** Keep batched particle draw order aligned with the active floor band. @private */
+  /** Keep batched particle draw order aligned with authored floor bands. @private */
   _updateBatchRenderOrder(maxFloorIndex) {
-    if (!this._batchRenderer) return;
-    const safeFloorIndex = Number.isFinite(Number(maxFloorIndex)) ? Number(maxFloorIndex) : 0;
-    this._batchRenderer.renderOrder = effectUnderOverheadOrder(safeFloorIndex, 50);
+    void maxFloorIndex;
+    for (const floorIndex of this._floorStates.keys()) {
+      const st = this._floorStates.get(floorIndex);
+      const br = st?.batchRenderer ?? null;
+      if (!br) continue;
+      const fi = Number.isFinite(Number(floorIndex)) ? Number(floorIndex) : 0;
+      br.renderOrder = effectUnderOverheadOrder(fi, 50);
+    }
+  }
+
+  /**
+   * @param {number} floorIndex
+   * @returns {string}
+   * @private
+   */
+  _overlayKeyForFloor(floorIndex) {
+    const fi = Number.isFinite(Number(floorIndex)) ? Number(floorIndex) : 0;
+    return `${WATER_SPLASH_BATCH_OVERLAY_PREFIX}${fi}`;
+  }
+
+  /**
+   * @param {number} floorIndex
+   * @returns {BatchedRenderer|null}
+   * @private
+   */
+  _createBatchedRendererForFloor(floorIndex) {
+    const br = new BatchedRenderer();
+    br.frustumCulled = false;
+    br.renderOrder = effectUnderOverheadOrder(floorIndex, 50);
+    try {
+      if (br.layers && typeof br.layers.set === 'function') {
+        br.layers.set(0);
+      }
+    } catch (_) {}
+    return br;
+  }
+
+  /**
+   * Active splash floor used for upper-floor occluder selection.
+   * We normally keep one active floor (or one lower-floor fallback).
+   * @param {number} viewFloor
+   * @returns {number}
+   * @private
+   */
+  _getOccluderFloorIndex(viewFloor) {
+    let floor = Number.isFinite(Number(viewFloor)) ? Number(viewFloor) : 0;
+    for (const idx of this._activeFloors) {
+      if (Number.isFinite(Number(idx))) {
+        floor = Number(idx);
+        break;
+      }
+    }
+    return floor;
+  }
+
+  /**
+   * Resolve the exact upper-floor occluder texture for a splash floor.
+   * Prefer rebuilding from per-level scene RT diagnostics so the occluder
+   * matches the current splash floor's "floors above me" set.
+   *
+   * Falls back to FloorCompositor's shared `_waterOccluderRT` when diagnostics
+   * are unavailable.
+   *
+   * @param {any} floorCompositor
+   * @param {number} splashFloorIndex
+   * @returns {import('three').Texture|null}
+   * @private
+   */
+  _resolveUpperFloorOccluderTexture(floorCompositor, splashFloorIndex) {
+    const fc = floorCompositor ?? null;
+    if (!fc) return null;
+    const sf = Number(splashFloorIndex);
+    if (!Number.isFinite(sf)) return null;
+
+    try {
+      if (typeof fc.getUpperSceneOccluderTextureForFloorIndex === 'function') {
+        const tex = fc.getUpperSceneOccluderTextureForFloorIndex(sf);
+        if (tex) return tex;
+      }
+    } catch (_) {}
+
+    return fc?._waterOccluderRT?.texture ?? null;
   }
 
   // ── Lifecycle ──────────────────────────────────────────────────────────────
@@ -606,19 +699,6 @@ export class WaterSplashesEffectV2 {
     if (this._initialized) return;
     const THREE = window.THREE;
     if (!THREE) { log.warn('initialize: THREE not available'); return; }
-
-    // Create a dedicated BatchedRenderer for water splash particles.
-    // Uses FLOOR_EFFECTS role so splashes sit between albedo and overhead.
-    // Layer 0 only — no OVERLAY_THREE_LAYER; floor-band ordering handles
-    // stacking correctly without a late-overlay bypass.
-    this._batchRenderer = new BatchedRenderer();
-    this._batchRenderer.renderOrder = effectUnderOverheadOrder(0, 50);
-    this._batchRenderer.frustumCulled = false;
-    try {
-      if (this._batchRenderer.layers && typeof this._batchRenderer.layers.set === 'function') {
-        this._batchRenderer.layers.set(0);
-      }
-    } catch (_) {}
 
     // Start loading sprite textures (populate() will await this).
     this._texturesReady = this._loadTextures();
@@ -667,11 +747,25 @@ export class WaterSplashesEffectV2 {
     // Key: floorIndex, Value: { edgeArrays: Float32Array[], interiorArrays: Float32Array[] }
     const floorWaterData = new Map();
 
-    // ── Process background image first (if it has a _Water mask) ─────────────
-    const bgSrc = getViewedLevelBackgroundSrc(canvas?.scene) ?? canvas?.scene?.background?.src;
-    if (bgSrc) {
+    // ── Process background image(s) first (if they have _Water masks) ────────
+    // Mirror FireEffectV2 floor attribution: resolve level backgrounds to their
+    // FloorStack index so background-derived splashes don't pin to floor 0.
+    const scene = canvas?.scene ?? null;
+    const seenBgWaterKeys = new Set();
+
+    /**
+     * @param {string} bgSrcRaw
+     * @param {number} floorIndex
+     */
+    const ingestBackgroundWater = async (bgSrcRaw, floorIndex) => {
+      const bgSrc = typeof bgSrcRaw === 'string' ? bgSrcRaw.trim() : '';
+      if (!bgSrc) return;
+
       const dotIdx = bgSrc.lastIndexOf('.');
       const bgBasePath = dotIdx > 0 ? bgSrc.substring(0, dotIdx) : bgSrc;
+      const fi = Number.isFinite(Number(floorIndex)) ? Math.max(0, Math.floor(Number(floorIndex))) : 0;
+      const dedupeKey = `${fi}|${bgBasePath}`;
+      if (seenBgWaterKeys.has(dedupeKey)) return;
 
       let image = null;
       const waterResult = await probeMaskFile(bgBasePath, '_Water');
@@ -680,47 +774,72 @@ export class WaterSplashesEffectV2 {
       }
       // probeMaskFile already checked all formats and cached the result.
       // No need for fallback GET probing - it just causes 404 spam.
+      if (!image) return;
 
-      if (image) {
-        // Background fills the entire scene rect.
-        const bgX = foundrySceneX;
-        const bgY = foundrySceneY;
-        const bgW = sceneWidth;
-        const bgH = sceneHeight;
+      // Background fills the entire scene rect.
+      const bgX = foundrySceneX;
+      const bgY = foundrySceneY;
+      const bgW = sceneWidth;
+      const bgH = sceneHeight;
 
-        const bgEdgePoints = scanWaterEdgePoints(
-          image, this.params.maskThreshold, this.params.edgeScanStride
-        );
-        const bgInteriorPoints = scanWaterInteriorPoints(
-          image, this.params.maskThreshold, this.params.interiorScanStride
-        );
+      const bgEdgePoints = scanWaterEdgePoints(
+        image, this.params.maskThreshold, this.params.edgeScanStride
+      );
+      const bgInteriorPoints = scanWaterInteriorPoints(
+        image, this.params.maskThreshold, this.params.interiorScanStride
+      );
 
-        const convertToSceneUV = (localPoints) => {
-          if (!localPoints) return null;
-          const sceneGlobal = new Float32Array(localPoints.length);
-          for (let i = 0; i < localPoints.length; i += 3) {
-            const foundryPx = bgX + localPoints[i] * bgW;
-            const foundryPy = bgY + localPoints[i + 1] * bgH;
-            sceneGlobal[i]     = (foundryPx - foundrySceneX) / sceneWidth;
-            sceneGlobal[i + 1] = (foundryPy - foundrySceneY) / sceneHeight;
-            sceneGlobal[i + 2] = localPoints[i + 2];
-          }
-          return sceneGlobal;
-        };
-
-        const sceneEdge = convertToSceneUV(bgEdgePoints);
-        const sceneInterior = convertToSceneUV(bgInteriorPoints);
-        if (sceneEdge || sceneInterior) {
-          const floorIndex = 0;
-          if (!floorWaterData.has(floorIndex)) {
-            floorWaterData.set(floorIndex, { edgeArrays: [], interiorArrays: [] });
-          }
-          const floorEntry = floorWaterData.get(floorIndex);
-          if (sceneEdge) floorEntry.edgeArrays.push(sceneEdge);
-          if (sceneInterior) floorEntry.interiorArrays.push(sceneInterior);
-          log.info(`  background → floor ${floorIndex}, ${sceneEdge ? sceneEdge.length / 3 : 0} edge pts, ${sceneInterior ? sceneInterior.length / 3 : 0} interior pts`);
+      const convertToSceneUV = (localPoints) => {
+        if (!localPoints) return null;
+        const sceneGlobal = new Float32Array(localPoints.length);
+        for (let i = 0; i < localPoints.length; i += 3) {
+          const foundryPx = bgX + localPoints[i] * bgW;
+          const foundryPy = bgY + localPoints[i + 1] * bgH;
+          sceneGlobal[i] = (foundryPx - foundrySceneX) / sceneWidth;
+          sceneGlobal[i + 1] = (foundryPy - foundrySceneY) / sceneHeight;
+          sceneGlobal[i + 2] = localPoints[i + 2];
         }
+        return sceneGlobal;
+      };
+
+      const sceneEdge = convertToSceneUV(bgEdgePoints);
+      const sceneInterior = convertToSceneUV(bgInteriorPoints);
+      if (sceneEdge || sceneInterior) {
+        if (!floorWaterData.has(fi)) {
+          floorWaterData.set(fi, { edgeArrays: [], interiorArrays: [] });
+        }
+        const floorEntry = floorWaterData.get(fi);
+        if (sceneEdge) floorEntry.edgeArrays.push(sceneEdge);
+        if (sceneInterior) floorEntry.interiorArrays.push(sceneInterior);
+        seenBgWaterKeys.add(dedupeKey);
+        log.info(`  background → floor ${fi}, ${sceneEdge ? sceneEdge.length / 3 : 0} edge pts, ${sceneInterior ? sceneInterior.length / 3 : 0} interior pts`);
       }
+    };
+
+    if (hasV14NativeLevels(scene) && floors.length > 0) {
+      for (const f of floors) {
+        const lid = f?.levelId;
+        if (typeof lid !== 'string' || !lid.length) continue;
+        let bgSrc = '';
+        try {
+          const lvl = scene.levels?.get?.(lid);
+          bgSrc = String(lvl?.background?.src || '').trim();
+        } catch (_) {}
+        if (!bgSrc) continue;
+        await ingestBackgroundWater(bgSrc, f.index);
+      }
+    }
+
+    // Always probe viewed-level fallback too (covers init races and non-level bands).
+    {
+      const fallbackSrc = getViewedLevelBackgroundSrc(scene)
+        ?? scene?.background?.src
+        ?? '';
+      const activeFi = window.MapShine?.floorStack?.getActiveFloor?.();
+      const fi = (floors.length > 1 && Number.isFinite(Number(activeFi?.index)))
+        ? Number(activeFi.index)
+        : 0;
+      await ingestBackgroundWater(String(fallbackSrc || ''), fi);
     }
 
     for (const tileDoc of tileDocs) {
@@ -818,25 +937,34 @@ export class WaterSplashesEffectV2 {
       this._floorStates.set(floorIndex, state);
       totalSystems += state.foamSystems.length + state.splashSystems.length
         + (state.foamSystems2?.length ?? 0) + (state.splashSystems2?.length ?? 0);
+      if (state.batchRenderer) {
+        this._batchRenderers.set(Number(floorIndex), state.batchRenderer);
+        const overlayKey = this._overlayKeyForFloor(floorIndex);
+        this._renderBus.addEffectOverlay(
+          overlayKey,
+          state.batchRenderer,
+          Number(floorIndex),
+          { overlayRole: 'floorEffect' }
+        );
+      }
     }
 
     if (!this._loggedPopulateCountsOnce) {
       this._loggedPopulateCountsOnce = true;
       try {
         const keys = [...this._floorStates.keys()];
+        const overlayKeys = keys.map((fi) => this._overlayKeyForFloor(fi));
+        const batchCount = [...this._floorStates.values()].filter((st) => !!st?.batchRenderer).length;
         log.info('[WaterSplashesEffectV2] populate summary', {
           floors: keys,
           totalSystems,
+          batchCount,
+          overlayKeys,
         });
       } catch (_) {}
     }
 
     if (totalSystems > 0) {
-      // Add the BatchedRenderer to the bus scene via the overlay API.
-      if (this._batchRenderer) {
-        this._renderBus.addEffectOverlay('__water_splash_batch__', this._batchRenderer, 0);
-      }
-
       // Activate the current floor's systems.
       this._activateCurrentFloor();
     }
@@ -872,7 +1000,7 @@ export class WaterSplashesEffectV2 {
    * Invoked from FloorCompositor immediately before the bus scene draw.
    */
   syncShadowDarkeningUniforms() {
-    if (!this._initialized || !this._batchRenderer) return;
+    if (!this._initialized || this._batchRenderers.size === 0) return;
     const splashesEnabled = !!this.params?.enabled;
     const bubblesEnabled = !!this.bubblesParams?.enabled;
     const parentWaterEnabled = this._isParentWaterEffectEnabled();
@@ -916,10 +1044,6 @@ export class WaterSplashesEffectV2 {
       if (st.splashSystems2 && st.splashSystems2.length) systems.push(...st.splashSystems2);
     }
 
-    const br = this._batchRenderer;
-    const batches = br?.batches;
-    const map = br?.systemToBatchIndex;
-
     const applyU = (u) => {
       if (!u) return;
       if (u.uCombinedShadowMap) u.uCombinedShadowMap.value = texForShader;
@@ -928,6 +1052,11 @@ export class WaterSplashesEffectV2 {
 
     for (const sys of systems) {
       if (!sys) continue;
+      const floorIndex = Number(sys.userData?._msFloorIndex);
+      const st = Number.isFinite(floorIndex) ? this._floorStates.get(floorIndex) : null;
+      const br = st?.batchRenderer ?? null;
+      const batches = br?.batches;
+      const map = br?.systemToBatchIndex;
       if (sys.material) {
         this._patchFloorPresenceMaterial(sys.material);
         applyU(sys.material.userData?._msFloorPresenceUniforms);
@@ -950,14 +1079,16 @@ export class WaterSplashesEffectV2 {
    * @param {{ elapsed: number, delta: number }} timeInfo
    */
   update(timeInfo) {
-    if (!this._initialized || !this._batchRenderer) return;
+    if (!this._initialized || this._batchRenderers.size === 0) return;
     const splashesEnabled = !!this.params?.enabled;
     const bubblesEnabled = !!this.bubblesParams?.enabled;
     const parentWaterEnabled = this._isParentWaterEffectEnabled();
     const shouldRender = this._enabled && parentWaterEnabled && (splashesEnabled || bubblesEnabled);
 
     // Hide immediately when water is disabled to prevent lingering additive glare.
-    this._batchRenderer.visible = shouldRender;
+    for (const br of this._batchRenderers.values()) {
+      br.visible = shouldRender;
+    }
     if (!shouldRender) return;
 
     // Optional diagnostics for cases where systems were activated before the
@@ -973,10 +1104,10 @@ export class WaterSplashesEffectV2 {
         || (window.MapShine?.debugWaterSplashesLogs === true);
       if (dbg && !this._loggedRuntimeDebugOnce) {
         this._loggedRuntimeDebugOnce = true;
-        const br = this._batchRenderer;
+        const anyFloor = this._activeFloors.keys().next().value;
+        const br = this._floorStates.get(anyFloor)?.batchRenderer ?? null;
         const mapSize = br?.systemToBatchIndex?.size ?? null;
         const batchCount = br?.batches?.length ?? null;
-        const anyFloor = this._floorStates.keys().next().value;
         const state = (anyFloor !== undefined) ? this._floorStates.get(anyFloor) : null;
         const anySys = state ? ([...(state.foamSystems ?? []), ...(state.splashSystems ?? [])][0] ?? null) : null;
         const idx = (anySys && br?.systemToBatchIndex?.get) ? br.systemToBatchIndex.get(anySys) : null;
@@ -1023,11 +1154,20 @@ export class WaterSplashesEffectV2 {
       // This RT marks pixels covered by the current/upper floor's tiles.
       // It is already aligned with the main camera and sampled in screen UV.
       const fc = window.MapShine?.effectComposer?._floorCompositorV2 ?? null;
-      // Match WaterEffectV2 occluder semantics: floor 0 has no upper-floor occluder.
-      // Without this gate we can keep sampling stale RT contents from the last
-      // upper-floor frame after returning to ground floor.
+      // DistortionManager floor-presence RT is current-floor tile coverage only.
+      // It does not represent the full stack of intervening level imagery.
+      const floorPresenceTex = fc?._distortionEffect?.floorPresenceTarget?.texture ?? null;
+      // For lower-floor splash systems viewed from higher floors, prioritize the
+      // stacked per-level upper-scene occluder (includes background + foreground
+      // imagery between origin/view floors).
       const viewFloor = window.MapShine?.floorStack?.getActiveFloor?.()?.index ?? 0;
-      const fpTex = viewFloor > 0 ? (fc?._waterOccluderRT?.texture ?? null) : null;
+      const occluderFloor = this._getOccluderFloorIndex(viewFloor);
+      const upperOccluderTex = (occluderFloor < viewFloor)
+        ? this._resolveUpperFloorOccluderTexture(fc, occluderFloor)
+        : null;
+      const fpTex = (occluderFloor < viewFloor)
+        ? (upperOccluderTex ?? floorPresenceTex ?? null)
+        : (floorPresenceTex ?? null);
       const waterMaskTex = (fc?._waterEffect && typeof fc._waterEffect.getWaterMaskTexture === 'function')
         ? fc._waterEffect.getWaterMaskTexture()
         : null;
@@ -1098,26 +1238,20 @@ export class WaterSplashesEffectV2 {
           if (st.splashSystems2 && st.splashSystems2.length) systems.push(...st.splashSystems2);
         }
 
-        const br = this._batchRenderer;
-        const batches = br?.batches;
-        const map = br?.systemToBatchIndex;
-
         for (const sys of systems) {
           if (!sys) continue;
+          const systemFloorIndex = Number(sys.userData?._msFloorIndex);
+          const st = Number.isFinite(systemFloorIndex) ? this._floorStates.get(systemFloorIndex) : null;
+          const br = st?.batchRenderer ?? null;
+          const batches = br?.batches;
+          const map = br?.systemToBatchIndex;
 
           // Restore normal masking behavior: keep particles clipped to the water mask
           // so underwater bubbles/splashes cannot drift onto land.
           const wantsWaterClip = 1.0;
-          // Floor presence RT includes the active floor's tile coverage.
-          // For same-floor systems this can self-occlude splashes/bubbles, so keep
-          // same-floor clipping opt-in only. But when we intentionally show a lower-floor
-          // fallback system while viewing an upper floor, enable clipping so upper tiles
-          // correctly mask lower-floor particles.
-          const systemFloorIndex = Number(sys.userData?._msFloorIndex);
-          const shouldClipByUpperFloor = Number.isFinite(systemFloorIndex)
-            && Number.isFinite(viewFloor)
-            && systemFloorIndex < viewFloor;
-          const wantsFloorPresenceClip = (sys.userData?.occludeByFloorPresence === true || shouldClipByUpperFloor) ? 1.0 : 0.0;
+          // Terrain masking must apply whenever floor-presence data exists.
+          // This prevents splashes/bubbles from bleeding through blocking terrain.
+          const wantsFloorPresenceClip = fpTex ? 1.0 : 0.0;
 
           // Patch and update the source material (MeshBasicMaterial)
           if (sys.material) {
@@ -1161,11 +1295,15 @@ export class WaterSplashesEffectV2 {
       }
     } catch (_) {}
 
-    // Step the BatchedRenderer.
-    try {
-      this._batchRenderer.update(dt);
-    } catch (err) {
-      log.warn('WaterSplashesEffectV2: BatchedRenderer.update threw, skipping frame:', err);
+    // Step each active floor's BatchedRenderer.
+    for (const floorIndex of this._activeFloors) {
+      const br = this._floorStates.get(floorIndex)?.batchRenderer ?? null;
+      if (!br) continue;
+      try {
+        br.update(dt);
+      } catch (err) {
+        log.warn('WaterSplashesEffectV2: BatchedRenderer.update threw, skipping frame:', err);
+      }
     }
   }
 
@@ -1367,12 +1505,15 @@ export class WaterSplashesEffectV2 {
     }
     this._activeFloors.clear();
 
+    for (const floorIndex of this._floorStates.keys()) {
+      try { this._renderBus.removeEffectOverlay(this._overlayKeyForFloor(floorIndex)); } catch (_) {}
+    }
+
     for (const [, state] of this._floorStates) {
       this._disposeFloorState(state);
     }
     this._floorStates.clear();
-
-    this._renderBus.removeEffectOverlay('__water_splash_batch__');
+    this._batchRenderers.clear();
   }
 
   dispose() {
@@ -1383,7 +1524,7 @@ export class WaterSplashesEffectV2 {
     this._foamTexture = null;
     this._splashTexture = null;
     this._combinedShadowFallbackTex = null;
-    this._batchRenderer = null;
+    this._batchRenderers.clear();
     this._initialized = false;
     log.info('WaterSplashesEffectV2 disposed');
   }
@@ -1397,7 +1538,8 @@ export class WaterSplashesEffectV2 {
    * @private
    */
   _buildFloorSystems(edgePoints, interiorPoints, sceneW, sceneH, sceneX, sceneY, floorIndex) {
-    const state = { foamSystems: [], splashSystems: [], foamSystems2: [], splashSystems2: [] };
+    const batchRenderer = this._createBatchedRendererForFloor(floorIndex);
+    const state = { foamSystems: [], splashSystems: [], foamSystems2: [], splashSystems2: [], batchRenderer };
 
     // Build foam plume systems from edge points.
     if (edgePoints && edgePoints.length >= 3 && this.params.foamEnabled) {
@@ -1745,7 +1887,8 @@ export class WaterSplashesEffectV2 {
   /** Add a floor's systems to the BatchedRenderer. @private */
   _activateFloor(floorIndex) {
     const state = this._floorStates.get(floorIndex);
-    if (!state || !this._batchRenderer) return;
+    const br = state?.batchRenderer ?? null;
+    if (!state || !br) return;
 
     const allSystems = [
       ...state.foamSystems, ...state.splashSystems,
@@ -1753,9 +1896,9 @@ export class WaterSplashesEffectV2 {
     ];
     for (const sys of allSystems) {
       if (sys?.userData) sys.userData._msFloorIndex = floorIndex;
-      try { this._batchRenderer.addSystem(sys); } catch (_) {}
+      try { br.addSystem(sys); } catch (_) {}
       // Emitters as children of BatchedRenderer — transitive scene membership.
-      if (sys.emitter) this._batchRenderer.add(sys.emitter);
+      if (sys.emitter) br.add(sys.emitter);
     }
 
     // Force the occlusion-uniform block to re-run on the next update frame.
@@ -1770,7 +1913,6 @@ export class WaterSplashesEffectV2 {
         || (window.debugWaterSplashesLogs === true)
         || (window.MapShine?.debugWaterSplashesLogs === true);
       if (dbg) {
-        const br = this._batchRenderer;
         const mapSize = br?.systemToBatchIndex?.size ?? null;
         const batchCount = br?.batches?.length ?? null;
         const first = allSystems[0] ?? null;
@@ -1798,33 +1940,34 @@ export class WaterSplashesEffectV2 {
 
   /** Remove a floor's systems from the BatchedRenderer. @private */
   _deactivateFloor(floorIndex) {
-    if (!this._batchRenderer) return;
     const state = this._floorStates.get(floorIndex);
-    if (!state) return;
+    const br = state?.batchRenderer ?? null;
+    if (!state || !br) return;
 
     const allSystems = [
       ...state.foamSystems, ...state.splashSystems,
       ...(state.foamSystems2 ?? []), ...(state.splashSystems2 ?? []),
     ];
     for (const sys of allSystems) {
-      try { this._batchRenderer.deleteSystem(sys); } catch (_) {}
-      if (sys.emitter) this._batchRenderer.remove(sys.emitter);
+      try { br.deleteSystem(sys); } catch (_) {}
+      if (sys.emitter) br.remove(sys.emitter);
     }
     log.debug(`deactivated floor ${floorIndex}`);
   }
 
   /** Dispose all systems in a floor state. @private */
   _disposeFloorState(state) {
+    const br = state?.batchRenderer ?? null;
     const allSystems = [
       ...state.foamSystems, ...state.splashSystems,
       ...(state.foamSystems2 ?? []), ...(state.splashSystems2 ?? []),
     ];
     for (const sys of allSystems) {
       try {
-        if (this._batchRenderer) this._batchRenderer.deleteSystem(sys);
+        if (br) br.deleteSystem(sys);
       } catch (_) {}
-      if (sys.emitter && this._batchRenderer) {
-        this._batchRenderer.remove(sys.emitter);
+      if (sys.emitter && br) {
+        br.remove(sys.emitter);
       }
       try { sys.material?.dispose(); } catch (_) {}
     }
@@ -1832,6 +1975,7 @@ export class WaterSplashesEffectV2 {
     state.splashSystems.length = 0;
     if (state.foamSystems2) state.foamSystems2.length = 0;
     if (state.splashSystems2) state.splashSystems2.length = 0;
+    if (state.batchRenderer) state.batchRenderer = null;
   }
 
   // ── Private: Per-frame param sync ──────────────────────────────────────────
@@ -2162,20 +2306,46 @@ export class WaterSplashesEffectV2 {
   /** Same logic as FireEffectV2 and FloorRenderBus. @private */
   _resolveFloorIndex(tileDoc, floors) {
     if (!floors || floors.length <= 1) return 0;
+
     if (tileHasLevelsRange(tileDoc)) {
       const flags = readTileLevelsFlags(tileDoc);
       const tileBottom = Number(flags.rangeBottom);
       const tileTop = Number(flags.rangeTop);
       const tileMid = (tileBottom + tileTop) / 2;
+
       for (let i = 0; i < floors.length; i++) {
         const f = floors[i];
-        if (tileMid >= f.elevationMin && tileMid <= f.elevationMax) return i;
+        if (tileMid >= f.elevationMin && tileMid < f.elevationMax) return i;
       }
       for (let i = 0; i < floors.length; i++) {
         const f = floors[i];
         if (tileBottom <= f.elevationMax && f.elevationMin <= tileTop) return i;
       }
     }
+
+    const v14Idx = resolveV14NativeDocFloorIndexMin(tileDoc, globalThis.canvas?.scene);
+    if (v14Idx !== null) return v14Idx;
+
+    // Same fallback path as FireEffectV2/FloorCompositor: resolve native level ids.
+    try {
+      if (hasV14NativeLevels(globalThis.canvas?.scene)) {
+        const singleLevel = tileDoc?.level ?? tileDoc?._source?.level;
+        if (typeof singleLevel === 'string' && singleLevel.length > 0) {
+          for (let i = 0; i < floors.length; i += 1) {
+            if (floors[i].levelId === singleLevel) return i;
+          }
+        }
+        const levelsSet = tileDoc?.levels;
+        if (levelsSet?.size) {
+          for (const lid of levelsSet) {
+            for (let i = 0; i < floors.length; i += 1) {
+              if (floors[i].levelId === lid) return i;
+            }
+          }
+        }
+      }
+    } catch (_) {}
+
     const elev = Number.isFinite(Number(tileDoc?.elevation)) ? Number(tileDoc.elevation) : 0;
     for (let i = 0; i < floors.length; i++) {
       const f = floors[i];

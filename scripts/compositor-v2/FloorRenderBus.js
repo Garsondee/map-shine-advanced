@@ -1197,17 +1197,22 @@ export class FloorRenderBus {
       const fi = Number(entry?.floorIndex);
       const minFI = Number(minFloorIndex);
       const fireHint = topVisibleFloorIndexForFire;
-      const isFireOverlay = String(tileId).startsWith('ms_fire_batch_');
+      const overlayRole = String(entry?.overlayRole || '');
+      const isStackedOverlay = overlayRole === 'stackedFloorEffect';
+      const isLegacyStackedOverlay =
+        String(tileId).startsWith('ms_fire_batch_');
       let inRange;
       if (
-        isFireOverlay
+        (isStackedOverlay || isLegacyStackedOverlay)
         && fireHint != null
         && Number.isFinite(Number(fireHint))
         && Number.isFinite(minFI) && Number.isFinite(Number(maxFloorIndex))
         && minFI === Number(maxFloorIndex)
       ) {
         const L = minFI;
-        // Stacked fire: show batch F whenever slice L is at or above F (L >= F).
+        // Stacked floor overlays: show batch F whenever slice L is at or above F (L >= F).
+        // This keeps lower-floor authored effects visible from upper slices while
+        // still letting upper authored alpha occlude during source-over composite.
         inRange = Number.isFinite(fi) && fi <= L;
       } else {
         inRange = Number.isFinite(fi) && fi >= minFloorIndex && fi <= maxFloorIndex;
@@ -1311,15 +1316,23 @@ export class FloorRenderBus {
    * @param {string} key - Unique key for this overlay (e.g. `${tileId}_specular`)
    * @param {import('three').Mesh} mesh - The overlay mesh (already configured with material, position, etc.)
    * @param {number} floorIndex - Floor this overlay belongs to
+   * @param {{ overlayRole?: string }} [options] - Optional overlay semantics for per-level rendering.
    */
-  addEffectOverlay(key, mesh, floorIndex) {
+  addEffectOverlay(key, mesh, floorIndex, options = {}) {
     if (!this._initialized || !this._scene) return;
     // Remove existing overlay with the same key to avoid duplicates.
     if (this._tiles.has(key)) {
       this.removeEffectOverlay(key);
     }
     this._scene.add(mesh);
-    const entry = { mesh, material: mesh.material, floorIndex, root: null, attachedToTileId: null };
+    const entry = {
+      mesh,
+      material: mesh.material,
+      floorIndex,
+      root: null,
+      attachedToTileId: null,
+      overlayRole: String(options?.overlayRole || ''),
+    };
     this._tiles.set(key, entry);
     mesh.visible = this._computeEntryVisibleForSlice(key, entry);
     log.debug(`FloorRenderBus: added effect overlay '${key}' (floor ${floorIndex})`);

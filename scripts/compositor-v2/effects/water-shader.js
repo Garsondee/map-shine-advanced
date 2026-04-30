@@ -1499,6 +1499,17 @@ float refractTapValid(vec2 screenUv) {
   return vOcc * vBg;
 }
 
+// Softly reject distortion taps as they approach/leak past screen borders.
+// This prevents hard UV pinning artifacts in map edges/corners when refraction
+// offsets push outside the valid scene framebuffer area.
+float screenUvEdgeFade(vec2 screenUv) {
+  vec2 px = 1.0 / max(uResolution, vec2(1.0));
+  float soft = max(2.0 * max(px.x, px.y), 1e-5);
+  vec2 edge = min(screenUv, vec2(1.0) - screenUv);
+  float minEdge = min(edge.x, edge.y);
+  return smoothstep(0.0, soft, minEdge);
+}
+
 vec4 sampleRefractedSafe(vec2 screenUv, vec4 fallback) {
   return (refractTapValid(screenUv) > 0.5) ? texture2D(tDiffuse, screenUv) : fallback;
 }
@@ -1846,12 +1857,15 @@ void main() {
     offsetUvRaw *= 0.14;
   }
   vec2 offsetUv = offsetUvRaw * distMask;
-  vec2 uv1 = clamp(vUv + offsetUv, vec2(0.001), vec2(0.999));
+  vec2 uv1Candidate = vUv + offsetUv;
+  vec2 uv1 = clamp(uv1Candidate, vec2(0.001), vec2(0.999));
 
   // If the distorted center UV would sample outside the water body or into an
   // occluder, smoothly pin the distortion to zero at this pixel.
-  float v1 = refractTapValid(uv1);
+  float v1 = refractTapValid(uv1Candidate);
+  float edgeFade = screenUvEdgeFade(uv1Candidate);
   offsetUv *= v1;
+  offsetUv *= edgeFade;
   uv1 = clamp(vUv + offsetUv, vec2(0.001), vec2(0.999));
   vec4 centerSample = texture2D(tDiffuse, uv1);
 

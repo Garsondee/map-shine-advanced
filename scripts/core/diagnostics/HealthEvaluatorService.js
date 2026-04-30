@@ -1546,9 +1546,21 @@ export class HealthEvaluatorService {
             if (!instance?.enabled || !instance?.params?.enabled) {
               return { pass: true, skipped: true, message: 'Water splashes disabled' };
             }
+            const states = instance?._floorStates;
+            let perFloorBatchCount = 0;
+            if (states && typeof states.values === 'function') {
+              for (const st of states.values()) {
+                if (st?.batchRenderer) perFloorBatchCount += 1;
+              }
+            }
+            const mapCount = Number(instance?._batchRenderers?.size ?? 0);
+            const ok = perFloorBatchCount > 0 || mapCount > 0;
             return {
-              pass: !!instance?._batchRenderer,
-              message: instance?._batchRenderer ? 'Quarks batch renderer present' : 'Splashes batch renderer missing',
+              pass: ok,
+              message: ok
+                ? `Per-floor splash batch renderers present (${Math.max(perFloorBatchCount, mapCount)})`
+                : 'Per-floor splash batch renderers missing',
+              evidence: { perFloorBatchCount, mapCount },
             };
           },
         },

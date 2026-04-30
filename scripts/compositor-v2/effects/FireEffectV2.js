@@ -578,7 +578,12 @@ export class FireEffectV2 {
       totalSystems += state.systems.length + state.emberSystems.length + state.smokeSystems.length;
       if (state.batchRenderer) {
         const key = `${FIRE_BATCH_OVERLAY_PREFIX}${floorIndex}`;
-        this._renderBus.addEffectOverlay(key, state.batchRenderer, floorIndex);
+        this._renderBus.addEffectOverlay(
+          key,
+          state.batchRenderer,
+          floorIndex,
+          { overlayRole: 'stackedFloorEffect' }
+        );
         log.info(`FireEffectV2: ${key} added to bus (floor ${floorIndex}), parent=${state.batchRenderer.parent?.type}`);
       }
     }

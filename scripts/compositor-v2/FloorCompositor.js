@@ -4691,6 +4691,35 @@ export class FloorCompositor {
   }
 
   /**
+   * Public occlusion contract for floor-aware effects:
+   * returns authored upper-slice alpha occluder texture for `floorIndex`.
+   *
+   * @param {number} floorIndex
+   * @returns {import('three').Texture|null}
+   */
+  getUpperSceneOccluderTextureForFloorIndex(floorIndex) {
+    const fi = Number(floorIndex);
+    if (!Number.isFinite(fi)) return null;
+    try {
+      const diag = window.MapShine?.__v2PerLevelDiag ?? null;
+      const visibleFloors = Array.isArray(diag?.visibleFloors) ? diag.visibleFloors : null;
+      const levelSceneRTs = Array.isArray(diag?.levelSceneRTs) ? diag.levelSceneRTs : null;
+      if (
+        !visibleFloors
+        || !levelSceneRTs
+        || visibleFloors.length !== levelSceneRTs.length
+        || visibleFloors.length === 0
+      ) return null;
+      const li = visibleFloors.findIndex((v) => Number(v) === fi);
+      if (li < 0 || li >= visibleFloors.length - 1) return null;
+      const rt = this._buildUpperSceneAlphaOccluder(levelSceneRTs.slice(li + 1));
+      return rt?.texture ?? null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /**
    * Mirror lighting shadow textures into WaterEffectV2 so foam/murk/specular
    * sample the same factors as LightingEffectV2.
    * When ShadowManagerV2 is enabled, bind its combined RT to tCombinedShadow

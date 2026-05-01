@@ -19,7 +19,8 @@
  * V1 → V2 cleanup:
  *   - No EffectMaskRegistry subscription (masks loaded directly per tile)
  *   - No floor-presence gate (bus visibility handles floor isolation)
- *   - No depth-pass occlusion (Z-ordering handles tile stacking)
+ *   - No depth-pass occlusion; background/tile specular uses tileStackedOverlayOrder
+ *     so overlays interleave with albedo (upper tiles occlude lower specular).
  *   - No base mesh mode (always per-tile overlays with additive blending)
  *   - No dual-pass occluder + color mesh (single additive mesh per tile)
  *   - Shader split into separate module (specular-shader.js)
@@ -46,7 +47,7 @@ const log = createLogger('SpecularEffectV2');
 // but large enough to consistently render on top of the albedo tile.
 const SPECULAR_Z_OFFSET = 0.1;
 
-import { tileRelativeEffectOrder } from '../LayerOrderPolicy.js';
+import { tileStackedOverlayOrder } from '../LayerOrderPolicy.js';
 
 // Intra-band delta for specular overlays relative to their tile.
 const SPECULAR_EFFECT_DELTA = 1;
@@ -1475,12 +1476,12 @@ export class SpecularEffectV2 {
       mesh.rotation.z = rotation;
     }
 
-    // Place specular in the correct role band via LayerOrderPolicy.
+    // Same role band as the base mesh (+delta) so higher-sorted tiles draw later and
+    // occlude background / lower-tile specular (see tileStackedOverlayOrder).
     try {
       const baseOrder = Number(baseEntry?.mesh?.renderOrder);
-      const isOverhead = !!baseEntry?.root?.userData?.isOverhead;
       if (Number.isFinite(baseOrder)) {
-        mesh.renderOrder = tileRelativeEffectOrder(baseOrder, floorIndex, isOverhead, SPECULAR_EFFECT_DELTA);
+        mesh.renderOrder = tileStackedOverlayOrder(baseOrder, floorIndex, SPECULAR_EFFECT_DELTA);
       }
     } catch (_) {}
 

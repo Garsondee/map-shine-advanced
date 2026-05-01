@@ -134,6 +134,46 @@ export function motionAboveTokensOrder(floorIndex, intraOffset = 0) {
 // ── Tile-relative effect order (for per-tile additive overlays) ──────────────
 
 /**
+ * Render order for overlays that must **interleave** with tile albedo (e.g. additive
+ * specular): drawn immediately **after** the base mesh in the **same** role band
+ * (FLOOR_ALBEDO, FLOOR_OVERHEAD, or FLOOR_MOTION_TOP). This lets higher-sorted tiles
+ * occlude shine from layers beneath without a depth prepass.
+ *
+ * Band is inferred from `tileRenderOrder` so motion-above-tokens tiles are handled
+ * correctly (their base order is not FLOOR_ALBEDO).
+ *
+ * @param {number} tileRenderOrder - the base tile or background plane `renderOrder`
+ * @param {number} floorIndex
+ * @param {number} [delta=1] - slots after the base mesh (multiple overlays on one tile)
+ * @returns {number}
+ */
+export function tileStackedOverlayOrder(tileRenderOrder, floorIndex, delta = 1) {
+  const fi = Number.isFinite(Number(floorIndex)) ? Math.max(0, Number(floorIndex)) : 0;
+  const floorBase = fi * RENDER_ORDER_PER_FLOOR;
+  const localOrder = tileRenderOrder - floorBase;
+  const d = Math.max(1, Math.round(Number(delta) || 1));
+
+  // Motion-above-tokens (foreground / above-token tiles)
+  if (localOrder >= ROLE_OFFSETS.FLOOR_MOTION_TOP) {
+    const intra = localOrder - ROLE_OFFSETS.FLOOR_MOTION_TOP;
+    const next = Math.max(0, Math.min(MAX_INTRA_ROLE_OFFSET, intra + d));
+    return floorBase + ROLE_OFFSETS.FLOOR_MOTION_TOP + next;
+  }
+
+  // Overhead / roof / foreground layer (above ground albedo, below overhead-FX slot reserved for FX)
+  if (localOrder >= ROLE_OFFSETS.FLOOR_OVERHEAD) {
+    const intra = localOrder - ROLE_OFFSETS.FLOOR_OVERHEAD;
+    const next = Math.max(0, Math.min(MAX_INTRA_ROLE_OFFSET, intra + d));
+    return floorBase + ROLE_OFFSETS.FLOOR_OVERHEAD + next;
+  }
+
+  // Ground albedo band — includes `__bg_image__` at intra 0 and regular tiles.
+  const intra = Math.max(0, localOrder - ROLE_OFFSETS.FLOOR_ALBEDO);
+  const next = Math.max(0, Math.min(MAX_INTRA_ROLE_OFFSET, intra + d));
+  return floorBase + ROLE_OFFSETS.FLOOR_ALBEDO + next;
+}
+
+/**
  * Given a tile's renderOrder and the tile's floor + overhead status, compute
  * the render order for a tile-relative effect overlay (specular, bush, prism, etc).
  *

@@ -36,6 +36,7 @@ import {
   getViewedLevelBackgroundSrc,
 } from '../../foundry/levels-scene-flags.js';
 import Coordinates from '../../utils/coordinates.js';
+import { getTileBusPlaneSizeAndMirror, getTileVisualCenterFoundryXY } from '../../scene/tile-manager.js';
 import { getVertexShader, getFragmentShader } from './specular-shader.js';
 
 const log = createLogger('SpecularEffectV2');
@@ -716,10 +717,10 @@ export class SpecularEffectV2 {
 
       const floorIndex = this._resolveFloorIndex(tileDoc, floors);
 
-      const tileW = tileDoc.width ?? 0;
-      const tileH = tileDoc.height ?? 0;
-      const centerX = (tileDoc.x ?? 0) + tileW / 2;
-      const centerY = worldH - ((tileDoc.y ?? 0) + tileH / 2);
+      const { dispW: tileW, dispH: tileH, signX: planeSignX, signY: planeSignY } = getTileBusPlaneSizeAndMirror(tileDoc);
+      const { cx: cxf, cy: cyf } = getTileVisualCenterFoundryXY(tileDoc);
+      const centerX = cxf;
+      const centerY = worldH - cyf;
       const rotation = typeof tileDoc.rotation === 'number'
         ? (tileDoc.rotation * Math.PI) / 180 : 0;
 
@@ -729,7 +730,7 @@ export class SpecularEffectV2 {
       await this._createOverlay(tileId, floorIndex, {
         specularUrl: row.specResult.path,
         albedoUrl: src,
-        centerX, centerY, z, tileW, tileH, rotation,
+        centerX, centerY, z, tileW, tileH, rotation, planeSignX, planeSignY,
       });
 
       overlayCount++;
@@ -1315,7 +1316,7 @@ export class SpecularEffectV2 {
   async _createOverlayMesh(tileId, opts) {
     const {
       centerX, centerY, tileW, tileH, rotation, z, floorIndex,
-      albedoUrl, specularUrl
+      albedoUrl, specularUrl, planeSignX = 1, planeSignY = 1,
     } = opts;
 
     const THREE = window.THREE;
@@ -1386,6 +1387,11 @@ export class SpecularEffectV2 {
     const mesh = new THREE.Mesh(geometry, material);
     mesh.name = `SpecV2_${tileId}`;
     mesh.frustumCulled = false;
+    mesh.scale.set(
+      Number.isFinite(planeSignX) && planeSignX !== 0 ? planeSignX : 1,
+      Number.isFinite(planeSignY) && planeSignY !== 0 ? planeSignY : 1,
+      1,
+    );
     const baseEntry = this._renderBus?._tiles?.get?.(tileId);
     const canAttachToTileRoot = !!baseEntry && !String(tileId).startsWith('__');
     if (canAttachToTileRoot) {

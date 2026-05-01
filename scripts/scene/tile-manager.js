@@ -105,6 +105,30 @@ export function getTileVisualCenterFoundryXY(tileDoc) {
   return { cx: sx + rx, cy: sy + ry };
 }
 
+/**
+ * Foundry tile meshes multiply {@link TileDocument#shape} width/height by
+ * `texture.scaleX` / `texture.scaleY` for **display** size and use the **sign** of
+ * those scales for horizontal/vertical flip (`PrimaryCanvasObject#resize`).
+ * Bus `PlaneGeometry` + mesh scale must match so mask UVs align with albedo.
+ *
+ * @param {object} tileDoc
+ * @returns {{ dispW: number, dispH: number, signX: number, signY: number }}
+ */
+export function getTileBusPlaneSizeAndMirror(tileDoc) {
+  const shape = tileDoc?.shape && typeof tileDoc.shape === 'object' ? tileDoc.shape : null;
+  const w = Number(shape?.width ?? tileDoc?.width) || 0;
+  const h = Number(shape?.height ?? tileDoc?.height) || 0;
+  const scRawX = tileDoc?.texture?.scaleX;
+  const scRawY = tileDoc?.texture?.scaleY;
+  const scX = Number.isFinite(Number(scRawX)) ? Number(scRawX) : 1;
+  const scY = Number.isFinite(Number(scRawY)) ? Number(scRawY) : 1;
+  const dispW = Math.abs(w) * Math.abs(scX || 1);
+  const dispH = Math.abs(h) * Math.abs(scY || 1);
+  const signX = scX === 0 ? 1 : Math.sign(scX);
+  const signY = scY === 0 ? 1 : Math.sign(scY);
+  return { dispW, dispH, signX, signY };
+}
+
 function hasFiniteActiveLevelBand(context) {
   return Number.isFinite(Number(context?.bottom)) && Number.isFinite(Number(context?.top));
 }

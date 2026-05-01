@@ -8,6 +8,8 @@ import { loadTexture } from '../assets/loader.js';
 import { VisionPolygonComputer } from '../vision/VisionPolygonComputer.js';
 import { weatherController } from '../core/WeatherController.js';
 import { createLogger } from '../core/log.js';
+import { getPerspectiveElevation } from '../foundry/elevation-context.js';
+import { hasV14NativeLevels } from '../foundry/levels-scene-flags.js';
 
 const _lightLosComputer = new VisionPolygonComputer();
 const log = createLogger('ThreeLightSource');
@@ -1882,7 +1884,14 @@ export class ThreeLightSource {
         // when we shrink the polygon below, the resulting boundary aligns with
         // the intended radius.
         const computeRadiusPx = Math.max(0, (Number(radiusPx) || 0) + wallInsetPx);
-        const ptsF = _lightLosComputer.compute(centerF, computeRadiusPx, null, sceneBounds, { sense: 'light' });
+        const computeOpts = { sense: 'light' };
+        try {
+          if (hasV14NativeLevels(canvas?.scene)) {
+            const p = getPerspectiveElevation();
+            if (Number.isFinite(p?.losHeight)) computeOpts.elevation = p.losHeight;
+          }
+        } catch (_) {}
+        const ptsF = _lightLosComputer.compute(centerF, computeRadiusPx, null, sceneBounds, computeOpts);
 
         if (ptsF && ptsF.length >= 6) {
           shapePoints = [];

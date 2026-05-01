@@ -534,17 +534,28 @@ export class FireEffectV2 {
 
       // Convert tile-local UVs → scene-global UVs.
       // generateFirePoints returns (u, v, brightness) in tile image space [0..1].
-      // We remap to scene-global UV using the tile's Foundry position and size.
+      // Foundry v14+: TileDocument x/y is the texture anchor, not the top-left corner
+      // (RectangleShapeData: rect origin is x - anchorX*width, y - anchorY*height).
+      // Offset UVs relative to anchor, then apply rotation around that origin.
       const tileX = Number(tileDoc.x) || 0;
       const tileY = Number(tileDoc.y) || 0;
       const tileW = Number(tileDoc.width) || 1;
       const tileH = Number(tileDoc.height) || 1;
+      const anchorX = Number(tileDoc.texture?.anchorX ?? tileDoc.shape?.anchorX ?? 0);
+      const anchorY = Number(tileDoc.texture?.anchorY ?? tileDoc.shape?.anchorY ?? 0);
+      const rotDeg = Number(tileDoc.rotation) || 0;
+      const rot = (rotDeg * Math.PI) / 180;
+      const cos = Math.cos(rot);
+      const sin = Math.sin(rot);
 
       const sceneGlobalPoints = new Float32Array(tileLocalPoints.length);
       for (let i = 0; i < tileLocalPoints.length; i += 3) {
-        // Tile-local UV → Foundry world pixel → scene-global UV.
-        const foundryPx = tileX + tileLocalPoints[i] * tileW;
-        const foundryPy = tileY + tileLocalPoints[i + 1] * tileH;
+        const u = tileLocalPoints[i];
+        const v = tileLocalPoints[i + 1];
+        const du = (u - anchorX) * tileW;
+        const dv = (v - anchorY) * tileH;
+        const foundryPx = tileX + du * cos - dv * sin;
+        const foundryPy = tileY + du * sin + dv * cos;
         sceneGlobalPoints[i]     = (foundryPx - foundrySceneX) / sceneWidth;
         sceneGlobalPoints[i + 1] = (foundryPy - foundrySceneY) / sceneHeight;
         sceneGlobalPoints[i + 2] = tileLocalPoints[i + 2]; // brightness unchanged

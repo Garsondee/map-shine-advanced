@@ -850,9 +850,10 @@ export class LightingEffectV2 {
     this._registerHook('updateAmbientLight', (doc, changes) => this._onLightUpdate(doc, changes));
     this._registerHook('deleteAmbientLight', (doc) => this._onLightDelete(doc));
     this._registerHook('updateScene', (scene, changes) => this._onSceneUpdate(scene, changes));
+    // Full dispose+rebuild so wall-clipped LOS geometry and materials are not reused
+    // across floors (placeables/embedded docs can change; baked polygons must match the active band).
     this._registerHook('mapShineLevelContextChanged', () => {
-      this._reconcileMissingEmbeddedLights();
-      this._markPerspectiveRefreshDirty();
+      this.syncAllLights();
     });
     this._registerHook('lightingRefresh', () => {
       this._reconcileMissingEmbeddedLights();

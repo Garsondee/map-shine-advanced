@@ -35,7 +35,7 @@ import {
   getVisibleLevelBackgroundLayers,
   hasV14NativeLevels,
 } from '../foundry/levels-scene-flags.js';
-import { isTileOverhead, getTileVisualCenterFoundryXY } from '../scene/tile-manager.js';
+import { isTileOverhead, getTileVisualCenterFoundryXY, getTileBusPlaneSizeAndMirror } from '../scene/tile-manager.js';
 import {
   RENDER_ORDER_PER_FLOOR,
   GROUND_Z,
@@ -286,8 +286,7 @@ export class FloorRenderBus {
 
       // Foundry v14+ tiles: shape (x,y) is the anchor; center uses anchorX/Y.
       const worldH = fd.height;
-      const tileW = tileDoc.width ?? 0;
-      const tileH = tileDoc.height ?? 0;
+      const { dispW: tileW, dispH: tileH, signX: planeSignX, signY: planeSignY } = getTileBusPlaneSizeAndMirror(tileDoc);
       const { cx: cxf, cy: cyf } = getTileVisualCenterFoundryXY(tileDoc);
       const centerX = cxf;
       const centerY = worldH - cyf;
@@ -314,7 +313,7 @@ export class FloorRenderBus {
       }
 
       // Create mesh immediately with null texture (invisible until loaded).
-      this._addTileMesh(tileId, floorIndex, null, centerX, centerY, z, tileW, tileH, rotation, alpha, renderOrder, isOverhead, roofShadowCaster, cloudShadowBlockerEnabled);
+      this._addTileMesh(tileId, floorIndex, null, centerX, centerY, z, tileW, tileH, rotation, alpha, renderOrder, isOverhead, roofShadowCaster, cloudShadowBlockerEnabled, planeSignX, planeSignY);
 
       // Load texture via THREE.TextureLoader — HTML <img>, straight alpha.
       this._loader.load(src, (tex) => {
@@ -751,8 +750,7 @@ export class FloorRenderBus {
     const floors = window.MapShine?.floorStack?.getFloors?.() ?? [];
     const floorIndex = this._resolveFloorIndex(tileDoc, floors);
     const worldH = Number(sceneData?.height) || 0;
-    const tileW = Number(tileDoc?.width) || 0;
-    const tileH = Number(tileDoc?.height) || 0;
+    const { dispW: tileW, dispH: tileH, signX: planeSignX, signY: planeSignY } = getTileBusPlaneSizeAndMirror(tileDoc);
     const { cx: cxf, cy: cyf } = getTileVisualCenterFoundryXY(tileDoc);
     const centerX = cxf;
     const centerY = worldH - cyf;
@@ -779,7 +777,7 @@ export class FloorRenderBus {
 
     let entry = this._tiles.get(tileId);
     if (!entry) {
-      this._addTileMesh(tileId, floorIndex, null, centerX, centerY, z, tileW, tileH, rotation, alpha, renderOrder, isOverhead, roofShadowCaster, cloudShadowBlockerEnabled);
+      this._addTileMesh(tileId, floorIndex, null, centerX, centerY, z, tileW, tileH, rotation, alpha, renderOrder, isOverhead, roofShadowCaster, cloudShadowBlockerEnabled, planeSignX, planeSignY);
       entry = this._tiles.get(tileId);
       if (!entry) return false;
     }
@@ -802,6 +800,12 @@ export class FloorRenderBus {
         try { entry.mesh.geometry?.dispose?.(); } catch (_) {}
         entry.mesh.geometry = new window.THREE.PlaneGeometry(tileW, tileH);
       }
+
+      entry.mesh.scale.set(
+        Number.isFinite(planeSignX) && planeSignX !== 0 ? planeSignX : 1,
+        Number.isFinite(planeSignY) && planeSignY !== 0 ? planeSignY : 1,
+        1,
+      );
 
       entry.mesh.renderOrder = renderOrder;
       entry.mesh.layers.set(0);
@@ -1811,9 +1815,11 @@ export class FloorRenderBus {
    * @param {number} alpha
    * @param {boolean} isOverhead - draw-order / userData (PIXI parity), not necessarily ROOF_LAYER
    * @param {boolean} roofShadowCaster - ROOF_LAYER + optional cloud blocker (overhead or upper-floor slab)
+   * @param {number} [planeSignX=1] - Horizontal mirror (texture.scaleX sign)
+   * @param {number} [planeSignY=1] - Vertical mirror (texture.scaleY sign)
    * @private
    */
-  _addTileMesh(tileId, floorIndex, texture, cx, cy, z, w, h, rotation, alpha, renderOrder = 0, isOverhead = false, roofShadowCaster = false, cloudShadowBlockerEnabled = false) {
+  _addTileMesh(tileId, floorIndex, texture, cx, cy, z, w, h, rotation, alpha, renderOrder = 0, isOverhead = false, roofShadowCaster = false, cloudShadowBlockerEnabled = false, planeSignX = 1, planeSignY = 1) {
     const THREE = window.THREE;
     const mat = new THREE.MeshBasicMaterial({
       map: texture || null,
@@ -1868,6 +1874,7 @@ export class FloorRenderBus {
     root.rotation.z = rotation;
     mesh.position.set(0, 0, 0);
     mesh.rotation.z = 0;
+    mesh.scale.set(Number.isFinite(planeSignX) && planeSignX !== 0 ? planeSignX : 1, Number.isFinite(planeSignY) && planeSignY !== 0 ? planeSignY : 1, 1);
     // renderOrder controls visual stacking: lower = behind, higher = in front.
     // Three.js sorts transparent objects by renderOrder first, then by distance.
     mesh.renderOrder = renderOrder;

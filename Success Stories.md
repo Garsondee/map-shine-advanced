@@ -241,3 +241,26 @@ This issue was a layered ordering/slice interaction, not just one render-order v
 - Middle (fire) floor no longer blacks out the floor below.
 - Multi-floor rendering now behaves correctly on all tested floors (roof, fire floor, ground).
 
+## Success Story: Iridescence Mask Looked Inverted (Shine on Padding, Not on Props)
+
+### Problem We Saw
+
+- Iridescence appeared strongest in **transparent padding / bounding-box corners** and on **opaque black unused UV**, while the actual mesh surfaces (brighter mask regions) showed little or no shimmer.
+- Visually this read as **inverted masking**: effect where the mask was black, none where it was brighter than black.
+
+### What Was Wrong At The Start
+
+- The fragment shader had a special path for **“alpha-only”** masks: when RGB was near zero, it treated **`rawMask` as opacity alone** (`rawMask ≈ a`).
+- Typical `_Iridescence` authoring uses **opaque black** in empty padding and **colored/lighter** values on props.
+- That branch gave **full strength** on opaque black padding and **`luminance × α`** on colored pixels — exactly the inverted look users reported.
+
+### What Fixed It
+
+- Removed the alpha-only branch so **one rule applies everywhere**: **`rawMask = luminance(rgb) × alpha`**, with optional **Invert mask** flipping luminance before the multiply (not after), so transparent texels still discard correctly.
+- Users who paint **light = shine** get shimmer on props; black RGB regions no longer steal the effect via opacity alone.
+
+### Final Outcome
+
+- Iridescence aligns with mask intent: **bright mask regions shimmer**, **dark regions do not**, and **fully transparent** areas stay empty.
+- Confirmed in-session on vault-style props after the change.
+

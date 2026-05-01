@@ -1287,6 +1287,77 @@ export class SpecularEffectV2 {
   }
 
   /**
+   * Remove one tile overlay (used when the tile image path changes).
+   * @param {string} tileId
+   * @private
+   */
+  _disposeOverlayEntry(tileId) {
+    if (!tileId || tileId === '__bg_image__') return;
+    const entry = this._overlays.get(tileId);
+    if (!entry) return;
+    this._renderBus.removeEffectOverlay(`${tileId}_specular`);
+    const material = entry?.material ?? null;
+    const uniforms = material?.uniforms ?? null;
+    if (uniforms) {
+      for (const key of ['uAlbedoMap', 'uSpecularMap']) {
+        const tex = uniforms[key]?.value;
+        if (tex && tex !== this._fallbackBlack && tex !== this._fallbackWhite) {
+          try { tex.dispose(); } catch (_) {}
+        }
+      }
+    }
+    try { material?.dispose?.(); } catch (_) {}
+    try { entry?.mesh?.geometry?.dispose?.(); } catch (_) {}
+    this._overlays.delete(tileId);
+  }
+
+  /**
+   * Re-probe `_Specular` and rebuild the overlay after `texture.src` changed on a tile.
+   *
+   * @param {object} tileDoc
+   * @param {object|null} foundrySceneData
+   */
+  async refreshTileAfterTextureChange(tileDoc, foundrySceneData) {
+    if (!this._initialized || !tileDoc) return;
+    const tileId = tileDoc.id ?? tileDoc._id;
+    if (!tileId || tileId === '__bg_image__') return;
+
+    this._disposeOverlayEntry(tileId);
+
+    const src = tileDoc?.texture?.src ?? tileDoc?.img ?? '';
+    if (!src) return;
+
+    const floors = window.MapShine?.floorStack?.getFloors?.() ?? [];
+    const worldH = foundrySceneData?.height ?? (typeof canvas !== 'undefined' ? canvas?.dimensions?.height : 0) ?? 0;
+
+    const dotIdx = src.lastIndexOf('.');
+    const basePath = dotIdx > 0 ? src.substring(0, dotIdx) : src;
+    const specResult = await probeMaskFile(basePath, '_Specular');
+    if (!specResult?.path) return;
+
+    const floorIndex = this._resolveFloorIndex(tileDoc, floors);
+    const { dispW: tileW, dispH: tileH, signX: planeSignX, signY: planeSignY } = getTileBusPlaneSizeAndMirror(tileDoc);
+    const { cx: cxf, cy: cyf } = getTileVisualCenterFoundryXY(tileDoc);
+    const centerX = cxf;
+    const centerY = worldH - cyf;
+    const rotation = typeof tileDoc.rotation === 'number'
+      ? (tileDoc.rotation * Math.PI) / 180 : 0;
+
+    const GROUND_Z = 1000;
+    const z = GROUND_Z + floorIndex + SPECULAR_Z_OFFSET;
+
+    await this._createOverlay(tileId, floorIndex, {
+      specularUrl: specResult.path,
+      albedoUrl: src,
+      centerX, centerY, z, tileW, tileH, rotation, planeSignX, planeSignY,
+    });
+
+    if (!this._realShaderCompiled && !this._shaderCompilePending) {
+      setTimeout(() => this._compileRealShaderForOverlays(), 0);
+    }
+  }
+
+  /**
    * Full dispose — call on scene teardown.
    */
   dispose() {

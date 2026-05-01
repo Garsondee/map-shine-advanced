@@ -617,6 +617,37 @@ export class FireEffectV2 {
   }
 
   /**
+   * After a tile's `texture.src` changes, fire spawn points for that tile must be
+   * recomputed from the new `_Fire` mask. Because particles are merged per floor
+   * (one BatchedRenderer per floor), this triggers a full {@link populate} via
+   * {@link _queueRebuild} so all tiles are rescanned — same pattern as param-driven rebuilds.
+   *
+   * @param {object} _tileDoc
+   * @param {object|null} foundrySceneData
+   */
+  async refreshTileAfterTextureChange(_tileDoc, foundrySceneData) {
+    if (!this._initialized) return;
+    void _tileDoc;
+
+    if (foundrySceneData && typeof foundrySceneData === 'object') {
+      this._lastPopulateSceneData = foundrySceneData;
+    } else if (!this._lastPopulateSceneData) {
+      const d = typeof canvas !== 'undefined' ? canvas?.dimensions : null;
+      if (!d) return;
+      this._lastPopulateSceneData = {
+        height: d.height,
+        width: d.width,
+        sceneWidth: d.sceneWidth ?? d.width,
+        sceneHeight: d.sceneHeight ?? d.height,
+        sceneX: d.sceneX ?? 0,
+        sceneY: d.sceneY ?? 0,
+      };
+    }
+
+    this._queueRebuild();
+  }
+
+  /**
    * Per-frame update. Steps the BatchedRenderer simulation.
    * @param {{ elapsed: number, delta: number }} timeInfo
    */

@@ -326,6 +326,61 @@ export class IridescenceEffectV2 {
     this.params.textureStatus = 'Inactive (no _Iridescence mask)';
   }
 
+  /**
+   * @param {string} tileKey
+   * @private
+   */
+  _disposeOverlayEntry(tileKey) {
+    if (!tileKey || tileKey === '__bg_image__') return;
+    const entry = this._overlays.get(tileKey);
+    if (!entry) return;
+    this._renderBus.removeEffectOverlay(`${tileKey}_iridescence`);
+    try { entry.material.dispose(); } catch (_) {}
+    try { entry.mesh.geometry?.dispose?.(); } catch (_) {}
+    for (const key of ['uIridescenceMask']) {
+      const tex = entry.material?.uniforms?.[key]?.value;
+      try { tex?.dispose?.(); } catch (_) {}
+    }
+    this._overlays.delete(tileKey);
+  }
+
+  /**
+   * Re-probe `_Iridescence` and rebuild the overlay after `texture.src` changed on a tile.
+   *
+   * @param {object} tileDoc
+   * @param {object|null} foundrySceneData
+   */
+  async refreshTileAfterTextureChange(tileDoc, foundrySceneData) {
+    if (!this._initialized || !tileDoc) return;
+    const tileKey = tileDoc.id ?? tileDoc._id;
+    if (tileKey == null || tileKey === '' || tileKey === '__bg_image__') return;
+
+    this._disposeOverlayEntry(tileKey);
+
+    const src = tileDoc?.texture?.src ?? tileDoc?.img ?? '';
+    if (!src) return;
+
+    const floors = window.MapShine?.floorStack?.getFloors?.() ?? [];
+    const worldH = foundrySceneData?.height ?? (typeof canvas !== 'undefined' ? canvas?.dimensions?.height : 0) ?? 0;
+
+    const basePath = this._basePathNoExt(src);
+    const result = await probeMaskFile(basePath, '_Iridescence');
+    if (!result?.path) return;
+
+    const floorIndex = this._resolveFloorIndex(tileDoc, floors);
+    const { dispW: tileW, dispH: tileH, signX: planeSignX, signY: planeSignY } = getTileBusPlaneSizeAndMirror(tileDoc);
+    const { cx: cxf, cy: cyf } = getTileVisualCenterFoundryXY(tileDoc);
+    const centerX = cxf;
+    const centerY = worldH - cyf;
+    const rotation = typeof tileDoc.rotation === 'number' ? (tileDoc.rotation * Math.PI) / 180 : 0;
+    const z = GROUND_Z + floorIndex * Z_PER_FLOOR + IRIDESCENCE_Z_OFFSET;
+
+    this._createOverlay(tileKey, floorIndex, {
+      maskUrl: result.path, centerX, centerY, z, tileW, tileH, rotation, planeSignX, planeSignY,
+    });
+    this._syncOverlayVisibility();
+  }
+
   dispose() {
     this.clear();
     this._unregisterLightHooks();

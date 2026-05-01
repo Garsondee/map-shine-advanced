@@ -1038,6 +1038,60 @@ export class TreeEffectV2 {
     this.params.textureStatus = 'Inactive (no _Tree mask)';
   }
 
+  /**
+   * @param {string} tileId
+   * @private
+   */
+  _disposeSingleTileOverlay(tileId) {
+    if (!tileId || String(tileId).startsWith('__bg_image__')) return;
+    const entry = this._overlays.get(tileId);
+    if (!entry) return;
+    this._renderBus.removeEffectOverlay(`${tileId}_tree`);
+    try { entry.material.dispose(); } catch (_) {}
+    try { entry.mesh.geometry.dispose(); } catch (_) {}
+    const tex = entry.material.uniforms.uTreeMask?.value;
+    if (tex && tex.dispose) {
+      try { tex.dispose(); } catch (_) {}
+    }
+    this._overlays.delete(tileId);
+    try { this._deriveAlphaByTileId.delete(tileId); } catch (_) {}
+    try { this._alphaSampleByTileId.delete(tileId); } catch (_) {}
+  }
+
+  /**
+   * Re-probe `_Tree` and rebuild the overlay after `texture.src` changed on a tile.
+   *
+   * @param {object} tileDoc
+   * @param {object|null} foundrySceneData
+   */
+  async refreshTileAfterTextureChange(tileDoc, foundrySceneData) {
+    if (!this._initialized || !tileDoc) return;
+    const tileId = tileDoc.id ?? tileDoc._id;
+    if (!tileId) return;
+
+    this._disposeSingleTileOverlay(tileId);
+
+    const src = tileDoc?.texture?.src ?? tileDoc?.img ?? '';
+    if (!src) return;
+
+    const floors = window.MapShine?.floorStack?.getFloors?.() ?? [];
+    const worldH = Number(foundrySceneData?.height) || (typeof canvas !== 'undefined' ? Number(canvas?.dimensions?.height) || 0 : 0);
+
+    const basePath = src.replace(/\.[^.]+$/, '');
+    const url = await this._probeMask(basePath, '_Tree');
+    if (!url) return;
+
+    const floorIndex = this._resolveFloorIndex(tileDoc, floors);
+    const tileW = Number(tileDoc?.width ?? 0);
+    const tileH = Number(tileDoc?.height ?? 0);
+    const centerX = Number(tileDoc?.x ?? 0) + tileW / 2;
+    const centerY = worldH - (Number(tileDoc?.y ?? 0) + tileH / 2);
+    const z = GROUND_Z + floorIndex + TREE_Z_OFFSET;
+    const rotation = typeof tileDoc?.rotation === 'number' ? (tileDoc.rotation * Math.PI) / 180 : 0;
+
+    this._createOverlay(tileId, floorIndex, { url, centerX, centerY, z, tileW, tileH, rotation });
+  }
+
   dispose() {
     this.clear();
     this._loader = null;

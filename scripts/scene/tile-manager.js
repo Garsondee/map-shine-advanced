@@ -2030,6 +2030,22 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
       log.debug(`Tile updated: ${tileDoc.id}`, changes);
       this.updateTileSprite(tileDoc, changes);
 
+      // V2 surface effects (specular, fluid, …) are populated once at scene load.
+      // When `texture.src` changes, re-probe companion masks and rebuild overlays.
+      const texSrcChanged = changes && typeof changes === 'object'
+        && 'texture' in changes
+        && changes.texture
+        && typeof changes.texture === 'object'
+        && 'src' in changes.texture;
+      if (texSrcChanged) {
+        try {
+          const fc = window.MapShine?.floorCompositorV2 ?? window.MapShine?.effectComposer?._floorCompositorV2;
+          const p = fc?.notifyTileTextureChanged?.(tileDoc);
+          if (p?.catch) p.catch(() => {});
+        } catch (_) {
+        }
+      }
+
       // Only invalidate water caches if the update could affect the water mask.
       // The scene-wide water SDF is derived from the _Water mask texture, NOT
       // from individual tile metadata flags. Tile flag changes (e.g. Levels
@@ -3545,75 +3561,78 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
       }
     }
 
-    // Update texture if changed
-    if ('texture' in changes && changes.texture?.src) {
-      // If the tile texture changes, its associated _Water mask may also change.
-      // Clear any cached resolution for this tile base path so we re-scan properly.
-      try {
-        const prevSrc = spriteData?.tileDoc?.texture?.src;
-        const nextSrc = changes.texture.src;
-        const prevParts = this._splitUrl(prevSrc);
-        const nextParts = this._splitUrl(nextSrc);
-        if (prevParts?.pathNoExt) this._tileWaterMaskResolvedUrl.delete(prevParts.pathNoExt);
-        if (nextParts?.pathNoExt) this._tileWaterMaskResolvedUrl.delete(nextParts.pathNoExt);
-      } catch (_) {
-      }
-
-      // Reset auto-detection state unless user explicitly overrode occlusion.
-      try {
-        if (sprite.userData?._autoOccludesWaterState !== 'overridden') {
-          sprite.userData._autoOccludesWaterState = null;
-          sprite.userData._autoOccludesWaterRequestKey = null;
-        }
-      } catch (_) {
-      }
-
-      this.loadTileTexture(changes.texture.src).then(texture => {
-        sprite.material.map = texture;
-        sprite.material.needsUpdate = true;
-
-        // If the tile texture changes, its associated _Specular mask may also change.
+    // Update texture if changed (Foundry: redraw when `texture` delta includes `src`)
+    const textureSrcInDelta = 'texture' in changes && changes.texture && typeof changes.texture === 'object'
+      && 'src' in changes.texture;
+    if (textureSrcInDelta) {
+      const nextSrc = tileDoc.texture?.src;
+      if (nextSrc) {
+        // If the tile texture changes, its associated _Water mask may also change.
+        // Clear any cached resolution for this tile base path so we re-scan properly.
         try {
           const prevSrc = spriteData?.tileDoc?.texture?.src;
-          const nextSrc = changes.texture.src;
           const prevParts = this._splitUrl(prevSrc);
           const nextParts = this._splitUrl(nextSrc);
-          if (prevParts?.pathNoExt) this._tileSpecularMaskResolvedUrl.delete(prevParts.pathNoExt);
-          if (nextParts?.pathNoExt) this._tileSpecularMaskResolvedUrl.delete(nextParts.pathNoExt);
+          if (prevParts?.pathNoExt) this._tileWaterMaskResolvedUrl.delete(prevParts.pathNoExt);
+          if (nextParts?.pathNoExt) this._tileWaterMaskResolvedUrl.delete(nextParts.pathNoExt);
         } catch (_) {
         }
 
-        // Rebind all per-tile overlays for the new texture via the binding manager.
+        // Reset auto-detection state unless user explicitly overrode occlusion.
         try {
-          const nextDoc = { id: tileDoc.id, texture: { src: changes.texture.src }, flags: targetDoc.flags };
-          this.tileBindingManager.onTileReady(nextDoc, sprite);
-        } catch (_) {
-        }
-
-        const occ = sprite.userData?.waterOccluderMesh;
-        if (occ?.material?.uniforms?.tTile) {
-          occ.material.uniforms.tTile.value = texture;
-          if (occ.material.uniforms.uHasTile) {
-            occ.material.uniforms.uHasTile.value = texture ? 1.0 : 0.0;
+          if (sprite.userData?._autoOccludesWaterState !== 'overridden') {
+            sprite.userData._autoOccludesWaterState = null;
+            sprite.userData._autoOccludesWaterRequestKey = null;
           }
-        }
-
-        // Kick auto-detection again for the new tile texture. This will:
-        // - enable water occlusion if a matching _Water mask exists
-        // - update the water occluder mesh's mask uniforms
-        // - safely no-op (with cached null) if no mask exists
-        try {
-          this.updateSpriteTransform(sprite, targetDoc);
         } catch (_) {
         }
 
-        try {
-          window.MapShine?.cloudEffectV2?.requestBlockerUpdate?.(2);
-        } catch (_) {
-        }
-      }).catch(error => {
-        log.error(`Failed to load updated tile texture`, error);
-      });
+        this.loadTileTexture(nextSrc).then(texture => {
+          sprite.material.map = texture;
+          sprite.material.needsUpdate = true;
+
+          // If the tile texture changes, its associated _Specular mask may also change.
+          try {
+            const prevSrc = spriteData?.tileDoc?.texture?.src;
+            const prevParts = this._splitUrl(prevSrc);
+            const nextParts = this._splitUrl(nextSrc);
+            if (prevParts?.pathNoExt) this._tileSpecularMaskResolvedUrl.delete(prevParts.pathNoExt);
+            if (nextParts?.pathNoExt) this._tileSpecularMaskResolvedUrl.delete(nextParts.pathNoExt);
+          } catch (_) {
+          }
+
+          // Rebind all per-tile overlays for the new texture via the binding manager.
+          try {
+            const nextDoc = { id: tileDoc.id, texture: { src: nextSrc }, flags: targetDoc.flags };
+            this.tileBindingManager.onTileReady(nextDoc, sprite);
+          } catch (_) {
+          }
+
+          const occ = sprite.userData?.waterOccluderMesh;
+          if (occ?.material?.uniforms?.tTile) {
+            occ.material.uniforms.tTile.value = texture;
+            if (occ.material.uniforms.uHasTile) {
+              occ.material.uniforms.uHasTile.value = texture ? 1.0 : 0.0;
+            }
+          }
+
+          // Kick auto-detection again for the new tile texture. This will:
+          // - enable water occlusion if a matching _Water mask exists
+          // - update the water occluder mesh's mask uniforms
+          // - safely no-op (with cached null) if no mask exists
+          try {
+            this.updateSpriteTransform(sprite, targetDoc);
+          } catch (_) {
+          }
+
+          try {
+            window.MapShine?.cloudEffectV2?.requestBlockerUpdate?.(2);
+          } catch (_) {
+          }
+        }).catch(error => {
+          log.error(`Failed to load updated tile texture`, error);
+        });
+      }
     }
 
     // Update visibility

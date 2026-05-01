@@ -126,6 +126,13 @@ export class FloorCompositor {
     this._healthEvaluator = null;
 
     /**
+     * Last `foundrySceneData` snapshot used during populate (world height, scene rect).
+     * Used to refresh per-tile V2 overlays when a tile's image changes after load.
+     * @type {object|null}
+     */
+    this._lastFoundrySceneData = null;
+
+    /**
      * FloorRenderBus: owns a single THREE.Scene containing all tile meshes
      * Z-ordered by floor index. Textures loaded independently via
      * THREE.TextureLoader (straight alpha, no canvas 2D corruption).
@@ -2087,6 +2094,69 @@ export class FloorCompositor {
   }
 
   /**
+   * Resolve scene geometry for mask overlays (populate snapshot or canvas fallback).
+   * @returns {object}
+   * @private
+   */
+  _resolveFoundrySceneDataSnapshot() {
+    const fd = this._lastFoundrySceneData ?? window.MapShine?.sceneComposer?.foundrySceneData ?? null;
+    if (fd && typeof fd === 'object') return fd;
+    const d = typeof canvas !== 'undefined' ? canvas?.dimensions : null;
+    const h = Number(d?.height) || 0;
+    const w = Number(d?.width) || 0;
+    return {
+      height: h,
+      width: w,
+      sceneWidth: w,
+      sceneHeight: h,
+      sceneX: 0,
+      sceneY: 0,
+    };
+  }
+
+  /**
+   * When a tile's `texture.src` changes after initial V2 populate, re-probe companion
+   * masks and rebuild per-tile overlays (specular, fluid, iridescence, prism, bush, tree)
+   * and re-merge fire particles (full FireEffectV2 repopulate per floor batch).
+   *
+   * @param {object} tileDoc - Updated Foundry TileDocument
+   */
+  notifyTileTextureChanged(tileDoc) {
+    if (!tileDoc) return;
+    const id = tileDoc.id ?? tileDoc._id;
+    if (!id) return;
+    const fd = this._resolveFoundrySceneDataSnapshot();
+    const p = this._refreshV2SurfaceEffectsForTile(tileDoc, fd);
+    if (p && typeof p.catch === 'function') p.catch(() => {});
+  }
+
+  /**
+   * @param {object} tileDoc
+   * @param {object} foundrySceneData
+   * @returns {Promise<void>}
+   * @private
+   */
+  async _refreshV2SurfaceEffectsForTile(tileDoc, foundrySceneData) {
+    const effects = [
+      this._specularEffect,
+      this._fluidEffect,
+      this._iridescenceEffect,
+      this._prismEffect,
+      this._bushEffect,
+      this._treeEffect,
+      this._fireEffect,
+    ];
+    const tasks = [];
+    for (const e of effects) {
+      if (e && typeof e.refreshTileAfterTextureChange === 'function') {
+        tasks.push(e.refreshTileAfterTextureChange(tileDoc, foundrySceneData));
+      }
+    }
+    if (!tasks.length) return;
+    await Promise.allSettled(tasks);
+  }
+
+  /**
    * Explicit loading-time prewarm entrypoint.
    *
    * Runs the one-time populate work that used to happen lazily on first render,
@@ -2247,6 +2317,8 @@ export class FloorCompositor {
         );
         return false;
       }
+
+      this._lastFoundrySceneData = sc.foundrySceneData ?? null;
 
       log.warn(
         `[POPULATE LOAD] begin (source=${source})`,

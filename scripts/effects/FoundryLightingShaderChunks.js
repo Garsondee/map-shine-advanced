@@ -570,15 +570,17 @@ export const FoundryLightingShaderChunks = {
   flame: `
             // Time-only tint (no spatial fbm here — avoids rectangular cells on top-down fire).
             float inten = clamp(uAnimIntensity, 0.0, 10.0);
+            float iD = clamp((inten - 1.0) / 9.0, 0.0, 1.0);
             float tc0 = 0.5 + 0.5 * sin(uTime * 7.1 + uSeed * 13.17);
             float tc1 = 0.5 + 0.5 * sin(uTime * 4.9 + uSeed * 27.03);
             float tc2 = 0.5 + 0.5 * sin(uTime * 2.3 + uSeed * 41.0);
             float co = 0.42 + 0.33 * (tc0 + tc1) * 0.5 + 0.12 * tc2;
-            vec3 hot = uColor * 2.75;
-            vec3 warm = uColor * 1.1;
-            outColor = mix(mix(uColor, warm, clamp(co, 0.0, 1.0)), hot, tc0 * tc0 * (0.26 + 0.05 * inten * 0.1));
+            vec3 hot = uColor * mix(1.08, 2.75, iD);
+            vec3 warm = uColor * mix(1.02, 1.1, 0.2 + 0.8 * iD);
+            outColor = mix(mix(uColor, warm, clamp(co, 0.0, 1.0)), hot, tc0 * tc0 * (0.04 + 0.24 * iD));
             float rimKeep = pow(max(0.0, 1.0 - dist), 0.48);
-            animAlphaMul *= clamp(0.4 + 0.55 * rimKeep, 0.42, 1.0);
+            float rimFloor = mix(0.58, 0.42, iD);
+            animAlphaMul *= clamp(0.4 + 0.55 * rimKeep, rimFloor, 1.0);
   `
 
   ,

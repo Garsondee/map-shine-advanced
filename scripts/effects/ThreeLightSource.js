@@ -517,6 +517,9 @@ export class ThreeLightSource {
 
           if (r >= 1.0) discard;
 
+          // Animation intensity 1..10 → 0..1 (5 ≈ comfortable midpoint for fire tuning).
+          float iAnimDrive = clamp((clamp(uAnimIntensity, 0.0, 10.0) - 1.0) / 9.0, 0.0, 1.0);
+
           // 20 = torch, 21 = flame - both are fire lights: tight screen-space core, not the full dim disk.
           float isTorch = step(19.5, uAnimType) * (1.0 - step(20.5, uAnimType));
           float isFlame = step(20.5, uAnimType) * (1.0 - step(21.5, uAnimType));
@@ -531,19 +534,19 @@ export class ThreeLightSource {
 
           // Torch (20) + flame (21): wind-warped ember + dim disk (local warp on p only; vUvs/cookies unchanged).
           if (isFireCore > 0.5) {
-            // Keep a perceptibly small fire core around intensity=1.0, then
-            // grow the core area as authored intensity increases.
-            float ai = clamp(uAnimIntensity * 0.1, 0.02, 1.0);
-            float coreGrowth = smoothstep(1.0, 10.0, clamp(uAnimIntensity, 0.0, 10.0));
+            float fireChaosAmt = smoothstep(0.03, 0.92, iAnimDrive);
+            float ai = mix(0.03, 1.0, pow(iAnimDrive, 0.78));
+            float coreGrowth = smoothstep(0.0, 1.0, iAnimDrive);
             float brPx = max(uBrightRadius, 1.5);
             float uRad = max(uRadius, 1.0);
 
-            float wTime = uTime * (6.0 + ai * 8.0);
+            float wTime = uTime * mix(2.4, 14.0, pow(iAnimDrive, 0.85));
             float seedK = fract(uSeed * 0.001 + 0.37) * 200.0;
             vec2 whipOffset = vec2(
               noise2(vec2(wTime * 0.8, seedK + 1.7)) * 2.0 - 1.0,
               noise2(vec2(wTime * 0.9 + 17.4, seedK + 43.1)) * 2.0 - 1.0
             );
+            whipOffset *= mix(0.22, 1.0, fireChaosAmt);
             // ~10x subtler than original whip so the core stays near center (avoids LOS circle clip / hard edge).
             vec2 fireP = p + whipOffset * (brPx * (0.02 + ai * 0.05));
             float lenFp = length(fireP);
@@ -552,14 +555,14 @@ export class ThreeLightSource {
             float aWarp = dot(fdir, vec2(0.882, -0.472)) * 6.5 + dot(fdir, vec2(0.415, 0.910)) * 4.3;
             float edgeNoise = 0.5 * noise2(vec2(aWarp, wTime * 1.2))
               + 0.5 * noise2(vec2(aWarp * 1.37 + 2.1, wTime * 1.08 + 1.7));
-            float distMod = 1.0 - (edgeNoise * (0.03 + ai * 0.04));
+            float distMod = 1.0 - (edgeNoise * (0.03 + ai * 0.04) * mix(0.3, 1.0, fireChaosAmt));
             float fireDistPx = lenFp * distMod;
 
             float ballPx = mix(1.35, 3.4, coreGrowth) + brPx * mix(0.015, 0.26, coreGrowth);
             ballPx = min(ballPx, mix(11.0, 32.0, coreGrowth));
             ballPx *= mix(1.0, 1.18, isFlame);
-            ballPx *= 1.75 * 1.5;
-            float fallPow = mix(12.0, 8.0, isFlame);
+            ballPx *= 1.75 * 1.5 * mix(0.68, 1.08, iAnimDrive);
+            float fallPow = mix(12.0, 8.0, isFlame) + mix(2.4, 0.0, iAnimDrive);
             float t = fireDistPx / max(ballPx, 0.5);
             float ember = pow(max(0.0, 1.0 - t), fallPow);
 
@@ -599,7 +602,7 @@ export class ThreeLightSource {
             float sideGate = pow(sideCore, bpSide);
             float chaosPre = clamp(burst * 0.82 + sideGate * 0.36, 0.0, 1.0);
             float chop = 0.5 + 0.5 * (0.5 + 0.5 * sin(clkSlow * 0.025 + ph3 * 1.1)) * (0.5 + 0.5 * sin(clkEnv * 0.029 + ph1 * 1.5)) * (0.5 + 0.5 * sin(clkEnv * 0.015 + ph2 * 0.88));
-            float chaosMix = clamp(chaosPre * chop, 0.0, 1.0) * 0.52;
+            float chaosMix = clamp(chaosPre * chop, 0.0, 1.0) * 0.52 * fireChaosAmt;
 
             float clkEff = clkSlow * mix(1.0, 4.15, chaosMix);
 
@@ -623,9 +626,11 @@ export class ThreeLightSource {
             float shimB = sin(clkEff * mix(0.33, 0.9, chaosMix) + ph4 * 1.05 + 0.45 * sin(clkEnv * 0.12 + ph5));
             flickMul *= mix(1.0, 0.94 + 0.11 * shimA * shimB, 0.48 + 0.52 * chaosMix);
             flickMul = clamp(flickMul, 0.1, 1.52);
+            float flickStable = mix(1.0, flickMul, fireChaosAmt);
 
+            float fireRadialMul = mix(0.68, 2.0, pow(iAnimDrive, 1.02));
             float radialBase = ember + disk * 0.52;
-            intensity = radialBase * 1.95 * flickMul;
+            intensity = radialBase * fireRadialMul * flickStable;
           } else {
             // 1. OUTER CIRCLE (Dim Radius)
             float outerStart = 1.0 - softness;
@@ -767,8 +772,8 @@ export class ThreeLightSource {
 
           float fairyBoost = (uAnimType > 1.5 && uAnimType < 2.5) ? 3.0 : 1.0;
           alphaBase *= fairyBoost;
-          // Torch + flame: intensity path already boosts ember; keep alpha punch modest.
-          alphaBase *= mix(1.0, 1.75, isFireCore);
+          // Torch + flame: extra punch scales up with animation intensity (low at 1, full at 10).
+          alphaBase *= mix(1.0, 1.75, isFireCore * iAnimDrive);
 
           // Apply Foundry-like luminosity as a direct strength control.
           // This ensures low luminosity visibly reduces emitted light.
@@ -795,9 +800,9 @@ export class ThreeLightSource {
           // but do not multiply by luminosity so "color-only" lights remain visible.
           rgbOut *= alphaBase;
           if (isFireCore > 0.5) {
-            float hot = 7.1 + 2.4 * clamp(uAnimIntensity * 0.1, 0.0, 1.0);
+            float hotHi = mix(1.05, 3.35, pow(iAnimDrive, 1.04));
             vec3 fire = vec3(1.0, 0.52, 0.14);
-            rgbOut = mix(rgbOut * hot, rgbOut * fire * hot * 0.42, 0.38);
+            rgbOut = mix(rgbOut * hotHi, rgbOut * fire * hotHi * 0.42, mix(0.22, 0.38, iAnimDrive));
           }
 
           // Additive Output
@@ -1053,10 +1058,11 @@ export class ThreeLightSource {
       this.mesh.position.set(worldPos.x, worldPos.y, lightZ);
     }
 
-    // Respect Foundry's hidden flag so toggling a light off in the UI removes
-    // it from the light accumulation buffer immediately.
-    if (this.mesh) {
-      this.mesh.visible = (doc.hidden !== true);
+    // Hidden: force off immediately. Non-hidden: do not set visible=true here —
+    // LightingEffectV2 applies level/perspective gating each frame after updateAnimation;
+    // forcing visible would wipe multi-floor visibility whenever updateData runs (inset/zoom, hooks).
+    if (this.mesh && doc.hidden === true) {
+      this.mesh.visible = false;
     }
 
     this._lastDocX = docX;
@@ -1481,12 +1487,16 @@ export class ThreeLightSource {
     noiseScale: noiseScaleOverride,
     windGusts = true,
   } = {}) {
-    const intNorm = this._clamp(intensity, 0, 10) / 10;
-    const amplification = 0.05 + intNorm * 1.95;
-    const ratioOscillationScale = 0.15 + intNorm * 1.85;
+    const i = this._clamp(intensity, 0, 10);
+    const intNorm = i / 10;
+    // Match shader iAnimDrive: animation 1→10 maps to 0→1 (5 ≈ mid).
+    const iDrive = Math.max(0, Math.min(1, (i - 1) / 9));
+    const ampCurve = intNorm * intNorm;
+    const amplification = 0.018 + ampCurve * 1.55;
+    const ratioOscillationScale = 0.04 + ampCurve * 1.65;
     const noiseScale = Number.isFinite(noiseScaleOverride)
       ? noiseScaleOverride
-      : (0.28 + intNorm * 0.55);
+      : (0.38 + intNorm * 0.52);
 
     const res = this.animateFlickering(tMs, {
       speed,
@@ -1503,7 +1513,8 @@ export class ThreeLightSource {
 
     const tSec = this.animation.time;
     const windStutter = Math.sin(tSec * 19.3) * Math.sin(tSec * 31.7 + 2.1) * Math.cos(tSec * 7.1);
-    let gustMul = 1.0 + (windStutter * 0.85 * intNorm);
+    const gustWeight = iDrive * iDrive;
+    let gustMul = 1.0 + (windStutter * 0.85 * gustWeight);
     if (windStutter < -0.4) {
       gustMul *= 0.45;
     }
@@ -2188,7 +2199,10 @@ export class ThreeLightSource {
     if (type === 'torch') {
       const { brightnessPulse } = this.animateTorch(tMs, { speed, intensity, reverse });
       // Main beat is in the fragment shader; uIntensity follows SmoothNoise — ease jumps at cell boundaries.
-      const target = Math.max(0.62, Math.min(1.28, brightnessPulse));
+      const iDr = Math.max(0, Math.min(1, (this._clamp(intensity, 0, 10) - 1) / 9));
+      const minPulse = 0.88 - 0.26 * iDr;
+      const maxPulse = 1.05 + 0.23 * iDr;
+      const target = Math.max(minPulse, Math.min(maxPulse, brightnessPulse));
       if (typeof this._fireBrightnessSmoothed !== 'number' || !Number.isFinite(this._fireBrightnessSmoothed)) {
         this._fireBrightnessSmoothed = target;
       } else {
@@ -2216,7 +2230,10 @@ export class ThreeLightSource {
     } else if (type === 'flame') {
       // Match torch: flicker on uIntensity only; keep authored bright/dim radii (no full-disk “breathing”).
       const { brightnessPulse } = this.animateTorch(tMs, { speed, intensity, reverse });
-      const target = Math.max(0.62, Math.min(1.28, brightnessPulse));
+      const iDr = Math.max(0, Math.min(1, (this._clamp(intensity, 0, 10) - 1) / 9));
+      const minPulse = 0.88 - 0.26 * iDr;
+      const maxPulse = 1.05 + 0.23 * iDr;
+      const target = Math.max(minPulse, Math.min(maxPulse, brightnessPulse));
       if (typeof this._fireBrightnessSmoothed !== 'number' || !Number.isFinite(this._fireBrightnessSmoothed)) {
         this._fireBrightnessSmoothed = target;
       } else {

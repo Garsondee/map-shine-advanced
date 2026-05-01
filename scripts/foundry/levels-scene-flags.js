@@ -763,6 +763,282 @@ export function readDocLevelsRange(doc) {
   return { rangeBottom, rangeTop };
 }
 
+/** Matches {@link foundry.documents.BaseScene.metadata.defaultLevelId} — embedded SetField value before real Level ids. */
+const FOUNDRY_SCENE_DEFAULT_LEVEL_PLACEHOLDER_ID = 'defaultLevel0000';
+
+/**
+ * Expand Foundry placeholder level ids on AmbientLight docs to real Level document ids.
+ * Lights may still store `defaultLevel0000` while `scene.levels` uses UUIDs.
+ *
+ * Multi-level scenes: `SceneDocument#initialLevel` is the configured “entry” level (often
+ * ground), while `scene.levels.sorted[0]` is the **bottom** of the elevation stack in V14
+ * (often a basement added before the placeholder was migrated). Ambiguous legacy lights
+ * must match **either** so basement lights remain visible when `initialLevel` points elsewhere.
+ *
+ * @param {object|null|undefined} scene - Foundry Scene document (`canvas.scene`)
+ * @param {string[]} ids - Collected level id strings from the light document
+ * @returns {string[]}
+ */
+function expandFoundryDefaultLevelPlaceholderIds(scene, ids) {
+  if (!Array.isArray(ids) || ids.length === 0) return ids ?? [];
+  const out = [];
+  const seen = new Set();
+  const pushResolved = (rid) => {
+    if (rid == null) return;
+    const rs = String(rid).trim();
+    if (!rs || seen.has(rs)) return;
+    out.push(rs);
+    seen.add(rs);
+  };
+  for (const raw of ids) {
+    const s = String(raw ?? '').trim();
+    if (!s) continue;
+    if (!seen.has(s)) {
+      out.push(s);
+      seen.add(s);
+    }
+    if (s !== FOUNDRY_SCENE_DEFAULT_LEVEL_PLACEHOLDER_ID) continue;
+    try {
+      const il = scene?.initialLevel;
+      pushResolved(il?.id ?? il?._id);
+    } catch (_) {}
+    try {
+      const sortedLevels = scene?.levels?.sorted;
+      if (sortedLevels?.length) {
+        const bottom = sortedLevels[0];
+        pushResolved(bottom?.id ?? bottom?._id);
+      }
+    } catch (_) {}
+  }
+  return out;
+}
+
+/**
+ * V14 level resolution for AmbientLight: whether the light applies to the current
+ * view, and whether legacy elevation LOS masking should be skipped.
+ *
+ * When the light explicitly lists level ids (`doc.levels`, etc.) and one matches the
+ * navigated/viewed level, `skipLegacyLosMasking` is true — Foundry scopes the light by
+ * level, while `doc.elevation` / flags.rangeBottom may still be the legacy default (e.g.
+ * 0). Applying `rangeBottom <= viewerLOS` after a level match would hide basement lights
+ * for viewers with no token (perspective = active level center below ground).
+ *
+ * @param {object|null|undefined} doc - AmbientLight document or plain object
+ * @param {object|null|undefined} scene - Foundry Scene document
+ * @returns {{ ok: boolean, skipLegacyLosMasking: boolean }}
+ */
+export function getAmbientLightLevelGate(doc, scene) {
+  const sorted = scene?.levels?.sorted;
+  if (!Array.isArray(sorted) || sorted.length <= 1) {
+    return { ok: true, skipLegacyLosMasking: false };
+  }
+  if (!doc) return { ok: true, skipLegacyLosMasking: false };
+
+  const msCtx = (typeof window !== 'undefined' && window.MapShine?.activeLevelContext) || null;
+
+  let levelIndex = Number(msCtx?.index);
+  if (!Number.isFinite(levelIndex)) levelIndex = null;
+
+  let Lv = (levelIndex != null && levelIndex >= 0 && levelIndex < sorted.length)
+    ? sorted[levelIndex]
+    : null;
+
+  const ctxLevelId = msCtx?.levelId ?? null;
+  let canvasLevelId = null;
+  try {
+    if (typeof globalThis !== 'undefined'
+      && globalThis.canvas?.scene?.id === scene?.id) {
+      canvasLevelId = globalThis.canvas?.level?.id ?? null;
+    }
+  } catch (_) {}
+
+  const primaryId = ctxLevelId || canvasLevelId;
+
+  if (!Lv && primaryId) {
+    const idx = sorted.findIndex((l) => l?.id === primaryId || l?._id === primaryId);
+    if (idx >= 0) {
+      levelIndex = idx;
+      Lv = sorted[idx];
+    }
+  }
+
+  if (!Lv) {
+    const viewed = getViewedV14Level(scene);
+    if (viewed?.levelId) {
+      const idx = sorted.findIndex((l) => l?.id === viewed.levelId || l?._id === viewed.levelId);
+      if (idx >= 0) {
+        levelIndex = idx;
+        Lv = sorted[idx];
+      } else if (Number.isFinite(viewed.index)) {
+        levelIndex = viewed.index;
+        Lv = sorted[levelIndex] ?? null;
+      }
+    }
+  }
+
+  if (!Lv) return { ok: true, skipLegacyLosMasking: false };
+
+  const safeIdx = Number.isFinite(levelIndex) ? levelIndex : sorted.indexOf(Lv);
+  const idxForNext = safeIdx >= 0 ? safeIdx : 0;
+
+  const levelIdsTarget = new Set(
+    [
+      Lv?.id,
+      Lv?._id,
+      Lv?.uuid,
+      Lv?.document?.id,
+      Lv?.document?._id,
+      Lv?.document?.uuid,
+      safeIdx >= 0 ? safeIdx : null,
+    ]
+      .map((v) => (v == null ? '' : String(v).trim()))
+      .filter(Boolean),
+  );
+
+  const readFinite = (v) => {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  };
+  const readBandBottom = (level) =>
+    readFinite(
+      level?.elevation?.bottom
+      ?? (typeof level?.elevation === 'number' ? level.elevation : null)
+      ?? level?.rangeBottom
+      ?? level?.document?.elevation
+      ?? level?.document?.rangeBottom
+      ?? level?.document?.flags?.levels?.rangeBottom,
+    );
+  const readBandTop = (level, nextLevel) =>
+    readFinite(
+      level?.elevation?.top
+      ?? level?.rangeTop
+      ?? level?.top
+      ?? level?.document?.rangeTop
+      ?? level?.document?.top
+      ?? level?.document?.flags?.levels?.rangeTop
+      ?? readBandBottom(nextLevel),
+    );
+  const levelBottom = readBandBottom(Lv);
+  const levelTop = readBandTop(Lv, sorted[idxForNext + 1]);
+
+  const cfg = doc?.config && typeof doc.config === 'object' ? doc.config : {};
+  const levelsSources = [
+    doc.levels,
+    doc?.light?.levels,
+    doc?.document?.light?.levels,
+    cfg.levels,
+    cfg?.light?.levels,
+    doc?.flags?.levels?.levels,
+    doc?.flags?.levels?.inclusive,
+  ];
+  /** @type {string[]} */
+  const arr = [];
+  const pushId = (raw) => {
+    if (raw == null) return;
+    if (typeof raw === 'string' || typeof raw === 'number') {
+      const s = String(raw).trim();
+      if (s) arr.push(s);
+      return;
+    }
+    if (typeof raw === 'object') {
+      const id =
+        raw?.id
+        ?? raw?._id
+        ?? raw?.document?.id
+        ?? raw?.document?._id
+        ?? null;
+      if (id != null) {
+        const s = String(id).trim();
+        if (s) arr.push(s);
+      }
+    }
+  };
+  const pushFromShape = (src) => {
+    if (!src) return;
+    if (Array.isArray(src)) {
+      for (const v of src) pushFromShape(v);
+      return;
+    }
+    if (typeof src === 'string' || typeof src === 'number') {
+      pushId(src);
+      return;
+    }
+    if (src instanceof Set) {
+      for (const v of src.values()) pushFromShape(v);
+      return;
+    }
+    if (src instanceof Map) {
+      for (const [k, v] of src.entries()) {
+        pushFromShape(k);
+        if (v === true || v === 1 || v === '1') pushFromShape(k);
+        else pushFromShape(v);
+      }
+      return;
+    }
+    if (typeof src.forEach === 'function') {
+      src.forEach((v) => pushFromShape(v));
+      return;
+    }
+    if (typeof src === 'object') {
+      for (const [k, v] of Object.entries(src)) {
+        if (v === true || v === 1 || v === '1') pushId(k);
+      }
+      pushId(src);
+    }
+  };
+  try {
+    for (const src of levelsSources) {
+      if (!src) continue;
+      pushFromShape(src);
+    }
+  } catch (_) {}
+
+  // Lights may list only `defaultLevel0000` (Scene.metadata.defaultLevelId) after migration from
+  // single-level scenes. Expanding that to initialLevel + sorted[0] breaks as soon as the user
+  // changes the scene default or views another floor — those ids are not "every legacy level".
+  // Until authors pick real Level UUIDs in the light config, treat placeholder-only as unscoped.
+  const trimmedLevelIds = arr.map((s) => String(s ?? '').trim()).filter(Boolean);
+  const placeholderOnly = trimmedLevelIds.length > 0
+    && trimmedLevelIds.every((s) => s === FOUNDRY_SCENE_DEFAULT_LEVEL_PLACEHOLDER_ID);
+  if (placeholderOnly) {
+    return { ok: true, skipLegacyLosMasking: true };
+  }
+
+  const arrForMatch = expandFoundryDefaultLevelPlaceholderIds(scene, arr);
+
+  if (arrForMatch.length > 0 && levelIdsTarget.size > 0) {
+    for (const id of arrForMatch) {
+      if (levelIdsTarget.has(String(id))) {
+        return { ok: true, skipLegacyLosMasking: true };
+      }
+    }
+    return { ok: false, skipLegacyLosMasking: false };
+  }
+
+  const lightBottom = readFinite(doc?.elevation ?? doc?.flags?.levels?.rangeBottom);
+  const lightTop = readFinite(doc?.flags?.levels?.rangeTop);
+  if (lightBottom == null && lightTop == null) {
+    return { ok: true, skipLegacyLosMasking: false };
+  }
+
+  const targetBottom = levelBottom ?? -Infinity;
+  const targetTop = levelTop ?? Infinity;
+  const sourceBottom = lightBottom ?? -Infinity;
+  const sourceTop = lightTop ?? Infinity;
+  const overlap = sourceBottom < targetTop && sourceTop >= targetBottom;
+  return { ok: overlap, skipLegacyLosMasking: false };
+}
+
+/**
+ * Whether an AmbientLight should contribute for the currently viewed / navigated level.
+ * @param {object|null|undefined} doc
+ * @param {object|null|undefined} scene
+ * @returns {boolean}
+ */
+export function ambientLightVisibleForCurrentView(doc, scene) {
+  return getAmbientLightLevelGate(doc, scene).ok;
+}
+
 // ---------------------------------------------------------------------------
 //  Wall-height flag readers (MS-LVL-014)
 // ---------------------------------------------------------------------------

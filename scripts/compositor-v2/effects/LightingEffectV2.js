@@ -850,14 +850,79 @@ export class LightingEffectV2 {
     this._registerHook('updateAmbientLight', (doc, changes) => this._onLightUpdate(doc, changes));
     this._registerHook('deleteAmbientLight', (doc) => this._onLightDelete(doc));
     this._registerHook('updateScene', (scene, changes) => this._onSceneUpdate(scene, changes));
-    this._registerHook('mapShineLevelContextChanged', () => this._markPerspectiveRefreshDirty());
-    this._registerHook('lightingRefresh', () => this._markPerspectiveRefreshDirty());
+    this._registerHook('mapShineLevelContextChanged', () => {
+      this._reconcileMissingEmbeddedLights();
+      this._markPerspectiveRefreshDirty();
+    });
+    this._registerHook('lightingRefresh', () => {
+      this._reconcileMissingEmbeddedLights();
+      this._markPerspectiveRefreshDirty();
+    });
 
     this._initialized = true;
     log.info(`LightingEffectV2 initialized (${w}x${h})`);
   }
 
   // ── Light sync ────────────────────────────────────────────────────────
+
+  /**
+   * All embedded AmbientLight documents on the scene (every level), not the lighting
+   * layer's placeables (V14 often only materializes placeables for the viewed level).
+   * @private
+   * @returns {object[]}
+   */
+  _collectAllEmbeddedAmbientLightDocs() {
+    /** @type {object[]} */
+    const out = [];
+    try {
+      const col = canvas?.scene?.lights;
+      if (!col) return out;
+      const size = col.size ?? 0;
+      if (!(size > 0)) return out;
+      if (Array.isArray(col.contents)) {
+        for (const d of col.contents) {
+          if (d) out.push(d);
+        }
+      } else if (typeof col.forEach === 'function') {
+        col.forEach((d) => {
+          if (d) out.push(d);
+        });
+      } else {
+        out.push(...Array.from(col.values()));
+      }
+    } catch (_) {}
+    return out;
+  }
+
+  /**
+   * Add any scene embedded lights missing from `_lights` (e.g. after a level change when
+   * `canvas.lighting.placeables` only listed the starting level).
+   * @private
+   */
+  _reconcileMissingEmbeddedLights() {
+    if (!this._initialized || !this._lightsSynced) return;
+    const docs = this._collectAllEmbeddedAmbientLightDocs();
+    if (!docs.length) return;
+    const enhancementMap = this._getLightEnhancementConfigMap();
+    let added = 0;
+    for (const doc of docs) {
+      const id = doc?.id ?? doc?._id;
+      if (id == null) continue;
+      const isNegative = doc?.config?.negative === true || doc?.negative === true;
+      if (isNegative) {
+        if (!this._darknessSources.has(id)) {
+          this._addLightFromDoc(doc, enhancementMap);
+          added += 1;
+        }
+      } else if (!this._lights.has(id)) {
+        this._addLightFromDoc(doc, enhancementMap);
+        added += 1;
+      }
+    }
+    if (added > 0) {
+      log.info(`LightingEffectV2: reconciled ${added} embedded light(s) missing from V2 maps`);
+    }
+  }
 
   /**
    * Full sync of all Foundry light sources. Call once after canvas is ready.
@@ -878,19 +943,14 @@ export class LightingEffectV2 {
     }
     this._darknessSources.clear();
 
-    // Read Foundry placeables
-    let docs = [];
-    try {
-      const placeables = canvas?.lighting?.placeables;
-      if (placeables && placeables.length > 0) {
-        docs = placeables.map(p => p.document).filter(Boolean);
-      }
-    } catch (_) {}
+    // Prefer embedded collection: includes every AmbientLight on the scene for all levels.
+    // `canvas.lighting.placeables` is only objects on the PIXI layer (often current level only).
+    let docs = this._collectAllEmbeddedAmbientLightDocs();
     if (docs.length === 0) {
       try {
-        const lightDocs = canvas?.scene?.lights;
-        if (lightDocs && lightDocs.size > 0) {
-          docs = Array.from(lightDocs.values());
+        const placeables = canvas?.lighting?.placeables;
+        if (placeables && placeables.length > 0) {
+          docs = placeables.map((p) => p.document).filter(Boolean);
         }
       } catch (_) {}
     }
@@ -907,6 +967,24 @@ export class LightingEffectV2 {
   }
 
   /**
+   * Prefer the live embedded AmbientLight document from the scene collection so
+   * level membership / flags match Foundry after navigation (avoids stale refs on ThreeLightSource).
+   * @private
+   * @param {ThreeLightSource|ThreeDarknessSource} source
+   * @returns {object|null|undefined}
+   */
+  _liveAmbientDocForGating(source) {
+    const lightsCollection = canvas?.scene?.lights;
+    const id = source?.id ?? source?.document?.id;
+    if (!lightsCollection || id == null) return source?.document ?? null;
+    try {
+      return lightsCollection.get?.(id) ?? lightsCollection.get?.(String(id)) ?? source?.document ?? null;
+    } catch (_) {
+      return source?.document ?? null;
+    }
+  }
+
+  /**
    * Toggle Three.js light/darkness mesh visibility from Levels elevation rules
    * (`isLightVisibleForPerspective`). Uses live `canvas.scene.lights` docs when
    * available so token/level changes apply without a full resync.
@@ -914,32 +992,17 @@ export class LightingEffectV2 {
    */
   _refreshLightsForLevelsPerspective() {
     if (!this._initialized) return;
-    const lightsCollection = canvas?.scene?.lights;
     const sceneDarkness = readFoundryDarkness01();
 
     for (const light of this._lights.values()) {
       if (!light?.mesh) continue;
-      let doc = light.document;
-      try {
-        const id = light.id ?? light.document?.id;
-        if (lightsCollection && id != null) {
-          const live = lightsCollection.get?.(id) ?? lightsCollection.get?.(String(id));
-          if (live) doc = live;
-        }
-      } catch (_) {}
+      const doc = this._liveAmbientDocForGating(light);
       light.mesh.visible = this._isDocVisibleForLighting(doc, sceneDarkness);
     }
 
     for (const ds of this._darknessSources.values()) {
       if (!ds?.mesh) continue;
-      let doc = ds.document;
-      try {
-        const id = ds.id ?? ds.document?.id;
-        if (lightsCollection && id != null) {
-          const live = lightsCollection.get?.(id) ?? lightsCollection.get?.(String(id));
-          if (live) doc = live;
-        }
-      } catch (_) {}
+      const doc = this._liveAmbientDocForGating(ds);
       ds.mesh.visible = this._isDocVisibleForLighting(doc, sceneDarkness);
     }
   }
@@ -1226,20 +1289,26 @@ export class LightingEffectV2 {
     const tSec = (timeInfo && typeof timeInfo.elapsed === 'number') ? timeInfo.elapsed : 0;
     for (const light of this._lights.values()) {
       try {
-        if (light?.mesh) {
-          light.mesh.visible = this._isDocVisibleForLighting(light?.document, foundrySceneDarkness);
+        if (!this._shouldDecimateAnimationUpdate(light, tSec)) {
+          light.updateAnimation(timeInfo, sceneDarkness);
         }
-        if (this._shouldDecimateAnimationUpdate(light, tSec)) continue;
-        light.updateAnimation(timeInfo, sceneDarkness);
+        // After animation/updateData: re-apply level/perspective + darkness range using the
+        // live scene document (ThreeLightSource.updateData no longer forces visible=true).
+        if (light?.mesh) {
+          const doc = this._liveAmbientDocForGating(light);
+          light.mesh.visible = this._isDocVisibleForLighting(doc, foundrySceneDarkness);
+        }
       } catch (_) {}
     }
     for (const ds of this._darknessSources.values()) {
       try {
-        if (ds?.mesh) {
-          ds.mesh.visible = this._isDocVisibleForLighting(ds?.document, foundrySceneDarkness);
+        if (!this._shouldDecimateAnimationUpdate(ds, tSec)) {
+          ds.updateAnimation(timeInfo);
         }
-        if (this._shouldDecimateAnimationUpdate(ds, tSec)) continue;
-        ds.updateAnimation(timeInfo);
+        if (ds?.mesh) {
+          const doc = this._liveAmbientDocForGating(ds);
+          ds.mesh.visible = this._isDocVisibleForLighting(doc, foundrySceneDarkness);
+        }
       } catch (_) {}
     }
 
@@ -1379,6 +1448,9 @@ export class LightingEffectV2 {
       cu0.uApplyRoofOcclusionToBuilding.value = 1.0;
     }
 
+    // FloorCompositor may invoke render() once per visible level per frame; an earlier pass
+    // clears _perspectiveRefreshDirty so later passes must not skip visibility refresh.
+    this._markPerspectiveRefreshDirty();
     this._refreshLightsForLevelsPerspectiveIfNeeded(
       (typeof performance !== 'undefined' && typeof performance.now === 'function')
         ? (performance.now() / 1000)

@@ -17,6 +17,7 @@
  */
 
 import { PrecipitationType, weatherController as coreWeatherController } from '../core/WeatherController.js';
+import { refreshMsaSameSceneRedrawPredict } from '../utils/msa-local-flag-guard.js';
 
 /** @type {ReadonlySet<string>} */
 export const MANUAL_WEATHER_PARAM_IDS = new Set([
@@ -206,6 +207,9 @@ export function applyWeatherManualParam(wc, paramId, value, options = {}) {
   if (!st || !cur) return false;
 
   const syncUi = options.syncMainTweakpane !== false;
+
+  // Same-scene flag persist is debounced; Foundry may redraw before tearDown skip guards refresh.
+  refreshMsaSameSceneRedrawPredict();
 
   const clamp01 = (v) => {
     const n = Number(v);

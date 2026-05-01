@@ -77,6 +77,34 @@ export function isTileOverhead(tileDoc) {
   return elev >= foregroundElevation;
 }
 
+/**
+ * Geometric center of a Foundry tile in canvas pixels (origin top-left, Y down).
+ * v14+ uses `document.shape`: (x,y) is the texture anchor and anchorX/anchorY
+ * are normalized; Map Shine THREE sprites are drawn centered on position, so the
+ * center must include the (0.5 - anchor) offset, rotated like Foundry's mesh.
+ *
+ * @param {object} tileDoc
+ * @returns {{ cx: number, cy: number }}
+ */
+export function getTileVisualCenterFoundryXY(tileDoc) {
+  const shape = tileDoc?.shape && typeof tileDoc.shape === 'object' ? tileDoc.shape : null;
+  const sx = Number(shape?.x ?? tileDoc?.x) || 0;
+  const sy = Number(shape?.y ?? tileDoc?.y) || 0;
+  const w = Number(shape?.width ?? tileDoc?.width) || 0;
+  const h = Number(shape?.height ?? tileDoc?.height) || 0;
+  const ax = Number(shape?.anchorX ?? 0);
+  const ay = Number(shape?.anchorY ?? 0);
+  const vx = (0.5 - ax) * w;
+  const vy = (0.5 - ay) * h;
+  const rotDeg = Number(shape?.rotation ?? tileDoc?.rotation) || 0;
+  const rad = (rotDeg * Math.PI) / 180;
+  const c = Math.cos(rad);
+  const s = Math.sin(rad);
+  const rx = vx * c - vy * s;
+  const ry = vx * s + vy * c;
+  return { cx: sx + rx, cy: sy + ry };
+}
+
 function hasFiniteActiveLevelBand(context) {
   return Number.isFinite(Number(context?.bottom)) && Number.isFinite(Number(context?.top));
 }
@@ -677,9 +705,8 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     const foundryX = worldX;
     const foundryY = sceneHeight - worldY;
 
-    // Convert to tile local space (account for rotation around center)
-    const centerX = tileDoc.x + width / 2;
-    const centerY = tileDoc.y + height / 2;
+    // Convert to tile local space (rotation around visual center = sprite center)
+    const { cx: centerX, cy: centerY } = getTileVisualCenterFoundryXY(tileDoc);
     const dx = foundryX - centerX;
     const dy = foundryY - centerY;
 
@@ -2357,9 +2384,8 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     const foundryX = worldX;
     const foundryY = sceneHeight - worldY;
 
-    // Convert to tile local space (account for rotation around center)
-    const centerX = tileDoc.x + width / 2;
-    const centerY = tileDoc.y + height / 2;
+    // Convert to tile local space (rotation around visual center = sprite center)
+    const { cx: centerX, cy: centerY } = getTileVisualCenterFoundryXY(tileDoc);
     const dx = foundryX - centerX;
     const dy = foundryY - centerY;
 
@@ -2716,8 +2742,9 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
             const sceneY = d?.sceneRect?.y ?? d?.sceneY ?? 0;
             const sceneW = d?.sceneRect?.width ?? d?.sceneWidth ?? d?.width ?? 10000;
             const sceneH = d?.sceneRect?.height ?? d?.sceneHeight ?? d?.height ?? 10000;
-            const u = (tileDoc.x + tileDoc.width / 2 - sceneX) / sceneW;
-            const v = (tileDoc.y + tileDoc.height / 2 - sceneY) / sceneH;
+            const { cx: tcX, cy: tcY } = getTileVisualCenterFoundryXY(tileDoc);
+            const u = (tcX - sceneX) / sceneW;
+            const v = (tcY - sceneY) / sceneH;
             const interiorMul = this._interiorDarknessOverheadScalar(u, v, idim);
             if (interiorMul < 0.999) {
               if (!this._tempOverheadTint) this._tempOverheadTint = new THREE.Color(1, 1, 1);
@@ -2751,11 +2778,18 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
         // TODO: Improve this to use proper SAT or pixel check for rotated tiles
         // For now, simple bounding box of the sprite
         
-        // Get tile bounds in world space
-        const left = tileDoc.x;
-        const right = tileDoc.x + tileDoc.width;
-        const top = tileDoc.y;
-        const bottom = tileDoc.y + tileDoc.height;
+        // Unrotated AABB from shape anchor (matches Foundry mesh footprint when rotation = 0).
+        const shapeOccl = tileDoc?.shape && typeof tileDoc.shape === 'object' ? tileDoc.shape : null;
+        const ox = Number(shapeOccl?.x ?? tileDoc?.x) || 0;
+        const oy = Number(shapeOccl?.y ?? tileDoc?.y) || 0;
+        const ow = Number(shapeOccl?.width ?? tileDoc?.width) || 0;
+        const oh = Number(shapeOccl?.height ?? tileDoc?.height) || 0;
+        const oax = Number(shapeOccl?.anchorX ?? 0);
+        const oay = Number(shapeOccl?.anchorY ?? 0);
+        const left = ox - oax * ow;
+        const top = oy - oay * oh;
+        const right = left + ow;
+        const bottom = top + oh;
 
         for (const token of sources) {
           // Token center
@@ -2897,8 +2931,7 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
       if (!baseColor) continue;
 
       // Calculate tile center UV in scene space
-      const tileCenterX = tileDoc.x + tileDoc.width / 2;
-      const tileCenterY = tileDoc.y + tileDoc.height / 2;
+      const { cx: tileCenterX, cy: tileCenterY } = getTileVisualCenterFoundryXY(tileDoc);
       const u = (tileCenterX - sceneX) / sceneW;
       const v = (tileCenterY - sceneY) / sceneH;
 
@@ -4045,9 +4078,7 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     const dispW = width * Math.abs(scaleX || 1);
     const dispH = height * Math.abs(scaleY || 1);
     
-    // Center of tile in Foundry coords
-    const centerX = tileDoc.x + width / 2;
-    const centerY = tileDoc.y + height / 2; // Foundry Y (0 at top)
+    const { cx: centerX, cy: centerY } = getTileVisualCenterFoundryXY(tileDoc);
     
     // Convert to THREE World Coords (Y inverted)
     const sceneHeight = canvas.dimensions?.height || 10000;

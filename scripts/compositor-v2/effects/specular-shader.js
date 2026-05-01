@@ -21,6 +21,7 @@
  *   - Dynamic light falloff and color tinting
  *   - Building shadow suppression
  *   - Wind-driven ripple on wet surfaces
+ *   - Outdoor-only stripe scroll (manual layer speeds + wind drift along wind direction)
  *   - Reinhard-Jodie tone mapping
  *   - World-space pattern coordinates
  *
@@ -200,6 +201,9 @@ export function getFragmentShader(maxLights = 64) {
     varying vec2 vUv;
     varying vec3 vWorldPosition;
 
+    // Drift speed for wind-driven specular stripe UV (full wind vs legacy uWindAccum damping).
+    const float kWindStripeScrollMul = 4.0;
+
     // ── Noise helpers ─────────────────────────────────────────────────────────
 
     float noise1D(float p) {
@@ -285,11 +289,14 @@ export function getFragmentShader(maxLights = 64) {
       float parallaxStrength,
       float wave,
       float gaps,
-      float softness
+      float softness,
+      float outdoorWeight
     ) {
+      // Stripe motion (scroll / pulse / wave phase) only where _Outdoors mask reads outdoor.
+      float ow = clamp(outdoorWeight, 0.0, 1.0);
       // Freeze animation when speed is effectively zero.
-      float timeAnim = (abs(speed) > 0.000001) ? time : 0.0;
-      float speedAnimScale = clamp(abs(speed) / 0.01, 0.0, 10.0);
+      float timeAnim = (abs(speed) > 0.000001) ? time * ow : 0.0;
+      float speedAnimScale = clamp(abs(speed) / 0.01, 0.0, 10.0) * ow;
 
       // Camera-based parallax offset
       vec2 parallaxUv = uv;
@@ -313,8 +320,12 @@ export function getFragmentShader(maxLights = 64) {
         parallaxUv.x * sinA + parallaxUv.y * cosA
       );
 
-      // Scrolling stripes
-      float pos = rotUv.x * frequency + timeAnim * speed;
+      // Band-axis scroll: each layer uses a different stripe angle, so timeAnim*speed slides bands in
+      // different directions. Outdoors we rely on shared wind UV drift only (see main); suppress
+      // per-layer scroll there so all stripe layers move consistently with wind. Indoors ow=0
+      // ⇒ timeAnim is already zero.
+      float scrollAlongBands = timeAnim * speed * (1.0 - ow);
+      float pos = rotUv.x * frequency + scrollAlongBands;
       float stripe = fract(pos);
 
       // Map width (0-1) to band half-size
@@ -482,6 +493,15 @@ export function getFragmentShader(maxLights = 64) {
       float worldYTopDown = ((uSceneBounds.y + uSceneBounds.w) - vWorldPosition.y);
       vec2 worldPatternUv = vec2(worldX, worldYTopDown) / worldPatternScalePx;
 
+      // Wind pushes stripe UVs by accumulated (direction × speed). Map uWindAccum into
+      // worldPatternUv space so band drift matches on-screen wind (empirically: flip both axes
+      // from raw accum so motion is not opposite to weather windDirection).
+      vec2 stripePatternUv = worldPatternUv;
+      if (uWindDrivenStripesEnabled && uWindStripeInfluence > 0.00001) {
+        vec2 windAccumPattern = vec2(-uWindAccum.x, uWindAccum.y);
+        stripePatternUv += windAccumPattern * uWindStripeInfluence * outdoorFactor * kWindStripeScrollMul;
+      }
+
       // ── Multi-layer stripes ───────────────────────────────────────────────
       float stripeMaskAnimated = 0.0;
 
@@ -492,28 +512,31 @@ export function getFragmentShader(maxLights = 64) {
 
         if (uStripe1Enabled) {
           layer1 = generateStripeLayer(
-            worldPatternUv, vWorldPosition, uCameraPosition, uTime,
+            stripePatternUv, vWorldPosition, uCameraPosition, uTime,
             uStripe1Frequency, uStripe1Speed, uStripe1Angle,
             uStripe1Width, uStripe1Parallax, uParallaxStrength,
-            uStripe1Wave, uStripe1Gaps, uStripe1Softness
+            uStripe1Wave, uStripe1Gaps, uStripe1Softness,
+            outdoorFactor
           ) * uStripe1Intensity;
         }
 
         if (uStripe2Enabled) {
           layer2 = generateStripeLayer(
-            worldPatternUv, vWorldPosition, uCameraPosition, uTime,
+            stripePatternUv, vWorldPosition, uCameraPosition, uTime,
             uStripe2Frequency, uStripe2Speed, uStripe2Angle,
             uStripe2Width, uStripe2Parallax, uParallaxStrength,
-            uStripe2Wave, uStripe2Gaps, uStripe2Softness
+            uStripe2Wave, uStripe2Gaps, uStripe2Softness,
+            outdoorFactor
           ) * uStripe2Intensity;
         }
 
         if (uStripe3Enabled) {
           layer3 = generateStripeLayer(
-            worldPatternUv, vWorldPosition, uCameraPosition, uTime,
+            stripePatternUv, vWorldPosition, uCameraPosition, uTime,
             uStripe3Frequency, uStripe3Speed, uStripe3Angle,
             uStripe3Width, uStripe3Parallax, uParallaxStrength,
-            uStripe3Wave, uStripe3Gaps, uStripe3Softness
+            uStripe3Wave, uStripe3Gaps, uStripe3Softness,
+            outdoorFactor
           ) * uStripe3Intensity;
         }
 

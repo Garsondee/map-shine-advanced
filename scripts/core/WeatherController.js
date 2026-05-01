@@ -9,6 +9,7 @@ import { createLogger } from './log.js';
 import { getFoundrySunlightFactor } from './foundry-time-phases.js';
 import { extendMsaLocalFlagWriteGuard } from '../utils/msa-local-flag-guard.js';
 import { mapShinePushSceneDarknessLevel } from '../utils/msa-v2-darkness.js';
+import { cloneAndSanitizeControlState } from '../settings/control-state-sanitize.js';
 
 const log = createLogger('WeatherController');
 
@@ -1044,7 +1045,7 @@ export class WeatherController {
         dynamicPresetId: this.dynamicPresetId,
         dynamicEvolutionSpeed: this.dynamicEvolutionSpeed,
         dynamicPaused: this.dynamicPaused === true,
-        timeOfDay: Number(this.timeOfDay) || 12,
+        timeOfDay: Number.isFinite(Number(this.timeOfDay)) ? (((Number(this.timeOfDay) % 24) + 24) % 24) : 12,
         sceneDarkness: Number(
           canvas?.scene?.environment?.darknessLevel ??
           canvas?.environment?.darknessLevel ??
@@ -1058,6 +1059,20 @@ export class WeatherController {
         transitionDuration: Number(this.transitionDuration) || 0,
         transitionElapsed: Number(this.transitionElapsed) || 0
       };
+
+      try {
+        const cp = window.MapShine?.controlPanel?.controlState;
+        if (cp && typeof cp === 'object') {
+          payload.controlState = cloneAndSanitizeControlState(cp, { silent: true });
+          if (typeof cp.linkTimeToFoundry === 'boolean') {
+            payload.linkTimeToFoundry = cp.linkTimeToFoundry;
+          }
+          const tt = Number(cp.timeTransitionMinutes);
+          if (Number.isFinite(tt)) {
+            payload.timeTransitionMinutes = tt;
+          }
+        }
+      } catch (_) {}
 
       this._lastLocalWeatherSnapshotUpdatedAt = payload.updatedAt;
       extendMsaLocalFlagWriteGuard();
@@ -1079,6 +1094,18 @@ export class WeatherController {
       if (this._lastLocalWeatherSnapshotUpdatedAt != null && stored.updatedAt === this._lastLocalWeatherSnapshotUpdatedAt) {
         return;
       }
+
+      try {
+        if (stored.controlState && typeof stored.controlState === 'object' && !Array.isArray(stored.controlState)) {
+          const cp = window.MapShine?.controlPanel;
+          if (cp?.controlState && typeof cp.controlState === 'object') {
+            Object.assign(cp.controlState, cloneAndSanitizeControlState(stored.controlState, { silent: true }));
+            cp._ensureDirectedCustomPreset?.();
+            cp.syncLiveWeatherOverrideDomFromDirectedPreset?.();
+            cp.pane?.refresh?.();
+          }
+        }
+      } catch (_) {}
 
       if (stored.enabled === true || stored.enabled === false) {
         this.enabled = stored.enabled === true;
@@ -2539,6 +2566,11 @@ export class WeatherController {
     this.transitionDuration = safeDuration;
     this.transitionElapsed = 0;
     this.isTransitioning = true;
+
+    if (this._canEditSceneFlags()) {
+      this._weatherSnapshotPersistTimer = 0;
+      this._scheduleSaveWeatherSnapshot();
+    }
   }
 
   /**

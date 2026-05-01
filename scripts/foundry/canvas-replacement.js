@@ -90,6 +90,7 @@ import { ControlsIntegration } from './controls-integration.js';
 import { frameCoordinator } from '../core/frame-coordinator.js';
 import { loadingScreenService as loadingOverlay } from '../ui/loading-screen/loading-screen-service.js';
 import { stateApplier } from '../ui/state-applier.js';
+import { MSA_SAME_SCENE_REDRAW_PREDICT_MS } from '../utils/msa-local-flag-guard.js';
 import { applyWeatherManualParam, syncDirectedCustomPresetFromWeatherController } from '../ui/weather-param-bridge.js';
 import { createEnhancedLightsApi } from '../effects/EnhancedLightsApi.js';
 import { LightEnhancementStore } from '../effects/LightEnhancementStore.js';
@@ -1394,6 +1395,26 @@ let fogSaveSafetyPatchInstalled = false;
 /** @type {number|null} - Safety net timer ID to force-dismiss stuck overlay after tearDown */
 let _overlayDismissSafetyTimerId = null;
 
+/**
+ * updateScene can occasionally deliver dimension/grid keys without a user-facing Scene Config edit
+ * (core batching, timing, or replication). Full createThreeCanvas from onUpdateScene is expensive and
+ * causes the "random loading screen + degraded performance" failure mode. Debounce + per-scene throttle
+ * reduce bursts; set window.MapShine.__forceNextUpdateSceneReinit = true to bypass throttle once.
+ */
+const UPDATE_SCENE_REINIT_DEBOUNCE_MS = 800;
+const UPDATE_SCENE_REINIT_MIN_INTERVAL_MS = 25000;
+
+/** @type {ReturnType<typeof setTimeout>|null} */
+let _updateSceneReinitDebounceTimer = null;
+
+/** @type {Map<string, number>} */
+const _updateSceneReinitLastBySceneId = new Map();
+
+/** @type {string|null} */
+let _updateSceneReinitPendingSceneId = null;
+
+const MSA_V14_LIFECYCLE_TRACE = '[MSA-V14-LIFECYCLE]';
+
 /** @type {boolean} */
 let ambientSoundAudibilityPatched = false;
 
@@ -2066,6 +2087,15 @@ export function initialize() {
     Hooks.on('updateWall', () => _scheduleNativeTemplateHydration('updateWall', 4));
     Hooks.on('deleteWall', () => _scheduleNativeTemplateHydration('deleteWall', 4));
     Hooks.on('sightRefresh', () => _scheduleNativeTemplateHydration('sightRefresh', 2));
+
+    // Foundry draws a PIXI.Graphics outline between sceneRect and padded canvas.rect on the
+    // interface group (see InterfaceCanvasGroup.#drawOutline). Hide it for Map Shine scenes.
+    if (!globalThis.__msaSuppressInterfaceOutlineHook) {
+      globalThis.__msaSuppressInterfaceOutlineHook = true;
+      Hooks.on('drawInterfaceCanvasGroup', () => {
+        safeCall(() => _suppressFoundryInterfaceSceneOutline(), 'hook.drawInterfaceCanvasGroup.outline', Severity.COSMETIC);
+      });
+    }
     
     // Hook into canvas teardown
     Hooks.on('canvasTearDown', onCanvasTearDown);
@@ -2743,12 +2773,48 @@ function computeNativeSameSceneDrawIntent(drawArgs) {
     if (!drawTarget || drawTarget === null) {
       return { sameSceneRedraw: false, sameSceneLevelSwitch: false };
     }
+    const targetId = drawTarget?.id != null ? String(drawTarget.id) : '';
+    if (!targetId) {
+      return { sameSceneRedraw: false, sameSceneLevelSwitch: false };
+    }
+
     const cur = canvas?.scene;
-    const sameSceneRedraw = !!(cur && drawTarget?.id === cur?.id);
+    let viewedId = null;
+    try {
+      const v = game?.scenes?.current?.id ?? game?.scenes?.viewed?.id;
+      viewedId = v != null ? String(v) : null;
+    } catch (_) {
+      viewedId = null;
+    }
+
+    let lastResolved = null;
+    try {
+      const lr = window.MapShine?.__msaLastResolvedSceneId;
+      lastResolved = lr != null ? String(lr) : null;
+    } catch (_) {
+      lastResolved = null;
+    }
+
+    // Primary: live canvas document matches draw target.
+    // V14 same-scene redraw can invoke Canvas#draw while `canvas.scene` is briefly
+    // cleared — then `cur` is null and we must not treat that as a cross-scene
+    // transition (full loading overlay + redundant createThreeCanvas).
+    const sameByCanvas = !!(cur && String(cur.id) === targetId);
+    const sameByStaleCanvas = !!(
+      !cur
+      && lastResolved
+      && targetId === lastResolved
+      && viewedId
+      && targetId === viewedId
+    );
+    const sameSceneRedraw = sameByCanvas || sameByStaleCanvas;
+
     if (!sameSceneRedraw) {
       return { sameSceneRedraw: false, sameSceneLevelSwitch: false };
     }
-    if (!hasV14NativeLevels(cur)) {
+
+    const levelsScene = cur ?? drawTarget;
+    if (!hasV14NativeLevels(levelsScene)) {
       return { sameSceneRedraw: true, sameSceneLevelSwitch: false };
     }
     const vo = canvas?._viewOptions;
@@ -2778,6 +2844,13 @@ function installCanvasDrawWrapper() {
         const drawIntent = computeNativeSameSceneDrawIntent(args);
         window.MapShine.__nativeSameSceneRedraw = drawIntent.sameSceneRedraw === true;
         window.MapShine.__nativeSameSceneLevelSwitch = drawIntent.sameSceneLevelSwitch === true;
+        if (drawIntent.sameSceneRedraw === true) {
+          log.info(`${MSA_V14_LIFECYCLE_TRACE} Canvas.draw same-scene redraw detected`, {
+            targetSceneId: args?.[0]?.id ?? null,
+            canvasSceneId: canvas?.scene?.id ?? null,
+            levelSwitch: drawIntent.sameSceneLevelSwitch === true,
+          });
+        }
       } catch (_) {}
 
       // ->->->-> Diagnostic state poller: logs canvas internals every 2s while draw is pending ->->->->
@@ -3051,6 +3124,47 @@ function installCanvasTransitionWrapper() {
       try {
         const guardUntil = Number(window.MapShine?._msaLocalFlagWriteGuardUntil) || 0;
         if (performance.now() < guardUntil) {
+          return wrapped(...args);
+        }
+      } catch (_) {}
+
+      // Same-scene redraw scheduled right after MSA flag echo (sliders); see _armPredictSameSceneRedrawFromMsaFlags.
+      // Require viewed scene == predicted id so a real scene switch (viewed updates before tearDown) still shows the overlay.
+      try {
+        const until = Number(window.MapShine?.__msaPredictSameSceneRedrawUntil) || 0;
+        const predSid = window.MapShine?.__msaPredictSameSceneRedrawSceneId;
+        const viewedId = game?.scenes?.viewed?.id != null ? String(game.scenes.viewed.id) : null;
+        const liveSid = canvas?.scene?.id != null ? String(canvas.scene.id) : null;
+        let lastRes = null;
+        try {
+          const lr = window.MapShine?.__msaLastResolvedSceneId;
+          lastRes = lr != null ? String(lr) : null;
+        } catch (_) {}
+        const effectiveSid = liveSid || lastRes;
+        if (
+          until > 0 &&
+          performance.now() < until &&
+          predSid &&
+          viewedId &&
+          predSid === viewedId &&
+          effectiveSid === predSid
+        ) {
+          return wrapped(...args);
+        }
+      } catch (_) {}
+
+      // Last resort: same Foundry scene is still viewed (rain/flags redraw, missed predict, libWrapper order).
+      // Real scene switches have viewed !== canvas.scene before teardown clears the document.
+      try {
+        const viewedId = game?.scenes?.viewed?.id != null ? String(game.scenes.viewed.id) : null;
+        const liveSid = canvas?.scene?.id != null ? String(canvas.scene.id) : null;
+        let lastRes = null;
+        try {
+          const lr = window.MapShine?.__msaLastResolvedSceneId;
+          lastRes = lr != null ? String(lr) : null;
+        } catch (_) {}
+        const effectiveSid = liveSid || lastRes;
+        if (viewedId && effectiveSid && viewedId === effectiveSid) {
           return wrapped(...args);
         }
       } catch (_) {}
@@ -3436,15 +3550,124 @@ function _resolveUpdateSceneUserId(userId, options) {
  */
 function _msaMapShineFlagDiffIsEchoOnly(changes) {
   try {
-    const msa = changes?.flags?.['map-shine-advanced'];
-    if (!msa || typeof msa !== 'object') return false;
-    const keys = Object.keys(msa);
+    const keys = _msaMapShineFlagDiffKeys(changes);
     if (!keys.length) return false;
     const ECHO = new Set(['controlState', 'weather-snapshot']);
     return keys.every((k) => ECHO.has(k));
   } catch (_) {
     return false;
   }
+}
+
+/**
+ * Foundry v14 may deliver updateScene changes as nested objects or flattened
+ * paths (`flags.map-shine-advanced.weather-snapshot`). Normalize both shapes.
+ * @param {object} changes
+ * @returns {string[]}
+ */
+function _msaFlattenChangeKeys(changes) {
+  const keys = [];
+  const walk = (value, prefix = '') => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return;
+    for (const [key, child] of Object.entries(value)) {
+      const path = prefix ? `${prefix}.${key}` : key;
+      keys.push(path);
+      if (child && typeof child === 'object' && !Array.isArray(child)) {
+        walk(child, path);
+      }
+    }
+  };
+  try {
+    walk(changes);
+  } catch (_) {}
+  return keys;
+}
+
+/**
+ * Return changed keys under `flags.map-shine-advanced`, supporting nested and
+ * flattened Foundry update payloads.
+ * @param {object} changes
+ * @returns {string[]}
+ */
+function _msaMapShineFlagDiffKeys(changes) {
+  try {
+    const direct = changes?.flags?.['map-shine-advanced'];
+    if (direct && typeof direct === 'object') {
+      return [...new Set(Object.keys(direct).map((key) => String(key).split('.')[0]).filter(Boolean))];
+    }
+
+    const prefix = 'flags.map-shine-advanced.';
+    const keys = new Set();
+    for (const path of _msaFlattenChangeKeys(changes)) {
+      if (!path.startsWith(prefix)) continue;
+      const rest = path.slice(prefix.length);
+      const top = rest.split('.')[0];
+      if (top) keys.add(top);
+    }
+    return [...keys];
+  } catch (_) {
+    return [];
+  }
+}
+
+/**
+ * True when `updateScene` delta cannot affect scene dimensions, grid geometry, or background asset —
+ * only document metadata / flags. Prevents spurious `createThreeCanvas` (full loading screen) from
+ * weather slider flag writes or similar.
+ * @param {object} changes
+ * @returns {boolean}
+ */
+function _msaSceneUpdateDeltaSkipsMapShineRebuild(changes) {
+  try {
+    if (!changes || typeof changes !== 'object') return false;
+    const keys = _msaFlattenChangeKeys(changes);
+    if (!keys.length) return false;
+    const echoKeys = new Set(['controlState', 'weather-snapshot']);
+    const SAFE_TOP = new Set([
+      'flags',
+      '_id',
+      'permission',
+      'sort',
+      'folder',
+      'navigation',
+      'navOrder',
+      'thumb',
+      'ownership',
+      'description',
+      'name',
+    ]);
+    return keys.every((key) => {
+      if (SAFE_TOP.has(key)) return true;
+      if (key.startsWith('flags.')) {
+        if (!key.startsWith('flags.map-shine-advanced.')) return true;
+        const flagKey = key.slice('flags.map-shine-advanced.'.length).split('.')[0];
+        return echoKeys.has(flagKey);
+      }
+      return false;
+    });
+  } catch (_) {
+    return false;
+  }
+}
+
+/**
+ * Flag-only weather/control saves often trigger a same-scene `canvas.draw` → `tearDown`, but
+ * `computeNativeSameSceneDrawIntent` can miss (brief `canvas.scene === null`) or `canvasReady`
+ * can clear `__nativeSameSceneRedraw` before a nested teardown. Arm a short TTL so
+ * {@link _tearDownWrapper} skips the "Switching scenes..." overlay.
+ * @param {*} scene - Foundry Scene document
+ */
+function _armPredictSameSceneRedrawFromMsaFlags(scene) {
+  try {
+    if (!window.MapShine) window.MapShine = {};
+    const sid = scene?.id != null ? String(scene.id) : '';
+    const live = canvas?.scene?.id != null ? String(canvas.scene.id) : '';
+    if (!sid || !live || sid !== live) return;
+    window.MapShine.__msaPredictSameSceneRedrawUntil = performance.now() + MSA_SAME_SCENE_REDRAW_PREDICT_MS;
+    try {
+      window.MapShine.__msaPredictSameSceneRedrawSceneId = sid;
+    } catch (_) {}
+  } catch (_) {}
 }
 
 async function onUpdateScene(scene, changes, _options, _userId) {
@@ -3461,8 +3684,15 @@ async function onUpdateScene(scene, changes, _options, _userId) {
   const localAuthor = !!(originatingUserId && game?.user?.id === originatingUserId);
   const guardUntil = Number(window.MapShine?._msaLocalFlagWriteGuardUntil) || 0;
   const echoOnly = _msaMapShineFlagDiffIsEchoOnly(changes);
-  const nsDiff = changes?.flags?.['map-shine-advanced'];
-  const hasMsaSettingsDiff = !!(nsDiff && Object.prototype.hasOwnProperty.call(nsDiff, 'settings'));
+  const msaDiffKeys = _msaMapShineFlagDiffKeys(changes);
+  const hasMsaSettingsDiff = msaDiffKeys.includes('settings');
+
+  // Debounced slider saves (wind/rain/cloud) → setFlag controlState + weather-snapshot only.
+  // Foundry will redraw the canvas; arm tearDown overlay skip for that predictable path.
+  if (echoOnly && !hasMsaSettingsDiff) {
+    _armPredictSameSceneRedrawFromMsaFlags(scene);
+  }
+
   const skipAuthoritativeMsaResync =
     localAuthor
     || (isGmLike() && echoOnly && performance.now() < guardUntil);
@@ -3592,6 +3822,18 @@ async function onUpdateScene(scene, changes, _options, _userId) {
     log.debug('updateScene: settings-flag change detected -> skipping full scene reinit');
     return;
   }
+
+  if (echoOnly) {
+    log.debug('updateScene: MSA control/weather flag echo -> skipping Map Shine canvas rebuild');
+    return;
+  }
+
+  // Weather / control panel persists only `flags` (+ harmless doc keys). Never schedule
+  // createThreeCanvas from those deltas — full reload loading screen on rain slider.
+  if (_msaSceneUpdateDeltaSkipsMapShineRebuild(changes)) {
+    log.debug('updateScene: flags/metadata-only delta -> skipping Map Shine canvas rebuild');
+    return;
+  }
   
   // Grid changes should NOT require a full Three.js scene rebuild.
   // Rebuilding can race with Foundry's internal canvas updates and briefly leave `canvas.ready=false`,
@@ -3635,13 +3877,78 @@ async function onUpdateScene(scene, changes, _options, _userId) {
       );
       return;
     }
-    log.info('Scene configuration changed, reinitializing Map Shine canvas');
-
-    // Defer to next frame to ensure Foundry has finished updating
-    setTimeout(async () => {
-      await createThreeCanvas(scene);
-    }, 0);
+    _scheduleUpdateSceneDrivenReinit(scene, changes);
   }
+}
+
+/**
+ * Debounced + throttled full reinit from {@link onUpdateScene} shouldReinit path.
+ * @param {*} scene - Foundry Scene document
+ * @param {object} changes - updateScene changes that triggered the reinit
+ */
+function _scheduleUpdateSceneDrivenReinit(scene, changes = undefined) {
+  const sceneId = scene?.id != null ? String(scene.id) : '';
+  if (!sceneId) return;
+  const changeKeys = _msaFlattenChangeKeys(changes);
+
+  try {
+    if (_updateSceneReinitDebounceTimer) {
+      clearTimeout(_updateSceneReinitDebounceTimer);
+      _updateSceneReinitDebounceTimer = null;
+    }
+  } catch (_) {}
+
+  _updateSceneReinitPendingSceneId = sceneId;
+  _updateSceneReinitDebounceTimer = setTimeout(async () => {
+    _updateSceneReinitDebounceTimer = null;
+    const pendingId = _updateSceneReinitPendingSceneId;
+    _updateSceneReinitPendingSceneId = null;
+    if (!pendingId) return;
+
+    try {
+      const liveId = canvas?.scene?.id != null ? String(canvas.scene.id) : null;
+      if (liveId !== pendingId) {
+        log.debug('updateScene: skipping createThreeCanvas (scene no longer active)');
+        return;
+      }
+
+      let force = false;
+      try {
+        force = !!window.MapShine?.__forceNextUpdateSceneReinit;
+        if (force) window.MapShine.__forceNextUpdateSceneReinit = false;
+      } catch (_) {}
+
+      if (!force) {
+        const last = _updateSceneReinitLastBySceneId.get(pendingId) || 0;
+        const now = performance.now();
+        if (last > 0 && (now - last) < UPDATE_SCENE_REINIT_MIN_INTERVAL_MS) {
+          log.warn(
+            `updateScene: skipping Map Shine full reinit (throttled; ${Math.round((now - last) / 1000)}s since last for this scene). ` +
+            'Set window.MapShine.__forceNextUpdateSceneReinit = true then change scene config if you need an immediate rebuild.'
+          );
+          return;
+        }
+      }
+
+      const sceneDoc = game?.scenes?.get?.(pendingId) ?? scene;
+      _updateSceneReinitLastBySceneId.set(pendingId, performance.now());
+      log.info('Scene configuration changed, reinitializing Map Shine canvas');
+
+      if (!_createThreeCanvasRunning && _hasLiveMapShineRuntime()) {
+        log.warn(`${MSA_V14_LIFECYCLE_TRACE} updateScene direct full reinit: destroying existing runtime before createThreeCanvas`, {
+          sceneId: pendingId,
+          changeKeys,
+        });
+        destroyThreeCanvas();
+      }
+
+      await createThreeCanvas(sceneDoc);
+    } catch (err) {
+      try {
+        log.warn('updateScene: createThreeCanvas from guarded updateScene path failed:', err?.message ?? err);
+      } catch (_) {}
+    }
+  }, UPDATE_SCENE_REINIT_DEBOUNCE_MS);
 }
 
 /**
@@ -3798,8 +4105,18 @@ async function resyncMapShineAfterNativeLevelRedraw(scene) {
     renderLoop?.requestContinuousRender?.(400);
   } catch (e) {
     log.error('[level-resync] failed; falling back to full scene init', e);
+    if (!_createThreeCanvasRunning && _hasLiveMapShineRuntime()) {
+      log.warn(`${MSA_V14_LIFECYCLE_TRACE} same-scene resync failed: destroying existing runtime before fallback create`, {
+        sceneId: scene?.id ?? null,
+      });
+      destroyThreeCanvas();
+    }
     await createThreeCanvas(scene, { skipLoadingOverlay: true });
   }
+}
+
+function _hasLiveMapShineRuntime() {
+  return !!(effectComposer && sceneComposer && threeCanvas && renderLoop);
 }
 
 async function _waitForFoundryCanvasReady({ timeoutMs = 15000 } = {}) {
@@ -3840,22 +4157,40 @@ async function _waitForFoundryCanvasReady({ timeoutMs = 15000 } = {}) {
 async function onCanvasReady(canvas) {
   installFogSaveSafetyPatch();
   let skipNativeLevelSwitchOverlay = false;
+  let nativeSameSceneRedrawAtReady = false;
+  let nativeSameSceneLevelSwitchAtReady = false;
   try {
     if (!window.MapShine) window.MapShine = {};
     window.MapShine.__sceneTransitionActive = false;
-    skipNativeLevelSwitchOverlay = !!window.MapShine.__nativeSameSceneLevelSwitch;
+    nativeSameSceneRedrawAtReady = !!window.MapShine.__nativeSameSceneRedraw;
+    nativeSameSceneLevelSwitchAtReady = !!window.MapShine.__nativeSameSceneLevelSwitch;
+    skipNativeLevelSwitchOverlay = nativeSameSceneLevelSwitchAtReady;
     window.MapShine.__nativeSameSceneRedraw = false;
     window.MapShine.__nativeSameSceneLevelSwitch = false;
+    window.MapShine.__msaPredictSameSceneRedrawUntil = 0;
+    try {
+      delete window.MapShine.__msaPredictSameSceneRedrawSceneId;
+    } catch (_) {}
+    if (canvas?.scene?.id != null) {
+      window.MapShine.__msaLastResolvedSceneId = String(canvas.scene.id);
+    }
   } catch (_) {}
 
   // LoadCoordinator: begin tracking this scene load.
   // If createThreeCanvas is already active, defer beginSceneLoad to the replayed
   // createThreeCanvas entry point so we don't reset coordinator state mid-run.
   const sceneForCoordinator = canvas?.scene;
-  if (sceneForCoordinator && !_createThreeCanvasRunning) {
+  const sameSceneRuntimePreservedAtReady = nativeSameSceneRedrawAtReady && _hasLiveMapShineRuntime();
+  if (sceneForCoordinator && !_createThreeCanvasRunning && !sameSceneRuntimePreservedAtReady) {
     loadCoordinator.beginSceneLoad(sceneForCoordinator.id, sceneForCoordinator.name);
   } else if (sceneForCoordinator && _createThreeCanvasRunning) {
     log.debug('LoadCoordinator: deferring beginSceneLoad during active createThreeCanvas');
+  } else if (sceneForCoordinator && sameSceneRuntimePreservedAtReady) {
+    log.info(`${MSA_V14_LIFECYCLE_TRACE} canvasReady same-scene redraw: preserving existing load coordinator/runtime`, {
+      sceneId: sceneForCoordinator.id,
+      nativeSameSceneRedrawAtReady,
+      nativeSameSceneLevelSwitchAtReady,
+    });
   }
 
   // Authoritative boot diagnostics: this is the single decision point which
@@ -4045,6 +4380,23 @@ async function onCanvasReady(canvas) {
 
   log.info(`Initializing Map Shine canvas for scene: ${scene.name}`);
 
+  if (nativeSameSceneRedrawAtReady && _hasLiveMapShineRuntime()) {
+    log.info(`${MSA_V14_LIFECYCLE_TRACE} canvasReady same-scene redraw: resyncing without loading overlay/full create`, {
+      sceneId: scene.id,
+      levelSwitch: nativeSameSceneLevelSwitchAtReady,
+    });
+    await resyncMapShineAfterNativeLevelRedraw(scene);
+    safeCall(() => loadingOverlay.fadeIn(200).catch(() => {}), 'overlay.sameSceneRedrawResync', Severity.COSMETIC);
+    return;
+  }
+
+  if (nativeSameSceneRedrawAtReady && !_hasLiveMapShineRuntime()) {
+    log.warn(`${MSA_V14_LIFECYCLE_TRACE} canvasReady same-scene redraw had no live Map Shine runtime; allowing full create`, {
+      sceneId: scene.id,
+      levelSwitch: nativeSameSceneLevelSwitchAtReady,
+    });
+  }
+
   if (!skipNativeLevelSwitchOverlay) {
     safeCall(() => {
       // Scene name is rendered by the dedicated scene-name element/subtitle when present.
@@ -4170,6 +4522,15 @@ function onCanvasTearDown(canvas) {
       ? 'Map Shine: canvasTearDown (preserving in-flight same-scene load / native level redraw)'
       : 'Tearing down Map Shine canvas'
   );
+  if (lightNativeSameScenePath || preserveInFlightSameSceneLoad) {
+    log.info(`${MSA_V14_LIFECYCLE_TRACE} canvasTearDown same-scene/preserved path`, {
+      tearDownSceneId,
+      lightNativeSameSceneRedraw,
+      lightNativeLevelSwitch,
+      preserveInFlightSameSceneLoad,
+      liveRuntime: _hasLiveMapShineRuntime(),
+    });
+  }
 
   // Cancellation boundary: canvasTearDown must abort any in-flight load work.
   // Without this, createThreeCanvas can continue into late phases and attempt
@@ -8010,6 +8371,34 @@ function enableSystem() {
 }
 
 /**
+ * Hide Foundry's scene-vs-padding frame (PIXI.Graphics from InterfaceCanvasGroup.#drawOutline).
+ * First child of canvas.interface after each interface draw is that outline.
+ * @private
+ */
+function _suppressFoundryInterfaceSceneOutline() {
+  safeCall(() => {
+    if (!canvas?.ready) return;
+    if (isMapMakerMode) return;
+    if (!sceneSettings.isEnabled(canvas?.scene)) return;
+
+    const iface = canvas?.interface;
+    const first = iface?.children?.[0];
+    if (!first || first.destroyed) return;
+
+    const PIXI = globalThis.PIXI;
+    const isOutlineGraphics = PIXI?.Graphics && first instanceof PIXI.Graphics;
+    const ctorName = String(first?.constructor?.name || '');
+    if (!isOutlineGraphics && ctorName !== 'Graphics' && ctorName !== '_Graphics' && ctorName !== 'LegacyGraphics') {
+      return;
+    }
+
+    first.visible = false;
+    first.renderable = false;
+    first.alpha = 0;
+  }, 'suppress.interfaceOutline', Severity.COSMETIC);
+}
+
+/**
  * Hard safety: Suppress PIXI visuals that are replaced by Three.js in Gameplay/Hybrid mode.
  *
  * Why this exists:
@@ -8023,6 +8412,10 @@ function enableSystem() {
  */
 function _enforceGameplayPixiSuppression() {
   safeCall(() => {
+    try {
+      _suppressFoundryInterfaceSceneOutline();
+    } catch (_) {}
+
     const diag = (extra = {}) => {
       safeCall(() => _publishPixiVisibilityDiagnostics(extra), 'pixiSuppress.visibilityDiagnostics', Severity.COSMETIC);
       safeCall(() => _syncPixiLayerDebugMode(), 'pixiLayer.debugSync', Severity.COSMETIC);

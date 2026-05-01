@@ -295,9 +295,15 @@ export function isLightVisibleForPerspective(lightDoc) {
   const viewerLOS = perspective.losHeight;
   const viewerElevation = perspective.elevation;
 
-  // Read elevation range from the light doc
-  const rangeBottom = Number(lightDoc.elevation ?? -Infinity);
+  // Range must match `readDocLevelsRange` (Levels / V14): rangeBottom often lives
+  // in `flags.levels.rangeBottom` while `doc.elevation` stays at a legacy default.
+  // Using elevation alone hides cellar lights when the viewer is below ground.
   const range = readDocLevelsRange(lightDoc);
+  let rangeBottom = range.rangeBottom;
+  if (!Number.isFinite(rangeBottom)) {
+    const e = Number(lightDoc?.elevation);
+    rangeBottom = Number.isFinite(e) ? e : -Infinity;
+  }
   const rangeTop = range.rangeTop;
 
   // Light below background elevation: hidden if viewer is above background

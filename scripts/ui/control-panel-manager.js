@@ -18,8 +18,8 @@ import {
 } from './weather-param-bridge.js';
 import { debugLoadingProfiler } from '../core/debug-loading-profiler.js';
 import { getFoundryTimePhaseHours } from '../core/foundry-time-phases.js';
-import { extendMsaLocalFlagWriteGuard } from '../utils/msa-local-flag-guard.js';
-import { sanitizeControlStateInPlace } from '../settings/control-state-sanitize.js';
+import { extendMsaLocalFlagWriteGuard, refreshMsaSameSceneRedrawPredict } from '../utils/msa-local-flag-guard.js';
+import { cloneAndSanitizeControlState, sanitizeControlStateInPlace } from '../settings/control-state-sanitize.js';
 
 const log = createLogger('ControlPanel');
 
@@ -886,6 +886,7 @@ export class ControlPanelManager {
     }
 
     this._mirrorLiveWeatherDomPair(paramId, value);
+    // tearDown skip is armed from `applyWeatherManualParam` (rain/cloud/wind scalars).
     if (opts.save) {
       this._skipNextControlStateSceneFlagPersist = true;
       this.debouncedSave();
@@ -1831,6 +1832,31 @@ export class ControlPanelManager {
     if (_isDbg) _dlp.begin('cp.loadControlState', 'finalize');
     this._didLoadControlState = await this._loadControlState();
     if (_isDbg) _dlp.end('cp.loadControlState');
+
+    // `weather-snapshot` is the latest live-play authority. Some Control Panel edits
+    // intentionally skip `controlState` flag writes (V14 redraw guard), so the snapshot
+    // carries a full sanitized controlState copy to prevent stale flags from clobbering it.
+    try {
+      const snap = canvas?.scene?.getFlag?.('map-shine-advanced', 'weather-snapshot');
+      if (snap && typeof snap === 'object') {
+        if (snap.controlState && typeof snap.controlState === 'object' && !Array.isArray(snap.controlState)) {
+          Object.assign(this.controlState, cloneAndSanitizeControlState(snap.controlState, { silent: true }));
+          this._ensureDirectedCustomPreset();
+          this._didLoadControlState = true;
+          this._suppressInitialWeatherApply = true;
+        }
+        if (Number.isFinite(snap.timeOfDay)) {
+          this.controlState.timeOfDay = snap.timeOfDay % 24;
+        }
+        if (typeof snap.linkTimeToFoundry === 'boolean') {
+          this.controlState.linkTimeToFoundry = snap.linkTimeToFoundry;
+        }
+        const tt = Number(snap.timeTransitionMinutes);
+        if (Number.isFinite(tt)) {
+          this.controlState.timeTransitionMinutes = tt;
+        }
+      }
+    } catch (_) {}
 
     // If Foundry link mode is enabled, pull canonical world time before first apply pass.
     if (this.controlState.linkTimeToFoundry) {
@@ -3262,6 +3288,9 @@ export class ControlPanelManager {
    */
   async _applyControlState() {
     try {
+      // Debounced scene-flag saves lag behind Tweakpane sliders; arm same-scene tearDown skip for Mode/Dynamic/Directed/time paths.
+      refreshMsaSameSceneRedrawPredict();
+
       const targetHour = ((Number(this.controlState.timeOfDay) % 24) + 24) % 24;
       const transitionMinutes = Number(this.controlState.timeTransitionMinutes) || 0;
       const shouldStartTransition =
@@ -3328,6 +3357,8 @@ export class ControlPanelManager {
    */
   async _applyWindState() {
     try {
+      refreshMsaSameSceneRedrawPredict();
+
       const weatherController = coreWeatherController || window.MapShine?.weatherController || window.weatherController;
       if (!weatherController) {
         log.warn('WeatherController not available for wind application');
@@ -3403,6 +3434,13 @@ export class ControlPanelManager {
         this.controlState.directedPresetId,
         this.controlState.directedTransitionMinutes
       );
+
+      try {
+        const wc = resolveWeatherController();
+        if (wc?.saveWeatherSnapshotNow) {
+          await wc.saveWeatherSnapshotNow();
+        }
+      } catch (_) {}
       
       ui.notifications?.info(`Weather transition started: ${this.controlState.directedPresetId}`);
       log.info('Started directed weather transition:', this.controlState.directedPresetId);
@@ -3578,10 +3616,15 @@ Current Weather:
         if (syncDarkness) {
           await stateApplier.syncFoundryDarknessFromMapShineTime();
         }
-        // V14 regression guard:
-        // skipped-persist saves must not perform *any* Scene flag writes, otherwise
-        // the same-scene redraw/reload path can still be triggered (e.g. cloud slider).
-        log.debug('Skipped Scene controlState flag persist for live/time-only save');
+        // Time fields are not written to `controlState` flags (see below). Persist the
+        // authoritative hour + full WC state via weather-snapshot instead (separate flag key).
+        try {
+          const wc = resolveWeatherController();
+          if (wc?.saveWeatherSnapshotNow) {
+            await wc.saveWeatherSnapshotNow();
+          }
+        } catch (_) {}
+        log.debug('Skipped Scene controlState flag persist for live/time-only save (weather-snapshot updated)');
         return;
       }
 
@@ -3599,6 +3642,12 @@ Current Weather:
       // One Foundry darkness write after persist — avoids hammering canvas.scene.update
       // on every clock tick / 100ms transition frame (can grey-break V2 rendering).
       await stateApplier.syncFoundryDarknessFromMapShineTime();
+      try {
+        const wc = resolveWeatherController();
+        if (wc?.saveWeatherSnapshotNow) {
+          await wc.saveWeatherSnapshotNow();
+        }
+      } catch (_) {}
       log.debug('Saved control state to scene flags');
     } catch (error) {
       log.warn('Failed to save control state:', error);

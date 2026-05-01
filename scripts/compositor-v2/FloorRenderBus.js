@@ -35,7 +35,7 @@ import {
   getVisibleLevelBackgroundLayers,
   hasV14NativeLevels,
 } from '../foundry/levels-scene-flags.js';
-import { isTileOverhead } from '../scene/tile-manager.js';
+import { isTileOverhead, getTileVisualCenterFoundryXY } from '../scene/tile-manager.js';
 import {
   RENDER_ORDER_PER_FLOOR,
   GROUND_Z,
@@ -284,13 +284,13 @@ export class FloorRenderBus {
       const rotation = typeof tileDoc.rotation === 'number'
         ? (tileDoc.rotation * Math.PI) / 180 : 0;
 
-      // Foundry tile x/y = top-left in canvas space (Y-down).
-      // Three world Y-up: worldY = worldH - foundryY.
+      // Foundry v14+ tiles: shape (x,y) is the anchor; center uses anchorX/Y.
       const worldH = fd.height;
       const tileW = tileDoc.width ?? 0;
       const tileH = tileDoc.height ?? 0;
-      const centerX = (tileDoc.x ?? 0) + tileW / 2;
-      const centerY = worldH - ((tileDoc.y ?? 0) + tileH / 2);
+      const { cx: cxf, cy: cyf } = getTileVisualCenterFoundryXY(tileDoc);
+      const centerX = cxf;
+      const centerY = worldH - cyf;
       const z = GROUND_Z + floorIndex * Z_PER_FLOOR;
       const tileId = tileDoc.id ?? tileDoc._id ?? `tile_${tileCount}`;
 
@@ -753,8 +753,9 @@ export class FloorRenderBus {
     const worldH = Number(sceneData?.height) || 0;
     const tileW = Number(tileDoc?.width) || 0;
     const tileH = Number(tileDoc?.height) || 0;
-    const centerX = (Number(tileDoc?.x) || 0) + tileW / 2;
-    const centerY = worldH - ((Number(tileDoc?.y) || 0) + tileH / 2);
+    const { cx: cxf, cy: cyf } = getTileVisualCenterFoundryXY(tileDoc);
+    const centerX = cxf;
+    const centerY = worldH - cyf;
     const z = GROUND_Z + floorIndex * Z_PER_FLOOR;
     const alpha = typeof tileDoc.alpha === 'number' ? tileDoc.alpha : 1;
     const rotation = typeof tileDoc.rotation === 'number'

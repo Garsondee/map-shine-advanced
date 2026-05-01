@@ -29,6 +29,7 @@ import {
   hydrateControlPanelLiveOverridesFromController,
   resolveWeatherController
 } from './weather-param-bridge.js';
+import * as scenePresets from './scene-presets.js';
 
 const log = createLogger('UI');
 
@@ -297,6 +298,27 @@ export class TweakpaneManager {
      * @type {Set<string>}
      */
     this._worldBasedEffects = new Set();
+
+    /** @type {boolean} When true, preset-apply pipeline is running; do not flip UI to Custom. */
+    this._applyingPreset = false;
+
+    /** @type {HTMLElement|null} */
+    this._presetsBarEl = null;
+
+    /** @type {HTMLSelectElement|null} */
+    this._presetsSelectEl = null;
+
+    /** @type {string|null} */
+    this._lastPresetsSceneId = null;
+
+    /** @type {boolean} After first presets hydrate; avoids clearing activePresetId during startup churn. */
+    this._scenePresetTrackingReady = false;
+
+    /** @type {(() => void)|null} */
+    this._canvasReadyPresetsHandler = null;
+
+    /** @type {boolean} While true, queued effect saves must not flip the preset dropdown to Custom. */
+    this._presetSuppressCustomForSaves = false;
   }
 
   _registerPrimaryFolder(folder) {
@@ -386,9 +408,9 @@ export class TweakpaneManager {
       this._applyFilter('');
     });
 
-    // Insert directly before the first top-level folder so the filter bar is always
-    // visible at the top of the section list regardless of Tweakpane wrapper layout.
-    listHost.insertBefore(wrap, firstFolderEl);
+    // Prepend so the filter bar stays above any headerless strips (presets / scene toggle)
+    // and the first Tweakpane folder row.
+    listHost.insertBefore(wrap, listHost.firstChild);
 
     this._filterBarEl = wrap;
   }
@@ -828,6 +850,10 @@ export class TweakpaneManager {
     // Always keep core launchers near the top of the UI so they're accessible
     // regardless of which authoring section is currently expanded.
     this.buildQuickActionsSection();
+    // Presets strip (requires a top-level folder to anchor insertBefore the first .tp-fldv)
+    if (!showOnboardingOnly) {
+      await this.buildPresetsBar();
+    }
     // Build after at least one folder exists so we can insert this headerless
     // section directly above Quick Actions in the top-level list.
     this.buildSceneEnableQuickSection();
@@ -868,7 +894,18 @@ export class TweakpaneManager {
     this._buildFilterBar();
 
     // Start UI update loop only when full controls are available.
-    if (!showOnboardingOnly) this.startUILoop();
+    if (!showOnboardingOnly) {
+      this._scenePresetTrackingReady = true;
+      this.startUILoop();
+      if (!this._canvasReadyPresetsHandler) {
+        this._canvasReadyPresetsHandler = () => {
+          this._lastPresetsSceneId = null;
+          void this._hydratePresetsSelect({ forceLoad: false });
+          this._refreshSceneEnableQuickToggle({ force: true });
+        };
+        Hooks.on('canvasReady', this._canvasReadyPresetsHandler);
+      }
+    }
 
     // Make pane draggable
     this.makeDraggable();
@@ -1478,6 +1515,10 @@ export class TweakpaneManager {
         }
         dlg.toggle?.();
       });
+
+      addGridButton('Copy Scene Settings', async () => {
+        await this.copyScenePresetToClipboard();
+      });
     }
 
     addGridButton('Attempt Scene Recovery', async () => {
@@ -1685,6 +1726,247 @@ export class TweakpaneManager {
   }
 
   /**
+   * Headerless presets row: built-in JSON presets + Custom state.
+   * Inserts before the first top-level folder (Quick Actions).
+   * @returns {Promise<void>}
+   * @private
+   */
+  async buildPresetsBar() {
+    if (!this.pane?.element) return;
+
+    const paneEl = this.pane.element;
+    const firstFolderEl = paneEl.querySelector('.tp-fldv');
+    const listHost = firstFolderEl?.parentElement;
+    if (!firstFolderEl || !listHost) return;
+
+    if (this._presetsBarEl?.parentElement) {
+      this._presetsBarEl.remove();
+    }
+
+    const wrap = document.createElement('div');
+    wrap.className = 'ms-scene-presets-bar';
+    wrap.style.display = 'flex';
+    wrap.style.alignItems = 'center';
+    wrap.style.gap = '8px';
+    wrap.style.padding = '4px 0 6px 0';
+
+    const label = document.createElement('span');
+    label.textContent = 'Presets';
+    label.style.fontWeight = '600';
+    label.style.flex = '0 0 auto';
+
+    const select = document.createElement('select');
+    select.className = 'ms-scene-presets-select';
+    select.style.flex = '1 1 auto';
+    select.style.minWidth = '0';
+    select.style.padding = '5px 8px';
+    select.style.borderRadius = '6px';
+    select.style.border = '1px solid rgba(255,255,255,0.18)';
+    select.style.background = 'rgba(255,255,255,0.08)';
+    select.style.color = 'inherit';
+
+    wrap.appendChild(label);
+    wrap.appendChild(select);
+
+    for (const evt of ['mousedown', 'pointerdown', 'dblclick', 'contextmenu', 'click']) {
+      wrap.addEventListener(evt, (e) => e.stopPropagation());
+    }
+    wrap.addEventListener('wheel', (e) => e.stopPropagation(), { passive: true });
+
+    listHost.insertBefore(wrap, firstFolderEl);
+
+    this._presetsBarEl = wrap;
+    this._presetsSelectEl = select;
+
+    select.addEventListener('change', (ev) => {
+      ev.stopPropagation();
+      void this._onPresetsSelectChange(select.value);
+    });
+
+    await this._hydratePresetsSelect({ forceLoad: true });
+  }
+
+  /**
+   * @param {{ forceLoad?: boolean }} [options]
+   * @returns {Promise<void>}
+   * @private
+   */
+  async _hydratePresetsSelect(options = {}) {
+    const { forceLoad = false } = options;
+    const select = this._presetsSelectEl;
+    if (!select) return;
+
+    const presets = await scenePresets.loadBuiltInPresets({ force: forceLoad });
+
+    select.replaceChildren();
+
+    const optCustom = document.createElement('option');
+    optCustom.value = '__custom__';
+    optCustom.textContent = 'Custom';
+    select.appendChild(optCustom);
+
+    for (const p of presets) {
+      const opt = document.createElement('option');
+      opt.value = p.id;
+      opt.textContent = p.name;
+      opt.title = p.description || p.name;
+      select.appendChild(opt);
+    }
+
+    const scene = canvas?.scene ?? null;
+    const activeId = scene ? scenePresets.getActivePresetId(scene) : null;
+    const hasPresetOption = activeId && presets.some((p) => p.id === activeId);
+
+    if (hasPresetOption) {
+      select.value = activeId;
+      optCustom.hidden = true;
+    } else {
+      select.value = '__custom__';
+      optCustom.hidden = false;
+    }
+
+    this._lastPresetsSceneId = scene?.id ?? null;
+  }
+
+  /**
+   * @param {string} value
+   * @returns {Promise<void>}
+   * @private
+   */
+  async _onPresetsSelectChange(value) {
+    if (value === '__custom__') return;
+
+    const scene = canvas?.scene;
+    if (!scene) {
+      ui.notifications?.warn?.('Map Shine: No active scene');
+      await this._hydratePresetsSelect({ forceLoad: false });
+      return;
+    }
+
+    if (!canPersistSceneDocument()) {
+      ui.notifications?.warn?.('Map Shine: Only GMs can apply presets');
+      await this._hydratePresetsSelect({ forceLoad: false });
+      return;
+    }
+
+    const preset = await scenePresets.getPresetById(value);
+    if (!preset) {
+      ui.notifications?.warn?.('Map Shine: Preset not found');
+      await this._hydratePresetsSelect({ forceLoad: false });
+      return;
+    }
+
+    this._applyingPreset = true;
+    this._presetSuppressCustomForSaves = true;
+    try {
+      await scenePresets.applyPresetToScene(scene, preset);
+    } finally {
+      try {
+        this.lastSave = 0;
+        await this.flushSaveQueue();
+        await Promise.resolve();
+        this.lastSave = 0;
+        await this.flushSaveQueue();
+      } catch (_) {
+      }
+      this._presetSuppressCustomForSaves = false;
+      this._applyingPreset = false;
+    }
+
+    await this._hydratePresetsSelect({ forceLoad: false });
+  }
+
+  /**
+   * Sync presets dropdown when the active scene changes (UI loop + canvasReady).
+   * @private
+   */
+  _refreshPresetsSelect() {
+    const select = this._presetsSelectEl;
+    if (!select) return;
+
+    const scene = canvas?.scene ?? null;
+    const sceneId = scene?.id ?? null;
+
+    if (sceneId !== this._lastPresetsSceneId) {
+      this._lastPresetsSceneId = sceneId;
+      void this._hydratePresetsSelect({ forceLoad: false });
+      return;
+    }
+
+    if (!scene) return;
+
+    const activeId = scenePresets.getActivePresetId(scene);
+    const hasOption = activeId && [...select.options].some((o) => o.value === activeId);
+    const want = hasOption ? activeId : '__custom__';
+
+    const customOpt = select.querySelector('option[value="__custom__"]');
+    if (customOpt) customOpt.hidden = want !== '__custom__';
+
+    if (select.value !== want) {
+      select.value = want;
+    }
+  }
+
+  /**
+   * When the user diverges from a shipped preset, clear the active preset flag and show Custom.
+   * @returns {Promise<void>}
+   * @private
+   */
+  async _markPresetCustom() {
+    if (this._applyingPreset || this._presetSuppressCustomForSaves || !this._scenePresetTrackingReady || this._uiValidatorActive) return;
+
+    const scene = canvas?.scene;
+    if (!scene) return;
+
+    const select = this._presetsSelectEl;
+    if (select && select.value !== '__custom__') {
+      select.value = '__custom__';
+      const customOpt = select.querySelector('option[value="__custom__"]');
+      if (customOpt) customOpt.hidden = false;
+    }
+
+    if (!scenePresets.getActivePresetId(scene)) return;
+
+    if (canPersistSceneDocument()) {
+      await scenePresets.clearActivePresetId(scene);
+    }
+  }
+
+  /**
+   * Copy preset-ready JSON (id / name / description scaffold) for module authors.
+   * @returns {Promise<void>}
+   * @public
+   */
+  async copyScenePresetToClipboard() {
+    const scene = canvas?.scene;
+    if (!scene) {
+      ui.notifications?.warn?.('Map Shine: No active scene to copy settings from');
+      return;
+    }
+
+    const payload = scenePresets.buildPresetReadyJsonForScene(scene);
+    if (!payload) {
+      ui.notifications?.warn?.('Map Shine: Could not build preset JSON');
+      return;
+    }
+
+    const json = JSON.stringify(payload, null, 2);
+
+    try {
+      if (navigator?.clipboard?.writeText) {
+        await navigator.clipboard.writeText(json);
+        ui.notifications.info(`Map Shine: Preset-ready JSON for "${scene.name}" copied to clipboard`);
+      } else {
+        throw new Error('Clipboard API not available');
+      }
+    } catch (error) {
+      log.warn('Failed to copy preset JSON to clipboard, printing to console instead:', error);
+      console.log(json);
+      ui.notifications.warn('Map Shine: Could not copy to clipboard. JSON printed to browser console.');
+    }
+  }
+
+  /**
    * Build the Environment section — contains global sun/sky parameters that are
    * the single source of truth for all effects (shadows, window light, trees, etc.).
    * @private
@@ -1826,12 +2108,6 @@ export class TweakpaneManager {
     });
 
     sceneFolder.addBlade({ view: 'separator' });
-
-    sceneFolder.addButton({
-      title: 'Copy Scene Settings'
-    }).on('click', async () => {
-      await this.copySceneSettingsToClipboard();
-    });
 
     sceneFolder.addButton({
       title: 'Paste Scene Settings'
@@ -3749,6 +4025,8 @@ export class TweakpaneManager {
       log.debug(`Sun latitude pushed to all effects: ${lat}`);
     }
 
+    void this._markPresetCustom();
+
     this.saveUIState();
   }
 
@@ -3937,6 +4215,7 @@ export class TweakpaneManager {
   queueSave(effectId) {
     if (this._uiValidatorActive) return;
     this.saveQueue.add(effectId);
+    void this._markPresetCustom();
   }
 
   /**
@@ -4851,6 +5130,8 @@ export class TweakpaneManager {
         await repairSceneControlStateFlag(scene);
       }
 
+      await scenePresets.clearActivePresetId(scene);
+
       ui.notifications.info(`Map Shine: Settings from "${sourceName}" applied to "${scene.name}". Reload the scene to see full changes.`);
     } catch (e) {
       log.warn('Failed to paste scene settings:', e);
@@ -5648,6 +5929,7 @@ export class TweakpaneManager {
 
       // Keep the scene-level quick toggle in sync across scene changes/flag edits.
       this._refreshSceneEnableQuickToggle();
+      this._refreshPresetsSelect();
 
       // Continue loop
       this.rafHandle = requestAnimationFrame(uiLoop);
@@ -6087,6 +6369,20 @@ export class TweakpaneManager {
     this._sceneEnableQuickToggleSceneId = null;
     this._sceneEnableQuickToggleState = null;
     this._sceneEnableQuickToggleBusy = false;
+
+    if (this._canvasReadyPresetsHandler) {
+      try {
+        Hooks.off('canvasReady', this._canvasReadyPresetsHandler);
+      } catch (_) {
+      }
+      this._canvasReadyPresetsHandler = null;
+    }
+    this._presetsBarEl = null;
+    this._presetsSelectEl = null;
+    this._lastPresetsSceneId = null;
+    this._scenePresetTrackingReady = false;
+    this._presetSuppressCustomForSaves = false;
+    this._applyingPreset = false;
     
     if (this.tileMotionDialog) {
       this.tileMotionDialog.dispose();

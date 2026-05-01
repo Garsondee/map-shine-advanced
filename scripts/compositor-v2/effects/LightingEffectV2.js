@@ -118,6 +118,18 @@ export class LightingEffectV2 {
     this._lightsSynced = false;
     /** @type {number} Last seen count of scene light-enhancement entries */
     this._lastEnhancementCount = -1;
+    /** @type {Map<string, object>|null} Cached per-scene enhancement map */
+    this._cachedEnhancementMap = null;
+    /** @type {string|null} Cache key for enhancement map */
+    this._cachedEnhancementKey = null;
+    /** @type {string|number|null} Scene id used by enhancement cache */
+    this._cachedEnhancementSceneId = null;
+    /** @type {boolean} */
+    this._perspectiveRefreshDirty = true;
+    /** @type {number} */
+    this._lastPerspectiveRefreshAtSec = -Infinity;
+    /** @type {Map<string, number>} Per-light next allowed animation update time (seconds) */
+    this._nextAnimationUpdateAtSec = new Map();
 
     // ── Tuning parameters (match V1 defaults) ──────────────────────────
     this.params = {
@@ -195,6 +207,7 @@ export class LightingEffectV2 {
    */
   setLightingPerspectiveContext(ctx) {
     this._lightingPerspectiveContext = ctx;
+    this._perspectiveRefreshDirty = true;
   }
 
   /** @private */
@@ -209,6 +222,7 @@ export class LightingEffectV2 {
     const moduleFlags = changes?.flags?.[MODULE_ID];
     if (!moduleFlags || !Object.prototype.hasOwnProperty.call(moduleFlags, LIGHT_ENHANCEMENT_FLAG_KEY)) return;
 
+    this._invalidateEnhancementCache();
     this.syncAllLights();
   }
 
@@ -218,9 +232,9 @@ export class LightingEffectV2 {
    * @returns {Map<string, object>}
    */
   _getLightEnhancementConfigMap() {
-    const map = new Map();
     const scene = canvas?.scene;
-    if (!scene) return map;
+    if (!scene) return new Map();
+    const sceneId = scene?.id ?? scene?._id ?? null;
 
     let raw;
     try {
@@ -232,6 +246,17 @@ export class LightingEffectV2 {
     const list = Array.isArray(raw)
       ? raw
       : (Array.isArray(raw?.lights) ? raw.lights : (Array.isArray(raw?.items) ? raw.items : []));
+    const rawLen = list.length;
+    const firstId = rawLen > 0 && list[0] && list[0].id != null ? String(list[0].id) : '';
+    const lastId = rawLen > 1 && list[rawLen - 1] && list[rawLen - 1].id != null ? String(list[rawLen - 1].id) : '';
+    const cacheKey = `${rawLen}|${firstId}|${lastId}`;
+    if (this._cachedEnhancementMap
+        && this._cachedEnhancementSceneId === sceneId
+        && this._cachedEnhancementKey === cacheKey) {
+      return this._cachedEnhancementMap;
+    }
+
+    const map = new Map();
 
     for (const entry of list) {
       if (!entry || typeof entry !== 'object') continue;
@@ -242,7 +267,17 @@ export class LightingEffectV2 {
       map.set(id, config);
     }
 
+    this._cachedEnhancementMap = map;
+    this._cachedEnhancementKey = cacheKey;
+    this._cachedEnhancementSceneId = sceneId;
     return map;
+  }
+
+  /** @private */
+  _invalidateEnhancementCache() {
+    this._cachedEnhancementMap = null;
+    this._cachedEnhancementKey = null;
+    this._cachedEnhancementSceneId = null;
   }
 
   /**
@@ -815,6 +850,8 @@ export class LightingEffectV2 {
     this._registerHook('updateAmbientLight', (doc, changes) => this._onLightUpdate(doc, changes));
     this._registerHook('deleteAmbientLight', (doc) => this._onLightDelete(doc));
     this._registerHook('updateScene', (scene, changes) => this._onSceneUpdate(scene, changes));
+    this._registerHook('mapShineLevelContextChanged', () => this._markPerspectiveRefreshDirty());
+    this._registerHook('lightingRefresh', () => this._markPerspectiveRefreshDirty());
 
     this._initialized = true;
     log.info(`LightingEffectV2 initialized (${w}x${h})`);
@@ -827,6 +864,7 @@ export class LightingEffectV2 {
    */
   syncAllLights() {
     if (!this._initialized) return;
+    this._nextAnimationUpdateAtSec.clear();
 
     // Dispose existing
     for (const light of this._lights.values()) {
@@ -864,6 +902,7 @@ export class LightingEffectV2 {
     }
 
     this._lightsSynced = true;
+    this._perspectiveRefreshDirty = true;
     log.info(`LightingEffectV2: synced ${this._lights.size} lights, ${this._darknessSources.size} darkness sources`);
   }
 
@@ -903,6 +942,48 @@ export class LightingEffectV2 {
       } catch (_) {}
       ds.mesh.visible = this._isDocVisibleForLighting(doc, sceneDarkness);
     }
+  }
+
+  /** @private */
+  _markPerspectiveRefreshDirty() {
+    this._perspectiveRefreshDirty = true;
+  }
+
+  /**
+   * Refresh light visibility when dirty, with a low-frequency watchdog.
+   * @private
+   * @param {number} nowSec
+   */
+  _refreshLightsForLevelsPerspectiveIfNeeded(nowSec) {
+    const t = Number.isFinite(nowSec) ? nowSec : 0;
+    const elapsed = t - this._lastPerspectiveRefreshAtSec;
+    const watchdogIntervalSec = 0.35;
+    if (!this._perspectiveRefreshDirty && elapsed < watchdogIntervalSec) return;
+    this._refreshLightsForLevelsPerspective();
+    this._perspectiveRefreshDirty = false;
+    this._lastPerspectiveRefreshAtSec = t;
+  }
+
+  /**
+   * Reduce animation work for non-visible torch/flame lights.
+   * @private
+   * @param {ThreeLightSource|ThreeDarknessSource} source
+   * @param {number} tSec
+   * @returns {boolean}
+   */
+  _shouldDecimateAnimationUpdate(source, tSec) {
+    if (!source) return false;
+    if (source?.mesh?.visible !== false) return false;
+    const animType = String(source?.document?.config?.animation?.type || '').toLowerCase();
+    const isTorchLike = animType === 'torch' || animType === 'flame';
+    if (!isTorchLike) return false;
+
+    const id = String(source?.id ?? source?.document?.id ?? source?.document?._id ?? '');
+    if (!id) return false;
+    const nextAt = Number(this._nextAnimationUpdateAtSec.get(id));
+    if (Number.isFinite(nextAt) && tSec < nextAt) return true;
+    this._nextAnimationUpdateAtSec.set(id, tSec + (1 / 12));
+    return false;
   }
 
   /**
@@ -990,6 +1071,7 @@ export class LightingEffectV2 {
   _onLightCreate(doc) {
     if (!this._initialized) return;
     this._addLightFromDoc(doc);
+    this._markPerspectiveRefreshDirty();
   }
 
   /** @private */
@@ -1027,6 +1109,7 @@ export class LightingEffectV2 {
       old.dispose();
       this._lights.delete(id);
       this._addLightFromDoc(merged);
+      this._markPerspectiveRefreshDirty();
       return;
     }
     if (!isNegative && this._darknessSources.has(id)) {
@@ -1035,6 +1118,7 @@ export class LightingEffectV2 {
       old.dispose();
       this._darknessSources.delete(id);
       this._addLightFromDoc(merged);
+      this._markPerspectiveRefreshDirty();
       return;
     }
 
@@ -1047,6 +1131,7 @@ export class LightingEffectV2 {
       // Light not tracked yet — create it
       this._addLightFromDoc(merged);
     }
+    this._markPerspectiveRefreshDirty();
   }
 
   /** @private */
@@ -1067,6 +1152,8 @@ export class LightingEffectV2 {
       ds.dispose();
       this._darknessSources.delete(id);
     }
+    this._nextAnimationUpdateAtSec.delete(String(id));
+    this._markPerspectiveRefreshDirty();
   }
 
   // ── Per-frame update ──────────────────────────────────────────────────
@@ -1136,11 +1223,13 @@ export class LightingEffectV2 {
 
     // Update light animations
     const foundrySceneDarkness = readFoundryDarkness01();
+    const tSec = (timeInfo && typeof timeInfo.elapsed === 'number') ? timeInfo.elapsed : 0;
     for (const light of this._lights.values()) {
       try {
         if (light?.mesh) {
           light.mesh.visible = this._isDocVisibleForLighting(light?.document, foundrySceneDarkness);
         }
+        if (this._shouldDecimateAnimationUpdate(light, tSec)) continue;
         light.updateAnimation(timeInfo, sceneDarkness);
       } catch (_) {}
     }
@@ -1149,6 +1238,7 @@ export class LightingEffectV2 {
         if (ds?.mesh) {
           ds.mesh.visible = this._isDocVisibleForLighting(ds?.document, foundrySceneDarkness);
         }
+        if (this._shouldDecimateAnimationUpdate(ds, tSec)) continue;
         ds.updateAnimation(timeInfo);
       } catch (_) {}
     }
@@ -1236,6 +1326,7 @@ export class LightingEffectV2 {
     try {
       const enhancementCount = this._getLightEnhancementConfigMap().size;
       if (this._lightsSynced && enhancementCount !== this._lastEnhancementCount) {
+        this._invalidateEnhancementCache();
         this.syncAllLights();
       }
     } catch (_) {
@@ -1288,7 +1379,11 @@ export class LightingEffectV2 {
       cu0.uApplyRoofOcclusionToBuilding.value = 1.0;
     }
 
-    this._refreshLightsForLevelsPerspective();
+    this._refreshLightsForLevelsPerspectiveIfNeeded(
+      (typeof performance !== 'undefined' && typeof performance.now === 'function')
+        ? (performance.now() / 1000)
+        : 0
+    );
 
     // ── Pass 1: Accumulate Foundry light mesh contributions ───────────
     // Save camera layer mask — ThreeLightSource meshes live on layer 0.
@@ -1622,6 +1717,10 @@ export class LightingEffectV2 {
     this._composeQuad = null;
     this._lightsSynced = false;
     this._lastEnhancementCount = -1;
+    this._invalidateEnhancementCache();
+    this._perspectiveRefreshDirty = true;
+    this._lastPerspectiveRefreshAtSec = -Infinity;
+    this._nextAnimationUpdateAtSec.clear();
     this._initialized = false;
     this._lightingPerspectiveContext = null;
 

@@ -17,6 +17,10 @@
  *   (single-level maps / non-level scenes).
  *
  * @module compositor-v2/effects/BuildingShadowsEffectV2
+ *
+ * Canvas padding: this pass renders scene-sized RTs (mask space), not full canvas.
+ * Do not clip with `canvas.dimensions.sceneRect` offsets here — that mixes spaces.
+ * {@link LightingEffectV2} already gates `tBuildingShadow` with `inSceneBounds`.
  */
 
 import { createLogger } from '../../core/log.js';
@@ -393,6 +397,7 @@ export class BuildingShadowsEffectV2 {
         uniform sampler2D tStrength;
         uniform float uOpacity;
         varying vec2 vUv;
+
         void main() {
           float s = clamp(texture2D(tStrength, vUv).r, 0.0, 1.0);
           float factor = 1.0 - s * clamp(uOpacity, 0.0, 1.0);

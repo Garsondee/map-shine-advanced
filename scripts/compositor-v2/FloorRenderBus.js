@@ -34,6 +34,9 @@ import {
   getVisibleLevelBackgroundSrcs,
   getVisibleLevelBackgroundLayers,
   hasV14NativeLevels,
+  resolveV14BackgroundFloorIndexForSrc,
+  normalizeFoundryAssetUrlKey,
+  getViewedV14Level,
 } from '../foundry/levels-scene-flags.js';
 import { isTileOverhead, getTileVisualCenterFoundryXY, getTileBusPlaneSizeAndMirror } from '../scene/tile-manager.js';
 import {
@@ -48,6 +51,59 @@ import {
 } from './LayerOrderPolicy.js';
 
 const log = createLogger('FloorRenderBus');
+
+/**
+ * When {@link resolveV14BackgroundFloorIndexForSrc} returns 0 on early populate
+ * (levels not hydrated) or floor stack not ready, pin the bus floor from the
+ * viewed V14 level if the src matches {@link getViewedLevelBackgroundSrc}.
+ * Does not override a non-zero resolve (avoids clobbering correct multi-layer rows).
+ *
+ * @param {any} scene
+ * @param {string} src
+ * @param {number} floorIdx
+ * @param {{ loadCount: number, floorsLen: number, viewedBg: string, viewedLevelIndexOverride?: number|undefined }} ctx
+ * @returns {number}
+ */
+function finalizeBackgroundFloorIndexForBus(scene, src, floorIdx, ctx) {
+  let out = Number.isFinite(Number(floorIdx)) ? Number(floorIdx) : 0;
+  const trimmed = String(src || '').trim();
+  const viewedBg = String(ctx.viewedBg || '').trim();
+  const nativeLevelCount = Number(scene?.levels?.size ?? 0);
+  const multi = nativeLevelCount > 1 || ctx.floorsLen > 1;
+  const normMatch = !!(
+    trimmed
+    && viewedBg
+    && normalizeFoundryAssetUrlKey(viewedBg) === normalizeFoundryAssetUrlKey(trimmed)
+  );
+  const ovr = Number(ctx.viewedLevelIndexOverride);
+
+  // `mapShineLevelContextChanged` passes the target level index before `canvas.level` / viewed-bg URL catch up.
+  if (ctx.loadCount === 1 && multi && Number.isFinite(ovr)) {
+    if (normMatch) return Math.max(0, Math.floor(ovr));
+    // `_configureLevelTextures` can list the new src while getViewedLevelBackgroundSrc() still lags one frame.
+    if (out === 0) return Math.max(0, Math.floor(ovr));
+  }
+
+  if (ctx.loadCount !== 1 || !normMatch || !multi) return out;
+  // Trust non-zero resolve (multi-layer stack or hydrated levels).
+  if (out !== 0) return out;
+  try {
+    if (globalThis.canvas?.scene?.id === scene?.id) {
+      const r = Number(globalThis.canvas?.level?.index);
+      if (Number.isFinite(r)) return Math.max(0, Math.floor(r));
+    }
+  } catch (_) {}
+  const vl = getViewedV14Level(scene);
+  const r = Number(vl?.index);
+  if (Number.isFinite(r)) return Math.max(0, Math.floor(r));
+  return out;
+}
+
+/** @param {number} floorIdx */
+function backgroundBusKeyForFloorIndex(floorIdx) {
+  const fi = Number.isFinite(Number(floorIdx)) ? Math.max(0, Math.floor(Number(floorIdx))) : 0;
+  return fi === 0 ? '__bg_image__' : `__bg_image__${fi}`;
+}
 
 const MAX_SORT_WITHIN_FLOOR_GROUP = MAX_INTRA_ROLE_OFFSET;
 const UPPER_FLOOR_ALPHA_CUTOFF = 0.4;
@@ -143,6 +199,12 @@ export class FloorRenderBus {
     this._lastPreRenderLeakCount = 0;
     this._lastPreRenderLeakKeys = [];
 
+    /**
+     * Incremented when background decodes are invalidated (bus clear / bg swap).
+     * Async `Image.onload` from an earlier swap or populate must not call `_addBackgroundImage`.
+     */
+    this._bgDecodeEpoch = 0;
+
     log.debug('FloorRenderBus created');
   }
 
@@ -223,14 +285,21 @@ export class FloorRenderBus {
       && _composerAlbedoMatchesViewedBg(bgTexture, bgSrc);
 
     if (reuseComposerAlbedo) {
-      this._addBackgroundImage(fd, bgTexture, 0, '__bg_image__');
-      if (visibleBgSrcs.length > 1) {
+      const viewedBgReuse = String(getViewedLevelBackgroundSrc(scene) || '').trim();
+      let floorIdxReuse = resolveV14BackgroundFloorIndexForSrc(scene, bgSrc);
+      floorIdxReuse = finalizeBackgroundFloorIndexForBus(scene, bgSrc, floorIdxReuse, {
+        loadCount: 1,
+        floorsLen: floors.length,
+        viewedBg: viewedBgReuse,
+      });
+      this._addBackgroundImage(fd, bgTexture, floorIdxReuse, backgroundBusKeyForFloorIndex(floorIdxReuse));
+      if (visibleBgLayers.length > 1) {
         // Composer albedo only matches the viewed level texture; load other visible
         // background layers explicitly so upper-floor views include lower levels.
-        this._loadVisibleBackgroundStack(visibleBgSrcs, fd, { skipFirst: true });
+        this._loadVisibleBackgroundStack(visibleBgLayers, fd, { skipFirst: true });
       }
-    } else if (visibleBgSrcs.length > 0) {
-      this._loadVisibleBackgroundStack(visibleBgSrcs, fd);
+    } else if (visibleBgLayers.length > 0) {
+      this._loadVisibleBackgroundStack(visibleBgLayers, fd);
     } else if (bgSrc) {
       // Route legacy single-background load through the same
       // `_loadVisibleBackgroundStack` path used for multi-level stacks.
@@ -239,7 +308,7 @@ export class FloorRenderBus {
       // holes survive to the GPU. Previously this fell back to
       // `TextureLoader`, which silently flattens WebP alpha in browsers
       // that decode HTMLImageElement with premultiplied RGB.
-      this._loadVisibleBackgroundStack([bgSrc], fd);
+      this._loadVisibleBackgroundStack([{ src: bgSrc, alphaThreshold: 0 }], fd);
       log.info('FloorRenderBus: bg image load routed through ImageBitmap stack loader');
     } else if (bgTexture) {
       let frames = 0;
@@ -249,8 +318,16 @@ export class FloorRenderBus {
         try {
           const img = bgTexture?.image;
           if (img && img.width > 0 && img.height > 0) {
-            if (!this._tiles.has('__bg_image__')) {
-              this._addBackgroundImage(fd, bgTexture, 0, '__bg_image__');
+            const viewedBgRaf = String(getViewedLevelBackgroundSrc(scene) || '').trim();
+            let fiRaf = resolveV14BackgroundFloorIndexForSrc(scene, bgSrc);
+            fiRaf = finalizeBackgroundFloorIndexForBus(scene, bgSrc, fiRaf, {
+              loadCount: 1,
+              floorsLen: floors.length,
+              viewedBg: viewedBgRaf,
+            });
+            const keyRaf = backgroundBusKeyForFloorIndex(fiRaf);
+            if (!this._tiles.has(keyRaf)) {
+              this._addBackgroundImage(fd, bgTexture, fiRaf, keyRaf);
             }
             return;
           }
@@ -435,7 +512,8 @@ export class FloorRenderBus {
    */
   clear() {
     if (!this._scene) return;
-    
+    this._bgDecodeEpoch += 1;
+
     log.info(`[V2 DEBUG] FloorRenderBus.clear() called - scene has ${this._scene.children.length} children before clear`);
     
     for (const { mesh, material, root } of this._tiles.values()) {
@@ -1294,13 +1372,11 @@ export class FloorRenderBus {
   }
 
   /**
-   * Map texture for the Nth loaded visible background (`__bg_image__` for 0,
-   * `__bg_image__1` for 1, …). `entry.floorIndex` on those planes is this stack
-   * index from `_loadVisibleBackgroundStack`, **not** `FloorBand.index`, so
-   * post-merge water should align masks with `visibleFloors` position (e.g.
-   * length-1 = active roof, length-2 = middle) rather than band index alone.
+   * Map texture for the bus key `__bg_image__` (stack 0) or `__bg_image__${stackIndex}`.
+   * Keys follow V14 level index from `_loadVisibleBackgroundStack`, not necessarily
+   * contiguous stack positions when only some floors have background art.
    *
-   * @param {number} stackIndex - integer >= 0, typically `visibleFloors.length - 1 - k`
+   * @param {number} stackIndex - Same index used in the bus key (`__bg_image__${stackIndex}`)
    * @returns {import('three').Texture|null}
    */
   getBackgroundImageMapForStackIndex(stackIndex) {
@@ -1589,30 +1665,32 @@ export class FloorRenderBus {
    *
    * @param {string} src - New image path to load
    * @param {object} fd  - foundrySceneData (for dimensions)
+   * @param {{ viewedLevelIndex?: number }} [swapOpts] - Optional native level {@link foundry.documents.BaseLevel#index}
+   *   from `mapShineLevelContextChanged` so floor placement stays correct before `canvas.level` commits.
    */
-  swapBackgroundImage(src, fd) {
+  swapBackgroundImage(src, fd, swapOpts = {}) {
     if (!this._initialized || !fd) return;
     const scene = globalThis.canvas?.scene ?? null;
     const visibleLayers = getVisibleLevelBackgroundLayers(scene);
-    const stack = visibleLayers.map((l) => l.src);
-    if (stack.length > 0) {
-      this.swapVisibleLevelBackgroundImages(stack, fd);
+    if (visibleLayers.length > 0) {
+      this.swapVisibleLevelBackgroundImages(visibleLayers, fd, swapOpts);
       return;
     }
     if (!src) return;
-    this.swapVisibleLevelBackgroundImages([src], fd);
+    this.swapVisibleLevelBackgroundImages([{ src, alphaThreshold: 0 }], fd, swapOpts);
   }
 
   /**
    * Replace the entire visible-level background stack.
    *
-   * @param {string[]} srcs
+   * @param {Array<string|{src:string, alphaThreshold?:number, sort?: number}>} srcsOrLayers
    * @param {object} fd
+   * @param {{ skipFirst?: boolean, viewedLevelIndex?: number }} [options]
    */
-  swapVisibleLevelBackgroundImages(srcs, fd, options = {}) {
-    if (!this._initialized || !fd || !Array.isArray(srcs) || srcs.length === 0) return;
+  swapVisibleLevelBackgroundImages(srcsOrLayers, fd, options = {}) {
+    if (!this._initialized || !fd || !Array.isArray(srcsOrLayers) || srcsOrLayers.length === 0) return;
     this._removeBackgroundImageEntries();
-    this._loadVisibleBackgroundStack(srcs, fd, options);
+    this._loadVisibleBackgroundStack(srcsOrLayers, fd, options);
   }
 
   /**
@@ -1620,6 +1698,7 @@ export class FloorRenderBus {
    * @private
    */
   _removeBackgroundImageEntries() {
+    this._bgDecodeEpoch += 1;
     const keys = [];
     for (const key of this._tiles.keys()) {
       if (String(key).startsWith('__bg_image__')) keys.push(String(key));
@@ -1637,22 +1716,48 @@ export class FloorRenderBus {
 
   /**
    * Load and add all visible background layers in order.
-   * @param {string[]} srcs
+   * Each layer is placed at the V14 level index that owns that `background.src`
+   * ({@link resolveV14BackgroundFloorIndexForSrc}). Foundry's `_configureLevelTextures`
+   * `sort` field is **texture stack order**, not native level index — it must not
+   * be used as `floorIndex` or upper-floor albedo is culled from `renderFloorRangeTo`.
+   * For a **single-URL** load when resolve returns 0 (e.g. first populate before
+   * `scene.levels` is hydrated) but the URL matches {@link getViewedLevelBackgroundSrc},
+   * {@link finalizeBackgroundFloorIndexForBus} pins from `canvas.level` / {@link getViewedV14Level}.
+   *
+   * @param {Array<string|{src:string, alphaThreshold?:number, sort?: number}>} srcsOrLayers
    * @param {object} fd
-   * @param {{skipFirst?: boolean}} [options]
+   * @param {{skipFirst?: boolean, viewedLevelIndex?: number}} [options]
    * @private
    */
-  _loadVisibleBackgroundStack(srcs, fd, options = {}) {
-    const list = Array.isArray(srcs) ? srcs : [];
-    const { skipFirst = false } = options;
+  _loadVisibleBackgroundStack(srcsOrLayers, fd, options = {}) {
+    const list = Array.isArray(srcsOrLayers) ? srcsOrLayers : [];
+    const { skipFirst = false, viewedLevelIndex } = options;
     if (!list.length) return;
+    const scene = globalThis.canvas?.scene ?? null;
+    let loadCount = 0;
     for (let i = 0; i < list.length; i += 1) {
       if (skipFirst && i === 0) continue;
       const raw = list[i];
-      const src = (typeof raw === 'string') ? raw.trim() : '';
+      const src = (typeof raw === 'string') ? String(raw).trim() : String(raw?.src || '').trim();
+      if (src) loadCount += 1;
+    }
+    const floorsLen = (window.MapShine?.floorStack?.getFloors?.() ?? []).length;
+    const viewedBg = String(getViewedLevelBackgroundSrc(scene) || '').trim();
+
+    for (let i = 0; i < list.length; i += 1) {
+      if (skipFirst && i === 0) continue;
+      const raw = list[i];
+      const src = (typeof raw === 'string') ? String(raw).trim() : String(raw?.src || '').trim();
       if (!src) continue;
-      const key = i === 0 ? '__bg_image__' : `__bg_image__${i}`;
-      this._loadBgImageStraightAlpha(src, fd, i, key);
+      let floorIdx = resolveV14BackgroundFloorIndexForSrc(scene, src);
+      floorIdx = finalizeBackgroundFloorIndexForBus(scene, src, floorIdx, {
+        loadCount,
+        floorsLen,
+        viewedBg,
+        viewedLevelIndexOverride: viewedLevelIndex,
+      });
+      const key = backgroundBusKeyForFloorIndex(floorIdx);
+      this._loadBgImageStraightAlpha(src, fd, floorIdx, key);
     }
   }
 
@@ -1713,9 +1818,11 @@ export class FloorRenderBus {
   _loadBgImageStraightAlpha(src, fd, zIndex, key) {
     const THREE = window.THREE;
     if (!THREE) return;
+    const decodeEpochAtSchedule = this._bgDecodeEpoch;
     const img = new Image();
     img.crossOrigin = 'anonymous';
     img.onload = () => {
+      if (decodeEpochAtSchedule !== this._bgDecodeEpoch) return;
       try {
         const w = img.naturalWidth || img.width;
         const h = img.naturalHeight || img.height;

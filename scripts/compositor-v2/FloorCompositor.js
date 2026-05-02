@@ -4928,6 +4928,16 @@ export class FloorCompositor {
       levelSceneRTs.push(levelSceneRT);
     }
 
+    let windowLightBufW = 1;
+    let windowLightBufH = 1;
+    try {
+      if (this.renderer && this._sizeVec && typeof this.renderer.getDrawingBufferSize === 'function') {
+        this.renderer.getDrawingBufferSize(this._sizeVec);
+        windowLightBufW = Math.max(1, Math.floor(this._sizeVec.x));
+        windowLightBufH = Math.max(1, Math.floor(this._sizeVec.y));
+      }
+    } catch (_) {}
+
     for (let li = 0; li < perLevelEntries.length; li++) {
       const { levelIndex, rts } = perLevelEntries[li];
       const { sceneRT: levelSceneRT, postA: levelPostA, postB: levelPostB } = rts;
@@ -4944,7 +4954,7 @@ export class FloorCompositor {
         const shadowW = Number(combinedShadowRawTex?.image?.width) || levelSceneRT.width || 1;
         const shadowH = Number(combinedShadowRawTex?.image?.height) || levelSceneRT.height || 1;
         this._windowLightEffect?.setCloudShadowTexture?.(combinedShadowRawTex, shadowW, shadowH, windowCloudShadowViewBounds);
-        this._windowLightEffect?.setOverheadRoofAlphaTexture?.(overheadRoofAlphaTex, levelSceneRT.width || 1, levelSceneRT.height || 1);
+        this._windowLightEffect?.setOverheadRoofAlphaTexture?.(overheadRoofAlphaTex, windowLightBufW, windowLightBufH);
         this._windowLightEffect?.setCeilingTransmittanceTexture?.(ceilingTransmittanceTex);
         this._windowLightEffect?.syncFrameOcclusion?.(this);
         this._skyColorEffect?.setOverheadRoofAlphaTexture?.(overheadRoofAlphaTex);

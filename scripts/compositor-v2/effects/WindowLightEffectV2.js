@@ -25,8 +25,9 @@
  * Roof / ceiling occlusion for window glow uses the same half-res transmittance
  * texture as `LightingEffectV2` when available (`setCeilingTransmittanceTexture`),
  * else falls back to `uOverheadRoofAlphaTex`. `syncFrameOcclusion` applies
- * `LightingPerspectiveContext.getRoofScreenOcclusionScale` so multi-floor
- * “lower floor” behavior matches lighting (optional attenuation of screen-space gate).
+ * `LightingPerspectiveContext.getRoofScreenOcclusionScaleForFloor` for the per-level
+ * lit slice (falls back to `getRoofScreenOcclusionScale` when needed) so multi-floor
+ * "lower floor" behavior matches the slice being drawn, not only the UI active floor.
  *
  * @module compositor-v2/effects/WindowLightEffectV2
  */
@@ -38,6 +39,7 @@ import {
   readTileLevelsFlags,
   getVisibleLevelBackgroundLayers,
   resolveV14NativeDocFloorIndexMin,
+  resolveV14BackgroundFloorIndexForSrc,
 } from '../../foundry/levels-scene-flags.js';
 import { weatherController, PrecipitationType } from '../../core/WeatherController.js';
 
@@ -324,6 +326,17 @@ export class WindowLightEffectV2 {
 
     this._buildSharedUniforms();
 
+    this._scene.userData.onBindWindowLightPass = (rw, rh) => {
+      const u = this._sharedUniforms;
+      if (!u?.uScreenSize) return;
+      const w = Math.max(1, Math.floor(Number(rw) || 1));
+      const h = Math.max(1, Math.floor(Number(rh) || 1));
+      u.uScreenSize.value.set(w, h);
+      // Combined/cloud shadow RTs are authored for this same buffer; keep the divisor
+      // identical to gl_FragCoord space for Pass 1b (avoids texel drift vs texture.image).
+      if (u.uCloudShadowBufferSize) u.uCloudShadowBufferSize.value.set(w, h);
+    };
+
     this._initialized = true;
     log.info('WindowLightEffectV2 initialized');
   }
@@ -339,6 +352,7 @@ export class WindowLightEffectV2 {
 
   dispose() {
     this.clear();
+    if (this._scene?.userData) delete this._scene.userData.onBindWindowLightPass;
     this._scene = null;
     this._initialized = false;
     this._sharedUniforms = null;
@@ -439,8 +453,10 @@ export class WindowLightEffectV2 {
       for (let i = 0; i < bgLayers.length; i += 1) {
         const src = String(bgLayers[i]?.src || '').trim();
         if (!src) continue;
-        if (Number.isFinite(activeFloorIdx) && i !== activeFloorIdx) continue;
-        bgEntries.push({ src, floorIndex: i, key: (i === 0) ? '__bg_image__' : `__bg_image__${i}` });
+        const floorIndex = resolveV14BackgroundFloorIndexForSrc(scene, src);
+        if (Number.isFinite(activeFloorIdx) && floorIndex !== activeFloorIdx) continue;
+        const key = floorIndex === 0 ? '__bg_image__' : `__bg_image__${floorIndex}`;
+        bgEntries.push({ src, floorIndex, key });
       }
     }
 
@@ -766,46 +782,39 @@ export class WindowLightEffectV2 {
   }
 
   /**
-   * Bind CloudEffectV2 shadow factor texture for screen-space occlusion.
+   * Bind cloud / ShadowManager combined shadow factor texture for screen-space occlusion.
+   * Textures are laid out per drawing-buffer pixel; UVs always use `gl_FragCoord` / `uCloudShadowBufferSize`.
    * @param {THREE.Texture|null} texture
    * @param {number} screenW
    * @param {number} screenH
-   * @param {{minX:number,minY:number,maxX:number,maxY:number}|null} [viewBounds]
+   * @param {{minX:number,minY:number,maxX:number,maxY:number}|null} [_viewBounds] - Ignored (kept for call-site compatibility).
    */
-  setCloudShadowTexture(texture, screenW, screenH, viewBounds = null) {
+  setCloudShadowTexture(texture, screenW, screenH, _viewBounds = null) {
     const u = this._sharedUniforms;
     if (!u) return;
     u.uCloudShadowTex.value = texture ?? null;
     u.uHasCloudShadowTex.value = texture ? 1.0 : 0.0;
     const w = Math.max(1, Number(screenW) || 1);
     const h = Math.max(1, Number(screenH) || 1);
-    u.uScreenSize.value.set(w, h);
-    if (viewBounds && Number.isFinite(viewBounds.minX) && Number.isFinite(viewBounds.minY)
-      && Number.isFinite(viewBounds.maxX) && Number.isFinite(viewBounds.maxY)) {
-      u.uCloudShadowViewMin.value.set(viewBounds.minX, viewBounds.minY);
-      u.uCloudShadowViewMax.value.set(viewBounds.maxX, viewBounds.maxY);
-      u.uHasCloudShadowViewBounds.value = 1.0;
-    } else {
-      u.uHasCloudShadowViewBounds.value = 0.0;
-    }
+    if (u.uCloudShadowBufferSize) u.uCloudShadowBufferSize.value.set(w, h);
   }
 
   /**
    * Bind overhead roof alpha texture for screen-space gating of window light.
    * This prevents non-overhead window overlays (e.g. background windows) from
    * leaking light onto pixels currently covered by visible overhead tiles.
+   * Roof/ceiling screen UVs use `uScreenSize`, which is set only in
+   * {@link LightingEffectV2}'s `onBindWindowLightPass` (actual `_windowLightRT` size)
+   * so `gl_FragCoord` always matches the bound RT. This method binds the texture only.
    * @param {THREE.Texture|null} texture
-   * @param {number} screenW
-   * @param {number} screenH
+   * @param {number} screenW - Reserved for API compatibility (ignored).
+   * @param {number} screenH - Reserved for API compatibility (ignored).
    */
-  setOverheadRoofAlphaTexture(texture, screenW, screenH) {
+  setOverheadRoofAlphaTexture(texture, _screenW, _screenH) {
     const u = this._sharedUniforms;
     if (!u) return;
     u.uOverheadRoofAlphaTex.value = texture ?? null;
     u.uHasOverheadRoofAlphaTex.value = texture ? 1.0 : 0.0;
-    const w = Math.max(1, Number(screenW) || 1);
-    const h = Math.max(1, Number(screenH) || 1);
-    u.uScreenSize.value.set(w, h);
   }
 
   /**
@@ -831,9 +840,14 @@ export class WindowLightEffectV2 {
     try {
       const lp = floorCompositor?._lightingPerspectiveContext ?? null;
       const restrict = floorCompositor?._lightingEffect?.params?.restrictRoofScreenLightOcclusionToTopFloor === true;
-      const scale = lp && typeof lp.getRoofScreenOcclusionScale === 'function'
-        ? lp.getRoofScreenOcclusionScale(restrict)
-        : 1.0;
+      const renderFloor = Number.isFinite(this._renderFloorIndex)
+        ? Number(this._renderFloorIndex)
+        : (lp?.activeFloorIndex ?? 0);
+      const scale = lp && typeof lp.getRoofScreenOcclusionScaleForFloor === 'function'
+        ? lp.getRoofScreenOcclusionScaleForFloor(renderFloor, restrict)
+        : lp && typeof lp.getRoofScreenOcclusionScale === 'function'
+          ? lp.getRoofScreenOcclusionScale(restrict)
+          : 1.0;
       u.uWindowRoofScreenOcclusionScale.value = scale;
     } catch (_) {
       u.uWindowRoofScreenOcclusionScale.value = 1.0;
@@ -872,9 +886,7 @@ export class WindowLightEffectV2 {
       uCloudShadowTex: { value: null },
       uHasCloudShadowTex: { value: 0.0 },
       uScreenSize: { value: new THREE.Vector2(1, 1) },
-      uCloudShadowViewMin: { value: new THREE.Vector2(0, 0) },
-      uCloudShadowViewMax: { value: new THREE.Vector2(1, 1) },
-      uHasCloudShadowViewBounds: { value: 0.0 },
+      uCloudShadowBufferSize: { value: new THREE.Vector2(1, 1) },
       uCloudShadowContrast: { value: Math.max(0.0, Number(this.params.cloudShadowContrast) || 1.0) },
       uCloudShadowBias: { value: Number(this.params.cloudShadowBias) || 0.0 },
       uCloudShadowGamma: { value: Math.max(0.01, Number(this.params.cloudShadowGamma) || 1.0) },
@@ -933,11 +945,8 @@ export class WindowLightEffectV2 {
       blending: THREE.AdditiveBlending,
       vertexShader: /* glsl */`
         varying vec2 vUv;
-        varying vec2 vWorldXY;
         void main() {
           vUv = uv;
-          vec4 worldPos = modelMatrix * vec4(position, 1.0);
-          vWorldXY = worldPos.xy;
           gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
         }
       `,
@@ -962,9 +971,7 @@ export class WindowLightEffectV2 {
         uniform sampler2D uCloudShadowTex;
         uniform float uHasCloudShadowTex;
         uniform vec2  uScreenSize;
-        uniform vec2  uCloudShadowViewMin;
-        uniform vec2  uCloudShadowViewMax;
-        uniform float uHasCloudShadowViewBounds;
+        uniform vec2  uCloudShadowBufferSize;
         uniform float uCloudShadowContrast;
         uniform float uCloudShadowBias;
         uniform float uCloudShadowGamma;
@@ -990,7 +997,6 @@ export class WindowLightEffectV2 {
         uniform sampler2D uMask;
         uniform float uMaskReady;
         varying vec2 vUv;
-        varying vec2 vWorldXY;
 
         float msLuminance(vec3 c) {
           return dot(c, vec3(0.2126, 0.7152, 0.0722));
@@ -1084,11 +1090,11 @@ export class WindowLightEffectV2 {
           float cloudDimming = mix(1.0, clamp(uCloudFactor, 0.0, 1.0), clamp(uCloudInfluence, 0.0, 1.0));
           float cloudShadow = 1.0;
           if (uHasCloudShadowTex > 0.5) {
-            vec2 shadowUv = gl_FragCoord.xy / max(uScreenSize, vec2(1.0));
-            if (uHasCloudShadowViewBounds > 0.5) {
-              vec2 vbSize = max(uCloudShadowViewMax - uCloudShadowViewMin, vec2(1e-3));
-              shadowUv = (vWorldXY - uCloudShadowViewMin) / vbSize;
-            }
+            // Always sample in drawing-buffer / RT pixel space. ShadowManager + cloud
+            // targets are filled per screen texel; world-XY remap via view bounds can
+            // disagree with gl_FragCoord by epsilon under pan/zoom (projection vs float),
+            // which high-contrast shadow curves turn into visible flicker.
+            vec2 shadowUv = gl_FragCoord.xy / max(uCloudShadowBufferSize, vec2(1.0));
             float s = clamp(texture2D(uCloudShadowTex, clamp(shadowUv, 0.0, 1.0)).r, 0.0, 1.0);
             s = clamp((s - 0.5) * max(uCloudShadowContrast, 0.0) + 0.5 + uCloudShadowBias, 0.0, 1.0);
             s = pow(s, max(uCloudShadowGamma, 0.01));
@@ -1131,6 +1137,7 @@ export class WindowLightEffectV2 {
     material.toneMapped = false;
 
     const mesh = new THREE.Mesh(geo, material);
+    mesh.frustumCulled = false;
     mesh.position.set(centerX, centerY, z);
     mesh.rotation.z = rotation;
     mesh.userData.floorIndex = Math.max(0, Number(floorIndex) || 0);

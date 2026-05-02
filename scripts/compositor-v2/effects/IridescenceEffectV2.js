@@ -12,7 +12,7 @@ import { probeMaskFile } from '../../assets/loader.js';
 import Coordinates from '../../utils/coordinates.js';
 import { tileHasLevelsRange, readTileLevelsFlags } from '../../foundry/levels-scene-flags.js';
 import { getTileBusPlaneSizeAndMirror, getTileVisualCenterFoundryXY } from '../../scene/tile-manager.js';
-import { GROUND_Z, Z_PER_FLOOR, tileRelativeEffectOrder } from '../LayerOrderPolicy.js';
+import { GROUND_Z, Z_PER_FLOOR, tileStackedOverlayOrder } from '../LayerOrderPolicy.js';
 import { resolveEffectEnabled } from '../../effects/resolve-effect-enabled.js';
 
 const log = createLogger('IridescenceEffectV2');
@@ -581,9 +581,8 @@ export class IridescenceEffectV2 {
     try {
       const baseEntry = this._renderBus?._tiles?.get?.(tileKey);
       const baseOrder = Number(baseEntry?.mesh?.renderOrder);
-      const isOverhead = !!(baseEntry?.root?.userData?.isOverhead ?? baseEntry?.mesh?.parent?.userData?.isOverhead);
       if (Number.isFinite(baseOrder)) {
-        mesh.renderOrder = tileRelativeEffectOrder(baseOrder, floorIndex, isOverhead, 5);
+        mesh.renderOrder = tileStackedOverlayOrder(baseOrder, floorIndex, 5);
       }
     } catch (_) {}
 

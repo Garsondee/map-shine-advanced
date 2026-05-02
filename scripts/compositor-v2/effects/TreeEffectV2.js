@@ -14,6 +14,7 @@ import {
   readTileLevelsFlags,
   resolveV14NativeDocFloorIndexMin,
   getVisibleLevelBackgroundLayers,
+  resolveV14BackgroundFloorIndexForSrc,
 } from '../../foundry/levels-scene-flags.js';
 import { weatherController } from '../../core/WeatherController.js';
 
@@ -710,8 +711,10 @@ export class TreeEffectV2 {
       for (let i = 0; i < bgLayers.length; i += 1) {
         const src = String(bgLayers[i]?.src || '').trim();
         if (!src) continue;
-        if (Number.isFinite(activeFloorIdx) && i !== activeFloorIdx) continue;
-        bgEntries.push({ src, floorIndex: i, key: (i === 0) ? '__bg_image__' : `__bg_image__${i}` });
+        const floorIndex = resolveV14BackgroundFloorIndexForSrc(scene, src);
+        if (Number.isFinite(activeFloorIdx) && floorIndex !== activeFloorIdx) continue;
+        const key = floorIndex === 0 ? '__bg_image__' : `__bg_image__${floorIndex}`;
+        bgEntries.push({ src, floorIndex, key });
       }
     }
     for (const bg of bgEntries) {

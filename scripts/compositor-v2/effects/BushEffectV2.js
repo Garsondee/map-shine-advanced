@@ -9,10 +9,15 @@
 
 import { createLogger } from '../../core/log.js';
 import { probeMaskFile } from '../../assets/loader.js';
-import { tileHasLevelsRange, readTileLevelsFlags, resolveV14NativeDocFloorIndexMin } from '../../foundry/levels-scene-flags.js';
-import { getVisibleLevelBackgroundLayers } from '../../foundry/levels-scene-flags.js';
+import {
+  tileHasLevelsRange,
+  readTileLevelsFlags,
+  resolveV14NativeDocFloorIndexMin,
+  getVisibleLevelBackgroundLayers,
+  resolveV14BackgroundFloorIndexForSrc,
+} from '../../foundry/levels-scene-flags.js';
 import { weatherController } from '../../core/WeatherController.js';
-import { tileRelativeEffectOrder } from '../LayerOrderPolicy.js';
+import { tileStackedOverlayOrder } from '../LayerOrderPolicy.js';
 
 const log = createLogger('BushEffectV2');
 
@@ -672,8 +677,10 @@ export class BushEffectV2 {
       for (let i = 0; i < bgLayers.length; i += 1) {
         const src = String(bgLayers[i]?.src || '').trim();
         if (!src) continue;
-        if (Number.isFinite(activeFloorIdx) && i !== activeFloorIdx) continue;
-        bgEntries.push({ src, floorIndex: i, key: (i === 0) ? '__bg_image__' : `__bg_image__${i}` });
+        const floorIndex = resolveV14BackgroundFloorIndexForSrc(scene, src);
+        if (Number.isFinite(activeFloorIdx) && floorIndex !== activeFloorIdx) continue;
+        const key = floorIndex === 0 ? '__bg_image__' : `__bg_image__${floorIndex}`;
+        bgEntries.push({ src, floorIndex, key });
       }
     }
     for (const bg of bgEntries) {
@@ -1304,9 +1311,8 @@ export class BushEffectV2 {
     try {
       const baseEntry = this._renderBus?._tiles?.get?.(tileId);
       const baseOrder = Number(baseEntry?.mesh?.renderOrder);
-      const isOverhead = !!baseEntry?.root?.userData?.isOverhead;
       if (Number.isFinite(baseOrder)) {
-        mesh.renderOrder = tileRelativeEffectOrder(baseOrder, floorIndex, isOverhead, 2);
+        mesh.renderOrder = tileStackedOverlayOrder(baseOrder, floorIndex, 2);
       }
     } catch (_) {}
 

@@ -566,7 +566,10 @@ export class FluidEffectV2 {
     mesh.layers.set(0);
     if (isOverhead) mesh.layers.enable(20);
 
-    // Keep renderOrder under the base tile if present.
+    // Sub-albedo draw order (paired with FLUID_Z_OFFSET): stays behind this tile’s
+    // albedo but still sorts with other tiles — higher-sorted tiles draw later and
+    // occlude. Do not use tileStackedOverlayOrder here; that would paint fluid after
+    // albedo and change the authored “under the texture” look.
     try {
       const baseOrder = Number(baseEntry?.mesh?.renderOrder);
       if (Number.isFinite(baseOrder)) {

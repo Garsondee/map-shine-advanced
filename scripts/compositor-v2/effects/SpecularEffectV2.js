@@ -664,12 +664,15 @@ export class SpecularEffectV2 {
         // In multi-floor scenes the viewed level background belongs to the
         // active floor band, not always floor 0.
         const bgFloorIndex = floors.length > 1 ? Math.max(0, Math.min(3, activeFloorIndex)) : 0;
+        const bgBusTileId = floors.length > 1
+          ? (bgFloorIndex === 0 ? '__bg_image__' : `__bg_image__${bgFloorIndex}`)
+          : '__bg_image__';
 
         // Keep background below tile plane within its floor band.
         const GROUND_Z = 1000;
         const z = GROUND_Z + bgFloorIndex - 1 + SPECULAR_Z_OFFSET;
 
-        await this._createOverlay('__bg_image__', bgFloorIndex, {
+        await this._createOverlay(bgBusTileId, bgFloorIndex, {
           specularUrl: bgSpecResult.path,
           albedoUrl: bgSrc,
           centerX, centerY, z,
@@ -1293,7 +1296,7 @@ export class SpecularEffectV2 {
    * @private
    */
   _disposeOverlayEntry(tileId) {
-    if (!tileId || tileId === '__bg_image__') return;
+    if (!tileId || /^__bg_image__(?:|[1-9]\d*)$/.test(String(tileId))) return;
     const entry = this._overlays.get(tileId);
     if (!entry) return;
     this._renderBus.removeEffectOverlay(`${tileId}_specular`);
@@ -1321,7 +1324,7 @@ export class SpecularEffectV2 {
   async refreshTileAfterTextureChange(tileDoc, foundrySceneData) {
     if (!this._initialized || !tileDoc) return;
     const tileId = tileDoc.id ?? tileDoc._id;
-    if (!tileId || tileId === '__bg_image__') return;
+    if (!tileId || /^__bg_image__(?:|[1-9]\d*)$/.test(String(tileId))) return;
 
     this._disposeOverlayEntry(tileId);
 
@@ -1645,10 +1648,18 @@ export class SpecularEffectV2 {
    * @private
    */
   _rebindBackgroundOverlayFloor(floorIndex) {
-    const bg = this._overlays.get('__bg_image__');
-    if (!bg?.mesh) return;
     const nextFloor = Math.max(0, Math.min(3, Number(floorIndex) || 0));
-    const overlayKey = '__bg_image___specular';
+    let bgTileId = null;
+    let bg = null;
+    for (const [tid, entry] of this._overlays) {
+      if (typeof tid === 'string' && /^__bg_image__(?:|[1-9]\d*)$/.test(tid)) {
+        bgTileId = tid;
+        bg = entry;
+        break;
+      }
+    }
+    if (!bg?.mesh || !bgTileId) return;
+    const overlayKey = `${bgTileId}_specular`;
 
     bg.floorIndex = nextFloor;
 

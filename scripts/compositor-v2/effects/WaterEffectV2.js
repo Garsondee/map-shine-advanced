@@ -46,6 +46,7 @@ import {
   resolveV14NativeDocFloorIndexMin,
   readV14SceneLevels,
   hasV14NativeLevels,
+  resolveV14BackgroundFloorIndexForSrc,
 } from '../../foundry/levels-scene-flags.js';
 import { DepthShaderChunks } from '../../effects/DepthShaderChunks.js';
 import { VisionSDF } from '../../vision/VisionSDF.js';
@@ -1860,7 +1861,8 @@ static getControlSchema() {
         for (let i = 0; i < bgLayers.length; i += 1) {
           const src = String(bgLayers[i]?.src || '').trim();
           if (!src) continue;
-          bgLayerRows.push({ src, floorIndex: i });
+          const floorIndex = resolveV14BackgroundFloorIndexForSrc(scene, src);
+          bgLayerRows.push({ src, floorIndex });
         }
       } else {
         const bgSrc = String(getViewedLevelBackgroundSrc(scene) ?? scene?.background?.src ?? '').trim();

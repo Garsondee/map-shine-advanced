@@ -231,14 +231,68 @@ export function getVisibleLevelBackgroundSrcs(scene) {
 }
 
 /**
+ * Map a background image URL to the native V14 level {@link foundry.documents.BaseLevel#index}
+ * whose `background.src` matches (after {@link normalizeFoundryAssetUrlKey}).
+ * Used when Foundry's texture stack lists only the viewed level so array position
+ * is not a reliable floor index for FloorRenderBus / per-floor albedo.
+ *
+ * @param {Scene|null|undefined} scene
+ * @param {string} src
+ * @returns {number} Non-negative floor index (defaults to 0 if unmatched)
+ */
+export function resolveV14BackgroundFloorIndexForSrc(scene, src) {
+  const raw = typeof src === 'string' ? src.trim() : '';
+  if (!raw || !scene?.levels?.size) return 0;
+  const target = normalizeFoundryAssetUrlKey(raw);
+  const targetFile = (() => {
+    try {
+      const tail = (target.split('/').pop() || '').split('?')[0] || '';
+      return tail.toLowerCase();
+    } catch (_) {
+      return '';
+    }
+  })();
+  if (!target && !targetFile) return 0;
+  try {
+    const sorted = scene.levels.sorted ?? scene.levels.contents ?? [];
+    for (const level of sorted) {
+      const bg = String(level?.background?.src || '').trim();
+      if (!bg) continue;
+      if (target && normalizeFoundryAssetUrlKey(bg) === target) {
+        const idx = Number(level?.index);
+        return Number.isFinite(idx) ? Math.max(0, Math.floor(idx)) : 0;
+      }
+    }
+    if (targetFile) {
+      for (const level of sorted) {
+        const bg = String(level?.background?.src || '').trim();
+        if (!bg) continue;
+        let f = '';
+        try {
+          const k = normalizeFoundryAssetUrlKey(bg);
+          f = (k.split('/').pop() || '').split('?')[0].toLowerCase();
+        } catch (_) { f = ''; }
+        if (f && f === targetFile) {
+          const idx = Number(level?.index);
+          return Number.isFinite(idx) ? Math.max(0, Math.floor(idx)) : 0;
+        }
+      }
+    }
+  } catch (_) {}
+  return 0;
+}
+
+/**
  * Get ordered visible background layer metadata from Foundry's level config.
  *
  * @param {Scene|null|undefined} scene
- * @returns {Array<{src:string, alphaThreshold:number}>}
+ * @returns {Array<{src:string, alphaThreshold:number, sort?: number}>}
+ *   `sort` is passed through from Foundry when present; do not use it as the
+ *   floor index for bus placement (it reflects texture stack order).
  */
 export function getVisibleLevelBackgroundLayers(scene) {
   if (!scene) return [];
-  /** @type {Array<{src:string, alphaThreshold:number}>} */
+  /** @type {Array<{src:string, alphaThreshold:number, sort?: number}>} */
   const out = [];
   try {
     const configured = (typeof scene._configureLevelTextures === 'function')
@@ -252,12 +306,25 @@ export function getVisibleLevelBackgroundLayers(scene) {
       const alphaThreshold = Number.isFinite(rawThreshold)
         ? Math.max(0, Math.min(1, rawThreshold))
         : 0;
-      out.push({ src, alphaThreshold });
+      const rawSort = Number(entry.sort);
+      const sort = Number.isFinite(rawSort) ? Math.max(0, Math.floor(rawSort)) : undefined;
+      const row = { src, alphaThreshold };
+      if (sort !== undefined) row.sort = sort;
+      out.push(row);
     }
   } catch (_) {}
   if (out.length) return out;
   const viewed = getViewedLevelBackgroundSrc(scene);
-  if (viewed) out.push({ src: viewed, alphaThreshold: 0 });
+  if (viewed) {
+    try {
+      const level = _resolveViewedV14LevelDoc(scene);
+      const idx = Number(level?.index);
+      const sort = Number.isFinite(idx) ? Math.max(0, Math.floor(idx)) : 0;
+      out.push({ src: viewed, alphaThreshold: 0, sort });
+    } catch (_) {
+      out.push({ src: viewed, alphaThreshold: 0 });
+    }
+  }
   return out;
 }
 

@@ -1476,6 +1476,16 @@ export class LightingEffectV2 {
     renderer.autoClear = true;
     if (windowLightScene) {
       try {
+        // WindowLight shaders use gl_FragCoord / uScreenSize for roof/ceiling masks.
+        // uScreenSize must match THIS RT (set above), not values pushed earlier in the
+        // frame — Lighting resizes these RTs after FloorCompositor.bind, and zoom/DPR
+        // can otherwise desync roof sampling → apparent fade/pulse when panning or zooming.
+        try {
+          windowLightScene.userData?.onBindWindowLightPass?.(
+            this._windowLightRT.width,
+            this._windowLightRT.height,
+          );
+        } catch (_) {}
         renderer.render(windowLightScene, camera);
       } catch (err) {
         log.error('LightingEffectV2: window light render failed:', err);

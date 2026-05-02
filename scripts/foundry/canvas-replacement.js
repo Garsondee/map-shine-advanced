@@ -2196,7 +2196,19 @@ export function initialize() {
 
             if (levelId) sc._lastV14BusBgLevelId = levelId;
 
-            bus.swapBackgroundImage(viewedBgSrc, fd);
+            let swapLevelIndex = Number.NaN;
+            try {
+              const lid = payload?.context?.levelId ?? canvas?.level?.id ?? null;
+              const doc = lid && canvas.scene?.levels?.get ? canvas.scene.levels.get(lid) : null;
+              if (doc && Number.isFinite(Number(doc.index))) {
+                swapLevelIndex = Math.max(0, Math.floor(Number(doc.index)));
+              }
+            } catch (_) {}
+            bus.swapBackgroundImage(
+              viewedBgSrc,
+              fd,
+              Number.isFinite(swapLevelIndex) ? { viewedLevelIndex: swapLevelIndex } : {},
+            );
 
             if (pathChanged) {
               try {
@@ -6066,7 +6078,19 @@ async function createThreeCanvas(scene, createOptions = {}) {
         if (viewedBg) {
           const runSwap = () => {
             try {
-              bus.swapBackgroundImage(viewedBg, fd);
+              let coldSwapIdx = Number.NaN;
+              try {
+                const lid = window.MapShine?.activeLevelContext?.levelId ?? canvas?.level?.id ?? null;
+                const doc = lid && v14Scene?.levels?.get ? v14Scene.levels.get(lid) : null;
+                if (doc && Number.isFinite(Number(doc.index))) {
+                  coldSwapIdx = Math.max(0, Math.floor(Number(doc.index)));
+                }
+              } catch (_) {}
+              bus.swapBackgroundImage(
+                viewedBg,
+                fd,
+                Number.isFinite(coldSwapIdx) ? { viewedLevelIndex: coldSwapIdx } : {},
+              );
               const lid = window.MapShine?.activeLevelContext?.levelId ?? canvas?.level?.id ?? null;
               if (lid) sc._lastV14BusBgLevelId = lid;
               if (typeof sc.extractBasePath === 'function' && typeof sc._loadMasksOnlyForBasePath === 'function') {

@@ -11,6 +11,7 @@ import { createLogger } from '../../core/log.js';
 import { probeMaskFile } from '../../assets/loader.js';
 import Coordinates from '../../utils/coordinates.js';
 import { tileHasLevelsRange, readTileLevelsFlags } from '../../foundry/levels-scene-flags.js';
+import { getAuthoritativeAmbientLightDocuments } from '../../foundry/ambient-light-documents.js';
 import { getTileBusPlaneSizeAndMirror, getTileVisualCenterFoundryXY } from '../../scene/tile-manager.js';
 import { GROUND_Z, Z_PER_FLOOR, tileStackedOverlayOrder } from '../LayerOrderPolicy.js';
 import { resolveEffectEnabled } from '../../effects/resolve-effect-enabled.js';
@@ -711,22 +712,33 @@ export class IridescenceEffectV2 {
 
   _syncAllLights() {
     this._lights.clear();
-    const lights = canvas?.lighting?.placeables ?? [];
-    for (const light of lights) this._addLight(light?.document);
+    const docs = getAuthoritativeAmbientLightDocuments();
+    for (const doc of docs) this._addLight(doc);
     this._syncLightUniforms();
+  }
+
+  /** Rebuild cached light uniforms from the scene (recovery / MapShine.rebuildLighting). */
+  resyncLightsFromFoundry() {
+    this._syncAllLights();
   }
 
   _onLightCreated(doc) { this._addLight(doc); this._syncLightUniforms(); }
   _onLightUpdated(doc, changes) {
     const merged = this._mergeLightDocChanges(doc, changes);
-    this._lights.delete(merged?.id);
+    const k = merged?.id != null ? String(merged.id) : '';
+    if (k) this._lights.delete(k);
     this._addLight(merged);
     this._syncLightUniforms();
   }
-  _onLightDeleted(doc) { if (doc?.id) this._lights.delete(doc.id); this._syncLightUniforms(); }
+  _onLightDeleted(doc) {
+    const k = doc?.id != null ? String(doc.id) : '';
+    if (k) this._lights.delete(k);
+    this._syncLightUniforms();
+  }
 
   _addLight(doc) {
-    if (!doc?.id || this._lights.size >= MAX_LIGHTS || this._lights.has(doc.id)) return;
+    const idKey = doc?.id != null ? String(doc.id) : '';
+    if (!idKey || this._lights.size >= MAX_LIGHTS || this._lights.has(idKey)) return;
     const config = doc.config;
     if (!config) return;
 
@@ -754,7 +766,7 @@ export class IridescenceEffectV2 {
     const luminosity = config.luminosity ?? 0.5;
     const intensity = luminosity * 2.0;
 
-    this._lights.set(doc.id, {
+    this._lights.set(idKey, {
       position: worldPos,
       color: { r: r * intensity, g: g * intensity, b: b * intensity },
       radius,

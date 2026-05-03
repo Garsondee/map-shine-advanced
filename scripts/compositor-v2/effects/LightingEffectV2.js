@@ -8,8 +8,9 @@
  * dependency edges to prevent silent failures.
  *
  * Reads the bus scene RT (albedo + overlays) and applies ambient light,
- * dynamic light sources, darkness sources, and coloration to produce the
- * final lit image.
+ * dynamic light sources, darkness sources, and chroma-weighted surface tint
+ * (so neutral lamp RGB does not duplicate the luminance channel) to produce the
+ * lit image.
  *
  * Reuses the V1 ThreeLightSource and ThreeDarknessSource classes for
  * individual light mesh rendering — they output additive light contribution
@@ -35,9 +36,10 @@
 import { createLogger } from '../../core/log.js';
 import { ThreeLightSource } from '../../effects/ThreeLightSource.js';
 import { ThreeDarknessSource } from '../../effects/ThreeDarknessSource.js';
-import { isLightVisibleForPerspective } from '../../foundry/elevation-context.js';
+import { isLightVisibleForPerspective, getPerspectiveForRenderFloorIndex } from '../../foundry/elevation-context.js';
 import { createLightingPerspectiveContext } from '../LightingPerspectiveContext.js';
-import { getFoundryTimePhaseHours, getFoundrySunlightFactor, getWrappedHourProgress } from '../../core/foundry-time-phases.js';
+import { computeTimeOfDayDarkness01 } from '../../core/foundry-time-phases.js';
+import { getAuthoritativeAmbientLightDocuments } from '../../foundry/ambient-light-documents.js';
 
 const log = createLogger('LightingEffectV2');
 const MODULE_ID = 'map-shine-advanced';
@@ -77,37 +79,6 @@ const readFoundryDarkness01 = () => {
   return 0.0;
 };
 
-const computeTimeOfDayDarkness01 = (hourRaw) => {
-  const h = Number(hourRaw);
-  if (!Number.isFinite(h)) return null;
-
-  const safeHour = ((h % 24) + 24) % 24;
-  const phases = getFoundryTimePhaseHours();
-
-  // Match StateApplier._updateSceneDarkness() anchors.
-  const dawnDuskDarkness = 0.55;
-  const noonDarkness = 0.0;
-  const midnightDarkness = 0.95;
-
-  const dayProgress = getWrappedHourProgress(safeHour, phases.sunrise, phases.sunset);
-  let targetDarkness;
-
-  if (Number.isFinite(dayProgress)) {
-    const sunlight = Math.pow(getFoundrySunlightFactor(safeHour, phases), 0.85);
-    targetDarkness = dawnDuskDarkness + ((noonDarkness - dawnDuskDarkness) * sunlight);
-  } else {
-    const nightProgress = getWrappedHourProgress(safeHour, phases.sunset, phases.sunrise);
-    if (Number.isFinite(nightProgress)) {
-      const moonArc = Math.pow(Math.max(0, Math.sin(Math.PI * nightProgress)), 0.8);
-      targetDarkness = dawnDuskDarkness + ((midnightDarkness - dawnDuskDarkness) * moonArc);
-    } else {
-      targetDarkness = midnightDarkness;
-    }
-  }
-
-  return clamp01(targetDarkness);
-};
-
 export class LightingEffectV2 {
   constructor() {
     /** @type {boolean} */
@@ -130,13 +101,44 @@ export class LightingEffectV2 {
     this._lastPerspectiveRefreshAtSec = -Infinity;
     /** @type {Map<string, number>} Per-light next allowed animation update time (seconds) */
     this._nextAnimationUpdateAtSec = new Map();
+    /**
+     * One-shot: old scenes only stored `globalIllumination`; copy that value into
+     * {@link #params.ambientDayScale} and {@link #params.ambientNightScale} when they
+     * are still at schema defaults so existing worlds keep their look.
+     * @type {boolean}
+     */
+    this._legacyGlobalIlluminationSeeded = false;
 
     // ── Tuning parameters (match V1 defaults) ──────────────────────────
     this.params = {
       enabled: true,
+      /**
+       * Legacy single scale (hidden). Superseded by ambientDayScale / ambientNightScale;
+       * still loaded from old saves so {@link #_seedAmbientFromLegacyGlobalIfNeeded} can migrate.
+       */
       globalIllumination: 1.3,
+      /** Scales Foundry ambient brightest colour at darkness 0 (noon / bright scenes). */
+      ambientDayScale: 1.3,
+      /** Scales Foundry ambient darkness colour at darkness 1 (night). */
+      ambientNightScale: 1.3,
       lightIntensity: 0.25,
+      /** Scales the minimum illumination floor under darkness (see compose shader). */
+      minIlluminationScale: 1.0,
       colorationStrength: 1.0,
+      /** Extra coupling of surface albedo luma into the tint path only. */
+      colorationReflectivity: 1.0,
+      /**
+       * Pre-tint saturation on the RGB light buffer (0 = neutral, >0 richer chroma for tint).
+       * Does not re-introduce white boost alone; achromatic lights stay gated by chroma weight.
+       */
+      colorationSaturation: 0.0,
+      /** Curve on chroma detection: >1 requires more saturated lights before full tint. */
+      colorationChromaCurve: 1.0,
+      /**
+       * Mix toward legacy behaviour: 0 = tint only from saturated (non-grey) RGB, 1 = ignore chroma gate
+       * (old “full RGB” colouration, can double-count white with luminance).
+       */
+      colorationAchromaticMix: 0.0,
       wallInsetPx: 6.0,
       upperFloorTransmissionEnabled: false,
       upperFloorTransmissionStrength: 0.6,
@@ -154,6 +156,18 @@ export class LightingEffectV2 {
       darknessLevel: 0.0,
       negativeDarknessStrength: 1.0,
       darknessPunchGain: 2.0,
+      /**
+       * Optional tone curve on the lighting pass output (None recommended if Colour Correction
+       * tone mapping is already enabled).
+       */
+      composeToneMapping: 0,
+      composeToneExposure: 1.0,
+      /** Multiplies building-shadow opacity when applied to ambient in this pass (0 = off). */
+      ambientBuildingShadowMix: 1.0,
+      /** How much cloud / combined shadow darkens ambient here (0 = ignore, 1 = full). */
+      cloudShadowAmbientInfluence: 1.0,
+      /** Scales overhead shadow strength on ambient only (0 = off). */
+      overheadShadowAmbientInfluence: 1.0,
     };
 
     // ── Light management ────────────────────────────────────────────────
@@ -200,6 +214,14 @@ export class LightingEffectV2 {
      * @type {import('../LightingPerspectiveContext.js').LightingPerspectiveContext|null}
      */
     this._lightingPerspectiveContext = null;
+
+    /**
+     * When set, Foundry light visibility uses this FloorStack band midpoint instead of
+     * the global viewer perspective so each multi-floor lit slice only receives lights
+     * for that floor pass.
+     * @type {number|null}
+     */
+    this._renderFloorIndexForLights = null;
   }
 
   /**
@@ -207,6 +229,17 @@ export class LightingEffectV2 {
    */
   setLightingPerspectiveContext(ctx) {
     this._lightingPerspectiveContext = ctx;
+    this._perspectiveRefreshDirty = true;
+  }
+
+  /**
+   * Per-level compositor pass: gate AmbientLights for this floor index only.
+   * Pass `null` after per-level passes complete (see FloorCompositor).
+   * @param {number|null} [floorIndex=null]
+   */
+  setRenderFloorIndexForLights(floorIndex = null) {
+    const n = Number(floorIndex);
+    this._renderFloorIndexForLights = Number.isFinite(n) ? n : null;
     this._perspectiveRefreshDirty = true;
   }
 
@@ -339,16 +372,206 @@ export class LightingEffectV2 {
     return {
       enabled: true,
       groups: [
-        { name: 'illumination', label: 'Global Illumination', type: 'inline', parameters: ['globalIllumination', 'lightIntensity', 'colorationStrength'] },
-        { name: 'occlusion', label: 'Occlusion', type: 'inline', parameters: ['wallInsetPx', 'restrictRoofScreenLightOcclusionToTopFloor', 'upperFloorTransmissionEnabled', 'upperFloorTransmissionStrength'] },
-        { name: 'darkness', label: 'Darkness Response', type: 'inline', parameters: ['interiorDarkness', 'negativeDarknessStrength', 'darknessPunchGain'] },
-        { name: 'lightAnim', label: 'Light Animation Behaviour', type: 'inline', parameters: ['lightAnimWindInfluence', 'lightAnimOutdoorPower'] },
+        {
+          name: 'ambientFloor',
+          label: 'Ambient & minimum floor',
+          type: 'folder',
+          expanded: true,
+          parameters: ['ambientDayScale', 'ambientNightScale', 'minIlluminationScale'],
+        },
+        {
+          name: 'dynamicLuma',
+          label: 'Dynamic lights (luminance)',
+          type: 'folder',
+          expanded: true,
+          parameters: ['lightIntensity'],
+        },
+        {
+          name: 'surfaceTint',
+          label: 'Surface tint (RGB light buffer)',
+          type: 'folder',
+          expanded: true,
+          parameters: [
+            'colorationStrength',
+            'colorationReflectivity',
+            'colorationSaturation',
+            'colorationChromaCurve',
+            'colorationAchromaticMix',
+          ],
+        },
+        {
+          name: 'composeTonemap',
+          label: 'Lighting pass tone map',
+          type: 'folder',
+          expanded: false,
+          parameters: ['composeToneMapping', 'composeToneExposure'],
+        },
+        {
+          name: 'ambientShadowMix',
+          label: 'Ambient shadow mixing',
+          type: 'folder',
+          expanded: false,
+          parameters: [
+            'ambientBuildingShadowMix',
+            'cloudShadowAmbientInfluence',
+            'overheadShadowAmbientInfluence',
+          ],
+        },
+        {
+          name: 'occlusion',
+          label: 'Occlusion',
+          type: 'folder',
+          expanded: false,
+          parameters: [
+            'wallInsetPx',
+            'restrictRoofScreenLightOcclusionToTopFloor',
+            'upperFloorTransmissionEnabled',
+            'upperFloorTransmissionStrength',
+          ],
+        },
+        {
+          name: 'darkness',
+          label: 'Darkness response',
+          type: 'folder',
+          expanded: false,
+          parameters: ['interiorDarkness', 'negativeDarknessStrength', 'darknessPunchGain'],
+        },
+        {
+          name: 'lightAnim',
+          label: 'Light animation',
+          type: 'folder',
+          expanded: false,
+          parameters: ['lightAnimWindInfluence', 'lightAnimOutdoorPower'],
+        },
       ],
       parameters: {
         enabled: { type: 'boolean', default: true, hidden: true },
-        globalIllumination: { type: 'slider', min: 0, max: 2, step: 0.1, default: 1.3, label: 'Illumination scale' },
-        lightIntensity: { type: 'slider', min: 0, max: 2, step: 0.05, default: 0.25, label: 'Light Intensity' },
-        colorationStrength: { type: 'slider', min: 0, max: 500, step: 0.05, default: 1.0, label: 'Coloration Strength' },
+        globalIllumination: {
+          type: 'slider',
+          min: 0,
+          max: 2,
+          step: 0.1,
+          default: 1.3,
+          label: 'Illumination scale (legacy)',
+          hidden: true,
+          tooltip: 'Deprecated: use Day ambient and Night ambient. Kept so old module data still loads.',
+        },
+        ambientDayScale: {
+          type: 'slider',
+          min: 0,
+          max: 3.5,
+          step: 0.05,
+          default: 1.3,
+          label: 'Day ambient (noon)',
+          tooltip: 'Scales Foundry “ambient brightest” at low darkness only. Raise for brighter midday without lifting night.',
+        },
+        ambientNightScale: {
+          type: 'slider',
+          min: 0,
+          max: 3.5,
+          step: 0.05,
+          default: 1.3,
+          label: 'Night ambient fill',
+          tooltip: 'Scales Foundry “ambient darkness” at high darkness. Lower for deeper night while keeping day bright.',
+        },
+        minIlluminationScale: {
+          type: 'slider',
+          min: 0,
+          max: 3,
+          step: 0.05,
+          default: 1.0,
+          label: 'Minimum light floor',
+          tooltip: 'Scales the darkest-scene safety floor so interiors never clip to pure black.',
+        },
+        lightIntensity: { type: 'slider', min: 0, max: 2, step: 0.05, default: 0.25, label: 'Light intensity' },
+        colorationStrength: {
+          type: 'slider',
+          min: 0,
+          max: 40,
+          step: 0.05,
+          default: 1.0,
+          label: 'Tint strength',
+          tooltip: 'How strongly coloured light tints surfaces (achromatic / white lights are excluded by default).',
+        },
+        colorationReflectivity: {
+          type: 'slider',
+          min: 0,
+          max: 2,
+          step: 0.05,
+          default: 1.0,
+          label: 'Tint vs albedo',
+          tooltip: 'Couples tint to surface brightness (albedo luma); lower flattens tint on dark pixels.',
+        },
+        colorationSaturation: {
+          type: 'slider',
+          min: -1,
+          max: 2,
+          step: 0.05,
+          default: 0.0,
+          label: 'Tint input saturation',
+          tooltip: 'Pre-boosts chroma in the light buffer before tint (0 = as rendered).',
+        },
+        colorationChromaCurve: {
+          type: 'slider',
+          min: 0.25,
+          max: 4,
+          step: 0.05,
+          default: 1.0,
+          label: 'Chroma sharpness',
+          tooltip: 'Higher values need more saturated lamp colours before tint reaches full strength.',
+        },
+        colorationAchromaticMix: {
+          type: 'slider',
+          min: 0,
+          max: 1,
+          step: 0.05,
+          default: 0.0,
+          label: 'Neutral light bleed',
+          tooltip: 'Blends toward legacy behaviour where white lights also drove the tint path (can brighten greys).',
+        },
+        composeToneMapping: {
+          type: 'list',
+          label: 'Tone mapping',
+          options: { None: 0, 'ACES Filmic': 1, Reinhard: 2 },
+          default: 0,
+          tooltip: 'Applied at the end of the lighting pass. Prefer None if Colour Correction already tone maps.',
+        },
+        composeToneExposure: {
+          type: 'slider',
+          min: 0.25,
+          max: 4,
+          step: 0.05,
+          default: 1.0,
+          label: 'Tone-map exposure',
+          tooltip: 'Linear gain before tone mapping (only when tone mapping is not None).',
+        },
+        ambientBuildingShadowMix: {
+          type: 'slider',
+          min: 0,
+          max: 1,
+          step: 0.05,
+          default: 1.0,
+          label: 'Building shadow on ambient',
+          tooltip: 'Scales how much baked building shadow darkens ambient illumination in this pass.',
+        },
+        cloudShadowAmbientInfluence: {
+          type: 'slider',
+          min: 0,
+          max: 1,
+          step: 0.05,
+          default: 1.0,
+          label: 'Cloud shadow on ambient',
+          tooltip: 'Reduces cloud (or combined) shadow on ambient only; dynamic lights stay full strength.',
+        },
+        overheadShadowAmbientInfluence: {
+          type: 'slider',
+          min: 0,
+          max: 1,
+          step: 0.05,
+          default: 1.0,
+          label: 'Overhead shadow on ambient',
+          tooltip: 'Scales overhead tile shadow on ambient; torches and lamps still punch through.',
+        },
         wallInsetPx: { type: 'slider', min: 0, max: 40, step: 0.5, default: 6.0, label: 'Wall Inset (px)' },
         restrictRoofScreenLightOcclusionToTopFloor: {
           type: 'boolean',
@@ -358,7 +581,15 @@ export class LightingEffectV2 {
         },
         upperFloorTransmissionEnabled: { type: 'boolean', default: false, label: 'Upper Floor Through-Gaps' },
         upperFloorTransmissionStrength: { type: 'slider', min: 0, max: 2, step: 0.05, default: 0.6, label: 'Upper Light Strength' },
-        interiorDarkness: { type: 'slider', min: 0, max: 1.5, step: 0.05, default: 0.0, label: 'Interior Darkness' },
+        interiorDarkness: {
+          type: 'slider',
+          min: 0,
+          max: 1.5,
+          step: 0.05,
+          default: 0.0,
+          label: 'Interior Darkness',
+          tooltip: 'Extra dim on mask-classified interiors (ambient only). Fades out automatically under Foundry / window light so torches and overlap regions do not stay muddy; specular in the scene buffer scales with total illumination.',
+        },
         lightAnimWindInfluence: { type: 'slider', min: 0, max: 3, step: 0.05, default: 1.0, label: 'Wind Influence' },
         lightAnimOutdoorPower: { type: 'slider', min: 0, max: 6, step: 0.25, default: 2.0, label: 'Outdoor Power' },
         negativeDarknessStrength: { type: 'slider', min: 0, max: 3, step: 0.1, default: 1.0, label: 'Negative Darkness Strength' },
@@ -463,9 +694,19 @@ export class LightingEffectV2 {
         uDarknessLevel:      { value: 0.0 },
         uAmbientBrightest:   { value: new THREE.Color(1, 1, 1) },
         uAmbientDarkness:    { value: new THREE.Color(0.141, 0.141, 0.282) },
-        uGlobalIllumination: { value: 1.3 },
+        uAmbientDayScale:   { value: 1.3 },
+        uAmbientNightScale: { value: 1.3 },
         uLightIntensity:     { value: 0.25 },
+        uMinIlluminationScale: { value: 1.0 },
         uColorationStrength: { value: 1.0 },
+        uColorationReflectivity: { value: 1.0 },
+        uColorationSaturation: { value: 0.0 },
+        uColorationChromaCurve: { value: 1.0 },
+        uColorationAchromaticMix: { value: 0.0 },
+        uComposeToneMapping: { value: 0 },
+        uComposeToneExposure: { value: 1.0 },
+        uCloudShadowAmbientInfluence: { value: 1.0 },
+        uOverheadShadowAmbientInfluence: { value: 1.0 },
         uNegativeDarknessStrength: { value: 1.0 },
         uDarknessPunchGain:        { value: 2.0 },
         uInteriorDarkness:         { value: 0.0 },
@@ -534,9 +775,19 @@ export class LightingEffectV2 {
         uniform float uDarknessLevel;
         uniform vec3 uAmbientBrightest;
         uniform vec3 uAmbientDarkness;
-        uniform float uGlobalIllumination;
+        uniform float uAmbientDayScale;
+        uniform float uAmbientNightScale;
         uniform float uLightIntensity;
+        uniform float uMinIlluminationScale;
         uniform float uColorationStrength;
+        uniform float uColorationReflectivity;
+        uniform float uColorationSaturation;
+        uniform float uColorationChromaCurve;
+        uniform float uColorationAchromaticMix;
+        uniform int uComposeToneMapping;
+        uniform float uComposeToneExposure;
+        uniform float uCloudShadowAmbientInfluence;
+        uniform float uOverheadShadowAmbientInfluence;
         uniform float uNegativeDarknessStrength;
         uniform float uDarknessPunchGain;
         uniform float uInteriorDarkness;
@@ -555,6 +806,25 @@ export class LightingEffectV2 {
           return dot(c, vec3(0.2126, 0.7152, 0.0722));
         }
 
+        float rgbSaturation(vec3 c) {
+          float mn = min(min(c.r, c.g), c.b);
+          float mx = max(max(c.r, c.g), c.b);
+          return (mx > 1e-4) ? clamp((mx - mn) / mx, 0.0, 1.0) : 0.0;
+        }
+
+        vec3 ACESFilmicToneMapping(vec3 x) {
+          float a = 2.51;
+          float b = 0.03;
+          float c = 2.43;
+          float d = 0.59;
+          float e = 0.14;
+          return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
+        }
+
+        vec3 ReinhardToneMapping(vec3 x) {
+          return x / (x + vec3(1.0));
+        }
+
         void main() {
           vec4 baseColor = texture2D(tScene, vUv);
           vec4 srcSample = texture2D(tLightSources, vUv);
@@ -566,8 +836,9 @@ export class LightingEffectV2 {
           float baseDarknessLevel = clamp(uDarknessLevel, 0.0, 1.0);
 
           // Ambient: interpolate between day and night based on darkness level.
-          vec3 ambientDay   = uAmbientBrightest * max(uGlobalIllumination, 0.0);
-          vec3 ambientNight = uAmbientDarkness  * max(uGlobalIllumination, 0.0);
+          // Day and night scales are separate so you can run bright noon and deep night together.
+          vec3 ambientDay   = uAmbientBrightest * max(uAmbientDayScale, 0.0);
+          vec3 ambientNight = uAmbientDarkness  * max(uAmbientNightScale, 0.0);
           vec3 ambient = mix(ambientDay, ambientNight, baseDarknessLevel);
 
           // Scene UV (Foundry space) for masks authored in scene rect — shared by
@@ -734,7 +1005,14 @@ export class LightingEffectV2 {
           // become visible as broad banding when interior darkness is increased.
           float indoorSignal = clamp(1.0 - isOutdoorForInteriorDimSafe, 0.0, 1.0);
           float indoorConfidence = smoothstep(0.30, 0.70, indoorSignal);
-          ambientAfterDark *= max(0.0, 1.0 - uInteriorDarkness * indoorConfidence);
+          // tScene includes additive specular; litColor = baseColor * totalIllumination. If we
+          // crush ambientAfterDark on interiors while directLight is only moderate, totalIllumination
+          // stays low and specular highlights (already in baseColor) read flat. Fade interior
+          // crush where the same dynamic channel used for darkness punch is strong (Foundry
+          // srcSample.a and window whites, scaled by uLightIntensity).
+          float interiorDarkLightSuppression = smoothstep(0.02, 0.2, lightTermI);
+          float indoorConfidenceForDim = indoorConfidence * (1.0 - interiorDarkLightSuppression);
+          ambientAfterDark *= max(0.0, 1.0 - uInteriorDarkness * indoorConfidenceForDim);
 
           // Total illumination = ambient (after darkness) + dynamic lights.
           vec3 totalIllumination = ambientAfterDark + directLight;
@@ -753,8 +1031,13 @@ export class LightingEffectV2 {
               float rawMix = roofAlpha * isOutdoorForInteriorDimSafe;
               shadowFactor = mix(shadowFactor, rawShadowFactor, rawMix);
             }
+            float shadowFactorMix = mix(
+              1.0,
+              shadowFactor,
+              clamp(uCloudShadowAmbientInfluence, 0.0, 1.0)
+            );
             vec3 ambientPortion = ambientAfterDark;
-            totalIllumination = ambientPortion * shadowFactor + directLight;
+            totalIllumination = ambientPortion * shadowFactorMix + directLight;
           }
 
           // Legacy cloud-only path: dims the ambient component only.
@@ -771,9 +1054,14 @@ export class LightingEffectV2 {
               float rawMix = roofAlpha * isOutdoorForInteriorDimSafe;
               shadowFactor = mix(shadowFactor, rawShadowFactor, rawMix);
             }
+            float shadowFactorMixC = mix(
+              1.0,
+              shadowFactor,
+              clamp(uCloudShadowAmbientInfluence, 0.0, 1.0)
+            );
             // Only dim the ambient portion; keep dynamic-light additive intact.
             vec3 ambientPortion = ambientAfterDark;
-            totalIllumination = ambientPortion * shadowFactor + directLight;
+            totalIllumination = ambientPortion * shadowFactorMixC + directLight;
           }
 
           // Building shadow: dims only the ambient component.
@@ -812,25 +1100,49 @@ export class LightingEffectV2 {
             vec3 ovShadowRgb = clamp(ovSample.rgb, vec3(0.0), vec3(1.0));
             float tileProjectionFactor = clamp(ovSample.a, 0.0, 1.0);
             vec3 combinedShadowFactor = ovShadowRgb * tileProjectionFactor;
-            vec3 ovMix = mix(vec3(1.0), combinedShadowFactor, clamp(uOverheadShadowOpacity, 0.0, 1.0));
+            float ovAmt = clamp(uOverheadShadowOpacity, 0.0, 1.0)
+              * clamp(uOverheadShadowAmbientInfluence, 0.0, 1.0);
+            vec3 ovMix = mix(vec3(1.0), combinedShadowFactor, ovAmt);
             vec3 ambientComp = totalIllumination - directLight;
             ambientComp *= ovMix;
             totalIllumination = ambientComp + directLight;
           }
 
           // Minimum illumination floor to prevent pure black.
-          vec3 minIllum = mix(ambientDay, ambientNight, localDarknessLevel) * 0.1;
+          vec3 minIllum = mix(ambientDay, ambientNight, localDarknessLevel)
+            * (0.1 * max(uMinIlluminationScale, 0.0));
           totalIllumination = max(totalIllumination, minIllum);
 
           // Apply illumination to albedo.
           vec3 litColor = baseColor.rgb * totalIllumination;
 
-          // Coloration: lights tint the surface proportional to surface brightness.
-          float reflection = perceivedBrightness(baseColor.rgb);
-          vec3 coloration = safeLights * master * reflection * max(uColorationStrength, 0.0);
+          // Colouration: only the chromatic part of the RGB light buffer tints albedo.
+          // Luminance for neutral / uncoloured Foundry lights already comes from tLightSources.a
+          // (see directLight), so repeating full RGB here used to double-count white light.
+          vec3 lumaW = vec3(0.2126, 0.7152, 0.0722);
+          float lSL = dot(safeLights, lumaW);
+          vec3 greySL = vec3(lSL);
+          vec3 safeForColor = safeLights;
+          float csat = uColorationSaturation;
+          if (abs(csat) > 1e-5) {
+            safeForColor = clamp(mix(greySL, safeLights, 1.0 + csat), 0.0, 3.5);
+          }
+          float lightSat = rgbSaturation(safeForColor);
+          float chromaW = pow(max(lightSat, 0.0), max(uColorationChromaCurve, 0.001));
+          chromaW = mix(chromaW, 1.0, clamp(uColorationAchromaticMix, 0.0, 1.0));
+
+          float reflection = perceivedBrightness(baseColor.rgb) * max(uColorationReflectivity, 0.0);
+          vec3 coloration = safeForColor * master * reflection
+            * max(uColorationStrength, 0.0) * chromaW;
           litColor += coloration;
 
-          gl_FragColor = vec4(litColor, baseColor.a);
+          vec3 outRgb = litColor * max(uComposeToneExposure, 0.0);
+          if (uComposeToneMapping == 1) {
+            outRgb = ACESFilmicToneMapping(outRgb);
+          } else if (uComposeToneMapping == 2) {
+            outRgb = ReinhardToneMapping(outRgb);
+          }
+          gl_FragColor = vec4(outRgb, baseColor.a);
         }
       `,
       depthTest: false,
@@ -866,59 +1178,70 @@ export class LightingEffectV2 {
 
   // ── Light sync ────────────────────────────────────────────────────────
 
-  /**
-   * All embedded AmbientLight documents on the scene (every level), not the lighting
-   * layer's placeables (V14 often only materializes placeables for the viewed level).
-   * @private
-   * @returns {object[]}
-   */
-  _collectAllEmbeddedAmbientLightDocs() {
-    /** @type {object[]} */
-    const out = [];
-    try {
-      const col = canvas?.scene?.lights;
-      if (!col) return out;
-      const size = col.size ?? 0;
-      if (!(size > 0)) return out;
-      if (Array.isArray(col.contents)) {
-        for (const d of col.contents) {
-          if (d) out.push(d);
-        }
-      } else if (typeof col.forEach === 'function') {
-        col.forEach((d) => {
-          if (d) out.push(d);
-        });
-      } else {
-        out.push(...Array.from(col.values()));
-      }
-    } catch (_) {}
-    return out;
+  /** @private @param {unknown} id */
+  _lightMapKey(id) {
+    if (id == null || id === '') return '';
+    return String(id);
   }
 
   /**
-   * Add any scene embedded lights missing from `_lights` (e.g. after a level change when
-   * `canvas.lighting.placeables` only listed the starting level).
+   * Drop V2 meshes for scene lights that no longer exist, then add any missing docs.
+   * Runs on `lightingRefresh` so a missed `deleteAmbientLight` hook cannot leave ghosts;
+   * also fixes the old early-return when embedded collection was empty (no pruning).
    * @private
    */
   _reconcileMissingEmbeddedLights() {
     if (!this._initialized || !this._lightsSynced) return;
-    const docs = this._collectAllEmbeddedAmbientLightDocs();
-    if (!docs.length) return;
+    const docs = getAuthoritativeAmbientLightDocuments();
     const enhancementMap = this._getLightEnhancementConfigMap();
+
+    const validPositive = new Set();
+    const validNegative = new Set();
+    for (const doc of docs) {
+      const key = this._lightMapKey(doc?.id ?? doc?._id);
+      if (!key) continue;
+      const isNegative = doc?.config?.negative === true || doc?.negative === true;
+      if (isNegative) validNegative.add(key);
+      else validPositive.add(key);
+    }
+
+    let pruned = 0;
+    for (const key of [...this._lights.keys()]) {
+      if (validPositive.has(key)) continue;
+      const light = this._lights.get(key);
+      if (light?.mesh) this._lightScene?.remove(light.mesh);
+      light?.dispose?.();
+      this._lights.delete(key);
+      this._nextAnimationUpdateAtSec.delete(key);
+      pruned += 1;
+    }
+    for (const key of [...this._darknessSources.keys()]) {
+      if (validNegative.has(key)) continue;
+      const ds = this._darknessSources.get(key);
+      if (ds?.mesh) this._darknessScene?.remove(ds.mesh);
+      ds?.dispose?.();
+      this._darknessSources.delete(key);
+      this._nextAnimationUpdateAtSec.delete(key);
+      pruned += 1;
+    }
+
     let added = 0;
     for (const doc of docs) {
-      const id = doc?.id ?? doc?._id;
-      if (id == null) continue;
+      const key = this._lightMapKey(doc?.id ?? doc?._id);
+      if (!key) continue;
       const isNegative = doc?.config?.negative === true || doc?.negative === true;
       if (isNegative) {
-        if (!this._darknessSources.has(id)) {
+        if (!this._darknessSources.has(key)) {
           this._addLightFromDoc(doc, enhancementMap);
           added += 1;
         }
-      } else if (!this._lights.has(id)) {
+      } else if (!this._lights.has(key)) {
         this._addLightFromDoc(doc, enhancementMap);
         added += 1;
       }
+    }
+    if (pruned > 0) {
+      log.info(`LightingEffectV2: pruned ${pruned} stale light/darkness slot(s) not on scene`);
     }
     if (added > 0) {
       log.info(`LightingEffectV2: reconciled ${added} embedded light(s) missing from V2 maps`);
@@ -932,7 +1255,24 @@ export class LightingEffectV2 {
     if (!this._initialized) return;
     this._nextAnimationUpdateAtSec.clear();
 
-    // Dispose existing
+    // `_lightScene` is shared with PlayerLightEffectV2 (torch/flashlight) and
+    // CandleFlamesEffectV2 (glow group). Those meshes are not in `_lights`, so a
+    // normal "clear _lights" pass would leave them parented — looks like a Foundry
+    // light disk after every AmbientLight is deleted. Detach foreign children first;
+    // those effects re-attach on their next update if still enabled.
+    if (this._lightScene) {
+      const trackedMeshes = new Set();
+      for (const light of this._lights.values()) {
+        if (light?.mesh) trackedMeshes.add(light.mesh);
+      }
+      for (const ch of [...this._lightScene.children]) {
+        if (!trackedMeshes.has(ch)) {
+          try { this._lightScene.remove(ch); } catch (_) {}
+        }
+      }
+    }
+
+    // Dispose existing Foundry-tracked light sources
     for (const light of this._lights.values()) {
       if (light.mesh) this._lightScene.remove(light.mesh);
       light.dispose();
@@ -946,15 +1286,7 @@ export class LightingEffectV2 {
 
     // Prefer embedded collection: includes every AmbientLight on the scene for all levels.
     // `canvas.lighting.placeables` is only objects on the PIXI layer (often current level only).
-    let docs = this._collectAllEmbeddedAmbientLightDocs();
-    if (docs.length === 0) {
-      try {
-        const placeables = canvas?.lighting?.placeables;
-        if (placeables && placeables.length > 0) {
-          docs = placeables.map((p) => p.document).filter(Boolean);
-        }
-      } catch (_) {}
-    }
+    const docs = getAuthoritativeAmbientLightDocuments();
 
     const enhancementMap = this._getLightEnhancementConfigMap();
     this._lastEnhancementCount = enhancementMap.size;
@@ -1062,7 +1394,10 @@ export class LightingEffectV2 {
    */
   _isDocVisibleForLighting(doc, sceneDarkness) {
     if (!doc) return false;
-    if (!isLightVisibleForPerspective(doc)) return false;
+    const pOverride = this._renderFloorIndexForLights != null
+      ? getPerspectiveForRenderFloorIndex(this._renderFloorIndexForLights)
+      : null;
+    if (!isLightVisibleForPerspective(doc, pOverride)) return false;
     if (doc.hidden === true) return false;
 
     const d = clamp01(Number.isFinite(sceneDarkness) ? sceneDarkness : readFoundryDarkness01());
@@ -1099,7 +1434,8 @@ export class LightingEffectV2 {
     }
 
     const mergedDoc = this._mergeLightEnhancementsIntoDoc(plainDoc, enhancementMap);
-    const id = mergedDoc.id ?? mergedDoc._id;
+    const id = this._lightMapKey(mergedDoc.id ?? mergedDoc._id);
+    if (!id) return;
     const isNegative = mergedDoc?.config?.negative === true || mergedDoc?.negative === true;
 
     if (isNegative) {
@@ -1141,7 +1477,7 @@ export class LightingEffectV2 {
   /** @private */
   _onLightUpdate(doc, changes) {
     if (!this._initialized) return;
-    const id = doc?.id ?? doc?._id;
+    const id = this._lightMapKey(doc?.id ?? doc?._id);
     if (!id) return;
 
     // Merge changes into a plain object for updateData.
@@ -1201,7 +1537,7 @@ export class LightingEffectV2 {
   /** @private */
   _onLightDelete(doc) {
     if (!this._initialized) return;
-    const id = doc?.id ?? doc?._id;
+    const id = this._lightMapKey(doc?.id ?? doc?._id);
     if (!id) return;
 
     if (this._lights.has(id)) {
@@ -1218,6 +1554,29 @@ export class LightingEffectV2 {
     }
     this._nextAnimationUpdateAtSec.delete(String(id));
     this._markPerspectiveRefreshDirty();
+  }
+
+  /**
+   * One-shot migration from the old single `globalIllumination` control into
+   * `ambientDayScale` / `ambientNightScale` when the latter are still at defaults
+   * but legacy differs (typical old module / preset JSON).
+   * @private
+   */
+  _seedAmbientFromLegacyGlobalIfNeeded() {
+    if (this._legacyGlobalIlluminationSeeded) return;
+    this._legacyGlobalIlluminationSeeded = true;
+    const p = this.params;
+    const g = p.globalIllumination;
+    if (g === undefined || g === null || !Number.isFinite(Number(g))) return;
+    const def = 1.3;
+    const gv = Number(g);
+    const day = Number(p.ambientDayScale);
+    const night = Number(p.ambientNightScale);
+    if (!Number.isFinite(day) || !Number.isFinite(night)) return;
+    if (Math.abs(day - def) < 1e-5 && Math.abs(night - def) < 1e-5 && Math.abs(gv - def) > 1e-5) {
+      p.ambientDayScale = gv;
+      p.ambientNightScale = gv;
+    }
   }
 
   // ── Per-frame update ──────────────────────────────────────────────────
@@ -1316,14 +1675,25 @@ export class LightingEffectV2 {
     // Update compose uniforms
     const u = this._composeMaterial?.uniforms;
     if (u) {
+      this._seedAmbientFromLegacyGlobalIfNeeded();
       for (const k of LEGACY_LIGHTING_PARAM_KEYS) {
         if (Object.prototype.hasOwnProperty.call(this.params, k)) delete this.params[k];
       }
       // `uDarknessLevel` drives the ambient day/night blend in the compose shader.
       u.uDarknessLevel.value = clamp01(sceneDarkness);
-      u.uGlobalIllumination.value = this.params.globalIllumination;
+      u.uAmbientDayScale.value = Math.max(0, Number(this.params.ambientDayScale) || 0);
+      u.uAmbientNightScale.value = Math.max(0, Number(this.params.ambientNightScale) || 0);
       u.uLightIntensity.value = this.params.lightIntensity;
+      u.uMinIlluminationScale.value = Math.max(0, Number(this.params.minIlluminationScale) || 0);
       u.uColorationStrength.value = this.params.colorationStrength;
+      u.uColorationReflectivity.value = Math.max(0, Number(this.params.colorationReflectivity) || 0);
+      u.uColorationSaturation.value = Number(this.params.colorationSaturation) || 0;
+      u.uColorationChromaCurve.value = Math.max(0.001, Number(this.params.colorationChromaCurve) || 1);
+      u.uColorationAchromaticMix.value = clamp01(Number(this.params.colorationAchromaticMix) || 0);
+      u.uComposeToneMapping.value = Math.max(0, Math.min(2, Math.round(Number(this.params.composeToneMapping) || 0)));
+      u.uComposeToneExposure.value = Math.max(0, Number(this.params.composeToneExposure) || 1);
+      u.uCloudShadowAmbientInfluence.value = clamp01(Number(this.params.cloudShadowAmbientInfluence) ?? 1);
+      u.uOverheadShadowAmbientInfluence.value = clamp01(Number(this.params.overheadShadowAmbientInfluence) ?? 1);
       u.uNegativeDarknessStrength.value = this.params.negativeDarknessStrength;
       u.uDarknessPunchGain.value = this.params.darknessPunchGain;
       u.uInteriorDarkness.value = Math.max(0, Number(this.params.interiorDarkness) || 0);
@@ -1629,17 +1999,19 @@ export class LightingEffectV2 {
     if (buildingShadowTexture) {
       cu.tBuildingShadow.value    = buildingShadowTexture;
       cu.uHasBuildingShadow.value = 1;
-      const op = Number.isFinite(Number(buildingShadowOpacity))
+      const opBase = Number.isFinite(Number(buildingShadowOpacity))
         ? Math.max(0.0, Math.min(1.0, Number(buildingShadowOpacity)))
         : 0.75;
-      cu.uBuildingShadowOpacity.value = op;
+      const ambBld = Number(this.params?.ambientBuildingShadowMix);
+      const bMix = Number.isFinite(ambBld) ? clamp01(ambBld) : 1.0;
+      cu.uBuildingShadowOpacity.value = opBase * bMix;
 
       if (!this._dbgLoggedBuildingShadowOnce) {
         this._dbgLoggedBuildingShadowOnce = true;
         try {
           log.info('LightingEffectV2 building shadow bind:',
             'tex', buildingShadowTexture?.uuid || 'ok',
-            '| opacity', op,
+            '| opacity', cu.uBuildingShadowOpacity.value,
             '| has', cu.uHasBuildingShadow.value
           );
         } catch (_) {}
@@ -1752,6 +2124,100 @@ export class LightingEffectV2 {
     if (this._darknessRT) this._darknessRT.setSize(rw, rh);
   }
 
+  /**
+   * Remove scene-flag `lightEnhancements` rows whose ids are not on the scene (GM only).
+   * @private
+   * @returns {Promise<{ removed: number }>}
+   */
+  async _repairOrphanLightEnhancementFlags() {
+    const scene = canvas?.scene;
+    if (!scene) return { removed: 0 };
+    try {
+      if (!game?.user?.isGM) {
+        log.warn('repair lightEnhancements: GM only');
+        return { removed: 0 };
+      }
+    } catch (_) {
+      return { removed: 0 };
+    }
+
+    const liveIds = new Set();
+    for (const d of getAuthoritativeAmbientLightDocuments()) {
+      const k = this._lightMapKey(d?.id ?? d?._id);
+      if (k) liveIds.add(k);
+    }
+
+    let raw;
+    try {
+      raw = scene.getFlag?.(MODULE_ID, LIGHT_ENHANCEMENT_FLAG_KEY);
+    } catch (_) {
+      raw = scene?.flags?.[MODULE_ID]?.[LIGHT_ENHANCEMENT_FLAG_KEY];
+    }
+
+    const list = Array.isArray(raw)
+      ? raw
+      : (Array.isArray(raw?.lights) ? raw.lights : (Array.isArray(raw?.items) ? raw.items : []));
+    if (!list.length) return { removed: 0 };
+
+    const next = [];
+    let removed = 0;
+    for (const entry of list) {
+      if (!entry || typeof entry !== 'object') continue;
+      const id = this._lightMapKey(entry.id);
+      if (!id) continue;
+      if (!liveIds.has(id)) {
+        removed += 1;
+        continue;
+      }
+      next.push(entry);
+    }
+    if (removed === 0) return { removed: 0 };
+
+    const version = (raw && typeof raw === 'object' && Number.isFinite(raw.version)) ? raw.version : 1;
+    await scene.setFlag(MODULE_ID, LIGHT_ENHANCEMENT_FLAG_KEY, { version, lights: next });
+    this._invalidateEnhancementCache();
+    log.info(`LightingEffectV2: stripped ${removed} orphan lightEnhancement entr(y/ies) from scene flags`);
+    return { removed };
+  }
+
+  /**
+   * Dispose all Three.js light/darkness meshes and rebuild from Foundry scene data.
+   * @param {{ repairSceneFlags?: boolean, foundryLightingRefresh?: boolean }} [options]
+   * @returns {Promise<{ ok: boolean, reason?: string, orphansRemoved?: number }>}
+   */
+  async forceRebuildFromFoundry(options = {}) {
+    const repairSceneFlags = options.repairSceneFlags === true;
+    const foundryLightingRefresh = options.foundryLightingRefresh !== false;
+
+    if (!this._initialized) {
+      log.warn('LightingEffectV2.forceRebuildFromFoundry: not initialized');
+      return { ok: false, reason: 'not_initialized' };
+    }
+
+    this._invalidateEnhancementCache();
+    this.syncAllLights();
+
+    let orphansRemoved = 0;
+    if (repairSceneFlags) {
+      const r = await this._repairOrphanLightEnhancementFlags();
+      orphansRemoved = r.removed ?? 0;
+      if (orphansRemoved > 0) this.syncAllLights();
+      try {
+        await globalThis.window?.MapShine?.lightEnhancementStore?.load?.(canvas?.scene);
+      } catch (_) {}
+    }
+
+    if (foundryLightingRefresh) {
+      try {
+        Hooks.callAll('lightingRefresh');
+      } catch (_) {}
+    } else {
+      this._reconcileMissingEmbeddedLights();
+    }
+
+    return { ok: true, orphansRemoved };
+  }
+
   // ── Helpers ───────────────────────────────────────────────────────────
 
   /** @private */
@@ -1806,6 +2272,8 @@ export class LightingEffectV2 {
     this._nextAnimationUpdateAtSec.clear();
     this._initialized = false;
     this._lightingPerspectiveContext = null;
+    this._renderFloorIndexForLights = null;
+    this._legacyGlobalIlluminationSeeded = false;
 
     log.info('LightingEffectV2 disposed');
   }

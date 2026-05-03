@@ -351,7 +351,28 @@ export class ModeManager {
     if (canvas.drawings) canvas.drawings.visible = true;
     if (canvas.templates) canvas.templates.visible = true;
     if (canvas.notes) canvas.notes.visible = true;
-    if (canvas.lighting) canvas.lighting.visible = true;
+    if (canvas.lighting) {
+      // Match canvas-replacement V2 policy: do not force PIXI light disks on when
+      // Three.js LightingEffectV2 owns them (avoids duplicate / stale radii).
+      if (window.MapShine?.__v2Active === true) {
+        const activeControl = String(ui?.controls?.control?.name || ui?.controls?.activeControl || '').toLowerCase();
+        const activeControlLayer = String(ui?.controls?.control?.layer || '').toLowerCase();
+        const activeLayerName = String(canvas?.activeLayer?.options?.name || canvas?.activeLayer?.name || '').toLowerCase();
+        const activeLayerCtor = String(canvas?.activeLayer?.constructor?.name || '').toLowerCase();
+        const lightingEdit =
+          !!canvas?.lighting?.active
+          || activeControl === 'lighting'
+          || activeControl === 'light'
+          || activeControlLayer === 'lighting'
+          || activeControlLayer === 'light'
+          || activeLayerName === 'lighting'
+          || activeLayerName === 'light'
+          || activeLayerCtor === 'lightinglayer';
+        canvas.lighting.visible = lightingEdit;
+      } else {
+        canvas.lighting.visible = true;
+      }
+    }
     if (canvas.sounds) canvas.sounds.visible = true;
     if (canvas.regions) canvas.regions.visible = true;
     if (canvas.controls) canvas.controls.visible = true;

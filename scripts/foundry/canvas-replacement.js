@@ -1586,7 +1586,144 @@ export function initialize() {
       }
     };
 
-    console.log('MapShine: scene cleaning commands available -- MapShine.cleanScene(), MapShine.cleanAllScenes(), MapShine.setAutoClean()');
+    /**
+     * Hard-reset Map Shine lighting from Foundry scene data (V2 meshes + specular/iridescence caches).
+     * Also clears non-Foundry meshes from the shared Three light scene (player torch/flashlight,
+     * candle glow) so they cannot masquerade as deleted AmbientLights; they re-attach next frame if still on.
+     * @param {{ repairSceneFlags?: boolean, foundryLightingRefresh?: boolean }} [options]
+     * - repairSceneFlags: GM only — strip `lightEnhancements` flag rows for deleted AmbientLight ids.
+     * - foundryLightingRefresh: default true — runs Foundry's `lightingRefresh` hook after rebuild.
+     * @returns {Promise<{ ok: boolean, reason?: string, orphansRemoved?: number }>}
+     */
+    window.MapShine.rebuildLighting = async function(options = {}) {
+      try {
+        const fc = window.MapShine?.floorCompositorV2 ?? window.MapShine?.effectComposer?._floorCompositorV2;
+        if (!fc?.rebuildLightingFromFoundry) {
+          console.error('MapShine.rebuildLighting: FloorCompositor not ready (load a scene with the Map Shine canvas).');
+          return { ok: false, reason: 'no_compositor' };
+        }
+        const r = await fc.rebuildLightingFromFoundry(options);
+        try {
+          _enforceGameplayPixiSuppression();
+        } catch (_) {}
+        console.warn('MapShine.rebuildLighting result:', r);
+        return r;
+      } catch (e) {
+        console.error('MapShine.rebuildLighting error:', e);
+        return { ok: false, reason: 'exception' };
+      }
+    };
+
+    /**
+     * List embedded `AmbientLight` documents on the active scene (authoritative count
+     * matches `canvas.scene.lights.size`). Use when the UI says lights are gone but
+     * Map Shine / Foundry still show illumination.
+     * @returns {object[]}
+     */
+    window.MapShine.listAmbientLights = function() {
+      try {
+        const scene = canvas?.scene;
+        if (!scene?.lights) {
+          console.warn('MapShine.listAmbientLights: no scene or lights collection');
+          return [];
+        }
+        const out = [];
+        const collect = (doc) => {
+          if (!doc) return;
+          let levels;
+          try {
+            if (doc.levels && typeof doc.levels.values === 'function') {
+              levels = [...doc.levels.values()];
+            } else if (Array.isArray(doc.levels)) {
+              levels = [...doc.levels];
+            }
+          } catch (_) {}
+          out.push({
+            id: doc.id,
+            name: doc.name ?? '',
+            x: doc.x,
+            y: doc.y,
+            elevation: doc.elevation,
+            hidden: doc.hidden === true,
+            negative: !!(doc.config?.negative || doc.negative),
+            levels: levels ?? undefined,
+          });
+        };
+        try {
+          scene.lights.forEach(collect);
+        } catch (_) {
+          const c = scene.lights.contents;
+          if (Array.isArray(c)) for (const d of c) collect(d);
+        }
+        if (out.length) console.table(out);
+        else console.warn('MapShine.listAmbientLights: 0 embedded AmbientLight documents on this scene.');
+        console.warn(`MapShine.listAmbientLights: total ${out.length}`);
+        return out;
+      } catch (e) {
+        console.error('MapShine.listAmbientLights:', e);
+        return [];
+      }
+    };
+
+    /**
+     * GM: delete every embedded AmbientLight on the **current** scene (including darkness
+     * sources that are still AmbientLight documents). Requires explicit confirm string.
+     * @param {{ confirm?: string }} [options] — pass `{ confirm: 'DELETE_ALL_AMBIENT_LIGHTS' }`
+     * @returns {Promise<{ ok: boolean, reason?: string, deleted?: number, count?: number, ids?: string[] }>}
+     */
+    window.MapShine.deleteAllAmbientLightsFromScene = async function(options = {}) {
+      try {
+        if (!game?.user?.isGM) {
+          console.error('MapShine.deleteAllAmbientLightsFromScene: GM only');
+          return { ok: false, reason: 'not_gm' };
+        }
+        const scene = canvas?.scene;
+        if (!scene?.lights) {
+          return { ok: false, reason: 'no_scene' };
+        }
+        try {
+          if (typeof scene.canUserModify === 'function' && !scene.canUserModify(game.user, 'update')) {
+            console.error('MapShine.deleteAllAmbientLightsFromScene: no permission to update this scene');
+            return { ok: false, reason: 'no_permission' };
+          }
+        } catch (_) {}
+
+        const ids = [];
+        const push = (doc) => {
+          if (doc?.id) ids.push(doc.id);
+        };
+        try {
+          scene.lights.forEach(push);
+        } catch (_) {
+          const c = scene.lights.contents;
+          if (Array.isArray(c)) for (const d of c) push(d);
+        }
+        if (!ids.length) {
+          console.warn('MapShine.deleteAllAmbientLightsFromScene: nothing to delete');
+          return { ok: true, deleted: 0 };
+        }
+        if (options?.confirm !== 'DELETE_ALL_AMBIENT_LIGHTS') {
+          console.warn(
+            `MapShine.deleteAllAmbientLightsFromScene: ${ids.length} AmbientLight(s) on "${scene.name}". ` +
+              'Inspect with MapShine.listAmbientLights(). To remove them from the world, run:\n' +
+              `  await MapShine.deleteAllAmbientLightsFromScene({ confirm: 'DELETE_ALL_AMBIENT_LIGHTS' })`,
+            ids,
+          );
+          return { ok: false, reason: 'needs_confirm', count: ids.length, ids };
+        }
+        await scene.deleteEmbeddedDocuments('AmbientLight', ids);
+        try {
+          await window.MapShine.rebuildLighting?.({ foundryLightingRefresh: true });
+        } catch (_) {}
+        console.warn(`MapShine.deleteAllAmbientLightsFromScene: deleted ${ids.length} document(s)`);
+        return { ok: true, deleted: ids.length };
+      } catch (e) {
+        console.error('MapShine.deleteAllAmbientLightsFromScene:', e);
+        return { ok: false, reason: 'exception' };
+      }
+    };
+
+    console.log('MapShine: console helpers — cleanScene(), cleanAllScenes(), setAutoClean(), rebuildLighting(), listAmbientLights(), deleteAllAmbientLightsFromScene()');
   } catch (_) {}
 
   try {
@@ -8668,6 +8805,12 @@ function _enforceGameplayPixiSuppression() {
           if (canvas.visibility.filter) canvas.visibility.filter.enabled = false;
           if (canvas.visibility.vision) canvas.visibility.vision.visible = false;
         }, 'pixiSuppress.visibility(editorOverlayV2)', Severity.COSMETIC);
+
+        // Foundry PIXI lighting disks duplicate LightingEffectV2 and can desync after
+        // bulk deletes; hide except while the lighting layer / tool is active.
+        safeCall(() => {
+          if (canvas.lighting) canvas.lighting.visible = !!lightingEditContext;
+        }, 'pixiSuppress.lighting(editorOverlayV2)', Severity.COSMETIC);
       }
 
       if (threeCanvas) {
@@ -8860,6 +9003,16 @@ function _enforceGameplayPixiSuppression() {
     safeCall(() => {
       _enforcePersistentOverlayAdornments();
     }, 'pixiSuppress.persistentOverlayAdornments', Severity.COSMETIC);
+
+    // V2: AmbientLight radii are drawn in Three.js; keep Foundry's lighting layer off
+    // during gameplay (including when persistent drawings force PIXI opacity on).
+    safeCall(() => {
+      if (!canvas.lighting) return;
+      if (window.MapShine?.__v2Active === true) {
+        canvas.lighting.visible = !!lightingEditContext;
+      }
+    }, 'pixiSuppress.lightingV2Gameplay', Severity.COSMETIC);
+
     diag({
       branch: 'gameplay-selective',
       shouldPixiReceiveInput: !!shouldPixiReceiveInput,

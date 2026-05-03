@@ -36,6 +36,7 @@ import {
   readTileLevelsFlags,
   getViewedLevelBackgroundSrc,
 } from '../../foundry/levels-scene-flags.js';
+import { getAuthoritativeAmbientLightDocuments } from '../../foundry/ambient-light-documents.js';
 import Coordinates from '../../utils/coordinates.js';
 import { getTileBusPlaneSizeAndMirror, getTileVisualCenterFoundryXY } from '../../scene/tile-manager.js';
 import { getVertexShader, getFragmentShader } from './specular-shader.js';
@@ -117,7 +118,7 @@ export class SpecularEffectV2 {
     /**
      * Tracked Foundry ambient lights for dynamic specular.
      * Key: light document ID. Value: parsed light data.
-     * @type {Map<string, {position: THREE.Vector3, color: {r:number,g:number,b:number}, radius: number, dim: number, attenuation: number}>}
+     * @type {Map<string, {position: THREE.Vector3, color: {r:number,g:number,b:number}, radius: number, brightRadiusPx: number, attenuation: number}>}
      */
     this._lights = new Map();
 
@@ -886,6 +887,11 @@ export class SpecularEffectV2 {
 
     // ── Foundry darkness + ambient ────────────────────────────────────────
     this._updateEnvironmentUniforms();
+
+    // Light uniforms are not pushed on every AmbientLight hook (e.g. token drag);
+    // deferred shader compile also rebuilds Float32 buffers without re-filling.
+    this._refreshTrackedLightsFromFoundry();
+    this._updateLightUniforms();
   }
 
   /**
@@ -1610,6 +1616,11 @@ export class SpecularEffectV2 {
 
       this._syncOverlayVisibility();
 
+      // _buildSharedUniforms() created fresh light arrays (zeros). Without this,
+      // numLights stays 0 until an AmbientLight create/update/delete hook fires.
+      this._refreshTrackedLightsFromFoundry();
+      this._updateLightUniforms();
+
       const elapsed = (performance?.now?.() ?? Date.now()) - startMs;
       log.warn(`[${elapsed.toFixed(0)}ms] SpecularEffectV2: real shader material attached for ${this._overlays.size} overlays`);
     } catch (err) {
@@ -1846,12 +1857,14 @@ export class SpecularEffectV2 {
       this._updateLightUniforms();
     });
     this._hookIds.update = Hooks.on('updateAmbientLight', (doc) => {
-      this._lights.delete(doc.id);
+      const k = doc?.id != null ? String(doc.id) : '';
+      if (k) this._lights.delete(k);
       this._addLight(doc);
       this._updateLightUniforms();
     });
     this._hookIds.delete = Hooks.on('deleteAmbientLight', (doc) => {
-      this._lights.delete(doc.id);
+      const k = doc?.id != null ? String(doc.id) : '';
+      if (k) this._lights.delete(k);
       this._updateLightUniforms();
     });
   }
@@ -1869,21 +1882,47 @@ export class SpecularEffectV2 {
   _syncAllLights() {
     this._lights.clear();
     try {
-      const lights = canvas?.lighting?.placeables ?? [];
-      for (const light of lights) {
-        this._addLight(light.document);
+      const docs = getAuthoritativeAmbientLightDocuments();
+      for (const doc of docs) {
+        this._addLight(doc);
       }
       this._updateLightUniforms();
     } catch (_) {}
   }
 
-  /** @private */
-  _addLight(doc) {
-    if (!doc?.id || this._lights.size >= MAX_LIGHTS) return;
-    const config = doc.config;
-    if (!config) return;
+  /** Rebuild cached light uniforms from the scene (recovery / MapShine.rebuildLighting). */
+  resyncLightsFromFoundry() {
+    this._syncAllLights();
+  }
 
-    // Parse light color.
+  /** @private @param {object|null|undefined} doc */
+  _isNegativeLightDoc(doc) {
+    return doc?.config?.negative === true || doc?.negative === true;
+  }
+
+  /** @private @param {object} doc */
+  _docHasPositiveLightRadius(doc) {
+    const cfg = doc?.config;
+    if (!cfg) return false;
+    const dim = Number(cfg.dim) || 0;
+    const bright = Number(cfg.bright) || 0;
+    return Math.max(dim, bright) > 0;
+  }
+
+  /**
+   * Copy Foundry AmbientLight photometry into a cached entry (position, radii px, color, attenuation).
+   * Matches ThreeLightSource.updateData grid→px conversion.
+   * @private
+   * @param {object} doc
+   * @param {{position: THREE.Vector3, color: {r:number,g:number,b:number}, radius: number, brightRadiusPx: number, attenuation: number}} entry
+   * @returns {boolean} false if doc cannot drive a positive light (zero radius, etc.)
+   */
+  _syncLightEntryFromDoc(doc, entry) {
+    const THREE = window.THREE;
+    const config = doc?.config;
+    if (!config || !entry?.position) return false;
+    if (this._isNegativeLightDoc(doc)) return false;
+
     let r = 1, g = 1, b = 1;
     const colorInput = config.color;
     if (colorInput) {
@@ -1909,18 +1948,98 @@ export class SpecularEffectV2 {
     const intensity = luminosity * 2.0;
     const dim = config.dim || 0;
     const bright = config.bright || 0;
-    const radius = Math.max(dim, bright);
-    if (radius === 0) return;
+    const radiusGrid = Math.max(dim, bright);
+    if (radiusGrid === 0) return false;
+
+    let radiusPx = radiusGrid;
+    let brightRadiusPx = 0;
+    try {
+      const d = canvas?.dimensions;
+      const dist = Number(d?.distance);
+      const size = Number(d?.size);
+      if (d && Number.isFinite(dist) && dist > 0 && Number.isFinite(size)) {
+        const pxPerUnit = size / dist;
+        radiusPx = radiusGrid * pxPerUnit;
+        const brightRaw = Math.max(0, bright) * pxPerUnit;
+        brightRadiusPx = Math.max(0, Math.min(brightRaw, radiusPx));
+      }
+    } catch (_) { /* canvas may not be ready */ }
+
+    const rawAtt = config.attenuation ?? 0.5;
+    const rawAttenuation = Number.isFinite(Number(rawAtt)) ? Number(rawAtt) : 0.5;
+    const computedAttenuation = (Math.cos(Math.PI * Math.pow(rawAttenuation, 1.5)) - 1) / -2;
+
+    entry.position.copy(Coordinates.toWorld(doc.x, doc.y));
+    entry.color.r = r * intensity;
+    entry.color.g = g * intensity;
+    entry.color.b = b * intensity;
+    entry.radius = radiusPx;
+    entry.brightRadiusPx = brightRadiusPx;
+    entry.attenuation = computedAttenuation;
+    return true;
+  }
+
+  /**
+   * Keep _lights aligned with Foundry docs every frame (position, radius edits, token-carried lights).
+   * Full resync when membership changes. Complements hook-driven CRUD.
+   * @private
+   */
+  _refreshTrackedLightsFromFoundry() {
+    let docs;
+    try {
+      docs = getAuthoritativeAmbientLightDocuments();
+    } catch (_) {
+      return;
+    }
+
+    /** @type {object[]} */
+    const positives = [];
+    for (let i = 0; i < docs.length; i++) {
+      const d = docs[i];
+      if (!d || this._isNegativeLightDoc(d)) continue;
+      if (!this._docHasPositiveLightRadius(d)) continue;
+      positives.push(d);
+    }
+
+    if (positives.length !== this._lights.size) {
+      this._syncAllLights();
+      return;
+    }
+
+    for (let i = 0; i < positives.length; i++) {
+      const doc = positives[i];
+      const idKey = doc?.id != null ? String(doc.id) : '';
+      if (!idKey || !this._lights.has(idKey)) {
+        this._syncAllLights();
+        return;
+      }
+      const entry = this._lights.get(idKey);
+      if (!this._syncLightEntryFromDoc(doc, entry)) {
+        this._syncAllLights();
+        return;
+      }
+    }
+  }
+
+  /** @private */
+  _addLight(doc) {
+    const idKey = doc?.id != null ? String(doc.id) : '';
+    if (!idKey || this._lights.size >= MAX_LIGHTS) return;
+    if (this._isNegativeLightDoc(doc)) return;
+    const config = doc.config;
+    if (!config) return;
 
     const worldPos = Coordinates.toWorld(doc.x, doc.y);
-
-    this._lights.set(doc.id, {
+    const entry = {
       position: worldPos,
-      color: { r: r * intensity, g: g * intensity, b: b * intensity },
-      radius,
-      dim,
-      attenuation: config.attenuation ?? 0.5,
-    });
+      color: { r: 1, g: 1, b: 1 },
+      radius: 0,
+      brightRadiusPx: 0,
+      attenuation: 0.5,
+    };
+    if (!this._syncLightEntryFromDoc(doc, entry)) return;
+
+    this._lights.set(idKey, entry);
   }
 
   /** @private */
@@ -1943,7 +2062,7 @@ export class SpecularEffectV2 {
       colArr[i3 + 1] = light.color.g;
       colArr[i3 + 2] = light.color.b;
       cfgArr[i4]     = light.radius;
-      cfgArr[i4 + 1] = light.dim;
+      cfgArr[i4 + 1] = light.brightRadiusPx;
       cfgArr[i4 + 2] = light.attenuation;
       cfgArr[i4 + 3] = 0;
       idx++;

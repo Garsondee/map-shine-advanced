@@ -2391,8 +2391,9 @@ export class ThreeLightSource {
       this._cookieRetryTimeoutId = null;
     }
     if (this.mesh) {
-      this.mesh.geometry.dispose();
-      this.mesh.material.dispose();
+      try { this.mesh.removeFromParent(); } catch (_) {}
+      try { this.mesh.geometry.dispose(); } catch (_) {}
+      try { this.mesh.material.dispose(); } catch (_) {}
     }
   }
 }

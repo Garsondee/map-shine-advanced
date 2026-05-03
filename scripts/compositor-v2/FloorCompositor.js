@@ -4588,6 +4588,27 @@ export class FloorCompositor {
   }
 
   /**
+   * Wipe Map Shine V2 lighting meshes and rebuild from Foundry; resync specular/iridescence light caches.
+   * Console (GM): `await MapShine.rebuildLighting({ repairSceneFlags: true })`
+   * @param {{ repairSceneFlags?: boolean, foundryLightingRefresh?: boolean }} [options]
+   * @returns {Promise<{ ok: boolean, reason?: string, orphansRemoved?: number }>}
+   */
+  async rebuildLightingFromFoundry(options = {}) {
+    const le = this._lightingEffect;
+    if (!le?.forceRebuildFromFoundry) {
+      return { ok: false, reason: 'lighting_effect_missing' };
+    }
+    const out = await le.forceRebuildFromFoundry(options);
+    try {
+      this._specularEffect?.resyncLightsFromFoundry?.();
+    } catch (_) {}
+    try {
+      this._iridescenceEffect?.resyncLightsFromFoundry?.();
+    } catch (_) {}
+    return out;
+  }
+
+  /**
    * External resize handler — call when the viewport size changes.
    * @param {number} width
    * @param {number} height
@@ -4959,6 +4980,10 @@ export class FloorCompositor {
         this._windowLightEffect?.syncFrameOcclusion?.(this);
         this._skyColorEffect?.setOverheadRoofAlphaTexture?.(overheadRoofAlphaTex);
 
+        try {
+          this._lightingEffect?.setRenderFloorIndexForLights?.(levelIndex);
+        } catch (_) {}
+
         let outdoorsForLightingTex = null;
         try {
           const lightingCtx = window.MapShine?.activeLevelContext ?? null;
@@ -5164,6 +5189,9 @@ export class FloorCompositor {
       try { this._waterEffect?.clearLevelContext?.(); } catch (_) {}
     }
     this._windowLightEffect?.setRenderFloorIndex?.(null);
+    try {
+      this._lightingEffect?.setRenderFloorIndexForLights?.(null);
+    } catch (_) {}
 
     // Release pool entries for levels no longer visible.
     this._levelRTPool.releaseStale(activeLevels);

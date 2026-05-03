@@ -278,6 +278,38 @@ export function isTileVisibleForPerspective(tileDoc, tileFlags) {
 // ---------------------------------------------------------------------------
 
 /**
+ * Synthetic perspective at the midpoint of a FloorStack floor band so
+ * multi-floor compositor passes can gate lights for **that slice** instead of
+ * the global viewer / active level (fixes upper-floor lights bleeding onto
+ * lower-floor renders).
+ *
+ * @param {number} floorIndex - `FloorCompositor` / `FloorStack` floor index
+ * @returns {ReturnType<typeof getPerspectiveElevation>|null}
+ */
+export function getPerspectiveForRenderFloorIndex(floorIndex) {
+  const fi = Number(floorIndex);
+  if (!Number.isFinite(fi)) return null;
+  const floors = globalThis.window?.MapShine?.floorStack?.getFloors?.() ?? [];
+  const f = floors[fi];
+  if (!f) return null;
+  const scene = globalThis.canvas?.scene ?? null;
+  const bottom = Number(f.elevationMin);
+  const top = Number(f.elevationMax);
+  let mid = NaN;
+  if (Number.isFinite(bottom) && Number.isFinite(top)) {
+    mid = (bottom + top) * 0.5;
+  }
+  if (!Number.isFinite(mid)) return null;
+  return {
+    elevation: mid,
+    losHeight: mid,
+    source: 'render-floor',
+    tokenId: null,
+    backgroundElevation: getSceneBackgroundElevation(scene),
+  };
+}
+
+/**
  * Check if an ambient light should be visible based on its elevation range
  * and the current perspective elevation.
  *
@@ -289,9 +321,12 @@ export function isTileVisibleForPerspective(tileDoc, tileFlags) {
  * - Lights below background elevation are hidden when viewer is above background
  *
  * @param {AmbientLightDocument|object} lightDoc - The light document
+ * @param {ReturnType<typeof getPerspectiveElevation>|null} [perspectiveOverride] - When set (e.g. from
+ *   {@link getPerspectiveForRenderFloorIndex}), use this instead of {@link getPerspectiveElevation} so
+ *   per-level lighting passes match the slice being composited.
  * @returns {boolean} Whether the light should be visible
  */
-export function isLightVisibleForPerspective(lightDoc) {
+export function isLightVisibleForPerspective(lightDoc, perspectiveOverride = null) {
   if (!hasV14NativeLevels(canvas?.scene)) return true;
   if (!lightDoc) return true;
 
@@ -304,7 +339,7 @@ export function isLightVisibleForPerspective(lightDoc) {
   } catch (_) {}
   if (!levelGate.ok) return false;
 
-  const perspective = getPerspectiveElevation();
+  const perspective = perspectiveOverride ?? getPerspectiveElevation();
 
   // Lights scoped by V14 level ids already matched the viewed level — do not apply
   // lightMasking vs doc.elevation (often still 0); use only the underBackground rule.

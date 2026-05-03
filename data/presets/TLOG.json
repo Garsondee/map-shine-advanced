@@ -1018,7 +1018,8 @@
         },
         "lighting": {
           "enabled": true,
-          "globalIllumination": 1,
+          "ambientDayScale": 1,
+          "ambientNightScale": 1,
           "lightIntensity": 0.15000000000000002,
           "colorationStrength": 5,
           "wallInsetPx": 6,
@@ -1307,7 +1308,7 @@
           "hazeContrastLoss": 0,
           "autoIntensityEnabled": true,
           "autoIntensityStrength": 1,
-          "debugOverride": true,
+          "debugOverride": false,
           "exposure": 0.51,
           "saturation": 0.21,
           "contrast": 0.98,

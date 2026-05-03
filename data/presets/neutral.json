@@ -435,7 +435,8 @@
           },
           "lighting": {
             "enabled": true,
-            "globalIllumination": 0.9,
+            "ambientDayScale": 0.9,
+            "ambientNightScale": 0.9,
             "lightIntensity": 0.1,
             "colorationStrength": 10,
             "wallInsetPx": 6,
@@ -619,7 +620,7 @@
             "nightVignetteStrength": 0.25,
             "nightVignetteSoftness": 1,
             "nightGrainStrength": 0,
-            "debugOverride": true,
+            "debugOverride": false,
             "exposure": 0.51,
             "saturation": 0.21,
             "contrast": 0.98,

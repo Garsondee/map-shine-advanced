@@ -170,7 +170,9 @@ export function getFragmentShader(maxLights = 64) {
     uniform int numLights;
     uniform vec3 lightPosition[${maxLights}];
     uniform vec3 lightColor[${maxLights}];
-    uniform vec4 lightConfig[${maxLights}]; // (radius, dim, attenuation, unused)
+    // Per light: (outerRadiusPx, brightRadiusPx, attenuation, unused) — same pixel
+    // space as lightPosition.xy / vWorldPosition.xy (see ThreeLightSource.updateData).
+    uniform vec4 lightConfig[${maxLights}];
 
     // ── Frost / Ice Glaze ─────────────────────────────────────────────────────
     uniform bool uFrostGlazeEnabled;
@@ -416,14 +418,15 @@ export function getFragmentShader(maxLights = 64) {
         vec3 lPos = lightPosition[i];
         vec3 lColor = lightColor[i];
         float radius = lightConfig[i].x;
-        float dim = lightConfig[i].y;
+        float brightRadius = lightConfig[i].y;
         float attenuation = lightConfig[i].z;
 
         float dist = distance(vWorldPosition.xy, lPos.xy);
 
         if (dist < radius) {
-          float d = dist / radius;
-          float inner = (radius > 0.0) ? clamp(dim / radius, 0.0, 0.99) : 0.0;
+          float d = dist / max(radius, 1e-5);
+          // Inner edge of falloff = bright core as a fraction of outer radius (Foundry bright/dim).
+          float inner = (radius > 0.0) ? clamp(brightRadius / radius, 0.0, 0.99) : 0.0;
           float falloff = 1.0 - smoothstep(inner, 1.0, d);
           float linear = 1.0 - d;
           float squared = 1.0 - d * d;

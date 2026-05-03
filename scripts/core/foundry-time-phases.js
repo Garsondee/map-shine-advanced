@@ -153,3 +153,40 @@ export function getFoundrySunlightFactor(hour, phases = getFoundryTimePhaseHours
   if (!Number.isFinite(progress)) return 0;
   return Math.max(0, Math.sin(Math.PI * progress));
 }
+
+/**
+ * Map Shine calendar hour → synthetic darkness 0..1 (matches lighting / StateApplier anchors).
+ * Used by {@link LightingEffectV2} and {@link SkyColorEffectV2} so sky grading tracks midnight.
+ *
+ * @param {number} hourRaw - Weather / control-panel hour 0..24
+ * @returns {number|null} null if hour is not finite
+ */
+export function computeTimeOfDayDarkness01(hourRaw) {
+  const h = Number(hourRaw);
+  if (!Number.isFinite(h)) return null;
+
+  const safeHour = normalizeHour24(h);
+  const phases = getFoundryTimePhaseHours();
+
+  const dawnDuskDarkness = 0.55;
+  const noonDarkness = 0.0;
+  const midnightDarkness = 0.95;
+
+  const dayProgress = getWrappedHourProgress(safeHour, phases.sunrise, phases.sunset);
+  let targetDarkness;
+
+  if (Number.isFinite(dayProgress)) {
+    const sunlight = Math.pow(getFoundrySunlightFactor(safeHour, phases), 0.85);
+    targetDarkness = dawnDuskDarkness + ((noonDarkness - dawnDuskDarkness) * sunlight);
+  } else {
+    const nightProgress = getWrappedHourProgress(safeHour, phases.sunset, phases.sunrise);
+    if (Number.isFinite(nightProgress)) {
+      const moonArc = Math.pow(Math.max(0, Math.sin(Math.PI * nightProgress)), 0.8);
+      targetDarkness = dawnDuskDarkness + ((midnightDarkness - dawnDuskDarkness) * moonArc);
+    } else {
+      targetDarkness = midnightDarkness;
+    }
+  }
+
+  return Math.max(0, Math.min(1, targetDarkness));
+}

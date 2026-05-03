@@ -2918,9 +2918,11 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
   _removeDynamicLightSources() {
     const lighting = this._getLightingEffect();
     try {
-      if (lighting?.lights) {
-        if (this._torchLightSource?.mesh) lighting.lightScene?.remove?.(this._torchLightSource.mesh);
-        if (this._flashlightLightSource?.mesh) lighting.lightScene?.remove?.(this._flashlightLightSource.mesh);
+      // LightingEffectV2 has no `.lights` collection — use `lightScene` (was never
+      // true before, so torch/flash ThreeLightSource meshes could stay in the scene).
+      if (lighting?.lightScene) {
+        if (this._torchLightSource?.mesh) lighting.lightScene.remove(this._torchLightSource.mesh);
+        if (this._flashlightLightSource?.mesh) lighting.lightScene.remove(this._flashlightLightSource.mesh);
       }
     } catch (_) {
     }

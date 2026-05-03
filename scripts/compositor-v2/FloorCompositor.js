@@ -2832,6 +2832,7 @@ export class FloorCompositor {
   } = {}) {
     if (!this._initialized) {
       log.warn('FloorCompositor.render called before initialize()');
+      this._ensureDefaultFramebuffer();
       return;
     }
 
@@ -2859,6 +2860,7 @@ export class FloorCompositor {
             };
           }
         } catch (_) {}
+        this._ensureDefaultFramebuffer();
         return;
       }
       // Clear any stale hold flag so subsequent rAFs proceed normally.
@@ -3102,6 +3104,7 @@ export class FloorCompositor {
 
     if (populateSlimRender) {
       this._runPopulateSlimRenderFrame();
+      this._ensureDefaultFramebuffer();
       return;
     }
 
@@ -3284,6 +3287,7 @@ export class FloorCompositor {
     if (!_compositeOut) {
       log.warn('FloorCompositor.render: per-level pipeline produced no output');
       if (_dbgStages) this._debugFirstFrameStagesLogged = true;
+      this._ensureDefaultFramebuffer();
       return;
     }
     let currentInput = _compositeOut;
@@ -3466,6 +3470,10 @@ export class FloorCompositor {
         }
       } catch (_) {}
     }
+
+    // Always leave the context on the default framebuffer so the canvas presents
+    // the last blit. _blitToScreen restores prevTarget, which can re-bind an RT.
+    this._ensureDefaultFramebuffer();
   }
 
   /**
@@ -3647,6 +3655,20 @@ export class FloorCompositor {
    * @param {THREE.WebGLRenderTarget} sourceRT
    * @private
    */
+  /**
+   * Bind the WebGL default framebuffer (visible canvas). Passes and
+   * {@link #_blitToScreen} can leave an off-screen RT bound; the canvas then
+   * keeps showing stale pixels (often read as grey) until something resets.
+   * @private
+   */
+  _ensureDefaultFramebuffer() {
+    try {
+      const r = this.renderer;
+      if (!r || typeof r.setRenderTarget !== 'function') return;
+      r.setRenderTarget(null);
+    } catch (_) {}
+  }
+
   _blitToScreen(sourceRT) {
     if (!this._blitMaterial || !sourceRT) return;
     const renderer = this.renderer;

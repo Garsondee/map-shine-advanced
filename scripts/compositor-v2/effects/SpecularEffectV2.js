@@ -2,9 +2,11 @@
  * @fileoverview V2 Specular Effect — per-tile additive specular overlays.
  *
  * HEALTH-WIRING BADGE (Map Shine Breaker Box):
- * If you change outdoors / roof-map binding, per-floor mask resolution, or overlay
- * lifecycle, update HealthEvaluator contracts for `SpecularEffectV2` and keep
- * `_healthDiagnostics` in `render()` accurate for Breaker Box diagnostics.
+ * If you change outdoors / roof-map binding, per-floor mask resolution, overlay
+ * lifecycle, PlayerLightEffectV2 → player light uniforms / floor gate (`_appendPlayerLightSpecularUniforms`),
+ * or AmbientLight floor masks (`uAmbientLightFloorGate`, `lightConfig.w`), update HealthEvaluator contracts
+ * for `SpecularEffectV2` and keep `_healthDiagnostics` in
+ * `render()` accurate for Breaker Box diagnostics.
  *
  * Architecture:
  *   For each tile that has a `_Specular` mask, this effect creates an additive
@@ -35,8 +37,15 @@ import {
   tileHasLevelsRange,
   readTileLevelsFlags,
   getViewedLevelBackgroundSrc,
+  readDocLevelsRange,
+  hasV14NativeLevels,
 } from '../../foundry/levels-scene-flags.js';
 import { getAuthoritativeAmbientLightDocuments } from '../../foundry/ambient-light-documents.js';
+import {
+  getPerspectiveElevation,
+  getPerspectiveForRenderFloorIndex,
+  isLightVisibleForPerspective,
+} from '../../foundry/elevation-context.js';
 import Coordinates from '../../utils/coordinates.js';
 import { getTileBusPlaneSizeAndMirror, getTileVisualCenterFoundryXY } from '../../scene/tile-manager.js';
 import { getVertexShader, getFragmentShader } from './specular-shader.js';
@@ -55,6 +64,9 @@ const SPECULAR_EFFECT_DELTA = 1;
 
 // Maximum number of dynamic lights the shader supports (compile-time constant).
 const MAX_LIGHTS = 64;
+
+/** PlayerLightEffectV2 torch + flashlight slots in specular-shader (must match GLSL `[2]`). */
+const PLAYER_SPECULAR_LIGHT_SLOTS = 2;
 
 /**
  * Parallel async map with a fixed worker pool. Used so `probeMaskFile` does not
@@ -118,7 +130,7 @@ export class SpecularEffectV2 {
     /**
      * Tracked Foundry ambient lights for dynamic specular.
      * Key: light document ID. Value: parsed light data.
-     * @type {Map<string, {position: THREE.Vector3, color: {r:number,g:number,b:number}, radius: number, brightRadiusPx: number, attenuation: number}>}
+     * @type {Map<string, {position: THREE.Vector3, color: {r:number,g:number,b:number}, radius: number, brightRadiusPx: number, attenuation: number, floorVisibilityMask: number}>}
      */
     this._lights = new Map();
 
@@ -254,6 +266,9 @@ export class SpecularEffectV2 {
       // Building Shadow Suppression
       buildingShadowSuppressionEnabled: true,
       buildingShadowSuppressionStrength: 0.8,
+
+      /** Extra analytic specular gain for PlayerLightEffectV2 torch / flashlight overlap (1 = none). */
+      playerLightSpecularBoost: 1.35,
     };
 
     log.debug('SpecularEffectV2 created');
@@ -322,6 +337,7 @@ export class SpecularEffectV2 {
           'Draws **additive shine** on top of map tiles (and the scene background) wherever a matching **`_Specular`** texture exists beside the art.',
           'Stripes, sparkles, rain wetness, frost, outdoor/cloud response, and Foundry lights all multiply into that mask — there is no separate PBR roughness or normal-map path.',
           'Uses one overlay mesh per masked tile, rendered through the floor bus so level visibility stays correct.',
+          'Torch and flashlight from PlayerLightEffectV2 feed a separate analytic pass each frame (after player-light update). On multi-floor scenes they only add to specular overlays on the same floor band as the controlled token’s elevation.',
           'Performance scales with how many `_Specular` overlays exist and how busy the stripe/sparkle math is; heavy maps benefit from fewer stripe layers or lower intensities.',
           'Settings are stored on the scene (not World Based).',
         ].join('\n\n'),
@@ -333,6 +349,7 @@ export class SpecularEffectV2 {
           'Outdoor blend': 'How much outdoor areas mix stripe modulation with cloud-lit specular.',
           'Wet surface': 'Rain-driven sheen from albedo brightness, strongest on outdoor pixels.',
           'Building shadow suppression': 'Pulls specular down where the building shadow map is dark.',
+          'Player light specular boost': 'Scales analytic specular energy from the torch / flashlight ThreeLightSource pass (1 = match disk strength, higher = punchier highlights).',
         },
       },
       presetApplyDefaults: true,
@@ -349,7 +366,7 @@ export class SpecularEffectV2 {
           label: 'Look',
           type: 'folder',
           expanded: true,
-          parameters: ['intensity', 'lightColor'],
+          parameters: ['intensity', 'lightColor', 'playerLightSpecularBoost'],
         },
         {
           name: 'stripes',
@@ -467,6 +484,16 @@ export class SpecularEffectV2 {
           label: 'Specular tint',
           default: { ...white },
           tooltip: 'Tint multiplied into specular highlights (linear 0–1 per channel).',
+        },
+        playerLightSpecularBoost: {
+          type: 'slider',
+          label: 'Player light specular boost',
+          min: 1,
+          max: 2.5,
+          step: 0.05,
+          default: 1.35,
+          throttle: 100,
+          tooltip: 'Extra strength where torch / flashlight (PlayerLightEffectV2) overlaps the floor specular pass. Uses the same world-space radii as the player light disks.',
         },
         stripeEnabled: {
           type: 'boolean',
@@ -892,6 +919,11 @@ export class SpecularEffectV2 {
     // deferred shader compile also rebuilds Float32 buffers without re-filling.
     this._refreshTrackedLightsFromFoundry();
     this._updateLightUniforms();
+
+    const floors = window.MapShine?.floorStack?.getFloors?.() ?? [];
+    if (u.uAmbientLightFloorGate) {
+      u.uAmbientLightFloorGate.value = floors.length > 1 ? 1.0 : 0.0;
+    }
   }
 
   /**
@@ -911,6 +943,10 @@ export class SpecularEffectV2 {
     }
     const THREE = window.THREE;
     const u = this._sharedUniforms;
+
+    // Player torch / flashlight are not AmbientLight docs — append after Foundry fill
+    // (update() runs before playerLight.update(); render runs after, so snapshots are fresh).
+    this._appendPlayerLightSpecularUniforms();
 
     // ── Camera ────────────────────────────────────────────────────────────
     if (isFinite(camera.position.x) && isFinite(camera.position.y)) {
@@ -1800,6 +1836,15 @@ export class SpecularEffectV2 {
       lightColor: { value: new Float32Array(MAX_LIGHTS * 3) },
       lightConfig: { value: new Float32Array(MAX_LIGHTS * 4) },
 
+      // PlayerLightEffectV2 (floor-gated in shader vs per-overlay uOutdoorsFloorIdx)
+      uPlayerLightCount: { value: 0 },
+      uPlayerLightFloorIndex: { value: -1 },
+      uPlayerLightFloorGate: { value: 0.0 },
+      uAmbientLightFloorGate: { value: 0.0 },
+      playerLightPosition: { value: new Float32Array(PLAYER_SPECULAR_LIGHT_SLOTS * 3) },
+      playerLightColor: { value: new Float32Array(PLAYER_SPECULAR_LIGHT_SLOTS * 3) },
+      playerLightConfig: { value: new Float32Array(PLAYER_SPECULAR_LIGHT_SLOTS * 4) },
+
       // Frost
       uFrostGlazeEnabled: { value: this.params.frostGlazeEnabled },
       uFrostLevel: { value: 0 },
@@ -1976,7 +2021,55 @@ export class SpecularEffectV2 {
     entry.radius = radiusPx;
     entry.brightRadiusPx = brightRadiusPx;
     entry.attenuation = computedAttenuation;
+    entry.floorVisibilityMask = this._ambientLightFloorVisibilityMask(doc);
     return true;
+  }
+
+  /**
+   * Bitmask (bits 0..3 = floors 0..3) for which FloorStack bands this AmbientLight
+   * should drive specular on. Matches LightingEffectV2 gating where possible.
+   * @private
+   * @param {object} doc - AmbientLight document
+   * @returns {number}
+   */
+  _ambientLightFloorVisibilityMask(doc) {
+    const floors = window.MapShine?.floorStack?.getFloors?.() ?? [];
+    if (!floors || floors.length <= 1) return 0;
+
+    const scene = canvas?.scene ?? null;
+    let mask = 0;
+    const v14 = !!(scene && hasV14NativeLevels(scene));
+
+    for (let i = 0; i < floors.length && i < 4; i++) {
+      const f = floors[i];
+      let vis = false;
+      if (v14) {
+        const persp = getPerspectiveForRenderFloorIndex(i);
+        vis = persp ? isLightVisibleForPerspective(doc, persp) : false;
+      } else {
+        vis = this._ambientLightOverlapsFloorBand(doc, f);
+      }
+      if (vis) mask |= (1 << i);
+    }
+    return mask;
+  }
+
+  /**
+   * V12 / non-native-levels: treat light vertical span vs floor elevation band overlap
+   * as specular visibility (Foundry disk is still XY-only in the shader).
+   * @private
+   * @param {object} doc
+   * @param {{ elevationMin?: number, elevationMax?: number }} floorBand
+   * @returns {boolean}
+   */
+  _ambientLightOverlapsFloorBand(doc, floorBand) {
+    const range = readDocLevelsRange(doc);
+    const lo = range.rangeBottom;
+    const hi = range.rangeTop;
+    const fmin = Number(floorBand?.elevationMin);
+    const fmax = Number(floorBand?.elevationMax);
+    if (!Number.isFinite(fmin) || !Number.isFinite(fmax)) return true;
+    return lo <= fmax && fmin <= hi;
   }
 
   /**
@@ -2036,6 +2129,7 @@ export class SpecularEffectV2 {
       radius: 0,
       brightRadiusPx: 0,
       attenuation: 0.5,
+      floorVisibilityMask: 0,
     };
     if (!this._syncLightEntryFromDoc(doc, entry)) return;
 
@@ -2064,10 +2158,117 @@ export class SpecularEffectV2 {
       cfgArr[i4]     = light.radius;
       cfgArr[i4 + 1] = light.brightRadiusPx;
       cfgArr[i4 + 2] = light.attenuation;
-      cfgArr[i4 + 3] = 0;
+      cfgArr[i4 + 3] = Number(light.floorVisibilityMask) || 0;
       idx++;
     }
     u.numLights.value = idx;
+  }
+
+  /**
+   * Append PlayerLightEffectV2 torch / flashlight as extra analytic lights for this frame.
+   * Filled in {@link #render} (after FloorCompositor updates player light) so uniforms match
+   * ThreeLightSource meshes; {@link #update} only uploads Foundry AmbientLight documents.
+   * @private
+   */
+  _appendPlayerLightSpecularUniforms() {
+    if (!this._realShaderCompiled || !this._sharedUniforms) return;
+    const u = this._sharedUniforms;
+    if (!u.playerLightPosition?.value || !u.playerLightColor?.value || !u.playerLightConfig?.value) return;
+
+    u.uPlayerLightCount.value = 0;
+    u.uPlayerLightFloorIndex.value = -1;
+    u.uPlayerLightFloorGate.value = 0.0;
+
+    const pl = window.MapShine?.floorCompositorV2?._playerLightEffect
+      ?? window.MapShine?.playerLightEffectV2
+      ?? window.MapShine?.playerLightEffect;
+    if (!pl || typeof pl.getSpecularAnalyticLightSnapshots !== 'function') return;
+
+    const snaps = pl.getSpecularAnalyticLightSnapshots();
+    if (!snaps.length) return;
+
+    const floors = window.MapShine?.floorStack?.getFloors?.() ?? [];
+    const multiFloor = floors.length > 1;
+    if (multiFloor) {
+      const elev = this._getControlledTokenElevationForPlayerFloor();
+      u.uPlayerLightFloorIndex.value = this._resolveFloorIndexFromElevation(elev, floors);
+      u.uPlayerLightFloorGate.value = 1.0;
+    } else {
+      u.uPlayerLightFloorIndex.value = 0;
+      u.uPlayerLightFloorGate.value = 0.0;
+    }
+
+    const boost = Math.max(1.0, Math.min(3.5, Number(this.params.playerLightSpecularBoost) || 1.35));
+    const posArr = u.playerLightPosition.value;
+    const colArr = u.playerLightColor.value;
+    const cfgArr = u.playerLightConfig.value;
+
+    let n = 0;
+    for (let s = 0; s < snaps.length && n < PLAYER_SPECULAR_LIGHT_SLOTS; s++) {
+      const sn = snaps[s];
+      const i3 = n * 3;
+      const i4 = n * 4;
+      posArr[i3] = sn.x;
+      posArr[i3 + 1] = sn.y;
+      posArr[i3 + 2] = sn.z;
+      colArr[i3] = sn.r * boost;
+      colArr[i3 + 1] = sn.g * boost;
+      colArr[i3 + 2] = sn.b * boost;
+      cfgArr[i4] = sn.radius;
+      cfgArr[i4 + 1] = sn.brightRadiusPx;
+      cfgArr[i4 + 2] = sn.attenuation;
+      cfgArr[i4 + 3] = 0;
+      n++;
+    }
+    u.uPlayerLightCount.value = n;
+  }
+
+  /**
+   * Elevation used to map the controlled token to a {@link FloorStack} band for player specular.
+   * @private
+   * @returns {number}
+   */
+  _getControlledTokenElevationForPlayerFloor() {
+    try {
+      const pe = getPerspectiveElevation();
+      if (pe?.source === 'controlled-token' && Number.isFinite(pe.elevation)) {
+        return pe.elevation;
+      }
+      const t = canvas?.tokens?.controlled?.[0];
+      const doc = t?.document;
+      if (doc) {
+        let e = Number(doc.elevation ?? 0);
+        if (!Number.isFinite(e)) e = 0;
+        try {
+          const destElev = doc.movement?.destination?.elevation;
+          if (destElev !== undefined && destElev !== null) {
+            const dest = Number(destElev);
+            if (Number.isFinite(dest)) return dest;
+          }
+        } catch (_) { /* movement not available */ }
+        return e;
+      }
+      if (Number.isFinite(pe?.elevation)) return pe.elevation;
+    } catch (_) { /* canvas not ready */ }
+    return 0;
+  }
+
+  /**
+   * Map world elevation to floor stack index (0..3). Matches tile elevation branch of
+   * {@link #_resolveFloorIndex} when Levels ranges are absent.
+   * @private
+   * @param {number} elevation
+   * @param {object[]} floors
+   * @returns {number}
+   */
+  _resolveFloorIndexFromElevation(elevation, floors) {
+    if (!floors || floors.length <= 1) return 0;
+    const e = Number.isFinite(Number(elevation)) ? Number(elevation) : 0;
+    for (let i = 0; i < floors.length; i++) {
+      const f = floors[i];
+      if (e >= f.elevationMin && e <= f.elevationMax) return Math.min(3, Math.max(0, i));
+    }
+    return 0;
   }
 
   // ── Private: Environment uniforms ──────────────────────────────────────────

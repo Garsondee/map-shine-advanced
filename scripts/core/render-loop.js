@@ -128,6 +128,9 @@ export class RenderLoop {
     // Throttle context-lost logs so we don't spam console while the rAF loop keeps running.
     this._lastContextLostLogMs = -Infinity;
 
+    /** Compositor frames driven by load-time hidden-tab pump (rAF may not run when hidden). */
+    this._loadPumpFrameCount = 0;
+
     // Bind render method to preserve context
     this.render = this.render.bind(this);
   }
@@ -164,9 +167,79 @@ export class RenderLoop {
     this._lastEffectContinuousCheckMs = -Infinity;
 
     this._continuousRenderUntilMs = 0;
+
+    this._loadPumpFrameCount = 0;
     
     // Kick off the loop
     this.animationFrameId = requestAnimationFrame(this.render);
+  }
+
+  /**
+   * Run one full {@link EffectComposer#render} without waiting for rAF.
+   * Chromium often does not run {@link requestAnimationFrame} while the tab is hidden,
+   * so {@link #requestRender} never takes effect; the load-time hidden-tab pump calls this instead.
+   */
+  pumpBackgroundLoadFrame() {
+    if (!this.isRunning || !this.effectComposer) return;
+
+    try {
+      const lost = this.renderer?.getContext?.()?.isContextLost?.();
+      if (lost) return;
+    } catch (_) {
+      return;
+    }
+
+    const now = performance.now();
+    let deltaTime = (now - this.lastFrameTime) / 1000;
+    this.lastFrameTime = now;
+    if (!Number.isFinite(deltaTime) || deltaTime < 0) deltaTime = 1 / 60;
+    if (deltaTime > 0.1) deltaTime = 0.1;
+
+    try {
+      this.effectComposer.render(deltaTime);
+      this._lastComposerRenderTime = now;
+      this._forceNextRender = true;
+    } catch (err) {
+      log.warn('pumpBackgroundLoadFrame: effectComposer.render failed', err);
+      return;
+    }
+
+    try {
+      const ms = window.MapShine;
+      const strictSync = _isStrictSyncEnabled();
+      const fc = strictSync ? ms?.frameCoordinator : null;
+      if (strictSync && fc?.hasPendingPixiToken?.()) {
+        try { fc.consumePendingPixiToken?.(); } catch (_) {}
+      }
+    } catch (_) {}
+
+    try {
+      const stage = canvas?.stage;
+      const fcState = window.MapShine?.frameCoordinator?.getFrameState?.();
+      const pixiPivotX = Number.isFinite(fcState?.cameraX) ? fcState.cameraX : stage?.pivot?.x;
+      const pixiPivotY = Number.isFinite(fcState?.cameraY) ? fcState.cameraY : stage?.pivot?.y;
+      const pixiZoom = Number.isFinite(fcState?.zoom) ? fcState.zoom : stage?.scale?.x;
+      if (typeof pixiPivotX === 'number') this._lastPixiPivotX = pixiPivotX;
+      if (typeof pixiPivotY === 'number') this._lastPixiPivotY = pixiPivotY;
+      if (typeof pixiZoom === 'number') this._lastPixiZoom = pixiZoom;
+    } catch (_) {}
+
+    try {
+      const cam = this.camera;
+      this._lastCamX = cam?.position?.x;
+      this._lastCamY = cam?.position?.y;
+      this._lastCamZ = cam?.position?.z;
+      this._lastCamZoom = cam?.zoom;
+    } catch (_) {}
+
+    this._loadPumpFrameCount++;
+  }
+
+  /**
+   * @returns {number} Compositor frames issued by {@link #pumpBackgroundLoadFrame} this session.
+   */
+  getLoadPumpFrameCount() {
+    return this._loadPumpFrameCount || 0;
   }
 
   /**

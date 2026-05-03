@@ -27,8 +27,9 @@ import { ThreeLightSource } from '../../effects/ThreeLightSource.js';
 
 // HEALTH-WIRING BADGE (Map Shine Breaker Box):
 // If you change this effect's lifecycle, token/wall behavior, dynamic-light
-// bridge, or mode-specific output logic, you MUST update HealthEvaluator
-// contracts/wiring for `PlayerLightEffectV2` to prevent silent failures.
+// bridge, mode-specific output logic, or getSpecularAnalyticLightSnapshots /
+// ThreeLightSource uniform layout consumed by SpecularEffectV2, you MUST update
+// HealthEvaluator contracts/wiring for `PlayerLightEffectV2` to prevent silent failures.
 
 // NOTE: Avoid importing EffectBase/RenderLayers from EffectComposer here.
 // EffectComposer -> FloorCompositor -> PlayerLightEffectV2 -> EffectComposer
@@ -3113,6 +3114,82 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
           flashSrc.mesh.parent.remove(flashSrc.mesh);
         }
       }
+    }
+  }
+
+  /**
+   * Torch + flashlight {@link ThreeLightSource} snapshots for SpecularEffectV2 analytic
+   * lights (world px, radii px). Call in the same frame after {@link #_updateDynamicLightSources}
+   * (FloorCompositor runs `specular.render` after all effect updates).
+   *
+   * @returns {Array<{x:number,y:number,z:number,r:number,g:number,b:number,radius:number,brightRadiusPx:number,attenuation:number}>}
+   */
+  getSpecularAnalyticLightSnapshots() {
+    const a = this._threeLightSourceToSpecularSnapshot(this._torchLightSource);
+    const b = this._threeLightSourceToSpecularSnapshot(this._flashlightLightSource);
+    return [...(a ? [a] : []), ...(b ? [b] : [])];
+  }
+
+  /**
+   * @private
+   * @param {import('../../effects/ThreeLightSource.js').ThreeLightSource|null|undefined} src
+   * @returns {{x:number,y:number,z:number,r:number,g:number,b:number,radius:number,brightRadiusPx:number,attenuation:number}|null}
+   */
+  _threeLightSourceToSpecularSnapshot(src) {
+    try {
+      if (!src?.mesh || src.mesh.visible !== true || !src.mesh.parent) return null;
+      const uniforms = src.material?.uniforms;
+      if (!uniforms?.uRadius || !uniforms?.uColor) return null;
+
+      const intensity = Number(uniforms.uIntensity?.value);
+      if (!Number.isFinite(intensity) || intensity < 1e-5) return null;
+
+      const rPx = Math.max(0, Number(uniforms.uRadius.value) || 0);
+      if (rPx < 1e-3) return null;
+
+      let bPx = Math.max(0, Number(uniforms.uBrightRadius?.value) || 0);
+      bPx = Math.min(bPx, rPx);
+
+      const attRaw = Number(uniforms.uAttenuation?.value);
+      const attenuation = Number.isFinite(attRaw) ? attRaw : 0.5;
+
+      const THREE = window.THREE;
+      let x = 0;
+      let y = 0;
+      let z = 0;
+      if (THREE) {
+        if (!this._specularSnapWorldPos) this._specularSnapWorldPos = new THREE.Vector3();
+        src.mesh.getWorldPosition(this._specularSnapWorldPos);
+        x = this._specularSnapWorldPos.x;
+        y = this._specularSnapWorldPos.y;
+        z = this._specularSnapWorldPos.z;
+      } else {
+        x = src.mesh.position.x;
+        y = src.mesh.position.y;
+        z = src.mesh.position.z;
+      }
+
+      const ox = uniforms.uCenterOffset?.value?.x ?? 0;
+      const oy = uniforms.uCenterOffset?.value?.y ?? 0;
+      x += Number(ox) || 0;
+      y += Number(oy) || 0;
+
+      const c = uniforms.uColor.value;
+      const br = Math.max(0.15, Math.min(4.0, Number(uniforms.uBrightness?.value) || 1.0));
+      const gain = Math.max(0.15, Math.min(4.0, Number(uniforms.uOutputGain?.value) || 1.0));
+      const scale = intensity * br * gain;
+
+      return {
+        x, y, z,
+        r: c.r * scale,
+        g: c.g * scale,
+        b: c.b * scale,
+        radius: rPx,
+        brightRadiusPx: bPx,
+        attenuation,
+      };
+    } catch (_) {
+      return null;
     }
   }
 

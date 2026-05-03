@@ -170,9 +170,22 @@ export function getFragmentShader(maxLights = 64) {
     uniform int numLights;
     uniform vec3 lightPosition[${maxLights}];
     uniform vec3 lightColor[${maxLights}];
-    // Per light: (outerRadiusPx, brightRadiusPx, attenuation, unused) — same pixel
-    // space as lightPosition.xy / vWorldPosition.xy (see ThreeLightSource.updateData).
+    // Per light: (outerRadiusPx, brightRadiusPx, attenuation, floorMask)
+    // floorMask: bitmask — bit i set ⇒ light contributes on FloorStack floor i (0..3).
+    // Used when uAmbientLightFloorGate > 0.5 so upper-floor lights do not add XY disk
+    // specular on lower-floor overlays. Same pixel space as lightPosition.xy.
     uniform vec4 lightConfig[${maxLights}];
+
+    // PlayerLightEffectV2 torch / flashlight (not AmbientLight docs). Gated by floor
+    // vs uOutdoorsFloorIdx when uPlayerLightFloorGate > 0.5 (multi-floor scenes).
+    uniform int uPlayerLightCount;
+    uniform int uPlayerLightFloorIndex;
+    uniform float uPlayerLightFloorGate;
+    // Multi-floor: multiply each Foundry AmbientLight disk by the bit for this overlay's floor.
+    uniform float uAmbientLightFloorGate;
+    uniform vec3 playerLightPosition[2];
+    uniform vec3 playerLightColor[2];
+    uniform vec4 playerLightConfig[2];
 
     // ── Frost / Ice Glaze ─────────────────────────────────────────────────────
     uniform bool uFrostGlazeEnabled;
@@ -385,6 +398,28 @@ export function getFragmentShader(maxLights = 64) {
     // to [0,1], causing saturation to white/grey at high intensities instead
     // of bright light. The final blit to screen handles the sRGB encode.
 
+    // Extract one bit (floor index 0..3) from ambient-light floor visibility mask.
+    float specularAmbientFloorMaskBit(float mask, float floorIdx) {
+      float fi = clamp(floorIdx, 0.0, 3.0);
+      float div = pow(2.0, fi);
+      return mod(floor(mask / div + 1e-4), 2.0);
+    }
+
+    // Analytic disk contribution (Foundry + player specular lights share this falloff).
+    vec3 msSpecularDiskContrib(vec3 lPos, vec3 lColor, float radius, float brightRadius, float attenuation) {
+      float dist = distance(vWorldPosition.xy, lPos.xy);
+      if (dist < radius) {
+        float d = dist / max(radius, 1e-5);
+        float inner = (radius > 0.0) ? clamp(brightRadius / radius, 0.0, 0.99) : 0.0;
+        float falloff = 1.0 - smoothstep(inner, 1.0, d);
+        float linear = 1.0 - d;
+        float squared = 1.0 - d * d;
+        float lightIntensity = mix(linear, squared, attenuation) * falloff;
+        return lColor * lightIntensity;
+      }
+      return vec3(0.0);
+    }
+
     // ── Main ──────────────────────────────────────────────────────────────────
 
     void main() {
@@ -432,15 +467,46 @@ export function getFragmentShader(maxLights = 64) {
           float squared = 1.0 - d * d;
           float lightIntensity = mix(linear, squared, attenuation) * falloff;
 
-          totalDynamicLight += lColor * lightIntensity;
+          float floorMul = 1.0;
+          if (uAmbientLightFloorGate > 0.5) {
+            float m = lightConfig[i].w;
+            floorMul = specularAmbientFloorMaskBit(m, uOutdoorsFloorIdx);
+          }
+
+          vec3 addL = lColor * lightIntensity * floorMul;
+          totalDynamicLight += addL;
 
           // Track brightest contributing light for color tinting.
-          float contribution = dot(lColor, vec3(0.2126, 0.7152, 0.0722)) * lightIntensity;
+          float contribution = dot(addL, vec3(0.2126, 0.7152, 0.0722));
           if (contribution > dominantDynLightWeight) {
             dominantDynLightWeight = contribution;
             float lum = max(dot(lColor, vec3(0.2126, 0.7152, 0.0722)), 0.001);
             dominantDynLightColor = lColor / lum;
           }
+        }
+      }
+
+      // Player torch / flashlight: same falloff, but only on this overlay's floor band
+      // when uPlayerLightFloorGate is on (matches SpecularEffectV2 floor vs token elevation).
+      float playerFloorGate = 1.0;
+      if (uPlayerLightFloorGate > 0.5 && uPlayerLightFloorIndex >= 0 && uPlayerLightCount > 0) {
+        int overlayFi = int(uOutdoorsFloorIdx + 0.5);
+        playerFloorGate = (overlayFi == uPlayerLightFloorIndex) ? 1.0 : 0.0;
+      }
+      for (int j = 0; j < 2; j++) {
+        if (j >= uPlayerLightCount) break;
+        vec3 pPos = playerLightPosition[j];
+        vec3 pCol = playerLightColor[j];
+        float pr = playerLightConfig[j].x;
+        float pbr = playerLightConfig[j].y;
+        float patt = playerLightConfig[j].z;
+        vec3 addP = msSpecularDiskContrib(pPos, pCol, pr, pbr, patt) * playerFloorGate;
+        totalDynamicLight += addP;
+        float pcontrib = dot(addP, vec3(0.2126, 0.7152, 0.0722));
+        if (pcontrib > dominantDynLightWeight) {
+          dominantDynLightWeight = pcontrib;
+          float plum = max(dot(pCol, vec3(0.2126, 0.7152, 0.0722)), 0.001);
+          dominantDynLightColor = pCol / plum;
         }
       }
 

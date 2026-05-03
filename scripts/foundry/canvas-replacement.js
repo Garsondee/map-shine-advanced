@@ -478,6 +478,197 @@ let _createThreeCanvasPendingRequest = null;
 let _lastCreateThreeCanvasFailure = null;
 const CREATE_THREE_CANVAS_FAILURE_COOLDOWN_MS = 3000;
 
+/** @type {number|null} */
+let _loadHiddenPumpIntervalId = null;
+/** @type {number|null} */
+let _loadVisibilityDebugIntervalId = null;
+/** @type {boolean} */
+let _loadVisibilityLifecycleHooksInstalled = false;
+
+/**
+ * Stop the optional hidden-tab render pump (started during scene load).
+ * @private
+ */
+function _stopLoadHiddenPump() {
+  try {
+    if (_loadHiddenPumpIntervalId != null) {
+      clearInterval(_loadHiddenPumpIntervalId);
+    }
+  } catch (_) {
+  }
+  _loadHiddenPumpIntervalId = null;
+}
+
+/**
+ * While the tab is hidden during load, browsers throttle rAF; nudge the compositor
+ * on a long interval so GPU warmup / lazy compiles can still progress (~1Hz when clamped).
+ * @private
+ */
+function _startLoadHiddenPump() {
+  _stopLoadHiddenPump();
+  _loadHiddenPumpIntervalId = setInterval(() => {
+    try {
+      if (!window.MapShine?.__msaSceneLoading) {
+        _stopLoadHiddenPump();
+        return;
+      }
+      if (typeof document === 'undefined' || document.hidden !== true) return;
+      const rl = window.MapShine?.renderLoop;
+      // rAF is often suspended when hidden — requestRender does nothing; pump one compositor frame.
+      rl?.pumpBackgroundLoadFrame?.();
+      rl?.requestRender?.();
+      rl?.requestContinuousRender?.(900);
+    } catch (_) {
+    }
+  }, 750);
+}
+
+/**
+ * Opt-in 2s sampling: set `window.MapShine.__loadVisibilityDebug = true` before load.
+ * @private
+ */
+function _stopLoadVisibilityDebugInterval() {
+  try {
+    if (_loadVisibilityDebugIntervalId != null) {
+      clearInterval(_loadVisibilityDebugIntervalId);
+    }
+  } catch (_) {
+  }
+  _loadVisibilityDebugIntervalId = null;
+}
+
+/** @private */
+function _startLoadVisibilityDebugInterval() {
+  _stopLoadVisibilityDebugInterval();
+  _loadVisibilityDebugIntervalId = setInterval(() => {
+    try {
+      const ms = window.MapShine;
+      if (!ms || ms.__loadVisibilityDebug !== true) {
+        _stopLoadVisibilityDebugInterval();
+        return;
+      }
+      if (!ms.__msaSceneLoading) {
+        _stopLoadVisibilityDebugInterval();
+        return;
+      }
+      const r = renderer;
+      const rl = ms?.renderLoop;
+      const fc = ms?.frameCoordinator;
+      const snap = {
+        tMs: Math.round(performance.now()),
+        hidden: typeof document !== 'undefined' ? document.hidden : null,
+        visibilityState: typeof document !== 'undefined' ? document.visibilityState : null,
+        threeFrame: r?.info?.render?.frame ?? null,
+        loopFrame: typeof rl?.getFrameCount === 'function' ? rl.getFrameCount() : null,
+        loadPumpFrames: typeof rl?.getLoadPumpFrameCount === 'function' ? rl.getLoadPumpFrameCount() : null,
+        renderCalls: r?.info?.render?.calls ?? null,
+        strictHoldReason: ms?.__v2StrictHoldInfo?.reason ?? null,
+        pixiTokens: (() => {
+          try {
+            return fc?.getStrictSyncTokenStats?.() ?? null;
+          } catch (_) {
+            return null;
+          }
+        })(),
+        step: _createThreeCanvasProgress?.step ?? null,
+      };
+      log.info('[loadVisibilityDebug]', snap);
+    } catch (_) {
+    }
+  }, 2000);
+}
+
+/**
+ * One-shot shader/compositor kick after intro gate was skipped while tab-hidden.
+ * @private
+ */
+async function _runDeferredIntroCompileRetry() {
+  await safeCallAsync(async () => {
+    const ec = effectComposer;
+    if (!ec || typeof ec.progressiveWarmup !== 'function') return;
+    await ec.progressiveWarmup();
+    const fc = ec._floorCompositorV2;
+    if (fc && typeof fc.warmupAsync === 'function') {
+      await fc.warmupAsync(4000, null);
+    }
+    await ec.progressiveWarmup();
+    window.MapShine?.renderLoop?.requestContinuousRender?.(2000);
+    window.MapShine?.renderLoop?.requestRender?.();
+  }, 'deferredIntroCompileRetry', Severity.DEGRADED);
+}
+
+/**
+ * After returning to a visible tab: resize sync, continuous render, optional deferred intro warmup.
+ * @param {string} [reason]
+ * @private
+ */
+function _recoverRenderingAfterTabFocus(reason = '') {
+  try {
+    const ms = window.MapShine;
+    if (!ms) return;
+
+    const tc = threeCanvas;
+    const rh = resizeHandler;
+    if (tc && rh && typeof rh.resize === 'function') {
+      const rect = tc.getBoundingClientRect?.();
+      const w = Math.max(1, Math.round(Number(rect?.width) || 0));
+      const h = Math.max(1, Math.round(Number(rect?.height) || 0));
+      if (w >= 1 && h >= 1) {
+        safeCall(() => rh.resize(w, h), 'recover.tabFocus.resize', Severity.COSMETIC);
+      }
+    }
+
+    ms.renderLoop?.requestContinuousRender?.(2500);
+    ms.renderLoop?.requestRender?.();
+    try {
+      ms.renderer?.setRenderTarget?.(null);
+    } catch (_) {}
+    ms.renderLoop?.pumpBackgroundLoadFrame?.();
+
+    try {
+      const coldSwap = ms.__v14ColdLoadSwapResync;
+      if (typeof coldSwap === 'function') coldSwap();
+    } catch (_) {}
+
+    if (ms.__pendingIntroCompileRetry === true) {
+      ms.__pendingIntroCompileRetry = false;
+      void _runDeferredIntroCompileRetry();
+    }
+
+    if (reason && window.MapShine?.__loadVisibilityDebug === true) {
+      log.info('[loadVisibilityDebug] recovery fired', { reason });
+    }
+  } catch (_) {
+  }
+}
+
+/**
+ * visibilitychange / focus: compositor recovery when rAF was starved in background.
+ * @private
+ */
+function _ensureLoadVisibilityLifecycleHooks() {
+  if (_loadVisibilityLifecycleHooksInstalled) return;
+  _loadVisibilityLifecycleHooksInstalled = true;
+
+  const onVisible = (reason) => {
+    try {
+      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
+    } catch (_) {
+      return;
+    }
+    safeCall(() => _recoverRenderingAfterTabFocus(reason), 'loadVisibility.onVisible', Severity.COSMETIC);
+  };
+
+  try {
+    document.addEventListener('visibilitychange', () => onVisible('document.visibilitychange'));
+  } catch (_) {
+  }
+  try {
+    window.addEventListener('focus', () => onVisible('window.focus'));
+  } catch (_) {
+  }
+}
+
 // Tracks whether a Three.js canvas was actually attached to the DOM during the
 // current scene's lifetime. Used to guard renderer disposal in destroyThreeCanvas:
 // we only need to force-context-loss + dispose if the renderer was actually used
@@ -4985,6 +5176,13 @@ async function createThreeCanvas(scene, createOptions = {}) {
   } catch (_) {
   }
 
+  safeCall(() => {
+    _ensureLoadVisibilityLifecycleHooks();
+    if (window.MapShine?.__loadVisibilityDebug === true) {
+      _startLoadVisibilityDebugInterval();
+    }
+  }, 'loadVisibility.instrumentation', Severity.COSMETIC);
+
   // Coordinator normalization: createThreeCanvas can be entered via replayed
   // calls that do not pass through onCanvasReady. Ensure the coordinator is
   // tracking this scene load before phase transitions begin.
@@ -6213,7 +6411,10 @@ async function createThreeCanvas(scene, createOptions = {}) {
       ) {
         const viewedBg = getViewedLevelBackgroundSrc(v14Scene);
         if (viewedBg) {
+          let _v14ColdLoadSwapRan = false;
           const runSwap = () => {
+            if (_v14ColdLoadSwapRan) return;
+            _v14ColdLoadSwapRan = true;
             try {
               let coldSwapIdx = Number.NaN;
               try {
@@ -6251,11 +6452,22 @@ async function createThreeCanvas(scene, createOptions = {}) {
               }
               window.MapShine?.renderLoop?.requestRender?.();
               window.MapShine?.renderLoop?.requestContinuousRender?.(300);
-            } catch (_) {}
+            } catch (_) {
+              _v14ColdLoadSwapRan = false;
+            }
           };
+          // Primary path: after two animation frames (layout + Foundry level settled).
           requestAnimationFrame(() => {
             requestAnimationFrame(runSwap);
           });
+          // Backstop: rAF is throttled or not run while the tab is hidden during load.
+          // Without this, swapBackgroundImage + forceRepopulate never run → stale/grey albedo.
+          setTimeout(runSwap, 0);
+          setTimeout(runSwap, 750);
+          setTimeout(runSwap, 2500);
+          try {
+            if (window.MapShine) window.MapShine.__v14ColdLoadSwapResync = runSwap;
+          } catch (_) {}
         }
       }
     }, 'floorStack.syncAfterCameraFollowerInit', Severity.COSMETIC);
@@ -7321,6 +7533,7 @@ async function createThreeCanvas(scene, createOptions = {}) {
           log.info('Render loop started (isolateBindingOnly early exit)');
         } catch (_) {}
       }
+      safeCall(() => _startLoadHiddenPump(), 'loadHiddenPump.start(isolateBinding)', Severity.COSMETIC);
       _finishIsolation('Isolation mode: binding-only ready');
       return;
     }
@@ -7450,6 +7663,7 @@ async function createThreeCanvas(scene, createOptions = {}) {
         dlp.event('renderLoop: STARTED ->-> first rAF frame queued (post-populate)');
       } catch (_) {}
       log.info('Render loop started (post compositor populate)');
+      safeCall(() => _startLoadHiddenPump(), 'loadHiddenPump.start', Severity.COSMETIC);
     }
 
     stepLog(' -> Step: preloadAllFloors DONE');
@@ -7702,6 +7916,32 @@ async function createThreeCanvas(scene, createOptions = {}) {
             ? 'tab hidden'
             : 'shader readiness timeout';
           log.warn(`overlay.introZoom: skipping intro readiness gate (${reason}); using standard fade-in`, compileGate);
+          try {
+            if (compileGate?.reason === 'tab-hidden' && window.MapShine) {
+              window.MapShine.__pendingIntroCompileRetry = true;
+            }
+          } catch (_) {
+          }
+
+          if (compileGate?.reason === 'tab-hidden') {
+            // Background tabs throttle timers. A Promise.race against a short timeout
+            // can resolve before fadeIn() finishes — then hide() inside fadeIn never
+            // runs on schedule and the user can see an empty/grey WebGL view until rAF
+            // catches up. Await the full dismiss, then pump compositor frames (rAF may
+            // still be starved while hidden).
+            await safeCallAsync(async () => {
+              await loadingOverlay.fadeIn(2000, 800).catch(() => {});
+              try { loadingOverlay.hide?.(); } catch (_) {}
+            }, 'overlay.tabHidden.fadeIn', Severity.COSMETIC);
+            safeCall(() => {
+              for (let i = 0; i < 5; i++) {
+                try { window.MapShine?.renderLoop?.pumpBackgroundLoadFrame?.(); } catch (_) {}
+              }
+              window.MapShine?.renderLoop?.requestContinuousRender?.(4000);
+            }, 'overlay.tabHidden.postPump', Severity.COSMETIC);
+            return;
+          }
+
           await Promise.race([
             loadingOverlay.fadeIn(2000, 800),
             new Promise((r) => setTimeout(r, 5000)),
@@ -7892,6 +8132,10 @@ async function createThreeCanvas(scene, createOptions = {}) {
     }, 'overlay.fadeIn(error)', Severity.COSMETIC);
   } finally {
     _createThreeCanvasRunning = false;
+    safeCall(() => {
+      _stopLoadHiddenPump();
+      _stopLoadVisibilityDebugInterval();
+    }, 'loadVisibility.cleanup', Severity.COSMETIC);
     try { if (_progressHeartbeatId) clearInterval(_progressHeartbeatId); } catch (_) {}
     try {
       if (_overlaySceneReadyDismissTimer) {
@@ -7933,6 +8177,8 @@ async function createThreeCanvas(scene, createOptions = {}) {
  */
 function destroyThreeCanvas() {
   log.info('Destroying Three.js canvas');
+  safeCall(() => _stopLoadHiddenPump(), 'loadHiddenPump.dispose', Severity.COSMETIC);
+  safeCall(() => _stopLoadVisibilityDebugInterval(), 'loadVisibilityDebug.dispose', Severity.COSMETIC);
   // Clean up resize handling first
   if (resizeHandler) {
     safeDispose(() => resizeHandler.dispose(), 'resizeHandler.dispose');

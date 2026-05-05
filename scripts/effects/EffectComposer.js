@@ -24,6 +24,29 @@ import { FloorCompositor } from '../compositor-v2/FloorCompositor.js';
 const log = createLogger('EffectComposer');
 
 /**
+ * Resolve whether a stylistic effect should be enabled from scene flags.
+ * For most effects, only explicit true enables the pass.
+ * Vision mode is special-cased to default-on when both branches are unset.
+ *
+ * @param {string} effectId
+ * @param {object} mapMakerEffects
+ * @param {object} gmEffects
+ * @returns {boolean}
+ */
+function resolveStylisticEnabled(effectId, mapMakerEffects = {}, gmEffects = {}) {
+  const mmEnabled = mapMakerEffects?.[effectId]?.enabled;
+  const gmEnabled = gmEffects?.[effectId]?.enabled;
+  if (mmEnabled === true || gmEnabled === true) return true;
+
+  if (effectId === 'visionMode') {
+    const hasExplicitBoolean =
+      mmEnabled === true || mmEnabled === false || gmEnabled === true || gmEnabled === false;
+    if (!hasExplicitBoolean) return true;
+  }
+  return false;
+}
+
+/**
  * Effect render layers (ordered by render sequence)
  */
 export const RenderLayers = {
@@ -691,7 +714,7 @@ export class EffectComposer {
           ['dazzleOverlay', '_dazzleOverlayEffect'],
         ];
         for (const [effectId, fcKey] of _stylisticGates) {
-          const explicitOn = _mm[effectId]?.enabled === true || _gm[effectId]?.enabled === true;
+          const explicitOn = resolveStylisticEnabled(effectId, _mm, _gm);
           const eff = _fc[fcKey];
           if (!eff) continue;
           if (typeof eff.enabled !== 'undefined') eff.enabled = explicitOn;
@@ -702,9 +725,11 @@ export class EffectComposer {
         if (window.MapShine?.__v2FrameTraceEnabled === true) {
           const gateDiag = {};
           for (const [effectId, fcKey] of _stylisticGates) {
+            const explicitOn = _mm[effectId]?.enabled === true || _gm[effectId]?.enabled === true;
             const eff = _fc?.[fcKey];
             gateDiag[effectId] = {
-              explicitOn: _mm[effectId]?.enabled === true || _gm[effectId]?.enabled === true,
+              explicitOn,
+              resolvedEnabled: resolveStylisticEnabled(effectId, _mm, _gm),
               enabled: typeof eff?.enabled === 'boolean' ? !!eff.enabled : null,
               paramsEnabled: typeof eff?.params?.enabled === 'boolean' ? !!eff.params.enabled : null,
             };
@@ -907,7 +932,7 @@ export class EffectComposer {
           const gm = allSettings?.gm?.effects || {};
           const ui = window.MapShine?.uiManager;
           for (const [effectId, fcKey] of STYLISTIC_SCENE_FLAG_TO_FC) {
-            const explicitOn = mm[effectId]?.enabled === true || gm[effectId]?.enabled === true;
+            const explicitOn = resolveStylisticEnabled(effectId, mm, gm);
             this._floorCompositorV2.applyParam(fcKey, 'enabled', explicitOn);
             try {
               const fd = ui?.effectFolders?.[effectId];

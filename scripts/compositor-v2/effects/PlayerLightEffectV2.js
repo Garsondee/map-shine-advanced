@@ -1122,9 +1122,11 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
         const isFlashlightMode = this.params.mode === 'flashlight';
 
         if (isFlashlightMode) {
-          // Use Foundry's polygon backends to match real sight/light wall behavior,
-          // including one-way walls, door states, and threshold walls.
-          collision = this._findClosestWallCollision(tokenObj, destFoundry, ['sight', 'light', 'move']);
+          // Flashlight follows optical wall senses so it can pass through windows
+          // while still respecting one-way walls, door states, and thresholds.
+          collision = this._findClosestWallCollision(tokenObj, destFoundry, ['sight', 'light'], {
+            flashlightOpticalPassThrough: true
+          });
         } else {
           // Torch placement behaves like moving a physical object.
           collision = this._findClosestWallCollision(tokenObj, destFoundry, ['move']);
@@ -1397,7 +1399,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
     return d.distance / pxPerGrid;
   }
 
-  _findClosestWallCollision(tokenObj, destinationFoundry, collisionTypes = ['move']) {
+  _findClosestWallCollision(tokenObj, destinationFoundry, collisionTypes = ['move'], options = null) {
     if (!tokenObj || !destinationFoundry) return null;
 
     const tokenElevation = Number.isFinite(Number(tokenObj?.document?.elevation))
@@ -1425,7 +1427,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
       if (!type) continue;
 
       try {
-        const collision = this._findClosestBlockingCollision(tokenObj, origin, destination, type, tokenElevation);
+        const collision = this._findClosestBlockingCollision(tokenObj, origin, destination, type, tokenElevation, options);
         if (!collision || !Number.isFinite(collision.x) || !Number.isFinite(collision.y)) continue;
 
         const dx = collision.x - originX;
@@ -1442,19 +1444,27 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
     return bestCollision;
   }
 
-  _findClosestBlockingCollision(tokenObj, origin, destination, type, elevation) {
+  _findClosestBlockingCollision(tokenObj, origin, destination, type, elevation, options = null) {
     if (!tokenObj || !destination || !type) return null;
 
     let closest = null;
     try {
-      closest = tokenObj.checkCollision(destination, { origin, mode: 'closest', type });
+      // Keep the fast path aligned with backend semantics so proximity/distance
+      // walls do not behave as unconditional blockers.
+      closest = tokenObj.checkCollision(destination, {
+        origin,
+        mode: 'closest',
+        type,
+        edgeDirectionMode: CONST.EDGE_DIRECTION_MODES.NORMAL,
+        useThreshold: true
+      });
     } catch (_) {
       closest = null;
     }
 
     if (!closest) return null;
     if (typeof closest !== 'object') return null;
-    if (this._collisionHitBlocksAtElevation(closest, elevation)) return closest;
+    if (this._collisionHitBlocksAtElevation(closest, elevation, type, options)) return closest;
 
     const backend = CONFIG?.Canvas?.polygonBackends?.[type];
     if (!backend || typeof backend.testCollision !== 'function') return null;
@@ -1472,7 +1482,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
 
       for (const hit of allHits) {
         if (!hit || typeof hit !== 'object') continue;
-        if (!this._collisionHitBlocksAtElevation(hit, elevation)) continue;
+        if (!this._collisionHitBlocksAtElevation(hit, elevation, type, options)) continue;
         return hit;
       }
     } catch (_) {
@@ -1481,7 +1491,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
     return null;
   }
 
-  _collisionHitBlocksAtElevation(hit, elevation) {
+  _collisionHitBlocksAtElevation(hit, elevation, type = null, options = null) {
     if (!hit) return false;
     if (!Number.isFinite(elevation)) return true;
     if (typeof hit !== 'object') return !!hit;
@@ -1495,6 +1505,15 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
 
       const wallDoc = edge.object?.document ?? edge.object ?? null;
       if (!wallDoc) return true;
+
+      // Flashlight should follow optical transparency behavior: proximity/distance
+      // walls are treated as pass-through for beam clipping.
+      if (options?.flashlightOpticalPassThrough === true && (type === 'sight' || type === 'light')) {
+        const senseValue = Number(type === 'light' ? wallDoc?.light : wallDoc?.sight);
+        const proximity = Number(CONST?.WALL_SENSE_TYPES?.PROXIMITY ?? 30);
+        const distance = Number(CONST?.WALL_SENSE_TYPES?.DISTANCE ?? 40);
+        if (senseValue === proximity || senseValue === distance) continue;
+      }
 
       const bounds = readWallHeightFlags(wallDoc);
       let bottom = Number(bounds?.bottom);

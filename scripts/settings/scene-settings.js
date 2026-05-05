@@ -1022,6 +1022,46 @@ export function registerSettings() {
     default: true
   });
 
+  game.settings.register('map-shine-advanced', 'nightVisionAllowPlayers', {
+    name: 'Allow Players to Use Night Vision Mode',
+    hint: 'Legacy setting — combined with “Player Light: Night Vision (global default)” for Night Vision allowance when a scene uses Use Global. Prefer Map Shine Control → Player Lights → Global Defaults.',
+    scope: 'world',
+    config: true,
+    restricted: true,
+    type: Boolean,
+    default: false
+  });
+
+  game.settings.register('map-shine-advanced', 'playerLightTorchAllowedDefault', {
+    name: 'Player Light: Torch (global default)',
+    hint: 'Default allowance for the Torch token-palette tool when a scene uses “Use Global” for Torch. Per-scene overrides are set in Map Shine Control → Player Lights.',
+    scope: 'world',
+    config: true,
+    restricted: true,
+    type: Boolean,
+    default: true
+  });
+
+  game.settings.register('map-shine-advanced', 'playerLightFlashlightAllowedDefault', {
+    name: 'Player Light: Flashlight (global default)',
+    hint: 'Default allowance for the Flashlight token-palette tool when a scene uses “Use Global” for Flashlight. Per-scene overrides are set in Map Shine Control → Player Lights.',
+    scope: 'world',
+    config: true,
+    restricted: true,
+    type: Boolean,
+    default: true
+  });
+
+  game.settings.register('map-shine-advanced', 'playerLightNightVisionAllowedDefault', {
+    name: 'Player Light: Night Vision (global default)',
+    hint: 'Default allowance for Night Vision when a scene uses “Use Global”. If either this or the legacy “Allow Players to Use Night Vision Mode” is enabled, Night Vision is allowed globally. Map Shine Control → Player Lights can sync both when you change this there.',
+    scope: 'world',
+    config: true,
+    restricted: true,
+    type: Boolean,
+    default: false
+  });
+
   game.settings.register('map-shine-advanced', 'rightClickMoveImmediate', {
     name: 'Right-Click Move Immediate',
     hint: 'When enabled, right-click movement executes on the first click instead of requiring a second confirmation click on the same destination.',

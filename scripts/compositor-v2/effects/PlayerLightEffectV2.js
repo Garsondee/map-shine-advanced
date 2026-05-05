@@ -24,6 +24,7 @@ import {
 
 import { SmartWindBehavior } from '../../particles/SmartWindBehavior.js';
 import { ThreeLightSource } from '../../effects/ThreeLightSource.js';
+import { getNightVisionVertexShader, getNightVisionFragmentShader } from './night-vision-shader.js';
 
 // HEALTH-WIRING BADGE (Map Shine Breaker Box):
 // If you change this effect's lifecycle, token/wall behavior, dynamic-light
@@ -212,6 +213,50 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
       flashlightLightDistanceScaleNear: 0.28,
       flashlightLightDistanceScaleFar: 3,
 
+      nightVisionTint: { r: 0.2, g: 1.0, b: 0.45 },
+      nightVisionTintStrength: 0.85,
+      nightVisionSaturation: 0.15,
+      nightVisionBrightness: 1.0,
+      nightVisionGain: 4.0,
+      nightVisionGamma: 0.7,
+      nightVisionMaxLuma: 1.4,
+      nightVisionDarkLift: 0.04,
+      nightVisionEyepieceStyle: 'single',
+      nightVisionEyepieceRadius: 0.55,
+      nightVisionEyepieceSoftness: 0.18,
+      nightVisionEyepieceIntensity: 1.0,
+      nightVisionEyepieceColor: { r: 0.0, g: 0.0, b: 0.0 },
+      nightVisionEyepieceSeparation: 0.22,
+      nightVisionScanlinesEnabled: true,
+      nightVisionScanlinesIntensity: 0.25,
+      nightVisionScanlinesDensity: 320,
+      nightVisionScanlinesSpeed: 0.4,
+      nightVisionScanlinesThickness: 0.5,
+      nightVisionNoiseAmount: 0.18,
+      nightVisionNoiseLowLightBoost: 1.0,
+      nightVisionNoiseSpeed: 6.0,
+      nightVisionNoiseScale: 1.5,
+      nightVisionPhosphorFlickerAmount: 0.06,
+      nightVisionPhosphorFlickerSpeed: 9.0,
+      nightVisionBloomEnabled: true,
+      nightVisionBloomThreshold: 0.7,
+      nightVisionBloomThresholdSoftness: 0.25,
+      nightVisionBloomIntensity: 0.85,
+      nightVisionBloomBlurPx: 6,
+      nightVisionBloomPersistenceSeconds: 0.6,
+      nightVisionBloomResponse: 1.4,
+      nightVisionDistortionAmount: -0.05,
+      nightVisionCAAmount: 1.6,
+      nightVisionCAEdgePower: 2.0,
+      nightVisionWarmupSeconds: 0.6,
+      nightVisionShutdownSeconds: 0.4,
+      nightVisionPowerFlickerEnabled: true,
+      nightVisionPowerFlickerIntensity: 0.5,
+      nightVisionDarknessGateEnabled: true,
+      nightVisionDarknessStart: 0.25,
+      nightVisionDarknessEnd: 0.6,
+      nightVisionDarknessInfluence: 1.0,
+
       debugReadoutEnabled: false
     };
 
@@ -312,6 +357,29 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
     this._visionMaskHas = 0.0;
 
     this._debugOverlay = null;
+
+    /** Night vision post-pass (screen-space) */
+    this._nightVisionActive = false;
+    this._nvEffectivePower = 0;
+    this._nvPrevWant = false;
+    this._nvWarmupAccum = 0;
+    this._lastNvDt = 1 / 60;
+    this._lastNvElapsed = 0;
+
+    this._nvComposeScene = null;
+    this._nvComposeCamera = null;
+    this._nvComposeMaterial = null;
+    this._nvComposeQuad = null;
+    this._nvFallbackBlack = null;
+
+    this._nvBloomScene = null;
+    this._nvBloomCamera = null;
+    this._nvBloomMaterial = null;
+    this._nvBloomQuad = null;
+    this._nvBloomReadRT = null;
+    this._nvBloomWriteRT = null;
+    this._nvBloomWidth = 0;
+    this._nvBloomHeight = 0;
   }
 
   static getControlSchema() {
@@ -483,11 +551,131 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
             'flashlightLightDistanceScaleNear',
             'flashlightLightDistanceScaleFar'
           ]
+        },
+        {
+          name: 'night-vision-tube',
+          label: 'Night Vision: Tube & Tint',
+          type: 'folder',
+          expanded: false,
+          parameters: [
+            'nightVisionTint',
+            'nightVisionTintStrength',
+            'nightVisionSaturation',
+            'nightVisionBrightness'
+          ]
+        },
+        {
+          name: 'night-vision-gain',
+          label: 'Night Vision: Light Amplification',
+          type: 'folder',
+          expanded: false,
+          parameters: [
+            'nightVisionGain',
+            'nightVisionGamma',
+            'nightVisionMaxLuma',
+            'nightVisionDarkLift'
+          ]
+        },
+        {
+          name: 'night-vision-eyepiece',
+          label: 'Night Vision: Eyepiece',
+          type: 'folder',
+          expanded: false,
+          parameters: [
+            'nightVisionEyepieceStyle',
+            'nightVisionEyepieceRadius',
+            'nightVisionEyepieceSoftness',
+            'nightVisionEyepieceIntensity',
+            'nightVisionEyepieceColor',
+            'nightVisionEyepieceSeparation'
+          ]
+        },
+        {
+          name: 'night-vision-scanlines',
+          label: 'Night Vision: Scanlines',
+          type: 'folder',
+          expanded: false,
+          parameters: [
+            'nightVisionScanlinesEnabled',
+            'nightVisionScanlinesIntensity',
+            'nightVisionScanlinesDensity',
+            'nightVisionScanlinesSpeed',
+            'nightVisionScanlinesThickness'
+          ]
+        },
+        {
+          name: 'night-vision-noise',
+          label: 'Night Vision: Noise & Phosphor',
+          type: 'folder',
+          expanded: false,
+          parameters: [
+            'nightVisionNoiseAmount',
+            'nightVisionNoiseLowLightBoost',
+            'nightVisionNoiseSpeed',
+            'nightVisionNoiseScale',
+            'nightVisionPhosphorFlickerAmount',
+            'nightVisionPhosphorFlickerSpeed'
+          ]
+        },
+        {
+          name: 'night-vision-bloom',
+          label: 'Night Vision: Bloom / Burn-In',
+          type: 'folder',
+          expanded: false,
+          parameters: [
+            'nightVisionBloomEnabled',
+            'nightVisionBloomThreshold',
+            'nightVisionBloomThresholdSoftness',
+            'nightVisionBloomIntensity',
+            'nightVisionBloomBlurPx',
+            'nightVisionBloomPersistenceSeconds',
+            'nightVisionBloomResponse'
+          ]
+        },
+        {
+          name: 'night-vision-optical',
+          label: 'Night Vision: Optical',
+          type: 'folder',
+          expanded: false,
+          parameters: [
+            'nightVisionDistortionAmount',
+            'nightVisionCAAmount',
+            'nightVisionCAEdgePower'
+          ]
+        },
+        {
+          name: 'night-vision-power',
+          label: 'Night Vision: Power & Warm-up',
+          type: 'folder',
+          expanded: false,
+          parameters: [
+            'nightVisionWarmupSeconds',
+            'nightVisionShutdownSeconds',
+            'nightVisionPowerFlickerEnabled',
+            'nightVisionPowerFlickerIntensity'
+          ]
+        },
+        {
+          name: 'night-vision-darkness',
+          label: 'Night Vision: Auto-Dim',
+          type: 'folder',
+          expanded: false,
+          parameters: [
+            'nightVisionDarknessGateEnabled',
+            'nightVisionDarknessStart',
+            'nightVisionDarknessEnd',
+            'nightVisionDarknessInfluence'
+          ]
         }
       ],
       parameters: {
         enabled: { type: 'boolean', default: true },
-        mode: { type: 'list', label: 'Mode', options: { Torch: 'torch', Flashlight: 'flashlight' }, default: 'flashlight' },
+        mode: {
+          type: 'list',
+          label: 'Mode',
+          options: { Torch: 'torch', Flashlight: 'flashlight', 'Night Vision': 'nightVision' },
+          default: 'flashlight'
+        },
         torchMaxDistanceUnits: { type: 'slider', label: 'Torch Max Dist (u)', min: 1, max: 200, step: 1, default: 10, throttle: 50 },
         flashlightMaxDistanceUnits: { type: 'slider', label: 'Flashlight Max Dist (u)', min: 1, max: 200, step: 1, default: 60, throttle: 50 },
         fadeOutDistanceUnits: { type: 'slider', label: 'Fade Band (u)', min: 0, max: 100, step: 1, default: 7, throttle: 50 },
@@ -606,6 +794,56 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
         flashlightLightDistanceScaleEnabled: { type: 'boolean', label: 'Distance Scaling', default: true },
         flashlightLightDistanceScaleNear: { type: 'slider', label: 'Near Scale', min: 0.1, max: 3, step: 0.01, default: 0.28, throttle: 50 },
         flashlightLightDistanceScaleFar: { type: 'slider', label: 'Far Scale', min: 0.1, max: 3, step: 0.01, default: 3, throttle: 50 },
+
+        nightVisionTint: { type: 'color', label: 'Tint', default: { r: 0.2, g: 1.0, b: 0.45 } },
+        nightVisionTintStrength: { type: 'slider', label: 'Tint Strength', min: 0, max: 1, step: 0.01, default: 0.85, throttle: 50 },
+        nightVisionSaturation: { type: 'slider', label: 'Saturation', min: 0, max: 1, step: 0.01, default: 0.15, throttle: 50 },
+        nightVisionBrightness: { type: 'slider', label: 'Brightness', min: 0, max: 2, step: 0.01, default: 1.0, throttle: 50 },
+        nightVisionGain: { type: 'slider', label: 'Gain', min: 1, max: 10, step: 0.05, default: 4.0, throttle: 50 },
+        nightVisionGamma: { type: 'slider', label: 'Gamma', min: 0.3, max: 2.0, step: 0.01, default: 0.7, throttle: 50 },
+        nightVisionMaxLuma: { type: 'slider', label: 'Max Luma Clamp', min: 0.5, max: 2.0, step: 0.01, default: 1.4, throttle: 50 },
+        nightVisionDarkLift: { type: 'slider', label: 'Dark Lift', min: 0, max: 0.5, step: 0.005, default: 0.04, throttle: 50 },
+        nightVisionEyepieceStyle: {
+          type: 'list',
+          label: 'Eyepiece Style',
+          options: { Single: 'single', Binocular: 'binocular' },
+          default: 'single'
+        },
+        nightVisionEyepieceRadius: { type: 'slider', label: 'Eyepiece Radius', min: 0.05, max: 0.95, step: 0.01, default: 0.55, throttle: 50 },
+        nightVisionEyepieceSoftness: { type: 'slider', label: 'Eyepiece Softness', min: 0.01, max: 0.5, step: 0.01, default: 0.18, throttle: 50 },
+        nightVisionEyepieceIntensity: { type: 'slider', label: 'Eyepiece Intensity', min: 0, max: 1, step: 0.01, default: 1.0, throttle: 50 },
+        nightVisionEyepieceColor: { type: 'color', label: 'Eyepiece Edge Color', default: { r: 0, g: 0, b: 0 } },
+        nightVisionEyepieceSeparation: { type: 'slider', label: 'Binocular Separation', min: 0, max: 0.5, step: 0.01, default: 0.22, throttle: 50 },
+        nightVisionScanlinesEnabled: { type: 'boolean', label: 'Scanlines', default: true },
+        nightVisionScanlinesIntensity: { type: 'slider', label: 'Scanline Intensity', min: 0, max: 1, step: 0.01, default: 0.25, throttle: 50 },
+        nightVisionScanlinesDensity: { type: 'slider', label: 'Scanline Density', min: 60, max: 1200, step: 1, default: 320, throttle: 50 },
+        nightVisionScanlinesSpeed: { type: 'slider', label: 'Scanline Speed', min: -3, max: 3, step: 0.05, default: 0.4, throttle: 50 },
+        nightVisionScanlinesThickness: { type: 'slider', label: 'Scanline Thickness', min: 0, max: 1, step: 0.01, default: 0.5, throttle: 50 },
+        nightVisionNoiseAmount: { type: 'slider', label: 'Noise Amount', min: 0, max: 1, step: 0.01, default: 0.18, throttle: 50 },
+        nightVisionNoiseLowLightBoost: { type: 'slider', label: 'Noise Low-Light Boost', min: 0, max: 3, step: 0.05, default: 1.0, throttle: 50 },
+        nightVisionNoiseSpeed: { type: 'slider', label: 'Noise Speed', min: 0, max: 12, step: 0.1, default: 6.0, throttle: 50 },
+        nightVisionNoiseScale: { type: 'slider', label: 'Noise Scale', min: 0.5, max: 6, step: 0.05, default: 1.5, throttle: 50 },
+        nightVisionPhosphorFlickerAmount: { type: 'slider', label: 'Phosphor Flicker', min: 0, max: 1, step: 0.01, default: 0.06, throttle: 50 },
+        nightVisionPhosphorFlickerSpeed: { type: 'slider', label: 'Phosphor Flicker Speed', min: 0.5, max: 30, step: 0.1, default: 9.0, throttle: 50 },
+        nightVisionBloomEnabled: { type: 'boolean', label: 'Bloom / Burn-In', default: true },
+        nightVisionBloomThreshold: { type: 'slider', label: 'Bloom Threshold', min: 0, max: 1, step: 0.01, default: 0.7, throttle: 50 },
+        nightVisionBloomThresholdSoftness: { type: 'slider', label: 'Threshold Softness', min: 0.01, max: 0.5, step: 0.005, default: 0.25, throttle: 50 },
+        nightVisionBloomIntensity: { type: 'slider', label: 'Bloom Intensity', min: 0, max: 3, step: 0.01, default: 0.85, throttle: 50 },
+        nightVisionBloomBlurPx: { type: 'slider', label: 'Bloom Blur (px)', min: 0, max: 16, step: 0.25, default: 6, throttle: 50 },
+        nightVisionBloomPersistenceSeconds: { type: 'slider', label: 'Burn Persistence (s)', min: 0, max: 3, step: 0.05, default: 0.6, throttle: 50 },
+        nightVisionBloomResponse: { type: 'slider', label: 'Bloom Response', min: 0.1, max: 3, step: 0.05, default: 1.4, throttle: 50 },
+        nightVisionDistortionAmount: { type: 'slider', label: 'Distortion', min: -0.3, max: 0.3, step: 0.005, default: -0.05, throttle: 50 },
+        nightVisionCAAmount: { type: 'slider', label: 'Chromatic Aberration (px)', min: 0, max: 6, step: 0.05, default: 1.6, throttle: 50 },
+        nightVisionCAEdgePower: { type: 'slider', label: 'CA Edge Power', min: 0.1, max: 4, step: 0.05, default: 2.0, throttle: 50 },
+        nightVisionWarmupSeconds: { type: 'slider', label: 'Warm-up (s)', min: 0, max: 3, step: 0.05, default: 0.6, throttle: 50 },
+        nightVisionShutdownSeconds: { type: 'slider', label: 'Shutdown (s)', min: 0, max: 3, step: 0.05, default: 0.4, throttle: 50 },
+        nightVisionPowerFlickerEnabled: { type: 'boolean', label: 'Warm-up Power Flicker', default: true },
+        nightVisionPowerFlickerIntensity: { type: 'slider', label: 'Power Flicker Intensity', min: 0, max: 1, step: 0.01, default: 0.5, throttle: 50 },
+        nightVisionDarknessGateEnabled: { type: 'boolean', label: 'Auto-Dim by Scene Darkness', default: true },
+        nightVisionDarknessStart: { type: 'slider', label: 'Darkness Gate Start', min: 0, max: 1, step: 0.01, default: 0.25, throttle: 50 },
+        nightVisionDarknessEnd: { type: 'slider', label: 'Darkness Gate End', min: 0, max: 1, step: 0.01, default: 0.6, throttle: 50 },
+        nightVisionDarknessInfluence: { type: 'slider', label: 'Darkness Influence', min: 0, max: 1, step: 0.01, default: 1.0, throttle: 50 },
+
         debugReadoutEnabled: { type: 'boolean', label: 'Debug Readout', default: false }
       }
     };
@@ -662,6 +900,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
     this._createTorchSparksSystem();
     this._createFlashlightMesh();
     this._createDebugOverlay();
+    this._initNightVisionPost();
 
     this.scene.add(this._group);
     // Register torch batch renderer via FloorRenderBus so it participates in
@@ -913,19 +1152,24 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
     this._torchWasActiveLastFrame = false;
 
     if (window.MapShine?.isMapMakerMode) {
+      this._tickNightVisionPower(timeInfo, false);
       this._setVisible(false);
       this._hideDynamicLightSources();
       return;
     }
 
     if (!this.enabled) {
+      this._tickNightVisionPower(timeInfo, false);
       this._setVisible(false);
       this._hideDynamicLightSources();
       return;
     }
 
     const THREE = window.THREE;
-    if (!THREE) return;
+    if (!THREE) {
+      this._tickNightVisionPower(timeInfo, false);
+      return;
+    }
 
     try {
       const renderer = this.renderer;
@@ -964,6 +1208,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
 
     const tokenId = this._getActiveTokenId();
     if (!tokenId) {
+      this._tickNightVisionPower(timeInfo, false);
       this._setVisible(false);
       this._hideDynamicLightSources();
       return;
@@ -973,10 +1218,11 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
     const tokenIdChanged = torchPrevTokenId !== tokenId;
 
     const tokenSprite = window.MapShine?.tokenManager?.getTokenSprite?.(tokenId) ?? null;
-    const tokenDoc = tokenSprite?.userData?.tokenDoc ?? null;
     const tokenObj = canvas?.tokens?.get?.(tokenId) ?? null;
-
-    if (!tokenSprite || !tokenDoc || !tokenObj) {
+    // NVG post-pass does not need a MapShine token sprite; fall back to canvas token doc.
+    const tokenDoc = tokenSprite?.userData?.tokenDoc ?? tokenObj?.document ?? null;
+    if (!tokenDoc || !tokenObj) {
+      this._tickNightVisionPower(timeInfo, false);
       this._setVisible(false);
       this._hideDynamicLightSources();
       return;
@@ -985,7 +1231,8 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
     try {
       const tokenMode = tokenDoc.getFlag?.('map-shine-advanced', 'playerLightMode')
         ?? tokenDoc?.flags?.['map-shine-advanced']?.playerLightMode;
-      if (tokenMode === 'torch' || tokenMode === 'flashlight') {
+      // Keep tweakpane-selected night vision available for immediate preview.
+      if (this.params.mode !== 'nightVision' && (tokenMode === 'torch' || tokenMode === 'flashlight' || tokenMode === 'nightVision')) {
         this.params.mode = tokenMode;
       }
     } catch (_) {
@@ -995,7 +1242,8 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
       const enabledFlag = tokenDoc.getFlag?.('map-shine-advanced', 'playerLightEnabled')
         ?? tokenDoc?.flags?.['map-shine-advanced']?.playerLightEnabled;
       const enabled = (enabledFlag === undefined || enabledFlag === null) ? false : !!enabledFlag;
-      if (!enabled) {
+      if (!enabled && this.params.mode !== 'nightVision') {
+        this._tickNightVisionPower(timeInfo, false);
         this._setVisible(false);
         this._hideDynamicLightSources();
         return;
@@ -1004,10 +1252,29 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
     }
 
     if (!this._isAllowedForUser(tokenDoc)) {
+      this._tickNightVisionPower(timeInfo, false);
       this._setVisible(false);
       this._hideDynamicLightSources();
       return;
     }
+
+    if (this.params.mode === 'nightVision') {
+      this._tickNightVisionPower(timeInfo, true);
+      this._flashlightFinalIntensity = 0;
+      this._setVisible(false, false);
+      this._hideDynamicLightSources();
+      this._updateDebugOverlay('NIGHT_VISION', 0, false, this._nvEffectivePower);
+      return;
+    }
+
+    if (!tokenSprite) {
+      this._tickNightVisionPower(timeInfo, false);
+      this._setVisible(false);
+      this._hideDynamicLightSources();
+      return;
+    }
+
+    this._tickNightVisionPower(timeInfo, false);
 
     if (this._pointerClientX === null || this._pointerClientY === null) {
       this._setVisible(false);
@@ -1364,6 +1631,41 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
     if (this._debugOverlay) {
       document.body.removeChild(this._debugOverlay);
       this._debugOverlay = null;
+    }
+
+    try {
+      this._disposeNvBloomTargets();
+    } catch (_) {
+    }
+    try {
+      this._nvBloomMaterial?.dispose?.();
+    } catch (_) {
+    }
+    try {
+      this._nvBloomQuad?.geometry?.dispose?.();
+    } catch (_) {
+    }
+    this._nvBloomScene = null;
+    this._nvBloomCamera = null;
+    this._nvBloomMaterial = null;
+    this._nvBloomQuad = null;
+
+    try {
+      this._nvComposeMaterial?.dispose?.();
+    } catch (_) {
+    }
+    try {
+      this._nvComposeQuad?.geometry?.dispose?.();
+    } catch (_) {
+    }
+    this._nvComposeScene = null;
+    this._nvComposeCamera = null;
+    this._nvComposeMaterial = null;
+    this._nvComposeQuad = null;
+
+    if (this._nvFallbackBlack) {
+      try { this._nvFallbackBlack.dispose(); } catch (_) {}
+      this._nvFallbackBlack = null;
     }
 
     this._removeDynamicLightSources();
@@ -3210,6 +3512,349 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
     } catch (_) {
       return null;
     }
+  }
+
+  _clamp01Nv(v) {
+    const x = Number(v);
+    if (!Number.isFinite(x)) return 0;
+    return Math.max(0, Math.min(1, x));
+  }
+
+  _readSceneDarknessLevelNv() {
+    let darkness = 0;
+    try {
+      darkness = Number(canvas?.environment?.darknessLevel);
+    } catch (_) {}
+    if (!Number.isFinite(darkness)) {
+      try {
+        darkness = Number(canvas?.scene?.environment?.darknessLevel);
+      } catch (_) {}
+    }
+    return this._clamp01Nv(Number.isFinite(darkness) ? darkness : 0);
+  }
+
+  _computeNightVisionDarknessGate() {
+    if (!this.params.nightVisionDarknessGateEnabled) return 1.0;
+    const darkness = this._readSceneDarknessLevelNv();
+    const d0 = this._clamp01Nv(this.params.nightVisionDarknessStart);
+    const d1 = this._clamp01Nv(this.params.nightVisionDarknessEnd);
+    const lo = Math.min(d0, d1);
+    const hi = Math.max(d0, d1);
+    const denom = Math.max(0.0001, hi - lo);
+    const x = this._clamp01Nv((darkness - lo) / denom);
+    const smooth = x * x * (3 - 2 * x);
+    return 1.0 + (smooth - 1.0) * this._clamp01Nv(this.params.nightVisionDarknessInfluence);
+  }
+
+  _tickNightVisionPower(timeInfo, wantActive) {
+    const dt = Math.min(0.1, typeof timeInfo?.motionDelta === 'number'
+      ? timeInfo.motionDelta
+      : (typeof timeInfo?.delta === 'number' ? timeInfo.delta : 1 / 60));
+    this._lastNvDt = Math.max(1 / 240, dt);
+    this._lastNvElapsed = typeof timeInfo?.elapsed === 'number' ? timeInfo.elapsed : 0;
+
+    if (!wantActive) {
+      this._nvPrevWant = false;
+      const shut = Math.max(0.05, (Number(this.params.nightVisionShutdownSeconds) || 0.4) / 3);
+      const a = 1 - Math.exp(-this._lastNvDt / shut);
+      this._nvEffectivePower += (0 - this._nvEffectivePower) * a;
+      this._nightVisionActive = this._nvEffectivePower > 1e-3;
+      return;
+    }
+
+    if (!this._nvPrevWant) {
+      this._nvWarmupAccum = 0;
+    }
+    this._nvPrevWant = true;
+    this._nvWarmupAccum += this._lastNvDt;
+
+    const gate = this._computeNightVisionDarknessGate();
+    const warmSec = Math.max(0, Number(this.params.nightVisionWarmupSeconds) || 0);
+    let wf = (warmSec <= 1e-6) ? 1 : Math.min(1, this._nvWarmupAccum / warmSec);
+    wf = wf * wf * (3 - 2 * wf);
+    const target = gate * wf;
+
+    const tau = Math.max(0.04, warmSec > 1e-6 ? warmSec / 4 : 0.12);
+    const alpha = 1 - Math.exp(-this._lastNvDt / tau);
+    this._nvEffectivePower += (target - this._nvEffectivePower) * alpha;
+
+    if (this.params.nightVisionPowerFlickerEnabled && wf < 0.995) {
+      const fi = this._clamp01Nv(this.params.nightVisionPowerFlickerIntensity);
+      const flick = 1 - fi * (0.55 + 0.45 * Math.sin(this._lastNvElapsed * (22 + 17 * fi)));
+      this._nvEffectivePower *= flick;
+    }
+
+    // Keep the post-pass wired while NV mode is selected even if auto-dim drives
+    // power very low in bright scenes (avoids appearing completely disconnected).
+    this._nightVisionActive = true;
+  }
+
+  _initNightVisionPost() {
+    const THREE = window.THREE;
+    if (!THREE) return;
+
+    if (!this._nvFallbackBlack) {
+      const data = new Uint8Array([0, 0, 0, 255]);
+      const tex = new THREE.DataTexture(data, 1, 1, THREE.RGBAFormat);
+      tex.needsUpdate = true;
+      tex.flipY = false;
+      this._nvFallbackBlack = tex;
+    }
+
+    this._nvComposeScene = new THREE.Scene();
+    this._nvComposeCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+
+    const tint = this.params.nightVisionTint || { r: 0.2, g: 1, b: 0.45 };
+    const eyeCol = this.params.nightVisionEyepieceColor || { r: 0, g: 0, b: 0 };
+
+    this._nvComposeMaterial = new THREE.ShaderMaterial({
+      uniforms: {
+        tDiffuse: { value: null },
+        tBloomBurnMap: { value: this._nvFallbackBlack },
+        uResolution: { value: new THREE.Vector2(1, 1) },
+        uTime: { value: 0 },
+        uTint: { value: new THREE.Vector3(tint.r, tint.g, tint.b) },
+        uTintStrength: { value: this.params.nightVisionTintStrength },
+        uSaturation: { value: this.params.nightVisionSaturation },
+        uBrightness: { value: this.params.nightVisionBrightness },
+        uGain: { value: this.params.nightVisionGain },
+        uGamma: { value: this.params.nightVisionGamma },
+        uMaxLuma: { value: this.params.nightVisionMaxLuma },
+        uDarkLift: { value: this.params.nightVisionDarkLift },
+        uDistortionAmount: { value: this.params.nightVisionDistortionAmount },
+        uDistortionCenter: { value: new THREE.Vector2(0.5, 0.5) },
+        uCAAmountPx: { value: this.params.nightVisionCAAmount },
+        uCAEdgePower: { value: this.params.nightVisionCAEdgePower },
+        uScanlinesEnabled: { value: this.params.nightVisionScanlinesEnabled ? 1.0 : 0.0 },
+        uScanIntensity: { value: this.params.nightVisionScanlinesIntensity },
+        uScanDensity: { value: this.params.nightVisionScanlinesDensity },
+        uScanSpeed: { value: this.params.nightVisionScanlinesSpeed },
+        uScanThickness: { value: this.params.nightVisionScanlinesThickness },
+        uNoiseAmount: { value: this.params.nightVisionNoiseAmount },
+        uNoiseLowLightBoost: { value: this.params.nightVisionNoiseLowLightBoost },
+        uNoiseSpeed: { value: this.params.nightVisionNoiseSpeed },
+        uNoiseScale: { value: this.params.nightVisionNoiseScale },
+        uPhosphorFlickerAmount: { value: this.params.nightVisionPhosphorFlickerAmount },
+        uPhosphorFlickerSpeed: { value: this.params.nightVisionPhosphorFlickerSpeed },
+        uBloomEnabled: { value: this.params.nightVisionBloomEnabled ? 1.0 : 0.0 },
+        uBloomIntensity: { value: this.params.nightVisionBloomIntensity },
+        uBloomBlurPx: { value: this.params.nightVisionBloomBlurPx },
+        uEyepieceStyle: { value: this.params.nightVisionEyepieceStyle === 'binocular' ? 1.0 : 0.0 },
+        uEyepieceRadius: { value: this.params.nightVisionEyepieceRadius },
+        uEyepieceSoftness: { value: this.params.nightVisionEyepieceSoftness },
+        uEyepieceIntensity: { value: this.params.nightVisionEyepieceIntensity },
+        uEyepieceColor: { value: new THREE.Vector3(eyeCol.r, eyeCol.g, eyeCol.b) },
+        uEyepieceSeparation: { value: this.params.nightVisionEyepieceSeparation },
+        uPower: { value: 1.0 },
+      },
+      vertexShader: getNightVisionVertexShader(),
+      fragmentShader: getNightVisionFragmentShader(),
+      depthTest: false,
+      depthWrite: false,
+      toneMapped: false,
+    });
+
+    this._nvComposeQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), this._nvComposeMaterial);
+    this._nvComposeQuad.frustumCulled = false;
+    this._nvComposeScene.add(this._nvComposeQuad);
+  }
+
+  _disposeNvBloomTargets() {
+    if (this._nvBloomReadRT) {
+      try { this._nvBloomReadRT.dispose(); } catch (_) {}
+      this._nvBloomReadRT = null;
+    }
+    if (this._nvBloomWriteRT) {
+      try { this._nvBloomWriteRT.dispose(); } catch (_) {}
+      this._nvBloomWriteRT = null;
+    }
+    this._nvBloomWidth = 0;
+    this._nvBloomHeight = 0;
+  }
+
+  _ensureNvBloomResources(width, height) {
+    const THREE = window.THREE;
+    if (!THREE || !this._nvFallbackBlack) return false;
+
+    if (!this._nvBloomScene) {
+      this._nvBloomScene = new THREE.Scene();
+      this._nvBloomCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+      this._nvBloomMaterial = new THREE.ShaderMaterial({
+        uniforms: {
+          tCurrentScene: { value: null },
+          tPrevBurn: { value: this._nvFallbackBlack },
+          uThreshold: { value: 0.7 },
+          uSoftness: { value: 0.25 },
+          uResponse: { value: 1.4 },
+          uDecayFactor: { value: 0.98 },
+          uBurnWriteGain: { value: 1.0 },
+        },
+        vertexShader: /* glsl */`
+          varying vec2 vUv;
+          void main() {
+            vUv = uv;
+            gl_Position = vec4(position.xy, 0.0, 1.0);
+          }
+        `,
+        fragmentShader: /* glsl */`
+          uniform sampler2D tCurrentScene;
+          uniform sampler2D tPrevBurn;
+          uniform float uThreshold;
+          uniform float uSoftness;
+          uniform float uResponse;
+          uniform float uDecayFactor;
+          uniform float uBurnWriteGain;
+          varying vec2 vUv;
+          void main() {
+            vec3 src = texture2D(tCurrentScene, vUv).rgb;
+            vec3 prev = texture2D(tPrevBurn, vUv).rgb * clamp(uDecayFactor, 0.0, 1.0);
+            float luma = dot(src, vec3(0.2126, 0.7152, 0.0722));
+            float soft = max(0.0001, uSoftness);
+            float gate = smoothstep(uThreshold - soft, uThreshold + soft, luma);
+            vec3 fresh = src * gate * max(0.0, uResponse) * clamp(uBurnWriteGain, 0.0, 1.0);
+            gl_FragColor = vec4(max(prev, fresh), 1.0);
+          }
+        `,
+        depthTest: false,
+        depthWrite: false,
+        toneMapped: false,
+      });
+      this._nvBloomQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), this._nvBloomMaterial);
+      this._nvBloomQuad.frustumCulled = false;
+      this._nvBloomScene.add(this._nvBloomQuad);
+    }
+
+    const targetW = Math.max(1, Math.floor(Math.max(1, Number(width) || 1) * 0.5));
+    const targetH = Math.max(1, Math.floor(Math.max(1, Number(height) || 1) * 0.5));
+    if (targetW === this._nvBloomWidth && targetH === this._nvBloomHeight && this._nvBloomReadRT && this._nvBloomWriteRT) {
+      return true;
+    }
+
+    this._disposeNvBloomTargets();
+    this._nvBloomReadRT = new THREE.WebGLRenderTarget(targetW, targetH, {
+      minFilter: THREE.LinearFilter,
+      magFilter: THREE.LinearFilter,
+      format: THREE.RGBAFormat,
+      type: THREE.HalfFloatType,
+      depthBuffer: false,
+      stencilBuffer: false,
+    });
+    this._nvBloomWriteRT = this._nvBloomReadRT.clone();
+    this._nvBloomWidth = targetW;
+    this._nvBloomHeight = targetH;
+    return true;
+  }
+
+  _updateNvBloomMap(renderer, inputRT, dtSec, darknessGate = 1.0) {
+    if (!renderer || !inputRT || !this.params.nightVisionBloomEnabled) return;
+    if (!this._ensureNvBloomResources(inputRT.width, inputRT.height)) return;
+    if (!this._nvBloomMaterial || !this._nvBloomReadRT || !this._nvBloomWriteRT) return;
+
+    const persist = Math.max(0.05, Number(this.params.nightVisionBloomPersistenceSeconds) || 0.6);
+    const dt = Math.max(1 / 240, Number(dtSec) || (1 / 60));
+    const decay = Math.exp(-dt / persist);
+
+    const u = this._nvBloomMaterial.uniforms;
+    u.tCurrentScene.value = inputRT.texture;
+    u.tPrevBurn.value = this._nvBloomReadRT.texture;
+    u.uThreshold.value = this._clamp01Nv(this.params.nightVisionBloomThreshold);
+    u.uSoftness.value = Math.max(0.001, Number(this.params.nightVisionBloomThresholdSoftness) || 0.25);
+    u.uResponse.value = Math.max(0, Number(this.params.nightVisionBloomResponse) || 1.4);
+    u.uDecayFactor.value = this._clamp01Nv(decay);
+    u.uBurnWriteGain.value = this._clamp01Nv(darknessGate);
+
+    const prevTarget = renderer.getRenderTarget();
+    const prevAutoClear = renderer.autoClear;
+    renderer.setRenderTarget(this._nvBloomWriteRT);
+    renderer.autoClear = true;
+    renderer.render(this._nvBloomScene, this._nvBloomCamera);
+    renderer.autoClear = prevAutoClear;
+    renderer.setRenderTarget(prevTarget);
+
+    const tmp = this._nvBloomReadRT;
+    this._nvBloomReadRT = this._nvBloomWriteRT;
+    this._nvBloomWriteRT = tmp;
+  }
+
+  shouldRenderNightVision() {
+    return !!(this.enabled && this.params?.enabled && this._nightVisionActive && this._nvComposeMaterial);
+  }
+
+  onResize() {
+    this._disposeNvBloomTargets();
+  }
+
+  _syncNightVisionUniforms(w, h) {
+    const u = this._nvComposeMaterial?.uniforms;
+    if (!u) return;
+
+    const tint = this.params.nightVisionTint || { r: 0.2, g: 1, b: 0.45 };
+    const eyeCol = this.params.nightVisionEyepieceColor || { r: 0, g: 0, b: 0 };
+
+    u.uResolution.value.set(w, h);
+    u.uTime.value = this._lastNvElapsed;
+    u.uTint.value.set(tint.r, tint.g, tint.b);
+    u.uTintStrength.value = Number(this.params.nightVisionTintStrength) || 0;
+    u.uSaturation.value = Number(this.params.nightVisionSaturation) || 0;
+    u.uBrightness.value = Number(this.params.nightVisionBrightness) ?? 1;
+    u.uGain.value = Math.max(0.01, Number(this.params.nightVisionGain) || 1);
+    u.uGamma.value = Math.max(0.05, Number(this.params.nightVisionGamma) || 1);
+    u.uMaxLuma.value = Math.max(0.01, Number(this.params.nightVisionMaxLuma) || 1);
+    u.uDarkLift.value = Math.max(0, Number(this.params.nightVisionDarkLift) || 0);
+    u.uDistortionAmount.value = Number(this.params.nightVisionDistortionAmount) || 0;
+    u.uCAAmountPx.value = Math.max(0, Number(this.params.nightVisionCAAmount) || 0);
+    u.uCAEdgePower.value = Math.max(0.01, Number(this.params.nightVisionCAEdgePower) || 1);
+    u.uScanlinesEnabled.value = this.params.nightVisionScanlinesEnabled ? 1.0 : 0.0;
+    u.uScanIntensity.value = Math.max(0, Number(this.params.nightVisionScanlinesIntensity) || 0);
+    u.uScanDensity.value = Math.max(1, Number(this.params.nightVisionScanlinesDensity) || 100);
+    u.uScanSpeed.value = Number(this.params.nightVisionScanlinesSpeed) || 0;
+    u.uScanThickness.value = Math.max(0, Number(this.params.nightVisionScanlinesThickness) || 0.5);
+    u.uNoiseAmount.value = Math.max(0, Number(this.params.nightVisionNoiseAmount) || 0);
+    u.uNoiseLowLightBoost.value = Math.max(0, Number(this.params.nightVisionNoiseLowLightBoost) || 0);
+    u.uNoiseSpeed.value = Math.max(0, Number(this.params.nightVisionNoiseSpeed) || 0);
+    u.uNoiseScale.value = Math.max(0.1, Number(this.params.nightVisionNoiseScale) || 1);
+    u.uPhosphorFlickerAmount.value = Math.max(0, Number(this.params.nightVisionPhosphorFlickerAmount) || 0);
+    u.uPhosphorFlickerSpeed.value = Math.max(0.01, Number(this.params.nightVisionPhosphorFlickerSpeed) || 1);
+    u.uBloomEnabled.value = this.params.nightVisionBloomEnabled ? 1.0 : 0.0;
+    u.uBloomIntensity.value = Math.max(0, Number(this.params.nightVisionBloomIntensity) || 0);
+    u.uBloomBlurPx.value = Math.max(0, Number(this.params.nightVisionBloomBlurPx) || 0);
+    u.uEyepieceStyle.value = this.params.nightVisionEyepieceStyle === 'binocular' ? 1.0 : 0.0;
+    u.uEyepieceRadius.value = Math.max(0.01, Number(this.params.nightVisionEyepieceRadius) || 0.5);
+    u.uEyepieceSoftness.value = Math.max(0.001, Number(this.params.nightVisionEyepieceSoftness) || 0.1);
+    u.uEyepieceIntensity.value = Math.max(0, Math.min(1, Number(this.params.nightVisionEyepieceIntensity) ?? 1));
+    u.uEyepieceColor.value.set(eyeCol.r, eyeCol.g, eyeCol.b);
+    u.uEyepieceSeparation.value = Math.max(0, Number(this.params.nightVisionEyepieceSeparation) || 0);
+    u.uPower.value = Math.max(0, Math.min(1, this._nvEffectivePower));
+  }
+
+  renderNightVision(renderer, camera, inputRT, outputRT) {
+    if (!this.shouldRenderNightVision() || !renderer || !inputRT || !outputRT) return false;
+
+    const darknessGate = this._computeNightVisionDarknessGate();
+    if (this.params.nightVisionBloomEnabled) {
+      this._updateNvBloomMap(renderer, inputRT, this._lastNvDt, darknessGate);
+    }
+
+    const w = Math.max(1, Number(inputRT.width) || 1);
+    const h = Math.max(1, Number(inputRT.height) || 1);
+
+    const u = this._nvComposeMaterial.uniforms;
+    u.tDiffuse.value = inputRT.texture;
+    u.tBloomBurnMap.value = this._nvBloomReadRT?.texture ?? this._nvFallbackBlack;
+
+    this._syncNightVisionUniforms(w, h);
+
+    const prevTarget = renderer.getRenderTarget();
+    const prevAutoClear = renderer.autoClear;
+
+    renderer.setRenderTarget(outputRT);
+    renderer.autoClear = true;
+    renderer.render(this._nvComposeScene, this._nvComposeCamera);
+
+    renderer.autoClear = prevAutoClear;
+    renderer.setRenderTarget(prevTarget);
+
+    return true;
   }
 
   _setVisible(visible, torchMode) {

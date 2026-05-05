@@ -7,9 +7,10 @@
  * PATH A — _refreshVisibility patch (per-token, immediate):
  *   Monkey-patches Token.prototype._refreshVisibility so we execute inside
  *   Foundry's render-flag pipeline at exactly the moment each token's
- *   isVisible is evaluated. Syncs the result to the Three.js sprite and
- *   forces the PIXI token to remain visible for hit-testing (Three.js
- *   handles the visual hiding; PIXI stays interactive at alpha=0).
+ *   isVisible is evaluated. Syncs the result to the Three.js sprite (with
+ *   the same window optical pass-through fallback as Path B) and forces the
+ *   PIXI token to remain visible for hit-testing (Three.js handles the visual
+ *   hiding; PIXI stays interactive at alpha=0).
  *
  * PATH B — sightRefresh hook (bulk, after vision computation):
  *   Listens to Foundry's "sightRefresh" hook which fires AFTER
@@ -30,7 +31,7 @@ import { isGmLike } from '../core/gm-parity.js';
 
 import { createLogger } from '../core/log.js';
 import { getTokenRenderingMode, TOKEN_RENDERING_MODES } from '../settings/scene-settings.js';
-import { isLevelsEnabledForScene, hasV14NativeLevels } from '../foundry/levels-scene-flags.js';
+import { isLevelsEnabledForScene, hasV14NativeLevels, readWallHeightFlags } from '../foundry/levels-scene-flags.js';
 
 const log = createLogger('VisibilityController');
 
@@ -272,6 +273,155 @@ export class VisibilityController {
     }
   }
 
+  /**
+   * Whether `viewer` has unobstructed sight/light to `point` (canvas-space {x,y}),
+   * treating PROXIMITY/DISTANCE walls as optical pass-through (windows).
+   * Used by token visibility and {@link WallManager} door icon visibility.
+   *
+   * @param {{x: number, y: number}} point
+   * @param {Token} viewer - Foundry token placeable
+   * @returns {boolean}
+   */
+  canSeePointOptically(point, viewer) {
+    try {
+      if (!point || !viewer) return false;
+      const hasSight = !!(viewer.hasSight || viewer.document?.sight?.enabled);
+      if (!hasSight) return false;
+
+      const origin = viewer.center;
+      if (!origin) return false;
+
+      const viewerElevation = Number.isFinite(Number(viewer?.document?.elevation))
+        ? Number(viewer.document.elevation)
+        : 0;
+
+      const sightHit = this._findClosestBlockingCollisionWithOpticalPassThrough(
+        viewer,
+        origin,
+        point,
+        'sight',
+        viewerElevation
+      );
+      if (sightHit) return false;
+
+      const lightHit = this._findClosestBlockingCollisionWithOpticalPassThrough(
+        viewer,
+        origin,
+        point,
+        'light',
+        viewerElevation
+      );
+      if (lightHit) return false;
+
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /**
+   * Optical LOS fallback for cases where Foundry visibility disagrees with
+   * MapShine's window pass-through wall behavior.
+   * @param {Token|null} targetToken
+   * @returns {boolean}
+   * @private
+   */
+  _canAnyControlledTokenSeeTargetOptically(targetToken) {
+    try {
+      if (!targetToken) return false;
+      const controlled = canvas?.tokens?.controlled;
+      if (!Array.isArray(controlled) || controlled.length === 0) return false;
+
+      const targetCenter = targetToken.center;
+      if (!targetCenter) return false;
+      const targetTokenId = targetToken.document?.id;
+
+      for (const viewer of controlled) {
+        if (!viewer) continue;
+        if (viewer === targetToken) return true;
+        if (viewer.document?.id && viewer.document.id === targetTokenId) return true;
+
+        if (this.canSeePointOptically(targetCenter, viewer)) return true;
+      }
+    } catch (_) {
+    }
+    return false;
+  }
+
+  /**
+   * Variant of collision query that treats optical proximity/distance walls as
+   * pass-through, matching flashlight window behavior.
+   * @private
+   */
+  _findClosestBlockingCollisionWithOpticalPassThrough(tokenObj, origin, destination, type, elevation) {
+    if (!tokenObj || !destination || !type) return null;
+    const backend = CONFIG?.Canvas?.polygonBackends?.[type];
+
+    try {
+      const allHits = backend?.testCollision?.(origin, destination, {
+        mode: 'all',
+        type,
+        source: tokenObj,
+        token: tokenObj,
+        edgeDirectionMode: CONST?.EDGE_DIRECTION_MODES?.NORMAL,
+        useThreshold: true
+      });
+      if (!Array.isArray(allHits) || allHits.length === 0) return null;
+
+      for (const hit of allHits) {
+        if (this._collisionHitBlocksAtElevationWithOpticalPassThrough(hit, elevation, type)) {
+          return hit;
+        }
+      }
+    } catch (_) {
+    }
+
+    return null;
+  }
+
+  /**
+   * Elevation-aware wall blocking with optical pass-through support for
+   * proximity/distance walls (windows).
+   * @private
+   */
+  _collisionHitBlocksAtElevationWithOpticalPassThrough(hit, elevation, type = null) {
+    if (!hit) return false;
+    if (!Number.isFinite(elevation)) return true;
+    if (typeof hit !== 'object') return !!hit;
+
+    const edges = hit?.edges;
+    if (!(edges instanceof Set) || edges.size === 0) return true;
+
+    for (const edge of edges) {
+      if (!edge) continue;
+      if (edge.type && edge.type !== 'wall') return true;
+
+      const wallDoc = edge.object?.document ?? edge.object ?? null;
+      if (!wallDoc) return true;
+
+      // Match PlayerLight optical pass-through behavior through windows.
+      if (type === 'sight' || type === 'light') {
+        const senseValue = Number(type === 'light' ? wallDoc?.light : wallDoc?.sight);
+        const proximity = Number(CONST?.WALL_SENSE_TYPES?.PROXIMITY ?? 30);
+        const distance = Number(CONST?.WALL_SENSE_TYPES?.DISTANCE ?? 40);
+        if (senseValue === proximity || senseValue === distance) continue;
+      }
+
+      const bounds = readWallHeightFlags(wallDoc);
+      let bottom = Number(bounds?.bottom);
+      let top = Number(bounds?.top);
+      if (!Number.isFinite(bottom)) bottom = -Infinity;
+      if (!Number.isFinite(top)) top = Infinity;
+      if (top < bottom) {
+        const swap = bottom;
+        bottom = top;
+        top = swap;
+      }
+      if (bottom <= elevation && elevation < top) return true;
+    }
+    return false;
+  }
+
   // ---------------------------------------------------------------------------
   //  Core visibility logic (shared by both paths)
   // ---------------------------------------------------------------------------
@@ -298,6 +448,12 @@ export class VisibilityController {
 
     // Use the explicitly passed computed visibility, or fallback to isVisible
     let visible = computedVisibility ?? foundryToken.isVisible ?? foundryToken.visible;
+
+    // Match Path B: window (PROXIMITY/DISTANCE) optical pass-through so the next
+    // render-flag tick does not overwrite sightRefresh with Foundry-strict false.
+    if (!visible) {
+      visible = this._canAnyControlledTokenSeeTargetOptically(foundryToken);
+    }
 
     // Level-based filtering: hide tokens that are above the current level.
     // This runs after Foundry's own visibility so we only further restrict.
@@ -393,6 +549,10 @@ export class VisibilityController {
             || foundryToken?.document?.isOwner
           );
         }
+      }
+
+      if (!visible) {
+        visible = this._canAnyControlledTokenSeeTargetOptically(foundryToken);
       }
 
       // Level-based filtering: hide tokens that are above the current level.

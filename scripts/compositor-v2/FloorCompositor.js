@@ -1744,6 +1744,7 @@ export class FloorCompositor {
           || playerLight?._torchParticleSystem?.emitter?.visible === true
           || playerLight?._torchSparksSystem?.emitter?.visible === true
           || playerLight?._flashlightBeamMesh?.visible === true
+          || playerLight?._nightVisionActive === true
         )
       );
       if (playerLightActive) {
@@ -3334,6 +3335,16 @@ export class FloorCompositor {
     }
     if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: lens.render DONE'); } catch (_) {} }
 
+    // Night vision goggles post-pass (after lens): tube tint, gain, bloom burn, scanlines.
+    if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: playerLight.nightVision'); } catch (_) {} }
+    if (resolveEffectEnabled(this._playerLightEffect) && this._playerLightEffect?.shouldRenderNightVision?.()) {
+      const nvOutput = (currentInput === this._postA) ? this._postB : this._postA;
+      if (this._playerLightEffect.renderNightVision(this.renderer, this.camera, currentInput, nvOutput)) {
+        currentInput = nvOutput;
+      }
+    }
+    if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: playerLight.nightVision DONE'); } catch (_) {} }
+
     // ── Step 3: Optional mask debug overlay → blit to screen ────────────
     if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: blitToScreen'); } catch (_) {} }
     let blitSource = currentInput;
@@ -4665,6 +4676,7 @@ export class FloorCompositor {
     try { this._invertEffect?.onResize?.(w, h); } catch (_) {}
     try { this._sepiaEffect?.onResize?.(w, h); } catch (_) {}
     try { this._lensEffect?.onResize?.(w, h); } catch (_) {}
+    try { this._playerLightEffect?.onResize?.(w, h); } catch (_) {}
     try { this._distortionEffect?.onResize?.(w, h); } catch (_) {}
     try { this._floorDepthBlurEffect?.onResize?.(w, h); } catch (_) {}
     log.debug(`FloorCompositor.onResize: RTs resized to ${w}x${h}`);

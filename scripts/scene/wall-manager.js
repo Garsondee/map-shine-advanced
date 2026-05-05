@@ -512,17 +512,64 @@ export class WallManager {
     }
   }
 
+  /**
+   * Door midpoint in Foundry canvas space; same coordinates as polygon collision.
+   * @param {object} wallDoc
+   * @returns {{x: number, y: number}|null}
+   * @private
+   */
+  _getDoorMidpointCanvas(wallDoc) {
+    const coords = wallDoc?.c;
+    if (!Array.isArray(coords) || coords.length < 4) return null;
+    return {
+      x: (coords[0] + coords[2]) / 2,
+      y: (coords[1] + coords[3]) / 2
+    };
+  }
+
+  /**
+   * Window-aware LOS from effective vision tokens to the door icon position.
+   * @param {object} wallDoc
+   * @returns {boolean}
+   * @private
+   */
+  _canSelectionSeeDoorOptically(wallDoc) {
+    try {
+      const point = this._getDoorMidpointCanvas(wallDoc);
+      if (!point) return false;
+
+      const vc = window.MapShine?.visibilityController;
+      if (!vc || typeof vc.canSeePointOptically !== 'function') return false;
+
+      const visionTokens = this._getEffectiveVisionTokens();
+      for (const viewer of visionTokens) {
+        if (!viewer) continue;
+        if (vc.canSeePointOptically(point, viewer)) return true;
+      }
+    } catch (_) {
+    }
+    return false;
+  }
+
   _isDoorVisibleToSelection(wallDoc) {
     if (!wallDoc?.door) return false;
 
     if (!this._isWallVisibleAtPerspective(wallDoc)) return false;
 
     const nativeVisibility = this._getNativeDoorControlVisibility(wallDoc);
-    if (nativeVisibility !== null) {
-      return nativeVisibility;
+    if (nativeVisibility === true) {
+      return true;
     }
 
     if ((wallDoc.door === CONST.WALL_DOOR_TYPES.SECRET) && !isGmLike()) {
+      return false;
+    }
+
+    if (this._canSelectionSeeDoorOptically(wallDoc)) {
+      return true;
+    }
+
+    if (nativeVisibility === false) {
       return false;
     }
 

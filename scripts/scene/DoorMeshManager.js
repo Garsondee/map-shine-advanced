@@ -864,9 +864,16 @@ export class DoorMeshManager {
     const globalTint = this._globalTint;
     globalTint.setRGB(1, 1, 1);
 
-    try {
-      const scene = canvas?.scene;
-      const env = canvas?.environment;
+    // In V2 compositor mode, door meshes render into floor albedo and should be
+    // lit by the compositor illumination pass. Applying manual darkness tint
+    // here would double-darken door textures.
+    const v2Lighting = window.MapShine?.effectComposer?._floorCompositorV2?._lightingEffect ?? null;
+    if (v2Lighting) {
+      globalTint.setRGB(1, 1, 1);
+    } else {
+      try {
+        const scene = canvas?.scene;
+        const env = canvas?.environment;
 
       if (scene?.environment?.darknessLevel !== undefined) {
         let darkness = scene.environment.darknessLevel;
@@ -909,7 +916,8 @@ export class DoorMeshManager {
         } catch (_) {
         }
       }
-    } catch (_) {
+      } catch (_) {
+      }
     }
 
     const tr = Math.max(0, Math.min(255, (globalTint.r * 255 + 0.5) | 0));

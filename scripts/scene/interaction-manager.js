@@ -3817,11 +3817,6 @@ export class InteractionManager {
                      return;
                 }
 
-                if (candidateType === 'wallEndpoint' || candidateType === 'wallEndpointOuter') {
-                     this.startWallDrag(candidate, event);
-                     return;
-                }
-
                 if (candidateType === 'wallLine' || candidateType === 'wallLineBg' || candidateType === 'wallHitbox') {
                     if (isGmLike() || this._isWallsContextActive()) {
                         this.selectWall(candidate, event);

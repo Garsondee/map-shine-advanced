@@ -20,6 +20,10 @@ import { debugLoadingProfiler } from '../core/debug-loading-profiler.js';
 import { getFoundryTimePhaseHours } from '../core/foundry-time-phases.js';
 import { extendMsaLocalFlagWriteGuard, refreshMsaSameSceneRedrawPredict } from '../utils/msa-local-flag-guard.js';
 import { cloneAndSanitizeControlState, sanitizeControlStateInPlace } from '../settings/control-state-sanitize.js';
+import {
+  getGlobalPlayerLightModeAllowed,
+  resolvePlayerLightModeAllowance
+} from '../core/player-light-allowance.js';
 
 const log = createLogger('ControlPanel');
 
@@ -93,7 +97,12 @@ export class ControlPanelManager {
       tileMotionSpeedPercent: 100,
       tileMotionAutoPlayEnabled: true,
       tileMotionTimeFactorPercent: 100,
-      tileMotionPaused: false
+      tileMotionPaused: false,
+      playerLightAllowance: {
+        torch: 'global',
+        flashlight: 'global',
+        nightVision: 'global'
+      }
     };
 
     this._suppressInitialWeatherApply = false;
@@ -384,6 +393,7 @@ export class ControlPanelManager {
     this._buildTimeSection(masterFolder, { expanded: true, registerTopLevel: false });
     this._buildQuickSceneBeatsSection(masterFolder, { expanded: true, registerTopLevel: false });
     this._buildTileMotionSection(masterFolder, { expanded: false, registerTopLevel: false });
+    this._buildPlayerLightsSection(masterFolder, { expanded: false, registerTopLevel: false });
     this._buildWeatherSection(masterFolder, { expanded: false, registerTopLevel: false });
     this._buildWindSection(masterFolder, { expanded: false, registerTopLevel: false });
   }
@@ -3280,6 +3290,142 @@ export class ControlPanelManager {
     transportGrid.appendChild(spacer);
 
     contentElement.appendChild(transportGrid);
+  }
+
+  /**
+   * GM: per-scene Player Light mode allowances + world global defaults.
+   * @private
+   */
+  _buildPlayerLightsSection(parentFolder = this.pane, options = undefined) {
+    const targetFolder = parentFolder || this.pane;
+    const lightsFolder = targetFolder.addFolder({
+      title: options?.title ?? '🔦 Player Lights',
+      expanded: options?.expanded ?? false
+    });
+    if (options?.registerTopLevel !== false && targetFolder === this.pane) this._registerTopLevelFolder(lightsFolder);
+    this._ensureFolderTag(lightsFolder, 'playerLights', 'GM');
+
+    const contentEl = lightsFolder.element.querySelector('.tp-fldv_c') || lightsFolder.element;
+
+    if (!isGmLike()) {
+      const reason = document.createElement('div');
+      reason.textContent = 'Player Light allowances are GM-only. Ask your GM to use Map Shine Control → Player Lights.';
+      reason.style.cssText = 'font-size:11px;opacity:0.78;margin:4px 8px 8px';
+      contentEl.appendChild(reason);
+      return;
+    }
+
+    if (!this.controlState.playerLightAllowance || typeof this.controlState.playerLightAllowance !== 'object') {
+      this.controlState.playerLightAllowance = {
+        torch: 'global',
+        flashlight: 'global',
+        nightVision: 'global'
+      };
+    }
+
+    const MODULE = 'map-shine-advanced';
+
+    const summaryEl = document.createElement('div');
+    summaryEl.style.cssText = 'font-size:9px;opacity:0.78;margin:4px 8px 8px;line-height:1.4;white-space:pre-wrap;';
+    contentEl.insertBefore(summaryEl, contentEl.firstChild);
+
+    const updateSummary = () => {
+      try {
+        const scene = canvas?.scene ?? null;
+        const lines = ['Effective for players on this scene:'];
+        const modes = [
+          ['torch', 'Torch'],
+          ['flashlight', 'Flashlight'],
+          ['nightVision', 'Night Vision']
+        ];
+        for (const [mode, label] of modes) {
+          const ok = resolvePlayerLightModeAllowance(mode, { scene, controlState: this.controlState });
+          lines.push(`• ${label}: ${ok ? 'Allowed' : 'Disallowed'}`);
+        }
+        summaryEl.textContent = lines.join('\n');
+      } catch (_) {
+        summaryEl.textContent = '';
+      }
+    };
+    updateSummary();
+
+    const modes = [
+      { key: 'torch', label: 'Torch (scene)' },
+      { key: 'flashlight', label: 'Flashlight (scene)' },
+      { key: 'nightVision', label: 'Night Vision (scene)' }
+    ];
+
+    for (const { key, label } of modes) {
+      lightsFolder.addBinding(this.controlState.playerLightAllowance, key, {
+        label,
+        options: {
+          'Use Global': 'global',
+          'Allowed': 'allowed',
+          'Disallowed': 'disallowed'
+        }
+      }).on('change', (ev) => {
+        this.controlState.playerLightAllowance[key] = ev.value;
+        updateSummary();
+        if (ev?.last) {
+          this.debouncedSave();
+          try {
+            ui?.controls?.render?.(true);
+          } catch (_) {}
+        }
+      });
+    }
+
+    const globalFolder = lightsFolder.addFolder({
+      title: 'Global Defaults',
+      expanded: false
+    });
+
+    const globalDefaultsState = {
+      torch: !!game.settings.get(MODULE, 'playerLightTorchAllowedDefault'),
+      flashlight: !!game.settings.get(MODULE, 'playerLightFlashlightAllowedDefault'),
+      nightVision: getGlobalPlayerLightModeAllowed('nightVision')
+    };
+
+    globalFolder.addBinding(globalDefaultsState, 'torch', { label: 'Torch' }).on('change', async (ev) => {
+      globalDefaultsState.torch = !!ev.value;
+      try {
+        await game.settings.set(MODULE, 'playerLightTorchAllowedDefault', !!ev.value);
+      } catch (_) {}
+      updateSummary();
+      if (ev?.last) {
+        try {
+          ui?.controls?.render?.(true);
+        } catch (_) {}
+      }
+    });
+
+    globalFolder.addBinding(globalDefaultsState, 'flashlight', { label: 'Flashlight' }).on('change', async (ev) => {
+      globalDefaultsState.flashlight = !!ev.value;
+      try {
+        await game.settings.set(MODULE, 'playerLightFlashlightAllowedDefault', !!ev.value);
+      } catch (_) {}
+      updateSummary();
+      if (ev?.last) {
+        try {
+          ui?.controls?.render?.(true);
+        } catch (_) {}
+      }
+    });
+
+    globalFolder.addBinding(globalDefaultsState, 'nightVision', { label: 'Night Vision' }).on('change', async (ev) => {
+      globalDefaultsState.nightVision = !!ev.value;
+      const v = !!ev.value;
+      try {
+        await game.settings.set(MODULE, 'playerLightNightVisionAllowedDefault', v);
+        await game.settings.set(MODULE, 'nightVisionAllowPlayers', v);
+      } catch (_) {}
+      updateSummary();
+      if (ev?.last) {
+        try {
+          ui?.controls?.render?.(true);
+        } catch (_) {}
+      }
+    });
   }
 
   /**

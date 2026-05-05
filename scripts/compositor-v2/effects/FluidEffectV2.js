@@ -246,6 +246,67 @@ export class FluidEffectV2 {
     this._overlays.clear();
   }
 
+  /**
+   * @param {string} tileId
+   * @private
+   */
+  _disposeOverlayEntry(tileId) {
+    if (!tileId || tileId === '__bg_image__') return;
+    const entry = this._overlays.get(tileId);
+    if (!entry) return;
+    this._renderBus.removeEffectOverlay(`${tileId}_fluid`);
+    try { entry.material.dispose(); } catch (_) {}
+    try { entry.mesh.geometry?.dispose?.(); } catch (_) {}
+    try {
+      const tex = entry.material.uniforms?.tFluidMask?.value;
+      tex?.dispose?.();
+    } catch (_) {}
+    this._overlays.delete(tileId);
+  }
+
+  /**
+   * Re-probe `_Fluid` and rebuild the overlay after `texture.src` changed on a tile.
+   *
+   * @param {object} tileDoc
+   * @param {object|null} foundrySceneData
+   */
+  async refreshTileAfterTextureChange(tileDoc, foundrySceneData) {
+    if (!this._initialized || !tileDoc) return;
+    const tileId = tileDoc.id ?? tileDoc._id;
+    if (!tileId || tileId === '__bg_image__') return;
+
+    this._disposeOverlayEntry(tileId);
+
+    const src = tileDoc?.texture?.src ?? tileDoc?.img ?? '';
+    if (!src) return;
+
+    const floors = window.MapShine?.floorStack?.getFloors?.() ?? [];
+    const worldH = foundrySceneData?.height ?? (typeof canvas !== 'undefined' ? canvas?.dimensions?.height : 0) ?? 0;
+
+    const basePath = this._basePathNoExt(src);
+    const mask = await probeMaskFile(basePath, '_Fluid');
+    if (!mask?.path) return;
+
+    const floorIndex = this._resolveFloorIndex(tileDoc, floors);
+
+    const tileW = tileDoc.width ?? 0;
+    const tileH = tileDoc.height ?? 0;
+    const centerX = (tileDoc.x ?? 0) + tileW / 2;
+    const centerY = worldH - ((tileDoc.y ?? 0) + tileH / 2);
+    const rotation = typeof tileDoc.rotation === 'number'
+      ? (tileDoc.rotation * Math.PI) / 180 : 0;
+
+    const z = (GROUND_Z + floorIndex) + FLUID_Z_OFFSET;
+
+    this._createOverlay(tileId, floorIndex, {
+      maskUrl: mask.path,
+      centerX, centerY, z,
+      tileW, tileH,
+      rotation,
+      isOverhead: !!tileDoc?.overhead,
+    });
+  }
+
   dispose() {
     this.clear();
     this._loader = null;
@@ -505,7 +566,10 @@ export class FluidEffectV2 {
     mesh.layers.set(0);
     if (isOverhead) mesh.layers.enable(20);
 
-    // Keep renderOrder under the base tile if present.
+    // Sub-albedo draw order (paired with FLUID_Z_OFFSET): stays behind this tile’s
+    // albedo but still sorts with other tiles — higher-sorted tiles draw later and
+    // occlude. Do not use tileStackedOverlayOrder here; that would paint fluid after
+    // albedo and change the authored “under the texture” look.
     try {
       const baseOrder = Number(baseEntry?.mesh?.renderOrder);
       if (Number.isFinite(baseOrder)) {

@@ -5,6 +5,8 @@
  */
 import { canPersistSceneDocument, isGmLike } from '../core/gm-parity.js';
 import { createLogger } from '../core/log.js';
+import { repairSceneControlStateFlag } from './control-state-sanitize.js';
+import { wipeMapShineAdvancedFlagsAsync } from './scene-msa-flag-wipe.js';
 import { createDefaultStyledLoadingScreenConfig } from '../ui/loading-screen/loading-screen-config.js';
 
 const log = createLogger('Settings');
@@ -14,6 +16,9 @@ const CURRENT_VERSION = '0.2.0';
 
 /** Flag namespace in Foundry scene */
 const FLAG_NAMESPACE = 'map-shine-advanced';
+
+/** Legacy v1.x module scene flag scope (removed on repair/enable when possible) */
+const LEGACY_FLAG_NAMESPACE = 'map-shine';
 
 /** Module setting keys */
 const DEBUG_LOADING_MODE_SETTING = 'debugLoadingMode';
@@ -221,6 +226,10 @@ function _silentlyPersistEnabled(scene) {
 export function isEnabled(scene) {
   const val = scene.getFlag(FLAG_NAMESPACE, 'enabled');
   if (val === true) return true;
+  // Explicit user/GM disable must always win. Without this guard, scenes that
+  // contain authored Map Shine data could be auto-reactivated by implied-config
+  // detection, making "off" impossible for those scenes.
+  if (val === false) return false;
 
   // Auto-detect pre-configured scenes (e.g. packaged module maps where the
   // `enabled` flag was not included in the compendium export).
@@ -432,33 +441,118 @@ export async function ensureValidSceneSettings(scene, options = {}) {
 }
 
 /**
+ * True only when the scene document has the explicit `enabled` flag set to true.
+ * Unlike {@link isEnabled}, this does not treat implied authoring config as enabled.
+ *
+ * @param {Scene|null|undefined} scene
+ * @returns {boolean}
+ * @public
+ */
+export function isExplicitlyEnabled(scene) {
+  try {
+    return scene?.getFlag?.(FLAG_NAMESPACE, 'enabled') === true;
+  } catch (_) {
+    return false;
+  }
+}
+
+/**
+ * Remove legacy `map-shine` namespace from the scene (v1.x module).
+ * @param {Scene} scene
+ * @returns {Promise<void>}
+ * @private
+ */
+async function removeLegacyMapShineNamespace(scene) {
+  if (!canPersistSceneDocument() || !scene?.id) return;
+  try {
+    const leg = scene.flags?.[LEGACY_FLAG_NAMESPACE];
+    if (!leg || typeof leg !== 'object' || Object.keys(leg).length === 0) return;
+    await scene.update({ [`flags.-=${LEGACY_FLAG_NAMESPACE}`]: null });
+    log.info(`Removed legacy ${LEGACY_FLAG_NAMESPACE} flags from scene "${scene.name ?? scene.id}"`);
+  } catch (e) {
+    log.warn('Failed to remove legacy map-shine flags:', e?.message ?? e);
+  }
+}
+
+/**
+ * Normalize and repair persisted Map Shine scene flags before enable or after import.
+ *
+ * @param {Scene} scene
+ * @param {{ depth?: 'standard'|'deep' }} [options]
+ * @returns {Promise<void>}
+ * @public
+ */
+export async function repairSceneMapShineDocument(scene, options = {}) {
+  const depth = options.depth === 'deep' ? 'deep' : 'standard';
+  if (!scene) return;
+
+  const autoRepair = canPersistSceneDocument();
+  await ensureValidSceneSettings(scene, { autoRepair });
+
+  if (autoRepair) {
+    await repairSceneControlStateFlag(scene);
+    await removeLegacyMapShineNamespace(scene);
+  }
+
+  if (depth === 'deep') {
+    // Reserved for future: tile-motion state, weather snapshot keys, etc.
+  }
+}
+
+/**
  * Enable Map Shine for a scene.
  *
  * For fresh blank scenes, writes default settings. For scenes that already have
  * Map Shine authoring data (e.g. imported from a packaged module compendium), the
  * existing settings are preserved so the author's effect parameters are not lost.
  *
+ * When `reset` is `'full'`, all `map-shine-advanced` scene flags are removed first,
+ * then defaults are written (destructive).
+ *
  * @param {Scene} scene - Foundry scene object
+ * @param {{ reset?: 'none'|'full' }} [options]
  * @returns {Promise<void>}
  * @public
  */
-export async function enable(scene) {
-  await scene.setFlag(FLAG_NAMESPACE, 'enabled', true);
+export async function enable(scene, options = {}) {
+  if (!scene) {
+    throw new Error('Map Shine: no scene to enable');
+  }
+  if (!canPersistSceneDocument()) {
+    throw new Error('Map Shine: only GMs can persist scene Map Shine flags');
+  }
+
+  const reset = options.reset === 'full' ? 'full' : 'none';
+  let s = scene;
+
+  if (reset === 'full') {
+    await wipeMapShineAdvancedFlagsAsync(s, 'enable-reset-full');
+    s = game.scenes?.get?.(s.id) ?? s;
+  } else {
+    await repairSceneMapShineDocument(s, { depth: 'standard' });
+    s = game.scenes?.get?.(s.id) ?? s;
+  }
+
+  await s.setFlag(FLAG_NAMESPACE, 'enabled', true);
+
+  if (s.getFlag(FLAG_NAMESPACE, 'enabled') !== true) {
+    throw new Error('Map Shine: enabled flag did not persist on the scene document');
+  }
 
   // Only write default settings when the scene has no existing Map Shine settings.
   // Pre-configured packaged maps already have author-tuned parameters that must
-  // not be overwritten with defaults.
+  // not be overwritten with defaults (unless reset === 'full').
   let existing = null;
   try {
-    existing = scene.getFlag(FLAG_NAMESPACE, 'settings');
+    existing = s.getFlag(FLAG_NAMESPACE, 'settings');
     existing = _safeParseJsonMaybe(existing);
   } catch (_) {}
 
-  if (!_isPlainObject(existing)) {
-    await setSceneSettings(scene, createDefaultSettings());
-    log.info(`Map Shine enabled for scene: ${scene.name} (default settings written)`);
+  if (reset === 'full' || !_isPlainObject(existing)) {
+    await setSceneSettings(s, createDefaultSettings());
+    log.info(`Map Shine enabled for scene: ${s.name} (${reset === 'full' ? 'defaults after full reset' : 'default settings written'})`);
   } else {
-    log.info(`Map Shine enabled for scene: ${scene.name} (existing settings preserved)`);
+    log.info(`Map Shine enabled for scene: ${s.name} (existing settings preserved)`);
   }
 }
 
@@ -597,7 +691,13 @@ export async function savePlayerOverrides(scene, overrides) {
 }
 
 /**
- * Migrate settings from old version to current
+ * Migrate settings from old version to current.
+ *
+ * Roadmap (incremental, version-keyed transforms — keep each step idempotent):
+ * - **0.1.x → 0.2.0:** `ensureValidSceneSettings` + `repairSceneMapShineDocument` handle shape repair at runtime.
+ * - **Future:** Add branches on `fromVersion` for renamed effect IDs, deprecated parameters, or tier moves.
+ * - **Future:** Call from a dedicated world migration hook or from `repairSceneMapShineDocument(..., { depth: 'deep' })` when needed.
+ *
  * @param {SceneSettings} oldSettings - Settings to migrate
  * @returns {MigrationResult} Migration result
  * @public
@@ -607,8 +707,7 @@ export function migrateSettings(oldSettings) {
   const warnings = [];
 
   try {
-    // Migration logic will be added as versions evolve
-    // For now, just ensure version is current
+    // Placeholder: bump version; add `if (semver.lt(fromVersion, 'x.y.z')) { ... }` chains as the schema evolves.
     const migratedSettings = { ...oldSettings };
     migratedSettings.version = CURRENT_VERSION;
 
@@ -921,6 +1020,46 @@ export function registerSettings() {
     restricted: true,
     type: Boolean,
     default: true
+  });
+
+  game.settings.register('map-shine-advanced', 'nightVisionAllowPlayers', {
+    name: 'Allow Players to Use Night Vision Mode',
+    hint: 'Legacy setting — combined with “Player Light: Night Vision (global default)” for Night Vision allowance when a scene uses Use Global. Prefer Map Shine Control → Player Lights → Global Defaults.',
+    scope: 'world',
+    config: true,
+    restricted: true,
+    type: Boolean,
+    default: false
+  });
+
+  game.settings.register('map-shine-advanced', 'playerLightTorchAllowedDefault', {
+    name: 'Player Light: Torch (global default)',
+    hint: 'Default allowance for the Torch token-palette tool when a scene uses “Use Global” for Torch. Per-scene overrides are set in Map Shine Control → Player Lights.',
+    scope: 'world',
+    config: true,
+    restricted: true,
+    type: Boolean,
+    default: true
+  });
+
+  game.settings.register('map-shine-advanced', 'playerLightFlashlightAllowedDefault', {
+    name: 'Player Light: Flashlight (global default)',
+    hint: 'Default allowance for the Flashlight token-palette tool when a scene uses “Use Global” for Flashlight. Per-scene overrides are set in Map Shine Control → Player Lights.',
+    scope: 'world',
+    config: true,
+    restricted: true,
+    type: Boolean,
+    default: true
+  });
+
+  game.settings.register('map-shine-advanced', 'playerLightNightVisionAllowedDefault', {
+    name: 'Player Light: Night Vision (global default)',
+    hint: 'Default allowance for Night Vision when a scene uses “Use Global”. If either this or the legacy “Allow Players to Use Night Vision Mode” is enabled, Night Vision is allowed globally. Map Shine Control → Player Lights can sync both when you change this there.',
+    scope: 'world',
+    config: true,
+    restricted: true,
+    type: Boolean,
+    default: false
   });
 
   game.settings.register('map-shine-advanced', 'rightClickMoveImmediate', {

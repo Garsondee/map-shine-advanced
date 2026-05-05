@@ -146,14 +146,17 @@ export class LoadingOverlay {
     content.style.transitionProperty = 'opacity';
     content.style.transitionTimingFunction = 'ease';
     content.style.transitionDuration = '0ms';
+    content.style.textAlign = 'center';
 
     this._contentEl = content;
 
-    // Title row: "Map Shine" left, elapsed timer right
+    // Title row: centered title + elapsed timer
     const titleRow = document.createElement('div');
     titleRow.style.display = 'flex';
-    titleRow.style.alignItems = 'baseline';
-    titleRow.style.justifyContent = 'space-between';
+    titleRow.style.flexDirection = 'column';
+    titleRow.style.alignItems = 'center';
+    titleRow.style.justifyContent = 'center';
+    titleRow.style.gap = '2px';
 
     const title = document.createElement('div');
     title.className = 'map-shine-loading-overlay__title';
@@ -172,6 +175,7 @@ export class LoadingOverlay {
     timer.style.fontVariantNumeric = 'tabular-nums';
     timer.style.color = 'rgba(255, 255, 255, 0.4)';
     timer.style.letterSpacing = '0.3px';
+    timer.style.textAlign = 'center';
     this._timerEl = timer;
 
     titleRow.appendChild(title);
@@ -184,12 +188,15 @@ export class LoadingOverlay {
     subtitle.style.marginTop = '3px';
     subtitle.style.fontSize = '13px';
     subtitle.style.color = 'rgba(255, 255, 255, 0.5)';
+    subtitle.style.textAlign = 'center';
     this._subtitleEl = subtitle;
 
     // Spinner
     const spinner = document.createElement('div');
     spinner.className = 'map-shine-loading-overlay__spinner';
     spinner.style.marginTop = '16px';
+    spinner.style.marginLeft = 'auto';
+    spinner.style.marginRight = 'auto';
     spinner.style.width = '30px';
     spinner.style.height = '30px';
     spinner.style.borderRadius = '50%';
@@ -203,6 +210,7 @@ export class LoadingOverlay {
     stageRow.style.display = 'flex';
     stageRow.style.flexWrap = 'wrap';
     stageRow.style.gap = '5px';
+    stageRow.style.justifyContent = 'center';
     this._stageRowEl = stageRow;
 
     // Message
@@ -214,6 +222,7 @@ export class LoadingOverlay {
     msg.style.lineHeight = '1.4';
     msg.style.color = 'rgba(255, 255, 255, 0.7)';
     msg.style.minHeight = '18px';
+    msg.style.textAlign = 'center';
 
     // Progress bar row: bar + percentage
     const progressRow = document.createElement('div');
@@ -221,6 +230,7 @@ export class LoadingOverlay {
     progressRow.style.display = 'flex';
     progressRow.style.alignItems = 'center';
     progressRow.style.gap = '10px';
+    progressRow.style.width = '100%';
 
     const progress = document.createElement('div');
     progress.className = 'map-shine-loading-overlay__progress';
@@ -422,6 +432,17 @@ export class LoadingOverlay {
     this.ensure();
     if (this._subtitleEl) {
       this._subtitleEl.textContent = name ? `Loading ${name}` : 'Loading';
+    }
+  }
+
+  /**
+   * Set subtitle text explicitly (used by level transition curtain).
+   * @param {string} text
+   */
+  setSubtitle(text) {
+    this.ensure();
+    if (this._subtitleEl) {
+      this._subtitleEl.textContent = text ? String(text) : '';
     }
   }
 

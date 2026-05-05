@@ -9,9 +9,15 @@
 
 import { createLogger } from '../../core/log.js';
 import { probeMaskFile } from '../../assets/loader.js';
-import { tileHasLevelsRange, readTileLevelsFlags } from '../../foundry/levels-scene-flags.js';
+import {
+  tileHasLevelsRange,
+  readTileLevelsFlags,
+  resolveV14NativeDocFloorIndexMin,
+  getVisibleLevelBackgroundLayers,
+  resolveV14BackgroundFloorIndexForSrc,
+} from '../../foundry/levels-scene-flags.js';
 import { weatherController } from '../../core/WeatherController.js';
-import { tileRelativeEffectOrder } from '../LayerOrderPolicy.js';
+import { tileStackedOverlayOrder } from '../LayerOrderPolicy.js';
 
 const log = createLogger('BushEffectV2');
 
@@ -115,9 +121,7 @@ export class BushEffectV2 {
   set enabled(v) {
     this._enabled = !!v;
     this.params.enabled = this._enabled;
-    for (const entry of this._overlays.values()) {
-      entry.mesh.visible = this._enabled;
-    }
+    this._applyOverlayFloorVisibility();
   }
 
   static getControlSchema() {
@@ -631,21 +635,64 @@ export class BushEffectV2 {
     this.clear();
 
     const floors = window.MapShine?.floorStack?.getFloors() ?? [];
+    const activeFloorIdxRaw = Number(window.MapShine?.floorStack?.getActiveFloor?.()?.index);
+    const activeFloorIdx = Number.isFinite(activeFloorIdxRaw) ? activeFloorIdxRaw : 0;
     const worldH = Number(foundrySceneData?.height) || 0;
 
-    // Background first
-    const bgSrc = canvas?.scene?.background?.src ?? '';
-    if (bgSrc) {
-      const basePath = bgSrc.replace(/\.[^.]+$/, '');
-      const url = await this._probeMask(basePath, '_Bush');
-      if (url) {
-        const centerX = Number(foundrySceneData?.sceneX ?? 0) + Number(foundrySceneData?.sceneWidth ?? 0) / 2;
-        const centerY = worldH - (Number(foundrySceneData?.sceneY ?? 0) + Number(foundrySceneData?.sceneHeight ?? 0) / 2);
-        const tileW = Number(foundrySceneData?.sceneWidth ?? 0);
-        const tileH = Number(foundrySceneData?.sceneHeight ?? 0);
-        const z = GROUND_Z - 1 + BUSH_Z_OFFSET;
-        this._createOverlay('__bg_image__', 0, { url, centerX, centerY, z, tileW, tileH, rotation: 0 });
+    // Background overlays: prefer native scene.levels so every floor's authored
+    // background can get a corresponding _Bush overlay regardless of current view.
+    // Fallback to visible configured backgrounds for non-level scenes.
+    const scene = canvas?.scene ?? null;
+    const bgEntries = [];
+    const floorIndexByLevelId = new Map();
+    try {
+      for (const f of floors) {
+        const levelId = (f?.levelId != null) ? String(f.levelId) : '';
+        const idx = Number(f?.index);
+        if (!levelId || !Number.isFinite(idx)) continue;
+        floorIndexByLevelId.set(levelId, idx);
       }
+    } catch (_) {}
+    try {
+      const sortedLevels = scene?.levels?.sorted ?? [];
+      if (Array.isArray(sortedLevels) && sortedLevels.length > 0) {
+        for (let i = 0; i < sortedLevels.length; i += 1) {
+          const level = sortedLevels[i];
+          const src = String(level?.background?.src || '').trim();
+          if (!src) continue;
+          const levelId = (level?.id != null) ? String(level.id) : '';
+          const mappedFloorIndex = levelId ? floorIndexByLevelId.get(levelId) : undefined;
+          const floorIndex = Number.isFinite(Number(mappedFloorIndex))
+            ? Number(mappedFloorIndex)
+            : i;
+          const keyIndex = Math.max(0, Math.floor(Number(level?.index)));
+          const key = (keyIndex === 0) ? '__bg_image__' : `__bg_image__${keyIndex}`;
+          if (Number.isFinite(activeFloorIdx) && floorIndex !== activeFloorIdx) continue;
+          bgEntries.push({ src, floorIndex, key });
+        }
+      }
+    } catch (_) {}
+    if (bgEntries.length === 0) {
+      const bgLayers = getVisibleLevelBackgroundLayers(scene);
+      for (let i = 0; i < bgLayers.length; i += 1) {
+        const src = String(bgLayers[i]?.src || '').trim();
+        if (!src) continue;
+        const floorIndex = resolveV14BackgroundFloorIndexForSrc(scene, src);
+        if (Number.isFinite(activeFloorIdx) && floorIndex !== activeFloorIdx) continue;
+        const key = floorIndex === 0 ? '__bg_image__' : `__bg_image__${floorIndex}`;
+        bgEntries.push({ src, floorIndex, key });
+      }
+    }
+    for (const bg of bgEntries) {
+      const basePath = bg.src.replace(/\.[^.]+$/, '');
+      const url = await this._probeMask(basePath, '_Bush');
+      if (!url) continue;
+      const centerX = Number(foundrySceneData?.sceneX ?? 0) + Number(foundrySceneData?.sceneWidth ?? 0) / 2;
+      const centerY = worldH - (Number(foundrySceneData?.sceneY ?? 0) + Number(foundrySceneData?.sceneHeight ?? 0) / 2);
+      const tileW = Number(foundrySceneData?.sceneWidth ?? 0);
+      const tileH = Number(foundrySceneData?.sceneHeight ?? 0);
+      const z = GROUND_Z - 1 + BUSH_Z_OFFSET;
+      this._createOverlay(bg.key, bg.floorIndex, { url, centerX, centerY, z, tileW, tileH, rotation: 0 });
     }
 
     // Tiles
@@ -680,6 +727,9 @@ export class BushEffectV2 {
 
   update(timeInfo) {
     if (!this._enabled || !this._initialized) return;
+
+    // Clamp overlay visibility to active floor every frame to avoid transition flashes.
+    this._applyOverlayFloorVisibility();
 
     const time = Number.isFinite(timeInfo?.elapsed)
       ? Number(timeInfo.elapsed)
@@ -757,7 +807,7 @@ export class BushEffectV2 {
   }
 
   onFloorChange(_maxFloorIndex) {
-    // Bus overlay visibility is handled by FloorRenderBus.setVisibleFloors().
+    this._applyOverlayFloorVisibility();
   }
 
   wantsContinuousRender() {
@@ -781,6 +831,59 @@ export class BushEffectV2 {
     this._overlays.clear();
     this._deriveAlphaByTileId.clear();
     this.params.textureStatus = 'Inactive (no _Bush mask)';
+  }
+
+  /**
+   * @param {string} tileId
+   * @private
+   */
+  _disposeSingleTileOverlay(tileId) {
+    if (!tileId || String(tileId).startsWith('__bg_image__')) return;
+    const entry = this._overlays.get(tileId);
+    if (!entry) return;
+    this._renderBus.removeEffectOverlay(`${tileId}_bush`);
+    try { entry.material.dispose(); } catch (_) {}
+    try { entry.mesh.geometry.dispose(); } catch (_) {}
+    const tex = entry.material.uniforms.uBushMask?.value;
+    if (tex && tex.dispose) {
+      try { tex.dispose(); } catch (_) {}
+    }
+    this._overlays.delete(tileId);
+    try { this._deriveAlphaByTileId.delete(tileId); } catch (_) {}
+  }
+
+  /**
+   * Re-probe `_Bush` and rebuild the overlay after `texture.src` changed on a tile.
+   *
+   * @param {object} tileDoc
+   * @param {object|null} foundrySceneData
+   */
+  async refreshTileAfterTextureChange(tileDoc, foundrySceneData) {
+    if (!this._initialized || !tileDoc) return;
+    const tileId = tileDoc.id ?? tileDoc._id;
+    if (!tileId) return;
+
+    this._disposeSingleTileOverlay(tileId);
+
+    const src = tileDoc?.texture?.src ?? tileDoc?.img ?? '';
+    if (!src) return;
+
+    const floors = window.MapShine?.floorStack?.getFloors?.() ?? [];
+    const worldH = Number(foundrySceneData?.height) || (typeof canvas !== 'undefined' ? Number(canvas?.dimensions?.height) || 0 : 0);
+
+    const basePath = src.replace(/\.[^.]+$/, '');
+    const url = await this._probeMask(basePath, '_Bush');
+    if (!url) return;
+
+    const floorIndex = this._resolveFloorIndex(tileDoc, floors);
+    const tileW = Number(tileDoc?.width ?? 0);
+    const tileH = Number(tileDoc?.height ?? 0);
+    const centerX = Number(tileDoc?.x ?? 0) + tileW / 2;
+    const centerY = worldH - (Number(tileDoc?.y ?? 0) + tileH / 2);
+    const z = GROUND_Z + floorIndex + BUSH_Z_OFFSET;
+    const rotation = typeof tileDoc?.rotation === 'number' ? (tileDoc.rotation * Math.PI) / 180 : 0;
+
+    this._createOverlay(tileId, floorIndex, { url, centerX, centerY, z, tileW, tileH, rotation });
   }
 
   dispose() {
@@ -861,6 +964,12 @@ export class BushEffectV2 {
 
   _resolveFloorIndex(tileDoc, floors) {
     if (!floors || floors.length <= 1) return 0;
+
+    // Prefer V14 native level assignment first. Legacy Levels ranges may still
+    // exist on migrated content but not reflect the current native floor mapping.
+    const v14Idx = resolveV14NativeDocFloorIndexMin(tileDoc, globalThis.canvas?.scene);
+    if (v14Idx !== null) return v14Idx;
+
     if (tileHasLevelsRange(tileDoc)) {
       const flags = readTileLevelsFlags(tileDoc);
       const mid = (Number(flags.rangeBottom) + Number(flags.rangeTop)) / 2;
@@ -1108,6 +1217,9 @@ export class BushEffectV2 {
           float edgeFade = smoothstep(0.0, max(uEdgeFadeStart + 1e-4, uEdgeFadeEnd), edgeDist);
           distortion *= edgeFade;
 
+          vec4 bushSample = texture2D(uBushMask, vUv - distortion);
+          float texA = safeAlpha(bushSample);
+
           vec2 shadowDir = normalize(vec2(uSunDir.x, -uSunDir.y));
           if (length(shadowDir) < 0.01) shadowDir = -windDir;
           vec2 shadowOffset = shadowDir * uShadowLength;
@@ -1166,8 +1278,6 @@ export class BushEffectV2 {
           float shadowA = (shadowWeight > 0.0) ? (shadowAccum / shadowWeight) : 0.0;
           shadowA *= clamp(uShadowOpacity, 0.0, 1.0) * uIntensity * edgeFade;
 
-          vec4 bushSample = texture2D(uBushMask, vUv - distortion);
-          float texA = safeAlpha(bushSample);
           float mainAlpha = texA * uIntensity;
           float shadowOnlyAlpha = shadowA * (1.0 - clamp(mainAlpha, 0.0, 1.0));
           float finalAlpha = clamp(mainAlpha + shadowOnlyAlpha, 0.0, 1.0);
@@ -1193,20 +1303,22 @@ export class BushEffectV2 {
     const mesh = new THREE.Mesh(geometry, material);
     mesh.name = `BushV2_${tileId}`;
     mesh.frustumCulled = false;
+    mesh.userData = mesh.userData || {};
+    mesh.userData.floorIndex = floorIndex;
     mesh.position.set(centerX, centerY, z);
     mesh.rotation.z = rotation;
 
     try {
       const baseEntry = this._renderBus?._tiles?.get?.(tileId);
       const baseOrder = Number(baseEntry?.mesh?.renderOrder);
-      const isOverhead = !!baseEntry?.root?.userData?.isOverhead;
       if (Number.isFinite(baseOrder)) {
-        mesh.renderOrder = tileRelativeEffectOrder(baseOrder, floorIndex, isOverhead, 2);
+        mesh.renderOrder = tileStackedOverlayOrder(baseOrder, floorIndex, 2);
       }
     } catch (_) {}
 
     this._renderBus.addEffectOverlay(`${tileId}_bush`, mesh, floorIndex);
     this._overlays.set(tileId, { mesh, material, floorIndex });
+    this._applyOverlayFloorVisibility();
 
     // Load mask texture.
     this._loader.load(url, (tex) => {
@@ -1247,6 +1359,22 @@ export class BushEffectV2 {
       return true;
     } catch (_err) {
       return false;
+    }
+  }
+
+  _getSafeVisibleMaxFloorIndex() {
+    const busIdx = Number(this._renderBus?._visibleMaxFloorIndex);
+    const activeIdx = Number(window.MapShine?.floorStack?.getActiveFloor?.()?.index);
+    if (Number.isFinite(busIdx)) return busIdx;
+    if (Number.isFinite(activeIdx)) return activeIdx;
+    return 0;
+  }
+
+  _applyOverlayFloorVisibility() {
+    const maxFloor = this._getSafeVisibleMaxFloorIndex();
+    for (const entry of this._overlays.values()) {
+      if (!entry?.mesh) continue;
+      entry.mesh.visible = this._enabled && Number(entry.floorIndex) <= maxFloor;
     }
   }
 }

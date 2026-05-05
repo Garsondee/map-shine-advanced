@@ -17,9 +17,9 @@ const log = createLogger('OverheadShadowsEffect');
 /**
  * Overhead Shadows Effect V2 (adapted from V1).
  *
- * - Uses ROOF_LAYER (20) overhead tiles as a stamp; tree canopies use
- *   WEATHER_ROOF_LAYER (21) in roofVisibility/roofBlock passes so LightingEffectV2
- *   can occlude through foliage while caster passes can still hide trees where needed.
+ * - Uses ROOF_LAYER (20) overhead tiles as a stamp.
+ * - Tree canopies are intentionally excluded from weather roof visibility/blocker
+ *   captures to avoid canopy-alpha halos suppressing lighting around trees.
  * - Casts a short, soft shadow "downwards" from roofs by sampling an
  *   offset version of the roof mask.
  * - Only darkens the region outside the roof by subtracting the base roof
@@ -106,32 +106,32 @@ export class OverheadShadowsEffectV2 {
     this.params = {
       enabled: true,
       opacity: 0.4,
-      length: 0.165,
-      softness: 3.0,
-      outdoorShadowLengthScale: 1.0,
-      indoorReceiverShadowLengthScale: 1.0,
+      length: 0.040,
+      softness: 1.0,
+      outdoorShadowLengthScale: 2.0,
+      indoorReceiverShadowLengthScale: 0.25,
       verticalOnly: true,  // v1: primarily vertical motion in screen space
-      affectsLights: 0.0,
+      affectsLights: 0.75,
       sunLatitude: 0.1,    // 0=flat east/west, 1=maximum north/south arc
       indoorShadowEnabled: true, // Back-compat toggle; controls projected _Outdoors dark-region building shadow contribution on outdoor receivers
-      indoorShadowOpacity: 0.5,   // Back-compat alias for outdoorBuildingShadowOpacity
-      outdoorBuildingShadowOpacity: 0.5,
-      indoorShadowLengthScale: 1.0, // Back-compat alias for outdoorBuildingShadowLengthScale
-      outdoorBuildingShadowLengthScale: 1.0,
-      indoorShadowSoftness: 3.0,
-      indoorFluidShadowSoftness: 3.0,
-      indoorFluidShadowIntensityBoost: 1.0,
+      indoorShadowOpacity: 0.42,   // Back-compat alias for outdoorBuildingShadowOpacity
+      outdoorBuildingShadowOpacity: 0.42,
+      indoorShadowLengthScale: 4.70, // Back-compat alias for outdoorBuildingShadowLengthScale
+      outdoorBuildingShadowLengthScale: 4.70,
+      indoorShadowSoftness: 3.8,
+      indoorFluidShadowSoftness: 3.1,
+      indoorFluidShadowIntensityBoost: 0.81,
       indoorFluidColorSaturation: 1.2,
-      tileProjectionEnabled: false,
+      tileProjectionEnabled: true,
       tileProjectionOpacity: 0.5,
       tileProjectionLengthScale: 1.0,
       tileProjectionSoftness: 3.0,
       tileProjectionThreshold: 0.05,
       tileProjectionPower: 1.0,
-      tileProjectionOutdoorOpacityScale: 1.0,
+      tileProjectionOutdoorOpacityScale: 0.10,
       tileProjectionIndoorOpacityScale: 1.0,
       tileProjectionSortBias: 0.002,
-      fluidColorEnabled: false,
+      fluidColorEnabled: true,
       fluidEffectTransparency: 0.35,
       fluidShadowIntensityBoost: 1.0,
       fluidShadowSoftness: 3.0,
@@ -591,8 +591,14 @@ export class OverheadShadowsEffectV2 {
     }
     const effectiveMask = floorMask ?? this.outdoorsMask ?? registryMask;
 
-    // Always cache this floor's mask for the render path to look up
-    this._floorStates.set(floorKey, { outdoorsMask: effectiveMask });
+    // Always cache this floor's mask for the render path to look up.
+    // Reuse existing entry objects to reduce churn in long sessions.
+    const fk = String(floorKey ?? '');
+    if (fk) {
+      const existing = this._floorStates.get(fk);
+      if (existing) existing.outdoorsMask = effectiveMask;
+      else this._floorStates.set(fk, { outdoorsMask: effectiveMask });
+    }
 
     // Only set this.outdoorsMask for the ACTIVE floor being viewed.
     // The bindFloorMasks loop iterates through ALL floors, so if we set it for every
@@ -660,7 +666,7 @@ export class OverheadShadowsEffectV2 {
           min: 0.0,
           max: 0.3,
           step: 0.005,
-          default: 0.165
+          default: 0.040
         },
         softness: {
           type: 'slider',
@@ -668,7 +674,7 @@ export class OverheadShadowsEffectV2 {
           min: 0.5,
           max: 5.0,
           step: 0.1,
-          default: 3.0
+          default: 1.0
         },
         outdoorShadowLengthScale: {
           type: 'slider',
@@ -676,7 +682,7 @@ export class OverheadShadowsEffectV2 {
           min: 0.0,
           max: 30.0,
           step: 1.00,
-          default: 1.0,
+          default: 2.0,
           tooltip: 'Scales projected overhead shadow distance on outdoor receivers'
         },
         indoorReceiverShadowLengthScale: {
@@ -685,7 +691,7 @@ export class OverheadShadowsEffectV2 {
           min: 0.0,
           max: 30.0,
           step: 0.01,
-          default: 1.0,
+          default: 0.25,
           tooltip: 'Scales projected overhead shadow distance on indoor receivers'
         },
         affectsLights: {
@@ -699,7 +705,7 @@ export class OverheadShadowsEffectV2 {
         fluidColorEnabled: {
           type: 'checkbox',
           label: 'Use Fluid Effect Colour',
-          default: false,
+          default: true,
           tooltip: 'Tints overhead shadows with FluidEffect colour when fluid overlays are attached to overhead tiles'
         },
         fluidEffectTransparency: {
@@ -750,7 +756,7 @@ export class OverheadShadowsEffectV2 {
         tileProjectionEnabled: {
           type: 'checkbox',
           label: 'Enable Tile Shadow Projection',
-          default: false,
+          default: true,
           tooltip: 'Adds tile alpha from Tile Motion (per-tile Shadow Projection) as an extra projected shadow source'
         },
         tileProjectionOpacity: {
@@ -804,7 +810,7 @@ export class OverheadShadowsEffectV2 {
           min: 0.0,
           max: 2.0,
           step: 0.01,
-          default: 1.0,
+          default: 0.10,
           tooltip: 'Additional multiplier applied to tile-projected shadow strength on outdoor receivers'
         },
         tileProjectionIndoorOpacityScale: {
@@ -828,7 +834,7 @@ export class OverheadShadowsEffectV2 {
           min: 0.0,
           max: 1.0,
           step: 0.01,
-          default: 0.5,
+          default: 0.42,
           tooltip: 'Strength of projected _Outdoors dark-region contribution on outdoor receivers'
         },
         outdoorBuildingShadowLengthScale: {
@@ -837,7 +843,7 @@ export class OverheadShadowsEffectV2 {
           min: 0.0,
           max: 30.0,
           step: 0.01,
-          default: 1.0,
+          default: 4.70,
           tooltip: 'Scale factor for _Outdoors dark-region projection distance'
         },
         indoorShadowSoftness: {
@@ -846,7 +852,7 @@ export class OverheadShadowsEffectV2 {
           min: 0.5,
           max: 5.0,
           step: 0.1,
-          default: 3.0,
+          default: 3.8,
           tooltip: 'Indoor blur radius for overhead and fluid shadow contributions'
         },
         indoorFluidShadowSoftness: {
@@ -855,7 +861,7 @@ export class OverheadShadowsEffectV2 {
           min: 0.5,
           max: 10.0,
           step: 0.1,
-          default: 3.0,
+          default: 3.1,
           tooltip: 'Blur radius for FluidEffect tint on indoor receivers (up to 2x regular shadow softness range)'
         },
         indoorFluidShadowIntensityBoost: {
@@ -864,7 +870,7 @@ export class OverheadShadowsEffectV2 {
           min: 0.0,
           max: 5.0,
           step: 0.01,
-          default: 1.0,
+          default: 0.81,
           tooltip: 'Boost multiplier for FluidEffect colour contribution on indoor receivers (up to 500%)'
         },
         indoorFluidColorSaturation: {
@@ -1917,7 +1923,27 @@ export class OverheadShadowsEffectV2 {
     // Optimization: Skip update if params haven't changed
     const camZoom = this._getEffectiveZoom();
     const outdoorBuildingShadow = this._resolveOutdoorBuildingShadowParams();
-    const updateHash = `${hour.toFixed(3)}_${this.params.sunLatitude}_${this.params.opacity}_${this.params.length}_${this.params.softness}_${this.params.outdoorShadowLengthScale}_${this.params.indoorReceiverShadowLengthScale}_${camZoom.toFixed(4)}_${this.params.indoorShadowEnabled}_${outdoorBuildingShadow.opacity}_${outdoorBuildingShadow.lengthScale}_${this.params.indoorShadowSoftness}_${this.params.indoorFluidShadowSoftness}_${this.params.indoorFluidShadowIntensityBoost}_${this.params.indoorFluidColorSaturation}_${this.params.tileProjectionEnabled}_${this.params.tileProjectionOpacity}_${this.params.tileProjectionLengthScale}_${this.params.tileProjectionSoftness}_${this.params.tileProjectionThreshold}_${this.params.tileProjectionPower}_${this.params.tileProjectionOutdoorOpacityScale}_${this.params.tileProjectionIndoorOpacityScale}_${this.params.tileProjectionSortBias}_${this.params.fluidColorEnabled}_${this.params.fluidEffectTransparency}_${this.params.fluidShadowIntensityBoost}_${this.params.fluidShadowSoftness}_${this.params.fluidColorBoost}_${this.params.fluidColorSaturation}_${this.params.debugView}_${hoverRevealActive ? 1 : 0}`;
+    // Floor changes must invalidate this cache even when scalar params/camera are
+    // unchanged, otherwise wall/roof occlusion uniforms can remain one floor behind
+    // until a pan/zoom modifies camZoom and forces an update.
+    let floorContextSig = 'nofloor';
+    try {
+      const fs = window.MapShine?.floorStack ?? null;
+      const active = fs?.getActiveFloor?.() ?? null;
+      const activeKey = active?.compositorKey != null
+        ? String(active.compositorKey)
+        : `${Number(active?.elevationMin)}:${Number(active?.elevationMax)}`;
+      const activeIdx = Number.isFinite(Number(active?.index)) ? Number(active.index) : -1;
+      const floors = fs?.getFloors?.() ?? [];
+      const upperSig = Array.isArray(floors)
+        ? floors
+          .filter((f) => Number.isFinite(Number(f?.index)) && Number(f.index) > activeIdx)
+          .map((f) => (f?.compositorKey != null ? String(f.compositorKey) : `${Number(f?.elevationMin)}:${Number(f?.elevationMax)}`))
+          .join('|')
+        : '';
+      floorContextSig = `${activeIdx}:${activeKey}:${upperSig}`;
+    } catch (_) {}
+    const updateHash = `${hour.toFixed(3)}_${this.params.sunLatitude}_${this.params.opacity}_${this.params.length}_${this.params.softness}_${this.params.outdoorShadowLengthScale}_${this.params.indoorReceiverShadowLengthScale}_${camZoom.toFixed(4)}_${this.params.indoorShadowEnabled}_${outdoorBuildingShadow.opacity}_${outdoorBuildingShadow.lengthScale}_${this.params.indoorShadowSoftness}_${this.params.indoorFluidShadowSoftness}_${this.params.indoorFluidShadowIntensityBoost}_${this.params.indoorFluidColorSaturation}_${this.params.tileProjectionEnabled}_${this.params.tileProjectionOpacity}_${this.params.tileProjectionLengthScale}_${this.params.tileProjectionSoftness}_${this.params.tileProjectionThreshold}_${this.params.tileProjectionPower}_${this.params.tileProjectionOutdoorOpacityScale}_${this.params.tileProjectionIndoorOpacityScale}_${this.params.tileProjectionSortBias}_${this.params.fluidColorEnabled}_${this.params.fluidEffectTransparency}_${this.params.fluidShadowIntensityBoost}_${this.params.fluidShadowSoftness}_${this.params.fluidColorBoost}_${this.params.fluidColorSaturation}_${this.params.debugView}_${hoverRevealActive ? 1 : 0}_${floorContextSig}`;
 
     const receiverMask = this._resolveReceiverOutdoorsMaskTexture();
     const upperObTextures = this._collectUpperFloorOutdoorsTextures();
@@ -1966,7 +1992,7 @@ export class OverheadShadowsEffectV2 {
       if (u.uOutdoorShadowLengthScale) u.uOutdoorShadowLengthScale.value = this.params.outdoorShadowLengthScale ?? 1.0;
       if (u.uIndoorReceiverShadowLengthScale) u.uIndoorReceiverShadowLengthScale.value = this.params.indoorReceiverShadowLengthScale ?? 1.0;
       if (u.uZoom && this.mainCamera) {
-        u.uZoom.value = this._getEffectiveZoom();
+        u.uZoom.value = camZoom;
       }
       // Outdoor Building Shadow: projected _Outdoors dark-region term (outdoor
       // receivers) that helps visually connect overhead-only roof details
@@ -2055,6 +2081,25 @@ export class OverheadShadowsEffectV2 {
   }
 
   /**
+   * Force the next update() to recompute dynamic uniforms/mask bindings.
+   * Use this on scene or level transitions where visual context can change
+   * without camera/time parameter deltas.
+   *
+   * @param {string} [reason='manual']
+   */
+  invalidateDynamicCaches(reason = 'manual') {
+    this._lastUpdateHash = null;
+    this._lastOutdoorsMaskRef = null;
+    this._lastObUpperSig = '';
+    // Drop cached per-floor texture refs so scene/floor transitions cannot
+    // accumulate stale references over long runtimes.
+    this._floorStates.clear();
+    try {
+      log.debug(`OverheadShadowsEffectV2: invalidated dynamic caches (${String(reason)})`);
+    } catch (_) {}
+  }
+
+  /**
    * Render the effect as a full-screen pass.
    */
   render(renderer, scene = null, camera = null) {
@@ -2136,19 +2181,20 @@ export class OverheadShadowsEffectV2 {
     // projection has real off-screen source coverage at viewport edges.
     const roofCaptureScale = Math.max(guardScaleX, guardScaleY);
 
+    const INCLUDE_TREE_CANOPY_IN_WEATHER_ROOF_CAPTURES = false;
     const treeCaptureOverrides = [];
-    this.mainScene.traverse((object) => {
+    if (INCLUDE_TREE_CANOPY_IN_WEATHER_ROOF_CAPTURES) {
+      this.mainScene.traverse((object) => {
         if (!object?.userData?.mapShineTreeTileId || !object.layers) return;
         treeCaptureOverrides.push({
           object,
           layersMask: object.layers.mask,
           visible: typeof object.visible === 'boolean' ? object.visible : undefined
         });
-        // Include tree overlays in weather visibility/blocker captures only.
-        // Roof shadow caster capture still explicitly hides tree overlays below.
         object.layers.enable(WEATHER_ROOF_LAYER);
         if (typeof object.visible === 'boolean') object.visible = true;
       });
+    }
 
     const roofVisibilityExclusions = [];
     this.mainScene.traverse((object) => {
@@ -2724,6 +2770,7 @@ export class OverheadShadowsEffectV2 {
     if (this._registryUnsub) { this._registryUnsub(); this._registryUnsub = null; }
     this._tileMotionManager = null;
     this._renderBus = null;
+    this._floorStates.clear();
     if (this.roofTarget) {
       this.roofTarget.dispose();
       this.roofTarget = null;

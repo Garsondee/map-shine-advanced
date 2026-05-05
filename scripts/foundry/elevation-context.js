@@ -13,7 +13,16 @@
  * globals on each call. No caching or subscription is needed.
  */
 
-import { getSceneBackgroundElevation, getSceneWeatherElevation, readTileLevelsFlags, tileHasLevelsRange, readDocLevelsRange, getSceneLightMasking, hasV14NativeLevels } from './levels-scene-flags.js';
+import {
+  getAmbientLightLevelGate,
+  getSceneBackgroundElevation,
+  getSceneWeatherElevation,
+  readTileLevelsFlags,
+  tileHasLevelsRange,
+  readDocLevelsRange,
+  getSceneLightMasking,
+  hasV14NativeLevels,
+} from './levels-scene-flags.js';
 
 // ---------------------------------------------------------------------------
 //  Controlled token helpers
@@ -269,35 +278,98 @@ export function isTileVisibleForPerspective(tileDoc, tileFlags) {
 // ---------------------------------------------------------------------------
 
 /**
+ * Synthetic perspective at the midpoint of a FloorStack floor band so
+ * multi-floor compositor passes can gate lights for **that slice** instead of
+ * the global viewer / active level (fixes upper-floor lights bleeding onto
+ * lower-floor renders).
+ *
+ * @param {number} floorIndex - `FloorCompositor` / `FloorStack` floor index
+ * @returns {ReturnType<typeof getPerspectiveElevation>|null}
+ */
+export function getPerspectiveForRenderFloorIndex(floorIndex) {
+  const fi = Number(floorIndex);
+  if (!Number.isFinite(fi)) return null;
+  const floors = globalThis.window?.MapShine?.floorStack?.getFloors?.() ?? [];
+  const f = floors[fi];
+  if (!f) return null;
+  const scene = globalThis.canvas?.scene ?? null;
+  const bottom = Number(f.elevationMin);
+  const top = Number(f.elevationMax);
+  let mid = NaN;
+  if (Number.isFinite(bottom) && Number.isFinite(top)) {
+    mid = (bottom + top) * 0.5;
+  }
+  if (!Number.isFinite(mid)) return null;
+  return {
+    elevation: mid,
+    losHeight: mid,
+    source: 'render-floor',
+    tokenId: null,
+    backgroundElevation: getSceneBackgroundElevation(scene),
+  };
+}
+
+/**
  * Check if an ambient light should be visible based on its elevation range
  * and the current perspective elevation.
  *
  * Ports the algorithm from Levels' `LightHandler.isLightVisibleWrapper`:
+ * - V14 `AmbientLight.levels` SetField: light must include the active/viewed level id
+ *   ({@link getAmbientLightLevelGate}); explicit matches skip legacy LOS vs doc.elevation.
  * - `lightMasking=true` (default): light visible if `rangeBottom <= viewerLOS`
  * - `lightMasking=false`: light visible only if viewer is within `[rangeBottom, rangeTop]`
  * - Lights below background elevation are hidden when viewer is above background
  *
  * @param {AmbientLightDocument|object} lightDoc - The light document
+ * @param {ReturnType<typeof getPerspectiveElevation>|null} [perspectiveOverride] - When set (e.g. from
+ *   {@link getPerspectiveForRenderFloorIndex}), use this instead of {@link getPerspectiveElevation} so
+ *   per-level lighting passes match the slice being composited.
  * @returns {boolean} Whether the light should be visible
  */
-export function isLightVisibleForPerspective(lightDoc) {
+export function isLightVisibleForPerspective(lightDoc, perspectiveOverride = null) {
   if (!hasV14NativeLevels(canvas?.scene)) return true;
   if (!lightDoc) return true;
 
-  const perspective = getPerspectiveElevation();
+  const scene = canvas?.scene ?? null;
+
+  /** @type {{ ok: boolean, skipLegacyLosMasking: boolean }} */
+  let levelGate = { ok: true, skipLegacyLosMasking: false };
+  try {
+    levelGate = getAmbientLightLevelGate(lightDoc, scene);
+  } catch (_) {}
+  if (!levelGate.ok) return false;
+
+  const perspective = perspectiveOverride ?? getPerspectiveElevation();
+
+  // Lights scoped by V14 level ids already matched the viewed level — do not apply
+  // lightMasking vs doc.elevation (often still 0); use only the underBackground rule.
+  if (levelGate.skipLegacyLosMasking) {
+    if (perspective.source === 'background') return true;
+    const bgElevation = getSceneBackgroundElevation(scene);
+    const range = readDocLevelsRange(lightDoc);
+    const rangeTop = range.rangeTop;
+    const viewerLOS = perspective.losHeight;
+    if (viewerLOS >= bgElevation && rangeTop < bgElevation) return false;
+    return true;
+  }
 
   // No controlled token and no active level: everything visible (matches Levels)
   if (perspective.source === 'background') return true;
 
-  const scene = canvas?.scene ?? null;
   const bgElevation = getSceneBackgroundElevation(scene);
   const lightMasking = getSceneLightMasking(scene);
   const viewerLOS = perspective.losHeight;
   const viewerElevation = perspective.elevation;
 
-  // Read elevation range from the light doc
-  const rangeBottom = Number(lightDoc.elevation ?? -Infinity);
+  // Range must match `readDocLevelsRange` (Levels / V14): rangeBottom often lives
+  // in `flags.levels.rangeBottom` while `doc.elevation` stays at a legacy default.
+  // Using elevation alone hides cellar lights when the viewer is below ground.
   const range = readDocLevelsRange(lightDoc);
+  let rangeBottom = range.rangeBottom;
+  if (!Number.isFinite(rangeBottom)) {
+    const e = Number(lightDoc?.elevation);
+    rangeBottom = Number.isFinite(e) ? e : -Infinity;
+  }
   const rangeTop = range.rangeTop;
 
   // Light below background elevation: hidden if viewer is above background

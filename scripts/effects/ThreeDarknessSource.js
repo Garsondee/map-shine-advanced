@@ -359,10 +359,9 @@ export class ThreeDarknessSource {
       this.mesh.position.set(worldPos.x, worldPos.y, z);
     }
 
-    // Respect Foundry's hidden flag so toggling a darkness source off in the UI
-    // removes it from the darkness accumulation buffer immediately.
-    if (this.mesh) {
-      this.mesh.visible = (doc.hidden !== true);
+    // Hidden: force off. Non-hidden: visibility is owned by LightingEffectV2 (level/perspective).
+    if (this.mesh && doc.hidden === true) {
+      this.mesh.visible = false;
     }
   }
 
@@ -457,8 +456,9 @@ export class ThreeDarknessSource {
 
   dispose() {
     if (this.mesh) {
-      this.mesh.geometry.dispose();
-      this.mesh.material.dispose();
+      try { this.mesh.removeFromParent(); } catch (_) {}
+      try { this.mesh.geometry.dispose(); } catch (_) {}
+      try { this.mesh.material.dispose(); } catch (_) {}
     }
   }
 }

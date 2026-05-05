@@ -29,6 +29,7 @@ import {
   hydrateControlPanelLiveOverridesFromController,
   resolveWeatherController
 } from './weather-param-bridge.js';
+import * as scenePresets from './scene-presets.js';
 
 const log = createLogger('UI');
 
@@ -270,6 +271,21 @@ export class TweakpaneManager {
     /** @type {HTMLElement|null} Filter bar wrapper element */
     this._filterBarEl = null;
 
+    /** @type {HTMLElement|null} */
+    this._sceneEnableQuickSectionEl = null;
+
+    /** @type {HTMLButtonElement|null} */
+    this._sceneEnableQuickToggleButtonEl = null;
+
+    /** @type {string|null} */
+    this._sceneEnableQuickToggleSceneId = null;
+
+    /** @type {boolean|null} */
+    this._sceneEnableQuickToggleState = null;
+
+    /** @type {boolean} */
+    this._sceneEnableQuickToggleBusy = false;
+
     /** @type {Array<Object>} Accumulated DOM highlight items awaiting cleanup */
     this._filterHighlighted = [];
 
@@ -282,6 +298,27 @@ export class TweakpaneManager {
      * @type {Set<string>}
      */
     this._worldBasedEffects = new Set();
+
+    /** @type {boolean} When true, preset-apply pipeline is running; do not flip UI to Custom. */
+    this._applyingPreset = false;
+
+    /** @type {HTMLElement|null} */
+    this._presetsBarEl = null;
+
+    /** @type {HTMLSelectElement|null} */
+    this._presetsSelectEl = null;
+
+    /** @type {string|null} */
+    this._lastPresetsSceneId = null;
+
+    /** @type {boolean} After first presets hydrate; avoids clearing activePresetId during startup churn. */
+    this._scenePresetTrackingReady = false;
+
+    /** @type {(() => void)|null} */
+    this._canvasReadyPresetsHandler = null;
+
+    /** @type {boolean} While true, queued effect saves must not flip the preset dropdown to Custom. */
+    this._presetSuppressCustomForSaves = false;
   }
 
   _registerPrimaryFolder(folder) {
@@ -371,9 +408,9 @@ export class TweakpaneManager {
       this._applyFilter('');
     });
 
-    // Insert directly before the first top-level folder so the filter bar is always
-    // visible at the top of the section list regardless of Tweakpane wrapper layout.
-    listHost.insertBefore(wrap, firstFolderEl);
+    // Prepend so the filter bar stays above any headerless strips (presets / scene toggle)
+    // and the first Tweakpane folder row.
+    listHost.insertBefore(wrap, listHost.firstChild);
 
     this._filterBarEl = wrap;
   }
@@ -709,16 +746,23 @@ export class TweakpaneManager {
     const _dlp = debugLoadingProfiler;
     const _isDbg = _dlp.debugMode;
 
-    // Wait for Tweakpane to be available (up to 5 seconds)
+    // Wait for Tweakpane to be available (up to 5 seconds).
+    // tweakpane-loader sets window.Tweakpane = null on import failure; typeof is then
+    // "object", not "undefined", so we must wait for a real Pane constructor.
     if (_isDbg) _dlp.begin('tp.waitForLib', 'finalize');
     log.info('Waiting for Tweakpane library to load...');
     const startTime = Date.now();
-    while (typeof Tweakpane === 'undefined' && (Date.now() - startTime) < 5000) {
+    const _tweakpaneReady = () => (
+      typeof Tweakpane !== 'undefined'
+      && Tweakpane != null
+      && typeof Tweakpane.Pane === 'function'
+    );
+    while (!_tweakpaneReady() && (Date.now() - startTime) < 5000) {
       await new Promise(resolve => setTimeout(resolve, 100));
     }
     if (_isDbg) _dlp.end('tp.waitForLib');
 
-    if (typeof Tweakpane === 'undefined') {
+    if (!_tweakpaneReady()) {
       log.error('Tweakpane library failed to load after 5 seconds');
       throw new Error('Tweakpane library not available');
     }
@@ -800,11 +844,19 @@ export class TweakpaneManager {
 
     const scene = canvas?.scene ?? null;
     const sceneIsEnabled = !!scene && sceneSettings.isEnabled(scene);
-    const showOnboardingOnly = (isGmLike() ?? false) && !sceneIsEnabled;
+    // Onboarding must require a real GM so debug GM-parity cannot show Enable without persistence.
+    const showOnboardingOnly = !!globalThis.game?.user?.isGM && !sceneIsEnabled;
 
     // Always keep core launchers near the top of the UI so they're accessible
     // regardless of which authoring section is currently expanded.
     this.buildQuickActionsSection();
+    // Presets strip (requires a top-level folder to anchor insertBefore the first .tp-fldv)
+    if (!showOnboardingOnly) {
+      await this.buildPresetsBar();
+    }
+    // Build after at least one folder exists so we can insert this headerless
+    // section directly above Quick Actions in the top-level list.
+    this.buildSceneEnableQuickSection();
 
     if (_isDbg) _dlp.begin('tp.buildSections', 'finalize');
     // Build scene setup section (only for GMs)
@@ -842,7 +894,18 @@ export class TweakpaneManager {
     this._buildFilterBar();
 
     // Start UI update loop only when full controls are available.
-    if (!showOnboardingOnly) this.startUILoop();
+    if (!showOnboardingOnly) {
+      this._scenePresetTrackingReady = true;
+      this.startUILoop();
+      if (!this._canvasReadyPresetsHandler) {
+        this._canvasReadyPresetsHandler = () => {
+          this._lastPresetsSceneId = null;
+          void this._hydratePresetsSelect({ forceLoad: false });
+          this._refreshSceneEnableQuickToggle({ force: true });
+        };
+        Hooks.on('canvasReady', this._canvasReadyPresetsHandler);
+      }
+    }
 
     // Make pane draggable
     this.makeDraggable();
@@ -1452,6 +1515,10 @@ export class TweakpaneManager {
         }
         dlg.toggle?.();
       });
+
+      addGridButton('Copy Scene Settings', async () => {
+        await this.copyScenePresetToClipboard();
+      });
     }
 
     addGridButton('Attempt Scene Recovery', async () => {
@@ -1496,6 +1563,407 @@ export class TweakpaneManager {
       this.accordionStates['quick_actions'] = ev.expanded;
       this.saveUIState();
     });
+  }
+
+  /**
+   * Build an always-visible, headerless scene master toggle section that lives
+   * above the Quick Actions folder.
+   * @private
+   */
+  buildSceneEnableQuickSection() {
+    if (!this.pane?.element) return;
+
+    const paneEl = this.pane.element;
+    const firstFolderEl = paneEl.querySelector('.tp-fldv');
+    const listHost = firstFolderEl?.parentElement;
+    if (!firstFolderEl || !listHost) return;
+
+    if (this._sceneEnableQuickSectionEl?.parentElement) {
+      this._sceneEnableQuickSectionEl.remove();
+    }
+
+    const wrap = document.createElement('div');
+    wrap.className = 'ms-scene-enable-quick';
+    wrap.style.display = 'flex';
+    wrap.style.padding = '4px 0 6px 0';
+
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.style.width = '100%';
+    button.style.padding = '6px 10px';
+    button.style.borderRadius = '6px';
+    button.style.border = '1px solid rgba(255,255,255,0.18)';
+    button.style.background = 'rgba(255,255,255,0.08)';
+    button.style.color = 'inherit';
+    button.style.cursor = 'pointer';
+    button.style.fontWeight = '600';
+    button.style.textAlign = 'left';
+    button.style.transition = 'background 120ms ease, border-color 120ms ease';
+
+    button.addEventListener('click', async (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      await this._onSceneEnableQuickToggleClick();
+    });
+
+    for (const evt of ['mousedown', 'pointerdown', 'dblclick', 'contextmenu']) {
+      button.addEventListener(evt, (e) => e.stopPropagation());
+    }
+
+    wrap.appendChild(button);
+    listHost.insertBefore(wrap, firstFolderEl);
+
+    this._sceneEnableQuickSectionEl = wrap;
+    this._sceneEnableQuickToggleButtonEl = button;
+    this._sceneEnableQuickToggleSceneId = null;
+    this._sceneEnableQuickToggleState = null;
+    this._refreshSceneEnableQuickToggle({ force: true });
+  }
+
+  /**
+   * Handle quick toggle click for active scene enable/disable.
+   * @returns {Promise<void>}
+   * @private
+   */
+  async _onSceneEnableQuickToggleClick() {
+    if (this._sceneEnableQuickToggleBusy) return;
+
+    const scene = canvas?.scene;
+    if (!scene) {
+      ui.notifications?.warn?.('Map Shine: No active scene to toggle.');
+      return;
+    }
+
+    if (!canPersistSceneDocument()) {
+      ui.notifications?.warn?.('Map Shine: Only GMs can toggle scene enabled state.');
+      return;
+    }
+
+    this._sceneEnableQuickToggleBusy = true;
+    this._refreshSceneEnableQuickToggle({ force: true });
+
+    try {
+      const enabled = sceneSettings.isEnabled(scene);
+      if (enabled) {
+        await sceneSettings.disable(scene);
+        ui.notifications?.info?.('Map Shine: Disabled for this scene. Advanced effects are bypassed.');
+      } else {
+        await sceneSettings.enable(scene, { reset: 'none' });
+        const refreshed = game.scenes?.get?.(scene.id) ?? scene;
+        if (!sceneSettings.isExplicitlyEnabled(refreshed)) {
+          ui.notifications?.error?.('Map Shine: Enabled flag did not persist. Check console for details.');
+          return;
+        }
+        ui.notifications?.info?.('Map Shine: Enabled for this scene.');
+      }
+
+      this._refreshSceneEnableQuickToggle({ force: true });
+
+      try {
+        const drawScene = game.scenes?.get?.(scene.id) ?? scene;
+        await canvas.draw(drawScene);
+      } catch (drawErr) {
+        console.warn('MapShine scene toggle: canvas.draw() threw; skipping forced page reload:', drawErr);
+        ui.notifications?.warn?.('Map Shine: Scene redraw failed. Try switching scenes or reloading manually if visuals look incorrect.');
+      }
+    } catch (e) {
+      log.error('MapShine scene quick toggle failed:', e);
+      ui.notifications?.error?.('Map Shine: Failed to toggle scene enabled state. Check console for details.');
+    } finally {
+      this._sceneEnableQuickToggleBusy = false;
+      this._refreshSceneEnableQuickToggle({ force: true });
+    }
+  }
+
+  /**
+   * Refresh quick scene enable toggle visuals from current scene flag state.
+   * @param {{force?: boolean}} [options]
+   * @private
+   */
+  _refreshSceneEnableQuickToggle(options = {}) {
+    const { force = false } = options;
+    const button = this._sceneEnableQuickToggleButtonEl;
+    if (!button) return;
+
+    const scene = canvas?.scene ?? null;
+    const sceneId = scene?.id ?? null;
+    const enabled = !!scene && sceneSettings.isEnabled(scene);
+
+    if (!force && sceneId === this._sceneEnableQuickToggleSceneId && enabled === this._sceneEnableQuickToggleState) {
+      return;
+    }
+
+    this._sceneEnableQuickToggleSceneId = sceneId;
+    this._sceneEnableQuickToggleState = enabled;
+
+    const hasScene = !!scene;
+    const canEdit = hasScene && canPersistSceneDocument();
+    const busy = this._sceneEnableQuickToggleBusy;
+
+    button.disabled = !hasScene || !canEdit || busy;
+
+    if (!hasScene) {
+      button.textContent = 'Map Shine Enabled: No Active Scene';
+      button.style.background = 'rgba(255,255,255,0.06)';
+      button.style.borderColor = 'rgba(255,255,255,0.16)';
+      button.title = 'No active scene';
+      return;
+    }
+
+    button.textContent = `Map Shine Enabled: ${enabled ? 'ON' : 'OFF'}`;
+    button.style.background = enabled ? 'rgba(46, 166, 86, 0.28)' : 'rgba(166, 62, 46, 0.28)';
+    button.style.borderColor = enabled ? 'rgba(78, 210, 126, 0.65)' : 'rgba(230, 100, 84, 0.65)';
+
+    if (busy) {
+      button.title = 'Applying scene toggle...';
+    } else if (!canEdit) {
+      button.title = 'Only GMs can toggle this scene flag';
+    } else {
+      button.title = enabled
+        ? 'Click to disable Map Shine Advanced for this scene'
+        : 'Click to enable Map Shine Advanced for this scene';
+    }
+  }
+
+  /**
+   * Headerless presets row: built-in JSON presets + Custom state.
+   * Inserts before the first top-level folder (Quick Actions).
+   * @returns {Promise<void>}
+   * @private
+   */
+  async buildPresetsBar() {
+    if (!this.pane?.element) return;
+
+    const paneEl = this.pane.element;
+    const firstFolderEl = paneEl.querySelector('.tp-fldv');
+    const listHost = firstFolderEl?.parentElement;
+    if (!firstFolderEl || !listHost) return;
+
+    if (this._presetsBarEl?.parentElement) {
+      this._presetsBarEl.remove();
+    }
+
+    const wrap = document.createElement('div');
+    wrap.className = 'ms-scene-presets-bar';
+    wrap.style.display = 'flex';
+    wrap.style.alignItems = 'center';
+    wrap.style.gap = '8px';
+    wrap.style.padding = '4px 0 6px 0';
+
+    const label = document.createElement('span');
+    label.textContent = 'Presets';
+    label.style.fontWeight = '600';
+    label.style.flex = '0 0 auto';
+
+    const select = document.createElement('select');
+    select.className = 'ms-scene-presets-select';
+    select.style.flex = '1 1 auto';
+    select.style.minWidth = '0';
+    select.style.padding = '5px 8px';
+    select.style.borderRadius = '6px';
+    select.style.border = '1px solid rgba(255,255,255,0.18)';
+    select.style.background = 'rgba(255,255,255,0.08)';
+    select.style.color = 'inherit';
+
+    wrap.appendChild(label);
+    wrap.appendChild(select);
+
+    for (const evt of ['mousedown', 'pointerdown', 'dblclick', 'contextmenu', 'click']) {
+      wrap.addEventListener(evt, (e) => e.stopPropagation());
+    }
+    wrap.addEventListener('wheel', (e) => e.stopPropagation(), { passive: true });
+
+    listHost.insertBefore(wrap, firstFolderEl);
+
+    this._presetsBarEl = wrap;
+    this._presetsSelectEl = select;
+
+    select.addEventListener('change', (ev) => {
+      ev.stopPropagation();
+      void this._onPresetsSelectChange(select.value);
+    });
+
+    await this._hydratePresetsSelect({ forceLoad: true });
+  }
+
+  /**
+   * @param {{ forceLoad?: boolean }} [options]
+   * @returns {Promise<void>}
+   * @private
+   */
+  async _hydratePresetsSelect(options = {}) {
+    const { forceLoad = false } = options;
+    const select = this._presetsSelectEl;
+    if (!select) return;
+
+    const presets = await scenePresets.loadBuiltInPresets({ force: forceLoad });
+
+    select.replaceChildren();
+
+    const optCustom = document.createElement('option');
+    optCustom.value = '__custom__';
+    optCustom.textContent = 'Custom';
+    select.appendChild(optCustom);
+
+    for (const p of presets) {
+      const opt = document.createElement('option');
+      opt.value = p.id;
+      opt.textContent = p.name;
+      opt.title = p.description || p.name;
+      select.appendChild(opt);
+    }
+
+    const scene = canvas?.scene ?? null;
+    const activeId = scene ? scenePresets.getActivePresetId(scene) : null;
+    const hasPresetOption = activeId && presets.some((p) => p.id === activeId);
+
+    if (hasPresetOption) {
+      select.value = activeId;
+      optCustom.hidden = true;
+    } else {
+      select.value = '__custom__';
+      optCustom.hidden = false;
+    }
+
+    this._lastPresetsSceneId = scene?.id ?? null;
+  }
+
+  /**
+   * @param {string} value
+   * @returns {Promise<void>}
+   * @private
+   */
+  async _onPresetsSelectChange(value) {
+    if (value === '__custom__') return;
+
+    const scene = canvas?.scene;
+    if (!scene) {
+      ui.notifications?.warn?.('Map Shine: No active scene');
+      await this._hydratePresetsSelect({ forceLoad: false });
+      return;
+    }
+
+    if (!canPersistSceneDocument()) {
+      ui.notifications?.warn?.('Map Shine: Only GMs can apply presets');
+      await this._hydratePresetsSelect({ forceLoad: false });
+      return;
+    }
+
+    const preset = await scenePresets.getPresetById(value);
+    if (!preset) {
+      ui.notifications?.warn?.('Map Shine: Preset not found');
+      await this._hydratePresetsSelect({ forceLoad: false });
+      return;
+    }
+
+    this._applyingPreset = true;
+    this._presetSuppressCustomForSaves = true;
+    try {
+      await scenePresets.applyPresetToScene(scene, preset);
+    } finally {
+      try {
+        this.lastSave = 0;
+        await this.flushSaveQueue();
+        await Promise.resolve();
+        this.lastSave = 0;
+        await this.flushSaveQueue();
+      } catch (_) {
+      }
+      this._presetSuppressCustomForSaves = false;
+      this._applyingPreset = false;
+    }
+
+    await this._hydratePresetsSelect({ forceLoad: false });
+  }
+
+  /**
+   * Sync presets dropdown when the active scene changes (UI loop + canvasReady).
+   * @private
+   */
+  _refreshPresetsSelect() {
+    const select = this._presetsSelectEl;
+    if (!select) return;
+
+    const scene = canvas?.scene ?? null;
+    const sceneId = scene?.id ?? null;
+
+    if (sceneId !== this._lastPresetsSceneId) {
+      this._lastPresetsSceneId = sceneId;
+      void this._hydratePresetsSelect({ forceLoad: false });
+      return;
+    }
+
+    if (!scene) return;
+
+    const activeId = scenePresets.getActivePresetId(scene);
+    const hasOption = activeId && [...select.options].some((o) => o.value === activeId);
+    const want = hasOption ? activeId : '__custom__';
+
+    const customOpt = select.querySelector('option[value="__custom__"]');
+    if (customOpt) customOpt.hidden = want !== '__custom__';
+
+    if (select.value !== want) {
+      select.value = want;
+    }
+  }
+
+  /**
+   * When the user diverges from a shipped preset, clear the active preset flag and show Custom.
+   * @returns {Promise<void>}
+   * @private
+   */
+  async _markPresetCustom() {
+    if (this._applyingPreset || this._presetSuppressCustomForSaves || !this._scenePresetTrackingReady || this._uiValidatorActive) return;
+
+    const scene = canvas?.scene;
+    if (!scene) return;
+
+    const select = this._presetsSelectEl;
+    if (select && select.value !== '__custom__') {
+      select.value = '__custom__';
+      const customOpt = select.querySelector('option[value="__custom__"]');
+      if (customOpt) customOpt.hidden = false;
+    }
+
+    if (!scenePresets.getActivePresetId(scene)) return;
+
+    if (canPersistSceneDocument()) {
+      await scenePresets.clearActivePresetId(scene);
+    }
+  }
+
+  /**
+   * Copy preset-ready JSON (id / name / description scaffold) for module authors.
+   * @returns {Promise<void>}
+   * @public
+   */
+  async copyScenePresetToClipboard() {
+    const scene = canvas?.scene;
+    if (!scene) {
+      ui.notifications?.warn?.('Map Shine: No active scene to copy settings from');
+      return;
+    }
+
+    const payload = scenePresets.buildPresetReadyJsonForScene(scene);
+    if (!payload) {
+      ui.notifications?.warn?.('Map Shine: Could not build preset JSON');
+      return;
+    }
+
+    const json = JSON.stringify(payload, null, 2);
+
+    try {
+      if (navigator?.clipboard?.writeText) {
+        await navigator.clipboard.writeText(json);
+        ui.notifications.info(`Map Shine: Preset-ready JSON for "${scene.name}" copied to clipboard`);
+      } else {
+        throw new Error('Clipboard API not available');
+      }
+    } catch (error) {
+      log.warn('Failed to copy preset JSON to clipboard, printing to console instead:', error);
+      console.log(json);
+      ui.notifications.warn('Map Shine: Could not copy to clipboard. JSON printed to browser console.');
+    }
   }
 
   /**
@@ -1640,12 +2108,6 @@ export class TweakpaneManager {
     });
 
     sceneFolder.addBlade({ view: 'separator' });
-
-    sceneFolder.addButton({
-      title: 'Copy Scene Settings'
-    }).on('click', async () => {
-      await this.copySceneSettingsToClipboard();
-    });
 
     sceneFolder.addButton({
       title: 'Paste Scene Settings'
@@ -2531,6 +2993,53 @@ export class TweakpaneManager {
   }
 
   /**
+   * Ask GM how to enable: repair existing data vs full reset.
+   * @param {{ hasLegacy?: boolean }} [opts]
+   * @returns {Promise<'none'|'full'|null>} reset mode, or null if cancelled
+   * @private
+   */
+  _promptEnableMapShineMode(opts = {}) {
+    const { hasLegacy = false } = opts;
+    const legacyNote = hasLegacy
+      ? '<p>This scene may carry data from the legacy <strong>map-shine</strong> module; repair or reset will also clear that namespace when possible.</p>'
+      : '';
+
+    return new Promise((resolve) => {
+      const dialog = new Dialog({
+        title: 'Enable Map Shine Advanced',
+        content: `
+          <p>Choose how to handle existing Map Shine data on this scene:</p>
+          <ul style="margin:8px 0 8px 18px;line-height:1.45;">
+            <li><strong>Repair and enable</strong> — normalize settings and control state; keep effect parameters where possible.</li>
+            <li><strong>Reset and enable</strong> — remove <em>all</em> Map Shine Advanced flags for this scene, then enable with defaults. Use for corrupted or incompatible saves.</li>
+          </ul>
+          ${legacyNote}
+        `,
+        buttons: {
+          repair: {
+            icon: '<i class="fas fa-wrench"></i>',
+            label: 'Repair and enable',
+            callback: () => resolve('none')
+          },
+          reset: {
+            icon: '<i class="fas fa-eraser"></i>',
+            label: 'Reset and enable',
+            callback: () => resolve('full')
+          },
+          cancel: {
+            icon: '<i class="fas fa-times"></i>',
+            label: 'Cancel',
+            callback: () => resolve(null)
+          }
+        },
+        default: 'repair',
+        close: () => resolve(null)
+      });
+      dialog.render(true);
+    });
+  }
+
+  /**
    * Add the scene enable/upgrade control button to a folder.
    * @param {any} folder
    * @private
@@ -2548,8 +3057,11 @@ export class TweakpaneManager {
     try {
       hasLegacy = scene.getFlag('map-shine', 'enabled') === true;
     } catch (e) {
-      // Flag scope not available; treat as no legacy data present.
       hasLegacy = false;
+    }
+    if (!hasLegacy) {
+      const leg = scene.flags?.['map-shine'];
+      hasLegacy = !!(leg && typeof leg === 'object' && Object.keys(leg).length > 0);
     }
 
     if (isEnabled) {
@@ -2568,6 +3080,18 @@ export class TweakpaneManager {
       title
     });
 
+    const canEditScene = canPersistSceneDocument();
+    try {
+      enableButton.disabled = !canEditScene;
+    } catch (_) {
+    }
+    if (!canEditScene) {
+      try {
+        enableButton.element?.setAttribute?.('title', 'Only GMs can enable Map Shine on a scene.');
+      } catch (_) {
+      }
+    }
+
     enableButton.on('click', async () => {
       const s = canvas?.scene;
       if (!s) {
@@ -2575,46 +3099,32 @@ export class TweakpaneManager {
         return;
       }
 
-      try {
-        await sceneSettings.enable(s);
+      if (!canPersistSceneDocument()) {
+        ui.notifications?.warn?.('Map Shine: Only GMs can enable Map Shine on a scene.');
+        return;
+      }
 
-        // Verify the flag actually persisted before proceeding
-        const verified = sceneSettings.isEnabled(s);
+      const reset = await this._promptEnableMapShineMode({ hasLegacy });
+      if (reset == null) return;
+
+      try {
+        await sceneSettings.enable(s, { reset });
+
+        const refreshed = game.scenes?.get?.(s.id) ?? s;
+        const verified = sceneSettings.isExplicitlyEnabled(refreshed);
         if (!verified) {
-          console.error('MapShine enable button: flag did NOT persist after enable(). Aborting.');
+          console.error('MapShine enable button: explicit enabled flag did NOT persist after enable(). Aborting.');
           ui.notifications?.error?.('Map Shine: Failed to persist scene flag. Check console for details.');
           return;
         }
 
         ui.notifications?.info?.('Map Shine: Scene enabled — activating 3D canvas…');
 
-        // Redraw the canvas instead of reloading the page. This is more
-        // robust because it avoids the reload-dependent failure path where
-        // a missing tile texture crashes Foundry's Canvas.#draw() and
-        // prevents the canvasReady hook from ever firing.
-        //
-        // canvas.draw() triggers our _drawWrapper → Foundry's #draw →
-        // canvasReady (or our recovery sentinel) → onCanvasReady →
-        // createThreeCanvas. The PIXI background alpha is set to 0 at
-        // runtime by createThreeCanvas, so canvasConfig transparency
-        // from the initial page load is not required.
         try {
-          await canvas.draw(s);
+          await canvas.draw(refreshed);
         } catch (drawErr) {
-          console.warn('MapShine enable button: canvas.draw() threw — falling back to page reload:', drawErr);
-          // Fallback: reload the page if canvas.draw() fails outright
-          setTimeout(() => {
-            try {
-              const utils = globalThis.foundry?.utils;
-              if (typeof utils?.debouncedReload === 'function') {
-                utils.debouncedReload();
-              } else {
-                globalThis.location?.reload?.();
-              }
-            } catch (_) {
-              globalThis.location?.reload?.();
-            }
-          }, 250);
+          console.warn('MapShine enable button: canvas.draw() threw; skipping forced page reload:', drawErr);
+          ui.notifications?.warn?.('Map Shine: Scene redraw failed after enabling. You can reload manually if the scene looks wrong.');
         }
       } catch (e) {
         log.error('Failed to enable Map Shine Advanced for scene:', e);
@@ -3515,6 +4025,8 @@ export class TweakpaneManager {
       log.debug(`Sun latitude pushed to all effects: ${lat}`);
     }
 
+    void this._markPresetCustom();
+
     this.saveUIState();
   }
 
@@ -3703,6 +4215,7 @@ export class TweakpaneManager {
   queueSave(effectId) {
     if (this._uiValidatorActive) return;
     this.saveQueue.add(effectId);
+    void this._markPresetCustom();
   }
 
   /**
@@ -4617,6 +5130,8 @@ export class TweakpaneManager {
         await repairSceneControlStateFlag(scene);
       }
 
+      await scenePresets.clearActivePresetId(scene);
+
       ui.notifications.info(`Map Shine: Settings from "${sourceName}" applied to "${scene.name}". Reload the scene to see full changes.`);
     } catch (e) {
       log.warn('Failed to paste scene settings:', e);
@@ -5412,6 +5927,10 @@ export class TweakpaneManager {
       } catch (_) {
       }
 
+      // Keep the scene-level quick toggle in sync across scene changes/flag edits.
+      this._refreshSceneEnableQuickToggle();
+      this._refreshPresetsSelect();
+
       // Continue loop
       this.rafHandle = requestAnimationFrame(uiLoop);
     };
@@ -5845,6 +6364,25 @@ export class TweakpaneManager {
     this._clearFilterHighlights();
     this._filterSavedExpanded.clear();
     this._filterBarEl = null;
+    this._sceneEnableQuickSectionEl = null;
+    this._sceneEnableQuickToggleButtonEl = null;
+    this._sceneEnableQuickToggleSceneId = null;
+    this._sceneEnableQuickToggleState = null;
+    this._sceneEnableQuickToggleBusy = false;
+
+    if (this._canvasReadyPresetsHandler) {
+      try {
+        Hooks.off('canvasReady', this._canvasReadyPresetsHandler);
+      } catch (_) {
+      }
+      this._canvasReadyPresetsHandler = null;
+    }
+    this._presetsBarEl = null;
+    this._presetsSelectEl = null;
+    this._lastPresetsSceneId = null;
+    this._scenePresetTrackingReady = false;
+    this._presetSuppressCustomForSaves = false;
+    this._applyingPreset = false;
     
     if (this.tileMotionDialog) {
       this.tileMotionDialog.dispose();

@@ -92,6 +92,13 @@ uniform vec2 uWaterRawMaskTexelSize;  // 1 / dimensions of composited _Water RT 
 
 uniform sampler2D tWaterOccluderAlpha; // Screen-space upper-floor occluder mask
 uniform float uHasWaterOccluderAlpha;  // 1.0 when occluder mask is valid
+uniform sampler2D tSliceAlpha;         // Authoritative per-level albedo alpha (pre-post chain)
+uniform float uHasSliceAlpha;          // 1.0 when tSliceAlpha is valid
+// Post-merge: pre-multiplied transmittance from all upper bg layers (baked RT).
+uniform sampler2D tWaterBgAlphaMask;
+uniform float uHasWaterBgAlphaMask;
+// Debug: 0 off; 3 = fullscreen yellow (water gate skipped). 1/2 = magenta/cyan only where water mask inside>0 (not uniforms — those are global per pass).
+uniform float uDebugWaterPassTint;
 
 uniform vec2 uWaterDataTexelSize; // 1.0 / tWaterData dimensions
 
@@ -1354,7 +1361,8 @@ void getFoamData(vec2 sceneUv, float shore, float inside, vec2 rainOffPx, vec2 w
   }
   
   floatingOut.amount = floatingBase;
-  floatingOut.color = foamColor;
+  // Match shore foam: bake scene-luminance response into albedo (lightFactor was computed but unused).
+  floatingOut.color = foamColor * lightFactor;
   floatingOut.opacity = opacity;
   floatingOut.shadowStrength = shadowStr;
   floatingOut.lightFactor = lightFactor;
@@ -1447,7 +1455,17 @@ float waterOccluderAlphaSoft(vec2 screenUv) {
   float s = texture2D(tWaterOccluderAlpha, screenUv - vec2(0.0, px.y)).a;
   float e = texture2D(tWaterOccluderAlpha, screenUv + vec2(px.x, 0.0)).a;
   float w = texture2D(tWaterOccluderAlpha, screenUv - vec2(px.x, 0.0)).a;
-  return 0.52 * c + 0.12 * (n + s + e + w);
+  // Center-heavy blend: previous 0.52/0.12 cross-filter dilated occlusion into
+  // authored alpha holes (bridge gaps) and clipped ground water from above.
+  return 0.72 * c + 0.07 * (n + s + e + w);
+}
+
+// Post-merge background transmittance mask in screen UV.
+// 1.0 = no upper/background coverage between water source floor and viewer.
+// 0.0 = fully blocked by stacked background albedo above the water source.
+float waterBgTransmittanceAt(vec2 screenUv) {
+  if (uHasWaterBgAlphaMask < 0.5) return 1.0;
+  return clamp(texture2D(tWaterBgAlphaMask, screenUv).r, 0.0, 1.0);
 }
 
 // Safe sampling for refraction/distortion taps.
@@ -1461,6 +1479,7 @@ float refractTapValid(vec2 screenUv) {
     float occ = waterOccluderAlphaSoft(screenUv);
     vOcc = 1.0 - smoothstep(0.34, 0.66, occ);
   }
+  float vBg = waterBgTransmittanceAt(screenUv);
 
   // Water-body gating: if the shifted UV lands outside the water mask,
   // reject it so we don't pull pixels from above-water areas.
@@ -1474,10 +1493,21 @@ float refractTapValid(vec2 screenUv) {
       ? waterInsideFromSdf(wdS.r)
       : smoothstep(0.02, 0.08, wdS.g);
     insideS *= waterRawMaskAuthoritative(suv);
-    return insideS * vOcc;
+    return insideS * vOcc * vBg;
   }
 
-  return vOcc;
+  return vOcc * vBg;
+}
+
+// Softly reject distortion taps as they approach/leak past screen borders.
+// This prevents hard UV pinning artifacts in map edges/corners when refraction
+// offsets push outside the valid scene framebuffer area.
+float screenUvEdgeFade(vec2 screenUv) {
+  vec2 px = 1.0 / max(uResolution, vec2(1.0));
+  float soft = max(2.0 * max(px.x, px.y), 1e-5);
+  vec2 edge = min(screenUv, vec2(1.0) - screenUv);
+  float minEdge = min(edge.x, edge.y);
+  return smoothstep(0.0, soft, minEdge);
 }
 
 vec4 sampleRefractedSafe(vec2 screenUv, vec4 fallback) {
@@ -1590,6 +1620,15 @@ vec3 calculateSpecularHighlights(
 // ── Main ─────────────────────────────────────────────────────────────────
 void main() {
   vec4 base = texture2D(tDiffuse, vUv);
+  // Mode 3 only at top: fullscreen yellow (water gate skipped alarm).
+  // Modes 1–2 are handled after per-pixel inside exists — uHasWaterData is a
+  // uniform (true for the whole quad whenever any water exists), so gating on
+  // it alone still tints every pixel cyan/magenta.
+  if (uDebugWaterPassTint > 2.5) {
+    MSA_BLOOM_RT_ZERO;
+    gl_FragColor = vec4(1.0, 1.0, 0.0, 1.0);
+    return;
+  }
   float isEnabled = step(0.5, uWaterEnabled) * step(0.5, uHasWaterData);
   if (isEnabled < 0.5) { MSA_BLOOM_RT_ZERO; gl_FragColor = base; return; }
   // Occluder mask: upper-floor tiles rendered to screen-space RT (tile union →
@@ -1650,13 +1689,51 @@ void main() {
     ? distortionInsideFromSdf(sdf01)
     : inside;
   distInside *= rawAuth;
-  // Borrowing a lower floor's water pack on an upper slice: only treat pixels as
-  // water where this slice is punched out (low alpha). Suppresses river SDF over
-  // opaque bridge deck texels (same scene UV as the river below).
+  if (uHasWaterBgAlphaMask > 0.5) {
+    float m = texture2D(tWaterBgAlphaMask, vUv).r;
+    inside *= m;
+    distInside *= m;
+  }
+  // Borrowed lower-floor water on this slice: suppress wherever **this** slice's
+  // bus levelSceneRT is opaque (tiles / deck over river holes).
+  // Sample tSliceAlpha at **vUv** like tDiffuse / base — it is the same
+  // camera-rendered RT in screen projection. tWaterData stays in **sceneUv**
+  // (map 0–1 texture space); mixing the two UV spaces caused a sliding blank
+  // that followed the camera.
+  // Do NOT require uHasWaterOccluderAlpha: that mask is built only from *higher*
+  // floors, so middle slices never got slice punch when the roof mask was weak.
+  //
+  // Do not punch native water with slice alpha: even a narrow smoothstep(0.93…)
+  // on levelSceneRT can be ~1 across most pixels (opaque bg / PM), which removed
+  // all water on every floor. Borrowed-only path below is the supported case.
   if (uCrossSliceWaterData > 0.5) {
-    float sheetOpaque = smoothstep(0.05, 0.96, base.a);
+    float sheetOpaque = 0.0;
+    if (uHasSliceAlpha > 0.5) {
+      float sliceA = texture2D(tSliceAlpha, vUv).a;
+      // Softer ramp than 0.05–0.96: mid-alpha is sensitive to filtering / PM RTs and
+      // was causing “swimming” at punch boundaries on borrowed middle-floor water.
+      sheetOpaque = smoothstep(0.10, 0.88, sliceA);
+    } else if (uHasWaterOccluderAlpha > 0.5) {
+      sheetOpaque = smoothstep(0.10, 0.88, base.a);
+    }
     inside *= (1.0 - sheetOpaque);
     distInside *= (1.0 - sheetOpaque);
+  }
+  // Occluder plumbing debug: 1 = magenta (RT bound), 2 = cyan (no RT). Uses
+  // per-pixel inside from tWaterData — not the uHasWaterData uniform.
+  // Mix toward base where the occluder mask is strong so debug matches culling.
+  if (uDebugWaterPassTint > 0.5 && uDebugWaterPassTint <= 2.5) {
+    MSA_BLOOM_RT_ZERO;
+    if (inside > 0.01) {
+      vec3 dbg = (uDebugWaterPassTint > 1.5) ? vec3(0.0, 1.0, 1.0) : vec3(1.0, 0.0, 1.0);
+      float occVis = (uHasWaterOccluderAlpha > 0.5) ? waterOccluderAlphaSoft(vUv) : 0.0;
+      float occBlend = smoothstep(0.36, 0.64, occVis);
+      vec3 rgb = mix(dbg, base.rgb, occBlend);
+      gl_FragColor = vec4(rgb, 1.0);
+    } else {
+      gl_FragColor = base;
+    }
+    return;
   }
   // Extra stability fade near the binary water-mask transition.
   // Prevents bright specular/caustics edge flicker when the water boundary is thin.
@@ -1780,12 +1857,15 @@ void main() {
     offsetUvRaw *= 0.14;
   }
   vec2 offsetUv = offsetUvRaw * distMask;
-  vec2 uv1 = clamp(vUv + offsetUv, vec2(0.001), vec2(0.999));
+  vec2 uv1Candidate = vUv + offsetUv;
+  vec2 uv1 = clamp(uv1Candidate, vec2(0.001), vec2(0.999));
 
   // If the distorted center UV would sample outside the water body or into an
   // occluder, smoothly pin the distortion to zero at this pixel.
-  float v1 = refractTapValid(uv1);
+  float v1 = refractTapValid(uv1Candidate);
+  float edgeFade = screenUvEdgeFade(uv1Candidate);
   offsetUv *= v1;
+  offsetUv *= edgeFade;
   uv1 = clamp(vUv + offsetUv, vec2(0.001), vec2(0.999));
   vec4 centerSample = texture2D(tDiffuse, uv1);
 
@@ -1883,6 +1963,11 @@ void main() {
     float dCurve = max(0.01, uCloudShadowDarkenCurve);
     cloudDarken = dStrength * pow(cloudShadow, dCurve);
   }
+  // ShadowManager combined already folds cloud into the lit factor (foam/murk).
+  // Applying legacy cloudDarken on top would double-darken vs the lit scene in tDiffuse.
+  if (uHasCombinedShadow > 0.5) {
+    cloudDarken = 0.0;
+  }
 
   // Structural shadows (building + overhead): used to darken foam and fully suppress specular.
   // Match LightingEffectV2 conventions:
@@ -1903,10 +1988,10 @@ void main() {
     overheadShadow = 1.0 - ovLit;
   }
   float structuralShadow = max(buildingShadow, overheadShadow);
-  float foamStructuralDarken = mix(1.0, 0.35, structuralShadow);
+  // Legacy path (no tCombinedShadow): crush foam in deep shadow — reads shiny in light, not emissive in shade.
+  float foamStructuralDarken = mix(1.0, 0.06, pow(structuralShadow, 1.15));
   // Reduce foam visibility under building shadows specifically.
-  // Keep a small floor so foam does not pop completely out.
-  float foamBuildingShadowFade = mix(1.0, 0.14, buildingShadow);
+  float foamBuildingShadowFade = mix(1.0, 0.06, pow(buildingShadow, 1.1));
 
   // ShadowManagerV2 combined map (screen vUv, R = lit factor). When bound, shore +
   // floating foam use this for color and alpha so they track cloud + overhead + building
@@ -2021,6 +2106,19 @@ void main() {
   // Foam (pass pre-computed waveGrad to avoid redundant calculateWave call)
   float sceneLuma = dot(col, vec3(0.299, 0.587, 0.114));
   float darkness = clamp(uSceneDarkness, 0.0, 1.0);
+
+  // WaterSplashesEffectV2 MS_WATER_SPLASHES_SHADOW_DARKEN_V3: combined shadow at
+  // pixel UV (gl_FragCoord / uResolution), then rgb *= csh and a *= csh. Advanced
+  // floating foam uses this path so it tracks the same grid as bus particles (vUv
+  // can sit off the combined RT in some viewport/post setups).
+  float splashCombinedCsh = 1.0;
+  if (uHasCombinedShadow > 0.5) {
+    vec2 msUvSplash = vec2(
+      (gl_FragCoord.x + 0.5) / max(uResolution.x, 1.0),
+      (gl_FragCoord.y + 0.5) / max(uResolution.y, 1.0)
+    );
+    splashCombinedCsh = clamp(texture2D(tCombinedShadow, msUvSplash).r, 0.0, 1.0);
+  }
   
   float shoreFoamAmount;
   FloatingFoamData floatingFoam;
@@ -2067,15 +2165,15 @@ void main() {
       shoreFoamColor = mix(shoreFoamColor, shoreFoamColor * (0.8 + colorVar * 0.4), varAmount);
     }
     
-    // Brightness, contrast, gamma
-    float brightness = clamp(uShoreFoamBrightness, 0.0, 2.0);
+    // Brightness, contrast, gamma (cap brightness so foam cannot blow past scene albedo)
+    float brightness = clamp(uShoreFoamBrightness, 0.0, 1.25);
     float contrast = clamp(uShoreFoamContrast, 0.0, 2.0);
     float gamma = max(0.1, uShoreFoamGamma);
     
     shoreFoamColor = shoreFoamColor * brightness;
     shoreFoamColor = ((shoreFoamColor - 0.5) * contrast) + 0.5;
     shoreFoamColor = pow(max(shoreFoamColor, vec3(0.0)), vec3(gamma));
-    shoreFoamColor = clamp(shoreFoamColor, vec3(0.0), vec3(1.0));
+    shoreFoamColor = clamp(shoreFoamColor, vec3(0.0), vec3(0.92));
     
     // Lighting calculation
     float shoreLightFactor = 1.0;
@@ -2114,20 +2212,33 @@ void main() {
   // Apply floating foam with independent color and FULL opacity control
   if (floatFoamAmtVis > 0.01) {
     float floatingAlpha = clamp(floatFoamAmtVis * floatingFoam.opacity, 0.0, 1.0);
-    floatingAlpha *= foamAlphaLitMul;
     floatingAlpha *= mix(1.0, 0.20, uFloorDepthBlurWaterSoft);
-    vec3 floatingFoamColor = mix(floatingFoam.color, col, 0.42 * fdbFoam) * foamColorLitMul;
+    vec3 floatingFoamColor = mix(floatingFoam.color, col, 0.42 * fdbFoam);
+    if (uHasCombinedShadow > 0.5) {
+      floatingFoamColor *= splashCombinedCsh;
+      floatingAlpha = clamp(floatingAlpha * splashCombinedCsh, 0.0, 1.0);
+    } else {
+      floatingAlpha *= foamAlphaLitMul;
+      floatingFoamColor *= foamColorLitMul;
+    }
     // Blend foam color first (without darkness)
     col = mix(col, floatingFoamColor, floatingAlpha);
     // THEN apply darkness to the final result for proper night darkening
     col *= floatingFoam.darkScale;
   }
 
-  // Shader flecks (drive by combined foam presence)
-  float fleckDriver = clamp(max(shoreFoamVis, floatFoamAmtVis) * foamAlphaLitMul, 0.0, 1.0);
+  // Shader flecks (drive by combined foam presence) — same lit factor as splashes when combined
+  float fleckShadowMul = foamColorLitMul;
+  if (uHasCombinedShadow > 0.5) {
+    fleckShadowMul = splashCombinedCsh;
+  }
+  float fleckDriver = clamp(max(shoreFoamVis, floatFoamAmtVis) * (uHasCombinedShadow > 0.5 ? splashCombinedCsh : foamAlphaLitMul), 0.0, 1.0);
   float shaderFlecks = getShaderFlecks(sceneUv, inside, shore, fleckDriver, rainOffPx, indoorWindMotion);
-  vec3 fleckCol = mix(uShoreFoamColor, floatingFoam.color, clamp(floatFoamAmtVis, 0.0, 1.0)) * foamColorLitMul;
-  col += fleckCol * shaderFlecks * 0.8 * mix(1.0, 0.07, uFloorDepthBlurWaterSoft);
+  vec3 fleckCol = mix(uShoreFoamColor, floatingFoam.color, clamp(floatFoamAmtVis, 0.0, 1.0)) * fleckShadowMul;
+  float fleckW = shaderFlecks * 0.45 * mix(1.0, 0.07, uFloorDepthBlurWaterSoft);
+  vec3 fleckAdd = fleckCol * fleckW;
+  fleckAdd = min(fleckAdd, vec3(0.28));
+  col += fleckAdd;
 
   // Apply screen-space cloud shadows globally to water + foam + caustics + murk
   col *= max(0.0, 1.0 - cloudDarken);

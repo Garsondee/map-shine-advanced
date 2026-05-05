@@ -5,6 +5,9 @@
  * RTs are lazily allocated on first access and reused across frames. Levels that
  * are no longer visible can be released to free GPU memory.
  *
+ * Per-level targets use `LinearSRGBColorSpace` (constructor option), matching
+ * {@link FloorCompositor} and the same “linear working RT” idea as V3 bloom inputs.
+ *
  * @module compositor-v2/LevelRenderTargetPool
  */
 
@@ -54,16 +57,15 @@ export class LevelRenderTargetPool {
       type: this._rtType,
       depthBuffer: !!depthBuffer,
       stencilBuffer: false,
+      // Same contract as FloorCompositor main RTs / V3 linear working buffers (e.g. bloom input).
+      colorSpace: THREE.LinearSRGBColorSpace,
     });
 
     const sceneRT = new THREE.WebGLRenderTarget(this._width, this._height, makeOpts(true));
-    sceneRT.texture.colorSpace = THREE.LinearSRGBColorSpace;
 
     const postA = new THREE.WebGLRenderTarget(this._width, this._height, makeOpts(false));
-    postA.texture.colorSpace = THREE.LinearSRGBColorSpace;
 
     const postB = new THREE.WebGLRenderTarget(this._width, this._height, makeOpts(false));
-    postB.texture.colorSpace = THREE.LinearSRGBColorSpace;
 
     entry = { sceneRT, postA, postB };
     this._pools.set(levelIndex, entry);

@@ -8,6 +8,7 @@ import { canPersistSceneDocument, isGmLike } from '../core/gm-parity.js';
 
 import { createLogger } from '../core/log.js';
 import * as sceneSettings from './scene-settings.js';
+import { getViewedLevelBackgroundSrc } from '../foundry/levels-scene-flags.js';
 import {
   getEffectMaskRegistry,
   discoverMaskDirectoryFiles,
@@ -68,6 +69,69 @@ export function getMaskTextureManifest(scene) {
 export function maskTextureManifestMatchesBasePath(flag, basePath) {
   if (!flag) return false;
   return _normBasePath(flag.basePath) === _normBasePath(basePath);
+}
+
+/**
+ * The texture URL that suffix-mask discovery should track (may differ from
+ * `scene.background.src` on Foundry v14 native Levels).
+ * @param {Scene|null|undefined} scene
+ * @returns {string|null}
+ */
+export function resolveSceneMaskSourceSrc(scene) {
+  try {
+    const override = scene?.getFlag?.(MASK_FLAG_NAMESPACE, 'maskSource');
+    if (typeof override === 'string' && override.trim().length > 0) {
+      return override.trim();
+    }
+  } catch (_) {}
+  try {
+    const viewed = getViewedLevelBackgroundSrc(scene);
+    if (typeof viewed === 'string' && viewed.trim()) return viewed.trim();
+  } catch (_) {}
+  try {
+    const bg = scene?.background?.src ?? scene?.img;
+    if (typeof bg === 'string' && bg.trim()) return bg.trim();
+  } catch (_) {}
+  return null;
+}
+
+/**
+ * Whether a persisted maskTextureManifest should be trusted for this load.
+ * Rejects stale manifests where `maskSourceKey` no longer matches the image
+ * that actually drives mask discovery (common after level/background edits).
+ *
+ * @param {object|null} flag
+ * @param {string} basePath - normalized directory base for this load (no extension)
+ * @param {string} maskSourceSrc - authoritative mask source texture URL for this load
+ */
+export function maskTextureManifestMatchesLoadContext(flag, basePath, maskSourceSrc) {
+  if (!flag || !flag.pathsByMaskId) return false;
+  const bp = _normBasePath(basePath);
+  if (!bp) return false;
+
+  const loadKey = normalizeMaskSourceKey(maskSourceSrc || '');
+  const loadBaseFromSrc = loadKey ? _normBasePath(loadKey.replace(/\?.*$/, '').replace(/\.[^/.]+$/, '')) : '';
+
+  const flagBase = _normBasePath(flag.basePath);
+  const flagKeyRaw = typeof flag.maskSourceKey === 'string' ? flag.maskSourceKey.trim() : '';
+  const flagKey = normalizeMaskSourceKey(flagKeyRaw);
+  const flagBaseFromKey = flagKey ? _normBasePath(flagKey.replace(/\?.*$/, '').replace(/\.[^/.]+$/, '')) : '';
+
+  if (flagBase && flagBase === bp) {
+    if (flagKey && loadKey && flagKey !== loadKey) {
+      return false;
+    }
+    return true;
+  }
+
+  if (loadBaseFromSrc && flagBaseFromKey && loadBaseFromSrc === flagBaseFromKey) {
+    if (flagKey && loadKey && flagKey !== loadKey) {
+      return false;
+    }
+    return true;
+  }
+
+  return false;
 }
 
 /**
@@ -185,7 +249,7 @@ export async function prepareSceneMaskManifestForLoad(scene, { basePath, maskSou
   const ext = extensionFromTextureSrc(maskSourceSrc);
 
   const flag = getMaskTextureManifest(scene);
-  const flagMatches = maskTextureManifestMatchesBasePath(flag, basePath);
+  const flagMatches = maskTextureManifestMatchesLoadContext(flag, basePath, maskSourceSrc);
 
   if (flagMatches && flag.pathsByMaskId) {
     const manifest = pathsByMaskIdToLoaderManifest(flag.pathsByMaskId, enabledMaskIds);
@@ -248,12 +312,13 @@ export async function prepareSceneMaskManifestForLoad(scene, { basePath, maskSou
  * @returns {{ maskManifest: Record<string, string>, maskExtension: string|null, maskIds: string[], cacheKeySuffix: string, skipMaskIds?: string[], maskConventionFallback: 'off'|'minimal'|'full' }}
  */
 export function getMaskBundleOptionsFromFlagOnly(scene, basePath, enabledMaskIds, { skipMaskIds = ['water'] } = {}) {
-  const bgExt = extensionFromTextureSrc(scene?.background?.src);
+  const maskSourceSrc = resolveSceneMaskSourceSrc(scene) || '';
+  const ext = extensionFromTextureSrc(maskSourceSrc || scene?.background?.src);
   const flag = getMaskTextureManifest(scene);
-  if (!maskTextureManifestMatchesBasePath(flag, basePath) || !flag.pathsByMaskId) {
+  if (!maskTextureManifestMatchesLoadContext(flag, basePath, maskSourceSrc) || !flag.pathsByMaskId) {
     return {
       maskManifest: {},
-      maskExtension: bgExt,
+      maskExtension: ext,
       maskIds: enabledMaskIds,
       cacheKeySuffix: 'mf:none',
       skipMaskIds,
@@ -263,7 +328,7 @@ export function getMaskBundleOptionsFromFlagOnly(scene, basePath, enabledMaskIds
   const manifest = pathsByMaskIdToLoaderManifest(flag.pathsByMaskId, enabledMaskIds);
   return {
     maskManifest: manifest,
-    maskExtension: bgExt,
+    maskExtension: ext,
     maskIds: enabledMaskIds,
     cacheKeySuffix: `mf:${flag.updatedAt || 0}`,
     skipMaskIds,

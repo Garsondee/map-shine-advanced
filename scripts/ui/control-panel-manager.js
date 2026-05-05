@@ -18,8 +18,12 @@ import {
 } from './weather-param-bridge.js';
 import { debugLoadingProfiler } from '../core/debug-loading-profiler.js';
 import { getFoundryTimePhaseHours } from '../core/foundry-time-phases.js';
-import { extendMsaLocalFlagWriteGuard } from '../utils/msa-local-flag-guard.js';
-import { sanitizeControlStateInPlace } from '../settings/control-state-sanitize.js';
+import { extendMsaLocalFlagWriteGuard, refreshMsaSameSceneRedrawPredict } from '../utils/msa-local-flag-guard.js';
+import { cloneAndSanitizeControlState, sanitizeControlStateInPlace } from '../settings/control-state-sanitize.js';
+import {
+  getGlobalPlayerLightModeAllowed,
+  resolvePlayerLightModeAllowance
+} from '../core/player-light-allowance.js';
 
 const log = createLogger('ControlPanel');
 
@@ -93,7 +97,12 @@ export class ControlPanelManager {
       tileMotionSpeedPercent: 100,
       tileMotionAutoPlayEnabled: true,
       tileMotionTimeFactorPercent: 100,
-      tileMotionPaused: false
+      tileMotionPaused: false,
+      playerLightAllowance: {
+        torch: 'global',
+        flashlight: 'global',
+        nightVision: 'global'
+      }
     };
 
     this._suppressInitialWeatherApply = false;
@@ -234,6 +243,21 @@ export class ControlPanelManager {
      */
     this._lastWeatherControlFingerprint = null;
 
+    /**
+     * One-shot guard: skip next Scene `controlState` flag persist when save came
+     * from live weather sliders. Frequent same-scene flag writes can trigger V14
+     * redraw/tearDown cycles that look like full scene reloads.
+     * @type {boolean}
+     */
+    this._skipNextControlStateSceneFlagPersist = false;
+    /**
+     * When true, skipped persist should still push one Foundry darkness sync.
+     * Used for time-only updates (clock/quick-time) so we avoid scene flag writes
+     * while still applying darkness after scrubbing.
+     * @type {boolean}
+     */
+    this._syncDarknessOnSkippedPersist = false;
+
     this._boundHandlers = {
       onFaceMouseDown: (e) => this._onClockMouseDown(e),
       onFaceTouchStart: (e) => this._onClockTouchStart(e),
@@ -369,6 +393,7 @@ export class ControlPanelManager {
     this._buildTimeSection(masterFolder, { expanded: true, registerTopLevel: false });
     this._buildQuickSceneBeatsSection(masterFolder, { expanded: true, registerTopLevel: false });
     this._buildTileMotionSection(masterFolder, { expanded: false, registerTopLevel: false });
+    this._buildPlayerLightsSection(masterFolder, { expanded: false, registerTopLevel: false });
     this._buildWeatherSection(masterFolder, { expanded: false, registerTopLevel: false });
     this._buildWindSection(masterFolder, { expanded: false, registerTopLevel: false });
   }
@@ -871,7 +896,11 @@ export class ControlPanelManager {
     }
 
     this._mirrorLiveWeatherDomPair(paramId, value);
-    if (opts.save) this.debouncedSave();
+    // tearDown skip is armed from `applyWeatherManualParam` (rain/cloud/wind scalars).
+    if (opts.save) {
+      this._skipNextControlStateSceneFlagPersist = true;
+      this.debouncedSave();
+    }
   }
 
   /**
@@ -956,6 +985,7 @@ export class ControlPanelManager {
         this._commitLiveWeatherOverrideScalar(pid, v, { save: false });
       });
       range.addEventListener('change', () => {
+        this._skipNextControlStateSceneFlagPersist = true;
         this.debouncedSave();
       });
 
@@ -969,6 +999,7 @@ export class ControlPanelManager {
         if (Number.isFinite(v)) {
           this._commitLiveWeatherOverrideScalar(pid, v, { save: false });
         }
+        this._skipNextControlStateSceneFlagPersist = true;
         this.debouncedSave();
       });
 
@@ -1688,11 +1719,13 @@ export class ControlPanelManager {
       const minsNum = typeof transitionMinutes === 'number' ? transitionMinutes : Number(transitionMinutes);
       const safeMinutes = Number.isFinite(minsNum) ? Math.max(0.1, Math.min(60.0, minsNum)) : 5.0;
 
-      // Persist immediately so other clients can't overwrite with old state mid-transition.
+      // Do not persist time targets to scene flags here.
+      // In Foundry V14, scene flag writes on the viewed scene can trigger same-scene
+      // redraw paths that surface as full loading transitions.
       this.controlState.timeOfDay = ((targetHour % 24) + 24) % 24;
-      await this._saveControlState();
 
-      await stateApplier.startTimeOfDayTransition(this.controlState.timeOfDay, safeMinutes, true, false);
+      // Runtime-only time transition; avoid StateApplier's saveToScene controlState write.
+      await stateApplier.startTimeOfDayTransition(this.controlState.timeOfDay, safeMinutes, false, false);
       this._updateClockTarget(this.controlState.timeOfDay);
     } catch (error) {
       log.error('Failed to start time-of-day transition:', error);
@@ -1809,6 +1842,31 @@ export class ControlPanelManager {
     if (_isDbg) _dlp.begin('cp.loadControlState', 'finalize');
     this._didLoadControlState = await this._loadControlState();
     if (_isDbg) _dlp.end('cp.loadControlState');
+
+    // `weather-snapshot` is the latest live-play authority. Some Control Panel edits
+    // intentionally skip `controlState` flag writes (V14 redraw guard), so the snapshot
+    // carries a full sanitized controlState copy to prevent stale flags from clobbering it.
+    try {
+      const snap = canvas?.scene?.getFlag?.('map-shine-advanced', 'weather-snapshot');
+      if (snap && typeof snap === 'object') {
+        if (snap.controlState && typeof snap.controlState === 'object' && !Array.isArray(snap.controlState)) {
+          Object.assign(this.controlState, cloneAndSanitizeControlState(snap.controlState, { silent: true }));
+          this._ensureDirectedCustomPreset();
+          this._didLoadControlState = true;
+          this._suppressInitialWeatherApply = true;
+        }
+        if (Number.isFinite(snap.timeOfDay)) {
+          this.controlState.timeOfDay = snap.timeOfDay % 24;
+        }
+        if (typeof snap.linkTimeToFoundry === 'boolean') {
+          this.controlState.linkTimeToFoundry = snap.linkTimeToFoundry;
+        }
+        const tt = Number(snap.timeTransitionMinutes);
+        if (Number.isFinite(tt)) {
+          this.controlState.timeTransitionMinutes = tt;
+        }
+      }
+    } catch (_) {}
 
     // If Foundry link mode is enabled, pull canonical world time before first apply pass.
     if (this.controlState.linkTimeToFoundry) {
@@ -2088,9 +2146,9 @@ export class ControlPanelManager {
         this._revealTimeTargetUI();
         const mins = Number(this.controlState.timeTransitionMinutes) || 0;
         if (mins > 0) {
-          void this._startTimeOfDayTransition(hour, mins).then(() => this.debouncedSave());
+          void this._startTimeOfDayTransition(hour, mins).then(() => this._queueTimeOnlySave());
         } else {
-          void this._setTimeOfDay(hour).then(() => this.debouncedSave());
+          void this._setTimeOfDay(hour).then(() => this._queueTimeOnlySave());
         }
       });
       btnGrid.appendChild(btn);
@@ -2440,12 +2498,12 @@ export class ControlPanelManager {
       if (typeof target === 'number' && Number.isFinite(target)) {
         const mins = Number(this.controlState.timeTransitionMinutes) || 0;
         if (mins > 0) {
-          void this._startTimeOfDayTransition(target, mins).then(() => this.debouncedSave());
+          void this._startTimeOfDayTransition(target, mins).then(() => this._queueTimeOnlySave());
         } else {
-          void this._setTimeOfDay(target).then(() => this.debouncedSave());
+          void this._setTimeOfDay(target).then(() => this._queueTimeOnlySave());
         }
       } else {
-        this.debouncedSave();
+        this._queueTimeOnlySave();
       }
     }
   }
@@ -2568,6 +2626,17 @@ export class ControlPanelManager {
     this._updateClockTarget(this.controlState.timeOfDay);
     this._updateClock(hour);
     await this._applyControlState();
+  }
+
+  /**
+   * Queue a save after time-only edits without writing Scene controlState flags.
+   * This avoids same-scene redraw/reload paths while still syncing darkness once.
+   * @private
+   */
+  _queueTimeOnlySave() {
+    this._skipNextControlStateSceneFlagPersist = true;
+    this._syncDarknessOnSkippedPersist = true;
+    this.debouncedSave();
   }
 
   /**
@@ -3224,11 +3293,150 @@ export class ControlPanelManager {
   }
 
   /**
+   * GM: per-scene Player Light mode allowances + world global defaults.
+   * @private
+   */
+  _buildPlayerLightsSection(parentFolder = this.pane, options = undefined) {
+    const targetFolder = parentFolder || this.pane;
+    const lightsFolder = targetFolder.addFolder({
+      title: options?.title ?? '🔦 Player Lights',
+      expanded: options?.expanded ?? false
+    });
+    if (options?.registerTopLevel !== false && targetFolder === this.pane) this._registerTopLevelFolder(lightsFolder);
+    this._ensureFolderTag(lightsFolder, 'playerLights', 'GM');
+
+    const contentEl = lightsFolder.element.querySelector('.tp-fldv_c') || lightsFolder.element;
+
+    if (!isGmLike()) {
+      const reason = document.createElement('div');
+      reason.textContent = 'Player Light allowances are GM-only. Ask your GM to use Map Shine Control → Player Lights.';
+      reason.style.cssText = 'font-size:11px;opacity:0.78;margin:4px 8px 8px';
+      contentEl.appendChild(reason);
+      return;
+    }
+
+    if (!this.controlState.playerLightAllowance || typeof this.controlState.playerLightAllowance !== 'object') {
+      this.controlState.playerLightAllowance = {
+        torch: 'global',
+        flashlight: 'global',
+        nightVision: 'global'
+      };
+    }
+
+    const MODULE = 'map-shine-advanced';
+
+    const summaryEl = document.createElement('div');
+    summaryEl.style.cssText = 'font-size:9px;opacity:0.78;margin:4px 8px 8px;line-height:1.4;white-space:pre-wrap;';
+    contentEl.insertBefore(summaryEl, contentEl.firstChild);
+
+    const updateSummary = () => {
+      try {
+        const scene = canvas?.scene ?? null;
+        const lines = ['Effective for players on this scene:'];
+        const modes = [
+          ['torch', 'Torch'],
+          ['flashlight', 'Flashlight'],
+          ['nightVision', 'Night Vision']
+        ];
+        for (const [mode, label] of modes) {
+          const ok = resolvePlayerLightModeAllowance(mode, { scene, controlState: this.controlState });
+          lines.push(`• ${label}: ${ok ? 'Allowed' : 'Disallowed'}`);
+        }
+        summaryEl.textContent = lines.join('\n');
+      } catch (_) {
+        summaryEl.textContent = '';
+      }
+    };
+    updateSummary();
+
+    const modes = [
+      { key: 'torch', label: 'Torch (scene)' },
+      { key: 'flashlight', label: 'Flashlight (scene)' },
+      { key: 'nightVision', label: 'Night Vision (scene)' }
+    ];
+
+    for (const { key, label } of modes) {
+      lightsFolder.addBinding(this.controlState.playerLightAllowance, key, {
+        label,
+        options: {
+          'Use Global': 'global',
+          'Allowed': 'allowed',
+          'Disallowed': 'disallowed'
+        }
+      }).on('change', (ev) => {
+        this.controlState.playerLightAllowance[key] = ev.value;
+        updateSummary();
+        if (ev?.last) {
+          this.debouncedSave();
+          try {
+            ui?.controls?.render?.(true);
+          } catch (_) {}
+        }
+      });
+    }
+
+    const globalFolder = lightsFolder.addFolder({
+      title: 'Global Defaults',
+      expanded: false
+    });
+
+    const globalDefaultsState = {
+      torch: !!game.settings.get(MODULE, 'playerLightTorchAllowedDefault'),
+      flashlight: !!game.settings.get(MODULE, 'playerLightFlashlightAllowedDefault'),
+      nightVision: getGlobalPlayerLightModeAllowed('nightVision')
+    };
+
+    globalFolder.addBinding(globalDefaultsState, 'torch', { label: 'Torch' }).on('change', async (ev) => {
+      globalDefaultsState.torch = !!ev.value;
+      try {
+        await game.settings.set(MODULE, 'playerLightTorchAllowedDefault', !!ev.value);
+      } catch (_) {}
+      updateSummary();
+      if (ev?.last) {
+        try {
+          ui?.controls?.render?.(true);
+        } catch (_) {}
+      }
+    });
+
+    globalFolder.addBinding(globalDefaultsState, 'flashlight', { label: 'Flashlight' }).on('change', async (ev) => {
+      globalDefaultsState.flashlight = !!ev.value;
+      try {
+        await game.settings.set(MODULE, 'playerLightFlashlightAllowedDefault', !!ev.value);
+      } catch (_) {}
+      updateSummary();
+      if (ev?.last) {
+        try {
+          ui?.controls?.render?.(true);
+        } catch (_) {}
+      }
+    });
+
+    globalFolder.addBinding(globalDefaultsState, 'nightVision', { label: 'Night Vision' }).on('change', async (ev) => {
+      globalDefaultsState.nightVision = !!ev.value;
+      const v = !!ev.value;
+      try {
+        await game.settings.set(MODULE, 'playerLightNightVisionAllowedDefault', v);
+        await game.settings.set(MODULE, 'nightVisionAllowPlayers', v);
+      } catch (_) {}
+      updateSummary();
+      if (ev?.last) {
+        try {
+          ui?.controls?.render?.(true);
+        } catch (_) {}
+      }
+    });
+  }
+
+  /**
    * Apply control state to game systems using centralized StateApplier
    * @private
    */
   async _applyControlState() {
     try {
+      // Debounced scene-flag saves lag behind Tweakpane sliders; arm same-scene tearDown skip for Mode/Dynamic/Directed/time paths.
+      refreshMsaSameSceneRedrawPredict();
+
       const targetHour = ((Number(this.controlState.timeOfDay) % 24) + 24) % 24;
       const transitionMinutes = Number(this.controlState.timeTransitionMinutes) || 0;
       const shouldStartTransition =
@@ -3295,6 +3503,8 @@ export class ControlPanelManager {
    */
   async _applyWindState() {
     try {
+      refreshMsaSameSceneRedrawPredict();
+
       const weatherController = coreWeatherController || window.MapShine?.weatherController || window.weatherController;
       if (!weatherController) {
         log.warn('WeatherController not available for wind application');
@@ -3370,6 +3580,13 @@ export class ControlPanelManager {
         this.controlState.directedPresetId,
         this.controlState.directedTransitionMinutes
       );
+
+      try {
+        const wc = resolveWeatherController();
+        if (wc?.saveWeatherSnapshotNow) {
+          await wc.saveWeatherSnapshotNow();
+        }
+      } catch (_) {}
       
       ui.notifications?.info(`Weather transition started: ${this.controlState.directedPresetId}`);
       log.info('Started directed weather transition:', this.controlState.directedPresetId);
@@ -3538,11 +3755,45 @@ Current Weather:
       const scene = canvas?.scene;
       if (!scene || !canPersistSceneDocument()) return;
 
+      if (this._skipNextControlStateSceneFlagPersist === true) {
+        this._skipNextControlStateSceneFlagPersist = false;
+        const syncDarkness = this._syncDarknessOnSkippedPersist === true;
+        this._syncDarknessOnSkippedPersist = false;
+        if (syncDarkness) {
+          await stateApplier.syncFoundryDarknessFromMapShineTime();
+        }
+        // Time fields are not written to `controlState` flags (see below). Persist the
+        // authoritative hour + full WC state via weather-snapshot instead (separate flag key).
+        try {
+          const wc = resolveWeatherController();
+          if (wc?.saveWeatherSnapshotNow) {
+            await wc.saveWeatherSnapshotNow();
+          }
+        } catch (_) {}
+        log.debug('Skipped Scene controlState flag persist for live/time-only save (weather-snapshot updated)');
+        return;
+      }
+
+      // V14 regression guard:
+      // Persisting `timeOfDay` to Scene flags causes document updates that can
+      // trigger same-scene redraw/transition paths. Keep time runtime-local and
+      // persist only non-time control fields.
+      const persistedControlState = { ...this.controlState };
+      try { delete persistedControlState.timeOfDay; } catch (_) {}
+      try { delete persistedControlState.timeTransitionMinutes; } catch (_) {}
+      try { delete persistedControlState.linkTimeToFoundry; } catch (_) {}
+
       extendMsaLocalFlagWriteGuard();
-      await scene.setFlag('map-shine-advanced', 'controlState', this.controlState);
+      await scene.setFlag('map-shine-advanced', 'controlState', persistedControlState);
       // One Foundry darkness write after persist — avoids hammering canvas.scene.update
       // on every clock tick / 100ms transition frame (can grey-break V2 rendering).
       await stateApplier.syncFoundryDarknessFromMapShineTime();
+      try {
+        const wc = resolveWeatherController();
+        if (wc?.saveWeatherSnapshotNow) {
+          await wc.saveWeatherSnapshotNow();
+        }
+      } catch (_) {}
       log.debug('Saved control state to scene flags');
     } catch (error) {
       log.warn('Failed to save control state:', error);

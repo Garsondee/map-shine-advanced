@@ -1,4 +1,5 @@
 import { createLogger } from '../core/log.js';
+import { readWallHeightFlags } from '../foundry/levels-scene-flags.js';
 
 const log = createLogger('NavMeshBuilder');
 
@@ -120,6 +121,7 @@ export class NavMeshBuilder {
       const isDoor = doorType > 0;
       const isOpenDoor = isDoor && doorState === 1;
       if (isOpenDoor) continue;
+      const wallBounds = readWallHeightFlags(doc);
 
       out.push({
         wallId: String(doc?.id || ''),
@@ -127,6 +129,8 @@ export class NavMeshBuilder {
         ay: asNumber(c[1], 0),
         bx: asNumber(c[2], 0),
         by: asNumber(c[3], 0),
+        bottom: asNumber(wallBounds?.bottom, -Infinity),
+        top: asNumber(wallBounds?.top, Infinity),
         doorType,
         doorState
       });
@@ -243,7 +247,7 @@ export class NavMeshBuilder {
 
   _computeRevisionToken(sceneId, wallSegments) {
     const segmentHash = wallSegments
-      .map((s) => `${s.wallId}|${Math.round(s.ax)}:${Math.round(s.ay)}:${Math.round(s.bx)}:${Math.round(s.by)}|${s.doorType}:${s.doorState}`)
+      .map((s) => `${s.wallId}|${Math.round(s.ax)}:${Math.round(s.ay)}:${Math.round(s.bx)}:${Math.round(s.by)}|${s.bottom}:${s.top}|${s.doorType}:${s.doorState}`)
       .join(';');
     return `${sceneId}|${segmentHash.length}|${segmentHash}`;
   }

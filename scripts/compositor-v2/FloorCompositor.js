@@ -8,17 +8,12 @@
  *
  * Render pipeline:
  *   1. Global shadow/cloud passes, then each visible level: bus slice → level RTs,
- *      full post chain **per level** (lighting … water … bloom …) **before** any
- *      merge — effects are not applied to a single pre-merged canvas.
- *   2. **LevelCompositePass** blends those per-level final RTs strictly bottom→top
- *      using straight-alpha Porter–Duff source-over. The multi-floor "sandwich"
- *      contract: each `levelFinalRTs[N]` carries content + post-chain output for
- *      floor N with alpha preserved (alpha=1 only where that floor has opaque
- *      tile/bus coverage). Any opaque pixel on an upper floor therefore
- *      occludes the lower floors it covers (e.g. a bridge over a river hides
- *      ground-floor water beneath it). Water on a lower floor receives an
- *      additional shader-level upper-floor occluder (see Phase 3) so water
- *      shading under upper geometry is suppressed before this composite runs.
+ *      full post chain **per level** (lighting … per-level water **only when a single
+ *      floor is visible** … bloom …) **before** merge.
+ *   2. **LevelCompositePass** blends per-level final RTs bottom→top (straight-alpha).
+ *      With **multiple** visible floors, **WaterEffectV2** runs **once after** this
+ *      merge so `tDiffuse` is the stacked scene (holes/stacking already correct).
+ *      Single-floor keeps water inside the per-level chain (bloom MRT / spec path).
  *   3. Distortion, PIXI/fog/lens, mask debug, blit to screen, late overlays.
  *
  * Current effects (bus overlays — rendered in step 1):
@@ -129,6 +124,13 @@ export class FloorCompositor {
     this.camera = camera;
     /** @type {any|null} */
     this._healthEvaluator = null;
+
+    /**
+     * Last `foundrySceneData` snapshot used during populate (world height, scene rect).
+     * Used to refresh per-tile V2 overlays when a tile's image changes after load.
+     * @type {object|null}
+     */
+    this._lastFoundrySceneData = null;
 
     /**
      * FloorRenderBus: owns a single THREE.Scene containing all tile meshes
@@ -466,6 +468,13 @@ export class FloorCompositor {
     /** @type {boolean} Whether bus/effect populate has completed at least once. */
     this._populateComplete = false;
 
+    /** @type {number} Last forceRepopulate wall-clock ms (for coalescing) */
+    this._lastForceRepopulateAtMs = 0;
+    /** @type {string|null} Scene id associated with last forceRepopulate */
+    this._lastForceRepopulateSceneId = null;
+    /** @type {string|null} Last forceRepopulate source tag */
+    this._lastForceRepopulateSource = null;
+
     /** @type {number} Throttle anchor for `[POPULATE RENDER-SLIM]` logs. */
     this._populateSlimRenderLogNextAt = 0;
 
@@ -602,6 +611,29 @@ export class FloorCompositor {
 
     /** @type {THREE.WebGLRenderTarget|null} Upper-floor occluder mask for water effect */
     this._waterOccluderRT = null;
+    /** @type {THREE.WebGLRenderTarget|null} Ping-pong scratch for upper-alpha occluder union */
+    this._waterOccluderScratchRT = null;
+    /** @type {THREE.Scene|null} Fullscreen scene for upper-alpha occluder union */
+    this._waterOccluderUnionScene = null;
+    /** @type {THREE.OrthographicCamera|null} Camera for upper-alpha occluder union */
+    this._waterOccluderUnionCamera = null;
+    /** @type {THREE.ShaderMaterial|null} Material for upper-alpha occluder union */
+    this._waterOccluderUnionMaterial = null;
+    /** @type {THREE.Mesh|null} Fullscreen quad for upper-alpha occluder union */
+    this._waterOccluderUnionQuad = null;
+
+    /** @type {THREE.WebGLRenderTarget|null} Ping-pong A: post-merge bg stack → water mask */
+    this._waterBgProductRT = null;
+    /** @type {THREE.WebGLRenderTarget|null} Ping-pong B */
+    this._waterBgProductScratchRT = null;
+    /** @type {THREE.Scene|null} */
+    this._waterBgProductScene = null;
+    /** @type {THREE.OrthographicCamera|null} */
+    this._waterBgProductCamera = null;
+    /** @type {THREE.ShaderMaterial|null} */
+    this._waterBgProductMaterial = null;
+    /** @type {THREE.Mesh|null} */
+    this._waterBgProductQuad = null;
 
     // ── Per-Level RT Pipeline ─────────────────────────────────────────────────
     /** @type {LevelRenderTargetPool} Per-level RT allocation pool */
@@ -657,11 +689,15 @@ export class FloorCompositor {
 
     /**
      * P2: Whether the bus scene has any objects on OVERLAY_THREE_LAYER (31).
-     * Checked cheaply each frame to skip the late overlay render pass when empty.
-     * Set to true when overlay content is added; reset/recomputed on populate.
+     * Revalidated periodically to avoid paying a permanent late-overlay render
+     * cost after transient overlay emitters/descriptors are removed.
      * @type {boolean}
      */
     this._hasOverlayLayerContent = false;
+    /** @type {number} Next timestamp (performance.now) for overlay-layer re-scan */
+    this._overlayLayerScanNextAt = 0;
+    /** @type {number} Min interval between overlay-layer scans in ms */
+    this._overlayLayerScanIntervalMs = 350;
 
     log.debug('FloorCompositor created');
   }
@@ -891,12 +927,16 @@ export class FloorCompositor {
     const camera = this.camera;
     if (!scene || !camera || !this.renderer) return;
 
-    // P2: Skip the late overlay render call when no objects are on OVERLAY_THREE_LAYER.
-    // This avoids an unnecessary renderer.render() call per frame on scenes without
-    // door icons or other late-overlay objects.
-    if (!this._hasOverlayLayerContent) {
-      // Cheap refresh: check if any bus scene child has the overlay layer enabled.
-      // Only scan top-level children (not full traverse) to keep this O(N-floors).
+    // P2: Skip the late overlay render call when no objects are on
+    // OVERLAY_THREE_LAYER. Re-scan periodically (or when currently false) so the
+    // flag can both promote and demote as overlay content appears/disappears.
+    const now = (typeof performance !== 'undefined' && typeof performance.now === 'function')
+      ? performance.now()
+      : Date.now();
+    const shouldRescan = !this._hasOverlayLayerContent || now >= this._overlayLayerScanNextAt;
+    if (shouldRescan) {
+      // Cheap refresh: check if any bus scene child has overlay layer enabled.
+      // Only scans top-level children (not full traverse) to keep this O(N-floors).
       const children = scene.children;
       let found = false;
       const overlayBit = 1 << OVERLAY_THREE_LAYER;
@@ -907,8 +947,10 @@ export class FloorCompositor {
         }
       }
       this._hasOverlayLayerContent = found;
-      if (!found) return;
+      const scanEvery = Math.max(100, Number(this._overlayLayerScanIntervalMs) || 350);
+      this._overlayLayerScanNextAt = now + scanEvery;
     }
+    if (!this._hasOverlayLayerContent) return;
 
     const renderer = this.renderer;
     const prevTarget = renderer.getRenderTarget();
@@ -1019,6 +1061,10 @@ export class FloorCompositor {
       return;
     }
 
+    if (THREE.ColorManagement && typeof THREE.ColorManagement.enabled === 'boolean') {
+      THREE.ColorManagement.enabled = true;
+    }
+
     this._sizeVec = new THREE.Vector2();
     this.renderer.getDrawingBufferSize(this._sizeVec);
     const w = Math.max(1, this._sizeVec.x);
@@ -1029,9 +1075,13 @@ export class FloorCompositor {
     // but fall back to UnsignedByte on GPUs/browsers that can't render to half-float.
     // A hard failure here can trigger webglcontextlost during startup.
     //
-    // IMPORTANT: All intermediate RTs must use LinearSRGBColorSpace so that
-    // Three.js does NOT apply sRGB encoding on write or decoding on read.
-    // The sRGB encode happens exactly once: in the final blit to the screen.
+    // Color space (aligned with V3ThreeSceneHost / V3EffectChain conventions):
+    // - Scene + post ping-pong RTs: LinearSRGBColorSpace — Three renders into RTs in
+    //   linear working space; materials sample SRGB albedo textures with correct decode.
+    //   Final sRGB encode for the canvas comes from renderer.outputColorSpace + the
+    //   fullscreen blit path (see renderer-strategy configure()).
+    // - Mask / non-color data RTs: NoColorSpace — same rationale as V3 mask passes and
+    //   V3EffectChain ping-pong targets (avoid automatic transfer on read/write).
     const makeRt = (type, depthBuffer) => ({
       minFilter: THREE.LinearFilter,
       magFilter: THREE.LinearFilter,
@@ -1039,13 +1089,13 @@ export class FloorCompositor {
       type,
       depthBuffer: !!depthBuffer,
       stencilBuffer: false,
+      colorSpace: THREE.LinearSRGBColorSpace,
     });
 
     let preferredType = THREE.HalfFloatType;
     // Quick capability probe: if we can't create a half-float RT, fall back.
     try {
       const probe = new THREE.WebGLRenderTarget(4, 4, makeRt(THREE.HalfFloatType, false));
-      probe.texture.colorSpace = THREE.LinearSRGBColorSpace;
       probe.dispose();
     } catch (e) {
       preferredType = THREE.UnsignedByteType;
@@ -1054,14 +1104,11 @@ export class FloorCompositor {
 
     const rtOpts = makeRt(preferredType, true);
     this._sceneRT = new THREE.WebGLRenderTarget(w, h, rtOpts);
-    this._sceneRT.texture.colorSpace = THREE.LinearSRGBColorSpace;
 
     // Ping-pong pair for post-processing chain. No depth needed for post passes.
     const postOpts = makeRt(preferredType, false);
     this._postA = new THREE.WebGLRenderTarget(w, h, postOpts);
-    this._postA.texture.colorSpace = THREE.LinearSRGBColorSpace;
     this._postB = new THREE.WebGLRenderTarget(w, h, postOpts);
-    this._postB.texture.colorSpace = THREE.LinearSRGBColorSpace;
 
     // Water occluder mask: screen-space alpha mask of currently viewed floor tiles.
     // Validated approach: this mask is sampled directly in the water post shader
@@ -1075,7 +1122,137 @@ export class FloorCompositor {
       type: THREE.UnsignedByteType,
       depthBuffer: false,
       stencilBuffer: false,
+      colorSpace: THREE.NoColorSpace,
     });
+    this._waterOccluderScratchRT = new THREE.WebGLRenderTarget(w, h, {
+      minFilter: THREE.LinearFilter,
+      magFilter: THREE.LinearFilter,
+      format: THREE.RGBAFormat,
+      type: THREE.UnsignedByteType,
+      depthBuffer: false,
+      stencilBuffer: false,
+      colorSpace: THREE.NoColorSpace,
+    });
+    this._waterOccluderUnionScene = new THREE.Scene();
+    this._waterOccluderUnionCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+    this._waterOccluderUnionMaterial = new THREE.ShaderMaterial({
+      uniforms: {
+        tBase: { value: null },
+        tUpper: { value: null },
+        uHasBase: { value: 0.0 },
+      },
+      vertexShader: /* glsl */`
+        varying vec2 vUv;
+        void main() {
+          vUv = uv;
+          gl_Position = vec4(position.xy, 0.0, 1.0);
+        }
+      `,
+      fragmentShader: /* glsl */`
+        uniform sampler2D tBase;
+        uniform sampler2D tUpper;
+        uniform float uHasBase;
+        varying vec2 vUv;
+        // Authoritative coverage for water occlusion: alpha only, stacked
+        // bottom-to-top with the same straight-alpha source-over rule as
+        // LevelCompositePass (not per-pixel max). Independent per-slice max
+        // treated every deck as simultaneously in front at the same UV, so a
+        // solid pixel on a lower bridge combined with a hole in the roof still
+        // read as fully occluded and killed post-merge water from upper views.
+        void main() {
+          float upperA = texture2D(tUpper, vUv).a;
+          float outA = (uHasBase > 0.5)
+            ? (upperA + texture2D(tBase, vUv).a * (1.0 - upperA))
+            : upperA;
+          gl_FragColor = vec4(0.0, 0.0, 0.0, outA);
+        }
+      `,
+      depthTest: false,
+      depthWrite: false,
+      transparent: false,
+      blending: THREE.NoBlending,
+    });
+    this._waterOccluderUnionMaterial.toneMapped = false;
+    this._waterOccluderUnionQuad = new THREE.Mesh(
+      new THREE.PlaneGeometry(2, 2),
+      this._waterOccluderUnionMaterial,
+    );
+    this._waterOccluderUnionQuad.frustumCulled = false;
+    this._waterOccluderUnionScene.add(this._waterOccluderUnionQuad);
+
+    const bgProdRtOpts = {
+      minFilter: THREE.LinearFilter,
+      magFilter: THREE.LinearFilter,
+      format: THREE.RGBAFormat,
+      type: THREE.UnsignedByteType,
+      depthBuffer: false,
+      stencilBuffer: false,
+      colorSpace: THREE.NoColorSpace,
+    };
+    this._waterBgProductRT = new THREE.WebGLRenderTarget(w, h, bgProdRtOpts);
+    this._waterBgProductScratchRT = new THREE.WebGLRenderTarget(w, h, bgProdRtOpts);
+    this._waterBgProductScene = new THREE.Scene();
+    this._waterBgProductCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+    this._waterBgProductMaterial = new THREE.ShaderMaterial({
+      uniforms: {
+        tAccum: { value: null },
+        tLayer: { value: null },
+        uHasAccum: { value: 0.0 },
+        uViewBounds: { value: new THREE.Vector4(0, 0, 1, 1) },
+        uSceneDimensions: { value: new THREE.Vector2(1, 1) },
+        uSceneRect: { value: new THREE.Vector4(0, 0, 1, 1) },
+        uHasSceneRect: { value: 0.0 },
+      },
+      vertexShader: /* glsl */`
+        varying vec2 vUv;
+        void main() {
+          vUv = uv;
+          gl_Position = vec4(position.xy, 0.0, 1.0);
+        }
+      `,
+      fragmentShader: /* glsl */`
+        uniform sampler2D tAccum;
+        uniform sampler2D tLayer;
+        uniform float uHasAccum;
+        uniform vec4 uViewBounds;
+        uniform vec2 uSceneDimensions;
+        uniform vec4 uSceneRect;
+        uniform float uHasSceneRect;
+        varying vec2 vUv;
+
+        vec2 screenUvToFoundry(vec2 screenUv) {
+          float threeX = mix(uViewBounds.x, uViewBounds.z, screenUv.x);
+          float threeY = mix(uViewBounds.y, uViewBounds.w, screenUv.y);
+          return vec2(threeX, uSceneDimensions.y - threeY);
+        }
+        vec2 foundryToSceneUv(vec2 foundryPos) {
+          return (foundryPos - uSceneRect.xy) / max(uSceneRect.zw, vec2(1e-5));
+        }
+
+        void main() {
+          float prev = (uHasAccum > 0.5) ? texture2D(tAccum, vUv).r : 1.0;
+          vec2 sceneUv = vUv;
+          if (uHasSceneRect > 0.5) {
+            sceneUv = foundryToSceneUv(screenUvToFoundry(vUv));
+          }
+          float a = texture2D(tLayer, sceneUv).a;
+          float trans = 1.0 - smoothstep(0.04, 0.22, a);
+          float outR = prev * trans;
+          gl_FragColor = vec4(outR, outR, outR, 1.0);
+        }
+      `,
+      depthTest: false,
+      depthWrite: false,
+      transparent: false,
+      blending: THREE.NoBlending,
+    });
+    this._waterBgProductMaterial.toneMapped = false;
+    this._waterBgProductQuad = new THREE.Mesh(
+      new THREE.PlaneGeometry(2, 2),
+      this._waterBgProductMaterial,
+    );
+    this._waterBgProductQuad.frustumCulled = false;
+    this._waterBgProductScene.add(this._waterBgProductQuad);
 
     // ── Per-level RT infrastructure ───────────────────────────────────────
     this._levelRTPool.initialize(w, h, preferredType);
@@ -1567,6 +1744,7 @@ export class FloorCompositor {
           || playerLight?._torchParticleSystem?.emitter?.visible === true
           || playerLight?._torchSparksSystem?.emitter?.visible === true
           || playerLight?._flashlightBeamMesh?.visible === true
+          || playerLight?._nightVisionActive === true
         )
       );
       if (playerLightActive) {
@@ -1706,6 +1884,38 @@ export class FloorCompositor {
    */
   async forceRepopulate(options = {}) {
     const { source = 'runtime-refresh' } = options;
+
+    // Coalesce duplicate repopulate requests emitted during cold-load/level-sync
+    // bootstrap paths (e.g. cold-load-bg-resync + level-context-resync). Without
+    // this, effects are cleared/rebuilt multiple times in quick succession and
+    // can briefly flash wrong-floor overlays before final visibility settles.
+    if (this._populatePromise && !this._populateComplete) {
+      log.info(`FloorCompositor: forceRepopulate coalesced into in-flight populate (source=${source})`);
+      return this._populatePromise;
+    }
+
+    const nowMs = Date.now();
+    const sceneId = canvas?.scene?.id ? String(canvas.scene.id) : null;
+    const sameScene = !!sceneId && sceneId === this._lastForceRepopulateSceneId;
+    const elapsedMs = nowMs - Number(this._lastForceRepopulateAtMs || 0);
+    if (sameScene && elapsedMs >= 0 && elapsedMs < 900) {
+      log.info(
+        `FloorCompositor: skipping duplicate forceRepopulate (source=${source}, previous=${this._lastForceRepopulateSource || 'unknown'}, elapsedMs=${elapsedMs})`
+      );
+      return this._ensureBusPopulated({ source: `${source}:coalesced` });
+    }
+
+    this._lastForceRepopulateAtMs = nowMs;
+    this._lastForceRepopulateSceneId = sceneId;
+    this._lastForceRepopulateSource = String(source);
+
+    // Prevent stale canopy overlays from rendering while the async populate
+    // queue is replaying. Tree/Bush populate jobs run later in the queue, so
+    // without this early clear old-floor overlays can flash for a few frames
+    // during floor/level transitions.
+    try { this._treeEffect?.clear?.(); } catch (_) {}
+    try { this._bushEffect?.clear?.(); } catch (_) {}
+
     this._populateComplete = false;
     this._populatePromise = null;
     this._busPopulated = false;
@@ -1885,6 +2095,69 @@ export class FloorCompositor {
   }
 
   /**
+   * Resolve scene geometry for mask overlays (populate snapshot or canvas fallback).
+   * @returns {object}
+   * @private
+   */
+  _resolveFoundrySceneDataSnapshot() {
+    const fd = this._lastFoundrySceneData ?? window.MapShine?.sceneComposer?.foundrySceneData ?? null;
+    if (fd && typeof fd === 'object') return fd;
+    const d = typeof canvas !== 'undefined' ? canvas?.dimensions : null;
+    const h = Number(d?.height) || 0;
+    const w = Number(d?.width) || 0;
+    return {
+      height: h,
+      width: w,
+      sceneWidth: w,
+      sceneHeight: h,
+      sceneX: 0,
+      sceneY: 0,
+    };
+  }
+
+  /**
+   * When a tile's `texture.src` changes after initial V2 populate, re-probe companion
+   * masks and rebuild per-tile overlays (specular, fluid, iridescence, prism, bush, tree)
+   * and re-merge fire particles (full FireEffectV2 repopulate per floor batch).
+   *
+   * @param {object} tileDoc - Updated Foundry TileDocument
+   */
+  notifyTileTextureChanged(tileDoc) {
+    if (!tileDoc) return;
+    const id = tileDoc.id ?? tileDoc._id;
+    if (!id) return;
+    const fd = this._resolveFoundrySceneDataSnapshot();
+    const p = this._refreshV2SurfaceEffectsForTile(tileDoc, fd);
+    if (p && typeof p.catch === 'function') p.catch(() => {});
+  }
+
+  /**
+   * @param {object} tileDoc
+   * @param {object} foundrySceneData
+   * @returns {Promise<void>}
+   * @private
+   */
+  async _refreshV2SurfaceEffectsForTile(tileDoc, foundrySceneData) {
+    const effects = [
+      this._specularEffect,
+      this._fluidEffect,
+      this._iridescenceEffect,
+      this._prismEffect,
+      this._bushEffect,
+      this._treeEffect,
+      this._fireEffect,
+    ];
+    const tasks = [];
+    for (const e of effects) {
+      if (e && typeof e.refreshTileAfterTextureChange === 'function') {
+        tasks.push(e.refreshTileAfterTextureChange(tileDoc, foundrySceneData));
+      }
+    }
+    if (!tasks.length) return;
+    await Promise.allSettled(tasks);
+  }
+
+  /**
    * Explicit loading-time prewarm entrypoint.
    *
    * Runs the one-time populate work that used to happen lazily on first render,
@@ -2045,6 +2318,8 @@ export class FloorCompositor {
         );
         return false;
       }
+
+      this._lastFoundrySceneData = sc.foundrySceneData ?? null;
 
       log.warn(
         `[POPULATE LOAD] begin (source=${source})`,
@@ -2241,6 +2516,16 @@ export class FloorCompositor {
       });
 
       this._populateComplete = true;
+      // Ensure at least one fresh frame after async populate finishes.
+      // Without this, first-load occlusion/shadow masks can remain stale until a
+      // user camera interaction (pan/zoom) triggers another compositor render.
+      try {
+        const ms = window.MapShine;
+        ms?.cameraFollower?.forceSync?.();
+        ms?.unifiedCamera?.syncFromPixi?.('populate-complete');
+        ms?.renderLoop?.requestRender?.();
+        ms?.renderLoop?.requestContinuousRender?.(180);
+      } catch (_) {}
       return true;
     })().finally(() => {
       // Allow retry if the attempt failed or aborted before completion.
@@ -2507,6 +2792,9 @@ export class FloorCompositor {
       }
     } catch (_) {}
     try {
+      sm.applyBuildingShadowUvRemap?.(this.camera);
+    } catch (_) {}
+    try {
       sm.render(this.renderer);
     } catch (err) {
       log.warn('FloorCompositor: ShadowManagerV2 render failed:', err);
@@ -2545,6 +2833,7 @@ export class FloorCompositor {
   } = {}) {
     if (!this._initialized) {
       log.warn('FloorCompositor.render called before initialize()');
+      this._ensureDefaultFramebuffer();
       return;
     }
 
@@ -2572,6 +2861,7 @@ export class FloorCompositor {
             };
           }
         } catch (_) {}
+        this._ensureDefaultFramebuffer();
         return;
       }
       // Clear any stale hold flag so subsequent rAFs proceed normally.
@@ -2773,6 +3063,8 @@ export class FloorCompositor {
           skyIntensity01: Number.isFinite(skyIntensity01) ? Math.max(0.0, Math.min(1.0, skyIntensity01)) : 1.0,
           sceneDarkness01,
           effectiveDarkness01,
+          skyTintDarknessLightsEnabled: this._skyColorEffect?.params?.skyTintDarknessLightsEnabled,
+          skyTintDarknessLightsIntensity: this._skyColorEffect?.params?.skyTintDarknessLightsIntensity,
         });
       } catch (_) {}
       try {
@@ -2813,6 +3105,7 @@ export class FloorCompositor {
 
     if (populateSlimRender) {
       this._runPopulateSlimRenderFrame();
+      this._ensureDefaultFramebuffer();
       return;
     }
 
@@ -2850,7 +3143,10 @@ export class FloorCompositor {
     const _disableOverheadInLighting = _alphaIsoDebug?.disableOverheadInLighting === true;
     const _disableRoofInLighting = _alphaIsoDebug?.disableRoofInLighting === true;
     const _skipWaterPass = _alphaIsoDebug?.skipWaterPass === true;
-    const _disableWaterOccluder = _alphaIsoDebug?.disableWaterOccluder === true;
+    // Water upper-floor occluder: when multiple floors are visible, the water
+    // shader can sample a screen-space mask built from upper levels' authored
+    // scene RT alpha (see `_buildUpperSceneAlphaOccluder`). Bisect with
+    // `window.MapShine.__alphaIsolationDebug.disableWaterOccluder = true`.
     const _skipLensPass = _alphaIsoDebug?.skipLensPass === true;
     if (_profiling && !this._passTimings) {
       this._passTimings = {};
@@ -2976,6 +3272,7 @@ export class FloorCompositor {
       _profiling,
       _dbgStages,
       _skipWaterPass,
+      _alphaIsoDebug,
       cloudShadowTexLegacy,
       cloudShadowRawTexLegacy,
       combinedShadowTex,
@@ -2991,6 +3288,7 @@ export class FloorCompositor {
     if (!_compositeOut) {
       log.warn('FloorCompositor.render: per-level pipeline produced no output');
       if (_dbgStages) this._debugFirstFrameStagesLogged = true;
+      this._ensureDefaultFramebuffer();
       return;
     }
     let currentInput = _compositeOut;
@@ -3036,6 +3334,16 @@ export class FloorCompositor {
       }
     }
     if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: lens.render DONE'); } catch (_) {} }
+
+    // Night vision goggles post-pass (after lens): tube tint, gain, bloom burn, scanlines.
+    if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: playerLight.nightVision'); } catch (_) {} }
+    if (resolveEffectEnabled(this._playerLightEffect) && this._playerLightEffect?.shouldRenderNightVision?.()) {
+      const nvOutput = (currentInput === this._postA) ? this._postB : this._postA;
+      if (this._playerLightEffect.renderNightVision(this.renderer, this.camera, currentInput, nvOutput)) {
+        currentInput = nvOutput;
+      }
+    }
+    if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: playerLight.nightVision DONE'); } catch (_) {} }
 
     // ── Step 3: Optional mask debug overlay → blit to screen ────────────
     if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: blitToScreen'); } catch (_) {} }
@@ -3122,7 +3430,9 @@ export class FloorCompositor {
     // This keeps interactive world controls (e.g. Three door icons) above
     // fog, bloom, color correction, and any screen-space passes.
     if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: lateOverlay.render'); } catch (_) {} }
+    if (_profiling) _profileT0 = performance.now();
     this._renderLateWorldOverlay();
+    if (_profiling) this._recordPassTiming('lateOverlayRender', _profileT0);
     if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: lateOverlay.render DONE'); } catch (_) {} }
 
     // Cloud-top blit: render after late world overlay so atmospheric cloud tops
@@ -3171,6 +3481,10 @@ export class FloorCompositor {
         }
       } catch (_) {}
     }
+
+    // Always leave the context on the default framebuffer so the canvas presents
+    // the last blit. _blitToScreen restores prevTarget, which can re-bind an RT.
+    this._ensureDefaultFramebuffer();
   }
 
   /**
@@ -3352,6 +3666,20 @@ export class FloorCompositor {
    * @param {THREE.WebGLRenderTarget} sourceRT
    * @private
    */
+  /**
+   * Bind the WebGL default framebuffer (visible canvas). Passes and
+   * {@link #_blitToScreen} can leave an off-screen RT bound; the canvas then
+   * keeps showing stale pixels (often read as grey) until something resets.
+   * @private
+   */
+  _ensureDefaultFramebuffer() {
+    try {
+      const r = this.renderer;
+      if (!r || typeof r.setRenderTarget !== 'function') return;
+      r.setRenderTarget(null);
+    } catch (_) {}
+  }
+
   _blitToScreen(sourceRT) {
     if (!this._blitMaterial || !sourceRT) return;
     const renderer = this.renderer;
@@ -3518,7 +3846,15 @@ export class FloorCompositor {
    */
   _onLevelContextChanged(payload) {
     if (!this._busPopulated) return;
+    try {
+      this._overheadShadowEffect?.invalidateDynamicCaches?.('level-context-changed');
+    } catch (_) {}
     this._applyCurrentFloorVisibility(payload);
+    try {
+      const ms = window.MapShine;
+      ms?.renderLoop?.requestRender?.();
+      ms?.renderLoop?.requestContinuousRender?.(220);
+    } catch (_) {}
   }
 
   /**
@@ -3756,7 +4092,11 @@ export class FloorCompositor {
           const waterFloorKey = waterFloor?.compositorKey ?? null;
           const compositor = window.MapShine?.sceneComposer?._sceneMaskCompositor;
           const waterFloorTex = (compositor && waterFloorKey)
-            ? (compositor.getFloorTexture?.(waterFloorKey, 'outdoors') ?? null)
+            ? (
+              compositor.getFloorTexture?.(waterFloorKey, 'skyReach')
+              ?? compositor.getFloorTexture?.(waterFloorKey, 'outdoors')
+              ?? null
+            )
             : null;
           if (waterFloorTex) {
             waterOutdoorsTex = waterFloorTex;
@@ -3896,6 +4236,7 @@ export class FloorCompositor {
       try { this._renderBus.setVisibleFloors(fallbackIdx); } catch (_) {}
       try { this._fireEffect?.onFloorChange?.(fallbackIdx); } catch (_) {}
       try { this._dustEffect?.onFloorChange?.(fallbackIdx); } catch (_) {}
+      try { this._specularEffect?.onFloorChange?.(fallbackIdx); } catch (_) {}
       try { this._waterSplashesEffect?.onFloorChange?.(fallbackIdx); } catch (_) {}
       try { this._windowLightEffect?.onFloorChange?.(fallbackIdx); } catch (_) {}
       try { this._cloudEffect?.onFloorChange?.(fallbackIdx); } catch (_) {}
@@ -4006,6 +4347,8 @@ export class FloorCompositor {
     this._fireEffect.onFloorChange(maxFloorIndex);
     // Notify dust effect of floor change so it can swap active particle systems.
     this._dustEffect.onFloorChange(maxFloorIndex);
+    // Specular background overlay needs floor rebinding on level changes.
+    try { this._specularEffect?.onFloorChange?.(maxFloorIndex); } catch (_) {}
     // Iridescence overlays are bus-managed but we still notify for parity.
     try { this._iridescenceEffect?.onFloorChange?.(maxFloorIndex); } catch (_) {}
     // Notify water splashes of floor change so it can swap active systems.
@@ -4278,6 +4621,27 @@ export class FloorCompositor {
   }
 
   /**
+   * Wipe Map Shine V2 lighting meshes and rebuild from Foundry; resync specular/iridescence light caches.
+   * Console (GM): `await MapShine.rebuildLighting({ repairSceneFlags: true })`
+   * @param {{ repairSceneFlags?: boolean, foundryLightingRefresh?: boolean }} [options]
+   * @returns {Promise<{ ok: boolean, reason?: string, orphansRemoved?: number }>}
+   */
+  async rebuildLightingFromFoundry(options = {}) {
+    const le = this._lightingEffect;
+    if (!le?.forceRebuildFromFoundry) {
+      return { ok: false, reason: 'lighting_effect_missing' };
+    }
+    const out = await le.forceRebuildFromFoundry(options);
+    try {
+      this._specularEffect?.resyncLightsFromFoundry?.();
+    } catch (_) {}
+    try {
+      this._iridescenceEffect?.resyncLightsFromFoundry?.();
+    } catch (_) {}
+    return out;
+  }
+
+  /**
    * External resize handler — call when the viewport size changes.
    * @param {number} width
    * @param {number} height
@@ -4289,6 +4653,9 @@ export class FloorCompositor {
     if (this._postA)   this._postA.setSize(w, h);
     if (this._postB)   this._postB.setSize(w, h);
     if (this._waterOccluderRT) this._waterOccluderRT.setSize(w, h);
+    if (this._waterOccluderScratchRT) this._waterOccluderScratchRT.setSize(w, h);
+    if (this._waterBgProductRT) this._waterBgProductRT.setSize(w, h);
+    if (this._waterBgProductScratchRT) this._waterBgProductScratchRT.setSize(w, h);
     try { this._levelRTPool?.onResize?.(w, h); } catch (_) {}
     try { this._shadowManagerEffect?.onResize?.(w, h); } catch (_) {}
     try { this._bushEffect?.onResize?.(w, h); } catch (_) {}
@@ -4309,9 +4676,208 @@ export class FloorCompositor {
     try { this._invertEffect?.onResize?.(w, h); } catch (_) {}
     try { this._sepiaEffect?.onResize?.(w, h); } catch (_) {}
     try { this._lensEffect?.onResize?.(w, h); } catch (_) {}
+    try { this._playerLightEffect?.onResize?.(w, h); } catch (_) {}
     try { this._distortionEffect?.onResize?.(w, h); } catch (_) {}
     try { this._floorDepthBlurEffect?.onResize?.(w, h); } catch (_) {}
     log.debug(`FloorCompositor.onResize: RTs resized to ${w}x${h}`);
+  }
+
+  /**
+   * Copy viewport / scene-rect uniforms from WaterEffectV2 compose material into
+   * the post-merge bg product pass (must run after {@link WaterEffectV2#syncComposeViewportUniforms}).
+   * @private
+   */
+  _syncWaterBgProductUniformsFromWaterCompose() {
+    const src = this._waterEffect?._composeMaterial?.uniforms;
+    const dst = this._waterBgProductMaterial?.uniforms;
+    if (!src || !dst) return;
+    try {
+      if (src.uViewBounds?.value && dst.uViewBounds?.value) {
+        dst.uViewBounds.value.copy(src.uViewBounds.value);
+      }
+      if (src.uSceneDimensions?.value && dst.uSceneDimensions?.value) {
+        dst.uSceneDimensions.value.copy(src.uSceneDimensions.value);
+      }
+      if (src.uSceneRect?.value && dst.uSceneRect?.value) {
+        dst.uSceneRect.value.copy(src.uSceneRect.value);
+      }
+      if (src.uHasSceneRect && dst.uHasSceneRect) {
+        dst.uHasSceneRect.value = src.uHasSceneRect.value;
+      }
+    } catch (_) {}
+  }
+
+  /**
+   * Bake transmittance ∏(1 - smoothstep(bg alpha)) into a single fullscreen RT (R channel),
+   * two textures per draw to stay under fragment sampler limits in the water shader.
+   * @param {Array<import('three').Texture>} stackTextures
+   * @returns {import('three').WebGLRenderTarget|null}
+   * @private
+   */
+  _buildWaterBackgroundAlphaMaskRT(stackTextures) {
+    const THREE = window.THREE;
+    const arr = Array.isArray(stackTextures) ? stackTextures.filter((t) => t) : [];
+    if (!THREE || !this.renderer || !arr.length) return null;
+    if (!this._waterBgProductRT || !this._waterBgProductScratchRT
+      || !this._waterBgProductScene || !this._waterBgProductCamera || !this._waterBgProductMaterial) {
+      return null;
+    }
+    const renderer = this.renderer;
+    const prevTarget = renderer.getRenderTarget();
+    const prevAutoClear = renderer.autoClear;
+    const prevColor = renderer.getClearColor(new THREE.Color());
+    const prevAlpha = renderer.getClearAlpha();
+    const mat = this._waterBgProductMaterial.uniforms;
+    const dummy = this._waterEffect?._fallbackBlack ?? null;
+    const outA = this._waterBgProductRT;
+    const outB = this._waterBgProductScratchRT;
+    let lastRT = null;
+    try {
+      for (let i = 0; i < arr.length; i++) {
+        const writeRT = (i % 2 === 0) ? outA : outB;
+        mat.uHasAccum.value = i > 0 ? 1.0 : 0.0;
+        mat.tAccum.value = i > 0 && lastRT ? lastRT.texture : dummy;
+        mat.tLayer.value = arr[i];
+        renderer.setRenderTarget(writeRT);
+        renderer.setClearColor(0x000000, 1);
+        renderer.autoClear = true;
+        renderer.render(this._waterBgProductScene, this._waterBgProductCamera);
+        lastRT = writeRT;
+      }
+    } finally {
+      renderer.autoClear = prevAutoClear;
+      renderer.setClearColor(prevColor, prevAlpha);
+      if (typeof renderer.setClearAlpha === 'function') {
+        try { renderer.setClearAlpha(prevAlpha); } catch (_) {}
+      }
+      renderer.setRenderTarget(prevTarget);
+    }
+    return lastRT;
+  }
+
+  /**
+   * Build a screen-space upper-floor occluder from authoritative per-level scene RT alpha.
+   * Stacks slice alphas bottom→top with straight-alpha source-over (matches
+   * `LevelCompositePass`), not per-pixel max — max treated independent decks as
+   * simultaneously opaque and hid water through higher-floor holes.
+   *
+   * @param {Array<THREE.WebGLRenderTarget|null|undefined>} upperSceneRTs
+   * @returns {THREE.WebGLRenderTarget|null}
+   * @private
+   */
+  _buildUpperSceneAlphaOccluder(upperSceneRTs) {
+    if (!Array.isArray(upperSceneRTs) || upperSceneRTs.length === 0) return null;
+    if (!this._waterOccluderRT || !this._waterOccluderScratchRT) return null;
+    if (!this._waterOccluderUnionScene || !this._waterOccluderUnionCamera || !this._waterOccluderUnionMaterial) return null;
+
+    const textures = [];
+    for (const rt of upperSceneRTs) {
+      const tex = rt?.texture ?? null;
+      if (tex) textures.push(tex);
+    }
+    if (!textures.length) return null;
+
+    const renderer = this.renderer;
+    const THREE = window.THREE;
+    const prevTarget = renderer.getRenderTarget();
+    const prevAutoClear = renderer.autoClear;
+    const prevColor = renderer.getClearColor(new THREE.Color());
+    const prevAlpha = renderer.getClearAlpha();
+
+    let readRT = null;
+    let writeRT = this._waterOccluderRT;
+    const mat = this._waterOccluderUnionMaterial;
+
+    try {
+      for (const tex of textures) {
+        mat.uniforms.tBase.value = readRT ? readRT.texture : null;
+        mat.uniforms.uHasBase.value = readRT ? 1.0 : 0.0;
+        mat.uniforms.tUpper.value = tex;
+        renderer.setRenderTarget(writeRT);
+        renderer.setClearColor(0x000000, 0);
+        renderer.autoClear = true;
+        renderer.render(this._waterOccluderUnionScene, this._waterOccluderUnionCamera);
+        if (!readRT) {
+          readRT = writeRT;
+          writeRT = this._waterOccluderScratchRT;
+        } else {
+          const tmp = readRT;
+          readRT = writeRT;
+          writeRT = tmp;
+        }
+      }
+    } finally {
+      renderer.autoClear = prevAutoClear;
+      renderer.setClearColor(prevColor, prevAlpha);
+      if (typeof renderer.setClearAlpha === 'function') {
+        try { renderer.setClearAlpha(prevAlpha); } catch (_) {}
+      }
+      renderer.setRenderTarget(prevTarget);
+    }
+    return readRT;
+  }
+
+  /**
+   * Public occlusion contract for floor-aware effects:
+   * returns authored upper-slice alpha occluder texture for `floorIndex`.
+   *
+   * @param {number} floorIndex
+   * @returns {import('three').Texture|null}
+   */
+  getUpperSceneOccluderTextureForFloorIndex(floorIndex) {
+    const fi = Number(floorIndex);
+    if (!Number.isFinite(fi)) return null;
+    try {
+      const diag = window.MapShine?.__v2PerLevelDiag ?? null;
+      const visibleFloors = Array.isArray(diag?.visibleFloors) ? diag.visibleFloors : null;
+      const levelSceneRTs = Array.isArray(diag?.levelSceneRTs) ? diag.levelSceneRTs : null;
+      if (
+        !visibleFloors
+        || !levelSceneRTs
+        || visibleFloors.length !== levelSceneRTs.length
+        || visibleFloors.length === 0
+      ) return null;
+      const li = visibleFloors.findIndex((v) => Number(v) === fi);
+      if (li < 0 || li >= visibleFloors.length - 1) return null;
+      const rt = this._buildUpperSceneAlphaOccluder(levelSceneRTs.slice(li + 1));
+      return rt?.texture ?? null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /**
+   * Mirror lighting shadow textures into WaterEffectV2 so foam/murk/specular
+   * sample the same factors as LightingEffectV2.
+   * When ShadowManagerV2 is enabled, bind its combined RT to tCombinedShadow
+   * (never use cloud-only texture as a false "combined" for foam).
+   * @param {object} o
+   * @param {THREE.Texture|null} [o.cloudShadowTexLegacy]
+   * @param {THREE.Texture|null} [o.buildingShadowTex]
+   * @param {THREE.Texture|null} [o.overheadShadowTexLegacy]
+   * @private
+   */
+  _bindWaterShadowUniforms({
+    cloudShadowTexLegacy = null,
+    buildingShadowTex = null,
+    overheadShadowTexLegacy = null,
+  } = {}) {
+    const water = this._waterEffect;
+    if (!water) return;
+    const sm = this._shadowManagerEffect;
+    const smCombined = (resolveEffectEnabled(sm) && sm?.combinedShadowTexture)
+      ? sm.combinedShadowTexture
+      : null;
+    try {
+      if (smCombined) {
+        water.setShadowManagerCombinedTexture?.(smCombined);
+      } else {
+        water.setShadowManagerCombinedTexture?.(null);
+      }
+      water.setCloudShadowTexture?.(cloudShadowTexLegacy ?? null);
+      water.setBuildingShadowTexture?.(buildingShadowTex ?? null);
+      water.setOverheadShadowTexture?.(overheadShadowTexLegacy ?? null);
+    } catch (_) {}
   }
 
   // ── Per-Level RT Pipeline ──────────────────────────────────────────────────
@@ -4329,6 +4895,7 @@ export class FloorCompositor {
       _profiling,
       _dbgStages,
       _skipWaterPass,
+      _alphaIsoDebug,
       cloudShadowTexLegacy,
       cloudShadowRawTexLegacy,
       combinedShadowTex,
@@ -4347,8 +4914,36 @@ export class FloorCompositor {
     const floorStack = window.MapShine?.floorStack;
     const visibleFloors = floorStack?.getVisibleFloors?.() ?? [];
     if (!visibleFloors.length) return null;
+    const usePostMergeWater = visibleFloors.length > 1;
+    const dbgWaterOcc = _alphaIsoDebug?.disableWaterOccluder;
+    const _disableWaterOccluder = dbgWaterOcc === true
+      || (dbgWaterOcc !== false && visibleFloors.length < 2);
+    const floorsByIndex = new Map(
+      (floorStack?.getFloors?.() ?? []).map((f) => [Number(f?.index), f]),
+    );
+    const resolveWaterOutdoorsForFloor = (floorIndex) => {
+      try {
+        const idx = Number(floorIndex);
+        if (!Number.isFinite(idx)) return null;
+        const compositor = window.MapShine?.sceneComposer?._sceneMaskCompositor ?? null;
+        const floor = floorsByIndex.get(idx) ?? null;
+        const floorKey = floor?.compositorKey ?? null;
+        if (compositor && floorKey) {
+          return (
+            compositor.getFloorTexture?.(floorKey, 'skyReach')
+            ?? compositor.getFloorTexture?.(floorKey, 'outdoors')
+            ?? null
+          );
+        }
+      } catch (_) {}
+      return null;
+    };
 
     if (_dbgStages) { try { log.info(`[V2 PerLevel] rendering ${visibleFloors.length} level(s)`); } catch (_) {} }
+
+    // Hint for bus per-level prepass: enables stacked fire visibility (`fi <= slice L`).
+    // Value must be a finite number (we use the active top index); semantics are in FloorRenderBus.
+    const topVisibleFloorIndexForFire = Number(visibleFloors[visibleFloors.length - 1]?.index ?? 0);
 
     // Track which level indices are active so we can release stale pool entries.
     const activeLevels = new Set();
@@ -4356,18 +4951,20 @@ export class FloorCompositor {
     // Parallel array of raw sceneRTs (post-`renderFloorRangeTo`, pre-any-pass).
     // Used by the rebind pass below and exposed via diag for dumpLevelRTs().
     const levelSceneRTs = [];
+    /** @type {Array<{floor:any, levelIndex:number, rts:any}>} */
+    const perLevelEntries = [];
 
+    // Prepass: render raw sceneRT for every visible level first. This makes
+    // authored alpha for upper levels available when building water occluders
+    // for lower levels in the post chain.
     for (let li = 0; li < visibleFloors.length; li++) {
       const floor = visibleFloors[li];
       const levelIndex = Number(floor?.index ?? li);
       activeLevels.add(levelIndex);
-
       const rts = this._levelRTPool.acquire(levelIndex);
       if (!rts) continue;
-
-      const { sceneRT: levelSceneRT, postA: levelPostA, postB: levelPostB } = rts;
-
-      // ── Bus render for this single level ───────────────────────────────
+      perLevelEntries.push({ floor, levelIndex, rts });
+      const { sceneRT: levelSceneRT } = rts;
       if (_profiling) _profileT0 = performance.now();
       this._renderBus.renderFloorRangeTo(
         this.renderer, this.camera,
@@ -4379,9 +4976,26 @@ export class FloorCompositor {
           clearBeforeRender: true,
           clearAlpha: 0,
           clearColor: 0x000000,
+          topVisibleFloorIndexForFire,
         },
       );
       if (_profiling) this._recordPassTiming(`perLevel_busRender_${levelIndex}`, _profileT0);
+      levelSceneRTs.push(levelSceneRT);
+    }
+
+    let windowLightBufW = 1;
+    let windowLightBufH = 1;
+    try {
+      if (this.renderer && this._sizeVec && typeof this.renderer.getDrawingBufferSize === 'function') {
+        this.renderer.getDrawingBufferSize(this._sizeVec);
+        windowLightBufW = Math.max(1, Math.floor(this._sizeVec.x));
+        windowLightBufH = Math.max(1, Math.floor(this._sizeVec.y));
+      }
+    } catch (_) {}
+
+    for (let li = 0; li < perLevelEntries.length; li++) {
+      const { levelIndex, rts } = perLevelEntries[li];
+      const { sceneRT: levelSceneRT, postA: levelPostA, postB: levelPostB } = rts;
 
       // ── Post-processing chain for this level ───────────────────────────
       let currentInput = levelSceneRT;
@@ -4389,15 +5003,20 @@ export class FloorCompositor {
       // Lighting pass
       if (resolveEffectEnabled(this._lightingEffect)) {
         if (_profiling) _profileT0 = performance.now();
+        this._windowLightEffect?.setRenderFloorIndex?.(levelIndex);
         const winScene = resolveEffectEnabled(this._windowLightEffect)
           ? this._windowLightEffect._scene : null;
         const shadowW = Number(combinedShadowRawTex?.image?.width) || levelSceneRT.width || 1;
         const shadowH = Number(combinedShadowRawTex?.image?.height) || levelSceneRT.height || 1;
         this._windowLightEffect?.setCloudShadowTexture?.(combinedShadowRawTex, shadowW, shadowH, windowCloudShadowViewBounds);
-        this._windowLightEffect?.setOverheadRoofAlphaTexture?.(overheadRoofAlphaTex, levelSceneRT.width || 1, levelSceneRT.height || 1);
+        this._windowLightEffect?.setOverheadRoofAlphaTexture?.(overheadRoofAlphaTex, windowLightBufW, windowLightBufH);
         this._windowLightEffect?.setCeilingTransmittanceTexture?.(ceilingTransmittanceTex);
         this._windowLightEffect?.syncFrameOcclusion?.(this);
         this._skyColorEffect?.setOverheadRoofAlphaTexture?.(overheadRoofAlphaTex);
+
+        try {
+          this._lightingEffect?.setRenderFloorIndexForLights?.(levelIndex);
+        } catch (_) {}
 
         let outdoorsForLightingTex = null;
         try {
@@ -4446,48 +5065,37 @@ export class FloorCompositor {
         currentInput = fOut;
       }
 
-      // Water pass — per-level, using that level's water data
+      // Water pass — per-level only when a single floor is visible (bloom MRT path).
+      // Multi-floor: one water pass after LevelCompositePass on the merged RT.
       let _waterPassWrote = false;
-      if (!_skipWaterPass && resolveEffectEnabled(this._waterEffect)) {
+      if (!usePostMergeWater && !_skipWaterPass && resolveEffectEnabled(this._waterEffect)) {
+        let waterDataFloorIndex = levelIndex;
         try {
           // Set per-level water context so the shader uses this level's mask data
-          this._waterEffect.setLevelContext?.(levelIndex);
+          const resolvedDataFloor = this._waterEffect.setLevelContext?.(levelIndex);
+          if (Number.isFinite(Number(resolvedDataFloor))) {
+            waterDataFloorIndex = Number(resolvedDataFloor);
+          }
+        } catch (_) {}
+        try {
+          // Mirror V3 overlay floor-binding semantics:
+          // bind outdoors per rendered level (skyReach-first), and when this
+          // slice borrows lower-floor water data bind that lower floor's mask.
+          const perLevelWaterOutdoors = resolveWaterOutdoorsForFloor(waterDataFloorIndex);
+          if (perLevelWaterOutdoors) {
+            this._waterEffect.setOutdoorsMask?.(perLevelWaterOutdoors);
+          } else if (visibleFloors.length > 1) {
+            this._waterEffect.setOutdoorsMask?.(this._getNeutralOutdoorsTexture());
+          }
         } catch (_) {}
 
-        // Upper-floor occluder: screen-space alpha union of every WALKABLE tile
-        // on floors above `levelIndex`. Feeds the water shader's
-        // `tWaterOccluderAlpha` so water below a solid upper tile (bridge, deck,
-        // upper-floor slab) is suppressed inside the ground RT before the
-        // composite runs.
-        //
-        // Intentionally excludes `__bg_image__*` backgrounds. Full-scene upper
-        // backgrounds are *artwork*, not physical occluders — their visual
-        // coverage is already handled correctly by LevelCompositePass using the
-        // upper RT's own alpha channel (straight-alpha source-over). Feeding bg
-        // images into this shader-level occluder would kill water globally on
-        // any scene whose upper "floor" is represented as a full-scene image
-        // (the common case), because any opaque texel in that image maps to
-        // `occluderBlend ≈ 1` and short-circuits the water pass to passthrough.
-        // Net effect of that misconfiguration is water only appearing in pixels
-        // where BOTH the upper AND ground art have alpha = 0 — a failure mode
-        // we want to avoid.
-        //
-        // If the upper bg image genuinely authors opaque alpha over a
-        // water-masked region, the composite still hides the water below
-        // correctly. If it authors alpha holes, the composite reveals the
-        // ground RT's water through the hole. Either way, the user-chosen
-        // "opaque upper art hides water below" semantic is preserved by the
-        // composite alone.
+        // Upper-floor occluder: union of authored per-level scene alpha from
+        // levels above the current slice. This uses the same source alpha that
+        // LevelCompositePass / LevelAlphaRebind rely on.
         let waterOccluder = null;
-        if (li < visibleFloors.length - 1 && this._waterOccluderRT) {
+        if (!_disableWaterOccluder && li < visibleFloors.length - 1 && this._waterOccluderRT) {
           try {
-            this._renderBus.renderFloorMaskTo(
-              this.renderer, this.camera,
-              levelIndex + 1,
-              this._waterOccluderRT,
-              { includeHiddenAboveFloors: true, includeBackground: false },
-            );
-            waterOccluder = this._waterOccluderRT;
+            waterOccluder = this._buildUpperSceneAlphaOccluder(levelSceneRTs.slice(li + 1));
           } catch (_) {
             waterOccluder = null;
           }
@@ -4495,14 +5103,28 @@ export class FloorCompositor {
 
         const waterOut = (currentInput === levelPostA) ? levelPostB : levelPostA;
         if (_profiling) _profileT0 = performance.now();
-        _waterPassWrote = this._waterEffect.render(this.renderer, this.camera, currentInput, waterOut, waterOccluder);
+        this._bindWaterShadowUniforms({
+          cloudShadowTexLegacy,
+          buildingShadowTex,
+          overheadShadowTexLegacy,
+        });
+        _waterPassWrote = this._waterEffect.render(
+          this.renderer,
+          this.camera,
+          currentInput,
+          waterOut,
+          waterOccluder,
+          levelSceneRT?.texture ?? null,
+        );
         if (_profiling) this._recordPassTiming(`perLevel_water_${levelIndex}`, _profileT0);
         if (_waterPassWrote) currentInput = waterOut;
+      } else if (usePostMergeWater) {
+        try { this._bloomEffect?.setWaterSpecularBloomTexture?.(null); } catch (_) {}
       }
 
       // Feed water specular bloom texture (only meaningful from the last level that had water)
       try {
-        const wt = (_waterPassWrote && typeof this._waterEffect?.getWaterSpecularBloomTexture === 'function')
+        const wt = (!usePostMergeWater && _waterPassWrote && typeof this._waterEffect?.getWaterSpecularBloomTexture === 'function')
           ? this._waterEffect.getWaterSpecularBloomTexture() : null;
         this._bloomEffect?.setWaterSpecularBloomTexture?.(wt ?? null);
       } catch (_) {}
@@ -4581,6 +5203,8 @@ export class FloorCompositor {
       //   - LevelCompositePass source-over reveals the ground RT (and
       //     any ground-floor effects like water) through every authored
       //     hole, not just where both RGB and alpha were carved.
+      // Always run alpha rebind so effect alpha cannot accidentally flatten
+      // authored holes and mask lower floors.
       if (_profiling) _profileT0 = performance.now();
       const rebindOut = (currentInput === levelPostA) ? levelPostB : levelPostA;
       const rebound = this._levelAlphaRebindPass.render(
@@ -4588,16 +5212,20 @@ export class FloorCompositor {
         currentInput,
         levelSceneRT,
         rebindOut,
+        { allowAlphaWiden: _waterPassWrote === true },
       );
       if (_profiling) this._recordPassTiming(`perLevel_alphaRebind_${levelIndex}`, _profileT0);
       if (rebound) currentInput = rebindOut;
 
       levelFinalRTs.push(currentInput);
-      levelSceneRTs.push(levelSceneRT);
 
       // Restore water to global state after this level's pass
       try { this._waterEffect?.clearLevelContext?.(); } catch (_) {}
     }
+    this._windowLightEffect?.setRenderFloorIndex?.(null);
+    try {
+      this._lightingEffect?.setRenderFloorIndexForLights?.(null);
+    } catch (_) {}
 
     // Release pool entries for levels no longer visible.
     this._levelRTPool.releaseStale(activeLevels);
@@ -4618,6 +5246,96 @@ export class FloorCompositor {
       this._postB,
     );
     if (_profiling) this._recordPassTiming('perLevel_composite', _profileT0);
+
+    /** Merged composite lives in `_postA`; post-merge water may write `_postB`. */
+    let mergedCompositeOut = this._postA;
+    if (usePostMergeWater && !_skipWaterPass && resolveEffectEnabled(this._waterEffect)) {
+      const activeFloor = floorStack?.getActiveFloor?.();
+      const ai = Number.isFinite(Number(activeFloor?.index))
+        ? Number(activeFloor.index)
+        : 0;
+      let dataFloor = -1;
+      try {
+        dataFloor = typeof this._waterEffect.setPostMergeWaterContext === 'function'
+          ? Number(this._waterEffect.setPostMergeWaterContext(ai))
+          : -1;
+      } catch (_) {
+        dataFloor = -1;
+      }
+      try {
+        const perLevelWaterOutdoors = resolveWaterOutdoorsForFloor(
+          Number.isFinite(dataFloor) && dataFloor >= 0 ? dataFloor : ai,
+        );
+        if (perLevelWaterOutdoors) {
+          this._waterEffect.setOutdoorsMask?.(perLevelWaterOutdoors);
+        } else {
+          this._waterEffect.setOutdoorsMask?.(this._getNeutralOutdoorsTexture());
+        }
+      } catch (_) {}
+      // Post-merge: punch water with every bus background **between** the water
+      // data floor (e.g. ground) and the viewer — e.g. levels 1+2 when source is 0
+      // and you stand on the roof. Resolve each slice by FloorBand.index first,
+      // then stack index j as fallback.
+      try {
+        const bus = this._renderBus;
+        let sourceSi = visibleFloors.findIndex(
+          (f) => Number(f?.index) === Number(dataFloor),
+        );
+        if (sourceSi < 0) {
+          // Water source below the lowest visible slice: mask the whole visible stack.
+          sourceSi = -1;
+        }
+        const stackTex = [];
+        for (let j = sourceSi + 1; j < visibleFloors.length; j++) {
+          const li = Number(visibleFloors[j]?.index);
+          let t = null;
+          if (Number.isFinite(li) && typeof bus?.getBackgroundImageMapForFloorIndex === 'function') {
+            t = bus.getBackgroundImageMapForFloorIndex(li);
+          }
+          if (!t && typeof bus?.getBackgroundImageMapForStackIndex === 'function') {
+            t = bus.getBackgroundImageMapForStackIndex(j);
+          }
+          if (t) stackTex.push(t);
+        }
+        const layers = stackTex.slice(0, 8);
+        let maskRt = null;
+        if (layers.length) {
+          try {
+            this._waterEffect.syncComposeViewportUniforms?.(this.renderer, this.camera);
+          } catch (_) {}
+          this._syncWaterBgProductUniformsFromWaterCompose();
+          maskRt = this._buildWaterBackgroundAlphaMaskRT(layers);
+        }
+        this._waterEffect.setWaterBackgroundAlphaMaskTexture?.(
+          maskRt?.texture ?? null,
+        );
+      } catch (_) {}
+      let postMergeWaterWrote = false;
+      if (_profiling) _profileT0 = performance.now();
+      try {
+        this._bindWaterShadowUniforms({
+          cloudShadowTexLegacy,
+          buildingShadowTex,
+          overheadShadowTexLegacy,
+        });
+        postMergeWaterWrote = this._waterEffect.render(
+          this.renderer,
+          this.camera,
+          this._postA,
+          this._postB,
+          null,
+          null,
+        );
+      } catch (_) {
+        postMergeWaterWrote = false;
+      } finally {
+        try { this._waterEffect.setWaterBackgroundAlphaMaskTexture?.(null); } catch (_) {}
+      }
+      if (_profiling) this._recordPassTiming('postMerge_water', _profileT0);
+      if (postMergeWaterWrote) mergedCompositeOut = this._postB;
+      try { this._bloomEffect?.setWaterSpecularBloomTexture?.(null); } catch (_) {}
+      try { this._waterEffect?.clearLevelContext?.(); } catch (_) {}
+    }
 
     // Expose per-level diagnostics on MapShine for console inspection
     try {
@@ -4650,7 +5368,7 @@ export class FloorCompositor {
 
     if (_dbgStages) { try { log.info('[V2 PerLevel] composite complete'); } catch (_) {} }
 
-    return this._postA;
+    return mergedCompositeOut;
   }
 
   // ── Cleanup ────────────────────────────────────────────────────────────────
@@ -4713,6 +5431,9 @@ export class FloorCompositor {
     try { this._postA?.dispose(); } catch (_) {}
     try { this._postB?.dispose(); } catch (_) {}
     try { this._waterOccluderRT?.dispose(); } catch (_) {}
+    try { this._waterOccluderScratchRT?.dispose(); } catch (_) {}
+    try { this._waterBgProductRT?.dispose(); } catch (_) {}
+    try { this._waterBgProductScratchRT?.dispose(); } catch (_) {}
     try { this._levelRTPool?.dispose(); } catch (_) {}
     try { this._levelCompositePass?.dispose(); } catch (_) {}
     try { this._levelAlphaRebindPass?.dispose(); } catch (_) {}
@@ -4720,6 +5441,21 @@ export class FloorCompositor {
     this._postA = null;
     this._postB = null;
     this._waterOccluderRT = null;
+    this._waterOccluderScratchRT = null;
+    this._waterBgProductRT = null;
+    this._waterBgProductScratchRT = null;
+    try { this._waterOccluderUnionMaterial?.dispose?.(); } catch (_) {}
+    try { this._waterOccluderUnionQuad?.geometry?.dispose?.(); } catch (_) {}
+    this._waterOccluderUnionScene = null;
+    this._waterOccluderUnionCamera = null;
+    this._waterOccluderUnionMaterial = null;
+    this._waterOccluderUnionQuad = null;
+    try { this._waterBgProductMaterial?.dispose?.(); } catch (_) {}
+    try { this._waterBgProductQuad?.geometry?.dispose?.(); } catch (_) {}
+    this._waterBgProductScene = null;
+    this._waterBgProductCamera = null;
+    this._waterBgProductMaterial = null;
+    this._waterBgProductQuad = null;
 
     // Dispose blit resources.
     try { this._blitMaterial?.dispose(); } catch (_) {}

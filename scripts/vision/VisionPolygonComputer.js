@@ -36,6 +36,7 @@ export class VisionPolygonComputer {
     this._tempHit = { x: 0, y: 0 };
     this._tempSegA = { x: 0, y: 0 };
     this._tempSegB = { x: 0, y: 0 };
+    this._tempThresholdTarget = { x: 0, y: 0 };
   }
 
   /**
@@ -264,6 +265,10 @@ export class VisionPolygonComputer {
       const c = doc.c;
       if (!c || c.length < 4) continue;
 
+      // MS-LVL-073: Respect Foundry threshold wall semantics (proximity/distance)
+      // for custom LOS paths so non-normal wall senses don't become unconditional.
+      if (!this._wallBlocksSenseWithThreshold(doc, sense, center, elevation)) continue;
+
       const ax = c[0];
       const ay = c[1];
       const bx = c[2];
@@ -319,6 +324,109 @@ export class VisionPolygonComputer {
 
     segments.length = writeIndex;
     return segments;
+  }
+
+  /**
+   * Determine whether a wall blocks a sense from this source, including threshold rules.
+   * @param {object} doc - Wall document-like object with `c`, `sight`, `light`.
+   * @param {'sight'|'light'} sense
+   * @param {{x:number, y:number}} source
+   * @param {number|undefined} elevation
+   * @returns {boolean}
+   * @private
+   */
+  _wallBlocksSenseWithThreshold(doc, sense, source, elevation) {
+    const value = Number(sense === 'light' ? doc?.light : doc?.sight);
+    if (!Number.isFinite(value) || value <= 0) return false;
+
+    // Normal walls are unconditional blockers after existing door/dir/elevation checks.
+    const normal = Number(CONST?.WALL_SENSE_TYPES?.NORMAL ?? 20);
+    if (value === normal) return true;
+
+    const c = doc?.c;
+    if (!Array.isArray(c) || c.length < 4) return value > 0;
+
+    const backend = CONFIG?.Canvas?.polygonBackends?.[sense];
+    if (!backend || typeof backend.testCollision !== 'function') return value > 0;
+
+    this._tempThresholdTarget.x = (Number(c[0]) + Number(c[2])) * 0.5;
+    this._tempThresholdTarget.y = (Number(c[1]) + Number(c[3])) * 0.5;
+    const target = this._tempThresholdTarget;
+
+    let hits = null;
+    try {
+      hits = backend.testCollision(source, target, {
+        mode: 'all',
+        type: sense,
+        edgeDirectionMode: CONST?.EDGE_DIRECTION_MODES?.NORMAL,
+        useThreshold: true
+      });
+    } catch (_) {
+      return value > 0;
+    }
+    if (!Array.isArray(hits) || hits.length === 0) return false;
+    return this._collisionHitsIncludeWall(hits, doc, elevation);
+  }
+
+  /**
+   * Check collision hits for a specific wall, including elevation filtering.
+   * @param {Array} hits
+   * @param {object} wallDoc
+   * @param {number|undefined} elevation
+   * @returns {boolean}
+   * @private
+   */
+  _collisionHitsIncludeWall(hits, wallDoc, elevation) {
+    const wallId = String(wallDoc?.id ?? '');
+    if (!wallId) {
+      for (const hit of hits) {
+        const edges = hit?.edges;
+        if (!(edges instanceof Set) || edges.size === 0) continue;
+        for (const edge of edges) {
+          const edgeDoc = edge?.object?.document ?? edge?.object ?? null;
+          if (!edgeDoc) continue;
+          if (!this._wallBlocksAtElevation(edgeDoc, elevation)) continue;
+          return true;
+        }
+      }
+      return false;
+    }
+
+    for (const hit of hits) {
+      const edges = hit?.edges;
+      if (!(edges instanceof Set)) continue;
+      for (const edge of edges) {
+        const edgeDoc = edge?.object?.document ?? edge?.object ?? null;
+        if (!edgeDoc) continue;
+        const edgeId = String(edgeDoc?.id ?? '');
+        if (wallId && edgeId && edgeId !== wallId) continue;
+        if (!this._wallBlocksAtElevation(edgeDoc, elevation)) continue;
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Elevation gate using Levels-style bottom-inclusive/top-exclusive semantics.
+   * @param {object} wallDoc
+   * @param {number|undefined} elevation
+   * @returns {boolean}
+   * @private
+   */
+  _wallBlocksAtElevation(wallDoc, elevation) {
+    if (!(typeof elevation === 'number' && Number.isFinite(elevation))) return true;
+    const bounds = readWallHeightFlags(wallDoc);
+    let bottom = Number(bounds?.bottom);
+    let top = Number(bounds?.top);
+    if (!Number.isFinite(bottom)) bottom = -Infinity;
+    if (!Number.isFinite(top)) top = Infinity;
+    if (top < bottom) {
+      const swap = bottom;
+      bottom = top;
+      top = swap;
+    }
+    return elevation >= bottom && (top === Infinity || elevation < top);
   }
 
   /**

@@ -5203,7 +5203,9 @@ var Object3D = class _Object3D extends EventDispatcher {
     const children = this.children;
     for (let i = 0, l = children.length; i < l; i++) {
       const child = children[i];
-      child.updateMatrixWorld(force);
+      if (child.matrixWorldAutoUpdate === true || force === true) {
+        child.updateMatrixWorld(force);
+      }
     }
   }
   updateWorldMatrix(updateParents, updateChildren) {

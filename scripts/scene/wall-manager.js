@@ -512,17 +512,75 @@ export class WallManager {
     }
   }
 
+  /**
+   * Two canvas-space probe points on opposite sides of the door segment.
+   * Offsetting from the center avoids self-collision against the wall edge.
+   * @param {object} wallDoc
+   * @returns {Array<{x: number, y: number}>}
+   * @private
+   */
+  _getDoorProbePointsCanvas(wallDoc) {
+    const coords = wallDoc?.c;
+    if (!Array.isArray(coords) || coords.length < 4) return [];
+    const ray = Ray.fromArrays(coords.slice(0, 2), coords.slice(2, 4));
+    const x = (coords[0] + coords[2]) / 2;
+    const y = (coords[1] + coords[3]) / 2;
+    const dx = -ray.dy;
+    const dy = ray.dx;
+    const denom = Math.abs(dx) + Math.abs(dy);
+    if (!denom) return [];
+    const t = 3 / denom;
+    return [
+      { x: x + (t * dx), y: y + (t * dy) },
+      { x: x - (t * dx), y: y - (t * dy) }
+    ];
+  }
+
+  /**
+   * Window-aware LOS from effective vision tokens to the door icon position.
+   * @param {object} wallDoc
+   * @returns {boolean}
+   * @private
+   */
+  _canSelectionSeeDoorOptically(wallDoc) {
+    try {
+      const points = this._getDoorProbePointsCanvas(wallDoc);
+      if (!points.length) return false;
+
+      const vc = window.MapShine?.visibilityController;
+      if (!vc || typeof vc.canSeePointOptically !== 'function') return false;
+
+      const visionTokens = this._getEffectiveVisionTokens();
+      for (const viewer of visionTokens) {
+        if (!viewer) continue;
+        for (const point of points) {
+          if (vc.canSeePointOptically(point, viewer)) return true;
+        }
+      }
+    } catch (_) {
+    }
+    return false;
+  }
+
   _isDoorVisibleToSelection(wallDoc) {
     if (!wallDoc?.door) return false;
 
     if (!this._isWallVisibleAtPerspective(wallDoc)) return false;
 
     const nativeVisibility = this._getNativeDoorControlVisibility(wallDoc);
-    if (nativeVisibility !== null) {
-      return nativeVisibility;
+    if (nativeVisibility === true) {
+      return true;
     }
 
     if ((wallDoc.door === CONST.WALL_DOOR_TYPES.SECRET) && !isGmLike()) {
+      return false;
+    }
+
+    if (this._canSelectionSeeDoorOptically(wallDoc)) {
+      return true;
+    }
+
+    if (nativeVisibility === false) {
       return false;
     }
 
@@ -1071,6 +1129,7 @@ export class WallManager {
   setHighlight(id, active) {
       const group = this.walls.get(id);
       if (!group) return;
+      const wallDoc = canvas?.walls?.get?.(id)?.document || null;
       
       // If active is false, but it is selected, keep it active (highlighted)
       const shouldBeHighlighted = active || this.selected.has(id);
@@ -1080,9 +1139,8 @@ export class WallManager {
           if (shouldBeHighlighted) {
              line.material.color.setHex(0xff9829); // Orange highlight
           } else {
-             const doc = canvas.walls.get(id)?.document;
-             if (doc) {
-                 line.material.color.setHex(this.getWallColor(doc));
+             if (wallDoc) {
+                 line.material.color.setHex(this.getWallColor(wallDoc));
              }
           }
           line.material.needsUpdate = true;
@@ -1097,7 +1155,11 @@ export class WallManager {
       // Highlight endpoint center fill while preserving black outer ring.
       group.children.forEach(c => {
           if (c.userData.type === 'wallEndpoint') {
-              c.material.color.setHex(shouldBeHighlighted ? 0xff9829 : this.getWallColor(canvas.walls.get(id).document));
+              if (shouldBeHighlighted) {
+                c.material.color.setHex(0xff9829);
+              } else if (wallDoc) {
+                c.material.color.setHex(this.getWallColor(wallDoc));
+              }
               c.material.needsUpdate = true;
           }
       });

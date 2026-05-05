@@ -31,7 +31,7 @@
 
 import { createLogger } from '../../core/log.js';
 import { weatherController } from '../../core/WeatherController.js';
-import { getFoundryTimePhaseHours } from '../../core/foundry-time-phases.js';
+import { computeTimeOfDayDarkness01, getFoundryTimePhaseHours } from '../../core/foundry-time-phases.js';
 
 const log = createLogger('SkyColorEffectV2');
 
@@ -120,10 +120,23 @@ export class SkyColorEffectV2 {
       skyTintDarknessLightsEnabled: true,
       skyTintDarknessLightsIntensity: 1.01,
 
+      /**
+       * How strongly Map Shine calendar / weather clock darkness is merged with Foundry
+       * scene darkness for grading (1 = same rule as lighting: max of both).
+       */
+      calendarDarknessBlend: 1.0,
+      /** Multiplier on how hard darkness pulls exposure/contrast toward night (widen noon–midnight). */
+      dayNightGradePull: 1.0,
+      /** Extra stops-style lift at full day (brightens midday without lifting midnight). */
+      noonExposureBoost: 0.0,
+      /** Added to internal darkness before grading — pushes nights darker without changing noon clock. */
+      nightExtraDarkness: 0.0,
+
       dayVignetteStrength: 0.0, dayVignetteSoftness: 0.5, dayGrainStrength: 0.0,
       nightVignetteStrength: 0.25, nightVignetteSoftness: 1.00, nightGrainStrength: 0.0,
 
-      debugOverride: true,
+      /** When true, manual exposure/sat/contrast replace automation (night hooks will not show in grade). */
+      debugOverride: false,
       exposure: 0.51,
       saturation: 0.21,
       contrast: 0.98,
@@ -173,7 +186,35 @@ export class SkyColorEffectV2 {
       enabled: true,
       groups: [
         { name: 'sky-color', label: 'Sky Color', type: 'inline', parameters: ['intensity', 'saturationBoost', 'vibranceBoost', 'skyTintDarknessLightsEnabled', 'skyTintDarknessLightsIntensity'] },
-        { name: 'sky-automation', label: 'Sky Automation', type: 'folder', expanded: false, parameters: ['sunriseHour', 'sunsetHour', 'goldenHourWidth', 'goldenStrength', 'goldenPower', 'goldenOutdoorRecolorStrength', 'goldenOutdoorRecolorColor', 'nightFloor', 'analyticStrength', 'turbidity', 'rayleighStrength', 'mieStrength', 'forwardScatter', 'weatherInfluence', 'cloudToTurbidity', 'precipToTurbidity', 'overcastDesaturate', 'overcastContrastReduce', 'tempWarmAtHorizon', 'tempCoolAtNoon', 'nightCoolBoost', 'goldenSaturationBoost', 'nightSaturationFloor', 'hazeLift', 'hazeContrastLoss', 'autoIntensityEnabled', 'autoIntensityStrength'] },
+        {
+          name: 'day-night-grade',
+          label: 'Day / night grade (brightness)',
+          type: 'folder',
+          expanded: true,
+          parameters: [
+            'calendarDarknessBlend',
+            'dayNightGradePull',
+            'noonExposureBoost',
+            'nightExtraDarkness',
+            'autoIntensityEnabled',
+            'autoIntensityStrength',
+          ],
+        },
+        {
+          name: 'night-look',
+          label: 'Night vignette & grain',
+          type: 'folder',
+          expanded: false,
+          parameters: [
+            'dayVignetteStrength',
+            'dayVignetteSoftness',
+            'dayGrainStrength',
+            'nightVignetteStrength',
+            'nightVignetteSoftness',
+            'nightGrainStrength',
+          ],
+        },
+        { name: 'sky-automation', label: 'Sky Automation', type: 'folder', expanded: false, parameters: ['sunriseHour', 'sunsetHour', 'goldenHourWidth', 'goldenStrength', 'goldenPower', 'goldenOutdoorRecolorStrength', 'goldenOutdoorRecolorColor', 'nightFloor', 'analyticStrength', 'turbidity', 'rayleighStrength', 'mieStrength', 'forwardScatter', 'weatherInfluence', 'cloudToTurbidity', 'precipToTurbidity', 'overcastDesaturate', 'overcastContrastReduce', 'tempWarmAtHorizon', 'tempCoolAtNoon', 'nightCoolBoost', 'goldenSaturationBoost', 'nightSaturationFloor', 'hazeLift', 'hazeContrastLoss'] },
         { name: 'automation', label: 'Automation vs Manual', type: 'inline', separator: true, parameters: ['debugOverride', 'exposure', 'saturation', 'contrast'] }
       ],
       parameters: {
@@ -210,7 +251,58 @@ export class SkyColorEffectV2 {
         autoIntensityStrength: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 1.0, label: 'Auto Strength', throttle: 50 },
         skyTintDarknessLightsEnabled: { type: 'boolean', default: true, label: 'Tint Sun Lights' },
         skyTintDarknessLightsIntensity: { type: 'slider', min: 0.0, max: 5.0, step: 0.01, default: 1.01, label: 'Sun Light Tint Intensity', throttle: 50 },
-        debugOverride: { type: 'boolean', default: true, label: 'Manual Override' },
+        calendarDarknessBlend: {
+          type: 'slider',
+          min: 0,
+          max: 1,
+          step: 0.05,
+          default: 1.0,
+          label: 'Calendar darkness blend',
+          throttle: 50,
+          tooltip: 'How much Map Shine clock time (midnight curve) is mixed with Foundry scene darkness. Match lighting: leave at 1. Set 0 to use only Foundry darkness.',
+        },
+        dayNightGradePull: {
+          type: 'slider',
+          min: 0,
+          max: 2.5,
+          step: 0.05,
+          default: 1.0,
+          label: 'Midday–midnight separation',
+          throttle: 50,
+          tooltip: 'Raises how strongly darkness pulls the grade (exposure/contrast) — larger values = darker nights vs brighter noon.',
+        },
+        noonExposureBoost: {
+          type: 'slider',
+          min: 0,
+          max: 0.6,
+          step: 0.01,
+          default: 0.0,
+          label: 'Noon exposure lift',
+          throttle: 50,
+          tooltip: 'Adds automated exposure when the sun is high, without brightening midnight.',
+        },
+        nightExtraDarkness: {
+          type: 'slider',
+          min: 0,
+          max: 0.45,
+          step: 0.01,
+          default: 0.0,
+          label: 'Night extra depth',
+          throttle: 50,
+          tooltip: 'Biases the whole grade darker at night; use after calendar blend if midnight is still too bright.',
+        },
+        dayVignetteStrength: { type: 'slider', min: 0, max: 2, step: 0.01, default: 0.0, label: 'Day vignette', throttle: 50 },
+        dayVignetteSoftness: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.5, label: 'Day vignette softness', throttle: 50 },
+        dayGrainStrength: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.0, label: 'Day grain', throttle: 50 },
+        nightVignetteStrength: { type: 'slider', min: 0, max: 2, step: 0.01, default: 0.25, label: 'Night vignette', throttle: 50 },
+        nightVignetteSoftness: { type: 'slider', min: 0, max: 1, step: 0.01, default: 1.0, label: 'Night vignette softness', throttle: 50 },
+        nightGrainStrength: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.0, label: 'Night grain', throttle: 50 },
+        debugOverride: {
+          type: 'boolean',
+          default: false,
+          label: 'Manual override',
+          tooltip: 'When on, Exposure/Saturation/Contrast sliders replace time-of-day automation (night/day grade stops updating from the clock).',
+        },
         exposure: { type: 'slider', min: -1, max: 1, step: 0.01, default: 0.51, label: 'Exposure (Manual)', throttle: 50 },
         saturation: { type: 'slider', min: 0, max: 2, step: 0.01, default: 0.21, label: 'Saturation (Manual)', throttle: 50 },
         contrast: { type: 'slider', min: 0.5, max: 1.5, step: 0.01, default: 0.98, label: 'Contrast (Manual)', throttle: 50 }
@@ -523,6 +615,31 @@ export class SkyColorEffectV2 {
     u.uHasOverheadRoofAlpha.value = roofAlphaTex ? 1.0 : 0.0;
   }
 
+  /**
+   * Darkness 0..1 for sky grading: Foundry scene + Map Shine calendar curve + weather,
+   * matching {@link LightingEffectV2} so sky tracks midnight when the lighting pass does.
+   * @returns {number}
+   */
+  _sceneDarknessForSkyGrade() {
+    let sceneDarkness = readSceneDarkness01();
+    const env = weatherController?.getEnvironment?.() ?? null;
+    if (env && Number.isFinite(env.sceneDarkness)) sceneDarkness = clamp01(env.sceneDarkness);
+
+    const timeDark = computeTimeOfDayDarkness01(weatherController?.timeOfDay);
+    const blend = clamp01(Number(this.params?.calendarDarknessBlend) ?? 1);
+    if (Number.isFinite(timeDark)) {
+      const merged = Math.max(sceneDarkness, timeDark);
+      sceneDarkness = clamp01(sceneDarkness * (1 - blend) + merged * blend);
+    }
+
+    try {
+      const eff = Number(env?.effectiveDarkness);
+      if (Number.isFinite(eff)) sceneDarkness = Math.max(sceneDarkness, clamp01(eff));
+    } catch (_) {}
+
+    return sceneDarkness;
+  }
+
   // ── Per-frame update ──────────────────────────────────────────────────
 
   /**
@@ -609,8 +726,11 @@ export class SkyColorEffectV2 {
           if (Number.isFinite(env.stormFactor)) storm = clamp01(env.stormFactor);
         }
 
-        let sceneDarkness = readSceneDarkness01();
-        if (env && Number.isFinite(env.sceneDarkness)) sceneDarkness = clamp01(env.sceneDarkness);
+        let sceneDarkness = this._sceneDarknessForSkyGrade();
+
+        const gradePull = Math.max(0, Number(this.params.dayNightGradePull) ?? 1);
+        const noonBoost = Math.max(0, Number(this.params.noonExposureBoost) || 0);
+        const nightExtra = Math.max(0, Number(this.params.nightExtraDarkness) || 0);
 
         const weatherInfluence = clamp01(this.params.weatherInfluence);
         const turbidityBase = clamp01(this.params.turbidity);
@@ -624,7 +744,8 @@ export class SkyColorEffectV2 {
           sceneDarkness +
           (1.0 - dayFactor) * 0.25 +
           overcast * 0.15 +
-          storm * 0.1
+          storm * 0.1 +
+          nightExtra
         );
 
         const rayleigh = clamp01(this.params.rayleighStrength);
@@ -656,13 +777,15 @@ export class SkyColorEffectV2 {
         const overcastContrastWeight = lerp(overcastContrastNightWeight, 1.0, dayFactor);
         contrast *= 1.0 - overcastContrast * overcast * weatherInfluence * overcastContrastWeight;
         contrast *= 1.0 - turbidityEff * mie * hazeLoss;
-        contrast *= 1.0 - effectiveDarkness * 0.2;
+        contrast *= 1.0 - effectiveDarkness * 0.2 * Math.min(1.5, gradePull);
         contrast = Math.max(0.5, Math.min(1.5, contrast));
 
         const hazeLiftVal = clamp01(this.params.hazeLift);
         brightness = turbidityEff * mie * hazeLiftVal;
 
-        exposure = 0.25 * dayFactor - 0.35 * effectiveDarkness - 0.10 * turbidityEff;
+        exposure = 0.25 * dayFactor + noonBoost * dayFactor
+          - 0.35 * effectiveDarkness * gradePull
+          - 0.10 * turbidityEff;
         exposure += forward * golden * 0.05;
         exposure = Math.max(-1.0, Math.min(1.0, exposure));
 
@@ -815,7 +938,7 @@ export class SkyColorEffectV2 {
       let effectiveIntensity = this.params.intensity;
       if (this.params.autoIntensityEnabled) {
         const localDayFactor = clamp01(this._lastDayFactor ?? 0.5);
-        const localSceneDarkness = readSceneDarkness01();
+        const localSceneDarkness = this._sceneDarknessForSkyGrade();
         // Auto-intensity should NOT behave like “sky brightness”.
         // We want the grade to stay strong at night (to actually darken),
         // and be gentler at noon.

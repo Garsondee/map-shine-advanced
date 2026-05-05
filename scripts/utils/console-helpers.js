@@ -1640,6 +1640,24 @@ export const consoleHelpers = {
   },
 
   /**
+   * A/B steps for background-tab / alt-tab load repro vs strict PIXI–Three sync.
+   * Usage: MapShine.debug.reproBackgroundTabStrictSyncHelp()
+   */
+  reproBackgroundTabStrictSyncHelp() {
+    const lines = [
+      'Background-tab vs strict-sync A/B:',
+      '1) MapShine.debug.setStrictSync(false) → reload world → alt-tab during load → note render.',
+      '2) MapShine.debug.setStrictSync(true) → repeat.',
+      '3) MapShine.debug.strictSyncStatus() → compare token/hold stats.',
+      '4) Before load: MapShine.__loadVisibilityDebug = true → console INFO "[loadVisibilityDebug]" every 2s while loading.',
+      '   - loopFrame = rAF ticks (often 0 when tab hidden); loadPumpFrames = compositor draws from hidden-tab pump.',
+      '5) After broken load: focus tab — visibility recovery runs resize + pump + warmup retry if intro gate skipped hidden.',
+    ];
+    console.log(lines.join('\n'));
+    return lines;
+  },
+
+  /**
    * Diagnose the unified per-floor mask binding system.
    *
    * Returns the latest telemetry snapshot published by

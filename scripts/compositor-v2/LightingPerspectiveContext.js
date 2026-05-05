@@ -18,7 +18,8 @@
  *   activeLevelBottom: number|null,
  *   activeLevelTop: number|null,
  *   activeCompositorKey: string|null,
- *   getRoofScreenOcclusionScale: (restrictOcclusionToTopFloorOnly: boolean) => number
+ *   getRoofScreenOcclusionScale: (restrictOcclusionToTopFloorOnly: boolean) => number,
+ *   getRoofScreenOcclusionScaleForFloor: (floorIndex: number, restrictOcclusionToTopFloorOnly: boolean) => number
  * }>} LightingPerspectiveContext
  */
 
@@ -62,11 +63,25 @@ export function createLightingPerspectiveContext() {
    * @param {boolean} restrictOcclusionToTopFloorOnly
    * @returns {number} 0 or 1
    */
-  const getRoofScreenOcclusionScale = (restrictOcclusionToTopFloorOnly) => {
+  /**
+   * Screen-space roof / ceiling gating scale for a specific scene floor index.
+   * Used by per-level passes (e.g. WindowLightEffectV2) where the slice being lit
+   * may differ from the UI active floor.
+   * @param {number} floorIndex
+   * @param {boolean} restrictOcclusionToTopFloorOnly
+   * @returns {number} 0 or 1
+   */
+  const getRoofScreenOcclusionScaleForFloor = (floorIndex, restrictOcclusionToTopFloorOnly) => {
     const restrict = restrictOcclusionToTopFloorOnly === true;
-    if (isActiveFloorBelowTop && restrict) return 0;
+    const fi = Number(floorIndex);
+    const idx = Number.isFinite(fi) ? fi : activeFloorIndex;
+    const isFloorBelowTop = isMultiFloor && idx < topFloorIndex;
+    if (isFloorBelowTop && restrict) return 0;
     return 1;
   };
+
+  const getRoofScreenOcclusionScale = (restrictOcclusionToTopFloorOnly) =>
+    getRoofScreenOcclusionScaleForFloor(activeFloorIndex, restrictOcclusionToTopFloorOnly);
 
   return Object.freeze({
     floorCount,
@@ -78,5 +93,6 @@ export function createLightingPerspectiveContext() {
     activeLevelTop: hasBand ? activeLevelTop : null,
     activeCompositorKey,
     getRoofScreenOcclusionScale,
+    getRoofScreenOcclusionScaleForFloor,
   });
 }

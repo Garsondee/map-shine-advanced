@@ -2,9 +2,18 @@
  * @fileoverview Centralized floor-aware render-order policy for the V2 compositor.
  *
  * Every bus-scene mesh and effect overlay should obtain its renderOrder from
- * this module instead of computing ad-hoc values. The policy divides each
- * floor into fixed role bands so that the visual stack is deterministic
- * regardless of which floor the viewer is on:
+ * this module instead of computing ad-hoc values. Pick helpers by intent:
+ *
+ * - **tileStackedOverlayOrder** — Per-tile overlays that must paint **in stack order**
+ *   with scene/tile albedo (specular, bush, prism, iridescence). Higher-sorted tiles
+ *   occlude overlays from layers beneath.
+ * - **tileRelativeEffectOrder** — Places overlays in **FLOOR_EFFECTS** while preserving
+ *   sort — rarely needed; most per-tile FX should use tileStackedOverlayOrder instead.
+ * - **effectUnderOverheadOrder** / **effectAboveOverheadOrder** — Floor-wide batches
+ *   (particles, splashes, trees) that are not tied to a single tile’s sort slot.
+ *
+ * The policy divides each floor into fixed role bands so that the visual stack is
+ * deterministic regardless of which floor the viewer is on:
  *
  *   per floor (ascending):
  *     FLOOR_ALBEDO        0 –  2399   regular (non-overhead) tiles
@@ -134,13 +143,50 @@ export function motionAboveTokensOrder(floorIndex, intraOffset = 0) {
 // ── Tile-relative effect order (for per-tile additive overlays) ──────────────
 
 /**
- * Given a tile's renderOrder and the tile's floor + overhead status, compute
- * the render order for a tile-relative effect overlay (specular, bush, prism, etc).
+ * Render order for overlays that must **interleave** with tile albedo (e.g. additive
+ * specular): drawn immediately **after** the base mesh in the **same** role band
+ * (FLOOR_ALBEDO, FLOOR_OVERHEAD, or FLOOR_MOTION_TOP). This lets higher-sorted tiles
+ * occlude shine from layers beneath without a depth prepass.
  *
- * If the tile is in the albedo band the overlay is placed in the effects band
- * at the same relative sort position. If the tile is overhead, the overlay goes
- * into the overhead-fx band. This keeps per-tile effects in their correct role
- * band rather than relying on small numeric deltas.
+ * Band is inferred from `tileRenderOrder` so motion-above-tokens tiles are handled
+ * correctly (their base order is not FLOOR_ALBEDO).
+ *
+ * @param {number} tileRenderOrder - the base tile or background plane `renderOrder`
+ * @param {number} floorIndex
+ * @param {number} [delta=1] - slots after the base mesh (multiple overlays on one tile)
+ * @returns {number}
+ */
+export function tileStackedOverlayOrder(tileRenderOrder, floorIndex, delta = 1) {
+  const fi = Number.isFinite(Number(floorIndex)) ? Math.max(0, Number(floorIndex)) : 0;
+  const floorBase = fi * RENDER_ORDER_PER_FLOOR;
+  const localOrder = tileRenderOrder - floorBase;
+  const d = Math.max(1, Math.round(Number(delta) || 1));
+
+  // Motion-above-tokens (foreground / above-token tiles)
+  if (localOrder >= ROLE_OFFSETS.FLOOR_MOTION_TOP) {
+    const intra = localOrder - ROLE_OFFSETS.FLOOR_MOTION_TOP;
+    const next = Math.max(0, Math.min(MAX_INTRA_ROLE_OFFSET, intra + d));
+    return floorBase + ROLE_OFFSETS.FLOOR_MOTION_TOP + next;
+  }
+
+  // Overhead / roof / foreground layer (above ground albedo, below overhead-FX slot reserved for FX)
+  if (localOrder >= ROLE_OFFSETS.FLOOR_OVERHEAD) {
+    const intra = localOrder - ROLE_OFFSETS.FLOOR_OVERHEAD;
+    const next = Math.max(0, Math.min(MAX_INTRA_ROLE_OFFSET, intra + d));
+    return floorBase + ROLE_OFFSETS.FLOOR_OVERHEAD + next;
+  }
+
+  // Ground albedo band — includes `__bg_image__` at intra 0 and regular tiles.
+  const intra = Math.max(0, localOrder - ROLE_OFFSETS.FLOOR_ALBEDO);
+  const next = Math.max(0, Math.min(MAX_INTRA_ROLE_OFFSET, intra + d));
+  return floorBase + ROLE_OFFSETS.FLOOR_ALBEDO + next;
+}
+
+/**
+ * Map a tile-relative overlay into **FLOOR_EFFECTS** (or overhead-FX for overhead
+ * tiles), preserving intra-floor sort. **Avoid for surface overlays** that must
+ * interleave with albedo — use {@link tileStackedOverlayOrder} so upper tiles can
+ * occlude (otherwise every overlay draws after all ground albedo in that floor).
  *
  * @param {number} tileRenderOrder  - the base tile's renderOrder
  * @param {number} floorIndex       - tile's floor

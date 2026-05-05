@@ -77,6 +77,58 @@ export function isTileOverhead(tileDoc) {
   return elev >= foregroundElevation;
 }
 
+/**
+ * Geometric center of a Foundry tile in canvas pixels (origin top-left, Y down).
+ * v14+ uses `document.shape`: (x,y) is the texture anchor and anchorX/anchorY
+ * are normalized; Map Shine THREE sprites are drawn centered on position, so the
+ * center must include the (0.5 - anchor) offset, rotated like Foundry's mesh.
+ *
+ * @param {object} tileDoc
+ * @returns {{ cx: number, cy: number }}
+ */
+export function getTileVisualCenterFoundryXY(tileDoc) {
+  const shape = tileDoc?.shape && typeof tileDoc.shape === 'object' ? tileDoc.shape : null;
+  const sx = Number(shape?.x ?? tileDoc?.x) || 0;
+  const sy = Number(shape?.y ?? tileDoc?.y) || 0;
+  const w = Number(shape?.width ?? tileDoc?.width) || 0;
+  const h = Number(shape?.height ?? tileDoc?.height) || 0;
+  const ax = Number(shape?.anchorX ?? 0);
+  const ay = Number(shape?.anchorY ?? 0);
+  const vx = (0.5 - ax) * w;
+  const vy = (0.5 - ay) * h;
+  const rotDeg = Number(shape?.rotation ?? tileDoc?.rotation) || 0;
+  const rad = (rotDeg * Math.PI) / 180;
+  const c = Math.cos(rad);
+  const s = Math.sin(rad);
+  const rx = vx * c - vy * s;
+  const ry = vx * s + vy * c;
+  return { cx: sx + rx, cy: sy + ry };
+}
+
+/**
+ * Foundry tile meshes multiply {@link TileDocument#shape} width/height by
+ * `texture.scaleX` / `texture.scaleY` for **display** size and use the **sign** of
+ * those scales for horizontal/vertical flip (`PrimaryCanvasObject#resize`).
+ * Bus `PlaneGeometry` + mesh scale must match so mask UVs align with albedo.
+ *
+ * @param {object} tileDoc
+ * @returns {{ dispW: number, dispH: number, signX: number, signY: number }}
+ */
+export function getTileBusPlaneSizeAndMirror(tileDoc) {
+  const shape = tileDoc?.shape && typeof tileDoc.shape === 'object' ? tileDoc.shape : null;
+  const w = Number(shape?.width ?? tileDoc?.width) || 0;
+  const h = Number(shape?.height ?? tileDoc?.height) || 0;
+  const scRawX = tileDoc?.texture?.scaleX;
+  const scRawY = tileDoc?.texture?.scaleY;
+  const scX = Number.isFinite(Number(scRawX)) ? Number(scRawX) : 1;
+  const scY = Number.isFinite(Number(scRawY)) ? Number(scRawY) : 1;
+  const dispW = Math.abs(w) * Math.abs(scX || 1);
+  const dispH = Math.abs(h) * Math.abs(scY || 1);
+  const signX = scX === 0 ? 1 : Math.sign(scX);
+  const signY = scY === 0 ? 1 : Math.sign(scY);
+  return { dispW, dispH, signX, signY };
+}
+
 function hasFiniteActiveLevelBand(context) {
   return Number.isFinite(Number(context?.bottom)) && Number.isFinite(Number(context?.top));
 }
@@ -677,9 +729,8 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     const foundryX = worldX;
     const foundryY = sceneHeight - worldY;
 
-    // Convert to tile local space (account for rotation around center)
-    const centerX = tileDoc.x + width / 2;
-    const centerY = tileDoc.y + height / 2;
+    // Convert to tile local space (rotation around visual center = sprite center)
+    const { cx: centerX, cy: centerY } = getTileVisualCenterFoundryXY(tileDoc);
     const dx = foundryX - centerX;
     const dy = foundryY - centerY;
 
@@ -1979,6 +2030,22 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
       log.debug(`Tile updated: ${tileDoc.id}`, changes);
       this.updateTileSprite(tileDoc, changes);
 
+      // V2 surface effects (specular, fluid, …) are populated once at scene load.
+      // When `texture.src` changes, re-probe companion masks and rebuild overlays.
+      const texSrcChanged = changes && typeof changes === 'object'
+        && 'texture' in changes
+        && changes.texture
+        && typeof changes.texture === 'object'
+        && 'src' in changes.texture;
+      if (texSrcChanged) {
+        try {
+          const fc = window.MapShine?.floorCompositorV2 ?? window.MapShine?.effectComposer?._floorCompositorV2;
+          const p = fc?.notifyTileTextureChanged?.(tileDoc);
+          if (p?.catch) p.catch(() => {});
+        } catch (_) {
+        }
+      }
+
       // Only invalidate water caches if the update could affect the water mask.
       // The scene-wide water SDF is derived from the _Water mask texture, NOT
       // from individual tile metadata flags. Tile flag changes (e.g. Levels
@@ -2357,9 +2424,8 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     const foundryX = worldX;
     const foundryY = sceneHeight - worldY;
 
-    // Convert to tile local space (account for rotation around center)
-    const centerX = tileDoc.x + width / 2;
-    const centerY = tileDoc.y + height / 2;
+    // Convert to tile local space (rotation around visual center = sprite center)
+    const { cx: centerX, cy: centerY } = getTileVisualCenterFoundryXY(tileDoc);
     const dx = foundryX - centerX;
     const dy = foundryY - centerY;
 
@@ -2716,8 +2782,9 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
             const sceneY = d?.sceneRect?.y ?? d?.sceneY ?? 0;
             const sceneW = d?.sceneRect?.width ?? d?.sceneWidth ?? d?.width ?? 10000;
             const sceneH = d?.sceneRect?.height ?? d?.sceneHeight ?? d?.height ?? 10000;
-            const u = (tileDoc.x + tileDoc.width / 2 - sceneX) / sceneW;
-            const v = (tileDoc.y + tileDoc.height / 2 - sceneY) / sceneH;
+            const { cx: tcX, cy: tcY } = getTileVisualCenterFoundryXY(tileDoc);
+            const u = (tcX - sceneX) / sceneW;
+            const v = (tcY - sceneY) / sceneH;
             const interiorMul = this._interiorDarknessOverheadScalar(u, v, idim);
             if (interiorMul < 0.999) {
               if (!this._tempOverheadTint) this._tempOverheadTint = new THREE.Color(1, 1, 1);
@@ -2751,11 +2818,18 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
         // TODO: Improve this to use proper SAT or pixel check for rotated tiles
         // For now, simple bounding box of the sprite
         
-        // Get tile bounds in world space
-        const left = tileDoc.x;
-        const right = tileDoc.x + tileDoc.width;
-        const top = tileDoc.y;
-        const bottom = tileDoc.y + tileDoc.height;
+        // Unrotated AABB from shape anchor (matches Foundry mesh footprint when rotation = 0).
+        const shapeOccl = tileDoc?.shape && typeof tileDoc.shape === 'object' ? tileDoc.shape : null;
+        const ox = Number(shapeOccl?.x ?? tileDoc?.x) || 0;
+        const oy = Number(shapeOccl?.y ?? tileDoc?.y) || 0;
+        const ow = Number(shapeOccl?.width ?? tileDoc?.width) || 0;
+        const oh = Number(shapeOccl?.height ?? tileDoc?.height) || 0;
+        const oax = Number(shapeOccl?.anchorX ?? 0);
+        const oay = Number(shapeOccl?.anchorY ?? 0);
+        const left = ox - oax * ow;
+        const top = oy - oay * oh;
+        const right = left + ow;
+        const bottom = top + oh;
 
         for (const token of sources) {
           // Token center
@@ -2897,8 +2971,7 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
       if (!baseColor) continue;
 
       // Calculate tile center UV in scene space
-      const tileCenterX = tileDoc.x + tileDoc.width / 2;
-      const tileCenterY = tileDoc.y + tileDoc.height / 2;
+      const { cx: tileCenterX, cy: tileCenterY } = getTileVisualCenterFoundryXY(tileDoc);
       const u = (tileCenterX - sceneX) / sceneW;
       const v = (tileCenterY - sceneY) / sceneH;
 
@@ -3017,8 +3090,23 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     const oIndex = (oiy * this._outdoorsMaskWidth + oix) * 4;
     const odA = this._outdoorsMaskData[oIndex + 3] / 255;
     const odR = this._outdoorsMaskData[oIndex] / 255;
-    const isOutdoor = (odA > 0.08) ? (odR >= 0.45 ? 1 : 0) : 1;
-    return Math.max(0, 1 - interiorDarkness * (1 - isOutdoor));
+    const odG = this._outdoorsMaskData[oIndex + 1] / 255;
+    const odB = this._outdoorsMaskData[oIndex + 2] / 255;
+
+    // Keep CPU overhead dim decode consistent with LightingEffectV2:
+    // - transparent/invalid mask pixels should behave as outdoors (no dim)
+    // - ignore low-level mask noise that can produce thin row artifacts
+    const outdoorRaw = Math.max(0, Math.min(1, Math.max(odR, Math.max(odG, odB))));
+    const outdoorMid = Math.max(0, Math.min(1, (outdoorRaw - 0.18) / (0.82 - 0.18)));
+    const outdoorSmooth = outdoorMid * outdoorMid * (3 - 2 * outdoorMid); // smoothstep
+    const outdoorLoHi = (outdoorRaw <= 0.10) ? 0 : ((outdoorRaw >= 0.90) ? 1 : outdoorSmooth);
+    const alphaValid = odA >= 0.5 ? 1 : 0;
+    const isOutdoor = (alphaValid > 0) ? outdoorLoHi : 1.0;
+
+    const indoorSignal = Math.max(0, Math.min(1, 1 - isOutdoor));
+    const indoorMid = Math.max(0, Math.min(1, (indoorSignal - 0.30) / (0.70 - 0.30)));
+    const indoorConfidence = indoorMid * indoorMid * (3 - 2 * indoorMid); // smoothstep
+    return Math.max(0, 1 - interiorDarkness * indoorConfidence);
   }
 
   /**
@@ -3473,75 +3561,78 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
       }
     }
 
-    // Update texture if changed
-    if ('texture' in changes && changes.texture?.src) {
-      // If the tile texture changes, its associated _Water mask may also change.
-      // Clear any cached resolution for this tile base path so we re-scan properly.
-      try {
-        const prevSrc = spriteData?.tileDoc?.texture?.src;
-        const nextSrc = changes.texture.src;
-        const prevParts = this._splitUrl(prevSrc);
-        const nextParts = this._splitUrl(nextSrc);
-        if (prevParts?.pathNoExt) this._tileWaterMaskResolvedUrl.delete(prevParts.pathNoExt);
-        if (nextParts?.pathNoExt) this._tileWaterMaskResolvedUrl.delete(nextParts.pathNoExt);
-      } catch (_) {
-      }
-
-      // Reset auto-detection state unless user explicitly overrode occlusion.
-      try {
-        if (sprite.userData?._autoOccludesWaterState !== 'overridden') {
-          sprite.userData._autoOccludesWaterState = null;
-          sprite.userData._autoOccludesWaterRequestKey = null;
-        }
-      } catch (_) {
-      }
-
-      this.loadTileTexture(changes.texture.src).then(texture => {
-        sprite.material.map = texture;
-        sprite.material.needsUpdate = true;
-
-        // If the tile texture changes, its associated _Specular mask may also change.
+    // Update texture if changed (Foundry: redraw when `texture` delta includes `src`)
+    const textureSrcInDelta = 'texture' in changes && changes.texture && typeof changes.texture === 'object'
+      && 'src' in changes.texture;
+    if (textureSrcInDelta) {
+      const nextSrc = tileDoc.texture?.src;
+      if (nextSrc) {
+        // If the tile texture changes, its associated _Water mask may also change.
+        // Clear any cached resolution for this tile base path so we re-scan properly.
         try {
           const prevSrc = spriteData?.tileDoc?.texture?.src;
-          const nextSrc = changes.texture.src;
           const prevParts = this._splitUrl(prevSrc);
           const nextParts = this._splitUrl(nextSrc);
-          if (prevParts?.pathNoExt) this._tileSpecularMaskResolvedUrl.delete(prevParts.pathNoExt);
-          if (nextParts?.pathNoExt) this._tileSpecularMaskResolvedUrl.delete(nextParts.pathNoExt);
+          if (prevParts?.pathNoExt) this._tileWaterMaskResolvedUrl.delete(prevParts.pathNoExt);
+          if (nextParts?.pathNoExt) this._tileWaterMaskResolvedUrl.delete(nextParts.pathNoExt);
         } catch (_) {
         }
 
-        // Rebind all per-tile overlays for the new texture via the binding manager.
+        // Reset auto-detection state unless user explicitly overrode occlusion.
         try {
-          const nextDoc = { id: tileDoc.id, texture: { src: changes.texture.src }, flags: targetDoc.flags };
-          this.tileBindingManager.onTileReady(nextDoc, sprite);
-        } catch (_) {
-        }
-
-        const occ = sprite.userData?.waterOccluderMesh;
-        if (occ?.material?.uniforms?.tTile) {
-          occ.material.uniforms.tTile.value = texture;
-          if (occ.material.uniforms.uHasTile) {
-            occ.material.uniforms.uHasTile.value = texture ? 1.0 : 0.0;
+          if (sprite.userData?._autoOccludesWaterState !== 'overridden') {
+            sprite.userData._autoOccludesWaterState = null;
+            sprite.userData._autoOccludesWaterRequestKey = null;
           }
-        }
-
-        // Kick auto-detection again for the new tile texture. This will:
-        // - enable water occlusion if a matching _Water mask exists
-        // - update the water occluder mesh's mask uniforms
-        // - safely no-op (with cached null) if no mask exists
-        try {
-          this.updateSpriteTransform(sprite, targetDoc);
         } catch (_) {
         }
 
-        try {
-          window.MapShine?.cloudEffectV2?.requestBlockerUpdate?.(2);
-        } catch (_) {
-        }
-      }).catch(error => {
-        log.error(`Failed to load updated tile texture`, error);
-      });
+        this.loadTileTexture(nextSrc).then(texture => {
+          sprite.material.map = texture;
+          sprite.material.needsUpdate = true;
+
+          // If the tile texture changes, its associated _Specular mask may also change.
+          try {
+            const prevSrc = spriteData?.tileDoc?.texture?.src;
+            const prevParts = this._splitUrl(prevSrc);
+            const nextParts = this._splitUrl(nextSrc);
+            if (prevParts?.pathNoExt) this._tileSpecularMaskResolvedUrl.delete(prevParts.pathNoExt);
+            if (nextParts?.pathNoExt) this._tileSpecularMaskResolvedUrl.delete(nextParts.pathNoExt);
+          } catch (_) {
+          }
+
+          // Rebind all per-tile overlays for the new texture via the binding manager.
+          try {
+            const nextDoc = { id: tileDoc.id, texture: { src: nextSrc }, flags: targetDoc.flags };
+            this.tileBindingManager.onTileReady(nextDoc, sprite);
+          } catch (_) {
+          }
+
+          const occ = sprite.userData?.waterOccluderMesh;
+          if (occ?.material?.uniforms?.tTile) {
+            occ.material.uniforms.tTile.value = texture;
+            if (occ.material.uniforms.uHasTile) {
+              occ.material.uniforms.uHasTile.value = texture ? 1.0 : 0.0;
+            }
+          }
+
+          // Kick auto-detection again for the new tile texture. This will:
+          // - enable water occlusion if a matching _Water mask exists
+          // - update the water occluder mesh's mask uniforms
+          // - safely no-op (with cached null) if no mask exists
+          try {
+            this.updateSpriteTransform(sprite, targetDoc);
+          } catch (_) {
+          }
+
+          try {
+            window.MapShine?.cloudEffectV2?.requestBlockerUpdate?.(2);
+          } catch (_) {
+          }
+        }).catch(error => {
+          log.error(`Failed to load updated tile texture`, error);
+        });
+      }
     }
 
     // Update visibility
@@ -4030,9 +4121,7 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     const dispW = width * Math.abs(scaleX || 1);
     const dispH = height * Math.abs(scaleY || 1);
     
-    // Center of tile in Foundry coords
-    const centerX = tileDoc.x + width / 2;
-    const centerY = tileDoc.y + height / 2; // Foundry Y (0 at top)
+    const { cx: centerX, cy: centerY } = getTileVisualCenterFoundryXY(tileDoc);
     
     // Convert to THREE World Coords (Y inverted)
     const sceneHeight = canvas.dimensions?.height || 10000;

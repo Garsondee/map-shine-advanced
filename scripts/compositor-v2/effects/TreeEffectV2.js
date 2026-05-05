@@ -9,14 +9,18 @@
 
 import { createLogger } from '../../core/log.js';
 import { probeMaskFile } from '../../assets/loader.js';
-import { tileHasLevelsRange, readTileLevelsFlags } from '../../foundry/levels-scene-flags.js';
+import {
+  tileHasLevelsRange,
+  readTileLevelsFlags,
+  resolveV14NativeDocFloorIndexMin,
+  getVisibleLevelBackgroundLayers,
+  resolveV14BackgroundFloorIndexForSrc,
+} from '../../foundry/levels-scene-flags.js';
 import { weatherController } from '../../core/WeatherController.js';
 
 import {
   GROUND_Z,
-  RENDER_ORDER_PER_FLOOR,
   effectAboveOverheadOrder,
-  FLOOR_OVERHEAD_FX_OFFSET,
 } from '../LayerOrderPolicy.js';
 
 const log = createLogger('TreeEffectV2');
@@ -67,46 +71,47 @@ export class TreeEffectV2 {
     this._worldSamplePoint = null;
     this._localSamplePoint = null;
 
-    // Public params (mirrors V1 schema / defaults)
+    // Public params — wind/shadow/edge defaults match BushEffectV2 for parity; trees
+    // add optional turbulence (default off).
     this.params = {
       enabled: true,
       textureStatus: 'Searching...',
       intensity: 1.0,
 
-      // -- Wind Physics --
-      windSpeedGlobal: 0.05666,
-      windRampSpeed: 1.49174,
-      gustFrequency: 0.0022,
-      gustSpeed: 0.15,
-      waveSpatialFrequency: 0.0014,
-      waveTravelSpeed: 0.7,
-      waveSharpness: 2.0,
-      waveInfluence: 0.6,
-      ambientMotion: 0.07,
+      // -- Wind Physics (BushEffectV2 defaults) --
+      windSpeedGlobal: 0.23,
+      windRampSpeed: 0.74,
+      gustFrequency: 0.01,
+      gustSpeed: 0.5246,
+      waveSpatialFrequency: 0.0018,
+      waveTravelSpeed: 0.85,
+      waveSharpness: 2.2,
+      waveInfluence: 0.65,
+      ambientMotion: 0.1,
       rustleFloorScale: 0.25,
-      flutterBaseDrive: 0.1,
+      flutterBaseDrive: 0.3,
       flutterWindStart: 0.0,
       flutterWindFull: 0.12,
-      flutterLowWindBoost: 1.67,
-      flutterLowWindFadeEnd: 0.37,
-      flutterGustFloor: 0.49,
-      bendMinStrength: 0.19,
+      flutterLowWindBoost: 1.35,
+      flutterLowWindFadeEnd: 0.35,
+      flutterGustFloor: 0.35,
+      bendMinStrength: 0.2,
       bendWindStart: 0.22,
       bendWindFull: 0.78,
-      turbulence: 1.06,
+      turbulence: 0.0,
       turbulenceScale: 0.00146,
-      minRustleSpeed: 0.12347,
-      edgeFadeStart: 0.0,
-      edgeFadeEnd: 0.04,
+      minRustleSpeed: 0.04,
+      edgeFadeStart: 0.03,
+      edgeFadeEnd: 0.14,
 
-      // -- Tree Movement --
-      branchBend: 0.072,
-      elasticity: 1.38,
+      // -- Canopy motion (BushEffectV2 branch/flutter defaults) --
+      branchBend: 0.012,
+      elasticity: 0.89,
 
       // -- Leaf Flutter --
-      flutterIntensity: 0.0007,
-      flutterSpeed: 6.64492,
-      flutterScale: 0.02351,
+      flutterIntensity: 0.0005,
+      flutterSpeed: 1.19,
+      flutterScale: 0.02,
 
       // -- Color --
       exposure: 0.0,
@@ -116,10 +121,10 @@ export class TreeEffectV2 {
       temperature: 0.0,
       tint: 0.0,
 
-      // Canopy shadow (offset sample + blur in fragment shader)
+      // Canopy shadow (offset alpha sample — same model as BushEffectV2)
       shadowOpacity: 0.5,
-      shadowLength: 0.02,
-      shadowSoftness: 1.42,
+      shadowLength: 0.01,
+      shadowSoftness: 0.5,
     };
 
     log.debug('TreeEffectV2 created');
@@ -129,9 +134,7 @@ export class TreeEffectV2 {
   set enabled(v) {
     this._enabled = !!v;
     this.params.enabled = this._enabled;
-    for (const entry of this._overlays.values()) {
-      entry.mesh.visible = this._enabled;
-    }
+    this._applyOverlayFloorVisibility();
   }
 
   static getControlSchema() {
@@ -141,16 +144,18 @@ export class TreeEffectV2 {
         title: 'Tree canopy (_Tree masks)',
         summary: [
           'Animates **high-canopy motion** on tiles (and the scene background) that ship a matching **`_Tree`** texture next to the art.',
-          'Like **Bush**, weather **wind** drives waves, bend, and flutter; trees add **turbulence** noise on top. **Sun direction** (sky / overhead / time) feeds a soft **canopy shadow** pass.',
+          'Wind, canopy shadow, and edge safety match **Bush** (same shader math). Optional **turbulence** defaults off so stock trees behave like bushes; turn it up for livelier treetops.',
           'Render order is tuned so canopies sit above bushes/specular on the same floor.',
-          'Cost scales with overlay count and shadow taps; reduce shadow softness or intensity on heavy maps.',
+          'Cost scales with overlay count (shadow uses the same multi-tap pattern as bushes).',
           'Settings save with the scene (not World Based).',
         ].join('\n\n'),
         glossary: {
           'Mask status': 'Whether the scene found at least one `_Tree` texture after load.',
+          Intensity: 'Overall strength of the tree layer (alpha and shadow contribution).',
           Turbulence: 'Extra high-frequency wobble mixed into distortion (trees only).',
-          'Canopy shadow': 'Darkening from a blurred, offset sample of the mask opposite the sun.',
-          'Hover fade': 'When token hover-hide is active, trees can fade via runtime uniform (not a Tweakpane slider).',
+          'Canopy shadow': 'Darkening from a blurred, offset sample of the mask opposite the sun (same as bushes).',
+          'Edge safety': 'Pulls motion and shadow down near scene edges to hide UV seams.',
+          'Hover fade': 'When hover-hide is active, RGB and alpha are scaled together so the canopy does not pick up an extra dark fringe.',
         },
       },
       presetApplyDefaults: true,
@@ -243,7 +248,7 @@ export class TreeEffectV2 {
           step: 0.01,
           default: 1.0,
           throttle: 100,
-          tooltip: 'Master strength of the tree layer and its shadow pass.',
+          tooltip: 'Master strength of the tree layer (alpha and shadow contribution).',
         },
         windSpeedGlobal: {
           type: 'slider',
@@ -251,7 +256,7 @@ export class TreeEffectV2 {
           min: 0.0,
           max: 3.0,
           step: 0.001,
-          default: 0.05666,
+          default: 0.23,
           throttle: 100,
           tooltip: 'Multiplies scene wind speed before driving motion.',
         },
@@ -261,7 +266,7 @@ export class TreeEffectV2 {
           min: 0.1,
           max: 10.0,
           step: 0.05,
-          default: 1.49174,
+          default: 0.74,
           throttle: 100,
           tooltip: 'Higher = canopy motion follows weather wind changes faster.',
         },
@@ -271,7 +276,7 @@ export class TreeEffectV2 {
           min: 0.0,
           max: 0.05,
           step: 0.0001,
-          default: 0.0022,
+          default: 0.01,
           throttle: 100,
           tooltip: 'Spatial scale of the pseudo-gust noise field.',
         },
@@ -281,7 +286,7 @@ export class TreeEffectV2 {
           min: 0.0,
           max: 2.0,
           step: 0.01,
-          default: 0.15,
+          default: 0.5246,
           throttle: 100,
           tooltip: 'How fast the gust field scrolls with wind.',
         },
@@ -291,7 +296,7 @@ export class TreeEffectV2 {
           min: 0.0001,
           max: 0.01,
           step: 0.0001,
-          default: 0.0014,
+          default: 0.0018,
           throttle: 100,
           tooltip: 'Spacing of large wind waves along the wind direction.',
         },
@@ -301,7 +306,7 @@ export class TreeEffectV2 {
           min: 0.05,
           max: 4.0,
           step: 0.01,
-          default: 0.7,
+          default: 0.85,
           throttle: 100,
           tooltip: 'Animation speed of the traveling wave carrier.',
         },
@@ -311,7 +316,7 @@ export class TreeEffectV2 {
           min: 0.5,
           max: 6.0,
           step: 0.05,
-          default: 2.0,
+          default: 2.2,
           throttle: 100,
           tooltip: 'Exponent on the wave carrier — higher = crisper gust fronts.',
         },
@@ -321,7 +326,7 @@ export class TreeEffectV2 {
           min: 0.0,
           max: 1.0,
           step: 0.01,
-          default: 0.6,
+          default: 0.65,
           throttle: 100,
           tooltip: 'How much the traveling wave modulates bend and flutter.',
         },
@@ -331,9 +336,9 @@ export class TreeEffectV2 {
           min: 0.0,
           max: 2.0,
           step: 0.01,
-          default: 1.06,
+          default: 0.0,
           throttle: 100,
-          tooltip: 'Strength of extra procedural chop layered on wind distortion.',
+          tooltip: 'Extra procedural chop (0 = bush-identical wind UV; raise for livelier treetops).',
         },
         turbulenceScale: {
           type: 'slider',
@@ -351,7 +356,7 @@ export class TreeEffectV2 {
           min: 0.0,
           max: 0.35,
           step: 0.005,
-          default: 0.07,
+          default: 0.1,
           throttle: 100,
           tooltip: 'Baseline motion when wind is calm.',
         },
@@ -371,7 +376,7 @@ export class TreeEffectV2 {
           min: 0.0,
           max: 1.0,
           step: 0.01,
-          default: 0.1,
+          default: 0.3,
           throttle: 100,
           tooltip: 'Minimum flutter response before wind ramps it up.',
         },
@@ -401,7 +406,7 @@ export class TreeEffectV2 {
           min: 1.0,
           max: 2.5,
           step: 0.01,
-          default: 1.67,
+          default: 1.35,
           throttle: 100,
           tooltip: 'Extra flutter when wind is barely moving.',
         },
@@ -411,7 +416,7 @@ export class TreeEffectV2 {
           min: 0.05,
           max: 1.0,
           step: 0.01,
-          default: 0.37,
+          default: 0.35,
           throttle: 100,
           tooltip: 'Wind level where the low-wind boost has faded out.',
         },
@@ -421,7 +426,7 @@ export class TreeEffectV2 {
           min: 0.0,
           max: 1.0,
           step: 0.01,
-          default: 0.49,
+          default: 0.35,
           throttle: 100,
           tooltip: 'Minimum gust modulation on flutter in calm wind.',
         },
@@ -431,7 +436,7 @@ export class TreeEffectV2 {
           min: 0.0,
           max: 1.0,
           step: 0.01,
-          default: 0.19,
+          default: 0.2,
           throttle: 100,
           tooltip: 'Floor on bend strength in light wind.',
         },
@@ -461,7 +466,7 @@ export class TreeEffectV2 {
           min: 0.0,
           max: 0.6,
           step: 0.01,
-          default: 0.12347,
+          default: 0.04,
           throttle: 100,
           tooltip: 'Minimum effective wind speed when the scene reports calm air.',
         },
@@ -471,7 +476,7 @@ export class TreeEffectV2 {
           min: 0.0,
           max: 0.1,
           step: 0.001,
-          default: 0.072,
+          default: 0.012,
           throttle: 100,
           tooltip: 'How far UVs shift along wind when bending.',
         },
@@ -481,7 +486,7 @@ export class TreeEffectV2 {
           min: 0.5,
           max: 5.0,
           step: 0.01,
-          default: 1.38,
+          default: 0.89,
           throttle: 100,
           tooltip: 'Oscillation speed of the orbital sway term.',
         },
@@ -491,7 +496,7 @@ export class TreeEffectV2 {
           min: 0.0,
           max: 0.005,
           step: 0.0001,
-          default: 0.0007,
+          default: 0.0005,
           throttle: 100,
           tooltip: 'Strength of high-frequency leaf jitter.',
         },
@@ -501,7 +506,7 @@ export class TreeEffectV2 {
           min: 1.0,
           max: 20.0,
           step: 0.05,
-          default: 6.64492,
+          default: 1.19,
           throttle: 100,
           tooltip: 'How fast the flutter phase advances.',
         },
@@ -511,7 +516,7 @@ export class TreeEffectV2 {
           min: 0.005,
           max: 0.1,
           step: 0.0001,
-          default: 0.02351,
+          default: 0.02,
           throttle: 100,
           tooltip: 'World-space scale of noise driving flutter.',
         },
@@ -589,9 +594,9 @@ export class TreeEffectV2 {
           type: 'slider',
           label: 'Shadow offset',
           min: 0.0,
-          max: 0.2,
+          max: 0.1,
           step: 0.001,
-          default: 0.02,
+          default: 0.01,
           throttle: 100,
           tooltip: 'How far the shadow sample is pushed opposite the sun.',
         },
@@ -599,9 +604,9 @@ export class TreeEffectV2 {
           type: 'slider',
           label: 'Shadow softness',
           min: 0.5,
-          max: 10.0,
+          max: 5.0,
           step: 0.05,
-          default: 1.42,
+          default: 0.5,
           throttle: 100,
           tooltip: 'Blur radius of the multi-tap shadow sample.',
         },
@@ -611,9 +616,9 @@ export class TreeEffectV2 {
           min: 0.0,
           max: 0.2,
           step: 0.005,
-          default: 0.0,
+          default: 0.03,
           throttle: 100,
-          tooltip: 'Scene-edge band where motion begins to fall off.',
+          tooltip: 'Scene-edge band where motion and shadow begin to fall off.',
         },
         edgeFadeEnd: {
           type: 'slider',
@@ -621,29 +626,30 @@ export class TreeEffectV2 {
           min: 0.02,
           max: 0.4,
           step: 0.005,
-          default: 0.04,
+          default: 0.14,
           throttle: 100,
           tooltip: 'Scene-edge distance where motion and shadow are fully suppressed.',
         },
       },
       presets: {
         Calm: {
-          windSpeedGlobal: 0.03,
-          turbulence: 0.55,
-          flutterIntensity: 0.00045,
-          branchBend: 0.045,
+          windSpeedGlobal: 0.12,
+          turbulence: 0.0,
+          flutterIntensity: 0.00035,
+          branchBend: 0.008,
         },
         Windy: {
-          windSpeedGlobal: 0.11,
-          gustSpeed: 0.42,
-          waveTravelSpeed: 1.05,
-          turbulence: 1.35,
-          branchBend: 0.09,
+          windSpeedGlobal: 0.48,
+          gustSpeed: 0.95,
+          waveTravelSpeed: 1.15,
+          turbulence: 0.45,
+          branchBend: 0.018,
+          waveSharpness: 2.6,
         },
         'Soft shadow': {
-          shadowOpacity: 0.35,
-          shadowLength: 0.014,
-          shadowSoftness: 2.0,
+          shadowOpacity: 0.32,
+          shadowLength: 0.007,
+          shadowSoftness: 0.85,
         },
       },
     };
@@ -663,21 +669,66 @@ export class TreeEffectV2 {
     this.clear();
 
     const floors = window.MapShine?.floorStack?.getFloors() ?? [];
+    const activeFloorIdxRaw = Number(window.MapShine?.floorStack?.getActiveFloor?.()?.index);
+    const activeFloorIdx = Number.isFinite(activeFloorIdxRaw) ? activeFloorIdxRaw : 0;
     const worldH = Number(foundrySceneData?.height) || 0;
 
-    // Background first
-    const bgSrc = canvas?.scene?.background?.src ?? '';
-    if (bgSrc) {
+    // Background overlays: prefer native scene.levels so every floor's authored
+    // background can get a corresponding _Tree overlay regardless of current view.
+    // Fallback to visible configured backgrounds for non-level scenes.
+    const scene = canvas?.scene ?? null;
+    const bgEntries = [];
+    const floorIndexByLevelId = new Map();
+    try {
+      for (const f of floors) {
+        const levelId = (f?.levelId != null) ? String(f.levelId) : '';
+        const idx = Number(f?.index);
+        if (!levelId || !Number.isFinite(idx)) continue;
+        floorIndexByLevelId.set(levelId, idx);
+      }
+    } catch (_) {}
+    try {
+      const sortedLevels = scene?.levels?.sorted ?? [];
+      if (Array.isArray(sortedLevels) && sortedLevels.length > 0) {
+        for (let i = 0; i < sortedLevels.length; i += 1) {
+          const level = sortedLevels[i];
+          const src = String(level?.background?.src || '').trim();
+          if (!src) continue;
+          const levelId = (level?.id != null) ? String(level.id) : '';
+          const mappedFloorIndex = levelId ? floorIndexByLevelId.get(levelId) : undefined;
+          const floorIndex = Number.isFinite(Number(mappedFloorIndex))
+            ? Number(mappedFloorIndex)
+            : i;
+          const keyIndex = Math.max(0, Math.floor(Number(level?.index)));
+          const key = (keyIndex === 0) ? '__bg_image__' : `__bg_image__${keyIndex}`;
+          if (Number.isFinite(activeFloorIdx) && floorIndex !== activeFloorIdx) continue;
+          bgEntries.push({ src, floorIndex, key });
+        }
+      }
+    } catch (_) {}
+    if (bgEntries.length === 0) {
+      const bgLayers = getVisibleLevelBackgroundLayers(scene);
+      for (let i = 0; i < bgLayers.length; i += 1) {
+        const src = String(bgLayers[i]?.src || '').trim();
+        if (!src) continue;
+        const floorIndex = resolveV14BackgroundFloorIndexForSrc(scene, src);
+        if (Number.isFinite(activeFloorIdx) && floorIndex !== activeFloorIdx) continue;
+        const key = floorIndex === 0 ? '__bg_image__' : `__bg_image__${floorIndex}`;
+        bgEntries.push({ src, floorIndex, key });
+      }
+    }
+    for (const bg of bgEntries) {
+      const bgSrc = bg.src;
+      if (!bgSrc) continue;
       const basePath = bgSrc.replace(/\.[^.]+$/, '');
       const url = await this._probeMask(basePath, '_Tree');
-      if (url) {
-        const centerX = Number(foundrySceneData?.sceneX ?? 0) + Number(foundrySceneData?.sceneWidth ?? 0) / 2;
-        const centerY = worldH - (Number(foundrySceneData?.sceneY ?? 0) + Number(foundrySceneData?.sceneHeight ?? 0) / 2);
-        const tileW = Number(foundrySceneData?.sceneWidth ?? 0);
-        const tileH = Number(foundrySceneData?.sceneHeight ?? 0);
-        const z = GROUND_Z - 1 + TREE_Z_OFFSET;
-        this._createOverlay('__bg_image__', 0, { url, centerX, centerY, z, tileW, tileH, rotation: 0 });
-      }
+      if (!url) continue;
+      const centerX = Number(foundrySceneData?.sceneX ?? 0) + Number(foundrySceneData?.sceneWidth ?? 0) / 2;
+      const centerY = worldH - (Number(foundrySceneData?.sceneY ?? 0) + Number(foundrySceneData?.sceneHeight ?? 0) / 2);
+      const tileW = Number(foundrySceneData?.sceneWidth ?? 0);
+      const tileH = Number(foundrySceneData?.sceneHeight ?? 0);
+      const z = GROUND_Z - 1 + TREE_Z_OFFSET;
+      this._createOverlay(bg.key, bg.floorIndex, { url, centerX, centerY, z, tileW, tileH, rotation: 0 });
     }
 
     // Tiles
@@ -712,6 +763,9 @@ export class TreeEffectV2 {
 
   update(timeInfo) {
     if (!this._enabled || !this._initialized) return;
+
+    // Clamp overlay visibility to active floor every frame to avoid transition flashes.
+    this._applyOverlayFloorVisibility();
 
     const time = Number.isFinite(timeInfo?.elapsed)
       ? Number(timeInfo.elapsed)
@@ -811,7 +865,7 @@ export class TreeEffectV2 {
   }
 
   onFloorChange(_maxFloorIndex) {
-    // Bus overlay visibility is handled by FloorRenderBus.setVisibleFloors().
+    this._applyOverlayFloorVisibility();
   }
 
   wantsContinuousRender() {
@@ -987,6 +1041,60 @@ export class TreeEffectV2 {
     this.params.textureStatus = 'Inactive (no _Tree mask)';
   }
 
+  /**
+   * @param {string} tileId
+   * @private
+   */
+  _disposeSingleTileOverlay(tileId) {
+    if (!tileId || String(tileId).startsWith('__bg_image__')) return;
+    const entry = this._overlays.get(tileId);
+    if (!entry) return;
+    this._renderBus.removeEffectOverlay(`${tileId}_tree`);
+    try { entry.material.dispose(); } catch (_) {}
+    try { entry.mesh.geometry.dispose(); } catch (_) {}
+    const tex = entry.material.uniforms.uTreeMask?.value;
+    if (tex && tex.dispose) {
+      try { tex.dispose(); } catch (_) {}
+    }
+    this._overlays.delete(tileId);
+    try { this._deriveAlphaByTileId.delete(tileId); } catch (_) {}
+    try { this._alphaSampleByTileId.delete(tileId); } catch (_) {}
+  }
+
+  /**
+   * Re-probe `_Tree` and rebuild the overlay after `texture.src` changed on a tile.
+   *
+   * @param {object} tileDoc
+   * @param {object|null} foundrySceneData
+   */
+  async refreshTileAfterTextureChange(tileDoc, foundrySceneData) {
+    if (!this._initialized || !tileDoc) return;
+    const tileId = tileDoc.id ?? tileDoc._id;
+    if (!tileId) return;
+
+    this._disposeSingleTileOverlay(tileId);
+
+    const src = tileDoc?.texture?.src ?? tileDoc?.img ?? '';
+    if (!src) return;
+
+    const floors = window.MapShine?.floorStack?.getFloors?.() ?? [];
+    const worldH = Number(foundrySceneData?.height) || (typeof canvas !== 'undefined' ? Number(canvas?.dimensions?.height) || 0 : 0);
+
+    const basePath = src.replace(/\.[^.]+$/, '');
+    const url = await this._probeMask(basePath, '_Tree');
+    if (!url) return;
+
+    const floorIndex = this._resolveFloorIndex(tileDoc, floors);
+    const tileW = Number(tileDoc?.width ?? 0);
+    const tileH = Number(tileDoc?.height ?? 0);
+    const centerX = Number(tileDoc?.x ?? 0) + tileW / 2;
+    const centerY = worldH - (Number(tileDoc?.y ?? 0) + tileH / 2);
+    const z = GROUND_Z + floorIndex + TREE_Z_OFFSET;
+    const rotation = typeof tileDoc?.rotation === 'number' ? (tileDoc.rotation * Math.PI) / 180 : 0;
+
+    this._createOverlay(tileId, floorIndex, { url, centerX, centerY, z, tileW, tileH, rotation });
+  }
+
   dispose() {
     this.clear();
     this._loader = null;
@@ -1067,6 +1175,12 @@ export class TreeEffectV2 {
 
   _resolveFloorIndex(tileDoc, floors) {
     if (!floors || floors.length <= 1) return 0;
+
+    // Prefer V14 native level assignment first. Some migrated scenes can carry
+    // legacy Levels range data that no longer matches the active native level.
+    const v14Idx = resolveV14NativeDocFloorIndexMin(tileDoc, globalThis.canvas?.scene);
+    if (v14Idx !== null) return v14Idx;
+
     if (tileHasLevelsRange(tileDoc)) {
       const flags = readTileLevelsFlags(tileDoc);
       const tileBottom = Number(flags.rangeBottom);
@@ -1081,6 +1195,7 @@ export class TreeEffectV2 {
         if (tileBottom <= f.elevationMax && f.elevationMin <= tileTop) return i;
       }
     }
+
     const elev = Number.isFinite(Number(tileDoc?.elevation)) ? Number(tileDoc.elevation) : 0;
     for (let i = 0; i < floors.length; i++) {
       const f = floors[i];
@@ -1118,7 +1233,6 @@ export class TreeEffectV2 {
     let x = 0.0;
     let y = -1.0;
 
-    // Prefer the same sun azimuth source used by FloorCompositor-driven effects.
     const sky = window.MapShine?.effectComposer?._floorCompositorV2?._skyColorEffect;
     const overhead = window.MapShine?.effectComposer?._floorCompositorV2?._overheadShadowEffect;
     const latitude = Number(overhead?.params?.sunLatitude ?? 0.1);
@@ -1284,15 +1398,14 @@ export class TreeEffectV2 {
           float ambientMotion = uAmbientMotion;
           float effectiveSpeed = ambientMotion + rustleSpeed;
 
-          // Build a continuous, speed-driven wind pressure field that travels across
-          // the map with wind direction. This replaces gust-special branching with
-          // a single coherent wind response signal.
-          float windFieldFrequency = mix(0.00025, max(0.00025, uGustFrequency), rawWind);
-          float windFieldTravel = mix(0.18, max(0.18, uGustSpeed), rawWind);
+          // Continuous speed-coupled wind pressure field (traveling across map)
+          // to avoid binary gust behavior and keep response wind-speed driven.
+          float windFieldFrequency = mix(0.0003, max(0.0003, uGustFrequency), rawWind);
+          float windFieldTravel = mix(0.16, max(0.16, uGustSpeed), rawWind);
           vec2 windFieldPos = vWorldPos * windFieldFrequency;
           vec2 windFieldScroll = windDir * uTime * windFieldTravel * (0.2 + rawWind);
           float windField = noise(windFieldPos - windFieldScroll);
-          float windPulse = mix(0.65, 1.3, smoothstep(0.08, 0.92, windField));
+          float windPulse = mix(0.65, 1.28, smoothstep(0.08, 0.92, windField));
           windPulse *= (0.35 + 0.65 * rawWind);
 
           float waveCoord = dot(vWorldPos, windDir);
@@ -1308,8 +1421,23 @@ export class TreeEffectV2 {
           float bendStrength = (uBendMinStrength + (1.0 - uBendMinStrength) * rawWind) * bendDrive;
           float pushMagnitude = windPulse * uBranchBend * effectiveSpeed * waveMod * bendStrength;
           float swayMagnitude = orbitSway * (uBranchBend * 0.4) * effectiveSpeed * (0.5 + 0.5 * windPulse) * (0.65 + 0.35 * waveMod) * bendStrength;
-          float crossSwayMagnitude = swayMagnitude * 0.18;
+          float crossSwayMagnitude = swayMagnitude * 0.16;
 
+          float noiseVal = noise(vWorldPos * uFlutterScale);
+          float flutterPhase = uTime * uFlutterSpeed * (0.85 + rustleSpeed) + noiseVal * 6.28;
+          float flutter = sin(flutterPhase);
+          float lowWindBoost = mix(uFlutterLowWindBoost, 1.0, smoothstep(0.04, max(0.041, uFlutterLowWindFadeEnd), rawWind));
+          float legacyFlutterFloor = clamp(uFlutterGustFloor, 0.0, 1.0);
+          float flutterWindPulse = mix(legacyFlutterFloor, 1.0, clamp(windPulse, 0.0, 1.0));
+          float flutterMagnitude = flutter * uFlutterIntensity * flutterWindPulse * lowWindBoost * flutterDrive * (0.6 + 0.4 * waveMod);
+          vec2 flutterVec = (windDir * flutterMagnitude) + (perpDir * (flutterMagnitude * 0.1));
+
+          vec2 distortion = (windDir * pushMagnitude)
+                          + (windDir * swayMagnitude)
+                          + (perpDir * crossSwayMagnitude)
+                          + flutterVec;
+
+          // Optional tree-only chop (default uTurbulence = 0 → bush-identical).
           float turbulenceStrength = max(0.0, uTurbulence);
           float turbulenceScale = max(0.00001, uTurbulenceScale);
           vec2 turbulencePos = vWorldPos * turbulenceScale;
@@ -1320,21 +1448,7 @@ export class TreeEffectV2 {
           float turbulenceMagnitude = turbulenceStrength * effectiveSpeed * turbulenceGustCoupling * (0.55 + 0.45 * waveMod);
           vec2 turbulenceVec = (windDir * (turbulenceSigned * uBranchBend * 0.85 * turbulenceMagnitude))
                              + (perpDir * (((turbulenceFieldB - 0.5) * 2.0) * uBranchBend * 0.15 * turbulenceMagnitude));
-
-          float noiseVal = noise(vWorldPos * uFlutterScale);
-          float flutterPhase = uTime * uFlutterSpeed * (0.85 + rustleSpeed) + noiseVal * 6.28;
-          float flutter = sin(flutterPhase);
-          float lowWindBoost = mix(uFlutterLowWindBoost, 1.0, smoothstep(0.04, max(0.041, uFlutterLowWindFadeEnd), rawWind));
-          float legacyFlutterFloor = clamp(uFlutterGustFloor, 0.0, 1.0);
-          float flutterWindPulse = mix(legacyFlutterFloor, 1.0, clamp(windPulse, 0.0, 1.0));
-          float flutterMagnitude = flutter * uFlutterIntensity * flutterWindPulse * lowWindBoost * flutterDrive * (0.6 + 0.4 * waveMod);
-          vec2 flutterVec = (windDir * flutterMagnitude) + (perpDir * (flutterMagnitude * 0.12));
-
-          vec2 distortion = (windDir * pushMagnitude)
-                          + (windDir * swayMagnitude)
-                          + (perpDir * crossSwayMagnitude)
-                          + turbulenceVec
-                          + flutterVec;
+          distortion += turbulenceVec;
 
           vec2 sceneSpan = max(uSceneMax - uSceneMin, vec2(1e-3));
           vec2 sceneUv = clamp((vWorldPos - uSceneMin) / sceneSpan, 0.0, 1.0);
@@ -1342,11 +1456,12 @@ export class TreeEffectV2 {
           float edgeFade = smoothstep(0.0, max(uEdgeFadeStart + 1e-4, uEdgeFadeEnd), edgeDist);
           distortion *= edgeFade;
 
+          vec4 treeSample = texture2D(uTreeMask, vUv - distortion);
+          float texA = safeAlpha(treeSample);
+
           vec2 shadowDir = normalize(vec2(uSunDir.x, -uSunDir.y));
           if (length(shadowDir) < 0.01) shadowDir = -windDir;
-          // Tree canopy shadow should not appear as a detached offset blob.
-          // Keep the soft shadow lobe centered on canopy pixels.
-          vec2 shadowOffset = vec2(0.0);
+          vec2 shadowOffset = shadowDir * uShadowLength;
           float shadowBlur = max(0.0001, uShadowSoftness * 0.0008);
           vec2 shadowBaseUv = vUv - distortion - shadowOffset;
           vec2 step1 = vec2(shadowBlur);
@@ -1400,29 +1515,24 @@ export class TreeEffectV2 {
           shadowWeight += 0.04;
 
           float shadowA = (shadowWeight > 0.0) ? (shadowAccum / shadowWeight) : 0.0;
-          // Fade tree shadow contribution together with canopy hover fade to avoid
-          // detached "dark ghost" shapes when the canopy is hidden.
-          shadowA *= clamp(uShadowOpacity, 0.0, 1.0) * uIntensity * edgeFade * clamp(uHoverFade, 0.0, 1.0);
+          shadowA *= clamp(uShadowOpacity, 0.0, 1.0) * uIntensity * edgeFade;
 
-          vec4 treeSample = texture2D(uTreeMask, vUv - distortion);
-          float texA = safeAlpha(treeSample);
-          float mainAlpha = texA * uIntensity * clamp(uHoverFade, 0.0, 1.0);
-          // Prevent soft shadow bloom from extending beyond canopy edges.
-          // Gate shadow contribution by local canopy coverage.
-          float canopyGate = smoothstep(0.03, 0.35, clamp(mainAlpha, 0.0, 1.0));
-          float shadowOnlyAlpha = shadowA * (1.0 - clamp(mainAlpha, 0.0, 1.0)) * canopyGate;
-          float a = clamp(mainAlpha + shadowOnlyAlpha, 0.0, 1.0);
-          if (a <= 0.001) discard;
+          float mainAlpha = texA * uIntensity;
+          float shadowOnlyAlpha = shadowA * (1.0 - clamp(mainAlpha, 0.0, 1.0));
+          float finalAlpha = clamp(mainAlpha + shadowOnlyAlpha, 0.0, 1.0);
+          if (finalAlpha <= 0.001) discard;
 
           float ccDelta = abs(uExposure) + abs(uBrightness) + abs(uContrast - 1.0)
                         + abs(uSaturation - 1.0) + abs(uTemperature) + abs(uTint);
           vec3 c = treeSample.rgb;
           if (ccDelta > 0.0001) c = applyCC(c);
-          // Kill white fringe: filtering blends RGB from empty/white texels while alpha
-          // drops; scaling by coverage makes premultiplied output match the mask energy.
           c *= texA;
-          float ih = uIntensity * clamp(uHoverFade, 0.0, 1.0);
-          gl_FragColor = vec4(c * ih, clamp(a, 0.0, 1.0));
+          gl_FragColor = vec4(c * uIntensity, finalAlpha);
+          // Hover-hide: scale premultiplied RGB and alpha together (do not fold hf into
+          // mainAlpha — that inflates shadowOnlyAlpha and causes a dark fringe).
+          float hf = clamp(uHoverFade, 0.0, 1.0);
+          gl_FragColor.rgb *= hf;
+          gl_FragColor.a *= hf;
         }
       `,
       transparent: true,
@@ -1439,6 +1549,7 @@ export class TreeEffectV2 {
     mesh.frustumCulled = false;
     mesh.userData = mesh.userData || {};
     mesh.userData.mapShineTreeTileId = tileId;
+    mesh.userData.floorIndex = floorIndex;
     mesh.position.set(centerX, centerY, z);
     mesh.rotation.z = rotation;
 
@@ -1449,6 +1560,7 @@ export class TreeEffectV2 {
 
     this._renderBus.addEffectOverlay(`${tileId}_tree`, mesh, floorIndex);
     this._overlays.set(tileId, { mesh, material, floorIndex });
+    this._applyOverlayFloorVisibility();
 
     // Load mask texture.
     this._loader.load(url, (tex) => {
@@ -1511,5 +1623,21 @@ export class TreeEffectV2 {
       const data = ctx.getImageData(0, 0, width, height).data;
       this._alphaSampleByTileId.set(tileId, { width, height, data });
     } catch (_) {}
+  }
+
+  _getSafeVisibleMaxFloorIndex() {
+    const busIdx = Number(this._renderBus?._visibleMaxFloorIndex);
+    const activeIdx = Number(window.MapShine?.floorStack?.getActiveFloor?.()?.index);
+    if (Number.isFinite(busIdx)) return busIdx;
+    if (Number.isFinite(activeIdx)) return activeIdx;
+    return 0;
+  }
+
+  _applyOverlayFloorVisibility() {
+    const maxFloor = this._getSafeVisibleMaxFloorIndex();
+    for (const entry of this._overlays.values()) {
+      if (!entry?.mesh) continue;
+      entry.mesh.visible = this._enabled && Number(entry.floorIndex) <= maxFloor;
+    }
   }
 }

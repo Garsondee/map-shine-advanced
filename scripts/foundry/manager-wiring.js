@@ -11,6 +11,41 @@
  * @module foundry/manager-wiring
  */
 
+import { LevelTransitionCurtain } from '../scene/level-transition-curtain.js';
+
+/** @type {LevelTransitionCurtain|null} */
+let _levelTransitionCurtain = null;
+
+/**
+ * Patch CameraFollower level-context emissions behind a fade-to-black curtain.
+ * @param {object|null} mapShine - window.MapShine
+ * @param {object|null} cameraFollower - CameraFollower instance
+ */
+export function registerLevelTransitionCurtain(mapShine, cameraFollower) {
+  disposeLevelTransitionCurtain();
+  if (!cameraFollower) return;
+  _levelTransitionCurtain = new LevelTransitionCurtain();
+  _levelTransitionCurtain.register(cameraFollower);
+  if (mapShine) {
+    mapShine.levelTransitionCurtain = _levelTransitionCurtain;
+  }
+}
+
+/**
+ * Restore CameraFollower._emitLevelContextChanged and drop the curtain instance.
+ */
+export function disposeLevelTransitionCurtain() {
+  if (_levelTransitionCurtain) {
+    try {
+      _levelTransitionCurtain.dispose();
+    } catch (_) {}
+    _levelTransitionCurtain = null;
+  }
+  try {
+    if (window.MapShine) delete window.MapShine.levelTransitionCurtain;
+  } catch (_) {}
+}
+
 // ── Global Exposure ─────────────────────────────────────────────────────────
 
 /**

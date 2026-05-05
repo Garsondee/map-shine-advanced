@@ -11,11 +11,13 @@ import { createLogger } from '../../core/log.js';
 import { probeMaskFile } from '../../assets/loader.js';
 import Coordinates from '../../utils/coordinates.js';
 import { tileHasLevelsRange, readTileLevelsFlags } from '../../foundry/levels-scene-flags.js';
-import { tileRelativeEffectOrder } from '../LayerOrderPolicy.js';
+import { getAuthoritativeAmbientLightDocuments } from '../../foundry/ambient-light-documents.js';
+import { getTileBusPlaneSizeAndMirror, getTileVisualCenterFoundryXY } from '../../scene/tile-manager.js';
+import { GROUND_Z, Z_PER_FLOOR, tileStackedOverlayOrder } from '../LayerOrderPolicy.js';
+import { resolveEffectEnabled } from '../../effects/resolve-effect-enabled.js';
 
 const log = createLogger('IridescenceEffectV2');
 
-const GROUND_Z = 1000;
 const IRIDESCENCE_Z_OFFSET = 0.2;
 const MAX_LIGHTS = 64;
 
@@ -31,6 +33,8 @@ export class IridescenceEffectV2 {
     this._lights = new Map();
     this._hookIds = {};
     this._sharedUniforms = null;
+    /** @type {THREE.DataTexture|null} */
+    this._fallbackBlack = null;
 
     this.params = {
       enabled: true,
@@ -45,7 +49,9 @@ export class IridescenceEffectV2 {
       phaseMult: 4.0,
       angle: 0.0,
       parallaxStrength: 3.0,
-      maskThreshold: 0.34,
+      maskThreshold: 0.05,
+      /** When true, uses (1 − luminance) × α — for masks painted dark-on-light instead of white = shine. */
+      invertMask: false,
       colorCycleSpeed: 0.1,
       ignoreDarkness: 0.5,
       alpha: 0.5,
@@ -54,10 +60,13 @@ export class IridescenceEffectV2 {
 
   get enabled() { return this._enabled; }
   set enabled(v) {
-    this._enabled = !!v;
-    this.params.enabled = this._enabled;
-    if (this._sharedUniforms?.uEffectEnabled) this._sharedUniforms.uEffectEnabled.value = this._enabled;
-    for (const entry of this._overlays.values()) entry.mesh.visible = this._enabled;
+    const next = !!v;
+    this._enabled = next;
+    this.params.enabled = next;
+    if (this._sharedUniforms?.uEffectEnabled) {
+      this._sharedUniforms.uEffectEnabled.value = resolveEffectEnabled(this);
+    }
+    this._syncOverlayVisibility();
   }
 
   static getControlSchema() {
@@ -69,6 +78,8 @@ export class IridescenceEffectV2 {
           'Adds a **thin-film / holographic** layer on tiles (and the scene background) that ship a matching **`_Iridescence`** texture next to the art.',
           'The shader blends **screen-space flow**, **world noise**, and **mask-driven distortion** into shifting spectral color. **Foundry lights** tint the result; **ignore darkness** keeps color visible in shadow.',
           'One overlay per masked source, on the floor bus — visibility follows level/floor rules like Specular/Bush.',
+          'Tile overlays are **parented to the same bus transform as the albedo tile** (like Specular V2) so mask UVs stay locked to the art.',
+          '**Mask rule:** **luminance × α** — paint **light** where shimmer goes; transparent stays empty. **Invert mask** flips black↔white for inverse paint.',
           '**Noise scale** is a **0–1 UI** value mapped internally to shader frequency (higher = finer detail).',
           'Settings save with the scene (not World Based).',
         ].join('\n\n'),
@@ -84,7 +95,8 @@ export class IridescenceEffectV2 {
           'Distortion strength': 'How strongly the mask warps UVs into the noise field.',
           'Noise scale': 'UI 0–1 mapped to internal noise frequency (see summary).',
           'Phase multiplier': 'Scales interference fringe density.',
-          'Mask threshold': 'Cutoff on the mask alpha — higher keeps only stronger mask regions.',
+          'Mask threshold': 'Cutoff on decoded mask strength — higher keeps only stronger regions.',
+          'Invert mask': 'Turn **on** to flip black↔white (shine follows **dark** pixels instead of bright).',
         },
       },
       presetApplyDefaults: true,
@@ -129,7 +141,7 @@ export class IridescenceEffectV2 {
           label: 'Mask',
           type: 'folder',
           expanded: false,
-          parameters: ['maskThreshold'],
+          parameters: ['maskThreshold', 'invertMask'],
         },
       ],
       parameters: {
@@ -253,9 +265,15 @@ export class IridescenceEffectV2 {
           min: 0,
           max: 1,
           step: 0.01,
-          default: 0.34,
+          default: 0.05,
           throttle: 100,
-          tooltip: 'Minimum mask value to show iridescence; trims weak edges.',
+          tooltip: 'Minimum decoded mask strength to show iridescence; trims weak edges.',
+        },
+        invertMask: {
+          type: 'boolean',
+          label: 'Invert mask',
+          default: false,
+          tooltip: 'Off = brighter `_Iridescence` pixels = more shine (usual white-on-black paint). On = invert luminance (black = shine).',
         },
       },
       presets: {
@@ -287,6 +305,7 @@ export class IridescenceEffectV2 {
     if (this._initialized) return;
     const THREE = window.THREE;
     if (!THREE) return;
+    this._buildFallbackTextures();
     this._buildSharedUniforms();
     this._registerLightHooks();
     this._syncAllLights();
@@ -308,17 +327,99 @@ export class IridescenceEffectV2 {
     this.params.textureStatus = 'Inactive (no _Iridescence mask)';
   }
 
+  /**
+   * @param {string} tileKey
+   * @private
+   */
+  _disposeOverlayEntry(tileKey) {
+    if (!tileKey || tileKey === '__bg_image__') return;
+    const entry = this._overlays.get(tileKey);
+    if (!entry) return;
+    this._renderBus.removeEffectOverlay(`${tileKey}_iridescence`);
+    try { entry.material.dispose(); } catch (_) {}
+    try { entry.mesh.geometry?.dispose?.(); } catch (_) {}
+    for (const key of ['uIridescenceMask']) {
+      const tex = entry.material?.uniforms?.[key]?.value;
+      try { tex?.dispose?.(); } catch (_) {}
+    }
+    this._overlays.delete(tileKey);
+  }
+
+  /**
+   * Re-probe `_Iridescence` and rebuild the overlay after `texture.src` changed on a tile.
+   *
+   * @param {object} tileDoc
+   * @param {object|null} foundrySceneData
+   */
+  async refreshTileAfterTextureChange(tileDoc, foundrySceneData) {
+    if (!this._initialized || !tileDoc) return;
+    const tileKey = tileDoc.id ?? tileDoc._id;
+    if (tileKey == null || tileKey === '' || tileKey === '__bg_image__') return;
+
+    this._disposeOverlayEntry(tileKey);
+
+    const src = tileDoc?.texture?.src ?? tileDoc?.img ?? '';
+    if (!src) return;
+
+    const floors = window.MapShine?.floorStack?.getFloors?.() ?? [];
+    const worldH = foundrySceneData?.height ?? (typeof canvas !== 'undefined' ? canvas?.dimensions?.height : 0) ?? 0;
+
+    const basePath = this._basePathNoExt(src);
+    const result = await probeMaskFile(basePath, '_Iridescence');
+    if (!result?.path) return;
+
+    const floorIndex = this._resolveFloorIndex(tileDoc, floors);
+    const { dispW: tileW, dispH: tileH, signX: planeSignX, signY: planeSignY } = getTileBusPlaneSizeAndMirror(tileDoc);
+    const { cx: cxf, cy: cyf } = getTileVisualCenterFoundryXY(tileDoc);
+    const centerX = cxf;
+    const centerY = worldH - cyf;
+    const rotation = typeof tileDoc.rotation === 'number' ? (tileDoc.rotation * Math.PI) / 180 : 0;
+    const z = GROUND_Z + floorIndex * Z_PER_FLOOR + IRIDESCENCE_Z_OFFSET;
+
+    this._createOverlay(tileKey, floorIndex, {
+      maskUrl: result.path, centerX, centerY, z, tileW, tileH, rotation, planeSignX, planeSignY,
+    });
+    this._syncOverlayVisibility();
+  }
+
   dispose() {
     this.clear();
     this._unregisterLightHooks();
+    try { this._fallbackBlack?.dispose?.(); } catch (_) {}
+    this._fallbackBlack = null;
     this._sharedUniforms = null;
     this._initialized = false;
     log.info('IridescenceEffectV2 disposed');
   }
 
+  /**
+   * Same contract as SpecularEffectV2: hide bus meshes when the effect is off or
+   * params.enabled is false.
+   * @private
+   */
+  _syncOverlayVisibility() {
+    const visible = !!(this._enabled && this.params?.enabled !== false);
+    for (const [, entry] of this._overlays) {
+      const mesh = entry?.mesh;
+      if (!mesh) continue;
+      mesh.visible = visible;
+    }
+  }
+
+  /** @private */
+  _buildFallbackTextures() {
+    const THREE = window.THREE;
+    const blackData = new Uint8Array([0, 0, 0, 255]);
+    this._fallbackBlack = new THREE.DataTexture(blackData, 1, 1, THREE.RGBAFormat);
+    this._fallbackBlack.needsUpdate = true;
+    this._fallbackBlack.minFilter = THREE.NearestFilter;
+    this._fallbackBlack.magFilter = THREE.NearestFilter;
+  }
+
   async populate(foundrySceneData) {
     if (!this._initialized) return;
     this.clear();
+    this._syncOverlayVisibility();
 
     const floors = window.MapShine?.floorStack?.getFloors?.() ?? [];
     const worldH = foundrySceneData?.height ?? 0;
@@ -336,7 +437,9 @@ export class IridescenceEffectV2 {
         const centerX = sceneX + sceneW / 2;
         const centerY = worldH - (sceneY + sceneH / 2);
         const z = (GROUND_Z - 1) + IRIDESCENCE_Z_OFFSET;
-        this._createOverlay('__bg_image__', 0, { maskUrl: bgResult.path, centerX, centerY, z, tileW: sceneW, tileH: sceneH, rotation: 0 });
+        this._createOverlay('__bg_image__', 0, {
+          maskUrl: bgResult.path, centerX, centerY, z, tileW: sceneW, tileH: sceneH, rotation: 0,
+        });
         overlayCount++;
       }
     }
@@ -345,22 +448,28 @@ export class IridescenceEffectV2 {
     for (const tileDoc of tileDocs) {
       const src = tileDoc?.texture?.src ?? tileDoc?.img ?? '';
       if (!src) continue;
-      const tileId = tileDoc?.id ?? tileDoc?._id;
-      if (!tileId) continue;
+      // Must match FloorRenderBus / SpecularEffectV2 exactly — Map keys are identity-
+      // sensitive (number ≠ string). Coercing to String breaks _tiles.get() so attach
+      // fails and overlays fall back to world space (wrong vs moving tiles).
+      const tileKey = tileDoc?.id ?? tileDoc?._id;
+      if (tileKey == null || tileKey === '') continue;
 
       const basePath = this._basePathNoExt(src);
       const result = await probeMaskFile(basePath, '_Iridescence');
       if (!result?.path) continue;
 
       const floorIndex = this._resolveFloorIndex(tileDoc, floors);
-      const tileW = tileDoc.width ?? 0;
-      const tileH = tileDoc.height ?? 0;
-      const centerX = (tileDoc.x ?? 0) + tileW / 2;
-      const centerY = worldH - ((tileDoc.y ?? 0) + tileH / 2);
+      const { dispW: tileW, dispH: tileH, signX: planeSignX, signY: planeSignY } = getTileBusPlaneSizeAndMirror(tileDoc);
+      // V14+: (x,y) is the shape anchor; visual center uses anchorX/Y (matches FloorRenderBus).
+      const { cx: cxf, cy: cyf } = getTileVisualCenterFoundryXY(tileDoc);
+      const centerX = cxf;
+      const centerY = worldH - cyf;
       const rotation = typeof tileDoc.rotation === 'number' ? (tileDoc.rotation * Math.PI) / 180 : 0;
-      const z = (GROUND_Z + floorIndex) + IRIDESCENCE_Z_OFFSET;
+      const z = GROUND_Z + floorIndex * Z_PER_FLOOR + IRIDESCENCE_Z_OFFSET;
 
-      this._createOverlay(tileId, floorIndex, { maskUrl: result.path, centerX, centerY, z, tileW, tileH, rotation });
+      this._createOverlay(tileKey, floorIndex, {
+        maskUrl: result.path, centerX, centerY, z, tileW, tileH, rotation, planeSignX, planeSignY,
+      });
       overlayCount++;
     }
 
@@ -369,6 +478,7 @@ export class IridescenceEffectV2 {
       ? 'Ready (_Iridescence mask found)'
       : 'Inactive (no _Iridescence mask)';
     log.info(`IridescenceEffectV2 populated: ${overlayCount} overlay(s)`);
+    this._syncOverlayVisibility();
   }
 
   update(timeInfo) {
@@ -376,7 +486,7 @@ export class IridescenceEffectV2 {
     const u = this._sharedUniforms;
 
     u.uTime.value = timeInfo.elapsed;
-    u.uEffectEnabled.value = this._enabled;
+    u.uEffectEnabled.value = resolveEffectEnabled(this);
     u.uIntensity.value = this.params.intensity;
     u.uAlpha.value = this.params.alpha;
     u.uDistortionStrength.value = this.params.distortionStrength;
@@ -389,11 +499,12 @@ export class IridescenceEffectV2 {
     u.uIgnoreDarkness.value = this.params.ignoreDarkness;
     u.uParallaxStrength.value = this.params.parallaxStrength;
     u.uMaskThreshold.value = this.params.maskThreshold;
+    u.uMaskInvert.value = this.params.invertMask ? 1.0 : 0.0;
 
     this._updateEnvironmentUniforms();
     this._syncLightUniforms();
 
-    for (const { mesh } of this._overlays.values()) mesh.visible = this._enabled;
+    this._syncOverlayVisibility();
   }
 
   render(renderer, camera) {
@@ -415,10 +526,6 @@ export class IridescenceEffectV2 {
     }
     u.uCameraOffset.value.set(cx, cy);
 
-    const roofTex = window.MapShine?.effectComposer?._floorCompositorV2?._overheadShadowEffect?.roofAlphaTexture ?? null;
-    u.uRoofAlphaMap.value = roofTex;
-    u.uHasRoofAlphaMap.value = roofTex ? 1.0 : 0.0;
-
     // Screen-space token mask: suppress iridescence where token silhouettes exist.
     try {
       const mm = window.MapShine?.maskManager;
@@ -426,55 +533,81 @@ export class IridescenceEffectV2 {
       if (!tokenMaskTex) {
         tokenMaskTex = window.MapShine?.lightingEffect?.tokenMaskTarget?.texture ?? null;
       }
-      u.uTokenMask.value = tokenMaskTex;
+      u.uTokenMask.value = tokenMaskTex || this._fallbackBlack;
       u.uHasTokenMask.value = tokenMaskTex ? 1.0 : 0.0;
     } catch (_) {
-      u.uTokenMask.value = null;
+      u.uTokenMask.value = this._fallbackBlack;
       u.uHasTokenMask.value = 0.0;
     }
   }
 
-  _createOverlay(tileId, floorIndex, opts) {
+  _createOverlay(tileKey, floorIndex, opts) {
     const THREE = window.THREE;
-    const { maskUrl, centerX, centerY, z, tileW, tileH, rotation } = opts;
+    const {
+      maskUrl, centerX, centerY, z, tileW, tileH, rotation,
+      planeSignX = 1, planeSignY = 1,
+    } = opts;
 
     const perTileUniforms = {
       uIridescenceMask: { value: null },
     };
     const uniforms = { ...this._sharedUniforms, ...perTileUniforms };
 
+    // Match SpecularEffectV2 bus overlays: additive pass, no depth test (bus tile
+    // albedo also uses depthTest:false; depth-testing this quad hides it against
+    // unrelated depth from tokens/walls).
     const material = new THREE.ShaderMaterial({
       uniforms,
       vertexShader: this._getVertexShader(),
       fragmentShader: this._getFragmentShader(),
       side: THREE.DoubleSide,
       transparent: true,
-      blending: THREE.NormalBlending,
+      blending: THREE.AdditiveBlending,
       depthWrite: false,
-      depthTest: true,
+      depthTest: false,
+      toneMapped: false,
+      fog: false,
     });
 
     const geometry = new THREE.PlaneGeometry(tileW, tileH);
     const mesh = new THREE.Mesh(geometry, material);
-    mesh.name = `IridescenceV2_${tileId}`;
+    mesh.name = `IridescenceV2_${tileKey}`;
     mesh.frustumCulled = false;
-    mesh.position.set(centerX, centerY, z);
-    mesh.rotation.z = rotation;
+    mesh.scale.set(
+      Number.isFinite(planeSignX) && planeSignX !== 0 ? planeSignX : 1,
+      Number.isFinite(planeSignY) && planeSignY !== 0 ? planeSignY : 1,
+      1,
+    );
 
     try {
-      const baseEntry = this._renderBus?._tiles?.get?.(tileId);
+      const baseEntry = this._renderBus?._tiles?.get?.(tileKey);
       const baseOrder = Number(baseEntry?.mesh?.renderOrder);
-      const isOverhead = !!baseEntry?.root?.userData?.isOverhead;
       if (Number.isFinite(baseOrder)) {
-        mesh.renderOrder = tileRelativeEffectOrder(baseOrder, floorIndex, isOverhead, 5);
+        mesh.renderOrder = tileStackedOverlayOrder(baseOrder, floorIndex, 5);
       }
     } catch (_) {}
 
-    this._renderBus.addEffectOverlay(`${tileId}_iridescence`, mesh, floorIndex);
-    this._overlays.set(tileId, { mesh, material, floorIndex });
+    // Match SpecularEffectV2: any bus tile entry may attach; parent resolves to
+    // tileEntry.root || mesh.parent (see FloorRenderBus.addTileAttachedOverlay).
+    const baseEntry = this._renderBus?._tiles?.get?.(tileKey);
+    const canAttachToTileRoot = !!baseEntry && !String(tileKey).startsWith('__');
+    let attached = false;
+    if (canAttachToTileRoot && typeof this._renderBus?.addTileAttachedOverlay === 'function') {
+      mesh.position.set(0, 0, IRIDESCENCE_Z_OFFSET);
+      mesh.rotation.z = 0;
+      attached = this._renderBus.addTileAttachedOverlay(tileKey, `${tileKey}_iridescence`, mesh, floorIndex) === true;
+    }
+    if (!attached) {
+      mesh.position.set(centerX, centerY, z);
+      mesh.rotation.z = rotation;
+      this._renderBus.addEffectOverlay(`${tileKey}_iridescence`, mesh, floorIndex);
+    }
+    this._overlays.set(tileKey, { mesh, material, floorIndex });
+    this._syncOverlayVisibility();
 
     const loader = new THREE.TextureLoader();
     loader.load(maskUrl, (tex) => {
+      if (THREE.NoColorSpace !== undefined) tex.colorSpace = THREE.NoColorSpace;
       tex.flipY = true;
       tex.minFilter = THREE.LinearFilter;
       tex.magFilter = THREE.LinearFilter;
@@ -482,24 +615,22 @@ export class IridescenceEffectV2 {
       tex.wrapT = THREE.ClampToEdgeWrapping;
       tex.generateMipmaps = false;
       tex.needsUpdate = true;
-      const entry = this._overlays.get(tileId);
+      const entry = this._overlays.get(tileKey);
       if (!entry) {
         try { tex.dispose(); } catch (_) {}
         return;
       }
       entry.material.uniforms.uIridescenceMask.value = tex;
     }, undefined, (err) => {
-      log.warn(`IridescenceEffectV2: failed to load mask for ${tileId}: ${maskUrl}`, err);
+      log.warn(`IridescenceEffectV2: failed to load mask for ${tileKey}: ${maskUrl}`, err);
     });
   }
 
   _buildSharedUniforms() {
     const THREE = window.THREE;
     this._sharedUniforms = {
-      uEffectEnabled: { value: this._enabled },
-      uRoofAlphaMap: { value: null },
-      uHasRoofAlphaMap: { value: 0.0 },
-      uTokenMask: { value: null },
+      uEffectEnabled: { value: resolveEffectEnabled(this) },
+      uTokenMask: { value: this._fallbackBlack },
       uHasTokenMask: { value: 0.0 },
       uTime: { value: 0.0 },
       uResolution: { value: new THREE.Vector2(1, 1) },
@@ -517,6 +648,7 @@ export class IridescenceEffectV2 {
       uParallaxStrength: { value: this.params.parallaxStrength },
       uCameraOffset: { value: new THREE.Vector2(0, 0) },
       uMaskThreshold: { value: this.params.maskThreshold },
+      uMaskInvert: { value: this.params.invertMask ? 1.0 : 0.0 },
       uAmbientDaylight: { value: new THREE.Color(1.0, 1.0, 1.0) },
       uAmbientDarkness: { value: new THREE.Color(0.14, 0.14, 0.28) },
       numLights: { value: 0 },
@@ -580,22 +712,33 @@ export class IridescenceEffectV2 {
 
   _syncAllLights() {
     this._lights.clear();
-    const lights = canvas?.lighting?.placeables ?? [];
-    for (const light of lights) this._addLight(light?.document);
+    const docs = getAuthoritativeAmbientLightDocuments();
+    for (const doc of docs) this._addLight(doc);
     this._syncLightUniforms();
+  }
+
+  /** Rebuild cached light uniforms from the scene (recovery / MapShine.rebuildLighting). */
+  resyncLightsFromFoundry() {
+    this._syncAllLights();
   }
 
   _onLightCreated(doc) { this._addLight(doc); this._syncLightUniforms(); }
   _onLightUpdated(doc, changes) {
     const merged = this._mergeLightDocChanges(doc, changes);
-    this._lights.delete(merged?.id);
+    const k = merged?.id != null ? String(merged.id) : '';
+    if (k) this._lights.delete(k);
     this._addLight(merged);
     this._syncLightUniforms();
   }
-  _onLightDeleted(doc) { if (doc?.id) this._lights.delete(doc.id); this._syncLightUniforms(); }
+  _onLightDeleted(doc) {
+    const k = doc?.id != null ? String(doc.id) : '';
+    if (k) this._lights.delete(k);
+    this._syncLightUniforms();
+  }
 
   _addLight(doc) {
-    if (!doc?.id || this._lights.size >= MAX_LIGHTS || this._lights.has(doc.id)) return;
+    const idKey = doc?.id != null ? String(doc.id) : '';
+    if (!idKey || this._lights.size >= MAX_LIGHTS || this._lights.has(idKey)) return;
     const config = doc.config;
     if (!config) return;
 
@@ -623,7 +766,7 @@ export class IridescenceEffectV2 {
     const luminosity = config.luminosity ?? 0.5;
     const intensity = luminosity * 2.0;
 
-    this._lights.set(doc.id, {
+    this._lights.set(idKey, {
       position: worldPos,
       color: { r: r * intensity, g: g * intensity, b: b * intensity },
       radius,
@@ -748,8 +891,6 @@ export class IridescenceEffectV2 {
     return /* glsl */`
       uniform bool uEffectEnabled;
       uniform sampler2D uIridescenceMask;
-      uniform sampler2D uRoofAlphaMap;
-      uniform float uHasRoofAlphaMap;
       uniform sampler2D uTokenMask;
       uniform float uHasTokenMask;
       uniform float uTime;
@@ -768,6 +909,7 @@ export class IridescenceEffectV2 {
       uniform float uParallaxStrength;
       uniform vec2 uCameraOffset;
       uniform float uMaskThreshold;
+      uniform float uMaskInvert;
       uniform vec3 uAmbientDaylight;
       uniform vec3 uAmbientDarkness;
       uniform int numLights;
@@ -782,16 +924,24 @@ export class IridescenceEffectV2 {
         return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453);
       }
 
+      // Luminance × α only. Do NOT use a separate “alpha-only” branch that sets rawMask=a
+      // when RGB≈0 — opaque black padding would read full strength while painted props
+      // (non-black RGB) went through luminance and looked inverted vs padding.
       void main() {
         if (!uEffectEnabled) discard;
 
-        if (uHasRoofAlphaMap > 0.5) {
-          vec2 roofUV = gl_FragCoord.xy / max(uResolution.xy, vec2(1.0));
-          float roofA = texture2D(uRoofAlphaMap, roofUV).a;
-          if (roofA > 0.05) discard;
-        }
+        vec4 s = texture2D(uIridescenceMask, vUv);
+        float lum = clamp(dot(s.rgb, vec3(0.299, 0.587, 0.114)), 0.0, 1.0);
+        float peak = max(max(s.r, s.g), s.b);
+        float rgbBright = max(lum, peak);
+        float a = clamp(s.a, 0.0, 1.0);
+        const float A_EPS = 0.001;
 
-        float rawMask = texture2D(uIridescenceMask, vUv).r;
+        if (a < A_EPS) discard;
+
+        float t = rgbBright;
+        if (uMaskInvert > 0.5) t = 1.0 - t;
+        float rawMask = t * a;
         float maskVal = smoothstep(uMaskThreshold, 1.0, rawMask);
         if (maskVal < 0.01) discard;
 

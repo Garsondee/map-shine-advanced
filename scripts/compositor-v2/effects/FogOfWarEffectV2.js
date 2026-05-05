@@ -520,9 +520,16 @@ export class FogOfWarEffectV2 {
         if (![seg.x0, seg.y0, seg.x1, seg.y1].every(Number.isFinite)) continue;
         out.push({
           document: {
+            id: doc.id,
             c: [seg.x0, seg.y0, seg.x1, seg.y1],
-            sight: CONST.WALL_SENSE_TYPES?.NORMAL ?? 20,
-            light: CONST.WALL_SENSE_TYPES?.NORMAL ?? 20,
+            // Preserve source wall sense semantics (including proximity/distance)
+            // so transition blockers match the original wall behavior.
+            sight: Number.isFinite(Number(doc.sight))
+              ? Number(doc.sight)
+              : (CONST.WALL_SENSE_TYPES?.NORMAL ?? 20),
+            light: Number.isFinite(Number(doc.light))
+              ? Number(doc.light)
+              : (CONST.WALL_SENSE_TYPES?.NORMAL ?? 20),
             door: CONST.WALL_DOOR_TYPES?.NONE ?? 0,
             dir: CONST.WALL_DIRECTIONS?.BOTH ?? 0,
             // Match real wall vertical bounds (Levels / wall-height) so door leaves

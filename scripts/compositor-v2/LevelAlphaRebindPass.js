@@ -16,11 +16,18 @@
  *   failure cascades into the LevelCompositePass and hides lower floors
  *   under what should be a hole.
  *
- *   This pass runs at the very end of each per-level pipeline and
- *   guarantees the output alpha equals `min(postChain.a, authored.a)`:
- *   the RGB carries whatever the post-chain produced (including water
- *   RGB painted at water-mask regions), but the alpha is clamped so
- *   pixels that the floor author marked transparent stay transparent.
+ *   This pass runs at the very end of each per-level pipeline and normally
+ *   clamps output alpha toward `min(postChain.a, authored.a)` so pixels the
+ *   author marked transparent stay transparent for upper-floor holes.
+ *
+ *   Exception: when the post chain **raises** alpha above authored (e.g.
+ *   WaterEffectV2 uses `max(base.a, inside)` over river tiles that are
+ *   alpha-0 holes), blindly taking `min` would force alpha back to 0.
+ *   LevelCompositePass then computes straight-alpha source-over as
+ *   `base.rgb * base.a` wherever the upper slice is transparent, which
+ *   **zeros water RGB** when looking through a bridge — water appears only on
+ *   single-floor views. If post alpha clearly exceeds authored, keep the
+ *   post alpha so widened coverage survives compositing.
  *
  *   This gives LevelCompositePass an authoritative "this is where the
  *   floor is solid" signal that mirrors the user's authored content and
@@ -48,20 +55,26 @@ const VERTEX_SHADER = /* glsl */ `
  *   after `renderFloorRangeTo`, whose alpha channel carries the
  *   authored content alpha. RGB is ignored.
  *
- * Output alpha = min(diffuse.a, authored.a), clamped to [0, 1]. This is
- * equivalent to a logical AND between the post-chain alpha and the
- * authored solidity: anything the post-chain would widen into a hole
- * gets clipped back to the hole.
+ * Output alpha is usually min(diffuse.a, authored.a). When diffuse.a is
+ * meaningfully above authored (water and similar passes widening coverage),
+ * keep diffuse.a so lower-floor water stays visible through upper holes.
  */
 const REBIND_FRAGMENT = /* glsl */ `
   uniform sampler2D tDiffuse;
   uniform sampler2D tAuthoredAlpha;
+  uniform float uAllowAlphaWiden;
   varying vec2 vUv;
   void main() {
     vec4 c = texture2D(tDiffuse, vUv);
     float authored = texture2D(tAuthoredAlpha, vUv).a;
-    float outA = clamp(min(c.a, authored), 0.0, 1.0);
-    gl_FragColor = vec4(c.rgb, outA);
+    float outA = min(c.a, authored);
+    // Epsilon: ignore tiny filtering deltas; water widen is much larger.
+    // Restrict widened-alpha preservation to known passes (water), otherwise
+    // VFX alpha (e.g. fire) can flatten holes and hide lower floors.
+    if (uAllowAlphaWiden > 0.5 && c.a > authored + 0.02) {
+      outA = c.a;
+    }
+    gl_FragColor = vec4(c.rgb, clamp(outA, 0.0, 1.0));
   }
 `;
 
@@ -85,6 +98,7 @@ export class LevelAlphaRebindPass {
       uniforms: {
         tDiffuse: { value: null },
         tAuthoredAlpha: { value: null },
+        uAllowAlphaWiden: { value: 0.0 },
       },
       vertexShader: VERTEX_SHADER,
       fragmentShader: REBIND_FRAGMENT,
@@ -111,9 +125,10 @@ export class LevelAlphaRebindPass {
    * @param {THREE.WebGLRenderTarget} inputRT - post-chain output
    * @param {THREE.WebGLRenderTarget} authoredAlphaRT - raw sceneRT for this level
    * @param {THREE.WebGLRenderTarget} outputRT - destination
+   * @param {{allowAlphaWiden?: boolean}} [options]
    * @returns {boolean} true on success
    */
-  render(renderer, inputRT, authoredAlphaRT, outputRT) {
+  render(renderer, inputRT, authoredAlphaRT, outputRT, options = {}) {
     if (!this._initialized || !renderer || !inputRT || !authoredAlphaRT || !outputRT) return false;
 
     const prevTarget = renderer.getRenderTarget();
@@ -121,6 +136,7 @@ export class LevelAlphaRebindPass {
 
     this._material.uniforms.tDiffuse.value = inputRT.texture;
     this._material.uniforms.tAuthoredAlpha.value = authoredAlphaRT.texture;
+    this._material.uniforms.uAllowAlphaWiden.value = options?.allowAlphaWiden === true ? 1.0 : 0.0;
 
     renderer.setRenderTarget(outputRT);
     renderer.autoClear = true;

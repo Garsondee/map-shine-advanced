@@ -21,6 +21,7 @@
  *   - Dynamic light falloff and color tinting
  *   - Building shadow suppression
  *   - Wind-driven ripple on wet surfaces
+ *   - Outdoor-only stripe scroll (manual layer speeds + wind drift along wind direction)
  *   - Reinhard-Jodie tone mapping
  *   - World-space pattern coordinates
  *
@@ -169,7 +170,22 @@ export function getFragmentShader(maxLights = 64) {
     uniform int numLights;
     uniform vec3 lightPosition[${maxLights}];
     uniform vec3 lightColor[${maxLights}];
-    uniform vec4 lightConfig[${maxLights}]; // (radius, dim, attenuation, unused)
+    // Per light: (outerRadiusPx, brightRadiusPx, attenuation, floorMask)
+    // floorMask: bitmask — bit i set ⇒ light contributes on FloorStack floor i (0..3).
+    // Used when uAmbientLightFloorGate > 0.5 so upper-floor lights do not add XY disk
+    // specular on lower-floor overlays. Same pixel space as lightPosition.xy.
+    uniform vec4 lightConfig[${maxLights}];
+
+    // PlayerLightEffectV2 torch / flashlight (not AmbientLight docs). Gated by floor
+    // vs uOutdoorsFloorIdx when uPlayerLightFloorGate > 0.5 (multi-floor scenes).
+    uniform int uPlayerLightCount;
+    uniform int uPlayerLightFloorIndex;
+    uniform float uPlayerLightFloorGate;
+    // Multi-floor: multiply each Foundry AmbientLight disk by the bit for this overlay's floor.
+    uniform float uAmbientLightFloorGate;
+    uniform vec3 playerLightPosition[2];
+    uniform vec3 playerLightColor[2];
+    uniform vec4 playerLightConfig[2];
 
     // ── Frost / Ice Glaze ─────────────────────────────────────────────────────
     uniform bool uFrostGlazeEnabled;
@@ -199,6 +215,9 @@ export function getFragmentShader(maxLights = 64) {
     // ── Varyings ──────────────────────────────────────────────────────────────
     varying vec2 vUv;
     varying vec3 vWorldPosition;
+
+    // Drift speed for wind-driven specular stripe UV (full wind vs legacy uWindAccum damping).
+    const float kWindStripeScrollMul = 4.0;
 
     // ── Noise helpers ─────────────────────────────────────────────────────────
 
@@ -260,6 +279,16 @@ export function getFragmentShader(maxLights = 64) {
       return clamp(lum * s.a, 0.0, 1.0);
     }
 
+    // Specular authoring often ships grayscale RGB without meaningful alpha.
+    // If alpha is missing/zero but luminance exists, treat it as opaque instead
+    // of collapsing highlights to zero.
+    float decodeSpecularMaskStrength(vec4 s) {
+      float lum = clamp(dot(s.rgb, vec3(0.299, 0.587, 0.114)), 0.0, 1.0);
+      float a = clamp(s.a, 0.0, 1.0);
+      if (a < 1e-4) return lum;
+      return lum * a;
+    }
+
     // ── Stripe layer generator ────────────────────────────────────────────────
 
     float generateStripeLayer(
@@ -275,11 +304,14 @@ export function getFragmentShader(maxLights = 64) {
       float parallaxStrength,
       float wave,
       float gaps,
-      float softness
+      float softness,
+      float outdoorWeight
     ) {
+      // Stripe motion (scroll / pulse / wave phase) only where _Outdoors mask reads outdoor.
+      float ow = clamp(outdoorWeight, 0.0, 1.0);
       // Freeze animation when speed is effectively zero.
-      float timeAnim = (abs(speed) > 0.000001) ? time : 0.0;
-      float speedAnimScale = clamp(abs(speed) / 0.01, 0.0, 10.0);
+      float timeAnim = (abs(speed) > 0.000001) ? time * ow : 0.0;
+      float speedAnimScale = clamp(abs(speed) / 0.01, 0.0, 10.0) * ow;
 
       // Camera-based parallax offset
       vec2 parallaxUv = uv;
@@ -303,8 +335,12 @@ export function getFragmentShader(maxLights = 64) {
         parallaxUv.x * sinA + parallaxUv.y * cosA
       );
 
-      // Scrolling stripes
-      float pos = rotUv.x * frequency + timeAnim * speed;
+      // Band-axis scroll: each layer uses a different stripe angle, so timeAnim*speed slides bands in
+      // different directions. Outdoors we rely on shared wind UV drift only (see main); suppress
+      // per-layer scroll there so all stripe layers move consistently with wind. Indoors ow=0
+      // ⇒ timeAnim is already zero.
+      float scrollAlongBands = timeAnim * speed * (1.0 - ow);
+      float pos = rotUv.x * frequency + scrollAlongBands;
       float stripe = fract(pos);
 
       // Map width (0-1) to band half-size
@@ -362,6 +398,28 @@ export function getFragmentShader(maxLights = 64) {
     // to [0,1], causing saturation to white/grey at high intensities instead
     // of bright light. The final blit to screen handles the sRGB encode.
 
+    // Extract one bit (floor index 0..3) from ambient-light floor visibility mask.
+    float specularAmbientFloorMaskBit(float mask, float floorIdx) {
+      float fi = clamp(floorIdx, 0.0, 3.0);
+      float div = pow(2.0, fi);
+      return mod(floor(mask / div + 1e-4), 2.0);
+    }
+
+    // Analytic disk contribution (Foundry + player specular lights share this falloff).
+    vec3 msSpecularDiskContrib(vec3 lPos, vec3 lColor, float radius, float brightRadius, float attenuation) {
+      float dist = distance(vWorldPosition.xy, lPos.xy);
+      if (dist < radius) {
+        float d = dist / max(radius, 1e-5);
+        float inner = (radius > 0.0) ? clamp(brightRadius / radius, 0.0, 0.99) : 0.0;
+        float falloff = 1.0 - smoothstep(inner, 1.0, d);
+        float linear = 1.0 - d;
+        float squared = 1.0 - d * d;
+        float lightIntensity = mix(linear, squared, attenuation) * falloff;
+        return lColor * lightIntensity;
+      }
+      return vec3(0.0);
+    }
+
     // ── Main ──────────────────────────────────────────────────────────────────
 
     void main() {
@@ -395,28 +453,60 @@ export function getFragmentShader(maxLights = 64) {
         vec3 lPos = lightPosition[i];
         vec3 lColor = lightColor[i];
         float radius = lightConfig[i].x;
-        float dim = lightConfig[i].y;
+        float brightRadius = lightConfig[i].y;
         float attenuation = lightConfig[i].z;
 
         float dist = distance(vWorldPosition.xy, lPos.xy);
 
         if (dist < radius) {
-          float d = dist / radius;
-          float inner = (radius > 0.0) ? clamp(dim / radius, 0.0, 0.99) : 0.0;
+          float d = dist / max(radius, 1e-5);
+          // Inner edge of falloff = bright core as a fraction of outer radius (Foundry bright/dim).
+          float inner = (radius > 0.0) ? clamp(brightRadius / radius, 0.0, 0.99) : 0.0;
           float falloff = 1.0 - smoothstep(inner, 1.0, d);
           float linear = 1.0 - d;
           float squared = 1.0 - d * d;
           float lightIntensity = mix(linear, squared, attenuation) * falloff;
 
-          totalDynamicLight += lColor * lightIntensity;
+          float floorMul = 1.0;
+          if (uAmbientLightFloorGate > 0.5) {
+            float m = lightConfig[i].w;
+            floorMul = specularAmbientFloorMaskBit(m, uOutdoorsFloorIdx);
+          }
+
+          vec3 addL = lColor * lightIntensity * floorMul;
+          totalDynamicLight += addL;
 
           // Track brightest contributing light for color tinting.
-          float contribution = dot(lColor, vec3(0.2126, 0.7152, 0.0722)) * lightIntensity;
+          float contribution = dot(addL, vec3(0.2126, 0.7152, 0.0722));
           if (contribution > dominantDynLightWeight) {
             dominantDynLightWeight = contribution;
             float lum = max(dot(lColor, vec3(0.2126, 0.7152, 0.0722)), 0.001);
             dominantDynLightColor = lColor / lum;
           }
+        }
+      }
+
+      // Player torch / flashlight: same falloff, but only on this overlay's floor band
+      // when uPlayerLightFloorGate is on (matches SpecularEffectV2 floor vs token elevation).
+      float playerFloorGate = 1.0;
+      if (uPlayerLightFloorGate > 0.5 && uPlayerLightFloorIndex >= 0 && uPlayerLightCount > 0) {
+        int overlayFi = int(uOutdoorsFloorIdx + 0.5);
+        playerFloorGate = (overlayFi == uPlayerLightFloorIndex) ? 1.0 : 0.0;
+      }
+      for (int j = 0; j < 2; j++) {
+        if (j >= uPlayerLightCount) break;
+        vec3 pPos = playerLightPosition[j];
+        vec3 pCol = playerLightColor[j];
+        float pr = playerLightConfig[j].x;
+        float pbr = playerLightConfig[j].y;
+        float patt = playerLightConfig[j].z;
+        vec3 addP = msSpecularDiskContrib(pPos, pCol, pr, pbr, patt) * playerFloorGate;
+        totalDynamicLight += addP;
+        float pcontrib = dot(addP, vec3(0.2126, 0.7152, 0.0722));
+        if (pcontrib > dominantDynLightWeight) {
+          dominantDynLightWeight = pcontrib;
+          float plum = max(dot(pCol, vec3(0.2126, 0.7152, 0.0722)), 0.001);
+          dominantDynLightColor = pCol / plum;
         }
       }
 
@@ -457,7 +547,7 @@ export function getFragmentShader(maxLights = 64) {
       }
 
       // ── Specular mask strength ────────────────────────────────────────────
-      float specularStrength = dot(specularMask.rgb, vec3(0.299, 0.587, 0.114)) * specularMask.a;
+      float specularStrength = decodeSpecularMaskStrength(specularMask);
 
       // ── Cloud lighting ────────────────────────────────────────────────────
       float cloudLit = 1.0;
@@ -472,6 +562,15 @@ export function getFragmentShader(maxLights = 64) {
       float worldYTopDown = ((uSceneBounds.y + uSceneBounds.w) - vWorldPosition.y);
       vec2 worldPatternUv = vec2(worldX, worldYTopDown) / worldPatternScalePx;
 
+      // Wind pushes stripe UVs by accumulated (direction × speed). Map uWindAccum into
+      // worldPatternUv space so band drift matches on-screen wind (empirically: flip both axes
+      // from raw accum so motion is not opposite to weather windDirection).
+      vec2 stripePatternUv = worldPatternUv;
+      if (uWindDrivenStripesEnabled && uWindStripeInfluence > 0.00001) {
+        vec2 windAccumPattern = vec2(-uWindAccum.x, uWindAccum.y);
+        stripePatternUv += windAccumPattern * uWindStripeInfluence * outdoorFactor * kWindStripeScrollMul;
+      }
+
       // ── Multi-layer stripes ───────────────────────────────────────────────
       float stripeMaskAnimated = 0.0;
 
@@ -482,28 +581,31 @@ export function getFragmentShader(maxLights = 64) {
 
         if (uStripe1Enabled) {
           layer1 = generateStripeLayer(
-            worldPatternUv, vWorldPosition, uCameraPosition, uTime,
+            stripePatternUv, vWorldPosition, uCameraPosition, uTime,
             uStripe1Frequency, uStripe1Speed, uStripe1Angle,
             uStripe1Width, uStripe1Parallax, uParallaxStrength,
-            uStripe1Wave, uStripe1Gaps, uStripe1Softness
+            uStripe1Wave, uStripe1Gaps, uStripe1Softness,
+            outdoorFactor
           ) * uStripe1Intensity;
         }
 
         if (uStripe2Enabled) {
           layer2 = generateStripeLayer(
-            worldPatternUv, vWorldPosition, uCameraPosition, uTime,
+            stripePatternUv, vWorldPosition, uCameraPosition, uTime,
             uStripe2Frequency, uStripe2Speed, uStripe2Angle,
             uStripe2Width, uStripe2Parallax, uParallaxStrength,
-            uStripe2Wave, uStripe2Gaps, uStripe2Softness
+            uStripe2Wave, uStripe2Gaps, uStripe2Softness,
+            outdoorFactor
           ) * uStripe2Intensity;
         }
 
         if (uStripe3Enabled) {
           layer3 = generateStripeLayer(
-            worldPatternUv, vWorldPosition, uCameraPosition, uTime,
+            stripePatternUv, vWorldPosition, uCameraPosition, uTime,
             uStripe3Frequency, uStripe3Speed, uStripe3Angle,
             uStripe3Width, uStripe3Parallax, uParallaxStrength,
-            uStripe3Wave, uStripe3Gaps, uStripe3Softness
+            uStripe3Wave, uStripe3Gaps, uStripe3Softness,
+            outdoorFactor
           ) * uStripe3Intensity;
         }
 
@@ -562,7 +664,7 @@ export function getFragmentShader(maxLights = 64) {
       }
 
       // ── Base specular color ───────────────────────────────────────────────
-      vec3 specularColor = specularMask.rgb * specularMask.a
+      vec3 specularColor = vec3(specularStrength)
         * totalModulator * uSpecularIntensity
         * effectiveLightColor * totalIncidentLight * buildingShadowFactor;
 

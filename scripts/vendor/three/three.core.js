@@ -14385,7 +14385,11 @@ class Object3D extends EventDispatcher {
 
 			const child = children[ i ];
 
-			child.updateMatrixWorld( force );
+			if ( child.matrixWorldAutoUpdate === true || force === true ) {
+
+				child.updateMatrixWorld( force );
+
+			}
 
 		}
 

@@ -8991,6 +8991,26 @@ export class WeatherParticles {
     }
   }
 
+  _enforceMaskPixelCacheLimits() {
+    try {
+      const maxEntries = Number.isFinite(this._maskPixelCacheMaxEntries)
+        ? Math.max(8, Math.floor(this._maskPixelCacheMaxEntries))
+        : 48;
+
+      const maxBytes = Number.isFinite(this._maskPixelCacheMaxBytes)
+        ? Math.max(8 * 1024 * 1024, Math.floor(this._maskPixelCacheMaxBytes))
+        : 64 * 1024 * 1024;
+
+      while (this._maskPixelCache.size > maxEntries || (this._maskPixelCacheBytes || 0) > maxBytes) {
+        const oldest = this._maskPixelCache.keys().next().value;
+        if (oldest === undefined) break;
+        // Always evict from the front of the Map, which is our LRU order.
+        // Update our byte accounting so large masks don't accumulate silently.
+        this._deleteMaskPixelCacheEntry(oldest);
+      }
+    } catch (_) {}
+  }
+
   _getMaskPixelData(maskTexture) {
     const image = maskTexture?.image;
     if (!image) return null;
@@ -9045,6 +9065,7 @@ export class WeatherParticles {
           if (typeof entry.byteLength === 'number' && Number.isFinite(entry.byteLength) && entry.byteLength > 0) {
             this._maskPixelCacheBytes = (this._maskPixelCacheBytes || 0) + entry.byteLength;
           }
+          this._enforceMaskPixelCacheLimits();
           return entry;
         }
       }
@@ -9070,23 +9091,7 @@ export class WeatherParticles {
       }
 
       // LRU eviction: keep cache size bounded.
-      try {
-        const maxEntries = Number.isFinite(this._maskPixelCacheMaxEntries)
-          ? Math.max(8, Math.floor(this._maskPixelCacheMaxEntries))
-          : 48;
-
-        const maxBytes = Number.isFinite(this._maskPixelCacheMaxBytes)
-          ? Math.max(8 * 1024 * 1024, Math.floor(this._maskPixelCacheMaxBytes))
-          : 64 * 1024 * 1024;
-
-        while (this._maskPixelCache.size > maxEntries || (this._maskPixelCacheBytes || 0) > maxBytes) {
-          const oldest = this._maskPixelCache.keys().next().value;
-          if (oldest === undefined) break;
-          // Always evict from the front of the Map, which is our LRU order.
-          // Update our byte accounting so large masks don't accumulate silently.
-          this._deleteMaskPixelCacheEntry(oldest);
-        }
-      } catch (_) {}
+      this._enforceMaskPixelCacheLimits();
 
       return entry;
     } catch (_) {

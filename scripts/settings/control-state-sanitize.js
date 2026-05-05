@@ -5,7 +5,9 @@
  * @module settings/control-state-sanitize
  */
 
+import { canPersistSceneDocument } from '../core/gm-parity.js';
 import { createLogger } from '../core/log.js';
+import { normalizePlayerLightOverride } from '../core/player-light-allowance.js';
 
 const log = createLogger('ControlStateSanitize');
 
@@ -68,7 +70,12 @@ export function createDefaultControlState() {
     tileMotionSpeedPercent: 100,
     tileMotionAutoPlayEnabled: true,
     tileMotionTimeFactorPercent: 100,
-    tileMotionPaused: false
+    tileMotionPaused: false,
+    playerLightAllowance: {
+      torch: 'global',
+      flashlight: 'global',
+      nightVision: 'global'
+    }
   };
 }
 
@@ -167,6 +174,15 @@ export function sanitizeControlStateInPlace(cs, options = {}) {
   } else {
     _sanitizeDirectedCustomPresetNumbers(cs.directedCustomPreset);
   }
+
+  const defPL = createDefaultControlState().playerLightAllowance;
+  if (!cs.playerLightAllowance || typeof cs.playerLightAllowance !== 'object') {
+    cs.playerLightAllowance = { ...defPL };
+  } else {
+    cs.playerLightAllowance.torch = normalizePlayerLightOverride(cs.playerLightAllowance.torch);
+    cs.playerLightAllowance.flashlight = normalizePlayerLightOverride(cs.playerLightAllowance.flashlight);
+    cs.playerLightAllowance.nightVision = normalizePlayerLightOverride(cs.playerLightAllowance.nightVision);
+  }
 }
 
 /**
@@ -181,6 +197,9 @@ export function cloneAndSanitizeControlState(raw, options = {}) {
     Object.assign(next, raw);
     if (raw.directedCustomPreset && typeof raw.directedCustomPreset === 'object') {
       Object.assign(next.directedCustomPreset, raw.directedCustomPreset);
+    }
+    if (raw.playerLightAllowance && typeof raw.playerLightAllowance === 'object') {
+      Object.assign(next.playerLightAllowance, raw.playerLightAllowance);
     }
     if (!Number.isFinite(next.windSpeedMS)) {
       const legacy01 = Number(raw.windSpeed);
@@ -214,6 +233,7 @@ export function getSanitizedControlStateForExport(scene) {
  * @returns {Promise<boolean>} true when a write was attempted
  */
 export async function repairSceneControlStateFlag(scene) {
+  if (!canPersistSceneDocument()) return false;
   if (!scene || typeof scene.setFlag !== 'function') return false;
   try {
     const raw = scene.getFlag('map-shine-advanced', 'controlState');

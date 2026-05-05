@@ -165,6 +165,10 @@ export class CameraFollower {
     // to whichever level Foundry is now viewing.
     const canvasReadyId = Hooks.on('canvasReady', () => {
       this._syncToViewedLevel({ emit: true, reason: 'canvas-ready' });
+      // Scene transitions can keep the same level-id/index values; force a
+      // resync broadcast so render caches are invalidated even when context
+      // appears "unchanged" by value comparison.
+      this._emitLevelContextChanged('canvas-ready-force-resync');
     });
     this._hookIds.push({ name: 'canvasReady', id: canvasReadyId });
 
@@ -209,8 +213,18 @@ export class CameraFollower {
       if (suppressed) return;
       if (!policyOk) return;
 
-      // V14: if the token's level field changed, prefer syncing by level id
+      // V14: if the token's level field changed, prefer syncing by level id.
+      // Route through setActiveLevel so both token-driven and UI-driven changes
+      // share the same Foundry scene.view({ level }) transition path.
       if (levelChanged && changes.level) {
+        const levelCtx = this.setActiveLevel(changes.level, {
+          keepLockMode: true,
+          emit: true,
+          reason: 'token-level-changed',
+        });
+        if (levelCtx) {
+          return;
+        }
         const levelIdx = this._levels.findIndex((l) => l.levelId === changes.level);
         if (levelIdx >= 0) {
           this._setActiveLevelByIndex(levelIdx, {
@@ -629,6 +643,15 @@ export class CameraFollower {
     const token = controlled[0] || null;
     const tokenLevelId = token?.document?.level;
     if (tokenLevelId) {
+      const levelCtx = this.setActiveLevel(tokenLevelId, {
+        keepLockMode: true,
+        emit: options.emit !== false,
+        reason: options.reason || 'follow-controlled-token',
+      });
+      if (levelCtx) {
+        return true;
+      }
+
       const levelIdx = this._levels.findIndex((l) => l.levelId === tokenLevelId);
       if (levelIdx >= 0) {
         this._setActiveLevelByIndex(levelIdx, {

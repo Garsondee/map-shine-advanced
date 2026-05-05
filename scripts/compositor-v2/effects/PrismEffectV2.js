@@ -10,7 +10,7 @@
 import { createLogger } from '../../core/log.js';
 import { probeMaskFile } from '../../assets/loader.js';
 import { tileHasLevelsRange, readTileLevelsFlags } from '../../foundry/levels-scene-flags.js';
-import { tileRelativeEffectOrder } from '../LayerOrderPolicy.js';
+import { tileStackedOverlayOrder } from '../LayerOrderPolicy.js';
 
 const log = createLogger('PrismEffectV2');
 
@@ -106,6 +106,67 @@ export class PrismEffectV2 {
       }
     }
     this._overlays.clear();
+  }
+
+  /**
+   * @param {string} tileId
+   * @private
+   */
+  _disposeOverlayEntry(tileId) {
+    if (!tileId || tileId === '__bg_image__') return;
+    const entry = this._overlays.get(tileId);
+    if (!entry) return;
+    this._renderBus.removeEffectOverlay(`${tileId}_prism`);
+    try { entry.material.dispose(); } catch (_) {}
+    try { entry.mesh.geometry?.dispose?.(); } catch (_) {}
+    for (const key of ['uPrismMask', 'uBaseMap']) {
+      const tex = entry.material?.uniforms?.[key]?.value;
+      try { tex?.dispose?.(); } catch (_) {}
+    }
+    this._overlays.delete(tileId);
+  }
+
+  /**
+   * Re-probe `_Prism` and rebuild the overlay after `texture.src` changed on a tile.
+   *
+   * @param {object} tileDoc
+   * @param {object|null} foundrySceneData
+   */
+  async refreshTileAfterTextureChange(tileDoc, foundrySceneData) {
+    if (!this._initialized || !tileDoc) return;
+    const tileId = tileDoc.id ?? tileDoc._id;
+    if (!tileId || tileId === '__bg_image__') return;
+
+    this._disposeOverlayEntry(tileId);
+
+    const src = tileDoc?.texture?.src ?? tileDoc?.img ?? '';
+    if (!src) return;
+
+    const floors = window.MapShine?.floorStack?.getFloors?.() ?? [];
+    const worldH = foundrySceneData?.height ?? (typeof canvas !== 'undefined' ? canvas?.dimensions?.height : 0) ?? 0;
+
+    const basePath = this._basePathNoExt(src);
+    const result = await probeMaskFile(basePath, '_Prism');
+    if (!result?.path) return;
+
+    const floorIndex = this._resolveFloorIndex(tileDoc, floors);
+    const tileW = tileDoc.width ?? 0;
+    const tileH = tileDoc.height ?? 0;
+    const centerX = (tileDoc.x ?? 0) + tileW / 2;
+    const centerY = worldH - ((tileDoc.y ?? 0) + tileH / 2);
+    const rotation = typeof tileDoc.rotation === 'number' ? (tileDoc.rotation * Math.PI) / 180 : 0;
+    const z = (GROUND_Z + floorIndex) + PRISM_Z_OFFSET;
+
+    this._createOverlay(tileId, floorIndex, {
+      maskUrl: result.path,
+      baseUrl: src,
+      centerX,
+      centerY,
+      z,
+      tileW,
+      tileH,
+      rotation,
+    });
   }
 
   dispose() {
@@ -303,9 +364,8 @@ export class PrismEffectV2 {
     try {
       const baseEntry = this._renderBus?._tiles?.get?.(tileId);
       const baseOrder = Number(baseEntry?.mesh?.renderOrder);
-      const isOverhead = !!baseEntry?.root?.userData?.isOverhead;
       if (Number.isFinite(baseOrder)) {
-        mesh.renderOrder = tileRelativeEffectOrder(baseOrder, floorIndex, isOverhead, 6);
+        mesh.renderOrder = tileStackedOverlayOrder(baseOrder, floorIndex, 6);
       }
     } catch (_) {}
 

@@ -15,7 +15,8 @@
  */
 
 import { createLogger } from '../core/log.js';
-import { readWallHeightFlags } from '../foundry/levels-scene-flags.js';
+import { readWallHeightFlags, resolveV14NativeDocFloorIndexMin } from '../foundry/levels-scene-flags.js';
+import { FLOOR_LAYERS } from '../compositor-v2/FloorLayerManager.js';
 import Coordinates from '../utils/coordinates.js';
 import { weatherController } from '../core/WeatherController.js';
 import { effectUnderOverheadOrder, GROUND_Z, Z_PER_FLOOR } from '../compositor-v2/LayerOrderPolicy.js';
@@ -54,18 +55,29 @@ const BUS_GROUND_Z = GROUND_Z;
 const BUS_Z_PER_FLOOR = Z_PER_FLOOR;
 const DOOR_Z_LIFT_ABOVE_FLOOR = 4;
 
+/** Sentinel: wall spans all elevations / no level slice — show on every per-level RT. */
+export const DOOR_FLOOR_INDEX_GLOBAL = -1;
+
+const _maxFloorLayerIndex = Math.max(0, FLOOR_LAYERS.length - 1);
+
 /**
  * Map a door wall to a floor index using wall-height bounds (same idea as
- * FloorRenderBus._resolveFloorIndex for tiles). Using the *active* floor here
- * wrongly puts upstairs doors in a higher render band so they paint over
- * lower-floor roofs during the stacked-floor composite.
+ * FloorLayerManager tile bucketing). Using the *active* floor here wrongly puts
+ * upstairs doors in a higher render band so they paint over lower-floor roofs
+ * during the stacked-floor composite.
  *
  * @param {object|null|undefined} wallDoc
- * @returns {number}
+ * @returns {number} Non-negative stack index, or {@link DOOR_FLOOR_INDEX_GLOBAL}
  */
-function resolveDoorFloorIndex(wallDoc) {
+export function resolveDoorMeshFloorIndex(wallDoc) {
   const floors = window.MapShine?.floorStack?.getFloors?.() ?? [];
   if (!floors.length || floors.length <= 1) return 0;
+
+  const scene = wallDoc?.parent ?? (typeof canvas !== 'undefined' ? canvas?.scene : null) ?? null;
+  const v14Idx = resolveV14NativeDocFloorIndexMin(wallDoc, scene);
+  if (v14Idx !== null) {
+    return Math.min(v14Idx, floors.length - 1, _maxFloorLayerIndex);
+  }
 
   const bounds = readWallHeightFlags(wallDoc);
   let wb = Number(bounds?.bottom);
@@ -78,18 +90,18 @@ function resolveDoorFloorIndex(wallDoc) {
     wt = s;
   }
 
-  // Full-height walls: treat as ground-floor doors (legacy / no level data).
-  if (wb === -Infinity && wt === Infinity) return 0;
+  // Full-height / no vertical slice: still visible on every level slice (V2 bus).
+  if (wb === -Infinity && wt === Infinity) return DOOR_FLOOR_INDEX_GLOBAL;
 
   if (Number.isFinite(wb) && Number.isFinite(wt)) {
     const mid = (wb + wt) / 2;
     for (let i = 0; i < floors.length; i++) {
       const f = floors[i];
-      if (mid >= f.elevationMin && mid < f.elevationMax) return i;
+      if (mid >= f.elevationMin && mid < f.elevationMax) return Math.min(i, _maxFloorLayerIndex);
     }
     for (let i = 0; i < floors.length; i++) {
       const f = floors[i];
-      if (wb < f.elevationMax && f.elevationMin <= wt) return i;
+      if (wb < f.elevationMax && f.elevationMin <= wt) return Math.min(i, _maxFloorLayerIndex);
     }
     return 0;
   }
@@ -97,13 +109,13 @@ function resolveDoorFloorIndex(wallDoc) {
   const elev = Number.isFinite(wb) ? wb : (Number.isFinite(wt) ? wt : 0);
   for (let i = 0; i < floors.length; i++) {
     const f = floors[i];
-    if (elev >= f.elevationMin && elev <= f.elevationMax) return i;
+    if (elev >= f.elevationMin && elev <= f.elevationMax) return Math.min(i, _maxFloorLayerIndex);
   }
   return 0;
 }
 
 function getDoorRenderOrder(wallDoc) {
-  const floorIndex = resolveDoorFloorIndex(wallDoc);
+  const floorIndex = resolveDoorMeshFloorIndex(wallDoc);
   const safeFloorIndex = Number.isFinite(floorIndex) && floorIndex >= 0 ? floorIndex : 0;
   return effectUnderOverheadOrder(safeFloorIndex, 2000);
 }
@@ -285,7 +297,8 @@ class DoorMesh {
     this.mesh.userData = {
       type: 'doorMesh',
       wallId: this.wallDoc.id,
-      style: this.style
+      style: this.style,
+      floorIndex: resolveDoorMeshFloorIndex(this.wallDoc),
     };
     
     // Draw doors after regular tile albedo but below overhead tiles in the
@@ -373,7 +386,9 @@ class DoorMesh {
     const busScene = window.MapShine?.effectComposer?._floorCompositorV2?._renderBus?._scene ?? null;
     // V2 bus: Z matches FloorRenderBus tile planes per floor index (see BUS_*).
     // Do not add sceneComposer.groundZ — it can push meshes behind the camera.
-    const doorFloorIndex = resolveDoorFloorIndex(this.wallDoc);
+    const doorFloorRaw = resolveDoorMeshFloorIndex(this.wallDoc);
+    const doorFloorIndex = Number.isFinite(doorFloorRaw) && doorFloorRaw >= 0 ? doorFloorRaw : 0;
+    if (this.mesh.userData) this.mesh.userData.floorIndex = doorFloorRaw;
     const z = busScene
       ? (BUS_GROUND_Z + doorFloorIndex * BUS_Z_PER_FLOOR + DOOR_Z_LIFT_ABOVE_FLOOR)
       : (groundZ + DOOR_BASE_Z_V1);
@@ -849,9 +864,16 @@ export class DoorMeshManager {
     const globalTint = this._globalTint;
     globalTint.setRGB(1, 1, 1);
 
-    try {
-      const scene = canvas?.scene;
-      const env = canvas?.environment;
+    // In V2 compositor mode, door meshes render into floor albedo and should be
+    // lit by the compositor illumination pass. Applying manual darkness tint
+    // here would double-darken door textures.
+    const v2Lighting = window.MapShine?.effectComposer?._floorCompositorV2?._lightingEffect ?? null;
+    if (v2Lighting) {
+      globalTint.setRGB(1, 1, 1);
+    } else {
+      try {
+        const scene = canvas?.scene;
+        const env = canvas?.environment;
 
       if (scene?.environment?.darknessLevel !== undefined) {
         let darkness = scene.environment.darknessLevel;
@@ -894,7 +916,8 @@ export class DoorMeshManager {
         } catch (_) {
         }
       }
-    } catch (_) {
+      } catch (_) {
+      }
     }
 
     const tr = Math.max(0, Math.min(255, (globalTint.r * 255 + 0.5) | 0));

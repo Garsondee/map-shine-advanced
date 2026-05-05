@@ -19,7 +19,13 @@
 import { createLogger } from '../../core/log.js';
 import { weatherController } from '../../core/WeatherController.js';
 import { probeMaskFile } from '../../assets/loader.js';
-import { tileHasLevelsRange, readTileLevelsFlags } from '../../foundry/levels-scene-flags.js';
+import {
+  tileHasLevelsRange,
+  readTileLevelsFlags,
+  resolveV14NativeDocFloorIndexMin,
+  getViewedLevelBackgroundSrc,
+  hasV14NativeLevels,
+} from '../../foundry/levels-scene-flags.js';
 // OVERLAY_THREE_LAYER not needed — dust uses layer 0 only; stacking handled
 // by LayerOrderPolicy FLOOR_EFFECTS band.
 import {
@@ -438,18 +444,56 @@ export class DustEffectV2 {
     const floors = window.MapShine?.floorStack?.getFloors?.() ?? [];
     const worldH = Number(d.height) || 0;
 
-    // Background first.
-    const bgSrc = canvas?.scene?.background?.src ?? '';
-    if (bgSrc) {
+    // Background first (V14 level-aware): bind each discovered background _Dust mask
+    // to its authored floor index instead of pinning to floor 0.
+    const scene = canvas?.scene ?? null;
+    const seenBgDustKeys = new Set();
+    const ingestBackgroundDust = async (bgSrcRaw, floorIndex) => {
+      const bgSrc = typeof bgSrcRaw === 'string' ? bgSrcRaw.trim() : '';
+      if (!bgSrc) return;
+      const bgBasePath = this._extractBasePath(bgSrc);
+      if (!bgBasePath) return;
+      const fi = Number.isFinite(Number(floorIndex)) ? Math.max(0, Math.floor(Number(floorIndex))) : 0;
+      const dedupeKey = `${fi}|${bgBasePath}`;
+      if (seenBgDustKeys.has(dedupeKey)) return;
+      seenBgDustKeys.add(dedupeKey);
+
       await this._accumulateDustPointsForSource({
         baseSrc: bgSrc,
-        floorIndex: 0,
+        floorIndex: fi,
         x: Number(d.sceneX) || 0,
         y: Number(d.sceneY) || 0,
         w: Number(d.sceneWidth) || 0,
         h: Number(d.sceneHeight) || 0,
         worldH,
       });
+    };
+
+    if (hasV14NativeLevels(scene) && floors.length > 0) {
+      for (const floor of floors) {
+        const levelId = floor?.levelId;
+        if (typeof levelId !== 'string' || !levelId.length) continue;
+        let bgSrc = '';
+        try {
+          const lvl = scene.levels?.get?.(levelId);
+          bgSrc = String(lvl?.background?.src || '').trim();
+        } catch (_) {
+        }
+        if (!bgSrc) continue;
+        await ingestBackgroundDust(bgSrc, floor.index);
+      }
+    }
+
+    // Always also probe the currently viewed background on active floor index.
+    {
+      const fallbackSrc = getViewedLevelBackgroundSrc(scene)
+        ?? canvas?.scene?.background?.src
+        ?? '';
+      const activeFloor = window.MapShine?.floorStack?.getActiveFloor?.();
+      const activeFloorIndex = (floors.length > 1 && Number.isFinite(Number(activeFloor?.index)))
+        ? Number(activeFloor.index)
+        : 0;
+      await ingestBackgroundDust(String(fallbackSrc || ''), activeFloorIndex);
     }
 
     // Tiles.
@@ -814,6 +858,13 @@ export class DustEffectV2 {
 
   _resolveFloorIndex(tileDoc, floors) {
     if (!floors || floors.length <= 1) return 0;
+
+    // Prefer V14-native level membership when available.
+    const nativeFloorIndex = resolveV14NativeDocFloorIndexMin(tileDoc, canvas?.scene);
+    if (Number.isFinite(Number(nativeFloorIndex))) {
+      const fi = Math.floor(Number(nativeFloorIndex));
+      if (fi >= 0 && fi < floors.length) return fi;
+    }
 
     if (tileHasLevelsRange(tileDoc)) {
       const flags = readTileLevelsFlags(tileDoc);

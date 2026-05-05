@@ -8,8 +8,9 @@
  * dependency edges to prevent silent failures.
  *
  * Reads the bus scene RT (albedo + overlays) and applies ambient light,
- * dynamic light sources, darkness sources, and coloration to produce the
- * final lit image.
+ * dynamic light sources, darkness sources, and chroma-weighted surface tint
+ * (so neutral lamp RGB does not duplicate the luminance channel) to produce the
+ * lit image.
  *
  * Reuses the V1 ThreeLightSource and ThreeDarknessSource classes for
  * individual light mesh rendering — they output additive light contribution
@@ -35,9 +36,10 @@
 import { createLogger } from '../../core/log.js';
 import { ThreeLightSource } from '../../effects/ThreeLightSource.js';
 import { ThreeDarknessSource } from '../../effects/ThreeDarknessSource.js';
-import { isLightVisibleForPerspective } from '../../foundry/elevation-context.js';
+import { isLightVisibleForPerspective, getPerspectiveForRenderFloorIndex } from '../../foundry/elevation-context.js';
 import { createLightingPerspectiveContext } from '../LightingPerspectiveContext.js';
-import { getFoundryTimePhaseHours, getFoundrySunlightFactor, getWrappedHourProgress } from '../../core/foundry-time-phases.js';
+import { computeTimeOfDayDarkness01 } from '../../core/foundry-time-phases.js';
+import { getAuthoritativeAmbientLightDocuments } from '../../foundry/ambient-light-documents.js';
 
 const log = createLogger('LightingEffectV2');
 const MODULE_ID = 'map-shine-advanced';
@@ -66,46 +68,11 @@ const LEGACY_LIGHTING_PARAM_KEYS = [
 const clamp01 = (n) => Math.max(0, Math.min(1, n));
 
 const readFoundryDarkness01 = () => {
-  try {
-    const sceneLevel = canvas?.scene?.environment?.darknessLevel;
-    if (Number.isFinite(sceneLevel)) return clamp01(sceneLevel);
-  } catch (_) {}
-  try {
-    const envLevel = canvas?.environment?.darknessLevel;
-    if (Number.isFinite(envLevel)) return clamp01(envLevel);
-  } catch (_) {}
+  const sceneLevel = canvas?.scene?.environment?.darknessLevel;
+  if (Number.isFinite(sceneLevel)) return clamp01(sceneLevel);
+  const envLevel = canvas?.environment?.darknessLevel;
+  if (Number.isFinite(envLevel)) return clamp01(envLevel);
   return 0.0;
-};
-
-const computeTimeOfDayDarkness01 = (hourRaw) => {
-  const h = Number(hourRaw);
-  if (!Number.isFinite(h)) return null;
-
-  const safeHour = ((h % 24) + 24) % 24;
-  const phases = getFoundryTimePhaseHours();
-
-  // Match StateApplier._updateSceneDarkness() anchors.
-  const dawnDuskDarkness = 0.55;
-  const noonDarkness = 0.0;
-  const midnightDarkness = 0.95;
-
-  const dayProgress = getWrappedHourProgress(safeHour, phases.sunrise, phases.sunset);
-  let targetDarkness;
-
-  if (Number.isFinite(dayProgress)) {
-    const sunlight = Math.pow(getFoundrySunlightFactor(safeHour, phases), 0.85);
-    targetDarkness = dawnDuskDarkness + ((noonDarkness - dawnDuskDarkness) * sunlight);
-  } else {
-    const nightProgress = getWrappedHourProgress(safeHour, phases.sunset, phases.sunrise);
-    if (Number.isFinite(nightProgress)) {
-      const moonArc = Math.pow(Math.max(0, Math.sin(Math.PI * nightProgress)), 0.8);
-      targetDarkness = dawnDuskDarkness + ((midnightDarkness - dawnDuskDarkness) * moonArc);
-    } else {
-      targetDarkness = midnightDarkness;
-    }
-  }
-
-  return clamp01(targetDarkness);
 };
 
 export class LightingEffectV2 {
@@ -118,13 +85,56 @@ export class LightingEffectV2 {
     this._lightsSynced = false;
     /** @type {number} Last seen count of scene light-enhancement entries */
     this._lastEnhancementCount = -1;
+    /** @type {Map<string, object>|null} Cached per-scene enhancement map */
+    this._cachedEnhancementMap = null;
+    /** @type {string|null} Cache key for enhancement map */
+    this._cachedEnhancementKey = null;
+    /** @type {string|number|null} Scene id used by enhancement cache */
+    this._cachedEnhancementSceneId = null;
+    /** @type {boolean} */
+    this._perspectiveRefreshDirty = true;
+    /** @type {number} */
+    this._lastPerspectiveRefreshAtSec = -Infinity;
+    /** @type {Map<string, number>} Per-light next allowed animation update time (seconds) */
+    this._nextAnimationUpdateAtSec = new Map();
+    /**
+     * One-shot: old scenes only stored `globalIllumination`; copy that value into
+     * {@link #params.ambientDayScale} and {@link #params.ambientNightScale} when they
+     * are still at schema defaults so existing worlds keep their look.
+     * @type {boolean}
+     */
+    this._legacyGlobalIlluminationSeeded = false;
 
     // ── Tuning parameters (match V1 defaults) ──────────────────────────
     this.params = {
       enabled: true,
+      /**
+       * Legacy single scale (hidden). Superseded by ambientDayScale / ambientNightScale;
+       * still loaded from old saves so {@link #_seedAmbientFromLegacyGlobalIfNeeded} can migrate.
+       */
       globalIllumination: 1.3,
+      /** Scales Foundry ambient brightest colour at darkness 0 (noon / bright scenes). */
+      ambientDayScale: 1.3,
+      /** Scales Foundry ambient darkness colour at darkness 1 (night). */
+      ambientNightScale: 1.3,
       lightIntensity: 0.25,
+      /** Scales the minimum illumination floor under darkness (see compose shader). */
+      minIlluminationScale: 1.0,
       colorationStrength: 1.0,
+      /** Extra coupling of surface albedo luma into the tint path only. */
+      colorationReflectivity: 1.0,
+      /**
+       * Pre-tint saturation on the RGB light buffer (0 = neutral, >0 richer chroma for tint).
+       * Does not re-introduce white boost alone; achromatic lights stay gated by chroma weight.
+       */
+      colorationSaturation: 0.0,
+      /** Curve on chroma detection: >1 requires more saturated lights before full tint. */
+      colorationChromaCurve: 1.0,
+      /**
+       * Mix toward legacy behaviour: 0 = tint only from saturated (non-grey) RGB, 1 = ignore chroma gate
+       * (old “full RGB” colouration, can double-count white with luminance).
+       */
+      colorationAchromaticMix: 0.0,
       wallInsetPx: 6.0,
       upperFloorTransmissionEnabled: false,
       upperFloorTransmissionStrength: 0.6,
@@ -142,6 +152,26 @@ export class LightingEffectV2 {
       darknessLevel: 0.0,
       negativeDarknessStrength: 1.0,
       darknessPunchGain: 2.0,
+      /**
+       * Optional tone curve on the lighting pass output (None recommended if Colour Correction
+       * tone mapping is already enabled).
+       */
+      composeToneMapping: 0,
+      composeToneExposure: 1.0,
+      /** Multiplies building-shadow opacity when applied to ambient in this pass (0 = off). */
+      ambientBuildingShadowMix: 1.0,
+      /** How much cloud / combined shadow darkens ambient here (0 = ignore, 1 = full). */
+      cloudShadowAmbientInfluence: 1.0,
+      /** Scales overhead shadow strength on ambient only (0 = off). */
+      overheadShadowAmbientInfluence: 1.0,
+      /** Internal render scale for source lights RT (1.0 = full resolution). */
+      internalLightResolutionScale: 1.0,
+      /** Internal render scale for window glow RT (1.0 = full resolution). */
+      internalWindowResolutionScale: 1.0,
+      /** Internal render scale for darkness RT (1.0 = full resolution). */
+      internalDarknessResolutionScale: 1.0,
+      /** Use half-float for window light RT (false allows 8-bit to cut bandwidth). */
+      windowLightUseHalfFloat: true,
     };
 
     // ── Light management ────────────────────────────────────────────────
@@ -181,6 +211,31 @@ export class LightingEffectV2 {
 
     /** @type {THREE.Vector2|null} Reusable size vector */
     this._sizeVec = null;
+    /** @type {THREE.Vector3|null} Reusable projection helper vector */
+    this._tmpNdcVec = null;
+    /** @type {THREE.Vector3|null} Reusable projection helper vector */
+    this._tmpWorldVec = null;
+    /** @type {THREE.Vector3|null} Reusable projection helper vector */
+    this._tmpDirVec = null;
+    /** @type {Array<{ndcX:number,ndcY:number,key:string}>} Stable corner descriptors */
+    this._perspectiveCornerDefs = [
+      { ndcX: -1, ndcY: -1, key: '00' },
+      { ndcX:  1, ndcY: -1, key: '10' },
+      { ndcX: -1, ndcY:  1, key: '01' },
+      { ndcX:  1, ndcY:  1, key: '11' },
+    ];
+    /** @type {WeakSet<object>} Tracks normalized outdoors mask textures */
+    this._normalizedOutdoorsTextures = new WeakSet();
+    /** @type {number|null} Cached tone mapping mode define */
+    this._composeToneMappingMode = null;
+    /** @type {{r:number,g:number,b:number}|null} Cached ambientBrightest RGB */
+    this._lastAmbientBrightestRgb = null;
+    /** @type {{r:number,g:number,b:number}|null} Cached ambientDarkness RGB */
+    this._lastAmbientDarknessRgb = null;
+    /** @type {number|null} Cached ambientBrightest hex */
+    this._lastAmbientBrightestHex = null;
+    /** @type {number|null} Cached ambientDarkness hex */
+    this._lastAmbientDarknessHex = null;
 
     /**
      * Per-frame Levels/floor snapshot from `FloorCompositor` (optional).
@@ -188,6 +243,58 @@ export class LightingEffectV2 {
      * @type {import('../LightingPerspectiveContext.js').LightingPerspectiveContext|null}
      */
     this._lightingPerspectiveContext = null;
+
+    /**
+     * When set, Foundry light visibility uses this FloorStack band midpoint instead of
+     * the global viewer perspective so each multi-floor lit slice only receives lights
+     * for that floor pass.
+     * @type {number|null}
+     */
+    this._renderFloorIndexForLights = null;
+  }
+
+  /**
+   * @private
+   * @param {number} n
+   * @returns {number}
+   */
+  _sanitizeResolutionScale(n) {
+    const v = Number(n);
+    return Number.isFinite(v) ? Math.max(0.25, Math.min(1.0, v)) : 1.0;
+  }
+
+  /**
+   * @private
+   * @param {number} baseW
+   * @param {number} baseH
+   * @param {number} scale
+   * @returns {{ w: number, h: number }}
+   */
+  _scaledTargetSize(baseW, baseH, scale) {
+    const s = this._sanitizeResolutionScale(scale);
+    return {
+      w: Math.max(1, Math.round(baseW * s)),
+      h: Math.max(1, Math.round(baseH * s)),
+    };
+  }
+
+  /**
+   * @private
+   * @param {THREE.Texture|null|undefined} texture
+   */
+  _normalizeOutdoorsMaskTexture(texture) {
+    const tex = texture;
+    if (!tex || this._normalizedOutdoorsTextures.has(tex)) return;
+    const THREE = window.THREE;
+    if (!THREE) return;
+    let texChanged = false;
+    if (tex.wrapS !== THREE.ClampToEdgeWrapping) { tex.wrapS = THREE.ClampToEdgeWrapping; texChanged = true; }
+    if (tex.wrapT !== THREE.ClampToEdgeWrapping) { tex.wrapT = THREE.ClampToEdgeWrapping; texChanged = true; }
+    if (tex.minFilter !== THREE.LinearFilter) { tex.minFilter = THREE.LinearFilter; texChanged = true; }
+    if (tex.magFilter !== THREE.LinearFilter) { tex.magFilter = THREE.LinearFilter; texChanged = true; }
+    if (tex.generateMipmaps !== false) { tex.generateMipmaps = false; texChanged = true; }
+    if (texChanged) tex.needsUpdate = true;
+    this._normalizedOutdoorsTextures.add(tex);
   }
 
   /**
@@ -195,6 +302,18 @@ export class LightingEffectV2 {
    */
   setLightingPerspectiveContext(ctx) {
     this._lightingPerspectiveContext = ctx;
+    this._perspectiveRefreshDirty = true;
+  }
+
+  /**
+   * Per-level compositor pass: gate AmbientLights for this floor index only.
+   * Pass `null` after per-level passes complete (see FloorCompositor).
+   * @param {number|null} [floorIndex=null]
+   */
+  setRenderFloorIndexForLights(floorIndex = null) {
+    const n = Number(floorIndex);
+    this._renderFloorIndexForLights = Number.isFinite(n) ? n : null;
+    this._perspectiveRefreshDirty = true;
   }
 
   /** @private */
@@ -209,6 +328,7 @@ export class LightingEffectV2 {
     const moduleFlags = changes?.flags?.[MODULE_ID];
     if (!moduleFlags || !Object.prototype.hasOwnProperty.call(moduleFlags, LIGHT_ENHANCEMENT_FLAG_KEY)) return;
 
+    this._invalidateEnhancementCache();
     this.syncAllLights();
   }
 
@@ -218,9 +338,9 @@ export class LightingEffectV2 {
    * @returns {Map<string, object>}
    */
   _getLightEnhancementConfigMap() {
-    const map = new Map();
     const scene = canvas?.scene;
-    if (!scene) return map;
+    if (!scene) return new Map();
+    const sceneId = scene?.id ?? scene?._id ?? null;
 
     let raw;
     try {
@@ -232,6 +352,17 @@ export class LightingEffectV2 {
     const list = Array.isArray(raw)
       ? raw
       : (Array.isArray(raw?.lights) ? raw.lights : (Array.isArray(raw?.items) ? raw.items : []));
+    const rawLen = list.length;
+    const firstId = rawLen > 0 && list[0] && list[0].id != null ? String(list[0].id) : '';
+    const lastId = rawLen > 1 && list[rawLen - 1] && list[rawLen - 1].id != null ? String(list[rawLen - 1].id) : '';
+    const cacheKey = `${rawLen}|${firstId}|${lastId}`;
+    if (this._cachedEnhancementMap
+        && this._cachedEnhancementSceneId === sceneId
+        && this._cachedEnhancementKey === cacheKey) {
+      return this._cachedEnhancementMap;
+    }
+
+    const map = new Map();
 
     for (const entry of list) {
       if (!entry || typeof entry !== 'object') continue;
@@ -242,7 +373,17 @@ export class LightingEffectV2 {
       map.set(id, config);
     }
 
+    this._cachedEnhancementMap = map;
+    this._cachedEnhancementKey = cacheKey;
+    this._cachedEnhancementSceneId = sceneId;
     return map;
+  }
+
+  /** @private */
+  _invalidateEnhancementCache() {
+    this._cachedEnhancementMap = null;
+    this._cachedEnhancementKey = null;
+    this._cachedEnhancementSceneId = null;
   }
 
   /**
@@ -267,6 +408,12 @@ export class LightingEffectV2 {
     const nextConfig = { ...baseConfig, ...enhancement };
     if (baseConfig.darknessResponse && enhancement.darknessResponse && typeof enhancement.darknessResponse === 'object') {
       nextConfig.darknessResponse = { ...baseConfig.darknessResponse, ...enhancement.darknessResponse };
+    }
+    // Shallow spread would replace the whole `animation` object with a partial enhancement
+    // (e.g. only speed), dropping `type` / `intensity` and breaking ThreeLightSource torch detection.
+    if (baseConfig.animation && typeof baseConfig.animation === 'object'
+        && enhancement.animation && typeof enhancement.animation === 'object') {
+      nextConfig.animation = { ...baseConfig.animation, ...enhancement.animation };
     }
 
     // Preserve the live runtime document when possible, but provide a plain
@@ -298,16 +445,206 @@ export class LightingEffectV2 {
     return {
       enabled: true,
       groups: [
-        { name: 'illumination', label: 'Global Illumination', type: 'inline', parameters: ['globalIllumination', 'lightIntensity', 'colorationStrength'] },
-        { name: 'occlusion', label: 'Occlusion', type: 'inline', parameters: ['wallInsetPx', 'restrictRoofScreenLightOcclusionToTopFloor', 'upperFloorTransmissionEnabled', 'upperFloorTransmissionStrength'] },
-        { name: 'darkness', label: 'Darkness Response', type: 'inline', parameters: ['interiorDarkness', 'negativeDarknessStrength', 'darknessPunchGain'] },
-        { name: 'lightAnim', label: 'Light Animation Behaviour', type: 'inline', parameters: ['lightAnimWindInfluence', 'lightAnimOutdoorPower'] },
+        {
+          name: 'ambientFloor',
+          label: 'Ambient & minimum floor',
+          type: 'folder',
+          expanded: true,
+          parameters: ['ambientDayScale', 'ambientNightScale', 'minIlluminationScale'],
+        },
+        {
+          name: 'dynamicLuma',
+          label: 'Dynamic lights (luminance)',
+          type: 'folder',
+          expanded: true,
+          parameters: ['lightIntensity'],
+        },
+        {
+          name: 'surfaceTint',
+          label: 'Surface tint (RGB light buffer)',
+          type: 'folder',
+          expanded: true,
+          parameters: [
+            'colorationStrength',
+            'colorationReflectivity',
+            'colorationSaturation',
+            'colorationChromaCurve',
+            'colorationAchromaticMix',
+          ],
+        },
+        {
+          name: 'composeTonemap',
+          label: 'Lighting pass tone map',
+          type: 'folder',
+          expanded: false,
+          parameters: ['composeToneMapping', 'composeToneExposure'],
+        },
+        {
+          name: 'ambientShadowMix',
+          label: 'Ambient shadow mixing',
+          type: 'folder',
+          expanded: false,
+          parameters: [
+            'ambientBuildingShadowMix',
+            'cloudShadowAmbientInfluence',
+            'overheadShadowAmbientInfluence',
+          ],
+        },
+        {
+          name: 'occlusion',
+          label: 'Occlusion',
+          type: 'folder',
+          expanded: false,
+          parameters: [
+            'wallInsetPx',
+            'restrictRoofScreenLightOcclusionToTopFloor',
+            'upperFloorTransmissionEnabled',
+            'upperFloorTransmissionStrength',
+          ],
+        },
+        {
+          name: 'darkness',
+          label: 'Darkness response',
+          type: 'folder',
+          expanded: false,
+          parameters: ['interiorDarkness', 'negativeDarknessStrength', 'darknessPunchGain'],
+        },
+        {
+          name: 'lightAnim',
+          label: 'Light animation',
+          type: 'folder',
+          expanded: false,
+          parameters: ['lightAnimWindInfluence', 'lightAnimOutdoorPower'],
+        },
       ],
       parameters: {
         enabled: { type: 'boolean', default: true, hidden: true },
-        globalIllumination: { type: 'slider', min: 0, max: 2, step: 0.1, default: 1.3, label: 'Illumination scale' },
-        lightIntensity: { type: 'slider', min: 0, max: 2, step: 0.05, default: 0.25, label: 'Light Intensity' },
-        colorationStrength: { type: 'slider', min: 0, max: 500, step: 0.05, default: 1.0, label: 'Coloration Strength' },
+        globalIllumination: {
+          type: 'slider',
+          min: 0,
+          max: 2,
+          step: 0.1,
+          default: 1.3,
+          label: 'Illumination scale (legacy)',
+          hidden: true,
+          tooltip: 'Deprecated: use Day ambient and Night ambient. Kept so old module data still loads.',
+        },
+        ambientDayScale: {
+          type: 'slider',
+          min: 0,
+          max: 3.5,
+          step: 0.05,
+          default: 1.3,
+          label: 'Day ambient (noon)',
+          tooltip: 'Scales Foundry “ambient brightest” at low darkness only. Raise for brighter midday without lifting night.',
+        },
+        ambientNightScale: {
+          type: 'slider',
+          min: 0,
+          max: 3.5,
+          step: 0.05,
+          default: 1.3,
+          label: 'Night ambient fill',
+          tooltip: 'Scales Foundry “ambient darkness” at high darkness. Lower for deeper night while keeping day bright.',
+        },
+        minIlluminationScale: {
+          type: 'slider',
+          min: 0,
+          max: 3,
+          step: 0.05,
+          default: 1.0,
+          label: 'Minimum light floor',
+          tooltip: 'Scales the darkest-scene safety floor so interiors never clip to pure black.',
+        },
+        lightIntensity: { type: 'slider', min: 0, max: 2, step: 0.05, default: 0.25, label: 'Light intensity' },
+        colorationStrength: {
+          type: 'slider',
+          min: 0,
+          max: 40,
+          step: 0.05,
+          default: 1.0,
+          label: 'Tint strength',
+          tooltip: 'How strongly coloured light tints surfaces (achromatic / white lights are excluded by default).',
+        },
+        colorationReflectivity: {
+          type: 'slider',
+          min: 0,
+          max: 2,
+          step: 0.05,
+          default: 1.0,
+          label: 'Tint vs albedo',
+          tooltip: 'Couples tint to surface brightness (albedo luma); lower flattens tint on dark pixels.',
+        },
+        colorationSaturation: {
+          type: 'slider',
+          min: -1,
+          max: 2,
+          step: 0.05,
+          default: 0.0,
+          label: 'Tint input saturation',
+          tooltip: 'Pre-boosts chroma in the light buffer before tint (0 = as rendered).',
+        },
+        colorationChromaCurve: {
+          type: 'slider',
+          min: 0.25,
+          max: 4,
+          step: 0.05,
+          default: 1.0,
+          label: 'Chroma sharpness',
+          tooltip: 'Higher values need more saturated lamp colours before tint reaches full strength.',
+        },
+        colorationAchromaticMix: {
+          type: 'slider',
+          min: 0,
+          max: 1,
+          step: 0.05,
+          default: 0.0,
+          label: 'Neutral light bleed',
+          tooltip: 'Blends toward legacy behaviour where white lights also drove the tint path (can brighten greys).',
+        },
+        composeToneMapping: {
+          type: 'list',
+          label: 'Tone mapping',
+          options: { None: 0, 'ACES Filmic': 1, Reinhard: 2 },
+          default: 0,
+          tooltip: 'Applied at the end of the lighting pass. Prefer None if Colour Correction already tone maps.',
+        },
+        composeToneExposure: {
+          type: 'slider',
+          min: 0.25,
+          max: 4,
+          step: 0.05,
+          default: 1.0,
+          label: 'Tone-map exposure',
+          tooltip: 'Linear gain before tone mapping (only when tone mapping is not None).',
+        },
+        ambientBuildingShadowMix: {
+          type: 'slider',
+          min: 0,
+          max: 1,
+          step: 0.05,
+          default: 1.0,
+          label: 'Building shadow on ambient',
+          tooltip: 'Scales how much baked building shadow darkens ambient illumination in this pass.',
+        },
+        cloudShadowAmbientInfluence: {
+          type: 'slider',
+          min: 0,
+          max: 1,
+          step: 0.05,
+          default: 1.0,
+          label: 'Cloud shadow on ambient',
+          tooltip: 'Reduces cloud (or combined) shadow on ambient only; dynamic lights stay full strength.',
+        },
+        overheadShadowAmbientInfluence: {
+          type: 'slider',
+          min: 0,
+          max: 1,
+          step: 0.05,
+          default: 1.0,
+          label: 'Overhead shadow on ambient',
+          tooltip: 'Scales overhead tile shadow on ambient; torches and lamps still punch through.',
+        },
         wallInsetPx: { type: 'slider', min: 0, max: 40, step: 0.5, default: 6.0, label: 'Wall Inset (px)' },
         restrictRoofScreenLightOcclusionToTopFloor: {
           type: 'boolean',
@@ -317,7 +654,15 @@ export class LightingEffectV2 {
         },
         upperFloorTransmissionEnabled: { type: 'boolean', default: false, label: 'Upper Floor Through-Gaps' },
         upperFloorTransmissionStrength: { type: 'slider', min: 0, max: 2, step: 0.05, default: 0.6, label: 'Upper Light Strength' },
-        interiorDarkness: { type: 'slider', min: 0, max: 1.5, step: 0.05, default: 0.0, label: 'Interior Darkness' },
+        interiorDarkness: {
+          type: 'slider',
+          min: 0,
+          max: 1.5,
+          step: 0.05,
+          default: 0.0,
+          label: 'Interior Darkness',
+          tooltip: 'Extra dim on mask-classified interiors (ambient only). Fades out automatically under Foundry / window light so torches and overlap regions do not stay muddy; specular in the scene buffer scales with total illumination.',
+        },
         lightAnimWindInfluence: { type: 'slider', min: 0, max: 3, step: 0.05, default: 1.0, label: 'Wind Influence' },
         lightAnimOutdoorPower: { type: 'slider', min: 0, max: 6, step: 0.25, default: 2.0, label: 'Outdoor Power' },
         negativeDarknessStrength: { type: 'slider', min: 0, max: 3, step: 0.1, default: 1.0, label: 'Negative Darkness Strength' },
@@ -338,6 +683,9 @@ export class LightingEffectV2 {
     if (!THREE) return;
 
     this._sizeVec = new THREE.Vector2();
+    this._tmpNdcVec = new THREE.Vector3();
+    this._tmpWorldVec = new THREE.Vector3();
+    this._tmpDirVec = new THREE.Vector3();
 
     // ── Light accumulation RT (HDR, additive blending) ────────────────
     const rtOpts = {
@@ -348,12 +696,19 @@ export class LightingEffectV2 {
       depthBuffer: false,
       stencilBuffer: false,
     };
-    this._lightRT = new THREE.WebGLRenderTarget(w, h, rtOpts);
+    const lightSize = this._scaledTargetSize(w, h, this.params.internalLightResolutionScale);
+    const windowSize = this._scaledTargetSize(w, h, this.params.internalWindowResolutionScale);
+    const darknessSize = this._scaledTargetSize(w, h, this.params.internalDarknessResolutionScale);
+    this._lightRT = new THREE.WebGLRenderTarget(lightSize.w, lightSize.h, rtOpts);
     // Linear storage: light accumulation is additive in linear space.
     this._lightRT.texture.colorSpace = THREE.LinearSRGBColorSpace;
-    this._windowLightRT = new THREE.WebGLRenderTarget(w, h, rtOpts);
+    const windowRtOpts = {
+      ...rtOpts,
+      type: this.params.windowLightUseHalfFloat ? THREE.HalfFloatType : THREE.UnsignedByteType,
+    };
+    this._windowLightRT = new THREE.WebGLRenderTarget(windowSize.w, windowSize.h, windowRtOpts);
     this._windowLightRT.texture.colorSpace = THREE.LinearSRGBColorSpace;
-    this._darknessRT = new THREE.WebGLRenderTarget(w, h, {
+    this._darknessRT = new THREE.WebGLRenderTarget(darknessSize.w, darknessSize.h, {
       ...rtOpts,
       type: THREE.UnsignedByteType,
     });
@@ -368,6 +723,9 @@ export class LightingEffectV2 {
     this._composeScene = new THREE.Scene();
     this._composeCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
     this._composeMaterial = new THREE.ShaderMaterial({
+      defines: {
+        COMPOSE_TONEMAP_MODE: 0,
+      },
       uniforms: {
         tScene:   { value: null },
         tLightSources: { value: null },
@@ -422,9 +780,18 @@ export class LightingEffectV2 {
         uDarknessLevel:      { value: 0.0 },
         uAmbientBrightest:   { value: new THREE.Color(1, 1, 1) },
         uAmbientDarkness:    { value: new THREE.Color(0.141, 0.141, 0.282) },
-        uGlobalIllumination: { value: 1.3 },
+        uAmbientDayScale:   { value: 1.3 },
+        uAmbientNightScale: { value: 1.3 },
         uLightIntensity:     { value: 0.25 },
+        uMinIlluminationScale: { value: 1.0 },
         uColorationStrength: { value: 1.0 },
+        uColorationReflectivity: { value: 1.0 },
+        uColorationSaturation: { value: 0.0 },
+        uColorationChromaCurve: { value: 1.0 },
+        uColorationAchromaticMix: { value: 0.0 },
+        uComposeToneExposure: { value: 1.0 },
+        uCloudShadowAmbientInfluence: { value: 1.0 },
+        uOverheadShadowAmbientInfluence: { value: 1.0 },
         uNegativeDarknessStrength: { value: 1.0 },
         uDarknessPunchGain:        { value: 2.0 },
         uInteriorDarkness:         { value: 0.0 },
@@ -439,6 +806,7 @@ export class LightingEffectV2 {
         tOutdoorsForRoofLight: { value: null },
         uHasOutdoorsForRoofLight: { value: 0 },
         uOutdoorsForRoofLightFlipY: { value: 0 },
+        uOutdoorsForRoofLightTexelSize: { value: new THREE.Vector2(0, 0) },
         // Half-res T from OverheadShadowsEffectV2: single source for geometric ceiling gate.
         tCeilingLightTransmittance: { value: null },
         uHasCeilingLightTransmittance: { value: 0 },
@@ -447,6 +815,8 @@ export class LightingEffectV2 {
       // These shader sources are embedded in JS template literals (backticks).
       // Never include backticks inside shader comments/strings; it will break JS parsing.
       vertexShader: /* glsl */`
+        precision highp float;
+        precision highp int;
         varying vec2 vUv;
         void main() {
           vUv = uv;
@@ -454,6 +824,8 @@ export class LightingEffectV2 {
         }
       `,
       fragmentShader: /* glsl */`
+        precision highp float;
+        precision highp int;
         uniform sampler2D tScene;
         uniform sampler2D tLightSources;
         uniform sampler2D tLightWindow;
@@ -488,9 +860,18 @@ export class LightingEffectV2 {
         uniform float uDarknessLevel;
         uniform vec3 uAmbientBrightest;
         uniform vec3 uAmbientDarkness;
-        uniform float uGlobalIllumination;
+        uniform float uAmbientDayScale;
+        uniform float uAmbientNightScale;
         uniform float uLightIntensity;
+        uniform float uMinIlluminationScale;
         uniform float uColorationStrength;
+        uniform float uColorationReflectivity;
+        uniform float uColorationSaturation;
+        uniform float uColorationChromaCurve;
+        uniform float uColorationAchromaticMix;
+        uniform float uComposeToneExposure;
+        uniform float uCloudShadowAmbientInfluence;
+        uniform float uOverheadShadowAmbientInfluence;
         uniform float uNegativeDarknessStrength;
         uniform float uDarknessPunchGain;
         uniform float uInteriorDarkness;
@@ -500,6 +881,7 @@ export class LightingEffectV2 {
         uniform sampler2D tOutdoorsForRoofLight;
         uniform float uHasOutdoorsForRoofLight;
         uniform float uOutdoorsForRoofLightFlipY;
+        uniform vec2 uOutdoorsForRoofLightTexelSize;
         uniform sampler2D tCeilingLightTransmittance;
         uniform float uHasCeilingLightTransmittance;
         varying vec2 vUv;
@@ -508,9 +890,29 @@ export class LightingEffectV2 {
           return dot(c, vec3(0.2126, 0.7152, 0.0722));
         }
 
+        float rgbSaturation(vec3 c) {
+          float mn = min(min(c.r, c.g), c.b);
+          float mx = max(max(c.r, c.g), c.b);
+          return (mx > 1e-4) ? clamp((mx - mn) / mx, 0.0, 1.0) : 0.0;
+        }
+
+        vec3 ACESFilmicToneMapping(vec3 x) {
+          float a = 2.51;
+          float b = 0.03;
+          float c = 2.43;
+          float d = 0.59;
+          float e = 0.14;
+          return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
+        }
+
+        vec3 ReinhardToneMapping(vec3 x) {
+          return x / (x + vec3(1.0));
+        }
+
         void main() {
           vec4 baseColor = texture2D(tScene, vUv);
-          vec3 srcLights = max(texture2D(tLightSources, vUv).rgb, vec3(0.0));
+          vec4 srcSample = texture2D(tLightSources, vUv);
+          vec3 srcLights = max(srcSample.rgb, vec3(0.0));
           vec3 winLights = max(texture2D(tLightWindow, vUv).rgb, vec3(0.0));
           float darknessMask = clamp(texture2D(tDarkness, vUv).r, 0.0, 1.0);
 
@@ -518,8 +920,9 @@ export class LightingEffectV2 {
           float baseDarknessLevel = clamp(uDarknessLevel, 0.0, 1.0);
 
           // Ambient: interpolate between day and night based on darkness level.
-          vec3 ambientDay   = uAmbientBrightest * max(uGlobalIllumination, 0.0);
-          vec3 ambientNight = uAmbientDarkness  * max(uGlobalIllumination, 0.0);
+          // Day and night scales are separate so you can run bright noon and deep night together.
+          vec3 ambientDay   = uAmbientBrightest * max(uAmbientDayScale, 0.0);
+          vec3 ambientNight = uAmbientDarkness  * max(uAmbientNightScale, 0.0);
           vec3 ambient = mix(ambientDay, ambientNight, baseDarknessLevel);
 
           // Scene UV (Foundry space) for masks authored in scene rect — shared by
@@ -542,9 +945,27 @@ export class LightingEffectV2 {
           if (uHasOutdoorsForRoofLight > 0.5) {
             vec2 ouvId = sceneUvFoundry;
             if (uOutdoorsForRoofLightFlipY > 0.5) ouvId.y = 1.0 - ouvId.y;
-            vec4 odId = texture2D(tOutdoorsForRoofLight, ouvId);
-            float odAId = clamp(odId.a, 0.0, 1.0);
-            isOutdoorForInteriorDim = (odAId > 0.08) ? step(0.45, odId.r) : 1.0;
+            vec4 odIdC = texture2D(tOutdoorsForRoofLight, clamp(ouvId, 0.0, 1.0));
+            vec4 odId = odIdC;
+            // Robust decode for interior dimming:
+            // - outdoors masks are authored mostly binary (0/1)
+            // - composed/filtered textures can introduce tiny mid-tone rows
+            //   that become visible as horizontal dark bands when scaled by
+            //   uInteriorDarkness.
+            // Snap near-extremes to remove seam/banding noise while preserving
+            // real indoor/outdoor transitions.
+            float outdoorRaw = clamp(max(odId.r, max(odId.g, odId.b)), 0.0, 1.0);
+            float outdoorMid = smoothstep(0.18, 0.82, outdoorRaw);
+            float outdoorLoHi = (outdoorRaw <= 0.10) ? 0.0 : ((outdoorRaw >= 0.90) ? 1.0 : outdoorMid);
+            // Transparent/invalid outdoors pixels should not darken ambient.
+            // In those regions treat as "outdoors" (1.0), then blend toward the
+            // decoded RGB classification only where alpha is confidently present.
+            // Interior-darkness should only trust clearly authored alpha.
+            // Soft alpha ramps (from filtering/composition) can form thin
+            // horizontal rows that interiorDarkness amplifies; treat those as
+            // outdoors to avoid residual banding.
+            float outdoorsAlphaValid = step(0.5, clamp(odId.a, 0.0, 1.0));
+            isOutdoorForInteriorDim = mix(1.0, outdoorLoHi, outdoorsAlphaValid);
           }
 
           // Roof / tree canopy: prefer packed ceiling transmittance T (half-res blit from
@@ -629,7 +1050,12 @@ export class LightingEffectV2 {
           float visS = mix(1.0, roofLightVisibility, clamp(uApplyRoofOcclusionToSources, 0.0, 1.0));
           float visW = mix(1.0, roofLightVisibility, clamp(uApplyRoofOcclusionToWindow, 0.0, 1.0));
           vec3 safeLights = srcLights * visS + winLights * visW;
-          float lightI = max(max(safeLights.r, safeLights.g), safeLights.b);
+          // White/direct illumination channel:
+          // - Foundry lights: read from accumulated alpha (luminosity-aware in ThreeLightSource)
+          // - Window light: continue deriving from RGB
+          float srcWhite = max(srcSample.a, 0.0) * visS;
+          float winWhite = max(max(winLights.r, winLights.g), winLights.b) * visW;
+          float lightI = max(srcWhite, winWhite);
           float lightIVisible = lightI;
           vec3 directLight = vec3(lightIVisible) * master;
 
@@ -653,7 +1079,19 @@ export class LightingEffectV2 {
           // sample the map border and smear interior classification (horizontal bands
           // in the grey margin). Match building-shadow guard.
           float isOutdoorForInteriorDimSafe = mix(1.0, isOutdoorForInteriorDim, inSceneBounds);
-          ambientAfterDark *= max(0.0, 1.0 - uInteriorDarkness * (1.0 - isOutdoorForInteriorDimSafe));
+          // Only apply interior-darkness where the mask confidently indicates
+          // "indoors". This rejects low-level mask noise/seams that otherwise
+          // become visible as broad banding when interior darkness is increased.
+          float indoorSignal = clamp(1.0 - isOutdoorForInteriorDimSafe, 0.0, 1.0);
+          float indoorConfidence = smoothstep(0.30, 0.70, indoorSignal);
+          // tScene includes additive specular; litColor = baseColor * totalIllumination. If we
+          // crush ambientAfterDark on interiors while directLight is only moderate, totalIllumination
+          // stays low and specular highlights (already in baseColor) read flat. Fade interior
+          // crush where the same dynamic channel used for darkness punch is strong (Foundry
+          // srcSample.a and window whites, scaled by uLightIntensity).
+          float interiorDarkLightSuppression = smoothstep(0.02, 0.2, lightTermI);
+          float indoorConfidenceForDim = indoorConfidence * (1.0 - interiorDarkLightSuppression);
+          ambientAfterDark *= max(0.0, 1.0 - uInteriorDarkness * indoorConfidenceForDim);
 
           // Total illumination = ambient (after darkness) + dynamic lights.
           vec3 totalIllumination = ambientAfterDark + directLight;
@@ -672,8 +1110,13 @@ export class LightingEffectV2 {
               float rawMix = roofAlpha * isOutdoorForInteriorDimSafe;
               shadowFactor = mix(shadowFactor, rawShadowFactor, rawMix);
             }
+            float shadowFactorMix = mix(
+              1.0,
+              shadowFactor,
+              clamp(uCloudShadowAmbientInfluence, 0.0, 1.0)
+            );
             vec3 ambientPortion = ambientAfterDark;
-            totalIllumination = ambientPortion * shadowFactor + directLight;
+            totalIllumination = ambientPortion * shadowFactorMix + directLight;
           }
 
           // Legacy cloud-only path: dims the ambient component only.
@@ -690,9 +1133,14 @@ export class LightingEffectV2 {
               float rawMix = roofAlpha * isOutdoorForInteriorDimSafe;
               shadowFactor = mix(shadowFactor, rawShadowFactor, rawMix);
             }
+            float shadowFactorMixC = mix(
+              1.0,
+              shadowFactor,
+              clamp(uCloudShadowAmbientInfluence, 0.0, 1.0)
+            );
             // Only dim the ambient portion; keep dynamic-light additive intact.
             vec3 ambientPortion = ambientAfterDark;
-            totalIllumination = ambientPortion * shadowFactor + directLight;
+            totalIllumination = ambientPortion * shadowFactorMixC + directLight;
           }
 
           // Building shadow: dims only the ambient component.
@@ -731,30 +1179,55 @@ export class LightingEffectV2 {
             vec3 ovShadowRgb = clamp(ovSample.rgb, vec3(0.0), vec3(1.0));
             float tileProjectionFactor = clamp(ovSample.a, 0.0, 1.0);
             vec3 combinedShadowFactor = ovShadowRgb * tileProjectionFactor;
-            vec3 ovMix = mix(vec3(1.0), combinedShadowFactor, clamp(uOverheadShadowOpacity, 0.0, 1.0));
+            float ovAmt = clamp(uOverheadShadowOpacity, 0.0, 1.0)
+              * clamp(uOverheadShadowAmbientInfluence, 0.0, 1.0);
+            vec3 ovMix = mix(vec3(1.0), combinedShadowFactor, ovAmt);
             vec3 ambientComp = totalIllumination - directLight;
             ambientComp *= ovMix;
             totalIllumination = ambientComp + directLight;
           }
 
           // Minimum illumination floor to prevent pure black.
-          vec3 minIllum = mix(ambientDay, ambientNight, localDarknessLevel) * 0.1;
+          vec3 minIllum = mix(ambientDay, ambientNight, localDarknessLevel)
+            * (0.1 * max(uMinIlluminationScale, 0.0));
           totalIllumination = max(totalIllumination, minIllum);
 
           // Apply illumination to albedo.
           vec3 litColor = baseColor.rgb * totalIllumination;
 
-          // Coloration: lights tint the surface proportional to surface brightness.
-          float reflection = perceivedBrightness(baseColor.rgb);
-          vec3 coloration = safeLights * master * reflection * max(uColorationStrength, 0.0);
+          // Colouration: only the chromatic part of the RGB light buffer tints albedo.
+          // Luminance for neutral / uncoloured Foundry lights already comes from tLightSources.a
+          // (see directLight), so repeating full RGB here used to double-count white light.
+          vec3 lumaW = vec3(0.2126, 0.7152, 0.0722);
+          float lSL = dot(safeLights, lumaW);
+          vec3 greySL = vec3(lSL);
+          vec3 safeForColor = safeLights;
+          float csat = uColorationSaturation;
+          if (abs(csat) > 1e-5) {
+            safeForColor = clamp(mix(greySL, safeLights, 1.0 + csat), 0.0, 3.5);
+          }
+          float lightSat = rgbSaturation(safeForColor);
+          float chromaW = pow(max(lightSat, 0.0), max(uColorationChromaCurve, 0.001));
+          chromaW = mix(chromaW, 1.0, clamp(uColorationAchromaticMix, 0.0, 1.0));
+
+          float reflection = perceivedBrightness(baseColor.rgb) * max(uColorationReflectivity, 0.0);
+          vec3 coloration = safeForColor * master * reflection
+            * max(uColorationStrength, 0.0) * chromaW;
           litColor += coloration;
 
-          gl_FragColor = vec4(litColor, baseColor.a);
+          vec3 outRgb = litColor * max(uComposeToneExposure, 0.0);
+          #if COMPOSE_TONEMAP_MODE == 1
+            outRgb = ACESFilmicToneMapping(outRgb);
+          #elif COMPOSE_TONEMAP_MODE == 2
+            outRgb = ReinhardToneMapping(outRgb);
+          #endif
+          gl_FragColor = vec4(outRgb, baseColor.a);
         }
       `,
       depthTest: false,
       depthWrite: false,
     });
+    this._composeToneMappingMode = 0;
     this._composeMaterial.toneMapped = false;
 
     this._composeQuad = new THREE.Mesh(
@@ -769,6 +1242,15 @@ export class LightingEffectV2 {
     this._registerHook('updateAmbientLight', (doc, changes) => this._onLightUpdate(doc, changes));
     this._registerHook('deleteAmbientLight', (doc) => this._onLightDelete(doc));
     this._registerHook('updateScene', (scene, changes) => this._onSceneUpdate(scene, changes));
+    // Full dispose+rebuild so wall-clipped LOS geometry and materials are not reused
+    // across floors (placeables/embedded docs can change; baked polygons must match the active band).
+    this._registerHook('mapShineLevelContextChanged', () => {
+      this.syncAllLights();
+    });
+    this._registerHook('lightingRefresh', () => {
+      this._reconcileMissingEmbeddedLights();
+      this._markPerspectiveRefreshDirty();
+    });
 
     this._initialized = true;
     log.info(`LightingEffectV2 initialized (${w}x${h})`);
@@ -776,13 +1258,101 @@ export class LightingEffectV2 {
 
   // ── Light sync ────────────────────────────────────────────────────────
 
+  /** @private @param {unknown} id */
+  _lightMapKey(id) {
+    if (id == null || id === '') return '';
+    return String(id);
+  }
+
+  /**
+   * Drop V2 meshes for scene lights that no longer exist, then add any missing docs.
+   * Runs on `lightingRefresh` so a missed `deleteAmbientLight` hook cannot leave ghosts;
+   * also fixes the old early-return when embedded collection was empty (no pruning).
+   * @private
+   */
+  _reconcileMissingEmbeddedLights() {
+    if (!this._initialized || !this._lightsSynced) return;
+    const docs = getAuthoritativeAmbientLightDocuments();
+    const enhancementMap = this._getLightEnhancementConfigMap();
+
+    const validPositive = new Set();
+    const validNegative = new Set();
+    for (const doc of docs) {
+      const key = this._lightMapKey(doc?.id ?? doc?._id);
+      if (!key) continue;
+      const isNegative = doc?.config?.negative === true || doc?.negative === true;
+      if (isNegative) validNegative.add(key);
+      else validPositive.add(key);
+    }
+
+    let pruned = 0;
+    for (const key of [...this._lights.keys()]) {
+      if (validPositive.has(key)) continue;
+      const light = this._lights.get(key);
+      if (light?.mesh) this._lightScene?.remove(light.mesh);
+      light?.dispose?.();
+      this._lights.delete(key);
+      this._nextAnimationUpdateAtSec.delete(key);
+      pruned += 1;
+    }
+    for (const key of [...this._darknessSources.keys()]) {
+      if (validNegative.has(key)) continue;
+      const ds = this._darknessSources.get(key);
+      if (ds?.mesh) this._darknessScene?.remove(ds.mesh);
+      ds?.dispose?.();
+      this._darknessSources.delete(key);
+      this._nextAnimationUpdateAtSec.delete(key);
+      pruned += 1;
+    }
+
+    let added = 0;
+    for (const doc of docs) {
+      const key = this._lightMapKey(doc?.id ?? doc?._id);
+      if (!key) continue;
+      const isNegative = doc?.config?.negative === true || doc?.negative === true;
+      if (isNegative) {
+        if (!this._darknessSources.has(key)) {
+          this._addLightFromDoc(doc, enhancementMap);
+          added += 1;
+        }
+      } else if (!this._lights.has(key)) {
+        this._addLightFromDoc(doc, enhancementMap);
+        added += 1;
+      }
+    }
+    if (pruned > 0) {
+      log.info(`LightingEffectV2: pruned ${pruned} stale light/darkness slot(s) not on scene`);
+    }
+    if (added > 0) {
+      log.info(`LightingEffectV2: reconciled ${added} embedded light(s) missing from V2 maps`);
+    }
+  }
+
   /**
    * Full sync of all Foundry light sources. Call once after canvas is ready.
    */
   syncAllLights() {
     if (!this._initialized) return;
+    this._nextAnimationUpdateAtSec.clear();
 
-    // Dispose existing
+    // `_lightScene` is shared with PlayerLightEffectV2 (torch/flashlight) and
+    // CandleFlamesEffectV2 (glow group). Those meshes are not in `_lights`, so a
+    // normal "clear _lights" pass would leave them parented — looks like a Foundry
+    // light disk after every AmbientLight is deleted. Detach foreign children first;
+    // those effects re-attach on their next update if still enabled.
+    if (this._lightScene) {
+      const trackedMeshes = new Set();
+      for (const light of this._lights.values()) {
+        if (light?.mesh) trackedMeshes.add(light.mesh);
+      }
+      for (const ch of [...this._lightScene.children]) {
+        if (!trackedMeshes.has(ch)) {
+          try { this._lightScene.remove(ch); } catch (_) {}
+        }
+      }
+    }
+
+    // Dispose existing Foundry-tracked light sources
     for (const light of this._lights.values()) {
       if (light.mesh) this._lightScene.remove(light.mesh);
       light.dispose();
@@ -794,22 +1364,9 @@ export class LightingEffectV2 {
     }
     this._darknessSources.clear();
 
-    // Read Foundry placeables
-    let docs = [];
-    try {
-      const placeables = canvas?.lighting?.placeables;
-      if (placeables && placeables.length > 0) {
-        docs = placeables.map(p => p.document).filter(Boolean);
-      }
-    } catch (_) {}
-    if (docs.length === 0) {
-      try {
-        const lightDocs = canvas?.scene?.lights;
-        if (lightDocs && lightDocs.size > 0) {
-          docs = Array.from(lightDocs.values());
-        }
-      } catch (_) {}
-    }
+    // Prefer embedded collection: includes every AmbientLight on the scene for all levels.
+    // `canvas.lighting.placeables` is only objects on the PIXI layer (often current level only).
+    const docs = getAuthoritativeAmbientLightDocuments();
 
     const enhancementMap = this._getLightEnhancementConfigMap();
     this._lastEnhancementCount = enhancementMap.size;
@@ -818,7 +1375,22 @@ export class LightingEffectV2 {
     }
 
     this._lightsSynced = true;
+    this._perspectiveRefreshDirty = true;
     log.info(`LightingEffectV2: synced ${this._lights.size} lights, ${this._darknessSources.size} darkness sources`);
+  }
+
+  /**
+   * Prefer the live embedded AmbientLight document from the scene collection so
+   * level membership / flags match Foundry after navigation (avoids stale refs on ThreeLightSource).
+   * @private
+   * @param {ThreeLightSource|ThreeDarknessSource} source
+   * @returns {object|null|undefined}
+   */
+  _liveAmbientDocForGating(source) {
+    const lightsCollection = canvas?.scene?.lights;
+    const id = source?.id ?? source?.document?.id;
+    if (!lightsCollection || id == null) return source?.document ?? null;
+    return lightsCollection.get?.(id) ?? lightsCollection.get?.(String(id)) ?? source?.document ?? null;
   }
 
   /**
@@ -829,33 +1401,96 @@ export class LightingEffectV2 {
    */
   _refreshLightsForLevelsPerspective() {
     if (!this._initialized) return;
-    const lightsCollection = canvas?.scene?.lights;
+    const sceneDarkness = readFoundryDarkness01();
 
     for (const light of this._lights.values()) {
       if (!light?.mesh) continue;
-      let doc = light.document;
-      try {
-        const id = light.id ?? light.document?.id;
-        if (lightsCollection && id != null) {
-          const live = lightsCollection.get?.(id) ?? lightsCollection.get?.(String(id));
-          if (live) doc = live;
-        }
-      } catch (_) {}
-      light.mesh.visible = isLightVisibleForPerspective(doc);
+      const doc = this._liveAmbientDocForGating(light);
+      light.mesh.visible = this._isDocVisibleForLighting(doc, sceneDarkness);
     }
 
     for (const ds of this._darknessSources.values()) {
       if (!ds?.mesh) continue;
-      let doc = ds.document;
-      try {
-        const id = ds.id ?? ds.document?.id;
-        if (lightsCollection && id != null) {
-          const live = lightsCollection.get?.(id) ?? lightsCollection.get?.(String(id));
-          if (live) doc = live;
-        }
-      } catch (_) {}
-      ds.mesh.visible = isLightVisibleForPerspective(doc);
+      const doc = this._liveAmbientDocForGating(ds);
+      ds.mesh.visible = this._isDocVisibleForLighting(doc, sceneDarkness);
     }
+  }
+
+  /** @private */
+  _markPerspectiveRefreshDirty() {
+    this._perspectiveRefreshDirty = true;
+  }
+
+  /**
+   * Refresh light visibility when dirty, with a low-frequency watchdog.
+   * @private
+   * @param {number} nowSec
+   */
+  _refreshLightsForLevelsPerspectiveIfNeeded(nowSec) {
+    const t = Number.isFinite(nowSec) ? nowSec : 0;
+    const elapsed = t - this._lastPerspectiveRefreshAtSec;
+    const watchdogIntervalSec = 0.35;
+    if (!this._perspectiveRefreshDirty && elapsed < watchdogIntervalSec) return;
+    this._refreshLightsForLevelsPerspective();
+    this._perspectiveRefreshDirty = false;
+    this._lastPerspectiveRefreshAtSec = t;
+  }
+
+  /**
+   * Reduce animation work for non-visible torch/flame lights.
+   * @private
+   * @param {ThreeLightSource|ThreeDarknessSource} source
+   * @param {number} tSec
+   * @returns {boolean}
+   */
+  _shouldDecimateAnimationUpdate(source, tSec) {
+    if (!source) return false;
+    if (source?.mesh?.visible !== false) return false;
+    const animType = String(source?.document?.config?.animation?.type || '').toLowerCase();
+    const isTorchLike = animType === 'torch' || animType === 'flame';
+    if (!isTorchLike) return false;
+
+    const id = String(source?.id ?? source?.document?.id ?? source?.document?._id ?? '');
+    if (!id) return false;
+    const nextAt = Number(this._nextAnimationUpdateAtSec.get(id));
+    if (Number.isFinite(nextAt) && tSec < nextAt) return true;
+    this._nextAnimationUpdateAtSec.set(id, tSec + (1 / 12));
+    return false;
+  }
+
+  /**
+   * Foundry visibility gate for AmbientLight docs:
+   * - Levels/perspective visibility
+   * - hidden flag
+   * - darkness activation range (`config.darkness.{min,max}`)
+   * @private
+   * @param {object|null|undefined} doc
+   * @param {number} sceneDarkness
+   * @returns {boolean}
+   */
+  _isDocVisibleForLighting(doc, sceneDarkness) {
+    if (!doc) return false;
+    const pOverride = this._renderFloorIndexForLights != null
+      ? getPerspectiveForRenderFloorIndex(this._renderFloorIndexForLights)
+      : null;
+    if (!isLightVisibleForPerspective(doc, pOverride)) return false;
+    if (doc.hidden === true) return false;
+
+    const d = clamp01(Number.isFinite(sceneDarkness) ? sceneDarkness : readFoundryDarkness01());
+    const darknessRange = doc?.config?.darkness ?? doc?.darkness;
+    if (!darknessRange || typeof darknessRange !== 'object') return true;
+
+    const minRaw = Number(darknessRange.min);
+    const maxRaw = Number(darknessRange.max);
+    const hasMin = Number.isFinite(minRaw);
+    const hasMax = Number.isFinite(maxRaw);
+    if (!hasMin && !hasMax) return true;
+
+    const min = hasMin ? clamp01(minRaw) : 0;
+    const max = hasMax ? clamp01(maxRaw) : 1;
+    const low = Math.min(min, max);
+    const high = Math.max(min, max);
+    return d >= low && d <= high;
   }
 
   /**
@@ -875,7 +1510,8 @@ export class LightingEffectV2 {
     }
 
     const mergedDoc = this._mergeLightEnhancementsIntoDoc(plainDoc, enhancementMap);
-    const id = mergedDoc.id ?? mergedDoc._id;
+    const id = this._lightMapKey(mergedDoc.id ?? mergedDoc._id);
+    if (!id) return;
     const isNegative = mergedDoc?.config?.negative === true || mergedDoc?.negative === true;
 
     if (isNegative) {
@@ -911,12 +1547,13 @@ export class LightingEffectV2 {
   _onLightCreate(doc) {
     if (!this._initialized) return;
     this._addLightFromDoc(doc);
+    this._markPerspectiveRefreshDirty();
   }
 
   /** @private */
   _onLightUpdate(doc, changes) {
     if (!this._initialized) return;
-    const id = doc?.id ?? doc?._id;
+    const id = this._lightMapKey(doc?.id ?? doc?._id);
     if (!id) return;
 
     // Merge changes into a plain object for updateData.
@@ -948,6 +1585,7 @@ export class LightingEffectV2 {
       old.dispose();
       this._lights.delete(id);
       this._addLightFromDoc(merged);
+      this._markPerspectiveRefreshDirty();
       return;
     }
     if (!isNegative && this._darknessSources.has(id)) {
@@ -956,6 +1594,7 @@ export class LightingEffectV2 {
       old.dispose();
       this._darknessSources.delete(id);
       this._addLightFromDoc(merged);
+      this._markPerspectiveRefreshDirty();
       return;
     }
 
@@ -968,12 +1607,13 @@ export class LightingEffectV2 {
       // Light not tracked yet — create it
       this._addLightFromDoc(merged);
     }
+    this._markPerspectiveRefreshDirty();
   }
 
   /** @private */
   _onLightDelete(doc) {
     if (!this._initialized) return;
-    const id = doc?.id ?? doc?._id;
+    const id = this._lightMapKey(doc?.id ?? doc?._id);
     if (!id) return;
 
     if (this._lights.has(id)) {
@@ -987,6 +1627,31 @@ export class LightingEffectV2 {
       if (ds.mesh) this._darknessScene?.remove(ds.mesh);
       ds.dispose();
       this._darknessSources.delete(id);
+    }
+    this._nextAnimationUpdateAtSec.delete(String(id));
+    this._markPerspectiveRefreshDirty();
+  }
+
+  /**
+   * One-shot migration from the old single `globalIllumination` control into
+   * `ambientDayScale` / `ambientNightScale` when the latter are still at defaults
+   * but legacy differs (typical old module / preset JSON).
+   * @private
+   */
+  _seedAmbientFromLegacyGlobalIfNeeded() {
+    if (this._legacyGlobalIlluminationSeeded) return;
+    this._legacyGlobalIlluminationSeeded = true;
+    const p = this.params;
+    const g = p.globalIllumination;
+    if (g === undefined || g === null || !Number.isFinite(Number(g))) return;
+    const def = 1.3;
+    const gv = Number(g);
+    const day = Number(p.ambientDayScale);
+    const night = Number(p.ambientNightScale);
+    if (!Number.isFinite(day) || !Number.isFinite(night)) return;
+    if (Math.abs(day - def) < 1e-5 && Math.abs(night - def) < 1e-5 && Math.abs(gv - def) > 1e-5) {
+      p.ambientDayScale = gv;
+      p.ambientNightScale = gv;
     }
   }
 
@@ -1002,86 +1667,113 @@ export class LightingEffectV2 {
     // Sync darkness level and ambient colors from Foundry canvas environment.
     // canvas.environment exposes darknessLevel (0=bright, 1=dark) and the
     // scene's configured ambient colors for brightest/darkest lighting states.
-    try {
-      const env = canvas?.environment;
-      if (env) {
-        this.params.darknessLevel = readFoundryDarkness01();
-
-        // Sync ambient colors if Foundry exposes them (v11+).
-        // ambientBrightest / ambientDarkness are Color objects or hex strings.
-        const u = this._composeMaterial?.uniforms;
-        if (u) {
-          if (env.ambientBrightest) {
-            try {
-              const c = env.ambientBrightest;
-              if (typeof c === 'object' && 'r' in c) {
-                u.uAmbientBrightest.value.setRGB(c.r ?? 1, c.g ?? 1, c.b ?? 1);
-              } else if (typeof c === 'number') {
-                u.uAmbientBrightest.value.setHex(c);
-              }
-            } catch (_) {}
+    const env = canvas?.environment;
+    if (env) {
+      this.params.darknessLevel = readFoundryDarkness01();
+      const u = this._composeMaterial?.uniforms;
+      if (u) {
+        const bright = env.ambientBrightest;
+        if (bright && typeof bright === 'object' && 'r' in bright) {
+          const r = Number(bright.r ?? 1);
+          const g = Number(bright.g ?? 1);
+          const b = Number(bright.b ?? 1);
+          const prev = this._lastAmbientBrightestRgb;
+          if (!prev || prev.r !== r || prev.g !== g || prev.b !== b) {
+            u.uAmbientBrightest.value.setRGB(r, g, b);
+            this._lastAmbientBrightestRgb = { r, g, b };
+            this._lastAmbientBrightestHex = null;
           }
-          if (env.ambientDarkness) {
-            try {
-              const c = env.ambientDarkness;
-              if (typeof c === 'object' && 'r' in c) {
-                u.uAmbientDarkness.value.setRGB(c.r ?? 0.141, c.g ?? 0.141, c.b ?? 0.282);
-              } else if (typeof c === 'number') {
-                u.uAmbientDarkness.value.setHex(c);
-              }
-            } catch (_) {}
+        } else if (typeof bright === 'number' && Number.isFinite(bright) && this._lastAmbientBrightestHex !== bright) {
+          u.uAmbientBrightest.value.setHex(bright);
+          this._lastAmbientBrightestHex = bright;
+          this._lastAmbientBrightestRgb = null;
+        }
+        const dark = env.ambientDarkness;
+        if (dark && typeof dark === 'object' && 'r' in dark) {
+          const r = Number(dark.r ?? 0.141);
+          const g = Number(dark.g ?? 0.141);
+          const b = Number(dark.b ?? 0.282);
+          const prev = this._lastAmbientDarknessRgb;
+          if (!prev || prev.r !== r || prev.g !== g || prev.b !== b) {
+            u.uAmbientDarkness.value.setRGB(r, g, b);
+            this._lastAmbientDarknessRgb = { r, g, b };
+            this._lastAmbientDarknessHex = null;
           }
+        } else if (typeof dark === 'number' && Number.isFinite(dark) && this._lastAmbientDarknessHex !== dark) {
+          u.uAmbientDarkness.value.setHex(dark);
+          this._lastAmbientDarknessHex = dark;
+          this._lastAmbientDarknessRgb = null;
         }
       }
-    } catch (_) {}
+    }
 
     let sceneDarkness = clamp01(this.params.darknessLevel);
-    try {
-      const wc = window.MapShine?.weatherController;
-      const timeDark = computeTimeOfDayDarkness01(wc?.timeOfDay);
+    const wc = window.MapShine?.weatherController;
+    const timeDark = computeTimeOfDayDarkness01(wc?.timeOfDay);
 
       // Prefer the darker of:
       // - Foundry scene darkness (if it is being updated)
       // - Map Shine time-of-day darkness (always available from control state)
-      if (Number.isFinite(timeDark)) {
-        sceneDarkness = Math.max(sceneDarkness, timeDark);
-      }
+    if (Number.isFinite(timeDark)) {
+      sceneDarkness = Math.max(sceneDarkness, timeDark);
+    }
 
       // Optional weather responsiveness: allow Map Shine effectiveDarkness to
       // increase darkness further under heavy weather.
-      const envState = wc?.getEnvironment?.();
-      const eff = Number(envState?.effectiveDarkness);
-      if (Number.isFinite(eff)) sceneDarkness = Math.max(sceneDarkness, clamp01(eff));
-    } catch (_) {}
+    const envState = wc?.getEnvironment?.();
+    const eff = Number(envState?.effectiveDarkness);
+    if (Number.isFinite(eff)) sceneDarkness = Math.max(sceneDarkness, clamp01(eff));
     this.params.darknessLevel = sceneDarkness;
 
     // Update light animations
+    const foundrySceneDarkness = readFoundryDarkness01();
+    const tSec = (timeInfo && typeof timeInfo.elapsed === 'number') ? timeInfo.elapsed : 0;
     for (const light of this._lights.values()) {
-      try {
-        const visibleForPerspective = isLightVisibleForPerspective(light?.document);
-        if (light?.mesh) {
-          light.mesh.visible = visibleForPerspective && (light?.document?.hidden !== true);
-        }
+      if (!this._shouldDecimateAnimationUpdate(light, tSec) && typeof light?.updateAnimation === 'function') {
         light.updateAnimation(timeInfo, sceneDarkness);
-      } catch (_) {}
+      }
+      if (light?.mesh) {
+        const doc = this._liveAmbientDocForGating(light);
+        light.mesh.visible = this._isDocVisibleForLighting(doc, foundrySceneDarkness);
+      }
     }
     for (const ds of this._darknessSources.values()) {
-      try {
+      if (!this._shouldDecimateAnimationUpdate(ds, tSec) && typeof ds?.updateAnimation === 'function') {
         ds.updateAnimation(timeInfo);
-      } catch (_) {}
+      }
+      if (ds?.mesh) {
+        const doc = this._liveAmbientDocForGating(ds);
+        ds.mesh.visible = this._isDocVisibleForLighting(doc, foundrySceneDarkness);
+      }
     }
 
     // Update compose uniforms
     const u = this._composeMaterial?.uniforms;
     if (u) {
+      this._seedAmbientFromLegacyGlobalIfNeeded();
       for (const k of LEGACY_LIGHTING_PARAM_KEYS) {
         if (Object.prototype.hasOwnProperty.call(this.params, k)) delete this.params[k];
       }
       // `uDarknessLevel` drives the ambient day/night blend in the compose shader.
       u.uDarknessLevel.value = clamp01(sceneDarkness);
-      u.uGlobalIllumination.value = this.params.globalIllumination;
+      u.uAmbientDayScale.value = Math.max(0, Number(this.params.ambientDayScale) || 0);
+      u.uAmbientNightScale.value = Math.max(0, Number(this.params.ambientNightScale) || 0);
       u.uLightIntensity.value = this.params.lightIntensity;
+      u.uMinIlluminationScale.value = Math.max(0, Number(this.params.minIlluminationScale) || 0);
       u.uColorationStrength.value = this.params.colorationStrength;
+      u.uColorationReflectivity.value = Math.max(0, Number(this.params.colorationReflectivity) || 0);
+      u.uColorationSaturation.value = Number(this.params.colorationSaturation) || 0;
+      u.uColorationChromaCurve.value = Math.max(0.001, Number(this.params.colorationChromaCurve) || 1);
+      u.uColorationAchromaticMix.value = clamp01(Number(this.params.colorationAchromaticMix) || 0);
+      const toneMode = Math.max(0, Math.min(2, Math.round(Number(this.params.composeToneMapping) || 0)));
+      if (this._composeToneMappingMode !== toneMode) {
+        this._composeToneMappingMode = toneMode;
+        this._composeMaterial.defines.COMPOSE_TONEMAP_MODE = toneMode;
+        this._composeMaterial.needsUpdate = true;
+      }
+      u.uComposeToneExposure.value = Math.max(0, Number(this.params.composeToneExposure) || 1);
+      u.uCloudShadowAmbientInfluence.value = clamp01(Number(this.params.cloudShadowAmbientInfluence) ?? 1);
+      u.uOverheadShadowAmbientInfluence.value = clamp01(Number(this.params.overheadShadowAmbientInfluence) ?? 1);
       u.uNegativeDarknessStrength.value = this.params.negativeDarknessStrength;
       u.uDarknessPunchGain.value = this.params.darknessPunchGain;
       u.uInteriorDarkness.value = Math.max(0, Number(this.params.interiorDarkness) || 0);
@@ -1151,62 +1843,52 @@ export class LightingEffectV2 {
     // Some worlds hydrate scene flag data slightly after initial canvas/light
     // construction. If enhancement entries appear later, force a one-shot resync
     // so initial-load light coloration/intensity matches post-move updates.
-    try {
-      const enhancementCount = this._getLightEnhancementConfigMap().size;
-      if (this._lightsSynced && enhancementCount !== this._lastEnhancementCount) {
-        this.syncAllLights();
-      }
-    } catch (_) {
+    const enhancementCount = this._getLightEnhancementConfigMap().size;
+    if (this._lightsSynced && enhancementCount !== this._lastEnhancementCount) {
+      this._invalidateEnhancementCache();
+      this.syncAllLights();
     }
 
     // Ensure RTs match drawing buffer size
     renderer.getDrawingBufferSize(this._sizeVec);
     const w = Math.max(1, this._sizeVec.x);
     const h = Math.max(1, this._sizeVec.y);
-    if (this._lightRT.width !== w || this._lightRT.height !== h) {
-      this._lightRT.setSize(w, h);
-      this._windowLightRT.setSize(w, h);
-      this._darknessRT.setSize(w, h);
-    }
+    const lightSize = this._scaledTargetSize(w, h, this.params.internalLightResolutionScale);
+    const windowSize = this._scaledTargetSize(w, h, this.params.internalWindowResolutionScale);
+    const darknessSize = this._scaledTargetSize(w, h, this.params.internalDarknessResolutionScale);
+    if (this._lightRT.width !== lightSize.w || this._lightRT.height !== lightSize.h) this._lightRT.setSize(lightSize.w, lightSize.h);
+    if (this._windowLightRT.width !== windowSize.w || this._windowLightRT.height !== windowSize.h) this._windowLightRT.setSize(windowSize.w, windowSize.h);
+    if (this._darknessRT.width !== darknessSize.w || this._darknessRT.height !== darknessSize.h) this._darknessRT.setSize(darknessSize.w, darknessSize.h);
 
     const prevTarget = renderer.getRenderTarget();
     const prevAutoClear = renderer.autoClear;
 
-    try {
-      const persp = this._lightingPerspectiveContext ?? createLightingPerspectiveContext();
-      const cu0 = this._composeMaterial.uniforms;
-      const transmissionEnabled = this.params.upperFloorTransmissionEnabled === true;
-      const rawTransmission = Number(this.params.upperFloorTransmissionStrength);
-      const transmission = transmissionEnabled && Number.isFinite(rawTransmission)
-        ? Math.max(0, Math.min(1, rawTransmission))
-        : 0;
-      const occlusionWeight = 1.0 - transmission;
-      const restrictRoofToTop = this.params.restrictRoofScreenLightOcclusionToTopFloor === true;
-      // 0f7b217: on lower floors of multi-floor scenes, screen-space roof alpha must not
-      // suppress building shadows or gate Foundry lights (upper roof still in tOverheadRoofAlpha).
-      const roofScreenOcclusionScale = persp.getRoofScreenOcclusionScale(restrictRoofToTop);
-      cu0.uApplyRoofOcclusionToSources.value = occlusionWeight * roofScreenOcclusionScale;
-      // Window overlays: floor-isolated elsewhere; compose-level roof gating off (0f7b217).
-      cu0.uApplyRoofOcclusionToWindow.value = 0.0;
-      // Building shadows are scene-UV; screen-space roof alpha still suppresses them where
-      // tOverheadRoofAlpha is high. On the *uppermost* band of a multi-floor map, the main
-      // level art often lives on ROOF_LAYER (tile over underground background) so the roof
-      // visibility pass covers the whole viewport and wipes building shadows entirely.
-      // Foundry light roof gating keeps using roofScreenOcclusionScale; building shadows rely
-      // on BuildingShadowsEffectV2's receiver _Outdoors gate instead for that case.
-      const onUppermostMultiFloor = persp.isMultiFloor
-        && persp.activeFloorIndex === persp.topFloorIndex
-        && persp.topFloorIndex > 0;
-      const buildingRoofOcclusionScale = onUppermostMultiFloor ? 0.0 : roofScreenOcclusionScale;
-      cu0.uApplyRoofOcclusionToBuilding.value = buildingRoofOcclusionScale;
-    } catch (_) {
-      const cu0 = this._composeMaterial.uniforms;
-      cu0.uApplyRoofOcclusionToSources.value = 1.0;
-      cu0.uApplyRoofOcclusionToWindow.value = 0.0;
-      cu0.uApplyRoofOcclusionToBuilding.value = 1.0;
-    }
+    const persp = this._lightingPerspectiveContext ?? createLightingPerspectiveContext();
+    const cu0 = this._composeMaterial.uniforms;
+    const transmissionEnabled = this.params.upperFloorTransmissionEnabled === true;
+    const rawTransmission = Number(this.params.upperFloorTransmissionStrength);
+    const transmission = transmissionEnabled && Number.isFinite(rawTransmission)
+      ? Math.max(0, Math.min(1, rawTransmission))
+      : 0;
+    const occlusionWeight = 1.0 - transmission;
+    const restrictRoofToTop = this.params.restrictRoofScreenLightOcclusionToTopFloor === true;
+    const roofScreenOcclusionScale = persp.getRoofScreenOcclusionScale(restrictRoofToTop);
+    cu0.uApplyRoofOcclusionToSources.value = occlusionWeight * roofScreenOcclusionScale;
+    cu0.uApplyRoofOcclusionToWindow.value = 0.0;
+    const onUppermostMultiFloor = persp.isMultiFloor
+      && persp.activeFloorIndex === persp.topFloorIndex
+      && persp.topFloorIndex > 0;
+    const buildingRoofOcclusionScale = onUppermostMultiFloor ? 0.0 : roofScreenOcclusionScale;
+    cu0.uApplyRoofOcclusionToBuilding.value = buildingRoofOcclusionScale;
 
-    this._refreshLightsForLevelsPerspective();
+    // FloorCompositor may invoke render() once per visible level per frame; an earlier pass
+    // clears _perspectiveRefreshDirty so later passes must not skip visibility refresh.
+    this._markPerspectiveRefreshDirty();
+    this._refreshLightsForLevelsPerspectiveIfNeeded(
+      (typeof performance !== 'undefined' && typeof performance.now === 'function')
+        ? (performance.now() / 1000)
+        : 0
+    );
 
     // ── Pass 1: Accumulate Foundry light mesh contributions ───────────
     // Save camera layer mask — ThreeLightSource meshes live on layer 0.
@@ -1226,6 +1908,16 @@ export class LightingEffectV2 {
     renderer.autoClear = true;
     if (windowLightScene) {
       try {
+        // WindowLight shaders use gl_FragCoord / uScreenSize for roof/ceiling masks.
+        // uScreenSize must match THIS RT (set above), not values pushed earlier in the
+        // frame — Lighting resizes these RTs after FloorCompositor.bind, and zoom/DPR
+        // can otherwise desync roof sampling → apparent fade/pulse when panning or zooming.
+        try {
+          windowLightScene.userData?.onBindWindowLightPass?.(
+            this._windowLightRT.width,
+            this._windowLightRT.height,
+          );
+        } catch (_) {}
         renderer.render(windowLightScene, camera);
       } catch (err) {
         log.error('LightingEffectV2: window light render failed:', err);
@@ -1279,11 +1971,10 @@ export class LightingEffectV2 {
       cu.uHasCombinedShadowRaw.value = 0;
     }
     // View→scene UV uniforms for compose (building shadow + _Outdoors roof-light gate).
-    try {
-      const dims = canvas?.dimensions;
-      const sc = window.MapShine?.sceneComposer;
-      const cam = camera;
-      if (cam && dims) {
+    const dims = canvas?.dimensions;
+    const sc = window.MapShine?.sceneComposer;
+    const cam = camera;
+    if (cam && dims) {
         let vMinX = 0, vMinY = 0, vMaxX = 1, vMaxY = 1;
         let c00x = 0, c00y = 0, c10x = 1, c10y = 0, c01x = 0, c01y = 1, c11x = 1, c11y = 1;
         if (cam.isOrthographicCamera) {
@@ -1299,20 +1990,14 @@ export class LightingEffectV2 {
         } else {
           const THREE = window.THREE;
           const groundZ = sc?.basePlaneMesh?.position?.z ?? (sc?.groundZ ?? 0);
-          if (THREE) {
-            const ndc = new THREE.Vector3();
-            const world = new THREE.Vector3();
-            const dir = new THREE.Vector3();
+          const ndc = this._tmpNdcVec;
+          const world = this._tmpWorldVec;
+          const dir = this._tmpDirVec;
+          if (THREE && ndc && world && dir) {
             let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+            let validCornerCount = 0;
 
-            const corners = [
-              { ndcX: -1, ndcY: -1, key: '00' },
-              { ndcX:  1, ndcY: -1, key: '10' },
-              { ndcX: -1, ndcY:  1, key: '01' },
-              { ndcX:  1, ndcY:  1, key: '11' },
-            ];
-
-            for (const c of corners) {
+            for (const c of this._perspectiveCornerDefs) {
               ndc.set(c.ndcX, c.ndcY, 0.5);
               world.copy(ndc).unproject(cam);
               dir.copy(world).sub(cam.position);
@@ -1324,6 +2009,7 @@ export class LightingEffectV2 {
               const iy = cam.position.y + dir.y * t;
               if (ix < minX) minX = ix; if (iy < minY) minY = iy;
               if (ix > maxX) maxX = ix; if (iy > maxY) maxY = iy;
+              validCornerCount += 1;
 
               if (c.key === '00') { c00x = ix; c00y = iy; }
               else if (c.key === '10') { c10x = ix; c10y = iy; }
@@ -1333,6 +2019,15 @@ export class LightingEffectV2 {
 
             if (minX !== Infinity) {
               vMinX = minX; vMinY = minY; vMaxX = maxX; vMaxY = maxY;
+            }
+            // If any corner ray misses the ground plane, never keep mixed
+            // default 0..1 corners; that can create horizontal/diagonal UV bands.
+            // Fall back to axis-aligned bounds corners for a stable mapping.
+            if (validCornerCount < 4 && minX !== Infinity) {
+              c00x = minX; c00y = minY;
+              c10x = maxX; c10y = minY;
+              c01x = minX; c01y = maxY;
+              c11x = maxX; c11y = maxY;
             }
           }
         }
@@ -1352,23 +2047,24 @@ export class LightingEffectV2 {
           dims.width  ?? 1,
           dims.height ?? 1
         );
-      }
-    } catch (_) {}
+    }
 
     if (buildingShadowTexture) {
       cu.tBuildingShadow.value    = buildingShadowTexture;
       cu.uHasBuildingShadow.value = 1;
-      const op = Number.isFinite(Number(buildingShadowOpacity))
+      const opBase = Number.isFinite(Number(buildingShadowOpacity))
         ? Math.max(0.0, Math.min(1.0, Number(buildingShadowOpacity)))
         : 0.75;
-      cu.uBuildingShadowOpacity.value = op;
+      const ambBld = Number(this.params?.ambientBuildingShadowMix);
+      const bMix = Number.isFinite(ambBld) ? clamp01(ambBld) : 1.0;
+      cu.uBuildingShadowOpacity.value = opBase * bMix;
 
       if (!this._dbgLoggedBuildingShadowOnce) {
         this._dbgLoggedBuildingShadowOnce = true;
         try {
           log.info('LightingEffectV2 building shadow bind:',
             'tex', buildingShadowTexture?.uuid || 'ok',
-            '| opacity', op,
+            '| opacity', cu.uBuildingShadowOpacity.value,
             '| has', cu.uHasBuildingShadow.value
           );
         } catch (_) {}
@@ -1379,13 +2075,21 @@ export class LightingEffectV2 {
     }
 
     if (outdoorsMaskTexture) {
+      this._normalizeOutdoorsMaskTexture(outdoorsMaskTexture);
       cu.tOutdoorsForRoofLight.value = outdoorsMaskTexture;
       cu.uHasOutdoorsForRoofLight.value = 1;
       cu.uOutdoorsForRoofLightFlipY.value = outdoorsMaskTexture.flipY ? 1.0 : 0.0;
+      const tw = Number(outdoorsMaskTexture?.image?.width) || Number(outdoorsMaskTexture?.source?.data?.width) || 0;
+      const th = Number(outdoorsMaskTexture?.image?.height) || Number(outdoorsMaskTexture?.source?.data?.height) || 0;
+      cu.uOutdoorsForRoofLightTexelSize.value.set(
+        tw > 0 ? 1.0 / tw : 0.0,
+        th > 0 ? 1.0 / th : 0.0,
+      );
     } else {
       cu.tOutdoorsForRoofLight.value = null;
       cu.uHasOutdoorsForRoofLight.value = 0;
       cu.uOutdoorsForRoofLightFlipY.value = 0;
+      cu.uOutdoorsForRoofLightTexelSize.value.set(0, 0);
     }
     if (overheadRoofAlphaTexture) {
       cu.tOverheadRoofAlpha.value = overheadRoofAlphaTexture;
@@ -1438,9 +2142,112 @@ export class LightingEffectV2 {
   onResize(w, h) {
     const rw = Math.max(1, w);
     const rh = Math.max(1, h);
-    if (this._lightRT) this._lightRT.setSize(rw, rh);
-    if (this._windowLightRT) this._windowLightRT.setSize(rw, rh);
-    if (this._darknessRT) this._darknessRT.setSize(rw, rh);
+    if (this._lightRT) {
+      const sz = this._scaledTargetSize(rw, rh, this.params.internalLightResolutionScale);
+      this._lightRT.setSize(sz.w, sz.h);
+    }
+    if (this._windowLightRT) {
+      const sz = this._scaledTargetSize(rw, rh, this.params.internalWindowResolutionScale);
+      this._windowLightRT.setSize(sz.w, sz.h);
+    }
+    if (this._darknessRT) {
+      const sz = this._scaledTargetSize(rw, rh, this.params.internalDarknessResolutionScale);
+      this._darknessRT.setSize(sz.w, sz.h);
+    }
+  }
+
+  /**
+   * Remove scene-flag `lightEnhancements` rows whose ids are not on the scene (GM only).
+   * @private
+   * @returns {Promise<{ removed: number }>}
+   */
+  async _repairOrphanLightEnhancementFlags() {
+    const scene = canvas?.scene;
+    if (!scene) return { removed: 0 };
+    try {
+      if (!game?.user?.isGM) {
+        log.warn('repair lightEnhancements: GM only');
+        return { removed: 0 };
+      }
+    } catch (_) {
+      return { removed: 0 };
+    }
+
+    const liveIds = new Set();
+    for (const d of getAuthoritativeAmbientLightDocuments()) {
+      const k = this._lightMapKey(d?.id ?? d?._id);
+      if (k) liveIds.add(k);
+    }
+
+    let raw;
+    try {
+      raw = scene.getFlag?.(MODULE_ID, LIGHT_ENHANCEMENT_FLAG_KEY);
+    } catch (_) {
+      raw = scene?.flags?.[MODULE_ID]?.[LIGHT_ENHANCEMENT_FLAG_KEY];
+    }
+
+    const list = Array.isArray(raw)
+      ? raw
+      : (Array.isArray(raw?.lights) ? raw.lights : (Array.isArray(raw?.items) ? raw.items : []));
+    if (!list.length) return { removed: 0 };
+
+    const next = [];
+    let removed = 0;
+    for (const entry of list) {
+      if (!entry || typeof entry !== 'object') continue;
+      const id = this._lightMapKey(entry.id);
+      if (!id) continue;
+      if (!liveIds.has(id)) {
+        removed += 1;
+        continue;
+      }
+      next.push(entry);
+    }
+    if (removed === 0) return { removed: 0 };
+
+    const version = (raw && typeof raw === 'object' && Number.isFinite(raw.version)) ? raw.version : 1;
+    await scene.setFlag(MODULE_ID, LIGHT_ENHANCEMENT_FLAG_KEY, { version, lights: next });
+    this._invalidateEnhancementCache();
+    log.info(`LightingEffectV2: stripped ${removed} orphan lightEnhancement entr(y/ies) from scene flags`);
+    return { removed };
+  }
+
+  /**
+   * Dispose all Three.js light/darkness meshes and rebuild from Foundry scene data.
+   * @param {{ repairSceneFlags?: boolean, foundryLightingRefresh?: boolean }} [options]
+   * @returns {Promise<{ ok: boolean, reason?: string, orphansRemoved?: number }>}
+   */
+  async forceRebuildFromFoundry(options = {}) {
+    const repairSceneFlags = options.repairSceneFlags === true;
+    const foundryLightingRefresh = options.foundryLightingRefresh !== false;
+
+    if (!this._initialized) {
+      log.warn('LightingEffectV2.forceRebuildFromFoundry: not initialized');
+      return { ok: false, reason: 'not_initialized' };
+    }
+
+    this._invalidateEnhancementCache();
+    this.syncAllLights();
+
+    let orphansRemoved = 0;
+    if (repairSceneFlags) {
+      const r = await this._repairOrphanLightEnhancementFlags();
+      orphansRemoved = r.removed ?? 0;
+      if (orphansRemoved > 0) this.syncAllLights();
+      try {
+        await globalThis.window?.MapShine?.lightEnhancementStore?.load?.(canvas?.scene);
+      } catch (_) {}
+    }
+
+    if (foundryLightingRefresh) {
+      try {
+        Hooks.callAll('lightingRefresh');
+      } catch (_) {}
+    } else {
+      this._reconcileMissingEmbeddedLights();
+    }
+
+    return { ok: true, orphansRemoved };
   }
 
   // ── Helpers ───────────────────────────────────────────────────────────
@@ -1491,8 +2298,14 @@ export class LightingEffectV2 {
     this._composeQuad = null;
     this._lightsSynced = false;
     this._lastEnhancementCount = -1;
+    this._invalidateEnhancementCache();
+    this._perspectiveRefreshDirty = true;
+    this._lastPerspectiveRefreshAtSec = -Infinity;
+    this._nextAnimationUpdateAtSec.clear();
     this._initialized = false;
     this._lightingPerspectiveContext = null;
+    this._renderFloorIndexForLights = null;
+    this._legacyGlobalIlluminationSeeded = false;
 
     log.info('LightingEffectV2 disposed');
   }

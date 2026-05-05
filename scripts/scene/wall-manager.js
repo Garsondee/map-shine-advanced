@@ -513,18 +513,27 @@ export class WallManager {
   }
 
   /**
-   * Door midpoint in Foundry canvas space; same coordinates as polygon collision.
+   * Two canvas-space probe points on opposite sides of the door segment.
+   * Offsetting from the center avoids self-collision against the wall edge.
    * @param {object} wallDoc
-   * @returns {{x: number, y: number}|null}
+   * @returns {Array<{x: number, y: number}>}
    * @private
    */
-  _getDoorMidpointCanvas(wallDoc) {
+  _getDoorProbePointsCanvas(wallDoc) {
     const coords = wallDoc?.c;
-    if (!Array.isArray(coords) || coords.length < 4) return null;
-    return {
-      x: (coords[0] + coords[2]) / 2,
-      y: (coords[1] + coords[3]) / 2
-    };
+    if (!Array.isArray(coords) || coords.length < 4) return [];
+    const ray = Ray.fromArrays(coords.slice(0, 2), coords.slice(2, 4));
+    const x = (coords[0] + coords[2]) / 2;
+    const y = (coords[1] + coords[3]) / 2;
+    const dx = -ray.dy;
+    const dy = ray.dx;
+    const denom = Math.abs(dx) + Math.abs(dy);
+    if (!denom) return [];
+    const t = 3 / denom;
+    return [
+      { x: x + (t * dx), y: y + (t * dy) },
+      { x: x - (t * dx), y: y - (t * dy) }
+    ];
   }
 
   /**
@@ -535,8 +544,8 @@ export class WallManager {
    */
   _canSelectionSeeDoorOptically(wallDoc) {
     try {
-      const point = this._getDoorMidpointCanvas(wallDoc);
-      if (!point) return false;
+      const points = this._getDoorProbePointsCanvas(wallDoc);
+      if (!points.length) return false;
 
       const vc = window.MapShine?.visibilityController;
       if (!vc || typeof vc.canSeePointOptically !== 'function') return false;
@@ -544,7 +553,9 @@ export class WallManager {
       const visionTokens = this._getEffectiveVisionTokens();
       for (const viewer of visionTokens) {
         if (!viewer) continue;
-        if (vc.canSeePointOptically(point, viewer)) return true;
+        for (const point of points) {
+          if (vc.canSeePointOptically(point, viewer)) return true;
+        }
       }
     } catch (_) {
     }

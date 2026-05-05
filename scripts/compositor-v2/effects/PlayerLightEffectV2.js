@@ -1231,8 +1231,9 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
     try {
       const tokenMode = tokenDoc.getFlag?.('map-shine-advanced', 'playerLightMode')
         ?? tokenDoc?.flags?.['map-shine-advanced']?.playerLightMode;
-      // Keep tweakpane-selected night vision available for immediate preview.
-      if (this.params.mode !== 'nightVision' && (tokenMode === 'torch' || tokenMode === 'flashlight' || tokenMode === 'nightVision')) {
+      // Runtime mode must follow token flags so toolbar toggles always switch
+      // correctly, including switching away from night vision.
+      if (tokenMode === 'torch' || tokenMode === 'flashlight' || tokenMode === 'nightVision') {
         this.params.mode = tokenMode;
       }
     } catch (_) {
@@ -3521,13 +3522,26 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
   }
 
   _readSceneDarknessLevelNv() {
-    let darkness = 0;
+    let darkness = Number.NaN;
+    // Prefer scene-authored darkness first. In some runtime states canvas-level
+    // darkness can lag or represent a different interpolation snapshot.
     try {
-      darkness = Number(canvas?.environment?.darknessLevel);
+      darkness = Number(canvas?.scene?.environment?.darknessLevel);
     } catch (_) {}
     if (!Number.isFinite(darkness)) {
       try {
-        darkness = Number(canvas?.scene?.environment?.darknessLevel);
+        // Foundry v12 scene documents use `darkness`.
+        darkness = Number(canvas?.scene?.darkness);
+      } catch (_) {}
+    }
+    // Fall back to live canvas darkness values.
+    try {
+      if (!Number.isFinite(darkness)) darkness = Number(canvas?.environment?.darknessLevel);
+    } catch (_) {}
+    if (!Number.isFinite(darkness)) {
+      try {
+        // Foundry v12 exposes darkness on canvas directly.
+        darkness = Number(canvas?.darknessLevel);
       } catch (_) {}
     }
     return this._clamp01Nv(Number.isFinite(darkness) ? darkness : 0);

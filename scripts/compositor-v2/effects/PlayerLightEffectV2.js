@@ -355,6 +355,27 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
     this._visionMaskTexture = null;
     this._visionMaskTexelSize = null;
     this._visionMaskHas = 0.0;
+    this._screenUniformFlashlight = null;
+    this._screenUniformTorch = null;
+    this._lastInvScreenW = -1;
+    this._lastInvScreenH = -1;
+    this._lastRopeMaskTex = undefined;
+    this._lastRopeMaskHas = -1;
+
+    this._collisionCache = {
+      tokenId: null,
+      mode: null,
+      tokenX: 0,
+      tokenY: 0,
+      aimX: 0,
+      aimY: 0,
+      tSec: -Infinity,
+      collision: null,
+      valid: false,
+      optionsKey: ''
+    };
+    this._collisionCacheMinIntervalSec = 1 / 30;
+    this._collisionCacheMinMoveSq = 4.0;
 
     this._debugOverlay = null;
 
@@ -902,6 +923,16 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
     this._createFlashlightMesh();
     this._createDebugOverlay();
     this._initNightVisionPost();
+    this._screenUniformFlashlight = [
+      this._flashlightBeamMat?.uniforms || null,
+      this._flashlightMat?.uniforms || null,
+      this._flashlightCookieMat?.uniforms || null,
+      this._flashlightOriginMat?.uniforms || null
+    ];
+    this._screenUniformTorch = [
+      this._torchFlameMat?.uniforms || this._torchFlameMat?.userData?._msRopeMaskUniforms || null,
+      this._torchSparksMat?.uniforms || this._torchSparksMat?.userData?._msRopeMaskUniforms || null
+    ];
 
     this.scene.add(this._group);
     // Register torch batch renderer via FloorRenderBus so it participates in
@@ -969,6 +1000,50 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
     this._visionMaskTexture = null;
     this._visionMaskHas = 0.0;
     if (this._visionMaskTexelSize) this._visionMaskTexelSize.set(1, 1);
+  }
+
+  _updateScreenMaskUniforms() {
+    const renderer = this.renderer;
+    if (!renderer || !this._tempScreenSize) return;
+
+    renderer.getDrawingBufferSize(this._tempScreenSize);
+    const invW = 1.0 / Math.max(1.0, this._tempScreenSize.x);
+    const invH = 1.0 / Math.max(1.0, this._tempScreenSize.y);
+    const mm = window.MapShine?.maskManager;
+    let ropeMaskTex = mm ? mm.getTexture('ropeMask.screen') : null;
+    if (!ropeMaskTex) {
+      const le = window.MapShine?.lightingEffect;
+      ropeMaskTex = le?.ropeMaskTarget?.texture ?? null;
+    }
+    const hasRopeMask = ropeMaskTex ? 1.0 : 0.0;
+    const changed = invW !== this._lastInvScreenW
+      || invH !== this._lastInvScreenH
+      || ropeMaskTex !== this._lastRopeMaskTex
+      || hasRopeMask !== this._lastRopeMaskHas;
+    if (!changed) return;
+
+    const flashlightUniforms = this._screenUniformFlashlight || [];
+    for (let i = 0; i < flashlightUniforms.length; i++) {
+      const u = flashlightUniforms[i];
+      if (!u) continue;
+      if (u.uInvScreenSize) u.uInvScreenSize.value.set(invW, invH);
+      if (u.uRopeMask) u.uRopeMask.value = ropeMaskTex;
+      if (u.uHasRopeMask) u.uHasRopeMask.value = hasRopeMask;
+    }
+
+    const torchUniforms = this._screenUniformTorch || [];
+    for (let i = 0; i < torchUniforms.length; i++) {
+      const u = torchUniforms[i];
+      if (!u) continue;
+      if (u.uInvScreenSize) u.uInvScreenSize.value.set(invW, invH);
+      if (u.uRopeMask) u.uRopeMask.value = ropeMaskTex;
+      if (u.uHasRopeMask) u.uHasRopeMask.value = hasRopeMask;
+    }
+
+    this._lastInvScreenW = invW;
+    this._lastInvScreenH = invH;
+    this._lastRopeMaskTex = ropeMaskTex;
+    this._lastRopeMaskHas = hasRopeMask;
   }
 
   _tryAttachFlashlightToLightScene() {
@@ -1173,37 +1248,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
     }
 
     try {
-      const renderer = this.renderer;
-      if (renderer && this._tempScreenSize) {
-        renderer.getDrawingBufferSize(this._tempScreenSize);
-        const invW = 1.0 / Math.max(1.0, this._tempScreenSize.x);
-        const invH = 1.0 / Math.max(1.0, this._tempScreenSize.y);
-        const mm = window.MapShine?.maskManager;
-        let ropeMaskTex = mm ? mm.getTexture('ropeMask.screen') : null;
-        if (!ropeMaskTex) {
-          const le = window.MapShine?.lightingEffect;
-          ropeMaskTex = le?.ropeMaskTarget?.texture ?? null;
-        }
-
-        const mats = [this._flashlightBeamMat, this._flashlightMat, this._flashlightCookieMat, this._flashlightOriginMat];
-        for (let i = 0; i < mats.length; i++) {
-          const u = mats[i]?.uniforms;
-          if (!u) continue;
-          if (u.uInvScreenSize) u.uInvScreenSize.value.set(invW, invH);
-          if (u.uRopeMask) u.uRopeMask.value = ropeMaskTex;
-          if (u.uHasRopeMask) u.uHasRopeMask.value = ropeMaskTex ? 1.0 : 0.0;
-        }
-
-        const torchMats = [this._torchFlameMat, this._torchSparksMat];
-        for (let i = 0; i < torchMats.length; i++) {
-          const m = torchMats[i];
-          const u = m?.uniforms || m?.userData?._msRopeMaskUniforms;
-          if (!u) continue;
-          if (u.uInvScreenSize) u.uInvScreenSize.value.set(invW, invH);
-          if (u.uRopeMask) u.uRopeMask.value = ropeMaskTex;
-          if (u.uHasRopeMask) u.uHasRopeMask.value = ropeMaskTex ? 1.0 : 0.0;
-        }
-      }
+      this._updateScreenMaskUniforms();
     } catch (_) {
     }
 
@@ -1337,6 +1382,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
       this._torchExtinguished = false;
     }
 
+    let tokenRadiusPx = 0;
     if (isTorchMode && this.params.torchReigniteRequiresTouch) {
       try {
         const grid = canvas?.grid;
@@ -1346,7 +1392,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
         const scaleY = tokenDoc?.texture?.scaleY ?? 1;
         const wPx = (tokenDoc?.width ?? 1) * gridSizeX * scaleX;
         const hPx = (tokenDoc?.height ?? 1) * gridSizeY * scaleY;
-        const tokenRadiusPx = 0.5 * Math.max(0, Math.min(wPx, hPx));
+        tokenRadiusPx = 0.5 * Math.max(0, Math.min(wPx, hPx));
         const tokenRadiusU = tokenRadiusPx * pxToUnits;
         const extraU = Math.max(0, this.params.torchReigniteTouchExtraUnits ?? 0);
         const touching = distanceUnits <= (tokenRadiusU + extraU);
@@ -1389,17 +1435,10 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
         const destFoundry = Coordinates.toFoundry(aimWorld.x, aimWorld.y);
         let collision = null;
         const isFlashlightMode = this.params.mode === 'flashlight';
-
-        if (isFlashlightMode) {
-          // Flashlight follows optical wall senses so it can pass through windows
-          // while still respecting one-way walls, door states, and thresholds.
-          collision = this._findClosestWallCollision(tokenObj, destFoundry, ['sight', 'light'], {
-            flashlightOpticalPassThrough: true
-          });
-        } else {
-          // Torch placement behaves like moving a physical object.
-          collision = this._findClosestWallCollision(tokenObj, destFoundry, ['move']);
-        }
+        const tSec = typeof timeInfo?.elapsed === 'number' ? timeInfo.elapsed : 0;
+        const options = isFlashlightMode ? { flashlightOpticalPassThrough: true } : null;
+        const collisionTypes = isFlashlightMode ? ['sight', 'light'] : ['move'];
+        collision = this._findClosestWallCollisionCached(tokenObj, tokenId, tokenCenterWorld, aimWorld, destFoundry, collisionTypes, options, tSec);
         if (collision) {
           blocked = true;
           const cv = Coordinates.toWorld(collision.x, collision.y);
@@ -1474,7 +1513,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
     if (this.params.mode === 'flashlight') {
       const flashlightMaxU = maxU;
       const flashlightConeMaxLenU = Math.max(0.5, this.params.flashlightLengthUnits) * 4.0;
-      this._updateFlashlight(timeInfo, tokenCenterWorld, aimWorld, blocked, safeWallDistanceUnits, groundZ, fade, tokenDoc, flashlightMaxU, flashlightConeMaxLenU);
+      this._updateFlashlight(timeInfo, tokenCenterWorld, aimWorld, blocked, safeWallDistanceUnits, groundZ, fade, tokenDoc, flashlightMaxU, flashlightConeMaxLenU, tokenRadiusPx);
       this._updateDynamicLightSources(timeInfo, tokenCenterWorld, clampedTargetWorld, blocked, safeWallDistanceUnits, groundZ, fade, tokenDoc);
       this._setVisible(true, false);
       return;
@@ -1746,6 +1785,45 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
     }
 
     return bestCollision;
+  }
+
+  _findClosestWallCollisionCached(tokenObj, tokenId, tokenCenterWorld, aimWorld, destinationFoundry, collisionTypes = ['move'], options = null, tSec = 0) {
+    const cache = this._collisionCache;
+    const tokenX = Number(tokenCenterWorld?.x) || 0;
+    const tokenY = Number(tokenCenterWorld?.y) || 0;
+    const aimX = Number(aimWorld?.x) || 0;
+    const aimY = Number(aimWorld?.y) || 0;
+    const optionsKey = options?.flashlightOpticalPassThrough ? 'optical' : '';
+    const mode = Array.isArray(collisionTypes) ? collisionTypes.join('|') : String(collisionTypes || '');
+
+    if (cache?.valid
+      && cache.tokenId === tokenId
+      && cache.mode === mode
+      && cache.optionsKey === optionsKey
+      && (tSec - cache.tSec) < this._collisionCacheMinIntervalSec) {
+      const moveSq = (tokenX - cache.tokenX) * (tokenX - cache.tokenX)
+        + (tokenY - cache.tokenY) * (tokenY - cache.tokenY)
+        + (aimX - cache.aimX) * (aimX - cache.aimX)
+        + (aimY - cache.aimY) * (aimY - cache.aimY);
+      if (moveSq <= this._collisionCacheMinMoveSq) {
+        return cache.collision;
+      }
+    }
+
+    const collision = this._findClosestWallCollision(tokenObj, destinationFoundry, collisionTypes, options);
+    this._collisionCache = {
+      tokenId,
+      mode,
+      tokenX,
+      tokenY,
+      aimX,
+      aimY,
+      tSec,
+      collision,
+      valid: true,
+      optionsKey
+    };
+    return collision;
   }
 
   _findClosestBlockingCollision(tokenObj, origin, destination, type, elevation, options = null) {
@@ -2962,7 +3040,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
     this._updateTorchSparks(timeInfo, groundZ, finalIntensity, distanceFade);
   }
 
-  _updateFlashlight(timeInfo, tokenCenterWorld, cursorWorld, blocked, wallDistanceUnits, groundZ, distanceFade = 1.0, tokenDoc = null, maxDistanceUnitsOverride = null, coneMaxLenUOverride = null) {
+  _updateFlashlight(timeInfo, tokenCenterWorld, cursorWorld, blocked, wallDistanceUnits, groundZ, distanceFade = 1.0, tokenDoc = null, maxDistanceUnitsOverride = null, coneMaxLenUOverride = null, tokenRadiusPxOverride = null) {
     if (!this._flashlightBeamMesh || !this._flashlightBeamMat || !this._flashlightCookieMesh || !this._flashlightCookieMat) return;
 
     this._tryAttachFlashlightToLightScene();
@@ -2980,14 +3058,17 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
     const lenPx = Math.hypot(this._tempA.x, this._tempA.y);
     const lenU = lenPx * pxToUnits;
 
-    const grid = canvas?.grid;
-    const gridSizeX = (grid && typeof grid.sizeX === 'number' && grid.sizeX > 0) ? grid.sizeX : (canvas?.dimensions?.size ?? 100);
-    const gridSizeY = (grid && typeof grid.sizeY === 'number' && grid.sizeY > 0) ? grid.sizeY : (canvas?.dimensions?.size ?? 100);
-    const scaleX = tokenDoc?.texture?.scaleX ?? 1;
-    const scaleY = tokenDoc?.texture?.scaleY ?? 1;
-    const wPx = (tokenDoc?.width ?? 1) * gridSizeX * scaleX;
-    const hPx = (tokenDoc?.height ?? 1) * gridSizeY * scaleY;
-    const tokenRadiusPx = 0.5 * Math.max(0, Math.min(wPx, hPx));
+    let tokenRadiusPx = Number.isFinite(tokenRadiusPxOverride) ? tokenRadiusPxOverride : null;
+    if (tokenRadiusPx === null) {
+      const grid = canvas?.grid;
+      const gridSizeX = (grid && typeof grid.sizeX === 'number' && grid.sizeX > 0) ? grid.sizeX : (canvas?.dimensions?.size ?? 100);
+      const gridSizeY = (grid && typeof grid.sizeY === 'number' && grid.sizeY > 0) ? grid.sizeY : (canvas?.dimensions?.size ?? 100);
+      const scaleX = tokenDoc?.texture?.scaleX ?? 1;
+      const scaleY = tokenDoc?.texture?.scaleY ?? 1;
+      const wPx = (tokenDoc?.width ?? 1) * gridSizeX * scaleX;
+      const hPx = (tokenDoc?.height ?? 1) * gridSizeY * scaleY;
+      tokenRadiusPx = 0.5 * Math.max(0, Math.min(wPx, hPx));
+    }
     const tokenRadiusU = tokenRadiusPx * pxToUnits;
     const beamStartPx = Math.max(0, tokenRadiusPx);
 

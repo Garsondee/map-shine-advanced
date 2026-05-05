@@ -163,6 +163,10 @@ export class LensEffectV2 {
      * @type {Array<{index:number, name:string, path:string, group:object}>}
      */
     this._catalog = [];
+    /** @type {Map<string, number>} */
+    this._catalogNameToIndex = new Map();
+    /** @type {Set<string>} */
+    this._catalogNameSet = new Set();
 
     /** @type {Array<THREE.Texture|null>} */
     this._slotTextures = new Array(OVERLAY_SLOT_COUNT).fill(null);
@@ -375,6 +379,19 @@ export class LensEffectV2 {
   /** Read-only catalog for UI consumers. */
   get catalog() { return this._catalog; }
 
+  _setCatalog(catalogEntries) {
+    this._catalog = Array.isArray(catalogEntries) ? catalogEntries : [];
+    this._catalogNameToIndex.clear();
+    this._catalogNameSet.clear();
+    for (let i = 0; i < this._catalog.length; i++) {
+      const name = String(this._catalog[i]?.name || '').toLowerCase();
+      if (!name) continue;
+      // Keep first occurrence if duplicates exist.
+      if (!this._catalogNameToIndex.has(name)) this._catalogNameToIndex.set(name, i);
+      this._catalogNameSet.add(name);
+    }
+  }
+
   _slotParamKey(base, slot) {
     return `${base}${slot}`;
   }
@@ -417,11 +434,11 @@ export class LensEffectV2 {
   _findCatalogIndexByName(baseName) {
     if (!baseName) return -1;
     const needle = String(baseName).toLowerCase();
-    return this._catalog.findIndex(entry => String(entry?.name || '').toLowerCase() === needle);
+    return this._catalogNameToIndex.get(needle) ?? -1;
   }
 
   _getAvailableNames(candidates) {
-    return uniqueNames(candidates).filter(name => this._findCatalogIndexByName(name) >= 0);
+    return uniqueNames(candidates).filter(name => this._catalogNameSet.has(name));
   }
 
   _normalizeSelection(paramKey, candidates, { allowNone = true, defaultValue = 'auto' } = {}) {
@@ -475,7 +492,8 @@ export class LensEffectV2 {
     } = config;
 
     const s = String(slot);
-    this.params[`overlayIndex${s}`] = (name && this._findCatalogIndexByName(name) >= 0) ? this._findCatalogIndexByName(name) : -1;
+    const index = name ? this._findCatalogIndexByName(name) : -1;
+    this.params[`overlayIndex${s}`] = index >= 0 ? index : -1;
     this.params[`overlayIntensity${s}`] = Math.max(0, Number(intensity) || 0);
     this.params[`overlayLumaReactivity${s}`] = clamp01(lumaReactivity);
     this.params[`overlayLumaBoost${s}`] = Math.max(0.1, Number(lumaBoost) || 1);
@@ -1223,14 +1241,14 @@ export class LensEffectV2 {
     }
 
     if (discovered.length > 0) {
-      this._catalog = makeCatalogFromPaths(discovered);
+      this._setCatalog(makeCatalogFromPaths(discovered));
       this._applyDefaultPresetIfUnset();
       log.info(`LensEffectV2: discovered ${this._catalog.length} overlay(s) in ${LENS_ASSET_DIR}`);
       return;
     }
 
     const fallbackPaths = FALLBACK_OVERLAY_FILES.map(file => `${LENS_ASSET_DIR}/${file}`);
-    this._catalog = makeCatalogFromPaths(fallbackPaths);
+    this._setCatalog(makeCatalogFromPaths(fallbackPaths));
     this._applyDefaultPresetIfUnset();
     log.warn(`LensEffectV2: FilePicker browse failed or empty; using fallback catalog (${this._catalog.length} entries)`);
   }
@@ -1628,6 +1646,8 @@ export class LensEffectV2 {
     this._lightBurnQuad = null;
     this._loader          = null;
     this._catalog         = [];
+    this._catalogNameToIndex.clear();
+    this._catalogNameSet.clear();
     this._slotLoadedIndices.fill(-2);
     this._initialized     = false;
 

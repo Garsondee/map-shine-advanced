@@ -487,6 +487,38 @@ function _ensurePlayerLightToolDisabledStyles() {
   }
 }
 
+function _ensurePlayerLightToolStateStyles() {
+  try {
+    if (globalThis.__msaPlayerLightToolStateCss) return;
+    globalThis.__msaPlayerLightToolStateCss = true;
+    const style = document.createElement('style');
+    style.id = 'msa-player-light-tool-state-style';
+    style.textContent = `
+      #ui-left [data-tool^="map-shine-player-"],
+      #scene-controls [data-tool^="map-shine-player-"],
+      #controls [data-tool^="map-shine-player-"] {
+        transition: filter 120ms ease, color 120ms ease, text-shadow 120ms ease, opacity 120ms ease;
+      }
+      #ui-left [data-tool^="map-shine-player-"].msa-tool-active,
+      #scene-controls [data-tool^="map-shine-player-"].msa-tool-active,
+      #controls [data-tool^="map-shine-player-"].msa-tool-active {
+        color: #ffae33 !important;
+        filter: brightness(1.45) saturate(1.3);
+        text-shadow: 0 0 8px rgba(255, 153, 0, 0.7);
+      }
+      #ui-left [data-tool^="map-shine-player-"].msa-tool-inactive,
+      #scene-controls [data-tool^="map-shine-player-"].msa-tool-inactive,
+      #controls [data-tool^="map-shine-player-"].msa-tool-inactive {
+        color: #5f5f5f !important;
+        filter: brightness(0.55) saturate(0.55);
+        text-shadow: none;
+      }
+    `;
+    document.head.appendChild(style);
+  } catch (_) {
+  }
+}
+
 function _collectSceneControlToolElements(toolName) {
   /** @type {Element[]} */
   const out = [];
@@ -507,6 +539,64 @@ function _collectSceneControlToolElements(toolName) {
     }
   }
   return out;
+}
+
+function _resolvePlayerLightActiveMode() {
+  try {
+    const { tokenDoc, enabled, mode } = getPlayerLightState();
+    if (!tokenDoc || !enabled) return null;
+    if (mode !== 'torch' && mode !== 'flashlight' && mode !== 'nightVision') return null;
+    const playerLightEffect = getPlayerLightEffectInstance();
+    if (playerLightEffect && !playerLightEffect.enabled) return null;
+    return mode;
+  } catch (_) {
+    return null;
+  }
+}
+
+function _setToolActiveStateOnSceneControls(toolName, active) {
+  try {
+    const controlsApi = ui?.controls;
+    const controlsList = controlsApi?.controls;
+    if (!controlsList) return;
+    const tokensControl = Array.isArray(controlsList)
+      ? controlsList.find((c) => c?.name === 'tokens')
+      : controlsList?.tokens;
+    const tools = tokensControl?.tools;
+    if (!tools) return;
+    if (Array.isArray(tools)) {
+      const tool = tools.find((t) => t?.name === toolName);
+      if (tool) tool.active = !!active;
+      return;
+    }
+    if (typeof tools === 'object' && tools[toolName]) {
+      tools[toolName].active = !!active;
+    }
+  } catch (_) {
+  }
+}
+
+function _applyPlayerLightToolStateSync() {
+  try {
+    _ensurePlayerLightToolStateStyles();
+    const activeMode = _resolvePlayerLightActiveMode();
+    const modeMap = [
+      ['map-shine-player-torch', 'torch'],
+      ['map-shine-player-flashlight', 'flashlight'],
+      ['map-shine-player-nightvision', 'nightVision']
+    ];
+    for (const [toolName, mode] of modeMap) {
+      const active = activeMode === mode;
+      _setToolActiveStateOnSceneControls(toolName, active);
+      const els = _collectSceneControlToolElements(toolName);
+      els.forEach((el) => {
+        el.classList.toggle('msa-tool-active', active);
+        el.classList.toggle('msa-tool-inactive', !active);
+        el.setAttribute('aria-pressed', active ? 'true' : 'false');
+      });
+    }
+  } catch (_) {
+  }
 }
 
 function _applyPlayerLightToolDisabledStates() {
@@ -671,16 +761,34 @@ Hooks.once('init', async function() {
 
   Hooks.on('renderSceneControls', () => {
     try {
-      queueMicrotask(() => _applyPlayerLightToolDisabledStates());
+      queueMicrotask(() => {
+        _applyPlayerLightToolDisabledStates();
+        _applyPlayerLightToolStateSync();
+      });
     } catch (_) {
     }
   });
 
   Hooks.on('canvasReady', () => {
     try {
-      queueMicrotask(() => _applyPlayerLightToolDisabledStates());
+      queueMicrotask(() => {
+        _applyPlayerLightToolDisabledStates();
+        _applyPlayerLightToolStateSync();
+      });
     } catch (_) {
     }
+  });
+
+  Hooks.on('controlToken', () => {
+    try {
+      queueMicrotask(() => _applyPlayerLightToolStateSync());
+    } catch (_) {}
+  });
+
+  Hooks.on('updateToken', () => {
+    try {
+      queueMicrotask(() => _applyPlayerLightToolStateSync());
+    } catch (_) {}
   });
 
   // Register scene control buttons for Map Shine panels

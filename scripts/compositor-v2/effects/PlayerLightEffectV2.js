@@ -674,7 +674,8 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
           type: 'list',
           label: 'Mode',
           options: { Torch: 'torch', Flashlight: 'flashlight', 'Night Vision': 'nightVision' },
-          default: 'flashlight'
+          default: 'flashlight',
+          hidden: true
         },
         torchMaxDistanceUnits: { type: 'slider', label: 'Torch Max Dist (u)', min: 1, max: 200, step: 1, default: 10, throttle: 50 },
         flashlightMaxDistanceUnits: { type: 'slider', label: 'Flashlight Max Dist (u)', min: 1, max: 200, step: 1, default: 60, throttle: 50 },
@@ -1243,7 +1244,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
       const enabledFlag = tokenDoc.getFlag?.('map-shine-advanced', 'playerLightEnabled')
         ?? tokenDoc?.flags?.['map-shine-advanced']?.playerLightEnabled;
       const enabled = (enabledFlag === undefined || enabledFlag === null) ? false : !!enabledFlag;
-      if (!enabled && this.params.mode !== 'nightVision') {
+      if (!enabled) {
         this._tickNightVisionPower(timeInfo, false);
         this._setVisible(false);
         this._hideDynamicLightSources();

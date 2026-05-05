@@ -181,6 +181,15 @@ export function getNightVisionFragmentShader() {
       float flickerMul = 1.0 - uPhosphorFlickerAmount * (0.35 + 0.65 * pf);
       col *= flickerMul;
 
+      // Add a subtle phosphor scintillation layer that remains visible on
+      // brighter surfaces instead of only reading against black regions.
+      float phosphorLuma = clamp(dot(col, LUM), 0.0, 1.0);
+      float phosphorPresence = smoothstep(0.05, 0.9, phosphorLuma);
+      float phosphorHash = hash12(floor(vUv * uResolution * 0.75) + fract(uTime * (11.0 + uPhosphorFlickerSpeed * 37.0)));
+      float phosphorSpark = phosphorHash * 2.0 - 1.0;
+      float phosphorAmp = uPhosphorFlickerAmount * (0.02 + 0.06 * phosphorPresence);
+      col += vec3(phosphorSpark) * phosphorAmp;
+
       float eyeOpen = eyepieceMask(vUv);
       float ei = clamp(uEyepieceIntensity, 0.0, 1.0);
       vec3 edgeCol = clamp(uEyepieceColor, vec3(0.0), vec3(1.0));

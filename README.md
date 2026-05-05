@@ -4,9 +4,6 @@
 
 Map Shine Advanced is a Foundry VTT module that brings a Three.js-based renderer to Foundry with a focus on cinematic 2.5D battlemaps: PBR-style surface shading, mask-driven effects, particles, and a modern post-processing pipeline.
 
-- **Repo**: https://github.com/Garsondee/map-shine-advanced
-- **Status**: `0.1.5` (active development)
-
 ## What this module does
 
 - **Renders the scene in Three.js** while Foundry continues to provide game logic + UI.

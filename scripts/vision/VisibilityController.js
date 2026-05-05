@@ -399,14 +399,6 @@ export class VisibilityController {
       const wallDoc = edge.object?.document ?? edge.object ?? null;
       if (!wallDoc) return true;
 
-      // Match PlayerLight optical pass-through behavior through windows.
-      if (type === 'sight' || type === 'light') {
-        const senseValue = Number(type === 'light' ? wallDoc?.light : wallDoc?.sight);
-        const proximity = Number(CONST?.WALL_SENSE_TYPES?.PROXIMITY ?? 30);
-        const distance = Number(CONST?.WALL_SENSE_TYPES?.DISTANCE ?? 40);
-        if (senseValue === proximity || senseValue === distance) continue;
-      }
-
       const bounds = readWallHeightFlags(wallDoc);
       let bottom = Number(bounds?.bottom);
       let top = Number(bounds?.top);

@@ -238,6 +238,9 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
       nightVisionNoiseScale: 1.5,
       nightVisionPhosphorFlickerAmount: 0.06,
       nightVisionPhosphorFlickerSpeed: 9.0,
+      nightVisionPhosphorSize: 0.75,
+      nightVisionPhosphorDensity: 1.0,
+      nightVisionPhosphorIntensity: 1.0,
       nightVisionBloomEnabled: true,
       nightVisionBloomThreshold: 0.7,
       nightVisionBloomThresholdSoftness: 0.25,
@@ -635,7 +638,10 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
             'nightVisionNoiseSpeed',
             'nightVisionNoiseScale',
             'nightVisionPhosphorFlickerAmount',
-            'nightVisionPhosphorFlickerSpeed'
+            'nightVisionPhosphorFlickerSpeed',
+            'nightVisionPhosphorSize',
+            'nightVisionPhosphorDensity',
+            'nightVisionPhosphorIntensity'
           ]
         },
         {
@@ -847,6 +853,9 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
         nightVisionNoiseScale: { type: 'slider', label: 'Noise Scale', min: 0.5, max: 6, step: 0.05, default: 1.5, throttle: 50 },
         nightVisionPhosphorFlickerAmount: { type: 'slider', label: 'Phosphor Flicker', min: 0, max: 1, step: 0.01, default: 0.06, throttle: 50 },
         nightVisionPhosphorFlickerSpeed: { type: 'slider', label: 'Phosphor Flicker Speed', min: 0.5, max: 30, step: 0.1, default: 9.0, throttle: 50 },
+        nightVisionPhosphorSize: { type: 'slider', label: 'Phosphor Size', min: 0.2, max: 3.0, step: 0.01, default: 0.75, throttle: 50 },
+        nightVisionPhosphorDensity: { type: 'slider', label: 'Phosphor Density', min: 0.1, max: 3.0, step: 0.01, default: 1.0, throttle: 50 },
+        nightVisionPhosphorIntensity: { type: 'slider', label: 'Phosphor Intensity', min: 0, max: 4.0, step: 0.01, default: 1.0, throttle: 50 },
         nightVisionBloomEnabled: { type: 'boolean', label: 'Bloom / Burn-In', default: true },
         nightVisionBloomThreshold: { type: 'slider', label: 'Bloom Threshold', min: 0, max: 1, step: 0.01, default: 0.7, throttle: 50 },
         nightVisionBloomThresholdSoftness: { type: 'slider', label: 'Threshold Softness', min: 0.01, max: 0.5, step: 0.005, default: 0.25, throttle: 50 },
@@ -3732,6 +3741,9 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
         uNoiseScale: { value: this.params.nightVisionNoiseScale },
         uPhosphorFlickerAmount: { value: this.params.nightVisionPhosphorFlickerAmount },
         uPhosphorFlickerSpeed: { value: this.params.nightVisionPhosphorFlickerSpeed },
+        uPhosphorSize: { value: this.params.nightVisionPhosphorSize },
+        uPhosphorDensity: { value: this.params.nightVisionPhosphorDensity },
+        uPhosphorIntensity: { value: this.params.nightVisionPhosphorIntensity },
         uBloomEnabled: { value: this.params.nightVisionBloomEnabled ? 1.0 : 0.0 },
         uBloomIntensity: { value: this.params.nightVisionBloomIntensity },
         uBloomBlurPx: { value: this.params.nightVisionBloomBlurPx },
@@ -3911,6 +3923,9 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
     u.uNoiseScale.value = Math.max(0.1, Number(this.params.nightVisionNoiseScale) || 1);
     u.uPhosphorFlickerAmount.value = Math.max(0, Number(this.params.nightVisionPhosphorFlickerAmount) || 0);
     u.uPhosphorFlickerSpeed.value = Math.max(0.01, Number(this.params.nightVisionPhosphorFlickerSpeed) || 1);
+    u.uPhosphorSize.value = Math.max(0.05, Number(this.params.nightVisionPhosphorSize) || 0.75);
+    u.uPhosphorDensity.value = Math.max(0.01, Number(this.params.nightVisionPhosphorDensity) || 1.0);
+    u.uPhosphorIntensity.value = Math.max(0, Number(this.params.nightVisionPhosphorIntensity) || 0);
     u.uBloomEnabled.value = this.params.nightVisionBloomEnabled ? 1.0 : 0.0;
     u.uBloomIntensity.value = Math.max(0, Number(this.params.nightVisionBloomIntensity) || 0);
     u.uBloomBlurPx.value = Math.max(0, Number(this.params.nightVisionBloomBlurPx) || 0);

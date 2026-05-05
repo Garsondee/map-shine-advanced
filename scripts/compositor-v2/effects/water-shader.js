@@ -1013,7 +1013,7 @@ struct FloatingFoamData {
 };
 
 // waveGradPre: pre-computed waveGrad2D result from main() to avoid redundant wave calculation.
-void getFoamData(vec2 sceneUv, float shore, float inside, vec2 rainOffPx, vec2 waveGradPre, float sceneLuma, float darkness, float indoorWindMotion, out float shoreFoamOut, out FloatingFoamData floatingOut) {
+void getFoamData(vec2 sceneUv, float shore, float inside, vec2 rainOffPx, vec2 waveGradPre, float sceneLuma, float darkness, float outdoorStrength, float indoorWindMotion, out float shoreFoamOut, out FloatingFoamData floatingOut) {
   vec2 foamWindOffsetUv = uWindOffsetUv * indoorWindMotion;
   vec2 foamSceneUv = sceneUv - (foamWindOffsetUv * 0.5);
   float sceneAspect = (uHasSceneRect > 0.5) ? (uSceneRect.z / max(1.0, uSceneRect.w)) : (uResolution.x / max(1.0, uResolution.y));
@@ -1314,31 +1314,47 @@ void getFoamData(vec2 sceneUv, float shore, float inside, vec2 rainOffPx, vec2 w
   // Apply color variation (subtle hue shift)
   foamColor = foamColor * (1.0 + colorVar * 0.15);
   
-  // Brightness/Contrast/Gamma adjustments
-  float foamBright = clamp(uFloatingFoamBrightness, -1.0, 1.0);
+  // Brightness/Contrast/Gamma adjustments (color-only; do not alter coverage mask)
+  float foamBright = clamp(uFloatingFoamBrightness, 0.0, 1.25);
   float foamContrast = max(0.0, uFloatingFoamContrast);
   float foamGamma = max(0.01, uFloatingFoamGamma);
-  
-  floatingBase = clamp(floatingBase + foamBright, 0.0, 1.0);
-  floatingBase = (floatingBase - 0.5) * foamContrast + 0.5;
-  floatingBase = pow(clamp(floatingBase, 0.0, 1.0), foamGamma);
+
+  foamColor = foamColor * foamBright;
+  foamColor = ((foamColor - 0.5) * foamContrast) + 0.5;
+  foamColor = pow(max(foamColor, vec3(0.0)), vec3(foamGamma));
+  foamColor = clamp(foamColor, vec3(0.0), vec3(0.92));
   
   // Lighting calculation (applied AFTER opacity blending for proper darkness)
+  // Keep darkness response active even when explicit foam lighting is disabled;
+  // otherwise foam can read as self-illuminated at night.
   float lightFactor = 1.0;
-  float darkScale = 1.0;
+  float darkResponse = clamp(uFloatingFoamDarknessResponse, 0.0, 1.0);
+  // Scene darkness convention: 1 = darkest. Keep response linear with darkness.
+  float darkScale = mix(1.0, 0.02, darkness * darkResponse);
   if (uFloatingFoamLightingEnabled > 0.5) {
     float ambient = clamp(uFloatingFoamAmbientLight, 0.0, 1.0);
     float sceneInfluence = clamp(uFloatingFoamSceneLightInfluence, 0.0, 1.0);
-    float darkResponse = clamp(uFloatingFoamDarknessResponse, 0.0, 1.0);
-    
-    // Scene lighting contribution
+
+    // Scene lighting contribution with a small bounce floor so ambient=0 does
+    // not crush foam fully black against nearby lit water.
     float sceneLit = smoothstep(0.02, 0.35, sceneLuma);
-    sceneLit = mix(ambient, 1.0, sceneLit);
-    
-    // Darkness response - much stronger at night (0.05 instead of 0.25)
-    darkScale = mix(1.0, 0.05, darkness * darkResponse);
-    
-    lightFactor = sceneLit * sceneInfluence + ambient * (1.0 - sceneInfluence);
+    float sceneBounceFloor = clamp(0.08 + sceneLuma * 0.32, 0.0, 0.32);
+    sceneLit = max(sceneLit, sceneBounceFloor);
+
+    // Ambient should still be artist-controllable, but avoid dark-zone glow.
+    // Use a soft light gate (never fully zero) plus night attenuation.
+    float ambientLitGate = mix(0.20, 1.0, smoothstep(0.06, 0.55, sceneLit));
+    float ambientNightAtten = mix(1.0, 0.10, darkness);
+    // Ambient only lifts foam where _Outdoors is non-black.
+    float outdoorsAmbientGate = 1.0;
+    if (uHasOutdoorsMask > 0.5) {
+      outdoorsAmbientGate = smoothstep(0.01, 0.08, clamp(outdoorStrength, 0.0, 1.0));
+    }
+    float ambientEff = ambient * ambientLitGate * ambientNightAtten * outdoorsAmbientGate;
+
+    // Base follows local scene light; ambient adds fill biased by scene influence.
+    float litBase = sceneLit;
+    lightFactor = litBase + ambientEff * (0.55 + 0.45 * sceneInfluence);
     lightFactor = clamp(lightFactor, 0.0, 1.0);
   }
   
@@ -1993,16 +2009,29 @@ void main() {
   // Reduce foam visibility under building shadows specifically.
   float foamBuildingShadowFade = mix(1.0, 0.06, pow(buildingShadow, 1.1));
 
+  vec2 msUvShadow = vec2(
+    (gl_FragCoord.x + 0.5) / max(uResolution.x, 1.0),
+    (gl_FragCoord.y + 0.5) / max(uResolution.y, 1.0)
+  );
+  float combinedShadowLit = 1.0;
+  float combinedShadowOcc = 0.0;
+  if (uHasCombinedShadow > 0.5) {
+    combinedShadowLit = clamp(texture2D(tCombinedShadow, msUvShadow).r, 0.0, 1.0);
+    combinedShadowOcc = clamp(1.0 - combinedShadowLit, 0.0, 1.0);
+  }
+
   // ShadowManagerV2 combined map (screen vUv, R = lit factor). When bound, shore +
   // floating foam use this for color and alpha so they track cloud + overhead + building
   // the same way as water particles and murk (avoids double-applying structural).
   float foamColorLitMul = foamStructuralDarken;
   float foamAlphaLitMul = foamBuildingShadowFade;
   if (uHasCombinedShadow > 0.5) {
-    float cl = clamp(texture2D(tCombinedShadow, vUv).r, 0.0, 1.0);
-    foamColorLitMul = cl;
-    foamAlphaLitMul = cl;
+    foamColorLitMul = combinedShadowLit;
+    foamAlphaLitMul = combinedShadowLit;
   }
+  // Foam should darken in shadow without "disappearing". Use a stronger color-only
+  // curve than water base and keep alpha mostly ownership/coverage-driven.
+  float foamShadowColorMul = pow(clamp(foamColorLitMul, 0.0, 1.0), 1.65);
 
   // Murk
   float murkFactor = 0.0;
@@ -2067,7 +2096,9 @@ void main() {
 
     // V1-accurate cloud-shadow caustics kill.
     float causticsCloudLit = 1.0;
-    if (uCloudShadowEnabled > 0.5 && uHasCloudShadow > 0.5) {
+    if (uHasCombinedShadow > 0.5) {
+      causticsCloudLit = combinedShadowLit;
+    } else if (uCloudShadowEnabled > 0.5 && uHasCloudShadow > 0.5) {
       float cloudLitRaw = texture2D(tCloudShadow, vUv).r;
       float cs = clamp(1.0 - cloudLitRaw, 0.0, 1.0);
       causticsCloudLit = max(0.0, 1.0 - cs);
@@ -2111,22 +2142,17 @@ void main() {
   // pixel UV (gl_FragCoord / uResolution), then rgb *= csh and a *= csh. Advanced
   // floating foam uses this path so it tracks the same grid as bus particles (vUv
   // can sit off the combined RT in some viewport/post setups).
-  float splashCombinedCsh = 1.0;
-  if (uHasCombinedShadow > 0.5) {
-    vec2 msUvSplash = vec2(
-      (gl_FragCoord.x + 0.5) / max(uResolution.x, 1.0),
-      (gl_FragCoord.y + 0.5) / max(uResolution.y, 1.0)
-    );
-    splashCombinedCsh = clamp(texture2D(tCombinedShadow, msUvSplash).r, 0.0, 1.0);
-  }
+  float splashCombinedCsh = combinedShadowLit;
   
   float shoreFoamAmount;
   FloatingFoamData floatingFoam;
-  getFoamData(sceneUv, shore, inside, rainOffPx, waveGrad, sceneLuma, darkness, indoorWindMotion, shoreFoamAmount, floatingFoam);
+  getFoamData(sceneUv, shore, inside, rainOffPx, waveGrad, sceneLuma, darkness, outdoorStrength, indoorWindMotion, shoreFoamAmount, floatingFoam);
   // Softer foam presence + less pop vs blurred bus (mask still drives physics above).
   float fdbFoam = uFloorDepthBlurWaterSoft;
   float shoreFoamVis = shoreFoamAmount * mix(1.0, 0.58, fdbFoam);
   float floatFoamAmtVis = floatingFoam.amount * mix(1.0, 0.58, fdbFoam);
+  float foamCoverageVis = clamp(max(shoreFoamVis, floatFoamAmtVis), 0.0, 1.0);
+  float floatFoamCoverageVis = clamp(floatFoamAmtVis, 0.0, 1.0);
   
   // Apply floating foam shadow to water surface BEFORE foam rendering
   // Shadow offset based on sun direction (like building shadows)
@@ -2139,7 +2165,7 @@ void main() {
     // Sample foam at offset position for directional shadow
     float shoreFoamShadow;
     FloatingFoamData shadowFoam;
-    getFoamData(shadowUv, shore, inside, rainOffPx, waveGrad, sceneLuma, darkness, indoorWindMotion, shoreFoamShadow, shadowFoam);
+    getFoamData(shadowUv, shore, inside, rainOffPx, waveGrad, sceneLuma, darkness, outdoorStrength, indoorWindMotion, shoreFoamShadow, shadowFoam);
     
     float shadowDarken = shadowFoam.amount * floatingFoam.shadowStrength;
     shadowDarken *= mix(1.0, 0.22, uFloorDepthBlurWaterSoft);
@@ -2194,13 +2220,12 @@ void main() {
     
     // Apply lighting to color
     shoreFoamColor *= shoreLightFactor;
-    shoreFoamColor *= foamColorLitMul;
+    shoreFoamColor *= foamShadowColorMul;
     shoreFoamColor = mix(shoreFoamColor, col, 0.42 * fdbFoam);
     
     // Opacity and blending
     float shoreOpacity = clamp(uShoreFoamOpacity, 0.0, 1.0);
     float shoreAlpha = clamp(shoreFoamVis * shoreOpacity, 0.0, 1.0);
-    shoreAlpha *= foamAlphaLitMul;
     shoreAlpha *= mix(1.0, 0.20, uFloorDepthBlurWaterSoft);
     
     // Blend foam color first
@@ -2214,17 +2239,38 @@ void main() {
     float floatingAlpha = clamp(floatFoamAmtVis * floatingFoam.opacity, 0.0, 1.0);
     floatingAlpha *= mix(1.0, 0.20, uFloorDepthBlurWaterSoft);
     vec3 floatingFoamColor = mix(floatingFoam.color, col, 0.42 * fdbFoam);
-    if (uHasCombinedShadow > 0.5) {
-      floatingFoamColor *= splashCombinedCsh;
-      floatingAlpha = clamp(floatingAlpha * splashCombinedCsh, 0.0, 1.0);
+    // SkyColorEffectV2-driven lift for floating foam:
+    // brighten foam primarily outdoors so ambient can stay near zero without
+    // losing daytime readability.
+    vec3 skyColFoam = clamp(uSkyColor, vec3(0.0), vec3(1.0));
+    float skyLumFoam = dot(skyColFoam, vec3(0.299, 0.587, 0.114));
+    float skyIFoam = clamp(uSkyIntensity, 0.0, 1.0);
+    float skyBoost = 1.0;
+    if (uHasOutdoorsMask > 0.5) {
+      float outdoorFoam = clamp(outdoorStrength, 0.0, 1.0);
+      // Outdoors receive most of the sky lift; indoors get only a small residual.
+      float skyLift = (0.08 + 0.52 * outdoorFoam) * skyIFoam * (0.45 + 0.55 * skyLumFoam);
+      skyBoost += skyLift;
     } else {
-      floatingAlpha *= foamAlphaLitMul;
-      floatingFoamColor *= foamColorLitMul;
+      // Fallback when no outdoors mask exists.
+      skyBoost += 0.20 * skyIFoam * (0.45 + 0.55 * skyLumFoam);
     }
-    // Blend foam color first (without darkness)
+    floatingFoamColor *= skyBoost;
+    float floatingShadowMul = foamShadowColorMul;
+    if (uHasCombinedShadow > 0.5) {
+      floatingShadowMul = foamShadowColorMul;
+    } else {
+      floatingShadowMul = foamShadowColorMul;
+    }
+    // Keep foam silhouette/coverage stable in shadow. Darken albedo only; avoid
+    // coupling shadow response to alpha, which reads as "transparent foam".
+    floatingFoamColor *= floatingShadowMul;
+    // Apply floating-foam darkness to the foam layer itself. Applying darkness to
+    // final col here makes the whole water pixel dim and still allows later specular
+    // to re-brighten foam areas.
+    floatingFoamColor *= floatingFoam.darkScale;
+    // Blend foam color onto water
     col = mix(col, floatingFoamColor, floatingAlpha);
-    // THEN apply darkness to the final result for proper night darkening
-    col *= floatingFoam.darkScale;
   }
 
   // Shader flecks (drive by combined foam presence) — same lit factor as splashes when combined
@@ -2440,14 +2486,18 @@ void main() {
 
   // Combined shadow suppression: cloud, building, and overhead shadows
   float combinedShadow = 0.0;
-  
-  // Cloud shadow
-  if (uCloudShadowEnabled > 0.5 && cloudShadow > 1e-5) {
-    combinedShadow = max(combinedShadow, cloudShadow);
+
+  if (uHasCombinedShadow > 0.5) {
+    combinedShadow = combinedShadowOcc;
+  } else {
+    // Cloud shadow
+    if (uCloudShadowEnabled > 0.5 && cloudShadow > 1e-5) {
+      combinedShadow = max(combinedShadow, cloudShadow);
+    }
+
+    // Structural shadows (building + overhead) are already sampled above.
+    combinedShadow = max(combinedShadow, structuralShadow);
   }
-  
-  // Structural shadows (building + overhead) are already sampled above.
-  combinedShadow = max(combinedShadow, structuralShadow);
   
   // Apply combined shadow to specular
   if (combinedShadow > 1e-5) {
@@ -2457,7 +2507,11 @@ void main() {
     spec *= mix(1.0, litPow, kStrength);
   }
   // Structural shadows suppress 75% of specular at full shadow.
-  spec *= (1.0 - 0.75 * structuralShadow);
+  if (uHasCombinedShadow > 0.5) {
+    spec *= (1.0 - 0.75 * combinedShadowOcc);
+  } else {
+    spec *= (1.0 - 0.75 * structuralShadow);
+  }
   if (uSpecDisableMasking < 0.5) {
     float specMask = pow(clamp(distInside, 0.0, 1.0), clamp(uSpecMaskGamma, 0.05, 12.0));
     spec *= specMask;
@@ -2478,6 +2532,8 @@ void main() {
   float skySpecI = mix(0.08, 1.0, skyI);
   vec3 tint = mix(vec3(1.0), skyCol, clamp(uSpecSkyTint, 0.0, 1.0));
   vec3 specCol = spec * tint * skySpecI;
+  // Floating foam should read as diffuse/frothy, not mirror-bright.
+  specCol *= mix(1.0, 0.02, floatFoamCoverageVis);
   float sClamp = max(0.0, uSpecClamp);
   if (sClamp > 0.0) {
     specCol = min(specCol, vec3(sClamp));
@@ -2493,6 +2549,7 @@ void main() {
       waveGrad, rainOffPx, indoorWindMotion, outdoorStrength, sceneLuma, 
       darkness, combinedShadow, structuralShadow
     );
+    specHighlightsCol *= mix(1.0, 0.02, floatFoamCoverageVis);
     col += specHighlightsCol;
   }
 
@@ -2524,6 +2581,7 @@ void main() {
     
     // Apply shadow suppression
     reflectionStrength *= (1.0 - combinedShadow * 0.5);
+    reflectionStrength *= mix(1.0, 0.12, floatFoamCoverageVis);
     
     // Indoor damping
     if (uHasOutdoorsMask > 0.5) {

@@ -566,7 +566,8 @@ export class LoadingScreenDialog {
       panel.className = `ms-lsd-live-panel ${this.selectedElementId === '__panel__' ? 'is-selected' : ''}`;
       panel.style.left = `${num(panelCfg.x, 50)}%`;
       panel.style.top = `${num(panelCfg.y, 50)}%`;
-      panel.style.width = `min(${Math.max(120, num(panelCfg.widthPx, 440))}px, calc(100vw - 40px))`;
+      const panelWidthCss = String(panelCfg.widthCss || '').trim();
+      panel.style.width = panelWidthCss || `min(${Math.max(120, num(panelCfg.widthPx, 440))}px, calc(100vw - 40px))`;
       panel.style.padding = panelCfg.padding || '24px 22px';
       panel.style.background = this.state.config.style.panelBackground || 'rgba(10,10,14,0.7)';
       panel.style.border = this.state.config.style.panelBorder || '1px solid rgba(255,255,255,0.12)';
@@ -611,9 +612,15 @@ export class LoadingScreenDialog {
       node.style.letterSpacing = element.style?.letterSpacing || '';
       node.style.lineHeight = element.style?.lineHeight || '';
 
+      const widthCss = String(element.style?.widthCss || '').trim();
+      const maxWidthCss = String(element.style?.maxWidthCss || '').trim();
+      const minWidthCss = String(element.style?.minWidthCss || '').trim();
       const widthPx = Number(element.style?.widthPx);
       const maxWidthPx = Number(element.style?.maxWidthPx);
       const minWidthPx = Number(element.style?.minWidthPx);
+      if (widthCss) node.style.width = widthCss;
+      if (maxWidthCss) node.style.maxWidth = maxWidthCss;
+      if (minWidthCss) node.style.minWidth = minWidthCss;
       if (Number.isFinite(widthPx) && widthPx > 0) node.style.width = `${Math.max(1, widthPx)}px`;
       if (Number.isFinite(maxWidthPx) && maxWidthPx > 0) node.style.maxWidth = `${Math.max(16, maxWidthPx)}px`;
       if (Number.isFinite(minWidthPx) && minWidthPx > 0) node.style.minWidth = `${Math.max(1, minWidthPx)}px`;
@@ -628,7 +635,8 @@ export class LoadingScreenDialog {
 
       if (element.type === 'progress-bar') {
         node.classList.add('ms-lsd-live-progress');
-        node.style.width = `${Math.max(80, num(element.props?.widthPx, 280))}px`;
+        const progressWidthCss = String(element.props?.widthCss || '').trim();
+        node.style.width = progressWidthCss || `${Math.max(80, num(element.props?.widthPx, 280))}px`;
         node.style.height = `${Math.max(2, num(element.props?.heightPx, 6))}px`;
         node.style.borderRadius = `${Math.max(0, num(element.props?.radiusPx, 999))}px`;
 
@@ -645,9 +653,10 @@ export class LoadingScreenDialog {
         // anchor transform applied to the positioned element. Keep anchoring on the
         // wrapper and rotation on an inner node.
         node.classList.add('ms-lsd-live-spinner-wrap');
+        const sizeCss = String(element.props?.sizeCss || '').trim();
         const size = Math.max(10, num(element.props?.sizePx, 30));
-        node.style.width = `${size}px`;
-        node.style.height = `${size}px`;
+        node.style.width = sizeCss || `${size}px`;
+        node.style.height = sizeCss || `${size}px`;
 
         const spinner = document.createElement('div');
         spinner.className = 'ms-lsd-live-spinner';
@@ -671,11 +680,12 @@ export class LoadingScreenDialog {
         const padY = Math.max(0, num(element.props?.containerPaddingYpx, 8));
         const padX = Math.max(0, num(element.props?.containerPaddingXpx, 12));
         const radius = Math.max(0, num(element.props?.containerRadiusPx, 999));
+        const maxWidthCss = String(element.props?.maxWidthCss || '').trim();
         const maxWidthPx = Math.max(240, num(element.props?.maxWidthPx, 1200));
 
         node.style.width = 'max-content';
         // Keep full width in preview so placement matches the largest runtime footprint.
-        node.style.maxWidth = `${maxWidthPx}px`;
+        node.style.maxWidth = maxWidthCss || `${maxWidthPx}px`;
         node.style.padding = containerEnabled ? `${padY}px ${padX}px` : '0';
         node.style.borderRadius = containerEnabled ? `${radius}px` : '0';
         node.style.background = containerEnabled
@@ -685,22 +695,34 @@ export class LoadingScreenDialog {
           ? String(element.props?.containerBorder || '1px solid rgba(120,160,255,0.24)')
           : 'none';
 
-        const stageAlign = String(element.style?.textAlign || 'left').toLowerCase();
+        const stageAlign = String(element.style?.textAlign || 'center').toLowerCase();
         node.style.justifyContent = stageAlign === 'right' ? 'flex-end' : stageAlign === 'center' ? 'center' : 'flex-start';
 
         // Use realistic stage labels so wrapping/fit behavior is visible in editor
         [
           'Discovering assets',
+          'Cataloging batches',
           'Loading textures',
+          'Uploading GPU data',
+          'Bootstrapping effects',
           'Core effects',
-          'Dependent effects',
+          'Dependency effects',
           'Wiring effects',
-          'Scene managers',
-          'Syncing objects',
-          'Finalizing',
+          'Token systems',
+          'Floor layers',
+          'Movement systems',
+          'Interaction graph',
+          'Camera systems',
+          'Syncing scene',
+          'UI bootstrap',
+          'Control panels',
+          'Preparing scene',
+          'Compiling shaders',
+          'Final polish',
+          'Ready',
         ].forEach((label, idx) => {
           const pill = document.createElement('span');
-          pill.className = `ms-lsd-live-pill ${idx < 5 ? 'is-done' : idx === 7 ? 'is-active' : 'is-pending'}`;
+          pill.className = `ms-lsd-live-pill ${idx < 13 ? 'is-done' : idx === 17 ? 'is-active' : 'is-pending'}`;
           pill.textContent = label;
           node.appendChild(pill);
         });
@@ -708,8 +730,10 @@ export class LoadingScreenDialog {
         const img = document.createElement('img');
         img.className = 'ms-lsd-live-image';
         img.src = element.props?.src || '';
-        img.style.maxWidth = `${Math.max(16, num(element.props?.widthPx, 90))}px`;
-        img.style.maxHeight = `${Math.max(16, num(element.props?.heightPx, 90))}px`;
+        const imgWidthCss = String(element.props?.widthCss || '').trim();
+        const imgHeightCss = String(element.props?.heightCss || '').trim();
+        img.style.maxWidth = imgWidthCss || `${Math.max(16, num(element.props?.widthPx, 90))}px`;
+        img.style.maxHeight = imgHeightCss || `${Math.max(16, num(element.props?.heightPx, 90))}px`;
         node.appendChild(img);
       } else if (element.type === 'custom-html') {
         node.innerHTML = String(element.props?.html || '<em>Custom HTML</em>');
@@ -1876,17 +1900,18 @@ export class LoadingScreenDialog {
       }
       .ms-lsd-live-stage-row {
         display: flex;
-        gap: 5px;
-        row-gap: 6px;
-        flex-wrap: nowrap;
+        gap: 4px;
+        row-gap: 5px;
+        flex-wrap: wrap;
         justify-content: flex-start;
         align-items: center;
         box-sizing: border-box;
-        white-space: nowrap;
+        white-space: normal;
       }
       .ms-lsd-live-pill {
-        padding: 2px 7px; border-radius: 999px;
-        font-size: 10px; font-weight: 600;
+        padding: 2px 6px; border-radius: 999px;
+        font-size: 9.5px; font-weight: 600;
+        line-height: 1.2;
       }
       .ms-lsd-live-pill.is-pending { background: rgba(255,255,255,0.08); color: rgba(255,255,255,0.5); }
       .ms-lsd-live-pill.is-active { background: rgba(0,180,255,0.2); color: rgba(0,220,255,0.95); }

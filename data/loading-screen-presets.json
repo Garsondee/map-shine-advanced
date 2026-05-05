@@ -34,7 +34,8 @@
           "visible": true,
           "x": 50,
           "y": 52,
-          "widthPx": 560,
+          "widthCss": "48%",
+          "maxWidthCss": "min(960px, 92vw)",
           "padding": "26px 28px"
         },
         "elements": [
@@ -45,7 +46,7 @@
             "position": { "x": 50, "y": 32 },
             "anchor": "center",
             "props": { "text": "Map Shine Advanced" },
-            "style": { "fontSize": "32px", "fontWeight": "700", "letterSpacing": "0.6px", "textShadow": "0 2px 16px rgba(0,0,0,0.55)" },
+            "style": { "fontSize": "clamp(24px, 2.2vw, 34px)", "fontWeight": "700", "letterSpacing": "0.6px", "textShadow": "0 2px 16px rgba(0,0,0,0.55)" },
             "animation": { "entrance": { "type": "fade-in-up", "duration": 560, "delay": 30, "easing": "ease-out" }, "ambient": { "type": "pulse", "duration": 3800, "easing": "ease-in-out" } }
           },
           {
@@ -54,8 +55,8 @@
             "visible": true,
             "position": { "x": 50, "y": 36 },
             "anchor": "center",
-            "props": { "text": "Preparing your scene stack" },
-            "style": { "fontSize": "13px", "fontWeight": "400", "color": "rgba(196,223,255,0.8)" },
+            "props": { "text": "Preparing your world..." },
+            "style": { "fontSize": "clamp(11px, 0.9vw, 13px)", "fontWeight": "400", "color": "rgba(196,223,255,0.8)" },
             "animation": { "entrance": { "type": "fade-in", "duration": 460, "delay": 120, "easing": "ease-out" }, "ambient": null }
           },
           {
@@ -64,8 +65,8 @@
             "visible": true,
             "position": { "x": 50, "y": 39.8 },
             "anchor": "center",
-            "props": { "prefix": "Routing to " },
-            "style": { "fontSize": "14px", "fontWeight": "500", "color": "rgba(211,230,255,0.82)" },
+            "props": { "prefix": "Entering " },
+            "style": { "fontSize": "clamp(12px, 1vw, 14px)", "fontWeight": "500", "color": "rgba(211,230,255,0.82)" },
             "animation": { "entrance": { "type": "blur-in", "duration": 460, "delay": 190, "easing": "ease-out" }, "ambient": null }
           },
           {
@@ -75,7 +76,7 @@
             "position": { "x": 50, "y": 43.2 },
             "anchor": "center",
             "props": {
-              "html": "<div style='width:440px;max-width:calc(100vw - 48px);height:1px;background:linear-gradient(90deg,rgba(0,0,0,0),rgba(143,202,255,0.68),rgba(0,0,0,0));'></div>"
+              "html": "<div style='width:58%;max-width:calc(100vw - 48px);min-width:260px;height:1px;background:linear-gradient(90deg,rgba(0,0,0,0),rgba(143,202,255,0.68),rgba(0,0,0,0));'></div>"
             },
             "style": {},
             "animation": { "entrance": { "type": "clip-reveal-center", "duration": 520, "delay": 240, "easing": "ease-out" }, "ambient": null }
@@ -93,7 +94,7 @@
               "containerRadiusPx": 999,
               "containerBackground": "rgba(4,12,24,0.54)",
               "containerBorder": "1px solid rgba(120,170,240,0.26)",
-              "maxWidthPx": 920
+              "maxWidthCss": "72%"
             },
             "style": {},
             "animation": { "entrance": { "type": "fade-in", "duration": 340, "delay": 330, "easing": "ease-out" }, "ambient": null }
@@ -102,9 +103,9 @@
             "id": "progress",
             "type": "progress-bar",
             "visible": true,
-            "position": { "x": 50, "y": 53.5 },
+            "position": { "x": 50, "y": 60.2 },
             "anchor": "center",
-            "props": { "widthPx": 430, "heightPx": 8, "radiusPx": 999 },
+            "props": { "widthCss": "min(640px, 62vw)", "heightPx": 24, "radiusPx": 14 },
             "style": {},
             "animation": { "entrance": { "type": "fade-in-up", "duration": 320, "delay": 390, "easing": "ease-out" }, "ambient": { "type": "glow-pulse", "duration": 2500, "easing": "ease-in-out" } }
           },
@@ -112,29 +113,29 @@
             "id": "percentage",
             "type": "percentage",
             "visible": true,
-            "position": { "x": 76.5, "y": 53.5 },
+            "position": { "x": 53.8, "y": 60.2 },
             "anchor": "center-left",
             "props": {},
-            "style": { "fontSize": "13px", "fontWeight": "700", "color": "rgba(205,236,255,0.84)" },
+            "style": { "fontSize": "clamp(13px, 1.05vw, 16px)", "fontWeight": "700", "color": "rgba(218,241,255,0.9)" },
             "animation": { "entrance": { "type": "fade-in", "duration": 300, "delay": 430, "easing": "ease-out" }, "ambient": null }
           },
           {
             "id": "message",
             "type": "message",
             "visible": true,
-            "position": { "x": 50, "y": 57.4 },
+            "position": { "x": 50, "y": 67.2 },
             "anchor": "center",
             "props": { "text": "Compiling manager graph..." },
-            "style": { "fontSize": "12.5px", "color": "rgba(190,214,239,0.82)" },
+            "style": { "fontSize": "clamp(12px, 0.98vw, 14px)", "fontWeight": "500", "color": "rgba(200,222,244,0.84)" },
             "animation": { "entrance": { "type": "fade-in", "duration": 300, "delay": 470, "easing": "ease-out" }, "ambient": { "type": "pulse", "duration": 2100, "easing": "ease-in-out" } }
           },
           {
             "id": "spinner",
             "type": "spinner",
             "visible": true,
-            "position": { "x": 22.5, "y": 53.5 },
+            "position": { "x": 50, "y": 54.8 },
             "anchor": "center",
-            "props": { "sizePx": 26 },
+            "props": { "sizeCss": "clamp(54px, 6vw, 84px)" },
             "style": {},
             "animation": { "entrance": { "type": "scale-in", "duration": 460, "delay": 220, "easing": "ease-out" }, "ambient": { "type": "spin", "duration": 900, "easing": "linear" } }
           },
@@ -142,10 +143,10 @@
             "id": "timer",
             "type": "timer",
             "visible": true,
-            "position": { "x": 78, "y": 33.2 },
-            "anchor": "center-left",
+            "position": { "x": 46.2, "y": 60.2 },
+            "anchor": "center-right",
             "props": {},
-            "style": { "fontSize": "12px", "color": "rgba(191,214,236,0.6)" },
+            "style": { "fontSize": "clamp(13px, 1.05vw, 16px)", "fontWeight": "700", "color": "rgba(206,228,248,0.9)" },
             "animation": { "entrance": { "type": "fade-in", "duration": 320, "delay": 210, "easing": "ease-out" }, "ambient": null }
           }
         ]

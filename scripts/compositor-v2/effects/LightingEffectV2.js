@@ -1089,7 +1089,9 @@ export class LightingEffectV2 {
           // stays low and specular highlights (already in baseColor) read flat. Fade interior
           // crush where the same dynamic channel used for darkness punch is strong (Foundry
           // srcSample.a and window whites, scaled by uLightIntensity).
-          float interiorDarkLightSuppression = smoothstep(0.02, 0.2, lightTermI);
+          // Keep suppression for bright direct-light overlap, but avoid fully
+          // flattening interior darkness under moderate baseline illumination.
+          float interiorDarkLightSuppression = smoothstep(0.12, 0.65, lightTermI);
           float indoorConfidenceForDim = indoorConfidence * (1.0 - interiorDarkLightSuppression);
           ambientAfterDark *= max(0.0, 1.0 - uInteriorDarkness * indoorConfidenceForDim);
 

@@ -43,8 +43,8 @@ export function createDefaultStyledLoadingScreenConfig() {
         visible: true,
         x: 50,
         y: 50,
-        widthPx: 440,
-        maxWidthCss: 'calc(100vw - 40px)',
+        widthCss: '48%',
+        maxWidthCss: 'min(960px, 92vw)',
         padding: '24px 22px',
       },
       elements: [
@@ -55,17 +55,17 @@ export function createDefaultStyledLoadingScreenConfig() {
           position: { x: 12, y: 8 },
           anchor: 'top-left',
           props: { text: 'Map Shine' },
-          style: { fontSize: '20px', fontWeight: '700', color: 'rgba(255,255,255,0.95)' },
+          style: { fontSize: 'clamp(18px, 1.8vw, 24px)', fontWeight: '700', color: 'rgba(255,255,255,0.95)' },
           animation: { entrance: { type: 'fade-in', duration: 400, delay: 0, easing: 'ease-out' }, ambient: null },
         },
         {
           id: 'timer',
           type: 'timer',
           visible: true,
-          position: { x: 88, y: 9 },
-          anchor: 'top-right',
+          position: { x: 46.2, y: 60.2 },
+          anchor: 'center-right',
           props: {},
-          style: { fontSize: '13px', fontWeight: '500', color: 'rgba(255,255,255,0.45)' },
+          style: { fontSize: 'clamp(13px, 1.05vw, 16px)', fontWeight: '700', color: 'rgba(206,228,248,0.9)' },
           animation: { entrance: { type: 'fade-in', duration: 400, delay: 100, easing: 'ease-out' }, ambient: null },
         },
         {
@@ -74,17 +74,27 @@ export function createDefaultStyledLoadingScreenConfig() {
           visible: true,
           position: { x: 12, y: 16 },
           anchor: 'top-left',
-          props: { prefix: 'Loading ' },
-          style: { fontSize: '13px', color: 'rgba(255,255,255,0.5)' },
+          props: { prefix: 'Entering ' },
+          style: { fontSize: 'clamp(11px, 0.9vw, 13px)', color: 'rgba(255,255,255,0.5)' },
           animation: { entrance: { type: 'fade-in', duration: 400, delay: 180, easing: 'ease-out' }, ambient: null },
+        },
+        {
+          id: 'subtitle',
+          type: 'text',
+          visible: true,
+          position: { x: 50, y: 36 },
+          anchor: 'center',
+          props: { text: 'Preparing your world...' },
+          style: { fontSize: 'clamp(11px, 0.9vw, 13px)', fontWeight: '400', color: 'rgba(196,223,255,0.8)' },
+          animation: { entrance: { type: 'fade-in', duration: 460, delay: 120, easing: 'ease-out' }, ambient: null },
         },
         {
           id: 'spinner',
           type: 'spinner',
           visible: true,
-          position: { x: 50, y: 35 },
+          position: { x: 50, y: 54.8 },
           anchor: 'center',
-          props: { variant: 'ring', sizePx: 30 },
+          props: { variant: 'ring', sizeCss: 'clamp(54px, 6vw, 84px)' },
           style: {},
           animation: { entrance: { type: 'scale-in', duration: 450, delay: 230, easing: 'ease-out' }, ambient: { type: 'spin', duration: 800, easing: 'linear' } },
         },
@@ -101,7 +111,7 @@ export function createDefaultStyledLoadingScreenConfig() {
             containerRadiusPx: 999,
             containerBackground: 'rgba(6,10,20,0.62)',
             containerBorder: '1px solid rgba(120,160,255,0.24)',
-            maxWidthPx: 1200,
+            maxWidthCss: '72%',
           },
           style: {},
           animation: { entrance: { type: 'fade-in', duration: 350, delay: 300, easing: 'ease-out' }, ambient: null },
@@ -110,19 +120,19 @@ export function createDefaultStyledLoadingScreenConfig() {
           id: 'message',
           type: 'message',
           visible: true,
-          position: { x: 50, y: 62 },
+          position: { x: 50, y: 67.2 },
           anchor: 'center',
           props: { text: 'Starting…' },
-          style: { fontSize: '12.5px', color: 'rgba(255,255,255,0.72)' },
+          style: { fontSize: 'clamp(12px, 0.98vw, 14px)', fontWeight: '500', color: 'rgba(200,222,244,0.84)' },
           animation: { entrance: { type: 'fade-in', duration: 300, delay: 380, easing: 'ease-out' }, ambient: null },
         },
         {
           id: 'progress',
           type: 'progress-bar',
           visible: true,
-          position: { x: 50, y: 72 },
+          position: { x: 50, y: 60.2 },
           anchor: 'center',
-          props: { widthPx: 360, heightPx: 6, radiusPx: 999 },
+          props: { widthCss: 'min(640px, 62vw)', heightPx: 24, radiusPx: 14 },
           style: {},
           animation: { entrance: { type: 'fade-in', duration: 300, delay: 420, easing: 'ease-out' }, ambient: { type: 'glow-pulse', duration: 2200, easing: 'ease-in-out' } },
         },
@@ -130,10 +140,10 @@ export function createDefaultStyledLoadingScreenConfig() {
           id: 'percentage',
           type: 'percentage',
           visible: true,
-          position: { x: 87, y: 72 },
-          anchor: 'center',
+          position: { x: 53.8, y: 60.2 },
+          anchor: 'center-left',
           props: {},
-          style: { fontSize: '12px', fontWeight: '600', color: 'rgba(255,255,255,0.55)' },
+          style: { fontSize: 'clamp(13px, 1.05vw, 16px)', fontWeight: '700', color: 'rgba(218,241,255,0.9)' },
           animation: { entrance: { type: 'fade-in', duration: 300, delay: 460, easing: 'ease-out' }, ambient: null },
         },
       ],
@@ -201,6 +211,7 @@ export function normalizeLoadingScreenConfig(input) {
   config.version = LOADING_SCREEN_CONFIG_VERSION;
   if (!Array.isArray(config.fonts.googleFamilies)) config.fonts.googleFamilies = [];
   config.fonts.googleFamilies = config.fonts.googleFamilies.map((f) => String(f || '').trim()).filter(Boolean);
+  applyDefaultThemeBottomClusterUpgrade(config);
 
   return config;
 }
@@ -272,4 +283,114 @@ function cryptoSafeId() {
   } catch (_) {
   }
   return `id-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+/**
+ * Ensure the built-in default theme gets the latest chunky bottom cluster
+ * even when older world settings saved stale element values.
+ * @param {Object} config
+ */
+function applyDefaultThemeBottomClusterUpgrade(config) {
+  const basePresetId = String(config?.basePresetId || '').trim();
+  const themeName = String(config?.themeName || '').trim();
+  const isMapShineDefault = basePresetId === 'map-shine-default' || themeName === 'Map Shine Default';
+  if (!isMapShineDefault) return;
+
+  const elements = Array.isArray(config?.layout?.elements) ? config.layout.elements : [];
+  if (!elements.length) return;
+
+  // Some worlds saved older/default variations can leave duplicate bottom
+  // cluster elements. We normalize then enforce singletons by type.
+  const canonicalByType = new Map([
+    ['progress-bar', 'progress'],
+    ['spinner', 'spinner'],
+    ['timer', 'timer'],
+    ['percentage', 'percentage'],
+    ['message', 'message'],
+  ]);
+
+  for (const el of elements) {
+    if (!el || typeof el !== 'object') continue;
+    const id = String(el.id || '').trim();
+    if (!id) continue;
+    const type = String(el.type || '').trim().toLowerCase();
+
+    // For the built-in default theme, keep only the known decorative custom HTML.
+    // Older saved configs can contain extra custom-html bottom shells that no
+    // longer match the canonical chunky loading-bar cluster.
+    if (type === 'custom-html' && id !== 'decor-line') {
+      el.visible = false;
+      continue;
+    }
+
+    el.position = isObject(el.position) ? el.position : { x: 50, y: 50 };
+    el.props = isObject(el.props) ? el.props : {};
+    el.style = isObject(el.style) ? el.style : {};
+
+    if (id === 'subtitle') {
+      el.props.text = 'Preparing your world...';
+    } else if (id === 'scene-name') {
+      el.props.prefix = 'Entering ';
+    }
+  }
+
+  // Enforce one visible element per bottom role type, preferring canonical ids.
+  for (const [type, canonicalId] of canonicalByType.entries()) {
+    const matches = elements.filter((e) => String(e?.type || '').trim().toLowerCase() === type);
+    if (!matches.length) continue;
+    let chosen = matches.find((e) => String(e?.id || '').trim() === canonicalId) || matches[0];
+    for (const m of matches) m.visible = (m === chosen);
+    chosen.id = canonicalId;
+    chosen.visible = true;
+  }
+
+  // Re-apply canonical bottom-cluster styling by canonical ids.
+  for (const el of elements) {
+    if (!el || el.visible === false) continue;
+    const id = String(el.id || '').trim();
+    if (!id) continue;
+    applyCanonicalBottomClusterStyle(el, id);
+  }
+}
+
+function applyCanonicalBottomClusterStyle(el, id) {
+  el.position = isObject(el.position) ? el.position : { x: 50, y: 50 };
+  el.props = isObject(el.props) ? el.props : {};
+  el.style = isObject(el.style) ? el.style : {};
+
+  if (id === 'spinner') {
+    el.position.x = 50;
+    el.position.y = 54.8;
+    el.anchor = 'center';
+    el.props.sizeCss = 'clamp(54px, 6vw, 84px)';
+    el.props.sizePx = 72;
+  } else if (id === 'progress') {
+    el.position.x = 50;
+    el.position.y = 60.2;
+    el.anchor = 'center';
+    el.props.widthCss = 'min(640px, 62vw)';
+    el.props.heightPx = 24;
+    el.props.radiusPx = 14;
+  } else if (id === 'timer') {
+    el.position.x = 46.2;
+    el.position.y = 60.2;
+    el.anchor = 'center-right';
+    el.style.fontSize = 'clamp(13px, 1.05vw, 16px)';
+    el.style.fontWeight = '700';
+    el.style.color = 'rgba(206,228,248,0.9)';
+  } else if (id === 'percentage') {
+    el.position.x = 53.8;
+    el.position.y = 60.2;
+    el.anchor = 'center-left';
+    el.style.fontSize = 'clamp(13px, 1.05vw, 16px)';
+    el.style.fontWeight = '700';
+    el.style.color = 'rgba(218,241,255,0.9)';
+  } else if (id === 'message') {
+    el.position.x = 50;
+    el.position.y = 67.2;
+    el.anchor = 'center';
+    el.style.fontSize = 'clamp(12px, 0.98vw, 14px)';
+    el.style.fontWeight = '500';
+    el.style.color = 'rgba(200,222,244,0.84)';
+  }
 }

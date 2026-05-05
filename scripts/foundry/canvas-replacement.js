@@ -4744,17 +4744,30 @@ async function onCanvasReady(canvas) {
       loadingOverlay.showBlack('Loading...');
       loadingOverlay.setSceneName(displayName);
       loadingOverlay.configureStages([
-        { id: 'assets.discover', label: 'Discovering assets...', weight: 3  },
-        { id: 'assets.load',     label: 'Loading textures...',   weight: 20 },
-        { id: 'effects.core',    label: 'Core effects...',       weight: 25 },
-        { id: 'effects.deps',    label: 'Dependent effects...',  weight: 1  },
-        { id: 'effects.wire',    label: 'Wiring effects...',     weight: 1  },
-        { id: 'scene.managers',  label: 'Scene managers...',     weight: 12 },
-        { id: 'scene.sync',      label: 'Syncing scene...',      weight: 3  },
-        { id: 'ui.init',         label: 'Initializing UI...',    weight: 8  },
-        { id: 'scene.prepare',   label: 'Preparing scene...',    weight: 10 },
-        { id: 'shaders.compile', label: 'Compiling shaders...',  weight: 15 },
-        { id: 'final',           label: 'Finalizing...',         weight: 2  },
+        { id: 'assets.discover',      label: 'Discovering assets...',   weight: 3  },
+        { id: 'assets.catalog',       label: 'Cataloging batches...',    weight: 2  },
+        { id: 'assets.load',          label: 'Loading textures...',      weight: 18 },
+        { id: 'assets.gpu',           label: 'Uploading to GPU...',      weight: 6  },
+        { id: 'scene.settings',       label: 'Validating scene...',      weight: 2  },
+        { id: 'scene.canvas',         label: 'Creating canvas...',       weight: 3  },
+        { id: 'scene.renderer',       label: 'Attaching renderer...',    weight: 3  },
+        { id: 'effects.bootstrap',    label: 'Bootstrapping effects...', weight: 4  },
+        { id: 'effects.core',         label: 'Core effects...',          weight: 20 },
+        { id: 'effects.deps',         label: 'Dependency effects...',    weight: 3  },
+        { id: 'effects.wire',         label: 'Wiring effects...',        weight: 3  },
+        { id: 'scene.tokens',         label: 'Token systems...',         weight: 5  },
+        { id: 'scene.layers',         label: 'Floor layers...',          weight: 5  },
+        { id: 'scene.movement',       label: 'Movement systems...',      weight: 4  },
+        { id: 'scene.interaction',    label: 'Interaction graph...',     weight: 3  },
+        { id: 'scene.camera',         label: 'Camera systems...',        weight: 3  },
+        { id: 'scene.sync',           label: 'Syncing scene...',         weight: 4  },
+        { id: 'ui.bootstrap',         label: 'UI bootstrap...',          weight: 4  },
+        { id: 'ui.panels',            label: 'Control panels...',        weight: 4  },
+        { id: 'scene.frames',         label: 'Stabilizing frames...',    weight: 2  },
+        { id: 'scene.prepare',        label: 'Preparing scene...',       weight: 8  },
+        { id: 'shaders.compile',      label: 'Compiling shaders...',     weight: 12 },
+        { id: 'final.controls',       label: 'Final controls...',        weight: 2  },
+        { id: 'final',                label: 'Ready...',                 weight: 2  },
       ]);
       loadingOverlay.startStages();
       loadingOverlay.setStage('assets.discover', 0.0, undefined, { immediate: true });
@@ -5449,17 +5462,30 @@ async function createThreeCanvas(scene, createOptions = {}) {
         loadingOverlay.showBlack('Loading...');
         loadingOverlay.setSceneName(displayName);
         loadingOverlay.configureStages([
-          { id: 'assets.discover', label: 'Discovering assets...', weight: 3  },
-          { id: 'assets.load',     label: 'Loading textures...',   weight: 20 },
-          { id: 'effects.core',    label: 'Core effects...',       weight: 25 },
-          { id: 'effects.deps',    label: 'Dependent effects...',  weight: 1  },
-          { id: 'effects.wire',    label: 'Wiring effects...',     weight: 1  },
-          { id: 'scene.managers',  label: 'Scene managers...',     weight: 12 },
-          { id: 'scene.sync',      label: 'Syncing scene...',      weight: 3  },
-          { id: 'ui.init',         label: 'Initializing UI...',    weight: 8  },
-          { id: 'scene.prepare',   label: 'Preparing scene...',    weight: 10 },
-          { id: 'shaders.compile', label: 'Compiling shaders...',  weight: 15 },
-          { id: 'final',           label: 'Finalizing...',         weight: 2  },
+          { id: 'assets.discover',      label: 'Discovering assets...',   weight: 3  },
+          { id: 'assets.catalog',       label: 'Cataloging batches...',    weight: 2  },
+          { id: 'assets.load',          label: 'Loading textures...',      weight: 18 },
+          { id: 'assets.gpu',           label: 'Uploading to GPU...',      weight: 6  },
+          { id: 'scene.settings',       label: 'Validating scene...',      weight: 2  },
+          { id: 'scene.canvas',         label: 'Creating canvas...',       weight: 3  },
+          { id: 'scene.renderer',       label: 'Attaching renderer...',    weight: 3  },
+          { id: 'effects.bootstrap',    label: 'Bootstrapping effects...', weight: 4  },
+          { id: 'effects.core',         label: 'Core effects...',          weight: 20 },
+          { id: 'effects.deps',         label: 'Dependency effects...',    weight: 3  },
+          { id: 'effects.wire',         label: 'Wiring effects...',        weight: 3  },
+          { id: 'scene.tokens',         label: 'Token systems...',         weight: 5  },
+          { id: 'scene.layers',         label: 'Floor layers...',          weight: 5  },
+          { id: 'scene.movement',       label: 'Movement systems...',      weight: 4  },
+          { id: 'scene.interaction',    label: 'Interaction graph...',     weight: 3  },
+          { id: 'scene.camera',         label: 'Camera systems...',        weight: 3  },
+          { id: 'scene.sync',           label: 'Syncing scene...',         weight: 4  },
+          { id: 'ui.bootstrap',         label: 'UI bootstrap...',          weight: 4  },
+          { id: 'ui.panels',            label: 'Control panels...',        weight: 4  },
+          { id: 'scene.frames',         label: 'Stabilizing frames...',    weight: 2  },
+          { id: 'scene.prepare',        label: 'Preparing scene...',       weight: 8  },
+          { id: 'shaders.compile',      label: 'Compiling shaders...',     weight: 12 },
+          { id: 'final.controls',       label: 'Final controls...',        weight: 2  },
+          { id: 'final',                label: 'Ready...',                 weight: 2  },
         ]);
         loadingOverlay.startStages();
         loadingOverlay.setStage('assets.discover', 0.0, undefined, { immediate: true });
@@ -5471,6 +5497,7 @@ async function createThreeCanvas(scene, createOptions = {}) {
     // Older scenes may contain corrupted or legacy-shaped payloads (including JSON strings),
     // which can crash downstream UI/effect parameter loading.
     _setCreateThreeCanvasProgress('sceneSettings.ensureValid');
+    safeCall(() => loadingOverlay.setStage('scene.settings', 0.0, 'Validating scene settings...', { immediate: true, keepAuto: true }), 'overlay.sceneSettings.start', Severity.COSMETIC);
     await safeCallAsync(async () => {
       if (_bailIfSessionStale('sceneSettings.ensureValid')) return;
       if (typeof sceneSettings?.ensureValidSceneSettings === 'function') {
@@ -5478,6 +5505,7 @@ async function createThreeCanvas(scene, createOptions = {}) {
       }
     }, 'sceneSettings.ensureValid', Severity.DEGRADED);
     if (_bailIfSessionStale('sceneSettings.ensureValid.post')) return;
+    safeCall(() => loadingOverlay.setStage('scene.settings', 1.0, 'Scene settings validated', { immediate: true, keepAuto: true }), 'overlay.sceneSettings.done', Severity.COSMETIC);
 
     // P0.3: Capture Foundry state before modifying it
     captureFoundryStateSnapshot();
@@ -5489,6 +5517,7 @@ async function createThreeCanvas(scene, createOptions = {}) {
     // Create new canvas element
     if (isDebugLoad) dlp.begin('canvas.create', 'setup');
     _setCreateThreeCanvasProgress('canvas.create');
+    safeCall(() => loadingOverlay.setStage('scene.canvas', 0.0, 'Creating render canvas...', { immediate: true, keepAuto: true }), 'overlay.canvasCreate.start', Severity.COSMETIC);
     stepLog(' -> Step: canvas.create');
 
     // Hard safety: ensure we never end up with multiple MapShine canvases.
@@ -5589,11 +5618,13 @@ async function createThreeCanvas(scene, createOptions = {}) {
     _threeCanvasWasActive = true;
     if (isDebugLoad) dlp.end('canvas.create');
     stepLog(' -> Step: canvas.create DONE');
+    safeCall(() => loadingOverlay.setStage('scene.canvas', 1.0, 'Render canvas ready', { immediate: true, keepAuto: true }), 'overlay.canvasCreate.done', Severity.COSMETIC);
     log.debug('Three.js canvas created and attached as sibling to PIXI canvas');
 
     // Get renderer from global state and attach its canvas
     if (isDebugLoad) dlp.begin('renderer.attach', 'setup');
     _setCreateThreeCanvasProgress('renderer.attach');
+    safeCall(() => loadingOverlay.setStage('scene.renderer', 0.0, 'Attaching renderer...', { immediate: true, keepAuto: true }), 'overlay.rendererAttach.start', Severity.COSMETIC);
     stepLog(' -> Step: renderer.attach');
     mapShine = window.MapShine;
     if (_bailIfSessionStale('renderer.attach.pre')) return;
@@ -5749,11 +5780,14 @@ async function createThreeCanvas(scene, createOptions = {}) {
 
     if (isDebugLoad) dlp.end('renderer.attach');
     stepLog(' -> Step: renderer.attach DONE');
+    safeCall(() => loadingOverlay.setStage('scene.renderer', 1.0, 'Renderer attached', { immediate: true, keepAuto: true }), 'overlay.rendererAttach.done', Severity.COSMETIC);
 
     // Ensure regions outside the Foundry world bounds remain black; padded region is covered by a background plane
     if (renderer.setClearColor) {
       renderer.setClearColor(0x000000, 1);
     }
+
+    safeCall(() => loadingOverlay.setStage('assets.catalog', 1.0, 'Cataloging asset batches...', { immediate: true, keepAuto: true }), 'overlay.assetsCatalog', Severity.COSMETIC);
 
     // Step 1: Initialize scene composer
     _sectionStart('sceneComposer.initialize');
@@ -5862,8 +5896,13 @@ async function createThreeCanvas(scene, createOptions = {}) {
     _setCreateThreeCanvasProgress('gpu.textureWarmup');
     stepLog(' -> Step: gpu.textureWarmup');
     safeCall(() => {
+      loadingOverlay.setStage('assets.gpu', 0.0, 'Uploading textures to GPU...', { immediate: true, keepAuto: true });
       const warmupResult = warmupBundleTextures(renderer, bundle, (uploaded, total) => {
-        safeCall(() => loadingOverlay.setStage('assets.load', 1.0, `GPU upload ${uploaded}/${total}...`, { keepAuto: true }), 'overlay.gpuWarmup', Severity.COSMETIC);
+        safeCall(() => {
+          const denom = total > 0 ? total : 1;
+          const progress = Math.max(0, Math.min(1, uploaded / denom));
+          loadingOverlay.setStage('assets.gpu', progress, `GPU upload ${uploaded}/${total}...`, { keepAuto: true });
+        }, 'overlay.gpuWarmup', Severity.COSMETIC);
       });
       if (warmupResult.totalMs > 50) {
         log.info(`GPU texture warmup took ${warmupResult.totalMs.toFixed(0)}ms for ${warmupResult.uploaded} textures`);
@@ -5909,7 +5948,7 @@ async function createThreeCanvas(scene, createOptions = {}) {
     // V2: Depth passes are not used ->-> FloorCompositor renders MeshBasicMaterial only.
 
     safeCall(() => {
-      loadingOverlay.setStage('effects.core', 0.0, 'Initializing effects...', { immediate: true, keepAuto: true });
+      loadingOverlay.setStage('effects.bootstrap', 0.0, 'Initializing effects...', { immediate: true, keepAuto: true });
       loadingOverlay.startAutoProgress(0.55, 0.015);
     }, 'overlay.effectsCore', Severity.COSMETIC);
     log.info('[loading] entered effects.core stage (30%)');
@@ -5942,7 +5981,7 @@ async function createThreeCanvas(scene, createOptions = {}) {
     if (isDebugLoad) dlp.end('weatherController.initialize');
 
 
-    safeCall(() => loadingOverlay.setStage('effects.core', 0.05, 'Weather initialized...', { keepAuto: true }), 'overlay.weather', Severity.COSMETIC);
+    safeCall(() => loadingOverlay.setStage('effects.bootstrap', 1.0, 'Weather initialized...', { keepAuto: true }), 'overlay.weather', Severity.COSMETIC);
 
     if (_bailIfSessionStale('postManagerInit')) {
       safeDispose(() => destroyThreeCanvas(), 'destroyThreeCanvas(stale)');
@@ -6086,7 +6125,7 @@ async function createThreeCanvas(scene, createOptions = {}) {
     }
 
     safeCall(() => {
-      loadingOverlay.setStage('scene.managers', 0.05, 'Initializing token manager...', { keepAuto: true });
+      loadingOverlay.setStage('scene.tokens', 0.05, 'Initializing token manager...', { keepAuto: true });
     }, 'overlay.tokens', Severity.COSMETIC);
     // Yield so the browser can paint the scene.sync stage transition.
     _setCreateThreeCanvasProgress('scene.managers.yield.beforeTiles');
@@ -6155,7 +6194,7 @@ async function createThreeCanvas(scene, createOptions = {}) {
     if (window.MapShine) window.MapShine.tileMotionManager = tileMotionManager;
     log.info('Tile motion manager initialized');
 
-    safeCall(() => loadingOverlay.setStage('scene.managers', 0.30, 'Setting up floor layers...', { keepAuto: true }), 'overlay.tiles', Severity.COSMETIC);
+    safeCall(() => loadingOverlay.setStage('scene.layers', 0.30, 'Setting up floor layers...', { keepAuto: true }), 'overlay.tiles', Severity.COSMETIC);
 
     // V2: SurfaceRegistry is effect infrastructure ->-> skip.
 
@@ -6192,13 +6231,13 @@ async function createThreeCanvas(scene, createOptions = {}) {
     console.log(' -> Manager: TokenMovementManager DONE');
     log.info('Token movement manager initialized');
 
-    safeCall(() => loadingOverlay.setStage('scene.managers', 0.50, 'Initializing movement manager...', { keepAuto: true }), 'overlay.walls', Severity.COSMETIC);
+    safeCall(() => loadingOverlay.setStage('scene.movement', 0.50, 'Initializing movement manager...', { keepAuto: true }), 'overlay.walls', Severity.COSMETIC);
 
     // P1.3: Parallel initialization of independent lightweight managers.
     // These managers only create THREE objects and register Foundry hooks ->-> they
     // don't depend on each other or on tokens/tiles/walls, so it's safe to run
     // them concurrently. MapPointsManager is async and included in the batch.
-    safeCall(() => loadingOverlay.setStage('scene.managers', 0.65, 'Syncing scene objects...', { keepAuto: true }), 'overlay.remaining', Severity.COSMETIC);
+    safeCall(() => loadingOverlay.setStage('scene.interaction', 0.40, 'Syncing scene objects...', { keepAuto: true }), 'overlay.remaining', Severity.COSMETIC);
 
     _setCreateThreeCanvasProgress('scene.managers.lightweightBatch.construct');
     console.log(' -> Manager: Lightweight batch (Door, Note, Template, LightIcon, EnhancedLightIcon, SoundIcon, MapPoints, Grid)');
@@ -6308,7 +6347,7 @@ async function createThreeCanvas(scene, createOptions = {}) {
     if (isDebugLoad) dlp.end('manager.Interaction.init');
     console.log(' -> Manager: InteractionManager DONE');
     log.info('Interaction manager initialized');
-    safeCall(() => loadingOverlay.setStage('scene.managers', 0.80, 'Building interaction systems...', { keepAuto: true }), 'overlay.interaction', Severity.COSMETIC);
+    safeCall(() => loadingOverlay.setStage('scene.interaction', 0.90, 'Building interaction systems...', { keepAuto: true }), 'overlay.interaction', Severity.COSMETIC);
 
     // Sync Selection Box UI params (loaded from scene settings) into the InteractionManager.
     // initializeUI() runs earlier during startup, before InteractionManager exists.
@@ -6497,7 +6536,7 @@ async function createThreeCanvas(scene, createOptions = {}) {
     }, 'exposeLegacyCameraControllerAlias', Severity.COSMETIC);
     if (isDebugLoad) dlp.end('manager.PixiInputBridge.init');
     log.info('PIXI input bridge initialized - pan/zoom updates PIXI stage');
-    safeCall(() => loadingOverlay.setStage('scene.managers', 0.93, 'Setting up camera...', { keepAuto: true }), 'overlay.camera', Severity.COSMETIC);
+    safeCall(() => loadingOverlay.setStage('scene.camera', 0.93, 'Setting up camera...', { keepAuto: true }), 'overlay.camera', Severity.COSMETIC);
 
     // Step 6a.5: Initialize cinematic camera manager
     if (isDebugLoad) dlp.begin('manager.CinematicCamera.init', 'manager');
@@ -6538,7 +6577,7 @@ async function createThreeCanvas(scene, createOptions = {}) {
     _sectionStart('finalization');
     // Transition to UI init stage — the next blocking phase is initializeUI.
     safeCall(() => {
-      loadingOverlay.setStage('ui.init', 0.0, 'Initializing UI...', { immediate: true });
+      loadingOverlay.setStage('ui.bootstrap', 0.0, 'Initializing UI...', { immediate: true });
     }, 'overlay.uiInit.start', Severity.COSMETIC);
 
     // Step 7: Create ModeManager and ensure Foundry UI layers are above our canvas
@@ -6710,7 +6749,7 @@ async function createThreeCanvas(scene, createOptions = {}) {
     await safeCallAsync(async () => {
       if (_bailIfSessionStale('initializeUI')) return;
 
-      safeCall(() => loadingOverlay.setStage('ui.init', 0.05, 'Graphics settings...', { keepAuto: false }), 'overlay.uiInit.graphicsSettings', Severity.COSMETIC);
+      safeCall(() => loadingOverlay.setStage('ui.bootstrap', 0.20, 'Graphics settings...', { keepAuto: false }), 'overlay.uiInit.graphicsSettings', Severity.COSMETIC);
       safeCall(() => { if (window.MapShine) window.MapShine.stateApplier = stateApplier; }, 'exposeStateApplier', Severity.COSMETIC);
 
       if (!effectCapabilitiesRegistry) {
@@ -6739,7 +6778,7 @@ async function createThreeCanvas(scene, createOptions = {}) {
       }
       
       await graphicsSettings.initialize();
-      safeCall(() => loadingOverlay.setStage('ui.init', 0.20, 'Graphics ready...', { keepAuto: false }), 'overlay.uiInit.graphicsReady', Severity.COSMETIC);
+      safeCall(() => loadingOverlay.setStage('ui.bootstrap', 1.0, 'Graphics ready...', { keepAuto: false }), 'overlay.uiInit.graphicsReady', Severity.COSMETIC);
       await new Promise(r => setTimeout(r, 0)); // yield so browser paints progress
       if (tokenManager && typeof tokenManager.setDepthInteraction === 'function') {
         graphicsSettings._onTokenDepthInteractionChanged = (enabled) => {
@@ -6756,7 +6795,7 @@ async function createThreeCanvas(scene, createOptions = {}) {
         if (!uiManager) {
           uiManager = new TweakpaneManager();
           await uiManager.initialize();
-          safeCall(() => loadingOverlay.setStage('ui.init', 0.40, 'UI manager ready...', { keepAuto: false }), 'overlay.uiInit.uiManagerReady', Severity.COSMETIC);
+          safeCall(() => loadingOverlay.setStage('ui.panels', 0.35, 'UI manager ready...', { keepAuto: false }), 'overlay.uiInit.uiManagerReady', Severity.COSMETIC);
           await new Promise(r => setTimeout(r, 0)); // yield
           if (window.MapShine) window.MapShine.uiManager = uiManager;
         }
@@ -6982,7 +7021,7 @@ async function createThreeCanvas(scene, createOptions = {}) {
         if (!controlPanel) {
           controlPanel = new ControlPanelManager();
           await controlPanel.initialize();
-          safeCall(() => loadingOverlay.setStage('ui.init', 0.55, 'Control panel ready...', { keepAuto: false }), 'overlay.uiInit.controlPanelReady', Severity.COSMETIC);
+          safeCall(() => loadingOverlay.setStage('ui.panels', 0.75, 'Control panel ready...', { keepAuto: false }), 'overlay.uiInit.controlPanelReady', Severity.COSMETIC);
           await new Promise(r => setTimeout(r, 0)); // yield
           if (window.MapShine) window.MapShine.controlPanel = controlPanel;
         }
@@ -7003,7 +7042,7 @@ async function createThreeCanvas(scene, createOptions = {}) {
 
         // Legacy custom levels authoring UI removed. Use Foundry V14 native levels UI.
 
-        safeCall(() => loadingOverlay.setStage('ui.init', 0.65, 'Registering effects...', { keepAuto: false }), 'overlay.uiInit.registerEffects', Severity.COSMETIC);
+        safeCall(() => loadingOverlay.setStage('ui.panels', 1.0, 'Registering effects...', { keepAuto: false }), 'overlay.uiInit.registerEffects', Severity.COSMETIC);
 
         // ->->->-> Register V2 effect controls in Tweakpane ->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->->
         // V1 effects are NOT constructed in V2 mode, but we still need UI
@@ -7151,7 +7190,7 @@ async function createThreeCanvas(scene, createOptions = {}) {
           uiManager.registerEffect('windowLight', 'Window Light',
             WindowLightEffectV2.getControlSchema(), _makeV2Callback('_windowLightEffect'), 'structure');
         }, 'v2.registerWindowLightUI', Severity.DEGRADED);
-        safeCall(() => loadingOverlay.setStage('final', 0.10, 'Loading effect controls...', { keepAuto: true }), 'overlay.ui.p1', Severity.COSMETIC);
+        safeCall(() => loadingOverlay.setStage('final.controls', 0.25, 'Loading effect controls...', { keepAuto: true }), 'overlay.ui.p1', Severity.COSMETIC);
 
         safeCall(() => {
           uiManager.registerEffect('fire-sparks', 'Fire',
@@ -7192,7 +7231,7 @@ async function createThreeCanvas(scene, createOptions = {}) {
           uiManager.registerEffect('player-light', 'Player Light',
             PlayerLightEffectV2.getControlSchema(), _makeV2Callback('_playerLightEffect'), 'atmospheric');
         }, 'v2.registerPlayerLightUI(V2)', Severity.DEGRADED);
-        safeCall(() => loadingOverlay.setStage('final', 0.18, 'Loading effect controls...', { keepAuto: true }), 'overlay.ui.p2', Severity.COSMETIC);
+        safeCall(() => loadingOverlay.setStage('final.controls', 0.45, 'Loading effect controls...', { keepAuto: true }), 'overlay.ui.p2', Severity.COSMETIC);
 
         safeCall(() => {
           uiManager.registerEffect('bloom', 'Bloom (Glow)',
@@ -7233,7 +7272,7 @@ async function createThreeCanvas(scene, createOptions = {}) {
           uiManager.registerEffect('halftone', 'Halftone',
             HalftoneEffectV2.getControlSchema(), _makeV2Callback('_halftoneEffect'), 'global');
         }, 'v2.registerHalftoneUI', Severity.DEGRADED);
-        safeCall(() => loadingOverlay.setStage('final', 0.26, 'Loading effect controls...', { keepAuto: true }), 'overlay.ui.p3', Severity.COSMETIC);
+        safeCall(() => loadingOverlay.setStage('final.controls', 0.70, 'Loading effect controls...', { keepAuto: true }), 'overlay.ui.p3', Severity.COSMETIC);
 
         safeCall(() => {
           uiManager.registerEffect('ascii', 'ASCII Art',
@@ -7264,7 +7303,7 @@ async function createThreeCanvas(scene, createOptions = {}) {
           uiManager.registerEffect('lens', 'Lens',
             LensEffectV2.getControlSchema(), _makeV2Callback('_lensEffect'), 'global');
         }, 'v2.registerLensUI', Severity.DEGRADED);
-        safeCall(() => loadingOverlay.setStage('final', 0.34, 'Loading effect controls...', { keepAuto: true }), 'overlay.ui.p4', Severity.COSMETIC);
+        safeCall(() => loadingOverlay.setStage('final.controls', 1.0, 'Loading effect controls...', { keepAuto: true }), 'overlay.ui.p4', Severity.COSMETIC);
 
         // Ash controls: in V2 mode WeatherController isn't constructed as an updatable, but
         // we still expose full ash tuning controls so users can keep it disabled and
@@ -7518,7 +7557,7 @@ async function createThreeCanvas(scene, createOptions = {}) {
 
         log.info('V2: registered effect controls (Lighting, Specular, Fluid, Iridescence, Prism, Bush, Tree, SkyColor, WindowLight, Fire, WaterSplashes, SmellyFlies, Lightning, CandleFlames, Bloom, ColorCorrection, Sharpen, Fog, Water, Cloud, OverheadShadows, BuildingShadows, FloorDepthBlur, Grid, Lens)');
 
-        safeCall(() => loadingOverlay.setStage('ui.init', 1.0, 'UI ready', { immediate: true }), 'overlay.uiInit.done', Severity.COSMETIC);
+        safeCall(() => loadingOverlay.setStage('ui.panels', 1.0, 'UI ready', { immediate: true }), 'overlay.uiInit.done', Severity.COSMETIC);
         log.info('V2: UI initialized');
     }, 'initializeUI', Severity.DEGRADED);
     stepLog(' -> Step: initializeUI DONE');
@@ -7593,10 +7632,12 @@ async function createThreeCanvas(scene, createOptions = {}) {
     //   2. framePromise has .catch() so rejections don't propagate
     //   3. Outer try/catch ensures _sectionEnd is always called
     stepLog(' -> Step: waitForThreeFrames');
+    safeCall(() => loadingOverlay.setStage('scene.frames', 0.0, 'Stabilizing first frames...', { immediate: true, keepAuto: false }), 'overlay.frames.start', Severity.COSMETIC);
     _sectionStart('fin.waitForThreeFrames');
     if (isDebugLoad) dlp.begin('fin.waitForThreeFrames', 'finalize');
     _setCreateThreeCanvasProgress('waitForThreeFrames');
     stepLog(' -> Step: waitForThreeFrames SKIPPED (V2)');
+    safeCall(() => loadingOverlay.setStage('scene.frames', 1.0, 'Frame stabilization skipped', { immediate: true, keepAuto: false }), 'overlay.frames.skip', Severity.COSMETIC);
     try { dlp.event('fin.waitForThreeFrames: SKIPPED (V2)', 'warn'); } catch (_) {}
     if (isDebugLoad) { try { dlp.end('fin.waitForThreeFrames', { skipped: true, v2: true }); } catch (_) {} }
     _sectionEnd('fin.waitForThreeFrames');
@@ -7667,6 +7708,7 @@ async function createThreeCanvas(scene, createOptions = {}) {
     }
 
     stepLog(' -> Step: preloadAllFloors DONE');
+    safeCall(() => loadingOverlay.setStage('scene.frames', 1.0, 'Frames stabilized', { immediate: true, keepAuto: false }), 'overlay.frames.done', Severity.COSMETIC);
     if (isDebugLoad) dlp.end('fin.preloadAllFloors');
 
     // Step: Shader compilation gate.

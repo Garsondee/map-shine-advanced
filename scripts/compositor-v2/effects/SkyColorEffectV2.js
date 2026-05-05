@@ -127,8 +127,10 @@ export class SkyColorEffectV2 {
       calendarDarknessBlend: 1.0,
       /** Multiplier on how hard darkness pulls exposure/contrast toward night (widen noon–midnight). */
       dayNightGradePull: 1.0,
-      /** Extra stops-style lift at full day (brightens midday without lifting midnight). */
+      /** Extra stops-style lift around solar noon (brightens midday and nearby hours only). */
       noonExposureBoost: 0.0,
+      /** Extra stops-style drop around solar midnight (darkens midnight and nearby hours only). */
+      midnightExposureDrop: 0.0,
       /** Added to internal darkness before grading — pushes nights darker without changing noon clock. */
       nightExtraDarkness: 0.0,
 
@@ -195,6 +197,7 @@ export class SkyColorEffectV2 {
             'calendarDarknessBlend',
             'dayNightGradePull',
             'noonExposureBoost',
+            'midnightExposureDrop',
             'nightExtraDarkness',
             'autoIntensityEnabled',
             'autoIntensityStrength',
@@ -274,12 +277,22 @@ export class SkyColorEffectV2 {
         noonExposureBoost: {
           type: 'slider',
           min: 0,
-          max: 0.6,
+          max: 1.2,
           step: 0.01,
           default: 0.0,
-          label: 'Noon exposure lift',
+          label: 'Midday exposure lift',
           throttle: 50,
-          tooltip: 'Adds automated exposure when the sun is high, without brightening midnight.',
+          tooltip: 'Adds exposure around solar noon, tapering in/out for nearby hours.',
+        },
+        midnightExposureDrop: {
+          type: 'slider',
+          min: 0,
+          max: 1.2,
+          step: 0.01,
+          default: 0.0,
+          label: 'Midnight exposure drop',
+          throttle: 50,
+          tooltip: 'Subtracts exposure around solar midnight, tapering in/out for nearby hours.',
         },
         nightExtraDarkness: {
           type: 'slider',
@@ -674,6 +687,8 @@ export class SkyColorEffectV2 {
       let nightSatFloor = clamp01(this.params.nightSaturationFloor);
       let dayProgress = -1.0;
       let effectiveDarkness = 0.0;
+      let noonExposureWeight = 0.0;
+      let midnightExposureWeight = 0.0;
 
       {
         // ── Analytic automation ──────────────────────────────────────
@@ -729,8 +744,19 @@ export class SkyColorEffectV2 {
         let sceneDarkness = this._sceneDarknessForSkyGrade();
 
         const gradePull = Math.max(0, Number(this.params.dayNightGradePull) ?? 1);
-        const noonBoost = Math.max(0, Number(this.params.noonExposureBoost) || 0);
         const nightExtra = Math.max(0, Number(this.params.nightExtraDarkness) || 0);
+
+        // Build smooth exposure peaks around solar noon / midnight so controls affect
+        // the target time and its neighboring hours.
+        const daylightSpan = sunrise < sunset
+          ? (sunset - sunrise)
+          : ((24 - sunrise) + sunset);
+        const solarNoonHour = wrapHour24(sunrise + daylightSpan * 0.5);
+        const solarMidnightHour = wrapHour24(solarNoonHour + 12.0);
+        const noonWindowHours = 5.0;
+        const midnightWindowHours = 5.0;
+        noonExposureWeight = peakHour(hour, solarNoonHour, noonWindowHours);
+        midnightExposureWeight = peakHour(hour, solarMidnightHour, midnightWindowHours);
 
         const weatherInfluence = clamp01(this.params.weatherInfluence);
         const turbidityBase = clamp01(this.params.turbidity);
@@ -783,7 +809,7 @@ export class SkyColorEffectV2 {
         const hazeLiftVal = clamp01(this.params.hazeLift);
         brightness = turbidityEff * mie * hazeLiftVal;
 
-        exposure = 0.25 * dayFactor + noonBoost * dayFactor
+        exposure = 0.25 * dayFactor
           - 0.35 * effectiveDarkness * gradePull
           - 0.10 * turbidityEff;
         exposure += forward * golden * 0.05;
@@ -835,6 +861,13 @@ export class SkyColorEffectV2 {
         this.params.saturation = saturation;
         this.params.contrast = contrast;
       }
+
+      // Apply dedicated midday/midnight exposure shaping in both auto and manual modes.
+      const noonBoost = Math.max(0, Number(this.params.noonExposureBoost) || 0);
+      const midnightDrop = Math.max(0, Number(this.params.midnightExposureDrop) || 0);
+      exposure += noonBoost * noonExposureWeight;
+      exposure -= midnightDrop * midnightExposureWeight;
+      exposure = Math.max(-1.0, Math.min(1.0, exposure));
 
       saturation = Math.max(0.0, Math.min(2.0, saturation + (this.params.saturationBoost ?? 0.0)));
       vibrance = Math.max(-1.0, Math.min(1.0, vibrance + (this.params.vibranceBoost ?? 0.0)));

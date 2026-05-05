@@ -434,7 +434,10 @@ export class StyledLoadingScreenRenderer {
     panel.className = 'map-shine-styled-loading-overlay__panel';
     panel.style.left = `${clamp(panelCfg.x, 0, 100)}%`;
     panel.style.top = `${clamp(panelCfg.y, 0, 100)}%`;
-    panel.style.width = `min(${Math.max(120, Number(panelCfg.widthPx) || 440)}px, ${String(panelCfg.maxWidthCss || 'calc(100vw - 40px)')})`;
+    const panelWidthCss = String(panelCfg.widthCss || '').trim();
+    panel.style.width = panelWidthCss
+      ? panelWidthCss
+      : `min(${Math.max(120, Number(panelCfg.widthPx) || 440)}px, ${String(panelCfg.maxWidthCss || 'calc(100vw - 40px)')})`;
     panel.style.padding = String(panelCfg.padding || '24px 22px');
     panel.style.borderRadius = `${Math.max(0, Number(this._config.style.panelRadiusPx) || 14)}px`;
     panel.style.background = String(this._config.style.panelBackground || 'rgba(10,10,14,0.7)');
@@ -585,9 +588,15 @@ export class StyledLoadingScreenRenderer {
     if (element.style?.lineHeight) node.style.lineHeight = String(element.style.lineHeight);
     if (Number.isFinite(element.style?.opacity)) node.style.opacity = `${clamp(element.style.opacity, 0, 1)}`;
 
+    const widthCss = String(element.style?.widthCss || '').trim();
+    const maxWidthCss = String(element.style?.maxWidthCss || '').trim();
+    const minWidthCss = String(element.style?.minWidthCss || '').trim();
     const widthPx = Number(element.style?.widthPx);
     const maxWidthPx = Number(element.style?.maxWidthPx);
     const minWidthPx = Number(element.style?.minWidthPx);
+    if (widthCss) node.style.width = widthCss;
+    if (maxWidthCss) node.style.maxWidth = maxWidthCss;
+    if (minWidthCss) node.style.minWidth = minWidthCss;
     if (Number.isFinite(widthPx) && widthPx > 0) node.style.width = `${Math.max(1, widthPx)}px`;
     if (Number.isFinite(maxWidthPx) && maxWidthPx > 0) node.style.maxWidth = `${Math.max(16, maxWidthPx)}px`;
     if (Number.isFinite(minWidthPx) && minWidthPx > 0) node.style.minWidth = `${Math.max(1, minWidthPx)}px`;
@@ -613,9 +622,10 @@ export class StyledLoadingScreenRenderer {
       this._timerEl = node;
     } else if (type === 'spinner') {
       node.classList.add('map-shine-styled-loading-overlay__spinner-wrap');
+      const sizeCss = String(element.props?.sizeCss || '').trim();
       const sizePx = Math.max(10, Number(element.props?.sizePx) || 30);
-      node.style.width = `${sizePx}px`;
-      node.style.height = `${sizePx}px`;
+      node.style.width = sizeCss || `${sizePx}px`;
+      node.style.height = sizeCss || `${sizePx}px`;
 
       // IMPORTANT: Spinner rotation uses CSS `transform`, which would override the
       // anchor transform applied to the positioned element. Keep anchoring on the
@@ -626,11 +636,12 @@ export class StyledLoadingScreenRenderer {
       spinner.style.height = '100%';
       node.appendChild(spinner);
     } else if (type === 'progress-bar') {
+      const widthCss = String(element.props?.widthCss || '').trim();
       const widthPx = Math.max(80, Number(element.props?.widthPx) || 360);
       const heightPx = Math.max(2, Number(element.props?.heightPx) || 6);
       const radiusPx = Math.max(0, Number(element.props?.radiusPx) || 999);
 
-      node.style.width = `${widthPx}px`;
+      node.style.width = widthCss || `${widthPx}px`;
       node.style.height = `${heightPx}px`;
       node.style.borderRadius = `${radiusPx}px`;
 
@@ -652,10 +663,11 @@ export class StyledLoadingScreenRenderer {
       const padY = Math.max(0, Number(element.props?.containerPaddingYpx) || 8);
       const padX = Math.max(0, Number(element.props?.containerPaddingXpx) || 12);
       const radius = Math.max(0, Number(element.props?.containerRadiusPx) || 999);
+      const maxWidthCss = String(element.props?.maxWidthCss || '').trim();
       const maxWidthPx = Math.max(240, Number(element.props?.maxWidthPx) || 1200);
 
       node.style.width = 'max-content';
-      node.style.maxWidth = `min(${maxWidthPx}px, calc(100vw - 24px))`;
+      node.style.maxWidth = maxWidthCss || `min(${maxWidthPx}px, calc(100vw - 24px))`;
       node.style.padding = containerEnabled ? `${padY}px ${padX}px` : '0';
       node.style.borderRadius = containerEnabled ? `${radius}px` : '0';
       node.style.background = containerEnabled
@@ -665,7 +677,7 @@ export class StyledLoadingScreenRenderer {
         ? String(element.props?.containerBorder || '1px solid rgba(120,160,255,0.24)')
         : 'none';
 
-      const stageAlign = String(element.style?.textAlign || 'left').toLowerCase();
+      const stageAlign = String(element.style?.textAlign || 'center').toLowerCase();
       node.style.justifyContent = stageAlign === 'right' ? 'flex-end' : stageAlign === 'center' ? 'center' : 'flex-start';
 
       this._stageRow = node;
@@ -674,8 +686,10 @@ export class StyledLoadingScreenRenderer {
       const img = document.createElement('img');
       img.src = src;
       img.alt = String(element.props?.alt || '');
-      img.style.maxWidth = `${Math.max(16, Number(element.props?.widthPx) || 120)}px`;
-      img.style.maxHeight = `${Math.max(16, Number(element.props?.heightPx) || 120)}px`;
+      const imgWidthCss = String(element.props?.widthCss || '').trim();
+      const imgHeightCss = String(element.props?.heightCss || '').trim();
+      img.style.maxWidth = imgWidthCss || `${Math.max(16, Number(element.props?.widthPx) || 120)}px`;
+      img.style.maxHeight = imgHeightCss || `${Math.max(16, Number(element.props?.heightPx) || 120)}px`;
       img.style.objectFit = 'contain';
       if (Number.isFinite(element.props?.opacity)) img.style.opacity = `${clamp(element.props.opacity, 0, 1)}`;
       node.appendChild(img);
@@ -794,7 +808,8 @@ export class StyledLoadingScreenRenderer {
       pill.className = 'map-shine-styled-loading-overlay__stage-pill map-shine-styled-loading-overlay__stage-pill--pending';
       pill.dataset.stageId = id;
       const rawLabel = String(range.label || id);
-      pill.textContent = rawLabel.replace(/[\u2026.]+$/, '').trim();
+      pill.textContent = shortenStageLabel(rawLabel, id);
+      pill.dataset.stageGroup = stageGroupFromId(id);
       this._stageRow.appendChild(pill);
     }
   }
@@ -809,16 +824,27 @@ export class StyledLoadingScreenRenderer {
     for (const pill of pills) {
       const id = pill.dataset.stageId;
       if (id === activeStageId) {
-        pill.className = stageComplete
-          ? 'map-shine-styled-loading-overlay__stage-pill map-shine-styled-loading-overlay__stage-pill--done'
-          : 'map-shine-styled-loading-overlay__stage-pill map-shine-styled-loading-overlay__stage-pill--active';
+        if (stageComplete) this._setPillDone(pill);
+        else pill.className = 'map-shine-styled-loading-overlay__stage-pill map-shine-styled-loading-overlay__stage-pill--active';
         passedActive = true;
       } else if (!passedActive) {
-        pill.className = 'map-shine-styled-loading-overlay__stage-pill map-shine-styled-loading-overlay__stage-pill--done';
+        this._setPillDone(pill);
       } else {
         pill.className = 'map-shine-styled-loading-overlay__stage-pill map-shine-styled-loading-overlay__stage-pill--pending';
       }
     }
+  }
+
+  _setPillDone(pill) {
+    if (!pill) return;
+    const alreadyDone = pill.dataset.done === '1';
+    pill.className = 'map-shine-styled-loading-overlay__stage-pill map-shine-styled-loading-overlay__stage-pill--done';
+    if (alreadyDone) return;
+    pill.dataset.done = '1';
+    pill.classList.add('map-shine-styled-loading-overlay__stage-pill--flash');
+    try {
+      setTimeout(() => pill.classList.remove('map-shine-styled-loading-overlay__stage-pill--flash'), 520);
+    } catch (_) {}
   }
 
   _onDebugDismiss() {
@@ -863,7 +889,7 @@ export class StyledLoadingScreenRenderer {
         width: 100%;
         height: 100%;
         border-radius: 999px;
-        border: 2px solid rgba(255,255,255,0.15);
+        border: 4px solid rgba(255,255,255,0.2);
         border-top-color: var(--ms-ls-accent, rgba(0,180,255,0.9));
         animation: msLsSpinnerSpin 0.85s linear infinite;
       }
@@ -886,8 +912,8 @@ export class StyledLoadingScreenRenderer {
 
       .map-shine-styled-loading-overlay__stage-row {
         display: flex;
-        gap: 5px;
-        row-gap: 6px;
+        gap: 4px;
+        row-gap: 5px;
         flex-wrap: wrap;
         justify-content: flex-start;
         align-items: center;
@@ -895,9 +921,11 @@ export class StyledLoadingScreenRenderer {
         white-space: normal;
       }
       .map-shine-styled-loading-overlay__stage-pill {
-        padding: 2px 7px; border-radius: 999px;
-        font-size: 10px; font-weight: 600;
-        transition: background 200ms ease, color 200ms ease;
+        padding: 4px 10px; border-radius: 999px;
+        font-size: 11px; font-weight: 700;
+        letter-spacing: 0.1px;
+        line-height: 1.2;
+        transition: background 200ms ease, color 200ms ease, box-shadow 220ms ease;
       }
       .map-shine-styled-loading-overlay__stage-pill--pending {
         background: rgba(255,255,255,0.06); color: rgba(255,255,255,0.4);
@@ -907,6 +935,24 @@ export class StyledLoadingScreenRenderer {
       }
       .map-shine-styled-loading-overlay__stage-pill--done {
         background: rgba(100,220,140,0.15); color: rgba(140,255,180,0.9);
+      }
+      .map-shine-styled-loading-overlay__stage-pill[data-stage-group="assets"] {
+        border: 1px solid rgba(0,180,255,0.16);
+      }
+      .map-shine-styled-loading-overlay__stage-pill[data-stage-group="effects"] {
+        border: 1px solid rgba(176,118,255,0.16);
+      }
+      .map-shine-styled-loading-overlay__stage-pill[data-stage-group="scene"] {
+        border: 1px solid rgba(124,220,164,0.16);
+      }
+      .map-shine-styled-loading-overlay__stage-pill[data-stage-group="ui"] {
+        border: 1px solid rgba(250,210,110,0.16);
+      }
+      .map-shine-styled-loading-overlay__stage-pill[data-stage-group="final"] {
+        border: 1px solid rgba(255,255,255,0.2);
+      }
+      .map-shine-styled-loading-overlay__stage-pill--flash {
+        animation: msLsPillDoneFlash 480ms ease-out 1;
       }
 
       .map-shine-styled-loading-overlay__effect-vignette {
@@ -930,6 +976,11 @@ export class StyledLoadingScreenRenderer {
       @keyframes msLsSpinnerSpin {
         from { transform: rotate(0deg); }
         to { transform: rotate(360deg); }
+      }
+      @keyframes msLsPillDoneFlash {
+        0% { box-shadow: 0 0 0 rgba(120,255,180,0); }
+        25% { box-shadow: 0 0 12px rgba(120,255,180,0.48); transform: translateY(-1px); }
+        100% { box-shadow: 0 0 0 rgba(120,255,180,0); transform: translateY(0); }
       }
     `;
     this._style = style;
@@ -1022,6 +1073,44 @@ function quoteFont(name) {
 function isTextLikeType(type) {
   const t = String(type || '').toLowerCase();
   return t === 'text' || t === 'subtitle' || t === 'scene-name' || t === 'message' || t === 'percentage' || t === 'timer';
+}
+
+function stageGroupFromId(stageId) {
+  const id = String(stageId || '').trim().toLowerCase();
+  if (!id) return 'misc';
+  const dot = id.indexOf('.');
+  return dot > 0 ? id.slice(0, dot) : id;
+}
+
+function shortenStageLabel(label, stageId) {
+  const clean = String(label || stageId || '').replace(/[\u2026.]+$/, '').trim();
+  const id = String(stageId || '').toLowerCase();
+  if (!clean) return 'Stage';
+  if (id === 'assets.discover') return 'Discover';
+  if (id === 'assets.catalog') return 'Catalog';
+  if (id === 'assets.load') return 'Textures';
+  if (id === 'assets.gpu') return 'GPU';
+  if (id === 'scene.settings') return 'Settings';
+  if (id === 'scene.canvas') return 'Canvas';
+  if (id === 'scene.renderer') return 'Renderer';
+  if (id === 'effects.bootstrap') return 'Effects Boot';
+  if (id === 'effects.core') return 'Effects Core';
+  if (id === 'effects.deps') return 'Effects Deps';
+  if (id === 'effects.wire') return 'Effects Wire';
+  if (id === 'scene.tokens') return 'Tokens';
+  if (id === 'scene.layers') return 'Layers';
+  if (id === 'scene.movement') return 'Movement';
+  if (id === 'scene.interaction') return 'Interaction';
+  if (id === 'scene.camera') return 'Camera';
+  if (id === 'scene.sync') return 'Scene Sync';
+  if (id === 'ui.bootstrap') return 'UI Boot';
+  if (id === 'ui.panels') return 'UI Panels';
+  if (id === 'scene.prepare') return 'Prepare';
+  if (id === 'scene.frames') return 'Frames';
+  if (id === 'shaders.compile') return 'Shaders';
+  if (id === 'final.controls') return 'Controls';
+  if (id === 'final') return 'Ready';
+  return clean.length > 14 ? `${clean.slice(0, 14).trim()}…` : clean;
 }
 
 function sleep(ms) {

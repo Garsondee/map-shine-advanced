@@ -1893,8 +1893,7 @@ export class OverheadShadowsEffectV2 {
    *
    * We use WeatherController.timeOfDay (0-24h) which is driven by the
    * "Time of Day" UI slider. This gives us a stable, user-controlled
-   * east/west shadow offset instead of a continuously orbiting sun
-   * based on elapsed time.
+   * east/west shadow offset on a full daily orbit.
    */
   update(timeInfo) {
     if (!this.material || !this.params.enabled) return;
@@ -1956,12 +1955,13 @@ export class OverheadShadowsEffectV2 {
     if (this._lastUpdateHash === updateHash && this.sunDir && !outdoorsMaskChanged) return;
     this._lastUpdateHash = updateHash;
 
-    // Map hour to a sun azimuth over a half-orbit.
-    // 12h (noon) -> 0 azimuth
+    // Map hour to a full 24h sun azimuth orbit.
+    // 12h (noon)    ->   0
     //  6h (sunrise) -> -PI/2
     // 18h (sunset)  -> +PI/2
+    //  0h/24h       -> -PI (same direction as +PI, continuous wrap)
     const t = (hour % 24.0) / 24.0;
-    const azimuth = (t - 0.5) * Math.PI;
+    const azimuth = (t - 0.5) * (Math.PI * 2.0);
 
     // Sun direction MUST be identical to BuildingShadowsEffect so both
     // effects follow the same daily arc. The shader projection sign (+dir)

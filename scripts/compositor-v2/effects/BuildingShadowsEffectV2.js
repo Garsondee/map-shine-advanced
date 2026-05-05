@@ -1195,8 +1195,13 @@ export class BuildingShadowsEffectV2 {
           hour = weatherController.timeOfDay;
         }
       } catch (_) {}
+      // Full 24h azimuth orbit:
+      // 12h (noon)   ->   0
+      //  6h (sunrise)-> -PI/2
+      // 18h (sunset) -> +PI/2
+      //  0h/24h      -> -PI (same direction as +PI, continuous wrap)
       const t = (hour % 24.0) / 24.0;
-      const azimuth = (t - 0.5) * Math.PI;
+      const azimuth = (t - 0.5) * (Math.PI * 2.0);
       x = -Math.sin(azimuth);
       y = -Math.cos(azimuth) * lat;
     }

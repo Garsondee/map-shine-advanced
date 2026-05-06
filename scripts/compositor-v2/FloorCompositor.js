@@ -8,8 +8,8 @@
  *
  * Render pipeline:
  *   1. Global shadow/cloud passes, then each visible level: bus slice → level RTs,
- *      full post chain **per level** (lighting … per-level water **only when a single
- *      floor is visible** … bloom …) **before** merge.
+ *      full post chain **per level** (lighting … filter … per-level water **only when a single
+ *      floor is visible** … color correction … bloom …) **before** merge.
  *   2. **LevelCompositePass** blends per-level final RTs bottom→top (straight-alpha).
  *      With **multiple** visible floors, **WaterEffectV2** runs **once after** this
  *      merge so `tDiffuse` is the stacked scene (holes/stacking already correct).
@@ -34,7 +34,8 @@
  *   - **WaterEffectV2**: Water tint/distortion/specular/foam driven by _Water masks.
  *   - **SkyColorEffectV2**: Time-of-day atmospheric color grading.
  *   - **BloomEffectV2**: Screen-space glow via UnrealBloomPass.
- *   - **ColorCorrectionEffectV2**: User-authored color grade.
+ *   - **ColorCorrectionEffectV2**: User-authored color grade (runs **after** per-level
+ *     water so tint/spec/foam receive the same grade as the rest of the scene; no extra pass).
  *   - **SharpenEffectV2**: Unsharp mask filter (disabled by default).
  *
  * Called by EffectComposer.render() in the V2-only runtime.
@@ -68,6 +69,7 @@ import { BushEffectV2 } from './effects/BushEffectV2.js';
 import { TreeEffectV2 } from './effects/TreeEffectV2.js';
 import { OverheadShadowsEffectV2 } from './effects/OverheadShadowsEffectV2.js';
 import { BuildingShadowsEffectV2 } from './effects/BuildingShadowsEffectV2.js';
+import { PaintedShadowEffectV2 } from './effects/PaintedShadowEffectV2.js';
 import { createLightingPerspectiveContext } from './LightingPerspectiveContext.js';
 import { DustEffectV2 } from './effects/DustEffectV2.js';
 import { DotScreenEffectV2 } from './effects/DotScreenEffectV2.js';
@@ -380,6 +382,13 @@ export class FloorCompositor {
      * @type {BuildingShadowsEffectV2}
      */
     this._buildingShadowEffect = new BuildingShadowsEffectV2();
+
+    /**
+     * V2 Painted Shadow Effect: projects authored _Shadow masks along sun direction.
+     * Contribution is gated by _Outdoors so interiors remain fully lit.
+     * @type {PaintedShadowEffectV2}
+     */
+    this._paintedShadowEffect = new PaintedShadowEffectV2();
 
     /**
      * Frozen per-frame snapshot for Levels/floor-aware lighting (see `LightingPerspectiveContext`).
@@ -1576,6 +1585,13 @@ export class FloorCompositor {
     }
     _reportProgress('BuildingShadowsEffectV2');
     await yieldToMain();
+    try {
+      this._paintedShadowEffect?.initialize?.(this.renderer);
+    } catch (err) {
+      log.warn('FloorCompositor: PaintedShadowEffectV2 initialize failed:', err);
+    }
+    _reportProgress('PaintedShadowEffectV2');
+    await yieldToMain();
 
     // Artistic post-processing effects (disabled by default)
     try { this._dotScreenEffect?.initialize?.(); } catch (err) {
@@ -2759,6 +2775,78 @@ export class FloorCompositor {
   }
 
   /**
+   * Build previous-frame dynamic-light payload for source shadow overrides.
+   * Uses LightingEffectV2 light RT texture (stable, no render-order changes).
+   * @returns {{texture:any, strength:number, enabled:boolean, viewBounds:{x:number,y:number,z:number,w:number}, sceneDimensions:{x:number,y:number}, sceneRect:{x:number,y:number,z:number,w:number}}|null}
+   */
+  _buildDynamicLightOverridePayload() {
+    const lighting = this._lightingEffect ?? null;
+    const tex = lighting?.dynamicLightTexture ?? null;
+    if (!tex) return null;
+    const dims = globalThis.canvas?.dimensions;
+    if (!dims) return null;
+    const rect = dims.sceneRect ?? dims;
+    const sceneRect = {
+      x: Number(rect?.x ?? dims.sceneX ?? 0),
+      y: Number(rect?.y ?? dims.sceneY ?? 0),
+      z: Number(rect?.width ?? dims.sceneWidth ?? dims.width ?? 1),
+      w: Number(rect?.height ?? dims.sceneHeight ?? dims.height ?? 1),
+    };
+    const sceneDimensions = {
+      x: Number(dims.width ?? 1),
+      y: Number(dims.height ?? 1),
+    };
+    let viewBounds = { x: 0, y: 0, z: 1, w: 1 };
+    try {
+      const cam = this.camera ?? null;
+      const THREE = window.THREE;
+      if (cam?.isOrthographicCamera) {
+        const zoom = Math.max(0.001, cam.zoom ?? 1.0);
+        viewBounds = {
+          x: Number(cam.position.x + cam.left / zoom),
+          y: Number(cam.position.y + cam.bottom / zoom),
+          z: Number(cam.position.x + cam.right / zoom),
+          w: Number(cam.position.y + cam.top / zoom),
+        };
+      } else if (cam?.isPerspectiveCamera && THREE) {
+        const groundZ = Number(window.MapShine?.sceneComposer?.groundZ ?? 0);
+        const ndc = new THREE.Vector3();
+        const world = new THREE.Vector3();
+        const dir = new THREE.Vector3();
+        let minX = Infinity; let minY = Infinity; let maxX = -Infinity; let maxY = -Infinity;
+        const corners = [[-1, -1], [1, -1], [-1, 1], [1, 1]];
+        for (let i = 0; i < 4; i++) {
+          ndc.set(corners[i][0], corners[i][1], 0.5);
+          world.copy(ndc).unproject(cam);
+          dir.copy(world).sub(cam.position);
+          const dz = dir.z;
+          if (Math.abs(dz) < 1e-6) continue;
+          const t = (groundZ - cam.position.z) / dz;
+          if (!Number.isFinite(t) || t <= 0) continue;
+          const ix = cam.position.x + dir.x * t;
+          const iy = cam.position.y + dir.y * t;
+          if (ix < minX) minX = ix;
+          if (iy < minY) minY = iy;
+          if (ix > maxX) maxX = ix;
+          if (iy > maxY) maxY = iy;
+        }
+        if (minX !== Infinity) {
+          viewBounds = { x: minX, y: minY, z: maxX, w: maxY };
+        }
+      }
+    } catch (_) {}
+
+    return {
+      texture: tex,
+      enabled: true,
+      strength: Number(this._lightingEffect?.params?.dynamicLightShadowOverrideStrength ?? 0.7),
+      viewBounds,
+      sceneDimensions,
+      sceneRect,
+    };
+  }
+
+  /**
    * Combine cloud (may be null / previous frame) + overhead + building into
    * ShadowManagerV2's screen-space RT for consumers that draw before the cloud pass.
    * @param {THREE.Texture|null} cloudTex
@@ -2774,11 +2862,15 @@ export class FloorCompositor {
     const buildingTex = (this._buildingShadowEffect?.params?.enabled)
       ? (this._buildingShadowEffect.shadowFactorTexture ?? null)
       : null;
+    const paintedTex = (this._paintedShadowEffect?.params?.enabled)
+      ? (this._paintedShadowEffect.shadowFactorTexture ?? null)
+      : null;
     sm.setInputs({
       cloudShadowTexture: cloudTex ?? null,
       cloudShadowRawTexture: cloudRawTex ?? null,
       overheadShadowTexture: overheadTex,
       buildingShadowTexture: buildingTex,
+      paintedShadowTexture: paintedTex,
     });
     try {
       const dims = globalThis.canvas?.dimensions;
@@ -3090,17 +3182,23 @@ export class FloorCompositor {
       try { this._sepiaEffect?.update?.(timeInfo); } catch (_) {}
       try { this._lensEffect?.update?.(timeInfo); } catch (_) {}
       try { this._distortionEffect?.update?.(timeInfo); } catch (_) {}
-      // Overhead shadows: update sun direction + uniform params from controls.
+
+    }
+
+    // Overhead + building shadows: run whenever we have timeInfo, not only inside
+    // the populate-slim gate above. These effects push Tweakpane-driven uniforms
+    // and mask bindings; skipping the outer block used to freeze sliders until
+    // unrelated params (sun hash) changed.
+    if (timeInfo) {
       try { this._overheadShadowEffect?.update?.(timeInfo); } catch (err) {
         log.warn('OverheadShadowsEffectV2 update threw, skipping overhead shadow update:', err);
       }
-      // Building shadows: must run update() here — unlike most effects, render() can
-      // return before calling update() (no compositor / disabled / RT not ready).
-      // HealthEvaluator + uniform freshness rely on this path every frame.
       try { this._buildingShadowEffect?.update?.(timeInfo); } catch (err) {
         log.warn('BuildingShadowsEffectV2 update threw, skipping building shadow update:', err);
       }
-
+      try { this._paintedShadowEffect?.update?.(timeInfo); } catch (err) {
+        log.warn('PaintedShadowEffectV2 update threw, skipping painted shadow update:', err);
+      }
     }
 
     if (populateSlimRender) {
@@ -3123,6 +3221,7 @@ export class FloorCompositor {
         const el  = sky.currentSunElevationDeg ?? 45;
         this._overheadShadowEffect?.setSunAngles?.(az, el);
         this._buildingShadowEffect?.setSunAngles?.(az, el);
+        this._paintedShadowEffect?.setSunAngles?.(az, el);
       }
     } catch (_) {}
 
@@ -3174,6 +3273,11 @@ export class FloorCompositor {
       this._renderBus?.syncRuntimeTileState?.();
     } catch (_) {}
 
+    const _dynamicLightOverride = this._buildDynamicLightOverridePayload();
+    try { this._overheadShadowEffect?.setDynamicLightOverride?.(_dynamicLightOverride); } catch (_) {}
+    try { this._buildingShadowEffect?.setDynamicLightOverride?.(_dynamicLightOverride); } catch (_) {}
+    try { this._paintedShadowEffect?.setDynamicLightOverride?.(_dynamicLightOverride); } catch (_) {}
+
     // Capture overhead tile alpha + compute soft shadow factor for lighting / ShadowManager.
     if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: overheadShadows.render'); } catch (_) {} }
     if (_profiling) _profileT0 = performance.now();
@@ -3198,6 +3302,18 @@ export class FloorCompositor {
     }
     if (_profiling) this._recordPassTiming('buildingShadowsRender', _profileT0);
     if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: buildingShadows.render DONE'); } catch (_) {} }
+
+    if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: paintedShadows.render'); } catch (_) {} }
+    if (_profiling) _profileT0 = performance.now();
+    if (!_skipBuildingShadowPass) {
+      try {
+        this._paintedShadowEffect?.render?.(this.renderer);
+      } catch (err) {
+        log.warn('PaintedShadowEffectV2 render threw, skipping painted shadow pass:', err);
+      }
+    }
+    if (_profiling) this._recordPassTiming('paintedShadowsRender', _profileT0);
+    if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: paintedShadows.render DONE'); } catch (_) {} }
 
     // ShadowManagerV2 (required): combine previous-frame cloud + current structural
     // shadows so water splash/bubble particles can sample the same darkening the
@@ -3251,13 +3367,15 @@ export class FloorCompositor {
     const windowCloudShadowTexLegacy = cloudEnabled
       ? (this._cloudEffect.cloudShadowRawTexture ?? this._cloudEffect.cloudShadowTexture)
       : null;
-    const combinedShadowTex = this._shadowManagerEffect?.combinedShadowTexture ?? cloudShadowTexLegacy;
-    const combinedShadowRawTex = this._shadowManagerEffect?.combinedShadowRawTexture ?? combinedShadowTex;
     const cloudShadowRawTexLegacy = windowCloudShadowTexLegacy;
     const windowCloudShadowViewBounds = cloudEnabled
       ? (this._cloudEffect.cloudShadowViewBounds ?? null) : null;
     const buildingShadowTex = resolveEffectEnabled(this._buildingShadowEffect)
       ? this._buildingShadowEffect.shadowFactorTexture : null;
+    const smCombinedTex = this._shadowManagerEffect?.combinedShadowTexture ?? null;
+    const combinedShadowTex = smCombinedTex ?? cloudShadowTexLegacy;
+    const combinedShadowRawTex = this._shadowManagerEffect?.combinedShadowRawTexture ?? combinedShadowTex;
+    const buildingShadowTexForLighting = smCombinedTex != null ? null : buildingShadowTex;
     const buildingShadowOpacity = Number.isFinite(this._buildingShadowEffect?.params?.opacity)
       ? this._buildingShadowEffect.params.opacity : 0.75;
     const overheadShadowTexLegacy = (!_disableOverheadInLighting && resolveEffectEnabled(this._overheadShadowEffect))
@@ -3278,6 +3396,7 @@ export class FloorCompositor {
       combinedShadowTex,
       combinedShadowRawTex,
       buildingShadowTex,
+      buildingShadowTexForLighting,
       buildingShadowOpacity,
       overheadShadowTexLegacy,
       overheadRoofAlphaTex,
@@ -4105,6 +4224,28 @@ export class FloorCompositor {
         }
       } catch (_) {}
 
+      // When water geometry/data is for the **same floor being viewed**, force the water
+      // shader to sample the **same** _Outdoors texture as the rest of the stack (cloud,
+      // lighting sync via weatherController.setRoofMap, overhead/building shadows, etc.).
+      // Otherwise water used compositor.getFloorTexture(key, skyReach ?? outdoors) while
+      // main used resolveCompositorOutdoorsTexture — sibling band keys / skyReach vs
+      // outdoors / async RT pools can disagree and look like wrong-floor or inverted
+      // indoor/outdoor response next to a neutral (all-indoor) fallback.
+      try {
+        const viewedFloor = window.MapShine?.floorStack?.getActiveFloor?.() ?? null;
+        const viewedIdx = Number(viewedFloor?.index);
+        const waterIdx = Number(this._waterEffect?._activeFloorIndex);
+        if (
+          Number.isFinite(viewedIdx)
+          && Number.isFinite(waterIdx)
+          && viewedIdx === waterIdx
+          && outdoorsTex
+        ) {
+          waterOutdoorsTex = outdoorsTex;
+          waterOutdoorsRoute = mainRoute ? `same-floor-as-main:${mainRoute}` : 'same-floor-as-main';
+        }
+      } catch (_) {}
+
       // Resolve per-floor cloud outdoors masks and the floor-id texture up-front
       // so their identities participate in the binding signature below. This
       // ensures e.g. async promotion of a newly composed upper-floor outdoors
@@ -4199,6 +4340,7 @@ export class FloorCompositor {
       this._atmosphericFogEffect?.setOutdoorsMask?.(outdoorsTex);
       this._overheadShadowEffect?.setOutdoorsMask?.(outdoorsTex);
       this._buildingShadowEffect?.setOutdoorsMask?.(outdoorsTex);
+      this._paintedShadowEffect?.setOutdoorsMask?.(outdoorsTex);
 
       // Apply the pre-resolved cloud per-floor bindings. If the visible floor
       // set isn't representable, fall back to legacy single-mask mode.
@@ -4901,6 +5043,7 @@ export class FloorCompositor {
       combinedShadowTex,
       combinedShadowRawTex,
       buildingShadowTex,
+      buildingShadowTexForLighting = buildingShadowTex,
       buildingShadowOpacity,
       overheadShadowTexLegacy,
       overheadRoofAlphaTex,
@@ -5033,7 +5176,7 @@ export class FloorCompositor {
           currentInput, levelPostA,
           winScene,
           cloudShadowTexLegacy, cloudShadowRawTexLegacy,
-          buildingShadowTex, overheadShadowTexLegacy,
+          buildingShadowTexForLighting, overheadShadowTexLegacy,
           buildingShadowOpacity,
           overheadRoofAlphaTex, overheadRoofBlockTex,
           outdoorsForLightingTex,
@@ -5051,14 +5194,7 @@ export class FloorCompositor {
         currentInput = skyOut;
       }
 
-      // Color correction
-      if (resolveEffectEnabled(this._colorCorrectionEffect)) {
-        const ccOut = (currentInput === levelPostA) ? levelPostB : levelPostA;
-        this._colorCorrectionEffect.render(this.renderer, currentInput, ccOut);
-        currentInput = ccOut;
-      }
-
-      // Filter
+      // Filter (before water: refracted samples include filter; avoids an extra pass)
       if (resolveEffectEnabled(this._filterEffect)) {
         const fOut = (currentInput === levelPostA) ? levelPostB : levelPostA;
         this._filterEffect.render(this.renderer, currentInput, fOut);
@@ -5128,6 +5264,13 @@ export class FloorCompositor {
           ? this._waterEffect.getWaterSpecularBloomTexture() : null;
         this._bloomEffect?.setWaterSpecularBloomTexture?.(wt ?? null);
       } catch (_) {}
+
+      // User color correction after water so foam/spec/tint are graded with the scene (no extra pass).
+      if (resolveEffectEnabled(this._colorCorrectionEffect)) {
+        const ccOut = (currentInput === levelPostA) ? levelPostB : levelPostA;
+        this._colorCorrectionEffect.render(this.renderer, currentInput, ccOut);
+        currentInput = ccOut;
+      }
 
       // Distortion (fire heat haze): skipped per-level because aux-pass
       // caching in DistortionManager assumes one render per frame. Applied
@@ -5249,6 +5392,8 @@ export class FloorCompositor {
 
     /** Merged composite lives in `_postA`; post-merge water may write `_postB`. */
     let mergedCompositeOut = this._postA;
+    // Post-merge water composites onto an already user–CC'd merge (CC ran per slice before
+    // composite). Procedural water sits on top without a second CC pass — rare vs single-floor.
     if (usePostMergeWater && !_skipWaterPass && resolveEffectEnabled(this._waterEffect)) {
       const activeFloor = floorStack?.getActiveFloor?.();
       const ai = Number.isFinite(Number(activeFloor?.index))
@@ -5406,6 +5551,7 @@ export class FloorCompositor {
     try { this._colorCorrectionEffect?.dispose?.(); } catch (_) {}
     try { this._overheadShadowEffect?.dispose?.(); } catch (_) {}
     try { this._buildingShadowEffect?.dispose?.(); } catch (_) {}
+    try { this._paintedShadowEffect?.dispose?.(); } catch (_) {}
     try { this._smellyFliesEffect?.dispose?.(); } catch (_) {}
     try { this._lightningEffect?.dispose?.(); } catch (_) {}
     try { this._candleFlamesEffect?.dispose?.(); } catch (_) {}

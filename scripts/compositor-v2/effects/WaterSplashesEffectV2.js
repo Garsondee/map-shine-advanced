@@ -63,6 +63,7 @@ import {
   GROUND_Z,
   effectUnderOverheadOrder,
 } from '../LayerOrderPolicy.js';
+import { resolveEffectWindWorld } from './resolve-effect-wind.js';
 
 const log = createLogger('WaterSplashesV2');
 
@@ -71,7 +72,7 @@ const SHADOW_DARKEN_V1_ANCHOR = '// MS_WATER_SPLASHES_SHADOW_DARKEN_V1';
 
 /**
  * GLSL appended after `#include <tonemapping_fragment>` so shadow response is not
- * undone by tone mapping; scales RGB and alpha for additive foam/splashes/bubbles.
+ * undone by tone mapping; scales RGB and alpha for foam/splashes/bubbles.
  */
 const SHADOW_DARKEN_FS = `
   // MS_WATER_SPLASHES_SHADOW_DARKEN_V3
@@ -235,6 +236,7 @@ export class WaterSplashesEffectV2 {
       splashLifeMin: 0.3,
       splashLifeMax: 0.8,
       splashPeakOpacity: 0.7,
+      splashWindDriftScale: 1.0,
     };
 
     // Controller wrapper so the V2 UI callback can target `_waterSplashesEffect.bubbles`
@@ -281,6 +283,7 @@ export class WaterSplashesEffectV2 {
       splashLifeMin: 0.3,
       splashLifeMax: 0.8,
       splashPeakOpacity: 0.84,
+      splashWindDriftScale: 1.0,
 
       // Scan settings
       edgeScanStride: 2,
@@ -592,8 +595,8 @@ export class WaterSplashesEffectV2 {
 
   /**
    * Water splashes are a dependent visual layer for WaterEffectV2.
-   * If the parent water pass is disabled, hide splashes entirely so additive
-   * foam/splash sprites cannot glare on dry terrain where only `_Water` masks exist.
+   * If the parent water pass is disabled, hide splashes entirely so foam/splash
+   * sprites cannot glare on dry terrain where only `_Water` masks exist.
    * @returns {boolean}
    * @private
    */
@@ -1085,7 +1088,7 @@ export class WaterSplashesEffectV2 {
     const parentWaterEnabled = this._isParentWaterEffectEnabled();
     const shouldRender = this._enabled && parentWaterEnabled && (splashesEnabled || bubblesEnabled);
 
-    // Hide immediately when water is disabled to prevent lingering additive glare.
+    // Hide immediately when water is disabled to prevent lingering bright residual.
     for (const br of this._batchRenderers.values()) {
       br.visible = shouldRender;
     }
@@ -1570,7 +1573,7 @@ export class WaterSplashesEffectV2 {
           bucketPoints, sceneW, sceneH, sceneX, sceneY,
           GROUND_Z + (Number(floorIndex) || 0), 0.3
         );
-        const sys = this._createSplashSystem(shape, weight);
+        const sys = this._createSplashSystem(shape, weight, floorIndex);
         if (sys) state.splashSystems.push(sys);
       }
     }
@@ -1604,7 +1607,7 @@ export class WaterSplashesEffectV2 {
           bucketPoints, sceneW, sceneH, sceneX, sceneY,
           GROUND_Z + (Number(floorIndex) || 0), 0.3
         );
-        const sys = this._createBubbleSplashSystem(shape, weight);
+        const sys = this._createBubbleSplashSystem(shape, weight, floorIndex);
         if (sys) state.splashSystems2.push(sys);
       }
     }
@@ -1622,7 +1625,7 @@ export class WaterSplashesEffectV2 {
       transparent: true,
       depthWrite: false,
       depthTest: false,
-      blending: THREE.AdditiveBlending,
+      blending: THREE.NormalBlending,
       color: 0xffffff,
       side: THREE.DoubleSide,
     });
@@ -1677,7 +1680,7 @@ export class WaterSplashesEffectV2 {
   }
 
   /** @private */
-  _createSplashSystem(shape, weight) {
+  _createSplashSystem(shape, weight, floorIndex = 0) {
     const THREE = window.THREE;
     if (!THREE) return null;
 
@@ -1687,7 +1690,7 @@ export class WaterSplashesEffectV2 {
       transparent: true,
       depthWrite: false,
       depthTest: false,
-      blending: THREE.AdditiveBlending,
+      blending: THREE.NormalBlending,
       color: 0xffffff,
       side: THREE.DoubleSide,
     });
@@ -1702,7 +1705,7 @@ export class WaterSplashesEffectV2 {
     const splashRateMult = 40.0;
     const splashRate = Math.max(0.0, Number(p.splashRate) || 0) * splashRateMult;
 
-    const splashLifecycle = new SplashRingLifecycleBehavior(this);
+    const splashLifecycle = new SplashRingLifecycleBehavior(this, floorIndex);
 
     // Splash emission is gated by precipitation — when it's not raining,
     // the behavior's _precipMult drives alpha to 0 so particles are invisible.
@@ -1755,7 +1758,7 @@ export class WaterSplashesEffectV2 {
       transparent: true,
       depthWrite: false,
       depthTest: false,
-      blending: THREE.AdditiveBlending,
+      blending: THREE.NormalBlending,
       color: 0xffffff,
       side: THREE.DoubleSide,
     });
@@ -1814,7 +1817,7 @@ export class WaterSplashesEffectV2 {
    * Uses bubblesParams for size/rate/life.
    * @private
    */
-  _createBubbleSplashSystem(shape, weight) {
+  _createBubbleSplashSystem(shape, weight, floorIndex = 0) {
     const THREE = window.THREE;
     if (!THREE) return null;
 
@@ -1823,7 +1826,7 @@ export class WaterSplashesEffectV2 {
       transparent: true,
       depthWrite: false,
       depthTest: false,
-      blending: THREE.AdditiveBlending,
+      blending: THREE.NormalBlending,
       color: 0xffffff,
       side: THREE.DoubleSide,
     });
@@ -1838,7 +1841,9 @@ export class WaterSplashesEffectV2 {
     const splashRateMult = 20.0;
     const splashRate = Math.max(0.0, Number(p.splashRate) || 0) * splashRateMult;
 
-    const splashLifecycle = new SplashRingLifecycleBehavior({ params: p });
+    const bubbleSplashOwner = { params: p };
+    Object.defineProperty(bubbleSplashOwner, '_sceneBounds', { get: () => this._sceneBounds });
+    const splashLifecycle = new SplashRingLifecycleBehavior(bubbleSplashOwner, floorIndex);
 
     const system = new QuarksParticleSystem({
       duration: 1,
@@ -1984,6 +1989,13 @@ export class WaterSplashesEffectV2 {
   _updateSystemParams(splashesEnabled = true, bubblesEnabled = true) {
     const p = this.params;
 
+    let wind01 = 0.15;
+    try {
+      wind01 = resolveEffectWindWorld().speed01;
+    } catch (_) {}
+    const foamWindMul = 0.42 + 0.58 * wind01;
+    const splashWindPrecipMul = 0.55 + 0.45 * wind01;
+
     // Keep emission strong enough to remain visible after spatial bucketing.
     // `_createFoamSystem/_createSplashSystem` apply the same multipliers.
     const foamRateMult = 40.0;
@@ -2028,7 +2040,7 @@ export class WaterSplashesEffectV2 {
           }
           continue;
         }
-        const foamRate = Math.max(0.0, Number(p.foamRate) || 0) * foamRateMult;
+        const foamRate = Math.max(0.0, Number(p.foamRate) || 0) * foamRateMult * foamWindMul;
         if (sys.emissionOverTime) {
           sys.emissionOverTime.a = Math.max(1.0, foamRate * w * 0.5);
           sys.emissionOverTime.b = Math.max(2.0, foamRate * w);
@@ -2065,7 +2077,7 @@ export class WaterSplashesEffectV2 {
         }
         const splashRate = Math.max(0.0, Number(p.splashRate) || 0) * splashRateMult;
         // Scale emission by precipitation so splashes only appear when it rains.
-        const precipScale = Math.max(0, Math.min(1.0, precip));
+        const precipScale = Math.max(0, Math.min(1.0, precip)) * splashWindPrecipMul;
         if (sys.emissionOverTime) {
           // Keep a small baseline so systems remain alive/ready; visual intensity is still
           // strongly gated by precipitation via SplashRingLifecycleBehavior alpha.
@@ -2078,7 +2090,7 @@ export class WaterSplashesEffectV2 {
 
       // Bubbles foam systems: hardcoded rates from bubblesParams.
       const bp = this.bubblesParams;
-      const bubbleFoamRate = Math.max(0.0, Number(bp.foamRate) || 0) * foamRateMult;
+      const bubbleFoamRate = Math.max(0.0, Number(bp.foamRate) || 0) * foamRateMult * foamWindMul;
       if (bubblesEnabled) for (const sys of (state.foamSystems2 ?? [])) {
         if (!sys?.userData) continue;
         const w = (sys.userData._msEmissionScaleDynamic ?? sys.userData._msEmissionScale) ?? 1.0;
@@ -2094,6 +2106,7 @@ export class WaterSplashesEffectV2 {
 
       // Bubbles splash systems: hardcoded rates from bubblesParams.
       const bubbleSplashRate = Math.max(0.0, Number(bp.splashRate) || 0) * splashRateMult;
+      const bubbleSplashScale = Math.max(0, Math.min(1.0, precip)) * splashWindPrecipMul;
       if (bubblesEnabled) for (const sys of (state.splashSystems2 ?? [])) {
         if (!sys?.userData) continue;
         const w = (sys.userData._msEmissionScaleDynamic ?? sys.userData._msEmissionScale) ?? 1.0;
@@ -2102,8 +2115,8 @@ export class WaterSplashesEffectV2 {
           continue;
         }
         if (sys.emissionOverTime) {
-          sys.emissionOverTime.a = Math.max(1.0, bubbleSplashRate * w * 0.5);
-          sys.emissionOverTime.b = Math.max(2.0, bubbleSplashRate * w);
+          sys.emissionOverTime.a = Math.max(0.2, bubbleSplashRate * w * 0.5 * bubbleSplashScale);
+          sys.emissionOverTime.b = Math.max(0.5, bubbleSplashRate * w * bubbleSplashScale);
         }
       }
     }
@@ -2410,6 +2423,7 @@ export class WaterSplashesEffectV2 {
             'splashLifeMax',
             'splashSizeMin',
             'splashSizeMax',
+            'splashWindDriftScale',
           ]
         },
         {
@@ -2453,6 +2467,7 @@ export class WaterSplashesEffectV2 {
         splashLifeMax: { type: 'slider', label: 'Life Max', min: 0.05, max: 10, step: 0.05, default: 0.8 },
         splashSizeMin: { type: 'slider', label: 'Size Min', min: 1, max: 1000, step: 1, default: 99 },
         splashSizeMax: { type: 'slider', label: 'Size Max', min: 1, max: 1000, step: 1, default: 457 },
+        splashWindDriftScale: { type: 'slider', label: 'Splash Wind Drift', min: 0, max: 2, step: 0.01, default: 1.0 },
 
         maskThreshold: { type: 'slider', label: 'Water Threshold', min: 0.0, max: 1.0, step: 0.01, default: 0.15 },
         edgeScanStride: { type: 'slider', label: 'Edge Stride', min: 1, max: 16, step: 1, default: 2 },
@@ -2518,6 +2533,7 @@ export class WaterSplashesEffectV2 {
             'splashLifeMax',
             'splashSizeMin',
             'splashSizeMax',
+            'splashWindDriftScale',
           ]
         },
       ],
@@ -2550,6 +2566,7 @@ export class WaterSplashesEffectV2 {
         splashLifeMax: { type: 'slider', label: 'Life Max', min: 0.05, max: 10, step: 0.05, default: 0.8 },
         splashSizeMin: { type: 'slider', label: 'Size Min', min: 1, max: 1000, step: 1, default: 35 },
         splashSizeMax: { type: 'slider', label: 'Size Max', min: 1, max: 1000, step: 1, default: 77 },
+        splashWindDriftScale: { type: 'slider', label: 'Splash Wind Drift', min: 0, max: 2, step: 0.01, default: 1.0 },
       }
     };
   }

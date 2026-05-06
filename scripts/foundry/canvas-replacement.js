@@ -63,6 +63,7 @@ import { FilterEffectV2 } from '../compositor-v2/effects/FilterEffectV2.js';
 import { WaterSplashesEffectV2 } from '../compositor-v2/effects/WaterSplashesEffectV2.js';
 import { OverheadShadowsEffectV2 } from '../compositor-v2/effects/OverheadShadowsEffectV2.js';
 import { BuildingShadowsEffectV2 } from '../compositor-v2/effects/BuildingShadowsEffectV2.js';
+import { PaintedShadowEffectV2 } from '../compositor-v2/effects/PaintedShadowEffectV2.js';
 import { BushEffectV2 } from '../compositor-v2/effects/BushEffectV2.js';
 import { TreeEffectV2 } from '../compositor-v2/effects/TreeEffectV2.js';
 import { DotScreenEffectV2 } from '../compositor-v2/effects/DotScreenEffectV2.js';
@@ -6877,7 +6878,6 @@ async function createThreeCanvas(scene, createOptions = {}) {
                 return;
               }
 
-              if (paramId === 'variability') return weatherController.setVariability(Number(value) || 0);
               if (paramId === 'simulationSpeed') {
                 weatherController.simulationSpeed = Math.max(0.01, Number(value) || 1.0);
                 return;
@@ -6887,11 +6887,6 @@ async function createThreeCanvas(scene, createOptions = {}) {
                 syncDirectedCustomPresetFromWeatherController(weatherController);
                 return;
               }
-
-              if (paramId === 'gustWaitMin') return void (weatherController.gustWaitMin = Number(value) || 0);
-              if (paramId === 'gustWaitMax') return void (weatherController.gustWaitMax = Number(value) || 0);
-              if (paramId === 'gustDuration') return void (weatherController.gustDuration = Number(value) || 0.1);
-              if (paramId === 'gustStrength') return void (weatherController.gustStrength = Number(value) || 0);
 
               if (paramId === 'wettingDuration') return void (weatherController.wetnessTuning.wettingDuration = Number(value) || 1);
               if (paramId === 'dryingDuration') return void (weatherController.wetnessTuning.dryingDuration = Number(value) || 1);
@@ -7517,6 +7512,13 @@ async function createThreeCanvas(scene, createOptions = {}) {
             BuildingShadowsEffectV2.getControlSchema(), _makeV2Callback('_buildingShadowEffect'), 'global'
           );
         }, 'v2.registerBuildingShadowsUI', Severity.DEGRADED);
+
+        safeCall(() => {
+          uiManager.registerEffect(
+            'painted-shadows', 'Painted Shadows',
+            PaintedShadowEffectV2.getControlSchema(), _makeV2Callback('_paintedShadowEffect'), 'global'
+          );
+        }, 'v2.registerPaintedShadowsUI', Severity.DEGRADED);
 
         safeCall(() => {
           uiManager.registerEffect(

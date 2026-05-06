@@ -51,6 +51,7 @@ import {
 import { DepthShaderChunks } from '../../effects/DepthShaderChunks.js';
 import { VisionSDF } from '../../vision/VisionSDF.js';
 import { getVertexShader, getFragmentShader, getFragmentShaderSafe } from './water-shader.js';
+import { resolveEffectWindWorld } from './resolve-effect-wind.js';
 import { safeBuildShaderMaterial } from '../../core/diagnostics/SafeShaderBuilder.js';
 
 const log = createLogger('WaterEffectV2');
@@ -191,6 +192,8 @@ export class WaterEffectV2 {
       // Wind drives wave speed between these values (× waveSpeed). Guide: ~0.10 calm, ~0.55 gust.
       waveSpeedWindMinFactor: 0.0,
       waveSpeedWindMaxFactor: 0.86,
+      // Max |d(gust)|/sec for wave travel/strength/motion (0..1 gust curve). Lower = softer gusts.
+      waveGustSlewRate: 0.68,
       waveStrengthWindMinFactor: 0.05,
       waveIndoorDampingEnabled: true,
       waveIndoorDampingStrength: 2.0,
@@ -364,6 +367,10 @@ export class WaterEffectV2 {
       shoreFoamThreshold: 0.55,
       shoreFoamScale: 11.4,
       shoreFoamSpeed: 0.1,
+      shoreFoamCoverage: 0.56,
+      shoreFoamSeedOffsetX: 13.7,
+      shoreFoamSeedOffsetY: -8.9,
+      shoreFoamTimeOffset: 41.0,
 
       // Shore Foam Appearance
       shoreFoamColor: { r: 1.0, g: 1.0, b: 1.0 },
@@ -404,10 +411,11 @@ export class WaterEffectV2 {
       shoreFoamEvolutionScale: 4.4,
 
       // Shore Foam Coverage
-      shoreFoamCoreWidth: 0.12,
-      shoreFoamCoreFalloff: 1.0,
-      shoreFoamTailWidth: 0.67,
-      shoreFoamTailFalloff: 0.3,
+      shoreFoamCoreWidth: 0.26,
+      shoreFoamCoreFalloff: 0.45,
+      shoreFoamTailWidth: 0.88,
+      shoreFoamTailFalloff: 0.42,
+      shoreFoamFadeCurve: 1.7,
 
       floatingFoamStrength: 1.07,
       floatingFoamCoverage: 0.5,
@@ -585,6 +593,10 @@ export class WaterEffectV2 {
     // Smoothed wave wind motion: always ≥ 0, rate-limited to prevent advection reversal.
     // Rises faster than it falls so gusts are felt but calm spells don't snap waves backward.
     this._waveWindMotion01 = 0.0;
+
+    // Slew-limited gust 0..1 drives wave phase speed, strength, and shader motion so strong
+    // wind bursts don't pop the surface (see water-shader Gerstner phase vs uWaveTime).
+    this._waveGustDisplay01 = 0.0;
 
     // Dual-spectrum wind-direction blending.
     // We keep a "previous" direction and "target" direction and blend between
@@ -1060,7 +1072,7 @@ static getControlSchema() {
           type: 'folder',
           expanded: false,
           parameters: [
-            'waveSpeedWindMinFactor', 'waveSpeedWindMaxFactor', 'waveStrengthWindMinFactor',
+            'waveSpeedWindMinFactor', 'waveSpeedWindMaxFactor', 'waveGustSlewRate', 'waveStrengthWindMinFactor',
             'waveIndoorDampingEnabled', 'waveIndoorDampingStrength', 'waveIndoorMinFactor',
             'windDirResponsiveness',
             'waveTriBlendAngleDeg', 'waveTriSideWeight',
@@ -1184,6 +1196,7 @@ static getControlSchema() {
           parameters: [
             'shoreFoamEnabled',
             'shoreFoamStrength', 'shoreFoamThreshold', 'shoreFoamScale', 'shoreFoamSpeed',
+            'shoreFoamCoverage', 'shoreFoamSeedOffsetX', 'shoreFoamSeedOffsetY', 'shoreFoamTimeOffset',
             'shoreFoamColor', 'shoreFoamTint', 'shoreFoamTintStrength',
             'shoreFoamColorVariation', 'shoreFoamOpacity',
             'shoreFoamBrightness', 'shoreFoamContrast', 'shoreFoamGamma',
@@ -1345,6 +1358,16 @@ static getControlSchema() {
           default: 0.86,
           label: 'Wave speed at full wind',
           tooltip: 'Phase speed at strong gusts (before × Wave speed scale). Typical ~0.55.',
+        },
+        waveGustSlewRate: {
+          type: 'slider',
+          min: 0.08,
+          max: 4,
+          step: 0.02,
+          default: 0.68,
+          label: 'Gust ramp speed',
+          tooltip:
+            'Caps how fast wave energy (travel + height) can follow wind gusts (units: gust 0..1 per second). Lower = softer, more inertial waves.',
         },
         waveStrengthWindMinFactor: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.05, label: 'Strength Calm Baseline' },
         waveIndoorDampingEnabled: { type: 'boolean', default: true, label: 'Indoor Damping Enabled' },
@@ -1522,6 +1545,10 @@ static getControlSchema() {
         shoreFoamThreshold: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.55, label: 'Threshold' },
         shoreFoamScale: { type: 'slider', min: 1, max: 100, step: 0.1, default: 11.4, label: 'Scale' },
         shoreFoamSpeed: { type: 'slider', min: 0, max: 2, step: 0.01, default: 0.1, label: 'Speed' },
+        shoreFoamCoverage: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.56, label: 'Coverage' },
+        shoreFoamSeedOffsetX: { type: 'slider', min: -100, max: 100, step: 0.1, default: 13.7, label: 'Seed Offset X' },
+        shoreFoamSeedOffsetY: { type: 'slider', min: -100, max: 100, step: 0.1, default: -8.9, label: 'Seed Offset Y' },
+        shoreFoamTimeOffset: { type: 'slider', min: -200, max: 200, step: 0.1, default: 41.0, label: 'Time Offset' },
         shoreFoamColor: { type: 'color', default: { r: 1.0, g: 1.0, b: 1.0 }, label: 'Color' },
         shoreFoamTint: { type: 'color', default: { r: 1.0, g: 1.0, b: 1.0 }, label: 'Tint' },
         shoreFoamTintStrength: { type: 'slider', min: 0, max: 1, step: 0.01, default: 1.0, label: 'Tint Strength' },
@@ -1554,8 +1581,9 @@ static getControlSchema() {
         shoreFoamEvolutionScale: { type: 'slider', min: 0.1, max: 10, step: 0.1, default: 4.4, label: 'Evol Scale' },
         shoreFoamCoreWidth: { type: 'slider', min: 0.01, max: 1, step: 0.01, default: 0.12, label: 'Core Width' },
         shoreFoamCoreFalloff: { type: 'slider', min: 0.01, max: 1, step: 0.01, default: 1.0, label: 'Core Falloff' },
-        shoreFoamTailWidth: { type: 'slider', min: 0.01, max: 1, step: 0.01, default: 0.67, label: 'Tail Width' },
-        shoreFoamTailFalloff: { type: 'slider', min: 0.01, max: 1, step: 0.01, default: 0.3, label: 'Tail Falloff' },
+        shoreFoamTailWidth: { type: 'slider', min: 0.01, max: 1, step: 0.01, default: 0.88, label: 'Tail Width' },
+        shoreFoamTailFalloff: { type: 'slider', min: 0.01, max: 1, step: 0.01, default: 0.42, label: 'Tail Falloff' },
+        shoreFoamFadeCurve: { type: 'slider', min: 0.1, max: 4, step: 0.01, default: 1.7, label: 'Fade Curve' },
 
         floatingFoamStrength: { type: 'slider', min: 0, max: 2, step: 0.01, default: 1.07, label: 'Strength' },
         floatingFoamCoverage: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.5, label: 'Coverage' },
@@ -2709,52 +2737,10 @@ static getControlSchema() {
     // ── Wind state (WeatherController-coupled with deterministic fallback) ──
     // Keep fallback values stable so the effect behaves consistently when weather
     // is disabled/unavailable.
-    let windDirX = 1.0;
-    let windDirY = 0.0;
-    let windSpeed01 = 0.15;
-    try {
-      // V2 mode does not always initialize WeatherController.
-      // Match CloudEffectV2 behavior: only read WC when initialized; otherwise
-      // fall back to the V2 cloud effect's own resolved weather state.
-      const wcInitialized = weatherController?.initialized === true;
-      const ws = wcInitialized ? weatherController?.getCurrentState?.() : null;
-      if (ws) {
-        const wx = Number(ws.windDirection?.x);
-        const wy = Number(ws.windDirection?.y);
-        const wvMS = Number(ws.windSpeedMS);
-        const wv01 = Number(ws.windSpeed);
-        if (Number.isFinite(wx) && Number.isFinite(wy)) {
-          const len = Math.hypot(wx, wy);
-          if (len > 1e-5) {
-            windDirX = wx / len;
-            windDirY = wy / len;
-          }
-        }
-        if (Number.isFinite(wvMS)) {
-          windSpeed01 = Math.max(0.0, Math.min(1.0, wvMS / 78.0));
-        } else if (Number.isFinite(wv01)) {
-          windSpeed01 = Math.max(0.0, Math.min(1.0, wv01));
-        }
-      } else {
-        // CloudEffectV2 maintains its own deterministic fallback wind state.
-        // Pull from it so water matches clouds in V2 mode.
-        const cloud = window.MapShine?.effectComposer?._floorCompositorV2?._cloudEffect;
-        const cs = cloud?._getWeatherState?.();
-        if (cs) {
-          const wx = Number(cs.windDirX);
-          const wy = Number(cs.windDirY);
-          const wv = Number(cs.windSpeed);
-          if (Number.isFinite(wx) && Number.isFinite(wy)) {
-            const len = Math.hypot(wx, wy);
-            if (len > 1e-5) {
-              windDirX = wx / len;
-              windDirY = wy / len;
-            }
-          }
-          if (Number.isFinite(wv)) windSpeed01 = Math.max(0, Math.min(1, wv));
-        }
-      }
-    } catch (_) {}
+    const rawWind = resolveEffectWindWorld();
+    let windDirX = rawWind.dirX;
+    let windDirY = rawWind.dirY;
+    let windSpeed01 = rawWind.speed01;
 
     // Freeze wind-driving inputs while paused. This prevents paused-frame drift
     // when external weather fallbacks (e.g. cloud fallback state) continue to
@@ -2768,19 +2754,6 @@ static getControlSchema() {
       windSpeed01 = Number.isFinite(this._smoothedWindSpeed01)
         ? Math.max(0.0, Math.min(1.0, this._smoothedWindSpeed01))
         : 0.0;
-    }
-
-    // At very low wind speeds, weather direction can wander/noise rapidly.
-    // Freeze to the last stable direction to prevent low-speed wave jitter.
-    if (windSpeed01 < 0.06) {
-      const stableLen = Math.hypot(this._waveDirX, this._waveDirY);
-      if (stableLen > 1e-6) {
-        windDirX = this._waveDirX / stableLen;
-        windDirY = this._waveDirY / stableLen;
-      } else {
-        windDirX = 1.0;
-        windDirY = 0.0;
-      }
     }
 
     // Wind-direction smoothing: low-pass filter gated by wind speed so
@@ -2913,13 +2886,25 @@ static getControlSchema() {
     // - high wind quickly ramps wave energy (faster + taller waves)
     // Map windMotion into a "gust energy" curve that ramps more strongly
     // as wind increases, while preserving calm=0 and gust=1.
-    const gust01 = 1.0 - Math.pow(1.0 - this._waveWindMotion01, 1.35);
+    const targetGust01 = 1.0 - Math.pow(1.0 - this._waveWindMotion01, 1.35);
+    const slewPerSec = Math.max(0.05, Number(p.waveGustSlewRate ?? 0.68));
+    const maxGustStep = slewPerSec * dt;
+    let gDisp = Number.isFinite(this._waveGustDisplay01) ? this._waveGustDisplay01 : targetGust01;
+    gDisp += Math.min(maxGustStep, Math.max(-maxGustStep, targetGust01 - gDisp));
+    gDisp = Math.max(0.0, Math.min(1.0, gDisp));
+    this._waveGustDisplay01 = gDisp;
+    const gust01 = gDisp;
+
     const waveSpeed = (speedLo + (speedHi - speedLo) * gust01) * (p.waveSpeed ?? 1.0);
     const waveStrength = (strengthMin + (1.0 - strengthMin) * gust01) * (p.waveStrength ?? 0.6);
 
     // Wind time: monotonic integration driven by the smoothed wave wind (never reverses).
-    this._windTime += dt * (0.1 + gust01 * 0.9);
-    this._waveTime += dt * waveSpeed;
+    const gustForWindTime = 1.0 - Math.pow(1.0 - this._waveWindMotion01, 1.35);
+    this._windTime += dt * (0.1 + gustForWindTime * 0.9);
+    // Shader phase is -omega*uWaveTime (no longer × uWaveSpeed). Previously JS integrated
+    // uWaveTime by waveSpeed while the shader multiplied by waveSpeed again (~w² steady rate).
+    // Integrate w² here so travel speed matches legacy visuals without the S*Δw phase pop.
+    this._waveTime += dt * waveSpeed * Math.max(0.0, waveSpeed);
     u.uWindTime.value = this._windTime;
     if (u.uWaveTime) u.uWaveTime.value = this._waveTime;
 
@@ -2987,7 +2972,8 @@ static getControlSchema() {
 
     // ── Waves ─────────────────────────────────────────────────────────────
     u.uWaveScale.value = safeNum(p.waveScale, 16.0);
-    u.uWaveSpeed.value = waveSpeed;
+    // Gerstner phase uses uWaveTime only (water-shader). Keep uniform at 1 so older tooling stays valid.
+    u.uWaveSpeed.value = 1.0;
     u.uWaveStrength.value = waveStrength;
     if (u.uWaveMotion01) u.uWaveMotion01.value = gust01;
     u.uDistortionStrengthPx.value = safeNum(p.distortionStrengthPx, 24.0);
@@ -3196,6 +3182,12 @@ static getControlSchema() {
     u.uShoreFoamThreshold.value = safeNum(p.shoreFoamThreshold, 0.28);
     u.uShoreFoamScale.value = safeNum(p.shoreFoamScale, 20.0);
     u.uShoreFoamSpeed.value = safeNum(p.shoreFoamSpeed, 0.1);
+    u.uShoreFoamCoverage.value = safeNum(p.shoreFoamCoverage, 0.56);
+    u.uShoreFoamSeedOffset.value.set(
+      safeNum(p.shoreFoamSeedOffsetX, 13.7),
+      safeNum(p.shoreFoamSeedOffsetY, -8.9),
+    );
+    u.uShoreFoamTimeOffset.value = safeNum(p.shoreFoamTimeOffset, 41.0);
     
     // Modulate foam brightness by scene darkness so it doesn't "glow" at night
     const shoreBrightnessBase = safeNum(p.shoreFoamBrightness, 0.6);
@@ -3239,6 +3231,7 @@ static getControlSchema() {
     u.uShoreFoamCoreFalloff.value = safeNum(p.shoreFoamCoreFalloff, 0.1);
     u.uShoreFoamTailWidth.value = safeNum(p.shoreFoamTailWidth, 0.6);
     u.uShoreFoamTailFalloff.value = safeNum(p.shoreFoamTailFalloff, 0.3);
+    u.uShoreFoamFadeCurve.value = safeNum(p.shoreFoamFadeCurve, 1.7);
 
     // Sun direction from azimuth + elevation (cached to avoid per-frame trig)
     const az = safeNum(p.specSunAzimuthDeg, 135);
@@ -3974,6 +3967,7 @@ static getControlSchema() {
     this._windTime = 0;
     this._windOffsetUvX = 0;
     this._windOffsetUvY = 0;
+    this._waveGustDisplay01 = 0;
     this._smoothedWaveShapeWind01 = 0;
     this._lastDefinesKey = -1;
     this._firstRenderDone = false;
@@ -4296,6 +4290,9 @@ static getControlSchema() {
       uShoreFoamThreshold:                { value: p.shoreFoamThreshold ?? 0.28 },
       uShoreFoamScale:                    { value: p.shoreFoamScale ?? 20.0 },
       uShoreFoamSpeed:                    { value: p.shoreFoamSpeed ?? 0.1 },
+      uShoreFoamCoverage:                 { value: p.shoreFoamCoverage ?? 0.56 },
+      uShoreFoamSeedOffset:               { value: new THREE.Vector2(p.shoreFoamSeedOffsetX ?? 13.7, p.shoreFoamSeedOffsetY ?? -8.9) },
+      uShoreFoamTimeOffset:               { value: p.shoreFoamTimeOffset ?? 41.0 },
       uShoreFoamColor:                    { value: new THREE.Vector3(shoreFoamColor.r, shoreFoamColor.g, shoreFoamColor.b) },
       uShoreFoamTint:                     { value: new THREE.Vector3(shoreFoamTint.r, shoreFoamTint.g, shoreFoamTint.b) },
       uShoreFoamTintStrength:             { value: p.shoreFoamTintStrength ?? 0.2 },
@@ -4330,6 +4327,7 @@ static getControlSchema() {
       uShoreFoamCoreFalloff:              { value: p.shoreFoamCoreFalloff ?? 0.1 },
       uShoreFoamTailWidth:                { value: p.shoreFoamTailWidth ?? 0.6 },
       uShoreFoamTailFalloff:              { value: p.shoreFoamTailFalloff ?? 0.3 },
+      uShoreFoamFadeCurve:                { value: p.shoreFoamFadeCurve ?? 1.7 },
 
       // Foam
       uFoamColor:     { value: new THREE.Vector3(foamColor.r, foamColor.g, foamColor.b) },

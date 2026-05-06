@@ -48,6 +48,8 @@ export class BuildingShadowsEffectV2 {
       shadowCurve: 0.9,
       blurRadius: 1.6,
       sunLatitude: 0.1,
+      dynamicLightShadowOverrideEnabled: true,
+      dynamicLightShadowOverrideStrength: 0.7,
     };
 
     /** @type {THREE.WebGLRenderer|null} */
@@ -88,6 +90,7 @@ export class BuildingShadowsEffectV2 {
 
     this._sunAzimuthDeg = null;
     this._sunElevationDeg = null;
+    this._dynamicLightOverride = null;
 
     /** @type {Promise<void>|null} Background floor-mask warmup in flight */
     this._floorPreloadPromise = null;
@@ -244,7 +247,15 @@ export class BuildingShadowsEffectV2 {
         uShadowCurve: { value: this.params.shadowCurve },
         uZoom: { value: 1.0 },
         uTexelSize: { value: new THREE.Vector2(1 / 1024, 1 / 1024) },
-        uSceneDimensions: { value: new THREE.Vector2(1, 1) }
+        uSceneDimensions: { value: new THREE.Vector2(1, 1) },
+        tDynamicLight: { value: null },
+        uHasDynamicLight: { value: 0.0 },
+        uDynamicLightShadowOverrideEnabled: { value: 1.0 },
+        uDynamicLightShadowOverrideStrength: { value: this.params.dynamicLightShadowOverrideStrength ?? 0.7 },
+        uDynViewBounds: { value: new THREE.Vector4(0, 0, 1, 1) },
+        uDynSceneDimensions: { value: new THREE.Vector2(1, 1) },
+        uDynSceneRect: { value: new THREE.Vector4(0, 0, 1, 1) },
+        uHasDynSceneRect: { value: 0.0 }
       },
       vertexShader: `
         varying vec2 vUv;
@@ -269,6 +280,14 @@ export class BuildingShadowsEffectV2 {
         uniform float uZoom;
         uniform vec2 uTexelSize;
         uniform vec2 uSceneDimensions;
+        uniform sampler2D tDynamicLight;
+        uniform float uHasDynamicLight;
+        uniform float uDynamicLightShadowOverrideEnabled;
+        uniform float uDynamicLightShadowOverrideStrength;
+        uniform vec4 uDynViewBounds;
+        uniform vec2 uDynSceneDimensions;
+        uniform vec4 uDynSceneRect;
+        uniform float uHasDynSceneRect;
         varying vec2 vUv;
 
         float uvInBounds(vec2 uv) {
@@ -304,6 +323,13 @@ export class BuildingShadowsEffectV2 {
           float valid = uvInBounds(uv);
           float casterOutdoors = readOutdoorsMask(uv);
           return (1.0 - casterOutdoors) * receiverOutdoorGate * valid;
+        }
+
+        vec2 sceneUvToDynScreenUv(vec2 sceneUv) {
+          vec2 foundryPos = uDynSceneRect.xy + sceneUv * max(uDynSceneRect.zw, vec2(1e-5));
+          vec2 threePos = vec2(foundryPos.x, uDynSceneDimensions.y - foundryPos.y);
+          vec2 span = max(uDynViewBounds.zw - uDynViewBounds.xy, vec2(1e-5));
+          return (threePos - uDynViewBounds.xy) / span;
         }
 
         void main() {
@@ -365,6 +391,14 @@ export class BuildingShadowsEffectV2 {
           float strength = mix(integrated, peakHit, 0.35 + 0.25 * smearAmount);
           strength = smoothstep(0.0, 1.0, clamp(strength, 0.0, 1.0));
           strength = pow(strength, max(uShadowCurve, 0.01));
+          if (uHasDynamicLight > 0.5 && uDynamicLightShadowOverrideEnabled > 0.5 && uHasDynSceneRect > 0.5) {
+            vec2 dynUv = clamp(sceneUvToDynScreenUv(vUv), vec2(0.0), vec2(1.0));
+            vec3 dyn = texture2D(tDynamicLight, dynUv).rgb;
+            float dynI = clamp(max(dyn.r, max(dyn.g, dyn.b)), 0.0, 1.0);
+            float dynPresence = smoothstep(0.02, 0.30, dynI);
+            float dynLift = clamp(dynPresence * max(uDynamicLightShadowOverrideStrength, 0.0), 0.0, 1.0);
+            strength = mix(strength, 0.0, dynLift);
+          }
           gl_FragColor = vec4(vec3(clamp(strength, 0.0, 1.0)), 1.0);
         }
       `,
@@ -542,6 +576,40 @@ export class BuildingShadowsEffectV2 {
     u.uShadowCurve.value = this.params.shadowCurve;
     u.uZoom.value = this._getEffectiveZoom();
     if (this.sunDir) u.uSunDir.value.copy(this.sunDir);
+    const dlo = this._dynamicLightOverride;
+    const dynTex = dlo?.texture ?? null;
+    if (u.tDynamicLight) u.tDynamicLight.value = dynTex;
+    if (u.uHasDynamicLight) u.uHasDynamicLight.value = dynTex ? 1.0 : 0.0;
+    if (u.uDynamicLightShadowOverrideEnabled) {
+      u.uDynamicLightShadowOverrideEnabled.value = (this.params.dynamicLightShadowOverrideEnabled !== false && dlo?.enabled !== false) ? 1.0 : 0.0;
+    }
+    if (u.uDynamicLightShadowOverrideStrength) {
+      const dynStrength = Number.isFinite(Number(dlo?.strength))
+        ? Number(dlo.strength)
+        : Number(this.params.dynamicLightShadowOverrideStrength ?? 0.7);
+      u.uDynamicLightShadowOverrideStrength.value = Math.max(0.0, Math.min(1.0, dynStrength));
+    }
+    if (u.uDynViewBounds) {
+      const vb = dlo?.viewBounds;
+      if (vb && Number.isFinite(vb.x) && Number.isFinite(vb.y) && Number.isFinite(vb.z) && Number.isFinite(vb.w)) {
+        u.uDynViewBounds.value.set(vb.x, vb.y, vb.z, vb.w);
+      }
+    }
+    if (u.uDynSceneDimensions) {
+      const sdim = dlo?.sceneDimensions;
+      if (sdim && Number.isFinite(sdim.x) && Number.isFinite(sdim.y)) {
+        u.uDynSceneDimensions.value.set(sdim.x, sdim.y);
+      }
+    }
+    if (u.uDynSceneRect && u.uHasDynSceneRect) {
+      const srect = dlo?.sceneRect;
+      if (srect && Number.isFinite(srect.x) && Number.isFinite(srect.y) && Number.isFinite(srect.z) && Number.isFinite(srect.w)) {
+        u.uDynSceneRect.value.set(srect.x, srect.y, srect.z, srect.w);
+        u.uHasDynSceneRect.value = 1.0;
+      } else {
+        u.uHasDynSceneRect.value = 0.0;
+      }
+    }
 
     const dims = canvas?.dimensions;
     if (dims && u.uSceneDimensions) {
@@ -561,6 +629,10 @@ export class BuildingShadowsEffectV2 {
   setSunAngles(azimuthDeg, elevationDeg) {
     this._sunAzimuthDeg = Number(azimuthDeg);
     this._sunElevationDeg = Number(elevationDeg);
+  }
+
+  setDynamicLightOverride(payload = null) {
+    this._dynamicLightOverride = payload && typeof payload === 'object' ? payload : null;
   }
 
   /**
@@ -773,6 +845,7 @@ export class BuildingShadowsEffectV2 {
       drewAny: true,
       receiverMaskUuid: receiverMaskTex?.uuid ?? null,
       shadowFactorTextureUuid: this.shadowTarget?.texture?.uuid ?? null,
+      dynamicLightOverrideBound: !!(this._dynamicLightOverride?.texture),
     };
 
     const blurRadius = Number(this.params.blurRadius ?? 0);
@@ -1204,6 +1277,22 @@ export class BuildingShadowsEffectV2 {
       const azimuth = (t - 0.5) * (Math.PI * 2.0);
       x = -Math.sin(azimuth);
       y = -Math.cos(azimuth) * lat;
+    }
+
+    // Prevent zero-length vectors from reaching shader normalize() when latitude
+    // is zero and azimuth crosses noon/midnight in full-orbit mode.
+    const dirLenSq = (x * x) + (y * y);
+    if (dirLenSq < 1e-8) {
+      const prevX = Number(this.sunDir?.x);
+      const prevY = Number(this.sunDir?.y);
+      const prevLenSq = (prevX * prevX) + (prevY * prevY);
+      if (Number.isFinite(prevLenSq) && prevLenSq > 1e-8) {
+        x = prevX;
+        y = prevY;
+      } else {
+        x = Math.cos(Number.isFinite(this._sunAzimuthDeg) ? (this._sunAzimuthDeg * (Math.PI / 180.0)) : 0.0) >= 0.0 ? -1.0 : 1.0;
+        y = 0.0;
+      }
     }
 
     if (!this.sunDir) this.sunDir = new THREE.Vector2(x, y);

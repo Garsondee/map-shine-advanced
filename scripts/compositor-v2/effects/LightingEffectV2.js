@@ -30,6 +30,12 @@
  * darkens under cloud cover. Lights still punch through (they add on top of the
  * shadow-dimmed ambient rather than being gated by it).
  *
+ * Structural shadows (overhead / building / painted) are normally pre-multiplied
+ * by ShadowManagerV2 into `tCombinedShadow`; the compose pass dims ambient once.
+ * A separate `tBuildingShadow` multiply runs only when combined shadow is
+ * unavailable (legacy wiring), matching the gated overhead legacy path — not in
+ * addition to combined, which would double-apply building darkening.
+ *
  * @module compositor-v2/effects/LightingEffectV2
  */
 
@@ -164,6 +170,8 @@ export class LightingEffectV2 {
       cloudShadowAmbientInfluence: 1.0,
       /** Scales overhead shadow strength on ambient only (0 = off). */
       overheadShadowAmbientInfluence: 1.0,
+      /** How strongly dynamic lights neutralize ambient shadow darkening (0 = off, 1 = full). */
+      dynamicLightShadowOverrideStrength: 0.65,
       /** Internal render scale for source lights RT (1.0 = full resolution). */
       internalLightResolutionScale: 1.0,
       /** Internal render scale for window glow RT (1.0 = full resolution). */
@@ -439,6 +447,15 @@ export class LightingEffectV2 {
     return this._lightScene;
   }
 
+  /**
+   * Latest dynamic-light accumulation texture (previous frame when sampled by
+   * pre-light shadow passes).
+   * @returns {THREE.Texture|null}
+   */
+  get dynamicLightTexture() {
+    return this._lightRT?.texture ?? null;
+  }
+
   // ── UI schema (moved from V1 LightingEffect) ─────────────────────────────
 
   static getControlSchema() {
@@ -488,6 +505,7 @@ export class LightingEffectV2 {
             'ambientBuildingShadowMix',
             'cloudShadowAmbientInfluence',
             'overheadShadowAmbientInfluence',
+            'dynamicLightShadowOverrideStrength',
           ],
         },
         {
@@ -645,6 +663,15 @@ export class LightingEffectV2 {
           label: 'Overhead shadow on ambient',
           tooltip: 'Scales overhead tile shadow on ambient; torches and lamps still punch through.',
         },
+        dynamicLightShadowOverrideStrength: {
+          type: 'slider',
+          min: 0,
+          max: 1,
+          step: 0.05,
+          default: 0.65,
+          label: 'Dynamic light shadow override',
+          tooltip: 'Lifts cloud/combined/overhead ambient shadows under strong dynamic lighting (player torch/flashlight and other lights).',
+        },
         wallInsetPx: { type: 'slider', min: 0, max: 40, step: 0.5, default: 6.0, label: 'Wall Inset (px)' },
         restrictRoofScreenLightOcclusionToTopFloor: {
           type: 'boolean',
@@ -743,7 +770,7 @@ export class LightingEffectV2 {
         tCombinedShadowRaw:    { value: null },
         uHasCombinedShadowRaw: { value: 0 },
         // Building shadow: greyscale factor from BuildingShadowsEffectV2.
-        // Applied after cloud shadow — dims only the ambient component.
+        // Legacy-only when uHasCombinedShadow is off (combined already includes building).
         tBuildingShadow:     { value: null },
         uHasBuildingShadow:  { value: 0 },
         uBuildingShadowOpacity: { value: 0.75 },
@@ -792,6 +819,7 @@ export class LightingEffectV2 {
         uComposeToneExposure: { value: 1.0 },
         uCloudShadowAmbientInfluence: { value: 1.0 },
         uOverheadShadowAmbientInfluence: { value: 1.0 },
+        uDynamicLightShadowOverrideStrength: { value: 0.65 },
         uNegativeDarknessStrength: { value: 1.0 },
         uDarknessPunchGain:        { value: 2.0 },
         uInteriorDarkness:         { value: 0.0 },
@@ -872,6 +900,7 @@ export class LightingEffectV2 {
         uniform float uComposeToneExposure;
         uniform float uCloudShadowAmbientInfluence;
         uniform float uOverheadShadowAmbientInfluence;
+        uniform float uDynamicLightShadowOverrideStrength;
         uniform float uNegativeDarknessStrength;
         uniform float uDarknessPunchGain;
         uniform float uInteriorDarkness;
@@ -1062,6 +1091,15 @@ export class LightingEffectV2 {
           // Darkness punch: strong nearby lights reduce the effective darkness
           // level locally, letting the ambient brighten under torches/lamps.
           float lightTermI = max(lightIVisible * master, 0.0);
+          // Shadow override should react as soon as gameplay lights are visibly present.
+          // Use a lower activation band than darkness-punch so torch/flashlight beams
+          // can clear shadows instead of being visibly darkened by them.
+          float dynamicLightPresence = smoothstep(0.015, 0.22, max(lightIVisible, lightTermI));
+          float dynamicShadowLift = clamp(
+            dynamicLightPresence * clamp(uDynamicLightShadowOverrideStrength, 0.0, 1.0),
+            0.0,
+            1.0
+          );
           float punch = 1.0 - exp(-lightTermI * max(uDarknessPunchGain, 0.0));
           float localDarknessLevel = clamp(
             baseDarknessLevel * (1.0 - punch * max(uNegativeDarknessStrength, 0.0)),
@@ -1117,6 +1155,7 @@ export class LightingEffectV2 {
               shadowFactor,
               clamp(uCloudShadowAmbientInfluence, 0.0, 1.0)
             );
+            shadowFactorMix = mix(shadowFactorMix, 1.0, dynamicShadowLift);
             vec3 ambientPortion = ambientAfterDark;
             totalIllumination = ambientPortion * shadowFactorMix + directLight;
           }
@@ -1140,17 +1179,20 @@ export class LightingEffectV2 {
               shadowFactor,
               clamp(uCloudShadowAmbientInfluence, 0.0, 1.0)
             );
+            shadowFactorMixC = mix(shadowFactorMixC, 1.0, dynamicShadowLift);
             // Only dim the ambient portion; keep dynamic-light additive intact.
             vec3 ambientPortion = ambientAfterDark;
             totalIllumination = ambientPortion * shadowFactorMixC + directLight;
           }
 
-          // Building shadow: dims only the ambient component.
+          // Building shadow (legacy path only): dims only the ambient component.
+          // When tCombinedShadow is bound, ShadowManagerV2 already multiplied
+          // building into the combined factor — do not apply tBuildingShadow again.
           // World-stable UV reconstruction: vUv maps 0..1 across the viewport.
           // Reconstruct world XY by lerping the camera frustum corners, then
           // normalise by scene rect to get scene UV (0..1 = scene rect).
           // This matches CloudEffectV2's uViewBoundsMin/Max approach exactly.
-          if (uHasBuildingShadow > 0.5) {
+          if (uHasCombinedShadow < 0.5 && uHasBuildingShadow > 0.5) {
             // BuildingShadowsEffectV2 outputs scene-space UV aligned with sceneUvFoundry.
             float bldShadow = clamp(texture2D(tBuildingShadow, sceneUvFoundry).r, 0.0, 1.0);
             // Guard scene padding / outside-scene pixels: do NOT clamp-sample edge texels
@@ -1167,6 +1209,9 @@ export class LightingEffectV2 {
               float roofSuppress = mix(0.0, roofAlpha, clamp(uApplyRoofOcclusionToBuilding, 0.0, 1.0));
               shadowMix = mix(shadowMix, 1.0, roofSuppress);
             }
+            // Dynamic lights should neutralize building-shadow darkening where
+            // the receiver is strongly lit (player torch/flashlight and other lights).
+            shadowMix = mix(shadowMix, 1.0, dynamicShadowLift);
             // Apply only to ambient contribution; dynamic lights punch through.
             vec3 ambientComponent = totalIllumination - directLight;
             ambientComponent *= shadowMix;
@@ -1184,6 +1229,7 @@ export class LightingEffectV2 {
             float ovAmt = clamp(uOverheadShadowOpacity, 0.0, 1.0)
               * clamp(uOverheadShadowAmbientInfluence, 0.0, 1.0);
             vec3 ovMix = mix(vec3(1.0), combinedShadowFactor, ovAmt);
+            ovMix = mix(ovMix, vec3(1.0), dynamicShadowLift);
             vec3 ambientComp = totalIllumination - directLight;
             ambientComp *= ovMix;
             totalIllumination = ambientComp + directLight;
@@ -1776,6 +1822,7 @@ export class LightingEffectV2 {
       u.uComposeToneExposure.value = Math.max(0, Number(this.params.composeToneExposure) || 1);
       u.uCloudShadowAmbientInfluence.value = clamp01(Number(this.params.cloudShadowAmbientInfluence) ?? 1);
       u.uOverheadShadowAmbientInfluence.value = clamp01(Number(this.params.overheadShadowAmbientInfluence) ?? 1);
+      u.uDynamicLightShadowOverrideStrength.value = clamp01(Number(this.params.dynamicLightShadowOverrideStrength) ?? 0.65);
       u.uNegativeDarknessStrength.value = this.params.negativeDarknessStrength;
       u.uDarknessPunchGain.value = this.params.darknessPunchGain;
       u.uInteriorDarkness.value = Math.max(0, Number(this.params.interiorDarkness) || 0);

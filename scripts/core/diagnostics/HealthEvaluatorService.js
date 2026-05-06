@@ -1044,6 +1044,7 @@ export class HealthEvaluatorService {
     this.dependencyGraph.addEdge('CloudEffectV2', 'LightingEffectV2', 'required');
     this.dependencyGraph.addEdge('OverheadShadowsEffectV2', 'LightingEffectV2', 'required');
     this.dependencyGraph.addEdge('BuildingShadowsEffectV2', 'LightingEffectV2', 'required');
+    this.dependencyGraph.addEdge('PaintedShadowEffectV2', 'LightingEffectV2', 'required');
     this.dependencyGraph.addEdge('WaterEffectV2', 'WindowLightEffectV2', 'contextual');
     this.dependencyGraph.addEdge('WaterEffectV2', 'WaterSplashesEffectV2', 'contextual');
     this.dependencyGraph.addEdge('WindowLightEffectV2', 'LightingEffectV2', 'required');
@@ -1714,6 +1715,34 @@ export class HealthEvaluatorService {
           },
         },
         heartbeatRule('BuildingShadowsEffectV2', 8000),
+      ],
+    });
+
+    this.registry.register('PaintedShadowEffectV2', {
+      effectId: 'PaintedShadowEffectV2',
+      getInstance: (ctx) => ctx.floorCompositor?._paintedShadowEffect ?? null,
+      getLevelKeys: (_instance, ctx) => activeLevelKeys(ctx),
+      rules: [
+        {
+          id: 'initializedTargets',
+          tier: 'structural',
+          severity: 'error',
+          check: (instance) => {
+            if (instance?.params && instance.params.enabled === false) {
+              return { pass: true, skipped: true, message: 'Painted shadows disabled' };
+            }
+            const pass =
+              !!instance?._projectMaterial &&
+              !!instance?.shadowTarget?.texture;
+            return {
+              pass,
+              message: pass
+                ? 'Painted shadow material + output target available'
+                : 'Painted shadow resources missing after init',
+            };
+          },
+        },
+        heartbeatRule('PaintedShadowEffectV2', 8000),
       ],
     });
 

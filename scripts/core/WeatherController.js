@@ -2619,7 +2619,7 @@ export class WeatherController {
     return {
       enabled: true,
       /** Bump when adding/removing Tweakpane params so the Weather folder can rebuild (see canvas-replacement). */
-      uiRevision: 3,
+      uiRevision: 4,
       parameters: {
         presetTransitionDurationMinutes: {
           label: 'Preset Transition (min)',
@@ -2711,15 +2711,6 @@ export class WeatherController {
           group: 'transitions'
         },
         
-        // Variability
-        variability: {
-          label: 'Variability',
-          default: 0.7,
-          min: 0.0,
-          max: 1.0,
-          step: 0.01,
-          group: 'simulation'
-        },
         simulationSpeed: {
           label: 'Simulation Speed',
           default: 1.0,
@@ -2745,23 +2736,6 @@ export class WeatherController {
           max: 1.0,
           step: 0.01,
           group: 'state'
-        },
-        // Wind base state (moved into dedicated Wind folder)
-        windSpeed: {
-          label: 'Base Wind Speed',
-          default: 0.44,
-          min: 0.0,
-          max: 1.0,
-          step: 0.01,
-          group: 'wind'
-        },
-        windDirection: {
-          label: 'Wind Direction (deg)',
-          default: 0.0,
-          min: 0.0,
-          max: 360.0,
-          step: 1.0,
-          group: 'wind'
         },
         fogDensity: {
           label: 'Fog Density',
@@ -2795,40 +2769,6 @@ export class WeatherController {
           max: 1.0,
           step: 0.01,
           group: 'manual'
-        },
-
-        // Wind / Gust tuning
-        gustWaitMin: {
-          label: 'Gust Pause Min (s)',
-          default: 1.0,
-          min: 0.0,
-          max: 60.0,
-          step: 0.5,
-          group: 'wind'
-        },
-        gustWaitMax: {
-          label: 'Gust Pause Max (s)',
-          default: 11.5,
-          min: 0.0,
-          max: 120.0,
-          step: 0.5,
-          group: 'wind'
-        },
-        gustDuration: {
-          label: 'Gust Duration (s)',
-          default: 7.4,
-          min: 0.1,
-          max: 30.0,
-          step: 0.1,
-          group: 'wind'
-        },
-        gustStrength: {
-          label: 'Gust Strength',
-          default: 1.0,
-          min: 0.0,
-          max: 3.0,
-          step: 0.05,
-          group: 'wind'
         },
 
         // Rain tuning
@@ -3492,11 +3432,10 @@ export class WeatherController {
           'startQueuedTransition'
         ], expanded: false },
         { label: 'Environment', type: 'folder', parameters: ['roofMaskForceEnabled'] },
-        { label: 'Simulation', type: 'folder', parameters: ['variability', 'transitionDuration', 'simulationSpeed'] },
+        { label: 'Simulation', type: 'folder', parameters: ['transitionDuration', 'simulationSpeed'] },
         { label: 'Fog', type: 'folder', parameters: ['fogDensity'], expanded: true },
         { label: 'Manual Override', type: 'folder', parameters: ['precipitation', 'cloudCover', 'wetness', 'freezeLevel'], expanded: true },
         { label: 'Wetness', type: 'folder', parameters: ['wettingDuration', 'dryingDuration', 'precipThreshold'] },
-        { label: 'Wind', type: 'folder', parameters: ['windSpeed', 'windDirection', 'gustWaitMin', 'gustWaitMax', 'gustDuration', 'gustStrength'], expanded: true },
         { label: 'Rain', type: 'folder', parameters: [
           'rainIntensityScale',
           'rainStreakLength',

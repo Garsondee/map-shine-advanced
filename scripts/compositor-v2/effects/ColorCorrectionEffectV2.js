@@ -10,8 +10,9 @@
  *   - Vignette + film grain
  *
  * Runs AFTER SkyColorEffectV2 (which provides time-of-day atmospheric grading).
- * Together they form the complete color pipeline:
- *   SkyColor (automated, atmospheric) → ColorCorrection (static, user look)
+ * In {@link FloorCompositor} per-level order it runs **after** WaterEffectV2 when
+ * water renders in the slice, so foam/spec/tint are graded without a second pass.
+ * Together: SkyColor (atmospheric) → … water … → ColorCorrection (user look).
  *
  * Ported from V1 ColorCorrectionEffect with identical shader logic and defaults.
  *

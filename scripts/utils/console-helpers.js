@@ -1796,6 +1796,101 @@ export const consoleHelpers = {
   },
 
   /**
+   * Why overhead sky-reach shelter can be “always on” but invisible: the shader
+   * only runs the branch when `uHasSkyReach` is set (bound non-null `skyReach`
+   * texture). Missing RT → skipped. Flat skyReach≈1 everywhere → no shelter.
+   *
+   * Usage: MapShine.debug.diagnoseSkyReachV2()
+   *
+   * @returns {object}
+   */
+  diagnoseSkyReachV2() {
+    const ms = window.MapShine ?? {};
+    const comp = ms.sceneComposer?._sceneMaskCompositor ?? null;
+    const fc = ms.effectComposer?._floorCompositorV2 ?? null;
+    const oh = fc?._overheadShadowEffect ?? null;
+    const floors = ms.floorStack?.getFloors?.() ?? [];
+    const active = ms.floorStack?.getActiveFloor?.() ?? null;
+
+    /** @type {number|null} */
+    let uHasSkyReach = null;
+    /** @type {number|null} */
+    let uSkyReachShadowOpacity = null;
+    try {
+      const u = oh?.material?.uniforms;
+      if (u?.uHasSkyReach) uHasSkyReach = Number(u.uHasSkyReach.value);
+      if (u?.uSkyReachShadowOpacity) uSkyReachShadowOpacity = Number(u.uSkyReachShadowOpacity.value);
+    } catch (_) {}
+
+    const rows = floors.map((f) => {
+      const key =
+        f?.compositorKey != null
+          ? String(f.compositorKey)
+          : `${Number(f?.elevationMin)}:${Number(f?.elevationMax)}`;
+      const skyReach = comp?.getFloorTexture?.(key, 'skyReach') ?? null;
+      const floorAlpha = comp?.getFloorTexture?.(key, 'floorAlpha') ?? null;
+      const outdoors = comp?.getFloorTexture?.(key, 'outdoors') ?? null;
+      const w = skyReach?.image?.width ?? skyReach?.source?.data?.width ?? skyReach?.width ?? null;
+      const h = skyReach?.image?.height ?? skyReach?.source?.data?.height ?? skyReach?.height ?? null;
+      return {
+        index: f?.index,
+        key,
+        outdoors: outdoors ? 'yes' : '—',
+        floorAlpha: floorAlpha ? 'yes' : '—',
+        skyReachTex: skyReach ? 'yes' : '—',
+        size: w && h ? `${w}×${h}` : '—',
+      };
+    });
+
+    const summary = {
+      compositor: !!comp,
+      overheadEffect: !!oh,
+      overheadParamsEnabled: oh?.params?.enabled !== false,
+      overheadOpacity: oh?.params?.opacity,
+      skyReachShadowOpacityParam: oh?.params?.skyReachShadowOpacity,
+      uHasSkyReach,
+      uSkyReachShadowOpacityUniform: uSkyReachShadowOpacity,
+      cacheFloorKeys: comp?._floorCache ? [...comp._floorCache.keys()] : [],
+      _activeFloorKey: comp?._activeFloorKey ?? null,
+    };
+
+    try {
+      console.table(rows);
+      console.log('[diagnoseSkyReachV2] GPU uniforms / compositor — inspect `summary`:', summary);
+    } catch (_) {}
+
+    const activeKey =
+      active?.compositorKey != null
+        ? String(active.compositorKey)
+        : Number.isFinite(Number(active?.elevationMin)) && Number.isFinite(Number(active?.elevationMax))
+          ? `${Number(active.elevationMin)}:${Number(active.elevationMax)}`
+          : null;
+
+    let activeSky = activeKey && comp?.getFloorTexture ? comp.getFloorTexture(activeKey, 'skyReach') : null;
+
+    if (!activeSky && activeKey && comp?.getFloorTexture) {
+      const alt = `${Number(active?.elevationMin)}:${Number(active?.elevationMax)}`;
+      if (alt !== activeKey) activeSky = comp.getFloorTexture(alt, 'skyReach');
+    }
+
+    if (!activeSky) {
+      console.warn(
+        '[diagnoseSkyReachV2] Active floor has NO skyReach texture → uHasSkyReach stays 0 → shelter math never runs. Compose masks / visit upper floors so GpuSceneMaskCompositor caches floorAlpha above this band.',
+      );
+    } else if (uHasSkyReach != null && uHasSkyReach < 0.5) {
+      console.warn(
+        '[diagnoseSkyReachV2] skyReach RT exists but uHasSkyReach<0.5 — key mismatch vs FloorCompositor bind path or update not run yet.',
+      );
+    } else {
+      console.info(
+        '[diagnoseSkyReachV2] Texture bound. If still no darkness under decks: sample MapShine.debug.skyReachProbe(x,y) under a bridge — expect value≈0 there; value≈1 everywhere means upper-floor floorAlpha never occluded this band.',
+      );
+    }
+
+    return { rows, summary, activeKey, hasActiveSkyReachTex: !!activeSky };
+  },
+
+  /**
    * Toggle the unified MaskBindingController rollout flag at runtime.
    * When enabled, FloorCompositor routes per-frame mask fan-out through
    * MaskBindingController (in addition to the legacy outdoors sync) so the
@@ -2442,6 +2537,7 @@ Available commands (access via MapShine.debug):
   .setStrictSync(bool)      - Enable/disable strict render sync at runtime
   .diagnoseMaskBindings()   - Per-floor mask fan-out snapshot (MaskBindingController)
   .skyReachProbe(x,y,fIdx)  - Read back skyReach value at world (x,y) for a floor
+  .diagnoseSkyReachV2()     - Table: per-floor skyReach/floorAlpha + uHasSkyReach (why shelter is invisible)
   .setMaskBindingController(bool) - Toggle the unified mask binding controller rollout
   .levelAlphaProbe(x,y)     - Read scene+final RT alpha per level (+ water occluder) at canvas pixel (x,y)
   .dumpLevelRTs()           - Dump each level's sceneRT (authored) AND finalRT (post-rebind) to PNG tabs

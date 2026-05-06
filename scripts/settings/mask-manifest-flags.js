@@ -168,7 +168,7 @@ export function collectEnabledMaskIds(scene) {
   const isEnabled = (effectId) => !!enabledEffects?.[effectId]?.enabled;
   // Outdoors is required for BuildingShadows / specular / sky gating — not optional
   // like tree/bush; always allow manifest + bundle resolution alongside specular.
-  const ids = new Set(['specular', 'outdoors']);
+  const ids = new Set(['specular', 'outdoors', 'handPaintedShadow']);
 
   if (isEnabled('specular')) {
     ids.add('normal');
@@ -194,6 +194,17 @@ export function collectEnabledMaskIds(scene) {
     ids.add('water');
   }
   return Array.from(ids);
+}
+
+function _hasAllEnabledMaskPaths(pathsByMaskId, enabledMaskIds) {
+  const p = pathsByMaskId && typeof pathsByMaskId === 'object' ? pathsByMaskId : {};
+  for (const id of Array.isArray(enabledMaskIds) ? enabledMaskIds : []) {
+    const key = String(id || '').trim();
+    if (!key) continue;
+    const v = p[key] ?? p[key.toLowerCase()] ?? p[key.toUpperCase()];
+    if (typeof v !== 'string' || !v.trim()) return false;
+  }
+  return true;
 }
 
 /**
@@ -251,7 +262,11 @@ export async function prepareSceneMaskManifestForLoad(scene, { basePath, maskSou
   const flag = getMaskTextureManifest(scene);
   const flagMatches = maskTextureManifestMatchesLoadContext(flag, basePath, maskSourceSrc);
 
-  if (flagMatches && flag.pathsByMaskId) {
+  const flagHasAllEnabled = flagMatches && flag?.pathsByMaskId
+    ? _hasAllEnabledMaskPaths(flag.pathsByMaskId, enabledMaskIds)
+    : false;
+
+  if (flagMatches && flag.pathsByMaskId && flagHasAllEnabled) {
     const manifest = pathsByMaskIdToLoaderManifest(flag.pathsByMaskId, enabledMaskIds);
     return {
       maskManifest: manifest,
@@ -261,6 +276,17 @@ export async function prepareSceneMaskManifestForLoad(scene, { basePath, maskSou
       // Paths came from GM directory listing — do not convention-probe missing optional masks (404 spam).
       maskConventionFallback: 'off',
     };
+  }
+
+  // Stale-manifest repair for GMs: if load context matches but enabled mask ids
+  // have grown (e.g. new feature adds `_Shadow`), refresh from directory listing
+  // instead of silently omitting the new masks forever.
+  if (flagMatches && flag?.pathsByMaskId && !flagHasAllEnabled && isGmLike()) {
+    log.info('Refreshing stale maskTextureManifest missing enabled mask ids', {
+      basePath,
+      enabledMaskIds,
+      manifestIds: Object.keys(flag.pathsByMaskId || {}),
+    });
   }
 
   if (!isGmLike()) {
@@ -315,14 +341,20 @@ export function getMaskBundleOptionsFromFlagOnly(scene, basePath, enabledMaskIds
   const maskSourceSrc = resolveSceneMaskSourceSrc(scene) || '';
   const ext = extensionFromTextureSrc(maskSourceSrc || scene?.background?.src);
   const flag = getMaskTextureManifest(scene);
-  if (!maskTextureManifestMatchesLoadContext(flag, basePath, maskSourceSrc) || !flag.pathsByMaskId) {
+  const flagMatches = maskTextureManifestMatchesLoadContext(flag, basePath, maskSourceSrc);
+  const flagHasAllEnabled = flagMatches && flag?.pathsByMaskId
+    ? _hasAllEnabledMaskPaths(flag.pathsByMaskId, enabledMaskIds)
+    : false;
+  if (!flagMatches || !flag.pathsByMaskId || !flagHasAllEnabled) {
     return {
       maskManifest: {},
       maskExtension: ext,
       maskIds: enabledMaskIds,
       cacheKeySuffix: 'mf:none',
       skipMaskIds,
-      maskConventionFallback: 'off',
+      // If flag is stale/missing for a newly enabled mask id, allow minimal
+      // convention fallback so optional masks like `_Shadow` can still resolve.
+      maskConventionFallback: 'minimal',
     };
   }
   const manifest = pathsByMaskIdToLoaderManifest(flag.pathsByMaskId, enabledMaskIds);

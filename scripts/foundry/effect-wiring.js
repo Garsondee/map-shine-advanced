@@ -79,6 +79,7 @@ const CAPABILITIES = [
   { effectId: 'clouds',            displayName: 'Clouds',                   category: 'atmospheric',  performanceImpact: 'medium' },
   { effectId: 'overhead-shadows',  displayName: 'Overhead Shadows',         category: 'structure',    performanceImpact: 'medium' },
   { effectId: 'building-shadows',  displayName: 'Building Shadows',         category: 'structure',    performanceImpact: 'medium' },
+  { effectId: 'painted-shadows',   displayName: 'Painted Shadows',          category: 'structure',    performanceImpact: 'medium' },
   { effectId: 'fire-sparks',       displayName: 'Fire & Embers',            category: 'particle',     performanceImpact: 'high' },
   { effectId: 'dust',              displayName: 'Dust Motes',               category: 'particle',     performanceImpact: 'low' },
   { effectId: 'ascii',             displayName: 'ASCII',                    category: 'global',       performanceImpact: 'high' },

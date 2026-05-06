@@ -78,6 +78,7 @@ const COMPOSITE_MODES = {
   dust:         'lighten',
   ash:          'lighten',
   outdoors:     'source-over',
+  handPaintedShadow: 'source-over',
   windows:      'source-over',
   structural:   'source-over',
   specular:     'source-over',
@@ -785,6 +786,19 @@ export class GpuSceneMaskCompositor {
         this._upperOutdoorsMetaRepairCount.delete(floorKey);
       }
     }
+    // File/bundle masks in _floorMeta satisfy getFloorTexture('outdoors') even when
+    // GPU compose() never ran — _floorCache stays empty and derived masks (floorAlpha,
+    // skyReach) are never built. Force a cache miss so per-tile GPU composition runs.
+    if (cached?.masks?.length) {
+      const tilesForFloor = this._getActiveLevelTiles(sc, ctx)?.length ?? 0;
+      const skyReachRt = this._floorCache.get(floorKey)?.get('skyReach');
+      if (tilesForFloor > 0 && !skyReachRt) {
+        log.info('composeFloor: evicting meta — GPU skyReach missing while tiles exist', { floorKey });
+        this._floorMeta.delete(floorKey);
+        this._upperBandNoOutdoorsAccepted.delete(floorKey);
+        cached = null;
+      }
+    }
     if (cached?.masks?.length) {
       // Pass cached masks through directly. The compositor's _readbackIsNonEmpty
       // check already strips empty masks (black-RGB floor-boundary alphas), so
@@ -1379,7 +1393,20 @@ export class GpuSceneMaskCompositor {
             this._floorMeta.delete(bandKey);
             this._upperBandNoOutdoorsAccepted.delete(bandKey);
           } else {
-            continue;
+            // Same failure mode as composeFloor cache-hit: _floorMeta has bundle masks so
+            // getFloorTexture('outdoors') works, but multi-floor preload skipped GPU compose()
+            // and _floorCache never received skyReach / floorAlpha.
+            const skyReachRt = this._floorCache.get(bandKey)?.get('skyReach');
+            if (hasTiles && !skyReachRt) {
+              log.info('preloadAllFloors: evicting band meta — GPU skyReach missing while tiles exist', {
+                bandKey,
+              });
+              this._floorMeta.delete(bandKey);
+              this._upperBandNoOutdoorsAccepted.delete(bandKey);
+              _recomposedBands.add(bandKey);
+            } else {
+              continue;
+            }
           }
         }
 

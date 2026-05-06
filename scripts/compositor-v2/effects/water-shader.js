@@ -77,7 +77,7 @@ layout(location = 1) out highp vec4 pc_fragColor1;
 #endif
 
 // ── Texture samplers ─────────────────────────────────────────────────────
-uniform sampler2D tDiffuse;       // Scene RT (post-lighting)
+uniform sampler2D tDiffuse;       // Scene RT (lit + sky + filter; user CC runs after water in FloorCompositor)
 uniform sampler2D tNoiseMap;      // 512x512 RGBA seeded noise
 uniform sampler2D tWaterData;     // SDF data (R=SDF, G=exposure, BA=normals)
 uniform float uHasWaterData;      // 1.0 when tWaterData is valid
@@ -108,6 +108,7 @@ uniform float uTintStrength;
 
 // ── Waves ────────────────────────────────────────────────────────────────
 uniform float uWaveScale;
+// Legacy: phase advance is fully encoded in uWaveTime (integrated in JS). Kept for API compat; not used in Gerstner phase.
 uniform float uWaveSpeed;
 uniform float uWaveStrength;
 uniform float uWaveMotion01;
@@ -288,6 +289,9 @@ uniform float uShoreFoamStrength;
 uniform float uShoreFoamThreshold;
 uniform float uShoreFoamScale;
 uniform float uShoreFoamSpeed;
+uniform float uShoreFoamCoverage;
+uniform vec2 uShoreFoamSeedOffset;
+uniform float uShoreFoamTimeOffset;
 
 // Shore Foam Appearance
 uniform vec3 uShoreFoamColor;
@@ -332,6 +336,7 @@ uniform float uShoreFoamCoreWidth;
 uniform float uShoreFoamCoreFalloff;
 uniform float uShoreFoamTailWidth;
 uniform float uShoreFoamTailFalloff;
+uniform float uShoreFoamFadeCurve;
 
 // ── Floating Foam ────────────────────────────────────────────────────────
 uniform float uFloatingFoamStrength;
@@ -565,7 +570,20 @@ vec2 computeRainOffsetPx(vec2 uv) {
   // Precipitation ramps in smoothly — light rain = subtle, heavy rain = strong
   float ramp = smoothstep(0.0, 0.6, p) * (0.5 + 0.5 * p);
 
-  return offset * px * ramp;
+  vec2 noisy = offset * px * ramp;
+
+  // Wind shear: bias rain ripples downwind (uWindSpeed is gust-shaped 0..1 from WaterEffectV2).
+  float wind01 = clamp(uWindSpeed, 0.0, 1.0);
+  vec2 wRaw = uWindDir;
+  float wlen = length(wRaw);
+  wRaw = (wlen > 1e-6) ? (wRaw / wlen) : vec2(1.0, 0.0);
+  float sa = (uHasSceneRect > 0.5)
+    ? (uSceneRect.z / max(1.0, uSceneRect.w))
+    : (uResolution.x / max(1.0, uResolution.y));
+  vec2 windBasis = normalize(vec2(wRaw.x * sa, wRaw.y));
+  vec2 windShear = windBasis * px * ramp * (2.5 + 9.5 * wind01);
+
+  return noisy + windShear;
 }
 
 vec2 curlNoise2D(vec2 p) {
@@ -594,7 +612,7 @@ vec2 warpUv(vec2 sceneUv, float motion01) {
   float m = clamp(motion01, 0.0, 1.0);
   float inShelter = waterIndoorWindMotion01(sceneUv);
   // Important: do NOT advect the wave *domain* using uWindOffsetUv.
-  // The waves already travel via the phase term in addWave() (omega * uWindTime).
+  // Gerstner phase advances via uWaveTime (integrated in JS), not UV offset.
   // Advecting the domain as well can partially cancel / overtake the phase travel
   // and produces a standing-wave / ping-pong look.
   vec2 uv = sceneUv;
@@ -752,7 +770,7 @@ vec3 calculateWaveForWind(vec2 sceneUv, float t, float motion01, vec2 windDirInp
         // Apply Phase Jitter: 
         // Higher octaves (smaller waves) get jittered more aggressively by noise field
         float phaseJitter = jitterField * mix(1.0, 4.0, octave / 7.0);
-        float phase = k * dot(dir, uv) - (omega * t * uWaveSpeed) + phaseJitter;
+        float phase = k * dot(dir, uv) - (omega * t) + phaseJitter;
         
         // Steepness logic
         float steepnessWeight = pow(0.78, octave);
@@ -789,7 +807,7 @@ vec3 calculateWaveForWind(vec2 sceneUv, float t, float motion01, vec2 windDirInp
         float omega = sqrt(9.8 * k);
         
         float phaseJitter2 = jitterField * mix(0.5, 2.0, octave / 3.0);
-        float phase = k * dot(dir, uv) - (omega * t * uWaveSpeed * 0.8) + phaseJitter2;
+        float phase = k * dot(dir, uv) - (omega * t * 0.8) + phaseJitter2;
         
         float steepnessWeight = pow(0.7, octave);
         float octaveSteepness = (globalSteepness * steepnessWeight * 0.4) / 3.0;
@@ -884,18 +902,17 @@ float shoreFactor(float shore01) {
 
 float waterInsideFromSdf(float sdf01) { return smoothstep(0.52, 0.48, sdf01); }
 
-// Coverage from composited _Water only (linear sample + sub-texel smoothstep).
-// Nearest+step looked blocky when the composited mask is lower-res than the screen; SDF alone can sit past the art.
-float waterRawMaskAuthoritative(vec2 sceneUv01) {
+// Continuous coverage/intensity from composited _Water.
+// This preserves authored soft gradients directly (0..1) so every downstream
+// effect can follow mask intensity instead of a thresholded cutoff.
+float waterRawMaskIntensity(vec2 sceneUv01) {
   if (uHasWaterRawMask < 0.5) return 1.0;
-  float w = texture2D(tWaterRawMask, sceneUv01).r;
-  float t = uWaterRawMaskThreshold;
-  float tex = max(uWaterRawMaskTexelSize.x, uWaterRawMaskTexelSize.y);
-  // ~1 texel transition in mask UV so upscaling stays smooth; clamp hi edge below 1.0.
-  float soft = max(1e-5, tex * 1.25);
-  float hi = min(t + soft, 0.999);
-  if (hi <= t) return step(t, w);
-  return smoothstep(t, hi, w);
+  return clamp(texture2D(tWaterRawMask, sceneUv01).r, 0.0, 1.0);
+}
+
+// Legacy authoritative gate helper kept for compatibility; now intensity-driven.
+float waterRawMaskAuthoritative(vec2 sceneUv01) {
+  return waterRawMaskIntensity(sceneUv01);
 }
 
 float distortionInsideFromSdf(float sdf01) {
@@ -1024,18 +1041,14 @@ void getFoamData(vec2 sceneUv, float shore, float inside, vec2 rainOffPx, vec2 w
   vec2 windBasis = normalize(vec2(windDir.x * sceneAspect, windDir.y));
   float tWind = uWindTime * indoorWindMotion;
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // NEW ADVANCED SHORE FOAM SYSTEM (based on floating foam techniques)
-  // ═══════════════════════════════════════════════════════════════════════════
-  
+  // Shoreline foam uses floating-style pattern generation with a shore band mask.
   float shoreFoamAmount = 0.0;
   
   if (uShoreFoamEnabled > 0.5 && uShoreFoamStrength > 0.01) {
-    // Base UV for shore foam
-    vec2 shoreUv = foamBasis * max(0.1, uShoreFoamScale);
-    shoreUv -= windBasis * (tWind * uShoreFoamSpeed);
+    float shoreTime = tWind + uShoreFoamTimeOffset;
+    vec2 shoreUv = (foamBasis + uShoreFoamSeedOffset) * max(0.1, uShoreFoamScale);
+    shoreUv -= windBasis * (shoreTime * uShoreFoamSpeed);
     
-    // Enhanced wave distortion
     float waveDistortStr = clamp(uShoreFoamWaveDistortionStrength, 0.0, 5.0);
     shoreUv += waveGradPre * waveDistortStr * 0.15;
     vec2 texel = 1.0 / max(uResolution, vec2(1.0));
@@ -1043,14 +1056,13 @@ void getFoamData(vec2 sceneUv, float shore, float inside, vec2 rainOffPx, vec2 w
     vec2 rainBasis = vec2(rainUv.x * sceneAspect, rainUv.y);
     shoreUv += rainBasis * waveDistortStr * 0.1;
     
-    // Random noise distortion for organic movement
     if (uShoreFoamNoiseDistortionEnabled > 0.5 && uShoreFoamNoiseDistortionStrength > 0.01) {
       float noiseDistStr = clamp(uShoreFoamNoiseDistortionStrength, 0.0, 2.0);
       float noiseDistScale = max(0.1, uShoreFoamNoiseDistortionScale);
       float noiseDistSpeed = max(0.0, uShoreFoamNoiseDistortionSpeed);
       
-      vec2 noiseUv = foamBasis * noiseDistScale;
-      float noiseTime = tWind * noiseDistSpeed;
+      vec2 noiseUv = (foamBasis + uShoreFoamSeedOffset * 1.7) * noiseDistScale;
+      float noiseTime = shoreTime * noiseDistSpeed;
       
       float sn1x = valueNoise(noiseUv + vec2(noiseTime, 0.0));
       float sn1y = valueNoise(noiseUv + vec2(0.0, noiseTime) + 11.3);
@@ -1065,16 +1077,15 @@ void getFoamData(vec2 sceneUv, float shore, float inside, vec2 rainOffPx, vec2 w
       shoreUv += noiseOffset * noiseDistStr;
     }
     
-    // Temporal evolution
     vec2 shoreEvolUv = shoreUv;
     if (uShoreFoamEvolutionEnabled > 0.5 && uShoreFoamEvolutionAmount > 0.01) {
       float evolSpeed = max(0.0, uShoreFoamEvolutionSpeed);
       float evolScale = max(0.1, uShoreFoamEvolutionScale);
       float evolAmount = clamp(uShoreFoamEvolutionAmount, 0.0, 1.0);
       
-      float evolTime = tWind * evolSpeed * 0.1;
+      float evolTime = shoreTime * evolSpeed * 0.1;
       
-      vec2 evolWarpUv = foamBasis * evolScale;
+      vec2 evolWarpUv = (foamBasis + uShoreFoamSeedOffset * 2.4) * evolScale;
       float sew1 = valueNoise(evolWarpUv + vec2(evolTime, 0.0));
       float sew2 = valueNoise(evolWarpUv + vec2(0.0, evolTime) + 19.3);
       float sew3 = valueNoise(evolWarpUv * 1.7 + vec2(evolTime * 0.7, evolTime * 0.7) + 37.7);
@@ -1087,15 +1098,11 @@ void getFoamData(vec2 sceneUv, float shore, float inside, vec2 rainOffPx, vec2 w
       shoreEvolUv = mix(shoreUv, shoreUv + evolWarp, evolAmount);
     }
     
-    // Base foam pattern
-    float sc1 = valueNoise(shoreEvolUv);
-    float sc2 = valueNoise(shoreEvolUv * 2.1 + 7.3);
-    float shoreBase = sc1 * 0.7 + sc2 * 0.3;
-    
-    // Complexity layers
+    float shoreC1 = valueNoise(shoreEvolUv);
+    float shoreC2 = valueNoise(shoreEvolUv * 2.1 + 5.2);
+    float shoreBase = shoreC1 * 0.7 + shoreC2 * 0.3;
     float complexShore = shoreBase;
     
-    // Thickness variation
     if (uShoreFoamThicknessVariation > 0.01) {
       float thickScale = max(0.1, uShoreFoamThicknessScale);
       float sthick1 = valueNoise(shoreEvolUv * thickScale);
@@ -1105,7 +1112,6 @@ void getFoamData(vec2 sceneUv, float shore, float inside, vec2 rainOffPx, vec2 w
       complexShore *= thickness;
     }
     
-    // Filaments and tendrils
     if (uShoreFoamFilamentsEnabled > 0.5 && uShoreFoamFilamentsStrength > 0.01) {
       float filScale = max(0.1, uShoreFoamFilamentsScale);
       float filLength = clamp(uShoreFoamFilamentsLength, 0.1, 4.0);
@@ -1132,7 +1138,6 @@ void getFoamData(vec2 sceneUv, float shore, float inside, vec2 rainOffPx, vec2 w
       complexShore = max(complexShore, filaments * filStr);
     }
     
-    // Edge detail
     if (uShoreFoamEdgeDetail > 0.01) {
       float edgeScale = max(0.1, uShoreFoamEdgeDetailScale);
       float sedge1 = valueNoise(shoreEvolUv * edgeScale * 3.0);
@@ -1144,24 +1149,22 @@ void getFoamData(vec2 sceneUv, float shore, float inside, vec2 rainOffPx, vec2 w
       complexShore = clamp(complexShore + edgeOffset, 0.0, 1.0);
     }
     
-    // Distance-based coverage (core and tail)
-    float distNormalized = clamp(shore / max(0.01, uShoreFoamThreshold), 0.0, 1.0);
-    
-    // Core: solid foam at shoreline
+    // Distance remap: widen band (~2x reach) and apply a curve so foam
+    // is strong very near shore but falls off quickly.
+    float distWide = clamp(shore / max(0.01, uShoreFoamThreshold * 0.5), 0.0, 1.0);
+    float fadeCurve = max(0.25, uShoreFoamFadeCurve);
+    float distNormalized = pow(distWide, fadeCurve);
     float coreWidth = clamp(uShoreFoamCoreWidth, 0.01, 1.0);
     float coreFalloff = max(0.01, uShoreFoamCoreFalloff);
     float coreMask = smoothstep(coreWidth + coreFalloff, coreWidth, distNormalized);
-    
-    // Tail: textured foam extending inland
     float tailWidth = clamp(uShoreFoamTailWidth, 0.01, 1.0);
     float tailFalloff = max(0.01, uShoreFoamTailFalloff);
     float tailMask = smoothstep(tailWidth + tailFalloff, 0.0, distNormalized);
-    
-    // Combine core (solid) and tail (textured)
-    float coreFoam = coreMask;
-    float tailFoam = complexShore * tailMask;
-    
-    shoreFoamAmount = clamp(max(coreFoam, tailFoam), 0.0, 1.0);
+
+    float shoreCoverage = clamp(uShoreFoamCoverage, 0.0, 1.0);
+    float shoreClumps = smoothstep(1.0 - shoreCoverage, 1.0, complexShore);
+    float shoreBand = clamp(max(coreMask, tailMask), 0.0, 1.0);
+    shoreFoamAmount = clamp(shoreClumps * shoreBand, 0.0, 1.0);
     shoreFoamAmount *= inside * max(0.0, uShoreFoamStrength);
   }
 
@@ -1508,7 +1511,7 @@ float refractTapValid(vec2 screenUv) {
     float insideS = (uUseSdfMask > 0.5)
       ? waterInsideFromSdf(wdS.r)
       : smoothstep(0.02, 0.08, wdS.g);
-    insideS *= waterRawMaskAuthoritative(suv);
+    insideS *= waterRawMaskIntensity(suv);
     return insideS * vOcc * vBg;
   }
 
@@ -1695,12 +1698,11 @@ void main() {
   vec4 wd = texture2D(tWaterData, sceneUv);
   float sdf01 = wd.r;
   float exposure01 = wd.g;
-  float inside = (uUseSdfMask > 0.5)
-    ? waterInsideFromSdf(sdf01)
-    : smoothstep(0.02, 0.08, exposure01);
-  float rawAuth = waterRawMaskAuthoritative(sceneUv);
-  inside *= rawAuth;
-  float shore = clamp(exposure01, 0.0, 1.0);
+  float rawAuth = waterRawMaskIntensity(sceneUv);
+  // Hybrid: raw mask controls authoritative water coverage, SDF/exposure still
+  // drive shoreline/depth-dependent shaping for distortion/specular/foam.
+  float inside = rawAuth;
+  float shore = clamp(exposure01 * rawAuth, 0.0, 1.0);
   float distInside = (uUseSdfMask > 0.5)
     ? distortionInsideFromSdf(sdf01)
     : inside;
@@ -1909,10 +1911,16 @@ void main() {
     vec2 dirN = (dirLen > 1e-6) ? (dir / dirLen) : vec2(1.0, 0.0);
     vec2 perpN = vec2(-dirN.y, dirN.x);
 
-    // Gate CA by shoreline mask + luminance threshold. Keep it independent from
-    // distortion edge masking so CA controls still work when refraction settings
-    // are dialed low or multi-tap is disabled.
-    float caEdgeMask = chromaticInsideFromSdf(sdf01) * caLumaGate;
+    // Gate CA by shoreline mask + luminance threshold, then confine it to a
+    // narrow raw-mask transition band to avoid broad color fringing.
+    // This keeps CA local to the shoreline even when _Water has soft gradients.
+    float caSdfMask = chromaticInsideFromSdf(sdf01);
+    float caRawEdgeBand = clamp(4.0 * rawAuth * (1.0 - rawAuth), 0.0, 1.0);
+    caRawEdgeBand = pow(caRawEdgeBand, 1.9);
+    // Require actual mask gradient so wide soft plateaus don't get broad CA tint.
+    float rawGrad = length(vec2(dFdx(rawAuth), dFdy(rawAuth)));
+    float caGradGate = smoothstep(0.006, 0.03, rawGrad);
+    float caEdgeMask = caSdfMask * caRawEdgeBand * caGradGate * caLumaGate;
     float caPx = caPxBase * caEdgeMask;
     float spread = clamp(uChromaticAberrationSampleSpread, 0.25, 3.0);
     float kawasePx = clamp(uChromaticAberrationKawaseBlurPx, 0.0, 8.0);
@@ -1964,7 +1972,9 @@ void main() {
 
     float rChannel = (r0 * rW0 + r1 * rW1 + r2 * rW2 + r3 * rW3 + r4 * rW4) / rSum;
     float bChannel = (b0 * bW0 + b1 * bW1 + b2 * bW2 + b3 * bW3 + b4 * bW4) / bSum;
-    refracted.rgb = vec3(rChannel, refracted.g, bChannel);
+    vec3 caRgb = vec3(rChannel, refracted.g, bChannel);
+    float caBlend = clamp(caEdgeMask, 0.0, 1.0);
+    refracted.rgb = mix(refracted.rgb, caRgb, caBlend);
   }
 
   vec3 col = refracted.rgb;
@@ -2222,14 +2232,17 @@ void main() {
     shoreFoamColor *= shoreLightFactor;
     shoreFoamColor *= foamShadowColorMul;
     shoreFoamColor = mix(shoreFoamColor, col, 0.42 * fdbFoam);
+    // Scene-referred cap: foam is diffusive, not emissive. Keeps normal-blended
+    // WaterSplashes particles from stacking into clipped white on top.
+    shoreFoamColor = clamp(shoreFoamColor, vec3(0.0), vec3(1.0));
     
     // Opacity and blending
     float shoreOpacity = clamp(uShoreFoamOpacity, 0.0, 1.0);
     float shoreAlpha = clamp(shoreFoamVis * shoreOpacity, 0.0, 1.0);
     shoreAlpha *= mix(1.0, 0.20, uFloorDepthBlurWaterSoft);
     
-    // Blend foam color first
-    col = mix(col, shoreFoamColor, shoreAlpha);
+    // Blend foam color first (standard src-over; clamp output for downstream passes)
+    col = clamp(mix(col, shoreFoamColor, shoreAlpha), vec3(0.0), vec3(1.0));
     // THEN apply darkness for proper night darkening
     col *= shoreDarkScale;
   }
@@ -2255,6 +2268,8 @@ void main() {
       // Fallback when no outdoors mask exists.
       skyBoost += 0.20 * skyIFoam * (0.45 + 0.55 * skyLumFoam);
     }
+    // Prevent multiplicative "HDR foam" that reads self-lit vs particle splashes.
+    skyBoost = min(skyBoost, 1.22);
     floatingFoamColor *= skyBoost;
     float floatingShadowMul = foamShadowColorMul;
     if (uHasCombinedShadow > 0.5) {
@@ -2269,8 +2284,9 @@ void main() {
     // final col here makes the whole water pixel dim and still allows later specular
     // to re-brighten foam areas.
     floatingFoamColor *= floatingFoam.darkScale;
+    floatingFoamColor = clamp(floatingFoamColor, vec3(0.0), vec3(1.0));
     // Blend foam color onto water
-    col = mix(col, floatingFoamColor, floatingAlpha);
+    col = clamp(mix(col, floatingFoamColor, floatingAlpha), vec3(0.0), vec3(1.0));
   }
 
   // Shader flecks (drive by combined foam presence) — same lit factor as splashes when combined
@@ -2284,10 +2300,17 @@ void main() {
   float fleckW = shaderFlecks * 0.45 * mix(1.0, 0.07, uFloorDepthBlurWaterSoft);
   vec3 fleckAdd = fleckCol * fleckW;
   fleckAdd = min(fleckAdd, vec3(0.28));
-  col += fleckAdd;
+  col = clamp(col + fleckAdd, vec3(0.0), vec3(1.0));
 
   // Apply screen-space cloud shadows globally to water + foam + caustics + murk
   col *= max(0.0, 1.0 - cloudDarken);
+
+  // Sun specular / sharp highlights must follow the lit scene in tDiffuse. Shadow RTs
+  // and uSceneDarkness do not cover every dark region (interiors, night albedo, etc.).
+  // Min(center, refracted) keeps glints subdued when either the surface pixel or the
+  // refracted sample is in a dark part of the map.
+  float specEnvLuma = min(msLuminance(base.rgb), msLuminance(refracted.rgb));
+  float specSceneLightMul = smoothstep(0.018, 0.24, specEnvLuma);
 
   // Specular (GGX)
   vec2 slope;
@@ -2539,6 +2562,7 @@ void main() {
     specCol = min(specCol, vec3(sClamp));
   }
   specCol *= mix(1.0, 0.18, uFloorDepthBlurWaterSoft);
+  specCol *= specSceneLightMul;
   col += specCol;
 
   // ── Specular Highlights (additive sharp highlights) ─────────────────────
@@ -2550,6 +2574,7 @@ void main() {
       darkness, combinedShadow, structuralShadow
     );
     specHighlightsCol *= mix(1.0, 0.02, floatFoamCoverageVis);
+    specHighlightsCol *= specSceneLightMul;
     col += specHighlightsCol;
   }
 

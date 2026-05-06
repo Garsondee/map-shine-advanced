@@ -503,8 +503,6 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
           expanded: false,
           parameters: [
             'flashlightIntensity',
-            'flashlightBrokenness',
-            'flashlightWobble',
             'flashlightAngleDeg',
             'flashlightLengthUnits',
             'flashlightBeamAngleDeg',
@@ -725,8 +723,8 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
         flashlightAngleDeg: { type: 'slider', label: 'Legacy Cone Angle (deg)', min: 5, max: 140, step: 1, default: 38, throttle: 50 },
         flashlightLengthUnits: { type: 'slider', label: 'Legacy Cone Length (u)', min: 1, max: 160, step: 1, default: 18, throttle: 50 },
         flashlightIntensity: { type: 'slider', label: 'Intensity', min: 0, max: 6, step: 0.01, default: 5.4, throttle: 50 },
-        flashlightBrokenness: { type: 'slider', label: 'Brokenness', min: 0, max: 1, step: 0.01, default: 0.0, throttle: 50 },
-        flashlightWobble: { type: 'slider', label: 'Wobble', min: 0, max: 1, step: 0.01, default: 0.0, throttle: 50 },
+        flashlightBrokenness: { type: 'slider', label: 'Brokenness', min: 0, max: 1, step: 0.01, default: 0.0, throttle: 50, hidden: true },
+        flashlightWobble: { type: 'slider', label: 'Wobble', min: 0, max: 1, step: 0.01, default: 0.0, throttle: 50, hidden: true },
 
         flashlightBeamAngleDeg: { type: 'slider', label: 'Angle (deg)', min: 1, max: 160, step: 1, default: 38, throttle: 50 },
         flashlightBeamLengthUnits: { type: 'slider', label: 'Length (u)', min: 0.5, max: 240, step: 0.5, default: 18, throttle: 50 },

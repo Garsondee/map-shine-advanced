@@ -27,6 +27,17 @@ import {
 
 const log = createLogger('ControlPanel');
 
+/** GM panel "Gustiness" → WeatherController.variability (wind surge / meander strength). */
+const GUSTINESS_TO_VARIABILITY = Object.freeze({
+  calm: 0.25,
+  light: 0.45,
+  moderate: 0.7,
+  strong: 0.85,
+  extreme: 0.95
+});
+
+const MAX_WIND_MS_CP = 78.0;
+
 /**
  * Manages the GM Control Panel with time-of-day clock and weather controls
  * Optimized for live play - fast, concise, authoritative
@@ -442,6 +453,34 @@ export class ControlPanelManager {
     target.fogDensity = finite01(target.fogDensity, d.fogDensity);
     target.freezeLevel = finite01(target.freezeLevel, d.freezeLevel);
     target.windDirection = finiteDeg(target.windDirection, d.windDirection);
+  }
+
+  /**
+   * Coerce panel wind fields so Tweakpane number blades never stick on NaN.
+   * @private
+   */
+  _coercePanelWindScalarsInPlace() {
+    if (!this.controlState || typeof this.controlState !== 'object') return;
+    const wms = Number(this.controlState.windSpeedMS);
+    this.controlState.windSpeedMS = Number.isFinite(wms)
+      ? Math.max(0.0, Math.min(MAX_WIND_MS_CP, wms))
+      : 39.0;
+    const wd = Number(this.controlState.windDirection);
+    this.controlState.windDirection = Number.isFinite(wd)
+      ? ((wd % 360) + 360) % 360
+      : 180.0;
+  }
+
+  /**
+   * Refresh Tweakpane blades for the Wind section (after programmatic WC → panel sync).
+   * @private
+   */
+  _refreshWindPaneBindings() {
+    try {
+      this.windControls?.speed?.refresh?.();
+      this.windControls?.direction?.refresh?.();
+      this._windGustinessBinding?.refresh?.();
+    } catch (_) {}
   }
 
   _ensureDirectedCustomPreset() {
@@ -894,6 +933,14 @@ export class ControlPanelManager {
     } finally {
       this._applyingRapidOverrides = false;
     }
+
+    if (paramId === 'windSpeed') {
+      this.controlState.windSpeedMS = Math.max(0.0, Math.min(MAX_WIND_MS_CP, Number(value) * MAX_WIND_MS_CP));
+    } else if (paramId === 'windDirection') {
+      this.controlState.windDirection = Number(value);
+    }
+    this._coercePanelWindScalarsInPlace();
+    this._refreshWindPaneBindings();
 
     this._mirrorLiveWeatherDomPair(paramId, value);
     // tearDown skip is armed from `applyWeatherManualParam` (rain/cloud/wind scalars).
@@ -1925,6 +1972,8 @@ export class ControlPanelManager {
       this.syncLiveWeatherOverrideDomFromDirectedPreset();
     } catch (_) {}
 
+    void this._applyWindState();
+
     this._registerFoundryTimeHook();
 
     log.info('Control Panel initialized');
@@ -2817,6 +2866,7 @@ export class ControlPanelManager {
       max: 78.0,
       step: 0.5
     }).on('change', (ev) => {
+      this._coercePanelWindScalarsInPlace();
       void this._applyWindState();
       if (ev?.last) this.debouncedSave();
     });
@@ -2827,6 +2877,7 @@ export class ControlPanelManager {
       max: 360,
       step: 5
     }).on('change', (ev) => {
+      this._coercePanelWindScalarsInPlace();
       void this._applyWindState();
       if (ev?.last) this.debouncedSave();
     });
@@ -2842,6 +2893,7 @@ export class ControlPanelManager {
           'Extreme': 'extreme'
         }
       }).on('change', (ev) => {
+        this._coercePanelWindScalarsInPlace();
         void this._applyWindState();
         if (ev?.last) this.debouncedSave();
       });
@@ -2897,6 +2949,7 @@ export class ControlPanelManager {
       btn.addEventListener('click', () => {
         this.controlState.windSpeedMS = cfg.speedMS;
         this.controlState.gustiness = cfg.gustiness;
+        this._coercePanelWindScalarsInPlace();
         try {
           this.pane?.refresh?.();
         } catch (_) {
@@ -2913,7 +2966,7 @@ export class ControlPanelManager {
       expanded: false
     });
 
-    advancedFolder.addBinding(this.controlState, 'gustiness', {
+    this._windGustinessBinding = advancedFolder.addBinding(this.controlState, 'gustiness', {
       label: 'Gustiness',
       options: {
         'Calm': 'calm',
@@ -2923,6 +2976,7 @@ export class ControlPanelManager {
         'Extreme': 'extreme'
       }
     }).on('change', (ev) => {
+      this._coercePanelWindScalarsInPlace();
       void this._applyWindState();
       if (ev?.last) this.debouncedSave();
     });
@@ -3324,6 +3378,39 @@ export class ControlPanelManager {
     }
 
     const MODULE = 'map-shine-advanced';
+    const clamp01 = (v) => Math.max(0, Math.min(1, Number(v) || 0));
+    const getPlayerLightParam = (paramId, fallback = 0) => {
+      try {
+        const uiManager = window.MapShine?.uiManager;
+        const eff = uiManager?.effectFolders?.['player-light'];
+        const raw = eff?.params?.[paramId];
+        const n = Number(raw);
+        return Number.isFinite(n) ? clamp01(n) : fallback;
+      } catch (_) {
+        return fallback;
+      }
+    };
+    const setPlayerLightParam = (paramId, value) => {
+      try {
+        const uiManager = window.MapShine?.uiManager;
+        const eff = uiManager?.effectFolders?.['player-light'];
+        if (!eff?.params || !Object.prototype.hasOwnProperty.call(eff.params, paramId)) return;
+        const next = clamp01(value);
+        eff.params[paramId] = next;
+        try {
+          eff.bindings?.[paramId]?.refresh?.();
+        } catch (_) {}
+        try {
+          const cb = uiManager?.effectCallbacks?.get?.('player-light');
+          cb?.('player-light', paramId, next);
+        } catch (_) {}
+        try {
+          uiManager?.updateEffectiveState?.('player-light');
+          uiManager?.updateControlStates?.('player-light');
+          uiManager?.queueSave?.('player-light');
+        } catch (_) {}
+      } catch (_) {}
+    };
 
     const summaryEl = document.createElement('div');
     summaryEl.style.cssText = 'font-size:9px;opacity:0.78;margin:4px 8px 8px;line-height:1.4;white-space:pre-wrap;';
@@ -3374,6 +3461,33 @@ export class ControlPanelManager {
         }
       });
     }
+
+    const flashlightFolder = lightsFolder.addFolder({
+      title: 'Flashlight Behavior',
+      expanded: false
+    });
+    const flashlightState = {
+      flashlightWobble: getPlayerLightParam('flashlightWobble', 0),
+      flashlightBrokenness: getPlayerLightParam('flashlightBrokenness', 0)
+    };
+    flashlightFolder.addBinding(flashlightState, 'flashlightWobble', {
+      label: 'Wobble',
+      min: 0,
+      max: 1,
+      step: 0.01
+    }).on('change', (ev) => {
+      flashlightState.flashlightWobble = clamp01(ev.value);
+      setPlayerLightParam('flashlightWobble', flashlightState.flashlightWobble);
+    });
+    flashlightFolder.addBinding(flashlightState, 'flashlightBrokenness', {
+      label: 'Broken',
+      min: 0,
+      max: 1,
+      step: 0.01
+    }).on('change', (ev) => {
+      flashlightState.flashlightBrokenness = clamp01(ev.value);
+      setPlayerLightParam('flashlightBrokenness', flashlightState.flashlightBrokenness);
+    });
 
     const globalFolder = lightsFolder.addFolder({
       title: 'Global Defaults',
@@ -3511,12 +3625,23 @@ export class ControlPanelManager {
         return;
       }
 
+      this._coercePanelWindScalarsInPlace();
+
+      const gustKey = this.controlState.gustiness;
+      const variability = GUSTINESS_TO_VARIABILITY[gustKey] ?? GUSTINESS_TO_VARIABILITY.moderate;
+      if (typeof weatherController.setVariability === 'function') {
+        weatherController.setVariability(variability);
+      } else {
+        weatherController.variability = Math.max(0, Math.min(1, variability));
+      }
+
+      const degRaw = Number(this.controlState.windDirection);
+      const degSafe = Number.isFinite(degRaw) ? ((degRaw % 360) + 360) % 360 : 0.0;
       const resolvedWindDir = (typeof weatherController._windDirFromAngleDeg === 'function')
-        ? weatherController._windDirFromAngleDeg(this.controlState.windDirection)
+        ? weatherController._windDirFromAngleDeg(degSafe)
         : (() => {
-            const directionRad = (this.controlState.windDirection * Math.PI) / 180.0;
-            // Foundry-space direction is Y-down.
-            return { x: Math.cos(directionRad), y: -Math.sin(directionRad) };
+            const rad = (degSafe * Math.PI) / 180.0;
+            return { x: Math.cos(rad), y: -Math.sin(rad) };
           })();
       const dirX = Number.isFinite(resolvedWindDir?.x) ? resolvedWindDir.x : 1.0;
       const dirY = Number.isFinite(resolvedWindDir?.y) ? resolvedWindDir.y : 0.0;
@@ -3527,33 +3652,40 @@ export class ControlPanelManager {
       const applyToState = (state) => {
         if (!state) return;
         const windMS = Number(this.controlState.windSpeedMS);
-        const clampedMS = Number.isFinite(windMS) ? Math.max(0.0, Math.min(78.0, windMS)) : 0.0;
+        const clampedMS = Number.isFinite(windMS) ? Math.max(0.0, Math.min(MAX_WIND_MS_CP, windMS)) : 0.0;
         state.windSpeedMS = clampedMS;
-        state.windSpeed = clampedMS / 78.0;
+        state.windSpeed = clampedMS / MAX_WIND_MS_CP;
 
         const wd = state.windDirection;
         if (wd && typeof wd.set === 'function') {
           wd.set(dirX, dirY);
           if (typeof wd.normalize === 'function') wd.normalize();
         } else {
-          // Fallback for early init / unexpected shapes
           state.windDirection = { x: dirX, y: dirY };
         }
       };
 
       applyToState(weatherController.targetState);
-
-      // Mirror to currentState so the change is visible immediately this frame
-      // (even before the next WeatherController.update()).
       applyToState(weatherController.currentState);
 
-      // Legacy gustiness controls are intentionally no longer written here.
-      // Wind variability is generated continuously from current wind speed.
+      this._ensureDirectedCustomPreset();
+      const preset = this.controlState.directedCustomPreset;
+      if (preset && typeof preset === 'object') {
+        const ms = Number(this.controlState.windSpeedMS);
+        const clampedMS = Number.isFinite(ms) ? Math.max(0.0, Math.min(MAX_WIND_MS_CP, ms)) : 0.0;
+        preset.windSpeed = clampedMS / MAX_WIND_MS_CP;
+        preset.windDirection = this.controlState.windDirection;
+        this._sanitizeDirectedCustomPresetNumbers(preset);
+      }
+      this.syncLiveWeatherOverrideDomFromDirectedPreset();
+      this._lastWeatherControlFingerprint = this._weatherControlFingerprint();
+      this._updateWindUI(weatherController);
 
       log.debug('Applied wind state:', {
         speedMS: this.controlState.windSpeedMS,
         direction: this.controlState.windDirection,
-        gustiness: this.controlState.gustiness
+        gustiness: this.controlState.gustiness,
+        variability
       });
     } catch (error) {
       log.error('Failed to apply wind state:', error);
@@ -3975,6 +4107,7 @@ Current Weather:
     this._rapidWeatherBindingTarget = null;
     this._liveWeatherOverrideFolder = null;
     this._liveWeatherOverrideDom = null;
+    this._windGustinessBinding = null;
 
     log.info('Control panel destroyed');
   }

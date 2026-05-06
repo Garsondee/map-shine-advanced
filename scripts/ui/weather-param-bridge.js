@@ -6,9 +6,10 @@
  * - **Live Weather Overrides** (control panel) apply by writing `targetState` / `currentState`
  *   (`applyDirectedCustomPresetToWeather` / `applyWeatherManualParam`), then mirror into the
  *   main Weather folder for display (`syncWeatherEffectFolderParam`). That is one-way UI→WC→main Tweakpane.
- * - **Main Tweakpane** edits call `applyWeatherManualParam` → WC, then
- *   `syncDirectedCustomPresetFromWeatherController` updates `directedCustomPreset` and
- *   `ControlPanelManager.syncLiveWeatherOverrideDomFromDirectedPreset()` (native range/number UI).
+ * - **Main Tweakpane** manual scalars (precip, clouds, etc.) call `applyWeatherManualParam` → WC, then
+ *   `syncDirectedCustomPresetFromWeatherController` updates `directedCustomPreset`, top-level panel wind
+ *   fields, and `ControlPanelManager.syncLiveWeatherOverrideDomFromDirectedPreset()`. Base wind and
+ *   gustiness/variability are edited only on the Map Shine Control Panel.
  *
  * On Weather effect registration, `hydrateMainWeatherTweakpaneFromController` runs **before** the initial
  * callback so schema defaults (often 0) do not clobber WC that was already loaded from snapshots.
@@ -82,10 +83,6 @@ export function hydrateMainWeatherTweakpaneFromController(wc, uiManager) {
   if (has('dynamicPaused')) {
     eff.params.dynamicPaused = wc.dynamicPaused === true;
     refresh('dynamicPaused');
-  }
-  if (has('variability') && Number.isFinite(Number(wc.variability))) {
-    eff.params.variability = Number(wc.variability);
-    refresh('variability');
   }
   if (has('simulationSpeed') && Number.isFinite(Number(wc.simulationSpeed))) {
     eff.params.simulationSpeed = Number(wc.simulationSpeed);
@@ -436,7 +433,13 @@ export function syncDirectedCustomPresetFromWeatherController(wc) {
     preset.freezeLevel = clamp01(st.freezeLevel);
     preset.fogDensity = clamp01(st.fogDensity);
 
-    const ws = Number.isFinite(st.windSpeed) ? clamp01(st.windSpeed) : 0;
+    let ws;
+    if (Number.isFinite(st.windSpeed)) {
+      ws = clamp01(st.windSpeed);
+    } else {
+      const ms = Number(st.windSpeedMS);
+      ws = Number.isFinite(ms) ? clamp01(ms / MAX_WIND_MS) : 0;
+    }
     preset.windSpeed = ws;
 
     let deg = 0;
@@ -456,6 +459,21 @@ export function syncDirectedCustomPresetFromWeatherController(wc) {
       if (typeof cp._sanitizeDirectedCustomPresetNumbers === 'function') {
         cp._sanitizeDirectedCustomPresetNumbers(preset);
       }
+    } catch (_) {}
+
+    const msTop = Number(st.windSpeedMS);
+    if (Number.isFinite(msTop)) {
+      cp.controlState.windSpeedMS = Math.max(0, Math.min(MAX_WIND_MS, msTop));
+    } else {
+      cp.controlState.windSpeedMS = Math.max(0, Math.min(MAX_WIND_MS, ws * MAX_WIND_MS));
+    }
+    cp.controlState.windDirection = preset.windDirection;
+
+    try {
+      if (typeof cp._coercePanelWindScalarsInPlace === 'function') cp._coercePanelWindScalarsInPlace();
+    } catch (_) {}
+    try {
+      if (typeof cp._refreshWindPaneBindings === 'function') cp._refreshWindPaneBindings();
     } catch (_) {}
 
     // Live overrides use native range/number DOM, not Tweakpane bindings — sync from preset only.

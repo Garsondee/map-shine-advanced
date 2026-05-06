@@ -47,6 +47,7 @@ const EFFECT_MASKS = {
   ash: { suffix: '_Ash', required: false, description: 'Ash disturbance mask' },
   dust: { suffix: '_Dust', required: false, description: 'Dust motes mask' },
   outdoors: { suffix: '_Outdoors', required: false, description: 'Indoor/outdoor area mask' },
+  handPaintedShadow: { suffix: '_Shadow', required: false, description: 'Hand-painted outdoor shadow mask' },
   outdoors0: { suffix: '_Outdoors_0', required: false, description: 'Outdoors mask for level 0' },
   outdoors1: { suffix: '_Outdoors_1', required: false, description: 'Outdoors mask for level 1' },
   iridescence: { suffix: '_Iridescence', required: false, description: 'Iridescence effect mask' },

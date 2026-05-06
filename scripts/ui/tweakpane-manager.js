@@ -2116,7 +2116,7 @@ export class TweakpaneManager {
     });
 
     sceneFolder.addButton({
-      title: 'Import Single Effect'
+      title: 'Copy effects from another scene…'
     }).on('click', async () => {
       await this.importSingleEffectFromScene();
     });
@@ -5107,11 +5107,13 @@ export class TweakpaneManager {
     // Confirm before overwriting.
     const confirmed = await Dialog.confirm({
       title: 'Paste Map Shine Scene Settings',
-      content: `<p>Apply Map Shine settings from <strong>${sourceName}</strong> to <strong>${scene.name}</strong>?</p>
+      content: `<div class="ms-dialog-prose">
+               <p>Apply Map Shine settings from <strong>${sourceName}</strong> to <strong>${scene.name}</strong>?</p>
                <p>This will overwrite <em>all</em> current Map Shine effect settings for this scene.</p>
                ${hasControlStatePaste
         ? '<p>GM live-play control state (time/weather mode) from the clipboard will be applied when valid.</p>'
-        : '<p>Existing GM control state on this scene will be checked and repaired if it contains invalid values.</p>'}`,
+        : '<p>Existing GM control state on this scene will be checked and repaired if it contains invalid values.</p>'}
+               </div>`,
       yes: () => true,
       no: () => false,
       defaultYes: false
@@ -5174,27 +5176,27 @@ export class TweakpaneManager {
   }
 
   /**
-   * Import selected effects from another scene into the current scene.
-   * Supports full import, params-only, or enabled-only.
+   * Copy selected effect settings from another scene into the active scene (UI: scene-to-scene transfer dialog).
+   * Supports full copy, parameters-only, or enabled-flag-only.
    * @returns {Promise<void>}
    * @public
    */
   async importSingleEffectFromScene() {
     const targetScene = canvas?.scene;
     if (!targetScene) {
-      ui.notifications?.warn?.('Map Shine: No active scene to import into');
+      ui.notifications?.warn?.('Map Shine: No active scene to copy settings into');
       return;
     }
 
     if (!isGmLike()) {
-      ui.notifications?.warn?.('Map Shine: Only GMs can import effect settings');
+      ui.notifications?.warn?.('Map Shine: Only GMs can copy effect settings between scenes');
       return;
     }
 
     const scenes = Array.from(game?.scenes?.contents || []).filter((s) => !!s?.id);
     const sourceCandidates = scenes.filter((s) => s.id !== targetScene.id);
     if (sourceCandidates.length === 0) {
-      ui.notifications?.warn?.('Map Shine: No other scenes are available to import from');
+      ui.notifications?.warn?.('Map Shine: No other scenes are available to copy from');
       return;
     }
 
@@ -5230,39 +5232,71 @@ export class TweakpaneManager {
       `<option value="${k}">${this._escHtml(v)}</option>`
     )).join('');
 
+    const targetName = this._escHtml(targetScene.name || targetScene.id);
+    const settingsModeEsc = this._escHtml(this.settingsMode);
+
     const content = `
-      <form>
-        <div class="form-group">
-          <label>Source Scene</label>
-          <select name="sourceSceneId">
-            ${sceneOptionsHtml}
-          </select>
-        </div>
-        <div class="form-group">
-          <label>Effects</label>
-          <div style="display:flex; gap:6px; margin-bottom:6px;">
-            <button type="button" name="checkAllEffects" style="flex:1;">Check All</button>
-            <button type="button" name="uncheckAllEffects" style="flex:1;">Uncheck All</button>
+      <form class="ms-scene-effects-transfer" autocomplete="off">
+        <p class="ms-scene-effects-transfer__lede">
+          Copy Map Shine <strong>effect</strong> settings from another scene into the scene you are viewing.
+          (For a full scene payload via clipboard, use <strong>Paste Scene Settings</strong>.)
+        </p>
+
+        <div class="ms-scene-effects-transfer__routes" role="group" aria-label="Source and target scenes">
+          <div class="ms-scene-effects-transfer__route ms-scene-effects-transfer__route--target">
+            <span class="ms-scene-effects-transfer__kicker">Target</span>
+            <strong class="ms-scene-effects-transfer__scene-name" title="Active canvas scene">${targetName}</strong>
+            <span class="ms-scene-effects-transfer__sub">Scene you are editing now</span>
           </div>
-          <div
-            name="effectsList"
-            style="max-height:260px; overflow:auto; border:1px solid rgba(255,255,255,0.2); border-radius:4px; padding:6px;"
-          >
-            <div style="opacity:0.8;">Select a source scene to load effects.</div>
+          <div class="ms-scene-effects-transfer__arrow" aria-hidden="true"><i class="fas fa-arrow-right"></i></div>
+          <div class="ms-scene-effects-transfer__route ms-scene-effects-transfer__route--source">
+            <label class="ms-scene-effects-transfer__kicker" for="ms-scene-transfer-source">Source</label>
+            <select id="ms-scene-transfer-source" name="sourceSceneId" class="ms-scene-effects-transfer__select">
+              ${sceneOptionsHtml}
+            </select>
+            <span class="ms-scene-effects-transfer__sub">Scene to copy values from</span>
           </div>
-          <p class="notes" style="margin-top:4px;">
-            Selected: <strong><span name="selectedCount">0</span></strong>
-          </p>
         </div>
-        <div class="form-group">
-          <label>Import Mode</label>
-          <select name="importMode">
+
+        <div class="ms-scene-effects-transfer__field">
+          <label class="ms-scene-effects-transfer__label" for="ms-scene-transfer-mode">What to copy</label>
+          <select id="ms-scene-transfer-mode" name="importMode" class="ms-scene-effects-transfer__select">
             ${modeOptionsHtml}
           </select>
+          <p class="ms-scene-effects-transfer__mode-hint">
+            <strong>Full</strong> — enabled flag and parameters.
+            <strong>Parameters only</strong> — keeps each effect’s on/off on this scene as-is.
+            <strong>Enabled only</strong> — copies only the enabled flag.
+          </p>
         </div>
-        <p class="notes" style="margin-top: 8px;">
-          Current target mode: <strong>${this._escHtml(this.settingsMode)}</strong> on scene
-          <strong>${this._escHtml(targetScene.name || targetScene.id)}</strong>.
+
+        <div class="ms-scene-effects-transfer__field">
+          <label class="ms-scene-effects-transfer__label" for="ms-scene-transfer-filter">Filter effects</label>
+          <input type="search" id="ms-scene-transfer-filter" name="effectFilter" class="ms-scene-effects-transfer__filter"
+            placeholder="Search by effect name…" autocomplete="off">
+        </div>
+
+        <div class="ms-scene-effects-transfer__toolbar">
+          <button type="button" class="ms-scene-effects-transfer__btn" name="checkAllEffects" title="Select all effects that match the current filter">
+            Check visible
+          </button>
+          <button type="button" class="ms-scene-effects-transfer__btn" name="uncheckAllEffects" title="Clear selection for effects that match the current filter">
+            Uncheck visible
+          </button>
+        </div>
+
+        <div name="effectsList" class="ms-scene-effects-transfer__list" role="list" aria-label="Effects to copy">
+          <div class="ms-scene-effects-transfer__empty">Loading effects for the selected source…</div>
+        </div>
+
+        <div class="ms-scene-effects-transfer__counts">
+          <span name="effectCounts" class="ms-scene-effects-transfer__counts-main">0 selected · 0 visible of 0 effects</span>
+        </div>
+
+        <div name="actionSummary" class="ms-scene-effects-transfer__summary" aria-live="polite"></div>
+
+        <p class="ms-scene-effects-transfer__footer-notes">
+          Settings tier for this copy: <strong>${settingsModeEsc}</strong> (Map Maker vs GM merge matches your current Map Shine UI mode).
         </p>
       </form>
     `;
@@ -5272,12 +5306,12 @@ export class TweakpaneManager {
 
     const selected = await new Promise((resolve) => {
       const dialog = new Dialog({
-        title: 'Import Map Shine Effects From Scene',
+        title: 'Copy effect settings between scenes',
         content,
         buttons: {
           import: {
-            icon: '<i class="fas fa-file-import"></i>',
-            label: 'Import',
+            icon: '<i class="fas fa-copy"></i>',
+            label: 'Copy to this scene',
             callback: (html) => {
               const sourceSceneId = String(html.find('[name="sourceSceneId"]').val() || '');
               const importMode = String(html.find('[name="importMode"]').val() || 'full');
@@ -5301,68 +5335,125 @@ export class TweakpaneManager {
           html.closest('.app.window-app')?.on('pointerdown', (ev) => ev.stopPropagation());
 
           const sourceSelect = html.find('[name="sourceSceneId"]');
+          const modeSelect = html.find('[name="importMode"]');
+          const filterInput = html.find('[name="effectFilter"]');
           const effectsList = html.find('[name="effectsList"]');
-          const selectedCountEl = html.find('[name="selectedCount"]');
+          const effectCountsEl = html.find('[name="effectCounts"]');
+          const actionSummaryEl = html.find('[name="actionSummary"]');
           const checkAllBtn = html.find('[name="checkAllEffects"]');
           const uncheckAllBtn = html.find('[name="uncheckAllEffects"]');
 
-          const syncSelectedCount = () => {
-            selectedCountEl.text(String(selectedTargets.size));
+          const targetSceneName = targetScene.name || targetScene.id;
+
+          const applyFilter = () => {
+            const q = String(filterInput.val() || '').trim().toLowerCase();
+            effectsList.find('.ms-scene-effects-transfer__row').each((_, el) => {
+              const ft = String(el.getAttribute('data-filter-text') || '').toLowerCase();
+              const match = !q || ft.includes(q);
+              el.classList.toggle('ms-scene-effects-transfer__row--hidden', !match);
+            });
+            syncEffectCounts();
+            updateActionSummary();
+          };
+
+          const visibleRowElements = () => effectsList.find(
+            '.ms-scene-effects-transfer__row:not(.ms-scene-effects-transfer__row--hidden)'
+          );
+
+          const syncEffectCounts = () => {
+            const total = currentEffects.length;
+            const visible = visibleRowElements().length;
+            const nSel = selectedTargets.size;
+            effectCountsEl.text(`${nSel} selected · ${visible} visible of ${total} effect${total === 1 ? '' : 's'}`);
+          };
+
+          const updateActionSummary = () => {
+            const sourceId = String(sourceSelect.val() || '');
+            const source = getSceneById(sourceId);
+            const sourceName = source ? (source.name || source.id) : '—';
+            const modeKey = String(modeSelect.val() || 'full');
+            const modeLabel = modeLabels[modeKey] || modeLabels.full;
+            const n = selectedTargets.size;
+            actionSummaryEl.text(
+              `Ready: ${modeLabel.toLowerCase()} from "${sourceName}" → "${targetSceneName}" · ${n} effect${n === 1 ? '' : 's'} selected`
+            );
           };
 
           const rebuildEffects = () => {
+            filterInput.val('');
             const sourceId = String(sourceSelect.val() || '');
             const source = getSceneById(sourceId);
             currentEffects = getImportableEffects(source);
             selectedTargets.clear();
             if (currentEffects.length === 0) {
-              effectsList.html('<div style="opacity:0.8;">No matching effects found for this scene.</div>');
-              syncSelectedCount();
+              effectsList.html('<div class="ms-scene-effects-transfer__empty">No matching effects found for this scene.</div>');
+              syncEffectCounts();
+              updateActionSummary();
               return;
             }
 
-            const rowsHtml = currentEffects.map((e) => (
-              `<label style="display:flex; align-items:center; gap:6px; padding:2px 0;">
-                <input type="checkbox" data-target-effect="${this._escHtml(e.targetEffectId)}">
-                <span>${this._escHtml(e.label)}</span>
-              </label>`
-            )).join('');
+            const rowsHtml = currentEffects.map((e) => {
+              const idEsc = this._escHtml(e.targetEffectId);
+              const filterEsc = this._escHtml(e.label.toLowerCase());
+              return `<label class="ms-scene-effects-transfer__row" role="listitem" data-target-effect="${idEsc}" data-filter-text="${filterEsc}">
+                <input type="checkbox" class="ms-scene-effects-transfer__check" data-target-effect="${idEsc}">
+                <span class="ms-scene-effects-transfer__row-label">${this._escHtml(e.label)}</span>
+              </label>`;
+            }).join('');
             effectsList.html(rowsHtml);
-            syncSelectedCount();
-
-            effectsList.find('input[type="checkbox"][data-target-effect]').on('change', (ev) => {
-              const targetEffectId = String(ev.currentTarget?.getAttribute('data-target-effect') || '');
-              if (!targetEffectId) return;
-              if (ev.currentTarget.checked) selectedTargets.add(targetEffectId);
-              else selectedTargets.delete(targetEffectId);
-              syncSelectedCount();
-            });
+            syncEffectCounts();
+            updateActionSummary();
           };
 
+          effectsList.on('change', 'input[type="checkbox"][data-target-effect]', (ev) => {
+            const targetEffectId = String(ev.currentTarget?.getAttribute('data-target-effect') || '');
+            if (!targetEffectId) return;
+            if (ev.currentTarget.checked) selectedTargets.add(targetEffectId);
+            else selectedTargets.delete(targetEffectId);
+            syncEffectCounts();
+            updateActionSummary();
+          });
+
+          // Check visible / Uncheck visible: only rows matching the filter (not .row--hidden).
           checkAllBtn.on('click', (ev) => {
             ev.preventDefault();
-            selectedTargets.clear();
-            for (const row of currentEffects) {
-              selectedTargets.add(row.targetEffectId);
-            }
-            effectsList.find('input[type="checkbox"][data-target-effect]').each((_, el) => {
-              el.checked = true;
+            visibleRowElements().each((_, row) => {
+              const id = String(row.getAttribute('data-target-effect') || '');
+              if (!id) return;
+              selectedTargets.add(id);
+              const inp = row.querySelector('input[type="checkbox"]');
+              if (inp) inp.checked = true;
             });
-            syncSelectedCount();
+            syncEffectCounts();
+            updateActionSummary();
           });
 
           uncheckAllBtn.on('click', (ev) => {
             ev.preventDefault();
-            selectedTargets.clear();
-            effectsList.find('input[type="checkbox"][data-target-effect]').each((_, el) => {
-              el.checked = false;
+            visibleRowElements().each((_, row) => {
+              const id = String(row.getAttribute('data-target-effect') || '');
+              if (!id) return;
+              selectedTargets.delete(id);
+              const inp = row.querySelector('input[type="checkbox"]');
+              if (inp) inp.checked = false;
             });
-            syncSelectedCount();
+            syncEffectCounts();
+            updateActionSummary();
           });
 
-          sourceSelect.on('change', rebuildEffects);
+          filterInput.on('input', () => applyFilter());
+
+          sourceSelect.on('change', () => {
+            rebuildEffects();
+          });
+
+          modeSelect.on('change', () => updateActionSummary());
+
           rebuildEffects();
         }
+      }, {
+        width: 720,
+        height: 'auto'
       });
       dialog.render(true);
     });
@@ -5380,7 +5471,7 @@ export class TweakpaneManager {
       : 'full';
     const selectedIds = Array.isArray(selected.selectedEffectIds) ? selected.selectedEffectIds : [];
     if (selectedIds.length === 0) {
-      ui.notifications?.warn?.('Map Shine: Select at least one effect to import');
+      ui.notifications?.warn?.('Map Shine: Select at least one effect to copy');
       return;
     }
 
@@ -5446,9 +5537,9 @@ export class TweakpaneManager {
 
     const sourceName = sourceScene.name || sourceScene.id;
     if (updatedCount > 0) {
-      ui.notifications?.info?.(`Map Shine: Imported ${modeLabels[mode].toLowerCase()} for ${importedEffects} effect(s) from "${sourceName}".`);
+      ui.notifications?.info?.(`Map Shine: Copied ${modeLabels[mode].toLowerCase()} for ${importedEffects} effect(s) from "${sourceName}".`);
     } else {
-      ui.notifications?.warn?.('Map Shine: No matching values were imported for the selected effects.');
+      ui.notifications?.warn?.('Map Shine: No matching values were copied for the selected effects.');
     }
   }
 
@@ -5661,12 +5752,10 @@ export class TweakpaneManager {
 
       if (effectId === 'weather') {
         // When Dynamic Weather is enabled, manual weather overrides become read-only.
-        // (We keep other controls like time-of-day, variability, and dynamic settings interactive.)
+        // (We keep other controls like time-of-day and dynamic settings interactive.)
         const manualParams = new Set([
           'precipitation',
           'cloudCover',
-          'windSpeed',
-          'windDirection',
           'freezeLevel',
           'fogDensity'
         ]);

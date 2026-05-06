@@ -88,6 +88,12 @@ export function captureRenderStack(fc, runtime = {}) {
     effectIds: ['BuildingShadowsEffectV2'],
   });
 
+  addPass('paintedShadows', 'PaintedShadowEffectV2', 'post', {
+    enabled: !!fc._paintedShadowEffect?.params?.enabled,
+    outputs: ['painted shadow factor RT'],
+    effectIds: ['PaintedShadowEffectV2'],
+  });
+
   addPass('busAlbedo', blurEnabled ? 'Bus → sceneRT (floor depth blur path)' : 'Bus → sceneRT (direct)', 'bus', {
     enabled: true,
     outputs: ['sceneRT'],
@@ -248,6 +254,7 @@ export function captureRenderStack(fc, runtime = {}) {
     { effectId: 'CloudEffectV2', passIds: ['cloudShadow', 'cloudTopsBlit'] },
     { effectId: 'OverheadShadowsEffectV2', passIds: ['overheadShadows'] },
     { effectId: 'BuildingShadowsEffectV2', passIds: ['buildingShadows'] },
+    { effectId: 'PaintedShadowEffectV2', passIds: ['paintedShadows'] },
     { effectId: 'SkyColorEffectV2', passIds: ['skyColor'] },
     { effectId: 'PlayerLightEffectV2', passIds: ['lateWorldOverlay'] },
     { effectId: 'DistortionManager', passIds: ['distortion'] },

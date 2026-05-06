@@ -16,6 +16,7 @@
  */
 
 import { weatherController } from '../../core/WeatherController.js';
+import { resolveEffectWindWorld } from './resolve-effect-wind.js';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Gradient / Envelope Constants
@@ -381,6 +382,157 @@ export class WaterInteriorMaskShape {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// OutdoorsMaskState — shared CPU _Outdoors readback for particle wind shelter
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * CPU mirror of WaterEffectV2 `_Outdoors` binding for sampling shelter at world XY.
+ * @private
+ */
+class OutdoorsMaskState {
+  /**
+   * @param {number} [floorIndex=0]
+   */
+  constructor(floorIndex = 0) {
+    this._floorIndex = Number.isFinite(Number(floorIndex)) ? Number(floorIndex) : 0;
+    this._hasOutdoorsMask = false;
+    this._outdoorsMaskFlipY = false;
+    this._outdoorsMaskTex = null;
+    this._outdoorsMaskData = null;
+    this._outdoorsMaskW = 0;
+    this._outdoorsMaskH = 0;
+    this._outdoorsMaskImageUuid = null;
+    this._outdoorsMaskGpuRowOrder = false;
+    this._indoorSuppressionStrength = 0.0;
+  }
+
+  get indoorSuppressionStrength() {
+    return this._indoorSuppressionStrength;
+  }
+
+  /** Sync from live WaterEffectV2 uniforms + compositor readback. */
+  syncFromWaterEffect() {
+    this._indoorSuppressionStrength = 0.0;
+    this._hasOutdoorsMask = false;
+    try {
+      const waterEffect = window.MapShine?.effectComposer?._floorCompositorV2?._waterEffect;
+      const wp = waterEffect?.params;
+      const u = waterEffect?._composeMaterial?.uniforms;
+      const hasOutdoorsMask = Number(u?.uHasOutdoorsMask?.value) > 0.5;
+      if (hasOutdoorsMask) {
+        this._hasOutdoorsMask = true;
+        const outdoorsTex = u?.tOutdoorsMask?.value ?? null;
+        this._outdoorsMaskTex = outdoorsTex;
+        this._outdoorsMaskFlipY = Number(u?.uOutdoorsMaskFlipY?.value) > 0.5;
+        this._refreshOutdoorsCpuPixels(outdoorsTex);
+        const waveSupp = (wp?.waveIndoorDampingEnabled === true)
+          ? Math.max(0.0, Math.min(1.0, Number(wp?.waveIndoorDampingStrength) || 0.0))
+          : 0.0;
+        const rainSupp = (wp?.rainIndoorDampingEnabled === true)
+          ? Math.max(0.0, Math.min(1.0, Number(wp?.rainIndoorDampingStrength) || 0.0))
+          : 0.0;
+        this._indoorSuppressionStrength = Math.max(waveSupp, rainSupp);
+      }
+    } catch (_) {}
+  }
+
+  /**
+   * @param {any} outdoorsTex
+   * @private
+   */
+  _refreshOutdoorsCpuPixels(outdoorsTex) {
+    const compositor = window.MapShine?.gpuSceneMaskCompositor;
+    const floors = window.MapShine?.floorStack?.getFloors?.() ?? [];
+    const floor = floors[this._floorIndex];
+    let floorKey = (floor?.compositorKey != null) ? String(floor.compositorKey) : null;
+    if (!floorKey && compositor?._activeFloorKey) {
+      const active = window.MapShine?.floorStack?.getActiveFloor?.();
+      if (active && Number(active.index) === this._floorIndex) {
+        floorKey = String(compositor._activeFloorKey);
+      }
+    }
+
+    if (compositor && floorKey && typeof compositor.getCpuPixelsForFloor === 'function') {
+      const buf = compositor.getCpuPixelsForFloor(floorKey, 'outdoors');
+      const dims = compositor.getOutputDims?.('outdoors');
+      if (buf && dims?.width > 0 && dims?.height > 0) {
+        this._outdoorsMaskData = buf;
+        this._outdoorsMaskW = dims.width;
+        this._outdoorsMaskH = dims.height;
+        this._outdoorsMaskGpuRowOrder = true;
+        return;
+      }
+    }
+
+    const img = outdoorsTex?.image;
+    const imgUuid = img?.src ?? outdoorsTex?.uuid ?? null;
+    if (imgUuid !== this._outdoorsMaskImageUuid) {
+      this._outdoorsMaskImageUuid = imgUuid;
+      this._prepareOutdoorsMaskDataFromImage(outdoorsTex);
+    }
+  }
+
+  /**
+   * @param {any} tex
+   * @private
+   */
+  _prepareOutdoorsMaskDataFromImage(tex) {
+    try {
+      const img = tex?.image;
+      const w = Number(img?.width) || Number(img?.videoWidth) || 0;
+      const h = Number(img?.height) || Number(img?.videoHeight) || 0;
+      if (!(w > 0 && h > 0)) {
+        this._outdoorsMaskData = null;
+        this._outdoorsMaskW = 0;
+        this._outdoorsMaskH = 0;
+        return;
+      }
+      const c = document.createElement('canvas');
+      c.width = w;
+      c.height = h;
+      const ctx = c.getContext('2d');
+      if (!ctx) return;
+      ctx.drawImage(img, 0, 0, w, h);
+      const data = ctx.getImageData(0, 0, w, h).data;
+      this._outdoorsMaskData = data;
+      this._outdoorsMaskW = w;
+      this._outdoorsMaskH = h;
+      this._outdoorsMaskGpuRowOrder = false;
+    } catch (_) {
+      this._outdoorsMaskData = null;
+      this._outdoorsMaskW = 0;
+      this._outdoorsMaskH = 0;
+    }
+  }
+
+  /**
+   * @param {number} worldX
+   * @param {number} worldY
+   * @param {object} ownerEffect
+   * @returns {number|null}
+   */
+  sampleAtWorld(worldX, worldY, ownerEffect) {
+    if (!this._hasOutdoorsMask || !this._outdoorsMaskData || this._outdoorsMaskW <= 0 || this._outdoorsMaskH <= 0) {
+      return null;
+    }
+    const b = ownerEffect?._sceneBounds;
+    if (!b || !Number.isFinite(worldX) || !Number.isFinite(worldY)) return null;
+    if (!(b.sw > 0 && b.sh > 0)) return null;
+
+    const u = clamp01((worldX - b.sx) / b.sw);
+    const vFoundry = clamp01(1.0 - ((worldY - b.syWorld) / b.sh));
+    const texY = this._outdoorsMaskFlipY ? (1.0 - vFoundry) : vFoundry;
+
+    const px = Math.max(0, Math.min(this._outdoorsMaskW - 1, Math.floor(u * (this._outdoorsMaskW - 1))));
+    const pyRow = Math.max(0, Math.min(this._outdoorsMaskH - 1, Math.floor(texY * (this._outdoorsMaskH - 1))));
+    const py = this._outdoorsMaskGpuRowOrder ? ((this._outdoorsMaskH - 1) - pyRow) : pyRow;
+    const i = (py * this._outdoorsMaskW + px) * 4;
+    const d = this._outdoorsMaskData;
+    return clamp01(d[i] / 255.0);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // FoamPlumeLifecycleBehavior — Shore foam: billow, drift, fade
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -397,6 +549,7 @@ export class FoamPlumeLifecycleBehavior {
     this.type = 'FoamPlumeLifecycle';
     this.ownerEffect = ownerEffect;
     this._floorIndex = Number.isFinite(Number(floorIndex)) ? Number(floorIndex) : 0;
+    this._outMask = new OutdoorsMaskState(this._floorIndex);
 
     // Cached per-frame state from params.
     this._peakOpacity = 0.65;
@@ -404,19 +557,9 @@ export class FoamPlumeLifecycleBehavior {
     this._foamColorG = 0.90;
     this._foamColorB = 0.88;
     this._windDriftScale = 0.0;
-    this._indoorSuppressionStrength = 0.0;
     this._windX = 1.0;
     this._windY = 0.0;
     this._windSpeed01 = 0.0;
-    this._hasOutdoorsMask = false;
-    this._outdoorsMaskFlipY = false;
-    this._outdoorsMaskTex = null;
-    this._outdoorsMaskData = null;
-    this._outdoorsMaskW = 0;
-    this._outdoorsMaskH = 0;
-    this._outdoorsMaskImageUuid = null;
-    /** @type {boolean} true when `_outdoorsMaskData` is from readRenderTargetPixels (row 0 = bottom) */
-    this._outdoorsMaskGpuRowOrder = false;
 
     // Color tint jitter.
     this._tintStrength = 0.0;
@@ -457,7 +600,7 @@ export class FoamPlumeLifecycleBehavior {
     if (life <= 0) return;
 
     if (particle._msOutdoorStrength == null) {
-      const outdoor = this._sampleOutdoorsAtWorldPos(particle?.position?.x, particle?.position?.y);
+      const outdoor = this._outMask.sampleAtWorld(particle?.position?.x, particle?.position?.y, this.ownerEffect);
       if (Number.isFinite(outdoor)) particle._msOutdoorStrength = outdoor;
     }
 
@@ -512,7 +655,7 @@ export class FoamPlumeLifecycleBehavior {
         ? clamp01(particle._msOutdoorStrength)
         : 1.0;
       const indoor = 1.0 - outdoor;
-      const indoorMul = 1.0 - (0.9 * this._indoorSuppressionStrength * indoor);
+      const indoorMul = 1.0 - (0.9 * this._outMask.indoorSuppressionStrength * indoor);
       const driftSpeed = (15 + 80 * this._windSpeed01) * this._windDriftScale * indoorMul;
       particle.position.x += this._windX * driftSpeed * delta;
       particle.position.y += this._windY * driftSpeed * delta;
@@ -526,8 +669,6 @@ export class FoamPlumeLifecycleBehavior {
     this._foamColorG = p?.foamColorG ?? 0.90;
     this._foamColorB = p?.foamColorB ?? 0.88;
     this._windDriftScale = Math.max(0.0, p?.foamWindDriftScale ?? 0.3);
-    this._indoorSuppressionStrength = 0.0;
-    this._hasOutdoorsMask = false;
 
     this._tintStrength = clamp01(p?.tintStrength ?? 0.0);
     this._tintJitter = clamp01(p?.tintJitter ?? 1.0) * 2.0;
@@ -544,151 +685,12 @@ export class FoamPlumeLifecycleBehavior {
       };
     }
 
-    // Read current wind direction from weather controller.
-    try {
-      const state = weatherController?.getCurrentState?.();
-      if (state) {
-        const dir = state.windDirection;
-        if (dir && Number.isFinite(dir.x) && Number.isFinite(dir.y)) {
-          const len = Math.hypot(dir.x, dir.y);
-          this._windX = len > 1e-6 ? (dir.x / len) : 1.0;
-          this._windY = len > 1e-6 ? (dir.y / len) : 0.0;
-        }
-        this._windSpeed01 = Number.isFinite(state.windSpeed) ? Math.max(0, Math.min(1, state.windSpeed)) : 0;
-      }
-    } catch (_) {}
+    const rw = resolveEffectWindWorld();
+    this._windX = rw.dirX;
+    this._windY = rw.dirY;
+    this._windSpeed01 = rw.speed01;
 
-    // Best-effort indoor coupling: when WaterEffect indoor damping is active and an
-    // outdoors mask is bound, strongly reduce splash foam drift so indoor water
-    // appears sheltered from wind.
-    try {
-      const waterEffect = window.MapShine?.effectComposer?._floorCompositorV2?._waterEffect;
-      const wp = waterEffect?.params;
-      const u = waterEffect?._composeMaterial?.uniforms;
-      const hasOutdoorsMask = Number(u?.uHasOutdoorsMask?.value) > 0.5;
-      if (hasOutdoorsMask) {
-        this._hasOutdoorsMask = true;
-        const outdoorsTex = u?.tOutdoorsMask?.value ?? null;
-        this._outdoorsMaskTex = outdoorsTex;
-        this._outdoorsMaskFlipY = Number(u?.uOutdoorsMaskFlipY?.value) > 0.5;
-
-        // GPU _Outdoors is usually a WebGL RT — must use compositor readback (see DustMotesEffect).
-        this._refreshOutdoorsCpuPixels(outdoorsTex);
-
-        const waveSupp = (wp?.waveIndoorDampingEnabled === true)
-          ? Math.max(0.0, Math.min(1.0, Number(wp?.waveIndoorDampingStrength) || 0.0))
-          : 0.0;
-        const rainSupp = (wp?.rainIndoorDampingEnabled === true)
-          ? Math.max(0.0, Math.min(1.0, Number(wp?.rainIndoorDampingStrength) || 0.0))
-          : 0.0;
-        this._indoorSuppressionStrength = Math.max(waveSupp, rainSupp);
-      }
-    } catch (_) {}
-  }
-
-  /**
-   * Fill `_outdoorsMaskData` from GpuSceneMaskCompositor readback, or canvas fallback
-   * when the bound texture is image-based (bundle / file path).
-   * @param {any} outdoorsTex
-   * @private
-   */
-  _refreshOutdoorsCpuPixels(outdoorsTex) {
-    const compositor = window.MapShine?.gpuSceneMaskCompositor;
-    const floors = window.MapShine?.floorStack?.getFloors?.() ?? [];
-    const floor = floors[this._floorIndex];
-    let floorKey = (floor?.compositorKey != null) ? String(floor.compositorKey) : null;
-    if (!floorKey && compositor?._activeFloorKey) {
-      const active = window.MapShine?.floorStack?.getActiveFloor?.();
-      if (active && Number(active.index) === this._floorIndex) {
-        floorKey = String(compositor._activeFloorKey);
-      }
-    }
-
-    if (compositor && floorKey && typeof compositor.getCpuPixelsForFloor === 'function') {
-      const buf = compositor.getCpuPixelsForFloor(floorKey, 'outdoors');
-      const dims = compositor.getOutputDims?.('outdoors');
-      if (buf && dims?.width > 0 && dims?.height > 0) {
-        this._outdoorsMaskData = buf;
-        this._outdoorsMaskW = dims.width;
-        this._outdoorsMaskH = dims.height;
-        this._outdoorsMaskGpuRowOrder = true;
-        return;
-      }
-    }
-
-    // Fallback: image-backed texture (no GPU RT for this floor yet)
-    const img = outdoorsTex?.image;
-    const imgUuid = img?.src ?? outdoorsTex?.uuid ?? null;
-    if (imgUuid !== this._outdoorsMaskImageUuid) {
-      this._outdoorsMaskImageUuid = imgUuid;
-      this._prepareOutdoorsMaskDataFromImage(outdoorsTex);
-    }
-  }
-
-  /**
-   * Cache outdoors-mask pixel data from an HTML image / canvas (bundle masks).
-   * @param {any} tex
-   * @private
-   */
-  _prepareOutdoorsMaskDataFromImage(tex) {
-    try {
-      const img = tex?.image;
-      const w = Number(img?.width) || Number(img?.videoWidth) || 0;
-      const h = Number(img?.height) || Number(img?.videoHeight) || 0;
-      if (!(w > 0 && h > 0)) {
-        this._outdoorsMaskData = null;
-        this._outdoorsMaskW = 0;
-        this._outdoorsMaskH = 0;
-        return;
-      }
-      const c = document.createElement('canvas');
-      c.width = w;
-      c.height = h;
-      const ctx = c.getContext('2d');
-      if (!ctx) return;
-      ctx.drawImage(img, 0, 0, w, h);
-      const data = ctx.getImageData(0, 0, w, h).data;
-      this._outdoorsMaskData = data;
-      this._outdoorsMaskW = w;
-      this._outdoorsMaskH = h;
-      this._outdoorsMaskGpuRowOrder = false;
-    } catch (_) {
-      this._outdoorsMaskData = null;
-      this._outdoorsMaskW = 0;
-      this._outdoorsMaskH = 0;
-    }
-  }
-
-  /**
-   * Sample outdoors mask at a world-space position.
-   * Returns 0 (indoors) .. 1 (outdoors), or null when unavailable.
-   * Matches WaterEffectV2 `sampleOutdoorsMask`: texture **R** channel, same Y flip uniform.
-   * @param {number} worldX
-   * @param {number} worldY
-   * @returns {number|null}
-   * @private
-   */
-  _sampleOutdoorsAtWorldPos(worldX, worldY) {
-    if (!this._hasOutdoorsMask || !this._outdoorsMaskData || this._outdoorsMaskW <= 0 || this._outdoorsMaskH <= 0) {
-      return null;
-    }
-    const b = this.ownerEffect?._sceneBounds;
-    if (!b || !Number.isFinite(worldX) || !Number.isFinite(worldY)) return null;
-    if (!(b.sw > 0 && b.sh > 0)) return null;
-
-    // Foundry scene UV (Y-down, 0 = top): same encoding as WaterSplashes mask points.
-    const u = clamp01((worldX - b.sx) / b.sw);
-    const vFoundry = clamp01(1.0 - ((worldY - b.syWorld) / b.sh));
-    // Mirror water-shader: texY = flip ? (1 - sceneUv.y) : sceneUv.y
-    const texY = this._outdoorsMaskFlipY ? (1.0 - vFoundry) : vFoundry;
-
-    const px = Math.max(0, Math.min(this._outdoorsMaskW - 1, Math.floor(u * (this._outdoorsMaskW - 1))));
-    const pyRow = Math.max(0, Math.min(this._outdoorsMaskH - 1, Math.floor(texY * (this._outdoorsMaskH - 1))));
-    // GPU readback: row 0 = bottom. Canvas/image: row 0 = top.
-    const py = this._outdoorsMaskGpuRowOrder ? ((this._outdoorsMaskH - 1) - pyRow) : pyRow;
-    const i = (py * this._outdoorsMaskW + px) * 4;
-    const d = this._outdoorsMaskData;
-    return clamp01(d[i] / 255.0);
+    this._outMask.syncFromWaterEffect();
   }
 
   reset() {}
@@ -704,11 +706,21 @@ export class FoamPlumeLifecycleBehavior {
  * the water surface. Quick pop and expand, then rapid fade.
  */
 export class SplashRingLifecycleBehavior {
-  constructor(ownerEffect) {
+  /**
+   * @param {object} ownerEffect - WaterSplashesEffectV2 or proxy with `params` (+ `_sceneBounds` for outdoors sampling)
+   * @param {number} [floorIndex=0]
+   */
+  constructor(ownerEffect, floorIndex = 0) {
     this.type = 'SplashRingLifecycle';
     this.ownerEffect = ownerEffect;
+    this._floorIndex = Number.isFinite(Number(floorIndex)) ? Number(floorIndex) : 0;
+    this._outMask = new OutdoorsMaskState(this._floorIndex);
     this._peakOpacity = 0.70;
     this._precipMult = 1.0;
+    this._windX = 1.0;
+    this._windY = 0.0;
+    this._windSpeed01 = 0.0;
+    this._splashWindDriftScale = 1.0;
 
     // Color tint jitter.
     this._tintStrength = 0.0;
@@ -731,12 +743,20 @@ export class SplashRingLifecycleBehavior {
 
     // Random tint mix selection for this particle (stable over its lifetime).
     particle._msTintRand = Math.random();
+
+    particle._msOutdoorStrength = null;
   }
 
   update(particle, delta) {
     const life = particle.life;
     const age = particle.age;
     if (life <= 0) return;
+
+    if (particle._msOutdoorStrength == null) {
+      const outdoor = this._outMask.sampleAtWorld(particle?.position?.x, particle?.position?.y, this.ownerEffect);
+      if (Number.isFinite(outdoor)) particle._msOutdoorStrength = outdoor;
+    }
+
     const t = age / Math.max(0.001, life);
 
     // Alpha: sharp pop then rapid fade.
@@ -768,11 +788,30 @@ export class SplashRingLifecycleBehavior {
     const sizeScale = lerpScalarStops(SPLASH_SIZE_STOPS, t);
     const baseSize = particle._splashBaseSize ?? 20;
     applyParticleScalarSize(particle, baseSize * sizeScale);
+
+    // Wind shear on impact rings (weaker than shore foam; respects _Outdoors shelter).
+    if (particle.position && this._splashWindDriftScale > 0.001) {
+      const outdoor = (particle._msOutdoorStrength != null && Number.isFinite(particle._msOutdoorStrength))
+        ? clamp01(particle._msOutdoorStrength)
+        : 1.0;
+      const indoor = 1.0 - outdoor;
+      const indoorMul = 1.0 - (0.9 * this._outMask.indoorSuppressionStrength * indoor);
+      const driftSpeed = (6.0 + 28.0 * this._windSpeed01) * this._splashWindDriftScale * indoorMul;
+      particle.position.x += this._windX * driftSpeed * delta;
+      particle.position.y += this._windY * driftSpeed * delta;
+    }
   }
 
   frameUpdate(delta) {
     const p = this.ownerEffect?.params;
     this._peakOpacity = Math.max(0.0, Math.min(1.0, p?.splashPeakOpacity ?? 0.70));
+    this._splashWindDriftScale = Math.max(0.0, Number(p?.splashWindDriftScale) || 1.0);
+
+    const rw = resolveEffectWindWorld();
+    this._windX = rw.dirX;
+    this._windY = rw.dirY;
+    this._windSpeed01 = rw.speed01;
+    this._outMask.syncFromWaterEffect();
 
     this._tintStrength = clamp01(p?.tintStrength ?? 0.0);
     this._tintJitter = clamp01(p?.tintJitter ?? 1.0) * 2.0;
@@ -800,7 +839,7 @@ export class SplashRingLifecycleBehavior {
   }
 
   reset() {}
-  clone() { return new SplashRingLifecycleBehavior(this.ownerEffect); }
+  clone() { return new SplashRingLifecycleBehavior(this.ownerEffect, this._floorIndex); }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

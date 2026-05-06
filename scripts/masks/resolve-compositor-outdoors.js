@@ -33,11 +33,11 @@ function levelsBandKeyFromContext(ctx) {
 /**
  * @param {object} compositor - GpuSceneMaskCompositor instance
  * @param {{ bottom?: number, top?: number }|null} [levelContext]
- * @param {{ skipGroundFallback?: boolean, allowBundleFallback?: boolean }} [options]
+ * @param {{ skipGroundFallback?: boolean, allowBundleFallback?: boolean, strictViewedFloorOnly?: boolean }} [options]
  * @returns {{ texture: import('three').Texture|null, resolvedKey: string|null, route: string|null }}
  */
 export function resolveCompositorOutdoorsTexture(compositor, levelContext = null, options = {}) {
-  const { skipGroundFallback = false, allowBundleFallback = true } = options;
+  const { skipGroundFallback = false, allowBundleFallback = true, strictViewedFloorOnly = false } = options;
   const empty = { texture: null, resolvedKey: null, route: null };
   if (!compositor || typeof compositor.getFloorTexture !== 'function') return empty;
 
@@ -90,6 +90,29 @@ export function resolveCompositorOutdoorsTexture(compositor, levelContext = null
   for (const key of uniqueKeys) {
     tex = tryKey(key);
     if (tex) return { texture: tex, resolvedKey: key, route: 'direct' };
+  }
+
+  if (strictViewedFloorOnly) {
+    if (allowBundleFallback && !tex) {
+      const sc = window.MapShine?.sceneComposer;
+      const bundleMask = sc?.currentBundle?.masks?.find?.(
+        (m) => m?.id === 'outdoors' || m?.type === 'outdoors'
+      )?.texture ?? null;
+      if (bundleMask) {
+        let mf = false;
+        try {
+          mf = (window.MapShine?.floorStack?.getFloors?.() ?? []).length > 1;
+        } catch (_) {
+          mf = false;
+        }
+        const af = window.MapShine?.floorStack?.getActiveFloor?.() ?? null;
+        const aidx = Number(af?.index);
+        if (!mf || !Number.isFinite(aidx) || aidx <= 0) {
+          return { texture: bundleMask, resolvedKey: 'bundle', route: 'bundle' };
+        }
+      }
+    }
+    return empty;
   }
 
   // Prefer rendered floor band bottom (floor stack) so sibling scan matches the viewed band.

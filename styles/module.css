@@ -1847,3 +1847,244 @@
   opacity: 0.65;
   font-style: italic;
 }
+
+/* ── Dialog prose (confirm / simple HTML dialogs) ───────────────────────── */
+.ms-dialog-prose {
+  max-width: min(520px, calc(100vw - 48px));
+  line-height: 1.5;
+}
+
+.ms-dialog-prose p {
+  margin: 0.5em 0;
+}
+
+.ms-dialog-prose p:first-child {
+  margin-top: 0;
+}
+
+.ms-dialog-prose p:last-child {
+  margin-bottom: 0;
+}
+
+/* ── Scene → scene effect settings transfer dialog ─────────────────────── */
+.ms-scene-effects-transfer {
+  box-sizing: border-box;
+  max-width: min(720px, calc(100vw - 48px));
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.ms-scene-effects-transfer__lede {
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: var(--color-text-primary, inherit);
+  opacity: 0.95;
+}
+
+.ms-scene-effects-transfer__routes {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: stretch;
+  gap: 10px 14px;
+}
+
+.ms-scene-effects-transfer__route {
+  flex: 1 1 200px;
+  min-width: 0;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(0, 0, 0, 0.18);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.ms-scene-effects-transfer__route--target {
+  border-color: rgba(92, 166, 255, 0.35);
+}
+
+.ms-scene-effects-transfer__kicker {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  opacity: 0.75;
+}
+
+.ms-scene-effects-transfer__scene-name {
+  font-size: 15px;
+  word-break: break-word;
+}
+
+.ms-scene-effects-transfer__sub {
+  font-size: 11px;
+  opacity: 0.72;
+}
+
+.ms-scene-effects-transfer__arrow {
+  flex: 0 0 auto;
+  align-self: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0.55;
+  font-size: 18px;
+  padding: 0 4px;
+}
+
+.ms-scene-effects-transfer__field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ms-scene-effects-transfer__label {
+  font-weight: 600;
+  font-size: 12px;
+}
+
+.ms-scene-effects-transfer__select,
+.ms-scene-effects-transfer__filter {
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+  min-height: 32px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(0, 0, 0, 0.25);
+  color: inherit;
+}
+
+.ms-scene-effects-transfer__select:focus,
+.ms-scene-effects-transfer__filter:focus {
+  outline: 2px solid rgba(92, 166, 255, 0.55);
+  outline-offset: 1px;
+}
+
+.ms-scene-effects-transfer__mode-hint {
+  margin: 0;
+  font-size: 11px;
+  opacity: 0.78;
+  line-height: 1.5;
+}
+
+.ms-scene-effects-transfer__toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.ms-scene-effects-transfer__btn {
+  flex: 1 1 140px;
+  min-height: 32px;
+  padding: 6px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  background: rgba(255, 255, 255, 0.08);
+  color: inherit;
+  font-weight: 600;
+  font-size: 12px;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+
+.ms-scene-effects-transfer__btn:hover {
+  background: rgba(255, 255, 255, 0.14);
+  border-color: rgba(255, 255, 255, 0.28);
+}
+
+.ms-scene-effects-transfer__btn:focus-visible {
+  outline: 2px solid rgba(92, 166, 255, 0.55);
+  outline-offset: 2px;
+}
+
+.ms-scene-effects-transfer__list {
+  max-height: min(55vh, 520px);
+  min-height: 120px;
+  overflow: auto;
+  padding: 6px 8px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(0, 0, 0, 0.22);
+  scrollbar-width: thin;
+}
+
+.ms-scene-effects-transfer__list::-webkit-scrollbar {
+  width: 8px;
+}
+
+.ms-scene-effects-transfer__list::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.25);
+  border-radius: 4px;
+}
+
+.ms-scene-effects-transfer__row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 7px 8px;
+  margin: 2px 0;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 100ms ease;
+}
+
+.ms-scene-effects-transfer__row:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.ms-scene-effects-transfer__row--hidden {
+  display: none !important;
+}
+
+.ms-scene-effects-transfer__check {
+  flex-shrink: 0;
+  margin-top: 3px;
+  accent-color: rgba(92, 166, 255, 0.9);
+  cursor: pointer;
+}
+
+.ms-scene-effects-transfer__row-label {
+  flex: 1;
+  min-width: 0;
+  word-break: break-word;
+}
+
+.ms-scene-effects-transfer__empty {
+  padding: 16px 10px;
+  text-align: center;
+  opacity: 0.75;
+  font-style: italic;
+}
+
+.ms-scene-effects-transfer__counts {
+  font-size: 12px;
+  opacity: 0.88;
+}
+
+.ms-scene-effects-transfer__counts-main {
+  font-weight: 600;
+}
+
+.ms-scene-effects-transfer__summary {
+  font-size: 12px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px dashed rgba(255, 255, 255, 0.2);
+  background: rgba(255, 255, 255, 0.04);
+  min-height: 1.5em;
+}
+
+.ms-scene-effects-transfer__footer-notes {
+  margin: 0;
+  font-size: 11px;
+  opacity: 0.72;
+}

@@ -58,6 +58,7 @@ const V2_EFFECT_KEY_BY_ID = Object.freeze({
   cloud: '_cloudEffect',
   'overhead-shadows': '_overheadShadowEffect',
   'building-shadows': '_buildingShadowEffect',
+  'painted-shadows': '_paintedShadowEffect',
   'player-light': '_playerLightEffect',
   'candle-flames': '_candleFlamesEffect',
 });

@@ -1109,7 +1109,16 @@ export class WindowLightEffectV2 {
             vec2 roofUv = gl_FragCoord.xy / max(uScreenSize, vec2(1.0));
             if (uHasCeilingTransmittance > 0.5) {
               // Same transmittance T as LightingEffectV2 (1 = light passes).
+              // When "Light Overheads" is enabled, visible roof/overhead pixels are
+              // receivers too, not just blockers. The raw transmittance texture is near
+              // zero there, so mix it open by roof alpha using the overhead controls.
               ceilingMul = clamp(texture2D(uCeilingTransmittance, clamp(roofUv, 0.0, 1.0)).r, 0.0, 1.0);
+              if (uHasOverheadRoofAlphaTex > 0.5 && uLightOverheadTiles > 0.5) {
+                vec4 roofSample = texture2D(uOverheadRoofAlphaTex, clamp(roofUv, 0.0, 1.0));
+                float roofAlpha = clamp(max(roofSample.r, roofSample.a), 0.0, 1.0);
+                float overheadAllow = clamp(uOverheadLightIntensity, 0.0, 1.0) * roofAlpha;
+                ceilingMul = mix(ceilingMul, 1.0, overheadAllow);
+              }
             } else if (uHasOverheadRoofAlphaTex > 0.5) {
               vec4 roofSample = texture2D(uOverheadRoofAlphaTex, clamp(roofUv, 0.0, 1.0));
               float roofAlpha = clamp(max(roofSample.r, roofSample.a), 0.0, 1.0);

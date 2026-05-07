@@ -1479,6 +1479,12 @@ export class FloorCompositor {
     await initEffect('FireEffectV2', () => this._fireEffect.initialize());
     await initEffect('DustEffectV2', () => this._dustEffect.initialize());
     await initEffect('WindowLightEffectV2', () => this._windowLightEffect.initialize());
+    try {
+      const tm = window.MapShine?.tileManager ?? null;
+      tm?.setWindowLightEffect?.(this._windowLightEffect);
+    } catch (err) {
+      log.warn('FloorCompositor: failed to link WindowLightEffectV2 to TileManager:', err);
+    }
     // Cloud effect needs the bus scene and main camera for the overhead blocker pass.
     this._cloudEffect.initialize(this.renderer, this._renderBus._scene, this.camera);
     try {
@@ -3256,6 +3262,13 @@ export class FloorCompositor {
         });
       } catch (_) {}
       this._windowLightEffect.update(timeInfo);
+      // Keep TileManager linked even if managers are re-created during canvas/scene transitions.
+      try {
+        const tm = window.MapShine?.tileManager ?? null;
+        if (tm?.windowLightEffect !== this._windowLightEffect) {
+          tm?.setWindowLightEffect?.(this._windowLightEffect);
+        }
+      } catch (_) {}
       this._colorCorrectionEffect.update(timeInfo);
       this._filterEffect.update(timeInfo);
       this._atmosphericFogEffect.update(timeInfo);

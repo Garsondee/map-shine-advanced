@@ -310,6 +310,8 @@ export class TileManager {
     // Window light effect reference for overhead tile lighting
     /** @type {import('../compositor-v2/effects/WindowLightEffectV2.js').WindowLightEffectV2|null} */
     this.windowLightEffect = null;
+    /** @type {Map<string, {data: Uint8ClampedArray, width: number, height: number}>} */
+    this._windowOverlayMaskCache = new Map();
 
     /** @type {import('../compositor-v2/effects/SpecularEffectV2.js').SpecularEffectV2|null} */
     this.specularEffect = null;
@@ -2957,14 +2959,27 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     const sceneY = d?.sceneRect?.y ?? d?.sceneY ?? 0;
     const sceneW = d?.sceneRect?.width ?? d?.sceneWidth ?? d?.width ?? 10000;
     const sceneH = d?.sceneRect?.height ?? d?.sceneHeight ?? d?.height ?? 10000;
+    const worldH = Number(window.MapShine?.sceneComposer?.foundrySceneData?.height ?? d?.height ?? 0);
 
     // Count overhead tiles for debugging
     let overheadCount = 0;
     let litCount = 0;
 
-    // For each overhead tile, calculate the average window light in its area
-    // and apply as an additive tint on top of the global darkness tint
-    for (const tileId of this._overheadTileIds) {
+    // Build a robust target list for overhead-window-lighting:
+    // - canonical overhead tracking set, plus
+    // - motion tiles forced above tokens (renderAboveTokens), even if overhead
+    //   classification state is temporarily stale.
+    const targetTileIds = new Set(this._overheadTileIds);
+    try {
+      for (const [id] of this.tileSprites.entries()) {
+        const forced = !!window.MapShine?.tileMotionManager?.getTileConfig?.(id)?.renderAboveTokens;
+        if (forced) targetTileIds.add(id);
+      }
+    } catch (_) {}
+
+    // For each overhead/motion-overhead tile, calculate window light in its area
+    // and apply as an additive tint on top of the current base tint.
+    for (const tileId of targetTileIds) {
       const data = this.tileSprites.get(tileId);
       if (!data) continue;
 
@@ -2975,8 +2990,21 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
       const baseColor = sprite?.material?.color;
       if (!baseColor) continue;
 
-      // Calculate tile center UV in scene space
-      const { cx: tileCenterX, cy: tileCenterY } = getTileVisualCenterFoundryXY(tileDoc);
+      // Calculate tile center UV in scene space.
+      // Motion tiles can move independently of TileDocument coordinates, so prefer
+      // live sprite world position to keep overhead window-light sampling in sync.
+      let tileCenterX;
+      let tileCenterY;
+      const spriteX = Number(sprite?.position?.x);
+      const spriteY = Number(sprite?.position?.y);
+      if (Number.isFinite(spriteX) && Number.isFinite(spriteY) && worldH > 0) {
+        tileCenterX = spriteX;
+        tileCenterY = worldH - spriteY;
+      } else {
+        const center = getTileVisualCenterFoundryXY(tileDoc);
+        tileCenterX = center.cx;
+        tileCenterY = center.cy;
+      }
       const u = (tileCenterX - sceneX) / sceneW;
       const v = (tileCenterY - sceneY) / sceneH;
 
@@ -3125,8 +3153,13 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
    */
   _sampleWindowLight(texture, u, v) {
     const wle = this.windowLightEffect;
-    if (!wle || !wle.windowMask) {
+    if (!wle) {
       return null;
+    }
+
+    // V2 path: WindowLightEffectV2 uses per-overlay masks (no single windowMask texture).
+    if (!wle.windowMask) {
+      return this._sampleWindowLightFromOverlays(wle, u, v);
     }
 
     // Lazy-extract window mask data
@@ -3222,6 +3255,94 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
       g: color.g,
       b: color.b,
       brightness: Math.min(1, finalBrightness)
+    };
+  }
+
+  /**
+   * V2 fallback sampling for WindowLightEffectV2 where masks are per-overlay meshes.
+   * Converts scene UV -> world point and samples matching overlay mask texels.
+   * @private
+   */
+  _sampleWindowLightFromOverlays(wle, u, v) {
+    const overlays = wle?._overlays;
+    if (!overlays || typeof overlays.values !== 'function' || overlays.size <= 0) return null;
+
+    const d = canvas?.dimensions;
+    const sceneX = Number(d?.sceneRect?.x ?? d?.sceneX ?? 0);
+    const sceneY = Number(d?.sceneRect?.y ?? d?.sceneY ?? 0);
+    const sceneW = Number(d?.sceneRect?.width ?? d?.sceneWidth ?? d?.width ?? 0);
+    const sceneH = Number(d?.sceneRect?.height ?? d?.sceneHeight ?? d?.height ?? 0);
+    const worldH = Number(window.MapShine?.sceneComposer?.foundrySceneData?.height ?? d?.height ?? 0);
+    if (!(sceneW > 0 && sceneH > 0 && worldH > 0)) return null;
+
+    const fx = sceneX + Math.max(0, Math.min(1, u)) * sceneW;
+    const fy = sceneY + Math.max(0, Math.min(1, v)) * sceneH;
+    const worldX = fx;
+    const worldY = worldH - fy;
+
+    const falloff = (typeof wle.params?.falloff === 'number' && Number.isFinite(wle.params.falloff))
+      ? Math.max(0.001, wle.params.falloff)
+      : 1.0;
+    const effectIntensity = (typeof wle.params?.intensity === 'number' && Number.isFinite(wle.params.intensity))
+      ? Math.max(0.0, wle.params.intensity)
+      : 1.0;
+    const color = wle.params?.color ?? { r: 1, g: 1, b: 1 };
+
+    let sumBrightness = 0.0;
+    for (const entry of overlays.values()) {
+      const mesh = entry?.mesh;
+      const mat = entry?.material;
+      if (!mesh || !mat || mesh.visible === false) continue;
+
+      const tex = mat?.uniforms?.uMask?.value ?? null;
+      const ready = Number(mat?.uniforms?.uMaskReady?.value ?? 0);
+      if (!tex || ready < 0.5) continue;
+
+      const key = String(tex.uuid ?? '');
+      let cached = key ? this._windowOverlayMaskCache.get(key) : null;
+      if (!cached) {
+        const extracted = this._extractMaskData(tex);
+        if (!extracted) continue;
+        cached = { data: extracted.data, width: extracted.width, height: extracted.height };
+        if (key) this._windowOverlayMaskCache.set(key, cached);
+      }
+
+      const w = Number(mesh?.geometry?.parameters?.width ?? 0);
+      const h = Number(mesh?.geometry?.parameters?.height ?? 0);
+      if (!(w > 0 && h > 0)) continue;
+
+      const dx = worldX - Number(mesh.position?.x ?? 0);
+      const dy = worldY - Number(mesh.position?.y ?? 0);
+      const rot = Number(mesh.rotation?.z ?? 0);
+      const c = Math.cos(-rot);
+      const s = Math.sin(-rot);
+      const lx = dx * c - dy * s;
+      const ly = dx * s + dy * c;
+      if (Math.abs(lx) > w * 0.5 || Math.abs(ly) > h * 0.5) continue;
+
+      const ou = Math.max(0, Math.min(1, lx / w + 0.5));
+      const ov = Math.max(0, Math.min(1, ly / h + 0.5));
+      const ix = Math.floor(ou * (cached.width - 1));
+      const iy = Math.floor(ov * (cached.height - 1));
+      const idx = (iy * cached.width + ix) * 4;
+      const mr = cached.data[idx] / 255;
+      const mg = cached.data[idx + 1] / 255;
+      const mb = cached.data[idx + 2] / 255;
+      const ma = cached.data[idx + 3] / 255;
+      if (ma < 0.01) continue;
+
+      const lum = mr * 0.2126 + mg * 0.7152 + mb * 0.0722;
+      const shaped = Math.pow(Math.max(0.0, Math.min(1.0, lum)), falloff) * ma;
+      const overlayIntensity = Number(mat?.uniforms?.uOverlayIntensity?.value ?? 1.0);
+      sumBrightness += shaped * Math.max(0.0, overlayIntensity);
+    }
+
+    if (sumBrightness <= 0.0001) return null;
+    return {
+      r: Number(color.r) || 1.0,
+      g: Number(color.g) || 1.0,
+      b: Number(color.b) || 1.0,
+      brightness: Math.min(1.0, sumBrightness * effectIntensity),
     };
   }
 

@@ -57,6 +57,19 @@ export class FrameState {
     this.cameraChanged = false;
     this.zoomChanged = false;
     this.screenSizeChanged = false;
+
+    // Scene-rect scissor — drawing-buffer-pixel AABB of the inner
+    // sceneRect projected through the active camera. Owned/written by
+    // SceneRectScissor (compositor-v2), surfaced here so any consumer
+    // already reading FrameState (effects, diagnostics) can pick it up
+    // without taking a direct dependency on the scissor module.
+    //
+    // Origin: bottom-left, matching WebGL gl.scissor semantics.
+    // `valid === false` means "no scissor this frame" — consumers
+    // should treat the scene as covering the whole drawing buffer.
+    this.sceneScissorPx = { x: 0, y: 0, w: 0, h: 0 };
+    this.sceneScissorValid = false;
+    this.sceneScissorFrameId = 0;
   }
 
   /**
@@ -239,6 +252,11 @@ export class FrameState {
       screenSize: { width: this.screenWidth, height: this.screenHeight },
       sceneRect: { x: this.sceneX, y: this.sceneY, width: this.sceneWidth, height: this.sceneHeight },
       viewBounds: { minX: this.viewMinX, minY: this.viewMinY, maxX: this.viewMaxX, maxY: this.viewMaxY },
+      sceneScissor: {
+        valid: this.sceneScissorValid,
+        frameId: this.sceneScissorFrameId,
+        rect: { ...this.sceneScissorPx },
+      },
       changes: {
         camera: this.cameraChanged,
         zoom: this.zoomChanged,

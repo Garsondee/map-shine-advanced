@@ -41,6 +41,7 @@ import {
   resolveV14NativeDocFloorIndexMin,
   resolveV14BackgroundFloorIndexForSrc,
 } from '../../foundry/levels-scene-flags.js';
+import { isTileOverhead } from '../../scene/tile-manager.js';
 import { weatherController, PrecipitationType } from '../../core/WeatherController.js';
 
 const log = createLogger('WindowLightEffectV2');
@@ -48,6 +49,7 @@ const log = createLogger('WindowLightEffectV2');
 // Z offset above albedo + specular. Must remain within the 1.0-per-floor Z band.
 const WINDOW_Z_OFFSET = 0.2;
 const clamp01 = (n) => Math.max(0.0, Math.min(1.0, Number(n) || 0.0));
+const stripUrlQueryHash = (s) => String(s || '').split('#')[0].split('?')[0];
 
 const readSceneDarkness01 = () => {
   try {
@@ -466,8 +468,9 @@ export class WindowLightEffectV2 {
       const bgFloorIndex = Number.isFinite(Number(bg.floorIndex)) ? Number(bg.floorIndex) : bi;
       const bgId = bg.key;
       if (!bgSrc) continue;
-      const dotIdx = bgSrc.lastIndexOf('.');
-      const bgBasePath = dotIdx > 0 ? bgSrc.substring(0, dotIdx) : bgSrc;
+      const bgSrcClean = stripUrlQueryHash(bgSrc);
+      const dotIdx = bgSrcClean.lastIndexOf('.');
+      const bgBasePath = dotIdx > 0 ? bgSrcClean.substring(0, dotIdx) : bgSrcClean;
       const bgWinResult = await probeMaskFile(bgBasePath, '_Windows');
       const bgStructResult = bgWinResult?.path ? null : await probeMaskFile(bgBasePath, '_Structural');
       const bgMaskPath = bgWinResult?.path ?? bgStructResult?.path;
@@ -510,8 +513,9 @@ export class WindowLightEffectV2 {
       const src = tileDoc?.texture?.src ?? tileDoc?.img ?? '';
       if (!src) continue;
 
-      const dotIdx = src.lastIndexOf('.');
-      const basePath = dotIdx > 0 ? src.substring(0, dotIdx) : src;
+      const srcClean = stripUrlQueryHash(src);
+      const dotIdx = srcClean.lastIndexOf('.');
+      const basePath = dotIdx > 0 ? srcClean.substring(0, dotIdx) : srcClean;
 
       // _Windows is preferred; _Structural is a legacy equivalent — both are
       // colour luminance masks with alpha defining where light hits the floor.
@@ -521,7 +525,9 @@ export class WindowLightEffectV2 {
       if (!maskPath) continue;
 
       const floorIndex = this._resolveFloorIndex(tileDoc, floors);
-      const isOverheadTile = !!tileDoc.overhead;
+      // Use canonical overhead classification (persisted source flags + elevation fallback).
+      // TileDocument#overhead is deprecated in PF2e v12+ and can misclassify overlays.
+      const isOverheadTile = isTileOverhead(tileDoc);
       if (isOverheadTile && !this.params.lightOverheadTiles) {
         continue;
       }
@@ -537,13 +543,10 @@ export class WindowLightEffectV2 {
       // Z in bus coordinates.
       const GROUND_Z = 1000;
       const z = GROUND_Z + floorIndex + WINDOW_Z_OFFSET;
-      // Levels-aware overhead handling:
-      // On upper floors, "overhead" is often used for floor reveal behavior, not
-      // roof semantics. Do not attenuate those window overlays as roof-light.
-      const treatAsRoofOverhead = isOverheadTile && floorIndex <= 0;
-      const intensityMultiplier = treatAsRoofOverhead
-        ? Math.max(0.0, Math.min(1.0, Number(this.params.overheadLightIntensity) || 0.0))
-        : 1.0;
+      // Apply overhead intensity uniformly to overhead overlays so the UI slider
+      // has an immediate visible effect regardless of floor semantics.
+      const overheadIntensity = Math.max(0.0, Math.min(1.0, Number(this.params.overheadLightIntensity) || 0.0));
+      const intensityMultiplier = isOverheadTile ? overheadIntensity : 1.0;
 
       this._createOverlay(tileId, floorIndex, {
         maskUrl: maskPath,
@@ -718,9 +721,7 @@ export class WindowLightEffectV2 {
     u.uOverheadLightIntensity.value = overheadIntensity;
     for (const entry of this._overlays.values()) {
       const overlayIntensity = entry.isOverhead
-        // Levels-aware overhead handling:
-        // Upper-floor overhead tiles should still emit window light.
-        ? ((entry.floorIndex <= 0) ? (overheadEnabled ? overheadIntensity : 0.0) : 1.0)
+        ? (overheadEnabled ? overheadIntensity : 0.0)
         : 1.0;
       const overlayUniform = entry.material?.uniforms?.uOverlayIntensity;
       if (overlayUniform) overlayUniform.value = overlayIntensity;
@@ -1233,6 +1234,8 @@ export class WindowLightEffectV2 {
     const renderFloor = Number(this._renderFloorIndex);
     if (Number.isFinite(renderFloor)) return Number(floorIndex) === renderFloor;
     const active = Number.isFinite(this._activeFloorIndex) ? this._activeFloorIndex : 0;
-    return Number(floorIndex) === active;
+    // Mirror FloorRenderBus.setVisibleFloors(): show all floors up to the
+    // currently visible max floor in normal (non per-slice) mode.
+    return Number(floorIndex) <= active;
   }
 }

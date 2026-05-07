@@ -32,6 +32,7 @@
  *
  * Structural shadows (overhead / building / painted) are normally pre-multiplied
  * by ShadowManagerV2 into `tCombinedShadow`; the compose pass dims ambient once.
+ * Painted shadow is split back out so lift/influence apply only to non-painted terms.
  * A separate `tBuildingShadow` multiply runs only when combined shadow is
  * unavailable (legacy wiring), matching the gated overhead legacy path — not in
  * addition to combined, which would double-apply building darkening.
@@ -769,6 +770,11 @@ export class LightingEffectV2 {
         uHasCombinedShadow: { value: 0 },
         tCombinedShadowRaw:    { value: null },
         uHasCombinedShadowRaw: { value: 0 },
+        // Painted shadow lit factor (same RT as ShadowManager tPaintedShadow): recombine in
+        // compose so dynamic-light lift / cloud ambient influence do not erase artistic shadow.
+        tPaintedShadowLit: { value: null },
+        uHasPaintedShadowLit: { value: 0 },
+        uPaintedShadowMgrOpacity: { value: 1.0 },
         // Building shadow: greyscale factor from BuildingShadowsEffectV2.
         // Legacy-only when uHasCombinedShadow is off (combined already includes building).
         tBuildingShadow:     { value: null },
@@ -866,6 +872,9 @@ export class LightingEffectV2 {
         uniform float uHasCombinedShadow;
         uniform sampler2D tCombinedShadowRaw;
         uniform float uHasCombinedShadowRaw;
+        uniform sampler2D tPaintedShadowLit;
+        uniform float uHasPaintedShadowLit;
+        uniform float uPaintedShadowMgrOpacity;
         uniform sampler2D tBuildingShadow;
         uniform float uHasBuildingShadow;
         uniform float uBuildingShadowOpacity;
@@ -1076,6 +1085,15 @@ export class LightingEffectV2 {
             float interiorUnderHang = (1.0 - isOutdoorSample) * underOverhead * (1.0 - suppressRoofLeak);
             roofLightVisibility = max(roofLightVisibility, interiorUnderHang * 0.52 * revealWeight);
           }
+          // Roof receiver relief:
+          // Keep dynamic light response on visible overhead/roof surfaces themselves.
+          // Without this, strong roof-screen occlusion can drive overhead tiles nearly
+          // black at night even when direct scene lights should illuminate them.
+          float roofReceiver = smoothstep(0.55, 0.85, roofAlphaLive);
+          float rawSourceLight = max(srcSample.a, 0.0);
+          float rawWindowLight = max(max(winLights.r, winLights.g), winLights.b);
+          float rawLightPresence = smoothstep(0.015, 0.16, max(rawSourceLight, rawWindowLight));
+          roofLightVisibility = max(roofLightVisibility, roofReceiver * rawLightPresence * 0.88);
           float visS = mix(1.0, roofLightVisibility, clamp(uApplyRoofOcclusionToSources, 0.0, 1.0));
           float visW = mix(1.0, roofLightVisibility, clamp(uApplyRoofOcclusionToWindow, 0.0, 1.0));
           vec3 safeLights = srcLights * visS + winLights * visW;
@@ -1150,12 +1168,26 @@ export class LightingEffectV2 {
               float rawMix = roofAlpha * isOutdoorForInteriorDimSafe;
               shadowFactor = mix(shadowFactor, rawShadowFactor, rawMix);
             }
+            // ShadowManagerV2 combines overhead * building * painted * cloud as one product.
+            // Split off painted so dynamic-light lift (and cloud ambient influence) only relax
+            // geometric/cloud shadow — painted shadow stays as authored on outdoor pixels.
+            float paintedEffective = 1.0;
+            if (uHasPaintedShadowLit > 0.5) {
+              float paintedBase = clamp(texture2D(tPaintedShadowLit, sceneUvFoundry).r, 0.0, 1.0);
+              paintedEffective = mix(1.0, paintedBase, clamp(uPaintedShadowMgrOpacity, 0.0, 1.0));
+            }
+            float nonPaintedShadow = clamp(
+              shadowFactor / max(paintedEffective, 0.0001),
+              0.0,
+              1.0
+            );
             float shadowFactorMix = mix(
               1.0,
-              shadowFactor,
+              nonPaintedShadow,
               clamp(uCloudShadowAmbientInfluence, 0.0, 1.0)
             );
             shadowFactorMix = mix(shadowFactorMix, 1.0, dynamicShadowLift);
+            shadowFactorMix *= paintedEffective;
             vec3 ambientPortion = ambientAfterDark;
             totalIllumination = ambientPortion * shadowFactorMix + directLight;
           }
@@ -1871,8 +1903,13 @@ export class LightingEffectV2 {
    *   from ShadowManagerV2 (cloud + overhead composition).
    * @param {THREE.Texture|null} [combinedShadowRawTexture=null] - Optional unified
    *   raw-shadow variant used on roof pixels.
+   * @param {THREE.Texture|null} [paintedShadowLitTexture=null] - Lit factor from
+   *   PaintedShadowEffectV2 (same as ShadowManager tPaintedShadow). When set, compose
+   *   isolates painted darkening from dynamic shadow lift.
+   * @param {number} [paintedShadowMgrOpacity=1] - ShadowManagerV2 `paintedOpacity`;
+   *   must match combine pass when splitting painted from combined shadow.
    */
-  render(renderer, camera, sceneRT, outputRT, windowLightScene = null, cloudShadowTexture = null, cloudShadowRawTexture = null, buildingShadowTexture = null, overheadShadowTexture = null, buildingShadowOpacity = 0.75, overheadRoofAlphaTexture = null, overheadRoofBlockTexture = null, outdoorsMaskTexture = null, ceilingTransmittanceTexture = null, combinedShadowTexture = null, combinedShadowRawTexture = null) {
+  render(renderer, camera, sceneRT, outputRT, windowLightScene = null, cloudShadowTexture = null, cloudShadowRawTexture = null, buildingShadowTexture = null, overheadShadowTexture = null, buildingShadowOpacity = 0.75, overheadRoofAlphaTexture = null, overheadRoofBlockTexture = null, outdoorsMaskTexture = null, ceilingTransmittanceTexture = null, combinedShadowTexture = null, combinedShadowRawTexture = null, paintedShadowLitTexture = null, paintedShadowMgrOpacity = 1.0) {
     if (!this._initialized || !this._enabled || !sceneRT) return;
     if (!this._lightRT || !this._windowLightRT || !this._darknessRT || !this._composeMaterial) return;
 
@@ -1921,11 +1958,16 @@ export class LightingEffectV2 {
       : 0;
     const occlusionWeight = 1.0 - transmission;
     const restrictRoofToTop = this.params.restrictRoofScreenLightOcclusionToTopFloor === true;
-    const roofScreenOcclusionScale = persp.getRoofScreenOcclusionScale(restrictRoofToTop);
+    const renderFloorForOcclusion = Number.isFinite(this._renderFloorIndexForLights)
+      ? Number(this._renderFloorIndexForLights)
+      : persp.activeFloorIndex;
+    const roofScreenOcclusionScale = (typeof persp.getRoofScreenOcclusionScaleForFloor === 'function')
+      ? persp.getRoofScreenOcclusionScaleForFloor(renderFloorForOcclusion, restrictRoofToTop)
+      : persp.getRoofScreenOcclusionScale(restrictRoofToTop);
     cu0.uApplyRoofOcclusionToSources.value = occlusionWeight * roofScreenOcclusionScale;
     cu0.uApplyRoofOcclusionToWindow.value = 0.0;
     const onUppermostMultiFloor = persp.isMultiFloor
-      && persp.activeFloorIndex === persp.topFloorIndex
+      && renderFloorForOcclusion === persp.topFloorIndex
       && persp.topFloorIndex > 0;
     const buildingRoofOcclusionScale = onUppermostMultiFloor ? 0.0 : roofScreenOcclusionScale;
     cu0.uApplyRoofOcclusionToBuilding.value = buildingRoofOcclusionScale;
@@ -2019,6 +2061,15 @@ export class LightingEffectV2 {
       cu.tCombinedShadowRaw.value = null;
       cu.uHasCombinedShadowRaw.value = 0;
     }
+    if (paintedShadowLitTexture) {
+      cu.tPaintedShadowLit.value = paintedShadowLitTexture;
+      cu.uHasPaintedShadowLit.value = 1;
+    } else {
+      cu.tPaintedShadowLit.value = null;
+      cu.uHasPaintedShadowLit.value = 0;
+    }
+    const psmo = Number(paintedShadowMgrOpacity);
+    cu.uPaintedShadowMgrOpacity.value = (Number.isFinite(psmo) ? Math.max(0, Math.min(1, psmo)) : 1.0);
     // View→scene UV uniforms for compose (building shadow + _Outdoors roof-light gate).
     const dims = canvas?.dimensions;
     const sc = window.MapShine?.sceneComposer;

@@ -2642,6 +2642,14 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     );
     const allowHoverHiddenFade = !(isTilesLayerActive && inputMode === 'pixi');
 
+    // Resolve active lighting effect robustly for both legacy + V2 paths.
+    // scene-context global can be null in V2-only wiring while the compositor
+    // still owns a live LightingEffectV2 instance.
+    const lightingEffect = window.MapShine?.lightingEffect
+      ?? window.MapShine?.floorCompositorV2?._lightingEffect
+      ?? window.MapShine?.effectComposer?._floorCompositorV2?._lightingEffect
+      ?? null;
+
     // Calculate global tile tint based on darkness
     // This matches the logic in SpecularEffect to darken elements at night
     const THREE = window.THREE;
@@ -2660,8 +2668,7 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     // If LightingEffect is active, tile lighting is handled by the lighting composite.
     // Keep tile base colors neutral so lights can punch through the global darkness.
     try {
-      const le = window.MapShine?.lightingEffect;
-      if (le && le.enabled) {
+      if (lightingEffect && lightingEffect.enabled) {
         globalTint.set(1, 1, 1);
         skipDarknessTint = true;
 
@@ -2691,9 +2698,8 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
       
       if (scene?.environment?.darknessLevel !== undefined) {
         let darkness = scene.environment.darknessLevel;
-        const le = window.MapShine?.lightingEffect;
-        if (le && typeof le.getEffectiveDarkness === 'function') {
-          darkness = le.getEffectiveDarkness();
+        if (lightingEffect && typeof lightingEffect.getEffectiveDarkness === 'function') {
+          darkness = lightingEffect.getEffectiveDarkness();
         }
         
         // PERFORMANCE: Reuse color objects, mutate in place
@@ -2772,9 +2778,8 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
         // Match LightingEffectV2 interior ambient dim on overhead sprites (see _interiorDarknessOverheadScalar).
         let overheadTint = globalTint;
         try {
-          const le = window.MapShine?.lightingEffect;
-          const idim = (le?.params && typeof le.params.interiorDarkness === 'number')
-            ? Math.max(0, le.params.interiorDarkness)
+          const idim = (lightingEffect?.params && typeof lightingEffect.params.interiorDarkness === 'number')
+            ? Math.max(0, lightingEffect.params.interiorDarkness)
             : 0;
           if (idim > 0) {
             const d = canvas.dimensions;
@@ -3184,7 +3189,10 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
 
     let darkness = 0.0;
     try {
-      const le = window.MapShine?.lightingEffect;
+      const le = window.MapShine?.lightingEffect
+        ?? window.MapShine?.floorCompositorV2?._lightingEffect
+        ?? window.MapShine?.effectComposer?._floorCompositorV2?._lightingEffect
+        ?? null;
       if (le && typeof le.getEffectiveDarkness === 'function') {
         darkness = le.getEffectiveDarkness();
       } else if (typeof canvas?.environment?.darknessLevel === 'number') {

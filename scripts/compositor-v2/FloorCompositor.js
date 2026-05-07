@@ -95,6 +95,7 @@ import { MaskDebugOverlayPass } from './MaskDebugOverlayPass.js';
 import { LevelRenderTargetPool } from './LevelRenderTargetPool.js';
 import { LevelCompositePass } from './LevelCompositePass.js';
 import { LevelAlphaRebindPass } from './LevelAlphaRebindPass.js';
+import { getSceneRectScissor, withSceneScissor, withoutSceneScissor } from './SceneRectScissor.js';
 import { resolveEffectEnabled, resolveOverlayEffectActive, resolveFloorEffectActive } from '../effects/resolve-effect-enabled.js';
 
 const log = createLogger('FloorCompositor');
@@ -1646,7 +1647,84 @@ export class FloorCompositor {
     });
 
     this._initialized = true;
+    // Pre-clear global ping-pong RTs to opaque black so the outer-rect
+    // area (untouched by every scissored pass) has a known value when
+    // bloom samples its input at full UV. See SceneRectScissor.
+    try { this._clearGlobalRTsToBlack(); } catch (err) {
+      log.warn('FloorCompositor: initial _clearGlobalRTsToBlack failed:', err);
+    }
     log.info(`FloorCompositor initialized (${w}x${h}, RT: HalfFloat)`);
+  }
+
+  /**
+   * Unscissored full clear of every global ping-pong / scratch RT to
+   * opaque black. Run once at initialize time and again after a resize
+   * (which reallocates underlying texture storage) so the SceneRectScissor
+   * pipeline never reads driver-uninitialized memory in the outer-rect
+   * area. Bloom is the main consumer that samples its input at full UV,
+   * so this matters specifically for `_postA` / `_postB`.
+   *
+   * @private
+   */
+  _clearGlobalRTsToBlack() {
+    const renderer = this.renderer;
+    if (!renderer || typeof renderer.setRenderTarget !== 'function') return;
+    const THREE = window.THREE;
+    const targets = [
+      this._sceneRT,
+      this._postA,
+      this._postB,
+      this._waterOccluderRT,
+      this._waterOccluderScratchRT,
+      this._waterBgProductRT,
+      this._waterBgProductScratchRT,
+    ].filter((rt) => rt);
+    if (!targets.length) return;
+
+    const prevTarget = renderer.getRenderTarget?.();
+    const prevAutoClear = renderer.autoClear;
+    const prevScissor = (typeof renderer.getScissorTest === 'function')
+      ? renderer.getScissorTest()
+      : null;
+    const prevColor = (THREE && typeof renderer.getClearColor === 'function')
+      ? renderer.getClearColor(new THREE.Color())
+      : null;
+    const prevAlpha = (typeof renderer.getClearAlpha === 'function')
+      ? renderer.getClearAlpha()
+      : null;
+
+    try {
+      if (typeof renderer.setScissorTest === 'function') renderer.setScissorTest(false);
+      if (typeof renderer.setClearColor === 'function') renderer.setClearColor(0x000000, 1);
+      if (typeof renderer.setClearAlpha === 'function') renderer.setClearAlpha(1);
+      renderer.autoClear = true;
+      for (const rt of targets) {
+        renderer.setRenderTarget(rt);
+        if (typeof renderer.clear === 'function') renderer.clear(true, true, true);
+      }
+    } finally {
+      renderer.autoClear = prevAutoClear;
+      try {
+        if (prevColor && typeof renderer.setClearColor === 'function') {
+          renderer.setClearColor(prevColor, prevAlpha != null ? prevAlpha : 1);
+        }
+      } catch (_) {}
+      try {
+        if (prevAlpha != null && typeof renderer.setClearAlpha === 'function') {
+          renderer.setClearAlpha(prevAlpha);
+        }
+      } catch (_) {}
+      try {
+        if (prevScissor != null && typeof renderer.setScissorTest === 'function') {
+          renderer.setScissorTest(prevScissor);
+        }
+      } catch (_) {}
+      try {
+        if (typeof renderer.setRenderTarget === 'function') {
+          renderer.setRenderTarget(prevTarget ?? null);
+        }
+      } catch (_) {}
+    }
   }
 
   /**
@@ -2960,6 +3038,18 @@ export class FloorCompositor {
       this._setStrictHoldFlag(false);
     }
 
+    // Recompute the scene-rect scissor AABB for this frame. All
+    // subsequent per-level / post-chain GL work runs inside
+    // `withSceneScissor(...)` so the GPU never rasterizes fragments
+    // outside the inner sceneRect (padded zone + outer black region).
+    // Cheap to call every frame: short-circuits when camera + sceneRect
+    // + drawing-buffer-size hash is unchanged.
+    try {
+      getSceneRectScissor().update(this.renderer, this.camera);
+    } catch (err) {
+      log.warn('FloorCompositor: SceneRectScissor.update failed:', err);
+    }
+
     // Update PIXI-content bridge once per compositor frame.
     try {
       const bridge = window.MapShine?.pixiContentLayerBridge ?? null;
@@ -3375,6 +3465,12 @@ export class FloorCompositor {
     const smCombinedTex = this._shadowManagerEffect?.combinedShadowTexture ?? null;
     const combinedShadowTex = smCombinedTex ?? cloudShadowTexLegacy;
     const combinedShadowRawTex = this._shadowManagerEffect?.combinedShadowRawTexture ?? combinedShadowTex;
+    const paintedShadowLitTex = (smCombinedTex != null && resolveEffectEnabled(this._paintedShadowEffect) && this._paintedShadowEffect?.params?.enabled)
+      ? (this._paintedShadowEffect.shadowFactorTexture ?? null)
+      : null;
+    const paintedShadowMgrOpacity = Number.isFinite(Number(this._shadowManagerEffect?.params?.paintedOpacity))
+      ? Math.max(0, Math.min(1, Number(this._shadowManagerEffect.params.paintedOpacity)))
+      : 1.0;
     const buildingShadowTexForLighting = smCombinedTex != null ? null : buildingShadowTex;
     const buildingShadowOpacity = Number.isFinite(this._buildingShadowEffect?.params?.opacity)
       ? this._buildingShadowEffect.params.opacity : 0.75;
@@ -3395,6 +3491,8 @@ export class FloorCompositor {
       cloudShadowRawTexLegacy,
       combinedShadowTex,
       combinedShadowRawTex,
+      paintedShadowLitTex,
+      paintedShadowMgrOpacity,
       buildingShadowTex,
       buildingShadowTexForLighting,
       buildingShadowOpacity,
@@ -3418,14 +3516,18 @@ export class FloorCompositor {
       const distOut = (currentInput === this._postA) ? this._postB : this._postA;
       this._distortionEffect.setBuffers(currentInput, distOut);
       this._distortionEffect.setRenderToScreen(false);
-      this._distortionEffect.render(this.renderer, this._renderBus?._scene ?? this.scene, this.camera);
+      withSceneScissor(this.renderer, () => {
+        this._distortionEffect.render(this.renderer, this._renderBus?._scene ?? this.scene, this.camera);
+      });
       currentInput = distOut;
     }
 
     // PIXI world-channel composite: inject bridge drawings late so they are
     // not altered by bloom/grading stylization passes.
     if (_profiling) _profileT0 = performance.now();
-    currentInput = this._compositePixiWorldOverlay(currentInput);
+    currentInput = withSceneScissor(this.renderer, () =>
+      this._compositePixiWorldOverlay(currentInput)
+    );
     if (_profiling) this._recordPassTiming('pixiWorldComposite', _profileT0);
 
     // Composite fog-of-war into the RT chain so downstream post effects (lens)
@@ -3433,7 +3535,10 @@ export class FloorCompositor {
     if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: fogOverlay.compositeToRT'); } catch (_) {} }
     {
       const fogOutput = (currentInput === this._postA) ? this._postB : this._postA;
-      if (this._compositeFogOverlayToRT(currentInput, fogOutput)) {
+      const fogWrote = withSceneScissor(this.renderer, () =>
+        this._compositeFogOverlayToRT(currentInput, fogOutput)
+      );
+      if (fogWrote) {
         currentInput = fogOutput;
       }
     }
@@ -3448,7 +3553,10 @@ export class FloorCompositor {
     if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: lens.render'); } catch (_) {} }
     if (!_skipLensPass && resolveEffectEnabled(this._lensEffect)) {
       const lensOutput = (currentInput === this._postA) ? this._postB : this._postA;
-      if (this._lensEffect.render(this.renderer, this.camera, currentInput, lensOutput, this._postA)) {
+      const wrote = withSceneScissor(this.renderer, () =>
+        this._lensEffect.render(this.renderer, this.camera, currentInput, lensOutput, this._postA)
+      );
+      if (wrote) {
         currentInput = lensOutput;
       }
     }
@@ -3458,7 +3566,10 @@ export class FloorCompositor {
     if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: playerLight.nightVision'); } catch (_) {} }
     if (resolveEffectEnabled(this._playerLightEffect) && this._playerLightEffect?.shouldRenderNightVision?.()) {
       const nvOutput = (currentInput === this._postA) ? this._postB : this._postA;
-      if (this._playerLightEffect.renderNightVision(this.renderer, this.camera, currentInput, nvOutput)) {
+      const wrote = withSceneScissor(this.renderer, () =>
+        this._playerLightEffect.renderNightVision(this.renderer, this.camera, currentInput, nvOutput)
+      );
+      if (wrote) {
         currentInput = nvOutput;
       }
     }
@@ -3847,9 +3958,21 @@ export class FloorCompositor {
         renderer.setClearAlpha(1);
       }
       if (typeof renderer.clear === 'function') {
+        // Unscissored clear: paint the entire default framebuffer black.
+        // The scissored blit below only writes the inner sceneRect, so the
+        // padded zone + outer black region stay at this clear color. This
+        // is what guarantees the outer area is clean even if the source
+        // RT (`_postA` / `_postB`) has stale content there from prior
+        // frames or before SceneRectScissor became valid.
         renderer.clear(true, true, true);
       }
-      renderer.render(this._blitScene, this._blitCamera);
+      // Scissor the blit so we never sample / write the source RT's
+      // outer-rect area onto the screen. If scissor is invalid (no
+      // sceneRect / off-screen / disabled), withSceneScissor falls
+      // through to a passthrough so the full blit still runs.
+      withSceneScissor(renderer, () => {
+        renderer.render(this._blitScene, this._blitCamera);
+      });
     } finally {
       // CRITICAL (V2): do not restore a transparent clear alpha.
       // If we restore clearAlpha=0 here, the renderer ends the frame in a
@@ -4798,7 +4921,10 @@ export class FloorCompositor {
     if (this._waterOccluderScratchRT) this._waterOccluderScratchRT.setSize(w, h);
     if (this._waterBgProductRT) this._waterBgProductRT.setSize(w, h);
     if (this._waterBgProductScratchRT) this._waterBgProductScratchRT.setSize(w, h);
-    try { this._levelRTPool?.onResize?.(w, h); } catch (_) {}
+    try { this._levelRTPool?.onResize?.(w, h, this.renderer); } catch (_) {}
+    // Re-clear global ping-pong RTs so the outer-rect area has a known
+    // value after the resize-driven re-allocation.
+    try { this._clearGlobalRTsToBlack(); } catch (_) {}
     try { this._shadowManagerEffect?.onResize?.(w, h); } catch (_) {}
     try { this._bushEffect?.onResize?.(w, h); } catch (_) {}
     try { this._treeEffect?.onResize?.(w, h); } catch (_) {}
@@ -5042,6 +5168,8 @@ export class FloorCompositor {
       cloudShadowRawTexLegacy,
       combinedShadowTex,
       combinedShadowRawTex,
+      paintedShadowLitTex,
+      paintedShadowMgrOpacity,
       buildingShadowTex,
       buildingShadowTexForLighting = buildingShadowTex,
       buildingShadowOpacity,
@@ -5104,24 +5232,35 @@ export class FloorCompositor {
       const floor = visibleFloors[li];
       const levelIndex = Number(floor?.index ?? li);
       activeLevels.add(levelIndex);
-      const rts = this._levelRTPool.acquire(levelIndex);
+      // Pass renderer so newly allocated pool RTs are pre-cleared to
+      // opaque black. This guarantees the outer-rect area (untouched by
+      // every scissored pass below) has a known value when bloom samples
+      // its input RT at full UV.
+      const rts = this._levelRTPool.acquire(levelIndex, this.renderer);
       if (!rts) continue;
       perLevelEntries.push({ floor, levelIndex, rts });
       const { sceneRT: levelSceneRT } = rts;
       if (_profiling) _profileT0 = performance.now();
-      this._renderBus.renderFloorRangeTo(
-        this.renderer, this.camera,
-        levelIndex, levelIndex,
-        levelSceneRT,
-        {
-          includeBackground: true,
-          filterBackgroundByFloor: true,
-          clearBeforeRender: true,
-          clearAlpha: 0,
-          clearColor: 0x000000,
-          topVisibleFloorIndexForFire,
-        },
-      );
+      // Scissor to inner sceneRect: skip rasterization of bus tiles +
+      // overlay particles in the padded zone / outer black region. The
+      // scissored clear leaves the area outside the rect at whatever the
+      // pool RT was previously cleared to (black/0 alpha — see plan
+      // section 4 'Per-level RTs are full-screen-sized').
+      withSceneScissor(this.renderer, () => {
+        this._renderBus.renderFloorRangeTo(
+          this.renderer, this.camera,
+          levelIndex, levelIndex,
+          levelSceneRT,
+          {
+            includeBackground: true,
+            filterBackgroundByFloor: true,
+            clearBeforeRender: true,
+            clearAlpha: 0,
+            clearColor: 0x000000,
+            topVisibleFloorIndexForFire,
+          },
+        );
+      });
       if (_profiling) this._recordPassTiming(`perLevel_busRender_${levelIndex}`, _profileT0);
       levelSceneRTs.push(levelSceneRT);
     }
@@ -5141,6 +5280,12 @@ export class FloorCompositor {
       const { sceneRT: levelSceneRT, postA: levelPostA, postB: levelPostB } = rts;
 
       // ── Post-processing chain for this level ───────────────────────────
+      // Every effect call below renders into a pool RT (`levelPostA` /
+      // `levelPostB`) wrapped in withSceneScissor, so the GPU only
+      // rasterizes fragments inside the inner sceneRect. The area outside
+      // the rect retains its prior contents on these RTs; the final blit
+      // to screen is also scissored so those outer pixels are never
+      // sampled (see _blitToScreen).
       let currentInput = levelSceneRT;
 
       // Lighting pass
@@ -5171,18 +5316,24 @@ export class FloorCompositor {
           }
         } catch (_) {}
 
-        this._lightingEffect.render(
-          this.renderer, this.camera,
-          currentInput, levelPostA,
-          winScene,
-          cloudShadowTexLegacy, cloudShadowRawTexLegacy,
-          buildingShadowTexForLighting, overheadShadowTexLegacy,
-          buildingShadowOpacity,
-          overheadRoofAlphaTex, overheadRoofBlockTex,
-          outdoorsForLightingTex,
-          ceilingTransmittanceTex,
-          combinedShadowTex, combinedShadowRawTex,
-        );
+        // Lighting composes screen-space occlusion/window terms using gl_FragCoord.
+        // Keep this pass unscissored so elevated/parallax overhead pixels outside the
+        // ground-projected scene rect still receive correct scene lighting.
+        withoutSceneScissor(this.renderer, () => {
+          this._lightingEffect.render(
+            this.renderer, this.camera,
+            currentInput, levelPostA,
+            winScene,
+            cloudShadowTexLegacy, cloudShadowRawTexLegacy,
+            buildingShadowTexForLighting, overheadShadowTexLegacy,
+            buildingShadowOpacity,
+            overheadRoofAlphaTex, overheadRoofBlockTex,
+            outdoorsForLightingTex,
+            ceilingTransmittanceTex,
+            combinedShadowTex, combinedShadowRawTex,
+            paintedShadowLitTex, paintedShadowMgrOpacity,
+          );
+        });
         if (_profiling) this._recordPassTiming(`perLevel_lighting_${levelIndex}`, _profileT0);
         currentInput = levelPostA;
       }
@@ -5190,14 +5341,18 @@ export class FloorCompositor {
       // Sky color grading
       if (resolveEffectEnabled(this._skyColorEffect)) {
         const skyOut = (currentInput === levelPostA) ? levelPostB : levelPostA;
-        this._skyColorEffect.render(this.renderer, currentInput, skyOut);
+        withSceneScissor(this.renderer, () => {
+          this._skyColorEffect.render(this.renderer, currentInput, skyOut);
+        });
         currentInput = skyOut;
       }
 
       // Filter (before water: refracted samples include filter; avoids an extra pass)
       if (resolveEffectEnabled(this._filterEffect)) {
         const fOut = (currentInput === levelPostA) ? levelPostB : levelPostA;
-        this._filterEffect.render(this.renderer, currentInput, fOut);
+        withSceneScissor(this.renderer, () => {
+          this._filterEffect.render(this.renderer, currentInput, fOut);
+        });
         currentInput = fOut;
       }
 
@@ -5231,7 +5386,9 @@ export class FloorCompositor {
         let waterOccluder = null;
         if (!_disableWaterOccluder && li < visibleFloors.length - 1 && this._waterOccluderRT) {
           try {
-            waterOccluder = this._buildUpperSceneAlphaOccluder(levelSceneRTs.slice(li + 1));
+            waterOccluder = withSceneScissor(this.renderer, () =>
+              this._buildUpperSceneAlphaOccluder(levelSceneRTs.slice(li + 1))
+            );
           } catch (_) {
             waterOccluder = null;
           }
@@ -5244,13 +5401,15 @@ export class FloorCompositor {
           buildingShadowTex,
           overheadShadowTexLegacy,
         });
-        _waterPassWrote = this._waterEffect.render(
-          this.renderer,
-          this.camera,
-          currentInput,
-          waterOut,
-          waterOccluder,
-          levelSceneRT?.texture ?? null,
+        _waterPassWrote = withSceneScissor(this.renderer, () =>
+          this._waterEffect.render(
+            this.renderer,
+            this.camera,
+            currentInput,
+            waterOut,
+            waterOccluder,
+            levelSceneRT?.texture ?? null,
+          )
         );
         if (_profiling) this._recordPassTiming(`perLevel_water_${levelIndex}`, _profileT0);
         if (_waterPassWrote) currentInput = waterOut;
@@ -5268,7 +5427,9 @@ export class FloorCompositor {
       // User color correction after water so foam/spec/tint are graded with the scene (no extra pass).
       if (resolveEffectEnabled(this._colorCorrectionEffect)) {
         const ccOut = (currentInput === levelPostA) ? levelPostB : levelPostA;
-        this._colorCorrectionEffect.render(this.renderer, currentInput, ccOut);
+        withSceneScissor(this.renderer, () => {
+          this._colorCorrectionEffect.render(this.renderer, currentInput, ccOut);
+        });
         currentInput = ccOut;
       }
 
@@ -5279,12 +5440,17 @@ export class FloorCompositor {
       // Atmospheric fog
       if (resolveEffectEnabled(this._atmosphericFogEffect)) {
         const fogOut = (currentInput === levelPostA) ? levelPostB : levelPostA;
-        if (this._atmosphericFogEffect.render(this.renderer, this.camera, currentInput, fogOut)) {
-          currentInput = fogOut;
-        }
+        const fogWrote = withSceneScissor(this.renderer, () =>
+          this._atmosphericFogEffect.render(this.renderer, this.camera, currentInput, fogOut)
+        );
+        if (fogWrote) currentInput = fogOut;
       }
 
-      // Bloom
+      // Bloom — intentionally NOT scissored. UnrealBloomPass internally
+      // binds a mip pyramid of progressively smaller render targets;
+      // a screen-space scissor rect would be wrong for those sub-RTs
+      // (and likely degenerate at the smallest mips). Profile separately
+      // before introducing per-mip scissor support.
       if (resolveEffectEnabled(this._bloomEffect)) {
         const bloomOut = (currentInput === levelPostA) ? levelPostB : levelPostA;
         this._bloomEffect.render(this.renderer, currentInput, bloomOut);
@@ -5294,7 +5460,9 @@ export class FloorCompositor {
       // Sharpen
       if (resolveEffectEnabled(this._sharpenEffect)) {
         const shOut = (currentInput === levelPostA) ? levelPostB : levelPostA;
-        this._sharpenEffect.render(this.renderer, currentInput, shOut);
+        withSceneScissor(this.renderer, () => {
+          this._sharpenEffect.render(this.renderer, currentInput, shOut);
+        });
         currentInput = shOut;
       }
 
@@ -5302,31 +5470,52 @@ export class FloorCompositor {
       // so registry/UI cannot disagree with FilterEffectV2-style gating.
       if (resolveEffectEnabled(this._dotScreenEffect)) {
         const dsOut = (currentInput === levelPostA) ? levelPostB : levelPostA;
-        if (this._dotScreenEffect.render(this.renderer, this.camera, currentInput, dsOut)) currentInput = dsOut;
+        const wrote = withSceneScissor(this.renderer, () =>
+          this._dotScreenEffect.render(this.renderer, this.camera, currentInput, dsOut)
+        );
+        if (wrote) currentInput = dsOut;
       }
       if (resolveEffectEnabled(this._halftoneEffect)) {
         const htOut = (currentInput === levelPostA) ? levelPostB : levelPostA;
-        if (this._halftoneEffect.render(this.renderer, this.camera, currentInput, htOut)) currentInput = htOut;
+        const wrote = withSceneScissor(this.renderer, () =>
+          this._halftoneEffect.render(this.renderer, this.camera, currentInput, htOut)
+        );
+        if (wrote) currentInput = htOut;
       }
       if (resolveEffectEnabled(this._asciiEffect)) {
         const ascOut = (currentInput === levelPostA) ? levelPostB : levelPostA;
-        if (this._asciiEffect.render(this.renderer, this.camera, currentInput, ascOut)) currentInput = ascOut;
+        const wrote = withSceneScissor(this.renderer, () =>
+          this._asciiEffect.render(this.renderer, this.camera, currentInput, ascOut)
+        );
+        if (wrote) currentInput = ascOut;
       }
       if (resolveEffectEnabled(this._dazzleOverlayEffect)) {
         const dzOut = (currentInput === levelPostA) ? levelPostB : levelPostA;
-        if (this._dazzleOverlayEffect.render(this.renderer, this.camera, currentInput, dzOut)) currentInput = dzOut;
+        const wrote = withSceneScissor(this.renderer, () =>
+          this._dazzleOverlayEffect.render(this.renderer, this.camera, currentInput, dzOut)
+        );
+        if (wrote) currentInput = dzOut;
       }
       if (resolveEffectEnabled(this._visionModeEffect)) {
         const vmOut = (currentInput === levelPostA) ? levelPostB : levelPostA;
-        if (this._visionModeEffect.render(this.renderer, this.camera, currentInput, vmOut)) currentInput = vmOut;
+        const wrote = withSceneScissor(this.renderer, () =>
+          this._visionModeEffect.render(this.renderer, this.camera, currentInput, vmOut)
+        );
+        if (wrote) currentInput = vmOut;
       }
       if (resolveEffectEnabled(this._invertEffect)) {
         const invOut = (currentInput === levelPostA) ? levelPostB : levelPostA;
-        if (this._invertEffect.render(this.renderer, this.camera, currentInput, invOut)) currentInput = invOut;
+        const wrote = withSceneScissor(this.renderer, () =>
+          this._invertEffect.render(this.renderer, this.camera, currentInput, invOut)
+        );
+        if (wrote) currentInput = invOut;
       }
       if (resolveEffectEnabled(this._sepiaEffect)) {
         const sepOut = (currentInput === levelPostA) ? levelPostB : levelPostA;
-        if (this._sepiaEffect.render(this.renderer, this.camera, currentInput, sepOut)) currentInput = sepOut;
+        const wrote = withSceneScissor(this.renderer, () =>
+          this._sepiaEffect.render(this.renderer, this.camera, currentInput, sepOut)
+        );
+        if (wrote) currentInput = sepOut;
       }
 
       // ── Authoritative alpha rebind ─────────────────────────────────────
@@ -5350,12 +5539,14 @@ export class FloorCompositor {
       // authored holes and mask lower floors.
       if (_profiling) _profileT0 = performance.now();
       const rebindOut = (currentInput === levelPostA) ? levelPostB : levelPostA;
-      const rebound = this._levelAlphaRebindPass.render(
-        this.renderer,
-        currentInput,
-        levelSceneRT,
-        rebindOut,
-        { allowAlphaWiden: _waterPassWrote === true },
+      const rebound = withSceneScissor(this.renderer, () =>
+        this._levelAlphaRebindPass.render(
+          this.renderer,
+          currentInput,
+          levelSceneRT,
+          rebindOut,
+          { allowAlphaWiden: _waterPassWrote === true },
+        )
       );
       if (_profiling) this._recordPassTiming(`perLevel_alphaRebind_${levelIndex}`, _profileT0);
       if (rebound) currentInput = rebindOut;
@@ -5382,12 +5573,14 @@ export class FloorCompositor {
     // Bottom→top straight-alpha source-over: each `levelFinalRTs[i]` carries
     // that floor's content with alpha preserved; `composite` handles 1, 2, and
     // 3+ levels correctly (iterative ping-pong for 3+).
-    this._levelCompositePass.composite(
-      this.renderer,
-      levelFinalRTs,
-      this._postA,
-      this._postB,
-    );
+    withSceneScissor(this.renderer, () => {
+      this._levelCompositePass.composite(
+        this.renderer,
+        levelFinalRTs,
+        this._postA,
+        this._postB,
+      );
+    });
     if (_profiling) this._recordPassTiming('perLevel_composite', _profileT0);
 
     /** Merged composite lives in `_postA`; post-merge water may write `_postB`. */
@@ -5449,7 +5642,9 @@ export class FloorCompositor {
             this._waterEffect.syncComposeViewportUniforms?.(this.renderer, this.camera);
           } catch (_) {}
           this._syncWaterBgProductUniformsFromWaterCompose();
-          maskRt = this._buildWaterBackgroundAlphaMaskRT(layers);
+          maskRt = withSceneScissor(this.renderer, () =>
+            this._buildWaterBackgroundAlphaMaskRT(layers)
+          );
         }
         this._waterEffect.setWaterBackgroundAlphaMaskTexture?.(
           maskRt?.texture ?? null,
@@ -5463,13 +5658,15 @@ export class FloorCompositor {
           buildingShadowTex,
           overheadShadowTexLegacy,
         });
-        postMergeWaterWrote = this._waterEffect.render(
-          this.renderer,
-          this.camera,
-          this._postA,
-          this._postB,
-          null,
-          null,
+        postMergeWaterWrote = withSceneScissor(this.renderer, () =>
+          this._waterEffect.render(
+            this.renderer,
+            this.camera,
+            this._postA,
+            this._postB,
+            null,
+            null,
+          )
         );
       } catch (_) {
         postMergeWaterWrote = false;

@@ -356,6 +356,11 @@ export class WeatherParticlesV2 {
 
         this._weatherParticles.update(dt, boundsVec4);
 
+        // Frustum cull before Quarks sim (matches V1 ParticleSystem.update order).
+        // Ensures emitters are paused/visible before batchRenderer.update so work is
+        // not spent on systems already marked off-screen this frame.
+        this._applyCulling();
+
         // Advance the BatchedRenderer (quarks core simulation step).
         if (this._batchRenderer) {
           this._batchRenderer.update(dt);
@@ -364,9 +369,6 @@ export class WeatherParticlesV2 {
         log.warn('WeatherParticlesV2.update: particle tick error', e);
       }
     }
-
-    // ── 4. Frustum cull individual particle systems ──────────────────────
-    this._applyCulling();
   }
 
   // ── Floor change ────────────────────────────────────────────────────────────

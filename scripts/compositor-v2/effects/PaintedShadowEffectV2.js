@@ -4,6 +4,10 @@
  * Projects authored `_Shadow` mask data along sun direction and outputs a
  * scene-space lit factor texture (1 = lit, 0 = shadowed).
  * Shadow contribution is gated by `_Outdoors` so interiors remain unaffected.
+ *
+ * LightingEffectV2 recomposes this factor separately from cloud/building/overhead
+ * so dynamic-light shadow lift and cloud ambient influence do not erase painted
+ * shadow on outdoor pixels (same RT as ShadowManagerV2 `tPaintedShadow`).
  */
 
 import { createLogger } from '../../core/log.js';

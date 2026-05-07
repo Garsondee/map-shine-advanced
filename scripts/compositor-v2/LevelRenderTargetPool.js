@@ -40,10 +40,19 @@ export class LevelRenderTargetPool {
 
   /**
    * Acquire (or reuse) an RT set for the given level index.
+   *
+   * When a renderer is supplied and a *new* entry is allocated, each RT
+   * receives a one-time unscissored full clear to opaque black. This is
+   * required for the SceneRectScissor pipeline: subsequent passes write
+   * only inside the inner sceneRect, leaving the outer area untouched.
+   * Bloom's mip downsample samples the input RT at full UV, so the outer
+   * area must contain a known value (not driver-uninitialized memory).
+   *
    * @param {number} levelIndex
+   * @param {THREE.WebGLRenderer} [renderer]
    * @returns {{sceneRT: THREE.WebGLRenderTarget, postA: THREE.WebGLRenderTarget, postB: THREE.WebGLRenderTarget}|null}
    */
-  acquire(levelIndex) {
+  acquire(levelIndex, renderer = null) {
     const THREE = window.THREE;
     if (!THREE || !this._initialized) return null;
 
@@ -70,7 +79,72 @@ export class LevelRenderTargetPool {
     entry = { sceneRT, postA, postB };
     this._pools.set(levelIndex, entry);
     log.debug(`LevelRenderTargetPool: allocated RTs for level ${levelIndex} (${this._width}x${this._height})`);
+    if (renderer) this._clearTargetsToBlack(renderer, entry);
     return entry;
+  }
+
+  /**
+   * Unscissored full clear of one or more RTs to opaque black. Used to
+   * pre-fill outer-rect (padded zone + outer black region) pixels with a
+   * known value before the SceneRectScissor pipeline starts writing only
+   * inside the inner sceneRect.
+   *
+   * @param {THREE.WebGLRenderer} renderer
+   * @param {{sceneRT: THREE.WebGLRenderTarget, postA: THREE.WebGLRenderTarget, postB: THREE.WebGLRenderTarget}} entry
+   * @private
+   */
+  _clearTargetsToBlack(renderer, entry) {
+    if (!renderer || !entry) return;
+    const THREE = window.THREE;
+    const prevTarget = renderer.getRenderTarget?.();
+    const prevAutoClear = renderer.autoClear;
+    const prevScissor = (typeof renderer.getScissorTest === 'function')
+      ? renderer.getScissorTest()
+      : null;
+    const prevColor = (THREE && typeof renderer.getClearColor === 'function')
+      ? renderer.getClearColor(new THREE.Color())
+      : null;
+    const prevAlpha = (typeof renderer.getClearAlpha === 'function')
+      ? renderer.getClearAlpha()
+      : null;
+
+    try {
+      if (typeof renderer.setScissorTest === 'function') renderer.setScissorTest(false);
+      if (typeof renderer.setClearColor === 'function') renderer.setClearColor(0x000000, 1);
+      if (typeof renderer.setClearAlpha === 'function') renderer.setClearAlpha(1);
+      renderer.autoClear = true;
+      for (const rt of [entry.sceneRT, entry.postA, entry.postB]) {
+        if (!rt) continue;
+        renderer.setRenderTarget(rt);
+        if (typeof renderer.clear === 'function') {
+          renderer.clear(true, true, true);
+        }
+      }
+    } catch (err) {
+      log.warn('LevelRenderTargetPool: pre-clear failed:', err);
+    } finally {
+      renderer.autoClear = prevAutoClear;
+      try {
+        if (prevColor && typeof renderer.setClearColor === 'function') {
+          renderer.setClearColor(prevColor, prevAlpha != null ? prevAlpha : 1);
+        }
+      } catch (_) {}
+      try {
+        if (prevAlpha != null && typeof renderer.setClearAlpha === 'function') {
+          renderer.setClearAlpha(prevAlpha);
+        }
+      } catch (_) {}
+      try {
+        if (prevScissor != null && typeof renderer.setScissorTest === 'function') {
+          renderer.setScissorTest(prevScissor);
+        }
+      } catch (_) {}
+      try {
+        if (typeof renderer.setRenderTarget === 'function') {
+          renderer.setRenderTarget(prevTarget ?? null);
+        }
+      } catch (_) {}
+    }
   }
 
   /**
@@ -95,17 +169,22 @@ export class LevelRenderTargetPool {
   }
 
   /**
-   * Resize all allocated RTs.
+   * Resize all allocated RTs. Optionally re-clears each entry to opaque
+   * black so the SceneRectScissor pipeline doesn't read driver-
+   * uninitialized memory in the outer-rect area after a reallocation.
+   *
    * @param {number} width
    * @param {number} height
+   * @param {THREE.WebGLRenderer} [renderer]
    */
-  onResize(width, height) {
+  onResize(width, height, renderer = null) {
     this._width = Math.max(1, width);
     this._height = Math.max(1, height);
     for (const [, entry] of this._pools) {
       try { entry.sceneRT?.setSize(this._width, this._height); } catch (_) {}
       try { entry.postA?.setSize(this._width, this._height); } catch (_) {}
       try { entry.postB?.setSize(this._width, this._height); } catch (_) {}
+      if (renderer) this._clearTargetsToBlack(renderer, entry);
     }
   }
 

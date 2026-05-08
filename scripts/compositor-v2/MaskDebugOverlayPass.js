@@ -28,6 +28,7 @@ export const MASK_DEBUG_OVERLAY_MODE_OPTIONS = {
   'Overhead: Roof Coverage Capture': 'overhead_roof_coverage',
   'Overhead: Roof Visibility (view floor)': 'overhead_roof_visibility',
   'Overhead: Roof Block': 'overhead_roof_block',
+  'Overhead: Roof Restrict Light': 'overhead_roof_restrict_light',
   'Overhead: Fluid Roof Capture': 'overhead_fluid_roof',
   'Overhead: Tile Projection Capture': 'overhead_tile_projection',
 };

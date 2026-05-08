@@ -784,6 +784,8 @@ export class LightingEffectV2 {
         uHasOverheadRoofAlpha: { value: 0 },
         tOverheadRoofBlock: { value: null },
         uHasOverheadRoofBlock: { value: 0 },
+        tOverheadRoofRestrictLight: { value: null },
+        uHasOverheadRoofRestrictLight: { value: 0 },
         // Foundry canvas dimensions (includes padding). Matches CloudEffectV2.
         // Used to convert Three world Y-up into Foundry world Y-down.
         uSceneDimensions: { value: new THREE.Vector2(1, 1) },
@@ -882,6 +884,8 @@ export class LightingEffectV2 {
         uniform float uHasOverheadRoofAlpha;
         uniform sampler2D tOverheadRoofBlock;
         uniform float uHasOverheadRoofBlock;
+        uniform sampler2D tOverheadRoofRestrictLight;
+        uniform float uHasOverheadRoofRestrictLight;
         uniform vec2  uSceneDimensions;
         uniform vec2 uBldViewBoundsMin;
         uniform vec2 uBldViewBoundsMax;
@@ -1089,13 +1093,26 @@ export class LightingEffectV2 {
           // Keep dynamic light response on visible overhead/roof surfaces themselves.
           // Without this, strong roof-screen occlusion can drive overhead tiles nearly
           // black at night even when direct scene lights should illuminate them.
+          // Foundry "Restrict light" overhead: suppress this relief and tighten vis*
+          // so local lights do not brighten those roof texels (separate mask RT).
+          float restrictLightRoof = 0.0;
+          if (uHasOverheadRoofRestrictLight > 0.5) {
+            vec4 rlrS = texture2D(tOverheadRoofRestrictLight, vUv);
+            restrictLightRoof = clamp(max(rlrS.a, max(rlrS.r, max(rlrS.g, rlrS.b))), 0.0, 1.0);
+          }
           float roofReceiver = smoothstep(0.55, 0.85, roofAlphaLive);
           float rawSourceLight = max(srcSample.a, 0.0);
           float rawWindowLight = max(max(winLights.r, winLights.g), winLights.b);
           float rawLightPresence = smoothstep(0.015, 0.16, max(rawSourceLight, rawWindowLight));
-          roofLightVisibility = max(roofLightVisibility, roofReceiver * rawLightPresence * 0.88);
+          float roofReliefBoost = roofReceiver * rawLightPresence * 0.88 * (1.0 - restrictLightRoof);
+          roofLightVisibility = max(roofLightVisibility, roofReliefBoost);
           float visS = mix(1.0, roofLightVisibility, clamp(uApplyRoofOcclusionToSources, 0.0, 1.0));
           float visW = mix(1.0, roofLightVisibility, clamp(uApplyRoofOcclusionToWindow, 0.0, 1.0));
+          // Restrict-light roof: gate dynamic lights even when uApplyRoofOcclusion* is 0.
+          // min(stampedVis, 1 - mask) drives contribution to ~0 under a solid restrict-light stamp.
+          float visRestrict = min(stampedVis, 1.0 - restrictLightRoof);
+          visS = mix(visS, visRestrict, restrictLightRoof);
+          visW = mix(visW, visRestrict, restrictLightRoof);
           vec3 safeLights = srcLights * visS + winLights * visW;
           // White/direct illumination channel:
           // - Foundry lights: read from accumulated alpha (luminosity-aware in ThreeLightSource)
@@ -1899,6 +1916,8 @@ export class LightingEffectV2 {
    *   applies only on outdoor pixels so interior lights survive under roofs.
    * @param {THREE.Texture|null} [ceilingTransmittanceTexture=null] - Half-res R
    *   packed T from OverheadShadowsEffectV2 (1 = pass light, 0 = ceiling blocks).
+   * @param {THREE.Texture|null} [overheadRoofRestrictLightTexture=null] - Screen-space
+   *   mask of overhead tiles with Foundry Restrict light (for dynamic-light gating).
    * @param {THREE.Texture|null} [combinedShadowTexture=null] - Unified shadow factor
    *   from ShadowManagerV2 (cloud + overhead composition).
    * @param {THREE.Texture|null} [combinedShadowRawTexture=null] - Optional unified
@@ -1909,7 +1928,7 @@ export class LightingEffectV2 {
    * @param {number} [paintedShadowMgrOpacity=1] - ShadowManagerV2 `paintedOpacity`;
    *   must match combine pass when splitting painted from combined shadow.
    */
-  render(renderer, camera, sceneRT, outputRT, windowLightScene = null, cloudShadowTexture = null, cloudShadowRawTexture = null, buildingShadowTexture = null, overheadShadowTexture = null, buildingShadowOpacity = 0.75, overheadRoofAlphaTexture = null, overheadRoofBlockTexture = null, outdoorsMaskTexture = null, ceilingTransmittanceTexture = null, combinedShadowTexture = null, combinedShadowRawTexture = null, paintedShadowLitTexture = null, paintedShadowMgrOpacity = 1.0) {
+  render(renderer, camera, sceneRT, outputRT, windowLightScene = null, cloudShadowTexture = null, cloudShadowRawTexture = null, buildingShadowTexture = null, overheadShadowTexture = null, buildingShadowOpacity = 0.75, overheadRoofAlphaTexture = null, overheadRoofBlockTexture = null, outdoorsMaskTexture = null, ceilingTransmittanceTexture = null, overheadRoofRestrictLightTexture = null, combinedShadowTexture = null, combinedShadowRawTexture = null, paintedShadowLitTexture = null, paintedShadowMgrOpacity = 1.0) {
     if (!this._initialized || !this._enabled || !sceneRT) return;
     if (!this._lightRT || !this._windowLightRT || !this._darknessRT || !this._composeMaterial) return;
 
@@ -2211,6 +2230,13 @@ export class LightingEffectV2 {
     } else {
       cu.tCeilingLightTransmittance.value = null;
       cu.uHasCeilingLightTransmittance.value = 0;
+    }
+    if (overheadRoofRestrictLightTexture) {
+      cu.tOverheadRoofRestrictLight.value = overheadRoofRestrictLightTexture;
+      cu.uHasOverheadRoofRestrictLight.value = 1;
+    } else {
+      cu.tOverheadRoofRestrictLight.value = null;
+      cu.uHasOverheadRoofRestrictLight.value = 0;
     }
     // Bind overhead shadow texture (screen-space, sampled directly at vUv).
     if (overheadShadowTexture) {

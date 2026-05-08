@@ -264,3 +264,51 @@ This issue was a layered ordering/slice interaction, not just one render-order v
 - Iridescence aligns with mask intent: **bright mask regions shimmer**, **dark regions do not**, and **fully transparent** areas stay empty.
 - Confirmed in-session on vault-style props after the change.
 
+## Success Story: Rain Not Masked by Tree Canopy (Overhead Shadows Off)
+
+### Account
+
+- Composer (Cursor agent)
+
+### Problem We Saw
+
+- Roofs and overhead tiles correctly masked precipitation (rain disappeared when the roof faded for hover-reveal).
+- **`_Tree` canopies did not**: rain stayed visible in the tree silhouette when the canopy faded out.
+- With **Overhead shadow projection disabled** (`OverheadShadowsEffectV2.params.enabled === false`), behavior stayed broken even after earlier rain-occlusion work.
+
+### What Was Wrong At The Start
+
+Several issues stacked; the last one only showed up when shadows were off:
+
+1. **Rain occlusion render targets could stay uninitialized**  
+   `OverheadShadowsEffectV2.render()` only called `onResize()` when older RTs were missing or mismatched. New `rainOcclusionVisibilityTarget` / `rainOcclusionBlockTarget` were not in that guard, so `_renderRainOcclusionTargets` could no-op forever and weather fell back without a reliable dedicated mask.
+
+2. **Tree meshes were not on the weather roof layer**  
+   Capture cameras use **ROOF_LAYER (20) + WEATHER_ROOF_LAYER (21)**. Canopy meshes from `TreeEffectV2` lived on layer **0** only unless temporarily patched. They needed **21** in addition to **0** so the main bus pass (camera enables 0–19) still drew them.
+
+3. **Disabled overhead path: live fade was wiped before rain occlusion**  
+   For the roof-**block** RT, the code forced tree uniforms (e.g. **`uHoverFade = 1`**) so `rb` stayed a full silhouette. It then called **`_renderRainOcclusionTargets` before restoring** those overrides. The **visibility** sub-pass therefore always saw the tree fully opaque (`rv ≈ 1`), so **`hiddenBlock = rb × (1 − rv)`** stayed ~0 and rain never hid on fade.  
+   The **enabled** shadow path accidentally did the right thing: **`treeBlockerUniformOverrides` were restored in a `finally` before** `_renderRainOcclusionTargets`.
+
+4. **Diagnostics were misleading**  
+   `roofTargetTreeParticipants` / `roofBlockTreeParticipants` were only incremented on the full enabled capture path, so probes showed **`0`** during `overhead-disabled-roofBlock` even when **`treeSeen: 1`**.
+
+### What Fixed It
+
+1. **Resize / init guard** includes rain occlusion RTs and size checks so targets always exist when other roof RTs do.
+
+2. **`TreeEffectV2`** enables **layer 21** on canopy meshes after creation (keeps layer **0** for normal bus rendering).
+
+3. **Disabled overhead branch** restores roof-block / tree **uniform and opacity overrides immediately after** `roofBlockTarget` render and **before** `_renderRainOcclusionTargets`, matching the enabled path’s ordering. Rain occlusion’s internal **block** pass still forces full opacity where needed.
+
+4. **Probe improvements**: optional `globalThis.__MSA_DEBUG_TREE_RAIN_MASK__`, heartbeat / early-out logs, payload field `disabledPathRestoredBeforeRainOcclusion`, and counting trees in the disabled blocker prep traverse.
+
+### Key Diagnostic Insight
+
+- Heartbeat showed **`paramsEnabled: false`** and **`path: 'overhead-disabled-roofBlock'`** while **`treeSeen: 1`** but **`roofBlockTreeParticipants: 0`** — that split pointed to **ordering and probe coverage**, not “no tree in the scene.”
+
+### Final Outcome
+
+- Rain masking follows **tree hover-fade** the same way as roofs, including when **overhead shadow projection is disabled**.
+- Dedicated rain occlusion RTs reliably initialize; debug flags can confirm capture path and tree participation.
+

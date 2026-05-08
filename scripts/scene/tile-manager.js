@@ -62,6 +62,24 @@ const BELOW_FLOOR_PRESENCE_LAYER = 24;
  * @param {object} tileDoc - The tile document
  * @returns {boolean}
  */
+/** @param {object|null|undefined} tileDoc */
+export function tileDocRestrictsLight(tileDoc) {
+  if (!tileDoc) return false;
+  try {
+    const r = tileDoc.restrictions?.light ?? tileDoc._source?.restrictions?.light;
+    if (r === true || r === 1) return true;
+    if (typeof r === 'string' && String(r).toLowerCase() === 'true') return true;
+  } catch (_) {}
+  try {
+    const id = tileDoc.id ?? tileDoc._id;
+    if (id && typeof canvas !== 'undefined' && canvas?.tiles?.get) {
+      const p = canvas.tiles.get(id);
+      if (p?.restrictsLight === true) return true;
+    }
+  } catch (_) {}
+  return false;
+}
+
 export function isTileOverhead(tileDoc) {
   // Read persisted data only — do not use TileDocument#overhead (deprecated on PF2e v12+).
   // Legacy/core persisted overhead marker.
@@ -3408,6 +3426,7 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     // Store Foundry data
     sprite.userData.foundryTileId = tileDoc.id;
     sprite.userData.tileDoc = tileDoc;
+    sprite.userData.restrictsLight = tileDocRestrictsLight(tileDoc);
 
     sprite.userData.textureReady = false;
     sprite.visible = false;
@@ -4082,6 +4101,7 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
 
     // Store overhead status for update loop
     sprite.userData.isOverhead = isOverhead;
+    sprite.userData.restrictsLight = tileDocRestrictsLight(tileDoc);
 
     try {
       if (sprite.material) {

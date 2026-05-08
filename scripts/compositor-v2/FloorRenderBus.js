@@ -38,7 +38,7 @@ import {
   normalizeFoundryAssetUrlKey,
   getViewedV14Level,
 } from '../foundry/levels-scene-flags.js';
-import { isTileOverhead, getTileVisualCenterFoundryXY, getTileBusPlaneSizeAndMirror } from '../scene/tile-manager.js';
+import { isTileOverhead, getTileVisualCenterFoundryXY, getTileBusPlaneSizeAndMirror, tileDocRestrictsLight } from '../scene/tile-manager.js';
 import {
   RENDER_ORDER_PER_FLOOR,
   GROUND_Z,
@@ -390,7 +390,8 @@ export class FloorRenderBus {
       }
 
       // Create mesh immediately with null texture (invisible until loaded).
-      this._addTileMesh(tileId, floorIndex, null, centerX, centerY, z, tileW, tileH, rotation, alpha, renderOrder, isOverhead, roofShadowCaster, cloudShadowBlockerEnabled, planeSignX, planeSignY);
+      const restrictsLight = tileDocRestrictsLight(tileDoc);
+      this._addTileMesh(tileId, floorIndex, null, centerX, centerY, z, tileW, tileH, rotation, alpha, renderOrder, isOverhead, roofShadowCaster, cloudShadowBlockerEnabled, planeSignX, planeSignY, restrictsLight);
 
       // Load texture via THREE.TextureLoader — HTML <img>, straight alpha.
       this._loader.load(src, (tex) => {
@@ -797,6 +798,20 @@ export class FloorRenderBus {
       if (uniforms?.uTileOpacity) {
         uniforms.uTileOpacity.value = targetOpacity;
       }
+
+      let doc = data?.tileDoc;
+      if (!doc && sourceTileId && canvas?.scene?.tiles) {
+        try {
+          doc = canvas.scene.tiles.get?.(sourceTileId) ?? null;
+        } catch (_) {
+          doc = null;
+        }
+      }
+      if (doc && entry.mesh?.userData && entry.root?.userData) {
+        const rl = !!tileDocRestrictsLight(doc);
+        if (entry.mesh.userData.restrictsLight !== rl) entry.mesh.userData.restrictsLight = rl;
+        if (entry.root.userData.restrictsLight !== rl) entry.root.userData.restrictsLight = rl;
+      }
     }
   }
 
@@ -852,9 +867,10 @@ export class FloorRenderBus {
       renderOrder = tileAlbedoOrder(floorIndex, sortWithinFloor);
     }
 
+    const restrictsLight = tileDocRestrictsLight(tileDoc);
     let entry = this._tiles.get(tileId);
     if (!entry) {
-      this._addTileMesh(tileId, floorIndex, null, centerX, centerY, z, tileW, tileH, rotation, alpha, renderOrder, isOverhead, roofShadowCaster, cloudShadowBlockerEnabled, planeSignX, planeSignY);
+      this._addTileMesh(tileId, floorIndex, null, centerX, centerY, z, tileW, tileH, rotation, alpha, renderOrder, isOverhead, roofShadowCaster, cloudShadowBlockerEnabled, planeSignX, planeSignY, restrictsLight);
       entry = this._tiles.get(tileId);
       if (!entry) return false;
     }
@@ -866,6 +882,7 @@ export class FloorRenderBus {
       root.userData = root.userData || {};
       root.userData.isOverhead = isOverhead;
       root.userData.floorIndex = floorIndex;
+      root.userData.restrictsLight = !!restrictsLight;
     }
 
     if (entry.mesh) {
@@ -885,6 +902,8 @@ export class FloorRenderBus {
       );
 
       entry.mesh.renderOrder = renderOrder;
+      entry.mesh.userData = entry.mesh.userData || {};
+      entry.mesh.userData.restrictsLight = !!restrictsLight;
       entry.mesh.layers.set(0);
       if (roofShadowCaster) {
         entry.mesh.layers.enable(20);
@@ -1925,7 +1944,7 @@ export class FloorRenderBus {
    * @param {number} [planeSignY=1] - Vertical mirror (texture.scaleY sign)
    * @private
    */
-  _addTileMesh(tileId, floorIndex, texture, cx, cy, z, w, h, rotation, alpha, renderOrder = 0, isOverhead = false, roofShadowCaster = false, cloudShadowBlockerEnabled = false, planeSignX = 1, planeSignY = 1) {
+  _addTileMesh(tileId, floorIndex, texture, cx, cy, z, w, h, rotation, alpha, renderOrder = 0, isOverhead = false, roofShadowCaster = false, cloudShadowBlockerEnabled = false, planeSignX = 1, planeSignY = 1, restrictsLight = false) {
     const THREE = window.THREE;
     const mat = new THREE.MeshBasicMaterial({
       map: texture || null,
@@ -1945,6 +1964,7 @@ export class FloorRenderBus {
     mesh.userData = mesh.userData || {};
     mesh.userData.foundryTileId = tileId;
     mesh.userData.mapShineBusTile = true;
+    mesh.userData.restrictsLight = !!restrictsLight;
     const root = new THREE.Group();
     root.name = `BusTileRoot_${tileId}`;
     root.frustumCulled = false;
@@ -1953,6 +1973,7 @@ export class FloorRenderBus {
     root.userData.mapShineBusTile = true;
     root.userData.isOverhead = isOverhead;
     root.userData.floorIndex = floorIndex;
+    root.userData.restrictsLight = !!restrictsLight;
 
     // Layer conventions:
     // - Layer 0: normal bus rendering (FloorCompositor camera enables it)

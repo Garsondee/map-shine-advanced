@@ -78,7 +78,7 @@ export function captureRenderStack(fc, runtime = {}) {
 
   addPass('overheadShadows', 'OverheadShadowsEffectV2', 'post', {
     enabled: !!fc._overheadShadowEffect?.params?.enabled,
-    outputs: ['roofAlpha / shadowFactor RTs'],
+    outputs: ['roofAlpha / roofRestrictLight / shadowFactor RTs'],
     effectIds: ['OverheadShadowsEffectV2'],
   });
 

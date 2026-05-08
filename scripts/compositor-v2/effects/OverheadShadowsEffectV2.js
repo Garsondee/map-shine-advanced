@@ -12,8 +12,25 @@
 
 import { createLogger } from '../../core/log.js';
 import { weatherController } from '../../core/WeatherController.js';
+import { tileDocRestrictsLight } from '../../scene/tile-manager.js';
 
 const log = createLogger('OverheadShadowsEffect');
+
+/**
+ * @param {import('three').Object3D} object
+ * @returns {boolean}
+ */
+function objectRestrictsLightForRoofCapture(object) {
+  if (object?.userData?.restrictsLight === true) return true;
+  const id = object?.userData?.foundryTileId;
+  if (!id) return false;
+  try {
+    const doc = canvas?.scene?.tiles?.get?.(id);
+    return tileDocRestrictsLight(doc);
+  } catch (_) {
+    return false;
+  }
+}
 
 /**
  * Overhead Shadows Effect V2 (adapted from V1).
@@ -42,6 +59,12 @@ export class OverheadShadowsEffectV2 {
 
     /** @type {THREE.WebGLRenderTarget|null} */
     this.roofVisibilityTarget = null; // Runtime roof visibility alpha for LightingEffectV2 suppression
+
+    /**
+     * Screen-space union of overhead tiles with Foundry Restrict light (alpha = texture alpha).
+     * @type {THREE.WebGLRenderTarget|null}
+     */
+    this.roofRestrictLightTarget = null;
 
     /** @type {THREE.WebGLRenderTarget|null} */
     this.rainOcclusionVisibilityTarget = null; // Runtime visibility alpha used by weather masking
@@ -764,6 +787,14 @@ export class OverheadShadowsEffectV2 {
    */
   get roofBlockTexture() {
     return this.roofBlockTarget?.texture || null;
+  }
+
+  /**
+   * Restrict-light overhead mask for LightingEffectV2 (screen-space, alpha channel).
+   * @returns {THREE.Texture|null}
+   */
+  get roofRestrictLightTexture() {
+    return this.roofRestrictLightTarget?.texture || null;
   }
 
   /**
@@ -2161,6 +2192,17 @@ export class OverheadShadowsEffectV2 {
       this.roofVisibilityTarget.setSize(width, height);
     }
 
+    if (!this.roofRestrictLightTarget) {
+      this.roofRestrictLightTarget = new THREE.WebGLRenderTarget(width, height, {
+        minFilter: THREE.LinearFilter,
+        magFilter: THREE.LinearFilter,
+        format: THREE.RGBAFormat,
+        type: THREE.UnsignedByteType
+      });
+    } else {
+      this.roofRestrictLightTarget.setSize(width, height);
+    }
+
     if (!this.rainOcclusionVisibilityTarget) {
       this.rainOcclusionVisibilityTarget = new THREE.WebGLRenderTarget(width, height, {
         minFilter: THREE.LinearFilter,
@@ -2727,6 +2769,7 @@ export class OverheadShadowsEffectV2 {
     if (!this.roofTarget
       || !this.roofBlockTarget
       || !this.roofVisibilityTarget
+      || !this.roofRestrictLightTarget
       || !this.rainOcclusionVisibilityTarget
       || !this.rainOcclusionBlockTarget
       || !this.ceilingTransmittanceTarget
@@ -2949,6 +2992,33 @@ export class OverheadShadowsEffectV2 {
           if (entry?.object?.material) entry.object.material.opacity = entry.opacity;
         }
 
+        // Restrict-light mask after live opacity/tree uniforms are restored so hover-
+        // faded roofs stop blocking dynamic light (stamp alpha follows the fade).
+        if (this.roofRestrictLightTarget) {
+          const restrictLightVisOverrides = [];
+          this.mainScene.traverse((object) => {
+            if (!object.layers || (object.layers.mask & roofCaptureMaskBits) === 0) return;
+            const isFluidOverlay = !!(object.material?.uniforms?.tFluidMask);
+            if (isFluidOverlay) return;
+            if (!(object.isSprite || object.isMesh) || typeof object.visible !== 'boolean') return;
+            const liveVis = object.visible;
+            restrictLightVisOverrides.push({ object, visible: object.visible });
+            const isFoundryTile = !!object.userData?.foundryTileId;
+            const rl = objectRestrictsLightForRoofCapture(object);
+            if (!isFoundryTile) object.visible = false;
+            else object.visible = !!(liveVis && rl);
+          });
+          this.mainCamera.layers.set(ROOF_LAYER);
+          this.mainCamera.layers.enable(WEATHER_ROOF_LAYER);
+          renderer.setRenderTarget(this.roofRestrictLightTarget);
+          renderer.setClearColor(0x000000, 0);
+          renderer.clear();
+          renderer.render(this.mainScene, this.mainCamera);
+          for (const entry of restrictLightVisOverrides) {
+            if (entry.object) entry.object.visible = entry.visible;
+          }
+        }
+
         this._renderRainOcclusionTargets(renderer, roofCaptureMaskBits, ROOF_LAYER, WEATHER_ROOF_LAYER);
         this._emitTreeRainMaskProbe({
           ...treeProbe,
@@ -3125,6 +3195,50 @@ export class OverheadShadowsEffectV2 {
       renderer.setClearColor(0x000000, 0);
       renderer.clear();
       renderer.render(this.mainScene, this.mainCamera);
+
+      // Pass 1 needs full-opacity casters; restrict-light must use live opacity and
+      // the real pre-pass visibility so faded/hidden roofs release dynamic lighting.
+      for (const entry of overrides) {
+        if (entry.object && entry.object.material) {
+          entry.object.material.opacity = entry.opacity;
+        }
+      }
+      for (const entry of opacityUniformOverrides) {
+        if (entry?.uniform) entry.uniform.value = entry.value;
+      }
+      for (const entry of tileOpacityUniformOverrides) {
+        if (entry?.uniform) entry.uniform.value = entry.value;
+      }
+      const roofSpriteLiveVisible = new Map(
+        roofSpriteVisibilityOverrides.map((e) => [e.object, e.visible])
+      );
+
+      // Pass 1c: restrict-light overhead only (same camera/layers as Pass 1).
+      const restrictLightVisOverrides = [];
+      this.mainScene.traverse((object) => {
+        if (!object.layers || (object.layers.mask & roofCaptureMaskBits) === 0) return;
+        const isFluidOverlay = !!(object.material?.uniforms?.tFluidMask);
+        if (isFluidOverlay) return;
+        if (!(object.isSprite || object.isMesh) || typeof object.visible !== 'boolean') return;
+        const liveVis = roofSpriteLiveVisible.has(object)
+          ? roofSpriteLiveVisible.get(object)
+          : object.visible;
+        restrictLightVisOverrides.push({ object, visible: object.visible });
+        const isFoundryTile = !!object.userData?.foundryTileId;
+        const rl = objectRestrictsLightForRoofCapture(object);
+        if (!isFoundryTile) {
+          object.visible = false;
+        } else {
+          object.visible = !!(liveVis && rl);
+        }
+      });
+      renderer.setRenderTarget(this.roofRestrictLightTarget);
+      renderer.setClearColor(0x000000, 0);
+      renderer.clear();
+      renderer.render(this.mainScene, this.mainCamera);
+      for (const entry of restrictLightVisOverrides) {
+        if (entry.object) entry.object.visible = entry.visible;
+      }
     } finally {
       for (const entry of roofCasterTreeVisibilityOverrides) {
         if (entry.object) entry.object.visible = entry.visible;
@@ -3567,6 +3681,10 @@ export class OverheadShadowsEffectV2 {
     if (this.roofVisibilityTarget) {
       this.roofVisibilityTarget.dispose();
       this.roofVisibilityTarget = null;
+    }
+    if (this.roofRestrictLightTarget) {
+      this.roofRestrictLightTarget.dispose();
+      this.roofRestrictLightTarget = null;
     }
     if (this.rainOcclusionVisibilityTarget) {
       this.rainOcclusionVisibilityTarget.dispose();

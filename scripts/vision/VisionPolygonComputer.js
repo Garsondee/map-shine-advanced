@@ -7,6 +7,7 @@
 
 import { createLogger } from '../core/log.js';
 import { readTileLevelsFlags, tileHasLevelsRange, hasV14NativeLevels, readWallHeightFlags } from '../foundry/levels-scene-flags.js';
+import { tileDocRestrictsLight } from '../scene/tile-manager.js';
 
 const log = createLogger('VisionPolygonComputer');
 
@@ -37,6 +38,11 @@ export class VisionPolygonComputer {
     this._tempSegA = { x: 0, y: 0 };
     this._tempSegB = { x: 0, y: 0 };
     this._tempThresholdTarget = { x: 0, y: 0 };
+
+    /** @type {{x:number,y:number}[]} Reused quad corners for restrict-light tiles */
+    this._restrictLightTileCorners = [
+      { x: 0, y: 0 }, { x: 0, y: 0 }, { x: 0, y: 0 }, { x: 0, y: 0 },
+    ];
   }
 
   /**
@@ -67,7 +73,10 @@ export class VisionPolygonComputer {
     const segments = this._segmentsPool;
     segments.length = 0;
     this.wallsToSegments(allWalls, center, radius, sense, segments, elevation);
-    
+    if (sense === 'light') {
+      this.restrictLightTilesToSegments(center, radius, segments, elevation);
+    }
+
     // Add scene boundary segments if provided (clips vision to scene interior)
     if (sceneBounds) {
       this.createRectangleBoundary(sceneBounds, center, radius, segments);
@@ -324,6 +333,159 @@ export class VisionPolygonComputer {
 
     segments.length = writeIndex;
     return segments;
+  }
+
+  /**
+   * Append quad edges for tiles with Foundry "Restrict light" into the segment list.
+   * Matches wall radius culling and Levels-style tile elevation bands.
+   *
+   * @param {{x: number, y: number}} center - Light center (Foundry px)
+   * @param {number} radius
+   * @param {Array<{a:{x:number,y:number},b:{x:number,y:number}}>} segments
+   * @param {number|undefined} elevation - Light / LOS height for band test
+   */
+  restrictLightTilesToSegments(center, radius, segments, elevation) {
+    if (!center || !(radius > 0) || !segments) return;
+
+    const radiusSq = radius * radius;
+    const hasElevation = typeof elevation === 'number' && Number.isFinite(elevation);
+    let writeIndex = segments.length;
+
+    const considerDoc = (tileDoc) => {
+      if (!tileDoc) return;
+      if (!tileDocRestrictsLight(tileDoc)) return;
+
+      if (hasElevation) {
+        const flags = readTileLevelsFlags(tileDoc);
+        const bottom = flags.rangeBottom;
+        const top = flags.rangeTop;
+        const inBand = elevation >= bottom && (top === Infinity || elevation < top);
+        if (!inBand) return;
+      }
+
+      if (!this._fillRestrictLightTileCornersFoundry(tileDoc)) return;
+
+      const corners = this._restrictLightTileCorners;
+      for (let i = 0; i < 4; i++) {
+        const a = corners[i];
+        const b = corners[(i + 1) % 4];
+        this._tempSegA.x = a.x;
+        this._tempSegA.y = a.y;
+        this._tempSegB.x = b.x;
+        this._tempSegB.y = b.y;
+
+        const ax = a.x;
+        const ay = a.y;
+        const bx = b.x;
+        const by = b.y;
+        const dxA = ax - center.x;
+        const dyA = ay - center.y;
+        const dxB = bx - center.x;
+        const dyB = by - center.y;
+        const distASq = dxA * dxA + dyA * dyA;
+        const distBSq = dxB * dxB + dyB * dyB;
+
+        if (distASq > radiusSq && distBSq > radiusSq) {
+          const closest = this.closestPointOnSegment(center, this._tempSegA, this._tempSegB);
+          const distClosestSq = (closest.x - center.x) ** 2 + (closest.y - center.y) ** 2;
+          if (distClosestSq > radiusSq) continue;
+        }
+
+        let seg = segments[writeIndex];
+        if (!seg || typeof seg !== 'object') {
+          seg = { a: { x: 0, y: 0 }, b: { x: 0, y: 0 } };
+          segments[writeIndex] = seg;
+        } else {
+          if (!seg.a) seg.a = { x: 0, y: 0 };
+          if (!seg.b) seg.b = { x: 0, y: 0 };
+        }
+        seg.a.x = ax;
+        seg.a.y = ay;
+        seg.b.x = bx;
+        seg.b.y = by;
+        writeIndex++;
+      }
+    };
+
+    try {
+      const placeables = canvas?.tiles?.placeables;
+      if (Array.isArray(placeables) && placeables.length > 0) {
+        for (const p of placeables) {
+          const doc = p?.document ?? null;
+          if (!doc) continue;
+          let restricts = false;
+          try {
+            restricts = !!p.restrictsLight;
+          } catch (_) {
+            restricts = false;
+          }
+          if (!restricts && !tileDocRestrictsLight(doc)) continue;
+          considerDoc(doc);
+        }
+      } else {
+        try {
+          const st = canvas?.scene?.tiles;
+          const docs = st?.contents
+            ?? (typeof st?.[Symbol.iterator] === 'function' ? Array.from(st) : []);
+          for (const d of docs) considerDoc(d);
+        } catch (_) {}
+      }
+    } catch (_) {
+    }
+
+    segments.length = writeIndex;
+  }
+
+  /**
+   * Fills {@link VisionPolygonComputer#_restrictLightTileCorners} with Foundry-space quad corners.
+   * @param {object} tileDoc
+   * @returns {boolean} false if degenerate
+   * @private
+   */
+  _fillRestrictLightTileCornersFoundry(tileDoc) {
+    const shape = tileDoc?.shape && typeof tileDoc.shape === 'object' ? tileDoc.shape : null;
+    const sx = Number(shape?.x ?? tileDoc?.x) || 0;
+    const sy = Number(shape?.y ?? tileDoc?.y) || 0;
+    const w = Number(shape?.width ?? tileDoc?.width) || 0;
+    const h = Number(shape?.height ?? tileDoc?.height) || 0;
+    const ax = Number(shape?.anchorX ?? 0);
+    const ay = Number(shape?.anchorY ?? 0);
+    const scRawX = tileDoc?.texture?.scaleX;
+    const scRawY = tileDoc?.texture?.scaleY;
+    const scX = Number.isFinite(Number(scRawX)) ? Number(scRawX) : 1;
+    const scY = Number.isFinite(Number(scRawY)) ? Number(scRawY) : 1;
+    const dispW = Math.abs(w) * Math.abs(scX || 1);
+    const dispH = Math.abs(h) * Math.abs(scY || 1);
+    if (dispW <= 1e-6 || dispH <= 1e-6) return false;
+
+    const rotDeg = Number(shape?.rotation ?? tileDoc?.rotation) || 0;
+    const rad = (rotDeg * Math.PI) / 180;
+    const c = Math.cos(rad);
+    const s = Math.sin(rad);
+
+    const x0 = -ax * dispW;
+    const y0 = -ay * dispH;
+    const x1 = (1 - ax) * dispW;
+    const y1 = -ay * dispH;
+    const x2 = (1 - ax) * dispW;
+    const y2 = (1 - ay) * dispH;
+    const x3 = -ax * dispW;
+    const y3 = (1 - ay) * dispH;
+
+    const corners = this._restrictLightTileCorners;
+    const lx0 = x0; const ly0 = y0;
+    const lx1 = x1; const ly1 = y1;
+    const lx2 = x2; const ly2 = y2;
+    const lx3 = x3; const ly3 = y3;
+    const pxs = [lx0, lx1, lx2, lx3];
+    const pys = [ly0, ly1, ly2, ly3];
+    for (let i = 0; i < 4; i++) {
+      const px = pxs[i];
+      const py = pys[i];
+      corners[i].x = sx + (px * c - py * s);
+      corners[i].y = sy + (px * s + py * c);
+    }
+    return true;
   }
 
   /**

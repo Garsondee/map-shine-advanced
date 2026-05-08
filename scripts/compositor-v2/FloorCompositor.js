@@ -3510,6 +3510,7 @@ export class FloorCompositor {
     const overheadRoofBlockTex = _disableRoofInLighting ? null : (this._overheadShadowEffect?.roofBlockTexture ?? null);
     const ceilingTransmittanceTex = (!_disableRoofInLighting && this._overheadShadowEffect?.ceilingTransmittanceTextureForLighting)
       ? this._overheadShadowEffect.ceilingTransmittanceTextureForLighting : null;
+    const overheadRoofRestrictLightTex = _disableRoofInLighting ? null : (this._overheadShadowEffect?.roofRestrictLightTexture ?? null);
 
     // ── Per-level scene RTs + composite (sole V2 render path) ───────────────
     const _compositeOut = this._renderPerLevelPipeline({
@@ -3530,6 +3531,7 @@ export class FloorCompositor {
       overheadRoofAlphaTex,
       overheadRoofBlockTex,
       ceilingTransmittanceTex,
+      overheadRoofRestrictLightTex,
       windowCloudShadowViewBounds,
     });
     if (!_compositeOut) {
@@ -3642,6 +3644,8 @@ export class FloorCompositor {
                 return ov.roofAlphaTexture ?? null;
               case 'overhead_roof_block':
                 return ov.roofBlockTexture ?? null;
+              case 'overhead_roof_restrict_light':
+                return ov.roofRestrictLightTexture ?? null;
               case 'overhead_fluid_roof':
                 return ov.fluidRoofTarget?.texture ?? null;
               case 'overhead_tile_projection':
@@ -5245,6 +5249,7 @@ export class FloorCompositor {
       overheadRoofAlphaTex,
       overheadRoofBlockTex,
       ceilingTransmittanceTex,
+      overheadRoofRestrictLightTex,
       windowCloudShadowViewBounds,
     } = ctx;
     let _profileT0 = 0;
@@ -5398,6 +5403,7 @@ export class FloorCompositor {
             overheadRoofAlphaTex, overheadRoofBlockTex,
             outdoorsForLightingTex,
             ceilingTransmittanceTex,
+            overheadRoofRestrictLightTex,
             combinedShadowTex, combinedShadowRawTex,
             paintedShadowLitTex, paintedShadowMgrOpacity,
           );

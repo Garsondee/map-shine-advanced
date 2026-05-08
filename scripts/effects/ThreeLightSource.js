@@ -1887,8 +1887,13 @@ export class ThreeLightSource {
         const computeOpts = { sense: 'light' };
         try {
           if (hasV14NativeLevels(canvas?.scene)) {
-            const p = getPerspectiveElevation();
-            if (Number.isFinite(p?.losHeight)) computeOpts.elevation = p.losHeight;
+            const docElev = Number(this.document?.elevation);
+            if (Number.isFinite(docElev)) {
+              computeOpts.elevation = docElev;
+            } else {
+              const p = getPerspectiveElevation();
+              if (Number.isFinite(p?.losHeight)) computeOpts.elevation = p.losHeight;
+            }
           }
         } catch (_) {}
         const ptsF = _lightLosComputer.compute(centerF, computeRadiusPx, null, sceneBounds, computeOpts);

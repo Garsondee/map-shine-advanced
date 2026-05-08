@@ -312,3 +312,48 @@ Several issues stacked; the last one only showed up when shadows were off:
 - Rain masking follows **tree hover-fade** the same way as roofs, including when **overhead shadow projection is disabled**.
 - Dedicated rain occlusion RTs reliably initialize; debug flags can confirm capture path and tree participation.
 
+## Success Story: Foundry “Restrict Light” Roofs — Leaks, Then Over-Blocking on Fade
+
+### Account
+
+- Composer (Cursor agent)
+
+### Problem We Saw
+
+- Overhead tiles with Foundry **Restrict light** still let **same-floor** dynamic lights “leak” through the roof in the V2 lighting composite (torch wash where the roof should block).
+- After an initial fix, behavior improved when the roof was opaque, but **hover/fade reveal** still went wrong: lights stayed suppressed even when the roof had faded away, so exploration under roofs felt incorrectly dark.
+
+### What Was Wrong At The Start
+
+Several pipeline gaps stacked:
+
+1. **LOS / vision alone did not match the screen-space lighting composite**  
+   Restrict-light behavior needed a **screen-space stamp** aligned with overhead capture, plus compositor wiring so relief and visibility gates respected that mask (including when `uApplyRoofOcclusionToSources` is low).
+
+2. **Overhead shadow projection off → restrict RT never updated**  
+   With `OverheadShadowsEffectV2.params.enabled === false`, the early return path filled `roofBlockTarget` but **skipped** the restrict-light render target. Lighting always saw an empty stamp, so either leaks returned or fixes appeared to “do nothing” in that configuration.
+
+3. **Restrict capture reused full-opacity caster setup**  
+   Pass **1** correctly forces **opacity 1** on roof casters so shadow masks stay stable while hovering. Pass **1c** (restrict-light only) ran in that same forced-opaque state and used **post-force** visibility (`visible === true`) for filtering. The restrict mask stayed **fully strong** while the roof **visually faded**, so lighting stayed blocked when it should have returned. The **disabled** overhead path had the same ordering issue: restrict ran **before** restoring roof-block opacity / tree uniforms.
+
+### What Fixed It
+
+1. **End-to-end restrict-light plumbing** (earlier in the same effort): LOS segments for light sense, `tileDocRestrictsLight` / `userData.restrictsLight`, dedicated `roofRestrictLightTarget`, `LightingEffectV2` sampling and gating, optional light elevation for native Levels, FloorRenderBus sync from documents.
+
+2. **Disabled overhead path** renders the restrict-only pass after `roofBlockTarget` so the RT stays valid when projection is off.
+
+3. **Fade-correct restrict capture**  
+   - **Enabled path:** after Pass **1**, restore saved **material opacity** and `uOpacity` / `uTileOpacity`, then run Pass **1c**. Use **pre–Pass-1** visibility from `roofSpriteVisibilityOverrides` so hidden tiles do not stamp.  
+   - **Disabled path:** run the restrict pass **after** restoring roof-block opacity and tree uniforms so the capture matches **live** fade.
+
+### Key Diagnostic Insight
+
+- “**No visual change**” with projection off pointed to **early return** skipping the restrict RT, not shader math.
+- “**Leak fixed but fade still wrong**” pointed to **capture state** (forced opaque + forced visible), not Foundry flags.
+
+### Final Outcome
+
+- Same-floor lights no longer wash through **opaque** restrict-light roofs.
+- When the roof **fades or hides** (hover-reveal / opacity), the restrict stamp **weakens with it**, and dynamic light **returns** as expected.
+- Behavior is consistent whether overhead **shadow projection** is on or off.
+

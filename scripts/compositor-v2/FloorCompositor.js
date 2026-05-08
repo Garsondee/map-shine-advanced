@@ -5373,7 +5373,6 @@ export class FloorCompositor {
         this._windowLightEffect?.setOverheadRoofAlphaTexture?.(overheadRoofAlphaTex, windowLightBufW, windowLightBufH);
         this._windowLightEffect?.setCeilingTransmittanceTexture?.(ceilingTransmittanceTex);
         this._windowLightEffect?.syncFrameOcclusion?.(this);
-        this._skyColorEffect?.setOverheadRoofAlphaTexture?.(overheadRoofAlphaTex);
 
         try {
           this._lightingEffect?.setRenderFloorIndexForLights?.(levelIndex);

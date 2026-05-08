@@ -23,8 +23,10 @@
  * Simplifications vs V1:
  *   - No rope mask or token mask
  *   - No cloud top mask
- *   - Outdoors gating is currently limited to the final grade blend
- *     (full V1-style multi-mask layering remains out of scope for now)
+ *   - Outdoors gating uses the active-floor `_Outdoors` mask for the final grade
+ *     blend. Overhead roof screen-space alpha does **not** suppress grading on roof
+ *     texels so time-of-day still brightens/darkens roofs (including Foundry
+ *     “Restrict light” tiles).
  *
  * @module compositor-v2/effects/SkyColorEffectV2
  */
@@ -338,13 +340,10 @@ export class SkyColorEffectV2 {
       uniforms: {
         tDiffuse:    { value: null },
         tOutdoorsMask: { value: this._fallbackWhite },
-        tOverheadRoofAlpha: { value: this._fallbackWhite },
         uTime:       { value: 0.0 },
         uResolution: { value: new THREE.Vector2(1, 1) },
         uHasOutdoorsMask: { value: 0.0 },
-        uHasOverheadRoofAlpha: { value: 0.0 },
         uOutdoorsMaskFlipY: { value: 0.0 },
-        uActiveFloorIndex: { value: 0.0 },
         uViewBoundsMin: { value: new THREE.Vector2(0, 0) },
         uViewBoundsMax: { value: new THREE.Vector2(1, 1) },
         uSceneBounds: { value: new THREE.Vector4(0, 0, 1, 1) },
@@ -383,13 +382,10 @@ export class SkyColorEffectV2 {
       fragmentShader: /* glsl */`
         uniform sampler2D tDiffuse;
         uniform sampler2D tOutdoorsMask;
-        uniform sampler2D tOverheadRoofAlpha;
         uniform vec2 uResolution;
         uniform float uTime;
         uniform float uHasOutdoorsMask;
-        uniform float uHasOverheadRoofAlpha;
         uniform float uOutdoorsMaskFlipY;
-        uniform float uActiveFloorIndex;
         uniform vec2 uViewBoundsMin;
         uniform vec2 uViewBoundsMax;
         uniform vec4 uSceneBounds;
@@ -475,12 +471,6 @@ export class SkyColorEffectV2 {
           return mix(1.0, outdoorMaskSample, inScene);
         }
 
-        float sampleOverheadRoofAlpha(vec2 screenUv) {
-          if (uHasOverheadRoofAlpha < 0.5) return 0.0;
-          vec4 roof = texture2D(tOverheadRoofAlpha, screenUv);
-          return clamp(max(roof.a, max(roof.r, max(roof.g, roof.b))), 0.0, 1.0);
-        }
-
         void main() {
           vec4 sceneColor = texture2D(tDiffuse, vUv);
           vec3 base = sceneColor.rgb;
@@ -492,20 +482,8 @@ export class SkyColorEffectV2 {
           }
 
           vec3 color = base;
-          float roofAlpha = sampleOverheadRoofAlpha(vUv);
-          // Hard roof gate: any meaningful roof coverage suppresses sky grade.
-          float roofOcclusion = step(0.05, roofAlpha);
-          float roofOutdoorVis = 1.0 - roofOcclusion;
-
           float outdoorVis = clamp(sampleOutdoorsMask(vUv), 0.0, 1.0);
-          // Levels-aware mask policy:
-          // - Ground floor: world-space _Outdoors + roof gate (normal behavior).
-          // - Upper floors: still apply _Outdoors (for indoor/outdoor correctness),
-          //   but pair it with screen-space roof visibility to stabilize edge behavior
-          //   in the same sampling space as this fullscreen pass.
-          float skyEligible = (uActiveFloorIndex > 0.5)
-            ? min(outdoorVis, roofOutdoorVis)
-            : (outdoorVis * roofOutdoorVis);
+          float skyEligible = outdoorVis;
 
           // 1) Exposure (stops)
           color *= exp2(uExposure);
@@ -614,18 +592,6 @@ export class SkyColorEffectV2 {
     u.tOutdoorsMask.value = outdoorsTex ?? this._fallbackWhite;
     u.uHasOutdoorsMask.value = outdoorsTex ? 1.0 : 0.0;
     u.uOutdoorsMaskFlipY.value = outdoorsTex?.flipY ? 1.0 : 0.0;
-  }
-
-  /**
-   * Feed screen-space overhead roof visibility alpha for occluding outdoors-only
-   * grading on overhead-covered pixels.
-   * @param {THREE.Texture|null} roofAlphaTex
-   */
-  setOverheadRoofAlphaTexture(roofAlphaTex) {
-    const u = this._composeMaterial?.uniforms;
-    if (!u) return;
-    u.tOverheadRoofAlpha.value = roofAlphaTex ?? this._fallbackWhite;
-    u.uHasOverheadRoofAlpha.value = roofAlphaTex ? 1.0 : 0.0;
   }
 
   /**
@@ -907,7 +873,6 @@ export class SkyColorEffectV2 {
 
       // Keep post-pass screen UV -> world -> scene UV mapping in sync for outdoors masking.
       const sc = window.MapShine?.sceneComposer;
-      const activeFloorIndex = Number(window.MapShine?.floorStack?.getActiveFloor?.()?.index);
       const sceneRect = canvas?.dimensions?.sceneRect;
       const sceneX = sceneRect?.x ?? 0;
       const sceneY = sceneRect?.y ?? 0;
@@ -939,7 +904,6 @@ export class SkyColorEffectV2 {
       u.uViewBoundsMax.value.set(vMaxX, vMaxY);
       u.uSceneBounds.value.set(sceneX, sceneY, sceneW, sceneH);
       u.uSceneDimensions.value.set(canvas?.dimensions?.width ?? sceneW, canvas?.dimensions?.height ?? sceneH);
-      u.uActiveFloorIndex.value = Number.isFinite(activeFloorIndex) ? Math.max(0, activeFloorIndex) : 0.0;
 
       u.uExposure.value = exposure;
       u.uTemperature.value = temperature;

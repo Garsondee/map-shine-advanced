@@ -61,6 +61,14 @@ export class PaintedShadowEffectV2 {
     this._paintedBundleLoadsInFlight = new Set();
     /** @type {Map<string, number>} */
     this._paintedBundleLastAttemptMs = new Map();
+    /** @type {(import('three').Texture|null)[]} */
+    this._paintedMasks = [null, null, null, null];
+    /** @type {(import('three').Texture|null)[]} */
+    this._outdoorsMasks = [null, null, null, null];
+    /** @type {import('three').Texture|null} */
+    this._floorIdTex = null;
+    /** @type {import('three').Texture|null} */
+    this._noShadowFallbackTex = null;
   }
 
   static getControlSchema() {
@@ -168,6 +176,22 @@ export class PaintedShadowEffectV2 {
       if (!viewedSrc) return null;
       const basePath = sc.extractBasePath(viewedSrc);
       return (typeof basePath === 'string' && basePath.trim()) ? basePath.trim() : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  _resolveBasePathForFloorIndex(floorIndex) {
+    try {
+      const sc = window.MapShine?.sceneComposer ?? null;
+      const scene = canvas?.scene ?? null;
+      if (!sc || !scene || typeof sc.extractBasePath !== 'function') return null;
+      const levels = scene?.levels?.sorted ?? scene?.levels?.contents ?? [];
+      const target = levels.find((l) => Number(l?.index) === Number(floorIndex)) ?? null;
+      const bgSrc = target?.background?.src ?? null;
+      if (typeof bgSrc !== 'string' || !bgSrc.trim()) return null;
+      const bp = sc.extractBasePath(bgSrc.trim());
+      return (typeof bp === 'string' && bp.trim()) ? bp.trim() : null;
     } catch (_) {
       return null;
     }
@@ -331,9 +355,19 @@ export class PaintedShadowEffectV2 {
     this._projectMaterial = new THREE.ShaderMaterial({
       uniforms: {
         tPaintedShadow: { value: null },
+        tPaintedShadow0: { value: null },
+        tPaintedShadow1: { value: null },
+        tPaintedShadow2: { value: null },
+        tPaintedShadow3: { value: null },
         tOutdoors: { value: null },
+        tOutdoors0: { value: null },
+        tOutdoors1: { value: null },
+        tOutdoors2: { value: null },
+        tOutdoors3: { value: null },
+        tFloorIdTex: { value: null },
         uHasPaintedShadow: { value: 0.0 },
         uHasOutdoorsMask: { value: 0.0 },
+        uHasFloorIdTex: { value: 0.0 },
         uPaintedFlipY: { value: 0.0 },
         uOutdoorsFlipY: { value: 0.0 },
         uSunDir: { value: new THREE.Vector2(0.0, -1.0) },
@@ -358,9 +392,19 @@ export class PaintedShadowEffectV2 {
       `,
       fragmentShader: `
         uniform sampler2D tPaintedShadow;
+        uniform sampler2D tPaintedShadow0;
+        uniform sampler2D tPaintedShadow1;
+        uniform sampler2D tPaintedShadow2;
+        uniform sampler2D tPaintedShadow3;
         uniform sampler2D tOutdoors;
+        uniform sampler2D tOutdoors0;
+        uniform sampler2D tOutdoors1;
+        uniform sampler2D tOutdoors2;
+        uniform sampler2D tOutdoors3;
+        uniform sampler2D tFloorIdTex;
         uniform float uHasPaintedShadow;
         uniform float uHasOutdoorsMask;
+        uniform float uHasFloorIdTex;
         uniform float uPaintedFlipY;
         uniform float uOutdoorsFlipY;
         uniform vec2 uSunDir;
@@ -387,7 +431,33 @@ export class PaintedShadowEffectV2 {
           return clamp((1.0 - luma) * s.a, 0.0, 1.0);
         }
 
+        float readFloorIndex(vec2 sceneUvFoundry) {
+          if (uHasFloorIdTex < 0.5) return -1.0;
+          vec2 sceneUvThree = vec2(sceneUvFoundry.x, 1.0 - sceneUvFoundry.y);
+          float fid = texture2D(tFloorIdTex, sceneUvThree).r;
+          return floor(fid * 255.0 + 0.5);
+        }
+
+        float readPaintedByFloor(float floorIdx, vec2 uv) {
+          if (floorIdx < 0.0) return readMaskShadowStrength(tPaintedShadow, uv, uPaintedFlipY);
+          if (floorIdx < 0.5) return readMaskShadowStrength(tPaintedShadow0, uv, uPaintedFlipY);
+          if (floorIdx < 1.5) return readMaskShadowStrength(tPaintedShadow1, uv, uPaintedFlipY);
+          if (floorIdx < 2.5) return readMaskShadowStrength(tPaintedShadow2, uv, uPaintedFlipY);
+          return readMaskShadowStrength(tPaintedShadow3, uv, uPaintedFlipY);
+        }
+
         float readOutdoors(vec2 uv) {
+          float floorIdx = readFloorIndex(uv);
+          if (floorIdx >= 0.0) {
+            vec2 suv = clamp(uv, vec2(0.0), vec2(1.0));
+            if (uOutdoorsFlipY > 0.5) suv.y = 1.0 - suv.y;
+            vec4 m;
+            if (floorIdx < 0.5) m = texture2D(tOutdoors0, suv);
+            else if (floorIdx < 1.5) m = texture2D(tOutdoors1, suv);
+            else if (floorIdx < 2.5) m = texture2D(tOutdoors2, suv);
+            else m = texture2D(tOutdoors3, suv);
+            return clamp(mix(1.0, m.r, m.a), 0.0, 1.0);
+          }
           vec2 suv = clamp(uv, vec2(0.0), vec2(1.0));
           if (uOutdoorsFlipY > 0.5) suv.y = 1.0 - suv.y;
           vec4 m = texture2D(tOutdoors, suv);
@@ -413,7 +483,8 @@ export class PaintedShadowEffectV2 {
           vec2 offsetUv = dir * (pixelLen / safeSceneSize);
           vec2 casterUv = clamp(vUv + offsetUv, vec2(0.0), vec2(1.0));
 
-          float painted = readMaskShadowStrength(tPaintedShadow, casterUv, uPaintedFlipY);
+          float floorIdx = readFloorIndex(vUv);
+          float painted = readPaintedByFloor(floorIdx, casterUv);
           float outdoors = readOutdoors(vUv);
           float strength = clamp(painted * clamp(uOpacity, 0.0, 1.0) * outdoors, 0.0, 1.0);
           if (uHasDynamicLight > 0.5 && uDynamicLightShadowOverrideEnabled > 0.5 && uHasDynSceneRect > 0.5) {
@@ -503,6 +574,20 @@ export class PaintedShadowEffectV2 {
     this._quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), this._projectMaterial);
     this._quad.frustumCulled = false;
     this._scene.add(this._quad);
+
+    // Neutral painted-mask fallback: white RGB + alpha 1 => readMaskShadowStrength = 0.
+    try {
+      const data = new Uint8Array([255, 255, 255, 255]);
+      this._noShadowFallbackTex = new THREE.DataTexture(data, 1, 1, THREE.RGBAFormat, THREE.UnsignedByteType);
+      this._noShadowFallbackTex.needsUpdate = true;
+      this._noShadowFallbackTex.flipY = false;
+      this._noShadowFallbackTex.generateMipmaps = false;
+      this._noShadowFallbackTex.minFilter = THREE.NearestFilter;
+      this._noShadowFallbackTex.magFilter = THREE.NearestFilter;
+      this._noShadowFallbackTex.name = 'MapShinePaintedShadowNoShadowFallback';
+    } catch (_) {
+      this._noShadowFallbackTex = null;
+    }
   }
 
   /**
@@ -662,6 +747,41 @@ export class PaintedShadowEffectV2 {
     const compositor = window.MapShine?.sceneComposer?._sceneMaskCompositor ?? null;
     const liveOutdoor = compositor ? this._resolveLiveCompositorOutdoorsTexture() : null;
     let outdoorsTex = liveOutdoor ?? this._outdoorsMask ?? null;
+    // Per-floor layering: pick painted/outdoors by floorIdTarget per pixel.
+    this._paintedMasks = [null, null, null, null];
+    this._outdoorsMasks = [null, null, null, null];
+    this._floorIdTex = null;
+    if (compositor) {
+      try {
+        const floors = window.MapShine?.floorStack?.getFloors?.() ?? [];
+        for (const floor of floors) {
+          const idx = Number(floor?.index);
+          const key = floor?.compositorKey;
+          if (!Number.isFinite(idx) || idx < 0 || idx > 3 || !key) continue;
+          this._paintedMasks[idx] = (
+            compositor.getFloorTexture?.(key, 'handPaintedShadow')
+            ?? compositor.getFloorTexture?.(key, 'paintedShadow')
+            ?? compositor.getFloorTexture?.(key, 'shadow')
+            ?? null
+          );
+          this._outdoorsMasks[idx] = compositor.getFloorTexture?.(key, 'outdoors') ?? null;
+          if (!this._paintedMasks[idx]) {
+            const floorBasePath = this._resolveBasePathForFloorIndex(idx);
+            if (floorBasePath) {
+              const cached = this._paintedBundleByBasePath.get(floorBasePath);
+              if (!this._paintedBundleByBasePath.has(floorBasePath) || cached == null) {
+                this._schedulePaintedBundleLoadForBasePath(floorBasePath);
+              }
+              if (cached) this._paintedMasks[idx] = cached;
+            }
+          }
+        }
+        const anyOutdoors = this._outdoorsMasks.some((t) => !!t);
+        if (anyOutdoors) {
+          this._floorIdTex = compositor.floorIdTarget?.texture ?? null;
+        }
+      } catch (_) {}
+    }
     if (!paintedTex || !outdoorsTex) {
       if (!outdoorsTex && !this._loggedMissingOutdoorsMask) {
         this._loggedMissingOutdoorsMask = true;
@@ -710,9 +830,20 @@ export class PaintedShadowEffectV2 {
     try {
       const pu = this._projectMaterial.uniforms;
       pu.tPaintedShadow.value = paintedTex;
+      const noShadowTex = this._noShadowFallbackTex ?? paintedTex;
+      pu.tPaintedShadow0.value = this._paintedMasks[0] ?? noShadowTex;
+      pu.tPaintedShadow1.value = this._paintedMasks[1] ?? noShadowTex;
+      pu.tPaintedShadow2.value = this._paintedMasks[2] ?? noShadowTex;
+      pu.tPaintedShadow3.value = this._paintedMasks[3] ?? noShadowTex;
       pu.tOutdoors.value = outdoorsTex;
+      pu.tOutdoors0.value = this._outdoorsMasks[0] ?? outdoorsTex;
+      pu.tOutdoors1.value = this._outdoorsMasks[1] ?? outdoorsTex;
+      pu.tOutdoors2.value = this._outdoorsMasks[2] ?? outdoorsTex;
+      pu.tOutdoors3.value = this._outdoorsMasks[3] ?? outdoorsTex;
+      pu.tFloorIdTex.value = this._floorIdTex;
       pu.uHasPaintedShadow.value = 1.0;
       pu.uHasOutdoorsMask.value = 1.0;
+      pu.uHasFloorIdTex.value = this._floorIdTex ? 1.0 : 0.0;
       pu.uPaintedFlipY.value = paintedTex?.flipY ? 1.0 : 0.0;
       pu.uOutdoorsFlipY.value = outdoorsTex?.flipY ? 1.0 : 0.0;
       pu.uSunDir.value.copy(this.sunDir || { x: 0.0, y: -1.0 });
@@ -800,6 +931,7 @@ export class PaintedShadowEffectV2 {
     try { this._invertMaterial?.dispose(); } catch (_) {}
     try { this._blurMaterial?.dispose(); } catch (_) {}
     try { this._quad?.geometry?.dispose(); } catch (_) {}
+    try { this._noShadowFallbackTex?.dispose?.(); } catch (_) {}
     this._strengthTarget = null;
     this._blurTarget = null;
     this.shadowTarget = null;
@@ -816,5 +948,9 @@ export class PaintedShadowEffectV2 {
     this._paintedBundleByBasePath.clear();
     this._paintedBundleLoadsInFlight.clear();
     this._paintedBundleLastAttemptMs.clear();
+    this._paintedMasks = [null, null, null, null];
+    this._outdoorsMasks = [null, null, null, null];
+    this._floorIdTex = null;
+    this._noShadowFallbackTex = null;
   }
 }

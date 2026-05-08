@@ -13,6 +13,10 @@
  * floor's texture was not found yet (async compose): tryKey(underground) succeeded before
  * the correct floor's RT existed.
  *
+ * `collectCompositorFloorCandidateKeys` is shared by `resolveCompositorFloorMaskTexture`
+ * (_Shadow / painted shadow) so per-floor masks use the **same ordered band guesses**
+ * during navigation drift.
+ *
  * @module masks/resolve-compositor-outdoors
  */
 
@@ -31,25 +35,22 @@ function levelsBandKeyFromContext(ctx) {
 }
 
 /**
- * @param {object} compositor - GpuSceneMaskCompositor instance
- * @param {{ bottom?: number, top?: number }|null} [levelContext]
- * @param {{ skipGroundFallback?: boolean, allowBundleFallback?: boolean, strictViewedFloorOnly?: boolean }} [options]
- * @returns {{ texture: import('three').Texture|null, resolvedKey: string|null, route: string|null }}
+ * Canonical ordered floor keys to try against GpuSceneMaskCompositor for the viewed band,
+ * aligned with `_Outdoors` resolution (stack → context gate → `_activeFloorKey`).
+ *
+ * @param {object|null} compositor
+ * @param {{ bottom?: number, top?: number }|null|undefined} [levelContext=null]
+ * @returns {{
+ *   uniqueKeys: string[],
+ *   activeFloor: object|null,
+ *   ctx: { bottom?: unknown, top?: unknown }|null,
+ *   ctxBandKey: string|null,
+ *   multiFloor: boolean,
+ *   cb: number
+ * }}
  */
-export function resolveCompositorOutdoorsTexture(compositor, levelContext = null, options = {}) {
-  const { skipGroundFallback = false, allowBundleFallback = true, strictViewedFloorOnly = false } = options;
-  const empty = { texture: null, resolvedKey: null, route: null };
-  if (!compositor || typeof compositor.getFloorTexture !== 'function') return empty;
-
+export function collectCompositorFloorCandidateKeys(compositor = null, levelContext = null) {
   const ctx = levelContext ?? window.MapShine?.activeLevelContext ?? null;
-  /** @type {import('three').Texture|null} */
-  let tex = null;
-
-  const tryKey = (k) => {
-    if (k == null || k === '') return null;
-    return compositor.getFloorTexture(String(k), 'outdoors') ?? null;
-  };
-
   const candidateKeys = [];
 
   let multiFloor = false;
@@ -78,7 +79,7 @@ export function resolveCompositorOutdoorsTexture(compositor, levelContext = null
     }
   }
 
-  const cak = compositor._activeFloorKey ?? null;
+  const cak = compositor?._activeFloorKey ?? null;
   if (cak) {
     const activeCk = activeFloor ? String(activeFloor.compositorKey) : '';
     if (!multiFloor || !activeFloor || String(cak) === activeCk) {
@@ -87,10 +88,188 @@ export function resolveCompositorOutdoorsTexture(compositor, levelContext = null
   }
 
   const uniqueKeys = [...new Set(candidateKeys.filter(Boolean))];
+  return { uniqueKeys, activeFloor, ctx, ctxBandKey, multiFloor, cb };
+}
+
+/**
+ * Collect sibling / alternate GpuSceneMaskCompositor keys that share `siblingBottom` (same
+ * band bottom as FloorStack/context, different string suffix). Used after primary candidate
+ * keys miss.
+ *
+ * @param {object} compositor
+ * @param {number} siblingBottom
+ * @param {readonly string[]} [exclude=[]]
+ * @returns {string[]}
+ */
+export function siblingFloorKeysMatchingBottom(compositor, siblingBottom, exclude = []) {
+  if (!compositor || !Number.isFinite(siblingBottom)) return [];
+  const ex = new Set(exclude.map(String));
+  /** @type {Set<string>} */
+  const keySet = new Set();
+  try {
+    if (compositor._floorMeta && typeof compositor._floorMeta.keys === 'function') {
+      for (const k of compositor._floorMeta.keys()) keySet.add(String(k));
+    }
+  } catch (_) {}
+  try {
+    if (compositor._floorCache && typeof compositor._floorCache.keys === 'function') {
+      for (const k of compositor._floorCache.keys()) keySet.add(String(k));
+    }
+  } catch (_) {}
+  return [...keySet]
+    .filter((key) => Number(String(key).split(':')[0]) === siblingBottom && !ex.has(key))
+    .sort();
+}
+
+/**
+ * Resolve any per-floor GpuSceneMaskCompositor RT by mask id (`handPaintedShadow`, …) using the
+ * same band-candidate ordering as `_Outdoors`. Never uses cross-floor downward fallbacks
+ * (nearest lower-band) — those are intentional for `_Outdoors` sampling only.
+ *
+ * @param {object} compositor
+ * @param {string[]} maskTypeIds
+ * @param {{ bottom?: number, top?: number }|null|undefined} [levelContext=null]
+ * @returns {{
+ *   texture: import('three').Texture|null,
+ *   resolvedKey: string|null,
+ *   maskType: string|null,
+ *   route: string|null,
+ *   candidateKeysAttempted: string[]
+ * }}
+ */
+export function resolveCompositorFloorMaskTexture(compositor, maskTypeIds, levelContext = null) {
+  const empty = {
+    texture: null,
+    resolvedKey: null,
+    maskType: null,
+    route: null,
+    candidateKeysAttempted: [],
+  };
+  if (!compositor || typeof compositor.getFloorTexture !== 'function') return empty;
+  if (!Array.isArray(maskTypeIds) || maskTypeIds.length === 0) return empty;
+
+  const { uniqueKeys, activeFloor, ctxBandKey, multiFloor, cb } = collectCompositorFloorCandidateKeys(
+    compositor,
+    levelContext,
+  );
+
+  /** @type {string[]} */
+  const candidateKeysAttempted = [];
+
+  const recordTry = (k) => {
+    const s = String(k ?? '');
+    if (s === '') return;
+    if (!candidateKeysAttempted.includes(s)) candidateKeysAttempted.push(s);
+  };
+
+  const tryFloorMask = (floorKey) => {
+    for (const type of maskTypeIds) {
+      const t = compositor.getFloorTexture(String(floorKey), type) ?? null;
+      if (t) return { texture: t, maskType: type };
+    }
+    return null;
+  };
+
+  for (const key of uniqueKeys) {
+    recordTry(key);
+    const hit = tryFloorMask(key);
+    if (hit?.texture) {
+      return {
+        texture: hit.texture,
+        resolvedKey: key,
+        maskType: hit.maskType ?? null,
+        route: 'direct',
+        candidateKeysAttempted,
+      };
+    }
+  }
+
+  // Same gapfill rationale as `_Outdoors`: stack/context desync mid-navigation.
+  try {
+    if (
+      ctxBandKey != null
+      && multiFloor
+      && activeFloor
+      && String(ctxBandKey) !== String(activeFloor.compositorKey ?? '')
+    ) {
+      recordTry(ctxBandKey);
+      const hit = tryFloorMask(ctxBandKey);
+      if (hit?.texture) {
+        return {
+          texture: hit.texture,
+          resolvedKey: ctxBandKey,
+          maskType: hit.maskType ?? null,
+          route: 'level-context-gapfill',
+          candidateKeysAttempted,
+        };
+      }
+    }
+  } catch (_) {}
+
+  const siblingBottom = Number.isFinite(Number(activeFloor?.elevationMin))
+    ? Number(activeFloor.elevationMin)
+    : (Number.isFinite(cb) ? cb : Number.NaN);
+  if (Number.isFinite(siblingBottom)) {
+    const siblingKeys = siblingFloorKeysMatchingBottom(compositor, siblingBottom, uniqueKeys);
+    for (const key of siblingKeys) {
+      recordTry(key);
+      const hit = tryFloorMask(key);
+      if (hit?.texture) {
+        return {
+          texture: hit.texture,
+          resolvedKey: key,
+          maskType: hit.maskType ?? null,
+          route: 'sibling',
+          candidateKeysAttempted,
+        };
+      }
+    }
+  }
+
+  return { ...empty, candidateKeysAttempted };
+}
+
+/**
+ * @param {object} compositor - GpuSceneMaskCompositor instance
+ * @param {{ bottom?: number, top?: number }|null} [levelContext]
+ * @param {{ skipGroundFallback?: boolean, allowBundleFallback?: boolean, strictViewedFloorOnly?: boolean }} [options]
+ * @returns {{ texture: import('three').Texture|null, resolvedKey: string|null, route: string|null }}
+ */
+export function resolveCompositorOutdoorsTexture(compositor, levelContext = null, options = {}) {
+  const { skipGroundFallback = false, allowBundleFallback = true, strictViewedFloorOnly = false } = options;
+  const empty = { texture: null, resolvedKey: null, route: null };
+  if (!compositor || typeof compositor.getFloorTexture !== 'function') return empty;
+
+  const { uniqueKeys, activeFloor, ctxBandKey, multiFloor, cb } = collectCompositorFloorCandidateKeys(
+    compositor,
+    levelContext,
+  );
+
+  /** @type {import('three').Texture|null} */
+  let tex = null;
+
+  const tryKey = (k) => {
+    if (k == null || k === '') return null;
+    return compositor.getFloorTexture(String(k), 'outdoors') ?? null;
+  };
+
   for (const key of uniqueKeys) {
     tex = tryKey(key);
     if (tex) return { texture: tex, resolvedKey: key, route: 'direct' };
   }
+
+  try {
+    if (
+      tex == null
+      && ctxBandKey != null
+      && multiFloor
+      && activeFloor
+      && String(ctxBandKey) !== String(activeFloor.compositorKey ?? '')
+    ) {
+      tex = tryKey(ctxBandKey);
+      if (tex) return { texture: tex, resolvedKey: ctxBandKey, route: 'level-context-gapfill' };
+    }
+  } catch (_) {}
 
   if (strictViewedFloorOnly) {
     if (allowBundleFallback && !tex) {
@@ -115,26 +294,12 @@ export function resolveCompositorOutdoorsTexture(compositor, levelContext = null
     return empty;
   }
 
-  // Prefer rendered floor band bottom (floor stack) so sibling scan matches the viewed band.
   const siblingBottom = Number.isFinite(Number(activeFloor?.elevationMin))
     ? Number(activeFloor.elevationMin)
     : (Number.isFinite(cb) ? cb : Number.NaN);
   if (Number.isFinite(siblingBottom)) {
-    /** @type {Set<string>} */
-    const keySet = new Set();
-    try {
-      if (compositor._floorMeta && typeof compositor._floorMeta.keys === 'function') {
-        for (const k of compositor._floorMeta.keys()) keySet.add(String(k));
-      }
-    } catch (_) {}
-    try {
-      if (compositor._floorCache && typeof compositor._floorCache.keys === 'function') {
-        for (const k of compositor._floorCache.keys()) keySet.add(String(k));
-      }
-    } catch (_) {}
-    const matching = [...keySet].filter((key) => Number(String(key).split(':')[0]) === siblingBottom).sort();
+    const matching = siblingFloorKeysMatchingBottom(compositor, siblingBottom, uniqueKeys);
     for (const key of matching) {
-      if (uniqueKeys.includes(key)) continue;
       tex = tryKey(key);
       if (tex) return { texture: tex, resolvedKey: key, route: 'sibling' };
     }
@@ -158,10 +323,6 @@ export function resolveCompositorOutdoorsTexture(compositor, levelContext = null
     }
   }
 
-  // Multi-floor fallback: if the active/view floor has no direct outdoors
-  // texture, prefer the nearest lower floor band that does have one.
-  // This supports "look down" rendering where upper floors are view layers but
-  // authored outdoors masks only exist on lower map floors.
   const activeBottom = Number(activeFloor?.elevationMin);
   if (Number.isFinite(activeBottom)) {
     /** @type {Array<{key:string,bottom:number}>} */
@@ -194,9 +355,6 @@ export function resolveCompositorOutdoorsTexture(compositor, levelContext = null
     }
   }
 
-  // BUNDLE FALLBACK: if GPU compositor has no outdoors texture for this level,
-  // try to load directly from the scene's asset bundle (for single-floor scenes
-  // or levels where _Outdoors comes from bundle, not per-tile composition).
   if (allowBundleFallback && !tex) {
     const sc = window.MapShine?.sceneComposer;
     const bundleMask = sc?.currentBundle?.masks?.find?.(m => (m?.id === 'outdoors' || m?.type === 'outdoors'))?.texture ?? null;

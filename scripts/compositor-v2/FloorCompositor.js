@@ -3107,6 +3107,23 @@ export class FloorCompositor {
     // sprite visibility can leak upper-floor art if other paths render sprites.
     this._enforceTileSpriteVisibilityForActiveFloor(floorStack);
 
+    // FloorCompositor._activeFloorIndex is normally advanced from
+    // _applyCurrentFloorVisibility(); some level transitions update FloorStack /
+    // compositor bands first (hooks, Levels navigation). When that snapshot
+    // drifts, outdoors sync's signature may match stale state and skip
+    // setOutdoorsMask(...) — consumers keep the wrong band until another
+    // unrelated signature change.
+    try {
+      const fsAf = floorStack?.getActiveFloor?.() ?? null;
+      const stackIdx = Number.isFinite(Number(fsAf?.index)) ? Number(fsAf.index) : null;
+      const prevIdx = this._activeFloorIndex;
+      if (stackIdx !== null && stackIdx !== (prevIdx ?? Number.NaN)) {
+        this._activeFloorIndex = stackIdx;
+        this._lastOutdoorsSignature = null;
+        window.MapShine?.sceneComposer?._sceneMaskCompositor?.syncActiveFloorFromFloorStack?.();
+      }
+    } catch (_) {}
+
     // Outdoors mask consumer sync runs every frame now. The internal binding
     // signature short-circuits when nothing has changed, so this is cheap
     // (string compare + quick lookups). Running unconditionally catches async
@@ -4288,6 +4305,7 @@ export class FloorCompositor {
   _syncOutdoorsMaskConsumers(options = {}) {
     const { context = null, force = false } = options;
     try {
+      const compositor = window.MapShine?.sceneComposer?._sceneMaskCompositor ?? null;
       const resolved = this._resolveOutdoorsMask(context);
       let outdoorsTex = resolved.texture ?? null;
       // Water movement suppression must use a real _Outdoors mask.
@@ -4310,6 +4328,14 @@ export class FloorCompositor {
       }
       const multiFloorScene = floorStackForSync.length > 1;
       const neutralOutdoorsTex = this._getNeutralOutdoorsTexture();
+      let compositorHasFloorMasks = false;
+      try {
+        const cacheSize = Number(compositor?._floorCache?.size ?? 0);
+        const metaSize = Number(compositor?._floorMeta?.size ?? 0);
+        compositorHasFloorMasks = (cacheSize > 0) || (metaSize > 0);
+      } catch (_) {
+        compositorHasFloorMasks = false;
+      }
 
       // Do not clobber a valid outdoors texture with transient null while floor
       // caches are still warming asynchronously. On upper floors, reusing the
@@ -4331,6 +4357,33 @@ export class FloorCompositor {
         ? neutralOutdoorsTex
         : skyOutdoorsTex;
       const skyRoute = skyOutdoorsTex ? (skyResolved.floorKey ?? null) : (skyOutdoorsFinal ? 'neutral' : null);
+
+      // PaintedShadowEffectV2 should gate by the currently viewed floor band only.
+      // Do not reuse sibling/lower-floor outdoors fallbacks from the generic route.
+      let paintedOutdoorsTex = null;
+      let paintedOutdoorsRoute = null;
+      try {
+        if (compositor) {
+          const strictPainted = resolveCompositorOutdoorsTexture(compositor, context, {
+            skipGroundFallback: multiFloorScene,
+            allowBundleFallback: !multiFloorScene || !compositorHasFloorMasks,
+            strictViewedFloorOnly: true,
+          });
+          paintedOutdoorsTex = strictPainted.texture ?? null;
+          paintedOutdoorsRoute = strictPainted.route ?? strictPainted.resolvedKey ?? null;
+        }
+      } catch (_) {
+        paintedOutdoorsTex = null;
+        paintedOutdoorsRoute = null;
+      }
+      if (!paintedOutdoorsTex && multiFloorScene && neutralOutdoorsTex) {
+        paintedOutdoorsTex = neutralOutdoorsTex;
+        paintedOutdoorsRoute = 'neutral';
+      }
+      if (!paintedOutdoorsTex && !multiFloorScene) {
+        paintedOutdoorsTex = outdoorsTex;
+        paintedOutdoorsRoute = mainRoute ? `main:${mainRoute}` : 'main';
+      }
 
       // Water can run in floor-fallback mode (for example only ground has _Water
       // data while viewing an upper floor). In that case, sampling outdoors from
@@ -4439,6 +4492,7 @@ export class FloorCompositor {
         `main:${texId(outdoorsTex)}@${mainRoute || 'none'}`,
         `water:${texId(waterOutdoorsTex)}@${waterOutdoorsRoute || 'none'}#${resolvedWaterFloorIndex ?? 'none'}`,
         `sky:${texId(skyOutdoorsFinal)}@${skyRoute || 'none'}`,
+        `painted:${texId(paintedOutdoorsTex)}@${paintedOutdoorsRoute || 'none'}`,
         `cloud:${cloudPerFloor.map(texId).join('|')}@${cloudFloorIdSupported && cloudAnyPerFloorMask ? 'multi' : 'single'}`,
         `floorId:${texId(cloudFloorIdTex)}`,
         `activeFloor:${this._activeFloorIndex ?? 'none'}`,
@@ -4456,6 +4510,7 @@ export class FloorCompositor {
         main: { route: mainRoute, texture: !!outdoorsTex },
         water: { route: waterOutdoorsRoute, texture: !!waterOutdoorsTex, floorIndex: resolvedWaterFloorIndex },
         sky: { route: skyRoute, texture: !!skyOutdoorsFinal },
+        painted: { route: paintedOutdoorsRoute, texture: !!paintedOutdoorsTex },
         cloud: {
           mode: cloudFloorIdSupported && cloudAnyPerFloorMask ? 'multi' : 'single',
           perFloorPresent: cloudPerFloor.map((t) => !!t),
@@ -4476,7 +4531,7 @@ export class FloorCompositor {
       this._atmosphericFogEffect?.setOutdoorsMask?.(outdoorsTex);
       this._overheadShadowEffect?.setOutdoorsMask?.(outdoorsTex);
       this._buildingShadowEffect?.setOutdoorsMask?.(outdoorsTex);
-      this._paintedShadowEffect?.setOutdoorsMask?.(outdoorsTex);
+      this._paintedShadowEffect?.setOutdoorsMask?.(paintedOutdoorsTex);
 
       // Apply the pre-resolved cloud per-floor bindings. If the visible floor
       // set isn't representable, fall back to legacy single-mask mode.

@@ -1,4 +1,5 @@
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
 const childProcess = require('child_process');
@@ -155,7 +156,7 @@ async function main() {
   const zipPath = path.join(releaseDir, 'module.zip');
   const moduleJsonCopyPath = path.join(releaseDir, 'module.json');
   const checksumsPath = path.join(releaseDir, 'checksums.txt');
-  const stagingDir = path.join(releaseDir, '_staging');
+  const stagingDir = path.join(os.tmpdir(), `map-shine-advanced-release-${crypto.randomBytes(8).toString('hex')}`);
 
   if (await pathExists(releaseDir)) {
     if (!args.force) {
@@ -166,23 +167,31 @@ async function main() {
 
   await ensureDir(stagingDir);
 
-  await fs.promises.copyFile(moduleJsonPath, path.join(stagingDir, 'module.json'));
-  await fs.promises.copyFile(readmePath, path.join(stagingDir, 'README.md'));
-  await copyDir(path.join(repoRoot, 'scripts'), path.join(stagingDir, 'scripts'));
-  await copyDir(path.join(repoRoot, 'styles'), path.join(stagingDir, 'styles'));
-  await copyDir(path.join(repoRoot, 'languages'), path.join(stagingDir, 'languages'));
-  await copyDir(path.join(repoRoot, 'assets'), path.join(stagingDir, 'assets'));
+  try {
+    await fs.promises.copyFile(moduleJsonPath, path.join(stagingDir, 'module.json'));
+    await fs.promises.copyFile(readmePath, path.join(stagingDir, 'README.md'));
+    await copyDir(path.join(repoRoot, 'scripts'), path.join(stagingDir, 'scripts'));
+    await copyDir(path.join(repoRoot, 'styles'), path.join(stagingDir, 'styles'));
+    await copyDir(path.join(repoRoot, 'languages'), path.join(stagingDir, 'languages'));
+    await copyDir(path.join(repoRoot, 'assets'), path.join(stagingDir, 'assets'));
 
-  const compressCmd = `Compress-Archive -Path (Join-Path ${psQuote(stagingDir)} '*') -DestinationPath ${psQuote(zipPath)} -Force`;
-  runPowerShell(compressCmd);
+    await ensureDir(releaseDir);
 
-  await fs.promises.copyFile(moduleJsonPath, moduleJsonCopyPath);
+    const compressCmd = `Compress-Archive -Path (Join-Path ${psQuote(stagingDir)} '*') -DestinationPath ${psQuote(zipPath)} -Force`;
+    runPowerShell(compressCmd);
 
-  const zipHash = sha256File(zipPath);
-  const checksumsText = `sha256  module.zip  ${zipHash}\n`;
-  await fs.promises.writeFile(checksumsPath, checksumsText, 'utf8');
+    await fs.promises.copyFile(moduleJsonPath, moduleJsonCopyPath);
 
-  if (!args.keepStaging) {
+    const zipHash = sha256File(zipPath);
+    const checksumsText = `sha256  module.zip  ${zipHash}\n`;
+    await fs.promises.writeFile(checksumsPath, checksumsText, 'utf8');
+
+    if (args.keepStaging) {
+      const keptPath = path.join(releaseDir, '_staging');
+      await copyDir(stagingDir, keptPath);
+      console.log(`- (staging kept at ${keptPath})`);
+    }
+  } finally {
     await fs.promises.rm(stagingDir, { recursive: true, force: true });
   }
 

@@ -12,7 +12,10 @@
 
 import { createLogger } from '../../core/log.js';
 import { weatherController } from '../../core/WeatherController.js';
-import { resolveCompositorOutdoorsTexture } from '../../masks/resolve-compositor-outdoors.js';
+import { loadAssetBundle, loadTexture } from '../../assets/loader.js';
+import { getViewedLevelBackgroundSrc } from '../../foundry/levels-scene-flags.js';
+import { getMaskTextureManifest, maskTextureManifestMatchesLoadContext } from '../../settings/mask-manifest-flags.js';
+import { collectCompositorFloorCandidateKeys, resolveCompositorFloorMaskTexture, resolveCompositorOutdoorsTexture } from '../../masks/resolve-compositor-outdoors.js';
 
 const log = createLogger('PaintedShadowEffectV2');
 const MAX_PAINTED_SHADOW_EDGE_PX = 3072;
@@ -48,6 +51,16 @@ export class PaintedShadowEffectV2 {
     this._outdoorsMask = null;
     this._dynamicLightOverride = null;
     this._healthDiagnostics = null;
+    /** @type {{ texture:any, resolvedKey:string|null, maskType:string|null, route:string|null, candidateKeysAttempted:string[] }|null} */
+    this._lastPaintGpuResolve = null;
+    /** @type {string|null} */
+    this._lastPaintedSourceSig = null;
+    /** @type {Map<string, import('three').Texture|null>} */
+    this._paintedBundleByBasePath = new Map();
+    /** @type {Set<string>} */
+    this._paintedBundleLoadsInFlight = new Set();
+    /** @type {Map<string, number>} */
+    this._paintedBundleLastAttemptMs = new Map();
   }
 
   static getControlSchema() {
@@ -92,10 +105,49 @@ export class PaintedShadowEffectV2 {
   }
 
   /**
-   * Match BuildingShadowsEffectV2: avoid ground/bundle stand-in _Outdoors on upper floors in multi-floor scenes.
+   * Match {@link FloorCompositor#_resolveOutdoorsMask}: same skipGround /
+   * bundle rules as GpuSceneMaskCompositor resolution (not PaintedShadow-specific
+   * shortcuts). Prefer this over syncing `_outdoorsMask` alone so the viewed band's
+   * _Outdoors tracks live FloorStack + compositor caches even when the sync path skips.
+   * @returns {import('three').Texture|null}
+   * @private
+   */
+  _resolveLiveCompositorOutdoorsTexture() {
+    const compositor = window.MapShine?.sceneComposer?._sceneMaskCompositor ?? null;
+    if (!compositor || typeof compositor.getFloorTexture !== 'function') return null;
+    let floorStackFloors = [];
+    try {
+      floorStackFloors = window.MapShine?.floorStack?.getFloors?.() ?? [];
+    } catch (_) {
+      floorStackFloors = [];
+    }
+    const skipGroundGlobalFallback = floorStackFloors.length > 1;
+    let compositorHasFloorMasks = false;
+    try {
+      const cacheSize = Number(compositor?._floorCache?.size ?? 0);
+      const metaSize = Number(compositor?._floorMeta?.size ?? 0);
+      compositorHasFloorMasks = (cacheSize > 0) || (metaSize > 0);
+    } catch (_) {
+      compositorHasFloorMasks = false;
+    }
+    const allowBundleFallback = !skipGroundGlobalFallback || !compositorHasFloorMasks;
+    const ctx = window.MapShine?.activeLevelContext ?? null;
+    return resolveCompositorOutdoorsTexture(compositor, ctx, {
+      skipGroundFallback: skipGroundGlobalFallback,
+      allowBundleFallback,
+      // Painted shadow should gate by the currently viewed band's outdoors only.
+      // Borrowing sibling/lower-floor outdoors causes stale-looking floor switches.
+      strictViewedFloorOnly: true,
+    }).texture ?? null;
+  }
+
+  /**
+   * Multi-floor scenes must not use scene-global fallback _Shadow (bundle/registry).
+   * If per-floor compositor keys have no painted mask yet, fail closed (null) instead
+   * of latching one global texture across level changes.
    * @returns {boolean}
    */
-  _skipGroundAndBundleFallbackForUpperMultiFloor() {
+  _disableGlobalPaintedFallbackForMultiFloor() {
     let floorStackFloors = [];
     try {
       floorStackFloors = window.MapShine?.floorStack?.getFloors?.() ?? [];
@@ -104,7 +156,164 @@ export class PaintedShadowEffectV2 {
     }
     const af = window.MapShine?.floorStack?.getActiveFloor?.() ?? null;
     const idx = Number(af?.index);
-    return floorStackFloors.length > 1 && Number.isFinite(idx) && idx > 0;
+    return floorStackFloors.length > 1 && Number.isFinite(idx) && idx >= 0;
+  }
+
+  _resolveViewedLevelBasePath() {
+    try {
+      const sc = window.MapShine?.sceneComposer ?? null;
+      const scene = canvas?.scene ?? null;
+      if (!sc || !scene || typeof sc.extractBasePath !== 'function') return null;
+      const viewedSrc = getViewedLevelBackgroundSrc(scene);
+      if (!viewedSrc) return null;
+      const basePath = sc.extractBasePath(viewedSrc);
+      return (typeof basePath === 'string' && basePath.trim()) ? basePath.trim() : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  _resolveViewedLevelShadowProbeInfo() {
+    try {
+      const scene = canvas?.scene ?? null;
+      const viewedSrc = getViewedLevelBackgroundSrc(scene);
+      const ext = (() => {
+        const s = String(viewedSrc || '');
+        const noQuery = s.split('?')[0];
+        const dot = noQuery.lastIndexOf('.');
+        return dot >= 0 ? noQuery.slice(dot + 1).toLowerCase() : 'webp';
+      })();
+      return {
+        viewedSrc: viewedSrc || null,
+        ext: ext || 'webp',
+      };
+    } catch (_) {
+      return { viewedSrc: null, ext: 'webp' };
+    }
+  }
+
+  async _probePaintedShadowTextureForBasePath(basePath) {
+    if (!basePath) return null;
+    const info = this._resolveViewedLevelShadowProbeInfo();
+    // Prefer authoritative scene manifest path for handPaintedShadow when available.
+    try {
+      const scene = canvas?.scene ?? null;
+      const flag = getMaskTextureManifest(scene);
+      const maskSourceSrc = info.viewedSrc ?? null;
+      if (flag && maskTextureManifestMatchesLoadContext(flag, basePath, maskSourceSrc)) {
+        const p = flag?.pathsByMaskId?.handPaintedShadow
+          ?? flag?.pathsByMaskId?.handpaintedshadow
+          ?? null;
+        if (typeof p === 'string' && p.trim()) {
+          const tex = await loadTexture(p.trim(), { suppressProbeErrors: true });
+          if (tex) return tex;
+        }
+      }
+    } catch (_) {}
+
+    const suffixes = ['_Shadow', '_shadow'];
+    const extCandidates = [];
+    const pushExt = (e) => {
+      const s = String(e || '').toLowerCase().replace(/^\./, '');
+      if (!s || extCandidates.includes(s)) return;
+      extCandidates.push(s);
+    };
+    pushExt(info.ext);
+    pushExt('webp');
+    pushExt('png');
+    pushExt('jpg');
+    pushExt('jpeg');
+
+    for (const suffix of suffixes) {
+      for (const ext of extCandidates) {
+        const path = `${basePath}${suffix}.${ext}`;
+        try {
+          const tex = await loadTexture(path, { suppressProbeErrors: true });
+          if (tex) return tex;
+        } catch (_) {}
+      }
+    }
+    return null;
+  }
+
+  _schedulePaintedBundleLoadForBasePath(basePath) {
+    if (!basePath || this._paintedBundleLoadsInFlight.has(basePath)) return;
+    const now = Date.now();
+    const last = Number(this._paintedBundleLastAttemptMs.get(basePath) ?? 0);
+    if (last > 0 && (now - last) < 1200) return;
+    this._paintedBundleLastAttemptMs.set(basePath, now);
+    this._paintedBundleLoadsInFlight.add(basePath);
+    const run = async () => {
+      try {
+        const directTex = await this._probePaintedShadowTextureForBasePath(basePath);
+        if (directTex) {
+          this._paintedBundleByBasePath.set(basePath, directTex);
+          return;
+        }
+        const result = await loadAssetBundle(basePath, null, {
+          skipBaseTexture: true,
+          suppressProbeErrors: true,
+          bypassCache: true,
+          maskIds: ['handPaintedShadow'],
+          allowConventionProbe: true,
+          maskConventionFallback: 'full',
+        });
+        const masks = result?.bundle?.masks ?? [];
+        const hit = Array.isArray(masks)
+          ? masks.find((m) => {
+            const id = String(m?.id ?? m?.type ?? '').toLowerCase();
+            const suffix = String(m?.suffix ?? '').toLowerCase();
+            return id.includes('shadow') || suffix === '_shadow';
+          })
+          : null;
+        this._paintedBundleByBasePath.set(basePath, hit?.texture ?? null);
+      } catch (_) {
+        this._paintedBundleByBasePath.set(basePath, null);
+      } finally {
+        this._paintedBundleLoadsInFlight.delete(basePath);
+      }
+    };
+    void run();
+  }
+
+  /**
+   * Some scenes author `_Shadow` only as a scene-global bundle mask (no per-floor
+   * compositor entries). In that case we must allow bundle fallback even on multi-floor
+   * maps, otherwise painted shadow disappears entirely.
+   * @param {any} compositor
+   * @returns {boolean}
+   * @private
+   */
+  _hasAnyPerFloorPaintedShadow(compositor) {
+    if (!compositor) return false;
+    const ids = new Set(['handpaintedshadow', 'paintedshadow', 'shadow']);
+    const isPainted = (m) => {
+      const id = String(m?.id ?? '').toLowerCase();
+      const type = String(m?.type ?? '').toLowerCase();
+      const suffix = String(m?.suffix ?? '').toLowerCase();
+      return ids.has(id) || ids.has(type) || suffix === '_shadow';
+    };
+    try {
+      if (compositor?._floorCache && typeof compositor._floorCache.entries === 'function') {
+        for (const [, maskMap] of compositor._floorCache.entries()) {
+          if (!maskMap || typeof maskMap.get !== 'function') continue;
+          const a = maskMap.get('handPaintedShadow');
+          const b = maskMap.get('paintedShadow');
+          const c = maskMap.get('shadow');
+          if (a?.texture || b?.texture || c?.texture) return true;
+        }
+      }
+    } catch (_) {}
+    try {
+      if (compositor?._floorMeta && typeof compositor._floorMeta.values === 'function') {
+        for (const meta of compositor._floorMeta.values()) {
+          const masks = meta?.masks;
+          if (!Array.isArray(masks)) continue;
+          if (masks.some((m) => isPainted(m) && !!m?.texture)) return true;
+        }
+      }
+    } catch (_) {}
+    return false;
   }
 
   getHealthDiagnostics() {
@@ -296,9 +505,17 @@ export class PaintedShadowEffectV2 {
     this._scene.add(this._quad);
   }
 
+  /**
+   * Resolves GpuSceneMaskCompositor / bundle _Shadow inputs using the same floor-key
+   * discovery order as `_Outdoors`. Stores the last Gpu resolve on `_lastPaintGpuResolve`
+   * for diagnostics / band-change detection.
+   * @returns {import('three').Texture|null}
+   */
   _resolvePaintedShadowTexture() {
     const compositor = window.MapShine?.sceneComposer?._sceneMaskCompositor ?? null;
+    this._lastPaintGpuResolve = null;
     if (!compositor) return null;
+
     const maskAliases = ['handPaintedShadow', 'paintedShadow', 'shadow'];
     const isPaintedMaskEntry = (m) => {
       const id = String(m?.id ?? '').toLowerCase();
@@ -306,28 +523,40 @@ export class PaintedShadowEffectV2 {
       const suffix = String(m?.suffix ?? '').toLowerCase();
       return maskAliases.some((a) => id === a.toLowerCase() || type === a.toLowerCase()) || suffix === '_shadow';
     };
-    const getFloorMask = (floorKey) => {
-      if (!floorKey) return null;
-      for (const alias of maskAliases) {
-        const tex = compositor.getFloorTexture?.(String(floorKey), alias) ?? null;
-        if (tex) return tex;
-      }
+
+    const lvlCtx = window.MapShine?.activeLevelContext ?? null;
+    const gpu = resolveCompositorFloorMaskTexture(compositor, maskAliases, lvlCtx);
+    this._lastPaintGpuResolve = gpu;
+    if (gpu.texture) return gpu.texture;
+
+    const ckCollected = collectCompositorFloorCandidateKeys(compositor, lvlCtx);
+    const metaFloorKeys = [
+      ...new Set([...(gpu.candidateKeysAttempted ?? []), gpu.resolvedKey, ckCollected.ctxBandKey].filter(Boolean)),
+    ];
+    for (const floorKey of metaFloorKeys) {
       const metaMasks = compositor?._floorMeta?.get?.(String(floorKey))?.masks ?? null;
-      if (Array.isArray(metaMasks)) {
-        const hit = metaMasks.find((m) => isPaintedMaskEntry(m) && !!m?.texture);
-        if (hit?.texture) return hit.texture;
-      }
-      return null;
-    };
-    const activeKey = window.MapShine?.floorStack?.getActiveFloor?.()?.compositorKey ?? null;
-    if (activeKey) {
-      const tex = getFloorMask(activeKey);
-      if (tex) return tex;
+      if (!Array.isArray(metaMasks)) continue;
+      const hit = metaMasks.find((m) => isPaintedMaskEntry(m) && !!m?.texture);
+      if (hit?.texture) return hit.texture;
     }
-    const activeFloorKey = compositor?._activeFloorKey ?? null;
-    if (activeFloorKey) {
-      const tex = getFloorMask(activeFloorKey);
-      if (tex) return tex;
+
+    const disableGlobalFallback = this._disableGlobalPaintedFallbackForMultiFloor();
+    const hasPerFloorPainted = this._hasAnyPerFloorPaintedShadow(compositor);
+    if (disableGlobalFallback && hasPerFloorPainted) {
+      return null;
+    }
+
+    const viewedBasePath = this._resolveViewedLevelBasePath();
+    if (viewedBasePath) {
+      const cachedViewed = this._paintedBundleByBasePath.get(viewedBasePath);
+      if (!this._paintedBundleByBasePath.has(viewedBasePath) || cachedViewed == null) {
+        this._schedulePaintedBundleLoadForBasePath(viewedBasePath);
+      }
+      const viewedBundleTex = cachedViewed ?? null;
+      if (viewedBundleTex) return viewedBundleTex;
+      // In multi-floor scenes, avoid stale global currentBundle fallback while
+      // async load for the viewed basePath is in flight.
+      if (disableGlobalFallback) return null;
     }
     const bundleTex = window.MapShine?.sceneComposer?.currentBundle?.masks?.find?.(
       (m) => isPaintedMaskEntry(m) && !!m?.texture
@@ -431,14 +660,8 @@ export class PaintedShadowEffectV2 {
     if (!this.params.enabled || !this._projectMaterial || !this._invertMaterial || !this._quad || !this._scene || !this._camera) return;
     const paintedTex = this._resolvePaintedShadowTexture();
     const compositor = window.MapShine?.sceneComposer?._sceneMaskCompositor ?? null;
-    const strictUpper = this._skipGroundAndBundleFallbackForUpperMultiFloor();
-    let outdoorsTex = this._outdoorsMask ?? null;
-    if (!outdoorsTex) {
-      outdoorsTex = resolveCompositorOutdoorsTexture(compositor, window.MapShine?.activeLevelContext ?? null, {
-        skipGroundFallback: strictUpper,
-        allowBundleFallback: !strictUpper,
-      }).texture ?? null;
-    }
+    const liveOutdoor = compositor ? this._resolveLiveCompositorOutdoorsTexture() : null;
+    let outdoorsTex = liveOutdoor ?? this._outdoorsMask ?? null;
     if (!paintedTex || !outdoorsTex) {
       if (!outdoorsTex && !this._loggedMissingOutdoorsMask) {
         this._loggedMissingOutdoorsMask = true;
@@ -454,9 +677,29 @@ export class PaintedShadowEffectV2 {
         note: 'Missing painted or outdoors mask',
       };
       this._clearShadowTargetToWhite(renderer);
+      this._lastPaintedSourceSig = null;
       return;
     }
     this._loggedMissingOutdoorsMask = false;
+
+    let cacheVersion = 0;
+    try {
+      cacheVersion = Number(window?.MapShine?.sceneComposer?._sceneMaskCompositor?.getFloorCacheVersion?.() ?? 0);
+    } catch (_) {}
+    const gpg = this._lastPaintGpuResolve;
+    const bandSig = [
+      gpg?.route ?? '',
+      gpg?.resolvedKey ?? '',
+      gpg?.maskType ?? '',
+      paintedTex?.uuid ?? '',
+      outdoorsTex?.uuid ?? '',
+      cacheVersion,
+    ].join('|');
+    if (this._lastPaintedSourceSig != null && this._lastPaintedSourceSig !== bandSig && renderer) {
+      this._clearShadowTargetToWhite(renderer);
+    }
+    this._lastPaintedSourceSig = bandSig;
+
     if (!this._ensureTargets(renderer, paintedTex)) {
       this._clearShadowTargetToWhite(renderer);
       return;
@@ -568,5 +811,10 @@ export class PaintedShadowEffectV2 {
     this._camera = null;
     this.renderer = null;
     this._outdoorsMask = null;
+    this._lastPaintGpuResolve = null;
+    this._lastPaintedSourceSig = null;
+    this._paintedBundleByBasePath.clear();
+    this._paintedBundleLoadsInFlight.clear();
+    this._paintedBundleLastAttemptMs.clear();
   }
 }

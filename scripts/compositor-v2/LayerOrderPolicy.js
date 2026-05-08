@@ -50,6 +50,13 @@ export const ROLE_OFFSETS = Object.freeze({
 /** Maximum intra-role offset callers may use before bleeding into the next band. */
 export const MAX_INTRA_ROLE_OFFSET = BAND_SIZE - 1; // 2399
 
+/**
+ * Fractional renderOrder stride for overlays that interleave immediately after
+ * their source tile. Three.js accepts non-integer renderOrder values; using the
+ * fractional space avoids colliding with the next tile's integer sort slot.
+ */
+const STACKED_OVERLAY_FRACTIONAL_STEP = 0.01;
+
 // ── Convenience aliases that effects / bus code can import directly ──────────
 
 export const FLOOR_ALBEDO_OFFSET      = ROLE_OFFSETS.FLOOR_ALBEDO;
@@ -153,7 +160,7 @@ export function motionAboveTokensOrder(floorIndex, intraOffset = 0) {
  *
  * @param {number} tileRenderOrder - the base tile or background plane `renderOrder`
  * @param {number} floorIndex
- * @param {number} [delta=1] - slots after the base mesh (multiple overlays on one tile)
+ * @param {number} [delta=1] - fractional slots after the base mesh (multiple overlays on one tile)
  * @returns {number}
  */
 export function tileStackedOverlayOrder(tileRenderOrder, floorIndex, delta = 1) {
@@ -161,24 +168,26 @@ export function tileStackedOverlayOrder(tileRenderOrder, floorIndex, delta = 1) 
   const floorBase = fi * RENDER_ORDER_PER_FLOOR;
   const localOrder = tileRenderOrder - floorBase;
   const d = Math.max(1, Math.round(Number(delta) || 1));
+  const overlayOffset = Math.min(0.99, d * STACKED_OVERLAY_FRACTIONAL_STEP);
 
   // Motion-above-tokens (foreground / above-token tiles)
   if (localOrder >= ROLE_OFFSETS.FLOOR_MOTION_TOP) {
     const intra = localOrder - ROLE_OFFSETS.FLOOR_MOTION_TOP;
-    const next = Math.max(0, Math.min(MAX_INTRA_ROLE_OFFSET, intra + d));
+    const maxMotionLocal = RENDER_ORDER_PER_FLOOR - ROLE_OFFSETS.FLOOR_MOTION_TOP - overlayOffset;
+    const next = Math.max(0, Math.min(maxMotionLocal, intra + overlayOffset));
     return floorBase + ROLE_OFFSETS.FLOOR_MOTION_TOP + next;
   }
 
   // Overhead / roof / foreground layer (above ground albedo, below overhead-FX slot reserved for FX)
   if (localOrder >= ROLE_OFFSETS.FLOOR_OVERHEAD) {
     const intra = localOrder - ROLE_OFFSETS.FLOOR_OVERHEAD;
-    const next = Math.max(0, Math.min(MAX_INTRA_ROLE_OFFSET, intra + d));
+    const next = Math.max(0, Math.min(MAX_INTRA_ROLE_OFFSET + overlayOffset, intra + overlayOffset));
     return floorBase + ROLE_OFFSETS.FLOOR_OVERHEAD + next;
   }
 
   // Ground albedo band — includes `__bg_image__` at intra 0 and regular tiles.
   const intra = Math.max(0, localOrder - ROLE_OFFSETS.FLOOR_ALBEDO);
-  const next = Math.max(0, Math.min(MAX_INTRA_ROLE_OFFSET, intra + d));
+  const next = Math.max(0, Math.min(MAX_INTRA_ROLE_OFFSET + overlayOffset, intra + overlayOffset));
   return floorBase + ROLE_OFFSETS.FLOOR_ALBEDO + next;
 }
 

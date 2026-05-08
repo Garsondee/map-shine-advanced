@@ -43,6 +43,12 @@ export class OverheadShadowsEffectV2 {
     /** @type {THREE.WebGLRenderTarget|null} */
     this.roofVisibilityTarget = null; // Runtime roof visibility alpha for LightingEffectV2 suppression
 
+    /** @type {THREE.WebGLRenderTarget|null} */
+    this.rainOcclusionVisibilityTarget = null; // Runtime visibility alpha used by weather masking
+
+    /** @type {THREE.WebGLRenderTarget|null} */
+    this.rainOcclusionBlockTarget = null; // Forced-opaque blocker alpha used by weather masking
+
     /**
      * Half-res packed ceiling light transmittance T in R (1 = lights pass, 0 = blocked).
      * Derived from roofVisibility + roofBlock with the same thresholds as LightingEffectV2
@@ -191,6 +197,9 @@ export class OverheadShadowsEffectV2 {
     /** @type {THREE.Texture|null} */
     this._dynamicLightTexture = null;
     this._dynamicLightOverrideStrength = 0.7;
+    this._treeRainMaskProbeLastKey = '';
+    this._treeRainMaskProbeLastTs = 0;
+    this._treeRainDebugHeartbeatLastTs = 0;
   }
 
   /**
@@ -201,6 +210,62 @@ export class OverheadShadowsEffectV2 {
     this._dynamicLightOverrideStrength = Number.isFinite(Number(payload?.strength))
       ? Math.max(0.0, Math.min(1.0, Number(payload.strength)))
       : 0.7;
+  }
+
+  /**
+   * Debug: tree / rain occlusion capture. Enable any of:
+   * - `window.MapShine.debugTreeRainMaskProbe = true` (or 1 / "true")
+   * - `globalThis.__MSA_DEBUG_TREE_RAIN_MASK__ = true`
+   * @returns {boolean}
+   * @private
+   */
+  _isTreeRainMaskDebugEnabled() {
+    try {
+      const g = typeof globalThis !== 'undefined' ? globalThis : window;
+      if (g.__MSA_DEBUG_TREE_RAIN_MASK__ === true) return true;
+      const v = g.MapShine?.debugTreeRainMaskProbe;
+      if (v === true || v === 1) return true;
+      if (typeof v === 'string' && v.toLowerCase() === 'true') return true;
+      return false;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /**
+   * Throttled proof that `render()` is running (helps when payload probe never fired).
+   * @private
+   */
+  _treeRainMaskDebugHeartbeat() {
+    if (!this._isTreeRainMaskDebugEnabled()) return;
+    const now = (typeof performance !== 'undefined' && performance?.now) ? performance.now() : Date.now();
+    if (now - this._treeRainDebugHeartbeatLastTs < 2000) return;
+    this._treeRainDebugHeartbeatLastTs = now;
+    try {
+      console.log('[MSA][TreeRainMaskProbe] overhead render tick', {
+        paramsEnabled: !!this.params?.enabled,
+        hasRoofBlockTarget: !!this.roofBlockTarget,
+        hasRainOcclusionVis: !!this.rainOcclusionVisibilityTarget,
+        hasMaterial: !!this.material,
+        hasMainScene: !!this.mainScene,
+        hasShadowScene: !!this.shadowScene,
+      });
+    } catch (_) {}
+  }
+
+  _emitTreeRainMaskProbe(payload) {
+    if (!this._isTreeRainMaskDebugEnabled()) return;
+    const now = (typeof performance !== 'undefined' && performance?.now) ? performance.now() : Date.now();
+    let key;
+    try {
+      key = JSON.stringify(payload);
+    } catch (_) {
+      key = String(payload);
+    }
+    if (key === this._treeRainMaskProbeLastKey && (now - this._treeRainMaskProbeLastTs) < 400) return;
+    this._treeRainMaskProbeLastKey = key;
+    this._treeRainMaskProbeLastTs = now;
+    try { console.log('[MSA][TreeRainMaskProbe]', payload); } catch (_) {}
   }
 
   /**
@@ -699,6 +764,24 @@ export class OverheadShadowsEffectV2 {
    */
   get roofBlockTexture() {
     return this.roofBlockTarget?.texture || null;
+  }
+
+  /**
+   * Runtime weather occlusion visibility texture (screen-space alpha).
+   * Includes overhead/trees with live fade for precipitation masking.
+   * @returns {THREE.Texture|null}
+   */
+  get rainOcclusionVisibilityTexture() {
+    return this.rainOcclusionVisibilityTarget?.texture || null;
+  }
+
+  /**
+   * Runtime weather occlusion blocker texture (screen-space alpha).
+   * Includes overhead/trees forced fully visible for precipitation masking.
+   * @returns {THREE.Texture|null}
+   */
+  get rainOcclusionBlockTexture() {
+    return this.rainOcclusionBlockTarget?.texture || null;
   }
 
   /**
@@ -2078,6 +2161,28 @@ export class OverheadShadowsEffectV2 {
       this.roofVisibilityTarget.setSize(width, height);
     }
 
+    if (!this.rainOcclusionVisibilityTarget) {
+      this.rainOcclusionVisibilityTarget = new THREE.WebGLRenderTarget(width, height, {
+        minFilter: THREE.LinearFilter,
+        magFilter: THREE.LinearFilter,
+        format: THREE.RGBAFormat,
+        type: THREE.UnsignedByteType
+      });
+    } else {
+      this.rainOcclusionVisibilityTarget.setSize(width, height);
+    }
+
+    if (!this.rainOcclusionBlockTarget) {
+      this.rainOcclusionBlockTarget = new THREE.WebGLRenderTarget(width, height, {
+        minFilter: THREE.LinearFilter,
+        magFilter: THREE.LinearFilter,
+        format: THREE.RGBAFormat,
+        type: THREE.UnsignedByteType
+      });
+    } else {
+      this.rainOcclusionBlockTarget.setSize(width, height);
+    }
+
     const ctW = Math.max(1, Math.floor(width / 2));
     const ctH = Math.max(1, Math.floor(height / 2));
     if (!this.ceilingTransmittanceTarget) {
@@ -2594,12 +2699,24 @@ export class OverheadShadowsEffectV2 {
     // If not initialized, force a neutral (white) shadow target so
     // LightingEffectV2 doesn't multiply the scene to black.
     if (!this.material || !this.mainCamera || !this.mainScene || !this.shadowScene) {
+      if (this._isTreeRainMaskDebugEnabled()) {
+        try {
+          console.warn('[MSA][TreeRainMaskProbe] render early-out (not initialized)', {
+            hasMaterial: !!this.material,
+            hasMainCamera: !!this.mainCamera,
+            hasMainScene: !!this.mainScene,
+            hasShadowScene: !!this.shadowScene,
+          });
+        } catch (_) {}
+      }
       this._clearShadowTargetToWhite(renderer);
       return;
     }
 
     const THREE = window.THREE;
     if (!THREE || !this.mainCamera || !this.mainScene || !this.shadowScene) return;
+
+    this._treeRainMaskDebugHeartbeat();
 
     // Ensure roof target exists and is correctly sized
     // PERFORMANCE: Reuse Vector2 instead of allocating every frame
@@ -2610,6 +2727,8 @@ export class OverheadShadowsEffectV2 {
     if (!this.roofTarget
       || !this.roofBlockTarget
       || !this.roofVisibilityTarget
+      || !this.rainOcclusionVisibilityTarget
+      || !this.rainOcclusionBlockTarget
       || !this.ceilingTransmittanceTarget
       || !this.shadowTarget
       || !this.fluidRoofTarget
@@ -2618,7 +2737,9 @@ export class OverheadShadowsEffectV2 {
       || !this.tileReceiverAlphaTarget
       || !this.tileReceiverSortTarget) {
       this.onResize(size.x, size.y);
-    } else if (this.roofTarget.width !== size.x || this.roofTarget.height !== size.y) {
+    } else if (this.roofTarget.width !== size.x || this.roofTarget.height !== size.y
+      || this.rainOcclusionVisibilityTarget.width !== size.x
+      || this.rainOcclusionVisibilityTarget.height !== size.y) {
       this.onResize(size.x, size.y);
     }
 
@@ -2663,18 +2784,56 @@ export class OverheadShadowsEffectV2 {
     // projection has real off-screen source coverage at viewport edges.
     const roofCaptureScale = Math.max(guardScaleX, guardScaleY);
 
-    const INCLUDE_TREE_CANOPY_IN_WEATHER_ROOF_CAPTURES = false;
+    const INCLUDE_TREE_CANOPY_IN_WEATHER_ROOF_CAPTURES = true;
+    const treeProbe = {
+      includeTreeCapture: INCLUDE_TREE_CANOPY_IN_WEATHER_ROOF_CAPTURES,
+      treeSeen: 0,
+      treeWeatherLayerEnabled: 0,
+      treeForcedVisibleForCapture: 0,
+      roofTargetTreeParticipants: 0,
+      roofTargetHoverFadeAvg: null,
+      roofTargetHoverFadeMin: null,
+      roofTargetHoverFadeMax: null,
+      roofBlockTreeParticipants: 0,
+      roofBlockHoverFadeBeforeAvg: null,
+      roofBlockHoverFadeForcedCount: 0,
+      roofVisibilityTexture: this.roofVisibilityTarget?.texture?.uuid ?? null,
+      roofBlockTexture: this.roofBlockTarget?.texture?.uuid ?? null
+    };
     const treeCaptureOverrides = [];
+    const treeMaskCaptureUniformOverrides = [];
+    const pushTreeUniformOverride = (uniforms, key, value) => {
+      const u = uniforms?.[key];
+      if (!u || typeof u.value !== 'number') return;
+      treeMaskCaptureUniformOverrides.push({ uniform: u, value: u.value });
+      u.value = value;
+    };
     if (INCLUDE_TREE_CANOPY_IN_WEATHER_ROOF_CAPTURES) {
       this.mainScene.traverse((object) => {
         if (!object?.userData?.mapShineTreeTileId || !object.layers) return;
+        treeProbe.treeSeen += 1;
+        if ((object.layers.mask & (1 << WEATHER_ROOF_LAYER)) !== 0) {
+          treeProbe.treeWeatherLayerEnabled += 1;
+        }
         treeCaptureOverrides.push({
           object,
           layersMask: object.layers.mask,
           visible: typeof object.visible === 'boolean' ? object.visible : undefined
         });
         object.layers.enable(WEATHER_ROOF_LAYER);
-        if (typeof object.visible === 'boolean') object.visible = true;
+        if (typeof object.visible === 'boolean') {
+          if (!object.visible) treeProbe.treeForcedVisibleForCapture += 1;
+          object.visible = true;
+        }
+        // Tree canopy shaders also consume roof/block maps for their own visual
+        // output. During roof-map capture, disable that self-masking feedback so
+        // tree silhouettes contribute deterministically like roof sprites.
+        const uniforms = object?.material?.uniforms;
+        if (uniforms) {
+          pushTreeUniformOverride(uniforms, 'uRoofRainHardBlockEnabled', 0.0);
+          pushTreeUniformOverride(uniforms, 'uHasRoofAlphaMap', 0.0);
+          pushTreeUniformOverride(uniforms, 'uHasRoofBlockMap', 0.0);
+        }
       });
     }
 
@@ -2736,6 +2895,7 @@ export class OverheadShadowsEffectV2 {
         const disabledTreeBlockerUniformOverrides = [];
         this.mainScene.traverse((object) => {
           if (!object?.userData?.mapShineTreeTileId) return;
+          treeProbe.roofBlockTreeParticipants += 1;
           const uniforms = object?.material?.uniforms;
           if (!uniforms) return;
           if (uniforms.uHoverFade && typeof uniforms.uHoverFade.value === 'number') {
@@ -2775,8 +2935,10 @@ export class OverheadShadowsEffectV2 {
         renderer.clear();
         renderer.render(this.mainScene, this.mainCamera);
 
-        this._renderCeilingTransmittancePass(renderer);
-
+        // Rain occlusion visibility must see live tree/roof fade (uHoverFade, tile
+        // opacity). The roof-block pass above forces full opacity for rb; restore
+        // those overrides *before* _renderRainOcclusionTargets so rv matches the
+        // screen (enabled path does the same via treeBlockerUniformOverrides finally).
         for (const entry of disabledTreeBlockerUniformOverrides) {
           if (entry?.uniform) entry.uniform.value = entry.value;
         }
@@ -2786,11 +2948,25 @@ export class OverheadShadowsEffectV2 {
         for (const entry of disabledBlockerOpacityOverrides) {
           if (entry?.object?.material) entry.object.material.opacity = entry.opacity;
         }
+
+        this._renderRainOcclusionTargets(renderer, roofCaptureMaskBits, ROOF_LAYER, WEATHER_ROOF_LAYER);
+        this._emitTreeRainMaskProbe({
+          ...treeProbe,
+          path: 'overhead-disabled-roofBlock',
+          disabledPathRestoredBeforeRainOcclusion: true,
+        });
+
+        this._renderCeilingTransmittancePass(renderer);
+      } else {
+        this._emitTreeRainMaskProbe({ ...treeProbe, path: 'overhead-disabled-no-roofBlock', warn: 'roofBlockTarget missing' });
       }
       for (const entry of treeCaptureOverrides) {
         if (!entry?.object) continue;
         if (entry.object.layers) entry.object.layers.mask = entry.layersMask;
         if (typeof entry.visible === 'boolean') entry.object.visible = entry.visible;
+      }
+      for (const entry of treeMaskCaptureUniformOverrides) {
+        if (entry?.uniform) entry.uniform.value = entry.value;
       }
       this.mainCamera.layers.mask = previousLayersMask;
       this._clearShadowTargetToWhite(renderer);
@@ -2919,14 +3095,19 @@ export class OverheadShadowsEffectV2 {
           }
           return;
         }
-        // Tree canopies should contribute to weather blocker/visibility captures,
-        // but not to the roof shadow caster pass (prevents dark canopy underside regression).
+        // Keep tree canopies in roof visibility/block captures so weather masking
+        // follows tree hover-fade exactly like overhead roof sprites.
         if (object?.userData?.mapShineTreeTileId) {
-          if (typeof object.visible === 'boolean') {
-            roofCasterTreeVisibilityOverrides.push({ object, visible: object.visible });
-            object.visible = false;
+          const hf = Number(object?.material?.uniforms?.uHoverFade?.value);
+          treeProbe.roofTargetTreeParticipants += 1;
+          if (Number.isFinite(hf)) {
+            const count = treeProbe.roofTargetTreeParticipants;
+            treeProbe.roofTargetHoverFadeAvg = (treeProbe.roofTargetHoverFadeAvg == null)
+              ? hf
+              : (treeProbe.roofTargetHoverFadeAvg * ((count - 1) / count) + hf / count);
+            treeProbe.roofTargetHoverFadeMin = (treeProbe.roofTargetHoverFadeMin == null) ? hf : Math.min(treeProbe.roofTargetHoverFadeMin, hf);
+            treeProbe.roofTargetHoverFadeMax = (treeProbe.roofTargetHoverFadeMax == null) ? hf : Math.max(treeProbe.roofTargetHoverFadeMax, hf);
           }
-          return;
         }
 
         // Hover-reveal can temporarily hide/fade roof renderables. For the roof mask
@@ -2980,8 +3161,21 @@ export class OverheadShadowsEffectV2 {
     const treeBlockerUniformOverrides = [];
     this.mainScene.traverse((object) => {
       if (!object?.userData?.mapShineTreeTileId) return;
+      treeProbe.roofBlockTreeParticipants += 1;
       const uniforms = object?.material?.uniforms;
       if (!uniforms) return;
+      const hfBefore = Number(uniforms.uHoverFade?.value);
+      if (Number.isFinite(hfBefore)) {
+        const count = treeProbe.roofBlockTreeParticipants;
+        treeProbe.roofBlockHoverFadeBeforeAvg = (treeProbe.roofBlockHoverFadeBeforeAvg == null)
+          ? hfBefore
+          : (treeProbe.roofBlockHoverFadeBeforeAvg * ((count - 1) / count) + hfBefore / count);
+      }
+      if (uniforms.uHoverFade && typeof uniforms.uHoverFade.value === 'number') {
+        treeBlockerUniformOverrides.push({ uniform: uniforms.uHoverFade, value: uniforms.uHoverFade.value });
+        uniforms.uHoverFade.value = 1.0;
+        treeProbe.roofBlockHoverFadeForcedCount += 1;
+      }
       if (uniforms.uShadowOpacity && typeof uniforms.uShadowOpacity.value === 'number') {
         treeBlockerUniformOverrides.push({ uniform: uniforms.uShadowOpacity, value: uniforms.uShadowOpacity.value });
         uniforms.uShadowOpacity.value = 0.0;
@@ -3019,6 +3213,8 @@ export class OverheadShadowsEffectV2 {
         if (entry?.uniform) entry.uniform.value = entry.value;
       }
     }
+    this._renderRainOcclusionTargets(renderer, roofCaptureMaskBits, ROOF_LAYER, WEATHER_ROOF_LAYER);
+    this._emitTreeRainMaskProbe({ ...treeProbe, path: 'overhead-enabled' });
 
     this._renderCeilingTransmittancePass(renderer);
 
@@ -3246,8 +3442,113 @@ export class OverheadShadowsEffectV2 {
       if (entry.object.layers) entry.object.layers.mask = entry.layersMask;
       if (typeof entry.visible === 'boolean') entry.object.visible = entry.visible;
     }
+    for (const entry of treeMaskCaptureUniformOverrides) {
+      if (entry?.uniform) entry.uniform.value = entry.value;
+    }
     // Restore previous render target
     renderer.setRenderTarget(previousTarget);
+  }
+
+  /**
+   * Render dedicated weather occlusion maps used by precipitation masking.
+   * Captures runtime visibility and forced-opaque blockers for overhead + trees.
+   * @private
+   */
+  _renderRainOcclusionTargets(renderer, roofCaptureMaskBits, roofLayer, weatherRoofLayer) {
+    if (!renderer || !this.mainScene || !this.mainCamera
+      || !this.rainOcclusionVisibilityTarget || !this.rainOcclusionBlockTarget) return;
+
+    const overrides = [];
+    const visUniformOverrides = [];
+    const blockUniformOverrides = [];
+    const pushUniform = (list, uniforms, key, value) => {
+      const u = uniforms?.[key];
+      if (!u || typeof u.value !== 'number') return;
+      list.push({ uniform: u, value: u.value });
+      u.value = value;
+    };
+
+    this.mainScene.traverse((object) => {
+      if (!object?.layers || !object?.material) return;
+      if ((object.layers.mask & roofCaptureMaskBits) === 0) return;
+      const isFluidOverlay = !!(object.material?.uniforms?.tFluidMask);
+      if (typeof object.visible === 'boolean') {
+        overrides.push({ object, visible: object.visible });
+        object.visible = !isFluidOverlay;
+      }
+      if (isFluidOverlay) return;
+
+      const mat = object.material;
+      if (typeof mat.opacity === 'number') {
+        visUniformOverrides.push({ object: mat, key: 'opacity', value: mat.opacity });
+      }
+      const uniforms = mat?.uniforms;
+      if (!uniforms) return;
+
+      // Keep tree silhouettes deterministic for capture and prevent recursive roof-map feedback.
+      if (object?.userData?.mapShineTreeTileId) {
+        pushUniform(visUniformOverrides, uniforms, 'uShadowOpacity', 0.0);
+        pushUniform(visUniformOverrides, uniforms, 'uWindSpeedGlobal', 0.0);
+        pushUniform(visUniformOverrides, uniforms, 'uAmbientMotion', 0.0);
+        pushUniform(visUniformOverrides, uniforms, 'uBranchBend', 0.0);
+        pushUniform(visUniformOverrides, uniforms, 'uFlutterIntensity', 0.0);
+        pushUniform(visUniformOverrides, uniforms, 'uTurbulence', 0.0);
+        pushUniform(visUniformOverrides, uniforms, 'uRoofRainHardBlockEnabled', 0.0);
+        pushUniform(visUniformOverrides, uniforms, 'uHasRoofAlphaMap', 0.0);
+        pushUniform(visUniformOverrides, uniforms, 'uHasRoofBlockMap', 0.0);
+      }
+    });
+
+    const prevMask = this.mainCamera.layers.mask;
+    this.mainCamera.layers.set(roofLayer);
+    this.mainCamera.layers.enable(weatherRoofLayer);
+
+    renderer.setRenderTarget(this.rainOcclusionVisibilityTarget);
+    renderer.setClearColor(0x000000, 0);
+    renderer.clear();
+    renderer.render(this.mainScene, this.mainCamera);
+
+    // Blocker pass: force opacity/fade to full so hiddenBlock can engage while fading.
+    for (const entry of visUniformOverrides) {
+      if (entry?.object && entry.key === 'opacity') entry.object.opacity = 1.0;
+    }
+    this.mainScene.traverse((object) => {
+      if (!object?.layers || !object?.material) return;
+      if ((object.layers.mask & roofCaptureMaskBits) === 0) return;
+      const isFluidOverlay = !!(object.material?.uniforms?.tFluidMask);
+      if (isFluidOverlay) return;
+      const mat = object.material;
+      const uniforms = mat?.uniforms;
+      if (typeof mat.opacity === 'number') {
+        blockUniformOverrides.push({ object: mat, key: 'opacity', value: mat.opacity });
+        mat.opacity = 1.0;
+      }
+      if (!uniforms) return;
+      pushUniform(blockUniformOverrides, uniforms, 'uOpacity', 1.0);
+      pushUniform(blockUniformOverrides, uniforms, 'uTileOpacity', 1.0);
+      if (object?.userData?.mapShineTreeTileId) {
+        pushUniform(blockUniformOverrides, uniforms, 'uHoverFade', 1.0);
+      }
+    });
+
+    renderer.setRenderTarget(this.rainOcclusionBlockTarget);
+    renderer.setClearColor(0x000000, 0);
+    renderer.clear();
+    renderer.render(this.mainScene, this.mainCamera);
+
+    for (const entry of blockUniformOverrides) {
+      if (entry?.object && entry.key === 'opacity') entry.object.opacity = entry.value;
+      if (entry?.uniform) entry.uniform.value = entry.value;
+    }
+    // Restore visibility-pass uniform edits.
+    for (const entry of visUniformOverrides) {
+      if (entry?.object && entry.key === 'opacity') entry.object.opacity = entry.value;
+      if (entry?.uniform) entry.uniform.value = entry.value;
+    }
+    for (const entry of overrides) {
+      if (entry?.object) entry.object.visible = entry.visible;
+    }
+    this.mainCamera.layers.mask = prevMask;
   }
 
   dispose() {
@@ -3266,6 +3567,14 @@ export class OverheadShadowsEffectV2 {
     if (this.roofVisibilityTarget) {
       this.roofVisibilityTarget.dispose();
       this.roofVisibilityTarget = null;
+    }
+    if (this.rainOcclusionVisibilityTarget) {
+      this.rainOcclusionVisibilityTarget.dispose();
+      this.rainOcclusionVisibilityTarget = null;
+    }
+    if (this.rainOcclusionBlockTarget) {
+      this.rainOcclusionBlockTarget.dispose();
+      this.rainOcclusionBlockTarget = null;
     }
     if (this.ceilingTransmittanceTarget) {
       this.ceilingTransmittanceTarget.dispose();

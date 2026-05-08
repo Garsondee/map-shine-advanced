@@ -7246,11 +7246,13 @@ export class WeatherParticles {
       const mm = window.MapShine?.maskManager;
       const fc = window.MapShine?.floorCompositorV2 ?? window.MapShine?.effectComposer?._floorCompositorV2;
       const ose = fc?._overheadShadowEffect;
-      roofBlockTexture = ose && ose.roofBlockTexture ? ose.roofBlockTexture : null;
-      const oseAlpha = ose && ose.roofAlphaTexture ? ose.roofAlphaTexture : null;
+      const rainOcclusionBlock = ose && ose.rainOcclusionBlockTexture ? ose.rainOcclusionBlockTexture : null;
+      const rainOcclusionAlpha = ose && ose.rainOcclusionVisibilityTexture ? ose.rainOcclusionVisibilityTexture : null;
+      roofBlockTexture = rainOcclusionBlock || (ose && ose.roofBlockTexture ? ose.roofBlockTexture : null);
+      const oseAlpha = rainOcclusionAlpha || (ose && ose.roofAlphaTexture ? ose.roofAlphaTexture : null);
       if (oseAlpha) {
         roofAlphaTexture = oseAlpha;
-        const rt = ose.roofVisibilityTarget;
+        const rt = rainOcclusionAlpha ? ose?.rainOcclusionVisibilityTarget : ose?.roofVisibilityTarget;
         if (rt && rt.width > 0 && rt.height > 0) {
           screenWidth = rt.width;
           screenHeight = rt.height;

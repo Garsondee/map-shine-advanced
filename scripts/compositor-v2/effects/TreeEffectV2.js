@@ -835,6 +835,7 @@ export class TreeEffectV2 {
       this._sharedUniforms.uTint.value = this.params.tint;
 
       this._syncSunDirectionUniform();
+      this._syncRoofMaskUniforms();
     }
 
     const tileManager = window.MapShine?.tileManager;
@@ -1157,7 +1158,47 @@ export class TreeEffectV2 {
       uTint: { value: this.params.tint },
 
       uDeriveAlpha: { value: 0.0 },
+      uRoofAlphaMap: { value: null },
+      uRoofBlockMap: { value: null },
+      uHasRoofAlphaMap: { value: 0.0 },
+      uHasRoofBlockMap: { value: 0.0 },
+      uRoofRainHardBlockEnabled: { value: 0.0 },
+      uScreenSize: { value: new THREE.Vector2(1920, 1080) },
     };
+  }
+
+  _syncRoofMaskUniforms() {
+    if (!this._sharedUniforms) return;
+    let roofAlphaTexture = null;
+    let roofBlockTexture = null;
+    let screenWidth = 1920;
+    let screenHeight = 1080;
+
+    try {
+      const fc = window.MapShine?.floorCompositorV2 ?? window.MapShine?.effectComposer?._floorCompositorV2;
+      const ose = fc?._overheadShadowEffect;
+      roofBlockTexture = ose?.roofBlockTexture ?? null;
+      const oseAlpha = ose?.roofAlphaTexture ?? null;
+      if (oseAlpha) {
+        roofAlphaTexture = oseAlpha;
+        const rt = ose?.roofVisibilityTarget;
+        if (rt?.width > 0 && rt?.height > 0) {
+          screenWidth = rt.width;
+          screenHeight = rt.height;
+        }
+      }
+    } catch (_) {}
+
+    const hasRoofAlphaMap = !!roofAlphaTexture;
+    const hasRoofBlockMap = !!roofBlockTexture;
+    const roofHardBlockEnabled = hasRoofAlphaMap && hasRoofBlockMap;
+
+    this._sharedUniforms.uRoofAlphaMap.value = roofAlphaTexture;
+    this._sharedUniforms.uRoofBlockMap.value = roofBlockTexture;
+    this._sharedUniforms.uHasRoofAlphaMap.value = hasRoofAlphaMap ? 1.0 : 0.0;
+    this._sharedUniforms.uHasRoofBlockMap.value = hasRoofBlockMap ? 1.0 : 0.0;
+    this._sharedUniforms.uRoofRainHardBlockEnabled.value = roofHardBlockEnabled ? 1.0 : 0.0;
+    this._sharedUniforms.uScreenSize.value.set(screenWidth, screenHeight);
   }
 
   async _probeMask(basePath, suffix) {
@@ -1334,6 +1375,12 @@ export class TreeEffectV2 {
 
         uniform float uDeriveAlpha;
         uniform float uHoverFade;
+        uniform sampler2D uRoofAlphaMap;
+        uniform sampler2D uRoofBlockMap;
+        uniform float uHasRoofAlphaMap;
+        uniform float uHasRoofBlockMap;
+        uniform float uRoofRainHardBlockEnabled;
+        uniform vec2  uScreenSize;
 
         varying vec2 vUv;
         varying vec2 vWorldPos;
@@ -1520,6 +1567,25 @@ export class TreeEffectV2 {
           float mainAlpha = texA * uIntensity;
           float shadowOnlyAlpha = shadowA * (1.0 - clamp(mainAlpha, 0.0, 1.0));
           float finalAlpha = clamp(mainAlpha + shadowOnlyAlpha, 0.0, 1.0);
+
+          // Match weather masking: suppress only when blocker exists and its visible
+          // alpha is hidden/fading (rb * (1-rv)), not while the roof/tree is visible.
+          if (uRoofRainHardBlockEnabled > 0.5) {
+            float rv = 1.0;
+            if (uHasRoofAlphaMap > 0.5) {
+              vec2 screenUv = gl_FragCoord.xy / uScreenSize;
+              rv = clamp(texture2D(uRoofAlphaMap, screenUv).a, 0.0, 1.0);
+            }
+            float rb = rv;
+            if (uHasRoofBlockMap > 0.5) {
+              vec2 screenUvB = gl_FragCoord.xy / uScreenSize;
+              rb = clamp(texture2D(uRoofBlockMap, screenUvB).a, 0.0, 1.0);
+            }
+            float hiddenBlock = rb * (1.0 - rv);
+            hiddenBlock = smoothstep(0.02, 0.28, hiddenBlock);
+            finalAlpha *= (1.0 - hiddenBlock);
+          }
+
           if (finalAlpha <= 0.001) discard;
 
           float ccDelta = abs(uExposure) + abs(uBrightness) + abs(uContrast - 1.0)
@@ -1556,6 +1622,13 @@ export class TreeEffectV2 {
     try {
       // Trees are above-overhead (canopy over rooftops).
       mesh.renderOrder = effectAboveOverheadOrder(floorIndex, 200);
+    } catch (_) {}
+
+    // WEATHER_ROOF_LAYER (21): must match OverheadShadowsEffectV2 roof capture /
+    // rain occlusion passes (camera enables 20+21). Without this, tree meshes are
+    // invisible to those passes unless temporarily patched each frame.
+    try {
+      mesh.layers.enable(21);
     } catch (_) {}
 
     this._renderBus.addEffectOverlay(`${tileId}_tree`, mesh, floorIndex);

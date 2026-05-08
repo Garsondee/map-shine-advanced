@@ -83,9 +83,6 @@ export class WeatherParticlesV2 {
 
     /** One-time debug guard for registration failures */
     this._msLoggedRegistrationFailureOnce = false;
-    /** Warmup orchestration for roof drips */
-    this._roofDripWarmupRequested = false;
-    this._roofDripWarmupBudgetMs = 2.5;
   }
 
   _ensureSystemRegistered(sys, label = '') {
@@ -252,10 +249,6 @@ export class WeatherParticlesV2 {
 
     this._initialized = true;
     log.info('WeatherParticlesV2 initialized (V1 WeatherParticles bridge active)');
-    try {
-      this._weatherParticles?.beginRoofDripWarmup?.('v2-init');
-      this._roofDripWarmupRequested = true;
-    } catch (_) {}
   }
 
   // ── Per-frame update ────────────────────────────────────────────────────────
@@ -349,14 +342,6 @@ export class WeatherParticlesV2 {
     // Keep draw order under overhead for the active viewed floor (same band as fire).
     try { this._refreshWeatherBatchRenderOrder(); } catch (_) {}
 
-    // Start/advance non-blocking drip warmup before precipitation is needed.
-    try {
-      if (this._weatherParticles && !this._roofDripWarmupRequested && boundsVec4) {
-        this._weatherParticles.beginRoofDripWarmup?.('v2-update');
-        this._roofDripWarmupRequested = true;
-      }
-      this._weatherParticles?.stepRoofDripWarmup?.(this._roofDripWarmupBudgetMs);
-    } catch (_) {}
 
     // ── 3. Tick WeatherParticles (emission rates, masking, sizing) ───────
     if (this._weatherParticles) {
@@ -396,11 +381,7 @@ export class WeatherParticlesV2 {
    */
   onFloorChange(_maxFloorIndex) {
     try { this._refreshWeatherBatchRenderOrder(); } catch (_) {}
-    try {
-      this._weatherParticles?.markRoofDripPoolStale?.('floor-change');
-      this._weatherParticles?.beginRoofDripWarmup?.('floor-change');
-      this._roofDripWarmupRequested = true;
-    } catch (_) {}
+    try { this._weatherParticles?.markRoofDripPoolStale?.('floor-change'); } catch (_) {}
   }
 
   /**
@@ -435,11 +416,7 @@ export class WeatherParticlesV2 {
    */
   clearWaterCaches() {
     try { this._weatherParticles?.clearWaterCaches?.(); } catch (_) {}
-    try {
-      this._weatherParticles?.markRoofDripPoolStale?.('cache-clear');
-      this._weatherParticles?.beginRoofDripWarmup?.('cache-clear');
-      this._roofDripWarmupRequested = true;
-    } catch (_) {}
+    try { this._weatherParticles?.markRoofDripPoolStale?.('cache-clear'); } catch (_) {}
   }
 
   // ── Dispose ─────────────────────────────────────────────────────────────────

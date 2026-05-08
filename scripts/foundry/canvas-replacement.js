@@ -1584,6 +1584,9 @@ let _webglContextRestoredHandler = null;
 /** @type {boolean} */
 let fogSaveSafetyPatchInstalled = false;
 
+/** @type {boolean} */
+let wallDoorMeshSafetyPatchInstalled = false;
+
 /** @type {number|null} - Safety net timer ID to force-dismiss stuck overlay after tearDown */
 let _overlayDismissSafetyTimerId = null;
 
@@ -2590,6 +2593,7 @@ export function initialize() {
     // This must wrap an awaited method (Canvas.tearDown) to actually block the teardown.
     installCanvasTransitionWrapper();
     installFogSaveSafetyPatch();
+    installWallDoorMeshSafetyPatch();
 
     // Install draw wrapper so we can detect stalls that occur before drawCanvas/canvasReady.
     // This must be low-impact and should not change behavior beyond logging.
@@ -3713,6 +3717,70 @@ function installFogSaveSafetyPatch() {
   }, 'installFogSaveSafetyPatch', Severity.DEGRADED, { fallback: false });
 
   fogSaveSafetyPatchInstalled = installed === true;
+}
+
+/**
+ * Guard native Wall.createDoorMeshes against transient null wall edges.
+ *
+ * During same-scene level redraws, Foundry can briefly initialize a door mesh
+ * before wall edge data is attached. Native DoorMesh animation then throws on
+ * `this.object.edge`. Skip only that transient state and allow redraw to proceed.
+ */
+function installWallDoorMeshSafetyPatch() {
+  if (wallDoorMeshSafetyPatchInstalled) return;
+
+  const installed = safeCall(() => {
+    const WallCls =
+      globalThis?.CONFIG?.Wall?.objectClass
+      ?? globalThis?.foundry?.canvas?.placeables?.Wall
+      ?? null;
+    const proto = WallCls?.prototype;
+    if (!proto || typeof proto.createDoorMeshes !== 'function') return false;
+    if (proto.createDoorMeshes.__mapShineWallDoorMeshSafeWrapped) return true;
+
+    const original = proto.createDoorMeshes;
+    const wrapped = function mapShineWallCreateDoorMeshesSafe(...args) {
+      const wallEdge = this?.edge ?? this?.object?.edge ?? null;
+      if (!wallEdge?.a || !wallEdge?.b) {
+        try {
+          log.warn('Skipping Wall.createDoorMeshes due to missing wall edge (transient redraw state)', {
+            wallId: this?.document?.id ?? this?.id ?? null,
+            sceneId: canvas?.scene?.id ?? null,
+            sameSceneRedraw: !!window?.MapShine?.__nativeSameSceneRedraw,
+            sameSceneLevelSwitch: !!window?.MapShine?.__nativeSameSceneLevelSwitch,
+          });
+        } catch (_) {}
+        return;
+      }
+
+      try {
+        return original.apply(this, args);
+      } catch (err) {
+        const msg = String(err?.message ?? err ?? '');
+        const stack = String(err?.stack ?? '');
+        const nullEdgeFailure =
+          /Cannot destructure property 'a' of 'this\.object\.edge' as it is null/i.test(msg)
+          || (/DoorMesh\.animateSlide/i.test(stack) && /edge/i.test(msg));
+        if (nullEdgeFailure) {
+          try {
+            log.warn('Suppressed transient native door mesh edge failure during wall draw', {
+              wallId: this?.document?.id ?? this?.id ?? null,
+              message: msg,
+            });
+          } catch (_) {}
+          return;
+        }
+        throw err;
+      }
+    };
+
+    wrapped.__mapShineWallDoorMeshSafeWrapped = true;
+    wrapped.__mapShineWallDoorMeshSafeOriginal = original;
+    proto.createDoorMeshes = wrapped;
+    return true;
+  }, 'installWallDoorMeshSafetyPatch', Severity.DEGRADED, { fallback: false });
+
+  wallDoorMeshSafetyPatchInstalled = installed === true;
 }
 
 function installAmbientSoundAudibilityPatch() {
@@ -6960,44 +7028,16 @@ async function createThreeCanvas(scene, createOptions = {}) {
               const roofDripMap = {
                 roofDripEmissionRainMult: 'emissionRainMult',
                 roofDripEmissionTailMult: 'emissionTailMult',
-                roofDripDebugEmissionMul: 'debugEmissionMul',
-                roofDripGlobalBudget: 'globalPointBudget',
-                roofDripMaxPerTile: 'maxPointsPerTile',
-                roofDripGpuMaxSpawnCap: 'gpuMaxSpawnCap',
-                roofDripAlphaThresholdGpu: 'alphaThresholdGpu',
-                roofDripPointsRefreshSec: 'pointsRefreshSec',
                 roofDripTailDurationSec: 'tailDurationSec',
-                roofDripGravityMul: 'dripGravityMul',
-                roofDripScreenDownZMix: 'screenDownZMix',
-                roofDripWindBase: 'windBase',
-                roofDripWindCoupling: 'windCoupling',
-                roofDripCurlMul: 'curlMul',
-                roofDripSpeedFactor: 'speedFactor',
-                roofDripStreakAnchorHalf: 'streakAnchorHalf',
                 roofDripLifeMin: 'lifeMin',
                 roofDripLifeMax: 'lifeMax',
-                roofDripParticleSpeedMin: 'particleSpeedMin',
-                roofDripParticleSpeedMax: 'particleSpeedMax',
                 roofDripSizeMin: 'sizeMin',
                 roofDripSizeMax: 'sizeMax',
-                roofDripSpawnInwardPull: 'spawnInwardPull',
-                roofDripSpawnUvJitter: 'spawnUvJitter',
-                roofDripEmitterNormalJitter: 'emitterNormalJitter',
-                roofDripEmitterTangentialJitter: 'emitterTangentialJitter',
-                roofDripKillZMargin: 'killZMargin',
-                roofDripTileEdgeSpacing: 'tileRectEdgeSpacing',
-                roofDripTreeEdgeSpacing: 'treeEdgeSpacing',
-                roofDripTreeInteriorSamples: 'treeInteriorSamples',
                 roofDripMaxParticles: 'maxParticles'
               };
               if (paramId === 'roofDripEnabled') {
                 if (!weatherController.roofDripTuning) weatherController.roofDripTuning = {};
                 weatherController.roofDripTuning.enabled = !!value;
-                return;
-              }
-              if (paramId === 'roofDripUseGpuRoofEdges') {
-                if (!weatherController.roofDripTuning) weatherController.roofDripTuning = {};
-                weatherController.roofDripTuning.useGpuRoofDripEdges = !!value;
                 return;
               }
               if (Object.prototype.hasOwnProperty.call(roofDripMap, paramId)) {

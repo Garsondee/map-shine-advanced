@@ -465,13 +465,12 @@ export class FloorRenderBus {
     const prevColor     = renderer.getClearColor(new THREE.Color());
     const prevAlpha     = renderer.getClearAlpha();
 
-    // Save camera layer mask and enable all floor layers + layer 0.
+    // Save camera layer mask and explicitly configure the main-pass layer set.
     // Tokens and tiles are assigned to floor layers (1-19) by FloorLayerManager,
-    // so we must enable those layers to render them. Layer 0 is kept for legacy
-    // compatibility. OVERLAY_THREE_LAYER is rendered in a late pass by
-    // FloorCompositor so UI can bypass post-processing.
+    // so we must render those plus layer 0. Do NOT inherit prior camera masks:
+    // overlay layer 31 is rendered in a dedicated late pass by FloorCompositor.
     const prevLayerMask = camera.layers.mask;
-    camera.layers.enable(0);
+    camera.layers.set(0);
     // Enable all floor layers (1-19) so tokens/tiles assigned to floors are visible.
     for (let i = 1; i <= 19; i++) {
       camera.layers.enable(i);

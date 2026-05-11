@@ -525,3 +525,9 @@ Several gaps stacked together. Almost all of them were the same shape as the RAD
 - **Idle / no qualifying surface** → **`uMsFoundrySurface` stays 0** so roofs do not depend on stale PIXI occlusion state.
 - **Hover-reveal** no longer wipes SURFACE shader holes by forcing full transparency.
 
+### Addendum: Playtest confirmation and how to re-test
+
+- **Confirmed in session** on a real scene with a large roof: behavior matched expectations once the roof tile used the **SURFACE** occlusion bit and **Define Surface** regions with **occlusion** were set up for the under-roof volume; a plain “big overhead tile” without SURFACE does not exercise this mode.
+- **Quick re-test checklist:** (1) Overhead tile has **`SURFACE`** in `occlusion.modes` (and desired `occlusion.alpha`). (2) A **Region** uses **Define Surface** with **Occlusion** enabled where tokens should count as “beneath the surface.” (3) An **occludable** token sits in that relationship to the surface. (4) On the V2 bus, the roof should **fade only where the mask stamps** (region footprint, camera-aligned), not as a full-tile binary wipe unless authored that way.
+- **Optional debug:** `MapShine.debug.probeReplicaOcclusionV2()` — confirm **`hasActiveSurfaceOcclusion`** when under a qualifying surface, **`readBack.aNorm`** dropping where the surface pass stamps, and bus uniforms **`uMsFoundrySurface`** on SURFACE tiles only when the mask is active.
+

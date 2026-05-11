@@ -193,6 +193,23 @@ vec2 ms_tileSurfaceUv() {
 `;
 
 /**
+ * Resolve one `occlusion.modes` entry to a numeric mode bit (v14 may store numeric bits or string keys).
+ * @param {unknown} m
+ * @returns {number}
+ */
+function occlusionModeEntryToBit(m) {
+  const n = Number(m);
+  if (Number.isFinite(n)) return n;
+  if (typeof m !== 'string') return NaN;
+  const M = (typeof CONST !== 'undefined' && CONST.TILE_OCCLUSION_MODES)
+    ? CONST.TILE_OCCLUSION_MODES
+    : null;
+  if (!M) return NaN;
+  const bit = M[m.trim().toUpperCase()];
+  return typeof bit === 'number' ? bit : NaN;
+}
+
+/**
  * Bitmask of Foundry tile occlusion modes (v14 `occlusion.modes` set/array, or legacy `occlusion.mode`).
  * @param {object|null|undefined} tileDoc
  * @returns {number}
@@ -209,26 +226,26 @@ export function getTileOcclusionModeFlags(tileDoc) {
   if (modes != null) {
     if (modes instanceof Set) {
       for (const m of modes) {
-        const v = Number(m);
+        const v = occlusionModeEntryToBit(m);
         if (Number.isFinite(v)) flags |= v;
       }
     } else if (typeof modes.forEach === 'function' && !Array.isArray(modes)) {
       try {
         modes.forEach((m) => {
-          const v = Number(m);
+          const v = occlusionModeEntryToBit(m);
           if (Number.isFinite(v)) flags |= v;
         });
       } catch (_) {
       }
     } else if (Array.isArray(modes)) {
       for (let i = 0; i < modes.length; i++) {
-        const v = Number(modes[i]);
+        const v = occlusionModeEntryToBit(modes[i]);
         if (Number.isFinite(v)) flags |= v;
       }
     } else if (modes && typeof modes[Symbol.iterator] === 'function' && typeof modes !== 'string') {
       try {
         for (const m of modes) {
-          const v = Number(m);
+          const v = occlusionModeEntryToBit(m);
           if (Number.isFinite(v)) flags |= v;
         }
       } catch (_) {
@@ -236,7 +253,7 @@ export function getTileOcclusionModeFlags(tileDoc) {
     }
   }
   if (flags === NONE && o.mode != null) {
-    const v = Number(o.mode);
+    const v = occlusionModeEntryToBit(o.mode);
     if (Number.isFinite(v)) flags |= v;
   }
   return flags;
@@ -432,7 +449,10 @@ function getBusFoundryOcclusionChannelWeights(tileDoc) {
     const placeable = canvas.tiles.get(id);
     const mesh = placeable?.mesh;
     const st = mesh?._occlusionState;
-    if (!st || typeof st.radial !== 'number') return null;
+    // Foundry v14+ may omit non-active channels or use booleans. Do not require
+    // `st.radial` to be a number — that dropped the whole weight struct and forced
+    // uMsFoundryFade to 0, breaking FADE / hover-driven bus occlusion for overhead tiles.
+    if (!st || typeof st !== 'object') return null;
     return {
       fade: Math.max(0, Math.min(1, Number(st.fade) || 0)),
       radial: Math.max(0, Math.min(1, Number(st.radial) || 0)),
@@ -3355,10 +3375,15 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
 
     const dt = timeInfo.delta;
     const canvasTokens = canvas.tokens?.placeables || [];
-    // We care about controlled tokens or the observed token
-    const sources = canvas.tokens?.controlled.length > 0 
-      ? canvas.tokens.controlled 
-      : (canvas.tokens?.observed || []);
+    // FADE / under-roof tests: controlled tokens, else observed (Foundry may give a
+    // single Token — normalize to an array for stable iteration).
+    const rawFadeSources = canvas.tokens?.controlled?.length > 0
+      ? canvas.tokens.controlled
+      : (canvas.tokens?.observed ?? []);
+    const sources = Array.isArray(rawFadeSources)
+      ? rawFadeSources
+      : (rawFadeSources != null ? [rawFadeSources] : []);
+    // Broader list for radial *geometry* fed to the bus (matches Foundry occludables).
     const radialSources = this._getRadialOcclusionTokenSources();
 
     // Hover-hide should mirror tree canopy parity across gameplay + editing when
@@ -3549,9 +3574,35 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
       const hasRadialMode = !!(occFlags & RADIAL_BIT);
       const hasVisionMode = !!(occFlags & VISION_BIT);
       const hasSurfaceMode = !!(occFlags & SURFACE_BIT);
-      // Shader-driven holes (RADIAL / VISION / SURFACE) must keep base opacity so the
-      // mask can carve per-pixel cutouts; full alpha=0 fade would hide them.
-      const keepBaseOpacityForShaderHoles = hasRadialMode || hasVisionMode || hasSurfaceMode;
+      // Full occluder set for replica / bus radial UVs (can include every visible token).
+      const radialCirclesFull = hasRadialMode
+        ? this._collectRadialOcclusionCircles(tileDoc, radialSources)
+        : [];
+      // Sprite-opacity hole gating must follow the same token scope as FADE under-roof
+      // checks (`sources` = controlled or observed only). Using radialSources alone
+      // fell back to all placeables when nothing was controlled, so any token on the
+      // map under the roof kept radialCutoutActive true and blocked hover fade until
+      // the GM selected a token (narrowing the fallback list).
+      const radialCirclesForSpriteOpacity = hasRadialMode
+        ? this._collectRadialOcclusionCircles(tileDoc, sources)
+        : [];
+      const radialOpacityHoleActive = hasRadialMode && radialCirclesForSpriteOpacity.length > 0;
+      const radialCutoutActive = hasRadialMode && radialCirclesFull.length > 0;
+      // VISION/SURFACE: only reserve base sprite opacity when the replica mask is
+      // stamping that channel this frame (same idea as radialOpacityHoleActive).
+      let visionMaskActive = false;
+      let surfaceMaskActive = false;
+      try {
+        const rp = resolveReplicaOcclusionMaskPass();
+        visionMaskActive = typeof rp?.hasActiveVisionSource === 'function'
+          && !!rp.hasActiveVisionSource();
+        surfaceMaskActive = typeof rp?.hasActiveSurfaceOcclusion === 'function'
+          && !!rp.hasActiveSurfaceOcclusion();
+      } catch (_) {
+      }
+      const keepBaseOpacityForShaderHoles = radialOpacityHoleActive
+        || (hasVisionMode && visionMaskActive)
+        || (hasSurfaceMode && surfaceMaskActive);
 
       // Occlusion only triggers when the mouse is hovering over the tile AND a
       // controlled token is underneath — matching Foundry's native behaviour.
@@ -3596,23 +3647,18 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
         }
       }
 
-      // Apply hover-hide (fade to zero alpha when hovered). Radial and Vision
-      // roofs keep base opacity so the shader can carve holes without the sprite
-      // going fully invisible.
+      // Apply hover-hide (fade to zero alpha when hovered). Modes that carve
+      // per-pixel holes keep base opacity only while their mask channel is active.
       if (!skipRoofFade && hoverHidden && !keepBaseOpacityForShaderHoles) {
         targetAlpha = 0;
         anyHoverHidden = true;
       }
 
-      const radialCircles = hasRadialMode
-        ? this._collectRadialOcclusionCircles(tileDoc, radialSources)
-        : [];
-      data._msRadialCircles = radialCircles;
+      data._msRadialCircles = radialCirclesFull;
       data._msRadialMode = hasRadialMode;
-      const radialCutoutActive = hasRadialMode && radialCircles.length > 0;
       try {
         const sh = sprite.material?.userData?._msOverheadCCShader;
-        applyRadialOcclusionUniformsToShader(sh, tileDoc, radialCircles, hasRadialMode);
+        applyRadialOcclusionUniformsToShader(sh, tileDoc, radialCirclesFull, hasRadialMode);
       } catch (_) {
       }
       if (radialCutoutActive) {

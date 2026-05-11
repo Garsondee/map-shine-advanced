@@ -5786,9 +5786,9 @@ async function createThreeCanvas(scene, createOptions = {}) {
     threeCanvas.style.left = '0';
     threeCanvas.style.width = '100%';
     threeCanvas.style.height = '100%';
-    // Above #board (z-index 10). Inline wins over module.css; must not leave Three
-    // under the board or Foundry's opaque clear fills the viewport (grey plate).
-    threeCanvas.style.zIndex = '100';
+    // Above #board (10), strictly below ensureUILayering() (100) so the fullscreen
+    // WebGL layer cannot tie-break on top of Foundry's interface.
+    threeCanvas.style.zIndex = '20';
     threeCanvas.style.pointerEvents = 'auto'; // Three.js handles interaction in gameplay mode
 
     // Inject NEXT to Foundry's canvas (as sibling, not child)
@@ -5917,7 +5917,7 @@ async function createThreeCanvas(scene, createOptions = {}) {
     rendererCanvas.style.left = '0';
     rendererCanvas.style.width = '100%';
     rendererCanvas.style.height = '100%';
-    rendererCanvas.style.zIndex = '100';
+    rendererCanvas.style.zIndex = '20';
     rendererCanvas.style.pointerEvents = 'auto'; // Three.js handles interaction in gameplay mode
     rendererCanvas.style.opacity = '1';
     // Use Foundry's scene background colour so padded region matches core Foundry
@@ -8998,14 +8998,14 @@ function enableSystem() {
   
   // Three.js Canvas: visible and interactive (PRIMARY interaction handler)
   threeCanvas.style.opacity = '1';
-  threeCanvas.style.zIndex = '100';
+  threeCanvas.style.zIndex = '20';
   threeCanvas.style.pointerEvents = 'auto'; // Three.js receives input in Gameplay Mode
   
   // PIXI Canvas: transparent overlay, input controlled by InputRouter
   const pixiCanvas = canvas.app?.view;
   if (pixiCanvas) {
     pixiCanvas.style.opacity = '1'; // Keep visible for overlay layers (drawings, templates, notes)
-    pixiCanvas.style.zIndex = '10'; // Under Three (100); still needed for capture/bridges
+    pixiCanvas.style.zIndex = '10'; // Under Three (20); still needed for capture/bridges
     pixiCanvas.style.pointerEvents = 'none'; // Default to pass-through; InputRouter enables for edit tools
 
     // V2: PIXI should not visually render the scene. Foundry's board canvas
@@ -9352,7 +9352,7 @@ function _enforceGameplayPixiSuppression() {
         threeCanvas.style.display = '';
         threeCanvas.style.visibility = 'visible';
         threeCanvas.style.opacity = '1';
-        threeCanvas.style.zIndex = '100';
+        threeCanvas.style.zIndex = '20';
         threeCanvas.style.pointerEvents = shouldPixiReceiveInputEffective ? 'none' : 'auto';
       }
 
@@ -9411,7 +9411,7 @@ function _enforceGameplayPixiSuppression() {
     // Selective system: keep PIXI board visible for compatibility overlays while
     // scene-bearing layers are suppressed surgically below.
     safeCall(() => {
-      // #map-shine-canvas must stay above #board (z-index 10). Foundry may reset
+      // #map-shine-canvas must stay above #board (10) and below UI (100). Foundry may reset
       // Application.renderer.background.alpha on redraw paths; if the board were
       // on top, an opaque clear would hide Three even when the blit path is healthy.
       if (canvas.app?.renderer?.background) {
@@ -9440,7 +9440,7 @@ function _enforceGameplayPixiSuppression() {
       threeCanvas.style.display = '';
       threeCanvas.style.visibility = 'visible';
       threeCanvas.style.opacity = '1';
-      threeCanvas.style.zIndex = '100';
+      threeCanvas.style.zIndex = '20';
       threeCanvas.style.pointerEvents = 'auto';
     }, 'pixiSuppress.threeCanvasVisible', Severity.COSMETIC);
 

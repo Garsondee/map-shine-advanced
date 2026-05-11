@@ -602,7 +602,7 @@ export class ControlsIntegration {
     // Three.js canvas: above #board so Foundry cannot paint an opaque plate over it
     const threeCanvas = document.getElementById('map-shine-canvas');
     if (threeCanvas) {
-      threeCanvas.style.zIndex = '100';
+      threeCanvas.style.zIndex = '20';
       threeCanvas.style.opacity = '1';
       threeCanvas.style.pointerEvents = 'auto';
     }
@@ -621,7 +621,7 @@ export class ControlsIntegration {
       this._reassertWallTransparencyAfterPerception();
     });
     
-    log.debug('PIXI overlay: z-index 10 under Three (100), renderer.background.alpha 0');
+    log.debug('PIXI overlay: z-index 10 under Three (20), renderer.background.alpha 0');
   }
 
   _enforcePixiTransparency() {

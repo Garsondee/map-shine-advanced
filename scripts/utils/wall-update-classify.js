@@ -10,6 +10,24 @@ export function flattenWallUpdateChanges(changes) {
   return d ? { ...d, ...rest } : { ...rest };
 }
 
+/**
+ * Wall door mesh animation duration (ms). Foundry often omits `animation.duration`;
+ * `0` / NaN must not be used or the door snaps in ~1ms and fog LOS sync has no
+ * in-between frames.
+ *
+ * @param {object|null|undefined} wallDoc
+ * @param {number} [fallbackMs=500]
+ * @returns {number}
+ */
+export function resolveWallDoorAnimationDurationMs(wallDoc, fallbackMs = 500) {
+  const raw = Number(wallDoc?.animation?.duration);
+  if (Number.isFinite(raw) && raw > 0) return raw;
+  const rawSrc = Number(wallDoc?._source?.animation?.duration);
+  if (Number.isFinite(rawSrc) && rawSrc > 0) return rawSrc;
+  const fb = Number(fallbackMs);
+  return Number.isFinite(fb) && fb > 0 ? fb : 500;
+}
+
 const WALL_GEOM_KEYS = ['c', 'door', 'move', 'sight', 'light', 'sound'];
 
 /**

@@ -12,6 +12,19 @@ import { tileDocRestrictsLight } from '../scene/tile-manager.js';
 const log = createLogger('VisionPolygonComputer');
 
 /**
+ * True when a wall is a door that is open for LOS purposes.
+ * Coerces `ds` — some Foundry / sync payloads use string door states.
+ * @param {object|null|undefined} doc
+ * @returns {boolean}
+ */
+function wallDocDoorIsOpenForVision(doc) {
+  const open = (typeof CONST !== 'undefined' && CONST.WALL_DOOR_STATES)
+    ? CONST.WALL_DOOR_STATES.OPEN
+    : 1;
+  return Number(doc?.door) > 0 && Number(doc?.ds) === open;
+}
+
+/**
  * Computes line-of-sight visibility polygons from wall data
  */
 export class VisionPolygonComputer {
@@ -51,7 +64,7 @@ export class VisionPolygonComputer {
    * @param {number} radius - Vision radius in pixels
    * @param {Wall[]} walls - Array of wall placeables (optional, defaults to canvas.walls.placeables)
    * @param {{x: number, y: number, width: number, height: number}} [sceneBounds] - Optional scene bounds to clip vision
-   * @param {{sense?: 'sight'|'light', elevation?: number}|null} [options] - Optional compute mode and viewer elevation for wall-height filtering
+   * @param {{sense?: 'sight'|'light', elevation?: number, forceClosedDoorWallIds?: Set<string>}|null} [options] - Optional compute mode, viewer elevation, and door walls to treat as closed even when `ds` is OPEN (door-fog seam).
    * @returns {number[]} Flat array [x0, y0, x1, y1, ...] in Foundry coordinates
    */
   compute(center, radius, walls = null, sceneBounds = null, options = null) {
@@ -66,13 +79,17 @@ export class VisionPolygonComputer {
     const sense = (options && options.sense === 'light') ? 'light' : 'sight';
     const elevation = (options && typeof options.elevation === 'number' && Number.isFinite(options.elevation))
       ? options.elevation : undefined;
+    const forceClosedDoorWallIds = (options && options.forceClosedDoorWallIds instanceof Set
+      && options.forceClosedDoorWallIds.size > 0)
+      ? options.forceClosedDoorWallIds
+      : null;
 
     // Convert walls to segments (filtering inline to avoid allocations).
     // When an elevation is provided, walls whose wall-height bounds don't
     // include that elevation are skipped (MS-LVL-072).
     const segments = this._segmentsPool;
     segments.length = 0;
-    this.wallsToSegments(allWalls, center, radius, sense, segments, elevation);
+    this.wallsToSegments(allWalls, center, radius, sense, segments, elevation, forceClosedDoorWallIds);
     if (sense === 'light') {
       this.restrictLightTilesToSegments(center, radius, segments, elevation);
     }
@@ -133,10 +150,8 @@ export class VisionPolygonComputer {
       // Skip walls that don't block sight at all
       if (doc.sight === 0) return false;
       
-      // Skip open doors (ds=1 means open)
-      // CONST.WALL_DOOR_TYPES: 0=None, 1=Door, 2=Secret
-      // CONST.WALL_DOOR_STATES: 0=Closed, 1=Open, 2=Locked
-      if (doc.door > 0 && doc.ds === 1) return false;
+      // Skip open doors.
+      if (wallDocDoorIsOpenForVision(doc)) return false;
       
       // TODO: Handle one-way walls (doc.dir)
       // TODO: Handle limited sight walls (doc.sight === 10) with partial transparency
@@ -159,7 +174,7 @@ export class VisionPolygonComputer {
       if (doc.light === 0) return false;
 
       // Skip open doors.
-      if (doc.door > 0 && doc.ds === 1) return false;
+      if (wallDocDoorIsOpenForVision(doc)) return false;
 
       // TODO: Handle one-way walls (doc.dir)
       // TODO: Handle limited light walls (doc.light === 10) with partial transmission
@@ -175,9 +190,10 @@ export class VisionPolygonComputer {
    * @param {string} sense - 'sight' or 'light'
    * @param {Array|null} outSegments - Output array (reused for perf)
    * @param {number|undefined} elevation - Viewer elevation for wall-height filtering (MS-LVL-072)
+   * @param {Set<string>|null} [forceClosedDoorWallIds] - Wall document ids whose OPEN doors still emit LOS segments (door-fog seam base pass).
    * @returns {Array<{a: {x: number, y: number}, b: {x: number, y: number}}>}
    */
-  wallsToSegments(walls, center, radius, sense = 'sight', outSegments = null, elevation = undefined) {
+  wallsToSegments(walls, center, radius, sense = 'sight', outSegments = null, elevation = undefined, forceClosedDoorWallIds = null) {
     const segments = outSegments ?? [];
     let writeIndex = segments.length;
     const radiusSq = radius * radius;
@@ -250,8 +266,11 @@ export class VisionPolygonComputer {
           }
         }
       }
-      // Skip open doors.
-      if (doc.door > 0 && doc.ds === 1) continue;
+      // Skip open doors unless this wall id is forced closed for a door-fog seam pass.
+      if (wallDocDoorIsOpenForVision(doc)) {
+        const wid = String(doc?.id ?? '');
+        if (!wid || !forceClosedDoorWallIds?.has(wid)) continue;
+      }
 
       // MS-LVL-072: Wall-height filtering. Skip walls whose vertical
       // bounds don't include the viewer's elevation. This allows tokens

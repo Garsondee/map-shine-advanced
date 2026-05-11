@@ -15,6 +15,57 @@ import { GROUND_Z } from './LayerOrderPolicy.js';
 
 const log = createLogger('ReplicaOcclusionMaskPass');
 
+/** Bumped when walls / global sight inputs change so cached LOS polygons rebuild. */
+let _replicaVisionLosEpoch = 0;
+
+/** One-time Foundry hooks — vision mesh *geometry* is expensive; camera pan only needs re-render. */
+let _replicaVisionLosHooksRegistered = false;
+
+function _bumpReplicaVisionLosEpoch() {
+  _replicaVisionLosEpoch++;
+}
+
+function _ensureReplicaVisionLosInvalidationHooks() {
+  if (_replicaVisionLosHooksRegistered || typeof Hooks === 'undefined') return;
+  _replicaVisionLosHooksRegistered = true;
+  try {
+    Hooks.on('createWall', _bumpReplicaVisionLosEpoch);
+    Hooks.on('deleteWall', _bumpReplicaVisionLosEpoch);
+    Hooks.on('updateWall', _bumpReplicaVisionLosEpoch);
+    Hooks.on('sightRefresh', _bumpReplicaVisionLosEpoch);
+    Hooks.on('lightingRefresh', _bumpReplicaVisionLosEpoch);
+    Hooks.on('mapShineLevelContextChanged', _bumpReplicaVisionLosEpoch);
+  } catch (_) {
+    _replicaVisionLosHooksRegistered = false;
+  }
+}
+
+/**
+ * Fingerprint for VISION polygon *CPU* rebuild (world LOS). Camera motion is excluded —
+ * the same mesh is re-projected each frame via `render(_visionScene, camera)`.
+ * @param {Array<{ tokenId: string, center: { x: number, y: number }, radiusPx: number, elevation: number }>} sources
+ * @returns {string}
+ */
+function buildReplicaVisionPolyDirtyKey(sources) {
+  const dims = typeof canvas !== 'undefined' ? canvas?.dimensions : null;
+  const sceneHeight = Number(dims?.height ?? dims?.sceneHeight ?? 0);
+  const sr = dims?.sceneRect ?? null;
+  const rectKey = sr && Number.isFinite(sr.x) && Number.isFinite(sr.y)
+    ? `${Math.round(sr.x)}|${Math.round(sr.y)}|${Math.round(sr.width)}|${Math.round(sr.height)}`
+    : '';
+  const sorted = sources.slice().sort((a, b) => String(a.tokenId).localeCompare(String(b.tokenId)));
+  const srcPart = sorted
+    .map((s) => {
+      const cx = Number(s.center?.x) || 0;
+      const cy = Number(s.center?.y) || 0;
+      const r = Number(s.radiusPx) || 0;
+      const el = Number(s.elevation) || 0;
+      return `${s.tokenId}:${cx.toFixed(2)}:${cy.toFixed(2)}:${r.toFixed(1)}:${el}`;
+    })
+    .join(';');
+  return `${_replicaVisionLosEpoch}|${sceneHeight}|${rectKey}|${srcPart}`;
+}
+
 /** Hard cap on simultaneous LOS polygons rendered per frame (perf safety). */
 const REPLICA_OCCLUSION_VISION_TOKEN_CAP = 8;
 
@@ -639,6 +690,11 @@ export class ReplicaOcclusionMaskPass {
     this._surfaceMeshes = new Map();
     /** @type {boolean} True when at least one surface region mesh is active this frame. */
     this._surfaceActive = false;
+
+    /** @type {string|null} Last {@link buildReplicaVisionPolyDirtyKey} — skips LOS CPU rebuild when unchanged. */
+    this._lastVisionPolyDirtyKey = null;
+
+    _ensureReplicaVisionLosInvalidationHooks();
   }
 
   /**
@@ -883,15 +939,16 @@ export class ReplicaOcclusionMaskPass {
    * so the bus camera projects them into screen space using the same matrix as
    * tile/overhead draws. Reuses existing meshes per `tokenId` to minimize churn.
    *
+   * @param {ReturnType<typeof collectVisionSourcesForReplica>} sources
    * @private
    * @returns {number} number of polygon meshes currently in the vision scene
    */
-  _rebuildVisionPolygons() {
+  _rebuildVisionPolygons(sources) {
     const THREE = window.THREE;
     if (!THREE || !this._visionScene || !this._visionMaterial || !this._visionComputer) return 0;
 
     const earcut = _resolveEarcut();
-    const sources = collectVisionSourcesForReplica();
+    const srcList = Array.isArray(sources) ? sources : collectVisionSourcesForReplica();
 
     const dims = typeof canvas !== 'undefined' ? canvas?.dimensions : null;
     const sceneHeight = Number(dims?.height ?? dims?.sceneHeight ?? 0);
@@ -904,7 +961,7 @@ export class ReplicaOcclusionMaskPass {
     const seen = new Set();
     let active = 0;
 
-    for (const src of sources) {
+    for (const src of srcList) {
       if (!earcut) break;
       const opts = (Number.isFinite(src.elevation) && src.elevation !== 0)
         ? { elevation: src.elevation }
@@ -1005,10 +1062,20 @@ export class ReplicaOcclusionMaskPass {
         }
       }
 
-      // VISION / LOS — rebuild polygon meshes for controlled tokens. When no
-      // tokens provide vision (GM view, none selected) the scene stays empty,
-      // _rtVision stays full white, and B channel never causes occlusion.
-      const visionCount = this._rebuildVisionPolygons();
+      // VISION / LOS — expensive CPU (wall raycast + earcut + geom) only when
+      // controlled sight sources or wall/perception inputs change; GPU still
+      // re-renders the same mesh every frame so holes track the bus camera.
+      const visionSources = collectVisionSourcesForReplica();
+      const visionPolyDirtyKey = buildReplicaVisionPolyDirtyKey(visionSources);
+      const mustRebuildVision = visionPolyDirtyKey !== this._lastVisionPolyDirtyKey
+        || (visionSources.length > 0 && this._visionMeshes.size === 0);
+      let visionCount;
+      if (mustRebuildVision) {
+        this._lastVisionPolyDirtyKey = visionPolyDirtyKey;
+        visionCount = this._rebuildVisionPolygons(visionSources);
+      } else {
+        visionCount = this._visionMeshes.size;
+      }
       this._visionActive = visionCount > 0;
       const useVision = !!(camera && this._visionActive);
       if (u.uVisionTex) u.uVisionTex.value = this._rtVision.texture;
@@ -1160,6 +1227,7 @@ export class ReplicaOcclusionMaskPass {
     this._visionActive = false;
     this._surfaceScene = null;
     this._surfaceActive = false;
+    this._lastVisionPolyDirtyKey = null;
     this._rt = null;
     this._rtResolved = null;
     this._rtVision = null;

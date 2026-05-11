@@ -14,6 +14,7 @@
  * @module scene/DoorMeshManager
  */
 
+import { resolveWallDoorAnimationDurationMs } from '../utils/wall-update-classify.js';
 import { createLogger } from '../core/log.js';
 import { readWallHeightFlags, resolveV14NativeDocFloorIndexMin } from '../foundry/levels-scene-flags.js';
 import { FLOOR_LAYERS } from '../compositor-v2/FloorLayerManager.js';
@@ -152,6 +153,10 @@ class DoorMesh {
       flip: animation?.flip ?? false,
       strength: animation?.strength ?? 1.0
     };
+    this.animation.duration = resolveWallDoorAnimationDurationMs(
+      { animation: this.animation, _source: wallDoc?._source },
+      500
+    );
     
     // Flip direction for right side of double doors
     if (style === DOOR_STYLES.DOUBLE_RIGHT) {
@@ -424,7 +429,11 @@ class DoorMesh {
     this._animating = true;
     this._animationStartProgress = this._animationProgress;
     this._animationTargetProgress = open ? 1.0 : 0.0;
-    this._animationDurationS = Math.max(0.001, (Number(this.animation.duration) || 0) / 1000);
+    const durMs = resolveWallDoorAnimationDurationMs(
+      { animation: this.animation, _source: this.wallDoc?._source },
+      500
+    );
+    this._animationDurationS = Math.max(1 / 60, durMs / 1000);
     this._animationElapsedS = 0;
     
     log.debug(`Door ${this.wallDoc.id} (${this.style}) animating to ${open ? 'OPEN' : 'CLOSED'}`);
@@ -434,6 +443,15 @@ class DoorMesh {
    * Update animation state (called each frame)
    * @param {Object} timeInfo - Time info from TimeManager
    */
+  /**
+   * Visual open amount 0 (closed) .. 1 (open). Used by FogOfWarEffectV2 door sync
+   * so LOS segments track the same eased motion as this mesh.
+   * @returns {number}
+   */
+  getOpenAnimationFactor() {
+    return this._animationProgress;
+  }
+
   update(timeInfo) {
     if (this._animating) {
       const dt = (timeInfo && typeof timeInfo.delta === 'number') ? timeInfo.delta : 0;
@@ -738,23 +756,30 @@ export class DoorMeshManager {
    * @param {Object} changes
    */
   _handleWallUpdate(doc, changes) {
-    const meshSet = this.doorMeshes.get(DoorMeshManager.wallKey(doc.id));
-    
-    // Check if we need to recreate meshes (animation config changed)
-    const needsRecreate = 
+    const wid = DoorMeshManager.wallKey(doc.id);
+    const meshSet = this.doorMeshes.get(wid);
+
+    if (!this._hasDoorMesh(doc)) {
+      if (meshSet) this._destroyDoorMeshes(wid);
+      return;
+    }
+
+    // Recreate only when animation visuals change. Do NOT use bare `door in changes`:
+    // some Foundry payloads include `door` alongside `ds`, which rebuilt meshes
+    // after the wall was already OPEN — new DoorMesh snapped to open and fog
+    // LOS never saw intermediate frames.
+    const needsRecreate =
       ('animation' in changes && (
         changes.animation?.texture !== undefined ||
         changes.animation?.double !== undefined ||
         changes.animation?.type !== undefined
-      )) ||
-      ('door' in changes);
-    
+      ));
+
     if (needsRecreate) {
-      // Recreate meshes
       this._createDoorMeshes(doc);
       return;
     }
-    
+
     // Check if door state changed
     if ('ds' in changes && meshSet) {
       // For fallback non-animated doors, state changes imply icon texture
@@ -765,6 +790,7 @@ export class DoorMeshManager {
       }
       const isOpen = doc.ds === CONST.WALL_DOOR_STATES.OPEN;
       for (const doorMesh of meshSet) {
+        doorMesh.wallDoc = doc;
         doorMesh.animate(isOpen);
       }
     }
@@ -785,7 +811,12 @@ export class DoorMeshManager {
         // Update animation config and refresh
         for (const doorMesh of meshSet) {
           if (anim.direction !== undefined) doorMesh.animation.direction = anim.direction;
-          if (anim.duration !== undefined) doorMesh.animation.duration = anim.duration;
+          if (anim.duration !== undefined) {
+            doorMesh.animation.duration = resolveWallDoorAnimationDurationMs(
+              { animation: { ...doorMesh.animation, duration: anim.duration }, _source: doorMesh.wallDoc?._source },
+              500
+            );
+          }
           if (anim.strength !== undefined) doorMesh.animation.strength = anim.strength;
           if (anim.flip !== undefined) doorMesh.animation.flip = anim.flip;
           doorMesh.refresh();

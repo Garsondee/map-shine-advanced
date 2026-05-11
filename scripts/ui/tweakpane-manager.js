@@ -253,6 +253,9 @@ export class TweakpaneManager {
 
     this._debugFolder = null;
 
+    /** @type {any|null} Top-level Tweakpane folder for Quick Actions (repositioned after filter bar). */
+    this._quickActionsFolder = null;
+
     /** @type {Array<any>|null} */
     this._dynamicExposureDebugBindings = null;
 
@@ -847,15 +850,16 @@ export class TweakpaneManager {
     // Onboarding must require a real GM so debug GM-parity cannot show Enable without persistence.
     const showOnboardingOnly = !!globalThis.game?.user?.isGM && !sceneIsEnabled;
 
-    // Always keep core launchers near the top of the UI so they're accessible
-    // regardless of which authoring section is currently expanded.
+    // Quick Actions is created first (so insertBefore targets exist), then
+    // presets / scene-enable strips are inserted above it; after the filter bar
+    // exists we move Quick Actions to sit directly under the filter (see
+    // _moveQuickActionsSectionBelowFilterBar).
     this.buildQuickActionsSection();
     // Presets strip (requires a top-level folder to anchor insertBefore the first .tp-fldv)
     if (!showOnboardingOnly) {
       await this.buildPresetsBar();
     }
-    // Build after at least one folder exists so we can insert this headerless
-    // section directly above Quick Actions in the top-level list.
+    // Headerless strip: inserts before the first top-level folder row.
     this.buildSceneEnableQuickSection();
 
     if (_isDbg) _dlp.begin('tp.buildSections', 'finalize');
@@ -892,6 +896,7 @@ export class TweakpaneManager {
     // Build the always-visible section filter bar after folders exist so we can
     // anchor it against the actual section list instead of guessing Tweakpane internals.
     this._buildFilterBar();
+    this._moveQuickActionsSectionBelowFilterBar();
 
     // Start UI update loop only when full controls are available.
     if (!showOnboardingOnly) {
@@ -1442,6 +1447,7 @@ export class TweakpaneManager {
       title: 'Quick Actions',
       expanded
     });
+    this._quickActionsFolder = quickActionsFolder;
     this._registerPrimaryFolder(quickActionsFolder);
 
     const contentElement = quickActionsFolder.element.querySelector('.tp-fldv_c') || quickActionsFolder.element;
@@ -1516,8 +1522,8 @@ export class TweakpaneManager {
         dlg.toggle?.();
       });
 
-      addGridButton('Copy Scene Settings', async () => {
-        await this.copyScenePresetToClipboard();
+      addGridButton('Copy Effects From Scene', async () => {
+        await this.importSingleEffectFromScene();
       });
     }
 
@@ -1566,8 +1572,28 @@ export class TweakpaneManager {
   }
 
   /**
+   * Place the Quick Actions folder immediately below the sticky filter bar so
+   * launchers stay at the top of the panel (after init, presets/scene strips may
+   * have been inserted above it in DOM order).
+   * @private
+   */
+  _moveQuickActionsSectionBelowFilterBar() {
+    const folder = this._quickActionsFolder;
+    const el = folder?.element;
+    if (!el?.parentElement || !this._filterBarEl?.parentElement) return;
+
+    const listHost = el.parentElement;
+    const filter = this._filterBarEl;
+    if (filter.parentElement !== listHost) return;
+
+    const anchor = filter.nextSibling;
+    if (el === anchor) return;
+    listHost.insertBefore(el, anchor);
+  }
+
+  /**
    * Build an always-visible, headerless scene master toggle section that lives
-   * above the Quick Actions folder.
+   * near the top of the section list (before the first Tweakpane folder at init).
    * @private
    */
   buildSceneEnableQuickSection() {

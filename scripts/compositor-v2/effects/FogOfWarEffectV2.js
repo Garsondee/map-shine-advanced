@@ -37,7 +37,7 @@ import { getLevelsCompatibilityMode, LEVELS_COMPATIBILITY_MODES } from '../../fo
 import { isLevelsEnabledForScene, readTileLevelsFlags, tileHasLevelsRange, readWallHeightFlags } from '../../foundry/levels-scene-flags.js';
 import { getPerspectiveElevation, isLightVisibleForPerspective } from '../../foundry/elevation-context.js';
 import Coordinates from '../../utils/coordinates.js';
-import { flattenWallUpdateChanges } from '../../utils/wall-update-classify.js';
+import { flattenWallUpdateChanges, resolveWallDoorAnimationDurationMs } from '../../utils/wall-update-classify.js';
 import {
   getActiveElevationBandKey,
   buildFogStoreContextKey,
@@ -71,18 +71,6 @@ function normalizeWallDoorAnimationType(raw) {
   if (!s) return 'swing';
   if (s === 'sliding') return 'slide';
   return s;
-}
-
-/**
- * Foundry passes `updateWall` hooks with a `changes` object; sometimes `ds` is
- * nested under `diff` (see Document#update). Without this, door fog transitions
- * never start and no door-sync logic runs.
- */
-function wallChangesIncludeDoorState(changes) {
-  if (!changes || typeof changes !== 'object') return false;
-  if (Object.prototype.hasOwnProperty.call(changes, 'ds')) return true;
-  const d = changes.diff;
-  return !!(d && typeof d === 'object' && Object.prototype.hasOwnProperty.call(d, 'ds'));
 }
 
 /**
@@ -305,6 +293,21 @@ export class FogOfWarEffectV2 {
     this._doorFogDefaultDurationMs = 500;
     this._doorFogThicknessGrid = 0.35;
 
+    /** @type {Set<string>|null} Door seam: wall ids forced closed in {@link VisionPolygonComputer} for this pass only */
+    this._visionComputeForceClosedIds = null;
+
+    /** @type {WebGLRenderTarget|null} Ping-pong with vision RT for closed/open LOS during door seam blend */
+    this._visionDoorSeamRTClosed = null;
+    this._visionDoorSeamRTOpen = null;
+    /** @type {WebGLRenderTarget|null} Cone-clip mask (white = keep) during door seam composite */
+    this._visionDoorSeamRTMask = null;
+    /** @type {object|null} */
+    this._visionDoorSeamCompositeScene = null;
+    /** @type {object|null} */
+    this._visionDoorSeamCompositeCamera = null;
+    /** @type {object|null} */
+    this._visionDoorSeamCompositeMaterial = null;
+
     // Socket listener for the authoritative fog reset broadcast from Foundry's
     // server. canvas.fog.reset() emits 'resetFog' via socket; the server then
     // calls _handleReset() on every client. That path does NOT fire a
@@ -454,12 +457,21 @@ export class FogOfWarEffectV2 {
 
       geom.computeBoundingBox();
       const bb = geom.boundingBox;
-      if (!bb || !(bb.max.x - bb.min.x > 0.001)) continue;
+      if (!bb) continue;
+      const extX = bb.max.x - bb.min.x;
+      const extY = bb.max.y - bb.min.y;
+      // Local plane bounds can be wider on Y than X (tall door art). Always
+      // spanning the longer axis avoids a degenerate LOS segment at the hinge.
+      if (extX <= 0.001 && extY <= 0.001) continue;
 
       mesh.updateMatrixWorld(true);
-      const yMid = (bb.min.y + bb.max.y) * 0.5;
-      const v0 = new THREE.Vector3(bb.min.x, yMid, 0);
-      const v1 = new THREE.Vector3(bb.max.x, yMid, 0);
+      const useX = extX >= extY;
+      const v0 = useX
+        ? new THREE.Vector3(bb.min.x, (bb.min.y + bb.max.y) * 0.5, 0)
+        : new THREE.Vector3((bb.min.x + bb.max.x) * 0.5, bb.min.y, 0);
+      const v1 = useX
+        ? new THREE.Vector3(bb.max.x, (bb.min.y + bb.max.y) * 0.5, 0)
+        : new THREE.Vector3((bb.min.x + bb.max.x) * 0.5, bb.max.y, 0);
       v0.applyMatrix4(mesh.matrixWorld);
       v1.applyMatrix4(mesh.matrixWorld);
 
@@ -488,63 +500,255 @@ export class FogOfWarEffectV2 {
   }
 
   /**
-   * Build temporary LOS blocker wall-like entries for animated door leaves.
-   * These are injected into VisionPolygonComputer so door transitions cast
-   * proper visibility shadows instead of only masking a thin strip.
-   *
+   * Door seam: wall ids on the active elevation band that are mid transition,
+   * plus a single blend factor (mean live openFactor) for mixing closed vs open LOS.
    * @param {number} nowMs
-   * @returns {{ blockers: Array<object>, transitioningWallIds: Set<string> }}
+   * @param {boolean} levelsActive
+   * @param {Wall[]|null} levelWalls
+   * @returns {{ forceClosedWallIds: Set<string>, blendFactor: number }}
    * @private
    */
-  _buildDoorTransitionBlockingWalls(nowMs) {
-    const empty = { blockers: [], transitioningWallIds: new Set() };
-    if (!this.params?.doorFogSyncEnabled) return empty;
-    if (!this._doorFogTransitions.size) return empty;
+  _collectDoorSeamBlendState(nowMs, levelsActive, levelWalls) {
+    const forceClosedWallIds = new Set();
+    let sum = 0;
+    let n = 0;
+    const floorIdSet = levelsActive && Array.isArray(levelWalls)
+      ? new Set(levelWalls.map((w) => String(w?.document?.id ?? '')).filter(Boolean))
+      : null;
 
-    const out = [];
-    const transitioningWallIds = new Set();
-    const walls = canvas?.walls?.placeables;
-    if (!Array.isArray(walls) || !walls.length) return empty;
-
+    const walls = canvas?.walls?.placeables ?? [];
     for (const wall of walls) {
       const doc = wall?.document;
       if (!doc) continue;
       if (!(Number(doc.door ?? 0) > 0)) continue;
-
-      const state = this._getDoorFogTransitionState(doc.id, nowMs);
-      if (!state) continue;
       const wallId = String(doc.id || '');
+      if (!wallId || !this._doorFogTransitions.has(wallId)) continue;
+      const state = this._getDoorFogTransitionState(wallId, nowMs);
+      if (!state) continue;
+      if (floorIdSet && !floorIdSet.has(wallId)) continue;
+      forceClosedWallIds.add(wallId);
+      sum += state.openFactor;
+      n++;
+    }
+    const blendFactor = n > 0 ? Math.max(0, Math.min(1, sum / n)) : 0;
+    return { forceClosedWallIds, blendFactor };
+  }
 
-      const segments = this._getDoorTransitionLeafSegmentsFoundry(doc, state.openFactor);
-      for (const seg of segments) {
-        if (![seg.x0, seg.y0, seg.x1, seg.y1].every(Number.isFinite)) continue;
-        out.push({
-          document: {
-            id: doc.id,
-            c: [seg.x0, seg.y0, seg.x1, seg.y1],
-            // Preserve source wall sense semantics (including proximity/distance)
-            // so transition blockers match the original wall behavior.
-            sight: Number.isFinite(Number(doc.sight))
-              ? Number(doc.sight)
-              : (CONST.WALL_SENSE_TYPES?.NORMAL ?? 20),
-            light: Number.isFinite(Number(doc.light))
-              ? Number(doc.light)
-              : (CONST.WALL_SENSE_TYPES?.NORMAL ?? 20),
-            door: CONST.WALL_DOOR_TYPES?.NONE ?? 0,
-            dir: CONST.WALL_DIRECTIONS?.BOTH ?? 0,
-            // Match real wall vertical bounds (Levels / wall-height) so door leaves
-            // don't block or pass wrong floors during transitions.
-            ...(doc.flags && typeof doc.flags === 'object' ? { flags: doc.flags } : {}),
-          },
-        });
+  /**
+   * @param {object} THREE
+   * @private
+   */
+  _disposeVisionDoorSeamResources(THREE) {
+    if (!THREE) return;
+    try {
+      if (this._visionDoorSeamRTClosed) {
+        this._visionDoorSeamRTClosed.dispose();
+        this._visionDoorSeamRTClosed = null;
       }
-      // Only strip the real wall from the LOS polygon list when we have at least
-      // one synthetic leaf segment. Otherwise we remove the wall line but inject
-      // nothing — vision treats the open door as no edge (wrong during animation).
-      if (wallId && segments.length > 0) transitioningWallIds.add(wallId);
+      if (this._visionDoorSeamRTOpen) {
+        this._visionDoorSeamRTOpen.dispose();
+        this._visionDoorSeamRTOpen = null;
+      }
+      if (this._visionDoorSeamRTMask) {
+        this._visionDoorSeamRTMask.dispose();
+        this._visionDoorSeamRTMask = null;
+      }
+      if (this._visionDoorSeamCompositeMaterial) {
+        this._visionDoorSeamCompositeMaterial.dispose();
+        this._visionDoorSeamCompositeMaterial = null;
+      }
+      this._visionDoorSeamCompositeScene = null;
+      this._visionDoorSeamCompositeCamera = null;
+    } catch (_) {
+    }
+  }
+
+  /**
+   * RTs matching {@link #visionRenderTarget} for two-pass door seam + composite quad.
+   * @param {object} THREE
+   * @private
+   */
+  _ensureVisionDoorSeamResources(THREE) {
+    const w = Math.max(1, this._visionRTWidth | 0);
+    const h = Math.max(1, this._visionRTHeight | 0);
+    const opts = {
+      format: THREE.RGBAFormat,
+      type: THREE.UnsignedByteType,
+      minFilter: THREE.LinearFilter,
+      magFilter: THREE.LinearFilter,
+      stencilBuffer: false,
+      depthBuffer: false,
+      generateMipmaps: false,
+    };
+
+    const needNew = !this._visionDoorSeamRTClosed
+      || this._visionDoorSeamRTClosed.width !== w
+      || this._visionDoorSeamRTClosed.height !== h;
+
+    if (needNew) {
+      this._disposeVisionDoorSeamResources(THREE);
+      this._visionDoorSeamRTClosed = new THREE.WebGLRenderTarget(w, h, opts);
+      this._visionDoorSeamRTOpen = new THREE.WebGLRenderTarget(w, h, opts);
+      this._visionDoorSeamRTMask = new THREE.WebGLRenderTarget(w, h, opts);
     }
 
-    return { blockers: out, transitioningWallIds };
+    if (!this._visionDoorSeamCompositeScene) {
+      this._visionDoorSeamCompositeScene = new THREE.Scene();
+      this._visionDoorSeamCompositeCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+      this._visionDoorSeamCompositeCamera.position.set(0, 0, 1);
+      this._visionDoorSeamCompositeMaterial = new THREE.ShaderMaterial({
+        uniforms: {
+          tClosed: { value: null },
+          tOpen: { value: null },
+          tMask: { value: null },
+          uBlend: { value: 0 },
+          uUseMask: { value: 0 },
+        },
+        vertexShader: `
+          varying vec2 vUv;
+          void main() {
+            vUv = uv;
+            gl_Position = vec4(position.xy, 0.0, 1.0);
+          }
+        `,
+        fragmentShader: `
+          uniform sampler2D tClosed;
+          uniform sampler2D tOpen;
+          uniform sampler2D tMask;
+          uniform float uBlend;
+          uniform float uUseMask;
+          varying vec2 vUv;
+          void main() {
+            float c = texture2D(tClosed, vUv).r;
+            float o = texture2D(tOpen, vUv).r;
+            float v = mix(c, o, uBlend);
+            if (uUseMask > 0.5) v *= texture2D(tMask, vUv).r;
+            gl_FragColor = vec4(v, v, v, 1.0);
+          }
+        `,
+        depthWrite: false,
+        depthTest: false,
+      });
+      const quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), this._visionDoorSeamCompositeMaterial);
+      this._visionDoorSeamCompositeScene.add(quad);
+    }
+  }
+
+  /**
+   * White union of Foundry LOS polygons for limited-sight tokens (cone clip after seam blend).
+   * @param {object} THREE
+   * @param {Token[]} controlledTokens
+   * @private
+   */
+  _renderDoorSeamLimitedSightMask(THREE, controlledTokens) {
+    if (!this._visionDoorSeamRTMask || !this.visionScene || !this.visionCamera) return;
+
+    while (this.visionScene.children.length > 0) {
+      const child = this.visionScene.children[0];
+      this.visionScene.remove(child);
+      if (child.geometry) child.geometry.dispose();
+      if (child.material && child.material !== this.visionMaterial && child.material !== this.darknessMaterial) {
+        child.material.dispose();
+      }
+    }
+
+    const offsetX = this.sceneRect.x;
+    const offsetY = this.sceneRect.y;
+    const w = Math.max(1, this.sceneRect.width);
+    const h = Math.max(1, this.sceneRect.height);
+
+    let drew = false;
+    for (const token of controlledTokens) {
+      if (!this._tokenHasVisionCapability(token)) continue;
+      const ang = Number(token?.document?.sight?.angle ?? 360);
+      const limited = Number.isFinite(ang) && ang < 360;
+      if (!limited) {
+        const fullShape = new THREE.Shape();
+        fullShape.moveTo(0, 0);
+        fullShape.lineTo(w, 0);
+        fullShape.lineTo(w, h);
+        fullShape.lineTo(0, h);
+        fullShape.closePath();
+        const mesh = new THREE.Mesh(new THREE.ShapeGeometry(fullShape), this.visionMaterial);
+        mesh.renderOrder = 0;
+        this.visionScene.add(mesh);
+        drew = true;
+        continue;
+      }
+      const vs = token.vision;
+      const shape = vs?.los || vs?.shape || vs?.fov;
+      const pts = shape?.points;
+      if (!Array.isArray(pts) || pts.length < 6) continue;
+      const threeShape = new THREE.Shape();
+      threeShape.moveTo(pts[0] - offsetX, pts[1] - offsetY);
+      for (let i = 2; i < pts.length; i += 2) {
+        threeShape.lineTo(pts[i] - offsetX, pts[i + 1] - offsetY);
+      }
+      threeShape.closePath();
+      const mesh = new THREE.Mesh(new THREE.ShapeGeometry(threeShape), this.visionMaterial);
+      mesh.renderOrder = 1;
+      this.visionScene.add(mesh);
+      drew = true;
+    }
+
+    if (!drew) {
+      const fullShape = new THREE.Shape();
+      fullShape.moveTo(0, 0);
+      fullShape.lineTo(w, 0);
+      fullShape.lineTo(w, h);
+      fullShape.lineTo(0, h);
+      fullShape.closePath();
+      this.visionScene.add(new THREE.Mesh(new THREE.ShapeGeometry(fullShape), this.visionMaterial));
+    }
+
+    const currentTarget = this.renderer.getRenderTarget();
+    const currentClearColor = this.renderer.getClearColor(new THREE.Color());
+    const currentClearAlpha = this.renderer.getClearAlpha();
+    this.renderer.setRenderTarget(this._visionDoorSeamRTMask);
+    this.renderer.setClearColor(0x000000, 1);
+    this.renderer.clear();
+    this.renderer.render(this.visionScene, this.visionCamera);
+    this.renderer.setRenderTarget(currentTarget);
+    this.renderer.setClearColor(currentClearColor, currentClearAlpha);
+  }
+
+  /**
+   * Mix closed/open vision RTs into {@link #visionRenderTarget}; optional cone mask multiply.
+   * @param {object} THREE
+   * @param {number} blendFactor
+   * @param {boolean} useConeMask
+   * @param {Token[]} controlledTokens
+   * @private
+   */
+  _compositeDoorSeamVisionFromPasses(THREE, blendFactor, useConeMask, controlledTokens) {
+    if (!this._visionDoorSeamRTClosed || !this._visionDoorSeamRTOpen
+        || !this._visionDoorSeamCompositeScene || !this._visionDoorSeamCompositeMaterial) return;
+
+    if (useConeMask) {
+      this._renderDoorSeamLimitedSightMask(THREE, controlledTokens);
+    }
+
+    const u = this._visionDoorSeamCompositeMaterial.uniforms;
+    u.tClosed.value = this._visionDoorSeamRTClosed.texture;
+    u.tOpen.value = this._visionDoorSeamRTOpen.texture;
+    u.uBlend.value = Math.max(0, Math.min(1, blendFactor));
+    u.uUseMask.value = useConeMask ? 1.0 : 0.0;
+    u.tMask.value = useConeMask && this._visionDoorSeamRTMask?.texture
+      ? this._visionDoorSeamRTMask.texture
+      : (this._fallbackWhite ?? this._visionDoorSeamRTOpen.texture);
+    this._visionDoorSeamCompositeMaterial.needsUpdate = true;
+
+    const currentTarget = this.renderer.getRenderTarget();
+    const currentClearColor = this.renderer.getClearColor(new THREE.Color());
+    const currentClearAlpha = this.renderer.getClearAlpha();
+
+    this.renderer.setRenderTarget(this.visionRenderTarget);
+    this.renderer.setClearColor(0x000000, 1);
+    this.renderer.clear();
+    this.renderer.render(this._visionDoorSeamCompositeScene, this._visionDoorSeamCompositeCamera);
+
+    this.renderer.setRenderTarget(currentTarget);
+    this.renderer.setClearColor(currentClearColor, currentClearAlpha);
   }
 
   resetExploration({ markLoaded = true } = {}) {
@@ -814,6 +1018,8 @@ export class FogOfWarEffectV2 {
     const THREE = window.THREE;
     if (!THREE) return;
 
+    this._disposeVisionDoorSeamResources(THREE);
+
     this._visionRTWidth = 1;
     this._visionRTHeight = 1;
     this._explorationRTWidth = 1;
@@ -1012,6 +1218,7 @@ export class FogOfWarEffectV2 {
    */
   _createVisionRenderTarget() {
     const THREE = window.THREE;
+    this._disposeVisionDoorSeamResources(THREE);
     const { width, height } = this.sceneRect;
     
     // Use a reasonable resolution (can be lower than scene for performance)
@@ -1892,28 +2099,28 @@ export class FogOfWarEffectV2 {
     const doorType = Number(doc?.door ?? 0);
     if (!(doorType > 0)) return;
     const flat = flattenWallUpdateChanges(changes);
-    if (!Object.prototype.hasOwnProperty.call(flat, 'ds')) return;
-
     const wallId = String(doc?.id || '');
     if (!wallId) return;
 
-    const nextState = Number(flat.ds ?? doc?.ds ?? 0);
+    const flatHasDs = Object.prototype.hasOwnProperty.call(flat, 'ds');
+    const nextState = Number(doc?.ds ?? 0);
     const cachedPrevState = this._doorStateCache.get(wallId);
+
+    // Some Foundry / socket paths omit `ds` from the delta even though `doc.ds`
+    // is already authoritative — still detect a transition when cache disagrees.
+    if (!flatHasDs && Number.isFinite(cachedPrevState) && cachedPrevState === nextState) return;
+
     const prevState = Number.isFinite(cachedPrevState)
       ? cachedPrevState
-      : (nextState === CONST.WALL_DOOR_STATES.OPEN
-        ? CONST.WALL_DOOR_STATES.CLOSED
-        : CONST.WALL_DOOR_STATES.OPEN);
+      : nextState;
     this._doorStateCache.set(wallId, nextState);
     if (prevState === nextState) return;
 
-    const durationMs = Math.max(
-      1,
-      Number(doc?.animation?.duration)
-      || Number(doc?._source?.animation?.duration)
-      || Number(this.params?.doorFogSyncDefaultDurationMs)
-      || this._doorFogDefaultDurationMs
-    );
+    if (this.params?.doorFogSyncEnabled === false) return;
+
+    const fogFallbackMs = Number(this.params?.doorFogSyncDefaultDurationMs)
+      || this._doorFogDefaultDurationMs;
+    const durationMs = resolveWallDoorAnimationDurationMs(doc, fogFallbackMs);
 
     this._doorFogTransitions.set(wallId, {
       wallId,
@@ -1932,6 +2139,34 @@ export class FogOfWarEffectV2 {
     }
   }
 
+  /**
+   * Average live open factor from {@link DoorMeshManager} meshes (0 closed .. 1 open).
+   * @param {string|number} wallId
+   * @returns {number|null}
+   * @private
+   */
+  _readLiveDoorMeshOpenFactor(wallId) {
+    try {
+      const dm = window.MapShine?.doorMeshManager;
+      if (!dm?.doorMeshes) return null;
+      const key = String(wallId || '');
+      const meshSet = dm.doorMeshes.get(key) ?? dm.doorMeshes.get(wallId);
+      if (!meshSet || typeof meshSet[Symbol.iterator] !== 'function') return null;
+      let sum = 0;
+      let n = 0;
+      for (const inst of meshSet) {
+        const fn = inst?.getOpenAnimationFactor;
+        const p = typeof fn === 'function' ? fn.call(inst) : null;
+        if (p == null || !Number.isFinite(p)) continue;
+        sum += Math.max(0, Math.min(1, p));
+        n++;
+      }
+      return n > 0 ? (sum / n) : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
   _getDoorFogTransitionState(wallId, nowMs) {
     const key = String(wallId || '');
     if (!key) return null;
@@ -1941,85 +2176,35 @@ export class FogOfWarEffectV2 {
 
     const elapsedMs = Math.max(0, nowMs - entry.startTimeMs);
     const t = entry.durationMs > 0 ? (elapsedMs / entry.durationMs) : 1;
+
+    const fromOpen = entry.fromState === CONST.WALL_DOOR_STATES.OPEN ? 1 : 0;
+    const toOpen = entry.toState === CONST.WALL_DOOR_STATES.OPEN ? 1 : 0;
+    const isOpening = toOpen > fromOpen;
+    const isClosing = toOpen < fromOpen;
+
+    const eased = easeInOutCosine(Math.min(1, t));
+    let openFactor = fromOpen + (toOpen - fromOpen) * eased;
+    const live = this._readLiveDoorMeshOpenFactor(key);
+    if (live != null) {
+      openFactor = live;
+    }
+
+    // End when clock finished AND (no textured door mesh to follow OR mesh reached target).
+    // Otherwise wall-clock can finish a frame or more before EffectComposer advances
+    // DoorMeshManager, which made vision/fog drift ahead of the rendered door.
     if (t >= 1) {
+      if (live != null) {
+        const atTarget = (toOpen === 1 && live >= 0.995) || (toOpen === 0 && live <= 0.005);
+        const graceExceeded = elapsedMs > entry.durationMs + 2500;
+        if (!atTarget && !graceExceeded) {
+          return { openFactor, isOpening, isClosing };
+        }
+      }
       this._doorFogTransitions.delete(key);
       return null;
     }
 
-    const eased = easeInOutCosine(t);
-    const fromOpen = entry.fromState === CONST.WALL_DOOR_STATES.OPEN ? 1 : 0;
-    const toOpen = entry.toState === CONST.WALL_DOOR_STATES.OPEN ? 1 : 0;
-    const openFactor = fromOpen + (toOpen - fromOpen) * eased;
-
-    return {
-      openFactor,
-      isOpening: toOpen > fromOpen,
-      isClosing: toOpen < fromOpen,
-    };
-  }
-
-  _addDoorTransitionVisionOverlays(THREE, nowMs) {
-    if (!this.params?.doorFogSyncEnabled) return;
-    if (!this._doorFogTransitions.size) return;
-
-    const walls = canvas?.walls?.placeables;
-    if (!Array.isArray(walls) || !walls.length) return;
-
-    const gridSize = Number(canvas?.dimensions?.size ?? 100);
-    const thicknessGrid = Number(this.params?.doorFogSyncThickness ?? this._doorFogThicknessGrid);
-    const halfThickness = Math.max(0.75, gridSize * Math.max(0.01, thicknessGrid)) * 0.5;
-    const offsetX = this.sceneRect.x;
-    const offsetY = this.sceneRect.y;
-
-    for (const wall of walls) {
-      const doc = wall?.document;
-      if (!doc) continue;
-      if (!(Number(doc.door ?? 0) > 0)) continue;
-
-      const state = this._getDoorFogTransitionState(doc.id, nowMs);
-      if (!state) continue;
-      // Opening: no raster overlay — only animated LOS segments (avoids vision=0 → solid fog).
-      if (!state.isClosing) continue;
-
-      const segments = this._getDoorTransitionLeafSegmentsFoundry(doc, state.openFactor);
-      for (const seg of segments) {
-        const leafPx = seg.x0 - offsetX;
-        const leafPy = seg.y0 - offsetY;
-        const ex = seg.x1 - offsetX;
-        const ey = seg.y1 - offsetY;
-        if (![leafPx, leafPy, ex, ey].every(Number.isFinite)) continue;
-
-        const segDx = ex - leafPx;
-        const segDy = ey - leafPy;
-        const segLen = Math.hypot(segDx, segDy);
-        if (segLen <= 0.001) continue;
-
-        const nx = -segDy / segLen;
-        const ny = segDx / segLen;
-        const ox = nx * halfThickness;
-        const oy = ny * halfThickness;
-
-        const shape = new THREE.Shape();
-        shape.moveTo(leafPx + ox, leafPy + oy);
-        shape.lineTo(ex + ox, ey + oy);
-        shape.lineTo(ex - ox, ey - oy);
-        shape.lineTo(leafPx - ox, leafPy - oy);
-        shape.closePath();
-
-        const opener = new THREE.Mesh(
-          new THREE.ShapeGeometry(shape),
-          new THREE.MeshBasicMaterial({
-            color: 0xffffff,
-            transparent: false,
-            depthWrite: false,
-            depthTest: false,
-            side: THREE.DoubleSide,
-          })
-        );
-        opener.renderOrder = 5;
-        this.visionScene.add(opener);
-      }
-    }
+    return { openFactor, isOpening, isClosing };
   }
 
   /**
@@ -2073,20 +2258,10 @@ export class FogOfWarEffectV2 {
    * @private
    */
   _renderVisionMask() {
-    if (!this.visionRenderTarget || !this.visionScene || !this.visionCamera) return;
+    if (!this.visionRenderTarget || !this.visionScene || !this.visionCamera || !this.renderer) return;
     
     const THREE = window.THREE;
-    
-    // Clear the vision scene
-    while (this.visionScene.children.length > 0) {
-      const child = this.visionScene.children[0];
-      this.visionScene.remove(child);
-      if (child.geometry) child.geometry.dispose();
-      if (child.material && child.material !== this.visionMaterial && child.material !== this.darknessMaterial) {
-        child.material.dispose();
-      }
-    }
-    
+
     const controlledTokens = this._getVisionDrivingTokens();
     const realGm = !!game?.user?.isGM;
 
@@ -2120,32 +2295,100 @@ export class FogOfWarEffectV2 {
     const baseWalls = canvas?.walls?.placeables ?? [];
     const levelWalls = levelsActive ? this._filterWallsForActiveElevationBand(baseWalls) : null;
     const nowMs = performance.now();
-    const doorTransitionData = this._buildDoorTransitionBlockingWalls(nowMs);
-    const doorTransitionBlockers = levelsActive
-      ? this._filterWallsForActiveElevationBand(doorTransitionData.blockers)
-      : doorTransitionData.blockers;
-    const transitioningDoorWallIds = doorTransitionData.transitioningWallIds;
-    const hasDoorTransitionLOSBlockers = doorTransitionBlockers.length > 0;
-    const polygonWalls = (levelsActive ? (levelWalls ?? []) : baseWalls).filter((w) => {
-      const wallId = String(w?.document?.id || '');
-      return !transitioningDoorWallIds.has(wallId);
-    });
-    const polygonWallsWithDoors = hasDoorTransitionLOSBlockers
-      ? polygonWalls.concat(doorTransitionBlockers)
-      : polygonWalls;
+    const polygonWalls = (levelsActive ? (levelWalls ?? []) : baseWalls);
+
+    const doorFogLosActive = this.params?.doorFogSyncEnabled !== false
+      && this._doorFogTransitions.size > 0;
+    const seamState = doorFogLosActive
+      ? this._collectDoorSeamBlendState(nowMs, levelsActive, levelWalls)
+      : null;
+    const forceClosedWallIds = seamState?.forceClosedWallIds ?? new Set();
+    const seamBlend = seamState?.blendFactor ?? 0;
+
+    const DOOR_SEAM_BLEND_EPS = 0.002;
+    let hasLimitedConeToken = false;
+    for (const t of controlledTokens) {
+      if (!this._tokenHasVisionCapability(t)) continue;
+      const sa = Number(t.document?.sight?.angle ?? 360);
+      if (Number.isFinite(sa) && sa < 360) {
+        hasLimitedConeToken = true;
+        break;
+      }
+    }
+
     const sceneRect = canvas?.dimensions?.sceneRect;
     const sceneBounds = sceneRect
       ? { x: sceneRect.x, y: sceneRect.y, width: sceneRect.width, height: sceneRect.height }
       : null;
 
-    // Categorize tokens into three groups:
-    // - tokensWithValidLOS: have a vision source with a valid polygon
-    // - tokensWaitingForLOS: have sight enabled and a vision source, but LOS hasn't computed yet
-    // - tokensWithoutSight: don't have sight enabled or have no vision source at all
-    // Only tokensWaitingForLOS should trigger retries. tokensWithoutSight are simply skipped.
+    const passes = (() => {
+      if (!doorFogLosActive || forceClosedWallIds.size === 0) {
+        return [{ force: null, outRT: this.visionRenderTarget }];
+      }
+      if (seamBlend <= DOOR_SEAM_BLEND_EPS) {
+        return [{ force: forceClosedWallIds, outRT: this.visionRenderTarget }];
+      }
+      if (seamBlend >= 1 - DOOR_SEAM_BLEND_EPS) {
+        return [{ force: null, outRT: this.visionRenderTarget }];
+      }
+      this._ensureVisionDoorSeamResources(THREE);
+      return [
+        { force: forceClosedWallIds, outRT: this._visionDoorSeamRTClosed },
+        { force: null, outRT: this._visionDoorSeamRTOpen },
+      ];
+    })();
+
+    try {
+      if (window.MapShine?.__debugDoorFog) {
+        const wallRows = [];
+        for (const wallId of this._doorFogTransitions.keys()) {
+          const st = this._getDoorFogTransitionState(wallId, nowMs);
+          if (!st) continue;
+          const live = this._readLiveDoorMeshOpenFactor(wallId);
+          wallRows.push({
+            wallId,
+            openFactor: st.openFactor,
+            factorSource: live != null ? 'mesh' : 'eased',
+            isOpening: !!st.isOpening,
+            isClosing: !!st.isClosing,
+          });
+        }
+        // Use log.info: default Map Shine log level is INFO, so log.debug is silent.
+        log.info('[DoorFogDebug] vision mask', {
+          doorFogSyncEnabled: this.params?.doorFogSyncEnabled !== false,
+          transitions: this._doorFogTransitions.size,
+          forceClosedWalls: forceClosedWallIds.size,
+          seamBlendMean: seamBlend,
+          doorFogLosActive,
+          polygonWallCount: polygonWalls.length,
+          passCount: passes.length,
+          twoPassSeamBlend: passes.length === 2,
+          hasLimitedConeToken,
+          walls: wallRows,
+        });
+      }
+    } catch (_) {}
+
     let polygonsRendered = 0;
     let tokensWaitingForLOS = 0;
     let tokensWithoutSight = 0;
+
+    for (let i = 0; i < passes.length; i++) {
+      const pass = passes[i];
+      this._visionComputeForceClosedIds = pass.force && pass.force.size ? pass.force : null;
+
+      polygonsRendered = 0;
+      tokensWaitingForLOS = 0;
+      tokensWithoutSight = 0;
+
+      while (this.visionScene.children.length > 0) {
+        const child = this.visionScene.children[0];
+        this.visionScene.remove(child);
+        if (child.geometry) child.geometry.dispose();
+        if (child.material && child.material !== this.visionMaterial && child.material !== this.darknessMaterial) {
+          child.material.dispose();
+        }
+      }
 
     for (const token of controlledTokens) {
       const visionSource = token.vision;
@@ -2154,17 +2397,28 @@ export class FogOfWarEffectV2 {
       // Prefer MapShine's custom LOS polygon for all sight-capable 360-vision
       // tokens. This keeps fog behavior consistent across token types/systems
       // (PC/NPC, PF2e bestiary imports, etc.) even when Foundry visionSource
-      // objects are missing or delayed. Non-360 cones still use Foundry fallback.
+      // objects are missing or delayed. During door-fog sync, also force this path
+      // for limited sight so animated door leaves affect vision (Foundry's cone
+      // polygon would otherwise snap on ds).
       if (hasSight) {
         const sightAngle = Number(token.document?.sight?.angle ?? 360);
-        const useCustomPolygon = !Number.isFinite(sightAngle) || sightAngle >= 360;
+        const useCustomPolygon = doorFogLosActive
+          || !Number.isFinite(sightAngle) || sightAngle >= 360;
         if (useCustomPolygon) {
-          const customPoints = this._computeTokenVisionPolygonPoints(token, polygonWallsWithDoors, sceneBounds);
+          const customPoints = this._computeTokenVisionPolygonPoints(token, polygonWalls, sceneBounds);
           if (customPoints && customPoints.length >= 6) {
             this._addPolygonPointsToVisionScene(customPoints, THREE);
             polygonsRendered++;
             continue;
           }
+          try {
+            if (window.MapShine?.__debugDoorFog) {
+              log.info('[DoorFogDebug] custom LOS unavailable', {
+                token: token?.name,
+                hasForceClosed: !!(this._visionComputeForceClosedIds && this._visionComputeForceClosedIds.size),
+              });
+            }
+          } catch (_) {}
         }
       }
 
@@ -2463,29 +2717,34 @@ export class FogOfWarEffectV2 {
       log.warn('Failed to render revealTokenInFog bubbles:', e);
     }
 
-    // Door-fog transition overlays (closing only): white strip softens re-occlusion.
-    // Opening intentionally has no raster overlay — black quads zero vision and
-    // read as solid fog through the doorway (especially with vision SDF).
-    try {
-      this._addDoorTransitionVisionOverlays(THREE, nowMs);
-    } catch (e) {
-      log.warn('Failed to render door transition fog overlays:', e);
+      const currentTargetPass = this.renderer.getRenderTarget();
+      const currentClearColorPass = this.renderer.getClearColor(new THREE.Color());
+      const currentClearAlphaPass = this.renderer.getClearAlpha();
+
+      this.renderer.setRenderTarget(pass.outRT);
+      this.renderer.setClearColor(0x000000, 1);
+      this.renderer.clear();
+      this.renderer.render(this.visionScene, this.visionCamera);
+
+      this.renderer.setRenderTarget(currentTargetPass);
+      this.renderer.setClearColor(currentClearColorPass, currentClearAlphaPass);
     }
-    
-    // Render to the vision target (always render, even if no polygons ->->
-    // that gives us a black texture = "nothing visible" = full fog)
-    const currentTarget = this.renderer.getRenderTarget();
-    const currentClearColor = this.renderer.getClearColor(new THREE.Color());
-    const currentClearAlpha = this.renderer.getClearAlpha();
-    
-    this.renderer.setRenderTarget(this.visionRenderTarget);
-    this.renderer.setClearColor(0x000000, 1);
-    this.renderer.clear();
-    this.renderer.render(this.visionScene, this.visionCamera);
-    
-    this.renderer.setRenderTarget(currentTarget);
-    this.renderer.setClearColor(currentClearColor, currentClearAlpha);
-    
+
+    this._visionComputeForceClosedIds = null;
+
+    if (passes.length === 2 && seamState) {
+      try {
+        this._compositeDoorSeamVisionFromPasses(
+          THREE,
+          seamBlend,
+          hasLimitedConeToken,
+          controlledTokens
+        );
+      } catch (e) {
+        log.warn('Door seam vision composite failed:', e);
+      }
+    }
+
     // Determine result state.
     //
     // Key distinction: tokens without sight are NOT "invalid" ->-> they simply
@@ -2789,6 +3048,10 @@ export class FogOfWarEffectV2 {
       const options = Number.isFinite(viewerElevation)
         ? { sense: 'sight', elevation: viewerElevation }
         : { sense: 'sight' };
+      const fc = this._visionComputeForceClosedIds;
+      if (fc instanceof Set && fc.size > 0) {
+        options.forceClosedDoorWallIds = fc;
+      }
 
       const computed = this._visionPolygonComputer.compute(
         { x: centerX, y: centerY },
@@ -3644,6 +3907,8 @@ export class FogOfWarEffectV2 {
     if (this.visionRenderTarget) {
       this.visionRenderTarget.dispose();
     }
+
+    this._disposeVisionDoorSeamResources(window.THREE);
     
     // Dispose exploration render targets
     if (this._explorationTargetA) {

@@ -38,7 +38,16 @@ import {
   normalizeFoundryAssetUrlKey,
   getViewedV14Level,
 } from '../foundry/levels-scene-flags.js';
-import { isTileOverhead, getTileVisualCenterFoundryXY, getTileBusPlaneSizeAndMirror, tileDocRestrictsLight } from '../scene/tile-manager.js';
+import {
+  isTileOverhead,
+  getTileVisualCenterFoundryXY,
+  getTileBusPlaneSizeAndMirror,
+  tileDocRestrictsLight,
+  getTileOcclusionModeFlags,
+  installBusMeshRadialOcclusionShader,
+  applyRadialOcclusionUniformsToShader,
+  applyFoundryOcclusionMaskBusUniforms,
+} from '../scene/tile-manager.js';
 import {
   RENDER_ORDER_PER_FLOOR,
   GROUND_Z,
@@ -392,6 +401,11 @@ export class FloorRenderBus {
       // Create mesh immediately with null texture (invisible until loaded).
       const restrictsLight = tileDocRestrictsLight(tileDoc);
       this._addTileMesh(tileId, floorIndex, null, centerX, centerY, z, tileW, tileH, rotation, alpha, renderOrder, isOverhead, roofShadowCaster, cloudShadowBlockerEnabled, planeSignX, planeSignY, restrictsLight);
+
+      const entryRadial = this._tiles.get(tileId);
+      if (entryRadial?.material && (getTileOcclusionModeFlags(tileDoc) & CONST.TILE_OCCLUSION_MODES.RADIAL)) {
+        installBusMeshRadialOcclusionShader(entryRadial.material);
+      }
 
       // Load texture via THREE.TextureLoader — HTML <img>, straight alpha.
       this._loader.load(src, (tex) => {
@@ -761,10 +775,28 @@ export class FloorRenderBus {
    * effective sprite opacity onto bus materials each frame so overhead hover-hide
    * is visible in the final V2 render.
    */
-  syncRuntimeTileState() {
+  /**
+   * @param {import('./ReplicaOcclusionMaskPass.js').ReplicaOcclusionMaskPass|null} [occlusionMaskPass]
+   */
+  syncRuntimeTileState(occlusionMaskPass = null) {
     if (!this._initialized) return;
     const tileManager = window.MapShine?.tileManager;
     if (!tileManager || typeof tileManager.getTileSpriteData !== 'function') return;
+
+    const occBridge = occlusionMaskPass
+      ?? window.MapShine?.floorCompositorV2?._replicaOcclusionMaskPass
+      ?? window.MapShine?.effectComposer?._floorCompositorV2?._replicaOcclusionMaskPass
+      ?? null;
+
+    // V2 bus reads _msRadialCircles from TileManager; TileManager.update() may be
+    // sub-rate (EffectComposer updateHz). Refresh circles every compositor sync so
+    // radial uniforms match tokens at full frame rate.
+    try {
+      if (typeof tileManager.syncRadialOcclusionCirclesForBus === 'function') {
+        tileManager.syncRadialOcclusionCirclesForBus();
+      }
+    } catch (_) {
+    }
 
     for (const [tileId, entry] of this._tiles) {
       if (!entry?.material) continue;
@@ -799,18 +831,39 @@ export class FloorRenderBus {
         uniforms.uTileOpacity.value = targetOpacity;
       }
 
-      let doc = data?.tileDoc;
-      if (!doc && sourceTileId && canvas?.scene?.tiles) {
-        try {
-          doc = canvas.scene.tiles.get?.(sourceTileId) ?? null;
-        } catch (_) {
-          doc = null;
-        }
+      // Prefer live Foundry TileDocument (v14 occlusion.modes); cached Map Shine tileDoc can lag updates.
+      let doc = null;
+      try {
+        if (sourceTileId && canvas?.scene?.tiles?.get) doc = canvas.scene.tiles.get(sourceTileId) ?? null;
+      } catch (_) {
+        doc = null;
       }
+      if (!doc) doc = data?.tileDoc ?? null;
       if (doc && entry.mesh?.userData && entry.root?.userData) {
         const rl = !!tileDocRestrictsLight(doc);
         if (entry.mesh.userData.restrictsLight !== rl) entry.mesh.userData.restrictsLight = rl;
         if (entry.root.userData.restrictsLight !== rl) entry.root.userData.restrictsLight = rl;
+      }
+
+      const tileDocForRadial = doc;
+      if (tileDocForRadial && (getTileOcclusionModeFlags(tileDocForRadial) & CONST.TILE_OCCLUSION_MODES.RADIAL)) {
+        installBusMeshRadialOcclusionShader(entry.material);
+        const busSh = entry.material?.userData?._msBusRadialOcclusionShader;
+        const circles = Array.isArray(data?._msRadialCircles) ? data._msRadialCircles : [];
+        const radialOn = !!(getTileOcclusionModeFlags(tileDocForRadial) & CONST.TILE_OCCLUSION_MODES.RADIAL);
+        applyRadialOcclusionUniformsToShader(busSh, tileDocForRadial, circles, radialOn);
+        applyFoundryOcclusionMaskBusUniforms(busSh, tileDocForRadial, occBridge, true);
+      } else {
+        const busSh = entry.material?.userData?._msBusRadialOcclusionShader;
+        if (busSh) {
+          const d = tileDocForRadial || doc;
+          if (d) {
+            applyRadialOcclusionUniformsToShader(busSh, d, [], false);
+            applyFoundryOcclusionMaskBusUniforms(busSh, d, occBridge, false);
+          } else {
+            applyFoundryOcclusionMaskBusUniforms(busSh, null, occBridge, false);
+          }
+        }
       }
     }
   }
@@ -932,6 +985,8 @@ export class FloorRenderBus {
     entry.roofShadowCaster = !!roofShadowCaster;
 
     if (entry.material) {
+      entry.material.userData = entry.material.userData || {};
+      entry.material.userData.foundryTileId = tileId;
       entry.material.opacity = alpha;
       entry.material.alphaTest = (floorIndex > 0 && Number(alpha) >= 0.95)
         ? UPPER_FLOOR_ALPHA_CUTOFF
@@ -956,6 +1011,11 @@ export class FloorRenderBus {
 
     if (src && prevSrc !== src) {
       this._loadTileTextureIntoEntry(tileId, src, floorIndex);
+    }
+
+    const entryRadialUpsert = this._tiles.get(tileId);
+    if (entryRadialUpsert?.material && (getTileOcclusionModeFlags(tileDoc) & CONST.TILE_OCCLUSION_MODES.RADIAL)) {
+      installBusMeshRadialOcclusionShader(entryRadialUpsert.material);
     }
 
     return true;
@@ -1956,6 +2016,8 @@ export class FloorRenderBus {
       alphaTest: (floorIndex > 0 && Number(alpha) >= 0.95) ? UPPER_FLOOR_ALPHA_CUTOFF : 0.0,
       premultipliedAlpha: floorIndex > 0,
     });
+    mat.userData = mat.userData || {};
+    mat.userData.foundryTileId = tileId;
 
     const geom = new THREE.PlaneGeometry(w, h);
     const mesh = new THREE.Mesh(geom, mat);

@@ -47,6 +47,7 @@ import { createLogger } from '../core/log.js';
 import { yieldToMain } from '../core/yield-to-main.js';
 import { OVERLAY_THREE_LAYER } from '../core/render-layers.js';
 import { FloorRenderBus } from './FloorRenderBus.js';
+import { ReplicaOcclusionMaskPass } from './ReplicaOcclusionMaskPass.js';
 import { SpecularEffectV2 } from './effects/SpecularEffectV2.js';
 import { FireEffectV2 } from './effects/FireEffectV2.js';
 import { WindowLightEffectV2 } from './effects/WindowLightEffectV2.js';
@@ -142,6 +143,13 @@ export class FloorCompositor {
      * @type {FloorRenderBus}
      */
     this._renderBus = new FloorRenderBus();
+
+    /**
+     * Option B: Map Shine GPU occlusion RT (radial holes) matching Foundry semantics,
+     * without PIXI `extract.canvas` readback.
+     * @type {ReplicaOcclusionMaskPass}
+     */
+    this._replicaOcclusionMaskPass = new ReplicaOcclusionMaskPass();
 
     /**
      * V2 Specular Effect: per-tile additive overlays driven by _Specular masks.
@@ -2147,6 +2155,28 @@ export class FloorCompositor {
   }
 
   /**
+   * Resize + render the replica occlusion mask RT before bus materials sample it.
+   *
+   * @private
+   */
+  _prepareBusOcclusionMaskBeforeBus() {
+    const pass = this._replicaOcclusionMaskPass;
+    if (!pass || typeof pass.setBusRenderTargetSize !== 'function') return;
+    const rt = this._sceneRT;
+    if (rt?.width > 0 && rt?.height > 0) {
+      pass.setBusRenderTargetSize(rt.width, rt.height);
+    } else if (this.renderer && typeof this.renderer.getDrawingBufferSize === 'function') {
+      const THREE = window.THREE;
+      if (!this._sizeVec) this._sizeVec = new THREE.Vector2();
+      this.renderer.getDrawingBufferSize(this._sizeVec);
+      pass.setBusRenderTargetSize(this._sizeVec.x, this._sizeVec.y);
+    }
+    try {
+      pass.update(this.renderer, this.camera);
+    } catch (_) {}
+  }
+
+  /**
    * Bus albedo + screen blit only (no lighting / water / bloom). All log lines
    * include POPULATE for filtering.
    *
@@ -2163,7 +2193,8 @@ export class FloorCompositor {
       );
     }
     try {
-      this._renderBus?.syncRuntimeTileState?.();
+      this._prepareBusOcclusionMaskBeforeBus();
+      this._renderBus?.syncRuntimeTileState?.(this._replicaOcclusionMaskPass);
     } catch (err) {
       log.warn('[POPULATE RENDER-SLIM] syncRuntimeTileState threw:', err);
     }
@@ -3390,7 +3421,8 @@ export class FloorCompositor {
     // roof-visibility pass must see runtime fade alpha to avoid stale clipping
     // holes in building shadows.
     try {
-      this._renderBus?.syncRuntimeTileState?.();
+      this._prepareBusOcclusionMaskBeforeBus();
+      this._renderBus?.syncRuntimeTileState?.(this._replicaOcclusionMaskPass);
     } catch (_) {}
 
     const _dynamicLightOverride = this._buildDynamicLightOverridePayload();
@@ -5837,6 +5869,8 @@ export class FloorCompositor {
     try { this._distortionEffect?.dispose?.(); } catch (_) {}
     try { this._floorDepthBlurEffect?.dispose?.(); } catch (_) {}
     try { this._maskDebugOverlayPass?.dispose?.(); } catch (_) {}
+    try { this._replicaOcclusionMaskPass?.dispose?.(); } catch (_) {}
+    this._replicaOcclusionMaskPass = null;
     try { this._renderBus?.dispose?.(); } catch (_) {}
     this._busPopulated = false;
     this._populateComplete = false;

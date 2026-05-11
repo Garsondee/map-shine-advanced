@@ -113,7 +113,9 @@ export class ControlPanelManager {
         torch: 'global',
         flashlight: 'global',
         nightVision: 'global'
-      }
+      },
+      replicaOcclusionRadiusScale: 35.0,
+      replicaOcclusionEdgeSoftness: 1.0
     };
 
     this._suppressInitialWeatherApply = false;
@@ -160,6 +162,15 @@ export class ControlPanelManager {
 
     /** @type {HTMLElement|null} */
     this.headerOverlay = null;
+
+    /** Plain DOM for overhead occlusion sliders (Tweakpane number blades do not drag reliably here). */
+    this._replicaOcclDomBuilt = false;
+
+    /** @type {{ root: HTMLElement, rangeR: HTMLInputElement, numR: HTMLInputElement, rangeE: HTMLInputElement, numE: HTMLInputElement }|null} */
+    this._replicaOcclDom = null;
+
+    /** Skip replica-occlusion DOM handlers while mirroring from `controlState`. */
+    this._suppressReplicaOcclDom = false;
 
     /** @type {HTMLInputElement|null} Custom time transition input (replaces Tweakpane binding) */
     this._timeTransitionInput = null;
@@ -404,6 +415,7 @@ export class ControlPanelManager {
     this._buildTimeSection(masterFolder, { expanded: true, registerTopLevel: false });
     this._buildQuickSceneBeatsSection(masterFolder, { expanded: true, registerTopLevel: false });
     this._buildTileMotionSection(masterFolder, { expanded: false, registerTopLevel: false });
+    this._buildOverheadOcclusionSection(masterFolder, { expanded: false, registerTopLevel: false });
     this._buildPlayerLightsSection(masterFolder, { expanded: false, registerTopLevel: false });
     this._buildWeatherSection(masterFolder, { expanded: false, registerTopLevel: false });
     this._buildWindSection(masterFolder, { expanded: false, registerTopLevel: false });
@@ -3347,6 +3359,172 @@ export class ControlPanelManager {
   }
 
   /**
+   * V2 replica overhead occlusion: radius + soft edge (Map Shine Control → scene flag).
+   * @private
+   */
+  _buildOverheadOcclusionSection(parentFolder = this.pane, options = undefined) {
+    const targetFolder = parentFolder || this.pane;
+    const folder = targetFolder.addFolder({
+      title: options?.title ?? '🔳 Overhead occlusion',
+      expanded: options?.expanded ?? false
+    });
+    if (options?.registerTopLevel !== false && targetFolder === this.pane) this._registerTopLevelFolder(folder);
+    this._ensureFolderTag(folder, 'overheadOccl', 'V2');
+
+    const canEdit = isGmLike();
+    const content = folder.element.querySelector('.tp-fldv_c') || folder.element;
+    if (!canEdit) {
+      const reason = document.createElement('div');
+      reason.textContent = 'GM only: radial roof cutout tuning for Map Shine V2 bus.';
+      reason.style.cssText = 'font-size:11px;opacity:0.78;margin:4px 8px 8px';
+      content.appendChild(reason);
+    }
+
+    const clampR = (x) => {
+      const n = Number(x);
+      return Number.isFinite(n) ? Math.max(0.05, Math.min(100, n)) : 35.0;
+    };
+    const clampE = (x) => {
+      const n = Number(x);
+      return Number.isFinite(n) ? Math.max(0, Math.min(100, n)) : 1.0;
+    };
+    this.controlState.replicaOcclusionRadiusScale = clampR(this.controlState.replicaOcclusionRadiusScale);
+    this.controlState.replicaOcclusionEdgeSoftness = clampE(this.controlState.replicaOcclusionEdgeSoftness);
+
+    const hint = document.createElement('div');
+    hint.textContent = 'Radius × 0.05–100 (default 35). Soft edge 0–100: replica rim + roof blend (try 20–80).';
+    hint.style.cssText = 'font-size:10px;opacity:0.65;margin:2px 8px 6px;line-height:1.35';
+    content.appendChild(hint);
+
+    if (this._replicaOcclDomBuilt) return;
+
+    const root = document.createElement('div');
+    root.className = 'map-shine-live-wx';
+    root.dataset.msReplicaOccl = '1';
+
+    const mkRow = (labelText, min, max, step) => {
+      const rowEl = document.createElement('div');
+      rowEl.className = 'map-shine-live-wx-row';
+      const lbl = document.createElement('span');
+      lbl.className = 'map-shine-live-wx-lbl';
+      lbl.textContent = labelText;
+      lbl.title = labelText;
+      const range = document.createElement('input');
+      range.type = 'range';
+      range.min = String(min);
+      range.max = String(max);
+      range.step = String(step);
+      range.setAttribute('aria-label', labelText);
+      const num = document.createElement('input');
+      num.type = 'number';
+      num.className = 'map-shine-live-wx-num';
+      num.min = String(min);
+      num.max = String(max);
+      num.step = String(step);
+      num.setAttribute('aria-label', `${labelText} value`);
+      rowEl.appendChild(lbl);
+      rowEl.appendChild(range);
+      rowEl.appendChild(num);
+      root.appendChild(rowEl);
+      return { rowEl, range, number: num };
+    };
+
+    const rRow = mkRow('Hole radius ×', 0.05, 100, 0.5);
+    const eRow = mkRow('Soft edge', 0, 100, 1);
+
+    const wirePair = (range, num, clampFn, key) => {
+      const finalize = (doSave) => {
+        const c = clampFn(this.controlState[key]);
+        this.controlState[key] = c;
+        this._suppressReplicaOcclDom = true;
+        try {
+          range.value = String(c);
+          num.value = String(c);
+        } catch (_) {
+        }
+        this._suppressReplicaOcclDom = false;
+        if (doSave) this.debouncedSave();
+      };
+
+      range.addEventListener('input', () => {
+        if (this._suppressReplicaOcclDom) return;
+        const v = range.valueAsNumber;
+        if (!Number.isFinite(v)) return;
+        const c = clampFn(v);
+        this.controlState[key] = c;
+        num.value = String(c);
+      });
+      range.addEventListener('change', () => {
+        if (this._suppressReplicaOcclDom) return;
+        const v = range.valueAsNumber;
+        if (Number.isFinite(v)) this.controlState[key] = clampFn(v);
+        finalize(true);
+      });
+
+      num.addEventListener('input', () => {
+        if (this._suppressReplicaOcclDom) return;
+        const v = parseFloat(num.value);
+        if (!Number.isFinite(v)) return;
+        const c = clampFn(v);
+        this.controlState[key] = c;
+        range.value = String(c);
+      });
+      num.addEventListener('change', () => {
+        if (this._suppressReplicaOcclDom) return;
+        const v = parseFloat(num.value);
+        if (Number.isFinite(v)) this.controlState[key] = clampFn(v);
+        finalize(true);
+      });
+
+      range.disabled = !canEdit;
+      num.disabled = !canEdit;
+    };
+
+    wirePair(rRow.range, rRow.number, clampR, 'replicaOcclusionRadiusScale');
+    wirePair(eRow.range, eRow.number, clampE, 'replicaOcclusionEdgeSoftness');
+
+    content.appendChild(root);
+    this._replicaOcclDom = {
+      root,
+      rangeR: rRow.range,
+      numR: rRow.number,
+      rangeE: eRow.range,
+      numE: eRow.number,
+    };
+    this._replicaOcclDomBuilt = true;
+    this._syncReplicaOcclDomFromControlState();
+  }
+
+  /**
+   * Mirror `controlState` → replica occlusion range/number inputs (after flag load / sanitize).
+   * @private
+   */
+  _syncReplicaOcclDomFromControlState() {
+    if (!this._replicaOcclDomBuilt || !this._replicaOcclDom || !this.controlState) return;
+    const clampR = (x) => {
+      const n = Number(x);
+      return Number.isFinite(n) ? Math.max(0.05, Math.min(100, n)) : 35.0;
+    };
+    const clampE = (x) => {
+      const n = Number(x);
+      return Number.isFinite(n) ? Math.max(0, Math.min(100, n)) : 1.0;
+    };
+    const r = clampR(this.controlState.replicaOcclusionRadiusScale);
+    const e = clampE(this.controlState.replicaOcclusionEdgeSoftness);
+    this.controlState.replicaOcclusionRadiusScale = r;
+    this.controlState.replicaOcclusionEdgeSoftness = e;
+    this._suppressReplicaOcclDom = true;
+    try {
+      this._replicaOcclDom.rangeR.value = String(r);
+      this._replicaOcclDom.numR.value = String(r);
+      this._replicaOcclDom.rangeE.value = String(e);
+      this._replicaOcclDom.numE.value = String(e);
+    } catch (_) {
+    }
+    this._suppressReplicaOcclDom = false;
+  }
+
+  /**
    * GM: per-scene Player Light mode allowances + world global defaults.
    * @private
    */
@@ -3759,7 +3937,9 @@ export class ControlPanelManager {
       tileMotionSpeedPercent: 100,
       tileMotionAutoPlayEnabled: true,
       tileMotionTimeFactorPercent: 100,
-      tileMotionPaused: false
+      tileMotionPaused: false,
+      replicaOcclusionRadiusScale: 35.0,
+      replicaOcclusionEdgeSoftness: 1.0
     };
     this._ensureDirectedCustomPreset();
     this._lastWeatherControlFingerprint = null;
@@ -3777,6 +3957,7 @@ export class ControlPanelManager {
     if (this.pane) {
       this.pane.refresh();
     }
+    this._sanitizeControlStateForTweakpaneBindings();
     this._updateCustomTimeControls();
 
     ui.notifications?.info('Control panel reset to defaults');
@@ -3837,6 +4018,7 @@ Current Weather:
   _sanitizeControlStateForTweakpaneBindings() {
     sanitizeControlStateInPlace(this.controlState, { silent: false });
     this._ensureDirectedCustomPreset();
+    this._syncReplicaOcclDomFromControlState();
   }
 
   /**

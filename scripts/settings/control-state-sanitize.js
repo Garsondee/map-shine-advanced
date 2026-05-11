@@ -75,7 +75,11 @@ export function createDefaultControlState() {
       torch: 'global',
       flashlight: 'global',
       nightVision: 'global'
-    }
+    },
+    /** V2 bus replica overhead occlusion: multiplies radial radius in buffer space (0.05–100). */
+    replicaOcclusionRadiusScale: 35.0,
+    /** Soft rim width 0–100 (1 = default; higher = wider smoothstep). */
+    replicaOcclusionEdgeSoftness: 1.0
   };
 }
 
@@ -168,6 +172,11 @@ export function sanitizeControlStateInPlace(cs, options = {}) {
   if (typeof cs.dynamicEnabled !== 'boolean') cs.dynamicEnabled = false;
   if (typeof cs.dynamicPaused !== 'boolean') cs.dynamicPaused = false;
   if (typeof cs.linkTimeToFoundry !== 'boolean') cs.linkTimeToFoundry = false;
+
+  const rScale = Number(cs.replicaOcclusionRadiusScale);
+  cs.replicaOcclusionRadiusScale = Number.isFinite(rScale) ? Math.max(0.05, Math.min(100, rScale)) : 35.0;
+  const eSoft = Number(cs.replicaOcclusionEdgeSoftness);
+  cs.replicaOcclusionEdgeSoftness = Number.isFinite(eSoft) ? Math.max(0, Math.min(100, eSoft)) : 1.0;
 
   if (!cs.directedCustomPreset || typeof cs.directedCustomPreset !== 'object') {
     cs.directedCustomPreset = { ...createDefaultControlState().directedCustomPreset };

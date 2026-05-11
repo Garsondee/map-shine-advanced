@@ -147,6 +147,418 @@ export function getTileBusPlaneSizeAndMirror(tileDoc) {
   return { dispW, dispH, signX, signY };
 }
 
+/** Max tokens contributing to radial occlusion per tile (shader uniform slots). */
+export const TILE_RADIAL_OCCLUSION_TOKEN_CAP = 8;
+
+// Three.js calls onBeforeCompile with fresh ShaderLib source on every program rebuild.
+// Guards like !fragment.includes('ms_radialAlphaModFromUv') always pass on that template,
+// so without anchors we re-inject duplicate uniforms/functions → GL compile errors or
+// runaway alpha multiplies. Anchors must be literal strings inside the patched GLSL.
+const MS_GLSL_BUS_RADIAL_GL_ANCHOR = '// MS_BUS_RADIAL_GL';
+const MS_GLSL_BUS_RADIAL_OPAQUE_ANCHOR = '// MS_BUS_RADIAL_OPAQUE';
+
+/** @type {import('three').DataTexture|null} */
+let _msBusDummyOccTex = null;
+
+function getMsBusDummyOccTexture(THREE) {
+  if (!_msBusDummyOccTex && THREE) {
+    const d = new Uint8Array([255, 255, 255, 255]);
+    _msBusDummyOccTex = new THREE.DataTexture(d, 1, 1, THREE.RGBAFormat);
+    _msBusDummyOccTex.needsUpdate = true;
+  }
+  return _msBusDummyOccTex;
+}
+
+function resolveReplicaOcclusionMaskPass() {
+  return window.MapShine?.floorCompositorV2?._replicaOcclusionMaskPass
+    ?? window.MapShine?.effectComposer?._floorCompositorV2?._replicaOcclusionMaskPass
+    ?? null;
+}
+const MS_GLSL_SPRITE_CC_GL_ANCHOR = '// MS_SPRITE_CC_GL';
+const MS_GLSL_SPRITE_CC_OPAQUE_ANCHOR = '// MS_SPRITE_CC_OPAQUE';
+const MS_GLSL_SPRITE_CC_OUTPUT_ANCHOR = '// MS_SPRITE_CC_OUTPUT';
+const MS_GLSL_SPRITE_CC_OUTGOING_ANCHOR = '// MS_SPRITE_CC_OUTGOING';
+
+// Three.js: textured MeshBasic/Sprite use vMapUv under USE_MAP; vUv exists only with USE_UV / USE_ANISOTROPY.
+const MS_RADIAL_GL_TILE_SURFACE_UV = `
+vec2 ms_tileSurfaceUv() {
+#if defined( USE_MAP )
+	return vMapUv;
+#elif defined( USE_UV ) || defined( USE_ANISOTROPY )
+	return vUv;
+#else
+	return vec2( 0.5 );
+#endif
+}
+`;
+
+/**
+ * Bitmask of Foundry tile occlusion modes (v14 `occlusion.modes` set/array, or legacy `occlusion.mode`).
+ * @param {object|null|undefined} tileDoc
+ * @returns {number}
+ */
+export function getTileOcclusionModeFlags(tileDoc) {
+  const NONE = (typeof CONST !== 'undefined' && CONST.TILE_OCCLUSION_MODES)
+    ? CONST.TILE_OCCLUSION_MODES.NONE
+    : 0;
+  const o = tileDoc?.occlusion ?? tileDoc?._source?.occlusion;
+  if (!o || typeof o !== 'object') return NONE;
+
+  let flags = NONE;
+  const modes = o.modes;
+  if (modes != null) {
+    if (modes instanceof Set) {
+      for (const m of modes) {
+        const v = Number(m);
+        if (Number.isFinite(v)) flags |= v;
+      }
+    } else if (typeof modes.forEach === 'function' && !Array.isArray(modes)) {
+      try {
+        modes.forEach((m) => {
+          const v = Number(m);
+          if (Number.isFinite(v)) flags |= v;
+        });
+      } catch (_) {
+      }
+    } else if (Array.isArray(modes)) {
+      for (let i = 0; i < modes.length; i++) {
+        const v = Number(modes[i]);
+        if (Number.isFinite(v)) flags |= v;
+      }
+    } else if (modes && typeof modes[Symbol.iterator] === 'function' && typeof modes !== 'string') {
+      try {
+        for (const m of modes) {
+          const v = Number(m);
+          if (Number.isFinite(v)) flags |= v;
+        }
+      } catch (_) {
+      }
+    }
+  }
+  if (flags === NONE && o.mode != null) {
+    const v = Number(o.mode);
+    if (Number.isFinite(v)) flags |= v;
+  }
+  return flags;
+}
+
+/**
+ * Install radial occlusion fragment patch on a MeshBasicMaterial (V2 FloorRenderBus).
+ * Uses tile UV → Foundry XY (same mapping as hover bounds). Idempotent per material.
+ * @param {import('three').MeshBasicMaterial} material
+ */
+export function installBusMeshRadialOcclusionShader(material) {
+  const THREE = window.THREE;
+  if (!material || !THREE || material.userData?._msBusRadialOcclusionInstalled) return;
+  material.userData._msBusRadialOcclusionInstalled = true;
+
+  const radialUniformBlock = `${MS_GLSL_BUS_RADIAL_GL_ANCHOR}
+${MS_RADIAL_GL_TILE_SURFACE_UV}
+uniform float uMsRadialEnabled;
+uniform float uMsRadialOcclAlpha;
+uniform int uMsRadialCount;
+uniform float uMsTileFoundryCx;
+uniform float uMsTileFoundryCy;
+uniform float uMsTileHalfW;
+uniform float uMsTileHalfH;
+uniform float uMsTileFlipX;
+uniform float uMsTileFlipY;
+uniform float uMsTileCos;
+uniform float uMsTileSin;
+uniform vec4 uMsRadial0;
+uniform vec4 uMsRadial1;
+uniform vec4 uMsRadial2;
+uniform vec4 uMsRadial3;
+uniform vec4 uMsRadial4;
+uniform vec4 uMsRadial5;
+uniform vec4 uMsRadial6;
+uniform vec4 uMsRadial7;
+
+uniform float uMsBusFoundryOccl;
+uniform sampler2D uMsFoundryOccTex;
+uniform vec2 uMsFoundryInvBuf;
+uniform float uMsFoundryOccElev;
+uniform float uMsFoundryFade;
+uniform float uMsFoundryRadial;
+uniform float uMsFoundryVision;
+uniform float uMsFoundrySurface;
+uniform float uMsFoundryUnoccA;
+uniform float uMsFoundryOccA;
+
+float ms_radialTokenFactor(vec2 fxy, vec4 tok) {
+  if (tok.z <= 0.001) return 1.0;
+  float dist = length(fxy - tok.xy);
+  float fw = max(2.0, tok.z * 0.04);
+  float hole = 1.0 - smoothstep(tok.z - fw, tok.z + fw, dist);
+  return mix(1.0, uMsRadialOcclAlpha, hole);
+}
+
+float ms_radialAlphaModFromUv(vec2 uv) {
+  if (uMsRadialEnabled < 0.5 || uMsRadialCount < 1) return 1.0;
+  float u = uv.x;
+  float v = uv.y;
+  if (uMsTileFlipX < 0.0) u = 1.0 - u;
+  if (uMsTileFlipY < 0.0) v = 1.0 - v;
+  float lx = (u - 0.5) * (uMsTileHalfW * 2.0);
+  float ly = (v - 0.5) * (uMsTileHalfH * 2.0);
+  float dx = lx * uMsTileCos - ly * uMsTileSin;
+  float dy = lx * uMsTileSin + ly * uMsTileCos;
+  vec2 fxy = vec2(uMsTileFoundryCx + dx, uMsTileFoundryCy + dy);
+  float m = 1.0;
+  if (uMsRadialCount > 0) m = min(m, ms_radialTokenFactor(fxy, uMsRadial0));
+  if (uMsRadialCount > 1) m = min(m, ms_radialTokenFactor(fxy, uMsRadial1));
+  if (uMsRadialCount > 2) m = min(m, ms_radialTokenFactor(fxy, uMsRadial2));
+  if (uMsRadialCount > 3) m = min(m, ms_radialTokenFactor(fxy, uMsRadial3));
+  if (uMsRadialCount > 4) m = min(m, ms_radialTokenFactor(fxy, uMsRadial4));
+  if (uMsRadialCount > 5) m = min(m, ms_radialTokenFactor(fxy, uMsRadial5));
+  if (uMsRadialCount > 6) m = min(m, ms_radialTokenFactor(fxy, uMsRadial6));
+  if (uMsRadialCount > 7) m = min(m, ms_radialTokenFactor(fxy, uMsRadial7));
+  return m;
+}
+`;
+
+  const prev = material.onBeforeCompile;
+  material.onBeforeCompile = (shader) => {
+    if (typeof prev === 'function') prev(shader);
+    material.userData._msBusRadialOcclusionShader = shader;
+
+    if (!shader.uniforms.uMsRadialEnabled) {
+      shader.uniforms.uMsRadialEnabled = { value: 0.0 };
+      shader.uniforms.uMsRadialOcclAlpha = { value: 0.0 };
+      shader.uniforms.uMsRadialCount = { value: 0 };
+      shader.uniforms.uMsTileFoundryCx = { value: 0.0 };
+      shader.uniforms.uMsTileFoundryCy = { value: 0.0 };
+      shader.uniforms.uMsTileHalfW = { value: 1.0 };
+      shader.uniforms.uMsTileHalfH = { value: 1.0 };
+      shader.uniforms.uMsTileFlipX = { value: 1.0 };
+      shader.uniforms.uMsTileFlipY = { value: 1.0 };
+      shader.uniforms.uMsTileCos = { value: 1.0 };
+      shader.uniforms.uMsTileSin = { value: 0.0 };
+      for (let i = 0; i < TILE_RADIAL_OCCLUSION_TOKEN_CAP; i++) {
+        shader.uniforms[`uMsRadial${i}`] = { value: new THREE.Vector4(0, 0, 0, 0) };
+      }
+    }
+
+    if (!shader.uniforms.uMsBusFoundryOccl) {
+      shader.uniforms.uMsBusFoundryOccl = { value: 0.0 };
+      shader.uniforms.uMsFoundryOccTex = { value: getMsBusDummyOccTexture(THREE) };
+      shader.uniforms.uMsFoundryInvBuf = { value: new THREE.Vector2(1, 1) };
+      shader.uniforms.uMsFoundryOccElev = { value: 0.0 };
+      shader.uniforms.uMsFoundryFade = { value: 0.0 };
+      shader.uniforms.uMsFoundryRadial = { value: 0.0 };
+      shader.uniforms.uMsFoundryVision = { value: 0.0 };
+      shader.uniforms.uMsFoundrySurface = { value: 0.0 };
+      shader.uniforms.uMsFoundryUnoccA = { value: 1.0 };
+      shader.uniforms.uMsFoundryOccA = { value: 0.0 };
+    } else if (!shader.uniforms.uMsFoundryInvBuf && shader.uniforms.uMsFoundryInvMask) {
+      shader.uniforms.uMsFoundryInvBuf = shader.uniforms.uMsFoundryInvMask;
+    }
+
+    if (!shader.fragmentShader.includes(MS_GLSL_BUS_RADIAL_GL_ANCHOR)) {
+      shader.fragmentShader = shader.fragmentShader.replace(
+        'void main() {',
+        `${radialUniformBlock}\nvoid main() {`
+      );
+    }
+    if (
+      shader.fragmentShader.includes('#include <opaque_fragment>')
+      && !shader.fragmentShader.includes(MS_GLSL_BUS_RADIAL_OPAQUE_ANCHOR)
+    ) {
+      shader.fragmentShader = shader.fragmentShader.replace(
+        '#include <opaque_fragment>',
+        `#include <opaque_fragment>
+	${MS_GLSL_BUS_RADIAL_OPAQUE_ANCHOR}
+	if (uMsBusFoundryOccl > 0.5) {
+	  // Replica RT (Option B) is a WebGL FBO: texel v=0 is GL bottom. Do not flip Y; the old
+	  // (1.0 - gl_FragCoord.y * invH) matched top-down canvas extracts (Option A).
+	  vec2 ms_foUv = vec2(gl_FragCoord.x * uMsFoundryInvBuf.x, gl_FragCoord.y * uMsFoundryInvBuf.y);
+	  vec4 ms_foMask = texture2D(uMsFoundryOccTex, ms_foUv);
+	  vec4 ms_foOcc = vec4(1.0) - step(vec4(uMsFoundryOccElev), ms_foMask);
+	  // Option B replica encodes the radial falloff smoothly in G. A per-pixel step() would re-binarize
+	  // that gradient and kill soft rims. Map green to occlusion strength by how far below full (1.0).
+	  float ms_oneMinusElev = max(0.0005, 1.0 - uMsFoundryOccElev);
+	  ms_foOcc.g = clamp((1.0 - ms_foMask.g) / ms_oneMinusElev, 0.0, 1.0);
+	  float ms_foBlend = max(ms_foOcc.r * uMsFoundryFade, max(ms_foOcc.g * uMsFoundryRadial, max(ms_foOcc.b * uMsFoundryVision, ms_foOcc.a * uMsFoundrySurface)));
+	  float ms_foMul = mix(uMsFoundryUnoccA, uMsFoundryOccA, ms_foBlend);
+	  gl_FragColor *= vec4(ms_foMul, ms_foMul, ms_foMul, ms_foMul);
+	} else {
+	  gl_FragColor.a *= ms_radialAlphaModFromUv( ms_tileSurfaceUv() );
+	}`
+      );
+    }
+
+    // First program compile can happen before syncRuntimeTileState has ever seen
+    // _msBusRadialOcclusionShader; push uniforms here so the first draw is correct.
+    try {
+      const tid = material.userData?.foundryTileId;
+      if (tid) {
+        const tm = window.MapShine?.tileManager;
+        const data = tm?.getTileSpriteData?.(tid);
+        let doc = null;
+        try {
+          if (canvas?.scene?.tiles?.get) doc = canvas.scene.tiles.get(tid) ?? null;
+        } catch (_) {
+          doc = null;
+        }
+        if (!doc) doc = data?.tileDoc ?? null;
+        const circles = Array.isArray(data?._msRadialCircles) ? data._msRadialCircles : [];
+        const RAD = (typeof CONST !== 'undefined' && CONST.TILE_OCCLUSION_MODES)
+          ? CONST.TILE_OCCLUSION_MODES.RADIAL
+          : 4;
+        const radial = !!(doc && (getTileOcclusionModeFlags(doc) & RAD));
+        applyRadialOcclusionUniformsToShader(shader, doc, circles, radial);
+        applyFoundryOcclusionMaskBusUniforms(shader, doc, resolveReplicaOcclusionMaskPass(), radial);
+      }
+    } catch (_) {
+    }
+  };
+  material.needsUpdate = true;
+}
+
+/**
+ * Per-channel weights for Foundry OccludableSamplerShader sampling.
+ * Must match PrimaryOccludableObjectMixin `#updateOcclusionState` — document occlusion *modes* are not
+ * the same (e.g. FADE is 0 until `occluded`, otherwise empty mask red reads as full fade-off).
+ *
+ * @param {object|null|undefined} tileDoc
+ * @returns {{ fade: number, radial: number, vision: number, surface: number, unoccludedAlpha: number|null, occludedAlpha: number|null }|null}
+ */
+function getBusFoundryOcclusionChannelWeights(tileDoc) {
+  const id = tileDoc?.id ?? tileDoc?._id;
+  try {
+    if (typeof canvas === 'undefined' || !id || !canvas.tiles?.get) return null;
+    const placeable = canvas.tiles.get(id);
+    const mesh = placeable?.mesh;
+    const st = mesh?._occlusionState;
+    if (!st || typeof st.radial !== 'number') return null;
+    return {
+      fade: Math.max(0, Math.min(1, Number(st.fade) || 0)),
+      radial: Math.max(0, Math.min(1, Number(st.radial) || 0)),
+      vision: Math.max(0, Math.min(1, Number(st.vision) || 0)),
+      surface: Math.max(0, Math.min(1, Number(st.surface) || 0)),
+      unoccludedAlpha: Number.isFinite(mesh.unoccludedAlpha) ? mesh.unoccludedAlpha : null,
+      occludedAlpha: Number.isFinite(mesh.occludedAlpha) ? mesh.occludedAlpha : null,
+    };
+  } catch (_) {
+    return null;
+  }
+}
+
+/**
+ * Push screen-space occlusion mask uniforms for V2 bus roof materials (Option B replica RT).
+ * When `useFoundryMask` is true and the pass has a valid texture, enables `uMsBusFoundryOccl`
+ * and disables per-token UV radial (`uMsRadialEnabled` → 0). Otherwise falls back to UV radial.
+ *
+ * @param {import('three').ShaderLibShader|null|undefined} shader
+ * @param {object|null|undefined} tileDoc
+ * @param {import('../compositor-v2/ReplicaOcclusionMaskPass.js').ReplicaOcclusionMaskPass|null|undefined} bridgeOrNull
+ * @param {boolean} useFoundryMask - false for tiles without RADIAL (clears Foundry path)
+ */
+export function applyFoundryOcclusionMaskBusUniforms(shader, tileDoc, bridgeOrNull, useFoundryMask) {
+  const u = shader?.uniforms;
+  if (!u?.uMsBusFoundryOccl) return;
+
+  const THREE = window.THREE;
+  const bridgedTex = typeof bridgeOrNull?.getTexture === 'function' ? bridgeOrNull.getTexture() : null;
+  const ok = !!useFoundryMask && !!(bridgeOrNull?.valid && bridgedTex);
+  u.uMsBusFoundryOccl.value = ok ? 1.0 : 0.0;
+
+  const tex = ok ? bridgedTex : getMsBusDummyOccTexture(THREE);
+  if (tex) u.uMsFoundryOccTex.value = tex;
+
+  const inv = typeof bridgeOrNull?.getBusInvBufSize === 'function'
+    ? bridgeOrNull.getBusInvBufSize()
+    : { invW: 1, invH: 1 };
+  const iw = Number(inv?.invW);
+  const ih = Number(inv?.invH);
+  const invU = u.uMsFoundryInvBuf ?? u.uMsFoundryInvMask;
+  if (invU?.value?.set) {
+    invU.value.set(
+      Number.isFinite(iw) ? iw : 1,
+      Number.isFinite(ih) ? ih : 1,
+    );
+  }
+
+  let elev = 0;
+  try {
+    if (typeof canvas !== 'undefined' && canvas?.masks?.occlusion?.mapElevation && tileDoc) {
+      elev = Number(canvas.masks.occlusion.mapElevation(tileDoc.elevation ?? 0));
+    }
+  } catch (_) {
+    elev = 0;
+  }
+  u.uMsFoundryOccElev.value = Number.isFinite(elev) ? Math.max(0, Math.min(1, elev)) : 0;
+
+  const M = (typeof CONST !== 'undefined' && CONST.TILE_OCCLUSION_MODES)
+    ? CONST.TILE_OCCLUSION_MODES
+    : { FADE: 1, SURFACE: 2, RADIAL: 4, VISION: 8 };
+  const flags = tileDoc ? getTileOcclusionModeFlags(tileDoc) : 0;
+  const w = getBusFoundryOcclusionChannelWeights(tileDoc);
+  // Fade / vision / hover use live PCO state. RADIAL and SURFACE are purely `occlusionMode`
+  // bits in Foundry (`#updateOcclusionState`); the PIXI tile mesh may never run
+  // `updateTransform` under Map Shine canvas replacement, leaving `_occlusionState.radial`
+  // stuck at 0 — which zeroes the green channel and removes the token hole entirely.
+  u.uMsFoundryFade.value = w ? w.fade : 0.0;
+  u.uMsFoundryVision.value = w ? w.vision : 0.0;
+  u.uMsFoundryRadial.value = (flags & M.RADIAL) ? 1.0 : 0.0;
+  u.uMsFoundrySurface.value = (flags & M.SURFACE) ? 1.0 : 0.0;
+
+  const ta = w?.unoccludedAlpha != null ? w.unoccludedAlpha : Number(tileDoc?.alpha);
+  u.uMsFoundryUnoccA.value = Number.isFinite(ta) ? Math.max(0, Math.min(1, ta)) : 1.0;
+  const oa = w?.occludedAlpha != null ? w.occludedAlpha : Number(tileDoc?.occlusion?.alpha);
+  u.uMsFoundryOccA.value = Number.isFinite(oa) ? Math.max(0, Math.min(1, oa)) : 0.0;
+
+  if (ok && u.uMsRadialEnabled) u.uMsRadialEnabled.value = 0.0;
+}
+
+/**
+ * Push radial occlusion uniforms to a compiled Three shader (sprite CC shader or bus radial shader).
+ * @param {import('three').ShaderLibShader|null|undefined} shader
+ * @param {object} tileDoc
+ * @param {{ x: number, y: number, r: number }[]} circles - Foundry space, max {@link TILE_RADIAL_OCCLUSION_TOKEN_CAP}
+ * @param {boolean} radialModeActive - tile has RADIAL in occlusion flags
+ */
+export function applyRadialOcclusionUniformsToShader(shader, tileDoc, circles, radialModeActive) {
+  const u = shader?.uniforms;
+  if (!u?.uMsRadialEnabled) return;
+
+  const THREE = window.THREE;
+  const flagsActive = !!radialModeActive && Array.isArray(circles) && circles.length > 0;
+  u.uMsRadialEnabled.value = flagsActive ? 1.0 : 0.0;
+
+  const occ = tileDoc?.occlusion && typeof tileDoc.occlusion === 'object' ? tileDoc.occlusion : {};
+  const occAlpha = Number(occ.alpha);
+  u.uMsRadialOcclAlpha.value = Number.isFinite(occAlpha) ? Math.max(0, Math.min(1, occAlpha)) : 0.0;
+
+  const { cx, cy } = getTileVisualCenterFoundryXY(tileDoc);
+  const { dispW, dispH, signX, signY } = getTileBusPlaneSizeAndMirror(tileDoc);
+  const shapeR = tileDoc?.shape && typeof tileDoc.shape === 'object' ? tileDoc.shape : null;
+  const rotDeg = Number(shapeR?.rotation ?? tileDoc?.rotation) || 0;
+  const rad = (rotDeg * Math.PI) / 180;
+
+  u.uMsTileFoundryCx.value = Number.isFinite(cx) ? cx : 0;
+  u.uMsTileFoundryCy.value = Number.isFinite(cy) ? cy : 0;
+  u.uMsTileHalfW.value = Math.max(0.0001, dispW * 0.5);
+  u.uMsTileHalfH.value = Math.max(0.0001, dispH * 0.5);
+  u.uMsTileFlipX.value = signX >= 0 ? 1.0 : -1.0;
+  u.uMsTileFlipY.value = signY >= 0 ? 1.0 : -1.0;
+  u.uMsTileCos.value = Math.cos(rad);
+  u.uMsTileSin.value = Math.sin(rad);
+
+  const n = flagsActive ? Math.min(TILE_RADIAL_OCCLUSION_TOKEN_CAP, circles.length) : 0;
+  u.uMsRadialCount.value = n;
+  for (let i = 0; i < TILE_RADIAL_OCCLUSION_TOKEN_CAP; i++) {
+    const vec = u[`uMsRadial${i}`]?.value;
+    if (!vec) continue;
+    if (i < n) {
+      const c = circles[i];
+      vec.set(Number(c.x) || 0, Number(c.y) || 0, Math.max(0, Number(c.r) || 0), 0);
+    } else {
+      vec.set(0, 0, 0, 0);
+    }
+  }
+}
+
 function hasFiniteActiveLevelBand(context) {
   return Number.isFinite(Number(context?.bottom)) && Number.isFinite(Number(context?.top));
 }
@@ -447,7 +859,24 @@ export class TileManager {
       shader.uniforms.uOverheadSaturation = { value: 1.0 };
       shader.uniforms.uOverheadGamma = { value: 1.0 };
 
+      const THREE = window.THREE;
+      shader.uniforms.uMsRadialEnabled = { value: 0.0 };
+      shader.uniforms.uMsRadialOcclAlpha = { value: 0.0 };
+      shader.uniforms.uMsRadialCount = { value: 0 };
+      shader.uniforms.uMsTileFoundryCx = { value: 0.0 };
+      shader.uniforms.uMsTileFoundryCy = { value: 0.0 };
+      shader.uniforms.uMsTileHalfW = { value: 1.0 };
+      shader.uniforms.uMsTileHalfH = { value: 1.0 };
+      shader.uniforms.uMsTileFlipX = { value: 1.0 };
+      shader.uniforms.uMsTileFlipY = { value: 1.0 };
+      shader.uniforms.uMsTileCos = { value: 1.0 };
+      shader.uniforms.uMsTileSin = { value: 0.0 };
+      for (let ri = 0; ri < TILE_RADIAL_OCCLUSION_TOKEN_CAP; ri++) {
+        shader.uniforms[`uMsRadial${ri}`] = { value: new THREE.Vector4(0, 0, 0, 0) };
+      }
+
       const uniformBlock = `
+${MS_GLSL_SPRITE_CC_GL_ANCHOR}
 uniform float uOverheadCCEnabled;
 uniform float uOverheadExposure;
 uniform float uOverheadTemperature;
@@ -456,6 +885,57 @@ uniform float uOverheadBrightness;
 uniform float uOverheadContrast;
 uniform float uOverheadSaturation;
 uniform float uOverheadGamma;
+
+uniform float uMsRadialEnabled;
+uniform float uMsRadialOcclAlpha;
+uniform int uMsRadialCount;
+uniform float uMsTileFoundryCx;
+uniform float uMsTileFoundryCy;
+uniform float uMsTileHalfW;
+uniform float uMsTileHalfH;
+uniform float uMsTileFlipX;
+uniform float uMsTileFlipY;
+uniform float uMsTileCos;
+uniform float uMsTileSin;
+uniform vec4 uMsRadial0;
+uniform vec4 uMsRadial1;
+uniform vec4 uMsRadial2;
+uniform vec4 uMsRadial3;
+uniform vec4 uMsRadial4;
+uniform vec4 uMsRadial5;
+uniform vec4 uMsRadial6;
+uniform vec4 uMsRadial7;
+${MS_RADIAL_GL_TILE_SURFACE_UV}
+float ms_radialTokenFactor(vec2 fxy, vec4 tok) {
+  if (tok.z <= 0.001) return 1.0;
+  float dist = length(fxy - tok.xy);
+  float fw = max(2.0, tok.z * 0.04);
+  float hole = 1.0 - smoothstep(tok.z - fw, tok.z + fw, dist);
+  return mix(1.0, uMsRadialOcclAlpha, hole);
+}
+
+float ms_radialAlphaModFromUv(vec2 uv) {
+  if (uMsRadialEnabled < 0.5 || uMsRadialCount < 1) return 1.0;
+  float u = uv.x;
+  float v = uv.y;
+  if (uMsTileFlipX < 0.0) u = 1.0 - u;
+  if (uMsTileFlipY < 0.0) v = 1.0 - v;
+  float lx = (u - 0.5) * (uMsTileHalfW * 2.0);
+  float ly = (v - 0.5) * (uMsTileHalfH * 2.0);
+  float dx = lx * uMsTileCos - ly * uMsTileSin;
+  float dy = lx * uMsTileSin + ly * uMsTileCos;
+  vec2 fxy = vec2(uMsTileFoundryCx + dx, uMsTileFoundryCy + dy);
+  float m = 1.0;
+  if (uMsRadialCount > 0) m = min(m, ms_radialTokenFactor(fxy, uMsRadial0));
+  if (uMsRadialCount > 1) m = min(m, ms_radialTokenFactor(fxy, uMsRadial1));
+  if (uMsRadialCount > 2) m = min(m, ms_radialTokenFactor(fxy, uMsRadial2));
+  if (uMsRadialCount > 3) m = min(m, ms_radialTokenFactor(fxy, uMsRadial3));
+  if (uMsRadialCount > 4) m = min(m, ms_radialTokenFactor(fxy, uMsRadial4));
+  if (uMsRadialCount > 5) m = min(m, ms_radialTokenFactor(fxy, uMsRadial5));
+  if (uMsRadialCount > 6) m = min(m, ms_radialTokenFactor(fxy, uMsRadial6));
+  if (uMsRadialCount > 7) m = min(m, ms_radialTokenFactor(fxy, uMsRadial7));
+  return m;
+}
 
 vec3 ms_applyOverheadWhiteBalance(vec3 color, float temp, float tint) {
   vec3 tempShift = vec3(1.0 + temp, 1.0, 1.0 - temp);
@@ -483,35 +963,59 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
 }
 `;
 
-      shader.fragmentShader = shader.fragmentShader.replace(
-        'void main() {',
-        `${uniformBlock}\nvoid main() {`
-      );
+      if (!shader.fragmentShader.includes(MS_GLSL_SPRITE_CC_GL_ANCHOR)) {
+        shader.fragmentShader = shader.fragmentShader.replace(
+          'void main() {',
+          `${uniformBlock}\nvoid main() {`
+        );
+      }
 
       let patched = false;
 
-      if (shader.fragmentShader.includes('#include <output_fragment>')) {
+      if (
+        shader.fragmentShader.includes('#include <opaque_fragment>')
+        && !shader.fragmentShader.includes(MS_GLSL_SPRITE_CC_OPAQUE_ANCHOR)
+      ) {
+        shader.fragmentShader = shader.fragmentShader.replace(
+          '#include <opaque_fragment>',
+          `#include <opaque_fragment>
+	${MS_GLSL_SPRITE_CC_OPAQUE_ANCHOR}
+	gl_FragColor.a *= ms_radialAlphaModFromUv( ms_tileSurfaceUv() );
+	gl_FragColor.rgb = ms_applyOverheadColorCorrection(gl_FragColor.rgb);`
+        );
+        patched = true;
+      }
+
+      if (
+        !patched
+        && shader.fragmentShader.includes('#include <output_fragment>')
+        && !shader.fragmentShader.includes(MS_GLSL_SPRITE_CC_OUTPUT_ANCHOR)
+      ) {
         shader.fragmentShader = shader.fragmentShader.replace(
           '#include <output_fragment>',
-          `#include <output_fragment>\n  gl_FragColor.rgb = ms_applyOverheadColorCorrection(gl_FragColor.rgb);`
+          `#include <output_fragment>
+	${MS_GLSL_SPRITE_CC_OUTPUT_ANCHOR}
+	gl_FragColor.rgb = ms_applyOverheadColorCorrection(gl_FragColor.rgb);`
         );
         patched = true;
       }
 
-      if (!patched && shader.fragmentShader.includes('gl_FragColor = vec4( outgoingLight, diffuseColor.a );')) {
+      if (
+        !patched
+        && shader.fragmentShader.includes('gl_FragColor = vec4( outgoingLight, diffuseColor.a );')
+        && !shader.fragmentShader.includes(MS_GLSL_SPRITE_CC_OUTGOING_ANCHOR)
+      ) {
         shader.fragmentShader = shader.fragmentShader.replace(
           'gl_FragColor = vec4( outgoingLight, diffuseColor.a );',
-          `vec3 ccLight = ms_applyOverheadColorCorrection(outgoingLight);\n  gl_FragColor = vec4( ccLight, diffuseColor.a );`
+          `vec3 ccLight = ms_applyOverheadColorCorrection(outgoingLight);
+	${MS_GLSL_SPRITE_CC_OUTGOING_ANCHOR}
+	gl_FragColor = vec4( ccLight, diffuseColor.a );`
         );
         patched = true;
       }
 
-      if (!patched) {
-        shader.fragmentShader = shader.fragmentShader.replace(
-          /}\s*$/,
-          `  gl_FragColor.rgb = ms_applyOverheadColorCorrection(gl_FragColor.rgb);\n}`
-        );
-      }
+      // No regex tail patch: expanded ShaderLib sources can end with many `}` tokens;
+      // replacing `/}\s*$/` corrupts GLSL and has taken down the whole WebGL context.
 
       try {
         const tileId = material?.userData?._msTileId;
@@ -754,7 +1258,8 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     const dx = foundryX - centerX;
     const dy = foundryY - centerY;
 
-    const rotDeg = tileDoc.rotation || 0;
+    const shapeHit = tileDoc?.shape && typeof tileDoc.shape === 'object' ? tileDoc.shape : null;
+    const rotDeg = Number(shapeHit?.rotation ?? tileDoc?.rotation) || 0;
     const r = (-rotDeg * Math.PI) / 180;
     const c = Math.cos(r);
     const s = Math.sin(r);
@@ -772,6 +1277,198 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     if (scaleY < 0) v = 1 - v;
 
     return !(u < 0 || u > 1 || v < 0 || v > 1);
+  }
+
+  /**
+   * @param {object} tileDoc
+   * @param {number} foundryX
+   * @param {number} foundryY
+   * @returns {boolean}
+   */
+  isFoundryPointInTileFootprint(tileDoc, foundryX, foundryY) {
+    const sceneHeight = canvas?.dimensions?.height ?? 10000;
+    return this.isWorldPointInTileBounds({ tileDoc }, foundryX, sceneHeight - foundryY);
+  }
+
+  /**
+   * Tokens that may punch radial holes in roofs (Foundry parity with TokensLayer#_getOccludableTokens).
+   * Broader than hover-fade's controlled/observed-only list.
+   * @returns {any[]}
+   */
+  _getRadialOcclusionTokenSources() {
+    try {
+      const layer = canvas?.tokens;
+      if (layer && typeof layer._getOccludableTokens === 'function') {
+        const arr = layer._getOccludableTokens();
+        if (Array.isArray(arr) && arr.length) {
+          return arr.filter((t) => t && t.visible !== false);
+        }
+      }
+    } catch (_) {
+    }
+    const raw = canvas?.tokens?.controlled?.length > 0
+      ? canvas.tokens.controlled
+      : (canvas.tokens?.observed ?? []);
+    const list = Array.isArray(raw) ? raw : (raw != null ? [raw] : []);
+    const vis = list.filter((t) => t && t.visible !== false);
+    if (vis.length) return vis;
+    try {
+      const p = canvas?.tokens?.placeables;
+      if (Array.isArray(p) && p.length) {
+        return p.filter((t) => t && t.visible !== false);
+      }
+    } catch (_) {}
+    return [];
+  }
+
+  /**
+   * @param {object} tileDoc
+   * @param {Iterable<any>} sources - Foundry Token placeables
+   * @returns {{ x: number, y: number, r: number }[]}
+   */
+  _collectRadialOcclusionCircles(tileDoc, sources) {
+    const RADIAL = (typeof CONST !== 'undefined' && CONST.TILE_OCCLUSION_MODES)
+      ? CONST.TILE_OCCLUSION_MODES.RADIAL
+      : 4;
+    if (!(getTileOcclusionModeFlags(tileDoc) & RADIAL)) return [];
+
+    // Tile mesh elevation matches document.elevation. Fade occlusion uses strict
+    // token.elevation < tile.elevation in Foundry, but overhead roofs are commonly
+    // authored at the same elevation as walking tokens — radial cutouts must still
+    // apply, so only skip tokens strictly above the roof slab.
+    const tileElev = Number.isFinite(Number(tileDoc?.elevation)) ? Number(tileDoc.elevation) : 0;
+    const out = [];
+
+    for (const token of sources) {
+      const doc = token?.document;
+      if (!doc) continue;
+      const te = Number.isFinite(Number(doc.elevation)) ? Number(doc.elevation) : 0;
+      if (te > tileElev) continue;
+
+      let anyUnder = false;
+      try {
+        if (typeof doc.getOcclusionTestPoints === 'function') {
+          const pts = doc.getOcclusionTestPoints();
+          if (pts && pts.length) {
+            for (let pi = 0; pi < pts.length; pi++) {
+              const p = pts[pi];
+              const fx = Number(p?.x);
+              const fy = Number(p?.y);
+              if (Number.isFinite(fx) && Number.isFinite(fy) && this.isFoundryPointInTileFootprint(tileDoc, fx, fy)) {
+                anyUnder = true;
+                break;
+              }
+            }
+          }
+        }
+      } catch (_) {
+      }
+
+      if (!anyUnder) {
+        const tcx = Number(token.x) + Number(token.w) * 0.5;
+        const tcy = Number(token.y) + Number(token.h) * 0.5;
+        if (this.isFoundryPointInTileFootprint(tileDoc, tcx, tcy)) anyUnder = true;
+      }
+      if (!anyUnder) continue;
+
+      let tcx = Number(token.x) + Number(token.w) * 0.5;
+      let tcy = Number(token.y) + Number(token.h) * 0.5;
+      try {
+        const c = token.center;
+        if (c && Number.isFinite(Number(c.x)) && Number.isFinite(Number(c.y))) {
+          tcx = Number(c.x);
+          tcy = Number(c.y);
+        }
+      } catch (_) {
+      }
+
+      let rad = Math.min(Number(token.w) || 0, Number(token.h) || 0) * 0.5;
+      try {
+        const er = Number(token.externalRadius);
+        const ocR = Number(doc.occludable?.radius ?? 0);
+        let lr = 0;
+        if (typeof token.getLightRadius === 'function') lr = Math.abs(Number(token.getLightRadius(ocR)));
+        const combined = Math.max(Number.isFinite(er) ? er : 0, Number.isFinite(lr) ? lr : 0);
+        if (Number.isFinite(combined) && combined > 0) rad = combined;
+      } catch (_) {
+      }
+      if (!Number.isFinite(rad) || rad <= 0) {
+        rad = Math.min(Number(token.w) || 48, Number(token.h) || 48) * 0.5;
+      }
+
+      out.push({ x: tcx, y: tcy, r: rad });
+      if (out.length >= TILE_RADIAL_OCCLUSION_TOKEN_CAP) break;
+    }
+    return out;
+  }
+
+  /**
+   * Live TileDocument from Foundry (v14 occlusion.modes lives here; cached tileDoc can lag).
+   * @param {string} tileId
+   * @param {{ tileDoc?: object }|null|undefined} data
+   * @returns {object|null}
+   */
+  _getRuntimeTileDoc(tileId, data) {
+    try {
+      const id = tileId ?? data?.tileDoc?.id ?? data?.tileDoc?._id;
+      if (id && canvas?.scene?.tiles?.get) return canvas.scene.tiles.get(id) ?? null;
+    } catch (_) {
+    }
+    return null;
+  }
+
+  /**
+   * Tiles that participate in overhead occlusion / radial this frame: hover-fade set
+   * plus any overhead/weather roof with RADIAL (may be missing from _overheadTileIds until hover).
+   * @returns {Set<string>}
+   */
+  _gatherOverheadOcclusionUpdateTileIds() {
+    const out = new Set(this._overheadTileIds);
+    const RAD = (typeof CONST !== 'undefined' && CONST.TILE_OCCLUSION_MODES)
+      ? CONST.TILE_OCCLUSION_MODES.RADIAL
+      : 4;
+    try {
+      for (const [tileId, data] of this.tileSprites.entries()) {
+        if (!data?.sprite?.material) continue;
+        const doc = this._getRuntimeTileDoc(tileId, data) || data.tileDoc;
+        if (!doc) continue;
+        if (!(getTileOcclusionModeFlags(doc) & RAD)) continue;
+        if (data.sprite.userData?.isOverhead || data.sprite.userData?.isWeatherRoof) {
+          out.add(tileId);
+        }
+      }
+    } catch (_) {
+    }
+    return out;
+  }
+
+  /**
+   * Recompute radial occlusion circles for RADIAL overhead tiles at compositor rate.
+   * {@link FloorRenderBus#syncRuntimeTileState} reads `_msRadialCircles`; `TileManager#update`
+   * may run sub-frame (EffectComposer `updateHz`), so bus materials would otherwise lag tokens.
+   * @public
+   */
+  syncRadialOcclusionCirclesForBus() {
+    const RAD = (typeof CONST !== 'undefined' && CONST.TILE_OCCLUSION_MODES)
+      ? CONST.TILE_OCCLUSION_MODES.RADIAL
+      : 4;
+    const radialSources = this._getRadialOcclusionTokenSources();
+    for (const tileId of this._gatherOverheadOcclusionUpdateTileIds()) {
+      const data = this.tileSprites.get(tileId);
+      if (!data?.sprite?.material) continue;
+      const tileDoc = this._getRuntimeTileDoc(tileId, data) || data.tileDoc;
+      if (!tileDoc || !(getTileOcclusionModeFlags(tileDoc) & RAD)) continue;
+
+      const circles = this._collectRadialOcclusionCircles(tileDoc, radialSources);
+      data._msRadialCircles = circles;
+      data._msRadialMode = true;
+
+      try {
+        const sh = data.sprite.material?.userData?._msOverheadCCShader;
+        applyRadialOcclusionUniformsToShader(sh, tileDoc, circles, true);
+      } catch (_) {
+      }
+    }
   }
 
   _getWaterOccluderScene() {
@@ -2376,9 +3073,9 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
       const tileDoc = data?.tileDoc;
       isOverhead = !!sprite?.userData?.isOverhead;
       const isWeatherRoof = !!sprite?.userData?.isWeatherRoof;
-      const occlusionMode = tileDoc?.occlusion?.mode ?? CONST.TILE_OCCLUSION_MODES.NONE;
+      const occlusionFlags = getTileOcclusionModeFlags(tileDoc);
       const forceOverheadNoHover = !!sprite?.userData?._msMotionForcedOverhead;
-      hoverEligible = (!forceOverheadNoHover && isOverhead) || isWeatherRoof || (occlusionMode !== CONST.TILE_OCCLUSION_MODES.NONE);
+      hoverEligible = (!forceOverheadNoHover && isOverhead) || isWeatherRoof || (occlusionFlags !== CONST.TILE_OCCLUSION_MODES.NONE);
       if (!hoverEligible) {
         if (!isOverhead) this._overheadTileIds.delete(tileId);
         data.hoverHidden = false;
@@ -2648,6 +3345,7 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     const sources = canvas.tokens?.controlled.length > 0 
       ? canvas.tokens.controlled 
       : (canvas.tokens?.observed || []);
+    const radialSources = this._getRadialOcclusionTokenSources();
 
     // Hover-hide should mirror tree canopy parity across gameplay + editing when
     // Three owns interaction. Only disable Three-side hover fade when the Tiles
@@ -2778,11 +3476,13 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
 
     let anyOverheadFadeInProgress = false;
 
-    for (const tileId of this._overheadTileIds) {
+    for (const tileId of this._gatherOverheadOcclusionUpdateTileIds()) {
       const data = this.tileSprites.get(tileId);
       if (!data) continue;
 
-      const { sprite, tileDoc } = data;
+      const { sprite } = data;
+      const tileDoc = this._getRuntimeTileDoc(tileId, data) || data.tileDoc;
+      if (!tileDoc) continue;
       const hoverHidden = allowHoverHiddenFade ? !!data.hoverHidden : false;
       if (!allowHoverHiddenFade && data.hoverHidden) {
         data.hoverHidden = false;
@@ -2827,13 +3527,16 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
       let targetAlpha = tileDoc.alpha ?? 1;
       
       const occlusion = tileDoc.occlusion || {};
-      const mode = occlusion.mode || CONST.TILE_OCCLUSION_MODES.NONE;
+      const occFlags = getTileOcclusionModeFlags(tileDoc);
+      const NONE = CONST.TILE_OCCLUSION_MODES.NONE;
+      const RADIAL_BIT = CONST.TILE_OCCLUSION_MODES.RADIAL;
+      const hasRadialMode = !!(occFlags & RADIAL_BIT);
 
       // Occlusion only triggers when the mouse is hovering over the tile AND a
       // controlled token is underneath — matching Foundry's native behaviour.
       // Without the hover gate, selecting a token would immediately fade ALL
       // overhead tiles covering it, which is incorrect.
-      if (!skipRoofFade && hoverHidden && mode !== CONST.TILE_OCCLUSION_MODES.NONE) {
+      if (!skipRoofFade && hoverHidden && occFlags !== NONE) {
         let occluded = false;
 
         // Check if any relevant token is under this tile
@@ -2872,10 +3575,30 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
         }
       }
 
-      // Apply hover-hide (fade to zero alpha when hovered)
-      if (!skipRoofFade && hoverHidden) {
+      // Apply hover-hide (fade to zero alpha when hovered). Radial roofs keep
+      // base opacity so the shader can carve holes without the sprite going fully invisible.
+      if (!skipRoofFade && hoverHidden && !(occFlags & RADIAL_BIT)) {
         targetAlpha = 0;
         anyHoverHidden = true;
+      }
+
+      const radialCircles = hasRadialMode
+        ? this._collectRadialOcclusionCircles(tileDoc, radialSources)
+        : [];
+      data._msRadialCircles = radialCircles;
+      data._msRadialMode = hasRadialMode;
+      const radialCutoutActive = hasRadialMode && radialCircles.length > 0;
+      try {
+        const sh = sprite.material?.userData?._msOverheadCCShader;
+        applyRadialOcclusionUniformsToShader(sh, tileDoc, radialCircles, hasRadialMode);
+      } catch (_) {
+      }
+      if (radialCutoutActive) {
+        try {
+          const rl = window.MapShine?.renderLoop;
+          rl?.requestContinuousRender?.(250);
+        } catch (_) {
+        }
       }
 
       if (skipRoofFade && hoverHidden) {
@@ -2914,9 +3637,14 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
 
       // Keep depth behavior consistent with fade-hidden roofs.
       // When opacity is near-zero, disable depthWrite so invisible roofs don't occlude tokens.
-      // When visible, re-enable depthWrite so roofs can reliably appear above tokens.
+      // Radial cutouts lower fragment alpha but the quad still has depth — depthWrite would
+      // keep tokens from showing through the "hole" unless disabled while cutouts are active.
       sprite.material.depthTest = true;
-      sprite.material.depthWrite = (sprite.material.opacity ?? 1.0) > 0.01;
+      if (radialCutoutActive) {
+        sprite.material.depthWrite = false;
+      } else {
+        sprite.material.depthWrite = (sprite.material.opacity ?? 1.0) > 0.01;
+      }
 
       // Sync above-floor blocker mesh opacity so it tracks the hover-fade.
       // Without this, the blocker stays at full opacity while the roof fades out,
@@ -4220,7 +4948,10 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
         sprite.material.depthTest = true;
         const initialAlpha = (tileDoc && typeof tileDoc.alpha === 'number') ? tileDoc.alpha : 1.0;
         sprite.material.depthWrite = initialAlpha > 0.01;
-        sprite.material.needsUpdate = true;
+        // Do NOT set material.needsUpdate here: in Three.js that bumps material.version
+        // and forces a full program rebuild + onBeforeCompile every time this path runs.
+        // updateSpriteTransform is invoked from many hooks; compile storms can freeze the
+        // client (black canvas, DevTools failing to attach).
       }
       sprite.renderOrder = 10;
     } else {
@@ -4236,7 +4967,6 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
       if (sprite.material && (sprite.material.depthWrite === false || sprite.material.depthTest === false)) {
         sprite.material.depthWrite = true;
         sprite.material.depthTest = true;
-        sprite.material.needsUpdate = true;
       }
       sprite.renderOrder = 0;
     }

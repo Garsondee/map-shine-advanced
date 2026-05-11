@@ -10,6 +10,7 @@ import { globalLoadingProfiler } from '../core/loading-profiler.js';
 import { probeMaskFile } from '../assets/loader.js';
 import { tileHasLevelsRange, readTileLevelsFlags } from '../foundry/levels-scene-flags.js';
 import { isTileOverhead } from '../scene/tile-manager.js';
+import { worldToReplicaDrawingPx, worldToReplicaMaskPx } from '../compositor-v2/ReplicaOcclusionMaskPass.js';
 
 const log = createLogger('ConsoleHelpers');
 
@@ -2519,6 +2520,203 @@ export const consoleHelpers = {
   },
 
   /**
+   * Option B replica occlusion: pass state, Foundry occludable tokens, bus roof uniforms,
+   * and one `readRenderTargetPixels` sample at the first token center (after a fresh pass).
+   * Usage: `copy(MapShine.debug.probeReplicaOcclusionV2())`
+   * @returns {object}
+   */
+  probeReplicaOcclusionV2() {
+    const ms = window.MapShine ?? {};
+    const fc = ms.floorCompositorV2 ?? ms.effectComposer?._floorCompositorV2 ?? null;
+    const renderer = fc?.renderer ?? null;
+    const pass = fc?._replicaOcclusionMaskPass ?? null;
+    const bus = fc?._renderBus ?? null;
+    const sceneRT = fc?._sceneRT;
+
+    const drawing = { w: 0, h: 0 };
+    try {
+      if (renderer?.getDrawingBufferSize) {
+        const THREE = window.THREE;
+        const v = fc?._sizeVec ?? new THREE.Vector2();
+        renderer.getDrawingBufferSize(v);
+        drawing.w = Math.floor(v.x);
+        drawing.h = Math.floor(v.y);
+      }
+    } catch (_) {
+    }
+
+    let tokens = [];
+    try {
+      const fn = typeof canvas !== 'undefined' ? canvas?.tokens?._getOccludableTokens : null;
+      const arr = typeof fn === 'function' ? fn.call(canvas.tokens) : null;
+      tokens = Array.isArray(arr) ? arr : [];
+    } catch (_) {
+    }
+
+    const busWProbe = Number(sceneRT?.width) || drawing.w || 1;
+    const busHProbe = Number(sceneRT?.height) || drawing.h || 1;
+    const tokenRows = tokens.map((t) => {
+      const c = t?.center;
+      let r = 0;
+      try {
+        r = Math.max(r, Number(t?.externalRadius) || 0);
+      } catch (_) {
+      }
+      try {
+        const lr = t?.getLightRadius?.(t?.document?.occludable?.radius);
+        if (Number.isFinite(lr)) r = Math.max(r, lr);
+      } catch (_) {
+      }
+      let mapElev = null;
+      try {
+        mapElev = canvas?.masks?.occlusion?.mapElevation?.(t?.document?.elevation ?? 0);
+      } catch (_) {
+      }
+      const cx = c ? Number(c.x) : NaN;
+      const cy = c ? Number(c.y) : NaN;
+      const THREE = window.THREE;
+      const cam = fc?.camera ?? null;
+      let replicaPx = null;
+      if (Number.isFinite(cx) && Number.isFinite(cy)) {
+        if (THREE && cam && (cam.isPerspectiveCamera || cam.isOrthographicCamera)) {
+          const id = String(t?.id ?? '');
+          const spr = ms.tokenManager?.tokenSprites?.get?.(id)?.sprite;
+          if (spr?.getWorldPosition) {
+            const wv = new THREE.Vector3();
+            spr.updateWorldMatrix?.(true, false);
+            spr.getWorldPosition(wv);
+            replicaPx = worldToReplicaMaskPx(THREE, cam, wv.x, wv.y, wv.z, busWProbe, busHProbe);
+          }
+        }
+        if (!replicaPx) {
+          replicaPx = worldToReplicaDrawingPx(typeof canvas !== 'undefined' ? canvas : null, cx, cy, busWProbe, busHProbe);
+        }
+      }
+      return {
+        id: String(t?.id ?? ''),
+        visible: !!t?.visible,
+        controlled: !!t?.controlled,
+        centerWorld: c ? { x: cx, y: cy } : null,
+        replicaDrawingPx: replicaPx,
+        externalRadius: Number(t?.externalRadius),
+        occlusionRadius: Math.max(1, r),
+        mapElevation: Number(mapElev),
+        docElevation: t?.document?.elevation,
+      };
+    });
+
+    const radialSamples = [];
+    try {
+      const tiles = bus?._tiles;
+      if (tiles?.forEach) {
+        let n = 0;
+        for (const [id, entry] of tiles) {
+          if (String(id).startsWith('__')) continue;
+          const sh = entry?.material?.userData?._msBusRadialOcclusionShader;
+          if (!sh?.uniforms) continue;
+          const u = sh.uniforms;
+          const inv = u.uMsFoundryInvBuf?.value ?? u.uMsFoundryInvMask?.value;
+          radialSamples.push({
+            tileId: String(id),
+            uMsBusFoundryOccl: u.uMsBusFoundryOccl?.value,
+            uMsFoundryRadial: u.uMsFoundryRadial?.value,
+            uMsFoundryFade: u.uMsFoundryFade?.value,
+            uMsFoundryVision: u.uMsFoundryVision?.value,
+            uMsFoundrySurface: u.uMsFoundrySurface?.value,
+            uMsFoundryOccElev: u.uMsFoundryOccElev?.value,
+            uMsFoundryUnoccA: u.uMsFoundryUnoccA?.value,
+            uMsFoundryOccA: u.uMsFoundryOccA?.value,
+            invBuf: inv ? { x: inv.x, y: inv.y } : null,
+            occTexUuid: u.uMsFoundryOccTex?.value?.uuid ?? null,
+            uMsRadialEnabled: u.uMsRadialEnabled?.value,
+          });
+          if (++n >= 8) break;
+        }
+      }
+    } catch (_) {
+    }
+
+    const replicaSampleRt = pass && (typeof pass.getSampleRenderTarget === 'function'
+      ? pass.getSampleRenderTarget()
+      : pass._rt ?? null);
+
+    let readBack = null;
+    try {
+      const firstTok = tokenRows[0];
+      const hasTokPos = !!(firstTok?.centerWorld || firstTok?.replicaDrawingPx);
+      if (replicaSampleRt && renderer?.readRenderTargetPixels && hasTokPos) {
+        try {
+          if (typeof fc._prepareBusOcclusionMaskBeforeBus === 'function') {
+            fc._prepareBusOcclusionMaskBeforeBus();
+          } else if (typeof pass.update === 'function') {
+            pass.update(renderer, fc?.camera ?? null);
+          }
+        } catch (e0) {
+          readBack = { prepareError: String(e0?.message ?? e0) };
+        }
+        if (!readBack?.prepareError) {
+          const pw = Math.max(1, Math.floor(replicaSampleRt.width));
+          const ph = Math.max(1, Math.floor(replicaSampleRt.height));
+          const rp = tokenRows[0]?.replicaDrawingPx;
+          const cx = Math.floor(Number(rp?.x ?? tokenRows[0]?.centerWorld?.x));
+          const cy = Math.floor(Number(rp?.y ?? tokenRows[0]?.centerWorld?.y));
+          const x = Math.max(0, Math.min(pw - 1, cx));
+          const yGl = Math.max(0, Math.min(ph - 1, ph - 1 - cy));
+          const buf = new Uint8Array(4);
+          renderer.readRenderTargetPixels(replicaSampleRt, x, yGl, 1, 1, buf);
+          readBack = {
+            note: 'RGBA from replica resolved RT (same pixels as bus `uMsFoundryOccTex`); Foundry default clear is G=B=A=1, R=0. Hole lowers G.',
+            sampleDrawingPx: rp ? { x: cx, y: cy } : { x: cx, y: cy, warn: 'fallback_world_if_no_replicaPx' },
+            readPixelBottomLeft: { x, y: yGl },
+            rgba: [buf[0], buf[1], buf[2], buf[3]],
+            gNorm: buf[1] / 255,
+          };
+        }
+      } else {
+        readBack = {
+          skipped: true,
+          reason: !replicaSampleRt ? 'no_replica_rt' : (!renderer?.readRenderTargetPixels ? 'no_readRenderTargetPixels' : 'no_token_center'),
+        };
+      }
+    } catch (e) {
+      readBack = { error: String(e?.message ?? e) };
+    }
+
+    const report = {
+      at: new Date().toISOString(),
+      hasFloorCompositor: !!fc,
+      sceneRT: sceneRT ? { w: sceneRT.width, h: sceneRT.height } : null,
+      drawingBuffer: drawing,
+      replicaPass: pass
+        ? {
+          valid: !!pass.valid,
+          busBuf: { w: pass._busBufW, h: pass._busBufH },
+          rtSize: replicaSampleRt
+            ? { w: replicaSampleRt.width, h: replicaSampleRt.height }
+            : null,
+          getBusInvBufSize: typeof pass.getBusInvBufSize === 'function' ? pass.getBusInvBufSize() : null,
+        }
+        : null,
+      canvasTokensOcclusionMode: (() => {
+        try {
+          return canvas?.tokens?.occlusionMode ?? null;
+        } catch (_) {
+          return null;
+        }
+      })(),
+      occludableTokenCount: tokenRows.length,
+      occludableTokens: tokenRows,
+      busRadialUniformSamples: radialSamples,
+      readBack,
+    };
+    try {
+      console.log('[probeReplicaOcclusionV2]', report);
+    } catch (_) {
+    }
+    return report;
+  },
+
+  /**
    * Show help
    */
   help() {
@@ -2548,6 +2746,7 @@ Available commands (access via MapShine.debug):
   .alphaIsolationSet(obj)   - Merge alpha/isolation debug flags
   .alphaIsolationPreset(id) - Apply a bisect preset (noLens/noStamp/noWaterOccluder/noWater/noOverhead/noCloud/noBuilding/off)
   .alphaIsolationReset()    - Clear alpha/isolation debug flags
+  .probeReplicaOcclusionV2() - JSON: replica RT + occludable tokens + bus roof uniforms + readPixels at token
   .diagnoseSpecular()       - Check specular effect health
   .resetSpecular()          - Reset to defaults
   .exportParameters()       - Export current params as JSON

@@ -17,6 +17,7 @@ import { TokenSelectionController } from './token-selection-controller.js';
 import { MouseStateManager } from './mouse-state-manager.js';
 import { safeCall, safeDispose, Severity } from '../core/safe-call.js';
 import { readWallHeightFlags, readTileLevelsFlags, tileHasLevelsRange, isLevelsEnabledForScene, getCanvasForegroundElevationSplit } from '../foundry/levels-scene-flags.js';
+import { getTileOcclusionModeFlags } from './tile-manager.js';
 import { applyAmbientLightLevelDefaults, applyAmbientSoundLevelDefaults, applyTileLevelDefaults, applyWallLevelDefaults } from '../foundry/levels-create-defaults.js';
 import { getPerspectiveElevation } from '../foundry/elevation-context.js';
 import { moveTrace } from '../core/movement-trace-log.js';
@@ -4756,8 +4757,8 @@ export class InteractionManager {
             // This prevents hiding decorative overhead tiles unexpectedly.
             const hoverEligible = safeCall(() => {
               const tileDoc = data.tileDoc;
-              const occlusionMode = tileDoc?.occlusion?.mode ?? CONST.TILE_OCCLUSION_MODES.NONE;
-              return !!sprite.userData.isWeatherRoof || (occlusionMode !== CONST.TILE_OCCLUSION_MODES.NONE);
+              const occlusionFlags = getTileOcclusionModeFlags(tileDoc);
+              return !!sprite.userData.isWeatherRoof || (occlusionFlags !== CONST.TILE_OCCLUSION_MODES.NONE);
             }, 'hover.checkOcclusionWorld', Severity.COSMETIC, { fallback: true });
             if (!hoverEligible) continue;
 
@@ -4814,8 +4815,8 @@ export class InteractionManager {
 
               const hoverEligible = safeCall(() => {
                 const tileDoc = data.tileDoc;
-                const occlusionMode = tileDoc?.occlusion?.mode ?? CONST.TILE_OCCLUSION_MODES.NONE;
-                return !!sprite.userData.isWeatherRoof || (occlusionMode !== CONST.TILE_OCCLUSION_MODES.NONE);
+                const occlusionFlags = getTileOcclusionModeFlags(tileDoc);
+                return !!sprite.userData.isWeatherRoof || (occlusionFlags !== CONST.TILE_OCCLUSION_MODES.NONE);
               }, 'hover.checkOcclusionRay', Severity.COSMETIC, { fallback: true });
               if (!hoverEligible) continue;
 

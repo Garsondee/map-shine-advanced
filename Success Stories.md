@@ -357,3 +357,68 @@ Several pipeline gaps stacked:
 - When the roof **fades or hides** (hover-reveal / opacity), the restrict stamp **weakens with it**, and dynamic light **returns** as expected.
 - Behavior is consistent whether overhead **shadow projection** is on or off.
 
+## Success Story: V2 Bus — Foundry-Style Radial Overhead Occlusion (Replica Mask)
+
+### Account
+
+- Composer (Cursor agent)
+
+### Problem We Saw
+
+- On the V2 floor compositor **bus**, overhead token occlusion (the circular “cutout” / radial hole Foundry uses for occludable tokens) did not line up with the 3D scene, felt **wrong under parallax**, or looked **binary** no matter how soft the control tried to be.
+- **Map Shine Control** sliders for hole **radius** and **soft edge** could show **NaN** or refuse to drag.
+- Chrome logged hundreds of **`GL_INVALID_OPERATION: glDrawElements: Feedback loop formed between Framebuffer and active Texture`** per frame while the feature was active.
+
+### What We Wanted (Product / Parity)
+
+- **Same semantics as Foundry’s overhead occlusion** for occludable tokens: radial falloff encoded in the mask, consumed by existing bus “Foundry occlusion” uniforms (`uMsBusFoundryOccl`, `uMsFoundryOccTex`, elevation / alpha weights), without PIXI `extract.canvas` readback every frame.
+- **GM-tunable** radius and soft rim, persisted where other Map Shine controls live (`controlState` + sanitize), with sane defaults (radius default **35** on the scale used in-panel; **40 / 40** radius+soft reported as a sweet spot in playtests).
+
+### What Was Wrong At The Start
+
+Several independent issues stacked:
+
+1. **Wrong coordinate space for the hole**  
+   Token positions were derived from **2D stage / client canvas** style mapping while the bus samples the mask with **`gl_FragCoord`** in the **same resolution and projection as the Three.js scene render target**. That mismatch read as a sliding / parallax offset between the token sprite and the hole.
+
+2. **Bus shader threw away smooth mask green**  
+   The replica pass intentionally writes a **smooth green** channel (`smoothstep` rim). The bus path still treated radial occlusion like a hard mask (e.g. heavy **`step`**-style use on the channel that should stay graded), so the **soft edge** never showed on screen.
+
+3. **Control UI bound badly through Tweakpane**  
+   Range widgets for the new tunables did not stay numeric end-to-end, so the panel could produce **NaN** or unusable sliders.
+
+4. **WebGL feedback loop**  
+   The mask lived in a **render target** sampled while drawing **another** render target (scene RT). On many drivers that is reported as a **feedback loop** (same logical texture lifecycle as FBO + sampler), and **each bus tile draw** could emit another console warning — hence **250+** lines per frame.
+
+### What Fixed It
+
+1. **Option B: Map Shine–owned replica mask pass** (`ReplicaOcclusionMaskPass`)  
+   One fullscreen fragment pass per frame: up to **8** occludable tokens, **radial distance** in **mask pixel space** matching bus `gl_FragCoord` layout (`canvasY = uResolution.y - frag.y`), **G** channel = occlusion weight, **B** = map elevation hint for the existing bus decode path. Tunables **`uRadiusScale`** and **`uEdgeSoftness`** with a widened feather curve so “100” soft is meaningfully softer than legacy.
+
+2. **Align tokens with the same camera as the bus**  
+   Collect token centers from Foundry’s occludable set, but map world position using the **FloorCompositor Three camera** and the **token sprite world position** (via `worldToReplicaMaskPx`), not stage-only coordinates. **`pass.update(renderer, floorCompositor.camera)`** so mask and bus share one projection.
+
+3. **Bus: preserve smooth green into the radial blend**  
+   After elevation masking, drive the radial factor from the **replica green** in a **continuous** way (ratio from `(1 − mask.g)` against the elevation band) instead of re-thresholding it to a hard step, so the **soft rim** from the mask survives into the final mix.
+
+4. **Map Shine Control: DOM sliders**  
+   Implemented **plain `<input type="range">`** (same pattern as other reliable controls such as live weather), plus **`control-state-sanitize`** clamps/defaults, and a **`_syncReplicaOcclDomFromControlState()`** path after sanitize so UI and state stay finite.
+
+5. **Resolve RT to kill the feedback loop**  
+   Render the mask into an internal **`_rt`**, then a second **fullscreen copy** into **`_rtResolved`**. **`getTexture()`** returns **`_rtResolved.texture`** for `uMsFoundryOccTex`. The bus only ever samples a texture that is **not** the color attachment of the framebuffer it is drawing into. **`try` / `finally`** restores the renderer’s previous render target around the pass.
+
+6. **Diagnostics**  
+   `probeReplicaOcclusionV2` (and readbacks) target the **resolved** RT so probes match what shaders sample.
+
+### Key Diagnostic Insights
+
+- **Parallax / offset** with an otherwise “correct”-looking circle → almost always **camera / RT space vs canvas space**, not radius math.
+- **Soft control does nothing** while the mask texture looks smooth in isolation → **downstream shader** was collapsing gradients, not the mask pass.
+- **Hundreds of identical WebGL warnings** → **per-draw** issue; trace **sampler2D bound to an RT** used during **scene RT** draws, then **decouple** with a copy/resolve texture.
+
+### Final Outcome
+
+- Radial overhead occlusion on the V2 bus **tracks tokens in world space** consistently with the scene camera.
+- **Soft rim** and **radius** are both visible and tunable; validated feel around **40 / 40** on the panel scale alongside defaults in sanitize.
+- **Console spam from feedback loops** is addressed by the **mask resolve** path; bus materials keep using the same uniform names Foundry parity code already expected.
+

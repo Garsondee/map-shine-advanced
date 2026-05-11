@@ -402,12 +402,14 @@ float ms_radialAlphaModFromUv(vec2 uv) {
         }
         if (!doc) doc = data?.tileDoc ?? null;
         const circles = Array.isArray(data?._msRadialCircles) ? data._msRadialCircles : [];
-        const RAD = (typeof CONST !== 'undefined' && CONST.TILE_OCCLUSION_MODES)
-          ? CONST.TILE_OCCLUSION_MODES.RADIAL
-          : 4;
-        const radial = !!(doc && (getTileOcclusionModeFlags(doc) & RAD));
+        const M = (typeof CONST !== 'undefined' && CONST.TILE_OCCLUSION_MODES)
+          ? CONST.TILE_OCCLUSION_MODES
+          : { RADIAL: 4, VISION: 8 };
+        const flagsAtCompile = doc ? getTileOcclusionModeFlags(doc) : 0;
+        const radial = !!(flagsAtCompile & M.RADIAL);
+        const wantsFoundryMask = !!(flagsAtCompile & (M.RADIAL | M.VISION));
         applyRadialOcclusionUniformsToShader(shader, doc, circles, radial);
-        applyFoundryOcclusionMaskBusUniforms(shader, doc, resolveReplicaOcclusionMaskPass(), radial);
+        applyFoundryOcclusionMaskBusUniforms(shader, doc, resolveReplicaOcclusionMaskPass(), wantsFoundryMask);
       }
     } catch (_) {
     }
@@ -452,7 +454,7 @@ function getBusFoundryOcclusionChannelWeights(tileDoc) {
  * @param {import('three').ShaderLibShader|null|undefined} shader
  * @param {object|null|undefined} tileDoc
  * @param {import('../compositor-v2/ReplicaOcclusionMaskPass.js').ReplicaOcclusionMaskPass|null|undefined} bridgeOrNull
- * @param {boolean} useFoundryMask - false for tiles without RADIAL (clears Foundry path)
+ * @param {boolean} useFoundryMask - false for tiles without RADIAL/VISION (clears Foundry path)
  */
 export function applyFoundryOcclusionMaskBusUniforms(shader, tileDoc, bridgeOrNull, useFoundryMask) {
   const u = shader?.uniforms;
@@ -494,14 +496,21 @@ export function applyFoundryOcclusionMaskBusUniforms(shader, tileDoc, bridgeOrNu
     : { FADE: 1, SURFACE: 2, RADIAL: 4, VISION: 8 };
   const flags = tileDoc ? getTileOcclusionModeFlags(tileDoc) : 0;
   const w = getBusFoundryOcclusionChannelWeights(tileDoc);
-  // Fade / vision / hover use live PCO state. RADIAL and SURFACE are purely `occlusionMode`
-  // bits in Foundry (`#updateOcclusionState`); the PIXI tile mesh may never run
-  // `updateTransform` under Map Shine canvas replacement, leaving `_occlusionState.radial`
-  // stuck at 0 — which zeroes the green channel and removes the token hole entirely.
+  // FADE / hover stay PCO-driven (set by Foundry on hover/state changes that we
+  // already mirror correctly). RADIAL, SURFACE, and VISION are driven from the
+  // `occlusion.modes` bits because the PIXI tile mesh may never run
+  // `updateTransform` under Map Shine canvas replacement, which leaves
+  // `_occlusionState.radial` / `.vision` stuck at 0 — that would zero the green/
+  // blue channel and remove the token hole entirely. The per-pixel occlusion
+  // strength now lives in the mask itself (G = radial, B = vision LOS).
   u.uMsFoundryFade.value = w ? w.fade : 0.0;
-  u.uMsFoundryVision.value = w ? w.vision : 0.0;
   u.uMsFoundryRadial.value = (flags & M.RADIAL) ? 1.0 : 0.0;
   u.uMsFoundrySurface.value = (flags & M.SURFACE) ? 1.0 : 0.0;
+  const hasVisionFlag = !!(flags & M.VISION);
+  const visionSourceActive = (typeof bridgeOrNull?.hasActiveVisionSource === 'function')
+    ? !!bridgeOrNull.hasActiveVisionSource()
+    : false;
+  u.uMsFoundryVision.value = (hasVisionFlag && visionSourceActive) ? 1.0 : 0.0;
 
   const ta = w?.unoccludedAlpha != null ? w.unoccludedAlpha : Number(tileDoc?.alpha);
   u.uMsFoundryUnoccA.value = Number.isFinite(ta) ? Math.max(0, Math.min(1, ta)) : 1.0;
@@ -3530,7 +3539,12 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
       const occFlags = getTileOcclusionModeFlags(tileDoc);
       const NONE = CONST.TILE_OCCLUSION_MODES.NONE;
       const RADIAL_BIT = CONST.TILE_OCCLUSION_MODES.RADIAL;
+      const VISION_BIT = CONST.TILE_OCCLUSION_MODES.VISION ?? 8;
       const hasRadialMode = !!(occFlags & RADIAL_BIT);
+      const hasVisionMode = !!(occFlags & VISION_BIT);
+      // Shader-driven holes (RADIAL / VISION) must keep base opacity so the
+      // mask can carve per-pixel cutouts; full alpha=0 fade would hide them.
+      const keepBaseOpacityForShaderHoles = hasRadialMode || hasVisionMode;
 
       // Occlusion only triggers when the mouse is hovering over the tile AND a
       // controlled token is underneath — matching Foundry's native behaviour.
@@ -3575,9 +3589,10 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
         }
       }
 
-      // Apply hover-hide (fade to zero alpha when hovered). Radial roofs keep
-      // base opacity so the shader can carve holes without the sprite going fully invisible.
-      if (!skipRoofFade && hoverHidden && !(occFlags & RADIAL_BIT)) {
+      // Apply hover-hide (fade to zero alpha when hovered). Radial and Vision
+      // roofs keep base opacity so the shader can carve holes without the sprite
+      // going fully invisible.
+      if (!skipRoofFade && hoverHidden && !keepBaseOpacityForShaderHoles) {
         targetAlpha = 0;
         anyHoverHidden = true;
       }

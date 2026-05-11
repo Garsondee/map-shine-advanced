@@ -403,7 +403,10 @@ export class FloorRenderBus {
       this._addTileMesh(tileId, floorIndex, null, centerX, centerY, z, tileW, tileH, rotation, alpha, renderOrder, isOverhead, roofShadowCaster, cloudShadowBlockerEnabled, planeSignX, planeSignY, restrictsLight);
 
       const entryRadial = this._tiles.get(tileId);
-      if (entryRadial?.material && (getTileOcclusionModeFlags(tileDoc) & CONST.TILE_OCCLUSION_MODES.RADIAL)) {
+      const populateOcclFlags = getTileOcclusionModeFlags(tileDoc);
+      const populateNeedsFoundryShader = !!(populateOcclFlags
+        & (CONST.TILE_OCCLUSION_MODES.RADIAL | CONST.TILE_OCCLUSION_MODES.VISION));
+      if (entryRadial?.material && populateNeedsFoundryShader) {
         installBusMeshRadialOcclusionShader(entryRadial.material);
       }
 
@@ -846,11 +849,14 @@ export class FloorRenderBus {
       }
 
       const tileDocForRadial = doc;
-      if (tileDocForRadial && (getTileOcclusionModeFlags(tileDocForRadial) & CONST.TILE_OCCLUSION_MODES.RADIAL)) {
+      const syncOcclFlags = tileDocForRadial ? getTileOcclusionModeFlags(tileDocForRadial) : 0;
+      const radialOn = !!(syncOcclFlags & CONST.TILE_OCCLUSION_MODES.RADIAL);
+      const visionOn = !!(syncOcclFlags & CONST.TILE_OCCLUSION_MODES.VISION);
+      const wantsFoundryMask = radialOn || visionOn;
+      if (tileDocForRadial && wantsFoundryMask) {
         installBusMeshRadialOcclusionShader(entry.material);
         const busSh = entry.material?.userData?._msBusRadialOcclusionShader;
         const circles = Array.isArray(data?._msRadialCircles) ? data._msRadialCircles : [];
-        const radialOn = !!(getTileOcclusionModeFlags(tileDocForRadial) & CONST.TILE_OCCLUSION_MODES.RADIAL);
         applyRadialOcclusionUniformsToShader(busSh, tileDocForRadial, circles, radialOn);
         applyFoundryOcclusionMaskBusUniforms(busSh, tileDocForRadial, occBridge, true);
       } else {
@@ -1014,7 +1020,10 @@ export class FloorRenderBus {
     }
 
     const entryRadialUpsert = this._tiles.get(tileId);
-    if (entryRadialUpsert?.material && (getTileOcclusionModeFlags(tileDoc) & CONST.TILE_OCCLUSION_MODES.RADIAL)) {
+    const upsertOcclFlags = getTileOcclusionModeFlags(tileDoc);
+    const upsertNeedsFoundryShader = !!(upsertOcclFlags
+      & (CONST.TILE_OCCLUSION_MODES.RADIAL | CONST.TILE_OCCLUSION_MODES.VISION));
+    if (entryRadialUpsert?.material && upsertNeedsFoundryShader) {
       installBusMeshRadialOcclusionShader(entryRadialUpsert.material);
     }
 

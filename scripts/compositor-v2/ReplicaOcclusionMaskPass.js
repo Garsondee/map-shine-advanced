@@ -1,13 +1,26 @@
 /**
  * @fileoverview Option B: Map Shine–owned occlusion mask RT mirroring Foundry’s
- * radial semantics (green channel + `step`/`mix` in bus materials). No PIXI
- * `extract.canvas` readback — one fullscreen fragment pass per frame.
+ * radial + vision semantics (green = radial, blue = vision/line-of-sight),
+ * consumed by bus materials via `step`/`mix`. No PIXI `extract.canvas`
+ * readback — one fullscreen fragment pass per frame, plus a real-geometry
+ * vision pass that draws controlled-token LOS polygons through the bus
+ * camera so RADIAL and VISION holes share the same parallax model.
  *
  * @module compositor-v2/ReplicaOcclusionMaskPass
  */
 import { createLogger } from '../core/log.js';
+import { VisionPolygonComputer } from '../vision/VisionPolygonComputer.js';
+import { GROUND_Z } from './LayerOrderPolicy.js';
 
 const log = createLogger('ReplicaOcclusionMaskPass');
+
+/** Hard cap on simultaneous LOS polygons rendered per frame (perf safety). */
+const REPLICA_OCCLUSION_VISION_TOKEN_CAP = 8;
+
+/** Lift vision polygons a hair above ground Z so they don't z-fight with floor 0 effects.
+ *  Depth test is disabled, but we keep the offset for any future depth-enabled debug pass.
+ */
+const REPLICA_VISION_Z_OFFSET = 0.05;
 
 /** Must match {@link TILE_RADIAL_OCCLUSION_TOKEN_CAP} in tile-manager.js */
 export const REPLICA_OCCLUSION_TOKEN_CAP = 8;
@@ -51,6 +64,8 @@ uniform vec3 uTok[8];
 uniform float uGreen[8];
 uniform float uRadiusScale;
 uniform float uEdgeSoftness;
+uniform sampler2D uVisionTex;
+uniform int uVisionEnabled;
 
 void main() {
   vec2 frag = gl_FragCoord.xy;
@@ -73,7 +88,29 @@ void main() {
       g = min(g, mix(1.0, te, inner));
     }
   }
-  gl_FragColor = vec4(0.0, g, 1.0, 1.0);
+  // B channel = VISION / Line-of-Sight occluder mask, in bus screen space.
+  // Source RT is rendered through the bus camera with controlled-token LOS
+  // polygons (filled black, otherwise white). 0 = covered = tile hidden.
+  // bus shader path: foMask.b < uMsFoundryOccElev → ms_foOcc.b = 1 → fade.
+  float vis = 1.0;
+  if (uVisionEnabled == 1) {
+    vis = texture2D(uVisionTex, frag / uResolution).r;
+  }
+  gl_FragColor = vec4(0.0, g, vis, 1.0);
+}
+`;
+
+/** Vision polygon vertex shader: standard MVP, polygons authored in bus world coords. */
+const VISION_POLY_VS = `
+void main() {
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+}
+`;
+
+/** Vision polygon fragment shader: pure black (covered = occluded in B channel). */
+const VISION_POLY_FS = `
+void main() {
+  gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
 }
 `;
 
@@ -332,12 +369,91 @@ function collectOccludableTokensForReplica(busW, busH, camera) {
   return out;
 }
 
+/**
+ * Collect controlled tokens that have vision, for VISION-mode LOS polygon rendering.
+ * Mirrors {@link VisionManager} controlled-token model so player and GM views behave
+ * predictably: GM with nothing selected → no VISION holes (matches Foundry's
+ * `_occlusionState.vision` staying 0 when no source covers the tile).
+ *
+ * @returns {Array<{ tokenId: string, center: { x: number, y: number }, radiusPx: number, elevation: number }>}
+ */
+function collectVisionSourcesForReplica() {
+  const out = [];
+  try {
+    if (typeof canvas === 'undefined' || !canvas?.tokens) return out;
+    const controlled = canvas.tokens.controlled ?? [];
+    if (!Array.isArray(controlled) || controlled.length === 0) return out;
+    const gsm = window.MapShine?.gameSystem ?? null;
+    const dims = canvas.dimensions;
+    const gridSize = Number(dims?.size) || 100;
+    const gridDistance = Number(dims?.distance) || 5;
+    for (const token of controlled) {
+      const doc = token?.document;
+      if (!doc) continue;
+      if (doc.hidden) continue;
+      const hasVision = gsm
+        ? gsm.hasTokenVision(token)
+        : (token.hasSight || doc.sight?.enabled);
+      if (!hasVision) continue;
+      let radiusPx = 0;
+      if (gsm && typeof gsm.getTokenVisionRadius === 'function') {
+        const dist = Number(gsm.getTokenVisionRadius(token));
+        if (Number.isFinite(dist) && dist > 0 && typeof gsm.distanceToPixels === 'function') {
+          radiusPx = Number(gsm.distanceToPixels(dist)) || 0;
+        }
+      }
+      if (!(radiusPx > 0)) {
+        const sightRange = Number(doc.sight?.range ?? token.sightRange ?? 0);
+        if (sightRange > 0 && gridDistance > 0) {
+          radiusPx = (sightRange / gridDistance) * gridSize;
+        }
+      }
+      if (!(radiusPx > 0) && (token.hasSight || doc.sight?.enabled)) {
+        // Unlimited / "very large" sight → use a generous fallback so VISION holes
+        // still appear when a token has sight enabled with no explicit range.
+        radiusPx = gridDistance > 0 ? (1000 / gridDistance) * gridSize : 5000;
+      }
+      if (!(radiusPx > 0)) continue;
+      const tokenWidth = (Number(doc.width) || 1) * gridSize;
+      const tokenHeight = (Number(doc.height) || 1) * gridSize;
+      const cx = (Number(doc.x) || 0) + tokenWidth / 2;
+      const cy = (Number(doc.y) || 0) + tokenHeight / 2;
+      const elevation = Number(doc.elevation ?? 0);
+      out.push({
+        tokenId: String(doc.id ?? token.id ?? ''),
+        center: { x: cx, y: cy },
+        radiusPx,
+        elevation: Number.isFinite(elevation) ? elevation : 0,
+      });
+      if (out.length >= REPLICA_OCCLUSION_VISION_TOKEN_CAP) break;
+    }
+  } catch (e) {
+    log.debug(`collectVisionSourcesForReplica failed: ${e?.message ?? e}`);
+  }
+  return out;
+}
+
+/** Earcut accessor with PIXI / global fallbacks (matches GeometryConverter). */
+function _resolveEarcut() {
+  try {
+    if (typeof PIXI !== 'undefined' && PIXI?.utils?.earcut) return PIXI.utils.earcut;
+  } catch (_) {}
+  if (typeof window !== 'undefined' && window.earcut) return window.earcut;
+  try {
+    const ec = canvas?.app?.renderer?.plugins?.extract?.earcut;
+    if (ec) return ec;
+  } catch (_) {}
+  return null;
+}
+
 export class ReplicaOcclusionMaskPass {
   constructor() {
     /** @type {import('three').WebGLRenderTarget|null} */
     this._rt = null;
     /** @type {import('three').WebGLRenderTarget|null} */
     this._rtResolved = null;
+    /** @type {import('three').WebGLRenderTarget|null} VISION-mode LOS mask (bus screen space). */
+    this._rtVision = null;
     /** @type {number} */
     this._rtW = 0;
     /** @type {number} */
@@ -364,6 +480,17 @@ export class ReplicaOcclusionMaskPass {
     this._copyScene = null;
     /** @type {import('three').OrthographicCamera|null} */
     this._copyCamera = null;
+
+    /** @type {import('three').Scene|null} VISION polygon scene, rendered with bus camera. */
+    this._visionScene = null;
+    /** @type {import('three').ShaderMaterial|null} */
+    this._visionMaterial = null;
+    /** @type {VisionPolygonComputer|null} */
+    this._visionComputer = null;
+    /** @type {Map<string, import('three').Mesh>} */
+    this._visionMeshes = new Map();
+    /** @type {boolean} True when the most recent update() built at least one polygon mesh. */
+    this._visionActive = false;
   }
 
   /**
@@ -410,7 +537,7 @@ export class ReplicaOcclusionMaskPass {
       this.valid = false;
       return;
     }
-    if (this._rt && this._rtResolved && this._rtW === w && this._rtH === h) {
+    if (this._rt && this._rtResolved && this._rtVision && this._rtW === w && this._rtH === h) {
       if (this._material?.uniforms?.uRadiusScale && this._material?.uniforms?.uEdgeSoftness) return;
     }
 
@@ -423,6 +550,10 @@ export class ReplicaOcclusionMaskPass {
     } catch (_) {
     }
     try {
+      this._rtVision?.dispose?.();
+    } catch (_) {
+    }
+    try {
       this._copyMesh?.geometry?.dispose?.();
     } catch (_) {
     }
@@ -432,6 +563,7 @@ export class ReplicaOcclusionMaskPass {
     }
     this._rt = null;
     this._rtResolved = null;
+    this._rtVision = null;
     this._mesh = null;
     this._material = null;
     this._scene = null;
@@ -452,6 +584,7 @@ export class ReplicaOcclusionMaskPass {
     };
     this._rt = new THREE.WebGLRenderTarget(w, h, rtOpts);
     this._rtResolved = new THREE.WebGLRenderTarget(w, h, rtOpts);
+    this._rtVision = new THREE.WebGLRenderTarget(w, h, rtOpts);
     this._rtW = w;
     this._rtH = h;
 
@@ -470,6 +603,8 @@ export class ReplicaOcclusionMaskPass {
         uGreen: { value: green },
         uRadiusScale: { value: REPLICA_OCCLUSION_RADIUS_SCALE_DEFAULT },
         uEdgeSoftness: { value: REPLICA_OCCLUSION_EDGE_SOFTNESS_DEFAULT },
+        uVisionTex: { value: this._rtVision.texture },
+        uVisionEnabled: { value: 0 },
       },
       vertexShader: VS,
       fragmentShader: FS,
@@ -511,7 +646,118 @@ export class ReplicaOcclusionMaskPass {
     this._copyCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
     this._copyCamera.position.z = 1;
 
+    // VISION pass — shared scene + material reused across polygon meshes.
+    if (!this._visionScene) this._visionScene = new THREE.Scene();
+    if (!this._visionMaterial) {
+      this._visionMaterial = new THREE.ShaderMaterial({
+        uniforms: {},
+        vertexShader: VISION_POLY_VS,
+        fragmentShader: VISION_POLY_FS,
+        depthTest: false,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+        transparent: false,
+      });
+    }
+    if (!this._visionComputer) this._visionComputer = new VisionPolygonComputer();
+
     this.valid = true;
+  }
+
+  /**
+   * Rebuild VISION-mode LOS polygon meshes for currently controlled tokens with sight.
+   * Polygons are authored in bus world coords (`(foundryX, sceneHeight - foundryY, GROUND_Z)`)
+   * so the bus camera projects them into screen space using the same matrix as
+   * tile/overhead draws. Reuses existing meshes per `tokenId` to minimize churn.
+   *
+   * @private
+   * @returns {number} number of polygon meshes currently in the vision scene
+   */
+  _rebuildVisionPolygons() {
+    const THREE = window.THREE;
+    if (!THREE || !this._visionScene || !this._visionMaterial || !this._visionComputer) return 0;
+
+    const earcut = _resolveEarcut();
+    const sources = collectVisionSourcesForReplica();
+
+    const dims = typeof canvas !== 'undefined' ? canvas?.dimensions : null;
+    const sceneHeight = Number(dims?.height ?? dims?.sceneHeight ?? 0);
+    const sceneRect = dims?.sceneRect ?? null;
+    const sceneBounds = sceneRect
+      ? { x: sceneRect.x, y: sceneRect.y, width: sceneRect.width, height: sceneRect.height }
+      : null;
+    const walls = (typeof canvas !== 'undefined' ? canvas?.walls?.placeables : null) ?? [];
+
+    const seen = new Set();
+    let active = 0;
+
+    for (const src of sources) {
+      if (!earcut) break;
+      const opts = (Number.isFinite(src.elevation) && src.elevation !== 0)
+        ? { elevation: src.elevation }
+        : null;
+
+      let points;
+      try {
+        points = this._visionComputer.compute(src.center, src.radiusPx, walls, sceneBounds, opts);
+      } catch (e) {
+        log.debug(`vision polygon compute failed for ${src.tokenId}: ${e?.message ?? e}`);
+        continue;
+      }
+      if (!points || points.length < 6) continue;
+
+      let indices;
+      try {
+        indices = earcut(points);
+      } catch (e) {
+        log.debug(`vision polygon triangulation failed for ${src.tokenId}: ${e?.message ?? e}`);
+        continue;
+      }
+      if (!indices || indices.length < 3) continue;
+
+      const vertCount = points.length / 2;
+      const vertices = new Float32Array(vertCount * 3);
+      for (let i = 0; i < vertCount; i++) {
+        const fx = points[i * 2];
+        const fy = points[i * 2 + 1];
+        vertices[i * 3] = fx;
+        vertices[i * 3 + 1] = sceneHeight - fy;
+        vertices[i * 3 + 2] = GROUND_Z + REPLICA_VISION_Z_OFFSET;
+      }
+
+      const key = src.tokenId || `tok_${active}`;
+      let mesh = this._visionMeshes.get(key);
+      if (!mesh) {
+        const geom = new THREE.BufferGeometry();
+        geom.setAttribute('position', new THREE.BufferAttribute(vertices, 3));
+        geom.setIndex(indices);
+        mesh = new THREE.Mesh(geom, this._visionMaterial);
+        mesh.frustumCulled = false;
+        mesh.matrixAutoUpdate = false;
+        mesh.userData = { msVisionPolyTokenId: key };
+        this._visionMeshes.set(key, mesh);
+        this._visionScene.add(mesh);
+      } else {
+        try { mesh.geometry.dispose(); } catch (_) {}
+        const geom = new THREE.BufferGeometry();
+        geom.setAttribute('position', new THREE.BufferAttribute(vertices, 3));
+        geom.setIndex(indices);
+        mesh.geometry = geom;
+        if (mesh.parent !== this._visionScene) this._visionScene.add(mesh);
+      }
+      seen.add(key);
+      active += 1;
+    }
+
+    // Remove meshes for tokens no longer providing vision.
+    for (const [key, mesh] of this._visionMeshes) {
+      if (seen.has(key)) continue;
+      try { this._visionScene.remove(mesh); } catch (_) {}
+      try { mesh.geometry?.dispose?.(); } catch (_) {}
+      this._visionMeshes.delete(key);
+    }
+
+    return active;
   }
 
   /**
@@ -523,7 +769,8 @@ export class ReplicaOcclusionMaskPass {
     this.valid = false;
     try {
       this._ensureResources(threeRenderer);
-      if (!this._rt || !this._rtResolved || !this._material || !this._scene || !this._camera
+      if (!this._rt || !this._rtResolved || !this._rtVision || !this._material
+        || !this._scene || !this._camera
         || !this._copyMaterial || !this._copyScene || !this._copyCamera) return false;
 
       const list = collectOccludableTokensForReplica(this._busBufW, this._busBufH, camera);
@@ -545,18 +792,37 @@ export class ReplicaOcclusionMaskPass {
         }
       }
 
+      // VISION / LOS — rebuild polygon meshes for controlled tokens. When no
+      // tokens provide vision (GM view, none selected) the scene stays empty,
+      // _rtVision stays full white, and B channel never causes occlusion.
+      const visionCount = this._rebuildVisionPolygons();
+      this._visionActive = visionCount > 0;
+      const useVision = !!(camera && this._visionActive);
+      if (u.uVisionTex) u.uVisionTex.value = this._rtVision.texture;
+      if (u.uVisionEnabled) u.uVisionEnabled.value = useVision ? 1 : 0;
+
       const prev = threeRenderer.getRenderTarget();
       const prevAuto = threeRenderer.autoClear;
       try {
+        // 1) Render VISION polygons through the bus camera into _rtVision.
+        //    Clear to white = "not occluded by vision"; polygons output black.
+        threeRenderer.setRenderTarget(this._rtVision);
+        threeRenderer.autoClear = true;
+        threeRenderer.setClearColor(0xffffff, 1);
+        threeRenderer.clear(true, true, false);
+        if (useVision) {
+          threeRenderer.render(this._visionScene, camera);
+        }
+
+        // 2) Radial fullscreen pass — also samples _rtVision and writes its
+        //    value into the B channel of _rt so bus materials see the full mask.
         threeRenderer.setRenderTarget(this._rt);
         threeRenderer.autoClear = true;
         threeRenderer.setClearColor(0x00ffff, 1);
         threeRenderer.clear(true, true, false);
         threeRenderer.render(this._scene, this._camera);
 
-        // Resolve to a separate texture before any pass samples the mask while drawing
-        // to another FBO (e.g. scene RT). Sampling the same RT's color texture as an
-        // active attachment elsewhere triggers GL_INVALID_OPERATION feedback-loop on many drivers.
+        // 3) Resolve copy — decouples sampler/attachment to avoid feedback loops.
         threeRenderer.setRenderTarget(this._rtResolved);
         threeRenderer.autoClear = true;
         threeRenderer.setClearColor(0x00ffff, 1);
@@ -576,6 +842,17 @@ export class ReplicaOcclusionMaskPass {
       this.valid = false;
       return false;
     }
+  }
+
+  /**
+   * Whether the most recent update() produced at least one VISION polygon mesh.
+   * Bus uniform plumbing uses this to gate `uMsFoundryVision` so VISION-mode
+   * tiles never blend in a no-source mask (matches Foundry's `_occlusionState.vision = 0`
+   * when no LOS source covers the tile).
+   * @returns {boolean}
+   */
+  hasActiveVisionSource() {
+    return !!this._visionActive;
   }
 
   dispose() {
@@ -603,6 +880,22 @@ export class ReplicaOcclusionMaskPass {
       this._rtResolved?.dispose?.();
     } catch (_) {
     }
+    try {
+      this._rtVision?.dispose?.();
+    } catch (_) {
+    }
+    try {
+      for (const mesh of this._visionMeshes.values()) {
+        try { this._visionScene?.remove?.(mesh); } catch (_) {}
+        try { mesh.geometry?.dispose?.(); } catch (_) {}
+      }
+    } catch (_) {
+    }
+    this._visionMeshes.clear();
+    try {
+      this._visionMaterial?.dispose?.();
+    } catch (_) {
+    }
     this._mesh = null;
     this._material = null;
     this._scene = null;
@@ -611,8 +904,13 @@ export class ReplicaOcclusionMaskPass {
     this._copyMaterial = null;
     this._copyScene = null;
     this._copyCamera = null;
+    this._visionScene = null;
+    this._visionMaterial = null;
+    this._visionComputer = null;
+    this._visionActive = false;
     this._rt = null;
     this._rtResolved = null;
+    this._rtVision = null;
     this._rtW = 0;
     this._rtH = 0;
     this.valid = false;

@@ -1424,10 +1424,38 @@ export function applyTokenRenderingMode() {
   }, 'tokenRendering.applyMode', Severity.COSMETIC);
 }
 
+/**
+ * Restore Foundry's native marquee (controls.drawSelect) after Map Shine patches.
+ * Must run on non-MSA scenes and when tearing down an MSA canvas so a prior scene
+ * cannot leave drawSelect as a no-op.
+ */
+function _restoreFoundryNativeSelectRectForVanillaScene() {
+  const hadModeManager = !!modeManager;
+  try {
+    modeManager?.forceRestoreFoundrySelectRect?.();
+  } catch (_) {}
+
+  safeCall(() => {
+    const controls = canvas?.controls;
+    if (!controls) return;
+
+    const selectGfx = controls.select;
+    if (_mapShineOrigDrawSelect && !hadModeManager) {
+      controls.drawSelect = _mapShineOrigDrawSelect;
+    }
+    if (selectGfx) selectGfx.visible = true;
+    _mapShineSelectSuppressed = false;
+    _mapShineOrigDrawSelect = null;
+  }, 'selectRect.restoreVanilla', Severity.COSMETIC);
+}
+
 function _updateFoundrySelectRectSuppression(forceValue = null) {
   // Never suppress select rect on non-MSA scenes. Stray hooks from a previous
   // MSA scene could otherwise patch Foundry's drawSelect on a vanilla scene.
-  if (!sceneSettings.isEnabled(canvas?.scene)) return;
+  if (!sceneSettings.isEnabled(canvas?.scene)) {
+    _restoreFoundryNativeSelectRectForVanillaScene();
+    return;
+  }
 
   // Suppress Foundry selection rectangle only when Three owns interaction.
   // Token selection/marquee in gameplay is Three-authoritative.
@@ -4783,6 +4811,7 @@ async function onCanvasReady(canvas) {
     }, 'graphicsSettings.init(UI-only)', Severity.DEGRADED);
 
     // Scene not replaced by Three.js - dismiss the overlay so the user can interact with Foundry normally.
+    safeCall(() => _restoreFoundryNativeSelectRectForVanillaScene(), 'uiOnly.restoreSelectRect', Severity.COSMETIC);
     safeCall(() => loadingOverlay.fadeIn(500).catch(() => {}), 'overlay.fadeIn', Severity.COSMETIC);
     return;
   }
@@ -8576,12 +8605,32 @@ function destroyThreeCanvas() {
   }
 
   // Restore Foundry's PIXI rendering via ModeManager (or legacy fallback)
+  const hadModeManager = !!modeManager;
+  const modeManagerHadOrigDrawSelect = !!(modeManager?._origDrawSelect);
   if (modeManager) {
     modeManager.restoreFoundryRendering();
     modeManager.dispose();
     modeManager = null;
   } else {
     restoreFoundryRendering();
+  }
+  if (hadModeManager) {
+    safeCall(() => {
+      const controls = canvas?.controls;
+      if (!controls) {
+        _mapShineOrigDrawSelect = null;
+        _mapShineSelectSuppressed = false;
+        return;
+      }
+      if (_mapShineOrigDrawSelect && !modeManagerHadOrigDrawSelect) {
+        controls.drawSelect = _mapShineOrigDrawSelect;
+      }
+      if (controls.select) controls.select.visible = true;
+      _mapShineOrigDrawSelect = null;
+      _mapShineSelectSuppressed = false;
+    }, 'destroyThree.restoreSelectRect.postModeManager', Severity.COSMETIC);
+  } else {
+    safeCall(() => _restoreFoundryNativeSelectRectForVanillaScene(), 'destroyThree.restoreSelectRect', Severity.COSMETIC);
   }
 
   // NOTE: We intentionally do NOT clear the asset cache here.

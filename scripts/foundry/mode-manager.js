@@ -15,6 +15,7 @@
 import { isGmLike } from '../core/gm-parity.js';
 
 import { createLogger } from '../core/log.js';
+import * as sceneSettings from '../settings/scene-settings.js';
 import { getConfiguredCanvasLayer } from './canvas-layer-resolve.js';
 
 const log = createLogger('ModeManager');
@@ -210,10 +211,39 @@ export class ModeManager {
   }
 
   /**
+   * Always restore Foundry's native drag-select implementation (bypasses redundant
+   * short-circuit in updateSelectRectSuppression). Used when leaving MSA scenes
+   * or when the canvas-replacement path patched drawSelect without flipping
+   * {@link #_selectSuppressed}.
+   */
+  forceRestoreFoundrySelectRect() {
+    this._selectSuppressed = false;
+    try {
+      const controls = canvas?.controls;
+      if (!controls) return;
+
+      const selectGfx = controls.select;
+      if (this._origDrawSelect) {
+        controls.drawSelect = this._origDrawSelect;
+      }
+      try {
+        if (selectGfx) selectGfx.visible = true;
+      } catch (_) {}
+    } catch (_) {}
+  }
+
+  /**
    * Suppress or restore Foundry's drag-select rectangle based on current mode.
    * @param {boolean|null} [forceValue=null] - Force a specific state, or null for auto.
    */
   updateSelectRectSuppression(forceValue = null) {
+    try {
+      if (canvas?.scene && !sceneSettings.isEnabled(canvas.scene)) {
+        this.forceRestoreFoundrySelectRect();
+        return;
+      }
+    } catch (_) {}
+
     let suppress = false;
     try {
       const im = window.MapShine?.interactionManager;
@@ -452,8 +482,7 @@ export class ModeManager {
    * Dispose mode manager — restore original state.
    */
   dispose() {
-    // Restore select rect if suppressed
-    this.updateSelectRectSuppression(false);
+    this.forceRestoreFoundrySelectRect();
     this._origDrawSelect = null;
     this._selectSuppressed = false;
     this._mapMakerFogState = null;

@@ -405,7 +405,8 @@ export class FloorRenderBus {
       const entryRadial = this._tiles.get(tileId);
       const populateOcclFlags = getTileOcclusionModeFlags(tileDoc);
       const populateNeedsFoundryShader = !!(populateOcclFlags
-        & (CONST.TILE_OCCLUSION_MODES.RADIAL | CONST.TILE_OCCLUSION_MODES.VISION));
+        & (CONST.TILE_OCCLUSION_MODES.RADIAL | CONST.TILE_OCCLUSION_MODES.VISION
+          | (CONST.TILE_OCCLUSION_MODES.SURFACE ?? 2)));
       if (entryRadial?.material && populateNeedsFoundryShader) {
         installBusMeshRadialOcclusionShader(entryRadial.material);
       }
@@ -852,7 +853,8 @@ export class FloorRenderBus {
       const syncOcclFlags = tileDocForRadial ? getTileOcclusionModeFlags(tileDocForRadial) : 0;
       const radialOn = !!(syncOcclFlags & CONST.TILE_OCCLUSION_MODES.RADIAL);
       const visionOn = !!(syncOcclFlags & CONST.TILE_OCCLUSION_MODES.VISION);
-      const wantsFoundryMask = radialOn || visionOn;
+      const surfaceOn = !!(syncOcclFlags & (CONST.TILE_OCCLUSION_MODES.SURFACE ?? 2));
+      const wantsFoundryMask = radialOn || visionOn || surfaceOn;
       if (tileDocForRadial && wantsFoundryMask) {
         installBusMeshRadialOcclusionShader(entry.material);
         const busSh = entry.material?.userData?._msBusRadialOcclusionShader;
@@ -1022,7 +1024,8 @@ export class FloorRenderBus {
     const entryRadialUpsert = this._tiles.get(tileId);
     const upsertOcclFlags = getTileOcclusionModeFlags(tileDoc);
     const upsertNeedsFoundryShader = !!(upsertOcclFlags
-      & (CONST.TILE_OCCLUSION_MODES.RADIAL | CONST.TILE_OCCLUSION_MODES.VISION));
+      & (CONST.TILE_OCCLUSION_MODES.RADIAL | CONST.TILE_OCCLUSION_MODES.VISION
+        | (CONST.TILE_OCCLUSION_MODES.SURFACE ?? 2)));
     if (entryRadialUpsert?.material && upsertNeedsFoundryShader) {
       installBusMeshRadialOcclusionShader(entryRadialUpsert.material);
     }

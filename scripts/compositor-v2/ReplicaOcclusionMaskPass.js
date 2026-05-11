@@ -1,10 +1,11 @@
 /**
  * @fileoverview Option B: Map Shine–owned occlusion mask RT mirroring Foundry’s
- * radial + vision semantics (green = radial, blue = vision/line-of-sight),
+ * radial + vision + surface semantics (green = radial, blue = vision/LOS,
+ * alpha = Define Surface region occlusion under occludable tokens),
  * consumed by bus materials via `step`/`mix`. No PIXI `extract.canvas`
- * readback — one fullscreen fragment pass per frame, plus a real-geometry
- * vision pass that draws controlled-token LOS polygons through the bus
- * camera so RADIAL and VISION holes share the same parallax model.
+ * readback — one fullscreen fragment pass per frame, plus real-geometry
+ * passes that draw controlled-token LOS polygons and region triangulations
+ * through the bus camera so RADIAL, VISION, and SURFACE share the same parallax model.
  *
  * @module compositor-v2/ReplicaOcclusionMaskPass
  */
@@ -16,6 +17,9 @@ const log = createLogger('ReplicaOcclusionMaskPass');
 
 /** Hard cap on simultaneous LOS polygons rendered per frame (perf safety). */
 const REPLICA_OCCLUSION_VISION_TOKEN_CAP = 8;
+
+/** Cap on region surface meshes drawn into the SURFACE mask channel per frame. */
+const REPLICA_OCCLUSION_SURFACE_REGION_CAP = 16;
 
 /** Lift vision polygons a hair above ground Z so they don't z-fight with floor 0 effects.
  *  Depth test is disabled, but we keep the offset for any future depth-enabled debug pass.
@@ -66,6 +70,8 @@ uniform float uRadiusScale;
 uniform float uEdgeSoftness;
 uniform sampler2D uVisionTex;
 uniform int uVisionEnabled;
+uniform sampler2D uSurfaceTex;
+uniform int uSurfaceEnabled;
 
 void main() {
   vec2 frag = gl_FragCoord.xy;
@@ -96,7 +102,13 @@ void main() {
   if (uVisionEnabled == 1) {
     vis = texture2D(uVisionTex, frag / uResolution).r;
   }
-  gl_FragColor = vec4(0.0, g, vis, 1.0);
+  // A channel = SURFACE (Define Surface region) occlusion — same decode family as B:
+  // low R in uSurfaceTex → foMask.a low → ms_foOcc.a high under step().
+  float surf = 1.0;
+  if (uSurfaceEnabled == 1) {
+    surf = texture2D(uSurfaceTex, frag / uResolution).r;
+  }
+  gl_FragColor = vec4(0.0, g, vis, surf);
 }
 `;
 
@@ -433,6 +445,133 @@ function collectVisionSourcesForReplica() {
   return out;
 }
 
+/**
+ * @param {object} regionDoc - Foundry RegionDocument
+ * @returns {boolean}
+ */
+function regionDocumentHasSurfaceOcclusionBehavior(regionDoc) {
+  const contents = regionDoc?.behaviors?.contents ?? regionDoc?.behaviors ?? [];
+  if (!Array.isArray(contents)) return false;
+  for (const b of contents) {
+    const sys = b?.system ?? b?._source ?? {};
+    if (sys.occlusion === true) return true;
+    if (sys.bottom && typeof sys.bottom === 'object' && sys.bottom.occlusion === true) return true;
+    if (sys.top && typeof sys.top === 'object' && sys.top.occlusion === true) return true;
+  }
+  return false;
+}
+
+/**
+ * Region footprints that should stamp the SURFACE mask (alpha channel), mirroring
+ * {@link canvas.masks.occlusion.occludedSurfaces} when available, else a conservative
+ * fallback from occludable tokens + {@link RegionDocument#testPoint}.
+ *
+ * @returns {Array<{ key: string, region: object }>}
+ */
+function collectSurfaceRegionsForReplica() {
+  const out = [];
+  const seen = new Set();
+  try {
+    const occ = typeof canvas !== 'undefined' ? canvas?.masks?.occlusion : null;
+    const os = occ?.occludedSurfaces;
+    if (os && typeof os.forEach === 'function') {
+      os.forEach((surface) => {
+        if (out.length >= REPLICA_OCCLUSION_SURFACE_REGION_CAP) return;
+        if (!surface || surface.occlusion !== true) return;
+        const doc = surface.region;
+        if (!doc?.triangulation?.vertices || !doc?.triangulation?.indices) return;
+        const key = String(surface.key ?? doc.uuid ?? doc.id ?? `r_${out.length}`);
+        if (seen.has(key)) return;
+        seen.add(key);
+        out.push({ key, region: doc });
+      });
+    }
+  } catch (e) {
+    log.debug(`collectSurfaceRegions occludedSurfaces: ${e?.message ?? e}`);
+  }
+  if (out.length >= REPLICA_OCCLUSION_SURFACE_REGION_CAP) return out.slice(0, REPLICA_OCCLUSION_SURFACE_REGION_CAP);
+
+  try {
+    const layer = typeof canvas !== 'undefined' ? canvas?.tokens : null;
+    const fn = layer?._getOccludableTokens;
+    const tokens = typeof fn === 'function' ? fn.call(layer) : [];
+    if (!Array.isArray(tokens) || tokens.length === 0) return out;
+    const scene = canvas?.scene;
+    const regions = Array.isArray(scene?.regions?.contents)
+      ? scene.regions.contents
+      : [];
+    for (let ri = 0; ri < regions.length; ri++) {
+      const regionDoc = regions[ri];
+      if (!regionDoc?.testPoint || !regionDoc?.triangulation?.vertices) continue;
+      if (!regionDocumentHasSurfaceOcclusionBehavior(regionDoc)) continue;
+      const rkey = String(regionDoc.uuid ?? regionDoc.id ?? '');
+      const dedupeKey = `fb_${rkey || `i_${ri}`}`;
+      if (seen.has(dedupeKey)) continue;
+      let any = false;
+      for (const tok of tokens) {
+        const c = tok?.center;
+        if (!c) continue;
+        const el = Number(tok.document?.elevation ?? 0);
+        const cx = Number(c.x);
+        const cy = Number(c.y);
+        if (!Number.isFinite(el) || !Number.isFinite(cx) || !Number.isFinite(cy)) continue;
+        try {
+          if (regionDoc.testPoint({ x: cx, y: cy, elevation: el })) {
+            any = true;
+            break;
+          }
+        } catch (_) {
+        }
+      }
+      if (!any) continue;
+      seen.add(dedupeKey);
+      out.push({ key: dedupeKey, region: regionDoc });
+      if (out.length >= REPLICA_OCCLUSION_SURFACE_REGION_CAP) break;
+    }
+  } catch (e2) {
+    log.debug(`collectSurfaceRegions fallback: ${e2?.message ?? e2}`);
+  }
+  return out.slice(0, REPLICA_OCCLUSION_SURFACE_REGION_CAP);
+}
+
+/**
+ * @param {object} regionDoc - RegionDocument with triangulation
+ * @param {number} sceneHeight
+ * @returns {{ vertices: Float32Array, indices: Uint16Array|Uint32Array }|null}
+ */
+function regionTriangulationToBusGeometry(regionDoc, sceneHeight) {
+  const tri = regionDoc?.triangulation;
+  if (!tri?.vertices || !tri?.indices) return null;
+  const verts = tri.vertices;
+  const idx = tri.indices;
+  const n = verts.length;
+  if (n < 6 || !idx || idx.length < 3) return null;
+
+  let v3;
+  if (n % 2 === 0) {
+    const vc = n / 2;
+    v3 = new Float32Array(vc * 3);
+    for (let i = 0; i < vc; i++) {
+      const fx = verts[i * 2];
+      const fy = verts[i * 2 + 1];
+      v3[i * 3] = fx;
+      v3[i * 3 + 1] = sceneHeight - fy;
+      v3[i * 3 + 2] = GROUND_Z + 0.06;
+    }
+  } else if (n % 3 === 0) {
+    const vc = n / 3;
+    v3 = new Float32Array(vc * 3);
+    for (let i = 0; i < vc; i++) {
+      v3[i * 3] = verts[i * 3];
+      v3[i * 3 + 1] = sceneHeight - verts[i * 3 + 1];
+      v3[i * 3 + 2] = GROUND_Z + 0.06;
+    }
+  } else {
+    return null;
+  }
+  return { vertices: v3, indices: idx };
+}
+
 /** Earcut accessor with PIXI / global fallbacks (matches GeometryConverter). */
 function _resolveEarcut() {
   try {
@@ -454,6 +593,8 @@ export class ReplicaOcclusionMaskPass {
     this._rtResolved = null;
     /** @type {import('three').WebGLRenderTarget|null} VISION-mode LOS mask (bus screen space). */
     this._rtVision = null;
+    /** @type {import('three').WebGLRenderTarget|null} SURFACE-mode region mask (bus screen space). */
+    this._rtSurface = null;
     /** @type {number} */
     this._rtW = 0;
     /** @type {number} */
@@ -491,6 +632,13 @@ export class ReplicaOcclusionMaskPass {
     this._visionMeshes = new Map();
     /** @type {boolean} True when the most recent update() built at least one polygon mesh. */
     this._visionActive = false;
+
+    /** @type {import('three').Scene|null} SURFACE region footprint scene (bus camera). */
+    this._surfaceScene = null;
+    /** @type {Map<string, import('three').Mesh>} */
+    this._surfaceMeshes = new Map();
+    /** @type {boolean} True when at least one surface region mesh is active this frame. */
+    this._surfaceActive = false;
   }
 
   /**
@@ -537,7 +685,7 @@ export class ReplicaOcclusionMaskPass {
       this.valid = false;
       return;
     }
-    if (this._rt && this._rtResolved && this._rtVision && this._rtW === w && this._rtH === h) {
+    if (this._rt && this._rtResolved && this._rtVision && this._rtSurface && this._rtW === w && this._rtH === h) {
       if (this._material?.uniforms?.uRadiusScale && this._material?.uniforms?.uEdgeSoftness) return;
     }
 
@@ -554,6 +702,10 @@ export class ReplicaOcclusionMaskPass {
     } catch (_) {
     }
     try {
+      this._rtSurface?.dispose?.();
+    } catch (_) {
+    }
+    try {
       this._copyMesh?.geometry?.dispose?.();
     } catch (_) {
     }
@@ -564,6 +716,7 @@ export class ReplicaOcclusionMaskPass {
     this._rt = null;
     this._rtResolved = null;
     this._rtVision = null;
+    this._rtSurface = null;
     this._mesh = null;
     this._material = null;
     this._scene = null;
@@ -585,6 +738,7 @@ export class ReplicaOcclusionMaskPass {
     this._rt = new THREE.WebGLRenderTarget(w, h, rtOpts);
     this._rtResolved = new THREE.WebGLRenderTarget(w, h, rtOpts);
     this._rtVision = new THREE.WebGLRenderTarget(w, h, rtOpts);
+    this._rtSurface = new THREE.WebGLRenderTarget(w, h, rtOpts);
     this._rtW = w;
     this._rtH = h;
 
@@ -605,6 +759,8 @@ export class ReplicaOcclusionMaskPass {
         uEdgeSoftness: { value: REPLICA_OCCLUSION_EDGE_SOFTNESS_DEFAULT },
         uVisionTex: { value: this._rtVision.texture },
         uVisionEnabled: { value: 0 },
+        uSurfaceTex: { value: this._rtSurface.texture },
+        uSurfaceEnabled: { value: 0 },
       },
       vertexShader: VS,
       fragmentShader: FS,
@@ -648,6 +804,7 @@ export class ReplicaOcclusionMaskPass {
 
     // VISION pass — shared scene + material reused across polygon meshes.
     if (!this._visionScene) this._visionScene = new THREE.Scene();
+    if (!this._surfaceScene) this._surfaceScene = new THREE.Scene();
     if (!this._visionMaterial) {
       this._visionMaterial = new THREE.ShaderMaterial({
         uniforms: {},
@@ -662,6 +819,62 @@ export class ReplicaOcclusionMaskPass {
     if (!this._visionComputer) this._visionComputer = new VisionPolygonComputer();
 
     this.valid = true;
+  }
+
+  /**
+   * Rebuild SURFACE-mode region triangulation meshes (Define Surface + occlusion).
+   * @private
+   * @returns {number}
+   */
+  _rebuildSurfacePolygons() {
+    const THREE = window.THREE;
+    if (!THREE || !this._surfaceScene || !this._visionMaterial) return 0;
+
+    const dims = typeof canvas !== 'undefined' ? canvas?.dimensions : null;
+    const sceneHeight = Number(dims?.height ?? dims?.sceneHeight ?? 0);
+    if (!(sceneHeight > 0)) return 0;
+
+    const specs = collectSurfaceRegionsForReplica();
+    const seen = new Set();
+    let active = 0;
+
+    for (const spec of specs) {
+      const regionDoc = spec.region;
+      const geomData = regionTriangulationToBusGeometry(regionDoc, sceneHeight);
+      if (!geomData) continue;
+
+      const key = spec.key || String(regionDoc.uuid ?? regionDoc.id ?? `s_${active}`);
+      let mesh = this._surfaceMeshes.get(key);
+      if (!mesh) {
+        const geom = new THREE.BufferGeometry();
+        geom.setAttribute('position', new THREE.BufferAttribute(geomData.vertices, 3));
+        geom.setIndex(Array.from(geomData.indices));
+        mesh = new THREE.Mesh(geom, this._visionMaterial);
+        mesh.frustumCulled = false;
+        mesh.matrixAutoUpdate = false;
+        mesh.userData = { msSurfacePolyKey: key };
+        this._surfaceMeshes.set(key, mesh);
+        this._surfaceScene.add(mesh);
+      } else {
+        try { mesh.geometry.dispose(); } catch (_) {}
+        const geom = new THREE.BufferGeometry();
+        geom.setAttribute('position', new THREE.BufferAttribute(geomData.vertices, 3));
+        geom.setIndex(Array.from(geomData.indices));
+        mesh.geometry = geom;
+        if (mesh.parent !== this._surfaceScene) this._surfaceScene.add(mesh);
+      }
+      seen.add(key);
+      active += 1;
+    }
+
+    for (const [key, mesh] of this._surfaceMeshes) {
+      if (seen.has(key)) continue;
+      try { this._surfaceScene.remove(mesh); } catch (_) {}
+      try { mesh.geometry?.dispose?.(); } catch (_) {}
+      this._surfaceMeshes.delete(key);
+    }
+
+    return active;
   }
 
   /**
@@ -769,7 +982,7 @@ export class ReplicaOcclusionMaskPass {
     this.valid = false;
     try {
       this._ensureResources(threeRenderer);
-      if (!this._rt || !this._rtResolved || !this._rtVision || !this._material
+      if (!this._rt || !this._rtResolved || !this._rtVision || !this._rtSurface || !this._material
         || !this._scene || !this._camera
         || !this._copyMaterial || !this._copyScene || !this._copyCamera) return false;
 
@@ -801,6 +1014,12 @@ export class ReplicaOcclusionMaskPass {
       if (u.uVisionTex) u.uVisionTex.value = this._rtVision.texture;
       if (u.uVisionEnabled) u.uVisionEnabled.value = useVision ? 1 : 0;
 
+      const surfaceCount = this._rebuildSurfacePolygons();
+      this._surfaceActive = surfaceCount > 0;
+      const useSurface = !!(camera && this._surfaceActive);
+      if (u.uSurfaceTex) u.uSurfaceTex.value = this._rtSurface.texture;
+      if (u.uSurfaceEnabled) u.uSurfaceEnabled.value = useSurface ? 1 : 0;
+
       const prev = threeRenderer.getRenderTarget();
       const prevAuto = threeRenderer.autoClear;
       try {
@@ -812,6 +1031,15 @@ export class ReplicaOcclusionMaskPass {
         threeRenderer.clear(true, true, false);
         if (useVision) {
           threeRenderer.render(this._visionScene, camera);
+        }
+
+        // 1b) SURFACE region footprints — white = no surface stamp; black = occluded in A.
+        threeRenderer.setRenderTarget(this._rtSurface);
+        threeRenderer.autoClear = true;
+        threeRenderer.setClearColor(0xffffff, 1);
+        threeRenderer.clear(true, true, false);
+        if (useSurface) {
+          threeRenderer.render(this._surfaceScene, camera);
         }
 
         // 2) Radial fullscreen pass — also samples _rtVision and writes its
@@ -855,6 +1083,16 @@ export class ReplicaOcclusionMaskPass {
     return !!this._visionActive;
   }
 
+  /**
+   * True when the SURFACE mask has at least one active region mesh this frame.
+   * Used to gate `uMsFoundrySurface` so SURFACE tiles match Foundry when no
+   * occludable token sits under an occluding surface.
+   * @returns {boolean}
+   */
+  hasActiveSurfaceOcclusion() {
+    return !!this._surfaceActive;
+  }
+
   dispose() {
     try {
       this._mesh?.geometry?.dispose?.();
@@ -885,6 +1123,18 @@ export class ReplicaOcclusionMaskPass {
     } catch (_) {
     }
     try {
+      this._rtSurface?.dispose?.();
+    } catch (_) {
+    }
+    try {
+      for (const mesh of this._surfaceMeshes.values()) {
+        try { this._surfaceScene?.remove?.(mesh); } catch (_) {}
+        try { mesh.geometry?.dispose?.(); } catch (_) {}
+      }
+    } catch (_) {
+    }
+    this._surfaceMeshes.clear();
+    try {
       for (const mesh of this._visionMeshes.values()) {
         try { this._visionScene?.remove?.(mesh); } catch (_) {}
         try { mesh.geometry?.dispose?.(); } catch (_) {}
@@ -908,9 +1158,12 @@ export class ReplicaOcclusionMaskPass {
     this._visionMaterial = null;
     this._visionComputer = null;
     this._visionActive = false;
+    this._surfaceScene = null;
+    this._surfaceActive = false;
     this._rt = null;
     this._rtResolved = null;
     this._rtVision = null;
+    this._rtSurface = null;
     this._rtW = 0;
     this._rtH = 0;
     this.valid = false;

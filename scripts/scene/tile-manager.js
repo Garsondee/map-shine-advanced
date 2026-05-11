@@ -404,10 +404,10 @@ float ms_radialAlphaModFromUv(vec2 uv) {
         const circles = Array.isArray(data?._msRadialCircles) ? data._msRadialCircles : [];
         const M = (typeof CONST !== 'undefined' && CONST.TILE_OCCLUSION_MODES)
           ? CONST.TILE_OCCLUSION_MODES
-          : { RADIAL: 4, VISION: 8 };
+          : { RADIAL: 4, VISION: 8, SURFACE: 2 };
         const flagsAtCompile = doc ? getTileOcclusionModeFlags(doc) : 0;
         const radial = !!(flagsAtCompile & M.RADIAL);
-        const wantsFoundryMask = !!(flagsAtCompile & (M.RADIAL | M.VISION));
+        const wantsFoundryMask = !!(flagsAtCompile & (M.RADIAL | M.VISION | M.SURFACE));
         applyRadialOcclusionUniformsToShader(shader, doc, circles, radial);
         applyFoundryOcclusionMaskBusUniforms(shader, doc, resolveReplicaOcclusionMaskPass(), wantsFoundryMask);
       }
@@ -454,7 +454,7 @@ function getBusFoundryOcclusionChannelWeights(tileDoc) {
  * @param {import('three').ShaderLibShader|null|undefined} shader
  * @param {object|null|undefined} tileDoc
  * @param {import('../compositor-v2/ReplicaOcclusionMaskPass.js').ReplicaOcclusionMaskPass|null|undefined} bridgeOrNull
- * @param {boolean} useFoundryMask - false for tiles without RADIAL/VISION (clears Foundry path)
+ * @param {boolean} useFoundryMask - false for tiles without RADIAL/VISION/SURFACE (clears Foundry path)
  */
 export function applyFoundryOcclusionMaskBusUniforms(shader, tileDoc, bridgeOrNull, useFoundryMask) {
   const u = shader?.uniforms;
@@ -500,12 +500,17 @@ export function applyFoundryOcclusionMaskBusUniforms(shader, tileDoc, bridgeOrNu
   // already mirror correctly). RADIAL, SURFACE, and VISION are driven from the
   // `occlusion.modes` bits because the PIXI tile mesh may never run
   // `updateTransform` under Map Shine canvas replacement, which leaves
-  // `_occlusionState.radial` / `.vision` stuck at 0 — that would zero the green/
-  // blue channel and remove the token hole entirely. The per-pixel occlusion
-  // strength now lives in the mask itself (G = radial, B = vision LOS).
+  // `_occlusionState.radial` / `.vision` / `.surface` stuck at 0 — that would zero the green/
+  // blue / alpha channel and remove the token hole entirely. The per-pixel occlusion
+  // strength now lives in the mask itself (G = radial, B = vision LOS, A = surface regions).
+  // SURFACE is further gated on `hasActiveSurfaceOcclusion()` so idle scenes do not stamp.
   u.uMsFoundryFade.value = w ? w.fade : 0.0;
   u.uMsFoundryRadial.value = (flags & M.RADIAL) ? 1.0 : 0.0;
-  u.uMsFoundrySurface.value = (flags & M.SURFACE) ? 1.0 : 0.0;
+  const hasSurfaceFlag = !!(flags & M.SURFACE);
+  const surfaceMaskActive = (typeof bridgeOrNull?.hasActiveSurfaceOcclusion === 'function')
+    ? !!bridgeOrNull.hasActiveSurfaceOcclusion()
+    : false;
+  u.uMsFoundrySurface.value = (hasSurfaceFlag && surfaceMaskActive) ? 1.0 : 0.0;
   const hasVisionFlag = !!(flags & M.VISION);
   const visionSourceActive = (typeof bridgeOrNull?.hasActiveVisionSource === 'function')
     ? !!bridgeOrNull.hasActiveVisionSource()
@@ -3540,11 +3545,13 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
       const NONE = CONST.TILE_OCCLUSION_MODES.NONE;
       const RADIAL_BIT = CONST.TILE_OCCLUSION_MODES.RADIAL;
       const VISION_BIT = CONST.TILE_OCCLUSION_MODES.VISION ?? 8;
+      const SURFACE_BIT = CONST.TILE_OCCLUSION_MODES.SURFACE ?? 2;
       const hasRadialMode = !!(occFlags & RADIAL_BIT);
       const hasVisionMode = !!(occFlags & VISION_BIT);
-      // Shader-driven holes (RADIAL / VISION) must keep base opacity so the
+      const hasSurfaceMode = !!(occFlags & SURFACE_BIT);
+      // Shader-driven holes (RADIAL / VISION / SURFACE) must keep base opacity so the
       // mask can carve per-pixel cutouts; full alpha=0 fade would hide them.
-      const keepBaseOpacityForShaderHoles = hasRadialMode || hasVisionMode;
+      const keepBaseOpacityForShaderHoles = hasRadialMode || hasVisionMode || hasSurfaceMode;
 
       // Occlusion only triggers when the mouse is hovering over the tile AND a
       // controlled token is underneath — matching Foundry's native behaviour.

@@ -2665,11 +2665,13 @@ export const consoleHelpers = {
           const buf = new Uint8Array(4);
           renderer.readRenderTargetPixels(replicaSampleRt, x, yGl, 1, 1, buf);
           readBack = {
-            note: 'RGBA from replica resolved RT (same pixels as bus `uMsFoundryOccTex`); Foundry default clear is G=B=A=1, R=0. Hole lowers G.',
+            note: 'RGBA from replica resolved RT (same pixels as bus `uMsFoundryOccTex`); default clear G=B=A=1, R=0. Radial lowers G; vision lowers B; surface lowers A.',
             sampleDrawingPx: rp ? { x: cx, y: cy } : { x: cx, y: cy, warn: 'fallback_world_if_no_replicaPx' },
             readPixelBottomLeft: { x, y: yGl },
             rgba: [buf[0], buf[1], buf[2], buf[3]],
             gNorm: buf[1] / 255,
+            bNorm: buf[2] / 255,
+            aNorm: buf[3] / 255,
           };
         }
       } else {
@@ -2695,6 +2697,8 @@ export const consoleHelpers = {
             ? { w: replicaSampleRt.width, h: replicaSampleRt.height }
             : null,
           getBusInvBufSize: typeof pass.getBusInvBufSize === 'function' ? pass.getBusInvBufSize() : null,
+          hasActiveVisionSource: typeof pass.hasActiveVisionSource === 'function' ? !!pass.hasActiveVisionSource() : null,
+          hasActiveSurfaceOcclusion: typeof pass.hasActiveSurfaceOcclusion === 'function' ? !!pass.hasActiveSurfaceOcclusion() : null,
         }
         : null,
       canvasTokensOcclusionMode: (() => {

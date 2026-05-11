@@ -515,7 +515,7 @@ export class ModeManager {
 
     // Three.js Canvas: visible and interactive
     threeCanvas.style.opacity = '1';
-    threeCanvas.style.zIndex = '1';
+    threeCanvas.style.zIndex = '100';
     threeCanvas.style.pointerEvents = 'auto';
 
     // PIXI Canvas: transparent overlay

@@ -1,18 +1,19 @@
 /* This script controls virtual lights in Foundry VTT on a virtual stage, it also takes care of the main hall house lights for a virtual theatre. */
 
-/* Toggle Lights by Location Macro (Stage/House) V2.6.6 (House Lights are Color-Only Based)
+/* Toggle Lights by Location Macro (Stage/House) V2.6.7 (Stage & House driven by UUID allowlists)
  * Features:
- * - Groups lights into 'Stage' (within polygon) and 'House' (matching specific color).
+ * - Groups lights into 'Stage' and 'House' using STAGE_LIGHT_UUID_ALLOWLIST and HOUSE_LIGHT_UUID_ALLOWLIST only (no polygon or color matching for grouping).
  * - Provides quick color/luminosity swatches to instantly set ALL Stage light color AND luminosity (MANUAL animation).
  * - Provides quick animation type buttons to instantly set ALL Stage light animation types.
  * - Adds sliders to control animation Speed and Intensity for ALL Stage lights simultaneously.
  * - Adds a slider to control Focus (Attenuation) for ALL Stage lights simultaneously.
- * - Adds a 'Master Brightness' slider to control Luminosity for ALL Stage lights simultaneously.
- * - Adds a 'Color Intensity' slider to control Saturation for ALL Stage lights simultaneously.
+ * - Adds a 'Master Brightness' slider to control Luminosity for ALL Stage lights simultaneously (with alpha for subtle lows).
+ * - Adds a 'Color Intensity' slider mapping UI 0..1 to Foundry saturation -1..+1.
+ * - Adds 'Bright' and 'Dim' sliders to set bright/dim radii (grid units) for ALL Stage lights at once (dim >= bright).
  * - Provides 'Environment' buttons to instantly set ALL Stage lights randomly to one of theme colors (MANUAL animation).
  * - Provides large buttons to turn ALL Stage Lights OFF or ON (White).
- * - Provides large buttons to turn lights matching House Color OFF or ON (luminosity only).
- * - Toggles lights On/Off using MANUAL luminosity AND color animation (configurable duration).
+ * - Provides large buttons to turn house allowlist lights OFF or ON (luminosity only; updates do not set config.color).
+ * - Toggles lights On/Off using MANUAL animation (stage: luminosity and colour; house UUID list: luminosity only).
  * - Displays '[Stage]' or '[House]' labels next to light names (Stage takes priority).
  * - Adds individual Focus (Attenuation) sliders for each light in the list.
  * - Adds individual X and Y position sliders for STAGE lights ONLY, constrained to the stage boundaries.
@@ -36,6 +37,7 @@
     const FADE_TIME_DEFAULT_MS = 5000;
     const ANIMATION_STEPS = 30;
     const COLLAPSE_DELAY_MS = 500;
+    /** Used for UI accents only (e.g. House ON button styling; grouping uses HOUSE_LIGHT_UUID_ALLOWLIST). */
     const HOUSE_LIGHT_COLOR = "#fff1ad";
     const OFF_LUMINOSITY = 0;
     const TARGET_ON_LUMINOSITY = 0.5;
@@ -43,6 +45,9 @@
     const TARGET_ON_INTENSITY = 1.0;
     const OFF_COLOR = "#000000";
     const DEFAULT_ON_COLOR = "#ffffff";
+    /** If bright and dim are both 0, the light barely illuminates; apply these (grid units) when turning on. Tune to your map. */
+    const DEFAULT_AMBIENT_BRIGHT = 12;
+    const DEFAULT_AMBIENT_DIM = 25;
     const DEFAULT_ANIMATION_INTENSITY = 5;
     const DEFAULT_ANIMATION_SPEED = 5;
     const MAX_SWATCH_LUMINOSITY = 0.5;
@@ -57,10 +62,17 @@
     const LUMINOSITY_SLIDER_MAX = 1.0;
     const LUMINOSITY_SLIDER_STEP = 0.05;
     const DEFAULT_LUMINOSITY_VALUE = 0.5;
-    const COLOR_INTENSITY_SLIDER_MIN = 0.0;    // Range is 0.0 to 1.0
+    /** UI slider 0..1 maps to Foundry `config.saturation` -1 (muted) .. +1 (vivid); 0.5 = neutral (0). */
+    const COLOR_INTENSITY_SLIDER_MIN = 0.0;
     const COLOR_INTENSITY_SLIDER_MAX = 1.0;
-    const COLOR_INTENSITY_SLIDER_STEP = 0.05;  // Keep this step or adjust if needed
-    const DEFAULT_COLOR_INTENSITY_VALUE = 1.0; // Default is usually fully opaque color
+    const COLOR_INTENSITY_SLIDER_STEP = 0.05;
+    const DEFAULT_COLOR_INTENSITY_VALUE = 0.5;
+    /** Master stage radius sliders (grid distance units, same as light config bright/dim). */
+    const STAGE_BRIGHT_SLIDER_MIN = 0;
+    const STAGE_BRIGHT_SLIDER_MAX = 60;
+    const STAGE_DIM_SLIDER_MIN = 0;
+    const STAGE_DIM_SLIDER_MAX = 100;
+    const STAGE_BRIGHT_DIM_SLIDER_STEP = 1;
     const POSITION_SLIDER_STEP = 1;
     const ANIMATION_INTERRUPT_WAIT_TIMEOUT_MS = 500;
     const ANIMATION_INTERRUPT_CHECK_INTERVAL_MS = 20;
@@ -96,6 +108,52 @@
             y: 4200
         }
     ]; // IMPORTANT: Must have at least 3 vertices. Order matters (clockwise or counter-clockwise).
+
+    /**
+     * Stage lights: only documents whose `uuid` is listed here. Paste from the lighting-layer console snippet.
+     * Leave empty `[]` if you have no stage lights to control.
+     */
+    const STAGE_LIGHT_UUID_ALLOWLIST = [
+        "Scene.8RsHB8sH1p6RWy0i.AmbientLight.VbvkgL8V956H9BFa",
+        "Scene.8RsHB8sH1p6RWy0i.AmbientLight.sUsIdlnPk3aqJHLa",
+        "Scene.8RsHB8sH1p6RWy0i.AmbientLight.MtfGDllcgKIHCTnE",
+        "Scene.8RsHB8sH1p6RWy0i.AmbientLight.eVMTYV0fZeYG7peA",
+        "Scene.8RsHB8sH1p6RWy0i.AmbientLight.59TnJHD866dY1r5J",
+        "Scene.8RsHB8sH1p6RWy0i.AmbientLight.9tof3OD9LBjnbqY4",
+        "Scene.8RsHB8sH1p6RWy0i.AmbientLight.AldVW0L3rbGUfAAc",
+        "Scene.8RsHB8sH1p6RWy0i.AmbientLight.DWYOnZkEEwXSILuL"
+    ];
+
+    const stageLightUuidAllowSet = new Set(
+        STAGE_LIGHT_UUID_ALLOWLIST.map((s) => (typeof s === "string" ? s.trim() : "")).filter(Boolean)
+    );
+    /**
+     * House lights: only documents whose `uuid` is listed here (bulk House OFF/ON and [House] label).
+     * Leave empty `[]` if you have no house lights to control.
+     * 
+     */
+    const HOUSE_LIGHT_UUID_ALLOWLIST = [
+        "Scene.8RsHB8sH1p6RWy0i.AmbientLight.WkkQNhITHyQmvlKN",
+        "Scene.8RsHB8sH1p6RWy0i.AmbientLight.tlEWANUTidGVVmla",
+        "Scene.8RsHB8sH1p6RWy0i.AmbientLight.97SaarvlNEAYBtE0",
+        "Scene.8RsHB8sH1p6RWy0i.AmbientLight.JFUoIE1dquMdXQ2H",
+        "Scene.8RsHB8sH1p6RWy0i.AmbientLight.hNaS8CID33ym1O0F",
+        "Scene.8RsHB8sH1p6RWy0i.AmbientLight.tt6cX7vkpbi5xOFx",
+        "Scene.8RsHB8sH1p6RWy0i.AmbientLight.GorQoYmvlMxCUla0",
+        "Scene.8RsHB8sH1p6RWy0i.AmbientLight.qrRtKDaJ30J4bTDH",
+        "Scene.8RsHB8sH1p6RWy0i.AmbientLight.KtA4AXoEAyi6lFZH",
+        "Scene.8RsHB8sH1p6RWy0i.AmbientLight.b5gjRiekAXXfYkeY",
+        "Scene.8RsHB8sH1p6RWy0i.AmbientLight.zSpCLUS40GqspxLk",
+        "Scene.8RsHB8sH1p6RWy0i.AmbientLight.MQwNrLTjbpGzhaXW",
+        "Scene.8RsHB8sH1p6RWy0i.AmbientLight.QyhJsbUb6uVhO259",
+
+        "Scene.8RsHB8sH1p6RWy0i.AmbientLight.7KGgzXY455SBEJRn",
+        "Scene.8RsHB8sH1p6RWy0i.AmbientLight.ggwwqBpB6W35XkyO"
+    ];
+
+    const houseLightUuidAllowSet = new Set(
+        HOUSE_LIGHT_UUID_ALLOWLIST.map((s) => (typeof s === "string" ? s.trim() : "")).filter(Boolean)
+    );
 
     // --- Calculate Stage Boundaries ---
     let minStageX = Infinity,
@@ -360,16 +418,170 @@
     function interpolateRgb(rgb1, rgb2, t) { const startRgb = Array.isArray(rgb1) && rgb1.length === 3 ? rgb1 : DEFAULT_ON_COLOR_RGB; const endRgb = Array.isArray(rgb2) && rgb2.length === 3 ? rgb2 : DEFAULT_ON_COLOR_RGB; const r = lerp(startRgb[0], endRgb[0], t); const g = lerp(startRgb[1], endRgb[1], t); const b = lerp(startRgb[2], endRgb[2], t); return [r, g, b]; }
     function normalizeColorToString(color) { if (color === null || color === undefined) return null; if (typeof color === 'string' && /^#?([a-f\d]{3}){1,2}$/i.test(color)) { let hex = color.startsWith('#') ? color : '#' + color; if (hex.length === 4) { hex = '#' + hex[1] + hex[1] + hex[2] + hex[2] + hex[3] + hex[3]; } return hex.toLowerCase(); } if (typeof color === 'object' && color !== null) { if (typeof color.toHex === 'function') { return color.toHex().toLowerCase(); } if (typeof color.toString === 'function') { let strColor = color.toString(); if (/^#?([a-f\d]{3}){1,2}$/i.test(strColor)) { let hex = strColor.startsWith('#') ? strColor : '#' + strColor; if (hex.length === 4) { hex = '#' + hex[1] + hex[1] + hex[2] + hex[2] + hex[3] + hex[3]; } return hex.toLowerCase(); } } } console.warn("[ColorUtil] Could not normalize color to string:", color); return DEFAULT_ON_COLOR; }
     function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
+    /** Resolves `data-light-uuid` reliably (dataset uses camelCase `lightUuid`, not `light-uuid`). */
+    function getLightUuidFromElement(el) {
+        if (!el) return undefined;
+        return el.getAttribute?.("data-light-uuid") ?? el.dataset?.lightUuid ?? undefined;
+    }
     function isPointInPolygon(point, polygonVertices) { const x = point.x, y = point.y; let isInside = false; const numVertices = polygonVertices.length; if (numVertices < 3) return false; for (let i = 0, j = numVertices - 1; i < numVertices; j = i++) { const xi = polygonVertices[i].x, yi = polygonVertices[i].y; const xj = polygonVertices[j].x, yj = polygonVertices[j].y; if (yi === y && yj === y && ((xi <= x && x <= xj) || (xj <= x && x <= xi))) { return true; } const intersect = ((yi > y) !== (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi) + xi); if (intersect) isInside = !isInside; } return isInside; }
 
-    async function bulkAnimateLightsManually(lightTransitions, duration, steps) {
-        if (!lightTransitions || lightTransitions.length === 0) { return; }
-        if (duration <= 0 || steps <= 0) { if (cancelCurrentAnimation) { console.log("[ManualAnim] Instant animation cancelled before execution."); return; } const finalUpdates = lightTransitions.map(t => ({ _id: t.uuid.split('.').pop(), "config.color": normalizeColorToString(t.endState.color) ?? OFF_COLOR, "config.luminosity": t.endState.luminosity ?? OFF_LUMINOSITY })); if (finalUpdates.length > 0) { try { await canvas.scene.updateEmbeddedDocuments("AmbientLight", finalUpdates); } catch (err) { console.error(`[ManualAnim] Error applying instant update:`, err); ui.notifications.error(`Failed to apply instant light update. See console (F12).`); } } return; }
+    /**
+     * Mutates embedded update objects: if the light still has no bright/dim radii and this update turns it on, set defaults.
+     */
+    function augmentAmbientUpdatesWithDefaultRadii(updates, docMap) {
+        const scene = canvas?.scene;
+        if (!updates?.length || !docMap || !scene) return;
+        for (const u of updates) {
+            const id = u._id;
+            if (!id) continue;
+            const lum = u["config.luminosity"];
+            if (lum !== undefined && lum <= OFF_LUMINOSITY) continue;
+            const doc = docMap.get(`${scene.uuid}.AmbientLight.${id}`);
+            if (!doc?.config) continue;
+            const b = Number(doc.config.bright) || 0;
+            const di = Number(doc.config.dim) || 0;
+            if (b > 0 || di > 0) continue;
+            u["config.bright"] = DEFAULT_AMBIENT_BRIGHT;
+            u["config.dim"] = DEFAULT_AMBIENT_DIM;
+        }
+    }
+
+    async function bulkAnimateLightsManually(lightTransitions, duration, steps, docMap, luminosityOnly = false) {
+        if (!lightTransitions || lightTransitions.length === 0) return;
+        if (duration <= 0 || steps <= 0) {
+            if (cancelCurrentAnimation) {
+                console.log("[ManualAnim] Instant animation cancelled before execution.");
+                return;
+            }
+            const finalUpdates = lightTransitions.map((t) => {
+                const u = { _id: t.uuid.split(".").pop(), "config.luminosity": t.endState.luminosity ?? OFF_LUMINOSITY };
+                if (!luminosityOnly) {
+                    u["config.color"] = normalizeColorToString(t.endState.color) ?? OFF_COLOR;
+                } else {
+                    u["config.color"] = null;
+                }
+                return u;
+            });
+            augmentAmbientUpdatesWithDefaultRadii(finalUpdates, docMap);
+            if (finalUpdates.length > 0) {
+                try {
+                    await canvas.scene.updateEmbeddedDocuments("AmbientLight", finalUpdates);
+                } catch (err) {
+                    console.error(`[ManualAnim] Error applying instant update:`, err);
+                    ui.notifications.error(`Failed to apply instant light update. See console (F12).`);
+                }
+            }
+            return;
+        }
         const stepDuration = duration / steps;
-        const transitionsWithRgb = lightTransitions.map(t => { const startColorStr = normalizeColorToString(t.startState.color); const endColorStr = normalizeColorToString(t.endState.color); const startRgbVal = startColorStr ? hexToRgb(startColorStr) : (t.startState.luminosity > OFF_LUMINOSITY ? DEFAULT_ON_COLOR_RGB : OFF_COLOR_RGB); const endRgbVal = endColorStr ? hexToRgb(endColorStr) : (t.endState.luminosity > OFF_LUMINOSITY ? DEFAULT_ON_COLOR_RGB : OFF_COLOR_RGB); const finalStartRgb = startRgbVal || (t.startState.luminosity > OFF_LUMINOSITY ? DEFAULT_ON_COLOR_RGB : OFF_COLOR_RGB); const finalEndRgb = endRgbVal || (t.endState.luminosity > OFF_LUMINOSITY ? DEFAULT_ON_COLOR_RGB : OFF_COLOR_RGB); const startLumi = t.startState.luminosity ?? (finalStartRgb === OFF_COLOR_RGB ? OFF_LUMINOSITY : TARGET_ON_LUMINOSITY); const endLumi = t.endState.luminosity ?? (finalEndRgb === OFF_COLOR_RGB ? OFF_LUMINOSITY : TARGET_ON_LUMINOSITY); return { ...t, startRgb: finalStartRgb, endRgb: finalEndRgb, startLuminosity: startLumi, endLuminosity: endLumi }; });
         let animationCompletedNaturally = true;
-        for (let i = 1; i <= steps; i++) { if (cancelCurrentAnimation) { console.log("[ManualAnim] Animation loop interrupted by cancellation flag."); animationCompletedNaturally = false; break; } const t = i / steps; const updates = []; for (const transition of transitionsWithRgb) { const { uuid, startLuminosity, endLuminosity, startRgb, endRgb } = transition; const currentLuminosity = lerp(startLuminosity, endLuminosity, t); const currentRgb = interpolateRgb(startRgb, endRgb, t); const currentHex = rgbToHex(currentRgb[0], currentRgb[1], currentRgb[2]); updates.push({ _id: uuid.split('.').pop(), "config.color": currentHex, "config.luminosity": currentLuminosity }); } if (updates.length > 0) { try { await canvas.scene.updateEmbeddedDocuments("AmbientLight", updates, { diff: false, recursive: false, noHook: true }); } catch (err) { console.error(`[ManualAnim] Error during step ${i} update:`, err); ui.notifications.error(`Animation step failed. See console (F12).`); animationCompletedNaturally = false; return; } } if (i < steps && !cancelCurrentAnimation) { await sleep(stepDuration); } }
-        if (animationCompletedNaturally) { const finalUpdatesOnComplete = transitionsWithRgb.map(tr => ({ _id: tr.uuid.split('.').pop(), "config.color": normalizeColorToString(tr.endState.color) ?? OFF_COLOR, "config.luminosity": tr.endState.luminosity ?? OFF_LUMINOSITY })); if (finalUpdatesOnComplete.length > 0) { try { await canvas.scene.updateEmbeddedDocuments("AmbientLight", finalUpdatesOnComplete); } catch (err) { console.error(`[ManualAnim] Error applying final state update after successful animation:`, err); } } } else { console.log("[ManualAnim] Skipping final state application due to interruption or error."); }
+
+        if (luminosityOnly) {
+            const transitionsLum = lightTransitions.map((t) => ({
+                ...t,
+                startLuminosity: t.startState.luminosity ?? OFF_LUMINOSITY,
+                endLuminosity: t.endState.luminosity ?? OFF_LUMINOSITY,
+            }));
+            for (let i = 1; i <= steps; i++) {
+                if (cancelCurrentAnimation) {
+                    console.log("[ManualAnim] Animation loop interrupted by cancellation flag.");
+                    animationCompletedNaturally = false;
+                    break;
+                }
+                const t = i / steps;
+                const updates = [];
+                for (const tr of transitionsLum) {
+                    const currentLuminosity = lerp(tr.startLuminosity, tr.endLuminosity, t);
+                    updates.push({ _id: tr.uuid.split(".").pop(), "config.luminosity": currentLuminosity });
+                }
+                augmentAmbientUpdatesWithDefaultRadii(updates, docMap);
+                if (updates.length > 0) {
+                    try {
+                        await canvas.scene.updateEmbeddedDocuments("AmbientLight", updates, { noHook: true });
+                    } catch (err) {
+                        console.error(`[ManualAnim] Error during step ${i} update:`, err);
+                        ui.notifications.error(`Animation step failed. See console (F12).`);
+                        animationCompletedNaturally = false;
+                        return;
+                    }
+                }
+                if (i < steps && !cancelCurrentAnimation) await sleep(stepDuration);
+            }
+            if (animationCompletedNaturally) {
+                const finalUpdatesOnComplete = transitionsLum.map((tr) => ({
+                    _id: tr.uuid.split(".").pop(),
+                    "config.luminosity": tr.endLuminosity ?? OFF_LUMINOSITY,
+                }));
+                augmentAmbientUpdatesWithDefaultRadii(finalUpdatesOnComplete, docMap);
+                if (finalUpdatesOnComplete.length > 0) {
+                    try {
+                        await canvas.scene.updateEmbeddedDocuments("AmbientLight", finalUpdatesOnComplete);
+                    } catch (err) {
+                        console.error(`[ManualAnim] Error applying final state update after successful animation:`, err);
+                    }
+                }
+            } else {
+                console.log("[ManualAnim] Skipping final state application due to interruption or error.");
+            }
+            return;
+        }
+
+        const transitionsWithRgb = lightTransitions.map((t) => {
+            const startColorStr = normalizeColorToString(t.startState.color);
+            const endColorStr = normalizeColorToString(t.endState.color);
+            const startRgbVal = startColorStr ? hexToRgb(startColorStr) : (t.startState.luminosity > OFF_LUMINOSITY ? DEFAULT_ON_COLOR_RGB : OFF_COLOR_RGB);
+            const endRgbVal = endColorStr ? hexToRgb(endColorStr) : (t.endState.luminosity > OFF_LUMINOSITY ? DEFAULT_ON_COLOR_RGB : OFF_COLOR_RGB);
+            const finalStartRgb = startRgbVal || (t.startState.luminosity > OFF_LUMINOSITY ? DEFAULT_ON_COLOR_RGB : OFF_COLOR_RGB);
+            const finalEndRgb = endRgbVal || (t.endState.luminosity > OFF_LUMINOSITY ? DEFAULT_ON_COLOR_RGB : OFF_COLOR_RGB);
+            const startLumi = t.startState.luminosity ?? (finalStartRgb === OFF_COLOR_RGB ? OFF_LUMINOSITY : TARGET_ON_LUMINOSITY);
+            const endLumi = t.endState.luminosity ?? (finalEndRgb === OFF_COLOR_RGB ? OFF_LUMINOSITY : TARGET_ON_LUMINOSITY);
+            return { ...t, startRgb: finalStartRgb, endRgb: finalEndRgb, startLuminosity: startLumi, endLuminosity: endLumi };
+        });
+        for (let i = 1; i <= steps; i++) {
+            if (cancelCurrentAnimation) {
+                console.log("[ManualAnim] Animation loop interrupted by cancellation flag.");
+                animationCompletedNaturally = false;
+                break;
+            }
+            const t = i / steps;
+            const updates = [];
+            for (const transition of transitionsWithRgb) {
+                const { uuid, startLuminosity, endLuminosity, startRgb, endRgb } = transition;
+                const currentLuminosity = lerp(startLuminosity, endLuminosity, t);
+                const currentRgb = interpolateRgb(startRgb, endRgb, t);
+                const currentHex = rgbToHex(currentRgb[0], currentRgb[1], currentRgb[2]);
+                updates.push({ _id: uuid.split(".").pop(), "config.color": currentHex, "config.luminosity": currentLuminosity });
+            }
+            augmentAmbientUpdatesWithDefaultRadii(updates, docMap);
+            if (updates.length > 0) {
+                try {
+                    await canvas.scene.updateEmbeddedDocuments("AmbientLight", updates, { noHook: true });
+                } catch (err) {
+                    console.error(`[ManualAnim] Error during step ${i} update:`, err);
+                    ui.notifications.error(`Animation step failed. See console (F12).`);
+                    animationCompletedNaturally = false;
+                    return;
+                }
+            }
+            if (i < steps && !cancelCurrentAnimation) await sleep(stepDuration);
+        }
+        if (animationCompletedNaturally) {
+            const finalUpdatesOnComplete = transitionsWithRgb.map((tr) => ({
+                _id: tr.uuid.split(".").pop(),
+                "config.color": normalizeColorToString(tr.endState.color) ?? OFF_COLOR,
+                "config.luminosity": tr.endState.luminosity ?? OFF_LUMINOSITY,
+            }));
+            augmentAmbientUpdatesWithDefaultRadii(finalUpdatesOnComplete, docMap);
+            if (finalUpdatesOnComplete.length > 0) {
+                try {
+                    await canvas.scene.updateEmbeddedDocuments("AmbientLight", finalUpdatesOnComplete);
+                } catch (err) {
+                    console.error(`[ManualAnim] Error applying final state update after successful animation:`, err);
+                }
+            }
+        } else {
+            console.log("[ManualAnim] Skipping final state application due to interruption or error.");
+        }
     }
 
     // --- Main Logic ---
@@ -379,9 +591,7 @@
 
     const currentScene = canvas.scene;
     const normalizedHouseColor = normalizeColorToString(HOUSE_LIGHT_COLOR);
-    if (!normalizedHouseColor) {
-        ui.notifications.error("Invalid HOUSE_LIGHT_COLOR defined in macro configuration. House light controls disabled.");
-    }
+    const houseControlsEnabled = houseLightUuidAllowSet.size > 0;
 
     // Data Structures for Lights
     const lightGroups = { stage: [], house: [] };
@@ -402,18 +612,24 @@
         lightDocMap.set(lightDoc.uuid, lightDoc);
 
         const currentColorNormalized = normalizeColorToString(lightConfig.color);
-        const lightPosition = { x: lightDoc.x, y: lightDoc.y };
         const currentLuminosity = lightConfig.luminosity ?? 0.0;
         const currentAttenuation = lightConfig.attenuation ?? DEFAULT_FOCUS_VALUE;
         const currentSaturation = lightConfig.saturation ?? DEFAULT_COLOR_INTENSITY_VALUE; // Capture saturation
         const isOn = currentLuminosity > OFF_LUMINOSITY;
 
-        const isStage = stageBoundsDefined ? isPointInPolygon(lightPosition, STAGE_VERTICES) : false;
-        const isListedHouse = normalizedHouseColor && currentColorNormalized === normalizedHouseColor;
+        const isStage = stageLightUuidAllowSet.has(lightDoc.uuid);
+        const isListedHouse = houseLightUuidAllowSet.has(lightDoc.uuid);
 
         const label = isStage ? "[Stage]" : (isListedHouse ? "[House]" : "");
 
-        const initialColorForAttr = isOn ? (currentColorNormalized ?? (isStage ? DEFAULT_ON_COLOR : (isListedHouse ? HOUSE_LIGHT_COLOR : DEFAULT_ON_COLOR))) : (isStage ? DEFAULT_ON_COLOR : (isListedHouse ? HOUSE_LIGHT_COLOR : DEFAULT_ON_COLOR));
+        let initialColorForAttr;
+        if (isStage) {
+            initialColorForAttr = isOn ? (currentColorNormalized ?? DEFAULT_ON_COLOR) : DEFAULT_ON_COLOR;
+        } else if (isListedHouse) {
+            initialColorForAttr = "";
+        } else {
+            initialColorForAttr = isOn ? (currentColorNormalized ?? DEFAULT_ON_COLOR) : DEFAULT_ON_COLOR;
+        }
         const initialLuminosityForAttr = isOn ? currentLuminosity : TARGET_ON_LUMINOSITY;
 
         const lightData = {
@@ -422,7 +638,7 @@
             name: lightDoc.name || `(Unnamed Light ${lightDoc.id})`,
             x: lightDoc.x,
             y: lightDoc.y,
-            color: currentColorNormalized,
+            color: isListedHouse ? null : currentColorNormalized,
             luminosity: currentLuminosity,
             attenuation: currentAttenuation,
             saturation: currentSaturation, // Store initial saturation
@@ -446,6 +662,26 @@
         }
     }
 
+    if (stageLightUuidAllowSet.size > 0) {
+        const nStage = stageLightUUIDs.length;
+        console.log(`Stage Controller | Stage UUIDs: ${stageLightUuidAllowSet.size} configured, ${nStage} matched in scene.`);
+        if (nStage < stageLightUuidAllowSet.size) {
+            ui.notifications.warn(
+                `Stage light UUID list: ${stageLightUuidAllowSet.size} entr${stageLightUuidAllowSet.size === 1 ? "y" : "ies"}, only ${nStage} found in this scene. Re-paste UUIDs after duplicating the scene.`
+            );
+        }
+    }
+
+    if (houseLightUuidAllowSet.size > 0) {
+        const nHouse = houseLightUUIDs.length;
+        console.log(`Stage Controller | House UUIDs: ${houseLightUuidAllowSet.size} configured, ${nHouse} matched in scene.`);
+        if (nHouse < houseLightUuidAllowSet.size) {
+            ui.notifications.warn(
+                `House light UUID list: ${houseLightUuidAllowSet.size} entr${houseLightUuidAllowSet.size === 1 ? "y" : "ies"}, only ${nHouse} found in this scene. Re-paste UUIDs after duplicating the scene.`
+            );
+        }
+    }
+
     if (totalLightCount === 0 && !stageBoundsDefined && !canControlSpotlights) {
         ui.notifications.info(`No controllable lights found, no Stage Area defined, and Spotlight control disabled.`);
         return;
@@ -453,19 +689,27 @@
 
     // --- HTML Generation Functions ---
     function generateLightListItemHtml(lightData) {
-        const initialColorAttr = lightData.initialColorForAttr || DEFAULT_ON_COLOR;
+        const isHouse = !!lightData.isHouseLight;
+        const initialColorAttr = isHouse ? '' : (lightData.initialColorForAttr || DEFAULT_ON_COLOR);
         const initialLuminosityStr = String(lightData.initialLuminosity);
         const labelHtml = lightData.label ? `<span class="light-label ${lightData.isStageLight ? 'stage' : (lightData.isHouseLight ? 'house' : '')}">${lightData.label}</span>` : '';
         const isOnLoad = lightData.statusClass === 'green';
 
         let currentDisplayColor = OFF_COLOR;
-        if (isOnLoad) {
+        if (isHouse) {
+            currentDisplayColor = isOnLoad ? '#a8a8a8' : OFF_COLOR;
+        } else if (isOnLoad) {
             currentDisplayColor = lightData.color || (lightData.isStageLight ? DEFAULT_ON_COLOR : '#808080');
-            if (lightData.isHouseLight && lightData.color === HOUSE_LIGHT_COLOR) {
-                 currentDisplayColor = HOUSE_LIGHT_COLOR;
-            }
         }
         const currentInputValue = isOnLoad ? (lightData.color || (lightData.isStageLight ? DEFAULT_ON_COLOR : OFF_COLOR)) : OFF_COLOR;
+
+        const colorControlsHtml = isHouse
+            ? `<span class="house-no-color-controls" title="House UUID lights: only brightness is controlled; this macro does not set colour."><i class="fas fa-lightbulb"></i> Lum only</span>`
+            : `<span class="current-color-wrapper" title="Set Light Color (Uses Manual Animation)"> <i class="fas fa-palette"></i> <input type="color" class="light-current-color-input" value="${currentInputValue}" title="Choose target color for this light"> <button type="button" class="set-single-color-button action-button" title="Apply Chosen Color"><i class="fas fa-check"></i></button> </span>`;
+
+        const swatchTitle = isHouse
+            ? (isOnLoad ? `On (luminosity ${lightData.luminosity.toFixed(2)}); colour not controlled by this macro` : `Off (luminosity ${OFF_LUMINOSITY})`)
+            : (isOnLoad ? `Current light colour: ${lightData.color ?? 'default'}` : `Off`);
 
         const statusTitle = isOnLoad ? `Visible (Luminosity ${lightData.luminosity.toFixed(2)})` : `Off (Luminosity ${OFF_LUMINOSITY})`;
         const currentFocus = lightData.attenuation?.toFixed(2) ?? DEFAULT_FOCUS_VALUE.toFixed(2);
@@ -483,10 +727,10 @@
 
         return `<li class="${LIGHT_ITEM_CLASS}" ${DATA_LIGHT_UUID}="${lightData.uuid}" ${DATA_INITIAL_LUMINOSITY}="${initialLuminosityStr}" ${DATA_INITIAL_COLOR}="${initialColorAttr}">
             <div class="light-selector"><input type="checkbox" class="light-select-checkbox" name="light_select_${lightData.id}" title="Select this light"/></div>
-            <div class="light-status-color"> <span class="light-status ${lightData.statusClass}" title="${statusTitle}"></span> <span class="color-swatch" style="background-color: ${currentDisplayColor};" title="Current Light Color: ${lightData.color ?? 'None'}"></span> </div>
+            <div class="light-status-color"> <span class="light-status ${lightData.statusClass}" title="${statusTitle}"></span> <span class="color-swatch" style="background-color: ${currentDisplayColor};" title="${swatchTitle}"></span> </div>
             <div class="light-name-details"> ${labelHtml} <span class="light-name" title="${lightData.name} (ID: ${lightData.id})">${lightData.name}</span> </div>
             <div class="light-actions">
-                <span class="current-color-wrapper" title="Set Light Color (Uses Manual Animation)"> <i class="fas fa-palette"></i> <input type="color" class="light-current-color-input" value="${currentInputValue}" title="Choose target color for this light"> <button type="button" class="set-single-color-button action-button" title="Apply Chosen Color"><i class="fas fa-check"></i></button> </span>
+                ${colorControlsHtml}
                 <button type="button" class="toggle-single-button action-button" title="Toggle On/Off (Uses Manual Animation)"><i class="fas fa-power-off"></i></button>
                 <button type="button" class="reset-single-button action-button" title="Reset Light to Initial State (Uses Manual Animation)"><i class="fas fa-undo"></i></button>
                 <div class="individual-focus-control" title="Set Focus (Attenuation: 0=Wide, 1=Narrow)"> <i class="fas fa-crosshairs"></i> <input type="range" class="individual-focus-slider" min="${FOCUS_SLIDER_MIN}" max="${FOCUS_SLIDER_MAX}" step="${FOCUS_SLIDER_STEP}" value="${currentFocus}" /> <span class="individual-focus-value">${currentFocus}</span> </div>
@@ -516,10 +760,10 @@ htmlContent += `
                 <i class="fas fa-lightbulb"></i> Stage ON (White)
             </button>
             <span class="button-separator">|</span>
-            <button type="button" id="house-lights-off-button" class="house-action-button house-off" title="Turn OFF ALL lights currently matching House Color [${HOUSE_LIGHT_COLOR}] (Sets Luminosity to 0)" ${!normalizedHouseColor ? 'disabled' : ''}>
+            <button type="button" id="house-lights-off-button" class="house-action-button house-off" title="Turn OFF ALL ${houseLightUUIDs.length} house UUID lights (luminosity to 0)" ${!houseControlsEnabled ? 'disabled' : ''}>
                 <i class="fas fa-power-off"></i> House Lights OFF
             </button>
-            <button type="button" id="house-lights-on-button" class="house-action-button house-on" title="Turn ON ALL lights currently matching House Color [${HOUSE_LIGHT_COLOR}] (Sets Luminosity to ${TARGET_ON_LUMINOSITY})" ${!normalizedHouseColor ? 'disabled' : ''}>
+            <button type="button" id="house-lights-on-button" class="house-action-button house-on" title="Turn ON ALL ${houseLightUUIDs.length} house UUID lights (luminosity to ${TARGET_ON_LUMINOSITY})" ${!houseControlsEnabled ? 'disabled' : ''}>
                 <i class="fas fa-lightbulb"></i> House Lights ON
             </button>
             <span class="button-separator">|</span>
@@ -533,9 +777,10 @@ htmlContent += `
     htmlContent += `<div class="light-list-area">`;
     if (stageBoundsDefined) { htmlContent += `<div class="spotlight-controls"> <h4 class="spotlight-title">Stage Spotlights <span class="spotlight-hint">(Lights follow tokens on stage)</span></h4> <ul class="spotlight-token-list"> <li class="spotlight-loading"><em>Detecting tokens on stage...</em></li> </ul> </div>`; } else { htmlContent += `<div class="spotlight-controls disabled-info"><p>Stage Area not defined. Spotlights disabled.</p></div>`; }
     if (stageLightUUIDs.length > 0) { htmlContent += `<div class="quick-color-luminosity-palette"> <h4 class="quick-palette-title">Stage Quick Set <span class="quick-palette-hint">(Click to apply Color & Luminosity to ALL ${stageLightUUIDs.length} Stage lights)</span></h4> <div class="palette-grid">`; COLOR_LUMINOSITY_INTENSITY_PALETTE.forEach(colorGroup => { htmlContent += `<div class="palette-color-column">`; colorGroup.steps.forEach(swatch => { htmlContent += `<button type="button" class="color-luminosity-swatch-button" data-color="${swatch.targetColor}" data-luminosity="${swatch.luminosity}" data-intensity="${swatch.intensity}" style="background-color: ${swatch.visualColor};" title="Set Stage: ${swatch.targetColor}, Lum ${swatch.luminosity.toFixed(2)}"></button>`; }); htmlContent += `</div>`; }); htmlContent += `</div></div>`; htmlContent += `<div class="quick-animation-types"> <h4 class="quick-animation-title">Stage Quick Animations <span class="quick-animation-hint">(Click to apply instantly to ALL ${stageLightUUIDs.length} Stage lights)</span></h4> ${sortedAnimationTypes.map(anim => `<button type="button" class="animation-type-button" data-animation-type="${anim.key}" title="Set Stage Lights Animation to ${anim.label}">${anim.label}</button>`).join('')} </div>`; htmlContent += `<div class="quick-animation-sliders">`; htmlContent += `<div class="slider-control-row"> <label for="stage-anim-speed-slider" class="slider-label" title="Animation Speed (${ANIM_SLIDER_MIN}-${ANIM_SLIDER_MAX})">Speed:</label> <input type="range" id="stage-anim-speed-slider" class="anim-slider" name="stage_anim_speed" min="${ANIM_SLIDER_MIN}" max="${ANIM_SLIDER_MAX}" step="${ANIM_SLIDER_STEP}" value="${DEFAULT_ANIMATION_SPEED}" ${stageLightUUIDs.length === 0 ? 'disabled' : ''} /> <span class="slider-value" id="stage-anim-speed-value">${DEFAULT_ANIMATION_SPEED}</span> </div>`; htmlContent += `<div class="slider-control-row"> <label for="stage-anim-intensity-slider" class="slider-label" title="Animation Intensity (${ANIM_SLIDER_MIN}-${ANIM_SLIDER_MAX})">Anim Intensity:</label> <input type="range" id="stage-anim-intensity-slider" class="anim-slider" name="stage_anim_intensity" min="${ANIM_SLIDER_MIN}" max="${ANIM_SLIDER_MAX}" step="${ANIM_SLIDER_STEP}" value="${DEFAULT_ANIMATION_INTENSITY}" ${stageLightUUIDs.length === 0 ? 'disabled' : ''} /> <span class="slider-value" id="stage-anim-intensity-value">${DEFAULT_ANIMATION_INTENSITY}</span> </div>`; htmlContent += `<div class="slider-control-row"> <label for="stage-focus-slider" class="slider-label" title="Focus (Attenuation: 0=Wide, 1=Narrow)">Focus:</label> <input type="range" id="stage-focus-slider" class="focus-slider" name="stage_focus" min="${FOCUS_SLIDER_MIN}" max="${FOCUS_SLIDER_MAX}" step="${FOCUS_SLIDER_STEP}" value="${DEFAULT_FOCUS_VALUE}" ${stageLightUUIDs.length === 0 ? 'disabled' : ''} /> <span class="slider-value" id="stage-focus-value">${DEFAULT_FOCUS_VALUE.toFixed(2)}</span> </div>`;
-    htmlContent += `<div class="slider-control-row"> <label for="stage-master-brightness-slider" class="slider-label" title="Master Brightness (Luminosity: ${LUMINOSITY_SLIDER_MIN.toFixed(1)}-${LUMINOSITY_SLIDER_MAX.toFixed(1)})">Brightness:</label> <input type="range" id="stage-master-brightness-slider" class="luminosity-slider" name="stage_master_brightness" min="${LUMINOSITY_SLIDER_MIN}" max="${LUMINOSITY_SLIDER_MAX}" step="${LUMINOSITY_SLIDER_STEP}" value="${DEFAULT_LUMINOSITY_VALUE}" ${stageLightUUIDs.length === 0 ? 'disabled' : ''} /> <span class="slider-value" id="stage-master-brightness-value">${DEFAULT_LUMINOSITY_VALUE.toFixed(2)}</span> </div>`;
-    // NEW Color Intensity Slider HTML
-    htmlContent += `<div class="slider-control-row"> <label for="stage-color-intensity-slider" class="slider-label" title="Color Intensity (Saturation: ${COLOR_INTENSITY_SLIDER_MIN.toFixed(1)} to ${COLOR_INTENSITY_SLIDER_MAX.toFixed(1)})">Color Intensity:</label> <input type="range" id="stage-color-intensity-slider" class="saturation-slider" name="stage_color_intensity" min="${COLOR_INTENSITY_SLIDER_MIN}" max="${COLOR_INTENSITY_SLIDER_MAX}" step="${COLOR_INTENSITY_SLIDER_STEP}" value="${DEFAULT_COLOR_INTENSITY_VALUE}" ${stageLightUUIDs.length === 0 ? 'disabled' : ''} /> <span class="slider-value" id="stage-color-intensity-value">${DEFAULT_COLOR_INTENSITY_VALUE.toFixed(2)}</span> </div>`;
+    htmlContent += `<div class="slider-control-row"> <label for="stage-master-brightness-slider" class="slider-label" title="Master Brightness (Luminosity: ${LUMINOSITY_SLIDER_MIN.toFixed(1)}-${LUMINOSITY_SLIDER_MAX.toFixed(1)}; pairs with opacity for subtle lows)">Brightness:</label> <input type="range" id="stage-master-brightness-slider" class="luminosity-slider" name="stage_master_brightness" min="${LUMINOSITY_SLIDER_MIN}" max="${LUMINOSITY_SLIDER_MAX}" step="${LUMINOSITY_SLIDER_STEP}" value="${DEFAULT_LUMINOSITY_VALUE}" ${stageLightUUIDs.length === 0 ? 'disabled' : ''} /> <span class="slider-value" id="stage-master-brightness-value">${DEFAULT_LUMINOSITY_VALUE.toFixed(2)}</span> </div>`;
+    htmlContent += `<div class="slider-control-row"> <label for="stage-color-intensity-slider" class="slider-label" title="Colour intensity: left = muted (saturation -1), right = vivid (+1), centre = neutral">Color Intensity:</label> <input type="range" id="stage-color-intensity-slider" class="saturation-slider" name="stage_color_intensity" min="${COLOR_INTENSITY_SLIDER_MIN}" max="${COLOR_INTENSITY_SLIDER_MAX}" step="${COLOR_INTENSITY_SLIDER_STEP}" value="${DEFAULT_COLOR_INTENSITY_VALUE}" ${stageLightUUIDs.length === 0 ? 'disabled' : ''} /> <span class="slider-value" id="stage-color-intensity-value">${DEFAULT_COLOR_INTENSITY_VALUE.toFixed(2)}</span> </div>`;
+    htmlContent += `<div class="slider-control-row"> <label for="stage-master-bright-radius-slider" class="slider-label" title="Bright radius for ALL stage lights (grid units). Dim is kept &ge; bright.">Bright:</label> <input type="range" id="stage-master-bright-radius-slider" class="radius-slider" name="stage_master_bright" min="${STAGE_BRIGHT_SLIDER_MIN}" max="${STAGE_BRIGHT_SLIDER_MAX}" step="${STAGE_BRIGHT_DIM_SLIDER_STEP}" value="${DEFAULT_AMBIENT_BRIGHT}" ${stageLightUUIDs.length === 0 ? 'disabled' : ''} /> <span class="slider-value" id="stage-master-bright-value">${DEFAULT_AMBIENT_BRIGHT}</span> </div>`;
+    htmlContent += `<div class="slider-control-row"> <label for="stage-master-dim-radius-slider" class="slider-label" title="Dim radius for ALL stage lights (grid units). Raised if below bright.">Dim:</label> <input type="range" id="stage-master-dim-radius-slider" class="radius-slider" name="stage_master_dim" min="${STAGE_DIM_SLIDER_MIN}" max="${STAGE_DIM_SLIDER_MAX}" step="${STAGE_BRIGHT_DIM_SLIDER_STEP}" value="${DEFAULT_AMBIENT_DIM}" ${stageLightUUIDs.length === 0 ? 'disabled' : ''} /> <span class="slider-value" id="stage-master-dim-value">${DEFAULT_AMBIENT_DIM}</span> </div>`;
     htmlContent += `</div>`; htmlContent += `<div class="quick-environment-types"> <h4 class="quick-environment-title">Stage Environments <span class="quick-environment-hint">(Randomly sets ALL ${stageLightUUIDs.length} Stage lights to theme colors)</span></h4>`; ENVIRONMENT_PALETTES.forEach(env => { const colors = env.colors && env.colors.length > 0 ? env.colors.map(c => normalizeColorToString(c) ?? DEFAULT_ON_COLOR) : [DEFAULT_ON_COLOR]; const color1 = colors[0]; const color2 = colors.length > 1 ? colors[1] : color1; const colorsString = colors.join(' / '); const title = `Set Stage Environment: ${env.name} (${colorsString})${env.description ? ` - ${env.description}` : ''}`; const colorsDataAttribute = JSON.stringify(colors).replace(/'/g, "\\'"); htmlContent += `<button type="button" class="environment-type-button" data-colors='${colorsDataAttribute}' style="background: linear-gradient(to right, ${color1}, ${color2});" title="${title}">${env.name}</button>`; }); htmlContent += `</div>`; } else if (stageBoundsDefined) { htmlContent += `<div class="quick-controls-info"><p>No non-spotlight lights detected in Stage Area. Stage Quick Controls disabled.</p></div>`; }
 
     htmlContent += generateGroupHtml('stage', 'Stage Lights', lightGroups.stage);
@@ -645,7 +890,8 @@ htmlContent += `
     .dialog.${DIALOG_ID.replace('#','')} .anim-slider:disabled,
     .dialog.${DIALOG_ID.replace('#','')} .focus-slider:disabled,
     .dialog.${DIALOG_ID.replace('#','')} .luminosity-slider:disabled,
-    .dialog.${DIALOG_ID.replace('#','')} .saturation-slider:disabled { cursor: not-allowed; opacity: 0.5; }
+    .dialog.${DIALOG_ID.replace('#','')} .saturation-slider:disabled,
+    .dialog.${DIALOG_ID.replace('#','')} .radius-slider:disabled { cursor: not-allowed; opacity: 0.5; }
     .dialog.${DIALOG_ID.replace('#','')} .slider-value { font-weight: bold; min-width: 35px; text-align: right; font-size: 0.9em; color: #333; font-family: monospace; } /* Using monospace for consistent width */
 
     /* Environment Buttons */
@@ -700,6 +946,8 @@ htmlContent += `
     .dialog.${DIALOG_ID.replace('#','')} .current-color-wrapper i.fa-palette { margin-right: 4px; color: #555; font-size: 0.9em; flex-shrink: 0; }
     .dialog.${DIALOG_ID.replace('#','')} .current-color-wrapper input[type="color"] { width: 35px; height: 18px; padding: 0; border: none; cursor: pointer !important; background-color: transparent; margin: 0 3px 0 0; min-width: 35px; }
     .dialog.${DIALOG_ID.replace('#','')} .current-color-wrapper .action-button { margin-left: 3px; width: 20px; height: 20px; font-size: 0.8em; flex-shrink: 0; }
+    .dialog.${DIALOG_ID.replace('#','')} .house-no-color-controls { display: inline-flex; align-items: center; gap: 4px; font-size: 0.8em; color: #666; white-space: nowrap; padding: 2px 4px; border: 1px dashed #ccc; border-radius: 3px; background: #fafafa; }
+    .dialog.${DIALOG_ID.replace('#','')} .house-no-color-controls i { color: #888; }
 
     /* Individual Focus Slider */
     .dialog.${DIALOG_ID.replace('#','')} .individual-focus-control { display: inline-flex; align-items: center; gap: 4px; border: 1px solid #bbb; border-radius: 3px; padding: 1px 5px; background: #f5f5f5; max-width: 130px; }
@@ -735,6 +983,7 @@ htmlContent += `
                     const lightIdsToDelete = Array.from(activeSpotlights.values());
                     if (lightIdsToDelete.length > 0) { try { await canvas.scene.deleteEmbeddedDocuments("AmbientLight", lightIdsToDelete); } catch (err) { console.error("Macro | Error deleting spotlight lights on close:", err); } }
                     activeSpotlights.clear();
+                    if (debounceTimer != null) { clearTimeout(debounceTimer); debounceTimer = null; }
                     if (tokenRefreshDebounceMap.size > 0) { for (const timeoutId of tokenRefreshDebounceMap.values()) { clearTimeout(timeoutId); } tokenRefreshDebounceMap.clear(); }
                     const hookIdsToUnregister = newDialog?._locLightControlHookIds ?? spotlightHookIds; // Use IDs stored on dialog if possible
                     console.log("Macro | Unregistering hooks:", hookIdsToUnregister);
@@ -778,10 +1027,8 @@ htmlContent += `
                 let baseColorForOnState;
                 if (isMarkedStage) {
                      baseColorForOnState = (initialColorAttr && initialColorAttr !== "null" && initialColorAttr !== "undefined") ? initialColorAttr : DEFAULT_ON_COLOR;
-                } else if (isMarkedHouseInitial) {
-                    baseColorForOnState = HOUSE_LIGHT_COLOR;
                 } else {
-                    baseColorForOnState = DEFAULT_ON_COLOR;
+                    baseColorForOnState = (initialColorAttr && initialColorAttr !== "null" && initialColorAttr !== "undefined") ? initialColorAttr : DEFAULT_ON_COLOR;
                 }
 
                 let newLuminosity = undefined;
@@ -817,27 +1064,41 @@ htmlContent += `
                     $statusSpan.attr('title', isEffectivelyOn ? `Visible (Luminosity ${effectiveLuminosity.toFixed(2)})` : `Off (Luminosity ${OFF_LUMINOSITY})`);
                 }
 
-                // Update Color Swatch and Color Input
-                let displayColor, inputColorValue;
-                const currentActualColor = normalizeColorToString(lightDoc?.config?.color) ?? $element.data(DATA_INITIAL_COLOR.replace('data-',''));
-
-                if (isEffectivelyOn) {
-                    const colorToUse = newColorValue ?? currentActualColor ?? baseColorForOnState;
-                    displayColor = colorToUse;
-                    inputColorValue = colorToUse;
+                // Update Color Swatch and Color Input (house rows: luminosity only; no colour control)
+                if (isMarkedHouseInitial) {
+                    const houseDisplay = isEffectivelyOn ? '#a8a8a8' : OFF_COLOR;
+                    const lumShow = newLuminosity !== undefined ? newLuminosity : (lightDoc?.config?.luminosity ?? 0.0);
+                    if ($colorSwatch.length) {
+                        $colorSwatch.css('background-color', houseDisplay);
+                        $colorSwatch.attr(
+                            'title',
+                            isEffectivelyOn
+                                ? `House on (luminosity ${lumShow.toFixed(2)}); colour is not set by this macro`
+                                : `Off (luminosity ${OFF_LUMINOSITY})`
+                        );
+                    }
                 } else {
-                    displayColor = OFF_COLOR;
-                    inputColorValue = (newColorValue === OFF_COLOR) ? OFF_COLOR : (currentActualColor ?? OFF_COLOR);
-                }
+                    let displayColor, inputColorValue;
+                    const currentActualColor = normalizeColorToString(lightDoc?.config?.color) ?? $element.data(DATA_INITIAL_COLOR.replace('data-', ''));
 
-                if ($colorSwatch.length) {
-                    $colorSwatch.css('background-color', displayColor);
-                     $colorSwatch.attr('title', `Current Light Color: ${isEffectivelyOn ? (currentActualColor ?? 'Unknown') : 'None'}`);
-                }
-                if ($colorInput.length) {
-                    const currentInputColor = normalizeColorToString($colorInput.val());
-                    if (inputColorValue !== currentInputColor) {
-                        $colorInput.val(inputColorValue);
+                    if (isEffectivelyOn) {
+                        const colorToUse = newColorValue ?? currentActualColor ?? baseColorForOnState;
+                        displayColor = colorToUse;
+                        inputColorValue = colorToUse;
+                    } else {
+                        displayColor = OFF_COLOR;
+                        inputColorValue = (newColorValue === OFF_COLOR) ? OFF_COLOR : (currentActualColor ?? OFF_COLOR);
+                    }
+
+                    if ($colorSwatch.length) {
+                        $colorSwatch.css('background-color', displayColor);
+                        $colorSwatch.attr('title', `Current Light Color: ${isEffectivelyOn ? (currentActualColor ?? 'Unknown') : 'None'}`);
+                    }
+                    if ($colorInput.length) {
+                        const currentInputColor = normalizeColorToString($colorInput.val());
+                        if (inputColorValue !== currentInputColor) {
+                            $colorInput.val(inputColorValue);
+                        }
                     }
                 }
 
@@ -887,12 +1148,20 @@ htmlContent += `
                  const wasInitiallyStage = $element.find('.light-label.stage').length > 0;
                  const wasInitiallyHouse = $element.find('.light-label.house').length > 0;
 
+                if (wasInitiallyHouse) {
+                    const startState = { luminosity: currentLuminosity };
+                    const endLum = isCurrentlyEffectivelyOn ? OFF_LUMINOSITY : TARGET_ON_LUMINOSITY;
+                    const endState = { luminosity: endLum };
+                    const uiUpdateData = { luminosity: endLum };
+                    return { uuid: lightUuid, startState, endState, uiUpdateData, luminosityOnly: true };
+                }
+
                 let targetOnColor;
-                 if (wasInitiallyHouse && initialColorAttr === HOUSE_LIGHT_COLOR) {
-                     targetOnColor = HOUSE_LIGHT_COLOR;
-                 } else {
-                     targetOnColor = (initialColorAttr && initialColorAttr !== "null" && initialColorAttr !== "undefined") ? initialColorAttr : DEFAULT_ON_COLOR;
-                 }
+                if (wasInitiallyStage) {
+                    targetOnColor = (initialColorAttr && initialColorAttr !== "null" && initialColorAttr !== "undefined") ? initialColorAttr : DEFAULT_ON_COLOR;
+                } else {
+                    targetOnColor = (initialColorAttr && initialColorAttr !== "null" && initialColorAttr !== "undefined") ? initialColorAttr : DEFAULT_ON_COLOR;
+                }
 
                 const startState = { color: currentColor ?? OFF_COLOR, luminosity: currentLuminosity };
                 let endState;
@@ -909,10 +1178,71 @@ htmlContent += `
             };
             const applyBulkLightUpdates = async (transitions, elementsToUpdate, notificationMessage, errorMessagePrefix) => {
                 if (!transitions || transitions.length === 0) { return; }
-                if (isAnimatingManually) { console.log(`[${errorMessagePrefix}] Request to interrupt existing animation.`); ui.notifications.warn("Interrupting previous light animation...", { permanent: false }); cancelCurrentAnimation = true; const waitStart = Date.now(); while (isAnimatingManually && (Date.now() - waitStart < ANIMATION_INTERRUPT_WAIT_TIMEOUT_MS)) { await sleep(ANIMATION_INTERRUPT_CHECK_INTERVAL_MS); } if (isAnimatingManually) { console.error(`[${errorMessagePrefix}] Failed to interrupt previous animation cleanly. Aborting.`); ui.notifications.error("Failed to interrupt previous animation."); cancelCurrentAnimation = false; return; } console.log(`[${errorMessagePrefix}] Previous animation lock released. Proceeding.`); cancelCurrentAnimation = false; }
+                if (isAnimatingManually) {
+                    console.log(`[${errorMessagePrefix}] Request to interrupt existing animation.`);
+                    ui.notifications.warn("Interrupting previous light animation...", { permanent: false });
+                    cancelCurrentAnimation = true;
+                    const interruptFadeMs = getAnimationSettings().duration;
+                    const interruptBudgetMs = Math.max(ANIMATION_INTERRUPT_WAIT_TIMEOUT_MS, interruptFadeMs + 2000);
+                    const waitStart = Date.now();
+                    while (isAnimatingManually && (Date.now() - waitStart < interruptBudgetMs)) {
+                        await sleep(ANIMATION_INTERRUPT_CHECK_INTERVAL_MS);
+                    }
+                    if (isAnimatingManually) {
+                        console.error(`[${errorMessagePrefix}] Failed to interrupt previous animation cleanly. Aborting.`);
+                        ui.notifications.error("Failed to interrupt previous animation.");
+                        cancelCurrentAnimation = false;
+                        return;
+                    }
+                    console.log(`[${errorMessagePrefix}] Previous animation lock released. Proceeding.`);
+                    cancelCurrentAnimation = false;
+                }
                 const animSettings = getAnimationSettings();
-                try { isAnimatingManually = true; console.log(`[${errorMessagePrefix}] Animation lock acquired.`); cancelCurrentAnimation = false; await bulkAnimateLightsManually(transitions, animSettings.duration, animSettings.steps); if (!cancelCurrentAnimation) { elementsToUpdate.forEach(item => { const lightDoc = lightDocMap.get(item.element.dataset[DATA_LIGHT_UUID.substring(5)]); if (lightDoc) { // Update local doc map based on intended end state of transition
-                    const endState = transitions.find(t => t.uuid === item.element.dataset[DATA_LIGHT_UUID.substring(5)])?.endState; if (endState) { lightDoc.updateSource({ config: { color: endState.color, luminosity: endState.luminosity } }, { diff: false }); } } updateLightElementUI(item.element, item.data); }); if (notificationMessage) { ui.notifications.info(`${notificationMessage} (${transitions.length} light${transitions.length > 1 ? 's' : ''}).`); } } else { console.log(`[${errorMessagePrefix}] Skipping UI updates as animation was cancelled.`); } } catch (err) { console.error(`[${errorMessagePrefix}] Error during animation/update:`, err); ui.notifications.error(`Error ${errorMessagePrefix}. Check console (F12).`); } finally { isAnimatingManually = false; console.log(`[${errorMessagePrefix}] Animation lock released.`); cancelCurrentAnimation = false; }
+                const luminosityOnly = transitions.length > 0 && transitions.every((t) => t.luminosityOnly === true);
+                try {
+                    isAnimatingManually = true;
+                    console.log(`[${errorMessagePrefix}] Animation lock acquired.`);
+                    cancelCurrentAnimation = false;
+                    await bulkAnimateLightsManually(transitions, animSettings.duration, animSettings.steps, lightDocMap, luminosityOnly);
+                    if (!cancelCurrentAnimation) {
+                        elementsToUpdate.forEach((item) => {
+                            const elUuid = getLightUuidFromElement(item.element);
+                            const lightDoc = lightDocMap.get(elUuid);
+                            if (lightDoc) {
+                                const trans = transitions.find((t) => t.uuid === elUuid);
+                                const endState = trans?.endState;
+                                if (endState) {
+                                    const b0 = (Number(lightDoc.config?.bright) || 0) <= 0 && (Number(lightDoc.config?.dim) || 0) <= 0;
+                                    const lumOn = (endState.luminosity ?? OFF_LUMINOSITY) > OFF_LUMINOSITY;
+                                    let cfg;
+                                    if (trans.luminosityOnly) {
+                                        cfg = { luminosity: endState.luminosity, color: null };
+                                    } else {
+                                        cfg = { color: endState.color, luminosity: endState.luminosity };
+                                    }
+                                    if (b0 && lumOn) {
+                                        cfg.bright = DEFAULT_AMBIENT_BRIGHT;
+                                        cfg.dim = DEFAULT_AMBIENT_DIM;
+                                    }
+                                    lightDoc.updateSource({ config: cfg }, { diff: false });
+                                }
+                            }
+                            updateLightElementUI(item.element, item.data);
+                        });
+                        if (notificationMessage) {
+                            ui.notifications.info(`${notificationMessage} (${transitions.length} light${transitions.length > 1 ? "s" : ""}).`);
+                        }
+                    } else {
+                        console.log(`[${errorMessagePrefix}] Skipping UI updates as animation was cancelled.`);
+                    }
+                } catch (err) {
+                    console.error(`[${errorMessagePrefix}] Error during animation/update:`, err);
+                    ui.notifications.error(`Error ${errorMessagePrefix}. Check console (F12).`);
+                } finally {
+                    isAnimatingManually = false;
+                    console.log(`[${errorMessagePrefix}] Animation lock released.`);
+                    cancelCurrentAnimation = false;
+                }
             };
             const getStageLightElements = () => {
                 let $stageLightElements = $(); if (!stageLightUUIDs || stageLightUUIDs.length === 0) return $stageLightElements; stageLightUUIDs.forEach(uuid => { $stageLightElements = $stageLightElements.add($html.find(`.${LIGHT_ITEM_CLASS}[${DATA_LIGHT_UUID}="${uuid}"]`)); }); return $stageLightElements;
@@ -922,10 +1252,62 @@ htmlContent += `
                 const transitions = []; const elementsToUpdate = []; const normalizedTargetColor = normalizeColorToString(targetColor); $elements.each((i, el) => { const $el = $(el); const lightUuid = $el.data(DATA_LIGHT_UUID.replace('data-', '')); const lightDoc = lightDocMap.get(lightUuid); if (!lightUuid || !lightDoc?.config) return; const currentLuminosity = lightDoc.config.luminosity ?? 0.0; const currentColor = normalizeColorToString(lightDoc.config.color); const alreadyAtTarget = Math.abs(currentLuminosity - targetLuminosity) < 0.01 && currentColor === normalizedTargetColor; if (alreadyAtTarget) return; const startState = { color: currentColor ?? OFF_COLOR, luminosity: currentLuminosity }; const endState = { color: normalizedTargetColor, luminosity: targetLuminosity }; const uiUpdateData = { color: normalizedTargetColor, luminosity: targetLuminosity }; transitions.push({ uuid: lightUuid, startState, endState }); elementsToUpdate.push({ element: el, data: uiUpdateData }); }); return { transitions, elementsToUpdate };
              };
             const getColorTransitions = ($elements, newColor) => {
-                 const transitions = []; const elementsToUpdate = []; const normalizedNewColor = normalizeColorToString(newColor); $elements.each((i, el) => { const $el = $(el); const lightUuid = $el.data(DATA_LIGHT_UUID.replace('data-', '')); const lightDoc = lightDocMap.get(lightUuid); if (!lightUuid || !lightDoc?.config) return; const currentLuminosity = lightDoc.config.luminosity ?? 0.0; const currentColor = normalizeColorToString(lightDoc.config.color); if (currentLuminosity <= OFF_LUMINOSITY) { console.log(`Skipping color set for ${lightUuid} - light is off.`); return; } if (currentColor === normalizedNewColor) { return; } const startState = { color: currentColor ?? DEFAULT_ON_COLOR, luminosity: currentLuminosity }; const endState = { color: normalizedNewColor, luminosity: currentLuminosity }; const uiUpdateData = { color: normalizedNewColor, luminosity: currentLuminosity }; transitions.push({ uuid: lightUuid, startState, endState }); elementsToUpdate.push({ element: el, data: uiUpdateData }); }); return { transitions, elementsToUpdate };
+                const transitions = [];
+                const elementsToUpdate = [];
+                const normalizedNewColor = normalizeColorToString(newColor);
+                $elements.each((i, el) => {
+                    const $el = $(el);
+                    const lightUuid = $el.data(DATA_LIGHT_UUID.replace('data-', ''));
+                    const lightDoc = lightDocMap.get(lightUuid);
+                    if (!lightUuid || !lightDoc?.config) return;
+                    if ($el.find('.light-label.house').length > 0) return;
+                    const currentLuminosity = lightDoc.config.luminosity ?? 0.0;
+                    const currentColor = normalizeColorToString(lightDoc.config.color);
+                    if (currentLuminosity <= OFF_LUMINOSITY) {
+                        console.log(`Skipping color set for ${lightUuid} - light is off.`);
+                        return;
+                    }
+                    if (currentColor === normalizedNewColor) return;
+                    const startState = { color: currentColor ?? DEFAULT_ON_COLOR, luminosity: currentLuminosity };
+                    const endState = { color: normalizedNewColor, luminosity: currentLuminosity };
+                    const uiUpdateData = { color: normalizedNewColor, luminosity: currentLuminosity };
+                    transitions.push({ uuid: lightUuid, startState, endState });
+                    elementsToUpdate.push({ element: el, data: uiUpdateData });
+                });
+                return { transitions, elementsToUpdate };
             };
             const getResetTransitions = ($elements) => {
-                const transitions = []; const elementsToUpdate = []; $elements.each((i, el) => { const $el = $(el); const lightUuid = $el.data(DATA_LIGHT_UUID.replace('data-', '')); const lightDoc = lightDocMap.get(lightUuid); if (!lightUuid || !lightDoc?.config) return; const currentLuminosity = lightDoc.config.luminosity ?? 0.0; const currentColor = normalizeColorToString(lightDoc.config.color); const initialColor = $el.data(DATA_INITIAL_COLOR.replace('data-', '')) || DEFAULT_ON_COLOR; const initialLuminosity = parseFloat($el.data(DATA_INITIAL_LUMINOSITY.replace('data-', ''))) || TARGET_ON_LUMINOSITY; const colorMatches = (currentColor === initialColor) || (!currentColor && initialColor === DEFAULT_ON_COLOR); const luminosityMatches = Math.abs(currentLuminosity - initialLuminosity) < 0.01; if (colorMatches && luminosityMatches) { return; } const startState = { color: currentColor, luminosity: currentLuminosity }; const endState = { color: initialColor, luminosity: initialLuminosity }; const uiUpdateData = { color: initialColor, luminosity: initialLuminosity }; transitions.push({ uuid: lightUuid, startState, endState }); elementsToUpdate.push({ element: el, data: uiUpdateData }); }); return { transitions, elementsToUpdate };
+                const transitions = [];
+                const elementsToUpdate = [];
+                $elements.each((i, el) => {
+                    const $el = $(el);
+                    const lightUuid = $el.data(DATA_LIGHT_UUID.replace('data-', ''));
+                    const lightDoc = lightDocMap.get(lightUuid);
+                    if (!lightUuid || !lightDoc?.config) return;
+                    const currentLuminosity = lightDoc.config.luminosity ?? 0.0;
+                    const currentColor = normalizeColorToString(lightDoc.config.color);
+                    const initialLuminosity = parseFloat($el.data(DATA_INITIAL_LUMINOSITY.replace('data-', ''))) || TARGET_ON_LUMINOSITY;
+                    const isHouseRow = $el.find('.light-label.house').length > 0;
+                    if (isHouseRow) {
+                        if (Math.abs(currentLuminosity - initialLuminosity) < 0.01) return;
+                        const startState = { luminosity: currentLuminosity };
+                        const endState = { luminosity: initialLuminosity };
+                        const uiUpdateData = { luminosity: initialLuminosity };
+                        transitions.push({ uuid: lightUuid, startState, endState, luminosityOnly: true });
+                        elementsToUpdate.push({ element: el, data: uiUpdateData });
+                        return;
+                    }
+                    const initialColor = $el.data(DATA_INITIAL_COLOR.replace('data-', '')) || DEFAULT_ON_COLOR;
+                    const colorMatches = (currentColor === initialColor) || (!currentColor && initialColor === DEFAULT_ON_COLOR);
+                    const luminosityMatches = Math.abs(currentLuminosity - initialLuminosity) < 0.01;
+                    if (colorMatches && luminosityMatches) return;
+                    const startState = { color: currentColor, luminosity: currentLuminosity };
+                    const endState = { color: initialColor, luminosity: initialLuminosity };
+                    const uiUpdateData = { color: initialColor, luminosity: initialLuminosity };
+                    transitions.push({ uuid: lightUuid, startState, endState });
+                    elementsToUpdate.push({ element: el, data: uiUpdateData });
+                });
+                return { transitions, elementsToUpdate };
             };
             const checkGroupSelectState = ($groupParent) => {
                 const $childrenCheckboxes = $groupParent.find('.light-select-checkbox'); const totalChildren = $childrenCheckboxes.length; const checkedChildren = $childrenCheckboxes.filter(':checked').length; const $groupCheckbox = $groupParent.find('.group-select-checkbox').first(); if (totalChildren === 0) { $groupCheckbox.prop({ checked: false, indeterminate: false }); } else if (checkedChildren === 0) { $groupCheckbox.prop({ checked: false, indeterminate: false }); } else if (checkedChildren === totalChildren) { $groupCheckbox.prop({ checked: true, indeterminate: false }); } else { $groupCheckbox.prop({ checked: false, indeterminate: true }); }
@@ -950,14 +1332,42 @@ htmlContent += `
                  stageLightUUIDs.forEach(uuid => {
                      const lightDoc = lightDocMap.get(uuid);
                      const saturation = lightDoc?.config?.saturation;
-                     // Average all lights, as saturation 0 is a valid (normal) value
-                     totalSaturation += (saturation !== null && saturation !== undefined ? saturation : DEFAULT_COLOR_INTENSITY_VALUE);
+                     totalSaturation += (saturation !== null && saturation !== undefined ? saturation : 0);
                      count++;
                  });
-                 const avgSaturation = count > 0 ? (totalSaturation / count) : DEFAULT_COLOR_INTENSITY_VALUE;
-                 const clampedSaturation = Math.max(COLOR_INTENSITY_SLIDER_MIN, Math.min(COLOR_INTENSITY_SLIDER_MAX, avgSaturation));
-                 $html.find('#stage-color-intensity-slider').val(clampedSaturation).prop('disabled', false);
-                 $html.find('#stage-color-intensity-value').text(clampedSaturation.toFixed(2));
+                 const avgFoundrySat = count > 0 ? (totalSaturation / count) : 0;
+                 const slider01 = (avgFoundrySat + 1) / 2;
+                 const clampedSlider = Math.max(COLOR_INTENSITY_SLIDER_MIN, Math.min(COLOR_INTENSITY_SLIDER_MAX, slider01));
+                 $html.find('#stage-color-intensity-slider').val(clampedSlider).prop('disabled', false);
+                 $html.find('#stage-color-intensity-value').text(clampedSlider.toFixed(2));
+            };
+            const initializeStageBrightDimSliders = () => {
+                if (stageLightUUIDs.length === 0) {
+                    $html.find('#stage-master-bright-radius-slider, #stage-master-dim-radius-slider').prop('disabled', true);
+                    $html.find('#stage-master-bright-value, #stage-master-dim-value').text('-');
+                    return;
+                }
+                let sumB = 0, sumD = 0, n = 0;
+                stageLightUUIDs.forEach((uuid) => {
+                    const lightDoc = lightDocMap.get(uuid);
+                    const b = Number(lightDoc?.config?.bright);
+                    const d = Number(lightDoc?.config?.dim);
+                    if (!Number.isNaN(b) && !Number.isNaN(d)) {
+                        sumB += b;
+                        sumD += d;
+                        n++;
+                    }
+                });
+                let b = n > 0 ? sumB / n : DEFAULT_AMBIENT_BRIGHT;
+                let d = n > 0 ? sumD / n : DEFAULT_AMBIENT_DIM;
+                b = Math.max(STAGE_BRIGHT_SLIDER_MIN, Math.min(STAGE_BRIGHT_SLIDER_MAX, b));
+                d = Math.max(STAGE_DIM_SLIDER_MIN, Math.min(STAGE_DIM_SLIDER_MAX, d));
+                if (d < b) d = b;
+                if (b > d) b = d;
+                $html.find('#stage-master-bright-radius-slider').val(Math.round(b)).prop('disabled', false);
+                $html.find('#stage-master-dim-radius-slider').val(Math.round(d)).prop('disabled', false);
+                $html.find('#stage-master-bright-value').text(b.toFixed(1));
+                $html.find('#stage-master-dim-value').text(d.toFixed(1));
             };
             const updateStageLightProperty = async (propertyKey, value) => {
                 if (stageLightUUIDs.length === 0) return;
@@ -974,27 +1384,108 @@ htmlContent += `
                     processedValue = parseFloat(value);
                     if (isNaN(processedValue)) return;
                     processedValue = Math.max(LUMINOSITY_SLIDER_MIN, Math.min(LUMINOSITY_SLIDER_MAX, processedValue));
-                } else if (propertyKey === 'config.saturation') { // NEW: Handle Saturation
+                } else if (propertyKey === 'config.saturation') {
                     processedValue = parseFloat(value);
                     if (isNaN(processedValue)) return;
                     processedValue = Math.max(COLOR_INTENSITY_SLIDER_MIN, Math.min(COLOR_INTENSITY_SLIDER_MAX, processedValue));
                 }
-                const updates = stageLightUUIDs.map(uuid => ({ _id: uuid.split('.').pop(), [propertyKey]: processedValue }));
-                if (updates.length === 0) return;
+
+                let updates;
+                let alphaForLum = null;
+                let foundrySaturation = null;
+                let brightRadius = null;
+                let dimRadius = null;
+
+                if (propertyKey === 'config.luminosity') {
+                    alphaForLum = processedValue <= OFF_LUMINOSITY ? 0 : Math.min(1, Math.max(0, processedValue));
+                    updates = stageLightUUIDs.map((uuid) => ({
+                        _id: uuid.split(".").pop(),
+                        "config.luminosity": processedValue,
+                        "config.alpha": alphaForLum,
+                    }));
+                } else if (propertyKey === 'config.saturation') {
+                    foundrySaturation = processedValue * 2 - 1;
+                    updates = stageLightUUIDs.map((uuid) => ({
+                        _id: uuid.split(".").pop(),
+                        "config.saturation": foundrySaturation,
+                    }));
+                } else if (propertyKey === 'config.bright' || propertyKey === 'config.dim') {
+                    let b = parseFloat($html.find("#stage-master-bright-radius-slider").val());
+                    let d = parseFloat($html.find("#stage-master-dim-radius-slider").val());
+                    if (isNaN(b)) b = DEFAULT_AMBIENT_BRIGHT;
+                    if (isNaN(d)) d = DEFAULT_AMBIENT_DIM;
+                    if (propertyKey === "config.bright") {
+                        b = parseFloat(value);
+                        if (isNaN(b)) return;
+                        b = Math.max(STAGE_BRIGHT_SLIDER_MIN, Math.min(STAGE_BRIGHT_SLIDER_MAX, b));
+                        d = Math.max(d, b);
+                        d = Math.min(STAGE_DIM_SLIDER_MAX, d);
+                    } else {
+                        d = parseFloat(value);
+                        if (isNaN(d)) return;
+                        d = Math.max(STAGE_DIM_SLIDER_MIN, Math.min(STAGE_DIM_SLIDER_MAX, d));
+                        b = Math.min(b, d);
+                        b = Math.max(STAGE_BRIGHT_SLIDER_MIN, b);
+                    }
+                    brightRadius = b;
+                    dimRadius = d;
+                    $html.find("#stage-master-bright-radius-slider").val(Math.round(b));
+                    $html.find("#stage-master-dim-radius-slider").val(Math.round(d));
+                    $html.find("#stage-master-bright-value").text(b.toFixed(1));
+                    $html.find("#stage-master-dim-value").text(d.toFixed(1));
+                    updates = stageLightUUIDs.map((uuid) => ({
+                        _id: uuid.split(".").pop(),
+                        "config.bright": b,
+                        "config.dim": d,
+                    }));
+                } else {
+                    processedValue = propertyKey === 'config.animation.speed' || propertyKey === 'config.animation.intensity'
+                        ? processedValue
+                        : parseFloat(value);
+                    if (propertyKey !== 'config.animation.speed' && propertyKey !== 'config.animation.intensity') {
+                        if (isNaN(processedValue)) return;
+                    }
+                    updates = stageLightUUIDs.map((uuid) => ({ _id: uuid.split(".").pop(), [propertyKey]: processedValue }));
+                }
+
+                if (!updates?.length) return;
                 try {
-                    await canvas.scene.updateEmbeddedDocuments("AmbientLight", updates, { diff: false, recursive: false, noHook: true });
-                    updates.forEach(update => {
+                    await canvas.scene.updateEmbeddedDocuments("AmbientLight", updates, { noHook: true });
+                    updates.forEach((update) => {
                         const fullUuid = `${currentScene.uuid}.AmbientLight.${update._id}`;
                         const lightDoc = lightDocMap.get(fullUuid);
                         if (lightDoc) {
-                            foundry.utils.setProperty(lightDoc.updateSource({}), propertyKey, processedValue);
+                            if (propertyKey === "config.luminosity") {
+                                lightDoc.updateSource(
+                                    { config: { luminosity: processedValue, alpha: alphaForLum } },
+                                    { diff: false, recursive: true }
+                                );
+                            } else if (propertyKey === "config.saturation") {
+                                lightDoc.updateSource(
+                                    { config: { saturation: foundrySaturation } },
+                                    { diff: false, recursive: true }
+                                );
+                            } else if (propertyKey === "config.bright" || propertyKey === "config.dim") {
+                                lightDoc.updateSource(
+                                    { config: { bright: brightRadius, dim: dimRadius } },
+                                    { diff: false, recursive: true }
+                                );
+                            } else {
+                                const srcChanges = {};
+                                foundry.utils.setProperty(srcChanges, propertyKey, processedValue);
+                                lightDoc.updateSource(srcChanges, { diff: false, recursive: true });
+                            }
                         }
                         const $listItem = $html.find(`.${LIGHT_ITEM_CLASS}[${DATA_LIGHT_UUID}="${fullUuid}"]`);
                         if ($listItem.length) {
                             let uiUpdateData = {};
-                            if (propertyKey === 'config.luminosity') { uiUpdateData = { luminosity: processedValue }; }
-                            else if (propertyKey === 'config.attenuation') { uiUpdateData = { attenuation: processedValue }; }
-                            else if (propertyKey === 'config.saturation') { uiUpdateData = { saturation: processedValue }; }
+                            if (propertyKey === "config.luminosity") {
+                                uiUpdateData = { luminosity: processedValue };
+                            } else if (propertyKey === "config.attenuation") {
+                                uiUpdateData = { attenuation: processedValue };
+                            } else if (propertyKey === "config.saturation") {
+                                uiUpdateData = { saturation: foundrySaturation };
+                            }
                             if (Object.keys(uiUpdateData).length > 0) {
                                 updateLightElementUI($listItem.get(0), uiUpdateData);
                             }
@@ -1006,7 +1497,8 @@ htmlContent += `
                     if (propertyKey.includes('animation')) initializeAnimationSliders();
                     if (propertyKey.includes('attenuation')) initializeFocusSliders();
                     if (propertyKey.includes('luminosity')) initializeMasterBrightnessSlider();
-                    if (propertyKey.includes('saturation')) initializeColorIntensitySlider(); // Reset saturation slider on error
+                    if (propertyKey.includes('saturation')) initializeColorIntensitySlider();
+                    if (propertyKey === "config.bright" || propertyKey === "config.dim") initializeStageBrightDimSliders();
                 }
             };
             const detectOnStageTokens = () => {
@@ -1045,7 +1537,8 @@ htmlContent += `
             initializeAnimationSliders();
             initializeFocusSliders();
             initializeMasterBrightnessSlider();
-            initializeColorIntensitySlider(); // NEW: Initialize saturation slider
+            initializeColorIntensitySlider();
+            initializeStageBrightDimSliders();
             if (stageBoundsDefined && canControlSpotlights) { rebuildActiveSpotlightsMap(); updateSpotlightList(); console.log("Macro | Registering spotlight hooks."); spotlightHookIds.push(Hooks.on("updateToken", handleTokenUpdate)); spotlightHookIds.push(Hooks.on("deleteToken", handleTokenDelete)); spotlightHookIds.push(Hooks.on("createToken", handleTokenCreate)); spotlightHookIds.push(Hooks.on("refreshToken", handleTokenRefresh)); } else { console.log("Macro | Skipping spotlight init/hooks."); $spotlightList.html('<li class="spotlight-empty"><em>Spotlight control disabled.</em></li>'); }
 
             // --- Event Listeners ---
@@ -1066,48 +1559,46 @@ htmlContent += `
                 const $stageElements = getStageLightElements(); if ($stageElements.length === 0) return; const targetColor = DEFAULT_ON_COLOR; const targetLuminosity = TARGET_ON_LUMINOSITY; const { transitions, elementsToUpdate } = getColorLuminosityTransitions($stageElements, targetColor, targetLuminosity); if (transitions.length > 0) { await applyBulkLightUpdates(transitions, elementsToUpdate, "Turned ON Stage Lights to White", "Stage ON White"); } else { ui.notifications.info(`Stage Lights already ON White.`); }
             });
 
-            // --- House Light Buttons (Color-Based Logic) ---
+            // --- House Light Buttons (UUID list only) ---
             $html.on('click', '#house-lights-off-button', async function() {
-                if (!normalizedHouseColor) return;
-                console.log(`House Lights OFF | Targeting lights with color ${normalizedHouseColor}`);
+                if (!houseControlsEnabled) return;
+                console.log("House Lights OFF | house UUID list");
                 const transitions = []; const elementsToUpdate = [];
                 for (const [uuid, lightDoc] of lightDocMap.entries()) {
                     if (!lightDoc?.config) continue;
                     const isSpotlight = foundry.utils.getProperty(lightDoc, `flags.${SPOTLIGHT_FLAG_MODULE}.${SPOTLIGHT_FLAG_KEY}`);
                     if (isSpotlight) continue;
                     const currentLuminosity = lightDoc.config.luminosity ?? 0.0;
-                    const currentColor = normalizeColorToString(lightDoc.config.color);
-                    if (currentColor === normalizedHouseColor && currentLuminosity > OFF_LUMINOSITY) {
-                        const startState = { color: currentColor, luminosity: currentLuminosity };
-                        const endState = { color: currentColor, luminosity: OFF_LUMINOSITY };
-                        transitions.push({ uuid: uuid, startState, endState });
+                    if (houseLightUuidAllowSet.has(uuid) && currentLuminosity > OFF_LUMINOSITY) {
+                        const startState = { luminosity: currentLuminosity };
+                        const endState = { luminosity: OFF_LUMINOSITY };
+                        transitions.push({ uuid: uuid, startState, endState, luminosityOnly: true });
                         const $element = $html.find(`.${LIGHT_ITEM_CLASS}[${DATA_LIGHT_UUID}="${uuid}"]`);
                         if ($element.length > 0) { elementsToUpdate.push({ element: $element.get(0), data: { luminosity: OFF_LUMINOSITY } }); }
                     }
                 }
-                if (transitions.length > 0) { await applyBulkLightUpdates(transitions, elementsToUpdate, `Turned OFF lights matching ${normalizedHouseColor}`, "House OFF (Color)"); }
-                else { ui.notifications.info(`No lights currently ON with color ${normalizedHouseColor}.`); }
+                if (transitions.length > 0) { await applyBulkLightUpdates(transitions, elementsToUpdate, "Turned OFF house UUID lights", "House OFF"); }
+                else { ui.notifications.info("No house UUID lights were on."); }
             });
             $html.on('click', '#house-lights-on-button', async function() {
-                if (!normalizedHouseColor) return;
-                console.log(`House Lights ON | Targeting lights with color ${normalizedHouseColor}`);
+                if (!houseControlsEnabled) return;
+                console.log("House Lights ON | house UUID list");
                 const transitions = []; const elementsToUpdate = []; const targetLuminosity = TARGET_ON_LUMINOSITY;
                 for (const [uuid, lightDoc] of lightDocMap.entries()) {
                      if (!lightDoc?.config) continue;
                      const isSpotlight = foundry.utils.getProperty(lightDoc, `flags.${SPOTLIGHT_FLAG_MODULE}.${SPOTLIGHT_FLAG_KEY}`);
                      if (isSpotlight) continue;
                     const currentLuminosity = lightDoc.config.luminosity ?? 0.0;
-                    const currentColor = normalizeColorToString(lightDoc.config.color);
-                    if (currentColor === normalizedHouseColor && Math.abs(currentLuminosity - targetLuminosity) > 0.01) {
-                         const startState = { color: currentColor, luminosity: currentLuminosity };
-                        const endState = { color: currentColor, luminosity: targetLuminosity };
-                        transitions.push({ uuid: uuid, startState, endState });
+                    if (houseLightUuidAllowSet.has(uuid) && Math.abs(currentLuminosity - targetLuminosity) > 0.01) {
+                        const startState = { luminosity: currentLuminosity };
+                        const endState = { luminosity: targetLuminosity };
+                        transitions.push({ uuid: uuid, startState, endState, luminosityOnly: true });
                         const $element = $html.find(`.${LIGHT_ITEM_CLASS}[${DATA_LIGHT_UUID}="${uuid}"]`);
                         if ($element.length > 0) { elementsToUpdate.push({ element: $element.get(0), data: { luminosity: targetLuminosity } }); }
                     }
                 }
-                if (transitions.length > 0) { await applyBulkLightUpdates(transitions, elementsToUpdate, `Turned ON lights matching ${normalizedHouseColor}`, "House ON (Color)"); }
-                else { ui.notifications.info(`No lights matching ${normalizedHouseColor} needed to be turned ON.`); }
+                if (transitions.length > 0) { await applyBulkLightUpdates(transitions, elementsToUpdate, "Turned ON house UUID lights", "House ON"); }
+                else { ui.notifications.info("House UUID lights already at target brightness."); }
             });
 
             // Quick Controls Listeners (Color, Anim, Env, Sliders)
@@ -1129,11 +1620,20 @@ htmlContent += `
             $html.on('input', '#stage-master-brightness-slider', async function() {
                 const brightnessValue = $(this).val(); $html.find('#stage-master-brightness-value').text(parseFloat(brightnessValue).toFixed(2)); await updateStageLightProperty('config.luminosity', brightnessValue);
             });
-             // NEW: Color Intensity Slider Listener
             $html.on('input', '#stage-color-intensity-slider', async function() {
                 const intensityValue = $(this).val();
                 $html.find('#stage-color-intensity-value').text(parseFloat(intensityValue).toFixed(2));
-                await updateStageLightProperty('config.alpha', intensityValue);
+                await updateStageLightProperty('config.saturation', intensityValue);
+            });
+            $html.on('input', '#stage-master-bright-radius-slider', async function() {
+                const v = $(this).val();
+                $html.find('#stage-master-bright-value').text(parseFloat(v).toFixed(1));
+                await updateStageLightProperty('config.bright', v);
+            });
+            $html.on('input', '#stage-master-dim-radius-slider', async function() {
+                const v = $(this).val();
+                $html.find('#stage-master-dim-value').text(parseFloat(v).toFixed(1));
+                await updateStageLightProperty('config.dim', v);
             });
             $html.on('click', '.environment-type-button', async function(event) {
                  const $button = $(this); const envName = $button.text().trim(); let availableColors = []; try { const colorsData = $button.data('colors'); if (colorsData && Array.isArray(colorsData)) { availableColors = colorsData; } else if (typeof colorsData === 'string' && colorsData.length > 2) { try { availableColors = JSON.parse(colorsData.replace(/\\'/g, "'")); } catch (jsonError) { console.error(`JSON Parse Error for '${envName}':`, jsonError); throw new Error("Invalid JSON"); } } else { throw new Error("Invalid data"); } } catch (e) { console.error(`Environment | Error parsing color data for '${envName}':`, e); ui.notifications.error(`Error reading colors for environment '${envName}'.`); return; } availableColors = availableColors.map(c => normalizeColorToString(c) ?? DEFAULT_ON_COLOR); if (availableColors.length === 0) return; const $stageLightElements = getStageLightElements(); if ($stageLightElements.length === 0) return; const transitions = []; const elementsToUpdate = []; const targetLuminosity = TARGET_ON_LUMINOSITY; $stageLightElements.each((i, el) => { const $el = $(el); const lightUuid = $el.data(DATA_LIGHT_UUID.replace('data-', '')); const lightDoc = lightDocMap.get(lightUuid); if (!lightUuid || !lightDoc?.config) return; const randomIndex = Math.floor(Math.random() * availableColors.length); const targetColor = availableColors[randomIndex]; const currentLuminosity = lightDoc.config.luminosity ?? 0.0; const currentColor = normalizeColorToString(lightDoc.config.color); const startState = { color: currentColor ?? OFF_COLOR, luminosity: currentLuminosity }; const endState = { color: targetColor, luminosity: targetLuminosity }; transitions.push({ uuid: lightUuid, startState, endState }); elementsToUpdate.push({ element: el, data: endState }); }); if (transitions.length > 0) { await applyBulkLightUpdates(transitions, elementsToUpdate, `Applied '${envName}' environment to Stage Lights`, `Environment ${envName}`); }
@@ -1437,6 +1937,7 @@ Lights Captured: ${successfulCaptures}
         const lightIdsToDelete = Array.from(activeSpotlights.values());
         if (lightIdsToDelete.length > 0) { try { await canvas.scene.deleteEmbeddedDocuments("AmbientLight", lightIdsToDelete); } catch {} }
         activeSpotlights.clear();
+        if (debounceTimer != null) { clearTimeout(debounceTimer); debounceTimer = null; }
         if (tokenRefreshDebounceMap.size > 0) { for (const timeoutId of tokenRefreshDebounceMap.values()) { clearTimeout(timeoutId); } tokenRefreshDebounceMap.clear(); }
         const oldHookIds = existingDialog._locLightControlHookIds || spotlightHookIds; // Use stored or global
         console.log("Macro | Unregistering hooks from previous instance:", oldHookIds);

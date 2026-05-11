@@ -591,18 +591,18 @@ export class ControlsIntegration {
 
     this._wrapEnvironmentInitialize();
     
-    // HYBRID STRATEGY: Three.js handles gameplay interaction, PIXI is a transparent
-    // overlay whose interactivity is controlled by InputRouter.
+    // HYBRID STRATEGY: Three.js is the visible map; PIXI stays under Three for
+    // capture/bridges while InputRouter toggles pointer-events for edit tools.
     
-    // PIXI canvas: on top, initially non-interactive (Three.js receives clicks)
+    // PIXI canvas: under Three (z 10), non-interactive by default
     pixiCanvas.style.opacity = '1'; // Keep visible for overlay layers
-    pixiCanvas.style.zIndex = '10'; // On top
+    pixiCanvas.style.zIndex = '10';
     pixiCanvas.style.pointerEvents = 'none'; // InputRouter will enable this for edit tools
     
-    // Three.js canvas: below PIXI, interactive in gameplay
+    // Three.js canvas: above #board so Foundry cannot paint an opaque plate over it
     const threeCanvas = document.getElementById('map-shine-canvas');
     if (threeCanvas) {
-      threeCanvas.style.zIndex = '1'; // Below PIXI
+      threeCanvas.style.zIndex = '100';
       threeCanvas.style.opacity = '1';
       threeCanvas.style.pointerEvents = 'auto';
     }
@@ -621,7 +621,7 @@ export class ControlsIntegration {
       this._reassertWallTransparencyAfterPerception();
     });
     
-    log.debug('PIXI overlay configured: opacity 0, z-index 10 (on top but transparent)');
+    log.debug('PIXI overlay: z-index 10 under Three (100), renderer.background.alpha 0');
   }
 
   _enforcePixiTransparency() {

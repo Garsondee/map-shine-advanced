@@ -158,6 +158,15 @@ let _pixiSuppressionTickerFn = null;
 /** @type {number} */
 let _pixiSuppressionTickerLastMs = 0;
 
+/**
+ * When true, {@link _msaPixiPrerenderTransparentItem} is registered on
+ * `renderer.runners.prerender` (Pixi v8). Otherwise we used `renderer.on('prerender', …)`.
+ * @type {boolean}
+ */
+let _pixiPrerenderTransparentUsesRunner = false;
+/** @type {any|null} Renderer that received the `prerender` event listener. */
+let _pixiPrerenderTransparentRenderer = null;
+
 /** @type {number|null} */
 let _inputArbitrationSettleRaf = null;
 
@@ -485,6 +494,12 @@ let _loadHiddenPumpIntervalId = null;
 let _loadVisibilityDebugIntervalId = null;
 /** @type {boolean} */
 let _loadVisibilityLifecycleHooksInstalled = false;
+/**
+ * When the document last entered a hidden/backgrounded state (`performance.now()` or `Date.now()`).
+ * Used so `window.focus` can still run V14 cold-load resync if `visibilitychange` is missing or reordered.
+ * @type {number}
+ */
+let _msaDocHiddenAtMs = 0;
 
 /**
  * Stop the optional hidden-tab render pump (started during scene load).
@@ -601,9 +616,14 @@ async function _runDeferredIntroCompileRetry() {
 /**
  * After returning to a visible tab: resize sync, continuous render, optional deferred intro warmup.
  * @param {string} [reason]
+ * @param {{ runColdBgResync?: boolean }} [opts] - When `runColdBgResync` is true, runs `__v14ColdLoadSwapResync`
+ *   (swapBackgroundImage + forceRepopulate). That path is heavy and must not run on every `window.focus`
+ *   while the tab stayed visible — it was restarting populate during normal play and could prolong grey
+ *   slim-render until all effect jobs finished again.
  * @private
  */
-function _recoverRenderingAfterTabFocus(reason = '') {
+function _recoverRenderingAfterTabFocus(reason = '', opts = {}) {
+  const runColdBgResync = opts.runColdBgResync === true;
   try {
     const ms = window.MapShine;
     if (!ms) return;
@@ -626,10 +646,12 @@ function _recoverRenderingAfterTabFocus(reason = '') {
     } catch (_) {}
     ms.renderLoop?.pumpBackgroundLoadFrame?.();
 
-    try {
-      const coldSwap = ms.__v14ColdLoadSwapResync;
-      if (typeof coldSwap === 'function') coldSwap();
-    } catch (_) {}
+    if (runColdBgResync) {
+      try {
+        const coldSwap = ms.__v14ColdLoadSwapResync;
+        if (typeof coldSwap === 'function') coldSwap();
+      } catch (_) {}
+    }
 
     if (ms.__pendingIntroCompileRetry === true) {
       ms.__pendingIntroCompileRetry = false;
@@ -637,7 +659,7 @@ function _recoverRenderingAfterTabFocus(reason = '') {
     }
 
     if (reason && window.MapShine?.__loadVisibilityDebug === true) {
-      log.info('[loadVisibilityDebug] recovery fired', { reason });
+      log.info('[loadVisibilityDebug] recovery fired', { reason, runColdBgResync });
     }
   } catch (_) {
   }
@@ -651,21 +673,49 @@ function _ensureLoadVisibilityLifecycleHooks() {
   if (_loadVisibilityLifecycleHooksInstalled) return;
   _loadVisibilityLifecycleHooksInstalled = true;
 
-  const onVisible = (reason) => {
-    try {
-      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
-    } catch (_) {
-      return;
-    }
-    safeCall(() => _recoverRenderingAfterTabFocus(reason), 'loadVisibility.onVisible', Severity.COSMETIC);
-  };
-
   try {
-    document.addEventListener('visibilitychange', () => onVisible('document.visibilitychange'));
+    document.addEventListener('visibilitychange', () => {
+      try {
+        if (typeof document === 'undefined') return;
+        if (document.visibilityState === 'hidden' || document.hidden) {
+          _msaDocHiddenAtMs = (typeof performance !== 'undefined' && performance.now)
+            ? performance.now()
+            : Date.now();
+          return;
+        }
+        if (document.visibilityState !== 'visible') return;
+      } catch (_) {
+        return;
+      }
+      const wasBackgrounded = _msaDocHiddenAtMs > 0;
+      _msaDocHiddenAtMs = 0;
+      safeCall(
+        () => _recoverRenderingAfterTabFocus('document.visibilitychange', { runColdBgResync: wasBackgrounded }),
+        'loadVisibility.visibility.visible',
+        Severity.COSMETIC,
+      );
+    });
   } catch (_) {
   }
   try {
-    window.addEventListener('focus', () => onVisible('window.focus'));
+    window.addEventListener('focus', () => {
+      try {
+        if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
+      } catch (_) {
+        return;
+      }
+      const perf = (typeof performance !== 'undefined' && performance.now)
+        ? performance.now()
+        : Date.now();
+      const t0 = _msaDocHiddenAtMs;
+      const wasBackgrounded = t0 > 0 && perf - t0 > 50;
+      if (wasBackgrounded) _msaDocHiddenAtMs = 0;
+      safeCall(
+        () => _recoverRenderingAfterTabFocus('window.focus', { runColdBgResync: wasBackgrounded }),
+        'loadVisibility.window.focus',
+        Severity.COSMETIC,
+      );
+    });
   } catch (_) {
   }
 }
@@ -4389,6 +4439,85 @@ function _scheduleUpdateSceneDrivenReinit(scene, changes = undefined) {
 }
 
 /**
+ * Re-assert transparent framebuffer clear at the **start** of each PIXI render so
+ * Foundry cannot paint an opaque plate over the Three canvas after resetting
+ * `renderer.background.alpha` (common on V14 native level / canvas redraw paths).
+ * Mirrors the V3 `V3ThreeSceneHost` prerender strategy.
+ * @private
+ */
+function _forcePixiRendererBackgroundTransparentForV2() {
+  try {
+    if (!window.MapShine?.__v2Active) return;
+    const bg = canvas?.app?.renderer?.background;
+    if (!bg) return;
+    if (typeof bg.alpha === 'number' && bg.alpha !== 0) {
+      bg.alpha = 0;
+    }
+    const c = bg.backgroundColor;
+    if (c) {
+      if (typeof c.setAlpha === 'function') c.setAlpha(0);
+      else if (typeof c._alpha === 'number') c._alpha = 0;
+      if (Array.isArray(c._arrayRgba) && c._arrayRgba.length >= 4) {
+        c._arrayRgba[3] = 0;
+      }
+    }
+  } catch (_) {
+  }
+}
+
+/** @type {{ prerender: () => void }} */
+const _msaPixiPrerenderTransparentItem = {
+  prerender() {
+    _forcePixiRendererBackgroundTransparentForV2();
+  },
+};
+
+/**
+ * @private
+ */
+function _detachPixiPrerenderTransparentBackgroundForV2() {
+  try {
+    if (_pixiPrerenderTransparentUsesRunner) {
+      const pr = canvas?.app?.renderer?.runners?.prerender;
+      if (pr?.remove) {
+        try { pr.remove(_msaPixiPrerenderTransparentItem); } catch (_) {}
+      }
+      _pixiPrerenderTransparentUsesRunner = false;
+    }
+    if (_pixiPrerenderTransparentRenderer) {
+      try {
+        _pixiPrerenderTransparentRenderer.off('prerender', _forcePixiRendererBackgroundTransparentForV2);
+      } catch (_) {}
+      _pixiPrerenderTransparentRenderer = null;
+    }
+  } catch (_) {
+  }
+}
+
+/**
+ * @private
+ */
+function _attachPixiPrerenderTransparentBackgroundForV2() {
+  _detachPixiPrerenderTransparentBackgroundForV2();
+  const ren = canvas?.app?.renderer;
+  if (!ren) return;
+  const pr = ren.runners?.prerender;
+  if (pr?.add) {
+    try {
+      pr.add(_msaPixiPrerenderTransparentItem);
+      _pixiPrerenderTransparentUsesRunner = true;
+      return;
+    } catch (_) {
+    }
+  }
+  try {
+    ren.on('prerender', _forcePixiRendererBackgroundTransparentForV2);
+    _pixiPrerenderTransparentRenderer = ren;
+  } catch (_) {
+  }
+}
+
+/**
  * (Re)install V2 gameplay PIXI visibility suppression hooks + throttled ticker hook.
  * Used after full scene init and after native same-scene level redraws.
  */
@@ -4404,6 +4533,7 @@ function _installPixiSuppressionHooksForV2() {
       _pixiSuppressionTickerFn = null;
       _pixiSuppressionTickerLastMs = 0;
     }
+    _detachPixiPrerenderTransparentBackgroundForV2();
 
     const install = (hook) => {
       try {
@@ -4435,6 +4565,8 @@ function _installPixiSuppressionHooksForV2() {
         ticker.add(_pixiSuppressionTickerFn, null, -75);
       }
     } catch (_) {}
+
+    _attachPixiPrerenderTransparentBackgroundForV2();
   }, 'pixiSuppress.installHooks', Severity.COSMETIC);
 }
 
@@ -4835,6 +4967,20 @@ async function onCanvasReady(canvas) {
     });
   }
 
+  // First Map Shine bind after a non-MSA scene (or any cold attach): Foundry can
+  // call Canvas.draw with canvas.scene already equal to the target scene, so
+  // computeNativeSameSceneDrawIntent reports a native "level switch" even though
+  // no WebGL runtime exists yet. That used to skip the loading overlay and hit
+  // resync-only (no createThreeCanvas) until a full page refresh.
+  if (skipNativeLevelSwitchOverlay && !_hasLiveMapShineRuntime()) {
+    log.info(`${MSA_V14_LIFECYCLE_TRACE} canvasReady level-switch overlay suppressed but no runtime — forcing full create`, {
+      sceneId: scene.id,
+      nativeSameSceneRedrawAtReady,
+      nativeSameSceneLevelSwitchAtReady,
+    });
+    skipNativeLevelSwitchOverlay = false;
+  }
+
   if (!skipNativeLevelSwitchOverlay) {
     safeCall(() => {
       // Scene name is rendered by the dedicated scene-name element/subtitle when present.
@@ -5040,6 +5186,10 @@ function onCanvasTearDown(canvas) {
     try { Hooks.off(h.hook, h.id); } catch (_) {}
   }
   _pixiSuppressionHookIds = [];
+
+  safeDispose(() => {
+    _detachPixiPrerenderTransparentBackgroundForV2();
+  }, 'pixiSuppress.prerenderTransparent.detach');
 
   if (_pixiSuppressionTickerFn) {
     safeDispose(() => {
@@ -5636,7 +5786,9 @@ async function createThreeCanvas(scene, createOptions = {}) {
     threeCanvas.style.left = '0';
     threeCanvas.style.width = '100%';
     threeCanvas.style.height = '100%';
-    threeCanvas.style.zIndex = '1'; // Below PIXI (but PIXI is transparent, so Three.js shows through)
+    // Above #board (z-index 10). Inline wins over module.css; must not leave Three
+    // under the board or Foundry's opaque clear fills the viewport (grey plate).
+    threeCanvas.style.zIndex = '100';
     threeCanvas.style.pointerEvents = 'auto'; // Three.js handles interaction in gameplay mode
 
     // Inject NEXT to Foundry's canvas (as sibling, not child)
@@ -5765,7 +5917,7 @@ async function createThreeCanvas(scene, createOptions = {}) {
     rendererCanvas.style.left = '0';
     rendererCanvas.style.width = '100%';
     rendererCanvas.style.height = '100%';
-    rendererCanvas.style.zIndex = '1'; // Below PIXI (but PIXI is transparent, so Three.js shows through)
+    rendererCanvas.style.zIndex = '100';
     rendererCanvas.style.pointerEvents = 'auto'; // Three.js handles interaction in gameplay mode
     rendererCanvas.style.opacity = '1';
     // Use Foundry's scene background colour so padded region matches core Foundry
@@ -6548,10 +6700,14 @@ async function createThreeCanvas(scene, createOptions = {}) {
       ) {
         const viewedBg = getViewedLevelBackgroundSrc(v14Scene);
         if (viewedBg) {
-          let _v14ColdLoadSwapRan = false;
+          // IMPORTANT: Do not single-flight this resync. The first rAF/setTimeout(0)
+          // pass can run while `canvas.level` / visible background stacks are still
+          // settling after a scene activation (especially non-MSA → MSA). An early
+          // swap+repopulate can succeed without throwing yet leave the FloorRenderBus
+          // on the solid grey fallback; a previous `_v14ColdLoadSwapRan` guard then
+          // skipped the 750ms/2500ms backstops entirely. Re-running swap+repopulate is
+          // idempotent enough to be safe; throttling is handled by spread-out timers.
           const runSwap = () => {
-            if (_v14ColdLoadSwapRan) return;
-            _v14ColdLoadSwapRan = true;
             try {
               let coldSwapIdx = Number.NaN;
               try {
@@ -6590,7 +6746,6 @@ async function createThreeCanvas(scene, createOptions = {}) {
               window.MapShine?.renderLoop?.requestRender?.();
               window.MapShine?.renderLoop?.requestContinuousRender?.(300);
             } catch (_) {
-              _v14ColdLoadSwapRan = false;
             }
           };
           // Primary path: after two animation frames (layout + Foundry level settled).
@@ -6600,6 +6755,7 @@ async function createThreeCanvas(scene, createOptions = {}) {
           // Backstop: rAF is throttled or not run while the tab is hidden during load.
           // Without this, swapBackgroundImage + forceRepopulate never run → stale/grey albedo.
           setTimeout(runSwap, 0);
+          setTimeout(runSwap, 150);
           setTimeout(runSwap, 750);
           setTimeout(runSwap, 2500);
           try {
@@ -8842,14 +8998,14 @@ function enableSystem() {
   
   // Three.js Canvas: visible and interactive (PRIMARY interaction handler)
   threeCanvas.style.opacity = '1';
-  threeCanvas.style.zIndex = '1'; // Below PIXI (but PIXI is transparent)
+  threeCanvas.style.zIndex = '100';
   threeCanvas.style.pointerEvents = 'auto'; // Three.js receives input in Gameplay Mode
   
   // PIXI Canvas: transparent overlay, input controlled by InputRouter
   const pixiCanvas = canvas.app?.view;
   if (pixiCanvas) {
     pixiCanvas.style.opacity = '1'; // Keep visible for overlay layers (drawings, templates, notes)
-    pixiCanvas.style.zIndex = '10'; // On top
+    pixiCanvas.style.zIndex = '10'; // Under Three (100); still needed for capture/bridges
     pixiCanvas.style.pointerEvents = 'none'; // Default to pass-through; InputRouter enables for edit tools
 
     // V2: PIXI should not visually render the scene. Foundry's board canvas
@@ -9196,6 +9352,7 @@ function _enforceGameplayPixiSuppression() {
         threeCanvas.style.display = '';
         threeCanvas.style.visibility = 'visible';
         threeCanvas.style.opacity = '1';
+        threeCanvas.style.zIndex = '100';
         threeCanvas.style.pointerEvents = shouldPixiReceiveInputEffective ? 'none' : 'auto';
       }
 
@@ -9254,11 +9411,9 @@ function _enforceGameplayPixiSuppression() {
     // Selective system: keep PIXI board visible for compatibility overlays while
     // scene-bearing layers are suppressed surgically below.
     safeCall(() => {
-      // #board stacks above #map-shine-canvas (z-index 10 vs 1). Foundry resets
-      // Application.renderer.background.alpha to 1 on many redraw paths (native
-      // level changes, resize, layer activation). An opaque clear then fills the
-      // whole board with the scene background colour and hides Three.js entirely
-      // even when FloorRenderBus + blit are healthy (misread as "Three not rendering").
+      // #map-shine-canvas must stay above #board (z-index 10). Foundry may reset
+      // Application.renderer.background.alpha on redraw paths; if the board were
+      // on top, an opaque clear would hide Three even when the blit path is healthy.
       if (canvas.app?.renderer?.background) {
         canvas.app.renderer.background.alpha = 0;
       }
@@ -9285,6 +9440,7 @@ function _enforceGameplayPixiSuppression() {
       threeCanvas.style.display = '';
       threeCanvas.style.visibility = 'visible';
       threeCanvas.style.opacity = '1';
+      threeCanvas.style.zIndex = '100';
       threeCanvas.style.pointerEvents = 'auto';
     }, 'pixiSuppress.threeCanvasVisible', Severity.COSMETIC);
 

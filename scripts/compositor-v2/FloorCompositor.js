@@ -2004,9 +2004,16 @@ export class FloorCompositor {
 
     const nowMs = Date.now();
     const sceneId = canvas?.scene?.id ? String(canvas.scene.id) : null;
+    // V14 cold-load bg resync intentionally fires swap+forceRepopulate on several
+    // timers (0/150/750/2500ms + rAF). The 900ms same-scene throttle below would
+    // let the *first* populate finish (sometimes with wrong canvas.level / texture
+    // stack after non-MSA → MSA) and then turn every later resync into a no-op
+    // because _ensureBusPopulated returns immediately when _populateComplete is
+    // true — leaving the grey FloorRenderBus plane until a full Foundry refresh.
+    const bypassDuplicateThrottle = String(source || '').includes('cold-load-bg-resync');
     const sameScene = !!sceneId && sceneId === this._lastForceRepopulateSceneId;
     const elapsedMs = nowMs - Number(this._lastForceRepopulateAtMs || 0);
-    if (sameScene && elapsedMs >= 0 && elapsedMs < 900) {
+    if (!bypassDuplicateThrottle && sameScene && elapsedMs >= 0 && elapsedMs < 900) {
       log.info(
         `FloorCompositor: skipping duplicate forceRepopulate (source=${source}, previous=${this._lastForceRepopulateSource || 'unknown'}, elapsedMs=${elapsedMs})`
       );

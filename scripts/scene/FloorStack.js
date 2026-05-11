@@ -171,8 +171,13 @@ export class FloorStack {
    * @returns {FloorBand[]}
    */
   getVisibleFloors() {
+    if (this._floors.length === 0) return [];
+    const raw = Number(this._activeFloorIndex);
+    const active = Number.isFinite(raw)
+      ? Math.max(0, Math.min(this._floors.length - 1, Math.floor(raw)))
+      : 0;
     if (this._floors.length <= 1) return this._floors.slice();
-    return this._floors.slice(0, this._activeFloorIndex + 1);
+    return this._floors.slice(0, active + 1);
   }
 
   /**

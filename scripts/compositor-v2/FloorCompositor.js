@@ -23,6 +23,7 @@
  *     driven by _Water masks. Own BatchedRenderer in the bus scene.
  *   - **WeatherParticlesV2**: Rain, snow, and ash particles via
  *     shared BatchedRenderer in the bus scene.
+ *   - **AshDisturbanceEffectV2**: Token-movement ash bursts on `_Ash` masks (Quarks).
  *
  * Post-processing effects (per-level and composite passes):
  *   - **CloudEffectV2**: Procedural clouds — generates shadow RT (fed into Lighting)
@@ -50,6 +51,7 @@ import { FloorRenderBus } from './FloorRenderBus.js';
 import { ReplicaOcclusionMaskPass } from './ReplicaOcclusionMaskPass.js';
 import { SpecularEffectV2 } from './effects/SpecularEffectV2.js';
 import { FireEffectV2 } from './effects/FireEffectV2.js';
+import { AshDisturbanceEffectV2 } from './effects/AshDisturbanceEffectV2.js';
 import { WindowLightEffectV2 } from './effects/WindowLightEffectV2.js';
 import { LightingEffectV2 } from './effects/LightingEffectV2.js';
 import { SkyColorEffectV2 } from './effects/SkyColorEffectV2.js';
@@ -341,9 +343,11 @@ export class FloorCompositor {
      */
     this._weatherParticles = new WeatherParticlesV2();
 
-    // Temporarily disable Ash Disturbance while investigating load hangs.
-    // Leave the implementation on disk so it can be re-enabled after diagnosis.
-    this._ashDisturbanceEffect = null;
+    /**
+     * V2 Ash Disturbance: token-movement bursts on `_Ash` masks (Quarks), bus overlay.
+     * @type {AshDisturbanceEffectV2}
+     */
+    this._ashDisturbanceEffect = new AshDisturbanceEffectV2(this._renderBus);
 
     /**
      * V2 Smelly Flies Effect: map-point-driven ambient fly swarms.
@@ -1485,6 +1489,7 @@ export class FloorCompositor {
     await initEffect('BushEffectV2', () => this._bushEffect.initialize());
     await initEffect('TreeEffectV2', () => this._treeEffect.initialize());
     await initEffect('FireEffectV2', () => this._fireEffect.initialize());
+    await initEffect('AshDisturbanceEffectV2', () => this._ashDisturbanceEffect.initialize());
     await initEffect('DustEffectV2', () => this._dustEffect.initialize());
     await initEffect('WindowLightEffectV2', () => this._windowLightEffect.initialize());
     try {
@@ -2510,6 +2515,7 @@ export class FloorCompositor {
         ['BushEffectV2', '_bushEffect', () => this._bushEffect.populate(sc.foundrySceneData)],
         ['TreeEffectV2', '_treeEffect', () => this._treeEffect.populate(sc.foundrySceneData)],
         ['FireEffectV2', '_fireEffect', () => this._fireEffect.populate(sc.foundrySceneData)],
+        ['AshDisturbanceEffectV2', '_ashDisturbanceEffect', () => this._ashDisturbanceEffect.populate(sc.foundrySceneData)],
         ['DustEffectV2', '_dustEffect', () => this._dustEffect.populate(sc.foundrySceneData)],
         ['WindowLightEffectV2', '_windowLightEffect', () => this._windowLightEffect.populate(sc.foundrySceneData)],
       ];
@@ -3244,6 +3250,11 @@ export class FloorCompositor {
         this._fireEffect.update(timeInfo);
       } catch (err) {
         log.warn('FireEffectV2 update threw, skipping frame:', err);
+      }
+      try {
+        this._ashDisturbanceEffect?.update?.(timeInfo);
+      } catch (err) {
+        log.warn('AshDisturbanceEffectV2 update threw, skipping frame:', err);
       }
       try {
         this._dustEffect.update(timeInfo);
@@ -4611,6 +4622,7 @@ export class FloorCompositor {
       this._activeFloorIndex = fallbackIdx;
       try { this._renderBus.setVisibleFloors(fallbackIdx); } catch (_) {}
       try { this._fireEffect?.onFloorChange?.(fallbackIdx); } catch (_) {}
+      try { this._ashDisturbanceEffect?.onFloorChange?.(fallbackIdx); } catch (_) {}
       try { this._dustEffect?.onFloorChange?.(fallbackIdx); } catch (_) {}
       try { this._specularEffect?.onFloorChange?.(fallbackIdx); } catch (_) {}
       try { this._waterSplashesEffect?.onFloorChange?.(fallbackIdx); } catch (_) {}
@@ -4721,6 +4733,7 @@ export class FloorCompositor {
     this._renderBus.setVisibleFloors(maxFloorIndex);
     // Notify fire effect of floor change so it can swap active particle systems.
     this._fireEffect.onFloorChange(maxFloorIndex);
+    try { this._ashDisturbanceEffect?.onFloorChange?.(maxFloorIndex); } catch (_) {}
     // Notify dust effect of floor change so it can swap active particle systems.
     this._dustEffect.onFloorChange(maxFloorIndex);
     // Specular background overlay needs floor rebinding on level changes.
@@ -5846,6 +5859,7 @@ export class FloorCompositor {
     try { this._bushEffect?.dispose?.(); } catch (_) {}
     try { this._treeEffect?.dispose?.(); } catch (_) {}
     try { this._fireEffect?.dispose?.(); } catch (_) {}
+    try { this._ashDisturbanceEffect?.dispose?.(); } catch (_) {}
     try { this._dustEffect?.dispose?.(); } catch (_) {}
     try { this._windowLightEffect?.dispose?.(); } catch (_) {}
     try { this._cloudEffect?.dispose?.(); } catch (_) {}

@@ -37,6 +37,9 @@ const log = createLogger('AshDisturbanceV2');
 const GROUND_Z = 1000;
 const BURST_Z_OFFSET = 5;
 
+/** Min time between movement bursts per token (path updates can fire very often). */
+const TOKEN_MOVE_BURST_MIN_MS = 75;
+
 const ASH_MASK_FORMATS = ['webp', 'png', 'jpg', 'jpeg'];
 
 /** Parallel mask probe + CPU scan; serial per-tile was starving Foundry's websocket during populate. */
@@ -156,7 +159,7 @@ export class AshDisturbanceEffectV2 {
   constructor(renderBus) {
     this._renderBus = renderBus;
 
-    this._enabled = true;
+    this._enabled = false;
     this._initialized = false;
 
     /** @type {BatchedRenderer|null} */
@@ -184,6 +187,12 @@ export class AshDisturbanceEffectV2 {
 
     /** @type {THREE.Vector2|null} */
     this._tempVec2 = null;
+
+    /** @type {Array<[string, number]>} Foundry hook ids for cleanup */
+    this._hookIds = [];
+
+    /** @type {Map<string, number>} tokenId -> last burst time (ms) */
+    this._tokenBurstLastMs = new Map();
 
     this._loggedFirstBurst = false;
 
@@ -272,6 +281,8 @@ export class AshDisturbanceEffectV2 {
     // We register (or re-register) in populate() after the bus has been populated.
 
     this._ensureTextures();
+
+    this._registerTokenHooks();
 
     this._initialized = true;
     log.info('AshDisturbanceEffectV2 initialized');
@@ -499,22 +510,20 @@ export class AshDisturbanceEffectV2 {
     if (!this.enabled) return;
     if (!this._batchRenderer) return;
 
-    // If ash is not active in current weather, skip ticking (saves CPU).
     const weather = window.MapShine?.weatherController?.getCurrentState?.() ?? {};
-    const ashIntensity = Number(weather.ashIntensity) || 0;
-    if (ashIntensity <= 0) return;
+    const ashBoost = Math.max(0, Math.min(1, Number(weather.ashIntensity) || 0));
 
     const motionDelta = (typeof timeInfo?.motionDelta === 'number')
       ? timeInfo.motionDelta
       : (typeof timeInfo?.delta === 'number' ? timeInfo.delta : 0.016);
 
-    // Quarks tick.
+    // Quarks tick whenever the effect is enabled (bursts use mask + enabled; weather ash is optional).
     try {
       this._batchRenderer.update(motionDelta);
     } catch (_) {
     }
 
-    // Wind/curl live tuning.
+    // Wind scales with weather ash intensity; curl follows user params regardless.
     const windSpeed = Number(weather.windSpeed) || 0;
     const windDir = weather.windDirection || { x: 1, y: 0 };
     const wx = Number(windDir.x) || 1;
@@ -542,7 +551,7 @@ export class AshDisturbanceEffectV2 {
         if (windForce?.direction) {
           windForce.direction.set(dirX, dirY, 0);
           if (windForce.magnitude && typeof windForce.magnitude.value === 'number') {
-            windForce.magnitude.value = 600 * windSpeed * (this.params.windInfluence ?? 0.6);
+            windForce.magnitude.value = 600 * windSpeed * (this.params.windInfluence ?? 0.6) * ashBoost;
           }
         }
 
@@ -563,6 +572,10 @@ export class AshDisturbanceEffectV2 {
   triggerBurstAt(worldX, worldY) {
     if (!this.enabled) return;
 
+    const weather = window.MapShine?.weatherController?.getCurrentState?.() ?? {};
+    const ashBoost = Math.max(0, Math.min(1, Number(weather.ashIntensity) || 0));
+    const burstRateMul = 1.0 + 0.5 * ashBoost;
+
     // Pick the topmost visible floor (active) as the primary burst floor.
     const activeFloor = window.MapShine?.floorStack?.getActiveFloor?.();
     const floorIndex = Number.isFinite(activeFloor?.index) ? activeFloor.index : 0;
@@ -577,7 +590,7 @@ export class AshDisturbanceEffectV2 {
 
     const emission = system.emissionOverTime;
     if (emission && typeof emission.value === 'number') {
-      emission.value = Math.max(0, this.params.burstRate || 0);
+      emission.value = Math.max(0, (this.params.burstRate || 0) * burstRateMul);
     }
     system.userData.burstTime = Math.max(0.05, this.params.burstDuration || 0.2);
 
@@ -599,10 +612,6 @@ export class AshDisturbanceEffectV2 {
    */
   handleTokenMovement(tokenId) {
     if (!this.enabled) return;
-
-    const weather = window.MapShine?.weatherController?.getCurrentState?.() ?? {};
-    const ashIntensity = Number(weather.ashIntensity) || 0;
-    if (ashIntensity <= 0) return;
 
     const token = canvas?.tokens?.get?.(tokenId);
     const doc = token?.document || canvas?.scene?.tokens?.get?.(tokenId);
@@ -648,6 +657,9 @@ export class AshDisturbanceEffectV2 {
 
   dispose() {
     try {
+      this._unregisterTokenHooks();
+      this._tokenBurstLastMs.clear();
+
       for (const fi of this._activeFloors) this._deactivateFloor(fi);
       this._activeFloors.clear();
 
@@ -675,6 +687,42 @@ export class AshDisturbanceEffectV2 {
   }
 
   // ── Internals ─────────────────────────────────────────────────────────────
+
+  _registerTokenHooks() {
+    if (this._hookIds.length) return;
+    const H = globalThis.Hooks;
+    if (!H || typeof H.on !== 'function') return;
+
+    const id = H.on('updateToken', (tokenDoc, changes) => {
+      if (!this.enabled || !this._initialized) return;
+      if (!tokenDoc?.id) return;
+      if (!changes || (changes.x === undefined && changes.y === undefined)) return;
+
+      const now = (typeof performance !== 'undefined' && performance.now)
+        ? performance.now()
+        : Date.now();
+      const last = this._tokenBurstLastMs.get(tokenDoc.id) ?? 0;
+      if (now - last < TOKEN_MOVE_BURST_MIN_MS) return;
+      this._tokenBurstLastMs.set(tokenDoc.id, now);
+
+      this.handleTokenMovement(tokenDoc.id);
+    });
+    this._hookIds.push(['updateToken', id]);
+  }
+
+  _unregisterTokenHooks() {
+    const H = globalThis.Hooks;
+    if (!H || typeof H.off !== 'function') {
+      this._hookIds.length = 0;
+      return;
+    }
+    for (const [name, hookId] of this._hookIds) {
+      try {
+        H.off(name, hookId);
+      } catch (_) {}
+    }
+    this._hookIds.length = 0;
+  }
 
   _activateFloor(floorIndex) {
     const st = this._floorStates.get(floorIndex);

@@ -5480,16 +5480,19 @@ export class WeatherParticles {
 
     // --- ASH EMBERS ---
     // Small percentage of glowing embers that cool from red -> orange -> grey.
+    // Match fire ember path: vertex colour carries HDR-ish intensity; disable tone
+    // mapping so bloom can pick up hot highlights (see FireEffectV2 ember material).
     const ashEmberMaterial = new THREE.MeshBasicMaterial({
       map: this.ashTexture,
       transparent: true,
       depthWrite: false,
       depthTest: false,
       blending: THREE.AdditiveBlending,
-      color: 0xff6a2a,
+      color: 0xffffff,
       opacity: 1.0,
       side: THREE.DoubleSide
     });
+    ashEmberMaterial.toneMapped = false;
 
     this._ashEmberMaterial = ashEmberMaterial;
     this._patchRoofMaskMaterial(this._ashEmberMaterial);
@@ -5551,6 +5554,7 @@ export class WeatherParticles {
         if (batch.material) {
           this._ashEmberBatchMaterial = batch.material;
           this._ashEmberBatchMaterial.side = THREE.DoubleSide;
+          this._ashEmberBatchMaterial.toneMapped = false;
           this._patchRoofMaskMaterial(this._ashEmberBatchMaterial);
         }
       }
@@ -6539,6 +6543,10 @@ export class WeatherParticles {
         mat.needsUpdate = true;
         if (mat.userData) mat.userData._msRoofMaskPatchedFs = mat.fragmentShader;
       }
+    }
+    if (cacheProp === '_ashEmberBatchMaterial' && mat && mat.toneMapped !== false) {
+      mat.toneMapped = false;
+      mat.needsUpdate = true;
     }
     return mat;
   }
@@ -8858,25 +8866,37 @@ export class WeatherParticles {
         this.ashEmberSystem.startSpeed.b = Math.max(emberSpeedMin, emberSpeedMax);
       }
 
-      const emberBrightness = (ashTuning.emberBrightness ?? 5) * darknessBrightnessScale;
-      const clampedEmberB = THREE ? THREE.MathUtils.clamp(emberBrightness, 0.0, 5.0) : emberBrightness;
-      const emberAlphaScale = clampedEmberB / 5.0;
-      const emberMinAlpha = (ashTuning.emberOpacityStartMin ?? 0.87) * emberAlphaScale;
-      const emberMaxAlpha = (ashTuning.emberOpacityStartMax ?? 0.94) * emberAlphaScale;
+      // HDR-style intensity: scale RGB by ember brightness (like fire emberEmission ×
+      // colour), keep opacity driven by the ember opacity sliders — not by folding
+      // brightness into alpha (which capped hot embers to LDR and killed bloom).
+      const emberBrightRaw = (Number(ashTuning.emberBrightness) || 0) * darknessBrightnessScale;
+      const rgbHdr = THREE
+        ? THREE.MathUtils.clamp(emberBrightRaw * 0.55, 0.0, 14.0)
+        : Math.max(0, Math.min(14, emberBrightRaw * 0.55));
+      const emberMinAlpha = ashTuning.emberOpacityStartMin ?? 0.87;
+      const emberMaxAlpha = ashTuning.emberOpacityStartMax ?? 0.94;
 
       if (this.ashEmberSystem.startColor && this.ashEmberSystem.startColor.a && this.ashEmberSystem.startColor.b) {
         const emberStart = ashTuning.emberColorStart ?? { r: 1.0, g: 0.25, b: 0.0 };
         const emberEnd = ashTuning.emberColorEnd ?? { r: 1.0, g: 0.25, b: 0.0 };
-        this.ashEmberSystem.startColor.a.set(emberStart.r, emberStart.g, emberStart.b, emberMinAlpha);
-        this.ashEmberSystem.startColor.b.set(emberEnd.r, emberEnd.g, emberEnd.b, emberMaxAlpha);
+        this.ashEmberSystem.startColor.a.set(
+          emberStart.r * rgbHdr, emberStart.g * rgbHdr, emberStart.b * rgbHdr, emberMinAlpha
+        );
+        this.ashEmberSystem.startColor.b.set(
+          emberEnd.r * rgbHdr, emberEnd.g * rgbHdr, emberEnd.b * rgbHdr, emberMaxAlpha
+        );
       }
 
       if (this._ashEmberColorOverLife?.color?.a && this._ashEmberColorOverLife.color?.b) {
         const emberStart = ashTuning.emberColorStart ?? { r: 1.0, g: 0.25, b: 0.0 };
         const emberEnd = ashTuning.emberColorEnd ?? { r: 1.0, g: 0.25, b: 0.0 };
         const emberEndAlpha = Math.max(0.0, ashTuning.emberOpacityEnd ?? 0.83);
-        this._ashEmberColorOverLife.color.a.set(emberStart.r, emberStart.g, emberStart.b, emberMinAlpha);
-        this._ashEmberColorOverLife.color.b.set(emberEnd.r, emberEnd.g, emberEnd.b, emberEndAlpha);
+        this._ashEmberColorOverLife.color.a.set(
+          emberStart.r * rgbHdr, emberStart.g * rgbHdr, emberStart.b * rgbHdr, emberMinAlpha
+        );
+        this._ashEmberColorOverLife.color.b.set(
+          emberEnd.r * rgbHdr, emberEnd.g * rgbHdr, emberEnd.b * rgbHdr, emberEndAlpha
+        );
       }
 
       if (this._ashEmberCurl && this._ashEmberCurlBaseStrength) {

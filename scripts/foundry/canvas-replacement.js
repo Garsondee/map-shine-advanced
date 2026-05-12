@@ -74,6 +74,7 @@ import { InvertEffectV2 } from '../compositor-v2/effects/InvertEffectV2.js';
 import { SepiaEffectV2 } from '../compositor-v2/effects/SepiaEffectV2.js';
 import { LensEffectV2 } from '../compositor-v2/effects/LensEffectV2.js';
 import { FloorDepthBlurEffect } from '../compositor-v2/effects/FloorDepthBlurEffect.js';
+import { AshDisturbanceEffectV2 } from '../compositor-v2/effects/AshDisturbanceEffectV2.js';
 import { InteractionManager } from '../scene/interaction-manager.js';
 import { PixiContentLayerBridge } from './pixi-content-layer-bridge.js';
 import { GridRenderer } from '../scene/grid-renderer.js';
@@ -7418,6 +7419,11 @@ async function createThreeCanvas(scene, createOptions = {}) {
         }, 'v2.registerFireUI', Severity.DEGRADED);
 
         safeCall(() => {
+          uiManager.registerEffect('ash-disturbance', 'Ash Disturbance',
+            AshDisturbanceEffectV2.getControlSchema(), _makeV2Callback('_ashDisturbanceEffect'), 'particle');
+        }, 'v2.registerAshDisturbanceUI', Severity.DEGRADED);
+
+        safeCall(() => {
           uiManager.registerEffect('dust', 'Dust Motes',
             DustEffectV2.getControlSchema(), _makeV2Callback('_dustEffect'), 'particle');
         }, 'v2.registerDustUI', Severity.DEGRADED);
@@ -7578,7 +7584,7 @@ async function createThreeCanvas(scene, createOptions = {}) {
               emberOpacityEnd: { label: 'Ember Opacity End', type: 'slider', default: ashTuning.emberOpacityEnd ?? 0.83, min: 0.0, max: 1.0, step: 0.01 },
               emberColorStart: { type: 'color', label: 'Ember Color Start', default: ashTuning.emberColorStart ?? { r: 1.0, g: 0.25, b: 0.0 } },
               emberColorEnd: { type: 'color', label: 'Ember Color End', default: ashTuning.emberColorEnd ?? { r: 1.0, g: 0.25, b: 0.0 } },
-              emberBrightness: { label: 'Ember Brightness', type: 'slider', default: ashTuning.emberBrightness ?? 5, min: 0.0, max: 5.0, step: 0.05 },
+              emberBrightness: { label: 'Ember Brightness (HDR)', type: 'slider', default: ashTuning.emberBrightness ?? 5, min: 0.0, max: 12.0, step: 0.05 },
               emberGravityScale: { label: 'Ember Gravity Scale', type: 'slider', default: ashTuning.emberGravityScale ?? 0, min: 0.0, max: 3.0, step: 0.05 },
               emberWindInfluence: { label: 'Ember Wind Influence', type: 'slider', default: ashTuning.emberWindInfluence ?? 0.45, min: 0.0, max: 4.0, step: 0.05 },
               emberCurlStrength: { label: 'Ember Curl Strength', type: 'slider', default: ashTuning.emberCurlStrength ?? 3, min: 0.0, max: 3.0, step: 0.05 }

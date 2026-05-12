@@ -27,6 +27,7 @@ import {
   collectSilhouetteEdgePixels,
   pickEvenlyPerComponentEdges
 } from './RoofDripEdgeSampling.js';
+import { WorldVolumeKillBehavior } from './world-volume-kill-behavior.js';
 
 const log = createLogger('WeatherParticles');
 const MAX_SPLASHES = 5000;
@@ -1094,82 +1095,6 @@ class RoofEdgeDripEmitter {
   update(system, delta) { /* no-op */ }
 }
 
-// Behavior: kill particles once they leave the world volume.
-//
-// Quarks runs all behaviors on the CPU each frame. Particles are removed
-// from the system when `particle.died` becomes true, which in turn is
-// driven by `particle.age >= particle.life` in the core update loop.
-//
-// This behavior therefore:
-// 1. Converts the particle position into WORLD space (using emitter.matrixWorld)
-//    so the test matches Foundry's scene rectangle.
-// 2. Compares that world position against a world-space AABB.
-// 3. Forces `age >= life` when a particle exits the box so Quarks culls it
-//    immediately on the next core update.
-//
-// The world-space AABB itself is defined once in _initSystems from
-// canvas.dimensions: [sceneX, sceneY, sceneWidth, sceneHeight] in X/Y and
-// fixed 0..7500 in Z, matching the "scene volume" we treat as valid world.
-// Any particle outside that 3D box is considered out-of-world and safe to cull.
-class WorldVolumeKillBehavior {
-  constructor(min, max) {
-    this.type = 'WorldVolumeKill';
-    this.enabled = true;
-    this.min = min.clone();
-    this.max = max.clone();
-    // PERFORMANCE FIX: Reuse a single Vector3 for world-space transforms
-    // instead of allocating a new one per particle per frame.
-    // This eliminates massive GC pressure that caused pan/zoom hitches.
-    this._tempVec = new window.THREE.Vector3();
-  }
-
-  initialize(particle, system) { /* no-op */ }
-
-  update(particle, delta, system) {
-    if (this.enabled === false) return;
-    const p = particle.position;
-    if (!p) return;
-
-    // Quarks: worldSpace=false → particle.position is emitter-local; worldSpace=true → world space
-    // (see ParticleSystem.spawn when worldSpace applies emitter.matrixWorld once).
-    let wx = p.x;
-    let wy = p.y;
-    let wz = p.z;
-
-    if (system?.worldSpace === true) {
-      // Already world space — do not multiply by matrixWorld again.
-    } else if (system && system.emitter && system.emitter.matrixWorld) {
-      this._tempVec.set(p.x, p.y, p.z);
-      this._tempVec.applyMatrix4(system.emitter.matrixWorld);
-      wx = this._tempVec.x;
-      wy = this._tempVec.y;
-      wz = this._tempVec.z;
-    }
-
-    if (
-      wx < this.min.x || wx > this.max.x ||
-      wy < this.min.y || wy > this.max.y ||
-      wz < this.min.z || wz > this.max.z
-    ) {
-      // Mark particle as dead by forcing its age beyond lifetime.
-      if (typeof particle.life === 'number') {
-        particle.age = particle.life;
-      } else {
-        // Fallback: very large age so any age>=life check passes.
-        particle.age = 1e9;
-      }
-    }
-  }
-
-  frameUpdate(delta) { /* no-op */ }
-
-  clone() {
-    return new WorldVolumeKillBehavior(this.min, this.max);
-  }
-
-  reset() { /* no-op */ }
-}
-
 class FoamFleckBehavior {
   constructor() {
     this.type = 'FoamFleck';
@@ -2092,12 +2017,15 @@ export class WeatherParticles {
     /** @type {number} */
     this._ashEmberCurlBaseTimeScale = 1;
 
-    // Ash clustering (uneven distribution)
-    this._ashClusterTimer = 0.0;
-    this._ashClusterCenter = { x: 0, y: 0 };
-    this._ashClusterRadius = 0.0;
-    this._ashBaseEmitterW = null;
-    this._ashBaseEmitterH = null;
+    // Legacy ash spatial-cluster fields removed; emission unevenness is now
+    // driven by WeatherController.getAshEmissionEnvelope() (see ash system update).
+
+    /** @type {WorldVolumeKillBehavior|null} Ash weather kill box (XY follows camera view when available). */
+    this._ashWeatherKillBehavior = null;
+    /** @type {import('three').Vector3|null} Full-scene kill min for ash fail-open when camera bounds unavailable. */
+    this._ashKillFullMin = null;
+    /** @type {import('three').Vector3|null} */
+    this._ashKillFullMax = null;
 
     /** @type {THREE.ShaderMaterial|null} quarks batch material for rain */
     this._rainBatchMaterial = null;
@@ -4726,6 +4654,11 @@ export class WeatherParticles {
     const snowVolumeMin = new THREE.Vector3(sceneX, sceneYWorld, groundZ - 100);
     const snowKillBehavior = new WorldVolumeKillBehavior(snowVolumeMin, volumeMax);
 
+    const ashWeatherKillBehavior = new WorldVolumeKillBehavior(snowVolumeMin, volumeMax);
+    this._ashWeatherKillBehavior = ashWeatherKillBehavior;
+    this._ashKillFullMin = snowVolumeMin.clone();
+    this._ashKillFullMax = volumeMax.clone();
+
     const roofDripVolumeMin = new THREE.Vector3(sceneX, sceneYWorld, groundZ - ROOF_DRIP_KILL_Z_MARGIN);
     const roofDripKillBehavior = new WorldVolumeKillBehavior(roofDripVolumeMin, volumeMax);
     this._roofDripKillBehavior = roofDripKillBehavior;
@@ -5482,7 +5415,7 @@ export class WeatherParticles {
         ashColorOverLife,
         new SnowFloorBehavior(), // Reuse floor behavior
         new RainFadeInBehavior(),
-        snowKillBehavior // Reuse kill behavior
+        ashWeatherKillBehavior
       ],
     });
 
@@ -5491,10 +5424,6 @@ export class WeatherParticles {
 
     if (this.scene) this.scene.add(this.ashSystem.emitter);
     this.batchRenderer.addSystem(this.ashSystem);
-
-    // Cache base emitter dimensions for clustering.
-    this._ashBaseEmitterW = sceneW;
-    this._ashBaseEmitterH = sceneH;
 
     // --- ASH EMBERS ---
     // Small percentage of glowing embers that cool from red -> orange -> grey.
@@ -5556,7 +5485,7 @@ export class WeatherParticles {
         ashEmberColorOverLife,
         new SnowFloorBehavior(),
         new RainFadeInBehavior(),
-        snowKillBehavior
+        ashWeatherKillBehavior
       ],
     });
 
@@ -6809,6 +6738,34 @@ export class WeatherParticles {
       this._viewSceneW = sceneW;
       this._viewSceneH = sceneH;
 
+      // Ash weather: tighter kill AABB in XY than the emitter (1.2×) so flakes drift
+      // off-screen are culled without affecting snow (separate WorldVolumeKillBehavior).
+      if (this._ashWeatherKillBehavior && this._ashKillFullMin && this._ashKillFullMax) {
+        const KILL_REL_TO_EMITTER = 1.45 / 1.2;
+        const ew = Math.max(1, maxX - minX);
+        const eh = Math.max(1, maxY - minY);
+        const ecx = (minX + maxX) * 0.5;
+        const ecy = (minY + maxY) * 0.5;
+        const kw = ew * KILL_REL_TO_EMITTER;
+        const kh = eh * KILL_REL_TO_EMITTER;
+        let kMinX = ecx - kw * 0.5;
+        let kMaxX = ecx + kw * 0.5;
+        let kMinY = ecy - kh * 0.5;
+        let kMaxY = ecy + kh * 0.5;
+        if (sceneW > 0 && sceneH > 0) {
+          const sMinX = sceneX;
+          const sMaxX = sceneX + sceneW;
+          const sMinY = sceneY;
+          const sMaxY = sceneY + sceneH;
+          kMinX = Math.max(sMinX, kMinX);
+          kMaxX = Math.min(sMaxX, kMaxX);
+          kMinY = Math.max(sMinY, kMinY);
+          kMaxY = Math.min(sMaxY, kMaxY);
+        }
+        this._ashWeatherKillBehavior.min.set(kMinX, kMinY, this._ashKillFullMin.z);
+        this._ashWeatherKillBehavior.max.set(kMaxX, kMaxY, this._ashKillFullMax.z);
+      }
+
       if (this.rainSystem?.emitter && this.rainSystem.emitterShape) {
         const shape = this.rainSystem.emitterShape;
         if (typeof shape.width === 'number') shape.width = emitW;
@@ -6831,9 +6788,8 @@ export class WeatherParticles {
         this.roofDripSystem.emitter.position.y = emitCY;
       }
 
-      // Ash emitters cover the full scene (same as rain/snow) to avoid visible
-      // hard-edged rectangles. Density variation comes from temporal clusterBoost
-      // on the emission rate, not from shrinking/repositioning the emitter.
+      // Ash / ash ember emitters follow the camera-visible rectangle (same as rain/snow).
+      // Density variation uses temporal clusterBoost on emission, not a static full-map box.
       if (this.ashSystem?.emitter && this.ashSystem.emitterShape) {
         const shape = this.ashSystem.emitterShape;
         if (typeof shape.width === 'number') shape.width = emitW;
@@ -6869,6 +6825,9 @@ export class WeatherParticles {
           this._foamFleckSystem.startSize.b = sizeMax;
         }
       }
+    } else if (this._ashWeatherKillBehavior && this._ashKillFullMin && this._ashKillFullMax) {
+      this._ashWeatherKillBehavior.min.copy(this._ashKillFullMin);
+      this._ashWeatherKillBehavior.max.copy(this._ashKillFullMax);
     }
 
     // Global scene darkness coupling (0 = fully lit, 1 = max darkness).
@@ -7503,9 +7462,13 @@ export class WeatherParticles {
         // Minimal per-frame work: just drive emission by precipitation/intensity.
         // PERFORMANCE: Mutate existing ConstantValue instead of creating new one every frame
         const rainIntensity = baseRainIntensity;
+        // Flurry envelope: 1.0 when precipFlurryVariability=0 (today's behavior).
+        const precipEnvelope = typeof weatherController.getPrecipEmissionEnvelope === 'function'
+          ? weatherController.getPrecipEmissionEnvelope()
+          : 1.0;
         const emission = this.rainSystem.emissionOverTime;
         if (emission && typeof emission.value === 'number') {
-            emission.value = 4000 * rainIntensity;
+            emission.value = 4000 * rainIntensity * precipEnvelope;
         }
 
         // --- EFFICIENT TUNING UPDATES ---
@@ -8651,9 +8614,13 @@ export class WeatherParticles {
 
     if (this.snowSystem) {
         // PERFORMANCE: Mutate existing values instead of creating new objects every frame
+        // Snow shares the precip flurry envelope so flurried rain/snow stay in sync.
+        const snowPrecipEnvelope = typeof weatherController.getPrecipEmissionEnvelope === 'function'
+          ? weatherController.getPrecipEmissionEnvelope()
+          : 1.0;
         const snowEmission = this.snowSystem.emissionOverTime;
         if (snowEmission && typeof snowEmission.value === 'number') {
-            snowEmission.value = 500 * snowIntensity;
+            snowEmission.value = 500 * snowIntensity * snowPrecipEnvelope;
         }
 
         const flakeSize = snowTuning.flakeSize ?? 1.0;
@@ -8733,47 +8700,19 @@ export class WeatherParticles {
         this._ashActivatedLogged = false;
       }
 
-      // Temporal ash intensity variation: every few seconds a random "cluster center"
-      // is chosen. Its distance from the (static, full-scene) emitter center drives
-      // a boost multiplier on emission rate, creating natural density surges and lulls
-      // without moving the emitter or creating visible rectangular edges.
-      if (this._ashClusterTimer <= 0) {
-        const holdMin = ashTuning.clusterHoldMin ?? 1.3;
-        const holdMax = ashTuning.clusterHoldMax ?? 2.3;
-        const holdRange = Math.max(0.1, holdMax - holdMin);
-        this._ashClusterTimer = Math.max(0.1, holdMin + Math.random() * holdRange);
+      // Flurry envelope: sampled from WeatherController each frame at full rate.
+      // At ashFlurryVariability=0 this stays at 1 (steady emission); higher values
+      // produce long lulls near `flurryLullFloor` punctuated by stronger bursts.
+      // Replaces the legacy distance-from-cluster-center boost (which produced
+      // only a global scalar tied to camera position, not real spatial bands).
+      const ashEnvelope = typeof weatherController.getAshEmissionEnvelope === 'function'
+        ? weatherController.getAshEmissionEnvelope()
+        : 1.0;
 
-        const sx = this._sceneBounds?.x ?? 0;
-        const sy = this._sceneBounds?.y ?? 0;
-        const sw = this._sceneBounds?.z ?? 10000;
-        const sh = this._sceneBounds?.w ?? 10000;
-        this._ashClusterCenter.x = sx + Math.random() * sw;
-        this._ashClusterCenter.y = sy + Math.random() * sh;
-
-        const radiusMin = Math.max(10, ashTuning.clusterRadiusMin ?? 1150);
-        const radiusMax = Math.max(radiusMin, ashTuning.clusterRadiusMax ?? 2060);
-        this._ashClusterRadius = radiusMin + Math.random() * (radiusMax - radiusMin);
-      }
-      this._ashClusterTimer -= Math.max(0, safeDt || 0);
-
-      // Modulate ash emission based on distance from cluster center to get uneven bands.
-      let clusterBoost = 1.0;
-      if (this._ashClusterRadius > 0 && this.ashSystem.emitter) {
-        const ex = this.ashSystem.emitter.position.x;
-        const ey = this.ashSystem.emitter.position.y;
-        const dx = ex - this._ashClusterCenter.x;
-        const dy = ey - this._ashClusterCenter.y;
-        const dist = Math.sqrt(dx * dx + dy * dy);
-        const t = 1.0 - Math.min(1.0, dist / this._ashClusterRadius);
-        const boostMin = ashTuning.clusterBoostMin ?? 1.1;
-        const boostMax = ashTuning.clusterBoostMax ?? 2.55;
-        clusterBoost = boostMin + (boostMax - boostMin) * t;
-      }
-      
       const ashEmission = this.ashSystem.emissionOverTime;
       if (ashEmission && typeof ashEmission.value === 'number') {
         const rate = ashTuning.emissionRate ?? 840;
-        ashEmission.value = rate * tunedIntensity * clusterBoost;
+        ashEmission.value = rate * tunedIntensity * ashEnvelope;
       }
 
       // Ash particle size - slightly larger than snow
@@ -8881,10 +8820,14 @@ export class WeatherParticles {
       const intensityScale = ashTuning.intensityScale ?? 0.5;
       const tunedIntensity = Math.max(0.0, ashIntensity * intensityScale);
 
+      // Share the ash flurry envelope so embers track the same surges/lulls.
+      const emberEnvelope = typeof weatherController.getAshEmissionEnvelope === 'function'
+        ? weatherController.getAshEmissionEnvelope()
+        : 1.0;
       const emberEmission = this.ashEmberSystem.emissionOverTime;
       if (emberEmission && typeof emberEmission.value === 'number') {
         const rate = ashTuning.emberEmissionRate ?? 167;
-        emberEmission.value = rate * tunedIntensity;
+        emberEmission.value = rate * tunedIntensity * emberEnvelope;
       }
 
       if (this.ashEmberSystem.startSize && typeof this.ashEmberSystem.startSize.a === 'number') {

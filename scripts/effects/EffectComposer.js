@@ -623,11 +623,9 @@ export class EffectComposer {
     //   - No effect sorting or rendering
     //   - No _renderOverlayToScreen()
     //   - No _renderDepthDebugOverlay()
-    // Updatables DO still run — but only ESSENTIAL ones are registered when V2
-    // is active (CameraFollower, InteractionManager, TileManager, GridRenderer,
-    // DoorMeshManager). Effect-related updatables (WeatherController, DepthPass,
-    // TileMotion, PhysicsRopes, DynamicExposure, DetectionFilter) are gated out
-    // during createThreeCanvas() via the _v2Active flag.
+    // Updatables DO still run — V2 startup registers a smaller set than legacy
+    // V1 (no legacy effect instances). World managers still register here
+    // (tokens, tiles, grid, doors, map points, physics ropes, tile motion, etc.).
     // See docs/planning/V2-MILESTONE-1-ALBEDO-ONLY.md for full rationale.
     const _floorStackEarly = window.MapShine?.floorStack ?? null;
     if (window.MapShine?.__v2StartupTraceEnabled === true && Number(timeInfo?.frameCount ?? 0) <= 8) {

@@ -203,11 +203,6 @@ export class MapPointDrawHandler {
       this.cancel();
     }
 
-    const mapPointsManager = window.MapShine?.mapPointsManager;
-    if (mapPointsManager && !mapPointsManager.showVisualHelpers) {
-      mapPointsManager.setShowVisualHelpers(true);
-    }
-
     this.state.active = true;
     this.state.effectTarget = effectTarget;
     this.state.groupType = groupType;
@@ -432,10 +427,6 @@ export class MapPointDrawHandler {
   startAddPointsToGroup(groupId) {
     const mapPointsManager = window.MapShine?.mapPointsManager;
     if (!mapPointsManager) return;
-
-    if (!mapPointsManager.showVisualHelpers) {
-      mapPointsManager.setShowVisualHelpers(true);
-    }
 
     const group = mapPointsManager.getGroup(groupId);
     if (!group) {

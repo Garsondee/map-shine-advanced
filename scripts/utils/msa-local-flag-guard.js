@@ -14,8 +14,12 @@ export const MSA_SAME_SCENE_REDRAW_PREDICT_MS = 8000;
 export function refreshMsaSameSceneRedrawPredict(ms = MSA_SAME_SCENE_REDRAW_PREDICT_MS) {
   try {
     if (!window.MapShine) window.MapShine = {};
-    const sid = typeof canvas !== 'undefined' && canvas?.scene?.id;
-    if (sid == null) return;
+    let sid = typeof canvas !== 'undefined' && canvas?.scene?.id != null ? String(canvas.scene.id) : '';
+    if (!sid) {
+      const v = game?.scenes?.viewed?.id ?? game?.scenes?.active?.id ?? game?.scenes?.current?.id;
+      if (v != null) sid = String(v);
+    }
+    if (!sid) return;
     window.MapShine.__msaPredictSameSceneRedrawUntil = performance.now() + Math.max(500, ms);
     window.MapShine.__msaPredictSameSceneRedrawSceneId = String(sid);
   } catch (_) {}
@@ -26,14 +30,17 @@ export function refreshMsaSameSceneRedrawPredict(ms = MSA_SAME_SCENE_REDRAW_PRED
  * `updateScene` can skip re-applying controlState / weather-snapshot when Foundry
  * omits userId on the hook or the echo would stack applyTimeOfDay / darkness updates.
  *
- * @param {number} [ms=2200]
+ * @param {number} [ms=2200] - How long `_msaLocalFlagWriteGuardUntil` stays armed.
+ * @param {number} [predictMs] - Optional TTL for same-scene redraw prediction (defaults to
+ *   {@link MSA_SAME_SCENE_REDRAW_PREDICT_MS}). Use a longer value when awaiting multiple
+ *   sequential `scene.setFlag` calls (e.g. map point saves).
  */
-export function extendMsaLocalFlagWriteGuard(ms = 2200) {
+export function extendMsaLocalFlagWriteGuard(ms = 2200, predictMs) {
   try {
     if (window.MapShine) {
       window.MapShine._msaLocalFlagWriteGuardUntil = performance.now() + Math.max(500, ms);
     }
   } catch (_) {
   }
-  refreshMsaSameSceneRedrawPredict();
+  refreshMsaSameSceneRedrawPredict(predictMs ?? MSA_SAME_SCENE_REDRAW_PREDICT_MS);
 }

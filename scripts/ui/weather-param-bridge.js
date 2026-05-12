@@ -97,6 +97,28 @@ export function hydrateMainWeatherTweakpaneFromController(wc, uiManager) {
     refresh('dynamicPlanDurationMinutes');
   }
 
+  // Flurry controls — particle emission envelopes (no transition/wetness side-effects).
+  if (has('precipFlurryVariability') && Number.isFinite(Number(wc.precipFlurryVariability))) {
+    eff.params.precipFlurryVariability = clamp01(wc.precipFlurryVariability);
+    refresh('precipFlurryVariability');
+  }
+  if (has('ashFlurryVariability') && Number.isFinite(Number(wc.ashFlurryVariability))) {
+    eff.params.ashFlurryVariability = clamp01(wc.ashFlurryVariability);
+    refresh('ashFlurryVariability');
+  }
+  if (has('flurryTimeScale') && Number.isFinite(Number(wc.flurryTimeScale))) {
+    eff.params.flurryTimeScale = Number(wc.flurryTimeScale);
+    refresh('flurryTimeScale');
+  }
+  if (has('flurryLullFloor') && Number.isFinite(Number(wc.flurryLullFloor))) {
+    eff.params.flurryLullFloor = Number(wc.flurryLullFloor);
+    refresh('flurryLullFloor');
+  }
+  if (has('flurryBurstPeakMax') && Number.isFinite(Number(wc.flurryBurstPeakMax))) {
+    eff.params.flurryBurstPeakMax = Number(wc.flurryBurstPeakMax);
+    refresh('flurryBurstPeakMax');
+  }
+
   for (const paramId of MANUAL_WEATHER_PARAM_IDS) {
     if (!has(paramId)) continue;
     let v;

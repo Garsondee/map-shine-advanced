@@ -31,6 +31,7 @@ import {
   Bezier,
   CurlNoiseField,
 } from '../../libs/three.quarks.module.js';
+import { WorldVolumeKillBehavior } from '../../particles/world-volume-kill-behavior.js';
 
 const log = createLogger('AshDisturbanceV2');
 
@@ -196,6 +197,13 @@ export class AshDisturbanceEffectV2 {
 
     this._loggedFirstBurst = false;
 
+    /** @type {WorldVolumeKillBehavior|null} Shared kill box for all burst systems (XY tracks camera when available). */
+    this._disturbanceKillBehavior = null;
+    /** @type {import('three').Vector3|null} Full-scene kill bounds (fail-open when camera rect unavailable). */
+    this._disturbKillFullMin = null;
+    /** @type {import('three').Vector3|null} */
+    this._disturbKillFullMax = null;
+
     this.params = {
       enabled: false,
       burstRate: 270,
@@ -264,6 +272,13 @@ export class AshDisturbanceEffectV2 {
 
     this._tempVec2 = new THREE.Vector2();
 
+    this._disturbKillFullMin = new THREE.Vector3(0, 0, 0);
+    this._disturbKillFullMax = new THREE.Vector3(1, 1, 1);
+    this._disturbanceKillBehavior = new WorldVolumeKillBehavior(
+      this._disturbKillFullMin,
+      this._disturbKillFullMax
+    );
+
     this._batchRenderer = new BatchedRenderer();
     // Must render above tiles and specular overlays.
     this._batchRenderer.renderOrder = 200050;
@@ -330,6 +345,12 @@ export class AshDisturbanceEffectV2 {
     if (!THREE) {
       popPhase('abort: THREE missing');
       return;
+    }
+
+    this._refreshDisturbanceKillSceneBounds();
+    if (this._disturbanceKillBehavior && this._disturbKillFullMin && this._disturbKillFullMax) {
+      this._disturbanceKillBehavior.min.copy(this._disturbKillFullMin);
+      this._disturbanceKillBehavior.max.copy(this._disturbKillFullMax);
     }
 
     const floors = window.MapShine?.floorStack?.getFloors?.() ?? [];
@@ -510,6 +531,8 @@ export class AshDisturbanceEffectV2 {
     if (!this.enabled) return;
     if (!this._batchRenderer) return;
 
+    this._updateDisturbanceViewKillBounds();
+
     const weather = window.MapShine?.weatherController?.getCurrentState?.() ?? {};
     const ashBoost = Math.max(0, Math.min(1, Number(weather.ashIntensity) || 0));
 
@@ -571,6 +594,14 @@ export class AshDisturbanceEffectV2 {
    */
   triggerBurstAt(worldX, worldY) {
     if (!this.enabled) return;
+
+    const burstView = this._computeCameraViewWorldRect(1.65);
+    if (burstView) {
+      if (worldX < burstView.minX || worldX > burstView.maxX
+        || worldY < burstView.minY || worldY > burstView.maxY) {
+        return;
+      }
+    }
 
     const weather = window.MapShine?.weatherController?.getCurrentState?.() ?? {};
     const ashBoost = Math.max(0, Math.min(1, Number(weather.ashIntensity) || 0));
@@ -1025,6 +1056,7 @@ export class AshDisturbanceEffectV2 {
         behaviors: [
           windForce,
           curl,
+          this._disturbanceKillBehavior,
           colorOverLife,
           sizeOverLife,
         ]
@@ -1050,6 +1082,141 @@ export class AshDisturbanceEffectV2 {
     if (this._activeFloors.has(floorIndex)) {
       this._activateFloor(floorIndex);
     }
+  }
+
+  /**
+   * Full-scene world AABB for ash disturbance kill fail-open (matches WeatherParticles scene volume).
+   * @private
+   */
+  _refreshDisturbanceKillSceneBounds() {
+    const THREE = window.THREE;
+    if (!THREE || !this._disturbKillFullMin || !this._disturbKillFullMax) return;
+    const d = canvas?.dimensions;
+    if (!d) return;
+    const sceneW = d.sceneWidth ?? d.width ?? 0;
+    const sceneH = d.sceneHeight ?? d.height ?? 0;
+    const sceneX = d.sceneX ?? 0;
+    const sceneY = d.sceneY ?? 0;
+    const totalH = d.height ?? 0;
+    const sceneYWorld = totalH > 0 ? totalH - (sceneY + sceneH) : sceneY;
+    const sc = window.MapShine?.sceneComposer;
+    const groundZ = (sc && typeof sc.groundZ === 'number') ? sc.groundZ : GROUND_Z;
+    const worldTopZ = (sc && typeof sc.worldTopZ === 'number') ? sc.worldTopZ : (groundZ + 7500);
+    const zSlack = 100;
+    this._disturbKillFullMin.set(sceneX, sceneYWorld, groundZ - zSlack);
+    this._disturbKillFullMax.set(sceneX + sceneW, sceneYWorld + sceneH, worldTopZ);
+  }
+
+  /**
+   * Camera-visible world XY rectangle (Foundry Y-up), clamped to scene rect.
+   * @param {number} marginScale - e.g. 1.2 matches WeatherParticles Phase 1 emitter margin.
+   * @returns {{ minX: number, maxX: number, minY: number, maxY: number, sceneX: number, sceneY: number, sceneW: number, sceneH: number }|null}
+   * @private
+   */
+  _computeCameraViewWorldRect(marginScale) {
+    const THREE = window.THREE;
+    const sceneComposer = window.MapShine?.sceneComposer;
+    const mainCamera = sceneComposer?.camera;
+    const cv = typeof canvas !== 'undefined' ? canvas : null;
+    if (!THREE || !sceneComposer || !mainCamera || !cv) return null;
+
+    const zoom = Number.isFinite(sceneComposer.currentZoom)
+      ? sceneComposer.currentZoom
+      : (Number.isFinite(sceneComposer.zoom) ? sceneComposer.zoom : 1.0);
+
+    const viewportWidth = sceneComposer.baseViewportWidth || window.innerWidth;
+    const viewportHeight = sceneComposer.baseViewportHeight || window.innerHeight;
+    const visibleW = viewportWidth / Math.max(1e-6, zoom);
+    const visibleH = viewportHeight / Math.max(1e-6, zoom);
+
+    const scale = Number.isFinite(marginScale) && marginScale > 0 ? marginScale : 1.2;
+    const desiredW = visibleW * scale;
+    const desiredH = visibleH * scale;
+
+    let sceneX = 0;
+    let sceneY = 0;
+    let sceneW = 0;
+    let sceneH = 0;
+    try {
+      const d = cv.dimensions;
+      const rect = d?.sceneRect;
+      const totalH = d?.height ?? 0;
+      if (rect && typeof rect.x === 'number') {
+        sceneX = rect.x;
+        sceneW = rect.width;
+        sceneH = rect.height;
+        sceneY = (totalH > 0) ? (totalH - (rect.y + rect.height)) : rect.y;
+      } else if (d) {
+        sceneX = d.sceneX ?? 0;
+        sceneW = d.sceneWidth ?? d.width ?? 0;
+        sceneH = d.sceneHeight ?? d.height ?? 0;
+        sceneY = (totalH > 0) ? (totalH - ((d.sceneY ?? 0) + sceneH)) : (d.sceneY ?? 0);
+      }
+    } catch (_) {
+      return null;
+    }
+
+    const camX = mainCamera.position.x;
+    const camY = mainCamera.position.y;
+
+    let minX = camX - desiredW / 2;
+    let maxX = camX + desiredW / 2;
+    let minY = camY - desiredH / 2;
+    let maxY = camY + desiredH / 2;
+
+    if (sceneW > 0 && sceneH > 0) {
+      const sMinX = sceneX;
+      const sMaxX = sceneX + sceneW;
+      const sMinY = sceneY;
+      const sMaxY = sceneY + sceneH;
+      minX = Math.max(sMinX, minX);
+      maxX = Math.min(sMaxX, maxX);
+      minY = Math.max(sMinY, minY);
+      maxY = Math.min(sMaxY, maxY);
+    }
+
+    if (maxX - minX < 1 || maxY - minY < 1) return null;
+    return { minX, maxX, minY, maxY, sceneX, sceneY, sceneW, sceneH };
+  }
+
+  /**
+   * @private
+   */
+  _updateDisturbanceViewKillBounds() {
+    if (!this._disturbanceKillBehavior || !this._disturbKillFullMin || !this._disturbKillFullMax) return;
+
+    const base = this._computeCameraViewWorldRect(1.2);
+    if (!base) {
+      this._disturbanceKillBehavior.min.copy(this._disturbKillFullMin);
+      this._disturbanceKillBehavior.max.copy(this._disturbKillFullMax);
+      return;
+    }
+
+    const KILL_REL = 1.45 / 1.2;
+    const ew = Math.max(1, base.maxX - base.minX);
+    const eh = Math.max(1, base.maxY - base.minY);
+    const ecx = (base.minX + base.maxX) * 0.5;
+    const ecy = (base.minY + base.maxY) * 0.5;
+    const kw = ew * KILL_REL;
+    const kh = eh * KILL_REL;
+    let kMinX = ecx - kw * 0.5;
+    let kMaxX = ecx + kw * 0.5;
+    let kMinY = ecy - kh * 0.5;
+    let kMaxY = ecy + kh * 0.5;
+
+    if (base.sceneW > 0 && base.sceneH > 0) {
+      const sMinX = base.sceneX;
+      const sMaxX = base.sceneX + base.sceneW;
+      const sMinY = base.sceneY;
+      const sMaxY = base.sceneY + base.sceneH;
+      kMinX = Math.max(sMinX, kMinX);
+      kMaxX = Math.min(sMaxX, kMaxX);
+      kMinY = Math.max(sMinY, kMinY);
+      kMaxY = Math.min(sMaxY, kMaxY);
+    }
+
+    this._disturbanceKillBehavior.min.set(kMinX, kMinY, this._disturbKillFullMin.z);
+    this._disturbanceKillBehavior.max.set(kMaxX, kMaxY, this._disturbKillFullMax.z);
   }
 
   _extractBasePath(src) {

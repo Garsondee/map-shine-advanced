@@ -5,6 +5,7 @@
  */
 import { createLogger } from '../core/log.js';
 import Coordinates from '../utils/coordinates.js';
+import { extendMsaLocalFlagWriteGuard } from '../utils/msa-local-flag-guard.js';
 
 const log = createLogger('MapPointsManager');
 
@@ -126,7 +127,8 @@ export class MapPointsManager {
     this.initialized = false;
     
     /** @type {boolean} */
-    this.showVisualHelpers = true;
+    /** When true, on-map handles/lines for existing groups are shown (Manage Map Points → "Show visual helpers"). */
+    this.showVisualHelpers = false;
     
     /** @type {Function[]} */
     this.changeListeners = [];
@@ -138,7 +140,12 @@ export class MapPointsManager {
     this._hookRegistrations = [];
 
     this._idCounter = 0;
-    
+
+    /** While > now, `updateScene` hook skips loadFromScene (avoids double-reload from our own setFlag echoes). */
+    this._suppressLoadFromSceneUntil = 0;
+    /** @type {ReturnType<typeof setTimeout>|null} */
+    this._suppressLoadFromSceneTimer = null;
+
     log.debug('MapPointsManager created');
   }
 
@@ -516,16 +523,88 @@ export class MapPointsManager {
       groupsData[id] = { ...group, id };
     }
 
+    // Foundry merges object flag updates instead of replacing the whole object (see wiki
+    // "Some details about setFlag and objects"). Omitting a group id from `groupsData`
+    // would NOT remove it from persisted data — use `-=groupId` so deletions stick.
+    let prevRaw = null;
     try {
-      await scene.unsetFlag(MODULE_ID, 'mapPointGroups');
-      await scene.setFlag(MODULE_ID, 'mapPointGroups', groupsData);
-      await scene.setFlag(MODULE_ID, 'mapPointGroupsInitialized', true);
+      prevRaw = scene.getFlag(MODULE_ID, 'mapPointGroups');
+    } catch (_) {
+      prevRaw = null;
+    }
+    const prevIds = (prevRaw && typeof prevRaw === 'object' && !Array.isArray(prevRaw))
+      ? Object.keys(prevRaw)
+      : [];
+    const nextIds = new Set(Object.keys(groupsData));
+    const flagPayload = { ...groupsData };
+    for (const id of prevIds) {
+      if (!nextIds.has(id)) flagPayload[`-=${id}`] = null;
+    }
+
+    try {
+      // Same-scene flag writes redraw Foundry's canvas; arm the guard used by
+      // canvas-replacement tearDown so this does not show the scene-switch loading overlay.
+      //
+      // Do NOT unsetFlag(mapPointGroups) before setFlag: that emits an intermediate
+      // updateScene with an empty flag; loadFromScene() then clears this.groups while the
+      // save is still in flight (async hook), wiping in-memory state and forcing a full
+      // effect/canvas rebuild. Use `flagPayload` (includes `-=id` for removals) instead.
+      //
+      // Coalesce both flag writes into one `scene.update` so Foundry emits a single
+      // updateScene -> (at most) single canvas redraw cycle. Two separate setFlag calls
+      // produced two back-to-back tearDown/canvasReady pairs; each had to be caught by
+      // the same-scene-redraw predictor, and any miss between them dropped us into a
+      // full Map Shine re-init.
+      if (this._suppressLoadFromSceneTimer) {
+        try { clearTimeout(this._suppressLoadFromSceneTimer); } catch (_) {}
+        this._suppressLoadFromSceneTimer = null;
+      }
+      this._suppressLoadFromSceneUntil = performance.now() + 15000;
+
+      // Strong, scene-id-independent guard. canvas-replacement consults this in every
+      // lifecycle decision (`_tearDownWrapper`, `onCanvasTearDown`, `onCanvasReady`,
+      // `_drawWrapper`) so even when scene-id resolution races (v12 `canvas.scene`
+      // briefly null, `game.scenes.current` undefined, predict-TTL armed for the wrong
+      // sid), the runtime is preserved and the staged "Loading…" overlay never shows.
+      // The `_msaSameSceneRedrawPredicted` helper requires a sid match; this one does
+      // not. 12s covers debounced save + server RTT + delayed `canvas.draw` → `tearDown`.
+      try {
+        if (typeof window !== 'undefined') {
+          if (!window.MapShine) window.MapShine = {};
+          window.MapShine.__msaMapPointWriteUntil = performance.now() + 12000;
+          window.MapShine.__msaMapPointWriteStarted = performance.now();
+        }
+      } catch (_) {}
+      try {
+        // User-visible diagnostic. Map-point save is the canonical "must not redraw"
+        // scenario; if anything in the lifecycle subsequently shows the loading
+        // overlay or destroys the Three.js runtime, console output below pinpoints
+        // exactly which path fired so we can fix it without enabling verbose logs.
+        // eslint-disable-next-line no-console
+        console.warn('[MSA-MAP-POINT-SAVE] starting scene.update — strong guard armed for 12s', {
+          sceneId: scene?.id ?? null,
+          payloadKeys: Object.keys(flagPayload || {}),
+          canvasSceneId: canvas?.scene?.id ?? null,
+          lastResolvedSceneId: window?.MapShine?.__msaLastResolvedSceneId ?? null,
+        });
+      } catch (_) {}
+
+      extendMsaLocalFlagWriteGuard(20000, 20000);
+      await scene.update({
+        [`flags.${MODULE_ID}.mapPointGroups`]: flagPayload,
+        [`flags.${MODULE_ID}.mapPointGroupsInitialized`]: true,
+      });
       log.debug('Map point groups saved to scene');
       return true;
     } catch (e) {
       log.error('Failed to save map point groups to scene:', e);
       ui?.notifications?.error?.('Failed to save map points to the scene. See console for details.');
       return false;
+    } finally {
+      this._suppressLoadFromSceneTimer = setTimeout(() => {
+        this._suppressLoadFromSceneTimer = null;
+        this._suppressLoadFromSceneUntil = 0;
+      }, 2500);
     }
   }
 
@@ -535,12 +614,17 @@ export class MapPointsManager {
    */
   setupHooks() {
     const updateSceneHandler = async (scene, changes) => {
-      if (scene.id !== canvas?.scene?.id) return;
+      const activeId = canvas?.scene?.id ?? game?.scenes?.viewed?.id ?? game?.scenes?.current?.id;
+      if (!activeId || String(scene.id) !== String(activeId)) return;
 
       const currentUpdated = changes.flags?.[MODULE_ID]?.mapPointGroups !== undefined;
       const legacyUpdated = changes.flags?.[LEGACY_MODULE_ID]?.mapPointGroups !== undefined;
 
       if (currentUpdated || legacyUpdated) {
+        if (performance.now() < (this._suppressLoadFromSceneUntil || 0)) {
+          log.debug('Map point groups: skipping loadFromScene during local persistence');
+          return;
+        }
         log.debug('Map point groups updated via scene flag');
         await this.loadFromScene();
         this.notifyListeners();
@@ -1442,6 +1526,12 @@ export class MapPointsManager {
    * Dispose of all resources
    */
   dispose() {
+    if (this._suppressLoadFromSceneTimer) {
+      try { clearTimeout(this._suppressLoadFromSceneTimer); } catch (_) {}
+      this._suppressLoadFromSceneTimer = null;
+    }
+    this._suppressLoadFromSceneUntil = 0;
+
     for (const { hook, fn } of this._hookRegistrations) {
       try {
         Hooks.off(hook, fn);

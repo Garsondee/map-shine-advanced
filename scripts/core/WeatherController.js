@@ -126,6 +126,28 @@ export class WeatherController {
     this.variability = 0.7; // Tuned variability
     this.noiseOffset = 0;
 
+    // Flurry emission envelopes (particle-only). One channel for ash, one shared
+    // between rain and snow. At variability=0 the displayed envelope stays at 1
+    // (today's behavior). Higher values produce semi-Markov bursts: long lulls
+    // near `lullFloor`, abrupt ramp-ups to a random peak in [1, burstPeakMax],
+    // then ramp-down. Envelopes are smoothed each frame to avoid hard steps in
+    // Quarks emissionOverTime. Stepped in `update()` with full-rate dt so they
+    // are independent of WeatherParticles' control-rate throttle.
+    /** Master 0..1 for ash flurry strength. 0 = steady, 1 = long quiet + strong bursts. */
+    this.ashFlurryVariability = 0.0;
+    /** Master 0..1 for rain/snow flurry strength. */
+    this.precipFlurryVariability = 0.0;
+    /** Global multiplier on sampled lull/burst durations (both channels). */
+    this.flurryTimeScale = 1.0;
+    /** Minimum emission fraction during lulls (0..0.5). */
+    this.flurryLullFloor = 0.05;
+    /** Cap for random burst peaks (1..6). */
+    this.flurryBurstPeakMax = 3.0;
+    /** @type {ReturnType<WeatherController.prototype._createFlurryState>} */
+    this._ashFlurryState = this._createFlurryState();
+    /** @type {ReturnType<WeatherController.prototype._createFlurryState>} */
+    this._precipFlurryState = this._createFlurryState();
+
     // Manual preset transition duration (used when selecting a preset)
     this.presetTransitionDurationSeconds = 30.0;
 
@@ -373,12 +395,6 @@ export class WeatherController {
       curlTimeScale: 0.88,
       // Base wind magnitude for falling ash (before windSpeed and windInfluence).
       ashWindBase: 400,
-      clusterHoldMin: 1.3,
-      clusterHoldMax: 2.3,
-      clusterRadiusMin: 1150,
-      clusterRadiusMax: 2060,
-      clusterBoostMin: 1.1,
-      clusterBoostMax: 2.55,
       emberEmissionRate: 167,
       emberSizeMin: 7,
       emberSizeMax: 14,
@@ -847,21 +863,31 @@ export class WeatherController {
     const dt = Math.min(timeInfo.delta, 0.25);
     const elapsed = timeInfo.elapsed;
 
+    const ashFlurryActive = this._clamp01(this.ashFlurryVariability) > 1e-4
+      && (this.targetState.ashIntensity ?? 0) > 0;
+    const precipFlurryActive = this._clamp01(this.precipFlurryVariability) > 1e-4
+      && (this.targetState.precipitation ?? 0) > 0;
+
     // Static fast-path: when weather is idle (no transition, no dynamic, no
-    // variability), snap target→current once and then early-return on
-    // subsequent frames. This avoids per-frame noise, wetness, and output
-    // recalculation when nothing is changing.
+    // variability, no active flurry envelope), snap target→current once and
+    // then early-return on subsequent frames. This avoids per-frame noise,
+    // wetness, and output recalculation when nothing is changing.
     //
     // REGRESSION: `_updateEnvironmentOutputs()` is skipped while `_staticSnapped`.
     // Any external change to inputs that affect sky/fog/day (notably `timeOfDay`
     // via `setTime`, dynamic mode, variability, transitions) MUST set
     // `_staticSnapped = false` or `getEnvironment()` desyncs from shaders.
-    if (!this.isTransitioning && this.dynamicEnabled !== true && this.variability <= 0) {
+    if (!this.isTransitioning
+        && this.dynamicEnabled !== true
+        && this.variability <= 0
+        && !ashFlurryActive
+        && !precipFlurryActive) {
       if (!this._staticSnapped) {
         this._copyState(this.targetState, this.currentState);
         this._syncWindUnits(this.currentState);
         this._updateWetness(dt);
         this._updateEnvironmentOutputs();
+        this._resetFlurryStates();
         this._staticSnapped = true;
       }
       return;
@@ -933,6 +959,20 @@ export class WeatherController {
     if (this.variability > 0) {
       this._applyVariability(elapsed, dt);
     }
+
+    // 2b. Step flurry emission envelopes (particle-only, not serialized).
+    // Uses full-rate dt so timing is independent of WeatherParticles' control
+    // throttle. Inactive channels (variability=0 or zero intensity) decay/
+    // snap to 1.0 inside `_stepFlurryEnvelope`.
+    const ashVar = (this.targetState.ashIntensity ?? 0) > 0
+      ? this._clamp01(this.ashFlurryVariability)
+      : 0.0;
+    this._stepFlurryEnvelope(this._ashFlurryState, ashVar, dt);
+
+    const precipVar = (this.targetState.precipitation ?? 0) > 0
+      ? this._clamp01(this.precipFlurryVariability)
+      : 0.0;
+    this._stepFlurryEnvelope(this._precipFlurryState, precipVar, dt);
 
     // 3. Update derived state (Wetness lagging)
     this._updateWetness(dt);
@@ -2376,6 +2416,194 @@ export class WeatherController {
     return this._fbm1D01(time, 3);
   }
 
+  /**
+   * Build a fresh flurry envelope state machine. Starts in `idle` so callers
+   * with variability=0 always read `value=1` (no scaling).
+   * @returns {{
+   *   phase: 'idle'|'lull'|'rampUp'|'burst'|'rampDown',
+   *   timer: number,
+   *   value: number,
+   *   targetValue: number,
+   *   currentPeak: number,
+   *   smoothK: number
+   * }}
+   */
+  _createFlurryState() {
+    return {
+      phase: 'idle',
+      timer: 0,
+      value: 1.0,
+      targetValue: 1.0,
+      currentPeak: 1.0,
+      smoothK: 6.0
+    };
+  }
+
+  /**
+   * Reset both flurry envelopes to neutral (value=1, idle). Called when neither
+   * channel is active so a switch back to steady weather is immediate.
+   * @private
+   */
+  _resetFlurryStates() {
+    if (this._ashFlurryState && this._ashFlurryState.value !== 1.0) {
+      this._ashFlurryState.phase = 'idle';
+      this._ashFlurryState.timer = 0;
+      this._ashFlurryState.value = 1.0;
+      this._ashFlurryState.targetValue = 1.0;
+    }
+    if (this._precipFlurryState && this._precipFlurryState.value !== 1.0) {
+      this._precipFlurryState.phase = 'idle';
+      this._precipFlurryState.timer = 0;
+      this._precipFlurryState.value = 1.0;
+      this._precipFlurryState.targetValue = 1.0;
+    }
+  }
+
+  /**
+   * Heavy-tail-leaning random duration in seconds. Most draws are uniform inside
+   * [min, max]; 20% are stretched up to 2.5× max to produce occasional very long
+   * gaps or very brief bursts so the rhythm feels irregular.
+   * @param {number} min Seconds.
+   * @param {number} max Seconds.
+   * @returns {number}
+   */
+  _sampleFlurryDuration(min, max) {
+    const a = Math.max(0.05, Math.min(min, max));
+    const b = Math.max(a, Math.max(min, max));
+    if (Math.random() < 0.2) {
+      // Stretched tail: bias toward longer durations.
+      const stretch = 1.0 + Math.random() * 1.5;
+      return a + Math.random() * (b - a) * stretch;
+    }
+    return a + Math.random() * (b - a);
+  }
+
+  /**
+   * Step one flurry envelope. Maintains a semi-Markov loop:
+   * lull -> rampUp -> burst -> rampDown -> lull, with smoothed `value` tracking
+   * `targetValue` per frame.
+   *
+   * @param {ReturnType<WeatherController.prototype._createFlurryState>} state
+   * @param {number} variability01 - 0..1 master strength.
+   * @param {number} dt - Delta time in seconds (full rate; clamped by caller).
+   * @private
+   */
+  _stepFlurryEnvelope(state, variability01, dt) {
+    if (!state) return;
+    const v = this._clamp01(variability01);
+    const safeDt = Math.max(0, dt || 0);
+
+    if (v <= 1e-4) {
+      // Decay smoothly back to neutral when variability is disabled mid-session.
+      state.phase = 'idle';
+      state.targetValue = 1.0;
+      const k = 1.0 - Math.exp(-safeDt * state.smoothK);
+      state.value += (1.0 - state.value) * k;
+      return;
+    }
+
+    if (state.phase === 'idle') {
+      // First activation: start in a lull so we ease into the cycle.
+      state.phase = 'lull';
+      state.timer = this._sampleFlurryDuration(
+        this._lullMinSeconds(v),
+        this._lullMaxSeconds(v)
+      );
+      state.targetValue = this._effectiveLullFloor();
+    }
+
+    state.timer -= safeDt;
+
+    if (state.timer <= 0) {
+      switch (state.phase) {
+        case 'lull': {
+          state.phase = 'rampUp';
+          const peakRange = Math.max(1.0, this.flurryBurstPeakMax || 1.0);
+          // Peak strength scales with variability so low variability still
+          // produces gentle bursts and high variability hits the cap often.
+          const peakMin = 1.0 + 0.25 * v;
+          const peakMax = 1.0 + (peakRange - 1.0) * (0.35 + 0.65 * v);
+          state.currentPeak = peakMin + Math.random() * Math.max(0.0, peakMax - peakMin);
+          state.targetValue = state.currentPeak;
+          // Ramp-up is short and slightly random so onsets feel snappy.
+          state.timer = 0.25 + Math.random() * 0.55;
+          state.smoothK = 5.0 + Math.random() * 3.0;
+          break;
+        }
+        case 'rampUp': {
+          state.phase = 'burst';
+          state.targetValue = state.currentPeak;
+          state.timer = this._sampleFlurryDuration(
+            this._burstMinSeconds(v),
+            this._burstMaxSeconds(v)
+          );
+          state.smoothK = 3.5;
+          break;
+        }
+        case 'burst': {
+          state.phase = 'rampDown';
+          state.targetValue = this._effectiveLullFloor();
+          // Ramp-down a touch longer than ramp-up to mimic atmospheric tail-off.
+          state.timer = 0.6 + Math.random() * 1.2;
+          state.smoothK = 2.5 + Math.random() * 1.5;
+          break;
+        }
+        case 'rampDown':
+        default: {
+          state.phase = 'lull';
+          state.targetValue = this._effectiveLullFloor();
+          state.timer = this._sampleFlurryDuration(
+            this._lullMinSeconds(v),
+            this._lullMaxSeconds(v)
+          );
+          state.smoothK = 6.0;
+          break;
+        }
+      }
+    }
+
+    const k = 1.0 - Math.exp(-safeDt * Math.max(0.1, state.smoothK));
+    state.value += (state.targetValue - state.value) * k;
+    // Clamp to non-negative; high bursts are intentionally allowed >1.
+    if (state.value < 0) state.value = 0;
+  }
+
+  _effectiveLullFloor() {
+    const n = Number(this.flurryLullFloor);
+    if (!Number.isFinite(n)) return 0.05;
+    return Math.max(0.0, Math.min(0.5, n));
+  }
+
+  _effectiveTimeScale() {
+    const n = Number(this.flurryTimeScale);
+    if (!Number.isFinite(n) || n <= 0) return 1.0;
+    return Math.max(0.05, Math.min(8.0, n));
+  }
+
+  _lullMinSeconds(v) {
+    // Quiet stretches grow strongly with variability (gamma>1) and time scale.
+    const baseMin = 2.0;
+    const gamma = 1.6;
+    return baseMin + 14.0 * Math.pow(v, gamma) * this._effectiveTimeScale();
+  }
+
+  _lullMaxSeconds(v) {
+    const baseMax = 6.0;
+    const gamma = 1.7;
+    return baseMax + 30.0 * Math.pow(v, gamma) * this._effectiveTimeScale();
+  }
+
+  _burstMinSeconds(v) {
+    // Higher variability also means bursts can be shorter and more punchy.
+    const baseMin = 1.5;
+    return Math.max(0.3, baseMin - 1.0 * v) * this._effectiveTimeScale();
+  }
+
+  _burstMaxSeconds(v) {
+    const baseMax = 5.0;
+    return Math.max(1.0, baseMax - 1.5 * v) * this._effectiveTimeScale();
+  }
+
   _applyVariability(time, dt) {
     const baseVar = this.variability;
 
@@ -2429,8 +2657,10 @@ export class WeatherController {
 
     // Ash Intensity = Target + subtle noise variation
     // Only modulate if target ashIntensity > 0 so idle scenes aren't affected.
+    // When the dedicated ash flurry envelope is active it owns the temporal
+    // variation, so we skip the legacy meander to avoid stacked modulation.
     const targetAsh = this.targetState.ashIntensity ?? 0.0;
-    if (targetAsh > 0) {
+    if (targetAsh > 0 && this._clamp01(this.ashFlurryVariability) <= 1e-4) {
       const ashNoiseSigned = (this._getPinkNoise01(time * 0.08 + this.noiseOffset * 5.0 + 200.0) * 2.0 - 1.0);
       // Bounded perturbation: ±15% of variability around target, clamped to [0, 1]
       const ashMeander = ashNoiseSigned * baseVar * 0.15;
@@ -2575,6 +2805,61 @@ export class WeatherController {
   }
 
   /**
+   * Set ash flurry variability (0..1). 0 = constant ash rate, 1 = long lulls
+   * between strong bursts. Particle-only; does not affect wetness or sky.
+   * @param {number} value
+   */
+  setAshFlurryVariability(value) {
+    this.ashFlurryVariability = THREE.MathUtils.clamp(Number(value) || 0, 0, 1);
+    this._staticSnapped = false;
+  }
+
+  /**
+   * Set rain/snow flurry variability (0..1).
+   * @param {number} value
+   */
+  setPrecipFlurryVariability(value) {
+    this.precipFlurryVariability = THREE.MathUtils.clamp(Number(value) || 0, 0, 1);
+    this._staticSnapped = false;
+  }
+
+  /**
+   * Set global time scale for flurry lull/burst durations. Higher = longer.
+   * @param {number} value Clamped to [0.05, 8].
+   */
+  setFlurryTimeScale(value) {
+    const n = Number(value);
+    this.flurryTimeScale = Number.isFinite(n)
+      ? Math.max(0.05, Math.min(8.0, n))
+      : 1.0;
+    this._staticSnapped = false;
+  }
+
+  /**
+   * Set minimum emission fraction during flurry lulls (0..0.5).
+   * @param {number} value
+   */
+  setFlurryLullFloor(value) {
+    const n = Number(value);
+    this.flurryLullFloor = Number.isFinite(n)
+      ? Math.max(0.0, Math.min(0.5, n))
+      : 0.05;
+    this._staticSnapped = false;
+  }
+
+  /**
+   * Set the cap for random burst peaks (>=1).
+   * @param {number} value Clamped to [1, 6].
+   */
+  setFlurryBurstPeakMax(value) {
+    const n = Number(value);
+    this.flurryBurstPeakMax = Number.isFinite(n)
+      ? Math.max(1.0, Math.min(6.0, n))
+      : 3.0;
+    this._staticSnapped = false;
+  }
+
+  /**
    * Set the time of day
    * @param {number} hour - 0.0 to 24.0
    */
@@ -2604,6 +2889,30 @@ export class WeatherController {
   }
 
   /**
+   * Particle-only ash emission multiplier (>= 0). Driven by `ashFlurryVariability`
+   * via a semi-Markov lull/burst loop. Returns `1.0` when the channel is idle so
+   * callers can multiply unconditionally.
+   * @returns {number}
+   */
+  getAshEmissionEnvelope() {
+    if (this.enabled === false && this.dynamicEnabled !== true) return 1.0;
+    const v = this._ashFlurryState?.value;
+    return Number.isFinite(v) ? Math.max(0.0, v) : 1.0;
+  }
+
+  /**
+   * Particle-only rain/snow emission multiplier (>= 0). Driven by
+   * `precipFlurryVariability` via a semi-Markov lull/burst loop. Returns `1.0`
+   * when the channel is idle so callers can multiply unconditionally.
+   * @returns {number}
+   */
+  getPrecipEmissionEnvelope() {
+    if (this.enabled === false && this.dynamicEnabled !== true) return 1.0;
+    const v = this._precipFlurryState?.value;
+    return Number.isFinite(v) ? Math.max(0.0, v) : 1.0;
+  }
+
+  /**
    * Get the control schema for Tweakpane
    * @returns {Object} Control schema
    */
@@ -2611,7 +2920,7 @@ export class WeatherController {
     return {
       enabled: true,
       /** Bump when adding/removing Tweakpane params so the Weather folder can rebuild (see canvas-replacement). */
-      uiRevision: 4,
+      uiRevision: 5,
       parameters: {
         presetTransitionDurationMinutes: {
           label: 'Preset Transition (min)',
@@ -3395,6 +3704,50 @@ export class WeatherController {
           default: false,
           type: 'boolean',
           group: 'environment'
+        },
+
+        // Flurry / emission variability
+        // These drive a particle-only emission envelope so weather can come in
+        // bursts followed by long quiet periods without affecting wetness or sky.
+        precipFlurryVariability: {
+          label: 'Rain/Snow Flurry',
+          default: 0.0,
+          min: 0.0,
+          max: 1.0,
+          step: 0.01,
+          group: 'flurry'
+        },
+        ashFlurryVariability: {
+          label: 'Ash Flurry',
+          default: 0.0,
+          min: 0.0,
+          max: 1.0,
+          step: 0.01,
+          group: 'flurry'
+        },
+        flurryTimeScale: {
+          label: 'Flurry Time Scale',
+          default: 1.0,
+          min: 0.1,
+          max: 6.0,
+          step: 0.05,
+          group: 'flurry'
+        },
+        flurryLullFloor: {
+          label: 'Lull Floor',
+          default: 0.05,
+          min: 0.0,
+          max: 0.5,
+          step: 0.01,
+          group: 'flurry'
+        },
+        flurryBurstPeakMax: {
+          label: 'Burst Peak Max',
+          default: 3.0,
+          min: 1.0,
+          max: 6.0,
+          step: 0.1,
+          group: 'flurry'
         }
       },
       groups: [
@@ -3477,7 +3830,14 @@ export class WeatherController {
           'rainSplash4SizeMax',
           'rainSplash4OpacityPeak'
         ] },
-        { label: 'Snow', type: 'folder', parameters: ['snowIntensityScale', 'snowFlakeSize', 'snowBrightness', 'snowGravityScale', 'snowWindInfluence', 'snowCurlStrength', 'snowFlutterStrength'] }
+        { label: 'Snow', type: 'folder', parameters: ['snowIntensityScale', 'snowFlakeSize', 'snowBrightness', 'snowGravityScale', 'snowWindInfluence', 'snowCurlStrength', 'snowFlutterStrength'] },
+        { label: 'Flurries', type: 'folder', parameters: [
+          'precipFlurryVariability',
+          'ashFlurryVariability',
+          'flurryTimeScale',
+          'flurryLullFloor',
+          'flurryBurstPeakMax'
+        ], expanded: false }
       ],
       presets: {
         'Clear (Dry)': { precipitation: 0.0, cloudCover: 0.05, windSpeed: 0.08, fogDensity: 0.0, freezeLevel: 0.0 },

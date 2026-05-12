@@ -873,8 +873,8 @@ export class TweakpaneManager {
       // Build authoring workflow controls
       this.buildGlobalControls();
 
-      // Build intro sequence controls (loading transition and scene intro behavior)
-      this.buildIntroSequencesSection();
+      // Build intro controls (loading transition and scene intro behavior)
+      this.buildIntrosSection();
 
       // Build environment section (sun latitude etc.) — single source of truth
       this.buildEnvironmentSection();
@@ -1117,13 +1117,13 @@ export class TweakpaneManager {
   }
 
   /**
-   * Build intro transition controls.
+   * Build intro controls.
    * @private
    */
-  buildIntroSequencesSection() {
+  buildIntrosSection() {
     const introFolder = this.pane.addFolder({
-      title: 'Intro Sequences',
-      expanded: this.accordionStates['introSequences'] ?? true
+      title: 'Intros',
+      expanded: this.accordionStates['intros'] ?? this.accordionStates['introSequences'] ?? true
     });
     this._registerPrimaryFolder(introFolder);
 
@@ -1139,7 +1139,7 @@ export class TweakpaneManager {
     this._uiValidatorGlobalHandlers.introZoomEnabled = onIntroZoomChange;
 
     introFolder.addBinding(this.globalParams, 'introZoomEnabled', {
-      label: 'Intro Zoom'
+      label: 'Enable'
     }).on('change', onIntroZoomChange);
 
     introFolder.addButton({
@@ -1163,7 +1163,7 @@ export class TweakpaneManager {
     });
 
     introFolder.on('fold', (ev) => {
-      this.accordionStates['introSequences'] = ev.expanded;
+      this.accordionStates['intros'] = ev.expanded;
       this.saveUIState();
     });
   }
@@ -7118,6 +7118,12 @@ export class TweakpaneManager {
     new Dialog({
       title: 'Draw Map Points',
       content,
+      close: () => {
+        const im = window.MapShine?.interactionManager;
+        if (!im?.mapPointDraw?.active) {
+          mapPointsManager?.setShowVisualHelpers?.(false);
+        }
+      },
       buttons: {
         draw: {
           icon: '<i class="fas fa-crosshairs"></i>',
@@ -7195,8 +7201,6 @@ export class TweakpaneManager {
       ui.notifications.warn('Map Points Manager not available');
       return;
     }
-
-    mapPointsManager.setShowVisualHelpers(true);
 
     // Effect options for editing
     const effectOptions = {
@@ -7871,7 +7875,6 @@ export class TweakpaneManager {
           const foundryY = Number.isFinite(h) ? (h - worldY) : worldY;
           canvas.pan({ x: bounds.centerX, y: foundryY });
         }
-        mapPointsManager.setShowVisualHelpers(true);
       }
     }, {
       width: 350

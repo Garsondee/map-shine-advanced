@@ -351,15 +351,28 @@ export class WeatherController {
       lifeMax: 4.7,
       speedMin: 15,
       speedMax: 25,
-      opacityStartMin: 0.53,
-      opacityStartMax: 0.75,
+      opacityStartMin: 0.58,
+      opacityStartMax: 0.82,
       opacityEnd: 0.85,
-      colorStart: { r: 0.45, g: 0.42, b: 0.38 },
-      colorEnd: { r: 0.35, g: 0.32, b: 0.28 },
+      // Quarks startColor ColorRange: random tint per particle from soot → pale ash.
+      colorStart: { r: 0.07, g: 0.055, b: 0.045 },
+      colorEnd: { r: 0.82, g: 0.80, b: 0.76 },
       brightness: 1.0,
-      gravityScale: 0.55,
-      windInfluence: 2.1,
-      curlStrength: 3,
+      // Multiplies ash billboard material RGB (1 = neutral white; vertex colours carry hue).
+      materialTint: 1.0,
+      // ColorOverLife multiplies startColour over lifetime; >1 RGB brightens dark soot toward pale ash.
+      ashLifeBrighten: 2.28,
+      ashLifeAlphaFade: 0.32,
+      gravityScale: 0.62,
+      windInfluence: 1.85,
+      // Scales CurlNoiseField strength (base baked in WeatherParticles).
+      curlStrength: 2.6,
+      // Multiplies curl noise spatial scale (larger = broader swirls).
+      curlNoiseScale: 1.0,
+      // Multiplies curl noise time evolution rate.
+      curlTimeScale: 0.88,
+      // Base wind magnitude for falling ash (before windSpeed and windInfluence).
+      ashWindBase: 400,
       clusterHoldMin: 1.3,
       clusterHoldMax: 2.3,
       clusterRadiusMin: 1150,
@@ -380,8 +393,11 @@ export class WeatherController {
       emberColorEnd: { r: 1.0, g: 0.25, b: 0.0 },
       emberBrightness: 5,
       emberGravityScale: 0,
-      emberWindInfluence: 0.45,
-      emberCurlStrength: 3
+      emberWindInfluence: 0.52,
+      emberCurlStrength: 4.2,
+      emberCurlNoiseScale: 0.72,
+      emberCurlTimeScale: 1.28,
+      emberWindBase: 650
     };
 
     /** @type {function|null} Unsubscribe from EffectMaskRegistry */

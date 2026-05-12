@@ -2083,6 +2083,14 @@ export class WeatherParticles {
     this._ashEmberCurl = null;
     this._ashEmberCurlBaseStrength = null;
     this._ashEmberColorOverLife = null;
+    /** @type {THREE.Vector3|null} */
+    this._ashCurlBaseScale = null;
+    /** @type {number} */
+    this._ashCurlBaseTimeScale = 1;
+    /** @type {THREE.Vector3|null} */
+    this._ashEmberCurlBaseScale = null;
+    /** @type {number} */
+    this._ashEmberCurlBaseTimeScale = 1;
 
     // Ash clustering (uneven distribution)
     this._ashClusterTimer = 0.0;
@@ -4350,27 +4358,37 @@ export class WeatherParticles {
     const ctx = canvas.getContext('2d');
     if (!ctx) return null;
 
+    /** @param {number} r @param {number} g @param {number} b @param {number} a */
+    const rgba = (r, g, b, a) => `rgba(${Math.round(r * 255)},${Math.round(g * 255)},${Math.round(b * 255)},${a})`;
+
+    // Per-atlas-tile palette: soot → brown-grey → mid → pale (pairs with wide vertex ColorRange).
+    const ashPalettes = [
+      { g0: [0.12, 0.1, 0.09], g1: [0.06, 0.05, 0.045], g2: [0.03, 0.025, 0.022], fill: [0.11, 0.09, 0.08], stroke: [0.04, 0.035, 0.03] },
+      { g0: [0.35, 0.28, 0.22], g1: [0.2, 0.16, 0.13], g2: [0.08, 0.065, 0.055], fill: [0.38, 0.3, 0.24], stroke: [0.12, 0.09, 0.07] },
+      { g0: [0.55, 0.52, 0.48], g1: [0.35, 0.33, 0.3], g2: [0.12, 0.11, 0.1], fill: [0.58, 0.55, 0.5], stroke: [0.28, 0.26, 0.23] },
+      { g0: [0.78, 0.76, 0.72], g1: [0.5, 0.48, 0.45], g2: [0.2, 0.19, 0.18], fill: [0.82, 0.8, 0.76], stroke: [0.45, 0.43, 0.4] },
+    ];
+
     const drawAshInCell = (cellX, cellY, variant) => {
       const cx = cellX * cellSize + cellSize / 2;
       const cy = cellY * cellSize + cellSize / 2;
       const maxRadius = (cellSize / 2) - 4;
+      const pal = ashPalettes[Math.min(3, Math.max(0, variant))] || ashPalettes[0];
 
       ctx.save();
       ctx.translate(cx, cy);
 
-      // Ash has a subtle dark glow/haze
       const glow = ctx.createRadialGradient(0, 0, 0, 0, 0, maxRadius);
-      glow.addColorStop(0, 'rgba(80, 75, 70, 0.7)');
-      glow.addColorStop(0.4, 'rgba(60, 55, 50, 0.3)');
-      glow.addColorStop(1, 'rgba(40, 35, 30, 0)');
+      glow.addColorStop(0, rgba(pal.g0[0], pal.g0[1], pal.g0[2], 0.72));
+      glow.addColorStop(0.42, rgba(pal.g1[0], pal.g1[1], pal.g1[2], 0.35));
+      glow.addColorStop(1, rgba(pal.g2[0], pal.g2[1], pal.g2[2], 0));
       ctx.fillStyle = glow;
       ctx.beginPath();
       ctx.arc(0, 0, maxRadius, 0, Math.PI * 2);
       ctx.fill();
 
-      // Draw irregular ash fragment shapes
-      ctx.fillStyle = 'rgba(90, 85, 80, 0.85)';
-      ctx.strokeStyle = 'rgba(50, 45, 40, 0.6)';
+      ctx.fillStyle = rgba(pal.fill[0], pal.fill[1], pal.fill[2], 0.88);
+      ctx.strokeStyle = rgba(pal.stroke[0], pal.stroke[1], pal.stroke[2], 0.62);
       ctx.lineWidth = 1;
 
       if (variant === 0) {
@@ -5404,15 +5422,15 @@ export class WeatherParticles {
     this._roofDripCurlBaseStrength = roofDripCurl.strength.clone();
 
     // --- ASH ---
-    // Ash precipitation: slower, heavier than snow, grey/charcoal colored
+    // Ash precipitation: slower, heavier than snow; vertex ColorRange carries soot→pale variation.
     const ashMaterial = new THREE.MeshBasicMaterial({
       map: this.ashTexture,
       transparent: true,
       depthWrite: false,
       depthTest: false,
-      blending: THREE.NormalBlending, // Normal blending for darker particles
-      color: 0x605550, // Grey/charcoal tint
-      opacity: 0.85,
+      blending: THREE.NormalBlending,
+      color: 0xffffff,
+      opacity: 0.92,
       side: THREE.DoubleSide
     });
 
@@ -5421,19 +5439,19 @@ export class WeatherParticles {
 
     // Ash falls slower than snow with less wind response
     const ashGravity = new ApplyForce(new THREE.Vector3(0, 0, -1), new ConstantValue(this._ashBaseGravity));
-    const ashWind = new ApplyForce(new THREE.Vector3(1, 0, 0), new ConstantValue(400)); // Less wind influence
+    const ashWind = new ApplyForce(new THREE.Vector3(1, 0, 0), new ConstantValue(400));
 
-    // Gentle curl noise for ash - less energetic than snow
+    // Curl: broad lazy cells; strength scaled each frame from ashTuning.curlStrength.
     const ashCurl = new CurlNoiseField(
-      new THREE.Vector3(1200, 1200, 1500),   // Larger spatial scale (lazier cells)
-      new THREE.Vector3(80, 80, 20),         // Weaker swirl strength
-      0.04                                    // Slower time evolution
+      new THREE.Vector3(1180, 1180, 1480),
+      new THREE.Vector3(72, 72, 18),
+      0.042
     );
 
-    // Ash color over life: fade from grey to slightly darker
+    // ColorOverLife multiplies particle.startColor (see Quarks ColorOverLife); brighten toward end of life.
     const ashColorOverLife = new ColorOverLife(new ColorRange(
-      new Vector4(0.4, 0.38, 0.35, 0.8),  // Start: grey with good alpha
-      new Vector4(0.3, 0.28, 0.25, 0.3)   // End: darker, faded
+      new Vector4(1.0, 0.99, 0.97, 1.0),
+      new Vector4(2.28, 2.18, 1.98, 0.32)
     ));
 
     this.ashSystem = new ParticleSystem({
@@ -5444,7 +5462,7 @@ export class WeatherParticles {
       startLife: new IntervalValue(5, 8), // Longer life than snow
       startSpeed: new IntervalValue(120, 200), // Slower than snow
       startSize: new IntervalValue(10, 16), // Slightly larger than snow
-      startColor: new ColorRange(new Vector4(0.45, 0.42, 0.38, 0.75), new Vector4(0.35, 0.32, 0.28, 0.5)),
+      startColor: new ColorRange(new Vector4(0.07, 0.055, 0.045, 0.78), new Vector4(0.82, 0.8, 0.76, 0.55)),
       worldSpace: true,
       maxParticles: 6000,
       emissionOverTime: new ConstantValue(0),
@@ -5500,9 +5518,9 @@ export class WeatherParticles {
     const ashEmberGravity = new ApplyForce(new THREE.Vector3(0, 0, -1), new ConstantValue(this._ashBaseGravity * 0.75));
     const ashEmberWind = new ApplyForce(new THREE.Vector3(1, 0, 0), new ConstantValue(650));
     const ashEmberCurl = new CurlNoiseField(
-      new THREE.Vector3(900, 900, 1200),
-      new THREE.Vector3(140, 140, 40),
-      0.08
+      new THREE.Vector3(880, 880, 1180),
+      new THREE.Vector3(155, 155, 46),
+      0.076
     );
 
     const ashEmberColorOverLife = new ColorOverLife(new ColorRange(
@@ -5582,11 +5600,15 @@ export class WeatherParticles {
     this._ashGravityForce = ashGravity;
     this._ashCurl = ashCurl;
     this._ashCurlBaseStrength = ashCurl.strength.clone();
+    this._ashCurlBaseScale = ashCurl.scale.clone();
+    this._ashCurlBaseTimeScale = ashCurl.timeScale;
     this._ashColorOverLife = ashColorOverLife;
     this._ashEmberWindForce = ashEmberWind;
     this._ashEmberGravityForce = ashEmberGravity;
     this._ashEmberCurl = ashEmberCurl;
     this._ashEmberCurlBaseStrength = ashEmberCurl.strength.clone();
+    this._ashEmberCurlBaseScale = ashEmberCurl.scale.clone();
+    this._ashEmberCurlBaseTimeScale = ashEmberCurl.timeScale;
     this._ashEmberColorOverLife = ashEmberColorOverLife;
 
      log.info(`Weather systems initialized. Area: ${sceneW}x${sceneH}`);
@@ -8782,27 +8804,47 @@ export class WeatherParticles {
       const ashBrightness = (ashTuning.brightness ?? 1.0) * darknessBrightnessScale;
       const clampedAshB = THREE ? THREE.MathUtils.clamp(ashBrightness, 0.0, 3.0) : ashBrightness;
       const ashAlphaScale = clampedAshB / 3.0;
-      const ashMinAlpha = (ashTuning.opacityStartMin ?? 0.53) * ashAlphaScale;
-      const ashMaxAlpha = (ashTuning.opacityStartMax ?? 0.75) * ashAlphaScale;
+      const ashMinAlpha = (ashTuning.opacityStartMin ?? 0.58) * ashAlphaScale;
+      const ashMaxAlpha = (ashTuning.opacityStartMax ?? 0.82) * ashAlphaScale;
+      const cStart = ashTuning.colorStart ?? { r: 0.07, g: 0.055, b: 0.045 };
+      const cEnd = ashTuning.colorEnd ?? { r: 0.82, g: 0.8, b: 0.76 };
       if (this.ashSystem.startColor && this.ashSystem.startColor.a && this.ashSystem.startColor.b) {
-        const cStart = ashTuning.colorStart ?? { r: 0.45, g: 0.42, b: 0.38 };
-        const cEnd = ashTuning.colorEnd ?? { r: 0.35, g: 0.32, b: 0.28 };
         this.ashSystem.startColor.a.set(cStart.r, cStart.g, cStart.b, ashMinAlpha);
         this.ashSystem.startColor.b.set(cEnd.r, cEnd.g, cEnd.b, ashMaxAlpha);
       }
 
-      if (this._ashColorOverLife?.color?.a && this._ashColorOverLife.color?.b) {
-        const cStart = ashTuning.colorStart ?? { r: 0.45, g: 0.42, b: 0.38 };
-        const cEnd = ashTuning.colorEnd ?? { r: 0.35, g: 0.32, b: 0.28 };
-        const endAlpha = Math.max(0.0, ashTuning.opacityEnd ?? 0.85);
-        this._ashColorOverLife.color.a.set(cStart.r, cStart.g, cStart.b, ashMinAlpha);
-        this._ashColorOverLife.color.b.set(cEnd.r, cEnd.g, cEnd.b, endAlpha);
+      if (this._ashMaterial && THREE) {
+        const mt = Number(ashTuning.materialTint);
+        const t = (Number.isFinite(mt) ? THREE.MathUtils.clamp(mt, 0.35, 1.5) : 1.0);
+        this._ashMaterial.color.setRGB(t, t, t);
+        if (this._ashBatchMaterial && this._ashBatchMaterial.color) {
+          this._ashBatchMaterial.color.setRGB(t, t, t);
+        }
       }
 
-      // Scale curl noise for ash
+      if (this._ashColorOverLife?.color?.a && this._ashColorOverLife.color?.b) {
+        const br = Number(ashTuning.ashLifeBrighten);
+        const brighten = (Number.isFinite(br) && br > 0) ? THREE.MathUtils.clamp(br, 0.5, 4.0) : 2.28;
+        const fadeA = Number(ashTuning.ashLifeAlphaFade);
+        const endMulA = (Number.isFinite(fadeA) ? THREE.MathUtils.clamp(fadeA, 0.05, 1.0) : 0.32);
+        this._ashColorOverLife.color.a.set(1.0, 0.99, 0.97, 1.0);
+        this._ashColorOverLife.color.b.set(brighten, brighten * 0.97, brighten * 0.9, endMulA);
+      }
+
+      // Scale curl noise for ash (strength + spatial scale + time evolution)
       if (this._ashCurl && this._ashCurlBaseStrength) {
-        const curlStrength = debugDisableWeatherBehaviors ? 0.0 : (ashTuning.curlStrength ?? 3);
+        const curlStrength = debugDisableWeatherBehaviors ? 0.0 : (ashTuning.curlStrength ?? 2.6);
         this._ashCurl.strength.copy(this._ashCurlBaseStrength).multiplyScalar(curlStrength);
+      }
+      if (this._ashCurl && this._ashCurlBaseScale) {
+        const ns = Number(ashTuning.curlNoiseScale);
+        const mul = (Number.isFinite(ns) && ns > 0) ? ns : 1.0;
+        this._ashCurl.scale.copy(this._ashCurlBaseScale).multiplyScalar(mul);
+      }
+      if (this._ashCurl && typeof this._ashCurlBaseTimeScale === 'number') {
+        const ts = Number(ashTuning.curlTimeScale);
+        const tmul = (Number.isFinite(ts) && ts > 0) ? ts : 1.0;
+        this._ashCurl.timeScale = this._ashCurlBaseTimeScale * tmul;
       }
 
       // Apply roof mask uniforms for ash (base material)
@@ -8900,8 +8942,18 @@ export class WeatherParticles {
       }
 
       if (this._ashEmberCurl && this._ashEmberCurlBaseStrength) {
-        const emberCurlStrength = debugDisableWeatherBehaviors ? 0.0 : (ashTuning.emberCurlStrength ?? 3);
+        const emberCurlStrength = debugDisableWeatherBehaviors ? 0.0 : (ashTuning.emberCurlStrength ?? 4.2);
         this._ashEmberCurl.strength.copy(this._ashEmberCurlBaseStrength).multiplyScalar(emberCurlStrength);
+      }
+      if (this._ashEmberCurl && this._ashEmberCurlBaseScale) {
+        const ns = Number(ashTuning.emberCurlNoiseScale);
+        const mul = (Number.isFinite(ns) && ns > 0) ? ns : 1.0;
+        this._ashEmberCurl.scale.copy(this._ashEmberCurlBaseScale).multiplyScalar(mul);
+      }
+      if (this._ashEmberCurl && typeof this._ashEmberCurlBaseTimeScale === 'number') {
+        const ts = Number(ashTuning.emberCurlTimeScale);
+        const tmul = (Number.isFinite(ts) && ts > 0) ? ts : 1.0;
+        this._ashEmberCurl.timeScale = this._ashEmberCurlBaseTimeScale * tmul;
       }
 
       if (this._ashEmberMaterial && this._ashEmberMaterial.userData && this._ashEmberMaterial.userData.roofUniforms) {
@@ -8930,7 +8982,7 @@ export class WeatherParticles {
     }
 
     // --- WIND & GRAVITY COUPLING ---
-    if (THREE && (this._rainWindForce || this._roofDripWindForce || this._snowWindForce || this._rainGravityForce || this._roofDripGravityForce || this._snowGravityForce)) {
+    if (THREE && (this._rainWindForce || this._roofDripWindForce || this._snowWindForce || this._rainGravityForce || this._roofDripGravityForce || this._snowGravityForce || this._ashWindForce || this._ashEmberWindForce || this._ashGravityForce || this._ashEmberGravityForce)) {
       const windSpeed = weather.windSpeed || 0; // 0-1 scalar
       const dir2 = weather.windDirection; // Expected THREE.Vector2 or Vector3-like
 
@@ -9040,9 +9092,10 @@ export class WeatherParticles {
       if (this._ashWindForce && this._ashWindForce.direction) {
         this._ashWindForce.direction.set(baseDir.x, baseDir.y, 0);
         if (this._ashWindForce.magnitude && typeof this._ashWindForce.magnitude.value === 'number') {
-          const baseMag = 400; // Less wind influence than snow
+          const baseMagRaw = Number(ashTuning.ashWindBase);
+          const baseMag = (Number.isFinite(baseMagRaw) && baseMagRaw > 0) ? baseMagRaw : 400;
           const align = THREE.MathUtils.clamp(windSpeed, 0, 1);
-          const windInfluence = ashTuning.windInfluence ?? 2.1;
+          const windInfluence = ashTuning.windInfluence ?? 1.85;
           this._ashWindForce.magnitude.value = baseMag * align * 0.7 * windInfluence;
         }
       }
@@ -9050,9 +9103,10 @@ export class WeatherParticles {
       if (this._ashEmberWindForce && this._ashEmberWindForce.direction) {
         this._ashEmberWindForce.direction.set(baseDir.x, baseDir.y, 0);
         if (this._ashEmberWindForce.magnitude && typeof this._ashEmberWindForce.magnitude.value === 'number') {
-          const baseMag = 650;
+          const baseMagRaw = Number(ashTuning.emberWindBase);
+          const baseMag = (Number.isFinite(baseMagRaw) && baseMagRaw > 0) ? baseMagRaw : 650;
           const align = THREE.MathUtils.clamp(windSpeed, 0, 1);
-          const windInfluence = ashTuning.emberWindInfluence ?? 0.45;
+          const windInfluence = ashTuning.emberWindInfluence ?? 0.52;
           this._ashEmberWindForce.magnitude.value = baseMag * align * 0.9 * windInfluence;
         }
       }

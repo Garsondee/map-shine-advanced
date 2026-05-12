@@ -168,6 +168,24 @@ let _pixiPrerenderTransparentUsesRunner = false;
 /** @type {any|null} Renderer that received the `prerender` event listener. */
 let _pixiPrerenderTransparentRenderer = null;
 
+/**
+ * V2 canvas DOM stacking (`z-index` strings for inline styles). Foundry’s
+ * `ensureUILayering()` drives peripheral HTML UI at ~100 — Map Shine must stay below that.
+ *
+ * | Band | Role |
+ * |------|------|
+ * | `boardBase` (10) | `#board` / `canvas.app.view` when Three must sit above the PIXI clear (“grey plate” fix). |
+ * | `three` (20) | `#map-shine-canvas` — above `boardBase`, below HTML UI. |
+ * | `nativePixiOverlay` (25) | Lift `#board` + app view **above** Three while native tools draw (lights, tiles, walls, …). |
+ *
+ * @type {{ boardBase: string; three: string; nativePixiOverlay: string }}
+ */
+const MS_V2_CANVAS_Z = Object.freeze({
+  boardBase: '10',
+  three: '20',
+  nativePixiOverlay: '25',
+});
+
 /** @type {number|null} */
 let _inputArbitrationSettleRaf = null;
 
@@ -4440,6 +4458,43 @@ function _scheduleUpdateSceneDrivenReinit(scene, changes = undefined) {
 }
 
 /**
+ * When the PIXI canvas is stacked above `#map-shine-canvas`, Foundry's lighting /
+ * regions layers still paint their **darkness / global illumination** meshes into
+ * the PIXI framebuffer. That reads as a grey plate over the Three.js map even
+ * though light radii / icons (drawn elsewhere on the layer) remain visible.
+ *
+ * Map Shine owns scene lighting in V2; suppress only those plating containers
+ * while native tool overlays stay interactive.
+ * @private
+ */
+function _suppressFoundryPlatingWhenMsaPixiStackedAboveThree() {
+  try {
+    if (window.MapShine?.__msaStackPixiAboveThree !== true) return;
+    if (!canvas?.ready || isMapMakerMode) return;
+    if (!sceneSettings.isEnabled(canvas?.scene)) return;
+
+    const L = canvas.lighting;
+    if (L?.visible) {
+      const illum = L.illumination;
+      if (illum && !illum.destroyed) {
+        illum.visible = false;
+        illum.renderable = false;
+      }
+    }
+
+    const R = canvas.regions;
+    if (R?.visible) {
+      const rPlating = R.illumination ?? R.darkness ?? R.dark;
+      if (rPlating && !rPlating.destroyed) {
+        rPlating.visible = false;
+        rPlating.renderable = false;
+      }
+    }
+  } catch (_) {
+  }
+}
+
+/**
  * Re-assert transparent framebuffer clear at the **start** of each PIXI render so
  * Foundry cannot paint an opaque plate over the Three canvas after resetting
  * `renderer.background.alpha` (common on V14 native level / canvas redraw paths).
@@ -4448,7 +4503,9 @@ function _scheduleUpdateSceneDrivenReinit(scene, changes = undefined) {
  */
 function _forcePixiRendererBackgroundTransparentForV2() {
   try {
-    if (!window.MapShine?.__v2Active) return;
+    if (window.MapShine?.__v2Active !== true && window.MapShine?.__msaStackPixiAboveThree !== true) {
+      return;
+    }
     const bg = canvas?.app?.renderer?.background;
     if (!bg) return;
     if (typeof bg.alpha === 'number' && bg.alpha !== 0) {
@@ -4466,10 +4523,16 @@ function _forcePixiRendererBackgroundTransparentForV2() {
   }
 }
 
+/** @private */
+function _msaPixiPrerenderTransparentHook() {
+  _forcePixiRendererBackgroundTransparentForV2();
+  _suppressFoundryPlatingWhenMsaPixiStackedAboveThree();
+}
+
 /** @type {{ prerender: () => void }} */
 const _msaPixiPrerenderTransparentItem = {
   prerender() {
-    _forcePixiRendererBackgroundTransparentForV2();
+    _msaPixiPrerenderTransparentHook();
   },
 };
 
@@ -4487,7 +4550,7 @@ function _detachPixiPrerenderTransparentBackgroundForV2() {
     }
     if (_pixiPrerenderTransparentRenderer) {
       try {
-        _pixiPrerenderTransparentRenderer.off('prerender', _forcePixiRendererBackgroundTransparentForV2);
+        _pixiPrerenderTransparentRenderer.off('prerender', _msaPixiPrerenderTransparentHook);
       } catch (_) {}
       _pixiPrerenderTransparentRenderer = null;
     }
@@ -4512,7 +4575,7 @@ function _attachPixiPrerenderTransparentBackgroundForV2() {
     }
   }
   try {
-    ren.on('prerender', _forcePixiRendererBackgroundTransparentForV2);
+    ren.on('prerender', _msaPixiPrerenderTransparentHook);
     _pixiPrerenderTransparentRenderer = ren;
   } catch (_) {
   }
@@ -5787,9 +5850,8 @@ async function createThreeCanvas(scene, createOptions = {}) {
     threeCanvas.style.left = '0';
     threeCanvas.style.width = '100%';
     threeCanvas.style.height = '100%';
-    // Above #board (10), strictly below ensureUILayering() (100) so the fullscreen
-    // WebGL layer cannot tie-break on top of Foundry's interface.
-    threeCanvas.style.zIndex = '20';
+    // Above #board base band; strictly below `ensureUILayering()` (~100).
+    threeCanvas.style.zIndex = MS_V2_CANVAS_Z.three;
     threeCanvas.style.pointerEvents = 'auto'; // Three.js handles interaction in gameplay mode
 
     // Inject NEXT to Foundry's canvas (as sibling, not child)
@@ -5800,12 +5862,12 @@ async function createThreeCanvas(scene, createOptions = {}) {
       return;
     }
     
-    // Selective default: keep PIXI board composited above Three and suppress
-    // replaced visuals per-layer instead of blanket board hiding.
+    // DOM stack: `#board` at `MS_V2_CANVAS_Z.boardBase`, Three at `.three` (see `_applyMsV2CanvasDomStack`).
+    // Suppress replaced visuals per-layer instead of blanket board hiding.
     pixiCanvas.style.display = '';
     pixiCanvas.style.visibility = 'visible';
     pixiCanvas.style.opacity = '1';
-    pixiCanvas.style.zIndex = '10';
+    pixiCanvas.style.zIndex = MS_V2_CANVAS_Z.boardBase;
     pixiCanvas.style.pointerEvents = 'none';
     pixiCanvas.style.backgroundColor = 'transparent';
 
@@ -5918,7 +5980,7 @@ async function createThreeCanvas(scene, createOptions = {}) {
     rendererCanvas.style.left = '0';
     rendererCanvas.style.width = '100%';
     rendererCanvas.style.height = '100%';
-    rendererCanvas.style.zIndex = '20';
+    rendererCanvas.style.zIndex = MS_V2_CANVAS_Z.three;
     rendererCanvas.style.pointerEvents = 'auto'; // Three.js handles interaction in gameplay mode
     rendererCanvas.style.opacity = '1';
     // Use Foundry's scene background colour so padded region matches core Foundry
@@ -7541,10 +7603,10 @@ async function createThreeCanvas(scene, createOptions = {}) {
             enabled: false,
             groups: [
               { name: 'ash', label: 'Ashfall', type: 'inline', parameters: ['ashIntensity', 'ashIntensityScale', 'ashEmissionRate'] },
-              { name: 'ash-appearance', label: 'Ash Appearance', type: 'inline', separator: true, parameters: ['ashSizeMin', 'ashSizeMax', 'ashLifeMin', 'ashLifeMax', 'ashSpeedMin', 'ashSpeedMax', 'ashOpacityStartMin', 'ashOpacityStartMax', 'ashOpacityEnd', 'ashColorStart', 'ashColorEnd', 'ashBrightness'] },
-              { name: 'ash-motion', label: 'Ash Motion', type: 'inline', separator: true, parameters: ['ashGravityScale', 'ashWindInfluence', 'ashCurlStrength'] },
+              { name: 'ash-appearance', label: 'Ash Appearance', type: 'inline', separator: true, parameters: ['ashSizeMin', 'ashSizeMax', 'ashLifeMin', 'ashLifeMax', 'ashSpeedMin', 'ashSpeedMax', 'ashOpacityStartMin', 'ashOpacityStartMax', 'ashOpacityEnd', 'ashColorStart', 'ashColorEnd', 'ashBrightness', 'ashMaterialTint', 'ashLifeBrighten', 'ashLifeAlphaFade'] },
+              { name: 'ash-motion', label: 'Ash Motion', type: 'inline', separator: true, parameters: ['ashGravityScale', 'ashWindInfluence', 'ashWindBase', 'ashCurlStrength', 'ashCurlNoiseScale', 'ashCurlTimeScale'] },
               { name: 'ash-cluster', label: 'Ash Clustering', type: 'inline', separator: true, parameters: ['ashClusterHoldMin', 'ashClusterHoldMax', 'ashClusterRadiusMin', 'ashClusterRadiusMax', 'ashClusterBoostMin', 'ashClusterBoostMax'] },
-              { name: 'embers', label: 'Embers', type: 'inline', separator: true, parameters: ['emberEmissionRate', 'emberSizeMin', 'emberSizeMax', 'emberLifeMin', 'emberLifeMax', 'emberSpeedMin', 'emberSpeedMax', 'emberOpacityStartMin', 'emberOpacityStartMax', 'emberOpacityEnd', 'emberColorStart', 'emberColorEnd', 'emberBrightness', 'emberGravityScale', 'emberWindInfluence', 'emberCurlStrength'] }
+              { name: 'embers', label: 'Embers', type: 'inline', separator: true, parameters: ['emberEmissionRate', 'emberSizeMin', 'emberSizeMax', 'emberLifeMin', 'emberLifeMax', 'emberSpeedMin', 'emberSpeedMax', 'emberOpacityStartMin', 'emberOpacityStartMax', 'emberOpacityEnd', 'emberColorStart', 'emberColorEnd', 'emberBrightness', 'emberGravityScale', 'emberWindInfluence', 'emberWindBase', 'emberCurlStrength', 'emberCurlNoiseScale', 'emberCurlTimeScale'] }
             ],
             parameters: {
               enabled: { type: 'boolean', default: false },
@@ -7557,15 +7619,21 @@ async function createThreeCanvas(scene, createOptions = {}) {
               ashLifeMax: { label: 'Life Max (s)', type: 'slider', default: ashTuning.lifeMax ?? 4.7, min: 0.2, max: 18, step: 0.1 },
               ashSpeedMin: { label: 'Fall Speed Min', type: 'slider', default: ashTuning.speedMin ?? 15, min: 0, max: 600, step: 5 },
               ashSpeedMax: { label: 'Fall Speed Max', type: 'slider', default: ashTuning.speedMax ?? 25, min: 0, max: 900, step: 5 },
-              ashOpacityStartMin: { label: 'Opacity Start Min', type: 'slider', default: ashTuning.opacityStartMin ?? 0.53, min: 0.0, max: 1.0, step: 0.01 },
-              ashOpacityStartMax: { label: 'Opacity Start Max', type: 'slider', default: ashTuning.opacityStartMax ?? 0.75, min: 0.0, max: 1.0, step: 0.01 },
+              ashOpacityStartMin: { label: 'Opacity Start Min', type: 'slider', default: ashTuning.opacityStartMin ?? 0.58, min: 0.0, max: 1.0, step: 0.01 },
+              ashOpacityStartMax: { label: 'Opacity Start Max', type: 'slider', default: ashTuning.opacityStartMax ?? 0.82, min: 0.0, max: 1.0, step: 0.01 },
               ashOpacityEnd: { label: 'Opacity End', type: 'slider', default: ashTuning.opacityEnd ?? 0.85, min: 0.0, max: 1.0, step: 0.01 },
-              ashColorStart: { type: 'color', label: 'Color Start', default: ashTuning.colorStart ?? { r: 0.45, g: 0.42, b: 0.38 } },
-              ashColorEnd: { type: 'color', label: 'Color End', default: ashTuning.colorEnd ?? { r: 0.35, g: 0.32, b: 0.28 } },
+              ashColorStart: { type: 'color', label: 'Color Start (soot)', default: ashTuning.colorStart ?? { r: 0.07, g: 0.055, b: 0.045 } },
+              ashColorEnd: { type: 'color', label: 'Color End (pale ash)', default: ashTuning.colorEnd ?? { r: 0.82, g: 0.8, b: 0.76 } },
               ashBrightness: { label: 'Brightness', type: 'slider', default: ashTuning.brightness ?? 1.0, min: 0.0, max: 3.0, step: 0.05 },
-              ashGravityScale: { label: 'Gravity Scale', type: 'slider', default: ashTuning.gravityScale ?? 0.55, min: 0.0, max: 3.0, step: 0.05 },
-              ashWindInfluence: { label: 'Wind Influence', type: 'slider', default: ashTuning.windInfluence ?? 2.1, min: 0.0, max: 4.0, step: 0.05 },
-              ashCurlStrength: { label: 'Curl Strength', type: 'slider', default: ashTuning.curlStrength ?? 3, min: 0.0, max: 3.0, step: 0.05 },
+              ashMaterialTint: { label: 'Material Tint', type: 'slider', default: ashTuning.materialTint ?? 1.0, min: 0.35, max: 1.5, step: 0.01 },
+              ashLifeBrighten: { label: 'Life Brighten', type: 'slider', default: ashTuning.ashLifeBrighten ?? 2.28, min: 0.5, max: 4.0, step: 0.02 },
+              ashLifeAlphaFade: { label: 'Life Alpha Fade', type: 'slider', default: ashTuning.ashLifeAlphaFade ?? 0.32, min: 0.05, max: 1.0, step: 0.01 },
+              ashGravityScale: { label: 'Gravity Scale', type: 'slider', default: ashTuning.gravityScale ?? 0.62, min: 0.0, max: 3.0, step: 0.05 },
+              ashWindInfluence: { label: 'Wind Influence', type: 'slider', default: ashTuning.windInfluence ?? 1.85, min: 0.0, max: 4.0, step: 0.05 },
+              ashWindBase: { label: 'Wind Base', type: 'slider', default: ashTuning.ashWindBase ?? 400, min: 0, max: 2000, step: 10 },
+              ashCurlStrength: { label: 'Curl Strength', type: 'slider', default: ashTuning.curlStrength ?? 2.6, min: 0.0, max: 10.0, step: 0.05 },
+              ashCurlNoiseScale: { label: 'Curl Noise Scale', type: 'slider', default: ashTuning.curlNoiseScale ?? 1.0, min: 0.2, max: 3.0, step: 0.02 },
+              ashCurlTimeScale: { label: 'Curl Time Scale', type: 'slider', default: ashTuning.curlTimeScale ?? 0.88, min: 0.1, max: 3.0, step: 0.02 },
               ashClusterHoldMin: { label: 'Cluster Hold Min (s)', type: 'slider', default: ashTuning.clusterHoldMin ?? 1.3, min: 0.5, max: 12, step: 0.1 },
               ashClusterHoldMax: { label: 'Cluster Hold Max (s)', type: 'slider', default: ashTuning.clusterHoldMax ?? 2.3, min: 0.5, max: 18, step: 0.1 },
               ashClusterRadiusMin: { label: 'Cluster Radius Min', type: 'slider', default: ashTuning.clusterRadiusMin ?? 1150, min: 50, max: 3000, step: 10 },
@@ -7586,8 +7654,11 @@ async function createThreeCanvas(scene, createOptions = {}) {
               emberColorEnd: { type: 'color', label: 'Ember Color End', default: ashTuning.emberColorEnd ?? { r: 1.0, g: 0.25, b: 0.0 } },
               emberBrightness: { label: 'Ember Brightness (HDR)', type: 'slider', default: ashTuning.emberBrightness ?? 5, min: 0.0, max: 12.0, step: 0.05 },
               emberGravityScale: { label: 'Ember Gravity Scale', type: 'slider', default: ashTuning.emberGravityScale ?? 0, min: 0.0, max: 3.0, step: 0.05 },
-              emberWindInfluence: { label: 'Ember Wind Influence', type: 'slider', default: ashTuning.emberWindInfluence ?? 0.45, min: 0.0, max: 4.0, step: 0.05 },
-              emberCurlStrength: { label: 'Ember Curl Strength', type: 'slider', default: ashTuning.emberCurlStrength ?? 3, min: 0.0, max: 3.0, step: 0.05 }
+              emberWindInfluence: { label: 'Ember Wind Influence', type: 'slider', default: ashTuning.emberWindInfluence ?? 0.52, min: 0.0, max: 4.0, step: 0.05 },
+              emberWindBase: { label: 'Ember Wind Base', type: 'slider', default: ashTuning.emberWindBase ?? 650, min: 0, max: 2500, step: 10 },
+              emberCurlStrength: { label: 'Ember Curl Strength', type: 'slider', default: ashTuning.emberCurlStrength ?? 4.2, min: 0.0, max: 10.0, step: 0.05 },
+              emberCurlNoiseScale: { label: 'Ember Curl Noise Scale', type: 'slider', default: ashTuning.emberCurlNoiseScale ?? 0.72, min: 0.2, max: 3.0, step: 0.02 },
+              emberCurlTimeScale: { label: 'Ember Curl Time Scale', type: 'slider', default: ashTuning.emberCurlTimeScale ?? 1.28, min: 0.1, max: 3.0, step: 0.02 }
             }
           };
 
@@ -7665,9 +7736,15 @@ async function createThreeCanvas(scene, createOptions = {}) {
               else if (paramId === 'ashColorStart') t.colorStart = value;
               else if (paramId === 'ashColorEnd') t.colorEnd = value;
               else if (paramId === 'ashBrightness') t.brightness = value;
+              else if (paramId === 'ashMaterialTint') t.materialTint = value;
+              else if (paramId === 'ashLifeBrighten') t.ashLifeBrighten = value;
+              else if (paramId === 'ashLifeAlphaFade') t.ashLifeAlphaFade = value;
               else if (paramId === 'ashGravityScale') t.gravityScale = value;
               else if (paramId === 'ashWindInfluence') t.windInfluence = value;
+              else if (paramId === 'ashWindBase') t.ashWindBase = value;
               else if (paramId === 'ashCurlStrength') t.curlStrength = value;
+              else if (paramId === 'ashCurlNoiseScale') t.curlNoiseScale = value;
+              else if (paramId === 'ashCurlTimeScale') t.curlTimeScale = value;
               else if (paramId === 'ashClusterHoldMin') t.clusterHoldMin = value;
               else if (paramId === 'ashClusterHoldMax') t.clusterHoldMax = value;
               else if (paramId === 'ashClusterRadiusMin') t.clusterRadiusMin = value;
@@ -7689,7 +7766,10 @@ async function createThreeCanvas(scene, createOptions = {}) {
               else if (paramId === 'emberBrightness') t.emberBrightness = value;
               else if (paramId === 'emberGravityScale') t.emberGravityScale = value;
               else if (paramId === 'emberWindInfluence') t.emberWindInfluence = value;
+              else if (paramId === 'emberWindBase') t.emberWindBase = value;
               else if (paramId === 'emberCurlStrength') t.emberCurlStrength = value;
+              else if (paramId === 'emberCurlNoiseScale') t.emberCurlNoiseScale = value;
+              else if (paramId === 'emberCurlTimeScale') t.emberCurlTimeScale = value;
             } catch (_) {}
           };
 
@@ -9004,14 +9084,12 @@ function enableSystem() {
   
   // Three.js Canvas: visible and interactive (PRIMARY interaction handler)
   threeCanvas.style.opacity = '1';
-  threeCanvas.style.zIndex = '20';
   threeCanvas.style.pointerEvents = 'auto'; // Three.js receives input in Gameplay Mode
   
   // PIXI Canvas: transparent overlay, input controlled by InputRouter
   const pixiCanvas = canvas.app?.view;
   if (pixiCanvas) {
     pixiCanvas.style.opacity = '1'; // Keep visible for overlay layers (drawings, templates, notes)
-    pixiCanvas.style.zIndex = '10'; // Under Three (20); still needed for capture/bridges
     pixiCanvas.style.pointerEvents = 'none'; // Default to pass-through; InputRouter enables for edit tools
 
     // V2: PIXI should not visually render the scene. Foundry's board canvas
@@ -9098,6 +9176,27 @@ function _suppressFoundryInterfaceSceneOutline() {
     first.renderable = false;
     first.alpha = 0;
   }, 'suppress.interfaceOutline', Severity.COSMETIC);
+}
+
+/**
+ * Apply `MS_V2_CANVAS_Z` to `#map-shine-canvas`, `canvas.app.view`, and `#board` when they differ.
+ * @param {boolean} nativePixiAboveThree When true (editor / native tool overlay), PIXI sits above Three; otherwise Three sits above the base PIXI band (grey-plate mitigation).
+ * @private
+ */
+function _applyMsV2CanvasDomStack(nativePixiAboveThree) {
+  const zPixi = nativePixiAboveThree ? MS_V2_CANVAS_Z.nativePixiOverlay : MS_V2_CANVAS_Z.boardBase;
+  const zThree = MS_V2_CANVAS_Z.three;
+  const threeEl = document.getElementById('map-shine-canvas');
+  if (threeEl) threeEl.style.zIndex = zThree;
+  const view = canvas?.app?.view ?? null;
+  const board = document.getElementById('board');
+  if (view) view.style.zIndex = zPixi;
+  else if (board && board.tagName === 'CANVAS') board.style.zIndex = zPixi;
+  if (board && board.tagName === 'CANVAS' && board !== view) board.style.zIndex = zPixi;
+  try {
+    const ms = window.MapShine;
+    if (ms) ms.__msaStackPixiAboveThree = !!nativePixiAboveThree;
+  } catch (_) {}
 }
 
 /**
@@ -9302,7 +9401,6 @@ function _enforceGameplayPixiSuppression() {
         pixiCanvas.style.display = '';
         pixiCanvas.style.visibility = 'visible';
         pixiCanvas.style.opacity = pixiVisualOpacity;
-        pixiCanvas.style.zIndex = '10';
         pixiCanvas.style.pointerEvents = shouldPixiReceiveInputEffective ? 'auto' : 'none';
         pixiCanvas.style.backgroundColor = 'transparent';
       }
@@ -9312,7 +9410,6 @@ function _enforceGameplayPixiSuppression() {
         board.style.display = '';
         board.style.visibility = 'visible';
         board.style.opacity = pixiVisualOpacity;
-        board.style.zIndex = '10';
         board.style.pointerEvents = shouldPixiReceiveInputEffective ? 'auto' : 'none';
         board.style.backgroundColor = 'transparent';
       }
@@ -9358,7 +9455,6 @@ function _enforceGameplayPixiSuppression() {
         threeCanvas.style.display = '';
         threeCanvas.style.visibility = 'visible';
         threeCanvas.style.opacity = '1';
-        threeCanvas.style.zIndex = '20';
         threeCanvas.style.pointerEvents = shouldPixiReceiveInputEffective ? 'none' : 'auto';
       }
 
@@ -9403,6 +9499,8 @@ function _enforceGameplayPixiSuppression() {
       safeCall(() => {
         _enforcePersistentOverlayAdornments();
       }, 'pixiEditorOverlay.persistentAdornments', Severity.COSMETIC);
+      safeCall(() => _applyMsV2CanvasDomStack(!!shouldPixiReceiveInputEffective), 'pixiSuppress.applyDomStackEditor', Severity.COSMETIC);
+      safeCall(() => _suppressFoundryPlatingWhenMsaPixiStackedAboveThree(), 'pixiSuppress.platingWhenStacked.sync', Severity.COSMETIC);
       diag({
         branch: 'editor-overlay',
         needsEditorOverlay: true,
@@ -9417,7 +9515,7 @@ function _enforceGameplayPixiSuppression() {
     // Selective system: keep PIXI board visible for compatibility overlays while
     // scene-bearing layers are suppressed surgically below.
     safeCall(() => {
-      // #map-shine-canvas must stay above #board (10) and below UI (100). Foundry may reset
+      // #map-shine-canvas uses `MS_V2_CANVAS_Z.three` (above board base, below UI ~100). Foundry may reset
       // Application.renderer.background.alpha on redraw paths; if the board were
       // on top, an opaque clear would hide Three even when the blit path is healthy.
       if (canvas.app?.renderer?.background) {
@@ -9432,7 +9530,6 @@ function _enforceGameplayPixiSuppression() {
         pixiCanvas.style.visibility = 'visible';
         pixiCanvas.style.opacity = '1';
         pixiCanvas.style.pointerEvents = 'none';
-        pixiCanvas.style.zIndex = '10';
         pixiCanvas.style.backgroundColor = 'transparent';
       }
     }, 'pixiSuppress.pixiCanvasSelectiveVisible', Severity.COSMETIC);
@@ -9446,7 +9543,6 @@ function _enforceGameplayPixiSuppression() {
       threeCanvas.style.display = '';
       threeCanvas.style.visibility = 'visible';
       threeCanvas.style.opacity = '1';
-      threeCanvas.style.zIndex = '20';
       threeCanvas.style.pointerEvents = 'auto';
     }, 'pixiSuppress.threeCanvasVisible', Severity.COSMETIC);
 
@@ -9459,7 +9555,6 @@ function _enforceGameplayPixiSuppression() {
         board.style.visibility = 'visible';
         board.style.opacity = '1';
         board.style.pointerEvents = 'none';
-        board.style.zIndex = '10';
         board.style.backgroundColor = 'transparent';
       }
     }, 'pixiSuppress.boardCanvasSelectiveVisible', Severity.COSMETIC);
@@ -9553,6 +9648,8 @@ function _enforceGameplayPixiSuppression() {
         canvas.lighting.visible = !!lightingEditContext;
       }
     }, 'pixiSuppress.lightingV2Gameplay', Severity.COSMETIC);
+
+    safeCall(() => _applyMsV2CanvasDomStack(false), 'pixiSuppress.applyDomStackSelective', Severity.COSMETIC);
 
     diag({
       branch: 'gameplay-selective',
@@ -9750,7 +9847,7 @@ function configureFoundryCanvas() {
     // Three.js is below but visible through PIXI's transparent background.
     pixiCanvas.style.opacity = '1'; // Keep visible for overlay layers
     pixiCanvas.style.pointerEvents = 'auto'; // PIXI handles ALL interaction
-    pixiCanvas.style.zIndex = '10'; // On top
+    pixiCanvas.style.zIndex = MS_V2_CANVAS_Z.nativePixiOverlay; // Above Three (`.three`) in legacy hybrid
   }
   
   // CRITICAL: Set PIXI renderer background to transparent

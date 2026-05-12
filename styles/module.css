@@ -6,7 +6,8 @@
   left: 0;
   width: 100%;
   height: 100%;
-  z-index: 20; /* Above #board (10); below Foundry UI after ensureUILayering() (z-index 100) */
+  /* Stack bands: #board / app.view 10, Three 20, native PIXI tools 25 — see MS_V2_CANVAS_Z in canvas-replacement.js */
+  z-index: 20; /* Above board base (10); below Foundry UI (~100) */
   pointer-events: none; /* Let Foundry handle mouse events */
 }
 

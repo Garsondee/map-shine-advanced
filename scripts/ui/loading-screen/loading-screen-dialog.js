@@ -1698,28 +1698,167 @@ export class LoadingScreenDialog {
     }, 1800);
   }
 
+  /**
+   * Foundry Application / ApplicationV2 root element (handles jQuery-wrapped legacy apps).
+   * @param {any} app
+   * @returns {HTMLElement|null}
+   */
+  _applicationDomElement(app) {
+    const el = app?.element;
+    if (!el) return null;
+    if (el instanceof HTMLElement) return el;
+    if (typeof el.get === 'function') {
+      const node = el.get(0);
+      return node instanceof HTMLElement ? node : null;
+    }
+    const first = el[0];
+    return first instanceof HTMLElement ? first : null;
+  }
+
+  /**
+   * Loading Screen Composer uses a very high z-index overlay; Foundry FilePicker stacks
+   * using Application z-order (much lower), so the picker would open behind this UI
+   * until the composer closed. Force the picker above our overlay.
+   * @param {any} picker
+   */
+  _elevateFilePickerAboveOverlay(picker) {
+    if (!picker) return;
+    // Fixed headroom above `.ms-lsd-overlay` (100050) and other Map Shine panels (~10000–100100).
+    const z = '250000';
+    try {
+      picker.bringToTop?.();
+      picker.bringToFront?.();
+    } catch (_) {
+    }
+    const raw = picker.element;
+    if (raw?.jquery && typeof raw.css === 'function') {
+      try {
+        raw.css('z-index', z);
+      } catch (_) {
+      }
+    }
+    const node = this._applicationDomElement(picker);
+    if (node?.style) node.style.setProperty('z-index', z, 'important');
+  }
+
+  /**
+   * While FilePicker is open, pull the composer overlay out of the way so the native
+   * window stacks correctly even if we cannot target the picker's root node (e.g. some
+   * ApplicationV2 hosts). Restored in {@link _endFilePickerStackingWorkaround}.
+   */
+  _beginFilePickerStackingWorkaround() {
+    if (!this.container) return;
+    const next = (this._filePickerStackDepth || 0) + 1;
+    this._filePickerStackDepth = next;
+    if (next > 1) return;
+    this._filePickerStackSave = {
+      z: this.container.style.zIndex,
+      prio: this.container.style.getPropertyPriority('z-index'),
+    };
+    this.container.style.setProperty('z-index', '40', 'important');
+  }
+
+  _endFilePickerStackingWorkaround() {
+    if (!this.container) return;
+    const next = Math.max(0, (this._filePickerStackDepth || 0) - 1);
+    this._filePickerStackDepth = next;
+    if (next > 0) return;
+    const save = this._filePickerStackSave;
+    this._filePickerStackSave = null;
+    if (!save) return;
+    if (save.z) {
+      this.container.style.zIndex = save.z;
+      if (save.prio) this.container.style.setProperty('z-index', save.z, save.prio);
+    } else {
+      this.container.style.removeProperty('z-index');
+    }
+  }
+
   async _pickFilePath() {
     try {
-      const pickerClass = globalThis.FilePicker;
-      if (!pickerClass) {
+      const filePickerImpl = globalThis.foundry?.applications?.apps?.FilePicker?.implementation;
+      const PickerCls = filePickerImpl ?? globalThis.FilePicker;
+      if (!PickerCls) {
         const raw = prompt('Enter file path:');
         return String(raw || '').trim() || null;
       }
 
       return await new Promise((resolve) => {
-        const picker = new pickerClass({
-          type: 'imagevideo',
-          current: '',
-          callback: (path) => resolve(String(path || '').trim() || null),
-        });
+        let settled = false;
+        let closeApplicationHook = null;
+
+        const finish = (path) => {
+          if (settled) return;
+          settled = true;
+          if (closeApplicationHook && typeof Hooks?.off === 'function') {
+            try {
+              Hooks.off('closeApplication', closeApplicationHook);
+            } catch (_) {
+            }
+            closeApplicationHook = null;
+          }
+          this._endFilePickerStackingWorkaround();
+          resolve(path == null ? null : String(path || '').trim() || null);
+        };
 
         try {
-          picker.render(true);
+          this._beginFilePickerStackingWorkaround();
+
+          const picker = new PickerCls({
+            type: 'imagevideo',
+            current: '',
+            callback: (path) => finish(path),
+          });
+
+          const closeOrig = typeof picker.close === 'function' ? picker.close.bind(picker) : null;
+          if (closeOrig) {
+            picker.close = async (...args) => {
+              const out = await closeOrig(...args);
+              if (!settled) finish(null);
+              return out;
+            };
+          } else if (typeof Hooks?.on === 'function') {
+            closeApplicationHook = (app) => {
+              if (app !== picker) return;
+              if (!settled) finish(null);
+            };
+            Hooks.on('closeApplication', closeApplicationHook);
+          }
+
+          const elevate = () => this._elevateFilePickerAboveOverlay(picker);
+
+          (async () => {
+            try {
+              if (typeof picker.render === 'function') {
+                const ren = picker.render(true);
+                if (ren && typeof ren.then === 'function') await ren;
+              }
+              if (typeof picker.browse === 'function') {
+                const br = picker.browse();
+                if (br && typeof br.then === 'function') await br;
+              }
+              if (typeof picker.render !== 'function' && typeof picker.browse !== 'function') {
+                finish(null);
+                return;
+              }
+            } catch (_) {
+              finish(null);
+              return;
+            }
+            elevate();
+            queueMicrotask(elevate);
+            requestAnimationFrame(() => {
+              elevate();
+              requestAnimationFrame(elevate);
+            });
+            for (const ms of [50, 150, 400, 800]) setTimeout(elevate, ms);
+          })();
         } catch (_) {
-          resolve(null);
+          finish(null);
         }
       });
     } catch (_) {
+      this._endFilePickerStackingWorkaround();
       return null;
     }
   }

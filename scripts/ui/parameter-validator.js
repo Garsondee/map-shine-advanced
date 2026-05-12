@@ -9,6 +9,84 @@ import { createLogger } from '../core/log.js';
 const log = createLogger('ParamValidator');
 
 /**
+ * Coerce Tweakpane / scene-flag colour payloads to a plain serializable `{ r, g, b }` (optional `a`).
+ * Handles `#rrggbb`, `[r,g,b]`, legacy 0–255 object components, and avoids shared live references.
+ *
+ * @param {*} value
+ * @returns {{ r: number, g: number, b: number, a?: number }|null}
+ */
+export function normalizeEffectRgbParam(value) {
+  if (value == null) return null;
+
+  let r;
+  let g;
+  let b;
+  let a;
+
+  if (typeof value === 'string') {
+    const s = value.trim();
+    const m = /^#?([0-9a-f]{6})([0-9a-f]{2})?$/i.exec(s);
+    if (!m) return null;
+    const n = parseInt(m[1], 16);
+    r = ((n >> 16) & 255) / 255;
+    g = ((n >> 8) & 255) / 255;
+    b = (n & 255) / 255;
+    if (m[2]) {
+      const ai = parseInt(m[2], 16);
+      if (Number.isFinite(ai)) a = ai / 255;
+    }
+  } else if (Array.isArray(value)) {
+    r = Number(value[0]);
+    g = Number(value[1]);
+    b = Number(value[2]);
+    if (value.length > 3) a = Number(value[3]);
+  } else if (typeof value === 'object') {
+    r = Number(value.r);
+    g = Number(value.g);
+    b = Number(value.b);
+    if (value.a !== undefined) a = Number(value.a);
+  } else {
+    return null;
+  }
+
+  if (!Number.isFinite(r) || !Number.isFinite(g) || !Number.isFinite(b)) return null;
+
+  const maxc = Math.max(r, g, b);
+  if (maxc > 2.0 && maxc <= 255) {
+    r /= 255;
+    g /= 255;
+    b /= 255;
+    if (a !== undefined && Number.isFinite(a) && a > 2.0 && a <= 255) a /= 255;
+  }
+
+  const out = { r, g, b };
+  if (a !== undefined && Number.isFinite(a)) out.a = a;
+  return out;
+}
+
+/**
+ * Deep-clone a colour-over-life gradient into plain `{ t, r, g, b, a? }[]` for UI + scene flags
+ * (avoids mutating schema `default` arrays in place).
+ *
+ * @param {*} value
+ * @returns {Array<{ t: number, r: number, g: number, b: number, a?: number }>|null}
+ */
+export function cloneEffectGradientParam(value) {
+  if (!Array.isArray(value) || value.length === 0) return null;
+  const out = [];
+  for (let i = 0; i < value.length; i++) {
+    const stop = value[i];
+    if (!stop || typeof stop !== 'object') return null;
+    const t = Number(stop.t);
+    if (!Number.isFinite(t)) return null;
+    const rgb = normalizeEffectRgbParam({ r: stop.r, g: stop.g, b: stop.b, a: stop.a });
+    if (!rgb) return null;
+    out.push({ t, ...rgb });
+  }
+  return out;
+}
+
+/**
  * Validation result
  * @typedef {Object} ValidationResult
  * @property {boolean} valid - Whether the value is valid
@@ -58,6 +136,68 @@ export class ParameterValidator {
   validateParameter(paramId, value, paramDef) {
     const warnings = [];
     let validValue = value;
+
+    if (paramDef?.type === 'gradient') {
+      let cloned = cloneEffectGradientParam(value);
+      if (!cloned) cloned = cloneEffectGradientParam(paramDef?.default);
+      if (!cloned || cloned.length === 0) {
+        const fb = cloneEffectGradientParam(paramDef?.default) ?? [];
+        return {
+          valid: false,
+          value: fb,
+          warnings: [],
+          error: `Invalid gradient value for ${paramId}`
+        };
+      }
+      validValue = cloned.map((s) => ({ ...s }));
+
+      if (this.customValidators.has(paramId)) {
+        const customResult = this.customValidators.get(paramId)(validValue, paramDef);
+        if (customResult.warnings) warnings.push(...customResult.warnings);
+        if (!customResult.valid) {
+          return customResult;
+        }
+        const again = cloneEffectGradientParam(customResult.value);
+        validValue = again ?? validValue;
+      }
+
+      return {
+        valid: true,
+        value: validValue.map((s) => ({ ...s })),
+        warnings,
+        error: null
+      };
+    }
+
+    if (paramDef?.type === 'color') {
+      let normalized = normalizeEffectRgbParam(value);
+      if (!normalized) normalized = normalizeEffectRgbParam(paramDef?.default);
+      if (!normalized) {
+        return {
+          valid: false,
+          value: { r: 1, g: 1, b: 1 },
+          warnings: [],
+          error: `Invalid colour value for ${paramId}`
+        };
+      }
+      validValue = { ...normalized };
+
+      if (this.customValidators.has(paramId)) {
+        const customResult = this.customValidators.get(paramId)(validValue, paramDef);
+        if (customResult.warnings) warnings.push(...customResult.warnings);
+        if (!customResult.valid) {
+          return customResult;
+        }
+        validValue = { ...(normalizeEffectRgbParam(customResult.value) ?? validValue) };
+      }
+
+      return {
+        valid: true,
+        value: { ...validValue },
+        warnings,
+        error: null
+      };
+    }
 
     // Type checking
     const expectedType = this.inferType(paramDef);
@@ -165,7 +305,11 @@ export class ParameterValidator {
       
       if (result.error) {
         allErrors.push(`${paramId}: ${result.error}`);
-        validatedParams[paramId] = paramDef.default;
+        if (paramDef?.type === 'gradient') {
+          validatedParams[paramId] = cloneEffectGradientParam(paramDef.default) ?? [];
+        } else {
+          validatedParams[paramId] = paramDef.default;
+        }
       } else {
         validatedParams[paramId] = result.value;
       }

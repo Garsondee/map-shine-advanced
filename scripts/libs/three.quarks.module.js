@@ -1140,7 +1140,7 @@ class ParticleSystem {
             this.behaviors[j].frameUpdate(delta);
             for (let i = 0; i < this.particleNum; i++) {
                 if (!this.particles[i].died) {
-                    this.behaviors[j].update(this.particles[i], delta);
+                    this.behaviors[j].update(this.particles[i], delta, this);
                 }
             }
         }

@@ -183,6 +183,11 @@ function clamp01(v) {
   return v < 0 ? 0 : v > 1 ? 1 : v;
 }
 
+function smoothstep01(x) {
+  const u = x < 0 ? 0 : x > 1 ? 1 : x;
+  return u * u * (3.0 - 2.0 * u);
+}
+
 function finiteOr(v, fallback = 0) {
   return Number.isFinite(v) ? v : fallback;
 }
@@ -525,7 +530,8 @@ export class EmberLifecycleBehavior {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// SmokeLifecycleBehavior — NormalBlending smoke color/alpha/size over life
+// SmokeLifecycleBehavior — smoke color/alpha/size over life (material uses NormalBlending;
+// emission is added then clamped to [0,1] per channel so smoke stays display-referred).
 // ═══════════════════════════════════════════════════════════════════════════════
 
 export class SmokeLifecycleBehavior {
@@ -550,7 +556,8 @@ export class SmokeLifecycleBehavior {
 
   initialize(particle) {
     const brightness = particle._flameBrightness ?? 1.0;
-    particle._smokeDensity = 1.0 - (brightness * 0.5);
+    // Softer than 0.5× so bright-mask spawns stay readable as smoke, not paper-thin.
+    particle._smokeDensity = Math.max(0.55, 1.0 - brightness * 0.32);
     particle._smokeStartSize = particle.size;
   }
 
@@ -563,17 +570,15 @@ export class SmokeLifecycleBehavior {
     const density = particle._smokeDensity ?? 0.75;
     const brightDark = this._colorBrightness * this._darknessFactor;
 
-    // Smoke alpha can intentionally hide early life (e.g. alphaStart=0.7).
-    // For user-authored colour/emission gradients, map the visible alpha window
-    // to 0..1 so the gradient bar matches what is actually visible in-scene.
-    const visibleDenom = Math.max(0.0001, this._alphaEnd - this._alphaStart);
-    const gradientT = clamp01((t - this._alphaStart) / visibleDenom);
+    // Colour and emission gradients use raw normalized life t ∈ [0,1] so stop
+    // positions in the UI bar match sampling in-scene (same axis as sliders).
+    // (Opacity is still driven separately by the alpha envelope below.)
 
     let baseR, baseG, baseB;
 
     if (this._colorGradient) {
       // User-defined colour gradient — replaces the legacy COOL/WARM blend.
-      const gc = lerpColorStops(this._colorGradient, gradientT, _smokeColorTemp);
+      const gc = lerpColorStops(this._colorGradient, t, _smokeColorTemp);
       baseR = gc.r;
       baseG = gc.g;
       baseB = gc.b;
@@ -587,33 +592,36 @@ export class SmokeLifecycleBehavior {
       baseB = coolColor.b + (warmColor.b - coolColor.b) * w;
     }
 
-    // Emission (self-illumination) — additive glow sampled from a colour gradient.
-    // Black (0,0,0) = no emission; any colour = that colour added on top.
+    // Emission is blended on top of diffuse smoke; clamp to display-referred [0,1]
+    // so bright stops tint toward white without HDR / bloom-driving vertex colours.
     let emissionR = 0, emissionG = 0, emissionB = 0;
     if (this._emissionGradient) {
-      const em = lerpColorStops(this._emissionGradient, gradientT, _smokeEmissionTemp);
+      const em = lerpColorStops(this._emissionGradient, t, _smokeEmissionTemp);
       emissionR = em.r;
       emissionG = em.g;
       emissionB = em.b;
     }
 
-    particle.color.x = baseR * brightDark + emissionR;
-    particle.color.y = baseG * brightDark + emissionG;
-    particle.color.z = baseB * brightDark + emissionB;
+    particle.color.x = clamp01(baseR * brightDark + emissionR);
+    particle.color.y = clamp01(baseG * brightDark + emissionG);
+    particle.color.z = clamp01(baseB * brightDark + emissionB);
 
-    // Alpha: 3-point smoothstep envelope.
+    // Alpha: 3-point smoothstep envelope over normalized age t ∈ [0,1].
+    // "Alpha Fade End" is the life fraction where opacity hits zero (not inclusive).
+    // Handle t >= aEnd and peak≈end explicitly so we never leave alphaEnv at its
+    // initial value and never depend on branch order edge cases.
     let alphaEnv = 0.0;
     const aStart = this._alphaStart;
     const aPeak = this._alphaPeak;
     const aEnd = this._alphaEnd;
-    if (t <= aStart) {
+    if (t <= aStart || t >= aEnd) {
       alphaEnv = 0.0;
-    } else if (t <= aPeak) {
-      const rampT = (t - aStart) / Math.max(0.0001, aPeak - aStart);
-      alphaEnv = rampT * rampT * (3.0 - 2.0 * rampT);
-    } else if (t <= aEnd) {
-      const fadeT = (t - aPeak) / Math.max(0.0001, aEnd - aPeak);
-      const s = fadeT * fadeT * (3.0 - 2.0 * fadeT);
+    } else if (t < aPeak) {
+      const rampT = (t - aStart) / Math.max(1e-5, aPeak - aStart);
+      alphaEnv = smoothstep01(rampT);
+    } else {
+      const fadeT = (t - aPeak) / Math.max(1e-5, aEnd - aPeak);
+      const s = smoothstep01(fadeT);
       alphaEnv = 1.0 - s;
     }
     const indoorSmoke = typeof particle._indoorSmokeScale === 'number' && Number.isFinite(particle._indoorSmokeScale)
@@ -636,8 +644,14 @@ export class SmokeLifecycleBehavior {
     this._colorBrightness = Math.max(0.01, p?.smokeColorBrightness ?? 0.45);
     this._sizeGrowth = Math.max(1.0, p?.smokeSizeOverLife ?? p?.smokeSizeGrowth ?? 4.0);
     this._alphaStart = Math.max(0.0, Math.min(1.0, p?.smokeAlphaStart ?? 0.0));
-    this._alphaPeak = Math.max(this._alphaStart, Math.min(1.0, p?.smokeAlphaPeak ?? 0.75));
-    this._alphaEnd = Math.max(this._alphaPeak, Math.min(1.0, p?.smokeAlphaEnd ?? 1.0));
+    let peak = Math.max(0.0, Math.min(1.0, p?.smokeAlphaPeak ?? 0.75));
+    let end = Math.max(0.0, Math.min(1.0, p?.smokeAlphaEnd ?? 1.0));
+    peak = Math.max(this._alphaStart, peak);
+    // If "fade end" is left of peak on the timeline, treat end as the opacity cutoff
+    // and pull peak back instead of silently bumping end upward.
+    if (end < peak) peak = end;
+    this._alphaPeak = peak;
+    this._alphaEnd = Math.max(peak, end);
 
     const darknessResponse = Math.max(0.0, Math.min(1.0, p?.smokeDarknessResponse ?? 0.8));
     const envState = weatherController._environmentState;

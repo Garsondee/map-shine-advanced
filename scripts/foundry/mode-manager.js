@@ -95,6 +95,27 @@ export class ModeManager {
   }
 
   /**
+   * Foundry `Pause` HUD (`#pause` / `ui.pause`) must sit above Map Shine DOM (canvas
+   * stack ~10–25, control surfaces ~10k) and stay clickable while `#ui` uses
+   * `pointer-events: none` for canvas passthrough.
+   */
+  elevatePauseUi() {
+    const z = '10100';
+    const apply = (node) => {
+      if (!node || !(node instanceof HTMLElement)) return;
+      node.style.zIndex = z;
+      node.style.pointerEvents = 'auto';
+    };
+    try {
+      apply(document.getElementById('pause'));
+      const raw = globalThis.ui?.pause?.element;
+      const el = raw?.get?.(0) ?? raw?.[0] ?? (raw instanceof HTMLElement ? raw : null);
+      apply(el);
+    } catch (_) {
+    }
+  }
+
+  /**
    * Ensure Foundry UI layers have proper z-index to appear above Three.js canvas.
    */
   ensureUILayering() {
@@ -133,13 +154,15 @@ export class ModeManager {
 
       // Re-enable pointer events on child elements that need interaction
       const uiChildren = uiContainer.querySelectorAll(
-        '#sidebar, #chat, #players, #hotbar, #controls, #navigation'
+        '#sidebar, #chat, #players, #hotbar, #controls, #navigation, #pause'
       );
       uiChildren.forEach(child => {
         child.style.pointerEvents = 'auto';
       });
       log.debug('Re-enabled pointer events on interactive UI children');
     }
+
+    this.elevatePauseUi();
 
     log.info('UI layering ensured — peripheral UI at z-index 100, canvas area left interactive');
   }

@@ -23,6 +23,8 @@ export class SmartWindBehavior {
   update(particle, delta, system) {
     if (!particle || typeof delta !== 'number') return;
 
+    const isSmoke = !!(system && system.userData && system.userData.isSmoke);
+
     // Sanity check delta to prevent physics explosions on lag spikes
     let dt = delta;
     if (!Number.isFinite(dt)) return;
@@ -44,10 +46,22 @@ export class SmartWindBehavior {
     } else if (state && typeof state.windSpeed === 'number' && Number.isFinite(state.windSpeed)) {
       windSpeed = Math.max(0.0, Math.min(1.0, state.windSpeed));
     }
-    if (!Number.isFinite(windSpeed) || windSpeed <= 0.001) return;
+    if (!Number.isFinite(windSpeed) || windSpeed <= 0.001) {
+      if (isSmoke && particle.velocity) {
+        particle.velocity.x *= 0.987;
+        particle.velocity.y *= 0.987;
+      }
+      return;
+    }
 
     const windDir = state && state.windDirection; // Vector2
-    if (!windDir || !Number.isFinite(windDir.x) || !Number.isFinite(windDir.y)) return;
+    if (!windDir || !Number.isFinite(windDir.x) || !Number.isFinite(windDir.y)) {
+      if (isSmoke && particle.velocity) {
+        particle.velocity.x *= 0.987;
+        particle.velocity.y *= 0.987;
+      }
+      return;
+    }
 
     // 3. Calculate Force
     // Base magnitude scaling matches FireSparksEffect / WeatherParticles tuning
@@ -73,7 +87,11 @@ export class SmartWindBehavior {
       return;
     }
 
-    const forceMag = windSpeed * 300.0 * influence * susceptibility;
+    // Smoke uses the same 300× base as fire, but lives much longer so XY velocity
+    // integrates into large drift; scale gusts down (after per-system windInfluence).
+    const smokeWindMul = isSmoke ? 0.06 : 1.0;
+
+    const forceMag = windSpeed * 300.0 * influence * susceptibility * smokeWindMul;
     if (!Number.isFinite(forceMag)) return;
 
     // 4. Apply to Velocity
@@ -81,6 +99,10 @@ export class SmartWindBehavior {
     // Wind acts as a force (acceleration).
     
     if (particle.velocity) {
+      if (isSmoke) {
+        particle.velocity.x *= 0.987;
+        particle.velocity.y *= 0.987;
+      }
       const dvx = windDir.x * forceMag * dt;
       const dvy = windDir.y * forceMag * dt;
 

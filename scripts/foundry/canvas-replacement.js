@@ -44,6 +44,7 @@ import {
 import { TileEffectBindingManager } from '../scene/TileEffectBindingManager.js';
 import { RenderLoop } from '../core/render-loop.js';
 import { TweakpaneManager } from '../ui/tweakpane-manager.js';
+import { normalizeEffectRgbParam } from '../ui/parameter-validator.js';
 import { ControlPanelManager } from '../ui/control-panel-manager.js';
 import { CameraPanelManager } from '../ui/camera-panel-manager.js';
 import { TokenManager } from '../scene/token-manager.js';
@@ -1726,8 +1727,10 @@ const MSA_V14_LIFECYCLE_TRACE = '[MSA-V14-LIFECYCLE]';
 /** @type {boolean} */
 let ambientSoundAudibilityPatched = false;
 
- /** @type {number|null} - Hook ID for pauseGame listener */
- let pauseGameHookId = null;
+/** @type {number|null} - Hook ID for pauseGame listener */
+let pauseGameHookId = null;
+/** @type {number|null} - Re-elevate Foundry Pause UI after it re-renders */
+let pauseUiRenderHookId = null;
 
 /** @type {string|null} Last shown Levels interop warning key (dedupe within session) */
 let lastLevelsInteropWarningKey = null;
@@ -2695,6 +2698,16 @@ export function initialize() {
             tm.setFoundryPaused(!!paused);
           }
         }, 'pauseGame.hook', Severity.COSMETIC);
+        safeCall(() => {
+          const bump = () => {
+            try {
+              modeManager?.elevatePauseUi?.();
+            } catch (_) {
+            }
+          };
+          bump();
+          requestAnimationFrame(() => requestAnimationFrame(bump));
+        }, 'pauseGame.pauseUiLayer', Severity.COSMETIC);
       });
     }
 
@@ -7303,6 +7316,13 @@ async function createThreeCanvas(scene, createOptions = {}) {
     });
     modeManager.ensureUILayering();
 
+    if (!pauseUiRenderHookId) {
+      pauseUiRenderHookId = Hooks.on('renderApplication', (app) => {
+        if (!app || app.constructor?.name !== 'Pause') return;
+        safeCall(() => modeManager?.elevatePauseUi?.(), 'renderApplication.pauseUi', Severity.COSMETIC);
+      });
+    }
+
     // Step 7.5 removed: shaders.compile is now a real stage in configureStages and is
     // initialized by fin.shaderCompile after UI init and scene prepare have completed.
     // Prematurely jumping to shaders.compile here would cause the bar to go backwards.
@@ -7986,6 +8006,10 @@ async function createThreeCanvas(scene, createOptions = {}) {
         // semantic gate that maps to ashIntensity (0 = off).
         safeCall(() => {
           const ashTuning = weatherController?.ashTuning || {};
+          const ashColorStartDefault = { ...(ashTuning.colorStart ?? { r: 0.07, g: 0.055, b: 0.045 }) };
+          const ashColorEndDefault = { ...(ashTuning.colorEnd ?? { r: 0.82, g: 0.8, b: 0.76 }) };
+          const emberColorStartDefault = { ...(ashTuning.emberColorStart ?? { r: 1.0, g: 0.25, b: 0.0 }) };
+          const emberColorEndDefault = { ...(ashTuning.emberColorEnd ?? { r: 1.0, g: 0.25, b: 0.0 }) };
           const ashWeatherSchema = {
             enabled: false,
             groups: [
@@ -8008,8 +8032,8 @@ async function createThreeCanvas(scene, createOptions = {}) {
               ashOpacityStartMin: { label: 'Opacity Start Min', type: 'slider', default: ashTuning.opacityStartMin ?? 0.58, min: 0.0, max: 1.0, step: 0.01 },
               ashOpacityStartMax: { label: 'Opacity Start Max', type: 'slider', default: ashTuning.opacityStartMax ?? 0.82, min: 0.0, max: 1.0, step: 0.01 },
               ashOpacityEnd: { label: 'Opacity End', type: 'slider', default: ashTuning.opacityEnd ?? 0.85, min: 0.0, max: 1.0, step: 0.01 },
-              ashColorStart: { type: 'color', label: 'Color Start (soot)', default: ashTuning.colorStart ?? { r: 0.07, g: 0.055, b: 0.045 } },
-              ashColorEnd: { type: 'color', label: 'Color End (pale ash)', default: ashTuning.colorEnd ?? { r: 0.82, g: 0.8, b: 0.76 } },
+              ashColorStart: { type: 'color', label: 'Color Start (soot)', default: ashColorStartDefault },
+              ashColorEnd: { type: 'color', label: 'Color End (pale ash)', default: ashColorEndDefault },
               ashBrightness: { label: 'Brightness', type: 'slider', default: ashTuning.brightness ?? 1.0, min: 0.0, max: 3.0, step: 0.05 },
               ashMaterialTint: { label: 'Material Tint', type: 'slider', default: ashTuning.materialTint ?? 1.0, min: 0.35, max: 1.5, step: 0.01 },
               ashLifeBrighten: { label: 'Life Brighten', type: 'slider', default: ashTuning.ashLifeBrighten ?? 2.28, min: 0.5, max: 4.0, step: 0.02 },
@@ -8030,8 +8054,8 @@ async function createThreeCanvas(scene, createOptions = {}) {
               emberOpacityStartMin: { label: 'Ember Opacity Min', type: 'slider', default: ashTuning.emberOpacityStartMin ?? 0.87, min: 0.0, max: 1.0, step: 0.01 },
               emberOpacityStartMax: { label: 'Ember Opacity Max', type: 'slider', default: ashTuning.emberOpacityStartMax ?? 0.94, min: 0.0, max: 1.0, step: 0.01 },
               emberOpacityEnd: { label: 'Ember Opacity End', type: 'slider', default: ashTuning.emberOpacityEnd ?? 0.83, min: 0.0, max: 1.0, step: 0.01 },
-              emberColorStart: { type: 'color', label: 'Ember Color Start', default: ashTuning.emberColorStart ?? { r: 1.0, g: 0.25, b: 0.0 } },
-              emberColorEnd: { type: 'color', label: 'Ember Color End', default: ashTuning.emberColorEnd ?? { r: 1.0, g: 0.25, b: 0.0 } },
+              emberColorStart: { type: 'color', label: 'Ember Color Start', default: emberColorStartDefault },
+              emberColorEnd: { type: 'color', label: 'Ember Color End', default: emberColorEndDefault },
               emberBrightness: { label: 'Ember Brightness (HDR)', type: 'slider', default: ashTuning.emberBrightness ?? 5, min: 0.0, max: 12.0, step: 0.05 },
               emberGravityScale: { label: 'Ember Gravity Scale', type: 'slider', default: ashTuning.emberGravityScale ?? 0, min: 0.0, max: 3.0, step: 0.05 },
               emberWindInfluence: { label: 'Ember Wind Influence', type: 'slider', default: ashTuning.emberWindInfluence ?? 0.52, min: 0.0, max: 4.0, step: 0.05 },
@@ -8113,8 +8137,14 @@ async function createThreeCanvas(scene, createOptions = {}) {
               else if (paramId === 'ashOpacityStartMin') t.opacityStartMin = value;
               else if (paramId === 'ashOpacityStartMax') t.opacityStartMax = value;
               else if (paramId === 'ashOpacityEnd') t.opacityEnd = value;
-              else if (paramId === 'ashColorStart') t.colorStart = value;
-              else if (paramId === 'ashColorEnd') t.colorEnd = value;
+              else if (paramId === 'ashColorStart') {
+                const c = normalizeEffectRgbParam(value);
+                if (c) t.colorStart = { ...c };
+              }
+              else if (paramId === 'ashColorEnd') {
+                const c = normalizeEffectRgbParam(value);
+                if (c) t.colorEnd = { ...c };
+              }
               else if (paramId === 'ashBrightness') t.brightness = value;
               else if (paramId === 'ashMaterialTint') t.materialTint = value;
               else if (paramId === 'ashLifeBrighten') t.ashLifeBrighten = value;
@@ -8135,8 +8165,14 @@ async function createThreeCanvas(scene, createOptions = {}) {
               else if (paramId === 'emberOpacityStartMin') t.emberOpacityStartMin = value;
               else if (paramId === 'emberOpacityStartMax') t.emberOpacityStartMax = value;
               else if (paramId === 'emberOpacityEnd') t.emberOpacityEnd = value;
-              else if (paramId === 'emberColorStart') t.emberColorStart = value;
-              else if (paramId === 'emberColorEnd') t.emberColorEnd = value;
+              else if (paramId === 'emberColorStart') {
+                const c = normalizeEffectRgbParam(value);
+                if (c) t.emberColorStart = { ...c };
+              }
+              else if (paramId === 'emberColorEnd') {
+                const c = normalizeEffectRgbParam(value);
+                if (c) t.emberColorEnd = { ...c };
+              }
               else if (paramId === 'emberBrightness') t.emberBrightness = value;
               else if (paramId === 'emberGravityScale') t.emberGravityScale = value;
               else if (paramId === 'emberWindInfluence') t.emberWindInfluence = value;
@@ -10707,13 +10743,28 @@ function ensureUILayering() {
     log.debug('UI container set to pointer-events: none');
     
     // Re-enable pointer events on child elements that need interaction
-    const uiChildren = uiContainer.querySelectorAll('#sidebar, #chat, #players, #hotbar, #controls, #navigation');
+    const uiChildren = uiContainer.querySelectorAll('#sidebar, #chat, #players, #hotbar, #controls, #navigation, #pause');
     uiChildren.forEach(child => {
       child.style.pointerEvents = 'auto';
     });
     log.debug('Re-enabled pointer events on interactive UI children');
   }
-  
+
+  try {
+    const pauseEl = document.getElementById('pause');
+    if (pauseEl) {
+      pauseEl.style.zIndex = '10100';
+      pauseEl.style.pointerEvents = 'auto';
+    }
+    const raw = globalThis.ui?.pause?.element;
+    const pnode = raw?.get?.(0) ?? raw?.[0] ?? (raw instanceof HTMLElement ? raw : null);
+    if (pnode?.style) {
+      pnode.style.zIndex = '10100';
+      pnode.style.pointerEvents = 'auto';
+    }
+  } catch (_) {
+  }
+
   log.info('UI layering ensured - peripheral UI at z-index 100, canvas area left interactive');
 }
 

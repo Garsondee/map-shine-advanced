@@ -4,9 +4,9 @@
  * Renders an interactive gradient strip with draggable colour stops.
  * Designed to be injected into the Tweakpane DOM after an anchor blade.
  *
- * Stops format: { t, r, g, b } — all channels in 0–1 float range.
- * For emission gradients use the same format: black (0,0,0) = no emission,
- * any colour = that colour as additive glow.
+ * Stops format: { t, r, g, b } — channels stored as 0–1 floats (legacy 0–255 is normalized on load).
+ * For emission gradients use the same format: black (0,0,0) = no tint; colour is
+ * added to diffuse smoke in the effect then clamped to display-referred [0,1].
  *
  * Interaction:
  *   - Click gradient strip          → add interpolated stop at that position
@@ -16,6 +16,8 @@
  *
  * @module ui/gradient-editor
  */
+
+import { normalizeEffectRgbParam } from './parameter-validator.js';
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 
@@ -337,15 +339,39 @@ export class GradientEditor {
     document.body.appendChild(popupEl);
 
     // Tweakpane pane with a float-range colour binding
+    const rgb0 = normalizeEffectRgbParam({ r: stop.r, g: stop.g, b: stop.b }) ?? {
+      r: _clamp(_finiteOr(stop.r, 0), 0, 1),
+      g: _clamp(_finiteOr(stop.g, 0), 0, 1),
+      b: _clamp(_finiteOr(stop.b, 0), 0, 1),
+    };
+    const nr = _clamp(rgb0.r, 0, 1);
+    const ng = _clamp(rgb0.g, 0, 1);
+    const nb = _clamp(rgb0.b, 0, 1);
+    const healed =
+      Math.abs(nr - _finiteOr(stop.r, 0)) > 1e-5
+      || Math.abs(ng - _finiteOr(stop.g, 0)) > 1e-5
+      || Math.abs(nb - _finiteOr(stop.b, 0)) > 1e-5;
+    stop.r = nr;
+    stop.g = ng;
+    stop.b = nb;
     const colorObj = { color: { r: stop.r, g: stop.g, b: stop.b } };
+    if (healed) {
+      this._render();
+      this._notifyChangeDebounced();
+    }
     const pane = new TP.Pane({ container: popupEl });
     pane.addBinding(colorObj, 'color', {
       label: 'Stop Colour',
+      // ObjectColorInputPlugin reads params.color.type, not top-level colorType.
+      color: { type: 'float' },
       colorType: 'float',
     }).on('change', (ev) => {
-      stop.r = ev.value.r;
-      stop.g = ev.value.g;
-      stop.b = ev.value.b;
+      const rgb = normalizeEffectRgbParam(ev.value);
+      if (rgb) {
+        stop.r = _clamp(rgb.r, 0, 1);
+        stop.g = _clamp(rgb.g, 0, 1);
+        stop.b = _clamp(rgb.b, 0, 1);
+      }
       this._render();
       this._notifyChangeDebounced();
     });
@@ -403,9 +429,11 @@ export class GradientEditor {
 
     if (!this._stops.length) return;
 
-    // Build a CSS linear-gradient from the colour stops
+    // addColorStop requires strictly non-decreasing offsets; keep order stable.
+    const sorted = [...this._stops].sort((a, b) => a.t - b.t);
+
     const grd = ctx.createLinearGradient(0, 0, w, 0);
-    for (const s of this._stops) {
+    for (const s of sorted) {
       grd.addColorStop(_clamp(s.t, 0, 1), _toHex(s.r, s.g, s.b));
     }
     ctx.fillStyle = grd;
@@ -495,7 +523,7 @@ export class GradientEditor {
   /**
    * Normalize stored stop data into the current color-stop shape.
    * Supports legacy scalar emission stops `{ t, v }` by converting them to
-   * grayscale emission where black = none and white = full emission.
+   * grayscale tint where black = none and white = strong (still clamped in-engine).
    */
   _normalizeStop(stop, index, total) {
     if (!stop || typeof stop !== 'object') return null;
@@ -504,6 +532,20 @@ export class GradientEditor {
     const t = _clamp(_finiteOr(stop.t, fallbackT), 0, 1);
 
     if (Number.isFinite(stop.r) || Number.isFinite(stop.g) || Number.isFinite(stop.b)) {
+      const rgb = normalizeEffectRgbParam({
+        r: stop.r,
+        g: stop.g,
+        b: stop.b,
+        a: stop.a,
+      });
+      if (rgb) {
+        return {
+          t,
+          r: _clamp(rgb.r, 0, 1),
+          g: _clamp(rgb.g, 0, 1),
+          b: _clamp(rgb.b, 0, 1),
+        };
+      }
       return {
         t,
         r: _clamp(_finiteOr(stop.r, 0), 0, 1),

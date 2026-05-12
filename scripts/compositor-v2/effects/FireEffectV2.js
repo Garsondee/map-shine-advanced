@@ -178,9 +178,9 @@ export class FireEffectV2 {
       emberPeakOpacity: 0.9,
       smokeEnabled: true,
       smokeRatio: 1.7,
-      smokeOpacity: 0.27,
+      smokeOpacity: 0.4,
       smokeColorWarmth: 0.59,
-      smokeColorBrightness: 0.35,
+      smokeColorBrightness: 0.52,
       smokeDarknessResponse: 0.8,
       smokeSizeMin: 200,
       smokeSizeMax: 400,
@@ -198,18 +198,18 @@ export class FireEffectV2 {
       // Gradient-over-lifespan: colour and emission tracks.
       // When non-null with ≥2 stops, the gradient overrides the legacy COOL/WARM blend.
       // Legacy warmth/brightness sliders remain in effect whenever gradient is null.
+      // Diffuse-like greys (matches legacy SMOKE_COLOR_* feel). Avoid fire-orange at t=0
+      // or smoke reads as a second additive flame layer despite NormalBlending.
       smokeColorGradient: [
-        { t: 0, r: 0.9, g: 0.45, b: 0.1 },
-        { t: 0.1061011893408639, r: 0.44, g: 0.38, b: 0.32 },
-        { t: 0.24895833219800675, r: 0.36, g: 0.34, b: 0.32 },
+        { t: 0, r: 0.4, g: 0.35, b: 0.3 },
+        { t: 0.15, r: 0.38, g: 0.35, b: 0.31 },
+        { t: 0.45, r: 0.32, g: 0.3, b: 0.28 },
         { t: 1, r: 0, g: 0, b: 0 },
       ],
+      // Emission is added to diffuse smoke RGB then clamped to [0,1] (display-referred, no HDR).
+      // Defaults stay black unless the user adds tint stops.
       smokeEmissionGradient: [
-        { t: 0, r: 1, g: 1, b: 0 },
-        { t: 0.034351663531208235, r: 1, g: 0.4885711669921875, b: 0 },
-        { t: 0.22172437617346613, r: 0.04, g: 0.04, b: 0.04 },
-        { t: 0.34935507220794615, r: 1, g: 0.5742854527064736, b: 0 },
-        { t: 0.4756279846315714, r: 0.0345205563107544, g: 0.0345205563107544, b: 0.0345205563107544 },
+        { t: 0, r: 0, g: 0, b: 0 },
         { t: 1, r: 0, g: 0, b: 0 },
       ],
       heatDistortionEnabled: true,
@@ -308,33 +308,29 @@ export class FireEffectV2 {
         emberCurlStrength: { type: 'slider', label: 'Curl Strength', min: 0.0, max: 12.0, step: 0.05, default: 6.65 },
         smokeEnabled: { type: 'checkbox', label: 'Enable Smoke', default: true },
         smokeRatio: { type: 'slider', label: 'Emission Density', min: 0.0, max: 3.0, step: 0.05, default: 1.7 },
-        smokeOpacity: { type: 'slider', label: 'Peak Opacity', min: 0.0, max: 1.0, step: 0.01, default: 0.27 },
+        smokeOpacity: { type: 'slider', label: 'Peak Opacity', min: 0.0, max: 1.0, step: 0.01, default: 0.4 },
         indoorSmokeSuppression: { type: 'slider', label: 'Indoor Smoke Suppression', min: 0.0, max: 1.0, step: 0.01, default: 0 },
         // Legacy colour controls — used when smokeColorGradient is null.
         smokeColorWarmth: { type: 'slider', label: 'Color Warmth', min: 0.0, max: 1.0, step: 0.01, default: 0.59 },
-        smokeColorBrightness: { type: 'slider', label: 'Brightness', min: 0.05, max: 2.0, step: 0.01, default: 0.35 },
+        smokeColorBrightness: { type: 'slider', label: 'Brightness', min: 0.05, max: 2.0, step: 0.01, default: 0.52 },
         smokeDarknessResponse: { type: 'slider', label: 'Darkness Response', min: 0.0, max: 1.0, step: 0.01, default: 0.8 },
         // Colour-over-life gradient. When set, overrides the warmth/brightness sliders.
         smokeColorGradient: {
           type: 'gradient',
           label: 'Colour Over Life',
           default: [
-            { t: 0, r: 0.9, g: 0.45, b: 0.1 },
-            { t: 0.1061011893408639, r: 0.44, g: 0.38, b: 0.32 },
-            { t: 0.24895833219800675, r: 0.36, g: 0.34, b: 0.32 },
+            { t: 0, r: 0.4, g: 0.35, b: 0.3 },
+            { t: 0.15, r: 0.38, g: 0.35, b: 0.31 },
+            { t: 0.45, r: 0.32, g: 0.3, b: 0.28 },
             { t: 1, r: 0, g: 0, b: 0 },
           ]
         },
-        // Emission (additive glow) gradient. Black = no emission; colour = tinted glow.
+        // Added on top of base smoke RGB in the lifecycle (black = no extra glow).
         smokeEmissionGradient: {
           type: 'gradient',
-          label: 'Emission (Glow) Over Life',
+          label: 'Emission tint over life',
           default: [
-            { t: 0, r: 1, g: 1, b: 0 },
-            { t: 0.034351663531208235, r: 1, g: 0.4885711669921875, b: 0 },
-            { t: 0.22172437617346613, r: 0.04, g: 0.04, b: 0.04 },
-            { t: 0.34935507220794615, r: 1, g: 0.5742854527064736, b: 0 },
-            { t: 0.4756279846315714, r: 0.0345205563107544, g: 0.0345205563107544, b: 0.0345205563107544 },
+            { t: 0, r: 0, g: 0, b: 0 },
             { t: 1, r: 0, g: 0, b: 0 },
           ]
         },
@@ -347,9 +343,9 @@ export class FireEffectV2 {
         smokeUpdraft: { type: 'slider', label: 'Updraft', min: 0.0, max: 20.0, step: 0.1, default: 1.1 },
         smokeTurbulence: { type: 'slider', label: 'Turbulence', min: 0.0, max: 5.0, step: 0.05, default: 0.4 },
         smokeWindInfluence: { type: 'slider', label: 'Wind Influence', min: 0.0, max: 10.0, step: 0.1, default: 0.1 },
-        smokeAlphaStart: { type: 'slider', label: 'Alpha Ramp Start', min: 0.0, max: 1.0, step: 0.01, default: 0 },
-        smokeAlphaPeak: { type: 'slider', label: 'Alpha Peak', min: 0.0, max: 1.0, step: 0.01, default: 0.5 },
-        smokeAlphaEnd: { type: 'slider', label: 'Alpha Fade End', min: 0.0, max: 1.0, step: 0.01, default: 1.0 },
+        smokeAlphaStart: { type: 'slider', label: 'Opacity ramp from (life %)', min: 0.0, max: 1.0, step: 0.01, default: 0 },
+        smokeAlphaPeak: { type: 'slider', label: 'Peak opacity at (life %)', min: 0.0, max: 1.0, step: 0.01, default: 0.5 },
+        smokeAlphaEnd: { type: 'slider', label: 'Opacity reaches zero at (life %)', min: 0.0, max: 1.0, step: 0.01, default: 1.0 },
         windInfluence: { type: 'slider', label: 'Wind Influence', min: 0.0, max: 5.0, step: 0.1, default: 4.5 },
         timeScale: { type: 'slider', label: 'Time Scale', min: 0.1, max: 3.0, step: 0.05, default: 3.0 },
         lightIntensity: { type: 'slider', label: 'Light Intensity', min: 0.0, max: 5.0, step: 0.1, default: 5.0 },

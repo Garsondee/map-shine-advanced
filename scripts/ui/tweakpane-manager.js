@@ -8,7 +8,13 @@ import { canPersistSceneDocument, isGmLike } from '../core/gm-parity.js';
 import { createLogger } from '../core/log.js';
 import { GradientEditor } from './gradient-editor.js';
 import { stateApplier } from './state-applier.js';
-import { globalValidator, getSpecularEffectiveState, getStripeDependencyState } from './parameter-validator.js';
+import {
+  globalValidator,
+  getSpecularEffectiveState,
+  getStripeDependencyState,
+  normalizeEffectRgbParam,
+  cloneEffectGradientParam
+} from './parameter-validator.js';
 import { TextureManagerUI } from './texture-manager.js';
 import { EffectStackUI } from './effect-stack.js';
 import { DiagnosticCenterManager } from './diagnostic-center.js';
@@ -3846,12 +3852,20 @@ export class TweakpaneManager {
     }
 
     // Use saved value if available, otherwise use default from schema
-    effectData.params[paramId] = savedParams[paramId] ?? paramDef.default;
-
-    // Gradient type is handled separately via DOM injection — skip Tweakpane binding
     if (paramDef.type === 'gradient') {
+      const raw = savedParams[paramId] ?? paramDef.default;
+      effectData.params[paramId] = cloneEffectGradientParam(raw)
+        ?? cloneEffectGradientParam(paramDef.default)
+        ?? [];
       this._buildGradientControl(effectId, container, paramId, paramDef, updateCallback);
       return;
+    }
+
+    effectData.params[paramId] = savedParams[paramId] ?? paramDef.default;
+    if (paramDef.type === 'color') {
+      const raw = effectData.params[paramId];
+      const n = normalizeEffectRgbParam(raw) ?? normalizeEffectRgbParam(paramDef.default);
+      effectData.params[paramId] = n ? { ...n } : { r: 1, g: 1, b: 1 };
     }
 
     // Determine control type
@@ -4134,8 +4148,12 @@ export class TweakpaneManager {
         const def = schemaParams[paramId];
         if (def?.readonly === true) continue;
         if (def?.hidden === true && paramId !== 'enabled') continue;
-        const v = this._sanitizeSerializableValue(value);
-        if (v === undefined) continue;
+        const v = def?.type === 'color'
+          ? normalizeEffectRgbParam(value)
+          : def?.type === 'gradient'
+            ? cloneEffectGradientParam(value)
+            : this._sanitizeSerializableValue(value);
+        if (v === undefined || v === null) continue;
         this._setProperty(params, paramId, v);
       }
 
@@ -4217,6 +4235,22 @@ export class TweakpaneManager {
         }
       }
 
+      for (const [paramId, paramDef] of Object.entries(schemaParams)) {
+        if (paramDef?.type !== 'color') continue;
+        const cv = params[paramId];
+        const n = normalizeEffectRgbParam(cv);
+        if (n) params[paramId] = n;
+        else if (cv !== undefined) delete params[paramId];
+      }
+
+      for (const [paramId, paramDef] of Object.entries(schemaParams)) {
+        if (paramDef?.type !== 'gradient') continue;
+        const gv = params[paramId];
+        const c = cloneEffectGradientParam(gv);
+        if (c) params[paramId] = c;
+        else if (gv !== undefined) delete params[paramId];
+      }
+
       // Apply player overrides (client-local, disable only)
       if (!isGmLike()) {
         const playerOverrides = sceneSettings.getPlayerOverrides(scene);
@@ -4277,8 +4311,12 @@ export class TweakpaneManager {
         const def = schemaParams[paramId];
         if (def?.readonly === true) continue;
         if (def?.hidden === true && paramId !== 'enabled') continue;
-        const v = this._sanitizeSerializableValue(value);
-        if (v === undefined) continue;
+        const v = def?.type === 'color'
+          ? normalizeEffectRgbParam(value)
+          : def?.type === 'gradient'
+            ? cloneEffectGradientParam(value)
+            : this._sanitizeSerializableValue(value);
+        if (v === undefined || v === null) continue;
         this._setProperty(params, paramId, v);
       }
 
@@ -4618,7 +4656,15 @@ export class TweakpaneManager {
         if (def?.readonly === true) continue;
         if (def?.hidden === true && paramId !== 'enabled') continue;
         if (effectData.params[paramId] !== undefined) {
-          effectData.params[paramId] = value;
+          let next = value;
+          if (def?.type === 'color') {
+            const n = normalizeEffectRgbParam(value);
+            if (n) next = { ...n };
+          } else if (def?.type === 'gradient') {
+            const g = cloneEffectGradientParam(value);
+            if (g) next = g;
+          }
+          effectData.params[paramId] = next;
           
           // Refresh binding display
           if (effectData.bindings[paramId]) {
@@ -4631,7 +4677,16 @@ export class TweakpaneManager {
       const callback = this.effectCallbacks.get(effectId);
       if (callback) {
         for (const [paramId, value] of Object.entries(savedParams)) {
-          callback(effectId, paramId, value);
+          const def = effectData.schema?.parameters?.[paramId];
+          let out = value;
+          if (def?.type === 'color') {
+            const n = normalizeEffectRgbParam(value);
+            if (n) out = { ...n };
+          } else if (def?.type === 'gradient') {
+            const g = cloneEffectGradientParam(value);
+            if (g) out = g;
+          }
+          callback(effectId, paramId, out);
         }
       }
       
@@ -4665,7 +4720,14 @@ export class TweakpaneManager {
     for (const [paramId, paramDef] of Object.entries(effectData.schema.parameters || {})) {
       if (paramDef?.readonly === true) continue;
       if (paramDef?.hidden === true && paramId !== 'enabled') continue;
-      effectData.params[paramId] = paramDef.default;
+      if (paramDef.type === 'color') {
+        const n = normalizeEffectRgbParam(paramDef.default);
+        effectData.params[paramId] = n ? { ...n } : { r: 1, g: 1, b: 1 };
+      } else if (paramDef.type === 'gradient') {
+        effectData.params[paramId] = cloneEffectGradientParam(paramDef.default) ?? [];
+      } else {
+        effectData.params[paramId] = paramDef.default;
+      }
 
       // Refresh UI binding
       if (effectData.bindings[paramId]) {
@@ -4675,7 +4737,7 @@ export class TweakpaneManager {
       // Notify callback
       const callback = this.effectCallbacks.get(effectId);
       if (callback) {
-        callback(effectId, paramId, paramDef.default);
+        callback(effectId, paramId, effectData.params[paramId]);
       }
     }
 

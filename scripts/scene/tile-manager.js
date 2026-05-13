@@ -25,6 +25,13 @@ const log = createLogger('TileManager');
 // Currently FALSE so tiles behave normally while we profile other systems.
 const DISABLE_TILE_UPDATES = false;
 
+// Debug flag for tile creation logging - set to true only when debugging load issues
+const TILE_DEBUG = false;
+
+function tileDebug(...args) {
+  if (TILE_DEBUG) console.log(...args);
+}
+
 // Z-layer offsets from groundZ.
 // These are OFFSETS added to groundZ, not absolute values.
 // Layers are spaced 1.0 unit apart so the depth pass's tight camera
@@ -693,6 +700,8 @@ export class TileManager {
     this._tileEffectMasks = new Map();
     /** @type {Map<string, Promise>} */
     this._tileEffectMaskResolvePromises = new Map();
+    /** @type {Set<string>} - Tiles known to have no effect masks (negative cache) */
+    this._tileEffectMaskMisses = new Set();
 
     /**
      * Estimated VRAM bytes consumed by per-tile effect masks.
@@ -720,6 +729,11 @@ export class TileManager {
 
     this._overheadTileIds = new Set();
     this._weatherRoofTileIds = new Set();
+
+    // Persistent sets for tiles that need per-frame occlusion updates
+    // Avoids scanning all tiles every frame
+    this._occlusionUpdateTileIds = new Set();
+    this._radialTileIds = new Set();
 
     this._initialLoad = {
       active: false,
@@ -1452,28 +1466,94 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
   }
 
   /**
+   * Build cached tile footprint data for fast point-in-tile tests.
+   * Called when tile transform changes to avoid recomputing every frame.
+   * @param {TileDocument} tileDoc
+   * @returns {{cx: number, cy: number, halfW: number, halfH: number, cos: number, sin: number, minX: number, maxX: number, minY: number, maxY: number}|null}
+   * @private
+   */
+  _buildTileFootprintCache(tileDoc) {
+    const width = Number(tileDoc.width) || 0;
+    const height = Number(tileDoc.height) || 0;
+    const scaleX = Number(tileDoc.texture?.scaleX ?? 1) || 1;
+    const scaleY = Number(tileDoc.texture?.scaleY ?? 1) || 1;
+
+    const dispW = width * Math.abs(scaleX);
+    const dispH = height * Math.abs(scaleY);
+
+    const { cx, cy } = getTileVisualCenterFoundryXY(tileDoc);
+
+    const rotDeg = Number(tileDoc?.shape?.rotation ?? tileDoc?.rotation) || 0;
+    const r = (-rotDeg * Math.PI) / 180;
+
+    return {
+      cx,
+      cy,
+      halfW: dispW * 0.5,
+      halfH: dispH * 0.5,
+      cos: Math.cos(r),
+      sin: Math.sin(r),
+      minX: cx - dispW * 0.5,
+      maxX: cx + dispW * 0.5,
+      minY: cy - dispH * 0.5,
+      maxY: cy + dispH * 0.5,
+    };
+  }
+
+  /**
+   * Fast point-in-tile test using cached footprint data.
+   * @param {object} fp - Footprint cache from _buildTileFootprintCache
+   * @param {number} x - Test point X in Foundry coords
+   * @param {number} y - Test point Y in Foundry coords
+   * @returns {boolean}
+   * @private
+   */
+  _isPointInCachedTileFootprint(fp, x, y) {
+    if (!fp) return false;
+
+    // Fast broad-phase first
+    if (x < fp.minX || x > fp.maxX || y < fp.minY || y > fp.maxY) return false;
+
+    const dx = x - fp.cx;
+    const dy = y - fp.cy;
+
+    const lx = dx * fp.cos - dy * fp.sin;
+    const ly = dx * fp.sin + dy * fp.cos;
+
+    return Math.abs(lx) <= fp.halfW && Math.abs(ly) <= fp.halfH;
+  }
+
+  /**
+   * Update persistent occlusion tracking sets when tile classification changes.
+   * Called from updateSpriteTransform when overhead/occlusion flags change.
+   * @param {string} tileId
+   * @param {THREE.Sprite} sprite
+   * @param {TileDocument} tileDoc
+   * @private
+   */
+  _updateTileOcclusionTracking(tileId, sprite, tileDoc) {
+    const M = (typeof CONST !== 'undefined' && CONST.TILE_OCCLUSION_MODES)
+      ? CONST.TILE_OCCLUSION_MODES
+      : { NONE: 0, RADIAL: 4 };
+    const flags = getTileOcclusionModeFlags(tileDoc);
+    const isRoofish = !!sprite?.userData?.isOverhead || !!sprite?.userData?.isWeatherRoof;
+    const needs = isRoofish || flags !== M.NONE;
+
+    if (needs) this._occlusionUpdateTileIds.add(tileId);
+    else this._occlusionUpdateTileIds.delete(tileId);
+
+    if (isRoofish && (flags & M.RADIAL)) this._radialTileIds.add(tileId);
+    else this._radialTileIds.delete(tileId);
+  }
+
+  /**
    * Tiles that participate in overhead occlusion / radial this frame: hover-fade set
    * plus any overhead/weather roof with RADIAL (may be missing from _overheadTileIds until hover).
    * @returns {Set<string>}
    */
   _gatherOverheadOcclusionUpdateTileIds() {
-    const out = new Set(this._overheadTileIds);
-    const RAD = (typeof CONST !== 'undefined' && CONST.TILE_OCCLUSION_MODES)
-      ? CONST.TILE_OCCLUSION_MODES.RADIAL
-      : 4;
-    try {
-      for (const [tileId, data] of this.tileSprites.entries()) {
-        if (!data?.sprite?.material) continue;
-        const doc = this._getRuntimeTileDoc(tileId, data) || data.tileDoc;
-        if (!doc) continue;
-        if (!(getTileOcclusionModeFlags(doc) & RAD)) continue;
-        if (data.sprite.userData?.isOverhead || data.sprite.userData?.isWeatherRoof) {
-          out.add(tileId);
-        }
-      }
-    } catch (_) {
-    }
-    return out;
+    // Return the persistent set - no need to scan all tiles every frame
+    return this._occlusionUpdateTileIds;
   }
 
   /**
@@ -1761,6 +1841,10 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     // Return cached result if available and non-empty. An empty Map was stored when
     // an early probe/load failed (timing, FilePicker) — GpuSceneMaskCompositor
     // then skipped the tile forever ("EMPTY_MAP_poison"). Clear and re-probe.
+    // Check negative cache first to avoid re-probing tiles known to have no masks
+    if (this._tileEffectMaskMisses.has(tileId)) {
+      return new Map();
+    }
     if (this._tileEffectMasks.has(tileId)) {
       const cached = this._tileEffectMasks.get(tileId);
       if (cached instanceof Map && cached.size > 0) {
@@ -1823,11 +1907,15 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
       // Do not cache an empty result: it poisons later compositor passes (tile
       // skipped as "loaded" with zero masks). Tiles with no suffix files pay a
       // re-probe on each composeFloor; that is rare and cheaper than a permanent miss.
+      // Cache negative results to avoid repeated probes
       if (results.size > 0) {
         this._tileEffectMasks.set(tileId, results);
+        this._tileEffectMaskMisses.delete(tileId);
         for (const entry of results.values()) {
           this._tileEffectMaskVramBytes += this._estimateTextureBytes(entry?.texture);
         }
+      } else {
+        this._tileEffectMaskMisses.add(tileId);
       }
 
       return results;
@@ -1850,12 +1938,13 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     if (cached) {
       for (const entry of cached.values()) {
         this._tileEffectMaskVramBytes -= this._estimateTextureBytes(entry?.texture);
-        try { entry?.texture?.dispose?.(); } catch (_) {}
       }
       // Clamp to zero to prevent drift from estimation inaccuracies.
       if (this._tileEffectMaskVramBytes < 0) this._tileEffectMaskVramBytes = 0;
       this._tileEffectMasks.delete(tileId);
     }
+    // Clear from negative cache when tile is removed or texture changes
+    this._tileEffectMaskMisses.delete(tileId);
   }
 
   /**
@@ -2375,6 +2464,9 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
       return;
     }
 
+    // Don't create mesh if not needed
+    if (!shouldBlock) return;
+
     // Create the blocker mesh — same geometry/layer as waterOccluderMesh but
     // with a solid-alpha material that writes alpha=1 for the tile's footprint.
     const geom = new THREE.PlaneGeometry(1, 1);
@@ -2555,6 +2647,10 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
       existing.visible = !!sprite.userData?.levelsHidden;
       return;
     }
+
+    // Don't create mesh unless tile is actually below current floor
+    // In V2 runtime, levelsHidden is typically always false
+    if (!sprite.userData?.levelsHidden) return;
 
     const geom = new THREE.PlaneGeometry(1, 1);
     const mat  = this._createFloorPresenceMaterial(sprite.material?.map ?? null);
@@ -2972,7 +3068,7 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
       const tileId = tileDoc?.id;
       const _texSrc = tileDoc?.texture?.src ?? 'no-texture';
       const _texName = _texSrc.split('/').pop() || _texSrc;
-      console.log(`     tile ${++_syncIdx}/${tiles.size}: ${tileId} (${_texName})`);
+      tileDebug(`     tile ${++_syncIdx}/${tiles.size}: ${tileId} (${_texName})`);
       if (tileId) {
         this._initialLoad.trackedIds.add(tileId);
         this._initialLoad.pendingAll++;
@@ -3514,6 +3610,7 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     this._frameGlobalTint = globalTint;
 
     let anyOverheadFadeInProgress = false;
+    let anyRadialCutoutActive = false;
 
     for (const tileId of this._gatherOverheadOcclusionUpdateTileIds()) {
       const data = this.tileSprites.get(tileId);
@@ -3662,11 +3759,7 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
       } catch (_) {
       }
       if (radialCutoutActive) {
-        try {
-          const rl = window.MapShine?.renderLoop;
-          rl?.requestContinuousRender?.(250);
-        } catch (_) {
-        }
+        anyRadialCutoutActive = true;
       }
 
       if (skipRoofFade && hoverHidden) {
@@ -3684,14 +3777,6 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
 
       if (absDiff > 0.0005) {
         anyOverheadFadeInProgress = true;
-        // Ensure the fade keeps rendering smoothly even if the scene is otherwise idle.
-        // (This is intentionally inside the per-tile loop so any new targetAlpha change
-        // immediately extends the continuous-render window.)
-        try {
-          const rl = window.MapShine?.renderLoop;
-          rl?.requestContinuousRender?.(2500);
-        } catch (_) {
-        }
         // Move opacity toward target at a fixed rate of 2.0 per second,
         // so a full 0->1 transition takes about 0.5 seconds regardless of
         // frame rate.
@@ -3725,12 +3810,15 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
 
     // If any overhead tile is mid-fade, ensure we keep rendering at full rate
     // long enough for the animation to settle.
-    if (anyOverheadFadeInProgress) {
-      try {
-        const rl = window.MapShine?.renderLoop;
+    // Coalesced render request to avoid per-tile overhead
+    try {
+      const rl = window.MapShine?.renderLoop;
+      if (anyOverheadFadeInProgress) {
         rl?.requestContinuousRender?.(250);
-      } catch (_) {
+      } else if (anyRadialCutoutActive) {
+        rl?.requestContinuousRender?.(250);
       }
+    } catch (_) {
     }
 
     // Tell WeatherController whether roof reveal/fade is active.
@@ -3889,8 +3977,17 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
 
     try {
       const canvas = document.createElement('canvas');
-      const w = image.width || image.naturalWidth || 256;
-      const h = image.height || image.naturalHeight || 256;
+      let w = image.width || image.naturalWidth || 256;
+      let h = image.height || image.naturalHeight || 256;
+
+      // Downsample large masks to max 1024px to reduce CPU memory/processing
+      const MAX_MASK_DIM = 1024;
+      if (w > MAX_MASK_DIM || h > MAX_MASK_DIM) {
+        const scale = MAX_MASK_DIM / Math.max(w, h);
+        w = Math.max(1, Math.round(w * scale));
+        h = Math.max(1, Math.round(h * scale));
+      }
+
       canvas.width = w;
       canvas.height = h;
       const ctx = canvas.getContext('2d');
@@ -3898,7 +3995,7 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
         log.warn('_extractMaskData: failed to get 2d context');
         return null;
       }
-      
+
       ctx.drawImage(image, 0, 0, w, h);
       const imageData = ctx.getImageData(0, 0, w, h);
       log.debug(`_extractMaskData: successfully extracted ${w}x${h} pixels`);
@@ -4186,7 +4283,7 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     }
 
     const _ctsId = tileDoc.id;
-    console.log(`       createTileSprite START: ${_ctsId}`);
+    tileDebug(`       createTileSprite START: ${_ctsId}`);
 
     // Create sprite with material.
     // alphaTest is intentionally 0 (disabled): a non-zero alphaTest hard-clips
@@ -4227,25 +4324,18 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     sprite.userData.textureReady = false;
     sprite.visible = false;
 
-    // Install overhead CC shader patch early so it compiles with the material.
-    // Uniform values will be populated once overhead classification is known.
-    console.log(`       createTileSprite [${_ctsId}]: _ensureOverheadColorCorrection...`);
-    try {
-      this._ensureOverheadColorCorrection(material);
-    } catch (_) {
-    }
-    console.log(`       createTileSprite [${_ctsId}]: _ensureOverheadColorCorrection DONE`);
-
     const isOverheadForLoad = isTileOverhead(tileDoc);
 
     // Load texture (instrumented for debug loading profiler)
     const _tileFileName = texturePath.split('/').pop() || tileDoc.id;
     const _tileDbgId = `tile.load[${_tileFileName}]`;
     const _dlp = debugLoadingProfiler;
-    const _tileCached = this.textureCache.has(texturePath);
+    const role = 'ALBEDO';
+    const cacheKey = this._getTextureCacheKey(texturePath, role);
+    const _tileCached = this.textureCache.has(cacheKey);
     if (_dlp.debugMode) _dlp.begin(_tileDbgId, 'tile', { overhead: isOverheadForLoad, cached: _tileCached });
     const _tileLoadStartMs = performance.now();
-    this.loadTileTexture(texturePath).then(texture => {
+    this.loadTileTexture(texturePath, { role }).then(texture => {
       material.map = texture;
       material.needsUpdate = true;
 
@@ -4340,9 +4430,9 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     });
 
     // Set initial transform and visibility
-    console.log(`       createTileSprite [${_ctsId}]: updateSpriteTransform...`);
+    tileDebug(`       createTileSprite [${_ctsId}]: updateSpriteTransform...`);
     this.updateSpriteTransform(sprite, tileDoc);
-    console.log(`       createTileSprite [${_ctsId}]: updateSpriteTransform DONE`);
+    tileDebug(`       createTileSprite [${_ctsId}]: updateSpriteTransform DONE`);
     
     this.scene.add(sprite);
 
@@ -4393,17 +4483,32 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     } catch (_) {
     }
 
-    console.log(`       createTileSprite [${_ctsId}]: _ensure*Mesh...`);
-    this._ensureWaterOccluderMesh(this.tileSprites.get(tileDoc.id), tileDoc);
-    this._ensureAboveFloorBlockerMesh(this.tileSprites.get(tileDoc.id), tileDoc);
-    this._ensureFloorPresenceMesh(this.tileSprites.get(tileDoc.id), tileDoc);
-    this._ensureBelowFloorPresenceMesh(this.tileSprites.get(tileDoc.id), tileDoc);
-    console.log(`       createTileSprite [${_ctsId}]: _ensure*Mesh DONE`);
+    tileDebug(`       createTileSprite [${_ctsId}]: _ensure*Mesh...`);
+    // Note: sprite data is set after scene.add, so these calls are no-ops here
+    // They will be called properly in updateSpriteTransform after data is set
+    tileDebug(`       createTileSprite [${_ctsId}]: _ensure*Mesh DONE`);
 
     if (sprite.userData.isOverhead) {
       this._overheadTileIds.add(tileDoc.id);
     } else {
       this._overheadTileIds.delete(tileDoc.id);
+    }
+
+    // Update persistent occlusion tracking
+    this._updateTileOcclusionTracking(tileDoc.id, sprite, tileDoc);
+
+    // Install overhead CC shader patch only for overhead tiles or tiles with occlusion modes
+    const occFlags = getTileOcclusionModeFlags(tileDoc);
+    const needsOverheadShader =
+      sprite.userData.isOverhead ||
+      sprite.userData.isWeatherRoof ||
+      occFlags !== CONST.TILE_OCCLUSION_MODES.NONE;
+
+    if (needsOverheadShader && sprite.material) {
+      try {
+        this._ensureOverheadColorCorrection(sprite.material);
+      } catch (_) {
+      }
     }
 
     // Keep overhead CC uniforms in sync with overhead status.
@@ -4418,6 +4523,9 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
       this._weatherRoofTileIds.delete(tileDoc.id);
     }
 
+    // Update persistent occlusion tracking (weather roof change)
+    this._updateTileOcclusionTracking(tileDoc.id, sprite, tileDoc);
+
     this._tintDirty = true;
 
     try {
@@ -4425,7 +4533,7 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     } catch (_) {
     }
 
-    console.log(`       createTileSprite END: ${_ctsId}`);
+    tileDebug(`       createTileSprite END: ${_ctsId}`);
     log.debug(`Created tile sprite: ${tileDoc.id}`);
   }
 
@@ -4482,14 +4590,7 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
         'elevation' in changes || 'z' in changes ||
         'flags' in changes) {
       this.updateSpriteTransform(sprite, targetDoc);
-      this._ensureWaterOccluderMesh(spriteData, targetDoc);
-      this._updateWaterOccluderMeshTransform(sprite, targetDoc);
-      this._ensureAboveFloorBlockerMesh(spriteData, targetDoc);
-      this._updateAboveFloorBlockerMeshTransform(sprite, targetDoc);
-      this._ensureFloorPresenceMesh(spriteData, targetDoc);
-      this._updateFloorPresenceMeshTransform(sprite, targetDoc);
-      this._ensureBelowFloorPresenceMesh(spriteData, targetDoc);
-      this._updateBelowFloorPresenceMeshTransform(sprite, targetDoc);
+      // Note: updateSpriteTransform already handles mesh syncing internally
 
       try {
         this.tileBindingManager.onTileTransformChanged(tileDoc.id, sprite);
@@ -4653,15 +4754,17 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
    * @param {string} tileId - Tile document ID
    * @private
    */
-  removeTileSprite(tileId) {
+  removeTileSprite(tileId, skipBusUpdates = false) {
     const spriteData = this.tileSprites.get(tileId);
     if (!spriteData) return;
 
     const { sprite } = spriteData;
 
-    try {
-      this.tileBindingManager.onTileRemoved(tileId);
-    } catch (_) {
+    if (!skipBusUpdates) {
+      try {
+        this.tileBindingManager.onTileRemoved(tileId);
+      } catch (_) {
+      }
     }
 
     const occ = sprite?.userData?.waterOccluderMesh;
@@ -4711,12 +4814,14 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     this.scene.remove(sprite);
 
     // Keep V2 albedo tile bus in sync when a tile is deleted.
-    try {
-      const bus = window.MapShine?.floorCompositorV2?._renderBus;
-      if (bus && typeof bus.removeTile === 'function') {
-        bus.removeTile(tileId);
+    if (!skipBusUpdates) {
+      try {
+        const bus = window.MapShine?.floorCompositorV2?._renderBus;
+        if (bus && typeof bus.removeTile === 'function') {
+          bus.removeTile(tileId);
+        }
+      } catch (_) {
       }
-    } catch (_) {
     }
     
     if (sprite.material) {
@@ -4726,6 +4831,8 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     this.tileSprites.delete(tileId);
     this._overheadTileIds.delete(tileId);
     this._weatherRoofTileIds.delete(tileId);
+    this._occlusionUpdateTileIds.delete(tileId);
+    this._radialTileIds.delete(tileId);
 
     // V2 compositor: tile removal is handled on next repopulate (bus reads tile docs directly).
     // No incremental unregister needed.
@@ -4899,9 +5006,23 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     sprite.userData.isOverhead = isOverhead;
     sprite.userData.restrictsLight = tileDocRestrictsLight(tileDoc);
 
+    const flag = getFlag(tileDoc, 'overheadIsRoof');
+    const isWeatherRoof = isOverhead && !!flag;
+    const wasWeatherRoof = !!sprite.userData.isWeatherRoof;
+    sprite.userData.isWeatherRoof = isWeatherRoof;
+
+    // Install overhead CC shader patch only for overhead tiles or tiles with occlusion modes
+    const occFlags = getTileOcclusionModeFlags(tileDoc);
+    const needsOverheadShader =
+      isOverhead ||
+      isWeatherRoof ||
+      occFlags !== CONST.TILE_OCCLUSION_MODES.NONE;
+
     try {
       if (sprite.material) {
-        this._ensureOverheadColorCorrection(sprite.material);
+        if (needsOverheadShader) {
+          this._ensureOverheadColorCorrection(sprite.material);
+        }
         this._applyOverheadColorCorrectionUniforms(sprite, sprite.material);
       }
     } catch (_) {
@@ -4913,6 +5034,9 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
         if (isOverhead) this._overheadTileIds.add(tileId);
         else this._overheadTileIds.delete(tileId);
       }
+
+      // Update persistent occlusion tracking
+      this._updateTileOcclusionTracking(tileId, sprite, tileDoc);
 
       // If a tile stops being overhead, clear any hover-hidden state so it
       // doesn't remain invisible as a ground tile.
@@ -4926,19 +5050,6 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
           }
         } catch (_) {
         }
-      }
-    }
-
-    const flag = getFlag(tileDoc, 'overheadIsRoof');
-    const isWeatherRoof = isOverhead && !!flag;
-    const wasWeatherRoof = !!sprite.userData.isWeatherRoof;
-    sprite.userData.isWeatherRoof = isWeatherRoof;
-
-    if (wasWeatherRoof !== isWeatherRoof) {
-      const tileId = tileDoc?.id;
-      if (tileId) {
-        if (isWeatherRoof) this._weatherRoofTileIds.add(tileId);
-        else this._weatherRoofTileIds.delete(tileId);
       }
     }
 
@@ -5088,6 +5199,9 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
 
     const data = this.tileSprites.get(tileDoc.id);
     if (data) {
+      // Cache footprint data for fast point-in-tile tests
+      data._footprintCache = this._buildTileFootprintCache(tileDoc);
+
       this._ensureWaterOccluderMesh(data, tileDoc);
       this._updateWaterOccluderMeshTransform(sprite, tileDoc);
       this._ensureAboveFloorBlockerMesh(data, tileDoc);
@@ -5352,20 +5466,34 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
   }
 
   /**
-   * Load texture with caching
-   * @param {string} texturePath 
+   * Get texture cache key that includes role to prevent ALBEDO/DATA_MASK conflicts.
+   * @param {string} texturePath
+   * @param {string} role
+   * @returns {string}
+   * @private
+   */
+  _getTextureCacheKey(texturePath, role) {
+    return `${role || 'ALBEDO'}:${texturePath}`;
+  }
+
+  /**
+   * Load a tile texture with optional role-based settings.
+   * @param {string} texturePath
    * @param {{role?: 'ALBEDO'|'DATA_MASK'}} [options]
    * @returns {Promise<THREE.Texture>}
    */
   async loadTileTexture(texturePath, options = {}) {
-    if (this.textureCache.has(texturePath)) {
-      const cached = this.textureCache.get(texturePath);
-      this._normalizeTileTextureSource(cached, options?.role || 'ALBEDO');
+    const role = options?.role || 'ALBEDO';
+    const cacheKey = this._getTextureCacheKey(texturePath, role);
+
+    if (this.textureCache.has(cacheKey)) {
+      const cached = this.textureCache.get(cacheKey);
+      this._normalizeTileTextureSource(cached, role);
       return cached;
     }
 
-    if (this._texturePromises.has(texturePath)) {
-      return this._texturePromises.get(texturePath);
+    if (this._texturePromises.has(cacheKey)) {
+      return this._texturePromises.get(cacheKey);
     }
 
     const promise = (async () => {
@@ -5420,7 +5548,7 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
             this._configureTileTextureFiltering(texture, role);
             this._normalizeTileTextureSource(texture, role);
             texture.needsUpdate = true;
-            this.textureCache.set(texturePath, texture);
+            this.textureCache.set(cacheKey, texture);
             debugLoadingProfiler.event(`tile.PIXI_CACHE HIT: ${_shortPath}`);
             return texture;
           }
@@ -5630,7 +5758,7 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
           this._configureTileTextureFiltering(texture, role);
           this._normalizeTileTextureSource(texture, role);
           texture.needsUpdate = true;
-          this.textureCache.set(texturePath, texture);
+          this.textureCache.set(cacheKey, texture);
           // P5-05: Register with budget tracker so VRAM usage is tracked.
           const _tw = texSource.width || 0;
           const _th = texSource.height || 0;
@@ -5695,7 +5823,7 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
                 this._configureTileTextureFiltering(texture, role);
                 this._normalizeTileTextureSource(texture, role);
                 texture.needsUpdate = true;
-                this.textureCache.set(texturePath, texture);
+                this.textureCache.set(cacheKey, texture);
               }
             } catch (_) {
             }
@@ -5715,12 +5843,12 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     }
   })();
 
-  this._texturePromises.set(texturePath, promise);
+  this._texturePromises.set(cacheKey, promise);
   try {
     const tex = await promise;
     return tex;
   } finally {
-    this._texturePromises.delete(texturePath);
+    this._texturePromises.delete(cacheKey);
   }
 
   }
@@ -5752,13 +5880,17 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
       this.hooksRegistered = false;
     }
 
-    for (const { sprite } of this.tileSprites.values()) {
-      this.scene.remove(sprite);
-      sprite.material?.dispose();
+    // Use removeTileSprite for proper cleanup of auxiliary meshes
+    // Skip bus updates during full teardown to avoid expensive operations
+    const ids = Array.from(this.tileSprites.keys());
+    for (const id of ids) {
+      this.removeTileSprite(id, true);
     }
     this.tileSprites.clear();
     this._overheadTileIds.clear();
     this._weatherRoofTileIds.clear();
+    this._occlusionUpdateTileIds.clear();
+    this._radialTileIds.clear();
 
     if (clearCache) {
       // P5-05: Unregister all cached textures from the budget tracker.
@@ -5807,6 +5939,7 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
       this._tileEffectMasks.clear();
       this._tileEffectMaskResolvePromises.clear();
       this._tileEffectMaskVramBytes = 0;
+      this._tileEffectMaskMisses.clear();
       
       this.initialized = false;
     }

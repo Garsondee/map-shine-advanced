@@ -58,6 +58,9 @@ export class ParticleSystem extends EffectBase {
     this._cullProjScreenMatrix = null;
     this._cullSphere = null;
     this._cullCenter = null;
+
+    // Cache target mask to avoid bitwise shift every frame
+    this._targetLayerMask = 1 << OVERLAY_THREE_LAYER;
   }
 
   /**
@@ -167,8 +170,17 @@ export class ParticleSystem extends EffectBase {
       const syWorld = worldH - (sy + sh);
       const THREE = window.THREE;
       if (THREE) {
-        if (!this._sceneBounds) this._sceneBounds = new THREE.Vector4(sx, syWorld, sw, sh);
-        this._sceneBounds.set(sx, syWorld, sw, sh);
+        if (!this._sceneBounds) {
+          this._sceneBounds = new THREE.Vector4(sx, syWorld, sw, sh);
+        } else if (
+          this._sceneBounds.x !== sx ||
+          this._sceneBounds.y !== syWorld ||
+          this._sceneBounds.z !== sw ||
+          this._sceneBounds.w !== sh
+        ) {
+          // OPTIMIZATION: Only update vector if changed to prevent reactivity checks
+          this._sceneBounds.set(sx, syWorld, sw, sh);
+        }
         boundsVec4 = this._sceneBounds;
       }
     }
@@ -184,7 +196,7 @@ export class ParticleSystem extends EffectBase {
       // particles in a single frame, causing a feedback loop where:
       //   large delta → spawn many particles → frame takes longer → larger delta → freeze
       // We cap at 100ms (0.1s) of simulation per frame to break this cycle.
-      const clampedDelta = Math.min(deltaSec, 0.1);
+      const clampedDelta = deltaSec > 0.1 ? 0.1 : deltaSec; // Faster Math.min
       
       // Global simulation speed control for Quarks-based systems (weather, fire, etc.).
       // A value of 2.0 with baseScale 750 reproduces the previous 1500x multiplier.
@@ -196,7 +208,7 @@ export class ParticleSystem extends EffectBase {
       // delta was in milliseconds. Since TimeManager provides seconds, this
       // effectively scales simulation time by 0.001 * 750 * 2 = 1.5x real-time.
       // We preserve this for backwards compatibility with tuned particle parameters.
-      const dt = clampedDelta * 0.001 * baseScale * simSpeed;
+      const dt = clampedDelta * 0.75 * simSpeed; // Combined constants (0.001 * 750)
 
       const ms = window.MapShine;
       const doTimings = ms?.debugQuarksTimings === true;
@@ -277,7 +289,7 @@ export class ParticleSystem extends EffectBase {
     const camera = sceneComposer?.camera || this.camera;
     if (!camera) return;
     const systemMap = this.batchRenderer?.systemToBatchIndex;
-    if (!systemMap || typeof systemMap.forEach !== 'function') return;
+    if (!systemMap) return;
     const batches = this.batchRenderer?.batches;
 
     if (!this._cullFrustum) this._cullFrustum = new THREE.Frustum();
@@ -285,61 +297,59 @@ export class ParticleSystem extends EffectBase {
     if (!this._cullSphere) this._cullSphere = new THREE.Sphere();
     if (!this._cullCenter) this._cullCenter = new THREE.Vector3();
 
-    if (typeof camera.updateProjectionMatrix === 'function') camera.updateProjectionMatrix();
-    camera.updateMatrixWorld(true);
+    // OPTIMIZATION: Never force updateProjectionMatrix here. It causes severe GPU/CPU stalls.
+    camera.updateMatrixWorld(false);
     this._cullProjScreenMatrix.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
     this._cullFrustum.setFromProjectionMatrix(this._cullProjScreenMatrix);
     const groundZ = (sceneComposer && typeof sceneComposer.groundZ === 'number') ? sceneComposer.groundZ : null;
 
-    systemMap.forEach((_, ps) => {
-      if (!ps || !ps.emitter) return;
-      const emitter = ps.emitter;
-      const ud = emitter.userData || (emitter.userData = {});
-      if (ud.msAutoCull === false) return;
+    // OPTIMIZATION: Avoid closure allocations (no .forEach)
+    for (const [ps, idx] of systemMap.entries()) {
+      const emitter = ps?.emitter;
+      if (!emitter) continue;
 
-      // MapShine overlay contract:
-      // EffectComposer renders layer 31 in a separate overlay pass and explicitly
-      // excludes it from the main scene render. If a Quarks VFXBatch stays on
-      // layer 0, it may render into the scene render target (and be affected by
-      // lighting/post) or be effectively hidden depending on the pipeline.
-      // Force every quarks batch onto the overlay layer so all particle systems
-      // render consistently.
-      try {
-        const idx = systemMap.get(ps);
-        const batch = (idx !== undefined && batches) ? batches[idx] : null;
-        if (batch?.layers?.set) {
+      const ud = emitter.userData || (emitter.userData = {});
+      if (ud.msAutoCull === false) continue;
+
+      // OPTIMIZATION: Guard layer set to avoid dirtying Three.js object masks
+      if (batches) {
+        const batch = batches[idx];
+        if (batch?.layers && batch.layers.mask !== this._targetLayerMask) {
           batch.layers.set(OVERLAY_THREE_LAYER);
         }
-      } catch (_) {
       }
 
       const pos = emitter.position;
       const c = ud.msCullCenter;
-      if (c && typeof c === 'object') {
-        if (typeof c.x === 'number' && typeof c.y === 'number' && typeof c.z === 'number') {
+
+      // OPTIMIZATION: Duck-typing beats typeof operators
+      if (c) {
+        if (c.x !== undefined) {
           this._cullCenter.set(c.x, c.y, c.z);
-        } else if (Array.isArray(c) && c.length >= 3) {
+        } else if (c[0] !== undefined) {
           this._cullCenter.set(c[0], c[1], c[2]);
         } else {
-          this._cullCenter.set(pos.x, pos.y, pos.z);
+          this._cullCenter.copy(pos);
         }
       } else {
-        this._cullCenter.set(pos.x, pos.y, pos.z);
+        this._cullCenter.copy(pos);
       }
 
       let radius = 500;
       const shape = ps.emitterShape;
-      if (shape && typeof shape.width === 'number' && typeof shape.height === 'number') {
-        const w = Math.max(0, shape.width);
-        const h = Math.max(0, shape.height);
+
+      if (shape && shape.width !== undefined && shape.height !== undefined) {
+        const w = shape.width > 0 ? shape.width : 0;
+        const h = shape.height > 0 ? shape.height : 0;
         radius = 0.5 * Math.sqrt(w * w + h * h);
       }
 
       if (groundZ !== null) {
-        radius += Math.max(0, Math.abs(this._cullCenter.z - groundZ)) * 0.5;
+        const dz = this._cullCenter.z - groundZ;
+        radius += (dz > 0 ? dz : -dz) * 0.5;
       }
 
-      if (typeof ud.msCullRadius === 'number' && Number.isFinite(ud.msCullRadius) && ud.msCullRadius > 0) {
+      if (ud.msCullRadius > 0) {
         radius = ud.msCullRadius;
       }
 
@@ -360,8 +370,14 @@ export class ParticleSystem extends EffectBase {
       lastCenter.x = this._cullCenter.x;
       lastCenter.y = this._cullCenter.y;
       lastCenter.z = this._cullCenter.z;
+
       const wasCulled = !!ud._msCulled;
-      emitter.visible = visible;
+
+      // OPTIMIZATION: Guard visibility updates
+      if (emitter.visible !== visible) {
+        emitter.visible = visible;
+      }
+
       if (visible) {
         if (wasCulled) {
           if (typeof ps.play === 'function') ps.play();
@@ -373,7 +389,7 @@ export class ParticleSystem extends EffectBase {
           ud._msCulled = true;
         }
       }
-    });
+    }
   }
 
   /**

@@ -62,6 +62,11 @@ export class VisionManager {
     // Creating/disposing PlaneGeometry repeatedly is unnecessary churn.
     this._fullQuadGeometry = new window.THREE.PlaneGeometry(width, height);
     this._fullQuadMesh = new window.THREE.Mesh(this._fullQuadGeometry, this.material);
+    this._fullQuadMesh.visible = false;
+    this.scene.add(this._fullQuadMesh); // Add once, toggle visibility later
+
+    // OPTIMIZATION: Mesh Object Pool for Zero-GC rendering
+    this._visionMeshPool = [];
 
     // State tracking
     this.needsUpdate = true;
@@ -293,10 +298,82 @@ export class VisionManager {
   clearScene() {
     while (this.scene.children.length > 0) {
       const child = this.scene.children[0];
-      // Avoid disposing our cached quad geometry; we reuse it.
-      if (child.geometry && child !== this._fullQuadMesh) child.geometry.dispose();
+      // Avoid disposing our cached quad geometry and pooled meshes; we reuse them.
+      if (child.geometry && child !== this._fullQuadMesh && !this._visionMeshPool.includes(child)) {
+        child.geometry.dispose();
+      }
       this.scene.remove(child);
     }
+  }
+
+  /**
+   * Fetches a reusable mesh from the pool, creating one if necessary.
+   * Pre-allocates buffer size for up to ~1000 vertices (triangle fan) to avoid GC.
+   * @private
+   */
+  _getOrCreateVisionMesh(index) {
+    if (index < this._visionMeshPool.length) {
+      const mesh = this._visionMeshPool[index];
+      mesh.visible = true;
+      return mesh;
+    }
+
+    // Preallocate for up to 1024 points (1024 triangles = 3072 vertices = 9216 floats)
+    const MAX_POINTS = 1024;
+    const geometry = new window.THREE.BufferGeometry();
+    const positions = new Float32Array(MAX_POINTS * 3 * 3);
+    
+    geometry.setAttribute('position', new window.THREE.BufferAttribute(positions, 3));
+    
+    const mesh = new window.THREE.Mesh(geometry, this.material);
+    mesh.frustumCulled = false; // Screen-space cover, no culling needed
+    this.scene.add(mesh);
+    
+    this._visionMeshPool.push(mesh);
+    return mesh;
+  }
+
+  /**
+   * Updates geometry natively using a Triangle Fan structure (Zero-GC allocation).
+   * Vision polygons are strictly star-shaped so fan-triangulation is perfect.
+   * @private
+   */
+  _updateMeshGeometry(mesh, center, points) {
+    const numPoints = Math.floor(points.length / 2);
+    if (numPoints < 3) {
+      mesh.visible = false;
+      return;
+    }
+
+    const geometry = mesh.geometry;
+    const positions = geometry.attributes.position.array;
+    
+    // Safety check: if the polygon is insanely complex, fallback or cap it.
+    const maxAllowedPoints = positions.length / 9;
+    const limit = Math.min(numPoints, maxAllowedPoints);
+
+    let posIdx = 0;
+    for (let i = 0; i < limit; i++) {
+      const nextI = (i + 1) % limit; // Loop back to 0 at the end
+      
+      // Triangle Vertex 1: Center
+      positions[posIdx++] = center.x - this.width / 2;
+      positions[posIdx++] = -(center.y - this.height / 2);
+      positions[posIdx++] = 0;
+      
+      // Triangle Vertex 2: Edge point A
+      positions[posIdx++] = points[i * 2] - this.width / 2;
+      positions[posIdx++] = -(points[i * 2 + 1] - this.height / 2);
+      positions[posIdx++] = 0;
+      
+      // Triangle Vertex 3: Edge point B
+      positions[posIdx++] = points[nextI * 2] - this.width / 2;
+      positions[posIdx++] = -(points[nextI * 2 + 1] - this.height / 2);
+      positions[posIdx++] = 0;
+    }
+
+    geometry.attributes.position.needsUpdate = true;
+    geometry.setDrawRange(0, limit * 3); // Tell ThreeJS exactly how many vertices to draw
   }
 
   /**
@@ -308,10 +385,9 @@ export class VisionManager {
       // PERF MODE: Skip all polygon computation and just render a single
       // full-screen quad as "fully visible" once, then reuse that texture.
       if (this.needsUpdate) {
-        this.clearScene();
-
-        // Reuse cached quad.
-        this.scene.add(this._fullQuadMesh);
+        // Toggle visibilities instead of adding/removing
+        this._fullQuadMesh.visible = true;
+        for (const mesh of this._visionMeshPool) mesh.visible = false;
 
         const currentTarget = this.renderer.getRenderTarget();
         this.renderer.setRenderTarget(this.renderTarget);
@@ -346,9 +422,6 @@ export class VisionManager {
     this._lastUpdateTime = performance.now();
     this._pendingThrottledUpdate = false;
 
-    // 1. Clear Scene
-    this.clearScene();
-
     const gsm = window.MapShine?.gameSystem;
     const walls = canvas?.walls?.placeables ?? [];
     
@@ -366,65 +439,49 @@ export class VisionManager {
       sceneBounds = this._tempSceneBounds;
     }
 
+    // Cache dimensional math outside the loop
+    const canvasDistance = canvas?.dimensions?.distance ?? 1;
+    const canvasSize = canvas?.dimensions?.size ?? 100;
+    const baseFallbackRadius = (1000 / canvasDistance) * canvasSize;
+
     let tokenCount = 0;
 
-    // 2. Compute vision for CONTROLLED tokens with vision (not ALL tokens)
-    // This is the key optimization - we only compute vision for tokens the user controls.
-    const placeables = canvas?.tokens?.placeables ?? [];
-    for (let ti = 0; ti < placeables.length; ti++) {
-      const token = placeables[ti];
-      const doc = token?.document;
-      const tokenId = doc?.id;
-      if (!tokenId) continue;
-
-      // Skip hidden tokens
+    // OPTIMIZATION: Loop ONLY over controlled tokens instead of every token on the scene!
+    for (const tokenId of this._controlledTokenIds) {
+      // Safe access: Handles modern Foundry (Map) and older versions (Array)
+      const token = canvas?.tokens?.get?.(tokenId) 
+                 ?? canvas?.tokens?.placeables?.find(t => t.id === tokenId);
+                  
+      if (!token) continue;
+      
+      const doc = token.document;
       if (doc?.hidden) continue;
 
-      // Only process controlled tokens
-      if (!this._controlledTokenIds.has(tokenId)) continue;
-
-      // Check if token has vision
       const hasVision = gsm
         ? gsm.hasTokenVision(token)
         : (token.hasSight || doc?.sight?.enabled);
       if (!hasVision) continue;
 
-      // Get vision radius
       let radiusPixels = 0;
-      
       if (gsm) {
         const distRadius = gsm.getTokenVisionRadius(token);
-        if (distRadius > 0) {
-          radiusPixels = gsm.distanceToPixels(distRadius);
-        }
+        if (distRadius > 0) radiusPixels = gsm.distanceToPixels(distRadius);
       }
       
-      // Fallback radius extraction
       if (!(radiusPixels > 0)) {
         const sightRange = doc?.sight?.range ?? token.sightRange ?? 0;
-        if (sightRange > 0 && canvas?.dimensions) {
-          radiusPixels = (sightRange / canvas.dimensions.distance) * canvas.dimensions.size;
-        }
+        if (sightRange > 0) radiusPixels = (sightRange / canvasDistance) * canvasSize;
       }
       
-      // If still no radius, try a default for tokens with hasSight
       if (!(radiusPixels > 0) && token.hasSight) {
-        // Default to a large radius (1000 units converted to pixels)
-        if (canvas?.dimensions) {
-          radiusPixels = (1000 / canvas.dimensions.distance) * canvas.dimensions.size;
-        } else {
-          radiusPixels = 5000; // Fallback pixel value
-        }
+        radiusPixels = baseFallbackRadius;
       }
       
       if (!(radiusPixels > 0)) continue;
 
-      // Get token center - use pending position if available (from hook changes)
-      // This fixes the "one step behind" issue where doc.x/y are stale during the hook
-      const tokenWidth = (doc.width ?? 1) * (canvas.dimensions?.size ?? 100);
-      const tokenHeight = (doc.height ?? 1) * (canvas.dimensions?.size ?? 100);
+      const tokenWidth = (doc.width ?? 1) * canvasSize;
+      const tokenHeight = (doc.height ?? 1) * canvasSize;
       
-      // Check for pending position update (authoritative from hook)
       const pendingPos = this.pendingPositions.get(tokenId);
       const tokenX = pendingPos?.x ?? doc.x;
       const tokenY = pendingPos?.y ?? doc.y;
@@ -433,25 +490,19 @@ export class VisionManager {
       center.x = tokenX + tokenWidth / 2;
       center.y = tokenY + tokenHeight / 2;
 
-      // MS-LVL-072: Read the token's elevation so the polygon computer can
-      // skip walls whose wall-height bounds don't include this elevation.
-      // This lets tokens on one floor see past walls that only exist on other floors.
       const tokenElevation = Number(doc.elevation ?? 0);
       const computeOptions = Number.isFinite(tokenElevation) && tokenElevation !== 0
         ? { elevation: tokenElevation }
         : null;
 
-      // Compute visibility polygon using our own algorithm
-      // Pass sceneBounds to clip vision to scene interior (not padded region)
       const points = this.computer.compute(center, radiusPixels, walls, sceneBounds, computeOptions);
 
       if (points && points.length >= 6) {
-        const geometry = this.converter.toBufferGeometry(points);
-        const mesh = new window.THREE.Mesh(geometry, this.material);
-        this.scene.add(mesh);
+        // OPTIMIZATION: Get pooled mesh and natively update its geometry buffer
+        const mesh = this._getOrCreateVisionMesh(tokenCount);
+        this._updateMeshGeometry(mesh, center, points);
         tokenCount++;
         
-        // Log first few points for debugging
         if (Math.random() < 0.02) {
           const samplePoints = points.slice(0, 6);
           log.debug(`Vision computed for token at (${center.x.toFixed(0)}, ${center.y.toFixed(0)}): radius=${radiusPixels.toFixed(0)}px, points=${points.length / 2}, first3=[(${samplePoints[0]?.toFixed(0)}, ${samplePoints[1]?.toFixed(0)}), (${samplePoints[2]?.toFixed(0)}, ${samplePoints[3]?.toFixed(0)}), (${samplePoints[4]?.toFixed(0)}, ${samplePoints[5]?.toFixed(0)})]`);
@@ -459,10 +510,13 @@ export class VisionManager {
       }
     }
 
-    // 4. If no tokens with vision, show entire scene (GM view or no vision tokens)
-    if (tokenCount === 0) {
-      this.scene.add(this._fullQuadMesh);
+    // OPTIMIZATION: Hide any leftover pooled meshes we didn't use this frame
+    for (let i = tokenCount; i < this._visionMeshPool.length; i++) {
+      this._visionMeshPool[i].visible = false;
     }
+
+    // Toggle full-screen quad visibility based on whether any tokens processed vision
+    this._fullQuadMesh.visible = (tokenCount === 0);
 
     if (Math.random() < 0.01) {
       log.debug(`Vision Update: ${tokenCount} tokens processed, ${walls.length} walls`);
@@ -511,11 +565,13 @@ export class VisionManager {
     this._hookIds = [];
 
     this.renderTarget.dispose();
-    try {
-      this._fullQuadGeometry?.dispose?.();
-    } catch (_) {
-    }
+    this._fullQuadGeometry?.dispose?.();
     this.material.dispose();
-    // Geometry disposal is handled in update loop for now
+
+    // Dispose pooled meshes
+    for (const mesh of this._visionMeshPool) {
+      mesh.geometry?.dispose();
+    }
+    this._visionMeshPool = [];
   }
 }

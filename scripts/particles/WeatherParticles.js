@@ -167,6 +167,17 @@ function roofDripDebugNoMask() {
   }
 }
 
+/** Graphics Settings: client particle spawn multiplier (0..2), default 1 when unset. */
+function readGraphicsParticleSpawnScale() {
+  try {
+    const v = Number(window.MapShine?.graphicsParticleSpawnScale);
+    if (!Number.isFinite(v)) return 1.0;
+    return Math.max(0, Math.min(2, v));
+  } catch (_) {
+    return 1.0;
+  }
+}
+
 // Avoid per-frame allocations in update(): splash tuning reads are table-driven.
 const SPLASH_TUNING_KEYS = [
   {
@@ -1515,7 +1526,9 @@ class SnowFloorBehavior {
     let z = particle.position.z;
     const THREE = window.THREE;
 
-    if (system && system.emitter && system.emitter.matrixWorld && THREE) {
+    // worldSpace=true: Quarks already baked emitter.matrixWorld into particle.position at spawn.
+    // worldSpace=false: positions are emitter-local until render — transform for ground test.
+    if (system && !system.worldSpace && system.emitter && system.emitter.matrixWorld && THREE) {
       if (!this._tempVec) this._tempVec = new THREE.Vector3();
       this._tempVec.set(particle.position.x, particle.position.y, particle.position.z);
       this._tempVec.applyMatrix4(system.emitter.matrixWorld);
@@ -1557,9 +1570,9 @@ class SnowFloorBehavior {
   reset() { /* no-op */ }
 }
 
-// NOTE: For both rain and snow we now treat particle.position as world-space
-// (worldSpace: true in the Quarks systems) and define the kill volume
-// directly from the scene rectangle and 0..7500 height.
+// NOTE: For rain/snow/ash with worldSpace:true, Quarks stores particle.position in
+// world space after spawn. Kill volumes use that same space; SnowFloorBehavior must
+// not re-apply emitter.matrixWorld for those systems.
 
 // Custom behavior to handle 0 -> 10% -> 0% opacity over life
 class SplashAlphaBehavior {
@@ -2020,13 +2033,6 @@ export class WeatherParticles {
     // Legacy ash spatial-cluster fields removed; emission unevenness is now
     // driven by WeatherController.getAshEmissionEnvelope() (see ash system update).
 
-    /** @type {WorldVolumeKillBehavior|null} Ash weather kill box (XY follows camera view when available). */
-    this._ashWeatherKillBehavior = null;
-    /** @type {import('three').Vector3|null} Full-scene kill min for ash fail-open when camera bounds unavailable. */
-    this._ashKillFullMin = null;
-    /** @type {import('three').Vector3|null} */
-    this._ashKillFullMax = null;
-
     /** @type {THREE.ShaderMaterial|null} quarks batch material for rain */
     this._rainBatchMaterial = null;
     /** @type {THREE.ShaderMaterial|null} quarks batch material for roof drips */
@@ -2338,7 +2344,8 @@ export class WeatherParticles {
       const rainTuning = weatherController?.rainTuning || {};
       const intensityScale = Number.isFinite(rainTuning.intensityScale) ? rainTuning.intensityScale : 1.0;
       const sampleP = Math.max(0.08, Math.min(0.65, 0.20 * intensityScale));
-      this._queueImpactSplash(wx, wy, groundZ, sampleP);
+      const spawnGfx = readGraphicsParticleSpawnScale();
+      this._queueImpactSplash(wx, wy, groundZ, sampleP * spawnGfx);
     } catch (_) {
     }
   }
@@ -2383,6 +2390,12 @@ export class WeatherParticles {
       return;
     }
 
+    const spawnGfx = readGraphicsParticleSpawnScale();
+    if (spawnGfx <= 0) {
+      this._rainImpactQueuedCount = 0;
+      return;
+    }
+
     const rainTuning = weatherController.rainTuning || {};
     const keys = SPLASH_TUNING_KEYS[0];
     const lifeMin = Math.max(0.001, rainTuning[keys.lifeMin] ?? 0.1);
@@ -2409,7 +2422,9 @@ export class WeatherParticles {
       const o = i * 3;
       const gz = q[o + 2];
       m.makeTranslation(q[o], q[o + 1], gz + 10);
-      const bursts = (Math.random() < 0.42) ? 2 : 1;
+      const burstOrig = (Math.random() < 0.42) ? 2 : 1;
+      const bursts = Math.max(0, Math.round(burstOrig * spawnGfx));
+      if (bursts <= 0) continue;
       sys.spawn(bursts, sys.emissionState, m);
     }
     this._rainImpactQueuedCount = 0;
@@ -4654,11 +4669,6 @@ export class WeatherParticles {
     const snowVolumeMin = new THREE.Vector3(sceneX, sceneYWorld, groundZ - 100);
     const snowKillBehavior = new WorldVolumeKillBehavior(snowVolumeMin, volumeMax);
 
-    const ashWeatherKillBehavior = new WorldVolumeKillBehavior(snowVolumeMin, volumeMax);
-    this._ashWeatherKillBehavior = ashWeatherKillBehavior;
-    this._ashKillFullMin = snowVolumeMin.clone();
-    this._ashKillFullMax = volumeMax.clone();
-
     const roofDripVolumeMin = new THREE.Vector3(sceneX, sceneYWorld, groundZ - ROOF_DRIP_KILL_Z_MARGIN);
     const roofDripKillBehavior = new WorldVolumeKillBehavior(roofDripVolumeMin, volumeMax);
     this._roofDripKillBehavior = roofDripKillBehavior;
@@ -5415,12 +5425,16 @@ export class WeatherParticles {
         ashColorOverLife,
         new SnowFloorBehavior(), // Reuse floor behavior
         new RainFadeInBehavior(),
-        ashWeatherKillBehavior
+        snowKillBehavior
       ],
     });
 
     this.ashSystem.emitter.position.set(centerX, centerY, safeEmitterZ);
     this.ashSystem.emitter.rotation.set(Math.PI, 0, 0);
+    // Match rain: late overlay pass (layer 31) so ash draws above tokens and canopy art.
+    try {
+      this.ashSystem.emitter.userData.msOverlayLayer = true;
+    } catch (_) {}
 
     if (this.scene) this.scene.add(this.ashSystem.emitter);
     this.batchRenderer.addSystem(this.ashSystem);
@@ -5485,12 +5499,15 @@ export class WeatherParticles {
         ashEmberColorOverLife,
         new SnowFloorBehavior(),
         new RainFadeInBehavior(),
-        ashWeatherKillBehavior
+        snowKillBehavior
       ],
     });
 
     this.ashEmberSystem.emitter.position.set(centerX, centerY, safeEmitterZ);
     this.ashEmberSystem.emitter.rotation.set(Math.PI, 0, 0);
+    try {
+      this.ashEmberSystem.emitter.userData.msOverlayLayer = true;
+    } catch (_) {}
     if (this.scene) this.scene.add(this.ashEmberSystem.emitter);
     this.batchRenderer.addSystem(this.ashEmberSystem);
 
@@ -6607,6 +6624,7 @@ export class WeatherParticles {
     const splashZoomLod = (zoom < 1.0) ? Math.max(0.15, zoom) : 1.0;
     const splashGlobalScale = Number.isFinite(ms?.weatherSplashScale) ? Math.max(0.0, ms.weatherSplashScale) : 1.0;
     const splashEmissionScale = splashGlobalScale * splashZoomLod * splashZoomLod;
+    const spawnGfx = readGraphicsParticleSpawnScale();
 
     const dbgKey = `${debugDisableWeatherSplashes ? 1 : 0}|${debugDisableWeatherFoam ? 1 : 0}|${debugDisableWeatherBehaviors ? 1 : 0}`;
     if (dbgKey !== this._lastDebugKey) {
@@ -6738,34 +6756,6 @@ export class WeatherParticles {
       this._viewSceneW = sceneW;
       this._viewSceneH = sceneH;
 
-      // Ash weather: tighter kill AABB in XY than the emitter (1.2×) so flakes drift
-      // off-screen are culled without affecting snow (separate WorldVolumeKillBehavior).
-      if (this._ashWeatherKillBehavior && this._ashKillFullMin && this._ashKillFullMax) {
-        const KILL_REL_TO_EMITTER = 1.45 / 1.2;
-        const ew = Math.max(1, maxX - minX);
-        const eh = Math.max(1, maxY - minY);
-        const ecx = (minX + maxX) * 0.5;
-        const ecy = (minY + maxY) * 0.5;
-        const kw = ew * KILL_REL_TO_EMITTER;
-        const kh = eh * KILL_REL_TO_EMITTER;
-        let kMinX = ecx - kw * 0.5;
-        let kMaxX = ecx + kw * 0.5;
-        let kMinY = ecy - kh * 0.5;
-        let kMaxY = ecy + kh * 0.5;
-        if (sceneW > 0 && sceneH > 0) {
-          const sMinX = sceneX;
-          const sMaxX = sceneX + sceneW;
-          const sMinY = sceneY;
-          const sMaxY = sceneY + sceneH;
-          kMinX = Math.max(sMinX, kMinX);
-          kMaxX = Math.min(sMaxX, kMaxX);
-          kMinY = Math.max(sMinY, kMinY);
-          kMaxY = Math.min(sMaxY, kMaxY);
-        }
-        this._ashWeatherKillBehavior.min.set(kMinX, kMinY, this._ashKillFullMin.z);
-        this._ashWeatherKillBehavior.max.set(kMaxX, kMaxY, this._ashKillFullMax.z);
-      }
-
       if (this.rainSystem?.emitter && this.rainSystem.emitterShape) {
         const shape = this.rainSystem.emitterShape;
         if (typeof shape.width === 'number') shape.width = emitW;
@@ -6825,9 +6815,6 @@ export class WeatherParticles {
           this._foamFleckSystem.startSize.b = sizeMax;
         }
       }
-    } else if (this._ashWeatherKillBehavior && this._ashKillFullMin && this._ashKillFullMax) {
-      this._ashWeatherKillBehavior.min.copy(this._ashKillFullMin);
-      this._ashWeatherKillBehavior.max.copy(this._ashKillFullMax);
     }
 
     // Global scene darkness coupling (0 = fully lit, 1 = max darkness).
@@ -7468,7 +7455,7 @@ export class WeatherParticles {
           : 1.0;
         const emission = this.rainSystem.emissionOverTime;
         if (emission && typeof emission.value === 'number') {
-            emission.value = 4000 * rainIntensity * precipEnvelope;
+            emission.value = 4000 * rainIntensity * precipEnvelope * spawnGfx;
         }
 
         // --- EFFICIENT TUNING UPDATES ---
@@ -7624,13 +7611,13 @@ export class WeatherParticles {
         } else if (suppressPrecip) {
           dripReason = 'emit:suppressed';
         }
-        dripEmission.value = dripRate;
+        dripEmission.value = dripRate * spawnGfx;
         if (dripRate > 0.001 && activeDripPointCount < 1) this._roofDripDiagLastReason = 'drip_pool_empty';
         else this._roofDripDiagLastReason = dripReason;
         // Roof-drip "end-of-life" splashes: supplement event-based impacts with
         // synthetic samples from active drip points so impacts remain visible.
         if (dripRate > 0.001 && !debugDisableWeatherSplashes) {
-          const syntheticPerTick = dripRate * safeDt * 0.14;
+          const syntheticPerTick = dripRate * safeDt * 0.14 * spawnGfx;
           this._queueRoofDripSyntheticImpacts(syntheticPerTick);
         }
       }
@@ -7654,7 +7641,8 @@ export class WeatherParticles {
       if (this.roofDripSystem.speedFactor !== dripSpeedFactor) {
         this.roofDripSystem.speedFactor = dripSpeedFactor;
       }
-      const mp = Math.max(200, Math.floor(_roofDripTuningVal('maxParticles', 5000)));
+      const mpBase = Math.max(200, Math.floor(_roofDripTuningVal('maxParticles', 5000)));
+      const mp = spawnGfx <= 0 ? 0 : Math.max(50, Math.floor(mpBase * spawnGfx));
       if (this.roofDripSystem.maxParticles !== mp) {
         this.roofDripSystem.maxParticles = mp;
       }
@@ -7847,7 +7835,7 @@ export class WeatherParticles {
           let splashEmission = 0;
           if (!debugDisableWeatherSplashes && baseIntensity > 0 && splashIntensityScale > 0 && splashPrecipFactor > 0) {
             // 200 splashes/sec at full intensity, further scaled per splash and precipitation factor.
-            splashEmission = 200 * baseIntensity * splashIntensityScale * splashPrecipFactor * splashEmissionScale;
+            splashEmission = 200 * baseIntensity * splashIntensityScale * splashPrecipFactor * splashEmissionScale * spawnGfx;
           }
 
           // PERFORMANCE: Mutate existing values instead of creating new objects every frame
@@ -7984,7 +7972,7 @@ export class WeatherParticles {
 
         let emission = 0;
         if (!debugDisableWeatherSplashes && waterEnabled && this._waterHitPoints && baseIntensity > 0 && splashPrecipFactor > 0) {
-          emission = 80 * baseIntensity * splashPrecipFactor * splashEmissionScale;
+          emission = 80 * baseIntensity * splashPrecipFactor * splashEmissionScale * spawnGfx;
         }
 
         if (sys.emissionOverTime && typeof sys.emissionOverTime.value === 'number') {
@@ -8026,9 +8014,10 @@ export class WeatherParticles {
       const windSpeed = windSpeed01;
 
       const plumeEnabled = foamEnabled && (waterParams?.foamPlumeEnabled ?? true) === true;
-      const maxParticles = Number.isFinite(waterParams?.foamPlumeMaxParticles)
+      const baseFoamMp = Number.isFinite(waterParams?.foamPlumeMaxParticles)
         ? Math.max(0, Math.floor(waterParams.foamPlumeMaxParticles))
         : 2500;
+      const maxParticles = spawnGfx <= 0 ? 0 : Math.max(1, Math.floor(baseFoamMp * spawnGfx));
       if (this._foamLastMaxParticles !== maxParticles) {
         this._foamLastMaxParticles = maxParticles;
         this._foamSystem.maxParticles = maxParticles;
@@ -8052,7 +8041,7 @@ export class WeatherParticles {
       if (plumeEnabled && waterEnabled && hasPlumePoints) {
         const base = Number.isFinite(waterParams?.foamPlumeEmissionBase) ? Math.max(0.0, waterParams.foamPlumeEmissionBase) : 8.0;
         const windScale = Number.isFinite(waterParams?.foamPlumeEmissionWindScale) ? Math.max(0.0, waterParams.foamPlumeEmissionWindScale) : 45.0;
-        foamEmission = (base + windScale * windSpeed) * Math.max(0.0, foamIntensity);
+        foamEmission = (base + windScale * windSpeed) * Math.max(0.0, foamIntensity) * spawnGfx;
       }
 
       if (this._foamSystem.emissionOverTime && typeof this._foamSystem.emissionOverTime.value === 'number') {
@@ -8352,7 +8341,8 @@ export class WeatherParticles {
       const debugIgnoreOutdoors = p.foamFlecksDebugIgnoreOutdoors === true;
 
       // Allow tuning maxParticles from the Water UI.
-      const mp = Number.isFinite(maxParticles) ? Math.max(0, Math.floor(maxParticles)) : 1200;
+      const mpBase = Number.isFinite(maxParticles) ? Math.max(0, Math.floor(maxParticles)) : 1200;
+      const mp = spawnGfx <= 0 ? 0 : Math.max(1, Math.floor(mpBase * spawnGfx));
       if (this._foamFleckLastMaxParticles !== mp) {
         this._foamFleckLastMaxParticles = mp;
         this._foamFleckSystem.maxParticles = mp;
@@ -8440,7 +8430,7 @@ export class WeatherParticles {
         const accelTerm = liftScale * (debugForceOn ? 1.0 : lift01);
         const windTerm = 0.35 + 1.65 * windSpeed01;
         const intensityTerm = 0.25 + 0.75 * (i / 6.0);
-        emission = (base + accelTerm) * windTerm * intensityTerm;
+        emission = (base + accelTerm) * windTerm * intensityTerm * spawnGfx;
       }
 
       if (this._foamFleckSystem.emissionOverTime && typeof this._foamFleckSystem.emissionOverTime.value === 'number') {
@@ -8620,7 +8610,7 @@ export class WeatherParticles {
           : 1.0;
         const snowEmission = this.snowSystem.emissionOverTime;
         if (snowEmission && typeof snowEmission.value === 'number') {
-            snowEmission.value = 500 * snowIntensity * snowPrecipEnvelope;
+            snowEmission.value = 500 * snowIntensity * snowPrecipEnvelope * spawnGfx;
         }
 
         const flakeSize = snowTuning.flakeSize ?? 1.0;
@@ -8712,7 +8702,7 @@ export class WeatherParticles {
       const ashEmission = this.ashSystem.emissionOverTime;
       if (ashEmission && typeof ashEmission.value === 'number') {
         const rate = ashTuning.emissionRate ?? 840;
-        ashEmission.value = rate * tunedIntensity * ashEnvelope;
+        ashEmission.value = rate * tunedIntensity * ashEnvelope * spawnGfx;
       }
 
       // Ash particle size - slightly larger than snow
@@ -8827,7 +8817,7 @@ export class WeatherParticles {
       const emberEmission = this.ashEmberSystem.emissionOverTime;
       if (emberEmission && typeof emberEmission.value === 'number') {
         const rate = ashTuning.emberEmissionRate ?? 167;
-        emberEmission.value = rate * tunedIntensity * emberEnvelope;
+        emberEmission.value = rate * tunedIntensity * emberEnvelope * spawnGfx;
       }
 
       if (this.ashEmberSystem.startSize && typeof this.ashEmberSystem.startSize.a === 'number') {

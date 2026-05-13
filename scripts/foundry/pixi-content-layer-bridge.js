@@ -13,6 +13,8 @@
 
 import { createLogger } from '../core/log.js';
 import { isWallDoorStateOnlyUpdate } from '../utils/wall-update-classify.js';
+import { hasV14NativeLevels, isDocMemberOfV14LevelSet } from './levels-scene-flags.js';
+import { elevationInBand } from '../ui/levels-editor/level-boundaries.js';
 
 const log = createLogger('PixiContentLayerBridge');
 
@@ -102,6 +104,9 @@ export class PixiContentLayerBridge {
     /** @type {string} Content signature from last replay capture — skip GPU upload when unchanged */
     this._lastReplayDocsSig = '';
 
+    /** @type {string} Last FloorStack active floor key; when it changes, drawing replay must re-run */
+    this._lastBridgeFloorKey = '';
+
     /** @type {number} Minimum ms between post-dirty followup captures */
     this._postDirtyThrottleMs = 200;
 
@@ -139,6 +144,13 @@ export class PixiContentLayerBridge {
      */
     /** @type {boolean} */
     this._templateWorldPublishOk = false;
+
+    /**
+     * Scene drawings must reach the world bridge at least once per session;
+     * otherwise skip:idle freezes while replay still has not painted pixels.
+     */
+    /** @type {boolean} */
+    this._drawingWorldPublishOk = false;
 
     /** @type {string} */
     this._textureSamplingStateKey = '';
@@ -380,9 +392,18 @@ export class PixiContentLayerBridge {
         );
       };
 
-      this._hookIds.push(['createDrawing', Hooks.on('createDrawing', () => { markDirty(1); })]);
-      this._hookIds.push(['updateDrawing', Hooks.on('updateDrawing', () => { markDirty(1); })]);
-      this._hookIds.push(['deleteDrawing', Hooks.on('deleteDrawing', () => { markDirty(1); })]);
+      this._hookIds.push(['createDrawing', Hooks.on('createDrawing', () => {
+        this._drawingWorldPublishOk = false;
+        markDirty(1);
+      })]);
+      this._hookIds.push(['updateDrawing', Hooks.on('updateDrawing', () => {
+        this._drawingWorldPublishOk = false;
+        markDirty(1);
+      })]);
+      this._hookIds.push(['deleteDrawing', Hooks.on('deleteDrawing', () => {
+        this._drawingWorldPublishOk = false;
+        markDirty(1);
+      })]);
       this._hookIds.push(['createAmbientSound', Hooks.on('createAmbientSound', () => { markDirty(2); })]);
       this._hookIds.push(['updateAmbientSound', Hooks.on('updateAmbientSound', () => { markDirty(2); })]);
       this._hookIds.push(['deleteAmbientSound', Hooks.on('deleteAmbientSound', () => { markDirty(2); })]);
@@ -448,6 +469,7 @@ export class PixiContentLayerBridge {
       // to prevent stacking multiple expensive captures per tool switch.
       this._hookIds.push(['canvasReady', Hooks.on('canvasReady', () => {
         this._templateWorldPublishOk = false;
+        this._drawingWorldPublishOk = false;
         markDirty(2);
       })]);
     }
@@ -459,6 +481,7 @@ export class PixiContentLayerBridge {
     this._pendingStageZoomSig = '';
     this._lastZoomDirtyMs = 0;
     this._dirty = true;
+    this._drawingWorldPublishOk = false;
     this._getTemplateControlIconImage();
   }
 
@@ -714,6 +737,7 @@ export class PixiContentLayerBridge {
 
   markDirty() {
     this._dirty = true;
+    this._drawingWorldPublishOk = false;
     this._lastReplayDocsSig = '';
   }
 
@@ -1087,6 +1111,46 @@ export class PixiContentLayerBridge {
   }
 
   /**
+   * Whether a drawing document should appear in the bridge capture for the **currently viewed floor**.
+   * Empty V14 `levels` on the doc means global (all floors). Single-floor scenes keep all drawings.
+   * @param {any} doc
+   * @returns {boolean}
+   * @private
+   */
+  _drawingDocVisibleForActiveFloor(doc) {
+    if (!doc) return true;
+    const scene = canvas?.scene;
+    const fs = window.MapShine?.floorStack;
+    const floors = fs?.getFloors?.() ?? [];
+    if (!scene || floors.length <= 1) return true;
+
+    const activeFloor = fs?.getActiveFloor?.();
+    if (!activeFloor) return true;
+
+    if (activeFloor.levelId && hasV14NativeLevels(scene)) {
+      return isDocMemberOfV14LevelSet(doc, activeFloor.levelId);
+    }
+
+    const docObj = doc?.document ?? doc;
+    const elev = Number(docObj?.elevation ?? doc?.elevation ?? 0);
+    const includeUpperBound = Number(activeFloor.index) >= (floors.length - 1);
+    return elevationInBand(elev, activeFloor.elevationMin, activeFloor.elevationMax, includeUpperBound);
+  }
+
+  /**
+   * Alpha multiplier for bridge-rendered drawings from `DrawingDocument#hidden`.
+   * Hidden drawings are omitted for non-GMs; GMs see them at 25% opacity.
+   * @param {any} doc
+   * @returns {number} 0..1
+   * @private
+   */
+  _drawingBridgeAlphaForDoc(doc) {
+    const hidden = this._toBool(doc?.hidden, false);
+    if (!hidden) return 1;
+    return game?.user?.isGM ? 0.25 : 0;
+  }
+
+  /**
    * @param {any} value
    * @param {number} fallback
    * @returns {number}
@@ -1392,13 +1456,14 @@ export class PixiContentLayerBridge {
    * @param {any} doc
    * @private
    */
-  _drawDrawingText(ctx, doc) {
+  _drawDrawingText(ctx, doc, alphaMul = 1) {
     const text = String(doc?.text ?? '').trim();
     if (!text) return false;
 
+    const m = Math.max(0, Math.min(1, this._toNumber(alphaMul, 1)));
     const fontSize = Math.max(8, this._toNumber(doc?.fontSize, 48));
     const fontFamily = String(doc?.fontFamily || 'Signika').trim() || 'Signika';
-    const textAlpha = Math.max(0, Math.min(1, this._toNumber(doc?.textAlpha, 1)));
+    const textAlpha = Math.max(0, Math.min(1, this._toNumber(doc?.textAlpha, 1))) * m;
     const textColor = this._normalizeHexColor(doc?.textColor) || '#ffffff';
     const r = Number.parseInt(textColor.slice(1, 3), 16);
     const g = Number.parseInt(textColor.slice(3, 5), 16);
@@ -1502,6 +1567,12 @@ export class PixiContentLayerBridge {
       for (const doc of docById.values()) replayDocs.push(doc);
     }
 
+    for (let i = replayDocs.length - 1; i >= 0; i -= 1) {
+      if (!this._drawingDocVisibleForActiveFloor(replayDocs[i])) {
+        replayDocs.splice(i, 1);
+      }
+    }
+
     const sceneDrawingsPresent = (Number(canvas?.scene?.drawings?.size) || 0) > 0;
     if (replayDocs.length === 0 && sceneDrawingsPresent) {
       // Preserve previous bridge texture when scene docs exist but extraction is
@@ -1522,7 +1593,8 @@ export class PixiContentLayerBridge {
         + `${this._toNumber(doc?.rotation, 0)}:`
         + `${this._toNumber(doc?.strokeWidth, 0)}:`
         + `${String(doc?.strokeColor ?? '')}:${String(doc?.fillColor ?? '')}:`
-        + `${String(doc?.text ?? '')}:${this._toNumber(doc?.sort, 0)}`
+        + `${String(doc?.text ?? '')}:${this._toNumber(doc?.sort, 0)}:`
+        + `${this._toBool(doc?.hidden, false) ? 1 : 0}`
       );
     }
     const contentSig = `${renderW}x${renderH}:${replayDocs.length}:${sigParts.join('|')}`;
@@ -1540,13 +1612,16 @@ export class PixiContentLayerBridge {
 
     let drawCount = 0;
     for (const doc of replayDocs) {
+      const bridgeAlpha = this._drawingBridgeAlphaForDoc(doc);
+      if (bridgeAlpha <= 0) continue;
+
       const kind = this._resolveDrawingType(doc);
       const pathInfo = this._traceDrawingPath(ctx, doc, kind);
       let rendered = false;
       if (pathInfo.hasPath) {
-        const fillAlpha = Math.max(0, Math.min(1, this._toNumber(doc?.fillAlpha, 0)));
+        const fillAlpha = Math.max(0, Math.min(1, this._toNumber(doc?.fillAlpha, 0) * bridgeAlpha));
         const fillType = this._toNumber(doc?.fillType, 0);
-        const strokeAlpha = Math.max(0, Math.min(1, this._toNumber(doc?.strokeAlpha, 1)));
+        const strokeAlpha = Math.max(0, Math.min(1, this._toNumber(doc?.strokeAlpha, 1) * bridgeAlpha));
         const strokeWidth = Math.max(0, this._toNumber(doc?.strokeWidth, 8));
 
         if (pathInfo.closed && fillAlpha > 0.001 && fillType !== 0) {
@@ -1563,7 +1638,7 @@ export class PixiContentLayerBridge {
         rendered = true;
       }
 
-      const textRendered = this._drawDrawingText(ctx, doc) === true;
+      const textRendered = this._drawDrawingText(ctx, doc, bridgeAlpha) === true;
       if (rendered || textRendered) drawCount += 1;
     }
 
@@ -1571,6 +1646,16 @@ export class PixiContentLayerBridge {
     worldTexture.needsUpdate = true;
     if (drawCount <= 0) {
       if (sceneDrawingsPresent) {
+        const viewerSeesNoDrawingPixels =
+          replayDocs.length > 0
+          && replayDocs.every((d) => this._drawingBridgeAlphaForDoc(d) <= 0);
+        if (viewerSeesNoDrawingPixels) {
+          return {
+            ok: true,
+            count: 0,
+            status: `captured:replay-nonvisible:${w}x${h} logical=${logicalW}x${logicalH} ss=${captureScale.toFixed(2)}`,
+          };
+        }
         return { ok: true, count: 0, status: `retry:replay-render-empty:${w}x${h}` };
       }
       return { ok: true, count: 0, status: `captured:replay-empty:${w}x${h} logical=${logicalW}x${logicalH} ss=${captureScale.toFixed(2)}` };
@@ -1786,17 +1871,24 @@ export class PixiContentLayerBridge {
     if (!ctx) return { ok: false, count: 0, status: 'skip:no-world-context' };
 
     const shapes = this._collectDrawingShapeObjects(drawingsLayer);
+    const shapesForFloor = shapes.filter((shape) => {
+      const doc = this._getDrawingDocument(shape?.parent);
+      return this._drawingDocVisibleForActiveFloor(doc);
+    });
     const w = this._worldCanvas.width;
     const h = this._worldCanvas.height;
     ctx.clearRect(0, 0, w, h);
-    if (shapes.length <= 0) {
+    if (shapesForFloor.length <= 0) {
       worldTexture.needsUpdate = true;
       return { ok: true, count: 0, status: `captured:shape-replay-empty:${w}x${h}` };
     }
 
     let drawn = 0;
-    for (const shape of shapes) {
+    for (const shape of shapesForFloor) {
       if (!shape) continue;
+      const doc = this._getDrawingDocument(shape?.parent);
+      const bridgeAlpha = this._drawingBridgeAlphaForDoc(doc);
+      if (bridgeAlpha <= 0) continue;
       let bounds = null;
       try { bounds = shape.getBounds?.(false) ?? null; } catch (_) { bounds = null; }
       const bx = Math.floor(this._toNumber(bounds?.x, 0));
@@ -1813,9 +1905,24 @@ export class PixiContentLayerBridge {
       }
       if (!shapeCanvas || !shapeCanvas.width || !shapeCanvas.height) continue;
       try {
+        ctx.save();
+        if (bridgeAlpha < 1) ctx.globalAlpha = bridgeAlpha;
         ctx.drawImage(shapeCanvas, bx, by, bw, bh);
+        ctx.restore();
         drawn += 1;
       } catch (_) {}
+    }
+
+    const sceneDrawingsPresentShape = (Number(canvas?.scene?.drawings?.size) || 0) > 0;
+    if (drawn <= 0 && sceneDrawingsPresentShape && shapesForFloor.length > 0) {
+      const allNonViewer = shapesForFloor.every((sh) => {
+        const d = this._getDrawingDocument(sh?.parent);
+        return this._drawingBridgeAlphaForDoc(d) <= 0;
+      });
+      if (allNonViewer) {
+        worldTexture.needsUpdate = true;
+        return { ok: true, count: 0, status: `captured:replay-nonvisible:${w}x${h} shape-replay` };
+      }
     }
 
     worldTexture.needsUpdate = true;
@@ -3320,6 +3427,21 @@ export class PixiContentLayerBridge {
 
     this._refreshTextureSamplingIfNeeded();
 
+    try {
+      const af = window?.MapShine?.floorStack?.getActiveFloor?.() ?? null;
+      const floorKey = af
+        ? String(af.key ?? `${af.elevationMin}:${af.elevationMax}:${af.levelId ?? ''}`)
+        : '__no_floor__';
+      if (floorKey !== this._lastBridgeFloorKey) {
+        const hadPrev = this._lastBridgeFloorKey !== '';
+        this._lastBridgeFloorKey = floorKey;
+        if (hadPrev) {
+          this._dirty = true;
+          this._lastReplayDocsSig = '';
+        }
+      }
+    } catch (_) {}
+
     if (!canvas?.ready) {
       this._lastUpdateStatus = 'skip:canvas-not-ready';
       this._clearChannel('world');
@@ -3488,6 +3610,13 @@ export class PixiContentLayerBridge {
       this._postDirtyCapturesRemaining = Math.max(this._postDirtyCapturesRemaining, 2);
     }
 
+    if (!drawingsPresent) {
+      this._drawingWorldPublishOk = true;
+    } else if (!this._drawingWorldPublishOk) {
+      this._dirty = true;
+      this._postDirtyCapturesRemaining = Math.max(this._postDirtyCapturesRemaining, 2);
+    }
+
     // Fullscreen extraction is expensive. Outside of explicit dirty changes,
     // only keep capturing while a drawing preview is actively being edited,
     // or for a short post-mutation followup window.
@@ -3586,7 +3715,12 @@ export class PixiContentLayerBridge {
       : this._renderReplayCapture(drawingsLayer, worldCapture.width, worldCapture.height);
 
     const replayCount = Number(this._toNumber(replayResult?.count, 0));
-    const replayEmptyWithDrawingsPresent = replayResult.ok && replayCount <= 0 && drawingsPresent;
+    const replayStatus = String(replayResult?.status ?? '');
+    const replayEmptyWithDrawingsPresent =
+      replayResult.ok
+      && replayCount <= 0
+      && drawingsPresent
+      && !replayStatus.includes('replay-nonvisible');
 
     // Compute non-drawing UI content flags BEFORE the replay-only gate so we
     // can fall through to stage isolation when overlays are actively being
@@ -3730,6 +3864,7 @@ export class PixiContentLayerBridge {
             this._postDirtyCapturesRemaining = Math.max(this._postDirtyCapturesRemaining, 2);
             this._lastUpdateStatus = `${this._lastUpdateStatus} + pending:settled-templates`;
           } else {
+            this._drawingWorldPublishOk = true;
             this._dirty = false;
           }
           return;
@@ -3740,6 +3875,7 @@ export class PixiContentLayerBridge {
         this._clearChannel('world');
         this._clearChannel('ui');
         this._uiHasContent = false;
+        this._drawingWorldPublishOk = false;
         this._dirty = false;
         return;
       }
@@ -3748,6 +3884,7 @@ export class PixiContentLayerBridge {
     if (captureStrategy === 'notes-extract') {
       if (replayResult.ok && !hasNotesUiContent) {
         this._lastUpdateStatus = `${replayResult.status} strategy=${captureStrategy}`;
+        this._drawingWorldPublishOk = true;
         this._dirty = false;
         return;
       }
@@ -3757,6 +3894,7 @@ export class PixiContentLayerBridge {
     if (captureStrategy === 'sounds-extract') {
       if (replayResult.ok && !hasSoundsUiContent) {
         this._lastUpdateStatus = `${replayResult.status} strategy=${captureStrategy}`;
+        this._drawingWorldPublishOk = true;
         this._dirty = false;
         return;
       }
@@ -3766,6 +3904,7 @@ export class PixiContentLayerBridge {
     if (captureStrategy === 'templates-extract') {
       if (replayResult.ok && !hasTemplatesUiContent && !hasNotesUiContent) {
         this._lastUpdateStatus = `${replayResult.status} strategy=${captureStrategy}`;
+        this._drawingWorldPublishOk = true;
         this._dirty = false;
         return;
       }
@@ -3775,6 +3914,7 @@ export class PixiContentLayerBridge {
     if (captureStrategy === 'regions-extract') {
       if (replayResult.ok && !hasRegionsUiContent) {
         this._lastUpdateStatus = `${replayResult.status} strategy=${captureStrategy}`;
+        this._drawingWorldPublishOk = true;
         this._dirty = false;
         return;
       }
@@ -3789,6 +3929,7 @@ export class PixiContentLayerBridge {
         return;
       }
       this._lastUpdateStatus = replayResult.status;
+      this._drawingWorldPublishOk = true;
       this._dirty = false;
       return;
     }
@@ -3916,6 +4057,7 @@ export class PixiContentLayerBridge {
       this._clearChannel('world');
       this._clearChannel('ui');
       this._uiHasContent = false;
+      this._drawingWorldPublishOk = false;
       return;
     }
 
@@ -4124,6 +4266,7 @@ export class PixiContentLayerBridge {
         if (canInjectGpuDirect && this._injectPixiRTToWorldTexture(tempRT, uiRtW, uiRtH)) {
           if (window?.MapShine) window.MapShine.__pixiBridgeGpuDirectActive = true;
           this._uiHasContent = false;
+          this._drawingWorldPublishOk = true;
           this._dirty = false;
           this._lastUpdateStatus = `captured:gpu-direct:${uiRtW}x${uiRtH} strategy=${captureStrategy}`;
           return;
@@ -4138,6 +4281,7 @@ export class PixiContentLayerBridge {
     } catch (err) {
       log.warn('Drawings capture failed', err);
       this._lastUpdateStatus = 'skip:capture-threw';
+      this._drawingWorldPublishOk = false;
       this._dirty = false;
       this._clearChannel('world');
       this._clearChannel('ui');
@@ -4334,6 +4478,7 @@ export class PixiContentLayerBridge {
       this._clearChannel('world');
       this._clearChannel('ui');
       this._uiHasContent = false;
+      this._drawingWorldPublishOk = false;
       this._dirty = false;
       return;
     }
@@ -4396,6 +4541,7 @@ export class PixiContentLayerBridge {
     // UI channel remains empty by default until dedicated UI ingestion ships.
     this._uiHasContent = false;
 
+    this._drawingWorldPublishOk = true;
     this._dirty = false;
     if (!hadFallbackStatus) {
       const captureMode = shouldPreserveReplayBase ? 'captured:overlay-on-replay' : 'captured';

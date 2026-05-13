@@ -3416,6 +3416,12 @@ export class TweakpaneManager {
       this.resetEffectToDefaults(effectId);
     });
 
+    folder.addButton({
+      title: '📋 Defaults prompt (for devs)'
+    }).on('click', () => {
+      void this.openEffectDefaultsDevPrompt(effectId, effectName);
+    });
+
     this.effectCallbacks.set(effectId, updateCallback);
 
     folder.on('fold', (ev) => {
@@ -3698,6 +3704,12 @@ export class TweakpaneManager {
       this.resetEffectToDefaults(effectId);
     });
 
+    folder.addButton({
+      title: '📋 Defaults prompt (for devs)'
+    }).on('click', () => {
+      void this.openEffectDefaultsDevPrompt(effectId, effectName);
+    });
+
     this.effectCallbacks.set(effectId, updateCallback);
 
     folder.on('fold', (ev) => {
@@ -3769,6 +3781,126 @@ export class TweakpaneManager {
   }
 
   /**
+   * Build a mask status section for mask-dependent effects
+   * @private
+   * @param {string} effectId - Effect identifier
+   * @param {object} folder - Tweakpane folder
+   * @param {object} group - Group definition
+   */
+  _buildMaskStatusSection(effectId, folder, group) {
+    // Get the content element of the folder
+    const contentElement = folder.element.querySelector('.tp-fldv_c') || folder.element;
+
+    // Create container for mask status
+    const statusContainer = document.createElement('div');
+    statusContainer.className = 'ms-mask-status-section';
+    statusContainer.style.padding = '8px';
+    statusContainer.style.fontSize = '12px';
+    statusContainer.style.lineHeight = '1.5';
+
+    // Create header
+    const header = document.createElement('div');
+    header.style.fontWeight = '600';
+    header.style.marginBottom = '8px';
+    header.style.color = '#aaa';
+    header.textContent = 'Required Masks';
+    statusContainer.appendChild(header);
+
+    // Create mask status row for _Water
+    const maskRow = document.createElement('div');
+    maskRow.style.display = 'flex';
+    maskRow.style.alignItems = 'center';
+    maskRow.style.gap = '8px';
+    maskRow.style.padding = '4px 0';
+
+    // Status indicator (X in red by default)
+    const statusIndicator = document.createElement('div');
+    statusIndicator.className = 'ms-mask-status-indicator';
+    statusIndicator.style.width = '16px';
+    statusIndicator.style.height = '16px';
+    statusIndicator.style.display = 'flex';
+    statusIndicator.style.alignItems = 'center';
+    statusIndicator.style.justifyContent = 'center';
+    statusIndicator.style.borderRadius = '3px';
+    statusIndicator.style.backgroundColor = 'rgba(255, 68, 68, 0.2)';
+    statusIndicator.style.color = '#ff4444';
+    statusIndicator.style.fontWeight = 'bold';
+    statusIndicator.style.fontSize = '14px';
+    statusIndicator.textContent = '✗';
+    statusIndicator.title = 'Missing: Place a _Water suffixed texture alongside your main albedo texture (e.g., BattleMap.png → BattleMap_Water.png) to enable water rendering.';
+
+    // Mask label
+    const maskLabel = document.createElement('div');
+    maskLabel.className = 'ms-mask-status-label';
+    maskLabel.style.flex = '1';
+    maskLabel.textContent = '_Water mask';
+    maskLabel.style.color = '#ff4444';
+
+    // Help text
+    const helpText = document.createElement('div');
+    helpText.className = 'ms-mask-status-help';
+    helpText.style.fontSize = '11px';
+    helpText.style.color = '#888';
+    helpText.style.marginTop = '6px';
+    helpText.style.padding = '6px';
+    helpText.style.backgroundColor = 'rgba(255, 255, 255, 0.05)';
+    helpText.style.borderRadius = '3px';
+    helpText.textContent = 'Place a _Water suffixed texture alongside your main albedo texture (e.g., BattleMap.png → BattleMap_Water.png) to enable water rendering.';
+
+    maskRow.appendChild(statusIndicator);
+    maskRow.appendChild(maskLabel);
+    statusContainer.appendChild(maskRow);
+    statusContainer.appendChild(helpText);
+    contentElement.appendChild(statusContainer);
+
+    // Store references for updating
+    if (!this.effectFolders[effectId]) {
+      this.effectFolders[effectId] = {};
+    }
+    this.effectFolders[effectId].maskStatusElements = {
+      container: statusContainer,
+      indicator: statusIndicator,
+      label: maskLabel,
+      helpText: helpText
+    };
+  }
+
+  /**
+   * Update mask status display for an effect
+   * @param {string} effectId - Effect identifier
+   * @param {object} maskStatus - Object with mask detection status (e.g., { water: true/false })
+   */
+  updateMaskStatusDisplay(effectId, maskStatus) {
+    const effectData = this.effectFolders[effectId];
+    if (!effectData || !effectData.maskStatusElements) return;
+
+    const { indicator, label, helpText } = effectData.maskStatusElements;
+
+    // Update based on _Water mask status
+    const waterDetected = maskStatus.water || false;
+
+    if (waterDetected) {
+      // Green checkmark
+      indicator.style.backgroundColor = 'rgba(76, 175, 80, 0.2)';
+      indicator.style.color = '#4caf50';
+      indicator.textContent = '✓';
+      indicator.title = 'Detected: Water rendering is active.';
+      label.style.color = '#4caf50';
+      helpText.textContent = 'Water mask detected. Water rendering is active.';
+      helpText.style.color = '#888';
+    } else {
+      // Red X
+      indicator.style.backgroundColor = 'rgba(255, 68, 68, 0.2)';
+      indicator.style.color = '#ff4444';
+      indicator.textContent = '✗';
+      indicator.title = 'Missing: Place a _Water suffixed texture alongside your main albedo texture (e.g., BattleMap.png → BattleMap_Water.png) to enable water rendering.';
+      label.style.color = '#ff4444';
+      helpText.textContent = 'Place a _Water suffixed texture alongside your main albedo texture (e.g., BattleMap.png → BattleMap_Water.png) to enable water rendering.';
+      helpText.style.color = '#ff4444';
+    }
+  }
+
+  /**
    * Build effect controls based on schema groups or flat structure
    * @private
    */
@@ -3778,6 +3910,12 @@ export class TweakpaneManager {
         // Add separator before this group if requested
         if (group.separator) {
           folder.addBlade({ view: 'separator' });
+        }
+
+        // Special handling for mask-status groups
+        if (group.type === 'mask-status') {
+          this._buildMaskStatusSection(effectId, folder, group);
+          continue;
         }
 
         // Determine target container (inline vs nested folder)
@@ -4754,6 +4892,161 @@ export class TweakpaneManager {
     if (notify) {
       ui.notifications.info(`Map Shine: ${effectId} reset to defaults`);
     }
+  }
+
+  /**
+   * Schema parameter entries in UI order (groups when present, then any leftovers).
+   * @param {object} schema
+   * @returns {Array<[string, object]>}
+   * @private
+   */
+  _getOrderedEffectSchemaParamEntries(schema) {
+    const parameters = schema?.parameters && typeof schema.parameters === 'object'
+      ? schema.parameters
+      : {};
+    const out = [];
+    const seen = new Set();
+
+    const groups = schema?.groups;
+    if (Array.isArray(groups)) {
+      for (const group of groups) {
+        const ids = group?.parameters;
+        if (!Array.isArray(ids)) continue;
+        for (const paramId of ids) {
+          if (seen.has(paramId)) continue;
+          const paramDef = parameters[paramId];
+          if (!paramDef) continue;
+          seen.add(paramId);
+          out.push([paramId, paramDef]);
+        }
+      }
+    }
+
+    for (const [paramId, paramDef] of Object.entries(parameters)) {
+      if (seen.has(paramId)) continue;
+      out.push([paramId, paramDef]);
+    }
+
+    return out;
+  }
+
+  /**
+   * Human-readable note listing every tunable control for an effect and its current value.
+   * Intended for pasting into a chat or ticket when updating schema `default` values.
+   * @param {string} effectId
+   * @param {string} effectDisplayName
+   * @returns {string}
+   * @public
+   */
+  buildEffectDefaultsDevPrompt(effectId, effectDisplayName) {
+    const effectData = this.effectFolders[effectId];
+    if (!effectData?.schema) {
+      return `Unknown effect: ${effectId}`;
+    }
+
+    const schema = effectData.schema;
+    const params = effectData.params || {};
+    const name = (typeof effectDisplayName === 'string' && effectDisplayName.trim())
+      ? effectDisplayName.trim()
+      : effectId;
+
+    const lines = [];
+    lines.push(`Make this the new default settings for ${name} (effect id: ${effectId}).`);
+    lines.push('');
+
+    const ordered = this._getOrderedEffectSchemaParamEntries(schema);
+    const enabledEntry = ordered.find(([id]) => id === 'enabled');
+    const rest = ordered.filter(([id]) => id !== 'enabled');
+    const sortedEntries = enabledEntry ? [enabledEntry, ...rest] : rest;
+
+    for (const [paramId, paramDef] of sortedEntries) {
+      if (paramId === 'textureStatus') continue;
+      if (paramDef?.type === 'button') continue;
+      if (paramDef?.readonly === true) continue;
+      if (paramDef?.hidden === true && paramId !== 'enabled') continue;
+      if (paramDef?.gmOnly === true && !isGmLike()) continue;
+
+      const raw = params[paramId];
+      const currentValue = raw === undefined ? paramDef?.default : raw;
+      let formatted = this.formatParamValue(paramId, currentValue, paramDef);
+      if (formatted === undefined) formatted = JSON.stringify(currentValue ?? null);
+      const label = (paramDef?.label && String(paramDef.label).trim())
+        ? String(paramDef.label).trim()
+        : paramId;
+      lines.push(`- ${label} (${paramId}): ${formatted}`);
+    }
+
+    return lines.join('\n');
+  }
+
+  /**
+   * Show the defaults prompt in a dialog, copy to clipboard when possible, and log fallback.
+   * @param {string} effectId
+   * @param {string} effectDisplayName
+   * @returns {Promise<void>}
+   * @public
+   */
+  async openEffectDefaultsDevPrompt(effectId, effectDisplayName) {
+    const text = this.buildEffectDefaultsDevPrompt(effectId, effectDisplayName);
+
+    try {
+      if (navigator?.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+        ui.notifications?.info?.('Map Shine: Defaults prompt copied to clipboard');
+      } else {
+        throw new Error('Clipboard API not available');
+      }
+    } catch (e) {
+      log.warn('openEffectDefaultsDevPrompt: clipboard copy failed:', e);
+      console.log(text);
+      ui.notifications?.warn?.('Map Shine: Could not copy to clipboard; text printed to console');
+    }
+
+    const safeId = String(effectId).replace(/[^a-zA-Z0-9_-]/g, '_');
+    const taId = `ms-effect-defaults-prompt-${safeId}`;
+    const title = this._escHtml(`Defaults prompt — ${effectDisplayName || effectId}`);
+
+    new Dialog({
+      title,
+      content: `
+        <p style="margin:0 0 8px;font-size:12px;opacity:0.9">
+          Use this list when updating <code>default</code> values in the effect schema.
+        </p>
+        <textarea id="${taId}" readonly spellcheck="false" style="width:100%;height:min(420px,55vh);resize:vertical;font-family:monospace;font-size:12px;padding:8px;box-sizing:border-box"></textarea>
+      `,
+      render: (html) => {
+        html.find(`#${taId}`).val(text);
+      },
+      buttons: {
+        copy: {
+          icon: '<i class="fas fa-copy"></i>',
+          label: 'Copy again',
+          callback: () => {
+            void (async () => {
+              try {
+                if (navigator?.clipboard?.writeText) {
+                  await navigator.clipboard.writeText(text);
+                  ui.notifications?.info?.('Copied');
+                } else {
+                  throw new Error('Clipboard API not available');
+                }
+              } catch (err) {
+                log.warn('Copy again failed:', err);
+                ui.notifications?.warn?.('Could not copy; select the text manually');
+              }
+            })();
+            return false;
+          },
+        },
+        close: {
+          icon: '<i class="fas fa-times"></i>',
+          label: 'Close',
+          callback: () => true,
+        },
+      },
+      default: 'close',
+      close: () => {},
+    }).render(true);
   }
 
   /**

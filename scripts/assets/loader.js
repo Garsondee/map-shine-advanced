@@ -91,6 +91,16 @@ const _missingMaskDiagnostics = new Map();
 /** Failed mask URL cache to suppress repeated 404 retries */
 const _failedMaskUrlCache = new Set();
 
+/** Directory file listing cache to avoid repeated FilePicker browsing */
+const _directoryFileListCache = new Map();
+const DIRECTORY_FILE_LIST_CACHE_TTL_MS = 30000;
+
+/** In-flight texture load deduplication */
+const textureInflight = new Map();
+
+/** In-flight asset bundle load deduplication */
+const assetBundleInflight = new Map();
+
 function _normalizeFileList(files) {
   const out = [];
   const seen = new Set();
@@ -102,6 +112,12 @@ function _normalizeFileList(files) {
     out.push(s);
   }
   return out;
+}
+
+function _directoryCacheKeyForBasePath(basePath) {
+  const src = String(basePath || '').trim().replace(/\\/g, '/');
+  const slash = src.lastIndexOf('/');
+  return slash >= 0 ? src.slice(0, slash + 1) : src;
 }
 
 async function _discoverFilesViaFilePicker(basePath) {
@@ -151,6 +167,7 @@ async function _discoverFilesViaFilePicker(basePath) {
   };
 
   const allFiles = [];
+  const allFilesSeen = new Set();
   for (const dir of dirsToTry) {
     try {
       const candidates = buildBrowseCandidates(dir);
@@ -163,7 +180,9 @@ async function _discoverFilesViaFilePicker(basePath) {
         }
         if (!result || !Array.isArray(result.files) || result.files.length === 0) continue;
         for (const f of result.files) {
-          if (!allFiles.includes(f)) allFiles.push(f);
+          if (typeof f !== 'string' || allFilesSeen.has(f)) continue;
+          allFilesSeen.add(f);
+          allFiles.push(f);
         }
         // First successful source is authoritative for this dir.
         break;
@@ -332,7 +351,24 @@ function _maskResolvedStemMatchesBase(resolvedPath, basePath, suffix) {
  * @returns {Promise<AssetLoadResult>} Loaded asset bundle
  * @public
  */
-export async function loadAssetBundle(basePath, onProgress = null, options = {}) {
+function makeAssetBundleCacheKey(basePath, options) {
+  const skipBaseTexture = options?.skipBaseTexture === true;
+  const skipMaskIds = options?.skipMaskIds;
+  const _skipKey = (() => {
+    try {
+      if (!skipMaskIds) return '';
+      if (skipMaskIds instanceof Set) return Array.from(skipMaskIds).sort().join(',');
+      if (Array.isArray(skipMaskIds)) return skipMaskIds.map((v) => String(v).toLowerCase()).sort().join(',');
+      return String(skipMaskIds).toLowerCase();
+    } catch (e) {
+      return '';
+    }
+  })();
+  const cacheKeySuffix = String(options?.cacheKeySuffix || 'default');
+  return `${basePath}::${skipBaseTexture ? 'masks' : 'full'}::skip=${_skipKey}::${cacheKeySuffix}`;
+}
+
+async function loadAssetBundleImpl(basePath, onProgress, options) {
   const {
     skipBaseTexture = false,
     suppressProbeErrors = false,
@@ -379,9 +415,7 @@ export async function loadAssetBundle(basePath, onProgress = null, options = {})
   
   try {
     // Check cache first
-    const _skipKey = _skipMaskSet ? Array.from(_skipMaskSet).sort().join(',') : '';
-    const ckSuffix = String(cacheKeySuffix || 'default');
-    const cacheKey = `${basePath}::${skipBaseTexture ? 'masks' : 'full'}::skip=${_skipKey}::${ckSuffix}`;
+    const cacheKey = makeAssetBundleCacheKey(basePath, options);
     if (!bypassCache && assetCache.has(cacheKey)) {
       const cached = assetCache.get(cacheKey);
       const cachedMaskCount = Array.isArray(cached?.masks) ? cached.masks.length : 0;
@@ -747,6 +781,27 @@ export async function loadAssetBundle(basePath, onProgress = null, options = {})
   }
 }
 
+export async function loadAssetBundle(basePath, onProgress = null, options = {}) {
+  const cacheKey = makeAssetBundleCacheKey(basePath, options);
+
+  if (!options?.bypassCache) {
+    const inflight = assetBundleInflight.get(cacheKey);
+    if (inflight) return inflight;
+  }
+
+  const promise = loadAssetBundleImpl(basePath, onProgress, options);
+
+  if (!options?.bypassCache) {
+    assetBundleInflight.set(cacheKey, promise);
+  }
+
+  try {
+    return await promise;
+  } finally {
+    assetBundleInflight.delete(cacheKey);
+  }
+}
+
 /**
  * Load base texture with format detection
  * @param {string} basePath - Base path without extension
@@ -759,10 +814,17 @@ async function loadBaseTexture(basePath) {
     throw new Error('three.js not loaded');
   }
 
-  // Try each supported format
-  for (const format of SUPPORTED_FORMATS) {
+  const preferredExt = _extractExtension(
+    typeof canvas !== 'undefined' ? canvas?.scene?.background?.src : ''
+  );
+
+  const formats = preferredExt
+    ? _buildExtensionVariants(preferredExt)
+    : SUPPORTED_FORMATS;
+
+  for (const format of formats) {
     const path = `${basePath}.${format}`;
-    
+
     try {
       const texture = await loadTextureAsync(path);
       if (texture) {
@@ -862,39 +924,77 @@ export async function probeMaskFile(basePath, suffix, options = {}) {
  * Discover available files in the same directory as the base texture
  * Uses Foundry's FilePicker API to avoid 404 spam
  * @param {string} basePath - Base path without extension (e.g., 'modules/mymodule/assets/map')
+ * @param {{force?: boolean}} [options] - Options
  * @returns {Promise<string[]>} Array of available file paths
  * @public
  */
-export async function discoverMaskDirectoryFiles(basePath) {
-  const lp = globalLoadingProfiler;
-  const doLoadProfile = !!lp?.enabled;
-  const spanToken = doLoadProfile ? (++_lpSeq) : 0;
-  if (doLoadProfile) {
-    try {
-      lp.begin(`assetLoader.discoverAvailableFiles.inner:${spanToken}`, { basePath });
-    } catch (e) {
+export async function discoverMaskDirectoryFiles(basePath, options = {}) {
+  const force = options?.force === true;
+  const cacheKey = _directoryCacheKeyForBasePath(basePath);
+  const now = performance.now();
+
+  if (!force && cacheKey) {
+    const cached = _directoryFileListCache.get(cacheKey);
+
+    if (cached?.promise) {
+      return cached.promise;
+    }
+
+    if (cached?.files && now - cached.atMs < DIRECTORY_FILE_LIST_CACHE_TTL_MS) {
+      return cached.files;
     }
   }
-  try {
-    const normalized = await _discoverFilesViaFilePicker(basePath);
-    if (normalized.length) {
-      log.debug(`FilePicker found ${normalized.length} files for ${basePath}`);
-      return normalized;
-    }
 
-    log.warn('FilePicker returned no files for basePath:', basePath);
-    return [];
+  const promise = (async () => {
+    const lp = globalLoadingProfiler;
+    const doLoadProfile = !!lp?.enabled;
+    const spanToken = doLoadProfile ? (++_lpSeq) : 0;
 
-  } catch (error) {
-    log.warn('Failed to discover files via FilePicker:', error.message);
-    return [];
-  } finally {
     if (doLoadProfile) {
       try {
-        lp.end(`assetLoader.discoverAvailableFiles.inner:${spanToken}`);
+        lp.begin(`assetLoader.discoverAvailableFiles.inner:${spanToken}`, { basePath });
       } catch (e) {
       }
     }
+
+    try {
+      const normalized = await _discoverFilesViaFilePicker(basePath);
+      if (normalized.length) {
+        log.debug(`FilePicker found ${normalized.length} files for ${basePath}`);
+        return normalized;
+      }
+
+      log.warn('FilePicker returned no files for basePath:', basePath);
+      return [];
+    } catch (error) {
+      log.warn('Failed to discover files via FilePicker:', error.message);
+      return [];
+    } finally {
+      if (doLoadProfile) {
+        try {
+          lp.end(`assetLoader.discoverAvailableFiles.inner:${spanToken}`);
+        } catch (e) {
+        }
+      }
+    }
+  })();
+
+  if (cacheKey) {
+    _directoryFileListCache.set(cacheKey, { promise, atMs: now });
+  }
+
+  try {
+    const files = await promise;
+    if (cacheKey) {
+      _directoryFileListCache.set(cacheKey, {
+        files,
+        atMs: performance.now()
+      });
+    }
+    return files;
+  } catch (e) {
+    if (cacheKey) _directoryFileListCache.delete(cacheKey);
+    return [];
   }
 }
 
@@ -1145,38 +1245,57 @@ async function _probeMaskPathByConvention(basePath, suffix) {
   return null;
 }
 
-function findMaskInFiles(availableFiles, basePath, suffix) {
-  // Extract base filename (without directory)
-  const lastSlash = basePath.lastIndexOf('/');
-  const baseFilename = lastSlash >= 0 ? basePath.substring(lastSlash + 1) : basePath;
+function _baseFilenameFromBasePath(basePath) {
+  const lastSlash = String(basePath || '').lastIndexOf('/');
+  return lastSlash >= 0 ? basePath.substring(lastSlash + 1) : basePath;
+}
 
-  const normalizeName = (name) => {
-    if (typeof name !== 'string') return '';
-    let out = name;
-    try {
-      out = decodeURIComponent(out);
-    } catch (e) {
-    }
-    return out.toLowerCase();
-  };
-  const normalizedAvailable = new Map();
-  for (const file of availableFiles) {
-    const filename = String(file).substring(String(file).lastIndexOf('/') + 1);
-    normalizedAvailable.set(normalizeName(filename), file);
+function _normalizeAvailableFilename(name) {
+  if (typeof name !== 'string') return '';
+  let out = name;
+  try {
+    out = decodeURIComponent(out);
+  } catch (e) {
   }
-  
-  // Try to find a file matching the suffix pattern
+  return out.toLowerCase();
+}
+
+function _buildAvailableFilenameLookup(availableFiles) {
+  const lookup = new Map();
+
+  for (const file of Array.isArray(availableFiles) ? availableFiles : []) {
+    const s = String(file || '');
+    if (!s) continue;
+
+    const filename = s.substring(s.lastIndexOf('/') + 1);
+    const key = _normalizeAvailableFilename(filename);
+
+    if (key && !lookup.has(key)) {
+      lookup.set(key, s);
+    }
+  }
+
+  return lookup;
+}
+
+function _findMaskInLookup(filenameLookup, baseFilename, suffix) {
   for (const format of SUPPORTED_FORMATS) {
     const expectedFilename = `${baseFilename}${suffix}.${format}`;
+    const matchingFile = filenameLookup.get(_normalizeAvailableFilename(expectedFilename));
 
-    const matchingFile = normalizedAvailable.get(normalizeName(expectedFilename));
     if (matchingFile) {
       log.debug(`Found mask: ${matchingFile}`);
       return matchingFile;
     }
   }
-  
+
   return null;
+}
+
+function findMaskInFiles(availableFiles, basePath, suffix) {
+  const lookup = _buildAvailableFilenameLookup(availableFiles);
+  const baseFilename = _baseFilenameFromBasePath(basePath);
+  return _findMaskInLookup(lookup, baseFilename, suffix);
 }
 
 /**
@@ -1194,13 +1313,19 @@ export function resolveMaskPathsFromListing(availableFiles, basePath, maskIds) {
       : Array.isArray(maskIds)
         ? maskIds
         : [];
+
   const out = {};
+  const lookup = _buildAvailableFilenameLookup(availableFiles);
+  const baseFilename = _baseFilenameFromBasePath(basePath);
+
   for (const id of ids) {
     const def = EFFECT_MASKS[id];
     if (!def?.suffix) continue;
-    const p = findMaskInFiles(availableFiles, basePath, def.suffix);
+
+    const p = _findMaskInLookup(lookup, baseFilename, def.suffix);
     if (p) out[id] = p;
   }
+
   return out;
 }
 
@@ -1241,19 +1366,33 @@ function normalizePath(path) {
    const cached = textureCache.get(key);
    if (cached) return cached;
 
-   const tex = await loadTextureAsync(key, suppressProbeErrors);
-   try {
-     if (options?.colorSpace !== undefined && tex) {
-       tex.colorSpace = options.colorSpace;
-     } else if (THREE?.NoColorSpace && tex) {
-       // Most generic textures are treated as data unless otherwise specified.
-       tex.colorSpace = THREE.NoColorSpace;
-     }
-   } catch (e) {
-   }
+   const inflight = textureInflight.get(key);
+   if (inflight) return inflight;
 
-   textureCache.set(key, tex);
-   return tex;
+   const promise = (async () => {
+     const tex = await loadTextureAsync(key, suppressProbeErrors);
+
+     try {
+       if (options?.colorSpace !== undefined && tex) {
+         tex.colorSpace = options.colorSpace;
+       } else if (THREE?.NoColorSpace && tex) {
+         // Most generic textures are treated as data unless otherwise specified.
+         tex.colorSpace = THREE.NoColorSpace;
+       }
+     } catch (e) {
+     }
+
+     textureCache.set(key, tex);
+     return tex;
+   })();
+
+   textureInflight.set(key, promise);
+
+   try {
+     return await promise;
+   } finally {
+     textureInflight.delete(key);
+   }
  }
 
 /**
@@ -1496,6 +1635,9 @@ export function clearCache() {
   _probeMaskNegativeCache.clear();
   _failedMaskUrlCache.clear();
   _missingMaskDiagnostics.clear();
+  _directoryFileListCache.clear();
+  textureInflight.clear();
+  assetBundleInflight.clear();
   log.info('Asset cache cleared');
 }
 

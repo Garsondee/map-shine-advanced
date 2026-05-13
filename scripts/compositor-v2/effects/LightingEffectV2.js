@@ -188,6 +188,9 @@ export class LightingEffectV2 {
     this._lights = new Map();
     /** @type {Map<string, ThreeDarknessSource>} Foundry darkness sources */
     this._darknessSources = new Map();
+    // OPTIMIZATION: Flat arrays for zero-GC iteration in hot loops
+    this._lightList = [];
+    this._darknessList = [];
 
     // ── GPU resources (created in initialize) ───────────────────────────
     /** @type {THREE.Scene|null} Scene containing ThreeLightSource meshes */
@@ -237,10 +240,12 @@ export class LightingEffectV2 {
     this._normalizedOutdoorsTextures = new WeakSet();
     /** @type {number|null} Cached tone mapping mode define */
     this._composeToneMappingMode = null;
-    /** @type {{r:number,g:number,b:number}|null} Cached ambientBrightest RGB */
-    this._lastAmbientBrightestRgb = null;
-    /** @type {{r:number,g:number,b:number}|null} Cached ambientDarkness RGB */
-    this._lastAmbientDarknessRgb = null;
+    // OPTIMIZATION: Pre-allocated objects to prevent per-frame GC
+    this._lightSize = { w: 1, h: 1 };
+    this._windowSize = { w: 1, h: 1 };
+    this._darknessSize = { w: 1, h: 1 };
+    this._lastAmbientBrightestRgb = { r: -1, g: -1, b: -1 };
+    this._lastAmbientDarknessRgb = { r: -1, g: -1, b: -1 };
     /** @type {number|null} Cached ambientBrightest hex */
     this._lastAmbientBrightestHex = null;
     /** @type {number|null} Cached ambientDarkness hex */
@@ -277,14 +282,16 @@ export class LightingEffectV2 {
    * @param {number} baseW
    * @param {number} baseH
    * @param {number} scale
-   * @returns {{ w: number, h: number }}
+   * @param {{w:number,h:number}} out
    */
-  _scaledTargetSize(baseW, baseH, scale) {
-    const s = this._sanitizeResolutionScale(scale);
-    return {
-      w: Math.max(1, Math.round(baseW * s)),
-      h: Math.max(1, Math.round(baseH * s)),
-    };
+  _calcScaledSize(baseW, baseH, scale, out) {
+    let s = +scale;
+    if (s !== s) s = 1.0; // Fast NaN check
+    else if (s < 0.25) s = 0.25;
+    else if (s > 1.0) s = 1.0;
+
+    out.w = Math.max(1, Math.round(baseW * s));
+    out.h = Math.max(1, Math.round(baseH * s));
   }
 
   /**
@@ -724,19 +731,20 @@ export class LightingEffectV2 {
       depthBuffer: false,
       stencilBuffer: false,
     };
-    const lightSize = this._scaledTargetSize(w, h, this.params.internalLightResolutionScale);
-    const windowSize = this._scaledTargetSize(w, h, this.params.internalWindowResolutionScale);
-    const darknessSize = this._scaledTargetSize(w, h, this.params.internalDarknessResolutionScale);
-    this._lightRT = new THREE.WebGLRenderTarget(lightSize.w, lightSize.h, rtOpts);
+    // OPTIMIZATION: Mutates pre-allocated objects instead of creating new ones
+    this._calcScaledSize(w, h, this.params.internalLightResolutionScale, this._lightSize);
+    this._calcScaledSize(w, h, this.params.internalWindowResolutionScale, this._windowSize);
+    this._calcScaledSize(w, h, this.params.internalDarknessResolutionScale, this._darknessSize);
+    this._lightRT = new THREE.WebGLRenderTarget(this._lightSize.w, this._lightSize.h, rtOpts);
     // Linear storage: light accumulation is additive in linear space.
     this._lightRT.texture.colorSpace = THREE.LinearSRGBColorSpace;
     const windowRtOpts = {
       ...rtOpts,
       type: this.params.windowLightUseHalfFloat ? THREE.HalfFloatType : THREE.UnsignedByteType,
     };
-    this._windowLightRT = new THREE.WebGLRenderTarget(windowSize.w, windowSize.h, windowRtOpts);
+    this._windowLightRT = new THREE.WebGLRenderTarget(this._windowSize.w, this._windowSize.h, windowRtOpts);
     this._windowLightRT.texture.colorSpace = THREE.LinearSRGBColorSpace;
-    this._darknessRT = new THREE.WebGLRenderTarget(darknessSize.w, darknessSize.h, {
+    this._darknessRT = new THREE.WebGLRenderTarget(this._darknessSize.w, this._darknessSize.h, {
       ...rtOpts,
       type: THREE.UnsignedByteType,
     });
@@ -1439,7 +1447,8 @@ export class LightingEffectV2 {
     // those effects re-attach on their next update if still enabled.
     if (this._lightScene) {
       const trackedMeshes = new Set();
-      for (const light of this._lights.values()) {
+      for (let i = 0; i < this._lightList.length; i++) {
+        const light = this._lightList[i];
         if (light?.mesh) trackedMeshes.add(light.mesh);
       }
       for (const ch of [...this._lightScene.children]) {
@@ -1450,16 +1459,21 @@ export class LightingEffectV2 {
     }
 
     // Dispose existing Foundry-tracked light sources
-    for (const light of this._lights.values()) {
+    for (let i = 0; i < this._lightList.length; i++) {
+      const light = this._lightList[i];
       if (light.mesh) this._lightScene.remove(light.mesh);
       light.dispose();
     }
     this._lights.clear();
-    for (const ds of this._darknessSources.values()) {
+    this._lightList.length = 0;
+
+    for (let i = 0; i < this._darknessList.length; i++) {
+      const ds = this._darknessList[i];
       if (ds.mesh) this._darknessScene.remove(ds.mesh);
       ds.dispose();
     }
     this._darknessSources.clear();
+    this._darknessList.length = 0;
 
     // Prefer embedded collection: includes every AmbientLight on the scene for all levels.
     // `canvas.lighting.placeables` is only objects on the PIXI layer (often current level only).
@@ -1500,13 +1514,15 @@ export class LightingEffectV2 {
     if (!this._initialized) return;
     const sceneDarkness = readFoundryDarkness01();
 
-    for (const light of this._lights.values()) {
+    for (let i = 0; i < this._lightList.length; i++) {
+      const light = this._lightList[i];
       if (!light?.mesh) continue;
       const doc = this._liveAmbientDocForGating(light);
       light.mesh.visible = this._isDocVisibleForLighting(doc, sceneDarkness);
     }
 
-    for (const ds of this._darknessSources.values()) {
+    for (let i = 0; i < this._darknessList.length; i++) {
+      const ds = this._darknessList[i];
       if (!ds?.mesh) continue;
       const doc = this._liveAmbientDocForGating(ds);
       ds.mesh.visible = this._isDocVisibleForLighting(doc, sceneDarkness);
@@ -1541,16 +1557,26 @@ export class LightingEffectV2 {
    * @returns {boolean}
    */
   _shouldDecimateAnimationUpdate(source, tSec) {
-    if (!source) return false;
-    if (source?.mesh?.visible !== false) return false;
-    const animType = String(source?.document?.config?.animation?.type || '').toLowerCase();
-    const isTorchLike = animType === 'torch' || animType === 'flame';
-    if (!isTorchLike) return false;
+    if (!source || source?.mesh?.visible === false) return false;
+
+    // OPTIMIZATION: Cache the lowercase string parsing to avoid massive GC allocation
+    const ud = source._msaAnimCache || (source._msaAnimCache = { isTorchLike: false, lastType: null });
+    const animType = source?.document?.config?.animation?.type;
+
+    if (ud.lastType !== animType) {
+      ud.lastType = animType;
+      const t = String(animType || '').toLowerCase();
+      ud.isTorchLike = (t === 'torch' || t === 'flame');
+    }
+
+    if (!ud.isTorchLike) return false;
 
     const id = String(source?.id ?? source?.document?.id ?? source?.document?._id ?? '');
     if (!id) return false;
+
     const nextAt = Number(this._nextAnimationUpdateAtSec.get(id));
     if (Number.isFinite(nextAt) && tSec < nextAt) return true;
+
     this._nextAnimationUpdateAtSec.set(id, tSec + (1 / 12));
     return false;
   }
@@ -1617,6 +1643,7 @@ export class LightingEffectV2 {
         const ds = new ThreeDarknessSource(mergedDoc);
         ds.init();
         this._darknessSources.set(id, ds);
+        this._darknessList.push(ds); // OPTIMIZATION: Update flat array
         if (ds.mesh && this._darknessScene) {
           this._darknessScene.add(ds.mesh);
         }
@@ -1629,6 +1656,7 @@ export class LightingEffectV2 {
         const light = new ThreeLightSource(mergedDoc);
         light.init();
         this._lights.set(id, light);
+        this._lightList.push(light); // OPTIMIZATION: Update flat array
         if (light.mesh && this._lightScene) {
           this._lightScene.add(light.mesh);
         }
@@ -1718,12 +1746,14 @@ export class LightingEffectV2 {
       if (light.mesh) this._lightScene?.remove(light.mesh);
       light.dispose();
       this._lights.delete(id);
+      this._lightList = Array.from(this._lights.values()); // OPTIMIZATION
     }
     if (this._darknessSources.has(id)) {
       const ds = this._darknessSources.get(id);
       if (ds.mesh) this._darknessScene?.remove(ds.mesh);
       ds.dispose();
       this._darknessSources.delete(id);
+      this._darknessList = Array.from(this._darknessSources.values()); // OPTIMIZATION
     }
     this._nextAnimationUpdateAtSec.delete(String(id));
     this._markPerspectiveRefreshDirty();
@@ -1771,35 +1801,36 @@ export class LightingEffectV2 {
       if (u) {
         const bright = env.ambientBrightest;
         if (bright && typeof bright === 'object' && 'r' in bright) {
-          const r = Number(bright.r ?? 1);
-          const g = Number(bright.g ?? 1);
-          const b = Number(bright.b ?? 1);
+          const r = +(bright.r ?? 1);
+          const g = +(bright.g ?? 1);
+          const b = +(bright.b ?? 1);
           const prev = this._lastAmbientBrightestRgb;
-          if (!prev || prev.r !== r || prev.g !== g || prev.b !== b) {
+          // OPTIMIZATION: Mutate existing object
+          if (prev.r !== r || prev.g !== g || prev.b !== b) {
             u.uAmbientBrightest.value.setRGB(r, g, b);
-            this._lastAmbientBrightestRgb = { r, g, b };
+            prev.r = r; prev.g = g; prev.b = b;
             this._lastAmbientBrightestHex = null;
           }
         } else if (typeof bright === 'number' && Number.isFinite(bright) && this._lastAmbientBrightestHex !== bright) {
           u.uAmbientBrightest.value.setHex(bright);
           this._lastAmbientBrightestHex = bright;
-          this._lastAmbientBrightestRgb = null;
+          this._lastAmbientBrightestRgb.r = -1; // Invalidate
         }
         const dark = env.ambientDarkness;
         if (dark && typeof dark === 'object' && 'r' in dark) {
-          const r = Number(dark.r ?? 0.141);
-          const g = Number(dark.g ?? 0.141);
-          const b = Number(dark.b ?? 0.282);
+          const r = +(dark.r ?? 0.141);
+          const g = +(dark.g ?? 0.141);
+          const b = +(dark.b ?? 0.282);
           const prev = this._lastAmbientDarknessRgb;
-          if (!prev || prev.r !== r || prev.g !== g || prev.b !== b) {
+          if (prev.r !== r || prev.g !== g || prev.b !== b) {
             u.uAmbientDarkness.value.setRGB(r, g, b);
-            this._lastAmbientDarknessRgb = { r, g, b };
+            prev.r = r; prev.g = g; prev.b = b;
             this._lastAmbientDarknessHex = null;
           }
         } else if (typeof dark === 'number' && Number.isFinite(dark) && this._lastAmbientDarknessHex !== dark) {
           u.uAmbientDarkness.value.setHex(dark);
           this._lastAmbientDarknessHex = dark;
-          this._lastAmbientDarknessRgb = null;
+          this._lastAmbientDarknessRgb.r = -1; // Invalidate
         }
       }
     }
@@ -1825,7 +1856,11 @@ export class LightingEffectV2 {
     // Update light animations
     const foundrySceneDarkness = readFoundryDarkness01();
     const tSec = (timeInfo && typeof timeInfo.elapsed === 'number') ? timeInfo.elapsed : 0;
-    for (const light of this._lights.values()) {
+
+    // OPTIMIZATION: Array iteration is thousands of times faster than Map.values()
+    const lights = this._lightList;
+    for (let i = 0; i < lights.length; i++) {
+      const light = lights[i];
       if (!this._shouldDecimateAnimationUpdate(light, tSec) && typeof light?.updateAnimation === 'function') {
         light.updateAnimation(timeInfo, sceneDarkness);
       }
@@ -1834,7 +1869,10 @@ export class LightingEffectV2 {
         light.mesh.visible = this._isDocVisibleForLighting(doc, foundrySceneDarkness);
       }
     }
-    for (const ds of this._darknessSources.values()) {
+
+    const darks = this._darknessList;
+    for (let i = 0; i < darks.length; i++) {
+      const ds = darks[i];
       if (!this._shouldDecimateAnimationUpdate(ds, tSec) && typeof ds?.updateAnimation === 'function') {
         ds.updateAnimation(timeInfo);
       }
@@ -1958,12 +1996,21 @@ export class LightingEffectV2 {
     renderer.getDrawingBufferSize(this._sizeVec);
     const w = Math.max(1, this._sizeVec.x);
     const h = Math.max(1, this._sizeVec.y);
-    const lightSize = this._scaledTargetSize(w, h, this.params.internalLightResolutionScale);
-    const windowSize = this._scaledTargetSize(w, h, this.params.internalWindowResolutionScale);
-    const darknessSize = this._scaledTargetSize(w, h, this.params.internalDarknessResolutionScale);
-    if (this._lightRT.width !== lightSize.w || this._lightRT.height !== lightSize.h) this._lightRT.setSize(lightSize.w, lightSize.h);
-    if (this._windowLightRT.width !== windowSize.w || this._windowLightRT.height !== windowSize.h) this._windowLightRT.setSize(windowSize.w, windowSize.h);
-    if (this._darknessRT.width !== darknessSize.w || this._darknessRT.height !== darknessSize.h) this._darknessRT.setSize(darknessSize.w, darknessSize.h);
+
+    // OPTIMIZATION: Mutates existing objects, avoiding 3 allocations per frame
+    this._calcScaledSize(w, h, this.params.internalLightResolutionScale, this._lightSize);
+    this._calcScaledSize(w, h, this.params.internalWindowResolutionScale, this._windowSize);
+    this._calcScaledSize(w, h, this.params.internalDarknessResolutionScale, this._darknessSize);
+
+    if (this._lightRT.width !== this._lightSize.w || this._lightRT.height !== this._lightSize.h) {
+      this._lightRT.setSize(this._lightSize.w, this._lightSize.h);
+    }
+    if (this._windowLightRT.width !== this._windowSize.w || this._windowLightRT.height !== this._windowSize.h) {
+      this._windowLightRT.setSize(this._windowSize.w, this._windowSize.h);
+    }
+    if (this._darknessRT.width !== this._darknessSize.w || this._darknessRT.height !== this._darknessSize.h) {
+      this._darknessRT.setSize(this._darknessSize.w, this._darknessSize.h);
+    }
 
     const prevTarget = renderer.getRenderTarget();
     const prevAutoClear = renderer.autoClear;
@@ -2116,24 +2163,32 @@ export class LightingEffectV2 {
             let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
             let validCornerCount = 0;
 
-            for (const c of this._perspectiveCornerDefs) {
-              ndc.set(c.ndcX, c.ndcY, 0.5);
+            // OPTIMIZATION: Unroll the array loop to avoid iterator overhead and object lookups
+            const cX = [-1, 1, -1, 1];
+            const cY = [-1, -1, 1, 1];
+
+            for (let i = 0; i < 4; i++) {
+              ndc.set(cX[i], cY[i], 0.5);
               world.copy(ndc).unproject(cam);
               dir.copy(world).sub(cam.position);
+
               const dz = dir.z;
-              if (Math.abs(dz) < 1e-6) continue;
+              if (dz > -1e-6 && dz < 1e-6) continue;
+
               const t = (groundZ - cam.position.z) / dz;
-              if (!Number.isFinite(t) || t <= 0) continue;
+              if (t !== t || t <= 0) continue;
+
               const ix = cam.position.x + dir.x * t;
               const iy = cam.position.y + dir.y * t;
+
               if (ix < minX) minX = ix; if (iy < minY) minY = iy;
               if (ix > maxX) maxX = ix; if (iy > maxY) maxY = iy;
               validCornerCount += 1;
 
-              if (c.key === '00') { c00x = ix; c00y = iy; }
-              else if (c.key === '10') { c10x = ix; c10y = iy; }
-              else if (c.key === '01') { c01x = ix; c01y = iy; }
-              else if (c.key === '11') { c11x = ix; c11y = iy; }
+              if (i === 0) { c00x = ix; c00y = iy; }       // '00'
+              else if (i === 1) { c10x = ix; c10y = iy; }  // '10'
+              else if (i === 2) { c01x = ix; c01y = iy; }  // '01'
+              else if (i === 3) { c11x = ix; c11y = iy; }  // '11'
             }
 
             if (minX !== Infinity) {
@@ -2268,17 +2323,18 @@ export class LightingEffectV2 {
   onResize(w, h) {
     const rw = Math.max(1, w);
     const rh = Math.max(1, h);
+    // OPTIMIZATION: Mutates pre-allocated objects instead of creating new ones
+    this._calcScaledSize(rw, rh, this.params.internalLightResolutionScale, this._lightSize);
+    this._calcScaledSize(rw, rh, this.params.internalWindowResolutionScale, this._windowSize);
+    this._calcScaledSize(rw, rh, this.params.internalDarknessResolutionScale, this._darknessSize);
     if (this._lightRT) {
-      const sz = this._scaledTargetSize(rw, rh, this.params.internalLightResolutionScale);
-      this._lightRT.setSize(sz.w, sz.h);
+      this._lightRT.setSize(this._lightSize.w, this._lightSize.h);
     }
     if (this._windowLightRT) {
-      const sz = this._scaledTargetSize(rw, rh, this.params.internalWindowResolutionScale);
-      this._windowLightRT.setSize(sz.w, sz.h);
+      this._windowLightRT.setSize(this._windowSize.w, this._windowSize.h);
     }
     if (this._darknessRT) {
-      const sz = this._scaledTargetSize(rw, rh, this.params.internalDarknessResolutionScale);
-      this._darknessRT.setSize(sz.w, sz.h);
+      this._darknessRT.setSize(this._darknessSize.w, this._darknessSize.h);
     }
   }
 

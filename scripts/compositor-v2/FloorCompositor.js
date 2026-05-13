@@ -721,6 +721,42 @@ export class FloorCompositor {
     /** @type {number} Min interval between overlay-layer scans in ms */
     this._overlayLayerScanIntervalMs = 350;
 
+    // PERFORMANCE: Pre-allocated objects to eliminate GC pressure in the render loop
+    this._tempColor = null;
+    this._tempVec4 = null;
+    this._tempVec2 = null;
+    this._tempVec3_1 = null;
+    this._tempVec3_2 = null;
+    this._tempVec3_3 = null;
+
+    this._tempActiveLevels = new Set();
+    this._tempLevelFinalRTs = [];
+    this._tempLevelSceneRTs = [];
+    this._tempPerLevelEntries = [];
+    this._tempTextures = [];
+
+    this._frameValidation = { valid: false, reason: null, details: {} };
+    
+    this._pixiWorldStageMat = { a: NaN, b: NaN, c: NaN, d: NaN, tx: NaN, ty: NaN };
+    this._pixiStageInverse = { ia: 1, ib: 0, ic: 0, id: 1, itx: 0, ity: 0 };
+
+    this._dynamicLightOverride = {
+      texture: null,
+      enabled: true,
+      strength: 0.7,
+      viewBounds: { x: 0, y: 0, z: 1, w: 1 },
+      sceneDimensions: { x: 1, y: 1 },
+      sceneRect: { x: 0, y: 0, z: 1, w: 1 }
+    };
+
+    this._outdoorsStateCache = {
+      contextKey: null, mainTex: null, mainRoute: null,
+      waterTex: null, waterRoute: null, waterFloorIdx: null,
+      skyTex: null, skyRoute: null, paintedTex: null, paintedRoute: null,
+      cloudMulti: false, floorIdTex: null, activeFloorIdx: null, cacheVersion: null,
+      cloudTex0: null, cloudTex1: null, cloudTex2: null, cloudTex3: null
+    };
+
     log.debug('FloorCompositor created');
   }
 
@@ -816,10 +852,25 @@ export class FloorCompositor {
     }
 
     const t = canvas?.stage?.worldTransform ?? null;
-    const stageSig = this._getPixiStageTransformSig(t);
-    if (stageSig !== this._pixiWorldStageInvSig) {
-      this._pixiWorldStageInvSig = stageSig;
-      const inv = this._computePixiStageInverse(t);
+    let stageChanged = false;
+
+    if (!t) {
+      if (!Number.isNaN(this._pixiWorldStageMat.a)) stageChanged = true;
+    } else {
+      if (t.a !== this._pixiWorldStageMat.a || t.b !== this._pixiWorldStageMat.b ||
+          t.c !== this._pixiWorldStageMat.c || t.d !== this._pixiWorldStageMat.d ||
+          t.tx !== this._pixiWorldStageMat.tx || t.ty !== this._pixiWorldStageMat.ty) {
+
+          stageChanged = true;
+          this._pixiWorldStageMat.a = t.a; this._pixiWorldStageMat.b = t.b;
+          this._pixiWorldStageMat.c = t.c; this._pixiWorldStageMat.d = t.d;
+          this._pixiWorldStageMat.tx = t.tx; this._pixiWorldStageMat.ty = t.ty;
+      }
+    }
+
+    if (stageChanged) {
+      this._computePixiStageInverse(t, this._pixiStageInverse);
+      const inv = this._pixiStageInverse;
       this._pixiWorldCompositeMaterial.uniforms.uStageInvMat.value.set(inv.ia, inv.ib, inv.ic, inv.id);
       this._pixiWorldCompositeMaterial.uniforms.uStageInvTranslate.value.set(inv.itx, inv.ity);
     }
@@ -869,12 +920,13 @@ export class FloorCompositor {
 
   /**
    * @param {PIXI.Matrix|null|undefined} t
+   * @param {{ia:number,ib:number,ic:number,id:number,itx:number,ity:number}} out
    * @returns {{ia:number,ib:number,ic:number,id:number,itx:number,ity:number}}
    * @private
    */
-  _computePixiStageInverse(t) {
-    let ia = 1; let ib = 0; let ic = 0; let id = 1; let itx = 0; let ity = 0;
-    if (!t) return { ia, ib, ic, id, itx, ity };
+  _computePixiStageInverse(t, out) {
+    out.ia = 1; out.ib = 0; out.ic = 0; out.id = 1; out.itx = 0; out.ity = 0;
+    if (!t) return out;
 
     const a = Number(t.a) || 0;
     const b = Number(t.b) || 0;
@@ -882,16 +934,17 @@ export class FloorCompositor {
     const d = Number(t.d) || 0;
     const tx = Number(t.tx) || 0;
     const ty = Number(t.ty) || 0;
-    const det = (a * d) - (b * c);
-    if (Math.abs(det) <= 1e-8) return { ia, ib, ic, id, itx, ity };
 
-    ia = d / det;
-    ib = -b / det;
-    ic = -c / det;
-    id = a / det;
-    itx = ((c * ty) - (d * tx)) / det;
-    ity = ((b * tx) - (a * ty)) / det;
-    return { ia, ib, ic, id, itx, ity };
+    const det = (a * d) - (b * c);
+    if (Math.abs(det) <= 1e-8) return out;
+
+    out.ia = d / det;
+    out.ib = -b / det;
+    out.ic = -c / det;
+    out.id = a / det;
+    out.itx = ((c * ty) - (d * tx)) / det;
+    out.ity = ((b * tx) - (a * ty)) / det;
+    return out;
   }
 
   /**
@@ -1705,8 +1758,9 @@ export class FloorCompositor {
     const prevScissor = (typeof renderer.getScissorTest === 'function')
       ? renderer.getScissorTest()
       : null;
+    if (!this._tempColor && THREE) this._tempColor = new THREE.Color();
     const prevColor = (THREE && typeof renderer.getClearColor === 'function')
-      ? renderer.getClearColor(new THREE.Color())
+      ? renderer.getClearColor(this._tempColor)
       : null;
     const prevAlpha = (typeof renderer.getClearAlpha === 'function')
       ? renderer.getClearAlpha()
@@ -2064,28 +2118,27 @@ export class FloorCompositor {
    * @private
    */
   _validateFrameInputs() {
-    const details = {};
+    const out = this._frameValidation;
+    // Fast clear of details
+    for (const k in out.details) delete out.details[k];
+    out.valid = false;
 
     if (!this._initialized) {
-      return { valid: false, reason: 'compositor-not-initialized', details };
+      out.reason = 'compositor-not-initialized';
+      return out;
     }
 
     if (!this._renderBus || !this._renderBus._scene) {
-      details.hasBus = !!this._renderBus;
-      return { valid: false, reason: 'render-bus-not-ready', details };
+      out.details.hasBus = !!this._renderBus;
+      out.reason = 'render-bus-not-ready';
+      return out;
     }
 
-    // A scene with tiles must have bus-populated data to render anything other
-    // than the slim path. The slim path is itself a valid partial render so we
-    // accept it here — only reject when neither full nor slim is available.
     if (!this._populateComplete && !this._populateSlimRenderActive()) {
-      details.populateComplete = this._populateComplete;
-      return { valid: false, reason: 'populate-not-ready', details };
+      out.details.populateComplete = this._populateComplete;
+      return out;
     }
 
-    // In multi-floor scenes the active floor must be resolvable. If FloorStack
-    // has no active floor we cannot produce a correct outdoors / visibility
-    // binding and would likely sample stale state from the previous floor.
     let floors = [];
     let activeFloor = null;
     try {
@@ -2093,48 +2146,34 @@ export class FloorCompositor {
       floors = floorStack?.getFloors?.() ?? [];
       activeFloor = floorStack?.getActiveFloor?.() ?? null;
     } catch (_) {}
+
     if (floors.length > 1 && !activeFloor) {
-      details.floorCount = floors.length;
-      return { valid: false, reason: 'no-active-floor-multi-floor', details };
+      out.details.floorCount = floors.length;
+      out.reason = 'no-active-floor-multi-floor';
+      return out;
     }
 
-    // Outdoors consumer sync requires at least a neutral fallback or a real
-    // texture so effects never read from an unbound sampler. A missing
-    // neutral generator is a critical failure we should surface via hold.
     if (!this._neutralOutdoorsTexture && !this._lastOutdoorsTexture) {
-      // Neutral is lazily created on first sync; not yet a failure.
-      details.hasLastOutdoors = !!this._lastOutdoorsTexture;
+      out.details.hasLastOutdoors = !!this._lastOutdoorsTexture;
     }
 
-    // When the unified MaskBindingController is enabled, layer its readiness
-    // check on top of the legacy checks above. The controller probes the
-    // compositor for every banded mask required by the active floor; if any
-    // is missing, the gate trips and the RenderLoop holds the last valid
-    // frame. This is the foundation for "no half-correct frames" in a
-    // multi-floor scene with bridges/overhangs — the frame is only released
-    // once skyReach, outdoors, and floorAlpha are all live for the active
-    // floor.
     if (this._isMaskBindingControllerEnabled()) {
       try {
         const controller = this._getMaskBindingController();
         const ready = controller.isReadyForFrame();
         if (!ready.valid) {
-          details.maskBinding = {
-            activeIndex: ready.activeIndex,
-            missing: ready.missing,
-          };
-          return {
-            valid: false,
-            reason: `mask-binding:${ready.reason}`,
-            details,
-          };
+          out.details.maskBinding = { activeIndex: ready.activeIndex, missing: ready.missing };
+          out.reason = `mask-binding:${ready.reason}`;
+          return out;
         }
       } catch (err) {
-        details.maskBindingError = String(err?.message ?? err);
+        out.details.maskBindingError = String(err?.message ?? err);
       }
     }
 
-    return { valid: true, reason: null, details };
+    out.valid = true;
+    out.reason = null;
+    return out;
   }
 
   /**
@@ -2908,49 +2947,59 @@ export class FloorCompositor {
    * @returns {{texture:any, strength:number, enabled:boolean, viewBounds:{x:number,y:number,z:number,w:number}, sceneDimensions:{x:number,y:number}, sceneRect:{x:number,y:number,z:number,w:number}}|null}
    */
   _buildDynamicLightOverridePayload() {
-    const lighting = this._lightingEffect ?? null;
-    const tex = lighting?.dynamicLightTexture ?? null;
+    const tex = this._lightingEffect?.dynamicLightTexture ?? null;
     if (!tex) return null;
+
     const dims = globalThis.canvas?.dimensions;
     if (!dims) return null;
+
     const rect = dims.sceneRect ?? dims;
-    const sceneRect = {
-      x: Number(rect?.x ?? dims.sceneX ?? 0),
-      y: Number(rect?.y ?? dims.sceneY ?? 0),
-      z: Number(rect?.width ?? dims.sceneWidth ?? dims.width ?? 1),
-      w: Number(rect?.height ?? dims.sceneHeight ?? dims.height ?? 1),
-    };
-    const sceneDimensions = {
-      x: Number(dims.width ?? 1),
-      y: Number(dims.height ?? 1),
-    };
-    let viewBounds = { x: 0, y: 0, z: 1, w: 1 };
+    const out = this._dynamicLightOverride;
+
+    out.texture = tex;
+    out.strength = Number(this._lightingEffect?.params?.dynamicLightShadowOverrideStrength ?? 0.7);
+
+    out.sceneRect.x = Number(rect?.x ?? dims.sceneX ?? 0);
+    out.sceneRect.y = Number(rect?.y ?? dims.sceneY ?? 0);
+    out.sceneRect.z = Number(rect?.width ?? dims.sceneWidth ?? dims.width ?? 1);
+    out.sceneRect.w = Number(rect?.height ?? dims.sceneHeight ?? dims.height ?? 1);
+
+    out.sceneDimensions.x = Number(dims.width ?? 1);
+    out.sceneDimensions.y = Number(dims.height ?? 1);
+
     try {
       const cam = this.camera ?? null;
       const THREE = window.THREE;
       if (cam?.isOrthographicCamera) {
         const zoom = Math.max(0.001, cam.zoom ?? 1.0);
-        viewBounds = {
-          x: Number(cam.position.x + cam.left / zoom),
-          y: Number(cam.position.y + cam.bottom / zoom),
-          z: Number(cam.position.x + cam.right / zoom),
-          w: Number(cam.position.y + cam.top / zoom),
-        };
+        out.viewBounds.x = Number(cam.position.x + cam.left / zoom);
+        out.viewBounds.y = Number(cam.position.y + cam.bottom / zoom);
+        out.viewBounds.z = Number(cam.position.x + cam.right / zoom);
+        out.viewBounds.w = Number(cam.position.y + cam.top / zoom);
       } else if (cam?.isPerspectiveCamera && THREE) {
+        // Safe instantiation for caches if missing
+        if (!this._tempVec3_1) {
+           this._tempVec3_1 = new THREE.Vector3();
+           this._tempVec3_2 = new THREE.Vector3();
+           this._tempVec3_3 = new THREE.Vector3();
+        }
         const groundZ = Number(window.MapShine?.sceneComposer?.groundZ ?? 0);
-        const ndc = new THREE.Vector3();
-        const world = new THREE.Vector3();
-        const dir = new THREE.Vector3();
+        const ndc = this._tempVec3_1;
+        const world = this._tempVec3_2;
+        const dir = this._tempVec3_3;
+
         let minX = Infinity; let minY = Infinity; let maxX = -Infinity; let maxY = -Infinity;
         const corners = [[-1, -1], [1, -1], [-1, 1], [1, 1]];
+
         for (let i = 0; i < 4; i++) {
           ndc.set(corners[i][0], corners[i][1], 0.5);
           world.copy(ndc).unproject(cam);
           dir.copy(world).sub(cam.position);
-          const dz = dir.z;
-          if (Math.abs(dz) < 1e-6) continue;
-          const t = (groundZ - cam.position.z) / dz;
+
+          if (Math.abs(dir.z) < 1e-6) continue;
+          const t = (groundZ - cam.position.z) / dir.z;
           if (!Number.isFinite(t) || t <= 0) continue;
+
           const ix = cam.position.x + dir.x * t;
           const iy = cam.position.y + dir.y * t;
           if (ix < minX) minX = ix;
@@ -2959,19 +3008,13 @@ export class FloorCompositor {
           if (iy > maxY) maxY = iy;
         }
         if (minX !== Infinity) {
-          viewBounds = { x: minX, y: minY, z: maxX, w: maxY };
+          out.viewBounds.x = minX; out.viewBounds.y = minY;
+          out.viewBounds.z = maxX; out.viewBounds.w = maxY;
         }
       }
     } catch (_) {}
 
-    return {
-      texture: tex,
-      enabled: true,
-      strength: Number(this._lightingEffect?.params?.dynamicLightShadowOverrideStrength ?? 0.7),
-      viewBounds,
-      sceneDimensions,
-      sceneRect,
-    };
+    return out;
   }
 
   /**
@@ -4004,14 +4047,16 @@ export class FloorCompositor {
       ? renderer.getScissorTest()
       : null;
     const THREE = window.THREE;
+    if (!this._tempColor && THREE) this._tempColor = new THREE.Color();
+    if (!this._tempVec4 && THREE) this._tempVec4 = new THREE.Vector4();
     const prevClearColor = (THREE && typeof renderer.getClearColor === 'function')
-      ? renderer.getClearColor(new THREE.Color())
+      ? renderer.getClearColor(this._tempColor)
       : null;
     const prevClearAlpha = (typeof renderer.getClearAlpha === 'function')
       ? renderer.getClearAlpha()
       : null;
     const prevViewport = (THREE && typeof renderer.getViewport === 'function')
-      ? renderer.getViewport(new THREE.Vector4())
+      ? renderer.getViewport(this._tempVec4)
       : null;
 
     this._blitMaterial.uniforms.tDiffuse.value = sourceRT.texture;
@@ -4534,28 +4579,37 @@ export class FloorCompositor {
       // even if the texture identity alias would otherwise cause a false
       // early-return (e.g. a previously-fallback route promoting to a
       // direct compositor texture that reuses a pooled texture uuid).
+      const isMulti = cloudFloorIdSupported && cloudAnyPerFloorMask;
       let cacheVersion = 0;
       try {
         cacheVersion = Number(window?.MapShine?.sceneComposer?._sceneMaskCompositor?.getFloorCacheVersion?.() ?? 0);
-      } catch (_) {
-        cacheVersion = 0;
-      }
+      } catch (_) {}
 
-      const signature = [
-        `ctx:${contextKey}`,
-        `main:${texId(outdoorsTex)}@${mainRoute || 'none'}`,
-        `water:${texId(waterOutdoorsTex)}@${waterOutdoorsRoute || 'none'}#${resolvedWaterFloorIndex ?? 'none'}`,
-        `sky:${texId(skyOutdoorsFinal)}@${skyRoute || 'none'}`,
-        `painted:${texId(paintedOutdoorsTex)}@${paintedOutdoorsRoute || 'none'}`,
-        `cloud:${cloudPerFloor.map(texId).join('|')}@${cloudFloorIdSupported && cloudAnyPerFloorMask ? 'multi' : 'single'}`,
-        `floorId:${texId(cloudFloorIdTex)}`,
-        `activeFloor:${this._activeFloorIndex ?? 'none'}`,
-        `cacheV:${cacheVersion}`,
-      ].join('#');
+      // Zero-GC Signature Verification
+      const cache = this._outdoorsStateCache;
+      let signatureChanged = false;
 
-      if (!force && signature === this._lastOutdoorsSignature) return;
+      if (cache.contextKey !== contextKey) { cache.contextKey = contextKey; signatureChanged = true; }
+      if (cache.mainTex !== outdoorsTex) { cache.mainTex = outdoorsTex; signatureChanged = true; }
+      if (cache.mainRoute !== mainRoute) { cache.mainRoute = mainRoute; signatureChanged = true; }
+      if (cache.waterTex !== waterOutdoorsTex) { cache.waterTex = waterOutdoorsTex; signatureChanged = true; }
+      if (cache.waterRoute !== waterOutdoorsRoute) { cache.waterRoute = waterOutdoorsRoute; signatureChanged = true; }
+      if (cache.waterFloorIdx !== resolvedWaterFloorIndex) { cache.waterFloorIdx = resolvedWaterFloorIndex; signatureChanged = true; }
+      if (cache.skyTex !== skyOutdoorsFinal) { cache.skyTex = skyOutdoorsFinal; signatureChanged = true; }
+      if (cache.skyRoute !== skyRoute) { cache.skyRoute = skyRoute; signatureChanged = true; }
+      if (cache.paintedTex !== paintedOutdoorsTex) { cache.paintedTex = paintedOutdoorsTex; signatureChanged = true; }
+      if (cache.paintedRoute !== paintedOutdoorsRoute) { cache.paintedRoute = paintedOutdoorsRoute; signatureChanged = true; }
+      if (cache.cloudMulti !== isMulti) { cache.cloudMulti = isMulti; signatureChanged = true; }
+      if (cache.floorIdTex !== cloudFloorIdTex) { cache.floorIdTex = cloudFloorIdTex; signatureChanged = true; }
+      if (cache.activeFloorIdx !== this._activeFloorIndex) { cache.activeFloorIdx = this._activeFloorIndex; signatureChanged = true; }
+      if (cache.cacheVersion !== cacheVersion) { cache.cacheVersion = cacheVersion; signatureChanged = true; }
 
-      this._lastOutdoorsSignature = signature;
+      if (cache.cloudTex0 !== cloudPerFloor[0]) { cache.cloudTex0 = cloudPerFloor[0]; signatureChanged = true; }
+      if (cache.cloudTex1 !== cloudPerFloor[1]) { cache.cloudTex1 = cloudPerFloor[1]; signatureChanged = true; }
+      if (cache.cloudTex2 !== cloudPerFloor[2]) { cache.cloudTex2 = cloudPerFloor[2]; signatureChanged = true; }
+      if (cache.cloudTex3 !== cloudPerFloor[3]) { cache.cloudTex3 = cloudPerFloor[3]; signatureChanged = true; }
+
+      if (!force && !signatureChanged) return;
       this._lastOutdoorsTexture = outdoorsTex;
       this._lastOutdoorsFloorKey = resolved.floorKey;
       this._lastOutdoorsContextKey = contextKey;
@@ -4929,7 +4983,7 @@ export class FloorCompositor {
     const heatSpeed = Number.isFinite(Number(fireParams.heatDistortionSpeed)) ? Number(fireParams.heatDistortionSpeed) : 3.0;
     const heatEdgeSoftness = Number.isFinite(Number(fireParams.heatDistortionEdgeSoftness))
       ? Number(fireParams.heatDistortionEdgeSoftness)
-      : 1.0;
+      : 0.4;
     const fireRate = Number.isFinite(Number(fireParams.globalFireRate)) ? Number(fireParams.globalFireRate) : 5.2;
     const fireSizeMin = Number.isFinite(Number(fireParams.fireSizeMin)) ? Number(fireParams.fireSizeMin) : 19;
     const fireSizeMax = Number.isFinite(Number(fireParams.fireSizeMax)) ? Number(fireParams.fireSizeMax) : 170;
@@ -4943,12 +4997,13 @@ export class FloorCompositor {
       return;
     }
     const softnessScale = Math.max(0.4, Math.min(3.0, heatEdgeSoftness));
-    // Softer, larger feathering for heat masks; sharp clipping looked unnatural
-    // around fire edges. Keep this in pixel-space style scaling and let
-    // DistortionManager map it through its blur texel-size path.
-    const blurRadiusBase = 3.0 + (avgSize / 30.0) + (fireRate * 0.22);
-    const blurRadius = Math.max(4.0, Math.min(28.0, blurRadiusBase * softnessScale));
-    const blurPasses = blurRadius >= 20.0 ? 5 : (blurRadius >= 14.0 ? 4 : (blurRadius >= 9.0 ? 3 : 2));
+    // Wider separable blur expands the fire mask before DistortionManager samples it.
+    // Heat haze was reading as a hard disk because the pre-blur footprint stayed too tight.
+    const blurRadiusBase = 6.5 + (avgSize / 21.0) + (fireRate * 0.32);
+    const blurRadius = Math.max(9.0, Math.min(40.0, blurRadiusBase * softnessScale));
+    const blurPasses = blurRadius >= 26.0 ? 6 : (blurRadius >= 20.0 ? 5 : (blurRadius >= 14.0 ? 4 : (blurRadius >= 10.0 ? 3 : 2)));
+    // Feeds the composite shader's multi-tap fringe; higher = softer map-space falloff.
+    const edgeSoftnessTexels = Math.max(2.0, Math.min(120.0, heatEdgeSoftness * 7.2 + blurRadius * 0.38));
 
     let heatMask = fireMask;
     const needsBlurRefresh =
@@ -4969,6 +5024,7 @@ export class FloorCompositor {
         intensity: finalIntensity,
         frequency: heatFrequency,
         speed: heatSpeed,
+        edgeSoftnessTexels,
       });
       dist.setSourceEnabled('heat', true);
     } else {
@@ -4977,6 +5033,7 @@ export class FloorCompositor {
         intensity: finalIntensity,
         frequency: heatFrequency,
         speed: heatSpeed,
+        edgeSoftnessTexels,
       });
       dist.setSourceEnabled('heat', true);
     }
@@ -5117,7 +5174,8 @@ export class FloorCompositor {
     const renderer = this.renderer;
     const prevTarget = renderer.getRenderTarget();
     const prevAutoClear = renderer.autoClear;
-    const prevColor = renderer.getClearColor(new THREE.Color());
+    if (!this._tempColor && THREE) this._tempColor = new THREE.Color();
+    const prevColor = renderer.getClearColor(this._tempColor);
     const prevAlpha = renderer.getClearAlpha();
     const mat = this._waterBgProductMaterial.uniforms;
     const dummy = this._waterEffect?._fallbackBlack ?? null;
@@ -5162,18 +5220,20 @@ export class FloorCompositor {
     if (!this._waterOccluderRT || !this._waterOccluderScratchRT) return null;
     if (!this._waterOccluderUnionScene || !this._waterOccluderUnionCamera || !this._waterOccluderUnionMaterial) return null;
 
-    const textures = [];
-    for (const rt of upperSceneRTs) {
-      const tex = rt?.texture ?? null;
-      if (tex) textures.push(tex);
+    this._tempTextures.length = 0;
+    for (let i = 0; i < upperSceneRTs.length; i++) {
+      const tex = upperSceneRTs[i]?.texture;
+      if (tex) this._tempTextures.push(tex);
     }
-    if (!textures.length) return null;
+    if (!this._tempTextures.length) return null;
+    const textures = this._tempTextures; // Alias to prevent logic changes
 
     const renderer = this.renderer;
     const THREE = window.THREE;
     const prevTarget = renderer.getRenderTarget();
     const prevAutoClear = renderer.autoClear;
-    const prevColor = renderer.getClearColor(new THREE.Color());
+    if (!this._tempColor && THREE) this._tempColor = new THREE.Color();
+    const prevColor = renderer.getClearColor(this._tempColor);
     const prevAlpha = renderer.getClearAlpha();
 
     let readRT = null;

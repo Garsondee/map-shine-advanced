@@ -10,10 +10,6 @@ Map Shine Advanced is a Foundry VTT module that brings a Three.js-based renderer
 - **Syncs Foundry documents** (tokens, tiles, walls, drawings, notes, templates, lights) into Three.js managers.
 - **Uses a suffix-based texture system** so map authors can provide extra masks like `_Specular`, `_Outdoors`, `_Windows`, etc.
 
-## Compatibility
-
-- **Foundry VTT**: v13 (minimum/verified/maximum currently set to 13)
-
 ## Installation
 
 Install using the manifest URL:

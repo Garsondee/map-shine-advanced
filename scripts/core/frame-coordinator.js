@@ -37,9 +37,15 @@ export class FrameCoordinator {
     
     /** @type {Set<Function>} - Post-PIXI callbacks (run after Foundry updates) */
     this._postPixiCallbacks = new Set();
-    
+
+    /** @type {Set<Object>} - Throttled post-PIXI callbacks (non-critical, rate-limited) */
+    this._throttledPostPixiCallbacks = new Set();
+
     /** @type {Object|null} - Captured camera state for this frame */
     this._frameState = null;
+
+    /** @type {number} - Last frame when PIXI was flushed (prevent duplicate flushes) */
+    this._lastPixiFlushFrame = -1;
     
     /** @type {number} - Frame counter for debugging */
     this._frameCount = 0;
@@ -167,7 +173,7 @@ export class FrameCoordinator {
   /**
    * Register a callback to run after PIXI updates but before Three.js render
    * Use this for texture extraction or state synchronization
-   * 
+   *
    * @param {Function} callback - Function to call after PIXI tick
    * @returns {Function} Unsubscribe function
    */
@@ -176,9 +182,34 @@ export class FrameCoordinator {
       log.error('onPostPixi requires a function callback');
       return () => {};
     }
-    
+
     this._postPixiCallbacks.add(callback);
     return () => this._postPixiCallbacks.delete(callback);
+  }
+
+  /**
+   * Register a throttled callback to run after PIXI updates.
+   * Unlike onPostPixi, these callbacks are rate-limited and suitable for
+   * non-critical work like diagnostics, polling, or slow sync jobs.
+   *
+   * @param {Function} callback - Function to call after PIXI tick
+   * @param {number} [intervalMs=100] - Minimum interval between calls (ms)
+   * @returns {Function} Unsubscribe function
+   */
+  onPostPixiThrottled(callback, intervalMs = 100) {
+    if (typeof callback !== 'function') {
+      log.error('onPostPixiThrottled requires a function callback');
+      return () => {};
+    }
+
+    const entry = {
+      callback,
+      intervalMs: Math.max(0, Number(intervalMs) || 0),
+      lastRunMs: 0
+    };
+
+    this._throttledPostPixiCallbacks.add(entry);
+    return () => this._throttledPostPixiCallbacks.delete(entry);
   }
 
   /**
@@ -205,11 +236,20 @@ export class FrameCoordinator {
     try {
       if (window?.MapShine?.__v2Active === true) return;
     } catch (_) {}
-    
+
+    // Avoid multiple forced PIXI renders inside the same coordinated frame.
+    if (this._inFrame && this._lastPixiFlushFrame === this._frameCount) {
+      return;
+    }
+
     try {
       // Force PIXI to render its current state
       // This ensures textures like vision masks are up-to-date
       canvas.app.renderer.render(canvas.stage);
+
+      if (this._inFrame) {
+        this._lastPixiFlushFrame = this._frameCount;
+      }
     } catch (e) {
       log.warn('Failed to flush PIXI render:', e);
     }
@@ -331,6 +371,22 @@ export class FrameCoordinator {
           log.error('Post-PIXI callback error:', e);
         }
       }
+
+      // Step 3b: Run throttled post-PIXI callbacks (non-critical work)
+      const postNow = performance.now();
+      for (const entry of this._throttledPostPixiCallbacks) {
+        if (entry.intervalMs > 0 && postNow - entry.lastRunMs < entry.intervalMs) {
+          continue;
+        }
+
+        entry.lastRunMs = postNow;
+
+        try {
+          entry.callback(this._frameState);
+        } catch (e) {
+          log.error('Throttled post-PIXI callback error:', e);
+        }
+      }
       
       this._metrics.pixiSyncTime = performance.now() - syncStart;
       
@@ -359,33 +415,50 @@ export class FrameCoordinator {
       this._frameState = null;
       return;
     }
-    
-    // Capture PIXI camera state (Foundry coordinates)
-    this._frameState = {
-      frameNumber: this._frameCount,
-      timestamp: performance.now(),
-      
-      // Camera position (Foundry world coords)
-      cameraX: stage.pivot.x,
-      cameraY: stage.pivot.y,
-      zoom: stage.scale.x || 1,
-      
-      // Viewport dimensions
-      viewportWidth: canvas.app?.view?.width || window.innerWidth,
-      viewportHeight: canvas.app?.view?.height || window.innerHeight,
-      
-      // Scene dimensions
-      sceneWidth: canvas.dimensions?.width || 1,
-      sceneHeight: canvas.dimensions?.height || 1,
-      
-      // Scene rect (actual map area)
-      sceneRect: canvas.dimensions?.sceneRect ? {
-        x: canvas.dimensions.sceneRect.x,
-        y: canvas.dimensions.sceneRect.y,
-        width: canvas.dimensions.sceneRect.width,
-        height: canvas.dimensions.sceneRect.height
-      } : null
-    };
+
+    // Reuse frame state object to avoid allocation
+    if (!this._frameState) {
+      this._frameState = {
+        frameNumber: 0,
+        timestamp: 0,
+        cameraX: 0,
+        cameraY: 0,
+        zoom: 1,
+        viewportWidth: 0,
+        viewportHeight: 0,
+        sceneWidth: 1,
+        sceneHeight: 1,
+        sceneRect: {
+          x: 0,
+          y: 0,
+          width: 1,
+          height: 1
+        }
+      };
+    }
+
+    const fs = this._frameState;
+
+    fs.frameNumber = this._frameCount;
+    fs.timestamp = performance.now();
+    fs.cameraX = stage.pivot.x;
+    fs.cameraY = stage.pivot.y;
+    fs.zoom = stage.scale.x || 1;
+    fs.viewportWidth = canvas.app?.view?.width || window.innerWidth;
+    fs.viewportHeight = canvas.app?.view?.height || window.innerHeight;
+    fs.sceneWidth = canvas.dimensions?.width || 1;
+    fs.sceneHeight = canvas.dimensions?.height || 1;
+
+    const rect = canvas.dimensions?.sceneRect;
+    if (rect) {
+      if (!fs.sceneRect) fs.sceneRect = { x: 0, y: 0, width: 1, height: 1 };
+      fs.sceneRect.x = rect.x;
+      fs.sceneRect.y = rect.y;
+      fs.sceneRect.width = rect.width;
+      fs.sceneRect.height = rect.height;
+    } else {
+      fs.sceneRect = null;
+    }
   }
 
   /**
@@ -484,6 +557,7 @@ export class FrameCoordinator {
     this._tickerCallback = null;
     this._syncCallbacks.clear();
     this._postPixiCallbacks.clear();
+    this._throttledPostPixiCallbacks.clear();
     this._frameState = null;
     this._initialized = false;
     

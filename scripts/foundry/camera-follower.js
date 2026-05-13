@@ -87,6 +87,10 @@ export class CameraFollower {
     this._lastX = 0;
     this._lastY = 0;
     this._lastZoom = 1;
+
+    // Floor-follow throttling
+    this._lastFloorFollowCheckMs = 0;
+    this._floorFollowCheckIntervalMs = 100;
   }
   
   /**
@@ -129,7 +133,11 @@ export class CameraFollower {
     this._syncFromPixi();
 
     if (this._shouldAutoFollowControlledToken() && !this._isControlledTokenFloorFollowSuppressed()) {
-      this._syncToControlledTokenLevel({ emit: false, reason: 'follow-update' });
+      const now = performance.now();
+      if (now - this._lastFloorFollowCheckMs >= this._floorFollowCheckIntervalMs) {
+        this._lastFloorFollowCheckMs = now;
+        this._syncToControlledTokenLevel({ emit: false, reason: 'follow-update' });
+      }
     }
   }
 
@@ -370,21 +378,22 @@ export class CameraFollower {
   }
 
   _findBestLevelIndexForElevation(elevation, levels = this._levels) {
-    const containing = [];
+    let bestIndex = -1;
+    let bestSpan = Infinity;
+
     for (let i = 0; i < levels.length; i += 1) {
       const level = levels[i];
       const includeUpperBound = i === (levels.length - 1);
       if (elevationInBand(elevation, level.bottom, level.top, includeUpperBound)) {
-        containing.push({ i, span: Math.abs(level.top - level.bottom) });
+        const span = Math.abs(level.top - level.bottom);
+        if (span < bestSpan) {
+          bestSpan = span;
+          bestIndex = i;
+        }
       }
     }
 
-    if (containing.length) {
-      // Sort by smallest span first (tightest-fitting level wins).
-      containing.sort((a, b) => a.span - b.span);
-
-      return containing[0].i;
-    }
+    if (bestIndex >= 0) return bestIndex;
 
     return this._findNearestLevelIndexByCenter(elevation, levels);
   }
@@ -643,6 +652,11 @@ export class CameraFollower {
     const token = controlled[0] || null;
     const tokenLevelId = token?.document?.level;
     if (tokenLevelId) {
+      // Early return if already on this level (avoid redundant canvas.scene.view calls)
+      if (this._activeLevelContext?.levelId === tokenLevelId) {
+        return true;
+      }
+
       const levelCtx = this.setActiveLevel(tokenLevelId, {
         keepLockMode: true,
         emit: options.emit !== false,
@@ -666,6 +680,12 @@ export class CameraFollower {
     const tokenElevation = this._getControlledTokenElevation();
     if (!Number.isFinite(tokenElevation)) return false;
     const nextIndex = this._findBestLevelIndexForElevation(tokenElevation);
+
+    // Early return if already on this level (avoid redundant work)
+    if (nextIndex === this._activeLevelIndex) {
+      return true;
+    }
+
     this._setActiveLevelByIndex(nextIndex, {
       emit: options.emit !== false,
       reason: options.reason || 'follow-controlled-token'
@@ -758,18 +778,29 @@ export class CameraFollower {
     
     // FOV-based zoom: adjust FOV instead of camera Z position
     // This keeps the ground plane at a constant depth in the frustum
+    // Only update projection matrix when zoom actually changes (pan does not need it)
+    const zoomChanged = dz >= 0.0001;
     if (camera.isPerspectiveCamera && this.sceneComposer.baseFovTanHalf !== undefined) {
-      const baseTan = this.sceneComposer.baseFovTanHalf;
       const zoom = pixiZoom || 1;
-      const fovRad = 2 * Math.atan(baseTan / zoom);
-      const fovDeg = fovRad * (180 / Math.PI);
-      const clamped = Math.max(1, Math.min(170, fovDeg));
-      camera.fov = clamped;
-      this.sceneComposer.currentZoom = zoom;
-      camera.updateProjectionMatrix();
+
+      if (zoomChanged || this.sceneComposer.currentZoom !== zoom) {
+        const baseTan = this.sceneComposer.baseFovTanHalf;
+        const fovRad = 2 * Math.atan(baseTan / zoom);
+        const fovDeg = fovRad * (180 / Math.PI);
+        const clamped = Math.max(1, Math.min(170, fovDeg));
+
+        if (Math.abs((camera.fov || 0) - clamped) > 0.001) {
+          camera.fov = clamped;
+          camera.updateProjectionMatrix();
+        }
+
+        this.sceneComposer.currentZoom = zoom;
+      }
     } else if (camera.isOrthographicCamera) {
-      camera.zoom = pixiZoom;
-      camera.updateProjectionMatrix();
+      if (zoomChanged || camera.zoom !== pixiZoom) {
+        camera.zoom = pixiZoom;
+        camera.updateProjectionMatrix();
+      }
     }
     
     // Update HUD alignment to match PIXI stage.

@@ -35,6 +35,9 @@ export class GraphicsSettingsDialog {
 
     /** @type {HTMLElement|null} Active-count tag on the Effects folder title. */
     this._effectsCountTag = null;
+
+    /** @type {HTMLElement|null} Line under Particle spawn slider (tier + %). */
+    this._particleSpawnCaptionEl = null;
   }
 
   async initialize(parentElement = document.body) {
@@ -135,6 +138,29 @@ export class GraphicsSettingsDialog {
     }).on('change', (ev) => {
       this.manager.setRenderResolutionPreset(ev.value);
     });
+
+    globalFolder.addBinding(this.manager.state, 'particleSpawnTier', {
+      label: 'Particle spawn',
+      min: 0,
+      max: 6,
+      step: 1
+    }).on('change', (ev) => {
+      this.manager.setParticleSpawnTier(ev.value);
+      this._syncParticleSpawnCaption();
+    });
+
+    const particleCaption = document.createElement('div');
+    particleCaption.className = 'map-shine-particle-spawn-caption';
+    particleCaption.style.fontSize = '10px';
+    particleCaption.style.opacity = '0.75';
+    particleCaption.style.padding = '0 6px 2px 8px';
+    particleCaption.style.fontStyle = 'italic';
+    particleCaption.textContent = this.manager.formatParticleSpawnTierCaption();
+    this._particleSpawnCaptionEl = particleCaption;
+    {
+      const capParent = globalFolder?.element?.querySelector?.('.tp-fldv_c') || globalFolder?.element;
+      if (capParent) capParent.appendChild(particleCaption);
+    }
 
     globalFolder.addBinding(this.manager.state, 'renderStrictSyncEnabled', {
       label: 'Strict Render Sync'
@@ -267,6 +293,14 @@ export class GraphicsSettingsDialog {
     this.hide();
 
     log.info('Graphics Settings dialog initialized');
+  }
+
+  _syncParticleSpawnCaption() {
+    if (!this._particleSpawnCaptionEl) return;
+    try {
+      this._particleSpawnCaptionEl.textContent = this.manager.formatParticleSpawnTierCaption();
+    } catch (_) {
+    }
   }
 
   /**
@@ -413,6 +447,7 @@ export class GraphicsSettingsDialog {
     } catch (_) {
     }
 
+    this._syncParticleSpawnCaption();
     this.refreshStatus();
   }
 

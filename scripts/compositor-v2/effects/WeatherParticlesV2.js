@@ -22,7 +22,9 @@
  * `OVERHEAD_OFFSET` (see FloorRenderBus), matching FireEffectV2: drawn in the
  * main `renderTo()` pass **under** overhead roof tiles and tree overlays.
  * Roof/tree **drips** use `emitter.userData.msOverlayLayer` → batch layer 31 →
- * `_renderLateWorldOverlay` (otherwise streaks are occluded by overhead art). Rain/snow stay on layer 0.
+ * `_renderLateWorldOverlay` (otherwise streaks are occluded by overhead art).
+ * **Rain, ash, and ash embers** set `msOverlayLayer=true` so they draw in that
+ * late pass above tokens/canopy; snow stays on layer 0 unless changed elsewhere.
  * Foam plumes use the same overlay flag. `WeatherParticlesV2._applyCulling` sets
  * `FloorCompositor._hasOverlayLayerContent` when assigning layer 31 (batches nest under BatchedRenderer).
  *

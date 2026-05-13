@@ -122,34 +122,28 @@ export class ParticleBuffers {
   updateEmitters(emitters) {
     if (!this.initialized) return;
 
-    // Clear previous frame data
-    this.emitterArray.fill(0);
-
-    // Cap at max emitters
-    const count = Math.min(emitters.length, this.emitterCount);
+    const count = emitters.length < this.emitterCount ? emitters.length : this.emitterCount;
     
-    if (count > 0) {
-      log.debug(`Updating emitter buffer with ${count} emitters`);
-    }
+    // OPTIMIZATION: Early return to avoid setting needsUpdate flag
+    if (count === 0) return;
+
+    // OPTIMIZATION: Only fill the portion of the array we intend to use
+    this.emitterArray.fill(0, 0, count * 8);
 
     for (let i = 0; i < count; i++) {
       const e = emitters[i];
       const offset = i * 8;
 
-      this.emitterArray[offset + 0] = e.x;
+      this.emitterArray[offset] = e.x;
       this.emitterArray[offset + 1] = e.y;
       this.emitterArray[offset + 2] = e.z;
-      this.emitterArray[offset + 3] = e.type; // encoded as float
+      this.emitterArray[offset + 3] = e.type;
       this.emitterArray[offset + 4] = e.count;
       this.emitterArray[offset + 5] = e.param1 || 0;
       this.emitterArray[offset + 6] = e.param2 || 0;
-      // offset + 7 is padding
     }
 
-    // Mark buffer for upload
-    // For StorageBufferAttribute, we typically create a Node that reads this array.
-    // Update texture
-    if (this.emitterTexture) {
+    if (this.emitterTexture && !this.emitterTexture.needsUpdate) {
         this.emitterTexture.needsUpdate = true;
     }
   }

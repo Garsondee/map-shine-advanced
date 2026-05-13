@@ -46,10 +46,18 @@ function loadAssetBundleOptsFromScene(scene, basePath) {
 
 // ── Resolution classes ────────────────────────────────────────────────────────
 
-/** Max output dimension for data masks (fire, water, outdoors, dust, ash).
+/** Max output dimension for high-detail data masks (water, outdoors, floorAlpha, skyReach).
  *  Raised from 4096 to 8192 to match the tile albedo resolution cap increase
- *  \u2014 6K\u20138K scenes were getting masks at only 68% resolution with the old cap. */
-const DATA_MAX = 8192;
+ *  — 6K–8K scenes were getting masks at only 68% resolution with the old cap. */
+const HIGH_DETAIL_DATA_MAX = 8192;
+
+/** Max output dimension for scalar data masks (specular, normal, roughness, etc.). */
+const SCALAR_MASK_MAX = 4096;
+
+/** Max output dimension for particle spawn masks (fire, dust, ash).
+ *  These masks only need spatial precision for "where can particles spawn?" — 2048 is sufficient
+ *  and massively reduces GPU memory and CPU readback cost compared to 8192. */
+const PARTICLE_MASK_MAX = 2048;
 
 /** Max output dimension for visual/color masks (specular, normal, bush, tree). */
 const VISUAL_MAX = 8192;
@@ -58,6 +66,12 @@ const VISUAL_MAX = 8192;
 const VISUAL_MASK_IDS = new Set([
   'specular', 'roughness', 'normal', 'iridescence', 'prism', 'bush', 'tree'
 ]);
+
+/** Mask types that are particle spawn masks and can use lower resolution. */
+const PARTICLE_MASK_IDS = new Set(['fire', 'dust', 'ash']);
+
+/** Mask types that need high detail (water, outdoors, floorAlpha, skyReach). */
+const HIGH_DETAIL_DATA_MASK_IDS = new Set(['water', 'outdoors', 'floorAlpha', 'skyReach']);
 
 /** Mask types that should NOT receive sRGB color space (linear data). */
 const DATA_ENCODED_MASKS = new Set(['normal', 'roughness', 'water']);
@@ -490,6 +504,13 @@ export class GpuSceneMaskCompositor {
      * @type {THREE.WebGLRenderTarget|null}
      */
     this._overheadAccumRt = null;
+
+    /**
+     * Signature of the last water patch operation to avoid repeated SDF rebuilds
+     * when inputs haven't changed. Includes floor cache version to catch content mutations.
+     * @type {string|null}
+     */
+    this._lastWaterPatchSignature = null;
   }
 
   // ── Public API ──────────────────────────────────────────────────────────────
@@ -549,7 +570,7 @@ export class GpuSceneMaskCompositor {
         log.warn(`compose[${floorKey}]: registry.outdoors missing, cannot force-add`);
       }
     }
-    log.info(`compose[${floorKey}]: mask types from tiles`, { types: [...allMaskTypes], tileCount: tileMaskEntries.length });
+    log.debug(`compose[${floorKey}]: mask types from tiles`, { types: [...allMaskTypes], tileCount: tileMaskEntries.length });
     if (allMaskTypes.size === 0) {
       log.warn(`compose[${floorKey}]: no mask types to compose`);
       return null;
@@ -562,6 +583,22 @@ export class GpuSceneMaskCompositor {
       if (eA !== eB) return eA - eB;
       return Number(a.tileDoc?.sort ?? 0) - Number(b.tileDoc?.sort ?? 0);
     });
+
+    // Build per-mask draw lists to avoid O(N*M) tile checks where N=tiles, M=mask types.
+    // Most tiles only have 1-2 masks, so this significantly reduces CPU work.
+    const entriesByMaskType = new Map();
+    for (const entry of sortedEntries) {
+      if (!entry.masks) continue;
+      for (const [maskType, maskEntry] of entry.masks.entries()) {
+        if (!maskEntry?.texture) continue;
+        let list = entriesByMaskType.get(maskType);
+        if (!list) {
+          list = [];
+          entriesByMaskType.set(maskType, list);
+        }
+        list.push(entry);
+      }
+    }
 
     // Ensure GPU resources are ready.
     this._ensureGpuResources(THREE);
@@ -577,8 +614,19 @@ export class GpuSceneMaskCompositor {
       const def = registry[maskType];
       if (!def) continue;
 
-      const isVisual = VISUAL_MASK_IDS.has(maskType);
-      const targetMax = Math.min(isVisual ? VISUAL_MAX : DATA_MAX, maxTex);
+      // Select resolution tier based on mask type.
+      let targetMax;
+      if (VISUAL_MASK_IDS.has(maskType)) {
+        targetMax = VISUAL_MAX;
+      } else if (PARTICLE_MASK_IDS.has(maskType)) {
+        targetMax = PARTICLE_MASK_MAX;
+      } else if (HIGH_DETAIL_DATA_MASK_IDS.has(maskType)) {
+        targetMax = HIGH_DETAIL_DATA_MAX;
+      } else {
+        targetMax = SCALAR_MASK_MAX;
+      }
+      targetMax = Math.min(targetMax, maxTex);
+
       const scale = Math.min(1.0, targetMax / Math.max(1, sceneW), targetMax / Math.max(1, sceneH));
       const outW = Math.max(1, Math.round(sceneW * scale));
       const outH = Math.max(1, Math.round(sceneH * scale));
@@ -597,9 +645,10 @@ export class GpuSceneMaskCompositor {
       const mode = COMPOSITE_MODES[maskType] ?? 'source-over';
       const isLighten = (mode === 'lighten');
 
-      // Compose all tiles for this mask type into the render target.
+      // Compose only tiles that have this mask type into the render target.
+      const entriesForMask = entriesByMaskType.get(maskType) ?? [];
       const anyDrawn = this._composeMaskType(
-        renderer, THREE, rt, sortedEntries, maskType,
+        renderer, THREE, rt, entriesForMask, maskType,
         sceneX, sceneY, sceneW, sceneH, isLighten
       );
 
@@ -639,14 +688,17 @@ export class GpuSceneMaskCompositor {
       // bindings; discarding it leaves no GpuSceneMaskCompositor texture and
       // effects fall back to "full outdoors". If we drew at least one outdoors
       // tile (anyDrawn), always publish the RT even when RGB samples are zero.
+      // Skip the expensive GPU readback for outdoors entirely since we ignore
+      // the result when anyDrawn is true anyway.
       const emr = window.MapShine?.effectMaskRegistry;
       const maskPolicy = emr?.getPolicy?.(maskType);
-      const skipReadbackCheck = isLighten && !maskPolicy?.preserveAcrossFloors;
+      const skipReadbackCheck =
+        maskType === 'outdoors' ||
+        (isLighten && !maskPolicy?.preserveAcrossFloors);
       if (!skipReadbackCheck) {
         try {
           const isNonEmpty = this._readbackIsNonEmpty(renderer, rt);
-          const keepAllZeroOutdoors = maskType === 'outdoors' && anyDrawn;
-          if (!isNonEmpty && !keepAllZeroOutdoors) {
+          if (!isNonEmpty) {
             log.debug(`compose: skipping all-zero '${maskType}' mask`);
             continue;
           }
@@ -655,7 +707,7 @@ export class GpuSceneMaskCompositor {
 
       // The render target texture is the compositor output.
       const outTex = rt.texture;
-      log.info(`compose[${floorKey}]: produced mask '${maskType}' via GPU RT`);
+      log.debug(`compose[${floorKey}]: produced mask '${maskType}' via GPU RT`);
 
       // Apply correct color space.
       if (COLOR_TEXTURE_IDS.has(maskType) && THREE.SRGBColorSpace) {
@@ -727,7 +779,7 @@ export class GpuSceneMaskCompositor {
     const outW = firstDims?.width ?? 0;
     const outH = firstDims?.height ?? 0;
 
-    log.info(`Composed ${compositeMasks.length} mask types from ${tileMaskEntries.length} tiles (${outW}×${outH}) [GPU]`);
+    log.debug(`Composed ${compositeMasks.length} mask types from ${tileMaskEntries.length} tiles (${outW}×${outH}) [GPU]`);
 
     return { masks: compositeMasks, width: outW, height: outH };
   }
@@ -777,7 +829,7 @@ export class GpuSceneMaskCompositor {
           const n = (this._upperOutdoorsMetaRepairCount.get(floorKey) ?? 0) + 1;
           if (n <= 2) {
             this._upperOutdoorsMetaRepairCount.set(floorKey, n);
-            log.info('composeFloor: evicting stale upper-floor meta without outdoors texture', { floorKey, attempt: n });
+            log.debug('composeFloor: evicting stale upper-floor meta without outdoors texture', { floorKey, attempt: n });
             this._floorMeta.delete(floorKey);
             this._upperBandNoOutdoorsAccepted.delete(floorKey);
             cached = null;
@@ -793,7 +845,7 @@ export class GpuSceneMaskCompositor {
       const tilesForFloor = this._getActiveLevelTiles(sc, ctx)?.length ?? 0;
       const skyReachRt = this._floorCache.get(floorKey)?.get('skyReach');
       if (tilesForFloor > 0 && !skyReachRt) {
-        log.info('composeFloor: evicting meta — GPU skyReach missing while tiles exist', { floorKey });
+        log.debug('composeFloor: evicting meta — GPU skyReach missing while tiles exist', { floorKey });
         this._floorMeta.delete(floorKey);
         this._upperBandNoOutdoorsAccepted.delete(floorKey);
         cached = null;
@@ -840,11 +892,11 @@ export class GpuSceneMaskCompositor {
         // floor's RTs instead of returning stale data from the previous floor.
         this._cpuPixelCache.clear();
       }
-      log.info('composeFloor: cache hit', { floorKey, masksChanged, basePath: cached.basePath });
+      log.debug('composeFloor: cache hit', { floorKey, masksChanged, basePath: cached.basePath });
       return { masks: cached.masks, masksChanged, levelElevation, basePath: cached.basePath };
     }
 
-    log.info('composeFloor: cache miss, compositing floor', { floorKey, bandBottom, bandTop });
+    log.debug('composeFloor: cache miss, compositing floor', { floorKey, bandBottom, bandTop });
 
     // Stale outdoors RT must not shadow bundle/file masks merged into _floorMeta.
     this._evictGpuMaskRtForFloor(floorKey, 'outdoors');
@@ -1022,7 +1074,7 @@ export class GpuSceneMaskCompositor {
             primaryBasePath = fallbackPath;
             const mergedHasOutdoors = Array.isArray(newMasks)
               && newMasks.some((m) => (m?.id ?? m?.type) === 'outdoors' && !!m?.texture);
-            log.info('composeFloor: ground-floor background backfill', {
+            log.debug('composeFloor: ground-floor background backfill', {
               fallbackPath,
               fromScene: !!bgFallbackPath,
               hadMasksBeforeBackfill: !!hasOutdoorsInNewMasks || !!newMasks,
@@ -1053,7 +1105,7 @@ export class GpuSceneMaskCompositor {
                     ? this.mergeMasks(newMasks, [outdoorsMask])
                     : [outdoorsMask];
                   primaryBasePath = fallbackPath;
-                  log.info('composeFloor: ground-floor explicit outdoors recovery succeeded', {
+                  log.debug('composeFloor: ground-floor explicit outdoors recovery succeeded', {
                     floorKey,
                     fallbackPath,
                     outdoorsPath,
@@ -1086,10 +1138,10 @@ export class GpuSceneMaskCompositor {
 
     // Single diagnostic log per floor composition - show what masks we have
     const outdoorsEntry = newMasks.find(m => (m?.id || m?.type) === 'outdoors');
-    log.info(`composeFloor[${floorKey}]: stored ${newMasks.length} masks, outdoors=${outdoorsEntry ? (outdoorsEntry.texture ? 'texture' : 'no-texture') : 'missing'}`);
+    log.debug(`composeFloor[${floorKey}]: stored ${newMasks.length} masks, outdoors=${outdoorsEntry ? (outdoorsEntry.texture ? 'texture' : 'no-texture') : 'missing'}`);
 
     if (cacheOnly) {
-      log.info('composeFloor: preloaded (cacheOnly)', { floorKey, maskCount: newMasks.length });
+      log.debug('composeFloor: preloaded (cacheOnly)', { floorKey, maskCount: newMasks.length });
       return { masks: newMasks, masksChanged: false, levelElevation, basePath: primaryBasePath };
     }
 
@@ -1115,7 +1167,7 @@ export class GpuSceneMaskCompositor {
     // (The cache-hit path clears this at line ~480; the miss path must also clear it.)
     if (masksChanged) this._cpuPixelCache.clear();
 
-    log.info('composeFloor: done', {
+    log.debug('composeFloor: done', {
       floorKey, maskCount: newMasks.length,
       maskTypes: newMasks.map(m => m.type),
       levelElevation, masksChanged
@@ -1280,7 +1332,7 @@ export class GpuSceneMaskCompositor {
               // produces "cache miss" spam + wasted GPU work.
               this._singleBandPreloadDone.add(floorKey);
             }
-            log.info('preloadAllFloors: single-band — full composeFloor', { floorKey });
+            log.debug('preloadAllFloors: single-band — full composeFloor', { floorKey });
           } catch (e) {
             log.warn('preloadAllFloors: single-band composeFloor failed', { floorKey, error: e });
           }
@@ -1384,7 +1436,7 @@ export class GpuSceneMaskCompositor {
             continue;
           }
           if (isUpperBandMissingOutdoors || isGroundBandMissingOutdoors) {
-            log.info('preloadAllFloors: evicting band meta without outdoors', {
+            log.debug('preloadAllFloors: evicting band meta without outdoors', {
               bandKey,
               bandBottom: bBot,
               hasTiles,
@@ -1398,7 +1450,7 @@ export class GpuSceneMaskCompositor {
             // and _floorCache never received skyReach / floorAlpha.
             const skyReachRt = this._floorCache.get(bandKey)?.get('skyReach');
             if (hasTiles && !skyReachRt) {
-              log.info('preloadAllFloors: evicting band meta — GPU skyReach missing while tiles exist', {
+              log.debug('preloadAllFloors: evicting band meta — GPU skyReach missing while tiles exist', {
                 bandKey,
               });
               this._floorMeta.delete(bandKey);
@@ -1449,7 +1501,7 @@ export class GpuSceneMaskCompositor {
           if (newBundle?.masks?.length) {
             const reg = window.MapShine?.effectMaskRegistry;
             if (reg && typeof reg.transitionToFloor === 'function') {
-              log.info('preloadAllFloors: refreshing registry for active floor', activeKey, 'after re-composition');
+              log.debug('preloadAllFloors: refreshing registry for active floor', activeKey, 'after re-composition');
               reg.transitionToFloor(activeKey, newBundle.masks);
             }
           }
@@ -1480,30 +1532,55 @@ export class GpuSceneMaskCompositor {
             const bBottom = Number(b.split(':')[0]);
             return aBottom - bBottom;
           });
-          this._patchWaterMasksForUpperFloors(sortedKeys);
-          await _yieldIfNeeded();
-          log.info('preloadAllFloors: water mask patch applied for', sortedKeys.length, 'floors');
 
-          // Push the patched water mask into WaterEffectV2 so it rebuilds its SDF
-          // from the patched texture. Swapping tWaterMask in update() is not enough —
-          // tWaterData (the SDF) drives all wave/refraction rendering and is built
-          // from this.waterMask. applyPatchedWaterMask() swaps the mask and forces
-          // a full SDF rebuild, then invalidates the per-floor state cache.
-          try {
-            const we = window.MapShine?.waterEffect;
-            if (we && typeof we.applyPatchedWaterMask === 'function') {
-              // Only push the patched mask for lower floors (those that had water
-              // bootstrapped and patched). Upper floors have no water RT.
-              for (const key of sortedKeys) {
-                const patchedRt = this._floorCache.get(key)?.get('water');
-                if (patchedRt?.texture) {
-                  we.applyPatchedWaterMask(patchedRt.texture, key);
-                  log.debug('preloadAllFloors: pushed patched water mask to WaterEffectV2 for floor', key);
+          // Build signature to detect if water patch inputs have changed.
+          // Includes floor cache version to catch content mutations.
+          const patchSignature = sortedKeys.map((key) => {
+            const targets = this._floorCache.get(key);
+            const water = targets?.get('water');
+            const alpha = targets?.get('floorAlpha');
+            return [
+              key,
+              water?.texture?.uuid ?? 'no-water',
+              water?.width ?? 0,
+              water?.height ?? 0,
+              alpha?.texture?.uuid ?? 'no-alpha',
+              alpha?.width ?? 0,
+              alpha?.height ?? 0,
+            ].join('/');
+          }).join('|');
+
+          const signatureWithVersion = `${this._floorCacheVersion}::${patchSignature}`;
+
+          if (signatureWithVersion !== this._lastWaterPatchSignature) {
+            this._patchWaterMasksForUpperFloors(sortedKeys);
+            this._lastWaterPatchSignature = signatureWithVersion;
+            await _yieldIfNeeded();
+            log.debug('preloadAllFloors: water mask patch applied for', sortedKeys.length, 'floors');
+
+            // Push the patched water mask into WaterEffectV2 so it rebuilds its SDF
+            // from the patched texture. Swapping tWaterMask in update() is not enough —
+            // tWaterData (the SDF) drives all wave/refraction rendering and is built
+            // from this.waterMask. applyPatchedWaterMask() swaps the mask and forces
+            // a full SDF rebuild, then invalidates the per-floor state cache.
+            try {
+              const we = window.MapShine?.waterEffect;
+              if (we && typeof we.applyPatchedWaterMask === 'function') {
+                // Only push the patched mask for lower floors (those that had water
+                // bootstrapped and patched). Upper floors have no water RT.
+                for (const key of sortedKeys) {
+                  const patchedRt = this._floorCache.get(key)?.get('water');
+                  if (patchedRt?.texture) {
+                    we.applyPatchedWaterMask(patchedRt.texture, key);
+                    log.debug('preloadAllFloors: pushed patched water mask to WaterEffectV2 for floor', key);
+                  }
                 }
               }
+            } catch (_weErr) {
+              log.warn('preloadAllFloors: applyPatchedWaterMask failed', _weErr);
             }
-          } catch (_weErr) {
-            log.warn('preloadAllFloors: applyPatchedWaterMask failed', _weErr);
+          } else {
+            log.debug('preloadAllFloors: skipped water patch, inputs unchanged');
           }
         }
       } catch (_patchErr) {
@@ -1589,7 +1666,6 @@ export class GpuSceneMaskCompositor {
           blitMat.uniforms.uRotation.value = 0.0;
           blitMat.uniforms.uMode.value     = 0; // lighten: max(r,g,b)*a — correct for greyscale mask
           blitMat.blending = THREE.NoBlending;
-          blitMat.needsUpdate = true;
           this._quadMesh.material = blitMat;
           renderer.autoClear = true;
           renderer.setRenderTarget(lowerWaterRt);
@@ -1627,7 +1703,6 @@ export class GpuSceneMaskCompositor {
           mat.uniforms.tUpperFloorAlpha.value = upperFloorAlphaRt.texture;
           mat.uniforms.tUpperWater.value      = upperWaterRt?.texture ?? upperFloorAlphaRt.texture;
           mat.uniforms.uHasUpperWater.value   = upperWaterRt ? 1.0 : 0.0;
-          mat.needsUpdate = true;
 
           renderer.autoClear = true;
           renderer.setRenderTarget(this._waterPatchTempRt);
@@ -1645,7 +1720,6 @@ export class GpuSceneMaskCompositor {
           blitMat.uniforms.uRotation.value = 0.0;
           blitMat.uniforms.uMode.value     = 2; // alpha-extract: outputs s.a directly
           blitMat.blending = THREE.NoBlending;
-          blitMat.needsUpdate = true;
 
           const blitMesh = this._quadMesh;
           const prevMat = blitMesh.material;
@@ -1688,7 +1762,7 @@ export class GpuSceneMaskCompositor {
   /**
    * Build (or rebuild) the floor ID texture from the supplied visible-floor bundles.
    *
-   * The floor ID texture is a world-space render target at DATA_MAX resolution where
+   * The floor ID texture is a world-space render target at HIGH_DETAIL_DATA_MAX resolution where
    * each pixel's R channel encodes the index of the topmost floor that has tile
    * coverage at that point: `floorIndex / 255.0`.
    *
@@ -1720,7 +1794,7 @@ export class GpuSceneMaskCompositor {
     const sceneW = sr.width;
     const sceneH = sr.height;
     const maxTex = renderer.capabilities?.maxTextureSize ?? 16384;
-    const scale = Math.min(1.0, DATA_MAX / Math.max(1, sceneW), DATA_MAX / Math.max(1, sceneH),
+    const scale = Math.min(1.0, HIGH_DETAIL_DATA_MAX / Math.max(1, sceneW), HIGH_DETAIL_DATA_MAX / Math.max(1, sceneH),
                                 maxTex / Math.max(1, sceneW), maxTex / Math.max(1, sceneH));
     const outW = Math.max(1, Math.round(sceneW * scale));
     const outH = Math.max(1, Math.round(sceneH * scale));
@@ -1757,7 +1831,6 @@ export class GpuSceneMaskCompositor {
 
       mat.uniforms.tFloorAlpha.value = floorAlphaEntry.texture;
       mat.uniforms.uFloorId.value    = Math.max(0, Math.min(255, index)) / 255.0;
-      mat.needsUpdate = true;
 
       try {
         renderer.render(this._floorIdScene, this._orthoCamera);
@@ -1948,6 +2021,7 @@ export class GpuSceneMaskCompositor {
     this._floorCache.clear();
     this._floorCacheVersion++;
     this._outputDims.clear();
+    this._lastWaterPatchSignature = null;
     // Reset LRU order so eviction logic starts fresh on the new scene.
     this._lruOrder.length = 0;
 
@@ -2147,6 +2221,8 @@ export class GpuSceneMaskCompositor {
     this._quadMesh = null;
     this._quadScene = null;
     this._orthoCamera = null;
+
+    this._lastWaterPatchSignature = null;
 
     this._cpuFallback.dispose();
 
@@ -2683,48 +2759,62 @@ export class GpuSceneMaskCompositor {
 
     let anyDrawn = false;
 
-    for (const entry of sortedEntries) {
-      const maskEntry = entry.masks?.get(maskType);
-      const tex = maskEntry?.texture;
-      if (!tex) continue;
+    // Enable scissor testing to avoid full-screen fragment work per tile.
+    const prevScissorTest = renderer.getScissorTest();
+    const prevScissor = new THREE.Vector4();
+    renderer.getScissor(prevScissor);
+    renderer.setScissorTest(true);
 
-      const tileDoc = entry.tileDoc;
-      const tileX = Number(tileDoc?.x ?? 0);
-      const tileY = Number(tileDoc?.y ?? 0);
-      const tileW = Number(tileDoc?.width ?? 0);
-      const tileH = Number(tileDoc?.height ?? 0);
-      if (!tileW || !tileH) continue;
+    try {
+      for (const entry of sortedEntries) {
+        const maskEntry = entry.masks?.get(maskType);
+        const tex = maskEntry?.texture;
+        if (!tex) continue;
 
-      // Compute tile rect in normalized scene UV space [0..1].
-      // Foundry uses Y-down (top-left origin); the WebGL render target uses Y-up.
-      // Flip V so the tile is placed at the correct vertical position in the RT.
-      const u0 = (tileX - sceneX) / sceneW;
-      const v0_foundry = (tileY - sceneY) / sceneH;
-      const uW = tileW / sceneW;
-      const vH = tileH / sceneH;
-      const v0 = 1.0 - (v0_foundry + vH);
+        const tileDoc = entry.tileDoc;
+        const tileX = Number(tileDoc?.x ?? 0);
+        const tileY = Number(tileDoc?.y ?? 0);
+        const tileW = Number(tileDoc?.width ?? 0);
+        const tileH = Number(tileDoc?.height ?? 0);
+        if (!tileW || !tileH) continue;
 
-      // Read tile transform.
-      const scaleX = Number(tileDoc?.texture?.scaleX ?? 1);
-      const scaleY = Number(tileDoc?.texture?.scaleY ?? 1);
-      // Foundry rotation is clockwise degrees; convert to radians.
-      const rotDeg = Number(tileDoc?.rotation ?? 0);
-      const rotRad = rotDeg * Math.PI / 180;
+        // Compute tile rect in normalized scene UV space [0..1].
+        // Foundry uses Y-down (top-left origin); the WebGL render target uses Y-up.
+        // Flip V so the tile is placed at the correct vertical position in the RT.
+        const u0 = (tileX - sceneX) / sceneW;
+        const v0_foundry = (tileY - sceneY) / sceneH;
+        const uW = tileW / sceneW;
+        const vH = tileH / sceneH;
+        const v0 = 1.0 - (v0_foundry + vH);
 
-      // Update shared material uniforms for this tile.
-      mat.uniforms.tMask.value = tex;
-      mat.uniforms.uTileRect.value.set(u0, v0, uW, vH);
-      mat.uniforms.uScaleSign.value.set(Math.sign(scaleX) || 1, Math.sign(scaleY) || 1);
-      mat.uniforms.uRotation.value = rotRad;
-      mat.needsUpdate = true;
+        // Read tile transform.
+        const scaleX = Number(tileDoc?.texture?.scaleX ?? 1);
+        const scaleY = Number(tileDoc?.texture?.scaleY ?? 1);
+        // Foundry rotation is clockwise degrees; convert to radians.
+        const rotDeg = Number(tileDoc?.rotation ?? 0);
+        const rotRad = rotDeg * Math.PI / 180;
 
-      // Render the shared quad mesh into the active render target.
-      try {
-        renderer.render(this._quadScene, this._orthoCamera);
-        anyDrawn = true;
-      } catch (e) {
-        log.debug(`_composeMaskType: draw failed for tile ${tileDoc?.id} mask ${maskType}`, e);
+        // Update shared material uniforms for this tile.
+        mat.uniforms.tMask.value = tex;
+        mat.uniforms.uTileRect.value.set(u0, v0, uW, vH);
+        mat.uniforms.uScaleSign.value.set(Math.sign(scaleX) || 1, Math.sign(scaleY) || 1);
+        mat.uniforms.uRotation.value = rotRad;
+
+        // Set scissor to tile's rotated bounding box.
+        if (!this._setTileScissor(renderer, rt, u0, v0, uW, vH, rotRad)) continue;
+
+        // Render the shared quad mesh into the active render target.
+        try {
+          renderer.render(this._quadScene, this._orthoCamera);
+          anyDrawn = true;
+        } catch (e) {
+          log.debug(`_composeMaskType: draw failed for tile ${tileDoc?.id} mask ${maskType}`, e);
+        }
       }
+    } finally {
+      // Restore previous scissor state.
+      renderer.setScissorTest(prevScissorTest);
+      renderer.setScissor(prevScissor);
     }
 
     renderer.setRenderTarget(prevTarget);
@@ -2775,10 +2865,10 @@ export class GpuSceneMaskCompositor {
 
     if (alphaTiles.length === 0) return null;
 
-    // Use DATA_MAX resolution — the floor alpha is a binary-ish mask; no need for
-    // visual-quality resolution. Half-res of DATA_MAX is sufficient but DATA_MAX
+    // Use HIGH_DETAIL_DATA_MAX resolution — the floor alpha is a binary-ish mask; no need for
+    // visual-quality resolution. Half-res of HIGH_DETAIL_DATA_MAX is sufficient but HIGH_DETAIL_DATA_MAX
     // gives clean edges for tiles that have detailed alpha channels.
-    const scale = Math.min(1.0, DATA_MAX / Math.max(1, sceneW), DATA_MAX / Math.max(1, sceneH));
+    const scale = Math.min(1.0, HIGH_DETAIL_DATA_MAX / Math.max(1, sceneW), HIGH_DETAIL_DATA_MAX / Math.max(1, sceneH));
     const outW = Math.max(1, Math.round(sceneW * scale));
     const outH = Math.max(1, Math.round(sceneH * scale));
 
@@ -2809,35 +2899,50 @@ export class GpuSceneMaskCompositor {
     mat.uniforms.uMode.value = 2; // alpha-extract mode
 
     let anyDrawn = false;
-    for (const { tileDoc, baseTex } of alphaTiles) {
-      const tileX = Number(tileDoc?.x ?? 0);
-      const tileY = Number(tileDoc?.y ?? 0);
-      const tileW = Number(tileDoc?.width ?? 0);
-      const tileH = Number(tileDoc?.height ?? 0);
-      if (!tileW || !tileH) continue;
 
-      const u0 = (tileX - sceneX) / sceneW;
-      const v0_foundry = (tileY - sceneY) / sceneH;
-      const uW = tileW / sceneW;
-      const vH = tileH / sceneH;
-      const v0 = 1.0 - (v0_foundry + vH); // Y-flip: Foundry Y-down → GL Y-up
+    // Enable scissor testing to avoid full-screen fragment work per tile.
+    const prevScissorTest = renderer.getScissorTest();
+    const prevScissor = new THREE.Vector4();
+    renderer.getScissor(prevScissor);
+    renderer.setScissorTest(true);
 
-      const scaleX = Number(tileDoc?.texture?.scaleX ?? 1);
-      const scaleY = Number(tileDoc?.texture?.scaleY ?? 1);
-      const rotRad = Number(tileDoc?.rotation ?? 0) * Math.PI / 180;
+    try {
+      for (const { tileDoc, baseTex } of alphaTiles) {
+        const tileX = Number(tileDoc?.x ?? 0);
+        const tileY = Number(tileDoc?.y ?? 0);
+        const tileW = Number(tileDoc?.width ?? 0);
+        const tileH = Number(tileDoc?.height ?? 0);
+        if (!tileW || !tileH) continue;
 
-      mat.uniforms.tMask.value = baseTex;
-      mat.uniforms.uTileRect.value.set(u0, v0, uW, vH);
-      mat.uniforms.uScaleSign.value.set(Math.sign(scaleX) || 1, Math.sign(scaleY) || 1);
-      mat.uniforms.uRotation.value = rotRad;
-      mat.needsUpdate = true;
+        const u0 = (tileX - sceneX) / sceneW;
+        const v0_foundry = (tileY - sceneY) / sceneH;
+        const uW = tileW / sceneW;
+        const vH = tileH / sceneH;
+        const v0 = 1.0 - (v0_foundry + vH); // Y-flip: Foundry Y-down → GL Y-up
 
-      try {
-        renderer.render(this._quadScene, this._orthoCamera);
-        anyDrawn = true;
-      } catch (e) {
-        log.debug(`_composeFloorAlpha: draw failed for tile ${tileDoc?.id}`, e);
+        const scaleX = Number(tileDoc?.texture?.scaleX ?? 1);
+        const scaleY = Number(tileDoc?.texture?.scaleY ?? 1);
+        const rotRad = Number(tileDoc?.rotation ?? 0) * Math.PI / 180;
+
+        mat.uniforms.tMask.value = baseTex;
+        mat.uniforms.uTileRect.value.set(u0, v0, uW, vH);
+        mat.uniforms.uScaleSign.value.set(Math.sign(scaleX) || 1, Math.sign(scaleY) || 1);
+        mat.uniforms.uRotation.value = rotRad;
+
+        // Set scissor to tile's rotated bounding box.
+        if (!this._setTileScissor(renderer, rt, u0, v0, uW, vH, rotRad)) continue;
+
+        try {
+          renderer.render(this._quadScene, this._orthoCamera);
+          anyDrawn = true;
+        } catch (e) {
+          log.debug(`_composeFloorAlpha: draw failed for tile ${tileDoc?.id}`, e);
+        }
       }
+    } finally {
+      // Restore previous scissor state.
+      renderer.setScissorTest(prevScissorTest);
+      renderer.setScissor(prevScissor);
     }
 
     renderer.setRenderTarget(prevTarget);
@@ -2873,8 +2978,68 @@ export class GpuSceneMaskCompositor {
   }
 
   /**
+   * Set scissor test to the tile's rotated bounding box in screen space.
+   * This avoids full-screen fragment shading per tile by only rendering
+   * the tile's actual footprint.
+   *
+   * @param {THREE.WebGLRenderer} renderer
+   * @param {THREE.WebGLRenderTarget} rt
+   * @param {number} u0 - Tile rect left in normalized UV [0..1]
+   * @param {number} v0 - Tile rect top in normalized UV [0..1]
+   * @param {number} uW - Tile rect width in normalized UV
+   * @param {number} vH - Tile rect height in normalized UV
+   * @param {number} rotRad - Tile rotation in radians
+   * @returns {boolean} True if scissor was set successfully, false if tile is off-screen
+   * @private
+   */
+  _setTileScissor(renderer, rt, u0, v0, uW, vH, rotRad) {
+    let minU = u0;
+    let maxU = u0 + uW;
+    let minV = v0;
+    let maxV = v0 + vH;
+
+    // Rotation expands the footprint beyond the unrotated rect.
+    if (rotRad) {
+      const cx = u0 + uW * 0.5;
+      const cy = v0 + vH * 0.5;
+      const hw = uW * 0.5;
+      const hh = vH * 0.5;
+      const c = Math.cos(rotRad);
+      const s = Math.sin(rotRad);
+
+      minU = Infinity; maxU = -Infinity;
+      minV = Infinity; maxV = -Infinity;
+
+      for (const [x, y] of [[-hw, -hh], [hw, -hh], [hw, hh], [-hw, hh]]) {
+        const ru = cx + x * c - y * s;
+        const rv = cy + x * s + y * c;
+        minU = Math.min(minU, ru);
+        maxU = Math.max(maxU, ru);
+        minV = Math.min(minV, rv);
+        maxV = Math.max(maxV, rv);
+      }
+    }
+
+    // Clamp to [0..1] to stay within render target bounds.
+    minU = Math.max(0, Math.min(1, minU));
+    maxU = Math.max(0, Math.min(1, maxU));
+    minV = Math.max(0, Math.min(1, minV));
+    maxV = Math.max(0, Math.min(1, maxV));
+
+    const x = Math.floor(minU * rt.width);
+    const y = Math.floor(minV * rt.height);
+    const w = Math.ceil((maxU - minU) * rt.width);
+    const h = Math.ceil((maxV - minV) * rt.height);
+
+    if (w <= 0 || h <= 0) return false;
+
+    renderer.setScissor(x, y, w, h);
+    return true;
+  }
+
+  /**
    * Ensure the overhead-accumulator scratch RT exists and matches the scene
-   * dimensions at DATA_MAX resolution. Reused across all floors in a compose
+   * dimensions at HIGH_DETAIL_DATA_MAX resolution. Reused across all floors in a compose
    * call to avoid per-floor allocations.
    *
    * @param {object} THREE
@@ -2884,7 +3049,7 @@ export class GpuSceneMaskCompositor {
    * @private
    */
   _ensureOverheadAccumRt(THREE, sceneW, sceneH) {
-    const scale = Math.min(1.0, DATA_MAX / Math.max(1, sceneW), DATA_MAX / Math.max(1, sceneH));
+    const scale = Math.min(1.0, HIGH_DETAIL_DATA_MAX / Math.max(1, sceneW), HIGH_DETAIL_DATA_MAX / Math.max(1, sceneH));
     const outW = Math.max(1, Math.round(sceneW * scale));
     const outH = Math.max(1, Math.round(sceneH * scale));
     let rt = this._overheadAccumRt;
@@ -2984,7 +3149,6 @@ export class GpuSceneMaskCompositor {
 
       for (const tex of upperAlphas) {
         m.uniforms.tUpperAlpha.value = tex;
-        m.needsUpdate = true;
         try {
           renderer.render(this._overheadAccumScene, this._orthoCamera);
         } catch (e) {
@@ -3006,7 +3170,6 @@ export class GpuSceneMaskCompositor {
     s.uniforms.tOutdoors.value      = outdoorsTex;
     s.uniforms.tOverheadAccum.value = overheadTex;
     s.uniforms.uHasOverhead.value   = overheadTex ? 1.0 : 0.0;
-    s.needsUpdate = true;
 
     try {
       renderer.render(this._skyReachScene, this._orthoCamera);
@@ -3029,6 +3192,9 @@ export class GpuSceneMaskCompositor {
    *   - Any lower floors already in the cache pick up the newly composed
    *     floor as an occluder (bridge-above-river scenario).
    *
+   * Optimization: Only recompose the active floor and floors below it.
+   * Floors above the active floor are unaffected by the newly composed floor.
+   *
    * Returns a mask entry for the floor matching `activeFloorKey` (if any) so
    * the caller can push it onto the compositeMasks list for that pass.
    *
@@ -3042,7 +3208,20 @@ export class GpuSceneMaskCompositor {
    */
   _composeSkyReachAllFloors(renderer, THREE, activeFloorKey, sceneW, sceneH) {
     let activeEntry = null;
+    const activeBottom = this._parseFloorBottom(activeFloorKey);
+
     for (const [floorKey, floorTargets] of this._floorCache.entries()) {
+      const floorBottom = this._parseFloorBottom(floorKey);
+
+      // The active floor may have new outdoors.
+      // Floors below active may now have a new overhead occluder.
+      // Floors above active are unaffected.
+      const shouldRecompose =
+        floorKey === activeFloorKey ||
+        floorBottom < activeBottom;
+
+      if (!shouldRecompose) continue;
+
       const tex = this._composeSkyReachForFloor(
         renderer, THREE, floorKey, floorTargets, sceneW, sceneH
       );

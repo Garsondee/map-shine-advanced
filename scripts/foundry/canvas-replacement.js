@@ -187,6 +187,73 @@ const MS_V2_CANVAS_Z = Object.freeze({
   nativePixiOverlay: '25',
 });
 
+// ============================================================================
+// DOM CACHING & FAST CONTEXT EVALUATION
+// ============================================================================
+
+let _cachedBoardElement = null;
+let _cachedThreeCanvasElement = null;
+
+function _getBoardEl() {
+  if (!_cachedBoardElement || !_cachedBoardElement.isConnected) {
+    _cachedBoardElement = document.getElementById('board');
+  }
+  return _cachedBoardElement;
+}
+
+function _getThreeCanvasEl() {
+  if (!_cachedThreeCanvasElement || !_cachedThreeCanvasElement.isConnected) {
+    _cachedThreeCanvasElement = document.getElementById('map-shine-canvas');
+  }
+  return _cachedThreeCanvasElement;
+}
+
+let _lastContextCheckTime = 0;
+let _cachedEditContexts = {};
+
+/**
+ * Evaluates the active UI tool without allocating strings on every tick.
+ * @private
+ */
+function _getEditContexts() {
+  const now = performance.now();
+  if (now - _lastContextCheckTime < 16) return _cachedEditContexts;
+  _lastContextCheckTime = now;
+
+  const control = ui?.controls?.control?.name || ui?.controls?.activeControl || '';
+  const tool = ui?.controls?.tool?.name || ui?.controls?.activeTool || game?.activeTool || '';
+  const layerOpts = canvas?.activeLayer?.options?.name || canvas?.activeLayer?.name || '';
+  const layerCtor = canvas?.activeLayer?.constructor?.name || '';
+  const controlLayer = ui?.controls?.control?.layer || '';
+
+  const check = (name, ctor) => {
+    if (control === name || controlLayer === name) return true;
+    if (layerOpts === name || layerOpts === name + 's') return true;
+    if (layerCtor === ctor || layerCtor === ctor + 'Layer') return true;
+    
+    // Fallback lowercasing only if exact matches fail
+    const l_control = control.toLowerCase();
+    return l_control === name || 
+           (controlLayer).toLowerCase() === name ||
+           layerOpts.toLowerCase() === name || 
+           layerOpts.toLowerCase() === name + 's' ||
+           layerCtor.toLowerCase() === ctor.toLowerCase() || 
+           layerCtor.toLowerCase() === ctor.toLowerCase() + 'layer';
+  };
+
+  _cachedEditContexts = {
+    walls: !!canvas?.walls?.active || check('walls', 'Walls'),
+    tiles: check('tiles', 'Tiles') || tool === 'tile',
+    drawings: !!canvas?.drawings?.active || check('drawings', 'Drawings'),
+    sounds: !!canvas?.sounds?.active || check('sounds', 'Sounds'),
+    templates: !!canvas?.templates?.active || check('templates', 'Template'),
+    notes: !!canvas?.notes?.active || check('notes', 'Notes'),
+    regions: !!canvas?.regions?.active || check('regions', 'Region'),
+    lighting: !!canvas?.lighting?.active || check('lighting', 'Lighting') || check('light', 'Lighting')
+  };
+  return _cachedEditContexts;
+}
+
 /** @type {number|null} */
 let _inputArbitrationSettleRaf = null;
 
@@ -1037,21 +1104,18 @@ function _setGridVisualSuppressed(suppressed) {
   const gridLayer = getConfiguredCanvasLayer('grid');
   if (!gridLayer) return;
   try {
-    gridLayer.visible = true;
-    gridLayer.renderable = true;
-  } catch (_) {}
-  try {
+    if (!gridLayer.visible) gridLayer.visible = true;
+    if (!gridLayer.renderable) gridLayer.renderable = true;
+    
     if (gridLayer.highlight) {
-      gridLayer.highlight.visible = true;
-      gridLayer.highlight.renderable = true;
+      if (!gridLayer.highlight.visible) gridLayer.highlight.visible = true;
+      if (!gridLayer.highlight.renderable) gridLayer.highlight.renderable = true;
     }
-  } catch (_) {}
-  try {
+    
     if (gridLayer.mesh) {
-      gridLayer.mesh.visible = !suppressed;
-      if (typeof gridLayer.mesh.alpha === 'number') {
-        gridLayer.mesh.alpha = suppressed ? 0 : 1;
-      }
+      if (gridLayer.mesh.visible === suppressed) gridLayer.mesh.visible = !suppressed;
+      const targetAlpha = suppressed ? 0 : 1;
+      if (gridLayer.mesh.alpha !== targetAlpha) gridLayer.mesh.alpha = targetAlpha;
     }
   } catch (_) {}
 }
@@ -1211,7 +1275,6 @@ function _scheduleNativeTemplateHydration(reason = 'unspecified', passes = 4) {
  */
 function _rehydrateNativeDrawingOverlays(reason = 'unspecified') {
   if (!canvas?.ready) return false;
-  if (window?.MapShine?.__usePixiContentLayerBridge === true) return false;
   const drawings = Array.isArray(canvas?.drawings?.placeables) ? canvas.drawings.placeables : [];
   if (drawings.length <= 0) return false;
 
@@ -1283,7 +1346,6 @@ function _rehydrateNativeDrawingOverlays(reason = 'unspecified') {
  * @private
  */
 function _scheduleNativeDrawingHydration(reason = 'unspecified', passes = 4) {
-  if (window?.MapShine?.__usePixiContentLayerBridge === true) return;
   const desired = Math.max(1, Number(passes) || 1);
   _nativeDrawingHydrationPassesRemaining = Math.max(_nativeDrawingHydrationPassesRemaining, desired);
   if (_nativeDrawingHydrationTimer !== null) return;
@@ -4150,7 +4212,7 @@ function _resolveUpdateSceneUserId(userId, options) {
  */
 function _msaMapShineFlagDiffIsEchoOnly(changes) {
   try {
-    const keys = _msaMapShineFlagDiffKeys(changes);
+    const keys = _msaGetMsaFlagChanges(changes);
     if (!keys.length) return false;
     const ECHO = new Set(['controlState', 'weather-snapshot']);
     return keys.every((k) => ECHO.has(k));
@@ -4160,54 +4222,62 @@ function _msaMapShineFlagDiffIsEchoOnly(changes) {
 }
 
 /**
- * Foundry v14 may deliver updateScene changes as nested objects or flattened
- * paths (`flags.map-shine-advanced.weather-snapshot`). Normalize both shapes.
+ * Safely extracts MapShine flag keys in a single rapid pass without array allocations.
+ * @param {object} changes
+ * @returns {string[]}
+ */
+function _msaGetMsaFlagChanges(changes) {
+  const flags = new Set();
+  
+  // Fast path for cleanly nested objects
+  const msaFlags = changes?.flags?.['map-shine-advanced'];
+  if (msaFlags && typeof msaFlags === 'object') {
+    for (const key of Object.keys(msaFlags)) {
+      flags.add(key.split('.')[0]);
+    }
+  }
+
+  // Fallback walk for flattened Foundry strings (e.g. `{"flags.map-shine-advanced.weather": true}`)
+  const walk = (obj, prefix = '') => {
+    if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return;
+    for (const key in obj) {
+      if (!Object.hasOwn(obj, key)) continue;
+      const path = prefix ? `${prefix}.${key}` : key;
+      if (path.startsWith('flags.map-shine-advanced.')) {
+        flags.add(path.slice(25).split('.')[0]);
+      } else if (path === 'flags' || path === 'flags.map-shine-advanced' || !path.startsWith('flags.')) {
+        walk(obj[key], path);
+      }
+    }
+  };
+  walk(changes);
+  
+  return Array.from(flags);
+}
+
+/**
+ * Flattens nested change keys into dot-notation paths for Foundry document update deltas.
+ * Handles both nested objects (e.g. `{flags: {'map-shine-advanced': {...}}}`) and
+ * already-flattened strings (e.g. `{'flags.map-shine-advanced.controlState': true}`).
  * @param {object} changes
  * @returns {string[]}
  */
 function _msaFlattenChangeKeys(changes) {
-  const keys = [];
-  const walk = (value, prefix = '') => {
-    if (!value || typeof value !== 'object' || Array.isArray(value)) return;
-    for (const [key, child] of Object.entries(value)) {
+  if (!changes || typeof changes !== 'object') return [];
+  const keys = new Set();
+
+  const walk = (obj, prefix = '') => {
+    if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return;
+    for (const key in obj) {
+      if (!Object.hasOwn(obj, key)) continue;
       const path = prefix ? `${prefix}.${key}` : key;
-      keys.push(path);
-      if (child && typeof child === 'object' && !Array.isArray(child)) {
-        walk(child, path);
-      }
+      keys.add(path);
+      walk(obj[key], path);
     }
   };
-  try {
-    walk(changes);
-  } catch (_) {}
-  return keys;
-}
+  walk(changes);
 
-/**
- * Return changed keys under `flags.map-shine-advanced`, supporting nested and
- * flattened Foundry update payloads.
- * @param {object} changes
- * @returns {string[]}
- */
-function _msaMapShineFlagDiffKeys(changes) {
-  try {
-    const direct = changes?.flags?.['map-shine-advanced'];
-    if (direct && typeof direct === 'object') {
-      return [...new Set(Object.keys(direct).map((key) => String(key).split('.')[0]).filter(Boolean))];
-    }
-
-    const prefix = 'flags.map-shine-advanced.';
-    const keys = new Set();
-    for (const path of _msaFlattenChangeKeys(changes)) {
-      if (!path.startsWith(prefix)) continue;
-      const rest = path.slice(prefix.length);
-      const top = rest.split('.')[0];
-      if (top) keys.add(top);
-    }
-    return [...keys];
-  } catch (_) {
-    return [];
-  }
+  return Array.from(keys);
 }
 
 /**
@@ -4223,7 +4293,7 @@ function _msaSceneUpdateDeltaSkipsMapShineRebuild(changes) {
 
     // Map-point (and similar) flag writes often batch harmless doc metadata (`author`, etc.).
     // The flattened-key walk below would otherwise fail `.every(...)` and fall through to risky paths.
-    const msaKeysEarly = _msaMapShineFlagDiffKeys(changes);
+    const msaKeysEarly = _msaGetMsaFlagChanges(changes);
     const structuralTop = ['padding', 'background', 'width', 'height', 'backgroundColor'].some((k) => k in changes);
     const gridCh = changes.grid && typeof changes.grid === 'object' ? changes.grid : null;
     const gridGeomEarly = !!(gridCh && (
@@ -4419,7 +4489,7 @@ async function onUpdateScene(scene, changes, _options, _userId) {
   const localAuthor = !!(originatingUserId && game?.user?.id === originatingUserId);
   const guardUntil = Number(window.MapShine?._msaLocalFlagWriteGuardUntil) || 0;
   const echoOnly = _msaMapShineFlagDiffIsEchoOnly(changes);
-  const msaDiffKeys = _msaMapShineFlagDiffKeys(changes);
+  const msaDiffKeys = _msaGetMsaFlagChanges(changes);
   const hasMsaSettingsDiff = msaDiffKeys.includes('settings');
 
   // Debounced slider saves (wind/rain/cloud) → setFlag controlState + weather-snapshot only.
@@ -4654,7 +4724,7 @@ async function onUpdateScene(scene, changes, _options, _userId) {
         gridChangeKeys: changes?.grid && typeof changes.grid === 'object' ? Object.keys(changes.grid) : null,
         changesTopKeys: Object.keys(changes || {}),
         mapPointWriteGuard: _msaMapPointWriteInFlight(),
-        msaFlagKeys: _msaMapShineFlagDiffKeys(changes),
+        msaFlagKeys: _msaGetMsaFlagChanges(changes),
       });
     } catch (_) {}
     _scheduleUpdateSceneDrivenReinit(scene, changes);
@@ -4745,9 +4815,9 @@ function _scheduleUpdateSceneDrivenReinit(scene, changes = undefined) {
 
 /**
  * When the PIXI canvas is stacked above `#map-shine-canvas`, Foundry's lighting /
- * regions layers still paint their **darkness / global illumination** meshes into
- * the PIXI framebuffer. That reads as a grey plate over the Three.js map even
- * though light radii / icons (drawn elsewhere on the layer) remain visible.
+ * regions / drawings layers can still paint **darkness / backdrop / illumination**
+ * meshes into the PIXI framebuffer. That reads as a grey plate over the Three.js
+ * map even though tool previews (drawn elsewhere on the layer) remain visible.
  *
  * Map Shine owns scene lighting in V2; suppress only those plating containers
  * while native tool overlays stay interactive.
@@ -4774,6 +4844,15 @@ function _suppressFoundryPlatingWhenMsaPixiStackedAboveThree() {
       if (rPlating && !rPlating.destroyed) {
         rPlating.visible = false;
         rPlating.renderable = false;
+      }
+    }
+
+    const D = canvas.drawings;
+    if (D?.visible) {
+      const dPlating = D.illumination ?? D.darkness ?? D.dark ?? D.backdrop;
+      if (dPlating && !dPlating.destroyed) {
+        dPlating.visible = false;
+        dPlating.renderable = false;
       }
     }
   } catch (_) {
@@ -8060,7 +8139,7 @@ async function createThreeCanvas(scene, createOptions = {}) {
               emberGravityScale: { label: 'Ember Gravity Scale', type: 'slider', default: ashTuning.emberGravityScale ?? 0, min: 0.0, max: 3.0, step: 0.05 },
               emberWindInfluence: { label: 'Ember Wind Influence', type: 'slider', default: ashTuning.emberWindInfluence ?? 0.52, min: 0.0, max: 4.0, step: 0.05 },
               emberWindBase: { label: 'Ember Wind Base', type: 'slider', default: ashTuning.emberWindBase ?? 650, min: 0, max: 2500, step: 10 },
-              emberCurlStrength: { label: 'Ember Curl Strength', type: 'slider', default: ashTuning.emberCurlStrength ?? 4.2, min: 0.0, max: 10.0, step: 0.05 },
+              emberCurlStrength: { label: 'Ember Curl Strength', type: 'slider', default: ashTuning.emberCurlStrength ?? 4.2, min: 0.0, max: 100.0, step: 0.05 },
               emberCurlNoiseScale: { label: 'Ember Curl Noise Scale', type: 'slider', default: ashTuning.emberCurlNoiseScale ?? 0.72, min: 0.2, max: 3.0, step: 0.02 },
               emberCurlTimeScale: { label: 'Ember Curl Time Scale', type: 'slider', default: ashTuning.emberCurlTimeScale ?? 1.28, min: 0.1, max: 3.0, step: 0.02 }
             }
@@ -9598,26 +9677,23 @@ function enableSystem() {
  * @private
  */
 function _suppressFoundryInterfaceSceneOutline() {
-  safeCall(() => {
-    if (!canvas?.ready) return;
-    if (isMapMakerMode) return;
-    if (!sceneSettings.isEnabled(canvas?.scene)) return;
+  if (!canvas?.ready || isMapMakerMode || !sceneSettings.isEnabled(canvas?.scene)) return;
 
-    const iface = canvas?.interface;
-    const first = iface?.children?.[0];
-    if (!first || first.destroyed) return;
+  const iface = canvas?.interface;
+  const first = iface?.children?.[0];
+  if (!first || first.destroyed) return;
 
-    const PIXI = globalThis.PIXI;
-    const isOutlineGraphics = PIXI?.Graphics && first instanceof PIXI.Graphics;
-    const ctorName = String(first?.constructor?.name || '');
-    if (!isOutlineGraphics && ctorName !== 'Graphics' && ctorName !== '_Graphics' && ctorName !== 'LegacyGraphics') {
-      return;
-    }
+  const PIXI = globalThis.PIXI;
+  const isOutlineGraphics = PIXI?.Graphics && first instanceof PIXI.Graphics;
+  const ctorName = first?.constructor?.name;
+  if (!isOutlineGraphics && ctorName !== 'Graphics' && ctorName !== '_Graphics' && ctorName !== 'LegacyGraphics') {
+    return;
+  }
 
-    first.visible = false;
-    first.renderable = false;
-    first.alpha = 0;
-  }, 'suppress.interfaceOutline', Severity.COSMETIC);
+  // Guard assignments to prevent PIXI dirty flags
+  if (first.visible !== false) first.visible = false;
+  if (first.renderable !== false) first.renderable = false;
+  if (first.alpha !== 0) first.alpha = 0;
 }
 
 /**
@@ -9628,16 +9704,25 @@ function _suppressFoundryInterfaceSceneOutline() {
 function _applyMsV2CanvasDomStack(nativePixiAboveThree) {
   const zPixi = nativePixiAboveThree ? MS_V2_CANVAS_Z.nativePixiOverlay : MS_V2_CANVAS_Z.boardBase;
   const zThree = MS_V2_CANVAS_Z.three;
-  const threeEl = document.getElementById('map-shine-canvas');
-  if (threeEl) threeEl.style.zIndex = zThree;
+  
+  const threeEl = _getThreeCanvasEl();
+  if (threeEl && threeEl.style.zIndex !== zThree) threeEl.style.zIndex = zThree;
+  
   const view = canvas?.app?.view ?? null;
-  const board = document.getElementById('board');
-  if (view) view.style.zIndex = zPixi;
-  else if (board && board.tagName === 'CANVAS') board.style.zIndex = zPixi;
-  if (board && board.tagName === 'CANVAS' && board !== view) board.style.zIndex = zPixi;
+  const board = _getBoardEl();
+  
+  if (view && view.style.zIndex !== zPixi) view.style.zIndex = zPixi;
+  else if (board && board.tagName === 'CANVAS' && board.style.zIndex !== zPixi) board.style.zIndex = zPixi;
+  
+  if (board && board.tagName === 'CANVAS' && board !== view && board.style.zIndex !== zPixi) {
+    board.style.zIndex = zPixi;
+  }
+  
   try {
     const ms = window.MapShine;
-    if (ms) ms.__msaStackPixiAboveThree = !!nativePixiAboveThree;
+    if (ms && ms.__msaStackPixiAboveThree !== !!nativePixiAboveThree) {
+      ms.__msaStackPixiAboveThree = !!nativePixiAboveThree;
+    }
   } catch (_) {}
 }
 
@@ -9654,451 +9739,181 @@ function _applyMsV2CanvasDomStack(nativePixiAboveThree) {
  * @private
  */
 function _enforceGameplayPixiSuppression() {
-  safeCall(() => {
-    try {
-      _suppressFoundryInterfaceSceneOutline();
-    } catch (_) {}
+  try {
+    _suppressFoundryInterfaceSceneOutline();
 
-    const diag = (extra = {}) => {
-      safeCall(() => _publishPixiVisibilityDiagnostics(extra), 'pixiSuppress.visibilityDiagnostics', Severity.COSMETIC);
-      safeCall(() => _syncPixiLayerDebugMode(), 'pixiLayer.debugSync', Severity.COSMETIC);
-    };
+    // Inline diagnostic calls to avoid safeCall closure allocation
+    try { _publishPixiVisibilityDiagnostics(); } catch(e) {}
+    try { _syncPixiLayerDebugMode(); } catch(e) {}
 
-    if (!canvas?.ready) {
-      diag({ suppressSkipReason: 'canvas-not-ready' });
-      return;
-    }
-    if (isMapMakerMode) {
-      diag({ suppressSkipReason: 'map-maker-mode' });
-      return;
-    }
-    // Safety: never suppress PIXI on scenes that are not MSA-enabled.
-    // Stray hooks or late callbacks could otherwise black-out non-MSA scenes.
-    if (!sceneSettings.isEnabled(canvas?.scene)) {
-      diag({ suppressSkipReason: 'scene-not-msa-enabled', sceneId: canvas?.scene?.id ?? null });
-      return;
-    }
-    // Debug/bridge escape hatch: allow temporary suspension of suppression
-    // while PIXI-content bridge performs offscreen extraction.
-    if (window?.MapShine?.__disablePixiSuppression === true) {
-      diag({ suppressSkipReason: 'disablePixiSuppression' });
-      return;
-    }
-    if (window?.MapShine?.__bridgeCaptureActive === true) {
-      diag({ suppressSkipReason: 'bridgeCaptureActive' });
-      return;
-    }
+    if (!canvas?.ready || isMapMakerMode || !sceneSettings.isEnabled(canvas?.scene)) return;
+    if (window?.MapShine?.__disablePixiSuppression === true || window?.MapShine?.__bridgeCaptureActive === true) return;
 
-    const activeControl = String(ui?.controls?.control?.name || ui?.controls?.activeControl || '').toLowerCase();
-    const activeTool = String(ui?.controls?.tool?.name || ui?.controls?.activeTool || game?.activeTool || '').toLowerCase();
-    const activeLayerName = String(canvas?.activeLayer?.options?.name || canvas?.activeLayer?.name || '').toLowerCase();
-    const activeLayerCtor = String(canvas?.activeLayer?.constructor?.name || '').toLowerCase();
-    const activeControlLayer = String(ui?.controls?.control?.layer || '').toLowerCase();
+    const ctx = _getEditContexts();
 
-    const wallsEditContext =
-      !!canvas?.walls?.active
-      || activeControl === 'walls'
-      || activeControl === 'wall'
-      || activeControlLayer === 'walls'
-      || activeControlLayer === 'wall'
-      || activeLayerName === 'walls'
-      || activeLayerName === 'wall'
-      || activeLayerCtor === 'wallslayer'
-      || activeLayerCtor === 'walllayer';
-
-    // Door controls: in gameplay, Map Shine uses Three.js door icons — hide PIXI duplicates.
-    // On the native Walls layer, Foundry PIXI must own doors/marquee/endpoints.
-    if (!wallsEditContext) {
+    if (!ctx.walls) {
       try {
         const controlsDoors = canvas?.controls?.doors;
         if (controlsDoors) {
-          controlsDoors.visible = false;
-          controlsDoors.renderable = false;
-          if (Array.isArray(controlsDoors.children) && controlsDoors.children.length) {
-            try { controlsDoors.removeChildren(); } catch (_) {}
+          if (controlsDoors.visible) controlsDoors.visible = false;
+          if (controlsDoors.renderable) controlsDoors.renderable = false;
+        }
+        const walls = canvas?.walls?.placeables;
+        if (walls) {
+          for (let i = 0, len = walls.length; i < len; i++) {
+            const wall = walls[i];
+            if (!wall?.isDoor) continue;
+            const dc = wall.doorControl;
+            if (!dc) continue;
+            if (dc.visible) dc.visible = false;
+            if (dc.renderable) dc.renderable = false;
+            if (dc.icon) {
+              if (dc.icon.visible) dc.icon.visible = false;
+              if (dc.icon.renderable) dc.icon.renderable = false;
+            }
           }
         }
-        for (const wall of canvas?.walls?.placeables || []) {
-          if (!wall?.isDoor) continue;
-          const dc = wall.doorControl;
-          if (!dc) continue;
-          dc.visible = false;
-          dc.renderable = false;
-          if (dc.icon) {
-            dc.icon.visible = false;
-            dc.icon.renderable = false;
-          }
-        }
-      } catch (_) {
-      }
+      } catch (_) {}
     }
 
-    const inputRouter =
-      window.MapShine?.inputRouter ||
-      window.mapShine?.inputRouter ||
-      controlsIntegration?.inputRouter ||
-      null;
-    const tilesEditContext =
-      activeControl === 'tiles'
-      || activeTool === 'tile'
-      || activeLayerName === 'tiles'
-      || activeLayerCtor === 'tileslayer'
-      || activeControlLayer === 'tiles';
-    const drawingsEditContext =
-      !!canvas?.drawings?.active
-      || activeControl === 'drawings'
-      || activeControl === 'drawing'
-      || activeControlLayer === 'drawings'
-      || activeControlLayer === 'drawing'
-      || activeLayerName === 'drawings'
-      || activeLayerName === 'drawing'
-      || activeLayerCtor === 'drawingslayer';
-    const soundsEditContext =
-      !!canvas?.sounds?.active
-      || activeControl === 'sounds'
-      || activeControl === 'sound'
-      || activeControlLayer === 'sounds'
-      || activeControlLayer === 'sound'
-      || activeLayerName === 'sounds'
-      || activeLayerName === 'sound'
-      || activeLayerCtor === 'soundslayer';
-    const templatesEditContext =
-      !!canvas?.templates?.active
-      || activeControl === 'templates'
-      || activeControl === 'template'
-      || activeControlLayer === 'templates'
-      || activeControlLayer === 'template'
-      || activeLayerName === 'templates'
-      || activeLayerName === 'template'
-      || activeLayerCtor === 'templatelayer';
-    const notesEditContext =
-      !!canvas?.notes?.active
-      || activeControl === 'notes'
-      || activeControl === 'note'
-      || activeControlLayer === 'notes'
-      || activeControlLayer === 'note'
-      || activeLayerName === 'notes'
-      || activeLayerName === 'note'
-      || activeLayerCtor === 'noteslayer';
-    const regionsEditContext =
-      !!canvas?.regions?.active
-      || activeControl === 'regions'
-      || activeControl === 'region'
-      || activeControlLayer === 'regions'
-      || activeControlLayer === 'region'
-      || activeLayerName === 'regions'
-      || activeLayerName === 'region'
-      || activeLayerCtor === 'regionlayer';
-    const lightingEditContext =
-      !!canvas?.lighting?.active
-      || activeControl === 'lighting'
-      || activeControl === 'light'
-      || activeControlLayer === 'lighting'
-      || activeControlLayer === 'light'
-      || activeLayerName === 'lighting'
-      || activeLayerName === 'light'
-      || activeLayerCtor === 'lightinglayer';
+    const inputRouter = window.MapShine?.inputRouter || controlsIntegration?.inputRouter || null;
+    const pixiEditContextFallback = ctx.tiles || ctx.drawings || ctx.sounds || ctx.templates || ctx.notes || ctx.regions || ctx.lighting || ctx.walls;
+    const shouldPixiReceiveInputEffective = !!inputRouter?.shouldPixiReceiveInput?.() || pixiEditContextFallback;
+    
     const useNativePersistentPixiOverlays = window?.MapShine?.__useNativePersistentPixiOverlays === true;
-    const hasPersistentPixiOverlays =
-      ((Number(canvas?.scene?.drawings?.size) || 0) > 0) ||
-      ((Number(canvas?.scene?.notes?.size) || 0) > 0) ||
-      _msSceneHasMeasuredTemplateRegions() ||
-      !!canvas?.drawings?.placeables?.length ||
-      !!canvas?.notes?.placeables?.length ||
-      !!_msMeasuredTemplateOverlayPlaceables().length;
+    const hasPersistentPixiOverlays = ((Number(canvas?.scene?.drawings?.size) || 0) > 0) || ((Number(canvas?.scene?.notes?.size) || 0) > 0) || _msSceneHasMeasuredTemplateRegions() || !!canvas?.drawings?.placeables?.length || !!canvas?.notes?.placeables?.length || !!_msMeasuredTemplateOverlayPlaceables().length;
     const nativeOverlayShouldStayVisible = useNativePersistentPixiOverlays && hasPersistentPixiOverlays;
-    // Tokens stay Three.js-native in gameplay. Walls/drawings/etc. need PIXI fail-open
-    // when InputRouter is null or briefly stale so the #board canvas receives marquee/drag.
-    const shouldPixiReceiveInput = !!inputRouter?.shouldPixiReceiveInput?.();
-    // Prefer InputRouter ownership, but fail-open for native PIXI edit contexts
-    // when router metadata is briefly stale during control/layer transitions.
-    // This prevents destructive misroutes (e.g. ambient-sound move becoming a
-    // new placement because Three receives the drag).
-    const pixiEditContextFallback =
-      tilesEditContext || drawingsEditContext || soundsEditContext
-      || templatesEditContext || notesEditContext || regionsEditContext
-      || lightingEditContext || wallsEditContext;
-    const shouldPixiReceiveInputEffective = shouldPixiReceiveInput || pixiEditContextFallback;
     const needsEditorOverlay = shouldPixiReceiveInputEffective || nativeOverlayShouldStayVisible;
-    const isDrawingsContext = drawingsEditContext;
 
-    if (window.MapShine) {
+    if (window.MapShine && window.MapShine.__forcePixiEditorOverlay !== needsEditorOverlay) {
       window.MapShine.__forcePixiEditorOverlay = needsEditorOverlay;
     }
 
     const isV2Active = !!window.MapShine?.__v2Active;
+    const pixiCanvas = canvas.app?.view;
+    const board = _getBoardEl();
+    const threeCanvasEl = _getThreeCanvasEl();
 
     if (needsEditorOverlay) {
-      const pixiCanvas = canvas.app?.view;
-      const threeCanvas = document.getElementById('map-shine-canvas');
-      // Persistent overlays (drawings/notes/templates) should remain visible in
-      // gameplay/default token mode just like native Foundry expectations.
-      // Keep PIXI overlay visually on whenever we have persistent PIXI overlay
-      // documents, not only during active PIXI edit tool contexts.
       const pixiVisualOpacity = (shouldPixiReceiveInputEffective || nativeOverlayShouldStayVisible) ? '1' : '0';
-      if (canvas.app?.renderer?.background) {
+      const pointerTarget = shouldPixiReceiveInputEffective ? 'auto' : 'none';
+
+      if (canvas.app?.renderer?.background && canvas.app.renderer.background.alpha !== 0) {
         canvas.app.renderer.background.alpha = 0;
       }
+      
       if (pixiCanvas) {
-        pixiCanvas.style.display = '';
-        pixiCanvas.style.visibility = 'visible';
-        pixiCanvas.style.opacity = pixiVisualOpacity;
-        pixiCanvas.style.pointerEvents = shouldPixiReceiveInputEffective ? 'auto' : 'none';
-        pixiCanvas.style.backgroundColor = 'transparent';
+        if (pixiCanvas.style.opacity !== pixiVisualOpacity) pixiCanvas.style.opacity = pixiVisualOpacity;
+        if (pixiCanvas.style.pointerEvents !== pointerTarget) pixiCanvas.style.pointerEvents = pointerTarget;
       }
 
-      const board = document.getElementById('board');
       if (board && board.tagName === 'CANVAS') {
-        board.style.display = '';
-        board.style.visibility = 'visible';
-        board.style.opacity = pixiVisualOpacity;
-        board.style.pointerEvents = shouldPixiReceiveInputEffective ? 'auto' : 'none';
-        board.style.backgroundColor = 'transparent';
+        if (board.style.opacity !== pixiVisualOpacity) board.style.opacity = pixiVisualOpacity;
+        if (board.style.pointerEvents !== pointerTarget) board.style.pointerEvents = pointerTarget;
       }
 
-      // In V2, force-replaced PIXI scene layers to remain hidden even while
-      // temporarily allowing PIXI hit-testing for editor tools.
       if (isV2Active) {
-        safeCall(() => {
-          if (canvas.background) canvas.background.visible = false;
+        try {
+          if (canvas.background && canvas.background.visible) canvas.background.visible = false;
           _setGridVisualSuppressed(true);
-          if (canvas.weather) canvas.weather.visible = false;
-          if (canvas.environment) canvas.environment.visible = false;
-
-          if (!canvas.primary) return;
-          // Tile editing relies on Foundry's native tile interaction chain.
-          // Keep primary logically visible so transforms update, hide visuals surgically.
-          canvas.primary.visible = true;
-          if (canvas.primary.background) canvas.primary.background.visible = false;
-          if (canvas.primary.foreground) canvas.primary.foreground.visible = false;
-          if (canvas.primary.tiles) canvas.primary.tiles.visible = !!tilesEditContext;
-          if (Array.isArray(canvas.primary.levelTextures)) {
-            for (const lt of canvas.primary.levelTextures) {
-              if (lt) lt.visible = false;
-            }
+          if (canvas.weather && canvas.weather.visible) canvas.weather.visible = false;
+          if (canvas.environment && canvas.environment.visible) canvas.environment.visible = false;
+          if (canvas.primary) {
+             if (!canvas.primary.visible) canvas.primary.visible = true;
+             if (canvas.primary.background && canvas.primary.background.visible) canvas.primary.background.visible = false;
+             if (canvas.primary.foreground && canvas.primary.foreground.visible) canvas.primary.foreground.visible = false;
+             if (canvas.primary.tiles && canvas.primary.tiles.visible !== !!ctx.tiles) canvas.primary.tiles.visible = !!ctx.tiles;
           }
-        }, 'pixiSuppress.primary(editorOverlayV2)', Severity.COSMETIC);
-        safeCall(() => { if (canvas.fog) canvas.fog.visible = false; }, 'pixiSuppress.fog(editorOverlayV2)', Severity.COSMETIC);
-        safeCall(() => {
-          if (!canvas.visibility) return;
-          canvas.visibility.visible = false;
-          if (canvas.visibility.filter) canvas.visibility.filter.enabled = false;
-          if (canvas.visibility.vision) canvas.visibility.vision.visible = false;
-        }, 'pixiSuppress.visibility(editorOverlayV2)', Severity.COSMETIC);
-
-        // Foundry PIXI lighting disks duplicate LightingEffectV2 and can desync after
-        // bulk deletes; hide except while the lighting layer / tool is active.
-        safeCall(() => {
-          if (canvas.lighting) canvas.lighting.visible = !!lightingEditContext;
-        }, 'pixiSuppress.lighting(editorOverlayV2)', Severity.COSMETIC);
+        } catch(_) {}
+        try { if (canvas.fog && canvas.fog.visible) canvas.fog.visible = false; } catch(_) {}
+        try {
+          if (canvas.visibility) {
+            if (canvas.visibility.visible) canvas.visibility.visible = false;
+            if (canvas.visibility.vision && canvas.visibility.vision.visible) canvas.visibility.vision.visible = false;
+          }
+        } catch(_) {}
+        try { if (canvas.lighting && canvas.lighting.visible !== !!ctx.lighting) canvas.lighting.visible = !!ctx.lighting; } catch(_) {}
       }
 
-      if (threeCanvas) {
-        threeCanvas.style.display = '';
-        threeCanvas.style.visibility = 'visible';
-        threeCanvas.style.opacity = '1';
-        threeCanvas.style.pointerEvents = shouldPixiReceiveInputEffective ? 'none' : 'auto';
+      if (threeCanvasEl) {
+        if (threeCanvasEl.style.opacity !== '1') threeCanvasEl.style.opacity = '1';
+        const threePointer = shouldPixiReceiveInputEffective ? 'none' : 'auto';
+        if (threeCanvasEl.style.pointerEvents !== threePointer) threeCanvasEl.style.pointerEvents = threePointer;
       }
 
-      // Ensure native tile placeables are active while in tile edit context.
-      // DO NOT set tile.interactive = true here — that sets eventMode='static' for ALL
-      // tiles including the full-scene overhead tile, bypassing Foundry's foreground/
-      // background eligibility logic in _refreshState.
-      // Let Foundry own eventMode; queue refreshState so _refreshState runs next frame.
-      if (tilesEditContext && canvas?.tiles) {
-        canvas.tiles.visible = true;
-        canvas.tiles.renderable = true;
-        canvas.tiles.interactiveChildren = true;
-        const ALPHA = 0.01;
-        for (const tile of canvas.tiles.placeables || []) {
-          if (!tile) continue;
-          tile.visible = true;
-          tile.renderable = true;
-          if (tile.mesh) tile.mesh.alpha = ALPHA;
-          // Restore native PIXI overlays (selection frame/handles/HUD affordances)
-          // in tile edit mode. Gameplay suppression may have previously forced
-          // child alpha to 0, which makes the selection rectangle disappear.
-          if (Array.isArray(tile.children)) {
-            for (const child of tile.children) {
-              if (child && typeof child.alpha === 'number') child.alpha = 1;
+      if (ctx.tiles && canvas?.tiles) {
+        if (!canvas.tiles.visible) canvas.tiles.visible = true;
+        const tiles = canvas.tiles.placeables;
+        if (tiles) {
+          for (let i = 0, len = tiles.length; i < len; i++) {
+            const tile = tiles[i];
+            if (!tile) continue;
+            if (!tile.visible) tile.visible = true;
+            if (tile.mesh && tile.mesh.alpha !== 0.01) tile.mesh.alpha = 0.01;
+            if (tile.frame) {
+               if (!tile.frame.visible) tile.frame.visible = true;
+               if (tile.frame.alpha !== 1) tile.frame.alpha = 1;
             }
           }
-          if (tile.frame) {
-            tile.frame.visible = true;
-            tile.frame.renderable = true;
-            tile.frame.alpha = 1;
-          }
-          try { tile.renderFlags?.set({ refreshState: true }); } catch (_) {}
         }
       }
-
-      if (wallsEditContext && canvas?.walls) {
-        canvas.walls.visible = true;
-        canvas.walls.renderable = true;
-        canvas.walls.interactiveChildren = true;
-      }
-
-      safeCall(() => {
-        _enforcePersistentOverlayAdornments();
-      }, 'pixiEditorOverlay.persistentAdornments', Severity.COSMETIC);
-      safeCall(() => _applyMsV2CanvasDomStack(!!shouldPixiReceiveInputEffective), 'pixiSuppress.applyDomStackEditor', Severity.COSMETIC);
-      safeCall(() => _suppressFoundryPlatingWhenMsaPixiStackedAboveThree(), 'pixiSuppress.platingWhenStacked.sync', Severity.COSMETIC);
-      diag({
-        branch: 'editor-overlay',
-        needsEditorOverlay: true,
-        shouldPixiReceiveInput: !!shouldPixiReceiveInput,
-        shouldPixiReceiveInputEffective: !!shouldPixiReceiveInputEffective,
-        nativeOverlayShouldStayVisible: !!nativeOverlayShouldStayVisible,
-        pixiVisualOpacity: (shouldPixiReceiveInputEffective || nativeOverlayShouldStayVisible) ? '1' : '0',
-      });
+      
+      try { _enforcePersistentOverlayAdornments(); } catch(e) {}
+      _applyMsV2CanvasDomStack(!!shouldPixiReceiveInputEffective);
+      try { _suppressFoundryPlatingWhenMsaPixiStackedAboveThree(); } catch(e) {}
+      
       return;
     }
 
-    // Selective system: keep PIXI board visible for compatibility overlays while
-    // scene-bearing layers are suppressed surgically below.
-    safeCall(() => {
-      // #map-shine-canvas uses `MS_V2_CANVAS_Z.three` (above board base, below UI ~100). Foundry may reset
-      // Application.renderer.background.alpha on redraw paths; if the board were
-      // on top, an opaque clear would hide Three even when the blit path is healthy.
-      if (canvas.app?.renderer?.background) {
-        canvas.app.renderer.background.alpha = 0;
-      }
-    }, 'pixiSuppress.rendererTransparentSelective', Severity.COSMETIC);
+    // Selective System path (Gameplay)
+    if (canvas.app?.renderer?.background && canvas.app.renderer.background.alpha !== 0) {
+      canvas.app.renderer.background.alpha = 0;
+    }
 
-    safeCall(() => {
-      const pixiCanvas = canvas.app?.view;
-      if (pixiCanvas) {
-        pixiCanvas.style.display = '';
-        pixiCanvas.style.visibility = 'visible';
-        pixiCanvas.style.opacity = '1';
-        pixiCanvas.style.pointerEvents = 'none';
-        pixiCanvas.style.backgroundColor = 'transparent';
-      }
-    }, 'pixiSuppress.pixiCanvasSelectiveVisible', Severity.COSMETIC);
+    if (pixiCanvas && pixiCanvas.style.pointerEvents !== 'none') pixiCanvas.style.pointerEvents = 'none';
+    if (threeCanvasEl && threeCanvasEl.style.pointerEvents !== 'auto') threeCanvasEl.style.pointerEvents = 'auto';
+    if (board && board.tagName === 'CANVAS' && board.style.pointerEvents !== 'none') board.style.pointerEvents = 'none';
 
-    // Always force the Three canvas visible in gameplay mode. Without this,
-    // mode transitions can leave stale display/visibility styles and present
-    // as a blank frame after PIXI is suppressed.
-    safeCall(() => {
-      const threeCanvas = document.getElementById('map-shine-canvas');
-      if (!threeCanvas) return;
-      threeCanvas.style.display = '';
-      threeCanvas.style.visibility = 'visible';
-      threeCanvas.style.opacity = '1';
-      threeCanvas.style.pointerEvents = 'auto';
-    }, 'pixiSuppress.threeCanvasVisible', Severity.COSMETIC);
+    if (canvas.primary && !canvas.primary.visible) canvas.primary.visible = true;
+    if (canvas.primary?.background && canvas.primary.background.visible) canvas.primary.background.visible = false;
+    if (canvas.primary?.tiles && canvas.primary.tiles.visible) canvas.primary.tiles.visible = false;
+    if (canvas.primary?.foreground && canvas.primary.foreground.visible) canvas.primary.foreground.visible = false;
 
-    // Foundry's primary PIXI canvas element is typically #board. Keep it alive
-    // so native overlays can render, but make it passthrough for pointer input.
-    safeCall(() => {
-      const board = document.getElementById('board');
-      if (board && board.tagName === 'CANVAS') {
-        board.style.display = '';
-        board.style.visibility = 'visible';
-        board.style.opacity = '1';
-        board.style.pointerEvents = 'none';
-        board.style.backgroundColor = 'transparent';
-      }
-    }, 'pixiSuppress.boardCanvasSelectiveVisible', Severity.COSMETIC);
+    if (window.MapShine?.__v2Active === true) {
+      if (canvas.background && canvas.background.visible) canvas.background.visible = false;
+      _setGridVisualSuppressed(true);
+    }
 
-    // V12+: primary can render tiles/overheads/roofs. Keep it hidden in gameplay.
-    // V14: PrimaryCanvasGroup draws per-Level background/foreground meshes as
-    // children (levelTextures[]). Map Shine owns scene rendering via Three.js,
-    // so ALL level textures must be suppressed — not just the viewed level's
-    // .background / .foreground properties.
-    safeCall(() => { 
-      if (canvas.primary) {
-        canvas.primary.visible = true;
-        if (canvas.primary.background) canvas.primary.background.visible = false;
-        if (canvas.primary.foreground) canvas.primary.foreground.visible = false;
-        if (canvas.primary.tiles) canvas.primary.tiles.visible = false;
-        if (Array.isArray(canvas.primary.levelTextures)) {
-          for (const lt of canvas.primary.levelTextures) {
-            if (lt) lt.visible = false;
+    if (canvas.fog && canvas.fog.visible) canvas.fog.visible = false;
+    if (canvas.visibility && canvas.visibility.visible) canvas.visibility.visible = false;
+
+    const tiles = canvas.tiles?.placeables;
+    if (tiles) {
+      for (let i = 0, len = tiles.length; i < len; i++) {
+        const tile = tiles[i];
+        if (!tile) continue;
+        if (!tile.visible) tile.visible = true;
+        if (tile.mesh && tile.mesh.alpha !== 0) tile.mesh.alpha = 0;
+        if (tile.texture && tile.texture.alpha !== 0) tile.texture.alpha = 0;
+        if (tile.children) {
+          for (let j = 0, clen = tile.children.length; j < clen; j++) {
+            if (tile.children[j].alpha !== 0) tile.children[j].alpha = 0;
           }
         }
       }
-    }, 'pixiSuppress.primary', Severity.COSMETIC);
+    }
 
-    // V2: mirror createThreeCanvas / editor-overlay policy — native redraws can
-    // re-enable canvas.background or the grid mesh; both sit on #board above Three.
-    safeCall(() => {
-      if (window.MapShine?.__v2Active !== true) return;
-      if (canvas.background) canvas.background.visible = false;
-      _setGridVisualSuppressed(true);
-    }, 'pixiSuppress.backgroundAndGridV2', Severity.COSMETIC);
+    try { _enforcePersistentOverlayAdornments(); } catch(e) {}
 
-    // Fog of war / visibility: in V2 we do not use Foundry's fog visuals.
-    // Leaving these visible can produce a fullscreen, camera-locked semi-transparent
-    // overlay that changes when a token becomes the active vision source.
-    safeCall(() => {
-      if (canvas.fog) canvas.fog.visible = false;
-    }, 'pixiSuppress.fog', Severity.COSMETIC);
-    safeCall(() => {
-      if (!canvas.visibility) return;
-      canvas.visibility.visible = false;
-      if (canvas.visibility.filter) canvas.visibility.filter.enabled = false;
-      if (canvas.visibility.vision) canvas.visibility.vision.visible = false;
-      if (Array.isArray(canvas.visibility.children)) {
-        for (const child of canvas.visibility.children) {
-          if (child && typeof child.visible !== 'undefined') child.visible = false;
-        }
-      }
-    }, 'pixiSuppress.visibility', Severity.COSMETIC);
+    if (canvas.lighting && window.MapShine?.__v2Active === true && canvas.lighting.visible !== !!ctx.lighting) {
+      canvas.lighting.visible = !!ctx.lighting;
+    }
 
-    // Tiles are fully Three-owned in gameplay mode. Keep PIXI tile visuals suppressed.
-    const alpha = 0;
+    _applyMsV2CanvasDomStack(false);
 
-    // Keep Three.js tiles visible in gameplay regardless of active canvas layer.
-    safeCall(() => {
-      const tm = window.MapShine?.tileManager;
-      if (tm?.setVisibility) tm.setVisibility(true);
-    }, 'pixiSuppress.tileVisibility', Severity.COSMETIC);
-
-    safeCall(() => {
-      if (canvas.tiles?.placeables) {
-        for (const tile of canvas.tiles.placeables) {
-          if (!tile) continue;
-          safeCall(() => {
-            // Gameplay mode: tiles are Three.js-owned visually, keep PIXI placeables
-            // visible for document sync but do NOT force interactive=true.
-            // Three.js canvas (pointerEvents:auto) owns all input in gameplay mode.
-            tile.visible = true;
-            if (tile.mesh) tile.mesh.alpha = alpha;
-            if (tile.texture) tile.texture.alpha = alpha;
-            if (Array.isArray(tile.children)) {
-              for (const child of tile.children) {
-                if (child && typeof child.alpha === 'number') child.alpha = alpha;
-              }
-            }
-          }, 'pixiSuppress.tile', Severity.COSMETIC);
-        }
-      }
-    }, 'pixiSuppress.tiles', Severity.COSMETIC);
-
-    // Keep persistent note/template adornments (icons + labels) visible even
-    // when their native layer is not the active edit layer.
-    safeCall(() => {
-      _enforcePersistentOverlayAdornments();
-    }, 'pixiSuppress.persistentOverlayAdornments', Severity.COSMETIC);
-
-    // V2: AmbientLight radii are drawn in Three.js; keep Foundry's lighting layer off
-    // during gameplay (including when persistent drawings force PIXI opacity on).
-    safeCall(() => {
-      if (!canvas.lighting) return;
-      if (window.MapShine?.__v2Active === true) {
-        canvas.lighting.visible = !!lightingEditContext;
-      }
-    }, 'pixiSuppress.lightingV2Gameplay', Severity.COSMETIC);
-
-    safeCall(() => _applyMsV2CanvasDomStack(false), 'pixiSuppress.applyDomStackSelective', Severity.COSMETIC);
-
-    diag({
-      branch: 'gameplay-selective',
-      shouldPixiReceiveInput: !!shouldPixiReceiveInput,
-      shouldPixiReceiveInputEffective: !!shouldPixiReceiveInputEffective,
-    });
-  }, 'enforceGameplayPixiSuppression', Severity.COSMETIC);
+  } catch (e) {
+    log.error('Error in _enforceGameplayPixiSuppression', e);
+  }
 }
 
 /**

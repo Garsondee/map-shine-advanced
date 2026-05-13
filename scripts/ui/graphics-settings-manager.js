@@ -14,6 +14,17 @@ import { GraphicsSettingsDialog } from './graphics-settings-dialog.js';
 
 const log = createLogger('GraphicsSettings');
 
+/** Client-local weather/foam particle spawn scale presets (index 0..6). Medium = current behaviour. */
+const PARTICLE_SPAWN_TIERS = Object.freeze([
+  { label: 'Off', scale: 0 },
+  { label: 'Light', scale: 1 / 3 },
+  { label: 'Reduced', scale: 2 / 3 },
+  { label: 'Medium', scale: 1 },
+  { label: 'High', scale: 4 / 3 },
+  { label: 'Very high', scale: 5 / 3 },
+  { label: 'Extreme', scale: 2 }
+]);
+
 // Legacy/alias IDs used by capabilities or historical UI wiring.
 // Normalize these to the runtime V2 effect IDs so overrides remain stable.
 const EFFECT_ID_ALIASES = Object.freeze({
@@ -72,6 +83,7 @@ const V2_EFFECT_KEY_BY_ID = Object.freeze({
  * @property {number} renderActiveFps
  * @property {number} renderContinuousFps
  * @property {boolean} tokenDepthInteraction - P4-02: tokens participate in depth buffer when true
+ * @property {number} particleSpawnTier - 0..6; 3 = Medium (100% spawn)
  * @property {Object<string, {enabled?: boolean}>} effectOverrides
  */
 
@@ -103,6 +115,7 @@ export class GraphicsSettingsManager {
       // P4-02: When true, token sprites use depthTest/depthWrite so elevated foreground
       // tiles correctly occlude them. Default false preserves legacy always-on-top behaviour.
       tokenDepthInteraction: false,
+      particleSpawnTier: 3,
       effectOverrides: {}
     };
 
@@ -228,6 +241,16 @@ export class GraphicsSettingsManager {
     return Math.max(min, Math.min(max, Math.floor(n)));
   }
 
+  /**
+   * @param {*} value
+   * @returns {number} integer 0..6, default 3 (Medium)
+   */
+  _coerceParticleSpawnTier(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return 3;
+    return Math.max(0, Math.min(6, Math.round(n)));
+  }
+
   _buildStorageKey() {
     try {
       const sceneId = canvas?.scene?.id || 'no-scene';
@@ -256,6 +279,7 @@ export class GraphicsSettingsManager {
 
     // Render loop reads these values from window.MapShine each frame.
     this.applyRenderPerformanceSettings();
+    this.applyParticleSpawnScale();
 
     try {
       this._onApplyRenderResolution?.();
@@ -446,6 +470,66 @@ export class GraphicsSettingsManager {
       ms.renderStrictSyncEnabled = this.getRenderStrictSyncEnabled();
     } catch (e) {
       log.warn('Failed to apply render performance settings', e);
+    }
+  }
+
+  /**
+   * @returns {number} 0..6
+   */
+  getParticleSpawnTier() {
+    return this._coerceParticleSpawnTier(this.state?.particleSpawnTier);
+  }
+
+  /**
+   * @returns {number} spawn multiplier 0..2 for WeatherParticles
+   */
+  getParticleSpawnScale() {
+    const tier = this.getParticleSpawnTier();
+    const row = PARTICLE_SPAWN_TIERS[tier];
+    const s = row ? row.scale : 1;
+    return Math.max(0, Math.min(2, Number(s) || 1));
+  }
+
+  /**
+   * @returns {{ label: string, percent: number }}
+   */
+  getParticleSpawnTierDisplay() {
+    const tier = this.getParticleSpawnTier();
+    const row = PARTICLE_SPAWN_TIERS[tier];
+    const scale = row ? row.scale : 1;
+    return {
+      label: row ? row.label : 'Medium',
+      percent: Math.round(scale * 100)
+    };
+  }
+
+  /**
+   * @returns {string}
+   */
+  formatParticleSpawnTierCaption() {
+    const { label, percent } = this.getParticleSpawnTierDisplay();
+    return `${label} — ${percent}%`;
+  }
+
+  /**
+   * @param {number} index
+   */
+  setParticleSpawnTier(index) {
+    this.state.particleSpawnTier = this._coerceParticleSpawnTier(index);
+    this.applyParticleSpawnScale();
+    this.saveState();
+  }
+
+  /**
+   * Mirror particle spawn scale to runtime (`window.MapShine.graphicsParticleSpawnScale`).
+   */
+  applyParticleSpawnScale() {
+    try {
+      if (!window) return;
+      const ms = window.MapShine || (window.MapShine = {});
+      ms.graphicsParticleSpawnScale = this.getParticleSpawnScale();
+    } catch (e) {
+      log.warn('Failed to apply particle spawn scale', e);
     }
   }
 
@@ -674,7 +758,12 @@ export class GraphicsSettingsManager {
       if (parsed.renderActiveFps !== undefined) this.state.renderActiveFps = this._coerceFps(parsed.renderActiveFps, 60, 5, 120);
       if (parsed.renderContinuousFps !== undefined) this.state.renderContinuousFps = this._coerceFps(parsed.renderContinuousFps, 30, 5, 120);
       if (typeof parsed.tokenDepthInteraction === 'boolean') this.state.tokenDepthInteraction = parsed.tokenDepthInteraction;
+      if (parsed.particleSpawnTier !== undefined) {
+        this.state.particleSpawnTier = this._coerceParticleSpawnTier(parsed.particleSpawnTier);
+      }
       if (parsed.effectOverrides && typeof parsed.effectOverrides === 'object') this.state.effectOverrides = parsed.effectOverrides;
+
+      this.state.particleSpawnTier = this._coerceParticleSpawnTier(this.state.particleSpawnTier);
 
       log.debug('Loaded graphics overrides');
     } catch (e) {

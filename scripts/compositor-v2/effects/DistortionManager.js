@@ -208,23 +208,65 @@ export const DistortionNoise = {
   `,
 
   /**
-   * Heat haze specific noise - combines multiple frequencies for realistic shimmer
+   * Heat haze — layered multi-scale noise with domain warp and independent
+   * advection per octave (turbulent air shimmer, not a single scrolling field).
    */
   heatHaze: `
     vec2 heatDistortion(vec2 uv, float time, float intensity, float frequency, float speed) {
-      // Primary low-frequency wave
-      float n1 = snoise(vec2(uv.x * frequency * 0.5, uv.y * frequency * 0.3 + time * speed * 0.7));
-      // Secondary higher-frequency shimmer
-      float n2 = snoise(vec2(uv.x * frequency * 2.0 + time * speed * 0.3, uv.y * frequency * 1.5 + time * speed));
-      // Tertiary micro-detail
-      float n3 = snoise(vec2(uv.x * frequency * 4.0 - time * speed * 0.5, uv.y * frequency * 3.0 + time * speed * 1.5));
-      
-      // Combine with decreasing weights
-      float nx = n1 * 0.6 + n2 * 0.3 + n3 * 0.1;
-      float ny = snoise(vec2(uv.y * frequency * 0.4 + time * speed * 0.5, uv.x * frequency * 0.6)) * 0.7
-               + snoise(vec2(uv.y * frequency * 1.8 + time * speed, uv.x * frequency * 2.2)) * 0.3;
-      
-      return vec2(nx, ny) * intensity;
+      float t = time * speed;
+      vec2 p = uv * max(0.05, frequency);
+
+      // Low-frequency domain warp breaks visible tiling and couples octaves.
+      vec2 warp = vec2(
+        snoise(p * 0.11 + vec2(t * 0.09, -t * 0.07)),
+        snoise(p * 0.10 + vec2(-t * 0.08, t * 0.11))
+      ) * 0.42;
+      vec2 pw = p + warp;
+
+      // Large slow convection cells (independent X/Y phase paths).
+      vec2 L = vec2(
+        snoise(pw * 0.31 + vec2(t * 0.55, t * 0.18)),
+        snoise(pw * 0.29 + vec2(-t * 0.22, t * 0.52))
+      );
+
+      // Medium layer at ~45° with different drift — simulates crossing currents.
+      float c = 0.70710678;
+      float s = 0.70710678;
+      vec2 pr = vec2(pw.x * c - pw.y * s, pw.x * s + pw.y * c);
+      vec2 M = vec2(
+        snoise(pr * 0.78 + vec2(t * 0.72, -t * 0.61)),
+        snoise(pr * 0.76 + vec2(t * 0.58, -t * 0.68))
+      );
+
+      // Fine shimmer + micro striations (opposing temporal gradients).
+      vec2 F = vec2(
+        snoise(pw * 2.05 + vec2(-t * 1.05, t * 1.12)),
+        snoise(pw * 2.02 + vec2(t * 1.08, -t * 0.98))
+      );
+      vec2 U = vec2(
+        snoise(pw * 4.15 + vec2(t * 1.55, t * -1.35)),
+        snoise(pw * 4.08 + vec2(-t * 1.42, t * 1.48))
+      ) * 0.38;
+
+      // Fractal Brownian motion on a skewed path (uses fbm from DistortionNoise).
+      vec2 fA = vec2(
+        fbm(pw * 1.1 + vec2(3.1, 9.7) + vec2(t * 0.35, -t * 0.28), 4, 2.05, 0.52),
+        fbm(pw * 1.08 + vec2(7.2, 2.4) + vec2(-t * 0.31, t * 0.36), 4, 2.05, 0.52)
+      );
+
+      vec2 v = L * 0.38 + M * 0.30 + F * 0.18 + U * 0.08 + fA * 0.12;
+
+      // Mild perpendicular stir (reduces axis-aligned shimmer; stays small).
+      float stir = snoise(pw * 0.55 + t * 0.41);
+      v += vec2(-v.y, v.x) * (0.10 + 0.08 * stir);
+
+      // High-frequency micro-shimmer so the haze reads less like a uniform disk.
+      vec2 micro = vec2(
+        snoise(pw * 7.15 + vec2(t * 2.05, -t * 1.92)),
+        snoise(pw * 7.05 + vec2(-t * 1.98, t * 2.08))
+      ) * 0.048;
+
+      return (v + micro) * intensity;
     }
   `,
 
@@ -570,16 +612,17 @@ export class DistortionManager {
       void main() {
         vec4 sum = vec4(0.0);
         float weightSum = 0.0;
-        
-        // 9-tap Gaussian blur
+        // 9 taps spanning ~±4 * reachPerTap texels (reach scales with requested blur radius).
+        float reachPerTap = max(0.4, uBlurRadius * 0.27);
+        float sigmaDist = max(0.85, uBlurRadius * 0.42);
         for (float i = -4.0; i <= 4.0; i += 1.0) {
-          float weight = exp(-0.5 * (i * i) / (uBlurRadius * uBlurRadius));
-          vec2 offset = uDirection * uTexelSize * i * uBlurRadius;
+          float dist = abs(i) * reachPerTap;
+          float weight = exp(-0.5 * (dist * dist) / (sigmaDist * sigmaDist));
+          vec2 offset = uDirection * uTexelSize * i * reachPerTap;
           sum += texture2D(tInput, vUv + offset) * weight;
           weightSum += weight;
         }
-        
-        gl_FragColor = sum / weightSum;
+        gl_FragColor = sum / max(weightSum, 1e-5);
       }
     `;
     
@@ -655,6 +698,8 @@ export class DistortionManager {
         uHeatIntensity: { value: 0.015 },
         uHeatFrequency: { value: 8.0 },
         uHeatSpeed: { value: 1.0 },
+        uHeatMaskTexelSize: { value: new THREE.Vector2(1 / 2048, 1 / 2048) },
+        uHeatEdgeSoftnessTexels: { value: 0.0 },
         
         // Water source
         tWaterMask: { value: null },
@@ -722,6 +767,8 @@ export class DistortionManager {
         uniform float uHeatIntensity;
         uniform float uHeatFrequency;
         uniform float uHeatSpeed;
+        uniform vec2 uHeatMaskTexelSize;
+        uniform float uHeatEdgeSoftnessTexels;
         
         // Water source
         uniform sampler2D tWaterMask;
@@ -821,6 +868,24 @@ export class DistortionManager {
           float e = waterMaskValue(texture2D(tex, safeClampUv(uv + vec2(stepUv.x, 0.0))));
           float w = waterMaskValue(texture2D(tex, safeClampUv(uv - vec2(stepUv.x, 0.0))));
           return (c * 4.0 + (n + s + e + w) * 2.0) / 12.0;
+        }
+
+        float blur5TapHeatMask(sampler2D tex, vec2 uv, vec2 stepUv) {
+          float c = texture2D(tex, uv).r;
+          float n = texture2D(tex, safeClampUv(uv + vec2(0.0, stepUv.y))).r;
+          float s = texture2D(tex, safeClampUv(uv - vec2(0.0, stepUv.y))).r;
+          float e = texture2D(tex, safeClampUv(uv + vec2(stepUv.x, 0.0))).r;
+          float w = texture2D(tex, safeClampUv(uv - vec2(stepUv.x, 0.0))).r;
+          return (c * 4.0 + (n + s + e + w) * 2.0) / 12.0;
+        }
+
+        // Two-scale 5-tap blend: preserves the hot core while widening the falloff
+        // (single-scale 5-tap stays too tight vs. mask texel size → hard "ring").
+        float blurHeatMaskFringe(sampler2D tex, vec2 uv, vec2 stepUv) {
+          float fine = blur5TapHeatMask(tex, uv, stepUv);
+          float wide = blur5TapHeatMask(tex, uv, stepUv * 2.55);
+          float blend = sqrt(max(1e-6, fine) * max(1e-6, wide));
+          return clamp(max(fine, wide) * 0.5 + blend * 0.42 + fine * 0.14, 0.0, 1.0);
         }
 
         float band01(float x, float lo, float hi) {
@@ -953,17 +1018,33 @@ export class DistortionManager {
             sceneUv = clamp(sceneUv, vec2(0.0), vec2(1.0));
           }
           
-          // Heat distortion
+          // Heat distortion — wide soft fringe + noise-wobbled edge so the haze
+          // does not read as a sharp circular toggle (mask is often blobby/binary).
           if (uHeatEnabled > 0.5) {
             float heatY = (uHeatMaskFlipY > 0.5) ? (1.0 - sceneUv.y) : sceneUv.y;
             vec2 heatUv = vec2(sceneUv.x, heatY);
-            float heatMask = texture2D(tHeatMask, heatUv).r * sceneInBounds;
-            if (heatMask > 0.01) {
-              // Use heatUv for noise coords so the pattern stays pinned to the map
-              // and aligned to the mask's UV convention.
+            vec2 heatStepUv = max(uHeatMaskTexelSize, vec2(1.0 / 4096.0))
+              * clamp(uHeatEdgeSoftnessTexels, 0.0, 128.0);
+            heatStepUv = max(heatStepUv, uHeatMaskTexelSize * 2.2);
+            float heatMaskRaw = texture2D(tHeatMask, heatUv).r * sceneInBounds;
+            float heatMask = (heatStepUv.x > 1e-5 || heatStepUv.y > 1e-5)
+              ? blurHeatMaskFringe(tHeatMask, heatUv, heatStepUv) * sceneInBounds
+              : heatMaskRaw;
+
+            float softNorm = clamp(uHeatEdgeSoftnessTexels / 56.0, 0.1, 1.0);
+            float riseLo = 0.004 + softNorm * 0.14;
+            float riseHi = riseLo + 0.02 + softNorm * 0.12;
+            float ambient = smoothstep(riseLo, riseHi, heatMask);
+            float annulus = smoothstep(0.03, 0.26, heatMask) * (1.0 - smoothstep(0.68, 0.99, heatMask));
+            float nEdge = snoise(heatUv * mix(20.0, 52.0, softNorm) * vec2(1.03, 0.97)
+              + uTime * vec2(0.1, -0.075));
+            float mWob = clamp(heatMask * (1.0 + 0.13 * softNorm * nEdge * annulus), 0.0, 1.0);
+            float gammaExp = mix(0.36, 0.62, softNorm);
+            float heatBlend = pow(max(mWob, 0.0), gammaExp) * ambient;
+            if (heatBlend > 2e-4) {
               vec2 heatOffset = heatDistortion(heatUv, uTime, uHeatIntensity, uHeatFrequency, uHeatSpeed);
-              totalOffset += heatOffset * heatMask;
-              totalMask = max(totalMask, heatMask);
+              totalOffset += heatOffset * heatBlend;
+              totalMask = max(totalMask, mWob);
             }
           }
           
@@ -2267,6 +2348,28 @@ export class DistortionManager {
       u.uHeatIntensity.value = heatSource.params.intensity;
       u.uHeatFrequency.value = heatSource.params.frequency;
       u.uHeatSpeed.value = heatSource.params.speed;
+      if (u.uHeatMaskTexelSize) {
+        const hm = heatSource.mask;
+        let mw = 2048;
+        let mh = 2048;
+        try {
+          const img = hm?.image;
+          if (img && img.width > 0 && img.height > 0) {
+            mw = img.width;
+            mh = img.height;
+          } else if (Number.isFinite(hm?.image?.width) && Number.isFinite(hm?.image?.height)) {
+            mw = hm.image.width;
+            mh = hm.image.height;
+          }
+        } catch (_) { /* keep defaults */ }
+        u.uHeatMaskTexelSize.value.set(1 / Math.max(1, mw), 1 / Math.max(1, mh));
+      }
+      if (u.uHeatEdgeSoftnessTexels) {
+        const v = Number.isFinite(heatSource.params?.edgeSoftnessTexels)
+          ? heatSource.params.edgeSoftnessTexels
+          : 0.0;
+        u.uHeatEdgeSoftnessTexels.value = Math.max(0.0, Math.min(128.0, v));
+      }
     } else {
       u.uHeatEnabled.value = 0.0;
     }

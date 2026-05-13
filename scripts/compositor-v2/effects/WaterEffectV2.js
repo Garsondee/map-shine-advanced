@@ -1018,6 +1018,14 @@ static getControlSchema() {
       enabled: true,
       groups: [
         {
+          name: 'mask-status',
+          label: 'Mask Status',
+          type: 'mask-status',
+          expanded: true,
+          separator: true,
+          parameters: []
+        },
+        {
           name: 'water-core',
           label: 'Core',
           type: 'folder',
@@ -2026,6 +2034,13 @@ static getControlSchema() {
       this._composeMaterial.uniforms.uHasWaterRawMask.value = 0.0;
     }
     this._hasAnyWaterData = this._floorWater.size > 0;
+
+    // Update mask status display in Tweakpane
+    const tweakpaneManager = window.MapShine?.tweakpaneManager;
+    if (tweakpaneManager && typeof tweakpaneManager.updateMaskStatusDisplay === 'function') {
+      tweakpaneManager.updateMaskStatusDisplay('water', { water: this._hasAnyWaterData });
+    }
+
     // Keep runtime enabled state stable; render path already checks uniforms/data.
 
     log.info(`WaterEffectV2 populated: ${this._waterTiles.length} tile(s), ${this._floorWater.size} floor(s)`);

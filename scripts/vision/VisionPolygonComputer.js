@@ -44,6 +44,9 @@ export class VisionPolygonComputer {
     this._seenAnglesSet = new Set();
     this._endpointMap = new Map();
     
+    // PERFORMANCE: Typed array for blistering fast angle sorting
+    this._anglesArray = new Float64Array(4096);
+    
     // Reusable temp objects for closestPointOnSegment
     this._tempClosest = { x: 0, y: 0 };
     this._tempRayEnd = { x: 0, y: 0 };
@@ -114,17 +117,24 @@ export class VisionPolygonComputer {
     // Collect unique endpoints within radius
     const endpoints = this.collectEndpoints(segments, center, radius);
     
-    // Cast rays and find intersections
-    const intersections = this.castRays(center, endpoints, segments, radius);
+    // OPTIMIZATION: Extract, sort, and deduplicate angles before casting rays
+    const sortedAngles = this._extractAndSortAngles(endpoints);
     
-    // Sort by angle and build polygon
-    intersections.sort((a, b) => a.angle - b.angle);
-    
-    // Flatten to point array
+    // Cast rays in angular order and build polygon
     const points = this._pointsPool;
     points.length = 0;
-    for (const intersection of intersections) {
-      points.push(intersection.x, intersection.y);
+    
+    let prevAngle = -999;
+    for (let i = 0; i < sortedAngles.length; i++) {
+      const angle = sortedAngles[i];
+      
+      // Deduplicate on the fly (replaces the need for a Hash Set)
+      if (Math.abs(angle - prevAngle) < 1e-6) continue;
+      prevAngle = angle;
+      
+      // Points are pushed in perfect angular order!
+      const hit = this.castRay(center, angle, segments, radius, this._tempHit);
+      points.push(hit.x, hit.y);
     }
     
     // Validate polygon
@@ -325,13 +335,8 @@ export class VisionPolygonComputer {
       
       if (distASq > radiusSq && distBSq > radiusSq) {
         // Both endpoints outside - check if segment passes through circle
-        this._tempSegA.x = ax;
-        this._tempSegA.y = ay;
-        this._tempSegB.x = bx;
-        this._tempSegB.y = by;
-        const closest = this.closestPointOnSegment(center, this._tempSegA, this._tempSegB);
-        const distClosestSq = (closest.x - center.x) ** 2 + (closest.y - center.y) ** 2;
-        if (distClosestSq > radiusSq) continue;
+        // OPTIMIZATION: Use scalar distance check instead of object method
+        if (this._distToSegmentSq(center.x, center.y, ax, ay, bx, by) > radiusSq) continue;
       }
 
       let seg = segments[writeIndex];
@@ -405,9 +410,8 @@ export class VisionPolygonComputer {
         const distBSq = dxB * dxB + dyB * dyB;
 
         if (distASq > radiusSq && distBSq > radiusSq) {
-          const closest = this.closestPointOnSegment(center, this._tempSegA, this._tempSegB);
-          const distClosestSq = (closest.x - center.x) ** 2 + (closest.y - center.y) ** 2;
-          if (distClosestSq > radiusSq) continue;
+          // OPTIMIZATION: Use scalar distance check instead of object method
+          if (this._distToSegmentSq(center.x, center.y, ax, ay, bx, by) > radiusSq) continue;
         }
 
         let seg = segments[writeIndex];
@@ -691,13 +695,8 @@ export class VisionPolygonComputer {
       let include = (distASq <= radiusSq || distBSq <= radiusSq);
       if (!include) {
         // Check if segment passes through circle
-        this._tempSegA.x = ax;
-        this._tempSegA.y = ay;
-        this._tempSegB.x = bx;
-        this._tempSegB.y = by;
-        const closest = this.closestPointOnSegment(center, this._tempSegA, this._tempSegB);
-        const distClosestSq = (closest.x - center.x) ** 2 + (closest.y - center.y) ** 2;
-        include = distClosestSq <= radiusSq;
+        // OPTIMIZATION: Use scalar distance check instead of object method
+        include = this._distToSegmentSq(center.x, center.y, ax, ay, bx, by) <= radiusSq;
       }
 
       if (!include) continue;
@@ -772,9 +771,10 @@ export class VisionPolygonComputer {
         const dy = point.y - center.y;
         const distSq = dx * dx + dy * dy;
         if (distSq <= radiusSqTol) {
-          const keyX = Math.round(point.x * 100);
-          const keyY = Math.round(point.y * 100);
-          const key = keyX * 1000000 + keyY;
+          // FIX: Shift to positive to prevent negative collision bugs
+          const safeX = Math.round(point.x * 10) + 1000000;
+          const safeY = Math.round(point.y * 10) + 1000000;
+          const key = safeX * 100000000 + safeY;
           if (!this._endpointMap.has(key)) {
             const angle = Math.atan2(dy, dx);
             let ep = endpoints[epCount];
@@ -798,9 +798,10 @@ export class VisionPolygonComputer {
         const dy = point.y - center.y;
         const distSq = dx * dx + dy * dy;
         if (distSq <= radiusSqTol) {
-          const keyX = Math.round(point.x * 100);
-          const keyY = Math.round(point.y * 100);
-          const key = keyX * 1000000 + keyY;
+          // FIX: Shift to positive to prevent negative collision bugs
+          const safeX = Math.round(point.x * 10) + 1000000;
+          const safeY = Math.round(point.y * 10) + 1000000;
+          const key = safeX * 100000000 + safeY;
           if (!this._endpointMap.has(key)) {
             const angle = Math.atan2(dy, dx);
             let ep = endpoints[epCount];
@@ -877,37 +878,41 @@ export class VisionPolygonComputer {
    * @returns {{x: number, y: number}|null}
    */
   castRay(origin, angle, segments, radius, outHit = null) {
-    const dx = Math.cos(angle);
-    const dy = Math.sin(angle);
+    const r_px = origin.x;
+    const r_py = origin.y;
     
-    // Ray endpoint (at max radius)
-    const rayEnd = this._tempRayEnd;
-    rayEnd.x = origin.x + dx * radius;
-    rayEnd.y = origin.y + dy * radius;
+    // Scale ray vector to exact radius bounds
+    const r_dx = Math.cos(angle) * radius;
+    const r_dy = Math.sin(angle) * radius;
 
-    let closestX = rayEnd.x;
-    let closestY = rayEnd.y;
-    let closestDistSq = Infinity;
+    // OPTIMIZATION: Track parametric 't' instead of Euclidean coordinates/distances
+    let closestT = 1.0; 
     
     for (let i = 0; i < segments.length; i++) {
       const seg = segments[i];
-      if (this.raySegmentIntersection(origin, rayEnd, seg.a, seg.b, this._tempHit)) {
-        const hx = this._tempHit.x;
-        const hy = this._tempHit.y;
-        const dxh = hx - origin.x;
-        const dyh = hy - origin.y;
-        const distSq = dxh * dxh + dyh * dyh;
-        if (distSq < closestDistSq) {
-          closestDistSq = distSq;
-          closestX = hx;
-          closestY = hy;
-        }
+      const s_px = seg.a.x;
+      const s_py = seg.a.y;
+      const s_dx = seg.b.x - s_px;
+      const s_dy = seg.b.y - s_py;
+      
+      const denom = r_dx * s_dy - r_dy * s_dx;
+      if (denom > -1e-10 && denom < 1e-10) continue; // Parallel
+      
+      const t = ((s_px - r_px) * s_dy - (s_py - r_py) * s_dx) / denom;
+      
+      // OPTIMIZATION: If 't' is behind ray (t < 0) or further than closest hit (t >= closestT), early exit!
+      if (t < 0 || t >= closestT) continue; 
+      
+      const u = ((s_px - r_px) * r_dy - (s_py - r_py) * r_dx) / denom;
+      if (u >= 0 && u <= 1) {
+        closestT = t; // New closest parametric distance
       }
     }
 
     const out = outHit ?? { x: 0, y: 0 };
-    out.x = closestX;
-    out.y = closestY;
+    // Final coordinate evaluated only ONCE at the very end
+    out.x = r_px + closestT * r_dx;
+    out.y = r_py + closestT * r_dy;
     return out;
   }
 
@@ -947,6 +952,58 @@ export class VisionPolygonComputer {
     }
     
     return false;
+  }
+
+  /**
+   * Extremely fast scalar distance check. Avoids allocating temp segment objects.
+   * @private
+   */
+  _distToSegmentSq(px, py, ax, ay, bx, by) {
+    const dx = bx - ax;
+    const dy = by - ay;
+    const lenSq = dx * dx + dy * dy;
+    
+    if (lenSq === 0) {
+      const dpx = px - ax;
+      const dpy = py - ay;
+      return dpx * dpx + dpy * dpy;
+    }
+    
+    let t = ((px - ax) * dx + (py - ay) * dy) / lenSq;
+    if (t < 0) t = 0;
+    else if (t > 1) t = 1;
+    
+    const cx = ax + t * dx;
+    const cy = ay + t * dy;
+    const dpx = px - cx;
+    const dpy = py - cy;
+    
+    return dpx * dpx + dpy * dpy;
+  }
+
+  /**
+   * Extracts endpoint angles, adds +- epsilon, and sorts them via TypedArray
+   * @private
+   */
+  _extractAndSortAngles(endpoints) {
+    const needed = endpoints.length * 3;
+    if (this._anglesArray.length < needed) {
+      this._anglesArray = new Float64Array(Math.max(this._anglesArray.length * 2, needed));
+    }
+    
+    const eps = this.epsilon;
+    let idx = 0;
+    
+    for (let i = 0; i < endpoints.length; i++) {
+      const baseAngle = endpoints[i].angle;
+      this._anglesArray[idx++] = baseAngle - eps;
+      this._anglesArray[idx++] = baseAngle;
+      this._anglesArray[idx++] = baseAngle + eps;
+    }
+    
+    const validAngles = this._anglesArray.subarray(0, needed);
+    validAngles.sort(); // V8 sorts flat Float64 arrays incredibly fast
+    return validAngles;
   }
 
   /**

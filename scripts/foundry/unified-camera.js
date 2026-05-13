@@ -71,7 +71,17 @@ export class UnifiedCameraController {
     
     // Drag state for Three.js canvas input
     this._isDragging = false;
-    this._lastMousePos = null;
+    this._lastMouseX = 0;
+    this._lastMouseY = 0;
+    this._hasLastMousePos = false;
+
+    // Cache last-applied projection state to avoid unnecessary updates
+    this._lastAppliedThreeZoom = NaN;
+    this._lastAppliedThreeAspect = NaN;
+
+    // Reusable Vector3 objects for screen-to-world conversion
+    this._screenRayNear = null;
+    this._screenRayFar = null;
 
     this._pendingRightDrag = false;
     this._rightDragStartPos = null;
@@ -213,19 +223,34 @@ export class UnifiedCameraController {
     
     // FOV-based zoom: adjust FOV instead of camera Z position
     // This keeps the ground plane at a constant depth in the frustum
+    // Only update projection matrix when zoom or aspect actually changes
+    const zoom = this.state.zoom || 1;
+    const zoomChanged = Math.abs(zoom - this._lastAppliedThreeZoom) > 0.0001;
+    const aspectChanged = camera.isPerspectiveCamera &&
+      Math.abs((camera.aspect || 0) - (this._lastAppliedThreeAspect || 0)) > 0.0001;
+
     if (camera.isPerspectiveCamera && this.sceneComposer.baseFovTanHalf !== undefined) {
-      const baseTan = this.sceneComposer.baseFovTanHalf;
-      const zoom = this.state.zoom || 1;
-      const fovRad = 2 * Math.atan(baseTan / zoom);
-      const fovDeg = fovRad * (180 / Math.PI);
-      const clamped = Math.max(1, Math.min(170, fovDeg));
-      camera.fov = clamped;
-      this.sceneComposer.currentZoom = zoom;
-      camera.updateProjectionMatrix();
+      if (zoomChanged || aspectChanged) {
+        const baseTan = this.sceneComposer.baseFovTanHalf;
+        const fovRad = 2 * Math.atan(baseTan / zoom);
+        const fovDeg = fovRad * (180 / Math.PI);
+        const clamped = Math.max(1, Math.min(170, fovDeg));
+
+        if (Math.abs((camera.fov || 0) - clamped) > 0.001 || aspectChanged) {
+          camera.fov = clamped;
+          camera.updateProjectionMatrix();
+        }
+
+        this.sceneComposer.currentZoom = zoom;
+        this._lastAppliedThreeZoom = zoom;
+        this._lastAppliedThreeAspect = camera.aspect || 0;
+      }
     } else if (camera.isOrthographicCamera) {
-      // Fallback for orthographic camera
-      camera.zoom = this.state.zoom;
-      camera.updateProjectionMatrix();
+      if (zoomChanged) {
+        camera.zoom = zoom;
+        camera.updateProjectionMatrix();
+        this._lastAppliedThreeZoom = zoom;
+      }
     }
   }
   
@@ -447,8 +472,12 @@ export class UnifiedCameraController {
     const nx = ((clientX - rect.left) / width) * 2 - 1;
     const ny = -(((clientY - rect.top) / height) * 2 - 1);
 
-    const near = new THREE_NS.Vector3(nx, ny, -1).unproject(camera);
-    const far = new THREE_NS.Vector3(nx, ny, 1).unproject(camera);
+    const near = this._screenRayNear || (this._screenRayNear = new THREE_NS.Vector3());
+    const far = this._screenRayFar || (this._screenRayFar = new THREE_NS.Vector3());
+
+    near.set(nx, ny, -1).unproject(camera);
+    far.set(nx, ny, 1).unproject(camera);
+
     const dz = far.z - near.z;
     if (Math.abs(dz) < 1e-8) return null;
 
@@ -608,13 +637,13 @@ export class UnifiedCameraController {
    */
   _onMouseDown(event) {
     if (!this.enabled) return;
-    
+
     // Right mouse button for pan
     if (event.button === 2) {
       this._pendingRightDrag = true;
       this._rightDragStartPos = { x: event.clientX, y: event.clientY };
       this._isDragging = false;
-      this._lastMousePos = null;
+      this._hasLastMousePos = false;
     }
   }
   
@@ -636,7 +665,9 @@ export class UnifiedCameraController {
         this._pendingRightDrag = false;
         this._rightDragStartPos = null;
         this._isDragging = true;
-        this._lastMousePos = { x: event.clientX, y: event.clientY };
+        this._lastMouseX = event.clientX;
+        this._lastMouseY = event.clientY;
+        this._hasLastMousePos = true;
         this.threeCanvas.style.cursor = 'grabbing';
         event.preventDefault();
       } else {
@@ -644,19 +675,21 @@ export class UnifiedCameraController {
       }
     }
 
-    if (!this._isDragging || !this._lastMousePos) return;
-    
-    const deltaX = event.clientX - this._lastMousePos.x;
-    const deltaY = event.clientY - this._lastMousePos.y;
-    
-    // Convert screen delta to world delta
-    const worldDelta = this._screenToWorldDelta(deltaX, deltaY);
-    
-    // Pan in Foundry coordinates (drag right = move camera left = decrease X)
-    // Foundry Y is down, so drag down = move camera up = decrease Y
-    this.pan(-worldDelta.x, -worldDelta.y, 'three');
-    
-    this._lastMousePos = { x: event.clientX, y: event.clientY };
+    if (!this._isDragging || !this._hasLastMousePos) return;
+
+    const deltaX = event.clientX - this._lastMouseX;
+    const deltaY = event.clientY - this._lastMouseY;
+
+    const scale = 1 / this.state.zoom;
+
+    this.pan(
+      -(deltaX * scale),
+      -(deltaY * scale),
+      'three'
+    );
+
+    this._lastMouseX = event.clientX;
+    this._lastMouseY = event.clientY;
     event.preventDefault();
   }
   
@@ -668,7 +701,7 @@ export class UnifiedCameraController {
   _onMouseUp(event) {
     if (this._isDragging) {
       this._isDragging = false;
-      this._lastMousePos = null;
+      this._hasLastMousePos = false;
       if (this.threeCanvas) {
         this.threeCanvas.style.cursor = 'default';
       }
@@ -781,7 +814,7 @@ export class UnifiedCameraController {
   disable() {
     this.enabled = false;
     this._isDragging = false;
-    this._lastMousePos = null;
+    this._hasLastMousePos = false;
     this._pendingRightDrag = false;
     this._rightDragStartPos = null;
     if (this.threeCanvas) {

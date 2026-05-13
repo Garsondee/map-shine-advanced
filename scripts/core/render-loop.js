@@ -9,48 +9,6 @@ import { createLogger } from './log.js';
 const log = createLogger('RenderLoop');
 
 /**
- * Read the current strict-sync mode flag from the shared MapShine namespace.
- * Strict sync mode enforces one compositor render per PIXI tick (lockstep
- * tokening) and disables adaptive FPS skipping. It is the fool-proof render
- * coherence mode; tolerate slightly higher GPU cost for guaranteed correctness.
- *
- * @returns {boolean}
- */
-function _isStrictSyncEnabled() {
-  try {
-    return window?.MapShine?.renderStrictSyncEnabled === true;
-  } catch (_) {
-    return false;
-  }
-}
-
-/**
- * Read the strict-sync hold-last-frame state. When the FloorCompositor detects
- * invalid frame inputs in strict mode it sets this flag to request the render
- * loop to skip the next compositor render so the last valid frame remains on
- * screen (browser keeps displaying the previous back-buffer).
- *
- * Includes an `updatedAtMs` field so the RenderLoop can cap the maximum hold
- * duration — without a cap, a stuck flag would starve the compositor of the
- * very invocation needed to re-validate and clear it.
- *
- * @returns {{active:boolean, reason:string|null, updatedAtMs:number}}
- */
-function _readStrictHoldFrame() {
-  try {
-    const flag = window?.MapShine?.renderStrictHoldFrame;
-    if (flag && flag.active === true) {
-      return {
-        active: true,
-        reason: String(flag.reason || 'unspecified'),
-        updatedAtMs: Number.isFinite(Number(flag.updatedAtMs)) ? Number(flag.updatedAtMs) : 0,
-      };
-    }
-  } catch (_) {}
-  return { active: false, reason: null, updatedAtMs: 0 };
-}
-
-/**
  * Maximum time (ms) the RenderLoop will suppress the compositor while the
  * strict-sync hold flag is active. After this window we force the compositor
  * to run so it can re-validate inputs and clear the flag. Without this cap,
@@ -131,8 +89,38 @@ export class RenderLoop {
     /** Compositor frames driven by load-time hidden-tab pump (rAF may not run when hidden). */
     this._loadPumpFrameCount = 0;
 
+    // OPTIMIZATION: Cache WebGL context to avoid cross-boundary lookups every frame
+    this._glContext = null;
+
+    // OPTIMIZATION: Pre-allocated state object for Zero-GC strict holding
+    this._strictHoldState = { active: false, reason: null, updatedAtMs: 0 };
+
     // Bind render method to preserve context
     this.render = this.render.bind(this);
+  }
+
+  /**
+   * Fast-path strict sync flag check
+   * @private
+   */
+  _isStrictSyncEnabled() {
+    return window?.MapShine?.renderStrictSyncEnabled === true;
+  }
+
+  /**
+   * Updates and returns the pre-allocated strict hold state (Zero-GC)
+   * @private
+   */
+  _getStrictHoldState() {
+    const flag = window?.MapShine?.renderStrictHoldFrame;
+    if (flag && flag.active === true) {
+      this._strictHoldState.active = true;
+      this._strictHoldState.reason = flag.reason ? String(flag.reason) : 'unspecified';
+      this._strictHoldState.updatedAtMs = +(flag.updatedAtMs) || 0;
+    } else {
+      this._strictHoldState.active = false;
+    }
+    return this._strictHoldState;
   }
 
   /**
@@ -169,7 +157,10 @@ export class RenderLoop {
     this._continuousRenderUntilMs = 0;
 
     this._loadPumpFrameCount = 0;
-    
+
+    // Attempt early context cache
+    this._glContext = this.renderer?.getContext?.() || null;
+
     // Kick off the loop
     this.animationFrameId = requestAnimationFrame(this.render);
   }
@@ -182,17 +173,13 @@ export class RenderLoop {
   pumpBackgroundLoadFrame() {
     if (!this.isRunning || !this.effectComposer) return;
 
-    try {
-      const lost = this.renderer?.getContext?.()?.isContextLost?.();
-      if (lost) return;
-    } catch (_) {
-      return;
-    }
+    if (!this._glContext) this._glContext = this.renderer?.getContext?.();
+    if (this._glContext?.isContextLost?.()) return;
 
     const now = performance.now();
     let deltaTime = (now - this.lastFrameTime) / 1000;
     this.lastFrameTime = now;
-    if (!Number.isFinite(deltaTime) || deltaTime < 0) deltaTime = 1 / 60;
+    if (deltaTime !== deltaTime || deltaTime < 0) deltaTime = 1 / 60; // Fast NaN check
     if (deltaTime > 0.1) deltaTime = 0.1;
 
     try {
@@ -204,32 +191,33 @@ export class RenderLoop {
       return;
     }
 
-    try {
-      const ms = window.MapShine;
-      const strictSync = _isStrictSyncEnabled();
-      const fc = strictSync ? ms?.frameCoordinator : null;
-      if (strictSync && fc?.hasPendingPixiToken?.()) {
-        try { fc.consumePendingPixiToken?.(); } catch (_) {}
-      }
-    } catch (_) {}
+    const ms = window.MapShine;
+    const strictSync = this._isStrictSyncEnabled();
+    const fc = ms?.frameCoordinator;
+
+    if (strictSync && fc?.hasPendingPixiToken?.()) {
+      try { fc.consumePendingPixiToken?.(); } catch (_) {}
+    }
 
     try {
       const stage = canvas?.stage;
-      const fcState = window.MapShine?.frameCoordinator?.getFrameState?.();
-      const pixiPivotX = Number.isFinite(fcState?.cameraX) ? fcState.cameraX : stage?.pivot?.x;
-      const pixiPivotY = Number.isFinite(fcState?.cameraY) ? fcState.cameraY : stage?.pivot?.y;
-      const pixiZoom = Number.isFinite(fcState?.zoom) ? fcState.zoom : stage?.scale?.x;
+      const fcState = fc?.getFrameState?.();
+
+      const pixiPivotX = fcState?.cameraX ?? stage?.pivot?.x;
+      const pixiPivotY = fcState?.cameraY ?? stage?.pivot?.y;
+      const pixiZoom = fcState?.zoom ?? stage?.scale?.x;
+
       if (typeof pixiPivotX === 'number') this._lastPixiPivotX = pixiPivotX;
       if (typeof pixiPivotY === 'number') this._lastPixiPivotY = pixiPivotY;
       if (typeof pixiZoom === 'number') this._lastPixiZoom = pixiZoom;
-    } catch (_) {}
 
-    try {
       const cam = this.camera;
-      this._lastCamX = cam?.position?.x;
-      this._lastCamY = cam?.position?.y;
-      this._lastCamZ = cam?.position?.z;
-      this._lastCamZoom = cam?.zoom;
+      if (cam) {
+        this._lastCamX = cam.position.x;
+        this._lastCamY = cam.position.y;
+        this._lastCamZ = cam.position.z;
+        this._lastCamZoom = cam.zoom;
+      }
     } catch (_) {}
 
     this._loadPumpFrameCount++;
@@ -284,6 +272,7 @@ export class RenderLoop {
   }
 
   /**
+   * Ultra-fast integer clamp. Bypasses Math.max/min/floor overhead.
    * @private
    * @param {*} value
    * @param {number} fallback
@@ -292,9 +281,10 @@ export class RenderLoop {
    * @returns {number}
    */
   _clampFps(value, fallback, min = 5, max = 120) {
-    const n = Number(value);
-    if (!Number.isFinite(n)) return fallback;
-    return Math.max(min, Math.min(max, Math.floor(n)));
+    let n = +value; // Fast unary cast
+    if (n !== n) return fallback; // Fast NaN check (NaN !== NaN)
+    n = n | 0; // Fast bitwise truncate/floor
+    return n < min ? min : (n > max ? max : n);
   }
 
   /**
@@ -351,20 +341,16 @@ export class RenderLoop {
     // running so we can resume immediately when the context is restored.
     this.animationFrameId = requestAnimationFrame(this.render);
 
-    // Skip rendering when the WebGL context is lost.
-    // Without this guard, every render call returns GL_INVALID_OPERATION (1282)
-    // and fills the console with shader VALIDATE_STATUS errors.
-    try {
-      const lost = this.renderer?.getContext?.()?.isContextLost?.();
-      if (lost) {
-        const now = performance.now();
-        if ((now - (this._lastContextLostLogMs || 0)) > 2000) {
-          this._lastContextLostLogMs = now;
-          log.warn('WebGL context is lost — skipping render this frame (rAF loop continues)');
-        }
-        return;
+    // Context caching logic removes massive WebGL cross-boundary lookup delays
+    if (!this._glContext) this._glContext = this.renderer?.getContext?.();
+    if (this._glContext?.isContextLost?.()) {
+      const now = performance.now();
+      if ((now - this._lastContextLostLogMs) > 2000) {
+        this._lastContextLostLogMs = now;
+        log.warn('WebGL context is lost — skipping render this frame (rAF loop continues)');
       }
-    } catch (_) {}
+      return;
+    }
 
     // Calculate delta time
     const now = performance.now();
@@ -392,20 +378,21 @@ export class RenderLoop {
         // Idle throttling: if camera is not moving, render at a reduced rate.
         // Prefer PIXI camera state (stage pivot/scale) to avoid 1-frame latency.
         const stage = canvas?.stage;
-        const fcState = (() => {
-          try {
-            const fc = window.MapShine?.frameCoordinator;
-            return fc?.initialized ? fc.getFrameState?.() : null;
-          } catch (_) {
-            return null;
+
+        // Avoid IIFE and deeply chained optional properties
+        let fcState = null;
+        try {
+          const fc = window.MapShine?.frameCoordinator;
+          if (fc?.initialized && fc.getFrameState) {
+            fcState = fc.getFrameState();
           }
-        })();
+        } catch (_) {}
 
         // Prefer post-PIXI coordinated camera snapshots when available.
         // This reduces cases where we sample stage state just before PIXI updates.
-        const pixiPivotX = Number.isFinite(fcState?.cameraX) ? fcState.cameraX : stage?.pivot?.x;
-        const pixiPivotY = Number.isFinite(fcState?.cameraY) ? fcState.cameraY : stage?.pivot?.y;
-        const pixiZoom = Number.isFinite(fcState?.zoom) ? fcState.zoom : stage?.scale?.x;
+        const pixiPivotX = fcState?.cameraX ?? stage?.pivot?.x;
+        const pixiPivotY = fcState?.cameraY ?? stage?.pivot?.y;
+        const pixiZoom = fcState?.zoom ?? stage?.scale?.x;
 
         let cameraChanged = false;
         if (typeof pixiPivotX === 'number' && typeof pixiPivotY === 'number' && typeof pixiZoom === 'number') {
@@ -416,15 +403,11 @@ export class RenderLoop {
           );
         } else {
           const cam = this.camera;
-          const camX = cam?.position?.x;
-          const camY = cam?.position?.y;
-          const camZ = cam?.position?.z;
-          const camZoom = cam?.zoom;
           cameraChanged = (
-            camX !== this._lastCamX ||
-            camY !== this._lastCamY ||
-            camZ !== this._lastCamZ ||
-            camZoom !== this._lastCamZoom
+            cam?.position?.x !== this._lastCamX ||
+            cam?.position?.y !== this._lastCamY ||
+            cam?.position?.z !== this._lastCamZ ||
+            cam?.zoom !== this._lastCamZoom
           );
         }
 
@@ -435,16 +418,14 @@ export class RenderLoop {
         // Strict sync pins rendering to the PIXI tick rate, so adaptive FPS
         // skipping is disabled for correctness. Adaptive FPS still works in
         // non-strict mode.
-        const strictSync = _isStrictSyncEnabled();
+        const strictSync = this._isStrictSyncEnabled();
         const adaptiveFpsEnabled = strictSync ? false : (ms?.renderAdaptiveFpsEnabled !== false);
 
         // Strict sync lockstep: if there's an unconsumed PIXI token we MUST
         // render this rAF even if the camera hasn't moved. Pull the frame
         // coordinator once; bypassing fast-path/adaptive skips below.
-        const fc = strictSync ? (() => {
-          try { return ms?.frameCoordinator ?? null; } catch (_) { return null; }
-        })() : null;
-        const pendingPixiToken = (strictSync && fc?.hasPendingPixiToken?.() === true);
+        const fc = ms?.frameCoordinator;
+        const pendingPixiToken = strictSync && fc?.hasPendingPixiToken?.() === true;
         const idleFps = this._clampFps(ms?.renderIdleFps, this._idleFps, 5, 60);
         const activeFps = this._clampFps(ms?.renderActiveFps, this._activeFps, 5, 120);
         const continuousFps = this._clampFps(ms?.renderContinuousFps, this._continuousFps, 5, 120);
@@ -521,12 +502,8 @@ export class RenderLoop {
         // Safety: we only honour the hold for STRICT_HOLD_MAX_MS so a stale
         // flag can never permanently starve the compositor. When the cap
         // trips we let the compositor run to re-validate and clear the flag.
-        const holdFrame = strictSync
-          ? _readStrictHoldFrame()
-          : { active: false, reason: null, updatedAtMs: 0 };
-        const holdAgeMs = holdFrame.active
-          ? (now - (holdFrame.updatedAtMs || now))
-          : 0;
+        const holdFrame = strictSync ? this._getStrictHoldState() : this._strictHoldState;
+        const holdAgeMs = holdFrame.active ? (now - holdFrame.updatedAtMs) : 0;
         const holdExpired = holdFrame.active && holdAgeMs > STRICT_HOLD_MAX_MS;
         if (holdFrame.active && !holdExpired) {
           shouldRender = false;
@@ -626,22 +603,17 @@ export class RenderLoop {
             }
           }
 
-          // Refresh caches after rendering.
-          try {
-            if (typeof pixiPivotX === 'number') this._lastPixiPivotX = pixiPivotX;
-            if (typeof pixiPivotY === 'number') this._lastPixiPivotY = pixiPivotY;
-            if (typeof pixiZoom === 'number') this._lastPixiZoom = pixiZoom;
-          } catch (_) {
-          }
+          // Cache camera state natively
+          if (typeof pixiPivotX === 'number') this._lastPixiPivotX = pixiPivotX;
+          if (typeof pixiPivotY === 'number') this._lastPixiPivotY = pixiPivotY;
+          if (typeof pixiZoom === 'number') this._lastPixiZoom = pixiZoom;
 
-          // Fallback cache for non-Foundry environments.
-          try {
-            const cam = this.camera;
-            this._lastCamX = cam?.position?.x;
-            this._lastCamY = cam?.position?.y;
-            this._lastCamZ = cam?.position?.z;
-            this._lastCamZoom = cam?.zoom;
-          } catch (_) {
+          const cam = this.camera;
+          if (cam) {
+            this._lastCamX = cam.position.x;
+            this._lastCamY = cam.position.y;
+            this._lastCamZ = cam.position.z;
+            this._lastCamZoom = cam.zoom;
           }
         }
       } catch (error) {

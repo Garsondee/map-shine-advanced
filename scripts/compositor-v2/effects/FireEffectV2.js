@@ -132,24 +132,24 @@ export class FireEffectV2 {
     /** @type {boolean} Whether another rebuild should run after current one */
     this._rebuildQueued = false;
 
-    // Effect parameters — same defaults as V1 for visual parity.
+    // Effect parameters — fire-sparks defaults (map-scale flames + smoke).
     this.params = {
       enabled: true,
       globalFireRate: 20,
-      fireHeight: 66,
+      fireHeight: 600,
       fireSize: 18.0,
-      emberRate: 0.8,
-      windInfluence: 4.5,
-      fireSizeMin: 64,
-      fireSizeMax: 154,
-      fireLifeMin: 2.8,
-      fireLifeMax: 6,
+      emberRate: 5,
+      windInfluence: 3.9,
+      fireSizeMin: 107,
+      fireSizeMax: 156,
+      fireLifeMin: 5,
+      fireLifeMax: 5.45,
       fireSpinEnabled: true,
-      fireSpinSpeedMin: 0.2,
-      fireSpinSpeedMax: 1,
-      fireTemperature: 0,
+      fireSpinSpeedMin: 0,
+      fireSpinSpeedMax: 0.3,
+      fireTemperature: 0.9,
       flameTextureOpacity: 1,
-      flameTextureBrightness: 2.15,
+      flameTextureBrightness: 3,
       flameTextureScaleX: 1,
       flameTextureScaleY: 1,
       flameTextureOffsetX: 0,
@@ -158,65 +158,65 @@ export class FireEffectV2 {
       flameTextureFlipX: true,
       flameTextureFlipY: true,
       emberSizeMin: 5,
-      emberSizeMax: 17,
-      emberLifeMin: 6.6,
+      emberSizeMax: 10,
+      emberLifeMin: 4.8,
       emberLifeMax: 12,
-      fireUpdraft: 7.05,
-      emberUpdraft: 1.45,
-      fireCurlStrength: 1.95,
-      emberCurlStrength: 6.65,
+      fireUpdraft: 1.15,
+      emberUpdraft: 2.5,
+      fireCurlStrength: 0,
+      emberCurlStrength: 10,
       weatherPrecipKill: 0.5,
       weatherWindKill: 0.5,
       timeScale: 3,
       lightIntensity: 5,
-      indoorLifeScale: 0.7,
+      indoorLifeScale: 1,
       indoorTimeScale: 0.2,
-      flamePeakOpacity: 0.5,
-      coreEmission: 5,
+      flamePeakOpacity: 1,
+      coreEmission: 2.3,
       flameBrightnessFloor: 0.75,
-      emberEmission: 2,
-      emberPeakOpacity: 0.9,
+      emberEmission: 5,
+      emberPeakOpacity: 1,
       smokeEnabled: true,
-      smokeRatio: 1.7,
-      smokeOpacity: 0.4,
-      smokeColorWarmth: 0.59,
-      smokeColorBrightness: 0.52,
-      smokeDarknessResponse: 0.8,
+      smokeRatio: 3,
+      smokeOpacity: 1,
+      smokeColorWarmth: 1,
+      smokeColorBrightness: 0.46,
+      smokeDarknessResponse: 0,
       smokeSizeMin: 200,
       smokeSizeMax: 400,
       smokeSizeGrowth: 10,
       smokeSizeOverLife: 10,
-      smokeLifeMin: 10,
-      smokeLifeMax: 11,
-      smokeUpdraft: 1.1,
-      smokeTurbulence: 0.4,
-      smokeWindInfluence: 0.1,
-      indoorSmokeSuppression: 0,
+      smokeLifeMin: 8.2,
+      smokeLifeMax: 8.5,
+      smokeUpdraft: 14.5,
+      smokeTurbulence: 0,
+      smokeWindInfluence: 10,
+      indoorSmokeSuppression: 0.9,
       smokeAlphaStart: 0,
-      smokeAlphaPeak: 0.5,
+      smokeAlphaPeak: 0.75,
       smokeAlphaEnd: 1,
       // Gradient-over-lifespan: colour and emission tracks.
       // When non-null with ≥2 stops, the gradient overrides the legacy COOL/WARM blend.
       // Legacy warmth/brightness sliders remain in effect whenever gradient is null.
-      // Diffuse-like greys (matches legacy SMOKE_COLOR_* feel). Avoid fire-orange at t=0
-      // or smoke reads as a second additive flame layer despite NormalBlending.
       smokeColorGradient: [
-        { t: 0, r: 0.4, g: 0.35, b: 0.3 },
-        { t: 0.15, r: 0.38, g: 0.35, b: 0.31 },
-        { t: 0.45, r: 0.32, g: 0.3, b: 0.28 },
+        { t: 0, r: 0.9, g: 0.45, b: 0.1 },
+        { t: 0.1061011893408639, r: 0.44, g: 0.38, b: 0.32 },
+        { t: 0.24895833219800675, r: 0.36, g: 0.34, b: 0.32 },
         { t: 1, r: 0, g: 0, b: 0 },
       ],
       // Emission is added to diffuse smoke RGB then clamped to [0,1] (display-referred, no HDR).
-      // Defaults stay black unless the user adds tint stops.
       smokeEmissionGradient: [
         { t: 0, r: 0, g: 0, b: 0 },
+        { t: 0.09782565829710174, r: 1, g: 0.6197895136979354, b: 0 },
+        { t: 0.4961058700157523, r: 0, g: 0, b: 0 },
+        { t: 0.4961058700157523, r: 0, g: 0, b: 0 },
         { t: 1, r: 0, g: 0, b: 0 },
       ],
       heatDistortionEnabled: true,
-      heatDistortionIntensity: 0.05,
+      heatDistortionIntensity: 0.019,
       heatDistortionFrequency: 20.0,
       heatDistortionSpeed: 3.0,
-      heatDistortionEdgeSoftness: 1.0,
+      heatDistortionEdgeSoftness: 0.4,
     };
 
     log.debug('FireEffectV2 created');
@@ -274,22 +274,22 @@ export class FireEffectV2 {
       parameters: {
         enabled: { type: 'checkbox', label: 'Fire Enabled', default: true },
         globalFireRate: { type: 'slider', label: 'Global Intensity', min: 0.0, max: 20.0, step: 0.1, default: 20 },
-        fireHeight: { type: 'slider', label: 'Height', min: 1.0, max: 600.0, step: 1.0, default: 66 },
-        fireTemperature: { type: 'slider', label: 'Temperature', min: 0.0, max: 1.0, step: 0.05, default: 0 },
-        flamePeakOpacity: { type: 'slider', label: 'Peak Opacity', min: 0.0, max: 1.0, step: 0.01, default: 0.5 },
-        coreEmission: { type: 'slider', label: 'Core Emission (HDR)', min: 0.5, max: 5.0, step: 0.1, default: 5 },
+        fireHeight: { type: 'slider', label: 'Height', min: 1.0, max: 600.0, step: 1.0, default: 600 },
+        fireTemperature: { type: 'slider', label: 'Temperature', min: 0.0, max: 1.0, step: 0.05, default: 0.9 },
+        flamePeakOpacity: { type: 'slider', label: 'Peak Opacity', min: 0.0, max: 1.0, step: 0.01, default: 1 },
+        coreEmission: { type: 'slider', label: 'Core Emission (HDR)', min: 0.5, max: 5.0, step: 0.1, default: 2.3 },
         flameBrightnessFloor: { type: 'slider', label: 'Mask Brightness Floor', min: 0.0, max: 1.5, step: 0.01, default: 0.75 },
-        fireSizeMin: { type: 'slider', label: 'Size Min', min: 1.0, max: 150.0, step: 1.0, default: 64 },
-        fireSizeMax: { type: 'slider', label: 'Size Max', min: 1.0, max: 200.0, step: 1.0, default: 154 },
-        fireLifeMin: { type: 'slider', label: 'Life Min (s)', min: 0.1, max: 6.0, step: 0.05, default: 2.8 },
-        fireLifeMax: { type: 'slider', label: 'Life Max (s)', min: 0.1, max: 6.0, step: 0.05, default: 6 },
+        fireSizeMin: { type: 'slider', label: 'Size Min', min: 1.0, max: 150.0, step: 1.0, default: 107 },
+        fireSizeMax: { type: 'slider', label: 'Size Max', min: 1.0, max: 200.0, step: 1.0, default: 156 },
+        fireLifeMin: { type: 'slider', label: 'Life Min (s)', min: 0.1, max: 6.0, step: 0.05, default: 5 },
+        fireLifeMax: { type: 'slider', label: 'Life Max (s)', min: 0.1, max: 6.0, step: 0.05, default: 5.45 },
         fireSpinEnabled: { type: 'checkbox', label: 'Spin Enabled', default: true },
-        fireSpinSpeedMin: { type: 'slider', label: 'Spin Speed Min', min: 0.0, max: 50.0, step: 0.1, default: 0.2 },
-        fireSpinSpeedMax: { type: 'slider', label: 'Spin Speed Max', min: 0.0, max: 50.0, step: 0.1, default: 1 },
-        fireUpdraft: { type: 'slider', label: 'Updraft', min: 0.0, max: 12.0, step: 0.05, default: 7.05 },
-        fireCurlStrength: { type: 'slider', label: 'Curl Strength', min: 0.0, max: 12.0, step: 0.05, default: 1.95 },
+        fireSpinSpeedMin: { type: 'slider', label: 'Spin Speed Min', min: 0.0, max: 50.0, step: 0.1, default: 0 },
+        fireSpinSpeedMax: { type: 'slider', label: 'Spin Speed Max', min: 0.0, max: 50.0, step: 0.1, default: 0.3 },
+        fireUpdraft: { type: 'slider', label: 'Updraft', min: 0.0, max: 12.0, step: 0.05, default: 1.15 },
+        fireCurlStrength: { type: 'slider', label: 'Curl Strength', min: 0.0, max: 12.0, step: 0.05, default: 0 },
         flameTextureOpacity: { type: 'slider', label: 'Opacity', min: 0.0, max: 1.0, step: 0.01, default: 1 },
-        flameTextureBrightness: { type: 'slider', label: 'Brightness', min: 0.0, max: 3.0, step: 0.01, default: 2.15 },
+        flameTextureBrightness: { type: 'slider', label: 'Brightness', min: 0.0, max: 3.0, step: 0.01, default: 3 },
         flameTextureScaleX: { type: 'slider', label: 'Scale X', min: 0.05, max: 4.0, step: 0.05, default: 1.0 },
         flameTextureScaleY: { type: 'slider', label: 'Scale Y', min: 0.05, max: 4.0, step: 0.05, default: 1.0 },
         flameTextureOffsetX: { type: 'slider', label: 'Offset X', min: -1.0, max: 1.0, step: 0.01, default: 0.0 },
@@ -297,31 +297,31 @@ export class FireEffectV2 {
         flameTextureRotation: { type: 'slider', label: 'Rotation (rad)', min: -3.14, max: 3.14, step: 0.01, default: 0.0 },
         flameTextureFlipX: { type: 'checkbox', label: 'Flip X', default: true },
         flameTextureFlipY: { type: 'checkbox', label: 'Flip Y', default: true },
-        emberRate: { type: 'slider', label: 'Density', min: 0.0, max: 5.0, step: 0.1, default: 0.8 },
-        emberEmission: { type: 'slider', label: 'Emission (HDR)', min: 0.5, max: 5.0, step: 0.1, default: 2 },
-        emberPeakOpacity: { type: 'slider', label: 'Peak Opacity', min: 0.0, max: 1.0, step: 0.01, default: 0.9 },
+        emberRate: { type: 'slider', label: 'Density', min: 0.0, max: 5.0, step: 0.1, default: 5 },
+        emberEmission: { type: 'slider', label: 'Emission (HDR)', min: 0.5, max: 5.0, step: 0.1, default: 5 },
+        emberPeakOpacity: { type: 'slider', label: 'Peak Opacity', min: 0.0, max: 1.0, step: 0.01, default: 1 },
         emberSizeMin: { type: 'slider', label: 'Size Min', min: 1.0, max: 40.0, step: 1.0, default: 5 },
-        emberSizeMax: { type: 'slider', label: 'Size Max', min: 1.0, max: 60.0, step: 1.0, default: 17 },
-        emberLifeMin: { type: 'slider', label: 'Life Min (s)', min: 0.1, max: 8.0, step: 0.1, default: 6.6 },
+        emberSizeMax: { type: 'slider', label: 'Size Max', min: 1.0, max: 60.0, step: 1.0, default: 10 },
+        emberLifeMin: { type: 'slider', label: 'Life Min (s)', min: 0.1, max: 8.0, step: 0.1, default: 4.8 },
         emberLifeMax: { type: 'slider', label: 'Life Max (s)', min: 0.1, max: 12.0, step: 0.1, default: 12.0 },
-        emberUpdraft: { type: 'slider', label: 'Updraft', min: 0.0, max: 12.0, step: 0.05, default: 1.45 },
-        emberCurlStrength: { type: 'slider', label: 'Curl Strength', min: 0.0, max: 12.0, step: 0.05, default: 6.65 },
+        emberUpdraft: { type: 'slider', label: 'Updraft', min: 0.0, max: 12.0, step: 0.05, default: 2.5 },
+        emberCurlStrength: { type: 'slider', label: 'Curl Strength', min: 0.0, max: 12.0, step: 0.05, default: 10 },
         smokeEnabled: { type: 'checkbox', label: 'Enable Smoke', default: true },
-        smokeRatio: { type: 'slider', label: 'Emission Density', min: 0.0, max: 3.0, step: 0.05, default: 1.7 },
-        smokeOpacity: { type: 'slider', label: 'Peak Opacity', min: 0.0, max: 1.0, step: 0.01, default: 0.4 },
-        indoorSmokeSuppression: { type: 'slider', label: 'Indoor Smoke Suppression', min: 0.0, max: 1.0, step: 0.01, default: 0 },
+        smokeRatio: { type: 'slider', label: 'Emission Density', min: 0.0, max: 3.0, step: 0.05, default: 3 },
+        smokeOpacity: { type: 'slider', label: 'Peak Opacity', min: 0.0, max: 1.0, step: 0.01, default: 1 },
+        indoorSmokeSuppression: { type: 'slider', label: 'Indoor Smoke Suppression', min: 0.0, max: 1.0, step: 0.01, default: 0.9 },
         // Legacy colour controls — used when smokeColorGradient is null.
-        smokeColorWarmth: { type: 'slider', label: 'Color Warmth', min: 0.0, max: 1.0, step: 0.01, default: 0.59 },
-        smokeColorBrightness: { type: 'slider', label: 'Brightness', min: 0.05, max: 2.0, step: 0.01, default: 0.52 },
-        smokeDarknessResponse: { type: 'slider', label: 'Darkness Response', min: 0.0, max: 1.0, step: 0.01, default: 0.8 },
+        smokeColorWarmth: { type: 'slider', label: 'Color Warmth', min: 0.0, max: 1.0, step: 0.01, default: 1 },
+        smokeColorBrightness: { type: 'slider', label: 'Brightness', min: 0.05, max: 2.0, step: 0.01, default: 0.46 },
+        smokeDarknessResponse: { type: 'slider', label: 'Darkness Response', min: 0.0, max: 1.0, step: 0.01, default: 0 },
         // Colour-over-life gradient. When set, overrides the warmth/brightness sliders.
         smokeColorGradient: {
           type: 'gradient',
           label: 'Colour Over Life',
           default: [
-            { t: 0, r: 0.4, g: 0.35, b: 0.3 },
-            { t: 0.15, r: 0.38, g: 0.35, b: 0.31 },
-            { t: 0.45, r: 0.32, g: 0.3, b: 0.28 },
+            { t: 0, r: 0.9, g: 0.45, b: 0.1 },
+            { t: 0.1061011893408639, r: 0.44, g: 0.38, b: 0.32 },
+            { t: 0.24895833219800675, r: 0.36, g: 0.34, b: 0.32 },
             { t: 1, r: 0, g: 0, b: 0 },
           ]
         },
@@ -331,6 +331,9 @@ export class FireEffectV2 {
           label: 'Emission tint over life',
           default: [
             { t: 0, r: 0, g: 0, b: 0 },
+            { t: 0.09782565829710174, r: 1, g: 0.6197895136979354, b: 0 },
+            { t: 0.4961058700157523, r: 0, g: 0, b: 0 },
+            { t: 0.4961058700157523, r: 0, g: 0, b: 0 },
             { t: 1, r: 0, g: 0, b: 0 },
           ]
         },
@@ -338,26 +341,26 @@ export class FireEffectV2 {
         smokeSizeMax: { type: 'slider', label: 'Size Max', min: 1.0, max: 400.0, step: 1.0, default: 400 },
         smokeSizeGrowth: { type: 'slider', label: 'Size Growth (Legacy)', min: 1.0, max: 10.0, step: 0.1, default: 10, hidden: true },
         smokeSizeOverLife: { type: 'slider', label: 'Size Over Life', min: 1.0, max: 10.0, step: 0.1, default: 10 },
-        smokeLifeMin: { type: 'slider', label: 'Life Min (s)', min: 0.1, max: 10.0, step: 0.1, default: 10 },
-        smokeLifeMax: { type: 'slider', label: 'Life Max (s)', min: 0.1, max: 15.0, step: 0.1, default: 11 },
-        smokeUpdraft: { type: 'slider', label: 'Updraft', min: 0.0, max: 20.0, step: 0.1, default: 1.1 },
-        smokeTurbulence: { type: 'slider', label: 'Turbulence', min: 0.0, max: 5.0, step: 0.05, default: 0.4 },
-        smokeWindInfluence: { type: 'slider', label: 'Wind Influence', min: 0.0, max: 10.0, step: 0.1, default: 0.1 },
+        smokeLifeMin: { type: 'slider', label: 'Life Min (s)', min: 0.1, max: 10.0, step: 0.1, default: 8.2 },
+        smokeLifeMax: { type: 'slider', label: 'Life Max (s)', min: 0.1, max: 15.0, step: 0.1, default: 8.5 },
+        smokeUpdraft: { type: 'slider', label: 'Updraft', min: 0.0, max: 20.0, step: 0.1, default: 14.5 },
+        smokeTurbulence: { type: 'slider', label: 'Turbulence', min: 0.0, max: 5.0, step: 0.05, default: 0 },
+        smokeWindInfluence: { type: 'slider', label: 'Wind Influence', min: 0.0, max: 10.0, step: 0.1, default: 10 },
         smokeAlphaStart: { type: 'slider', label: 'Opacity ramp from (life %)', min: 0.0, max: 1.0, step: 0.01, default: 0 },
-        smokeAlphaPeak: { type: 'slider', label: 'Peak opacity at (life %)', min: 0.0, max: 1.0, step: 0.01, default: 0.5 },
+        smokeAlphaPeak: { type: 'slider', label: 'Peak opacity at (life %)', min: 0.0, max: 1.0, step: 0.01, default: 0.75 },
         smokeAlphaEnd: { type: 'slider', label: 'Opacity reaches zero at (life %)', min: 0.0, max: 1.0, step: 0.01, default: 1.0 },
-        windInfluence: { type: 'slider', label: 'Wind Influence', min: 0.0, max: 5.0, step: 0.1, default: 4.5 },
+        windInfluence: { type: 'slider', label: 'Wind Influence', min: 0.0, max: 5.0, step: 0.1, default: 3.9 },
         timeScale: { type: 'slider', label: 'Time Scale', min: 0.1, max: 3.0, step: 0.05, default: 3.0 },
         lightIntensity: { type: 'slider', label: 'Light Intensity', min: 0.0, max: 5.0, step: 0.1, default: 5.0 },
-        indoorLifeScale: { type: 'slider', label: 'Indoor Life Scale', min: 0.05, max: 1.0, step: 0.05, default: 0.7 },
+        indoorLifeScale: { type: 'slider', label: 'Indoor Life Scale', min: 0.05, max: 1.0, step: 0.05, default: 1 },
         indoorTimeScale: { type: 'slider', label: 'Indoor Time Scale', min: 0.05, max: 1.0, step: 0.05, default: 0.2 },
         weatherPrecipKill: { type: 'slider', label: 'Rain Kill Strength', min: 0.0, max: 5.0, step: 0.05, default: 0.5 },
         weatherWindKill: { type: 'slider', label: 'Wind Kill Strength', min: 0.0, max: 5.0, step: 0.05, default: 0.5 },
         heatDistortionEnabled: { type: 'checkbox', label: 'Enable Heat Haze', default: true },
-        heatDistortionIntensity: { type: 'slider', label: 'Intensity', min: 0.0, max: 0.05, step: 0.001, default: 0.05 },
+        heatDistortionIntensity: { type: 'slider', label: 'Intensity', min: 0.0, max: 0.05, step: 0.001, default: 0.019 },
         heatDistortionFrequency: { type: 'slider', label: 'Frequency', min: 1.0, max: 20.0, step: 0.5, default: 20.0 },
         heatDistortionSpeed: { type: 'slider', label: 'Speed', min: 0.1, max: 3.0, step: 0.1, default: 3.0 },
-        heatDistortionEdgeSoftness: { type: 'slider', label: 'Edge Softness', min: 0.4, max: 3.0, step: 0.05, default: 1.0 }
+        heatDistortionEdgeSoftness: { type: 'slider', label: 'Edge Softness', min: 0.4, max: 3.0, step: 0.05, default: 0.4 }
       }
     };
   }
@@ -1185,16 +1188,14 @@ export class FireEffectV2 {
         // Updraft.
         const ud = sys.userData.updraftForce;
         if (ud?.magnitude) ud.magnitude.value = (p.fireHeight ?? 10) * 0.125 * (p.fireUpdraft ?? 1.0);
-        // Curl turbulence.
+        // Curl turbulence (CurlNoiseField / FixedCurlNoiseField use `strength`, not `force`).
         const turb = sys.userData.turbulence;
         const baseCurl = sys.userData.baseCurlStrength;
-        if (turb?.force && baseCurl) {
+        if (turb?.strength && baseCurl) {
           const cs = p.fireCurlStrength ?? 1.0;
-          turb.force.set(baseCurl.x * cs, baseCurl.y * cs, baseCurl.z * cs);
+          turb.strength.set(baseCurl.x * cs, baseCurl.y * cs, baseCurl.z * cs);
         }
-        // Wind influence.
-        const wf = sys.userData.windForce;
-        if (wf && sys.userData) sys.userData.windInfluence = p.windInfluence ?? 1.0;
+        if (sys.userData) sys.userData.windInfluence = p.windInfluence ?? 1.0;
       }
 
       // Ember systems.
@@ -1209,10 +1210,11 @@ export class FireEffectV2 {
         if (ud?.magnitude) ud.magnitude.value = (p.fireHeight ?? 10) * 0.4 * (p.emberUpdraft ?? 1.0);
         const turb = sys.userData.turbulence;
         const baseCurl = sys.userData.baseCurlStrength;
-        if (turb?.force && baseCurl) {
+        if (turb?.strength && baseCurl) {
           const cs = p.emberCurlStrength ?? 1.0;
-          turb.force.set(baseCurl.x * cs, baseCurl.y * cs, baseCurl.z * cs);
+          turb.strength.set(baseCurl.x * cs, baseCurl.y * cs, baseCurl.z * cs);
         }
+        if (sys.userData) sys.userData.windInfluence = p.windInfluence ?? 1.0;
       }
 
       // Smoke systems.
@@ -1228,9 +1230,9 @@ export class FireEffectV2 {
         if (ud?.magnitude) ud.magnitude.value = Math.max(0.0, p.smokeUpdraft ?? 2.5);
         const turb = sys.userData.turbulence;
         const baseCurl = sys.userData.baseCurlStrength;
-        if (turb?.force && baseCurl) {
+        if (turb?.strength && baseCurl) {
           const cs = Math.max(0.0, p.smokeTurbulence ?? 1.0);
-          turb.force.set(baseCurl.x * cs, baseCurl.y * cs, baseCurl.z * cs);
+          turb.strength.set(baseCurl.x * cs, baseCurl.y * cs, baseCurl.z * cs);
         }
         if (sys.userData) sys.userData.windInfluence = p.smokeWindInfluence ?? 1.0;
       }

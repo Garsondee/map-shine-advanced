@@ -36,6 +36,9 @@ export class ResourceRegistry {
     /** @type {number} - Counter for auto-generated IDs */
     this._idCounter = 0;
 
+    /** @type {WeakMap<Object, string>} - Resource object to ID mapping for duplicate detection */
+    this.resourceToId = new WeakMap();
+
     log.info('ResourceRegistry created');
   }
 
@@ -53,6 +56,15 @@ export class ResourceRegistry {
       return null;
     }
 
+    const existingId = this.resourceToId.get(resource);
+    if (existingId) {
+      const existing = this.resources.get(existingId);
+      if (existing && !existing.disposed) {
+        log.debug(`register: resource already registered as ${existingId}`);
+        return existingId;
+      }
+    }
+
     const id = `res_${++this._idCounter}`;
     const entry = {
       id,
@@ -65,6 +77,8 @@ export class ResourceRegistry {
     };
 
     this.resources.set(id, entry);
+
+    this.resourceToId.set(resource, id);
 
     // Track by owner for bulk disposal
     if (owner) {
@@ -83,6 +97,27 @@ export class ResourceRegistry {
    * @param {string} resourceId - Resource ID to dispose
    * @returns {boolean} Whether disposal succeeded
    */
+  _untrack(entry) {
+    if (!entry) return;
+
+    this.resources.delete(entry.id);
+
+    try {
+      this.resourceToId.delete(entry.resource);
+    } catch (e) {
+    }
+
+    if (entry.owner) {
+      const ownerSet = this.ownerMap.get(entry.owner);
+      if (ownerSet) {
+        ownerSet.delete(entry.id);
+        if (ownerSet.size === 0) {
+          this.ownerMap.delete(entry.owner);
+        }
+      }
+    }
+  }
+
   dispose(resourceId) {
     const entry = this.resources.get(resourceId);
     if (!entry) {
@@ -91,7 +126,7 @@ export class ResourceRegistry {
     }
 
     if (entry.disposed) {
-      log.debug(`dispose: resource already disposed: ${resourceId}`);
+      this._untrack(entry);
       return true;
     }
 
@@ -105,10 +140,12 @@ export class ResourceRegistry {
 
       entry.disposed = true;
       log.debug(`Disposed ${type}: ${name}`);
+      this._untrack(entry);
       return true;
     } catch (e) {
       log.error(`Error disposing resource ${resourceId}:`, e);
       entry.disposed = true;
+      this._untrack(entry);
       return false;
     }
   }
@@ -126,7 +163,7 @@ export class ResourceRegistry {
     }
 
     let count = 0;
-    for (const id of resourceIds) {
+    for (const id of Array.from(resourceIds)) {
       if (this.dispose(id)) {
         count++;
       }
@@ -143,12 +180,18 @@ export class ResourceRegistry {
    * @returns {number} Number of resources disposed
    */
   disposeByType(type) {
-    let count = 0;
+    const ids = [];
+
     for (const [id, entry] of this.resources.entries()) {
       if (entry.type === type && !entry.disposed) {
-        if (this.dispose(id)) {
-          count++;
-        }
+        ids.push(id);
+      }
+    }
+
+    let count = 0;
+    for (const id of ids) {
+      if (this.dispose(id)) {
+        count++;
       }
     }
 
@@ -162,7 +205,8 @@ export class ResourceRegistry {
    */
   disposeAll() {
     let count = 0;
-    for (const id of this.resources.keys()) {
+
+    for (const id of Array.from(this.resources.keys())) {
       if (this.dispose(id)) {
         count++;
       }
@@ -254,6 +298,7 @@ export class ResourceRegistry {
   clear() {
     this.resources.clear();
     this.ownerMap.clear();
+    this.resourceToId = new WeakMap();
     log.warn('ResourceRegistry cleared (resources NOT disposed)');
   }
 }

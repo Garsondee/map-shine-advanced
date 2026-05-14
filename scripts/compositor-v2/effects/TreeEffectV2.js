@@ -1564,9 +1564,18 @@ export class TreeEffectV2 {
           float shadowA = (shadowWeight > 0.0) ? (shadowAccum / shadowWeight) : 0.0;
           shadowA *= clamp(uShadowOpacity, 0.0, 1.0) * uIntensity * edgeFade;
 
+          float hf = clamp(uHoverFade, 0.0, 1.0);
+
           float mainAlpha = texA * uIntensity;
-          float shadowOnlyAlpha = shadowA * (1.0 - clamp(mainAlpha, 0.0, 1.0));
-          float finalAlpha = clamp(mainAlpha + shadowOnlyAlpha, 0.0, 1.0);
+
+          // This is the canopy alpha after hover fade.
+          // The shadow should be masked by this, not by the original full-strength tree.
+          float visibleMainAlpha = mainAlpha * hf;
+
+          // As the canopy disappears, the shadow is gradually allowed to appear underneath it.
+          float shadowOnlyAlpha = shadowA * (1.0 - clamp(visibleMainAlpha, 0.0, 1.0));
+
+          float finalAlpha = clamp(visibleMainAlpha + shadowOnlyAlpha, 0.0, 1.0);
 
           // Match weather masking: suppress only when blocker exists and its visible
           // alpha is hidden/fading (rb * (1-rv)), not while the roof/tree is visible.
@@ -1592,13 +1601,12 @@ export class TreeEffectV2 {
                         + abs(uSaturation - 1.0) + abs(uTemperature) + abs(uTint);
           vec3 c = treeSample.rgb;
           if (ccDelta > 0.0001) c = applyCC(c);
+
+          // Premultiplied canopy RGB fades with the canopy.
+          // Shadow contributes black via alpha, so it does not need RGB.
           c *= texA;
-          gl_FragColor = vec4(c * uIntensity, finalAlpha);
-          // Hover-hide: scale premultiplied RGB and alpha together (do not fold hf into
-          // mainAlpha — that inflates shadowOnlyAlpha and causes a dark fringe).
-          float hf = clamp(uHoverFade, 0.0, 1.0);
-          gl_FragColor.rgb *= hf;
-          gl_FragColor.a *= hf;
+
+          gl_FragColor = vec4(c * uIntensity * hf, finalAlpha);
         }
       `,
       transparent: true,

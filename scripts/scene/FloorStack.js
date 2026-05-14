@@ -39,7 +39,8 @@ const DEFAULT_FALLBACK_TOP = 10;
  * @typedef {object} FloorBand
  * @property {number} index        - Floor index (0 = ground, ascending)
  * @property {number} elevationMin - Bottom of this band's elevation range (inclusive)
- * @property {number} elevationMax - Top of this band's elevation range (inclusive)
+ * @property {number} elevationMax - Top of this band's elevation range;
+ *   treated as exclusive except on the highest floor.
  * @property {string} key          - Stable string key: `floor_${index}_${elevationMin}`
  * @property {string} compositorKey - Key matching GpuSceneMaskCompositor: `"${bottom}:${top}"`
  * @property {boolean} isActive    - Whether this is the player's current floor
@@ -82,6 +83,20 @@ export class FloorStack {
      */
     this._savedVisibility = new Map();
 
+    /**
+     * Explicit flag tracking whether we are currently capturing visibility states.
+     * This is more robust than inferring state from _savedVisibility.size.
+     * @type {boolean}
+     */
+    this._visibilityCaptureActive = false;
+
+    /**
+     * Cached result of hasV14NativeLevels() for the current scene.
+     * Avoids repeated calls in hot loops during per-floor visibility toggling.
+     * @type {boolean}
+     */
+    this._sceneHasV14NativeLevels = false;
+
     log.debug('FloorStack created');
   }
 
@@ -114,6 +129,14 @@ export class FloorStack {
    *   Used to identify which floor is active after rebuilding.
    */
   rebuildFloors(sceneBands, activeLevelContext) {
+    // Restore visibility before rebuilding to prevent objects being left hidden
+    // if teardown/rebuild happens mid floor-loop.
+    this.restoreVisibility();
+
+    // Cache the V14 native levels check for this scene to avoid repeated calls
+    // in hot loops during per-floor visibility toggling.
+    this._sceneHasV14NativeLevels = hasV14NativeLevels(globalThis.canvas?.scene);
+
     if (sceneBands?.length > 0) {
       // Build a FloorBand for each Levels scene band, sorted bottom-to-top.
       const sorted = [...sceneBands].sort((a, b) => Number(a.bottom) - Number(b.bottom));
@@ -195,7 +218,14 @@ export class FloorStack {
    */
   setActiveFloor(floorIndex) {
     if (this._floors.length === 0) return;
-    const clamped = Math.max(0, Math.min(this._floors.length - 1, floorIndex));
+
+    const n = Number(floorIndex);
+    if (!Number.isFinite(n)) return;
+
+    const clamped = Math.max(
+      0,
+      Math.min(this._floors.length - 1, Math.trunc(n))
+    );
 
     if (clamped === this._activeFloorIndex) return;
 
@@ -231,7 +261,10 @@ export class FloorStack {
     const floor = this._floors[floorIndex];
     if (!floor) return;
 
-    const isFirstFloor = this._savedVisibility.size === 0;
+    const isFirstFloor = !this._visibilityCaptureActive;
+    if (isFirstFloor) {
+      this._visibilityCaptureActive = true;
+    }
 
     // ── Base Plane (scene background) ─────────────────────────────────────────
     // The basePlaneMesh is the scene background image. It belongs to the ground
@@ -242,9 +275,11 @@ export class FloorStack {
     const basePlane = window.MapShine?.sceneComposer?.basePlaneMesh;
     if (basePlane) {
       if (isFirstFloor) {
-        this._savedVisibility.set(basePlane, basePlane.visible);
+        this._saveVisibility(basePlane);
       }
-      const origVisible = isFirstFloor ? basePlane.visible : (this._savedVisibility.get(basePlane) ?? basePlane.visible);
+      const origVisible = this._savedVisibility.has(basePlane)
+        ? this._savedVisibility.get(basePlane)
+        : basePlane.visible;
       basePlane.visible = origVisible && (floorIndex === 0);
     }
 
@@ -254,15 +289,13 @@ export class FloorStack {
       for (const { sprite, tileDoc } of tileSprites.values()) {
         if (!sprite) continue;
 
-        // Save original visibility on the first floor pass only.
         if (isFirstFloor) {
-          this._savedVisibility.set(sprite, sprite.visible);
+          this._saveVisibility(sprite);
         }
 
-        // Only show the sprite if it was originally visible AND belongs to
-        // this floor. An originally-hidden sprite (e.g., Levels-hidden,
-        // GM-hidden) stays hidden regardless of floor.
-        const origVisible = isFirstFloor ? sprite.visible : (this._savedVisibility.get(sprite) ?? sprite.visible);
+        const origVisible = this._savedVisibility.has(sprite)
+          ? this._savedVisibility.get(sprite)
+          : sprite.visible;
         sprite.visible = origVisible && this._tileIsOnFloor(tileDoc, floor);
       }
     }
@@ -274,10 +307,12 @@ export class FloorStack {
         if (!sprite) continue;
 
         if (isFirstFloor) {
-          this._savedVisibility.set(sprite, sprite.visible);
+          this._saveVisibility(sprite);
         }
 
-        const origVisible = isFirstFloor ? sprite.visible : (this._savedVisibility.get(sprite) ?? sprite.visible);
+        const origVisible = this._savedVisibility.has(sprite)
+          ? this._savedVisibility.get(sprite)
+          : sprite.visible;
         sprite.visible = origVisible && this._tokenIsOnFloor(tokenDoc, floor);
       }
     }
@@ -296,6 +331,7 @@ export class FloorStack {
       obj.visible = visible;
     }
     this._savedVisibility.clear();
+    this._visibilityCaptureActive = false;
   }
 
   // ── Lifecycle ────────────────────────────────────────────────────────────
@@ -304,14 +340,32 @@ export class FloorStack {
    * Release all references. Call when the scene is torn down.
    */
   dispose() {
+    // Restore visibility before disposing to prevent objects being left hidden
+    // if teardown happens mid floor-loop.
+    this.restoreVisibility();
+
     this._tileManager = null;
     this._tokenManager = null;
     this._floors = [];
+    this._activeFloorIndex = 0;
     this._savedVisibility.clear();
     log.debug('FloorStack disposed');
   }
 
   // ── Private Helpers ──────────────────────────────────────────────────────
+
+  /**
+   * Save visibility state for an object, but only if not already saved.
+   * This prevents accidental overwrites if the same object appears twice
+   * during the first floor pass.
+   * @param {import('three').Object3D} obj
+   * @private
+   */
+  _saveVisibility(obj) {
+    if (!this._savedVisibility.has(obj)) {
+      this._savedVisibility.set(obj, obj.visible);
+    }
+  }
 
   /**
    * Determine whether a tile belongs to the given floor band.
@@ -335,8 +389,7 @@ export class FloorStack {
       return true;
     }
 
-    const scene = globalThis.canvas?.scene;
-    if (floor.levelId && hasV14NativeLevels(scene)) {
+    if (floor.levelId && this._sceneHasV14NativeLevels) {
       const td = tileDoc?.document ?? tileDoc;
       if (!td) return false;
       return isDocMemberOfV14LevelSet(td, floor.levelId);
@@ -347,7 +400,13 @@ export class FloorStack {
       const flags = readTileLevelsFlags(tileDoc);
       const tileBottom = Number(flags.rangeBottom);
       const tileTop = Number(flags.rangeTop);
-      return rangesOverlap(tileBottom, tileTop, floor.elevationMin, floor.elevationMax);
+
+      // Only use the explicit Levels range if both endpoints are usable.
+      // Fall through to elevation-based fallback if flags are malformed.
+      if (!Number.isNaN(tileBottom) && !Number.isNaN(tileTop)) {
+        return rangesOverlap(tileBottom, tileTop, floor.elevationMin, floor.elevationMax);
+      }
+      // Fall through to elevation-based fallback if flags are malformed.
     }
 
     // No Levels range: use tile's elevation to find its floor.
@@ -373,8 +432,7 @@ export class FloorStack {
       return true;
     }
 
-    const scene = globalThis.canvas?.scene;
-    if (floor.levelId && hasV14NativeLevels(scene)) {
+    if (floor.levelId && this._sceneHasV14NativeLevels) {
       const td = tokenDoc?.document ?? tokenDoc;
       if (!td) return false;
       // isDocMemberOfV14LevelSet checks td.level (singular) for tokens and
@@ -403,24 +461,25 @@ export class FloorStack {
 
     const ctxBottom = Number(context.bottom);
     const ctxTop = Number(context.top);
-
-    // Find the floor band that best matches the context's elevation range.
-    // Prefer exact match, then first band that contains the context midpoint.
-    const mid = (ctxBottom + ctxTop) / 2;
+    const hasFiniteTop = Number.isFinite(ctxTop);
+    const mid = hasFiniteTop ? (ctxBottom + ctxTop) / 2 : ctxBottom;
 
     let bestIdx = 0;
+    let foundMidMatch = false;
+
     for (let i = 0; i < this._floors.length; i++) {
       const f = this._floors[i];
-      if (f.elevationMin === ctxBottom && f.elevationMax === ctxTop) {
-        return i; // Exact match
+
+      if (hasFiniteTop && f.elevationMin === ctxBottom && f.elevationMax === ctxTop) {
+        return i;
       }
-      // If we haven't found an exact match, check if mid is within bounds.
-      // Ignore infinity bounds for the mid check to avoid jumping to a
-      // "catch-all" floor if a tighter floor contains the center.
-      if (mid >= f.elevationMin && mid <= f.elevationMax) {
+
+      if (!foundMidMatch && mid >= f.elevationMin && mid <= f.elevationMax) {
         bestIdx = i;
+        foundMidMatch = true;
       }
     }
+
     return bestIdx;
   }
 }

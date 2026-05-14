@@ -76,10 +76,7 @@
  * @module compositor-v2/SceneRectScissor
  */
 
-import { createLogger } from '../core/log.js';
 import { getGlobalFrameState } from '../core/frame-state.js';
-
-const log = createLogger('SceneRectScissor');
 
 /** Treat anything < 1 px as no scissor. */
 const MIN_SCISSOR_PX = 1;
@@ -143,8 +140,16 @@ function readSceneGeometryForScissor() {
       const worldH = Number(fd.height);
       const worldW = Number(fd.width);
       if (
-        Number.isFinite(sceneW) && Number.isFinite(sceneH)
-        && sceneW >= MIN_SCISSOR_PX && sceneH >= MIN_SCISSOR_PX
+        Number.isFinite(sceneX) &&
+        Number.isFinite(sceneY) &&
+        Number.isFinite(sceneW) &&
+        Number.isFinite(sceneH) &&
+        Number.isFinite(worldH) &&
+        Number.isFinite(worldW) &&
+        sceneW >= MIN_SCISSOR_PX &&
+        sceneH >= MIN_SCISSOR_PX &&
+        worldH > 0 &&
+        worldW > 0
       ) {
         return { sceneX, sceneY, sceneW, sceneH, worldHeight: worldH, worldWidth: worldW };
       }
@@ -237,9 +242,6 @@ function foundrySceneRectToDrawingBufferScissor(sr, bufW, bufH) {
 function worldSceneRectToScissorPixels(THREE, camera, geom, groundZ, bufW, bufH, corners) {
   if (!THREE || !camera || !geom || !corners || corners.length < 4) return null;
 
-  camera.updateProjectionMatrix();
-  camera.updateMatrixWorld(true);
-
   const wh = geom.worldHeight;
   const gx = geom.sceneX;
   const gy = geom.sceneY;
@@ -262,11 +264,7 @@ function worldSceneRectToScissorPixels(THREE, camera, geom, groundZ, bufW, bufH,
 
   for (let i = 0; i < 4; i++) {
     const v = corners[i];
-    try {
-      v.project(camera);
-    } catch (_) {
-      continue;
-    }
+    v.project(camera);
     if (!Number.isFinite(v.x) || !Number.isFinite(v.y) || !Number.isFinite(v.z)) continue;
     if (v.z < -1 || v.z > 1) continue;
 
@@ -336,12 +334,28 @@ export class SceneRectScissor {
     const THREE = window.THREE;
     if (!THREE || !renderer) {
       this.valid = false;
+      this._publishInvalid('noRendererOrThree');
       return false;
+    }
+
+    // Update camera matrices BEFORE building hash to avoid stale cache.
+    if (camera) {
+      try {
+        if (typeof camera.updateProjectionMatrix === 'function') {
+          camera.updateProjectionMatrix();
+        }
+        if (typeof camera.updateMatrixWorld === 'function') {
+          camera.updateMatrixWorld();
+        }
+      } catch (_) {
+        // Projection path can still fail and fall back safely.
+      }
     }
 
     const geom = readSceneGeometryForScissor();
     if (!geom) {
       this.valid = false;
+      this._publishInvalid('noGeometry');
       return false;
     }
 
@@ -350,8 +364,6 @@ export class SceneRectScissor {
     // `Vector3.project` maps linearly to that same logical width/height.
     let bufW = 0;
     let bufH = 0;
-    let drawBufW = 0;
-    let drawBufH = 0;
     try {
       const v2 = (this._tmpRendererSize ??= new THREE.Vector2());
       if (typeof renderer.getSize === 'function') {
@@ -359,17 +371,13 @@ export class SceneRectScissor {
         bufW = Math.max(0, Math.floor(v2.x || 0));
         bufH = Math.max(0, Math.floor(v2.y || 0));
       }
-      if (typeof renderer.getDrawingBufferSize === 'function') {
-        renderer.getDrawingBufferSize(v2);
-        drawBufW = Math.max(0, Math.floor(v2.x || 0));
-        drawBufH = Math.max(0, Math.floor(v2.y || 0));
-      }
     } catch (_) {
       bufW = 0;
       bufH = 0;
     }
     if (bufW < MIN_SCISSOR_PX || bufH < MIN_SCISSOR_PX) {
       this.valid = false;
+      this._publishInvalid('invalidRendererSize');
       return false;
     }
 
@@ -411,10 +419,19 @@ export class SceneRectScissor {
     if (!raw) {
       this.valid = false;
       this._lastHash = hash;
+      this._publishInvalid('noRawScissor');
       return false;
     }
 
     const { x, y, w, h } = raw;
+
+    // Skip scissor if it covers the full renderer (no benefit, adds state churn).
+    if (x <= 0 && y <= 0 && w >= bufW && h >= bufH) {
+      this.valid = false;
+      this._lastHash = hash;
+      this._publishInvalid('fullScreenNoScissor');
+      return false;
+    }
 
     this.current.x = x;
     this.current.y = y;
@@ -444,6 +461,17 @@ export class SceneRectScissor {
 
     // Mirror onto MapShine globals for console / health probes, in line
     // with the existing `__v2*` diagnostic surface.
+    // Only fetch drawing buffer size when diagnostics are actually being written.
+    let drawBufW = 0;
+    let drawBufH = 0;
+    try {
+      if (typeof renderer.getDrawingBufferSize === 'function') {
+        const v2 = (this._tmpRendererSize ??= new THREE.Vector2());
+        renderer.getDrawingBufferSize(v2);
+        drawBufW = Math.max(0, Math.floor(v2.x || 0));
+        drawBufH = Math.max(0, Math.floor(v2.y || 0));
+      }
+    } catch (_) {}
     try {
       const ms = (typeof window !== 'undefined') ? window.MapShine : null;
       if (ms) {
@@ -477,12 +505,7 @@ export class SceneRectScissor {
   invalidate() {
     this.valid = false;
     this._lastHash = null;
-    try {
-      const fs = getGlobalFrameState();
-      if (fs) {
-        fs.sceneScissorValid = false;
-      }
-    } catch (_) {}
+    this._publishInvalid('explicitInvalidate');
   }
 
   /**
@@ -498,6 +521,14 @@ export class SceneRectScissor {
     };
   }
 
+  _hashMatrix(hash, elements) {
+    if (!elements || elements.length < 16) return hash;
+    for (let i = 0; i < 16; i++) {
+      hash = (hash * 31 + Math.round(elements[i] * 1e3)) | 0;
+    }
+    return hash;
+  }
+
   _buildHash(geom, bufW, bufH, groundZ, camera) {
     let hash = 17;
     hash = (hash * 31 + bufW) | 0;
@@ -511,20 +542,31 @@ export class SceneRectScissor {
     hash = (hash * 31 + (geom.worldWidth | 0)) | 0;
     const pm = camera?.projectionMatrix?.elements;
     const vm = camera?.matrixWorldInverse?.elements;
-    if (pm && pm.length >= 16) {
-      hash = (hash * 31 + Math.round(pm[0] * 1e3)) | 0;
-      hash = (hash * 31 + Math.round(pm[5] * 1e3)) | 0;
-      hash = (hash * 31 + Math.round(pm[10] * 1e3)) | 0;
-      hash = (hash * 31 + Math.round(pm[14] * 1e3)) | 0;
-    }
-    if (vm && vm.length >= 16) {
-      hash = (hash * 31 + Math.round(vm[12] * 1e3)) | 0;
-      hash = (hash * 31 + Math.round(vm[13] * 1e3)) | 0;
-      hash = (hash * 31 + Math.round(vm[14] * 1e3)) | 0;
-      hash = (hash * 31 + Math.round(vm[0] * 1e3)) | 0;
-      hash = (hash * 31 + Math.round(vm[5] * 1e3)) | 0;
-    }
+    hash = this._hashMatrix(hash, pm);
+    hash = this._hashMatrix(hash, vm);
     return hash;
+  }
+
+  _publishInvalid(reason = 'invalid') {
+    try {
+      const fs = getGlobalFrameState();
+      if (fs) {
+        fs.sceneScissorValid = false;
+        fs.sceneScissorFrameId = this.frameId;
+      }
+    } catch (_) {}
+    try {
+      const ms = (typeof window !== 'undefined') ? window.MapShine : null;
+      if (ms) {
+        ms.__v2SceneScissor = {
+          enabled: isSceneScissorEnabled(),
+          valid: false,
+          reason,
+          rect: null,
+          frameId: this.frameId,
+        };
+      }
+    } catch (_) {}
   }
 }
 
@@ -581,15 +623,25 @@ export function withSceneScissor(renderer, fn) {
     ? renderer.getScissorTest()
     : null;
 
-  let prevRect = null;
+  let hasPrevRect = false;
+  let prevX = 0;
+  let prevY = 0;
+  let prevW = 0;
+  let prevH = 0;
   try {
     if (typeof renderer.getScissor === 'function') {
       const THREE = window.THREE;
-      prevRect = THREE ? renderer.getScissor(new THREE.Vector4()) : null;
+      if (THREE) {
+        const tmpPrevScissor = (withSceneScissor._tmpPrevScissor ??= new THREE.Vector4());
+        renderer.getScissor(tmpPrevScissor);
+        prevX = tmpPrevScissor.x;
+        prevY = tmpPrevScissor.y;
+        prevW = tmpPrevScissor.z;
+        prevH = tmpPrevScissor.w;
+        hasPrevRect = true;
+      }
     }
-  } catch (_) {
-    prevRect = null;
-  }
+  } catch (_) {}
 
   try {
     if (typeof renderer.setScissor === 'function') {
@@ -601,8 +653,8 @@ export function withSceneScissor(renderer, fn) {
     return fn();
   } finally {
     try {
-      if (prevRect && typeof renderer.setScissor === 'function') {
-        renderer.setScissor(prevRect.x, prevRect.y, prevRect.z, prevRect.w);
+      if (hasPrevRect && typeof renderer.setScissor === 'function') {
+        renderer.setScissor(prevX, prevY, prevW, prevH);
       }
     } catch (_) {}
     try {

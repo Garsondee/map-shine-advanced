@@ -17,7 +17,7 @@ import {
   resolveV14BackgroundFloorIndexForSrc,
 } from '../../foundry/levels-scene-flags.js';
 import { weatherController } from '../../core/WeatherController.js';
-import { tileStackedOverlayOrder } from '../LayerOrderPolicy.js';
+import { MAX_INTRA_ROLE_OFFSET, tileAlbedoOrder, tileStackedOverlayOrder } from '../LayerOrderPolicy.js';
 
 const log = createLogger('BushEffectV2');
 
@@ -630,6 +630,36 @@ export class BushEffectV2 {
     log.info('BushEffectV2 initialized');
   }
 
+  /**
+   * Scene rect for Foundry→Three Y flip: prefer sceneComposer snapshot, fall back to
+   * `canvas.dimensions` when cold-load data is incomplete (matches refresh paths).
+   * @param {object|null|undefined} foundrySceneData
+   * @returns {{ worldH: number, sceneX: number, sceneY: number, sceneW: number, sceneH: number }}
+   * @private
+   */
+  _resolvePopulateSceneGeometry(foundrySceneData) {
+    const fd = foundrySceneData && typeof foundrySceneData === 'object' ? foundrySceneData : {};
+    const d = typeof canvas !== 'undefined' ? canvas?.dimensions : null;
+    const cw = Number(d?.width) || 0;
+    const ch = Number(d?.height) || 0;
+    let worldH = Number(fd.height) || 0;
+    const sceneW0 = Number(fd.sceneWidth) || Number(fd.width) || cw || 0;
+    const sceneH0 = Number(fd.sceneHeight) || Number(fd.height) || ch || 0;
+    let sceneW = sceneW0;
+    let sceneH = sceneH0;
+    const sceneX = Number(fd.sceneX ?? 0) || 0;
+    const sceneY = Number(fd.sceneY ?? 0) || 0;
+    if (!worldH) worldH = ch || sceneH || 0;
+    const rect = d?.sceneRect;
+    if (rect && (!(sceneW > 0) || !(sceneH > 0))) {
+      const rw = Number(rect.width) || 0;
+      const rh = Number(rect.height) || 0;
+      if (!(sceneW > 0) && rw > 0) sceneW = rw;
+      if (!(sceneH > 0) && rh > 0) sceneH = rh;
+    }
+    return { worldH, sceneX, sceneY, sceneW, sceneH };
+  }
+
   async populate(foundrySceneData) {
     if (!this._initialized) return;
     this.clear();
@@ -637,7 +667,7 @@ export class BushEffectV2 {
     const floors = window.MapShine?.floorStack?.getFloors() ?? [];
     const activeFloorIdxRaw = Number(window.MapShine?.floorStack?.getActiveFloor?.()?.index);
     const activeFloorIdx = Number.isFinite(activeFloorIdxRaw) ? activeFloorIdxRaw : 0;
-    const worldH = Number(foundrySceneData?.height) || 0;
+    const { worldH, sceneX, sceneY, sceneW, sceneH } = this._resolvePopulateSceneGeometry(foundrySceneData);
 
     // Background overlays: prefer native scene.levels so every floor's authored
     // background can get a corresponding _Bush overlay regardless of current view.
@@ -687,10 +717,10 @@ export class BushEffectV2 {
       const basePath = bg.src.replace(/\.[^.]+$/, '');
       const url = await this._probeMask(basePath, '_Bush');
       if (!url) continue;
-      const centerX = Number(foundrySceneData?.sceneX ?? 0) + Number(foundrySceneData?.sceneWidth ?? 0) / 2;
-      const centerY = worldH - (Number(foundrySceneData?.sceneY ?? 0) + Number(foundrySceneData?.sceneHeight ?? 0) / 2);
-      const tileW = Number(foundrySceneData?.sceneWidth ?? 0);
-      const tileH = Number(foundrySceneData?.sceneHeight ?? 0);
+      const centerX = sceneX + sceneW / 2;
+      const centerY = worldH - (sceneY + sceneH / 2);
+      const tileW = sceneW;
+      const tileH = sceneH;
       const z = GROUND_Z - 1 + BUSH_Z_OFFSET;
       this._createOverlay(bg.key, bg.floorIndex, { url, centerX, centerY, z, tileW, tileH, rotation: 0 });
     }
@@ -1309,10 +1339,22 @@ export class BushEffectV2 {
     mesh.rotation.z = rotation;
 
     try {
-      const baseEntry = this._renderBus?._tiles?.get?.(tileId);
-      const baseOrder = Number(baseEntry?.mesh?.renderOrder);
-      if (Number.isFinite(baseOrder)) {
-        mesh.renderOrder = tileStackedOverlayOrder(baseOrder, floorIndex, 2);
+      const fi = Number.isFinite(Number(floorIndex)) ? Math.max(0, Number(floorIndex)) : 0;
+      const isBgPlane = /^__bg_image__(?:|[1-9]\d*)$/.test(String(tileId));
+      if (isBgPlane) {
+        const baseAlbedoOrder = tileAlbedoOrder(fi, 0);
+        mesh.renderOrder = tileStackedOverlayOrder(baseAlbedoOrder, fi, 2);
+      } else {
+        const baseEntry = this._renderBus?._tiles?.get?.(tileId);
+        const baseOrder = Number(baseEntry?.mesh?.renderOrder);
+        if (Number.isFinite(baseOrder)) {
+          mesh.renderOrder = tileStackedOverlayOrder(baseOrder, fi, 2);
+        } else {
+          // Bus tile not registered yet (populate races). Sort slot 0 sits under every
+          // real tile in the transparent pass — use the top albedo intra slot instead.
+          const fallbackBase = tileAlbedoOrder(fi, MAX_INTRA_ROLE_OFFSET);
+          mesh.renderOrder = tileStackedOverlayOrder(fallbackBase, fi, 2);
+        }
       }
     } catch (_) {}
 
@@ -1332,6 +1374,19 @@ export class BushEffectV2 {
         const derive = this._detectDerivedAlpha(tex);
         this._deriveAlphaByTileId.set(tileId, derive);
         material.uniforms.uDeriveAlpha.value = derive ? 1.0 : 0.0;
+        // Late bus registration: snap renderOrder to the real albedo stack slot once available.
+        try {
+          const entry = this._overlays.get(tileId);
+          const m = entry?.mesh;
+          if (m && !/^__bg_image__(?:|[1-9]\d*)$/.test(String(tileId))) {
+            const fi = Number.isFinite(Number(floorIndex)) ? Math.max(0, Number(floorIndex)) : 0;
+            const baseEntry = this._renderBus?._tiles?.get?.(tileId);
+            const baseOrder = Number(baseEntry?.mesh?.renderOrder);
+            if (Number.isFinite(baseOrder)) {
+              m.renderOrder = tileStackedOverlayOrder(baseOrder, fi, 2);
+            }
+          }
+        } catch (_) {}
       } else {
         try { tex.dispose(); } catch (_) {}
       }

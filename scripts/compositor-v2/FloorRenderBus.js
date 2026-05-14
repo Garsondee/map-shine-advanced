@@ -114,6 +114,18 @@ function backgroundBusKeyForFloorIndex(floorIdx) {
   return fi === 0 ? '__bg_image__' : `__bg_image__${fi}`;
 }
 
+/**
+ * True only for the bus albedo background plane keys (`__bg_image__`, `__bg_image__1`, …).
+ * Effect overlays use the same prefix (`__bg_image__1_bush`, `_tree`, `_specular`, …) and must
+ * not be removed when swapping level backgrounds.
+ *
+ * @param {string} key
+ * @returns {boolean}
+ */
+function isBackgroundImageAlbedoBusKey(key) {
+  return /^__bg_image__$|^__bg_image__[1-9]\d*$/.test(String(key || ''));
+}
+
 const MAX_SORT_WITHIN_FLOOR_GROUP = MAX_INTRA_ROLE_OFFSET;
 const UPPER_FLOOR_ALPHA_CUTOFF = 0.4;
 
@@ -1791,7 +1803,7 @@ export class FloorRenderBus {
     this._bgDecodeEpoch += 1;
     const keys = [];
     for (const key of this._tiles.keys()) {
-      if (String(key).startsWith('__bg_image__')) keys.push(String(key));
+      if (isBackgroundImageAlbedoBusKey(key)) keys.push(String(key));
     }
     for (const key of keys) {
       const existing = this._tiles.get(key);

@@ -700,8 +700,6 @@ export class TileManager {
     this._tileEffectMasks = new Map();
     /** @type {Map<string, Promise>} */
     this._tileEffectMaskResolvePromises = new Map();
-    /** @type {Set<string>} - Tiles known to have no effect masks (negative cache) */
-    this._tileEffectMaskMisses = new Set();
 
     /**
      * Estimated VRAM bytes consumed by per-tile effect masks.
@@ -1841,10 +1839,6 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     // Return cached result if available and non-empty. An empty Map was stored when
     // an early probe/load failed (timing, FilePicker) — GpuSceneMaskCompositor
     // then skipped the tile forever ("EMPTY_MAP_poison"). Clear and re-probe.
-    // Check negative cache first to avoid re-probing tiles known to have no masks
-    if (this._tileEffectMaskMisses.has(tileId)) {
-      return new Map();
-    }
     if (this._tileEffectMasks.has(tileId)) {
       const cached = this._tileEffectMasks.get(tileId);
       if (cached instanceof Map && cached.size > 0) {
@@ -1907,15 +1901,11 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
       // Do not cache an empty result: it poisons later compositor passes (tile
       // skipped as "loaded" with zero masks). Tiles with no suffix files pay a
       // re-probe on each composeFloor; that is rare and cheaper than a permanent miss.
-      // Cache negative results to avoid repeated probes
       if (results.size > 0) {
         this._tileEffectMasks.set(tileId, results);
-        this._tileEffectMaskMisses.delete(tileId);
         for (const entry of results.values()) {
           this._tileEffectMaskVramBytes += this._estimateTextureBytes(entry?.texture);
         }
-      } else {
-        this._tileEffectMaskMisses.add(tileId);
       }
 
       return results;
@@ -1943,8 +1933,6 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
       if (this._tileEffectMaskVramBytes < 0) this._tileEffectMaskVramBytes = 0;
       this._tileEffectMasks.delete(tileId);
     }
-    // Clear from negative cache when tile is removed or texture changes
-    this._tileEffectMaskMisses.delete(tileId);
   }
 
   /**
@@ -5939,7 +5927,6 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
       this._tileEffectMasks.clear();
       this._tileEffectMaskResolvePromises.clear();
       this._tileEffectMaskVramBytes = 0;
-      this._tileEffectMaskMisses.clear();
       
       this.initialized = false;
     }

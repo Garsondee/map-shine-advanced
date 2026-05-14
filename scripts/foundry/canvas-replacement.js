@@ -719,10 +719,10 @@ async function _runDeferredIntroCompileRetry() {
 /**
  * After returning to a visible tab: resize sync, continuous render, optional deferred intro warmup.
  * @param {string} [reason]
- * @param {{ runColdBgResync?: boolean }} [opts] - When `runColdBgResync` is true, runs `__v14ColdLoadSwapResync`
- *   (swapBackgroundImage + forceRepopulate). That path is heavy and must not run on every `window.focus`
- *   while the tab stayed visible — it was restarting populate during normal play and could prolong grey
- *   slim-render until all effect jobs finished again.
+ * @param {{ runColdBgResync?: boolean }} [opts] - When `runColdBgResync` is true, may run `__v14ColdLoadSwapResync`
+ *   (swapBackgroundImage + forceRepopulate) only while {@link MapShine#__v14ColdLoadResyncPending} is true — i.e.
+ *   during the short V14 cold-load window ({@link MapShine#__v14ColdLoadResyncInstallId} + 3.5s), not on every
+ *   alt-tab after the scene has stabilized.
  * @private
  */
 function _recoverRenderingAfterTabFocus(reason = '', opts = {}) {
@@ -752,7 +752,8 @@ function _recoverRenderingAfterTabFocus(reason = '', opts = {}) {
     if (runColdBgResync) {
       try {
         const coldSwap = ms.__v14ColdLoadSwapResync;
-        if (typeof coldSwap === 'function') coldSwap();
+        const allowCold = ms.__v14ColdLoadResyncPending === true;
+        if (allowCold && typeof coldSwap === 'function') coldSwap();
       } catch (_) {}
     }
 
@@ -7215,7 +7216,15 @@ async function createThreeCanvas(scene, createOptions = {}) {
     // FloorStack was built earlier with null activeLevelContext; CameraFollower now
     // sets activeLevelContext + emits initialize. Rebuild + visibility immediately so
     // V2 compositor/bus do not stick on a stale upper-floor slice until a hook runs.
+    let coldLoadInstallId = 0;
     safeCall(() => {
+      try {
+        if (window.MapShine) {
+          window.MapShine.__v14ColdLoadResyncPending = false;
+          window.MapShine.__v14ColdLoadResyncInstallId = (Number(window.MapShine.__v14ColdLoadResyncInstallId) || 0) + 1;
+          coldLoadInstallId = window.MapShine.__v14ColdLoadResyncInstallId;
+        }
+      } catch (_) {}
       const fs = floorStack ?? window.MapShine?.floorStack;
       if (fs && typeof fs.rebuildFloors === 'function') {
         fs.rebuildFloors(
@@ -7305,7 +7314,18 @@ async function createThreeCanvas(scene, createOptions = {}) {
           setTimeout(runSwap, 750);
           setTimeout(runSwap, 2500);
           try {
-            if (window.MapShine) window.MapShine.__v14ColdLoadSwapResync = runSwap;
+            if (window.MapShine) {
+              window.MapShine.__v14ColdLoadResyncPending = true;
+              window.MapShine.__v14ColdLoadSwapResync = runSwap;
+              const installId = coldLoadInstallId;
+              setTimeout(() => {
+                try {
+                  const m = window.MapShine;
+                  if (!m || Number(m.__v14ColdLoadResyncInstallId) !== installId) return;
+                  m.__v14ColdLoadResyncPending = false;
+                } catch (_) {}
+              }, 3500);
+            }
           } catch (_) {}
         }
       }

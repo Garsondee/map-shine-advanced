@@ -57,7 +57,7 @@ const log = createLogger('SpecularEffectV2');
 // but large enough to consistently render on top of the albedo tile.
 const SPECULAR_Z_OFFSET = 0.1;
 
-import { tileStackedOverlayOrder } from '../LayerOrderPolicy.js';
+import { tileAlbedoOrder, tileStackedOverlayOrder } from '../LayerOrderPolicy.js';
 
 // Intra-band delta for specular overlays relative to their tile.
 const SPECULAR_EFFECT_DELTA = 1;
@@ -844,11 +844,32 @@ export class SpecularEffectV2 {
     u.uEffectEnabled.value = this._enabled;
     u.uSpecularIntensity.value = this.params.intensity;
 
-    u.uLightColor.value.set(
-      this.params.lightColor.r,
-      this.params.lightColor.g,
-      this.params.lightColor.b
-    );
+    // Specular tint must not land on (0,0,0): the fragment shader multiplies the
+    // entire additive pass by uLightColor (and dynamic-light tint only replaces
+    // that when a dominant disk contributes). Black uLightColor + zero dominant
+    // weight — common when AmbientLight docs are floor-gated away on this band —
+    // makes specular vanish even though ambient + masks are fine.
+    {
+      const lc = this.params?.lightColor;
+      let tr = 1;
+      let tg = 1;
+      let tb = 1;
+      if (lc && typeof lc === 'object') {
+        const pr = Number(lc.r);
+        const pg = Number(lc.g);
+        const pb = Number(lc.b);
+        if (Number.isFinite(pr)) tr = pr;
+        if (Number.isFinite(pg)) tg = pg;
+        if (Number.isFinite(pb)) tb = pb;
+      }
+      const eps = 1e-4;
+      if (tr <= eps && tg <= eps && tb <= eps) {
+        tr = 1;
+        tg = 1;
+        tb = 1;
+      }
+      u.uLightColor.value.set(tr, tg, tb);
+    }
 
     // Stripe globals
     u.uStripeEnabled.value = this.params.stripeEnabled;
@@ -1523,10 +1544,24 @@ export class SpecularEffectV2 {
 
     // Same role band as the base mesh (+delta) so higher-sorted tiles draw later and
     // occlude background / lower-tile specular (see tileStackedOverlayOrder).
+    //
+    // Background `__bg_image__*` planes are often registered asynchronously after
+    // `_loadVisibleBackgroundStack` decodes; SpecularEffectV2.populate() can run while
+    // `_tiles.get(tileId)` is still missing. If we skip renderOrder in that window the
+    // mesh keeps Three's default (0) and every albedo tile (order ~1e4+) draws on top —
+    // specular looks "invisible" (painted under the map). Derive stack order from
+    // policy instead of the live bus mesh for backgrounds.
     try {
-      const baseOrder = Number(baseEntry?.mesh?.renderOrder);
-      if (Number.isFinite(baseOrder)) {
-        mesh.renderOrder = tileStackedOverlayOrder(baseOrder, floorIndex, SPECULAR_EFFECT_DELTA);
+      const fi = Number.isFinite(Number(floorIndex)) ? Math.max(0, Number(floorIndex)) : 0;
+      const isBgPlane = /^__bg_image__(?:|[1-9]\d*)$/.test(String(tileId));
+      if (isBgPlane) {
+        const baseAlbedoOrder = tileAlbedoOrder(fi, 0);
+        mesh.renderOrder = tileStackedOverlayOrder(baseAlbedoOrder, fi, SPECULAR_EFFECT_DELTA);
+      } else {
+        const baseOrder = Number(baseEntry?.mesh?.renderOrder);
+        if (Number.isFinite(baseOrder)) {
+          mesh.renderOrder = tileStackedOverlayOrder(baseOrder, fi, SPECULAR_EFFECT_DELTA);
+        }
       }
     } catch (_) {}
 
@@ -1650,6 +1685,9 @@ export class SpecularEffectV2 {
         oldMat.dispose();
       }
 
+      // Entries were only used before attach; keep the queue empty post-upgrade so diagnostics stay honest.
+      this._pendingOverlays = [];
+
       this._syncOverlayVisibility();
 
       // _buildSharedUniforms() created fresh light arrays (zeros). Without this,
@@ -1714,6 +1752,9 @@ export class SpecularEffectV2 {
     // same floor Z band as the active floor.
     const GROUND_Z = 1000;
     bg.mesh.position.z = GROUND_Z + nextFloor - 1 + SPECULAR_Z_OFFSET;
+
+    const baseAlbedoOrder = tileAlbedoOrder(nextFloor, 0);
+    bg.mesh.renderOrder = tileStackedOverlayOrder(baseAlbedoOrder, nextFloor, SPECULAR_EFFECT_DELTA);
 
     if (bg.material?.uniforms?.uOutdoorsFloorIdx) {
       bg.material.uniforms.uOutdoorsFloorIdx.value = nextFloor;

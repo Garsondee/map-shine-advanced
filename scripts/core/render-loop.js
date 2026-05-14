@@ -124,6 +124,25 @@ export class RenderLoop {
   }
 
   /**
+   * Prefer FrameCoordinator snapshots when they are finite; NaN is not nullish
+   * for `??`, so never let bad coordinator values override the live stage.
+   * @private
+   */
+  _pixiCameraFromCoordinator(fcState, stage) {
+    const sx = stage?.pivot?.x;
+    const sy = stage?.pivot?.y;
+    const sz = stage?.scale?.x;
+    const fx = fcState?.cameraX;
+    const fy = fcState?.cameraY;
+    const fz = fcState?.zoom;
+    return {
+      x: Number.isFinite(fx) ? fx : sx,
+      y: Number.isFinite(fy) ? fy : sy,
+      zoom: Number.isFinite(fz) ? fz : sz,
+    };
+  }
+
+  /**
    * Start the render loop
    */
   start() {
@@ -202,10 +221,10 @@ export class RenderLoop {
     try {
       const stage = canvas?.stage;
       const fcState = fc?.getFrameState?.();
-
-      const pixiPivotX = fcState?.cameraX ?? stage?.pivot?.x;
-      const pixiPivotY = fcState?.cameraY ?? stage?.pivot?.y;
-      const pixiZoom = fcState?.zoom ?? stage?.scale?.x;
+      const pixi = this._pixiCameraFromCoordinator(fcState, stage);
+      const pixiPivotX = pixi.x;
+      const pixiPivotY = pixi.y;
+      const pixiZoom = pixi.zoom;
 
       if (typeof pixiPivotX === 'number') this._lastPixiPivotX = pixiPivotX;
       if (typeof pixiPivotY === 'number') this._lastPixiPivotY = pixiPivotY;
@@ -388,11 +407,11 @@ export class RenderLoop {
           }
         } catch (_) {}
 
-        // Prefer post-PIXI coordinated camera snapshots when available.
-        // This reduces cases where we sample stage state just before PIXI updates.
-        const pixiPivotX = fcState?.cameraX ?? stage?.pivot?.x;
-        const pixiPivotY = fcState?.cameraY ?? stage?.pivot?.y;
-        const pixiZoom = fcState?.zoom ?? stage?.scale?.x;
+        // Prefer post-PIXI coordinated camera snapshots when available (finite only).
+        const pixi = this._pixiCameraFromCoordinator(fcState, stage);
+        const pixiPivotX = pixi.x;
+        const pixiPivotY = pixi.y;
+        const pixiZoom = pixi.zoom;
 
         let cameraChanged = false;
         if (typeof pixiPivotX === 'number' && typeof pixiPivotY === 'number' && typeof pixiZoom === 'number') {
@@ -502,6 +521,9 @@ export class RenderLoop {
         // Safety: we only honour the hold for STRICT_HOLD_MAX_MS so a stale
         // flag can never permanently starve the compositor. When the cap
         // trips we let the compositor run to re-validate and clear the flag.
+        // When strict sync is off, never reuse a stale hold object from a prior
+        // strict-sync session — that would suppress compositor.render() forever.
+        if (!strictSync) this._strictHoldState.active = false;
         const holdFrame = strictSync ? this._getStrictHoldState() : this._strictHoldState;
         const holdAgeMs = holdFrame.active ? (now - holdFrame.updatedAtMs) : 0;
         const holdExpired = holdFrame.active && holdAgeMs > STRICT_HOLD_MAX_MS;

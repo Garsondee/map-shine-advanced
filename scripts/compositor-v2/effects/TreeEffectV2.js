@@ -664,6 +664,36 @@ export class TreeEffectV2 {
     log.info('TreeEffectV2 initialized');
   }
 
+  /**
+   * Scene rect for Foundry→Three Y flip: prefer sceneComposer snapshot, fall back to
+   * `canvas.dimensions` when cold-load data is incomplete (matches refresh paths).
+   * @param {object|null|undefined} foundrySceneData
+   * @returns {{ worldH: number, sceneX: number, sceneY: number, sceneW: number, sceneH: number }}
+   * @private
+   */
+  _resolvePopulateSceneGeometry(foundrySceneData) {
+    const fd = foundrySceneData && typeof foundrySceneData === 'object' ? foundrySceneData : {};
+    const d = typeof canvas !== 'undefined' ? canvas?.dimensions : null;
+    const cw = Number(d?.width) || 0;
+    const ch = Number(d?.height) || 0;
+    let worldH = Number(fd.height) || 0;
+    const sceneW0 = Number(fd.sceneWidth) || Number(fd.width) || cw || 0;
+    const sceneH0 = Number(fd.sceneHeight) || Number(fd.height) || ch || 0;
+    let sceneW = sceneW0;
+    let sceneH = sceneH0;
+    const sceneX = Number(fd.sceneX ?? 0) || 0;
+    const sceneY = Number(fd.sceneY ?? 0) || 0;
+    if (!worldH) worldH = ch || sceneH || 0;
+    const rect = d?.sceneRect;
+    if (rect && (!(sceneW > 0) || !(sceneH > 0))) {
+      const rw = Number(rect.width) || 0;
+      const rh = Number(rect.height) || 0;
+      if (!(sceneW > 0) && rw > 0) sceneW = rw;
+      if (!(sceneH > 0) && rh > 0) sceneH = rh;
+    }
+    return { worldH, sceneX, sceneY, sceneW, sceneH };
+  }
+
   async populate(foundrySceneData) {
     if (!this._initialized) return;
     this.clear();
@@ -671,7 +701,7 @@ export class TreeEffectV2 {
     const floors = window.MapShine?.floorStack?.getFloors() ?? [];
     const activeFloorIdxRaw = Number(window.MapShine?.floorStack?.getActiveFloor?.()?.index);
     const activeFloorIdx = Number.isFinite(activeFloorIdxRaw) ? activeFloorIdxRaw : 0;
-    const worldH = Number(foundrySceneData?.height) || 0;
+    const { worldH, sceneX, sceneY, sceneW, sceneH } = this._resolvePopulateSceneGeometry(foundrySceneData);
 
     // Background overlays: prefer native scene.levels so every floor's authored
     // background can get a corresponding _Tree overlay regardless of current view.
@@ -723,10 +753,10 @@ export class TreeEffectV2 {
       const basePath = bgSrc.replace(/\.[^.]+$/, '');
       const url = await this._probeMask(basePath, '_Tree');
       if (!url) continue;
-      const centerX = Number(foundrySceneData?.sceneX ?? 0) + Number(foundrySceneData?.sceneWidth ?? 0) / 2;
-      const centerY = worldH - (Number(foundrySceneData?.sceneY ?? 0) + Number(foundrySceneData?.sceneHeight ?? 0) / 2);
-      const tileW = Number(foundrySceneData?.sceneWidth ?? 0);
-      const tileH = Number(foundrySceneData?.sceneHeight ?? 0);
+      const centerX = sceneX + sceneW / 2;
+      const centerY = worldH - (sceneY + sceneH / 2);
+      const tileW = sceneW;
+      const tileH = sceneH;
       const z = GROUND_Z - 1 + TREE_Z_OFFSET;
       this._createOverlay(bg.key, bg.floorIndex, { url, centerX, centerY, z, tileW, tileH, rotation: 0 });
     }
@@ -1627,10 +1657,12 @@ export class TreeEffectV2 {
     mesh.position.set(centerX, centerY, z);
     mesh.rotation.z = rotation;
 
-    try {
-      // Trees are above-overhead (canopy over rooftops).
-      mesh.renderOrder = effectAboveOverheadOrder(floorIndex, 200);
-    } catch (_) {}
+    // Above overhead tiles (canopy). Do not rely on a silent try/catch — a
+    // thrown helper would leave Three's default renderOrder 0 and paint under
+    // the whole albedo stack (same symptom as async __bg_image__ races for
+    // surface-stacked effects).
+    const fi = Number.isFinite(Number(floorIndex)) ? Math.max(0, Number(floorIndex)) : 0;
+    mesh.renderOrder = effectAboveOverheadOrder(fi, 200);
 
     // WEATHER_ROOF_LAYER (21): must match OverheadShadowsEffectV2 roof capture /
     // rain occlusion passes (camera enables 20+21). Without this, tree meshes are

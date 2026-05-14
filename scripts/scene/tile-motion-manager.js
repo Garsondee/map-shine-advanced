@@ -27,6 +27,9 @@ const ROTATION_EASING_TYPES = new Set([
   'clockwork-chaos'
 ]);
 
+const DEG_TO_RAD = Math.PI / 180;
+const TAU = Math.PI * 2;
+
 function _clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
 }
@@ -179,6 +182,13 @@ export class TileMotionManager {
     this._tmpWorldVecA = { x: 0, y: 0 };
     this._tmpWorldVecB = { x: 0, y: 0 };
     this._tmpPivotResult = { x: 0, y: 0, rotation: 0 };
+
+    // Throttling state for continuous render requests.
+    this._nextContinuousRenderRequestMs = 0;
+
+    // Cached tile-edit context polling to avoid per-frame UI checks.
+    this._lastTileEditPollMs = 0;
+    this._cachedTileEditContextActive = false;
   }
 
   async initialize() {
@@ -865,10 +875,14 @@ export class TileMotionManager {
     }
   }
 
-  _getBusTileEntry(tileId) {
+  _getBusTilesMap() {
     const busTiles = window.MapShine?.floorCompositorV2?._renderBus?._tiles;
-    if (!busTiles || typeof busTiles.get !== 'function') return null;
-    return busTiles.get(tileId) || null;
+    return busTiles && typeof busTiles.get === 'function' ? busTiles : null;
+  }
+
+  _getBusTileEntry(tileId) {
+    const busTiles = this._getBusTilesMap();
+    return busTiles?.get(tileId) || null;
   }
 
   _getBusTileMesh(tileId) {
@@ -927,6 +941,44 @@ export class TileMotionManager {
     }
   }
 
+  _isConfigEffectivelyAnimated(cfg) {
+    if (!cfg?.enabled) return false;
+
+    if (cfg.mode === 'texture') {
+      const tm = cfg.textureMotion || {};
+      const phase = cfg.motion?.phase || 0;
+      return !!(tm.scrollU || tm.scrollV || tm.rotateSpeed || phase);
+    }
+
+    const m = cfg.motion || {};
+    const type = m.type || 'rotation';
+
+    if (type === 'rotation') {
+      return !!(m.speed || m.phase);
+    }
+
+    if (type === 'sine') {
+      return !!(m.amplitudeX || m.amplitudeY || m.amplitudeRot);
+    }
+
+    if (type === 'pingPong') {
+      const ax = m.pointA?.x || 0;
+      const ay = m.pointA?.y || 0;
+      const bx = m.pointB?.x || 0;
+      const by = m.pointB?.y || 0;
+      return !!(ax || ay || bx || by);
+    }
+
+    if (type === 'orbit') {
+      // Preserve current semantics where non-zero pivot with zero radius can still move the tile.
+      const px = cfg.pivot?.x || 0;
+      const py = cfg.pivot?.y || 0;
+      return !!(m.radius || px || py);
+    }
+
+    return true;
+  }
+
   _rebuildRuntimeGraph() {
     this._runtimeOrder.length = 0;
     this._invalidTiles.clear();
@@ -935,8 +987,24 @@ export class TileMotionManager {
     const enabledIds = [];
     const enabledSet = new Set();
 
+    // Build parent-to-children map for discovering child tiles
+    const parentToChildren = new Map();
+
     for (const [tileId, cfg] of Object.entries(this.state?.tiles || {})) {
       if (!cfg?.enabled) continue;
+
+      // Track parent relationships for all enabled tiles
+      if (cfg.parentId) {
+        let children = parentToChildren.get(cfg.parentId);
+        if (!children) {
+          children = [];
+          parentToChildren.set(cfg.parentId, children);
+        }
+        children.push(tileId);
+      }
+
+      // Only tiles with their own motion config start the traversal
+      if (!this._isConfigEffectivelyAnimated(cfg)) continue;
       enabledIds.push(tileId);
       enabledSet.add(tileId);
     }
@@ -981,6 +1049,24 @@ export class TileMotionManager {
 
     for (const tileId of enabledIds) visit(tileId);
 
+    // After DFS completes, add all children of tiles in runtime order
+    // This ensures children follow their parents without affecting cycle detection
+    const addedChildren = new Set();
+    for (const tileId of this._runtimeOrder) {
+      const addChildrenRecursive = (parentId) => {
+        const children = parentToChildren.get(parentId);
+        if (!children) return;
+        for (const childId of children) {
+          if (!addedChildren.has(childId) && !this._invalidTiles.has(childId)) {
+            this._runtimeOrder.push(childId);
+            addedChildren.add(childId);
+            addChildrenRecursive(childId); // Also add grandchildren
+          }
+        }
+      };
+      addChildrenRecursive(tileId);
+    }
+
     if (this._invalidTiles.size > 0) {
       log.warn(`Tile motion: detected parent cycles for ${this._invalidTiles.size} tile(s).`);
     }
@@ -999,6 +1085,14 @@ export class TileMotionManager {
     }
   }
 
+  _requestContinuousRenderThrottled(durationMs, minIntervalMs = 100) {
+    const now = performance.now();
+    if (now < (this._nextContinuousRenderRequestMs || 0)) return;
+
+    this._nextContinuousRenderRequestMs = now + minIntervalMs;
+    this._requestContinuousRender(durationMs);
+  }
+
   _getTileData(tileId) {
     const map = this.tileManager?.tileSprites;
     if (!map || typeof map.get !== 'function') return null;
@@ -1008,7 +1102,7 @@ export class TileMotionManager {
   _getResolvedState(tileId, frameId) {
     let state = this._resolvedStates.get(tileId);
     if (!state) {
-      state = { x: 0, y: 0, rotation: 0, animDelta: 0, frameId: -1 };
+      state = { x: 0, y: 0, rotation: 0, animDelta: 0, animCos: 1, animSin: 0, frameId: -1 };
       this._resolvedStates.set(tileId, state);
     }
     state.frameId = frameId;
@@ -1031,8 +1125,8 @@ export class TileMotionManager {
         const offX = tileBase.x - parentBase.x;
         const offY = tileBase.y - parentBase.y;
 
-        const pCos = Math.cos(parentResolved.animDelta);
-        const pSin = Math.sin(parentResolved.animDelta);
+        const pCos = parentResolved.animCos;
+        const pSin = parentResolved.animSin;
 
         const rotOffX = offX * pCos - offY * pSin;
         const rotOffY = offX * pSin + offY * pCos;
@@ -1143,8 +1237,8 @@ export class TileMotionManager {
     const amp = 0.16 * amount;
     const envelope = t * (1 - t) * 4;
 
-    const wobbleA = Math.sin((t * freq + phaseA) * Math.PI * 2) * amp;
-    const wobbleB = Math.sin((t * (freq + 1.5) + phaseB) * Math.PI * 2) * amp * 0.45;
+    const wobbleA = Math.sin((t * freq + phaseA) * TAU) * amp;
+    const wobbleB = Math.sin((t * (freq + 1.5) + phaseB) * TAU) * amp * 0.45;
     return _clamp(t + (wobbleA + wobbleB) * envelope, 0, 1);
   }
 
@@ -1218,7 +1312,18 @@ export class TileMotionManager {
   }
 
   _computeRotationDeltaRad(cfg, elapsedSec, tileId) {
+    const motion = cfg?.motion || {};
     const rawDeg = this._computeRawPhaseDeg(cfg, elapsedSec);
+
+    const easing = motion.rotationEasing || 'linear';
+    const jank = motion.clockworkJank || 0;
+    const easeStrength = motion.easeStrength ?? 1;
+
+    // Fast path for plain linear rotation with no easing or jank.
+    if ((easing === 'linear' || easeStrength <= 0) && jank <= 0.0001) {
+      return rawDeg * DEG_TO_RAD;
+    }
+
     const rawTurns = rawDeg / 360;
     const sign = rawTurns < 0 ? -1 : 1;
     const absTurns = Math.abs(rawTurns);
@@ -1226,7 +1331,7 @@ export class TileMotionManager {
     const cycleU = absTurns - cycleIndex;
     const shapedU = this._computeRotationProgress01(cfg, cycleU, tileId, cycleIndex);
     const totalDeg = sign * ((cycleIndex * 360) + (shapedU * 360));
-    return (totalDeg * Math.PI) / 180;
+    return totalDeg * DEG_TO_RAD;
   }
 
   _rotateFoundryLocalToWorld(localX, localYFoundry, worldRotationRad, out = undefined) {
@@ -1241,11 +1346,34 @@ export class TileMotionManager {
     return vec;
   }
 
+  _shouldSuppressForTileEdit() {
+    if (this._externalTileEditSuppressed) return true;
+
+    const now = performance.now();
+    if (now - this._lastTileEditPollMs > 100) {
+      this._lastTileEditPollMs = now;
+      this._cachedTileEditContextActive = this._isTilesEditContextActive();
+    }
+
+    return this._cachedTileEditContextActive;
+  }
+
   _applyPivotRotation(baseX, baseY, baseRotation, deltaRotation, pivotXFoundry, pivotYFoundry, out = undefined) {
     const pivotX = _toNumber(pivotXFoundry, 0);
-    const pivotY = -_toNumber(pivotYFoundry, 0);
-
+    const pivotYRaw = _toNumber(pivotYFoundry, 0);
     const finalRot = baseRotation + deltaRotation;
+
+    const res = out || this._tmpPivotResult;
+
+    // Fast path: zero-pivot rotation around tile origin does not change position.
+    if (pivotX === 0 && pivotYRaw === 0) {
+      res.x = baseX;
+      res.y = baseY;
+      res.rotation = finalRot;
+      return res;
+    }
+
+    const pivotY = -pivotYRaw;
 
     const iCos = Math.cos(baseRotation);
     const iSin = Math.sin(baseRotation);
@@ -1258,7 +1386,6 @@ export class TileMotionManager {
     const v1x = pivotX * fCos - pivotY * fSin;
     const v1y = pivotX * fSin + pivotY * fCos;
 
-    const res = out || this._tmpPivotResult;
     res.x = baseX + (v0x - v1x);
     res.y = baseY + (v0y - v1y);
     res.rotation = finalRot;
@@ -1267,7 +1394,14 @@ export class TileMotionManager {
 
   _applyFinalTileState(tileId, frameId, tileBase, sprite, finalX, finalY, finalRot, totalAnimDelta) {
     sprite.position.set(finalX, finalY, tileBase.z);
-    sprite.scale.set(tileBase.scaleX, tileBase.scaleY, 1);
+    // Only set scale if it actually changed (tile motion does not animate scale).
+    if (
+      sprite.scale.x !== tileBase.scaleX ||
+      sprite.scale.y !== tileBase.scaleY ||
+      sprite.scale.z !== 1
+    ) {
+      sprite.scale.set(tileBase.scaleX, tileBase.scaleY, 1);
+    }
     if (sprite.material) sprite.material.rotation = finalRot;
     sprite.updateMatrix();
     this.tileManager?.syncTileAttachedEffects?.(tileId, sprite);
@@ -1286,6 +1420,8 @@ export class TileMotionManager {
     resolved.y = finalY;
     resolved.rotation = finalRot;
     resolved.animDelta = totalAnimDelta;
+    resolved.animCos = Math.cos(totalAnimDelta);
+    resolved.animSin = Math.sin(totalAnimDelta);
 
     this._frameActiveTileIds.add(tileId);
   }
@@ -1407,18 +1543,43 @@ export class TileMotionManager {
     this._resolvedStates.clear();
   }
 
+  _applyInheritedOnlyTile(tileId, cfg, frameId) {
+    const data = this._getTileData(tileId);
+    const sprite = data?.sprite;
+    if (!sprite) return;
+
+    let tileBase = this._baseCache.get(tileId);
+    if (!tileBase) {
+      this.captureBaseTransform(tileId, sprite);
+      tileBase = this._baseCache.get(tileId);
+      if (!tileBase) return;
+    }
+
+    const inherited = this._resolveInheritedTransform(tileId, cfg, frameId, tileBase);
+
+    this._applyFinalTileState(
+      tileId,
+      frameId,
+      tileBase,
+      sprite,
+      inherited.inheritedX,
+      inherited.inheritedY,
+      inherited.inheritedRotation,
+      inherited.inheritedAnimDelta
+    );
+  }
+
   _applyRotationTile(tileId, cfg, elapsedSec, frameId) {
     const data = this._getTileData(tileId);
     const sprite = data?.sprite;
     if (!sprite) return;
 
-    const base = this._baseCache.get(tileId);
-    if (!base) {
+    let tileBase = this._baseCache.get(tileId);
+    if (!tileBase) {
       this.captureBaseTransform(tileId, sprite);
+      tileBase = this._baseCache.get(tileId);
+      if (!tileBase) return;
     }
-
-    const tileBase = this._baseCache.get(tileId);
-    if (!tileBase) return;
 
     const inherited = this._resolveInheritedTransform(tileId, cfg, frameId, tileBase);
     const ownDelta = this._computeRotationDeltaRad(cfg, elapsedSec, tileId);
@@ -1449,16 +1610,18 @@ export class TileMotionManager {
     const sprite = data?.sprite;
     if (!sprite) return;
 
-    const base = this._baseCache.get(tileId);
-    if (!base) this.captureBaseTransform(tileId, sprite);
-    const tileBase = this._baseCache.get(tileId);
-    if (!tileBase) return;
+    let tileBase = this._baseCache.get(tileId);
+    if (!tileBase) {
+      this.captureBaseTransform(tileId, sprite);
+      tileBase = this._baseCache.get(tileId);
+      if (!tileBase) return;
+    }
 
     const inherited = this._resolveInheritedTransform(tileId, cfg, frameId, tileBase);
     const rawDeg = this._computeRawPhaseDeg(cfg, elapsedSec);
     const loopMode = cfg?.motion?.loopMode === 'pingPong' ? 'pingPong' : 'loop';
     const u = this._loop01(rawDeg, loopMode);
-    const angle = u * Math.PI * 2;
+    const angle = u * TAU;
     const radius = Math.max(0, _toNumber(cfg?.motion?.radius, 0));
 
     const pivotCenterOff = this._rotateFoundryLocalToWorld(
@@ -1497,10 +1660,12 @@ export class TileMotionManager {
     const sprite = data?.sprite;
     if (!sprite) return;
 
-    const base = this._baseCache.get(tileId);
-    if (!base) this.captureBaseTransform(tileId, sprite);
-    const tileBase = this._baseCache.get(tileId);
-    if (!tileBase) return;
+    let tileBase = this._baseCache.get(tileId);
+    if (!tileBase) {
+      this.captureBaseTransform(tileId, sprite);
+      tileBase = this._baseCache.get(tileId);
+      if (!tileBase) return;
+    }
 
     const inherited = this._resolveInheritedTransform(tileId, cfg, frameId, tileBase);
     const rawDeg = this._computeRawPhaseDeg(cfg, elapsedSec);
@@ -1537,14 +1702,16 @@ export class TileMotionManager {
     const sprite = data?.sprite;
     if (!sprite) return;
 
-    const base = this._baseCache.get(tileId);
-    if (!base) this.captureBaseTransform(tileId, sprite);
-    const tileBase = this._baseCache.get(tileId);
-    if (!tileBase) return;
+    let tileBase = this._baseCache.get(tileId);
+    if (!tileBase) {
+      this.captureBaseTransform(tileId, sprite);
+      tileBase = this._baseCache.get(tileId);
+      if (!tileBase) return;
+    }
 
     const inherited = this._resolveInheritedTransform(tileId, cfg, frameId, tileBase);
     const rawDeg = this._computeRawPhaseDeg(cfg, elapsedSec);
-    const wave = Math.sin((rawDeg * Math.PI) / 180);
+    const wave = Math.sin(rawDeg * DEG_TO_RAD);
 
     const ampX = _toNumber(cfg?.motion?.amplitudeX, 0);
     const ampY = _toNumber(cfg?.motion?.amplitudeY, 0);
@@ -1553,7 +1720,7 @@ export class TileMotionManager {
     const off = this._rotateFoundryLocalToWorld(ampX * wave, ampY * wave, inherited.inheritedRotation, this._tmpWorldVecA);
     const baseX = inherited.inheritedX + off.x;
     const baseY = inherited.inheritedY + off.y;
-    const ownDelta = ((ampRot * wave) * Math.PI) / 180;
+    const ownDelta = (ampRot * wave) * DEG_TO_RAD;
 
     const pivoted = this._applyPivotRotation(
       baseX,
@@ -1608,7 +1775,7 @@ export class TileMotionManager {
     map.matrixAutoUpdate = true;
     map.center.set(pivotU, pivotV);
     map.offset.set(baseTex.offsetX + scrollU * elapsedSec, baseTex.offsetY + scrollV * elapsedSec);
-    map.rotation = baseTex.rotation + ((phaseDeg + rotateSpeedDeg * elapsedSec) * Math.PI / 180);
+    map.rotation = baseTex.rotation + (phaseDeg + rotateSpeedDeg * elapsedSec) * DEG_TO_RAD;
     map.updateMatrix();
 
     this._frameActiveTileIds.add(tileId);
@@ -1630,7 +1797,7 @@ export class TileMotionManager {
       return;
     }
 
-    const suppressForTileEdit = this._externalTileEditSuppressed || this._isTilesEditContextActive();
+    const suppressForTileEdit = this._shouldSuppressForTileEdit();
 
     // Hard UX guard: in Tile editor mode, pause all runtime tile motion so
     // users can reliably select, drag, and align tiles.
@@ -1647,11 +1814,11 @@ export class TileMotionManager {
     // elapsed accumulation so motion can resume smoothly.
     if (this.state?.global?.paused === true) {
       this._lastUpdateNowMs = this._getNowMs();
-      this._requestContinuousRender(120);
+      this._requestContinuousRenderThrottled(120, 100);
       return;
     }
 
-    this._requestContinuousRender(250);
+    this._requestContinuousRenderThrottled(250, 100);
 
     if (this._graphDirty) {
       this._rebuildRuntimeGraph();
@@ -1703,6 +1870,9 @@ export class TileMotionManager {
 
       if (cfg.mode === 'texture') {
         this._applyTextureTile(tileId, cfg, elapsedSec);
+      } else if (cfg.parentId && !cfg.motion) {
+        // Child tile with no own motion config - just apply inherited transform
+        this._applyInheritedOnlyTile(tileId, cfg, frameId);
       } else {
         const motionType = cfg?.motion?.type;
         if (motionType === 'orbit') {

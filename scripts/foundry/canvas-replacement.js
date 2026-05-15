@@ -2682,7 +2682,14 @@ export function initialize() {
       // V14 per-level backgrounds: when the viewed level's background differs
       // from the current Three.js background, swap the bus background and
       // reload mask bundles for the new art.
-      safeCallAsync(async () => {
+      //
+      // The returned promise is exposed on `window.MapShine.__levelMaskRebuildPromise`
+      // so the level-transition curtain can `await` it as part of its
+      // readiness chain. Without this, the cold-load mask fetch +
+      // `forceRepopulate` would run AFTER the curtain has lifted, causing
+      // the visible "scene rebuilds one element at a time" effect that the
+      // user observed on first-visit level transitions.
+      const levelMaskRebuildPromise = safeCallAsync(async () => {
         const ms = window.MapShine;
         if (!sceneSettings.isEnabled(canvas?.scene)) return;
 
@@ -2757,6 +2764,20 @@ export function initialize() {
         ms?.renderLoop?.requestRender?.();
         ms?.renderLoop?.requestContinuousRender?.(300);
       }, 'levelMaskRebuild', Severity.DEGRADED);
+
+      try {
+        if (!window.MapShine) window.MapShine = {};
+        window.MapShine.__levelMaskRebuildPromise = levelMaskRebuildPromise;
+        // Self-clear when this rebuild completes so the curtain isn't left
+        // awaiting a stale promise on the next transition.
+        levelMaskRebuildPromise.finally(() => {
+          try {
+            if (window.MapShine?.__levelMaskRebuildPromise === levelMaskRebuildPromise) {
+              window.MapShine.__levelMaskRebuildPromise = null;
+            }
+          } catch (_) {}
+        });
+      } catch (_) {}
     });
 
     // Hook into Foundry pause/unpause so we can smoothly ramp time scale to 0 and back.

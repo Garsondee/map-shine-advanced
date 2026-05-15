@@ -29,6 +29,7 @@ const HARD_CAP_BLACK_MS = 15000;
 // guesses — each helper resolves the moment its hook fires.
 const CANVAS_READY_TIMEOUT_MS = 8000;
 const CONTEXT_TIMEOUT_MS = 5000;
+const LEVEL_MASK_REBUILD_TIMEOUT_MS = 12000;
 const POPULATE_TIMEOUT_MS = 10000;
 const SHADERS_IDLE_TIMEOUT_MS = 6000;
 
@@ -399,7 +400,20 @@ export class LevelTransitionCurtain {
     if (targetChanged()) return { ready: false, targetChanged: true };
     this._setStage('apply', 1);
 
-    this._setStage('compositor', 0.3);
+    // Await the canvas-replacement.js `levelMaskRebuild` safeCallAsync that
+    // runs in response to `mapShineLevelContextChanged`. On first-visit to
+    // a level it does a cold mask load + `forceRepopulate` — without this
+    // wait those happen AFTER the curtain lifts and produce a visible
+    // "scene rebuilds element by element" effect. On subsequent visits the
+    // promise resolves quickly because the conditional in the handler
+    // short-circuits when the level hasn't changed.
+    this._setStage('compositor', 0.15);
+    await this._awaitLevelMaskRebuild(
+      Math.min(LEVEL_MASK_REBUILD_TIMEOUT_MS, remaining()),
+    );
+    if (targetChanged()) return { ready: false, targetChanged: true };
+
+    this._setStage('compositor', 0.5);
     await this._awaitFloorCompositorPopulate(
       Math.min(POPULATE_TIMEOUT_MS, remaining()),
     );
@@ -513,6 +527,51 @@ export class LevelTransitionCurtain {
       }
       const timer = setTimeout(() => finish(false), Math.max(50, timeoutMs));
     });
+  }
+
+  /**
+   * Await the in-flight `levelMaskRebuild` safeCallAsync exposed by
+   * `canvas-replacement.js` on `window.MapShine.__levelMaskRebuildPromise`.
+   *
+   * The promise's body does (a) `bus.swapBackgroundImage`, (b) cold mask
+   * load via `_loadMasksOnlyForBasePath`, and (c) `compositor.forceRepopulate`.
+   * Awaiting it ensures the curtain stays up through the rebuild rather
+   * than lifting partway through.
+   *
+   * Polls briefly for the promise to appear: the hook handler that creates
+   * the promise runs synchronously from inside our `perform()` callback,
+   * so it is normally present on entry, but a microtask race could delay
+   * its assignment by a tick.
+   *
+   * @param {number} timeoutMs
+   * @private
+   */
+  async _awaitLevelMaskRebuild(timeoutMs) {
+    const deadline = performance.now() + Math.max(50, timeoutMs);
+    const APPEAR_WINDOW_MS = 250;
+    const appearDeadline = performance.now() + APPEAR_WINDOW_MS;
+
+    // Phase 1: poll briefly for the promise to be set.
+    while (
+      performance.now() < appearDeadline
+        && performance.now() < deadline
+        && !this._disposed
+    ) {
+      if (window.MapShine?.__levelMaskRebuildPromise) break;
+      await this._sleep(20);
+    }
+
+    const p = window.MapShine?.__levelMaskRebuildPromise;
+    if (!p) return;
+
+    // Phase 2: await the promise (or hit the timeout).
+    const remainingMs = Math.max(50, deadline - performance.now());
+    try {
+      await Promise.race([
+        p,
+        this._sleep(remainingMs),
+      ]);
+    } catch (_) {}
   }
 
   /**

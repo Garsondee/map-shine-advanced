@@ -91,7 +91,40 @@ const CAPABILITIES = [
   { effectId: 'bushes',            displayName: 'Animated Bushes',          category: 'surface',      performanceImpact: 'medium' },
   { effectId: 'lighting',          displayName: 'Lighting',                 category: 'global',       performanceImpact: 'high' },
   { effectId: 'visionMode',        displayName: 'Vision Mode',              category: 'global',       performanceImpact: 'low' },
+  { effectId: 'external-effects-sequencer',
+    displayName: 'Sequencer / JB2A Integration',
+    category: 'global',
+    performanceImpact: 'medium' },
+  { effectId: 'external-effects-dsn',
+    displayName: 'Dice So Nice Integration',
+    category: 'global',
+    performanceImpact: 'low' },
 ];
+
+/**
+ * Module-presence checks used to gate the external-effects capability rows
+ * in the Graphics Settings UI. Pure presence — actual adapter wiring is
+ * driven by hooks (`diceSoNiceReady`, `sequencerReady`).
+ */
+const EXTERNAL_AVAILABILITY = {
+  'external-effects-sequencer': () => {
+    try {
+      const mod = globalThis.game?.modules?.get?.('sequencer');
+      return !!(mod && mod.active);
+    } catch (_) { return false; }
+  },
+  'external-effects-dsn': () => {
+    try {
+      const mod = globalThis.game?.modules?.get?.('dice-so-nice');
+      return !!(mod && mod.active);
+    } catch (_) { return false; }
+  },
+};
+
+const EXTERNAL_AVAILABILITY_REASON = {
+  'external-effects-sequencer': 'Sequencer module is not installed or not enabled',
+  'external-effects-dsn': 'Dice So Nice module is not installed or not enabled',
+};
 
 /**
  * Populate the EffectCapabilitiesRegistry with all known effect metadata.
@@ -99,6 +132,15 @@ const CAPABILITIES = [
  */
 export function registerAllCapabilities(registry) {
   for (const cap of CAPABILITIES) {
-    registry.register(cap);
+    const availability = EXTERNAL_AVAILABILITY[cap.effectId];
+    if (availability) {
+      registry.register({
+        ...cap,
+        isAvailable: availability,
+        availabilityReason: EXTERNAL_AVAILABILITY_REASON[cap.effectId] ?? '',
+      });
+    } else {
+      registry.register(cap);
+    }
   }
 }

@@ -812,15 +812,19 @@ export class InteractionManager {
       }
     }, 'isOverUI.elementsFromPoint', Severity.COSMETIC);
 
+    const uiRootSelector = '.window-app, .app.window-app, .application, foundry-application, dialog, .dialog, .filepicker, #sidebar, #navigation, #chat, #chat-log, #chat-controls, .chat-popout, .chat-message, .message-content, [data-message-id], [data-app-type="ChatMessage"]';
+    const uiControlSelector = 'button, a, input, select, textarea, label, [role="button"], [data-action], [data-tooltip]';
+    const mapShineUiSelector = '#map-shine-ui, #map-shine-texture-manager, #map-shine-effect-stack, #map-shine-control-panel, #map-shine-loading-overlay';
+
     // If any probed element is a render canvas, treat it as scene interaction
     // unless a hard UI blocker is present (dialogs, inputs, etc.).
     const overCanvas = elements.some((el) => isCanvasEl(el));
     if (overCanvas) {
       // Hard UI blockers still win even over canvas.
       for (const el of elements) {
-        if (el.closest('.window-app, .app.window-app, .application, dialog, .dialog, .filepicker')) return true;
-        if (el.closest('button, a, input, select, textarea, label')) return true;
-        if (el.closest('#map-shine-ui, #map-shine-texture-manager, #map-shine-effect-stack, #map-shine-control-panel, #map-shine-loading-overlay')) return true;
+        if (el.closest(uiRootSelector)) return true;
+        if (el.closest(uiControlSelector)) return true;
+        if (el.closest(mapShineUiSelector)) return true;
         if (el.closest('#map-point-context-menu')) return true;
         if (el.closest('#map-shine-overlay-root')) return true;
         if (el.closest('[data-overlay-id], .map-shine-overlay-ui')) return true;
@@ -837,10 +841,10 @@ export class InteractionManager {
     for (const el of elements) {
       // Foundry VTT UI windows/dialogs (v11/v12+)
       // NOTE: Do not treat `#ui` as a UI hit by itself; it wraps the entire canvas area.
-      if (el.closest('.window-app, .app.window-app, .application, dialog, .dialog, .filepicker, #sidebar, #navigation')) return true;
-      if (el.closest('button, a, input, select, textarea, label')) return true;
+      if (el.closest(uiRootSelector)) return true;
+      if (el.closest(uiControlSelector)) return true;
 
-      if (el.closest('#map-shine-ui, #map-shine-texture-manager, #map-shine-effect-stack, #map-shine-control-panel, #map-shine-loading-overlay')) return true;
+      if (el.closest(mapShineUiSelector)) return true;
       if (el.closest('#map-point-context-menu')) return true;
 
       // World-anchored overlays live in OverlayUIManager.
@@ -881,10 +885,14 @@ export class InteractionManager {
       }
     }, 'hardUi.elementsFromPoint', Severity.COSMETIC);
 
+    const uiRootSelector = '.window-app, .app.window-app, .application, foundry-application, dialog, .dialog, .filepicker, #sidebar, #navigation, #chat, #chat-log, #chat-controls, .chat-popout, .chat-message, .message-content, [data-message-id], [data-app-type="ChatMessage"]';
+    const uiControlSelector = 'button, a, input, select, textarea, label, [role="button"], [data-action], [data-tooltip]';
+    const mapShineUiSelector = '#map-shine-ui, #map-shine-texture-manager, #map-shine-effect-stack, #map-shine-control-panel, #map-shine-loading-overlay';
+
     for (const el of elements) {
-      if (el.closest('.window-app, .app.window-app, .application, dialog, .dialog, .filepicker')) return true;
-      if (el.closest('button, a, input, select, textarea, label')) return true;
-      if (el.closest('#map-shine-ui, #map-shine-texture-manager, #map-shine-effect-stack, #map-shine-control-panel, #map-shine-loading-overlay')) return true;
+      if (el.closest(uiRootSelector)) return true;
+      if (el.closest(uiControlSelector)) return true;
+      if (el.closest(mapShineUiSelector)) return true;
       if (el.closest('#map-point-context-menu')) return true;
       if (el.closest('#map-shine-overlay-root')) return true;
       if (el.closest('[data-overlay-id], .map-shine-overlay-ui')) return true;
@@ -2041,6 +2049,21 @@ export class InteractionManager {
           return;
         }
 
+        // Token interactions are Foundry-authoritative.
+        if (this._isTokensContextActive()) {
+          return;
+        }
+
+        // Defer native template/notes/sounds/regions flows to Foundry.
+        if (
+          this._isSoundsContextActive()
+          || this._isNotesContextActive()
+          || this._isTemplatesContextActive()
+          || this._isRegionsContextActive()
+        ) {
+          return;
+        }
+
         // Tiles are now fully Foundry-native while tile tools are active.
         // Do not run any Three-side double-click logic in this context.
         if (this._isTilesLayerActive()) {
@@ -2067,7 +2090,7 @@ export class InteractionManager {
             return cx >= rect.left && cx <= rect.right && cy >= rect.top && cy <= rect.bottom;
           }, 'dblClick.insideCanvas', Severity.COSMETIC, { fallback: false });
 
-          log.warn('TileInteraction.doubleClick.uiGate', {
+          log.debug('TileInteraction.doubleClick.uiGate', {
             tilesContext: isTilesContextActive,
             hardUiBlocker,
             bypassForTiles,
@@ -2468,6 +2491,33 @@ export class InteractionManager {
     return false;
   }
 
+  _isTokensContextActive() {
+    if (canvas?.tokens?.active) return true;
+    const { optionsName, name, ctor, sceneControlName, sceneControlLayer } = this._getActiveLayerMeta();
+    return optionsName === 'tokens'
+      || optionsName === 'token'
+      || name === 'tokens'
+      || name === 'token'
+      || ctor === 'tokenlayer'
+      || ctor === 'tokenslayer'
+      || sceneControlName === 'tokens'
+      || sceneControlName === 'token'
+      || sceneControlLayer === 'tokens'
+      || sceneControlLayer === 'token';
+  }
+
+  _hasInteractivePreview(layer) {
+    const previewChildren = Array.isArray(layer?.preview?.children) ? layer.preview.children : [];
+    for (const child of previewChildren) {
+      if (!child) continue;
+      if (child.visible === false || child.renderable === false) continue;
+      const alpha = Number(child.alpha);
+      if (Number.isFinite(alpha) && alpha <= 0) continue;
+      return true;
+    }
+    return false;
+  }
+
   _isSoundsContextActive() {
     if (canvas?.sounds?.active) return true;
     const { optionsName, name, ctor, sceneControlName, sceneControlLayer } = this._getActiveLayerMeta();
@@ -2511,7 +2561,7 @@ export class InteractionManager {
   }
 
   _isTemplatesContextActive() {
-    if (canvas?.templates?.active) return true;
+    if (canvas?.templates?.active || this._hasInteractivePreview(canvas?.templates)) return true;
     const { optionsName, name, ctor, sceneControlName, sceneControlLayer } = this._getActiveLayerMeta();
     return optionsName === 'templates'
       || optionsName === 'template'
@@ -2525,7 +2575,7 @@ export class InteractionManager {
   }
 
   _isRegionsContextActive() {
-    if (canvas?.regions?.active) return true;
+    if (canvas?.regions?.active || this._hasInteractivePreview(canvas?.regions)) return true;
     const { optionsName, name, ctor, sceneControlName, sceneControlLayer } = this._getActiveLayerMeta();
     return optionsName === 'regions'
       || optionsName === 'region'
@@ -3242,6 +3292,28 @@ export class InteractionManager {
    */
   onPointerDown(event) {
     try {
+        // Absolute guard: if this pointer event is over hard UI (chat cards,
+        // dialogs, form controls, etc.), never run scene interaction.
+        if (this._isHardUIInteractionEvent(event)) {
+          // Defensive cleanup for stale click-gesture state: if a prior scene
+          // interaction did not complete cleanly, do not let it consume chat/UI clicks.
+          if (this.moveClickState?.active) this._resetMoveClickState();
+          if (this.rightClickState?.active) {
+            this.rightClickState.active = false;
+            this.rightClickState.tokenId = null;
+          }
+          if (this._pendingLight?.active) {
+            this._pendingLight.active = false;
+            this._pendingLight.type = null;
+            this._pendingLight.id = null;
+            this._pendingLight.sprite = null;
+            this._pendingLight.hitPoint = null;
+            this._pendingLight.canEdit = false;
+            this._pendingLight.forceSheet = false;
+          }
+          return;
+        }
+
         // Native PIXI overlay workflows must bypass Three interaction entirely.
         // We listen in window capture phase, so without this guard, Three can
         // still consume clicks and trigger create-path logic (e.g. sounds).
@@ -3255,15 +3327,28 @@ export class InteractionManager {
           return;
         }
 
+        // Foundry must own token selection/targeting/marquee workflows.
+        if (this._isTokensContextActive() && !this.mapPointDraw?.active) {
+          return;
+        }
+
         const isTilesContextActive = this._isTilesLayerActive();
         const isUiEvent = this._isEventFromUI(event);
         if (isUiEvent) {
           const hardUiBlocker = this._isHardUIInteractionEvent(event);
           const bypassForTiles = isTilesContextActive && !hardUiBlocker;
           const targetPath = (event && typeof event.composedPath === 'function') ? event.composedPath() : null;
+          const pixiCanvas = canvas?.app?.view || null;
+          const boardCanvas = document.getElementById('board');
           const targetHitsCanvas = Array.isArray(targetPath)
             ? targetPath.includes(this.canvasElement)
-            : (event?.target === this.canvasElement);
+              || (pixiCanvas ? targetPath.includes(pixiCanvas) : false)
+              || (boardCanvas ? targetPath.includes(boardCanvas) : false)
+            : (
+              event?.target === this.canvasElement
+              || (pixiCanvas && event?.target === pixiCanvas)
+              || (boardCanvas && event?.target === boardCanvas)
+            );
           const insideCanvas = safeCall(() => {
             const rect = this.canvasElement?.getBoundingClientRect?.();
             if (!rect) return false;
@@ -3273,7 +3358,7 @@ export class InteractionManager {
             return cx >= rect.left && cx <= rect.right && cy >= rect.top && cy <= rect.bottom;
           }, 'pointerDown.uiGate.insideCanvas', Severity.COSMETIC, { fallback: false });
 
-          log.warn('TileInteraction.pointerDown.uiGate', {
+          log.debug('TileInteraction.pointerDown.uiGate', {
             tilesContext: isTilesContextActive,
             hardUiBlocker,
             bypassForTiles,
@@ -3282,12 +3367,18 @@ export class InteractionManager {
             button: event?.button
           });
 
+          // Hard UI events (chat cards, sidebar controls, dialogs, form inputs, etc.)
+          // must never fall through into scene interaction. If they do, token
+          // selection/control state can change before downstream systems (PF2E/FVTT)
+          // consume the UI click.
+          if (hardUiBlocker) return;
+
           // Global UI roots can appear in elementsFromPoint even when the actual
           // pointer event originated from the scene canvas. Keep canvas-originated
           // clicks interactive (token select/drag), while still blocking true UI hits.
           if (!bypassForTiles) {
             if (!insideCanvas) return;
-            if (hardUiBlocker && !targetHitsCanvas) return;
+            if (!targetHitsCanvas) return;
           }
         }
 
@@ -5221,13 +5312,29 @@ export class InteractionManager {
    */
   onPointerMove(event) {
     try {
+        const hardUiBlocker = this._isHardUIInteractionEvent(event);
         // Drawings drag/preview lifecycle is owned by Foundry DrawingsLayer.
         if (this._isDrawingsContextActive()) {
           return;
         }
 
         if (
-          this._isEventFromUI(event) &&
+          this._isTokensContextActive() &&
+          !this.dragState?.active &&
+          !this.dragSelect?.active &&
+          !this.wallDraw?.active &&
+          !this.lightPlacement?.active &&
+          !this.soundPlacement?.active &&
+          !this.mapPointDraw?.active &&
+          !this.rightClickState?.active &&
+          !this.moveClickState?.active &&
+          !this._pendingLight?.active
+        ) {
+          return;
+        }
+
+        if (
+          (hardUiBlocker || this._isEventFromUI(event)) &&
           !this.dragState?.active &&
           !this.dragSelect?.active &&
           !this.wallDraw?.active &&
@@ -5942,8 +6049,26 @@ export class InteractionManager {
    */
   async onPointerUp(event) {
     try {
+        const hardUiBlocker = this._isHardUIInteractionEvent(event);
         // WP-3: Cancel ping long-press on any pointer up.
         this._cancelPingLongPress();
+
+        // Never run scene pointer-up side effects for chat / sidebar / dialogs
+        // unless we are in the middle of an active scene gesture (drag, marquee, etc.).
+        if (hardUiBlocker) {
+          const sceneGestureActive = !!(
+            this.dragState?.active
+            || this.dragSelect?.active
+            || this.wallDraw?.active
+            || this.lightPlacement?.active
+            || this.soundPlacement?.active
+            || this.mapPointDraw?.active
+            || this.rightClickState?.active
+            || this.moveClickState?.active
+            || this._pendingLight?.active
+          );
+          if (!sceneGestureActive) return;
+        }
 
         // Drawings completion/cancel is handled by Foundry DrawingsLayer.
         if (this._isDrawingsContextActive()) {
@@ -5951,7 +6076,22 @@ export class InteractionManager {
         }
 
         if (
-          this._isEventFromUI(event) &&
+          this._isTokensContextActive() &&
+          !this.dragState?.active &&
+          !this.dragSelect?.active &&
+          !this.wallDraw?.active &&
+          !this.lightPlacement?.active &&
+          !this.soundPlacement?.active &&
+          !this.mapPointDraw?.active &&
+          !this.rightClickState?.active &&
+          !this.moveClickState?.active &&
+          !this._pendingLight?.active
+        ) {
+          return;
+        }
+
+        if (
+          (hardUiBlocker || this._isEventFromUI(event)) &&
           !this.dragState?.active &&
           !this.dragSelect?.active &&
           !this.wallDraw?.active &&
@@ -7269,6 +7409,8 @@ export class InteractionManager {
     // - T toggles target on currently hovered token
     // - Shift+T preserves existing targets
     if (!isMod && key === 't') {
+      // Let Foundry own token targeting keybinds when token context is active.
+      if (this._isTokensContextActive()) return;
       const activeLayer = canvas?.activeLayer;
 
       // Prefer Foundry's authoritative token-layer hover first. When MapShine

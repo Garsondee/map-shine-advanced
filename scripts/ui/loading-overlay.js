@@ -672,26 +672,41 @@ export class LoadingOverlay {
    * caller wants the screen black before performing some operation underneath.
    *
    * @param {number} [durationMs=280]
+   * @param {object} [options]
+   * @param {boolean} [options.contentVisible=true] When false, the inner panel
+   *   stays at content-opacity 0 throughout the fade so the screen reaches
+   *   solid-black with no visible panel. The caller is expected to bring the
+   *   panel in later via {@link #showPanel}. Used by the scene-transition
+   *   curtain so the loading screen appears AFTER the cover, not during it.
    * @returns {Promise<void>} Resolves when opacity reaches 1 (or hits the
    *   safety timeout).
    */
-  async fadeBlack(durationMs = 280) {
+  async fadeBlack(durationMs = 280, options = undefined) {
     this.ensure();
     const token = ++this._token;
     const d = Math.max(0, Number.isFinite(durationMs) ? durationMs : 280);
+    const contentVisible = options?.contentVisible !== false;
 
     this._autoProgress = null;
+
+    // If the overlay is fully hidden (display:none from a previous reveal),
+    // its inline opacity may still be 1 from the last fadeIn. Treat that as
+    // "starting from invisible" so the fade actually animates.
+    const wasHidden = this.el.style.display === 'none'
+      || this.el.classList.contains('map-shine-loading-overlay--hidden');
 
     this.el.style.display = 'flex';
     this.el.style.pointerEvents = 'auto';
     this.el.style.backgroundColor = 'rgba(0, 0, 0, 1)';
     this.el.style.transitionProperty = 'opacity';
     this.el.style.transitionTimingFunction = 'ease';
-    this._setContentOpacity(1, 0);
+    this._setContentOpacity(contentVisible ? 1 : 0, 0);
     this.el.classList.remove('map-shine-loading-overlay--hidden');
     this.el.classList.add('map-shine-loading-overlay--black');
 
-    const startOpacity = parseFloat(this.el.style.opacity || '0') || 0;
+    const parsedOpacity = parseFloat(this.el.style.opacity || '0');
+    const startOpacity = wasHidden ? 0
+      : (Number.isFinite(parsedOpacity) ? parsedOpacity : 0);
     if (startOpacity >= 0.999) {
       // Already fully black — nothing to animate.
       this.el.style.transitionDuration = '0ms';
@@ -707,6 +722,70 @@ export class LoadingOverlay {
     this.el.style.opacity = '1';
 
     await this._waitForOpacityTransition(this.el, d);
+    if (token !== this._token) return;
+  }
+
+  /**
+   * Fade the inner content panel from invisible to visible (opacity 0 → 1).
+   *
+   * Intended to follow {@link #fadeBlack} (with `contentVisible: false`) so the
+   * loading screen appears smoothly over a solid-black backdrop. The outer
+   * overlay's opacity / background are left untouched.
+   *
+   * @param {number} [durationMs=300]
+   * @returns {Promise<void>} Resolves on `transitionend` (or safety timeout).
+   */
+  async showPanel(durationMs = 300) {
+    this.ensure();
+    const token = this._token;
+    const d = Math.max(0, Number.isFinite(durationMs) ? durationMs : 300);
+
+    if (!this._contentEl) return;
+
+    const startOpacity = parseFloat(this._contentEl.style.opacity || '0') || 0;
+    if (startOpacity >= 0.999) {
+      this._setContentOpacity(1, 0);
+      return;
+    }
+
+    this._setContentOpacity(startOpacity, 0);
+    void this._contentEl.offsetHeight;
+    this._setContentOpacity(1, d);
+
+    await this._waitForOpacityTransition(this._contentEl, d);
+    if (token !== this._token) return;
+  }
+
+  /**
+   * Fade the inner content panel from visible to invisible (opacity 1 → 0).
+   *
+   * Intended for the second-to-last step of the scene-transition curtain so
+   * the loading screen disappears against the still-black backdrop, before
+   * {@link #fadeClear} reveals the freshly drawn scene underneath. The outer
+   * overlay's opacity / background are left untouched.
+   *
+   * @param {number} [durationMs=300]
+   * @returns {Promise<void>} Resolves on `transitionend` (or safety timeout).
+   */
+  async hidePanel(durationMs = 300) {
+    this.ensure();
+    const token = this._token;
+    const d = Math.max(0, Number.isFinite(durationMs) ? durationMs : 300);
+
+    if (!this._contentEl) return;
+
+    const startOpacity = parseFloat(this._contentEl.style.opacity || '1');
+    const start = Number.isFinite(startOpacity) ? startOpacity : 1;
+    if (start <= 0.001) {
+      this._setContentOpacity(0, 0);
+      return;
+    }
+
+    this._setContentOpacity(start, 0);
+    void this._contentEl.offsetHeight;
+    this._setContentOpacity(0, d);
+
+    await this._waitForOpacityTransition(this._contentEl, d);
     if (token !== this._token) return;
   }
 

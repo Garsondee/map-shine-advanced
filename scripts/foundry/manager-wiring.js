@@ -12,6 +12,7 @@
  */
 
 import { LevelTransitionCurtain } from '../scene/level-transition-curtain.js';
+import { sceneTransitionCurtain } from '../scene/scene-transition-curtain.js';
 
 /** @type {LevelTransitionCurtain|null} */
 let _levelTransitionCurtain = null;
@@ -36,6 +37,11 @@ export function registerLevelTransitionCurtain(mapShine, cameraFollower) {
   _levelTransitionCurtain.register(cameraFollower);
   if (mapShine) {
     mapShine.levelTransitionCurtain = _levelTransitionCurtain;
+    // Mirror the scene-transition curtain singleton for console diagnostics.
+    // (Lifecycle is module-scope, so we don't dispose it on canvas teardown.)
+    if (!mapShine.sceneTransitionCurtain) {
+      mapShine.sceneTransitionCurtain = sceneTransitionCurtain;
+    }
   }
 }
 
@@ -108,6 +114,7 @@ export function exposeGlobals(mapShine, refs) {
     'tileMotionManager',
     'weatherController', 'renderLoop', 'sceneDebug', 'controlsIntegration',
     'dynamicExposureManager', 'physicsRopeManager', 'assetLoader',
+    'externalEffects',
   ];
 
   for (const key of MANAGER_EXPOSURES) {

@@ -2,7 +2,7 @@
   "id": "map-shine-advanced",
   "title": "Map Shine Advanced",
   "description": "This Foundry VTT module is designed to bring the capabilities of three.js into Foundry VTT with a focus on producing 2.5 battlemaps with BPR shading, particles and advanced rendering options.",
-  "version": "0.2.0.28",
+  "version": "0.3.0.2",
   "library": "false",
   "manifestPlusVersion": "1.2.0",
   "compatibility": {
@@ -19,7 +19,21 @@
   ],
   "relationships": {
     "systems": [],
-    "requires": []
+    "requires": [],
+    "recommends": [
+      {
+        "id": "dice-so-nice",
+        "type": "module",
+        "reason": "Map Shine Advanced composites Dice So Nice's roll canvas inside its Three.js post-processing pipeline (bloom, color grade, lens). Toggle in Graphics Settings.",
+        "compatibility": { "verified": "6.0.0" }
+      },
+      {
+        "id": "sequencer",
+        "type": "module",
+        "reason": "Map Shine Advanced mirrors Sequencer effects (including JB2A) into its Three.js scene so they receive in-scene lighting and post-FX. Toggle in Graphics Settings.",
+        "compatibility": { "verified": "4.0.1" }
+      }
+    ]
   },
   "esmodules": [
     "scripts/vendor/tweakpane-loader.js",

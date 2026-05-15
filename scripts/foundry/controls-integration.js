@@ -188,6 +188,68 @@ export class ControlsIntegration {
       || sceneControlLayer === 'drawing';
   }
 
+  /**
+   * Detect whether a layer has a visible interactive preview object.
+   * This catches chat-driven placement workflows before Foundry switches the
+   * active layer/control state.
+   * @param {any} layer
+   * @returns {boolean}
+   * @private
+   */
+  _hasInteractivePreview(layer) {
+    const previewChildren = Array.isArray(layer?.preview?.children) ? layer.preview.children : [];
+    for (const child of previewChildren) {
+      if (!child) continue;
+      if (child.visible === false || child.renderable === false) continue;
+      const alpha = Number(child.alpha);
+      if (Number.isFinite(alpha) && alpha <= 0) continue;
+      return true;
+    }
+    return false;
+  }
+
+  _isNotesContextActive() {
+    if (canvas?.notes?.active) return true;
+    const { optionsName, name, ctor, sceneControlName, sceneControlLayer } = this._getActiveLayerMeta();
+    return optionsName === 'notes'
+      || optionsName === 'note'
+      || name === 'notes'
+      || name === 'note'
+      || ctor === 'noteslayer'
+      || sceneControlName === 'notes'
+      || sceneControlName === 'note'
+      || sceneControlLayer === 'notes'
+      || sceneControlLayer === 'note';
+  }
+
+  _isTemplatesContextActive() {
+    if (canvas?.templates?.active || this._hasInteractivePreview(canvas?.templates)) return true;
+    const { optionsName, name, ctor, sceneControlName, sceneControlLayer } = this._getActiveLayerMeta();
+    return optionsName === 'templates'
+      || optionsName === 'template'
+      || name === 'templates'
+      || name === 'template'
+      || ctor === 'templatelayer'
+      || sceneControlName === 'templates'
+      || sceneControlName === 'template'
+      || sceneControlLayer === 'templates'
+      || sceneControlLayer === 'template';
+  }
+
+  _isRegionsContextActive() {
+    if (canvas?.regions?.active || this._hasInteractivePreview(canvas?.regions)) return true;
+    const { optionsName, name, ctor, sceneControlName, sceneControlLayer } = this._getActiveLayerMeta();
+    return optionsName === 'regions'
+      || optionsName === 'region'
+      || name === 'regions'
+      || name === 'region'
+      || ctor === 'regionlayer'
+      || sceneControlName === 'regions'
+      || sceneControlName === 'region'
+      || sceneControlLayer === 'regions'
+      || sceneControlLayer === 'region';
+  }
+
   _isPixiEditorOverlayNeeded() {
     // Tokens stay Three.js-native; walls/lighting use Foundry PIXI tools. The
     // InputRouter drives pointer routing — this gate stays false.

@@ -173,9 +173,16 @@ export class MaskBindingController {
 
   /**
    * Pick the texture to push down the single-texture setter path for a
-   * consumer. We prefer the active floor's texture; if that slot is null we
-   * fall back to the first non-null texture across visible floors so
-   * consumers never receive a sudden null during async promotion.
+   * consumer. We prefer the active floor's texture.
+   *
+   * For most mask types we then fall back to the first non-null texture across
+   * visible floors so consumers never receive a sudden null during async
+   * promotion.
+   *
+   * For outdoors-family masks (`outdoors`, `skyReach`) we intentionally DO NOT
+   * cross-floor fallback. Reusing another floor's outdoors layout on the active
+   * floor causes incorrect indoor darkening / weather gating in stacked scenes.
+   * In that case callers should use their neutral fallback path instead.
    *
    * @param {PerFloorMaskBundle[]} bundles
    * @param {number} activeIndex
@@ -186,6 +193,7 @@ export class MaskBindingController {
   _pickSingleTex(bundles, activeIndex, maskId) {
     const active = bundles.find((b) => b.index === activeIndex);
     if (active?.masks?.[maskId]) return active.masks[maskId];
+    if (maskId === 'outdoors' || maskId === 'skyReach') return null;
     for (const b of bundles) {
       if (b.masks?.[maskId]) return b.masks[maskId];
     }

@@ -147,6 +147,84 @@ export function motionAboveTokensOrder(floorIndex, intraOffset = 0) {
   return computeRenderOrder(floorIndex, 'FLOOR_MOTION_TOP', intraOffset);
 }
 
+// ── External effects ordering (Sequencer / JB2A) ─────────────────────────────
+
+/**
+ * Sequencer sortLayer breakpoints used by `externalEffectOrder` to decide
+ * which existing role band an external effect should land in. Values match
+ * Sequencer 4.x defaults documented in `docs/api/effect.md`:
+ *
+ *   sortLayer  meaning              MSA role band
+ *   -----------------------------------------------------------------
+ *   <  300     deep underlay        FLOOR_ALBEDO (intra-top quarter)
+ *   <  700     belowTiles/Tokens    FLOOR_EFFECTS
+ *   <  900     above tokens (def)   FLOOR_OVERHEAD_FX (bottom half)
+ *   >= 900     aboveLighting/etc.   FLOOR_OVERHEAD_FX (top half) → MOTION_TOP for >= 1000
+ *
+ * External effects use a thin slice **at the top** of each band so MSA's
+ * own per-tile overlays (which spread across the band's intra range) keep
+ * their existing layering — external effects are sorted ABOVE same-floor
+ * MSA overlays in the same band.
+ */
+export const EXTERNAL_SORT_LAYER_BREAKPOINTS = Object.freeze({
+  BELOW_TILES: 300,
+  BELOW_TOKENS: 700,
+  ABOVE_TOKENS: 900,
+  ABOVE_LIGHTING: 1000,
+});
+
+/** Width of the external-effects slice carved from each role band. */
+const EXTERNAL_BAND_SLICE = 600;
+
+/**
+ * Compute renderOrder for an "external" effect (Sequencer / JB2A mirror, etc.)
+ * given Sequencer-style `sortLayer` and intra-floor `sort` values.
+ *
+ * The function maps `sortLayer` to one of the existing MSA role bands
+ * (FLOOR_EFFECTS, FLOOR_OVERHEAD_FX, FLOOR_MOTION_TOP) and uses the **top**
+ * slice of that band so external effects sit just above MSA's own overlays
+ * in the same band — preserving MSA's tile/sprite ordering underneath.
+ *
+ * @param {number} floorIndex  - 0-based floor index
+ * @param {number} sortLayer   - Sequencer sortLayer (300/600/700/800/900/1000)
+ * @param {number} [sort=0]    - Sequencer sort/zIndex tiebreaker; clamped to slice width
+ * @returns {number} renderOrder value
+ */
+export function externalEffectOrder(floorIndex, sortLayer, sort = 0) {
+  const fi = Number.isFinite(Number(floorIndex)) ? Math.max(0, Number(floorIndex)) : 0;
+  const sl = Number.isFinite(Number(sortLayer)) ? Number(sortLayer) : 800;
+  const tieRaw = Number.isFinite(Number(sort)) ? Number(sort) : 0;
+  // Quantize tiebreaker into the slice width while preserving sign-ordering.
+  const tie = Math.max(0, Math.min(EXTERNAL_BAND_SLICE - 1, Math.round(tieRaw)));
+  const floorBase = fi * RENDER_ORDER_PER_FLOOR;
+
+  // sortLayer >= 1000 (e.g. weather/aboveLighting hard pin) → MOTION_TOP slice.
+  if (sl >= EXTERNAL_SORT_LAYER_BREAKPOINTS.ABOVE_LIGHTING) {
+    return floorBase + ROLE_OFFSETS.FLOOR_MOTION_TOP + Math.min(BAND_SIZE - 1, tie);
+  }
+
+  // 900 ≤ sortLayer < 1000 (aboveLighting cosmetic) → top slice of OVERHEAD_FX.
+  if (sl >= EXTERNAL_SORT_LAYER_BREAKPOINTS.ABOVE_TOKENS) {
+    const sliceBase = BAND_SIZE - EXTERNAL_BAND_SLICE; // top slice of band
+    return floorBase + ROLE_OFFSETS.FLOOR_OVERHEAD_FX + sliceBase + tie;
+  }
+
+  // 700 ≤ sortLayer < 900 (default — above tokens) → bottom slice of OVERHEAD_FX.
+  if (sl >= EXTERNAL_SORT_LAYER_BREAKPOINTS.BELOW_TOKENS) {
+    return floorBase + ROLE_OFFSETS.FLOOR_OVERHEAD_FX + tie;
+  }
+
+  // 300 ≤ sortLayer < 700 (belowTokens) → top slice of FLOOR_EFFECTS.
+  if (sl >= EXTERNAL_SORT_LAYER_BREAKPOINTS.BELOW_TILES) {
+    const sliceBase = BAND_SIZE - EXTERNAL_BAND_SLICE;
+    return floorBase + ROLE_OFFSETS.FLOOR_EFFECTS + sliceBase + tie;
+  }
+
+  // sortLayer < 300 (belowTiles) → top slice of FLOOR_ALBEDO.
+  const sliceBase = BAND_SIZE - EXTERNAL_BAND_SLICE;
+  return floorBase + ROLE_OFFSETS.FLOOR_ALBEDO + sliceBase + tie;
+}
+
 // ── Tile-relative effect order (for per-tile additive overlays) ──────────────
 
 /**

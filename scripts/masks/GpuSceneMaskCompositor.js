@@ -2462,6 +2462,71 @@ export class GpuSceneMaskCompositor {
   }
 
   /**
+   * Reset every sticky per-band state that could prevent a fresh compose
+   * for `floorKey` on the next call to {@link composeFloor}.
+   *
+   * Background:
+   *
+   *  - `preloadAllFloors` writes an empty sentinel (`{ masks: [], basePath: null }`)
+   *    into `_floorMeta` for bands whose compose attempt returned null. The
+   *    sentinel is intentional — it stops the periodic warmup from re-attempting
+   *    the same failing band every ~1s. But it also masks the cache-hit
+   *    cheap-return in `composeFloor` (which still treats `masks.length === 0`
+   *    as a miss), and combined with the next two flags it blocks re-attempts
+   *    on user-driven navigation.
+   *
+   *  - `_upperBandNoOutdoorsAccepted.add(bandKey)` is added after a successful
+   *    compose that produced no `_Outdoors` sampler. It's intended to silence
+   *    the "evict band meta without outdoors" loop on upper bands that
+   *    legitimately have no `_Outdoors` art. Once set it sticks forever, so a
+   *    band that failed compose transiently (e.g. asset still loading) stays
+   *    locked out until the scene is reloaded.
+   *
+   *  - `_upperOutdoorsMetaRepairCount` is the per-band counter behind the
+   *    cache-hit repair path's "at most 2 retries" cap. Once it reaches 2,
+   *    the repair path stops trying for that band.
+   *
+   * Called by `canvas-replacement.js` on every `mapShineLevelContextChanged`
+   * for the newly active band so that explicit user navigation always gets a
+   * fresh attempt, regardless of what earlier preload runs decided.
+   *
+   * This is intentionally narrow: it only touches state for `floorKey`. It does
+   * NOT clear `_floorCache` GPU RTs by itself — the imminent `composeFloor`
+   * will overwrite them via its existing `_evictGpuMaskRtForFloor` path.
+   *
+   * @param {string} floorKey - e.g. "10:20"
+   */
+  primeFloorForRecompose(floorKey) {
+    if (!floorKey) return;
+    const key = String(floorKey);
+
+    // Drop empty sentinels (`{ masks: [], basePath: null }`). Leave real
+    // populated entries alone — composeFloor's own staleness checks own those.
+    try {
+      const meta = this._floorMeta.get(key);
+      if (meta && (!Array.isArray(meta.masks) || meta.masks.length === 0)) {
+        this._floorMeta.delete(key);
+      }
+    } catch (_) {}
+
+    // Always lift the "accepted no outdoors" lock for this band — the user
+    // is actively navigating here, so a stale earlier verdict shouldn't
+    // suppress a fresh compose. composeFloor will re-add it on its own if
+    // the new attempt still produces no outdoors.
+    try { this._upperBandNoOutdoorsAccepted.delete(key); } catch (_) {}
+
+    // Reset the cache-hit repair counter so the 2-retry cap doesn't block
+    // a fresh attempt on this navigation.
+    try { this._upperOutdoorsMetaRepairCount.delete(key); } catch (_) {}
+
+    // Bump the cache version so consumers that key off `getFloorCacheVersion`
+    // (notably the FloorCompositor outdoors binding signature) treat this
+    // as a meaningful state change even when no RT churn happens before
+    // composeFloor lands the new textures.
+    this._floorCacheVersion++;
+  }
+
+  /**
    * TEMP DEBUG: aggressively clear all cached per-floor mask state.
    * Used when `_disableFloorCaching` is enabled so each composeFloor call starts
    * from a clean slate.

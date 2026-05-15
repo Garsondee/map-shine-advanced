@@ -2094,8 +2094,13 @@ vec3 ms_applySceneLighting(vec3 color) {
     const isLocalTargeted = !!token.isTargeted || !!game?.user?.targets?.has?.(token);
     const otherTargetUsers = this._getOtherTargetUsers(token);
 
-    arrows.visible = isLocalTargeted;
-    if (isLocalTargeted) {
+    // When Foundry's token layer is active, native PIXI already draws targeting
+    // reticles — hide Map Shine's duplicate corner arrows for the local user.
+    const deferLocalTargetRing = !!canvas?.tokens?.active;
+    const showLocalArrows = isLocalTargeted && !deferLocalTargetRing;
+
+    arrows.visible = showLocalArrows;
+    if (showLocalArrows) {
       const selfColor = this._getSelfTargetColor();
       for (const child of arrows.children || []) {
         if (child?.material?.color?.setHex) child.material.color.setHex(selfColor);
@@ -2103,7 +2108,7 @@ vec3 ms_applySceneLighting(vec3 color) {
     }
 
     this._refreshTargetPips(spriteData, otherTargetUsers);
-    indicator.visible = isLocalTargeted || (otherTargetUsers.length > 0);
+    indicator.visible = showLocalArrows || (otherTargetUsers.length > 0);
   }
 
   /**

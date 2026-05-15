@@ -3559,6 +3559,15 @@ export class FloorCompositor {
       ? this._overheadShadowEffect.ceilingTransmittanceTextureForLighting : null;
     const overheadRoofRestrictLightTex = _disableRoofInLighting ? null : (this._overheadShadowEffect?.roofRestrictLightTexture ?? null);
 
+    // External-effects compositor (Sequencer / JB2A mirrors live in the bus
+    // scene — sync transforms immediately before the per-level pipeline kicks
+    // off so the bus render sees current positions). DSN composite runs later.
+    try {
+      window.MapShine?.externalEffects?.tickBeforeBusRender?.();
+    } catch (err) {
+      log.warn('FloorCompositor: externalEffects.tickBeforeBusRender failed:', err);
+    }
+
     // ── Per-level scene RTs + composite (sole V2 render path) ───────────────
     const _compositeOut = this._renderPerLevelPipeline({
       _profiling,
@@ -3588,6 +3597,24 @@ export class FloorCompositor {
       return;
     }
     let currentInput = _compositeOut;
+
+    // External effects: composite Dice So Nice's own canvas onto the scene
+    // BEFORE distortion/fog/lens, so dice receive those post-FX along with
+    // the rest of the scene (bloom + color grade already applied per-level).
+    try {
+      const ee = window.MapShine?.externalEffects ?? null;
+      if (ee && ee.requiresContinuousRender?.()) {
+        const dsnOutput = (currentInput === this._postA) ? this._postB : this._postA;
+        const next = withSceneScissor(this.renderer, () =>
+          ee.renderDsnPass(this.renderer, currentInput, dsnOutput)
+        );
+        if (next && next !== currentInput) {
+          currentInput = next;
+        }
+      }
+    } catch (err) {
+      log.warn('FloorCompositor: externalEffects.renderDsnPass failed:', err);
+    }
 
     // Distortion pass (runs once on composite; not inside per-level loop)
     if (resolveEffectEnabled(this._distortionEffect)) {
@@ -4230,13 +4257,17 @@ export class FloorCompositor {
    * 4) Ground floor outdoors texture
    *
    * @param {{bottom:number,top:number}|null} context
-   * @param {{allowWeatherRoofMap?: boolean}} [options] When false (lighting pass), never use
+   * @param {{allowWeatherRoofMap?: boolean, strictViewedFloorOnly?: boolean}} [options]
+   *   `allowWeatherRoofMap=false` (lighting pass) never uses
    *   `weatherController.roofMap` — it is not an indoor/outdoor floor mask and wrongly gates lights.
+   *   `strictViewedFloorOnly=true` disables sibling/lower-band fallbacks inside
+   *   `resolveCompositorOutdoorsTexture` so multi-floor scenes never reuse another
+   *   floor's outdoors mask when the viewed band's texture is missing.
    * @returns {{texture: THREE.Texture|null, floorKey: string|null}}
    * @private
    */
   _resolveOutdoorsMask(context = null, options = {}) {
-    const { allowWeatherRoofMap = true } = options;
+    const { allowWeatherRoofMap = true, strictViewedFloorOnly = false } = options;
 
     let floorStackFloors = [];
     try {
@@ -4296,6 +4327,7 @@ export class FloorCompositor {
       {
         skipGroundFallback: skipGroundGlobalFallback,
         allowBundleFallback,
+        strictViewedFloorOnly,
       },
     );
     if (gpu.texture) {
@@ -4397,20 +4429,6 @@ export class FloorCompositor {
     const { context = null, force = false } = options;
     try {
       const compositor = window.MapShine?.sceneComposer?._sceneMaskCompositor ?? null;
-      const resolved = this._resolveOutdoorsMask(context);
-      let outdoorsTex = resolved.texture ?? null;
-      // Water movement suppression must use a real _Outdoors mask.
-      // Do not seed this from the generic path because it may fall back to
-      // weatherController.roofMap (not floor-authored indoors/outdoors data).
-      const waterResolved = this._resolveOutdoorsMask(context, { allowWeatherRoofMap: false });
-      let waterOutdoorsTex = waterResolved.texture ?? null;
-      let waterOutdoorsRoute = waterResolved.floorKey ?? null;
-      // Sky grading is very sensitive to mask source quality/alignment.
-      // Resolve a strict floor outdoors texture for sky that never falls back to
-      // weather roof maps and never reuses stale previous masks.
-      const skyResolved = this._resolveOutdoorsMask(context, { allowWeatherRoofMap: false });
-      const skyOutdoorsTex = skyResolved.texture ?? null;
-
       let floorStackForSync = [];
       try {
         floorStackForSync = window.MapShine?.floorStack?.getFloors?.() ?? [];
@@ -4418,6 +4436,31 @@ export class FloorCompositor {
         floorStackForSync = [];
       }
       const multiFloorScene = floorStackForSync.length > 1;
+
+      // Multi-floor bands must not reuse sibling/lower-floor outdoors fallbacks.
+      // If the viewed floor's outdoors is missing, prefer neutral indoor over
+      // inheriting another floor's indoor/outdoor layout.
+      const resolved = this._resolveOutdoorsMask(context, {
+        strictViewedFloorOnly: multiFloorScene,
+      });
+      let outdoorsTex = resolved.texture ?? null;
+      // Water movement suppression must use a real _Outdoors mask.
+      // Do not seed this from the generic path because it may fall back to
+      // weatherController.roofMap (not floor-authored indoors/outdoors data).
+      const waterResolved = this._resolveOutdoorsMask(context, {
+        allowWeatherRoofMap: false,
+        strictViewedFloorOnly: multiFloorScene,
+      });
+      let waterOutdoorsTex = waterResolved.texture ?? null;
+      let waterOutdoorsRoute = waterResolved.floorKey ?? null;
+      // Sky grading is very sensitive to mask source quality/alignment.
+      // Resolve a strict floor outdoors texture for sky that never falls back to
+      // weather roof maps and never reuses stale previous masks.
+      const skyResolved = this._resolveOutdoorsMask(context, {
+        allowWeatherRoofMap: false,
+        strictViewedFloorOnly: multiFloorScene,
+      });
+      const skyOutdoorsTex = skyResolved.texture ?? null;
       const neutralOutdoorsTex = this._getNeutralOutdoorsTexture();
       let compositorHasFloorMasks = false;
       try {

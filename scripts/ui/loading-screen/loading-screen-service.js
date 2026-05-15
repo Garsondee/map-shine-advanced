@@ -49,6 +49,10 @@ class LoadingScreenService {
       hide: () => {},
       fadeToBlack: async () => {},
       fadeIn: async () => {},
+      fadeBlack: async () => {},
+      fadeClear: async () => {},
+      showPanel: async () => {},
+      hidePanel: async () => {},
       enableDebugMode: () => {},
       disableDebugMode: () => {},
       appendDebugLine: () => {},
@@ -240,6 +244,74 @@ class LoadingScreenService {
   async fadeIn(durationMs = 5000, contentFadeMs = 2000) {
     if (!this.shouldHandleLoading()) return;
     await this._renderer().fadeIn?.(durationMs, contentFadeMs);
+  }
+
+  /**
+   * Opacity-only fade to fully-opaque black. Used by the scene-transition and
+   * level-transition curtains. Falls back to {@link #fadeToBlack} on renderers
+   * that have not implemented the opacity-only path.
+   *
+   * @param {number} [durationMs=280]
+   * @param {object} [options]
+   * @param {boolean} [options.contentVisible=true]
+   * @returns {Promise<void>}
+   */
+  async fadeBlack(durationMs = 280, options = undefined) {
+    if (!this.shouldHandleLoading()) return;
+    const r = this._renderer();
+    if (typeof r.fadeBlack === 'function') {
+      await r.fadeBlack(durationMs, options);
+      return;
+    }
+    await r.fadeToBlack?.(durationMs, 0);
+  }
+
+  /**
+   * Opacity-only fade from black to fully-transparent, then hide. Falls back
+   * to {@link #fadeIn} on renderers without an explicit `fadeClear`.
+   *
+   * @param {number} [durationMs=520]
+   * @returns {Promise<void>}
+   */
+  async fadeClear(durationMs = 520) {
+    if (!this.shouldHandleLoading()) return;
+    const r = this._renderer();
+    if (typeof r.fadeClear === 'function') {
+      await r.fadeClear(durationMs);
+      return;
+    }
+    await r.fadeIn?.(durationMs, 0);
+  }
+
+  /**
+   * Fade the inner loading panel from invisible to visible (opacity 0 → 1).
+   * Renderers without an explicit panel concept (e.g. the styled wallpaper
+   * renderer) treat this as a no-op.
+   *
+   * @param {number} [durationMs=300]
+   * @returns {Promise<void>}
+   */
+  async showPanel(durationMs = 300) {
+    if (!this.shouldHandleLoading()) return;
+    const r = this._renderer();
+    if (typeof r.showPanel === 'function') {
+      await r.showPanel(durationMs);
+    }
+  }
+
+  /**
+   * Fade the inner loading panel from visible to invisible (opacity 1 → 0).
+   * Renderers without an explicit panel concept treat this as a no-op.
+   *
+   * @param {number} [durationMs=300]
+   * @returns {Promise<void>}
+   */
+  async hidePanel(durationMs = 300) {
+    if (!this.shouldHandleLoading()) return;
+    const r = this._renderer();
+    if (typeof r.hidePanel === 'function') {
+      await r.hidePanel(durationMs);
+    }
   }
 
   enableDebugMode() { this._active().enableDebugMode?.(); }

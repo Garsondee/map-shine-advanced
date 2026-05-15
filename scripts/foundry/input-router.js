@@ -94,6 +94,25 @@ export class InputRouter {
      */
     this._maxHistory = 50;
   }
+
+  /**
+   * Whether a Foundry layer currently has a visible interactive preview object.
+   * Used to detect chat-driven placement workflows (e.g., measured templates)
+   * even when the active layer/control has not switched yet.
+   * @param {any} layer
+   * @returns {boolean}
+   */
+  _hasInteractivePreview(layer) {
+    const previewChildren = Array.isArray(layer?.preview?.children) ? layer.preview.children : [];
+    for (const child of previewChildren) {
+      if (!child) continue;
+      if (child.visible === false || child.renderable === false) continue;
+      const alpha = Number(child.alpha);
+      if (Number.isFinite(alpha) && alpha <= 0) continue;
+      return true;
+    }
+    return false;
+  }
   
   /**
    * Set the input mode with atomic transition
@@ -117,6 +136,17 @@ export class InputRouter {
       || activeLayerName === 'drawings'
       || activeLayerName === 'drawing'
       || activeLayerCtor === 'drawingslayer';
+
+    const isTokensContext =
+      !!canvas?.tokens?.active
+      || activeControl === 'tokens'
+      || activeControl === 'token'
+      || activeControlLayer === 'tokens'
+      || activeControlLayer === 'token'
+      || activeLayerName === 'tokens'
+      || activeLayerName === 'token'
+      || activeLayerCtor === 'tokenlayer'
+      || activeLayerCtor === 'tokenslayer';
       
     const isLightingContext =
       !!canvas?.lighting?.active
@@ -150,6 +180,7 @@ export class InputRouter {
       
     const isTemplatesContext =
       !!canvas?.templates?.active
+      || this._hasInteractivePreview(canvas?.templates)
       || activeControl === 'templates'
       || activeControl === 'template'
       || activeControlLayer === 'templates'
@@ -160,6 +191,7 @@ export class InputRouter {
       
     const isRegionsContext =
       !!canvas?.regions?.active
+      || this._hasInteractivePreview(canvas?.regions)
       || activeControl === 'regions'
       || activeControl === 'region'
       || activeControlLayer === 'regions'
@@ -179,7 +211,7 @@ export class InputRouter {
       || activeLayerCtor === 'wallslayer'
       || activeLayerCtor === 'walllayer';
 
-    const isPixiContext = isDrawingsContext || isLightingContext || isSoundsContext || isNotesContext || isTemplatesContext || isRegionsContext || isWallsContext;
+    const isPixiContext = isTokensContext || isDrawingsContext || isLightingContext || isSoundsContext || isNotesContext || isTemplatesContext || isRegionsContext || isWallsContext;
     const pixiVisualOpacity = (isV2Active && !isPixiContext) ? '0' : '1';
     // Only force PIXI overlay when actually in PIXI mode (for layers we haven't
     // replaced yet like drawings, regions, sounds, notes, templates, lights, walls).
@@ -394,6 +426,8 @@ export class InputRouter {
     // Defensive: ui.controls may not exist during initialization
     // This prevents the "toolclip" error when Foundry is still setting up
     const activeTool = ui?.controls?.tool?.name ?? ui?.controls?.activeTool ?? game?.activeTool ?? '';
+    const hasTemplatePreview = this._hasInteractivePreview(canvas?.templates);
+    const hasRegionPreview = this._hasInteractivePreview(canvas?.regions);
     
     // Foundry-native token edit tools (select/target/ruler) are PIXI workflows
     // and rely on board-level drag/select handling.
@@ -452,6 +486,7 @@ export class InputRouter {
 
     const isTemplatesLayer =
       !!canvas?.templates?.active ||
+      hasTemplatePreview ||
       layerCtorName === 'TemplateLayer' ||
       layerIdName === 'templates' ||
       layerIdName === 'template' ||
@@ -488,6 +523,7 @@ export class InputRouter {
 
     const isRegionsLayer =
       !!canvas?.regions?.active ||
+      hasRegionPreview ||
       layerCtorName === 'RegionLayer' ||
       layerIdName === 'regions' ||
       layerIdName === 'region' ||
@@ -505,10 +541,10 @@ export class InputRouter {
       return InputMode.PIXI;
     }
 
-    // Three.js handles all token interactions: selection, drag, HUD,
-    // targeting, click-to-move, and ruler forwarding. No PIXI overlay needed.
+    // Foundry should remain authoritative for token interaction workflows
+    // (selection, targeting, marquee, and token-layer UX).
     if (isTokensLayer) {
-      return InputMode.THREE;
+      return InputMode.PIXI;
     }
 
     // Tile editing is PIXI-owned: Foundry's native Tile._refreshState() handles

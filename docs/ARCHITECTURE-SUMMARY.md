@@ -1340,3 +1340,136 @@ carefully designed to handle rejection cases.
 | Token floor reassignment | Already done | `_resolveTokenFloorIndex()` handles this. |
 | InputRouter third-party API | Already done | `addPixiLayer()` / `addPixiTool()` exist. Needs documentation. |
 | Token ghost preview | Low | Nice UX polish. Requires server-rejection reconciliation design. |
+
+---
+
+## 20. External Effects Integration (Dice So Nice + Sequencer / JB2A)
+
+Map Shine Advanced replaces Foundry's PIXI rendering with its own Three.js
+scene, which means third-party modules that draw to PIXI (Sequencer / JB2A)
+or stamp their own canvas on top of Foundry's (Dice So Nice) are invisible
+or visually inconsistent with MSA's post-processing. The
+`scripts/integrations/external-effects/` package bridges these modules into
+MSA's compositor.
+
+### 20.1. Subsystem Layout
+
+```
+scripts/integrations/external-effects/
+├── ExternalEffectsCompositor.js  # orchestrator; owns adapters + facades
+├── DiceSoNiceAdapter.js          # texture-mirror channel for DSN
+├── ExternalDsnPass.js            # fullscreen composite pass (DSN canvas)
+├── SequencerAdapter.js           # lifecycle owner; spawns one mirror per effect
+├── SequencerEffectMirror.js      # per-effect THREE.Mesh + transform sync
+└── ExternalLayerOrderPolicy.js   # re-export of externalEffectOrder()
+```
+
+Built once per scene from `canvas-replacement.js` after `FloorCompositor` is
+initialized; exposed on `window.MapShine.externalEffects`. Disposed on
+`canvasTearDown` so all third-party DOM/canvas state is restored.
+
+### 20.2. Two Integration Channels
+
+**Channel 1 — Sprite mirror (Sequencer / JB2A).** Each `CanvasEffect` created
+by Sequencer spawns a `THREE.Mesh` in `FloorRenderBus._scene`:
+
+- The PIXI container's `renderable` flag is set to `false`, so Sequencer's
+  own renderer does not paint pixels anywhere.
+- The mesh texture wraps the same media Sequencer is using:
+  - **Video** (`.webm` — JB2A's default): `THREE.VideoTexture` over the
+    `HTMLVideoElement` Sequencer is already playing. Zero-copy.
+  - **Static sprite** (`.webp`/`.png`): `THREE.Texture` over the underlying
+    `HTMLImageElement` / `HTMLCanvasElement` / `ImageBitmap`.
+  - **Spritesheet** (`AnimatedSpriteMesh`): `THREE.Texture` over the base
+    image; `map.offset`/`map.repeat` are updated per tick from the active
+    frame's `texture.frame` rectangle.
+- Transform sync (position/rotation/scale/opacity) runs once per
+  `FrameCoordinator.onPostPixi` — Foundry's PIXI ticker — so meshes track
+  PIXI without per-RAF reflow.
+- `renderOrder` is computed via `externalEffectOrder(floorIndex,
+  sortLayer, sort)` in `LayerOrderPolicy.js`, which maps Sequencer's
+  `sortLayer` (300/600/700/800/900/1000) to the top slice of an existing
+  MSA role band (`FLOOR_EFFECTS`, `FLOOR_OVERHEAD_FX`, `FLOOR_MOTION_TOP`).
+  External effects therefore sit just above same-floor MSA overlays in the
+  same band — preserving MSA's tile/sprite stacking underneath.
+
+Sequencer's `screenSpace` / `screenSpaceAboveUI` paths (a separate
+DOM-hosted PIXI app called `SequencerAboveUILayer`) are intentionally not
+mirrored — they are screen-space by design, and the user expectation is
+that they remain on top of MSA's UI overlays.
+
+**Channel 2 — Texture mirror (Dice So Nice).** DSN bundles its own
+Three.js r184 in a separate WebGL context, so we cannot share GL resources
+with MSA's r170 renderer. Instead:
+
+- The adapter wraps `game.dice3d.box.diceScene.renderer.domElement` (the
+  DSN `<canvas>`) in a `THREE.CanvasTexture`.
+- DSN's `renderer.render` is monkey-patched to mark the texture dirty
+  (`needsUpdate = true`) once per DSN frame.
+- The DSN canvas is hidden (`style.display = 'none'`) so it does not paint
+  directly on top of MSA's WebGL canvas; the texture is composited inside
+  MSA via {@link ExternalDsnPass}.
+- The pass is enabled on `diceSoNiceRollStart` and disabled after
+  `diceSoNiceRollComplete` plus a `hideAfterRoll` grace window
+  (default 4s, capped at DSN's `timeBeforeHide` config when present).
+- On dispose, the monkey-patch is reverted and the canvas's original
+  `display` style is restored — so disabling MSA or this adapter fully
+  restores DSN's stock behaviour.
+
+### 20.3. Render-Chain Insertion (`FloorCompositor.render()`)
+
+Two injection points in the existing render pipeline:
+
+1. **`externalEffects.tickBeforeBusRender()`** — called immediately before
+   `_renderPerLevelPipeline()` so Sequencer mirrors in
+   `FloorRenderBus._scene` are validated before bus render.
+2. **`externalEffects.renderDsnPass(renderer, currentInput, outputRT)`** —
+   called after `_renderPerLevelPipeline()` and before the `distortion` /
+   `pixi-world-composite` / `fog-of-war` / `lens` post-FX block. Dice
+   therefore receive distortion, fog, lens, and night-vision tints from
+   the post-composite chain. Bloom + color correction live inside the
+   per-level pipeline and are already applied to the scene below before
+   dice are stamped on top.
+
+Per-level bloom on the dice themselves was considered but is not feasible
+without restructuring `_renderPerLevelPipeline()`, since bloom runs once
+per level inside that loop.
+
+### 20.4. Graphics Settings Integration
+
+Two new capability rows are registered via `effect-wiring.js`:
+
+| Capability ID | Display Name | Availability gate |
+|---|---|---|
+| `external-effects-dsn` | Dice So Nice Integration | `game.modules.get('dice-so-nice')?.active` |
+| `external-effects-sequencer` | Sequencer / JB2A Integration | `game.modules.get('sequencer')?.active` |
+
+The compositor exposes `ExternalEffectsCompositor.facades.{sequencer,diceSoNice}`,
+each implementing the `setEnabled(boolean)` protocol expected by
+`GraphicsSettingsManager.applyOverrides()`. These facades are registered
+via `graphicsSettings.registerEffectInstance(...)` in `canvas-replacement.js`
+so the toggles route to `setAdapterEnabled()`.
+
+Disabling either adapter performs a clean rollback:
+
+- **DSN disabled**: `ExternalDsnPass.enabled = false`, DSN canvas
+  `display` restored. DSN rolls remain visible via its native overlay.
+- **Sequencer disabled**: `_enabled = false`. New effects no longer spawn
+  mirrors and their PIXI containers stay `renderable = true`, so Sequencer
+  renders normally (though MSA's PIXI suppression makes those effects
+  invisible in gameplay mode — this is identical to MSA's pre-integration
+  behaviour).
+
+### 20.5. Known Limitations
+
+- DSN's per-frame `texImage2D` upload of its canvas is the practical
+  ceiling on integration depth — cross-context texture sharing is not
+  feasible across Three.js r184 (DSN) and r170 (MSA).
+- Sequencer PIXI filters beyond `tint` and `alpha` (mask filters,
+  displacement filters) are not mirrored in v1; effects that rely on
+  those will look different in MSA than in vanilla PIXI.
+- Sequencer's `screenSpace` / `screenSpaceAboveUI` paths are intentionally
+  excluded — they remain in their own DOM-hosted PIXI app on top of
+  everything.
+- DSN's `showcase` and `editor` renderers (settings-UI dice preview) are
+  left untouched — only the in-scene `'board'` renderer is intercepted.

@@ -113,13 +113,15 @@ import {
   registerLevelTransitionCurtain,
   disposeLevelTransitionCurtain,
 } from './manager-wiring.js';
+import { ExternalEffectsCompositor } from '../integrations/external-effects/ExternalEffectsCompositor.js';
 import { DepthPassManager } from '../scene/depth-pass-manager.js';
 import { isSoundAudibleForPerspective } from './elevation-context.js';
 import { getFloorStackBandsSignature, getSceneBandsForFloorStack } from './levels-floor-stack-bands.js';
-import { hasV14NativeLevels, getViewedLevelBackgroundSrc } from './levels-scene-flags.js';
+import { hasV14NativeLevels, getViewedLevelBackgroundSrc, isLevelsEnabledForScene } from './levels-scene-flags.js';
 import { installSnapshotStoreHooks, getSnapshot as getLevelsSnapshot } from '../core/levels-import/LevelsSnapshotStore.js';
 import { ZoneManager } from './zone-manager.js';
 import { IntroZoomEffect } from './intro-zoom-effect.js';
+import { sceneTransitionCurtain } from '../scene/scene-transition-curtain.js';
 import { HealthEvaluatorService } from '../core/diagnostics/HealthEvaluatorService.js';
 import { BreakerBoxDialog } from '../ui/breaker-box-dialog.js';
 import { BreakerBoxHeaderIndicator } from '../ui/breaker-box-header-indicator.js';
@@ -245,6 +247,7 @@ function _getEditContexts() {
   };
 
   _cachedEditContexts = {
+    tokens: !!canvas?.tokens?.active || check('tokens', 'Token'),
     walls: !!canvas?.walls?.active || check('walls', 'Walls'),
     tiles: check('tiles', 'Tiles') || tool === 'tile',
     drawings: !!canvas?.drawings?.active || check('drawings', 'Drawings'),
@@ -873,6 +876,9 @@ let cameraPanel = null;
 
 /** @type {CinematicCameraManager|null} */
 let cinematicCameraManager = null;
+
+/** @type {ExternalEffectsCompositor|null} */
+let externalEffects = null;
 
 /** @type {IntroZoomEffect} - Singleton reused across scene loads (stateless between runs). */
 const introZoomEffect = new IntroZoomEffect();
@@ -1643,7 +1649,11 @@ function _updateFoundrySelectRectSuppression(forceValue = null) {
       ctor === 'tokenslayer';
     const tokenMarqueeContextActive = toolAllowsTokenMarquee && (isTokenControl || isTokenLayer);
 
-    return !isMapMakerMode && enabled && tokenMarqueeContextActive && !pixiOwnsInput;
+    // Foundry is authoritative for token marquee/selection in gameplay.
+    // Never suppress the native select rectangle in token contexts.
+    if (tokenMarqueeContextActive) return false;
+
+    return false;
   }, 'selectRect.checkSuppression', Severity.COSMETIC, { fallback: false });
 
   if (typeof forceValue === 'boolean') suppress = forceValue;
@@ -2697,6 +2707,16 @@ export function initialize() {
         const bus = ms?.floorCompositorV2?._renderBus;
         const fd = sc?.foundrySceneData;
 
+        // Track whether anything below required mask compositor re-work for
+        // the newly active band. We always trigger a fresh composeFloor on a
+        // real level change so the new band's per-floor `_Outdoors` /
+        // `floorAlpha` / `skyReach` masks are in place BEFORE `forceRepopulate`
+        // rebuilds effects against them. Without this, `composeFloor` is only
+        // invoked by the throttled `BuildingShadowsEffectV2._maybeWarmFloorMaskCache`
+        // preload (~1s in multi-floor scenes) and consumers fall back to
+        // sibling/lower-floor/bundle textures in the meantime.
+        let didV14Resync = false;
+
         if (hasV14NativeLevels(canvas?.scene) && sc && bus && fd) {
           const viewedBgSrc = getViewedLevelBackgroundSrc(canvas.scene);
           const currentBasePath = sc._lastMaskBasePath ?? sc.extractBasePath?.(
@@ -2747,16 +2767,91 @@ export function initialize() {
               }
             }
 
-            const compositor = ms?.floorCompositorV2;
-            if (compositor && typeof compositor._syncOutdoorsMaskConsumers === 'function') {
-              compositor._syncOutdoorsMaskConsumers({
-                context: payload?.context ?? ms?.activeLevelContext ?? null,
-                force: true,
-              });
+            didV14Resync = true;
+          }
+        }
+
+        // Proactively (re)compose the newly active band's per-floor mask
+        // bundle. The `mapShineLevelContextChanged` hook flow otherwise never
+        // calls `composeFloor()` directly — `_applyCurrentFloorVisibility`
+        // only advances the active index, and bundle masks loaded above don't
+        // populate per-floor RTs. Without an explicit compose here, the new
+        // band's `_Outdoors` mask remains null until the next
+        // `preloadAllFloors` pass kicks in (throttled to ~1s by
+        // `BuildingShadowsEffectV2`), and `resolveCompositorOutdoorsTexture`
+        // silently falls back to sibling/lower-floor/bundle textures from a
+        // different band — producing visually wrong outdoor/indoor lighting
+        // in multi-floor stacked scenes.
+        //
+        // `primeFloorForRecompose` first clears any sticky per-band state
+        // that previous preloads may have left in place:
+        //   - empty `_floorMeta` sentinel (`{ masks: [], basePath: null }`)
+        //   - `_upperBandNoOutdoorsAccepted` lock (permanent before this fix)
+        //   - `_upperOutdoorsMetaRepairCount` (capped at 2 retries before)
+        // so the band gets a genuinely fresh attempt on every user-driven
+        // level navigation, regardless of what earlier preloads decided.
+        const ctx = payload?.context ?? ms?.activeLevelContext ?? null;
+        const ctxBottom = Number(ctx?.bottom);
+        const ctxTop = Number(ctx?.top);
+        const compositor = sc?._sceneMaskCompositor ?? null;
+        const sceneDoc = canvas?.scene ?? null;
+        const hasLevels = sceneDoc
+          ? (hasV14NativeLevels(sceneDoc) || isLevelsEnabledForScene(sceneDoc))
+          : false;
+        if (
+          compositor
+          && hasLevels
+          && ctx
+          && Number.isFinite(ctxBottom)
+          && Number.isFinite(ctxTop)
+        ) {
+          const bandKey = `${ctxBottom}:${ctxTop}`;
+          try {
+            if (typeof compositor.primeFloorForRecompose === 'function') {
+              compositor.primeFloorForRecompose(bandKey);
             }
-            if (compositor && typeof compositor.forceRepopulate === 'function') {
-              await compositor.forceRepopulate({ source: 'level-context-resync' });
+            if (typeof compositor.composeFloor === 'function') {
+              const cfResult = await compositor.composeFloor(
+                { bottom: ctxBottom, top: ctxTop },
+                sceneDoc,
+                { cacheOnly: false },
+              );
+              if (cfResult?.masks?.length) {
+                log.info(
+                  `Level change: composed ${cfResult.masks.length} mask(s) for band ${bandKey}`,
+                );
+              } else {
+                log.debug(`Level change: composeFloor returned no masks for band ${bandKey}`);
+              }
             }
+          } catch (err) {
+            log.warn(`Level change: composeFloor for band ${bandKey} failed`, err);
+          }
+        }
+
+        // Now that the new band's masks (or definitive absence thereof) are
+        // in `_floorMeta` / `_floorCache`, push them to consumers and rebuild
+        // the effect graph. The order matters: `_syncOutdoorsMaskConsumers`
+        // runs the resolution that picks the band's freshly-composed outdoors
+        // texture; `forceRepopulate` then rebuilds each effect against the
+        // newly-bound masks.
+        const floorCompositor = ms?.floorCompositorV2 ?? null;
+        if (didV14Resync || (compositor && hasLevels)) {
+          if (
+            floorCompositor
+            && typeof floorCompositor._syncOutdoorsMaskConsumers === 'function'
+          ) {
+            floorCompositor._syncOutdoorsMaskConsumers({
+              context: ctx,
+              force: true,
+            });
+          }
+          if (
+            didV14Resync
+            && floorCompositor
+            && typeof floorCompositor.forceRepopulate === 'function'
+          ) {
+            await floorCompositor.forceRepopulate({ source: 'level-context-resync' });
           }
         }
 
@@ -3824,12 +3919,14 @@ function installCanvasTransitionWrapper() {
           guardUntil: window?.MapShine?._msaLocalFlagWriteGuardUntil ?? 0,
         });
       } catch (_) {}
+      // Scene-transition curtain: opacity-only fade-to-black, then the loading
+      // panel gracefully fades IN over the black backdrop so the user sees the
+      // loading screen for the full duration of the createThreeCanvas work.
+      // Marks `__sceneTransitionActive=true` so the level-transition curtain
+      // bypasses itself during this window.
       await safeCallAsync(async () => {
-        loadingOverlay.showLoading('Switching scenes...');
-        await loadingOverlay.fadeToBlack(2000, 600);
-        loadingOverlay.setMessage('Loading...');
-        loadingOverlay.setProgress(0, { immediate: true });
-      }, 'sceneTransition.fade', Severity.DEGRADED);
+        await sceneTransitionCurtain.cover({ message: 'Loading…' });
+      }, 'sceneTransition.cover', Severity.DEGRADED);
 
       // Catch tearDown errors (e.g. fog save IndexSizeError/DOMException) so they
       // do not propagate to Canvas.draw() and trigger spurious recovery paths.
@@ -5276,9 +5373,14 @@ async function onCanvasReady(canvas) {
   if (!scene) {
     log.debug('onCanvasReady called with no active scene ->-> dismissing overlay');
     // Dismiss the loading overlay even though there's no scene to draw.
-    // Without this, the overlay can get stuck if canvasReady fires with null
-    // (e.g. edge cases during blank canvas transitions or other module interactions).
-    safeCall(() => loadingOverlay.fadeIn(500).catch(() => {}), 'overlay.noScene', Severity.COSMETIC);
+    // Route through the scene-transition curtain so any in-flight cover state
+    // is reset and the panel-out → bg-out reveal looks smooth. Falls back to a
+    // direct fadeIn if the curtain raises.
+    safeCall(() => {
+      sceneTransitionCurtain.reveal({ holdMs: 0 }).catch(() => {
+        try { loadingOverlay.fadeIn(500).catch(() => {}); } catch (_) {}
+      });
+    }, 'overlay.noScene', Severity.COSMETIC);
     return;
   }
 
@@ -5683,6 +5785,14 @@ function onCanvasTearDown(canvas) {
 
   safeCall(() => _teardownPixiLayerDebugMode(), 'pixiDebug.teardownOnCanvasTearDown', Severity.COSMETIC);
 
+  // Dispose the external-effects compositor BEFORE we tear down the rest of
+  // MapShine — adapters mutate third-party module DOM/canvas state that must
+  // be restored even on light/native-same-scene teardown paths.
+  if (externalEffects) {
+    safeDispose(() => externalEffects.dispose(), 'externalEffects.dispose');
+    externalEffects = null;
+  }
+
   // Abort any in-flight intro zoom sequence and remove its white flash overlay
   // so it doesn't get stranded in the DOM if a scene change fires mid-sequence.
   safeDispose(() => introZoomEffect.dispose(), 'introZoomEffect.dispose');
@@ -5790,6 +5900,7 @@ function onCanvasTearDown(canvas) {
       window.MapShine.frameCoordinator = null;
       window.MapShine.waterEffect = null;
       window.MapShine.distortionManager = null;
+      window.MapShine.externalEffects = null;
       // effectMaskRegistry removed
       window.MapShine.textureBudgetTracker = null;
       // Keep renderer and capabilities - they're reusable
@@ -7524,6 +7635,28 @@ async function createThreeCanvas(scene, createOptions = {}) {
 
     // V2 fog is owned by FloorCompositor._fogEffect; no legacy fog-manager wrapping.
 
+    // Construct the external-effects compositor (Dice So Nice, Sequencer, …) so
+    // adapters can register their lifecycle hooks now that FloorCompositor +
+    // FloorRenderBus + FrameCoordinator are all live. The instance is exposed
+    // on window.MapShine via exposeGlobals() below.
+    safeCall(() => {
+      const fc = effectComposer?._floorCompositorV2 ?? null;
+      const bus = fc?._renderBus ?? null;
+      if (externalEffects) {
+        safeDispose(() => externalEffects.dispose(), 'externalEffects.dispose(reinit)');
+        externalEffects = null;
+      }
+      externalEffects = new ExternalEffectsCompositor({
+        renderer,
+        floorRenderBus: bus,
+        sceneComposer,
+        floorStack: window.MapShine?.floorStack ?? null,
+        frameCoordinator,
+        renderLoop,
+      });
+      void externalEffects.initialize();
+    }, 'externalEffects.construct', Severity.DEGRADED);
+
     // Expose all managers, effects, and functions on window.MapShine for diagnostics
     exposeGlobals(mapShine, {
       effectMap,
@@ -7540,6 +7673,7 @@ async function createThreeCanvas(scene, createOptions = {}) {
       tileMotionManager,
       weatherController, renderLoop, sceneDebug, controlsIntegration,
       dynamicExposureManager, physicsRopeManager, assetLoader,
+      externalEffects,
       setMapMakerMode, resetScene, isMapMakerMode
     });
 
@@ -7657,6 +7791,16 @@ async function createThreeCanvas(scene, createOptions = {}) {
         );
       }
       if (window.MapShine) window.MapShine.graphicsSettings = graphicsSettings;
+
+      // Register external-effects adapter facades so the Graphics Settings UI
+      // can toggle Sequencer / Dice So Nice integration alongside V2 effects.
+      safeCall(() => {
+        const ee = externalEffects;
+        if (!ee || !ee.facades) return;
+        graphicsSettings.registerEffectInstance('external-effects-sequencer', ee.facades.sequencer);
+        graphicsSettings.registerEffectInstance('external-effects-dsn', ee.facades.diceSoNice);
+        graphicsSettings.applyOverrides();
+      }, 'graphicsSettings.registerExternalEffects', Severity.COSMETIC);
 
         if (!uiManager) {
           uiManager = new TweakpaneManager();
@@ -8700,7 +8844,7 @@ async function createThreeCanvas(scene, createOptions = {}) {
       safeCall(() => {
         setTimeout(() => {
           try {
-            loadingOverlay.fadeIn(1200, 400).catch(() => {
+            sceneTransitionCurtain.reveal().catch(() => {
               try { loadingOverlay.hide(); } catch (_) {}
             });
           } catch (_) {
@@ -8713,9 +8857,11 @@ async function createThreeCanvas(scene, createOptions = {}) {
       if (window.MapShine) window.MapShine.debugLoadingProfiler = dlp;
     } else if (skipLoadingOverlay) {
       // Same-scene native level switch: stages were never configured; skip intro zoom / long fades.
+      // Force-clear the scene-transition curtain in case a stale flag is left
+      // over from a previous transition.
       safeCall(() => {
+        try { sceneTransitionCurtain.forceClear(); } catch (_) {}
         try { loadingOverlay.hide?.(); } catch (_) {}
-        try { loadingOverlay.fadeIn(0).catch(() => {}); } catch (_) {}
       }, 'overlay.nativeLevelSwitchDismiss', Severity.COSMETIC);
     } else {
       stepLog(' -> Step: overlay.fadeIn / intro-zoom');
@@ -8853,15 +8999,14 @@ async function createThreeCanvas(scene, createOptions = {}) {
           }
 
           if (compileGate?.reason === 'tab-hidden') {
-            // Background tabs throttle timers. A Promise.race against a short timeout
-            // can resolve before fadeIn() finishes — then hide() inside fadeIn never
-            // runs on schedule and the user can see an empty/grey WebGL view until rAF
-            // catches up. Await the full dismiss, then pump compositor frames (rAF may
-            // still be starved while hidden).
+            // Background tabs throttle timers. Awaiting the full reveal ensures
+            // the overlay is actually torn down rather than left stuck behind
+            // a throttled rAF, otherwise the user can see an empty/grey WebGL
+            // view until the tab is foregrounded.
             await safeCallAsync(async () => {
-              await loadingOverlay.fadeIn(2000, 800).catch(() => {});
+              await sceneTransitionCurtain.reveal({ holdMs: 0 }).catch(() => {});
               try { loadingOverlay.hide?.(); } catch (_) {}
-            }, 'overlay.tabHidden.fadeIn', Severity.COSMETIC);
+            }, 'overlay.tabHidden.reveal', Severity.COSMETIC);
             safeCall(() => {
               for (let i = 0; i < 5; i++) {
                 try { window.MapShine?.renderLoop?.pumpBackgroundLoadFrame?.(); } catch (_) {}
@@ -8872,7 +9017,7 @@ async function createThreeCanvas(scene, createOptions = {}) {
           }
 
           await Promise.race([
-            loadingOverlay.fadeIn(2000, 800),
+            sceneTransitionCurtain.reveal({ holdMs: 0 }),
             new Promise((r) => setTimeout(r, 5000)),
           ]);
           return;
@@ -8899,11 +9044,16 @@ async function createThreeCanvas(scene, createOptions = {}) {
           new Promise((resolve) => setTimeout(resolve, 12000)),
         ]);
 
-        // Hard safety: regardless of intro outcome, never leave the overlay stuck.
+        // Hard safety: regardless of intro outcome, never leave the overlay
+        // stuck. The intro zoom typically calls `loadingOverlay.hide()` itself,
+        // so this is mostly a no-op state reset, but we still await a fast
+        // reveal in case the intro zoom failed silently and the panel is still
+        // visible.
         await Promise.race([
-          loadingOverlay.fadeIn(1200, 400),
+          sceneTransitionCurtain.reveal({ holdMs: 0, panelOutMs: 200, revealMs: 400 }),
           new Promise((resolve) => setTimeout(resolve, 4000)),
         ]);
+        try { sceneTransitionCurtain.forceClear(); } catch (_) {}
         try { loadingOverlay.hide?.(); } catch (_) {}
       }, 'overlay.introZoom', Severity.COSMETIC);
       stepLog(' -> Step: overlay.introZoom DONE');
@@ -9876,7 +10026,7 @@ function _enforceGameplayPixiSuppression() {
     }
 
     const inputRouter = window.MapShine?.inputRouter || controlsIntegration?.inputRouter || null;
-    const pixiEditContextFallback = ctx.tiles || ctx.drawings || ctx.sounds || ctx.templates || ctx.notes || ctx.regions || ctx.lighting || ctx.walls;
+    const pixiEditContextFallback = ctx.tokens || ctx.tiles || ctx.drawings || ctx.sounds || ctx.templates || ctx.notes || ctx.regions || ctx.lighting || ctx.walls;
     const shouldPixiReceiveInputEffective = !!inputRouter?.shouldPixiReceiveInput?.() || pixiEditContextFallback;
     
     const useNativePersistentPixiOverlays = window?.MapShine?.__useNativePersistentPixiOverlays === true;

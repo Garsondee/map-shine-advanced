@@ -378,8 +378,9 @@ export class WindowLightEffectV2 {
 
   /**
    * Set/clear the current render floor index for per-level lighting passes.
-   * When finite, this overrides active-floor visibility so each slice receives
-   * only its own window overlays.
+   * When finite, this shows the slice floor and any lower-floor window overlays.
+   * Roof/ceiling transmittance remains responsible for blocking naturally
+   * occluded lower-floor glow.
    * @param {number|null} floorIndex
    */
   setRenderFloorIndex(floorIndex = null) {
@@ -409,17 +410,13 @@ export class WindowLightEffectV2 {
     // (full canvas height including padding), NOT canvas.scene.height (scene rect only).
     const worldH = foundrySceneData?.height ?? canvas?.scene?.height ?? 0;
 
-    const activeFloorIdxRaw = Number(window.MapShine?.floorStack?.getActiveFloor?.()?.index);
-    const activeFloorIdx = Number.isFinite(activeFloorIdxRaw) ? activeFloorIdxRaw : 0;
-
     let overlayCount = 0;
     const perFloorCounts = new Map();
 
     // ── Process scene background image ────────────────────────────────────
-    // Same active-floor-only background policy as TreeEffectV2 (Success Stories:
-    // Trees/Bushes floor leakage): only build a background _Windows overlay for
-    // the currently active floor so multi-level backgrounds cannot leak across
-    // floor transitions or underground views.
+    // Build background _Windows overlays for every authored floor. Per-slice
+    // visibility plus roof/ceiling transmittance decide whether lower-floor
+    // window glow is visible from the current floor.
     const scene = canvas?.scene ?? null;
     const bgEntries = [];
     const floorIndexByLevelId = new Map();
@@ -445,7 +442,6 @@ export class WindowLightEffectV2 {
             : i;
           const keyIndex = Math.max(0, Math.floor(Number(level?.index)));
           const key = (keyIndex === 0) ? '__bg_image__' : `__bg_image__${keyIndex}`;
-          if (Number.isFinite(activeFloorIdx) && floorIndex !== activeFloorIdx) continue;
           bgEntries.push({ src, floorIndex, key });
         }
       }
@@ -456,7 +452,6 @@ export class WindowLightEffectV2 {
         const src = String(bgLayers[i]?.src || '').trim();
         if (!src) continue;
         const floorIndex = resolveV14BackgroundFloorIndexForSrc(scene, src);
-        if (Number.isFinite(activeFloorIdx) && floorIndex !== activeFloorIdx) continue;
         const key = floorIndex === 0 ? '__bg_image__' : `__bg_image__${floorIndex}`;
         bgEntries.push({ src, floorIndex, key });
       }
@@ -1241,7 +1236,7 @@ export class WindowLightEffectV2 {
 
   _isFloorVisible(floorIndex) {
     const renderFloor = Number(this._renderFloorIndex);
-    if (Number.isFinite(renderFloor)) return Number(floorIndex) === renderFloor;
+    if (Number.isFinite(renderFloor)) return Number(floorIndex) <= renderFloor;
     const active = Number.isFinite(this._activeFloorIndex) ? this._activeFloorIndex : 0;
     // Mirror FloorRenderBus.setVisibleFloors(): show all floors up to the
     // currently visible max floor in normal (non per-slice) mode.

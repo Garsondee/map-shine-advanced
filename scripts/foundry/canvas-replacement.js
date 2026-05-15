@@ -122,6 +122,8 @@ import { IntroZoomEffect } from './intro-zoom-effect.js';
 import { HealthEvaluatorService } from '../core/diagnostics/HealthEvaluatorService.js';
 import { BreakerBoxDialog } from '../ui/breaker-box-dialog.js';
 import { BreakerBoxHeaderIndicator } from '../ui/breaker-box-header-indicator.js';
+import { PerformanceRecorder } from '../core/diagnostics/PerformanceRecorder.js';
+import { PerformanceRecorderDialog } from '../ui/performance-recorder-dialog.js';
 
 const log = createLogger('Canvas');
 
@@ -845,6 +847,10 @@ let effectComposer = null;
 let healthEvaluator = null;
 let breakerBoxDialog = null;
 let breakerBoxHeaderIndicator = null;
+/** @type {PerformanceRecorder|null} */
+let performanceRecorder = null;
+/** @type {PerformanceRecorderDialog|null} */
+let performanceRecorderDialog = null;
 
 /** @type {RenderLoop|null} */
 let renderLoop = null;
@@ -7635,6 +7641,22 @@ async function createThreeCanvas(scene, createOptions = {}) {
           }
         }, 'breakerBox.initialize', Severity.COSMETIC);
 
+        // Performance Recorder: must be exposed on window.MapShine BEFORE
+        // RenderLoop.start so the first frame can be measured if the user
+        // immediately starts recording. The recorder itself is armed but
+        // inactive — all hot-path hooks short-circuit on `enabled === false`.
+        safeCall(() => {
+          if (renderer && !performanceRecorder) {
+            performanceRecorder = new PerformanceRecorder(renderer);
+            if (window.MapShine) window.MapShine.performanceRecorder = performanceRecorder;
+          }
+          if (performanceRecorder && !performanceRecorderDialog) {
+            performanceRecorderDialog = new PerformanceRecorderDialog(performanceRecorder);
+            performanceRecorderDialog.initialize();
+            if (window.MapShine) window.MapShine.performanceRecorderDialog = performanceRecorderDialog;
+          }
+        }, 'performanceRecorder.initialize', Severity.COSMETIC);
+
         // Weather should register before the GM control panel so `hydrateMainWeatherTweakpaneFromController`
         // and live-override DOM sync see `effectFolders.weather` + WC in a consistent order.
         safeCall(() => {
@@ -9106,6 +9128,16 @@ function destroyThreeCanvas() {
     breakerBoxDialog = null;
   }
 
+  if (performanceRecorderDialog) {
+    safeDispose(() => performanceRecorderDialog.destroy(), 'performanceRecorderDialog.destroy');
+    performanceRecorderDialog = null;
+  }
+
+  if (performanceRecorder) {
+    safeDispose(() => performanceRecorder.dispose(), 'performanceRecorder.dispose');
+    performanceRecorder = null;
+  }
+
   if (healthEvaluator) {
     safeDispose(() => healthEvaluator.dispose(), 'healthEvaluator.dispose');
     healthEvaluator = null;
@@ -9116,6 +9148,8 @@ function destroyThreeCanvas() {
     window.MapShine.healthEvaluator = null;
     window.MapShine.breakerBoxDialog = null;
     window.MapShine.breakerBoxHeaderIndicator = null;
+    window.MapShine.performanceRecorder = null;
+    window.MapShine.performanceRecorderDialog = null;
   }, 'destroyThreeCanvas.clearHealthGlobals', Severity.COSMETIC);
 
   // Dispose Enhanced Light Inspector

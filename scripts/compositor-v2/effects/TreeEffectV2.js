@@ -1462,8 +1462,8 @@ export class TreeEffectV2 {
         }
 
         void main() {
-          vec2 windDir = normalize(uWindDir);
-          if (length(windDir) < 0.01) windDir = vec2(1.0, 0.0);
+          vec2 globalWindDir = normalize(uWindDir);
+          if (length(globalWindDir) < 0.01) globalWindDir = vec2(1.0, 0.0);
 
           float rawWind = clamp(uWindSpeed, 0.0, 1.0);
           float speed = max(0.0, rawWind * uWindSpeedGlobal);
@@ -1480,18 +1480,35 @@ export class TreeEffectV2 {
           float windFieldFrequency = mix(0.0003, max(0.0003, uGustFrequency), rawWind);
           float windFieldTravel = mix(0.16, max(0.16, uGustSpeed), rawWind);
           vec2 windFieldPos = vWorldPos * windFieldFrequency;
-          vec2 windFieldScroll = windDir * uTime * windFieldTravel * (0.2 + rawWind);
+          vec2 windFieldScroll = globalWindDir * uTime * windFieldTravel * (0.2 + rawWind);
           float windField = noise(windFieldPos - windFieldScroll);
           float windPulse = mix(0.65, 1.28, smoothstep(0.08, 0.92, windField));
           windPulse *= (0.35 + 0.65 * rawWind);
 
-          float waveCoord = dot(vWorldPos, windDir);
+          float waveCoord = dot(vWorldPos, globalWindDir);
           float wavePhase = waveCoord * uWaveSpatialFrequency - uTime * uWaveTravelSpeed * (0.35 + rustleSpeed);
           float waveCarrier = 0.5 + 0.5 * sin(wavePhase);
           float waveFront = pow(clamp(waveCarrier, 0.0, 1.0), max(0.1, uWaveSharpness));
           float waveMod = mix(1.0, waveFront, clamp(uWaveInfluence, 0.0, 1.0));
 
-          vec2 perpDir = vec2(-windDir.y, windDir.x);
+          // -- Directional Swirl (Turbulence) --
+          // Modulates the base wind direction locally for organic, varied pushing angles.
+          float turbulenceStrength = max(0.0, uTurbulence);
+          float turbulenceScale = max(0.00001, uTurbulenceScale);
+
+          // Generate a low-frequency noise for wind direction swinging
+          float swirlNoise = noise(vWorldPos * (turbulenceScale * 0.4) - (globalWindDir * uTime * 0.15));
+          // angleSpread ranges from roughly -0.6 to +0.6 radians at 1.0 turbulence (~35 degrees)
+          float angleSpread = (swirlNoise - 0.5) * 1.2 * turbulenceStrength;
+
+          float cosS = cos(angleSpread);
+          float sinS = sin(angleSpread);
+          vec2 localWindDir = vec2(
+            globalWindDir.x * cosS - globalWindDir.y * sinS,
+            globalWindDir.x * sinS + globalWindDir.y * cosS
+          );
+          vec2 localPerpDir = vec2(-localWindDir.y, localWindDir.x);
+
           float orbitPhase = uTime * uElasticity + (windField * 5.0);
           float orbitSway = sin(orbitPhase);
 
@@ -1507,24 +1524,22 @@ export class TreeEffectV2 {
           float legacyFlutterFloor = clamp(uFlutterGustFloor, 0.0, 1.0);
           float flutterWindPulse = mix(legacyFlutterFloor, 1.0, clamp(windPulse, 0.0, 1.0));
           float flutterMagnitude = flutter * uFlutterIntensity * flutterWindPulse * lowWindBoost * flutterDrive * (0.6 + 0.4 * waveMod);
-          vec2 flutterVec = (windDir * flutterMagnitude) + (perpDir * (flutterMagnitude * 0.1));
+          vec2 flutterVec = (localWindDir * flutterMagnitude) + (localPerpDir * (flutterMagnitude * 0.1));
 
-          vec2 distortion = (windDir * pushMagnitude)
-                          + (windDir * swayMagnitude)
-                          + (perpDir * crossSwayMagnitude)
+          vec2 distortion = (localWindDir * pushMagnitude)
+                          + (localWindDir * swayMagnitude)
+                          + (localPerpDir * crossSwayMagnitude)
                           + flutterVec;
 
           // Optional tree-only chop (default uTurbulence = 0 → bush-identical).
-          float turbulenceStrength = max(0.0, uTurbulence);
-          float turbulenceScale = max(0.00001, uTurbulenceScale);
           vec2 turbulencePos = vWorldPos * turbulenceScale;
           float turbulenceFieldA = noise(turbulencePos + vec2(uTime * 0.27, -uTime * 0.19));
           float turbulenceFieldB = noise((turbulencePos * 1.9) - vec2(uTime * 0.61, uTime * 0.47));
           float turbulenceSigned = ((turbulenceFieldA * 0.65 + turbulenceFieldB * 0.35) - 0.5) * 2.0;
           float turbulenceGustCoupling = 0.45 + 0.55 * windPulse;
           float turbulenceMagnitude = turbulenceStrength * effectiveSpeed * turbulenceGustCoupling * (0.55 + 0.45 * waveMod);
-          vec2 turbulenceVec = (windDir * (turbulenceSigned * uBranchBend * 0.85 * turbulenceMagnitude))
-                             + (perpDir * (((turbulenceFieldB - 0.5) * 2.0) * uBranchBend * 0.15 * turbulenceMagnitude));
+          vec2 turbulenceVec = (localWindDir * (turbulenceSigned * uBranchBend * 0.85 * turbulenceMagnitude))
+                             + (localPerpDir * (((turbulenceFieldB - 0.5) * 2.0) * uBranchBend * 0.15 * turbulenceMagnitude));
           distortion += turbulenceVec;
 
           vec2 sceneSpan = max(uSceneMax - uSceneMin, vec2(1e-3));
@@ -1537,7 +1552,7 @@ export class TreeEffectV2 {
           float texA = safeAlpha(treeSample);
 
           vec2 shadowDir = normalize(vec2(uSunDir.x, -uSunDir.y));
-          if (length(shadowDir) < 0.01) shadowDir = -windDir;
+          if (length(shadowDir) < 0.01) shadowDir = -globalWindDir;
           vec2 shadowOffset = shadowDir * uShadowLength;
           float shadowBlur = max(0.0001, uShadowSoftness * 0.0008);
           vec2 shadowBaseUv = vUv - distortion - shadowOffset;

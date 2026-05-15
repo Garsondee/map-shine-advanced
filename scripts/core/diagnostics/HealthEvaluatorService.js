@@ -1308,19 +1308,17 @@ export class HealthEvaluatorService {
             }
             const notVisible = sameFloor.filter((e) => !e?.mesh?.visible);
             const notReady = sameFloor.filter((e) => Number(e?.material?.uniforms?.uMaskReady?.value || 0) < 0.5);
-            const roofGateUnexpected = sameFloor.filter((e) => Number(e?.material?.uniforms?.uAllowRoofGate?.value ?? 0) > 0.5 && Number(e?.floorIndex) > 0);
-            const pass = notVisible.length === 0 && notReady.length === 0 && roofGateUnexpected.length === 0;
+            const pass = notVisible.length === 0 && notReady.length === 0;
             return {
               pass,
               message: pass
                 ? 'Active-floor window overlays are visible and mask-ready'
-                : 'Active-floor window overlays have visibility/mask/gating issues',
+                : 'Active-floor window overlays have visibility or mask readiness issues',
               evidence: {
                 activeFloor: active,
                 sameFloorOverlayCount: sameFloor.length,
                 notVisibleCount: notVisible.length,
                 notReadyCount: notReady.length,
-                roofGateUnexpectedCount: roofGateUnexpected.length,
               },
             };
           },

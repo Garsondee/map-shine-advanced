@@ -1506,6 +1506,10 @@ export class TweakpaneManager {
       window.MapShine?.breakerBoxDialog?.toggle?.();
     });
 
+    addGridButton('Performance Recorder', () => {
+      window.MapShine?.performanceRecorderDialog?.toggle?.();
+    });
+
     addGridButton('🎯 Map Points', () => {
       this.openMapPointsManagerDialog();
     });

@@ -102,8 +102,8 @@ export class LightingEffectV2 {
     this._perspectiveRefreshDirty = true;
     /** @type {number} */
     this._lastPerspectiveRefreshAtSec = -Infinity;
-    /** @type {Map<string, number>} Per-light next allowed animation update time (seconds) */
-    this._nextAnimationUpdateAtSec = new Map();
+    /** @type {boolean} Static compose uniforms need to be re-parsed from params */
+    this._paramsDirty = true;
     /**
      * One-shot: old scenes only stored `globalIllumination`; copy that value into
      * {@link #params.ambientDayScale} and {@link #params.ambientNightScale} when they
@@ -244,6 +244,12 @@ export class LightingEffectV2 {
     this._lightSize = { w: 1, h: 1 };
     this._windowSize = { w: 1, h: 1 };
     this._darknessSize = { w: 1, h: 1 };
+    /** @type {{w:number,h:number,lightScale:number,windowScale:number,darknessScale:number}} */
+    this._lastRtSizeState = { w: -1, h: -1, lightScale: NaN, windowScale: NaN, darknessScale: NaN };
+    /** @type {Set<string>} Reused by _reconcileMissingEmbeddedLights */
+    this._validPositiveCache = new Set();
+    /** @type {Set<string>} Reused by _reconcileMissingEmbeddedLights */
+    this._validNegativeCache = new Set();
     this._lastAmbientBrightestRgb = { r: -1, g: -1, b: -1 };
     this._lastAmbientDarknessRgb = { r: -1, g: -1, b: -1 };
     /** @type {number|null} Cached ambientBrightest hex */
@@ -265,6 +271,17 @@ export class LightingEffectV2 {
      * @type {number|null}
      */
     this._renderFloorIndexForLights = null;
+
+    this._viewProjectionCache = {
+      isValid: false,
+      isOrtho: false,
+      px: NaN, py: NaN, pz: NaN,
+      qx: NaN, qy: NaN, qz: NaN, qw: NaN,
+      zoom: NaN, left: NaN, right: NaN, top: NaN, bottom: NaN,
+      fov: NaN, aspect: NaN, near: NaN, far: NaN, groundZ: NaN,
+      vMinX: 0, vMinY: 0, vMaxX: 1, vMaxY: 1,
+      c00x: 0, c00y: 0, c10x: 1, c10y: 0, c01x: 0, c01y: 1, c11x: 1, c11y: 1,
+    };
   }
 
   /**
@@ -292,6 +309,159 @@ export class LightingEffectV2 {
 
     out.w = Math.max(1, Math.round(baseW * s));
     out.h = Math.max(1, Math.round(baseH * s));
+  }
+
+  /** @private */
+  _syncRenderTargetSizes(w, h) {
+    const state = this._lastRtSizeState;
+    const lightScale = this._sanitizeResolutionScale(this.params.internalLightResolutionScale);
+    const windowScale = this._sanitizeResolutionScale(this.params.internalWindowResolutionScale);
+    const darknessScale = this._sanitizeResolutionScale(this.params.internalDarknessResolutionScale);
+    if (
+      state.w === w && state.h === h
+      && state.lightScale === lightScale
+      && state.windowScale === windowScale
+      && state.darknessScale === darknessScale
+    ) {
+      return;
+    }
+
+    state.w = w;
+    state.h = h;
+    state.lightScale = lightScale;
+    state.windowScale = windowScale;
+    state.darknessScale = darknessScale;
+
+    this._calcScaledSize(w, h, lightScale, this._lightSize);
+    this._calcScaledSize(w, h, windowScale, this._windowSize);
+    this._calcScaledSize(w, h, darknessScale, this._darknessSize);
+
+    if (this._lightRT && (this._lightRT.width !== this._lightSize.w || this._lightRT.height !== this._lightSize.h)) {
+      this._lightRT.setSize(this._lightSize.w, this._lightSize.h);
+    }
+    if (this._windowLightRT && (this._windowLightRT.width !== this._windowSize.w || this._windowLightRT.height !== this._windowSize.h)) {
+      this._windowLightRT.setSize(this._windowSize.w, this._windowSize.h);
+    }
+    if (this._darknessRT && (this._darknessRT.width !== this._darknessSize.w || this._darknessRT.height !== this._darknessSize.h)) {
+      this._darknessRT.setSize(this._darknessSize.w, this._darknessSize.h);
+    }
+  }
+
+  /** @private */
+  _syncViewSceneUniforms(camera) {
+    const cu = this._composeMaterial?.uniforms;
+    const dims = canvas?.dimensions;
+    const cam = camera;
+    if (!cu || !cam || !dims) return;
+
+    const sc = window.MapShine?.sceneComposer;
+    const groundZ = sc?.basePlaneMesh?.position?.z ?? (sc?.groundZ ?? 0);
+    const q = cam.quaternion;
+    const cache = this._viewProjectionCache;
+    const isOrtho = cam.isOrthographicCamera === true;
+    const cameraChanged = !cache.isValid
+      || cache.isOrtho !== isOrtho
+      || cache.px !== cam.position.x || cache.py !== cam.position.y || cache.pz !== cam.position.z
+      || cache.qx !== (q?.x ?? 0) || cache.qy !== (q?.y ?? 0) || cache.qz !== (q?.z ?? 0) || cache.qw !== (q?.w ?? 1)
+      || cache.zoom !== cam.zoom
+      || cache.left !== (cam.left ?? 0) || cache.right !== (cam.right ?? 0)
+      || cache.top !== (cam.top ?? 0) || cache.bottom !== (cam.bottom ?? 0)
+      || cache.fov !== (cam.fov ?? 0) || cache.aspect !== (cam.aspect ?? 0)
+      || cache.near !== (cam.near ?? 0) || cache.far !== (cam.far ?? 0)
+      || cache.groundZ !== groundZ;
+
+    if (cameraChanged) {
+      let vMinX = 0, vMinY = 0, vMaxX = 1, vMaxY = 1;
+      let c00x = 0, c00y = 0, c10x = 1, c10y = 0, c01x = 0, c01y = 1, c11x = 1, c11y = 1;
+      if (isOrtho) {
+        vMinX = cam.position.x + cam.left   / cam.zoom;
+        vMinY = cam.position.y + cam.bottom / cam.zoom;
+        vMaxX = cam.position.x + cam.right  / cam.zoom;
+        vMaxY = cam.position.y + cam.top    / cam.zoom;
+
+        c00x = vMinX; c00y = vMinY;
+        c10x = vMaxX; c10y = vMinY;
+        c01x = vMinX; c01y = vMaxY;
+        c11x = vMaxX; c11y = vMaxY;
+      } else {
+        const THREE = window.THREE;
+        const ndc = this._tmpNdcVec;
+        const world = this._tmpWorldVec;
+        const dir = this._tmpDirVec;
+        if (THREE && ndc && world && dir) {
+          let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+          let validCornerCount = 0;
+
+          const cX = [-1, 1, -1, 1];
+          const cY = [-1, -1, 1, 1];
+
+          for (let i = 0; i < 4; i++) {
+            ndc.set(cX[i], cY[i], 0.5);
+            world.copy(ndc).unproject(cam);
+            dir.copy(world).sub(cam.position);
+
+            const dz = dir.z;
+            if (dz > -1e-6 && dz < 1e-6) continue;
+
+            const t = (groundZ - cam.position.z) / dz;
+            if (t !== t || t <= 0) continue;
+
+            const ix = cam.position.x + dir.x * t;
+            const iy = cam.position.y + dir.y * t;
+
+            if (ix < minX) minX = ix; if (iy < minY) minY = iy;
+            if (ix > maxX) maxX = ix; if (iy > maxY) maxY = iy;
+            validCornerCount += 1;
+
+            if (i === 0) { c00x = ix; c00y = iy; }
+            else if (i === 1) { c10x = ix; c10y = iy; }
+            else if (i === 2) { c01x = ix; c01y = iy; }
+            else if (i === 3) { c11x = ix; c11y = iy; }
+          }
+
+          if (minX !== Infinity) {
+            vMinX = minX; vMinY = minY; vMaxX = maxX; vMaxY = maxY;
+          }
+          if (validCornerCount < 4 && minX !== Infinity) {
+            c00x = minX; c00y = minY;
+            c10x = maxX; c10y = minY;
+            c01x = minX; c01y = maxY;
+            c11x = maxX; c11y = maxY;
+          }
+        }
+      }
+
+      cache.isValid = true;
+      cache.isOrtho = isOrtho;
+      cache.px = cam.position.x; cache.py = cam.position.y; cache.pz = cam.position.z;
+      cache.qx = q?.x ?? 0; cache.qy = q?.y ?? 0; cache.qz = q?.z ?? 0; cache.qw = q?.w ?? 1;
+      cache.zoom = cam.zoom;
+      cache.left = cam.left ?? 0; cache.right = cam.right ?? 0;
+      cache.top = cam.top ?? 0; cache.bottom = cam.bottom ?? 0;
+      cache.fov = cam.fov ?? 0; cache.aspect = cam.aspect ?? 0;
+      cache.near = cam.near ?? 0; cache.far = cam.far ?? 0;
+      cache.groundZ = groundZ;
+      cache.vMinX = vMinX; cache.vMinY = vMinY; cache.vMaxX = vMaxX; cache.vMaxY = vMaxY;
+      cache.c00x = c00x; cache.c00y = c00y; cache.c10x = c10x; cache.c10y = c10y;
+      cache.c01x = c01x; cache.c01y = c01y; cache.c11x = c11x; cache.c11y = c11y;
+    }
+
+    cu.uBldViewBoundsMin.value.set(cache.vMinX, cache.vMinY);
+    cu.uBldViewBoundsMax.value.set(cache.vMaxX, cache.vMaxY);
+    cu.uBldViewCorner00.value.set(cache.c00x, cache.c00y);
+    cu.uBldViewCorner10.value.set(cache.c10x, cache.c10y);
+    cu.uBldViewCorner01.value.set(cache.c01x, cache.c01y);
+    cu.uBldViewCorner11.value.set(cache.c11x, cache.c11y);
+    const sr = dims.sceneRect ?? dims;
+    cu.uBldSceneOrigin.value.set(sr.x ?? 0, sr.y ?? 0);
+    cu.uBldSceneSize.value.set(
+      sr.width  ?? dims.sceneWidth  ?? 1,
+      sr.height ?? dims.sceneHeight ?? 1
+    );
+    cu.uSceneDimensions.value.set(
+      dims.width  ?? 1,
+      dims.height ?? 1
+    );
   }
 
   /**
@@ -330,6 +500,58 @@ export class LightingEffectV2 {
     const n = Number(floorIndex);
     this._renderFloorIndexForLights = Number.isFinite(n) ? n : null;
     this._perspectiveRefreshDirty = true;
+  }
+
+  /**
+   * UI/settings callback used by the V2 control bridge.
+   * @param {string} paramId
+   * @param {unknown} value
+   */
+  applyParamChange(paramId, value) {
+    if (!this.params || !Object.prototype.hasOwnProperty.call(this.params, paramId)) return;
+    this.params[paramId] = value;
+    this._paramsDirty = true;
+  }
+
+  /** @private */
+  _markParamsDirty() {
+    this._paramsDirty = true;
+  }
+
+  /** @private */
+  _syncStaticParamUniforms() {
+    if (!this._paramsDirty) return;
+    const u = this._composeMaterial?.uniforms;
+    if (!u) return;
+
+    this._seedAmbientFromLegacyGlobalIfNeeded();
+    for (const k of LEGACY_LIGHTING_PARAM_KEYS) {
+      if (Object.prototype.hasOwnProperty.call(this.params, k)) delete this.params[k];
+    }
+
+    u.uAmbientDayScale.value = Math.max(0, Number(this.params.ambientDayScale) || 0);
+    u.uAmbientNightScale.value = Math.max(0, Number(this.params.ambientNightScale) || 0);
+    u.uLightIntensity.value = this.params.lightIntensity;
+    u.uMinIlluminationScale.value = Math.max(0, Number(this.params.minIlluminationScale) || 0);
+    u.uColorationStrength.value = this.params.colorationStrength;
+    u.uColorationReflectivity.value = Math.max(0, Number(this.params.colorationReflectivity) || 0);
+    u.uColorationSaturation.value = Number(this.params.colorationSaturation) || 0;
+    u.uColorationChromaCurve.value = Math.max(0.001, Number(this.params.colorationChromaCurve) || 1);
+    u.uColorationAchromaticMix.value = clamp01(Number(this.params.colorationAchromaticMix) || 0);
+    const toneMode = Math.max(0, Math.min(2, Math.round(Number(this.params.composeToneMapping) || 0)));
+    if (this._composeToneMappingMode !== toneMode) {
+      this._composeToneMappingMode = toneMode;
+      this._composeMaterial.defines.COMPOSE_TONEMAP_MODE = toneMode;
+      this._composeMaterial.needsUpdate = true;
+    }
+    u.uComposeToneExposure.value = Math.max(0, Number(this.params.composeToneExposure) || 1);
+    u.uCloudShadowAmbientInfluence.value = clamp01(Number(this.params.cloudShadowAmbientInfluence) ?? 1);
+    u.uOverheadShadowAmbientInfluence.value = clamp01(Number(this.params.overheadShadowAmbientInfluence) ?? 1);
+    u.uDynamicLightShadowOverrideStrength.value = clamp01(Number(this.params.dynamicLightShadowOverrideStrength) ?? 0.65);
+    u.uNegativeDarknessStrength.value = this.params.negativeDarknessStrength;
+    u.uDarknessPunchGain.value = this.params.darknessPunchGain;
+    u.uInteriorDarkness.value = Math.max(0, Number(this.params.interiorDarkness) || 0);
+    this._paramsDirty = false;
   }
 
   /** @private */
@@ -990,13 +1212,24 @@ export class LightingEffectV2 {
             step(sceneUvRaw.x, 1.0) *
             step(sceneUvRaw.y, 1.0);
 
+          vec4 roofAlphaSample = vec4(0.0);
+          float roofAlphaCached = 0.0;
+          if (uHasOverheadRoofAlpha > 0.5) {
+            roofAlphaSample = texture2D(tOverheadRoofAlpha, vUv);
+            roofAlphaCached = clamp(max(roofAlphaSample.a, max(roofAlphaSample.r, max(roofAlphaSample.g, roofAlphaSample.b))), 0.0, 1.0);
+          }
+
+          vec4 outdoorsRoofSample = vec4(0.0);
+          if (uHasOutdoorsForRoofLight > 0.5) {
+            vec2 ouvCached = sceneUvFoundry;
+            if (uOutdoorsForRoofLightFlipY > 0.5) ouvCached.y = 1.0 - ouvCached.y;
+            outdoorsRoofSample = texture2D(tOutdoorsForRoofLight, ouvCached);
+          }
+
           // Interior vs outdoor (_Outdoors mask) — dim ambient on indoor pixels only.
           float isOutdoorForInteriorDim = 1.0;
           if (uHasOutdoorsForRoofLight > 0.5) {
-            vec2 ouvId = sceneUvFoundry;
-            if (uOutdoorsForRoofLightFlipY > 0.5) ouvId.y = 1.0 - ouvId.y;
-            vec4 odIdC = texture2D(tOutdoorsForRoofLight, clamp(ouvId, 0.0, 1.0));
-            vec4 odId = odIdC;
+            vec4 odId = outdoorsRoofSample;
             // Robust decode for interior dimming:
             // - outdoors masks are authored mostly binary (0/1)
             // - composed/filtered textures can introduce tiny mid-tone rows
@@ -1024,18 +1257,13 @@ export class LightingEffectV2 {
           float stampedVis = 1.0;
           float roofAlphaComposite = 0.0;
           float roofBlockComposite = 0.0;
-          float roofAlphaLive = 0.0;
-          if (uHasOverheadRoofAlpha > 0.5) {
-            vec4 roofSampleLive = texture2D(tOverheadRoofAlpha, vUv);
-            roofAlphaLive = clamp(max(roofSampleLive.a, max(roofSampleLive.r, max(roofSampleLive.g, roofSampleLive.b))), 0.0, 1.0);
-          }
+          float roofAlphaLive = roofAlphaCached;
           if (uHasCeilingLightTransmittance > 0.5) {
             stampedVis = clamp(texture2D(tCeilingLightTransmittance, vUv).r, 0.0, 1.0);
             roofAlphaComposite = 1.0 - stampedVis;
           } else {
             if (uHasOverheadRoofAlpha > 0.5) {
-              vec4 roofSample = texture2D(tOverheadRoofAlpha, vUv);
-              float roofAlpha = clamp(max(roofSample.a, max(roofSample.r, max(roofSample.g, roofSample.b))), 0.0, 1.0);
+              float roofAlpha = roofAlphaCached;
               roofAlphaComposite = roofAlpha;
               float roofOcc = smoothstep(0.10, 0.14, roofAlpha);
               stampedVis = 1.0 - roofOcc;
@@ -1063,9 +1291,7 @@ export class LightingEffectV2 {
             // Outside sceneRect (canvas padding): sceneUvFoundry is clamped — do not sample
             // _Outdoors there or roof relief bleeds from the mask border (see inSceneBounds).
             float revealWeight = 1.0 - smoothstep(0.20, 0.60, roofAlphaLive);
-            vec2 ouv = sceneUvFoundry;
-            if (uOutdoorsForRoofLightFlipY > 0.5) ouv.y = 1.0 - ouv.y;
-            vec4 od = texture2D(tOutdoorsForRoofLight, ouv);
+            vec4 od = outdoorsRoofSample;
             float odA = clamp(od.a, 0.0, 1.0);
             float indoorReliefRaw = (odA > 0.08) ? (1.0 - step(0.45, od.r)) : 0.0;
             float isOutdoorSample = (odA > 0.08) ? step(0.45, od.r) : 0.0;
@@ -1185,8 +1411,7 @@ export class LightingEffectV2 {
             float shadowFactor = clamp(texture2D(tCombinedShadow, vUv).r, 0.0, 1.0);
             if (uHasCombinedShadowRaw > 0.5 && uHasOverheadRoofAlpha > 0.5) {
               float rawShadowFactor = clamp(texture2D(tCombinedShadowRaw, vUv).r, 0.0, 1.0);
-              vec4 roofSample = texture2D(tOverheadRoofAlpha, vUv);
-              float roofAlpha = clamp(max(roofSample.a, max(roofSample.r, max(roofSample.g, roofSample.b))), 0.0, 1.0);
+              float roofAlpha = roofAlphaCached;
               // Raw shadow has no outdoors / upper-floor masking. Interior pixels still
               // get overhead roof alpha (ceiling capture); only blend raw on outdoor-classified
               // pixels so multi-floor indoor rooms keep masked cloud shadow.
@@ -1226,8 +1451,7 @@ export class LightingEffectV2 {
             // still stamps ceilings in screen space on upper floors.
             if (uHasCloudShadowRaw > 0.5 && uHasOverheadRoofAlpha > 0.5) {
               float rawShadowFactor = clamp(texture2D(tCloudShadowRaw, vUv).r, 0.0, 1.0);
-              vec4 roofSample = texture2D(tOverheadRoofAlpha, vUv);
-              float roofAlpha = clamp(max(roofSample.a, max(roofSample.r, max(roofSample.g, roofSample.b))), 0.0, 1.0);
+              float roofAlpha = roofAlphaCached;
               float rawMix = roofAlpha * isOutdoorForInteriorDimSafe;
               shadowFactor = mix(shadowFactor, rawShadowFactor, rawMix);
             }
@@ -1261,8 +1485,7 @@ export class LightingEffectV2 {
             // Use alpha primarily (with RGB fallback) so live roof fade opacity
             // can smoothly attenuate this suppression.
             if (uHasOverheadRoofAlpha > 0.5) {
-              vec4 roofSample = texture2D(tOverheadRoofAlpha, vUv);
-              float roofAlpha = clamp(max(roofSample.a, max(roofSample.r, max(roofSample.g, roofSample.b))), 0.0, 1.0);
+              float roofAlpha = roofAlphaCached;
               float roofSuppress = mix(0.0, roofAlpha, clamp(uApplyRoofOcclusionToBuilding, 0.0, 1.0));
               shadowMix = mix(shadowMix, 1.0, roofSuppress);
             }
@@ -1380,8 +1603,10 @@ export class LightingEffectV2 {
     const docs = getAuthoritativeAmbientLightDocuments();
     const enhancementMap = this._getLightEnhancementConfigMap();
 
-    const validPositive = new Set();
-    const validNegative = new Set();
+    const validPositive = this._validPositiveCache;
+    const validNegative = this._validNegativeCache;
+    validPositive.clear();
+    validNegative.clear();
     for (const doc of docs) {
       const key = this._lightMapKey(doc?.id ?? doc?._id);
       if (!key) continue;
@@ -1397,7 +1622,6 @@ export class LightingEffectV2 {
       if (light?.mesh) this._lightScene?.remove(light.mesh);
       light?.dispose?.();
       this._lights.delete(key);
-      this._nextAnimationUpdateAtSec.delete(key);
       pruned += 1;
     }
     for (const key of [...this._darknessSources.keys()]) {
@@ -1406,7 +1630,6 @@ export class LightingEffectV2 {
       if (ds?.mesh) this._darknessScene?.remove(ds.mesh);
       ds?.dispose?.();
       this._darknessSources.delete(key);
-      this._nextAnimationUpdateAtSec.delete(key);
       pruned += 1;
     }
 
@@ -1438,7 +1661,6 @@ export class LightingEffectV2 {
    */
   syncAllLights() {
     if (!this._initialized) return;
-    this._nextAnimationUpdateAtSec.clear();
 
     // `_lightScene` is shared with PlayerLightEffectV2 (torch/flashlight) and
     // CandleFlamesEffectV2 (glow group). Those meshes are not in `_lights`, so a
@@ -1491,23 +1713,20 @@ export class LightingEffectV2 {
   }
 
   /**
-   * Prefer the live embedded AmbientLight document from the scene collection so
-   * level membership / flags match Foundry after navigation (avoids stale refs on ThreeLightSource).
+   * Prefer the cached live embedded AmbientLight document so level membership /
+   * flags match Foundry without doing collection lookups in hot loops.
    * @private
    * @param {ThreeLightSource|ThreeDarknessSource} source
    * @returns {object|null|undefined}
    */
   _liveAmbientDocForGating(source) {
-    const lightsCollection = canvas?.scene?.lights;
-    const id = source?.id ?? source?.document?.id;
-    if (!lightsCollection || id == null) return source?.document ?? null;
-    return lightsCollection.get?.(id) ?? lightsCollection.get?.(String(id)) ?? source?.document ?? null;
+    return source?._cachedDoc ?? source?.document ?? null;
   }
 
   /**
    * Toggle Three.js light/darkness mesh visibility from Levels elevation rules
-   * (`isLightVisibleForPerspective`). Uses live `canvas.scene.lights` docs when
-   * available so token/level changes apply without a full resync.
+   * (`isLightVisibleForPerspective`). Uses cached live docs so token/level changes
+   * apply without per-light collection lookups.
    * @private
    */
   _refreshLightsForLevelsPerspective() {
@@ -1559,8 +1778,8 @@ export class LightingEffectV2 {
   _shouldDecimateAnimationUpdate(source, tSec) {
     if (!source || source?.mesh?.visible === false) return false;
 
-    // OPTIMIZATION: Cache the lowercase string parsing to avoid massive GC allocation
-    const ud = source._msaAnimCache || (source._msaAnimCache = { isTorchLike: false, lastType: null });
+    // OPTIMIZATION: Cache lowercase parsing and update cadence on the source itself.
+    const ud = source._msaAnimCache || (source._msaAnimCache = { isTorchLike: false, lastType: null, nextUpdateAtSec: undefined });
     const animType = source?.document?.config?.animation?.type;
 
     if (ud.lastType !== animType) {
@@ -1571,13 +1790,10 @@ export class LightingEffectV2 {
 
     if (!ud.isTorchLike) return false;
 
-    const id = String(source?.id ?? source?.document?.id ?? source?.document?._id ?? '');
-    if (!id) return false;
+    const nextAt = ud.nextUpdateAtSec;
+    if (nextAt !== undefined && tSec < nextAt) return true;
 
-    const nextAt = Number(this._nextAnimationUpdateAtSec.get(id));
-    if (Number.isFinite(nextAt) && tSec < nextAt) return true;
-
-    this._nextAnimationUpdateAtSec.set(id, tSec + (1 / 12));
+    ud.nextUpdateAtSec = tSec + (1 / 12);
     return false;
   }
 
@@ -1622,7 +1838,7 @@ export class LightingEffectV2 {
    * @param {object} doc - Foundry AmbientLight document
    * @private
    */
-  _addLightFromDoc(doc, enhancementMap = null) {
+  _addLightFromDoc(doc, enhancementMap = null, cachedDoc = doc) {
     if (!doc?.id && !doc?._id) return;
     let plainDoc = doc;
     try {
@@ -1641,6 +1857,7 @@ export class LightingEffectV2 {
       if (this._darknessSources.has(id)) return;
       try {
         const ds = new ThreeDarknessSource(mergedDoc);
+        ds._cachedDoc = cachedDoc ?? mergedDoc;
         ds.init();
         this._darknessSources.set(id, ds);
         this._darknessList.push(ds); // OPTIMIZATION: Update flat array
@@ -1654,6 +1871,7 @@ export class LightingEffectV2 {
       if (this._lights.has(id)) return;
       try {
         const light = new ThreeLightSource(mergedDoc);
+        light._cachedDoc = cachedDoc ?? mergedDoc;
         light.init();
         this._lights.set(id, light);
         this._lightList.push(light); // OPTIMIZATION: Update flat array
@@ -1709,7 +1927,7 @@ export class LightingEffectV2 {
       if (old.mesh) this._lightScene?.remove(old.mesh);
       old.dispose();
       this._lights.delete(id);
-      this._addLightFromDoc(merged);
+      this._addLightFromDoc(merged, null, doc ?? merged);
       this._markPerspectiveRefreshDirty();
       return;
     }
@@ -1718,19 +1936,23 @@ export class LightingEffectV2 {
       if (old.mesh) this._darknessScene?.remove(old.mesh);
       old.dispose();
       this._darknessSources.delete(id);
-      this._addLightFromDoc(merged);
+      this._addLightFromDoc(merged, null, doc ?? merged);
       this._markPerspectiveRefreshDirty();
       return;
     }
 
     // Normal update
     if (this._lights.has(id)) {
-      this._lights.get(id).updateData(merged);
+      const light = this._lights.get(id);
+      light._cachedDoc = doc ?? merged;
+      light.updateData(merged);
     } else if (this._darknessSources.has(id)) {
-      this._darknessSources.get(id).updateData(merged);
+      const ds = this._darknessSources.get(id);
+      ds._cachedDoc = doc ?? merged;
+      ds.updateData(merged);
     } else {
       // Light not tracked yet — create it
-      this._addLightFromDoc(merged);
+      this._addLightFromDoc(merged, null, doc ?? merged);
     }
     this._markPerspectiveRefreshDirty();
   }
@@ -1755,7 +1977,6 @@ export class LightingEffectV2 {
       this._darknessSources.delete(id);
       this._darknessList = Array.from(this._darknessSources.values()); // OPTIMIZATION
     }
-    this._nextAnimationUpdateAtSec.delete(String(id));
     this._markPerspectiveRefreshDirty();
   }
 
@@ -1885,34 +2106,9 @@ export class LightingEffectV2 {
     // Update compose uniforms
     const u = this._composeMaterial?.uniforms;
     if (u) {
-      this._seedAmbientFromLegacyGlobalIfNeeded();
-      for (const k of LEGACY_LIGHTING_PARAM_KEYS) {
-        if (Object.prototype.hasOwnProperty.call(this.params, k)) delete this.params[k];
-      }
       // `uDarknessLevel` drives the ambient day/night blend in the compose shader.
       u.uDarknessLevel.value = clamp01(sceneDarkness);
-      u.uAmbientDayScale.value = Math.max(0, Number(this.params.ambientDayScale) || 0);
-      u.uAmbientNightScale.value = Math.max(0, Number(this.params.ambientNightScale) || 0);
-      u.uLightIntensity.value = this.params.lightIntensity;
-      u.uMinIlluminationScale.value = Math.max(0, Number(this.params.minIlluminationScale) || 0);
-      u.uColorationStrength.value = this.params.colorationStrength;
-      u.uColorationReflectivity.value = Math.max(0, Number(this.params.colorationReflectivity) || 0);
-      u.uColorationSaturation.value = Number(this.params.colorationSaturation) || 0;
-      u.uColorationChromaCurve.value = Math.max(0.001, Number(this.params.colorationChromaCurve) || 1);
-      u.uColorationAchromaticMix.value = clamp01(Number(this.params.colorationAchromaticMix) || 0);
-      const toneMode = Math.max(0, Math.min(2, Math.round(Number(this.params.composeToneMapping) || 0)));
-      if (this._composeToneMappingMode !== toneMode) {
-        this._composeToneMappingMode = toneMode;
-        this._composeMaterial.defines.COMPOSE_TONEMAP_MODE = toneMode;
-        this._composeMaterial.needsUpdate = true;
-      }
-      u.uComposeToneExposure.value = Math.max(0, Number(this.params.composeToneExposure) || 1);
-      u.uCloudShadowAmbientInfluence.value = clamp01(Number(this.params.cloudShadowAmbientInfluence) ?? 1);
-      u.uOverheadShadowAmbientInfluence.value = clamp01(Number(this.params.overheadShadowAmbientInfluence) ?? 1);
-      u.uDynamicLightShadowOverrideStrength.value = clamp01(Number(this.params.dynamicLightShadowOverrideStrength) ?? 0.65);
-      u.uNegativeDarknessStrength.value = this.params.negativeDarknessStrength;
-      u.uDarknessPunchGain.value = this.params.darknessPunchGain;
-      u.uInteriorDarkness.value = Math.max(0, Number(this.params.interiorDarkness) || 0);
+      this._syncStaticParamUniforms();
     }
   }
 
@@ -1997,20 +2193,7 @@ export class LightingEffectV2 {
     const w = Math.max(1, this._sizeVec.x);
     const h = Math.max(1, this._sizeVec.y);
 
-    // OPTIMIZATION: Mutates existing objects, avoiding 3 allocations per frame
-    this._calcScaledSize(w, h, this.params.internalLightResolutionScale, this._lightSize);
-    this._calcScaledSize(w, h, this.params.internalWindowResolutionScale, this._windowSize);
-    this._calcScaledSize(w, h, this.params.internalDarknessResolutionScale, this._darknessSize);
-
-    if (this._lightRT.width !== this._lightSize.w || this._lightRT.height !== this._lightSize.h) {
-      this._lightRT.setSize(this._lightSize.w, this._lightSize.h);
-    }
-    if (this._windowLightRT.width !== this._windowSize.w || this._windowLightRT.height !== this._windowSize.h) {
-      this._windowLightRT.setSize(this._windowSize.w, this._windowSize.h);
-    }
-    if (this._darknessRT.width !== this._darknessSize.w || this._darknessRT.height !== this._darknessSize.h) {
-      this._darknessRT.setSize(this._darknessSize.w, this._darknessSize.h);
-    }
+    this._syncRenderTargetSizes(w, h);
 
     const prevTarget = renderer.getRenderTarget();
     const prevAutoClear = renderer.autoClear;
@@ -2137,91 +2320,7 @@ export class LightingEffectV2 {
     const psmo = Number(paintedShadowMgrOpacity);
     cu.uPaintedShadowMgrOpacity.value = (Number.isFinite(psmo) ? Math.max(0, Math.min(1, psmo)) : 1.0);
     // View→scene UV uniforms for compose (building shadow + _Outdoors roof-light gate).
-    const dims = canvas?.dimensions;
-    const sc = window.MapShine?.sceneComposer;
-    const cam = camera;
-    if (cam && dims) {
-        let vMinX = 0, vMinY = 0, vMaxX = 1, vMaxY = 1;
-        let c00x = 0, c00y = 0, c10x = 1, c10y = 0, c01x = 0, c01y = 1, c11x = 1, c11y = 1;
-        if (cam.isOrthographicCamera) {
-          vMinX = cam.position.x + cam.left   / cam.zoom;
-          vMinY = cam.position.y + cam.bottom / cam.zoom;
-          vMaxX = cam.position.x + cam.right  / cam.zoom;
-          vMaxY = cam.position.y + cam.top    / cam.zoom;
-
-          c00x = vMinX; c00y = vMinY;
-          c10x = vMaxX; c10y = vMinY;
-          c01x = vMinX; c01y = vMaxY;
-          c11x = vMaxX; c11y = vMaxY;
-        } else {
-          const THREE = window.THREE;
-          const groundZ = sc?.basePlaneMesh?.position?.z ?? (sc?.groundZ ?? 0);
-          const ndc = this._tmpNdcVec;
-          const world = this._tmpWorldVec;
-          const dir = this._tmpDirVec;
-          if (THREE && ndc && world && dir) {
-            let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-            let validCornerCount = 0;
-
-            // OPTIMIZATION: Unroll the array loop to avoid iterator overhead and object lookups
-            const cX = [-1, 1, -1, 1];
-            const cY = [-1, -1, 1, 1];
-
-            for (let i = 0; i < 4; i++) {
-              ndc.set(cX[i], cY[i], 0.5);
-              world.copy(ndc).unproject(cam);
-              dir.copy(world).sub(cam.position);
-
-              const dz = dir.z;
-              if (dz > -1e-6 && dz < 1e-6) continue;
-
-              const t = (groundZ - cam.position.z) / dz;
-              if (t !== t || t <= 0) continue;
-
-              const ix = cam.position.x + dir.x * t;
-              const iy = cam.position.y + dir.y * t;
-
-              if (ix < minX) minX = ix; if (iy < minY) minY = iy;
-              if (ix > maxX) maxX = ix; if (iy > maxY) maxY = iy;
-              validCornerCount += 1;
-
-              if (i === 0) { c00x = ix; c00y = iy; }       // '00'
-              else if (i === 1) { c10x = ix; c10y = iy; }  // '10'
-              else if (i === 2) { c01x = ix; c01y = iy; }  // '01'
-              else if (i === 3) { c11x = ix; c11y = iy; }  // '11'
-            }
-
-            if (minX !== Infinity) {
-              vMinX = minX; vMinY = minY; vMaxX = maxX; vMaxY = maxY;
-            }
-            // If any corner ray misses the ground plane, never keep mixed
-            // default 0..1 corners; that can create horizontal/diagonal UV bands.
-            // Fall back to axis-aligned bounds corners for a stable mapping.
-            if (validCornerCount < 4 && minX !== Infinity) {
-              c00x = minX; c00y = minY;
-              c10x = maxX; c10y = minY;
-              c01x = minX; c01y = maxY;
-              c11x = maxX; c11y = maxY;
-            }
-          }
-        }
-        cu.uBldViewBoundsMin.value.set(vMinX, vMinY);
-        cu.uBldViewBoundsMax.value.set(vMaxX, vMaxY);
-        cu.uBldViewCorner00.value.set(c00x, c00y);
-        cu.uBldViewCorner10.value.set(c10x, c10y);
-        cu.uBldViewCorner01.value.set(c01x, c01y);
-        cu.uBldViewCorner11.value.set(c11x, c11y);
-        const sr = dims.sceneRect ?? dims;
-        cu.uBldSceneOrigin.value.set(sr.x ?? 0, sr.y ?? 0);
-        cu.uBldSceneSize.value.set(
-          sr.width  ?? dims.sceneWidth  ?? 1,
-          sr.height ?? dims.sceneHeight ?? 1
-        );
-        cu.uSceneDimensions.value.set(
-          dims.width  ?? 1,
-          dims.height ?? 1
-        );
-    }
+    this._syncViewSceneUniforms(camera);
 
     if (buildingShadowTexture) {
       cu.tBuildingShadow.value    = buildingShadowTexture;
@@ -2323,19 +2422,8 @@ export class LightingEffectV2 {
   onResize(w, h) {
     const rw = Math.max(1, w);
     const rh = Math.max(1, h);
-    // OPTIMIZATION: Mutates pre-allocated objects instead of creating new ones
-    this._calcScaledSize(rw, rh, this.params.internalLightResolutionScale, this._lightSize);
-    this._calcScaledSize(rw, rh, this.params.internalWindowResolutionScale, this._windowSize);
-    this._calcScaledSize(rw, rh, this.params.internalDarknessResolutionScale, this._darknessSize);
-    if (this._lightRT) {
-      this._lightRT.setSize(this._lightSize.w, this._lightSize.h);
-    }
-    if (this._windowLightRT) {
-      this._windowLightRT.setSize(this._windowSize.w, this._windowSize.h);
-    }
-    if (this._darknessRT) {
-      this._darknessRT.setSize(this._darknessSize.w, this._darknessSize.h);
-    }
+    this._lastRtSizeState.w = -1;
+    this._syncRenderTargetSizes(rw, rh);
   }
 
   /**
@@ -2483,7 +2571,6 @@ export class LightingEffectV2 {
     this._invalidateEnhancementCache();
     this._perspectiveRefreshDirty = true;
     this._lastPerspectiveRefreshAtSec = -Infinity;
-    this._nextAnimationUpdateAtSec.clear();
     this._initialized = false;
     this._lightingPerspectiveContext = null;
     this._renderFloorIndexForLights = null;

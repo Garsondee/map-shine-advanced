@@ -3272,76 +3272,34 @@ export class FloorCompositor {
     }
     if (!populateSlimRender && timeInfo) {
       // Wind must advance before update() so accumulation is 1× per frame.
-      this._cloudEffect.advanceWind(timeInfo.delta ?? 0.016);
-      this._specularEffect.update(timeInfo);
-      try { this._fluidEffect.update(timeInfo); } catch (err) {
-        log.warn('FluidEffectV2 update threw, skipping fluid update:', err);
-      }
-      try { this._iridescenceEffect.update(timeInfo); } catch (err) {
-        log.warn('IridescenceEffectV2 update threw, skipping iridescence update:', err);
-      }
-      try { this._prismEffect.update(timeInfo); } catch (err) {
-        log.warn('PrismEffectV2 update threw, skipping prism update:', err);
-      }
-      try { this._bushEffect.update(timeInfo); } catch (err) {
-        log.warn('BushEffectV2 update threw, skipping bush update:', err);
-      }
-      try { this._treeEffect.update(timeInfo); } catch (err) {
-        log.warn('TreeEffectV2 update threw, skipping tree update:', err);
-      }
-      try {
-        this._fireEffect.update(timeInfo);
-      } catch (err) {
-        log.warn('FireEffectV2 update threw, skipping frame:', err);
-      }
-      try {
-        this._ashDisturbanceEffect?.update?.(timeInfo);
-      } catch (err) {
-        log.warn('AshDisturbanceEffectV2 update threw, skipping frame:', err);
-      }
-      try {
-        this._dustEffect.update(timeInfo);
-      } catch (err) {
-        log.warn('DustEffectV2 update threw, skipping frame:', err);
-      }
-      try {
-        this._waterSplashesEffect?.update?.(timeInfo);
-      } catch (err) {
-        log.warn('WaterSplashesEffectV2 update threw, skipping frame:', err);
-      }
-      try {
-        this._smellyFliesEffect?.update?.(timeInfo);
-      } catch (err) {
-        log.warn('SmellyFliesEffect update threw, skipping frame:', err);
-      }
-      try {
+      this._profileEffectCall('cloud', 'update', () => this._cloudEffect.advanceWind(timeInfo.delta ?? 0.016), 'CloudEffectV2 advanceWind');
+      this._profileEffectCall('specular', 'update', () => this._specularEffect.update(timeInfo), 'SpecularEffectV2 update');
+      this._profileEffectCall('fluid', 'update', () => this._fluidEffect.update(timeInfo), 'FluidEffectV2 update');
+      this._profileEffectCall('iridescence', 'update', () => this._iridescenceEffect.update(timeInfo), 'IridescenceEffectV2 update');
+      this._profileEffectCall('prism', 'update', () => this._prismEffect.update(timeInfo), 'PrismEffectV2 update');
+      this._profileEffectCall('bush', 'update', () => this._bushEffect.update(timeInfo), 'BushEffectV2 update');
+      this._profileEffectCall('tree', 'update', () => this._treeEffect.update(timeInfo), 'TreeEffectV2 update');
+      this._profileEffectCall('fire', 'update', () => this._fireEffect.update(timeInfo), 'FireEffectV2 update');
+      this._profileEffectCall('ashDisturbance', 'update', () => this._ashDisturbanceEffect?.update?.(timeInfo), 'AshDisturbanceEffectV2 update');
+      this._profileEffectCall('dust', 'update', () => this._dustEffect.update(timeInfo), 'DustEffectV2 update');
+      this._profileEffectCall('waterSplashes', 'update', () => this._waterSplashesEffect?.update?.(timeInfo), 'WaterSplashesEffectV2 update');
+      this._profileEffectCall('smellyFlies', 'update', () => this._smellyFliesEffect?.update?.(timeInfo), 'SmellyFliesEffect update');
+      this._profileEffectCall('lightning', 'update', () => {
         this._lightningEffect?.ensureMeshesAttached?.(this._renderBus?._scene ?? null);
         this._lightningEffect?.update?.(timeInfo);
-      } catch (err) {
-        log.warn('LightningEffectV2 update threw, skipping frame:', err);
-      }
-      try {
+      }, 'LightningEffectV2 update');
+      this._profileEffectCall('candleFlames', 'update', () => {
         this._candleFlamesEffect?.ensureMeshesAttached?.(this._renderBus?._scene ?? null);
         this._candleFlamesEffect?.update?.(timeInfo);
-      } catch (err) {
-        log.warn('CandleFlamesEffectV2 update threw, skipping frame:', err);
-      }
-      try {
-        this._playerLightEffect?.update?.(timeInfo);
-      } catch (err) {
-        log.warn('PlayerLightEffectV2 update threw, skipping frame:', err);
-      }
-      this._cloudEffect.update(timeInfo);
-      this._lightingEffect.update(timeInfo);
+      }, 'CandleFlamesEffectV2 update');
+      this._profileEffectCall('playerLight', 'update', () => this._playerLightEffect?.update?.(timeInfo), 'PlayerLightEffectV2 update');
+      this._profileEffectCall('cloud', 'update', () => this._cloudEffect.update(timeInfo), 'CloudEffectV2 update');
+      this._profileEffectCall('lighting', 'update', () => this._lightingEffect.update(timeInfo), 'LightingEffectV2 update');
       // Weather particles must update BEFORE the bus render so their BatchedRenderer
       // positions are current when the bus scene is drawn this frame.
-      try { this._weatherParticles?.update?.(timeInfo); } catch (err) {
-        log.warn('WeatherParticlesV2 update threw, skipping weather update:', err);
-      }
-      try { this._waterEffect?.update?.(timeInfo); } catch (err) {
-        log.warn('WaterEffectV2 update threw, skipping water update:', err);
-      }
-      this._skyColorEffect.update(timeInfo);
+      this._profileEffectCall('weatherParticles', 'update', () => this._weatherParticles?.update?.(timeInfo), 'WeatherParticlesV2 update');
+      this._profileEffectCall('water', 'update', () => this._waterEffect?.update?.(timeInfo), 'WaterEffectV2 update');
+      this._profileEffectCall('skyColor', 'update', () => this._skyColorEffect.update(timeInfo), 'SkyColorEffectV2 update');
       const skyIntensity01 = Number(this._skyColorEffect?._composeMaterial?.uniforms?.uIntensity?.value);
       const weatherEnv = weatherController?.getEnvironment?.() ?? null;
       const sceneDarknessRaw = Number(canvas?.scene?.environment?.darknessLevel);
@@ -3370,7 +3328,7 @@ export class FloorCompositor {
           sunAzimuthDeg: this._skyColorEffect?.currentSunAzimuthDeg,
         });
       } catch (_) {}
-      this._windowLightEffect.update(timeInfo);
+      this._profileEffectCall('windowLight', 'update', () => this._windowLightEffect.update(timeInfo), 'WindowLightEffectV2 update');
       // Keep TileManager linked even if managers are re-created during canvas/scene transitions.
       try {
         const tm = window.MapShine?.tileManager ?? null;
@@ -3378,22 +3336,22 @@ export class FloorCompositor {
           tm?.setWindowLightEffect?.(this._windowLightEffect);
         }
       } catch (_) {}
-      this._colorCorrectionEffect.update(timeInfo);
-      this._filterEffect.update(timeInfo);
-      this._atmosphericFogEffect.update(timeInfo);
-      this._fogEffect.update(timeInfo);
-      this._bloomEffect.update(timeInfo);
-      this._sharpenEffect.update(timeInfo);
+      this._profileEffectCall('colorCorrection', 'update', () => this._colorCorrectionEffect.update(timeInfo), 'ColorCorrectionEffectV2 update');
+      this._profileEffectCall('filter', 'update', () => this._filterEffect.update(timeInfo), 'FilterEffectV2 update');
+      this._profileEffectCall('atmosphericFog', 'update', () => this._atmosphericFogEffect.update(timeInfo), 'AtmosphericFogEffectV2 update');
+      this._profileEffectCall('fogOfWar', 'update', () => this._fogEffect.update(timeInfo), 'FogOfWarEffectV2 update');
+      this._profileEffectCall('bloom', 'update', () => this._bloomEffect.update(timeInfo), 'BloomEffectV2 update');
+      this._profileEffectCall('sharpen', 'update', () => this._sharpenEffect.update(timeInfo), 'SharpenEffectV2 update');
       // Artistic post-processing effects
-      try { this._dotScreenEffect?.update?.(timeInfo); } catch (_) {}
-      try { this._halftoneEffect?.update?.(timeInfo); } catch (_) {}
-      try { this._asciiEffect?.update?.(timeInfo); } catch (_) {}
-      try { this._dazzleOverlayEffect?.update?.(timeInfo); } catch (_) {}
-      try { this._visionModeEffect?.update?.(timeInfo); } catch (_) {}
-      try { this._invertEffect?.update?.(timeInfo); } catch (_) {}
-      try { this._sepiaEffect?.update?.(timeInfo); } catch (_) {}
-      try { this._lensEffect?.update?.(timeInfo); } catch (_) {}
-      try { this._distortionEffect?.update?.(timeInfo); } catch (_) {}
+      this._profileEffectCall('dotScreen', 'update', () => this._dotScreenEffect?.update?.(timeInfo), 'DotScreenEffectV2 update');
+      this._profileEffectCall('halftone', 'update', () => this._halftoneEffect?.update?.(timeInfo), 'HalftoneEffectV2 update');
+      this._profileEffectCall('ascii', 'update', () => this._asciiEffect?.update?.(timeInfo), 'AsciiEffectV2 update');
+      this._profileEffectCall('dazzleOverlay', 'update', () => this._dazzleOverlayEffect?.update?.(timeInfo), 'DazzleOverlayEffectV2 update');
+      this._profileEffectCall('visionMode', 'update', () => this._visionModeEffect?.update?.(timeInfo), 'VisionModeEffectV2 update');
+      this._profileEffectCall('invert', 'update', () => this._invertEffect?.update?.(timeInfo), 'InvertEffectV2 update');
+      this._profileEffectCall('sepia', 'update', () => this._sepiaEffect?.update?.(timeInfo), 'SepiaEffectV2 update');
+      this._profileEffectCall('lens', 'update', () => this._lensEffect?.update?.(timeInfo), 'LensEffectV2 update');
+      this._profileEffectCall('distortion', 'update', () => this._distortionEffect?.update?.(timeInfo), 'DistortionManager update');
 
     }
 
@@ -3402,15 +3360,9 @@ export class FloorCompositor {
     // and mask bindings; skipping the outer block used to freeze sliders until
     // unrelated params (sun hash) changed.
     if (timeInfo) {
-      try { this._overheadShadowEffect?.update?.(timeInfo); } catch (err) {
-        log.warn('OverheadShadowsEffectV2 update threw, skipping overhead shadow update:', err);
-      }
-      try { this._buildingShadowEffect?.update?.(timeInfo); } catch (err) {
-        log.warn('BuildingShadowsEffectV2 update threw, skipping building shadow update:', err);
-      }
-      try { this._paintedShadowEffect?.update?.(timeInfo); } catch (err) {
-        log.warn('PaintedShadowEffectV2 update threw, skipping painted shadow update:', err);
-      }
+      this._profileEffectCall('overheadShadows', 'update', () => this._overheadShadowEffect?.update?.(timeInfo), 'OverheadShadowsEffectV2 update');
+      this._profileEffectCall('buildingShadows', 'update', () => this._buildingShadowEffect?.update?.(timeInfo), 'BuildingShadowsEffectV2 update');
+      this._profileEffectCall('paintedShadows', 'update', () => this._paintedShadowEffect?.update?.(timeInfo), 'PaintedShadowEffectV2 update');
     }
 
     if (populateSlimRender) {
@@ -3420,9 +3372,9 @@ export class FloorCompositor {
     }
 
     // ── Bind per-frame textures and camera to effects ────────────────────────
-    this._specularEffect.render(this.renderer, this.camera);
-    this._iridescenceEffect.render(this.renderer, this.camera);
-    this._prismEffect.render(this.renderer, this.camera);
+    this._profileEffectCall('specular', 'render', () => this._specularEffect.render(this.renderer, this.camera), 'SpecularEffectV2 render');
+    this._profileEffectCall('iridescence', 'render', () => this._iridescenceEffect.render(this.renderer, this.camera), 'IridescenceEffectV2 render');
+    this._profileEffectCall('prism', 'render', () => this._prismEffect.render(this.renderer, this.camera), 'PrismEffectV2 render');
 
     // Feed live sun angles from SkyColorEffectV2 into building shadows and
     // overhead shadows — single source of truth for sun direction.
@@ -3495,11 +3447,9 @@ export class FloorCompositor {
     if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: overheadShadows.render'); } catch (_) {} }
     if (_profiling) _profileT0 = performance.now();
     if (!_skipOverheadShadowPass) {
-      try {
+      this._profileEffectCall('overheadShadows', 'render', () => {
         this._overheadShadowEffect?.render?.(this.renderer, this._renderBus._scene, this.camera);
-      } catch (err) {
-        log.warn('OverheadShadowsEffectV2 render threw, skipping overhead shadow pass:', err);
-      }
+      }, 'OverheadShadowsEffectV2 render');
     }
     if (_profiling) this._recordPassTiming('overheadShadowsRender', _profileT0);
     if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: overheadShadows.render DONE'); } catch (_) {} }
@@ -3507,11 +3457,9 @@ export class FloorCompositor {
     if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: buildingShadows.render'); } catch (_) {} }
     if (_profiling) _profileT0 = performance.now();
     if (!_skipBuildingShadowPass) {
-      try {
+      this._profileEffectCall('buildingShadows', 'render', () => {
         this._buildingShadowEffect?.render?.(this.renderer, this.camera);
-      } catch (err) {
-        log.warn('BuildingShadowsEffectV2 render threw, skipping building shadow pass:', err);
-      }
+      }, 'BuildingShadowsEffectV2 render');
     }
     if (_profiling) this._recordPassTiming('buildingShadowsRender', _profileT0);
     if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: buildingShadows.render DONE'); } catch (_) {} }
@@ -3519,11 +3467,9 @@ export class FloorCompositor {
     if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: paintedShadows.render'); } catch (_) {} }
     if (_profiling) _profileT0 = performance.now();
     if (!_skipBuildingShadowPass) {
-      try {
+      this._profileEffectCall('paintedShadows', 'render', () => {
         this._paintedShadowEffect?.render?.(this.renderer);
-      } catch (err) {
-        log.warn('PaintedShadowEffectV2 render threw, skipping painted shadow pass:', err);
-      }
+      }, 'PaintedShadowEffectV2 render');
     }
     if (_profiling) this._recordPassTiming('paintedShadowsRender', _profileT0);
     if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: paintedShadows.render DONE'); } catch (_) {} }
@@ -3554,7 +3500,7 @@ export class FloorCompositor {
     if (_profiling) _profileT0 = performance.now();
     const cloudEnabled = !_skipCloudPass && resolveEffectEnabled(this._cloudEffect);
     if (cloudEnabled) {
-      this._cloudEffect.render(this.renderer);
+      this._profileEffectCall('cloud', 'render', () => this._cloudEffect.render(this.renderer), 'CloudEffectV2 render');
     }
     {
       const cloudTex = cloudEnabled
@@ -3641,9 +3587,11 @@ export class FloorCompositor {
       const distOut = (currentInput === this._postA) ? this._postB : this._postA;
       this._distortionEffect.setBuffers(currentInput, distOut);
       this._distortionEffect.setRenderToScreen(false);
-      withSceneScissor(this.renderer, () => {
-        this._distortionEffect.render(this.renderer, this._renderBus?._scene ?? this.scene, this.camera);
-      });
+      this._profileEffectCall('distortion', 'render', () => {
+        withSceneScissor(this.renderer, () => {
+          this._distortionEffect.render(this.renderer, this._renderBus?._scene ?? this.scene, this.camera);
+        });
+      }, 'DistortionManager render');
       currentInput = distOut;
     }
 
@@ -3660,9 +3608,12 @@ export class FloorCompositor {
     if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: fogOverlay.compositeToRT'); } catch (_) {} }
     {
       const fogOutput = (currentInput === this._postA) ? this._postB : this._postA;
-      const fogWrote = withSceneScissor(this.renderer, () =>
-        this._compositeFogOverlayToRT(currentInput, fogOutput)
-      );
+      let fogWrote = false;
+      this._profileEffectCall('fogOfWar', 'render', () => {
+        fogWrote = withSceneScissor(this.renderer, () =>
+          this._compositeFogOverlayToRT(currentInput, fogOutput)
+        );
+      }, 'FogOfWarEffectV2 composite');
       if (fogWrote) {
         currentInput = fogOutput;
       }
@@ -3678,9 +3629,12 @@ export class FloorCompositor {
     if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: lens.render'); } catch (_) {} }
     if (!_skipLensPass && resolveEffectEnabled(this._lensEffect)) {
       const lensOutput = (currentInput === this._postA) ? this._postB : this._postA;
-      const wrote = withSceneScissor(this.renderer, () =>
-        this._lensEffect.render(this.renderer, this.camera, currentInput, lensOutput, this._postA)
-      );
+      let wrote = false;
+      this._profileEffectCall('lens', 'render', () => {
+        wrote = withSceneScissor(this.renderer, () =>
+          this._lensEffect.render(this.renderer, this.camera, currentInput, lensOutput, this._postA)
+        );
+      }, 'LensEffectV2 render');
       if (wrote) {
         currentInput = lensOutput;
       }
@@ -3691,9 +3645,12 @@ export class FloorCompositor {
     if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: playerLight.nightVision'); } catch (_) {} }
     if (resolveEffectEnabled(this._playerLightEffect) && this._playerLightEffect?.shouldRenderNightVision?.()) {
       const nvOutput = (currentInput === this._postA) ? this._postB : this._postA;
-      const wrote = withSceneScissor(this.renderer, () =>
-        this._playerLightEffect.renderNightVision(this.renderer, this.camera, currentInput, nvOutput)
-      );
+      let wrote = false;
+      this._profileEffectCall('playerLight', 'render', () => {
+        wrote = withSceneScissor(this.renderer, () =>
+          this._playerLightEffect.renderNightVision(this.renderer, this.camera, currentInput, nvOutput)
+        );
+      }, 'PlayerLightEffectV2 renderNightVision');
       if (wrote) {
         currentInput = nvOutput;
       }
@@ -4016,6 +3973,33 @@ export class FloorCompositor {
     entry.total += elapsed;
     entry.count += 1;
     entry.last = elapsed;
+  }
+
+  /**
+   * Performance Recorder shim. When the recorder is enabled, wraps `fn` in a
+   * begin/end span so CPU + (optional) GPU + draw-call deltas are attributed
+   * to `effectKey`/`phase`. When disabled, this is a single property lookup
+   * plus the original try/catch — measured cost is ~tens of nanoseconds per
+   * call, safe to leave on the hot path unconditionally.
+   *
+   * @param {string} effectKey - Stable effect identifier (e.g. `'lighting'`).
+   * @param {'update'|'render'} phase
+   * @param {() => void} fn - Wrapped call (must NOT throw asynchronously).
+   * @param {string} [errorLabel] - Used by the existing per-effect log warn
+   *   when `fn` throws. Defaults to `${effectKey} ${phase}`.
+   * @private
+   */
+  _profileEffectCall(effectKey, phase, fn, errorLabel) {
+    const recorder = (typeof window !== 'undefined') ? window?.MapShine?.performanceRecorder : null;
+    const recording = recorder?.enabled === true;
+    const token = recording ? recorder.beginEffectCall(effectKey, phase) : null;
+    try {
+      fn();
+    } catch (err) {
+      log.warn(`${errorLabel ?? `${effectKey} ${phase}`} threw, skipping frame:`, err);
+    } finally {
+      if (recording) recorder.endEffectCall(token);
+    }
   }
 
   /**
@@ -5503,22 +5487,24 @@ export class FloorCompositor {
         // Lighting composes screen-space occlusion/window terms using gl_FragCoord.
         // Keep this pass unscissored so elevated/parallax overhead pixels outside the
         // ground-projected scene rect still receive correct scene lighting.
-        withoutSceneScissor(this.renderer, () => {
-          this._lightingEffect.render(
-            this.renderer, this.camera,
-            currentInput, levelPostA,
-            winScene,
-            cloudShadowTexLegacy, cloudShadowRawTexLegacy,
-            buildingShadowTexForLighting, overheadShadowTexLegacy,
-            buildingShadowOpacity,
-            overheadRoofAlphaTex, overheadRoofBlockTex,
-            outdoorsForLightingTex,
-            ceilingTransmittanceTex,
-            overheadRoofRestrictLightTex,
-            combinedShadowTex, combinedShadowRawTex,
-            paintedShadowLitTex, paintedShadowMgrOpacity,
-          );
-        });
+        this._profileEffectCall('lighting', 'render', () => {
+          withoutSceneScissor(this.renderer, () => {
+            this._lightingEffect.render(
+              this.renderer, this.camera,
+              currentInput, levelPostA,
+              winScene,
+              cloudShadowTexLegacy, cloudShadowRawTexLegacy,
+              buildingShadowTexForLighting, overheadShadowTexLegacy,
+              buildingShadowOpacity,
+              overheadRoofAlphaTex, overheadRoofBlockTex,
+              outdoorsForLightingTex,
+              ceilingTransmittanceTex,
+              overheadRoofRestrictLightTex,
+              combinedShadowTex, combinedShadowRawTex,
+              paintedShadowLitTex, paintedShadowMgrOpacity,
+            );
+          });
+        }, 'LightingEffectV2 render');
         if (_profiling) this._recordPassTiming(`perLevel_lighting_${levelIndex}`, _profileT0);
         currentInput = levelPostA;
       }
@@ -5526,18 +5512,22 @@ export class FloorCompositor {
       // Sky color grading
       if (resolveEffectEnabled(this._skyColorEffect)) {
         const skyOut = (currentInput === levelPostA) ? levelPostB : levelPostA;
-        withSceneScissor(this.renderer, () => {
-          this._skyColorEffect.render(this.renderer, currentInput, skyOut);
-        });
+        this._profileEffectCall('skyColor', 'render', () => {
+          withSceneScissor(this.renderer, () => {
+            this._skyColorEffect.render(this.renderer, currentInput, skyOut);
+          });
+        }, 'SkyColorEffectV2 render');
         currentInput = skyOut;
       }
 
       // Filter (before water: refracted samples include filter; avoids an extra pass)
       if (resolveEffectEnabled(this._filterEffect)) {
         const fOut = (currentInput === levelPostA) ? levelPostB : levelPostA;
-        withSceneScissor(this.renderer, () => {
-          this._filterEffect.render(this.renderer, currentInput, fOut);
-        });
+        this._profileEffectCall('filter', 'render', () => {
+          withSceneScissor(this.renderer, () => {
+            this._filterEffect.render(this.renderer, currentInput, fOut);
+          });
+        }, 'FilterEffectV2 render');
         currentInput = fOut;
       }
 
@@ -5586,16 +5576,18 @@ export class FloorCompositor {
           buildingShadowTex,
           overheadShadowTexLegacy,
         });
-        _waterPassWrote = withSceneScissor(this.renderer, () =>
-          this._waterEffect.render(
-            this.renderer,
-            this.camera,
-            currentInput,
-            waterOut,
-            waterOccluder,
-            levelSceneRT?.texture ?? null,
-          )
-        );
+        this._profileEffectCall('water', 'render', () => {
+          _waterPassWrote = withSceneScissor(this.renderer, () =>
+            this._waterEffect.render(
+              this.renderer,
+              this.camera,
+              currentInput,
+              waterOut,
+              waterOccluder,
+              levelSceneRT?.texture ?? null,
+            )
+          );
+        }, 'WaterEffectV2 render');
         if (_profiling) this._recordPassTiming(`perLevel_water_${levelIndex}`, _profileT0);
         if (_waterPassWrote) currentInput = waterOut;
       } else if (usePostMergeWater) {
@@ -5612,9 +5604,11 @@ export class FloorCompositor {
       // User color correction after water so foam/spec/tint are graded with the scene (no extra pass).
       if (resolveEffectEnabled(this._colorCorrectionEffect)) {
         const ccOut = (currentInput === levelPostA) ? levelPostB : levelPostA;
-        withSceneScissor(this.renderer, () => {
-          this._colorCorrectionEffect.render(this.renderer, currentInput, ccOut);
-        });
+        this._profileEffectCall('colorCorrection', 'render', () => {
+          withSceneScissor(this.renderer, () => {
+            this._colorCorrectionEffect.render(this.renderer, currentInput, ccOut);
+          });
+        }, 'ColorCorrectionEffectV2 render');
         currentInput = ccOut;
       }
 
@@ -5625,9 +5619,12 @@ export class FloorCompositor {
       // Atmospheric fog
       if (resolveEffectEnabled(this._atmosphericFogEffect)) {
         const fogOut = (currentInput === levelPostA) ? levelPostB : levelPostA;
-        const fogWrote = withSceneScissor(this.renderer, () =>
-          this._atmosphericFogEffect.render(this.renderer, this.camera, currentInput, fogOut)
-        );
+        let fogWrote = false;
+        this._profileEffectCall('atmosphericFog', 'render', () => {
+          fogWrote = withSceneScissor(this.renderer, () =>
+            this._atmosphericFogEffect.render(this.renderer, this.camera, currentInput, fogOut)
+          );
+        }, 'AtmosphericFogEffectV2 render');
         if (fogWrote) currentInput = fogOut;
       }
 
@@ -5638,16 +5635,20 @@ export class FloorCompositor {
       // before introducing per-mip scissor support.
       if (resolveEffectEnabled(this._bloomEffect)) {
         const bloomOut = (currentInput === levelPostA) ? levelPostB : levelPostA;
-        this._bloomEffect.render(this.renderer, currentInput, bloomOut);
+        this._profileEffectCall('bloom', 'render', () => {
+          this._bloomEffect.render(this.renderer, currentInput, bloomOut);
+        }, 'BloomEffectV2 render');
         currentInput = bloomOut;
       }
 
       // Sharpen
       if (resolveEffectEnabled(this._sharpenEffect)) {
         const shOut = (currentInput === levelPostA) ? levelPostB : levelPostA;
-        withSceneScissor(this.renderer, () => {
-          this._sharpenEffect.render(this.renderer, currentInput, shOut);
-        });
+        this._profileEffectCall('sharpen', 'render', () => {
+          withSceneScissor(this.renderer, () => {
+            this._sharpenEffect.render(this.renderer, currentInput, shOut);
+          });
+        }, 'SharpenEffectV2 render');
         currentInput = shOut;
       }
 
@@ -5655,51 +5656,72 @@ export class FloorCompositor {
       // so registry/UI cannot disagree with FilterEffectV2-style gating.
       if (resolveEffectEnabled(this._dotScreenEffect)) {
         const dsOut = (currentInput === levelPostA) ? levelPostB : levelPostA;
-        const wrote = withSceneScissor(this.renderer, () =>
-          this._dotScreenEffect.render(this.renderer, this.camera, currentInput, dsOut)
-        );
+        let wrote = false;
+        this._profileEffectCall('dotScreen', 'render', () => {
+          wrote = withSceneScissor(this.renderer, () =>
+            this._dotScreenEffect.render(this.renderer, this.camera, currentInput, dsOut)
+          );
+        }, 'DotScreenEffectV2 render');
         if (wrote) currentInput = dsOut;
       }
       if (resolveEffectEnabled(this._halftoneEffect)) {
         const htOut = (currentInput === levelPostA) ? levelPostB : levelPostA;
-        const wrote = withSceneScissor(this.renderer, () =>
-          this._halftoneEffect.render(this.renderer, this.camera, currentInput, htOut)
-        );
+        let wrote = false;
+        this._profileEffectCall('halftone', 'render', () => {
+          wrote = withSceneScissor(this.renderer, () =>
+            this._halftoneEffect.render(this.renderer, this.camera, currentInput, htOut)
+          );
+        }, 'HalftoneEffectV2 render');
         if (wrote) currentInput = htOut;
       }
       if (resolveEffectEnabled(this._asciiEffect)) {
         const ascOut = (currentInput === levelPostA) ? levelPostB : levelPostA;
-        const wrote = withSceneScissor(this.renderer, () =>
-          this._asciiEffect.render(this.renderer, this.camera, currentInput, ascOut)
-        );
+        let wrote = false;
+        this._profileEffectCall('ascii', 'render', () => {
+          wrote = withSceneScissor(this.renderer, () =>
+            this._asciiEffect.render(this.renderer, this.camera, currentInput, ascOut)
+          );
+        }, 'AsciiEffectV2 render');
         if (wrote) currentInput = ascOut;
       }
       if (resolveEffectEnabled(this._dazzleOverlayEffect)) {
         const dzOut = (currentInput === levelPostA) ? levelPostB : levelPostA;
-        const wrote = withSceneScissor(this.renderer, () =>
-          this._dazzleOverlayEffect.render(this.renderer, this.camera, currentInput, dzOut)
-        );
+        let wrote = false;
+        this._profileEffectCall('dazzleOverlay', 'render', () => {
+          wrote = withSceneScissor(this.renderer, () =>
+            this._dazzleOverlayEffect.render(this.renderer, this.camera, currentInput, dzOut)
+          );
+        }, 'DazzleOverlayEffectV2 render');
         if (wrote) currentInput = dzOut;
       }
       if (resolveEffectEnabled(this._visionModeEffect)) {
         const vmOut = (currentInput === levelPostA) ? levelPostB : levelPostA;
-        const wrote = withSceneScissor(this.renderer, () =>
-          this._visionModeEffect.render(this.renderer, this.camera, currentInput, vmOut)
-        );
+        let wrote = false;
+        this._profileEffectCall('visionMode', 'render', () => {
+          wrote = withSceneScissor(this.renderer, () =>
+            this._visionModeEffect.render(this.renderer, this.camera, currentInput, vmOut)
+          );
+        }, 'VisionModeEffectV2 render');
         if (wrote) currentInput = vmOut;
       }
       if (resolveEffectEnabled(this._invertEffect)) {
         const invOut = (currentInput === levelPostA) ? levelPostB : levelPostA;
-        const wrote = withSceneScissor(this.renderer, () =>
-          this._invertEffect.render(this.renderer, this.camera, currentInput, invOut)
-        );
+        let wrote = false;
+        this._profileEffectCall('invert', 'render', () => {
+          wrote = withSceneScissor(this.renderer, () =>
+            this._invertEffect.render(this.renderer, this.camera, currentInput, invOut)
+          );
+        }, 'InvertEffectV2 render');
         if (wrote) currentInput = invOut;
       }
       if (resolveEffectEnabled(this._sepiaEffect)) {
         const sepOut = (currentInput === levelPostA) ? levelPostB : levelPostA;
-        const wrote = withSceneScissor(this.renderer, () =>
-          this._sepiaEffect.render(this.renderer, this.camera, currentInput, sepOut)
-        );
+        let wrote = false;
+        this._profileEffectCall('sepia', 'render', () => {
+          wrote = withSceneScissor(this.renderer, () =>
+            this._sepiaEffect.render(this.renderer, this.camera, currentInput, sepOut)
+          );
+        }, 'SepiaEffectV2 render');
         if (wrote) currentInput = sepOut;
       }
 
@@ -5724,15 +5746,18 @@ export class FloorCompositor {
       // authored holes and mask lower floors.
       if (_profiling) _profileT0 = performance.now();
       const rebindOut = (currentInput === levelPostA) ? levelPostB : levelPostA;
-      const rebound = withSceneScissor(this.renderer, () =>
-        this._levelAlphaRebindPass.render(
-          this.renderer,
-          currentInput,
-          levelSceneRT,
-          rebindOut,
-          { allowAlphaWiden: _waterPassWrote === true },
-        )
-      );
+      let rebound = false;
+      this._profileEffectCall('levelAlphaRebind', 'render', () => {
+        rebound = withSceneScissor(this.renderer, () =>
+          this._levelAlphaRebindPass.render(
+            this.renderer,
+            currentInput,
+            levelSceneRT,
+            rebindOut,
+            { allowAlphaWiden: _waterPassWrote === true },
+          )
+        );
+      }, 'LevelAlphaRebindPass render');
       if (_profiling) this._recordPassTiming(`perLevel_alphaRebind_${levelIndex}`, _profileT0);
       if (rebound) currentInput = rebindOut;
 
@@ -5837,27 +5862,29 @@ export class FloorCompositor {
       } catch (_) {}
       let postMergeWaterWrote = false;
       if (_profiling) _profileT0 = performance.now();
-      try {
-        this._bindWaterShadowUniforms({
-          cloudShadowTexLegacy,
-          buildingShadowTex,
-          overheadShadowTexLegacy,
-        });
-        postMergeWaterWrote = withSceneScissor(this.renderer, () =>
-          this._waterEffect.render(
-            this.renderer,
-            this.camera,
-            this._postA,
-            this._postB,
-            null,
-            null,
-          )
-        );
-      } catch (_) {
-        postMergeWaterWrote = false;
-      } finally {
-        try { this._waterEffect.setWaterBackgroundAlphaMaskTexture?.(null); } catch (_) {}
-      }
+      this._profileEffectCall('water', 'render', () => {
+        try {
+          this._bindWaterShadowUniforms({
+            cloudShadowTexLegacy,
+            buildingShadowTex,
+            overheadShadowTexLegacy,
+          });
+          postMergeWaterWrote = withSceneScissor(this.renderer, () =>
+            this._waterEffect.render(
+              this.renderer,
+              this.camera,
+              this._postA,
+              this._postB,
+              null,
+              null,
+            )
+          );
+        } catch (_) {
+          postMergeWaterWrote = false;
+        } finally {
+          try { this._waterEffect.setWaterBackgroundAlphaMaskTexture?.(null); } catch (_) {}
+        }
+      }, 'WaterEffectV2 postMerge render');
       if (_profiling) this._recordPassTiming('postMerge_water', _profileT0);
       if (postMergeWaterWrote) mergedCompositeOut = this._postB;
       try { this._bloomEffect?.setWaterSpecularBloomTexture?.(null); } catch (_) {}

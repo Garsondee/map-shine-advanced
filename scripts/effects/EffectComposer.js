@@ -558,6 +558,14 @@ export class EffectComposer {
     const doProfile = !!profiler?.enabled;
     if (doProfile) profiler.beginFrame(timeInfo);
 
+    // Performance Recorder (Quick Actions → Performance Recorder dialog). The
+    // recorder lives on `window.MapShine.performanceRecorder` and short-
+    // circuits when `enabled === false`, so this is a single property lookup
+    // when not recording.
+    const perfRecorder = (typeof window !== 'undefined') ? window?.MapShine?.performanceRecorder : null;
+    const recording = perfRecorder?.enabled === true;
+    if (recording) perfRecorder.beginFrame(timeInfo);
+
     if (doProfile) {
       try {
         const now = performance.now();
@@ -662,12 +670,14 @@ export class EffectComposer {
           this._updatableAccum.set(updatable, accum % interval);
         }
         let t0 = 0;
-        if (doProfile) t0 = performance.now();
+        const measure = doProfile || recording;
+        if (measure) t0 = performance.now();
         updatable.update(timeInfo);
-        if (doProfile) {
+        if (measure) {
           const dt = performance.now() - t0;
           const name = updatable?.constructor?.name || updatable?.id || 'updatable';
-          profiler.recordUpdatable(name, dt);
+          if (doProfile) profiler.recordUpdatable(name, dt);
+          if (recording) perfRecorder.recordUpdatable(name, dt);
         }
       } catch (error) {
         log.error('Error updating updatable (V2 path):', error);
@@ -760,6 +770,16 @@ export class EffectComposer {
     });
     if (doProfile) profiler.endFrame();
     this._updateDecimationState(performance.now() - _frameStartMs);
+    if (recording) {
+      try {
+        const continuousReason = (typeof window !== 'undefined')
+          ? (window?.MapShine?.__v2ContinuousRenderReason ?? null)
+          : null;
+        perfRecorder.endFrame(this.renderer?.info, continuousReason, this._decimationActive === true);
+      } catch (err) {
+        log.warn('Performance recorder endFrame threw (suppressed):', err);
+      }
+    }
     return;
   }
 

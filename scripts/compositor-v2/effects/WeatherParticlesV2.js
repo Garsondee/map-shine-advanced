@@ -48,6 +48,9 @@ import {
 
 const log = createLogger('WeatherParticlesV2');
 
+// Proves which WeatherParticlesV2 build is active (`window.MapShine._wpV2Stamp`); set once, not per frame.
+const WP_V2_STAMP = 'WeatherParticlesV2:reg-verify:2026-02-25a';
+
 // Layer 31 — only for batches that must draw in FloorCompositor._renderLateWorldOverlay.
 const OVERLAY_THREE_LAYER = 31;
 
@@ -137,10 +140,13 @@ export class WeatherParticlesV2 {
    */
   _ensureSceneAttachment() {
     const scene = this._busScene;
-    if (!scene) return;
+    if (!scene || !this._batchRenderer) return;
+
+    // FAST PATH: renderer still under bus scene → FloorRenderBus.clear() has not evicted children.
+    if (this._batchRenderer.parent === scene) return;
 
     // Re-add BatchedRenderer if it was removed from the scene.
-    if (this._batchRenderer && !this._batchRenderer.parent) {
+    if (!this._batchRenderer.parent) {
       scene.add(this._batchRenderer);
     }
 
@@ -171,7 +177,11 @@ export class WeatherParticlesV2 {
 
   _ensureWeatherSystemsRegistered() {
     const wp = this._weatherParticles;
-    if (!wp) return;
+    const br = this._batchRenderer;
+    if (!wp || !br) return;
+
+    // FAST PATH: batch index already has expected core systems → skip scans.
+    if (br.systemToBatchIndex?.size >= 5) return;
 
     // Core precipitation systems
     this._ensureSystemRegistered(wp.rainSystem, 'rain');
@@ -230,19 +240,6 @@ export class WeatherParticlesV2 {
     // Instantiate the V1 WeatherParticles system, pointed at our bus scene.
     this._weatherParticles = new WeatherParticles(this._batchRenderer, busScene);
 
-    // Expose on window.MapShine as the V2-owned weather particle authority.
-    try {
-      if (window.MapShine) {
-        window.MapShine.weatherParticlesV2 = this;
-        window.MapShine.weatherParticles = this._weatherParticles;
-      }
-    } catch (_) {}
-
-    // Legacy bridge for code paths not yet migrated to V2 accessors.
-    if (!window.MapShineParticles) window.MapShineParticles = {};
-    window.MapShineParticles.weatherParticles = this._weatherParticles;
-    window.MapShineParticles.batchRenderer = this._batchRenderer;
-
     // Reusable culling objects (avoid per-frame allocations).
     this._cullFrustum           = new THREE.Frustum();
     this._cullProjScreenMatrix  = new THREE.Matrix4();
@@ -250,7 +247,56 @@ export class WeatherParticlesV2 {
     this._cullCenter            = new THREE.Vector3();
 
     this._initialized = true;
+    this._refreshSceneBoundsFromCanvas();
+    this._syncWindowDebugBridge();
     log.info('WeatherParticlesV2 initialized (V1 WeatherParticles bridge active)');
+  }
+
+  /**
+   * Refresh `this._sceneBounds` from Foundry `canvas.dimensions` (call on init + resize).
+   * @private
+   */
+  _refreshSceneBoundsFromCanvas() {
+    const THREE = window.THREE;
+    const d = typeof canvas !== 'undefined' ? canvas?.dimensions : null;
+    if (!THREE || !d) return;
+    const rect = d.sceneRect;
+    const sx = rect?.x ?? d.sceneX ?? 0;
+    const sy = rect?.y ?? d.sceneY ?? 0;
+    const sw = rect?.width ?? d.sceneWidth ?? d.width ?? 1000;
+    const sh = rect?.height ?? d.sceneHeight ?? d.height ?? 1000;
+    const worldH = d.height ?? (sy + sh);
+    const syWorld = worldH - (sy + sh);
+    if (!this._sceneBounds) this._sceneBounds = new THREE.Vector4(sx, syWorld, sw, sh);
+    else this._sceneBounds.set(sx, syWorld, sw, sh);
+  }
+
+  /**
+   * Expose globals for legacy bridges / console probes; only writes when values or stamp change.
+   * @private
+   */
+  _syncWindowDebugBridge() {
+    const ms = window.MapShine;
+    if (ms && ms._wpV2Stamp !== WP_V2_STAMP) {
+      ms._wpV2Stamp = WP_V2_STAMP;
+    }
+
+    const wp = this._weatherParticles;
+    const br = this._batchRenderer;
+
+    if (ms && (ms.weatherParticlesV2 !== this || ms.weatherParticles !== wp)) {
+      try {
+        ms.weatherParticlesV2 = this;
+        ms.weatherParticles = wp;
+      } catch (_) {}
+    }
+
+    if (window.MapShineParticles?.weatherParticles !== wp
+      || window.MapShineParticles?.batchRenderer !== br) {
+      window.MapShineParticles = window.MapShineParticles || {};
+      window.MapShineParticles.weatherParticles = wp;
+      window.MapShineParticles.batchRenderer = br;
+    }
   }
 
   // ── Per-frame update ────────────────────────────────────────────────────────
@@ -270,80 +316,43 @@ export class WeatherParticlesV2 {
     // This is the ROOT CAUSE fix: clear() wipes all bus scene children (including
     // the BatchedRenderer and every particle emitter) on every populate() call.
     // Without this guard the systems emit but are never rendered (no scene parent).
-    try { this._ensureSceneAttachment(); } catch (_) {}
+    this._ensureSceneAttachment();
 
-    // Runtime stamp: proves which WeatherParticlesV2 code is actually executing.
-    // Read from console: window.MapShine._wpV2Stamp
-    try {
-      if (window.MapShine) window.MapShine._wpV2Stamp = 'WeatherParticlesV2:reg-verify:2026-02-25a';
-    } catch (_) {}
-
-    // Re-assert global pointers so external bridges (WaterEffectV2 foam sync)
-    // and runtime debug probes always see the authoritative instance.
-    try {
-      if (!window.MapShineParticles) window.MapShineParticles = {};
-      window.MapShineParticles.weatherParticles = this._weatherParticles;
-      window.MapShineParticles.batchRenderer = this._batchRenderer;
-    } catch (_) {}
+    this._syncWindowDebugBridge();
 
     // Always ensure systems are registered before any other logic that might
     // throw/early-exit. If systems aren't in systemToBatchIndex, Quarks will
     // never simulate or render them.
-    try {
-      this._ensureWeatherSystemsRegistered();
-      const dbg = window.MapShine?.debugWeatherFoamLogs === true;
-      if (dbg && !this._msLoggedRegistrationOnce) {
-        this._msLoggedRegistrationOnce = true;
-        const br = this._batchRenderer;
-        const wp = this._weatherParticles;
-        const hasFoam = !!(br && wp && br.systemToBatchIndex?.has?.(wp._foamSystem));
-        const hasRain = !!(br && wp && br.systemToBatchIndex?.has?.(wp.rainSystem));
-        log.info('[WeatherParticlesV2] registration probe', {
-          mapSize: br?.systemToBatchIndex?.size ?? null,
-          batches: br?.batches?.length ?? null,
-          hasFoam,
-          hasRain
-        });
-      }
-    } catch (_) {}
+    this._ensureWeatherSystemsRegistered();
+    const dbg = window.MapShine?.debugWeatherFoamLogs === true;
+    if (dbg && !this._msLoggedRegistrationOnce) {
+      this._msLoggedRegistrationOnce = true;
+      const br = this._batchRenderer;
+      const wp = this._weatherParticles;
+      const hasFoam = !!(br && wp && br.systemToBatchIndex?.has?.(wp._foamSystem));
+      const hasRain = !!(br && wp && br.systemToBatchIndex?.has?.(wp.rainSystem));
+      log.info('[WeatherParticlesV2] registration probe', {
+        mapSize: br?.systemToBatchIndex?.size ?? null,
+        batches: br?.batches?.length ?? null,
+        hasFoam,
+        hasRain
+      });
+    }
 
     // ── 1. Advance WeatherController state ──────────────────────────────
     // WeatherController has its own sub-rate throttle (15 Hz), so calling
     // update() every frame is fine — it internally skips when not due.
-    try {
-      // Match FireEffectV2: ensure the controller is initialized before update().
-      // In V2 mode there is no guarantee some other effect initialized it first.
-      if (weatherController && weatherController.initialized !== true && typeof weatherController.initialize === 'function') {
-        void weatherController.initialize();
-      }
-      if (weatherController && typeof weatherController.update === 'function') {
-        weatherController.update(timeInfo);
-      }
-    } catch (_) {}
+    // Match FireEffectV2: ensure the controller is initialized before update().
+    // In V2 mode there is no guarantee some other effect initialized it first.
+    if (weatherController?.initialized !== true && typeof weatherController?.initialize === 'function') {
+      void weatherController.initialize();
+    }
+    if (typeof weatherController?.update === 'function') {
+      weatherController.update(timeInfo);
+    }
 
-    // ── 2. Build scene-bounds Vector4 for rain/snow clipping ────────────
-    let boundsVec4 = null;
-    try {
-      const THREE = window.THREE;
-      const d = canvas?.dimensions;
-      if (THREE && d) {
-        const rect = d.sceneRect;
-        const sx = rect?.x ?? d.sceneX ?? 0;
-        const sy = rect?.y ?? d.sceneY ?? 0;
-        const sw = rect?.width  ?? d.sceneWidth  ?? d.width  ?? 1000;
-        const sh = rect?.height ?? d.sceneHeight ?? d.height ?? 1000;
-        const worldH = d.height ?? (sy + sh);
-        // Convert Foundry Y-down into Three.js Y-up (minimum Y in world space).
-        const syWorld = worldH - (sy + sh);
-        if (!this._sceneBounds) this._sceneBounds = new THREE.Vector4(sx, syWorld, sw, sh);
-        this._sceneBounds.set(sx, syWorld, sw, sh);
-        boundsVec4 = this._sceneBounds;
-      }
-    } catch (_) {}
-
-    // Keep draw order under overhead for the active viewed floor (same band as fire).
-    try { this._refreshWeatherBatchRenderOrder(); } catch (_) {}
-
+    // ── 2. Scene-bounds Vector4 for rain/snow clipping (refreshed on resize / init)
+    const boundsVec4 = this._sceneBounds;
 
     // ── 3. Tick WeatherParticles (emission rates, masking, sizing) ───────
     if (this._weatherParticles) {
@@ -365,9 +374,7 @@ export class WeatherParticlesV2 {
         this._applyCulling();
 
         // Advance the BatchedRenderer (quarks core simulation step).
-        if (this._batchRenderer) {
-          this._batchRenderer.update(dt);
-        }
+        this._batchRenderer?.update(dt);
       } catch (e) {
         log.warn('WeatherParticlesV2.update: particle tick error', e);
       }
@@ -400,10 +407,13 @@ export class WeatherParticlesV2 {
   // ── Resize ──────────────────────────────────────────────────────────────────
 
   /**
-   * Resize handler — particle emitters reread canvas.dimensions each frame
-   * so no explicit resize logic is needed here.
+   * Resize handler — refresh cached scene bounds for WeatherParticles.update clipping.
    */
-  onResize(_w, _h) {}
+  onResize(w, h) {
+    void w;
+    void h;
+    this._refreshSceneBoundsFromCanvas();
+  }
 
   /**
    * V2 integration accessor for downstream systems that need weather particle internals.
@@ -526,12 +536,16 @@ export class WeatherParticlesV2 {
         this._cullCenter.set(pos.x, pos.y, pos.z);
       }
 
-      let radius = 500;
-      const shape = ps.emitterShape;
-      if (shape && typeof shape.width === 'number' && typeof shape.height === 'number') {
-        const w = Math.max(0, shape.width);
-        const h = Math.max(0, shape.height);
-        radius = 0.5 * Math.sqrt(w * w + h * h);
+      let radius = ud._msCachedShapeRadius;
+      if (radius === undefined) {
+        radius = 500;
+        const shape = ps.emitterShape;
+        if (shape && typeof shape.width === 'number' && typeof shape.height === 'number') {
+          const w = Math.max(0, shape.width);
+          const h = Math.max(0, shape.height);
+          radius = 0.5 * Math.sqrt(w * w + h * h);
+        }
+        ud._msCachedShapeRadius = radius;
       }
       if (groundZ !== null) {
         radius += Math.max(0, Math.abs(this._cullCenter.z - groundZ)) * 0.5;

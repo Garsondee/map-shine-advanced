@@ -295,6 +295,8 @@ export class FogOfWarEffectV2 {
 
     /** @type {Set<string>|null} Door seam: wall ids forced closed in {@link VisionPolygonComputer} for this pass only */
     this._visionComputeForceClosedIds = null;
+    /** @type {{skipDoorWallIds:Set<string>, additionalSegments:Array<{x0:number,y0:number,x1:number,y1:number}>, useLeafRaycast:boolean}|null} */
+    this._doorVisionRaycastOptions = null;
 
     /** @type {WebGLRenderTarget|null} Ping-pong with vision RT for closed/open LOS during door seam blend */
     this._visionDoorSeamRTClosed = null;
@@ -532,6 +534,53 @@ export class FogOfWarEffectV2 {
     }
     const blendFactor = n > 0 ? Math.max(0, Math.min(1, sum / n)) : 0;
     return { forceClosedWallIds, blendFactor };
+  }
+
+  /**
+   * Door transitions whose meshes animate across the opening become temporary
+   * raycast segments, replacing the original straight wall segment.
+   *
+   * @param {number} nowMs
+   * @param {Wall[]|null} levelWalls
+   * @returns {{skipDoorWallIds:Set<string>, additionalSegments:Array<{x0:number,y0:number,x1:number,y1:number}>, useLeafRaycast:boolean}}
+   * @private
+   */
+  _collectDoorVisionRaycastOptions(nowMs, levelWalls) {
+    const skipDoorWallIds = new Set();
+    const additionalSegments = [];
+    const floorIdSet = Array.isArray(levelWalls)
+      ? new Set(levelWalls.map((w) => String(w?.document?.id ?? '')).filter(Boolean))
+      : null;
+
+    const walls = canvas?.walls?.placeables ?? [];
+    for (const wall of walls) {
+      const doc = wall?.document;
+      if (!doc) continue;
+      if (!(Number(doc.door ?? 0) > 0)) continue;
+
+      const wallId = String(doc.id || '');
+      if (!wallId || !this._doorFogTransitions.has(wallId)) continue;
+      if (floorIdSet && !floorIdSet.has(wallId)) continue;
+
+      const animation = doc.animation;
+      const hasAnimatedDoorMesh = !!(animation?.type && animation?.texture);
+      if (!hasAnimatedDoorMesh) continue;
+
+      const state = this._getDoorFogTransitionState(wallId, nowMs);
+      if (!state) continue;
+
+      const leafSegments = this._getDoorTransitionLeafSegmentsFoundry(doc, state.openFactor);
+      if (!leafSegments.length) continue;
+
+      skipDoorWallIds.add(wallId);
+      additionalSegments.push(...leafSegments);
+    }
+
+    return {
+      skipDoorWallIds,
+      additionalSegments,
+      useLeafRaycast: skipDoorWallIds.size > 0 && additionalSegments.length > 0,
+    };
   }
 
   /**
@@ -2299,7 +2348,13 @@ export class FogOfWarEffectV2 {
 
     const doorFogLosActive = this.params?.doorFogSyncEnabled !== false
       && this._doorFogTransitions.size > 0;
-    const seamState = doorFogLosActive
+    const doorRaycastOptions = doorFogLosActive
+      ? this._collectDoorVisionRaycastOptions(nowMs, levelsActive ? levelWalls : null)
+      : null;
+    const useDoorLeafRaycast = !!doorRaycastOptions?.useLeafRaycast;
+    this._doorVisionRaycastOptions = useDoorLeafRaycast ? doorRaycastOptions : null;
+
+    const seamState = doorFogLosActive && !useDoorLeafRaycast
       ? this._collectDoorSeamBlendState(nowMs, levelsActive, levelWalls)
       : null;
     const forceClosedWallIds = seamState?.forceClosedWallIds ?? new Set();
@@ -2322,6 +2377,9 @@ export class FogOfWarEffectV2 {
       : null;
 
     const passes = (() => {
+      if (useDoorLeafRaycast) {
+        return [{ force: null, outRT: this.visionRenderTarget }];
+      }
       if (!doorFogLosActive || forceClosedWallIds.size === 0) {
         return [{ force: null, outRT: this.visionRenderTarget }];
       }
@@ -2359,6 +2417,9 @@ export class FogOfWarEffectV2 {
           transitions: this._doorFogTransitions.size,
           forceClosedWalls: forceClosedWallIds.size,
           seamBlendMean: seamBlend,
+          useLeafRaycast: useDoorLeafRaycast,
+          leafSegmentCount: doorRaycastOptions?.additionalSegments?.length ?? 0,
+          skippedDoorWalls: doorRaycastOptions?.skipDoorWallIds?.size ?? 0,
           doorFogLosActive,
           polygonWallCount: polygonWalls.length,
           passCount: passes.length,
@@ -2416,6 +2477,7 @@ export class FogOfWarEffectV2 {
               log.info('[DoorFogDebug] custom LOS unavailable', {
                 token: token?.name,
                 hasForceClosed: !!(this._visionComputeForceClosedIds && this._visionComputeForceClosedIds.size),
+                useLeafRaycast: !!this._doorVisionRaycastOptions?.useLeafRaycast,
               });
             }
           } catch (_) {}
@@ -2731,6 +2793,7 @@ export class FogOfWarEffectV2 {
     }
 
     this._visionComputeForceClosedIds = null;
+    this._doorVisionRaycastOptions = null;
 
     if (passes.length === 2 && seamState) {
       try {
@@ -3051,6 +3114,15 @@ export class FogOfWarEffectV2 {
       const fc = this._visionComputeForceClosedIds;
       if (fc instanceof Set && fc.size > 0) {
         options.forceClosedDoorWallIds = fc;
+      }
+      const doorRaycastOptions = this._doorVisionRaycastOptions;
+      if (doorRaycastOptions?.useLeafRaycast) {
+        if (doorRaycastOptions.skipDoorWallIds?.size > 0) {
+          options.skipDoorWallIds = doorRaycastOptions.skipDoorWallIds;
+        }
+        if (doorRaycastOptions.additionalSegments?.length > 0) {
+          options.additionalSegments = doorRaycastOptions.additionalSegments;
+        }
       }
 
       const computed = this._visionPolygonComputer.compute(

@@ -223,6 +223,105 @@ export class OverheadShadowsEffectV2 {
     this._treeRainMaskProbeLastKey = '';
     this._treeRainMaskProbeLastTs = 0;
     this._treeRainDebugHeartbeatLastTs = 0;
+
+    // PERFORMANCE: Per-frame caster cache. Built once at start of render() via
+    // a single mainScene.traverse() and reused by all caster/blocker/tile passes.
+    // Replaces ~15 separate scene traversals per frame with one O(N) walk plus
+    // cheap array iteration. Entries store object refs + categorization flags;
+    // live state (visible, opacity) is always read from the object at use time.
+    this._frameCasters = {
+      list: [],           // All cached entries (anything relevant to overhead capture)
+      hasTrees: false,    // True if any tree entries exist
+      hasFluid: false,    // True if any fluid-overlay entries exist
+      frameId: -1,        // Monotonic per-frame token to detect rebuild necessity
+      scene: null,        // Scene reference at time of last build
+    };
+    this._frameCasterId = 0;
+
+    // PERFORMANCE: Throttle global window.MapShine debug lookup.
+    // _isTreeRainMaskDebugEnabled() previously walked window.MapShine on every
+    // render(); cache the result and refresh at most ~every 2s.
+    this._debugTreeRainEnabledCache = false;
+    this._debugTreeRainEnabledCacheTs = 0;
+
+    // PERFORMANCE: Cache upper-floor composite signature so the per-frame
+    // accumulator pass (clear + N draws) is skipped when the source textures
+    // and combine mode are unchanged. Invalidated by invalidateDynamicCaches().
+    this._upperFloorCompositeLastSig = '';
+    this._upperFloorCompositeLastTexture = null;
+  }
+
+  /**
+   * Build (or reuse) a per-frame caster cache.
+   *
+   * Single mainScene.traverse() that categorizes every relevant object so the
+   * downstream render() passes can iterate a flat array instead of re-walking
+   * the scene graph. Cache is keyed by `frameId` so multiple consumers in the
+   * same frame all share the same build.
+   *
+   * Each entry stores stable refs (object/material/uniforms) plus
+   * categorization flags. Live mutable state (visible, opacity, uniform values)
+   * is always read/written through the stored refs at use time.
+   *
+   * @param {number} frameId Monotonic frame id (rebuild when changed)
+   * @param {number} roofCaptureMaskBits Bitmask of ROOF_LAYER | WEATHER_ROOF_LAYER
+   * @returns {Array<object>} The cached list (same instance each call within a frame)
+   * @private
+   */
+  _ensureFrameCasters(frameId, roofCaptureMaskBits) {
+    const fc = this._frameCasters;
+    if (fc.frameId === frameId && fc.scene === this.mainScene) {
+      return fc.list;
+    }
+    fc.frameId = frameId;
+    fc.scene = this.mainScene;
+    const list = fc.list;
+    list.length = 0;
+    fc.hasTrees = false;
+    fc.hasFluid = false;
+    if (!this.mainScene) return list;
+
+    this.mainScene.traverse((object) => {
+      if (!object) return;
+      const layers = object.layers;
+      const layersMask = layers?.mask ?? 0;
+      const ud = object.userData;
+      const mat = object.material;
+      const hasRoofLayer = (layersMask & roofCaptureMaskBits) !== 0;
+      const isTree = !!ud?.mapShineTreeTileId;
+      // Only keep entries relevant to overhead capture passes. Tile-projection
+      // sort/contributor passes (which scan all renderables) still build their
+      // own narrow caches; those passes are rare and gated by Tile Motion.
+      if (!hasRoofLayer && !isTree) return;
+      const uniforms = mat?.uniforms ?? null;
+      const isFluidOverlay = !!uniforms?.tFluidMask;
+      if (isFluidOverlay) fc.hasFluid = true;
+      if (isTree) fc.hasTrees = true;
+      list.push({
+        object,
+        mat: mat ?? null,
+        uniforms,
+        hasRoofLayer,
+        isTree,
+        isFluidOverlay,
+        isFoundryTile: !!ud?.foundryTileId,
+        isBusTile: !!ud?.mapShineBusTile,
+        isSprite: !!object.isSprite,
+        isMesh: !!object.isMesh,
+        hasMaterial: !!mat,
+        floorIndex: Number(ud?.floorIndex),
+      });
+    });
+    return list;
+  }
+
+  /**
+   * Invalidate the frame caster cache. Cheap; next render() rebuilds on demand.
+   * @private
+   */
+  _invalidateFrameCasters() {
+    this._frameCasters.frameId = -1;
+    this._frameCasters.scene = null;
   }
 
   /**
@@ -239,20 +338,34 @@ export class OverheadShadowsEffectV2 {
    * Debug: tree / rain occlusion capture. Enable any of:
    * - `window.MapShine.debugTreeRainMaskProbe = true` (or 1 / "true")
    * - `globalThis.__MSA_DEBUG_TREE_RAIN_MASK__ = true`
+   *
+   * PERFORMANCE: Result is cached for ~1s to keep window.* lookups off the hot
+   * render path. The probe only emits once every 400ms anyway, so a 1s cache
+   * window has no functional impact for debugging.
    * @returns {boolean}
    * @private
    */
   _isTreeRainMaskDebugEnabled() {
+    const now = (typeof performance !== 'undefined' && performance?.now) ? performance.now() : Date.now();
+    if ((now - this._debugTreeRainEnabledCacheTs) < 1000) {
+      return this._debugTreeRainEnabledCache;
+    }
+    this._debugTreeRainEnabledCacheTs = now;
+    let enabled = false;
     try {
       const g = typeof globalThis !== 'undefined' ? globalThis : window;
-      if (g.__MSA_DEBUG_TREE_RAIN_MASK__ === true) return true;
-      const v = g.MapShine?.debugTreeRainMaskProbe;
-      if (v === true || v === 1) return true;
-      if (typeof v === 'string' && v.toLowerCase() === 'true') return true;
-      return false;
+      if (g.__MSA_DEBUG_TREE_RAIN_MASK__ === true) {
+        enabled = true;
+      } else {
+        const v = g.MapShine?.debugTreeRainMaskProbe;
+        if (v === true || v === 1) enabled = true;
+        else if (typeof v === 'string' && v.toLowerCase() === 'true') enabled = true;
+      }
     } catch (_) {
-      return false;
+      enabled = false;
     }
+    this._debugTreeRainEnabledCache = enabled;
+    return enabled;
   }
 
   /**
@@ -487,6 +600,13 @@ export class OverheadShadowsEffectV2 {
 
   /**
    * Build scene-UV texture: multiply or max of every upper-floor `floorAlpha` from GpuSceneMaskCompositor.
+   *
+   * PERFORMANCE: Caches the composite RT across frames using a signature of
+   * input textures (uuid + version) and combine mode. When unchanged, the
+   * GPU clear + N fullscreen draws are skipped entirely and the previously
+   * composed texture is rebound. Invalidated via invalidateDynamicCaches() on
+   * floor / scene transitions.
+   *
    * @param {THREE.WebGLRenderer} renderer
    * @param {object} THREE
    * @private
@@ -499,6 +619,8 @@ export class OverheadShadowsEffectV2 {
     if (!this.params.upperFloorTileShadowEnabled) {
       u.tUpperFloorComposite.value = white;
       u.uHasUpperFloorComposite.value = 0.0;
+      // Reset cache so re-enabling forces a recomposite.
+      this._upperFloorCompositeLastSig = '';
       return;
     }
 
@@ -506,6 +628,7 @@ export class OverheadShadowsEffectV2 {
     if (textures.length === 0) {
       u.tUpperFloorComposite.value = white;
       u.uHasUpperFloorComposite.value = 0.0;
+      this._upperFloorCompositeLastSig = '';
       return;
     }
 
@@ -545,6 +668,7 @@ export class OverheadShadowsEffectV2 {
     maxW = Math.max(2, Math.min(maxW, cap));
     maxH = Math.max(2, Math.min(maxH, cap));
 
+    let rtRecreated = false;
     if (!this._upperFloorCompositeRT
       || this._upperFloorCompositeRT.width !== maxW
       || this._upperFloorCompositeRT.height !== maxH) {
@@ -559,6 +683,26 @@ export class OverheadShadowsEffectV2 {
       });
       this._upperFloorCompositeRT.texture.flipY = false;
       this._upperFloorCompositeRT.texture.name = 'Overhead_upperFloorComposite';
+      rtRecreated = true;
+    }
+
+    // PERFORMANCE: Skip the actual composite when nothing has changed.
+    // Signature combines combine mode + each input texture's uuid+version.
+    // texture.version increments on needsUpdate (DataTexture) and on RT recompose
+    // when callers respect that convention; covers the common cases. Resize
+    // forces a recompose via rtRecreated.
+    const combineModeForSig = String(this.params.upperFloorTileCombineMode || '').toLowerCase();
+    let sig = `${combineModeForSig}|${maxW}x${maxH}|${textures.length}`;
+    for (const t of textures) {
+      sig += `|${t?.uuid ?? ''}:${t?.version ?? 0}`;
+    }
+    if (!rtRecreated
+      && this._upperFloorCompositeLastSig === sig
+      && this._upperFloorCompositeLastTexture === this._upperFloorCompositeRT.texture) {
+      u.tUpperFloorComposite.value = this._upperFloorCompositeRT.texture;
+      u.uHasUpperFloorComposite.value = 1.0;
+      if (u.uUpperFloorCompositeFlipY) u.uUpperFloorCompositeFlipY.value = 0.0;
+      return;
     }
 
     const mat = this._upperFloorAccumMaterial;
@@ -569,7 +713,7 @@ export class OverheadShadowsEffectV2 {
 
     renderer.setRenderTarget(this._upperFloorCompositeRT);
 
-    const useMultiply = String(this.params.upperFloorTileCombineMode || '').toLowerCase() === 'multiply';
+    const useMultiply = combineModeForSig === 'multiply';
     if (useMultiply) {
       renderer.setClearColor(0xffffff, 1);
       renderer.clear();
@@ -613,6 +757,8 @@ export class OverheadShadowsEffectV2 {
     u.tUpperFloorComposite.value = this._upperFloorCompositeRT.texture;
     u.uHasUpperFloorComposite.value = 1.0;
     if (u.uUpperFloorCompositeFlipY) u.uUpperFloorCompositeFlipY.value = 0.0;
+    this._upperFloorCompositeLastSig = sig;
+    this._upperFloorCompositeLastTexture = this._upperFloorCompositeRT.texture;
   }
 
   /**
@@ -649,6 +795,10 @@ export class OverheadShadowsEffectV2 {
    * overhead shadow captures should still include those casters so lower floors
    * receive their shadow silhouettes.
    *
+   * PERFORMANCE: Uses the per-frame caster cache when available, eliminating a
+   * full mainScene.traverse() call per render. Falls back to a direct traverse
+   * outside the render path.
+   *
    * @returns {Array<{object: THREE.Object3D, visible: boolean}>}
    * @private
    */
@@ -659,9 +809,32 @@ export class OverheadShadowsEffectV2 {
     const activeIndex = Number.isFinite(Number(activeFloor?.index)) ? Number(activeFloor.index) : 0;
     if (!this.mainScene || !Number.isFinite(activeIndex)) return overrides;
 
+    const ROOF_LAYER_BIT = 1 << 20;
+    const fc = this._frameCasters;
+    // Reuse the frame caster cache when its frameId matches the current
+    // render frame. The list contains every object with a roof layer (incl.
+    // WEATHER_ROOF_LAYER), so we filter for the strict ROOF_LAYER bit here.
+    if (fc.frameId >= 0 && fc.scene === this.mainScene) {
+      const list = fc.list;
+      for (let i = 0, n = list.length; i < n; i++) {
+        const entry = list[i];
+        const object = entry.object;
+        if (!object?.layers || typeof object.visible !== 'boolean') continue;
+        if ((object.layers.mask & ROOF_LAYER_BIT) === 0) continue;
+        if (entry.isBusTile) continue;
+        if (!Number.isFinite(entry.floorIndex) || entry.floorIndex <= activeIndex) continue;
+        if (!object.visible) {
+          overrides.push({ object, visible: object.visible });
+          object.visible = true;
+        }
+      }
+      return overrides;
+    }
+
+    // Fallback path (cache miss): direct traverse.
     this.mainScene.traverse((object) => {
       if (!object?.layers || typeof object.visible !== 'boolean') return;
-      const isOverheadLayer = (object.layers.mask & (1 << 20)) !== 0;
+      const isOverheadLayer = (object.layers.mask & ROOF_LAYER_BIT) !== 0;
       if (!isOverheadLayer) return;
 
       // Skip FloorRenderBus tiles — they are handled by beginOverheadShadowCaptureReveal
@@ -2720,6 +2893,12 @@ export class OverheadShadowsEffectV2 {
     this._lastSkyReachMaskRef = null;
     this._lastUpperFloorAlphaSig = '';
     this._lastObUpperSig = '';
+    // PERFORMANCE: Drop perf caches so the next render() rebuilds them.
+    // - frame caster list (forces a fresh scene traverse)
+    // - upper-floor composite sig (forces a fresh accumulate pass)
+    this._invalidateFrameCasters();
+    this._upperFloorCompositeLastSig = '';
+    this._upperFloorCompositeLastTexture = null;
     // Drop cached per-floor texture refs so scene/floor transitions cannot
     // accumulate stale references over long runtimes.
     this._floorStates.clear();
@@ -2797,6 +2976,16 @@ export class OverheadShadowsEffectV2 {
     const previousLayersMask = this.mainCamera.layers.mask;
     const previousTarget = renderer.getRenderTarget();
 
+    // PERFORMANCE: Build per-frame caster cache (one mainScene.traverse) so all
+    // downstream passes iterate a flat array instead of re-walking the scene.
+    // frameId is a monotonic per-call counter (not real time) — every render()
+    // invocation gets a fresh cache.
+    const frameCasterFrameId = ++this._frameCasterId;
+    const frameCasters = this._ensureFrameCasters(frameCasterFrameId, roofCaptureMaskBits);
+    // PERFORMANCE: Cache the debug-enabled flag so each consumer below avoids a
+    // global window.MapShine lookup. The check itself is internally throttled.
+    const debugProbeEnabled = this._isTreeRainMaskDebugEnabled();
+
     // Capture roof/fluid with a guard-band expanded camera view so projected
     // sampling near viewport edges still has valid source texels.
     const zoom = this._getEffectiveZoom();
@@ -2852,44 +3041,59 @@ export class OverheadShadowsEffectV2 {
       u.value = value;
     };
     if (INCLUDE_TREE_CANOPY_IN_WEATHER_ROOF_CAPTURES) {
-      this.mainScene.traverse((object) => {
-        if (!object?.userData?.mapShineTreeTileId || !object.layers) return;
-        treeProbe.treeSeen += 1;
-        if ((object.layers.mask & (1 << WEATHER_ROOF_LAYER)) !== 0) {
-          treeProbe.treeWeatherLayerEnabled += 1;
+      // PERFORMANCE: Iterate cached caster list instead of full scene traverse.
+      // Tree debug counters only filled when probe is enabled to avoid hot-path
+      // arithmetic when nobody is watching.
+      const weatherRoofBit = 1 << WEATHER_ROOF_LAYER;
+      for (let i = 0, n = frameCasters.length; i < n; i++) {
+        const entry = frameCasters[i];
+        if (!entry.isTree) continue;
+        const object = entry.object;
+        const layers = object?.layers;
+        if (!layers) continue;
+        if (debugProbeEnabled) {
+          treeProbe.treeSeen += 1;
+          if ((layers.mask & weatherRoofBit) !== 0) {
+            treeProbe.treeWeatherLayerEnabled += 1;
+          }
         }
         treeCaptureOverrides.push({
           object,
-          layersMask: object.layers.mask,
+          layersMask: layers.mask,
           visible: typeof object.visible === 'boolean' ? object.visible : undefined
         });
-        object.layers.enable(WEATHER_ROOF_LAYER);
+        layers.enable(WEATHER_ROOF_LAYER);
         if (typeof object.visible === 'boolean') {
-          if (!object.visible) treeProbe.treeForcedVisibleForCapture += 1;
+          if (debugProbeEnabled && !object.visible) treeProbe.treeForcedVisibleForCapture += 1;
           object.visible = true;
         }
         // Tree canopy shaders also consume roof/block maps for their own visual
         // output. During roof-map capture, disable that self-masking feedback so
         // tree silhouettes contribute deterministically like roof sprites.
-        const uniforms = object?.material?.uniforms;
+        const uniforms = entry.uniforms;
         if (uniforms) {
           pushTreeUniformOverride(uniforms, 'uRoofRainHardBlockEnabled', 0.0);
           pushTreeUniformOverride(uniforms, 'uHasRoofAlphaMap', 0.0);
           pushTreeUniformOverride(uniforms, 'uHasRoofBlockMap', 0.0);
         }
-      });
+      }
     }
 
+    // PERFORMANCE: Iterate cached caster list. Skip the whole loop when no
+    // fluid overlay was seen during cache build (very common case — no fluid
+    // tiles in scene means zero exclusions to record).
     const roofVisibilityExclusions = [];
-    this.mainScene.traverse((object) => {
-      if (!object.layers || (object.layers.mask & roofVisibilityMaskBits) === 0) return;
-      const isFluidOverlay = !!(object.material?.uniforms?.tFluidMask);
-      if (!isFluidOverlay) return;
-      if (typeof object.visible === 'boolean') {
-        roofVisibilityExclusions.push({ object, visible: object.visible });
-        object.visible = false;
+    if (this._frameCasters.hasFluid) {
+      for (let i = 0, n = frameCasters.length; i < n; i++) {
+        const entry = frameCasters[i];
+        if (!entry.hasRoofLayer || !entry.isFluidOverlay) continue;
+        const object = entry.object;
+        if (typeof object.visible === 'boolean') {
+          roofVisibilityExclusions.push({ object, visible: object.visible });
+          object.visible = false;
+        }
       }
-    });
+    }
 
     // Capture runtime roof visibility (with live hover fade opacity) for
     // LightingEffectV2 building-shadow suppression. This pass intentionally uses
@@ -2913,63 +3117,68 @@ export class OverheadShadowsEffectV2 {
       if (this.roofBlockTarget) {
         // Keep hard roof light-blocking available even when overhead shadow
         // projection is disabled.
+        // PERFORMANCE: Both per-pass and tree iterations folded into ONE
+        // sweep over the cached caster list.
         const disabledBlockerOpacityOverrides = [];
         const disabledBlockerUniformOverrides = [];
-        this.mainScene.traverse((object) => {
-          if (!object?.layers || !object?.material) return;
-          if ((object.layers.mask & roofCaptureMaskBits) === 0) return;
-          const mat = object.material;
-          if (typeof mat.opacity === 'number') {
-            disabledBlockerOpacityOverrides.push({ object, opacity: mat.opacity });
-            mat.opacity = 1.0;
-          }
-          const uOpacity = mat?.uniforms?.uOpacity;
-          if (uOpacity && typeof uOpacity.value === 'number') {
-            disabledBlockerUniformOverrides.push({ uniform: uOpacity, value: uOpacity.value });
-            uOpacity.value = 1.0;
-          }
-          const uTileOpacity = mat?.uniforms?.uTileOpacity;
-          if (uTileOpacity && typeof uTileOpacity.value === 'number') {
-            disabledBlockerUniformOverrides.push({ uniform: uTileOpacity, value: uTileOpacity.value });
-            uTileOpacity.value = 1.0;
-          }
-        });
-
         const disabledTreeBlockerUniformOverrides = [];
-        this.mainScene.traverse((object) => {
-          if (!object?.userData?.mapShineTreeTileId) return;
-          treeProbe.roofBlockTreeParticipants += 1;
-          const uniforms = object?.material?.uniforms;
-          if (!uniforms) return;
-          if (uniforms.uHoverFade && typeof uniforms.uHoverFade.value === 'number') {
-            disabledTreeBlockerUniformOverrides.push({ uniform: uniforms.uHoverFade, value: uniforms.uHoverFade.value });
-            uniforms.uHoverFade.value = 1.0;
+        for (let i = 0, n = frameCasters.length; i < n; i++) {
+          const entry = frameCasters[i];
+          if (entry.hasRoofLayer && entry.mat) {
+            const mat = entry.mat;
+            if (typeof mat.opacity === 'number') {
+              disabledBlockerOpacityOverrides.push({ object: entry.object, opacity: mat.opacity });
+              mat.opacity = 1.0;
+            }
+            const uniforms = entry.uniforms;
+            if (uniforms) {
+              const uOpacity = uniforms.uOpacity;
+              if (uOpacity && typeof uOpacity.value === 'number') {
+                disabledBlockerUniformOverrides.push({ uniform: uOpacity, value: uOpacity.value });
+                uOpacity.value = 1.0;
+              }
+              const uTileOpacity = uniforms.uTileOpacity;
+              if (uTileOpacity && typeof uTileOpacity.value === 'number') {
+                disabledBlockerUniformOverrides.push({ uniform: uTileOpacity, value: uTileOpacity.value });
+                uTileOpacity.value = 1.0;
+              }
+            }
           }
-          if (uniforms.uShadowOpacity && typeof uniforms.uShadowOpacity.value === 'number') {
-            disabledTreeBlockerUniformOverrides.push({ uniform: uniforms.uShadowOpacity, value: uniforms.uShadowOpacity.value });
-            uniforms.uShadowOpacity.value = 0.0;
+          if (entry.isTree) {
+            if (debugProbeEnabled) treeProbe.roofBlockTreeParticipants += 1;
+            const uniforms = entry.uniforms;
+            if (uniforms) {
+              if (uniforms.uHoverFade && typeof uniforms.uHoverFade.value === 'number') {
+                disabledTreeBlockerUniformOverrides.push({ uniform: uniforms.uHoverFade, value: uniforms.uHoverFade.value });
+                uniforms.uHoverFade.value = 1.0;
+              }
+              if (uniforms.uShadowOpacity && typeof uniforms.uShadowOpacity.value === 'number') {
+                disabledTreeBlockerUniformOverrides.push({ uniform: uniforms.uShadowOpacity, value: uniforms.uShadowOpacity.value });
+                uniforms.uShadowOpacity.value = 0.0;
+              }
+              if (uniforms.uWindSpeedGlobal && typeof uniforms.uWindSpeedGlobal.value === 'number') {
+                disabledTreeBlockerUniformOverrides.push({ uniform: uniforms.uWindSpeedGlobal, value: uniforms.uWindSpeedGlobal.value });
+                uniforms.uWindSpeedGlobal.value = 0.0;
+              }
+              if (uniforms.uAmbientMotion && typeof uniforms.uAmbientMotion.value === 'number') {
+                disabledTreeBlockerUniformOverrides.push({ uniform: uniforms.uAmbientMotion, value: uniforms.uAmbientMotion.value });
+                uniforms.uAmbientMotion.value = 0.0;
+              }
+              if (uniforms.uBranchBend && typeof uniforms.uBranchBend.value === 'number') {
+                disabledTreeBlockerUniformOverrides.push({ uniform: uniforms.uBranchBend, value: uniforms.uBranchBend.value });
+                uniforms.uBranchBend.value = 0.0;
+              }
+              if (uniforms.uFlutterIntensity && typeof uniforms.uFlutterIntensity.value === 'number') {
+                disabledTreeBlockerUniformOverrides.push({ uniform: uniforms.uFlutterIntensity, value: uniforms.uFlutterIntensity.value });
+                uniforms.uFlutterIntensity.value = 0.0;
+              }
+              if (uniforms.uTurbulence && typeof uniforms.uTurbulence.value === 'number') {
+                disabledTreeBlockerUniformOverrides.push({ uniform: uniforms.uTurbulence, value: uniforms.uTurbulence.value });
+                uniforms.uTurbulence.value = 0.0;
+              }
+            }
           }
-          if (uniforms.uWindSpeedGlobal && typeof uniforms.uWindSpeedGlobal.value === 'number') {
-            disabledTreeBlockerUniformOverrides.push({ uniform: uniforms.uWindSpeedGlobal, value: uniforms.uWindSpeedGlobal.value });
-            uniforms.uWindSpeedGlobal.value = 0.0;
-          }
-          if (uniforms.uAmbientMotion && typeof uniforms.uAmbientMotion.value === 'number') {
-            disabledTreeBlockerUniformOverrides.push({ uniform: uniforms.uAmbientMotion, value: uniforms.uAmbientMotion.value });
-            uniforms.uAmbientMotion.value = 0.0;
-          }
-          if (uniforms.uBranchBend && typeof uniforms.uBranchBend.value === 'number') {
-            disabledTreeBlockerUniformOverrides.push({ uniform: uniforms.uBranchBend, value: uniforms.uBranchBend.value });
-            uniforms.uBranchBend.value = 0.0;
-          }
-          if (uniforms.uFlutterIntensity && typeof uniforms.uFlutterIntensity.value === 'number') {
-            disabledTreeBlockerUniformOverrides.push({ uniform: uniforms.uFlutterIntensity, value: uniforms.uFlutterIntensity.value });
-            uniforms.uFlutterIntensity.value = 0.0;
-          }
-          if (uniforms.uTurbulence && typeof uniforms.uTurbulence.value === 'number') {
-            disabledTreeBlockerUniformOverrides.push({ uniform: uniforms.uTurbulence, value: uniforms.uTurbulence.value });
-            uniforms.uTurbulence.value = 0.0;
-          }
-        });
+        }
 
         this.mainCamera.layers.set(ROOF_LAYER);
         this.mainCamera.layers.enable(WEATHER_ROOF_LAYER);
@@ -2995,19 +3204,21 @@ export class OverheadShadowsEffectV2 {
         // Restrict-light mask after live opacity/tree uniforms are restored so hover-
         // faded roofs stop blocking dynamic light (stamp alpha follows the fade).
         if (this.roofRestrictLightTarget) {
+          // PERFORMANCE: Iterate cached caster list (no scene traverse).
           const restrictLightVisOverrides = [];
-          this.mainScene.traverse((object) => {
-            if (!object.layers || (object.layers.mask & roofCaptureMaskBits) === 0) return;
-            const isFluidOverlay = !!(object.material?.uniforms?.tFluidMask);
-            if (isFluidOverlay) return;
-            if (!(object.isSprite || object.isMesh) || typeof object.visible !== 'boolean') return;
+          for (let i = 0, n = frameCasters.length; i < n; i++) {
+            const entry = frameCasters[i];
+            if (!entry.hasRoofLayer) continue;
+            if (entry.isFluidOverlay) continue;
+            const object = entry.object;
+            if (!(entry.isSprite || entry.isMesh) || typeof object.visible !== 'boolean') continue;
             const liveVis = object.visible;
             restrictLightVisOverrides.push({ object, visible: object.visible });
-            const isFoundryTile = !!object.userData?.foundryTileId;
+            const isFoundryTile = entry.isFoundryTile;
             const rl = objectRestrictsLightForRoofCapture(object);
             if (!isFoundryTile) object.visible = false;
             else object.visible = !!(liveVis && rl);
-          });
+          }
           this.mainCamera.layers.set(ROOF_LAYER);
           this.mainCamera.layers.enable(WEATHER_ROOF_LAYER);
           renderer.setRenderTarget(this.roofRestrictLightTarget);
@@ -3068,22 +3279,20 @@ export class OverheadShadowsEffectV2 {
     const tileProjectionOpacityOverrides = [];
     const tileReceiverVisibilityOverrides = [];
     const tileReceiverOpacityOverrides = [];
-    this.mainScene.traverse((object) => {
-      if (!object.layers || !object.material) return;
-
-      // Include both ROOF_LAYER and WEATHER_ROOF_LAYER participants.
-      // Weather blocker meshes can be weather-only and must be forced opaque in
-      // blocker capture passes.
-      if ((object.layers.mask & roofCaptureMaskBits) === 0) return;
-
-      const isFluidOverlay = !!(object.material?.uniforms?.tFluidMask);
+    // PERFORMANCE: Iterate cached caster list. Single pass collects fluid visibility
+    // / fluid uniform overrides AND opacity overrides for non-fluid casters.
+    for (let i = 0, n = frameCasters.length; i < n; i++) {
+      const entry = frameCasters[i];
+      if (!entry.hasRoofLayer || !entry.mat) continue;
+      const object = entry.object;
+      const isFluidOverlay = entry.isFluidOverlay;
 
       if (typeof object.visible === 'boolean') {
         fluidVisibilityOverrides.push({ object, visible: object.visible });
         object.visible = isFluidOverlay;
 
         if (isFluidOverlay) {
-          const uniforms = object.material?.uniforms;
+          const uniforms = entry.uniforms;
           if (uniforms) {
             fluidUniformOverrides.push({
               uniforms,
@@ -3096,8 +3305,8 @@ export class OverheadShadowsEffectV2 {
         }
       }
 
-      if (isFluidOverlay) return;
-      const mat = object.material;
+      if (isFluidOverlay) continue;
+      const mat = entry.mat;
       if (typeof mat.opacity === 'number') {
         overrides.push({ object, opacity: mat.opacity });
         // IMPORTANT: Hover-hide is a UX-only fade on roof tile renderables. We
@@ -3106,17 +3315,20 @@ export class OverheadShadowsEffectV2 {
         // pass always treats roof casters as fully opaque.
         mat.opacity = 1.0;
       }
-      const opacityUniform = mat?.uniforms?.uOpacity;
-      if (opacityUniform && typeof opacityUniform.value === 'number') {
-        opacityUniformOverrides.push({ uniform: opacityUniform, value: opacityUniform.value });
-        opacityUniform.value = 1.0;
+      const uniforms = entry.uniforms;
+      if (uniforms) {
+        const opacityUniform = uniforms.uOpacity;
+        if (opacityUniform && typeof opacityUniform.value === 'number') {
+          opacityUniformOverrides.push({ uniform: opacityUniform, value: opacityUniform.value });
+          opacityUniform.value = 1.0;
+        }
+        const tileOpacityUniform = uniforms.uTileOpacity;
+        if (tileOpacityUniform && typeof tileOpacityUniform.value === 'number') {
+          tileOpacityUniformOverrides.push({ uniform: tileOpacityUniform, value: tileOpacityUniform.value });
+          tileOpacityUniform.value = 1.0;
+        }
       }
-      const tileOpacityUniform = mat?.uniforms?.uTileOpacity;
-      if (tileOpacityUniform && typeof tileOpacityUniform.value === 'number') {
-        tileOpacityUniformOverrides.push({ uniform: tileOpacityUniform, value: tileOpacityUniform.value });
-        tileOpacityUniform.value = 1.0;
-      }
-    });
+    }
 
     // Pass 0/1 use guard-band camera state (temporarily expanded frustum).
     // Reveal upper-floor bus casters only for these caster-capture passes so
@@ -3155,20 +3367,23 @@ export class OverheadShadowsEffectV2 {
       // so lower floors receive their shadow contribution without polluting
       // visibility/blocker textures used elsewhere.
       roofUpperCasterVisibilityOverrides.push(...this._forceUpperOverheadCasterVisibilityForRoofPass());
-      this.mainScene.traverse((object) => {
-        if (!object.layers || (object.layers.mask & roofCaptureMaskBits) === 0) return;
-        const isFluidOverlay = !!(object.material?.uniforms?.tFluidMask);
-        if (isFluidOverlay) {
+      // PERFORMANCE: Iterate cached caster list. Tree probe averaging only runs
+      // when debug is enabled.
+      for (let i = 0, n = frameCasters.length; i < n; i++) {
+        const entry = frameCasters[i];
+        if (!entry.hasRoofLayer) continue;
+        const object = entry.object;
+        if (entry.isFluidOverlay) {
           if (typeof object.visible === 'boolean') {
             nonFluidVisibilityOverrides.push({ object, visible: object.visible });
             object.visible = false;
           }
-          return;
+          continue;
         }
         // Keep tree canopies in roof visibility/block captures so weather masking
         // follows tree hover-fade exactly like overhead roof sprites.
-        if (object?.userData?.mapShineTreeTileId) {
-          const hf = Number(object?.material?.uniforms?.uHoverFade?.value);
+        if (entry.isTree && debugProbeEnabled) {
+          const hf = Number(entry.uniforms?.uHoverFade?.value);
           treeProbe.roofTargetTreeParticipants += 1;
           if (Number.isFinite(hf)) {
             const count = treeProbe.roofTargetTreeParticipants;
@@ -3182,11 +3397,11 @@ export class OverheadShadowsEffectV2 {
 
         // Hover-reveal can temporarily hide/fade roof renderables. For the roof mask
         // capture pass we still need those tiles to contribute caster alpha.
-        if ((object.isSprite || object.isMesh) && typeof object.visible === 'boolean') {
+        if ((entry.isSprite || entry.isMesh) && typeof object.visible === 'boolean') {
           roofSpriteVisibilityOverrides.push({ object, visible: object.visible });
           object.visible = true;
         }
-      });
+      }
 
       // Pass 1: render overhead tiles into roofTarget (alpha mask)
       this.mainCamera.layers.set(ROOF_LAYER);
@@ -3214,24 +3429,26 @@ export class OverheadShadowsEffectV2 {
       );
 
       // Pass 1c: restrict-light overhead only (same camera/layers as Pass 1).
+      // PERFORMANCE: Iterate cached caster list.
       const restrictLightVisOverrides = [];
-      this.mainScene.traverse((object) => {
-        if (!object.layers || (object.layers.mask & roofCaptureMaskBits) === 0) return;
-        const isFluidOverlay = !!(object.material?.uniforms?.tFluidMask);
-        if (isFluidOverlay) return;
-        if (!(object.isSprite || object.isMesh) || typeof object.visible !== 'boolean') return;
+      for (let i = 0, n = frameCasters.length; i < n; i++) {
+        const entry = frameCasters[i];
+        if (!entry.hasRoofLayer) continue;
+        if (entry.isFluidOverlay) continue;
+        const object = entry.object;
+        if (!(entry.isSprite || entry.isMesh) || typeof object.visible !== 'boolean') continue;
         const liveVis = roofSpriteLiveVisible.has(object)
           ? roofSpriteLiveVisible.get(object)
           : object.visible;
         restrictLightVisOverrides.push({ object, visible: object.visible });
-        const isFoundryTile = !!object.userData?.foundryTileId;
+        const isFoundryTile = entry.isFoundryTile;
         const rl = objectRestrictsLightForRoofCapture(object);
         if (!isFoundryTile) {
           object.visible = false;
         } else {
           object.visible = !!(liveVis && rl);
         }
-      });
+      }
       renderer.setRenderTarget(this.roofRestrictLightTarget);
       renderer.setClearColor(0x000000, 0);
       renderer.clear();
@@ -3272,49 +3489,56 @@ export class OverheadShadowsEffectV2 {
 
     // Pass 1b: capture a non-guard roof blocker map for LightingEffectV2 hard
     // occlusion. This must remain in direct screen UV.
+    // PERFORMANCE: Iterate cached caster list (trees only). Probe averaging is
+    // gated behind debug flag — no arithmetic when nobody is watching.
     const treeBlockerUniformOverrides = [];
-    this.mainScene.traverse((object) => {
-      if (!object?.userData?.mapShineTreeTileId) return;
-      treeProbe.roofBlockTreeParticipants += 1;
-      const uniforms = object?.material?.uniforms;
-      if (!uniforms) return;
-      const hfBefore = Number(uniforms.uHoverFade?.value);
-      if (Number.isFinite(hfBefore)) {
-        const count = treeProbe.roofBlockTreeParticipants;
-        treeProbe.roofBlockHoverFadeBeforeAvg = (treeProbe.roofBlockHoverFadeBeforeAvg == null)
-          ? hfBefore
-          : (treeProbe.roofBlockHoverFadeBeforeAvg * ((count - 1) / count) + hfBefore / count);
+    if (this._frameCasters.hasTrees) {
+      for (let i = 0, n = frameCasters.length; i < n; i++) {
+        const entry = frameCasters[i];
+        if (!entry.isTree) continue;
+        const uniforms = entry.uniforms;
+        if (debugProbeEnabled) {
+          treeProbe.roofBlockTreeParticipants += 1;
+          const hfBefore = Number(uniforms?.uHoverFade?.value);
+          if (Number.isFinite(hfBefore)) {
+            const count = treeProbe.roofBlockTreeParticipants;
+            treeProbe.roofBlockHoverFadeBeforeAvg = (treeProbe.roofBlockHoverFadeBeforeAvg == null)
+              ? hfBefore
+              : (treeProbe.roofBlockHoverFadeBeforeAvg * ((count - 1) / count) + hfBefore / count);
+          }
+        }
+        if (!uniforms) continue;
+        if (uniforms.uHoverFade && typeof uniforms.uHoverFade.value === 'number') {
+          treeBlockerUniformOverrides.push({ uniform: uniforms.uHoverFade, value: uniforms.uHoverFade.value });
+          uniforms.uHoverFade.value = 1.0;
+          if (debugProbeEnabled) treeProbe.roofBlockHoverFadeForcedCount += 1;
+        }
+        if (uniforms.uShadowOpacity && typeof uniforms.uShadowOpacity.value === 'number') {
+          treeBlockerUniformOverrides.push({ uniform: uniforms.uShadowOpacity, value: uniforms.uShadowOpacity.value });
+          uniforms.uShadowOpacity.value = 0.0;
+        }
+        if (uniforms.uWindSpeedGlobal && typeof uniforms.uWindSpeedGlobal.value === 'number') {
+          treeBlockerUniformOverrides.push({ uniform: uniforms.uWindSpeedGlobal, value: uniforms.uWindSpeedGlobal.value });
+          uniforms.uWindSpeedGlobal.value = 0.0;
+        }
+        if (uniforms.uAmbientMotion && typeof uniforms.uAmbientMotion.value === 'number') {
+          treeBlockerUniformOverrides.push({ uniform: uniforms.uAmbientMotion, value: uniforms.uAmbientMotion.value });
+          uniforms.uAmbientMotion.value = 0.0;
+        }
+        if (uniforms.uBranchBend && typeof uniforms.uBranchBend.value === 'number') {
+          treeBlockerUniformOverrides.push({ uniform: uniforms.uBranchBend, value: uniforms.uBranchBend.value });
+          uniforms.uBranchBend.value = 0.0;
+        }
+        if (uniforms.uFlutterIntensity && typeof uniforms.uFlutterIntensity.value === 'number') {
+          treeBlockerUniformOverrides.push({ uniform: uniforms.uFlutterIntensity, value: uniforms.uFlutterIntensity.value });
+          uniforms.uFlutterIntensity.value = 0.0;
+        }
+        if (uniforms.uTurbulence && typeof uniforms.uTurbulence.value === 'number') {
+          treeBlockerUniformOverrides.push({ uniform: uniforms.uTurbulence, value: uniforms.uTurbulence.value });
+          uniforms.uTurbulence.value = 0.0;
+        }
       }
-      if (uniforms.uHoverFade && typeof uniforms.uHoverFade.value === 'number') {
-        treeBlockerUniformOverrides.push({ uniform: uniforms.uHoverFade, value: uniforms.uHoverFade.value });
-        uniforms.uHoverFade.value = 1.0;
-        treeProbe.roofBlockHoverFadeForcedCount += 1;
-      }
-      if (uniforms.uShadowOpacity && typeof uniforms.uShadowOpacity.value === 'number') {
-        treeBlockerUniformOverrides.push({ uniform: uniforms.uShadowOpacity, value: uniforms.uShadowOpacity.value });
-        uniforms.uShadowOpacity.value = 0.0;
-      }
-      if (uniforms.uWindSpeedGlobal && typeof uniforms.uWindSpeedGlobal.value === 'number') {
-        treeBlockerUniformOverrides.push({ uniform: uniforms.uWindSpeedGlobal, value: uniforms.uWindSpeedGlobal.value });
-        uniforms.uWindSpeedGlobal.value = 0.0;
-      }
-      if (uniforms.uAmbientMotion && typeof uniforms.uAmbientMotion.value === 'number') {
-        treeBlockerUniformOverrides.push({ uniform: uniforms.uAmbientMotion, value: uniforms.uAmbientMotion.value });
-        uniforms.uAmbientMotion.value = 0.0;
-      }
-      if (uniforms.uBranchBend && typeof uniforms.uBranchBend.value === 'number') {
-        treeBlockerUniformOverrides.push({ uniform: uniforms.uBranchBend, value: uniforms.uBranchBend.value });
-        uniforms.uBranchBend.value = 0.0;
-      }
-      if (uniforms.uFlutterIntensity && typeof uniforms.uFlutterIntensity.value === 'number') {
-        treeBlockerUniformOverrides.push({ uniform: uniforms.uFlutterIntensity, value: uniforms.uFlutterIntensity.value });
-        uniforms.uFlutterIntensity.value = 0.0;
-      }
-      if (uniforms.uTurbulence && typeof uniforms.uTurbulence.value === 'number') {
-        treeBlockerUniformOverrides.push({ uniform: uniforms.uTurbulence, value: uniforms.uTurbulence.value });
-        uniforms.uTurbulence.value = 0.0;
-      }
-    });
+    }
     try {
       this.mainCamera.layers.set(ROOF_LAYER);
       this.mainCamera.layers.enable(WEATHER_ROOF_LAYER);
@@ -3566,6 +3790,11 @@ export class OverheadShadowsEffectV2 {
   /**
    * Render dedicated weather occlusion maps used by precipitation masking.
    * Captures runtime visibility and forced-opaque blockers for overhead + trees.
+   *
+   * PERFORMANCE: Reuses the per-frame caster cache built at the start of
+   * render(). Falls back to a direct traverse when the cache is unavailable
+   * (e.g. called outside the standard render pipeline).
+   *
    * @private
    */
   _renderRainOcclusionTargets(renderer, roofCaptureMaskBits, roofLayer, weatherRoofLayer) {
@@ -3582,36 +3811,72 @@ export class OverheadShadowsEffectV2 {
       u.value = value;
     };
 
-    this.mainScene.traverse((object) => {
-      if (!object?.layers || !object?.material) return;
-      if ((object.layers.mask & roofCaptureMaskBits) === 0) return;
-      const isFluidOverlay = !!(object.material?.uniforms?.tFluidMask);
-      if (typeof object.visible === 'boolean') {
-        overrides.push({ object, visible: object.visible });
-        object.visible = !isFluidOverlay;
-      }
-      if (isFluidOverlay) return;
+    const fc = this._frameCasters;
+    const useCache = fc.frameId >= 0 && fc.scene === this.mainScene;
 
-      const mat = object.material;
-      if (typeof mat.opacity === 'number') {
-        visUniformOverrides.push({ object: mat, key: 'opacity', value: mat.opacity });
-      }
-      const uniforms = mat?.uniforms;
-      if (!uniforms) return;
+    if (useCache) {
+      // Iterate cached roof-layer entries.
+      const list = fc.list;
+      for (let i = 0, n = list.length; i < n; i++) {
+        const entry = list[i];
+        if (!entry.hasRoofLayer || !entry.mat) continue;
+        const object = entry.object;
+        const isFluidOverlay = entry.isFluidOverlay;
+        if (typeof object.visible === 'boolean') {
+          overrides.push({ object, visible: object.visible });
+          object.visible = !isFluidOverlay;
+        }
+        if (isFluidOverlay) continue;
 
-      // Keep tree silhouettes deterministic for capture and prevent recursive roof-map feedback.
-      if (object?.userData?.mapShineTreeTileId) {
-        pushUniform(visUniformOverrides, uniforms, 'uShadowOpacity', 0.0);
-        pushUniform(visUniformOverrides, uniforms, 'uWindSpeedGlobal', 0.0);
-        pushUniform(visUniformOverrides, uniforms, 'uAmbientMotion', 0.0);
-        pushUniform(visUniformOverrides, uniforms, 'uBranchBend', 0.0);
-        pushUniform(visUniformOverrides, uniforms, 'uFlutterIntensity', 0.0);
-        pushUniform(visUniformOverrides, uniforms, 'uTurbulence', 0.0);
-        pushUniform(visUniformOverrides, uniforms, 'uRoofRainHardBlockEnabled', 0.0);
-        pushUniform(visUniformOverrides, uniforms, 'uHasRoofAlphaMap', 0.0);
-        pushUniform(visUniformOverrides, uniforms, 'uHasRoofBlockMap', 0.0);
+        const mat = entry.mat;
+        if (typeof mat.opacity === 'number') {
+          visUniformOverrides.push({ object: mat, key: 'opacity', value: mat.opacity });
+        }
+        const uniforms = entry.uniforms;
+        if (!uniforms) continue;
+        if (entry.isTree) {
+          pushUniform(visUniformOverrides, uniforms, 'uShadowOpacity', 0.0);
+          pushUniform(visUniformOverrides, uniforms, 'uWindSpeedGlobal', 0.0);
+          pushUniform(visUniformOverrides, uniforms, 'uAmbientMotion', 0.0);
+          pushUniform(visUniformOverrides, uniforms, 'uBranchBend', 0.0);
+          pushUniform(visUniformOverrides, uniforms, 'uFlutterIntensity', 0.0);
+          pushUniform(visUniformOverrides, uniforms, 'uTurbulence', 0.0);
+          pushUniform(visUniformOverrides, uniforms, 'uRoofRainHardBlockEnabled', 0.0);
+          pushUniform(visUniformOverrides, uniforms, 'uHasRoofAlphaMap', 0.0);
+          pushUniform(visUniformOverrides, uniforms, 'uHasRoofBlockMap', 0.0);
+        }
       }
-    });
+    } else {
+      this.mainScene.traverse((object) => {
+        if (!object?.layers || !object?.material) return;
+        if ((object.layers.mask & roofCaptureMaskBits) === 0) return;
+        const isFluidOverlay = !!(object.material?.uniforms?.tFluidMask);
+        if (typeof object.visible === 'boolean') {
+          overrides.push({ object, visible: object.visible });
+          object.visible = !isFluidOverlay;
+        }
+        if (isFluidOverlay) return;
+
+        const mat = object.material;
+        if (typeof mat.opacity === 'number') {
+          visUniformOverrides.push({ object: mat, key: 'opacity', value: mat.opacity });
+        }
+        const uniforms = mat?.uniforms;
+        if (!uniforms) return;
+
+        if (object?.userData?.mapShineTreeTileId) {
+          pushUniform(visUniformOverrides, uniforms, 'uShadowOpacity', 0.0);
+          pushUniform(visUniformOverrides, uniforms, 'uWindSpeedGlobal', 0.0);
+          pushUniform(visUniformOverrides, uniforms, 'uAmbientMotion', 0.0);
+          pushUniform(visUniformOverrides, uniforms, 'uBranchBend', 0.0);
+          pushUniform(visUniformOverrides, uniforms, 'uFlutterIntensity', 0.0);
+          pushUniform(visUniformOverrides, uniforms, 'uTurbulence', 0.0);
+          pushUniform(visUniformOverrides, uniforms, 'uRoofRainHardBlockEnabled', 0.0);
+          pushUniform(visUniformOverrides, uniforms, 'uHasRoofAlphaMap', 0.0);
+          pushUniform(visUniformOverrides, uniforms, 'uHasRoofBlockMap', 0.0);
+        }
+      });
+    }
 
     const prevMask = this.mainCamera.layers.mask;
     this.mainCamera.layers.set(roofLayer);
@@ -3626,24 +3891,45 @@ export class OverheadShadowsEffectV2 {
     for (const entry of visUniformOverrides) {
       if (entry?.object && entry.key === 'opacity') entry.object.opacity = 1.0;
     }
-    this.mainScene.traverse((object) => {
-      if (!object?.layers || !object?.material) return;
-      if ((object.layers.mask & roofCaptureMaskBits) === 0) return;
-      const isFluidOverlay = !!(object.material?.uniforms?.tFluidMask);
-      if (isFluidOverlay) return;
-      const mat = object.material;
-      const uniforms = mat?.uniforms;
-      if (typeof mat.opacity === 'number') {
-        blockUniformOverrides.push({ object: mat, key: 'opacity', value: mat.opacity });
-        mat.opacity = 1.0;
+    if (useCache) {
+      const list = fc.list;
+      for (let i = 0, n = list.length; i < n; i++) {
+        const entry = list[i];
+        if (!entry.hasRoofLayer || !entry.mat) continue;
+        if (entry.isFluidOverlay) continue;
+        const mat = entry.mat;
+        const uniforms = entry.uniforms;
+        if (typeof mat.opacity === 'number') {
+          blockUniformOverrides.push({ object: mat, key: 'opacity', value: mat.opacity });
+          mat.opacity = 1.0;
+        }
+        if (!uniforms) continue;
+        pushUniform(blockUniformOverrides, uniforms, 'uOpacity', 1.0);
+        pushUniform(blockUniformOverrides, uniforms, 'uTileOpacity', 1.0);
+        if (entry.isTree) {
+          pushUniform(blockUniformOverrides, uniforms, 'uHoverFade', 1.0);
+        }
       }
-      if (!uniforms) return;
-      pushUniform(blockUniformOverrides, uniforms, 'uOpacity', 1.0);
-      pushUniform(blockUniformOverrides, uniforms, 'uTileOpacity', 1.0);
-      if (object?.userData?.mapShineTreeTileId) {
-        pushUniform(blockUniformOverrides, uniforms, 'uHoverFade', 1.0);
-      }
-    });
+    } else {
+      this.mainScene.traverse((object) => {
+        if (!object?.layers || !object?.material) return;
+        if ((object.layers.mask & roofCaptureMaskBits) === 0) return;
+        const isFluidOverlay = !!(object.material?.uniforms?.tFluidMask);
+        if (isFluidOverlay) return;
+        const mat = object.material;
+        const uniforms = mat?.uniforms;
+        if (typeof mat.opacity === 'number') {
+          blockUniformOverrides.push({ object: mat, key: 'opacity', value: mat.opacity });
+          mat.opacity = 1.0;
+        }
+        if (!uniforms) return;
+        pushUniform(blockUniformOverrides, uniforms, 'uOpacity', 1.0);
+        pushUniform(blockUniformOverrides, uniforms, 'uTileOpacity', 1.0);
+        if (object?.userData?.mapShineTreeTileId) {
+          pushUniform(blockUniformOverrides, uniforms, 'uHoverFade', 1.0);
+        }
+      });
+    }
 
     renderer.setRenderTarget(this.rainOcclusionBlockTarget);
     renderer.setClearColor(0x000000, 0);

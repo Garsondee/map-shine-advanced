@@ -67,7 +67,7 @@ export class VisionPolygonComputer {
    * @param {number} radius - Vision radius in pixels
    * @param {Wall[]} walls - Array of wall placeables (optional, defaults to canvas.walls.placeables)
    * @param {{x: number, y: number, width: number, height: number}} [sceneBounds] - Optional scene bounds to clip vision
-   * @param {{sense?: 'sight'|'light', elevation?: number, forceClosedDoorWallIds?: Set<string>}|null} [options] - Optional compute mode, viewer elevation, and door walls to treat as closed even when `ds` is OPEN (door-fog seam).
+   * @param {{sense?: 'sight'|'light', elevation?: number, forceClosedDoorWallIds?: Set<string>, skipDoorWallIds?: Set<string>, additionalSegments?: Array<{x0:number,y0:number,x1:number,y1:number}>}|null} [options] - Optional compute mode, viewer elevation, and door walls to treat as closed or replaced by animated blocker segments.
    * @returns {number[]} Flat array [x0, y0, x1, y1, ...] in Foundry coordinates
    */
   compute(center, radius, walls = null, sceneBounds = null, options = null) {
@@ -86,13 +86,23 @@ export class VisionPolygonComputer {
       && options.forceClosedDoorWallIds.size > 0)
       ? options.forceClosedDoorWallIds
       : null;
+    const skipDoorWallIds = (options && options.skipDoorWallIds instanceof Set
+      && options.skipDoorWallIds.size > 0)
+      ? options.skipDoorWallIds
+      : null;
+    const additionalSegments = Array.isArray(options?.additionalSegments)
+      ? options.additionalSegments
+      : null;
 
     // Convert walls to segments (filtering inline to avoid allocations).
     // When an elevation is provided, walls whose wall-height bounds don't
     // include that elevation are skipped (MS-LVL-072).
     const segments = this._segmentsPool;
     segments.length = 0;
-    this.wallsToSegments(allWalls, center, radius, sense, segments, elevation, forceClosedDoorWallIds);
+    this.wallsToSegments(allWalls, center, radius, sense, segments, elevation, forceClosedDoorWallIds, skipDoorWallIds);
+    if (additionalSegments?.length) {
+      this.appendAdditionalSegments(additionalSegments, center, radius, segments);
+    }
     if (sense === 'light') {
       this.restrictLightTilesToSegments(center, radius, segments, elevation);
     }
@@ -201,9 +211,10 @@ export class VisionPolygonComputer {
    * @param {Array|null} outSegments - Output array (reused for perf)
    * @param {number|undefined} elevation - Viewer elevation for wall-height filtering (MS-LVL-072)
    * @param {Set<string>|null} [forceClosedDoorWallIds] - Wall document ids whose OPEN doors still emit LOS segments (door-fog seam base pass).
+   * @param {Set<string>|null} [skipDoorWallIds] - Door wall document ids whose original wall segment is replaced by caller-supplied animated segments.
    * @returns {Array<{a: {x: number, y: number}, b: {x: number, y: number}}>}
    */
-  wallsToSegments(walls, center, radius, sense = 'sight', outSegments = null, elevation = undefined, forceClosedDoorWallIds = null) {
+  wallsToSegments(walls, center, radius, sense = 'sight', outSegments = null, elevation = undefined, forceClosedDoorWallIds = null, skipDoorWallIds = null) {
     const segments = outSegments ?? [];
     let writeIndex = segments.length;
     const radiusSq = radius * radius;
@@ -246,6 +257,8 @@ export class VisionPolygonComputer {
     for (const wall of walls) {
       const doc = wall?.document;
       if (!doc) continue;
+      const wid = String(doc?.id ?? '');
+      if (wid && Number(doc.door ?? 0) > 0 && skipDoorWallIds?.has(wid)) continue;
 
       // Inline filtering to avoid allocating a filtered walls array.
       // MS-LVL-035: If a wall's midpoint falls within an allWallBlockSight
@@ -278,7 +291,6 @@ export class VisionPolygonComputer {
       }
       // Skip open doors unless this wall id is forced closed for a door-fog seam pass.
       if (wallDocDoorIsOpenForVision(doc)) {
-        const wid = String(doc?.id ?? '');
         if (!wid || !forceClosedDoorWallIds?.has(wid)) continue;
       }
 
@@ -336,6 +348,60 @@ export class VisionPolygonComputer {
       if (distASq > radiusSq && distBSq > radiusSq) {
         // Both endpoints outside - check if segment passes through circle
         // OPTIMIZATION: Use scalar distance check instead of object method
+        if (this._distToSegmentSq(center.x, center.y, ax, ay, bx, by) > radiusSq) continue;
+      }
+
+      let seg = segments[writeIndex];
+      if (!seg || typeof seg !== 'object') {
+        seg = { a: { x: 0, y: 0 }, b: { x: 0, y: 0 } };
+        segments[writeIndex] = seg;
+      } else {
+        if (!seg.a) seg.a = { x: 0, y: 0 };
+        if (!seg.b) seg.b = { x: 0, y: 0 };
+      }
+
+      seg.a.x = ax;
+      seg.a.y = ay;
+      seg.b.x = bx;
+      seg.b.y = by;
+      writeIndex++;
+    }
+
+    segments.length = writeIndex;
+    return segments;
+  }
+
+  /**
+   * Append caller-provided blocking segments, using the same pooled segment shape
+   * and radius culling as wall segments.
+   *
+   * @param {Array<{x0:number,y0:number,x1:number,y1:number}>} sourceSegments
+   * @param {{x: number, y: number}} center
+   * @param {number} radius
+   * @param {Array<{a:{x:number,y:number},b:{x:number,y:number}}>} segments
+   * @returns {Array<{a:{x:number,y:number},b:{x:number,y:number}}>}
+   */
+  appendAdditionalSegments(sourceSegments, center, radius, segments) {
+    if (!Array.isArray(sourceSegments) || !center || !(radius > 0) || !segments) return segments;
+
+    const radiusSq = radius * radius;
+    let writeIndex = segments.length;
+
+    for (const source of sourceSegments) {
+      const ax = Number(source?.x0);
+      const ay = Number(source?.y0);
+      const bx = Number(source?.x1);
+      const by = Number(source?.y1);
+      if (![ax, ay, bx, by].every(Number.isFinite)) continue;
+      if (Math.hypot(bx - ax, by - ay) <= 0.001) continue;
+
+      const dxA = ax - center.x;
+      const dyA = ay - center.y;
+      const dxB = bx - center.x;
+      const dyB = by - center.y;
+      const distASq = dxA * dxA + dyA * dyA;
+      const distBSq = dxB * dxB + dyB * dyB;
+      if (distASq > radiusSq && distBSq > radiusSq) {
         if (this._distToSegmentSq(center.x, center.y, ax, ay, bx, by) > radiusSq) continue;
       }
 

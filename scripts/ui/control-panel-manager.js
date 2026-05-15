@@ -1783,8 +1783,9 @@ export class ControlPanelManager {
       // redraw paths that surface as full loading transitions.
       this.controlState.timeOfDay = ((targetHour % 24) + 24) % 24;
 
-      // Runtime-only time transition; avoid StateApplier's saveToScene controlState write.
-      await stateApplier.startTimeOfDayTransition(this.controlState.timeOfDay, safeMinutes, false, false);
+      // Runtime-only time transition; avoid StateApplier's saveToScene controlState write,
+      // but do update local Foundry darkness so darkness-gated lights re-evaluate during the ramp.
+      await stateApplier.startTimeOfDayTransition(this.controlState.timeOfDay, safeMinutes, false, true);
       this._updateClockTarget(this.controlState.timeOfDay);
     } catch (error) {
       log.error('Failed to start time-of-day transition:', error);
@@ -3745,7 +3746,7 @@ export class ControlPanelManager {
       if (shouldStartTransition) {
         this._lastTimeTargetApplied = targetHour;
         this._lastTimeTransitionMinutesApplied = transitionMinutes;
-        await stateApplier.startTimeOfDayTransition(targetHour, transitionMinutes, false, false);
+        await stateApplier.startTimeOfDayTransition(targetHour, transitionMinutes, false, true);
       } else if (shouldApplyInstant) {
         this._lastTimeTargetApplied = targetHour;
         this._lastTimeTransitionMinutesApplied = transitionMinutes;
@@ -4099,8 +4100,8 @@ Current Weather:
 
       extendMsaLocalFlagWriteGuard();
       await scene.setFlag('map-shine-advanced', 'controlState', persistedControlState);
-      // One Foundry darkness write after persist — avoids hammering canvas.scene.update
-      // on every clock tick / 100ms transition frame (can grey-break V2 rendering).
+      // Reconcile local runtime darkness after persist. Time transitions already
+      // apply this during the ramp without writing the Scene document.
       await stateApplier.syncFoundryDarknessFromMapShineTime();
       try {
         const wc = resolveWeatherController();

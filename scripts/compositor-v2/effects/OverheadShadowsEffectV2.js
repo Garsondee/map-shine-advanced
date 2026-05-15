@@ -249,6 +249,9 @@ export class OverheadShadowsEffectV2 {
     // and combine mode are unchanged. Invalidated by invalidateDynamicCaches().
     this._upperFloorCompositeLastSig = '';
     this._upperFloorCompositeLastTexture = null;
+
+    /** @type {import('../../core/diagnostics/PerformanceRecorder.js').PerformanceRecorder|null} */
+    this._activePerfRecorder = null;
   }
 
   /**
@@ -699,12 +702,15 @@ export class OverheadShadowsEffectV2 {
     if (!rtRecreated
       && this._upperFloorCompositeLastSig === sig
       && this._upperFloorCompositeLastTexture === this._upperFloorCompositeRT.texture) {
+      const perfToken = this._beginPerfSpan('upperFloorCompositeCached');
       u.tUpperFloorComposite.value = this._upperFloorCompositeRT.texture;
       u.uHasUpperFloorComposite.value = 1.0;
       if (u.uUpperFloorCompositeFlipY) u.uUpperFloorCompositeFlipY.value = 0.0;
+      this._endPerfSpan(perfToken);
       return;
     }
 
+    const perfToken = this._beginPerfSpan('upperFloorComposite');
     const mat = this._upperFloorAccumMaterial;
     const prevTarget = renderer.getRenderTarget();
     const prevClearColor = new THREE.Color();
@@ -759,6 +765,7 @@ export class OverheadShadowsEffectV2 {
     if (u.uUpperFloorCompositeFlipY) u.uUpperFloorCompositeFlipY.value = 0.0;
     this._upperFloorCompositeLastSig = sig;
     this._upperFloorCompositeLastTexture = this._upperFloorCompositeRT.texture;
+    this._endPerfSpan(perfToken);
   }
 
   /**
@@ -787,6 +794,40 @@ export class OverheadShadowsEffectV2 {
     renderer.setClearColor(0xffffff, 1);
     renderer.clear();
     renderer.setRenderTarget(prevTarget);
+  }
+
+  /**
+   * Begin a nested Performance Recorder span for overhead-shadow internals.
+   *
+   * These spans intentionally use the same effect aggregate table as normal
+   * effects, with keys like `overheadShadows.roofVisibility`. When GPU timer
+   * queries are already active for the parent overhead render span, the recorder
+   * automatically falls back to CPU/draw-call timing for nested spans.
+   *
+   * @param {string} name
+   * @returns {object|null}
+   * @private
+   */
+  _beginPerfSpan(name) {
+    try {
+      const recorder = this._activePerfRecorder;
+      if (!recorder?.enabled || typeof recorder.beginEffectCall !== 'function') return null;
+      return recorder.beginEffectCall(`overheadShadows.${name}`, 'render');
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /**
+   * @param {object|null} token
+   * @private
+   */
+  _endPerfSpan(token) {
+    if (!token) return;
+    try {
+      const recorder = this._activePerfRecorder ?? window.MapShine?.performanceRecorder;
+      recorder?.endEffectCall?.(token);
+    } catch (_) {}
   }
 
   /**
@@ -1089,6 +1130,7 @@ export class OverheadShadowsEffectV2 {
       || !this._ceilingTransmittanceCamera) {
       return;
     }
+    const perfToken = this._beginPerfSpan('ceilingTransmittance');
     const m = this._ceilingTransmittanceMaterial;
     m.uniforms.tRoofVis.value = this.roofVisibilityTarget.texture;
     m.uniforms.tRoofBlock.value = this.roofBlockTarget.texture;
@@ -1104,6 +1146,7 @@ export class OverheadShadowsEffectV2 {
       this._ceilingTransmittanceWritten = true;
     } finally {
       renderer.setRenderTarget(prev);
+      this._endPerfSpan(perfToken);
     }
   }
 
@@ -2937,7 +2980,16 @@ export class OverheadShadowsEffectV2 {
     const THREE = window.THREE;
     if (!THREE || !this.mainCamera || !this.mainScene || !this.shadowScene) return;
 
+    try {
+      const recorder = window.MapShine?.performanceRecorder;
+      this._activePerfRecorder = recorder?.enabled ? recorder : null;
+    } catch (_) {
+      this._activePerfRecorder = null;
+    }
+
     this._treeRainMaskDebugHeartbeat();
+
+    let perfToken = this._beginPerfSpan('setupAndCache');
 
     // Ensure roof target exists and is correctly sized
     // PERFORMANCE: Reuse Vector2 instead of allocating every frame
@@ -2985,6 +3037,7 @@ export class OverheadShadowsEffectV2 {
     // PERFORMANCE: Cache the debug-enabled flag so each consumer below avoids a
     // global window.MapShine lookup. The check itself is internally throttled.
     const debugProbeEnabled = this._isTreeRainMaskDebugEnabled();
+    this._endPerfSpan(perfToken);
 
     // Capture roof/fluid with a guard-band expanded camera view so projected
     // sampling near viewport edges still has valid source texels.
@@ -3040,6 +3093,7 @@ export class OverheadShadowsEffectV2 {
       treeMaskCaptureUniformOverrides.push({ uniform: u, value: u.value });
       u.value = value;
     };
+    perfToken = this._beginPerfSpan('treeWeatherPrep');
     if (INCLUDE_TREE_CANOPY_IN_WEATHER_ROOF_CAPTURES) {
       // PERFORMANCE: Iterate cached caster list instead of full scene traverse.
       // Tree debug counters only filled when probe is enabled to avoid hot-path
@@ -3078,6 +3132,7 @@ export class OverheadShadowsEffectV2 {
         }
       }
     }
+    this._endPerfSpan(perfToken);
 
     // PERFORMANCE: Iterate cached caster list. Skip the whole loop when no
     // fluid overlay was seen during cache build (very common case — no fluid
@@ -3098,12 +3153,14 @@ export class OverheadShadowsEffectV2 {
     // Capture runtime roof visibility (with live hover fade opacity) for
     // LightingEffectV2 building-shadow suppression. This pass intentionally uses
     // true tile visibility/opacity and excludes fluid overlays.
+    perfToken = this._beginPerfSpan('roofVisibility');
     this.mainCamera.layers.set(ROOF_LAYER);
     this.mainCamera.layers.enable(WEATHER_ROOF_LAYER);
     renderer.setRenderTarget(this.roofVisibilityTarget);
     renderer.setClearColor(0x000000, 0);
     renderer.clear();
     renderer.render(this.mainScene, this.mainCamera);
+    this._endPerfSpan(perfToken);
 
     for (const entry of roofVisibilityExclusions) {
       if (entry.object) entry.object.visible = entry.visible;
@@ -3122,6 +3179,7 @@ export class OverheadShadowsEffectV2 {
         const disabledBlockerOpacityOverrides = [];
         const disabledBlockerUniformOverrides = [];
         const disabledTreeBlockerUniformOverrides = [];
+        perfToken = this._beginPerfSpan('disabledBlockerPrep');
         for (let i = 0, n = frameCasters.length; i < n; i++) {
           const entry = frameCasters[i];
           if (entry.hasRoofLayer && entry.mat) {
@@ -3179,13 +3237,16 @@ export class OverheadShadowsEffectV2 {
             }
           }
         }
+        this._endPerfSpan(perfToken);
 
+        perfToken = this._beginPerfSpan('disabledRoofBlock');
         this.mainCamera.layers.set(ROOF_LAYER);
         this.mainCamera.layers.enable(WEATHER_ROOF_LAYER);
         renderer.setRenderTarget(this.roofBlockTarget);
         renderer.setClearColor(0x000000, 0);
         renderer.clear();
         renderer.render(this.mainScene, this.mainCamera);
+        this._endPerfSpan(perfToken);
 
         // Rain occlusion visibility must see live tree/roof fade (uHoverFade, tile
         // opacity). The roof-block pass above forces full opacity for rb; restore
@@ -3206,6 +3267,7 @@ export class OverheadShadowsEffectV2 {
         if (this.roofRestrictLightTarget) {
           // PERFORMANCE: Iterate cached caster list (no scene traverse).
           const restrictLightVisOverrides = [];
+          perfToken = this._beginPerfSpan('disabledRestrictLightPrep');
           for (let i = 0, n = frameCasters.length; i < n; i++) {
             const entry = frameCasters[i];
             if (!entry.hasRoofLayer) continue;
@@ -3219,12 +3281,15 @@ export class OverheadShadowsEffectV2 {
             if (!isFoundryTile) object.visible = false;
             else object.visible = !!(liveVis && rl);
           }
+          this._endPerfSpan(perfToken);
+          perfToken = this._beginPerfSpan('disabledRestrictLight');
           this.mainCamera.layers.set(ROOF_LAYER);
           this.mainCamera.layers.enable(WEATHER_ROOF_LAYER);
           renderer.setRenderTarget(this.roofRestrictLightTarget);
           renderer.setClearColor(0x000000, 0);
           renderer.clear();
           renderer.render(this.mainScene, this.mainCamera);
+          this._endPerfSpan(perfToken);
           for (const entry of restrictLightVisOverrides) {
             if (entry.object) entry.object.visible = entry.visible;
           }
@@ -3281,6 +3346,7 @@ export class OverheadShadowsEffectV2 {
     const tileReceiverOpacityOverrides = [];
     // PERFORMANCE: Iterate cached caster list. Single pass collects fluid visibility
     // / fluid uniform overrides AND opacity overrides for non-fluid casters.
+    perfToken = this._beginPerfSpan('casterOverridePrep');
     for (let i = 0, n = frameCasters.length; i < n; i++) {
       const entry = frameCasters[i];
       if (!entry.hasRoofLayer || !entry.mat) continue;
@@ -3329,6 +3395,7 @@ export class OverheadShadowsEffectV2 {
         }
       }
     }
+    this._endPerfSpan(perfToken);
 
     // Pass 0/1 use guard-band camera state (temporarily expanded frustum).
     // Reveal upper-floor bus casters only for these caster-capture passes so
@@ -3341,11 +3408,13 @@ export class OverheadShadowsEffectV2 {
       busRevealSnapshot = this._renderBus?.beginOverheadShadowCaptureReveal?.() ?? [];
 
       // Pass 0: render only FluidEffect overlays attached to overhead tiles.
+      perfToken = this._beginPerfSpan('fluidRoofCapture');
       this.mainCamera.layers.set(ROOF_LAYER);
       renderer.setRenderTarget(this.fluidRoofTarget);
       renderer.setClearColor(0x000000, 0);
       renderer.clear();
       renderer.render(this.mainScene, this.mainCamera);
+      this._endPerfSpan(perfToken);
 
     for (const entry of fluidVisibilityOverrides) {
       if (entry.object) {
@@ -3366,6 +3435,7 @@ export class OverheadShadowsEffectV2 {
       // Re-enable above-active overhead casters ONLY for this caster capture pass
       // so lower floors receive their shadow contribution without polluting
       // visibility/blocker textures used elsewhere.
+      perfToken = this._beginPerfSpan('roofCapturePrep');
       roofUpperCasterVisibilityOverrides.push(...this._forceUpperOverheadCasterVisibilityForRoofPass());
       // PERFORMANCE: Iterate cached caster list. Tree probe averaging only runs
       // when debug is enabled.
@@ -3402,14 +3472,17 @@ export class OverheadShadowsEffectV2 {
           object.visible = true;
         }
       }
+      this._endPerfSpan(perfToken);
 
       // Pass 1: render overhead tiles into roofTarget (alpha mask)
+      perfToken = this._beginPerfSpan('roofCapture');
       this.mainCamera.layers.set(ROOF_LAYER);
       this.mainCamera.layers.enable(WEATHER_ROOF_LAYER);
       renderer.setRenderTarget(this.roofTarget);
       renderer.setClearColor(0x000000, 0);
       renderer.clear();
       renderer.render(this.mainScene, this.mainCamera);
+      this._endPerfSpan(perfToken);
 
       // Pass 1 needs full-opacity casters; restrict-light must use live opacity and
       // the real pre-pass visibility so faded/hidden roofs release dynamic lighting.
@@ -3431,6 +3504,7 @@ export class OverheadShadowsEffectV2 {
       // Pass 1c: restrict-light overhead only (same camera/layers as Pass 1).
       // PERFORMANCE: Iterate cached caster list.
       const restrictLightVisOverrides = [];
+      perfToken = this._beginPerfSpan('restrictLightPrep');
       for (let i = 0, n = frameCasters.length; i < n; i++) {
         const entry = frameCasters[i];
         if (!entry.hasRoofLayer) continue;
@@ -3449,10 +3523,13 @@ export class OverheadShadowsEffectV2 {
           object.visible = !!(liveVis && rl);
         }
       }
+      this._endPerfSpan(perfToken);
+      perfToken = this._beginPerfSpan('restrictLight');
       renderer.setRenderTarget(this.roofRestrictLightTarget);
       renderer.setClearColor(0x000000, 0);
       renderer.clear();
       renderer.render(this.mainScene, this.mainCamera);
+      this._endPerfSpan(perfToken);
       for (const entry of restrictLightVisOverrides) {
         if (entry.object) entry.object.visible = entry.visible;
       }
@@ -3492,6 +3569,7 @@ export class OverheadShadowsEffectV2 {
     // PERFORMANCE: Iterate cached caster list (trees only). Probe averaging is
     // gated behind debug flag — no arithmetic when nobody is watching.
     const treeBlockerUniformOverrides = [];
+    perfToken = this._beginPerfSpan('roofBlockPrep');
     if (this._frameCasters.hasTrees) {
       for (let i = 0, n = frameCasters.length; i < n; i++) {
         const entry = frameCasters[i];
@@ -3539,13 +3617,16 @@ export class OverheadShadowsEffectV2 {
         }
       }
     }
+    this._endPerfSpan(perfToken);
     try {
+      perfToken = this._beginPerfSpan('roofBlock');
       this.mainCamera.layers.set(ROOF_LAYER);
       this.mainCamera.layers.enable(WEATHER_ROOF_LAYER);
       renderer.setRenderTarget(this.roofBlockTarget);
       renderer.setClearColor(0x000000, 0);
       renderer.clear();
       renderer.render(this.mainScene, this.mainCamera);
+      this._endPerfSpan(perfToken);
     } finally {
       for (const entry of treeBlockerUniformOverrides) {
         if (entry?.uniform) entry.uniform.value = entry.value;
@@ -3572,6 +3653,7 @@ export class OverheadShadowsEffectV2 {
       && this.tileProjectionSortTarget
       && this.tileReceiverAlphaTarget
       && this.tileReceiverSortTarget) {
+      perfToken = this._beginPerfSpan('tileProjectionTotal');
       const idSet = new Set(tileProjectionIds.map((id) => String(id)));
 
       // Build a dynamic sort normalization range from currently present tile
@@ -3608,6 +3690,7 @@ export class OverheadShadowsEffectV2 {
 
       // Receiver sort maps: capture currently visible top tile stacking so
       // projected casters can be occluded by higher-sort receiver tiles.
+      const tilePrepToken = this._beginPerfSpan('tileProjectionPrep');
       this.mainScene.traverse((object) => {
         const isRenderable = !!(object.isSprite || object.isMesh || object.isPoints || object.isLine);
         if (!isRenderable || typeof object.visible !== 'boolean') return;
@@ -3621,13 +3704,16 @@ export class OverheadShadowsEffectV2 {
           tileReceiverOpacityOverrides.push({ object, opacity: object.material.opacity });
         }
       });
+      this._endPerfSpan(tilePrepToken);
 
       // Receiver alpha pass (original alpha/opacity).
+      let tilePassToken = this._beginPerfSpan('tileReceiverAlpha');
       this.mainCamera.layers.enableAll();
       renderer.setRenderTarget(this.tileReceiverAlphaTarget);
       renderer.setClearColor(0x000000, 0);
       renderer.clear();
       renderer.render(this.mainScene, this.mainCamera);
+      this._endPerfSpan(tilePassToken);
 
       // Receiver sort pass (alpha multiplied by normalized sort).
       // Skip when all tiles share the same sort, because there is no ordering
@@ -3656,6 +3742,7 @@ export class OverheadShadowsEffectV2 {
       }
 
       // Contributor alpha pass for selected projection caster tiles.
+      const tileContributorPrepToken = this._beginPerfSpan('tileContributorPrep');
       this.mainScene.traverse((object) => {
         const isRenderable = !!(object.isSprite || object.isMesh || object.isPoints || object.isLine);
         if (!isRenderable || typeof object.visible !== 'boolean') return;
@@ -3675,6 +3762,7 @@ export class OverheadShadowsEffectV2 {
           object.material.opacity = 1.0;
         }
       });
+      this._endPerfSpan(tileContributorPrepToken);
 
       // Tile projection can target any tile layer (not only ROOF_LAYER).
       // We isolate contributors via visibility overrides, so enabling all
@@ -3686,10 +3774,12 @@ export class OverheadShadowsEffectV2 {
       try {
         this.mainCamera.layers.enableAll();
 
+        tilePassToken = this._beginPerfSpan('tileProjectionCapture');
         renderer.setRenderTarget(this.tileProjectionTarget);
         renderer.setClearColor(0x000000, 0);
         renderer.clear();
         renderer.render(this.mainScene, this.mainCamera);
+        this._endPerfSpan(tilePassToken);
 
         // Contributor sort pass (same selected casters, alpha multiplied by
         // normalized sort) for per-pixel sort occlusion in the projection shader.
@@ -3712,6 +3802,7 @@ export class OverheadShadowsEffectV2 {
       }
 
       hasTileProjection = true;
+      this._endPerfSpan(perfToken);
     }
 
     this.mainCamera.layers.mask = previousLayersMask;
@@ -3725,10 +3816,13 @@ export class OverheadShadowsEffectV2 {
       }
     }
 
+    perfToken = this._beginPerfSpan('upperFloorCompositeDispatch');
     this._renderUpperFloorComposite(renderer, THREE);
+    this._endPerfSpan(perfToken);
 
     // Pass 2: build shadow texture from roofTarget using a world-pinned
     // groundplane mesh that samples the roof mask in screen space.
+    perfToken = this._beginPerfSpan('shadowCompositeUniforms');
     if (this.material && this.material.uniforms) {
       this.material.uniforms.tRoof.value = this.roofTarget.texture;
       this.material.uniforms.tRoofVisibility.value = this.roofVisibilityTarget?.texture || null;
@@ -3763,7 +3857,9 @@ export class OverheadShadowsEffectV2 {
         }
       }
     }
+    this._endPerfSpan(perfToken);
 
+    perfToken = this._beginPerfSpan('shadowCompositeDraw');
     renderer.setRenderTarget(this.shadowTarget);
     renderer.setClearColor(0xffffff, 1);
     renderer.clear();
@@ -3771,7 +3867,9 @@ export class OverheadShadowsEffectV2 {
     this.mainCamera.layers.enable(0);
     renderer.render(this.shadowScene, this.mainCamera);
     this.mainCamera.layers.mask = prevLayerMask;
+    this._endPerfSpan(perfToken);
 
+    perfToken = this._beginPerfSpan('restoreState');
     for (const entry of nonFluidVisibilityOverrides) {
       if (entry.object) entry.object.visible = entry.visible;
     }
@@ -3785,6 +3883,7 @@ export class OverheadShadowsEffectV2 {
     }
     // Restore previous render target
     renderer.setRenderTarget(previousTarget);
+    this._endPerfSpan(perfToken);
   }
 
   /**
@@ -3814,6 +3913,7 @@ export class OverheadShadowsEffectV2 {
     const fc = this._frameCasters;
     const useCache = fc.frameId >= 0 && fc.scene === this.mainScene;
 
+    let perfToken = this._beginPerfSpan('rainOcclusionVisibilityPrep');
     if (useCache) {
       // Iterate cached roof-layer entries.
       const list = fc.list;
@@ -3877,20 +3977,24 @@ export class OverheadShadowsEffectV2 {
         }
       });
     }
+    this._endPerfSpan(perfToken);
 
     const prevMask = this.mainCamera.layers.mask;
     this.mainCamera.layers.set(roofLayer);
     this.mainCamera.layers.enable(weatherRoofLayer);
 
+    perfToken = this._beginPerfSpan('rainOcclusionVisibility');
     renderer.setRenderTarget(this.rainOcclusionVisibilityTarget);
     renderer.setClearColor(0x000000, 0);
     renderer.clear();
     renderer.render(this.mainScene, this.mainCamera);
+    this._endPerfSpan(perfToken);
 
     // Blocker pass: force opacity/fade to full so hiddenBlock can engage while fading.
     for (const entry of visUniformOverrides) {
       if (entry?.object && entry.key === 'opacity') entry.object.opacity = 1.0;
     }
+    perfToken = this._beginPerfSpan('rainOcclusionBlockPrep');
     if (useCache) {
       const list = fc.list;
       for (let i = 0, n = list.length; i < n; i++) {
@@ -3930,12 +4034,16 @@ export class OverheadShadowsEffectV2 {
         }
       });
     }
+    this._endPerfSpan(perfToken);
 
+    perfToken = this._beginPerfSpan('rainOcclusionBlock');
     renderer.setRenderTarget(this.rainOcclusionBlockTarget);
     renderer.setClearColor(0x000000, 0);
     renderer.clear();
     renderer.render(this.mainScene, this.mainCamera);
+    this._endPerfSpan(perfToken);
 
+    perfToken = this._beginPerfSpan('rainOcclusionRestore');
     for (const entry of blockUniformOverrides) {
       if (entry?.object && entry.key === 'opacity') entry.object.opacity = entry.value;
       if (entry?.uniform) entry.uniform.value = entry.value;
@@ -3949,6 +4057,7 @@ export class OverheadShadowsEffectV2 {
       if (entry?.object) entry.object.visible = entry.visible;
     }
     this.mainCamera.layers.mask = prevMask;
+    this._endPerfSpan(perfToken);
   }
 
   dispose() {

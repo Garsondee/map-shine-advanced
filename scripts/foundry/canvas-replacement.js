@@ -4549,8 +4549,9 @@ async function onUpdateScene(scene, changes, _options, _userId) {
           if (Number.isFinite(cs.timeOfDay)) {
             const mins = Number(cs.timeTransitionMinutes) || 0;
             if (mins > 0) {
-              // Match Control Panel: do not drive Foundry darkness every 100ms (V2 grey risk).
-              void stateApplier.startTimeOfDayTransition(cs.timeOfDay, mins, false, false);
+              // Runtime-only on replicas too: no scene writes, but keep local darkness-gated
+              // lights in sync with the animated Map Shine clock.
+              void stateApplier.startTimeOfDayTransition(cs.timeOfDay, mins, false, true);
             } else {
               void stateApplier.applyTimeOfDay(cs.timeOfDay, false, false);
             }

@@ -396,8 +396,8 @@ export class StateApplier {
   }
 
   /**
-   * Push Foundry `environment.darknessLevel` from current Map Shine / control-panel hour (GM only).
-   * Call after debounced `controlState` save so live time scrubbing does not hammer `canvas.scene.update`.
+   * Push Foundry `environment.darknessLevel` from current Map Shine / control-panel hour.
+   * Uses a local runtime update; persistence flows separately through controlState/weather-snapshot.
    * @returns {Promise<void>}
    */
   async syncFoundryDarknessFromMapShineTime() {
@@ -421,7 +421,7 @@ export class StateApplier {
    * @param {number} targetHour - 0-24 hour value
    * @param {number} transitionMinutes - Transition duration in minutes
    * @param {boolean} [saveToScene=true]
-   * @param {boolean} [applyFoundryDarkness=true] - When false, skips `canvas.scene.update` darkness (use for Control Panel live UI; sync via `syncFoundryDarknessFromMapShineTime` after save).
+   * @param {boolean} [applyFoundryDarkness=true] - When false, skips local Foundry runtime darkness (used only when another sync path will apply it).
    * @returns {Promise<void>}
    */
   async startTimeOfDayTransition(targetHour, transitionMinutes, saveToScene = true, applyFoundryDarkness = true) {
@@ -588,13 +588,16 @@ export class StateApplier {
 
   /**
    * Update Foundry scene darkness based on time of day.
-   * Persists via `mapShinePushSceneDarknessLevel` (V2-safe — see `msa-v2-darkness.js`).
+   * Applies local runtime darkness via `mapShinePushSceneDarknessLevel` (V2-safe — see `msa-v2-darkness.js`).
    * @param {number} hour - 0-24 hour value
    * @private
    */
   async _updateSceneDarkness(hour) {
     try {
-      if (!canPersistSceneDocument() || !canvas?.scene) return;
+      // This is a local canvas/runtime darkness update. Persistence still flows
+      // through controlState / weather-snapshot saves; players also need this so
+      // replicated time transitions toggle their own darkness-gated lights.
+      if (!canvas?.scene) return;
 
       const nowMs = Date.now();
 

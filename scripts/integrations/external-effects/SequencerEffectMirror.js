@@ -99,6 +99,12 @@ export class SequencerEffectMirror {
 
     /** @type {number} */
     this._lastPixiCanvasFrame = -1;
+
+    /** @type {Map<number, HTMLCanvasElement>} */
+    this._pixiCanvasFrameCache = new Map();
+
+    /** @type {number} */
+    this._pixiCanvasFrameCacheMax = 160;
   }
 
   /**
@@ -364,6 +370,16 @@ export class SequencerEffectMirror {
       } catch (e) {
         snap.rendererWebgl = { error: String(e?.message ?? e) };
       }
+    }
+
+    if (this._textureKind === 'pixiCanvas') {
+      snap.pixiCanvas = {
+        frameCacheSize: this._pixiCanvasFrameCache.size,
+        frameCacheMax: this._pixiCanvasFrameCacheMax,
+        lastFrame: this._lastPixiCanvasFrame,
+        canvasWidth: this._mediaSource instanceof HTMLCanvasElement ? this._mediaSource.width : null,
+        canvasHeight: this._mediaSource instanceof HTMLCanvasElement ? this._mediaSource.height : null,
+      };
     }
 
     const mat = this._material;
@@ -657,6 +673,7 @@ export class SequencerEffectMirror {
     this._geometry = null;
     this._texture = null;
     this._mediaSource = null;
+    this._pixiCanvasFrameCache.clear();
 
     this._restorePixiContainer();
   }
@@ -1542,10 +1559,45 @@ export class SequencerEffectMirror {
       if (!ctx) return;
       ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-      if (!this._drawPixiTextureFrameToCanvas(ctx, sprite, canvas.width, canvas.height)) {
-        this._extractPixiSpriteToCanvas(ctx, sprite, canvas.width, canvas.height);
+      const cached = this._pixiCanvasFrameCache.get(frameIdx);
+      if (cached instanceof HTMLCanvasElement) {
+        ctx.drawImage(cached, 0, 0, cached.width, cached.height, 0, 0, canvas.width, canvas.height);
+        this._texture.needsUpdate = true;
+        return;
       }
+
+      const drawn = this._drawPixiTextureFrameToCanvas(ctx, sprite, canvas.width, canvas.height)
+        || this._extractPixiSpriteToCanvas(ctx, sprite, canvas.width, canvas.height);
+      if (drawn) this._cachePixiCanvasFrame(frameIdx, canvas);
       this._texture.needsUpdate = true;
+    } catch (_) {}
+  }
+
+  /**
+   * Cache extracted PIXI frames so looping effects do not repeatedly call
+   * renderer.extract.canvas(), which stalls the GPU.
+   * @param {number} frameIdx
+   * @param {HTMLCanvasElement} source
+   */
+  _cachePixiCanvasFrame(frameIdx, source) {
+    if (!Number.isFinite(frameIdx) || !(source instanceof HTMLCanvasElement)) return;
+    if (this._pixiCanvasFrameCache.has(frameIdx)) return;
+    try {
+      const max = Math.max(1, Math.min(
+        this._pixiCanvasFrameCacheMax,
+        Number(this._resolveSprite()?.totalFrames) || this._pixiCanvasFrameCacheMax,
+      ));
+      while (this._pixiCanvasFrameCache.size >= max) {
+        const oldest = this._pixiCanvasFrameCache.keys().next().value;
+        this._pixiCanvasFrameCache.delete(oldest);
+      }
+      const copy = document.createElement('canvas');
+      copy.width = source.width;
+      copy.height = source.height;
+      const ctx = copy.getContext('2d', { willReadFrequently: false });
+      if (!ctx) return;
+      ctx.drawImage(source, 0, 0);
+      this._pixiCanvasFrameCache.set(frameIdx, copy);
     } catch (_) {}
   }
 
@@ -1592,10 +1644,10 @@ export class SequencerEffectMirror {
     try {
       if (typeof sprite.renderable === 'boolean') sprite.renderable = true;
       const attempts = [
-        () => extract.canvas(sprite),
-        () => extract.canvas({ target: sprite }),
         () => extract.canvas(sprite.texture),
         () => extract.canvas({ target: sprite.texture }),
+        () => extract.canvas(sprite),
+        () => extract.canvas({ target: sprite }),
       ];
       for (const fn of attempts) {
         let c = null;

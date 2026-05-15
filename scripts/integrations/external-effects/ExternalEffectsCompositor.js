@@ -19,6 +19,9 @@
  * Lifecycle: constructed once per scene from `canvas-replacement.js` after
  * `FloorCompositor` is initialized. Disposed on `canvasTearDown`.
  *
+ * F12: `MapShine.externalEffects.probeSequencerMirrors()` — Sequencer mirror diagnostics.
+ * `MapShine.externalEffects.probeSequencerMirrorsDeep()` — same + 2D DOM samples + WebGL hints.
+ *
  * @module integrations/external-effects/ExternalEffectsCompositor
  */
 
@@ -196,6 +199,58 @@ export class ExternalEffectsCompositor {
     if (this.enabled.diceSoNice && this.dsnPass?.enabled) return true;
     if (this.enabled.sequencer && this.sequencer?.hasActiveMirrors?.()) return true;
     return false;
+  }
+
+  /**
+   * Preferred continuous-render FPS while external effects are active.
+   * Returning a value lets the main RenderLoop avoid rendering faster than
+   * the active adapter can provide new pixels (especially DSN canvas uploads).
+   * @returns {number}
+   */
+  getPreferredContinuousFps() {
+    if (!this._initialized || this._disposed) return 0;
+    let preferred = 0;
+    try {
+      if (this.enabled.diceSoNice && this.dsnPass?.enabled) {
+        preferred = Math.max(preferred, Number(this.diceSoNice?.getPreferredContinuousFps?.()) || 0);
+      }
+    } catch (_) {}
+    try {
+      if (this.enabled.sequencer && this.sequencer?.hasActiveMirrors?.()) {
+        preferred = Math.max(preferred, 30);
+      }
+    } catch (_) {}
+    return preferred;
+  }
+
+  /**
+   * F12: `MapShine.externalEffects.probeSequencerMirrors()` while a Sequencer
+   * effect plays — dumps video/texture/material/mesh state per mirror.
+   * @param {string} [label]
+   * @returns {Array<Record<string, unknown>>}
+   */
+  probeSequencerMirrors(label) {
+    try {
+      return this.sequencer?.probeMirrorsToConsole?.(label ?? 'manual') ?? [];
+    } catch (e) {
+      console.warn('[MSA Sequencer mirror probe] failed:', e);
+      return [];
+    }
+  }
+
+  /**
+   * Same as `probeSequencerMirrors` but adds `domVideoSamples` (center pixel via 2D
+   * `drawImage`) and `rendererWebgl` hints — for diagnosing black mirrored video.
+   * @param {string} [label]
+   * @returns {Array<Record<string, unknown>>}
+   */
+  probeSequencerMirrorsDeep(label) {
+    try {
+      return this.sequencer?.probeMirrorsDeepToConsole?.(label ?? 'deep-manual') ?? [];
+    } catch (e) {
+      console.warn('[MSA Sequencer mirror probe DEEP] failed:', e);
+      return [];
+    }
   }
 
   /**

@@ -25,13 +25,17 @@
         "id": "dice-so-nice",
         "type": "module",
         "reason": "Map Shine Advanced composites Dice So Nice's roll canvas inside its Three.js post-processing pipeline (bloom, color grade, lens). Toggle in Graphics Settings.",
-        "compatibility": { "verified": "6.0.0" }
+        "compatibility": {
+          "verified": "6.0.0"
+        }
       },
       {
         "id": "sequencer",
         "type": "module",
         "reason": "Map Shine Advanced mirrors Sequencer effects (including JB2A) into its Three.js scene so they receive in-scene lighting and post-FX. Toggle in Graphics Settings.",
-        "compatibility": { "verified": "4.0.1" }
+        "compatibility": {
+          "verified": "4.0.1"
+        }
       }
     ]
   },

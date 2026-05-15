@@ -1933,6 +1933,11 @@ export class FloorCompositor {
         if (window.MapShine) window.MapShine.__v2ContinuousRenderReason = reason;
         return true;
       }
+      if (window.MapShine?.externalEffects?.requiresContinuousRender?.()) {
+        reason = 'external-effects';
+        if (window.MapShine) window.MapShine.__v2ContinuousRenderReason = reason;
+        return true;
+      }
       if (window.MapShine) window.MapShine.__v2ContinuousRenderReason = reason;
       return false;
     } catch (_) {
@@ -1956,6 +1961,8 @@ export class FloorCompositor {
         // Prefer 60fps while fluid overlays are active.
         return 60;
       }
+      const externalFps = Number(window.MapShine?.externalEffects?.getPreferredContinuousFps?.());
+      if (Number.isFinite(externalFps) && externalFps > 0) return externalFps;
     } catch (_) {
     }
     return 0;

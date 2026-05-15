@@ -30,6 +30,12 @@ const DEFAULT_GRACE_MS = 4000;
 const PREWARM_POLL_INTERVAL_MS = 250;
 const PREWARM_MAX_MS = 15000;
 
+const DSN_PERFORMANCE_PRESETS = Object.freeze({
+  native:   { mode: 'native',   maxPixelRatio: Infinity, maxUploadFps: 0 },
+  balanced: { mode: 'balanced', maxPixelRatio: 1.0,      maxUploadFps: 24 },
+  quality:  { mode: 'quality',  maxPixelRatio: 1.5,      maxUploadFps: 30 },
+});
+
 export class DiceSoNiceAdapter {
   /**
    * @param {{
@@ -67,6 +73,9 @@ export class DiceSoNiceAdapter {
     /** @type {Function|null} */
     this._origRenderFn = null;
 
+    /** @type {Function|null} */
+    this._origSetPixelRatioFn = null;
+
     /** @type {any|null} */
     this._canvasTexture = null;
 
@@ -84,6 +93,15 @@ export class DiceSoNiceAdapter {
 
     /** @type {number} */
     this._prewarmStartMs = 0;
+
+    /** @type {{ mode: string, maxPixelRatio: number, maxUploadFps: number }} */
+    this._performance = { ...DSN_PERFORMANCE_PRESETS.balanced };
+
+    /** @type {number} */
+    this._lastTextureDirtyAtMs = 0;
+
+    /** @type {number} */
+    this._lastRenderRequestAtMs = 0;
   }
 
   /**
@@ -138,6 +156,39 @@ export class DiceSoNiceAdapter {
     }
   }
 
+  /**
+   * Switch Dice So Nice integration performance mode at runtime.
+   *
+   * - `native`: restore DSN's DOM overlay and skip MSA compositing (fastest)
+   * - `balanced`: DPR 1 + 24fps canvas uploads (default)
+   * - `quality`: DPR 1.5 + 30fps canvas uploads
+   *
+   * @param {'native'|'balanced'|'quality'} mode
+   */
+  setPerformanceMode(mode) {
+    const preset = DSN_PERFORMANCE_PRESETS[mode] ?? DSN_PERFORMANCE_PRESETS.balanced;
+    this._performance = { ...preset };
+
+    try {
+      if (this._dsnPass) this._dsnPass.enabled = false;
+      if (preset.mode === 'native') this._showDsnCanvas();
+      else if (this._enabled && this._wired) this._hideDsnCanvas();
+    } catch (_) {}
+
+    this._applyPixelRatioCap();
+  }
+
+  /** @returns {{ mode: string, maxPixelRatio: number, maxUploadFps: number }} */
+  getPerformanceOptions() {
+    return { ...this._performance };
+  }
+
+  /** @returns {number} Preferred compositor FPS while DSN is active. */
+  getPreferredContinuousFps() {
+    const fps = Number(this._performance.maxUploadFps);
+    return Number.isFinite(fps) && fps > 0 ? fps : 0;
+  }
+
   // ── Wiring ────────────────────────────────────────────────────────────────
 
   _wireRenderer(dice3d) {
@@ -163,6 +214,7 @@ export class DiceSoNiceAdapter {
 
     this._dsnRenderer = renderer;
     this._dsnCanvas = renderer.domElement;
+    this._installPixelRatioCap(renderer);
 
     // Create CanvasTexture wrapping DSN's canvas. flipY=true since the canvas
     // is rendered top-down by WebGL.
@@ -191,15 +243,16 @@ export class DiceSoNiceAdapter {
         this._origRenderFn = origRender;
         renderer.render = (s, c) => {
           origRender(s, c);
-          try { if (this._canvasTexture) this._canvasTexture.needsUpdate = true; } catch (_) {}
-          try { this._renderLoop?.requestContinuousRender?.(180); } catch (_) {}
+          this._markTextureDirtyThrottled();
+          this._requestRenderThrottled();
         };
       }
     } catch (e) {
       log.warn('Failed to monkey-patch DSN renderer.render:', e);
     }
 
-    if (this._enabled) this._hideDsnCanvas();
+    if (this._enabled && this._performance.mode !== 'native') this._hideDsnCanvas();
+    else this._showDsnCanvas();
     this._wired = true;
     this._stopPrewarmPolling();
     log.info('DSN renderer wired into MSA compositor', {
@@ -215,8 +268,13 @@ export class DiceSoNiceAdapter {
     if (!this._wired) return;
     if (!this._dsnPass) return;
     this._clearGraceTimer();
+    if (this._performance.mode === 'native') {
+      try { this._dsnPass.enabled = false; } catch (_) {}
+      this._showDsnCanvas();
+      return;
+    }
     try { this._dsnPass.enabled = true; } catch (_) {}
-    try { if (this._canvasTexture) this._canvasTexture.needsUpdate = true; } catch (_) {}
+    this._forceTextureDirty();
     try { this._renderLoop?.requestContinuousRender?.(2000); } catch (_) {}
   }
 
@@ -280,6 +338,61 @@ export class DiceSoNiceAdapter {
     this._prewarmStartMs = 0;
   }
 
+  _installPixelRatioCap(renderer) {
+    if (!renderer || this._origSetPixelRatioFn) {
+      this._applyPixelRatioCap();
+      return;
+    }
+    const orig = renderer.setPixelRatio?.bind?.(renderer);
+    if (typeof orig !== 'function') return;
+    this._origSetPixelRatioFn = orig;
+    renderer.setPixelRatio = (value) => {
+      const cap = Number(this._performance.maxPixelRatio);
+      const requested = Number(value);
+      const next = Number.isFinite(cap) && cap > 0
+        ? Math.min(Number.isFinite(requested) ? requested : cap, cap)
+        : requested;
+      return orig(next);
+    };
+    this._applyPixelRatioCap();
+  }
+
+  _applyPixelRatioCap() {
+    const renderer = this._dsnRenderer;
+    if (!renderer || typeof renderer.setPixelRatio !== 'function') return;
+    const cap = Number(this._performance.maxPixelRatio);
+    if (!Number.isFinite(cap) || cap <= 0) return;
+    try {
+      const current = Number(renderer.getPixelRatio?.());
+      const target = Number.isFinite(current) ? Math.min(current, cap) : cap;
+      renderer.setPixelRatio(target);
+    } catch (_) {}
+  }
+
+  _forceTextureDirty() {
+    this._lastTextureDirtyAtMs = performance.now();
+    try { if (this._canvasTexture) this._canvasTexture.needsUpdate = true; } catch (_) {}
+  }
+
+  _markTextureDirtyThrottled() {
+    if (!this._canvasTexture || this._performance.mode === 'native') return;
+    const fps = Number(this._performance.maxUploadFps);
+    if (!Number.isFinite(fps) || fps <= 0) return;
+    const now = performance.now();
+    const minIntervalMs = 1000 / fps;
+    if ((now - this._lastTextureDirtyAtMs) < minIntervalMs) return;
+    this._lastTextureDirtyAtMs = now;
+    try { this._canvasTexture.needsUpdate = true; } catch (_) {}
+  }
+
+  _requestRenderThrottled() {
+    if (this._performance.mode === 'native') return;
+    const now = performance.now();
+    if ((now - this._lastRenderRequestAtMs) < 250) return;
+    this._lastRenderRequestAtMs = now;
+    try { this._renderLoop?.requestContinuousRender?.(400); } catch (_) {}
+  }
+
   _hideDsnCanvas() {
     const c = this._dsnCanvas;
     if (!c) return;
@@ -315,8 +428,12 @@ export class DiceSoNiceAdapter {
       if (this._dsnRenderer && this._origRenderFn) {
         this._dsnRenderer.render = this._origRenderFn;
       }
+      if (this._dsnRenderer && this._origSetPixelRatioFn) {
+        this._dsnRenderer.setPixelRatio = this._origSetPixelRatioFn;
+      }
     } catch (_) {}
     this._origRenderFn = null;
+    this._origSetPixelRatioFn = null;
     this._dsnRenderer = null;
 
     // Restore DSN canvas display.

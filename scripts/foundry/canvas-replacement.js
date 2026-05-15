@@ -56,6 +56,7 @@ import { TileMotionManager } from '../scene/tile-motion-manager.js';
 import { SurfaceRegistry } from '../scene/surface-registry.js';
 import { WallManager } from '../scene/wall-manager.js';
 import { DoorMeshManager } from '../scene/DoorMeshManager.js';
+import { DrawingManager } from '../scene/drawing-manager.js';
 import { NoteIconManager } from '../scene/NoteIconManager.js';
 import { TemplateAdornmentManager } from '../scene/TemplateAdornmentManager.js';
 import { FloorStack } from '../scene/FloorStack.js';
@@ -7074,10 +7075,12 @@ async function createThreeCanvas(scene, createOptions = {}) {
         };
       }
     }
-    // Drawings ownership test mode:
-    // Keep PIXI as the single visual source for drawings so the content bridge
-    // can be validated in isolation. Three-native DrawingManager remains disabled.
-    drawingManager = null;
+    // Drawings ownership: Three-native DrawingManager renders shapes/text on
+    // their floor's layer so the V2 compositor occludes lower-floor drawings
+    // with upper-floor tiles via LevelCompositePass. Native PIXI drawings remain
+    // available when the user activates the Drawings tool (PIXI overlay raises
+    // above Three) — the manager hides its own group during that mode to avoid
+    // double-rendering.
     noteManager = null;
     templateManager = null;
     lightIconManager = null;
@@ -7089,12 +7092,25 @@ async function createThreeCanvas(scene, createOptions = {}) {
     const mapPointHostScene = fc?._renderBus?._scene ?? threeScene;
     mapPointsManager = new MapPointsManager(mapPointHostScene);
 
+    // Drawings render through the V2 floor pipeline — host them on the
+    // FloorRenderBus scene when available so their per-floor camera-layer
+    // masks match how tiles/tokens/doors are rendered.
+    if (drawingManager) {
+      safeDispose(() => {
+        effectComposer?.removeUpdatable?.(drawingManager);
+        drawingManager.dispose();
+      }, 'drawingManager.dispose(reinit)');
+    }
+    const drawingHostScene = fc?._renderBus?._scene ?? threeScene;
+    drawingManager = new DrawingManager(drawingHostScene);
+
     if (isDebugLoad) {
       // Debug mode: initialize managers sequentially for accurate per-manager timing
       const lightweightManagers = [
         ['manager.DoorMesh.init', doorMeshManager],
         ['manager.MapPoints.init', mapPointsManager],
         ['manager.GridRenderer.init', gridRenderer],
+        ['manager.Drawings.init', drawingManager],
       ];
       for (const [id, mgr] of lightweightManagers) {
         dlp.begin(id, 'manager');
@@ -7109,17 +7125,22 @@ async function createThreeCanvas(scene, createOptions = {}) {
         Promise.resolve(doorMeshManager.initialize()),
         mapPointsManager.initialize(),
         Promise.resolve(gridRenderer.initialize()),
+        Promise.resolve(drawingManager.initialize()),
       ]);
     }
 
     effectComposer.addUpdatable(doorMeshManager);
     effectComposer.addUpdatable(gridRenderer);
+    // Drawings need the per-frame update() hook so they self-heal onto the
+    // FloorRenderBus scene if init beat the bus to construction.
+    effectComposer.addUpdatable(drawingManager);
     if (window.MapShine) window.MapShine.doorMeshManager = doorMeshManager;
     if (window.MapShine) window.MapShine.noteManager = null;
     if (window.MapShine) window.MapShine.templateManager = null;
+    if (window.MapShine) window.MapShine.drawingManager = drawingManager;
     if (window.MapShine) window.MapShine.pixiContentLayerBridge = pixiContentLayerBridge;
     console.log(' -> Manager: Lightweight batch DONE');
-    log.info('Parallel manager batch initialized (Door, MapPoints, Grid)');
+    log.info('Parallel manager batch initialized (Door, MapPoints, Grid, Drawings)');
 
     // Map-point consumers are wired by FloorCompositor V2
     // (smelly flies / lightning / candle flames). Keep manager bootstrap
@@ -9312,8 +9333,10 @@ function destroyThreeCanvas() {
 
   // Dispose drawing manager
   if (drawingManager) {
+    try { effectComposer?.removeUpdatable?.(drawingManager); } catch (_) {}
     drawingManager.dispose();
     drawingManager = null;
+    if (window.MapShine) window.MapShine.drawingManager = null;
     log.debug('Drawing manager disposed');
   }
 

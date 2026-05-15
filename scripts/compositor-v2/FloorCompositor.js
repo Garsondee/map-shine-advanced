@@ -1517,6 +1517,14 @@ export class FloorCompositor {
     } catch (err) {
       log.warn('FloorCompositor: failed to route door meshes to V2 render bus scene:', err);
     }
+    try {
+      const drawingManager = window.MapShine?.drawingManager ?? null;
+      drawingManager?.setScene?.(this._renderBus._scene ?? null);
+      drawingManager?.syncAllDrawings?.();
+      drawingManager?.updateVisibility?.();
+    } catch (err) {
+      log.warn('FloorCompositor: failed to route scene drawings to V2 render bus scene:', err);
+    }
     await yieldToMain();
 
     // Keep compositor startup resilient: a single effect init failure should not

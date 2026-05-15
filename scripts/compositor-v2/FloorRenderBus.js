@@ -619,6 +619,18 @@ export class FloorRenderBus {
         log.info(`[V2 DEBUG] Preserving door mesh: ${name} (type=${type})`);
         continue;
       }
+      // Preserve scene drawings (DrawingManager root group).
+      if (type === 'sceneDrawingsRoot') {
+        tokenCount++;
+        log.info(`[V2 DEBUG] Preserving scene drawings root: ${name}`);
+        continue;
+      }
+      // Preserve grid overlay mesh (GridRenderer).
+      if (name === 'GridOverlay' || name?.startsWith?.('GridOverlayGhost_')) {
+        tokenCount++;
+        log.info(`[V2 DEBUG] Preserving grid overlay: ${name}`);
+        continue;
+      }
       // Preserve transient interaction overlays (path previews, gizmos, etc.)
       // managed by InteractionManager.
       if (type === 'interactionOverlay') {
@@ -723,6 +735,15 @@ export class FloorRenderBus {
     }
 
     for (const ch of this._scene?.children ?? []) {
+      if (ch?.userData?.type === 'sceneDrawingsRoot') {
+        ch.visible = true;
+        for (const drawingGroup of ch.children ?? []) {
+          const fi = Number(drawingGroup?.userData?.floorIndex);
+          const inSlice = !Number.isFinite(fi) || fi <= this._visibleMaxFloorIndex;
+          drawingGroup.visible = inSlice && !this._suppressTileAlbedoForEditing;
+        }
+        continue;
+      }
       if (ch?.userData?.type !== 'doorMesh') continue;
       const fi = Number(ch.userData?.floorIndex);
       const globalDoor = fi === DOOR_FLOOR_INDEX_GLOBAL;
@@ -1418,6 +1439,18 @@ export class FloorRenderBus {
       ch.visible = inRange && !this._suppressTileAlbedoForEditing;
     }
 
+    const savedDrawingVisibility = new Map();
+    for (const ch of this._scene?.children ?? []) {
+      if (ch?.userData?.type !== 'sceneDrawingsRoot') continue;
+      for (const drawingGroup of ch.children ?? []) {
+        savedDrawingVisibility.set(drawingGroup, drawingGroup.visible === true);
+        const fi = Number(drawingGroup?.userData?.floorIndex);
+        const inRange = !Number.isFinite(fi)
+          || (fi >= minFloorIndex && fi <= maxFloorIndex);
+        drawingGroup.visible = inRange && !this._suppressTileAlbedoForEditing;
+      }
+    }
+
     // Save and configure renderer state.
     const prevTarget    = renderer.getRenderTarget();
     const prevAutoClear = renderer.autoClear;
@@ -1449,6 +1482,9 @@ export class FloorRenderBus {
     }
     for (const [doorNode, wasDoorVis] of savedDoorVisibility) {
       if (doorNode) doorNode.visible = wasDoorVis;
+    }
+    for (const [drawingNode, wasDrawingVis] of savedDrawingVisibility) {
+      if (drawingNode) drawingNode.visible = wasDrawingVis;
     }
   }
 

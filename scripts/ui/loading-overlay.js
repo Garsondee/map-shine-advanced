@@ -656,6 +656,127 @@ export class LoadingOverlay {
   }
 
   // ---------------------------------------------------------------------------
+  // Opacity-only fades for the level-transition curtain
+  //
+  // These avoid the background-color / content-opacity cross-fade used by
+  // `fadeToBlack` / `fadeIn` so the screen never shows a partially-grey state.
+  // The whole overlay (background + panel content) animates together as one
+  // CSS `opacity` transition resolved via `transitionend` (no `setTimeout`
+  // race).
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Fade the overlay in to fully-opaque black via opacity alone.
+   *
+   * Use this for short, deterministic "cover the screen" transitions where the
+   * caller wants the screen black before performing some operation underneath.
+   *
+   * @param {number} [durationMs=280]
+   * @returns {Promise<void>} Resolves when opacity reaches 1 (or hits the
+   *   safety timeout).
+   */
+  async fadeBlack(durationMs = 280) {
+    this.ensure();
+    const token = ++this._token;
+    const d = Math.max(0, Number.isFinite(durationMs) ? durationMs : 280);
+
+    this._autoProgress = null;
+
+    this.el.style.display = 'flex';
+    this.el.style.pointerEvents = 'auto';
+    this.el.style.backgroundColor = 'rgba(0, 0, 0, 1)';
+    this.el.style.transitionProperty = 'opacity';
+    this.el.style.transitionTimingFunction = 'ease';
+    this._setContentOpacity(1, 0);
+    this.el.classList.remove('map-shine-loading-overlay--hidden');
+    this.el.classList.add('map-shine-loading-overlay--black');
+
+    const startOpacity = parseFloat(this.el.style.opacity || '0') || 0;
+    if (startOpacity >= 0.999) {
+      // Already fully black — nothing to animate.
+      this.el.style.transitionDuration = '0ms';
+      this.el.style.opacity = '1';
+      return;
+    }
+
+    this.el.style.transitionDuration = '0ms';
+    this.el.style.opacity = String(startOpacity);
+    // Force a layout flush so the upcoming transition actually animates.
+    void this.el.offsetHeight;
+    this.el.style.transitionDuration = `${d}ms`;
+    this.el.style.opacity = '1';
+
+    await this._waitForOpacityTransition(this.el, d);
+    if (token !== this._token) return;
+  }
+
+  /**
+   * Fade the overlay back to fully-transparent via opacity alone, then hide.
+   *
+   * @param {number} [durationMs=520]
+   * @returns {Promise<void>} Resolves after the overlay is hidden.
+   */
+  async fadeClear(durationMs = 520) {
+    this.ensure();
+    const token = ++this._token;
+    const d = Math.max(0, Number.isFinite(durationMs) ? durationMs : 520);
+
+    this._autoProgress = null;
+
+    this.el.style.display = 'flex';
+    this.el.style.pointerEvents = 'none';
+    this.el.style.backgroundColor = 'rgba(0, 0, 0, 1)';
+    this.el.style.transitionProperty = 'opacity';
+    this.el.style.transitionTimingFunction = 'ease';
+
+    const startOpacity = parseFloat(this.el.style.opacity || '1');
+    if (startOpacity <= 0.001) {
+      this.hide();
+      return;
+    }
+
+    this.el.style.transitionDuration = '0ms';
+    this.el.style.opacity = String(Number.isFinite(startOpacity) ? startOpacity : 1);
+    void this.el.offsetHeight;
+    this.el.style.transitionDuration = `${d}ms`;
+    this.el.style.opacity = '0';
+
+    await this._waitForOpacityTransition(this.el, d);
+    if (token !== this._token) return;
+    this.hide();
+  }
+
+  /**
+   * Resolve when the element finishes its current opacity transition, or after
+   * `durationMs + 120ms` as a safety fallback. Ignores other transition
+   * properties so a parallel `width`/`color` animation cannot resolve us early.
+   *
+   * @param {HTMLElement} el
+   * @param {number} durationMs
+   * @returns {Promise<void>}
+   * @private
+   */
+  _waitForOpacityTransition(el, durationMs) {
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        try { el.removeEventListener('transitionend', onEnd); } catch (_) {}
+        if (timeoutHandle) clearTimeout(timeoutHandle);
+        resolve();
+      };
+      const onEnd = (event) => {
+        if (event && event.target !== el) return;
+        if (event?.propertyName && event.propertyName !== 'opacity') return;
+        finish();
+      };
+      el.addEventListener('transitionend', onEnd);
+      const timeoutHandle = setTimeout(finish, Math.max(50, durationMs + 120));
+    });
+  }
+
+  // ---------------------------------------------------------------------------
   // Elapsed timer
   // ---------------------------------------------------------------------------
 

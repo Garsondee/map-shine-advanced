@@ -224,6 +224,17 @@ export class VisibilityController {
     });
   }
 
+  /**
+   * Request a compositor frame after token visibility changes.
+   * @private
+   */
+  _requestRender() {
+    try {
+      window.MapShine?.renderLoop?.requestRender?.();
+    } catch (_) {
+    }
+  }
+
   // ---------------------------------------------------------------------------
   //  Level-based visibility filtering
   // ---------------------------------------------------------------------------
@@ -453,11 +464,16 @@ export class VisibilityController {
       visible = false;
     }
 
+    const wasVisible = sprite.visible;
+    const previousOpacity = Number(sprite.material?.opacity);
     sprite.visible = visible;
     if (visible && sprite.material?.map) {
       // Only restore opacity if the texture has loaded. Without a map,
       // setting opacity > 0 would show a white rectangle.
       sprite.material.opacity = foundryToken.document?.hidden ? 0.5 : 1.0;
+    }
+    if (wasVisible !== sprite.visible || previousOpacity !== Number(sprite.material?.opacity)) {
+      this._requestRender();
     }
 
     // Track detection state for Phase 3 glow/outline rendering.
@@ -493,6 +509,7 @@ export class VisibilityController {
     }
 
     const isGM = isGmLike();
+    let changed = false;
 
     for (const [tokenId, spriteData] of this.tokenManager.tokenSprites) {
       const sprite = spriteData?.sprite;
@@ -552,14 +569,21 @@ export class VisibilityController {
         visible = false;
       }
 
+      const wasVisible = sprite.visible;
+      const previousOpacity = Number(sprite.material?.opacity);
       sprite.visible = visible;
       if (visible && sprite.material?.map) {
         // Only restore opacity if the texture has loaded. Without a map,
         // setting opacity > 0 would show a white rectangle.
         sprite.material.opacity = foundryToken.document?.hidden ? 0.5 : 1.0;
       }
+      if (wasVisible !== sprite.visible || previousOpacity !== Number(sprite.material?.opacity)) {
+        changed = true;
+      }
       this.detectionState.set(tokenId, { visible, detectionFilter });
     }
+
+    if (changed) this._requestRender();
   }
 
   // ---------------------------------------------------------------------------

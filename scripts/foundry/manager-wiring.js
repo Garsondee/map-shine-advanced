@@ -17,7 +17,15 @@ import { LevelTransitionCurtain } from '../scene/level-transition-curtain.js';
 let _levelTransitionCurtain = null;
 
 /**
- * Patch CameraFollower level-context emissions behind a fade-to-black curtain.
+ * Create the {@link LevelTransitionCurtain} and expose it on
+ * `window.MapShine` so `CameraFollower._setActiveLevelByIndex` can route
+ * visible floor/level changes through it.
+ *
+ * The curtain no longer monkey-patches `_emitLevelContextChanged`; instead
+ * `CameraFollower` calls `runLevelSwitch` directly. The `cameraFollower`
+ * argument is kept for backwards compatibility and is forwarded to the
+ * curtain's now-passive `register()` hook.
+ *
  * @param {object|null} mapShine - window.MapShine
  * @param {object|null} cameraFollower - CameraFollower instance
  */
@@ -32,7 +40,7 @@ export function registerLevelTransitionCurtain(mapShine, cameraFollower) {
 }
 
 /**
- * Restore CameraFollower._emitLevelContextChanged and drop the curtain instance.
+ * Tear down the curtain instance. Safe to call multiple times.
  */
 export function disposeLevelTransitionCurtain() {
   if (_levelTransitionCurtain) {

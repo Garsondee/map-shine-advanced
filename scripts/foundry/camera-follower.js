@@ -31,6 +31,24 @@ import { elevationInBand } from '../ui/levels-editor/level-boundaries.js';
 const log = createLogger('CameraFollower');
 const FLOOR_FOLLOW_SUPPRESSION_DEFAULT_MS = 800;
 
+/**
+ * Reason tags for which `_setActiveLevelByIndex` must NOT run the
+ * level-transition curtain. These are reactive paths — they fire AFTER
+ * Foundry has already redrawn the canvas (canvasReady) or in response to
+ * scene-config changes (level documents added/removed). Fading-to-black at
+ * that point would mean fading out a frame the user has already seen and
+ * fading it back in for no benefit.
+ * @type {Set<string>}
+ */
+const SKIP_CURTAIN_REASONS = new Set([
+  'canvas-ready',
+  'canvas-ready-force-resync',
+  'sync-viewed-level',
+  'edges-initialized',
+  'scene-update',
+  'refresh-level-bands',
+]);
+
 function isEditableTarget(target) {
   if (!(target instanceof Element)) return false;
   if (target.closest('input, textarea, select, [contenteditable="true"], [contenteditable=""], .tox, .editor')) {
@@ -398,7 +416,125 @@ export class CameraFollower {
     return this._findNearestLevelIndexByCenter(elevation, levels);
   }
 
+  /**
+   * Dispatch an active-level change. For user-initiated visible changes the
+   * work is routed through {@link LevelTransitionCurtain#runLevelSwitch} so
+   * the screen is fully black before `canvas.scene.view({ level })` triggers
+   * Foundry's tear-down + redraw. For reactive / `emit:false` / same-index
+   * paths the change is applied directly without a fade.
+   *
+   * @param {number} index
+   * @param {{emit?: boolean, reason?: string}} [options]
+   * @returns {object|null} The active level context (optimistic when the
+   *   curtain path is taken).
+   * @private
+   */
   _setActiveLevelByIndex(index, options = {}) {
+    const { emit = true, reason = 'set-active-level' } = options;
+    if (!this._levels.length) return null;
+
+    const clamped = Math.max(0, Math.min(this._levels.length - 1, Number(index) || 0));
+    const level = this._levels[clamped];
+    if (!level) return null;
+
+    const isVisibleChange = clamped !== this._activeLevelIndex && this._levels.length > 1;
+    const isReactiveReason = SKIP_CURTAIN_REASONS.has(reason);
+    const curtain = window.MapShine?.levelTransitionCurtain ?? null;
+    const curtainAvailable = !!(
+      curtain
+        && typeof curtain.runLevelSwitch === 'function'
+        && (typeof curtain._shouldBypass !== 'function' || !curtain._shouldBypass())
+    );
+    const useCurtain = emit && isVisibleChange && !isReactiveReason && curtainAvailable;
+
+    if (!useCurtain) {
+      // Direct path. For genuine same-scene level changes that aren't
+      // already a reaction to Foundry's own redraw, we still need to ask
+      // Foundry to view the target level (the old code did this in
+      // setActiveLevel / stepLevel themselves — those callers no longer
+      // do it).
+      if (
+        emit
+          && isVisibleChange
+          && !isReactiveReason
+          && level?.source === 'v14-native'
+          && canvas?.scene?.view
+      ) {
+        try {
+          canvas.scene.view({ level: level.levelId });
+        } catch (err) {
+          log.warn('canvas.scene.view failed', err);
+        }
+      }
+      return this._applyActiveLevelByIndex(index, options);
+    }
+
+    // Curtain path. Update internal state synchronously so the dropdown UI
+    // and any caller inspecting `getActiveLevelContext()` immediately sees
+    // the new target. The matching `mapShineLevelContextChanged` hook fires
+    // INSIDE the curtain's `perform` callback (after fade-to-black) so all
+    // heavy listener work happens while the screen is fully covered.
+    const previous = this._activeLevelContext;
+    const fromLabel =
+      String(previous?.label || '').trim()
+        || (Number.isFinite(Number(previous?.index)) ? `Level ${Number(previous.index) + 1}` : 'Current level');
+    const toLabel =
+      String(level.label || '').trim() || `Level ${clamped + 1}`;
+
+    this._activeLevelIndex = clamped;
+    this._activeLevelContext = {
+      levelId: level.levelId,
+      label: level.label,
+      bottom: level.bottom,
+      top: level.top,
+      center: level.center,
+      source: level.source,
+      lockMode: this._lockMode,
+      transitionMs: 180,
+      index: clamped,
+      count: this._levels.length,
+    };
+
+    const performSwitch = () => {
+      if (level?.source === 'v14-native' && canvas?.scene?.view) {
+        try {
+          canvas.scene.view({ level: level.levelId });
+        } catch (err) {
+          log.warn('canvas.scene.view failed inside curtain perform', err);
+        }
+      }
+      this._emitLevelContextChanged(reason);
+    };
+
+    try {
+      void curtain.runLevelSwitch({
+        targetLevelId: level.levelId,
+        fromLabel,
+        toLabel,
+        reason,
+        perform: performSwitch,
+      });
+    } catch (err) {
+      log.warn('curtain.runLevelSwitch threw synchronously; falling back', err);
+      try {
+        performSwitch();
+      } catch (_) {}
+    }
+
+    return this._activeLevelContext;
+  }
+
+  /**
+   * Inner apply-without-curtain. Updates context and (when allowed) fires
+   * the `mapShineLevelContextChanged` hook. Used by the dispatcher above
+   * and historically by all of CameraFollower's internal callers.
+   *
+   * @param {number} index
+   * @param {{emit?: boolean, reason?: string}} [options]
+   * @returns {object|null}
+   * @private
+   */
+  _applyActiveLevelByIndex(index, options = {}) {
     const { emit = true, reason = 'set-active-level' } = options;
     if (!this._levels.length) return null;
 
@@ -445,20 +581,14 @@ export class CameraFollower {
     const step = delta > 0 ? 1 : -1;
     const current = Number.isFinite(this._activeLevelIndex) ? this._activeLevelIndex : 0;
     const nextIndex = Math.max(0, Math.min(this._levels.length - 1, current + step));
-    const nextLevel = this._levels[nextIndex];
 
-    // V14: delegate to Foundry's native view transition when using native levels
-    if (nextLevel?.source === 'v14-native' && canvas?.scene?.view) {
-      canvas.scene.view({ level: nextLevel.levelId });
-      return this._setActiveLevelByIndex(nextIndex, {
-        emit: options.emit !== false,
-        reason: options.reason || 'step-level',
-      });
-    }
-
+    // V14: `canvas.scene.view({ level })` is fired by `_setActiveLevelByIndex`
+    // (either inline for the direct path or inside the curtain's `perform`
+    // for the curtain path) — never here, so the curtain can fade-to-black
+    // BEFORE Foundry begins tearing down the canvas.
     return this._setActiveLevelByIndex(nextIndex, {
       emit: options.emit !== false,
-      reason: options.reason || 'step-level'
+      reason: options.reason || 'step-level',
     });
   }
 
@@ -475,16 +605,12 @@ export class CameraFollower {
       this.setLockMode('manual', { emit: false, reason: 'manual-select-level' });
     }
 
-    const targetLevel = this._levels[index];
-
-    // V14: delegate to Foundry's native view transition
-    if (targetLevel?.source === 'v14-native' && canvas?.scene?.view) {
-      canvas.scene.view({ level: targetLevel.levelId });
-    }
-
+    // V14 native view transition is delegated to `_setActiveLevelByIndex` so
+    // it lands inside the curtain's `perform` callback (after fade-to-black)
+    // and never fires before the screen is covered.
     return this._setActiveLevelByIndex(index, {
       emit: options.emit !== false,
-      reason: options.reason || 'set-active-level'
+      reason: options.reason || 'set-active-level',
     });
   }
 

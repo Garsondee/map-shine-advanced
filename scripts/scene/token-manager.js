@@ -777,6 +777,17 @@ vec3 ms_applySceneLighting(vec3 color) {
   }
 
   /**
+   * Request a compositor frame after async token visual state changes.
+   * @private
+   */
+  _requestTokenRender() {
+    try {
+      window.MapShine?.renderLoop?.requestRender?.();
+    } catch (_) {
+    }
+  }
+
+  /**
    * Update tokens (called every frame by EffectComposer)
    * @param {TimeInfo} timeInfo 
    */
@@ -1260,6 +1271,7 @@ vec3 ms_applySceneLighting(vec3 color) {
         currentSprite.material.opacity = 1;
       }
       currentSprite.material.needsUpdate = true;
+      this._requestTokenRender();
     }).catch(error => {
       log.error(`Failed to load token texture: ${texturePath}`, error);
     });
@@ -1453,6 +1465,7 @@ vec3 ms_applySceneLighting(vec3 color) {
 
         currentSprite.material.map = texture;
         currentSprite.material.needsUpdate = true;
+        this._requestTokenRender();
       }).catch(error => {
         log.error(`Failed to load updated token texture`, error);
       });

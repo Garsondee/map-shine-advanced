@@ -657,11 +657,17 @@ export class EffectComposer {
       } catch (_) {}
     }
     // ── Run updatables (camera, interaction, movement, etc.) ──────────
+    // Sub-rate scheduling must use real frame time, not TimeManager.delta.
+    // Foundry pause drives TimeManager.delta to 0, but scene-graph managers
+    // still need cadence for visibility, texture, and parent/layer reconciliation.
+    const schedulerDelta = Number.isFinite(deltaTime)
+      ? Math.max(0, Math.min(deltaTime, 0.1))
+      : Math.max(0, Number(timeInfo?.delta) || 0);
     for (const updatable of this.updatables) {
       try {
         const hz = updatable.updateHz;
         if (hz > 0) {
-          const accum = (this._updatableAccum.get(updatable) || 0) + timeInfo.delta;
+          const accum = (this._updatableAccum.get(updatable) || 0) + schedulerDelta;
           const interval = 1.0 / hz;
           if (accum < interval) {
             this._updatableAccum.set(updatable, accum);

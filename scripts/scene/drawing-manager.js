@@ -1,17 +1,36 @@
 /**
  * @fileoverview Drawing manager - syncs Foundry drawings to THREE.js
- * Handles text and shape drawings for Gameplay Mode visibility
+ * Handles text and shape drawings for Gameplay Mode visibility.
+ *
+ * Floor-aware rendering: each drawing is assigned to its floor band via the
+ * FloorLayerManager so the V2 compositor renders it inside that floor's pass.
+ * The bottom-to-top LevelCompositePass then naturally occludes lower-floor
+ * drawings with upper-floor tiles/roofs.
+ *
  * @module scene/drawing-manager
  */
 import { isGmLike } from '../core/gm-parity.js';
 
 
 import { createLogger } from '../core/log.js';
-import { OVERLAY_THREE_LAYER, GLOBAL_SCENE_LAYER } from '../core/render-layers.js';
-import { getPerspectiveElevation } from '../foundry/elevation-context.js';
-import { readDocLevelsRange, hasV14NativeLevels } from '../foundry/levels-scene-flags.js';
+import {
+  readDocLevelsRange,
+  resolveV14NativeDocFloorIndexMin,
+} from '../foundry/levels-scene-flags.js';
+import { resolveFloorIndexForElevation } from '../ui/levels-editor/level-boundaries.js';
+import {
+  effectAboveOverheadOrder,
+  GROUND_Z,
+  Z_PER_FLOOR,
+} from '../compositor-v2/LayerOrderPolicy.js';
+import { FLOOR_LAYERS } from '../compositor-v2/FloorLayerManager.js';
 
 const log = createLogger('DrawingManager');
+
+// Lift drawings just above the overhead tile slab for their floor so they sit
+// visually on top of roofs on the same floor but stay below the upper floor's
+// tile band (compositor handles cross-floor occlusion).
+const DRAWING_Z_LIFT_ABOVE_FLOOR = 6;
 
 /**
  * DrawingManager - Synchronizes Foundry VTT drawings to THREE.js
@@ -23,29 +42,32 @@ export class DrawingManager {
   constructor(scene) {
     this.scene = scene;
     const THREE = window.THREE;
-    
+
     /** @type {Map<string, THREE.Object3D>} */
     this.drawings = new Map();
-    
+
+    /** @type {Map<string, number>} - drawingId -> resolved floor index */
+    this._drawingFloorIndex = new Map();
+
     this.initialized = false;
     this.hooksRegistered = false;
-    
+
     /** @type {Array<[string, number]>} - Array of [hookName, hookId] tuples for proper cleanup */
     this._hookIds = [];
-    
-    // Group for all drawings
+
+    // Group for all drawings. Z is set per-child based on floor index, so the
+    // parent group sits at origin and never affects per-child positioning.
     this.group = new THREE.Group();
     this.group.name = 'Drawings';
-    this.group.renderOrder = 1000;
-    // Z position will be set in initialize() once groundZ is available
-    this.group.position.z = 2.0;
-    // Drawings are floor-agnostic world objects. GLOBAL_SCENE_LAYER (29) ensures
-    // they render exactly once per frame in the global scene pass (after the
-    // per-floor render loop), preventing multi-compositing artifacts and
-    // excluding them from per-floor depth captures.
-    this.group.layers.set(GLOBAL_SCENE_LAYER);
+    this.group.userData = {
+      type: 'sceneDrawingsRoot',
+      preserveOnBusClear: true,
+    };
+    this.group.position.z = 0;
+    // The parent group keeps layer 0 enabled so traversal walks work, but each
+    // child mesh is moved off layer 0 and onto its floor layer at create time.
     this.scene.add(this.group);
-    
+
     log.debug('DrawingManager created');
   }
 
@@ -56,15 +78,127 @@ export class DrawingManager {
   initialize() {
     if (this.initialized) return;
 
-    // Update Z position based on groundZ
-    const groundZ = window.MapShine?.sceneComposer?.groundZ ?? 0;
-    this.group.position.z = groundZ + 2.0;
-
     this.setupHooks();
     this.syncAllDrawings();
-    
+    this._repositionAllDrawingsZ();
+    this._reapplyLayersToAll();
+    this._syncDrawingFloorVisibility();
+    this.updateVisibility();
+
     this.initialized = true;
-    log.info(`DrawingManager initialized at z=${this.group.position.z}`);
+    log.info('DrawingManager initialized');
+  }
+
+  /**
+   * Move the parent group onto the V2 FloorRenderBus scene (or any other
+   * target) so drawings render inside the per-floor pipeline. Mirrors the
+   * self-heal pattern used by {@link DoorMeshManager}.
+   * @param {THREE.Scene|null} scene
+   */
+  setScene(scene) {
+    if (!scene) return;
+    const sceneChanged = scene !== this.scene;
+    if (sceneChanged) {
+      try { this.group?.parent?.remove?.(this.group); } catch (_) {}
+      this.scene = scene;
+    }
+    if (this.group && this.group.parent !== this.scene) {
+      try { this.scene.add(this.group); } catch (_) {}
+    }
+    this._repositionAllDrawingsZ();
+    this._reapplyLayersToAll();
+  }
+
+  /**
+   * @returns {THREE.Scene|null}
+   * @private
+   */
+  _getV2BusScene() {
+    return window.MapShine?.floorCompositorV2?._renderBus?._scene
+      ?? window.MapShine?.effectComposer?._floorCompositorV2?._renderBus?._scene
+      ?? null;
+  }
+
+  /**
+   * World Z for a drawing on its floor band. V2 bus meshes must NOT add
+   * sceneComposer.groundZ (camera sits at Z=2000, ground at 1000) — see DoorMeshManager.
+   * @param {number} floorIndex
+   * @returns {number}
+   * @private
+   */
+  _resolveDrawingWorldZ(floorIndex) {
+    const fi = Math.max(0, Math.floor(Number(floorIndex) || 0));
+    const busScene = this._getV2BusScene();
+    const onBus = !!(busScene && this.scene === busScene);
+    if (onBus) {
+      return GROUND_Z + fi * Z_PER_FLOOR + DRAWING_Z_LIFT_ABOVE_FLOOR;
+    }
+    const groundZ = window.MapShine?.sceneComposer?.groundZ ?? 0;
+    return (Number.isFinite(groundZ) ? groundZ : 0) + GROUND_Z + fi * Z_PER_FLOOR + DRAWING_Z_LIFT_ABOVE_FLOOR;
+  }
+
+  /**
+   * Re-apply Z after migrating onto the FloorRenderBus scene.
+   * @private
+   */
+  _repositionAllDrawingsZ() {
+    for (const [id, group] of this.drawings) {
+      const fi = this._drawingFloorIndex.get(id) ?? 0;
+      group.position.z = this._resolveDrawingWorldZ(fi);
+    }
+  }
+
+  /**
+   * Per-frame hook. Re-parents the drawing group into the FloorRenderBus scene
+   * as soon as that scene exists, so we never end up orphaned in the legacy
+   * main Three scene after init-order races.
+   */
+  update() {
+    try {
+      const busScene = this._getV2BusScene();
+      if (busScene && this.scene !== busScene) {
+        this.setScene(busScene);
+      } else if (this.group && this.scene && this.group.parent !== this.scene) {
+        // FloorRenderBus.populate() clear() can detach us; re-attach every frame.
+        try { this.scene.add(this.group); } catch (_) {}
+      }
+      this._repositionAllDrawingsZ();
+      this._reapplyLayersToAll();
+      this._syncDrawingFloorVisibility();
+    } catch (_) {}
+  }
+
+  /**
+   * Re-apply layer masks after a scene migration.
+   * @private
+   */
+  _reapplyLayersToAll() {
+    for (const [id, group] of this.drawings) {
+      this._applyFloorLayer(group, this._drawingFloorIndex.get(id) ?? 0);
+    }
+  }
+
+  /**
+   * Keep drawings in the currently visible floor slice. The actual per-pixel
+   * lower-floor occlusion happens in the V2 per-floor render/composite path.
+   * @private
+   */
+  _syncDrawingFloorVisibility() {
+    if (canvas?.drawings?.active) return;
+    const bus = window.MapShine?.floorCompositorV2?._renderBus
+      ?? window.MapShine?.effectComposer?._floorCompositorV2?._renderBus
+      ?? null;
+    const maxFi = Number(bus?._visibleMaxFloorIndex);
+    const floors = window.MapShine?.floorStack?.getFloors?.() ?? [];
+    const multiFloor = Array.isArray(floors) && floors.length > 1;
+    if (!multiFloor || !Number.isFinite(maxFi)) {
+      for (const group of this.drawings.values()) group.visible = true;
+      return;
+    }
+    for (const [id, group] of this.drawings) {
+      const fi = this._drawingFloorIndex.get(id) ?? 0;
+      group.visible = fi <= maxFi;
+    }
   }
 
   /**
@@ -75,9 +209,9 @@ export class DrawingManager {
     if (this.hooksRegistered) return;
 
     this._hookIds.push(['createDrawing', Hooks.on('createDrawing', (doc) => this.create(doc))]);
-    this._hookIds.push(['updateDrawing', Hooks.on('updateDrawing', (doc, changes) => this.update(doc, changes))]);
+    this._hookIds.push(['updateDrawing', Hooks.on('updateDrawing', (doc, changes) => this.update_(doc, changes))]);
     this._hookIds.push(['deleteDrawing', Hooks.on('deleteDrawing', (doc) => this.remove(doc.id))]);
-    
+
     this._hookIds.push(['canvasReady', Hooks.on('canvasReady', () => {
         this.syncAllDrawings();
         this.updateVisibility();
@@ -86,21 +220,29 @@ export class DrawingManager {
     // Keep baseline Foundry visibility in sync with vision/perception refreshes.
     this._hookIds.push(['sightRefresh', Hooks.on('sightRefresh', () => this.refreshVisibility())]);
 
-    // MS-LVL-044: Re-check drawing visibility when level context or controlled
-    // token changes.
-    this._hookIds.push(['mapShineLevelContextChanged', Hooks.on('mapShineLevelContextChanged', () => this.refreshVisibility())]);
+    // Level context / controlled token changes can shift which floor a drawing
+    // belongs to (rare, but supported when the doc has an explicit range).
+    this._hookIds.push(['mapShineLevelContextChanged', Hooks.on('mapShineLevelContextChanged', () => {
+      this._reassignAllFloors();
+      this._syncDrawingFloorVisibility();
+    })]);
     this._hookIds.push(['controlToken', Hooks.on('controlToken', () => this.refreshVisibility())]);
 
-    // Listen for layer activation to toggle visibility
+    // Drawing layer activate/deactivate — hide Three drawings while the native
+    // PIXI Drawings tool is active so editing handles aren't doubled up.
     this._hookIds.push(['activateDrawingsLayer', Hooks.on('activateDrawingsLayer', () => this.updateVisibility())]);
-    this._hookIds.push(['deactivateDrawingsLayer', Hooks.on('deactivateDrawingsLayer', () => this.updateVisibility())]);
+    this._hookIds.push(['deactivateDrawingsLayer', Hooks.on('deactivateDrawingsLayer', () => {
+      this.updateVisibility();
+      this.syncAllDrawings();
+    })]);
+    this._hookIds.push(['renderSceneControls', Hooks.on('renderSceneControls', () => this.updateVisibility())]);
 
     this.hooksRegistered = true;
   }
 
   /**
    * Set visibility of Three.js drawings
-   * @param {boolean} visible 
+   * @param {boolean} visible
    * @public
    */
   setVisibility(visible) {
@@ -108,51 +250,113 @@ export class DrawingManager {
   }
 
   /**
-   * Update visibility based on active tool
+   * Hide Three-native copies only while the Drawings tool is active so Foundry
+   * PIXI owns editing handles. In all other modes (gameplay, walls, tokens, …)
+   * the Three copies stay visible.
    * @private
    */
   updateVisibility() {
-    this.setVisibility(true);
+    this.setVisibility(!canvas?.drawings?.active);
+  }
+
+  /**
+   * Resolve the floor index a drawing belongs to. Mirrors the logic used by
+   * {@link FloorLayerManager} for tiles so the chosen floor matches the V2
+   * compositor's per-floor render passes.
+   *
+   * Returns 0 in single-floor scenes.
+   * @param {object} doc - Drawing document (or placeable wrapper)
+   * @returns {number}
+   * @private
+   */
+  _resolveDrawingFloorIndex(doc) {
+    const drawingDoc = doc?.document ?? doc;
+    const floors = window.MapShine?.floorStack?.getFloors?.() ?? [];
+    if (!floors.length || floors.length <= 1) return 0;
+
+    const maxIndex = Math.min(floors.length, FLOOR_LAYERS.length) - 1;
+
+    // V14-native level membership wins when present.
+    const scene = drawingDoc?.parent ?? canvas?.scene ?? null;
+    const v14Idx = resolveV14NativeDocFloorIndexMin(drawingDoc, scene);
+    if (v14Idx !== null && Number.isFinite(v14Idx)) {
+      return Math.max(0, Math.min(maxIndex, v14Idx));
+    }
+
+    // Legacy Levels range flags (`flags.levels.rangeBottom/rangeTop`).
+    const range = readDocLevelsRange(drawingDoc);
+    const hasFiniteRange = Number.isFinite(range.rangeBottom) || Number.isFinite(range.rangeTop);
+    if (hasFiniteRange) {
+      const bottom = Number.isFinite(range.rangeBottom) ? Number(range.rangeBottom) : 0;
+      const top = Number.isFinite(range.rangeTop) ? Number(range.rangeTop) : bottom;
+      const mid = (bottom + top) / 2;
+      const byMid = resolveFloorIndexForElevation(mid, floors);
+      if (byMid >= 0) return Math.min(maxIndex, byMid);
+      const byBottom = resolveFloorIndexForElevation(bottom, floors);
+      if (byBottom >= 0) return Math.min(maxIndex, byBottom);
+    }
+
+    // Foundry V14 drawings have a numeric `elevation` field — use it as a fallback.
+    const rawElev = Number(drawingDoc?.elevation);
+    if (Number.isFinite(rawElev)) {
+      const byElev = resolveFloorIndexForElevation(rawElev, floors);
+      if (byElev >= 0) return Math.min(maxIndex, byElev);
+    }
+
+    return 0;
+  }
+
+  /**
+   * Apply floor-layer assignment and render order to a drawing subtree.
+   * Drawings must render in the per-floor RTs (not the late overlay pass) so
+   * lower-floor drawings are naturally occluded by upper-floor alpha.
+   * @param {THREE.Object3D} root
+   * @param {number} floorIndex
+   * @private
+   */
+  _applyFloorLayer(root, floorIndex) {
+    const safeIndex = Math.max(0, Math.min(FLOOR_LAYERS.length - 1, Math.floor(floorIndex)));
+    const floorLayer = FLOOR_LAYERS[safeIndex];
+    if (floorLayer === undefined) return;
+    const order = effectAboveOverheadOrder(safeIndex, 1000);
+
+    root.traverse((obj) => {
+      if (!obj) return;
+      obj.frustumCulled = false;
+      if (!obj.layers) return;
+      obj.layers.set(floorLayer);
+      obj.renderOrder = order;
+    });
   }
 
   /**
    * Check whether a drawing should be visible to the current user.
    * Baseline visibility mirrors existing behavior (hidden drawings are visible
-   * to author/GM), with optional Levels elevation range filtering layered on top.
+   * to author/GM). Elevation/level range gating is intentionally NOT applied
+   * here — visibility per floor is handled by the compositor through layer
+   * assignment, so drawings on lower floors remain rendered in their own slice
+   * and get occluded by upper-floor tiles when the viewer is above them.
    *
    * @param {DrawingDocument} doc
    * @returns {boolean}
    * @private
    */
   _isDrawingVisible(doc) {
-    try {
-      const placeable = canvas?.drawings?.get?.(doc.id);
-      if (placeable && ('isVisible' in placeable) && !placeable.isVisible) return false;
+    const drawingDoc = doc?.document ?? doc;
+    if (!drawingDoc) return false;
 
-      if (!placeable) {
+    try {
+      // Document hidden flag — respect author/GM parity only.
+      if (drawingDoc.hidden) {
         const isGM = isGmLike();
-        const isAuthor = doc.isAuthor;
-        const hidden = doc.hidden;
-        if (hidden && !isAuthor && !isGM) return false;
+        if (!isGM && !drawingDoc.isAuthor) return false;
       }
+
+      // Do NOT gate on placeable.isVisible: Foundry sets that false whenever the
+      // Drawings layer is inactive (PIXI stops drawing the shape). Gameplay still
+      // needs the Three copy visible — that is the whole point of this manager.
     } catch (_) {
       // Fail-open: keep drawing visible if baseline check errors.
-    }
-
-    // MS-LVL-044: Elevation range gating for drawings.
-    try {
-      if (hasV14NativeLevels(canvas?.scene)) {
-        const range = readDocLevelsRange(doc);
-        if (Number.isFinite(range.rangeBottom) || Number.isFinite(range.rangeTop)) {
-          const perspective = getPerspectiveElevation();
-          if (perspective.source !== 'background') {
-            const elev = perspective.elevation;
-            if (elev < range.rangeBottom || elev > range.rangeTop) return false;
-          }
-        }
-      }
-    } catch (_) {
-      // Fail-open: keep drawing visible if elevation check errors.
     }
 
     return true;
@@ -204,6 +408,7 @@ export class DrawingManager {
         this.remove(drawingDoc.id);
       }
     }
+    this._repositionAllDrawingsZ();
   }
 
   /**
@@ -220,11 +425,41 @@ export class DrawingManager {
         this.remove(doc.id);
       }
     }
+    this.syncAllDrawings();
+  }
+
+  /**
+   * Re-evaluate every existing drawing's floor index. Called on level/floor
+   * context changes so drawings with explicit range flags follow their band.
+   * @private
+   */
+  _reassignAllFloors() {
+    if (!canvas?.scene?.drawings) return;
+    for (const doc of canvas.scene.drawings) {
+      if (!doc?.id) continue;
+      const group = this.drawings.get(doc.id);
+      if (!group) continue;
+      const floorIndex = this._resolveDrawingFloorIndex(doc);
+      if (this._drawingFloorIndex.get(doc.id) === floorIndex) continue;
+      this._drawingFloorIndex.set(doc.id, floorIndex);
+      this._applyFloorLayer(group, floorIndex);
+      if (group.userData) group.userData.floorIndex = floorIndex;
+      const sceneHeight = canvas?.dimensions?.height || 10000;
+      const drawingDoc = doc?.document ?? doc;
+      const shape = drawingDoc.shape || {};
+      const width = shape.width || drawingDoc.width || 0;
+      const height = shape.height || drawingDoc.height || 0;
+      const centerX = drawingDoc.x + width / 2;
+      const centerY = drawingDoc.y + height / 2;
+      const worldY = sceneHeight - centerY;
+      const baseZ = this._resolveDrawingWorldZ(floorIndex);
+      group.position.set(centerX, worldY, baseZ);
+    }
   }
 
   /**
    * Create a drawing object
-   * @param {DrawingDocument} doc 
+   * @param {DrawingDocument} doc
    * @private
    */
   create(doc) {
@@ -246,6 +481,7 @@ export class DrawingManager {
 
         // Basic implementation: Render text if it has text, otherwise render a box
         const group = new THREE.Group();
+        group.frustumCulled = false;
 
         // Use Drawing shape dimensions for placement, matching Foundry
         const shape = drawingDoc.shape || {};
@@ -260,8 +496,13 @@ export class DrawingManager {
         const sceneHeight = canvas.dimensions?.height || 10000;
         const worldY = sceneHeight - centerY;
 
-        // Position the group at the world-space center. Z is inherited from parent group
-        group.position.set(centerX, worldY, 0);
+        // Resolve the drawing's floor band and pin its Z just above that
+        // floor's tile slab so it draws on top of the floor visually but
+        // stays beneath the upper floor during multi-floor compositing.
+        const floorIndex = this._resolveDrawingFloorIndex(drawingDoc);
+        const baseZ = this._resolveDrawingWorldZ(floorIndex);
+
+        group.position.set(centerX, worldY, baseZ);
 
         // Apply rotation around the center. Foundry rotates clockwise in screen-space;
         // we negate here to account for Y-up vs Y-down.
@@ -285,16 +526,21 @@ export class DrawingManager {
         // 2. Shape Rendering (Simple Outline)
         this.createShape(drawingDoc, group, width, height);
 
-        // Render drawings in overlay pass so text/lines are not affected by bloom.
-        // Layers are not inherited in three.js, so apply to all descendants.
-        group.traverse((obj) => {
-          if (obj?.layers) obj.layers.set(OVERLAY_THREE_LAYER);
-        });
+        // Pin every child onto this drawing's floor layer so the V2 compositor
+        // renders it inside that floor's slice and upper floors occlude it via
+        // the LevelCompositePass blend.
+        this._applyFloorLayer(group, floorIndex);
+        group.userData = {
+          type: 'sceneDrawing',
+          docId: drawingDoc.id,
+          floorIndex,
+        };
 
         this.group.add(group);
         this.drawings.set(drawingDoc.id, group);
-        
-        log.debug(`Created drawing ${drawingDoc.id}`);
+        this._drawingFloorIndex.set(drawingDoc.id, floorIndex);
+
+        log.debug(`Created drawing ${drawingDoc.id} on floor ${floorIndex}`);
     } catch (e) {
         log.error(`Failed to create drawing ${drawingDoc?.id || 'unknown'}:`, e);
     }
@@ -471,7 +717,6 @@ export class DrawingManager {
       depthTest: false
     });
     const sprite = new THREE.Sprite(material);
-    sprite.renderOrder = 1001;
     sprite.scale.set(canvasWidth / resolution, canvasHeight / resolution, 1);
     sprite.position.set(0, 0, 0);
 
@@ -604,7 +849,6 @@ export class DrawingManager {
         });
 
         const segMesh = new THREE.Mesh(segGeom, segMat);
-        segMesh.renderOrder = 1000;
         segMesh.position.set(
           (p0.x + p1.x) / 2,
           (p0.y + p1.y) / 2,
@@ -634,59 +878,42 @@ export class DrawingManager {
         depthWrite: false
       });
       const fillMesh = new THREE.Mesh(fillGeometry, fillMaterial);
-      fillMesh.renderOrder = 999;
       fillMesh.position.set(0, 0, 0);
       group.add(fillMesh);
     }
 
-    // Border band: use a Shape with an inner hole so thickness is geometry,
-    // not line width (WebGL lineWidth is effectively 1px).
-    const halfW = width / 2;
-    const halfH = height / 2;
-    const innerHalfW = innerWidth / 2;
-    const innerHalfH = innerHeight / 2;
-
-    const outerShape = new THREE.Shape();
-    outerShape.moveTo(-halfW, -halfH);
-    outerShape.lineTo( halfW, -halfH);
-    outerShape.lineTo( halfW,  halfH);
-    outerShape.lineTo(-halfW,  halfH);
-    outerShape.lineTo(-halfW, -halfH);
-
-    // Inner hole (clockwise vs CCW is handled by ShapeGeometry)
-    if (innerWidth > 0 && innerHeight > 0) {
-      const innerPath = new THREE.Path();
-      innerPath.moveTo(-innerHalfW, -innerHalfH);
-      innerPath.lineTo( innerHalfW, -innerHalfH);
-      innerPath.lineTo( innerHalfW,  innerHalfH);
-      innerPath.lineTo(-innerHalfW,  innerHalfH);
-      innerPath.lineTo(-innerHalfW, -innerHalfH);
-      outerShape.holes.push(innerPath);
+    if (thickness > 0 && strokeAlpha > 0) {
+      const borderMaterial = new THREE.MeshBasicMaterial({
+        color: new THREE.Color(color),
+        transparent: true,
+        opacity: strokeAlpha,
+        side: THREE.DoubleSide,
+        depthTest: false,
+        depthWrite: false
+      });
+      const halfW = width / 2;
+      const halfH = height / 2;
+      const halfT = thickness / 2;
+      const makeBand = (bandWidth, bandHeight, x, y) => {
+        const mesh = new THREE.Mesh(new THREE.PlaneGeometry(bandWidth, bandHeight), borderMaterial);
+        mesh.position.set(x, y, 0.02);
+        mesh.frustumCulled = false;
+        group.add(mesh);
+      };
+      makeBand(width, thickness, 0, halfH - halfT);
+      makeBand(width, thickness, 0, -halfH + halfT);
+      makeBand(thickness, Math.max(0, height - (thickness * 2)), -halfW + halfT, 0);
+      makeBand(thickness, Math.max(0, height - (thickness * 2)), halfW - halfT, 0);
     }
-
-    const borderGeometry = new THREE.ShapeGeometry(outerShape);
-    const borderMaterial = new THREE.MeshBasicMaterial({
-      color: new THREE.Color(color),
-      transparent: strokeAlpha < 1.0,
-      opacity: strokeAlpha,
-      side: THREE.DoubleSide,
-      depthTest: false,
-      depthWrite: false
-    });
-
-    const borderMesh = new THREE.Mesh(borderGeometry, borderMaterial);
-    borderMesh.renderOrder = 1000;
-    borderMesh.position.set(0, 0, 0);
-    group.add(borderMesh);
   }
 
   /**
    * Update a drawing
-   * @param {DrawingDocument} doc 
-   * @param {Object} changes 
+   * @param {DrawingDocument} doc
+   * @param {Object} changes
    * @private
    */
-  update(doc, changes) {
+  update_(doc, changes) {
     this.remove(doc.id);
     this.create(doc);
   }
@@ -702,6 +929,7 @@ export class DrawingManager {
       this.group.remove(object);
       // Dispose geometries/materials if needed
       this.drawings.delete(id);
+      this._drawingFloorIndex.delete(id);
     }
   }
   
@@ -728,5 +956,6 @@ export class DrawingManager {
       this.group.clear();
       this.scene.remove(this.group);
       this.drawings.clear();
+      this._drawingFloorIndex.clear();
   }
 }

@@ -65,6 +65,9 @@ export class TreeEffectV2 {
 
     // Temporal state (smoothed wind coupling)
     this._currentWindSpeed = 0.0;
+    this._windFieldPhase = 0.0;
+    this._wavePhase = 0.0;
+    this._flutterPhase = 0.0;
     this._lastFrameTime = 0.0;
     this._hoverHidden = false;
     this._hoverFadeInProgress = false;
@@ -814,10 +817,25 @@ export class TreeEffectV2 {
     const lerpT = Math.min(1.0, delta * ramp);
     this._currentWindSpeed = this._currentWindSpeed + (windSpeed01 - this._currentWindSpeed) * lerpT;
 
+    const phaseDelta = Math.min(0.25, Math.max(0.0, delta));
+    const rawWind = Math.max(0.0, Math.min(1.0, this._currentWindSpeed));
+    const speed = Math.max(0.0, rawWind * Number(this.params.windSpeedGlobal ?? 0.0));
+    const rustleFloor = Math.max(0.0, Number(this.params.minRustleSpeed ?? 0.0) * Math.max(0.0, Number(this.params.rustleFloorScale ?? 0.0)));
+    const rustleSpeed = Math.max(speed, rustleFloor);
+    const windFieldTravel = rawWind <= 0.0
+      ? 0.16
+      : (0.16 + (Math.max(0.16, Number(this.params.gustSpeed ?? 0.0)) - 0.16) * rawWind);
+    this._windFieldPhase += phaseDelta * windFieldTravel * (0.2 + rawWind);
+    this._wavePhase += phaseDelta * Math.max(0.0, Number(this.params.waveTravelSpeed ?? 0.0)) * (0.35 + rustleSpeed);
+    this._flutterPhase += phaseDelta * Math.max(0.0, Number(this.params.flutterSpeed ?? 0.0)) * (0.85 + rustleSpeed);
+
     this._syncSceneBoundsUniforms();
 
     if (this._sharedUniforms) {
       this._sharedUniforms.uTime.value = time;
+      this._sharedUniforms.uWindFieldPhase.value = this._windFieldPhase;
+      this._sharedUniforms.uWavePhase.value = this._wavePhase;
+      this._sharedUniforms.uFlutterPhase.value = this._flutterPhase;
       if (windDir && typeof windDir.x === 'number' && typeof windDir.y === 'number') {
         // Weather wind vectors are Foundry-space (Y-down); shader world is Three-space (Y-up).
         this._sharedUniforms.uWindDir.value.set(windDir.x, -windDir.y);
@@ -1141,6 +1159,9 @@ export class TreeEffectV2 {
     this._sharedUniforms = {
       uTreeMask: { value: null },
       uTime: { value: 0.0 },
+      uWindFieldPhase: { value: 0.0 },
+      uWavePhase: { value: 0.0 },
+      uFlutterPhase: { value: 0.0 },
       uWindDir: { value: new THREE.Vector2(1.0, 0.0) },
       uSunDir: { value: new THREE.Vector2(0.0, -1.0) },
       uWindSpeed: { value: 0.0 },
@@ -1357,6 +1378,9 @@ export class TreeEffectV2 {
       fragmentShader: /* glsl */`
         uniform sampler2D uTreeMask;
         uniform float uTime;
+        uniform float uWindFieldPhase;
+        uniform float uWavePhase;
+        uniform float uFlutterPhase;
         uniform vec2  uWindDir;
         uniform vec2  uSunDir;
         uniform float uWindSpeed;
@@ -1478,15 +1502,14 @@ export class TreeEffectV2 {
           // Continuous speed-coupled wind pressure field (traveling across map)
           // to avoid binary gust behavior and keep response wind-speed driven.
           float windFieldFrequency = mix(0.0003, max(0.0003, uGustFrequency), rawWind);
-          float windFieldTravel = mix(0.16, max(0.16, uGustSpeed), rawWind);
           vec2 windFieldPos = vWorldPos * windFieldFrequency;
-          vec2 windFieldScroll = globalWindDir * uTime * windFieldTravel * (0.2 + rawWind);
+          vec2 windFieldScroll = globalWindDir * uWindFieldPhase;
           float windField = noise(windFieldPos - windFieldScroll);
           float windPulse = mix(0.65, 1.28, smoothstep(0.08, 0.92, windField));
           windPulse *= (0.35 + 0.65 * rawWind);
 
           float waveCoord = dot(vWorldPos, globalWindDir);
-          float wavePhase = waveCoord * uWaveSpatialFrequency - uTime * uWaveTravelSpeed * (0.35 + rustleSpeed);
+          float wavePhase = waveCoord * uWaveSpatialFrequency - uWavePhase;
           float waveCarrier = 0.5 + 0.5 * sin(wavePhase);
           float waveFront = pow(clamp(waveCarrier, 0.0, 1.0), max(0.1, uWaveSharpness));
           float waveMod = mix(1.0, waveFront, clamp(uWaveInfluence, 0.0, 1.0));
@@ -1518,7 +1541,7 @@ export class TreeEffectV2 {
           float crossSwayMagnitude = swayMagnitude * 0.16;
 
           float noiseVal = noise(vWorldPos * uFlutterScale);
-          float flutterPhase = uTime * uFlutterSpeed * (0.85 + rustleSpeed) + noiseVal * 6.28;
+          float flutterPhase = uFlutterPhase + noiseVal * 6.28;
           float flutter = sin(flutterPhase);
           float lowWindBoost = mix(uFlutterLowWindBoost, 1.0, smoothstep(0.04, max(0.041, uFlutterLowWindFadeEnd), rawWind));
           float legacyFlutterFloor = clamp(uFlutterGustFloor, 0.0, 1.0);

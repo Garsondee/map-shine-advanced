@@ -521,6 +521,9 @@ export class HealthEvaluatorService {
       consumers.skyColor = {
         uHasOutdoorsMask: Number(u?.uHasOutdoorsMask?.value ?? 0),
         tOutdoorsMask: this._texBrief(tex),
+        uHasIlluminationMask: Number(u?.uHasIlluminationMask?.value ?? 0),
+        tDynamicLightMask: this._texBrief(u?.tDynamicLightMask?.value),
+        tWindowLightMask: this._texBrief(u?.tWindowLightMask?.value),
       };
     } catch (_) {
       consumers.skyColor = { error: true };
@@ -1050,6 +1053,7 @@ export class HealthEvaluatorService {
     this.dependencyGraph.addEdge('WindowLightEffectV2', 'LightingEffectV2', 'required');
     this.dependencyGraph.addEdge('PlayerLightEffectV2', 'LightingEffectV2', 'required');
     this.dependencyGraph.addEdge('FireEffectV2', 'LightingEffectV2', 'contextual');
+    this.dependencyGraph.addEdge('LightingEffectV2', 'SkyColorEffectV2', 'contextual');
     this.dependencyGraph.addEdge('SkyColorEffectV2', 'WaterEffectV2', 'contextual');
     this.dependencyGraph.addEdge('WaterEffectV2', 'BloomEffectV2', 'contextual');
     this.dependencyGraph.addEdge('SkyColorEffectV2', 'WindowLightEffectV2', 'contextual');
@@ -1642,6 +1646,24 @@ export class HealthEvaluatorService {
             return {
               pass: !!instance?._composeMaterial,
               message: instance?._composeMaterial ? 'Compose material present' : 'Sky compose material missing',
+            };
+          },
+        },
+        {
+          id: 'illuminationMaskUniforms',
+          tier: 'structural',
+          severity: 'error',
+          check: (instance) => {
+            if (instance?.params && instance.params.enabled === false) {
+              return { pass: true, skipped: true, message: 'Sky color disabled' };
+            }
+            const u = instance?._composeMaterial?.uniforms;
+            const pass = !!u?.tDynamicLightMask && !!u?.tWindowLightMask && !!u?.uHasIlluminationMask;
+            return {
+              pass,
+              message: pass
+                ? 'Illumination mask uniforms present'
+                : 'Sky illumination mask uniforms missing',
             };
           },
         },

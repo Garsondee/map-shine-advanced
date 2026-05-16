@@ -148,7 +148,42 @@ export class TweakpaneManager {
       /** V2 fullscreen mask debug (FloorCompositor); extend modes in MaskDebugOverlayPass.js */
       maskDebugOverlayEnabled: false,
       maskDebugOverlayMode: 'outdoors_current',
-      maskDebugOverlayOpacity: 0.35
+      maskDebugOverlayOpacity: 0.35,
+      /**
+       * Post — external rendering integrations.
+       *
+       * `dsn` controls the Dice So Nice composite pass (see {@link ExternalDsnPass}).
+       * `sequencer` controls Sequencer / JB2A mirror look + placement (see
+       * {@link SequencerEffectMirror}). Tweakpane fans these values into
+       * `MapShine.externalEffects.applyPostSettings(...)` on change and on
+       * `canvasReady` (the compositor is rebuilt per scene).
+       */
+      post: {
+        dsn: {
+          enabled: true,
+          performanceMode: 'native',
+          maxPixelRatio: 1.0,
+          maxUploadFps: 24,
+          gracePeriodMs: 4000,
+          opacity: 1.0,
+          tint: { r: 1, g: 1, b: 1 },
+          brightness: 1.0,
+          saturation: 1.0,
+          contrast: 1.0,
+          gamma: 1.0
+        },
+        sequencer: {
+          enabled: true,
+          brightness: 2.0,
+          tint: { r: 1, g: 1, b: 1 },
+          mirrorScaleMul: 1.0,
+          alongCastPlacementMul: 0.7,
+          alongCastTargetNudgePx: 0,
+          mirrorZBias: 0,
+          rotateTowardsForwardMul: 1.0,
+          reverseForwardPivot: false
+        }
+      }
     };
     
     /** @type {Object<string, any>} Accordion expanded states */
@@ -319,6 +354,12 @@ export class TweakpaneManager {
 
     /** @type {string|null} */
     this._lastPresetsSceneId = null;
+
+    /** @type {any|null} Tweakpane folder for the Post section (DSN / Sequencer). */
+    this._postFolder = null;
+
+    /** @type {(() => void)|null} */
+    this._postCanvasReadyHandler = null;
 
     /** @type {boolean} After first presets hydrate; avoids clearing activePresetId during startup churn. */
     this._scenePresetTrackingReady = false;
@@ -887,6 +928,9 @@ export class TweakpaneManager {
 
       // Build token/character rendering authoring controls
       this.buildTokensSection();
+
+      // Post — external rendering integrations (Dice So Nice / Sequencer).
+      this.buildPostSection();
 
       this.buildRopesSection();
 
@@ -2032,6 +2076,365 @@ export class TweakpaneManager {
       this.accordionStates['cat_environment'] = ev.expanded;
       this.saveUIState();
     });
+  }
+
+  /**
+   * Build the **Post** primary folder — external-rendering integrations:
+   * Dice So Nice (compositor pass look + perf) and Sequencer / JB2A
+   * (mirror brightness, tint, cast placement).
+   *
+   * State lives under `this.globalParams.post` and is fanned out to
+   * `MapShine.externalEffects.applyPostSettings(...)` on change. The whole
+   * `globalParams.post` block is re-applied on `canvasReady` because the
+   * compositor is rebuilt per scene and any uniforms set against the
+   * previous instance would be lost.
+   *
+   * @private
+   */
+  buildPostSection() {
+    if (!this.pane) return;
+    if (this._postFolder) return;
+
+    const post = this.globalParams.post;
+    if (!post || typeof post !== 'object') return;
+
+    const postFolder = this.pane.addFolder({
+      title: 'Post',
+      expanded: this.accordionStates['post'] ?? true
+    });
+    this._registerPrimaryFolder(postFolder);
+    this._postFolder = postFolder;
+
+    const applyAll = () => this._applyPostSettings();
+    const persist = () => {
+      void this._markPresetCustom();
+      this.saveUIState();
+    };
+
+    this._buildPostDsnFolder(postFolder, post.dsn, applyAll, persist);
+    this._buildPostSequencerFolder(postFolder, post.sequencer, applyAll, persist);
+
+    postFolder.on('fold', (ev) => {
+      this.accordionStates['post'] = ev.expanded;
+      this.saveUIState();
+    });
+
+    if (!this._postCanvasReadyHandler) {
+      this._postCanvasReadyHandler = () => {
+        this._applyPostSettings();
+      };
+      try { Hooks.on('canvasReady', this._postCanvasReadyHandler); } catch (_) {}
+    }
+
+    this._applyPostSettings();
+  }
+
+  /**
+   * Dice So Nice sub-folder under "Post". Contains performance controls
+   * (which actively change DSN's renderer / canvas-upload rates) and a
+   * look group (which only mutates `ExternalDsnPass` uniforms).
+   * @param {any} parent
+   * @param {Record<string, any>} dsn
+   * @param {() => void} applyAll
+   * @param {() => void} persist
+   * @private
+   */
+  _buildPostDsnFolder(parent, dsn, applyAll, persist) {
+    const dsnFolder = parent.addFolder({
+      title: 'Dice So Nice',
+      expanded: this.accordionStates['post_dsn'] ?? true
+    });
+
+    const onChange = () => { applyAll(); persist(); };
+
+    dsnFolder.addBinding(dsn, 'enabled', { label: 'Enabled' }).on('change', onChange);
+
+    const perfFolder = dsnFolder.addFolder({
+      title: 'Performance',
+      expanded: this.accordionStates['post_dsn_perf'] ?? false
+    });
+
+    perfFolder.addBinding(dsn, 'performanceMode', {
+      label: 'Preset',
+      options: {
+        'Native (DSN draws on top)': 'native',
+        'Balanced (DPR 1, 24 fps)': 'balanced',
+        'Quality (DPR 1.5, 30 fps)': 'quality'
+      }
+    }).on('change', onChange);
+
+    perfFolder.addBinding(dsn, 'maxPixelRatio', {
+      label: 'Max Pixel Ratio',
+      min: 0.5,
+      max: 3.0,
+      step: 0.05
+    }).on('change', onChange);
+
+    perfFolder.addBinding(dsn, 'maxUploadFps', {
+      label: 'Max Upload FPS',
+      min: 0,
+      max: 60,
+      step: 1
+    }).on('change', onChange);
+
+    perfFolder.addBinding(dsn, 'gracePeriodMs', {
+      label: 'Hide Delay (ms)',
+      min: 500,
+      max: 15000,
+      step: 100
+    }).on('change', onChange);
+
+    perfFolder.on('fold', (ev) => {
+      this.accordionStates['post_dsn_perf'] = ev.expanded;
+      this.saveUIState();
+    });
+
+    const lookFolder = dsnFolder.addFolder({
+      title: 'Look',
+      expanded: this.accordionStates['post_dsn_look'] ?? true
+    });
+
+    lookFolder.addBinding(dsn, 'opacity', {
+      label: 'Opacity',
+      min: 0,
+      max: 1,
+      step: 0.01
+    }).on('change', onChange);
+
+    lookFolder.addBinding(dsn, 'tint', {
+      label: 'Tint',
+      color: { type: 'float' },
+      colorType: 'float'
+    }).on('change', onChange);
+
+    lookFolder.addBinding(dsn, 'brightness', {
+      label: 'Brightness',
+      min: 0,
+      max: 3,
+      step: 0.01
+    }).on('change', onChange);
+
+    lookFolder.addBinding(dsn, 'saturation', {
+      label: 'Saturation',
+      min: 0,
+      max: 2,
+      step: 0.01
+    }).on('change', onChange);
+
+    lookFolder.addBinding(dsn, 'contrast', {
+      label: 'Contrast',
+      min: 0,
+      max: 2,
+      step: 0.01
+    }).on('change', onChange);
+
+    lookFolder.addBinding(dsn, 'gamma', {
+      label: 'Gamma',
+      min: 0.5,
+      max: 2.5,
+      step: 0.01
+    }).on('change', onChange);
+
+    lookFolder.on('fold', (ev) => {
+      this.accordionStates['post_dsn_look'] = ev.expanded;
+      this.saveUIState();
+    });
+
+    dsnFolder.addBlade({ view: 'separator' });
+
+    dsnFolder.addButton({
+      title: 'Reset Dice So Nice Look',
+      label: 'Defaults'
+    }).on('click', () => {
+      dsn.opacity = 1.0;
+      dsn.tint.r = 1; dsn.tint.g = 1; dsn.tint.b = 1;
+      dsn.brightness = 1.0;
+      dsn.saturation = 1.0;
+      dsn.contrast = 1.0;
+      dsn.gamma = 1.0;
+      try { this.pane?.refresh?.(); } catch (_) {}
+      applyAll();
+      persist();
+    });
+
+    dsnFolder.on('fold', (ev) => {
+      this.accordionStates['post_dsn'] = ev.expanded;
+      this.saveUIState();
+    });
+  }
+
+  /**
+   * Sequencer / JB2A sub-folder under "Post". Controls per-mirror brightness
+   * + tint and the placement-along-cast / rotate-towards-forward pivots used
+   * by `SequencerEffectMirror`.
+   * @param {any} parent
+   * @param {Record<string, any>} seq
+   * @param {() => void} applyAll
+   * @param {() => void} persist
+   * @private
+   */
+  _buildPostSequencerFolder(parent, seq, applyAll, persist) {
+    const seqFolder = parent.addFolder({
+      title: 'Sequencer / JB2A',
+      expanded: this.accordionStates['post_sequencer'] ?? true
+    });
+
+    const onChange = () => { applyAll(); persist(); };
+
+    seqFolder.addBinding(seq, 'enabled', { label: 'Enabled' }).on('change', onChange);
+
+    const lookFolder = seqFolder.addFolder({
+      title: 'Look',
+      expanded: this.accordionStates['post_sequencer_look'] ?? true
+    });
+
+    lookFolder.addBinding(seq, 'brightness', {
+      label: 'Brightness',
+      min: 0.05,
+      max: 2.0,
+      step: 0.01
+    }).on('change', onChange);
+
+    lookFolder.addBinding(seq, 'tint', {
+      label: 'Tint',
+      color: { type: 'float' },
+      colorType: 'float'
+    }).on('change', onChange);
+
+    lookFolder.on('fold', (ev) => {
+      this.accordionStates['post_sequencer_look'] = ev.expanded;
+      this.saveUIState();
+    });
+
+    const scaleFolder = seqFolder.addFolder({
+      title: 'Mirror scale',
+      expanded: this.accordionStates['post_sequencer_scale'] ?? true
+    });
+
+    scaleFolder.addBinding(seq, 'mirrorScaleMul', {
+      label: 'Footprint multiplier',
+      min: 0.1,
+      max: 4.0,
+      step: 0.01
+    }).on('change', onChange);
+
+    scaleFolder.on('fold', (ev) => {
+      this.accordionStates['post_sequencer_scale'] = ev.expanded;
+      this.saveUIState();
+    });
+
+    const placementFolder = seqFolder.addFolder({
+      title: 'Placement',
+      expanded: this.accordionStates['post_sequencer_placement'] ?? false
+    });
+
+    placementFolder.addBinding(seq, 'alongCastPlacementMul', {
+      label: 'Along-cast delta',
+      min: 0.25,
+      max: 1.5,
+      step: 0.01
+    }).on('change', onChange);
+
+    placementFolder.addBinding(seq, 'alongCastTargetNudgePx', {
+      label: 'Toward target (+px)',
+      min: -400,
+      max: 400,
+      step: 1
+    }).on('change', onChange);
+
+    placementFolder.addBinding(seq, 'mirrorZBias', {
+      label: 'Z bias (world)',
+      min: -500,
+      max: 500,
+      step: 0.5
+    }).on('change', onChange);
+
+    placementFolder.addBinding(seq, 'rotateTowardsForwardMul', {
+      label: 'Forward Pivot',
+      min: 0,
+      max: 3,
+      step: 0.05
+    }).on('change', onChange);
+
+    placementFolder.addBinding(seq, 'reverseForwardPivot', {
+      label: 'Reverse Pivot'
+    }).on('change', onChange);
+
+    placementFolder.on('fold', (ev) => {
+      this.accordionStates['post_sequencer_placement'] = ev.expanded;
+      this.saveUIState();
+    });
+
+    const diagFolder = seqFolder.addFolder({
+      title: 'Diagnostics',
+      expanded: this.accordionStates['post_sequencer_diag'] ?? false
+    });
+
+    diagFolder.addButton({
+      title: 'Probe Active Mirrors',
+      label: 'Probe'
+    }).on('click', () => {
+      try {
+        window.MapShine?.externalEffects?.probeSequencerMirrors?.('tweakpane');
+      } catch (e) {
+        log.warn('probeSequencerMirrors failed:', e);
+      }
+    });
+
+    diagFolder.addButton({
+      title: 'Probe Active Mirrors (Deep)',
+      label: 'Probe (Deep)'
+    }).on('click', () => {
+      try {
+        window.MapShine?.externalEffects?.probeSequencerMirrorsDeep?.('tweakpane-deep');
+      } catch (e) {
+        log.warn('probeSequencerMirrorsDeep failed:', e);
+      }
+    });
+
+    diagFolder.on('fold', (ev) => {
+      this.accordionStates['post_sequencer_diag'] = ev.expanded;
+      this.saveUIState();
+    });
+
+    seqFolder.addBlade({ view: 'separator' });
+
+    seqFolder.addButton({
+      title: 'Reset Sequencer Look + Placement',
+      label: 'Defaults'
+    }).on('click', () => {
+      seq.brightness = 2.0;
+      seq.tint.r = 1; seq.tint.g = 1; seq.tint.b = 1;
+      seq.mirrorScaleMul = 1.0;
+      seq.alongCastPlacementMul = 0.7;
+      seq.alongCastTargetNudgePx = 0;
+      seq.mirrorZBias = 0;
+      seq.rotateTowardsForwardMul = 1.0;
+      seq.reverseForwardPivot = false;
+      try { this.pane?.refresh?.(); } catch (_) {}
+      applyAll();
+      persist();
+    });
+
+    seqFolder.on('fold', (ev) => {
+      this.accordionStates['post_sequencer'] = ev.expanded;
+      this.saveUIState();
+    });
+  }
+
+  /**
+   * Apply `this.globalParams.post` to the live compositor / adapters. Safe to
+   * call before `MapShine.externalEffects` exists (no-op in that case).
+   * @private
+   */
+  _applyPostSettings() {
+    const ee = window.MapShine?.externalEffects;
+    if (!ee || typeof ee.applyPostSettings !== 'function') return;
+    try {
+      ee.applyPostSettings(this.globalParams.post);
+    } catch (e) {
+      log.warn('Failed to apply Post settings:', e);
+    }
   }
 
   buildDebugSection() {
@@ -6623,7 +7026,7 @@ export class TweakpaneManager {
         // NOTE: state.globalParams is persisted across versions.
         // We must merge nested objects defensively so newly added parameters
         // (like tokenColorCorrection.windowLightIntensity) don't disappear.
-        const { tokenColorCorrection, dynamicExposure, ...rest } = state.globalParams;
+        const { tokenColorCorrection, dynamicExposure, post, ...rest } = state.globalParams;
         Object.assign(this.globalParams, rest);
         if (tokenColorCorrection && typeof tokenColorCorrection === 'object') {
           if (!this.globalParams.tokenColorCorrection) this.globalParams.tokenColorCorrection = {};
@@ -6669,6 +7072,53 @@ export class TweakpaneManager {
           if (this.globalParams.dynamicExposure.probeHz === undefined) this.globalParams.dynamicExposure.probeHz = 8;
           if (this.globalParams.dynamicExposure.tauBrighten === undefined) this.globalParams.dynamicExposure.tauBrighten = 15.0;
           if (this.globalParams.dynamicExposure.tauDarken === undefined) this.globalParams.dynamicExposure.tauDarken = 15.0;
+        }
+
+        // Defensive merge for the Post section (Dice So Nice + Sequencer).
+        // New fields appended in future versions land in defaults via this path.
+        if (post && typeof post === 'object') {
+          if (!this.globalParams.post) this.globalParams.post = { dsn: {}, sequencer: {} };
+          if (post.dsn && typeof post.dsn === 'object') {
+            if (!this.globalParams.post.dsn) this.globalParams.post.dsn = {};
+            const { tint: dsnTint, ...dsnRest } = post.dsn;
+            Object.assign(this.globalParams.post.dsn, dsnRest);
+            if (dsnTint && typeof dsnTint === 'object') {
+              if (!this.globalParams.post.dsn.tint) this.globalParams.post.dsn.tint = { r: 1, g: 1, b: 1 };
+              Object.assign(this.globalParams.post.dsn.tint, dsnTint);
+            }
+          }
+          if (post.sequencer && typeof post.sequencer === 'object') {
+            if (!this.globalParams.post.sequencer) this.globalParams.post.sequencer = {};
+            const { tint: seqTint, ...seqRest } = post.sequencer;
+            Object.assign(this.globalParams.post.sequencer, seqRest);
+            if (seqTint && typeof seqTint === 'object') {
+              if (!this.globalParams.post.sequencer.tint) this.globalParams.post.sequencer.tint = { r: 1, g: 1, b: 1 };
+              Object.assign(this.globalParams.post.sequencer.tint, seqTint);
+            }
+          }
+        }
+
+        if (this.globalParams.post?.sequencer) {
+          const sq = this.globalParams.post.sequencer;
+          if (sq.mirrorScaleMul === undefined || !Number.isFinite(Number(sq.mirrorScaleMul))) sq.mirrorScaleMul = 1.0;
+          if (sq.alongCastPlacementMul === undefined || !Number.isFinite(Number(sq.alongCastPlacementMul))) {
+            sq.alongCastPlacementMul = 0.7;
+          }
+          if (sq.alongCastTargetNudgePx === undefined || !Number.isFinite(Number(sq.alongCastTargetNudgePx))) {
+            sq.alongCastTargetNudgePx = 0;
+          }
+          if (sq.mirrorZBias === undefined || !Number.isFinite(Number(sq.mirrorZBias))) {
+            sq.mirrorZBias = 0;
+          }
+          if (sq.brightness === undefined || !Number.isFinite(Number(sq.brightness))) {
+            sq.brightness = 2.0;
+          }
+        }
+        if (this.globalParams.post?.dsn && typeof this.globalParams.post.dsn === 'object') {
+          const dsn = this.globalParams.post.dsn;
+          if (dsn.performanceMode === undefined || typeof dsn.performanceMode !== 'string') {
+            dsn.performanceMode = 'native';
+          }
         }
       }
 
@@ -6851,6 +7301,15 @@ export class TweakpaneManager {
       }
       this._canvasReadyPresetsHandler = null;
     }
+
+    if (this._postCanvasReadyHandler) {
+      try {
+        Hooks.off('canvasReady', this._postCanvasReadyHandler);
+      } catch (_) {
+      }
+      this._postCanvasReadyHandler = null;
+    }
+    this._postFolder = null;
     this._presetsBarEl = null;
     this._presetsSelectEl = null;
     this._lastPresetsSceneId = null;

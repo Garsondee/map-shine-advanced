@@ -95,7 +95,11 @@ export class DiceSoNiceAdapter {
     this._prewarmStartMs = 0;
 
     /** @type {{ mode: string, maxPixelRatio: number, maxUploadFps: number }} */
-    this._performance = { ...DSN_PERFORMANCE_PRESETS.balanced };
+    this._performance = {
+      ...DSN_PERFORMANCE_PRESETS.native,
+      maxPixelRatio: DSN_PERFORMANCE_PRESETS.balanced.maxPixelRatio,
+      maxUploadFps: DSN_PERFORMANCE_PRESETS.balanced.maxUploadFps,
+    };
 
     /** @type {number} */
     this._lastTextureDirtyAtMs = 0;
@@ -159,8 +163,9 @@ export class DiceSoNiceAdapter {
   /**
    * Switch Dice So Nice integration performance mode at runtime.
    *
-   * - `native`: restore DSN's DOM overlay and skip MSA compositing (fastest)
-   * - `balanced`: DPR 1 + 24fps canvas uploads (default)
+   * - `native`: restore DSN's DOM overlay and skip MSA compositing (fastest;
+   *   adapter bootstrap matches Post defaults: DPR cap 1, 24fps upload ceiling)
+   * - `balanced`: DPR 1 + 24fps canvas uploads
    * - `quality`: DPR 1.5 + 30fps canvas uploads
    *
    * @param {'native'|'balanced'|'quality'} mode
@@ -187,6 +192,40 @@ export class DiceSoNiceAdapter {
   getPreferredContinuousFps() {
     const fps = Number(this._performance.maxUploadFps);
     return Number.isFinite(fps) && fps > 0 ? fps : 0;
+  }
+
+  /**
+   * Grace window (ms) after `diceSoNiceRollComplete` before the DSN pass is
+   * disabled. Clamped to the same range as DSN's own `timeBeforeHide`.
+   * @param {number} ms
+   */
+  setGracePeriodMs(ms) {
+    const v = Number(ms);
+    if (!Number.isFinite(v)) return;
+    this._graceMs = Math.max(500, Math.min(15000, v));
+  }
+
+  /**
+   * Cap the DSN renderer's device pixel ratio. Lower = faster + softer dice;
+   * pass a positive number (`Infinity` for no cap).
+   * @param {number} ratio
+   */
+  setMaxPixelRatio(ratio) {
+    const v = Number(ratio);
+    if (!Number.isFinite(v) || v <= 0) return;
+    this._performance.maxPixelRatio = v;
+    this._applyPixelRatioCap();
+  }
+
+  /**
+   * Throttle `CanvasTexture.needsUpdate` to this rate while dice animate.
+   * 0 disables uploads while MSA owns rendering (the dice canvas freezes).
+   * @param {number} fps
+   */
+  setMaxUploadFps(fps) {
+    const v = Number(fps);
+    if (!Number.isFinite(v) || v < 0) return;
+    this._performance.maxUploadFps = v;
   }
 
   // ── Wiring ────────────────────────────────────────────────────────────────

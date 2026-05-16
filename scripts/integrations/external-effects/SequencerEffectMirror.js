@@ -10,8 +10,11 @@
  *   3. **Video** (`HTMLVideoElement`): wrap with `THREE.VideoTexture` only when
  *      the element decodes (reject `media.error` / empty dead pool tags).
  *
- * Transform sync uses the PIXI container's world transform converted to
- * MSA Three.js coordinates (Foundry top-left → MSA bottom-left).
+ * Mesh **Z** sits on the V2 **tile** plane (`sceneComposer.groundZ` + floor ×
+ * {@link Z_PER_FLOOR} + a small elevation fraction), i.e. the same depth band as
+ * {@link FloorRenderBus} map tiles — **not** the token sprite band (~groundZ+1003),
+ * which sits near/behind the perspective camera at z≈2000 and clips. Optional
+ * `MapShine.__sequencerMirrorZBias` or Tweakpane **Z bias** nudges depth when needed.
  *
  * The original PIXI container is set to `renderable = false` so it draws
  * nowhere else. Sequencer's own `EffectManager` lifecycle is untouched.
@@ -26,11 +29,21 @@
  * upload of the same element, so we must match PIXI's interpretation, not
  * assume every WebM is premultiplied.
  *
+ * **Second WebGL upload:** Three's `VideoTexture` re-uploads the same
+ * `<video>` element. That path is almost always **straight** RGBA
+ * (`UNPACK_PREMULTIPLY_ALPHA_WEBGL` off). PIXI's `alphaMode` / Sequencer patch
+ * describe how **PIXI** composites the sample, not necessarily the raw texels
+ * Three reads. When we mirror PIXI's **premultiplied** blend factors
+ * (`One × OneMinusSrcAlpha`) we must output **premultiplied** fragment colour
+ * (`rgb *= a` for straight samples). Otherwise edges look harsh, fringed, or
+ * “binary”. Override with `MapShine.__sequencerMirrorVideoGpuPremultiplied =
+ * true` if a rare GPU path truly delivers premultiplied texels.
+ *
  * @module integrations/external-effects/SequencerEffectMirror
  */
 
 import { createLogger } from '../../core/log.js';
-import { externalEffectOrder } from '../../compositor-v2/LayerOrderPolicy.js';
+import { externalEffectOrder, GROUND_Z, Z_PER_FLOOR } from '../../compositor-v2/LayerOrderPolicy.js';
 
 const log = createLogger('SequencerEffectMirror');
 const MIN_EFFECT_WORLD_SIZE_FACTOR = 0.75;
@@ -105,6 +118,12 @@ export class SequencerEffectMirror {
 
     /** @type {number} */
     this._pixiCanvasFrameCacheMax = 160;
+
+    /** @type {boolean} */
+    this._pixiCanvasIncludesSpriteState = false;
+
+    /** @type {'effectPosition'|'effectPositionPlusSpriteDelta'|null} */
+    this._lastMirrorPositionBasis = null;
   }
 
   /**
@@ -223,6 +242,89 @@ export class SequencerEffectMirror {
     };
 
     try {
+      const d = effect?.data ?? null;
+      const rc = Number(effect?.rotationContainer?.rotation ?? effect?.rotation ?? 0);
+      const mul = Number(globalThis.window?.MapShine?.__sequencerMirrorRotateTowardsForwardMul);
+      const sign = Number(globalThis.window?.MapShine?.__sequencerMirrorRotateTowardsForwardSign);
+      const sw = Number(sprite?.width);
+      const spanW = Math.max(
+        1,
+        Number(this._naturalSize.width) * this._readContainerScaleX(),
+        Number.isFinite(sw) && sw > 1 ? sw : 0,
+      );
+      snap.rotateTowardsAdjust = {
+        active: !!(
+          (d?.rotateTowards && !d.rotateTowards?.template && !d.anchor)
+          || (() => {
+            try {
+              const src = effect?.sourcePosition;
+              const tgt = effect?.targetPosition;
+              if (!src || !tgt || !Number.isFinite(src.x) || !Number.isFinite(tgt.x)) return false;
+              const len = Math.hypot(tgt.x - src.x, tgt.y - src.y);
+              if (len <= 1e-2) return false;
+              const px = Number(effect?.position?.x);
+              const py = Number(effect?.position?.y);
+              if (!Number.isFinite(px) || !Number.isFinite(py)) return false;
+              const ds = Math.hypot(px - src.x, py - src.y);
+              const dt = Math.hypot(px - tgt.x, py - tgt.y);
+              return ds < dt * 1.15;
+            } catch (_) {
+              return false;
+            }
+          })()
+        ),
+        rotationContainerRad: Number.isFinite(rc) ? rc : null,
+        spriteWidth: Number.isFinite(sw) ? sw : null,
+        spanWUsed: spanW,
+        forwardMulDefault: !Number.isFinite(mul) || mul <= 0 ? 1 : mul,
+        forwardSignDefault: !Number.isFinite(sign) || sign === 0 ? 1 : sign,
+      };
+    } catch (_) {
+      snap.rotateTowardsAdjust = null;
+    }
+
+    try {
+      snap.mirrorPlacement = {
+        lastBasis: this._lastMirrorPositionBasis,
+        alongCastPlacementMul: this._resolveAlongCastPlacementMul(),
+        externalDiffuseGain: this._resolveExternalDiffuseGain(),
+        spriteRootDelta: this._resolveSpriteRootDeltaFromEffect(effect),
+        sequencerCanvasXY: this._resolveSequencerCanvasWorldXY(effect),
+        effectPosition: (() => {
+          try {
+            const p = effect?.position;
+            if (p && Number.isFinite(Number(p.x)) && Number.isFinite(Number(p.y))) {
+              return { x: Number(p.x), y: Number(p.y) };
+            }
+          } catch (_) {}
+          return null;
+        })(),
+        mirrorFootprint: (() => {
+          try {
+            const px = this._resolveMirrorFootprintInScenePixels();
+            const lg = this._resolveLegacyNaturalFootprint();
+            return {
+              footprintW: px.width,
+              footprintH: px.height,
+              legacyNaturalScaleW: lg.width,
+              legacyNaturalScaleH: lg.height,
+              naturalSize: { ...this._naturalSize },
+              containerScale: { x: this._readContainerScaleX(), y: this._readContainerScaleY() },
+              preferGetBounds: globalThis.window?.MapShine?.__sequencerMirrorScalePreferGetBounds !== false,
+              meshScaleMul: this._resolveMirrorMeshScaleMul(),
+              alongCastTargetNudgePx: this._resolveAlongCastTargetNudgePx(),
+              meshWorldZ: this._resolveMirrorMeshWorldZ(),
+            };
+          } catch (_) {
+            return null;
+          }
+        })(),
+      };
+    } catch (_) {
+      snap.mirrorPlacement = null;
+    }
+
+    try {
       snap.sequencerPlayback = {
         hasAnimatedMedia: !!effect?.hasAnimatedMedia,
         spritePlaying: !!mgr?.playing,
@@ -272,6 +374,7 @@ export class SequencerEffectMirror {
     }
 
     snap.videoInterpretPremultiplied = this._resolveVideoSamplesArePremultiplied(sprite);
+    snap.videoGpuPremultipliedTexels = this._resolveMirrorVideoGpuIsPremultiplied();
 
     const v = this._mediaSource;
     if (v instanceof HTMLVideoElement) {
@@ -377,6 +480,7 @@ export class SequencerEffectMirror {
         frameCacheSize: this._pixiCanvasFrameCache.size,
         frameCacheMax: this._pixiCanvasFrameCacheMax,
         lastFrame: this._lastPixiCanvasFrame,
+        includesSpriteState: this._pixiCanvasIncludesSpriteState,
         canvasWidth: this._mediaSource instanceof HTMLCanvasElement ? this._mediaSource.width : null,
         canvasHeight: this._mediaSource instanceof HTMLCanvasElement ? this._mediaSource.height : null,
       };
@@ -394,6 +498,8 @@ export class SequencerEffectMirror {
         premultipliedAlpha: mat.premultipliedAlpha,
         toneMapped: mat.toneMapped,
         uOpacity: mat.uniforms?.uOpacity?.value,
+        uPremulFragment: mat.uniforms?.uPremulFragment?.value,
+        uStraightAlphaSample: mat.uniforms?.uStraightAlphaSample?.value,
         opacity: mat.opacity,
       };
     } else {
@@ -536,10 +642,12 @@ export class SequencerEffectMirror {
     if (!Number.isFinite(Number(sceneH))) return;
     this._refreshNaturalSizeFromSource();
 
-    // Position: prefer effect's world position (`effect.position` is set by
-    // Sequencer each tick during update). Fall back to PIXI container `x/y`.
+    // Scene pixels: Sequencer `effect.position` matches the canvas scene. Do not
+    // use `worldPosition` / stage-normalized coords here — they differ from the
+    // FloorRenderBus camera space and can move the mesh off-screen.
     let fx = Number.NaN;
     let fy = Number.NaN;
+    this._lastMirrorPositionBasis = 'effectPosition';
     try {
       const p = effect.position ?? null;
       if (p && Number.isFinite(Number(p.x)) && Number.isFinite(Number(p.y))) {
@@ -577,17 +685,13 @@ export class SequencerEffectMirror {
     }
     if (!Number.isFinite(fx) || !Number.isFinite(fy)) return;
 
-    // Convert Foundry top-left → MSA bottom-left (Y flip).
-    this.mesh.position.x = fx;
-    this.mesh.position.y = Number(sceneH) - fy;
-
-    // Z is decided by renderOrder; depthTest is off. Place at a stable Z near
-    // the floor band so future depth-aware effects can sample plausibly.
-    const groundZ = Number(this._sceneComposer?.groundZ);
-    const baseZ = Number.isFinite(groundZ) ? groundZ : 1000;
-    const floorIdx = this._resolveFloorIndex();
-    const elevation = this._resolveElevation();
-    this.mesh.position.z = baseZ + floorIdx + (Number.isFinite(elevation) ? elevation / 100 : 0);
+    // Shift from effect root toward the Sequencer sprite / cast layout, then
+    // pull ~10% back along the cast axis (tunable) so line spells sit where
+    // Sequencer reads visually correct.
+    const sprDelta = this._resolveSpriteRootDeltaFromEffect(effect);
+    if (sprDelta.x !== 0 || sprDelta.y !== 0) {
+      this._lastMirrorPositionBasis = 'effectPositionPlusSpriteDelta';
+    }
 
     // Rotation: Sequencer uses radians on the rotation container.
     let rotation = 0;
@@ -602,12 +706,51 @@ export class SequencerEffectMirror {
     // Three Y is flipped relative to Foundry Y; rotation must be negated.
     this.mesh.rotation.z = -rotation;
 
-    // Scale: derive a final world-space size from natural media dimensions
-    // and the Sequencer container scale.
-    const scaleX = this._readContainerScaleX();
-    const scaleY = this._readContainerScaleY();
-    const w = Math.max(1, this._naturalSize.width * scaleX);
-    const h = Math.max(1, this._naturalSize.height * scaleY);
+    // Scale: prefer PIXI world-space bounds (includes ancestor scale used for
+    // ranged / stretch / canvas zoom). Fallback: natural media × Sequencer
+    // container scale — the latter misses parent-chain scaling and can latch
+    // native video resolution instead of the drawn quad.
+    const foot = this._resolveMirrorFootprintInScenePixels();
+    const scaleMul = this._resolveMirrorMeshScaleMul();
+    const w = Math.max(1, foot.width * scaleMul);
+    const h = Math.max(1, foot.height * scaleMul);
+
+    // `rotateTowards` pivot uses Sequencer's live sprite width; `_naturalSize`
+    // can lag or differ from `managedSprite.width`, which under-shifts the mesh.
+    let spanW = w;
+    try {
+      const sp = this._resolveSprite();
+      const sw = Number(sp?.width);
+      if (Number.isFinite(sw) && sw > 1) spanW = Math.max(spanW, sw);
+    } catch (_) {}
+
+    // Pivot / half-width offset from Sequencer `_setAnchors()` (rotateTowards and
+    // some source→target line cases). Do **not** gate on |sprDelta|: attacks and
+    // projectiles often have a large sprite-root delta along the cast while still
+    // needing this offset — skipping it misaligned scale and placement vs PIXI.
+    const forwardOffset = this._resolveRotateTowardsForwardOffset(spanW, rotation);
+    const extra = this._retreatExtraOffsetAlongCast(
+      sprDelta.x + forwardOffset.x,
+      sprDelta.y + forwardOffset.y,
+      effect,
+      rotation,
+    );
+    fx += extra.x;
+    fy += extra.y;
+
+    const nudge = this._nudgeAlongCastTowardTargetPx(effect, rotation);
+    fx += nudge.x;
+    fy += nudge.y;
+
+    // Convert Foundry top-left → MSA bottom-left (Y flip).
+    this.mesh.position.x = fx;
+    this.mesh.position.y = Number(sceneH) - fy;
+
+    // Z: same band as bus tiles (see _resolveMirrorMeshWorldZ). Token sprites use a
+    // much higher Z (~groundZ+1003); placing mirror *meshes* there clips them
+    // behind the fixed camera at z≈2000.
+    this.mesh.position.z = this._resolveMirrorMeshWorldZ();
+
     this.mesh.scale.x = w;
     this.mesh.scale.y = h;
     this.mesh.scale.z = 1;
@@ -636,6 +779,9 @@ export class SequencerEffectMirror {
     try {
       const THREE = globalThis.THREE;
       if (THREE) this._syncMaterialBlendFromPixi(THREE);
+    } catch (_) {}
+    try {
+      this._syncExternalDiffuseGain();
     } catch (_) {}
 
     // Refresh order in case elevation/sortLayer changed since attach.
@@ -687,6 +833,12 @@ export class SequencerEffectMirror {
         uniforms: {
           map: { value: this._texture },
           uOpacity: { value: 1 },
+          uDiffuseGain: { value: 1 },
+          uTint: { value: new THREE.Vector3(1, 1, 1) },
+          /** 1 when blend factors expect premultiplied src (PIXI PMA path). */
+          uPremulFragment: { value: 0 },
+          /** 1 when `texture2D` returns straight RGBA (default for VideoTexture). */
+          uStraightAlphaSample: { value: 1 },
         },
         vertexShader: /* glsl */`
           varying vec2 vUv;
@@ -698,11 +850,24 @@ export class SequencerEffectMirror {
         fragmentShader: /* glsl */`
           uniform sampler2D map;
           uniform float uOpacity;
+          uniform float uDiffuseGain;
+          uniform vec3 uTint;
+          uniform float uPremulFragment;
+          uniform float uStraightAlphaSample;
           varying vec2 vUv;
 
           void main() {
             vec4 c = texture2D(map, vUv);
-            gl_FragColor = vec4(c.rgb * uOpacity, c.a * uOpacity);
+            vec3 rgb = c.rgb * uDiffuseGain * uTint * uOpacity;
+            float a = c.a * uOpacity;
+            // Premultiplied blend (One, OneMinusSrcAlpha) or additive PMA (One, One)
+            // needs premultiplied fragment rgb. Three's VideoTexture is usually
+            // straight alpha; PIXI "PMA" is then a compositing convention — apply
+            // rgb *= a only when uPremulFragment && uStraightAlphaSample.
+            if (uPremulFragment > 0.5 && uStraightAlphaSample > 0.5) {
+              rgb *= c.a;
+            }
+            gl_FragColor = vec4(rgb, a);
           }
         `,
         transparent: true,
@@ -768,6 +933,22 @@ export class SequencerEffectMirror {
   }
 
   /**
+   * Whether Three's `VideoTexture` upload of the shared `<video>` delivers
+   * premultiplied RGBA texels. Browser / WebGL defaults are **straight**; set
+   * `MapShine.__sequencerMirrorVideoGpuPremultiplied = true` only if you have
+   * confirmed a premultiplied upload path.
+   * @returns {boolean}
+   */
+  _resolveMirrorVideoGpuIsPremultiplied() {
+    try {
+      const v = globalThis.window?.MapShine?.__sequencerMirrorVideoGpuPremultiplied;
+      if (v === true || v === 1 || v === 'true') return true;
+      if (v === false || v === 0 || v === 'false') return false;
+    } catch (_) {}
+    return false;
+  }
+
+  /**
    * Align Three blending with the source PIXI sprite so mirrored VFX match
    * Sequencer (additive fire, etc.).
    * @param {any} THREE
@@ -809,37 +990,46 @@ export class SequencerEffectMirror {
     // Video: match Sequencer / PIXI alpha convention (premul vs straight).
     if (this._textureKind === 'video') {
       const pma = this._resolveVideoSamplesArePremultiplied(sprite);
-      mat.premultipliedAlpha = false;
+      const gpuPremul = this._resolveMirrorVideoGpuIsPremultiplied();
+      const straightSample = gpuPremul ? 0 : 1;
+      /** Fragment must output premultiplied rgb when these blend modes are used. */
+      let premulFragment = 0;
+
       mat.blendEquation = THREE.AddEquation;
       if (mode === 'add') {
         mat.blending = THREE.CustomBlending;
         if (pma) {
+          premulFragment = 1;
           mat.blendSrc = THREE.OneFactor;
           mat.blendDst = THREE.OneFactor;
         } else {
           mat.blendSrc = THREE.SrcAlphaFactor;
           mat.blendDst = THREE.OneFactor;
         }
-        return;
-      }
-      if (mode === 'multiply') {
+      } else if (mode === 'multiply') {
         mat.blending = THREE.MultiplyBlending;
-        return;
-      }
-      if (mode === 'screen') {
+      } else if (mode === 'screen') {
         mat.blending = THREE.CustomBlending;
         mat.blendSrc = THREE.OneMinusDstColorFactor;
         mat.blendDst = THREE.OneFactor;
-        return;
-      }
-      mat.blending = THREE.CustomBlending;
-      if (pma) {
-        mat.blendSrc = THREE.OneFactor;
-        mat.blendDst = THREE.OneMinusSrcAlphaFactor;
       } else {
-        mat.blendSrc = THREE.SrcAlphaFactor;
-        mat.blendDst = THREE.OneMinusSrcAlphaFactor;
+        mat.blending = THREE.CustomBlending;
+        if (pma) {
+          premulFragment = 1;
+          mat.blendSrc = THREE.OneFactor;
+          mat.blendDst = THREE.OneMinusSrcAlphaFactor;
+        } else {
+          mat.blendSrc = THREE.SrcAlphaFactor;
+          mat.blendDst = THREE.OneMinusSrcAlphaFactor;
+        }
       }
+
+      mat.premultipliedAlpha = premulFragment > 0;
+      try {
+        if (mat.uniforms?.uPremulFragment) mat.uniforms.uPremulFragment.value = premulFragment;
+        if (mat.uniforms?.uStraightAlphaSample) mat.uniforms.uStraightAlphaSample.value = straightSample;
+      } catch (_) {}
+
       return;
     }
 
@@ -862,6 +1052,170 @@ export class SequencerEffectMirror {
     mat.blendEquation = THREE.AddEquation;
     mat.blendSrc = THREE.SrcAlphaFactor;
     mat.blendDst = THREE.OneMinusSrcAlphaFactor;
+  }
+
+  /**
+   * Softens mirrored Sequencer / JB2A output on the floor bus (often reads as
+   * blown-out vs PIXI). Override with `MapShine.__sequencerMirrorExternalDiffuseGain`.
+   * @returns {number}
+   */
+  _resolveExternalDiffuseGain() {
+    const gRaw = Number(globalThis.window?.MapShine?.__sequencerMirrorExternalDiffuseGain);
+    if (Number.isFinite(gRaw) && gRaw > 0) return Math.min(2, Math.max(0.03, gRaw));
+    const k = this._textureKind;
+    if (k === 'pixiCanvas') return 0.74;
+    if (k === 'spritesheet') return 0.8;
+    if (k === 'image') return 0.84;
+    if (k === 'video') return 0.82;
+    return 0.85;
+  }
+
+  /**
+   * Per-channel multiplier from `MapShine.__sequencerMirrorExternalTint` ({r,g,b}).
+   * Each channel is clamped non-negative; missing / invalid values fall back to 1.
+   * @returns {{r:number,g:number,b:number}}
+   */
+  _resolveExternalTint() {
+    try {
+      const t = globalThis.window?.MapShine?.__sequencerMirrorExternalTint;
+      if (t && typeof t === 'object') {
+        const r = Number(t.r);
+        const g = Number(t.g);
+        const b = Number(t.b);
+        return {
+          r: Number.isFinite(r) && r >= 0 ? r : 1,
+          g: Number.isFinite(g) && g >= 0 ? g : 1,
+          b: Number.isFinite(b) && b >= 0 ? b : 1,
+        };
+      }
+    } catch (_) {}
+    return { r: 1, g: 1, b: 1 };
+  }
+
+  /**
+   * Applies `_resolveExternalDiffuseGain` × `_resolveExternalTint` to the
+   * active Three material. Video uses uniforms; MeshBasicMaterial uses `.color`.
+   */
+  _syncExternalDiffuseGain() {
+    const gain = this._resolveExternalDiffuseGain();
+    const tint = this._resolveExternalTint();
+    const mat = this._material;
+    if (!mat || typeof mat !== 'object') return;
+
+    if (this._textureKind === 'video' && mat.uniforms?.uDiffuseGain) {
+      mat.uniforms.uDiffuseGain.value = gain;
+      if (mat.uniforms.uTint?.value && typeof mat.uniforms.uTint.value.set === 'function') {
+        mat.uniforms.uTint.value.set(tint.r, tint.g, tint.b);
+      }
+      return;
+    }
+    try {
+      if (mat.color && typeof mat.color.setRGB === 'function') {
+        mat.color.setRGB(gain * tint.r, gain * tint.g, gain * tint.b);
+      }
+    } catch (_) {}
+  }
+
+  /**
+   * Parallel component of the combined sprite / pivot correction along the cast
+   * axis, scaled by `MapShine.__sequencerMirrorAlongCastPlacementMul` (default 0.7).
+   * @param {number} ex
+   * @param {number} ey
+   * @param {any} effect
+   * @param {number} rotation
+   * @returns {{ x: number, y: number }}
+   */
+  _retreatExtraOffsetAlongCast(ex, ey, effect, rotation) {
+    if (!Number.isFinite(ex) || !Number.isFinite(ey)) return { x: 0, y: 0 };
+    let ux = NaN;
+    let uy = NaN;
+    try {
+      const src = effect?.sourcePosition;
+      const tgt = effect?.targetPosition;
+      if (src && tgt && Number.isFinite(src.x) && Number.isFinite(tgt.x)) {
+        const dx = tgt.x - src.x;
+        const dy = tgt.y - src.y;
+        const len = Math.hypot(dx, dy);
+        if (len > 1e-2) {
+          ux = dx / len;
+          uy = dy / len;
+        }
+      }
+    } catch (_) {}
+    if (!Number.isFinite(ux) || !Number.isFinite(uy)) {
+      ux = Math.cos(rotation);
+      uy = Math.sin(rotation);
+    }
+    let mul = Number(globalThis.window?.MapShine?.__sequencerMirrorAlongCastPlacementMul);
+    if (!Number.isFinite(mul) || mul <= 0) mul = 0.7;
+    mul = Math.min(1.5, Math.max(0.25, mul));
+    const dot = ex * ux + ey * uy;
+    const px = dot * ux;
+    const py = dot * uy;
+    const qx = ex - px;
+    const qy = ey - py;
+    return { x: qx + mul * px, y: qy + mul * py };
+  }
+
+  /**
+   * @returns {number}
+   */
+  _resolveAlongCastPlacementMul() {
+    let mul = Number(globalThis.window?.MapShine?.__sequencerMirrorAlongCastPlacementMul);
+    if (!Number.isFinite(mul) || mul <= 0) mul = 0.7;
+    return Math.min(1.5, Math.max(0.25, mul));
+  }
+
+  /**
+   * Extra uniform scale on the mirror quad after footprint resolution (getBounds
+   * / natural size). `MapShine.__sequencerMirrorMeshScaleMul`, default 1.
+   * @returns {number}
+   */
+  _resolveMirrorMeshScaleMul() {
+    const g = Number(globalThis.window?.MapShine?.__sequencerMirrorMeshScaleMul);
+    if (!Number.isFinite(g) || g <= 0) return 1;
+    return Math.min(6, Math.max(0.05, g));
+  }
+
+  /**
+   * Extra scene-pixel translation along source→target (positive nudges the
+   * mesh toward the target). `MapShine.__sequencerMirrorAlongCastTargetNudgePx`.
+   * @returns {number}
+   */
+  _resolveAlongCastTargetNudgePx() {
+    const g = Number(globalThis.window?.MapShine?.__sequencerMirrorAlongCastTargetNudgePx);
+    if (!Number.isFinite(g)) return 0;
+    return Math.min(2000, Math.max(-2000, g));
+  }
+
+  /**
+   * @param {any} effect
+   * @param {number} rotation  Effect rotation (radians), cast fallback if no src/tgt.
+   * @returns {{ x: number, y: number }}
+   */
+  _nudgeAlongCastTowardTargetPx(effect, rotation) {
+    const px = this._resolveAlongCastTargetNudgePx();
+    if (px === 0) return { x: 0, y: 0 };
+    let ux = NaN;
+    let uy = NaN;
+    try {
+      const src = effect?.sourcePosition;
+      const tgt = effect?.targetPosition;
+      if (src && tgt && Number.isFinite(src.x) && Number.isFinite(tgt.x)) {
+        const dx = tgt.x - src.x;
+        const dy = tgt.y - src.y;
+        const len = Math.hypot(dx, dy);
+        if (len > 1e-2) {
+          ux = dx / len;
+          uy = dy / len;
+        }
+      }
+    } catch (_) {}
+    if (!Number.isFinite(ux) || !Number.isFinite(uy)) {
+      ux = Math.cos(rotation);
+      uy = Math.sin(rotation);
+    }
+    return { x: ux * px, y: uy * px };
   }
 
   // ── Internal: texture acquisition ──────────────────────────────────────────
@@ -1100,6 +1454,7 @@ export class SequencerEffectMirror {
     try { oldTexture?.dispose?.(); } catch (_) {}
     this._refreshNaturalSizeFromSource();
     try { this._syncMaterialBlendFromPixi(THREE); } catch (_) {}
+    try { this._syncExternalDiffuseGain(); } catch (_) {}
     return true;
   }
 
@@ -1387,13 +1742,15 @@ export class SequencerEffectMirror {
   _resolveDisplaySize(sprite, source = null, preferred = null) {
     const candidates = [];
     if (preferred) candidates.push(preferred);
-    candidates.push(this._readEffectDataSize());
+    // Prefer live PIXI display dimensions over raw media pixels (e.g. 1920×1080
+    // WebM drawn in a 400px-wide quad) and over token bounds from effect refs.
     try { candidates.push({ width: Number(sprite?.width), height: Number(sprite?.height) }); } catch (_) {}
     try {
       const tex = sprite?.texture ?? null;
       const rect = tex?.orig ?? tex?.frame ?? null;
       candidates.push({ width: Number(rect?.width), height: Number(rect?.height) });
     } catch (_) {}
+    candidates.push(this._readEffectDataSize());
     if (source) {
       candidates.push({
         width: Number(source.videoWidth ?? source.naturalWidth ?? source.width),
@@ -1498,12 +1855,231 @@ export class SequencerEffectMirror {
   _refreshNaturalSizeFromSource() {
     const sprite = this._resolveSprite();
     if (!sprite) return;
-    const current = this._naturalSize;
-    if (this._isMeaningfulWorldSize(current.width, current.height)) return;
     const next = this._resolveDisplaySize(sprite, this._mediaSource);
-    if (next.width > current.width || next.height > current.height) {
+    const cur = this._naturalSize;
+    if (!this._isMeaningfulWorldSize(cur.width, cur.height)) {
+      this._naturalSize = next;
+      return;
+    }
+    if (!this._isMeaningfulWorldSize(next.width, next.height)) return;
+    // Grow when we only had a placeholder, or shrink when we latched native
+    // video / token bounds but the live sprite footprint is much smaller.
+    const curA = cur.width * cur.height;
+    const nextA = next.width * next.height;
+    if (next.width > cur.width || next.height > cur.height) {
+      this._naturalSize = next;
+    } else if (curA > nextA * 2.25) {
       this._naturalSize = next;
     }
+  }
+
+  _resolveEffectPosition() {
+    const effect = this._effect;
+    let fx = Number.NaN;
+    let fy = Number.NaN;
+    try {
+      const p = effect?.position ?? null;
+      if (p && Number.isFinite(Number(p.x)) && Number.isFinite(Number(p.y))) {
+        fx = Number(p.x);
+        fy = Number(p.y);
+      }
+    } catch (_) {}
+    if (!Number.isFinite(fx) || !Number.isFinite(fy)) {
+      try {
+        if (Number.isFinite(Number(effect?.x)) && Number.isFinite(Number(effect?.y))) {
+          fx = Number(effect.x);
+          fy = Number(effect.y);
+        }
+      } catch (_) {}
+    }
+    if (!Number.isFinite(fx) || !Number.isFinite(fy)) {
+      try {
+        const c = effect?.spriteContainer ?? effect?.rotationContainer ?? null;
+        if (c && Number.isFinite(Number(c.x)) && Number.isFinite(Number(c.y))) {
+          fx = Number(c.x);
+          fy = Number(c.y);
+        }
+      } catch (_) {}
+    }
+    if (!Number.isFinite(fx) || !Number.isFinite(fy)) {
+      try {
+        const sprite = this._resolveSprite();
+        const wt = sprite?.worldTransform ?? effect?.worldTransform ?? null;
+        if (wt && Number.isFinite(Number(wt.tx)) && Number.isFinite(Number(wt.ty))) {
+          fx = Number(wt.tx);
+          fy = Number(wt.ty);
+        }
+      } catch (_) {}
+    }
+    return { x: fx, y: fy };
+  }
+
+  /**
+   * Vector from the CanvasEffect root to the Sequencer sprite root in PIXI
+   * global space (`worldTransform.tx/ty` difference). Same units as Foundry
+   * scene placement when parent chain matches; avoids `worldPosition` stage
+   * scaling, which does not match MSA's bus scene coordinates.
+   * @param {any} effect
+   * @returns {{ x: number, y: number }}
+   */
+  _resolveSpriteRootDeltaFromEffect(effect) {
+    try {
+      const root = effect?.sprite?.managedSprite ?? effect?.sprite ?? null;
+      if (!root?.worldTransform || !effect?.worldTransform) return { x: 0, y: 0 };
+      const wtR = root.worldTransform;
+      const wtE = effect.worldTransform;
+      const dx = Number(wtR.tx) - Number(wtE.tx);
+      const dy = Number(wtR.ty) - Number(wtE.ty);
+      if (!Number.isFinite(dx) || !Number.isFinite(dy)) return { x: 0, y: 0 };
+      return { x: dx, y: dy };
+    } catch (_) {
+      return { x: 0, y: 0 };
+    }
+  }
+
+  /**
+   * Canvas-space XY of the Sequencer sprite root, matching `CanvasEffect.worldPosition`
+   * (stage worldTransform normalization). Uses the getter when present, else the
+   * same math on `managedSprite ?? sprite`.
+   * @param {any} effect
+   * @returns {{ x: number, y: number }|null}
+   */
+  _resolveSequencerCanvasWorldXY(effect) {
+    try {
+      if (effect && typeof effect.worldPosition === 'object' && effect.worldPosition != null) {
+        const wp = effect.worldPosition;
+        const x = Number(wp.x);
+        const y = Number(wp.y);
+        if (Number.isFinite(x) && Number.isFinite(y)) return { x, y };
+      }
+    } catch (_) {}
+    try {
+      const root = effect?.sprite?.managedSprite ?? effect?.sprite ?? null;
+      if (!root?.worldTransform) return null;
+      const stage = globalThis.canvas?.stage;
+      const t = stage?.worldTransform;
+      if (!t) return null;
+      const wt = root.worldTransform;
+      const scale = Number(stage.scale?.x) || 1;
+      const x = (Number(wt.tx) - Number(t.tx)) / scale;
+      const y = (Number(wt.ty) - Number(t.ty)) / scale;
+      if (Number.isFinite(x) && Number.isFinite(y)) return { x, y };
+    } catch (_) {}
+    return null;
+  }
+
+  /**
+   * Sequencer's `_setAnchors()` shifts `rotateTowards` effects forward by
+   * setting `spriteContainer.pivot.x = sprite.width * -0.5` when no explicit
+   * anchor/template is present. Mirror that center shift in world space.
+   * @param {number} width
+   * @param {number} rotation
+   * @returns {{x:number,y:number}}
+   */
+  _resolveRotateTowardsForwardOffset(width, rotation) {
+    try {
+      const d = this._effect?.data ?? this._effect?.document ?? this._effect ?? null;
+      // Sequencer: `spriteContainer.pivot.x = sprite.width * -0.5` (half-width
+      // along the cast axis). Default multiplier 1 matches Sequencer; raise
+      // `MapShine.__sequencerMirrorRotateTowardsForwardMul` if a pack needs more.
+      let mul = Number(globalThis.window?.MapShine?.__sequencerMirrorRotateTowardsForwardMul);
+      if (!Number.isFinite(mul) || mul <= 0) mul = 1;
+      let sign = Number(globalThis.window?.MapShine?.__sequencerMirrorRotateTowardsForwardSign);
+      if (!Number.isFinite(sign) || sign === 0) sign = 1;
+      const amount = Number(width) * 0.5 * mul * sign;
+      if (!Number.isFinite(amount) || amount <= 0) return { x: 0, y: 0 };
+
+      if (d?.rotateTowards && !d.rotateTowards?.template && !d.anchor) {
+        return {
+          x: Math.cos(rotation) * amount,
+          y: Math.sin(rotation) * amount,
+        };
+      }
+
+      // Macros / Automated Evocations may omit `rotateTowards` while still using
+      // Sequencer `sourcePosition` → `targetPosition` for line-like placement.
+      try {
+        const eff = this._effect;
+        const src = eff?.sourcePosition;
+        const tgt = eff?.targetPosition;
+        if (src && tgt && Number.isFinite(src.x) && Number.isFinite(tgt.x)) {
+          const dx = tgt.x - src.x;
+          const dy = tgt.y - src.y;
+          const len = Math.hypot(dx, dy);
+          if (len > 1e-2) {
+            const px = Number(eff?.position?.x);
+            const py = Number(eff?.position?.y);
+            if (Number.isFinite(px) && Number.isFinite(py)) {
+              const ds = Math.hypot(px - src.x, py - src.y);
+              const dt = Math.hypot(px - tgt.x, py - tgt.y);
+              if (ds < dt * 1.15) {
+                return { x: (dx / len) * amount, y: (dy / len) * amount };
+              }
+            }
+          }
+        }
+      } catch (_) {}
+
+      return { x: 0, y: 0 };
+    } catch (_) {
+      return { x: 0, y: 0 };
+    }
+  }
+
+  _resolvePixiVisualBounds() {
+    const sprite = this._resolveSprite();
+    if (!sprite || typeof sprite !== 'object') return null;
+    const oldRenderable = sprite.renderable;
+    try {
+      // MSA suppresses the PIXI sprite, but bounds are still the best source of
+      // Sequencer's post-anchor / post-pivot visual center. Temporarily enable
+      // renderability for the calculation only; it does not draw synchronously.
+      if (typeof sprite.renderable === 'boolean') sprite.renderable = true;
+      const bounds = typeof sprite.getBounds === 'function' ? sprite.getBounds() : null;
+      const x = Number(bounds?.x);
+      const y = Number(bounds?.y);
+      const width = Number(bounds?.width);
+      const height = Number(bounds?.height);
+      if (Number.isFinite(x) && Number.isFinite(y) && this._isMeaningfulWorldSize(width, height)) {
+        return {
+          x,
+          y,
+          width,
+          height,
+          centerX: x + width / 2,
+          centerY: y + height / 2,
+        };
+      }
+    } catch (_) {
+      // Fall back below.
+    } finally {
+      try {
+        if (typeof oldRenderable === 'boolean') sprite.renderable = oldRenderable;
+      } catch (_) {}
+    }
+    return null;
+  }
+
+  _resolvePixiVisualSize(bounds = null) {
+    const sprite = this._resolveSprite();
+    let width = Number.NaN;
+    let height = Number.NaN;
+    try {
+      width = Number(sprite?.width);
+      height = Number(sprite?.height);
+    } catch (_) {}
+    if (!this._isMeaningfulWorldSize(width, height)) {
+      width = Number(bounds?.width);
+      height = Number(bounds?.height);
+    }
+    if (!this._isMeaningfulWorldSize(width, height)) {
+      width = Number(this._naturalSize.width) * this._readContainerScaleX();
+      height = Number(this._naturalSize.height) * this._readContainerScaleY();
+    }
+    return {
+      width: Number.isFinite(width) && width > 0 ? width : 1,
+      height: Number.isFinite(height) && height > 0 ? height : 1,
+    };
   }
 
   /**
@@ -1562,12 +2138,17 @@ export class SequencerEffectMirror {
       const cached = this._pixiCanvasFrameCache.get(frameIdx);
       if (cached instanceof HTMLCanvasElement) {
         ctx.drawImage(cached, 0, 0, cached.width, cached.height, 0, 0, canvas.width, canvas.height);
+        this._pixiCanvasIncludesSpriteState = cached.__msaSequencerIncludesSpriteState === true;
         this._texture.needsUpdate = true;
         return;
       }
 
-      const drawn = this._drawPixiTextureFrameToCanvas(ctx, sprite, canvas.width, canvas.height)
-        || this._extractPixiSpriteToCanvas(ctx, sprite, canvas.width, canvas.height);
+      let drawn = this._drawPixiTextureFrameToCanvas(ctx, sprite, canvas.width, canvas.height);
+      this._pixiCanvasIncludesSpriteState = false;
+      if (!drawn) {
+        drawn = this._extractPixiSpriteToCanvas(ctx, sprite, canvas.width, canvas.height);
+        if (drawn) this._pixiCanvasIncludesSpriteState = true;
+      }
       if (drawn) this._cachePixiCanvasFrame(frameIdx, canvas);
       this._texture.needsUpdate = true;
     } catch (_) {}
@@ -1597,6 +2178,7 @@ export class SequencerEffectMirror {
       const ctx = copy.getContext('2d', { willReadFrequently: false });
       if (!ctx) return;
       ctx.drawImage(source, 0, 0);
+      copy.__msaSequencerIncludesSpriteState = this._pixiCanvasIncludesSpriteState === true;
       this._pixiCanvasFrameCache.set(frameIdx, copy);
     } catch (_) {}
   }
@@ -1722,6 +2304,108 @@ export class SequencerEffectMirror {
     return 1;
   }
 
+  /**
+   * PIXI `canvas.stage.scale` / SceneComposer `currentZoom` — the same factor
+   * camera-sync uses for FOV. `getBounds()` width/height are in global space
+   * and **include** this scale; FloorRenderBus mesh units are **scene** space where
+   * the Three camera already applies zoom, so footprint from bounds must be divided
+   * by this value to stay zoom-stable vs Sequencer.
+   * @returns {number} clamped to a small positive floor
+   */
+  _resolveCanvasStageZoom() {
+    try {
+      const st = Number(globalThis.canvas?.stage?.scale?.x);
+      if (Number.isFinite(st) && st > 1e-6) return Math.max(1e-6, st);
+    } catch (_) {}
+    try {
+      const z = Number(this._sceneComposer?.currentZoom);
+      if (Number.isFinite(z) && z > 1e-6) return Math.max(1e-6, z);
+    } catch (_) {}
+    return 1;
+  }
+
+  /**
+   * Legacy mesh footprint: `_naturalSize` × Sequencer `spriteContainer` scale
+   * only (no ancestor chain). Used when `__sequencerMirrorScalePreferGetBounds`
+   * is false or as a fallback when bounds are unavailable.
+   * @returns {{ width: number, height: number }}
+   */
+  _resolveLegacyNaturalFootprint() {
+    const scaleX = this._readContainerScaleX();
+    const scaleY = this._readContainerScaleY();
+    return {
+      width: Math.max(1, this._naturalSize.width * scaleX),
+      height: Math.max(1, this._naturalSize.height * scaleY),
+    };
+  }
+
+  /**
+   * Footprint of the mirrored quad in **Foundry scene pixels** (same space as
+   * `effect.position`). Prefer PIXI `getBounds()` on the drawn sprite / its
+   * containers so ranged spells, distance stretch, and nested scales match what
+   * Sequencer renders; those bounds include canvas stage scale (FOV zoom), which
+   * we remove so mesh scale matches bus world units (the Three camera already zooms).
+   * Falls back to {@link _resolveLegacyNaturalFootprint}.
+   *
+   * F12: set `MapShine.__sequencerMirrorScalePreferGetBounds = false` to revert
+   * to natural×container-only sizing.
+   *
+   * @returns {{ width: number, height: number }}
+   */
+  _resolveMirrorFootprintInScenePixels() {
+    try {
+      const v = globalThis.window?.MapShine?.__sequencerMirrorScalePreferGetBounds;
+      if (v === false || v === 0 || v === 'false') {
+        return this._resolveLegacyNaturalFootprint();
+      }
+    } catch (_) {}
+
+    const stageZoom = this._resolveCanvasStageZoom();
+
+    const boundsSize = (obj) => {
+      if (!obj || typeof obj.getBounds !== 'function') return null;
+      let oldR;
+      try {
+        if (typeof obj.renderable === 'boolean') {
+          oldR = obj.renderable;
+          obj.renderable = true;
+        }
+        const b = obj.getBounds();
+        const rw = Number(b?.width);
+        const rh = Number(b?.height);
+        if (!this._isMeaningfulWorldSize(rw, rh)) return null;
+        return { width: rw / stageZoom, height: rh / stageZoom };
+      } catch (_) {
+        // fall through
+      } finally {
+        try {
+          if (typeof oldR === 'boolean') obj.renderable = oldR;
+        } catch (_) {}
+      }
+      return null;
+    };
+
+    const vb = this._resolvePixiVisualBounds();
+    if (vb && this._isMeaningfulWorldSize(vb.width, vb.height)) {
+      return { width: vb.width / stageZoom, height: vb.height / stageZoom };
+    }
+
+    try {
+      const eff = this._effect;
+      let sz = boundsSize(eff?.spriteContainer);
+      if (sz) return sz;
+      sz = boundsSize(eff?.rotationContainer);
+      if (sz) return sz;
+    } catch (_) {}
+
+    const pix = this._resolvePixiVisualSize(vb);
+    if (this._isMeaningfulWorldSize(pix.width, pix.height)) {
+      return { width: pix.width, height: pix.height };
+    }
+
+    return this._resolveLegacyNaturalFootprint();
+  }
+
   _resolveSortLayer() {
     const e = this._effect;
     try {
@@ -1744,13 +2428,77 @@ export class SequencerEffectMirror {
     return 0;
   }
 
+  /**
+   * Foundry / Sequencer canvas elevation for a source or target reference
+   * (token, tile, template, …). Matches the intent of Sequencer's
+   * `canvaslib.get_object_elevation` for common placeables.
+   * @param {unknown} obj
+   * @returns {number} finite elevation or NaN if unknown
+   */
+  _resolveObjectCanvasElevation(obj) {
+    if (obj == null || typeof obj !== 'object') return Number.NaN;
+    try {
+      const d = obj.document ?? null;
+      if (d && Number.isFinite(Number(d.elevation))) return Number(d.elevation);
+    } catch (_) {}
+    try {
+      if (Number.isFinite(Number(obj.elevation))) return Number(obj.elevation);
+    } catch (_) {}
+    return Number.NaN;
+  }
+
+  /**
+   * Resolved effect elevation for mirror Z / floor banding — mirrors Sequencer
+   * `CanvasEffect#updateElevation()` (`data.elevation` may be `{ elevation, absolute }`,
+   * combined with max(source,target) when not absolute).
+   * @returns {number}
+   */
   _resolveElevation() {
     const e = this._effect;
     try {
-      const ev = Number(e?.elevation ?? e?.data?.elevation);
-      if (Number.isFinite(ev)) return ev;
+      const inst = Number(e?.elevation);
+      if (Number.isFinite(inst)) return inst;
     } catch (_) {}
+
+    try {
+      const raw = e?.data?.elevation;
+      if (raw != null && typeof raw === 'object') {
+        let effectElevation = Number(raw.elevation);
+        if (!Number.isFinite(effectElevation)) effectElevation = 0;
+        if (raw.absolute === true) return effectElevation;
+        const srcEl = this._resolveObjectCanvasElevation(e?.source);
+        const tgtEl = this._resolveObjectCanvasElevation(e?.target);
+        const targetElevation = Math.max(
+          Number.isFinite(srcEl) ? srcEl : 0,
+          Number.isFinite(tgtEl) ? tgtEl : 0,
+        );
+        return effectElevation + targetElevation;
+      }
+      const flat = Number(raw);
+      if (Number.isFinite(flat)) return flat;
+    } catch (_) {}
+
     return 0;
+  }
+
+  /**
+   * World Z for the mirror on {@link FloorRenderBus} — bus **tiles** use
+   * `GROUND_Z + floorIndex * Z_PER_FLOOR`; we follow the same base + floor and
+   * add a fractional elevation term (legacy behaviour) plus optional bias.
+   * @returns {number}
+   */
+  _resolveMirrorMeshWorldZ() {
+    const gz = Number(this._sceneComposer?.groundZ);
+    const baseZ = Number.isFinite(gz) ? gz : GROUND_Z;
+    const floorIdx = this._resolveFloorIndex();
+    const fi = Number.isFinite(Number(floorIdx)) ? Number(floorIdx) : 0;
+    const elev = this._resolveElevation();
+    const e = Number.isFinite(elev) ? elev : 0;
+    let bias = Number(globalThis.window?.MapShine?.__sequencerMirrorZBias);
+    if (!Number.isFinite(bias)) bias = 0;
+    bias = Math.min(5000, Math.max(-5000, bias));
+    const elevZ = e / 100;
+    return baseZ + fi * Z_PER_FLOOR + elevZ + bias;
   }
 
   _resolveFloorIndex() {

@@ -686,6 +686,15 @@ export class LightingEffectV2 {
     return this._lightRT?.texture ?? null;
   }
 
+  /**
+   * Latest window-glow accumulation texture, used by downstream post passes
+   * that need to identify directly illuminated pixels.
+   * @returns {THREE.Texture|null}
+   */
+  get windowLightTexture() {
+    return this._windowLightRT?.texture ?? null;
+  }
+
   // ── UI schema (moved from V1 LightingEffect) ─────────────────────────────
 
   static getControlSchema() {

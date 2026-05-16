@@ -254,6 +254,84 @@ export class ExternalEffectsCompositor {
   }
 
   /**
+   * Apply the Tweakpane "Post" panel state (DSN look + Sequencer mirror knobs)
+   * to the live adapters/pass. Safe to call before initialization completes;
+   * missing pieces are skipped. Pass a partial config — only present keys are
+   * applied.
+   *
+   * Shape:
+   * ```
+   * {
+   *   dsn:       { enabled, performanceMode, maxPixelRatio, maxUploadFps,
+   *                gracePeriodMs, opacity, tint:{r,g,b}, brightness,
+   *                saturation, contrast, gamma },
+   *   sequencer: { enabled, brightness, tint:{r,g,b}, alongCastPlacementMul,
+   *                mirrorScaleMul, alongCastTargetNudgePx, mirrorZBias,
+   *                rotateTowardsForwardMul, reverseForwardPivot }
+   * }
+   * ```
+   * @param {Record<string, any>} post
+   */
+  applyPostSettings(post) {
+    if (!post || typeof post !== 'object') return;
+
+    const dsn = post.dsn ?? null;
+    if (dsn && typeof dsn === 'object') {
+      try {
+        if (typeof dsn.enabled === 'boolean') {
+          this.setAdapterEnabled('diceSoNice', dsn.enabled);
+        }
+        if (typeof dsn.performanceMode === 'string' && this.diceSoNice?.setPerformanceMode) {
+          this.diceSoNice.setPerformanceMode(dsn.performanceMode);
+        }
+        if (this.diceSoNice) {
+          if (Number.isFinite(Number(dsn.maxPixelRatio))) this.diceSoNice.setMaxPixelRatio?.(Number(dsn.maxPixelRatio));
+          if (Number.isFinite(Number(dsn.maxUploadFps))) this.diceSoNice.setMaxUploadFps?.(Number(dsn.maxUploadFps));
+          if (Number.isFinite(Number(dsn.gracePeriodMs))) this.diceSoNice.setGracePeriodMs?.(Number(dsn.gracePeriodMs));
+        }
+        if (this.dsnPass) {
+          if (Number.isFinite(Number(dsn.opacity))) this.dsnPass.setOpacity?.(Number(dsn.opacity));
+          if (dsn.tint && typeof dsn.tint === 'object') {
+            this.dsnPass.setTint?.(Number(dsn.tint.r), Number(dsn.tint.g), Number(dsn.tint.b));
+          }
+          if (Number.isFinite(Number(dsn.brightness))) this.dsnPass.setBrightness?.(Number(dsn.brightness));
+          if (Number.isFinite(Number(dsn.saturation))) this.dsnPass.setSaturation?.(Number(dsn.saturation));
+          if (Number.isFinite(Number(dsn.contrast))) this.dsnPass.setContrast?.(Number(dsn.contrast));
+          if (Number.isFinite(Number(dsn.gamma))) this.dsnPass.setGamma?.(Number(dsn.gamma));
+        }
+      } catch (e) {
+        log.warn('applyPostSettings(dsn) failed:', e);
+      }
+    }
+
+    const seq = post.sequencer ?? null;
+    if (seq && typeof seq === 'object') {
+      try {
+        if (typeof seq.enabled === 'boolean') {
+          this.setAdapterEnabled('sequencer', seq.enabled);
+        }
+        const adapter = this.sequencer;
+        if (adapter) {
+          if (Number.isFinite(Number(seq.brightness))) adapter.setExternalDiffuseGain?.(Number(seq.brightness));
+          if (seq.tint && typeof seq.tint === 'object') {
+            adapter.setExternalTint?.(Number(seq.tint.r), Number(seq.tint.g), Number(seq.tint.b));
+          }
+          if (Number.isFinite(Number(seq.alongCastPlacementMul))) adapter.setAlongCastPlacementMul?.(Number(seq.alongCastPlacementMul));
+          if (Number.isFinite(Number(seq.mirrorScaleMul))) adapter.setMirrorMeshScaleMul?.(Number(seq.mirrorScaleMul));
+          if (Number.isFinite(Number(seq.alongCastTargetNudgePx))) adapter.setAlongCastTargetNudgePx?.(Number(seq.alongCastTargetNudgePx));
+          if (Number.isFinite(Number(seq.mirrorZBias))) adapter.setMirrorZBias?.(Number(seq.mirrorZBias));
+          if (Number.isFinite(Number(seq.rotateTowardsForwardMul))) adapter.setRotateTowardsForwardMul?.(Number(seq.rotateTowardsForwardMul));
+          if (typeof seq.reverseForwardPivot === 'boolean') {
+            adapter.setRotateTowardsForwardSign?.(seq.reverseForwardPivot ? -1 : 1);
+          }
+        }
+      } catch (e) {
+        log.warn('applyPostSettings(sequencer) failed:', e);
+      }
+    }
+  }
+
+  /**
    * Set adapter enabled state. Disabling causes the adapter to stop spawning
    * new mirrors and (for DSN) restores the DSN canvas to its default DOM
    * visibility. Existing mirrors are left to time out naturally.

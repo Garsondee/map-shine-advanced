@@ -148,6 +148,117 @@ export class SequencerAdapter {
   }
 
   /**
+   * Master brightness for mirrored Sequencer / JB2A clips. Backed by
+   * `MapShine.__sequencerMirrorExternalDiffuseGain` (clamped 0.03–2 inside
+   * the mirror). Passing a non-finite value clears the override and the
+   * per-texture-kind defaults take effect again.
+   * @param {number} value
+   */
+  setExternalDiffuseGain(value) {
+    const root = (globalThis.window ?? globalThis).MapShine ?? null;
+    if (!root) return;
+    const v = Number(value);
+    if (!Number.isFinite(v) || v <= 0) {
+      delete root.__sequencerMirrorExternalDiffuseGain;
+      return;
+    }
+    root.__sequencerMirrorExternalDiffuseGain = Math.min(2, Math.max(0.03, v));
+  }
+
+  /**
+   * Per-channel multiplier for mirrored clips. Stored as `{r,g,b}` on
+   * `MapShine.__sequencerMirrorExternalTint` and read by every mirror.
+   * @param {number} r
+   * @param {number} g
+   * @param {number} b
+   */
+  setExternalTint(r, g, b) {
+    const root = (globalThis.window ?? globalThis).MapShine ?? null;
+    if (!root) return;
+    const rr = Math.max(0, Number(r));
+    const gg = Math.max(0, Number(g));
+    const bb = Math.max(0, Number(b));
+    if (![rr, gg, bb].every(Number.isFinite)) return;
+    root.__sequencerMirrorExternalTint = { r: rr, g: gg, b: bb };
+  }
+
+  /**
+   * Scale the along-cast component of the combined sprite + pivot delta.
+   * <1 retreats toward the caster, >1 pushes further forward.
+   * @param {number} value
+   */
+  setAlongCastPlacementMul(value) {
+    const root = (globalThis.window ?? globalThis).MapShine ?? null;
+    if (!root) return;
+    const v = Number(value);
+    if (!Number.isFinite(v) || v <= 0) return;
+    root.__sequencerMirrorAlongCastPlacementMul = v;
+  }
+
+  /**
+   * Uniform scale on mirror mesh width/height after footprint resolution.
+   * `MapShine.__sequencerMirrorMeshScaleMul` (default 1).
+   * @param {number} value
+   */
+  setMirrorMeshScaleMul(value) {
+    const root = (globalThis.window ?? globalThis).MapShine ?? null;
+    if (!root) return;
+    const v = Number(value);
+    if (!Number.isFinite(v) || v <= 0) return;
+    root.__sequencerMirrorMeshScaleMul = v;
+  }
+
+  /**
+   * Scene-pixel shift along source→target (positive = toward target).
+   * `MapShine.__sequencerMirrorAlongCastTargetNudgePx`.
+   * @param {number} value
+   */
+  setAlongCastTargetNudgePx(value) {
+    const root = (globalThis.window ?? globalThis).MapShine ?? null;
+    if (!root) return;
+    const v = Number(value);
+    if (!Number.isFinite(v)) return;
+    root.__sequencerMirrorAlongCastTargetNudgePx = v;
+  }
+
+  /**
+   * Extra world-space Z on the mirror mesh (bus scene). `MapShine.__sequencerMirrorZBias`.
+   * @param {number} value
+   */
+  setMirrorZBias(value) {
+    const root = (globalThis.window ?? globalThis).MapShine ?? null;
+    if (!root) return;
+    const v = Number(value);
+    if (!Number.isFinite(v)) return;
+    root.__sequencerMirrorZBias = v;
+  }
+
+  /**
+   * Multiplier for the analytic "half-width forward" pivot Sequencer applies
+   * to `rotateTowards` effects. Default 1.
+   * @param {number} value
+   */
+  setRotateTowardsForwardMul(value) {
+    const root = (globalThis.window ?? globalThis).MapShine ?? null;
+    if (!root) return;
+    const v = Number(value);
+    if (!Number.isFinite(v) || v < 0) return;
+    root.__sequencerMirrorRotateTowardsForwardMul = v;
+  }
+
+  /**
+   * Direction of the forward pivot. ≥0 = forward (1), <0 = back (-1).
+   * @param {number} sign
+   */
+  setRotateTowardsForwardSign(sign) {
+    const root = (globalThis.window ?? globalThis).MapShine ?? null;
+    if (!root) return;
+    const v = Number(sign);
+    if (!Number.isFinite(v) || v === 0) return;
+    root.__sequencerMirrorRotateTowardsForwardSign = v > 0 ? 1 : -1;
+  }
+
+  /**
    * Called once per FloorCompositor render before the bus scene is rendered.
    * Currently a no-op — transform sync runs on the PIXI ticker — but reserved
    * for future per-frame validation (e.g. floor-change reroute).

@@ -5570,6 +5570,11 @@ export class FloorCompositor {
       // Sky color grading
       if (resolveEffectEnabled(this._skyColorEffect)) {
         const skyOut = (currentInput === levelPostA) ? levelPostB : levelPostA;
+        const lightingForSky = resolveEffectEnabled(this._lightingEffect) ? this._lightingEffect : null;
+        this._skyColorEffect?.setIlluminationMasks?.(
+          lightingForSky?.dynamicLightTexture ?? null,
+          lightingForSky?.windowLightTexture ?? null,
+        );
         this._profileEffectCall('skyColor', 'render', () => {
           withSceneScissor(this.renderer, () => {
             this._skyColorEffect.render(this.renderer, currentInput, skyOut);

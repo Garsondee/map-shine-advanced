@@ -181,6 +181,8 @@ export class SkyColorEffectV2 {
 
     /** @type {THREE.DataTexture|null} */
     this._fallbackWhite = null;
+    /** @type {THREE.DataTexture|null} */
+    this._fallbackBlack = null;
   }
 
   // ── UI schema (moved from V1 SkyColorEffect) ─────────────────────────────
@@ -331,7 +333,7 @@ export class SkyColorEffectV2 {
     const THREE = window.THREE;
     if (!THREE) return;
 
-    this._ensureFallbackWhite();
+    this._ensureFallbackTextures();
 
     this._composeScene = new THREE.Scene();
     this._composeCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
@@ -340,9 +342,12 @@ export class SkyColorEffectV2 {
       uniforms: {
         tDiffuse:    { value: null },
         tOutdoorsMask: { value: this._fallbackWhite },
+        tDynamicLightMask: { value: this._fallbackBlack },
+        tWindowLightMask: { value: this._fallbackBlack },
         uTime:       { value: 0.0 },
         uResolution: { value: new THREE.Vector2(1, 1) },
         uHasOutdoorsMask: { value: 0.0 },
+        uHasIlluminationMask: { value: 0.0 },
         uOutdoorsMaskFlipY: { value: 0.0 },
         uViewBoundsMin: { value: new THREE.Vector2(0, 0) },
         uViewBoundsMax: { value: new THREE.Vector2(1, 1) },
@@ -382,9 +387,12 @@ export class SkyColorEffectV2 {
       fragmentShader: /* glsl */`
         uniform sampler2D tDiffuse;
         uniform sampler2D tOutdoorsMask;
+        uniform sampler2D tDynamicLightMask;
+        uniform sampler2D tWindowLightMask;
         uniform vec2 uResolution;
         uniform float uTime;
         uniform float uHasOutdoorsMask;
+        uniform float uHasIlluminationMask;
         uniform float uOutdoorsMaskFlipY;
         uniform vec2 uViewBoundsMin;
         uniform vec2 uViewBoundsMax;
@@ -471,6 +479,15 @@ export class SkyColorEffectV2 {
           return mix(1.0, outdoorMaskSample, inScene);
         }
 
+        float sampleDirectIllumination(vec2 screenUv) {
+          if (uHasIlluminationMask < 0.5) return 0.0;
+          vec3 dynamicLight = texture2D(tDynamicLightMask, screenUv).rgb;
+          vec3 windowLight = texture2D(tWindowLightMask, screenUv).rgb;
+          float dynamicI = max(dynamicLight.r, max(dynamicLight.g, dynamicLight.b));
+          float windowI = max(windowLight.r, max(windowLight.g, windowLight.b));
+          return smoothstep(0.015, 0.18, max(dynamicI, windowI));
+        }
+
         void main() {
           vec4 sceneColor = texture2D(tDiffuse, vUv);
           vec3 base = sceneColor.rgb;
@@ -498,7 +515,12 @@ export class SkyColorEffectV2 {
           float luma = dot(color, vec3(0.2126, 0.7152, 0.0722));
           vec3 gray = vec3(luma);
           float sat = max(color.r, max(color.g, color.b)) - min(color.r, min(color.g, color.b));
-          vec3 satColor = mix(gray, color, uSaturation);
+          float directIllumination = sampleDirectIllumination(vUv);
+          float litSceneLevel = max(max(base.r, base.g), base.b);
+          float darkScene = 1.0 - smoothstep(0.10, 0.38, litSceneLevel);
+          float desatEligibility = min(darkScene, 1.0 - directIllumination);
+          float saturationAmount = uSaturation < 1.0 ? mix(1.0, uSaturation, desatEligibility) : uSaturation;
+          vec3 satColor = mix(gray, color, saturationAmount);
           if (uVibrance != 0.0) {
             satColor = mix(satColor, mix(gray, satColor, 1.0 + uVibrance), (1.0 - sat));
           }
@@ -569,16 +591,27 @@ export class SkyColorEffectV2 {
   }
 
   /** @private */
-  _ensureFallbackWhite() {
+  _ensureFallbackTextures() {
     const THREE = window.THREE;
-    if (!THREE || this._fallbackWhite) return;
-    const data = new Uint8Array([255, 255, 255, 255]);
-    this._fallbackWhite = new THREE.DataTexture(data, 1, 1, THREE.RGBAFormat, THREE.UnsignedByteType);
-    this._fallbackWhite.needsUpdate = true;
-    this._fallbackWhite.flipY = false;
-    this._fallbackWhite.generateMipmaps = false;
-    this._fallbackWhite.minFilter = THREE.NearestFilter;
-    this._fallbackWhite.magFilter = THREE.NearestFilter;
+    if (!THREE) return;
+    if (!this._fallbackWhite) {
+      const white = new Uint8Array([255, 255, 255, 255]);
+      this._fallbackWhite = new THREE.DataTexture(white, 1, 1, THREE.RGBAFormat, THREE.UnsignedByteType);
+      this._fallbackWhite.needsUpdate = true;
+      this._fallbackWhite.flipY = false;
+      this._fallbackWhite.generateMipmaps = false;
+      this._fallbackWhite.minFilter = THREE.NearestFilter;
+      this._fallbackWhite.magFilter = THREE.NearestFilter;
+    }
+    if (!this._fallbackBlack) {
+      const black = new Uint8Array([0, 0, 0, 0]);
+      this._fallbackBlack = new THREE.DataTexture(black, 1, 1, THREE.RGBAFormat, THREE.UnsignedByteType);
+      this._fallbackBlack.needsUpdate = true;
+      this._fallbackBlack.flipY = false;
+      this._fallbackBlack.generateMipmaps = false;
+      this._fallbackBlack.minFilter = THREE.NearestFilter;
+      this._fallbackBlack.magFilter = THREE.NearestFilter;
+    }
   }
 
   /**
@@ -592,6 +625,19 @@ export class SkyColorEffectV2 {
     u.tOutdoorsMask.value = outdoorsTex ?? this._fallbackWhite;
     u.uHasOutdoorsMask.value = outdoorsTex ? 1.0 : 0.0;
     u.uOutdoorsMaskFlipY.value = outdoorsTex?.flipY ? 1.0 : 0.0;
+  }
+
+  /**
+   * Feed direct illumination buffers so night saturation desat can spare lit pixels.
+   * @param {THREE.Texture|null} dynamicLightTex
+   * @param {THREE.Texture|null} windowLightTex
+   */
+  setIlluminationMasks(dynamicLightTex, windowLightTex) {
+    const u = this._composeMaterial?.uniforms;
+    if (!u) return;
+    u.tDynamicLightMask.value = dynamicLightTex ?? this._fallbackBlack;
+    u.tWindowLightMask.value = windowLightTex ?? this._fallbackBlack;
+    u.uHasIlluminationMask.value = dynamicLightTex || windowLightTex ? 1.0 : 0.0;
   }
 
   /**
@@ -772,10 +818,11 @@ export class SkyColorEffectV2 {
         contrast *= 1.0 - effectiveDarkness * 0.2 * Math.min(1.5, gradePull);
         contrast = Math.max(0.5, Math.min(1.5, contrast));
 
+        const daylightGradeFactor = dayProgress >= 0.0 ? dayFactor : 0.0;
         const hazeLiftVal = clamp01(this.params.hazeLift);
-        brightness = turbidityEff * mie * hazeLiftVal;
+        brightness = turbidityEff * mie * hazeLiftVal * daylightGradeFactor;
 
-        exposure = 0.25 * dayFactor
+        exposure = 0.25 * daylightGradeFactor
           - 0.35 * effectiveDarkness * gradePull
           - 0.10 * turbidityEff;
         exposure += forward * golden * 0.05;
@@ -999,11 +1046,13 @@ export class SkyColorEffectV2 {
     try { this._composeMaterial?.dispose(); } catch (_) {}
     try { this._composeQuad?.geometry?.dispose(); } catch (_) {}
     try { this._fallbackWhite?.dispose?.(); } catch (_) {}
+    try { this._fallbackBlack?.dispose?.(); } catch (_) {}
     this._composeScene = null;
     this._composeCamera = null;
     this._composeMaterial = null;
     this._composeQuad = null;
     this._fallbackWhite = null;
+    this._fallbackBlack = null;
     this._initialized = false;
     log.info('SkyColorEffectV2 disposed');
   }

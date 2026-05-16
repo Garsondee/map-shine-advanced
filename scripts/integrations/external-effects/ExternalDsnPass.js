@@ -73,6 +73,10 @@ export class ExternalDsnPass {
         tDice: { value: null },
         uDiceOpacity: { value: 1.0 },
         uDiceTint: { value: new THREE.Vector3(1.0, 1.0, 1.0) },
+        uDiceBrightness: { value: 1.0 },
+        uDiceSaturation: { value: 1.0 },
+        uDiceContrast: { value: 1.0 },
+        uDiceGamma: { value: 1.0 },
       },
       vertexShader: /* glsl */`
         varying vec2 vUv;
@@ -86,15 +90,29 @@ export class ExternalDsnPass {
         uniform sampler2D tDice;
         uniform float uDiceOpacity;
         uniform vec3 uDiceTint;
+        uniform float uDiceBrightness;
+        uniform float uDiceSaturation;
+        uniform float uDiceContrast;
+        uniform float uDiceGamma;
         varying vec2 vUv;
+
+        // Rec. 709 luma weights — matches scene compositor convention.
+        const vec3 LUMA = vec3(0.2126, 0.7152, 0.0722);
+
         void main() {
           vec4 scene = texture2D(tScene, vUv);
           // DSN canvas is rendered with a top-left origin; flip V for sampling.
           vec4 dice = texture2D(tDice, vec2(vUv.x, 1.0 - vUv.y));
-          dice.rgb *= uDiceTint;
+
+          vec3 rgb = dice.rgb * uDiceTint * max(uDiceBrightness, 0.0);
+          rgb = (rgb - vec3(0.5)) * uDiceContrast + vec3(0.5);
+          float l = dot(rgb, LUMA);
+          rgb = mix(vec3(l), rgb, uDiceSaturation);
+          float invG = 1.0 / max(uDiceGamma, 1e-3);
+          rgb = pow(max(rgb, vec3(0.0)), vec3(invG));
+
           float a = clamp(dice.a * uDiceOpacity, 0.0, 1.0);
-          // Straight-alpha over compositing.
-          vec3 outRgb = mix(scene.rgb, dice.rgb, a);
+          vec3 outRgb = mix(scene.rgb, rgb, a);
           float outA = clamp(scene.a + a * (1.0 - scene.a), 0.0, 1.0);
           gl_FragColor = vec4(outRgb, outA);
         }
@@ -119,6 +137,73 @@ export class ExternalDsnPass {
     this._texture = texture ?? null;
     if (!this._material) return;
     this._material.uniforms.tDice.value = this._texture;
+  }
+
+  /**
+   * Pre-composite alpha multiplier for the dice layer. Clamped to [0, 1].
+   * @param {number} value
+   */
+  setOpacity(value) {
+    const v = Math.max(0, Math.min(1, Number(value)));
+    if (!Number.isFinite(v) || !this._material) return;
+    this._material.uniforms.uDiceOpacity.value = v;
+  }
+
+  /**
+   * Per-channel multiplier applied to dice RGB before tone shaping.
+   * @param {number} r
+   * @param {number} g
+   * @param {number} b
+   */
+  setTint(r, g, b) {
+    if (!this._material) return;
+    const rr = Math.max(0, Number(r));
+    const gg = Math.max(0, Number(g));
+    const bb = Math.max(0, Number(b));
+    if (![rr, gg, bb].every(Number.isFinite)) return;
+    const t = this._material.uniforms.uDiceTint.value;
+    if (t && typeof t.set === 'function') t.set(rr, gg, bb);
+  }
+
+  /**
+   * Scalar multiplier applied after tint and before contrast.
+   * @param {number} value Non-negative.
+   */
+  setBrightness(value) {
+    const v = Math.max(0, Number(value));
+    if (!Number.isFinite(v) || !this._material) return;
+    this._material.uniforms.uDiceBrightness.value = v;
+  }
+
+  /**
+   * 1 = identity. 0 = grayscale; >1 = boost. Pivot is Rec. 709 luma.
+   * @param {number} value
+   */
+  setSaturation(value) {
+    const v = Math.max(0, Number(value));
+    if (!Number.isFinite(v) || !this._material) return;
+    this._material.uniforms.uDiceSaturation.value = v;
+  }
+
+  /**
+   * 1 = identity. Pivot is mid-grey (0.5).
+   * @param {number} value
+   */
+  setContrast(value) {
+    const v = Math.max(0, Number(value));
+    if (!Number.isFinite(v) || !this._material) return;
+    this._material.uniforms.uDiceContrast.value = v;
+  }
+
+  /**
+   * Gamma applied after contrast/saturation; the shader uses 1/gamma so values
+   * above 1 brighten midtones. Clamped to keep `pow` stable.
+   * @param {number} value
+   */
+  setGamma(value) {
+    const v = Math.max(0.05, Math.min(8, Number(value)));
+    if (!Number.isFinite(v) || !this._material) return;
+    this._material.uniforms.uDiceGamma.value = v;
   }
 
   /**

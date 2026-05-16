@@ -342,13 +342,16 @@ export class SkyColorEffectV2 {
       uniforms: {
         tDiffuse:    { value: null },
         tOutdoorsMask: { value: this._fallbackWhite },
+        tSkyReachMask: { value: this._fallbackWhite },
         tDynamicLightMask: { value: this._fallbackBlack },
         tWindowLightMask: { value: this._fallbackBlack },
         uTime:       { value: 0.0 },
         uResolution: { value: new THREE.Vector2(1, 1) },
         uHasOutdoorsMask: { value: 0.0 },
+        uHasSkyReachMask: { value: 0.0 },
         uHasIlluminationMask: { value: 0.0 },
         uOutdoorsMaskFlipY: { value: 0.0 },
+        uSkyReachMaskFlipY: { value: 0.0 },
         uViewBoundsMin: { value: new THREE.Vector2(0, 0) },
         uViewBoundsMax: { value: new THREE.Vector2(1, 1) },
         uSceneBounds: { value: new THREE.Vector4(0, 0, 1, 1) },
@@ -387,13 +390,16 @@ export class SkyColorEffectV2 {
       fragmentShader: /* glsl */`
         uniform sampler2D tDiffuse;
         uniform sampler2D tOutdoorsMask;
+        uniform sampler2D tSkyReachMask;
         uniform sampler2D tDynamicLightMask;
         uniform sampler2D tWindowLightMask;
         uniform vec2 uResolution;
         uniform float uTime;
         uniform float uHasOutdoorsMask;
+        uniform float uHasSkyReachMask;
         uniform float uHasIlluminationMask;
         uniform float uOutdoorsMaskFlipY;
+        uniform float uSkyReachMaskFlipY;
         uniform vec2 uViewBoundsMin;
         uniform vec2 uViewBoundsMax;
         uniform vec4 uSceneBounds;
@@ -476,7 +482,25 @@ export class SkyColorEffectV2 {
           vec4 m = texture2D(tOutdoorsMask, sceneUv);
           float outdoors = mix(1.0, m.r, m.a);
           float outdoorMaskSample = step(0.5, clamp(outdoors, 0.0, 1.0));
-          return mix(1.0, outdoorMaskSample, inScene);
+
+          // Apply the per-floor skyReach gate on top of _Outdoors. Where
+          // an upper-floor solid tile (a bridge, an overhang, a rooftop)
+          // blocks the sky, this mask reads 0 and the area below stops being
+          // treated as sky-eligible. The mask is sampled in the same scene UV
+          // space as _Outdoors (see GpuSceneMaskCompositor skyReach mask id).
+          // alpha=0 → "no data" → default 1.0 to avoid sparse-mask bloating
+          // (same convention as _Outdoors above).
+          float skyReachSample = 1.0;
+          if (uHasSkyReachMask > 0.5) {
+            vec2 srUv = sceneUvRaw;
+            if (uSkyReachMaskFlipY > 0.5) srUv.y = 1.0 - srUv.y;
+            srUv = clamp(srUv, vec2(0.0), vec2(1.0));
+            vec4 sr = texture2D(tSkyReachMask, srUv);
+            float reach = mix(1.0, sr.r, sr.a);
+            skyReachSample = clamp(reach, 0.0, 1.0);
+          }
+
+          return mix(1.0, outdoorMaskSample * skyReachSample, inScene);
         }
 
         float sampleDirectIllumination(vec2 screenUv) {
@@ -625,6 +649,24 @@ export class SkyColorEffectV2 {
     u.tOutdoorsMask.value = outdoorsTex ?? this._fallbackWhite;
     u.uHasOutdoorsMask.value = outdoorsTex ? 1.0 : 0.0;
     u.uOutdoorsMaskFlipY.value = outdoorsTex?.flipY ? 1.0 : 0.0;
+  }
+
+  /**
+   * Feed the active-floor `skyReach` mask (per-floor `outdoors ∧ ¬union(upper-floor floorAlpha)`)
+   * into sky grading. Pixels under upper-floor solid coverage (bridges,
+   * rooftops, overhangs) read 0 and stop receiving sky color, matching the way
+   * indoor pixels stop receiving sky color.
+   *
+   * Source is {@link GpuSceneMaskCompositor#getFloorTexture} for `'skyReach'`
+   * — wired in {@link FloorCompositor#_syncOutdoorsMaskConsumers}.
+   * @param {THREE.Texture|null} skyReachTex
+   */
+  setSkyReachMask(skyReachTex) {
+    const u = this._composeMaterial?.uniforms;
+    if (!u) return;
+    u.tSkyReachMask.value = skyReachTex ?? this._fallbackWhite;
+    u.uHasSkyReachMask.value = skyReachTex ? 1.0 : 0.0;
+    u.uSkyReachMaskFlipY.value = skyReachTex?.flipY ? 1.0 : 0.0;
   }
 
   /**

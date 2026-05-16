@@ -21,6 +21,13 @@ export class ShadowManagerV2 {
       overheadOpacity: 1.0,
       overheadOcclusionStrength: 1.0,
       paintedOpacity: 1.0,
+      /**
+       * Independent opacity for {@link SkyReachShadowsEffectV2}. The effect's
+       * own `params.opacity` already shapes its strength; this slider lets a
+       * deployer dim the contribution at combine time without retuning the
+       * source.
+       */
+      skyReachOpacity: 1.0,
     };
 
     this._combinedRT = null;
@@ -36,6 +43,7 @@ export class ShadowManagerV2 {
     this._overheadShadowTexture = null;
     this._buildingShadowTexture = null;
     this._paintedShadowTexture = null;
+    this._skyReachShadowTexture = null;
   }
 
   initialize(renderer, width, height) {
@@ -53,17 +61,20 @@ export class ShadowManagerV2 {
         tOverheadShadow: { value: null },
         tBuildingShadow: { value: null },
         tPaintedShadow: { value: null },
+        tSkyReachShadow: { value: null },
         uHasCloudShadow: { value: 0.0 },
         uHasCloudShadowRaw: { value: 0.0 },
         uHasOverheadShadow: { value: 0.0 },
         uHasBuildingShadow: { value: 0.0 },
         uHasPaintedShadow: { value: 0.0 },
+        uHasSkyReachShadow: { value: 0.0 },
         uUseRawCloud: { value: 0.0 },
         uCloudWeight: { value: 1.0 },
         uCloudOpacity: { value: 1.0 },
         uOverheadOpacity: { value: 1.0 },
         uBuildingOpacity: { value: 1.0 },
         uPaintedOpacity: { value: 1.0 },
+        uSkyReachOpacity: { value: 1.0 },
         // Coordinate conversion uniforms for building shadows (world space)
         uSceneRect: { value: new THREE.Vector4() },
         uHasSceneRect: { value: 0.0 },
@@ -85,17 +96,20 @@ export class ShadowManagerV2 {
         uniform sampler2D tOverheadShadow;
         uniform sampler2D tBuildingShadow;
         uniform sampler2D tPaintedShadow;
+        uniform sampler2D tSkyReachShadow;
         uniform float uHasCloudShadow;
         uniform float uHasCloudShadowRaw;
         uniform float uHasOverheadShadow;
         uniform float uHasBuildingShadow;
         uniform float uHasPaintedShadow;
+        uniform float uHasSkyReachShadow;
         uniform float uUseRawCloud;
         uniform float uCloudWeight;
         uniform float uCloudOpacity;
         uniform float uOverheadOpacity;
         uniform float uBuildingOpacity;
         uniform float uPaintedOpacity;
+        uniform float uSkyReachOpacity;
         // Coordinate conversion uniforms for building shadows (world space)
         uniform vec4 uSceneRect;
         uniform float uHasSceneRect;
@@ -159,18 +173,35 @@ export class ShadowManagerV2 {
           return clamp(texture2D(tPaintedShadow, sceneUv).r, 0.0, 1.0);
         }
 
+        float readSkyReachShadow() {
+          if (uHasSkyReachShadow < 0.5) return 1.0;
+          // Same scene-UV reconstruction as tBuildingShadow — both effects emit
+          // a scene-space factor texture and share the LightingEffectV2 sampling
+          // convention.
+          vec2 sceneUv = vUv;
+          if (uHasBuildingUvRemap > 0.5 && uHasSceneRect > 0.5) {
+            vec2 foundryPos = smScreenUvToFoundry(vUv);
+            sceneUv = clamp(smFoundryToSceneUv(foundryPos), vec2(0.0), vec2(1.0));
+          } else if (uHasSceneRect > 0.5) {
+            sceneUv = clamp((vUv * uSceneRect.zw) + uSceneRect.xy, vec2(0.0), vec2(1.0));
+          }
+          return clamp(texture2D(tSkyReachShadow, sceneUv).r, 0.0, 1.0);
+        }
+
         void main() {
           float cloudBase = readCloudShadow();
           float overheadBase = readOverheadShadow();
           float buildingBase = readBuildingShadow();
           float paintedBase = readPaintedShadow();
+          float skyReachBase = readSkyReachShadow();
 
           float cloud = mix(1.0, cloudBase, clamp(uCloudOpacity, 0.0, 1.0));
           float overhead = mix(1.0, overheadBase, clamp(uOverheadOpacity, 0.0, 1.0));
           float building = mix(1.0, buildingBase, clamp(uBuildingOpacity, 0.0, 1.0));
           float painted = mix(1.0, paintedBase, clamp(uPaintedOpacity, 0.0, 1.0));
+          float skyReach = mix(1.0, skyReachBase, clamp(uSkyReachOpacity, 0.0, 1.0));
           float cw = clamp(uCloudWeight, 0.0, 1.0);
-          float combined = overhead * building * painted * mix(1.0, cloud, cw);
+          float combined = overhead * building * painted * skyReach * mix(1.0, cloud, cw);
           gl_FragColor = vec4(combined, combined, combined, 1.0);
         }
       `,
@@ -209,12 +240,13 @@ export class ShadowManagerV2 {
     else this._combinedRawRT = new THREE.WebGLRenderTarget(w, h, opts);
   }
 
-  setInputs({ cloudShadowTexture = null, cloudShadowRawTexture = null, overheadShadowTexture = null, buildingShadowTexture = null, paintedShadowTexture = null } = {}) {
+  setInputs({ cloudShadowTexture = null, cloudShadowRawTexture = null, overheadShadowTexture = null, buildingShadowTexture = null, paintedShadowTexture = null, skyReachShadowTexture = null } = {}) {
     this._cloudShadowTexture = cloudShadowTexture ?? null;
     this._cloudShadowRawTexture = cloudShadowRawTexture ?? null;
     this._overheadShadowTexture = overheadShadowTexture ?? null;
     this._buildingShadowTexture = buildingShadowTexture ?? null;
     this._paintedShadowTexture = paintedShadowTexture ?? null;
+    this._skyReachShadowTexture = skyReachShadowTexture ?? null;
   }
 
   /**
@@ -310,17 +342,20 @@ export class ShadowManagerV2 {
     u.tOverheadShadow.value = this._overheadShadowTexture;
     u.tBuildingShadow.value = this._buildingShadowTexture;
     u.tPaintedShadow.value = this._paintedShadowTexture;
+    u.tSkyReachShadow.value = this._skyReachShadowTexture;
     u.uHasCloudShadow.value = this._cloudShadowTexture ? 1.0 : 0.0;
     u.uHasCloudShadowRaw.value = this._cloudShadowRawTexture ? 1.0 : 0.0;
     u.uHasOverheadShadow.value = this._overheadShadowTexture ? 1.0 : 0.0;
     u.uHasBuildingShadow.value = this._buildingShadowTexture ? 1.0 : 0.0;
     u.uHasPaintedShadow.value = this._paintedShadowTexture ? 1.0 : 0.0;
+    u.uHasSkyReachShadow.value = this._skyReachShadowTexture ? 1.0 : 0.0;
     u.uUseRawCloud.value = useRawCloud ? 1.0 : 0.0;
     u.uCloudWeight.value = Math.max(0.0, Math.min(1.0, Number(this.params.cloudWeight) || 0));
     u.uCloudOpacity.value = Math.max(0.0, Math.min(1.0, Number(this.params.cloudOpacity) || 0));
     u.uOverheadOpacity.value = Math.max(0.0, Math.min(1.0, Number(this.params.overheadOpacity) || 0));
     u.uBuildingOpacity.value = Math.max(0.0, Math.min(1.0, Number(this.params.buildingOpacity) || 1.0));
     u.uPaintedOpacity.value = Math.max(0.0, Math.min(1.0, Number(this.params.paintedOpacity) || 1.0));
+    u.uSkyReachOpacity.value = Math.max(0.0, Math.min(1.0, Number(this.params.skyReachOpacity) || 1.0));
     
     // Bind scene rect for coordinate conversion (world-space building shadows)
     if (this._sceneRect) {

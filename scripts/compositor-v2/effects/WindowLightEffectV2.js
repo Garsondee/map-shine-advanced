@@ -10,12 +10,19 @@
  *   - For each tile that has a `_Windows` (or legacy `_Structural`) mask, create
  *     an additive overlay mesh in an ISOLATED scene (NOT the FloorRenderBus scene).
  *   - FloorCompositor passes `_scene` directly into `LightingEffectV2.render()` as
- *     the `windowLightScene` argument. LightingEffectV2 renders it additively into
- *     `_lightRT` (the light accumulation buffer) BEFORE the compose step.
+ *     the `windowLightScene` argument. LightingEffectV2 renders it into
+ *     `_windowLightRT`, then the compose pass merges that with Foundry lights
+ *     from `_lightRT` into total illumination.
+ *
+ * Shadow lift: {@link FloorCompositor#_buildDynamicLightOverridePayload} passes
+ * the previous frame's `_windowLightRT` alongside Foundry `_lightRT` into source
+ * shadow effects (overhead / building / sky-reach / painted) so window glow
+ * clears baked shadow strength the same way gameplay lights do.
  *
  * Why this is correct:
  *   The lighting compose shader does `litColor = albedo * totalIllumination`.
- *   By contributing to `totalIllumination` (via `_lightRT`), window light naturally
+ *   By contributing to `totalIllumination` (via `_windowLightRT` merged at compose),
+ *   window light naturally
  *   tints itself by the surface albedo — a red surface stays red under warm light.
  *   Pure additive post-lighting would add white light uniformly, desaturating colours.
  *

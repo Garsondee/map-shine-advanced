@@ -2124,6 +2124,81 @@ export class LightingEffectV2 {
   // ── Render ────────────────────────────────────────────────────────────
 
   /**
+   * Refresh current-frame light textures before source shadow passes run.
+   *
+   * The full lighting render normally accumulates `_lightRT` and `_windowLightRT`
+   * immediately before compose, which is too late for Building/SkyReach/Overhead
+   * shadow shaders that need light presence to clear shadow strength. This pass
+   * draws only the light masks, not darkness or final composition.
+   *
+   * @param {THREE.WebGLRenderer} renderer
+   * @param {THREE.Camera} camera
+   * @param {THREE.Scene|null} [windowLightScene=null]
+   * @returns {boolean} true when at least the render targets were refreshed
+   */
+  renderLightOverrideMasks(renderer, camera, windowLightScene = null) {
+    if (!this._initialized || !this._enabled || !renderer || !camera) return false;
+    if (!this._lightRT || !this._windowLightRT) return false;
+
+    if (!this._lightsSynced) {
+      this.syncAllLights();
+    }
+
+    const enhancementCount = this._getLightEnhancementConfigMap().size;
+    if (this._lightsSynced && enhancementCount !== this._lastEnhancementCount) {
+      this._invalidateEnhancementCache();
+      this.syncAllLights();
+    }
+
+    renderer.getDrawingBufferSize(this._sizeVec);
+    const w = Math.max(1, this._sizeVec.x);
+    const h = Math.max(1, this._sizeVec.y);
+    this._syncRenderTargetSizes(w, h);
+
+    // Match the later compose pass' current-frame Levels perspective.
+    this._markPerspectiveRefreshDirty();
+    this._refreshLightsForLevelsPerspectiveIfNeeded(
+      (typeof performance !== 'undefined' && typeof performance.now === 'function')
+        ? (performance.now() / 1000)
+        : 0
+    );
+
+    const prevTarget = renderer.getRenderTarget();
+    const prevAutoClear = renderer.autoClear;
+    const prevLayerMask = camera.layers.mask;
+
+    try {
+      camera.layers.enableAll();
+
+      renderer.setRenderTarget(this._lightRT);
+      renderer.setClearColor(0x000000, 1);
+      renderer.autoClear = true;
+      if (this._lightScene) {
+        renderer.render(this._lightScene, camera);
+      }
+
+      renderer.setRenderTarget(this._windowLightRT);
+      renderer.setClearColor(0x000000, 1);
+      renderer.autoClear = true;
+      if (windowLightScene) {
+        try {
+          windowLightScene.userData?.onBindWindowLightPass?.(
+            this._windowLightRT.width,
+            this._windowLightRT.height,
+          );
+        } catch (_) {}
+        renderer.render(windowLightScene, camera);
+      }
+    } finally {
+      camera.layers.mask = prevLayerMask;
+      renderer.autoClear = prevAutoClear;
+      renderer.setRenderTarget(prevTarget);
+    }
+
+    return true;
+  }
+
+  /**
    * Execute the lighting post-processing pass:
    *   1. Render light meshes → lightRT (Foundry sources only)
    *   1b. Render windowLightScene → windowLightRT

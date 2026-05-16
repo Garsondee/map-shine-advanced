@@ -23,11 +23,11 @@ const MAX_PAINTED_SHADOW_EDGE_PX = 3072;
 export class PaintedShadowEffectV2 {
   constructor() {
     this.params = {
-      enabled: false,
-      opacity: 0.6,
-      length: 0.055,
-      blurRadius: 1.8,
-      resolutionScale: 1.0,
+      enabled: true,
+      opacity: 0.5,
+      length: 0.1,
+      blurRadius: 0,
+      resolutionScale: 2,
       sunLatitude: 0.1,
       dynamicLightShadowOverrideEnabled: true,
       dynamicLightShadowOverrideStrength: 0.7,
@@ -73,7 +73,7 @@ export class PaintedShadowEffectV2 {
 
   static getControlSchema() {
     return {
-      enabled: false,
+      enabled: true,
       groups: [
         {
           name: 'main',
@@ -83,10 +83,10 @@ export class PaintedShadowEffectV2 {
         },
       ],
       parameters: {
-        opacity: { type: 'slider', label: 'Opacity', min: 0.0, max: 1.0, step: 0.01, default: 0.6 },
-        length: { type: 'slider', label: 'Length', min: 0.0, max: 0.6, step: 0.005, default: 0.055 },
-        blurRadius: { type: 'slider', label: 'Blur', min: 0.0, max: 4.0, step: 0.05, default: 1.8 },
-        resolutionScale: { type: 'slider', label: 'Resolution', min: 0.75, max: 2.0, step: 0.05, default: 1.0 },
+        opacity: { type: 'slider', label: 'Opacity', min: 0.0, max: 1.0, step: 0.01, default: 0.5 },
+        length: { type: 'slider', label: 'Length', min: 0.0, max: 0.6, step: 0.005, default: 0.1 },
+        blurRadius: { type: 'slider', label: 'Blur', min: 0.0, max: 4.0, step: 0.05, default: 0 },
+        resolutionScale: { type: 'slider', label: 'Resolution', min: 0.75, max: 2.0, step: 0.05, default: 2 },
       },
     };
   }
@@ -375,7 +375,9 @@ export class PaintedShadowEffectV2 {
         uLength: { value: this.params.length },
         uSceneDimensions: { value: new THREE.Vector2(1, 1) },
         tDynamicLight: { value: null },
+        tWindowLight: { value: null },
         uHasDynamicLight: { value: 0.0 },
+        uHasWindowLight: { value: 0.0 },
         uDynamicLightShadowOverrideEnabled: { value: 1.0 },
         uDynamicLightShadowOverrideStrength: { value: this.params.dynamicLightShadowOverrideStrength ?? 0.7 },
         uDynViewBounds: { value: new THREE.Vector4(0, 0, 1, 1) },
@@ -412,7 +414,9 @@ export class PaintedShadowEffectV2 {
         uniform float uLength;
         uniform vec2 uSceneDimensions;
         uniform sampler2D tDynamicLight;
+        uniform sampler2D tWindowLight;
         uniform float uHasDynamicLight;
+        uniform float uHasWindowLight;
         uniform float uDynamicLightShadowOverrideEnabled;
         uniform float uDynamicLightShadowOverrideStrength;
         uniform vec4 uDynViewBounds;
@@ -487,10 +491,17 @@ export class PaintedShadowEffectV2 {
           float painted = readPaintedByFloor(floorIdx, casterUv);
           float outdoors = readOutdoors(vUv);
           float strength = clamp(painted * clamp(uOpacity, 0.0, 1.0) * outdoors, 0.0, 1.0);
-          if (uHasDynamicLight > 0.5 && uDynamicLightShadowOverrideEnabled > 0.5 && uHasDynSceneRect > 0.5) {
+          if ((uHasDynamicLight > 0.5 || uHasWindowLight > 0.5) && uDynamicLightShadowOverrideEnabled > 0.5 && uHasDynSceneRect > 0.5) {
             vec2 dynUv = clamp(sceneUvToDynScreenUv(vUv), vec2(0.0), vec2(1.0));
-            vec3 dyn = texture2D(tDynamicLight, dynUv).rgb;
-            float dynI = clamp(max(dyn.r, max(dyn.g, dyn.b)), 0.0, 1.0);
+            float dynI = 0.0;
+            if (uHasDynamicLight > 0.5) {
+              vec3 dyn = texture2D(tDynamicLight, dynUv).rgb;
+              dynI = max(dynI, clamp(max(dyn.r, max(dyn.g, dyn.b)), 0.0, 1.0));
+            }
+            if (uHasWindowLight > 0.5) {
+              vec3 win = texture2D(tWindowLight, dynUv).rgb;
+              dynI = max(dynI, clamp(max(win.r, max(win.g, win.b)), 0.0, 1.0));
+            }
             float dynPresence = smoothstep(0.02, 0.30, dynI);
             float dynLift = clamp(dynPresence * max(uDynamicLightShadowOverrideStrength, 0.0), 0.0, 1.0);
             strength = mix(strength, 0.0, dynLift);
@@ -793,7 +804,7 @@ export class PaintedShadowEffectV2 {
         paintedMaskFound: !!paintedTex,
         outdoorsMaskFound: !!outdoorsTex,
         syncOutdoorsMaskUuid: this._outdoorsMask?.uuid ?? null,
-        dynamicLightOverrideBound: !!(this._dynamicLightOverride?.texture),
+        dynamicLightOverrideBound: !!(this._dynamicLightOverride?.texture || this._dynamicLightOverride?.windowTexture),
         note: 'Missing painted or outdoors mask',
       };
       this._clearShadowTargetToWhite(renderer);
@@ -851,8 +862,11 @@ export class PaintedShadowEffectV2 {
       pu.uLength.value = Math.max(0.0, Number(this.params.length) || 0.0);
       const dlo = this._dynamicLightOverride;
       const dynTex = dlo?.texture ?? null;
+      const winTex = dlo?.windowTexture ?? null;
       pu.tDynamicLight.value = dynTex;
+      pu.tWindowLight.value = winTex;
       pu.uHasDynamicLight.value = dynTex ? 1.0 : 0.0;
+      pu.uHasWindowLight.value = winTex ? 1.0 : 0.0;
       pu.uDynamicLightShadowOverrideEnabled.value = (this.params.dynamicLightShadowOverrideEnabled !== false && dlo?.enabled !== false) ? 1.0 : 0.0;
       const dynStrength = Number.isFinite(Number(dlo?.strength))
         ? Number(dlo.strength)
@@ -914,7 +928,7 @@ export class PaintedShadowEffectV2 {
         paintedMaskFound: true,
         outdoorsMaskFound: true,
         syncOutdoorsMaskUuid: this._outdoorsMask?.uuid ?? null,
-        dynamicLightOverrideBound: !!dynTex,
+        dynamicLightOverrideBound: !!(dynTex || winTex),
         shadowFactorTextureUuid: this.shadowTarget?.texture?.uuid ?? null,
       };
     } finally {

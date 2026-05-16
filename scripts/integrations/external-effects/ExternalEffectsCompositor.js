@@ -65,6 +65,19 @@ export class ExternalEffectsCompositor {
     /** @type {boolean} */
     this._disposed = false;
 
+    /**
+     * Defer-counter for {@link #_ensureSequencerAdapter()} when the first init
+     * attempt failed (exceptions are swallowed elsewhere). Bounded so we don't
+     * spin forever while Sequencer hooks are unreachable.
+     * @private
+     */
+    /** @type {number} */
+    this._sequencerDeferAttempts = 0;
+
+    /** Max deferred Sequencer wiring attempts (~a few seconds at compositor FPS). */
+    /** @private @type {number} */
+    this._SEQUENCER_DEFER_MAX = 320;
+
     /** Per-adapter enable flags (read by FloorCompositor and Graphics Settings). */
     this.enabled = {
       sequencer: true,
@@ -132,15 +145,17 @@ export class ExternalEffectsCompositor {
     }
 
     try {
+      const ir = this._resolveIntegrationRefs();
       this.sequencer = new SequencerAdapter({
         compositor: this,
-        floorRenderBus: this._refs.floorRenderBus ?? null,
-        sceneComposer: this._refs.sceneComposer ?? null,
-        floorStack: this._refs.floorStack ?? null,
-        frameCoordinator: this._refs.frameCoordinator ?? null,
-        renderLoop: this._refs.renderLoop ?? null,
+        floorRenderBus: ir.floorRenderBus,
+        sceneComposer: ir.sceneComposer,
+        floorStack: ir.floorStack,
+        frameCoordinator: ir.frameCoordinator,
+        renderLoop: ir.renderLoop,
       });
       this.sequencer.initialize();
+      this._sequencerDeferAttempts = 0;
     } catch (e) {
       log.warn('SequencerAdapter.initialize failed:', e);
       this.sequencer = null;
@@ -160,7 +175,25 @@ export class ExternalEffectsCompositor {
    * Adapters use this to sync any state that must be fresh before draw.
    */
   tickBeforeBusRender() {
-    if (!this._initialized || this._disposed) return;
+    if (this._disposed) return;
+
+    try {
+      if (!globalThis.window?.THREE) return;
+      if (!this._initialized) {
+        void this.initialize();
+      }
+    } catch (e) {
+      log.warn('Deferred ExternalEffectsCompositor.initialize (tickBeforeBusRender) failed:', e);
+    }
+
+    if (!this._initialized) return;
+
+    try {
+      this._ensureSequencerAdapter();
+    } catch (e) {
+      log.warn('ensureSequencerAdapter failed:', e);
+    }
+
     try { this.sequencer?.tickBeforeBusRender?.(); } catch (e) {
       log.warn('sequencer.tickBeforeBusRender failed:', e);
     }
@@ -231,6 +264,12 @@ export class ExternalEffectsCompositor {
    */
   probeSequencerMirrors(label) {
     try {
+      if (!globalThis.window?.THREE) return [];
+      if (!this._disposed && !this._initialized) {
+        void this.initialize();
+      }
+      if (!this._initialized) return [];
+      this._ensureSequencerAdapter();
       return this.sequencer?.probeMirrorsToConsole?.(label ?? 'manual') ?? [];
     } catch (e) {
       console.warn('[MSA Sequencer mirror probe] failed:', e);
@@ -246,6 +285,12 @@ export class ExternalEffectsCompositor {
    */
   probeSequencerMirrorsDeep(label) {
     try {
+      if (!globalThis.window?.THREE) return [];
+      if (!this._disposed && !this._initialized) {
+        void this.initialize();
+      }
+      if (!this._initialized) return [];
+      this._ensureSequencerAdapter();
       return this.sequencer?.probeMirrorsDeepToConsole?.(label ?? 'deep-manual') ?? [];
     } catch (e) {
       console.warn('[MSA Sequencer mirror probe DEEP] failed:', e);
@@ -274,6 +319,18 @@ export class ExternalEffectsCompositor {
    */
   applyPostSettings(post) {
     if (!post || typeof post !== 'object') return;
+
+    try {
+      if (
+        globalThis.window?.THREE &&
+        !this._disposed &&
+        !this._initialized
+      ) {
+        void this.initialize();
+      }
+    } catch (e) {
+      log.warn('applyPostSettings: deferred initialize failed:', e);
+    }
 
     const dsn = post.dsn ?? null;
     if (dsn && typeof dsn === 'object') {
@@ -310,6 +367,7 @@ export class ExternalEffectsCompositor {
         if (typeof seq.enabled === 'boolean') {
           this.setAdapterEnabled('sequencer', seq.enabled);
         }
+        this._ensureSequencerAdapter();
         const adapter = this.sequencer;
         if (adapter) {
           if (Number.isFinite(Number(seq.brightness))) adapter.setExternalDiffuseGain?.(Number(seq.brightness));
@@ -373,6 +431,76 @@ export class ExternalEffectsCompositor {
     this.diceSoNice = null;
     this.dsnPass = null;
     this._initialized = false;
+    this._sequencerDeferAttempts = 0;
     log.info('ExternalEffectsCompositor disposed');
+  }
+
+  /**
+   * Prefer {@link Window.MapShine}'s live compositor/bus over constructor refs —
+   * the FloorRenderBus instance can be stable while long-lived integrations need
+   * the current `_renderBus` assigned at scene init / reinit time.
+   * @private
+   */
+  _resolveIntegrationRefs() {
+    const ms = globalThis.window?.MapShine ?? {};
+    const ec = ms.effectComposer ?? null;
+    return {
+      floorRenderBus:
+        ec?._floorCompositorV2?._renderBus
+          ?? ms.floorCompositorV2?._renderBus
+          ?? ms.floorRenderBus
+          ?? this._refs.floorRenderBus
+          ?? null,
+      sceneComposer: ms.sceneComposer ?? this._refs.sceneComposer ?? null,
+      floorStack: ms.floorStack ?? this._refs.floorStack ?? null,
+      frameCoordinator: ms.frameCoordinator ?? this._refs.frameCoordinator ?? null,
+      renderLoop: ms.renderLoop ?? this._refs.renderLoop ?? null,
+    };
+  }
+
+  /**
+   * Create the Sequencer adapter if the first initializer pass skipped or threw.
+   * Idempotent once `this.sequencer` is assigned.
+   *
+   * Called from compositor ticks so floor / scene rebuilds regain hooks even when
+   * early construction failed transiently.
+   *
+   * @private
+   * @returns {boolean}
+   */
+  _ensureSequencerAdapter() {
+    if (this._disposed || !this._initialized || !this.enabled.sequencer) return false;
+    if (this.sequencer) return true;
+    const THREE = globalThis.window?.THREE;
+    if (!THREE) return false;
+
+    const maxTry = Number(this._SEQUENCER_DEFER_MAX);
+    const cap = Number.isFinite(maxTry) && maxTry > 0 ? maxTry : 320;
+    if (this._sequencerDeferAttempts >= cap) return false;
+
+    this._sequencerDeferAttempts += 1;
+
+    try {
+      const ir = this._resolveIntegrationRefs();
+      const adapter = new SequencerAdapter({
+        compositor: this,
+        floorRenderBus: ir.floorRenderBus,
+        sceneComposer: ir.sceneComposer,
+        floorStack: ir.floorStack,
+        frameCoordinator: ir.frameCoordinator,
+        renderLoop: ir.renderLoop,
+      });
+      adapter.initialize();
+      this.sequencer = adapter;
+      this._sequencerDeferAttempts = 0;
+      log.info('Sequencer adapter recovered via deferred wiring', {
+        hasBus: !!ir.floorRenderBus,
+      });
+      return true;
+    } catch (e) {
+      log.warn(`Deferred SequencerAdapter init attempt ${this._sequencerDeferAttempts}/${cap} failed:`, e);
+      this.sequencer = null;
+      return false;
+    }
   }
 }

@@ -135,20 +135,20 @@ export class OverheadShadowsEffectV2 {
 
     this.params = {
       enabled: true,
-      opacity: 0.4,
-      length: 0.040,
-      softness: 1.0,
-      outdoorShadowLengthScale: 2.0,
+      opacity: 0.5,
+      length: 0.1,
+      softness: 5,
+      outdoorShadowLengthScale: 0,
       indoorReceiverShadowLengthScale: 0.25,
       verticalOnly: true,  // v1: primarily vertical motion in screen space
       affectsLights: 0.75,
       sunLatitude: 0.1,    // 0=flat east/west, 1=maximum north/south arc
       indoorShadowEnabled: true, // Back-compat toggle; controls projected _Outdoors dark-region building shadow contribution on outdoor receivers
-      indoorShadowOpacity: 0.42,   // Back-compat alias for outdoorBuildingShadowOpacity
-      outdoorBuildingShadowOpacity: 0.42,
-      indoorShadowLengthScale: 4.70, // Back-compat alias for outdoorBuildingShadowLengthScale
-      outdoorBuildingShadowLengthScale: 4.70,
-      indoorShadowSoftness: 3.8,
+      indoorShadowOpacity: 1,   // Back-compat alias for outdoorBuildingShadowOpacity
+      outdoorBuildingShadowOpacity: 1,
+      indoorShadowLengthScale: 4.87, // Back-compat alias for outdoorBuildingShadowLengthScale
+      outdoorBuildingShadowLengthScale: 4.87,
+      indoorShadowSoftness: 2,
       indoorFluidShadowSoftness: 3.1,
       indoorFluidShadowIntensityBoost: 0.81,
       indoorFluidColorSaturation: 1.2,
@@ -170,10 +170,10 @@ export class OverheadShadowsEffectV2 {
       debugView: 'final',
       /** Darken outdoor receivers where upper-floor tile alpha blocks sky (derived skyReach). */
       skyReachShadowEnabled: true,
-      skyReachShadowOpacity: 0.35,
+      skyReachShadowOpacity: 1,
       /** Composite all upper floors' GPU `floorAlpha` masks and project like building shadow. */
       upperFloorTileShadowEnabled: true,
-      upperFloorTileShadowOpacity: 0.55,
+      upperFloorTileShadowOpacity: 1,
       upperFloorTileShadowLengthScale: 4.7,
       /** `multiply`: Π alpha (strict; gaps on any upper band weaken shadow). `max`: union of coverage (recommended multi-floor). */
       upperFloorTileCombineMode: 'multiply',
@@ -219,6 +219,8 @@ export class OverheadShadowsEffectV2 {
 
     /** @type {THREE.Texture|null} */
     this._dynamicLightTexture = null;
+    /** @type {THREE.Texture|null} */
+    this._windowLightTexture = null;
     this._dynamicLightOverrideStrength = 0.7;
     this._treeRainMaskProbeLastKey = '';
     this._treeRainMaskProbeLastTs = 0;
@@ -328,10 +330,11 @@ export class OverheadShadowsEffectV2 {
   }
 
   /**
-   * @param {{texture?: any, strength?: number}|null} payload
+   * @param {{texture?: any, windowTexture?: any, strength?: number}|null} payload
    */
   setDynamicLightOverride(payload = null) {
     this._dynamicLightTexture = payload?.texture ?? null;
+    this._windowLightTexture = payload?.windowTexture ?? null;
     this._dynamicLightOverrideStrength = Number.isFinite(Number(payload?.strength))
       ? Math.max(0.0, Math.min(1.0, Number(payload.strength)))
       : 0.7;
@@ -1261,7 +1264,7 @@ export class OverheadShadowsEffectV2 {
           min: 0.0,
           max: 1.0,
           step: 0.01,
-          default: 0.4
+          default: 0.5
         },
         length: {
           type: 'slider',
@@ -1269,7 +1272,7 @@ export class OverheadShadowsEffectV2 {
           min: 0.0,
           max: 0.3,
           step: 0.005,
-          default: 0.040
+          default: 0.1
         },
         softness: {
           type: 'slider',
@@ -1277,7 +1280,7 @@ export class OverheadShadowsEffectV2 {
           min: 0.5,
           max: 5.0,
           step: 0.1,
-          default: 1.0
+          default: 5
         },
         outdoorShadowLengthScale: {
           type: 'slider',
@@ -1285,7 +1288,7 @@ export class OverheadShadowsEffectV2 {
           min: 0.0,
           max: 30.0,
           step: 1.00,
-          default: 2.0,
+          default: 0,
           tooltip: 'Scales projected overhead shadow distance on outdoor receivers'
         },
         indoorReceiverShadowLengthScale: {
@@ -1437,7 +1440,7 @@ export class OverheadShadowsEffectV2 {
           min: 0.0,
           max: 1.0,
           step: 0.01,
-          default: 0.42,
+          default: 1,
           tooltip: 'Strength of projected _Outdoors dark-region contribution on outdoor receivers'
         },
         outdoorBuildingShadowLengthScale: {
@@ -1446,7 +1449,7 @@ export class OverheadShadowsEffectV2 {
           min: 0.0,
           max: 30.0,
           step: 0.01,
-          default: 4.70,
+          default: 4.87,
           tooltip: 'Scale factor for _Outdoors dark-region projection distance'
         },
         indoorShadowSoftness: {
@@ -1455,7 +1458,7 @@ export class OverheadShadowsEffectV2 {
           min: 0.5,
           max: 5.0,
           step: 0.1,
-          default: 3.8,
+          default: 2,
           tooltip: 'Indoor blur radius for overhead, sky-reach shelter, and fluid shadow contributions'
         },
         skyReachShadowEnabled: {
@@ -1470,7 +1473,7 @@ export class OverheadShadowsEffectV2 {
           min: 0.0,
           max: 1.0,
           step: 0.01,
-          default: 0.35,
+          default: 1,
           tooltip: 'How strongly low skyReach (occluded from sky by floors above) adds to the overhead shadow factor'
         },
         upperFloorTileShadowEnabled: {
@@ -1485,7 +1488,7 @@ export class OverheadShadowsEffectV2 {
           min: 0.0,
           max: 1.0,
           step: 0.01,
-          default: 0.55,
+          default: 1,
           tooltip: 'Strength of the projected upper-floor tile-alpha shadow on outdoor receivers'
         },
         upperFloorTileShadowLengthScale: {
@@ -1623,12 +1626,12 @@ export class OverheadShadowsEffectV2 {
         uHasSkyReach: { value: 0.0 },
         uSkyReachFlipY: { value: 0.0 },
         uSkyReachShadowEnabled: { value: 1.0 },
-        uSkyReachShadowOpacity: { value: this.params.skyReachShadowOpacity ?? 0.35 },
+        uSkyReachShadowOpacity: { value: this.params.skyReachShadowOpacity ?? 1.0 },
         tUpperFloorComposite: { value: whiteOb },
         uHasUpperFloorComposite: { value: 0.0 },
         uUpperFloorCompositeFlipY: { value: 0.0 },
         uUpperFloorTileShadowEnabled: { value: 1.0 },
-        uUpperFloorTileShadowOpacity: { value: this.params.upperFloorTileShadowOpacity ?? 0.55 },
+        uUpperFloorTileShadowOpacity: { value: this.params.upperFloorTileShadowOpacity ?? 1.0 },
         uUpperFloorTileShadowLengthScale: { value: this.params.upperFloorTileShadowLengthScale ?? 4.7 },
         // Upper-floor _Outdoors for Outdoor Building Shadow casters only (min across levels above).
         uObUpperOutdoors0: { value: whiteOb },
@@ -1639,8 +1642,8 @@ export class OverheadShadowsEffectV2 {
         uObUpperOutdoorsFlipY2: { value: 0.0 },
         uObUpperCount: { value: 0.0 },
         uIndoorShadowEnabled: { value: 0.0 },
-        uOutdoorBuildingShadowOpacity: { value: this.params.outdoorBuildingShadowOpacity ?? this.params.indoorShadowOpacity ?? 0.5 },
-        uOutdoorBuildingShadowLengthScale: { value: this.params.outdoorBuildingShadowLengthScale ?? this.params.indoorShadowLengthScale ?? 1.0 },
+        uOutdoorBuildingShadowOpacity: { value: this.params.outdoorBuildingShadowOpacity ?? this.params.indoorShadowOpacity ?? 1.0 },
+        uOutdoorBuildingShadowLengthScale: { value: this.params.outdoorBuildingShadowLengthScale ?? this.params.indoorShadowLengthScale ?? 4.87 },
         uIndoorShadowSoftness: { value: 3.0 },
         uIndoorFluidShadowSoftness: { value: 3.0 },
         uIndoorFluidShadowIntensityBoost: { value: 1.0 },
@@ -1682,7 +1685,9 @@ export class OverheadShadowsEffectV2 {
         ,
         uDebugView: { value: 0.0 },
         tDynamicLight: { value: null },
+        tWindowLight: { value: null },
         uHasDynamicLight: { value: 0.0 },
+        uHasWindowLight: { value: 0.0 },
         uDynamicLightShadowOverrideEnabled: { value: 1.0 },
         uDynamicLightShadowOverrideStrength: { value: this.params.dynamicLightShadowOverrideStrength ?? 0.7 }
       },
@@ -1774,7 +1779,9 @@ export class OverheadShadowsEffectV2 {
         uniform float uGroundDistance;
         uniform float uDebugView;
         uniform sampler2D tDynamicLight;
+        uniform sampler2D tWindowLight;
         uniform float uHasDynamicLight;
+        uniform float uHasWindowLight;
         uniform float uDynamicLightShadowOverrideEnabled;
         uniform float uDynamicLightShadowOverrideStrength;
 
@@ -2239,9 +2246,17 @@ export class OverheadShadowsEffectV2 {
           float roofCombinedStrength = combinedStrength;
           float tileOnlyStrength = tileProjectedStrength;
 
-          if (uHasDynamicLight > 0.5 && uDynamicLightShadowOverrideEnabled > 0.5) {
-            vec3 dyn = texture2D(tDynamicLight, clamp(screenUv, vec2(0.0), vec2(1.0))).rgb;
-            float dynI = clamp(max(dyn.r, max(dyn.g, dyn.b)), 0.0, 1.0);
+          if ((uHasDynamicLight > 0.5 || uHasWindowLight > 0.5) && uDynamicLightShadowOverrideEnabled > 0.5) {
+            vec2 clampedUv = clamp(screenUv, vec2(0.0), vec2(1.0));
+            float dynI = 0.0;
+            if (uHasDynamicLight > 0.5) {
+              vec3 dyn = texture2D(tDynamicLight, clampedUv).rgb;
+              dynI = max(dynI, clamp(max(dyn.r, max(dyn.g, dyn.b)), 0.0, 1.0));
+            }
+            if (uHasWindowLight > 0.5) {
+              vec3 win = texture2D(tWindowLight, clampedUv).rgb;
+              dynI = max(dynI, clamp(max(win.r, max(win.g, win.b)), 0.0, 1.0));
+            }
             float dynPresence = smoothstep(0.02, 0.30, dynI);
             float dynLift = clamp(dynPresence * max(uDynamicLightShadowOverrideStrength, 0.0), 0.0, 1.0);
             roofCombinedStrength = mix(roofCombinedStrength, 0.0, dynLift);
@@ -2835,7 +2850,9 @@ export class OverheadShadowsEffectV2 {
       if (u.uFluidColorBoost) u.uFluidColorBoost.value = this.params.fluidColorBoost;
       if (u.uFluidColorSaturation) u.uFluidColorSaturation.value = this.params.fluidColorSaturation;
       if (u.tDynamicLight) u.tDynamicLight.value = this._dynamicLightTexture ?? null;
+      if (u.tWindowLight) u.tWindowLight.value = this._windowLightTexture ?? null;
       if (u.uHasDynamicLight) u.uHasDynamicLight.value = this._dynamicLightTexture ? 1.0 : 0.0;
+      if (u.uHasWindowLight) u.uHasWindowLight.value = this._windowLightTexture ? 1.0 : 0.0;
       if (u.uDynamicLightShadowOverrideEnabled) {
         u.uDynamicLightShadowOverrideEnabled.value = this.params.dynamicLightShadowOverrideEnabled === false ? 0.0 : 1.0;
       }

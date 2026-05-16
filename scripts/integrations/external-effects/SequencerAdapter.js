@@ -67,7 +67,7 @@ export class SequencerAdapter {
     this._postPixiUnsubscribe = null;
 
     /** @type {WeakMap<object, string>} */
-    this._effectIds = new WeakMap();
+    this._canonicalMirrorKeysByEffectObject = new WeakMap();
 
     /** @type {number} */
     this._nextSyntheticId = 1;
@@ -105,6 +105,7 @@ export class SequencerAdapter {
     reg('sequencerReady', () => {
       log.info('Sequencer ready — adapter is active');
       this._bootstrapExistingEffects();
+      this._scheduleLateBootstrapPasses();
     });
     reg('createSequencerEffect', (effect) => this._onCreate(effect));
     reg('updateSequencerEffect', (effect) => this._onUpdate(effect));
@@ -131,6 +132,7 @@ export class SequencerAdapter {
 
     log.info('SequencerAdapter initialized');
     this._bootstrapExistingEffects();
+    this._scheduleLateBootstrapPasses();
   }
 
   /** @returns {boolean} */
@@ -260,8 +262,8 @@ export class SequencerAdapter {
 
   /**
    * Called once per FloorCompositor render before the bus scene is rendered.
-   * Currently a no-op — transform sync runs on the PIXI ticker — but reserved
-   * for future per-frame validation (e.g. floor-change reroute).
+   * Re-resolves the live FloorRenderBus because floor transitions/rebuilds can
+   * replace the rendered bus scene after this adapter was constructed.
    */
   tickBeforeBusRender() {
     if (this._disposed || this._mirrors.size === 0) return;
@@ -412,10 +414,15 @@ export class SequencerAdapter {
   }
 
   _resolveFloorRenderBus() {
-    const bus = this._floorRenderBus
+    const liveBus = globalThis.window?.MapShine?.effectComposer?._floorCompositorV2?._renderBus
       ?? globalThis.window?.MapShine?.floorCompositorV2?._renderBus
       ?? globalThis.window?.MapShine?.floorRenderBus
       ?? null;
+    if (liveBus) {
+      this._floorRenderBus = liveBus;
+      return liveBus;
+    }
+    const bus = this._floorRenderBus ?? null;
     return bus;
   }
 
@@ -424,8 +431,12 @@ export class SequencerAdapter {
     // Hook payloads can be either the effect directly, or an object wrapping
     // the effect (depending on Sequencer / hook signature variants).
     const effect = effectish.effect ?? effectish.document ?? effectish;
-    if (!effect) return null;
-    const id = String(
+    if (!effect || typeof effect !== 'object') return null;
+
+    const cachedKey = this._canonicalMirrorKeysByEffectObject.get(effect);
+    if (cachedKey) return { effect, id: cachedKey };
+
+    const base = String(
       effect.id
       ?? effect._id
       ?? effect.uuid
@@ -433,17 +444,37 @@ export class SequencerAdapter {
       ?? effect._objectId
       ?? effect.sequenceId
       ?? ''
-    ).trim();
-    if (id) return { effect, id };
-    if (typeof effect === 'object') {
-      let synthetic = this._effectIds.get(effect);
-      if (!synthetic) {
-        synthetic = `synthetic-${this._nextSyntheticId++}`;
-        this._effectIds.set(effect, synthetic);
-      }
-      return { effect, id: synthetic };
+    ).trim() || `synthetic-${this._nextSyntheticId++}`;
+
+    let key = base;
+    let bump = 0;
+    while (this._mirrorKeyHeldByDifferentEffect(key, effect)) {
+      bump += 1;
+      key = `${base}#${bump}`;
     }
-    return null;
+
+    this._canonicalMirrorKeysByEffectObject.set(effect, key);
+    return { effect, id: key };
+  }
+
+  /**
+   * True when `key` names an in-flight retry or mirror bound to another effect instance.
+   * Sequencer occasionally reuses the same nominal `effect.id` for multiple live
+   * {@link PIXI.DisplayObject}s; without this, only the first gets a Three mirror.
+   * @param {string} key
+   * @param {object} effect
+   */
+  _mirrorKeyHeldByDifferentEffect(key, effect) {
+    const pending = this._pendingAttach.get(key);
+    if (pending?.effect != null && pending.effect !== effect) return true;
+
+    const mirror = this._mirrors.get(key);
+    if (!mirror || typeof mirror !== 'object') return false;
+
+    /** @see SequencerEffectMirror */
+    const bound = mirror._effect ?? null;
+
+    return bound != null && bound !== effect;
   }
 
   _bootstrapExistingEffects() {
@@ -465,6 +496,21 @@ export class SequencerAdapter {
     } catch (e) {
       log.debug('bootstrap existing sequencer effects failed:', e);
     }
+  }
+
+  /**
+   * After floor / same-scene resync (`ExternalEffectsCompositor` rebuild), freshly
+   * registered hooks can run before {@link globalThis.Sequencer.EffectManager} lists
+   * every persistent clip. Retry bootstrapping on the next frames.
+   */
+  _scheduleLateBootstrapPasses() {
+    if (this._disposed || !this._initialized) return;
+    const run = () => {
+      if (!this._disposed && this._initialized) this._bootstrapExistingEffects();
+    };
+    try { requestAnimationFrame(() => requestAnimationFrame(run)); } catch (_) { try { run(); } catch (_) {} }
+    try { setTimeout(run, 48); } catch (_) {}
+    try { setTimeout(run, 240); } catch (_) {}
   }
 
   _scheduleAttachRetry(effect, key, attempts) {

@@ -11,8 +11,9 @@
  *   addEffectOverlay(). For each tile with a `_Water` mask, scans the mask on
  *   the CPU to build edge (shoreline) and interior spawn point lists, then
  *   creates foam plume + rain splash particle systems. Systems are grouped by
- *   floor index. Floor isolation is achieved by swapping active systems in/out
- *   of the BatchedRenderer on floor change.
+ *   floor index. All floors from ground through the active level (that have
+ *   splash data) stay attached so lower-level water is visible when looking
+ *   downward from above.
  *
  * Follows the same proven pattern as FireEffectV2:
  *   - Self-contained V2 class with its own BatchedRenderer
@@ -70,32 +71,156 @@ const log = createLogger('WaterSplashesV2');
 /** Detect legacy splash darken block for one-shot shader upgrade. */
 const SHADOW_DARKEN_V1_ANCHOR = '// MS_WATER_SPLASHES_SHADOW_DARKEN_V1';
 
+/** Strip/replace prior volume modulation when upgrading splash shaders. */
+const SPLASH_VOLUME_BEGIN = '// MS_WATER_SPLASHES_VOLUME_PRE_TONE_BEGIN';
+const SPLASH_VOLUME_END = '// MS_WATER_SPLASHES_VOLUME_PRE_TONE_END';
+
+/** Stronger crest lift in daytime (linear, before tone map) — night stays ~unchanged via `day`. */
+const SPLASH_PRE_TONE_SUN_RIM = 2.06;
+/** Darker splash centre vs hotspot rim for perceptual sparkle (HDR before tone map). */
+const SPLASH_VOL_BOWL_IN = 0.72;
+const SPLASH_VOL_BOWL_OUT = 1.09;
+/** Extra rim gain on top of crest (day-gated inside GLSL). */
+const SPLASH_PRE_TONE_SUN_CREST_PLUS = 0.72;
+
+/**
+ * Radial variation before `#include <tonemapping_fragment>`: dim disk interiors vs hot rim so
+ * sunlit foam reads sparkly; `uSplashAmbientDay` scales only daytime punch.
+ */
+const SPLASH_VOLUME_PRE_TONE_FS = `
+  ${SPLASH_VOLUME_BEGIN}
+#ifdef USE_UV
+  {
+    float _sr = clamp(length(vUv - vec2(0.5)) * 2.0, 0.0, 1.0);
+    float _day = clamp(uSplashAmbientDay, 0.0, 1.0);
+    float _bowl = mix(${SPLASH_VOL_BOWL_IN.toFixed(3)}, ${SPLASH_VOL_BOWL_OUT.toFixed(3)},
+      smoothstep(0.04, 0.86, _sr));
+    float _crest = 1.0 + (${(0.22).toFixed(3)} + ${SPLASH_PRE_TONE_SUN_CREST_PLUS.toFixed(3)} * _day) * smoothstep(0.62, 0.997, _sr);
+    float _sunRim = mix(1.0, ${SPLASH_PRE_TONE_SUN_RIM.toFixed(3)},
+      _day * smoothstep(0.68, 0.997, _sr));
+    gl_FragColor.rgb *= _bowl * _crest * _sunRim;
+  }
+#endif
+  ${SPLASH_VOLUME_END}
+`;
+
+/** @param {string} fs */
+function stripSplashVolumeBlock(fs) {
+  if (typeof fs !== 'string') return fs;
+  const re = new RegExp(
+    '\\n?\\s*' + SPLASH_VOLUME_BEGIN.replace(/\//g, '\\/').replace(/\./g, '\\.') + '[\\s\\S]*?' +
+    SPLASH_VOLUME_END.replace(/\//g, '\\/').replace(/\./g, '\\.') + '\\s*\\n?',
+    'g',
+  );
+  return fs.replace(re, '\n');
+}
+
+/**
+ * @param {string} fs
+ * @returns {string}
+ */
+function injectSplashVolumeBeforeTonemapping(fs) {
+  if (typeof fs !== 'string') return fs;
+  let s = stripSplashVolumeBlock(fs);
+  const tonemap = '#include <tonemapping_fragment>';
+  if (!s.includes(tonemap)) return s;
+  return s.replace(tonemap, `${SPLASH_VOLUME_PRE_TONE_FS}\n\t${tonemap}`);
+}
+
+/** Injected into patched particle fragment shaders (screen UV, same as ShadowManager). */
+const SPLASH_SHADOW_UNIFORM_DECL =
+  'uniform sampler2D uCombinedShadowMap;\n' +
+  'uniform sampler2D uCombinedShadowMapRaw;\n' +
+  'uniform float uHasCombinedShadowRaw;\n' +
+  'uniform float uSplashAmbientDay;\n';
+
+/**
+ * Ground lighting for foam/splashes ({@link SHADOW_DARKEN_FS}): conservative occlusion
+ * (min filtered + raw), a steep shade curve toward open water, plus a daylight axis from sky
+ * / Foundry darkness so noon can hit white spray without glowing at night.
+ */
+const SPLASH_OCCLUSION_DEADBAND = 0.055;
+const SPLASH_OCCLUSION_POWER = 2.02;
+const SPLASH_OCCLUSION_RGB_FLOOR = 0.032;
+/** Base linear multiplier before daylight / occlusion shoulders (post-tone). */
+const SPLASH_SURFACE_RGB_GAIN = 2.52;
+/** Extra multiplication when shadows show open sky / sun-lit water (`occ` gate). */
+const SPLASH_NOON_RGB_BOOST = 4.62;
+/** Lower ⇒ noon curve engages earlier ⇒ brighter shafts without raising shadow floors. */
+const SPLASH_NOON_OPEN_GATE = 0.325;
+/** Headroom — real display still clamps later; avoids flattening mids in the multiplier. */
+const SPLASH_RGB_POST_CAP = 48.0;
+const SPLASH_ALPHA_OCCLUSION_FLOOR = 0.34;
+/** Post-tone HDR shoulder: ramps extra gain toward sun-lit open water. */
+const SPLASH_SUN_SHOULDER_MAX = 4.85;
+/** Soft-open × occ used for shoulders (moderates shadow edge chatter). */
+const SPLASH_SUN_OPEN_POW = 0.73;
+/** `smoothstep` low edge for sunshine key vs combined shadow luminance `occ`. */
+const SPLASH_SUN_OCC_GATE_LO = 0.20;
+/** Perceived sparkle: bleach dull sunlit greys toward white (post-tone additive). */
+const SPLASH_SUN_VEIL = 1.06;
+
 /**
  * GLSL appended after `#include <tonemapping_fragment>` so shadow response is not
  * undone by tone mapping; scales RGB and alpha for foam/splashes/bubbles.
  */
 const SHADOW_DARKEN_FS = `
-  // MS_WATER_SPLASHES_SHADOW_DARKEN_V3
+  // MS_WATER_SPLASHES_SHADOW_DARKEN_V10
   {
     vec2 msUv = vec2(
       (gl_FragCoord.x + 0.5) / max(uResolution.x, 1.0),
       (gl_FragCoord.y + 0.5) / max(uResolution.y, 1.0)
     );
-    float csh = clamp(texture2D(uCombinedShadowMap, msUv).r, 0.0, 1.0);
-    gl_FragColor.rgb *= csh;
-    gl_FragColor.a = clamp(gl_FragColor.a * csh, 0.0, 1.0);
+    float filt = clamp(texture2D(uCombinedShadowMap, msUv).r, 0.0, 1.0);
+    float occ = filt;
+    if (uHasCombinedShadowRaw > 0.5) {
+      float raw = clamp(texture2D(uCombinedShadowMapRaw, msUv).r, 0.0, 1.0);
+      occ = min(filt, raw);
+    }
+    float open = clamp((occ - ${SPLASH_OCCLUSION_DEADBAND.toFixed(3)}) / max(1.0 - ${SPLASH_OCCLUSION_DEADBAND.toFixed(3)}, 1e-3), 0.0, 1.0);
+    float shade = mix(${SPLASH_OCCLUSION_RGB_FLOOR.toFixed(3)}, 1.0, pow(open, ${SPLASH_OCCLUSION_POWER.toFixed(3)}));
+    float day = clamp(uSplashAmbientDay, 0.0, 1.0);
+    float noon = mix(1.0, ${SPLASH_NOON_RGB_BOOST.toFixed(3)}, day * smoothstep(${SPLASH_NOON_OPEN_GATE.toFixed(3)}, 0.999, occ));
+    float sunKey = clamp(day * pow(open, ${SPLASH_SUN_OPEN_POW.toFixed(3)}) * smoothstep(${SPLASH_SUN_OCC_GATE_LO.toFixed(3)}, 1.002, occ), 0.0, 1.0);
+    float shoulder = mix(1.0, ${SPLASH_SUN_SHOULDER_MAX.toFixed(3)}, sunKey);
+    float rgbMul = clamp(${SPLASH_SURFACE_RGB_GAIN.toFixed(3)} * shade * noon * shoulder, 0.02, ${SPLASH_RGB_POST_CAP.toFixed(2)});
+    vec3 tinted = clamp(gl_FragColor.rgb * rgbMul, 0.0, 1.0);
+    float peak = max(max(tinted.r, tinted.g), tinted.b);
+    float veilNeed = clamp(1.0 - peak * ${(1.18).toFixed(3)}, 0.0, 1.0);
+    tinted = clamp(tinted + ${SPLASH_SUN_VEIL.toFixed(3)} * sunKey * veilNeed * sunKey, 0.0, 1.0);
+    gl_FragColor.rgb = tinted;
+    float aGate = sqrt(open * 0.88 + 0.12);
+    float aMul = mix(${SPLASH_ALPHA_OCCLUSION_FLOOR.toFixed(3)}, 1.0, aGate);
+    gl_FragColor.a = clamp(gl_FragColor.a * aMul, 0.0, 1.0);
   }
 `;
 
 /**
- * Strip misplaced V2/V3 darken blocks, then append darken after tonemapping when present.
+ * Strip misplaced darken blocks, prepend splash volume modulation, append shadow darken after tonemap.
+ * @param {string} fs
+ * @returns {string}
+ */
+function patchSplashParticleFragmentShader(fs) {
+  let s = injectSplashVolumeBeforeTonemapping(fs);
+  return injectShadowDarkenAfterTonemapping(s);
+}
+
+/**
+ * Strip misplaced V2–V10 darken blocks, then append darken after tonemapping when present.
  * @param {string} fs
  * @returns {string}
  */
 function injectShadowDarkenAfterTonemapping(fs) {
   let s = fs
     .replace(/\/\/ MS_WATER_SPLASHES_SHADOW_DARKEN_V2\s*\{[\s\S]*?\}\s*/g, '')
-    .replace(/\/\/ MS_WATER_SPLASHES_SHADOW_DARKEN_V3\s*\{[\s\S]*?\}\s*/g, '');
+    .replace(/\/\/ MS_WATER_SPLASHES_SHADOW_DARKEN_V3\s*\{[\s\S]*?\}\s*/g, '')
+    .replace(/\/\/ MS_WATER_SPLASHES_SHADOW_DARKEN_V4\s*\{[\s\S]*?\}\s*/g, '')
+    .replace(/\/\/ MS_WATER_SPLASHES_SHADOW_DARKEN_V5\s*\{[\s\S]*?\}\s*/g, '')
+    .replace(/\/\/ MS_WATER_SPLASHES_SHADOW_DARKEN_V6\s*\{[\s\S]*?\}\s*/g, '')
+    .replace(/\/\/ MS_WATER_SPLASHES_SHADOW_DARKEN_V7\s*\{[\s\S]*?\}\s*/g, '')
+    .replace(/\/\/ MS_WATER_SPLASHES_SHADOW_DARKEN_V8\s*\{[\s\S]*?\}\s*/g, '')
+    .replace(/\/\/ MS_WATER_SPLASHES_SHADOW_DARKEN_V9\s*\{[\s\S]*?\}\s*/g, '')
+    .replace(/\/\/ MS_WATER_SPLASHES_SHADOW_DARKEN_V10\s*\{[\s\S]*?\}\s*/g, '');
   const tonemap = '#include <tonemapping_fragment>';
   if (s.includes(tonemap)) {
     return s.replace(tonemap, `${tonemap}\n${SHADOW_DARKEN_FS}`);
@@ -138,11 +263,23 @@ export class WaterSplashesEffectV2 {
     this._initialized = false;
 
     /**
-     * Cache key for the last bound occlusion/water-mask uniforms.
-     * Avoids iterating every system + batch material every frame when nothing changed.
-     * @type {string|null}
+     * Scalar cache for shared splash occlusion uniforms (resolution, water mask, etc.).
+     * Per-system floor-presence texture is tracked separately on userData.
+     * @type {{ vf:number, wm:string|null, wmv:number, rx:number, ry:number, sbx:number, sby:number, sbw:number, sbh:number, gen:number }|null}
      */
-    this._lastOcclusionUniformKey = null;
+    this._lastOcclusionGlobals = null;
+
+    /** Bumped when `onFloorChange` actually changes which floors are active. @type {number} */
+    this._activeFloorsGeneration = 0;
+
+    /**
+     * Cached drawing-buffer pixel size (DPR-scaled). Refreshed on compositor resize
+     * and init — avoids per-frame getDrawingBufferSize on the renderer.
+     * @type {number}
+     */
+    this._drawingBufferW = 1;
+    /** @type {number} */
+    this._drawingBufferH = 1;
 
     /**
      * Throttle view-dependent spawn filtering; setViewBoundsUv currently allocates.
@@ -200,6 +337,9 @@ export class WaterSplashesEffectV2 {
     /** @type {Array<QuarksParticleSystem>} reused splash systems list */
     this._tempSplashSystems = [];
 
+    /** @type {Array<QuarksParticleSystem>} snapshot of all active-floor systems (updated in onFloorChange) */
+    this._activeSystemsFlat = [];
+
     /**
      * Hardcoded parameters for the built-in underwater bubbles layer.
      * These are intentionally not exposed to the UI — edit here to tune.
@@ -224,9 +364,9 @@ export class WaterSplashesEffectV2 {
       foamLifeMin: 1.2,
       foamLifeMax: 3.25,
       foamPeakOpacity: 0.88,
-      foamColorR: 0.85,
-      foamColorG: 0.9,
-      foamColorB: 0.88,
+      foamColorR: 0.97,
+      foamColorG: 0.982,
+      foamColorB: 1.0,
       foamWindDriftScale: 2,
 
       splashEnabled: true,
@@ -321,22 +461,34 @@ export class WaterSplashesEffectV2 {
         uWaterFlipV: { value: 0.0 },
         uSceneBounds: { value: new THREE.Vector4(0, 0, 1, 1) },
         uCombinedShadowMap: { value: null },
+        uCombinedShadowMapRaw: { value: null },
+        uHasCombinedShadowRaw: { value: 0.0 },
+        uSplashAmbientDay: { value: 1.0 },
       };
       material.userData._msFloorPresenceUniforms = uniforms;
     } else {
       if (!uniforms.uCombinedShadowMap) {
         uniforms.uCombinedShadowMap = { value: null };
       }
+      if (!uniforms.uCombinedShadowMapRaw) {
+        uniforms.uCombinedShadowMapRaw = { value: null };
+      }
+      if (uniforms.uHasCombinedShadowRaw === undefined) {
+        uniforms.uHasCombinedShadowRaw = { value: 0.0 };
+      }
+      if (uniforms.uSplashAmbientDay === undefined) {
+        uniforms.uSplashAmbientDay = { value: 1.0 };
+      }
     }
 
     const isShaderMat = material.isShaderMaterial === true;
     const marker = '/* MS_WATER_SPLASHES_MASKING_V1 */';
-    const shadowDecl = 'uniform sampler2D uCombinedShadowMap;\n';
 
-    // Sprite batch ShaderMaterial: nothing to do once mask + V3 shadow darken are present.
+    // Sprite batch ShaderMaterial: nothing to do once mask + volume + V10 lighting are present.
     if (isShaderMat && typeof material.fragmentShader === 'string'
       && material.fragmentShader.includes(marker)
-      && material.fragmentShader.includes('MS_WATER_SPLASHES_SHADOW_DARKEN_V3')) {
+      && material.fragmentShader.includes(SPLASH_VOLUME_BEGIN)
+      && material.fragmentShader.includes('MS_WATER_SPLASHES_SHADOW_DARKEN_V10')) {
       // One-shot hot upgrade: older masked shaders sampled floor presence from
       // alpha only. Some occluder passes encode coverage in R, so use max(R, A).
       if (material.fragmentShader.includes('texture2D(uFloorPresenceMap, fpScreenUV).a')) {
@@ -356,6 +508,9 @@ export class WaterSplashesEffectV2 {
       uni.uWaterFlipV = uniforms.uWaterFlipV;
       uni.uSceneBounds = uniforms.uSceneBounds;
       uni.uCombinedShadowMap = uniforms.uCombinedShadowMap;
+      uni.uCombinedShadowMapRaw = uniforms.uCombinedShadowMapRaw;
+      uni.uHasCombinedShadowRaw = uniforms.uHasCombinedShadowRaw;
+      uni.uSplashAmbientDay = uniforms.uSplashAmbientDay;
       return;
     }
 
@@ -373,6 +528,9 @@ export class WaterSplashesEffectV2 {
       uni.uWaterFlipV = uniforms.uWaterFlipV;
       uni.uSceneBounds = uniforms.uSceneBounds;
       uni.uCombinedShadowMap = uniforms.uCombinedShadowMap;
+      uni.uCombinedShadowMapRaw = uniforms.uCombinedShadowMapRaw;
+      uni.uHasCombinedShadowRaw = uniforms.uHasCombinedShadowRaw;
+      uni.uSplashAmbientDay = uniforms.uSplashAmbientDay;
 
       let shaderChanged = false;
 
@@ -424,11 +582,11 @@ export class WaterSplashesEffectV2 {
           const v1Body = /\/\/ MS_WATER_SPLASHES_SHADOW_DARKEN_V1\s*\{[\s\S]*?gl_FragColor\.rgb \*= msShadowMul;\s*\}/m;
           fs = fs.replace(v1Body, '');
           if (fs.includes('uniform sampler2D uBuildingShadowMap')) {
-            fs = fs.replace(SHADOW_DECL_V1_LEGACY, shadowDecl);
-          } else if (!fs.includes('uniform sampler2D uCombinedShadowMap')) {
-            fs = fs.replace(marker + '\n', marker + '\n' + shadowDecl);
+            fs = fs.replace(SHADOW_DECL_V1_LEGACY, SPLASH_SHADOW_UNIFORM_DECL);
+          } else if (!fs.includes('uniform sampler2D uCombinedShadowMapRaw')) {
+            fs = fs.replace(marker + '\n', marker + '\n' + SPLASH_SHADOW_UNIFORM_DECL);
           }
-          fs = injectShadowDarkenAfterTonemapping(fs);
+          fs = patchSplashParticleFragmentShader(fs);
           material.fragmentShader = fs;
           shaderChanged = true;
         }
@@ -450,7 +608,7 @@ export class WaterSplashesEffectV2 {
             'uniform float uWaterFlipV;\n' +
             'uniform vec4 uSceneBounds;\n' +
             marker + '\n' +
-            shadowDecl;
+            SPLASH_SHADOW_UNIFORM_DECL;
 
           // Place after the last precision statement if present, otherwise at start.
           const precRE = /precision\s+(?:lowp|mediump|highp)\s+float\s*;\s*/g;
@@ -497,15 +655,23 @@ export class WaterSplashesEffectV2 {
             fs = fs.replace(marker + '\n', marker + '\n' + maskBlock);
           }
 
-          fs = injectShadowDarkenAfterTonemapping(fs);
+          fs = patchSplashParticleFragmentShader(fs);
           material.fragmentShader = fs;
           shaderChanged = true;
-        } else if (!fs.includes('MS_WATER_SPLASHES_SHADOW_DARKEN_V3')) {
+        } else if (!fs.includes(SPLASH_VOLUME_BEGIN)
+          || !fs.includes('MS_WATER_SPLASHES_SHADOW_DARKEN_V10')) {
           let fsUp = fs;
-          if (!fsUp.includes('uniform sampler2D uCombinedShadowMap')) {
-            fsUp = fsUp.replace(marker + '\n', marker + '\n' + shadowDecl);
+          if (!fsUp.includes('uniform sampler2D uCombinedShadowMapRaw')) {
+            if (/\buniform\s+sampler2D\s+uCombinedShadowMap\s*;\s*/m.test(fsUp)) {
+              fsUp = fsUp.replace(
+                /\buniform\s+sampler2D\s+uCombinedShadowMap\s*;\s*/m,
+                SPLASH_SHADOW_UNIFORM_DECL
+              );
+            } else {
+              fsUp = fsUp.replace(marker + '\n', marker + '\n' + SPLASH_SHADOW_UNIFORM_DECL);
+            }
           }
-          fsUp = injectShadowDarkenAfterTonemapping(fsUp);
+          fsUp = patchSplashParticleFragmentShader(fsUp);
           material.fragmentShader = fsUp;
           shaderChanged = true;
         }
@@ -529,6 +695,9 @@ export class WaterSplashesEffectV2 {
       shader.uniforms.uSceneBounds = uniforms.uSceneBounds;
 
       shader.uniforms.uCombinedShadowMap = uniforms.uCombinedShadowMap;
+      shader.uniforms.uCombinedShadowMapRaw = uniforms.uCombinedShadowMapRaw;
+      shader.uniforms.uHasCombinedShadowRaw = uniforms.uHasCombinedShadowRaw;
+      shader.uniforms.uSplashAmbientDay = uniforms.uSplashAmbientDay;
 
       // Inject world position varying (works for quarks SpriteBatch and MeshBasicMaterial)
       shader.vertexShader = shader.vertexShader
@@ -541,14 +710,14 @@ export class WaterSplashesEffectV2 {
           '#include <soft_vertex>\n  vMsWorldPos = (modelMatrix * vec4(offset, 1.0)).xyz;'
         );
 
-      shader.fragmentShader = injectShadowDarkenAfterTonemapping(
+      shader.fragmentShader = patchSplashParticleFragmentShader(
         shader.fragmentShader
           .replace(
             'void main() {',
             'varying vec3 vMsWorldPos;\n' +
             'uniform sampler2D uFloorPresenceMap;\nuniform float uHasFloorPresenceMap;\nuniform vec2 uResolution;\n' +
             'uniform sampler2D uWaterMask;\nuniform float uHasWaterMask;\nuniform float uUseWaterMaskClip;\nuniform float uWaterFlipV;\nuniform vec4 uSceneBounds;\n' +
-            shadowDecl +
+            SPLASH_SHADOW_UNIFORM_DECL +
             'void main() {'
           )
           .replace(
@@ -650,24 +819,6 @@ export class WaterSplashesEffectV2 {
   }
 
   /**
-   * Active splash floor used for upper-floor occluder selection.
-   * We normally keep one active floor (or one lower-floor fallback).
-   * @param {number} viewFloor
-   * @returns {number}
-   * @private
-   */
-  _getOccluderFloorIndex(viewFloor) {
-    let floor = Number.isFinite(Number(viewFloor)) ? Number(viewFloor) : 0;
-    for (const idx of this._activeFloors) {
-      if (Number.isFinite(Number(idx))) {
-        floor = Number(idx);
-        break;
-      }
-    }
-    return floor;
-  }
-
-  /**
    * Resolve the exact upper-floor occluder texture for a splash floor.
    * Prefer rebuilding from per-level scene RT diagnostics so the occluder
    * matches the current splash floor's "floors above me" set.
@@ -696,6 +847,81 @@ export class WaterSplashesEffectV2 {
     return fc?._waterOccluderRT?.texture ?? null;
   }
 
+  /**
+   * Append all particle systems from a floor state into `out` without spread / extra arrays.
+   * @private
+   */
+  _appendSystemsFromFloorState(st, out) {
+    if (!st || !out) return;
+    const pushArr = (arr) => {
+      if (!arr || !arr.length) return;
+      for (let i = 0; i < arr.length; i++) out.push(arr[i]);
+    };
+    pushArr(st.foamSystems);
+    pushArr(st.splashSystems);
+    pushArr(st.foamSystems2);
+    pushArr(st.splashSystems2);
+  }
+
+  /**
+   * Rebuild `_activeSystemsFlat` from `_activeFloors` (call after floor activation changes).
+   * @private
+   */
+  _rebuildActiveSystemsFlat() {
+    const flat = this._activeSystemsFlat;
+    flat.length = 0;
+    for (const floorIndex of this._activeFloors) {
+      const st = this._floorStates.get(floorIndex);
+      if (!st) continue;
+      this._appendSystemsFromFloorState(st, flat);
+    }
+  }
+
+  /** Refresh drawing-buffer dimensions from the live renderer (init + compositor resize). */
+  _refreshDrawingBufferSize() {
+    const renderer = window.MapShine?.renderer || window.canvas?.app?.renderer;
+    if (!renderer || !window.THREE) {
+      this._drawingBufferW = 1;
+      this._drawingBufferH = 1;
+      return;
+    }
+    if (!this._tempVec2) this._tempVec2 = new window.THREE.Vector2();
+    const size = this._tempVec2;
+    if (typeof renderer.getDrawingBufferSize === 'function') {
+      renderer.getDrawingBufferSize(size);
+    } else if (typeof renderer.getSize === 'function') {
+      renderer.getSize(size);
+      const dpr = typeof renderer.getPixelRatio === 'function'
+        ? renderer.getPixelRatio()
+        : (window.devicePixelRatio || 1);
+      size.multiplyScalar(dpr);
+    }
+    this._drawingBufferW = size.x || 1;
+    this._drawingBufferH = size.y || 1;
+  }
+
+  /**
+   * Viewport resize hook (invoked from FloorCompositor.onResize).
+   * Keeps splash shader resolution uniforms aligned with the drawing buffer without per-frame queries.
+   */
+  syncDrawingBufferSize() {
+    this._refreshDrawingBufferSize();
+  }
+
+  /**
+   * Floor-presence / upper-scene texture for one splash floor when the camera is on `viewFloor`.
+   * Lower floors while viewing from above need the stacked upper-scene occluder.
+   * @private
+   */
+  _resolveFloorPresenceTexForSplashFloor(floorCompositor, viewFloor, systemFloorIndex, floorPresenceTex) {
+    const view = Number(viewFloor);
+    const sfi = Number(systemFloorIndex);
+    if (Number.isFinite(sfi) && Number.isFinite(view) && sfi < view) {
+      return this._resolveUpperFloorOccluderTexture(floorCompositor, sfi) ?? floorPresenceTex ?? null;
+    }
+    return floorPresenceTex ?? null;
+  }
+
   // ── Lifecycle ──────────────────────────────────────────────────────────────
 
   initialize() {
@@ -705,6 +931,8 @@ export class WaterSplashesEffectV2 {
 
     // Start loading sprite textures (populate() will await this).
     this._texturesReady = this._loadTextures();
+
+    this._refreshDrawingBufferSize();
 
     this._initialized = true;
     log.info('WaterSplashesEffectV2 initialized');
@@ -998,9 +1226,39 @@ export class WaterSplashesEffectV2 {
   }
 
   /**
-   * After ShadowManagerV2 pre-bus combine, bind `combinedShadowTexture` so foam,
-   * rain splashes, and underwater bubbles dim with the same factor as lit terrain.
-   * Invoked from FloorCompositor immediately before the bus scene draw.
+   * 0 = night / heavy scene darkness, 1 = bright noon sky — drives GLSL noon boost
+   * without treating shadow maps as the only lighting cue.
+   * @returns {number}
+   * @private
+   */
+  _computeSplashAmbientDay01() {
+    const fc = (() => {
+      try { return window.MapShine?.effectComposer?._floorCompositorV2 ?? null; } catch (_) { return null; }
+    })();
+    const sky = fc?._skyColorEffect;
+    const skyIntensityRaw = Number(sky?._composeMaterial?.uniforms?.uIntensity?.value);
+    const skyIntensity01 = Number.isFinite(skyIntensityRaw)
+      ? Math.max(0.0, Math.min(1.0, skyIntensityRaw))
+      : 1.0;
+    const canvas = window.canvas;
+    const weatherEnv = weatherController?.getEnvironment?.() ?? null;
+    const sceneDarknessRaw = Number(canvas?.scene?.environment?.darknessLevel);
+    const envDarknessRaw = Number(canvas?.environment?.darknessLevel);
+    const sceneDarkness01 = Number.isFinite(sceneDarknessRaw)
+      ? Math.max(0.0, Math.min(1.0, sceneDarknessRaw))
+      : (Number.isFinite(envDarknessRaw) ? Math.max(0.0, Math.min(1.0, envDarknessRaw)) : 0.0);
+    const effectiveDarknessRaw = Number(weatherEnv?.effectiveDarkness);
+    const effectiveDarkness01 = Number.isFinite(effectiveDarknessRaw)
+      ? Math.max(0.0, Math.min(1.0, effectiveDarknessRaw))
+      : 0.0;
+    const dark01 = Math.max(sceneDarkness01, effectiveDarkness01);
+    return Math.max(0.0, Math.min(1.0, skyIntensity01 * (1.0 - 0.92 * dark01)));
+  }
+
+  /**
+   * Bind ShadowManager combined shadow RTs (+ sky/day factor) onto splash shaders.
+   * Call after the authoritative shadow combine for this frame (post-cloud merge),
+   * immediately before `_renderPerLevelPipeline` draws the bus overlay.
    */
   syncShadowDarkeningUniforms() {
     if (!this._initialized || this._batchRenderers.size === 0) return;
@@ -1016,40 +1274,22 @@ export class WaterSplashesEffectV2 {
     const smFx = fc?._shadowManagerEffect ?? null;
     const combinedTex = smFx?.combinedShadowTexture ?? null;
     const texForShader = combinedTex ?? this._ensureCombinedShadowFallbackTexture();
+    const rawTexSm = smFx?.combinedShadowRawTexture ?? null;
+    const texRawForShader = rawTexSm ?? texForShader;
+    const hasSeparateRaw = !!(rawTexSm && combinedTex && rawTexSm !== combinedTex);
+    const splashAmbientDay = this._computeSplashAmbientDay01();
 
-    const renderer = window.MapShine?.renderer || window.canvas?.app?.renderer;
-    let resX = 1;
-    let resY = 1;
-    if (renderer && window.THREE) {
-      if (!this._tempVec2) this._tempVec2 = new window.THREE.Vector2();
-      const size = this._tempVec2;
-      if (typeof renderer.getDrawingBufferSize === 'function') {
-        renderer.getDrawingBufferSize(size);
-      } else if (typeof renderer.getSize === 'function') {
-        renderer.getSize(size);
-        const dpr = typeof renderer.getPixelRatio === 'function'
-          ? renderer.getPixelRatio()
-          : (window.devicePixelRatio || 1);
-        size.multiplyScalar(dpr);
-      }
-      resX = size.x || 1;
-      resY = size.y || 1;
-    }
+    const resX = this._drawingBufferW;
+    const resY = this._drawingBufferH;
 
-    const systems = this._tempSystems;
-    systems.length = 0;
-    for (const floorIndex of this._activeFloors) {
-      const st = this._floorStates.get(floorIndex);
-      if (!st) continue;
-      if (st.foamSystems && st.foamSystems.length) systems.push(...st.foamSystems);
-      if (st.splashSystems && st.splashSystems.length) systems.push(...st.splashSystems);
-      if (st.foamSystems2 && st.foamSystems2.length) systems.push(...st.foamSystems2);
-      if (st.splashSystems2 && st.splashSystems2.length) systems.push(...st.splashSystems2);
-    }
+    const systems = this._activeSystemsFlat;
 
     const applyU = (u) => {
       if (!u) return;
       if (u.uCombinedShadowMap) u.uCombinedShadowMap.value = texForShader;
+      if (u.uCombinedShadowMapRaw) u.uCombinedShadowMapRaw.value = texRawForShader;
+      if (u.uHasCombinedShadowRaw) u.uHasCombinedShadowRaw.value = hasSeparateRaw ? 1.0 : 0.0;
+      if (u.uSplashAmbientDay) u.uSplashAmbientDay.value = splashAmbientDay;
       if (u.uResolution) u.uResolution.value.set(resX, resY);
     };
 
@@ -1061,17 +1301,18 @@ export class WaterSplashesEffectV2 {
       const batches = br?.batches;
       const map = br?.systemToBatchIndex;
       if (sys.material) {
-        this._patchFloorPresenceMaterial(sys.material);
         applyU(sys.material.userData?._msFloorPresenceUniforms);
       }
       const idx = (map && typeof map.get === 'function') ? map.get(sys) : undefined;
       const batch = (idx !== undefined && batches) ? batches[idx] : null;
       const batchMat = batch?.material;
       if (batchMat) {
-        this._patchFloorPresenceMaterial(batchMat);
         applyU(batchMat.userData?._msFloorPresenceUniforms);
         const bu = batchMat.uniforms;
         if (bu?.uCombinedShadowMap) bu.uCombinedShadowMap.value = texForShader;
+        if (bu?.uCombinedShadowMapRaw) bu.uCombinedShadowMapRaw.value = texRawForShader;
+        if (bu?.uHasCombinedShadowRaw) bu.uHasCombinedShadowRaw.value = hasSeparateRaw ? 1.0 : 0.0;
+        if (bu?.uSplashAmbientDay) bu.uSplashAmbientDay.value = splashAmbientDay;
         if (bu?.uResolution) bu.uResolution.value.set(resX, resY);
       }
     }
@@ -1153,24 +1394,11 @@ export class WaterSplashesEffectV2 {
 
     // Bind floor-presence occlusion uniforms.
     try {
-      // V2 occlusion source: FloorCompositor's screen-space occluder alpha RT.
-      // This RT marks pixels covered by the current/upper floor's tiles.
-      // It is already aligned with the main camera and sampled in screen UV.
       const fc = window.MapShine?.effectComposer?._floorCompositorV2 ?? null;
-      // DistortionManager floor-presence RT is current-floor tile coverage only.
-      // It does not represent the full stack of intervening level imagery.
       const floorPresenceTex = fc?._distortionEffect?.floorPresenceTarget?.texture ?? null;
-      // For lower-floor splash systems viewed from higher floors, prioritize the
-      // stacked per-level upper-scene occluder (includes background + foreground
-      // imagery between origin/view floors).
-      const viewFloor = window.MapShine?.floorStack?.getActiveFloor?.()?.index ?? 0;
-      const occluderFloor = this._getOccluderFloorIndex(viewFloor);
-      const upperOccluderTex = (occluderFloor < viewFloor)
-        ? this._resolveUpperFloorOccluderTexture(fc, occluderFloor)
-        : null;
-      const fpTex = (occluderFloor < viewFloor)
-        ? (upperOccluderTex ?? floorPresenceTex ?? null)
-        : (floorPresenceTex ?? null);
+      const viewFloorRaw = window.MapShine?.floorStack?.getActiveFloor?.()?.index ?? 0;
+      const vfKey = Number.isFinite(Number(viewFloorRaw)) ? Number(viewFloorRaw) : 0;
+
       const waterMaskTex = (fc?._waterEffect && typeof fc._waterEffect.getWaterMaskTexture === 'function')
         ? fc._waterEffect.getWaterMaskTexture()
         : null;
@@ -1194,106 +1422,102 @@ export class WaterSplashesEffectV2 {
       }
 
       const sceneBounds = this._sceneBounds;
+      const resX = this._drawingBufferW;
+      const resY = this._drawingBufferH;
+      const wmv = waterFlipV ? 1 : 0;
+      const wmUuid = waterMaskTex?.uuid ?? null;
+      const sbx = sceneBounds?.sx ?? NaN;
+      const sby = sceneBounds?.syWorld ?? NaN;
+      const sbw = sceneBounds?.sw ?? NaN;
+      const sbh = sceneBounds?.sh ?? NaN;
 
-      const renderer = window.MapShine?.renderer || window.canvas?.app?.renderer;
-      let resX = 1, resY = 1;
-      if (renderer && window.THREE) {
-        if (!this._tempVec2) this._tempVec2 = new window.THREE.Vector2();
-        const size = this._tempVec2;
-        if (typeof renderer.getDrawingBufferSize === 'function') {
-          renderer.getDrawingBufferSize(size);
-        } else if (typeof renderer.getSize === 'function') {
-          renderer.getSize(size);
-          const dpr = typeof renderer.getPixelRatio === 'function'
-            ? renderer.getPixelRatio()
-            : (window.devicePixelRatio || 1);
-          size.multiplyScalar(dpr);
-        }
-        resX = size.x || 1;
-        resY = size.y || 1;
+      if (!this._lastOcclusionGlobals) {
+        this._lastOcclusionGlobals = {
+          vf: NaN,
+          wm: null,
+          wmv: -1,
+          rx: -1,
+          ry: -1,
+          sbx: NaN,
+          sby: NaN,
+          sbw: NaN,
+          sbh: NaN,
+          gen: -1,
+        };
+      }
+      const L = this._lastOcclusionGlobals;
+      const globalsChanged = (
+        L.vf !== vfKey
+        || L.wm !== wmUuid
+        || L.wmv !== wmv
+        || L.rx !== resX
+        || L.ry !== resY
+        || L.sbx !== sbx
+        || L.sby !== sby
+        || L.sbw !== sbw
+        || L.sbh !== sbh
+        || L.gen !== this._activeFloorsGeneration
+      );
+
+      if (globalsChanged) {
+        L.vf = vfKey;
+        L.wm = wmUuid;
+        L.wmv = wmv;
+        L.rx = resX;
+        L.ry = resY;
+        L.sbx = sbx;
+        L.sby = sby;
+        L.sbw = sbw;
+        L.sbh = sbh;
+        L.gen = this._activeFloorsGeneration;
       }
 
-      const key = JSON.stringify({
-        fp: fpTex?.uuid ?? null,
-        vf: viewFloor,
-        wm: waterMaskTex?.uuid ?? null,
-        wmv: waterFlipV ? 1 : 0,
-        rx: resX,
-        ry: resY,
-        sb: sceneBounds ? [sceneBounds.sx, sceneBounds.syWorld, sceneBounds.sw, sceneBounds.sh] : null,
-        floors: [...this._activeFloors],
-      });
+      const wantsWaterClip = 1.0;
+      const systems = this._activeSystemsFlat;
 
-      // Skip full uniform re-bind when the upstream occlusion inputs are unchanged.
-      // (Still runs simulation + emission/behavior updates above.)
-      if (this._lastOcclusionUniformKey !== key) {
-        this._lastOcclusionUniformKey = key;
+      const applyOcclusionUniforms = (u, fpTex) => {
+        if (!u) return;
+        const wantsFloorPresenceClip = fpTex ? 1.0 : 0.0;
+        u.uFloorPresenceMap.value = fpTex;
+        u.uHasFloorPresenceMap.value = (fpTex && wantsFloorPresenceClip > 0.5) ? 1.0 : 0.0;
+        u.uResolution.value.set(resX, resY);
+        u.uWaterMask.value = waterMaskTex;
+        u.uHasWaterMask.value = waterMaskTex ? 1.0 : 0.0;
+        if (u.uUseWaterMaskClip) u.uUseWaterMaskClip.value = wantsWaterClip;
+        if (u.uWaterFlipV) u.uWaterFlipV.value = waterFlipV ? 1.0 : 0.0;
+        if (sceneBounds && u.uSceneBounds?.value?.set) {
+          u.uSceneBounds.value.set(sceneBounds.sx, sceneBounds.syWorld, sceneBounds.sw, sceneBounds.sh);
+        }
+      };
 
-        // Collect active systems once (no per-frame allocations).
-        const systems = this._tempSystems;
-        systems.length = 0;
-        for (const floorIndex of this._activeFloors) {
-          const st = this._floorStates.get(floorIndex);
-          if (!st) continue;
-          if (st.foamSystems && st.foamSystems.length) systems.push(...st.foamSystems);
-          if (st.splashSystems && st.splashSystems.length) systems.push(...st.splashSystems);
-          if (st.foamSystems2 && st.foamSystems2.length) systems.push(...st.foamSystems2);
-          if (st.splashSystems2 && st.splashSystems2.length) systems.push(...st.splashSystems2);
+      for (const sys of systems) {
+        if (!sys) continue;
+        const systemFloorIndex = Number(sys.userData?._msFloorIndex);
+        const fpTex = this._resolveFloorPresenceTexForSplashFloor(fc, vfKey, systemFloorIndex, floorPresenceTex);
+        const fpId = fpTex?.uuid ?? null;
+        if (!globalsChanged && sys.userData?._msLastSplashFpUuid === fpId) continue;
+        if (sys.userData) sys.userData._msLastSplashFpUuid = fpId;
+
+        const st = Number.isFinite(systemFloorIndex) ? this._floorStates.get(systemFloorIndex) : null;
+        const br = st?.batchRenderer ?? null;
+        const batches = br?.batches;
+        const map = br?.systemToBatchIndex;
+
+        if (sys.material) {
+          let u = sys.material.userData?._msFloorPresenceUniforms;
+          if (!u) this._patchFloorPresenceMaterial(sys.material);
+          u = sys.material.userData?._msFloorPresenceUniforms;
+          applyOcclusionUniforms(u, fpTex);
         }
 
-        for (const sys of systems) {
-          if (!sys) continue;
-          const systemFloorIndex = Number(sys.userData?._msFloorIndex);
-          const st = Number.isFinite(systemFloorIndex) ? this._floorStates.get(systemFloorIndex) : null;
-          const br = st?.batchRenderer ?? null;
-          const batches = br?.batches;
-          const map = br?.systemToBatchIndex;
-
-          // Restore normal masking behavior: keep particles clipped to the water mask
-          // so underwater bubbles/splashes cannot drift onto land.
-          const wantsWaterClip = 1.0;
-          // Terrain masking must apply whenever floor-presence data exists.
-          // This prevents splashes/bubbles from bleeding through blocking terrain.
-          const wantsFloorPresenceClip = fpTex ? 1.0 : 0.0;
-
-          // Patch and update the source material (MeshBasicMaterial)
-          if (sys.material) {
-            this._patchFloorPresenceMaterial(sys.material);
-            const u = sys.material.userData?._msFloorPresenceUniforms;
-            if (u) {
-              u.uFloorPresenceMap.value = fpTex;
-              u.uHasFloorPresenceMap.value = (fpTex && wantsFloorPresenceClip > 0.5) ? 1.0 : 0.0;
-              u.uResolution.value.set(resX, resY);
-              u.uWaterMask.value = waterMaskTex;
-              u.uHasWaterMask.value = waterMaskTex ? 1.0 : 0.0;
-              if (u.uUseWaterMaskClip) u.uUseWaterMaskClip.value = wantsWaterClip;
-              if (u.uWaterFlipV) u.uWaterFlipV.value = waterFlipV ? 1.0 : 0.0;
-              if (sceneBounds && u.uSceneBounds?.value?.set) {
-                u.uSceneBounds.value.set(sceneBounds.sx, sceneBounds.syWorld, sceneBounds.sw, sceneBounds.sh);
-              }
-            }
-          }
-
-          // Patch and update the quarks batch material (ShaderMaterial)
-          const idx = (map && typeof map.get === 'function') ? map.get(sys) : undefined;
-          const batch = (idx !== undefined && batches) ? batches[idx] : null;
-          const batchMat = batch?.material;
-          if (batchMat) {
-            this._patchFloorPresenceMaterial(batchMat);
-            const u = batchMat.userData?._msFloorPresenceUniforms;
-            if (u) {
-              u.uFloorPresenceMap.value = fpTex;
-              u.uHasFloorPresenceMap.value = (fpTex && wantsFloorPresenceClip > 0.5) ? 1.0 : 0.0;
-              u.uResolution.value.set(resX, resY);
-              u.uWaterMask.value = waterMaskTex;
-              u.uHasWaterMask.value = waterMaskTex ? 1.0 : 0.0;
-              if (u.uUseWaterMaskClip) u.uUseWaterMaskClip.value = wantsWaterClip;
-              if (u.uWaterFlipV) u.uWaterFlipV.value = waterFlipV ? 1.0 : 0.0;
-              if (sceneBounds && u.uSceneBounds?.value?.set) {
-                u.uSceneBounds.value.set(sceneBounds.sx, sceneBounds.syWorld, sceneBounds.sw, sceneBounds.sh);
-              }
-            }
-          }
+        const idx = (map && typeof map.get === 'function') ? map.get(sys) : undefined;
+        const batch = (idx !== undefined && batches) ? batches[idx] : null;
+        const batchMat = batch?.material;
+        if (batchMat) {
+          let u = batchMat.userData?._msFloorPresenceUniforms;
+          if (!u) this._patchFloorPresenceMaterial(batchMat);
+          u = batchMat.userData?._msFloorPresenceUniforms;
+          applyOcclusionUniforms(u, fpTex);
         }
       }
     } catch (_) {}
@@ -1399,8 +1623,10 @@ export class WaterSplashesEffectV2 {
       for (const floorIndex of this._activeFloors) {
         const st = this._floorStates.get(floorIndex);
         if (!st) continue;
-        if (st.foamSystems && st.foamSystems.length) foamSystems.push(...st.foamSystems);
-        if (st.splashSystems && st.splashSystems.length) splashSystems.push(...st.splashSystems);
+        const fa = st.foamSystems;
+        if (fa) for (let i = 0; i < fa.length; i++) foamSystems.push(fa[i]);
+        const sa = st.splashSystems;
+        if (sa) for (let i = 0; i < sa.length; i++) splashSystems.push(sa[i]);
       }
 
       const updateWeightsFor = (systems) => {
@@ -1469,35 +1695,51 @@ export class WaterSplashesEffectV2 {
 
     const desired = new Set();
     const activeFloorIndex = Number(maxFloorIndex);
-    // Water splashes/bubbles are screen-facing overlays (depthTest disabled).
-    // Keep a single active floor to avoid cross-floor stacking. When the active
-    // floor has no dedicated water systems, fall back to the nearest lower floor
-    // that does (matching WaterEffectV2's floor-data selection behavior).
+    // Register every populated floor from ground through the active level so
+    // lower-level splashes/bubbles stay alive and visible when the camera
+    // looks downward from a higher floor.
     if (Number.isFinite(activeFloorIndex)) {
-      if (this._floorStates.has(activeFloorIndex)) {
-        desired.add(activeFloorIndex);
-      } else {
-        let fallbackFloor = null;
-        for (const idx of this._floorStates.keys()) {
-          if (idx <= activeFloorIndex && (fallbackFloor === null || idx > fallbackFloor)) {
-            fallbackFloor = idx;
-          }
-        }
-        if (fallbackFloor !== null) desired.add(fallbackFloor);
+      for (const idx of this._floorStates.keys()) {
+        const fi = Number(idx);
+        if (Number.isFinite(fi) && fi <= activeFloorIndex) desired.add(fi);
       }
     }
 
+    const prevFloors = this._activeFloors;
+    let floorsDirty = prevFloors.size !== desired.size;
+    if (!floorsDirty) {
+      for (const x of desired) {
+        if (!prevFloors.has(x)) {
+          floorsDirty = true;
+          break;
+        }
+      }
+    }
+    if (!floorsDirty) {
+      for (const x of prevFloors) {
+        if (!desired.has(x)) {
+          floorsDirty = true;
+          break;
+        }
+      }
+    }
+    if (floorsDirty) {
+      this._activeFloorsGeneration++;
+      this._lastOcclusionGlobals = null;
+    }
+
     // Deactivate floors that should no longer be visible.
-    for (const idx of this._activeFloors) {
+    for (const idx of prevFloors) {
       if (!desired.has(idx)) this._deactivateFloor(idx);
     }
     // Activate floors that are newly visible.
     for (const idx of desired) {
-      if (!this._activeFloors.has(idx)) this._activateFloor(idx);
+      if (!prevFloors.has(idx)) this._activateFloor(idx);
     }
 
     log.info(`onFloorChange(${maxFloorIndex}): active=[${[...desired]}] states=[${[...this._floorStates.keys()]}]`);
     this._activeFloors = desired;
+    this._rebuildActiveSystemsFlat();
   }
 
   // ── Cleanup ────────────────────────────────────────────────────────────────
@@ -1507,7 +1749,7 @@ export class WaterSplashesEffectV2 {
       this._deactivateFloor(idx);
     }
     this._activeFloors.clear();
-
+    this._activeSystemsFlat.length = 0;
     for (const floorIndex of this._floorStates.keys()) {
       try { this._renderBus.removeEffectOverlay(this._overlayKeyForFloor(floorIndex)); } catch (_) {}
     }
@@ -1630,6 +1872,7 @@ export class WaterSplashesEffectV2 {
       side: THREE.DoubleSide,
     });
     material.toneMapped = false;
+    this._patchFloorPresenceMaterial(material);
 
     const p = this.params;
     const lifeMin = Math.max(0.01, p.foamLifeMin ?? 0.8);
@@ -1695,6 +1938,7 @@ export class WaterSplashesEffectV2 {
       side: THREE.DoubleSide,
     });
     material.toneMapped = false;
+    this._patchFloorPresenceMaterial(material);
 
     const p = this.params;
     const lifeMin = Math.max(0.01, p.splashLifeMin ?? 0.3);
@@ -1763,6 +2007,7 @@ export class WaterSplashesEffectV2 {
       side: THREE.DoubleSide,
     });
     material.toneMapped = false;
+    this._patchFloorPresenceMaterial(material);
 
     const p = this.bubblesParams;
     const lifeMin = Math.max(0.01, p.foamLifeMin ?? 1.2);
@@ -1831,6 +2076,7 @@ export class WaterSplashesEffectV2 {
       side: THREE.DoubleSide,
     });
     material.toneMapped = false;
+    this._patchFloorPresenceMaterial(material);
 
     const p = this.bubblesParams;
     const lifeMin = Math.max(0.01, p.splashLifeMin ?? 0.3);
@@ -1895,10 +2141,8 @@ export class WaterSplashesEffectV2 {
     const br = state?.batchRenderer ?? null;
     if (!state || !br) return;
 
-    const allSystems = [
-      ...state.foamSystems, ...state.splashSystems,
-      ...(state.foamSystems2 ?? []), ...(state.splashSystems2 ?? []),
-    ];
+    const allSystems = [];
+    this._appendSystemsFromFloorState(state, allSystems);
     for (const sys of allSystems) {
       if (sys?.userData) sys.userData._msFloorIndex = floorIndex;
       try { br.addSystem(sys); } catch (_) {}
@@ -1906,10 +2150,15 @@ export class WaterSplashesEffectV2 {
       if (sys.emitter) br.add(sys.emitter);
     }
 
-    // Force the occlusion-uniform block to re-run on the next update frame.
-    // batchMat may be null on the frame when the key first changes (batch not yet
-    // registered), so resetting here ensures we patch after addSystem() wires everything up.
-    this._lastOcclusionUniformKey = null;
+    const batches = br.batches;
+    const map = br.systemToBatchIndex;
+    for (const sys of allSystems) {
+      if (!sys) continue;
+      const idx = (map && typeof map.get === 'function') ? map.get(sys) : undefined;
+      const batch = (idx !== undefined && batches) ? batches[idx] : null;
+      const batchMat = batch?.material;
+      if (batchMat) this._patchFloorPresenceMaterial(batchMat);
+    }
 
     // Optional diagnostics for "systems exist but nothing renders".
     // Enable at runtime: window.MapShine.debugWaterSplashesLogs = true
@@ -1949,10 +2198,8 @@ export class WaterSplashesEffectV2 {
     const br = state?.batchRenderer ?? null;
     if (!state || !br) return;
 
-    const allSystems = [
-      ...state.foamSystems, ...state.splashSystems,
-      ...(state.foamSystems2 ?? []), ...(state.splashSystems2 ?? []),
-    ];
+    const allSystems = [];
+    this._appendSystemsFromFloorState(state, allSystems);
     for (const sys of allSystems) {
       try { br.deleteSystem(sys); } catch (_) {}
       if (sys.emitter) br.remove(sys.emitter);
@@ -1963,10 +2210,8 @@ export class WaterSplashesEffectV2 {
   /** Dispose all systems in a floor state. @private */
   _disposeFloorState(state) {
     const br = state?.batchRenderer ?? null;
-    const allSystems = [
-      ...state.foamSystems, ...state.splashSystems,
-      ...(state.foamSystems2 ?? []), ...(state.splashSystems2 ?? []),
-    ];
+    const allSystems = [];
+    this._appendSystemsFromFloorState(state, allSystems);
     for (const sys of allSystems) {
       try {
         if (br) br.deleteSystem(sys);
@@ -2271,18 +2516,24 @@ export class WaterSplashesEffectV2 {
     const vInset = Math.max(0, Math.min(0.49, edgeInsetPx / sceneH));
     if (uInset <= 0 && vInset <= 0) return points;
 
-    const kept = [];
-    for (let i = 0; i < points.length; i += 3) {
+    const maxLen = points.length;
+    const kept = new Float32Array(maxLen);
+    let keptCount = 0;
+
+    for (let i = 0; i < maxLen; i += 3) {
       const u = points[i];
       const v = points[i + 1];
       if (!Number.isFinite(u) || !Number.isFinite(v)) continue;
       if (u <= uInset || u >= (1.0 - uInset) || v <= vInset || v >= (1.0 - vInset)) continue;
-      kept.push(u, v, points[i + 2]);
+
+      kept[keptCount++] = u;
+      kept[keptCount++] = v;
+      kept[keptCount++] = points[i + 2];
     }
 
-    if (kept.length === 0) return null;
-    if (kept.length === points.length) return points;
-    return new Float32Array(kept);
+    if (keptCount === 0) return null;
+    if (keptCount === maxLen) return points;
+    return new Float32Array(kept.buffer, 0, keptCount);
   }
 
   /**
@@ -2292,7 +2543,7 @@ export class WaterSplashesEffectV2 {
    * @param {number} sceneH
    * @param {number} sceneX
    * @param {number} sceneY
-   * @returns {Map<string, number[]>}
+   * @returns {Map<number, number[]>}
    * @private
    */
   _spatialBucket(points, sceneW, sceneH, sceneX, sceneY) {
@@ -2306,7 +2557,7 @@ export class WaterSplashesEffectV2 {
       const worldY = sceneY + (1.0 - v) * sceneH;
       const bx = Math.floor(worldX / BUCKET_SIZE);
       const by = Math.floor(worldY / BUCKET_SIZE);
-      const key = `${bx},${by}`;
+      const key = ((bx & 0xFFFF) << 16) | (by & 0xFFFF);
       let arr = buckets.get(key);
       if (!arr) { arr = []; buckets.set(key, arr); }
       arr.push(u, v, s);
@@ -2555,9 +2806,9 @@ export class WaterSplashesEffectV2 {
         foamSizeMin: { type: 'slider', label: 'Size Min', min: 1, max: 1000, step: 1, default: 35 },
         foamSizeMax: { type: 'slider', label: 'Size Max', min: 1, max: 1000, step: 1, default: 373 },
         foamWindDriftScale: { type: 'slider', label: 'Wind Drift', min: 0, max: 2, step: 0.01, default: 2.0 },
-        foamColorR: { type: 'slider', label: 'Color R', min: 0, max: 2, step: 0.01, default: 0.85 },
-        foamColorG: { type: 'slider', label: 'Color G', min: 0, max: 2, step: 0.01, default: 0.90 },
-        foamColorB: { type: 'slider', label: 'Color B', min: 0, max: 2, step: 0.01, default: 0.88 },
+        foamColorR: { type: 'slider', label: 'Color R', min: 0, max: 2, step: 0.01, default: 0.97 },
+        foamColorG: { type: 'slider', label: 'Color G', min: 0, max: 2, step: 0.01, default: 0.982 },
+        foamColorB: { type: 'slider', label: 'Color B', min: 0, max: 2, step: 0.01, default: 1.0 },
 
         splashEnabled: { type: 'boolean', label: 'Enabled', default: true },
         splashRate: { type: 'slider', label: 'Rate', min: 0, max: 400, step: 0.1, default: 47 },

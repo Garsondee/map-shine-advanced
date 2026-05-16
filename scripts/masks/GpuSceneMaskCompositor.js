@@ -169,7 +169,8 @@ const TILE_VERT = /* glsl */`
  * Uniforms:
  *   tMask     — tile mask texture
  *   uMode     — 0 = lighten (output luminance), 1 = source-over (output rgba),
- *               2 = alpha-extract (tile albedo alpha → greyscale, used by _composeFloorAlpha)
+ *               2 = alpha-extract (tile albedo alpha → greyscale, used by _composeFloorAlpha),
+ *               3 = solid alpha fallback (tile rect = opaque)
  */
 const TILE_FRAG = /* glsl */`
   precision highp float;
@@ -185,6 +186,16 @@ const TILE_FRAG = /* glsl */`
     if (vTileUv.x < 0.0 || vTileUv.x > 1.0 ||
         vTileUv.y < 0.0 || vTileUv.y > 1.0) {
       discard;
+    }
+
+    if (uMode == 3) {
+      // Solid footprint fallback used by _composeFloorAlpha when the tile's
+      // albedo texture is not loaded in TileManager yet. This preserves the
+      // floor's coarse occluder footprint so bridge/upper-floor shadows can
+      // appear immediately. Once the albedo texture is available, uMode 2
+      // captures detailed alpha holes.
+      gl_FragColor = vec4(1.0);
+      return;
     }
 
     vec4 s = texture2D(tMask, vTileUv);
@@ -2913,8 +2924,11 @@ export class GpuSceneMaskCompositor {
   _composeFloorAlpha(renderer, THREE, floorTargets, sortedEntries, sceneX, sceneY, sceneW, sceneH, maxTex) {
     const FLOOR_ALPHA_ID = 'floorAlpha';
     const tileManager = window.MapShine?.tileManager;
+    let fallbackSolidCount = 0;
 
-    // Collect tiles that have their base texture loaded.
+    // Collect floor tiles. Prefer the loaded base texture for detailed alpha
+    // holes; when it is missing (common for inactive upper floors during early
+    // preload) fall back to a solid tile footprint so floorAlpha still exists.
     const alphaTiles = [];
     for (const entry of sortedEntries) {
       const tileDoc = entry.tileDoc;
@@ -2923,7 +2937,7 @@ export class GpuSceneMaskCompositor {
 
       // Base texture lives on the sprite material map (loaded by TileManager).
       const baseTex = tileManager?.tileSprites?.get(tileId)?.sprite?.material?.map ?? null;
-      if (!baseTex) continue;
+      if (!baseTex) fallbackSolidCount++;
 
       alphaTiles.push({ tileDoc, baseTex });
     }
@@ -2961,7 +2975,6 @@ export class GpuSceneMaskCompositor {
     mat.blendDst = THREE.OneFactor;
     mat.blendSrcAlpha = THREE.OneFactor;
     mat.blendDstAlpha = THREE.OneFactor;
-    mat.uniforms.uMode.value = 2; // alpha-extract mode
 
     let anyDrawn = false;
 
@@ -2989,7 +3002,8 @@ export class GpuSceneMaskCompositor {
         const scaleY = Number(tileDoc?.texture?.scaleY ?? 1);
         const rotRad = Number(tileDoc?.rotation ?? 0) * Math.PI / 180;
 
-        mat.uniforms.tMask.value = baseTex;
+        mat.uniforms.uMode.value = baseTex ? 2 : 3; // alpha-extract, or solid footprint fallback
+        if (baseTex) mat.uniforms.tMask.value = baseTex;
         mat.uniforms.uTileRect.value.set(u0, v0, uW, vH);
         mat.uniforms.uScaleSign.value.set(Math.sign(scaleX) || 1, Math.sign(scaleY) || 1);
         mat.uniforms.uRotation.value = rotRad;
@@ -3016,6 +3030,13 @@ export class GpuSceneMaskCompositor {
 
     // Floor alpha is linear data — no color space conversion.
     rt.texture.colorSpace = THREE.NoColorSpace ?? '';
+    try {
+      rt.texture.userData = {
+        ...(rt.texture.userData ?? {}),
+        floorAlphaFallbackSolidCount: fallbackSolidCount,
+        floorAlphaTileCount: alphaTiles.length,
+      };
+    } catch (_) {}
 
     return {
       id: FLOOR_ALPHA_ID,

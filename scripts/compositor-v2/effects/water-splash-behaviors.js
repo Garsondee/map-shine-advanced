@@ -665,9 +665,9 @@ export class FoamPlumeLifecycleBehavior {
   frameUpdate(delta) {
     const p = this.ownerEffect?.params;
     this._peakOpacity = Math.max(0.0, Math.min(1.0, p?.foamPeakOpacity ?? 0.65));
-    this._foamColorR = p?.foamColorR ?? 0.85;
-    this._foamColorG = p?.foamColorG ?? 0.90;
-    this._foamColorB = p?.foamColorB ?? 0.88;
+    this._foamColorR = p?.foamColorR ?? 0.97;
+    this._foamColorG = p?.foamColorG ?? 0.982;
+    this._foamColorB = p?.foamColorB ?? 1.0;
     this._windDriftScale = Math.max(0.0, p?.foamWindDriftScale ?? 0.3);
 
     this._tintStrength = clamp01(p?.tintStrength ?? 0.0);
@@ -762,10 +762,10 @@ export class SplashRingLifecycleBehavior {
     // Alpha: sharp pop then rapid fade.
     const alpha = lerpScalarStops(SPLASH_ALPHA_STOPS, t);
     const opRand = particle._splashOpacityRand ?? 1.0;
-    // Splashes are near-white/translucent (tint jitter can pull them toward the water tone).
-    let r = 0.95;
-    let g = 0.97;
-    let b = 1.00;
+    // Near-white vertex color; shading (V10) clamps night/shadow vs sun spray.
+    let r = 0.982;
+    let g = 0.988;
+    let b = 1.0;
 
     if (this._tintStrength > 0.0001) {
       const rand = particle._msTintRand ?? 0.5;

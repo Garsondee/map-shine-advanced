@@ -65,6 +65,7 @@ import { FilterEffectV2 } from '../compositor-v2/effects/FilterEffectV2.js';
 import { WaterSplashesEffectV2 } from '../compositor-v2/effects/WaterSplashesEffectV2.js';
 import { OverheadShadowsEffectV2 } from '../compositor-v2/effects/OverheadShadowsEffectV2.js';
 import { BuildingShadowsEffectV2 } from '../compositor-v2/effects/BuildingShadowsEffectV2.js';
+import { SkyReachShadowsEffectV2 } from '../compositor-v2/effects/SkyReachShadowsEffectV2.js';
 import { PaintedShadowEffectV2 } from '../compositor-v2/effects/PaintedShadowEffectV2.js';
 import { BushEffectV2 } from '../compositor-v2/effects/BushEffectV2.js';
 import { TreeEffectV2 } from '../compositor-v2/effects/TreeEffectV2.js';
@@ -5178,6 +5179,46 @@ function _attachFrameCoordinatorPostPixiForV2() {
 }
 
 /**
+ * (Re)build ExternalEffectsCompositor when FloorCompositor render bus + frameCoordinator exist.
+ * `onCanvasTearDown` always disposes adapters (DSN DOM / hook cleanup) even when the Three.js
+ * runtime is preserved — without this, `MapShine.externalEffects` stays a disposed zombie and
+ * Sequencer mirrors never attach after native level / same-scene redraw.
+ */
+function _ensureExternalEffectsCompositorConstructed() {
+  const mapShine = window.MapShine;
+  if (!mapShine) return false;
+  safeCall(() => {
+    const fc = effectComposer?._floorCompositorV2 ?? null;
+    const bus = fc?._renderBus ?? null;
+    if (!bus || !renderer || !effectComposer || !sceneComposer || !renderLoop) {
+      log.warn('[externalEffects] skip construct — missing deps', {
+        bus: !!bus,
+        renderer: !!renderer,
+        effectComposer: !!effectComposer,
+        sceneComposer: !!sceneComposer,
+        renderLoop: !!renderLoop,
+      });
+      return;
+    }
+    if (externalEffects) {
+      safeDispose(() => externalEffects.dispose(), 'externalEffects.dispose(reinit)');
+      externalEffects = null;
+    }
+    externalEffects = new ExternalEffectsCompositor({
+      renderer,
+      floorRenderBus: bus,
+      sceneComposer,
+      floorStack: mapShine?.floorStack ?? null,
+      frameCoordinator,
+      renderLoop,
+    });
+    void externalEffects.initialize();
+    mapShine.externalEffects = externalEffects;
+  }, 'externalEffects.ensureConstructed', Severity.DEGRADED);
+  return !!externalEffects;
+}
+
+/**
  * Foundry V14 native level redraw tears down PIXI placeables; keep WebGL + managers
  * and rebind Three.js sprites/meshes to the new {@link canvas} state.
  * @param {*} scene
@@ -5218,6 +5259,7 @@ async function resyncMapShineAfterNativeLevelRedraw(scene) {
 
     _installPixiSuppressionHooksForV2();
     _attachFrameCoordinatorPostPixiForV2();
+    _ensureExternalEffectsCompositorConstructed();
 
     try {
       ec.timeManager?.resume?.();
@@ -5792,6 +5834,9 @@ function onCanvasTearDown(canvas) {
     safeDispose(() => externalEffects.dispose(), 'externalEffects.dispose');
     externalEffects = null;
   }
+  try {
+    if (window.MapShine) window.MapShine.externalEffects = null;
+  } catch (_) {}
 
   // Abort any in-flight intro zoom sequence and remove its white flash overlay
   // so it doesn't get stranded in the DOM if a scene change fires mid-sequence.
@@ -7639,23 +7684,7 @@ async function createThreeCanvas(scene, createOptions = {}) {
     // adapters can register their lifecycle hooks now that FloorCompositor +
     // FloorRenderBus + FrameCoordinator are all live. The instance is exposed
     // on window.MapShine via exposeGlobals() below.
-    safeCall(() => {
-      const fc = effectComposer?._floorCompositorV2 ?? null;
-      const bus = fc?._renderBus ?? null;
-      if (externalEffects) {
-        safeDispose(() => externalEffects.dispose(), 'externalEffects.dispose(reinit)');
-        externalEffects = null;
-      }
-      externalEffects = new ExternalEffectsCompositor({
-        renderer,
-        floorRenderBus: bus,
-        sceneComposer,
-        floorStack: window.MapShine?.floorStack ?? null,
-        frameCoordinator,
-        renderLoop,
-      });
-      void externalEffects.initialize();
-    }, 'externalEffects.construct', Severity.DEGRADED);
+    _ensureExternalEffectsCompositorConstructed();
 
     // Expose all managers, effects, and functions on window.MapShine for diagnostics
     exposeGlobals(mapShine, {
@@ -8541,6 +8570,13 @@ async function createThreeCanvas(scene, createOptions = {}) {
             BuildingShadowsEffectV2.getControlSchema(), _makeV2Callback('_buildingShadowEffect'), 'global'
           );
         }, 'v2.registerBuildingShadowsUI', Severity.DEGRADED);
+
+        safeCall(() => {
+          uiManager.registerEffect(
+            'sky-reach-shadows', 'Sky Reach Shadows',
+            SkyReachShadowsEffectV2.getControlSchema(), _makeV2Callback('_skyReachShadowEffect'), 'global'
+          );
+        }, 'v2.registerSkyReachShadowsUI', Severity.DEGRADED);
 
         safeCall(() => {
           uiManager.registerEffect(

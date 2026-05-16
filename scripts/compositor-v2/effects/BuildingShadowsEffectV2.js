@@ -39,14 +39,14 @@ export class BuildingShadowsEffectV2 {
   constructor() {
     this.params = {
       enabled: true,
-      opacity: 0.75,
-      length: 0.060,
-      softness: 1.0,
-      smear: 1.0,
-      resolutionScale: 1.25,
-      penumbra: 0.5,
-      shadowCurve: 0.9,
-      blurRadius: 1.6,
+      opacity: 0.5,
+      length: 0.1,
+      softness: 4,
+      smear: 0.33,
+      resolutionScale: 1,
+      penumbra: 1,
+      shadowCurve: 1.6,
+      blurRadius: 4,
       sunLatitude: 0.1,
       dynamicLightShadowOverrideEnabled: true,
       dynamicLightShadowOverrideStrength: 0.7,
@@ -137,7 +137,7 @@ export class BuildingShadowsEffectV2 {
           min: 0.0,
           max: 1.0,
           step: 0.01,
-          default: 0.75
+          default: 0.5
         },
         length: {
           type: 'slider',
@@ -145,7 +145,7 @@ export class BuildingShadowsEffectV2 {
           min: 0.0,
           max: 0.6,
           step: 0.005,
-          default: 0.060
+          default: 0.1
         },
         softness: {
           type: 'slider',
@@ -153,7 +153,7 @@ export class BuildingShadowsEffectV2 {
           min: 0.5,
           max: 8.0,
           step: 0.1,
-          default: 1.0
+          default: 4
         },
         smear: {
           type: 'slider',
@@ -161,7 +161,7 @@ export class BuildingShadowsEffectV2 {
           min: 0.0,
           max: 1.0,
           step: 0.01,
-          default: 1.0
+          default: 0.33
         },
         resolutionScale: {
           type: 'slider',
@@ -169,7 +169,7 @@ export class BuildingShadowsEffectV2 {
           min: 1.0,
           max: 2.0,
           step: 0.05,
-          default: 1.25
+          default: 1
         },
         penumbra: {
           type: 'slider',
@@ -177,7 +177,7 @@ export class BuildingShadowsEffectV2 {
           min: 0.0,
           max: 1.0,
           step: 0.01,
-          default: 0.5
+          default: 1
         },
         shadowCurve: {
           type: 'slider',
@@ -185,7 +185,7 @@ export class BuildingShadowsEffectV2 {
           min: 0.5,
           max: 1.6,
           step: 0.01,
-          default: 0.9
+          default: 1.6
         },
         blurRadius: {
           type: 'slider',
@@ -193,7 +193,7 @@ export class BuildingShadowsEffectV2 {
           min: 0.0,
           max: 4.0,
           step: 0.05,
-          default: 1.6
+          default: 4
         }
       }
     };
@@ -249,7 +249,9 @@ export class BuildingShadowsEffectV2 {
         uTexelSize: { value: new THREE.Vector2(1 / 1024, 1 / 1024) },
         uSceneDimensions: { value: new THREE.Vector2(1, 1) },
         tDynamicLight: { value: null },
+        tWindowLight: { value: null },
         uHasDynamicLight: { value: 0.0 },
+        uHasWindowLight: { value: 0.0 },
         uDynamicLightShadowOverrideEnabled: { value: 1.0 },
         uDynamicLightShadowOverrideStrength: { value: this.params.dynamicLightShadowOverrideStrength ?? 0.7 },
         uDynViewBounds: { value: new THREE.Vector4(0, 0, 1, 1) },
@@ -281,7 +283,9 @@ export class BuildingShadowsEffectV2 {
         uniform vec2 uTexelSize;
         uniform vec2 uSceneDimensions;
         uniform sampler2D tDynamicLight;
+        uniform sampler2D tWindowLight;
         uniform float uHasDynamicLight;
+        uniform float uHasWindowLight;
         uniform float uDynamicLightShadowOverrideEnabled;
         uniform float uDynamicLightShadowOverrideStrength;
         uniform vec4 uDynViewBounds;
@@ -391,10 +395,17 @@ export class BuildingShadowsEffectV2 {
           float strength = mix(integrated, peakHit, 0.35 + 0.25 * smearAmount);
           strength = smoothstep(0.0, 1.0, clamp(strength, 0.0, 1.0));
           strength = pow(strength, max(uShadowCurve, 0.01));
-          if (uHasDynamicLight > 0.5 && uDynamicLightShadowOverrideEnabled > 0.5 && uHasDynSceneRect > 0.5) {
+          if ((uHasDynamicLight > 0.5 || uHasWindowLight > 0.5) && uDynamicLightShadowOverrideEnabled > 0.5 && uHasDynSceneRect > 0.5) {
             vec2 dynUv = clamp(sceneUvToDynScreenUv(vUv), vec2(0.0), vec2(1.0));
-            vec3 dyn = texture2D(tDynamicLight, dynUv).rgb;
-            float dynI = clamp(max(dyn.r, max(dyn.g, dyn.b)), 0.0, 1.0);
+            float dynI = 0.0;
+            if (uHasDynamicLight > 0.5) {
+              vec3 dyn = texture2D(tDynamicLight, dynUv).rgb;
+              dynI = max(dynI, clamp(max(dyn.r, max(dyn.g, dyn.b)), 0.0, 1.0));
+            }
+            if (uHasWindowLight > 0.5) {
+              vec3 win = texture2D(tWindowLight, dynUv).rgb;
+              dynI = max(dynI, clamp(max(win.r, max(win.g, win.b)), 0.0, 1.0));
+            }
             float dynPresence = smoothstep(0.02, 0.30, dynI);
             float dynLift = clamp(dynPresence * max(uDynamicLightShadowOverrideStrength, 0.0), 0.0, 1.0);
             strength = mix(strength, 0.0, dynLift);
@@ -578,8 +589,11 @@ export class BuildingShadowsEffectV2 {
     if (this.sunDir) u.uSunDir.value.copy(this.sunDir);
     const dlo = this._dynamicLightOverride;
     const dynTex = dlo?.texture ?? null;
+    const winTex = dlo?.windowTexture ?? null;
     if (u.tDynamicLight) u.tDynamicLight.value = dynTex;
+    if (u.tWindowLight) u.tWindowLight.value = winTex;
     if (u.uHasDynamicLight) u.uHasDynamicLight.value = dynTex ? 1.0 : 0.0;
+    if (u.uHasWindowLight) u.uHasWindowLight.value = winTex ? 1.0 : 0.0;
     if (u.uDynamicLightShadowOverrideEnabled) {
       u.uDynamicLightShadowOverrideEnabled.value = (this.params.dynamicLightShadowOverrideEnabled !== false && dlo?.enabled !== false) ? 1.0 : 0.0;
     }
@@ -845,7 +859,7 @@ export class BuildingShadowsEffectV2 {
       drewAny: true,
       receiverMaskUuid: receiverMaskTex?.uuid ?? null,
       shadowFactorTextureUuid: this.shadowTarget?.texture?.uuid ?? null,
-      dynamicLightOverrideBound: !!(this._dynamicLightOverride?.texture),
+      dynamicLightOverrideBound: !!(this._dynamicLightOverride?.texture || this._dynamicLightOverride?.windowTexture),
     };
 
     const blurRadius = Number(this.params.blurRadius ?? 0);

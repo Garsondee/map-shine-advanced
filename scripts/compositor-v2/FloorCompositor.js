@@ -72,6 +72,7 @@ import { BushEffectV2 } from './effects/BushEffectV2.js';
 import { TreeEffectV2 } from './effects/TreeEffectV2.js';
 import { OverheadShadowsEffectV2 } from './effects/OverheadShadowsEffectV2.js';
 import { BuildingShadowsEffectV2 } from './effects/BuildingShadowsEffectV2.js';
+import { SkyReachShadowsEffectV2 } from './effects/SkyReachShadowsEffectV2.js';
 import { PaintedShadowEffectV2 } from './effects/PaintedShadowEffectV2.js';
 import { createLightingPerspectiveContext } from './LightingPerspectiveContext.js';
 import { DustEffectV2 } from './effects/DustEffectV2.js';
@@ -395,6 +396,15 @@ export class FloorCompositor {
      * @type {BuildingShadowsEffectV2}
      */
     this._buildingShadowEffect = new BuildingShadowsEffectV2();
+
+    /**
+     * V2 Sky Reach Shadows Effect: projects upper-floor `floorAlpha` silhouettes
+     * (bridges, roofs, solid upper-floor tiles) as directional shadows onto the
+     * currently-viewed floor. Combines with {@link BuildingShadowsEffectV2} via
+     * {@link ShadowManagerV2} into `tCombinedShadow`.
+     * @type {SkyReachShadowsEffectV2}
+     */
+    this._skyReachShadowEffect = new SkyReachShadowsEffectV2();
 
     /**
      * V2 Painted Shadow Effect: projects authored _Shadow masks along sun direction.
@@ -742,6 +752,7 @@ export class FloorCompositor {
 
     this._dynamicLightOverride = {
       texture: null,
+      windowTexture: null,
       enabled: true,
       strength: 0.7,
       viewBounds: { x: 0, y: 0, z: 1, w: 1 },
@@ -752,7 +763,9 @@ export class FloorCompositor {
     this._outdoorsStateCache = {
       contextKey: null, mainTex: null, mainRoute: null,
       waterTex: null, waterRoute: null, waterFloorIdx: null,
-      skyTex: null, skyRoute: null, paintedTex: null, paintedRoute: null,
+      skyTex: null, skyRoute: null,
+      skyReachTex: null, skyReachRoute: null,
+      paintedTex: null, paintedRoute: null,
       cloudMulti: false, floorIdTex: null, activeFloorIdx: null, cacheVersion: null,
       cloudTex0: null, cloudTex1: null, cloudTex2: null, cloudTex3: null
     };
@@ -1665,6 +1678,13 @@ export class FloorCompositor {
       log.warn('FloorCompositor: BuildingShadowsEffectV2 initialize failed:', err);
     }
     _reportProgress('BuildingShadowsEffectV2');
+    await yieldToMain();
+    try {
+      this._skyReachShadowEffect?.initialize?.(this.renderer, this.camera);
+    } catch (err) {
+      log.warn('FloorCompositor: SkyReachShadowsEffectV2 initialize failed:', err);
+    }
+    _reportProgress('SkyReachShadowsEffectV2');
     await yieldToMain();
     try {
       this._paintedShadowEffect?.initialize?.(this.renderer);
@@ -2813,7 +2833,7 @@ export class FloorCompositor {
       '_sharpenEffect', '_cloudEffect', '_shadowManagerEffect', '_waterEffect', '_waterSplashesEffect',
       '_underwaterBubblesEffect', '_smellyFliesEffect',
       '_lightningEffect', '_candleFlamesEffect', '_playerLightEffect',
-      '_overheadShadowEffect', '_buildingShadowEffect', '_dotScreenEffect',
+      '_overheadShadowEffect', '_buildingShadowEffect', '_skyReachShadowEffect', '_dotScreenEffect',
       '_halftoneEffect', '_asciiEffect', '_dazzleOverlayEffect',
       '_visionModeEffect', '_invertEffect', '_sepiaEffect', '_lensEffect',
       '_movementPreviewEffect',
@@ -2958,12 +2978,16 @@ export class FloorCompositor {
 
   /**
    * Build previous-frame dynamic-light payload for source shadow overrides.
-   * Uses LightingEffectV2 light RT texture (stable, no render-order changes).
-   * @returns {{texture:any, strength:number, enabled:boolean, viewBounds:{x:number,y:number,z:number,w:number}, sceneDimensions:{x:number,y:number}, sceneRect:{x:number,y:number,z:number,w:number}}|null}
+   * Uses LightingEffectV2 previous-frame textures: Foundry lights (`_lightRT`)
+   * and window glow (`_windowLightRT`) so {@link WindowLightEffectV2} lift matches
+   * gameplay lights in source shadow passes.
+   * @returns {{texture:any, windowTexture:any, strength:number, enabled:boolean, viewBounds:{x:number,y:number,z:number,w:number}, sceneDimensions:{x:number,y:number}, sceneRect:{x:number,y:number,z:number,w:number}}|null}
    */
   _buildDynamicLightOverridePayload() {
-    const tex = this._lightingEffect?.dynamicLightTexture ?? null;
-    if (!tex) return null;
+    const le = this._lightingEffect;
+    const tex = le?.dynamicLightTexture ?? null;
+    const winTex = le?.windowLightTexture ?? null;
+    if (!tex && !winTex) return null;
 
     const dims = globalThis.canvas?.dimensions;
     if (!dims) return null;
@@ -2972,7 +2996,8 @@ export class FloorCompositor {
     const out = this._dynamicLightOverride;
 
     out.texture = tex;
-    out.strength = Number(this._lightingEffect?.params?.dynamicLightShadowOverrideStrength ?? 0.7);
+    out.windowTexture = winTex;
+    out.strength = Number(le?.params?.dynamicLightShadowOverrideStrength ?? 0.7);
 
     out.sceneRect.x = Number(rect?.x ?? dims.sceneX ?? 0);
     out.sceneRect.y = Number(rect?.y ?? dims.sceneY ?? 0);
@@ -3051,12 +3076,16 @@ export class FloorCompositor {
     const paintedTex = (this._paintedShadowEffect?.params?.enabled)
       ? (this._paintedShadowEffect.shadowFactorTexture ?? null)
       : null;
+    const skyReachTex = (this._skyReachShadowEffect?.params?.enabled)
+      ? (this._skyReachShadowEffect.shadowFactorTexture ?? null)
+      : null;
     sm.setInputs({
       cloudShadowTexture: cloudTex ?? null,
       cloudShadowRawTexture: cloudRawTex ?? null,
       overheadShadowTexture: overheadTex,
       buildingShadowTexture: buildingTex,
       paintedShadowTexture: paintedTex,
+      skyReachShadowTexture: skyReachTex,
     });
     try {
       const dims = globalThis.canvas?.dimensions;
@@ -3377,6 +3406,7 @@ export class FloorCompositor {
     if (timeInfo) {
       this._profileEffectCall('overheadShadows', 'update', () => this._overheadShadowEffect?.update?.(timeInfo), 'OverheadShadowsEffectV2 update');
       this._profileEffectCall('buildingShadows', 'update', () => this._buildingShadowEffect?.update?.(timeInfo), 'BuildingShadowsEffectV2 update');
+      this._profileEffectCall('skyReachShadows', 'update', () => this._skyReachShadowEffect?.update?.(timeInfo), 'SkyReachShadowsEffectV2 update');
       this._profileEffectCall('paintedShadows', 'update', () => this._paintedShadowEffect?.update?.(timeInfo), 'PaintedShadowEffectV2 update');
     }
 
@@ -3400,6 +3430,7 @@ export class FloorCompositor {
         const el  = sky.currentSunElevationDeg ?? 45;
         this._overheadShadowEffect?.setSunAngles?.(az, el);
         this._buildingShadowEffect?.setSunAngles?.(az, el);
+        this._skyReachShadowEffect?.setSunAngles?.(az, el);
         this._paintedShadowEffect?.setSunAngles?.(az, el);
       }
     } catch (_) {}
@@ -3453,9 +3484,30 @@ export class FloorCompositor {
       this._renderBus?.syncRuntimeTileState?.(this._replicaOcclusionMaskPass);
     } catch (_) {}
 
+    // Source shadow passes need current-frame light presence so torches, Foundry
+    // lights, and WindowLightEffectV2 clear shadows without one-frame swimming.
+    try {
+      const activeIdx = Number.isFinite(Number(this._activeFloorIndex))
+        ? Number(this._activeFloorIndex)
+        : 0;
+      this._windowLightEffect?.setRenderFloorIndex?.(activeIdx);
+      this._windowLightEffect?.setCloudShadowTexture?.(null, 1, 1, null);
+      this._windowLightEffect?.setOverheadRoofAlphaTexture?.(null, 1, 1);
+      this._windowLightEffect?.setCeilingTransmittanceTexture?.(null);
+      this._windowLightEffect?.syncFrameOcclusion?.(this);
+      this._lightingEffect?.setRenderFloorIndexForLights?.(activeIdx);
+      const winScene = resolveEffectEnabled(this._windowLightEffect)
+        ? this._windowLightEffect._scene
+        : null;
+      this._lightingEffect?.renderLightOverrideMasks?.(this.renderer, this.camera, winScene);
+    } catch (err) {
+      log.warn('FloorCompositor: current-frame light override prepass failed:', err);
+    }
+
     const _dynamicLightOverride = this._buildDynamicLightOverridePayload();
     try { this._overheadShadowEffect?.setDynamicLightOverride?.(_dynamicLightOverride); } catch (_) {}
     try { this._buildingShadowEffect?.setDynamicLightOverride?.(_dynamicLightOverride); } catch (_) {}
+    try { this._skyReachShadowEffect?.setDynamicLightOverride?.(_dynamicLightOverride); } catch (_) {}
     try { this._paintedShadowEffect?.setDynamicLightOverride?.(_dynamicLightOverride); } catch (_) {}
 
     // Capture overhead tile alpha + compute soft shadow factor for lighting / ShadowManager.
@@ -3479,6 +3531,16 @@ export class FloorCompositor {
     if (_profiling) this._recordPassTiming('buildingShadowsRender', _profileT0);
     if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: buildingShadows.render DONE'); } catch (_) {} }
 
+    if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: skyReachShadows.render'); } catch (_) {} }
+    if (_profiling) _profileT0 = performance.now();
+    if (!_skipBuildingShadowPass) {
+      this._profileEffectCall('skyReachShadows', 'render', () => {
+        this._skyReachShadowEffect?.render?.(this.renderer, this.camera);
+      }, 'SkyReachShadowsEffectV2 render');
+    }
+    if (_profiling) this._recordPassTiming('skyReachShadowsRender', _profileT0);
+    if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: skyReachShadows.render DONE'); } catch (_) {} }
+
     if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: paintedShadows.render'); } catch (_) {} }
     if (_profiling) _profileT0 = performance.now();
     if (!_skipBuildingShadowPass) {
@@ -3489,9 +3551,9 @@ export class FloorCompositor {
     if (_profiling) this._recordPassTiming('paintedShadowsRender', _profileT0);
     if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: paintedShadows.render DONE'); } catch (_) {} }
 
-    // ShadowManagerV2 (required): combine previous-frame cloud + current structural
-    // shadows so water splash/bubble particles can sample the same darkening the
-    // lit scene uses, before the bus draws them.
+    // ShadowManagerV2 (required): combine previous-frame cloud + structural shadows
+    // for intermediate consumers. Splash/bubble shaders re-sync uniforms after the
+    // post-cloud combine so they match the RT used for lighting this frame.
     try {
       this._runShadowManagerCombinePass(
         this._shadowManagerPrevFrameCloudTex,
@@ -3500,9 +3562,6 @@ export class FloorCompositor {
       );
     } catch (err) {
       log.warn('FloorCompositor: pre-bus ShadowManagerV2 combine failed:', err);
-    }
-    try { this._waterSplashesEffect?.syncShadowDarkeningUniforms?.(); } catch (err) {
-      log.warn('WaterSplashesEffectV2 syncShadowDarkeningUniforms threw, skipping:', err);
     }
 
     // Runtime tile opacity already synced before shadow capture above. Keep the
@@ -3531,6 +3590,9 @@ export class FloorCompositor {
       }
       this._shadowManagerPrevFrameCloudTex = cloudTex ?? null;
       this._shadowManagerPrevFrameCloudRawTex = cloudRawTex ?? null;
+    }
+    try { this._waterSplashesEffect?.syncShadowDarkeningUniforms?.(); } catch (err) {
+      log.warn('WaterSplashesEffectV2 syncShadowDarkeningUniforms threw, skipping:', err);
     }
     if (_profiling) this._recordPassTiming('cloudRender', _profileT0);
     if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: cloud.render DONE'); } catch (_) {} }
@@ -4499,6 +4561,34 @@ export class FloorCompositor {
         : skyOutdoorsTex;
       const skyRoute = skyOutdoorsTex ? (skyResolved.floorKey ?? null) : (skyOutdoorsFinal ? 'neutral' : null);
 
+      // Active-floor `skyReach` mask: gates SkyColorEffectV2 so pixels under
+      // upper-floor solid coverage (bridges, rooftops, overhangs) stop
+      // receiving sky color. The mask is produced by GpuSceneMaskCompositor as
+      // `outdoors ∧ ¬union(upper-floor floorAlpha)`; see `scripts/masks/shaders/skyReachShader.js`.
+      let skyReachTex = null;
+      let skyReachRoute = null;
+      try {
+        const activeFloor = window.MapShine?.floorStack?.getActiveFloor?.() ?? null;
+        const ck = activeFloor?.compositorKey != null ? String(activeFloor.compositorKey) : '';
+        if (compositor) {
+          if (ck) {
+            skyReachTex = compositor.getFloorTexture?.(ck, 'skyReach') ?? null;
+            if (skyReachTex) skyReachRoute = `floor:${ck}`;
+          }
+          if (!skyReachTex) {
+            const b = Number(activeFloor?.elevationMin);
+            const t = Number(activeFloor?.elevationMax);
+            if (Number.isFinite(b) && Number.isFinite(t)) {
+              const fallbackKey = `${b}:${t}`;
+              skyReachTex = compositor.getFloorTexture?.(fallbackKey, 'skyReach') ?? null;
+              if (skyReachTex) skyReachRoute = `band:${fallbackKey}`;
+            }
+          }
+        }
+      } catch (_) {
+        skyReachTex = null;
+      }
+
       // PaintedShadowEffectV2 should gate by the currently viewed floor band only.
       // Do not reuse sibling/lower-floor outdoors fallbacks from the generic route.
       let paintedOutdoorsTex = null;
@@ -4639,6 +4729,8 @@ export class FloorCompositor {
       if (cache.waterFloorIdx !== resolvedWaterFloorIndex) { cache.waterFloorIdx = resolvedWaterFloorIndex; signatureChanged = true; }
       if (cache.skyTex !== skyOutdoorsFinal) { cache.skyTex = skyOutdoorsFinal; signatureChanged = true; }
       if (cache.skyRoute !== skyRoute) { cache.skyRoute = skyRoute; signatureChanged = true; }
+      if (cache.skyReachTex !== skyReachTex) { cache.skyReachTex = skyReachTex; signatureChanged = true; }
+      if (cache.skyReachRoute !== skyReachRoute) { cache.skyReachRoute = skyReachRoute; signatureChanged = true; }
       if (cache.paintedTex !== paintedOutdoorsTex) { cache.paintedTex = paintedOutdoorsTex; signatureChanged = true; }
       if (cache.paintedRoute !== paintedOutdoorsRoute) { cache.paintedRoute = paintedOutdoorsRoute; signatureChanged = true; }
       if (cache.cloudMulti !== isMulti) { cache.cloudMulti = isMulti; signatureChanged = true; }
@@ -4660,6 +4752,7 @@ export class FloorCompositor {
         main: { route: mainRoute, texture: !!outdoorsTex },
         water: { route: waterOutdoorsRoute, texture: !!waterOutdoorsTex, floorIndex: resolvedWaterFloorIndex },
         sky: { route: skyRoute, texture: !!skyOutdoorsFinal },
+        skyReach: { route: skyReachRoute, texture: !!skyReachTex },
         painted: { route: paintedOutdoorsRoute, texture: !!paintedOutdoorsTex },
         cloud: {
           mode: cloudFloorIdSupported && cloudAnyPerFloorMask ? 'multi' : 'single',
@@ -4677,6 +4770,7 @@ export class FloorCompositor {
       this._cloudEffect?.setOutdoorsMask?.(outdoorsTex);
       this._waterEffect?.setOutdoorsMask?.(waterOutdoorsTex);
       this._skyColorEffect?.setOutdoorsMask?.(skyOutdoorsFinal);
+      this._skyColorEffect?.setSkyReachMask?.(skyReachTex);
       this._filterEffect?.setOutdoorsMask?.(outdoorsTex);
       this._atmosphericFogEffect?.setOutdoorsMask?.(outdoorsTex);
       this._overheadShadowEffect?.setOutdoorsMask?.(outdoorsTex);
@@ -5156,6 +5250,7 @@ export class FloorCompositor {
     this._bloomEffect.onResize(w, h);
     try { this._overheadShadowEffect?.onResize?.(w, h); } catch (_) {}
     try { this._buildingShadowEffect?.onResize?.(w, h); } catch (_) {}
+    try { this._skyReachShadowEffect?.onResize?.(w, h); } catch (_) {}
     try { this._weatherParticles?.onResize?.(w, h); } catch (_) {}
     try { this._lightningEffect?.onResize?.(w, h); } catch (_) {}
     try { this._atmosphericFogEffect?.onResize?.(w, h); } catch (_) {}
@@ -5170,6 +5265,7 @@ export class FloorCompositor {
     try { this._playerLightEffect?.onResize?.(w, h); } catch (_) {}
     try { this._distortionEffect?.onResize?.(w, h); } catch (_) {}
     try { this._floorDepthBlurEffect?.onResize?.(w, h); } catch (_) {}
+    try { this._waterSplashesEffect?.syncDrawingBufferSize?.(); } catch (_) {}
     log.debug(`FloorCompositor.onResize: RTs resized to ${w}x${h}`);
   }
 
@@ -6024,6 +6120,7 @@ export class FloorCompositor {
     try { this._colorCorrectionEffect?.dispose?.(); } catch (_) {}
     try { this._overheadShadowEffect?.dispose?.(); } catch (_) {}
     try { this._buildingShadowEffect?.dispose?.(); } catch (_) {}
+    try { this._skyReachShadowEffect?.dispose?.(); } catch (_) {}
     try { this._paintedShadowEffect?.dispose?.(); } catch (_) {}
     try { this._smellyFliesEffect?.dispose?.(); } catch (_) {}
     try { this._lightningEffect?.dispose?.(); } catch (_) {}

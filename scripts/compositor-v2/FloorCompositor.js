@@ -658,10 +658,10 @@ export class FloorCompositor {
     this._waterSourceOccProductCamera = null;
     this._waterSourceOccProductMaterial = null;
     this._waterSourceOccProductQuad = null;
-    /** @type {string} Cache key for {@link #_getWaterSourceDeckMaskTexture} */
-    this._waterSourceMaskCacheKey = '';
-    /** @type {import('three').Texture|null} Cached source-floor water punch mask */
-    this._waterSourceMaskCacheTex = null;
+    /** @type {import('three').Texture|null} Deck mask for this frame (built after bus prepass) */
+    this._frameWaterSourceDeckTex = null;
+    /** @type {import('three').Texture|null} Source slice alpha matching deck mask */
+    this._frameWaterSourceSliceTex = null;
 
     /** @type {THREE.WebGLRenderTarget|null} Ping-pong A: post-merge bg stack → water mask */
     this._waterBgProductRT = null;
@@ -2604,7 +2604,6 @@ export class FloorCompositor {
           : Date.now();
         this._renderBus.populate(sc);
         this._busPopulated = true;
-        this._invalidateWaterSourceMaskCache();
         const tBus1 = (typeof performance !== 'undefined' && performance.now)
           ? performance.now()
           : Date.now();
@@ -5478,65 +5477,66 @@ export class FloorCompositor {
    * @returns {import('three').Texture|null}
    * @private
    */
-  _invalidateWaterSourceMaskCache() {
-    this._waterSourceMaskCacheKey = '';
-    this._waterSourceMaskCacheTex = null;
-  }
-
   /**
-   * @param {number} floorIndex
-   * @param {import('three').WebGLRenderTarget|null} sourceSceneRT
-   * @returns {string}
+   * @param {number} viewedFloorIndex
+   * @returns {number}
    * @private
    */
-  _waterSourceDeckMaskCacheSignature(floorIndex) {
-    const c = this.camera;
-    const grid = 48;
-    const qx = Math.round((c?.position?.x ?? 0) / grid) * grid;
-    const qy = Math.round((c?.position?.y ?? 0) / grid) * grid;
-    const qz = Math.round((c?.zoom ?? 1) * 200) / 200;
-    return `${floorIndex}|${qx}|${qy}|${qz}`;
-  }
-
-  /**
-   * Cached deck-only mask (camera-quantized). Scene multiply is done in shader via tSliceAlpha.
-   * @param {number} floorIndex
-   * @returns {import('three').Texture|null}
-   * @private
-   */
-  _getWaterSourceDeckMaskTexture(floorIndex) {
-    if (window.MapShine?.__alphaIsolationDebug?.disableWaterSourceDeckMask === true) return null;
-    if (!this._waterOccluderScratchRT) return null;
-    const cacheKey = this._waterSourceDeckMaskCacheSignature(floorIndex);
-    if (cacheKey === this._waterSourceMaskCacheKey && this._waterSourceMaskCacheTex) {
-      return this._waterSourceMaskCacheTex;
+  _resolveWaterSourceFloorForView(viewedFloorIndex) {
+    const water = this._waterEffect;
+    if (!water?.hasFloorWaterData) return -1;
+    const viewed = Number(viewedFloorIndex);
+    if (!Number.isFinite(viewed)) return -1;
+    let best = -1;
+    for (let fi = 0; fi <= viewed; fi++) {
+      if (water.hasFloorWaterData(fi)) best = fi;
     }
-    const deckRT = this._buildWaterSourceDeckMaskRT(floorIndex, this._waterOccluderScratchRT);
-    const tex = deckRT?.texture ?? null;
-    if (tex) {
-      this._waterSourceMaskCacheKey = cacheKey;
-      this._waterSourceMaskCacheTex = tex;
-    }
-    return tex;
+    return best;
   }
 
   /**
-   * @param {number} floorIndex
-   * @param {import('three').WebGLRenderTarget|null} [sourceSceneRT]
-   * @returns {import('three').Texture|null}
+   * Build deck + slice pair once right after bus prepass so they share the same camera
+   * snapshot (avoids one-frame punch mismatch while panning).
+   *
+   * @param {Array} visibleFloors
+   * @param {Array} levelSceneRTs
+   * @param {number} viewedFloorIndex
    * @private
    */
-  _bindWaterSourceDeckMask(floorIndex) {
-    const tex = this._getWaterSourceDeckMaskTexture(floorIndex);
+  _prepareFrameWaterSourceMask(visibleFloors, levelSceneRTs, viewedFloorIndex) {
+    this._frameWaterSourceDeckTex = null;
+    this._frameWaterSourceSliceTex = null;
+    if (window.MapShine?.__alphaIsolationDebug?.disableWaterSourceDeckMask === true) return;
+    if (!resolveEffectEnabled(this._waterEffect) || !this._waterOccluderScratchRT) return;
+
+    const dataFloor = this._resolveWaterSourceFloorForView(viewedFloorIndex);
+    if (dataFloor < 0) return;
+
+    const sourceSi = visibleFloors.findIndex((f) => Number(f?.index) === Number(dataFloor));
+    if (sourceSi >= 0 && levelSceneRTs[sourceSi]?.texture) {
+      this._frameWaterSourceSliceTex = levelSceneRTs[sourceSi].texture;
+    }
+
     try {
-      this._waterEffect?.setOverheadRoofBlockTexture?.(tex ?? null);
+      const deckRT = withSceneScissor(this.renderer, () =>
+        this._buildWaterSourceDeckMaskRT(dataFloor, this._waterOccluderScratchRT)
+      );
+      this._frameWaterSourceDeckTex = deckRT?.texture ?? null;
       if (window.MapShine?.__waterDebug) {
-        window.MapShine.__waterDebug.lastDeckMask = tex ?? null;
-        window.MapShine.__waterDebug.lastSourceFloorIndex = Number(floorIndex);
-        window.MapShine.__waterDebug.lastWaterTileIds = [...this._getWaterTileIdsForFloor(floorIndex)];
+        window.MapShine.__waterDebug.lastDeckMask = this._frameWaterSourceDeckTex;
+        window.MapShine.__waterDebug.lastSourceFloorIndex = dataFloor;
+        window.MapShine.__waterDebug.lastWaterTileIds = [...this._getWaterTileIdsForFloor(dataFloor)];
       }
     } catch (_) {}
-    return tex ?? null;
+  }
+
+  /**
+   * @private
+   */
+  _bindWaterSourceDeckMask() {
+    try {
+      this._waterEffect?.setOverheadRoofBlockTexture?.(this._frameWaterSourceDeckTex ?? null);
+    } catch (_) {}
   }
 
   /**
@@ -5791,6 +5791,9 @@ export class FloorCompositor {
       levelSceneRTs.push(levelSceneRT);
     }
 
+    const viewedFloorIdx = Number(floorStack?.getActiveFloor?.()?.index ?? 0);
+    this._prepareFrameWaterSourceMask(visibleFloors, levelSceneRTs, viewedFloorIdx);
+
     let windowLightBufW = 1;
     let windowLightBufH = 1;
     try {
@@ -5940,7 +5943,7 @@ export class FloorCompositor {
         this._profileEffectCall('water', 'render', () => {
           try {
             if (nativeSourceWater) {
-              this._bindWaterSourceDeckMask(waterDataFloorIndex);
+              this._bindWaterSourceDeckMask();
             }
             _waterPassWrote = withSceneScissor(this.renderer, () =>
               this._waterEffect.render(
@@ -5949,7 +5952,7 @@ export class FloorCompositor {
                 currentInput,
                 waterOut,
                 waterOccluder,
-                levelSceneRT?.texture ?? null,
+                this._frameWaterSourceSliceTex ?? levelSceneRT?.texture ?? null,
               )
             );
           } finally {
@@ -6193,7 +6196,6 @@ export class FloorCompositor {
       // and you stand on the roof. Resolve each slice by FloorBand.index first,
       // then stack index j as fallback.
       let postMergeWaterOccluder = null;
-      let postMergeSourceSliceAlphaTex = null;
       try {
         const bus = this._renderBus;
         let sourceSi = visibleFloors.findIndex(
@@ -6202,9 +6204,6 @@ export class FloorCompositor {
         if (sourceSi < 0) {
           // Water source below the lowest visible slice: mask the whole visible stack.
           sourceSi = -1;
-        }
-        if (sourceSi >= 0 && levelSceneRTs[sourceSi]?.texture) {
-          postMergeSourceSliceAlphaTex = levelSceneRTs[sourceSi].texture;
         }
         if (!_disableWaterOccluder && sourceSi < visibleFloors.length - 1 && this._waterOccluderRT) {
           try {
@@ -6251,9 +6250,7 @@ export class FloorCompositor {
             buildingShadowTex,
             overheadShadowTexLegacy,
           });
-          if (Number.isFinite(dataFloor) && dataFloor >= 0) {
-            this._bindWaterSourceDeckMask(dataFloor);
-          }
+          this._bindWaterSourceDeckMask();
           postMergeWaterWrote = withSceneScissor(this.renderer, () =>
             this._waterEffect.render(
               this.renderer,
@@ -6261,14 +6258,13 @@ export class FloorCompositor {
               this._postA,
               this._postB,
               postMergeWaterOccluder,
-              postMergeSourceSliceAlphaTex,
+              this._frameWaterSourceSliceTex,
             )
           );
         } catch (_) {
           postMergeWaterWrote = false;
         } finally {
           try { this._waterEffect.setWaterBackgroundAlphaMaskTexture?.(null); } catch (_) {}
-          try { this._waterEffect.setOverheadRoofBlockTexture?.(null); } catch (_) {}
         }
       }, 'WaterEffectV2 postMerge render');
       if (_profiling) this._recordPassTiming('postMerge_water', _profileT0);
@@ -6370,7 +6366,8 @@ export class FloorCompositor {
     this._busPopulated = false;
     this._populateComplete = false;
     this._populatePromise = null;
-    this._invalidateWaterSourceMaskCache();
+    this._frameWaterSourceDeckTex = null;
+    this._frameWaterSourceSliceTex = null;
 
     // Dispose render targets.
     try { this._sceneRT?.dispose(); } catch (_) {}

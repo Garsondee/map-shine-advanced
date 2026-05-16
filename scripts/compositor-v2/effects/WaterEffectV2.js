@@ -32,6 +32,10 @@
  * smoothstep than the original 0.05–0.96 ramp. Native water is not slice-punched
  * (levelSceneRT alpha is not reliable vs river holes on many maps).
  *
+ * Layering: `tWaterOccluderAlpha` stacks full sceneRT alpha for slices above the
+ * water-source floor. `tOverheadRoofBlock` is a bus overhead-only mask on the
+ * source floor (gated by raw water mask in the shader — not full slice alpha).
+ *
  * @module compositor-v2/effects/WaterEffectV2
  */
 
@@ -960,6 +964,20 @@ export class WaterEffectV2 {
       if (!u) return;
       if (u.tOverheadShadow) u.tOverheadShadow.value = shadowTex ?? this._fallbackWhite;
       if (u.uHasOverheadShadow) u.uHasOverheadShadow.value = shadowTex ? 1.0 : 0.0;
+    } catch (_) {}
+  }
+
+  /**
+   * Same-floor overhead mask for the water-source floor (bus `renderFloorMaskTo`).
+   * @param {THREE.Texture|null} roofBlockTex
+   */
+  setOverheadRoofBlockTexture(roofBlockTex) {
+    try {
+      const u = this._composeMaterial?.uniforms;
+      if (!u) return;
+      const fb = this._fallbackBlack;
+      if (u.tOverheadRoofBlock) u.tOverheadRoofBlock.value = roofBlockTex ?? fb;
+      if (u.uHasOverheadRoofBlock) u.uHasOverheadRoofBlock.value = roofBlockTex ? 1.0 : 0.0;
     } catch (_) {}
   }
 
@@ -3801,6 +3819,7 @@ static getControlSchema() {
     this._syncGlobalWaterBindingsFromViewedFloor();
     this._setCrossSliceWaterDataUniform(0);
     this.setWaterBackgroundAlphaMaskTexture(null);
+    this.setOverheadRoofBlockTexture(null);
   }
 
   /**
@@ -3892,6 +3911,20 @@ static getControlSchema() {
     const idx = Number(floorIndex);
     if (!Number.isFinite(idx)) return false;
     return this._floorWater.has(idx);
+  }
+
+  /**
+   * Tile ids with authored `_Water` masks on a floor (for debug / occlusion).
+   * @param {number} floorIndex
+   * @returns {string[]}
+   */
+  getWaterTileIdsForFloor(floorIndex) {
+    const fi = Number(floorIndex);
+    if (!Number.isFinite(fi)) return [];
+    return this._waterTiles
+      .filter((t) => Number(t.floorIndex) === fi)
+      .map((t) => t.tileId)
+      .filter(Boolean);
   }
 
   /**
@@ -4279,6 +4312,8 @@ static getControlSchema() {
       uHasBuildingShadow:   { value: 0.0 },
       tOverheadShadow:      { value: fallbacks.white },
       uHasOverheadShadow:   { value: 0.0 },
+      tOverheadRoofBlock:   { value: fallbacks.black },
+      uHasOverheadRoofBlock:{ value: 0.0 },
 
       // Cloud Reflection
       uCloudReflectionEnabled:         { value: p.cloudReflectionEnabled ? 1.0 : 0.0 },

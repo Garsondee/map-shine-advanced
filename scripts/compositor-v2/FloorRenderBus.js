@@ -50,6 +50,7 @@ import {
 } from '../scene/tile-manager.js';
 import {
   RENDER_ORDER_PER_FLOOR,
+  ROLE_OFFSETS,
   GROUND_Z,
   Z_PER_FLOOR,
   MAX_INTRA_ROLE_OFFSET,
@@ -1137,6 +1138,26 @@ export class FloorRenderBus {
   // ── Floor Mask Rendering ────────────────────────────────────────────────────
 
   /**
+   * Whether a bus tile should count as overhead for water occlusion on its floor.
+   * @param {object} entry
+   * @returns {boolean}
+   * @private
+   */
+  _tileQualifiesAsWaterOverhead(entry) {
+    if (entry?.isOverhead || entry?.roofShadowCaster) return true;
+    const node = entry?.root || entry?.mesh;
+    const mesh = entry?.mesh || node?.children?.[0];
+    if (node?.userData?.isOverhead) return true;
+    if (!mesh || !Number.isFinite(Number(entry?.floorIndex))) return false;
+    const fi = Number(entry.floorIndex);
+    const base = fi * RENDER_ORDER_PER_FLOOR;
+    const ro = Number(mesh.renderOrder);
+    if (!Number.isFinite(ro)) return false;
+    return ro >= base + ROLE_OFFSETS.FLOOR_OVERHEAD
+      && ro < base + ROLE_OFFSETS.FLOOR_MOTION_TOP;
+  }
+
+  /**
    * Render only tiles at `floorIndex >= minFloorIndex` to a target RT.
    * Used to generate an upper-floor occlusion mask for the water effect:
    * wherever the mask has non-zero alpha, ground-floor water is hidden.
@@ -1155,23 +1176,62 @@ export class FloorRenderBus {
    * @param {boolean} [options.roofCastersOnly=false] - When true, include only tiles
    *   flagged as roof/overhead occluders (`entry.roofShadowCaster`). This avoids
    *   full-screen occlusion from non-occluding upper-floor albedo layers.
+   * @param {boolean} [options.overheadTilesOnly=false] - With `roofCastersOnly`,
+   *   also include tiles whose bus root has `userData.isOverhead` (Foundry overhead).
+   * @param {boolean} [options.includeRoofCaptureLayers=false] - When true, enable
+   *   ROOF_LAYER (20) and WEATHER_ROOF_LAYER (21) on the camera for this pass.
+   * @param {boolean} [options.roofLayerOnly=false] - When true, render only ROOF_LAYER
+   *   (20) + WEATHER_ROOF_LAYER (21) so ground albedo cannot pollute the mask.
    * @param {boolean} [options.includeBackground=false] - When true, include
    *   `__bg_image__*` entries using their stored floorIndex.
    * @param {boolean} [options.backgroundOnly=false] - When true, include only
    *   `__bg_image__*` entries (upper-level background alpha) and exclude tiles.
+   * @param {number} [options.maxFloorIndex] - When set, exclude tiles with
+   *   `floorIndex` above this value (pairs with `minFloorIndex` for a single slice).
+   * @param {number} [options.forceRevealForFloorIndex] - When set, roof/occluder
+   *   tiles on this floor are forced visible for the mask pass (ignores view-slice hide).
+   * @param {boolean} [options.sourceFloorDeckMask=false] - All tiles on the clamped
+   *   floor slice (use with maxFloorIndex), for water punch over river UV overlap.
+   * @param {Set<string>|Array<string>} [options.excludeTileIds] - Skip these bus
+   *   tile ids (e.g. tiles that own `_Water` mask files).
+   * @param {boolean} [options.preserveCameraLayers=false] - When true with
+   *   includeRoofCaptureLayers, enable roof layers without `layers.set(0)`.
    */
   renderFloorMaskTo(renderer, camera, minFloorIndex, target, options = {}) {
     if (!this._initialized || !this._scene) return;
     const THREE = window.THREE;
     const includeHiddenAboveFloors = options?.includeHiddenAboveFloors === true;
     const roofCastersOnly = options?.roofCastersOnly === true;
+    const overheadTilesOnly = options?.overheadTilesOnly === true;
+    const includeRoofCaptureLayers = options?.includeRoofCaptureLayers === true;
+    const roofLayerOnly = options?.roofLayerOnly === true;
     const includeBackground = options?.includeBackground === true;
     const backgroundOnly = options?.backgroundOnly === true;
+    const ROOF_LAYER = 20;
+    const WEATHER_ROOF_LAYER = 21;
+    const maxFloorIndexRaw = options?.maxFloorIndex;
+    const hasMaxFloor = Number.isFinite(Number(maxFloorIndexRaw));
+    const maxFloorIndex = hasMaxFloor ? Number(maxFloorIndexRaw) : Infinity;
+    const forceRevealFloor = Number(options?.forceRevealForFloorIndex);
+    const hasForceRevealFloor = Number.isFinite(forceRevealFloor);
+    const sourceFloorDeckMask = options?.sourceFloorDeckMask === true;
+    const preserveCameraLayers = options?.preserveCameraLayers === true;
+    const excludeTileIdsRaw = options?.excludeTileIds;
+    const excludeTileIds = excludeTileIdsRaw instanceof Set
+      ? excludeTileIdsRaw
+      : (Array.isArray(excludeTileIdsRaw) ? new Set(excludeTileIdsRaw) : null);
 
     // Save each tile's current visibility so we can restore it after.
     const savedVisibility = new Map();
     const savedMaterialState = new Map();
     const savedDoorMaskVisibility = new Map();
+    const prevTarget = renderer.getRenderTarget();
+    const prevAutoClear = renderer.autoClear;
+    const prevColor = renderer.getClearColor(new THREE.Color());
+    const prevAlpha = renderer.getClearAlpha();
+    const prevLayerMask = camera.layers.mask;
+
+    try {
     for (const [tileId, entry] of this._tiles) {
       const node = entry?.root || entry?.mesh;
       if (!node) continue;
@@ -1179,6 +1239,11 @@ export class FloorRenderBus {
 
       // Background planes are optional contributors. Internal effect overlays
       // (`__*`, except `__bg_image__*` when includeBackground=true) stay hidden.
+      if (excludeTileIds?.has(tileId)) {
+        node.visible = false;
+        continue;
+      }
+
       if (tileId.startsWith('__')) {
         const isBgImage = tileId.startsWith('__bg_image__');
         if (!isBgImage || !includeBackground) {
@@ -1188,7 +1253,8 @@ export class FloorRenderBus {
         const mat = entry.material;
         const hasMap = !!mat?.map;
         const isBelowFloor = entry.floorIndex < minFloorIndex;
-        if (isBelowFloor || !hasMap) {
+        const isAboveFloor = entry.floorIndex > maxFloorIndex;
+        if (isBelowFloor || isAboveFloor || !hasMap) {
           node.visible = false;
           continue;
         }
@@ -1223,9 +1289,30 @@ export class FloorRenderBus {
       const mat = entry.material;
       const hasMap = !!mat?.map;
       const isBelowFloor = entry.floorIndex < minFloorIndex;
-      const includeAsOccluder = !roofCastersOnly || !!entry.roofShadowCaster;
+      const isAboveFloor = entry.floorIndex > maxFloorIndex;
+      let includeAsOccluder;
+      if (sourceFloorDeckMask) {
+        if (isBelowFloor || isAboveFloor || !hasMap) {
+          node.visible = false;
+          continue;
+        }
+        const wasVisibleDeck = savedVisibility.get(tileId) === true;
+        if (!wasVisibleDeck) {
+          node.visible = false;
+          continue;
+        }
+        includeAsOccluder = true;
+      } else if (roofLayerOnly || (overheadTilesOnly && !roofCastersOnly)) {
+        includeAsOccluder = this._tileQualifiesAsWaterOverhead(entry);
+      } else if (roofCastersOnly) {
+        includeAsOccluder = !!entry.roofShadowCaster
+          || (overheadTilesOnly && this._tileQualifiesAsWaterOverhead(entry));
+      } else {
+        includeAsOccluder = true;
+      }
+      const forceThisFloor = hasForceRevealFloor && entry.floorIndex === forceRevealFloor;
 
-      if (backgroundOnly || isBelowFloor || !includeAsOccluder) {
+      if (backgroundOnly || isBelowFloor || isAboveFloor || !includeAsOccluder) {
         // Below minFloorIndex: do not render into the occluder mask.
         node.visible = false;
       } else {
@@ -1240,7 +1327,7 @@ export class FloorRenderBus {
         const wasVisible = savedVisibility.get(tileId) === true;
         const hiddenByFloorSlice = entry.floorIndex > this._visibleMaxFloorIndex;
         const forceRevealForMask = includeHiddenAboveFloors && hiddenByFloorSlice;
-        node.visible = wasVisible || forceRevealForMask;
+        node.visible = forceThisFloor || wasVisible || forceRevealForMask;
         if (!node.visible) continue;
         // Render with real texture alpha so transparent areas are genuine openings.
         savedMaterialState.set(tileId, {
@@ -1270,55 +1357,56 @@ export class FloorRenderBus {
       ch.visible = false;
     }
 
-    // Save and configure renderer state.
-    const prevTarget = renderer.getRenderTarget();
-    const prevAutoClear = renderer.autoClear;
-    const prevColor = renderer.getClearColor(new THREE.Color());
-    const prevAlpha = renderer.getClearAlpha();
-    const prevLayerMask = camera.layers.mask;
-    camera.layers.enable(0);
+    if (roofLayerOnly) {
+      camera.layers.set(ROOF_LAYER);
+      camera.layers.enable(WEATHER_ROOF_LAYER);
+    } else if (preserveCameraLayers && includeRoofCaptureLayers) {
+      camera.layers.enable(ROOF_LAYER);
+      camera.layers.enable(WEATHER_ROOF_LAYER);
+    } else {
+      camera.layers.set(0);
+      if (includeRoofCaptureLayers) {
+        camera.layers.enable(ROOF_LAYER);
+        camera.layers.enable(WEATHER_ROOF_LAYER);
+      }
+    }
 
     // Clear to transparent black — alpha=0 means "no upper floor coverage".
     renderer.setRenderTarget(target);
     renderer.setClearColor(0x000000, 0);
     renderer.autoClear = true;
     renderer.render(this._scene, camera);
+    } finally {
+      camera.layers.mask = prevLayerMask;
+      renderer.autoClear = prevAutoClear;
+      // CRITICAL (V2): Do not restore a transparent clearAlpha.
+      renderer.setClearColor(prevColor, 1);
+      if (typeof renderer.setClearAlpha === 'function') {
+        try { renderer.setClearAlpha(1); } catch (_) {}
+      }
+      renderer.setRenderTarget(prevTarget);
 
-    // Restore camera layer mask and renderer state.
-    camera.layers.mask = prevLayerMask;
-    renderer.autoClear = prevAutoClear;
-    // CRITICAL (V2): Do not restore a transparent clearAlpha.
-    // This pass intentionally clears its TARGET to alpha=0, but the renderer's
-    // default clear alpha must remain opaque for subsequent screen blits.
-    renderer.setClearColor(prevColor, 1);
-    if (typeof renderer.setClearAlpha === 'function') {
-      try { renderer.setClearAlpha(1); } catch (_) {}
-    }
-    renderer.setRenderTarget(prevTarget);
+      for (const [tileId, wasVisible] of savedVisibility) {
+        const entry = this._tiles.get(tileId);
+        const node = entry?.root || entry?.mesh;
+        if (node) node.visible = wasVisible;
+      }
+      for (const [doorNode, wasDoorVis] of savedDoorMaskVisibility) {
+        if (doorNode) doorNode.visible = wasDoorVis;
+      }
 
-    // Restore original tile visibility.
-    for (const [tileId, wasVisible] of savedVisibility) {
-      const entry = this._tiles.get(tileId);
-      const node = entry?.root || entry?.mesh;
-      if (node) node.visible = wasVisible;
-    }
-    for (const [doorNode, wasDoorVis] of savedDoorMaskVisibility) {
-      if (doorNode) doorNode.visible = wasDoorVis;
-    }
-
-    // Restore original material state.
-    for (const [tileId, st] of savedMaterialState) {
-      const entry = this._tiles.get(tileId);
-      const mat = entry?.material;
-      if (!mat) continue;
-      mat.transparent = st.transparent;
-      mat.opacity = st.opacity;
-      if (st.color && mat.color) mat.color.copy(st.color);
-      if ('map' in st) mat.map = st.map;
-      mat.depthTest = st.depthTest;
-      mat.depthWrite = st.depthWrite;
-      mat.blending = st.blending;
-      mat.needsUpdate = true;
+      for (const [tileId, st] of savedMaterialState) {
+        const entry = this._tiles.get(tileId);
+        const mat = entry?.material;
+        if (!mat) continue;
+        mat.transparent = st.transparent;
+        mat.opacity = st.opacity;
+        if (st.color && mat.color) mat.color.copy(st.color);
+        if ('map' in st) mat.map = st.map;
+        mat.depthTest = st.depthTest;
+        mat.depthWrite = st.depthWrite;
+        mat.blending = st.blending;
+      }
     }
   }
 
@@ -2137,6 +2225,7 @@ export class FloorRenderBus {
       root,
       attachedToTileId: null,
       textureSrc: '',
+      isOverhead: !!isOverhead,
       roofShadowCaster: !!roofShadowCaster,
     });
 

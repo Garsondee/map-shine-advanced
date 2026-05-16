@@ -445,9 +445,15 @@ class OutdoorsMaskState {
     const floors = window.MapShine?.floorStack?.getFloors?.() ?? [];
     const floor = floors[this._floorIndex];
     let floorKey = (floor?.compositorKey != null) ? String(floor.compositorKey) : null;
-    if (!floorKey && compositor?._activeFloorKey) {
+
+    if (!floorKey) {
       const active = window.MapShine?.floorStack?.getActiveFloor?.();
-      if (active && Number(active.index) === this._floorIndex) {
+      const activeMatchesSystemFloor = active && Number(active.index) === this._floorIndex;
+      if (activeMatchesSystemFloor && active?.compositorKey != null) {
+        floorKey = String(active.compositorKey);
+      } else if (activeMatchesSystemFloor && compositor?._activeFloorKey) {
+        // `_activeFloorKey` can be stale after per-level rendering; only use it
+        // when the public active floor still matches this splash system floor.
         floorKey = String(compositor._activeFloorKey);
       }
     }

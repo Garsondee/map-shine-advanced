@@ -110,11 +110,26 @@ export class SequencerEffectMirror {
     /** @type {number} */
     this._lastVideoNudgeAt = 0;
 
-    /** @type {number} */
-    this._lastPixiCanvasFrame = -1;
+    /** @type {string} */
+    this._lastVideoSrcSignature = '';
 
-    /** @type {Map<number, HTMLCanvasElement>} */
+    /** @type {string} */
+    this._lastResolvedFilePath = '';
+
+    /** @type {string} */
+    this._lastPixiCanvasFp = '';
+
+    /** @type {Map<string, HTMLCanvasElement>} */
     this._pixiCanvasFrameCache = new Map();
+
+    /** @type {string|null} */
+    this._footprintReuseCachedStamp = null;
+
+    /** @type {{ width: number, height: number }|null} */
+    this._footprintReuseCachedValue = null;
+
+    /** @type {number} */
+    this._footprintReuseLastComputeAt = -1;
 
     /** @type {number} */
     this._pixiCanvasFrameCacheMax = 160;
@@ -124,6 +139,43 @@ export class SequencerEffectMirror {
 
     /** @type {'effectPosition'|'effectPositionPlusSpriteDelta'|null} */
     this._lastMirrorPositionBasis = null;
+
+    /** @type {string|null} */
+    this._lastTransformSignature = null;
+
+    /** @type {number|null} */
+    this._lastOpacity = null;
+
+    /** @type {string|null} */
+    this._lastSpritesheetUvSignature = null;
+
+    /** @type {string|null} */
+    this._lastBlendSignature = null;
+
+    /** @type {string|null} */
+    this._lastExternalLookSignature = null;
+
+    /** @type {string|null} */
+    this._lastRenderOrderSignature = null;
+
+    /** @type {number|null} */
+    this._lastRenderOrderValue = null;
+
+    /** @type {{ cacheHits: number, fastDraws: number, slowExtracts: number, uploads: number, skippedUnchanged: number }} */
+    this._pixiCanvasStats = {
+      cacheHits: 0,
+      fastDraws: 0,
+      slowExtracts: 0,
+      uploads: 0,
+      skippedUnchanged: 0,
+    };
+
+    /** @type {{ hits: number, misses: number, legacy: number }} */
+    this._footprintStats = {
+      hits: 0,
+      misses: 0,
+      legacy: 0,
+    };
   }
 
   /**
@@ -168,7 +220,12 @@ export class SequencerEffectMirror {
       mapShineExternalEffect: true,
     };
 
-    // Initial transform + order — refreshed on every PIXI tick.
+    if (this._textureKind === 'video' && this._mediaSource instanceof HTMLVideoElement) {
+      this._lastVideoSrcSignature = this._videoSrcSignature(this._mediaSource);
+    }
+    this._lastResolvedFilePath = this._resolveFilePath();
+
+    // Initial transform + order — refreshed on every compositor draw.
     this.syncFromPixi();
     this.refreshOrder();
 
@@ -211,7 +268,12 @@ export class SequencerEffectMirror {
     const floorIndex = this._resolveFloorIndex();
     const sortLayer = this._resolveSortLayer();
     const sort = this._resolveSortTiebreaker();
-    this.mesh.renderOrder = externalEffectOrder(floorIndex, sortLayer, sort);
+    const signature = `${floorIndex}|${sortLayer}|${sort}`;
+    if (signature === this._lastRenderOrderSignature && this._lastRenderOrderValue != null) return;
+    const order = externalEffectOrder(floorIndex, sortLayer, sort);
+    if (this.mesh.renderOrder !== order) this.mesh.renderOrder = order;
+    this._lastRenderOrderSignature = signature;
+    this._lastRenderOrderValue = order;
   }
 
   /**
@@ -301,7 +363,7 @@ export class SequencerEffectMirror {
         })(),
         mirrorFootprint: (() => {
           try {
-            const px = this._resolveMirrorFootprintInScenePixels();
+            const px = this._resolveMirrorFootprintInScenePixels(NaN, NaN, NaN, true);
             const lg = this._resolveLegacyNaturalFootprint();
             return {
               footprintW: px.width,
@@ -476,15 +538,25 @@ export class SequencerEffectMirror {
     }
 
     if (this._textureKind === 'pixiCanvas') {
+      const sp = this._resolveSprite();
       snap.pixiCanvas = {
         frameCacheSize: this._pixiCanvasFrameCache.size,
         frameCacheMax: this._pixiCanvasFrameCacheMax,
-        lastFrame: this._lastPixiCanvasFrame,
+        lastFingerprint: this._lastPixiCanvasFp,
+        stats: { ...this._pixiCanvasStats },
+        spriteCurrentFrame: Number.isFinite(Number(sp?.currentFrame ?? sp?._currentFrame))
+          ? Number(sp?.currentFrame ?? sp?._currentFrame)
+          : null,
         includesSpriteState: this._pixiCanvasIncludesSpriteState,
         canvasWidth: this._mediaSource instanceof HTMLCanvasElement ? this._mediaSource.width : null,
         canvasHeight: this._mediaSource instanceof HTMLCanvasElement ? this._mediaSource.height : null,
       };
     }
+
+    snap.footprint = {
+      reuseCachedStamp: this._footprintReuseCachedStamp,
+      stats: { ...this._footprintStats },
+    };
 
     const mat = this._material;
     if (mat) {
@@ -625,6 +697,7 @@ export class SequencerEffectMirror {
 
     const effect = this._effect;
     if (!effect) return;
+    const sprite = this._resolveSprite();
 
     // Video: align with Sequencer's own path (`sequencer-sprite-manager.js`
     // `updateVideoTextures` → `managedSprite.texture.update()`, and
@@ -634,13 +707,14 @@ export class SequencerEffectMirror {
     if (this._textureKind === 'video') {
       try { this._maybeReplaceDeadVideoWithSpriteTexture(); } catch (_) {}
       try { this._syncSequencerVideoPipeline(); } catch (_) {}
-      try { this._maybeRebindVideoElement(); } catch (_) {}
+      try { this._syncVideoMediaBinding(sprite); } catch (_) {}
       try { this._nudgeVideoElementIfNeeded(); } catch (_) {}
     }
+    try { this._syncEffectFilePath(sprite); } catch (_) {}
 
     const sceneH = globalThis.canvas?.dimensions?.height;
     if (!Number.isFinite(Number(sceneH))) return;
-    this._refreshNaturalSizeFromSource();
+    this._refreshNaturalSizeFromSource(sprite);
 
     // Scene pixels: Sequencer `effect.position` matches the canvas scene. Do not
     // use `worldPosition` / stage-normalized coords here — they differ from the
@@ -675,7 +749,6 @@ export class SequencerEffectMirror {
     }
     if (!Number.isFinite(fx) || !Number.isFinite(fy)) {
       try {
-        const sprite = this._resolveSprite();
         const wt = sprite?.worldTransform ?? effect?.worldTransform ?? null;
         if (wt && Number.isFinite(Number(wt.tx)) && Number.isFinite(Number(wt.ty))) {
           fx = Number(wt.tx);
@@ -688,29 +761,21 @@ export class SequencerEffectMirror {
     // Shift from effect root toward the Sequencer sprite / cast layout, then
     // pull ~10% back along the cast axis (tunable) so line spells sit where
     // Sequencer reads visually correct.
-    const sprDelta = this._resolveSpriteRootDeltaFromEffect(effect);
+    const sprDelta = this._resolveSpriteRootDeltaFromEffect(effect, sprite);
     if (sprDelta.x !== 0 || sprDelta.y !== 0) {
       this._lastMirrorPositionBasis = 'effectPositionPlusSpriteDelta';
     }
 
-    // Rotation: Sequencer uses radians on the rotation container.
-    let rotation = 0;
-    try {
-      const c = effect;
-      if (c.rotationContainer && Number.isFinite(Number(c.rotationContainer.rotation))) {
-        rotation = Number(c.rotationContainer.rotation);
-      } else if (Number.isFinite(Number(c.rotation))) {
-        rotation = Number(c.rotation);
-      }
-    } catch (_) {}
+    const rotation = this._readMirrorRotationRadians();
     // Three Y is flipped relative to Foundry Y; rotation must be negated.
-    this.mesh.rotation.z = -rotation;
+    const nextRotationZ = -rotation;
+    if (this.mesh.rotation.z !== nextRotationZ) this.mesh.rotation.z = nextRotationZ;
 
     // Scale: prefer PIXI world-space bounds (includes ancestor scale used for
     // ranged / stretch / canvas zoom). Fallback: natural media × Sequencer
     // container scale — the latter misses parent-chain scaling and can latch
     // native video resolution instead of the drawn quad.
-    const foot = this._resolveMirrorFootprintInScenePixels();
+    const foot = this._resolveMirrorFootprintInScenePixels(fx, fy, rotation, false, sprite);
     const scaleMul = this._resolveMirrorMeshScaleMul();
     const w = Math.max(1, foot.width * scaleMul);
     const h = Math.max(1, foot.height * scaleMul);
@@ -719,8 +784,7 @@ export class SequencerEffectMirror {
     // can lag or differ from `managedSprite.width`, which under-shifts the mesh.
     let spanW = w;
     try {
-      const sp = this._resolveSprite();
-      const sw = Number(sp?.width);
+      const sw = Number(sprite?.width);
       if (Number.isFinite(sw) && sw > 1) spanW = Math.max(spanW, sw);
     } catch (_) {}
 
@@ -743,17 +807,24 @@ export class SequencerEffectMirror {
     fy += nudge.y;
 
     // Convert Foundry top-left → MSA bottom-left (Y flip).
-    this.mesh.position.x = fx;
-    this.mesh.position.y = Number(sceneH) - fy;
+    const nextX = fx;
+    const nextY = Number(sceneH) - fy;
 
     // Z: same band as bus tiles (see _resolveMirrorMeshWorldZ). Token sprites use a
     // much higher Z (~groundZ+1003); placing mirror *meshes* there clips them
     // behind the fixed camera at z≈2000.
-    this.mesh.position.z = this._resolveMirrorMeshWorldZ();
+    const nextZ = this._resolveMirrorMeshWorldZ();
 
-    this.mesh.scale.x = w;
-    this.mesh.scale.y = h;
-    this.mesh.scale.z = 1;
+    const transformSignature = `${nextX}|${nextY}|${nextZ}|${nextRotationZ}|${w}|${h}`;
+    if (transformSignature !== this._lastTransformSignature) {
+      this.mesh.position.x = nextX;
+      this.mesh.position.y = nextY;
+      this.mesh.position.z = nextZ;
+      this.mesh.scale.x = w;
+      this.mesh.scale.y = h;
+      this.mesh.scale.z = 1;
+      this._lastTransformSignature = transformSignature;
+    }
 
     // Opacity / tint
     let alpha = 1;
@@ -762,30 +833,33 @@ export class SequencerEffectMirror {
       if (Number.isFinite(Number(c.alpha))) alpha = Number(c.alpha);
     } catch (_) {}
     const opacity = Math.max(0, Math.min(1, alpha));
-    if (this._material?.uniforms?.uOpacity) {
-      this._material.uniforms.uOpacity.value = opacity;
-    } else {
-      this._material.opacity = opacity;
+    if (opacity !== this._lastOpacity) {
+      if (this._material?.uniforms?.uOpacity) {
+        this._material.uniforms.uOpacity.value = opacity;
+      } else {
+        this._material.opacity = opacity;
+      }
+      this._lastOpacity = opacity;
     }
 
     // For spritesheets, advance UV from the animated frame index.
     if (this._textureKind === 'spritesheet') {
-      this._refreshSpritesheetUv();
+      this._refreshSpritesheetUv(sprite);
     } else if (this._textureKind === 'pixiCanvas') {
-      this._refreshPixiCanvasTexture();
+      this._refreshPixiCanvasTexture(false, sprite);
     }
 
     // Match PIXI blend mode (many JB2A clips use additive compositing).
     try {
       const THREE = globalThis.THREE;
-      if (THREE) this._syncMaterialBlendFromPixi(THREE);
+      if (THREE) this._syncMaterialBlendFromPixi(THREE, null, sprite);
     } catch (_) {}
     try {
       this._syncExternalDiffuseGain();
     } catch (_) {}
 
-    // Refresh order in case elevation/sortLayer changed since attach.
-    this.refreshOrder();
+    // Elevation / sortLayer can change without `updateSequencerEffect`.
+    try { this.refreshOrder(); } catch (_) {}
   }
 
   /**
@@ -820,8 +894,39 @@ export class SequencerEffectMirror {
     this._texture = null;
     this._mediaSource = null;
     this._pixiCanvasFrameCache.clear();
+    this._lastPixiCanvasFp = '';
+    this._footprintReuseCachedStamp = null;
+    this._footprintReuseCachedValue = null;
+    this._footprintReuseLastComputeAt = -1;
+    this._lastTransformSignature = null;
+    this._lastOpacity = null;
+    this._lastSpritesheetUvSignature = null;
+    this._lastBlendSignature = null;
+    this._lastExternalLookSignature = null;
+    this._lastRenderOrderSignature = null;
+    this._lastRenderOrderValue = null;
+    this._lastVideoSrcSignature = '';
+    this._lastResolvedFilePath = '';
 
     this._restorePixiContainer();
+  }
+
+  /**
+   * Clear per-frame dirty caches after the live media source or texture changes.
+   * @private
+   */
+  _invalidateSyncCaches() {
+    this._lastTransformSignature = null;
+    this._lastOpacity = null;
+    this._lastSpritesheetUvSignature = null;
+    this._lastBlendSignature = null;
+    this._lastExternalLookSignature = null;
+    this._lastRenderOrderSignature = null;
+    this._lastRenderOrderValue = null;
+    this._footprintReuseCachedStamp = null;
+    this._footprintReuseCachedValue = null;
+    this._footprintReuseLastComputeAt = -1;
+    this._lastPixiCanvasFp = '';
   }
 
   _createMaterial(THREE) {
@@ -953,12 +1058,13 @@ export class SequencerEffectMirror {
    * Sequencer (additive fire, etc.).
    * @param {any} THREE
    * @param {any} [material]
+   * @param {any|null} [resolvedSprite]
    */
-  _syncMaterialBlendFromPixi(THREE, material = null) {
+  _syncMaterialBlendFromPixi(THREE, material = null, resolvedSprite = null) {
     const mat = material ?? this._material;
     if (!mat || !THREE || typeof mat !== 'object') return;
 
-    const sprite = this._resolveSprite();
+    const sprite = resolvedSprite ?? this._resolveSprite();
     let bm = sprite?.blendMode;
     if (bm == null && this._effect && typeof this._effect === 'object') {
       bm = this._effect.blendMode;
@@ -994,6 +1100,9 @@ export class SequencerEffectMirror {
       const straightSample = gpuPremul ? 0 : 1;
       /** Fragment must output premultiplied rgb when these blend modes are used. */
       let premulFragment = 0;
+      const signature = `${this._textureKind}|${mode}|${pma ? 1 : 0}|${gpuPremul ? 1 : 0}`;
+      if (material == null && signature === this._lastBlendSignature) return;
+      this._lastBlendSignature = signature;
 
       mat.blendEquation = THREE.AddEquation;
       if (mode === 'add') {
@@ -1032,6 +1141,10 @@ export class SequencerEffectMirror {
 
       return;
     }
+
+    const signature = `${this._textureKind}|${mode}`;
+    if (material == null && signature === this._lastBlendSignature) return;
+    this._lastBlendSignature = signature;
 
     if (mode === 'add') {
       if (mat.blending !== THREE.AdditiveBlending) mat.blending = THREE.AdditiveBlending;
@@ -1101,6 +1214,9 @@ export class SequencerEffectMirror {
     const tint = this._resolveExternalTint();
     const mat = this._material;
     if (!mat || typeof mat !== 'object') return;
+    const signature = `${this._textureKind}|${gain}|${tint.r}|${tint.g}|${tint.b}`;
+    if (signature === this._lastExternalLookSignature) return;
+    this._lastExternalLookSignature = signature;
 
     if (this._textureKind === 'video' && mat.uniforms?.uDiffuseGain) {
       mat.uniforms.uDiffuseGain.value = gain;
@@ -1310,6 +1426,8 @@ export class SequencerEffectMirror {
         this._texture = tex;
         this._textureKind = 'video';
         this._mediaSource = video;
+        this._lastVideoSrcSignature = this._videoSrcSignature(video);
+        this._lastResolvedFilePath = this._resolveFilePath();
         this._naturalSize = this._resolveDisplaySize(sprite, video);
         return true;
       } catch (e) {
@@ -1359,7 +1477,7 @@ export class SequencerEffectMirror {
     tex.flipY = true;
     this._texture = tex;
     this._textureKind = 'pixiCanvas';
-    this._lastPixiCanvasFrame = -1;
+    this._lastPixiCanvasFp = '';
     this._refreshPixiCanvasTexture(true);
     return true;
   }
@@ -1452,6 +1570,8 @@ export class SequencerEffectMirror {
     this.mesh.material = this._material;
     try { oldMaterial?.dispose?.(); } catch (_) {}
     try { oldTexture?.dispose?.(); } catch (_) {}
+    this._invalidateSyncCaches();
+    this._lastVideoSrcSignature = '';
     this._refreshNaturalSizeFromSource();
     try { this._syncMaterialBlendFromPixi(THREE); } catch (_) {}
     try { this._syncExternalDiffuseGain(); } catch (_) {}
@@ -1601,20 +1721,50 @@ export class SequencerEffectMirror {
   }
 
   /**
-   * If we initially bound a stalled `<video>` but the current sprite exposes a
-   * different element that has decoded frames, re-point the Three VideoTexture.
-   * (Happens when attach ran before `managedSprite` was ready.)
+   * Stable signature for the active `<video>` source (element identity + URL).
+   * @param {HTMLVideoElement} el
+   * @returns {string}
    */
-  _maybeRebindVideoElement() {
+  _videoSrcSignature(el) {
+    if (!(el instanceof HTMLVideoElement)) return '';
+    try {
+      const src = String(el.currentSrc || el.src || el.getAttribute?.('src') || '').trim();
+      const uid = String(el.dataset?.sequencerVideoId ?? el.id ?? '');
+      return `${uid}|${src}`;
+    } catch (_) {
+      return '';
+    }
+  }
+
+  /**
+   * Keep the mirror's `VideoTexture` pointed at Sequencer's live element and
+   * source. Rebind when the sprite exposes a different decoded element, or when
+   * Sequencer swaps `src` on a pooled tag (otherwise only the first clip shows).
+   * @param {any|null} [resolvedSprite]
+   */
+  _syncVideoMediaBinding(resolvedSprite = null) {
     const THREE = globalThis.THREE;
     if (!THREE || this._textureKind !== 'video' || this._disposed || !this._material) return;
-    const prev = this._mediaSource;
-    if (!(prev instanceof HTMLVideoElement)) return;
-    const sprite = this._resolveSprite();
+
+    const sprite = resolvedSprite ?? this._resolveSprite();
     const el = this._extractVideoElement(sprite);
-    if (!(el instanceof HTMLVideoElement) || el === prev || !this._isUsableMirrorVideo(el)) return;
-    if (prev.videoWidth > 0) return;
-    if (el.videoWidth <= 0) return;
+    if (!(el instanceof HTMLVideoElement) || !this._isUsableMirrorVideo(el)) return;
+
+    const prev = this._mediaSource;
+    const nextSig = this._videoSrcSignature(el);
+    const sameElement = prev === el;
+    if (sameElement && nextSig === this._lastVideoSrcSignature) return;
+
+    if (sameElement) {
+      this._lastVideoSrcSignature = nextSig;
+      try { this._texture.needsUpdate = true; } catch (_) {}
+      try { this._material.needsUpdate = true; } catch (_) {}
+      void el.play?.().catch?.(() => {});
+      return;
+    }
+
+    if (prev instanceof HTMLVideoElement && prev.videoWidth > 0 && el.videoWidth <= 0) return;
+
     try {
       const oldTex = this._texture;
       const tex = new THREE.VideoTexture(el);
@@ -1627,13 +1777,36 @@ export class SequencerEffectMirror {
       tex.flipY = true;
       this._texture = tex;
       this._mediaSource = el;
+      this._lastVideoSrcSignature = nextSig;
       if (this._material?.uniforms?.map) {
         this._material.uniforms.map.value = tex;
         this._material.needsUpdate = true;
       }
       try { oldTex?.dispose?.(); } catch (_) {}
+      this._invalidateSyncCaches();
+      try { this._syncMaterialBlendFromPixi(THREE, null, sprite); } catch (_) {}
+      try { this._syncExternalDiffuseGain(); } catch (_) {}
     } catch (e) {
       log.warn('Sequencer mirror: video rebind failed:', e);
+    }
+  }
+
+  /**
+   * When Sequencer advances to another file on the same `CanvasEffect`, the
+   * mirror must not keep displaying the first clip's pixels.
+   * @param {any|null} [resolvedSprite]
+   */
+  _syncEffectFilePath(resolvedSprite = null) {
+    const path = this._resolveFilePath();
+    if (!path || path === this._lastResolvedFilePath) return;
+    this._lastResolvedFilePath = path;
+
+    if (this._textureKind !== 'video') return;
+
+    const sprite = resolvedSprite ?? this._resolveSprite();
+    const el = this._extractVideoElement(sprite);
+    if (el instanceof HTMLVideoElement && this._isUsableMirrorVideo(el)) {
+      this._syncVideoMediaBinding(sprite);
     }
   }
 
@@ -1852,8 +2025,8 @@ export class SequencerEffectMirror {
     return { width: min, height: min };
   }
 
-  _refreshNaturalSizeFromSource() {
-    const sprite = this._resolveSprite();
+  _refreshNaturalSizeFromSource(resolvedSprite = null) {
+    const sprite = resolvedSprite ?? this._resolveSprite();
     if (!sprite) return;
     const next = this._resolveDisplaySize(sprite, this._mediaSource);
     const cur = this._naturalSize;
@@ -1871,6 +2044,23 @@ export class SequencerEffectMirror {
     } else if (curA > nextA * 2.25) {
       this._naturalSize = next;
     }
+  }
+
+  /**
+   * Rotation radians from Sequencer's rotation container / CanvasEffect root.
+   * @returns {number}
+   */
+  _readMirrorRotationRadians() {
+    const effect = this._effect;
+    let rotation = 0;
+    try {
+      if (effect?.rotationContainer && Number.isFinite(Number(effect.rotationContainer.rotation))) {
+        rotation = Number(effect.rotationContainer.rotation);
+      } else if (Number.isFinite(Number(effect.rotation))) {
+        rotation = Number(effect.rotation);
+      }
+    } catch (_) {}
+    return rotation;
   }
 
   _resolveEffectPosition() {
@@ -1920,11 +2110,12 @@ export class SequencerEffectMirror {
    * scene placement when parent chain matches; avoids `worldPosition` stage
    * scaling, which does not match MSA's bus scene coordinates.
    * @param {any} effect
+   * @param {any|null} [resolvedSprite]
    * @returns {{ x: number, y: number }}
    */
-  _resolveSpriteRootDeltaFromEffect(effect) {
+  _resolveSpriteRootDeltaFromEffect(effect, resolvedSprite = null) {
     try {
-      const root = effect?.sprite?.managedSprite ?? effect?.sprite ?? null;
+      const root = resolvedSprite ?? effect?.sprite?.managedSprite ?? effect?.sprite ?? null;
       if (!root?.worldTransform || !effect?.worldTransform) return { x: 0, y: 0 };
       const wtR = root.worldTransform;
       const wtE = effect.worldTransform;
@@ -2026,8 +2217,8 @@ export class SequencerEffectMirror {
     }
   }
 
-  _resolvePixiVisualBounds() {
-    const sprite = this._resolveSprite();
+  _resolvePixiVisualBounds(resolvedSprite = null) {
+    const sprite = resolvedSprite ?? this._resolveSprite();
     if (!sprite || typeof sprite !== 'object') return null;
     const oldRenderable = sprite.renderable;
     try {
@@ -2060,8 +2251,8 @@ export class SequencerEffectMirror {
     return null;
   }
 
-  _resolvePixiVisualSize(bounds = null) {
-    const sprite = this._resolveSprite();
+  _resolvePixiVisualSize(bounds = null, resolvedSprite = null) {
+    const sprite = resolvedSprite ?? this._resolveSprite();
     let width = Number.NaN;
     let height = Number.NaN;
     try {
@@ -2086,9 +2277,9 @@ export class SequencerEffectMirror {
    * Refresh UV repeat/offset on the mesh material's map so the visible region
    * matches the spritesheet's current frame. Operates on `this._texture`.
    */
-  _refreshSpritesheetUv() {
+  _refreshSpritesheetUv(resolvedSprite = null) {
     if (!this._texture || !this._mediaSource) return;
-    const sprite = this._resolveSprite();
+    const sprite = resolvedSprite ?? this._resolveSprite();
     if (!sprite) return;
     try {
       const frameIdx = Number(sprite.currentFrame ?? sprite._currentFrame ?? 0);
@@ -2103,11 +2294,52 @@ export class SequencerEffectMirror {
       const fw = Number(frame.width ?? 0);
       const fh = Number(frame.height ?? 0);
       const map = this._texture;
-      map.repeat.set(fw / w, fh / h);
+      const repeatX = fw / w;
+      const repeatY = fh / h;
       // Three V flip: y origin at bottom; flipY=true.
-      map.offset.set(fx / w, 1 - (fy + fh) / h);
+      const offsetX = fx / w;
+      const offsetY = 1 - (fy + fh) / h;
+      const signature = `${frameIdx}|${fx}|${fy}|${fw}|${fh}|${w}|${h}|${repeatX}|${repeatY}|${offsetX}|${offsetY}`;
+      if (signature === this._lastSpritesheetUvSignature) return;
+      map.repeat.set(repeatX, repeatY);
+      map.offset.set(offsetX, offsetY);
       map.needsUpdate = true;
+      this._lastSpritesheetUvSignature = signature;
     } catch (_) {}
+  }
+
+  /**
+   * Stable key for pixiCanvas texture refresh: frame index, texture frame rect,
+   * sprite size, and world transform — catches cases where `currentFrame` does
+   * not advance while the displayed sub-rect updates.
+   * @param {any} sprite
+   * @returns {string}
+   */
+  _pixiCanvasFrameFingerprint(sprite) {
+    try {
+      let fi = Number(sprite?.currentFrame ?? sprite?._currentFrame);
+      if (!Number.isFinite(fi)) fi = -1;
+      const tex = sprite?.texture ?? null;
+      const frame = tex?.frame ?? tex?.orig ?? null;
+      const fx = Number(frame?.x ?? NaN);
+      const fy = Number(frame?.y ?? NaN);
+      const fw = Number(frame?.width ?? NaN);
+      const fh = Number(frame?.height ?? NaN);
+      let texSig = '';
+      try {
+        texSig = String(tex?.uid ?? tex?.baseTexture?.uid ?? tex?.__textureUid ?? '');
+      } catch (_) {}
+      const sw = Number(sprite?.width);
+      const sh = Number(sprite?.height);
+      const wt = sprite?.worldTransform;
+      let wm = '';
+      if (wt && typeof wt === 'object') {
+        wm = `${Math.round(Number(wt.a) * 1000)}_${Math.round(Number(wt.b) * 1000)}_${Math.round(Number(wt.c) * 1000)}_${Math.round(Number(wt.d) * 1000)}_${Math.round(Number(wt.tx) * 10)}_${Math.round(Number(wt.ty) * 10)}`;
+      }
+      return `${fi}|${fx}|${fy}|${fw}|${fh}|${texSig}|${Math.round(sw * 100)}_${Math.round(sh * 100)}|${wm}`;
+    } catch (_) {
+      return `err_${Math.random()}`;
+    }
   }
 
   /**
@@ -2115,14 +2347,17 @@ export class SequencerEffectMirror {
    * sprite frame into our canvas, then upload that canvas to Three.
    * @param {boolean} [force]
    */
-  _refreshPixiCanvasTexture(force = false) {
+  _refreshPixiCanvasTexture(force = false, resolvedSprite = null) {
     if (!this._texture || !(this._mediaSource instanceof HTMLCanvasElement)) return;
-    const sprite = this._resolveSprite();
+    const sprite = resolvedSprite ?? this._resolveSprite();
     if (!sprite) return;
 
-    const frameIdx = Number(sprite.currentFrame ?? sprite._currentFrame ?? 0) | 0;
-    if (!force && frameIdx === this._lastPixiCanvasFrame) return;
-    this._lastPixiCanvasFrame = frameIdx;
+    const fp = this._pixiCanvasFrameFingerprint(sprite);
+    if (!force && fp === this._lastPixiCanvasFp) {
+      this._pixiCanvasStats.skippedUnchanged += 1;
+      return;
+    }
+    this._lastPixiCanvasFp = fp;
 
     const canvas = this._mediaSource;
     try {
@@ -2135,38 +2370,47 @@ export class SequencerEffectMirror {
       if (!ctx) return;
       ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-      const cached = this._pixiCanvasFrameCache.get(frameIdx);
+      const cached = this._pixiCanvasFrameCache.get(fp);
       if (cached instanceof HTMLCanvasElement) {
         ctx.drawImage(cached, 0, 0, cached.width, cached.height, 0, 0, canvas.width, canvas.height);
         this._pixiCanvasIncludesSpriteState = cached.__msaSequencerIncludesSpriteState === true;
         this._texture.needsUpdate = true;
+        this._pixiCanvasStats.cacheHits += 1;
+        this._pixiCanvasStats.uploads += 1;
         return;
       }
 
       let drawn = this._drawPixiTextureFrameToCanvas(ctx, sprite, canvas.width, canvas.height);
       this._pixiCanvasIncludesSpriteState = false;
+      if (drawn) this._pixiCanvasStats.fastDraws += 1;
       if (!drawn) {
         drawn = this._extractPixiSpriteToCanvas(ctx, sprite, canvas.width, canvas.height);
-        if (drawn) this._pixiCanvasIncludesSpriteState = true;
+        if (drawn) {
+          this._pixiCanvasIncludesSpriteState = true;
+          this._pixiCanvasStats.slowExtracts += 1;
+        }
       }
-      if (drawn) this._cachePixiCanvasFrame(frameIdx, canvas);
+      if (drawn) this._cachePixiCanvasFrame(fp, canvas, sprite);
       this._texture.needsUpdate = true;
+      this._pixiCanvasStats.uploads += 1;
     } catch (_) {}
   }
 
   /**
    * Cache extracted PIXI frames so looping effects do not repeatedly call
    * renderer.extract.canvas(), which stalls the GPU.
-   * @param {number} frameIdx
+   * @param {string} frameKey fingerprint from {@link _pixiCanvasFrameFingerprint}
    * @param {HTMLCanvasElement} source
+   * @param {any|null} [resolvedSprite]
    */
-  _cachePixiCanvasFrame(frameIdx, source) {
-    if (!Number.isFinite(frameIdx) || !(source instanceof HTMLCanvasElement)) return;
-    if (this._pixiCanvasFrameCache.has(frameIdx)) return;
+  _cachePixiCanvasFrame(frameKey, source, resolvedSprite = null) {
+    if (!(typeof frameKey === 'string') || !(source instanceof HTMLCanvasElement)) return;
+    if (this._pixiCanvasFrameCache.has(frameKey)) return;
     try {
+      const tf = Number((resolvedSprite ?? this._resolveSprite())?.totalFrames);
       const max = Math.max(1, Math.min(
         this._pixiCanvasFrameCacheMax,
-        Number(this._resolveSprite()?.totalFrames) || this._pixiCanvasFrameCacheMax,
+        Number.isFinite(tf) && tf > 0 ? tf : this._pixiCanvasFrameCacheMax,
       ));
       while (this._pixiCanvasFrameCache.size >= max) {
         const oldest = this._pixiCanvasFrameCache.keys().next().value;
@@ -2179,7 +2423,7 @@ export class SequencerEffectMirror {
       if (!ctx) return;
       ctx.drawImage(source, 0, 0);
       copy.__msaSequencerIncludesSpriteState = this._pixiCanvasIncludesSpriteState === true;
-      this._pixiCanvasFrameCache.set(frameIdx, copy);
+      this._pixiCanvasFrameCache.set(frameKey, copy);
     } catch (_) {}
   }
 
@@ -2340,6 +2584,63 @@ export class SequencerEffectMirror {
   }
 
   /**
+   * Milliseconds to reuse the last expensive `getBounds()` footprint when a coarse
+   * transform stamp matches. `MapShine.__sequencerMirrorFootprintReuseMs`: unset →
+   * reuse until stamp changes; `0` disables reuse (always call `getBounds()`).
+   * @returns {number}
+   */
+  _mirrorFootprintReuseWindowMs() {
+    try {
+      const ms = Number(globalThis.window?.MapShine?.__sequencerMirrorFootprintReuseMs);
+      if (!Number.isFinite(ms)) return Number.POSITIVE_INFINITY;
+      if (ms <= 0) return 0;
+      return Math.min(1000, ms);
+    } catch (_) {
+      return Number.POSITIVE_INFINITY;
+    }
+  }
+
+  /**
+   * Coarse stamp for footprint caching (skipped for video mirrors).
+   * @param {number} fx
+   * @param {number} fy
+   * @param {number} rotation
+   * @param {any|null} [resolvedSprite]
+   * @returns {string}
+   */
+  _composeFootprintReuseStamp(fx, fy, rotation, resolvedSprite = null) {
+    const q = (v, mul = 4) => {
+      const n = Number(v);
+      if (!Number.isFinite(n)) return 'u';
+      return String(Math.round(n * mul) / mul);
+    };
+
+    let rf = fx;
+    let ry = fy;
+    if (!Number.isFinite(rf) || !Number.isFinite(ry)) {
+      const p = this._resolveEffectPosition();
+      rf = p.x;
+      ry = p.y;
+    }
+
+    let rr = rotation;
+    if (!Number.isFinite(rr)) rr = this._readMirrorRotationRadians();
+
+    const stageZoom = this._resolveCanvasStageZoom();
+    const sp = resolvedSprite ?? this._resolveSprite();
+    const frameIdx = Number(sp?.currentFrame ?? sp?._currentFrame ?? -1) | 0;
+    const sx = this._readContainerScaleX();
+    const sy = this._readContainerScaleY();
+    const sw = Number(sp?.width) || 0;
+    const sh = Number(sp?.height) || 0;
+    const nw = Math.round(Number(this._naturalSize.width) || 0);
+    const nh = Math.round(Number(this._naturalSize.height) || 0);
+    const tk = this._textureKind ?? '';
+
+    return `${tk}|${q(rf)}_${q(ry)}|${q(rr, 100)}|z${q(stageZoom, 1000)}|f${frameIdx}|sc${q(sx, 100)}_${q(sy, 100)}|spr${q(sw)}_${q(sh)}|nat${nw}x${nh}`;
+  }
+
+  /**
    * Footprint of the mirrored quad in **Foundry scene pixels** (same space as
    * `effect.position`). Prefer PIXI `getBounds()` on the drawn sprite / its
    * containers so ranged spells, distance stretch, and nested scales match what
@@ -2350,15 +2651,38 @@ export class SequencerEffectMirror {
    * F12: set `MapShine.__sequencerMirrorScalePreferGetBounds = false` to revert
    * to natural×container-only sizing.
    *
+   * F12: `MapShine.__sequencerMirrorFootprintReuseMs` — ms window to skip repeat
+   * `getBounds()` when coarse transforms are unchanged (unset = until stamp changes; `0` = off).
+   *
+   * @param {number} [fx]
+   * @param {number} [fy]
+   * @param {number} [rotation]
+   * @param {boolean} [bypassFootprintReuse] Always compute bounds (debug snapshots).
+   * @param {any|null} [resolvedSprite]
    * @returns {{ width: number, height: number }}
    */
-  _resolveMirrorFootprintInScenePixels() {
+  _resolveMirrorFootprintInScenePixels(fx = Number.NaN, fy = Number.NaN, rotation = Number.NaN, bypassFootprintReuse = false, resolvedSprite = null) {
     try {
       const v = globalThis.window?.MapShine?.__sequencerMirrorScalePreferGetBounds;
       if (v === false || v === 0 || v === 'false') {
+        this._footprintStats.legacy += 1;
         return this._resolveLegacyNaturalFootprint();
       }
     } catch (_) {}
+
+    const now = typeof performance !== 'undefined' ? performance.now() : 0;
+    const reuseMs = this._mirrorFootprintReuseWindowMs();
+    let stamp = null;
+    if (!bypassFootprintReuse && reuseMs > 0) {
+      stamp = this._composeFootprintReuseStamp(fx, fy, rotation, resolvedSprite);
+      if (stamp === this._footprintReuseCachedStamp
+          && this._footprintReuseCachedValue != null
+          && (!Number.isFinite(reuseMs) || (now - this._footprintReuseLastComputeAt) < reuseMs)) {
+        this._footprintStats.hits += 1;
+        return this._footprintReuseCachedValue;
+      }
+    }
+    this._footprintStats.misses += 1;
 
     const stageZoom = this._resolveCanvasStageZoom();
 
@@ -2385,25 +2709,37 @@ export class SequencerEffectMirror {
       return null;
     };
 
-    const vb = this._resolvePixiVisualBounds();
+    /** @type {{ width: number, height: number }} */
+    let result = this._resolveLegacyNaturalFootprint();
+
+    const vb = this._resolvePixiVisualBounds(resolvedSprite);
     if (vb && this._isMeaningfulWorldSize(vb.width, vb.height)) {
-      return { width: vb.width / stageZoom, height: vb.height / stageZoom };
+      result = { width: vb.width / stageZoom, height: vb.height / stageZoom };
+    } else {
+      try {
+        const eff = this._effect;
+        let sz = boundsSize(eff?.spriteContainer);
+        if (sz) result = sz;
+        else {
+          sz = boundsSize(eff?.rotationContainer);
+          if (sz) result = sz;
+          else {
+            const pix = this._resolvePixiVisualSize(vb, resolvedSprite);
+            if (this._isMeaningfulWorldSize(pix.width, pix.height)) {
+              result = { width: pix.width, height: pix.height };
+            }
+          }
+        }
+      } catch (_) {}
     }
 
-    try {
-      const eff = this._effect;
-      let sz = boundsSize(eff?.spriteContainer);
-      if (sz) return sz;
-      sz = boundsSize(eff?.rotationContainer);
-      if (sz) return sz;
-    } catch (_) {}
-
-    const pix = this._resolvePixiVisualSize(vb);
-    if (this._isMeaningfulWorldSize(pix.width, pix.height)) {
-      return { width: pix.width, height: pix.height };
+    if (!bypassFootprintReuse && reuseMs > 0 && stamp != null) {
+      this._footprintReuseCachedStamp = stamp;
+      this._footprintReuseCachedValue = result;
+      this._footprintReuseLastComputeAt = now;
     }
 
-    return this._resolveLegacyNaturalFootprint();
+    return result;
   }
 
   _resolveSortLayer() {

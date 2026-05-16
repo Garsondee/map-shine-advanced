@@ -172,13 +172,13 @@ export class PerformanceRecorderDialog {
       <div class="msa-perf__summary">
         <div class="msa-perf__summary-header" data-action="toggle-summary">
           <span class="msa-perf__chevron" data-bind="summary-chevron">▶</span>
-          Session summary, updatables, pass timings &amp; VRAM
+          Session summary, updatables, Sequencer, pass timings &amp; VRAM
         </div>
         <div class="msa-perf__summary-body" data-bind="summary-body" hidden></div>
       </div>
 
       <div class="msa-perf__hint">
-        Tip: Run typical activity (idle, pan/zoom, weather, multiple tokens, fog reset) for 10-30s for a representative profile.
+        Tip: Include Sequencer-heavy scenes: Session summary shows mirror sync cost (normally one syncFromPixi pass per FloorCompositor frame). Set MapShine.__sequencerMirrorLegacyPostPixiSync=true only if diagnosing legacy double-sync; main table prefixes sequencer › / seqMirror ›.
       </div>
     `;
 
@@ -593,6 +593,42 @@ export class PerformanceRecorderDialog {
       </tr>
     `).join('');
 
+    const seq = snap.sequencer ?? { phases: [], mirrors: [], live: null, note: '' };
+
+    const seqPhaseRows = (seq.phases || []).map((p) => `
+      <tr>
+        <td>${escapeHtml(String(p.phase ?? ''))}</td>
+        <td class="msa-perf__num">${fmt(p.avgMs ?? 0)}</td>
+        <td class="msa-perf__num">${fmt(p.maxMs ?? 0)}</td>
+        <td class="msa-perf__num">${fmt(p.lastMs ?? 0)}</td>
+        <td class="msa-perf__num">${fmtInt(p.count ?? 0)}</td>
+        <td class="msa-perf__num">${fmt(p.totalMs ?? 0, 2)}</td>
+      </tr>
+    `).join('');
+
+    const seqMirrorRows = (seq.mirrors || []).map((p) => `
+      <tr>
+        <td>${escapeHtml(String(p.textureKind ?? ''))}</td>
+        <td>${escapeHtml(String(p.adapterKey ?? ''))}</td>
+        <td class="msa-perf__num">${fmt(p.avgMs ?? 0)}</td>
+        <td class="msa-perf__num">${fmt(p.maxMs ?? 0)}</td>
+        <td class="msa-perf__num">${fmt(p.lastMs ?? 0)}</td>
+        <td class="msa-perf__num">${fmtInt(p.count ?? 0)}</td>
+        <td class="msa-perf__num">${fmt(p.totalMs ?? 0, 2)}</td>
+      </tr>
+    `).join('');
+
+    let liveSeqHtml = '<em>No live diagnostics (external effects unloaded or sequencer adapter missing).</em>';
+    try {
+      if (seq.live && typeof seq.live === 'object') {
+        liveSeqHtml = `<pre class="msa-perf__pre-diag">${escapeHtml(JSON.stringify(seq.live, null, 2))}</pre>`;
+      }
+    } catch (_) {}
+
+    const seqExplain = seq.note
+      ? `<div class="msa-perf__seq-note">${escapeHtml(seq.note)}</div>`
+      : '';
+
     const passRows = Object.entries(snap.v2PassTimings || {})
       .sort((a, b) => (b[1]?.avg ?? 0) - (a[1]?.avg ?? 0))
       .map(([name, data]) => `
@@ -649,6 +685,27 @@ export class PerformanceRecorderDialog {
           <thead><tr><th>Updatable</th><th>Count</th><th>Avg ms</th><th>Total ms</th></tr></thead>
           <tbody>${updatableRows || '<tr><td colspan="4"><em>no data</em></td></tr>'}</tbody>
         </table>
+      </div>
+
+      <div class="msa-perf__summary-section msa-perf__summary-span2">
+        <h4>Sequencer → Map Shine mirrors (JB2A / condition videos)</h4>
+        ${seqExplain}
+        <p class="msa-perf__seq-micro">
+          Accumulated phases and per‑mirror CPU appear while Recording. By default mirrors sync once per FloorCompositor frame (tickBeforeFloorBus).
+          Rows use prefixes <strong>sequencer ›</strong> / <strong>seqMirror ›</strong>. CSV / JSON exports include <code>sequencer-phases</code> + <code>sequencer-mirrors</code> sections.
+        </p>
+        <h5 class="msa-perf__subhead">Recorded phases</h5>
+        <table class="msa-perf__sub-table">
+          <thead><tr><th>Phase</th><th>Avg ms</th><th>Max</th><th>Last</th><th>Calls</th><th>Total ms</th></tr></thead>
+          <tbody>${seqPhaseRows || '<tr><td colspan="6"><em>start recording — no samples yet</em></td></tr>'}</tbody>
+        </table>
+        <h5 class="msa-perf__subhead">Recorded per‑mirror syncFromPixi (tickBeforeFloorBus; legacy doubles on PIXI ticker)</h5>
+        <table class="msa-perf__sub-table">
+          <thead><tr><th>Kind</th><th>Mirror key</th><th>Avg ms</th><th>Max</th><th>Last</th><th>Calls</th><th>Total ms</th></tr></thead>
+          <tbody>${seqMirrorRows || '<tr><td colspan="7"><em>start recording — no mirror samples yet</em></td></tr>'}</tbody>
+        </table>
+        <h5 class="msa-perf__subhead">Live adapter inventory</h5>
+        ${liveSeqHtml}
       </div>
 
       <div class="msa-perf__summary-section">

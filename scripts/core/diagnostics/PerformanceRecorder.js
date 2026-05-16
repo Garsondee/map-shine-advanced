@@ -8,6 +8,9 @@
  *   - Draw-call and triangle deltas per effect call via `renderer.info`
  *   - Session-level frame stats (FPS, frame-time, continuous-render reasons,
  *     decimation activation %, renderer.info totals, VRAM budget)
+ *   - Sequencer integration: per-mirror sync + phase rows (default: one
+ *     `syncFromPixi` path per compositor frame unless legacy post-PIX doubling is on)
+ *     — helps profile JB2A / condition-video overlays.
  *   - Frame timeline ring buffer for spike analysis (JSON / CSV export)
  *
  * Zero-cost when idle: a single `recorder?.enabled === true` check short-
@@ -159,6 +162,10 @@ export class PerformanceRecorder {
     /** @type {Map<string, number>} Updatable call counters. */
     this._updatableCounts = new Map();
 
+    /** @type {Map<string, Stat>} Sequencer subsystem CPU phases (e.g. tickBefore.total). */
+    this._sequencerPhases = new Map();
+    /** @type {Map<string, Stat>} Per-mirror syncFromPixi CPU (combined postPixi + pre-bus). */
+    this._sequencerMirrorSync = new Map();
     /** @type {Array<FrameRecord>} */
     this._frames = [];
     /** @type {number} */
@@ -360,6 +367,8 @@ export class PerformanceRecorder {
     this._aggregates.clear();
     this._updatables.clear();
     this._updatableCounts.clear();
+    this._sequencerPhases.clear();
+    this._sequencerMirrorSync.clear();
     this._frames.length = 0;
     this._frameWriteIndex = 0;
     this._continuousReasons.clear();
@@ -608,6 +617,58 @@ export class PerformanceRecorder {
     this._updatableCounts.set(name, (this._updatableCounts.get(name) || 0) + 1);
   }
 
+  /**
+   * Accumulate CPU time for a Sequencer subsystem phase (`tickBefore.*`, `postPixi.*`).
+   * @param {string} phase
+   * @param {number} ms
+   */
+  recordSequencerPhase(phase, ms) {
+    if (!this.enabled || !phase || !Number.isFinite(ms)) return;
+    let st = this._sequencerPhases.get(phase);
+    if (!st) {
+      st = makeStat();
+      this._sequencerPhases.set(phase, st);
+    }
+    addSample(st, ms);
+  }
+
+  /**
+   * Record one `syncFromPixi()` invocation for a Sequencer mirror (there are
+   * typically two passes per mirror per rendered frame: post-PIXI + pre-bus).
+   * @param {string} adapterKey
+   * @param {string|null} textureKind
+   * @param {number} ms
+   */
+  recordSequencerMirrorSync(adapterKey, textureKind, ms) {
+    if (!this.enabled || !adapterKey || !Number.isFinite(ms)) return;
+    const kind = (textureKind != null && String(textureKind).length > 0)
+      ? String(textureKind)
+      : 'unknown';
+    const compound = `${kind}|${adapterKey}`;
+    let st = this._sequencerMirrorSync.get(compound);
+    if (!st) {
+      st = makeStat();
+      this._sequencerMirrorSync.set(compound, st);
+    }
+    addSample(st, ms);
+  }
+
+  /**
+   * Gather live Sequencer diagnostics (mirror list, EffectManager sizing) via
+   * {@link globalThis.window.MapShine.externalEffects}.
+   * @returns {object|null}
+   */
+  snapshotSequencerLive() {
+    try {
+      const fn = window?.MapShine?.externalEffects?.sequencer?.getPerformanceRecorderDiagnostics?.bind?.(
+        window.MapShine.externalEffects.sequencer,
+      );
+      return typeof fn === 'function' ? fn() : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
   // ────────────────────────────────────────────────────────────────────────
   // GPU query pool / pump
   // ────────────────────────────────────────────────────────────────────────
@@ -807,6 +868,85 @@ export class PerformanceRecorder {
       }
     }
 
+    const sequencerZeroGpuExtras = () => ({
+      gpuLast: 0,
+      gpuAvg: 0,
+      gpuMax: 0,
+      gpuTotal: 0,
+      gpuCount: 0,
+      drawCallsAvg: 0,
+      trianglesAvg: 0,
+      linesAvg: 0,
+      pointsAvg: 0,
+      gpuDisjointDropped: 0,
+      gpuMissing: 0,
+    });
+
+    /** @type {{ phase: string, lastMs: number, avgMs: number, maxMs: number, totalMs: number, count: number }[]} */
+    const sequencerPhasesDetailed = [];
+    for (const [phase, st] of this._sequencerPhases.entries()) {
+      if (st.count === 0) continue;
+      effects.push({
+        effect: `sequencer › ${phase}`,
+        phase: 'cpu',
+        cpuLast: st.last,
+        cpuAvg: statAvg(st),
+        cpuMax: st.max,
+        cpuTotal: st.total,
+        cpuCount: st.count,
+        ...sequencerZeroGpuExtras(),
+      });
+      sequencerPhasesDetailed.push({
+        phase,
+        lastMs: st.last,
+        avgMs: statAvg(st),
+        maxMs: st.max,
+        totalMs: st.total,
+        count: st.count,
+      });
+    }
+    sequencerPhasesDetailed.sort((a, b) => b.totalMs - a.totalMs);
+
+    /** @type {{ textureKind: string, adapterKey: string, lastMs: number, avgMs: number, maxMs: number, totalMs: number, count: number }[]} */
+    const sequencerMirrorsDetailed = [];
+    for (const [compound, st] of this._sequencerMirrorSync.entries()) {
+      if (st.count === 0) continue;
+      const pipeIdx = compound.indexOf('|');
+      const textureKind = pipeIdx >= 0 ? compound.slice(0, pipeIdx) : 'unknown';
+      const adapterKey = pipeIdx >= 0 ? compound.slice(pipeIdx + 1) : compound;
+      effects.push({
+        effect: `seqMirror › ${textureKind} › ${adapterKey}`,
+        phase: 'sync',
+        cpuLast: st.last,
+        cpuAvg: statAvg(st),
+        cpuMax: st.max,
+        cpuTotal: st.total,
+        cpuCount: st.count,
+        ...sequencerZeroGpuExtras(),
+      });
+      sequencerMirrorsDetailed.push({
+        textureKind,
+        adapterKey,
+        lastMs: st.last,
+        avgMs: statAvg(st),
+        maxMs: st.max,
+        totalMs: st.total,
+        count: st.count,
+      });
+    }
+    sequencerMirrorsDetailed.sort((a, b) => b.totalMs - a.totalMs);
+
+    const sequencer = {
+      note:
+        'Sequencer mirrors call syncFromPixi once immediately before FloorRenderBus '
+        + 'renders (`tickBeforeBus`), so profiling counts scale roughly with compositor FPS × mirror '
+        + 'count. Legacy post-PIX `syncFromPixi` repeats work every PIXI tick when '
+        + '`MapShine.__sequencerMirrorLegacyPostPixiSync` is set (profiles as postPixi.syncFromPixi.loop). ',
+      phases: sequencerPhasesDetailed,
+      mirrors: sequencerMirrorsDetailed,
+      live: this.snapshotSequencerLive(),
+    };
+
     // Frame-time / FPS percentiles (1-second buckets).
     const frameTimes = [];
     const fpsBuckets = new Map();
@@ -895,6 +1035,7 @@ export class PerformanceRecorder {
       },
       effects,
       updatables,
+      sequencer,
       v2PassTimings,
       vramBudget,
       rendererInfo: {
@@ -969,6 +1110,41 @@ export class PerformanceRecorder {
     lines.push(['updatable', 'count', 'avg_ms', 'total_ms'].join(','));
     for (const u of snapshot.updatables) {
       lines.push([csvEscape(u.name), u.count, u.avgMs.toFixed(4), u.totalMs.toFixed(4)].join(','));
+    }
+    lines.push('');
+
+    const seq = snapshot.sequencer ?? {
+      phases: [],
+      mirrors: [],
+      note: '',
+    };
+
+    lines.push('## section,sequencer-phases');
+    lines.push(['phase', 'avg_ms', 'max_ms', 'last_ms', 'total_ms', 'call_count'].join(','));
+    for (const row of seq.phases ?? []) {
+      lines.push([
+        csvEscape(row.phase),
+        Number(row.avgMs ?? 0).toFixed(4),
+        Number(row.maxMs ?? 0).toFixed(4),
+        Number(row.lastMs ?? 0).toFixed(4),
+        Number(row.totalMs ?? 0).toFixed(4),
+        Number(row.count ?? 0),
+      ].join(','));
+    }
+    lines.push('');
+
+    lines.push('## section,sequencer-mirrors');
+    lines.push(['texture_kind', 'adapter_key', 'avg_ms', 'max_ms', 'last_ms', 'total_ms', 'invoke_count'].join(','));
+    for (const row of seq.mirrors ?? []) {
+      lines.push([
+        csvEscape(row.textureKind),
+        csvEscape(row.adapterKey),
+        Number(row.avgMs ?? 0).toFixed(4),
+        Number(row.maxMs ?? 0).toFixed(4),
+        Number(row.lastMs ?? 0).toFixed(4),
+        Number(row.totalMs ?? 0).toFixed(4),
+        Number(row.count ?? 0),
+      ].join(','));
     }
     lines.push('');
 
@@ -1072,6 +1248,8 @@ export class PerformanceRecorder {
     this._queriesOwned.length = 0;
     this._queryPool.length = 0;
     this._aggregates.clear();
+    this._sequencerPhases.clear();
+    this._sequencerMirrorSync.clear();
     this._frames.length = 0;
   }
 }
@@ -1150,6 +1328,7 @@ function csvEscape(value) {
  * @property {object} session
  * @property {EffectSnapshotRow[]} effects
  * @property {Array<{name:string, totalMs:number, count:number, avgMs:number}>} updatables
+ * @property {object} sequencer — phases / per-mirror sync / live diagnostics
  * @property {object|null} v2PassTimings
  * @property {object|null} vramBudget
  * @property {{ start: object|null, current: object|null }} rendererInfo

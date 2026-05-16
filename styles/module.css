@@ -2421,6 +2421,47 @@
   border-bottom: 1px solid rgba(255, 255, 255, 0.04);
 }
 
+.msa-perf__summary-span2 {
+  grid-column: 1 / -1;
+}
+
+.msa-perf__seq-note {
+  margin: 4px 0 8px;
+  font-size: 11px;
+  line-height: 1.35;
+  opacity: 0.92;
+}
+
+.msa-perf__seq-micro {
+  margin: 0 0 8px;
+  font-size: 10px;
+  line-height: 1.35;
+  opacity: 0.82;
+}
+
+.msa-perf__subhead {
+  margin: 10px 0 4px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  opacity: 0.75;
+}
+
+.msa-perf__pre-diag {
+  margin: 0;
+  padding: 6px 8px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 10px;
+  line-height: 1.35;
+  max-height: min(260px, 40vh);
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: rgba(0, 0, 0, 0.32);
+  border-radius: 4px;
+}
+
 .msa-perf__hint {
   padding: 6px 12px 8px;
   font-size: 10.5px;

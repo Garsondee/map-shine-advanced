@@ -9,9 +9,10 @@
  *   - `updateSequencerEffect`     — refresh renderOrder if elevation/sortLayer changed
  *   - `endedSequencerEffect`      — dispose mirror, unhide PIXI container
  *
- * Transform sync runs once per Foundry PIXI tick via
- * `FrameCoordinator.onPostPixi` so positions track the underlying PIXI
- * containers without per-RAF reflow.
+ * Mesh transform + texture sync (`syncFromPixi`) runs once per FloorCompositor draw
+ * in {@link #tickBeforeBusRender} — not every PIXI tick. The FrameCoordinator hook
+ * only runs diagnostics (see `MapShine.__sequencerMirrorProbeIntervalMs`) unless
+ * `MapShine.__sequencerMirrorLegacyPostPixiSync` is true (duplicate sync path; avoid).
  *
  * Diagnostics: `MapShine.externalEffects.probeSequencerMirrors()` (F12),
  * `MapShine.externalEffects.probeSequencerMirrorsDeep()` for DOM pixel samples + WebGL hints,
@@ -28,6 +29,20 @@ const log = createLogger('SequencerAdapter');
 
 const ATTACH_RETRY_DELAY_MS = 100;
 const ATTACH_RETRY_MAX_ATTEMPTS = 20;
+
+function getMapShineRoot() {
+  return (globalThis.window ?? globalThis).MapShine ?? null;
+}
+
+/**
+ * Performance recorder hooks are optional; avoids repeated churn on the lookup path.
+ * @returns {import('../../core/diagnostics/PerformanceRecorder.js').PerformanceRecorder|null}
+ */
+function getPerfRecorderIfEnabled() {
+  if (typeof window === 'undefined') return null;
+  const pr = window.MapShine?.performanceRecorder ?? null;
+  return pr?.enabled ? pr : null;
+}
 
 export class SequencerAdapter {
   /**
@@ -77,6 +92,15 @@ export class SequencerAdapter {
 
     /** @type {number} */
     this._lastMirrorProbeAt = 0;
+
+    /**
+     * Parallel dense arrays for hot loops (avoid `Map` iterator allocations every PIXI tick).
+     * Indices match: `_mirrorRunKeys[i]` ↔ `_mirrorRunList[i]`.
+     */
+    /** @type {string[]} */
+    this._mirrorRunKeys = [];
+    /** @type {SequencerEffectMirror[]} */
+    this._mirrorRunList = [];
   }
 
   /** @returns {boolean} */
@@ -111,7 +135,7 @@ export class SequencerAdapter {
     reg('updateSequencerEffect', (effect) => this._onUpdate(effect));
     reg('endedSequencerEffect', (effect) => this._onEnd(effect));
 
-    // Per-frame transform sync.
+    // Hook after PIXI: periodic diagnostics only. Full mirror sync happens in tickBeforeBusRender.
     try {
       const fc = this._frameCoordinator;
       if (fc && typeof fc.onPostPixi === 'function') {
@@ -157,7 +181,7 @@ export class SequencerAdapter {
    * @param {number} value
    */
   setExternalDiffuseGain(value) {
-    const root = (globalThis.window ?? globalThis).MapShine ?? null;
+    const root = getMapShineRoot();
     if (!root) return;
     const v = Number(value);
     if (!Number.isFinite(v) || v <= 0) {
@@ -175,7 +199,7 @@ export class SequencerAdapter {
    * @param {number} b
    */
   setExternalTint(r, g, b) {
-    const root = (globalThis.window ?? globalThis).MapShine ?? null;
+    const root = getMapShineRoot();
     if (!root) return;
     const rr = Math.max(0, Number(r));
     const gg = Math.max(0, Number(g));
@@ -190,7 +214,7 @@ export class SequencerAdapter {
    * @param {number} value
    */
   setAlongCastPlacementMul(value) {
-    const root = (globalThis.window ?? globalThis).MapShine ?? null;
+    const root = getMapShineRoot();
     if (!root) return;
     const v = Number(value);
     if (!Number.isFinite(v) || v <= 0) return;
@@ -203,7 +227,7 @@ export class SequencerAdapter {
    * @param {number} value
    */
   setMirrorMeshScaleMul(value) {
-    const root = (globalThis.window ?? globalThis).MapShine ?? null;
+    const root = getMapShineRoot();
     if (!root) return;
     const v = Number(value);
     if (!Number.isFinite(v) || v <= 0) return;
@@ -216,7 +240,7 @@ export class SequencerAdapter {
    * @param {number} value
    */
   setAlongCastTargetNudgePx(value) {
-    const root = (globalThis.window ?? globalThis).MapShine ?? null;
+    const root = getMapShineRoot();
     if (!root) return;
     const v = Number(value);
     if (!Number.isFinite(v)) return;
@@ -228,7 +252,7 @@ export class SequencerAdapter {
    * @param {number} value
    */
   setMirrorZBias(value) {
-    const root = (globalThis.window ?? globalThis).MapShine ?? null;
+    const root = getMapShineRoot();
     if (!root) return;
     const v = Number(value);
     if (!Number.isFinite(v)) return;
@@ -241,7 +265,7 @@ export class SequencerAdapter {
    * @param {number} value
    */
   setRotateTowardsForwardMul(value) {
-    const root = (globalThis.window ?? globalThis).MapShine ?? null;
+    const root = getMapShineRoot();
     if (!root) return;
     const v = Number(value);
     if (!Number.isFinite(v) || v < 0) return;
@@ -253,11 +277,49 @@ export class SequencerAdapter {
    * @param {number} sign
    */
   setRotateTowardsForwardSign(sign) {
-    const root = (globalThis.window ?? globalThis).MapShine ?? null;
+    const root = getMapShineRoot();
     if (!root) return;
     const v = Number(sign);
     if (!Number.isFinite(v) || v === 0) return;
     root.__sequencerMirrorRotateTowardsForwardSign = v > 0 ? 1 : -1;
+  }
+
+  /**
+   * Clear the cached `_floorRenderBus` pointer (e.g. after native level redraw
+   * or ExternalEffectsCompositor rebuild) so `_resolveFloorRenderBus` snaps to
+   * the current compositor/bus again.
+   */
+  invalidateFloorRenderBusCache() {
+    this._floorRenderBus = null;
+  }
+
+  /** @private @param {string} key @param {SequencerEffectMirror} mirror */
+  _densePushMirror(key, mirror) {
+    this._mirrorRunKeys.push(key);
+    this._mirrorRunList.push(mirror);
+  }
+
+  /**
+   * @private
+   * @param {string} key
+   */
+  _denseRemoveMirrorKey(key) {
+    const keys = this._mirrorRunKeys;
+    const list = this._mirrorRunList;
+    const n = keys.length;
+    let ix = -1;
+    for (let i = 0; i < n; i++) {
+      if (keys[i] === key) {
+        ix = i;
+        break;
+      }
+    }
+    if (ix < 0) return;
+    const last = n - 1;
+    keys[ix] = keys[last];
+    keys.pop();
+    list[ix] = list[last];
+    list.pop();
   }
 
   /**
@@ -266,15 +328,48 @@ export class SequencerAdapter {
    * replace the rendered bus scene after this adapter was constructed.
    */
   tickBeforeBusRender() {
-    if (this._disposed || this._mirrors.size === 0) return;
+    if (this._disposed) return;
+
+    const list = this._mirrorRunList;
+    const n = list.length;
+    if (n === 0) return;
+
+    const keys = this._mirrorRunKeys;
     const bus = this._resolveFloorRenderBus();
-    for (const mirror of this._mirrors.values()) {
-      try {
-        mirror.ensureAttached?.(bus);
-        mirror.syncFromPixi?.();
-      } catch (e) {
-        log.warn('mirror pre-bus validation failed:', e);
+
+    const pr = getPerfRecorderIfEnabled();
+
+    if (pr) {
+      const tWhole = performance.now();
+      let sumAttach = 0;
+      let sumSync = 0;
+      for (let i = 0; i < n; i++) {
+        const mirror = list[i];
+        const mirrorKey = keys[i];
+
+        const ta = performance.now();
+        mirror.ensureAttached(bus);
+        sumAttach += performance.now() - ta;
+
+        const ts = performance.now();
+        mirror.syncFromPixi();
+        const d = performance.now() - ts;
+        sumSync += d;
+        try {
+          pr.recordSequencerMirrorSync(mirrorKey, mirror._textureKind, d);
+        } catch (_) {}
       }
+      try {
+        pr.recordSequencerPhase('tickBefore.ensureAttached.total', sumAttach);
+        pr.recordSequencerPhase('tickBefore.syncFromPixi.total', sumSync);
+        pr.recordSequencerPhase('tickBefore.total', performance.now() - tWhole);
+      } catch (_) {}
+      return;
+    }
+
+    for (let i = 0; i < n; i++) {
+      list[i].ensureAttached(bus);
+      list[i].syncFromPixi();
     }
   }
 
@@ -293,13 +388,17 @@ export class SequencerAdapter {
    * @returns {Array<Record<string, unknown>>}
    */
   probeMirrorsToConsole(label = 'manual', opts = undefined) {
-    if (this._mirrors.size === 0) {
+    if (this._mirrorRunList.length === 0) {
       console.warn(`[MSA Sequencer mirror probe:${label}] no active mirrors`);
       return [];
     }
     const deep = !!opts?.deep;
     const rows = [];
-    for (const [key, mirror] of this._mirrors) {
+    const rk = this._mirrorRunKeys;
+    const rl = this._mirrorRunList;
+    for (let i = 0; i < rl.length; i++) {
+      const key = rk[i];
+      const mirror = rl[i];
       try {
         const snap = mirror.getDebugSnapshot?.(deep ? { deep: true } : undefined)
           ?? { error: 'no getDebugSnapshot' };
@@ -322,6 +421,115 @@ export class SequencerAdapter {
     return this.probeMirrorsToConsole(label, { deep: true });
   }
 
+  /**
+   * Live diagnostics for Map Shine Performance Recorder exports / dialog.
+   * Safe to call any time — returns null-ish fields when disabled.
+   * @returns {object|null}
+   */
+  getPerformanceRecorderDiagnostics() {
+    if (this._disposed) return null;
+
+    /** @type {Record<string, number>} */
+    const kindCounts = { video: 0, image: 0, spritesheet: 0, pixiCanvas: 0, unknown: 0 };
+    const pixiCanvasTotals = {
+      frameCacheSize: 0,
+      cacheHits: 0,
+      fastDraws: 0,
+      slowExtracts: 0,
+      uploads: 0,
+      skippedUnchanged: 0,
+    };
+    const footprintTotals = {
+      cacheHits: 0,
+      misses: 0,
+      legacy: 0,
+    };
+
+    /** @type {Array<Record<string, unknown>>} */
+    const mirrors = [];
+    const rk = this._mirrorRunKeys;
+    const rl = this._mirrorRunList;
+    for (let i = 0; i < rl.length; i++) {
+      const key = rk[i];
+      const mirror = rl[i];
+      const kind = mirror?._textureKind ?? 'unknown';
+      if (Object.prototype.hasOwnProperty.call(kindCounts, kind)) {
+        kindCounts[kind]++;
+      } else {
+        kindCounts.unknown++;
+      }
+
+      let fileHint = null;
+      try {
+        const dfp = mirror._effect?.data?.file ?? mirror._effect?.file ?? null;
+        fileHint = typeof dfp === 'string' ? dfp.split(/[\\/]/).pop() ?? dfp : null;
+      } catch (_) {}
+
+      mirrors.push({
+        adapterKey: key,
+        textureKind: mirror._textureKind ?? null,
+        attached: !!mirror._attached,
+        meshInBusScene: !!mirror.mesh?.parent,
+        renderOrder: Number.isFinite(Number(mirror.mesh?.renderOrder)) ? Number(mirror.mesh.renderOrder) : null,
+        naturalSizePx: mirror._naturalSize ? { ...mirror._naturalSize } : null,
+        effectId: mirror._effect?.id ?? null,
+        effectName: mirror._effect?.data?.name ?? mirror._effect?.name ?? null,
+        hasAnimatedMedia: !!mirror._effect?.hasAnimatedMedia,
+        spritePlaying: !!mirror._effect?.sprite?.playing,
+        fileBasenameHint: fileHint,
+        pixiCanvasStats: mirror._textureKind === 'pixiCanvas' && mirror._pixiCanvasStats
+          ? { ...mirror._pixiCanvasStats, frameCacheSize: mirror._pixiCanvasFrameCache?.size ?? 0 }
+          : null,
+        footprintStats: mirror._footprintStats ? { ...mirror._footprintStats } : null,
+      });
+
+      try {
+        const pStats = mirror._pixiCanvasStats ?? null;
+        if (pStats && typeof pStats === 'object') {
+          pixiCanvasTotals.frameCacheSize += Number(mirror._pixiCanvasFrameCache?.size) || 0;
+          pixiCanvasTotals.cacheHits += Number(pStats.cacheHits) || 0;
+          pixiCanvasTotals.fastDraws += Number(pStats.fastDraws) || 0;
+          pixiCanvasTotals.slowExtracts += Number(pStats.slowExtracts) || 0;
+          pixiCanvasTotals.uploads += Number(pStats.uploads) || 0;
+          pixiCanvasTotals.skippedUnchanged += Number(pStats.skippedUnchanged) || 0;
+        }
+      } catch (_) {}
+
+      try {
+        const fStats = mirror._footprintStats ?? null;
+        if (fStats && typeof fStats === 'object') {
+          footprintTotals.cacheHits += Number(fStats.hits) || 0;
+          footprintTotals.misses += Number(fStats.misses) || 0;
+          footprintTotals.legacy += Number(fStats.legacy) || 0;
+        }
+      } catch (_) {}
+    }
+
+    let sequencerMgrCount = null;
+    try {
+      const mgr = globalThis.Sequencer?.EffectManager ?? null;
+      const raw = mgr?.effects ?? mgr?._effects ?? null;
+      if (Array.isArray(raw)) sequencerMgrCount = raw.length;
+      else if (raw instanceof Map) sequencerMgrCount = raw.size;
+      else if (raw && typeof raw === 'object' && typeof Object.keys === 'function') {
+        sequencerMgrCount = Object.keys(raw).length;
+      }
+    } catch (_) {}
+
+    return {
+      adapterInitialized: !!this._initialized,
+      sequencerModulePresent: this.isSequencerAvailable(),
+      effectManagerTrackedEffectsApprox: sequencerMgrCount,
+      mirrorTilesActiveInMsa: mirrors.length,
+      mirrorsByTextureKind: kindCounts,
+      pixiCanvasMirrorTotals: pixiCanvasTotals,
+      footprintCacheTotals: footprintTotals,
+      pendingMirrorAttachRetries: this._pendingAttach?.size ?? 0,
+      adapterEnabled: !!this._enabled,
+      mirrors,
+    };
+  }
+
   // ── Hook handlers ──────────────────────────────────────────────────────────
 
   _onCreate(effect) {
@@ -329,7 +537,15 @@ export class SequencerAdapter {
     const normalized = this._normalizeEffect(effect);
     const key = normalized?.id;
     if (!normalized || !key) return;
-    if (this._mirrors.has(key)) return;
+
+    const existing = this._mirrors.get(key);
+    if (existing) {
+      if (!existing._disposed) return;
+      try { existing.dispose(); } catch (_) {}
+      this._mirrors.delete(key);
+      this._denseRemoveMirrorKey(key);
+    }
+
     if (this._pendingAttach.has(key)) return;
 
     let mirror = null;
@@ -352,6 +568,7 @@ export class SequencerAdapter {
     }
 
     this._mirrors.set(key, mirror);
+    this._densePushMirror(key, mirror);
     this._pendingAttach.delete(key);
     try { this._renderLoop?.requestContinuousRender?.(180); } catch (_) {}
   }
@@ -383,6 +600,7 @@ export class SequencerAdapter {
     this._pendingAttach.delete(key);
     if (!mirror) return;
     this._mirrors.delete(key);
+    this._denseRemoveMirrorKey(key);
     try { mirror.dispose(); } catch (e) {
       log.warn('mirror.dispose failed:', e);
     }
@@ -390,40 +608,71 @@ export class SequencerAdapter {
 
   _syncAll() {
     if (this._disposed) return;
-    if (this._mirrors.size === 0) return;
-    const probeMs = Number(globalThis.window?.MapShine?.__sequencerMirrorProbeIntervalMs);
+
+    const list = this._mirrorRunList;
+    const keys = this._mirrorRunKeys;
+    const n = list.length;
+    if (n === 0) return;
+
+    const msRoot = getMapShineRoot();
+    const legacyPostPixiSync = !!(msRoot?.__sequencerMirrorLegacyPostPixiSync === true);
+
+    if (legacyPostPixiSync) {
+      const pr = getPerfRecorderIfEnabled();
+      const tLoop = pr ? performance.now() : 0;
+      if (pr) {
+        for (let i = 0; i < n; i++) {
+          const mirror = list[i];
+          const ts = performance.now();
+          mirror.syncFromPixi();
+          try {
+            pr.recordSequencerMirrorSync(keys[i], mirror._textureKind, performance.now() - ts);
+          } catch (_) {}
+        }
+        try {
+          pr.recordSequencerPhase('postPixi.syncFromPixi.loop', performance.now() - tLoop);
+        } catch (_) {}
+      } else {
+        for (let i = 0; i < n; i++) {
+          list[i].syncFromPixi();
+        }
+      }
+    }
+
+    if (!msRoot) return;
+
+    const probeMs = Number(msRoot.__sequencerMirrorProbeIntervalMs);
+    if (!Number.isFinite(probeMs) || probeMs < 500) return;
+
     const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
-    let doProbe = false;
-    if (Number.isFinite(probeMs) && probeMs >= 500) {
-      if (now - (this._lastMirrorProbeAt ?? 0) >= probeMs) {
-        this._lastMirrorProbeAt = now;
-        doProbe = true;
-      }
-    }
-    for (const mirror of this._mirrors.values()) {
-      try { mirror.syncFromPixi(); } catch (e) {
-        log.warn('mirror.syncFromPixi failed:', e);
-      }
-    }
-    if (doProbe) {
-      try {
-        const deep = !!globalThis.window?.MapShine?.__sequencerMirrorProbeUseDeep;
-        this.probeMirrorsToConsole('[MapShine.__sequencerMirrorProbeIntervalMs]', deep ? { deep: true } : undefined);
-      } catch (_) {}
-    }
+    if (now - (this._lastMirrorProbeAt ?? 0) < probeMs) return;
+
+    this._lastMirrorProbeAt = now;
+    const deep = !!msRoot.__sequencerMirrorProbeUseDeep;
+    try {
+      this.probeMirrorsToConsole('[MapShine.__sequencerMirrorProbeIntervalMs]', deep ? { deep: true } : undefined);
+    } catch (_) {}
   }
 
   _resolveFloorRenderBus() {
-    const liveBus = globalThis.window?.MapShine?.effectComposer?._floorCompositorV2?._renderBus
-      ?? globalThis.window?.MapShine?.floorCompositorV2?._renderBus
-      ?? globalThis.window?.MapShine?.floorRenderBus
-      ?? null;
-    if (liveBus) {
-      this._floorRenderBus = liveBus;
-      return liveBus;
+    const ms = getMapShineRoot();
+    let preferred = null;
+    if (ms) {
+      preferred = ms.effectComposer?._floorCompositorV2?._renderBus
+        ?? ms.floorCompositorV2?._renderBus
+        ?? ms.floorRenderBus
+        ?? null;
     }
-    const bus = this._floorRenderBus ?? null;
-    return bus;
+
+    if (this._floorRenderBus && preferred === this._floorRenderBus) {
+      return this._floorRenderBus;
+    }
+    if (!ms) return this._floorRenderBus ?? null;
+    if (preferred) {
+      this._floorRenderBus = preferred;
+      return preferred;
+    }
+    return this._floorRenderBus ?? null;
   }
 
   _normalizeEffect(effectish) {
@@ -539,6 +788,7 @@ export class SequencerAdapter {
         });
         if (mirror.attach()) {
           this._mirrors.set(key, mirror);
+          this._densePushMirror(key, mirror);
           try { this._renderLoop?.requestContinuousRender?.(500); } catch (_) {}
           return;
         }
@@ -573,12 +823,16 @@ export class SequencerAdapter {
       try { mirror.dispose(); } catch (_) {}
     }
     this._mirrors.clear();
+    this._mirrorRunKeys.length = 0;
+    this._mirrorRunList.length = 0;
     for (const pending of this._pendingAttach.values()) {
       if (pending?.timerId != null) {
         try { clearTimeout(pending.timerId); } catch (_) {}
       }
     }
     this._pendingAttach.clear();
+
+    try { this.invalidateFloorRenderBusCache(); } catch (_) {}
 
     log.info('SequencerAdapter disposed');
   }

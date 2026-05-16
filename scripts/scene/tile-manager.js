@@ -3152,8 +3152,23 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
    */
   getOverheadTileSprites() {
     const sprites = [];
-    for (const { sprite } of this.tileSprites.values()) {
-      if (sprite.userData.isOverhead) sprites.push(sprite);
+    const NONE = CONST.TILE_OCCLUSION_MODES.NONE;
+    for (const { sprite, tileDoc } of this.tileSprites.values()) {
+      if (!sprite) continue;
+      const isOverhead = !!sprite.userData?.isOverhead;
+      if (isOverhead) {
+        sprites.push(sprite);
+        continue;
+      }
+      // Match InteractionManager hover eligibility: occlusion roofs without
+      // sprite.userData.isOverhead must still be hover-pickable.
+      const isWeatherRoof = !!sprite.userData?.isWeatherRoof;
+      const forceOverheadNoHover = !!sprite.userData?._msMotionForcedOverhead;
+      const occlusionFlags = getTileOcclusionModeFlags(tileDoc);
+      const hoverEligible = !forceOverheadNoHover && (
+        isWeatherRoof || (occlusionFlags !== NONE)
+      );
+      if (hoverEligible) sprites.push(sprite);
     }
     return sprites;
   }
@@ -3732,9 +3747,10 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
         }
       }
 
-      // Apply hover-hide (fade to zero alpha when hovered). Modes that carve
-      // per-pixel holes keep base opacity only while their mask channel is active.
-      if (!skipRoofFade && hoverHidden && !keepBaseOpacityForShaderHoles) {
+      // Apply hover-hide (fade to zero alpha when hovered). Explicit mouse-hover
+      // reveal wins over radial/vision/surface hole preservation — otherwise any
+      // token under a RADIAL roof blocks fade entirely (keepBaseOpacityForShaderHoles).
+      if (!skipRoofFade && hoverHidden) {
         targetAlpha = 0;
         anyHoverHidden = true;
       }

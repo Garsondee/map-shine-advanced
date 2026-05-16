@@ -268,6 +268,8 @@ export class WaterSplashesEffectV2 {
      * @type {{ vf:number, wm:string|null, wmv:number, rx:number, ry:number, sbx:number, sby:number, sbw:number, sbh:number, gen:number }|null}
      */
     this._lastOcclusionGlobals = null;
+    /** @type {string|null} Last compact per-floor occlusion binding diagnostic key. */
+    this._lastOcclusionSelectionLogKey = null;
 
     /** Bumped when `onFloorChange` actually changes which floors are active. @type {number} */
     this._activeFloorsGeneration = 0;
@@ -848,6 +850,43 @@ export class WaterSplashesEffectV2 {
   }
 
   /**
+   * Resolve the raw water mask texture for a specific splash floor.
+   *
+   * `WaterEffectV2.getWaterMaskTexture()` follows the currently resolved water
+   * floor. Stacked splash batches can include lower-floor systems while viewing
+   * from above, so they need their authored floor's raw mask for land clipping.
+   *
+   * @param {any} waterEffect
+   * @param {number} systemFloorIndex
+   * @param {import('three').Texture|null} fallbackTex
+   * @returns {{ texture: import('three').Texture|null, source: string }}
+   * @private
+   */
+  _resolveWaterMaskTexForSplashFloor(waterEffect, systemFloorIndex, fallbackTex) {
+    const we = waterEffect ?? null;
+    const fallback = fallbackTex ?? null;
+    const sfi = Number(systemFloorIndex);
+    if (!we || !Number.isFinite(sfi)) {
+      return { texture: fallback, source: fallback ? 'active-water-mask' : 'none' };
+    }
+
+    try {
+      if (typeof we.getWaterMaskTextureForFloor === 'function') {
+        const tex = we.getWaterMaskTextureForFloor(sfi);
+        if (tex) return { texture: tex, source: 'floor-water-mask-api' };
+      }
+    } catch (_) {}
+
+    try {
+      const floorData = we._floorWater?.get?.(sfi);
+      const tex = floorData?.rawMask ?? floorData?.waterData?.rawMaskTexture ?? null;
+      if (tex) return { texture: tex, source: 'floor-water-mask' };
+    } catch (_) {}
+
+    return { texture: fallback, source: fallback ? 'active-water-mask-fallback' : 'none' };
+  }
+
+  /**
    * Append all particle systems from a floor state into `out` without spread / extra arrays.
    * @private
    */
@@ -917,9 +956,17 @@ export class WaterSplashesEffectV2 {
     const view = Number(viewFloor);
     const sfi = Number(systemFloorIndex);
     if (Number.isFinite(sfi) && Number.isFinite(view) && sfi < view) {
-      return this._resolveUpperFloorOccluderTexture(floorCompositor, sfi) ?? floorPresenceTex ?? null;
+      const upperTex = this._resolveUpperFloorOccluderTexture(floorCompositor, sfi);
+      if (upperTex) return { texture: upperTex, source: 'upper-scene-occluder' };
+      return {
+        texture: floorPresenceTex ?? null,
+        source: floorPresenceTex ? 'floor-presence-fallback' : 'none',
+      };
     }
-    return floorPresenceTex ?? null;
+    return {
+      texture: floorPresenceTex ?? null,
+      source: floorPresenceTex ? 'floor-presence' : 'none',
+    };
   }
 
   // ── Lifecycle ──────────────────────────────────────────────────────────────
@@ -1175,7 +1222,7 @@ export class WaterSplashesEffectV2 {
           overlayKey,
           state.batchRenderer,
           Number(floorIndex),
-          { overlayRole: 'floorEffect' }
+          { overlayRole: 'stackedFloorEffect' }
         );
       }
     }
@@ -1399,8 +1446,9 @@ export class WaterSplashesEffectV2 {
       const viewFloorRaw = window.MapShine?.floorStack?.getActiveFloor?.()?.index ?? 0;
       const vfKey = Number.isFinite(Number(viewFloorRaw)) ? Number(viewFloorRaw) : 0;
 
-      const waterMaskTex = (fc?._waterEffect && typeof fc._waterEffect.getWaterMaskTexture === 'function')
-        ? fc._waterEffect.getWaterMaskTexture()
+      const waterEffect = fc?._waterEffect ?? null;
+      const waterMaskTex = (waterEffect && typeof waterEffect.getWaterMaskTexture === 'function')
+        ? waterEffect.getWaterMaskTexture()
         : null;
 
       // Legacy foam determines whether the mask needs V flipping (mask metadata / texture.flipY).
@@ -1475,14 +1523,14 @@ export class WaterSplashesEffectV2 {
       const wantsWaterClip = 1.0;
       const systems = this._activeSystemsFlat;
 
-      const applyOcclusionUniforms = (u, fpTex) => {
+      const applyOcclusionUniforms = (u, fpTex, systemWaterMaskTex) => {
         if (!u) return;
         const wantsFloorPresenceClip = fpTex ? 1.0 : 0.0;
         u.uFloorPresenceMap.value = fpTex;
         u.uHasFloorPresenceMap.value = (fpTex && wantsFloorPresenceClip > 0.5) ? 1.0 : 0.0;
         u.uResolution.value.set(resX, resY);
-        u.uWaterMask.value = waterMaskTex;
-        u.uHasWaterMask.value = waterMaskTex ? 1.0 : 0.0;
+        u.uWaterMask.value = systemWaterMaskTex;
+        u.uHasWaterMask.value = systemWaterMaskTex ? 1.0 : 0.0;
         if (u.uUseWaterMaskClip) u.uUseWaterMaskClip.value = wantsWaterClip;
         if (u.uWaterFlipV) u.uWaterFlipV.value = waterFlipV ? 1.0 : 0.0;
         if (sceneBounds && u.uSceneBounds?.value?.set) {
@@ -1490,13 +1538,34 @@ export class WaterSplashesEffectV2 {
         }
       };
 
+      const selectionDiag = globalsChanged ? new Map() : null;
       for (const sys of systems) {
         if (!sys) continue;
         const systemFloorIndex = Number(sys.userData?._msFloorIndex);
-        const fpTex = this._resolveFloorPresenceTexForSplashFloor(fc, vfKey, systemFloorIndex, floorPresenceTex);
+        const fpMeta = this._resolveFloorPresenceTexForSplashFloor(fc, vfKey, systemFloorIndex, floorPresenceTex);
+        const fpTex = fpMeta.texture ?? null;
+        const wmMeta = this._resolveWaterMaskTexForSplashFloor(waterEffect, systemFloorIndex, waterMaskTex);
+        const systemWaterMaskTex = wmMeta.texture ?? null;
         const fpId = fpTex?.uuid ?? null;
-        if (!globalsChanged && sys.userData?._msLastSplashFpUuid === fpId) continue;
-        if (sys.userData) sys.userData._msLastSplashFpUuid = fpId;
+        const wmId = systemWaterMaskTex?.uuid ?? null;
+        if (
+          !globalsChanged
+          && sys.userData?._msLastSplashFpUuid === fpId
+          && sys.userData?._msLastSplashWmUuid === wmId
+        ) continue;
+        if (sys.userData) {
+          sys.userData._msLastSplashFpUuid = fpId;
+          sys.userData._msLastSplashWmUuid = wmId;
+        }
+
+        if (selectionDiag && Number.isFinite(systemFloorIndex) && !selectionDiag.has(systemFloorIndex)) {
+          selectionDiag.set(systemFloorIndex, {
+            fp: fpMeta.source,
+            fpId,
+            wm: wmMeta.source,
+            wmId,
+          });
+        }
 
         const st = Number.isFinite(systemFloorIndex) ? this._floorStates.get(systemFloorIndex) : null;
         const br = st?.batchRenderer ?? null;
@@ -1507,7 +1576,7 @@ export class WaterSplashesEffectV2 {
           let u = sys.material.userData?._msFloorPresenceUniforms;
           if (!u) this._patchFloorPresenceMaterial(sys.material);
           u = sys.material.userData?._msFloorPresenceUniforms;
-          applyOcclusionUniforms(u, fpTex);
+          applyOcclusionUniforms(u, fpTex, systemWaterMaskTex);
         }
 
         const idx = (map && typeof map.get === 'function') ? map.get(sys) : undefined;
@@ -1517,8 +1586,27 @@ export class WaterSplashesEffectV2 {
           let u = batchMat.userData?._msFloorPresenceUniforms;
           if (!u) this._patchFloorPresenceMaterial(batchMat);
           u = batchMat.userData?._msFloorPresenceUniforms;
-          applyOcclusionUniforms(u, fpTex);
+          applyOcclusionUniforms(u, fpTex, systemWaterMaskTex);
         }
+      }
+
+      if (selectionDiag?.size) {
+        try {
+          const summary = [...selectionDiag.entries()]
+            .sort((a, b) => Number(a[0]) - Number(b[0]))
+            .map(([floor, m]) => ({
+              floor,
+              floorPresence: m.fp,
+              floorPresenceTex: m.fpId,
+              waterMask: m.wm,
+              waterMaskTex: m.wmId,
+            }));
+          const diagKey = JSON.stringify({ viewFloor: vfKey, summary });
+          if (diagKey !== this._lastOcclusionSelectionLogKey) {
+            this._lastOcclusionSelectionLogKey = diagKey;
+            log.info('[WaterSplashesEffectV2] occlusion bindings', { viewFloor: vfKey, bindings: summary });
+          }
+        } catch (_) {}
       }
     } catch (_) {}
 

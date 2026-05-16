@@ -252,6 +252,26 @@ export class OverheadShadowsEffectV2 {
     this._upperFloorCompositeLastSig = '';
     this._upperFloorCompositeLastTexture = null;
 
+    /**
+     * Roof / blocker / rain-occlusion capture cache. When camera, buffer size,
+     * guard scale, and live caster fade state are unchanged, the ~8 scene
+     * re-renders per frame are skipped and prior RT contents are reused.
+     * @type {{ valid: boolean, sig: string, capturedAtMs: number }}
+     */
+    this._roofMaskCaptureCache = { valid: false, sig: '', capturedAtMs: 0 };
+
+    /**
+     * Optional tile-projection capture cache (same invalidation as roof masks).
+     * @type {{ valid: boolean, sig: string, hasProjection: boolean, hasProjectionSort: boolean, hasReceiverSort: boolean }}
+     */
+    this._tileProjectionCaptureCache = {
+      valid: false,
+      sig: '',
+      hasProjection: false,
+      hasProjectionSort: false,
+      hasReceiverSort: false,
+    };
+
     /** @type {import('../../core/diagnostics/PerformanceRecorder.js').PerformanceRecorder|null} */
     this._activePerfRecorder = null;
   }
@@ -2390,6 +2410,8 @@ export class OverheadShadowsEffectV2 {
     const THREE = window.THREE;
     if (!width || !height || !THREE) return;
 
+    this._invalidateRoofMaskCaptureCache();
+
     if (!this.roofTarget) {
       this.roofTarget = new THREE.WebGLRenderTarget(width, height, {
         minFilter: THREE.LinearFilter,
@@ -2953,6 +2975,7 @@ export class OverheadShadowsEffectV2 {
     this._lastSkyReachMaskRef = null;
     this._lastUpperFloorAlphaSig = '';
     this._lastObUpperSig = '';
+    this._invalidateRoofMaskCaptureCache();
     // PERFORMANCE: Drop perf caches so the next render() rebuilds them.
     // - frame caster list (forces a fresh scene traverse)
     // - upper-floor composite sig (forces a fresh accumulate pass)
@@ -2965,6 +2988,148 @@ export class OverheadShadowsEffectV2 {
     try {
       log.debug(`OverheadShadowsEffectV2: invalidated dynamic caches (${String(reason)})`);
     } catch (_) {}
+  }
+
+  /**
+   * @returns {boolean}
+   * @private
+   */
+  _isRoofHoverRevealActive() {
+    try {
+      return !!weatherController?.roofMaskActive;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /**
+   * Drop cached roof / tile-projection captures.
+   * @private
+   */
+  _invalidateRoofMaskCaptureCache() {
+    this._roofMaskCaptureCache.valid = false;
+    this._roofMaskCaptureCache.sig = '';
+    this._roofMaskCaptureCache.capturedAtMs = 0;
+    this._tileProjectionCaptureCache.valid = false;
+    this._tileProjectionCaptureCache.sig = '';
+    this._tileProjectionCaptureCache.hasProjection = false;
+    this._tileProjectionCaptureCache.hasProjectionSort = false;
+    this._tileProjectionCaptureCache.hasReceiverSort = false;
+  }
+
+  /**
+   * Fingerprint live caster fade + structure. Any partial fade forces a refresh.
+   *
+   * @param {{ list: object[], hasFluid: boolean, hasTrees: boolean }} frameCasters
+   * @returns {string}
+   * @private
+   */
+  _computeCasterLiveSig(frameCasters) {
+    const list = frameCasters.list;
+    const n = list.length;
+    let flags = (frameCasters.hasFluid ? 1 : 0) | (frameCasters.hasTrees ? 2 : 0);
+    let fadeToken = '';
+    for (let i = 0; i < n; i++) {
+      const entry = list[i];
+      const mat = entry.mat;
+      if (mat && typeof mat.opacity === 'number' && mat.opacity < 0.999) {
+        fadeToken = `mo:${entry.object?.uuid ?? i}`;
+        break;
+      }
+      const uniforms = entry.uniforms;
+      const hf = uniforms?.uHoverFade?.value;
+      if (typeof hf === 'number' && hf < 0.999) {
+        fadeToken = `hf:${entry.object?.uuid ?? i}`;
+        break;
+      }
+      const uOpacity = uniforms?.uOpacity?.value;
+      if (typeof uOpacity === 'number' && uOpacity < 0.999) {
+        fadeToken = `uo:${entry.object?.uuid ?? i}`;
+        break;
+      }
+      const uTileOpacity = uniforms?.uTileOpacity?.value;
+      if (typeof uTileOpacity === 'number' && uTileOpacity < 0.999) {
+        fadeToken = `to:${entry.object?.uuid ?? i}`;
+        break;
+      }
+    }
+    let xor = (n ^ flags) | 0;
+    if (n > 0) {
+      const s0 = list[0].object?.uuid ?? '';
+      const s1 = list[n - 1].object?.uuid ?? '';
+      for (let i = 0; i < s0.length; i++) xor = ((xor << 5) - xor + s0.charCodeAt(i)) | 0;
+      for (let i = 0; i < s1.length; i++) xor = ((xor << 5) - xor + s1.charCodeAt(i)) | 0;
+    }
+    return `${n}|${flags}|${xor}|${fadeToken}`;
+  }
+
+  /**
+   * @param {THREE.Vector2} size Drawing buffer size
+   * @param {number} roofCaptureScale Guard-band scale from projection softness
+   * @param {{ list: object[], hasFluid: boolean, hasTrees: boolean }} frameCasters
+   * @returns {string}
+   * @private
+   */
+  _computeRoofMaskCaptureSig(size, roofCaptureScale, frameCasters) {
+    const cam = this.mainCamera;
+    let camSig = 'nocam';
+    if (cam) {
+      cam.updateMatrixWorld?.(true);
+      const p = cam.position;
+      const e = cam.projectionMatrix?.elements;
+      const pe = e
+        ? `${e[0].toFixed(5)}_${e[5].toFixed(5)}_${e[12].toFixed(3)}_${e[13].toFixed(3)}`
+        : 'nope';
+      camSig = [
+        p.x.toFixed(2),
+        p.y.toFixed(2),
+        p.z.toFixed(2),
+        Number(cam.zoom).toFixed(4),
+        this._getEffectiveZoom().toFixed(4),
+        pe,
+        cam.layers.mask,
+      ].join('|');
+    }
+    const w = Math.floor(size.x);
+    const h = Math.floor(size.y);
+    const enabled = this.params.enabled ? 1 : 0;
+    return [
+      'v1',
+      `${w}x${h}`,
+      roofCaptureScale.toFixed(5),
+      enabled,
+      camSig,
+      this._computeCasterLiveSig(frameCasters),
+    ].join('|');
+  }
+
+  /**
+   * @param {string} sig
+   * @param {boolean} hoverRevealActive
+   * @returns {boolean}
+   * @private
+   */
+  _shouldReuseRoofMaskCaptures(sig, hoverRevealActive) {
+    if (hoverRevealActive) return false;
+    try {
+      if (window.MapShine?.__overheadShadowsForceRoofCaptureEveryFrame === true) return false;
+    } catch (_) {}
+    const cache = this._roofMaskCaptureCache;
+    if (!cache.valid || cache.sig !== sig) return false;
+    const maxAgeMs = Number(window.MapShine?.__overheadShadowsRoofCaptureMaxAgeMs);
+    const ageLimit = Number.isFinite(maxAgeMs) ? maxAgeMs : 1500;
+    if (ageLimit > 0 && (performance.now() - cache.capturedAtMs) > ageLimit) return false;
+    return true;
+  }
+
+  /**
+   * @param {string} sig
+   * @private
+   */
+  _markRoofMaskCapturesFresh(sig) {
+    this._roofMaskCaptureCache.valid = true;
+    this._roofMaskCaptureCache.sig = sig;
+    this._roofMaskCaptureCache.capturedAtMs = performance.now();
   }
 
   /**
@@ -3086,6 +3251,10 @@ export class OverheadShadowsEffectV2 {
     // projection has real off-screen source coverage at viewport edges.
     const roofCaptureScale = Math.max(guardScaleX, guardScaleY);
 
+    const hoverRevealActive = this._isRoofHoverRevealActive();
+    const roofMaskCaptureSig = this._computeRoofMaskCaptureSig(size, roofCaptureScale, this._frameCasters);
+    const reuseRoofMaskCaptures = this._shouldReuseRoofMaskCaptures(roofMaskCaptureSig, hoverRevealActive);
+
     const INCLUDE_TREE_CANOPY_IN_WEATHER_ROOF_CAPTURES = true;
     const treeProbe = {
       includeTreeCapture: INCLUDE_TREE_CANOPY_IN_WEATHER_ROOF_CAPTURES,
@@ -3104,12 +3273,27 @@ export class OverheadShadowsEffectV2 {
     };
     const treeCaptureOverrides = [];
     const treeMaskCaptureUniformOverrides = [];
+    const overrides = [];
+    const opacityUniformOverrides = [];
+    const tileOpacityUniformOverrides = [];
+    const fluidVisibilityOverrides = [];
+    const fluidUniformOverrides = [];
+    const nonFluidVisibilityOverrides = [];
+    const roofCasterTreeVisibilityOverrides = [];
+    const roofSpriteVisibilityOverrides = [];
+    const roofUpperCasterVisibilityOverrides = [];
+    const tileProjectionVisibilityOverrides = [];
+    const tileProjectionOpacityOverrides = [];
+    const tileReceiverVisibilityOverrides = [];
+    const tileReceiverOpacityOverrides = [];
     const pushTreeUniformOverride = (uniforms, key, value) => {
       const u = uniforms?.[key];
       if (!u || typeof u.value !== 'number') return;
       treeMaskCaptureUniformOverrides.push({ uniform: u, value: u.value });
       u.value = value;
     };
+
+    if (!reuseRoofMaskCaptures) {
     perfToken = this._beginPerfSpan('treeWeatherPrep');
     if (INCLUDE_TREE_CANOPY_IN_WEATHER_ROOF_CAPTURES) {
       // PERFORMANCE: Iterate cached caster list instead of full scene traverse.
@@ -3323,6 +3507,7 @@ export class OverheadShadowsEffectV2 {
       } else {
         this._emitTreeRainMaskProbe({ ...treeProbe, path: 'overhead-disabled-no-roofBlock', warn: 'roofBlockTarget missing' });
       }
+      this._markRoofMaskCapturesFresh(roofMaskCaptureSig);
       for (const entry of treeCaptureOverrides) {
         if (!entry?.object) continue;
         if (entry.object.layers) entry.object.layers.mask = entry.layersMask;
@@ -3348,19 +3533,6 @@ export class OverheadShadowsEffectV2 {
       this.material.uniforms.uTileProjectionUvScale.value = 1.0;
     }
 
-    const overrides = [];
-    const opacityUniformOverrides = [];
-    const tileOpacityUniformOverrides = [];
-    const fluidVisibilityOverrides = [];
-    const fluidUniformOverrides = [];
-    const nonFluidVisibilityOverrides = [];
-    const roofCasterTreeVisibilityOverrides = [];
-    const roofSpriteVisibilityOverrides = [];
-    const roofUpperCasterVisibilityOverrides = [];
-    const tileProjectionVisibilityOverrides = [];
-    const tileProjectionOpacityOverrides = [];
-    const tileReceiverVisibilityOverrides = [];
-    const tileReceiverOpacityOverrides = [];
     // PERFORMANCE: Iterate cached caster list. Single pass collects fluid visibility
     // / fluid uniform overrides AND opacity overrides for non-fluid casters.
     perfToken = this._beginPerfSpan('casterOverridePrep');
@@ -3653,6 +3825,27 @@ export class OverheadShadowsEffectV2 {
     this._emitTreeRainMaskProbe({ ...treeProbe, path: 'overhead-enabled' });
 
     this._renderCeilingTransmittancePass(renderer);
+    this._markRoofMaskCapturesFresh(roofMaskCaptureSig);
+
+    } else {
+      const cacheHitToken = this._beginPerfSpan('roofMaskCaptureCacheHit');
+      this._endPerfSpan(cacheHitToken);
+      this._ceilingTransmittanceWritten = true;
+      if (!this.params.enabled) {
+        for (const entry of treeCaptureOverrides) {
+          if (!entry?.object) continue;
+          if (entry.object.layers) entry.object.layers.mask = entry.layersMask;
+          if (typeof entry.visible === 'boolean') entry.object.visible = entry.visible;
+        }
+        for (const entry of treeMaskCaptureUniformOverrides) {
+          if (entry?.uniform) entry.uniform.value = entry.value;
+        }
+        this.mainCamera.layers.mask = previousLayersMask;
+        this._clearShadowTargetToWhite(renderer);
+        renderer.setRenderTarget(previousTarget);
+        return;
+      }
+    }
 
     // IMPORTANT: restore camera layers before rendering the world-pinned
     // shadow mesh so the base plane is visible to the camera again.
@@ -3665,7 +3858,23 @@ export class OverheadShadowsEffectV2 {
     let hasTileProjectionSort = false;
     let hasTileReceiverSort = false;
     const tileProjectionIds = this._getTileProjectionIds();
-    if (tileProjectionIds.length > 0
+    const tileProjectionSig = tileProjectionIds.length > 0
+      ? `${roofMaskCaptureSig}|tiles:${tileProjectionIds.map((id) => String(id)).sort().join(',')}`
+      : '';
+    const tileProjCache = this._tileProjectionCaptureCache;
+    const reuseTileProjection = reuseRoofMaskCaptures
+      && tileProjectionSig.length > 0
+      && tileProjCache.valid
+      && tileProjCache.sig === tileProjectionSig;
+    if (reuseTileProjection) {
+      hasTileProjection = tileProjCache.hasProjection;
+      hasTileProjectionSort = tileProjCache.hasProjectionSort;
+      hasTileReceiverSort = tileProjCache.hasReceiverSort;
+      const tileCacheHitToken = this._beginPerfSpan('tileProjectionCacheHit');
+      this._endPerfSpan(tileCacheHitToken);
+    }
+    if (!reuseTileProjection
+      && tileProjectionIds.length > 0
       && this.tileProjectionTarget
       && this.tileProjectionSortTarget
       && this.tileReceiverAlphaTarget
@@ -3820,6 +4029,11 @@ export class OverheadShadowsEffectV2 {
 
       hasTileProjection = true;
       this._endPerfSpan(perfToken);
+      tileProjCache.valid = true;
+      tileProjCache.sig = tileProjectionSig;
+      tileProjCache.hasProjection = hasTileProjection;
+      tileProjCache.hasProjectionSort = hasTileProjectionSort;
+      tileProjCache.hasReceiverSort = hasTileReceiverSort;
     }
 
     this.mainCamera.layers.mask = previousLayersMask;

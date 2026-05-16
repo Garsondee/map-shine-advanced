@@ -617,21 +617,45 @@ export class InteractionManager {
     }, 'overheadHoverDebug.createLabel', Severity.COSMETIC);
   }
 
-  _updateOverheadHoverDebug(event, hit, opaqueHit) {
+  _updateOverheadHoverDebug(event, hit, opaqueHit, pickedTileId = null) {
     if (!this._debugOverheadHover?.enabled) return;
     this._ensureOverheadHoverDebugObjects();
     const dbg = this._debugOverheadHover;
     if (!dbg.group || !dbg.marker || !dbg.ray) return;
 
-    if (!hit) {
-      dbg.group.visible = false;
-      safeCall(() => { if (dbg.label) dbg.label.style.display = 'none'; }, 'overheadDebug.hideLabel', Severity.COSMETIC);
-      return;
+    const THREE = window.THREE;
+    let p = hit?.point || null;
+    if (!p && pickedTileId && THREE) {
+      const data = this.tileManager?.tileSprites?.get?.(pickedTileId);
+      const sprite = data?.sprite;
+      if (sprite) {
+        p = sprite.getWorldPosition(this._overheadDebugPoint || (this._overheadDebugPoint = new THREE.Vector3()));
+      }
+    }
+    if (!p && event && THREE) {
+      const world = this.screenToWorld(event.clientX, event.clientY);
+      if (world) {
+        p = this._overheadDebugPoint || (this._overheadDebugPoint = new THREE.Vector3());
+        p.set(world.x, world.y, this.sceneComposer?.groundZ ?? 0);
+      }
     }
 
-    const THREE = window.THREE;
-    const p = hit.point;
-    if (!p || !THREE) return;
+    if (!p || !THREE) {
+      dbg.group.visible = false;
+      safeCall(() => {
+        if (dbg.label && event) {
+          dbg.label.textContent = pickedTileId
+            ? `roofPick(world): ${pickedTileId}  (no hit point)`
+            : 'roofPick: miss';
+          dbg.label.style.left = `${event.clientX + 14}px`;
+          dbg.label.style.top = `${event.clientY + 14}px`;
+          dbg.label.style.display = 'block';
+        } else if (dbg.label) {
+          dbg.label.style.display = 'none';
+        }
+      }, 'overheadDebug.labelMiss', Severity.COSMETIC);
+      return;
+    }
 
     dbg.group.visible = true;
     dbg.marker.position.copy(p);
@@ -723,11 +747,12 @@ export class InteractionManager {
     // Label next to cursor
     safeCall(() => {
       if (dbg.label && event) {
-        const tileId = hit?.object?.userData?.foundryTileId;
+        const tileId = pickedTileId || hit?.object?.userData?.foundryTileId;
         const uv = hit?.uv;
         const u = (uv && Number.isFinite(uv.x)) ? uv.x.toFixed(3) : 'n/a';
         const v = (uv && Number.isFinite(uv.y)) ? uv.y.toFixed(3) : 'n/a';
-        dbg.label.textContent = `roofHit: ${tileId || 'n/a'}  uv(${u}, ${v})  opaque=${opaqueHit ? '1' : '0'}`;
+        const path = hit ? 'ray' : (pickedTileId ? 'world' : 'plane');
+        dbg.label.textContent = `roofHit(${path}): ${tileId || 'n/a'}  uv(${u}, ${v})  opaque=${opaqueHit ? '1' : '0'}`;
         dbg.label.style.left = `${event.clientX + 14}px`;
         dbg.label.style.top = `${event.clientY + 14}px`;
         dbg.label.style.display = 'block';
@@ -3327,6 +3352,12 @@ export class InteractionManager {
           return;
         }
 
+        // Door icons live in Three.js; they must stay clickable during normal
+        // Tokens-layer gameplay even though Foundry owns token selection below.
+        if (this._tryHandleDoorPointerDown(event)) {
+          return;
+        }
+
         // Foundry must own token selection/targeting/marquee workflows.
         if (this._isTokensContextActive() && !this.mapPointDraw?.active) {
           return;
@@ -4684,11 +4715,52 @@ export class InteractionManager {
   }
 
   /**
+   * Whether pointermove should defer to Foundry for token workflows but still
+   * allow Three.js roof/tree hover-hide.
+   * @returns {boolean}
+   */
+  _isTokensLayerGameplayPassthrough() {
+    return this._isTokensContextActive()
+      && !this.mapPointDraw?.active
+      && !this.dragState?.active
+      && !this.dragSelect?.active
+      && !this.wallDraw?.active
+      && !this.lightPlacement?.active
+      && !this.soundPlacement?.active
+      && !this.rightClickState?.active
+      && !this.moveClickState?.active
+      && !this._pendingLight?.active;
+  }
+
+  /**
+   * @param {PointerEvent} event
+   * @returns {boolean}
+   */
+  _isPointerOverSceneCanvas(event) {
+    const pointerState = this.getMouseState();
+    const targetPath = (typeof event?.composedPath === 'function') ? event.composedPath() : null;
+    const pixiCanvas = canvas?.app?.view || null;
+    const boardCanvas = document.getElementById('board');
+    const targetHitsSceneCanvas = Array.isArray(targetPath)
+      ? targetPath.includes(this.canvasElement)
+        || (pixiCanvas ? targetPath.includes(pixiCanvas) : false)
+        || (boardCanvas ? targetPath.includes(boardCanvas) : false)
+      : (
+        event?.target === this.canvasElement
+        || this.canvasElement?.contains?.(event?.target)
+        || (pixiCanvas && (event?.target === pixiCanvas || pixiCanvas.contains?.(event?.target)))
+        || (boardCanvas && (event?.target === boardCanvas || boardCanvas.contains?.(event?.target)))
+      );
+    return (!!pointerState?.insideCanvas && !pointerState?.isFromUI) || !!targetHitsSceneCanvas;
+  }
+
+  /**
    * Handle hover detection
-   * @param {PointerEvent} event 
+   * @param {PointerEvent} event
+   * @param {{ skipTokenAndWallHover?: boolean }} [options]
    * @private
    */
-  handleHover(event) {
+  handleHover(event, options = {}) {
     // Ensure camera matrices are current before any raycasting.
     // A stale camera matrixWorld can cause systematic pick offsets.
     safeCall(() => { const cam = this.sceneComposer?.camera; cam?.updateMatrixWorld?.(true); cam?.updateProjectionMatrix?.(); }, 'hover.updateCameraMatrix', Severity.COSMETIC);
@@ -4929,7 +5001,7 @@ export class InteractionManager {
         }
 
         // Update debug marker for the winning hit (or hide when no hit).
-        this._updateOverheadHoverDebug(event, bestHit, bestOpaque);
+        this._updateOverheadHoverDebug(event, bestHit, bestOpaque, bestTileId);
 
         // World-point path is authoritative for stability; raycast path above is fallback.
 
@@ -5029,6 +5101,21 @@ export class InteractionManager {
     }
 
     if (hitFound) return;
+
+    // Tokens-layer gameplay: Foundry owns token/wall hover; Three.js only fades roofs.
+    if (options?.skipTokenAndWallHover) {
+      safeCall(() => {
+        if (this.hoveredWallId) {
+          this.wallManager?.setHighlight?.(this.hoveredWallId, false);
+          this.hoveredWallId = null;
+        }
+        if (this.hoveredTokenId) {
+          this.tokenManager?.setHover?.(this.hoveredTokenId, false);
+          this.hoveredTokenId = null;
+        }
+      }, 'hover.clearStaleTokenWallOnTokensLayer', Severity.COSMETIC);
+      return;
+    }
 
     // 2. Check Walls (Priority for "near line" detection)
     // Only check walls if we are GM or on Wall Layer? Usually useful for everyone if interactive, but editing is GM.
@@ -5318,18 +5405,22 @@ export class InteractionManager {
           return;
         }
 
-        if (
-          this._isTokensContextActive() &&
-          !this.dragState?.active &&
-          !this.dragSelect?.active &&
-          !this.wallDraw?.active &&
-          !this.lightPlacement?.active &&
-          !this.soundPlacement?.active &&
-          !this.mapPointDraw?.active &&
-          !this.rightClickState?.active &&
-          !this.moveClickState?.active &&
-          !this._pendingLight?.active
-        ) {
+        if (this._isTokensLayerGameplayPassthrough()) {
+          // Roof/tree hover-hide is Three.js-owned even while Foundry handles tokens.
+          if (!hardUiBlocker && !this._isEventFromUI(event)) {
+            safeCall(() => {
+              const pointer = this.mouseStateManager?.updateFromEvent?.(event, {
+                isFromUI: this._isEventFromUI(event),
+              });
+              if (pointer?.insideCanvas && !pointer?.isFromUI) {
+                this._lastPointerClientX = pointer.clientX;
+                this._lastPointerClientY = pointer.clientY;
+              }
+            }, 'pointerMove.tokensHover.trackPointer', Severity.COSMETIC);
+            if (this._isPointerOverSceneCanvas(event)) {
+              this.handleHover(event, { skipTokenAndWallHover: true });
+            }
+          }
           return;
         }
 
@@ -8382,6 +8473,57 @@ export class InteractionManager {
    * @param {WallDocument|object|null} wallDoc
    * @returns {boolean} true if the door is reachable at the current elevation
    */
+  /**
+   * Raycast door controls and handle open/close (left) or lock toggle (right, GM).
+   * Runs before the Tokens-layer early return so gameplay door icons stay interactive.
+   *
+   * @param {PointerEvent} event
+   * @returns {boolean} true when a door control consumed the event
+   */
+  _tryHandleDoorPointerDown(event) {
+    const button = Number(event?.button);
+    if (button !== 0 && button !== 2) return false;
+    if (this._isWallsContextActive()) return false;
+
+    const wallGroup = this.wallManager?.wallGroup;
+    const camera = this.sceneComposer?.camera;
+    if (!wallGroup || !camera) return false;
+
+    this.updateMouseCoords(event);
+    this.raycaster.setFromCamera(this.mouse, camera);
+
+    const doorIntersects = this.raycaster.intersectObject(wallGroup, true);
+    if (!doorIntersects.length) return false;
+
+    let doorControl = null;
+    for (const hit of doorIntersects) {
+      let object = hit.object;
+      while (object && object !== wallGroup) {
+        const type = object?.userData?.type;
+        if (type === 'doorControl' || type === 'doorHitArea') {
+          doorControl = type === 'doorControl' ? object : object.parent;
+          break;
+        }
+        object = object.parent;
+      }
+      if (doorControl) break;
+    }
+
+    if (!doorControl) return false;
+
+    if (button === 2) {
+      if (!isGmLike()) return false;
+      this.handleDoorRightClick(doorControl, event);
+    } else {
+      this.handleDoorClick(doorControl, event);
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    event.stopImmediatePropagation?.();
+    return true;
+  }
+
   _isDoorWallAtTokenElevation(wallDoc) {
     if (isGmLike()) return true;
     if (!wallDoc) return true;

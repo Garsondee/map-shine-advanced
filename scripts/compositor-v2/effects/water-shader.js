@@ -92,6 +92,8 @@ uniform vec2 uWaterRawMaskTexelSize;  // 1 / dimensions of composited _Water RT 
 
 uniform sampler2D tWaterOccluderAlpha; // Screen-space upper-floor occluder mask
 uniform float uHasWaterOccluderAlpha;  // 1.0 when occluder mask is valid
+uniform sampler2D tOverheadRoofBlock;  // Water-source floor overhead-only bus mask
+uniform float uHasOverheadRoofBlock;   // 1.0 when tOverheadRoofBlock is valid
 uniform sampler2D tSliceAlpha;         // Authoritative per-level albedo alpha (pre-post chain)
 uniform float uHasSliceAlpha;          // 1.0 when tSliceAlpha is valid
 // Post-merge: pre-multiplied transmittance from all upper bg layers (baked RT).
@@ -1479,6 +1481,22 @@ float waterOccluderAlphaSoft(vec2 screenUv) {
   return 0.72 * c + 0.07 * (n + s + e + w);
 }
 
+// Non-_Water bus tiles on the water-source floor (cached deck mask).
+float waterRoofBlockOcc(vec2 screenUv) {
+  if (uHasOverheadRoofBlock < 0.5) return 0.0;
+  return smoothstep(0.34, 0.66, texture2D(tOverheadRoofBlock, screenUv).a);
+}
+
+// Deck mask × source slice scene alpha (screen-space punch over river UV).
+float waterSourceScreenOcc(vec2 screenUv) {
+  float deck = waterRoofBlockOcc(screenUv);
+  if (deck < 0.001) return 0.0;
+  if (uHasSliceAlpha > 0.5) {
+    return deck * smoothstep(0.10, 0.88, texture2D(tSliceAlpha, screenUv).a);
+  }
+  return deck;
+}
+
 // Post-merge background transmittance mask in screen UV.
 // 1.0 = no upper/background coverage between water source floor and viewer.
 // 0.0 = fully blocked by stacked background albedo above the water source.
@@ -1498,6 +1516,7 @@ float refractTapValid(vec2 screenUv) {
     float occ = waterOccluderAlphaSoft(screenUv);
     vOcc = 1.0 - smoothstep(0.34, 0.66, occ);
   }
+  float vRoof = 1.0 - waterSourceScreenOcc(screenUv);
   float vBg = waterBgTransmittanceAt(screenUv);
 
   // Water-body gating: if the shifted UV lands outside the water mask,
@@ -1512,10 +1531,10 @@ float refractTapValid(vec2 screenUv) {
       ? waterInsideFromSdf(wdS.r)
       : smoothstep(0.02, 0.08, wdS.g);
     insideS *= waterRawMaskIntensity(suv);
-    return insideS * vOcc * vBg;
+    return insideS * vOcc * vRoof * vBg;
   }
 
-  return vOcc * vBg;
+  return vOcc * vRoof * vBg;
 }
 
 // Softly reject distortion taps as they approach/leak past screen borders.
@@ -1656,11 +1675,11 @@ void main() {
   if (uHasWaterOccluderAlpha > 0.5) {
     float occ = waterOccluderAlphaSoft(vUv);
     occluderBlend = smoothstep(0.36, 0.64, occ);
-    if (occluderBlend > 0.995) {
-      MSA_BLOOM_RT_ZERO;
-      gl_FragColor = base;
-      return;
-    }
+  }
+  if (occluderBlend > 0.995) {
+    MSA_BLOOM_RT_ZERO;
+    gl_FragColor = base;
+    return;
   }
 
   // Depth occlusion: fallback only.
@@ -1711,6 +1730,13 @@ void main() {
     float m = texture2D(tWaterBgAlphaMask, vUv).r;
     inside *= m;
     distInside *= m;
+  }
+  // Water-source floor: cached deck mask × live slice alpha, gated by raw water.
+  {
+    float srcOcc = waterSourceScreenOcc(vUv);
+    float sourceOverheadGate = srcOcc * smoothstep(0.02, 0.08, rawAuth);
+    inside *= (1.0 - sourceOverheadGate);
+    distInside *= (1.0 - sourceOverheadGate);
   }
   // Borrowed lower-floor water on this slice: suppress wherever **this** slice's
   // bus levelSceneRT is opaque (tiles / deck over river holes).

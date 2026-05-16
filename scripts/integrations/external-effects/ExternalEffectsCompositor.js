@@ -6,8 +6,10 @@
  *
  *   1. **Sprite mirror (Sequencer / JB2A):** Each Sequencer effect spawns a
  *      `THREE.Mesh` mirror in `FloorRenderBus._scene`. The PIXI container is
- *      hidden (`renderable = false`) and the mesh transform is synced from
- *      the PIXI container via `FrameCoordinator.onPostPixi`.
+ *      hidden (`renderable = false`) and transforms/media are synced in
+ *      `FloorCompositor`'s {@link ExternalEffectsCompositor#tickBeforeBusRender}
+ *      (every compositor draw). `FrameCoordinator.onPostPixi` only mirrors
+ *      sync when legacy `MapShine.__sequencerMirrorLegacyPostPixiSync` is set.
  *
  *   2. **Texture mirror (DSN):** The dice-so-nice `<canvas>` is hidden and
  *      sampled as a `THREE.CanvasTexture`. A fullscreen `ExternalDsnPass`
@@ -155,6 +157,7 @@ export class ExternalEffectsCompositor {
         renderLoop: ir.renderLoop,
       });
       this.sequencer.initialize();
+      try { this.sequencer.invalidateFloorRenderBusCache(); } catch (_) {}
       this._sequencerDeferAttempts = 0;
     } catch (e) {
       log.warn('SequencerAdapter.initialize failed:', e);
@@ -491,6 +494,7 @@ export class ExternalEffectsCompositor {
         renderLoop: ir.renderLoop,
       });
       adapter.initialize();
+      try { adapter.invalidateFloorRenderBusCache(); } catch (_) {}
       this.sequencer = adapter;
       this._sequencerDeferAttempts = 0;
       log.info('Sequencer adapter recovered via deferred wiring', {

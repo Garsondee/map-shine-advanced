@@ -1229,6 +1229,71 @@ export class InteractionManager {
     this.moveClickState.worldPos = null;
   }
 
+  /**
+   * Arm click-to-move on empty canvas space during Tokens-layer gameplay.
+   * Pointer-up runs _handleRightClickMovePreview when moveClickState is active.
+   *
+   * @param {PointerEvent} event
+   * @returns {boolean}
+   */
+  _tryArmClickToMovePointerDown(event) {
+    if (this._isEventFromUI(event) || this._isHardUIInteractionEvent(event)) return false;
+
+    const button = Number(event?.button);
+    const clickToMoveButton = this._getClickToMoveButton();
+    if (button !== clickToMoveButton) return false;
+    if (clickToMoveButton === 0 && event.shiftKey) return false;
+
+    const selectedTokenDocs = this._getSelectedTokenDocs();
+    const selectedTokenDoc = selectedTokenDocs[0] || null;
+    if (!selectedTokenDoc) return false;
+
+    const camera = this.sceneComposer?.camera;
+    if (!camera) return false;
+
+    this.updateMouseCoords(event);
+    this.raycaster.setFromCamera(this.mouse, camera);
+
+    const tokenSprites = this.tokenManager?.getAllTokenSprites?.() || [];
+    if (tokenSprites.length > 0) {
+      const prevMask = this.raycaster.layers?.mask;
+      safeCall(() => {
+        if (!this.raycaster.layers) this.raycaster.layers = new THREE.Layers();
+        this.raycaster.layers.mask = 0xffffffff;
+      }, 'clickToMove.tokenRayLayers', Severity.COSMETIC);
+
+      const tokenIntersects = this.raycaster.intersectObjects(tokenSprites, true);
+
+      safeCall(() => {
+        if (typeof prevMask === 'number' && this.raycaster.layers) {
+          this.raycaster.layers.mask = prevMask;
+        }
+      }, 'clickToMove.restoreTokenRayLayers', Severity.COSMETIC);
+
+      if (tokenIntersects.length > 0) {
+        for (const hit of tokenIntersects) {
+          let candidate = hit.object;
+          while (candidate && !candidate.userData?.tokenDoc) candidate = candidate.parent;
+          if (candidate?.userData?.tokenDoc) return false;
+        }
+      }
+    }
+
+    const groundZ = this.sceneComposer?.groundZ ?? 0;
+    const worldPos = this.viewportToWorld(event.clientX, event.clientY, groundZ);
+    if (!worldPos) return false;
+
+    this._armMoveClickState({
+      button,
+      tokenDoc: selectedTokenDoc,
+      tokenDocs: selectedTokenDocs,
+      worldPos,
+      clientX: event.clientX,
+      clientY: event.clientY
+    });
+    return true;
+  }
+
   _armMoveClickState({ button, tokenDoc, tokenDocs, worldPos, clientX, clientY }) {
     this.moveClickState.active = true;
     this.moveClickState.button = Number.isFinite(Number(button)) ? Number(button) : 2;
@@ -3355,6 +3420,12 @@ export class InteractionManager {
         // Door icons live in Three.js; they must stay clickable during normal
         // Tokens-layer gameplay even though Foundry owns token selection below.
         if (this._tryHandleDoorPointerDown(event)) {
+          return;
+        }
+
+        // Click-to-move / pathfinding preview must arm on pointerdown; pointerup
+        // completes via moveClickState (excluded from the Tokens-layer guard below).
+        if (this._tryArmClickToMovePointerDown(event)) {
           return;
         }
 

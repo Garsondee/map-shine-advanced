@@ -80,6 +80,10 @@ export class ShadowDriverState {
       environment: env,
       current: currentWeather,
     };
+    // Upper-floor masks & sky-reach casters use floors with index > receiverBaseIndex.
+    // This MUST track the viewed (active) band — not the lowest visible floor — or
+    // multi-level visibility keeps receiverBase pinned to ground while the camera
+    // shows a higher story; sky-reach then darkens the wrong sheet (ground shadow on middle).
     const receiverBaseIndex = this._resolveReceiverBaseIndex(activeFloorIndex);
     const upper = this.maskBindings.getUpperFloorAlphaStack({ receiverBaseIndex });
     this.masks = {
@@ -109,23 +113,14 @@ export class ShadowDriverState {
   }
 
   /**
-   * Lowest {@link FloorBand#index} among currently visible floors (see
-   * {@link FloorStack#getVisibleFloors}). Sky-reach/building-style stack effects
-   * treat `floor.index > receiverBase` as casters; using the active index alone
-   * clears the whole stack on the top band of a two-level map (nothing above
-   * it), even though the roof tiles should still participate while lower bands
-   * remain in the visible stack.
+   * Active viewed floor index: floors strictly above this contribute to the upper
+   * `floorAlpha` stack (sky occlusion, sky-reach casters). Tied to
+   * {@link FloorCompositor#_activeFloorIndex}, not `min(visible)` — lower stories
+   * can stay visible in the stack while the user navigates upstairs; pinning to
+   * the lowest visible index mis-assigns the shadow receiver plane.
    */
   _resolveReceiverBaseIndex(activeFloorIndex) {
-    let receiverBaseIdx = Number.isFinite(Number(activeFloorIndex)) ? Number(activeFloorIndex) : 0;
-    try {
-      const visible = window.MapShine?.floorStack?.getVisibleFloors?.() ?? [];
-      for (const floor of visible) {
-        const idx = Number(floor?.index);
-        if (Number.isFinite(idx)) receiverBaseIdx = Math.min(receiverBaseIdx, idx);
-      }
-    } catch (_) {}
-    return receiverBaseIdx;
+    return Number.isFinite(Number(activeFloorIndex)) ? Number(activeFloorIndex) : 0;
   }
 
   _deriveTuning() {

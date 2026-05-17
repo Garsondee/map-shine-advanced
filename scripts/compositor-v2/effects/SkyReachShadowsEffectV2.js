@@ -1016,14 +1016,6 @@ export class SkyReachShadowsEffectV2 {
     let receiverBaseIdx = activeIdx;
     if (snap && Number.isFinite(Number(snap.receiverBaseIndex))) {
       receiverBaseIdx = Number(snap.receiverBaseIndex);
-    } else {
-      try {
-        const visible = floorStack?.getVisibleFloors?.() ?? [];
-        for (const f of visible) {
-          const idx = Number(f?.index);
-          if (Number.isFinite(idx)) receiverBaseIdx = Math.min(receiverBaseIdx, idx);
-        }
-      } catch (_) {}
     }
 
     const upper = [];

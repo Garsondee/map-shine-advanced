@@ -6019,11 +6019,17 @@ export class FloorCompositor {
 
         let outdoorsForLightingTex = null;
         try {
-          const lightingCtx = window.MapShine?.activeLevelContext ?? null;
-          outdoorsForLightingTex = this._resolveOutdoorsMask(lightingCtx, { allowWeatherRoofMap: false }).texture ?? null;
-          if (!outdoorsForLightingTex) {
-            const floorCount = (floorStack?.getFloors?.() ?? []).length;
-            if (floorCount > 1) outdoorsForLightingTex = this._getNeutralOutdoorsTexture();
+          const floorCount = (floorStack?.getFloors?.() ?? []).length;
+          // Bind the rendered slice's own _Outdoors (skyReach-first, same as water).
+          // Using activeLevelContext here applied the *viewed* floor mask to every
+          // visible band, so Day ambient / interior-darkness gated wrong on stacks.
+          outdoorsForLightingTex = resolveWaterOutdoorsForFloor(levelIndex);
+          if (!outdoorsForLightingTex && floorCount <= 1) {
+            const lightingCtx = window.MapShine?.activeLevelContext ?? null;
+            outdoorsForLightingTex = this._resolveOutdoorsMask(lightingCtx, { allowWeatherRoofMap: false }).texture ?? null;
+          }
+          if (!outdoorsForLightingTex && floorCount > 1) {
+            outdoorsForLightingTex = this._getNeutralOutdoorsTexture();
           }
         } catch (_) {}
 
@@ -6085,49 +6091,54 @@ export class FloorCompositor {
       let _waterPassWrote = false;
       if (!usePostMergeWater && !_skipWaterPass && resolveEffectEnabled(this._waterEffect)) {
         let waterDataFloorIndex = levelIndex;
-        try {
-          // Set per-level water context so the shader uses this level's mask data
-          const resolvedDataFloor = this._waterEffect.setLevelContext?.(levelIndex);
-          if (Number.isFinite(Number(resolvedDataFloor))) {
-            waterDataFloorIndex = Number(resolvedDataFloor);
-          }
-        } catch (_) {}
-        try {
-          // Mirror V3 overlay floor-binding semantics:
-          // bind outdoors per rendered level (skyReach-first), and when this
-          // slice borrows lower-floor water data bind that lower floor's mask.
-          const perLevelWaterOutdoors = resolveWaterOutdoorsForFloor(waterDataFloorIndex);
-          if (perLevelWaterOutdoors) {
-            this._waterEffect.setOutdoorsMask?.(perLevelWaterOutdoors);
-          } else if (visibleFloors.length > 1) {
-            this._waterEffect.setOutdoorsMask?.(this._getNeutralOutdoorsTexture());
-          }
-        } catch (_) {}
+        this._profileEffectCall('water.perLevel.setContext', 'render', () => {
+          try {
+            const resolvedDataFloor = this._waterEffect.setLevelContext?.(levelIndex);
+            if (Number.isFinite(Number(resolvedDataFloor))) {
+              waterDataFloorIndex = Number(resolvedDataFloor);
+            }
+          } catch (_) {}
+        }, 'WaterEffectV2 setLevelContext');
+        this._profileEffectCall('water.perLevel.outdoorsMask', 'render', () => {
+          try {
+            const perLevelWaterOutdoors = resolveWaterOutdoorsForFloor(waterDataFloorIndex);
+            if (perLevelWaterOutdoors) {
+              this._waterEffect.setOutdoorsMask?.(perLevelWaterOutdoors);
+            } else if (visibleFloors.length > 1) {
+              this._waterEffect.setOutdoorsMask?.(this._getNeutralOutdoorsTexture());
+            }
+          } catch (_) {}
+        }, 'WaterEffectV2 per-level outdoors');
 
-        // Upper-slice sceneRT alpha only; same-floor overhead uses input scene alpha in shader.
         let waterOccluder = null;
         if (!_disableWaterOccluder && li < visibleFloors.length - 1 && this._waterOccluderRT) {
-          try {
-            waterOccluder = withSceneScissor(this.renderer, () =>
-              this._buildUpperSceneAlphaOccluder(levelSceneRTs.slice(li + 1))
-            );
-          } catch (_) {
-            waterOccluder = null;
-          }
+          this._profileEffectCall('water.perLevel.occluderBuild', 'render', () => {
+            try {
+              waterOccluder = withSceneScissor(this.renderer, () =>
+                this._buildUpperSceneAlphaOccluder(levelSceneRTs.slice(li + 1))
+              );
+            } catch (_) {
+              waterOccluder = null;
+            }
+          }, 'WaterEffectV2 per-level occluder');
         }
 
         const waterOut = (currentInput === levelPostA) ? levelPostB : levelPostA;
         const nativeSourceWater = Number(waterDataFloorIndex) === Number(levelIndex);
         if (_profiling) _profileT0 = performance.now();
-        this._bindWaterShadowUniforms({
-          cloudShadowTexLegacy,
-          buildingShadowTex,
-          overheadShadowTexLegacy,
-        });
         this._profileEffectCall('water', 'render', () => {
+          this._profileEffectCall('water.perLevel.shadowBind', 'render', () => {
+            this._bindWaterShadowUniforms({
+              cloudShadowTexLegacy,
+              buildingShadowTex,
+              overheadShadowTexLegacy,
+            });
+          }, 'WaterEffectV2 shadow bind');
           try {
             if (nativeSourceWater) {
-              this._bindWaterSourceDeckMask();
+              this._profileEffectCall('water.perLevel.deckMask', 'render', () => {
+                this._bindWaterSourceDeckMask();
+              }, 'WaterEffectV2 deck mask');
             }
             _waterPassWrote = withSceneScissor(this.renderer, () =>
               this._waterEffect.render(
@@ -6359,23 +6370,27 @@ export class FloorCompositor {
         ? Number(activeFloor.index)
         : 0;
       let dataFloor = -1;
-      try {
-        dataFloor = typeof this._waterEffect.setPostMergeWaterContext === 'function'
-          ? Number(this._waterEffect.setPostMergeWaterContext(ai))
-          : -1;
-      } catch (_) {
-        dataFloor = -1;
-      }
-      try {
-        const perLevelWaterOutdoors = resolveWaterOutdoorsForFloor(
-          Number.isFinite(dataFloor) && dataFloor >= 0 ? dataFloor : ai,
-        );
-        if (perLevelWaterOutdoors) {
-          this._waterEffect.setOutdoorsMask?.(perLevelWaterOutdoors);
-        } else {
-          this._waterEffect.setOutdoorsMask?.(this._getNeutralOutdoorsTexture());
+      this._profileEffectCall('water.postMerge.setContext', 'render', () => {
+        try {
+          dataFloor = typeof this._waterEffect.setPostMergeWaterContext === 'function'
+            ? Number(this._waterEffect.setPostMergeWaterContext(ai))
+            : -1;
+        } catch (_) {
+          dataFloor = -1;
         }
-      } catch (_) {}
+      }, 'WaterEffectV2 postMerge context');
+      this._profileEffectCall('water.postMerge.outdoorsMask', 'render', () => {
+        try {
+          const perLevelWaterOutdoors = resolveWaterOutdoorsForFloor(
+            Number.isFinite(dataFloor) && dataFloor >= 0 ? dataFloor : ai,
+          );
+          if (perLevelWaterOutdoors) {
+            this._waterEffect.setOutdoorsMask?.(perLevelWaterOutdoors);
+          } else {
+            this._waterEffect.setOutdoorsMask?.(this._getNeutralOutdoorsTexture());
+          }
+        } catch (_) {}
+      }, 'WaterEffectV2 postMerge outdoors');
       // Post-merge: punch water with every bus background **between** the water
       // data floor (e.g. ground) and the viewer — e.g. levels 1+2 when source is 0
       // and you stand on the roof. Resolve each slice by FloorBand.index first,
@@ -6391,13 +6406,15 @@ export class FloorCompositor {
           sourceSi = -1;
         }
         if (!_disableWaterOccluder && sourceSi < visibleFloors.length - 1 && this._waterOccluderRT) {
-          try {
-            postMergeWaterOccluder = withSceneScissor(this.renderer, () =>
-              this._buildUpperSceneAlphaOccluder(levelSceneRTs.slice(sourceSi + 1))
-            );
-          } catch (_) {
-            postMergeWaterOccluder = null;
-          }
+          this._profileEffectCall('water.postMerge.occluderBuild', 'render', () => {
+            try {
+              postMergeWaterOccluder = withSceneScissor(this.renderer, () =>
+                this._buildUpperSceneAlphaOccluder(levelSceneRTs.slice(sourceSi + 1))
+              );
+            } catch (_) {
+              postMergeWaterOccluder = null;
+            }
+          }, 'WaterEffectV2 postMerge occluder');
         }
         const stackTex = [];
         for (let j = sourceSi + 1; j < visibleFloors.length; j++) {
@@ -6414,13 +6431,15 @@ export class FloorCompositor {
         const layers = stackTex.slice(0, 8);
         let maskRt = null;
         if (layers.length) {
-          try {
-            this._waterEffect.syncComposeViewportUniforms?.(this.renderer, this.camera);
-          } catch (_) {}
-          this._syncWaterBgProductUniformsFromWaterCompose();
-          maskRt = withSceneScissor(this.renderer, () =>
-            this._buildWaterBackgroundAlphaMaskRT(layers)
-          );
+          this._profileEffectCall('water.postMerge.bgStackMask', 'render', () => {
+            try {
+              this._waterEffect.syncComposeViewportUniforms?.(this.renderer, this.camera);
+            } catch (_) {}
+            this._syncWaterBgProductUniformsFromWaterCompose();
+            maskRt = withSceneScissor(this.renderer, () =>
+              this._buildWaterBackgroundAlphaMaskRT(layers)
+            );
+          }, 'WaterEffectV2 postMerge bg stack mask');
         }
         this._waterEffect.setWaterBackgroundAlphaMaskTexture?.(
           maskRt?.texture ?? null,
@@ -6430,12 +6449,16 @@ export class FloorCompositor {
       if (_profiling) _profileT0 = performance.now();
       this._profileEffectCall('water', 'render', () => {
         try {
-          this._bindWaterShadowUniforms({
-            cloudShadowTexLegacy,
-            buildingShadowTex,
-            overheadShadowTexLegacy,
-          });
-          this._bindWaterSourceDeckMask();
+          this._profileEffectCall('water.postMerge.shadowBind', 'render', () => {
+            this._bindWaterShadowUniforms({
+              cloudShadowTexLegacy,
+              buildingShadowTex,
+              overheadShadowTexLegacy,
+            });
+          }, 'WaterEffectV2 postMerge shadow bind');
+          this._profileEffectCall('water.postMerge.deckMask', 'render', () => {
+            this._bindWaterSourceDeckMask();
+          }, 'WaterEffectV2 postMerge deck mask');
           postMergeWaterWrote = withSceneScissor(this.renderer, () =>
             this._waterEffect.render(
               this.renderer,

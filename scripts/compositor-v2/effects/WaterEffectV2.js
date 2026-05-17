@@ -68,7 +68,11 @@ const WATER_SHADER_COMPILE_MAX_ATTEMPTS = 4;
 
 // Bitmask flags for conditional shader defines.
 const DEF_FOAM_FLECKS = 1 << 0;
-const DEF_MULTITAP    = 1 << 1;
+const DEF_MULTITAP = 1 << 1;
+const DEF_SHORE_FOAM = 1 << 2;
+const DEF_CAUSTICS = 1 << 3;
+const DEF_CHROM_ABERR = 1 << 4;
+const DEF_MURK = 1 << 5;
 
 /**
  * Return v when it is a finite number, otherwise return fallback.
@@ -556,6 +560,9 @@ export class WaterEffectV2 {
      * @type {number}
      */
     this._perLevelOverride = -1;
+
+    /** @type {import('../../core/diagnostics/PerformanceRecorder.js').PerformanceRecorder|null} */
+    this._activePerfRecorder = null;
 
     // ── Discovered water tiles (populated in populate()) ─────────────────
     /** @type {Array<{tileId: string, basePath: string, floorIndex: number, maskPath: string}>} */
@@ -1747,6 +1754,10 @@ static getControlSchema() {
     const defines = {};
     if (this.params.foamFlecksEnabled) defines.USE_FOAM_FLECKS = 1;
     if (this.params.refractionMultiTapEnabled) defines.USE_WATER_REFRACTION_MULTITAP = 1;
+    if (this.params.shoreFoamEnabled !== false) defines.USE_SHORE_FOAM = 1;
+    if (this.params.causticsEnabled !== false) defines.USE_CAUSTICS = 1;
+    if (this.params.chromaticAberrationEnabled === true) defines.USE_CHROMATIC_ABERRATION = 1;
+    if (this.params.murkEnabled !== false) defines.USE_MURK = 1;
     // DEFERRED: Create a minimal passthrough material now; heavy shader compiles on first render.
     // This prevents loading hangs caused by ~2400-line GLSL compilation during init.
     this._composeMaterial = this._createMinimalPassthroughMaterial(THREE);
@@ -1821,6 +1832,13 @@ static getControlSchema() {
     if (!this._initialized) { log.warn('populate: not initialized'); return; }
     const THREE = window.THREE;
     if (!THREE) return;
+
+    try {
+      const recorder = window.MapShine?.performanceRecorder;
+      this._activePerfRecorder = recorder?.enabled ? recorder : null;
+    } catch (_) {
+      this._activePerfRecorder = null;
+    }
 
     // Preserve packed-water GPU assets per floor when mask inputs are unchanged.
     // Level changes can trigger forceRepopulate; rebuilding every floor's JFA
@@ -2023,6 +2041,7 @@ static getControlSchema() {
     let sharedCanvas = null;
     const sceneGeo = { sceneX, sceneY, sceneW, sceneH };
     for (const [floorIndex, entries] of byFloor) {
+      const _floorPerf = this._beginPerfSpan(`populate.floor${floorIndex}`, 'update');
       try {
         const packSignature = this._waterPackSignature(entries, sceneGeo);
         const prevPack = previousFloorPacks.get(floorIndex);
@@ -2051,6 +2070,8 @@ static getControlSchema() {
         }
       } catch (err) {
         log.error(`populate: floor ${floorIndex} mask compositing failed:`, err);
+      } finally {
+        this._endPerfSpan(_floorPerf);
       }
     }
     for (const [, orphaned] of previousFloorPacks) {
@@ -2081,6 +2102,7 @@ static getControlSchema() {
     // Keep runtime enabled state stable; render path already checks uniforms/data.
 
     log.info(`WaterEffectV2 populated: ${this._waterTiles.length} tile(s), ${this._floorWater.size} floor(s)`);
+    this._activePerfRecorder = null;
   }
 
   /**
@@ -2115,6 +2137,8 @@ static getControlSchema() {
       return null;
     }
 
+    const _maskPerf = this._beginPerfSpan('populate.maskLoadAndCanvas', 'update');
+
     // Determine canvas resolution (proportional to scene, capped at buildResolution)
     const maxRes = this.params.buildResolution || 2048;
     const aspect = sceneW / Math.max(1, sceneH);
@@ -2140,6 +2164,7 @@ static getControlSchema() {
     const ctx = canvas.getContext('2d', { willReadFrequently: true });
     if (!ctx) {
       log.warn('_compositeFloorMask: failed to get 2D context');
+      this._endPerfSpan(_maskPerf);
       return null;
     }
     ctx.clearRect(0, 0, cvW, cvH);
@@ -2178,6 +2203,8 @@ static getControlSchema() {
     }
 
     const imageData = ctx.getImageData(0, 0, cvW, cvH).data;
+    this._endPerfSpan(_maskPerf);
+    const _sdfPerf = this._beginPerfSpan('populate.sdfPack', 'update');
 
     // Prefer GPU JFA path (near-instant mask->SDF), with CPU fallback.
     let waterData = null;
@@ -2193,9 +2220,11 @@ static getControlSchema() {
         waterData = this._buildWaterDataCpu(THREE, imageData, cvW, cvH);
       } catch (err) {
         log.error('_compositeFloorMask: CPU SDF build failed:', err);
+        this._endPerfSpan(_sdfPerf);
         return null;
       }
     }
+    this._endPerfSpan(_sdfPerf);
 
     if (!waterData?.hasWater) {
       log.info('_compositeFloorMask: mask found but no water pixels above threshold');
@@ -2368,12 +2397,22 @@ static getControlSchema() {
     this._waterDataPackMaterial.uniforms.uSdfRangePx.value = sdfRange;
     this._waterDataPackMaterial.uniforms.uExposureWidthPx.value = Math.max(1.0, Number(this.params.shoreWidthPx ?? 24));
     this._waterDataPackMaterial.uniforms.uMaskExpandPx.value = Number(this.params.maskExpandPx ?? 0.0);
+    let _packPerf = null;
+    try {
+      const recorder = window.MapShine?.performanceRecorder;
+      if (recorder?.enabled) {
+        this._activePerfRecorder = recorder;
+        _packPerf = this._beginPerfSpan('waterDataPackGpu', 'render');
+      }
+    } catch (_) {}
     renderer.autoClear = true;
     renderer.setRenderTarget(packTarget);
     renderer.clear();
     renderer.render(this._waterDataPackScene, this._waterDataPackCamera);
     renderer.setRenderTarget(prevTarget);
     renderer.autoClear = prevAutoClear;
+    this._endPerfSpan(_packPerf);
+    if (_packPerf) this._activePerfRecorder = null;
 
     return {
       texture: packTarget.texture,
@@ -2834,6 +2873,37 @@ static getControlSchema() {
   }
 
   /**
+   * Begin a nested Performance Recorder span for water internals.
+   * Keys appear as `water.<phase>.<name>` in the recorder dialog.
+   *
+   * @param {string} name
+   * @param {'update'|'render'} [phase]
+   * @returns {object|null}
+   * @private
+   */
+  _beginPerfSpan(name, phase = 'update') {
+    try {
+      const recorder = this._activePerfRecorder;
+      if (!recorder?.enabled || typeof recorder.beginEffectCall !== 'function') return null;
+      return recorder.beginEffectCall(`water.${phase}.${name}`, phase);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /**
+   * @param {object|null} token
+   * @private
+   */
+  _endPerfSpan(token) {
+    if (!token) return;
+    try {
+      const recorder = this._activePerfRecorder ?? window.MapShine?.performanceRecorder;
+      recorder?.endEffectCall?.(token);
+    } catch (_) {}
+  }
+
+  /**
    * Per-frame update. Syncs all time-varying uniforms from params.
    * @param {{ elapsed: number, delta: number }} timeInfo
    */
@@ -2841,6 +2911,15 @@ static getControlSchema() {
     if (!this._initialized || !this._composeMaterial) return;
     const u = this._composeMaterial.uniforms;
     if (!this._realShaderCompiled || !u?.uTime) return;
+
+    try {
+      const recorder = window.MapShine?.performanceRecorder;
+      this._activePerfRecorder = recorder?.enabled ? recorder : null;
+    } catch (_) {
+      this._activePerfRecorder = null;
+    }
+    let _perfToken = this._beginPerfSpan('timeAndPause');
+
     const p = this.params;
     // Derive pause from both TimeManager and Foundry global state.
     // This keeps water frozen even if pause propagation to TimeManager is delayed.
@@ -2889,6 +2968,8 @@ static getControlSchema() {
 
     // ── Time ──────────────────────────────────────────────────────────────
     u.uTime.value = elapsed;
+    this._endPerfSpan(_perfToken);
+    _perfToken = this._beginPerfSpan('wind');
 
     // ── Wind state (WeatherController-coupled with deterministic fallback) ──
     // Keep fallback values stable so the effect behaves consistently when weather
@@ -3030,6 +3111,8 @@ static getControlSchema() {
       const k = 1.0 - Math.exp(-dt * rate);
       this._waveWindMotion01 = Math.max(0.0, Math.min(1.0, current + (target - current) * k));
     }
+    this._endPerfSpan(_perfToken);
+    _perfToken = this._beginPerfSpan('wavesAndAdvection');
 
     // ── Waves (compute early: used to advance uWindTime) ─────────────────
     // Wave speed: linear in gust energy between calm and full-wind endpoints (× waveSpeed).
@@ -3113,6 +3196,8 @@ static getControlSchema() {
       this._windOffsetUvY += dv;
       u.uWindOffsetUv.value.set(this._windOffsetUvX, this._windOffsetUvY);
     }
+    this._endPerfSpan(_perfToken);
+    _perfToken = this._beginPerfSpan('settingsAndTint');
 
     // ── Enable / mask settings (shared with floor-change rebinding) ───────
     this._syncSettingsUniformsFromParams();
@@ -3121,6 +3206,8 @@ static getControlSchema() {
     const tint = normalizeRgb01(p.tintColor, { r: 0.02, g: 0.18, b: 0.28 });
     u.uTintColor.value.set(tint.r, tint.g, tint.b);
     u.uTintStrength.value = safeNum(p.tintStrength, 0.36);
+    this._endPerfSpan(_perfToken);
+    _perfToken = this._beginPerfSpan('waveUniforms');
 
     // ── Waves ─────────────────────────────────────────────────────────────
     u.uWaveScale.value = safeNum(p.waveScale, 16.0);
@@ -3171,6 +3258,8 @@ static getControlSchema() {
     u.uWaveIndoorDampingEnabled.value = p.waveIndoorDampingEnabled ? 1.0 : 0.0;
     u.uWaveIndoorDampingStrength.value = safeNum(p.waveIndoorDampingStrength, 1.0);
     u.uWaveIndoorMinFactor.value = safeNum(p.waveIndoorMinFactor, 0.05);
+    this._endPerfSpan(_perfToken);
+    _perfToken = this._beginPerfSpan('waveDirection');
 
     // ── Wave direction ────────────────────────────────────────────────────
     u.uLockWaveTravelToWind.value = p.lockWaveTravelToWind ? 1.0 : 0.0;
@@ -3185,6 +3274,8 @@ static getControlSchema() {
     u.uWaveDirFieldMaxRad.value = (Number(p.waveDirFieldMaxDeg ?? 45.0) * (Math.PI / 180));
     u.uWaveDirFieldScale.value = Number(p.waveDirFieldScale ?? 0.65);
     u.uWaveDirFieldSpeed.value = Number(p.waveDirFieldSpeed ?? 0.35);
+    this._endPerfSpan(_perfToken);
+    _perfToken = this._beginPerfSpan('distortionEdge');
 
     // ── Distortion edge ───────────────────────────────────────────────────
     u.uDistortionEdgeCenter.value = safeNum(p.distortionEdgeCenter, 1.0);
@@ -3194,6 +3285,8 @@ static getControlSchema() {
     u.uDistortionShoreRemapHi.value = safeNum(p.distortionShoreRemapHi, 1.0);
     u.uDistortionShorePow.value = safeNum(p.distortionShorePow, 1.29);
     u.uDistortionShoreMin.value = safeNum(p.distortionShoreMin, 0.31);
+    this._endPerfSpan(_perfToken);
+    _perfToken = this._beginPerfSpan('chromaticAberration');
 
     // ── Chromatic aberration ──────────────────────────────────────────────
     u.uChromaticAberrationEnabled.value = p.chromaticAberrationEnabled ? 1.0 : 0.0;
@@ -3208,6 +3301,8 @@ static getControlSchema() {
     u.uChromaticAberrationEdgeMin.value = safeNum(p.chromaticAberrationEdgeMin, 0.0);
     u.uChromaticAberrationDeadzone.value = safeNum(p.chromaticAberrationDeadzone, 0.02);
     u.uChromaticAberrationDeadzoneSoftness.value = safeNum(p.chromaticAberrationDeadzoneSoftness, 0.02);
+    this._endPerfSpan(_perfToken);
+    _perfToken = this._beginPerfSpan('rainDistortion');
 
     // ── Precipitation distortion (WeatherController coupling) ──────────────
     // Resolve precipitation: manual param, override, or live weather.
@@ -3239,6 +3334,8 @@ static getControlSchema() {
     u.uRainDistortionSpeed.value = safeNum(p.rainDistortionSpeed, 1.2);
     u.uRainIndoorDampingEnabled.value = p.rainIndoorDampingEnabled ? 1.0 : 0.0;
     u.uRainIndoorDampingStrength.value = safeNum(p.rainIndoorDampingStrength, 1.0);
+    this._endPerfSpan(_perfToken);
+    _perfToken = this._beginPerfSpan('specular');
 
     // ── Specular (GGX) ───────────────────────────────────────────────────
     u.uSpecStrength.value = safeNum(p.specStrength, 200.0);
@@ -3290,6 +3387,8 @@ static getControlSchema() {
     u.uCloudShadowDarkenCurve.value = safeNum(p.cloudShadowDarkenCurve, 1.5);
     u.uCloudShadowSpecularKill.value = safeNum(p.cloudShadowSpecularKill, 1.0);
     u.uCloudShadowSpecularCurve.value = safeNum(p.cloudShadowSpecularCurve, 6.0);
+    this._endPerfSpan(_perfToken);
+    _perfToken = this._beginPerfSpan('cloudReflection');
 
     // Cloud Reflection
     u.uCloudReflectionEnabled.value = p.cloudReflectionEnabled ? 1.0 : 0.0;
@@ -3313,6 +3412,8 @@ static getControlSchema() {
       u.tCloudTopTexture.value = cloudTopTexture ?? this._fallbackWhite;
       u.uHasCloudTopTexture.value = cloudTopTexture ? 1.0 : 0.0;
     }
+    this._endPerfSpan(_perfToken);
+    _perfToken = this._beginPerfSpan('caustics');
 
     // Caustics
     u.uCausticsEnabled.value = p.causticsEnabled ? 1.0 : 0.0;
@@ -3326,6 +3427,8 @@ static getControlSchema() {
     if (u.uCausticsBrightnessThreshold) u.uCausticsBrightnessThreshold.value = Number.isFinite(p.causticsBrightnessThreshold) ? Math.max(0.0, p.causticsBrightnessThreshold) : 0.55;
     if (u.uCausticsBrightnessSoftness) u.uCausticsBrightnessSoftness.value = Number.isFinite(p.causticsBrightnessSoftness) ? Math.max(0.0, p.causticsBrightnessSoftness) : 0.20;
     if (u.uCausticsBrightnessGamma) u.uCausticsBrightnessGamma.value = Number.isFinite(p.causticsBrightnessGamma) ? Math.max(0.01, p.causticsBrightnessGamma) : 1.0;
+    this._endPerfSpan(_perfToken);
+    _perfToken = this._beginPerfSpan('shoreFoam');
 
     // Shore Foam (Advanced)
     const sceneDarkness = globalThis.canvas?.environment?.darknessLevel ?? 0;
@@ -3384,6 +3487,8 @@ static getControlSchema() {
     u.uShoreFoamTailWidth.value = safeNum(p.shoreFoamTailWidth, 0.6);
     u.uShoreFoamTailFalloff.value = safeNum(p.shoreFoamTailFalloff, 0.3);
     u.uShoreFoamFadeCurve.value = safeNum(p.shoreFoamFadeCurve, 1.7);
+    this._endPerfSpan(_perfToken);
+    _perfToken = this._beginPerfSpan('sunDirections');
 
     // Sun direction from azimuth + elevation (cached to avoid per-frame trig)
     const az = safeNum(p.specSunAzimuthDeg, 135);
@@ -3398,6 +3503,11 @@ static getControlSchema() {
       this._cachedSunElDeg = el;
     }
     u.uSpecSunDir.value.set(this._cachedSunDirX, this._cachedSunDirY, this._cachedSunDirZ);
+    if (u.uSpecSunElevationDeg) {
+      u.uSpecSunElevationDeg.value = Number.isFinite(this._cachedSunElDeg)
+        ? this._cachedSunElDeg
+        : safeNum(p.specSunElevationDeg, 45);
+    }
 
     // Sun direction for specular highlights (separate azimuth/elevation)
     const hlAz = safeNum(p.specHighlightsSunAzimuthDeg, 135);
@@ -3416,6 +3526,8 @@ static getControlSchema() {
     u.uSpecHighlightsSunDir.value.set(this._cachedHlSunDirX, this._cachedHlSunDirY, this._cachedHlSunDirZ);
     u.uSpecHighlightsSunAzimuthDeg.value = hlAz;
     u.uSpecHighlightsSunElevationDeg.value = hlEl;
+    this._endPerfSpan(_perfToken);
+    _perfToken = this._beginPerfSpan('foam');
 
     // ── Foam ──────────────────────────────────────────────────────────────
     const foamColor = normalizeRgb01(p.foamColor, { r: 0.85, g: 0.9, b: 0.88 });
@@ -3446,7 +3558,9 @@ static getControlSchema() {
     u.uFloatingFoamCoverage.value = safeNum(p.floatingFoamCoverage, 0.57);
     u.uFloatingFoamScale.value = safeNum(p.floatingFoamScale, 200.0);
     u.uFloatingFoamWaveDistortion.value = safeNum(p.floatingFoamWaveDistortion, 2.0);
-    
+    this._endPerfSpan(_perfToken);
+    _perfToken = this._beginPerfSpan('floatingFoam');
+
     // Floating Foam Advanced (Phase 1)
     const sceneDarknessFloat = globalThis.canvas?.environment?.darknessLevel ?? 0;
     const floatingFoamColor = normalizeRgb01(p.floatingFoamColor, { r: 1.0, g: 1.0, b: 1.0 });
@@ -3497,10 +3611,13 @@ static getControlSchema() {
     u.uFloatingFoamEvolutionSpeed.value = safeNum(p.floatingFoamEvolutionSpeed, 0.15);
     u.uFloatingFoamEvolutionAmount.value = safeNum(p.floatingFoamEvolutionAmount, 0.6);
     u.uFloatingFoamEvolutionScale.value = safeNum(p.floatingFoamEvolutionScale, 1.5);
-    
-    u.uFoamFlecksIntensity.value = safeNum(p.foamFlecksIntensity, 0.0);
+    this._endPerfSpan(_perfToken);
+    _perfToken = this._beginPerfSpan('flecks');
 
-    
+    u.uFoamFlecksIntensity.value = safeNum(p.foamFlecksIntensity, 0.0);
+    this._endPerfSpan(_perfToken);
+    _perfToken = this._beginPerfSpan('murk');
+
     // Murk ──────────────────────────────────────────────────────────────
     u.uMurkEnabled.value = p.murkEnabled ? 1.0 : 0.0;
     u.uMurkIntensity.value = safeNum(p.murkIntensity, 0.76);
@@ -3518,6 +3635,8 @@ static getControlSchema() {
     // Murk Shadow Integration
     u.uMurkShadowEnabled.value = p.murkShadowEnabled ? 1.0 : 0.0;
     u.uMurkShadowStrength.value = safeNum(p.murkShadowStrength, 1.0);
+    this._endPerfSpan(_perfToken);
+    _perfToken = this._beginPerfSpan('bathymetry');
 
     // ── Faux bathymetry (Beer-Lambert) ───────────────────────────────────
     if (u.uBathymetryEnabled) u.uBathymetryEnabled.value = p.bathymetryEnabled ? 1.0 : 0.0;
@@ -3532,6 +3651,8 @@ static getControlSchema() {
       const c = normalizeRgb01(p.bathymetryDeepScatterColor, { r: 0.02, g: 0.10, b: 0.20 });
       u.uBathymetryDeepScatterColor.value.set(c.r, c.g, c.b);
     }
+    this._endPerfSpan(_perfToken);
+    _perfToken = this._beginPerfSpan('skyEnvAndDefines');
 
     // ── Sky / environment ─────────────────────────────────────────────────
     // uSkyIntensity feeds skySpecI = mix(0.08, 1.0, skyI) in the shader.
@@ -3549,17 +3670,32 @@ static getControlSchema() {
     // ── Shader defines (conditional compilation) ──────────────────────────
     const flecksEnabled = !!p.foamFlecksEnabled;
     const multiTapEnabled = !!p.refractionMultiTapEnabled;
+    const shoreFoamEnabled = (p.shoreFoamEnabled ?? true) !== false;
+    const causticsEnabled = (p.causticsEnabled ?? true) !== false;
+    const chromaticAberrationEnabled = (p.chromaticAberrationEnabled ?? false) === true;
+    const murkEnabled = (p.murkEnabled ?? true) !== false;
     const definesKey = (flecksEnabled ? DEF_FOAM_FLECKS : 0)
-      | (multiTapEnabled ? DEF_MULTITAP : 0);
+      | (multiTapEnabled ? DEF_MULTITAP : 0)
+      | (shoreFoamEnabled ? DEF_SHORE_FOAM : 0)
+      | (causticsEnabled ? DEF_CAUSTICS : 0)
+      | (chromaticAberrationEnabled ? DEF_CHROM_ABERR : 0)
+      | (murkEnabled ? DEF_MURK : 0);
 
     if (definesKey !== this._lastDefinesKey) {
       const d = this._composeMaterial.defines || {};
       if (flecksEnabled) d.USE_FOAM_FLECKS = 1; else delete d.USE_FOAM_FLECKS;
       if (multiTapEnabled) d.USE_WATER_REFRACTION_MULTITAP = 1; else delete d.USE_WATER_REFRACTION_MULTITAP;
+      if (shoreFoamEnabled) d.USE_SHORE_FOAM = 1; else delete d.USE_SHORE_FOAM;
+      if (causticsEnabled) d.USE_CAUSTICS = 1; else delete d.USE_CAUSTICS;
+      if (chromaticAberrationEnabled) d.USE_CHROMATIC_ABERRATION = 1; else delete d.USE_CHROMATIC_ABERRATION;
+      if (murkEnabled) d.USE_MURK = 1; else delete d.USE_MURK;
       this._composeMaterial.defines = d;
       this._composeMaterial.needsUpdate = true;
       this._lastDefinesKey = definesKey;
     }
+
+    this._endPerfSpan(_perfToken);
+    this._activePerfRecorder = null;
   }
 
   _wantsSpecularBloomMrt() {
@@ -3719,6 +3855,15 @@ static getControlSchema() {
     if (!this._initialized || !this._composeMaterial || !this._composeScene || !this._composeCamera) return false;
     if (!renderer || !inputRT || !outputRT) return false;
     if (!this.enabled) return false;
+
+    try {
+      const recorder = window.MapShine?.performanceRecorder;
+      this._activePerfRecorder = recorder?.enabled ? recorder : null;
+    } catch (_) {
+      this._activePerfRecorder = null;
+    }
+    let _perfToken = this._beginPerfSpan('earlyGate', 'render');
+
     const debugPassRequested = window.MapShine?.__waterDebugForceOccluderMagenta === true;
 
     // LAZY: start compiling on first actual render frame, but never await it on
@@ -3738,7 +3883,13 @@ static getControlSchema() {
         });
       }
     }
-    if (!this._realShaderCompiled) return false;
+    if (!this._realShaderCompiled) {
+      this._endPerfSpan(_perfToken);
+      this._activePerfRecorder = null;
+      return false;
+    }
+    this._endPerfSpan(_perfToken);
+    _perfToken = this._beginPerfSpan('bindings', 'render');
 
     const u = this._composeMaterial.uniforms;
     // Per-level passes temporarily override floor bindings; restore global state
@@ -3760,6 +3911,8 @@ static getControlSchema() {
       const blurOn = !!(fc?._floorDepthBlurEffect?.params?.enabled && vm > 0);
       this.syncFloorDepthBlurContext(blurOn, vm);
     } catch (_) {}
+    this._endPerfSpan(_perfToken);
+    _perfToken = this._beginPerfSpan('occluderAndSlice', 'render');
 
     // Bind screen-space occluder alpha (upper-floor coverage mask).
     // FloorCompositor._renderPerLevelPipeline renders the alpha union of every
@@ -3791,6 +3944,8 @@ static getControlSchema() {
         }
       }
     } catch (_) {}
+    this._endPerfSpan(_perfToken);
+    _perfToken = this._beginPerfSpan('debugAndDataGate', 'render');
 
     try {
       if (u.uDebugWaterPassTint) {
@@ -3813,54 +3968,83 @@ static getControlSchema() {
     } catch (_) {}
 
     if (!this._hasAnyWaterData) {
-      if (!debugPassRequested) return false;
+      if (!debugPassRequested) {
+        this._endPerfSpan(_perfToken);
+        this._activePerfRecorder = null;
+        return false;
+      }
     }
     if ((Number(u?.uHasWaterData?.value) || 0) <= 0 && (Number(u?.uHasWaterRawMask?.value) || 0) <= 0) {
-      if (!debugPassRequested) return false;
+      if (!debugPassRequested) {
+        this._endPerfSpan(_perfToken);
+        this._activePerfRecorder = null;
+        return false;
+      }
     }
+    this._endPerfSpan(_perfToken);
+    _perfToken = this._beginPerfSpan('viewportUniforms', 'render');
 
     this.syncComposeViewportUniforms(renderer, camera);
+    this._endPerfSpan(_perfToken);
+    _perfToken = this._beginPerfSpan('composeDraw', 'render');
 
     const prevTarget = renderer.getRenderTarget();
     const prevAutoClear = renderer.autoClear;
     const THREE = window.THREE;
 
+    this._endPerfSpan(_perfToken);
+    _perfToken = this._beginPerfSpan('bloomMrtMode', 'render');
     this._syncBloomMrtShaderMode();
     const useMrt = !!(THREE?.WebGLMultipleRenderTargets && this._wantsSpecularBloomMrt());
+    this._endPerfSpan(_perfToken);
 
     try {
       if (useMrt && this._blitCopyScene && this._blitCopyCamera && this._blitCopyMaterial) {
         const mrt = this._ensureWaterMrt(THREE, inputRT.width, inputRT.height);
         if (mrt) {
+          _perfToken = this._beginPerfSpan('composeMrtShader', 'render');
           renderer.setRenderTarget(mrt);
           renderer.autoClear = true;
           renderer.setClearColor(0x000000, 0);
           renderer.render(this._composeScene, this._composeCamera);
+          this._endPerfSpan(_perfToken);
+          _perfToken = this._beginPerfSpan('composeMrtBlit', 'render');
           this._blitCopyMaterial.map = mrt.texture[0];
           renderer.setRenderTarget(outputRT);
           renderer.autoClear = true;
           renderer.setClearColor(0x000000, 0);
           renderer.render(this._blitCopyScene, this._blitCopyCamera);
+          this._endPerfSpan(_perfToken);
+          _perfToken = null;
         } else {
           this.disposeWaterMrt();
+          _perfToken = this._beginPerfSpan('composeSingleDraw', 'render');
           renderer.setRenderTarget(outputRT);
           renderer.autoClear = true;
           renderer.setClearColor(0x000000, 0);
           renderer.render(this._composeScene, this._composeCamera);
+          this._endPerfSpan(_perfToken);
+          _perfToken = null;
         }
       } else {
         this.disposeWaterMrt();
+        _perfToken = this._beginPerfSpan('composeSingleDraw', 'render');
         renderer.setRenderTarget(outputRT);
         renderer.autoClear = true;
         renderer.setClearColor(0x000000, 0);
         renderer.render(this._composeScene, this._composeCamera);
+        this._endPerfSpan(_perfToken);
+        _perfToken = null;
       }
     } finally {
       renderer.autoClear = prevAutoClear;
       renderer.setRenderTarget(prevTarget);
     }
+    this._endPerfSpan(_perfToken);
+    this._activePerfRecorder = null;
     return true;
   }
+
   /**
    * Handle floor change — swap active water SDF data.
    * @param {number} maxFloorIndex
@@ -4331,6 +4515,7 @@ static getControlSchema() {
       uSpecModel:           { value: (p.specModel ?? 0) ? 1.0 : 0.0 },
       uSpecClamp:           { value: p.specClamp ?? 0.0 },
       uSpecSunDir:          { value: new THREE.Vector3(0.5, 0.5, 0.707) },
+      uSpecSunElevationDeg: { value: safeNum(p.specSunElevationDeg, 45) },
       uSpecSunIntensity:    { value: p.specSunIntensity },
       uSpecNormalStrength:  { value: p.specNormalStrength },
       uSpecNormalScale:     { value: p.specNormalScale },

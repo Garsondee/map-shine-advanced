@@ -1912,6 +1912,228 @@ export const consoleHelpers = {
   },
 
   /**
+   * Snapshot WaterEffectV2 params vs live shader uniforms and floor routing.
+   * Use before/after changing levels; paste the printed object into a bug report.
+   *
+   * Usage:
+   *   MapShine.debug.probeWaterFloorConfig()
+   *   MapShine.debug.probeWaterFloorConfig({ watch: true })
+   *   MapShine.debug.probeWaterFloorConfig.stop()
+   *
+   * @param {{ watch?: boolean, intervalMs?: number, log?: boolean }} [opts]
+   * @returns {object}
+   */
+  probeWaterFloorConfig(opts = {}) {
+    const ms = window.MapShine ?? {};
+    const fc = ms.effectComposer?._floorCompositorV2 ?? ms.floorCompositorV2 ?? null;
+    const we = fc?._waterEffect ?? ms.waterEffect ?? null;
+    const fs = ms.floorStack ?? null;
+    const u = we?._composeMaterial?.uniforms ?? null;
+
+    const texId = (tex) => {
+      if (!tex) return null;
+      try {
+        return tex.uuid ?? tex.image?.src?.slice?.(-48) ?? String(tex);
+      } catch (_) {
+        return 'tex';
+      }
+    };
+
+    const texSize = (tex) => {
+      if (!tex) return null;
+      const img = tex?.image;
+      const w = img?.width ?? img?.videoWidth ?? tex?.source?.data?.width ?? null;
+      const h = img?.height ?? img?.videoHeight ?? tex?.source?.data?.height ?? null;
+      return (w && h) ? { w, h } : null;
+    };
+
+    const active = fs?.getActiveFloor?.() ?? null;
+    const visible = fs?.getVisibleFloors?.() ?? [];
+    const visibleIndices = visible.map((f) => Number(f?.index));
+    const sceneFloorCount = floorStack?.getFloors?.()?.length ?? visible.length;
+    const usePostMergeWater = sceneFloorCount > 1;
+
+    const paramsUseSdf = we?.params?.useSdfMask;
+    const uniformUseSdf = Number(u?.uUseSdfMask?.value);
+    const paramsMaskThr = we?.params?.maskThreshold;
+    const uniformMaskThr = Number(u?.uWaterRawMaskThreshold?.value);
+
+    const floorWaterKeys = we?._floorWater
+      ? [...we._floorWater.keys()].map((k) => Number(k))
+      : [];
+    const activeWaterFloor = Number.isFinite(Number(we?._activeFloorIndex))
+      ? Number(we._activeFloorIndex)
+      : null;
+    const cachedFloorPack = (activeWaterFloor != null && we?._floorWater?.get)
+      ? we._floorWater.get(activeWaterFloor)
+      : null;
+
+    const outdoorsRoute = ms.__v2OutdoorsRoute ?? null;
+    const waterDebug = ms.__waterDebug ?? null;
+
+    const snap = {
+      at: new Date().toISOString(),
+      floor: {
+        activeIndex: Number.isFinite(Number(active?.index)) ? Number(active.index) : null,
+        activeCompositorKey: active?.compositorKey ?? null,
+        activeLevelContext: ms.activeLevelContext ?? null,
+        visibleIndices,
+        visibleCount: visible.length,
+        sceneFloorCount: floorStack?.getFloors?.()?.length ?? visible.length,
+        usePostMergeWater,
+        usePostMergeWaterLegacyVisibleGate: visible.length > 1,
+        compositorActiveFloorIndex: Number.isFinite(Number(fc?._activeFloorIndex))
+          ? Number(fc._activeFloorIndex)
+          : null,
+      },
+      waterEffect: {
+        instanceId: we?._instanceId ?? null,
+        initialized: !!we?._initialized,
+        realShaderCompiled: !!we?._realShaderCompiled,
+        enabled: !!we?.enabled,
+        hasAnyWaterData: !!we?._hasAnyWaterData,
+        activeFloorIndex: Number.isFinite(Number(we?._activeFloorIndex))
+          ? Number(we._activeFloorIndex)
+          : null,
+        perLevelOverride: Number.isFinite(Number(we?._perLevelOverride))
+          ? Number(we._perLevelOverride)
+          : -1,
+        floorWaterKeys,
+        cachedPackSignature: cachedFloorPack?.packSignature ?? null,
+        cachedTextures: cachedFloorPack ? {
+          tWaterData: texId(cachedFloorPack?.waterData?.texture),
+          tWaterRawMask: texId(cachedFloorPack?.rawMask ?? cachedFloorPack?.waterData?.rawMaskTexture),
+        } : null,
+      },
+      settings: {
+        params: {
+          useSdfMask: paramsUseSdf,
+          maskThreshold: paramsMaskThr,
+          debugView: we?.params?.debugView ?? 0,
+        },
+        uniforms: {
+          uUseSdfMask: uniformUseSdf,
+          uWaterRawMaskThreshold: uniformMaskThr,
+          uDebugView: Number(u?.uDebugView?.value),
+          uCrossSliceWaterData: Number(u?.uCrossSliceWaterData?.value),
+          uWaterEnabled: Number(u?.uWaterEnabled?.value),
+        },
+      },
+      masks: {
+        uHasWaterData: Number(u?.uHasWaterData?.value),
+        uHasWaterRawMask: Number(u?.uHasWaterRawMask?.value),
+        tWaterData: { id: texId(u?.tWaterData?.value), size: texSize(u?.tWaterData?.value) },
+        tWaterRawMask: { id: texId(u?.tWaterRawMask?.value), size: texSize(u?.tWaterRawMask?.value) },
+        uHasOutdoorsMask: Number(u?.uHasOutdoorsMask?.value),
+        tOutdoorsMask: { id: texId(u?.tOutdoorsMask?.value), size: texSize(u?.tOutdoorsMask?.value) },
+        uOutdoorsMaskFlipY: Number(u?.uOutdoorsMaskFlipY?.value),
+        outdoorsRoute,
+        frameWaterSourceDeck: waterDebug?.lastSourceFloorIndex ?? null,
+      },
+      mismatches: [],
+    };
+
+    const sdfOffInParams = paramsUseSdf === false;
+    const sdfOffInUniform = uniformUseSdf < 0.5;
+    if (sdfOffInParams !== sdfOffInUniform) {
+      snap.mismatches.push({
+        code: 'SDF_PARAMS_UNIFORM',
+        message: `params.useSdfMask=${paramsUseSdf} but uUseSdfMask=${uniformUseSdf}`,
+      });
+    }
+    if (sdfOffInParams && !sdfOffInUniform) {
+      snap.mismatches.push({
+        code: 'SDF_STUCK_ON',
+        message: 'SDF disabled in params but shader uniform still ON',
+      });
+    }
+    if (
+      Number.isFinite(paramsMaskThr)
+      && Number.isFinite(uniformMaskThr)
+      && Math.abs(paramsMaskThr - uniformMaskThr) > 1e-4
+    ) {
+      snap.mismatches.push({
+        code: 'MASK_THRESHOLD_DRIFT',
+        message: `params.maskThreshold=${paramsMaskThr} vs uniform=${uniformMaskThr}`,
+      });
+    }
+    if (we?._perLevelOverride >= 0 && usePostMergeWater) {
+      snap.mismatches.push({
+        code: 'PER_LEVEL_OVERRIDE_DURING_POST_MERGE',
+        message: `_perLevelOverride=${we._perLevelOverride} while post-merge water active`,
+      });
+    }
+    const cachedWd = snap.waterEffect.cachedTextures?.tWaterData ?? null;
+    const boundWd = snap.masks.tWaterData?.id ?? null;
+    if (cachedWd && boundWd && cachedWd !== boundWd) {
+      snap.mismatches.push({
+        code: 'WATER_TEX_NOT_FROM_CACHE',
+        message: `shader tWaterData (${boundWd}) !== cached floor pack (${cachedWd})`,
+      });
+    }
+
+    snap.ok = snap.mismatches.length === 0;
+    snap.summary = snap.ok
+      ? 'params and uniforms agree'
+      : snap.mismatches.map((m) => m.code).join(', ');
+
+    if (opts.log !== false) {
+      try {
+        console.groupCollapsed(`[probeWaterFloorConfig] ${snap.summary} | floor ${snap.floor.activeIndex}`);
+        console.log(snap);
+        if (snap.mismatches.length) console.warn('MISMATCHES:', snap.mismatches);
+        console.groupEnd();
+      } catch (_) {}
+    }
+
+    if (opts.watch === true) {
+      const intervalMs = Math.max(100, Number(opts.intervalMs) || 400);
+      if (consoleHelpers._waterFloorProbeTimer) {
+        clearInterval(consoleHelpers._waterFloorProbeTimer);
+      }
+      const sigOf = (s) => JSON.stringify({
+        fi: s.floor.activeIndex,
+        vi: s.floor.visibleIndices,
+        post: s.floor.usePostMergeWater,
+        wd: s.masks.tWaterData?.id,
+        cwd: s.waterEffect.cachedTextures?.tWaterData,
+        sdfP: s.settings.params.useSdfMask,
+        sdfU: s.settings.uniforms.uUseSdfMask,
+        afi: s.waterEffect.activeFloorIndex,
+        plo: s.waterEffect.perLevelOverride,
+        cross: s.settings.uniforms.uCrossSliceWaterData,
+        out: s.masks.tOutdoorsMask?.id,
+      });
+      let lastSig = sigOf(snap);
+      consoleHelpers._waterFloorProbeLast = snap;
+      consoleHelpers._waterFloorProbeTimer = setInterval(() => {
+        const next = consoleHelpers.probeWaterFloorConfig({ log: false, watch: false });
+        const sig = sigOf(next);
+        if (sig !== lastSig) {
+          lastSig = sig;
+          consoleHelpers._waterFloorProbeLast = next;
+          console.warn('[probeWaterFloorConfig] CHANGE', next);
+        }
+      }, intervalMs);
+      console.info(
+        `[probeWaterFloorConfig] watching every ${intervalMs}ms — change floors, paste CHANGE logs. Stop: MapShine.probeWaterFloorConfig.stop()`,
+      );
+    }
+
+    return snap;
+  },
+
+  probeWaterFloorConfigStop() {
+    if (consoleHelpers._waterFloorProbeTimer) {
+      clearInterval(consoleHelpers._waterFloorProbeTimer);
+      consoleHelpers._waterFloorProbeTimer = null;
+    }
+    const last = consoleHelpers._waterFloorProbeLast ?? null;
+    console.info('[probeWaterFloorConfig] watch stopped', last ? { last } : '');
+    return last;
+  },
+
+  /**
    * Read back the RGBA of every per-level final RT (plus the water occluder
    * RT if present) at screen pixel (x, y).
    *
@@ -2741,6 +2963,9 @@ Available commands (access via MapShine.debug):
   .skyReachProbe(x,y,fIdx)  - Read back skyReach value at world (x,y) for a floor
   .diagnoseSkyReachV2()     - Table: per-floor skyReach/floorAlpha + uHasSkyReach (why shelter is invisible)
   .setMaskBindingController(bool) - Toggle the unified mask binding controller rollout
+  .probeWaterFloorConfig()  - Params vs shader uniforms (useSdfMask, outdoors, floor routing); paste for bugs
+  .probeWaterFloorConfig({ watch: true }) - Log when water config changes on floor navigation
+  .probeWaterFloorConfig.stop() - Stop watch mode
   .levelAlphaProbe(x,y)     - Read scene+final RT alpha per level (+ water occluder) at canvas pixel (x,y)
   .dumpLevelRTs()           - Dump each level's sceneRT (authored) AND finalRT (post-rebind) to PNG tabs
   .busInventory()           - Console.table of every FloorRenderBus entry: floorIndex, textureSrc, alpha flags
@@ -2902,6 +3127,12 @@ export function installConsoleHelpers() {
       }
     };
     
+    // Water floor / SDF / outdoors config probe (paste output into bug reports).
+    const _probeWater = (opts) => consoleHelpers.probeWaterFloorConfig(opts);
+    _probeWater.stop = () => consoleHelpers.probeWaterFloorConfigStop();
+    window.MapShine.probeWaterFloorConfig = _probeWater;
+    consoleHelpers.probeWaterFloorConfig.stop = _probeWater.stop;
+
     // Water occluder diagnostic ->-> call MapShine.debugWaterOccluder() in the browser console
     // to dump the actual runtime state of all blocker meshes and the occluder RT.
     window.MapShine.debugWaterOccluder = () => {

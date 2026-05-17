@@ -16,6 +16,7 @@ import { loadAssetBundle, loadTexture } from '../../assets/loader.js';
 import { getViewedLevelBackgroundSrc } from '../../foundry/levels-scene-flags.js';
 import { getMaskTextureManifest, maskTextureManifestMatchesLoadContext } from '../../settings/mask-manifest-flags.js';
 import { collectCompositorFloorCandidateKeys, resolveCompositorFloorMaskTexture, resolveCompositorOutdoorsTexture } from '../../masks/resolve-compositor-outdoors.js';
+import { FLOOR_ID_OUTDOORS_RECEIVER_GLSL } from '../shadow-system/DirectionalShadowProjector.js';
 
 const log = createLogger('PaintedShadowEffectV2');
 const MAX_PAINTED_SHADOW_EDGE_PX = 3072;
@@ -102,6 +103,12 @@ export class PaintedShadowEffectV2 {
 
   setDynamicLightOverride(payload = null) {
     this._dynamicLightOverride = payload && typeof payload === 'object' ? payload : null;
+  }
+
+  setDriver(driverState = null) {
+    if (!driverState) return;
+    this.setSunAngles(driverState.sun?.azimuthDeg, driverState.sun?.elevationDeg);
+    this.setDynamicLightOverride(driverState.dynamicLightOverride ?? null);
   }
 
   /**
@@ -368,8 +375,17 @@ export class PaintedShadowEffectV2 {
         uHasPaintedShadow: { value: 0.0 },
         uHasOutdoorsMask: { value: 0.0 },
         uHasFloorIdTex: { value: 0.0 },
+        uFloorIdFlipY: { value: 1.0 },
         uPaintedFlipY: { value: 0.0 },
         uOutdoorsFlipY: { value: 0.0 },
+        uHasOutdoors0: { value: 0.0 },
+        uHasOutdoors1: { value: 0.0 },
+        uHasOutdoors2: { value: 0.0 },
+        uHasOutdoors3: { value: 0.0 },
+        uOutdoors0FlipY: { value: 0.0 },
+        uOutdoors1FlipY: { value: 0.0 },
+        uOutdoors2FlipY: { value: 0.0 },
+        uOutdoors3FlipY: { value: 0.0 },
         uSunDir: { value: new THREE.Vector2(0.0, -1.0) },
         uOpacity: { value: this.params.opacity },
         uLength: { value: this.params.length },
@@ -392,7 +408,7 @@ export class PaintedShadowEffectV2 {
           gl_Position = vec4(position.xy, 0.0, 1.0);
         }
       `,
-      fragmentShader: `
+      fragmentShader: `${FLOOR_ID_OUTDOORS_RECEIVER_GLSL}
         uniform sampler2D tPaintedShadow;
         uniform sampler2D tPaintedShadow0;
         uniform sampler2D tPaintedShadow1;
@@ -407,6 +423,15 @@ export class PaintedShadowEffectV2 {
         uniform float uHasPaintedShadow;
         uniform float uHasOutdoorsMask;
         uniform float uHasFloorIdTex;
+        uniform float uFloorIdFlipY;
+        uniform float uHasOutdoors0;
+        uniform float uHasOutdoors1;
+        uniform float uHasOutdoors2;
+        uniform float uHasOutdoors3;
+        uniform float uOutdoors0FlipY;
+        uniform float uOutdoors1FlipY;
+        uniform float uOutdoors2FlipY;
+        uniform float uOutdoors3FlipY;
         uniform float uPaintedFlipY;
         uniform float uOutdoorsFlipY;
         uniform vec2 uSunDir;
@@ -437,8 +462,9 @@ export class PaintedShadowEffectV2 {
 
         float readFloorIndex(vec2 sceneUvFoundry) {
           if (uHasFloorIdTex < 0.5) return -1.0;
-          vec2 sceneUvThree = vec2(sceneUvFoundry.x, 1.0 - sceneUvFoundry.y);
-          float fid = texture2D(tFloorIdTex, sceneUvThree).r;
+          vec2 fidUv = clamp(sceneUvFoundry, 0.0, 1.0);
+          if (uFloorIdFlipY > 0.5) fidUv.y = 1.0 - fidUv.y;
+          float fid = texture2D(tFloorIdTex, fidUv).r;
           return floor(fid * 255.0 + 0.5);
         }
 
@@ -451,16 +477,25 @@ export class PaintedShadowEffectV2 {
         }
 
         float readOutdoors(vec2 uv) {
-          float floorIdx = readFloorIndex(uv);
-          if (floorIdx >= 0.0) {
-            vec2 suv = clamp(uv, vec2(0.0), vec2(1.0));
-            if (uOutdoorsFlipY > 0.5) suv.y = 1.0 - suv.y;
-            vec4 m;
-            if (floorIdx < 0.5) m = texture2D(tOutdoors0, suv);
-            else if (floorIdx < 1.5) m = texture2D(tOutdoors1, suv);
-            else if (floorIdx < 2.5) m = texture2D(tOutdoors2, suv);
-            else m = texture2D(tOutdoors3, suv);
-            return clamp(mix(1.0, m.r, m.a), 0.0, 1.0);
+          if (uHasFloorIdTex > 0.5) {
+            return msa_readFloorIdOutdoors(
+              uv,
+              tFloorIdTex,
+              uHasFloorIdTex,
+              uFloorIdFlipY,
+              tOutdoors0,
+              tOutdoors1,
+              tOutdoors2,
+              tOutdoors3,
+              uHasOutdoors0,
+              uHasOutdoors1,
+              uHasOutdoors2,
+              uHasOutdoors3,
+              uOutdoors0FlipY,
+              uOutdoors1FlipY,
+              uOutdoors2FlipY,
+              uOutdoors3FlipY
+            );
           }
           vec2 suv = clamp(uv, vec2(0.0), vec2(1.0));
           if (uOutdoorsFlipY > 0.5) suv.y = 1.0 - suv.y;
@@ -855,8 +890,14 @@ export class PaintedShadowEffectV2 {
       pu.uHasPaintedShadow.value = 1.0;
       pu.uHasOutdoorsMask.value = 1.0;
       pu.uHasFloorIdTex.value = this._floorIdTex ? 1.0 : 0.0;
+      pu.uFloorIdFlipY.value = 1.0;
       pu.uPaintedFlipY.value = paintedTex?.flipY ? 1.0 : 0.0;
       pu.uOutdoorsFlipY.value = outdoorsTex?.flipY ? 1.0 : 0.0;
+      for (let i = 0; i < 4; i++) {
+        const t = pu[`tOutdoors${i}`].value;
+        pu[`uHasOutdoors${i}`].value = t ? 1.0 : 0.0;
+        pu[`uOutdoors${i}FlipY`].value = t?.flipY ? 1.0 : 0.0;
+      }
       pu.uSunDir.value.copy(this.sunDir || { x: 0.0, y: -1.0 });
       pu.uOpacity.value = Math.max(0.0, Math.min(1.0, Number(this.params.opacity) || 0.0));
       pu.uLength.value = Math.max(0.0, Number(this.params.length) || 0.0);

@@ -2010,7 +2010,7 @@ export class ThreeLightSource {
     }
   }
 
-  updateAnimation(timeInfo, globalDarkness, skyTint) {
+  updateAnimation(timeInfo, globalDarkness, skyTint, shadowContext = null) {
     const dtSec = (timeInfo && typeof timeInfo.delta === 'number') ? timeInfo.delta : 0;
     const dtMs = dtSec * 1000;
     const tMs = (timeInfo && typeof timeInfo.elapsed === 'number') ? (timeInfo.elapsed * 1000) : 0;
@@ -2038,7 +2038,14 @@ export class ThreeLightSource {
       if (dr && typeof dr === 'object' && dr.enabled === true) {
         hasDarknessResponse = true;
         const d0 = (typeof globalDarkness === 'number' && Number.isFinite(globalDarkness)) ? globalDarkness : 0.0;
-        const d = Math.max(0.0, Math.min(1.0, d0));
+        let d = Math.max(0.0, Math.min(1.0, d0));
+        const skyOcc = Number(shadowContext?.skyOcclusion01);
+        if (Number.isFinite(skyOcc)) {
+          // Sky occlusion is open-sky (1=open, 0=covered). Treat covered areas
+          // as locally darker for darknessResponse lights while preserving the
+          // global day/night curve.
+          d = Math.max(d, 1.0 - Math.max(0.0, Math.min(1.0, skyOcc)));
+        }
 
         // invert=true means "day=1" at darkness=0.
         const invert = dr.invert !== false;

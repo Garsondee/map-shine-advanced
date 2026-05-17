@@ -125,13 +125,23 @@ export function getFoundryTimePhaseHours() {
   const dusk = Number.isFinite(duskCal) ? calendarHoursToMapHour(duskCal, units.hoursPerDay) : defaults.dusk;
   const midnight = Number.isFinite(midnightCal) ? calendarHoursToMapHour(midnightCal, units.hoursPerDay) : defaults.midnight;
 
+  // PF2E / calendar imports occasionally map dusk before dawn on the 0–24 axis.
+  // That makes the sunrise→sunset arc cross midnight and treats hour 0 as midday.
+  let sunrise = dawn;
+  let sunset = dusk;
+  if (sunrise > sunset) {
+    const tmp = sunrise;
+    sunrise = sunset;
+    sunset = tmp;
+  }
+
   return {
     midnight,
     dawn,
     noon,
     dusk,
-    sunrise: dawn,
-    sunset: dusk,
+    sunrise,
+    sunset,
     hoursPerDay: units.hoursPerDay
   };
 }

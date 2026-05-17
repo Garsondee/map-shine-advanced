@@ -2619,6 +2619,10 @@ export class ControlPanelManager {
     // During drag we only preview the target.
     this._dragTimeTarget = hour24;
     this.controlState.timeOfDay = hour24;
+    try {
+      const wc = coreWeatherController || window.MapShine?.weatherController;
+      wc?.setTime?.(hour24);
+    } catch (_) {}
     this._updateClockTarget(hour24);
 
     // Provide immediate feedback while dragging.

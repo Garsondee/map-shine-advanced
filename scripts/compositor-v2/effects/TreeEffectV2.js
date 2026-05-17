@@ -873,7 +873,7 @@ export class TreeEffectV2 {
       this._sharedUniforms.uFlutterScale.value = this.params.flutterScale;
       this._sharedUniforms.uShadowOpacity.value = this.params.shadowOpacity;
       this._sharedUniforms.uShadowLength.value = this.params.shadowLength;
-      this._sharedUniforms.uShadowSoftness.value = this.params.shadowSoftness;
+      this._sharedUniforms.uShadowSoftness.value = this.params.shadowSoftness * (Number(this._driverShadowSoftnessScale) || 1.0);
 
       this._sharedUniforms.uExposure.value = this.params.exposure;
       this._sharedUniforms.uBrightness.value = this.params.brightness;
@@ -1144,6 +1144,24 @@ export class TreeEffectV2 {
     this._createOverlay(tileId, floorIndex, { url, centerX, centerY, z, tileW, tileH, rotation });
   }
 
+  setBillboardShadowMode(enabled) {
+    if (!this._sharedUniforms?.uBillboardShadowMode) return;
+    this._sharedUniforms.uBillboardShadowMode.value = enabled ? 1.0 : 0.0;
+  }
+
+  /**
+   * @returns {{mesh: import('three').Mesh, uniforms: object}[]}
+   */
+  collectBillboardShadowOverlayEntries() {
+    if (!this._enabled || !this._initialized) return [];
+    const out = [];
+    for (const entry of this._overlays.values()) {
+      if (!entry?.mesh?.visible || !entry.material?.uniforms) continue;
+      out.push({ mesh: entry.mesh, uniforms: entry.material.uniforms });
+    }
+    return out;
+  }
+
   dispose() {
     this.clear();
     this._loader = null;
@@ -1200,6 +1218,8 @@ export class TreeEffectV2 {
       uShadowOpacity: { value: this.params.shadowOpacity },
       uShadowLength: { value: this.params.shadowLength },
       uShadowSoftness: { value: this.params.shadowSoftness },
+
+      uBillboardShadowMode: { value: 0.0 },
 
       uExposure: { value: this.params.exposure },
       uBrightness: { value: this.params.brightness },
@@ -1321,6 +1341,10 @@ export class TreeEffectV2 {
 
   _syncSunDirectionUniform() {
     if (!this._sharedUniforms?.uSunDir?.value) return;
+    if (this._driverSunDir) {
+      this._sharedUniforms.uSunDir.value.set(this._driverSunDir.x, this._driverSunDir.y);
+      return;
+    }
 
     let x = 0.0;
     let y = -1.0;
@@ -1348,6 +1372,16 @@ export class TreeEffectV2 {
     }
 
     this._sharedUniforms.uSunDir.value.set(x, y);
+  }
+
+  setDriver(driverState = null) {
+    const dir = driverState?.sun?.dir;
+    const x = Number(dir?.x);
+    const y = Number(dir?.y);
+    this._driverSunDir = (Number.isFinite(x) && Number.isFinite(y)) ? { x, y } : null;
+    if (Number.isFinite(Number(driverState?.tuning?.shadowSoftnessScale))) {
+      this._driverShadowSoftnessScale = Number(driverState.tuning.shadowSoftnessScale);
+    }
   }
 
   _createOverlay(tileId, floorIndex, opts) {
@@ -1417,6 +1451,7 @@ export class TreeEffectV2 {
         uniform float uShadowOpacity;
         uniform float uShadowLength;
         uniform float uShadowSoftness;
+        uniform float uBillboardShadowMode;
         uniform vec2  uSceneMin;
         uniform vec2  uSceneMax;
 
@@ -1630,6 +1665,7 @@ export class TreeEffectV2 {
           shadowWeight += 0.04;
 
           float shadowA = (shadowWeight > 0.0) ? (shadowAccum / shadowWeight) : 0.0;
+          if (uBillboardShadowMode > 0.5) shadowA = 0.0;
           shadowA *= clamp(uShadowOpacity, 0.0, 1.0) * uIntensity * edgeFade;
 
           float hf = clamp(uHoverFade, 0.0, 1.0);

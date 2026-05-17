@@ -121,6 +121,7 @@ export class SkyColorEffectV2 {
 
       skyTintDarknessLightsEnabled: true,
       skyTintDarknessLightsIntensity: 1.01,
+      shadowGradePreserve: 0.35,
 
       /**
        * How strongly Map Shine calendar / weather clock darkness is merged with Foundry
@@ -191,7 +192,7 @@ export class SkyColorEffectV2 {
     return {
       enabled: true,
       groups: [
-        { name: 'sky-color', label: 'Sky Color', type: 'inline', parameters: ['intensity', 'saturationBoost', 'vibranceBoost', 'skyTintDarknessLightsEnabled', 'skyTintDarknessLightsIntensity'] },
+        { name: 'sky-color', label: 'Sky Color', type: 'inline', parameters: ['intensity', 'saturationBoost', 'vibranceBoost', 'shadowGradePreserve', 'skyTintDarknessLightsEnabled', 'skyTintDarknessLightsIntensity'] },
         {
           name: 'day-night-grade',
           label: 'Day / night grade (brightness)',
@@ -229,6 +230,7 @@ export class SkyColorEffectV2 {
         intensity: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.8, label: 'Intensity', throttle: 50 },
         saturationBoost: { type: 'slider', min: -0.5, max: 0.5, step: 0.01, default: 0.35, label: 'Sat Boost', throttle: 50 },
         vibranceBoost: { type: 'slider', min: -0.5, max: 0.5, step: 0.01, default: 0.0, label: 'Vibrance', throttle: 50 },
+        shadowGradePreserve: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.35, label: 'Shadow Preserve', throttle: 50 },
         sunriseHour: { type: 'slider', min: 0, max: 24, step: 0.05, default: 6.0, label: 'Sunrise', throttle: 50 },
         sunsetHour: { type: 'slider', min: 0, max: 24, step: 0.05, default: 18.0, label: 'Sunset', throttle: 50 },
         goldenHourWidth: { type: 'slider', min: 0.25, max: 6.0, step: 0.05, default: 6.0, label: 'Golden Width', throttle: 50 },
@@ -343,15 +345,21 @@ export class SkyColorEffectV2 {
         tDiffuse:    { value: null },
         tOutdoorsMask: { value: this._fallbackWhite },
         tSkyReachMask: { value: this._fallbackWhite },
+        tSkyOcclusion: { value: this._fallbackWhite },
+        tCombinedShadow: { value: this._fallbackWhite },
         tDynamicLightMask: { value: this._fallbackBlack },
         tWindowLightMask: { value: this._fallbackBlack },
         uTime:       { value: 0.0 },
         uResolution: { value: new THREE.Vector2(1, 1) },
         uHasOutdoorsMask: { value: 0.0 },
         uHasSkyReachMask: { value: 0.0 },
+        uHasSkyOcclusion: { value: 0.0 },
+        uHasCombinedShadow: { value: 0.0 },
+        uCombinedShadowEffectStrength: { value: 1.0 },
         uHasIlluminationMask: { value: 0.0 },
         uOutdoorsMaskFlipY: { value: 0.0 },
         uSkyReachMaskFlipY: { value: 0.0 },
+        uShadowGradePreserve: { value: 0.35 },
         uViewBoundsMin: { value: new THREE.Vector2(0, 0) },
         uViewBoundsMax: { value: new THREE.Vector2(1, 1) },
         uSceneBounds: { value: new THREE.Vector4(0, 0, 1, 1) },
@@ -391,15 +399,21 @@ export class SkyColorEffectV2 {
         uniform sampler2D tDiffuse;
         uniform sampler2D tOutdoorsMask;
         uniform sampler2D tSkyReachMask;
+        uniform sampler2D tSkyOcclusion;
+        uniform sampler2D tCombinedShadow;
         uniform sampler2D tDynamicLightMask;
         uniform sampler2D tWindowLightMask;
         uniform vec2 uResolution;
         uniform float uTime;
         uniform float uHasOutdoorsMask;
         uniform float uHasSkyReachMask;
+        uniform float uHasSkyOcclusion;
+        uniform float uHasCombinedShadow;
+        uniform float uCombinedShadowEffectStrength;
         uniform float uHasIlluminationMask;
         uniform float uOutdoorsMaskFlipY;
         uniform float uSkyReachMaskFlipY;
+        uniform float uShadowGradePreserve;
         uniform vec2 uViewBoundsMin;
         uniform vec2 uViewBoundsMax;
         uniform vec4 uSceneBounds;
@@ -503,6 +517,20 @@ export class SkyColorEffectV2 {
           return mix(1.0, outdoorMaskSample * skyReachSample, inScene);
         }
 
+        float sampleSkyOcclusion(vec2 screenUv) {
+          if (uHasSkyOcclusion < 0.5) return 1.0;
+          vec2 worldXY = mix(uViewBoundsMin, uViewBoundsMax, screenUv);
+          vec2 sceneUvRaw = vec2(
+            (worldXY.x - uSceneBounds.x) / max(1e-5, uSceneBounds.z),
+            1.0 - ((worldXY.y - uSceneBounds.y) / max(1e-5, uSceneBounds.w))
+          );
+          float inScene =
+            step(0.0, sceneUvRaw.x) * step(sceneUvRaw.x, 1.0) *
+            step(0.0, sceneUvRaw.y) * step(sceneUvRaw.y, 1.0);
+          vec2 sceneUv = clamp(sceneUvRaw, vec2(0.0), vec2(1.0));
+          return mix(1.0, clamp(texture2D(tSkyOcclusion, sceneUv).r, 0.0, 1.0), inScene);
+        }
+
         float sampleDirectIllumination(vec2 screenUv) {
           if (uHasIlluminationMask < 0.5) return 0.0;
           vec3 dynamicLight = texture2D(tDynamicLightMask, screenUv).rgb;
@@ -510,6 +538,13 @@ export class SkyColorEffectV2 {
           float dynamicI = max(dynamicLight.r, max(dynamicLight.g, dynamicLight.b));
           float windowI = max(windowLight.r, max(windowLight.g, windowLight.b));
           return smoothstep(0.015, 0.18, max(dynamicI, windowI));
+        }
+
+        /** Combined shadow R: 1 = lit. Strength >= 1 scales up subtle darkening (penumbra). */
+        float amplifyCombinedShadowLit(float lit01, float strength) {
+          float s = max(strength, 1.0);
+          float dark = 1.0 - clamp(lit01, 0.0, 1.0);
+          return 1.0 - min(1.0, dark * s);
         }
 
         void main() {
@@ -525,6 +560,18 @@ export class SkyColorEffectV2 {
           vec3 color = base;
           float outdoorVis = clamp(sampleOutdoorsMask(vUv), 0.0, 1.0);
           float skyEligible = outdoorVis;
+          skyEligible *= sampleSkyOcclusion(vUv);
+
+          // Sample once: R channel 1 = fully lit. Used to damp sky grade / warm recolor on
+          // outdoor pixels so subtle geometric shadow (sky-reach, soft penumbra) is not
+          // erased by lift/gain + grading — interiors already keep base via low skyEligible.
+          float combinedShadowR = uHasCombinedShadow > 0.5
+            ? clamp(texture2D(tCombinedShadow, vUv).r, 0.0, 1.0)
+            : 1.0;
+          combinedShadowR = amplifyCombinedShadowLit(combinedShadowR, uCombinedShadowEffectStrength);
+          // Old smoothstep(0, 0.5, r) hit full grading at R=0.5 — anything “not deep building
+          // shadow” became full sky replace and washed out small outdoor darkening.
+          float gradeBlend = smoothstep(0.74, 1.0, combinedShadowR);
 
           // 1) Exposure (stops)
           color *= exp2(uExposure);
@@ -585,14 +632,15 @@ export class SkyColorEffectV2 {
 
           // Dramatic golden-hour recolor for outdoors.
           if (uGoldenRecolorStrength > 0.0001) {
-            float recolorAmt = clamp(uGoldenRecolorStrength * skyEligible, 0.0, 1.0);
+            float recolorAmt = clamp(uGoldenRecolorStrength * skyEligible * gradeBlend, 0.0, 1.0);
             vec3 warmShift = color * uGoldenRecolorColor;
             color = mix(color, warmShift, recolorAmt);
           }
 
           // Blend grade only where outdoor visibility says the sky should apply.
           // This keeps interiors neutral when a valid _Outdoors mask is present.
-          float mask = clamp(uIntensity * skyEligible, 0.0, 1.0);
+          float gradeDamp = mix(clamp(uShadowGradePreserve, 0.0, 1.0), 1.0, gradeBlend);
+          float mask = clamp(uIntensity * skyEligible * gradeDamp, 0.0, 1.0);
           vec3 finalColor = mix(base, color, mask);
 
           gl_FragColor = vec4(finalColor, sceneColor.a);
@@ -667,6 +715,32 @@ export class SkyColorEffectV2 {
     u.tSkyReachMask.value = skyReachTex ?? this._fallbackWhite;
     u.uHasSkyReachMask.value = skyReachTex ? 1.0 : 0.0;
     u.uSkyReachMaskFlipY.value = skyReachTex?.flipY ? 1.0 : 0.0;
+  }
+
+  setSkyOcclusionTexture(texture) {
+    const u = this._composeMaterial?.uniforms;
+    if (!u) return;
+    u.tSkyOcclusion.value = texture ?? this._fallbackWhite;
+    u.uHasSkyOcclusion.value = texture ? 1.0 : 0.0;
+  }
+
+  setCombinedShadowTexture(texture) {
+    const u = this._composeMaterial?.uniforms;
+    if (!u) return;
+    u.tCombinedShadow.value = texture ?? this._fallbackWhite;
+    u.uHasCombinedShadow.value = texture ? 1.0 : 0.0;
+  }
+
+  /**
+   * Matches {@link LightingEffectV2} `combinedShadowEffectStrength` (1–10).
+   * Wired from FloorCompositor each frame after lighting updates.
+   * @param {number} strength
+   */
+  setCombinedShadowEffectStrength(strength) {
+    const u = this._composeMaterial?.uniforms;
+    if (!u?.uCombinedShadowEffectStrength) return;
+    const s = Number(strength);
+    u.uCombinedShadowEffectStrength.value = Number.isFinite(s) ? Math.max(1.0, Math.min(10.0, s)) : 1.0;
   }
 
   /**
@@ -1043,6 +1117,9 @@ export class SkyColorEffectV2 {
       }
 
       u.uIntensity.value = effectiveIntensity;
+      if (u.uShadowGradePreserve) {
+        u.uShadowGradePreserve.value = clamp01(this.params.shadowGradePreserve ?? 0.35);
+      }
     } catch (e) {
       if (Math.random() < 0.01) {
         log.warn('SkyColorEffectV2 update failed:', e);

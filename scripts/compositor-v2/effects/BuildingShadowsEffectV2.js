@@ -26,6 +26,10 @@
 import { createLogger } from '../../core/log.js';
 import { weatherController } from '../../core/WeatherController.js';
 import { resolveCompositorOutdoorsTexture } from '../../masks/resolve-compositor-outdoors.js';
+import { FLOOR_ID_OUTDOORS_RECEIVER_GLSL } from '../shadow-system/DirectionalShadowProjector.js';
+import { getUnifiedShadowLatitudeScale } from '../shadow-system/SunDirection.js';
+import { collectOutdoorsTexturesByFloorIndex } from '../shadow-system/floor-outdoors-slots.js';
+import { resolveReceiverOutdoorsMaskTexture } from '../shadow-system/resolve-receiver-outdoors-mask.js';
 
 const log = createLogger('BuildingShadowsEffectV2');
 
@@ -257,7 +261,22 @@ export class BuildingShadowsEffectV2 {
         uDynViewBounds: { value: new THREE.Vector4(0, 0, 1, 1) },
         uDynSceneDimensions: { value: new THREE.Vector2(1, 1) },
         uDynSceneRect: { value: new THREE.Vector4(0, 0, 1, 1) },
-        uHasDynSceneRect: { value: 0.0 }
+        uHasDynSceneRect: { value: 0.0 },
+        tFloorId: { value: null },
+        uHasFloorId: { value: 0.0 },
+        uFloorIdFlipY: { value: 1.0 },
+        tOutdoors0: { value: null },
+        tOutdoors1: { value: null },
+        tOutdoors2: { value: null },
+        tOutdoors3: { value: null },
+        uHasOutdoors0: { value: 0.0 },
+        uHasOutdoors1: { value: 0.0 },
+        uHasOutdoors2: { value: 0.0 },
+        uHasOutdoors3: { value: 0.0 },
+        uOutdoors0FlipY: { value: 0.0 },
+        uOutdoors1FlipY: { value: 0.0 },
+        uOutdoors2FlipY: { value: 0.0 },
+        uOutdoors3FlipY: { value: 0.0 },
       },
       vertexShader: `
         varying vec2 vUv;
@@ -266,13 +285,28 @@ export class BuildingShadowsEffectV2 {
           gl_Position = vec4(position.xy, 0.0, 1.0);
         }
       `,
-      fragmentShader: `
+      fragmentShader: `${FLOOR_ID_OUTDOORS_RECEIVER_GLSL}
         uniform sampler2D uOutdoorsMask;
         uniform float uHasMask;
         uniform float uOutdoorsMaskFlipY;
         uniform sampler2D uReceiverOutdoorsMask;
         uniform float uHasReceiverMask;
         uniform float uReceiverOutdoorsMaskFlipY;
+        uniform sampler2D tFloorId;
+        uniform float uHasFloorId;
+        uniform float uFloorIdFlipY;
+        uniform sampler2D tOutdoors0;
+        uniform sampler2D tOutdoors1;
+        uniform sampler2D tOutdoors2;
+        uniform sampler2D tOutdoors3;
+        uniform float uHasOutdoors0;
+        uniform float uHasOutdoors1;
+        uniform float uHasOutdoors2;
+        uniform float uHasOutdoors3;
+        uniform float uOutdoors0FlipY;
+        uniform float uOutdoors1FlipY;
+        uniform float uOutdoors2FlipY;
+        uniform float uOutdoors3FlipY;
         uniform vec2 uSunDir;
         uniform float uLength;
         uniform float uSoftness;
@@ -314,6 +348,26 @@ export class BuildingShadowsEffectV2 {
         }
 
         float readReceiverOutdoorsMask(vec2 uv) {
+          if (uHasFloorId > 0.5) {
+            return msa_readFloorIdOutdoors(
+              uv,
+              tFloorId,
+              uHasFloorId,
+              uFloorIdFlipY,
+              tOutdoors0,
+              tOutdoors1,
+              tOutdoors2,
+              tOutdoors3,
+              uHasOutdoors0,
+              uHasOutdoors1,
+              uHasOutdoors2,
+              uHasOutdoors3,
+              uOutdoors0FlipY,
+              uOutdoors1FlipY,
+              uOutdoors2FlipY,
+              uOutdoors3FlipY
+            );
+          }
           if (uHasReceiverMask < 0.5) return readOutdoorsMask(uv);
           vec2 suv = clamp(uv, 0.0, 1.0);
           if (uReceiverOutdoorsMaskFlipY > 0.5) {
@@ -581,7 +635,7 @@ export class BuildingShadowsEffectV2 {
 
     const u = this._projectMaterial.uniforms;
     u.uLength.value = this.params.length;
-    u.uSoftness.value = this.params.softness;
+    u.uSoftness.value = this.params.softness * (Number(this._driverShadowSoftnessScale) || 1.0);
     u.uSmear.value = this.params.smear;
     u.uPenumbra.value = this.params.penumbra;
     u.uShadowCurve.value = this.params.shadowCurve;
@@ -647,6 +701,17 @@ export class BuildingShadowsEffectV2 {
 
   setDynamicLightOverride(payload = null) {
     this._dynamicLightOverride = payload && typeof payload === 'object' ? payload : null;
+  }
+
+  setDriver(driverState = null) {
+    if (!driverState) return;
+    this.setSunAngles(driverState.sun?.azimuthDeg, driverState.sun?.elevationDeg);
+    this.setDynamicLightOverride(driverState.dynamicLightOverride ?? null);
+    // Phase 5: driver-derived softness scales every directional producer from
+    // the same cloud-cover response while preserving the artist-authored base.
+    if (Number.isFinite(Number(driverState.tuning?.shadowSoftnessScale))) {
+      this._driverShadowSoftnessScale = Number(driverState.tuning.shadowSoftnessScale);
+    }
   }
 
   /**
@@ -758,9 +823,21 @@ export class BuildingShadowsEffectV2 {
 
     const receiverMaskTex = this._resolveReceiverMaskTexture(compositor);
     if (this._projectMaterial?.uniforms) {
-      this._projectMaterial.uniforms.uReceiverOutdoorsMask.value = receiverMaskTex;
-      this._projectMaterial.uniforms.uHasReceiverMask.value = receiverMaskTex ? 1.0 : 0.0;
-      this._projectMaterial.uniforms.uReceiverOutdoorsMaskFlipY.value = receiverMaskTex?.flipY ? 1.0 : 0.0;
+      const pu = this._projectMaterial.uniforms;
+      pu.uReceiverOutdoorsMask.value = receiverMaskTex;
+      pu.uHasReceiverMask.value = receiverMaskTex ? 1.0 : 0.0;
+      pu.uReceiverOutdoorsMaskFlipY.value = receiverMaskTex?.flipY ? 1.0 : 0.0;
+
+      const { textures: recvSlots, floorIdTex } = collectOutdoorsTexturesByFloorIndex(compositor);
+      pu.tFloorId.value = floorIdTex;
+      pu.uHasFloorId.value = floorIdTex ? 1.0 : 0.0;
+      pu.uFloorIdFlipY.value = 1.0;
+      for (let i = 0; i < 4; i++) {
+        const t = recvSlots[i] ?? receiverMaskTex ?? null;
+        pu[`tOutdoors${i}`].value = t;
+        pu[`uHasOutdoors${i}`].value = t ? 1.0 : 0.0;
+        pu[`uOutdoors${i}FlipY`].value = t?.flipY ? 1.0 : 0.0;
+      }
     }
 
     const THREE = window.THREE;
@@ -1104,59 +1181,7 @@ export class BuildingShadowsEffectV2 {
   }
 
   _resolveReceiverMaskTexture(compositor) {
-    if (!compositor) return this._outdoorsMask ?? null;
-
-    const floorStackFloors = window.MapShine?.floorStack?.getFloors?.() ?? [];
-    const activeFloorForMask = window.MapShine?.floorStack?.getActiveFloor?.() ?? null;
-    const activeIdxForMask = Number(activeFloorForMask?.index);
-    const skipGroundGlobalFallback = floorStackFloors.length > 1
-      && Number.isFinite(activeIdxForMask)
-      && activeIdxForMask > 0;
-
-    const r = resolveCompositorOutdoorsTexture(
-      compositor,
-      window.MapShine?.activeLevelContext ?? null,
-      { skipGroundFallback: skipGroundGlobalFallback, allowBundleFallback: false },
-    );
-    if (r.texture) return r.texture;
-
-    // Fractional band vs integer compositor keys (FloorCompositor fire path). Include
-    // _floorMeta keys — _floorCache can be empty while file/bundle masks live in meta only.
-    const ctx = window.MapShine?.activeLevelContext ?? null;
-    const b = Number.isFinite(Number(activeFloorForMask?.elevationMin))
-      ? Number(activeFloorForMask.elevationMin)
-      : Number(ctx?.bottom);
-    const t = Number.isFinite(Number(activeFloorForMask?.elevationMax))
-      ? Number(activeFloorForMask.elevationMax)
-      : Number(ctx?.top);
-    if (Number.isFinite(b) && Number.isFinite(t)) {
-      const mid = (b + t) * 0.5;
-      const keySet = new Set([
-        ...Array.from(compositor._floorCache?.keys?.() ?? []),
-        ...Array.from(compositor._floorMeta?.keys?.() ?? []),
-      ]);
-      let bestKey = null;
-      let bestDelta = Infinity;
-      for (const key of keySet) {
-        const parts = String(key).split(':');
-        if (parts.length !== 2) continue;
-        const kb = Number(parts[0]);
-        const kt = Number(parts[1]);
-        if (!Number.isFinite(kb) || !Number.isFinite(kt)) continue;
-        if (mid < kb || mid > kt) continue;
-        const delta = Math.abs(kb - b) + Math.abs(kt - t);
-        if (delta < bestDelta) {
-          bestDelta = delta;
-          bestKey = key;
-        }
-      }
-      if (bestKey) {
-        const tex = compositor.getFloorTexture(bestKey, 'outdoors');
-        if (tex) return tex;
-      }
-    }
-
-    return this._outdoorsMask ?? null;
+    return resolveReceiverOutdoorsMaskTexture(compositor, this._outdoorsMask ?? null);
   }
 
   _maybeWarmFloorMaskCache(compositor, floorCount) {
@@ -1267,7 +1292,7 @@ export class BuildingShadowsEffectV2 {
     const THREE = window.THREE;
     if (!THREE) return;
 
-    const lat = Math.max(0.0, Math.min(1.0, this.params.sunLatitude ?? 0.1));
+    const lat = getUnifiedShadowLatitudeScale(this.params.sunLatitude ?? 0.1);
     let x = 0.0;
     let y = -1.0 * lat;
 

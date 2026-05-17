@@ -1048,6 +1048,12 @@ export class HealthEvaluatorService {
     this.dependencyGraph.addEdge('OverheadShadowsEffectV2', 'LightingEffectV2', 'required');
     this.dependencyGraph.addEdge('BuildingShadowsEffectV2', 'LightingEffectV2', 'required');
     this.dependencyGraph.addEdge('PaintedShadowEffectV2', 'LightingEffectV2', 'required');
+    this.dependencyGraph.addEdge('ShadowDriverState', 'OverheadShadowsEffectV2', 'required');
+    this.dependencyGraph.addEdge('ShadowDriverState', 'BuildingShadowsEffectV2', 'required');
+    this.dependencyGraph.addEdge('ShadowDriverState', 'PaintedShadowEffectV2', 'required');
+    this.dependencyGraph.addEdge('ShadowDriverState', 'SkyReachShadowsEffectV2', 'required');
+    this.dependencyGraph.addEdge('SkyOcclusionPrimitive', 'LightingEffectV2', 'contextual');
+    this.dependencyGraph.addEdge('SkyOcclusionPrimitive', 'SkyColorEffectV2', 'contextual');
     this.dependencyGraph.addEdge('WaterEffectV2', 'WindowLightEffectV2', 'contextual');
     this.dependencyGraph.addEdge('WaterEffectV2', 'WaterSplashesEffectV2', 'contextual');
     this.dependencyGraph.addEdge('WindowLightEffectV2', 'LightingEffectV2', 'required');
@@ -1668,6 +1674,46 @@ export class HealthEvaluatorService {
           },
         },
         heartbeatRule('SkyColorEffectV2', 6000),
+      ],
+    });
+
+    this.registry.register('ShadowDriverState', {
+      effectId: 'ShadowDriverState',
+      getInstance: (ctx) => ctx.floorCompositor?._shadowDriverState ?? null,
+      getLevelKeys: (_instance, ctx) => activeLevelKeys(ctx),
+      rules: [
+        {
+          id: 'publishedFrameSnapshot',
+          tier: 'structural',
+          severity: 'error',
+          check: (instance) => {
+            const pass = !!instance && Number(instance.frame ?? 0) > 0 && !!instance.sun?.dir;
+            return {
+              pass,
+              message: pass ? 'Unified shadow driver has a live frame snapshot' : 'ShadowDriverState has not published yet',
+            };
+          },
+        },
+      ],
+    });
+
+    this.registry.register('SkyOcclusionPrimitive', {
+      effectId: 'SkyOcclusionPrimitive',
+      getInstance: (ctx) => ctx.floorCompositor?._skyOcclusionPrimitive ?? null,
+      getLevelKeys: (_instance, ctx) => activeLevelKeys(ctx),
+      rules: [
+        {
+          id: 'outputTexture',
+          tier: 'structural',
+          severity: 'warn',
+          check: (instance) => {
+            const pass = !!instance?.texture;
+            return {
+              pass,
+              message: pass ? 'Sky occlusion texture available' : 'Sky occlusion texture missing',
+            };
+          },
+        },
       ],
     });
 

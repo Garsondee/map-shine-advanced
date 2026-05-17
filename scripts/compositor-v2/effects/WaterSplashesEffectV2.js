@@ -950,6 +950,10 @@ export class WaterSplashesEffectV2 {
   /**
    * Floor-presence / upper-scene texture for one splash floor when the camera is on `viewFloor`.
    * Lower floors while viewing from above need the stacked upper-scene occluder.
+   *
+   * Do not bind DistortionManager `floorPresenceTarget` for systems on the viewed
+   * floor: that RT encodes opaque tiles on the *current* floor in screen space,
+   * which zeros splash/bubble alpha anywhere those tiles project (including water).
    * @private
    */
   _resolveFloorPresenceTexForSplashFloor(floorCompositor, viewFloor, systemFloorIndex, floorPresenceTex) {
@@ -962,6 +966,9 @@ export class WaterSplashesEffectV2 {
         texture: floorPresenceTex ?? null,
         source: floorPresenceTex ? 'floor-presence-fallback' : 'none',
       };
+    }
+    if (Number.isFinite(sfi) && Number.isFinite(view) && sfi === view) {
+      return { texture: null, source: 'same-floor-skip-presence' };
     }
     return {
       texture: floorPresenceTex ?? null,

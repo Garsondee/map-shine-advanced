@@ -1,5 +1,6 @@
 /**
- * @fileoverview ShadowManagerV2 — combines cloud + overhead + building shadow factors.
+ * @fileoverview ShadowManagerV2 — combines cloud + overhead + building + painted +
+ * sky-reach + tree/bush billboard canopy factors.
  *
  * Contract:
  * - Inputs are shadow factors in [0..1], where 1 = fully lit.
@@ -28,6 +29,8 @@ export class ShadowManagerV2 {
        * source.
        */
       skyReachOpacity: 1.0,
+      treeBillboardOpacity: 1.0,
+      bushBillboardOpacity: 1.0,
     };
 
     this._combinedRT = null;
@@ -44,6 +47,9 @@ export class ShadowManagerV2 {
     this._buildingShadowTexture = null;
     this._paintedShadowTexture = null;
     this._skyReachShadowTexture = null;
+    this._treeBillboardShadowTexture = null;
+    this._bushBillboardShadowTexture = null;
+    this._inputList = null;
   }
 
   initialize(renderer, width, height) {
@@ -62,12 +68,16 @@ export class ShadowManagerV2 {
         tBuildingShadow: { value: null },
         tPaintedShadow: { value: null },
         tSkyReachShadow: { value: null },
+        tTreeBillboardShadow: { value: null },
+        tBushBillboardShadow: { value: null },
         uHasCloudShadow: { value: 0.0 },
         uHasCloudShadowRaw: { value: 0.0 },
         uHasOverheadShadow: { value: 0.0 },
         uHasBuildingShadow: { value: 0.0 },
         uHasPaintedShadow: { value: 0.0 },
         uHasSkyReachShadow: { value: 0.0 },
+        uHasTreeBillboardShadow: { value: 0.0 },
+        uHasBushBillboardShadow: { value: 0.0 },
         uUseRawCloud: { value: 0.0 },
         uCloudWeight: { value: 1.0 },
         uCloudOpacity: { value: 1.0 },
@@ -75,6 +85,8 @@ export class ShadowManagerV2 {
         uBuildingOpacity: { value: 1.0 },
         uPaintedOpacity: { value: 1.0 },
         uSkyReachOpacity: { value: 1.0 },
+        uTreeBillboardOpacity: { value: 1.0 },
+        uBushBillboardOpacity: { value: 1.0 },
         // Coordinate conversion uniforms for building shadows (world space)
         uSceneRect: { value: new THREE.Vector4() },
         uHasSceneRect: { value: 0.0 },
@@ -97,12 +109,16 @@ export class ShadowManagerV2 {
         uniform sampler2D tBuildingShadow;
         uniform sampler2D tPaintedShadow;
         uniform sampler2D tSkyReachShadow;
+        uniform sampler2D tTreeBillboardShadow;
+        uniform sampler2D tBushBillboardShadow;
         uniform float uHasCloudShadow;
         uniform float uHasCloudShadowRaw;
         uniform float uHasOverheadShadow;
         uniform float uHasBuildingShadow;
         uniform float uHasPaintedShadow;
         uniform float uHasSkyReachShadow;
+        uniform float uHasTreeBillboardShadow;
+        uniform float uHasBushBillboardShadow;
         uniform float uUseRawCloud;
         uniform float uCloudWeight;
         uniform float uCloudOpacity;
@@ -110,6 +126,8 @@ export class ShadowManagerV2 {
         uniform float uBuildingOpacity;
         uniform float uPaintedOpacity;
         uniform float uSkyReachOpacity;
+        uniform float uTreeBillboardOpacity;
+        uniform float uBushBillboardOpacity;
         // Coordinate conversion uniforms for building shadows (world space)
         uniform vec4 uSceneRect;
         uniform float uHasSceneRect;
@@ -126,6 +144,28 @@ export class ShadowManagerV2 {
 
         vec2 smFoundryToSceneUv(vec2 foundryPos) {
           return (foundryPos - uSceneRect.xy) / max(uSceneRect.zw, vec2(1e-5));
+        }
+
+        /**
+         * Building / painted / sky-reach factor textures are in normalized scene UV
+         * (same as LightingEffectV2). Never use vUv * uSceneRect.zw + uSceneRect.xy:
+         * uSceneRect is in Foundry pixels, so that expression clamps to (1,1) and
+         * wipes all world-space shadows in this combiner.
+         */
+        vec2 smSceneUvForWorldTextures(vec2 screenUv) {
+          if (uHasSceneRect < 0.5) return screenUv;
+          bool useRemap = (uHasBuildingUvRemap > 0.5);
+          if (!useRemap) {
+            float spanX = abs(uViewBounds.z - uViewBounds.x);
+            float spanY = abs(uViewBounds.w - uViewBounds.y);
+            useRemap = (uSceneDimensions.x > 2.0 && uSceneDimensions.y > 2.0
+              && spanX > 1e-4 && spanY > 1e-4);
+          }
+          if (useRemap) {
+            vec2 foundryPos = smScreenUvToFoundry(screenUv);
+            return clamp(smFoundryToSceneUv(foundryPos), vec2(0.0), vec2(1.0));
+          }
+          return screenUv;
         }
 
         float readCloudShadow() {
@@ -151,41 +191,30 @@ export class ShadowManagerV2 {
 
         float readBuildingShadow() {
           if (uHasBuildingShadow < 0.5) return 1.0;
-          vec2 sceneUv = vUv;
-          if (uHasBuildingUvRemap > 0.5 && uHasSceneRect > 0.5) {
-            vec2 foundryPos = smScreenUvToFoundry(vUv);
-            sceneUv = clamp(smFoundryToSceneUv(foundryPos), vec2(0.0), vec2(1.0));
-          } else if (uHasSceneRect > 0.5) {
-            sceneUv = clamp((vUv * uSceneRect.zw) + uSceneRect.xy, vec2(0.0), vec2(1.0));
-          }
+          vec2 sceneUv = smSceneUvForWorldTextures(vUv);
           return clamp(texture2D(tBuildingShadow, sceneUv).r, 0.0, 1.0);
         }
 
         float readPaintedShadow() {
           if (uHasPaintedShadow < 0.5) return 1.0;
-          vec2 sceneUv = vUv;
-          if (uHasBuildingUvRemap > 0.5 && uHasSceneRect > 0.5) {
-            vec2 foundryPos = smScreenUvToFoundry(vUv);
-            sceneUv = clamp(smFoundryToSceneUv(foundryPos), vec2(0.0), vec2(1.0));
-          } else if (uHasSceneRect > 0.5) {
-            sceneUv = clamp((vUv * uSceneRect.zw) + uSceneRect.xy, vec2(0.0), vec2(1.0));
-          }
+          vec2 sceneUv = smSceneUvForWorldTextures(vUv);
           return clamp(texture2D(tPaintedShadow, sceneUv).r, 0.0, 1.0);
         }
 
         float readSkyReachShadow() {
           if (uHasSkyReachShadow < 0.5) return 1.0;
-          // Same scene-UV reconstruction as tBuildingShadow — both effects emit
-          // a scene-space factor texture and share the LightingEffectV2 sampling
-          // convention.
-          vec2 sceneUv = vUv;
-          if (uHasBuildingUvRemap > 0.5 && uHasSceneRect > 0.5) {
-            vec2 foundryPos = smScreenUvToFoundry(vUv);
-            sceneUv = clamp(smFoundryToSceneUv(foundryPos), vec2(0.0), vec2(1.0));
-          } else if (uHasSceneRect > 0.5) {
-            sceneUv = clamp((vUv * uSceneRect.zw) + uSceneRect.xy, vec2(0.0), vec2(1.0));
-          }
+          vec2 sceneUv = smSceneUvForWorldTextures(vUv);
           return clamp(texture2D(tSkyReachShadow, sceneUv).r, 0.0, 1.0);
+        }
+
+        float readTreeBillboardShadow() {
+          if (uHasTreeBillboardShadow < 0.5) return 1.0;
+          return clamp(texture2D(tTreeBillboardShadow, vUv).r, 0.0, 1.0);
+        }
+
+        float readBushBillboardShadow() {
+          if (uHasBushBillboardShadow < 0.5) return 1.0;
+          return clamp(texture2D(tBushBillboardShadow, vUv).r, 0.0, 1.0);
         }
 
         void main() {
@@ -194,14 +223,18 @@ export class ShadowManagerV2 {
           float buildingBase = readBuildingShadow();
           float paintedBase = readPaintedShadow();
           float skyReachBase = readSkyReachShadow();
+          float treeBillboardBase = readTreeBillboardShadow();
+          float bushBillboardBase = readBushBillboardShadow();
 
           float cloud = mix(1.0, cloudBase, clamp(uCloudOpacity, 0.0, 1.0));
           float overhead = mix(1.0, overheadBase, clamp(uOverheadOpacity, 0.0, 1.0));
           float building = mix(1.0, buildingBase, clamp(uBuildingOpacity, 0.0, 1.0));
           float painted = mix(1.0, paintedBase, clamp(uPaintedOpacity, 0.0, 1.0));
           float skyReach = mix(1.0, skyReachBase, clamp(uSkyReachOpacity, 0.0, 1.0));
+          float treeBb = mix(1.0, treeBillboardBase, clamp(uTreeBillboardOpacity, 0.0, 1.0));
+          float bushBb = mix(1.0, bushBillboardBase, clamp(uBushBillboardOpacity, 0.0, 1.0));
           float cw = clamp(uCloudWeight, 0.0, 1.0);
-          float combined = overhead * building * painted * skyReach * mix(1.0, cloud, cw);
+          float combined = overhead * building * painted * skyReach * treeBb * bushBb * mix(1.0, cloud, cw);
           gl_FragColor = vec4(combined, combined, combined, 1.0);
         }
       `,
@@ -240,13 +273,53 @@ export class ShadowManagerV2 {
     else this._combinedRawRT = new THREE.WebGLRenderTarget(w, h, opts);
   }
 
-  setInputs({ cloudShadowTexture = null, cloudShadowRawTexture = null, overheadShadowTexture = null, buildingShadowTexture = null, paintedShadowTexture = null, skyReachShadowTexture = null } = {}) {
+  setInputs({ cloudShadowTexture = null, cloudShadowRawTexture = null, overheadShadowTexture = null, buildingShadowTexture = null, paintedShadowTexture = null, skyReachShadowTexture = null, treeBillboardShadowTexture = null, bushBillboardShadowTexture = null } = {}) {
+    this._inputList = null;
     this._cloudShadowTexture = cloudShadowTexture ?? null;
     this._cloudShadowRawTexture = cloudShadowRawTexture ?? null;
     this._overheadShadowTexture = overheadShadowTexture ?? null;
     this._buildingShadowTexture = buildingShadowTexture ?? null;
     this._paintedShadowTexture = paintedShadowTexture ?? null;
     this._skyReachShadowTexture = skyReachShadowTexture ?? null;
+    this._treeBillboardShadowTexture = treeBillboardShadowTexture ?? null;
+    this._bushBillboardShadowTexture = bushBillboardShadowTexture ?? null;
+  }
+
+  /**
+   * Phase-10 compatibility API: accepts the planned N-input shape while the
+   * WebGL1 combiner still maps known ids onto the existing fixed sampler layout.
+   *
+   * @param {{id:string, texture:any, rawTexture?:any, uvSpace?:'screen'|'scene', opacity?:number, preservesDeep?:boolean}[]} inputs
+   */
+  setInputList(inputs = []) {
+    this._inputList = Array.isArray(inputs) ? inputs.slice() : [];
+    const byId = new Map();
+    for (const input of this._inputList) {
+      const id = String(input?.id ?? '').toLowerCase();
+      if (id) byId.set(id, input);
+    }
+    const cloud = byId.get('cloud');
+    const overhead = byId.get('overhead');
+    const building = byId.get('building');
+    const painted = byId.get('painted');
+    const skyReach = byId.get('skyreach') ?? byId.get('sky-reach');
+    const treeBb = byId.get('tree') ?? byId.get('tree-billboard');
+    const bushBb = byId.get('bush') ?? byId.get('bush-billboard');
+    this._cloudShadowTexture = cloud?.texture ?? null;
+    this._cloudShadowRawTexture = cloud?.rawTexture ?? cloud?.texture ?? null;
+    this._overheadShadowTexture = overhead?.texture ?? null;
+    this._buildingShadowTexture = building?.texture ?? null;
+    this._paintedShadowTexture = painted?.texture ?? null;
+    this._skyReachShadowTexture = skyReach?.texture ?? null;
+    this._treeBillboardShadowTexture = treeBb?.texture ?? null;
+    this._bushBillboardShadowTexture = bushBb?.texture ?? null;
+    if (Number.isFinite(Number(cloud?.opacity))) this.params.cloudOpacity = Number(cloud.opacity);
+    if (Number.isFinite(Number(overhead?.opacity))) this.params.overheadOpacity = Number(overhead.opacity);
+    if (Number.isFinite(Number(building?.opacity))) this.params.buildingOpacity = Number(building.opacity);
+    if (Number.isFinite(Number(painted?.opacity))) this.params.paintedOpacity = Number(painted.opacity);
+    if (Number.isFinite(Number(skyReach?.opacity))) this.params.skyReachOpacity = Number(skyReach.opacity);
+    if (Number.isFinite(Number(treeBb?.opacity))) this.params.treeBillboardOpacity = Number(treeBb.opacity);
+    if (Number.isFinite(Number(bushBb?.opacity))) this.params.bushBillboardOpacity = Number(bushBb.opacity);
   }
 
   /**
@@ -343,12 +416,16 @@ export class ShadowManagerV2 {
     u.tBuildingShadow.value = this._buildingShadowTexture;
     u.tPaintedShadow.value = this._paintedShadowTexture;
     u.tSkyReachShadow.value = this._skyReachShadowTexture;
+    u.tTreeBillboardShadow.value = this._treeBillboardShadowTexture;
+    u.tBushBillboardShadow.value = this._bushBillboardShadowTexture;
     u.uHasCloudShadow.value = this._cloudShadowTexture ? 1.0 : 0.0;
     u.uHasCloudShadowRaw.value = this._cloudShadowRawTexture ? 1.0 : 0.0;
     u.uHasOverheadShadow.value = this._overheadShadowTexture ? 1.0 : 0.0;
     u.uHasBuildingShadow.value = this._buildingShadowTexture ? 1.0 : 0.0;
     u.uHasPaintedShadow.value = this._paintedShadowTexture ? 1.0 : 0.0;
     u.uHasSkyReachShadow.value = this._skyReachShadowTexture ? 1.0 : 0.0;
+    u.uHasTreeBillboardShadow.value = this._treeBillboardShadowTexture ? 1.0 : 0.0;
+    u.uHasBushBillboardShadow.value = this._bushBillboardShadowTexture ? 1.0 : 0.0;
     u.uUseRawCloud.value = useRawCloud ? 1.0 : 0.0;
     u.uCloudWeight.value = Math.max(0.0, Math.min(1.0, Number(this.params.cloudWeight) || 0));
     u.uCloudOpacity.value = Math.max(0.0, Math.min(1.0, Number(this.params.cloudOpacity) || 0));
@@ -356,6 +433,8 @@ export class ShadowManagerV2 {
     u.uBuildingOpacity.value = Math.max(0.0, Math.min(1.0, Number(this.params.buildingOpacity) || 1.0));
     u.uPaintedOpacity.value = Math.max(0.0, Math.min(1.0, Number(this.params.paintedOpacity) || 1.0));
     u.uSkyReachOpacity.value = Math.max(0.0, Math.min(1.0, Number(this.params.skyReachOpacity) || 1.0));
+    u.uTreeBillboardOpacity.value = Math.max(0.0, Math.min(1.0, Number(this.params.treeBillboardOpacity) || 1.0));
+    u.uBushBillboardOpacity.value = Math.max(0.0, Math.min(1.0, Number(this.params.bushBillboardOpacity) || 1.0));
     
     // Bind scene rect for coordinate conversion (world-space building shadows)
     if (this._sceneRect) {
@@ -371,12 +450,20 @@ export class ShadowManagerV2 {
     renderer.render(this._scene, this._camera);
   }
 
-  render(renderer) {
+  /**
+   * @param {THREE.WebGLRenderer} renderer
+   * @param {THREE.Camera|null} [camera=null] When set, refreshes screen→scene UV uniforms
+   *   immediately before combining (keeps painted/sky-reach/building aligned).
+   */
+  render(renderer, camera = null) {
     if (!this._initialized || !this.enabled || !renderer) return false;
     if (!this._combinedRT || !this._combinedRawRT) {
       renderer.getDrawingBufferSize(this._sizeVec);
       this.onResize(this._sizeVec.x, this._sizeVec.y);
     }
+    try {
+      if (camera) this.applyBuildingShadowUvRemap(camera);
+    } catch (_) {}
     const prevTarget = renderer.getRenderTarget();
     try {
       this._renderOne(renderer, this._combinedRT, false);

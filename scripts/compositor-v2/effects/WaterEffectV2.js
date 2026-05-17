@@ -822,6 +822,7 @@ export class WaterEffectV2 {
 
       try {
         this._syncGlobalWaterBindingsFromViewedFloor();
+        this._syncSettingsUniformsFromParams();
       } catch (_) {}
 
       log.warn(`[${duration.toFixed(1)}ms] WaterEffectV2: real shader compiled successfully`);
@@ -1821,8 +1822,11 @@ static getControlSchema() {
     const THREE = window.THREE;
     if (!THREE) return;
 
-    // Clear previous state
-    this._disposeFloorWater();
+    // Preserve packed-water GPU assets per floor when mask inputs are unchanged.
+    // Level changes can trigger forceRepopulate; rebuilding every floor's JFA
+    // pack produced different tWaterData UUIDs and inconsistent water look.
+    const previousFloorPacks = new Map(this._floorWater);
+    this._floorWater.clear();
     this._waterTiles = [];
     this._hasAnyWaterData = false;
 
@@ -2017,10 +2021,24 @@ static getControlSchema() {
     // large (e.g. 1024×1024 × 4 bytes = 4MB) canvas buffers in rapid succession,
     // which can trigger aggressive GC on low-RAM systems.
     let sharedCanvas = null;
+    const sceneGeo = { sceneX, sceneY, sceneW, sceneH };
     for (const [floorIndex, entries] of byFloor) {
       try {
+        const packSignature = this._waterPackSignature(entries, sceneGeo);
+        const prevPack = previousFloorPacks.get(floorIndex);
+        if (
+          prevPack?.packSignature === packSignature
+          && prevPack?.waterData?.texture
+          && prevPack?.rawMask
+        ) {
+          this._floorWater.set(floorIndex, prevPack);
+          previousFloorPacks.delete(floorIndex);
+          continue;
+        }
+        if (prevPack) this._disposeOneFloorWater(prevPack);
+
         const floorData = await this._compositeFloorMask(
-          THREE, entries, { sceneX, sceneY, sceneW, sceneH }, sharedCanvas
+          THREE, entries, sceneGeo, sharedCanvas
         );
         // Capture the canvas from the first floor for reuse
         if (!sharedCanvas && floorData?._canvas) {
@@ -2028,11 +2046,15 @@ static getControlSchema() {
         }
         if (floorData) {
           delete floorData._canvas; // Don't store the canvas reference in floor data
+          floorData.packSignature = packSignature;
           this._floorWater.set(floorIndex, floorData);
         }
       } catch (err) {
         log.error(`populate: floor ${floorIndex} mask compositing failed:`, err);
       }
+    }
+    for (const [, orphaned] of previousFloorPacks) {
+      this._disposeOneFloorWater(orphaned);
     }
     // Let the shared canvas be GC'd after all floors are processed
     sharedCanvas = null;
@@ -2044,12 +2066,9 @@ static getControlSchema() {
     const viewedFloorIndex = Number.isFinite(Number(activeFloor?.index))
       ? Number(activeFloor.index)
       : 0;
-    const resolvedWaterFloor = this._resolveWaterFloorForView(viewedFloorIndex);
-    this._activeFloorIndex = resolvedWaterFloor >= 0 ? resolvedWaterFloor : viewedFloorIndex;
-    if (resolvedWaterFloor >= 0) this._applyFloorWaterData(resolvedWaterFloor);
-    else if (this._composeMaterial?.uniforms?.uHasWaterData && this._composeMaterial?.uniforms?.uHasWaterRawMask) {
-      this._composeMaterial.uniforms.uHasWaterData.value = 0.0;
-      this._composeMaterial.uniforms.uHasWaterRawMask.value = 0.0;
+    const resolvedWaterFloor = this._commitWaterBindingsForView(viewedFloorIndex, { crossSlice: false });
+    if (resolvedWaterFloor < 0) {
+      this._activeFloorIndex = viewedFloorIndex;
     }
     this._hasAnyWaterData = this._floorWater.size > 0;
 
@@ -2660,6 +2679,72 @@ static getControlSchema() {
   }
 
   /**
+   * FloorStack active index, or 0 when unavailable.
+   * @returns {number}
+   * @private
+   */
+  _getViewedFloorIndex() {
+    try {
+      const n = Number(window.MapShine?.floorStack?.getActiveFloor?.()?.index);
+      if (Number.isFinite(n) && n >= 0) return n;
+    } catch (_) {}
+    return Number.isFinite(Number(this._activeFloorIndex)) ? Number(this._activeFloorIndex) : 0;
+  }
+
+  /**
+   * Re-apply user settings that must stay consistent across floor / pipeline mode
+   * switches (post-merge vs per-level, borrowed vs native water data).
+   * @private
+   */
+  _syncSettingsUniformsFromParams() {
+    if (!this._composeMaterial || !this._realShaderCompiled) return;
+    const u = this._composeMaterial.uniforms;
+    const p = this.params;
+    if (!u || !p) return;
+
+    u.uWaterEnabled.value = this.enabled ? 1.0 : 0.0;
+    if (u.uUseSdfMask) u.uUseSdfMask.value = p.useSdfMask === false ? 0.0 : 1.0;
+    if (u.uWaterRawMaskThreshold) {
+      u.uWaterRawMaskThreshold.value = Math.max(0.0, Math.min(1.0, Number(p.maskThreshold ?? 0.15)));
+    }
+    if (u.uDebugView) u.uDebugView.value = p.debugView ?? 0;
+  }
+
+  /**
+   * Bind packed water textures + settings for the floor that should drive the shader
+   * when viewing `viewedFloorIndex`.
+   *
+   * @param {number} viewedFloorIndex
+   * @param {{ crossSlice?: boolean|null }} [opts] When set, updates `uCrossSliceWaterData`.
+   * @returns {number} Packed-water data floor index, or -1 when none.
+   * @private
+   */
+  _commitWaterBindingsForView(viewedFloorIndex, opts = {}) {
+    const viewed = Number(viewedFloorIndex);
+    if (!Number.isFinite(viewed) || viewed < 0) {
+      if (opts.crossSlice != null) this._setCrossSliceWaterDataUniform(opts.crossSlice ? 1 : 0);
+      this._syncSettingsUniformsFromParams();
+      return -1;
+    }
+
+    const dataFloor = this._resolveWaterFloorForView(viewed);
+    if (dataFloor >= 0) {
+      this._activeFloorIndex = dataFloor;
+      this._applyFloorWaterData(dataFloor);
+    } else if (this._composeMaterial?.uniforms?.uHasWaterData && this._composeMaterial?.uniforms?.uHasWaterRawMask) {
+      this._composeMaterial.uniforms.uHasWaterData.value = 0.0;
+      this._composeMaterial.uniforms.uHasWaterRawMask.value = 0.0;
+    }
+
+    if (opts.crossSlice != null) {
+      this._setCrossSliceWaterDataUniform(opts.crossSlice ? 1 : 0);
+    }
+
+    this._syncSettingsUniformsFromParams();
+    return dataFloor;
+  }
+
+  /**
    * Feed active-floor water data to legacy WeatherParticles foam systems.
    * @param {number} elapsedSeconds
    * @private
@@ -2696,16 +2781,54 @@ static getControlSchema() {
   }
 
   /**
+   * @param {object|null|undefined} data
+   * @private
+   */
+  _disposeOneFloorWater(data) {
+    if (!data) return;
+    try { data.waterData?.texture?.dispose(); } catch (_) {}
+    try { data.waterData?.rawMaskTexture?.dispose(); } catch (_) {}
+    try { data.waterData?._packedTarget?.dispose(); } catch (_) {}
+  }
+
+  /**
+   * Stable key for reusing packed-water GPU assets across populate() calls.
+   * @param {Array} entries
+   * @param {{ sceneX: number, sceneY: number, sceneW: number, sceneH: number }} sceneGeo
+   * @returns {string}
+   * @private
+   */
+  _waterPackSignature(entries, sceneGeo) {
+    const p = this.params ?? {};
+    const paths = [...entries]
+      .map((e) => String(e?.maskPath ?? ''))
+      .filter(Boolean)
+      .sort()
+      .join('|');
+    const geo = [
+      sceneGeo.sceneX, sceneGeo.sceneY, sceneGeo.sceneW, sceneGeo.sceneH,
+    ].join(',');
+    const settings = [
+      p.buildResolution,
+      p.maskThreshold,
+      p.maskChannel,
+      p.maskInvert,
+      p.sdfRangePx,
+      p.shoreWidthPx,
+      p.maskExpandPx,
+      p.maskBlurRadius,
+      p.maskBlurPasses,
+    ].join(',');
+    return `${paths}::${geo}::${settings}`;
+  }
+
+  /**
    * Dispose all per-floor water data.
    * @private
    */
   _disposeFloorWater() {
     for (const [, data] of this._floorWater) {
-      // waterData holds the SDF texture + rawMaskTexture (DataTextures)
-      try { data.waterData?.texture?.dispose(); } catch (_) {}
-      try { data.waterData?.rawMaskTexture?.dispose(); } catch (_) {}
-      try { data.waterData?._packedTarget?.dispose(); } catch (_) {}
-      // rawMask is a reference to waterData.rawMaskTexture — already disposed above
+      this._disposeOneFloorWater(data);
     }
     this._floorWater.clear();
   }
@@ -2991,12 +3114,8 @@ static getControlSchema() {
       u.uWindOffsetUv.value.set(this._windOffsetUvX, this._windOffsetUvY);
     }
 
-    // ── Enable ────────────────────────────────────────────────────────────
-    u.uWaterEnabled.value = this.enabled ? 1.0 : 0.0;
-    if (u.uUseSdfMask) u.uUseSdfMask.value = p.useSdfMask === false ? 0.0 : 1.0;
-    if (u.uWaterRawMaskThreshold) {
-      u.uWaterRawMaskThreshold.value = Math.max(0.0, Math.min(1.0, Number(p.maskThreshold ?? 0.15)));
-    }
+    // ── Enable / mask settings (shared with floor-change rebinding) ───────
+    this._syncSettingsUniformsFromParams();
 
     // ── Tint ──────────────────────────────────────────────────────────────
     const tint = normalizeRgb01(p.tintColor, { r: 0.02, g: 0.18, b: 0.28 });
@@ -3622,8 +3741,15 @@ static getControlSchema() {
     if (!this._realShaderCompiled) return false;
 
     const u = this._composeMaterial.uniforms;
+    // Per-level passes temporarily override floor bindings; restore global state
+    // before drawing when no override is active (post-merge / single-floor path).
+    if (this._perLevelOverride < 0) {
+      this._commitWaterBindingsForView(this._getViewedFloorIndex(), { crossSlice: false });
+    } else {
+      this._syncSettingsUniformsFromParams();
+    }
+
     u.tDiffuse.value = inputRT.texture;
-    u.uWaterEnabled.value = this.enabled ? 1.0 : 0.0;
 
     try {
       const fc = window.MapShine?.effectComposer?._floorCompositorV2;
@@ -3741,23 +3867,8 @@ static getControlSchema() {
    */
   onFloorChange(maxFloorIndex) {
     if (!this._initialized) return;
-    this._setCrossSliceWaterDataUniform(0);
-    const bestFloor = this._resolveWaterFloorForView(maxFloorIndex);
-
-    if (bestFloor >= 0) {
-      // Always re-apply uniforms when a valid water floor is resolved.
-      // Floor-change events can transiently clear uniforms (bestFloor < 0);
-      // if the next valid resolution lands on the same floor index, a strict
-      // "index changed" guard would leave water disabled upstairs.
-      this._activeFloorIndex = bestFloor;
-      this._applyFloorWaterData(bestFloor);
-    } else if (bestFloor < 0) {
-      // No water on any visible floor — disable water data
-      if (this._composeMaterial?.uniforms?.uHasWaterData && this._composeMaterial?.uniforms?.uHasWaterRawMask) {
-        this._composeMaterial.uniforms.uHasWaterData.value = 0.0;
-        this._composeMaterial.uniforms.uHasWaterRawMask.value = 0.0;
-      }
-    }
+    this._perLevelOverride = -1;
+    this._commitWaterBindingsForView(maxFloorIndex, { crossSlice: false });
     this._hasAnyWaterData = this._floorWater.size > 0;
   }
 
@@ -3778,11 +3889,10 @@ static getControlSchema() {
     const idx = Number(levelIndex);
     if (!Number.isFinite(idx) || idx < 0) {
       this._perLevelOverride = -1;
-      this._setCrossSliceWaterDataUniform(0);
+      this._commitWaterBindingsForView(this._getViewedFloorIndex(), { crossSlice: false });
       return -1;
     }
     this._perLevelOverride = idx;
-    let dataFloor = idx;
     let crossSlice = false;
     // When this level has no _Water pack, borrow the nearest lower floor's
     // pack so the water surface visible through holes/bridges still renders
@@ -3790,13 +3900,9 @@ static getControlSchema() {
     // upper opaque geometry).
     if (!this._floorWater.has(idx)) {
       const resolved = this._resolveWaterFloorForView(idx);
-      if (resolved >= 0 && resolved !== idx) {
-        dataFloor = resolved;
-        crossSlice = true;
-      }
+      if (resolved >= 0 && resolved !== idx) crossSlice = true;
     }
-    this._applyFloorWaterData(dataFloor);
-    this._setCrossSliceWaterDataUniform(crossSlice ? 1 : 0);
+    const dataFloor = this._commitWaterBindingsForView(idx, { crossSlice });
     return dataFloor;
   }
 
@@ -3816,8 +3922,7 @@ static getControlSchema() {
    */
   clearLevelContext() {
     this._perLevelOverride = -1;
-    this._syncGlobalWaterBindingsFromViewedFloor();
-    this._setCrossSliceWaterDataUniform(0);
+    this._commitWaterBindingsForView(this._getViewedFloorIndex(), { crossSlice: false });
     this.setWaterBackgroundAlphaMaskTexture(null);
     this.setOverheadRoofBlockTexture(null);
   }
@@ -3854,16 +3959,10 @@ static getControlSchema() {
     const v = Number(viewedFloorIndex);
     this._perLevelOverride = -1;
     if (!Number.isFinite(v) || v < 0) {
-      this._setCrossSliceWaterDataUniform(0);
+      this._commitWaterBindingsForView(this._getViewedFloorIndex(), { crossSlice: false });
       return -1;
     }
-    const dataFloor = this._resolveWaterFloorForView(v);
-    if (dataFloor >= 0) {
-      this._activeFloorIndex = dataFloor;
-      this._applyFloorWaterData(dataFloor);
-    }
-    this._setCrossSliceWaterDataUniform(0);
-    return dataFloor;
+    return this._commitWaterBindingsForView(v, { crossSlice: false });
   }
 
   /**
@@ -3874,30 +3973,7 @@ static getControlSchema() {
    * @private
    */
   _syncGlobalWaterBindingsFromViewedFloor() {
-    let viewedIdx = NaN;
-    try {
-      const n = Number(window.MapShine?.floorStack?.getActiveFloor?.()?.index);
-      if (Number.isFinite(n)) viewedIdx = n;
-    } catch (_) {}
-
-    const resolved = Number.isFinite(viewedIdx)
-      ? this._resolveWaterFloorForView(viewedIdx)
-      : -1;
-
-    if (resolved >= 0) {
-      this._activeFloorIndex = resolved;
-      this._applyFloorWaterData(resolved);
-      return;
-    }
-
-    if (this._activeFloorIndex >= 0 && this._floorWater.has(this._activeFloorIndex)) {
-      this._applyFloorWaterData(this._activeFloorIndex);
-      return;
-    }
-
-    const u = this._composeMaterial?.uniforms;
-    if (u?.uHasWaterData) u.uHasWaterData.value = 0.0;
-    if (u?.uHasWaterRawMask) u.uHasWaterRawMask.value = 0.0;
+    this._commitWaterBindingsForView(this._getViewedFloorIndex(), { crossSlice: false });
   }
 
   /**

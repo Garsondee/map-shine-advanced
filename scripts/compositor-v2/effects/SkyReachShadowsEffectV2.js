@@ -36,8 +36,12 @@
  */
 
 import { createLogger } from '../../core/log.js';
+import { getUnifiedShadowLatitudeScale } from '../shadow-system/SunDirection.js';
 import { weatherController } from '../../core/WeatherController.js';
 import { loadTexture } from '../../assets/loader.js';
+import { FLOOR_ID_OUTDOORS_RECEIVER_GLSL } from '../shadow-system/DirectionalShadowProjector.js';
+import { collectOutdoorsTexturesByFloorIndex } from '../shadow-system/floor-outdoors-slots.js';
+import { resolveReceiverOutdoorsMaskTexture } from '../shadow-system/resolve-receiver-outdoors-mask.js';
 
 const log = createLogger('SkyReachShadowsEffectV2');
 
@@ -46,6 +50,10 @@ const log = createLogger('SkyReachShadowsEffectV2');
  * is proportional to RT pixels × steps × taps.
  */
 const MAX_SKY_REACH_SHADOW_EDGE_PX = 2560;
+
+/** Matches control schema max; zero/negative `length` disables the ray march offset (all-lit factor RT). */
+const SKY_REACH_LENGTH_SLIDER_MAX = 0.6;
+const SKY_REACH_MIN_EFFECTIVE_RAY_LENGTH = 0.02;
 
 export class SkyReachShadowsEffectV2 {
   constructor() {
@@ -58,15 +66,23 @@ export class SkyReachShadowsEffectV2 {
       resolutionScale: 1.25,
       penumbra: 1,
       shadowCurve: 0.81,
-      blurRadius: 4,
+      blurRadius: 0,
       sunLatitude: 0.1,
       /**
        * Combine mode for the upper-floor `floorAlpha` composite:
-       * - `'max'` (default): union of coverage — recommended for multi-floor since
-       *   not every floor authors alpha (gives correct silhouettes).
-       * - `'multiply'`: Π alpha (strict; gaps on any upper band weaken shadow).
+       * - `'max'` (default): union of coverage — required for multi-floor stacks.
+       * - `'multiply'`: per-pixel product of alpha — only sensible with **one** upper
+       *   `floorAlpha` layer; with multiple stacked floors it usually zeroes the whole
+       *   caster mask (orthogonal bands don't share opaque texels). When more than
+       *   one layer is present, the pass automatically uses **max** instead.
        */
       upperFloorCombineMode: 'max',
+      /**
+       * When true, sample {@link ShadowDriverState#masks.upperFloorAlphaCompositeTexture}
+       * as the caster mask instead of accumulating in this pass. Off by default to match
+       * pre-driver behavior and avoid stale `_compositeTarget` when toggling sources.
+       */
+      useDriverUpperFloorComposite: false,
       /**
        * When true, multiply the projected shadow by `(1 - activeFloorAlpha)` so
        * pixels of the active floor that are already covered by their own solid
@@ -74,7 +90,12 @@ export class SkyReachShadowsEffectV2 {
        * with the shadow rolling under the bridge across both floors.
        */
       castInteriorReceiverOnly: false,
-      dynamicLightShadowOverrideEnabled: true,
+      /**
+       * When true, soften/remove sky-reach shadow where dynamic/window lights are bright.
+       * Off by default: the override textures are often full-frame lit, which would erase
+       * sparse bridge/roof shadows entirely (see dynamic-light lift in the projector shader).
+       */
+      dynamicLightShadowOverrideEnabled: false,
       dynamicLightShadowOverrideStrength: 0.7,
     };
 
@@ -101,6 +122,8 @@ export class SkyReachShadowsEffectV2 {
 
     /** @type {THREE.ShaderMaterial|null} */
     this._accumMaterial = null;
+    /** @type {THREE.ShaderMaterial|null} */
+    this._outdoorIndoorCasterMaterial = null;
     /** @type {THREE.ShaderMaterial|null} */
     this._skyReachFallbackMaterial = null;
     /** @type {THREE.ShaderMaterial|null} */
@@ -133,10 +156,13 @@ export class SkyReachShadowsEffectV2 {
 
     /**
      * Cache the upper-floor composite signature so we can skip the
-     * accumulator pass when nothing has changed. Same trick as
-     * `OverheadShadowsEffectV2._upperFloorCompositeLastSig`.
+     * accumulator pass when nothing has changed (same invalidation pattern as
+     * other multi-input mask caches in the compositor).
      */
     this._compositeLastSig = '';
+
+    /** @type {boolean|null} Previous frame used driver RT vs local `_compositeTarget` */
+    this._lastCasterSourceWasDriver = null;
 
     /** @type {boolean} One-shot debug guard */
     this._loggedNoUpperOnce = false;
@@ -145,6 +171,24 @@ export class SkyReachShadowsEffectV2 {
     this._levelTextureCache = new Map();
     /** @type {Map<string, Promise<THREE.Texture|null>>} */
     this._levelTextureInflight = new Map();
+
+    /** @type {boolean} One-shot hint when multiply+multi-layer was coerced to max */
+    this._loggedMultiplyUnionHint = false;
+    /** @type {number} Echo of {@link ShadowDriverState#tuning.shadowLengthScale} */
+    this._driverShadowLengthScale = 1.0;
+
+    /**
+     * Copy of {@link ShadowDriverState#masks} from the last {@link #setDriver}
+     * so caster discovery matches ShadowMaskBindings / upper-floor compositor.
+     * @type {{
+     *   receiverBaseIndex?: number|null,
+     *   upperFloorAlphaTextures?: import('three').Texture[],
+     *   upperFloorAlphaKeys?: string[],
+     *   activeFloorAlpha?: import('three').Texture|null,
+     *   upperFloorAlphaCompositeTexture?: import('three').Texture|null,
+     * }|null}
+     */
+    this._driverMasksSnapshot = null;
   }
 
   getHealthDiagnostics() {
@@ -177,19 +221,19 @@ export class SkyReachShadowsEffectV2 {
       ],
       parameters: {
         opacity: { type: 'slider', label: 'Opacity', min: 0.0, max: 1.0, step: 0.01, default: 0.5 },
-        length: { type: 'slider', label: 'Length', min: 0.0, max: 0.6, step: 0.005, default: 0.1 },
+        length: { type: 'slider', label: 'Length', min: 0.02, max: 0.6, step: 0.005, default: 0.1 },
         softness: { type: 'slider', label: 'Softness', min: 0.5, max: 8.0, step: 0.1, default: 8 },
         smear: { type: 'slider', label: 'Smear', min: 0.0, max: 1.0, step: 0.01, default: 1.0 },
         resolutionScale: { type: 'slider', label: 'Resolution', min: 1.0, max: 2.0, step: 0.05, default: 1.25 },
         penumbra: { type: 'slider', label: 'Penumbra', min: 0.0, max: 1.0, step: 0.01, default: 1 },
         shadowCurve: { type: 'slider', label: 'Shadow Curve', min: 0.5, max: 1.6, step: 0.01, default: 0.81 },
-        blurRadius: { type: 'slider', label: 'Blur', min: 0.0, max: 4.0, step: 0.05, default: 4 },
+        blurRadius: { type: 'slider', label: 'Blur', min: 0.0, max: 4.0, step: 0.05, default: 0 },
         upperFloorCombineMode: {
           type: 'select',
           label: 'Upper-Floor Combine',
           options: {
             'Max (union)': 'max',
-            'Multiply (strict)': 'multiply',
+            'Multiply (single layer only)': 'multiply',
           },
           default: 'max',
         },
@@ -254,7 +298,11 @@ export class SkyReachShadowsEffectV2 {
         void main() {
           vec2 suv = clamp(vUv, 0.0, 1.0);
           if (uUpperAlphaFlipY > 0.5) suv.y = 1.0 - suv.y;
-          float a = clamp(texture2D(tUpperAlpha, suv).r, 0.0, 1.0);
+          vec4 m = texture2D(tUpperAlpha, suv);
+          // Match GpuSceneMaskCompositor modes: alpha-extract writes A; some paths
+          // still expose coverage primarily in R. Use max so upper-floor silhouettes
+          // never disappear when only one channel is authored.
+          float a = clamp(max(m.r, m.a), 0.0, 1.0);
           gl_FragColor = vec4(a, a, a, a);
         }
       `,
@@ -263,6 +311,38 @@ export class SkyReachShadowsEffectV2 {
       transparent: true,
     });
     this._accumMaterial.toneMapped = false;
+
+    this._outdoorIndoorCasterMaterial = new THREE.ShaderMaterial({
+      uniforms: {
+        tOutdoors: { value: null },
+        uOutdoorsFlipY: { value: 0.0 },
+      },
+      vertexShader: `
+        varying vec2 vUv;
+        void main() {
+          vUv = uv;
+          gl_Position = vec4(position.xy, 0.0, 1.0);
+        }
+      `,
+      fragmentShader: `
+        uniform sampler2D tOutdoors;
+        uniform float uOutdoorsFlipY;
+        varying vec2 vUv;
+        void main() {
+          vec2 suv = clamp(vUv, 0.0, 1.0);
+          if (uOutdoorsFlipY > 0.5) suv.y = 1.0 - suv.y;
+          vec4 m = texture2D(tOutdoors, suv);
+          float outd = clamp(mix(1.0, m.r, m.a), 0.0, 1.0);
+          // Match {@link BuildingShadowsEffectV2} caster sampling: shadow mass from low-outdoors (indoor) texels.
+          float indoor = clamp(1.0 - outd, 0.0, 1.0);
+          gl_FragColor = vec4(indoor, indoor, indoor, indoor);
+        }
+      `,
+      depthTest: false,
+      depthWrite: false,
+      transparent: true,
+    });
+    this._outdoorIndoorCasterMaterial.toneMapped = false;
 
     this._skyReachFallbackMaterial = new THREE.ShaderMaterial({
       uniforms: {
@@ -426,6 +506,21 @@ export class SkyReachShadowsEffectV2 {
         uDynSceneDimensions: { value: new THREE.Vector2(1, 1) },
         uDynSceneRect: { value: new THREE.Vector4(0, 0, 1, 1) },
         uHasDynSceneRect: { value: 0.0 },
+        tFloorId: { value: null },
+        uHasFloorId: { value: 0.0 },
+        uFloorIdFlipY: { value: 1.0 },
+        tOutdoors0: { value: null },
+        tOutdoors1: { value: null },
+        tOutdoors2: { value: null },
+        tOutdoors3: { value: null },
+        uHasOutdoors0: { value: 0.0 },
+        uHasOutdoors1: { value: 0.0 },
+        uHasOutdoors2: { value: 0.0 },
+        uHasOutdoors3: { value: 0.0 },
+        uOutdoors0FlipY: { value: 0.0 },
+        uOutdoors1FlipY: { value: 0.0 },
+        uOutdoors2FlipY: { value: 0.0 },
+        uOutdoors3FlipY: { value: 0.0 },
       },
       vertexShader: `
         varying vec2 vUv;
@@ -434,7 +529,7 @@ export class SkyReachShadowsEffectV2 {
           gl_Position = vec4(position.xy, 0.0, 1.0);
         }
       `,
-      fragmentShader: `
+      fragmentShader: `${FLOOR_ID_OUTDOORS_RECEIVER_GLSL}
         uniform sampler2D uCasterMask;
         uniform float uHasCaster;
         uniform sampler2D uActiveFloorAlpha;
@@ -460,6 +555,21 @@ export class SkyReachShadowsEffectV2 {
         uniform vec2 uDynSceneDimensions;
         uniform vec4 uDynSceneRect;
         uniform float uHasDynSceneRect;
+        uniform sampler2D tFloorId;
+        uniform float uHasFloorId;
+        uniform float uFloorIdFlipY;
+        uniform sampler2D tOutdoors0;
+        uniform sampler2D tOutdoors1;
+        uniform sampler2D tOutdoors2;
+        uniform sampler2D tOutdoors3;
+        uniform float uHasOutdoors0;
+        uniform float uHasOutdoors1;
+        uniform float uHasOutdoors2;
+        uniform float uHasOutdoors3;
+        uniform float uOutdoors0FlipY;
+        uniform float uOutdoors1FlipY;
+        uniform float uOutdoors2FlipY;
+        uniform float uOutdoors3FlipY;
         varying vec2 vUv;
 
         float uvInBounds(vec2 uv) {
@@ -470,12 +580,13 @@ export class SkyReachShadowsEffectV2 {
           return ge0.x * ge0.y * le1.x * le1.y;
         }
 
-        // Caster = union/product of upper-floor floorAlpha (R channel, alpha-extracted).
-        // No alpha-aware "no data → 1.0" remap: floorAlpha is authored as
-        // (alpha, alpha, alpha, alpha) by the accumulator pass, so .r is the value.
+        // Caster = union/product of upper-floor floorAlpha. Coverage may live in R
+        // (alpha-extract compositor) or A (source-over / legacy); use max(...)
+        // so ray marching never sees an empty mask when either channel carries data.
         float readCasterAlpha(vec2 uv) {
           vec2 suv = clamp(uv, 0.0, 1.0);
-          return clamp(texture2D(uCasterMask, suv).r, 0.0, 1.0);
+          vec4 m = texture2D(uCasterMask, suv);
+          return clamp(max(m.r, m.a), 0.0, 1.0);
         }
 
         float sampleCaster(vec2 uv) {
@@ -550,6 +661,28 @@ export class SkyReachShadowsEffectV2 {
             strength *= clamp(1.0 - actAlpha, 0.0, 1.0);
           }
 
+          if (uHasFloorId > 0.5) {
+            float receiverOutdoors = msa_readFloorIdOutdoors(
+              vUv,
+              tFloorId,
+              uHasFloorId,
+              uFloorIdFlipY,
+              tOutdoors0,
+              tOutdoors1,
+              tOutdoors2,
+              tOutdoors3,
+              uHasOutdoors0,
+              uHasOutdoors1,
+              uHasOutdoors2,
+              uHasOutdoors3,
+              uOutdoors0FlipY,
+              uOutdoors1FlipY,
+              uOutdoors2FlipY,
+              uOutdoors3FlipY
+            );
+            strength *= clamp(receiverOutdoors, 0.0, 1.0);
+          }
+
           if ((uHasDynamicLight > 0.5 || uHasWindowLight > 0.5) && uDynamicLightShadowOverrideEnabled > 0.5 && uHasDynSceneRect > 0.5) {
             vec2 dynUv = clamp(sceneUvToDynScreenUv(vUv), vec2(0.0), vec2(1.0));
             float dynI = 0.0;
@@ -561,7 +694,9 @@ export class SkyReachShadowsEffectV2 {
               vec3 win = texture2D(tWindowLight, dynUv).rgb;
               dynI = max(dynI, clamp(max(win.r, max(win.g, win.b)), 0.0, 1.0));
             }
-            float dynPresence = smoothstep(0.02, 0.30, dynI);
+            // Sparse sky-reach shadows vanish if we treat globally-bright RT as “torch everywhere”.
+            float dynPresence = smoothstep(0.38, 0.90, dynI);
+            dynPresence = pow(dynPresence, 1.2);
             float dynLift = clamp(dynPresence * max(uDynamicLightShadowOverrideStrength, 0.0), 0.0, 1.0);
             strength = mix(strength, 0.0, dynLift);
           }
@@ -718,8 +853,11 @@ export class SkyReachShadowsEffectV2 {
     this._updateSunDirection();
 
     const u = this._projectMaterial.uniforms;
-    u.uLength.value = this.params.length;
-    u.uSoftness.value = this.params.softness;
+    const lenScale = Number.isFinite(Number(this._driverShadowLengthScale))
+      ? Math.max(0.25, Math.min(4.0, Number(this._driverShadowLengthScale)))
+      : 1.0;
+    u.uLength.value = this._getEffectiveRayLength() * lenScale;
+    u.uSoftness.value = this.params.softness * (Number(this._driverShadowSoftnessScale) || 1.0);
     u.uSmear.value = this.params.smear;
     u.uPenumbra.value = this.params.penumbra;
     u.uShadowCurve.value = this.params.shadowCurve;
@@ -790,6 +928,28 @@ export class SkyReachShadowsEffectV2 {
     this._dynamicLightOverride = payload && typeof payload === 'object' ? payload : null;
   }
 
+  setDriver(driverState = null) {
+    if (!driverState) return;
+    this.setSunAngles(driverState.sun?.azimuthDeg, driverState.sun?.elevationDeg);
+    this.setDynamicLightOverride(driverState.dynamicLightOverride ?? null);
+    if (Number.isFinite(Number(driverState.tuning?.shadowSoftnessScale))) {
+      this._driverShadowSoftnessScale = Number(driverState.tuning.shadowSoftnessScale);
+    }
+    if (Number.isFinite(Number(driverState.tuning?.shadowLengthScale))) {
+      this._driverShadowLengthScale = Number(driverState.tuning.shadowLengthScale);
+    }
+    const m = driverState.masks;
+    this._driverMasksSnapshot = m
+      ? {
+        receiverBaseIndex: m.receiverBaseIndex,
+        upperFloorAlphaTextures: Array.isArray(m.upperFloorAlphaTextures) ? m.upperFloorAlphaTextures.slice() : [],
+        upperFloorAlphaKeys: Array.isArray(m.upperFloorAlphaKeys) ? m.upperFloorAlphaKeys.slice() : [],
+        activeFloorAlpha: m.activeFloorAlpha ?? null,
+        upperFloorAlphaCompositeTexture: m.upperFloorAlphaCompositeTexture ?? null,
+      }
+      : null;
+  }
+
   /**
    * @returns {{
    *   textures: THREE.Texture[],
@@ -799,20 +959,41 @@ export class SkyReachShadowsEffectV2 {
    *   casterKeys: string[],
    *   candidateKeys: string[],
    *   fallbackFloor: (object|null)
+   *   seededFromDriverSnapshot: boolean
    * }}
    * @private
    */
   _collectUpperFloorAlphaTextures() {
     const compositor = window.MapShine?.sceneComposer?._sceneMaskCompositor;
     if (!compositor?.getFloorTexture) {
-      return { textures: [], activeFloorAlpha: null, activeFloorIndex: null, receiverBaseIndex: null, casterKeys: [], fallbackFloor: null };
+      return {
+        textures: [],
+        activeFloorAlpha: null,
+        activeFloorIndex: null,
+        receiverBaseIndex: null,
+        casterKeys: [],
+        candidateKeys: [],
+        fallbackSolidTileCount: 0,
+        fallbackFloor: null,
+        seededFromDriverSnapshot: false,
+      };
     }
     const floorStack = window.MapShine?.floorStack;
     const floors = floorStack?.getFloors?.() ?? [];
     const activeFloor = floorStack?.getActiveFloor?.() ?? null;
     const activeIdx = Number(activeFloor?.index);
     if (!Number.isFinite(activeIdx)) {
-      return { textures: [], activeFloorAlpha: null, activeFloorIndex: null, receiverBaseIndex: null, casterKeys: [], candidateKeys: [], fallbackFloor: null };
+      return {
+        textures: [],
+        activeFloorAlpha: null,
+        activeFloorIndex: null,
+        receiverBaseIndex: null,
+        casterKeys: [],
+        candidateKeys: [],
+        fallbackSolidTileCount: 0,
+        fallbackFloor: null,
+        seededFromDriverSnapshot: false,
+      };
     }
 
     const resolveFloorAlpha = (floor) => {
@@ -829,18 +1010,21 @@ export class SkyReachShadowsEffectV2 {
       return tex;
     };
 
-    // The visible stack can contain lower floors seen through alpha holes while
-    // the active floor is the top/roof floor. In that common view, "floors above
-    // active" is empty, but lower visible receivers still need every floor above
-    // them to cast. Use the lowest visible receiver as the caster cutoff.
+    // Prefer {@link ShadowDriverState#masks.receiverBaseIndex} — same cutoff as
+    // ShadowMaskBindings / UpperFloorAlphaCompositor (avoids drift vs FloorCompositor._activeFloorIndex).
+    const snap = this._driverMasksSnapshot;
     let receiverBaseIdx = activeIdx;
-    try {
-      const visible = floorStack?.getVisibleFloors?.() ?? [];
-      for (const f of visible) {
-        const idx = Number(f?.index);
-        if (Number.isFinite(idx)) receiverBaseIdx = Math.min(receiverBaseIdx, idx);
-      }
-    } catch (_) {}
+    if (snap && Number.isFinite(Number(snap.receiverBaseIndex))) {
+      receiverBaseIdx = Number(snap.receiverBaseIndex);
+    } else {
+      try {
+        const visible = floorStack?.getVisibleFloors?.() ?? [];
+        for (const f of visible) {
+          const idx = Number(f?.index);
+          if (Number.isFinite(idx)) receiverBaseIdx = Math.min(receiverBaseIdx, idx);
+        }
+      } catch (_) {}
+    }
 
     const upper = [];
     const casterKeys = [];
@@ -852,11 +1036,28 @@ export class SkyReachShadowsEffectV2 {
       upper.push(tex);
       casterKeys.push(key);
     };
+
+    const driverTex = snap?.upperFloorAlphaTextures;
+    const driverKeys = snap?.upperFloorAlphaKeys;
+    const usedDriverStack = Array.isArray(driverTex) && driverTex.length > 0;
+    if (usedDriverStack) {
+      for (let i = 0; i < driverTex.length; i += 1) {
+        const tex = driverTex[i];
+        const key = (driverKeys && driverKeys[i] != null && String(driverKeys[i]))
+          ? String(driverKeys[i])
+          : `driver:${i}`;
+        pushTexture(key, tex ?? null);
+      }
+    }
+    // Always merge live stack resolution. The driver snapshot can omit a band, trail
+    // GpuSceneMaskCompositor by a frame, or reference the same keys with textures that
+    // were not yet repopulated — skipping this walk left `upper` empty or too sparse
+    // while building shadows (outdoors-driven) still looked correct.
     for (const f of floors) {
       const idx = Number(f?.index);
       if (!Number.isFinite(idx) || idx <= receiverBaseIdx) continue;
       const candidateKey = f?.compositorKey != null ? String(f.compositorKey) : String(idx);
-      candidateKeys.push(candidateKey);
+      if (!candidateKeys.includes(candidateKey)) candidateKeys.push(candidateKey);
       const tex = resolveFloorAlpha(f);
       pushTexture(candidateKey, tex);
     }
@@ -885,7 +1086,7 @@ export class SkyReachShadowsEffectV2 {
     for (const tex of upper) {
       fallbackSolidTileCount += Number(tex?.userData?.floorAlphaFallbackSolidCount ?? 0) || 0;
     }
-    const activeFloorAlpha = resolveFloorAlpha(activeFloor);
+    const activeFloorAlpha = (snap && snap.activeFloorAlpha) ? snap.activeFloorAlpha : resolveFloorAlpha(activeFloor);
     return {
       textures: upper,
       activeFloorAlpha,
@@ -895,6 +1096,7 @@ export class SkyReachShadowsEffectV2 {
       candidateKeys,
       fallbackSolidTileCount,
       fallbackFloor,
+      seededFromDriverSnapshot: usedDriverStack,
     };
   }
 
@@ -1089,30 +1291,132 @@ export class SkyReachShadowsEffectV2 {
   }
 
   /**
-   * Pick the composite RT size from the largest input floorAlpha, with caps.
+   * Pick the composite RT size for upper-floor casters.
+   *
+   * IMPORTANT: Do **not** take max(width) and max(height) from different
+   * textures — that can invent a bogus aspect (e.g. 2560×2560) while
+   * {@link BuildingShadowsEffectV2} and floor-id receivers stay at scene
+   * aspect (e.g. 2560×1190). Ray marching then disagrees with
+   * `msa_readFloorIdOutdoors`, often zeroing strength so the factor RT reads
+   * all-lit.
+   *
+   * Order: receiver outdoors mask size (Building parity) → caster whose aspect
+   * matches scene → largest single-texture area → mask-compositor output dims →
+   * drawing buffer.
    * @private
    */
   _resolveCompositeTargetSize(textures) {
+    const cap = (this.renderer?.capabilities?.maxTextureSize | 0) || 8192;
+    const clampEdge = (w, h) => ({
+      x: Math.max(2, Math.min(Math.round(w), cap, MAX_SKY_REACH_SHADOW_EDGE_PX)),
+      y: Math.max(2, Math.min(Math.round(h), cap, MAX_SKY_REACH_SHADOW_EDGE_PX)),
+    });
+
+    const fromTex = (t) => {
+      if (!t) return null;
+      const iw = Number(t.image?.width ?? t.source?.data?.width ?? t.source?.width ?? t.width ?? 0);
+      const ih = Number(t.image?.height ?? t.source?.data?.height ?? t.source?.height ?? t.height ?? 0);
+      if (Number.isFinite(iw) && Number.isFinite(ih) && iw > 0 && ih > 0) {
+        return { x: iw, y: ih };
+      }
+      return null;
+    };
+
+    const dims = typeof canvas !== 'undefined' ? canvas?.dimensions : null;
+    const rect0 = dims?.sceneRect ?? dims;
+    const sceneW = Number(rect0?.width ?? dims?.sceneWidth ?? dims?.width ?? 0);
+    const sceneH = Number(rect0?.height ?? dims?.sceneHeight ?? dims?.height ?? 0);
+    const sceneAspect = sceneW > 0 && sceneH > 0 ? sceneW / sceneH : null;
+
+    const compositor = window.MapShine?.sceneComposer?._sceneMaskCompositor ?? null;
+    const floors = window.MapShine?.floorStack?.getFloors?.() ?? [];
+    const snap = this._driverMasksSnapshot;
+    let recvIdx = Number(snap?.receiverBaseIndex);
+    if (!Number.isFinite(recvIdx)) {
+      const active = window.MapShine?.floorStack?.getActiveFloor?.();
+      recvIdx = Number(active?.index);
+    }
+    const receiverFloor = Number.isFinite(recvIdx)
+      ? floors.find((f) => Number(f?.index) === recvIdx) ?? null
+      : null;
+
+    const tryOutdoorsSizeForFloor = (floor) => {
+      if (!compositor?.getFloorTexture || !floor) return null;
+      const ck = floor.compositorKey != null ? String(floor.compositorKey) : '';
+      if (ck) {
+        const sz = fromTex(compositor.getFloorTexture(ck, 'outdoors'));
+        if (sz) return sz;
+      }
+      const b = Number(floor.elevationMin);
+      const t = Number(floor.elevationMax);
+      if (Number.isFinite(b) && Number.isFinite(t)) {
+        return fromTex(compositor.getFloorTexture(`${b}:${t}`, 'outdoors'));
+      }
+      return null;
+    };
+
+    const recvSz = tryOutdoorsSizeForFloor(receiverFloor);
+    if (recvSz) return clampEdge(recvSz.x, recvSz.y);
+
+    const activeFloor0 = window.MapShine?.floorStack?.getActiveFloor?.();
+    const activeSz = tryOutdoorsSizeForFloor(activeFloor0);
+    if (activeSz) return clampEdge(activeSz.x, activeSz.y);
+
+    for (const f of floors) {
+      const sz = tryOutdoorsSizeForFloor(f);
+      if (sz) return clampEdge(sz.x, sz.y);
+    }
+
+    try {
+      const floorMeta = compositor?._floorMeta;
+      if (compositor?.getFloorTexture && floorMeta && typeof floorMeta.entries === 'function') {
+        for (const [key] of floorMeta.entries()) {
+          const sz = fromTex(compositor.getFloorTexture(key, 'outdoors'));
+          if (sz) return clampEdge(sz.x, sz.y);
+        }
+      }
+    } catch (_) {}
+
+    let bestPair = null;
+    let bestAspDist = Infinity;
+    let bestArea = -1;
+    for (const t of textures || []) {
+      const sz = fromTex(t);
+      if (!sz) continue;
+      const area = sz.x * sz.y;
+      const asp = sz.y > 0 ? sz.x / sz.y : 1;
+      const aspDist = sceneAspect != null && sceneAspect > 0
+        ? Math.abs(Math.log((asp || 1) / sceneAspect))
+        : 0;
+      if (aspDist < bestAspDist - 1e-9 || (Math.abs(aspDist - bestAspDist) < 1e-9 && area > bestArea)) {
+        bestPair = sz;
+        bestAspDist = aspDist;
+        bestArea = area;
+      }
+    }
+    if (bestPair) return clampEdge(bestPair.x, bestPair.y);
+
     let maxW = 0;
     let maxH = 0;
-    for (const t of textures) {
-      if (!t) continue;
-      const iw = t.image?.width ?? t.source?.data?.width ?? t.width ?? 0;
-      const ih = t.image?.height ?? t.source?.data?.height ?? t.height ?? 0;
-      if (iw > maxW) maxW = iw;
-      if (ih > maxH) maxH = ih;
-    }
+    try {
+      const od = compositor?.getOutputDims?.('floorAlpha');
+      const ow = Math.floor(Number(od?.width));
+      const oh = Math.floor(Number(od?.height));
+      if (ow > 0 && oh > 0) {
+        maxW = ow;
+        maxH = oh;
+      }
+    } catch (_) {}
     if (maxW <= 0 || maxH <= 0) {
-      try {
-        const comp = window.MapShine?.sceneComposer?._sceneMaskCompositor;
-        const od = comp?.getOutputDims?.('floorAlpha');
-        const ow = Math.floor(Number(od?.width));
-        const oh = Math.floor(Number(od?.height));
-        if (ow > 0 && oh > 0) {
-          maxW = Math.max(maxW, ow);
-          maxH = Math.max(maxH, oh);
+      for (const t of textures || []) {
+        const sz = fromTex(t);
+        if (!sz) continue;
+        const area = sz.x * sz.y;
+        if (area > maxW * maxH) {
+          maxW = sz.x;
+          maxH = sz.y;
         }
-      } catch (_) {}
+      }
     }
     if ((maxW <= 0 || maxH <= 0) && this.renderer) {
       const d = new (window.THREE.Vector2)();
@@ -1120,11 +1424,7 @@ export class SkyReachShadowsEffectV2 {
       maxW = Math.max(maxW, Math.max(2, Math.floor(d.x)));
       maxH = Math.max(maxH, Math.max(2, Math.floor(d.y)));
     }
-    const cap = (this.renderer?.capabilities?.maxTextureSize | 0) || 8192;
-    return {
-      x: Math.max(2, Math.min(maxW, cap, MAX_SKY_REACH_SHADOW_EDGE_PX)),
-      y: Math.max(2, Math.min(maxH, cap, MAX_SKY_REACH_SHADOW_EDGE_PX)),
-    };
+    return clampEdge(maxW, maxH);
   }
 
   render(renderer, camera) {
@@ -1168,6 +1468,7 @@ export class SkyReachShadowsEffectV2 {
       candidateKeys,
       fallbackSolidTileCount,
       fallbackFloor,
+      seededFromDriverSnapshot,
     } = this._collectUpperFloorAlphaTextures();
     const fallbackSkyReachTex = upperAlphaTextures.length === 0 ? this._resolveFloorTexture(fallbackFloor, 'skyReach') : null;
     const fallbackOutdoorsTex = fallbackSkyReachTex ? this._resolveFloorTexture(fallbackFloor, 'outdoors') : null;
@@ -1215,38 +1516,118 @@ export class SkyReachShadowsEffectV2 {
     // ever becomes empty again after being populated.
     this._loggedNoUpperOnce = false;
 
+    const rawUpperCombine = String(this.params.upperFloorCombineMode || 'max').toLowerCase();
+    const upperAlphaCount = upperAlphaTextures.length;
+    let effectiveUpperFloorCombine = rawUpperCombine;
+    if (rawUpperCombine === 'multiply' && upperAlphaCount > 1) {
+      effectiveUpperFloorCombine = 'max';
+      if (!this._loggedMultiplyUnionHint) {
+        this._loggedMultiplyUnionHint = true;
+        log.info(
+          'SkyReachShadowsEffectV2: "multiply" combine with multiple upper-floor floorAlpha layers erases casters; '
+          + `using max (union) instead (${upperAlphaCount} layers).`,
+        );
+      }
+    }
+
     // ── 1) Build (or reuse cached) composite RT of upper-floor floorAlpha ──
     const usingDirectTileFallback = upperAlphaTextures.length === 0 && !fallbackSkyReachTex && directTileCasters.tiles.length > 0;
     const usingLevelImageFallback = upperAlphaTextures.length === 0 && !fallbackSkyReachTex && levelImageCasters.textures.length > 0;
+    const usingSkyReachFallback = upperAlphaTextures.length === 0 && !!fallbackSkyReachTex;
     const compositeSources = upperAlphaTextures.length > 0
       ? upperAlphaTextures
       : (fallbackSkyReachTex ? [fallbackSkyReachTex] : levelImageCasters.textures);
-    const compSize = this._resolveCompositeTargetSize(compositeSources);
+
+    // Same max-composite as {@link UpperFloorAlphaCompositor} + sky occlusion (built in FloorCompositor before setDriver).
+    const driverCompositeTex = this._driverMasksSnapshot?.upperFloorAlphaCompositeTexture ?? null;
+    const driverCompositeOk = !!(driverCompositeTex && driverCompositeTex.isTexture);
+    const snapUpperCount = Array.isArray(this._driverMasksSnapshot?.upperFloorAlphaTextures)
+      ? this._driverMasksSnapshot.upperFloorAlphaTextures.filter(Boolean).length
+      : 0;
+    const useDriverComposite = this.params.useDriverUpperFloorComposite === true
+      && driverCompositeOk
+      && snapUpperCount > 0
+      && upperAlphaTextures.length > 0
+      && !usingLevelImageFallback
+      && !usingDirectTileFallback
+      && !usingSkyReachFallback
+      && String(this.params.upperFloorCombineMode || 'max').toLowerCase() !== 'multiply';
+
+    if (this._lastCasterSourceWasDriver != null
+      && this._lastCasterSourceWasDriver !== useDriverComposite) {
+      this._compositeLastSig = '';
+    }
+
+    const buildingFx = window.MapShine?.floorCompositorV2?._buildingShadowEffect;
+    const buildingShadowsOn = !!(buildingFx
+      && buildingFx.enabled !== false
+      && buildingFx.params
+      && buildingFx.params.enabled !== false);
+    const buildingShadowPeer = buildingShadowsOn ? (buildingFx?.shadowTarget ?? null) : null;
+
+    let compSize;
+    /** When true, composite + projector RTs use the same pixel grid as {@link BuildingShadowsEffectV2}. */
+    let lockedCompositeToBuildingShadow = false;
+    if (useDriverComposite) {
+      compSize = this._resolveCompositeTargetSize([driverCompositeTex]);
+    } else if (buildingShadowPeer
+      && buildingShadowPeer.width > 2
+      && buildingShadowPeer.height > 2) {
+      // Building runs before Sky Reach in FloorCompositor. Its shadowTarget already encodes
+      // the canonical scene-space mask footprint + resolutionScale cap. Matching that grid
+      // keeps `msa_readFloorIdOutdoors` and SM scene-UV sampling aligned; local outdoors /
+      // meta heuristics can otherwise pick a taller band (e.g. 2560×1523) and Sky Reach's
+      // default resolutionScale (1.25) then diverges further (e.g. 1904px tall vs 1190).
+      lockedCompositeToBuildingShadow = true;
+      compSize = {
+        x: buildingShadowPeer.width,
+        y: buildingShadowPeer.height,
+      };
+    } else {
+      compSize = this._resolveCompositeTargetSize(compositeSources);
+    }
     if (this._compositeTarget.width !== compSize.x || this._compositeTarget.height !== compSize.y) {
       this._compositeTarget.setSize(compSize.x, compSize.y);
       this._compositeLastSig = '';
     }
 
-    const usingSkyReachFallback = upperAlphaTextures.length === 0 && !!fallbackSkyReachTex;
-    const combineMode = usingLevelImageFallback
+    let combineMode = usingLevelImageFallback
       ? 'levelImageFallback'
       : (usingDirectTileFallback
-      ? 'directTileFallback'
-      : (usingSkyReachFallback ? 'skyReachFallback' : String(this.params.upperFloorCombineMode || 'max').toLowerCase()));
-    let sig = `${combineMode}|${compSize.x}x${compSize.y}|${compositeSources.length}`;
-    for (const t of compositeSources) {
-      sig += `|${t?.uuid ?? ''}:${t?.version ?? 0}:${t?.flipY ? 1 : 0}`;
-    }
-    sig += `|out:${fallbackOutdoorsTex?.uuid ?? ''}:${fallbackOutdoorsTex?.version ?? 0}:${fallbackOutdoorsTex?.flipY ? 1 : 0}`;
-    if (usingLevelImageFallback) {
-      for (const label of levelImageCasters.loaded) sig += `|level:${label}`;
-    }
-    if (usingDirectTileFallback) {
-      for (const { tileDoc, key } of directTileCasters.tiles) {
-        sig += `|tile:${key}:${tileDoc?.id ?? tileDoc?._id ?? ''}:${tileDoc?.x ?? 0}:${tileDoc?.y ?? 0}:${tileDoc?.width ?? 0}:${tileDoc?.height ?? 0}:${tileDoc?.rotation ?? 0}:${tileDoc?.texture?.scaleX ?? 1}:${tileDoc?.texture?.scaleY ?? 1}`;
+        ? 'directTileFallback'
+        : (usingSkyReachFallback ? 'skyReachFallback' : effectiveUpperFloorCombine));
+    if (useDriverComposite) combineMode = 'driverUpperComposite';
+
+    let sig;
+    const maskCacheVer = compositor && typeof compositor.getFloorCacheVersion === 'function'
+      ? Number(compositor.getFloorCacheVersion()) || 0
+      : 0;
+    if (useDriverComposite) {
+      sig = `driverUpperComposite|${compSize.x}x${compSize.y}|${driverCompositeTex.uuid}|${driverCompositeTex.version ?? 0}|${driverCompositeTex.flipY ? 1 : 0}`;
+    } else {
+      // Key off GpuSceneMaskCompositor cache generation: RT textures often keep the same
+      // uuid/version when floorAlpha is redrawn, which previously left needsComposite false
+      // and projected from a stale (e.g. all-black) composite forever.
+      sig = `${combineMode}|mcv:${maskCacheVer}|${compSize.x}x${compSize.y}|${compositeSources.length}`;
+      for (const t of compositeSources) {
+        sig += `|${t?.uuid ?? ''}:${t?.version ?? 0}:${t?.flipY ? 1 : 0}`;
+      }
+      sig += `|out:${fallbackOutdoorsTex?.uuid ?? ''}:${fallbackOutdoorsTex?.version ?? 0}:${fallbackOutdoorsTex?.flipY ? 1 : 0}`;
+      if (usingLevelImageFallback) {
+        for (const label of levelImageCasters.loaded) sig += `|level:${label}`;
+      }
+      if (usingDirectTileFallback) {
+        for (const { tileDoc, key } of directTileCasters.tiles) {
+          sig += `|tile:${key}:${tileDoc?.id ?? tileDoc?._id ?? ''}:${tileDoc?.x ?? 0}:${tileDoc?.y ?? 0}:${tileDoc?.width ?? 0}:${tileDoc?.height ?? 0}:${tileDoc?.rotation ?? 0}:${tileDoc?.texture?.scaleX ?? 1}:${tileDoc?.texture?.scaleY ?? 1}`;
+        }
       }
     }
-    const needsComposite = sig !== this._compositeLastSig;
+    // Always redraw the local accumulator when not using the driver texture.
+    // GpuSceneMaskCompositor can refresh floorAlpha without bumping texture
+    // `version` or compositor cache signatures; caching on sig alone then
+    // projects from a stale (sometimes all-transparent) composite forever.
+    const needsComposite = !useDriverComposite;
+    let outdoorIndoorCasterPasses = 0;
 
     if (needsComposite) {
       const prevTarget = renderer.getRenderTarget();
@@ -1313,7 +1694,7 @@ export class SkyReachShadowsEffectV2 {
         renderer.autoClear = false;
         renderer.render(this._scene, this._camera);
       } else {
-      const useMultiply = combineMode === 'multiply';
+      const useMultiply = effectiveUpperFloorCombine === 'multiply';
       if (useMultiply) {
         renderer.setClearColor(0xffffff, 1);
         renderer.clear();
@@ -1347,6 +1728,44 @@ export class SkyReachShadowsEffectV2 {
           log.debug('SkyReachShadowsEffectV2: accumulator draw failed', e);
         }
       }
+      if (!useMultiply && this._outdoorIndoorCasterMaterial && compositor?.getFloorTexture) {
+        const floorsOI = window.MapShine?.floorStack?.getFloors?.() ?? [];
+        for (const f of floorsOI) {
+          const fidx = Number(f?.index);
+          if (!Number.isFinite(fidx) || fidx <= receiverBaseIndex) continue;
+          let oKey = f?.compositorKey != null ? String(f.compositorKey) : '';
+          if (!oKey) {
+            const bb = Number(f?.elevationMin);
+            const tt = Number(f?.elevationMax);
+            if (Number.isFinite(bb) && Number.isFinite(tt)) oKey = `${bb}:${tt}`;
+          }
+          if (!oKey) continue;
+          const fa = compositor.getFloorTexture(oKey, 'floorAlpha') ?? null;
+          if (fa) continue;
+          const od = compositor.getFloorTexture(oKey, 'outdoors') ?? null;
+          if (!od) continue;
+          const oi = this._outdoorIndoorCasterMaterial.uniforms;
+          oi.tOutdoors.value = od;
+          oi.uOutdoorsFlipY.value = od?.flipY ? 1.0 : 0.0;
+          this._quad.material = this._outdoorIndoorCasterMaterial;
+          this._outdoorIndoorCasterMaterial.blending = THREE.CustomBlending;
+          this._outdoorIndoorCasterMaterial.blendEquation = THREE.MaxEquation ?? THREE.AddEquation;
+          this._outdoorIndoorCasterMaterial.blendEquationAlpha = THREE.MaxEquation ?? THREE.AddEquation;
+          this._outdoorIndoorCasterMaterial.blendSrc = THREE.OneFactor;
+          this._outdoorIndoorCasterMaterial.blendDst = THREE.OneFactor;
+          this._outdoorIndoorCasterMaterial.blendSrcAlpha = THREE.OneFactor;
+          this._outdoorIndoorCasterMaterial.blendDstAlpha = THREE.OneFactor;
+          this._outdoorIndoorCasterMaterial.transparent = true;
+          try {
+            renderer.render(this._scene, this._camera);
+            outdoorIndoorCasterPasses += 1;
+          } catch (e) {
+            log.debug('SkyReachShadowsEffectV2: outdoor-indoor caster draw failed', e);
+          }
+        }
+        this._outdoorIndoorCasterMaterial.blending = THREE.NoBlending;
+        this._outdoorIndoorCasterMaterial.transparent = false;
+      }
       this._accumMaterial.blending = THREE.NoBlending;
       this._accumMaterial.transparent = false;
       }
@@ -1362,7 +1781,9 @@ export class SkyReachShadowsEffectV2 {
     const targetSize = this._compositeTarget.width && this._compositeTarget.height
       ? { x: this._compositeTarget.width, y: this._compositeTarget.height }
       : { x: 1024, y: 1024 };
-    const rtSize = this._computeRenderTargetSize(targetSize.x, targetSize.y);
+    const rtSize = lockedCompositeToBuildingShadow
+      ? { x: targetSize.x, y: targetSize.y }
+      : this._computeRenderTargetSize(targetSize.x, targetSize.y);
     if (this._strengthTarget.width !== rtSize.x || this._strengthTarget.height !== rtSize.y) {
       this._strengthTarget.setSize(rtSize.x, rtSize.y);
       this.shadowTarget.setSize(rtSize.x, rtSize.y);
@@ -1381,13 +1802,35 @@ export class SkyReachShadowsEffectV2 {
     const prevTarget = renderer.getRenderTarget();
     const prevAutoClear = renderer.autoClear;
 
-    this._projectMaterial.uniforms.uCasterMask.value = this._compositeTarget.texture;
+    this._projectMaterial.uniforms.uCasterMask.value = useDriverComposite
+      ? driverCompositeTex
+      : this._compositeTarget.texture;
     this._projectMaterial.uniforms.uHasCaster.value = 1.0;
     if (this._projectMaterial.uniforms.uActiveFloorAlpha) {
       this._projectMaterial.uniforms.uActiveFloorAlpha.value = activeFloorAlpha ?? null;
     }
     this._projectMaterial.uniforms.uHasActiveFloorAlpha.value = activeFloorAlpha ? 1.0 : 0.0;
     this._projectMaterial.uniforms.uActiveFloorAlphaFlipY.value = activeFloorAlpha?.flipY ? 1.0 : 0.0;
+
+    const outdoorsSlots = collectOutdoorsTexturesByFloorIndex(compositor);
+    const receiverOutdoorsFallbackTex = resolveReceiverOutdoorsMaskTexture(
+      compositor,
+      buildingFx?._outdoorsMask ?? null,
+    );
+    {
+      const pu = this._projectMaterial.uniforms;
+      const floorIdTex = outdoorsSlots.floorIdTex;
+      pu.tFloorId.value = floorIdTex;
+      pu.uHasFloorId.value = floorIdTex ? 1.0 : 0.0;
+      pu.uFloorIdFlipY.value = 1.0;
+      const recvSlots = outdoorsSlots.textures;
+      for (let i = 0; i < 4; i++) {
+        const t = recvSlots[i] ?? receiverOutdoorsFallbackTex ?? null;
+        pu[`tOutdoors${i}`].value = t;
+        pu[`uHasOutdoors${i}`].value = t ? 1.0 : 0.0;
+        pu[`uOutdoors${i}FlipY`].value = t?.flipY ? 1.0 : 0.0;
+      }
+    }
 
     renderer.setRenderTarget(this._strengthTarget);
     renderer.setClearColor(0x000000, 1);
@@ -1438,6 +1881,8 @@ export class SkyReachShadowsEffectV2 {
       activeFloorIndex,
       receiverBaseIndex,
       upperFloorCount: upperAlphaTextures.length,
+      seededFromDriverSnapshot: !!seededFromDriverSnapshot,
+      outdoorIndoorCasterPasses,
       casterKeys,
       candidateKeys,
       fallbackSolidTileCount,
@@ -1451,14 +1896,37 @@ export class SkyReachShadowsEffectV2 {
       directTileFallbackUsed: usingDirectTileFallback,
       drewAny: true,
       combineMode,
+      upperFloorCombineRequested: rawUpperCombine,
+      upperFloorCombineEffective: effectiveUpperFloorCombine,
+      effectiveRayLength: this._getEffectiveRayLength()
+        * (Number.isFinite(Number(this._driverShadowLengthScale)) ? Number(this._driverShadowLengthScale) : 1.0),
+      maskCacheVersion: maskCacheVer,
+      useDriverUpperComposite: !!useDriverComposite,
+      lockedCompositeToBuildingShadow,
+      buildingShadowPeerSize: lockedCompositeToBuildingShadow && buildingShadowPeer
+        ? { w: buildingShadowPeer.width, h: buildingShadowPeer.height }
+        : null,
+      driverCompositeTextureUuid: useDriverComposite ? (driverCompositeTex.uuid ?? null) : null,
       receiverInteriorOnly: !!this.params.castInteriorReceiverOnly,
-      compositeTextureUuid: this._compositeTarget.texture?.uuid ?? null,
+      compositeTextureUuid: (useDriverComposite ? driverCompositeTex.uuid : this._compositeTarget.texture?.uuid) ?? null,
       shadowFactorTextureUuid: this.shadowTarget?.texture?.uuid ?? null,
+      receiverOutdoorsFallbackUuid: receiverOutdoorsFallbackTex?.uuid ?? null,
+      buildingSyncedOutdoorsMaskUuid: buildingFx?._outdoorsMask?.uuid ?? null,
+      projectorHasFloorIdTexture: !!outdoorsSlots.floorIdTex,
       dynamicLightOverrideBound: !!(this._dynamicLightOverride?.texture || this._dynamicLightOverride?.windowTexture),
+      dynamicLightShadowLiftParam: this.params.dynamicLightShadowOverrideEnabled !== false,
+      useDriverUpperFloorCompositeParam: this.params.useDriverUpperFloorComposite === true,
     };
     try {
       if (window.MapShine) window.MapShine.__skyReachShadowsDiagnostics = this.getHealthDiagnostics();
     } catch (_) {}
+    this._lastCasterSourceWasDriver = useDriverComposite;
+  }
+
+  _getEffectiveRayLength() {
+    const rawSlider = Number(this.params?.length);
+    const base = Number.isFinite(rawSlider) ? rawSlider : 0.1;
+    return Math.max(SKY_REACH_MIN_EFFECTIVE_RAY_LENGTH, Math.min(SKY_REACH_LENGTH_SLIDER_MAX, base));
   }
 
   _computeRenderTargetSize(width, height) {
@@ -1491,7 +1959,7 @@ export class SkyReachShadowsEffectV2 {
     const THREE = window.THREE;
     if (!THREE) return;
 
-    const lat = Math.max(0.0, Math.min(1.0, this.params.sunLatitude ?? 0.1));
+    const lat = getUnifiedShadowLatitudeScale(this.params.sunLatitude ?? 0.1);
     let x = 0.0;
     let y = -1.0 * lat;
 
@@ -1543,11 +2011,14 @@ export class SkyReachShadowsEffectV2 {
     this._healthDiagnostics = null;
     this._floorPreloadPromise = null;
     this._compositeLastSig = '';
+    this._lastCasterSourceWasDriver = null;
+    this._driverMasksSnapshot = null;
     try { this._compositeTarget?.dispose(); } catch (_) {}
     try { this._strengthTarget?.dispose(); } catch (_) {}
     try { this.shadowTarget?.dispose(); } catch (_) {}
     try { this._blurTarget?.dispose(); } catch (_) {}
     try { this._accumMaterial?.dispose(); } catch (_) {}
+    try { this._outdoorIndoorCasterMaterial?.dispose(); } catch (_) {}
     try { this._skyReachFallbackMaterial?.dispose(); } catch (_) {}
     try { this._levelAlphaMaterial?.dispose(); } catch (_) {}
     try { this._tileFootprintMaterial?.dispose(); } catch (_) {}

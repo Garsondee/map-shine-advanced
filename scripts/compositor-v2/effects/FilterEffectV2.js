@@ -69,6 +69,9 @@ export class FilterEffectV2 {
       inkTintColor: { r: 0.0, g: 0.0, b: 0.0 },
 
       // Vignette-style multiplicative darken (separate from ColorCorrection vignette).
+      // Prefer ColorCorrectionEffectV2 vignette: this filter runs per-level and gets
+      // composited under upper floors, so enabling it can produce inconsistent edge
+      // darkening on multi-floor scenes. Kept available for stylized single-floor use.
       vignetteEnabled: false,
       vignetteStrength: 0.35,
       vignetteInner: 0.55,
@@ -97,9 +100,9 @@ export class FilterEffectV2 {
       help: {
         title: 'Filter (multiply / ink AO)',
         summary: [
-          'Multiplies the composited scene by a global tint and intensity, with optional ink-line “ambient occlusion” style darkening driven from the scene image, plus an optional multiply vignette.',
+          'Material-look filter for tint and ink-line “ambient occlusion” style darkening driven from the scene image.',
           'Best on high-contrast linework maps; ink AO reads dark regions and edges from the current render. Optional **Only _Outdoors Dark Regions** uses the outdoors mask when available.',
-          'Fullscreen post-processing after the main composite.',
+          'Runs in the per-level material chain before the final Camera Grade. Use Color Correction for final-frame exposure, tone mapping, and vignette.',
           'Performance: usually modest; higher spread/blur adds work. Lower intensity or disable sub-features if a map is heavy.',
           'Persistence: scene-based (not World Based).',
         ].join('\n\n'),
@@ -110,7 +113,7 @@ export class FilterEffectV2 {
           'Spread (px)': 'Screen-space reach of the ink shading.',
           'Spread Blur (px)': 'Softens the spread sample for smoother shading.',
           'Only _Outdoors Dark Regions': 'When an outdoors mask is present, limit ink AO to dark areas outside.',
-          Vignette: 'Edge darkening as an extra multiply pass.',
+          Vignette: 'Legacy per-level edge darkening. Prefer Camera Grade vignette for multi-floor scenes.',
         },
       },
       groups: [
@@ -141,7 +144,7 @@ export class FilterEffectV2 {
         },
         {
           name: 'vignette',
-          label: 'Vignette (Multiply)',
+          label: 'Advanced: legacy multiply vignette',
           type: 'folder',
           expanded: false,
           parameters: ['vignetteEnabled', 'vignetteStrength', 'vignetteInner', 'vignetteOuter', 'vignetteTintColor'],
@@ -252,9 +255,9 @@ export class FilterEffectV2 {
 
         vignetteEnabled: {
           type: 'boolean',
-          label: 'Enabled',
+          label: 'Enabled (legacy)',
           default: false,
-          tooltip: 'Enable multiply vignette darkening toward the edges.',
+          tooltip: 'Legacy per-level multiply vignette. Prefer Camera Grade vignette so multi-floor composites darken consistently.',
         },
         vignetteStrength: {
           type: 'slider',

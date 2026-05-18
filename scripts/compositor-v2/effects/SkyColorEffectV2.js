@@ -34,6 +34,8 @@
 import { createLogger } from '../../core/log.js';
 import { weatherController } from '../../core/WeatherController.js';
 import { computeTimeOfDayDarkness01, getFoundryTimePhaseHours } from '../../core/foundry-time-phases.js';
+import { computeSunAnglesFromHour } from '../shadow-system/SunDirection.js';
+import { LightingDirector } from '../../core/LightingDirector.js';
 
 const log = createLogger('SkyColorEffectV2');
 
@@ -83,15 +85,15 @@ export class SkyColorEffectV2 {
     // ── Tuning parameters (match V1 defaults) ──────────────────────────
     this.params = {
       enabled: true,
-      intensity: 0.8,
-      saturationBoost: 0.35,
-      vibranceBoost: 0.0,
+      intensity: 1,
+      saturationBoost: 0.5,
+      vibranceBoost: 0.07,
 
       sunriseHour: 6.0,
       sunsetHour: 18.0,
       goldenHourWidth: 6.0,
-      goldenStrength: 2.9,
-      goldenPower: 2.01,
+      goldenStrength: 4,
+      goldenPower: 3,
       nightFloor: 0.5,
 
       analyticStrength: 0.85,
@@ -109,18 +111,18 @@ export class SkyColorEffectV2 {
       tempWarmAtHorizon: 0.85,
       tempCoolAtNoon: -0.45,
       nightCoolBoost: -0.25,
-      goldenSaturationBoost: 0.18,
+      goldenSaturationBoost: 0.29,
       nightSaturationFloor: 0.33,
       hazeLift: 0.08,
       hazeContrastLoss: 0.0,
 
-      autoIntensityEnabled: true,
+      autoIntensityEnabled: false,
       autoIntensityStrength: 1.0,
-      goldenOutdoorRecolorStrength: 2.2,
+      goldenOutdoorRecolorStrength: 3.25,
       goldenOutdoorRecolorColor: { r: 1.35, g: 0.80, b: 0.50 },
 
       skyTintDarknessLightsEnabled: true,
-      skyTintDarknessLightsIntensity: 1.01,
+      skyTintDarknessLightsIntensity: 5,
       shadowGradePreserve: 0.35,
 
       /**
@@ -138,7 +140,7 @@ export class SkyColorEffectV2 {
       nightExtraDarkness: 0.0,
 
       dayVignetteStrength: 0.0, dayVignetteSoftness: 0.5, dayGrainStrength: 0.0,
-      nightVignetteStrength: 0.25, nightVignetteSoftness: 1.00, nightGrainStrength: 0.0,
+      nightVignetteStrength: 0.47, nightVignetteSoftness: 1.00, nightGrainStrength: 0.0,
 
       /** When true, manual exposure/sat/contrast replace automation (night hooks will not show in grade). */
       debugOverride: false,
@@ -179,6 +181,8 @@ export class SkyColorEffectV2 {
 
     // Cached dayFactor for auto-intensity computation
     this._lastDayFactor = 0.5;
+    this._colorCorrectionTimelineActive = false;
+    this.currentSkyIntensity01 = 1.0;
 
     /** @type {THREE.DataTexture|null} */
     this._fallbackWhite = null;
@@ -191,52 +195,69 @@ export class SkyColorEffectV2 {
   static getControlSchema() {
     return {
       enabled: true,
+      help: {
+        title: 'Sky Environment',
+        summary: [
+          'Computes time-of-day sky color, sun angle, and weather tint for downstream systems.',
+          'After the Linear HDR refactor this pass no longer applies a full-screen grade. Camera Grade owns exposure, vignette, grain, and tone mapping.',
+          'Use these controls to shape how daylight, golden hour, night, cloud, precipitation, and haze influence the perceived quality of light.'
+        ].join('\n\n'),
+        glossary: {
+          'Sky intensity': 'Environment strength exported to water, windows, splashes, and weather-aware lighting.',
+          'Golden recolor': 'Warm horizon/golden-hour bias for outdoor sky light.',
+          'Weather influence': 'How strongly cloud/precipitation shift turbidity, desaturation, and contrast.',
+          'Manual grade': 'Advanced legacy controls; the visual screen grade is suppressed by the HDR pipeline.'
+        },
+      },
       groups: [
-        { name: 'sky-color', label: 'Sky Color', type: 'inline', parameters: ['intensity', 'saturationBoost', 'vibranceBoost', 'shadowGradePreserve', 'skyTintDarknessLightsEnabled', 'skyTintDarknessLightsIntensity'] },
+        { name: 'sky-color', label: 'Sky environment outputs', type: 'inline', parameters: ['intensity', 'saturationBoost', 'vibranceBoost', 'shadowGradePreserve', 'skyTintDarknessLightsEnabled', 'skyTintDarknessLightsIntensity'] },
         {
           name: 'day-night-grade',
-          label: 'Day / night grade (brightness)',
+          label: 'Time / weather light quality',
           type: 'folder',
           expanded: true,
           parameters: [
             'calendarDarknessBlend',
             'dayNightGradePull',
-            'noonExposureBoost',
-            'midnightExposureDrop',
             'nightExtraDarkness',
             'autoIntensityEnabled',
             'autoIntensityStrength',
           ],
         },
         {
-          name: 'night-look',
-          label: 'Night vignette & grain',
+          name: 'advanced-legacy-grade',
+          label: 'Advanced: legacy screen-grade knobs',
           type: 'folder',
           expanded: false,
           parameters: [
+            'noonExposureBoost',
+            'midnightExposureDrop',
             'dayVignetteStrength',
             'dayVignetteSoftness',
             'dayGrainStrength',
             'nightVignetteStrength',
             'nightVignetteSoftness',
             'nightGrainStrength',
+            'debugOverride',
+            'exposure',
+            'saturation',
+            'contrast',
           ],
         },
-        { name: 'sky-automation', label: 'Sky Automation', type: 'folder', expanded: false, parameters: ['sunriseHour', 'sunsetHour', 'goldenHourWidth', 'goldenStrength', 'goldenPower', 'goldenOutdoorRecolorStrength', 'goldenOutdoorRecolorColor', 'nightFloor', 'analyticStrength', 'turbidity', 'rayleighStrength', 'mieStrength', 'forwardScatter', 'weatherInfluence', 'cloudToTurbidity', 'precipToTurbidity', 'overcastDesaturate', 'overcastContrastReduce', 'tempWarmAtHorizon', 'tempCoolAtNoon', 'nightCoolBoost', 'goldenSaturationBoost', 'nightSaturationFloor', 'hazeLift', 'hazeContrastLoss'] },
-        { name: 'automation', label: 'Automation vs Manual', type: 'inline', separator: true, parameters: ['debugOverride', 'exposure', 'saturation', 'contrast'] }
+        { name: 'sky-automation', label: 'Advanced: analytic sky model', type: 'folder', expanded: false, parameters: ['sunriseHour', 'sunsetHour', 'goldenHourWidth', 'goldenStrength', 'goldenPower', 'goldenOutdoorRecolorStrength', 'goldenOutdoorRecolorColor', 'nightFloor', 'analyticStrength', 'turbidity', 'rayleighStrength', 'mieStrength', 'forwardScatter', 'weatherInfluence', 'cloudToTurbidity', 'precipToTurbidity', 'overcastDesaturate', 'overcastContrastReduce', 'tempWarmAtHorizon', 'tempCoolAtNoon', 'nightCoolBoost', 'goldenSaturationBoost', 'nightSaturationFloor', 'hazeLift', 'hazeContrastLoss'] }
       ],
       parameters: {
         enabled: { type: 'boolean', default: true },
-        intensity: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.8, label: 'Intensity', throttle: 50 },
-        saturationBoost: { type: 'slider', min: -0.5, max: 0.5, step: 0.01, default: 0.35, label: 'Sat Boost', throttle: 50 },
-        vibranceBoost: { type: 'slider', min: -0.5, max: 0.5, step: 0.01, default: 0.0, label: 'Vibrance', throttle: 50 },
-        shadowGradePreserve: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.35, label: 'Shadow Preserve', throttle: 50 },
+        intensity: { type: 'slider', min: 0, max: 1, step: 0.01, default: 1, label: 'Sky intensity export', throttle: 50, tooltip: 'Environment strength exported to downstream effects. It is not a screen exposure control.' },
+        saturationBoost: { type: 'slider', min: -0.5, max: 0.5, step: 0.01, default: 0.5, label: 'Sky color saturation', throttle: 50, tooltip: 'Chroma bias for the computed sky tint sent to downstream systems.' },
+        vibranceBoost: { type: 'slider', min: -0.5, max: 0.5, step: 0.01, default: 0.07, label: 'Sky color vibrance', throttle: 50, tooltip: 'Selective chroma lift for the exported sky tint.' },
+        shadowGradePreserve: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.35, label: 'Shadow preserve', throttle: 50, tooltip: 'Keeps shadowed pixels from inheriting too much atmospheric tint in consumers that use shadow-aware sky data.' },
         sunriseHour: { type: 'slider', min: 0, max: 24, step: 0.05, default: 6.0, label: 'Sunrise', throttle: 50 },
         sunsetHour: { type: 'slider', min: 0, max: 24, step: 0.05, default: 18.0, label: 'Sunset', throttle: 50 },
         goldenHourWidth: { type: 'slider', min: 0.25, max: 6.0, step: 0.05, default: 6.0, label: 'Golden Width', throttle: 50 },
-        goldenStrength: { type: 'slider', min: 0.0, max: 4.0, step: 0.01, default: 2.9, label: 'Golden Strength', throttle: 50 },
-        goldenPower: { type: 'slider', min: 0.5, max: 3.0, step: 0.01, default: 2.01, label: 'Golden Power', throttle: 50 },
-        goldenOutdoorRecolorStrength: { type: 'slider', min: 0.0, max: 6.0, step: 0.05, default: 3.25, label: 'Golden Recolor', throttle: 50 },
+        goldenStrength: { type: 'slider', min: 0.0, max: 4.0, step: 0.01, default: 4, label: 'Golden Strength', throttle: 50 },
+        goldenPower: { type: 'slider', min: 0.5, max: 3.0, step: 0.01, default: 3, label: 'Golden Power', throttle: 50 },
+        goldenOutdoorRecolorStrength: { type: 'slider', min: 0.0, max: 4.0, step: 0.05, default: 3.25, label: 'Golden Recolor', throttle: 50 },
         goldenOutdoorRecolorColor: { type: 'color', default: { r: 1.35, g: 0.80, b: 0.50 }, label: 'Golden Recolor Color' },
         nightFloor: { type: 'slider', min: 0.0, max: 0.5, step: 0.01, default: 0.5, label: 'Night Floor', throttle: 50 },
         analyticStrength: { type: 'slider', min: 0.0, max: 4.0, step: 0.01, default: 0.85, label: 'Analytic Strength', throttle: 50 },
@@ -252,23 +273,23 @@ export class SkyColorEffectV2 {
         tempWarmAtHorizon: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.85, label: 'Warm Horizon', throttle: 50 },
         tempCoolAtNoon: { type: 'slider', min: -1.0, max: 0.0, step: 0.01, default: -0.45, label: 'Cool Noon', throttle: 50 },
         nightCoolBoost: { type: 'slider', min: -1.0, max: 0.0, step: 0.01, default: -0.25, label: 'Night Cool', throttle: 50 },
-        goldenSaturationBoost: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.18, label: 'Golden Sat', throttle: 50 },
+        goldenSaturationBoost: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.29, label: 'Golden Sat', throttle: 50 },
         nightSaturationFloor: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.33, label: 'Night Sat Floor', throttle: 50 },
         hazeLift: { type: 'slider', min: 0.0, max: 0.5, step: 0.01, default: 0.08, label: 'Haze Lift', throttle: 50 },
         hazeContrastLoss: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.0, label: 'Haze Contrast', throttle: 50 },
-        autoIntensityEnabled: { type: 'boolean', default: true, label: 'Auto Intensity' },
+        autoIntensityEnabled: { type: 'boolean', default: false, label: 'Auto Intensity' },
         autoIntensityStrength: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 1.0, label: 'Auto Strength', throttle: 50 },
         skyTintDarknessLightsEnabled: { type: 'boolean', default: true, label: 'Tint Sun Lights' },
-        skyTintDarknessLightsIntensity: { type: 'slider', min: 0.0, max: 5.0, step: 0.01, default: 1.01, label: 'Sun Light Tint Intensity', throttle: 50 },
+        skyTintDarknessLightsIntensity: { type: 'slider', min: 0.0, max: 5.0, step: 0.01, default: 5, label: 'Sun Light Tint Intensity', throttle: 50 },
         calendarDarknessBlend: {
           type: 'slider',
           min: 0,
           max: 1,
           step: 0.05,
           default: 1.0,
-          label: 'Calendar darkness blend',
+          label: 'Master darkness blend',
           throttle: 50,
-          tooltip: 'How much Map Shine clock time (midnight curve) is mixed with Foundry scene darkness. Match lighting: leave at 1. Set 0 to use only Foundry darkness.',
+          tooltip: 'How much LightingDirector master darkness influences sky color. Leave at 1 so sky, lights, and weather agree.',
         },
         dayNightGradePull: {
           type: 'slider',
@@ -276,9 +297,9 @@ export class SkyColorEffectV2 {
           max: 2.5,
           step: 0.05,
           default: 1.0,
-          label: 'Midday–midnight separation',
+          label: 'Day/night color separation',
           throttle: 50,
-          tooltip: 'Raises how strongly darkness pulls the grade (exposure/contrast) — larger values = darker nights vs brighter noon.',
+          tooltip: 'Raises how strongly darkness cools/desaturates the exported sky tint. Camera exposure remains in Color Correction.',
         },
         noonExposureBoost: {
           type: 'slider',
@@ -286,9 +307,9 @@ export class SkyColorEffectV2 {
           max: 1.2,
           step: 0.01,
           default: 0.0,
-          label: 'Midday exposure lift',
+          label: 'Legacy midday lift',
           throttle: 50,
-          tooltip: 'Adds exposure around solar noon, tapering in/out for nearby hours.',
+          tooltip: 'Legacy screen-grade exposure lift around solar noon. The SkyColor screen grade is suppressed in the HDR pipeline; use Camera Grade for actual exposure.',
         },
         midnightExposureDrop: {
           type: 'slider',
@@ -296,9 +317,9 @@ export class SkyColorEffectV2 {
           max: 1.2,
           step: 0.01,
           default: 0.0,
-          label: 'Midnight exposure drop',
+          label: 'Legacy midnight drop',
           throttle: 50,
-          tooltip: 'Subtracts exposure around solar midnight, tapering in/out for nearby hours.',
+          tooltip: 'Legacy screen-grade exposure drop around midnight. The SkyColor screen grade is suppressed in the HDR pipeline; use Camera Grade for actual exposure.',
         },
         nightExtraDarkness: {
           type: 'slider',
@@ -306,26 +327,75 @@ export class SkyColorEffectV2 {
           max: 0.45,
           step: 0.01,
           default: 0.0,
-          label: 'Night extra depth',
+          label: 'Night color depth',
           throttle: 50,
-          tooltip: 'Biases the whole grade darker at night; use after calendar blend if midnight is still too bright.',
+          tooltip: 'Biases the exported sky tint toward night; keep subtle to avoid double-darkening with Weather and LightingDirector.',
         },
         dayVignetteStrength: { type: 'slider', min: 0, max: 2, step: 0.01, default: 0.0, label: 'Day vignette', throttle: 50 },
         dayVignetteSoftness: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.5, label: 'Day vignette softness', throttle: 50 },
         dayGrainStrength: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.0, label: 'Day grain', throttle: 50 },
-        nightVignetteStrength: { type: 'slider', min: 0, max: 2, step: 0.01, default: 0.25, label: 'Night vignette', throttle: 50 },
+        nightVignetteStrength: { type: 'slider', min: 0, max: 2, step: 0.01, default: 0.47, label: 'Night vignette', throttle: 50 },
         nightVignetteSoftness: { type: 'slider', min: 0, max: 1, step: 0.01, default: 1.0, label: 'Night vignette softness', throttle: 50 },
         nightGrainStrength: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.0, label: 'Night grain', throttle: 50 },
         debugOverride: {
           type: 'boolean',
           default: false,
-          label: 'Manual override',
-          tooltip: 'When on, Exposure/Saturation/Contrast sliders replace time-of-day automation (night/day grade stops updating from the clock).',
+          label: 'Manual override (legacy)',
+          tooltip: 'Legacy screen-grade override. The HDR pipeline suppresses SkyColor screen grading, so prefer Camera Grade for visible exposure/saturation/contrast.',
         },
         exposure: { type: 'slider', min: -1, max: 1, step: 0.01, default: 0.51, label: 'Exposure (Manual)', throttle: 50 },
         saturation: { type: 'slider', min: 0, max: 2, step: 0.01, default: 0.21, label: 'Saturation (Manual)', throttle: 50 },
         contrast: { type: 'slider', min: 0.5, max: 1.5, step: 0.01, default: 0.98, label: 'Contrast (Manual)', throttle: 50 }
-      }
+      },
+      presets: {
+        'Clear Noon': {
+          intensity: 0.9,
+          weatherInfluence: 0.45,
+          goldenOutdoorRecolorStrength: 1.4,
+          overcastDesaturate: 0.22,
+          overcastContrastReduce: 0.28,
+          nightExtraDarkness: 0.0,
+        },
+        'Golden Hour': {
+          intensity: 0.82,
+          goldenStrength: 3.2,
+          goldenOutdoorRecolorStrength: 2.8,
+          goldenSaturationBoost: 0.28,
+          tempWarmAtHorizon: 0.95,
+          weatherInfluence: 0.55,
+        },
+        'Overcast Day': {
+          intensity: 0.68,
+          weatherInfluence: 0.85,
+          overcastDesaturate: 0.42,
+          overcastContrastReduce: 0.48,
+          tempCoolAtNoon: -0.55,
+          hazeLift: 0.12,
+        },
+        Storm: {
+          intensity: 0.55,
+          weatherInfluence: 1.0,
+          cloudToTurbidity: 0.45,
+          precipToTurbidity: 0.85,
+          overcastDesaturate: 0.5,
+          overcastContrastReduce: 0.58,
+          nightExtraDarkness: 0.06,
+        },
+        'Moonlit Night': {
+          intensity: 0.42,
+          nightCoolBoost: -0.45,
+          nightSaturationFloor: 0.25,
+          skyTintDarknessLightsIntensity: 0.8,
+          nightExtraDarkness: 0.04,
+        },
+        'Interior Night': {
+          intensity: 0.35,
+          nightCoolBoost: -0.35,
+          nightSaturationFloor: 0.3,
+          skyTintDarknessLightsIntensity: 0.6,
+          nightExtraDarkness: 0.03,
+        },
+      },
     };
   }
 
@@ -757,26 +827,33 @@ export class SkyColorEffectV2 {
   }
 
   /**
+   * When the ColorCorrection timeline owns time-of-day grading, SkyColor still
+   * computes sun/tint state for consumers but stops applying a visual grade.
+   * @param {boolean} active
+   */
+  setColorCorrectionTimelineActive(active) {
+    this._colorCorrectionTimelineActive = active === true;
+  }
+
+  /**
    * Darkness 0..1 for sky grading: Foundry scene + Map Shine calendar curve + weather,
    * matching {@link LightingEffectV2} so sky tracks midnight when the lighting pass does.
    * @returns {number}
    */
   _sceneDarknessForSkyGrade() {
-    let sceneDarkness = readSceneDarkness01();
-    const env = weatherController?.getEnvironment?.() ?? null;
-    if (env && Number.isFinite(env.sceneDarkness)) sceneDarkness = clamp01(env.sceneDarkness);
-
-    const timeDark = computeTimeOfDayDarkness01(weatherController?.timeOfDay);
+    // Phase 3: defer to LightingDirector so SkyColor agrees with LightingEffectV2.
+    // The legacy `calendarDarknessBlend` slider is still honoured as a *local*
+    // blend between the master darkness and the raw Foundry slider value, so
+    // authors can soften sky desaturation independent of the canonical
+    // master used by lighting.
+    const director = LightingDirector.get();
+    let sceneDarkness = clamp01(director.masterDarkness);
     const blend = clamp01(Number(this.params?.calendarDarknessBlend) ?? 1);
-    if (Number.isFinite(timeDark)) {
-      const merged = Math.max(sceneDarkness, timeDark);
-      sceneDarkness = clamp01(sceneDarkness * (1 - blend) + merged * blend);
+    if (blend < 1) {
+      sceneDarkness = clamp01(
+        director.foundryDarkness * (1 - blend) + sceneDarkness * blend,
+      );
     }
-
-    try {
-      const eff = Number(env?.effectiveDarkness);
-      if (Number.isFinite(eff)) sceneDarkness = Math.max(sceneDarkness, clamp01(eff));
-    } catch (_) {}
 
     return sceneDarkness;
   }
@@ -894,11 +971,13 @@ export class SkyColorEffectV2 {
         );
         const turbidityEff = clamp01(turbidityBase + turbidityWeather);
 
+        // LightingDirector already owns calendar/weather/Foundry darkness.
+        // SkyColor should add only a small atmospheric weather color bias here,
+        // not re-derive night darkness and double-dim the simulation.
         effectiveDarkness = clamp01(
           sceneDarkness +
-          (1.0 - dayFactor) * 0.25 +
-          overcast * 0.15 +
-          storm * 0.1 +
+          overcast * 0.08 * weatherInfluence +
+          storm * 0.06 * weatherInfluence +
           nightExtra
         );
 
@@ -961,18 +1040,10 @@ export class SkyColorEffectV2 {
 
         this._lastDayFactor = dayFactor;
 
-        // Update sun position for downstream systems (water specular, etc.).
-        // Azimuth: sun rises East (90°) travels through South (180°) and sets West (270°).
-        // dayProgress 0→1 maps sunrise→sunset: 0→East, 0.5→South, 1→West.
-        if (dayProgress >= 0.0) {
-          this.currentSunAzimuthDeg = 90.0 + dayProgress * 180.0;
-          // Elevation: sin curve peaks at noon (dayProgress=0.5).
-          this.currentSunElevationDeg = Math.max(2.0, Math.sin(Math.PI * clamp01(dayProgress)) * 85.0);
-        } else {
-          // Night: sun is below horizon; use a low angle from the opposite side.
-          this.currentSunAzimuthDeg = 270.0;
-          this.currentSunElevationDeg = 2.0;
-        }
+        // Full 24h orbit for shadows/specular — no freeze at dawn/dusk.
+        const sunAngles = computeSunAnglesFromHour(hour, sunrise);
+        this.currentSunAzimuthDeg = sunAngles.azimuthDeg;
+        this.currentSunElevationDeg = sunAngles.elevationDeg;
 
         const tNight = clamp01(effectiveDarkness);
         vignetteStrength = lerp(this.params.dayVignetteStrength ?? 0.0, this.params.nightVignetteStrength ?? 0.0, tNight);
@@ -1114,6 +1185,19 @@ export class SkyColorEffectV2 {
         );
         const strength = clamp01(this.params.autoIntensityStrength);
         effectiveIntensity *= lerp(1.0, localGradeIntensity, strength);
+      }
+      this.currentSkyIntensity01 = clamp01(effectiveIntensity);
+      // Linear HDR refactor (Phase 0): SkyColor is no longer a full-screen grader.
+      // It still computes sun/tint/intensity state for downstream consumers
+      // (water specular, splashes, ambient endpoints), but its fragment grade
+      // is suppressed unconditionally. The screen grade now lives only in
+      // ColorCorrectionEffectV2 post-composite. Set FORCE_SKY_GRADE = true in
+      // a debug build to re-enable for A/B testing.
+      const FORCE_SKY_GRADE = false;
+      if (!FORCE_SKY_GRADE) {
+        effectiveIntensity = 0.0;
+      } else if (this._colorCorrectionTimelineActive) {
+        effectiveIntensity = 0.0;
       }
 
       u.uIntensity.value = effectiveIntensity;

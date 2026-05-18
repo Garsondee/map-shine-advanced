@@ -36,6 +36,7 @@ import {
   resolveWeatherController
 } from './weather-param-bridge.js';
 import * as scenePresets from './scene-presets.js';
+import { DARKNESS_PRIORITY, LightingDirector } from '../core/LightingDirector.js';
 
 const log = createLogger('UI');
 
@@ -129,11 +130,22 @@ export class TweakpaneManager {
       },
       dynamicExposure: {
         enabled: true,
-        minExposure: 0.5,
-        maxExposure: 2.5,
+        minExposure: 0.35,
+        maxExposure: 3.0,
         probeHz: 8,
         tauBrighten: 15.0,
         tauDarken: 15.0
+      },
+      lightingDirectorDebug: {
+        lightingDarknessPriority: DARKNESS_PRIORITY.MAX,
+        masterDarkness: 0.0,
+        foundryDarkness: 0.0,
+        calendarDarkness: 0.0,
+        weatherDarkness: 0.0,
+        calendarDayWeight: 1.0,
+        sunElevationDeg: 60.0,
+        sunAzimuthDeg: 180.0,
+        priority: 'max'
       },
       dynamicExposureDebug: {
         subjectTokenId: '',
@@ -299,6 +311,8 @@ export class TweakpaneManager {
 
     /** @type {Array<any>|null} */
     this._dynamicExposureDebugBindings = null;
+    /** @type {Array<any>|null} */
+    this._lightingDirectorDebugBindings = null;
 
     /** @type {boolean} */
     this._didWarnMaskDebugOverlayOnInit = false;
@@ -1085,6 +1099,54 @@ export class TweakpaneManager {
       step: 1
     }).on('change', onTimeRateChange);
 
+    const lightingDirectorFolder = globalFolder.addFolder({
+      title: 'Lighting Director (readout)',
+      expanded: this.accordionStates['lightingDirector'] ?? false
+    });
+    this._lightingDirectorDebugBindings = [];
+    const directorDebug = this.globalParams.lightingDirectorDebug;
+    try {
+      const currentPriority = globalThis.game?.settings?.get?.('map-shine-advanced', 'lightingDarknessPriority');
+      if (typeof currentPriority === 'string') directorDebug.lightingDarknessPriority = currentPriority;
+    } catch (_) {
+    }
+    lightingDirectorFolder.addBinding(directorDebug, 'lightingDarknessPriority', {
+      label: 'Darkness authority',
+      options: {
+        'Max of all sources': DARKNESS_PRIORITY.MAX,
+        'Foundry slider': DARKNESS_PRIORITY.FOUNDRY,
+        'Calendar / time': DARKNESS_PRIORITY.CALENDAR,
+        Weather: DARKNESS_PRIORITY.WEATHER,
+      }
+    }).on('change', (ev) => {
+      directorDebug.lightingDarknessPriority = ev.value;
+      try {
+        void globalThis.game?.settings?.set?.('map-shine-advanced', 'lightingDarknessPriority', ev.value);
+      } catch (_) {
+      }
+      this.saveUIState();
+    });
+    const addDirectorReadout = (key, label) => {
+      const binding = lightingDirectorFolder.addBinding(directorDebug, key, {
+        label,
+        readonly: true
+      });
+      this._lightingDirectorDebugBindings.push(binding);
+      return binding;
+    };
+    addDirectorReadout('masterDarkness', 'Master darkness');
+    addDirectorReadout('foundryDarkness', 'Foundry');
+    addDirectorReadout('calendarDarkness', 'Calendar');
+    addDirectorReadout('weatherDarkness', 'Weather');
+    addDirectorReadout('calendarDayWeight', 'Daylight');
+    addDirectorReadout('sunElevationDeg', 'Sun elevation');
+    addDirectorReadout('sunAzimuthDeg', 'Sun azimuth');
+    addDirectorReadout('priority', 'Authority');
+    lightingDirectorFolder.on('fold', (ev) => {
+      this.accordionStates['lightingDirector'] = ev.expanded;
+      this.saveUIState();
+    });
+
     // Visual separator between time controls and UI/tools controls
     globalFolder.addBlade({ view: 'separator' });
 
@@ -1368,14 +1430,14 @@ export class TweakpaneManager {
     dynamicExposureFolder.addBinding(this.globalParams.dynamicExposure, 'minExposure', {
       label: 'Min Exposure',
       min: 0.1,
-      max: 4,
+      max: 2,
       step: 0.01
     }).on('change', onDynamicExposureChange('minExposure'));
 
     dynamicExposureFolder.addBinding(this.globalParams.dynamicExposure, 'maxExposure', {
       label: 'Max Exposure',
       min: 0.1,
-      max: 8,
+      max: 4,
       step: 0.01
     }).on('change', onDynamicExposureChange('maxExposure'));
 
@@ -1452,8 +1514,8 @@ export class TweakpaneManager {
       title: 'Reset Dynamic Exposure'
     }).on('click', () => {
       this.globalParams.dynamicExposure.enabled = true;
-      this.globalParams.dynamicExposure.minExposure = 0.5;
-      this.globalParams.dynamicExposure.maxExposure = 2.5;
+      this.globalParams.dynamicExposure.minExposure = 0.35;
+      this.globalParams.dynamicExposure.maxExposure = 3.0;
       this.globalParams.dynamicExposure.probeHz = 8;
       this.globalParams.dynamicExposure.tauBrighten = 15.0;
       this.globalParams.dynamicExposure.tauDarken = 15.0;
@@ -1578,6 +1640,14 @@ export class TweakpaneManager {
 
       addGridButton('Copy Effects From Scene', async () => {
         await this.importSingleEffectFromScene();
+      });
+
+      addGridButton('Reset Effects…', async () => {
+        await this.resetSelectedEffectsInScene();
+      });
+
+      addGridButton('Apply Effects to All Scenes…', async () => {
+        await this.applyCurrentEffectsToAllScenes();
       });
     }
 
@@ -4375,6 +4445,13 @@ export class TweakpaneManager {
   buildParameterControl(effectId, container, paramId, paramDef, updateCallback, savedParams) {
     const effectData = this.effectFolders[effectId];
 
+    // Hidden params may still be listed in legacy groups. Treat hidden as a
+    // rendering directive as well as a persistence directive so deprecated
+    // migration controls do not leave empty or confusing UI behind.
+    if (paramDef?.hidden === true) {
+      return;
+    }
+
     if (paramDef?.gmOnly === true && !isGmLike()) {
       return;
     }
@@ -4687,20 +4764,7 @@ export class TweakpaneManager {
         return;
       }
 
-      const schemaParams = effectData.schema?.parameters || {};
-      const params = {};
-      for (const [paramId, value] of Object.entries(effectData.params || {})) {
-        const def = schemaParams[paramId];
-        if (def?.readonly === true) continue;
-        if (def?.hidden === true && paramId !== 'enabled') continue;
-        const v = def?.type === 'color'
-          ? normalizeEffectRgbParam(value)
-          : def?.type === 'gradient'
-            ? cloneEffectGradientParam(value)
-            : this._sanitizeSerializableValue(value);
-        if (v === undefined || v === null) continue;
-        this._setProperty(params, paramId, v);
-      }
+      const params = this._buildSerializableEffectParams(effectId);
 
       const worldSettings = sceneSettings.getWorldEffectSettings();
       worldSettings[effectId] = params;
@@ -4824,6 +4888,111 @@ export class TweakpaneManager {
   }
 
   /**
+   * Serialize current UI params for an effect (same rules as scene / world flag writes).
+   * @param {string} effectId
+   * @returns {Object<string, *>}
+   * @private
+   */
+  _buildSerializableEffectParams(effectId) {
+    const effectData = this.effectFolders[effectId];
+    if (!effectData) return {};
+    const schemaParams = effectData.schema?.parameters || {};
+    const params = {};
+    for (const [paramId, value] of Object.entries(effectData.params || {})) {
+      const def = schemaParams[paramId];
+      if (def?.readonly === true) continue;
+      if (def?.hidden === true && paramId !== 'enabled') continue;
+      const v = def?.type === 'color'
+        ? normalizeEffectRgbParam(value)
+        : def?.type === 'gradient'
+          ? cloneEffectGradientParam(value)
+          : this._sanitizeSerializableValue(value);
+      if (v === undefined || v === null) continue;
+      this._setProperty(params, paramId, v);
+    }
+    return params;
+  }
+
+  /**
+   * Merge UI values into an existing stored effect blob for propagate modes.
+   * @param {string} effectId
+   * @param {object|null|undefined} existingBlob
+   * @param {'full'|'params'|'enabled'} mode
+   * @returns {object}
+   * @private
+   */
+  _propagateMergeEffectParams(effectId, existingBlob, mode) {
+    const uiSer = this._buildSerializableEffectParams(effectId);
+    const existing = (existingBlob && typeof existingBlob === 'object') ? { ...existingBlob } : {};
+    if (mode === 'full') {
+      return { ...uiSer };
+    }
+    if (mode === 'enabled') {
+      const out = { ...existing };
+      if (typeof uiSer.enabled === 'boolean') out.enabled = uiSer.enabled;
+      return out;
+    }
+    const out = { ...existing };
+    for (const [k, v] of Object.entries(uiSer)) {
+      if (k === 'enabled') continue;
+      out[k] = v;
+    }
+    return out;
+  }
+
+  /**
+   * Validate a merged effect payload before persisting to scene/world storage.
+   * @param {string} effectId
+   * @param {object} merged
+   * @returns {object}
+   * @private
+   */
+  _validatePropagatedEffectBlob(effectId, merged) {
+    const effectData = this.effectFolders[effectId];
+    if (!effectData?.schema) return merged;
+    const validation = globalValidator.validateAllParameters(effectId, merged, effectData.schema);
+    const out = { ...merged };
+    Object.assign(out, validation.params);
+    return out;
+  }
+
+  /**
+   * @param {Scene|null|undefined} scene
+   * @returns {boolean}
+   * @private
+   */
+  _sceneIsPersistableByUser(scene) {
+    if (!canPersistSceneDocument()) return false;
+    if (!scene?.id) return false;
+    try {
+      const user = game?.user;
+      if (!user) return false;
+      if (typeof scene.canUserModify === 'function' && !scene.canUserModify(user, 'update')) return false;
+    } catch (_) {
+      return false;
+    }
+    return true;
+  }
+
+  /**
+   * Registered effects for bulk UI lists, sorted by folder title.
+   * @returns {Array<{ targetEffectId: string, label: string }>}
+   * @private
+   */
+  _getRegisteredEffectsRowsForBulkUi() {
+    const rows = [];
+    for (const effectId of Object.keys(this.effectFolders || {})) {
+      const display = this.effectFolders[effectId]?.folder?.title || effectId;
+      rows.push({
+        targetEffectId: effectId,
+        label: `${display} (${effectId})`,
+      });
+    }
+    rows.sort((a, b) => a.label.localeCompare(b.label));
+    return rows;
+  }
+
+  /**
    * Save effect parameters to scene settings (respects three-tier hierarchy)
    * @param {string} effectId - Effect identifier
    * @returns {Promise<void>}
@@ -4849,21 +5018,7 @@ export class TweakpaneManager {
         return;
       }
 
-      // Get current parameters
-      const schemaParams = effectData.schema?.parameters || {};
-      const params = {};
-      for (const [paramId, value] of Object.entries(effectData.params || {})) {
-        const def = schemaParams[paramId];
-        if (def?.readonly === true) continue;
-        if (def?.hidden === true && paramId !== 'enabled') continue;
-        const v = def?.type === 'color'
-          ? normalizeEffectRgbParam(value)
-          : def?.type === 'gradient'
-            ? cloneEffectGradientParam(value)
-            : this._sanitizeSerializableValue(value);
-        if (v === undefined || v === null) continue;
-        this._setProperty(params, paramId, v);
-      }
+      const params = this._buildSerializableEffectParams(effectId);
 
       // Get all settings
       const allSettings = sceneSettings.getSceneSettings(scene);
@@ -6332,6 +6487,557 @@ export class TweakpaneManager {
   }
 
   /**
+   * Reset selected effects on the active scene to schema defaults (current Map Maker / GM tier).
+   * @returns {Promise<void>}
+   * @public
+   */
+  async resetSelectedEffectsInScene() {
+    const scene = canvas?.scene;
+    if (!scene) {
+      ui.notifications?.warn?.('Map Shine: No active scene');
+      return;
+    }
+
+    if (!isGmLike()) {
+      ui.notifications?.warn?.('Map Shine: Only GMs can reset effect settings');
+      return;
+    }
+
+    if (!canPersistSceneDocument()) {
+      ui.notifications?.warn?.('Map Shine: Only GMs can persist scene settings.');
+      return;
+    }
+
+    const rows = this._getRegisteredEffectsRowsForBulkUi();
+    if (rows.length === 0) {
+      ui.notifications?.warn?.('Map Shine: No effects are registered in the UI yet');
+      return;
+    }
+
+    const targetName = this._escHtml(scene.name || scene.id);
+    const settingsModeEsc = this._escHtml(this.settingsMode);
+
+    const content = `
+      <form class="ms-scene-effects-transfer" autocomplete="off">
+        <p class="ms-scene-effects-transfer__lede">
+          Reset selected effects to <strong>schema defaults</strong> on <strong>${targetName}</strong>.
+          Uses your current settings tier: <strong>${settingsModeEsc}</strong>.
+        </p>
+
+        <div class="ms-scene-effects-transfer__field">
+          <label class="ms-scene-effects-transfer__label" for="ms-effect-reset-filter">Filter effects</label>
+          <input type="search" id="ms-effect-reset-filter" name="effectFilter" class="ms-scene-effects-transfer__filter"
+            placeholder="Search by effect name…" autocomplete="off">
+        </div>
+
+        <div class="ms-scene-effects-transfer__toolbar">
+          <button type="button" class="ms-scene-effects-transfer__btn" name="checkAllEffects" title="Select all effects that match the current filter">
+            Check visible
+          </button>
+          <button type="button" class="ms-scene-effects-transfer__btn" name="uncheckAllEffects" title="Clear selection for effects that match the current filter">
+            Uncheck visible
+          </button>
+        </div>
+
+        <div name="effectsList" class="ms-scene-effects-transfer__list" role="list" aria-label="Effects to reset">
+        </div>
+
+        <div class="ms-scene-effects-transfer__counts">
+          <span name="effectCounts" class="ms-scene-effects-transfer__counts-main">0 selected · 0 visible of 0 effects</span>
+        </div>
+
+        <div name="actionSummary" class="ms-scene-effects-transfer__summary" aria-live="polite"></div>
+
+        <p class="ms-scene-effects-transfer__footer-notes">
+          World Based effects still save through the normal world-settings path when reset.
+        </p>
+      </form>
+    `;
+
+    let currentEffects = rows;
+    const selectedTargets = new Set();
+
+    const selected = await new Promise((resolve) => {
+      const dialog = new Dialog({
+        title: 'Reset effects to defaults',
+        content,
+        buttons: {
+          reset: {
+            icon: '<i class="fas fa-undo"></i>',
+            label: 'Reset selected',
+            callback: () => {
+              resolve({
+                selectedEffectIds: Array.from(selectedTargets),
+              });
+            }
+          },
+          cancel: {
+            icon: '<i class="fas fa-times"></i>',
+            label: 'Cancel',
+            callback: () => resolve(null)
+          }
+        },
+        default: 'reset',
+        close: () => resolve(null),
+        render: (html) => {
+          html.closest('.app.window-app')?.on('pointerdown', (ev) => ev.stopPropagation());
+
+          const filterInput = html.find('[name="effectFilter"]');
+          const effectsList = html.find('[name="effectsList"]');
+          const effectCountsEl = html.find('[name="effectCounts"]');
+          const actionSummaryEl = html.find('[name="actionSummary"]');
+          const checkAllBtn = html.find('[name="checkAllEffects"]');
+          const uncheckAllBtn = html.find('[name="uncheckAllEffects"]');
+
+          const applyFilter = () => {
+            const q = String(filterInput.val() || '').trim().toLowerCase();
+            effectsList.find('.ms-scene-effects-transfer__row').each((_, el) => {
+              const ft = String(el.getAttribute('data-filter-text') || '').toLowerCase();
+              const match = !q || ft.includes(q);
+              el.classList.toggle('ms-scene-effects-transfer__row--hidden', !match);
+            });
+            syncEffectCounts();
+            updateActionSummary();
+          };
+
+          const visibleRowElements = () => effectsList.find(
+            '.ms-scene-effects-transfer__row:not(.ms-scene-effects-transfer__row--hidden)'
+          );
+
+          const syncEffectCounts = () => {
+            const total = currentEffects.length;
+            const visible = visibleRowElements().length;
+            const nSel = selectedTargets.size;
+            effectCountsEl.text(`${nSel} selected · ${visible} visible of ${total} effect${total === 1 ? '' : 's'}`);
+          };
+
+          const updateActionSummary = () => {
+            const n = selectedTargets.size;
+            actionSummaryEl.text(
+              `Ready: reset ${n} effect${n === 1 ? '' : 's'} to defaults on "${scene.name || scene.id}" (${this.settingsMode} tier)`
+            );
+          };
+
+          const rebuildList = () => {
+            filterInput.val('');
+            selectedTargets.clear();
+            const rowsHtml = currentEffects.map((e) => {
+              const idEsc = this._escHtml(e.targetEffectId);
+              const filterEsc = this._escHtml(e.label.toLowerCase());
+              return `<label class="ms-scene-effects-transfer__row" role="listitem" data-target-effect="${idEsc}" data-filter-text="${filterEsc}">
+                <input type="checkbox" class="ms-scene-effects-transfer__check" data-target-effect="${idEsc}">
+                <span class="ms-scene-effects-transfer__row-label">${this._escHtml(e.label)}</span>
+              </label>`;
+            }).join('');
+            effectsList.html(rowsHtml);
+            syncEffectCounts();
+            updateActionSummary();
+          };
+
+          effectsList.on('change', 'input[type="checkbox"][data-target-effect]', (ev) => {
+            const targetEffectId = String(ev.currentTarget?.getAttribute('data-target-effect') || '');
+            if (!targetEffectId) return;
+            if (ev.currentTarget.checked) selectedTargets.add(targetEffectId);
+            else selectedTargets.delete(targetEffectId);
+            syncEffectCounts();
+            updateActionSummary();
+          });
+
+          checkAllBtn.on('click', (ev) => {
+            ev.preventDefault();
+            visibleRowElements().each((_, row) => {
+              const id = String(row.getAttribute('data-target-effect') || '');
+              if (!id) return;
+              selectedTargets.add(id);
+              const inp = row.querySelector('input[type="checkbox"]');
+              if (inp) inp.checked = true;
+            });
+            syncEffectCounts();
+            updateActionSummary();
+          });
+
+          uncheckAllBtn.on('click', (ev) => {
+            ev.preventDefault();
+            visibleRowElements().each((_, row) => {
+              const id = String(row.getAttribute('data-target-effect') || '');
+              if (!id) return;
+              selectedTargets.delete(id);
+              const inp = row.querySelector('input[type="checkbox"]');
+              if (inp) inp.checked = false;
+            });
+            syncEffectCounts();
+            updateActionSummary();
+          });
+
+          filterInput.on('input', () => applyFilter());
+
+          rebuildList();
+        }
+      }, {
+        width: 720,
+        height: 'auto'
+      });
+      dialog.render(true);
+    });
+
+    if (!selected?.selectedEffectIds?.length) {
+      if (selected?.selectedEffectIds?.length === 0) {
+        ui.notifications?.warn?.('Map Shine: Select at least one effect to reset');
+      }
+      return;
+    }
+
+    let n = 0;
+    for (const effectId of selected.selectedEffectIds) {
+      if (!this.effectFolders[effectId]) continue;
+      this.resetEffectToDefaultsInternal(effectId, false);
+      n++;
+    }
+
+    if (n > 0) {
+      ui.notifications?.info?.(`Map Shine: Reset ${n} effect${n === 1 ? '' : 's'} to defaults on "${scene.name || scene.id}".`);
+    }
+  }
+
+  /**
+   * Apply current UI effect parameters to all scenes (and world storage for World Based effects).
+   * @returns {Promise<void>}
+   * @public
+   */
+  async applyCurrentEffectsToAllScenes() {
+    if (!isGmLike()) {
+      ui.notifications?.warn?.('Map Shine: Only GMs can apply settings to all scenes');
+      return;
+    }
+    if (!canPersistSceneDocument()) {
+      ui.notifications?.warn?.('Map Shine: Only GMs can update scene documents on the server.');
+      return;
+    }
+
+    const scenes = Array.from(game?.scenes?.contents || []).filter((s) => !!s?.id);
+    const sceneCount = scenes.length;
+
+    const modeLabels = {
+      full: 'Full (enabled + parameters)',
+      params: 'Parameters only',
+      enabled: 'Enabled only',
+    };
+
+    const rows = this._getRegisteredEffectsRowsForBulkUi();
+    if (rows.length === 0) {
+      ui.notifications?.warn?.('Map Shine: No effects are registered in the UI yet');
+      return;
+    }
+
+    const modeOptionsHtml = Object.entries(modeLabels).map(([k, v]) => (
+      `<option value="${k}">${this._escHtml(v)}</option>`
+    )).join('');
+
+    const worldNote = WORLD_BASED_EFFECT_IDS.length
+      ? `<p class="ms-scene-effects-transfer__mode-hint">
+          Effects in <strong>World Based</strong> mode (${WORLD_BASED_EFFECT_IDS.map((id) => this._escHtml(id)).join(', ')})
+          update a <strong>single world-wide</strong> store — they are not written per scene.
+        </p>`
+      : '';
+
+    const settingsModeEsc = this._escHtml(this.settingsMode);
+    const content = `
+      <form class="ms-scene-effects-transfer" autocomplete="off">
+        <p class="ms-scene-effects-transfer__lede">
+          Copy <strong>current</strong> Map Shine effect values from this panel into <strong>every scene in this world</strong>
+          (<strong>${sceneCount}</strong> scene${sceneCount === 1 ? '' : 's'}). Compendium packs and other worlds are not included.
+        </p>
+        <p class="ms-scene-effects-transfer__mode-hint" style="color: var(--color-text-dark-secondary, #a8a8a8);">
+          This updates stored Map Shine <strong>${settingsModeEsc}</strong> flags only (Map Maker vs GM). Skips scenes you cannot edit.
+        </p>
+
+        <div class="ms-scene-effects-transfer__field">
+          <label class="ms-scene-effects-transfer__label" for="ms-propagate-mode">What to apply</label>
+          <select id="ms-propagate-mode" name="importMode" class="ms-scene-effects-transfer__select">
+            ${modeOptionsHtml}
+          </select>
+          <p class="ms-scene-effects-transfer__mode-hint">
+            <strong>Full</strong> — enabled and parameters from the panel.
+            <strong>Parameters only</strong> — leaves each scene’s stored <em>enabled</em> as-is.
+            <strong>Enabled only</strong> — copies only the enabled flag.
+          </p>
+        </div>
+        ${worldNote}
+
+        <div class="ms-scene-effects-transfer__field">
+          <label class="ms-scene-effects-transfer__label" for="ms-propagate-filter">Filter effects</label>
+          <input type="search" id="ms-propagate-filter" name="effectFilter" class="ms-scene-effects-transfer__filter"
+            placeholder="Search by effect name…" autocomplete="off">
+        </div>
+
+        <div class="ms-scene-effects-transfer__toolbar">
+          <button type="button" class="ms-scene-effects-transfer__btn" name="checkAllEffects" title="Select all effects that match the current filter">
+            Check visible
+          </button>
+          <button type="button" class="ms-scene-effects-transfer__btn" name="uncheckAllEffects" title="Clear selection for effects that match the current filter">
+            Uncheck visible
+          </button>
+        </div>
+
+        <div name="effectsList" class="ms-scene-effects-transfer__list" role="list" aria-label="Effects to propagate">
+        </div>
+
+        <div class="ms-scene-effects-transfer__counts">
+          <span name="effectCounts" class="ms-scene-effects-transfer__counts-main">0 selected · 0 visible of 0 effects</span>
+        </div>
+
+        <div name="actionSummary" class="ms-scene-effects-transfer__summary" aria-live="polite"></div>
+      </form>
+    `;
+
+    let currentEffects = rows;
+    const selectedTargets = new Set();
+
+    const selected = await new Promise((resolve) => {
+      const dialog = new Dialog({
+        title: 'Apply effects to all scenes',
+        content,
+        buttons: {
+          apply: {
+            icon: '<i class="fas fa-globe"></i>',
+            label: 'Apply to world',
+            callback: (html) => {
+              const importMode = String(html.find('[name="importMode"]').val() || 'full');
+              resolve({
+                importMode,
+                selectedEffectIds: Array.from(selectedTargets),
+              });
+            }
+          },
+          cancel: {
+            icon: '<i class="fas fa-times"></i>',
+            label: 'Cancel',
+            callback: () => resolve(null)
+          }
+        },
+        default: 'apply',
+        close: () => resolve(null),
+        render: (html) => {
+          html.closest('.app.window-app')?.on('pointerdown', (ev) => ev.stopPropagation());
+
+          const modeSelect = html.find('[name="importMode"]');
+          const filterInput = html.find('[name="effectFilter"]');
+          const effectsList = html.find('[name="effectsList"]');
+          const effectCountsEl = html.find('[name="effectCounts"]');
+          const actionSummaryEl = html.find('[name="actionSummary"]');
+          const checkAllBtn = html.find('[name="checkAllEffects"]');
+          const uncheckAllBtn = html.find('[name="uncheckAllEffects"]');
+
+          const applyFilter = () => {
+            const q = String(filterInput.val() || '').trim().toLowerCase();
+            effectsList.find('.ms-scene-effects-transfer__row').each((_, el) => {
+              const ft = String(el.getAttribute('data-filter-text') || '').toLowerCase();
+              const match = !q || ft.includes(q);
+              el.classList.toggle('ms-scene-effects-transfer__row--hidden', !match);
+            });
+            syncEffectCounts();
+            updateActionSummary();
+          };
+
+          const visibleRowElements = () => effectsList.find(
+            '.ms-scene-effects-transfer__row:not(.ms-scene-effects-transfer__row--hidden)'
+          );
+
+          const syncEffectCounts = () => {
+            const total = currentEffects.length;
+            const visible = visibleRowElements().length;
+            const nSel = selectedTargets.size;
+            effectCountsEl.text(`${nSel} selected · ${visible} visible of ${total} effect${total === 1 ? '' : 's'}`);
+          };
+
+          const updateActionSummary = () => {
+            const modeKey = String(modeSelect.val() || 'full');
+            const modeLabel = modeLabels[modeKey] || modeLabels.full;
+            const n = selectedTargets.size;
+            actionSummaryEl.text(
+              `Ready: ${modeLabel.toLowerCase()} · ${n} effect${n === 1 ? '' : 's'} → ${sceneCount} scene${sceneCount === 1 ? '' : 's'} (world-based effects use one world save)`
+            );
+          };
+
+          const rebuildList = () => {
+            filterInput.val('');
+            selectedTargets.clear();
+            const rowsHtml = currentEffects.map((e) => {
+              const idEsc = this._escHtml(e.targetEffectId);
+              const filterEsc = this._escHtml(e.label.toLowerCase());
+              return `<label class="ms-scene-effects-transfer__row" role="listitem" data-target-effect="${idEsc}" data-filter-text="${filterEsc}">
+                <input type="checkbox" class="ms-scene-effects-transfer__check" data-target-effect="${idEsc}">
+                <span class="ms-scene-effects-transfer__row-label">${this._escHtml(e.label)}</span>
+              </label>`;
+            }).join('');
+            effectsList.html(rowsHtml);
+            syncEffectCounts();
+            updateActionSummary();
+          };
+
+          effectsList.on('change', 'input[type="checkbox"][data-target-effect]', (ev) => {
+            const targetEffectId = String(ev.currentTarget?.getAttribute('data-target-effect') || '');
+            if (!targetEffectId) return;
+            if (ev.currentTarget.checked) selectedTargets.add(targetEffectId);
+            else selectedTargets.delete(targetEffectId);
+            syncEffectCounts();
+            updateActionSummary();
+          });
+
+          checkAllBtn.on('click', (ev) => {
+            ev.preventDefault();
+            visibleRowElements().each((_, row) => {
+              const id = String(row.getAttribute('data-target-effect') || '');
+              if (!id) return;
+              selectedTargets.add(id);
+              const inp = row.querySelector('input[type="checkbox"]');
+              if (inp) inp.checked = true;
+            });
+            syncEffectCounts();
+            updateActionSummary();
+          });
+
+          uncheckAllBtn.on('click', (ev) => {
+            ev.preventDefault();
+            visibleRowElements().each((_, row) => {
+              const id = String(row.getAttribute('data-target-effect') || '');
+              if (!id) return;
+              selectedTargets.delete(id);
+              const inp = row.querySelector('input[type="checkbox"]');
+              if (inp) inp.checked = false;
+            });
+            syncEffectCounts();
+            updateActionSummary();
+          });
+
+          filterInput.on('input', () => applyFilter());
+          modeSelect.on('change', () => updateActionSummary());
+
+          rebuildList();
+        }
+      }, {
+        width: 720,
+        height: 'auto'
+      });
+      dialog.render(true);
+    });
+
+    if (!selected) return;
+
+    const mode = (selected.importMode === 'params' || selected.importMode === 'enabled')
+      ? selected.importMode
+      : 'full';
+
+    const selectedIds = Array.isArray(selected.selectedEffectIds) ? selected.selectedEffectIds : [];
+    if (selectedIds.length === 0) {
+      ui.notifications?.warn?.('Map Shine: Select at least one effect to apply');
+      return;
+    }
+
+    const worldFiltered = selectedIds.filter((id) => this._isWorldBasedEligible(id) && this._worldBasedEffects.has(id));
+    const perSceneIds = selectedIds.filter((id) => !worldFiltered.includes(id));
+
+    let worldWriteCount = 0;
+    if (worldFiltered.length > 0) {
+      try {
+        const ws = { ...sceneSettings.getWorldEffectSettings() };
+        for (const effectId of worldFiltered) {
+          if (!this.effectFolders[effectId]) continue;
+          const prev = ws[effectId] || {};
+          const merged = this._propagateMergeEffectParams(effectId, prev, mode);
+          ws[effectId] = this._validatePropagatedEffectBlob(effectId, merged);
+          worldWriteCount++;
+        }
+        if (worldWriteCount > 0) {
+          await sceneSettings.setWorldEffectSettings(ws);
+        }
+      } catch (e) {
+        log.error('applyCurrentEffectsToAllScenes: world effect settings failed', e);
+        ui.notifications?.error?.('Map Shine: Failed to update world effect settings — see console.');
+      }
+    }
+
+    let nUpdatedScenes = 0;
+    let nSkipped = 0;
+    let nFailed = 0;
+    const skippedNames = [];
+    const failedNames = [];
+
+    if (perSceneIds.length > 0) {
+      const tier = this.settingsMode === 'gm' ? 'gm' : 'mapMaker';
+
+      for (const scene of scenes) {
+        if (!this._sceneIsPersistableByUser(scene)) {
+          nSkipped++;
+          skippedNames.push(scene.name || scene.id);
+          continue;
+        }
+
+        try {
+          const allSettings = sceneSettings.getSceneSettings(scene);
+
+          if (tier === 'mapMaker') {
+            if (!allSettings.mapMaker) allSettings.mapMaker = { effects: {} };
+            if (!allSettings.mapMaker.effects) allSettings.mapMaker.effects = {};
+            for (const effectId of perSceneIds) {
+              if (!this.effectFolders[effectId]) continue;
+              const prev = allSettings.mapMaker.effects[effectId] || {};
+              const merged = this._propagateMergeEffectParams(effectId, prev, mode);
+              allSettings.mapMaker.effects[effectId] = this._validatePropagatedEffectBlob(effectId, merged);
+            }
+          } else {
+            if (!allSettings.gm) allSettings.gm = { effects: {} };
+            if (!allSettings.gm.effects) allSettings.gm.effects = {};
+            for (const effectId of perSceneIds) {
+              if (!this.effectFolders[effectId]) continue;
+              const prev = allSettings.gm.effects[effectId] || {};
+              const merged = this._propagateMergeEffectParams(effectId, prev, mode);
+              allSettings.gm.effects[effectId] = this._validatePropagatedEffectBlob(effectId, merged);
+            }
+          }
+
+          await sceneSettings.setSceneSettings(scene, allSettings);
+          nUpdatedScenes++;
+        } catch (e) {
+          nFailed++;
+          failedNames.push(scene.name || scene.id);
+          log.error(`applyCurrentEffectsToAllScenes: failed for scene ${scene?.id}`, e);
+        }
+      }
+    }
+
+    const parts = [];
+    if (worldWriteCount > 0) {
+      parts.push(`world store: ${worldWriteCount} effect${worldWriteCount === 1 ? '' : 's'}`);
+    }
+    if (perSceneIds.length > 0) {
+      parts.push(`scenes updated: ${nUpdatedScenes}/${sceneCount}`);
+      if (nSkipped > 0) {
+        parts.push(`skipped (no permission): ${nSkipped}`);
+      }
+      if (nFailed > 0) {
+        parts.push(`failed: ${nFailed}`);
+      }
+    }
+
+    if (parts.length === 0) {
+      ui.notifications?.warn?.('Map Shine: Nothing to apply (no matching effects).');
+      return;
+    }
+
+    ui.notifications?.info?.(`Map Shine: Apply ${modeLabels[mode].toLowerCase()} — ${parts.join(' · ')}.`);
+
+    if (skippedNames.length > 0 && skippedNames.length <= 5) {
+      log.info('applyCurrentEffectsToAllScenes: skipped scenes', skippedNames);
+    } else if (skippedNames.length > 5) {
+      log.info(`applyCurrentEffectsToAllScenes: skipped ${skippedNames.length} scenes`);
+    }
+    if (failedNames.length > 0) {
+      log.warn('applyCurrentEffectsToAllScenes: failed scenes', failedNames);
+    }
+  }
+
+  /**
    * Run sanity check on an effect's current parameters
    * Detects invalid parameter combinations and warns/auto-fixes
    * @param {string} effectId - Effect to check
@@ -6792,6 +7498,34 @@ export class TweakpaneManager {
           dst.lastProbeAgeSeconds = Number.isFinite(src.lastProbeAgeSeconds) ? src.lastProbeAgeSeconds : 0.0;
 
           const bindings = this._dynamicExposureDebugBindings;
+          if (Array.isArray(bindings)) {
+            for (const b of bindings) {
+              try {
+                b?.refresh?.();
+              } catch (_) {
+              }
+            }
+          }
+        }
+      } catch (_) {
+      }
+
+      // Lighting Director readout: one canonical source for darkness and sun.
+      try {
+        const src = LightingDirector?.get?.();
+        const dst = this.globalParams?.lightingDirectorDebug;
+        if (src && dst) {
+          dst.masterDarkness = Number.isFinite(src.masterDarkness) ? src.masterDarkness : 0.0;
+          dst.foundryDarkness = Number.isFinite(src.foundryDarkness) ? src.foundryDarkness : 0.0;
+          dst.calendarDarkness = Number.isFinite(src.calendarDarkness) ? src.calendarDarkness : 0.0;
+          dst.weatherDarkness = Number.isFinite(src.weatherDarkness) ? src.weatherDarkness : 0.0;
+          dst.calendarDayWeight = Number.isFinite(src.calendarDayWeight) ? src.calendarDayWeight : 1.0;
+          dst.sunElevationDeg = Number.isFinite(src.sunElDeg) ? src.sunElDeg : 0.0;
+          dst.sunAzimuthDeg = Number.isFinite(src.sunAzDeg) ? src.sunAzDeg : 0.0;
+          dst.priority = String(src.priority ?? 'max');
+          dst.lightingDarknessPriority = String(src.priority ?? DARKNESS_PRIORITY.MAX);
+
+          const bindings = this._lightingDirectorDebugBindings;
           if (Array.isArray(bindings)) {
             for (const b of bindings) {
               try {

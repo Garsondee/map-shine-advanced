@@ -6,7 +6,7 @@
  * LightingEffectV2.
  *
  * HEALTH-WIRING BADGE (Map Shine Breaker Box):
- * If you change `shadowTarget` / `_strengthTarget` lifecycle, render cadence, or
+ * If you change `shadowTarget` / `_strengthTarget` / `_sharpHoldTarget` lifecycle, render cadence, or
  * LightingEffectV2 uniform wiring, you MUST update HealthEvaluator contracts for
  * `BuildingShadowsEffectV2` and the edge into `LightingEffectV2` to prevent silent failures.
  *
@@ -38,19 +38,30 @@ const log = createLogger('BuildingShadowsEffectV2');
  * follows mask native resolution (often scene-sized, 4k–8k+); that tanks FPS on mid GPUs.
  */
 const MAX_BUILDING_SHADOW_EDGE_PX = 2560;
+/** Internal RT downsample — shadows are low-frequency; half-res is visually equivalent. */
+const INTERNAL_SHADOW_DOWNSAMPLE = 0.5;
 
 export class BuildingShadowsEffectV2 {
   constructor() {
     this.params = {
       enabled: true,
-      opacity: 0.5,
-      length: 0.1,
-      softness: 4,
-      smear: 0.33,
-      resolutionScale: 1,
-      penumbra: 1,
+      opacity: 0.3,
+      /** Multiplier on shadow darkening after opacity (1 = legacy, up to 10 = much deeper penumbra). */
+      shadowStrengthBoost: 1,
+      length: 0.075,
+      softness: 8,
+      smear: 0,
+      resolutionScale: 2,
+      penumbra: 0.5,
       shadowCurve: 1.6,
-      blurRadius: 4,
+      blurRadius: 1.3,
+      /** 1 = keep full strength at the caster contact; fringe still uses blurred field. 0 = legacy (uniform blur can eat the footprint edge). */
+      contactShadowPreserve: 1,
+      /** smoothstep(low,high,sharpStrength) — widens/narrows where the pre-blur field wins over blur. */
+      contactSharpBlendLow: 0.04,
+      contactSharpBlendHigh: 0.78,
+      /** Grow shadow coverage in shadow RT pixels (max-filter) to cover bright rim cracks at silhouette. */
+      shadowEdgeInflatePx: 0.5,
       sunLatitude: 0.1,
       dynamicLightShadowOverrideEnabled: true,
       dynamicLightShadowOverrideStrength: 0.7,
@@ -67,6 +78,8 @@ export class BuildingShadowsEffectV2 {
     this.shadowTarget = null;
     /** @type {THREE.WebGLRenderTarget|null} Temp target for separable blur */
     this._blurTarget = null;
+    /** @type {THREE.WebGLRenderTarget|null} Pre-blur strength snapshot (used when contactShadowPreserve > 0) */
+    this._sharpHoldTarget = null;
 
     /** @type {THREE.Scene|null} */
     this._scene = null;
@@ -80,6 +93,8 @@ export class BuildingShadowsEffectV2 {
     this._invertMaterial = null;
     /** @type {THREE.ShaderMaterial|null} */
     this._blurMaterial = null;
+    /** @type {THREE.ShaderMaterial|null} */
+    this._copyMaterial = null;
 
     /** @type {THREE.Vector2|null} */
     this.sunDir = null;
@@ -101,8 +116,26 @@ export class BuildingShadowsEffectV2 {
     /** @type {number} Last warmup attempt timestamp (ms) */
     this._lastFloorPreloadAttemptMs = 0;
 
-    /** @type {object|null} Last-frame diagnostics for Breaker Box / health */
-    this._healthDiagnostics = null;
+    /** @type {object} Last-frame diagnostics for Breaker Box / health (mutated each frame) */
+    this._healthDiagnostics = {
+      timestamp: 0,
+      paramsEnabled: false,
+      compositorPresent: false,
+      drewAny: false,
+      floorKeys: [],
+      floorKeyCount: 0,
+      syncOutdoorsMaskUuid: null,
+      fallbackUsed: false,
+      fallbackMaskUuid: null,
+      bundleFallbackUsed: false,
+      fullOutdoorsFallbackUsed: false,
+      outdoorsResolveRoute: null,
+      outdoorsResolveKey: null,
+      receiverMaskUuid: null,
+      shadowFactorTextureUuid: null,
+      dynamicLightOverrideBound: false,
+      note: null,
+    };
 
     /** @type {string[]|null} Cached {@link #_computeSourceFloorKeys} result */
     this._floorKeysCache = null;
@@ -131,7 +164,21 @@ export class BuildingShadowsEffectV2 {
           name: 'main',
           label: 'Building Shadows',
           type: 'inline',
-          parameters: ['opacity', 'length', 'softness', 'smear', 'resolutionScale', 'penumbra', 'shadowCurve', 'blurRadius']
+          parameters: [
+            'opacity',
+            'shadowStrengthBoost',
+            'length',
+            'softness',
+            'smear',
+            'resolutionScale',
+            'penumbra',
+            'shadowCurve',
+            'blurRadius',
+            'contactShadowPreserve',
+            'contactSharpBlendLow',
+            'contactSharpBlendHigh',
+            'shadowEdgeInflatePx'
+          ]
         }
       ],
       parameters: {
@@ -141,7 +188,16 @@ export class BuildingShadowsEffectV2 {
           min: 0.0,
           max: 1.0,
           step: 0.01,
-          default: 0.5
+          default: 0.3
+        },
+        shadowStrengthBoost: {
+          type: 'slider',
+          label: 'Strength boost',
+          min: 1.0,
+          max: 10.0,
+          step: 0.05,
+          default: 1,
+          tooltip: 'Extra darkening beyond opacity (×1 matches older behavior; use up to ×10 when shadows look too faint).'
         },
         length: {
           type: 'slider',
@@ -149,7 +205,7 @@ export class BuildingShadowsEffectV2 {
           min: 0.0,
           max: 0.6,
           step: 0.005,
-          default: 0.1
+          default: 0.075
         },
         softness: {
           type: 'slider',
@@ -157,7 +213,7 @@ export class BuildingShadowsEffectV2 {
           min: 0.5,
           max: 8.0,
           step: 0.1,
-          default: 4
+          default: 8
         },
         smear: {
           type: 'slider',
@@ -165,7 +221,7 @@ export class BuildingShadowsEffectV2 {
           min: 0.0,
           max: 1.0,
           step: 0.01,
-          default: 0.33
+          default: 0
         },
         resolutionScale: {
           type: 'slider',
@@ -173,7 +229,7 @@ export class BuildingShadowsEffectV2 {
           min: 1.0,
           max: 2.0,
           step: 0.05,
-          default: 1
+          default: 2
         },
         penumbra: {
           type: 'slider',
@@ -181,7 +237,7 @@ export class BuildingShadowsEffectV2 {
           min: 0.0,
           max: 1.0,
           step: 0.01,
-          default: 1
+          default: 0.5
         },
         shadowCurve: {
           type: 'slider',
@@ -197,7 +253,45 @@ export class BuildingShadowsEffectV2 {
           min: 0.0,
           max: 4.0,
           step: 0.05,
-          default: 4
+          default: 1.3
+        },
+        contactShadowPreserve: {
+          type: 'slider',
+          label: 'Contact preserve',
+          min: 0.0,
+          max: 1.0,
+          step: 0.02,
+          default: 1,
+          tooltip:
+            'Blurs outward without eating the caster edge: merges pre-blur strength where the footprint is darkest, full blur where it fades.'
+        },
+        contactSharpBlendLow: {
+          type: 'slider',
+          label: 'Contact blend (low)',
+          min: 0.0,
+          max: 0.35,
+          step: 0.005,
+          default: 0.04,
+          tooltip: 'Lower bound for where pre-blur strength starts to dominate (shadow strength gamma). Raise slightly if fringe looks too crunchy.'
+        },
+        contactSharpBlendHigh: {
+          type: 'slider',
+          label: 'Contact blend (high)',
+          min: 0.2,
+          max: 0.98,
+          step: 0.01,
+          default: 0.78,
+          tooltip: 'Upper bound toward full contact sharpness inside the silhouette. Lower to pull softness closer to walls.'
+        },
+        shadowEdgeInflatePx: {
+          type: 'slider',
+          label: 'Edge inflate (px)',
+          min: 0.0,
+          max: 8.0,
+          step: 0.05,
+          default: 0.5,
+          tooltip:
+            'Expands shadow strength slightly in the shadow buffer (in RT pixels) so coverage tucks under the footprint and hides bright rim lines. 0 = off.'
         }
       }
     };
@@ -328,14 +422,6 @@ export class BuildingShadowsEffectV2 {
         uniform float uHasDynSceneRect;
         varying vec2 vUv;
 
-        float uvInBounds(vec2 uv) {
-          vec2 safeMin = max(uTexelSize * 0.5, vec2(0.0));
-          vec2 safeMax = min(vec2(1.0) - uTexelSize * 0.5, vec2(1.0));
-          vec2 ge0 = step(safeMin, uv);
-          vec2 le1 = step(uv, safeMax);
-          return ge0.x * ge0.y * le1.x * le1.y;
-        }
-
         float readOutdoorsMask(vec2 uv) {
           vec2 suv = clamp(uv, 0.0, 1.0);
           if (uOutdoorsMaskFlipY > 0.5) {
@@ -378,9 +464,8 @@ export class BuildingShadowsEffectV2 {
         }
 
         float sampleCasterIndoor(vec2 uv, float receiverOutdoorGate) {
-          float valid = uvInBounds(uv);
           float casterOutdoors = readOutdoorsMask(uv);
-          return (1.0 - casterOutdoors) * receiverOutdoorGate * valid;
+          return (1.0 - casterOutdoors) * receiverOutdoorGate;
         }
 
         vec2 sceneUvToDynScreenUv(vec2 sceneUv) {
@@ -411,33 +496,22 @@ export class BuildingShadowsEffectV2 {
           float receiverOutdoors = readReceiverOutdoorsMask(vUv);
           float receiverOutdoorGate = clamp(receiverOutdoors, 0.0, 1.0);
 
-          // Directional ray integration with lateral penumbra spread.
-          // This replaces "stacked offset copies" with continuous transport along
-          // the projected sun direction for smoother and more natural elongation.
-          vec2 ortho = vec2(-dir.y, dir.x);
+          // Directional ray integration along projected sun direction.
+          // Lateral softening is handled by the separable Gaussian blur pass.
           float smearAmount = clamp(uSmear, 0.0, 1.0);
-          float penumbraAmount = clamp(uPenumbra, 0.0, 1.0);
           float accum = 0.0;
           float weightSum = 0.0;
           float peakHit = 0.0;
+          float spreadBase = 0.45 + 0.4 * smearAmount;
 
-          // 8 steps vs 12: ~35% less texture work in this hot pass (full-RT per floor).
           const int RAY_STEPS = 8;
           for (int i = 0; i < RAY_STEPS; i++) {
             float t = (float(i) + 0.5) / float(RAY_STEPS);
-            // Spread toward far end for better long-shadow continuity.
-            float spreadT = mix(t, t * t, 0.45 + 0.4 * smearAmount);
+            float spreadT = mix(t, t * t, spreadBase);
             vec2 centerUv = vUv + (baseOffsetUv * spreadT);
-
-            float sigma = max(uSoftness, 0.5) * mix(0.8, 2.8, (t * t) + (0.5 * penumbraAmount * t));
-            float lateral = sigma * maskTexel.x * mix(0.8, 1.6, penumbraAmount);
             float distanceFade = mix(1.0, 0.55, t);
 
-            float c0 = sampleCasterIndoor(centerUv, receiverOutdoorGate);
-            float c1 = sampleCasterIndoor(centerUv + ortho * lateral, receiverOutdoorGate);
-            float c2 = sampleCasterIndoor(centerUv - ortho * lateral, receiverOutdoorGate);
-
-            float stepHit = c0 * 0.5 + c1 * 0.25 + c2 * 0.25;
+            float stepHit = sampleCasterIndoor(centerUv, receiverOutdoorGate);
             peakHit = max(peakHit, stepHit);
 
             float stepWeight = mix(1.1, 0.7, t) * distanceFade;
@@ -483,7 +557,14 @@ export class BuildingShadowsEffectV2 {
     this._invertMaterial = new THREE.ShaderMaterial({
       uniforms: {
         tStrength: { value: null },
-        uOpacity: { value: this.params.opacity }
+        tSharpStrength: { value: null },
+        uContactShadowPreserve: { value: this.params.contactShadowPreserve ?? 1 },
+        uContactSharpBlendLow: { value: this.params.contactSharpBlendLow ?? 0.04 },
+        uContactSharpBlendHigh: { value: this.params.contactSharpBlendHigh ?? 0.78 },
+        uOpacity: { value: this.params.opacity },
+        uShadowStrengthBoost: { value: this.params.shadowStrengthBoost ?? 1 },
+        uShadowEdgeInflatePx: { value: this.params.shadowEdgeInflatePx ?? 0 },
+        uStrengthTexelSize: { value: new THREE.Vector2(1 / 1024, 1 / 1024) }
       },
       vertexShader: `
         varying vec2 vUv;
@@ -494,12 +575,47 @@ export class BuildingShadowsEffectV2 {
       `,
       fragmentShader: `
         uniform sampler2D tStrength;
+        uniform sampler2D tSharpStrength;
+        uniform float uContactShadowPreserve;
+        uniform float uContactSharpBlendLow;
+        uniform float uContactSharpBlendHigh;
         uniform float uOpacity;
+        uniform float uShadowStrengthBoost;
+        uniform float uShadowEdgeInflatePx;
+        uniform vec2 uStrengthTexelSize;
         varying vec2 vUv;
 
+        float mergedStrength(vec2 suv) {
+          float sBlur = clamp(texture2D(tStrength, suv).r, 0.0, 1.0);
+          float sSharp = clamp(texture2D(tSharpStrength, suv).r, 0.0, 1.0);
+          float preserve = clamp(uContactShadowPreserve, 0.0, 1.0);
+          float lo = min(uContactSharpBlendLow, uContactSharpBlendHigh - 1e-4);
+          float hi = max(uContactSharpBlendHigh, lo + 1e-4);
+          float edgeW = smoothstep(lo, hi, sSharp);
+          return mix(sBlur, sSharp, preserve * edgeW);
+        }
+
         void main() {
-          float s = clamp(texture2D(tStrength, vUv).r, 0.0, 1.0);
-          float factor = 1.0 - s * clamp(uOpacity, 0.0, 1.0);
+          vec2 duv = max(uStrengthTexelSize * max(uShadowEdgeInflatePx, 0.0), vec2(0.0));
+          float s = mergedStrength(clamp(vUv, vec2(0.001), vec2(0.999)));
+          float infl = clamp(uShadowEdgeInflatePx, 0.0, 32.0);
+          if (infl > 1e-6) {
+            vec2 dd = duv * vec2(0.70710678);
+            vec2 e = vec2(0.001);
+            vec2 ee = vec2(0.999);
+            vec2 suv;
+            suv = clamp(vUv + vec2(duv.x, 0.0), e, ee); s = max(s, mergedStrength(suv));
+            suv = clamp(vUv - vec2(duv.x, 0.0), e, ee); s = max(s, mergedStrength(suv));
+            suv = clamp(vUv + vec2(0.0, duv.y), e, ee); s = max(s, mergedStrength(suv));
+            suv = clamp(vUv - vec2(0.0, duv.y), e, ee); s = max(s, mergedStrength(suv));
+            suv = clamp(vUv + vec2(dd.x, dd.y), e, ee); s = max(s, mergedStrength(suv));
+            suv = clamp(vUv + vec2(dd.x, -dd.y), e, ee); s = max(s, mergedStrength(suv));
+            suv = clamp(vUv + vec2(-dd.x, dd.y), e, ee); s = max(s, mergedStrength(suv));
+            suv = clamp(vUv - vec2(dd.x, dd.y), e, ee); s = max(s, mergedStrength(suv));
+          }
+          float boost = clamp(uShadowStrengthBoost, 1.0, 10.0);
+          float darkening = clamp(s * clamp(uOpacity, 0.0, 1.0) * boost, 0.0, 1.0);
+          float factor = 1.0 - darkening;
           gl_FragColor = vec4(vec3(factor), 1.0);
         }
       `,
@@ -535,22 +651,18 @@ export class BuildingShadowsEffectV2 {
           float r = clamp(uRadius, 0.0, 4.0);
           vec2 stepUv = uDirection * uTexelSize * r;
 
-          // 9-tap separable Gaussian kernel.
+          // 5-tap linear hardware-filtered Gaussian (bilinear between taps).
           float w0 = 0.227027;
-          float w1 = 0.1945946;
-          float w2 = 0.1216216;
-          float w3 = 0.054054;
-          float w4 = 0.016216;
+          float w12 = 0.316216;
+          float w34 = 0.070270;
+          float off12 = 1.384615;
+          float off34 = 3.230769;
 
           float s = texture2D(tInput, vUv).r * w0;
-          s += texture2D(tInput, vUv + stepUv * 1.0).r * w1;
-          s += texture2D(tInput, vUv - stepUv * 1.0).r * w1;
-          s += texture2D(tInput, vUv + stepUv * 2.0).r * w2;
-          s += texture2D(tInput, vUv - stepUv * 2.0).r * w2;
-          s += texture2D(tInput, vUv + stepUv * 3.0).r * w3;
-          s += texture2D(tInput, vUv - stepUv * 3.0).r * w3;
-          s += texture2D(tInput, vUv + stepUv * 4.0).r * w4;
-          s += texture2D(tInput, vUv - stepUv * 4.0).r * w4;
+          s += texture2D(tInput, vUv + stepUv * off12).r * w12;
+          s += texture2D(tInput, vUv - stepUv * off12).r * w12;
+          s += texture2D(tInput, vUv + stepUv * off34).r * w34;
+          s += texture2D(tInput, vUv - stepUv * off34).r * w34;
 
           gl_FragColor = vec4(vec3(clamp(s, 0.0, 1.0)), 1.0);
         }
@@ -561,6 +673,31 @@ export class BuildingShadowsEffectV2 {
       blending: THREE.NoBlending,
     });
     this._blurMaterial.toneMapped = false;
+
+    this._copyMaterial = new THREE.ShaderMaterial({
+      uniforms: {
+        tMap: { value: null },
+      },
+      vertexShader: `
+        varying vec2 vUv;
+        void main() {
+          vUv = uv;
+          gl_Position = vec4(position.xy, 0.0, 1.0);
+        }
+      `,
+      fragmentShader: `
+        uniform sampler2D tMap;
+        varying vec2 vUv;
+        void main() {
+          gl_FragColor = texture2D(tMap, vUv);
+        }
+      `,
+      depthTest: false,
+      depthWrite: false,
+      transparent: false,
+      blending: THREE.NoBlending,
+    });
+    this._copyMaterial.toneMapped = false;
 
     this._quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), this._projectMaterial);
     this._quad.frustumCulled = false;
@@ -616,6 +753,19 @@ export class BuildingShadowsEffectV2 {
       });
     } else {
       this._blurTarget.setSize(rtWidth, rtHeight);
+    }
+
+    if (!this._sharpHoldTarget) {
+      this._sharpHoldTarget = new THREE.WebGLRenderTarget(rtWidth, rtHeight, {
+        minFilter: THREE.LinearFilter,
+        magFilter: THREE.LinearFilter,
+        format: THREE.RGBAFormat,
+        type: THREE.UnsignedByteType,
+        depthBuffer: false,
+        stencilBuffer: false,
+      });
+    } else {
+      this._sharpHoldTarget.setSize(rtWidth, rtHeight);
     }
 
     if (this._projectMaterial?.uniforms?.uTexelSize) {
@@ -689,6 +839,32 @@ export class BuildingShadowsEffectV2 {
     if (this._invertMaterial?.uniforms?.uOpacity) {
       this._invertMaterial.uniforms.uOpacity.value = this.params.opacity;
     }
+    const iu = this._invertMaterial?.uniforms;
+    if (iu?.uShadowStrengthBoost) {
+      const b = Number(this.params.shadowStrengthBoost);
+      iu.uShadowStrengthBoost.value = Number.isFinite(b)
+        ? Math.max(1.0, Math.min(10.0, b))
+        : 1.0;
+    }
+    if (iu?.uContactShadowPreserve) {
+      const p = Number(this.params.contactShadowPreserve);
+      iu.uContactShadowPreserve.value = Number.isFinite(p) ? Math.max(0.0, Math.min(1.0, p)) : 1.0;
+    }
+    if (iu?.uContactSharpBlendLow && iu?.uContactSharpBlendHigh) {
+      let lo = Number(this.params.contactSharpBlendLow);
+      let hi = Number(this.params.contactSharpBlendHigh);
+      if (!Number.isFinite(lo)) lo = 0.04;
+      if (!Number.isFinite(hi)) hi = 0.78;
+      if (hi <= lo + 1e-4) hi = lo + 1e-4;
+      lo = Math.max(0.0, Math.min(0.999, lo));
+      hi = Math.max(lo + 1e-4, Math.min(1.0, hi));
+      iu.uContactSharpBlendLow.value = lo;
+      iu.uContactSharpBlendHigh.value = hi;
+    }
+    if (iu?.uShadowEdgeInflatePx) {
+      const inf = Number(this.params.shadowEdgeInflatePx);
+      iu.uShadowEdgeInflatePx.value = Number.isFinite(inf) ? Math.max(0.0, Math.min(32.0, inf)) : 0.0;
+    }
     if (this._blurMaterial?.uniforms?.uRadius) {
       this._blurMaterial.uniforms.uRadius.value = this.params.blurRadius;
     }
@@ -720,6 +896,23 @@ export class BuildingShadowsEffectV2 {
    * floor in a multi-floor stack — that masks the real upper-band mask and kills shadows.
    * @returns {boolean}
    */
+  /**
+   * Mutate pre-allocated {@link #_healthDiagnostics} (avoids per-frame GC).
+   * @param {Record<string, unknown>} fields
+   */
+  _patchHealthDiagnostics(fields) {
+    const h = this._healthDiagnostics;
+    for (const key of Object.keys(fields)) {
+      const value = fields[key];
+      if (key === 'floorKeys' && Array.isArray(value)) {
+        h.floorKeys.length = 0;
+        for (let i = 0; i < value.length; i++) h.floorKeys.push(value[i]);
+      } else {
+        h[key] = value;
+      }
+    }
+  }
+
   _skipGroundAndBundleFallbackForUpperMultiFloor() {
     let floorStackFloors = [];
     try {
@@ -739,13 +932,15 @@ export class BuildingShadowsEffectV2 {
     }
 
     if (!this.params.enabled) {
-      this._healthDiagnostics = {
+      this._patchHealthDiagnostics({
         timestamp: Date.now(),
         paramsEnabled: false,
         compositorPresent: false,
         drewAny: false,
+        floorKeys: [],
+        floorKeyCount: 0,
         note: 'Building shadows disabled',
-      };
+      });
       this._clearShadowTargetToWhite(renderer);
       return;
     }
@@ -753,13 +948,15 @@ export class BuildingShadowsEffectV2 {
     const sc = window.MapShine?.sceneComposer;
     const compositor = sc?._sceneMaskCompositor;
     if (!compositor) {
-      this._healthDiagnostics = {
+      this._patchHealthDiagnostics({
         timestamp: Date.now(),
         paramsEnabled: true,
         compositorPresent: false,
         drewAny: false,
+        floorKeys: [],
+        floorKeyCount: 0,
         note: 'GpuSceneMaskCompositor missing',
-      };
+      });
       this._clearShadowTargetToWhite(renderer);
       return;
     }
@@ -898,19 +1095,25 @@ export class BuildingShadowsEffectV2 {
     }
 
     if (!drewAny) {
-      this._healthDiagnostics = {
+      this._patchHealthDiagnostics({
         timestamp: Date.now(),
         paramsEnabled: true,
         compositorPresent: true,
-        floorKeys: [...floorKeys],
+        floorKeys,
         floorKeyCount: floorKeys.length,
         syncOutdoorsMaskUuid: this._outdoorsMask?.uuid ?? null,
         fallbackUsed: false,
+        fallbackMaskUuid: null,
+        bundleFallbackUsed: false,
+        fullOutdoorsFallbackUsed: false,
         outdoorsResolveRoute: outdoorResolve.route,
         outdoorsResolveKey: outdoorResolve.resolvedKey,
+        receiverMaskUuid: null,
+        shadowFactorTextureUuid: null,
+        dynamicLightOverrideBound: false,
         drewAny: false,
         note: 'Keyed passes produced no draw (mask textures null?)',
-      };
+      });
       this._clearShadowTargetToWhite(renderer);
       renderer.autoClear = prevAutoClear;
       renderer.setRenderTarget(prevTarget);
@@ -920,11 +1123,11 @@ export class BuildingShadowsEffectV2 {
     // Track if bundle fallback or full-outdoors fallback was used
     const usedBundleFallback = floorKeys.includes('bundle') || (outdoorResolve.route === 'bundle');
     const usedFullOutdoorsFallback = floorKeys.includes('full-outdoors');
-    this._healthDiagnostics = {
+    this._patchHealthDiagnostics({
       timestamp: Date.now(),
       paramsEnabled: true,
       compositorPresent: true,
-      floorKeys: [...floorKeys],
+      floorKeys,
       floorKeyCount: floorKeys.length,
       syncOutdoorsMaskUuid: this._outdoorsMask?.uuid ?? null,
       fallbackUsed: drewAny && !keyedDrew && !!fallbackMask,
@@ -937,15 +1140,38 @@ export class BuildingShadowsEffectV2 {
       receiverMaskUuid: receiverMaskTex?.uuid ?? null,
       shadowFactorTextureUuid: this.shadowTarget?.texture?.uuid ?? null,
       dynamicLightOverrideBound: !!(this._dynamicLightOverride?.texture || this._dynamicLightOverride?.windowTexture),
-    };
+      note: null,
+    });
 
     const blurRadius = Number(this.params.blurRadius ?? 0);
     const useBlur = !!this._blurMaterial && !!this._blurTarget && blurRadius > 0.01;
     let finalStrengthTex = this._strengthTarget.texture;
 
+    const contactP = Number(this.params.contactShadowPreserve ?? 1);
+    const preserveContact =
+      !!this._sharpHoldTarget &&
+      !!this._copyMaterial &&
+      Number.isFinite(contactP) &&
+      contactP > 1e-4;
+
     if (useBlur) {
       this._quad.material = this._blurMaterial;
-      this._blurMaterial.uniforms.tInput.value = this._strengthTarget.texture;
+
+      let blurSrc = this._strengthTarget.texture;
+
+      if (preserveContact) {
+        this._quad.material = this._copyMaterial;
+        this._copyMaterial.uniforms.tMap.value = this._strengthTarget.texture;
+        renderer.setRenderTarget(this._sharpHoldTarget);
+        renderer.setClearColor(0x000000, 1);
+        renderer.clear();
+        renderer.render(this._scene, this._camera);
+        blurSrc = this._sharpHoldTarget.texture;
+
+        this._quad.material = this._blurMaterial;
+      }
+
+      this._blurMaterial.uniforms.tInput.value = blurSrc;
       this._blurMaterial.uniforms.uDirection.value.set(1, 0);
       renderer.setRenderTarget(this._blurTarget);
       renderer.setClearColor(0x000000, 1);
@@ -962,7 +1188,18 @@ export class BuildingShadowsEffectV2 {
     }
 
     this._quad.material = this._invertMaterial;
+    if (this._invertMaterial.uniforms.uStrengthTexelSize) {
+      const sw = Math.max(1, this._strengthTarget.width | 0);
+      const sh = Math.max(1, this._strengthTarget.height | 0);
+      this._invertMaterial.uniforms.uStrengthTexelSize.value.set(1 / sw, 1 / sh);
+    }
     this._invertMaterial.uniforms.tStrength.value = finalStrengthTex;
+    if (this._invertMaterial.uniforms.tSharpStrength) {
+      const sharpTex = (preserveContact && useBlur && this._sharpHoldTarget?.texture)
+        ? this._sharpHoldTarget.texture
+        : finalStrengthTex;
+      this._invertMaterial.uniforms.tSharpStrength.value = sharpTex;
+    }
     renderer.setRenderTarget(this.shadowTarget);
     renderer.setClearColor(0xffffff, 1);
     renderer.clear();
@@ -1265,8 +1502,8 @@ export class BuildingShadowsEffectV2 {
   _computeRenderTargetSize(width, height) {
     const scaleRaw = Number(this.params?.resolutionScale ?? 1.0);
     const scale = Number.isFinite(scaleRaw) ? Math.min(2.0, Math.max(1.0, scaleRaw)) : 1.0;
-    let x = Math.max(1, Math.round(width * scale));
-    let y = Math.max(1, Math.round(height * scale));
+    let x = Math.max(1, Math.round(width * scale * INTERNAL_SHADOW_DOWNSAMPLE));
+    let y = Math.max(1, Math.round(height * scale * INTERNAL_SHADOW_DOWNSAMPLE));
     const maxE = Math.max(x, y);
     if (maxE > MAX_BUILDING_SHADOW_EDGE_PX) {
       const s = MAX_BUILDING_SHADOW_EDGE_PX / maxE;
@@ -1348,23 +1585,26 @@ export class BuildingShadowsEffectV2 {
   }
 
   dispose() {
-    this._healthDiagnostics = null;
     this._floorKeysCache = null;
     this._floorKeysSigCache = '';
     try { this._strengthTarget?.dispose(); } catch (_) {}
     try { this.shadowTarget?.dispose(); } catch (_) {}
     try { this._blurTarget?.dispose(); } catch (_) {}
+    try { this._sharpHoldTarget?.dispose(); } catch (_) {}
     try { this._projectMaterial?.dispose(); } catch (_) {}
     try { this._invertMaterial?.dispose(); } catch (_) {}
     try { this._blurMaterial?.dispose(); } catch (_) {}
+    try { this._copyMaterial?.dispose(); } catch (_) {}
     try { this._quad?.geometry?.dispose(); } catch (_) {}
 
     this._strengthTarget = null;
     this.shadowTarget = null;
     this._blurTarget = null;
+    this._sharpHoldTarget = null;
     this._projectMaterial = null;
     this._invertMaterial = null;
     this._blurMaterial = null;
+    this._copyMaterial = null;
     this._quad = null;
     this._scene = null;
     this._camera = null;

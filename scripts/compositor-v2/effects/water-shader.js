@@ -3,7 +3,7 @@
  *
  * V2 design: fullscreen post-processing pass that applies water tint, wave
  * distortion, caustics, specular (GGX), foam, murk, rain ripples,
- * chromatic aberration, and debug views to water areas defined by SDF data.
+ * chromatic aberration, and debug views to water areas defined by the _Water mask.
  *
  * Carried over verbatim from V1 WaterEffectV2 — the full water shader.
  *
@@ -14,7 +14,7 @@
  *   - Depth pass occlusion
  *   - Cloud shadow integration (tCloudShadow)
  *   - Outdoors mask / indoor damping (tOutdoorsMask)
- *   - Water occluder alpha (tWaterOccluderAlpha; screen-space tile union, not tWaterData SDF)
+ *   - Water occluder alpha (tWaterOccluderAlpha; screen-space tile union)
  *
  * Preserved from V1 (all visual features):
  *   - Texture-based noise (replaces procedural hash for fast compile)
@@ -27,8 +27,8 @@
  *   - GGX specular with anisotropy + optional surface chaos (patchy roughness, capillary normals)
  *   - Chromatic aberration (runtime toggle + thresholded Kawase blur)
  *   - Multi-tap refraction (ifdef USE_WATER_REFRACTION_MULTITAP)
- *   - SDF-based edge masking for distortion and chromatic aberration
- *   - Debug views (raw mask, inside, SDF, exposure, normals, wave height)
+ *   - Mask-based edge masking for distortion and chromatic aberration
+ *   - Debug views (raw mask, inside, packed mask R, shore band, normals, wave height)
  *   - Screen UV → Foundry → scene UV coordinate pipeline
  *
  * @module compositor-v2/effects/water-shader
@@ -79,7 +79,7 @@ layout(location = 1) out highp vec4 pc_fragColor1;
 // ── Texture samplers ─────────────────────────────────────────────────────
 uniform sampler2D tDiffuse;       // Scene RT (lit + sky + filter; user CC runs after water in FloorCompositor)
 uniform sampler2D tNoiseMap;      // 512x512 RGBA seeded noise
-uniform sampler2D tWaterData;     // SDF data (R=SDF, G=exposure, BA=normals)
+uniform sampler2D tWaterData;     // Packed from _Water mask: R=coverage, G=shore band, BA=neutral 0.5
 uniform float uHasWaterData;      // 1.0 when tWaterData is valid
 uniform float uWaterEnabled;      // Master enable
 // 1 when this slice borrows another floor's packed water mask (upper band + river below).
@@ -266,6 +266,11 @@ uniform float uHasCombinedShadow;
 uniform float uMurkShadowEnabled;
 uniform float uMurkShadowStrength;
 
+// Painted shadow lit factor (scene UV) — multi-floor omits painted from ShadowManager.
+uniform sampler2D tPaintedShadowLit;
+uniform float uHasPaintedShadowLit;
+uniform float uPaintedShadowOpacity;
+
 
 // ── Cloud Reflection ───────────────────────────────────────────────────────────
 uniform float uCloudReflectionEnabled;
@@ -424,6 +429,15 @@ uniform float uHasSceneRect;
 uniform vec3 uSkyColor;
 uniform float uSkyIntensity;
 uniform float uSceneDarkness;
+// Time-of-day CC timeline (post-merge water only — per-level water is graded by ColorCorrection pass).
+uniform float uTodTimelineInWater;
+uniform float uTodEnabled;
+uniform float uTodGlobalExposure;
+uniform float uTodGlobalSaturation;
+uniform vec3 uTodGlobalTintColor;
+uniform float uTodInteriorExposure;
+uniform float uTodInteriorSaturation;
+uniform vec3 uTodInteriorTintColor;
 uniform float uActiveLevelElevation;
 // 1 when floor-depth blur is active and water mask floor is below the viewed top floor
 // (that water sits on a Kawase-blurred composite — soften sharp procedural layers).
@@ -434,15 +448,14 @@ uniform float uWaterDepthShadowEnabled;
 uniform float uWaterDepthShadowStrength;
 uniform float uWaterDepthShadowMinBrightness;
 
-uniform float uUseSdfMask;
-
 ${DepthShaderChunks.uniforms}
 ${DepthShaderChunks.linearize}
 
 varying vec2 vUv;
 
 // Forward declarations
-float waterInsideFromSdf(float sdf01);
+float distortionInsideFromCoverage(float coverage01);
+float chromaticInsideFromCoverage(float coverage01);
 vec2 waveGrad2D(vec2 sceneUv, float t, float motion01);
 vec2 curlNoise2D(vec2 p);
 
@@ -538,6 +551,27 @@ float sampleOutdoorsMask(vec2 sceneUv01) {
   float y = (uOutdoorsMaskFlipY > 0.5) ? (1.0 - sceneUv01.y) : sceneUv01.y;
   vec2 uv = vec2(sceneUv01.x, y);
   return texture2D(tOutdoorsMask, uv).r;
+}
+
+vec3 applyWaterTimelineGrade(vec3 inputColor, float exposureStops, float saturationMul, vec3 tintColor) {
+  vec3 graded = inputColor * exp2(clamp(exposureStops, -10.0, 10.0));
+  graded *= clamp(tintColor, vec3(0.0), vec3(10.0));
+  float luma = dot(graded, vec3(0.2126, 0.7152, 0.0722));
+  graded = mix(vec3(luma), graded, clamp(saturationMul, 0.0, 4.0));
+  return graded;
+}
+
+// Interior timeline weight — same _Outdoors decode as ColorCorrectionEffectV2 / LightingEffectV2.
+float waterTimelineIndoorWeight(vec2 sceneUv01) {
+  if (uHasOutdoorsMask < 0.5) return 0.0;
+  float y = (uOutdoorsMaskFlipY > 0.5) ? (1.0 - sceneUv01.y) : sceneUv01.y;
+  vec4 od = texture2D(tOutdoorsMask, vec2(sceneUv01.x, y));
+  float outdoorRaw = clamp(max(od.r, max(od.g, od.b)), 0.0, 1.0);
+  float outdoorMid = smoothstep(0.18, 0.82, outdoorRaw);
+  float outdoorClass = (outdoorRaw <= 0.10) ? 0.0 : ((outdoorRaw >= 0.90) ? 1.0 : outdoorMid);
+  float outdoorsAlphaValid = step(0.5, clamp(od.a, 0.0, 1.0));
+  float isOutdoor = mix(1.0, outdoorClass, outdoorsAlphaValid);
+  return smoothstep(0.20, 0.75, clamp(1.0 - isOutdoor, 0.0, 1.0));
 }
 
 // Same shaping as main(): strong shelter indoors, tiny baseline to avoid 0-time seams.
@@ -949,8 +983,6 @@ float shoreFactor(float shore01) {
   return max(clamp(uDistortionShoreMin, 0.0, 1.0), clamp(s, 0.0, 1.0));
 }
 
-float waterInsideFromSdf(float sdf01) { return smoothstep(0.52, 0.48, sdf01); }
-
 // Continuous coverage/intensity from composited _Water.
 // This preserves authored soft gradients directly (0..1) so every downstream
 // effect can follow mask intensity instead of a thresholded cutoff.
@@ -964,17 +996,22 @@ float waterRawMaskAuthoritative(vec2 sceneUv01) {
   return waterRawMaskIntensity(sceneUv01);
 }
 
-float distortionInsideFromSdf(float sdf01) {
+// Edge metric matches legacy SDF semantics: high at the water/land transition, low in open water.
+float maskEdgeMetric(float coverage01) { return 1.0 - clamp(coverage01, 0.0, 1.0); }
+
+float distortionInsideFromCoverage(float coverage01) {
+  float edgeMet = maskEdgeMetric(coverage01);
   float c = clamp(uDistortionEdgeCenter, 0.0, 1.0);
   float f = max(0.0, uDistortionEdgeFeather);
-  float inside = (f > 1e-6) ? smoothstep(c + f, c - f, sdf01) : step(sdf01, c);
+  float inside = (f > 1e-6) ? smoothstep(c + f, c - f, edgeMet) : step(edgeMet, c);
   return pow(clamp(inside, 0.0, 1.0), max(0.01, uDistortionEdgeGamma));
 }
 
-float chromaticInsideFromSdf(float sdf01) {
+float chromaticInsideFromCoverage(float coverage01) {
+  float edgeMet = maskEdgeMetric(coverage01);
   float c = clamp(uChromaticAberrationEdgeCenter, 0.0, 1.0);
   float f = max(0.0, uChromaticAberrationEdgeFeather);
-  float inside = (f > 1e-6) ? smoothstep(c + f, c - f, sdf01) : step(sdf01, c);
+  float inside = (f > 1e-6) ? smoothstep(c + f, c - f, edgeMet) : step(edgeMet, c);
   inside = pow(clamp(inside, 0.0, 1.0), max(0.01, uChromaticAberrationEdgeGamma));
   inside = max(clamp(uChromaticAberrationEdgeMin, 0.0, 1.0), inside);
 
@@ -982,7 +1019,7 @@ float chromaticInsideFromSdf(float sdf01) {
   // artifacts where mask transitions are sharp.
   float dz = max(0.0, uChromaticAberrationDeadzone);
   float dzSoft = max(1e-5, uChromaticAberrationDeadzoneSoftness);
-  float edgeDelta = max(0.0, c - sdf01);
+  float edgeDelta = max(0.0, c - edgeMet);
   float deadzoneMask = smoothstep(dz, dz + dzSoft, edgeDelta);
   return inside * deadzoneMask;
 }
@@ -1435,8 +1472,22 @@ void getFoamData(vec2 sceneUv, float shore, float inside, vec2 rainOffPx, vec2 w
   floatingOut.darkScale = darkScale;
 }
 
+// Screen-space ShadowManager lit factor × optional scene-space painted lit (multi-floor).
+float waterCombinedShadowLit(vec2 screenUv, vec2 sceneUv01) {
+  float lit = 1.0;
+  if (uHasCombinedShadow > 0.5) {
+    lit = clamp(texture2D(tCombinedShadow, screenUv).r, 0.0, 1.0);
+  }
+  if (uHasPaintedShadowLit > 0.5) {
+    float paintedLit = clamp(texture2D(tPaintedShadowLit, sceneUv01).r, 0.0, 1.0);
+    paintedLit = mix(1.0, paintedLit, clamp(uPaintedShadowOpacity, 0.0, 1.0));
+    lit *= paintedLit;
+  }
+  return lit;
+}
+
 // ── Murk (subsurface silt/algae) ─────────────────────────────────────────
-vec3 applyMurk(vec2 sceneUv, float t, float inside, float shore, float outdoorStrength, float indoorWindMotion, vec3 baseColor, out float murkFactorOut) {
+vec3 applyMurk(vec2 sceneUv, float t, float inside, float shore, float outdoorStrength, float indoorWindMotion, vec3 baseColor, out float murkFactorOut, float shadowLitFactor) {
   murkFactorOut = 0.0;
   if (uMurkEnabled < 0.5) return baseColor;
   #ifndef USE_MURK
@@ -1498,10 +1549,10 @@ vec3 applyMurk(vec2 sceneUv, float t, float inside, float shore, float outdoorSt
   float baseLuma = dot(baseColor, vec3(0.299, 0.587, 0.114));
   float localLight = clamp(0.35 + baseLuma * 0.85, 0.2, 1.0);
   
-  // Apply ShadowManagerV2 combined shadow darkening to murk
+  // ShadowManager + painted lit factor (passed from main; includes multi-floor painted).
   float shadowDarken = 1.0;
-  if (uMurkShadowEnabled > 0.5 && uHasCombinedShadow > 0.5) {
-    float shadowLit = texture2D(tCombinedShadow, vUv).r;
+  if (uMurkShadowEnabled > 0.5 && (uHasCombinedShadow > 0.5 || uHasPaintedShadowLit > 0.5)) {
+    float shadowLit = clamp(shadowLitFactor, 0.0, 1.0);
     float shadowOcclusion = clamp(1.0 - shadowLit, 0.0, 1.0);
     float shadowStrength = clamp(uMurkShadowStrength, 0.0, 2.0);
     shadowDarken = 1.0 - (shadowOcclusion * shadowStrength);
@@ -1575,11 +1626,7 @@ float refractTapValid(vec2 screenUv) {
     vec2 suv = foundryToSceneUv(foundryPos);
     float inScene = step(0.0, suv.x) * step(suv.x, 1.0) * step(0.0, suv.y) * step(suv.y, 1.0);
     if (inScene < 0.5) return 0.0;
-    vec4 wdS = texture2D(tWaterData, clamp(suv, vec2(0.0), vec2(1.0)));
-    float insideS = (uUseSdfMask > 0.5)
-      ? waterInsideFromSdf(wdS.r)
-      : smoothstep(0.02, 0.08, wdS.g);
-    insideS *= waterRawMaskIntensity(suv);
+    float insideS = waterRawMaskIntensity(suv);
     return insideS * vOcc * vRoof * vBg;
   }
 
@@ -1764,17 +1811,12 @@ void main() {
   }
 
   vec4 wd = texture2D(tWaterData, sceneUv);
-  float sdf01 = wd.r;
-  float exposure01 = wd.g;
+  float shoreFromPack = wd.g;
   float rawAuth = waterRawMaskIntensity(sceneUv);
-  // Hybrid: raw mask controls authoritative water coverage, SDF/exposure still
-  // drive shoreline/depth-dependent shaping for distortion/specular/foam.
+  // Authoritative coverage from composited _Water; packed G = mask-gradient shore band.
   float inside = rawAuth;
-  float shore = clamp(exposure01 * rawAuth, 0.0, 1.0);
-  float distInside = (uUseSdfMask > 0.5)
-    ? distortionInsideFromSdf(sdf01)
-    : inside;
-  distInside *= rawAuth;
+  float shore = clamp(shoreFromPack * rawAuth, 0.0, 1.0);
+  float distInside = distortionInsideFromCoverage(rawAuth) * rawAuth;
   if (uHasWaterBgAlphaMask > 0.5) {
     float m = texture2D(tWaterBgAlphaMask, vUv).r;
     inside *= m;
@@ -1854,8 +1896,8 @@ void main() {
       return;
     }
     if (d < 2.5) { MSA_BLOOM_RT_ZERO; gl_FragColor = vec4(vec3(inside), 1.0); return; }
-    if (d < 3.5) { MSA_BLOOM_RT_ZERO; gl_FragColor = vec4(vec3(sdf01), 1.0); return; }
-    if (d < 4.5) { MSA_BLOOM_RT_ZERO; gl_FragColor = vec4(vec3(exposure01), 1.0); return; }
+    if (d < 3.5) { MSA_BLOOM_RT_ZERO; gl_FragColor = vec4(vec3(wd.r), 1.0); return; }
+    if (d < 4.5) { MSA_BLOOM_RT_ZERO; gl_FragColor = vec4(vec3(shoreFromPack), 1.0); return; }
     if (d < 5.5) { MSA_BLOOM_RT_ZERO; vec2 nn = smoothFlow2D(sceneUv); gl_FragColor = vec4(nn * 0.5 + 0.5, 0.0, 1.0); return; }
     if (d < 6.5) {
       MSA_BLOOM_RT_ZERO;
@@ -1989,13 +2031,13 @@ void main() {
     // Gate CA by shoreline mask + luminance threshold, then confine it to a
     // narrow raw-mask transition band to avoid broad color fringing.
     // This keeps CA local to the shoreline even when _Water has soft gradients.
-    float caSdfMask = chromaticInsideFromSdf(sdf01);
+    float caCoverageMask = chromaticInsideFromCoverage(rawAuth);
     float caRawEdgeBand = clamp(4.0 * rawAuth * (1.0 - rawAuth), 0.0, 1.0);
     caRawEdgeBand = pow(caRawEdgeBand, 1.9);
     // Require actual mask gradient so wide soft plateaus don't get broad CA tint.
     float rawGrad = length(vec2(dFdx(rawAuth), dFdy(rawAuth)));
     float caGradGate = smoothstep(0.006, 0.03, rawGrad);
-    float caEdgeMask = caSdfMask * caRawEdgeBand * caGradGate * caLumaGate;
+    float caEdgeMask = caCoverageMask * caRawEdgeBand * caGradGate * caLumaGate;
     float caPx = caPxBase * caEdgeMask;
     float spread = clamp(uChromaticAberrationSampleSpread, 0.25, 3.0);
     float kawasePx = clamp(uChromaticAberrationKawaseBlurPx, 0.0, 8.0);
@@ -2089,19 +2131,15 @@ void main() {
     (gl_FragCoord.x + 0.5) / max(uResolution.x, 1.0),
     (gl_FragCoord.y + 0.5) / max(uResolution.y, 1.0)
   );
-  float combinedShadowLit = 1.0;
-  float combinedShadowOcc = 0.0;
-  if (uHasCombinedShadow > 0.5) {
-    combinedShadowLit = clamp(texture2D(tCombinedShadow, msUvShadow).r, 0.0, 1.0);
-    combinedShadowOcc = clamp(1.0 - combinedShadowLit, 0.0, 1.0);
-  }
+  float combinedShadowLit = waterCombinedShadowLit(msUvShadow, sceneUv);
+  float combinedShadowOcc = clamp(1.0 - combinedShadowLit, 0.0, 1.0);
 
   // ShadowManagerV2 combined map (screen vUv, R = lit factor). When bound, shore +
   // floating foam use this for color and alpha so they track cloud + overhead + building
   // the same way as water particles and murk (avoids double-applying structural).
   float foamColorLitMul = foamStructuralDarken;
   float foamAlphaLitMul = foamBuildingShadowFade;
-  if (uHasCombinedShadow > 0.5) {
+  if (uHasCombinedShadow > 0.5 || uHasPaintedShadowLit > 0.5) {
     foamColorLitMul = combinedShadowLit;
     foamAlphaLitMul = combinedShadowLit;
   }
@@ -2111,7 +2149,7 @@ void main() {
 
   // Murk
   float murkFactor = 0.0;
-  col = applyMurk(sceneUv, uTime, inside, shore, outdoorStrength, indoorWindMotion, col, murkFactor);
+  col = applyMurk(sceneUv, uTime, inside, shore, outdoorStrength, indoorWindMotion, col, murkFactor, combinedShadowLit);
 
   // Tint - use darkening approach instead of brightening
   float sceneDarkness = clamp(uSceneDarkness, 0.0, 1.0);
@@ -2171,7 +2209,7 @@ void main() {
 
     // V1-accurate cloud-shadow caustics kill.
     float causticsCloudLit = 1.0;
-    if (uHasCombinedShadow > 0.5) {
+    if (uHasCombinedShadow > 0.5 || uHasPaintedShadowLit > 0.5) {
       causticsCloudLit = combinedShadowLit;
     } else if (uCloudShadowEnabled > 0.5 && uHasCloudShadow > 0.5) {
       float cloudLitRaw = texture2D(tCloudShadow, vUv).r;
@@ -2357,10 +2395,10 @@ void main() {
 
   // Shader flecks (drive by combined foam presence) — same lit factor as splashes when combined
   float fleckShadowMul = foamColorLitMul;
-  if (uHasCombinedShadow > 0.5) {
+  if (uHasCombinedShadow > 0.5 || uHasPaintedShadowLit > 0.5) {
     fleckShadowMul = splashCombinedCsh;
   }
-  float fleckDriver = clamp(max(shoreFoamVis, floatFoamAmtVis) * (uHasCombinedShadow > 0.5 ? splashCombinedCsh : foamAlphaLitMul), 0.0, 1.0);
+  float fleckDriver = clamp(max(shoreFoamVis, floatFoamAmtVis) * ((uHasCombinedShadow > 0.5 || uHasPaintedShadowLit > 0.5) ? splashCombinedCsh : foamAlphaLitMul), 0.0, 1.0);
   float shaderFlecks = getShaderFlecks(sceneUv, inside, shore, fleckDriver, rainOffPx, indoorWindMotion);
   vec3 fleckCol = mix(uShoreFoamColor, floatingFoam.color, clamp(floatFoamAmtVis, 0.0, 1.0)) * fleckShadowMul;
   float fleckW = shaderFlecks * 0.45 * mix(1.0, 0.07, uFloorDepthBlurWaterSoft);
@@ -2573,7 +2611,7 @@ void main() {
   // Combined shadow suppression: cloud, building, and overhead shadows
   float combinedShadow = 0.0;
 
-  if (uHasCombinedShadow > 0.5) {
+  if (uHasCombinedShadow > 0.5 || uHasPaintedShadowLit > 0.5) {
     combinedShadow = combinedShadowOcc;
   } else {
     // Cloud shadow
@@ -2593,7 +2631,7 @@ void main() {
     spec *= mix(1.0, litPow, kStrength);
   }
   // Structural shadows suppress 75% of specular at full shadow.
-  if (uHasCombinedShadow > 0.5) {
+  if (uHasCombinedShadow > 0.5 || uHasPaintedShadowLit > 0.5) {
     spec *= (1.0 - 0.75 * combinedShadowOcc);
   } else {
     spec *= (1.0 - 0.75 * structuralShadow);
@@ -2685,6 +2723,15 @@ void main() {
 
   col = mix(col, base.rgb, occluderBlend);
   specBloomAccum *= (1.0 - occluderBlend);
+  // Post-merge water renders after per-level ColorCorrection; apply timeline here
+  // so murk/tint/specular pick up interior exposure (matches ColorCorrectionEffectV2).
+  if (uTodTimelineInWater > 0.5 && uTodEnabled > 0.5 && inside > 0.001) {
+    float indoorW = waterTimelineIndoorWeight(worldSceneUv);
+    vec3 globalCol = applyWaterTimelineGrade(col, uTodGlobalExposure, uTodGlobalSaturation, uTodGlobalTintColor);
+    float interiorExposureTotal = uTodGlobalExposure + uTodInteriorExposure;
+    vec3 interiorCol = applyWaterTimelineGrade(col, interiorExposureTotal, uTodInteriorSaturation, uTodInteriorTintColor);
+    col = mix(globalCol, interiorCol, indoorW);
+  }
   MSA_BLOOM_RT_COMMIT(specBloomAccum * clamp(uBloomSpecularEmitMul, 0.0, 12.0));
   // LevelCompositePass is straight-alpha source-over. If we keep output a = base.a,
   // punched-through tile holes (base.a ≈ 0) zero out premultiplied contribution even

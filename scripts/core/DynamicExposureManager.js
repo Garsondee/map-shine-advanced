@@ -36,9 +36,12 @@ export class DynamicExposureManager {
     this.params = {
       enabled: true,
 
-      // Exposure multiplier bounds (applied on top of ColorCorrectionEffect.params.exposure)
-      minExposure: 0.5,
-      maxExposure: 2.5,
+      // Exposure multiplier bounds (applied on top of ColorCorrectionEffect.params.exposure).
+      // With the Linear HDR pipeline, the probe samples the pre-tone-map merged scene, so
+      // raw luminance can substantially exceed 1.0. Widening the range lets eye-adaptation
+      // pull noon scenes down more aggressively and lift mid-night scenes higher.
+      minExposure: 0.35,
+      maxExposure: 3.0,
 
       // How often we read back the probe (Hz). Readbacks can be expensive.
       probeHz: 8,

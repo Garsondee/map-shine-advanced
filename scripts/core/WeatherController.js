@@ -161,7 +161,7 @@ export class WeatherController {
     this.gustStrength = 1.0;      // Multiplier for how strong gusts are compared to base wind
 
     // Time of Day (0-24)
-    this.timeOfDay = 6.6; // Tuned time of day
+    this.timeOfDay = 12.0; // Canonical fresh-scene default: clear noon.
 
     // Season
     this.season = 'SUMMER';
@@ -3840,6 +3840,12 @@ export class WeatherController {
         ], expanded: false }
       ],
       presets: {
+        'Clear Noon': { precipitation: 0.0, cloudCover: 0.04, windSpeed: 0.08, fogDensity: 0.0, freezeLevel: 0.0 },
+        'Golden Hour': { precipitation: 0.0, cloudCover: 0.12, windSpeed: 0.12, fogDensity: 0.04, freezeLevel: 0.0 },
+        'Overcast Day': { precipitation: 0.0, cloudCover: 0.72, windSpeed: 0.18, fogDensity: 0.10, freezeLevel: 0.0 },
+        Storm: { precipitation: 0.88, cloudCover: 1.0, windSpeed: 0.72, fogDensity: 0.33, freezeLevel: 0.0 },
+        'Moonlit Night': { precipitation: 0.0, cloudCover: 0.12, windSpeed: 0.06, fogDensity: 0.02, freezeLevel: 0.0 },
+        'Interior Night': { precipitation: 0.0, cloudCover: 0.20, windSpeed: 0.04, fogDensity: 0.05, freezeLevel: 0.0 },
         'Clear (Dry)': { precipitation: 0.0, cloudCover: 0.05, windSpeed: 0.08, fogDensity: 0.0, freezeLevel: 0.0 },
         'Clear (Breezy)': { precipitation: 0.0, cloudCover: 0.15, windSpeed: 0.35, fogDensity: 0.02, freezeLevel: 0.0 },
         'Partly Cloudy': { precipitation: 0.0, cloudCover: 0.35, windSpeed: 0.15, fogDensity: 0.03, freezeLevel: 0.0 },

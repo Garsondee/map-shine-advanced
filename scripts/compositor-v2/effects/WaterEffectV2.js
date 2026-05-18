@@ -14,8 +14,8 @@
  *   1. `populate()` discovers background + tile `_Water` masks via `probeMaskFile()`.
  *   2. Per-floor masks are composited into a single RT by rendering white quads
  *      masked by the water texture into a scene-sized render target.
- *   3. An internal water-data builder converts the composited mask into
- *      composited mask (R=SDF, G=exposure, BA=normals).
+ *   3. An internal water-data builder packs the composited _Water mask
+ *      (R=coverage, G=shore band from mask gradients, BA=neutral).
  *   4. The fullscreen water shader reads tWaterData + scene RT to produce the
  *      refracted/tinted/specular output as a post-processing pass.
  *
@@ -53,7 +53,6 @@ import {
   resolveV14BackgroundFloorIndexForSrc,
 } from '../../foundry/levels-scene-flags.js';
 import { DepthShaderChunks } from '../../effects/DepthShaderChunks.js';
-import { VisionSDF } from '../../vision/VisionSDF.js';
 import { getVertexShader, getFragmentShader, getFragmentShaderSafe } from './water-shader.js';
 import { resolveEffectWindWorld } from './resolve-effect-wind.js';
 import { safeBuildShaderMaterial } from '../../core/diagnostics/SafeShaderBuilder.js';
@@ -160,6 +159,11 @@ export class WaterEffectV2 {
     this._waterCompileRetryAfterMs = 0;
     /** @type {number} Consecutive timeout/fallback builds (reset on real success). */
     this._waterShaderCompileFailures = 0;
+
+    /** @type {{ enabled: boolean, global?: object, interior?: object }} */
+    this._timelineGradeState = { enabled: false };
+    /** @type {boolean} Apply timeline grade inside water shader (post-merge path). */
+    this._applyTimelineGradeInWater = false;
 
     // ── Effect parameters ────────────────────────────────────────────────
     this.params = {
@@ -508,8 +512,7 @@ export class WaterEffectV2 {
       },
       bathymetryDeepScatterColor: { r: 0.02, g: 0.10, b: 0.20 },
 
-      // Mask composite + packed water-data resolution. GPU JFA path scales well;
-      // CPU SDF fallback is heavier at 2048+ if JFA is unavailable.
+      // Mask composite + packed water-data resolution.
       buildResolution: 2048,
       maskThreshold: 0.15,
       maskChannel: 'auto',
@@ -517,10 +520,7 @@ export class WaterEffectV2 {
       maskBlurRadius: 0.0,
       maskBlurPasses: 0,
       maskExpandPx: 0.0,
-      sdfRangePx: 64,
       shoreWidthPx: 24,
-
-      useSdfMask: true,
 
       // Debug
       debugView: 0,
@@ -543,7 +543,6 @@ export class WaterEffectV2 {
       uMicroChopIntensity: 0.71,
       uMicroChopScale: 1.0,
       uMicroChopSpeed: 1.7,
-      uUseSdfMask: true,
     };
 
     // ── Per-floor water state ────────────────────────────────────────────
@@ -567,9 +566,6 @@ export class WaterEffectV2 {
     // ── Discovered water tiles (populated in populate()) ─────────────────
     /** @type {Array<{tileId: string, basePath: string, floorIndex: number, maskPath: string}>} */
     this._waterTiles = [];
-
-    /** @type {VisionSDF|null} */
-    this._visionSDF = null;
 
     // ── GPU resources (created in initialize()) ──────────────────────────
     /** @type {THREE.Scene|null} */
@@ -1022,6 +1018,25 @@ export class WaterEffectV2 {
   }
 
   /**
+   * Painted shadow lit factor in scene UV (multi-floor: omitted from ShadowManager combine).
+   * @param {THREE.Texture|null} litTex
+   * @param {number} [opacity=1]
+   */
+  setPaintedShadowLitTexture(litTex, opacity = 1) {
+    try {
+      const u = this._composeMaterial?.uniforms;
+      if (!u) return;
+      const fb = this._fallbackWhite;
+      if (u.tPaintedShadowLit) u.tPaintedShadowLit.value = litTex ?? fb;
+      if (u.uHasPaintedShadowLit) u.uHasPaintedShadowLit.value = litTex ? 1.0 : 0.0;
+      if (u.uPaintedShadowOpacity) {
+        const o = Number(opacity);
+        u.uPaintedShadowOpacity.value = Number.isFinite(o) ? Math.max(0, Math.min(1, o)) : 1.0;
+      }
+    } catch (_) {}
+  }
+
+  /**
    * Set the specular sun direction from live time-of-day azimuth and elevation.
    * Called by FloorCompositor each frame after SkyColorEffectV2 updates.
    * @param {number} azimuthDeg - Degrees: 0=North, 90=East, 180=South, 270=West
@@ -1058,7 +1073,7 @@ static getControlSchema() {
           expanded: true,
           parameters: [
             'tintColor', 'tintStrength',
-            'useSdfMask', 'distortionStrengthPx',
+            'distortionStrengthPx',
             'debugView', 'debugWindArrow'
           ]
         },
@@ -1315,7 +1330,6 @@ static getControlSchema() {
 
         tintColor: { type: 'color', default: { r: 0.34987729679294466, g: 0.4833335876464844, b: 0.09730270218431925 }, label: 'Tint Color' },
         tintStrength: { type: 'slider', min: 0, max: 2, step: 0.01, default: 0.38, label: 'Tint Strength' },
-        useSdfMask: { type: 'boolean', default: true, label: 'Use SDF Mask' },
         distortionStrengthPx: { type: 'slider', min: 0, max: 24, step: 0.1, default: 24.0, label: 'Distortion (px)' },
         debugView: {
           type: 'dropdown',
@@ -1324,8 +1338,8 @@ static getControlSchema() {
           options: {
             Final: 0,
             'Water Mask': 1,
-            'SDF Shore': 2,
-            'Water Data (RGBA)': 3,
+            Inside: 2,
+            'Packed mask (R)': 3,
             Distortion: 4,
             Specular: 5,
             'Sky Reflection': 9,
@@ -1824,7 +1838,7 @@ static getControlSchema() {
   }
 
   /**
-   * Discover _Water masks for all tiles, composite per-floor, build SDF.
+   * Discover _Water masks for all tiles, composite per-floor, pack mask data.
    * Call after FloorRenderBus.populate() so tile geometry is already built.
    * @param {object} foundrySceneData - Scene geometry data from SceneComposer
    */
@@ -2034,7 +2048,7 @@ static getControlSchema() {
       arr.push(entry);
     }
 
-    // ── Step 3: Composite per-floor masks + build SDF ────────────────────
+    // ── Step 3: Composite per-floor masks + pack water data ───────────────
     // Reuse a single canvas across all floors to avoid allocating multiple
     // large (e.g. 1024×1024 × 4 bytes = 4MB) canvas buffers in rapid succession,
     // which can trigger aggressive GC on low-RAM systems.
@@ -2204,27 +2218,26 @@ static getControlSchema() {
 
     const imageData = ctx.getImageData(0, 0, cvW, cvH).data;
     this._endPerfSpan(_maskPerf);
-    const _sdfPerf = this._beginPerfSpan('populate.sdfPack', 'update');
+    const _packPerf = this._beginPerfSpan('populate.maskPack', 'update');
 
-    // Prefer GPU JFA path (near-instant mask->SDF), with CPU fallback.
+    // Prefer GPU pack from the composited _Water mask, with CPU fallback.
     let waterData = null;
     try {
       waterData = this._buildWaterDataGpuJfa(THREE, imageData, cvW, cvH);
     } catch (err) {
-      log.warn('_compositeFloorMask: GPU JFA SDF build failed, falling back to CPU path.', err);
+      log.warn('_compositeFloorMask: GPU water-data pack failed, falling back to CPU path.', err);
     }
 
     if (!waterData) {
-      // Fallback: CPU water-data build from the already composited RGBA pixels.
       try {
         waterData = this._buildWaterDataCpu(THREE, imageData, cvW, cvH);
       } catch (err) {
-        log.error('_compositeFloorMask: CPU SDF build failed:', err);
-        this._endPerfSpan(_sdfPerf);
+        log.error('_compositeFloorMask: CPU water-data pack failed:', err);
+        this._endPerfSpan(_packPerf);
         return null;
       }
     }
-    this._endPerfSpan(_sdfPerf);
+    this._endPerfSpan(_packPerf);
 
     if (!waterData?.hasWater) {
       log.info('_compositeFloorMask: mask found but no water pixels above threshold');
@@ -2258,11 +2271,9 @@ static getControlSchema() {
     this._waterDataPackCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
     this._waterDataPackMaterial = new THREE.ShaderMaterial({
       uniforms: {
-        tSdf: { value: null },
-        uSdfMaxDistancePx: { value: 32.0 },
-        uSdfRangePx: { value: 64.0 },
-        uExposureWidthPx: { value: 24.0 },
-        uMaskExpandPx: { value: 0.0 },
+        tMask: { value: null },
+        uTexelSize: { value: new THREE.Vector2(1 / 2048, 1 / 2048) },
+        uShoreWidthPx: { value: 24.0 },
       },
       vertexShader: /* glsl */`
         varying vec2 vUv;
@@ -2272,19 +2283,23 @@ static getControlSchema() {
         }
       `,
       fragmentShader: /* glsl */`
-        uniform sampler2D tSdf;
-        uniform float uSdfMaxDistancePx;
-        uniform float uSdfRangePx;
-        uniform float uExposureWidthPx;
-        uniform float uMaskExpandPx;
+        uniform sampler2D tMask;
+        uniform vec2 uTexelSize;
+        uniform float uShoreWidthPx;
         varying vec2 vUv;
 
         void main() {
-          float sdfNorm = texture2D(tSdf, vUv).r;
-          float signedPx = (0.5 - sdfNorm) * (2.0 * max(1e-4, uSdfMaxDistancePx)) - uMaskExpandPx;
-          float sdf01 = clamp(0.5 + (signedPx / (2.0 * max(1e-4, uSdfRangePx))), 0.0, 1.0);
-          float exposure01 = clamp(max(0.0, -signedPx) / max(1e-4, uExposureWidthPx), 0.0, 1.0);
-          gl_FragColor = vec4(sdf01, exposure01, 0.5, 0.5);
+          vec2 ts = uTexelSize;
+          float m = texture2D(tMask, vUv).r;
+          float ml = texture2D(tMask, vUv - vec2(ts.x, 0.0)).r;
+          float mr = texture2D(tMask, vUv + vec2(ts.x, 0.0)).r;
+          float md = texture2D(tMask, vUv - vec2(0.0, ts.y)).r;
+          float mu = texture2D(tMask, vUv + vec2(0.0, ts.y)).r;
+          vec2 grad = vec2(mr - ml, mu - md) * 0.5;
+          float gradMag = length(grad);
+          float softEdge = clamp(4.0 * m * (1.0 - m), 0.0, 1.0);
+          float shore01 = clamp(max(softEdge, gradMag * 0.25 * uShoreWidthPx), 0.0, 1.0);
+          gl_FragColor = vec4(m, shore01, 0.5, 0.5);
         }
       `,
       depthWrite: false,
@@ -2298,12 +2313,6 @@ static getControlSchema() {
   _buildWaterDataGpuJfa(THREE, rgbaPixels, width, height) {
     const renderer = window.MapShine?.renderer;
     if (!renderer) return null;
-    if (!this._visionSDF) {
-      this._visionSDF = new VisionSDF(renderer, width, height);
-      this._visionSDF.initialize();
-    } else {
-      this._visionSDF.resize(width, height);
-    }
 
     const channel = this.params.maskChannel ?? 'auto';
     const useAlpha = (channel === 'a') ? true : (channel === 'r' ? false : this._detectMaskUseAlpha(rgbaPixels));
@@ -2311,7 +2320,6 @@ static getControlSchema() {
     const threshold255 = Math.max(0, Math.min(255, Math.round((this.params.maskThreshold ?? 0.15) * 255)));
 
     const rawRgba = new Uint8Array(width * height * 4);
-    const binRgba = new Uint8Array(width * height * 4);
     let hasWater = false;
     for (let i = 0; i < width * height; i++) {
       const o = i * 4;
@@ -2323,12 +2331,9 @@ static getControlSchema() {
       if (channel === 'luma') v = Math.round(0.2126 * r + 0.7152 * g + 0.0722 * b);
       else v = useAlpha ? a : r;
       if (invert) v = 255 - v;
-      const on = v >= threshold255;
-      if (on) hasWater = true;
-      const bv = on ? 255 : 0;
+      if (v >= threshold255) hasWater = true;
 
       rawRgba[o] = v; rawRgba[o + 1] = v; rawRgba[o + 2] = v; rawRgba[o + 3] = 255;
-      binRgba[o] = bv; binRgba[o + 1] = bv; binRgba[o + 2] = bv; binRgba[o + 3] = 255;
     }
 
     if (!hasWater) {
@@ -2353,32 +2358,6 @@ static getControlSchema() {
     if ('colorSpace' in rawMaskTexture && THREE.NoColorSpace) rawMaskTexture.colorSpace = THREE.NoColorSpace;
     rawMaskTexture.needsUpdate = true;
 
-    const binaryMaskTexture = new THREE.DataTexture(binRgba, width, height, THREE.RGBAFormat, THREE.UnsignedByteType);
-    binaryMaskTexture.minFilter = THREE.NearestFilter;
-    binaryMaskTexture.magFilter = THREE.NearestFilter;
-    binaryMaskTexture.wrapS = THREE.ClampToEdgeWrapping;
-    binaryMaskTexture.wrapT = THREE.ClampToEdgeWrapping;
-    binaryMaskTexture.generateMipmaps = false;
-    binaryMaskTexture.flipY = false;
-    if ('colorSpace' in binaryMaskTexture && THREE.NoColorSpace) binaryMaskTexture.colorSpace = THREE.NoColorSpace;
-    binaryMaskTexture.needsUpdate = true;
-
-    const sdfRange = Math.max(1.0, Number(this.params.sdfRangePx ?? 64));
-    try {
-      // Keep JFA distance normalization aligned with the requested water SDF range.
-      this._visionSDF._maxDistance = sdfRange;
-      if (this._visionSDF._distanceMaterial?.uniforms?.uMaxDistance) {
-        this._visionSDF._distanceMaterial.uniforms.uMaxDistance.value = sdfRange;
-      }
-    } catch (_) {}
-
-    const sdfTex = this._visionSDF.update(binaryMaskTexture);
-    binaryMaskTexture.dispose();
-    if (!sdfTex) {
-      rawMaskTexture.dispose();
-      return null;
-    }
-
     this._ensureWaterDataPackResources(THREE);
     const packTarget = new THREE.WebGLRenderTarget(width, height, {
       format: THREE.RGBAFormat,
@@ -2392,11 +2371,9 @@ static getControlSchema() {
 
     const prevTarget = renderer.getRenderTarget();
     const prevAutoClear = renderer.autoClear;
-    this._waterDataPackMaterial.uniforms.tSdf.value = sdfTex;
-    this._waterDataPackMaterial.uniforms.uSdfMaxDistancePx.value = sdfRange;
-    this._waterDataPackMaterial.uniforms.uSdfRangePx.value = sdfRange;
-    this._waterDataPackMaterial.uniforms.uExposureWidthPx.value = Math.max(1.0, Number(this.params.shoreWidthPx ?? 24));
-    this._waterDataPackMaterial.uniforms.uMaskExpandPx.value = Number(this.params.maskExpandPx ?? 0.0);
+    this._waterDataPackMaterial.uniforms.tMask.value = rawMaskTexture;
+    this._waterDataPackMaterial.uniforms.uTexelSize.value.set(1 / Math.max(1, width), 1 / Math.max(1, height));
+    this._waterDataPackMaterial.uniforms.uShoreWidthPx.value = Math.max(1.0, Number(this.params.shoreWidthPx ?? 24));
     let _packPerf = null;
     try {
       const recorder = window.MapShine?.performanceRecorder;
@@ -2432,9 +2409,7 @@ static getControlSchema() {
     const threshold255 = Math.max(0, Math.min(255, Math.round((this.params.maskThreshold ?? 0.15) * 255)));
     const blurRadius = Math.max(0.0, Number(this.params.maskBlurRadius ?? 0.0));
     const blurPasses = Math.max(0, Math.floor(Number(this.params.maskBlurPasses ?? 0)));
-    const expandPx = Number.isFinite(this.params.maskExpandPx) ? Number(this.params.maskExpandPx) : 0.0;
-    const sdfRangePx = Math.max(1e-3, Number(this.params.sdfRangePx ?? 64));
-    const exposureWidthPx = Math.max(1e-3, Number(this.params.shoreWidthPx ?? 24));
+    const shoreWidthPx = Math.max(1e-3, Number(this.params.shoreWidthPx ?? 24));
 
     const raw = new Uint8Array(width * height);
     const rawRgba = new Uint8Array(width * height * 4);
@@ -2502,12 +2477,12 @@ static getControlSchema() {
     }
 
     const threshold = Math.max(0.0, Math.min(1.0, Number(this.params.maskThreshold ?? 0.15)));
-    const mask = new Uint8Array(width * height);
     let hasWater = false;
     for (let i = 0; i < width * height; i++) {
-      const on = working[i] >= threshold ? 1 : 0;
-      mask[i] = on;
-      if (on) hasWater = true;
+      if (working[i] >= threshold) {
+        hasWater = true;
+        break;
+      }
     }
 
     if (!hasWater) {
@@ -2521,20 +2496,27 @@ static getControlSchema() {
       };
     }
 
-    const distToLand = this._distanceTransform(mask, width, height, false);
-    const distToWater = this._distanceTransform(mask, width, height, true);
     const packed = new Uint8Array(width * height * 4);
-    for (let i = 0; i < width * height; i++) {
-      const isWater = mask[i] === 1;
-      const sdfPx0 = isWater ? -distToLand[i] : distToWater[i];
-      const sdfPx = sdfPx0 - expandPx;
-      const sdf01 = this._clamp01(0.5 + (sdfPx / (2.0 * sdfRangePx)));
-      const exposure01 = this._clamp01(Math.max(0.0, -sdfPx) / exposureWidthPx);
-      const o = i * 4;
-      packed[o] = Math.round(sdf01 * 255);
-      packed[o + 1] = Math.round(exposure01 * 255);
-      packed[o + 2] = 128;
-      packed[o + 3] = 128;
+    const shoreScale = 0.25 * shoreWidthPx;
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const i = y * width + x;
+        const m = working[i];
+        const xl = working[y * width + Math.max(0, x - 1)];
+        const xr = working[y * width + Math.min(width - 1, x + 1)];
+        const yd = working[Math.max(0, y - 1) * width + x];
+        const yu = working[Math.min(height - 1, y + 1) * width + x];
+        const gx = (xr - xl) * 0.5;
+        const gy = (yu - yd) * 0.5;
+        const grad = Math.sqrt(gx * gx + gy * gy);
+        const softEdge = Math.min(1.0, Math.max(0.0, 4.0 * m * (1.0 - m)));
+        const shore01 = this._clamp01(Math.max(softEdge, grad * shoreScale));
+        const o = i * 4;
+        packed[o] = Math.round(this._clamp01(m) * 255);
+        packed[o + 1] = Math.round(shore01 * 255);
+        packed[o + 2] = 128;
+        packed[o + 3] = 128;
+      }
     }
 
     const texture = new THREE.DataTexture(packed, width, height, THREE.RGBAFormat, THREE.UnsignedByteType);
@@ -2555,46 +2537,6 @@ static getControlSchema() {
       threshold: this.params.maskThreshold ?? 0.15,
       hasWater: true,
     };
-  }
-
-  _distanceTransform(mask01, width, height, toWater) {
-    const INF = 1e9;
-    const SQRT2 = 1.41421356237;
-    const dist = new Float32Array(width * height);
-
-    for (let i = 0; i < width * height; i++) {
-      const isWater = mask01[i] === 1;
-      const feature = toWater ? isWater : !isWater;
-      dist[i] = feature ? 0.0 : INF;
-    }
-
-    for (let y = 0; y < height; y++) {
-      const row = y * width;
-      for (let x = 0; x < width; x++) {
-        const idx = row + x;
-        let d = dist[idx];
-        if (x > 0) d = Math.min(d, dist[idx - 1] + 1.0);
-        if (y > 0) d = Math.min(d, dist[idx - width] + 1.0);
-        if (x > 0 && y > 0) d = Math.min(d, dist[idx - width - 1] + SQRT2);
-        if (x < width - 1 && y > 0) d = Math.min(d, dist[idx - width + 1] + SQRT2);
-        dist[idx] = d;
-      }
-    }
-
-    for (let y = height - 1; y >= 0; y--) {
-      const row = y * width;
-      for (let x = width - 1; x >= 0; x--) {
-        const idx = row + x;
-        let d = dist[idx];
-        if (x < width - 1) d = Math.min(d, dist[idx + 1] + 1.0);
-        if (y < height - 1) d = Math.min(d, dist[idx + width] + 1.0);
-        if (x < width - 1 && y < height - 1) d = Math.min(d, dist[idx + width + 1] + SQRT2);
-        if (x > 0 && y < height - 1) d = Math.min(d, dist[idx + width - 1] + SQRT2);
-        dist[idx] = d;
-      }
-    }
-
-    return dist;
   }
 
   _clamp01(v) {
@@ -2664,7 +2606,7 @@ static getControlSchema() {
   }
 
   /**
-   * Return the active floor's SDF/water-data texture (used by V1 WeatherParticles
+   * Return the active floor's packed water-data texture (used by V1 WeatherParticles
    * foam behaviors for spawn gating and flow-field sampling).
    * Returns null when no water data is loaded.
    * @returns {THREE.Texture|null}
@@ -2693,7 +2635,7 @@ static getControlSchema() {
       u.tWaterData.value = sdfTex;
       u.uHasWaterData.value = 1.0;
 
-      // Update texel size based on actual SDF texture dimensions
+      // Update texel size based on actual water-data texture dimensions
       if (sdfTex.image) {
         const w = sdfTex.image.width || 2048;
         const h = sdfTex.image.height || 2048;
@@ -2742,7 +2684,6 @@ static getControlSchema() {
     if (!u || !p) return;
 
     u.uWaterEnabled.value = this.enabled ? 1.0 : 0.0;
-    if (u.uUseSdfMask) u.uUseSdfMask.value = p.useSdfMask === false ? 0.0 : 1.0;
     if (u.uWaterRawMaskThreshold) {
       u.uWaterRawMaskThreshold.value = Math.max(0.0, Math.min(1.0, Number(p.maskThreshold ?? 0.15)));
     }
@@ -2852,7 +2793,6 @@ static getControlSchema() {
       p.maskThreshold,
       p.maskChannel,
       p.maskInvert,
-      p.sdfRangePx,
       p.shoreWidthPx,
       p.maskExpandPx,
       p.maskBlurRadius,
@@ -3667,6 +3607,8 @@ static getControlSchema() {
       u.uSceneDarkness.value = globalThis.canvas?.environment?.darknessLevel ?? 0;
     } catch (_) {}
 
+    this._syncTimelineGradeUniforms();
+
     // ── Shader defines (conditional compilation) ──────────────────────────
     const flecksEnabled = !!p.foamFlecksEnabled;
     const multiTapEnabled = !!p.refractionMultiTapEnabled;
@@ -3696,6 +3638,49 @@ static getControlSchema() {
 
     this._endPerfSpan(_perfToken);
     this._activePerfRecorder = null;
+  }
+
+  /**
+   * Timeline grade from ColorCorrectionEffectV2 (updated each frame by FloorCompositor).
+   * @param {{ enabled: boolean, global?: object, interior?: object }} state
+   */
+  setTimelineGradeState(state) {
+    this._timelineGradeState = state ?? { enabled: false };
+  }
+
+  /**
+   * When true, water shader applies the CC timeline after murk/tint (post-merge path).
+   * @param {boolean} active
+   */
+  setApplyTimelineGradeInWater(active) {
+    this._applyTimelineGradeInWater = active === true;
+    const u = this._composeMaterial?.uniforms;
+    if (u?.uTodTimelineInWater) {
+      u.uTodTimelineInWater.value = this._applyTimelineGradeInWater ? 1.0 : 0.0;
+    }
+  }
+
+  /** @private */
+  _syncTimelineGradeUniforms() {
+    const u = this._composeMaterial?.uniforms;
+    if (!u?.uTodEnabled) return;
+    const st = this._timelineGradeState ?? { enabled: false };
+    const enabled = st.enabled === true;
+    u.uTodEnabled.value = enabled ? 1.0 : 0.0;
+    u.uTodTimelineInWater.value = (enabled && this._applyTimelineGradeInWater) ? 1.0 : 0.0;
+    if (!enabled) return;
+    const g = st.global ?? {};
+    const i = st.interior ?? {};
+    u.uTodGlobalExposure.value = Number(g.exposure) || 0;
+    u.uTodGlobalSaturation.value = Number(g.saturation) ?? 1;
+    if (g.tintColor && u.uTodGlobalTintColor?.value?.set) {
+      u.uTodGlobalTintColor.value.set(g.tintColor.r ?? 1, g.tintColor.g ?? 1, g.tintColor.b ?? 1);
+    }
+    u.uTodInteriorExposure.value = Number(i.exposure) || 0;
+    u.uTodInteriorSaturation.value = Number(i.saturation) ?? 1;
+    if (i.tintColor && u.uTodInteriorTintColor?.value?.set) {
+      u.uTodInteriorTintColor.value.set(i.tintColor.r ?? 1, i.tintColor.g ?? 1, i.tintColor.b ?? 1);
+    }
   }
 
   _wantsSpecularBloomMrt() {
@@ -4046,7 +4031,7 @@ static getControlSchema() {
   }
 
   /**
-   * Handle floor change — swap active water SDF data.
+   * Handle floor change — swap active water mask data.
    * @param {number} maxFloorIndex
    */
   onFloorChange(maxFloorIndex) {
@@ -4223,7 +4208,7 @@ static getControlSchema() {
    * Full dispose — call on scene teardown.
    */
   dispose() {
-    // Dispose per-floor water data (mask RTs, SDF textures, raw masks)
+    // Dispose per-floor water data (mask RTs, packed textures, raw masks)
     this._disposeFloorWater();
     this._waterTiles = [];
     this._hasAnyWaterData = false;
@@ -4250,8 +4235,6 @@ static getControlSchema() {
     this._noiseTexture = null;
 
     // Dispose GPU JFA / water-data packing resources
-    try { this._visionSDF?.dispose?.(); } catch (_) {}
-    this._visionSDF = null;
     try { this._waterDataPackMaterial?.dispose?.(); } catch (_) {}
     try { this._waterDataPackQuad?.geometry?.dispose?.(); } catch (_) {}
     this._waterDataPackScene = null;
@@ -4401,7 +4384,6 @@ static getControlSchema() {
       uHasWaterData:       { value: waterData ? 1.0 : 0.0 },
       uWaterEnabled:       { value: this.enabled ? 1.0 : 0.0 },
       uCrossSliceWaterData: { value: 0.0 },
-      uUseSdfMask:         { value: p.useSdfMask === false ? 0.0 : 1.0 },
       tWaterRawMask:       { value: waterRawMask ?? fallbacks.black },
       uHasWaterRawMask:    { value: waterRawMask ? 1.0 : 0.0 },
       uWaterRawMaskThreshold: {
@@ -4742,6 +4724,9 @@ static getControlSchema() {
       uHasCombinedShadow:  { value: 0.0 },
       uMurkShadowEnabled:  { value: p.murkShadowEnabled ? 1.0 : 0.0 },
       uMurkShadowStrength: { value: p.murkShadowStrength },
+      tPaintedShadowLit:     { value: fallbacks?.white ?? null },
+      uHasPaintedShadowLit:  { value: 0.0 },
+      uPaintedShadowOpacity: { value: 1.0 },
 
       // Faux bathymetry (Beer-Lambert volumetric params)
       uBathymetryEnabled:         { value: p.bathymetryEnabled ? 1.0 : 0.0 },
@@ -4765,6 +4750,14 @@ static getControlSchema() {
       uSkyColor:        { value: new THREE.Vector3(0.5, 0.6, 0.8) },
       uSkyIntensity:    { value: 0.5 },
       uSceneDarkness:   { value: 0.0 },
+      uTodTimelineInWater: { value: 0.0 },
+      uTodEnabled: { value: 0.0 },
+      uTodGlobalExposure: { value: 0.0 },
+      uTodGlobalSaturation: { value: 1.0 },
+      uTodGlobalTintColor: { value: new THREE.Vector3(1, 1, 1) },
+      uTodInteriorExposure: { value: 0.0 },
+      uTodInteriorSaturation: { value: 1.0 },
+      uTodInteriorTintColor: { value: new THREE.Vector3(1, 1, 1) },
       uActiveLevelElevation: { value: 0.0 },
       uFloorDepthBlurWaterSoft: { value: 0.0 },
       

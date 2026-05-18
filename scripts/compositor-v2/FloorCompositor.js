@@ -93,6 +93,7 @@ import { PlayerLightEffectV2 } from './effects/PlayerLightEffectV2.js';
 import { SmellyFliesEffect } from '../particles/SmellyFliesEffect.js';
 import { CandleFlamesEffectV2 } from './effects/CandleFlamesEffectV2.js';
 import { weatherController } from '../core/WeatherController.js';
+import { LightingDirector } from '../core/LightingDirector.js';
 import { resolveCompositorOutdoorsTexture } from '../masks/resolve-compositor-outdoors.js';
 import { MaskBindingController } from '../masks/mask-binding-controller.js';
 import { MaskDebugOverlayPass } from './MaskDebugOverlayPass.js';
@@ -3203,7 +3204,9 @@ export class FloorCompositor {
     const buildingTex = (this._buildingShadowEffect?.params?.enabled)
       ? (this._buildingShadowEffect.shadowFactorTexture ?? null)
       : null;
-    const paintedTex = (this._paintedShadowEffect?.params?.enabled)
+    const sceneFloorCountForShadow = window.MapShine?.floorStack?.getFloors?.()?.length ?? 0;
+    const omitPaintedFromCombined = sceneFloorCountForShadow > 1;
+    const paintedTex = (this._paintedShadowEffect?.params?.enabled && !omitPaintedFromCombined)
       ? (this._paintedShadowEffect.shadowFactorTexture ?? null)
       : null;
     const skyReachTex = (this._skyReachShadowEffect?.params?.enabled)
@@ -3329,6 +3332,11 @@ export class FloorCompositor {
       return;
     }
 
+    // Single source of truth for darkness / sun / time-of-day for the frame.
+    // Computed once here so every downstream effect agrees on the same value;
+    // see scripts/core/LightingDirector.js for the merge rules.
+    try { LightingDirector.update(); } catch (_) {}
+
     try {
       this._treeEffect?.setBillboardShadowMode?.(false);
       this._bushEffect?.setBillboardShadowMode?.(false);
@@ -3443,7 +3451,7 @@ export class FloorCompositor {
         this._lastOutdoorsSignature = null;
         window.MapShine?.sceneComposer?._sceneMaskCompositor?.syncActiveFloorFromFloorStack?.();
         // Level-context hooks can update FloorStack before _applyCurrentFloorVisibility
-        // runs; rebind water textures/settings so uUseSdfMask and packed masks match.
+        // runs; rebind water textures/settings so packed masks match.
         try { this._waterEffect?.onFloorChange?.(stackIdx); } catch (_) {}
       }
     } catch (_) {}
@@ -3540,8 +3548,16 @@ export class FloorCompositor {
       // positions are current when the bus scene is drawn this frame.
       this._profileEffectCall('weatherParticles', 'update', () => this._weatherParticles?.update?.(timeInfo), 'WeatherParticlesV2 update');
       this._profileEffectCall('water', 'update', () => this._waterEffect?.update?.(timeInfo), 'WaterEffectV2 update');
+      try {
+        this._skyColorEffect?.setColorCorrectionTimelineActive?.(
+          this._colorCorrectionEffect?.params?.todTimelineEnabled === true
+        );
+      } catch (_) {}
       this._profileEffectCall('skyColor', 'update', () => this._skyColorEffect.update(timeInfo), 'SkyColorEffectV2 update');
-      const skyIntensity01 = Number(this._skyColorEffect?._composeMaterial?.uniforms?.uIntensity?.value);
+      const skyIntensity01 = Number(
+        this._skyColorEffect?.currentSkyIntensity01
+        ?? this._skyColorEffect?._composeMaterial?.uniforms?.uIntensity?.value
+      );
       const weatherEnv = weatherController?.getEnvironment?.() ?? null;
       const sceneDarknessRaw = Number(canvas?.scene?.environment?.darknessLevel);
       const envDarknessRaw = Number(canvas?.environment?.darknessLevel);
@@ -3578,6 +3594,11 @@ export class FloorCompositor {
         }
       } catch (_) {}
       this._profileEffectCall('colorCorrection', 'update', () => this._colorCorrectionEffect.update(timeInfo), 'ColorCorrectionEffectV2 update');
+      try {
+        this._waterEffect?.setTimelineGradeState?.(
+          this._colorCorrectionEffect?.getTimelineGradeState?.(),
+        );
+      } catch (_) {}
       this._profileEffectCall('filter', 'update', () => this._filterEffect.update(timeInfo), 'FilterEffectV2 update');
       this._profileEffectCall('atmosphericFog', 'update', () => this._atmosphericFogEffect.update(timeInfo), 'AtmosphericFogEffectV2 update');
       this._profileEffectCall('fogOfWar', 'update', () => this._fogEffect.update(timeInfo), 'FogOfWarEffectV2 update');
@@ -3822,13 +3843,22 @@ export class FloorCompositor {
     const smCombinedTex = this._shadowManagerEffect?.combinedShadowTexture ?? null;
     const combinedShadowTex = smCombinedTex ?? cloudShadowTexLegacy;
     const combinedShadowRawTex = this._shadowManagerEffect?.combinedShadowRawTexture ?? combinedShadowTex;
-    const paintedShadowLitTex = (smCombinedTex != null && resolveEffectEnabled(this._paintedShadowEffect) && this._paintedShadowEffect?.params?.enabled)
+    const omitPaintedFromCombined = (window.MapShine?.floorStack?.getFloors?.()?.length ?? 0) > 1;
+    const paintedShadowEnabled = resolveEffectEnabled(this._paintedShadowEffect)
+      && this._paintedShadowEffect?.params?.enabled;
+    const paintedShadowLitTex = paintedShadowEnabled
       ? (this._paintedShadowEffect.shadowFactorTexture ?? null)
       : null;
+    const paintedGroundOnlyLitTex = (omitPaintedFromCombined && paintedShadowEnabled)
+      ? (this._paintedShadowEffect?.groundOnlyLitTexture ?? null)
+      : null;
+    const paintedShadowAtAndAboveLitTex = null;
+    const paintedShadowInCombined = !omitPaintedFromCombined;
     const paintedShadowMgrOpacity = Number.isFinite(Number(this._shadowManagerEffect?.params?.paintedOpacity))
       ? Math.max(0, Math.min(1, Number(this._shadowManagerEffect.params.paintedOpacity)))
       : 1.0;
-    const buildingShadowTexForLighting = smCombinedTex != null ? null : buildingShadowTex;
+    // Lighting compose samples building+painted separately for structural-vs-sky ambient (still unified for combine).
+    const buildingShadowTexForLighting = buildingShadowTex;
     const buildingShadowOpacity = Number.isFinite(this._buildingShadowEffect?.params?.opacity)
       ? this._buildingShadowEffect.params.opacity : 0.75;
     const overheadShadowTexLegacy = (!_disableOverheadInLighting && resolveEffectEnabled(this._overheadShadowEffect))
@@ -3859,7 +3889,10 @@ export class FloorCompositor {
       combinedShadowTex,
       combinedShadowRawTex,
       paintedShadowLitTex,
+      paintedGroundOnlyLitTex,
+      paintedShadowAtAndAboveLitTex,
       paintedShadowMgrOpacity,
+      paintedShadowInCombined,
       buildingShadowTex,
       buildingShadowTexForLighting,
       buildingShadowOpacity,
@@ -4982,6 +5015,7 @@ export class FloorCompositor {
       this._waterEffect?.setOutdoorsMask?.(waterOutdoorsTex);
       this._skyColorEffect?.setOutdoorsMask?.(skyOutdoorsFinal);
       this._skyColorEffect?.setSkyReachMask?.(skyReachTex);
+      this._colorCorrectionEffect?.setOutdoorsMask?.(outdoorsTex);
       this._filterEffect?.setOutdoorsMask?.(outdoorsTex);
       this._atmosphericFogEffect?.setOutdoorsMask?.(outdoorsTex);
       this._overheadShadowEffect?.setOutdoorsMask?.(outdoorsTex);
@@ -5820,6 +5854,7 @@ export class FloorCompositor {
     cloudShadowTexLegacy = null,
     buildingShadowTex = null,
     overheadShadowTexLegacy = null,
+    waterDataFloorIndex = null,
   } = {}) {
     const water = this._waterEffect;
     if (!water) return;
@@ -5827,12 +5862,40 @@ export class FloorCompositor {
     const smCombined = (resolveEffectEnabled(sm) && sm?.combinedShadowTexture)
       ? sm.combinedShadowTexture
       : null;
+    const sceneFloorCount = window.MapShine?.floorStack?.getFloors?.()?.length ?? 0;
+    const omitPaintedFromCombined = sceneFloorCount > 1;
+    let paintedLitTex = null;
+    let paintedOpacity = 1.0;
+    const ps = this._paintedShadowEffect;
+    if (
+      omitPaintedFromCombined
+      && resolveEffectEnabled(ps)
+      && ps?.params?.enabled
+    ) {
+      const fi = Number.isFinite(Number(waterDataFloorIndex))
+        ? Math.max(0, Math.floor(Number(waterDataFloorIndex)))
+        : 0;
+      if (fi <= 0) {
+        paintedLitTex = ps.groundOnlyLitTexture ?? ps.shadowFactorTexture ?? null;
+      } else if (typeof ps.renderLitForSingleFloor === 'function') {
+        try {
+          paintedLitTex = ps.renderLitForSingleFloor(this.renderer, fi);
+        } catch (_) {
+          paintedLitTex = ps.shadowFactorTexture ?? null;
+        }
+      } else {
+        paintedLitTex = ps.shadowFactorTexture ?? null;
+      }
+      const po = Number(sm?.params?.paintedOpacity);
+      paintedOpacity = Number.isFinite(po) ? Math.max(0, Math.min(1, po)) : 1.0;
+    }
     try {
       if (smCombined) {
         water.setShadowManagerCombinedTexture?.(smCombined);
       } else {
         water.setShadowManagerCombinedTexture?.(null);
       }
+      water.setPaintedShadowLitTexture?.(paintedLitTex, paintedOpacity);
       water.setCloudShadowTexture?.(cloudShadowTexLegacy ?? null);
       water.setBuildingShadowTexture?.(buildingShadowTex ?? null);
       water.setOverheadShadowTexture?.(overheadShadowTexLegacy ?? null);
@@ -5860,7 +5923,10 @@ export class FloorCompositor {
       combinedShadowTex,
       combinedShadowRawTex,
       paintedShadowLitTex,
+      paintedGroundOnlyLitTex,
+      paintedShadowAtAndAboveLitTex,
       paintedShadowMgrOpacity,
+      paintedShadowInCombined,
       buildingShadowTex,
       buildingShadowTexForLighting = buildingShadowTex,
       buildingShadowOpacity,
@@ -5883,6 +5949,12 @@ export class FloorCompositor {
     // and rebuilt different packed-water textures / slice binding.
     const sceneFloorCount = floorStack?.getFloors?.()?.length ?? visibleFloors.length;
     const usePostMergeWater = sceneFloorCount > 1;
+    // Phase 2 (Linear HDR refactor): ColorCorrection, AtmosphericFog, and Bloom now
+    // run once on the merged composite, never per-level. The pre-Phase-2 stacked
+    // timeline overlay path (`useStackedTimelineCc`, `setSuppressTimelineInPass`,
+    // `renderTimelineOverlay`) has been removed — multi-floor and single-floor both
+    // go through the single post-composite CC pass, fed with a stacked outdoors mask
+    // when multiple floors are visible.
     const dbgWaterOcc = _alphaIsoDebug?.disableWaterOccluder;
     const _disableWaterOccluder = dbgWaterOcc === true;
     const floorsByIndex = new Map(
@@ -6036,6 +6108,13 @@ export class FloorCompositor {
         // Lighting composes screen-space occlusion/window terms using gl_FragCoord.
         // Keep this pass unscissored so elevated/parallax overhead pixels outside the
         // ground-projected scene rect still receive correct scene lighting.
+        const paintedForLevel = !paintedShadowInCombined
+          ? (levelIndex > 0
+            ? (this._paintedShadowEffect?.renderLitForSingleFloor?.(this.renderer, levelIndex)
+              ?? paintedShadowAtAndAboveLitTex
+              ?? paintedShadowLitTex)
+            : (paintedGroundOnlyLitTex ?? paintedShadowLitTex))
+          : paintedShadowLitTex;
         this._profileEffectCall('lighting', 'render', () => {
           withoutSceneScissor(this.renderer, () => {
             this._lightingEffect.render(
@@ -6050,7 +6129,9 @@ export class FloorCompositor {
               ceilingTransmittanceTex,
               overheadRoofRestrictLightTex,
               combinedShadowTex, combinedShadowRawTex,
-              paintedShadowLitTex, paintedShadowMgrOpacity,
+              paintedForLevel, paintedShadowMgrOpacity,
+              paintedShadowAtAndAboveLitTex,
+              paintedShadowInCombined,
             );
           });
         }, 'LightingEffectV2 render');
@@ -6132,6 +6213,7 @@ export class FloorCompositor {
               cloudShadowTexLegacy,
               buildingShadowTex,
               overheadShadowTexLegacy,
+              waterDataFloorIndex: waterDataFloorIndex,
             });
           }, 'WaterEffectV2 shadow bind');
           try {
@@ -6167,45 +6249,14 @@ export class FloorCompositor {
         this._bloomEffect?.setWaterSpecularBloomTexture?.(wt ?? null);
       } catch (_) {}
 
-      // User color correction after water so foam/spec/tint are graded with the scene (no extra pass).
-      if (resolveEffectEnabled(this._colorCorrectionEffect)) {
-        const ccOut = (currentInput === levelPostA) ? levelPostB : levelPostA;
-        this._profileEffectCall('colorCorrection', 'render', () => {
-          withSceneScissor(this.renderer, () => {
-            this._colorCorrectionEffect.render(this.renderer, currentInput, ccOut);
-          });
-        }, 'ColorCorrectionEffectV2 render');
-        currentInput = ccOut;
-      }
+      // Phase 2: ColorCorrection, AtmosphericFog, and Bloom moved out of the
+      // per-level loop. They now run once on the merged composite after
+      // LevelCompositePass so multi-floor alpha blending is mathematically
+      // correct and the camera-grade stage is energy-conserving.
 
       // Distortion (fire heat haze): skipped per-level because aux-pass
       // caching in DistortionManager assumes one render per frame. Applied
       // once globally after composite in the late pass section.
-
-      // Atmospheric fog
-      if (resolveEffectEnabled(this._atmosphericFogEffect)) {
-        const fogOut = (currentInput === levelPostA) ? levelPostB : levelPostA;
-        let fogWrote = false;
-        this._profileEffectCall('atmosphericFog', 'render', () => {
-          fogWrote = withSceneScissor(this.renderer, () =>
-            this._atmosphericFogEffect.render(this.renderer, this.camera, currentInput, fogOut)
-          );
-        }, 'AtmosphericFogEffectV2 render');
-        if (fogWrote) currentInput = fogOut;
-      }
-
-      // Bloom — intentionally NOT scissored. UnrealBloomPass internally
-      // binds a mip pyramid of progressively smaller render targets;
-      // a screen-space scissor rect would be wrong for those sub-RTs
-      // (and likely degenerate at the smallest mips). Profile separately
-      // before introducing per-mip scissor support.
-      if (resolveEffectEnabled(this._bloomEffect)) {
-        const bloomOut = (currentInput === levelPostA) ? levelPostB : levelPostA;
-        this._profileEffectCall('bloom', 'render', () => {
-          this._bloomEffect.render(this.renderer, currentInput, bloomOut);
-        }, 'BloomEffectV2 render');
-        currentInput = bloomOut;
-      }
 
       // Sharpen
       if (resolveEffectEnabled(this._sharpenEffect)) {
@@ -6363,7 +6414,7 @@ export class FloorCompositor {
     /** Merged composite lives in `_postA`; post-merge water may write `_postB`. */
     let mergedCompositeOut = this._postA;
     // Post-merge water composites onto an already user–CC'd merge (CC ran per slice before
-    // composite). Procedural water sits on top without a second CC pass — rare vs single-floor.
+    // composite). Timeline CC runs once after water via stacked _Outdoors (multi-floor).
     if (usePostMergeWater && !_skipWaterPass && resolveEffectEnabled(this._waterEffect)) {
       const activeFloor = floorStack?.getActiveFloor?.();
       const ai = Number.isFinite(Number(activeFloor?.index))
@@ -6454,6 +6505,7 @@ export class FloorCompositor {
               cloudShadowTexLegacy,
               buildingShadowTex,
               overheadShadowTexLegacy,
+              waterDataFloorIndex: Number.isFinite(dataFloor) && dataFloor >= 0 ? dataFloor : ai,
             });
           }, 'WaterEffectV2 postMerge shadow bind');
           this._profileEffectCall('water.postMerge.deckMask', 'render', () => {
@@ -6477,9 +6529,108 @@ export class FloorCompositor {
       }, 'WaterEffectV2 postMerge render');
       if (_profiling) this._recordPassTiming('postMerge_water', _profileT0);
       if (postMergeWaterWrote) mergedCompositeOut = this._postB;
-      try { this._bloomEffect?.setWaterSpecularBloomTexture?.(null); } catch (_) {}
+      // NOTE: clearing the water specular bloom texture happens after the
+      // post-composite bloom pass below — otherwise the moved-out bloom call
+      // would see a null specular contribution.
       try { this._waterEffect?.clearLevelContext?.(); } catch (_) {}
       restoreWaterOutdoorsForDataFloor(dataFloor);
+    }
+
+    // ── Phase 2: Global post-composite HDR → LDR chain ─────────────────────
+    // The merged composite is still linear HDR (lighting pass emits unclamped
+    // linear values; SkyColor is ambient-only; per-level CC/Fog/Bloom no longer
+    // run). Apply Fog → Bloom → ColorCorrection once on the merged frame.
+    //
+    // ColorCorrection is now the sole owner of exposure, white balance, ToD
+    // timeline, vignette, grain, and tone mapping (HDR → LDR boundary).
+    // DynamicExposureManager probes via `getInputTexture()` which returns the
+    // RT passed into the CC `render` call — i.e. the post-bloom HDR scene —
+    // giving the eye-adaptation probe true photometric brightness.
+
+    const _pickOtherPost = () =>
+      (mergedCompositeOut === this._postA) ? this._postB : this._postA;
+
+    // Atmospheric fog (post-composite)
+    if (resolveEffectEnabled(this._atmosphericFogEffect)) {
+      const fogOut = _pickOtherPost();
+      let fogWrote = false;
+      if (_profiling) _profileT0 = performance.now();
+      this._profileEffectCall('atmosphericFog.postMerge', 'render', () => {
+        fogWrote = withSceneScissor(this.renderer, () =>
+          this._atmosphericFogEffect.render(
+            this.renderer, this.camera, mergedCompositeOut, fogOut,
+          ),
+        );
+      }, 'AtmosphericFogEffectV2 postMerge render');
+      if (_profiling) this._recordPassTiming('postMerge_atmosphericFog', _profileT0);
+      if (fogWrote) mergedCompositeOut = fogOut;
+    }
+
+    // Bloom (post-composite, unscissored). Operates on true HDR luminance now;
+    // threshold may need tuning per scene (Phase rebalance task).
+    if (resolveEffectEnabled(this._bloomEffect)) {
+      const bloomOut = _pickOtherPost();
+      if (_profiling) _profileT0 = performance.now();
+      this._profileEffectCall('bloom.postMerge', 'render', () => {
+        this._bloomEffect.render(this.renderer, mergedCompositeOut, bloomOut);
+      }, 'BloomEffectV2 postMerge render');
+      if (_profiling) this._recordPassTiming('postMerge_bloom', _profileT0);
+      mergedCompositeOut = bloomOut;
+    }
+    // Now that bloom has consumed the water specular bloom texture (if any),
+    // clear it so the next frame starts clean.
+    try { this._bloomEffect?.setWaterSpecularBloomTexture?.(null); } catch (_) {}
+
+    // Color correction (post-composite, single grade owner).
+    if (resolveEffectEnabled(this._colorCorrectionEffect)) {
+      // Build the per-frame stacked outdoors mask so the single CC pass can
+      // apply interior/exterior ToD splits accurately on the flat composite.
+      let outdoorsForCc = null;
+      try {
+        const maskCompositor = window.MapShine?.sceneComposer?._sceneMaskCompositor ?? null;
+        const floorKeys = visibleFloors
+          .map((f) => (f?.compositorKey != null ? String(f.compositorKey) : ''))
+          .filter((k) => k.length > 0);
+        if (maskCompositor && floorKeys.length > 1) {
+          if (_profiling) _profileT0 = performance.now();
+          this._profileEffectCall('cc.stackedOutdoors', 'render', () => {
+            try {
+              outdoorsForCc = maskCompositor.composeStackedOutdoorsMask?.(
+                this.renderer,
+                floorKeys,
+              ) ?? null;
+            } catch (_) {
+              outdoorsForCc = null;
+            }
+          }, 'GpuSceneMaskCompositor stacked outdoors');
+          if (_profiling) this._recordPassTiming('postMerge_stackedOutdoors', _profileT0);
+        }
+      } catch (_) {}
+      // Single-floor fallback: use the active outdoors mask already synced for the frame.
+      if (!outdoorsForCc) outdoorsForCc = this._lastOutdoorsTexture ?? null;
+
+      const ccOut = _pickOtherPost();
+      if (_profiling) _profileT0 = performance.now();
+      this._profileEffectCall('colorCorrection.postMerge', 'render', () => {
+        withSceneScissor(this.renderer, () => {
+          try {
+            if (outdoorsForCc) {
+              this._colorCorrectionEffect.setOutdoorsMask(outdoorsForCc);
+            }
+            this._colorCorrectionEffect.render(
+              this.renderer, mergedCompositeOut, ccOut,
+            );
+          } finally {
+            try {
+              if (this._lastOutdoorsTexture) {
+                this._colorCorrectionEffect.setOutdoorsMask(this._lastOutdoorsTexture);
+              }
+            } catch (_) {}
+          }
+        });
+      }, 'ColorCorrectionEffectV2 postMerge render');
+      if (_profiling) this._recordPassTiming('postMerge_colorCorrection', _profileT0);
+      mergedCompositeOut = ccOut;
     }
 
     // Expose per-level diagnostics on MapShine for console inspection

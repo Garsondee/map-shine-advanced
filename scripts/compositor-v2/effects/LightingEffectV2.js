@@ -27,16 +27,25 @@
  *     “gate on every floor” (can mis-mask downstairs).
  *
  * Cloud shadow IS integrated: a shadow factor texture (1.0=lit, 0.0=shadowed)
- * is passed in from CloudEffectV2 and multiplies totalIllumination so the scene
- * darkens under cloud cover. Lights still punch through (they add on top of the
- * shadow-dimmed ambient rather than being gated by it).
+ * multiplies ambient in the compose pass. Structural building+painted occlusion
+ * additionally scales the HDR light-buffer contribution (direct + colouration) so
+ * wide AmbientLights cannot shine through those shadows; gameplay-scale lights clear
+ * that occlusion via structural shadow override.
  *
- * Structural shadows (overhead / building / painted) are normally pre-multiplied
- * by ShadowManagerV2 into the combined shadow RT consumed as `tUnifiedShadowFactor`; the compose pass dims ambient once.
- * Painted shadow is split back out so lift/influence apply only to non-painted terms.
- * A separate `tBuildingShadow` multiply runs only when combined shadow is
- * unavailable (legacy wiring), matching the gated overhead legacy path — not in
- * addition to combined, which would double-apply building darkening.
+ * Structural shadows (overhead / building / painted) are pre-multiplied by
+ * ShadowManagerV2 into the combined shadow RT consumed as
+ * `tUnifiedShadowFactor`; the compose pass dims ambient once. Painted shadow
+ * is split back out so lift/influence apply only to non-painted terms.
+ * Building shadow is also sampled separately (`tBuildingShadowLit`) so outdoor
+ * daylight ambient can respect structural occlusion when unified shadow is lifted.
+ * Legacy per-effect fallbacks (`tOverheadShadow`, cloud-only) were removed —
+ * ShadowManagerV2 owns the combined factor.
+ *
+ * **Point light gain (`lightIntensity`):** Applied in {@link ThreeLightSource} fragment
+ * output (`uComposeLightGain`) before additive `_lightRT` accumulation. Compose reads the
+ * buffer without a second multiply so filter overlap and half-float bleed are not amplified
+ * as a fullscreen gain. Torch / flashlight {@link ThreeLightSource} instances are updated
+ * from here each frame/when params change. Window glow is unchanged.
  *
  * @module compositor-v2/effects/LightingEffectV2
  */
@@ -51,6 +60,7 @@ import {
   getFoundrySunlightFactor,
 } from '../../core/foundry-time-phases.js';
 import { getAuthoritativeAmbientLightDocuments } from '../../foundry/ambient-light-documents.js';
+import { LightingDirector } from '../../core/LightingDirector.js';
 
 const log = createLogger('LightingEffectV2');
 const MODULE_ID = 'map-shine-advanced';
@@ -123,29 +133,29 @@ export class LightingEffectV2 {
        * Legacy single scale (hidden). Superseded by ambientDayScale / ambientNightScale;
        * still loaded from old saves so {@link #_seedAmbientFromLegacyGlobalIfNeeded} can migrate.
        */
-      globalIllumination: 1.3,
+      globalIllumination: 0,
       /** Scales Foundry ambient brightest colour at darkness 0 (noon / bright scenes). */
-      ambientDayScale: 1.3,
+      ambientDayScale: 0,
       /** Scales Foundry ambient darkness colour at darkness 1 (night). */
-      ambientNightScale: 1.3,
-      lightIntensity: 0.25,
+      ambientNightScale: 0,
+      lightIntensity: 2,
       /** Scales the minimum illumination floor under darkness (see compose shader). */
-      minIlluminationScale: 1.0,
-      colorationStrength: 1.0,
+      minIlluminationScale: 0,
+      colorationStrength: 3.7,
       /** Extra coupling of surface albedo luma into the tint path only. */
-      colorationReflectivity: 1.0,
+      colorationReflectivity: 0.95,
       /**
        * Pre-tint saturation on the RGB light buffer (0 = neutral, >0 richer chroma for tint).
        * Does not re-introduce white boost alone; achromatic lights stay gated by chroma weight.
        */
-      colorationSaturation: 0.0,
+      colorationSaturation: 0.4,
       /** Curve on chroma detection: >1 requires more saturated lights before full tint. */
-      colorationChromaCurve: 1.0,
+      colorationChromaCurve: 0.25,
       /**
        * Mix toward legacy behaviour: 0 = tint only from saturated (non-grey) RGB, 1 = ignore chroma gate
        * (old “full RGB” colouration, can double-count white with luminance).
        */
-      colorationAchromaticMix: 0.0,
+      colorationAchromaticMix: 1.0,
       wallInsetPx: 6.0,
       upperFloorTransmissionEnabled: false,
       upperFloorTransmissionStrength: 0.6,
@@ -161,27 +171,37 @@ export class LightingEffectV2 {
       lightAnimWindInfluence: 1.0,
       lightAnimOutdoorPower: 2.0,
       darknessLevel: 0.0,
-      negativeDarknessStrength: 1.0,
-      darknessPunchGain: 2.0,
+      negativeDarknessStrength: 2.0,
+      darknessPunchGain: 0,
       /**
-       * Optional tone curve on the lighting pass output (None recommended if Colour Correction
-       * tone mapping is already enabled).
+       * Deprecated. Retained only for legacy save compatibility; the lighting pass now always
+       * outputs linear HDR. Tone mapping is owned exclusively by `ColorCorrectionEffectV2`.
+       * These values are force-coerced to None/1.0 in `_syncStaticParamUniforms`.
        */
       composeToneMapping: 0,
       composeToneExposure: 1.0,
-      /** Multiplies building-shadow opacity when applied to ambient in this pass (0 = off). */
-      ambientBuildingShadowMix: 1.0,
       /**
        * Amplifies darkness from the unified combined shadow texture (1 = as authored,
        * up to 10 = treat subtle penumbra as much deeper shadow for tuning).
        */
-      combinedShadowEffectStrength: 1.0,
+      combinedShadowEffectStrength: 4,
       /** How much cloud / combined shadow darkens ambient here (0 = ignore, 1 = full). */
       cloudShadowAmbientInfluence: 1.0,
       /** Scales overhead shadow strength on ambient only (0 = off). */
       overheadShadowAmbientInfluence: 1.0,
       /** How strongly dynamic lights neutralize ambient shadow darkening (0 = off, 1 = full). */
-      dynamicLightShadowOverrideStrength: 0.65,
+      dynamicLightShadowOverrideStrength: 0,
+      /**
+       * Outdoor daylight ambient slice (calendar day × low Foundry darkness): weight applied so
+       * building+painted shadow resists lifts that flatten unified shadow; shadow override still clears both.
+       */
+      structuralSunAmbientOcclusion: 1.0,
+      /**
+       * Multiplies HDR light-buffer output (direct white channel + additive tint path) by
+       * building×painted structural lit texture. Gameplay-scale lights clear via structural
+       * shadow override only. 0 = legacy (fills and tints bypass structural shadow).
+       */
+      directStructuralOcclusionStrength: 1.0,
       /** Internal render scale for source lights RT (1.0 = full resolution). */
       internalLightResolutionScale: 1.0,
       /** Internal render scale for window glow RT (1.0 = full resolution). */
@@ -685,6 +705,7 @@ export class LightingEffectV2 {
     if (!this.params || !Object.prototype.hasOwnProperty.call(this.params, paramId)) return;
     this.params[paramId] = value;
     this._paramsDirty = true;
+    if (paramId === 'lightIntensity') this._pushComposeLightGainToFoundryMeshes();
   }
 
   /** @private */
@@ -705,20 +726,23 @@ export class LightingEffectV2 {
 
     u.uAmbientDayScale.value = Math.max(0, Number(this.params.ambientDayScale) || 0);
     u.uAmbientNightScale.value = Math.max(0, Number(this.params.ambientNightScale) || 0);
-    u.uLightIntensity.value = this.params.lightIntensity;
     u.uMinIlluminationScale.value = Math.max(0, Number(this.params.minIlluminationScale) || 0);
     u.uColorationStrength.value = this.params.colorationStrength;
     u.uColorationReflectivity.value = Math.max(0, Number(this.params.colorationReflectivity) || 0);
     u.uColorationSaturation.value = Number(this.params.colorationSaturation) || 0;
     u.uColorationChromaCurve.value = Math.max(0.001, Number(this.params.colorationChromaCurve) || 1);
     u.uColorationAchromaticMix.value = clamp01(Number(this.params.colorationAchromaticMix) || 0);
-    const toneMode = Math.max(0, Math.min(2, Math.round(Number(this.params.composeToneMapping) || 0)));
-    if (this._composeToneMappingMode !== toneMode) {
-      this._composeToneMappingMode = toneMode;
-      this._composeMaterial.defines.COMPOSE_TONEMAP_MODE = toneMode;
+    // Linear HDR refactor (Phase 0): the lighting pass must emit unclamped linear light.
+    // Tone mapping is owned by ColorCorrectionEffectV2; we hard-coerce these to safe values
+    // regardless of stored params so legacy scenes that set ACES/Reinhard here stop double-applying.
+    this.params.composeToneMapping = 0;
+    this.params.composeToneExposure = 1.0;
+    if (this._composeToneMappingMode !== 0) {
+      this._composeToneMappingMode = 0;
+      this._composeMaterial.defines.COMPOSE_TONEMAP_MODE = 0;
       this._composeMaterial.needsUpdate = true;
     }
-    u.uComposeToneExposure.value = Math.max(0, Number(this.params.composeToneExposure) || 1);
+    u.uComposeToneExposure.value = 1.0;
     u.uCombinedShadowEffectStrength.value = Math.max(
       1.0,
       Math.min(10.0, Number(this.params.combinedShadowEffectStrength) || 1.0)
@@ -726,6 +750,8 @@ export class LightingEffectV2 {
     u.uCloudShadowAmbientInfluence.value = clamp01(Number(this.params.cloudShadowAmbientInfluence) ?? 1);
     u.uOverheadShadowAmbientInfluence.value = clamp01(Number(this.params.overheadShadowAmbientInfluence) ?? 1);
     u.uDynamicLightShadowOverrideStrength.value = clamp01(Number(this.params.dynamicLightShadowOverrideStrength) ?? 0.65);
+    u.uStructuralSunAmbientOcclusion.value = clamp01(Number(this.params.structuralSunAmbientOcclusion) ?? 1.0);
+    u.uDirectStructuralOcclusionStrength.value = clamp01(Number(this.params.directStructuralOcclusionStrength) ?? 1.0);
     u.uNegativeDarknessStrength.value = this.params.negativeDarknessStrength;
     u.uDarknessPunchGain.value = this.params.darknessPunchGain;
     u.uInteriorDarkness.value = Math.max(0, Number(this.params.interiorDarkness) || 0);
@@ -886,26 +912,41 @@ export class LightingEffectV2 {
   static getControlSchema() {
     return {
       enabled: true,
+      help: {
+        title: 'Light Physics',
+        summary: [
+          'This panel controls linear HDR light transport: Foundry point lights, ambient day/night fill, and shadow occlusion.',
+          'It does not own exposure, brightness, or tone mapping. Use Camera Grade for the HDR to LDR look.',
+          'Shadows dim ambient/sky light. Point lights are preserved so torches and lamps create readable pools at night.'
+        ].join('\n\n'),
+        glossary: {
+          'Day ambient': 'Foundry ambientBrightest at low darkness; drives bright noon readability.',
+          'Night ambient': 'Foundry ambientDarkness at high darkness; keep lower for deeper nights.',
+          'Point light gain':
+            'Multiplies AmbientLight/torch emission in ThreeLightSource before `_lightRT` accumulation. Compose no longer rescales that buffer fullscreen (which lit areas with overlap/residue rather than authored lamp geometry only). Window glow unaffected.',
+          'Minimum light floor': 'Safety floor that prevents pure-black collapse without replacing actual lights.'
+        },
+      },
       groups: [
         {
           name: 'ambientFloor',
-          label: 'Ambient & minimum floor',
+          label: 'Ambient light (linear HDR)',
           type: 'folder',
           expanded: true,
           parameters: ['ambientDayScale', 'ambientNightScale', 'minIlluminationScale'],
         },
         {
           name: 'dynamicLuma',
-          label: 'Dynamic lights (luminance)',
+          label: 'Point lights',
           type: 'folder',
           expanded: true,
           parameters: ['lightIntensity'],
         },
         {
           name: 'surfaceTint',
-          label: 'Surface tint (RGB light buffer)',
+          label: 'Colored light on surfaces',
           type: 'folder',
-          expanded: true,
+          expanded: false,
           parameters: [
             'colorationStrength',
             'colorationReflectivity',
@@ -915,28 +956,22 @@ export class LightingEffectV2 {
           ],
         },
         {
-          name: 'composeTonemap',
-          label: 'Lighting pass tone map',
-          type: 'folder',
-          expanded: false,
-          parameters: ['composeToneMapping', 'composeToneExposure'],
-        },
-        {
           name: 'ambientShadowMix',
-          label: 'Ambient shadow mixing',
+          label: 'Ambient occlusion from shadows',
           type: 'folder',
           expanded: false,
           parameters: [
-            'ambientBuildingShadowMix',
             'combinedShadowEffectStrength',
             'cloudShadowAmbientInfluence',
             'overheadShadowAmbientInfluence',
             'dynamicLightShadowOverrideStrength',
+            'structuralSunAmbientOcclusion',
+            'directStructuralOcclusionStrength',
           ],
         },
         {
           name: 'occlusion',
-          label: 'Occlusion',
+          label: 'Roof / floor occlusion',
           type: 'folder',
           expanded: false,
           parameters: [
@@ -948,14 +983,14 @@ export class LightingEffectV2 {
         },
         {
           name: 'darkness',
-          label: 'Darkness response',
+          label: 'Advanced darkness response',
           type: 'folder',
           expanded: false,
           parameters: ['interiorDarkness', 'negativeDarknessStrength', 'darknessPunchGain'],
         },
         {
           name: 'lightAnim',
-          label: 'Light animation',
+          label: 'Advanced light animation',
           type: 'folder',
           expanded: false,
           parameters: ['lightAnimWindInfluence', 'lightAnimOutdoorPower'],
@@ -968,7 +1003,7 @@ export class LightingEffectV2 {
           min: 0,
           max: 2,
           step: 0.1,
-          default: 1.3,
+          default: 0,
           label: 'Illumination scale (legacy)',
           hidden: true,
           tooltip: 'Deprecated: use Day ambient and Night ambient. Kept so old module data still loads.',
@@ -978,44 +1013,53 @@ export class LightingEffectV2 {
           min: 0,
           max: 3.5,
           step: 0.05,
-          default: 1.3,
+          default: 0,
           label: 'Day ambient (noon)',
           tooltip: 'Scales Foundry “ambient brightest” at low darkness only. Raise for brighter midday without lifting night.',
         },
         ambientNightScale: {
           type: 'slider',
           min: 0,
-          max: 3.5,
+          max: 2,
           step: 0.05,
-          default: 1.3,
+          default: 0,
           label: 'Night ambient fill',
-          tooltip: 'Scales Foundry “ambient darkness” at high darkness. Lower for deeper night while keeping day bright.',
+          tooltip: 'Scales Foundry ambientDarkness at high darkness. Keep below day ambient so nights stay dark/desaturated while point lights remain important.',
         },
         minIlluminationScale: {
           type: 'slider',
           min: 0,
           max: 3,
           step: 0.05,
-          default: 1.0,
+          default: 0,
           label: 'Minimum light floor',
           tooltip: 'Scales the darkest-scene safety floor so interiors never clip to pure black.',
         },
-        lightIntensity: { type: 'slider', min: 0, max: 2, step: 0.05, default: 0.25, label: 'Light intensity' },
+        lightIntensity: {
+          type: 'slider',
+          min: 0,
+          max: 2,
+          step: 0.05,
+          default: 2,
+          label: 'Point light gain',
+          tooltip:
+            'Emission multiplier on Foundry lamp meshes (`uComposeLightGain`) before `_lightRT` accumulation; compose reads the RT as-is so buffer overlap or noise does not get a second brightness pass. Torch/flash meshes follow the same value. Separate from Window glow / Day-night ambient.',
+        },
         colorationStrength: {
           type: 'slider',
           min: 0,
-          max: 40,
+          max: 8,
           step: 0.05,
-          default: 1.0,
+          default: 3.7,
           label: 'Tint strength',
-          tooltip: 'How strongly coloured light tints surfaces (achromatic / white lights are excluded by default).',
+          tooltip: 'How strongly saturated lamp colors tint surfaces. This is not exposure; white/neutral lights are excluded by default.',
         },
         colorationReflectivity: {
           type: 'slider',
           min: 0,
           max: 2,
           step: 0.05,
-          default: 1.0,
+          default: 0.95,
           label: 'Tint vs albedo',
           tooltip: 'Couples tint to surface brightness (albedo luma); lower flattens tint on dark pixels.',
         },
@@ -1024,7 +1068,7 @@ export class LightingEffectV2 {
           min: -1,
           max: 2,
           step: 0.05,
-          default: 0.0,
+          default: 0.4,
           label: 'Tint input saturation',
           tooltip: 'Pre-boosts chroma in the light buffer before tint (0 = as rendered).',
         },
@@ -1033,7 +1077,7 @@ export class LightingEffectV2 {
           min: 0.25,
           max: 4,
           step: 0.05,
-          default: 1.0,
+          default: 0.25,
           label: 'Chroma sharpness',
           tooltip: 'Higher values need more saturated lamp colours before tint reaches full strength.',
         },
@@ -1042,44 +1086,37 @@ export class LightingEffectV2 {
           min: 0,
           max: 1,
           step: 0.05,
-          default: 0.0,
+          default: 1.0,
           label: 'Neutral light bleed',
           tooltip: 'Blends toward legacy behaviour where white lights also drove the tint path (can brighten greys).',
         },
         composeToneMapping: {
           type: 'list',
-          label: 'Tone mapping',
-          options: { None: 0, 'ACES Filmic': 1, Reinhard: 2 },
+          label: 'Tone mapping (deprecated)',
+          options: { None: 0 },
           default: 0,
-          tooltip: 'Applied at the end of the lighting pass. Prefer None if Colour Correction already tone maps.',
+          hidden: true,
+          tooltip: 'Deprecated: lighting pass always outputs linear HDR. Tone mapping is owned by Color Correction.',
         },
         composeToneExposure: {
           type: 'slider',
-          min: 0.25,
-          max: 4,
-          step: 0.05,
-          default: 1.0,
-          label: 'Tone-map exposure',
-          tooltip: 'Linear gain before tone mapping (only when tone mapping is not None).',
-        },
-        ambientBuildingShadowMix: {
-          type: 'slider',
-          min: 0,
+          min: 1,
           max: 1,
           step: 0.05,
           default: 1.0,
-          label: 'Building shadow on ambient',
-          tooltip: 'Scales how much baked building shadow darkens ambient illumination in this pass.',
+          label: 'Tone-map exposure (deprecated)',
+          hidden: true,
+          tooltip: 'Deprecated: forced to 1.0. Use Color Correction exposure instead.',
         },
         combinedShadowEffectStrength: {
           type: 'slider',
           min: 1,
-          max: 10,
+          max: 4,
           step: 0.05,
-          default: 1.0,
+          default: 4,
           label: 'Combined shadow strength',
           tooltip:
-            'Multiplies how dark the unified shadow reads on ambient (1 = default, 10 = up to 10× deeper penumbra). Also drives Sky Color shadow-aware grading.',
+            'Amplifies unified shadow darkness on ambient only (1 = authored, 4 = very deep). Strong lights can still clear shadow override on structural paths.',
         },
         cloudShadowAmbientInfluence: {
           type: 'slider',
@@ -1104,9 +1141,30 @@ export class LightingEffectV2 {
           min: 0,
           max: 1,
           step: 0.05,
-          default: 0.65,
+          default: 0,
           label: 'Dynamic light shadow override',
-          tooltip: 'Lifts cloud/combined/overhead ambient shadows under strong dynamic lighting (player torch/flashlight and other lights).',
+          tooltip:
+            'Clears ambient shadow near bright gameplay lights (torch/flashlight). Uses stricter sensing than older builds so faint HDRI-style fill does not erase building/painted shadows; strong lights still lift.',
+        },
+        structuralSunAmbientOcclusion: {
+          type: 'slider',
+          min: 0,
+          max: 1,
+          step: 0.05,
+          default: 1.0,
+          label: 'Structural shadow vs sky/day fill',
+          tooltip:
+            'For outdoor pixels under daylight: building + painted shadows stay darker than unified ambient lifts alone (minimum of unified shadow and structural occlusion). Dynamic shadow override still clears structural shadows near torches/player lights. Set to 0 for legacy behaviour.',
+        },
+        directStructuralOcclusionStrength: {
+          type: 'slider',
+          min: 0,
+          max: 1,
+          step: 0.05,
+          default: 1.0,
+          label: 'Structural occlusion on HDR lights',
+          tooltip:
+            'Darkens the Foundry HDR light accumulation (ambient disks/torches/colour spill) wherever building+painted shadows are dark. Strong gameplay lights clear this via Structural shadow override. Set to 0 to restore fills that bypass structural shadows entirely.',
         },
         wallInsetPx: { type: 'slider', min: 0, max: 40, step: 0.5, default: 6.0, label: 'Wall Inset (px)' },
         restrictRoofScreenLightOcclusionToTopFloor: {
@@ -1128,8 +1186,8 @@ export class LightingEffectV2 {
         },
         lightAnimWindInfluence: { type: 'slider', min: 0, max: 3, step: 0.05, default: 1.0, label: 'Wind Influence' },
         lightAnimOutdoorPower: { type: 'slider', min: 0, max: 6, step: 0.25, default: 2.0, label: 'Outdoor Power' },
-        negativeDarknessStrength: { type: 'slider', min: 0, max: 3, step: 0.1, default: 1.0, label: 'Negative Darkness Strength' },
-        darknessPunchGain: { type: 'slider', min: 0, max: 10, step: 0.1, default: 2.0, label: 'Darkness Punch Gain' },
+        negativeDarknessStrength: { type: 'slider', min: 0, max: 3, step: 0.1, default: 2.0, label: 'Negative Darkness Strength' },
+        darknessPunchGain: { type: 'slider', min: 0, max: 10, step: 0.1, default: 0, label: 'Darkness Punch Gain' },
       }
     };
   }
@@ -1207,22 +1265,23 @@ export class LightingEffectV2 {
         // Cloud shadow: factor texture from CloudEffectV2 (1.0=lit, 0.0=shadowed).
         // Multiplies totalIllumination so ambient dims under clouds while dynamic
         // lights (which add on top) still punch through the shadow.
-        // Unified cloud/combined shadow factors: only one path is active per frame.
-        // (Mutually exclusive legacy cloud vs ShadowManager tCombined — shares texture units.)
+        // Unified shadow factor from ShadowManagerV2: the single occlusion
+        // input to the lighting compose pass.
+        // Building shadow lit texture (scene UV): recomposed for structural-vs-day-ambient split.
+        tBuildingShadowLit: { value: null },
+        uHasBuildingShadowLit: { value: 0 },
         tUnifiedShadowFactor: { value: null },
         tUnifiedShadowRaw: { value: null },
         uHasShadowRaw: { value: 0 },
         uHasCombinedShadow: { value: 0 },
-        uHasCloudShadow: { value: 0 },
         // compose so dynamic-light lift / cloud ambient influence do not erase artistic shadow.
         tPaintedShadowLit: { value: null },
         uHasPaintedShadowLit: { value: 0 },
+        tPaintedShadowAtAndAboveLit: { value: null },
+        uHasPaintedShadowAtAndAboveLit: { value: 0 },
         uPaintedShadowMgrOpacity: { value: 1.0 },
-        // Building shadow: greyscale factor from BuildingShadowsEffectV2.
-        // Legacy-only when uHasCombinedShadow is off (combined already includes building).
-        tBuildingShadow:     { value: null },
-        uHasBuildingShadow:  { value: 0 },
-        uBuildingShadowOpacity: { value: 0.75 },
+        uLightingPaintedFloorIndex: { value: 0 },
+        uPaintedShadowInCombined: { value: 1.0 },
         tOverheadRoofAlpha: { value: null },
         uHasOverheadRoofAlpha: { value: 0 },
         tOverheadRoofBlock: { value: null },
@@ -1232,11 +1291,6 @@ export class LightingEffectV2 {
         // Foundry canvas dimensions (includes padding). Matches CloudEffectV2.
         // Used to convert Three world Y-up into Foundry world Y-down.
         uSceneDimensions: { value: new THREE.Vector2(1, 1) },
-        // Overhead shadow: per-frame screen-space shadow from OverheadShadowsEffectV2.
-        // Sampled directly at vUv (screen-space RT). Dims ambient only.
-        tOverheadShadow:     { value: null },
-        uHasOverheadShadow:  { value: 0 },
-        uOverheadShadowOpacity: { value: 1.0 },
         // World-space UV reconstruction for building shadow sampling.
         // The bake RT is in scene UV space (0..1 = scene rect in Foundry world coords).
         // To sample it correctly, reconstruct world XY per fragment from the
@@ -1260,9 +1314,8 @@ export class LightingEffectV2 {
         uCalendarDayWeight:  { value: 0.0 },
         uAmbientBrightest:   { value: new THREE.Color(1, 1, 1) },
         uAmbientDarkness:    { value: new THREE.Color(0.141, 0.141, 0.282) },
-        uAmbientDayScale:   { value: 1.3 },
-        uAmbientNightScale: { value: 1.3 },
-        uLightIntensity:     { value: 0.25 },
+        uAmbientDayScale:    { value: 1.3 },
+        uAmbientNightScale:  { value: 0.85 },
         uMinIlluminationScale: { value: 1.0 },
         uColorationStrength: { value: 1.0 },
         uColorationReflectivity: { value: 1.0 },
@@ -1274,6 +1327,8 @@ export class LightingEffectV2 {
         uCloudShadowAmbientInfluence: { value: 1.0 },
         uOverheadShadowAmbientInfluence: { value: 1.0 },
         uDynamicLightShadowOverrideStrength: { value: 0.65 },
+        uStructuralSunAmbientOcclusion: { value: 1.0 },
+        uDirectStructuralOcclusionStrength: { value: 1.0 },
         uNegativeDarknessStrength: { value: 1.0 },
         uDarknessPunchGain:        { value: 2.0 },
         uInteriorDarkness:         { value: 0.0 },
@@ -1284,7 +1339,6 @@ export class LightingEffectV2 {
         // uAllowRoofGate there — compose must still suppress leaks onto water/lower views).
         uApplyRoofOcclusionToSources: { value: 1.0 },
         uApplyRoofOcclusionToWindow:  { value: 0.0 },
-        uApplyRoofOcclusionToBuilding: { value: 1.0 },
         // _Outdoors mask (scene UV): gate roof/tree *light* occlusion so interior
         // pixels under overhead stamps still receive Foundry lights (see fragment).
         tOutdoorsForRoofLight: { value: null },
@@ -1318,13 +1372,15 @@ export class LightingEffectV2 {
         uniform sampler2D tUnifiedShadowRaw;
         uniform float uHasShadowRaw;
         uniform float uHasCombinedShadow;
-        uniform float uHasCloudShadow;
+        uniform sampler2D tBuildingShadowLit;
+        uniform float uHasBuildingShadowLit;
         uniform sampler2D tPaintedShadowLit;
         uniform float uHasPaintedShadowLit;
+        uniform sampler2D tPaintedShadowAtAndAboveLit;
+        uniform float uHasPaintedShadowAtAndAboveLit;
         uniform float uPaintedShadowMgrOpacity;
-        uniform sampler2D tBuildingShadow;
-        uniform float uHasBuildingShadow;
-        uniform float uBuildingShadowOpacity;
+        uniform float uLightingPaintedFloorIndex;
+        uniform float uPaintedShadowInCombined;
         uniform sampler2D tOverheadRoofAlpha;
         uniform float uHasOverheadRoofAlpha;
         uniform sampler2D tOverheadRoofBlock;
@@ -1340,16 +1396,12 @@ export class LightingEffectV2 {
         uniform vec2 uBldViewCorner11;
         uniform vec2 uBldSceneOrigin;
         uniform vec2 uBldSceneSize;
-        uniform sampler2D tOverheadShadow;
-        uniform float uHasOverheadShadow;
-        uniform float uOverheadShadowOpacity;
         uniform float uDarknessLevel;
         uniform float uCalendarDayWeight;
         uniform vec3 uAmbientBrightest;
         uniform vec3 uAmbientDarkness;
         uniform float uAmbientDayScale;
         uniform float uAmbientNightScale;
-        uniform float uLightIntensity;
         uniform float uMinIlluminationScale;
         uniform float uColorationStrength;
         uniform float uColorationReflectivity;
@@ -1361,6 +1413,8 @@ export class LightingEffectV2 {
         uniform float uCloudShadowAmbientInfluence;
         uniform float uOverheadShadowAmbientInfluence;
         uniform float uDynamicLightShadowOverrideStrength;
+        uniform float uStructuralSunAmbientOcclusion;
+        uniform float uDirectStructuralOcclusionStrength;
         uniform float uNegativeDarknessStrength;
         uniform float uDarknessPunchGain;
         uniform float uInteriorDarkness;
@@ -1368,7 +1422,6 @@ export class LightingEffectV2 {
         uniform float uHasSkyOcclusion;
         uniform float uApplyRoofOcclusionToSources;
         uniform float uApplyRoofOcclusionToWindow;
-        uniform float uApplyRoofOcclusionToBuilding;
         uniform sampler2D tOutdoorsForRoofLight;
         uniform float uHasOutdoorsForRoofLight;
         uniform float uOutdoorsForRoofLightFlipY;
@@ -1413,8 +1466,8 @@ export class LightingEffectV2 {
           vec3 srcLights = max(srcSample.rgb, vec3(0.0));
           vec3 winLights = max(texture2D(tLightWindow, vUv).rgb, vec3(0.0));
           float darknessMask = clamp(texture2D(tDarkness, vUv).r, 0.0, 1.0);
+          float ambientShadowMixOut = 1.0;
 
-          float master = max(uLightIntensity, 0.0);
           float baseDarknessLevel = clamp(uDarknessLevel, 0.0, 1.0);
 
           // Ambient: interpolate between day and night based on darkness level.
@@ -1576,23 +1629,22 @@ export class LightingEffectV2 {
           float visRestrict = min(stampedVis, 1.0 - restrictLightRoof);
           visS = mix(visS, visRestrict, restrictLightRoof);
           visW = mix(visW, visRestrict, restrictLightRoof);
-          vec3 safeLights = srcLights * visS + winLights * visW;
-          // White/direct illumination channel:
-          // - Foundry lights: read from accumulated alpha (luminosity-aware in ThreeLightSource)
-          // - Window light: continue deriving from RGB
-          float srcWhite = max(srcSample.a, 0.0) * visS;
+          vec3 srcSafe = srcLights * visS;
+          vec3 winSafe = winLights * visW;
+          // Foundry HDR buffer already carries lightIntensity via ThreeLightSource uComposeLightGain;
+          // no second multiply here (that lifted every texel with buffer energy).
+          float c = max(srcSample.a, 0.0) * visS;
           float winWhite = max(max(winLights.r, winLights.g), winLights.b) * visW;
-          float lightI = max(srcWhite, winWhite);
-          float lightIVisible = lightI;
-          vec3 directLight = vec3(lightIVisible) * master;
+          float lightIVisible = max(c, winWhite);
+          vec3 directLight = vec3(c + winWhite);
 
           // Darkness punch: strong nearby lights reduce the effective darkness
           // level locally, letting the ambient brighten under torches/lamps.
-          float lightTermI = max(lightIVisible * master, 0.0);
+          float lightTermI = max(lightIVisible, 0.0);
           // Shadow override should react as soon as gameplay lights are visibly present.
           // Use a lower activation band than darkness-punch so torch/flashlight beams
           // can clear shadows instead of being visibly darkened by them.
-          float dynamicLightPresence = smoothstep(0.015, 0.22, max(lightIVisible, lightTermI));
+          float dynamicLightPresence = smoothstep(0.015, 0.22, lightIVisible);
           float dynamicShadowLift = clamp(
             dynamicLightPresence * clamp(uDynamicLightShadowOverrideStrength, 0.0, 1.0),
             0.0,
@@ -1600,10 +1652,17 @@ export class LightingEffectV2 {
           );
           // ShadowManager combined factor multiplies overhead × building × painted × sky-reach × …
           // Sky-reach and other subtle terms vanish if we clear shadow from baseline energy in
-          // tLightSources the same way we clear for a torch. Use a stricter band for this path only.
-          float dynamicLightPresenceCombined = smoothstep(0.14, 0.58, max(lightIVisible, lightTermI));
+          // tLightSources the same way we clear for a torch. Use a stricter band for this path only
+          // so faint HDR accumulation from wide AmbientLights does not erase structural shadows.
+          float dlPresenceNormComb = lightIVisible;
+          float dynamicLightPresenceCombined = smoothstep(0.34, 0.78, dlPresenceNormComb);
           float dynamicShadowLiftCombined = clamp(
             dynamicLightPresenceCombined * clamp(uDynamicLightShadowOverrideStrength, 0.0, 1.0),
+            0.0,
+            1.0
+          );
+          float dynamicShadowLiftStructural = clamp(
+            smoothstep(0.52, 0.93, dlPresenceNormComb) * clamp(uDynamicLightShadowOverrideStrength, 0.0, 1.0),
             0.0,
             1.0
           );
@@ -1636,19 +1695,35 @@ export class LightingEffectV2 {
           // tScene includes additive specular; litColor = baseColor * totalIllumination. If we
           // crush ambientAfterDark on interiors while directLight is only moderate, totalIllumination
           // stays low and specular highlights (already in baseColor) read flat. Fade interior
-          // crush where the same dynamic channel used for darkness punch is strong (Foundry
-          // srcSample.a and window whites, scaled by uLightIntensity).
+          // crush where the HDR light buffer reads strong on this pixel (Foundry + window whites).
           // Keep suppression for bright direct-light overlap, but avoid fully
           // flattening interior darkness under moderate baseline illumination.
           float interiorDarkLightSuppression = smoothstep(0.12, 0.65, lightTermI);
           float indoorConfidenceForDim = indoorConfidence * (1.0 - interiorDarkLightSuppression);
           ambientAfterDark *= max(0.0, 1.0 - uInteriorDarkness * indoorConfidenceForDim);
 
-          // Total illumination = ambient (after darkness) + dynamic lights.
-          vec3 totalIllumination = ambientAfterDark + directLight;
+          // Building × painted lit texture (scene UV): shared by daylight ambient slice, direct HDR occlusion, additive tint path.
+          float buildStructU = (uHasBuildingShadowLit > 0.5)
+            ? clamp(texture2D(tBuildingShadowLit, sceneUvFoundry).r, 0.0, 1.0)
+            : 1.0;
+          float paintedStructU = 1.0;
+          if (uHasPaintedShadowLit > 0.5) {
+            float pbStrU = clamp(texture2D(tPaintedShadowLit, sceneUvFoundry).r, 0.0, 1.0);
+            float pApplyStrU = pbStrU;
+            if (uHasPaintedShadowAtAndAboveLit > 0.5 && uLightingPaintedFloorIndex > 0.5) {
+              pApplyStrU = clamp(texture2D(tPaintedShadowAtAndAboveLit, sceneUvFoundry).r, 0.0, 1.0);
+            }
+            paintedStructU = mix(1.0, pApplyStrU, clamp(uPaintedShadowMgrOpacity, 0.0, 1.0));
+          }
+          float coreStructUnified = clamp(buildStructU * paintedStructU, 0.0, 1.0);
+          float coreStructLiftedGlobal = mix(coreStructUnified, 1.0, dynamicShadowLiftStructural);
+          float structuralDirectMul = mix(1.0, coreStructLiftedGlobal, clamp(uDirectStructuralOcclusionStrength, 0.0, 1.0));
+          vec3 attenuatedDirect = directLight * structuralDirectMul;
 
-          // Unified shadow path: cloud + overhead composition from ShadowManagerV2.
-          // Dynamic lights are NOT gated so torches/lamps still punch through.
+          vec3 totalIllumination = ambientAfterDark + attenuatedDirect;
+
+          // Unified shadow path: ShadowManagerV2 combine dims ambient here. The HDR direct
+          // channel uses structuralDirectMul (building×painted); strong lights clear it.
           if (uHasCombinedShadow > 0.5) {
             float shadowFactor = clamp(texture2D(tUnifiedShadowFactor, vUv).r, 0.0, 1.0);
             if (uHasShadowRaw > 0.5 && uHasOverheadRoofAlpha > 0.5) {
@@ -1661,108 +1736,64 @@ export class LightingEffectV2 {
               shadowFactor = mix(shadowFactor, rawShadowFactor, rawMix);
             }
             shadowFactor = amplifyCombinedShadowLit(shadowFactor, uCombinedShadowEffectStrength);
-            // ShadowManagerV2 combines overhead * building * painted * cloud as one product.
-            // Split off painted so dynamic-light lift (and cloud ambient influence) only relax
-            // geometric/cloud shadow — painted shadow stays as authored on outdoor pixels.
+            // Multi-floor: painted is NOT in ShadowManager combine — apply per-level only.
+            // Single-floor: split painted out of combined for cloud lift / dynamic-light.
             float paintedEffective = 1.0;
-            if (uHasPaintedShadowLit > 0.5) {
-              float paintedBase = clamp(texture2D(tPaintedShadowLit, sceneUvFoundry).r, 0.0, 1.0);
-              paintedEffective = mix(1.0, paintedBase, clamp(uPaintedShadowMgrOpacity, 0.0, 1.0));
+            float shadowFactorMix;
+            if (uPaintedShadowInCombined < 0.5 && uHasPaintedShadowLit > 0.5) {
+              float paintedApply = clamp(texture2D(tPaintedShadowLit, sceneUvFoundry).r, 0.0, 1.0);
+              paintedEffective = mix(1.0, paintedApply, clamp(uPaintedShadowMgrOpacity, 0.0, 1.0));
+              shadowFactorMix = mix(
+                1.0,
+                shadowFactor,
+                clamp(uCloudShadowAmbientInfluence, 0.0, 1.0)
+              );
+              shadowFactorMix = mix(shadowFactorMix, 1.0, dynamicShadowLiftCombined);
+              shadowFactorMix *= paintedEffective;
+            } else {
+              float paintedBaked = 1.0;
+              if (uHasPaintedShadowLit > 0.5) {
+                paintedBaked = clamp(texture2D(tPaintedShadowLit, sceneUvFoundry).r, 0.0, 1.0);
+                float paintedApply = paintedBaked;
+                if (uHasPaintedShadowAtAndAboveLit > 0.5 && uLightingPaintedFloorIndex > 0.5) {
+                  paintedApply = clamp(texture2D(tPaintedShadowAtAndAboveLit, sceneUvFoundry).r, 0.0, 1.0);
+                }
+                paintedEffective = mix(1.0, paintedApply, clamp(uPaintedShadowMgrOpacity, 0.0, 1.0));
+              }
+              float nonPaintedShadow = clamp(
+                shadowFactor / max(paintedBaked, 0.0001),
+                0.0,
+                1.0
+              );
+              shadowFactorMix = mix(
+                1.0,
+                nonPaintedShadow,
+                clamp(uCloudShadowAmbientInfluence, 0.0, 1.0)
+              );
+              shadowFactorMix = mix(shadowFactorMix, 1.0, dynamicShadowLiftCombined);
+              shadowFactorMix *= paintedEffective;
             }
-            float nonPaintedShadow = clamp(
-              shadowFactor / max(paintedEffective, 0.0001),
+            float shadowSunSlice = min(shadowFactorMix, coreStructLiftedGlobal);
+            float wSkySunSlice = clamp(
+              (1.0 - baseDarknessLevel)
+                * calendarDayWeight
+                * isOutdoorForInteriorDimSafe
+                * clamp(uStructuralSunAmbientOcclusion, 0.0, 1.0),
               0.0,
               1.0
             );
-            float shadowFactorMix = mix(
-              1.0,
-              nonPaintedShadow,
-              clamp(uCloudShadowAmbientInfluence, 0.0, 1.0)
-            );
-            shadowFactorMix = mix(shadowFactorMix, 1.0, dynamicShadowLiftCombined);
-            shadowFactorMix *= paintedEffective;
-            vec3 ambientPortion = ambientAfterDark;
-            totalIllumination = ambientPortion * shadowFactorMix + directLight;
+            vec3 ambSkySunPortion = ambientAfterDark * wSkySunSlice;
+            vec3 ambRestPortion = ambientAfterDark * (1.0 - wSkySunSlice);
+            vec3 ambientPortionLit = ambSkySunPortion * shadowSunSlice + ambRestPortion * shadowFactorMix;
+            totalIllumination = ambientPortionLit + attenuatedDirect;
+            ambientShadowMixOut = shadowFactorMix;
           }
 
-          // Legacy cloud-only path: dims the ambient component only.
-          // Dynamic lights are NOT gated so torches/lamps still punch through clouds.
-          if (uHasCombinedShadow < 0.5 && uHasCloudShadow > 0.5) {
-            float shadowFactor = clamp(texture2D(tUnifiedShadowFactor, vUv).r, 0.0, 1.0);
-            // On outdoor pixels under overhead capture, prefer raw cloud (moving
-            // shadows on rooftops). Indoors, keep masked cloud only — roof alpha
-            // still stamps ceilings in screen space on upper floors.
-            if (uHasShadowRaw > 0.5 && uHasOverheadRoofAlpha > 0.5) {
-              float rawShadowFactor = clamp(texture2D(tUnifiedShadowRaw, vUv).r, 0.0, 1.0);
-              float roofAlpha = roofAlphaCached;
-              float rawMix = roofAlpha * isOutdoorForInteriorDimSafe;
-              shadowFactor = mix(shadowFactor, rawShadowFactor, rawMix);
-            }
-            shadowFactor = amplifyCombinedShadowLit(shadowFactor, uCombinedShadowEffectStrength);
-            float shadowFactorMixC = mix(
-              1.0,
-              shadowFactor,
-              clamp(uCloudShadowAmbientInfluence, 0.0, 1.0)
-            );
-            shadowFactorMixC = mix(shadowFactorMixC, 1.0, dynamicShadowLiftCombined);
-            // Only dim the ambient portion; keep dynamic-light additive intact.
-            vec3 ambientPortion = ambientAfterDark;
-            totalIllumination = ambientPortion * shadowFactorMixC + directLight;
-          }
-
-          // Building shadow (legacy path only): dims only the ambient component.
-          // When unified combined shadow is bound, ShadowManagerV2 already multiplied
-          // building into the combined factor — do not apply tBuildingShadow again.
-          // World-stable UV reconstruction: vUv maps 0..1 across the viewport.
-          // Reconstruct world XY by lerping the camera frustum corners, then
-          // normalise by scene rect to get scene UV (0..1 = scene rect).
-          // This matches CloudEffectV2's uViewBoundsMin/Max approach exactly.
-          if (uHasCombinedShadow < 0.5 && uHasBuildingShadow > 0.5) {
-            // BuildingShadowsEffectV2 outputs scene-space UV aligned with sceneUvFoundry.
-            float bldShadow = clamp(texture2D(tBuildingShadow, sceneUvFoundry).r, 0.0, 1.0);
-            // Guard scene padding / outside-scene pixels: do NOT clamp-sample edge texels
-            // from tBuildingShadow there, otherwise dark bands appear at map borders.
-            bldShadow = mix(1.0, bldShadow, inSceneBounds);
-
-            float shadowMix = mix(1.0, bldShadow, uBuildingShadowOpacity);
-            // Suppress building shadow where visible overhead roof pixels exist.
-            // Use alpha primarily (with RGB fallback) so live roof fade opacity
-            // can smoothly attenuate this suppression.
-            if (uHasOverheadRoofAlpha > 0.5) {
-              float roofAlpha = roofAlphaCached;
-              float roofSuppress = mix(0.0, roofAlpha, clamp(uApplyRoofOcclusionToBuilding, 0.0, 1.0));
-              shadowMix = mix(shadowMix, 1.0, roofSuppress);
-            }
-            // Dynamic lights should neutralize building-shadow darkening where
-            // the receiver is strongly lit (player torch/flashlight and other lights).
-            shadowMix = mix(shadowMix, 1.0, dynamicShadowLift);
-            // Apply only to ambient contribution; dynamic lights punch through.
-            vec3 ambientComponent = totalIllumination - directLight;
-            ambientComponent *= shadowMix;
-            totalIllumination = ambientComponent + directLight;
-          }
-
-          // Overhead shadow: screen-space shadow from overhead tiles.
-          // RGB carries roof/fluid-tinted shadow factor, alpha carries tile-projection factor.
-          // Dims ambient only — dynamic lights punch through.
-          if (uHasCombinedShadow < 0.5 && uHasOverheadShadow > 0.5) {
-            vec4 ovSample = texture2D(tOverheadShadow, vUv);
-            vec3 ovShadowRgb = clamp(ovSample.rgb, vec3(0.0), vec3(1.0));
-            float tileProjectionFactor = clamp(ovSample.a, 0.0, 1.0);
-            vec3 combinedShadowFactor = ovShadowRgb * tileProjectionFactor;
-            float ovAmt = clamp(uOverheadShadowOpacity, 0.0, 1.0)
-              * clamp(uOverheadShadowAmbientInfluence, 0.0, 1.0);
-            vec3 ovMix = mix(vec3(1.0), combinedShadowFactor, ovAmt);
-            ovMix = mix(ovMix, vec3(1.0), dynamicShadowLift);
-            vec3 ambientComp = totalIllumination - directLight;
-            ambientComp *= ovMix;
-            totalIllumination = ambientComp + directLight;
-          }
-
-          // Minimum illumination floor to prevent pure black.
+          // Minimum illumination floor (scaled down where unified shadow darkens ambient so penumbra survives).
           vec3 minIllum = mix(ambientDay, ambientNight, localDarknessLevel)
             * (0.1 * max(uMinIlluminationScale, 0.0));
-          totalIllumination = max(totalIllumination, minIllum);
+          float floorReach = clamp(ambientShadowMixOut, 0.0, 1.0);
+          totalIllumination = max(totalIllumination, minIllum * mix(0.18, 1.0, floorReach));
 
           // Apply illumination to albedo.
           vec3 litColor = baseColor.rgb * totalIllumination;
@@ -1770,30 +1801,28 @@ export class LightingEffectV2 {
           // Colouration: only the chromatic part of the RGB light buffer tints albedo.
           // Luminance for neutral / uncoloured Foundry lights already comes from tLightSources.a
           // (see directLight), so repeating full RGB here used to double-count white light.
+          vec3 lightsForColor = srcSafe + winSafe;
           vec3 lumaW = vec3(0.2126, 0.7152, 0.0722);
-          float lSL = dot(safeLights, lumaW);
+          float lSL = dot(lightsForColor, lumaW);
           vec3 greySL = vec3(lSL);
-          vec3 safeForColor = safeLights;
+          vec3 safeForColor = lightsForColor;
           float csat = uColorationSaturation;
           if (abs(csat) > 1e-5) {
-            safeForColor = clamp(mix(greySL, safeLights, 1.0 + csat), 0.0, 3.5);
+            safeForColor = clamp(mix(greySL, lightsForColor, 1.0 + csat), 0.0, 3.5);
           }
           float lightSat = rgbSaturation(safeForColor);
           float chromaW = pow(max(lightSat, 0.0), max(uColorationChromaCurve, 0.001));
           chromaW = mix(chromaW, 1.0, clamp(uColorationAchromaticMix, 0.0, 1.0));
 
           float reflection = perceivedBrightness(baseColor.rgb) * max(uColorationReflectivity, 0.0);
-          vec3 coloration = safeForColor * master * reflection
-            * max(uColorationStrength, 0.0) * chromaW;
+          vec3 coloration = safeForColor * reflection
+            * max(uColorationStrength, 0.0) * chromaW * structuralDirectMul;
           litColor += coloration;
 
-          vec3 outRgb = litColor * max(uComposeToneExposure, 0.0);
-          #if COMPOSE_TONEMAP_MODE == 1
-            outRgb = ACESFilmicToneMapping(outRgb);
-          #elif COMPOSE_TONEMAP_MODE == 2
-            outRgb = ReinhardToneMapping(outRgb);
-          #endif
-          gl_FragColor = vec4(outRgb, baseColor.a);
+          // Linear HDR output: no clamp, no tone mapping. ColorCorrectionEffectV2 is the
+          // sole owner of exposure and tone curves. uComposeToneExposure is forced to 1.0
+          // upstream; uniform retained only for legacy save compatibility.
+          gl_FragColor = vec4(litColor, baseColor.a);
         }
       `,
       depthTest: false,
@@ -1901,6 +1930,31 @@ export class LightingEffectV2 {
   }
 
   /**
+   * Push `params.lightIntensity` into every AmbientLight `ThreeLightSource` + player torch /
+   * flashlight meshes so `_lightRT` accumulates brighter lamps without a compose multiply.
+   * @private
+   */
+  _pushComposeLightGainToFoundryMeshes() {
+    if (!this._initialized) return;
+    const g = Math.max(0, Number(this.params.lightIntensity));
+    const safe = Number.isFinite(g) ? g : 0;
+    for (let i = 0; i < this._lightList.length; i++) {
+      const light = this._lightList[i];
+      const u = light?.material?.uniforms?.uComposeLightGain;
+      if (u) u.value = safe;
+    }
+    try {
+      const pl = window.MapShine?.playerLightEffectV2;
+      for (const src of [pl?._torchLightSource, pl?._flashlightLightSource]) {
+        const u = src?.material?.uniforms?.uComposeLightGain;
+        if (u) u.value = safe;
+      }
+    } catch (_) {
+      /* noop */
+    }
+  }
+
+  /**
    * Full sync of all Foundry light sources. Call once after canvas is ready.
    */
   syncAllLights() {
@@ -1953,6 +2007,7 @@ export class LightingEffectV2 {
 
     this._lightsSynced = true;
     this._perspectiveRefreshDirty = true;
+    this._pushComposeLightGainToFoundryMeshes();
     log.info(`LightingEffectV2: synced ${this._lights.size} lights, ${this._darknessSources.size} darkness sources`);
   }
 
@@ -1975,7 +2030,10 @@ export class LightingEffectV2 {
    */
   _refreshLightsForLevelsPerspective() {
     if (!this._initialized) return;
-    const sceneDarkness = readFoundryDarkness01();
+    // Phase 3: per-light "is this light visible at the current darkness?"
+    // gating reads the canonical master darkness, so user-selected priority
+    // (calendar/weather/slider/max) consistently drives which torches appear.
+    const sceneDarkness = clamp01(LightingDirector.get().masterDarkness);
 
     for (let i = 0; i < this._lightList.length; i++) {
       const light = this._lightList[i];
@@ -2059,7 +2117,11 @@ export class LightingEffectV2 {
     if (!isLightVisibleForPerspective(doc, pOverride)) return false;
     if (doc.hidden === true) return false;
 
-    const d = clamp01(Number.isFinite(sceneDarkness) ? sceneDarkness : readFoundryDarkness01());
+    const d = clamp01(
+      Number.isFinite(sceneDarkness)
+        ? sceneDarkness
+        : LightingDirector.get().masterDarkness,
+    );
     const darknessRange = doc?.config?.darkness ?? doc?.darkness;
     if (!darknessRange || typeof darknessRange !== 'object') return true;
 
@@ -2236,12 +2298,17 @@ export class LightingEffectV2 {
     const p = this.params;
     const g = p.globalIllumination;
     if (g === undefined || g === null || !Number.isFinite(Number(g))) return;
-    const def = 1.3;
+    const defDay = 0;
+    const defNight = 0;
     const gv = Number(g);
     const day = Number(p.ambientDayScale);
     const night = Number(p.ambientNightScale);
     if (!Number.isFinite(day) || !Number.isFinite(night)) return;
-    if (Math.abs(day - def) < 1e-5 && Math.abs(night - def) < 1e-5 && Math.abs(gv - def) > 1e-5) {
+    if (
+      Math.abs(day - defDay) < 1e-5 &&
+      Math.abs(night - defNight) < 1e-5 &&
+      Math.abs(gv - defDay) > 1e-5
+    ) {
       p.ambientDayScale = gv;
       p.ambientNightScale = gv;
     }
@@ -2262,22 +2329,16 @@ export class LightingEffectV2 {
   }
 
   /**
-   * Darkness 0..1 for ambient day/night mix: Foundry scene, calendar curve, weather.
+   * Darkness 0..1 for ambient day/night mix. Phase 3 delegates this entirely
+   * to {@link LightingDirector}; the legacy in-shader Math.max merge of
+   * Foundry slider + calendar + weather has moved to CPU so every consumer
+   * agrees on a single value per frame.
+   *
    * @returns {number}
    * @private
    */
   _resolveEffectiveSceneDarkness01() {
-    let sceneDarkness = readFoundryDarkness01();
-    const mapHour = this._resolveMapShineTimeOfDayHour();
-    const timeDark = computeTimeOfDayDarkness01(mapHour);
-    if (Number.isFinite(timeDark)) sceneDarkness = Math.max(sceneDarkness, timeDark);
-
-    const wc = window.MapShine?.weatherController;
-    const envState = wc?.getEnvironment?.();
-    const eff = Number(envState?.effectiveDarkness);
-    if (Number.isFinite(eff)) sceneDarkness = Math.max(sceneDarkness, clamp01(eff));
-
-    return clamp01(sceneDarkness);
+    return clamp01(LightingDirector.get().masterDarkness);
   }
 
   /**
@@ -2288,13 +2349,11 @@ export class LightingEffectV2 {
     const u = this._composeMaterial?.uniforms;
     if (!u) return;
 
-    const mapHour = this._resolveMapShineTimeOfDayHour();
-    const sceneDarkness = this._resolveEffectiveSceneDarkness01();
+    const state = LightingDirector.get();
+    const sceneDarkness = clamp01(state.masterDarkness);
     this.params.darknessLevel = sceneDarkness;
     u.uDarknessLevel.value = sceneDarkness;
-    u.uCalendarDayWeight.value = Number.isFinite(mapHour)
-      ? clamp01(getFoundrySunlightFactor(mapHour))
-      : 0.0;
+    u.uCalendarDayWeight.value = clamp01(state.calendarDayWeight);
   }
 
   // ── Per-frame update ──────────────────────────────────────────────────
@@ -2351,8 +2410,11 @@ export class LightingEffectV2 {
 
     this._syncComposeDarknessUniforms();
 
+    // Phase 3: master darkness drives both ambient-light animation
+    // (`light.updateAnimation`) and per-light visibility gating, so a single
+    // value owns the entire ambient-light chain for the frame.
     const sceneDarkness = this.params.darknessLevel;
-    const foundrySceneDarkness = readFoundryDarkness01();
+    const foundrySceneDarkness = sceneDarkness;
     const tSec = (timeInfo && typeof timeInfo.elapsed === 'number') ? timeInfo.elapsed : 0;
 
     // OPTIMIZATION: Array iteration is thousands of times faster than Map.values()
@@ -2510,7 +2572,7 @@ export class LightingEffectV2 {
    * @param {number} [paintedShadowMgrOpacity=1] - ShadowManagerV2 `paintedOpacity`;
    *   must match combine pass when splitting painted from combined shadow.
    */
-  render(renderer, camera, sceneRT, outputRT, windowLightScene = null, cloudShadowTexture = null, cloudShadowRawTexture = null, buildingShadowTexture = null, overheadShadowTexture = null, buildingShadowOpacity = 0.75, overheadRoofAlphaTexture = null, overheadRoofBlockTexture = null, outdoorsMaskTexture = null, ceilingTransmittanceTexture = null, overheadRoofRestrictLightTexture = null, combinedShadowTexture = null, combinedShadowRawTexture = null, paintedShadowLitTexture = null, paintedShadowMgrOpacity = 1.0) {
+  render(renderer, camera, sceneRT, outputRT, windowLightScene = null, cloudShadowTexture = null, cloudShadowRawTexture = null, buildingShadowTexture = null, overheadShadowTexture = null, buildingShadowOpacity = 0.75, overheadRoofAlphaTexture = null, overheadRoofBlockTexture = null, outdoorsMaskTexture = null, ceilingTransmittanceTexture = null, overheadRoofRestrictLightTexture = null, combinedShadowTexture = null, combinedShadowRawTexture = null, paintedShadowLitTexture = null, paintedShadowMgrOpacity = 1.0, paintedShadowAtAndAboveLitTexture = null, paintedShadowInCombined = true) {
     if (!this._initialized || !this._enabled || !sceneRT) return;
     if (!this._lightRT || !this._windowLightRT || !this._darknessRT || !this._composeMaterial) return;
     if (renderer) this._lastCompositorRenderer = renderer;
@@ -2568,11 +2630,6 @@ export class LightingEffectV2 {
       : persp.getRoofScreenOcclusionScale(restrictRoofToTop);
     cu0.uApplyRoofOcclusionToSources.value = occlusionWeight * roofScreenOcclusionScale;
     cu0.uApplyRoofOcclusionToWindow.value = 0.0;
-    const onUppermostMultiFloor = persp.isMultiFloor
-      && renderFloorForOcclusion === persp.topFloorIndex
-      && persp.topFloorIndex > 0;
-    const buildingRoofOcclusionScale = onUppermostMultiFloor ? 0.0 : roofScreenOcclusionScale;
-    cu0.uApplyRoofOcclusionToBuilding.value = buildingRoofOcclusionScale;
 
     // FloorCompositor may invoke render() once per visible level per frame; an earlier pass
     // clears _perspectiveRefreshDirty so later passes must not skip visibility refresh.
@@ -2582,6 +2639,8 @@ export class LightingEffectV2 {
         ? (performance.now() / 1000)
         : 0
     );
+
+    this._pushComposeLightGainToFoundryMeshes();
 
     // ── Pass 1: Accumulate Foundry light mesh contributions ───────────
     // Save camera layer mask — ThreeLightSource meshes live on layer 0.
@@ -2634,17 +2693,17 @@ export class LightingEffectV2 {
     cu.tLightSources.value = this._lightRT.texture;
     cu.tLightWindow.value = this._windowLightRT.texture;
     cu.tDarkness.value = this._darknessRT.texture;
+    // Phase 4: ShadowManagerV2's combined shadow factor is the single shadow
+    // input. The legacy cloud-only path was removed; if combined is absent,
+    // the shader simply applies no shadow term.
     const hasComb = !!combinedShadowTexture;
     cu.uHasCombinedShadow.value = hasComb ? 1 : 0;
-    cu.uHasCloudShadow.value = (!hasComb && !!cloudShadowTexture) ? 1 : 0;
-    cu.tUnifiedShadowFactor.value = combinedShadowTexture ?? cloudShadowTexture ?? null;
-    if (hasComb) {
-      cu.tUnifiedShadowRaw.value = combinedShadowRawTexture ?? null;
-      cu.uHasShadowRaw.value = combinedShadowRawTexture ? 1 : 0;
-    } else {
-      cu.tUnifiedShadowRaw.value = cloudShadowRawTexture ?? null;
-      cu.uHasShadowRaw.value = cloudShadowRawTexture ? 1 : 0;
-    }
+    cu.tUnifiedShadowFactor.value = combinedShadowTexture ?? null;
+    const bTex = buildingShadowTexture ?? null;
+    cu.tBuildingShadowLit.value = bTex;
+    cu.uHasBuildingShadowLit.value = bTex ? 1 : 0;
+    cu.tUnifiedShadowRaw.value = (hasComb ? combinedShadowRawTexture : null) ?? null;
+    cu.uHasShadowRaw.value = (hasComb && combinedShadowRawTexture) ? 1 : 0;
     if (paintedShadowLitTexture) {
       cu.tPaintedShadowLit.value = paintedShadowLitTexture;
       cu.uHasPaintedShadowLit.value = 1;
@@ -2652,35 +2711,23 @@ export class LightingEffectV2 {
       cu.tPaintedShadowLit.value = null;
       cu.uHasPaintedShadowLit.value = 0;
     }
+    if (paintedShadowAtAndAboveLitTexture) {
+      cu.tPaintedShadowAtAndAboveLit.value = paintedShadowAtAndAboveLitTexture;
+      cu.uHasPaintedShadowAtAndAboveLit.value = 1;
+    } else {
+      cu.tPaintedShadowAtAndAboveLit.value = null;
+      cu.uHasPaintedShadowAtAndAboveLit.value = 0;
+    }
     const psmo = Number(paintedShadowMgrOpacity);
     cu.uPaintedShadowMgrOpacity.value = (Number.isFinite(psmo) ? Math.max(0, Math.min(1, psmo)) : 1.0);
-    // View→scene UV uniforms for compose (building shadow + _Outdoors roof-light gate).
+    const litFloorIdx = Number.isFinite(this._renderFloorIndexForLights)
+      ? Number(this._renderFloorIndexForLights)
+      : 0;
+    cu.uLightingPaintedFloorIndex.value = Math.max(0, litFloorIdx);
+    cu.uPaintedShadowInCombined.value = paintedShadowInCombined === false ? 0.0 : 1.0;
+    // View→scene UV uniforms for compose (_Outdoors roof-light gate; building
+    // shadow no longer sampled here — ShadowManagerV2 combines it upstream).
     this._syncViewSceneUniforms(camera);
-
-    if (buildingShadowTexture) {
-      cu.tBuildingShadow.value    = buildingShadowTexture;
-      cu.uHasBuildingShadow.value = 1;
-      const opBase = Number.isFinite(Number(buildingShadowOpacity))
-        ? Math.max(0.0, Math.min(1.0, Number(buildingShadowOpacity)))
-        : 0.75;
-      const ambBld = Number(this.params?.ambientBuildingShadowMix);
-      const bMix = Number.isFinite(ambBld) ? clamp01(ambBld) : 1.0;
-      cu.uBuildingShadowOpacity.value = opBase * bMix;
-
-      if (!this._dbgLoggedBuildingShadowOnce) {
-        this._dbgLoggedBuildingShadowOnce = true;
-        try {
-          log.info('LightingEffectV2 building shadow bind:',
-            'tex', buildingShadowTexture?.uuid || 'ok',
-            '| opacity', cu.uBuildingShadowOpacity.value,
-            '| has', cu.uHasBuildingShadow.value
-          );
-        } catch (_) {}
-      }
-    } else {
-      cu.tBuildingShadow.value    = null;
-      cu.uHasBuildingShadow.value = 0;
-    }
 
     if (outdoorsMaskTexture) {
       this._normalizeOutdoorsMaskTexture(outdoorsMaskTexture);
@@ -2727,15 +2774,8 @@ export class LightingEffectV2 {
       cu.tOverheadRoofRestrictLight.value = null;
       cu.uHasOverheadRoofRestrictLight.value = 0;
     }
-    // Bind overhead shadow texture (screen-space, sampled directly at vUv).
-    if (overheadShadowTexture) {
-      cu.tOverheadShadow.value       = overheadShadowTexture;
-      cu.uHasOverheadShadow.value    = 1;
-      cu.uOverheadShadowOpacity.value = 1.0;
-    } else {
-      cu.tOverheadShadow.value    = null;
-      cu.uHasOverheadShadow.value = 0;
-    }
+    // Phase 4: legacy `tOverheadShadow` binding removed. OverheadShadowsEffectV2
+    // now contributes through ShadowManagerV2's combined shadow texture only.
 
     renderer.setRenderTarget(outputRT);
     renderer.setClearColor(0x000000, 1);

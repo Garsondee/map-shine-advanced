@@ -17,6 +17,7 @@ import {
   resolveV14BackgroundFloorIndexForSrc,
 } from '../../foundry/levels-scene-flags.js';
 import { weatherController } from '../../core/WeatherController.js';
+import { computeSunDirection2D } from '../shadow-system/SunDirection.js';
 import { MAX_INTRA_ROLE_OFFSET, tileAlbedoOrder, tileStackedOverlayOrder } from '../LayerOrderPolicy.js';
 
 const log = createLogger('BushEffectV2');
@@ -1096,16 +1097,9 @@ export class BushEffectV2 {
       x = -Math.sin(azimuthRad);
       y = -Math.cos(azimuthRad) * lat;
     } else {
-      let hour = 12.0;
-      try {
-        if (weatherController && typeof weatherController.timeOfDay === 'number') {
-          hour = weatherController.timeOfDay;
-        }
-      } catch (_) {}
-      const t = (hour % 24.0) / 24.0;
-      const azimuth = (t - 0.5) * Math.PI;
-      x = -Math.sin(azimuth);
-      y = -Math.cos(azimuth) * lat;
+      const sun = computeSunDirection2D(null, null, lat);
+      x = sun.x;
+      y = sun.y;
     }
 
     this._sharedUniforms.uSunDir.value.set(x, y);

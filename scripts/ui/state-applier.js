@@ -10,7 +10,7 @@ import { createLogger } from '../core/log.js';
 import { extendMsaLocalFlagWriteGuard } from '../utils/msa-local-flag-guard.js';
 import { mapShinePushSceneDarknessLevel } from '../utils/msa-v2-darkness.js';
 import { weatherController as coreWeatherController } from '../core/WeatherController.js';
-import { getFoundryTimePhaseHours, getWrappedHourProgress, getFoundrySunlightFactor } from '../core/foundry-time-phases.js';
+import { computeTimeOfDayDarkness01 } from '../core/foundry-time-phases.js';
 
 const log = createLogger('StateApplier');
 
@@ -601,28 +601,12 @@ export class StateApplier {
 
       const nowMs = Date.now();
 
-      // Align darkness transitions to Foundry/PF2E time-of-day phase definitions.
+      // Align darkness transitions to the same helper used by LightingDirector.
+      // This avoids a second hand-maintained dawn/noon/midnight curve fighting
+      // the canonical lighting model.
       const safeHour = ((Number(hour) % 24) + 24) % 24;
-      const phases = getFoundryTimePhaseHours();
-      const dawnDuskDarkness = 0.55;
-      const noonDarkness = 0.0;
-      const midnightDarkness = 0.95;
-
-      let targetDarkness;
-      const dayProgress = getWrappedHourProgress(safeHour, phases.sunrise, phases.sunset);
-
-      if (Number.isFinite(dayProgress)) {
-        const sunlight = Math.pow(getFoundrySunlightFactor(safeHour, phases), 0.85);
-        targetDarkness = dawnDuskDarkness + ((noonDarkness - dawnDuskDarkness) * sunlight);
-      } else {
-        const nightProgress = getWrappedHourProgress(safeHour, phases.sunset, phases.sunrise);
-        if (Number.isFinite(nightProgress)) {
-          const moonArc = Math.pow(Math.max(0, Math.sin(Math.PI * nightProgress)), 0.8);
-          targetDarkness = dawnDuskDarkness + ((midnightDarkness - dawnDuskDarkness) * moonArc);
-        } else {
-          targetDarkness = midnightDarkness;
-        }
-      }
+      let targetDarkness = computeTimeOfDayDarkness01(safeHour);
+      if (!Number.isFinite(targetDarkness)) targetDarkness = 0.0;
 
       // Clamp to valid range
       targetDarkness = Math.max(0, Math.min(1, targetDarkness));

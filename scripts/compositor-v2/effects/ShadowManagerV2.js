@@ -21,6 +21,7 @@ export class ShadowManagerV2 {
       cloudOpacity: 1.0,
       overheadOpacity: 1.0,
       overheadOcclusionStrength: 1.0,
+      buildingOpacity: 1.0,
       paintedOpacity: 1.0,
       /**
        * Independent opacity for {@link SkyReachShadowsEffectV2}. The effect's

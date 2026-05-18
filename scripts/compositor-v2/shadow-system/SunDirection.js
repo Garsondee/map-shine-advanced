@@ -9,6 +9,34 @@ import { weatherController } from '../../core/WeatherController.js';
 
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
+const wrapHour24 = (h) => {
+  const hour = Number(h);
+  return Number.isFinite(hour) ? ((hour % 24) + 24) % 24 : 0;
+};
+
+/**
+ * Full 24h sun orbit for shadows, specular, and downstream consumers.
+ *
+ * Azimuth advances continuously: East (90°) at sunrise → South (180°) at solar
+ * noon → West (270°) at sunset → North (0°) at solar midnight, then back to East.
+ * Elevation follows a single daily cosine peak at solar noon and stays near the
+ * horizon at sunrise, sunset, and midnight (clamped to 2° for shader stability).
+ *
+ * @param {number} hourRaw - Map Shine time of day 0–24
+ * @param {number} [sunriseHour=6] - Orbit anchor; azimuth is 90° when hour equals sunrise
+ * @returns {{azimuthDeg:number, elevationDeg:number}}
+ */
+export function computeSunAnglesFromHour(hourRaw, sunriseHour = 6) {
+  const hour = wrapHour24(hourRaw);
+  const sunrise = wrapHour24(sunriseHour);
+  const hoursSinceSunrise = wrapHour24(hour - sunrise);
+  const orbit = hoursSinceSunrise / 24.0;
+  const azimuthDeg = (90 + orbit * 360) % 360;
+  const elevRaw = Math.cos((orbit - 0.25) * Math.PI * 2) * 85.0;
+  const elevationDeg = Math.max(2.0, elevRaw);
+  return { azimuthDeg, elevationDeg };
+}
+
 /**
  * Convert an azimuth/elevation pair into the 2D shadow convention used by the
  * existing Building/Painted/SkyReach shaders.
@@ -21,6 +49,7 @@ const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
  */
 export function computeSunDirection2D(azimuthDeg, elevationDeg, latitudeScale = 0.1, fallback = null) {
   let az = Number(azimuthDeg);
+  let elFromAngles = null;
   if (!Number.isFinite(az)) {
     let hour = 12.0;
     try {
@@ -28,11 +57,14 @@ export function computeSunDirection2D(azimuthDeg, elevationDeg, latitudeScale = 
         hour = weatherController.timeOfDay;
       }
     } catch (_) {}
-    // Full 24h fallback, retained only for cold-start frames before SkyColor updates.
-    az = ((hour % 24.0) / 24.0 - 0.5) * 360.0;
+    const angles = computeSunAnglesFromHour(hour);
+    az = angles.azimuthDeg;
+    elFromAngles = angles.elevationDeg;
   }
 
-  const el = Number.isFinite(Number(elevationDeg)) ? Number(elevationDeg) : 45.0;
+  const el = Number.isFinite(Number(elevationDeg))
+    ? Number(elevationDeg)
+    : (Number.isFinite(elFromAngles) ? elFromAngles : 45.0);
   const lat = Number.isFinite(Number(latitudeScale)) ? clamp(Number(latitudeScale), 0.0, 1.0) : 0.1;
   const rad = az * (Math.PI / 180.0);
   let x = -Math.sin(rad);

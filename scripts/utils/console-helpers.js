@@ -1953,8 +1953,6 @@ export const consoleHelpers = {
     const sceneFloorCount = floorStack?.getFloors?.()?.length ?? visible.length;
     const usePostMergeWater = sceneFloorCount > 1;
 
-    const paramsUseSdf = we?.params?.useSdfMask;
-    const uniformUseSdf = Number(u?.uUseSdfMask?.value);
     const paramsMaskThr = we?.params?.maskThreshold;
     const uniformMaskThr = Number(u?.uWaterRawMaskThreshold?.value);
 
@@ -2007,12 +2005,10 @@ export const consoleHelpers = {
       },
       settings: {
         params: {
-          useSdfMask: paramsUseSdf,
           maskThreshold: paramsMaskThr,
           debugView: we?.params?.debugView ?? 0,
         },
         uniforms: {
-          uUseSdfMask: uniformUseSdf,
           uWaterRawMaskThreshold: uniformMaskThr,
           uDebugView: Number(u?.uDebugView?.value),
           uCrossSliceWaterData: Number(u?.uCrossSliceWaterData?.value),
@@ -2033,20 +2029,6 @@ export const consoleHelpers = {
       mismatches: [],
     };
 
-    const sdfOffInParams = paramsUseSdf === false;
-    const sdfOffInUniform = uniformUseSdf < 0.5;
-    if (sdfOffInParams !== sdfOffInUniform) {
-      snap.mismatches.push({
-        code: 'SDF_PARAMS_UNIFORM',
-        message: `params.useSdfMask=${paramsUseSdf} but uUseSdfMask=${uniformUseSdf}`,
-      });
-    }
-    if (sdfOffInParams && !sdfOffInUniform) {
-      snap.mismatches.push({
-        code: 'SDF_STUCK_ON',
-        message: 'SDF disabled in params but shader uniform still ON',
-      });
-    }
     if (
       Number.isFinite(paramsMaskThr)
       && Number.isFinite(uniformMaskThr)
@@ -2097,8 +2079,6 @@ export const consoleHelpers = {
         post: s.floor.usePostMergeWater,
         wd: s.masks.tWaterData?.id,
         cwd: s.waterEffect.cachedTextures?.tWaterData,
-        sdfP: s.settings.params.useSdfMask,
-        sdfU: s.settings.uniforms.uUseSdfMask,
         afi: s.waterEffect.activeFloorIndex,
         plo: s.waterEffect.perLevelOverride,
         cross: s.settings.uniforms.uCrossSliceWaterData,
@@ -2963,7 +2943,7 @@ Available commands (access via MapShine.debug):
   .skyReachProbe(x,y,fIdx)  - Read back skyReach value at world (x,y) for a floor
   .diagnoseSkyReachV2()     - Table: per-floor skyReach/floorAlpha + uHasSkyReach (why shelter is invisible)
   .setMaskBindingController(bool) - Toggle the unified mask binding controller rollout
-  .probeWaterFloorConfig()  - Params vs shader uniforms (useSdfMask, outdoors, floor routing); paste for bugs
+  .probeWaterFloorConfig()  - Params vs shader uniforms (mask threshold, outdoors, floor routing); paste for bugs
   .probeWaterFloorConfig({ watch: true }) - Log when water config changes on floor navigation
   .probeWaterFloorConfig.stop() - Stop watch mode
   .levelAlphaProbe(x,y)     - Read scene+final RT alpha per level (+ water occluder) at canvas pixel (x,y)

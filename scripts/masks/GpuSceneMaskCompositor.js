@@ -22,6 +22,10 @@ import * as assetLoader from '../assets/loader.js';
 import { getEffectMaskRegistry } from '../assets/loader.js';
 import { SceneMaskCompositor } from './scene-mask-compositor.js';
 import { SKY_REACH_VERT, SKY_REACH_FRAG, OVERHEAD_ACCUM_FRAG } from './shaders/skyReachShader.js';
+import {
+  STACKED_OUTDOORS_VERT,
+  STACKED_OUTDOORS_LAYER_FRAG,
+} from './shaders/stackedOutdoorsShader.js';
 import { isLevelsEnabledForScene, tileHasLevelsRange, readTileLevelsFlags, readSceneLevelsFlag, hasV14NativeLevels, readV14SceneLevels, getViewedLevelBackgroundSrc } from '../foundry/levels-scene-flags.js';
 import { isTileOverhead } from '../scene/tile-manager.js';
 import { collectEnabledMaskIds, getMaskBundleOptionsFromFlagOnly } from '../settings/mask-manifest-flags.js';
@@ -515,6 +519,17 @@ export class GpuSceneMaskCompositor {
      * @type {THREE.WebGLRenderTarget|null}
      */
     this._overheadAccumRt = null;
+
+    /** @type {THREE.RawShaderMaterial|null} Stacked _Outdoors layer combiner. */
+    this._stackedOutdoorsMaterial = null;
+    /** @type {THREE.Mesh|null} */
+    this._stackedOutdoorsMesh = null;
+    /** @type {THREE.Scene|null} */
+    this._stackedOutdoorsScene = null;
+    /** @type {THREE.WebGLRenderTarget|null} */
+    this._stackedOutdoorsRtA = null;
+    /** @type {THREE.WebGLRenderTarget|null} */
+    this._stackedOutdoorsRtB = null;
 
     /**
      * Signature of the last water patch operation to avoid repeated SDF rebuilds
@@ -2229,6 +2244,15 @@ export class GpuSceneMaskCompositor {
     try { this._overheadAccumRt?.dispose(); } catch (_) {}
     this._overheadAccumRt = null;
 
+    try { this._stackedOutdoorsMaterial?.dispose(); } catch (_) {}
+    this._stackedOutdoorsMaterial = null;
+    this._stackedOutdoorsMesh = null;
+    this._stackedOutdoorsScene = null;
+    try { this._stackedOutdoorsRtA?.dispose(); } catch (_) {}
+    try { this._stackedOutdoorsRtB?.dispose(); } catch (_) {}
+    this._stackedOutdoorsRtA = null;
+    this._stackedOutdoorsRtB = null;
+
     this._quadMesh = null;
     this._quadScene = null;
     this._orthoCamera = null;
@@ -2420,6 +2444,111 @@ export class GpuSceneMaskCompositor {
       this._skyReachScene = new THREE.Scene();
       this._skyReachScene.add(this._skyReachMesh);
     }
+
+    if (!this._stackedOutdoorsMaterial) {
+      this._stackedOutdoorsMaterial = new THREE.RawShaderMaterial({
+        vertexShader: STACKED_OUTDOORS_VERT,
+        fragmentShader: STACKED_OUTDOORS_LAYER_FRAG,
+        uniforms: {
+          tAccum: { value: null },
+          tFloorAlpha: { value: null },
+          tOutdoors: { value: null },
+        },
+        depthTest: false,
+        depthWrite: false,
+        transparent: false,
+        blending: THREE.NoBlending,
+      });
+    }
+    if (!this._stackedOutdoorsMesh) {
+      this._stackedOutdoorsMesh = new THREE.Mesh(this._quadGeo, this._stackedOutdoorsMaterial);
+      this._stackedOutdoorsMesh.frustumCulled = false;
+    }
+    if (!this._stackedOutdoorsScene) {
+      this._stackedOutdoorsScene = new THREE.Scene();
+      this._stackedOutdoorsScene.add(this._stackedOutdoorsMesh);
+    }
+  }
+
+  /**
+   * Build a scene-space stacked `_Outdoors` mask for visible floors (bottom→top).
+   * Each texel uses the topmost floor with authored `floorAlpha` coverage.
+   *
+   * @param {THREE.WebGLRenderer} renderer
+   * @param {string[]} floorKeysBottomToTop - GpuSceneMaskCompositor floor keys
+   * @returns {THREE.Texture|null}
+   */
+  composeStackedOutdoorsMask(renderer, floorKeysBottomToTop) {
+    const THREE = window.THREE;
+    if (!renderer || !THREE || !Array.isArray(floorKeysBottomToTop) || floorKeysBottomToTop.length === 0) {
+      return null;
+    }
+
+    this._ensureGpuResources(THREE);
+
+    let refW = 0;
+    let refH = 0;
+    for (const floorKey of floorKeysBottomToTop) {
+      const ref = this.getFloorTexture(floorKey, 'outdoors')
+        ?? this.getFloorTexture(floorKey, 'floorAlpha');
+      if (!ref) continue;
+      refW = Number(ref.image?.width) || refW;
+      refH = Number(ref.image?.height) || refH;
+      if (refW > 0 && refH > 0) break;
+    }
+    if (refW < 1 || refH < 1) return null;
+
+    let rtA = this._stackedOutdoorsRtA;
+    let rtB = this._stackedOutdoorsRtB;
+    if (!rtA || rtA.width !== refW || rtA.height !== refH) {
+      try { rtA?.dispose(); } catch (_) {}
+      try { rtB?.dispose(); } catch (_) {}
+      rtA = this._createRenderTarget(THREE, refW, refH, 'stackedOutdoorsA');
+      rtB = this._createRenderTarget(THREE, refW, refH, 'stackedOutdoorsB');
+      this._stackedOutdoorsRtA = rtA;
+      this._stackedOutdoorsRtB = rtB;
+    }
+
+    const m = this._stackedOutdoorsMaterial;
+    const prevTarget = renderer.getRenderTarget();
+    const prevClearColor = new THREE.Color();
+    renderer.getClearColor(prevClearColor);
+    const prevClearAlpha = renderer.getClearAlpha();
+
+    renderer.setRenderTarget(rtA);
+    renderer.setClearColor(0xffffff, 0);
+    renderer.clear();
+
+    let accum = rtA;
+    let scratch = rtB;
+
+    for (const floorKey of floorKeysBottomToTop) {
+      const outdoorsTex = this.getFloorTexture(floorKey, 'outdoors');
+      const alphaTex = this.getFloorTexture(floorKey, 'floorAlpha');
+      if (!outdoorsTex || !alphaTex) continue;
+
+      m.uniforms.tAccum.value = accum.texture;
+      m.uniforms.tFloorAlpha.value = alphaTex;
+      m.uniforms.tOutdoors.value = outdoorsTex;
+
+      renderer.setRenderTarget(scratch);
+      renderer.setClearColor(0x000000, 0);
+      renderer.clear();
+      try {
+        renderer.render(this._stackedOutdoorsScene, this._orthoCamera);
+      } catch (e) {
+        log.debug('composeStackedOutdoorsMask: layer failed', { floorKey, err: e });
+      }
+
+      const tmp = accum;
+      accum = scratch;
+      scratch = tmp;
+    }
+
+    renderer.setClearColor(prevClearColor, prevClearAlpha);
+    renderer.setRenderTarget(prevTarget);
+
+    return accum.texture;
   }
 
   /**

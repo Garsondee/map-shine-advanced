@@ -448,7 +448,7 @@
     'uHasCeilingLightTransmittance', 'tCeilingLightTransmittance',
     'uHasSkyOcclusion', 'tSkyOcclusion',
     'uDynamicLightShadowOverrideStrength',
-    'uLightIntensity', 'uMinIlluminationScale', 'uInteriorDarkness',
+    'uMinIlluminationScale', 'uInteriorDarkness',
     'uNegativeDarknessStrength', 'uDarknessPunchGain',
   ]);
 

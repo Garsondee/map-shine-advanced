@@ -8,6 +8,7 @@ import { createLogger } from '../core/log.js';
 import { repairSceneControlStateFlag } from './control-state-sanitize.js';
 import { wipeMapShineAdvancedFlagsAsync } from './scene-msa-flag-wipe.js';
 import { createDefaultStyledLoadingScreenConfig } from '../ui/loading-screen/loading-screen-config.js';
+import { LightingDirector } from '../core/LightingDirector.js';
 
 const log = createLogger('Settings');
 
@@ -765,7 +766,12 @@ function createDefaultSettings() {
 export function registerSettings() {
   // Note: Per-scene player overrides are registered dynamically
   // This is just a placeholder for module-wide settings
-  
+
+  // Centralised lighting/darkness orchestrator (scripts/core/LightingDirector.js).
+  // Owns the `lightingDarknessPriority` world setting that controls how
+  // Foundry slider / calendar / weather darkness sources are merged.
+  try { LightingDirector.registerSettings(); } catch (_) {}
+
   game.settings.register('map-shine-advanced', 'debug-mode', {
     name: 'Debug Mode',
     hint: 'Enable verbose logging for troubleshooting',

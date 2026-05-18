@@ -302,6 +302,11 @@ export class ThreeLightSource {
         //   (not config.coloration, which is the coloration *technique* id)
         uLuminosity: { value: 1.0 },
         uColoration: { value: 0.5 },
+        /**
+         * Map Shine LightingEffect “Point light gain” — applied before additive `_lightRT` blend,
+         * not in compose post-multiply.
+         */
+        uComposeLightGain: { value: 0.35 },
         // Cookie/gobo texture (optional)
         tCookie: { value: null },
         uHasCookie: { value: 0.0 },
@@ -343,6 +348,7 @@ export class ThreeLightSource {
         uniform float uBrightness;
         uniform float uLuminosity;
         uniform float uColoration;
+        uniform float uComposeLightGain;
         uniform sampler2D tCookie;
         uniform float uHasCookie;
         uniform float uCookieRotation;
@@ -807,8 +813,10 @@ export class ThreeLightSource {
             rgbOut = mix(rgbOut * hotHi, rgbOut * fire * hotHi * 0.42, mix(0.22, 0.38, iAnimDrive));
           }
 
-          // Additive Output
-          gl_FragColor = vec4(rgbOut, alpha);
+          // Map Shine LightingEffect Point light gain: scale emission before _lightRT accumulation.
+          // (Name must not shadow cg from the cookie-gamma block above — GLSL ES 1.0 uses function scope.)
+          float composeGain = clamp(uComposeLightGain, 0.0, 8.0);
+          gl_FragColor = vec4(rgbOut * composeGain, alpha * composeGain);
         }
       `,
       transparent: true,

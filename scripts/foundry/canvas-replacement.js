@@ -8174,7 +8174,7 @@ async function createThreeCanvas(scene, createOptions = {}) {
         };
 
         safeCall(() => {
-          uiManager.registerEffect('lighting', 'Lighting & Tone Mapping',
+          uiManager.registerEffect('lighting', 'Light Physics',
             LightingEffectV2.getControlSchema(), _makeV2Callback('_lightingEffect'), 'global');
         }, 'v2.registerLightingUI', Severity.DEGRADED);
 
@@ -8209,7 +8209,7 @@ async function createThreeCanvas(scene, createOptions = {}) {
         }, 'v2.registerTreeUI', Severity.DEGRADED);
 
         safeCall(() => {
-          uiManager.registerEffect('sky-color', 'Sky Color',
+          uiManager.registerEffect('sky-color', 'Sky Environment',
             SkyColorEffectV2.getControlSchema(), _makeV2Callback('_skyColorEffect'), 'global');
         }, 'v2.registerSkyColorUI', Severity.DEGRADED);
 
@@ -8266,22 +8266,22 @@ async function createThreeCanvas(scene, createOptions = {}) {
         safeCall(() => loadingOverlay.setStage('final.controls', 0.45, 'Loading effect controls...', { keepAuto: true }), 'overlay.ui.p2', Severity.COSMETIC);
 
         safeCall(() => {
-          uiManager.registerEffect('bloom', 'Bloom (Glow)',
+          uiManager.registerEffect('bloom', 'Atmosphere: Bloom Highlights',
             BloomEffectV2.getControlSchema(), _makeV2Callback('_bloomEffect'), 'global');
         }, 'v2.registerBloomUI', Severity.DEGRADED);
 
         safeCall(() => {
-          uiManager.registerEffect('colorCorrection', 'Color Grading & VFX',
+          uiManager.registerEffect('colorCorrection', 'Camera Grade (HDR → LDR)',
             ColorCorrectionEffectV2.getControlSchema(), _makeV2Callback('_colorCorrectionEffect'), 'global');
         }, 'v2.registerColorCorrectionUI', Severity.DEGRADED);
 
         safeCall(() => {
-          uiManager.registerEffect('filter', 'Filter (Multiply / Ink AO)',
+          uiManager.registerEffect('filter', 'Material Filter (Ink AO)',
             FilterEffectV2.getControlSchema(), _makeV2Callback('_filterEffect'), 'global');
         }, 'v2.registerFilterUI', Severity.DEGRADED);
 
         safeCall(() => {
-          uiManager.registerEffect('atmospheric-fog', 'Atmospheric Fog',
+          uiManager.registerEffect('atmospheric-fog', 'Atmosphere: Fog & Air',
             AtmosphericFogEffectV2.getControlSchema(), _makeV2Callback('_atmosphericFogEffect'), 'atmospheric');
         }, 'v2.registerAtmosphericFogUI', Severity.DEGRADED);
 

@@ -160,6 +160,29 @@
   margin-top: 4px;
 }
 
+/* Lighting HDR UI facelift: make the dense Tweakpane hierarchy easier to scan. */
+#map-shine-ui .tp-fldv_t {
+  letter-spacing: 0.01em;
+}
+
+#map-shine-ui .tp-fldv_t:has(.tp-fldv_t) {
+  font-weight: 600;
+}
+
+#map-shine-ui .tp-fldv:has(.tp-fldv_t[title*="Advanced"]),
+#map-shine-ui .tp-fldv:has(.tp-fldv_t[title*="legacy"]) {
+  opacity: 0.92;
+}
+
+#map-shine-ui .tp-fldv:has(.tp-fldv_t[title*="Lighting Director"]) {
+  border-left: 2px solid rgba(130, 180, 255, 0.45);
+}
+
+#map-shine-ui .tp-fldv:has(.tp-fldv_t[title*="Camera Grade"]),
+#map-shine-ui .tp-fldv:has(.tp-fldv_t[title*="HDR"]) {
+  border-left: 2px solid rgba(255, 210, 125, 0.45);
+}
+
 /* ===================================================================
    Section Filter Bar — always-visible search bar inside the Map Shine
    Advanced panel, sits between the pane title and the section list.

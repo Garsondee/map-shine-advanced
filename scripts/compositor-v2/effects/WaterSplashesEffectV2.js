@@ -32,6 +32,7 @@
 
 import { createLogger } from '../../core/log.js';
 import { weatherController } from '../../core/WeatherController.js';
+import { LightingDirector } from '../../core/LightingDirector.js';
 import { probeMaskFile } from '../../assets/loader.js';
 import {
   tileHasLevelsRange,
@@ -1295,17 +1296,9 @@ export class WaterSplashesEffectV2 {
       ? Math.max(0.0, Math.min(1.0, skyIntensityRaw))
       : 1.0;
     const canvas = window.canvas;
-    const weatherEnv = weatherController?.getEnvironment?.() ?? null;
-    const sceneDarknessRaw = Number(canvas?.scene?.environment?.darknessLevel);
-    const envDarknessRaw = Number(canvas?.environment?.darknessLevel);
-    const sceneDarkness01 = Number.isFinite(sceneDarknessRaw)
-      ? Math.max(0.0, Math.min(1.0, sceneDarknessRaw))
-      : (Number.isFinite(envDarknessRaw) ? Math.max(0.0, Math.min(1.0, envDarknessRaw)) : 0.0);
-    const effectiveDarknessRaw = Number(weatherEnv?.effectiveDarkness);
-    const effectiveDarkness01 = Number.isFinite(effectiveDarknessRaw)
-      ? Math.max(0.0, Math.min(1.0, effectiveDarknessRaw))
-      : 0.0;
-    const dark01 = Math.max(sceneDarkness01, effectiveDarkness01);
+    // Phase 3: defer to LightingDirector so splashes dim consistently with
+    // lighting/sky regardless of which darkness source is authoritative.
+    const dark01 = Math.max(0.0, Math.min(1.0, LightingDirector.get().masterDarkness));
     return Math.max(0.0, Math.min(1.0, skyIntensity01 * (1.0 - 0.92 * dark01)));
   }
 

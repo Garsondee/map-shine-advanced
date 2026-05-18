@@ -52,8 +52,8 @@ export class AtmosphericFogEffectV2 {
       fogColor: '#c8d0d8',      // Slightly blue-gray fog
       fogColorNight: '#1a1a2e', // Darker blue at night
       skyTintStrength: 0.0,
-      nightColorStrength: 2.0,
-      darknessStrength: 1.0,
+      nightColorStrength: 0.75,
+      darknessStrength: 0.65,
       darknessColorMin: 0.25,
 
       // Fog behavior
@@ -116,6 +116,18 @@ export class AtmosphericFogEffectV2 {
   static getControlSchema() {
     return {
       enabled: true,
+      help: {
+        title: 'Atmospheric Fog & Air',
+        summary: [
+          'Adds air depth, fog color, and weather-driven atmosphere after floors are merged.',
+          'Fog should tint and soften the scene, not own exposure or scene darkness. Use Camera Grade for brightness and tone mapping.'
+        ].join('\n\n'),
+        glossary: {
+          'Sky tint': 'How much the current sky/environment color tints fog.',
+          'Night color': 'How strongly fog shifts toward the night fog color at high darkness.',
+          'Darkness strength': 'How much LightingDirector darkness affects fog color response.'
+        },
+      },
       groups: [
         {
           name: 'fog',
@@ -152,9 +164,9 @@ export class AtmosphericFogEffectV2 {
         enabled: { type: 'boolean', default: true },
         fogColor: { type: 'color', default: '#c8d0d8', label: 'Fog Color' },
         fogColorNight: { type: 'color', default: '#1a1a2e', label: 'Night Fog Color' },
-        skyTintStrength: { type: 'slider', min: 0, max: 10, step: 0.05, default: 0.0, label: 'Sky Tint Strength' },
-        nightColorStrength: { type: 'slider', min: 0, max: 10, step: 0.05, default: 2.0, label: 'Night Color Strength' },
-        darknessStrength: { type: 'slider', min: 0, max: 10, step: 0.05, default: 1.0, label: 'Darkness Strength' },
+        skyTintStrength: { type: 'slider', min: 0, max: 3, step: 0.05, default: 0.0, label: 'Sky Tint Strength' },
+        nightColorStrength: { type: 'slider', min: 0, max: 3, step: 0.05, default: 0.75, label: 'Night Color Strength' },
+        darknessStrength: { type: 'slider', min: 0, max: 3, step: 0.05, default: 0.65, label: 'Darkness Strength' },
         darknessColorMin: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.25, label: 'Darkness Min Color' },
         maxOpacity: { type: 'slider', min: 0, max: 1, step: 0.05, default: 0.6, label: 'Max Opacity' },
         falloffStart: { type: 'slider', min: 0, max: 1, step: 0.05, default: 0.1, label: 'Falloff Start' },
@@ -183,7 +195,53 @@ export class AtmosphericFogEffectV2 {
         cutoutStrength: { type: 'slider', min: 0, max: 1.0, step: 0.01, default: 0.65, label: 'Cutout Strength' },
         cutoutSpeed: { type: 'slider', min: 0, max: 0.2, step: 0.01, default: 0.02, label: 'Cutout Speed' },
         cutoutContrast: { type: 'slider', min: 0.5, max: 3.0, step: 0.05, default: 1.25, label: 'Cutout Contrast' }
-      }
+      },
+      presets: {
+        'Clear Noon': {
+          maxOpacity: 0.18,
+          skyTintStrength: 0.2,
+          nightColorStrength: 0.4,
+          darknessStrength: 0.4,
+          noiseStrength: 0.08,
+        },
+        'Golden Hour': {
+          fogColor: '#d8c4a5',
+          maxOpacity: 0.28,
+          skyTintStrength: 0.45,
+          nightColorStrength: 0.45,
+          darknessStrength: 0.45,
+        },
+        'Overcast Day': {
+          fogColor: '#b8c1ca',
+          maxOpacity: 0.42,
+          skyTintStrength: 0.6,
+          nightColorStrength: 0.7,
+          darknessStrength: 0.55,
+        },
+        Storm: {
+          fogColor: '#8f99a6',
+          fogColorNight: '#111827',
+          maxOpacity: 0.62,
+          skyTintStrength: 0.75,
+          nightColorStrength: 1.15,
+          darknessStrength: 0.85,
+        },
+        'Moonlit Night': {
+          fogColor: '#9aa8c4',
+          fogColorNight: '#11172e',
+          maxOpacity: 0.26,
+          skyTintStrength: 0.35,
+          nightColorStrength: 1.0,
+          darknessStrength: 0.65,
+        },
+        'Interior Night': {
+          maxOpacity: 0.16,
+          useIndoorMask: true,
+          indoorFogReduction: 0.95,
+          nightColorStrength: 0.75,
+          darknessStrength: 0.45,
+        },
+      },
     };
   }
 

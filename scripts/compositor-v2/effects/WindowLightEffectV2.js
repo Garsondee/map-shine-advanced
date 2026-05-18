@@ -50,6 +50,7 @@ import {
 } from '../../foundry/levels-scene-flags.js';
 import { isTileOverhead } from '../../scene/tile-manager.js';
 import { weatherController, PrecipitationType } from '../../core/WeatherController.js';
+import { LightingDirector } from '../../core/LightingDirector.js';
 
 const log = createLogger('WindowLightEffectV2');
 
@@ -113,24 +114,25 @@ export class WindowLightEffectV2 {
     this.params = {
       hasWindowMask: false,
       enabled: true,
-      intensity: 1.5,
-      falloff: 3.0,
+      intensity: 2.1,
+      falloff: 1.5,
       color: { r: 1.0, g: 0.96, b: 0.85 },
       lightOverheadTiles: true,
       overheadLightIntensity: 1.0,
+      specularBoost: 2.0,
       flickerEnabled: false,
       flickerSpeed: 0.35,
       flickerAmount: 0.15,
       cloudInfluence: 1.0,
-      cloudShadowContrast: 4.0,
+      cloudShadowContrast: 0.9,
       cloudShadowBias: 0.05,
       cloudShadowGamma: 2.28,
       cloudShadowMinLight: 0.0,
       useSkyTint: true,
-      skyTintStrength: 9.5,
-      nightDimming: 1.0,
-      sunLightEnabled: false,
-      sunLightLength: 0.03,
+      skyTintStrength: 0.25,
+      nightDimming: 0.1,
+      sunLightEnabled: true,
+      sunLightLength: 0.0,
       rainOnGlassEnabled: true,
       rainOnGlassIntensity: 1.0,
       rainOnGlassPrecipStart: 0.15,
@@ -140,8 +142,8 @@ export class WindowLightEffectV2 {
       rainOnGlassMaxOffsetPx: 1.25,
       rainOnGlassDarken: 0.25,
       // RGB shift (chromatic dispersion / refraction)
-      rgbShiftAmount: 1.9,  // pixels
-      rgbShiftAngle: 76.0,  // degrees
+      rgbShiftAmount: 3.75,  // pixels
+      rgbShiftAngle: 120.0,  // degrees
     };
 
     /**
@@ -186,6 +188,18 @@ export class WindowLightEffectV2 {
   static getControlSchema() {
     return {
       enabled: true,
+      help: {
+        title: 'Window Light',
+        summary: [
+          'Adds warm window glow and weather-aware glass effects. This is a light source / emissive surface, not a camera exposure control.',
+          'Sky tint and cloud dimming make windows feel connected to day, night, and weather. Keep those moderate so Color Correction remains the final grade owner.'
+        ].join('\n\n'),
+        glossary: {
+          Intensity: 'Linear window glow energy before lighting composition.',
+          'Sky tint': 'How much computed sky color warms/cools window light.',
+          'Night dimming': 'How strongly LightingDirector darkness reduces windows at night.'
+        },
+      },
       groups: [
         { name: 'status', label: 'Effect Status', type: 'inline', parameters: ['textureStatus'] },
         { name: 'lighting', label: 'Window Light', type: 'folder', expanded: true, parameters: ['intensity', 'falloff', 'color'] },
@@ -210,20 +224,20 @@ export class WindowLightEffectV2 {
       parameters: {
         hasWindowMask: { type: 'boolean', default: true, hidden: true },
         textureStatus: { type: 'string', label: 'Mask Status', default: 'Checking...', readonly: true },
-        intensity: { type: 'slider', label: 'Intensity', min: 0.0, max: 25.0, step: 0.1, default: 25 },
-        falloff: { type: 'slider', label: 'Falloff (Gamma)', min: 0.1, max: 5.0, step: 0.1, default: 5 },
+        intensity: { type: 'slider', label: 'Intensity', min: 0.0, max: 4.0, step: 0.05, default: 2.1, tooltip: 'Linear window glow energy. Values above 2 are stylized in the HDR pipeline.' },
+        falloff: { type: 'slider', label: 'Falloff (Gamma)', min: 0.5, max: 5.0, step: 0.05, default: 1.5 },
         color: { type: 'color', label: 'Light Color', default: { r: 1.0, g: 0.96, b: 0.85 } },
         cloudInfluence: { type: 'slider', label: 'Cloud Dimming', min: 0.0, max: 1.0, step: 0.01, default: 1.0 },
-        nightDimming: { type: 'slider', label: 'Night Dimming', min: 0.0, max: 2.0, step: 0.01, default: 1 },
+        nightDimming: { type: 'slider', label: 'Night Dimming', min: 0.0, max: 2.0, step: 0.01, default: 0.1 },
         useSkyTint: { type: 'boolean', label: 'Use Sky Tint', default: true },
-        skyTintStrength: { type: 'slider', label: 'Sky Tint Strength', min: 0.0, max: 25.0, step: 0.01, default: 9.5 },
-        cloudShadowContrast: { type: 'slider', label: 'Shadow Contrast', min: 0.0, max: 4.0, step: 0.01, default: 4.0 },
+        skyTintStrength: { type: 'slider', label: 'Sky Tint Strength', min: 0.0, max: 5.0, step: 0.01, default: 0.25, tooltip: 'Moderate sky color coupling for weather/night ambience without replacing Camera Grade.' },
+        cloudShadowContrast: { type: 'slider', label: 'Shadow Contrast', min: 0.0, max: 4.0, step: 0.01, default: 0.9 },
         cloudShadowBias: { type: 'slider', label: 'Shadow Bias', min: -1.0, max: 1.0, step: 0.01, default: 0.05 },
         cloudShadowGamma: { type: 'slider', label: 'Shadow Gamma', min: 0.1, max: 4.0, step: 0.01, default: 2.28 },
         cloudShadowMinLight: { type: 'slider', label: 'Min Light', min: 0.0, max: 1.0, step: 0.01, default: 0.0 },
-        rgbShiftAmount: { type: 'slider', label: 'RGB Shift', min: 0.0, max: 12.0, step: 0.01, default: 1.9 },
-        rgbShiftAngle: { type: 'slider', label: 'Angle (deg)', min: 0.0, max: 360.0, step: 1.0, default: 76.0 },
-        specularBoost: { type: 'slider', label: 'Specular Boost', min: 0.0, max: 5.0, step: 0.1, default: 5.0 },
+        rgbShiftAmount: { type: 'slider', label: 'RGB Shift', min: 0.0, max: 12.0, step: 0.01, default: 3.75 },
+        rgbShiftAngle: { type: 'slider', label: 'Angle (deg)', min: 0.0, max: 360.0, step: 1.0, default: 120.0 },
+        specularBoost: { type: 'slider', label: 'Specular Boost', min: 0.0, max: 2.0, step: 0.05, default: 2.0 },
         lightOverheadTiles: { type: 'boolean', label: 'Light Overheads', default: true },
         overheadLightIntensity: { type: 'slider', label: 'Overhead Intensity', min: 0.0, max: 1.0, step: 0.05, default: 1.0 },
         rainOnGlassEnabled: { type: 'boolean', label: 'Enabled', default: true },
@@ -308,8 +322,8 @@ export class WindowLightEffectV2 {
         rainFlowPerpScale: { type: 'slider', label: 'Perpendicular Scale', min: -2.0, max: 2.0, step: 0.01, default: 1.0 },
         rainFlowGlobalInfluence: { type: 'slider', label: 'Global Influence', min: 0.0, max: 2.0, step: 0.01, default: 1.0 },
         rainFlowAngleOffset: { type: 'slider', label: 'Angle Offset', min: -180.0, max: 180.0, step: 1.0, default: 0.0 },
-        sunLightEnabled: { type: 'boolean', label: 'Enable Sun Tracking', default: false },
-        sunLightLength: { type: 'slider', label: 'Light Shift Length', min: 0.0, max: 0.3, step: 0.005, default: 0.03 },
+        sunLightEnabled: { type: 'boolean', label: 'Enable Sun Tracking', default: true },
+        sunLightLength: { type: 'slider', label: 'Light Shift Length', min: 0.0, max: 0.3, step: 0.005, default: 0.0 },
         lightningWindowEnabled: { type: 'boolean', label: 'Enabled', default: true },
         lightningWindowIntensityBoost: { type: 'slider', label: 'Intensity Boost', min: 0.0, max: 5.0, step: 0.05, default: 1.0 },
         lightningWindowContrastBoost: { type: 'slider', label: 'Contrast Boost', min: 0.0, max: 5.0, step: 0.05, default: 1.75 },
@@ -659,13 +673,19 @@ export class WindowLightEffectV2 {
     const skyIntensity01 = clamp01(this._skyState.skyIntensity01);
     u.uSkyTintStrength.value = Math.max(0.0, Number(this.params.skyTintStrength) || 0.0) * skyIntensity01 * skyTintBySkyColorMul;
 
+    // Phase 3: prefer the externally-injected sky state when available so a
+    // single orchestrator can override per-frame, otherwise fall through to
+    // LightingDirector so window light dimming matches lighting/sky exactly.
     const stateDarkness = Number(this._skyState.sceneDarkness01);
     const stateEffectiveDarkness = Number(this._skyState.effectiveDarkness01);
-    const sceneDarkness01 = Number.isFinite(stateDarkness) ? clamp01(stateDarkness) : readSceneDarkness01();
-    const effectiveDarkness01 = Number.isFinite(stateEffectiveDarkness) ? clamp01(stateEffectiveDarkness) : 0.0;
-    // Use the strongest darkness signal so weather/time-driven night also dims
-    // window light even when Foundry scene darkness remains low.
-    const darkness = Math.max(sceneDarkness01, effectiveDarkness01);
+    let darkness;
+    if (Number.isFinite(stateDarkness) || Number.isFinite(stateEffectiveDarkness)) {
+      const sceneDarkness01 = Number.isFinite(stateDarkness) ? clamp01(stateDarkness) : 0.0;
+      const effectiveDarkness01 = Number.isFinite(stateEffectiveDarkness) ? clamp01(stateEffectiveDarkness) : 0.0;
+      darkness = Math.max(sceneDarkness01, effectiveDarkness01);
+    } else {
+      darkness = clamp01(LightingDirector.get().masterDarkness);
+    }
     const nightDimming = Math.max(0.0, Math.min(2.0, Number(this.params.nightDimming) || 0.0));
     // Curve + up-to-2× slider so mid-range darkness and defaults read clearly “night”.
     const nightDimAmount = Math.min(1.0, darkness * nightDimming * 2.15);

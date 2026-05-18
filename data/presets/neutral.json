@@ -1131,7 +1131,6 @@
               "b": 0.28
             },
             "tintStrength": 0.36,
-            "useSdfMask": true,
             "distortionStrengthPx": 6,
             "debugView": 0,
             "debugWindArrow": false,

@@ -33,6 +33,14 @@ import { resolveReceiverOutdoorsMaskTexture } from '../shadow-system/resolve-rec
 
 const log = createLogger('BuildingShadowsEffectV2');
 
+/** Projector shader: `pxLen = uLength * 1400` (mask texels). */
+const BUILDING_SHADOW_LENGTH_SHADER_SCALE = 1400;
+/** Target mask-space length at full dawn/dusk weight with default slider (0.075). */
+const BUILDING_SHADOW_PEAK_PX_AT_DEFAULT_LENGTH = 400;
+const BUILDING_SHADOW_DEFAULT_LENGTH = 0.075;
+const BUILDING_SHADOW_PEAK_U_LENGTH =
+  BUILDING_SHADOW_PEAK_PX_AT_DEFAULT_LENGTH / BUILDING_SHADOW_LENGTH_SHADER_SCALE;
+
 /**
  * Building shadows ray-march the full outdoors mask per pixel. Uncapped RT size
  * follows mask native resolution (often scene-sized, 4k–8k+); that tanks FPS on mid GPUs.
@@ -110,6 +118,8 @@ export class BuildingShadowsEffectV2 {
     this._sunAzimuthDeg = null;
     this._sunElevationDeg = null;
     this._dynamicLightOverride = null;
+    /** @type {number} Echo of {@link ShadowDriverState#tuning.shadowLengthScale} (0 dawn/dusk peak, 0 noon/midnight) */
+    this._driverShadowLengthScale = 1.0;
 
     /** @type {Promise<void>|null} Background floor-mask warmup in flight */
     this._floorPreloadPromise = null;
@@ -205,7 +215,9 @@ export class BuildingShadowsEffectV2 {
           min: 0.0,
           max: 0.6,
           step: 0.005,
-          default: 0.075
+          default: 0.075,
+          tooltip:
+            'Peak shadow length at dawn/dusk (~400 px at default). Scales toward zero at solar noon and midnight.',
         },
         softness: {
           type: 'slider',
@@ -784,7 +796,7 @@ export class BuildingShadowsEffectV2 {
     this._updateSunDirection();
 
     const u = this._projectMaterial.uniforms;
-    u.uLength.value = this.params.length;
+    u.uLength.value = this._getEffectiveRayLength();
     u.uSoftness.value = this.params.softness * (Number(this._driverShadowSoftnessScale) || 1.0);
     u.uSmear.value = this.params.smear;
     u.uPenumbra.value = this.params.penumbra;
@@ -888,6 +900,23 @@ export class BuildingShadowsEffectV2 {
     if (Number.isFinite(Number(driverState.tuning?.shadowSoftnessScale))) {
       this._driverShadowSoftnessScale = Number(driverState.tuning.shadowSoftnessScale);
     }
+    if (Number.isFinite(Number(driverState.tuning?.shadowLengthScale))) {
+      this._driverShadowLengthScale = Number(driverState.tuning.shadowLengthScale);
+    }
+  }
+
+  /**
+   * Time-of-day length: peaks near ~400 mask px at dawn/dusk (default slider), ~0 at noon/midnight.
+   * @returns {number}
+   */
+  _getEffectiveRayLength() {
+    const rawSlider = Number(this.params?.length);
+    const base = Number.isFinite(rawSlider) ? rawSlider : BUILDING_SHADOW_DEFAULT_LENGTH;
+    const artistScale = base / BUILDING_SHADOW_DEFAULT_LENGTH;
+    const timeW = Number.isFinite(Number(this._driverShadowLengthScale))
+      ? Math.max(0.0, Math.min(1.0, Number(this._driverShadowLengthScale)))
+      : 1.0;
+    return BUILDING_SHADOW_PEAK_U_LENGTH * artistScale * timeW;
   }
 
   /**

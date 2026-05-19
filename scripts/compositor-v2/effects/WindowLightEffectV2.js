@@ -36,6 +36,13 @@
  * lit slice (falls back to `getRoofScreenOcclusionScale` when needed) so multi-floor
  * "lower floor" behavior matches the slice being drawn, not only the UI active floor.
  *
+ * Environment tint: {@link #setSkyState} receives sky tint from SkyColor and,
+ * when Color Correction time-of-day camera timeline is enabled, the timeline
+ * global tint multiplier so window glow tracks graded time of day.
+ *
+ * Indoor-only: {@link #setOutdoorsMask} gates overlays with the active-floor
+ * `_Outdoors` mask (white = outdoor, no window glow).
+ *
  * @module compositor-v2/effects/WindowLightEffectV2
  */
 
@@ -51,13 +58,47 @@ import {
 import { isTileOverhead } from '../../scene/tile-manager.js';
 import { weatherController, PrecipitationType } from '../../core/WeatherController.js';
 import { LightingDirector } from '../../core/LightingDirector.js';
+import { GROUND_Z } from '../LayerOrderPolicy.js';
 
 const log = createLogger('WindowLightEffectV2');
 
-// Z offset above albedo + specular. Must remain within the 1.0-per-floor Z band.
+// Tile overlays: slightly above bus tile plane (`GROUND_Z + floorIndex`).
+// Background overlays: sit on the bg stack (`GROUND_Z - 1 + ε`), matching
+// FloorRenderBus `_addBackgroundImage` + SpecularEffectV2 (`GROUND_Z + fi - 1 + offset`).
 const WINDOW_Z_OFFSET = 0.2;
+const TOD_ANCHOR_COUNT = 8;
+/** Clock hours for tod0..tod7 — matches ColorCorrectionEffectV2 defaults. */
+const DEFAULT_TOD_ANCHOR_HOURS = [0.0, 3.0, 6.0, 9.0, 12.0, 15.0, 18.0, 21.0];
+/**
+ * UI order and labels (display-only). `index` is the persisted tod{N} slot.
+ * Same ordering as ColorCorrectionEffectV2.
+ */
+const TOD_ANCHOR_META = [
+  { index: 4, label: 'Noon', clockHint: '12:00' },
+  { index: 5, label: 'Afternoon', clockHint: '15:00' },
+  { index: 6, label: 'Dusk', clockHint: '18:00' },
+  { index: 7, label: 'Night', clockHint: '21:00' },
+  { index: 0, label: 'Midnight', clockHint: '00:00' },
+  { index: 1, label: 'Pre-dawn', clockHint: '03:00' },
+  { index: 2, label: 'Dawn', clockHint: '06:00' },
+  { index: 3, label: 'Morning', clockHint: '09:00' },
+];
+
 const clamp01 = (n) => Math.max(0.0, Math.min(1.0, Number(n) || 0.0));
 const stripUrlQueryHash = (s) => String(s || '').split('#')[0].split('?')[0];
+
+const wrapHour24 = (hour) => {
+  const n = Number(hour);
+  const h = Number.isFinite(n) ? n : 0;
+  return ((h % 24) + 24) % 24;
+};
+
+const smooth01 = (t) => {
+  const x = clamp01(t);
+  return x * x * (3 - 2 * x);
+};
+
+const lerp = (a, b, t) => a + (b - a) * t;
 
 const readSceneDarkness01 = () => {
   try {
@@ -90,6 +131,15 @@ export class WindowLightEffectV2 {
     this._activeFloorIndex = 0;
     /** @type {number|null} Per-pass render floor override (set by FloorCompositor). */
     this._renderFloorIndex = null;
+    /**
+     * When {@link #setRenderFloorIndex} passes a finite floor index:
+     * - false (stack): show overlays for this floor and every floor below — used for shadow-light
+     *   prepasses so lower-storey windows still participate in lift masks.
+     * - true (slice): show overlays only for exactly that floor — matches {@link FloorCompositor}'s
+     *   per-level scene RT so downstairs windows do not illuminate upstairs albedo.
+     * @type {boolean}
+     */
+    this._renderFloorSliceStrict = false;
 
     /**
      * Per-tile overlay entries.
@@ -100,7 +150,13 @@ export class WindowLightEffectV2 {
     /** @type {object|null} */
     this._sharedUniforms = null;
 
-    /** @type {{ skyTintColor: {r:number,g:number,b:number}, sunAzimuthDeg: number, skyIntensity01: number, sceneDarkness01: (number|null), effectiveDarkness01: (number|null), skyTintDarknessLightsEnabled: (boolean|null), skyTintDarknessLightsIntensity: (number|null) }} */
+    /** @type {THREE.Texture|null} Active-floor `_Outdoors` mask (white = outdoor). */
+    this._outdoorsMask = null;
+
+    /** @type {WeakSet<object>} Tracks normalized outdoors mask textures. */
+    this._normalizedOutdoorsTextures = new WeakSet();
+
+    /** @type {{ skyTintColor: {r:number,g:number,b:number}, sunAzimuthDeg: number, skyIntensity01: number, sceneDarkness01: (number|null), effectiveDarkness01: (number|null), skyTintDarknessLightsEnabled: (boolean|null), skyTintDarknessLightsIntensity: (number|null), todCameraTimelineActive: boolean, todCameraTintColor: {r:number,g:number,b:number} }} */
     this._skyState = {
       skyTintColor: { r: 1.0, g: 1.0, b: 1.0 },
       sunAzimuthDeg: 180.0,
@@ -109,12 +165,14 @@ export class WindowLightEffectV2 {
       effectiveDarkness01: null,
       skyTintDarknessLightsEnabled: null,
       skyTintDarknessLightsIntensity: null,
+      todCameraTimelineActive: false,
+      todCameraTintColor: { r: 1.0, g: 1.0, b: 1.0 },
     };
 
     this.params = {
       hasWindowMask: false,
       enabled: true,
-      intensity: 2.1,
+      intensity: 2.0,
       falloff: 1.5,
       color: { r: 1.0, g: 0.96, b: 0.85 },
       lightOverheadTiles: true,
@@ -129,7 +187,9 @@ export class WindowLightEffectV2 {
       cloudShadowGamma: 2.28,
       cloudShadowMinLight: 0.0,
       useSkyTint: true,
-      skyTintStrength: 0.25,
+      skyTintStrength: 0.05,
+      useTodCameraTint: true,
+      todCameraTintStrength: 5.0,
       nightDimming: 0.1,
       sunLightEnabled: true,
       sunLightLength: 0.0,
@@ -145,6 +205,10 @@ export class WindowLightEffectV2 {
       rgbShiftAmount: 3.75,  // pixels
       rgbShiftAngle: 120.0,  // degrees
     };
+
+    for (let i = 0; i < TOD_ANCHOR_COUNT; i++) {
+      this.params[`tod${i}IntensityPercent`] = 100.0;
+    }
 
     /**
      * Last foundrySceneData passed into populate(). Used for one-time
@@ -176,6 +240,20 @@ export class WindowLightEffectV2 {
 
   // ── Public API ─────────────────────────────────────────────────────────────
 
+  /**
+   * Master intensity × blended time-of-day percentage (0–200% anchors).
+   * @param {number} [hourRaw] Scene clock hour; defaults to WeatherController time.
+   * @returns {number}
+   */
+  getEffectiveIntensity(hourRaw) {
+    const master = Math.max(0.0, Number(this.params.intensity) || 0);
+    const hour = hourRaw !== undefined
+      ? hourRaw
+      : (Number(weatherController?.timeOfDay) ?? 12.0);
+    const todMul = this._evaluateTodIntensityMultiplier(hour);
+    return master * todMul;
+  }
+
   get enabled() { return this._enabled; }
   set enabled(v) {
     this._enabled = !!v;
@@ -186,6 +264,24 @@ export class WindowLightEffectV2 {
   // ── UI schema (moved from V1 WindowLightEffect) ───────────────────────────
 
   static getControlSchema() {
+    const todIntensityParams = {};
+    const todIntensityParamKeys = [];
+    for (const meta of TOD_ANCHOR_META) {
+      const i = meta.index;
+      const key = `tod${i}IntensityPercent`;
+      todIntensityParamKeys.push(key);
+      todIntensityParams[key] = {
+        type: 'slider',
+        label: `${meta.label} strength (%)`,
+        min: 0.0,
+        max: 200.0,
+        step: 1.0,
+        default: 100.0,
+        throttle: 50,
+        tooltip: `Window light at ~${meta.clockHint} as a percentage of master intensity. Blends smoothly between anchors as scene time advances.`,
+      };
+    }
+
     return {
       enabled: true,
       help: {
@@ -195,16 +291,25 @@ export class WindowLightEffectV2 {
           'Sky tint and cloud dimming make windows feel connected to day, night, and weather. Keep those moderate so Color Correction remains the final grade owner.'
         ].join('\n\n'),
         glossary: {
-          Intensity: 'Linear window glow energy before lighting composition.',
+          'Master intensity': 'Overall window glow scale. Time-of-day percentages multiply this value.',
+          'Time of day %': 'Per-anchor strength as a percentage of master intensity. Anchors blend smoothly around the 24h clock (same eight slots as Color Correction).',
           'Sky tint': 'How much computed sky color warms/cools window light.',
+          'ToD camera tint': 'Multiplies window light by the Color Correction time-of-day camera timeline global tint when that timeline is enabled.',
           'Night dimming': 'How strongly LightingDirector darkness reduces windows at night.'
         },
       },
       groups: [
         { name: 'status', label: 'Effect Status', type: 'inline', parameters: ['textureStatus'] },
         { name: 'lighting', label: 'Window Light', type: 'folder', expanded: true, parameters: ['intensity', 'falloff', 'color'] },
+        {
+          name: 'todIntensity',
+          label: 'Time of Day Intensity',
+          type: 'folder',
+          expanded: false,
+          parameters: todIntensityParamKeys,
+        },
         { name: 'sunTracking', label: 'Sun Tracking', type: 'folder', expanded: false, parameters: ['sunLightEnabled', 'sunLightLength'] },
-        { name: 'environment', label: 'Environment', type: 'folder', expanded: false, parameters: ['cloudInfluence', 'nightDimming', 'useSkyTint', 'skyTintStrength'] },
+        { name: 'environment', label: 'Environment', type: 'folder', expanded: false, parameters: ['cloudInfluence', 'nightDimming', 'useSkyTint', 'skyTintStrength', 'useTodCameraTint', 'todCameraTintStrength'] },
         { name: 'cloudShadows', label: 'Cloud Shadows', type: 'folder', expanded: false, parameters: ['cloudShadowContrast', 'cloudShadowBias', 'cloudShadowGamma', 'cloudShadowMinLight'] },
         { name: 'refraction', label: 'Refraction (RGB)', type: 'folder', expanded: false, parameters: ['rgbShiftAmount', 'rgbShiftAngle'] },
         { name: 'overheads', label: 'Overhead Tile Lighting', type: 'folder', expanded: false, parameters: ['lightOverheadTiles', 'overheadLightIntensity'] },
@@ -224,13 +329,24 @@ export class WindowLightEffectV2 {
       parameters: {
         hasWindowMask: { type: 'boolean', default: true, hidden: true },
         textureStatus: { type: 'string', label: 'Mask Status', default: 'Checking...', readonly: true },
-        intensity: { type: 'slider', label: 'Intensity', min: 0.0, max: 4.0, step: 0.05, default: 2.1, tooltip: 'Linear window glow energy. Values above 2 are stylized in the HDR pipeline.' },
+        intensity: {
+          type: 'slider',
+          label: 'Master Intensity',
+          min: 0.0,
+          max: 4.0,
+          step: 0.05,
+          default: 2.0,
+          tooltip: 'Overall linear window glow energy. Each time-of-day anchor applies a percentage of this value.',
+        },
+        ...todIntensityParams,
         falloff: { type: 'slider', label: 'Falloff (Gamma)', min: 0.5, max: 5.0, step: 0.05, default: 1.5 },
         color: { type: 'color', label: 'Light Color', default: { r: 1.0, g: 0.96, b: 0.85 } },
         cloudInfluence: { type: 'slider', label: 'Cloud Dimming', min: 0.0, max: 1.0, step: 0.01, default: 1.0 },
         nightDimming: { type: 'slider', label: 'Night Dimming', min: 0.0, max: 2.0, step: 0.01, default: 0.1 },
         useSkyTint: { type: 'boolean', label: 'Use Sky Tint', default: true },
-        skyTintStrength: { type: 'slider', label: 'Sky Tint Strength', min: 0.0, max: 5.0, step: 0.01, default: 0.25, tooltip: 'Moderate sky color coupling for weather/night ambience without replacing Camera Grade.' },
+        skyTintStrength: { type: 'slider', label: 'Sky Tint Strength', min: 0.0, max: 5.0, step: 0.01, default: 0.05, tooltip: 'Moderate sky color coupling for weather/night ambience without replacing Camera Grade.' },
+        useTodCameraTint: { type: 'boolean', label: 'Use ToD Camera Tint', default: true, tooltip: 'When Color Correction time-of-day camera timeline is on, multiply window light by the timeline global tint (same style as the CC grade).' },
+        todCameraTintStrength: { type: 'slider', label: 'ToD Camera Tint Strength', min: 0.0, max: 5.0, step: 0.01, default: 5.0, throttle: 50, tooltip: 'Intensity of the timeline tint on window light (0 = no effect). Independent from Sky Tint Strength.' },
         cloudShadowContrast: { type: 'slider', label: 'Shadow Contrast', min: 0.0, max: 4.0, step: 0.01, default: 0.9 },
         cloudShadowBias: { type: 'slider', label: 'Shadow Bias', min: -1.0, max: 1.0, step: 0.01, default: 0.05 },
         cloudShadowGamma: { type: 'slider', label: 'Shadow Gamma', min: 0.1, max: 4.0, step: 0.01, default: 2.28 },
@@ -398,15 +514,17 @@ export class WindowLightEffectV2 {
   }
 
   /**
-   * Set/clear the current render floor index for per-level lighting passes.
-   * When finite, this shows the slice floor and any lower-floor window overlays.
-   * Roof/ceiling transmittance remains responsible for blocking naturally
-   * occluded lower-floor glow.
+   * Set/clear the current render floor index for lighting/shadow passes.
+   *
    * @param {number|null} floorIndex
+   * @param {boolean} [sliceStrict=false] When true with a finite index, only window overlays on that
+   *   floor are visible (per-level lighting slice). When false, overlays on this floor and all lower
+   *   floors are visible (stack semantics — shadow prepass).
    */
-  setRenderFloorIndex(floorIndex = null) {
+  setRenderFloorIndex(floorIndex = null, sliceStrict = false) {
     const next = Number(floorIndex);
     this._renderFloorIndex = Number.isFinite(next) ? next : null;
+    this._renderFloorSliceStrict = Number.isFinite(next) ? !!sliceStrict : false;
     for (const entry of this._overlays.values()) {
       entry.mesh.visible = this._isFloorVisible(entry.floorIndex);
     }
@@ -458,11 +576,21 @@ export class WindowLightEffectV2 {
           if (!src) continue;
           const levelId = (level?.id != null) ? String(level.id) : '';
           const mappedFloorIndex = levelId ? floorIndexByLevelId.get(levelId) : undefined;
-          const floorIndex = Number.isFinite(Number(mappedFloorIndex))
-            ? Number(mappedFloorIndex)
-            : i;
-          const keyIndex = Math.max(0, Math.floor(Number(level?.index)));
+          const docIdx = Number(level?.index);
+          const keyIndex = Number.isFinite(docIdx)
+            ? Math.max(0, Math.floor(docIdx))
+            : Math.max(0, Math.floor(Number(mappedFloorIndex) || 0));
           const key = (keyIndex === 0) ? '__bg_image__' : `__bg_image__${keyIndex}`;
+          // Same band index as PaintedShadow `_resolveBasePathForFloorIndex` / bus keys — Foundry level.index,
+          // not the loop ordinal (indices may be non-contiguous).
+          let floorIndex;
+          if (Number.isFinite(docIdx)) {
+            floorIndex = Math.max(0, Math.floor(docIdx));
+          } else if (Number.isFinite(Number(mappedFloorIndex))) {
+            floorIndex = Number(mappedFloorIndex);
+          } else {
+            floorIndex = i;
+          }
           bgEntries.push({ src, floorIndex, key });
         }
       }
@@ -500,8 +628,7 @@ export class WindowLightEffectV2 {
       const centerX = sceneX + sceneW / 2;
       const centerY = worldH - (sceneY + sceneH / 2);
 
-      const GROUND_Z = 1000;
-      const z = GROUND_Z + bgFloorIndex + WINDOW_Z_OFFSET;
+      const z = GROUND_Z + bgFloorIndex - 1 + WINDOW_Z_OFFSET;
 
       this._createOverlay(bgId, bgFloorIndex, {
         maskUrl: bgMaskPath,
@@ -557,7 +684,6 @@ export class WindowLightEffectV2 {
         ? (tileDoc.rotation * Math.PI) / 180 : 0;
 
       // Z in bus coordinates.
-      const GROUND_Z = 1000;
       const z = GROUND_Z + floorIndex + WINDOW_Z_OFFSET;
       // Apply overhead intensity uniformly to overhead overlays so the UI slider
       // has an immediate visible effect regardless of floor semantics.
@@ -638,7 +764,7 @@ export class WindowLightEffectV2 {
     if (!u) return;
 
     u.uEffectEnabled.value = !!this._enabled;
-    u.uIntensity.value = Math.max(0.0, Number(this.params.intensity) || 0);
+    u.uIntensity.value = this.getEffectiveIntensity();
     u.uFalloff.value = Math.max(0.01, Number(this.params.falloff) || 1);
 
     const c = this.params.color;
@@ -672,6 +798,19 @@ export class WindowLightEffectV2 {
     u.uUseSkyTint.value = (this.params.useSkyTint && skyTintBySkyColorEnabled) ? 1.0 : 0.0;
     const skyIntensity01 = clamp01(this._skyState.skyIntensity01);
     u.uSkyTintStrength.value = Math.max(0.0, Number(this.params.skyTintStrength) || 0.0) * skyIntensity01 * skyTintBySkyColorMul;
+
+    const todTint = this._skyState.todCameraTintColor;
+    const ttr = Number(todTint.r);
+    const ttg = Number(todTint.g);
+    const ttb = Number(todTint.b);
+    u.uTodCameraTintColor.value.setRGB(
+      Number.isFinite(ttr) ? ttr : 1.0,
+      Number.isFinite(ttg) ? ttg : 1.0,
+      Number.isFinite(ttb) ? ttb : 1.0
+    );
+    const todCamActive = this._skyState.todCameraTimelineActive === true && this.params.useTodCameraTint !== false;
+    u.uTodCameraTintActive.value = todCamActive ? 1.0 : 0.0;
+    u.uTodCameraTintStrength.value = Math.max(0.0, Number(this.params.todCameraTintStrength) || 0.0);
 
     // Phase 3: prefer the externally-injected sky state when available so a
     // single orchestrator can override per-frame, otherwise fall through to
@@ -748,6 +887,8 @@ export class WindowLightEffectV2 {
       const overlayUniform = entry.material?.uniforms?.uOverlayIntensity;
       if (overlayUniform) overlayUniform.value = overlayIntensity;
     }
+
+    this._updateSceneBounds();
   }
 
   /**
@@ -762,13 +903,15 @@ export class WindowLightEffectV2 {
   }
 
   /**
-   * Receives environment data from FloorCompositor/SkyColorEffectV2.
+   * Receives environment data from FloorCompositor (SkyColor + Color Correction ToD).
    * @param {{
    *   skyTintColor?: {r:number,g:number,b:number},
    *   sunAzimuthDeg?: number,
    *   skyIntensity01?: number,
    *   sceneDarkness01?: number,
-   *   effectiveDarkness01?: number
+   *   effectiveDarkness01?: number,
+   *   todCameraTimelineActive?: boolean,
+   *   todCameraTintColor?: {r:number,g:number,b:number},
    * }} state
    */
   setSkyState(state = {}) {
@@ -802,6 +945,20 @@ export class WindowLightEffectV2 {
     this._skyState.skyTintDarknessLightsIntensity = Number.isFinite(Number(state.skyTintDarknessLightsIntensity))
       ? Number(state.skyTintDarknessLightsIntensity)
       : null;
+
+    if (typeof state.todCameraTimelineActive === 'boolean') {
+      this._skyState.todCameraTimelineActive = state.todCameraTimelineActive;
+    }
+    if (state.todCameraTintColor && typeof state.todCameraTintColor === 'object') {
+      const tr = Number(state.todCameraTintColor.r);
+      const tg = Number(state.todCameraTintColor.g);
+      const tb = Number(state.todCameraTintColor.b);
+      this._skyState.todCameraTintColor = {
+        r: Number.isFinite(tr) ? tr : 1.0,
+        g: Number.isFinite(tg) ? tg : 1.0,
+        b: Number.isFinite(tb) ? tb : 1.0,
+      };
+    }
   }
 
   /**
@@ -827,8 +984,12 @@ export class WindowLightEffectV2 {
    * This prevents non-overhead window overlays (e.g. background windows) from
    * leaking light onto pixels currently covered by visible overhead tiles.
    * Roof/ceiling screen UVs use `uScreenSize`, which is set only in
-   * {@link LightingEffectV2}'s `onBindWindowLightPass` (actual `_windowLightRT` size)
-   * so `gl_FragCoord` always matches the bound RT. This method binds the texture only.
+ * Sky tint comes from {@link FloorCompositor} via {@link #setSkyState} (SkyColor).
+ * When Color Correction time-of-day camera timeline is enabled, the same frame also
+ * injects the timeline global tint multiplier so window glow tracks graded day/night.
+ *
+ * {@link LightingEffectV2}'s `onBindWindowLightPass` (actual `_windowLightRT` size)
+ * so `gl_FragCoord` always matches the bound RT. This method binds the texture only.
    * @param {THREE.Texture|null} texture
    * @param {number} screenW - Reserved for API compatibility (ignored).
    * @param {number} screenH - Reserved for API compatibility (ignored).
@@ -850,6 +1011,21 @@ export class WindowLightEffectV2 {
     if (!u) return;
     if (u.uCeilingTransmittance) u.uCeilingTransmittance.value = texture ?? null;
     if (u.uHasCeilingTransmittance) u.uHasCeilingTransmittance.value = texture ? 1.0 : 0.0;
+  }
+
+  /**
+   * Bind the active-floor `_Outdoors` mask so window glow is limited to indoor pixels.
+   * White/outdoor regions are discarded in the overlay shader.
+   * @param {THREE.Texture|null} texture
+   */
+  setOutdoorsMask(texture) {
+    this._outdoorsMask = texture ?? null;
+    const u = this._sharedUniforms;
+    if (!u) return;
+    if (texture) this._normalizeOutdoorsMaskTexture(texture);
+    u.uOutdoorsMask.value = texture ?? null;
+    u.uHasOutdoorsMask.value = texture ? 1.0 : 0.0;
+    u.uOutdoorsMaskFlipY.value = texture?.flipY ? 1.0 : 0.0;
   }
 
   /**
@@ -879,6 +1055,97 @@ export class WindowLightEffectV2 {
 
   // ── Internals ──────────────────────────────────────────────────────────────
 
+  /**
+   * @private
+   * @param {THREE.Texture|null|undefined} texture
+   */
+  _normalizeOutdoorsMaskTexture(texture) {
+    const tex = texture;
+    if (!tex || this._normalizedOutdoorsTextures.has(tex)) return;
+    const THREE = window.THREE;
+    if (!THREE) return;
+    let texChanged = false;
+    if (tex.wrapS !== THREE.ClampToEdgeWrapping) { tex.wrapS = THREE.ClampToEdgeWrapping; texChanged = true; }
+    if (tex.wrapT !== THREE.ClampToEdgeWrapping) { tex.wrapT = THREE.ClampToEdgeWrapping; texChanged = true; }
+    if (tex.minFilter !== THREE.LinearFilter) { tex.minFilter = THREE.LinearFilter; texChanged = true; }
+    if (tex.magFilter !== THREE.LinearFilter) { tex.magFilter = THREE.LinearFilter; texChanged = true; }
+    if (tex.generateMipmaps !== false) { tex.generateMipmaps = false; texChanged = true; }
+    if (texChanged) tex.needsUpdate = true;
+    this._normalizedOutdoorsTextures.add(tex);
+  }
+
+  /** @private */
+  _updateSceneBounds() {
+    const u = this._sharedUniforms;
+    if (!u?.uSceneBounds || !u?.uSceneDimensions) return;
+
+    const fd = window.MapShine?.sceneComposer?.foundrySceneData ?? null;
+    if (fd && Number(fd.height) > 0 && Number(fd.width) > 0) {
+      u.uSceneBounds.value.set(
+        Number(fd.sceneX ?? 0),
+        Number(fd.sceneY ?? 0),
+        Number(fd.sceneWidth ?? fd.width ?? 1),
+        Number(fd.sceneHeight ?? fd.height ?? 1),
+      );
+      u.uSceneDimensions.value.set(Number(fd.width), Number(fd.height));
+      return;
+    }
+
+    const dims = canvas?.dimensions;
+    if (!dims) return;
+    const rect = dims.sceneRect;
+    u.uSceneBounds.value.set(
+      rect?.x ?? 0,
+      rect?.y ?? 0,
+      rect?.width ?? dims.width ?? 1,
+      rect?.height ?? dims.height ?? 1,
+    );
+    u.uSceneDimensions.value.set(dims.width ?? 1, dims.height ?? 1);
+  }
+
+  /** @private */
+  _readTodIntensityPercent(index) {
+    const key = `tod${index}IntensityPercent`;
+    const raw = Number(this.params[key]);
+    if (!Number.isFinite(raw)) return 100.0;
+    return Math.max(0.0, Math.min(200.0, raw));
+  }
+
+  /**
+   * Smooth 24h blend of per-anchor intensity percentages (returns 0–2 for 0–200%).
+   * @private
+   */
+  _evaluateTodIntensityMultiplier(hourRaw) {
+    const hour = wrapHour24(hourRaw);
+    const anchors = DEFAULT_TOD_ANCHOR_HOURS.map((anchorHour, index) => ({
+      hour: anchorHour,
+      percent: this._readTodIntensityPercent(index),
+    }));
+    anchors.sort((a, b) => a.hour - b.hour);
+
+    let prev = anchors[anchors.length - 1];
+    let next = anchors[0];
+    for (let i = 0; i < anchors.length; i++) {
+      const a = anchors[i];
+      const b = anchors[(i + 1) % anchors.length];
+      const bHour = i === anchors.length - 1 ? b.hour + 24 : b.hour;
+      const h = hour < a.hour ? hour + 24 : hour;
+      if (h >= a.hour && h <= bHour) {
+        prev = a;
+        next = b;
+        break;
+      }
+    }
+
+    const prevHour = prev.hour;
+    const nextHour = next.hour <= prevHour ? next.hour + 24 : next.hour;
+    const sampleHour = hour < prevHour ? hour + 24 : hour;
+    const span = Math.max(0.0001, nextHour - prevHour);
+    const t = smooth01((sampleHour - prevHour) / span);
+    const blendedPercent = lerp(prev.percent, next.percent, t);
+    return blendedPercent / 100.0;
+  }
+
   _buildSharedUniforms() {
     const THREE = window.THREE;
     if (!THREE) return;
@@ -900,6 +1167,9 @@ export class WindowLightEffectV2 {
       uSkyTintColor: { value: new THREE.Color(1, 1, 1) },
       uUseSkyTint: { value: this.params.useSkyTint ? 1.0 : 0.0 },
       uSkyTintStrength: { value: Math.max(0.0, Number(this.params.skyTintStrength) || 0.0) },
+      uTodCameraTintColor: { value: new THREE.Color(1, 1, 1) },
+      uTodCameraTintActive: { value: 0.0 },
+      uTodCameraTintStrength: { value: Math.max(0.0, Number(this.params.todCameraTintStrength) || 0.0) },
       uNightFactor: { value: 1.0 },
       uSunDir: { value: new THREE.Vector2(0, -1) },
       uSunTrackEnabled: { value: this.params.sunLightEnabled ? 1.0 : 0.0 },
@@ -929,6 +1199,11 @@ export class WindowLightEffectV2 {
       // RGB shift (chromatic dispersion) — pixel offset split into R/B channels.
       uRgbShiftAmount: { value: Math.max(0.0, Number(this.params.rgbShiftAmount) || 0) },
       uRgbShiftAngle: { value: (Number(this.params.rgbShiftAngle) || 0) * (Math.PI / 180.0) },
+      uOutdoorsMask: { value: null },
+      uHasOutdoorsMask: { value: 0.0 },
+      uOutdoorsMaskFlipY: { value: 0.0 },
+      uSceneBounds: { value: new THREE.Vector4(0, 0, 1, 1) },
+      uSceneDimensions: { value: new THREE.Vector2(1, 1) },
       // uWindowTexelSize and uMask are per-overlay only (set in _createOverlay).
     };
   }
@@ -958,7 +1233,15 @@ export class WindowLightEffectV2 {
       uAllowRoofGate: { value: isOverhead ? 0.0 : 1.0 },
       // 1/texWidth, 1/texHeight — set once texture loads.
       uWindowTexelSize: { value: new THREE.Vector2(1.0 / w, 1.0 / h) },
+      // World-space delta per +1.0 in overlay UV (accounts for tile size + rotation).
+      uWorldPerUvX: { value: new THREE.Vector2(w, 0) },
+      uWorldPerUvY: { value: new THREE.Vector2(0, h) },
     };
+
+    const cosR = Math.cos(rotation);
+    const sinR = Math.sin(rotation);
+    uniforms.uWorldPerUvX.value.set(cosR * w, sinR * w);
+    uniforms.uWorldPerUvY.value.set(-sinR * h, cosR * h);
 
     const material = new THREE.ShaderMaterial({
       uniforms,
@@ -968,8 +1251,11 @@ export class WindowLightEffectV2 {
       blending: THREE.AdditiveBlending,
       vertexShader: /* glsl */`
         varying vec2 vUv;
+        varying vec2 vWorldXY;
         void main() {
           vUv = uv;
+          vec4 worldPos = modelMatrix * vec4(position, 1.0);
+          vWorldXY = worldPos.xy;
           gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
         }
       `,
@@ -985,6 +1271,9 @@ export class WindowLightEffectV2 {
         uniform vec3  uSkyTintColor;
         uniform float uUseSkyTint;
         uniform float uSkyTintStrength;
+        uniform vec3  uTodCameraTintColor;
+        uniform float uTodCameraTintActive;
+        uniform float uTodCameraTintStrength;
         uniform float uNightFactor;
         uniform vec2  uSunDir;
         uniform float uSunTrackEnabled;
@@ -1017,12 +1306,55 @@ export class WindowLightEffectV2 {
         uniform float uIsOverheadOverlay;
         uniform float uAllowRoofGate;
         uniform vec2  uWindowTexelSize;
+        uniform vec2  uWorldPerUvX;
+        uniform vec2  uWorldPerUvY;
         uniform sampler2D uMask;
         uniform float uMaskReady;
+        uniform sampler2D uOutdoorsMask;
+        uniform float uHasOutdoorsMask;
+        uniform float uOutdoorsMaskFlipY;
+        uniform vec4 uSceneBounds;
+        uniform vec2 uSceneDimensions;
         varying vec2 vUv;
+        varying vec2 vWorldXY;
 
         float msLuminance(vec3 c) {
           return dot(c, vec3(0.2126, 0.7152, 0.0722));
+        }
+
+        vec2 worldToSceneUv(vec2 worldXY) {
+          float foundryY = uSceneDimensions.y - worldXY.y;
+          return vec2(
+            (worldXY.x - uSceneBounds.x) / max(uSceneBounds.z, 1.0),
+            (foundryY - uSceneBounds.y) / max(uSceneBounds.w, 1.0)
+          );
+        }
+
+        float sampleOutdoorStrength(vec2 sceneUvFoundry, float inScene) {
+          if (uHasOutdoorsMask < 0.5) return 0.0;
+          // Outside the authored scene rect: never emit window glow.
+          if (inScene < 0.5) return 1.0;
+          vec2 maskUv = clamp(sceneUvFoundry, 0.0, 1.0);
+          if (uOutdoorsMaskFlipY > 0.5) maskUv.y = 1.0 - maskUv.y;
+          vec4 od = texture2D(uOutdoorsMask, maskUv);
+          float outdoorRaw = clamp(max(od.r, max(od.g, od.b)), 0.0, 1.0);
+          float outdoorMid = smoothstep(0.18, 0.82, outdoorRaw);
+          float outdoorClass = (outdoorRaw <= 0.10) ? 0.0 : ((outdoorRaw >= 0.90) ? 1.0 : outdoorMid);
+          float outdoorsAlphaValid = step(0.5, clamp(od.a, 0.0, 1.0));
+          float isOutdoor = mix(1.0, outdoorClass, outdoorsAlphaValid);
+          return isOutdoor;
+        }
+
+        vec2 uvOffsetToWorld(vec2 uvDelta) {
+          return uWorldPerUvX * uvDelta.x + uWorldPerUvY * uvDelta.y;
+        }
+
+        float outdoorStrengthAtWorld(vec2 worldXY) {
+          vec2 sceneUvRaw = worldToSceneUv(worldXY);
+          float inSceneBounds =
+            step(0.0, sceneUvRaw.x) * step(sceneUvRaw.x, 1.0) *
+            step(0.0, sceneUvRaw.y) * step(sceneUvRaw.y, 1.0);
+          return sampleOutdoorStrength(sceneUvRaw, inSceneBounds);
         }
 
         float msHash12(vec2 p) {
@@ -1036,8 +1368,6 @@ export class WindowLightEffectV2 {
           // white-tile flash caused by sampling a null/uninitialized sampler.
           if (uEffectEnabled < 0.5 || uMaskReady < 0.5) discard;
 
-          // Boundary alpha check at the unshifted UV — cuts out areas outside
-          // the map tile footprint.
           vec2 sunOffset = (uSunTrackEnabled > 0.5) ? (uSunDir * uSunLightLength) : vec2(0.0);
           vec2 rainDir = normalize((length(uRainDir) > 0.001) ? uRainDir : vec2(0.0, -1.0));
           float rainPhase = uTime * max(uRainSpeed, 0.001);
@@ -1045,8 +1375,18 @@ export class WindowLightEffectV2 {
           float rainNoise = msHash12(floor(rainNoiseUv));
           float rainStrand = smoothstep(0.78, 0.98, rainNoise) * clamp(uRainAmount, 0.0, 1.0);
           vec2 rainOffset = rainDir * (uRainMaxOffsetPx * rainStrand) * uWindowTexelSize;
+          vec2 maskOffsetUv = sunOffset + rainOffset;
 
-          vec2 baseUv = clamp(vUv + sunOffset + rainOffset, 0.001, 0.999);
+          // _Outdoors: gate both the floor pixel (destination) and the world
+          // position that owns the shifted mask sample (sun/rain scroll the mask
+          // under the quad — without this, indoor mask texels paint onto outdoor ground).
+          float outdoorAtDest = outdoorStrengthAtWorld(vWorldXY);
+          float outdoorAtSrc = outdoorStrengthAtWorld(vWorldXY + uvOffsetToWorld(maskOffsetUv));
+          if (max(outdoorAtDest, outdoorAtSrc) > 0.45) discard;
+
+          // Boundary alpha check at the shifted UV — cuts out areas outside
+          // the map tile footprint.
+          vec2 baseUv = clamp(vUv + maskOffsetUv, 0.001, 0.999);
           vec4 mCenter = texture2D(uMask, baseUv);
           // Strict alpha coverage: transparent mask pixels emit no light.
           // This prevents full-tile leakage when RGB contains residual values
@@ -1086,6 +1426,14 @@ export class WindowLightEffectV2 {
           // Apply falloff per-channel so mask tint and RGB split remain visible.
           vec3 shaped = pow(clamp(maskRgb, 0.0, 1.0), vec3(uFalloff)) * clamp(alphaGate, 0.0, 1.0);
 
+          // Per-channel outdoors at each mask tap (RGB shift uses extra UV offsets).
+          vec3 indoorGate = vec3(
+            1.0 - step(0.45, outdoorStrengthAtWorld(vWorldXY + uvOffsetToWorld(maskOffsetUv + rOffset))),
+            1.0 - step(0.45, outdoorStrengthAtWorld(vWorldXY + uvOffsetToWorld(maskOffsetUv))),
+            1.0 - step(0.45, outdoorStrengthAtWorld(vWorldXY + uvOffsetToWorld(maskOffsetUv + bOffset)))
+          );
+          shaped *= indoorGate;
+
           // Optional subtle flicker.
           float flicker = 1.0;
           if (uFlickerEnabled > 0.5) {
@@ -1109,6 +1457,13 @@ export class WindowLightEffectV2 {
           float warmDayFactor = clamp((uNightFactor - 0.45) / 0.55, 0.0, 1.0);
           vec3 daylightWarmTint = vec3(1.05, 1.0, 0.94);
           vec3 envTintColor = mix(tintColor, tintColor * daylightWarmTint, 0.16 * warmDayFactor);
+
+          vec3 todTint = clamp(uTodCameraTintColor, vec3(0.0), vec3(10.0));
+          float todMix = (uTodCameraTintActive > 0.5)
+            ? (1.0 - exp(-max(uTodCameraTintStrength, 0.0) * 0.42))
+            : 0.0;
+          vec3 todMul = mix(vec3(1.0), todTint, clamp(todMix, 0.0, 1.0));
+          envTintColor *= todMul;
 
           float cloudDimming = mix(1.0, clamp(uCloudFactor, 0.0, 1.0), clamp(uCloudInfluence, 0.0, 1.0));
           float cloudShadow = 1.0;
@@ -1263,7 +1618,10 @@ export class WindowLightEffectV2 {
 
   _isFloorVisible(floorIndex) {
     const renderFloor = Number(this._renderFloorIndex);
-    if (Number.isFinite(renderFloor)) return Number(floorIndex) <= renderFloor;
+    if (Number.isFinite(renderFloor)) {
+      if (this._renderFloorSliceStrict) return Number(floorIndex) === renderFloor;
+      return Number(floorIndex) <= renderFloor;
+    }
     const active = Number.isFinite(this._activeFloorIndex) ? this._activeFloorIndex : 0;
     // Mirror FloorRenderBus.setVisibleFloors(): show all floors up to the
     // currently visible max floor in normal (non per-slice) mode.

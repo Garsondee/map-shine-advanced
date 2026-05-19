@@ -15,6 +15,7 @@
 import { createLogger } from '../../core/log.js';
 import { weatherController } from '../../core/WeatherController.js';
 import { tileDocRestrictsLight } from '../../scene/tile-manager.js';
+import { resolveEffectEnabled } from '../../effects/resolve-effect-enabled.js';
 
 const log = createLogger('OverheadStampEffect');
 
@@ -142,7 +143,7 @@ export class OverheadStampEffectV2 {
       tileProjectionSoftness: 3.0,
       tileProjectionThreshold: 0.05,
       tileProjectionPower: 1.0,
-      tileProjectionOutdoorOpacityScale: 0.10,
+      tileProjectionOutdoorOpacityScale: 0.75,
       tileProjectionIndoorOpacityScale: 1.0,
       tileProjectionSortBias: 0.002,
       fluidColorEnabled: true,
@@ -792,6 +793,7 @@ export class OverheadStampEffectV2 {
    * @returns {THREE.Texture|null}
    */
   get shadowFactorTexture() {
+    if (!resolveEffectEnabled(this)) return null;
     return this.shadowTarget?.texture || null;
   }
 
@@ -802,6 +804,7 @@ export class OverheadStampEffectV2 {
    * @returns {THREE.Texture|null}
    */
   get roofAlphaTexture() {
+    if (!resolveEffectEnabled(this)) return null;
     return this.roofVisibilityTarget?.texture || null;
   }
 
@@ -812,6 +815,7 @@ export class OverheadStampEffectV2 {
    * @returns {THREE.Texture|null}
    */
   get roofBlockTexture() {
+    if (!resolveEffectEnabled(this)) return null;
     return this.roofBlockTarget?.texture || null;
   }
 
@@ -820,6 +824,7 @@ export class OverheadStampEffectV2 {
    * @returns {THREE.Texture|null}
    */
   get roofRestrictLightTexture() {
+    if (!resolveEffectEnabled(this)) return null;
     return this.roofRestrictLightTarget?.texture || null;
   }
 
@@ -829,6 +834,7 @@ export class OverheadStampEffectV2 {
    * @returns {THREE.Texture|null}
    */
   get rainOcclusionVisibilityTexture() {
+    if (!resolveEffectEnabled(this)) return null;
     return this.rainOcclusionVisibilityTarget?.texture || null;
   }
 
@@ -838,6 +844,7 @@ export class OverheadStampEffectV2 {
    * @returns {THREE.Texture|null}
    */
   get rainOcclusionBlockTexture() {
+    if (!resolveEffectEnabled(this)) return null;
     return this.rainOcclusionBlockTarget?.texture || null;
   }
 
@@ -1129,7 +1136,7 @@ export class OverheadStampEffectV2 {
           min: 0.0,
           max: 2.0,
           step: 0.01,
-          default: 0.10,
+          default: 0.75,
           tooltip: 'Additional multiplier applied to tile-projected shadow strength on outdoor receivers'
         },
         tileProjectionIndoorOpacityScale: {
@@ -2328,6 +2335,27 @@ export class OverheadStampEffectV2 {
   }
 
   /**
+   * Resolve Foundry tile id from bus mesh/material hierarchy.
+   * @param {THREE.Object3D|null|undefined} object
+   * @returns {string|null}
+   * @private
+   */
+  _resolveFoundryTileId(object) {
+    if (!object) return null;
+    const direct = object.userData?.foundryTileId;
+    if (direct) return String(direct);
+    const matId = object.material?.userData?.foundryTileId;
+    if (matId) return String(matId);
+    let parent = object.parent;
+    for (let depth = 0; parent && depth < 4; depth += 1) {
+      const pid = parent.userData?.foundryTileId;
+      if (pid) return String(pid);
+      parent = parent.parent;
+    }
+    return null;
+  }
+
+  /**
    * Normalize a sort key into [0,1] for alpha-encoded sort passes.
    * @param {number} sortKey
    * @param {number} sortMin
@@ -2394,7 +2422,7 @@ export class OverheadStampEffectV2 {
    * east/west shadow offset on a full daily orbit.
    */
   update(timeInfo) {
-    if (!this.material || !this.params.enabled) return;
+    if (!this.material || !resolveEffectEnabled(this)) return;
 
     const THREE = window.THREE;
     if (!THREE) return;
@@ -2759,6 +2787,7 @@ export class OverheadStampEffectV2 {
     const w = Math.floor(size.x);
     const h = Math.floor(size.y);
     const enabled = this.params.enabled ? 1 : 0;
+    const motionSig = this._tileMotionManager?.getActiveMotionCaptureSig?.() ?? '';
     return [
       'v1',
       `${w}x${h}`,
@@ -2766,6 +2795,7 @@ export class OverheadStampEffectV2 {
       enabled,
       camSig,
       this._computeCasterLiveSig(frameCasters),
+      motionSig,
     ].join('|');
   }
 
@@ -2777,6 +2807,7 @@ export class OverheadStampEffectV2 {
    */
   _shouldReuseRoofMaskCaptures(sig, hoverRevealActive) {
     if (hoverRevealActive) return false;
+    if (this._tileMotionManager?.shouldBypassShadowCaptureCache?.() === true) return false;
     try {
       if (window.MapShine?.__overheadShadowsForceRoofCaptureEveryFrame === true) return false;
     } catch (_) {}
@@ -2827,6 +2858,15 @@ export class OverheadStampEffectV2 {
 
     const THREE = window.THREE;
     if (!THREE || !this.mainCamera || !this.mainScene || !this.shadowScene) return;
+
+    // Disabled via params or graphics settings: skip all roof capture passes.
+    // Consumers read null from texture getters; weather falls back to mask registry.
+    if (!resolveEffectEnabled(this)) {
+      this._lastRoofMaskCaptureReused = false;
+      this._roofMaskCaptureCache.valid = false;
+      this._clearShadowTargetToWhite(renderer);
+      return;
+    }
 
     try {
       const recorder = window.MapShine?.performanceRecorder;
@@ -3520,11 +3560,15 @@ export class OverheadStampEffectV2 {
     let hasTileProjectionSort = false;
     let hasTileReceiverSort = false;
     const tileProjectionIds = this._getTileProjectionIds();
+    const tileProjectionMotionSig = this._tileMotionManager?.getShadowProjectionMotionSig?.() ?? '';
+    const bypassTileMotionShadowCache = this._tileMotionManager?.shouldBypassShadowCaptureCache?.() === true;
     const tileProjectionSig = tileProjectionIds.length > 0
-      ? `${roofMaskCaptureSig}|tiles:${tileProjectionIds.map((id) => String(id)).sort().join(',')}`
+      ? `${roofMaskCaptureSig}|tiles:${tileProjectionIds.map((id) => String(id)).sort().join(',')}|motion:${tileProjectionMotionSig}`
       : '';
     const tileProjCache = this._tileProjectionCaptureCache;
-    const reuseTileProjection = reuseRoofMaskCaptures
+    // Tile projection has its own cache lane. Never reuse while tile motion is
+    // actively driving transforms — stale masks lag behind moving casters.
+    const reuseTileProjection = !bypassTileMotionShadowCache
       && tileProjectionSig.length > 0
       && tileProjCache.valid
       && tileProjCache.sig === tileProjectionSig;
@@ -3551,7 +3595,7 @@ export class OverheadStampEffectV2 {
       this.mainScene.traverse((object) => {
         const isTileRenderable = !!(object?.isSprite || object?.isMesh);
         if (!isTileRenderable || !object?.material) return;
-        if (!object?.userData?.foundryTileId) return;
+        if (!this._resolveFoundryTileId(object)) return;
         const sortKey = this._getTileSortKey(object);
         if (sortKey < sortMin) sortMin = sortKey;
         if (sortKey > sortMax) sortMax = sortKey;
@@ -3585,7 +3629,8 @@ export class OverheadStampEffectV2 {
         tileReceiverVisibilityOverrides.push({ object, visible: object.visible });
 
         const isTileRenderable = !!(object.isSprite || object.isMesh);
-        const keepVisible = !!(object.visible && isTileRenderable && object?.userData?.foundryTileId && object.material);
+        const tileId = this._resolveFoundryTileId(object);
+        const keepVisible = !!(object.visible && isTileRenderable && tileId && object.material);
         object.visible = keepVisible;
 
         if (keepVisible && typeof object.material?.opacity === 'number') {
@@ -3636,7 +3681,7 @@ export class OverheadStampEffectV2 {
         if (!isRenderable || typeof object.visible !== 'boolean') return;
         tileProjectionVisibilityOverrides.push({ object, visible: object.visible });
 
-        const tileId = object?.userData?.foundryTileId;
+        const tileId = this._resolveFoundryTileId(object);
         const isTileRenderable = !!(object.isSprite || object.isMesh);
         const keepVisible = !!(isTileRenderable && tileId && idSet.has(String(tileId)));
         // Projection should still capture tiles that are currently hidden/faded

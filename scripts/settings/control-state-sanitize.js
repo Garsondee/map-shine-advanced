@@ -7,7 +7,7 @@
 
 import { canPersistSceneDocument } from '../core/gm-parity.js';
 import { createLogger } from '../core/log.js';
-import { normalizePlayerLightOverride } from '../core/player-light-allowance.js';
+import { createDefaultPlayerLightAllowance, normalizePlayerLightOverride } from '../core/player-light-allowance.js';
 
 const log = createLogger('ControlStateSanitize');
 
@@ -71,11 +71,7 @@ export function createDefaultControlState() {
     tileMotionAutoPlayEnabled: true,
     tileMotionTimeFactorPercent: 100,
     tileMotionPaused: false,
-    playerLightAllowance: {
-      torch: 'global',
-      flashlight: 'global',
-      nightVision: 'global'
-    },
+    playerLightAllowance: createDefaultPlayerLightAllowance(),
     /** V2 bus replica overhead occlusion: multiplies radial radius in buffer space (0.05–100). */
     replicaOcclusionRadiusScale: 35.0,
     /** Soft rim width 0–100 (1 = default; higher = wider smoothstep). */
@@ -184,13 +180,13 @@ export function sanitizeControlStateInPlace(cs, options = {}) {
     _sanitizeDirectedCustomPresetNumbers(cs.directedCustomPreset);
   }
 
-  const defPL = createDefaultControlState().playerLightAllowance;
+  const defPL = createDefaultPlayerLightAllowance();
   if (!cs.playerLightAllowance || typeof cs.playerLightAllowance !== 'object') {
     cs.playerLightAllowance = { ...defPL };
   } else {
-    cs.playerLightAllowance.torch = normalizePlayerLightOverride(cs.playerLightAllowance.torch);
-    cs.playerLightAllowance.flashlight = normalizePlayerLightOverride(cs.playerLightAllowance.flashlight);
-    cs.playerLightAllowance.nightVision = normalizePlayerLightOverride(cs.playerLightAllowance.nightVision);
+    for (const key of Object.keys(defPL)) {
+      cs.playerLightAllowance[key] = normalizePlayerLightOverride(cs.playerLightAllowance[key]);
+    }
   }
 }
 

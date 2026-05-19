@@ -3423,6 +3423,11 @@ export class InteractionManager {
           return;
         }
 
+        // GM map-point effect cluster HUD (same early path as door controls).
+        if (this._tryHandleMapPointEffectControlPointerDown(event)) {
+          return;
+        }
+
         // Click-to-move / pathfinding preview must arm on pointerdown; pointerup
         // completes via moveClickState (excluded from the Tokens-layer guard below).
         if (this._tryArmClickToMovePointerDown(event)) {
@@ -8544,6 +8549,34 @@ export class InteractionManager {
    * @param {WallDocument|object|null} wallDoc
    * @returns {boolean} true if the door is reachable at the current elevation
    */
+  /**
+   * Raycast GM map-point effect cluster HUD toggles.
+   * Runs before the Tokens-layer early return (same pattern as door controls).
+   *
+   * @param {PointerEvent} event
+   * @returns {boolean}
+   */
+  _tryHandleMapPointEffectControlPointerDown(event) {
+    if (Number(event?.button) !== 0) return false;
+    if (!game.user?.isGM) return false;
+
+    const mapPointsManager = window.MapShine?.mapPointsManager;
+    if (!mapPointsManager?.showControlHud) return false;
+
+    const clusterId = mapPointsManager.pickEffectControlCluster(
+      event,
+      this.raycaster,
+      this.sceneComposer?.camera
+    );
+    if (!clusterId) return false;
+
+    mapPointsManager.toggleClusterEnabled(clusterId).catch(() => {});
+    event.preventDefault();
+    event.stopPropagation();
+    event.stopImmediatePropagation?.();
+    return true;
+  }
+
   /**
    * Raycast door controls and handle open/close (left) or lock toggle (right, GM).
    * Runs before the Tokens-layer early return so gameplay door icons stay interactive.

@@ -13,6 +13,7 @@ import { applyTokenLevelDefaults } from '../foundry/levels-create-defaults.js';
 import { getPerspectiveElevation } from '../foundry/elevation-context.js';
 import { getTokenRenderingMode, TOKEN_RENDERING_MODES } from '../settings/scene-settings.js';
 import { moveTrace, moveTraceConstrainSnapshot } from '../core/movement-trace-log.js';
+import { getMaxTextureAnisotropy } from '../assets/texture-policies.js';
 
 const log = createLogger('TokenManager');
 
@@ -148,11 +149,7 @@ export class TokenManager {
   }
 
   _getMaxAnisotropy() {
-    if (typeof this._maxAnisotropy === 'number') return this._maxAnisotropy;
-    const renderer = this._getRenderer();
-    const max = renderer?.capabilities?.getMaxAnisotropy?.();
-    this._maxAnisotropy = (typeof max === 'number' && max > 0) ? max : 1;
-    return this._maxAnisotropy;
+    return getMaxTextureAnisotropy(this._getRenderer());
   }
 
   _isPowerOfTwo(value) {
@@ -183,7 +180,7 @@ export class TokenManager {
     texture.generateMipmaps = canMipmap;
     texture.minFilter = canMipmap ? THREE.LinearMipmapLinearFilter : THREE.LinearFilter;
     texture.magFilter = THREE.LinearFilter;
-    texture.anisotropy = canMipmap ? Math.min(16, this._getMaxAnisotropy()) : 1;
+    texture.anisotropy = canMipmap ? this._getMaxAnisotropy() : 1;
     texture.needsUpdate = true;
   }
 

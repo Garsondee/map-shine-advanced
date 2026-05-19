@@ -84,7 +84,7 @@ const DEFAULT_TOD_ANCHORS = [
     { exposure: -2, saturation: 1, tintColor: { r: 1, g: 1, b: 1 } }),
   makeTodAnchor(12.0,
     { exposure: 0.7, saturation: 1, tintColor: { r: 1, g: 1, b: 1 } },
-    { exposure: -1, saturation: 0.5, tintColor: { r: 1, g: 1, b: 1 } }),
+    { exposure: -2, saturation: 0.5, tintColor: { r: 1, g: 1, b: 1 } }),
   makeTodAnchor(15.0,
     { exposure: 0, saturation: 1, tintColor: { r: 3, g: 1.3, b: 1 } },
     { exposure: -2, saturation: 1, tintColor: { r: 1, g: 1, b: 1 } }),

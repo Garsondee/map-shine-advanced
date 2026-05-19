@@ -1068,6 +1068,36 @@ export function registerSettings() {
     default: false
   });
 
+  game.settings.register('map-shine-advanced', 'playerLightLowLightVisionAllowedDefault', {
+    name: 'Player Light: Low-light Vision (global default)',
+    hint: 'Default allowance for biological low-light vision when a scene uses “Use Global”. Per-scene overrides are set in Map Shine Control → Player Lights.',
+    scope: 'world',
+    config: true,
+    restricted: true,
+    type: Boolean,
+    default: false
+  });
+
+  game.settings.register('map-shine-advanced', 'playerLightInfravisionAllowedDefault', {
+    name: 'Player Light: Infravision (global default)',
+    hint: 'Default allowance for passive thermal infravision when a scene uses “Use Global”. Per-scene overrides are set in Map Shine Control → Player Lights.',
+    scope: 'world',
+    config: true,
+    restricted: true,
+    type: Boolean,
+    default: false
+  });
+
+  game.settings.register('map-shine-advanced', 'playerLightActiveIRAllowedDefault', {
+    name: 'Player Light: Active Infravision (global default)',
+    hint: 'Default allowance for active IR goggles (NV post-pass + IR flashlight cone) when a scene uses “Use Global”. Per-scene overrides are set in Map Shine Control → Player Lights.',
+    scope: 'world',
+    config: true,
+    restricted: true,
+    type: Boolean,
+    default: false
+  });
+
   game.settings.register('map-shine-advanced', 'rightClickMoveImmediate', {
     name: 'Right-Click Move Immediate',
     hint: 'When enabled, right-click movement executes on the first click instead of requiring a second confirmation click on the same destination.',

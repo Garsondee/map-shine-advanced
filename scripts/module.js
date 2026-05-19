@@ -11,6 +11,7 @@ import { canPersistSceneDocument, isGmLike } from './core/gm-parity.js';
 import {
   getPlayerLightAllowanceLabel,
   isPlayerLightModeAllowedForUser,
+  isValidPlayerLightMode,
   resolvePlayerLightModeAllowance
 } from './core/player-light-allowance.js';
 
@@ -464,7 +465,7 @@ function getPlayerLightState() {
 
     const enabled = !!tokenDoc.getFlag?.(MODULE_ID, 'playerLightEnabled');
     const modeRaw = tokenDoc.getFlag?.(MODULE_ID, 'playerLightMode');
-    const mode = (modeRaw === 'torch' || modeRaw === 'flashlight' || modeRaw === 'nightVision') ? modeRaw : null;
+    const mode = isValidPlayerLightMode(modeRaw) ? modeRaw : null;
     return { tokenDoc, enabled, mode };
   } catch (_) {
     return { tokenDoc: null, enabled: false, mode: null };
@@ -544,8 +545,7 @@ function _collectSceneControlToolElements(toolName) {
 function _resolvePlayerLightActiveMode() {
   try {
     const { tokenDoc, enabled, mode } = getPlayerLightState();
-    if (!tokenDoc || !enabled) return null;
-    if (mode !== 'torch' && mode !== 'flashlight' && mode !== 'nightVision') return null;
+    if (!tokenDoc || !enabled || !isValidPlayerLightMode(mode)) return null;
     const playerLightEffect = getPlayerLightEffectInstance();
     if (playerLightEffect && !playerLightEffect.enabled) return null;
     return mode;
@@ -583,7 +583,10 @@ function _applyPlayerLightToolStateSync() {
     const modeMap = [
       ['map-shine-player-torch', 'torch'],
       ['map-shine-player-flashlight', 'flashlight'],
-      ['map-shine-player-nightvision', 'nightVision']
+      ['map-shine-player-nightvision', 'nightVision'],
+      ['map-shine-player-lowlight', 'lowLightVision'],
+      ['map-shine-player-infravision', 'infravision'],
+      ['map-shine-player-active-ir', 'activeIR']
     ];
     for (const [toolName, mode] of modeMap) {
       const active = activeMode === mode;
@@ -606,7 +609,10 @@ function _applyPlayerLightToolDisabledStates() {
     const map = [
       ['map-shine-player-torch', 'torch'],
       ['map-shine-player-flashlight', 'flashlight'],
-      ['map-shine-player-nightvision', 'nightVision']
+      ['map-shine-player-nightvision', 'nightVision'],
+      ['map-shine-player-lowlight', 'lowLightVision'],
+      ['map-shine-player-infravision', 'infravision'],
+      ['map-shine-player-active-ir', 'activeIR']
     ];
     for (const [toolName, mode] of map) {
       const els = _collectSceneControlToolElements(toolName);
@@ -981,6 +987,42 @@ Hooks.once('init', async function() {
         });
 
         ensureTool(tokenControls, {
+          name: 'map-shine-gm-effect-controls',
+          title: 'Map Point Effect Controls (GM)',
+          icon: 'fas fa-eye',
+          toggle: true,
+          order: 104,
+          visible: true,
+          active: !!window.MapShine?.mapPointsManager?.showControlHud,
+          toolclip: {
+            src: '',
+            heading: 'Map Point Effect Controls',
+            items: [{ paragraph: 'Show on-map toggles to enable or disable localized map-point effect clusters.' }]
+          },
+          onChange: () => {
+            const mapPointsManager = window.MapShine?.mapPointsManager;
+            if (!mapPointsManager) {
+              ui.notifications?.warn?.('Map Points Manager is not available yet. The scene may still be initializing.');
+              return;
+            }
+            let active = false;
+            try {
+              const tools = tokenControls.tools;
+              if (Array.isArray(tools)) {
+                active = !!tools.find((t) => t?.name === 'map-shine-gm-effect-controls')?.active;
+              } else if (tools && typeof tools === 'object') {
+                active = !!tools['map-shine-gm-effect-controls']?.active;
+              }
+            } catch (_) {
+              active = !mapPointsManager.showControlHud;
+            }
+            mapPointsManager.setShowControlHud(active);
+            _setToolActiveStateOnSceneControls('map-shine-gm-effect-controls', active);
+            queueMicrotask(() => rerenderControls());
+          }
+        });
+
+        ensureTool(tokenControls, {
           name: 'map-shine-loading-screens',
           title: 'Map Shine Loading Screens',
           icon: 'fas fa-images',
@@ -1152,6 +1194,129 @@ Hooks.once('init', async function() {
           } catch (e) {
             console.error('Map Shine: failed to set player night vision mode', e);
             ui.notifications?.warn?.('Failed to set Night Vision mode.');
+          }
+        }
+      });
+
+      ensureTool(tokenControls, {
+        name: 'map-shine-player-lowlight',
+        title: 'Player Light: Low-light Vision',
+        icon: 'fas fa-eye',
+        toggle: true,
+        order: 106,
+        visible: playerToolsVisible,
+        active: false,
+        onChange: async () => {
+          if (!isPlayerLightModeAllowedForUser('lowLightVision')) {
+            ui.notifications?.warn?.(`${getPlayerLightAllowanceLabel('lowLightVision')} is not enabled by the GM on this scene.`);
+            return;
+          }
+
+          const playerLightEffect = getPlayerLightEffectInstance();
+          if (playerLightEffect && !playerLightEffect.enabled) {
+            ui.notifications?.warn?.('Player Light is disabled for this map.');
+            return;
+          }
+
+          const { tokenDoc, enabled, mode } = getPlayerLightState();
+          if (!tokenDoc) {
+            ui.notifications?.warn?.('Select a token first.');
+            return;
+          }
+
+          try {
+            if (enabled && mode === 'lowLightVision') {
+              await tokenDoc.setFlag('map-shine-advanced', 'playerLightEnabled', false);
+            } else {
+              await tokenDoc.setFlag('map-shine-advanced', 'playerLightEnabled', true);
+              await tokenDoc.setFlag('map-shine-advanced', 'playerLightMode', 'lowLightVision');
+            }
+            rerenderControls();
+          } catch (e) {
+            console.error('Map Shine: failed to set player low-light vision mode', e);
+            ui.notifications?.warn?.('Failed to set Low-light Vision mode.');
+          }
+        }
+      });
+
+      ensureTool(tokenControls, {
+        name: 'map-shine-player-infravision',
+        title: 'Player Light: Infravision',
+        icon: 'fas fa-temperature-high',
+        toggle: true,
+        order: 107,
+        visible: playerToolsVisible,
+        active: false,
+        onChange: async () => {
+          if (!isPlayerLightModeAllowedForUser('infravision')) {
+            ui.notifications?.warn?.(`${getPlayerLightAllowanceLabel('infravision')} is not enabled by the GM on this scene.`);
+            return;
+          }
+
+          const playerLightEffect = getPlayerLightEffectInstance();
+          if (playerLightEffect && !playerLightEffect.enabled) {
+            ui.notifications?.warn?.('Player Light is disabled for this map.');
+            return;
+          }
+
+          const { tokenDoc, enabled, mode } = getPlayerLightState();
+          if (!tokenDoc) {
+            ui.notifications?.warn?.('Select a token first.');
+            return;
+          }
+
+          try {
+            if (enabled && mode === 'infravision') {
+              await tokenDoc.setFlag('map-shine-advanced', 'playerLightEnabled', false);
+            } else {
+              await tokenDoc.setFlag('map-shine-advanced', 'playerLightEnabled', true);
+              await tokenDoc.setFlag('map-shine-advanced', 'playerLightMode', 'infravision');
+            }
+            rerenderControls();
+          } catch (e) {
+            console.error('Map Shine: failed to set player infravision mode', e);
+            ui.notifications?.warn?.('Failed to set Infravision mode.');
+          }
+        }
+      });
+
+      ensureTool(tokenControls, {
+        name: 'map-shine-player-active-ir',
+        title: 'Player Light: Active Infravision',
+        icon: 'fas fa-radar',
+        toggle: true,
+        order: 108,
+        visible: playerToolsVisible,
+        active: false,
+        onChange: async () => {
+          if (!isPlayerLightModeAllowedForUser('activeIR')) {
+            ui.notifications?.warn?.(`${getPlayerLightAllowanceLabel('activeIR')} is not enabled by the GM on this scene.`);
+            return;
+          }
+
+          const playerLightEffect = getPlayerLightEffectInstance();
+          if (playerLightEffect && !playerLightEffect.enabled) {
+            ui.notifications?.warn?.('Player Light is disabled for this map.');
+            return;
+          }
+
+          const { tokenDoc, enabled, mode } = getPlayerLightState();
+          if (!tokenDoc) {
+            ui.notifications?.warn?.('Select a token first.');
+            return;
+          }
+
+          try {
+            if (enabled && mode === 'activeIR') {
+              await tokenDoc.setFlag('map-shine-advanced', 'playerLightEnabled', false);
+            } else {
+              await tokenDoc.setFlag('map-shine-advanced', 'playerLightEnabled', true);
+              await tokenDoc.setFlag('map-shine-advanced', 'playerLightMode', 'activeIR');
+            }
+            rerenderControls();
+          } catch (e) {
+            console.error('Map Shine: failed to set player active infravision mode', e);
+            ui.notifications?.warn?.('Failed to set Active Infravision mode.');
           }
         }
       });

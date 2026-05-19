@@ -13,6 +13,7 @@
 
 import { createLogger } from '../core/log.js';
 import { isWallDoorStateOnlyUpdate } from '../utils/wall-update-classify.js';
+import { getMaxTextureAnisotropy } from '../assets/texture-policies.js';
 import { hasV14NativeLevels, isDocMemberOfV14LevelSet } from './levels-scene-flags.js';
 import { elevationInBand } from '../ui/levels-editor/level-boundaries.js';
 
@@ -194,12 +195,9 @@ export class PixiContentLayerBridge {
    * @private
    */
   _resolveBridgeAnisotropy() {
-    const renderer = window?.MapShine?.sceneComposer?.renderer ?? window?.MapShine?.effectComposer?.renderer ?? null;
-    const maxFn = renderer?.capabilities?.getMaxAnisotropy;
-    if (typeof maxFn !== 'function') return 1;
-    const value = Number(maxFn.call(renderer.capabilities));
-    if (!Number.isFinite(value) || value < 1) return 1;
-    return Math.max(1, Math.floor(value));
+    return getMaxTextureAnisotropy(
+      window?.MapShine?.sceneComposer?.renderer ?? window?.MapShine?.effectComposer?.renderer ?? null
+    );
   }
 
   /**
@@ -223,7 +221,7 @@ export class PixiContentLayerBridge {
     texture.minFilter = THREE.LinearFilter;
     texture.magFilter = THREE.LinearFilter;
     texture.generateMipmaps = false;
-    texture.anisotropy = 1;
+    texture.anisotropy = this._resolveBridgeAnisotropy();
   }
 
   /**
@@ -231,7 +229,7 @@ export class PixiContentLayerBridge {
    */
   _refreshTextureSamplingIfNeeded() {
     const sharpMipmaps = window?.MapShine?.__pixiBridgeSharpMipmaps === true;
-    const anisotropy = sharpMipmaps ? this._resolveBridgeAnisotropy() : 1;
+    const anisotropy = this._resolveBridgeAnisotropy();
     const stateKey = `${sharpMipmaps ? 'sharp' : 'soft'}:${anisotropy}`;
     if (stateKey === this._textureSamplingStateKey) return;
 

@@ -1062,7 +1062,8 @@ export class HealthEvaluatorService {
     this.dependencyGraph.addEdge('LightingEffectV2', 'SkyColorEffectV2', 'contextual');
     this.dependencyGraph.addEdge('SkyColorEffectV2', 'WaterEffectV2', 'contextual');
     this.dependencyGraph.addEdge('WaterEffectV2', 'BloomEffectV2', 'contextual');
-    this.dependencyGraph.addEdge('SkyColorEffectV2', 'WindowLightEffectV2', 'contextual');
+        this.dependencyGraph.addEdge('SkyColorEffectV2', 'WindowLightEffectV2', 'contextual');
+        this.dependencyGraph.addEdge('ColorCorrectionEffectV2', 'WindowLightEffectV2', 'contextual');
     this.dependencyGraph.addEdge('SkyColorEffectV2', 'DustEffectV2', 'contextual');
     this.dependencyGraph.addEdge('GpuSceneMaskCompositor', 'SpecularEffectV2', 'optional');
   }

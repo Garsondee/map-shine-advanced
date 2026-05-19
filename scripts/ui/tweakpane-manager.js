@@ -8793,12 +8793,19 @@ export class TweakpaneManager {
         `;
       }
 
+      const isGM = !!game.user?.isGM;
+
       return groups.map(group => {
         const color = mapPointsManager.getEffectColor(group.effectTarget);
         const colorHex = '#' + color.toString(16).padStart(6, '0');
         const effectLabel = effectOptions[group.effectTarget] || group.effectTarget || 'None';
         const typeLabel = group.effectTarget === 'rope' ? 'Rope' : (groupTypeLabels[group.type] || group.type);
         const pointCount = group.points?.length || 0;
+        const cluster = mapPointsManager.getClusterForGroup?.(group.id);
+        const clusterActive = cluster ? cluster.enabled !== false : true;
+        const showPowerBtn = isGM && group.isEffectSource && group.effectTarget;
+        const powerBg = clusterActive ? '#3a5a3a' : '#4a4a4a';
+        const powerTitle = clusterActive ? 'Turn off effect cluster' : 'Turn on effect cluster';
         
         return `
           <div class="map-point-group-item" data-group-id="${group.id}" style="
@@ -8821,6 +8828,13 @@ export class TweakpaneManager {
               </div>
             </div>
             <div style="display: flex; gap: 4px; margin-left: 8px;">
+              ${showPowerBtn ? `
+              <button type="button" class="group-action-btn group-power-btn" data-action="toggle-power" data-group-id="${group.id}"
+                style="padding: 4px 8px; font-size: 10px; background: ${powerBg}; border: none; border-radius: 3px; color: #ddd; cursor: pointer;"
+                title="${powerTitle}">
+                <i class="fas fa-power-off"></i>
+              </button>
+              ` : ''}
               <button type="button" class="group-action-btn group-edit-btn" data-action="edit" data-group-id="${group.id}" 
                 style="padding: 4px 8px; font-size: 10px; background: #4a4a6a; border: none; border-radius: 3px; color: #ddd; cursor: pointer;"
                 title="Edit group">
@@ -8853,9 +8867,21 @@ export class TweakpaneManager {
             ${mapPointsManager.groups.size} group${mapPointsManager.groups.size !== 1 ? 's' : ''}
           </span>
         </div>
+        ${game.user?.isGM ? `
+        <p style="font-size: 10px; color: #888; margin: 0 0 8px 0;">
+          Use the <i class="fas fa-eye"></i> tool on the token bar to show on-map cluster toggles.
+        </p>
+        ` : ''}
         <div class="groups-list" style="max-height: 300px; overflow-y: auto; margin-bottom: 12px;">
           ${buildGroupsList()}
         </div>
+        ${game.user?.isGM ? `
+        <div style="margin-bottom: 8px;">
+          <button type="button" class="rebuild-clusters-btn" style="width: 100%; padding: 6px; font-size: 11px; background: #3a3a5a; border: none; border-radius: 4px; color: #ddd; cursor: pointer;">
+            <i class="fas fa-object-group"></i> Rebuild effect clusters
+          </button>
+        </div>
+        ` : ''}
       </div>
     `;
 
@@ -8893,6 +8919,14 @@ export class TweakpaneManager {
           mapPointsManager.setShowVisualHelpers(ev.target.checked);
         });
 
+        html.find('.rebuild-clusters-btn').on('click', async (ev) => {
+          ev.preventDefault();
+          ev.stopPropagation();
+          await mapPointsManager.rebuildControlClusters();
+          dialog.close();
+          this.openMapPointsManagerDialog();
+        });
+
         // Handle group action buttons
         html.find('.group-action-btn').on('click', async (ev) => {
           ev.stopPropagation();
@@ -8918,6 +8952,14 @@ export class TweakpaneManager {
               } else {
                 ui.notifications.warn('Failed to delete map point group (insufficient permissions or save error).');
               }
+            }
+          } else if (action === 'toggle-power') {
+            const ok = await mapPointsManager.toggleClusterForGroup(groupId);
+            if (ok) {
+              dialog.close();
+              this.openMapPointsManagerDialog();
+            } else {
+              ui.notifications.warn('Failed to toggle effect cluster.');
             }
           } else if (action === 'edit') {
             dialog.close();

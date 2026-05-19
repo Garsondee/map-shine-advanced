@@ -14,6 +14,53 @@ const wrapHour24 = (h) => {
   return Number.isFinite(hour) ? ((hour % 24) + 24) % 24 : 0;
 };
 
+const clamp01 = (value, fallback = 0) => {
+  const n = Number(value);
+  return Number.isFinite(n) ? clamp(n, 0.0, 1.0) : fallback;
+};
+
+const smooth01 = (x) => {
+  const t = clamp01(x);
+  return t * t * (3 - 2 * t);
+};
+
+const wrapDistHours = (a, b) => {
+  const d = Math.abs(a - b);
+  return Math.min(d, 24 - d);
+};
+
+/**
+ * Smooth peak centered on `center` hour (0–24), falling to 0 over `widthHours`.
+ * @param {number} hour
+ * @param {number} center
+ * @param {number} widthHours
+ * @returns {number}
+ */
+export const peakHour = (hour, center, widthHours) => {
+  const d = wrapDistHours(wrapHour24(hour), wrapHour24(center));
+  const t = clamp01(1 - d / Math.max(0.0001, widthHours));
+  return smooth01(t);
+};
+
+/**
+ * Directional shadow length weight: 0 at solar noon and midnight, 1 at dawn/dusk.
+ * Feeds {@link ShadowDriverState#tuning.shadowLengthScale}.
+ *
+ * @param {number} hourRaw
+ * @param {number} [sunriseHour=6]
+ * @param {number} [widthHours=2.5]
+ * @returns {number}
+ */
+export function computeGoldenHourShadowLengthWeight(hourRaw, sunriseHour = 6, widthHours = 2.5) {
+  const hour = wrapHour24(hourRaw);
+  const sunrise = wrapHour24(sunriseHour);
+  const sunset = wrapHour24(sunrise + 12);
+  return Math.max(
+    peakHour(hour, sunrise, widthHours),
+    peakHour(hour, sunset, widthHours),
+  );
+}
+
 /**
  * Full 24h sun orbit for shadows, specular, and downstream consumers.
  *
@@ -87,10 +134,7 @@ export function computeSunDirection2D(azimuthDeg, elevationDeg, latitudeScale = 
   return { x, y, azimuthDeg: az, elevationDeg: el };
 }
 
-export function clamp01(value, fallback = 0) {
-  const n = Number(value);
-  return Number.isFinite(n) ? clamp(n, 0.0, 1.0) : fallback;
-}
+export { clamp01 };
 
 /**
  * Latitude scale for the 2D shadow plane: must match

@@ -178,6 +178,7 @@ uniform float uRainIndoorDampingStrength;
 
 // ── Wind ─────────────────────────────────────────────────────────────────
 uniform vec2 uWindDir;
+uniform vec2 uWindDrift;
 uniform vec2 uPrevWindDir;
 uniform vec2 uTargetWindDir;
 uniform float uWindDirBlend;
@@ -653,10 +654,8 @@ vec2 warpUv(vec2 sceneUv, float motion01) {
   // Advecting the domain as well can partially cancel / overtake the phase travel
   // and produces a standing-wave / ping-pong look.
   vec2 uv = sceneUv;
-  // Use uWindTime (monotonically wind-driven) for warp drift speed.
-  // This keeps all warp motion locked to the wind: as wind increases the
-  // warp pattern advances faster, and it never reverses direction.
-  float warpT = uWindTime * inShelter * max(0.0, uWaveWarpTimeSpeed) * m;
+  // Wind-driven warp drift: use integrated uWindDrift (JS) so rotating wind
+  // cannot multiply a huge scalar uWindTime by a slightly changed basis (ping-pong).
   float sceneAspect = sceneAspectRatio();
   vec2 windF = uWindDir;
   float wl = length(windF);
@@ -669,25 +668,26 @@ vec2 warpUv(vec2 sceneUv, float motion01) {
   float along = dot(basis, windBasis);
   float across = dot(basis, windPerp);
   vec2 streakUv = windBasis * (along * 2.75) + windPerp * (across * 1.0);
+
+  vec2 driftAspect = vec2(uWindDrift.x * sceneAspect, uWindDrift.y) * inShelter;
+  vec2 warpDrift = driftAspect * max(0.0, uWaveWarpTimeSpeed) * m;
+  vec2 warpDriftPerp = vec2(-warpDrift.y, warpDrift.x);
+
   // No oscillating pulse — warp strength is controlled by uWaveWarpLargeStrength.
   // Any sin/cos multiplier here would cause periodic amplitude variation that
   // contributes to the ping-pong appearance.
-  // All FBM offsets are along/across the wind axis using warpT.
-  // Previously these used fixed screen axes (e.g. vec2(t*0.07, -t*0.05))
-  // which caused the sampled UV to drift perpendicular to the wave travel
-  // direction, making waves appear to reverse and ping-pong.
   // Sample two noise values per warp layer: one for along-wind, one for cross-wind.
   // Displace uv along windBasis/windPerp so warp is coherent with wave travel.
   // Raw vec2(nA, nB) displacement causes arbitrary-direction warp drift -> ping-pong.
-  float lf1 = (valueNoise2D(streakUv * 0.23 + vec2(19.1, 7.3) - windBasis * (warpT * 0.07)) - 0.5) * 2.0;
-  float lf2 = (valueNoise2D(streakUv * 0.23 + vec2(3.7, 23.9) - windPerp  * (warpT * 0.04)) - 0.5) * 2.0;
+  float lf1 = (valueNoise2D(streakUv * 0.23 + vec2(19.1, 7.3) - warpDrift * 0.07) - 0.5) * 2.0;
+  float lf2 = (valueNoise2D(streakUv * 0.23 + vec2(3.7, 23.9) - warpDriftPerp * 0.04) - 0.5) * 2.0;
   uv += (windBasis * lf1 + windPerp * lf2) * clamp(uWaveWarpLargeStrength, 0.0, 1.0);
-  float n1 = (valueNoise2D((uv * 2.1) + vec2(13.7, 9.2) - windBasis * (warpT * 0.11)) - 0.5) * 2.0;
-  float n2 = (valueNoise2D((uv * 2.1) + vec2(41.3, 27.9) - windPerp  * (warpT * 0.06)) - 0.5) * 2.0;
+  float n1 = (valueNoise2D((uv * 2.1) + vec2(13.7, 9.2) - warpDrift * 0.11) - 0.5) * 2.0;
+  float n2 = (valueNoise2D((uv * 2.1) + vec2(41.3, 27.9) - warpDriftPerp * 0.06) - 0.5) * 2.0;
   uv += (windBasis * n1 + windPerp * n2) * clamp(uWaveWarpSmallStrength, 0.0, 1.0);
   // Micro warp: single value-noise octaves (4 taps each) — visually similar, less work than fbmNoise.
-  float n3 = (valueNoise2D(uv * 4.7 + vec2(7.9, 19.1) - windBasis * (warpT * 0.15)) - 0.5) * 2.0;
-  float n4 = (valueNoise2D(uv * 4.7 + vec2(29.4, 3.3) - windPerp  * (warpT * 0.05)) - 0.5) * 2.0;
+  float n3 = (valueNoise2D(uv * 4.7 + vec2(7.9, 19.1) - warpDrift * 0.15) - 0.5) * 2.0;
+  float n4 = (valueNoise2D(uv * 4.7 + vec2(29.4, 3.3) - warpDriftPerp * 0.05) - 0.5) * 2.0;
   uv += (windBasis * n3 + windPerp * n4) * clamp(uWaveWarpMicroStrength, 0.0, 1.0);
   return uv;
 }
@@ -1033,9 +1033,9 @@ float getShaderFlecks(vec2 sceneUv, float inside, float shore, float rainAmt, ve
   windF = (windLen > 1e-6) ? (windF / windLen) : vec2(1.0, 0.0);
   vec2 windDir = vec2(windF.x, windF.y);
   vec2 windBasis = normalize(vec2(windDir.x * sceneAspect, windDir.y));
-  float tWind = uWindTime * indoorWindMotion;
   float fleckSpeed = uShoreFoamSpeed * 2.5 + 0.15;
-  vec2 fleckOffset = windBasis * (tWind * fleckSpeed);
+  vec2 driftAspect = vec2(uWindDrift.x * sceneAspect, uWindDrift.y) * indoorWindMotion;
+  vec2 fleckOffset = driftAspect * fleckSpeed;
   vec2 foamWindOffsetUv = uWindOffsetUv * indoorWindMotion;
   vec2 foamSceneUv = sceneUv - (foamWindOffsetUv * 0.5);
   vec2 fleckBasis = vec2(foamSceneUv.x * sceneAspect, foamSceneUv.y);
@@ -1123,14 +1123,15 @@ void getFoamData(vec2 sceneUv, float shore, float inside, vec2 rainOffPx, vec2 w
   vec2 windBasis = normalize(vec2(windDir.x * sceneAspect, windDir.y));
   float tWind = uWindTime * indoorWindMotion;
 
-  // Shoreline foam uses floating-style pattern generation with a shore band mask.
+  vec2 driftAspect = vec2(uWindDrift.x * sceneAspect, uWindDrift.y) * indoorWindMotion;
   float shoreFoamAmount = 0.0;
   
   #ifdef USE_SHORE_FOAM
   if (uShoreFoamEnabled > 0.5 && uShoreFoamStrength > 0.01) {
     float shoreTime = tWind + uShoreFoamTimeOffset;
     vec2 shoreUv = (foamBasis + uShoreFoamSeedOffset) * max(0.1, uShoreFoamScale);
-    shoreUv -= windBasis * (shoreTime * uShoreFoamSpeed);
+    vec2 shoreDrift = driftAspect * uShoreFoamSpeed + windBasis * (uShoreFoamTimeOffset * uShoreFoamSpeed);
+    shoreUv -= shoreDrift;
     
     float waveDistortStr = clamp(uShoreFoamWaveDistortionStrength, 0.0, 5.0);
     shoreUv += waveGradPre * waveDistortStr * 0.15;
@@ -1253,7 +1254,8 @@ void getFoamData(vec2 sceneUv, float shore, float inside, vec2 rainOffPx, vec2 w
   #endif
 
   vec2 clumpUv = foamBasis * max(0.1, uFloatingFoamScale);
-  clumpUv -= windBasis * (tWind * (0.02 + uShoreFoamSpeed * 0.05));
+  vec2 clumpDrift = driftAspect * (0.02 + uShoreFoamSpeed * 0.05);
+  clumpUv -= clumpDrift;
   
   // Enhanced wave distortion (much stronger)
   if (uFloatingFoamWaveDistortion > 0.01) {
@@ -1506,9 +1508,12 @@ vec3 applyMurk(vec2 sceneUv, float t, float inside, float shore, float outdoorSt
   windF = (windLen > 1e-6) ? (windF / windLen) : vec2(1.0, 0.0);
   vec2 windBasis = normalize(vec2(windF.x * sceneAspect, windF.y));
   vec2 windPerp = vec2(-windBasis.y, windBasis.x);
-  float tWind = uWindTime * indoorWindMotion;
+
+  vec2 driftAspect = vec2(uWindDrift.x * sceneAspect, uWindDrift.y) * indoorWindMotion;
+  vec2 driftAspectPerp = vec2(-driftAspect.y, driftAspect.x);
+
   vec2 cloudUv = murkBasis * murkScale;
-  vec2 cloudDrift = windBasis * (tWind * murkSpeed * 0.22);
+  vec2 cloudDrift = driftAspect * (murkSpeed * 0.22);
   vec2 cloudWarp = curlNoise2D((cloudUv - cloudDrift) * 0.45) * 0.45;
   float cloudA = valueNoise2D(cloudUv - cloudDrift + cloudWarp);
   float cloudB = valueNoise2D(cloudUv * 0.57 - cloudDrift * 0.73 + windPerp * 0.35 + vec2(17.3, 9.1) - cloudWarp * 0.35);
@@ -1525,15 +1530,15 @@ vec3 applyMurk(vec2 sceneUv, float t, float inside, float shore, float outdoorSt
   // Same domain offset as murkBasis to keep grain seamlessly continuous
   // across the scene UV [0,1] extents.
   vec2 grainBasis = vec2(sceneUv.x * sceneAspect, sceneUv.y) + vec2(47.3, 31.7);
-  float grainPhase = tWind * (murkSpeed + grainSpeed);
-  vec2 grainDrift = windBasis * (grainPhase * 1.8);
+  vec2 grainDrift = driftAspect * ((murkSpeed + grainSpeed) * 1.8);
   // Keep the fine-grain evolution locked to the wind basis so the suspended
   // silt motion always aligns with wind direction.
-  vec2 grainEvo = windBasis * (tWind * grainSpeed * 0.95) + windPerp * (tWind * grainSpeed * 0.22);
+  vec2 grainEvo = driftAspect * (grainSpeed * 0.95) + driftAspectPerp * (grainSpeed * 0.22);
   vec2 gUv1 = grainBasis * (grainScale * 1.0) - grainDrift + grainEvo;
   vec2 gUv2 = grainBasis * (grainScale * 2.35) - grainDrift * 2.1 - grainEvo * 1.6 + vec2(23.4, 7.1);
   vec2 gUv3 = grainBasis * (grainScale * 4.9) - grainDrift * 3.0 + grainEvo * 2.4 + vec2(-11.8, 31.6);
-  vec2 gWarp = curlNoise2D((grainBasis * grainScale * 0.018) + grainEvo * 0.12 - windBasis * (grainPhase * 0.20)) * 2.0;
+  vec2 gWarpPhaseDrift = driftAspect * ((murkSpeed + grainSpeed) * 0.20);
+  vec2 gWarp = curlNoise2D((grainBasis * grainScale * 0.018) + grainEvo * 0.12 - gWarpPhaseDrift) * 2.0;
   gUv1 += gWarp * 0.20; gUv2 += gWarp * 0.12; gUv3 += gWarp * 0.08;
   float g1 = valueNoise(gUv1);
   float g2 = valueNoise(gUv2);
@@ -2502,13 +2507,10 @@ void main() {
   // isn't uniform across the surface (reads as natural water vs filtered pool).
   float chR = clamp(uSpecSurfaceChaos, 0.0, 1.0);
   if (chR > 1e-4) {
-    vec2 wfR = uWindDir;
-    float wlR = length(wfR);
-    wfR = (wlR > 1e-6) ? (wfR / wlR) : vec2(1.0, 0.0);
-    vec2 wbR = normalize(vec2(wfR.x * sceneAspectW, wfR.y));
-    vec2 wpR = vec2(-wbR.y, wbR.x);
     vec2 basisR = vec2(sceneUv.x * sceneAspectW, sceneUv.y);
-    vec2 rDom = basisR * 2.8 - wbR * (uWindTime * 0.09) - wpR * (uWindTime * 0.044);
+    vec2 driftAspect = vec2(uWindDrift.x * sceneAspectW, uWindDrift.y);
+    vec2 driftAspectPerp = vec2(-driftAspect.y, driftAspect.x);
+    vec2 rDom = basisR * 2.8 - driftAspect * 0.09 - driftAspectPerp * 0.044;
     float rN = valueNoise2D(rDom + vec2(101.3, 67.1));
     float rN2 = valueNoise2D(rDom * 1.87 - vec2(uWindTime * 0.062, uWindTime * 0.031));
     float rPatch = mix(rN, rN2, 0.35);

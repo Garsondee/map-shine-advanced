@@ -15,6 +15,7 @@ import { isTileVisibleForPerspective, isBackgroundVisibleForPerspective, isWeath
 import { tileHasLevelsRange, isLevelsEnabledForScene, readTileLevelsFlags, hasV14NativeLevels, getCanvasForegroundElevationSplit } from '../foundry/levels-scene-flags.js';
 import { applyTileLevelDefaults } from '../foundry/levels-create-defaults.js';
 import { getEffectMaskRegistry, probeMaskFile } from '../assets/loader.js';
+import { getMaxTextureAnisotropy } from '../assets/texture-policies.js';
 import { getTextureBudgetTracker, estimateTextureBytes } from '../assets/TextureBudgetTracker.js';
 import { TileEffectBindingManager } from './TileEffectBindingManager.js';
 
@@ -812,7 +813,6 @@ export class TileManager {
     };
 
     // Cache renderer-derived values for texture filtering.
-    this._maxAnisotropy = null;
     
     log.debug('TileManager created');
   }
@@ -1079,11 +1079,7 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
   }
 
   _getMaxAnisotropy() {
-    if (typeof this._maxAnisotropy === 'number') return this._maxAnisotropy;
-    const renderer = this._getRenderer();
-    const max = renderer?.capabilities?.getMaxAnisotropy?.();
-    this._maxAnisotropy = (typeof max === 'number' && max > 0) ? max : 1;
-    return this._maxAnisotropy;
+    return getMaxTextureAnisotropy(this._getRenderer());
   }
 
   _isPowerOfTwo(value) {
@@ -1120,9 +1116,9 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     // coloured halos at every mip level that grow wider at lower mip levels.
     // This is especially visible on upper-floor transparent .webp tiles where
     // the artwork boundary has a hard opaque→transparent transition.
-    // LinearFilter gives sufficient quality; anisotropy is kept for oblique views.
+    // LinearFilter gives sufficient quality; max anisotropy keeps oblique views sharp.
     const renderer = this._getRenderer();
-    const maxAniso = Math.min(4, this._getMaxAnisotropy());
+    const maxAniso = this._getMaxAnisotropy();
     texture.generateMipmaps = false;
     texture.minFilter = THREE.LinearFilter;
     texture.magFilter = THREE.LinearFilter;
@@ -4161,7 +4157,10 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
 
     const envFactor = 1.0 - Math.max(0.0, Math.min(1.0, darkness * nightDimming));
 
-    const finalBrightness = shaped * indoorFactor * wle.params.intensity * envFactor;
+    const effectIntensity = (typeof wle.getEffectiveIntensity === 'function')
+      ? Math.max(0.0, wle.getEffectiveIntensity())
+      : Math.max(0.0, Number(wle.params?.intensity) || 0);
+    const finalBrightness = shaped * indoorFactor * effectIntensity * envFactor;
 
     // Return the light color (from params) scaled by brightness
     const color = wle.params.color;
@@ -4198,9 +4197,11 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     const falloff = (typeof wle.params?.falloff === 'number' && Number.isFinite(wle.params.falloff))
       ? Math.max(0.001, wle.params.falloff)
       : 1.0;
-    const effectIntensity = (typeof wle.params?.intensity === 'number' && Number.isFinite(wle.params.intensity))
-      ? Math.max(0.0, wle.params.intensity)
-      : 1.0;
+    const effectIntensity = (typeof wle.getEffectiveIntensity === 'function')
+      ? Math.max(0.0, wle.getEffectiveIntensity())
+      : ((typeof wle.params?.intensity === 'number' && Number.isFinite(wle.params.intensity))
+        ? Math.max(0.0, wle.params.intensity)
+        : 1.0);
     const color = wle.params?.color ?? { r: 1, g: 1, b: 1 };
 
     let sumBrightness = 0.0;

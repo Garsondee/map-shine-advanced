@@ -6,6 +6,7 @@
 
 import { createLogger } from '../core/log.js';
 import * as assetLoader from '../assets/loader.js';
+import { applyVisibleTextureAnisotropy } from '../assets/texture-policies.js';
 import { weatherController } from '../core/WeatherController.js';
 import { globalLoadingProfiler } from '../core/loading-profiler.js';
 import { debugLoadingProfiler } from '../core/debug-loading-profiler.js';
@@ -749,6 +750,7 @@ export class SceneComposer {
       threeTexture.minFilter = THREE.LinearFilter;
       threeTexture.magFilter = THREE.LinearFilter;
       threeTexture.generateMipmaps = false;
+      applyVisibleTextureAnisotropy(threeTexture);
       // FloorRenderBus.populate() reuses _albedoTexture only when this matches
       // getViewedLevelBackgroundSrc(); avoids showing another level's art after V14 view changes.
       threeTexture.userData = threeTexture.userData || {};

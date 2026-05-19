@@ -879,6 +879,8 @@ export class EffectComposer {
         'bloom':            '_bloomEffect',
         'colorCorrection':  '_colorCorrectionEffect',
         'filter':           '_filterEffect',
+        'atmospheric-fog':  '_atmosphericFogEffect',
+        'fog':              '_fogEffect',
         'sharpen':          '_sharpenEffect',
         'cloud':            '_cloudEffect',
         'dotScreen':        '_dotScreenEffect',
@@ -945,6 +947,27 @@ export class EffectComposer {
           }
         } catch (err) {
           log.warn('FloorCompositor V2: water flag replay failed:', err);
+        }
+
+        // Atmospheric fog: scene flags only (same rationale as water).
+        try {
+          const scene = globalThis.canvas?.scene;
+          const allSettings = sceneSettings.getSceneSettings(scene);
+          const fogFlags = allSettings?.mapMaker?.effects?.['atmospheric-fog'] || {};
+          const fogEffect = this._floorCompositorV2._atmosphericFogEffect;
+          if (fogEffect?.params) {
+            for (const [k, v] of Object.entries(fogFlags)) {
+              if (Object.prototype.hasOwnProperty.call(fogEffect.params, k)) {
+                if (typeof v === 'number' && !Number.isFinite(v)) continue;
+                fogEffect.params[k] = v;
+              }
+            }
+            if (Object.keys(fogFlags).length > 0) {
+              log.info(`FloorCompositor V2: replayed ${Object.keys(fogFlags).length} atmospheric-fog params from scene flags`);
+            }
+          }
+        } catch (err) {
+          log.warn('FloorCompositor V2: atmospheric-fog flag replay failed:', err);
         }
 
         // Stylistic `enabled`: mapMaker / gm scene flags only (strict `=== true`),

@@ -7,6 +7,13 @@
 import { createLogger } from '../core/log.js';
 import { globalLoadingProfiler } from '../core/loading-profiler.js';
 import { debugLoadingProfiler } from '../core/debug-loading-profiler.js';
+import { applyTexturePolicy, applyVisibleTextureAnisotropy } from './texture-policies.js';
+import {
+  loadImageTexture,
+  MASK_MAX_SIZE,
+  VISUAL_MASK_MAX_SIZE,
+  normalizeTextureUrl,
+} from './image-texture-loader.js';
 
 const log = createLogger('AssetLoader');
 
@@ -999,17 +1006,8 @@ export async function discoverMaskDirectoryFiles(basePath, options = {}) {
 }
 
 // ---------------------------------------------------------------------------
-// Direct mask texture loading (bypasses PIXI for off-thread decode)
+// Direct mask texture loading (off-thread decode via image-texture-loader)
 // ---------------------------------------------------------------------------
-
-/** Feature-detect createImageBitmap support once */
-const _hasImageBitmap = typeof createImageBitmap === 'function';
-
-/** Max dimension for low-frequency data masks (fire spawn, outdoors, water depth, etc.) */
-const MASK_MAX_SIZE = 4096;
-
-/** Max dimension for color textures (bush, tree) and visual-detail masks */
-const VISUAL_MASK_MAX_SIZE = 8192;
 
 /**
  * Masks containing high-frequency visual detail that is directly visible on screen.
@@ -1019,147 +1017,23 @@ const VISUAL_MASK_MAX_SIZE = 8192;
 const VISUAL_DETAIL_MASKS = new Set(['specular', 'roughness', 'normal', 'iridescence', 'prism']);
 
 /**
- * Load a mask texture directly via fetch + createImageBitmap → THREE.Texture.
- * This bypasses PIXI entirely:
- *   - Image decode happens off the main thread (createImageBitmap)
- *   - No PIXI texture management overhead
- *   - No canvas clone step needed (ImageBitmap is already detached)
- *   - Large masks are downscaled during decode (zero main-thread cost)
+ * Load a mask texture via fetch + createImageBitmap (see image-texture-loader.js).
  *
- * Texture settings (flipY, mipmaps, colorSpace, filters) are applied
- * immediately so there is no need for post-load reconfiguration and
- * only a single `needsUpdate = true` cycle occurs.
- *
- * Falls back to the legacy PIXI path if createImageBitmap is unavailable.
- *
- * @param {string} url - URL to the mask image file
+ * @param {string} url
  * @param {object} [opts]
- * @param {boolean} [opts.isColorTexture=false] - True for bush/tree (sRGB + mipmaps)
- * @param {number}  [opts.maxSize] - Max dimension; larger images are downscaled during decode
- * @returns {Promise<THREE.Texture>} Loaded THREE.Texture
+ * @param {boolean} [opts.isColorTexture=false]
+ * @param {number} [opts.maxSize]
+ * @returns {Promise<THREE.Texture>}
  * @private
  */
 async function loadMaskTextureDirect(url, opts = {}) {
-  const THREE = window.THREE;
-  const absoluteUrl = normalizePath(url);
   const isColor = !!opts.isColorTexture;
   const maxSize = opts.maxSize ?? (isColor ? VISUAL_MASK_MAX_SIZE : MASK_MAX_SIZE);
-  const _dlp = debugLoadingProfiler;
-  const _isDbg = _dlp.debugMode;
-  const _shortUrl = url.split('/').pop() || url;
-
-  if (!_hasImageBitmap) {
-    // Fallback: use the legacy PIXI-based loader
-    return loadTextureAsync(absoluteUrl);
-  }
-
-  if (_isDbg) _dlp.begin(`al.fetch[${_shortUrl}]`, 'texture');
-  const response = await fetch(absoluteUrl);
-  if (!response.ok) {
-    if (_isDbg) _dlp.end(`al.fetch[${_shortUrl}]`, { status: response.status });
-    throw new Error(`Fetch failed (${response.status}): ${absoluteUrl}`);
-  }
-  const blob = await response.blob();
-  if (_isDbg) _dlp.end(`al.fetch[${_shortUrl}]`, { bytes: blob.size });
-
-  // Build createImageBitmap options — decode + optional downscale off-thread.
-  // Color textures (bush/tree) use premultiplied alpha so that transparent pixels
-  // become (0,0,0,0) instead of (1,1,1,0).  This eliminates white fringe from
-  // bilinear filtering at content edges — the GPU interpolates premultiplied
-  // values correctly.  The shader un-premultiplies after sampling.
-  // Data masks keep straight alpha (premultiplyAlpha:'none') since they are
-  // sampled as single-channel data, not blended as RGBA.
-  const bitmapOpts = {
-    premultiplyAlpha: isColor ? 'premultiply' : 'none',
-    colorSpaceConversion: 'none'
-  };
-
-  // Decode off the main thread, then downscale if the image exceeds maxSize.
-  // We resize the already-decoded ImageBitmap (not the blob) to avoid
-  // decompressing the PNG/WebP/JPG data a second time.
-  if (_isDbg) _dlp.begin(`al.decode[${_shortUrl}]`, 'texture');
-  let bitmap = await createImageBitmap(blob, bitmapOpts);
-  if (_isDbg) _dlp.end(`al.decode[${_shortUrl}]`, { w: bitmap.width, h: bitmap.height });
-
-  if (maxSize > 0 && (bitmap.width > maxSize || bitmap.height > maxSize)) {
-    const w = bitmap.width;
-    const h = bitmap.height;
-    const scale = maxSize / Math.max(w, h);
-    const newW = Math.max(1, Math.round(w * scale));
-    const newH = Math.max(1, Math.round(h * scale));
-
-    try {
-      // Resize the decoded bitmap (fast — no re-decompression)
-      const resized = await createImageBitmap(bitmap, 0, 0, w, h, {
-        resizeWidth: newW,
-        resizeHeight: newH,
-        resizeQuality: 'medium',
-        // Preserve the premultiply mode from the original decode so the
-        // resize averages pixels in the correct alpha space.
-        premultiplyAlpha: isColor ? 'premultiply' : 'none'
-      });
-      bitmap.close(); // Release full-size memory
-      bitmap = resized;
-      log.debug(`Downscaled mask ${absoluteUrl}: ${w}×${h} → ${newW}×${newH}`);
-    } catch (_) {
-      // If resize options aren't supported, keep the full-size bitmap
-      log.debug(`Resize not supported — keeping full-size mask ${w}×${h}`);
-    }
-  }
-
-  // Stabilize ImageBitmap orientation by copying to a canvas element.
-  // Some browsers/drivers have inconsistent ImageBitmap upload/orientation
-  // behavior with WebGL UNPACK_FLIP_Y (see tile-manager.js commit 090907e).
-  // Drawing through a canvas normalizes the pixel data so Three.js uploads
-  // it consistently regardless of browser or GPU driver.
-  let texSource = bitmap;
-  try {
-    const bw = Number(bitmap?.width ?? 0);
-    const bh = Number(bitmap?.height ?? 0);
-    if (bw > 0 && bh > 0) {
-      const canvasEl = document.createElement('canvas');
-      canvasEl.width = bw;
-      canvasEl.height = bh;
-      const ctx = canvasEl.getContext('2d');
-      if (ctx) {
-        ctx.drawImage(bitmap, 0, 0, bw, bh);
-        texSource = canvasEl;
-      }
-    }
-  } catch (_) {
-  }
-  try {
-    if (texSource !== bitmap && bitmap && typeof bitmap.close === 'function') bitmap.close();
-  } catch (_) {
-  }
-
-  // Create the THREE.Texture with final, correct settings — no double config.
-  const texture = new THREE.Texture(texSource);
-  texture.wrapS = THREE.ClampToEdgeWrapping;
-  texture.wrapT = THREE.ClampToEdgeWrapping;
-
-  if (isColor) {
-    // Color textures (bush, tree) — sRGB, no mipmaps.
-    // Mipmaps with straight-alpha textures cause "mipmap bleed": gl.generateMipmap()
-    // averages transparent texels whose RGB is white with opaque content, creating
-    // white halos at every mip level that no shader correction can undo.
-    // flipY=false matches the base map and data masks (all share geometry with scale.y=-1).
-    texture.colorSpace = THREE.SRGBColorSpace || '';
-    texture.flipY = false;
-    texture.generateMipmaps = false;
-    texture.minFilter = THREE.LinearFilter;
-    texture.magFilter = THREE.LinearFilter;
-  } else {
-    // Data masks — linear, no mipmaps, flipY=false (shader handles UV inversion)
-    texture.colorSpace = THREE.NoColorSpace || '';
-    texture.flipY = false;
-    texture.generateMipmaps = false;
-    texture.minFilter = THREE.LinearFilter;
-    texture.magFilter = THREE.LinearFilter;
-  }
-
-  texture.needsUpdate = true;
-  return texture;
+  return loadImageTexture(url, {
+    role: isColor ? 'MASK_COLOR' : 'DATA_MASK',
+    maxSize,
+    markOwned: true,
+  });
 }
 
 /**
@@ -1336,16 +1210,7 @@ export function resolveMaskPathsFromListing(availableFiles, basePath, maskIds) {
  * @private
  */
 function normalizePath(path) {
-  // If already absolute (starts with http:// or https://), return as-is
-  if (path.startsWith('http://') || path.startsWith('https://')) {
-    return path;
-  }
-  
-  // For all other paths (relative or root-relative), return as-is
-  // The browser will resolve them correctly relative to the current page
-  // This allows Foundry's routing system to handle modules/, worlds/, etc.
-  // Encode spaces to avoid URL resolution failures for module asset paths.
-  return path.includes(' ') ? path.replace(/ /g, '%20') : path;
+  return normalizeTextureUrl(path);
 }
 
  /**
@@ -1402,7 +1267,7 @@ function normalizePath(path) {
  * @returns {Promise<THREE.Texture>} Loaded texture
  * @private
  */
-async function loadTextureAsync(path, suppressProbeErrors = false) {
+async function loadTextureAsync(path, suppressProbeErrors = false, policyRole = 'ALBEDO') {
   const THREE = window.THREE;
   const lp = globalLoadingProfiler;
   const doLoadProfile = !!lp?.enabled;
@@ -1485,12 +1350,12 @@ async function loadTextureAsync(path, suppressProbeErrors = false) {
     const threeTexture = new THREE.Texture(texSource);
     threeTexture.needsUpdate = true;
     
-    // Configure texture settings
     threeTexture.wrapS = THREE.ClampToEdgeWrapping;
     threeTexture.wrapT = THREE.ClampToEdgeWrapping;
-    threeTexture.minFilter = THREE.LinearMipmapLinearFilter;
-    threeTexture.magFilter = THREE.LinearFilter;
-    threeTexture.generateMipmaps = true;
+    applyTexturePolicy(threeTexture, policyRole);
+    if (policyRole === 'ALBEDO') {
+      applyVisibleTextureAnisotropy(threeTexture);
+    }
     
     log.debug(`Successfully loaded: ${absolutePath}`);
     if (doLoadProfile) {

@@ -6,6 +6,11 @@
 import { createLogger } from '../core/log.js';
 import Coordinates from '../utils/coordinates.js';
 import { extendMsaLocalFlagWriteGuard } from '../utils/msa-local-flag-guard.js';
+import { OVERLAY_THREE_LAYER } from '../core/render-layers.js';
+import {
+  recomputeControlClusters,
+  buildGroupIdToClusterIdMap,
+} from './map-point-control-clusters.js';
 
 const log = createLogger('MapPointsManager');
 
@@ -129,6 +134,24 @@ export class MapPointsManager {
     /** @type {boolean} */
     /** When true, on-map handles/lines for existing groups are shown (Manage Map Points → "Show visual helpers"). */
     this.showVisualHelpers = false;
+
+    /** When true, GM effect-cluster toggle HUD is shown on the canvas. */
+    this.showControlHud = false;
+
+    /** @type {Map<string, import('./map-point-control-clusters.js').MapPointControlCluster>} */
+    this.controlClusters = new Map();
+
+    /** @type {Map<string, string>} groupId -> clusterId */
+    this._groupIdToClusterId = new Map();
+
+    /** @type {Map<string, THREE.Object3D>} */
+    this.controlHudObjects = new Map();
+
+    /** @type {THREE.Group|null} */
+    this.controlHudGroup = null;
+
+    /** @type {ReturnType<typeof setTimeout>|null} */
+    this._recomputeClustersTimer = null;
     
     /** @type {Function[]} */
     this.changeListeners = [];
@@ -368,8 +391,10 @@ export class MapPointsManager {
       log.debug(`Loading map points: v2Initialized=${v2Initialized}, source=${fromLegacy ? 'legacy' : 'current'}`);
 
       const prevShowHelpers = this.showVisualHelpers;
+      const prevShowControlHud = this.showControlHud;
       this.groups.clear();
       this.clearVisualObjects();
+      this._loadControlClustersFromScene(scene);
 
       if (!groupsData || typeof groupsData !== 'object') {
         log.debug('No map point groups found in scene flags');
@@ -424,12 +449,19 @@ export class MapPointsManager {
         await this._saveToSceneNow();
       }
 
+      this._recomputeControlClusters(false);
+
       if (prevShowHelpers) {
         const editingGroupId = window.MapShine?.interactionManager?.mapPointDraw?.editingGroupId;
         for (const [id, group] of this.groups) {
           if (editingGroupId && id === editingGroupId) continue;
           this.createVisualHelper(id, group);
         }
+      }
+
+      if (prevShowControlHud && game.user?.isGM) {
+        this.showControlHud = true;
+        this._refreshControlHud();
       }
 
       log.info(`Loaded ${this.groups.size} map point groups from scene${fromLegacy ? ' (from legacy)' : ''}`);
@@ -505,6 +537,53 @@ export class MapPointsManager {
     return this._enqueueOp(() => this._saveToSceneNow());
   }
 
+  /**
+   * Arm guards so scene flag persistence does not trigger a full canvas teardown.
+   * Shared by map point groups and control-cluster writes.
+   * @param {{ logLabel?: string, payloadKeys?: string[] }} [options]
+   * @private
+   */
+  _armMapPointPersistGuards(options = {}) {
+    if (this._suppressLoadFromSceneTimer) {
+      try { clearTimeout(this._suppressLoadFromSceneTimer); } catch (_) {}
+      this._suppressLoadFromSceneTimer = null;
+    }
+    this._suppressLoadFromSceneUntil = performance.now() + 15000;
+
+    try {
+      if (typeof window !== 'undefined') {
+        if (!window.MapShine) window.MapShine = {};
+        window.MapShine.__msaMapPointWriteUntil = performance.now() + 12000;
+        window.MapShine.__msaMapPointWriteStarted = performance.now();
+      }
+    } catch (_) {}
+
+    if (options.logLabel) {
+      try {
+        const scene = canvas?.scene;
+        // eslint-disable-next-line no-console
+        console.warn(`[MSA-MAP-POINT-SAVE] ${options.logLabel} — strong guard armed for 12s`, {
+          sceneId: scene?.id ?? null,
+          payloadKeys: options.payloadKeys ?? [],
+          canvasSceneId: canvas?.scene?.id ?? null,
+          lastResolvedSceneId: window?.MapShine?.__msaLastResolvedSceneId ?? null,
+        });
+      } catch (_) {}
+    }
+
+    extendMsaLocalFlagWriteGuard(20000, 20000);
+  }
+
+  /**
+   * @private
+   */
+  _scheduleClearMapPointPersistGuards() {
+    this._suppressLoadFromSceneTimer = setTimeout(() => {
+      this._suppressLoadFromSceneTimer = null;
+      this._suppressLoadFromSceneUntil = 0;
+    }, 2500);
+  }
+
   async _saveToSceneNow() {
     const scene = canvas?.scene;
     if (!scene) {
@@ -542,54 +621,12 @@ export class MapPointsManager {
     }
 
     try {
-      // Same-scene flag writes redraw Foundry's canvas; arm the guard used by
-      // canvas-replacement tearDown so this does not show the scene-switch loading overlay.
-      //
-      // Do NOT unsetFlag(mapPointGroups) before setFlag: that emits an intermediate
-      // updateScene with an empty flag; loadFromScene() then clears this.groups while the
-      // save is still in flight (async hook), wiping in-memory state and forcing a full
-      // effect/canvas rebuild. Use `flagPayload` (includes `-=id` for removals) instead.
-      //
-      // Coalesce both flag writes into one `scene.update` so Foundry emits a single
-      // updateScene -> (at most) single canvas redraw cycle. Two separate setFlag calls
-      // produced two back-to-back tearDown/canvasReady pairs; each had to be caught by
-      // the same-scene-redraw predictor, and any miss between them dropped us into a
-      // full Map Shine re-init.
-      if (this._suppressLoadFromSceneTimer) {
-        try { clearTimeout(this._suppressLoadFromSceneTimer); } catch (_) {}
-        this._suppressLoadFromSceneTimer = null;
-      }
-      this._suppressLoadFromSceneUntil = performance.now() + 15000;
-
-      // Strong, scene-id-independent guard. canvas-replacement consults this in every
-      // lifecycle decision (`_tearDownWrapper`, `onCanvasTearDown`, `onCanvasReady`,
-      // `_drawWrapper`) so even when scene-id resolution races (v12 `canvas.scene`
-      // briefly null, `game.scenes.current` undefined, predict-TTL armed for the wrong
-      // sid), the runtime is preserved and the staged "Loading…" overlay never shows.
-      // The `_msaSameSceneRedrawPredicted` helper requires a sid match; this one does
-      // not. 12s covers debounced save + server RTT + delayed `canvas.draw` → `tearDown`.
-      try {
-        if (typeof window !== 'undefined') {
-          if (!window.MapShine) window.MapShine = {};
-          window.MapShine.__msaMapPointWriteUntil = performance.now() + 12000;
-          window.MapShine.__msaMapPointWriteStarted = performance.now();
-        }
-      } catch (_) {}
-      try {
-        // User-visible diagnostic. Map-point save is the canonical "must not redraw"
-        // scenario; if anything in the lifecycle subsequently shows the loading
-        // overlay or destroys the Three.js runtime, console output below pinpoints
-        // exactly which path fired so we can fix it without enabling verbose logs.
-        // eslint-disable-next-line no-console
-        console.warn('[MSA-MAP-POINT-SAVE] starting scene.update — strong guard armed for 12s', {
-          sceneId: scene?.id ?? null,
-          payloadKeys: Object.keys(flagPayload || {}),
-          canvasSceneId: canvas?.scene?.id ?? null,
-          lastResolvedSceneId: window?.MapShine?.__msaLastResolvedSceneId ?? null,
-        });
-      } catch (_) {}
-
-      extendMsaLocalFlagWriteGuard(20000, 20000);
+      // Same-scene flag writes redraw Foundry's canvas; arm guards so tearDown does not
+      // show the scene-switch loading overlay (see _armMapPointPersistGuards).
+      this._armMapPointPersistGuards({
+        logLabel: 'starting scene.update (groups)',
+        payloadKeys: Object.keys(flagPayload || {}),
+      });
       await scene.update({
         [`flags.${MODULE_ID}.mapPointGroups`]: flagPayload,
         [`flags.${MODULE_ID}.mapPointGroupsInitialized`]: true,
@@ -601,10 +638,7 @@ export class MapPointsManager {
       ui?.notifications?.error?.('Failed to save map points to the scene. See console for details.');
       return false;
     } finally {
-      this._suppressLoadFromSceneTimer = setTimeout(() => {
-        this._suppressLoadFromSceneTimer = null;
-        this._suppressLoadFromSceneUntil = 0;
-      }, 2500);
+      this._scheduleClearMapPointPersistGuards();
     }
   }
 
@@ -619,6 +653,7 @@ export class MapPointsManager {
 
       const currentUpdated = changes.flags?.[MODULE_ID]?.mapPointGroups !== undefined;
       const legacyUpdated = changes.flags?.[LEGACY_MODULE_ID]?.mapPointGroups !== undefined;
+      const clustersUpdated = changes.flags?.[MODULE_ID]?.mapPointControlClusters !== undefined;
 
       if (currentUpdated || legacyUpdated) {
         if (performance.now() < (this._suppressLoadFromSceneUntil || 0)) {
@@ -627,6 +662,19 @@ export class MapPointsManager {
         }
         log.debug('Map point groups updated via scene flag');
         await this.loadFromScene();
+        this.notifyListeners();
+        return;
+      }
+
+      if (clustersUpdated) {
+        if (performance.now() < (this._suppressLoadFromSceneUntil || 0)) {
+          log.debug('Map point control clusters: skipping hook during local persistence');
+          return;
+        }
+        log.debug('Map point control clusters updated via scene flag');
+        this._loadControlClustersFromScene(scene);
+        this._rebuildGroupIdToClusterIdMap();
+        this._refreshControlHud();
         this.notifyListeners();
       }
     };
@@ -668,7 +716,7 @@ export class MapPointsManager {
   getGroupsByEffect(effectTarget) {
     const result = [];
     for (const group of this.groups.values()) {
-      if (group.isEffectSource && group.effectTarget === effectTarget) {
+      if (group.isEffectSource && group.effectTarget === effectTarget && this._isGroupClusterEnabled(group.id)) {
         result.push(group);
       }
     }
@@ -771,6 +819,7 @@ export class MapPointsManager {
     for (const group of this.groups.values()) {
       const isLegacyRopeType = group.type === 'rope';
       const isRopeEffectLine = group.type === 'line' && group.effectTarget === 'rope';
+      if (!this._isGroupClusterEnabled(group.id)) continue;
       if ((isLegacyRopeType || isRopeEffectLine) && group.points && group.points.length >= 2) {
         const ropeType = (group.ropeType === 'rope' || group.ropeType === 'chain') ? group.ropeType : (lastRopeType || 'chain');
         const segLen = Number.isFinite(group.segmentLength) ? group.segmentLength : undefined;
@@ -1007,6 +1056,7 @@ export class MapPointsManager {
       }
 
       this.notifyListeners();
+      this._scheduleRecomputeClusters();
 
       log.info(`Created map point group: ${id} (${group.label})`);
       return group;
@@ -1064,6 +1114,7 @@ export class MapPointsManager {
       }
 
       this.notifyListeners();
+      this._scheduleRecomputeClusters();
 
       log.debug(`Updated map point group: ${id}`);
       return normalizedGroup;
@@ -1099,6 +1150,7 @@ export class MapPointsManager {
       }
 
       this.notifyListeners();
+      this._scheduleRecomputeClusters();
       log.info(`Deleted map point group: ${id}`);
       return true;
     });
@@ -1522,6 +1574,486 @@ export class MapPointsManager {
     }
   }
 
+  // ── Effect control clusters (GM HUD toggles) ─────────────────────────────
+
+  /**
+   * @param {object|null} [scene]
+   * @private
+   */
+  _loadControlClustersFromScene(scene = canvas?.scene) {
+    this.controlClusters.clear();
+    if (!scene) return;
+
+    let clustersData = null;
+    try {
+      clustersData = scene.getFlag(MODULE_ID, 'mapPointControlClusters');
+    } catch (_) {
+      clustersData = null;
+    }
+
+    if (!clustersData || typeof clustersData !== 'object' || Array.isArray(clustersData)) {
+      this._rebuildGroupIdToClusterIdMap();
+      return;
+    }
+
+    for (const [id, cluster] of Object.entries(clustersData)) {
+      if (!cluster || typeof cluster !== 'object') continue;
+      const memberGroupIds = Array.isArray(cluster.memberGroupIds)
+        ? cluster.memberGroupIds.filter((gid) => typeof gid === 'string' && gid.length > 0)
+        : [];
+      const cx = Number(cluster.centroid?.x);
+      const cy = Number(cluster.centroid?.y);
+      this.controlClusters.set(id, {
+        id,
+        effectTarget: typeof cluster.effectTarget === 'string' ? cluster.effectTarget : '',
+        enabled: cluster.enabled !== false,
+        memberGroupIds,
+        centroid: {
+          x: Number.isFinite(cx) ? cx : 0,
+          y: Number.isFinite(cy) ? cy : 0,
+        },
+        source: cluster.source === 'group' ? 'group' : 'auto',
+      });
+    }
+
+    this._rebuildGroupIdToClusterIdMap();
+  }
+
+  /**
+   * @param {boolean} [persist=false]
+   * @private
+   */
+  _recomputeControlClusters(persist = false) {
+    const previous = new Map(this.controlClusters);
+    const next = recomputeControlClusters(this.groups, previous);
+    this.controlClusters = next;
+    this._rebuildGroupIdToClusterIdMap();
+    if (persist) {
+      this._saveClustersToSceneNow().catch((e) => {
+        log.error('Failed to persist control clusters after recompute:', e);
+      });
+    }
+  }
+
+  /**
+   * @private
+   */
+  _rebuildGroupIdToClusterIdMap() {
+    this._groupIdToClusterId = buildGroupIdToClusterIdMap(this.controlClusters);
+  }
+
+  /**
+   * @param {string} groupId
+   * @returns {boolean}
+   * @private
+   */
+  _isGroupClusterEnabled(groupId) {
+    const clusterId = this._groupIdToClusterId.get(groupId);
+    if (!clusterId) return true;
+    const cluster = this.controlClusters.get(clusterId);
+    if (!cluster) return true;
+    return cluster.enabled !== false;
+  }
+
+  /**
+   * @param {string} groupId
+   * @returns {import('./map-point-control-clusters.js').MapPointControlCluster|undefined}
+   */
+  getClusterForGroup(groupId) {
+    const clusterId = this._groupIdToClusterId.get(groupId);
+    if (!clusterId) return undefined;
+    return this.controlClusters.get(clusterId);
+  }
+
+  /**
+   * @returns {import('./map-point-control-clusters.js').MapPointControlCluster[]}
+   */
+  getControlClusters() {
+    return Array.from(this.controlClusters.values());
+  }
+
+  /**
+   * @private
+   */
+  _scheduleRecomputeClusters() {
+    if (this._recomputeClustersTimer) {
+      try { clearTimeout(this._recomputeClustersTimer); } catch (_) {}
+    }
+    this._recomputeClustersTimer = setTimeout(() => {
+      this._recomputeClustersTimer = null;
+      this._enqueueOp(async () => {
+        this._recomputeControlClusters(false);
+        const ok = await this._saveClustersToSceneNow();
+        if (ok) {
+          this._refreshControlHud();
+          this.notifyListeners();
+        }
+      });
+    }, 200);
+  }
+
+  /**
+   * @returns {Promise<boolean>}
+   */
+  async rebuildControlClusters() {
+    return this._enqueueOp(async () => {
+      if (!this._canEditScene()) {
+        ui?.notifications?.warn?.('You do not have permission to rebuild effect clusters on this scene.');
+        return false;
+      }
+      this._recomputeControlClusters(false);
+      const ok = await this._saveClustersToSceneNow();
+      if (ok) {
+        this._refreshControlHud();
+        this.notifyListeners();
+        ui?.notifications?.info?.('Map point effect clusters rebuilt.');
+      }
+      return ok;
+    });
+  }
+
+  /**
+   * @returns {Promise<boolean>}
+   */
+  async _saveClustersToSceneNow() {
+    const scene = canvas?.scene;
+    if (!scene) return false;
+    if (!this._canEditScene()) return false;
+
+    const clustersData = {};
+    for (const [id, cluster] of this.controlClusters) {
+      if (!cluster || typeof cluster !== 'object') continue;
+      clustersData[id] = { ...cluster, id };
+    }
+
+    let prevRaw = null;
+    try {
+      prevRaw = scene.getFlag(MODULE_ID, 'mapPointControlClusters');
+    } catch (_) {
+      prevRaw = null;
+    }
+    const prevIds = (prevRaw && typeof prevRaw === 'object' && !Array.isArray(prevRaw))
+      ? Object.keys(prevRaw)
+      : [];
+    const nextIds = new Set(Object.keys(clustersData));
+    const flagPayload = { ...clustersData };
+    for (const id of prevIds) {
+      if (!nextIds.has(id)) flagPayload[`-=${id}`] = null;
+    }
+
+    try {
+      this._armMapPointPersistGuards({
+        logLabel: 'starting scene.update (control clusters)',
+        payloadKeys: Object.keys(flagPayload || {}),
+      });
+      await scene.update({
+        [`flags.${MODULE_ID}.mapPointControlClusters`]: flagPayload,
+      });
+      return true;
+    } catch (e) {
+      log.error('Failed to save map point control clusters:', e);
+      return false;
+    } finally {
+      this._scheduleClearMapPointPersistGuards();
+    }
+  }
+
+  /**
+   * @param {string} clusterId
+   * @returns {Promise<boolean>}
+   */
+  async toggleClusterEnabled(clusterId) {
+    return this._enqueueOp(async () => {
+      if (!game.user?.isGM) return false;
+      if (!this._canEditScene()) {
+        ui?.notifications?.warn?.('You do not have permission to modify effect clusters on this scene.');
+        return false;
+      }
+
+      const cluster = this.controlClusters.get(clusterId);
+      if (!cluster) return false;
+
+      const wasOn = cluster.enabled !== false;
+      cluster.enabled = !wasOn;
+      const ok = await this._saveClustersToSceneNow();
+      if (!ok) {
+        cluster.enabled = wasOn;
+        return false;
+      }
+
+      this._refreshControlHud();
+      this.notifyListeners();
+      return true;
+    });
+  }
+
+  /**
+   * @param {string} groupId
+   * @returns {Promise<boolean>}
+   */
+  async toggleClusterForGroup(groupId) {
+    const clusterId = this._groupIdToClusterId.get(groupId);
+    if (!clusterId) return false;
+    return this.toggleClusterEnabled(clusterId);
+  }
+
+  /**
+   * @param {boolean} show
+   */
+  setShowControlHud(show) {
+    this.showControlHud = !!show && !!game.user?.isGM;
+    if (this.showControlHud) {
+      this._recomputeControlClusters(false);
+      this._refreshControlHud();
+      if (this._canEditScene()) {
+        this._saveClustersToSceneNow().catch(() => {});
+      }
+    } else {
+      this._clearControlHud();
+    }
+  }
+
+  /**
+   * @returns {THREE.Group|null}
+   */
+  getControlHudGroup() {
+    return this.controlHudGroup;
+  }
+
+  /**
+   * @param {PointerEvent} event
+   * @param {THREE.Raycaster} raycaster
+   * @param {THREE.Camera} [camera]
+   * @returns {string|null} clusterId
+   */
+  pickEffectControlCluster(event, raycaster, camera = null) {
+    if (!game.user?.isGM || !this.showControlHud || !this.controlHudGroup) return null;
+    if (!raycaster || typeof raycaster.setFromCamera !== 'function') return null;
+
+    const cam = camera
+      ?? window.MapShine?.sceneComposer?.camera
+      ?? window.MapShine?.interactionManager?.sceneComposer?.camera;
+    if (!cam) return null;
+
+    const rect = canvas?.app?.view?.getBoundingClientRect?.()
+      ?? document.getElementById('board')?.getBoundingClientRect?.();
+    if (!rect?.width || !rect?.height) return null;
+
+    const clientX = Number(event?.clientX);
+    const clientY = Number(event?.clientY);
+    if (!Number.isFinite(clientX) || !Number.isFinite(clientY)) return null;
+
+    const ndcX = ((clientX - rect.left) / rect.width) * 2 - 1;
+    const ndcY = -((clientY - rect.top) / rect.height) * 2 + 1;
+
+    const THREE = window.THREE;
+    const prevMask = raycaster.layers?.mask;
+    try {
+      if (THREE && !raycaster.layers) raycaster.layers = new THREE.Layers();
+      if (raycaster.layers) {
+        raycaster.layers.mask = 0xffffffff;
+        raycaster.layers.enable(0);
+        raycaster.layers.enable(OVERLAY_THREE_LAYER);
+      }
+    } catch (_) {
+    }
+
+    raycaster.setFromCamera({ x: ndcX, y: ndcY }, cam);
+
+    const hits = raycaster.intersectObject(this.controlHudGroup, true);
+    try {
+      if (typeof prevMask === 'number' && raycaster.layers) {
+        raycaster.layers.mask = prevMask;
+      }
+    } catch (_) {
+    }
+
+    for (const hit of hits) {
+      let object = hit.object;
+      while (object && object !== this.controlHudGroup) {
+        const type = object.userData?.type;
+        if (type === 'mapPointEffectControl' || type === 'mapPointEffectControlHit') {
+          const clusterId = object.userData?.clusterId
+            ?? object.parent?.userData?.clusterId;
+          if (clusterId) return clusterId;
+        }
+        object = object.parent;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * @private
+   */
+  _ensureControlHudGroup() {
+    const THREE = window.THREE;
+    if (!THREE) return null;
+
+    if (!this.controlHudGroup) {
+      this.controlHudGroup = new THREE.Group();
+      this.controlHudGroup.name = 'MapPointControlHud';
+      this.scene.add(this.controlHudGroup);
+    }
+    return this.controlHudGroup;
+  }
+
+  /**
+   * @private
+   */
+  _refreshControlHud() {
+    const THREE = window.THREE;
+    if (!THREE) return;
+
+    if (!game.user?.isGM || !this.showControlHud) {
+      this._clearControlHud();
+      return;
+    }
+
+    const hudRoot = this._ensureControlHudGroup();
+    if (!hudRoot) return;
+
+    for (const id of [...this.controlHudObjects.keys()]) {
+      this._removeControlHudObject(id);
+    }
+
+    const groundZ = window.MapShine?.sceneComposer?.groundZ ?? 1000;
+    const uiScale = canvas?.dimensions?.uiScale ?? 1;
+    const iconSize = 28 * uiScale;
+
+    for (const cluster of this.controlClusters.values()) {
+      if (!cluster?.id || !cluster.centroid) continue;
+      this._createOrUpdateControlHudSprite(cluster, groundZ, iconSize);
+    }
+  }
+
+  /**
+   * @param {import('./map-point-control-clusters.js').MapPointControlCluster} cluster
+   * @param {number} groundZ
+   * @param {number} iconSize
+   * @private
+   */
+  _createOrUpdateControlHudSprite(cluster, groundZ, iconSize) {
+    const THREE = window.THREE;
+    if (!THREE) return;
+
+    const clusterId = cluster.id;
+    const enabled = cluster.enabled !== false;
+    const cx = Number(cluster.centroid?.x);
+    const cy = Number(cluster.centroid?.y);
+    if (!Number.isFinite(cx) || !Number.isFinite(cy)) return;
+
+    let hudGroup = this.controlHudObjects.get(clusterId);
+    if (hudGroup) {
+      this._removeControlHudObject(clusterId);
+      hudGroup = null;
+    }
+    if (!hudGroup) {
+      hudGroup = new THREE.Group();
+      hudGroup.name = `MapPointControlHud_${clusterId}`;
+      hudGroup.userData = { type: 'mapPointEffectControl', clusterId };
+
+      const fillColor = enabled ? 0x44cc66 : 0x666666;
+      const ringColor = enabled ? 0xffffff : 0x999999;
+
+      const iconGeo = new THREE.CircleGeometry(iconSize * 0.42, 24);
+      const iconMat = new THREE.MeshBasicMaterial({
+        color: fillColor,
+        transparent: true,
+        opacity: enabled ? 0.92 : 0.55,
+        depthTest: false,
+        depthWrite: false,
+      });
+      iconMat.toneMapped = false;
+      const icon = new THREE.Mesh(iconGeo, iconMat);
+      icon.renderOrder = 260000;
+      icon.layers.set(OVERLAY_THREE_LAYER);
+      icon.userData = { type: 'mapPointEffectControl', clusterId };
+      hudGroup.add(icon);
+
+      const ringGeo = new THREE.RingGeometry(iconSize * 0.42, iconSize * 0.5, 24);
+      const ringMat = new THREE.MeshBasicMaterial({
+        color: ringColor,
+        transparent: true,
+        opacity: 0.9,
+        depthTest: false,
+        depthWrite: false,
+      });
+      ringMat.toneMapped = false;
+      const ring = new THREE.Mesh(ringGeo, ringMat);
+      ring.renderOrder = 260001;
+      ring.layers.set(OVERLAY_THREE_LAYER);
+      ring.userData = { type: 'mapPointEffectControl', clusterId };
+      hudGroup.add(ring);
+
+      const hitGeo = new THREE.CircleGeometry(iconSize * 0.85, 16);
+      const hitMat = new THREE.MeshBasicMaterial({
+        transparent: true,
+        opacity: 0.001,
+        depthTest: false,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+      });
+      const hit = new THREE.Mesh(hitGeo, hitMat);
+      hit.position.z = 0.5;
+      hit.renderOrder = 259000;
+      hit.layers.set(0);
+      hit.userData = { type: 'mapPointEffectControlHit', clusterId };
+      hudGroup.add(hit);
+
+      this._ensureControlHudGroup()?.add(hudGroup);
+      this.controlHudObjects.set(clusterId, hudGroup);
+    }
+
+    hudGroup.position.set(cx, cy, groundZ + 6);
+    hudGroup.userData.clusterId = clusterId;
+    hudGroup.userData.effectTarget = cluster.effectTarget;
+
+    const iconMesh = hudGroup.children.find((c) => c.userData?.type === 'mapPointEffectControl');
+    const ringMesh = hudGroup.children.find((c) => c.geometry?.type === 'RingGeometry');
+    const fillColor = enabled ? 0x44cc66 : 0x666666;
+    if (iconMesh?.material) {
+      iconMesh.material.color.setHex(fillColor);
+      iconMesh.material.opacity = enabled ? 0.92 : 0.55;
+      iconMesh.material.needsUpdate = true;
+    }
+    if (ringMesh?.material) {
+      ringMesh.material.color.setHex(enabled ? 0xffffff : 0x999999);
+      ringMesh.material.needsUpdate = true;
+    }
+  }
+
+  /**
+   * @param {string} clusterId
+   * @private
+   */
+  _removeControlHudObject(clusterId) {
+    const obj = this.controlHudObjects.get(clusterId);
+    if (!obj) return;
+    obj.traverse((child) => {
+      if (child.geometry) child.geometry.dispose();
+      if (child.material) {
+        if (Array.isArray(child.material)) child.material.forEach((m) => m.dispose());
+        else child.material.dispose();
+      }
+    });
+    this.controlHudGroup?.remove(obj);
+    this.controlHudObjects.delete(clusterId);
+  }
+
+  /**
+   * @private
+   */
+  _clearControlHud() {
+    for (const id of [...this.controlHudObjects.keys()]) {
+      this._removeControlHudObject(id);
+    }
+    if (this.controlHudGroup) {
+      this.scene.remove(this.controlHudGroup);
+      this.controlHudGroup = null;
+    }
+  }
+
   /**
    * Dispose of all resources
    */
@@ -1529,6 +2061,10 @@ export class MapPointsManager {
     if (this._suppressLoadFromSceneTimer) {
       try { clearTimeout(this._suppressLoadFromSceneTimer); } catch (_) {}
       this._suppressLoadFromSceneTimer = null;
+    }
+    if (this._recomputeClustersTimer) {
+      try { clearTimeout(this._recomputeClustersTimer); } catch (_) {}
+      this._recomputeClustersTimer = null;
     }
     this._suppressLoadFromSceneUntil = 0;
 
@@ -1542,7 +2078,11 @@ export class MapPointsManager {
     this._hookRegistrations = [];
 
     this.clearVisualObjects();
+    this._clearControlHud();
     this.groups.clear();
+    this.controlClusters.clear();
+    this._groupIdToClusterId.clear();
+    this.showControlHud = false;
     this.changeListeners = [];
     this.initialized = false;
     

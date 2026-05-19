@@ -1,5 +1,12 @@
 import { isGmLike } from '../../core/gm-parity.js';
+import {
+  FLASHLIGHT_PLAYER_LIGHT_MODES,
+  isValidPlayerLightMode,
+  NV_ONLY_PLAYER_LIGHT_MODES,
+  NV_POST_PLAYER_LIGHT_MODES
+} from '../../core/player-light-allowance.js';
 import { createLogger } from '../../core/log.js';
+import { LightingDirector } from '../../core/LightingDirector.js';
 import Coordinates from '../../utils/coordinates.js';
 import { readWallHeightFlags } from '../../foundry/levels-scene-flags.js';
 import { weatherController } from '../../core/WeatherController.js';
@@ -62,6 +69,73 @@ const OVERLAY_THREE_LAYER = 31;
 
 const log = createLogger('PlayerLightEffect');
 
+const clamp01 = (v) => Math.max(0, Math.min(1, v));
+
+const NV_ONLY_MODES = new Set(NV_ONLY_PLAYER_LIGHT_MODES);
+const NV_POST_MODES = new Set(NV_POST_PLAYER_LIGHT_MODES);
+const FLASHLIGHT_MODES = new Set(FLASHLIGHT_PLAYER_LIGHT_MODES);
+
+/** Per-mode night-vision / flashlight parameter presets applied when a vision mode is selected. */
+const VISION_PROFILES = Object.freeze({
+  lowLightVision: {
+    nightVisionTint: { r: 1.0, g: 1.0, b: 1.0 },
+    nightVisionTintStrength: 0.3,
+    nightVisionSaturation: 0.4,
+    nightVisionGain: 2.5,
+    nightVisionGamma: 0.45,
+    nightVisionPurkinjeStrength: 1.0,
+    nightVisionPurkinjeDarkStart: 0.012,
+    nightVisionPurkinjeBrightEnd: 0.22,
+    nightVisionPurkinjeCurve: 1.4,
+    nightVisionScanlinesEnabled: false,
+    nightVisionScanlinesIntensity: 0,
+    nightVisionPhosphorFlickerAmount: 0,
+    nightVisionNoiseAmount: 0,
+    nightVisionEyepieceStyle: 'single',
+    nightVisionEyepieceRadius: 1.0,
+    nightVisionEyepieceIntensity: 0,
+    nightVisionBloomEnabled: true,
+    nightVisionBloomPersistenceSeconds: 0.1,
+    nightVisionCAAmount: 0.8,
+    nightVisionDistortionAmount: 0,
+    nightVisionPowerFlickerEnabled: false,
+    nightVisionPurkinjeStrength: 0
+  },
+  infravision: {
+    nightVisionTint: { r: 1.0, g: 0.1, b: 0.0 },
+    nightVisionTintStrength: 1.0,
+    nightVisionSaturation: 0.0,
+    nightVisionGain: 7.0,
+    nightVisionGamma: 0.35,
+    nightVisionMaxLuma: 3.0,
+    nightVisionScanlinesEnabled: false,
+    nightVisionPhosphorFlickerAmount: 0,
+    nightVisionNoiseAmount: 0,
+    nightVisionEyepieceRadius: 1.0,
+    nightVisionEyepieceIntensity: 0,
+    nightVisionBloomEnabled: false,
+    nightVisionDistortionAmount: 0,
+    nightVisionPowerFlickerEnabled: false,
+    nightVisionCAAmount: 0,
+    nightVisionPurkinjeStrength: 0
+  },
+  activeIR: {
+    nightVisionTint: { r: 0.2, g: 1.0, b: 0.45 },
+    nightVisionTintStrength: 0.85,
+    nightVisionSaturation: 0.15,
+    nightVisionGain: 4.0,
+    nightVisionGamma: 0.7,
+    nightVisionScanlinesEnabled: true,
+    nightVisionScanlinesIntensity: 0.25,
+    nightVisionNoiseAmount: 0.22,
+    nightVisionPhosphorFlickerAmount: 0.08,
+    nightVisionBloomEnabled: true,
+    flashlightAngleDeg: 35,
+    flashlightBeamAngleDeg: 35,
+    nightVisionPurkinjeStrength: 0
+  }
+});
+
 class SimpleSmoothNoise {
   constructor({ amplitude = 1, scale = 1, seed = 1 } = {}) {
     this.amplitude = amplitude;
@@ -105,6 +179,11 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
       flashlightMaxDistanceUnits: 60,
       fadeOutDistanceUnits: 7,
       wallBlockEnabled: true,
+
+      autoDayNightBalance: true,
+      dayIntensityScale: 0.28,
+      nightIntensityScale: 1.65,
+      dayNightCurve: 1.15,
 
       springStiffness: 55,
       springDamping: 16,
@@ -217,10 +296,14 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
       nightVisionTintStrength: 0.85,
       nightVisionSaturation: 0.15,
       nightVisionBrightness: 1.0,
+      nightVisionPurkinjeStrength: 0,
+      nightVisionPurkinjeDarkStart: 0.015,
+      nightVisionPurkinjeBrightEnd: 0.18,
+      nightVisionPurkinjeCurve: 1.35,
       nightVisionGain: 4.0,
       nightVisionGamma: 0.7,
-      nightVisionMaxLuma: 1.4,
-      nightVisionDarkLift: 0.04,
+      nightVisionMaxLuma: 2.5,
+      nightVisionDarkLift: 0.02,
       nightVisionEyepieceStyle: 'single',
       nightVisionEyepieceRadius: 0.55,
       nightVisionEyepieceSoftness: 0.18,
@@ -242,7 +325,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
       nightVisionPhosphorDensity: 1.0,
       nightVisionPhosphorIntensity: 1.0,
       nightVisionBloomEnabled: true,
-      nightVisionBloomThreshold: 0.7,
+      nightVisionBloomThreshold: 1.0,
       nightVisionBloomThresholdSoftness: 0.25,
       nightVisionBloomIntensity: 0.85,
       nightVisionBloomBlurPx: 6,
@@ -291,6 +374,9 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
 
     this._torchWasActiveLastFrame = false;
     this._torchPrevTokenId = null;
+    this._torchWindDownActive = false;
+    this._torchWindDownElapsed = 0;
+    this._torchWindDownGroundZ = 0;
 
     this._distanceFade = 0;
 
@@ -404,6 +490,8 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
     this._nvBloomWriteRT = null;
     this._nvBloomWidth = 0;
     this._nvBloomHeight = 0;
+
+    this._appliedVisionProfileMode = null;
   }
 
   static getControlSchema() {
@@ -422,6 +510,18 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
             'fadeOutDistanceUnits',
             'wallBlockEnabled',
             'debugReadoutEnabled'
+          ]
+        },
+        {
+          name: 'dayNight',
+          label: 'Day / Night',
+          type: 'folder',
+          expanded: true,
+          parameters: [
+            'autoDayNightBalance',
+            'dayIntensityScale',
+            'nightIntensityScale',
+            'dayNightCurve'
           ]
         },
         {
@@ -587,6 +687,18 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
           ]
         },
         {
+          name: 'night-vision-purkinje',
+          label: 'Night Vision: Purkinje (Low-light)',
+          type: 'folder',
+          expanded: false,
+          parameters: [
+            'nightVisionPurkinjeStrength',
+            'nightVisionPurkinjeDarkStart',
+            'nightVisionPurkinjeBrightEnd',
+            'nightVisionPurkinjeCurve'
+          ]
+        },
+        {
           name: 'night-vision-gain',
           label: 'Night Vision: Light Amplification',
           type: 'folder',
@@ -698,7 +810,14 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
         mode: {
           type: 'list',
           label: 'Mode',
-          options: { Torch: 'torch', Flashlight: 'flashlight', 'Night Vision': 'nightVision' },
+          options: {
+            Torch: 'torch',
+            Flashlight: 'flashlight',
+            'Night Vision': 'nightVision',
+            'Low-light Vision': 'lowLightVision',
+            Infravision: 'infravision',
+            'Active Infravision': 'activeIR'
+          },
           default: 'flashlight',
           hidden: true
         },
@@ -706,6 +825,39 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
         flashlightMaxDistanceUnits: { type: 'slider', label: 'Flashlight Max Dist (u)', min: 1, max: 200, step: 1, default: 60, throttle: 50 },
         fadeOutDistanceUnits: { type: 'slider', label: 'Fade Band (u)', min: 0, max: 100, step: 1, default: 7, throttle: 50 },
         wallBlockEnabled: { type: 'boolean', label: 'Wall Block', default: true },
+        autoDayNightBalance: {
+          type: 'boolean',
+          default: true,
+          label: 'Auto Day/Night',
+          tooltip: 'Scales torch + flashlight VFX and dynamic lights with scene darkness so player lights stay subtle by day and readable at night after Color Correction.',
+        },
+        dayIntensityScale: {
+          type: 'slider',
+          min: 0,
+          max: 1.5,
+          step: 0.01,
+          default: 0.28,
+          label: 'Day Scale',
+          tooltip: 'Multiplier at full daylight (master darkness ≈ 0).',
+        },
+        nightIntensityScale: {
+          type: 'slider',
+          min: 0.25,
+          max: 4,
+          step: 0.01,
+          default: 1.65,
+          label: 'Night Scale',
+          tooltip: 'Multiplier at full night (master darkness ≈ 1).',
+        },
+        dayNightCurve: {
+          type: 'slider',
+          min: 0.25,
+          max: 3,
+          step: 0.05,
+          default: 1.15,
+          label: 'Darkness Curve',
+          tooltip: 'Above 1 = lights stay dim longer into dusk; below 1 = ramp up earlier.',
+        },
         springStiffness: { type: 'slider', label: 'Spring Stiffness', min: 1, max: 300, step: 1, default: 55, throttle: 50 },
         springDamping: { type: 'slider', label: 'Spring Damping', min: 0, max: 90, step: 1, default: 16, throttle: 50 },
         torchBaseIntensity: { type: 'slider', label: 'Base Intensity', min: 0, max: 6, step: 0.01, default: 0.66, throttle: 50 },
@@ -825,10 +977,86 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
         nightVisionTintStrength: { type: 'slider', label: 'Tint Strength', min: 0, max: 1, step: 0.01, default: 0.85, throttle: 50 },
         nightVisionSaturation: { type: 'slider', label: 'Saturation', min: 0, max: 1, step: 0.01, default: 0.15, throttle: 50 },
         nightVisionBrightness: { type: 'slider', label: 'Brightness', min: 0, max: 2, step: 0.01, default: 1.0, throttle: 50 },
-        nightVisionGain: { type: 'slider', label: 'Gain', min: 1, max: 10, step: 0.05, default: 4.0, throttle: 50 },
-        nightVisionGamma: { type: 'slider', label: 'Gamma', min: 0.3, max: 2.0, step: 0.01, default: 0.7, throttle: 50 },
-        nightVisionMaxLuma: { type: 'slider', label: 'Max Luma Clamp', min: 0.5, max: 2.0, step: 0.01, default: 1.4, throttle: 50 },
-        nightVisionDarkLift: { type: 'slider', label: 'Dark Lift', min: 0, max: 0.5, step: 0.005, default: 0.04, throttle: 50 },
+        nightVisionPurkinjeStrength: {
+          type: 'slider',
+          label: 'Purkinje Strength',
+          min: 0,
+          max: 1,
+          step: 0.01,
+          default: 0,
+          throttle: 50,
+          tooltip: 'Biological rod/cone crossover. Dark pre-gain areas desaturate to monochrome; brighter ambient areas keep color. Enabled automatically in Low-light Vision mode.',
+        },
+        nightVisionPurkinjeDarkStart: {
+          type: 'slider',
+          label: 'Purkinje Dark Start',
+          min: 0.001,
+          max: 0.2,
+          step: 0.001,
+          default: 0.015,
+          throttle: 50,
+          tooltip: 'Pre-gain HDR luma below which color is fully suppressed (rod-dominated).',
+        },
+        nightVisionPurkinjeBrightEnd: {
+          type: 'slider',
+          label: 'Purkinje Bright End',
+          min: 0.02,
+          max: 1.0,
+          step: 0.01,
+          default: 0.18,
+          throttle: 50,
+          tooltip: 'Pre-gain HDR luma above which full saturation is restored (cone-dominated).',
+        },
+        nightVisionPurkinjeCurve: {
+          type: 'slider',
+          label: 'Purkinje Curve',
+          min: 0.2,
+          max: 4.0,
+          step: 0.05,
+          default: 1.35,
+          throttle: 50,
+          tooltip: 'Crossover sharpness between rod and cone vision retention.',
+        },
+        nightVisionGain: {
+          type: 'slider',
+          label: 'Gain (× linear)',
+          min: 1,
+          max: 10,
+          step: 0.05,
+          default: 4.0,
+          throttle: 50,
+          tooltip: 'Linear gain converted to EV stops for HDR metering (4× ≈ +2 stops). Meters post-bloom linear HDR when available.',
+        },
+        nightVisionGamma: {
+          type: 'slider',
+          label: 'Shadow Curve',
+          min: 0.3,
+          max: 2.0,
+          step: 0.01,
+          default: 0.7,
+          throttle: 50,
+          tooltip: 'Lower values lift shadows more aggressively; higher values keep gain on midtones/highlights.',
+        },
+        nightVisionMaxLuma: {
+          type: 'slider',
+          label: 'Peak Luma (soft knee)',
+          min: 0.5,
+          max: 4.0,
+          step: 0.01,
+          default: 2.5,
+          throttle: 50,
+          tooltip: 'Soft highlight ceiling after amplification. HDR scenes often need 2–3+ vs the old 0–1 display-referred clamp.',
+        },
+        nightVisionDarkLift: {
+          type: 'slider',
+          label: 'Black Level (linear)',
+          min: 0,
+          max: 0.25,
+          step: 0.002,
+          default: 0.02,
+          throttle: 50,
+          tooltip: 'Linear offset added to HDR luma before log gain (smaller than pre-HDR defaults).',
+        },
         nightVisionEyepieceStyle: {
           type: 'list',
           label: 'Eyepiece Style',
@@ -855,7 +1083,16 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
         nightVisionPhosphorDensity: { type: 'slider', label: 'Phosphor Density', min: 0.1, max: 3.0, step: 0.01, default: 1.0, throttle: 50 },
         nightVisionPhosphorIntensity: { type: 'slider', label: 'Phosphor Intensity', min: 0, max: 4.0, step: 0.01, default: 1.0, throttle: 50 },
         nightVisionBloomEnabled: { type: 'boolean', label: 'Bloom / Burn-In', default: true },
-        nightVisionBloomThreshold: { type: 'slider', label: 'Bloom Threshold', min: 0, max: 1, step: 0.01, default: 0.7, throttle: 50 },
+        nightVisionBloomThreshold: {
+          type: 'slider',
+          label: 'Bloom Threshold (linear)',
+          min: 0,
+          max: 4,
+          step: 0.01,
+          default: 1.0,
+          throttle: 50,
+          tooltip: 'Linear HDR brightness floor for tube bloom burn-in (matches post-merge bloom scale).',
+        },
         nightVisionBloomThresholdSoftness: { type: 'slider', label: 'Threshold Softness', min: 0.01, max: 0.5, step: 0.005, default: 0.25, throttle: 50 },
         nightVisionBloomIntensity: { type: 'slider', label: 'Bloom Intensity', min: 0, max: 3, step: 0.01, default: 0.85, throttle: 50 },
         nightVisionBloomBlurPx: { type: 'slider', label: 'Bloom Blur (px)', min: 0, max: 16, step: 0.25, default: 6, throttle: 50 },
@@ -1234,6 +1471,15 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
     const torchPrevTokenId = this._torchPrevTokenId;
     this._torchWasActiveLastFrame = false;
 
+    if (this._torchWindDownActive) {
+      this._tickNightVisionPower(timeInfo, false);
+      this._hideDynamicLightSources();
+      if (this._tickTorchWindDown(timeInfo)) {
+        this._setVisible(false, false, { keepTorchVisible: true });
+        return;
+      }
+    }
+
     if (window.MapShine?.isMapMakerMode) {
       this._tickNightVisionPower(timeInfo, false);
       this._setVisible(false);
@@ -1242,6 +1488,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
     }
 
     if (!this.enabled) {
+      if (this._tryBeginTorchWindDown(torchWasActiveLastFrame, timeInfo)) return;
       this._tickNightVisionPower(timeInfo, false);
       this._setVisible(false);
       this._hideDynamicLightSources();
@@ -1261,10 +1508,15 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
 
     const tokenId = this._getActiveTokenId();
     if (!tokenId) {
+      if (this._tryBeginTorchWindDown(torchWasActiveLastFrame, timeInfo)) return;
       this._tickNightVisionPower(timeInfo, false);
       this._setVisible(false);
       this._hideDynamicLightSources();
       return;
+    }
+
+    if (this._torchWindDownActive) {
+      this._cancelTorchWindDown();
     }
 
     this._torchPrevTokenId = tokenId;
@@ -1275,6 +1527,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
     // NVG post-pass does not need a MapShine token sprite; fall back to canvas token doc.
     const tokenDoc = tokenSprite?.userData?.tokenDoc ?? tokenObj?.document ?? null;
     if (!tokenDoc || !tokenObj) {
+      if (this._tryBeginTorchWindDown(torchWasActiveLastFrame, timeInfo)) return;
       this._tickNightVisionPower(timeInfo, false);
       this._setVisible(false);
       this._hideDynamicLightSources();
@@ -1286,7 +1539,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
         ?? tokenDoc?.flags?.['map-shine-advanced']?.playerLightMode;
       // Runtime mode must follow token flags so toolbar toggles always switch
       // correctly, including switching away from night vision.
-      if (tokenMode === 'torch' || tokenMode === 'flashlight' || tokenMode === 'nightVision') {
+      if (isValidPlayerLightMode(tokenMode)) {
         this.params.mode = tokenMode;
       }
     } catch (_) {
@@ -1297,6 +1550,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
         ?? tokenDoc?.flags?.['map-shine-advanced']?.playerLightEnabled;
       const enabled = (enabledFlag === undefined || enabledFlag === null) ? false : !!enabledFlag;
       if (!enabled) {
+        if (this._tryBeginTorchWindDown(torchWasActiveLastFrame, timeInfo)) return;
         this._tickNightVisionPower(timeInfo, false);
         this._setVisible(false);
         this._hideDynamicLightSources();
@@ -1306,31 +1560,48 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
     }
 
     if (!this._isAllowedForUser(tokenDoc)) {
+      if (this._tryBeginTorchWindDown(torchWasActiveLastFrame, timeInfo)) return;
       this._tickNightVisionPower(timeInfo, false);
       this._setVisible(false);
       this._hideDynamicLightSources();
       return;
     }
 
-    if (this.params.mode === 'nightVision') {
+    const mode = this.params.mode;
+    const nvOnlyMode = NV_ONLY_MODES.has(mode);
+    const nvPostMode = NV_POST_MODES.has(mode);
+    const useFlashlight = FLASHLIGHT_MODES.has(mode);
+
+    if (nvPostMode) {
+      this._applyVisionProfile(mode);
+    } else {
+      this._appliedVisionProfileMode = null;
+    }
+
+    if (nvOnlyMode) {
       this._tickNightVisionPower(timeInfo, true);
       this._flashlightFinalIntensity = 0;
       this._setVisible(false, false);
       this._hideDynamicLightSources();
-      this._updateDebugOverlay('NIGHT_VISION', 0, false, this._nvEffectivePower);
+      this._updateDebugOverlay(this._getVisionDebugLabel(mode), 0, false, this._nvEffectivePower);
       return;
     }
 
-    if (!tokenSprite) {
+    if (nvPostMode && useFlashlight) {
+      this._tickNightVisionPower(timeInfo, true);
+    } else {
       this._tickNightVisionPower(timeInfo, false);
+    }
+
+    if (!tokenSprite) {
+      if (this._tryBeginTorchWindDown(torchWasActiveLastFrame, timeInfo)) return;
       this._setVisible(false);
       this._hideDynamicLightSources();
       return;
     }
 
-    this._tickNightVisionPower(timeInfo, false);
-
     if (this._pointerClientX === null || this._pointerClientY === null) {
+      if (this._tryBeginTorchWindDown(torchWasActiveLastFrame, timeInfo)) return;
       this._setVisible(false);
       this._hideDynamicLightSources();
       return;
@@ -1345,6 +1616,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
       : null;
 
     if (!cursorWorld) {
+      if (this._tryBeginTorchWindDown(torchWasActiveLastFrame, timeInfo)) return;
       this._setVisible(false);
       this._hideDynamicLightSources();
       return;
@@ -1352,7 +1624,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
 
     const tokenCenterWorld = tokenSprite.position;
 
-    const aimWorld = (this.params.mode === 'flashlight')
+    const aimWorld = useFlashlight
       ? this._getFlashlightAimWorld(timeInfo, tokenCenterWorld, cursorWorld, groundZ)
       : cursorWorld;
 
@@ -1409,6 +1681,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
         }
 
         if (this._torchExtinguished && !touching) {
+          if (this._tryBeginTorchWindDown(torchWasActiveLastFrame, timeInfo, groundZ)) return;
           this._setVisible(false);
           this._hideDynamicLightSources();
           return;
@@ -1422,6 +1695,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
     }
 
     if (fade <= 0.0001) {
+      if (this._tryBeginTorchWindDown(torchWasActiveLastFrame, timeInfo, groundZ)) return;
       this._setVisible(false);
       this._hideDynamicLightSources();
       return;
@@ -1441,7 +1715,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
       try {
         const destFoundry = Coordinates.toFoundry(aimWorld.x, aimWorld.y);
         let collision = null;
-        const isFlashlightMode = this.params.mode === 'flashlight';
+        const isFlashlightMode = useFlashlight;
         const tSec = typeof timeInfo?.elapsed === 'number' ? timeInfo.elapsed : 0;
         const options = isFlashlightMode ? { flashlightOpticalPassThrough: true } : null;
         const collisionTypes = isFlashlightMode ? ['sight', 'light'] : ['move'];
@@ -1487,42 +1761,17 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
       this._registerTorchParticleSystem(this._torchSparksSystem);
     }
 
-    // Step the local torch particle simulation each frame.
-    // This mirrors FireEffectV2's explicit BatchedRenderer.update() flow.
-    try {
-      if (this._torchBatchRenderer && typeof this._torchBatchRenderer.update === 'function') {
-        const deltaSec = typeof timeInfo?.motionDelta === 'number'
-          ? timeInfo.motionDelta
-          : (typeof timeInfo?.delta === 'number' ? timeInfo.delta : 0.016);
-        const clampedDelta = Math.min(deltaSec, 0.1);
-        const simSpeed = (weatherController && typeof weatherController.simulationSpeed === 'number')
-          ? weatherController.simulationSpeed
-          : 2.0;
-        const dtQuarks = clampedDelta * 0.001 * 750 * simSpeed;
-        
-        // DEBUG: Log batch update
-        if (!this._debugBatchUpdateLogged) {
-          log.info(`[TORCH DEBUG] Calling batch.update(${dtQuarks}), systems: ${this._torchBatchRenderer.children?.length ?? 0}`);
-          this._debugBatchUpdateLogged = true;
-        }
-        
-        this._torchBatchRenderer.update(dtQuarks);
-      } else {
-        if (!this._debugNoBatchLogged) {
-          log.warn('[TORCH DEBUG] Batch renderer not available or no update method');
-          this._debugNoBatchLogged = true;
-        }
-      }
-    } catch (err) {
-      log.error('[TORCH DEBUG] Batch update threw:', err);
-    }
+    this._updateTorchBatchRenderer(timeInfo);
 
-    if (this.params.mode === 'flashlight') {
+    if (useFlashlight) {
       const flashlightMaxU = maxU;
       const flashlightConeMaxLenU = Math.max(0.5, this.params.flashlightLengthUnits) * 4.0;
       this._updateFlashlight(timeInfo, tokenCenterWorld, aimWorld, blocked, safeWallDistanceUnits, groundZ, fade, tokenDoc, flashlightMaxU, flashlightConeMaxLenU, tokenRadiusPx);
       this._updateDynamicLightSources(timeInfo, tokenCenterWorld, clampedTargetWorld, blocked, safeWallDistanceUnits, groundZ, fade, tokenDoc);
       this._setVisible(true, false);
+      if (mode === 'activeIR') {
+        this._updateDebugOverlay('ACTIVE_IR', distanceUnits, blocked, this._nvEffectivePower);
+      }
       return;
     }
 
@@ -2127,10 +2376,211 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
     return this._flashlightAimWorld;
   }
 
+  _getVisionDebugLabel(mode) {
+    switch (mode) {
+      case 'lowLightVision':
+        return 'LOW_LIGHT';
+      case 'infravision':
+        return 'INFRAVISION';
+      case 'activeIR':
+        return 'ACTIVE_IR';
+      default:
+        return 'NIGHT_VISION';
+    }
+  }
+
+  _applyVisionProfile(mode) {
+    if (this._appliedVisionProfileMode === mode) return;
+    this._appliedVisionProfileMode = mode;
+
+    const profile = VISION_PROFILES[mode];
+    if (!profile) {
+      if (mode === 'nightVision') {
+        this.params.nightVisionPurkinjeStrength = 0;
+      }
+      return;
+    }
+
+    for (const [key, val] of Object.entries(profile)) {
+      if (val && typeof val === 'object' && !Array.isArray(val)) {
+        this.params[key] = { ...(this.params[key] || {}), ...val };
+      } else {
+        this.params[key] = val;
+      }
+    }
+  }
+
   _isAllowedForUser(tokenDoc) {
     const isGM = !!isGmLike();
     if (isGM) return true;
     return !!tokenDoc?.isOwner;
+  }
+
+  _getGroundZ() {
+    const sceneComposer = window.MapShine?.sceneComposer;
+    return (sceneComposer && typeof sceneComposer.groundZ === 'number') ? sceneComposer.groundZ : 0;
+  }
+
+  /**
+   * Darkness-driven scale for torch/flashlight VFX + dynamic lights (matches CandleFlamesEffectV2).
+   * Night-vision post modes are excluded — they have their own gain/darkness gates.
+   * @returns {number}
+   */
+  _computeDayNightIntensityMul() {
+    if (!this.params.autoDayNightBalance) return 1.0;
+
+    const mode = this.params.mode;
+    if (mode !== 'torch' && !FLASHLIGHT_MODES.has(mode)) return 1.0;
+
+    const darkness = clamp01(LightingDirector.get().masterDarkness);
+    const day = Math.max(0, Number(this.params.dayIntensityScale) || 0);
+    const night = Math.max(0, Number(this.params.nightIntensityScale) || 0);
+    const curve = Math.max(0.05, Number(this.params.dayNightCurve) || 1);
+    const t = Math.pow(darkness, curve);
+    return day + (night - day) * t;
+  }
+
+  _getTorchWindDownMaxSec() {
+    const flameUd = this._torchParticleSystem?.userData;
+    const flameMax = Math.max(
+      0.55,
+      flameUd?._msTorchBaseLifeMax ?? 1.1
+    );
+    const sparkMax = Math.max(0.25, this.params.torchSparksLifeMax ?? 0.7);
+    return Math.max(flameMax, sparkMax) + 0.4;
+  }
+
+  _stopTorchEmission() {
+    const stopSystem = (sys) => {
+      if (!sys?.emissionOverTime) return;
+      if (sys.emissionOverTime.a !== undefined) {
+        sys.emissionOverTime.a = 0;
+        sys.emissionOverTime.b = 0;
+      } else if (typeof sys.emissionOverTime.value === 'number') {
+        sys.emissionOverTime.value = 0;
+      }
+    };
+    stopSystem(this._torchParticleSystem);
+    stopSystem(this._torchSparksSystem);
+  }
+
+  _beginTorchWindDown(groundZ) {
+    if (this._torchWindDownActive) return;
+    this._torchWindDownActive = true;
+    this._torchWindDownElapsed = 0;
+    this._torchWindDownGroundZ = groundZ;
+    this._stopTorchEmission();
+    if (!this._torchParticlesRegistered) {
+      this._registerTorchParticleSystem(this._torchParticleSystem);
+      this._registerTorchParticleSystem(this._torchSparksSystem);
+    }
+    if (this._torchParticleSystem?.emitter) {
+      this._torchParticleSystem.emitter.visible = true;
+    }
+    if (this._torchSparksSystem?.emitter) {
+      this._torchSparksSystem.emitter.visible = true;
+    }
+  }
+
+  _cancelTorchWindDown() {
+    this._torchWindDownActive = false;
+    this._torchWindDownElapsed = 0;
+  }
+
+  _endTorchWindDown() {
+    this._cancelTorchWindDown();
+    this._setVisible(false, true);
+  }
+
+  _updateTorchBatchRenderer(timeInfo) {
+    try {
+      if (this._torchBatchRenderer && typeof this._torchBatchRenderer.update === 'function') {
+        const deltaSec = typeof timeInfo?.motionDelta === 'number'
+          ? timeInfo.motionDelta
+          : (typeof timeInfo?.delta === 'number' ? timeInfo.delta : 0.016);
+        const clampedDelta = Math.min(deltaSec, 0.1);
+        const simSpeed = (weatherController && typeof weatherController.simulationSpeed === 'number')
+          ? weatherController.simulationSpeed
+          : 2.0;
+        const dtQuarks = clampedDelta * 0.001 * 750 * simSpeed;
+
+        if (!this._debugBatchUpdateLogged) {
+          log.info(`[TORCH DEBUG] Calling batch.update(${dtQuarks}), systems: ${this._torchBatchRenderer.children?.length ?? 0}`);
+          this._debugBatchUpdateLogged = true;
+        }
+
+        this._torchBatchRenderer.update(dtQuarks);
+      } else if (!this._debugNoBatchLogged) {
+        log.warn('[TORCH DEBUG] Batch renderer not available or no update method');
+        this._debugNoBatchLogged = true;
+      }
+    } catch (err) {
+      log.error('[TORCH DEBUG] Batch update threw:', err);
+    }
+  }
+
+  /**
+   * Step torch particles while emission is off until existing flame/spark quarks expire.
+   * @returns {boolean} true while wind-down should continue blocking normal update
+   */
+  _tickTorchWindDown(timeInfo) {
+    if (!this._torchWindDownActive) return false;
+
+    const dt = typeof timeInfo?.motionDelta === 'number'
+      ? timeInfo.motionDelta
+      : (typeof timeInfo?.delta === 'number' ? timeInfo.delta : 0.016);
+    this._torchWindDownElapsed += Math.min(dt, 0.1);
+
+    const groundZ = this._torchWindDownGroundZ;
+    if (this._torchPos) {
+      const z = groundZ + 3.5;
+      if (this._torchParticleSystem?.emitter) {
+        this._torchParticleSystem.emitter.position.set(this._torchPos.x, this._torchPos.y, z);
+      }
+      if (this._torchSparksSystem?.emitter) {
+        this._torchSparksSystem.emitter.position.set(this._torchPos.x, this._torchPos.y, z);
+      }
+    }
+
+    this._updateTorchBatchRenderer(timeInfo);
+
+    const flameAlive = (this._torchParticleSystem?.particleNum ?? 0) > 0;
+    const sparksAlive = (this._torchSparksSystem?.particleNum ?? 0) > 0;
+    const maxSec = this._getTorchWindDownMaxSec();
+
+    if (!flameAlive && !sparksAlive && this._torchWindDownElapsed >= 0.08) {
+      this._endTorchWindDown();
+      return false;
+    }
+
+    if (this._torchWindDownElapsed >= maxSec + 0.75) {
+      this._endTorchWindDown();
+      return false;
+    }
+
+    return true;
+  }
+
+  /**
+   * Begin torch particle wind-down when the controlled token/light source goes away.
+   * @returns {boolean} true if update() should return early this frame
+   */
+  _tryBeginTorchWindDown(torchWasActiveLastFrame, timeInfo, groundZ = null) {
+    if (!torchWasActiveLastFrame || this.params?.mode !== 'torch') return false;
+
+    const gz = (typeof groundZ === 'number') ? groundZ : this._getGroundZ();
+    if (!this._torchWindDownActive) {
+      this._beginTorchWindDown(gz);
+    }
+
+    this._tickNightVisionPower(timeInfo, false);
+    this._hideDynamicLightSources();
+    if (this._tickTorchWindDown(timeInfo)) {
+      this._setVisible(false, false, { keepTorchVisible: true });
+      return true;
+    }
+
+    return false;
   }
 
   _getActiveTokenId() {
@@ -2918,7 +3368,8 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
     const guttering = !inRange;
 
     const ember = (!inRange || blocked) ? 1 : 0;
-    const baseTarget = ember ? this.params.emberIntensity : this.params.torchBaseIntensity;
+    const dayNightMul = this._computeDayNightIntensityMul();
+    const baseTarget = (ember ? this.params.emberIntensity : this.params.torchBaseIntensity) * dayNightMul;
     const targetIntensity = baseTarget * Math.max(0, Math.min(1, distanceFade));
 
     const rise = Math.max(0.001, this.params.intensityRiseSpeed);
@@ -3096,7 +3547,8 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
     const wallAttenuation = blocked
       ? Math.max(0.10, Math.min(1.0, wallDistanceUnits / Math.max(0.001, baseBeamLenU)))
       : 1.0;
-    const rawIntensity = (this.params.flashlightIntensity * aimFalloff) * Math.max(0, Math.min(1, distanceFade));
+    const dayNightMul = this._computeDayNightIntensityMul();
+    const rawIntensity = (this.params.flashlightIntensity * aimFalloff) * Math.max(0, Math.min(1, distanceFade)) * dayNightMul;
     const brokennessMult = this._getFlashlightBrokennessMultiplier(t, dt);
     const intensity = rawIntensity * Math.max(0, Math.min(1.25, brokennessMult)) * wallAttenuation;
     this._flashlightFinalIntensity = intensity;
@@ -3393,10 +3845,13 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
 
           const baseIntensity = typeof this._torchFinalIntensity === 'number' ? this._torchFinalIntensity : 0;
           const scaleWithIntensity = !!this.params.torchLightScaleWithIntensity;
-          const scale = scaleWithIntensity ? Math.max(0.15, Math.min(1.5, baseIntensity)) : 1.0;
+          const dayNightMul = this._computeDayNightIntensityMul();
+          const lightScale = scaleWithIntensity
+            ? Math.max(0.15, Math.min(1.5, baseIntensity))
+            : dayNightMul;
 
-          const dim = Math.max(0, this.params.torchLightDim) * scale;
-          const bright = Math.max(0, this.params.torchLightBright) * scale;
+          const dim = Math.max(0, this.params.torchLightDim) * lightScale;
+          const bright = Math.max(0, this.params.torchLightBright) * lightScale;
 
           const animType = this.params.torchLightAnimType === 'none' ? null : this.params.torchLightAnimType;
 
@@ -3407,9 +3862,9 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
             color: c,
             dim,
             bright,
-            alpha: this.params.torchLightAlpha,
+            alpha: this.params.torchLightAlpha * lightScale,
             attenuation: this.params.torchLightAttenuation,
-            luminosity: this.params.torchLightLuminosity,
+            luminosity: this.params.torchLightLuminosity * lightScale,
             animation: {
               type: animType,
               speed: this.params.torchLightAnimSpeed,
@@ -3440,7 +3895,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
     // Flashlight light
     const flashSrc = this._ensureLightSource(flashId, '_flashlightLightDoc', '_flashlightLightSource', lightScene);
     if (flashSrc && flashSrc.mesh) {
-      const enabled = !!this.params.flashlightLightEnabled && this.params.mode === 'flashlight' && this.enabled;
+      const enabled = !!this.params.flashlightLightEnabled && FLASHLIGHT_MODES.has(this.params.mode) && this.enabled;
       
       if (enabled) {
         // Re-add to scene if it was removed
@@ -3476,7 +3931,8 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
         const wallScale = blocked
           ? Math.max(0.10, Math.min(1.0, wallDistanceUnits / Math.max(0.001, this.params.flashlightLightDim)))
           : 1.0;
-        const scale = distanceScale * flashlightIntensityFactor * wallScale;
+        const dayNightMul = this._computeDayNightIntensityMul();
+        const scale = distanceScale * flashlightIntensityFactor * wallScale * dayNightMul;
 
         let lightWorldX = tokenCenterWorld.x;
         let lightWorldY = tokenCenterWorld.y;
@@ -3610,6 +4066,12 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
     return Math.max(0, Math.min(1, x));
   }
 
+  /** Linear gain slider → EV stops for HDR log amplification. */
+  _nightVisionGainToStops(gainLinear) {
+    const g = Math.max(1e-3, Number(gainLinear) || 1);
+    return Math.log2(g);
+  }
+
   _readSceneDarknessLevelNv() {
     let darkness = Number.NaN;
     // Prefer scene-authored darkness first. In some runtime states canvas-level
@@ -3713,6 +4175,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
     this._nvComposeMaterial = new THREE.ShaderMaterial({
       uniforms: {
         tDiffuse: { value: null },
+        tHdrLinear: { value: null },
         tBloomBurnMap: { value: this._nvFallbackBlack },
         uResolution: { value: new THREE.Vector2(1, 1) },
         uTime: { value: 0 },
@@ -3720,8 +4183,13 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
         uTintStrength: { value: this.params.nightVisionTintStrength },
         uSaturation: { value: this.params.nightVisionSaturation },
         uBrightness: { value: this.params.nightVisionBrightness },
-        uGain: { value: this.params.nightVisionGain },
-        uGamma: { value: this.params.nightVisionGamma },
+        uPurkinjeStrength: { value: this.params.nightVisionPurkinjeStrength },
+        uPurkinjeDarkStart: { value: this.params.nightVisionPurkinjeDarkStart },
+        uPurkinjeBrightEnd: { value: this.params.nightVisionPurkinjeBrightEnd },
+        uPurkinjeCurve: { value: this.params.nightVisionPurkinjeCurve },
+        uUseHdrLinear: { value: 0.0 },
+        uGainStops: { value: this._nightVisionGainToStops(this.params.nightVisionGain) },
+        uShadowCurve: { value: this.params.nightVisionGamma },
         uMaxLuma: { value: this.params.nightVisionMaxLuma },
         uDarkLift: { value: this.params.nightVisionDarkLift },
         uDistortionAmount: { value: this.params.nightVisionDistortionAmount },
@@ -3851,7 +4319,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
     return true;
   }
 
-  _updateNvBloomMap(renderer, inputRT, dtSec, darknessGate = 1.0) {
+  _updateNvBloomMap(renderer, inputRT, dtSec, darknessGate = 1.0, hdrInputRT = null) {
     if (!renderer || !inputRT || !this.params.nightVisionBloomEnabled) return;
     if (!this._ensureNvBloomResources(inputRT.width, inputRT.height)) return;
     if (!this._nvBloomMaterial || !this._nvBloomReadRT || !this._nvBloomWriteRT) return;
@@ -3861,9 +4329,10 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
     const decay = Math.exp(-dt / persist);
 
     const u = this._nvBloomMaterial.uniforms;
-    u.tCurrentScene.value = inputRT.texture;
+    const bloomSrc = hdrInputRT?.texture ?? inputRT.texture;
+    u.tCurrentScene.value = bloomSrc;
     u.tPrevBurn.value = this._nvBloomReadRT.texture;
-    u.uThreshold.value = this._clamp01Nv(this.params.nightVisionBloomThreshold);
+    u.uThreshold.value = Math.max(0, Number(this.params.nightVisionBloomThreshold) || 0);
     u.uSoftness.value = Math.max(0.001, Number(this.params.nightVisionBloomThresholdSoftness) || 0.25);
     u.uResponse.value = Math.max(0, Number(this.params.nightVisionBloomResponse) || 1.4);
     u.uDecayFactor.value = this._clamp01Nv(decay);
@@ -3903,8 +4372,12 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
     u.uTintStrength.value = Number(this.params.nightVisionTintStrength) || 0;
     u.uSaturation.value = Number(this.params.nightVisionSaturation) || 0;
     u.uBrightness.value = Number(this.params.nightVisionBrightness) ?? 1;
-    u.uGain.value = Math.max(0.01, Number(this.params.nightVisionGain) || 1);
-    u.uGamma.value = Math.max(0.05, Number(this.params.nightVisionGamma) || 1);
+    u.uPurkinjeStrength.value = Math.max(0, Math.min(1, Number(this.params.nightVisionPurkinjeStrength) || 0));
+    u.uPurkinjeDarkStart.value = Math.max(1e-5, Number(this.params.nightVisionPurkinjeDarkStart) || 0.015);
+    u.uPurkinjeBrightEnd.value = Math.max(1e-4, Number(this.params.nightVisionPurkinjeBrightEnd) || 0.18);
+    u.uPurkinjeCurve.value = Math.max(0.15, Number(this.params.nightVisionPurkinjeCurve) || 1.35);
+    u.uGainStops.value = this._nightVisionGainToStops(this.params.nightVisionGain);
+    u.uShadowCurve.value = Math.max(0.05, Number(this.params.nightVisionGamma) || 1);
     u.uMaxLuma.value = Math.max(0.01, Number(this.params.nightVisionMaxLuma) || 1);
     u.uDarkLift.value = Math.max(0, Number(this.params.nightVisionDarkLift) || 0);
     u.uDistortionAmount.value = Number(this.params.nightVisionDistortionAmount) || 0;
@@ -3936,12 +4409,13 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
     u.uPower.value = Math.max(0, Math.min(1, this._nvEffectivePower));
   }
 
-  renderNightVision(renderer, camera, inputRT, outputRT) {
+  renderNightVision(renderer, camera, inputRT, outputRT, hdrInputRT = null) {
     if (!this.shouldRenderNightVision() || !renderer || !inputRT || !outputRT) return false;
 
+    const hdrRT = (hdrInputRT && hdrInputRT !== inputRT) ? hdrInputRT : null;
     const darknessGate = this._computeNightVisionDarknessGate();
     if (this.params.nightVisionBloomEnabled) {
-      this._updateNvBloomMap(renderer, inputRT, this._lastNvDt, darknessGate);
+      this._updateNvBloomMap(renderer, inputRT, this._lastNvDt, darknessGate, hdrRT);
     }
 
     const w = Math.max(1, Number(inputRT.width) || 1);
@@ -3949,6 +4423,8 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
 
     const u = this._nvComposeMaterial.uniforms;
     u.tDiffuse.value = inputRT.texture;
+    u.tHdrLinear.value = hdrRT?.texture ?? inputRT.texture;
+    u.uUseHdrLinear.value = hdrRT ? 1.0 : 0.0;
     u.tBloomBurnMap.value = this._nvBloomReadRT?.texture ?? this._nvFallbackBlack;
 
     this._syncNightVisionUniforms(w, h);
@@ -3966,12 +4442,14 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
     return true;
   }
 
-  _setVisible(visible, torchMode) {
+  _setVisible(visible, torchMode, options = {}) {
+    const keepTorchVisible = !!options.keepTorchVisible;
+    const torchVisible = keepTorchVisible || (visible && torchMode);
     if (this._torchParticleSystem && this._torchParticleSystem.emitter) {
-      this._torchParticleSystem.emitter.visible = visible && torchMode;
+      this._torchParticleSystem.emitter.visible = torchVisible;
     }
     if (this._torchSparksSystem && this._torchSparksSystem.emitter) {
-      this._torchSparksSystem.emitter.visible = visible && torchMode;
+      this._torchSparksSystem.emitter.visible = torchVisible;
     }
     if (this._flashlightMesh) this._flashlightMesh.visible = false;
     const flashlightOn = visible && !torchMode && (typeof this._flashlightFinalIntensity === 'number') && this._flashlightFinalIntensity > 1e-4;

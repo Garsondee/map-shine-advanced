@@ -611,6 +611,42 @@ let _loadVisibilityLifecycleHooksInstalled = false;
  */
 let _msaDocHiddenAtMs = 0;
 
+/** @returns {boolean} */
+function _msaIsDocumentHidden() {
+  try {
+    return typeof document !== 'undefined' && document.hidden === true;
+  } catch (_) {
+    return false;
+  }
+}
+
+/**
+ * Keep the hidden-tab pump alive while scene load or post-load GPU recovery may still be pending.
+ * @returns {boolean}
+ * @private
+ */
+function _msaLoadHiddenPumpStillNeeded() {
+  try {
+    const ms = window.MapShine;
+    if (!ms) return false;
+    if (ms.__msaSceneLoading === true) return true;
+    if (ms.__pendingIntroCompileRetry === true) return true;
+    if (ms.__v14ColdLoadResyncPending === true) return true;
+    return false;
+  } catch (_) {
+    return false;
+  }
+}
+
+/**
+ * Stop the optional hidden-tab render pump when no recovery work remains.
+ * @private
+ */
+function _maybeStopLoadHiddenPump() {
+  if (_msaLoadHiddenPumpStillNeeded()) return;
+  _stopLoadHiddenPump();
+}
+
 /**
  * Stop the optional hidden-tab render pump (started during scene load).
  * @private
@@ -626,6 +662,46 @@ function _stopLoadHiddenPump() {
 }
 
 /**
+ * Run one or more compositor frames without rAF (used during hidden-tab load).
+ * @param {number} [count]
+ * @returns {number} Frames pumped
+ * @private
+ */
+function _pumpCompositorFrames(count = 1) {
+  const n = Math.max(1, Math.min(12, Math.floor(Number(count) || 1)));
+  const rl = window.MapShine?.renderLoop;
+  if (!rl) return 0;
+  let pumped = 0;
+  for (let i = 0; i < n; i++) {
+    try {
+      if (typeof rl.pumpBackgroundLoadFrame === 'function') {
+        rl.pumpBackgroundLoadFrame();
+        pumped++;
+      } else {
+        rl.requestRender?.();
+      }
+    } catch (_) {
+    }
+  }
+  try {
+    rl.requestContinuousRender?.(Math.max(1200, pumped * 400));
+    rl.requestRender?.();
+  } catch (_) {
+  }
+  return pumped;
+}
+
+/**
+ * @param {number} [count]
+ * @returns {number}
+ * @private
+ */
+function _pumpLoadFramesWhileHidden(count = 3) {
+  if (!_msaIsDocumentHidden()) return 0;
+  return _pumpCompositorFrames(count);
+}
+
+/**
  * While the tab is hidden during load, browsers throttle rAF; nudge the compositor
  * on a long interval so GPU warmup / lazy compiles can still progress (~1Hz when clamped).
  * @private
@@ -634,16 +710,20 @@ function _startLoadHiddenPump() {
   _stopLoadHiddenPump();
   _loadHiddenPumpIntervalId = setInterval(() => {
     try {
-      if (!window.MapShine?.__msaSceneLoading) {
-        _stopLoadHiddenPump();
+      if (!_msaLoadHiddenPumpStillNeeded()) {
+        _maybeStopLoadHiddenPump();
         return;
       }
       if (typeof document === 'undefined' || document.hidden !== true) return;
       const rl = window.MapShine?.renderLoop;
-      // rAF is often suspended when hidden — requestRender does nothing; pump one compositor frame.
-      rl?.pumpBackgroundLoadFrame?.();
-      rl?.requestRender?.();
-      rl?.requestContinuousRender?.(900);
+      // rAF is often suspended when hidden — requestRender does nothing; pump compositor frames.
+      if (typeof rl?.pumpBackgroundLoadFrame === 'function') {
+        rl.pumpBackgroundLoadFrame();
+        rl.pumpBackgroundLoadFrame();
+      } else {
+        rl?.requestRender?.();
+      }
+      rl?.requestContinuousRender?.(1200);
     } catch (_) {
     }
   }, 750);
@@ -716,11 +796,28 @@ async function _runDeferredIntroCompileRetry() {
     const fc = ec._floorCompositorV2;
     if (fc && typeof fc.warmupAsync === 'function') {
       await fc.warmupAsync(4000, null);
+      try {
+        if (typeof fc.openShaderGate === 'function') fc.openShaderGate();
+      } catch (_) {
+      }
     }
     await ec.progressiveWarmup();
-    window.MapShine?.renderLoop?.requestContinuousRender?.(2000);
+    _pumpCompositorFrames(4);
+    window.MapShine?.renderLoop?.requestContinuousRender?.(2500);
     window.MapShine?.renderLoop?.requestRender?.();
+    try {
+      const coldSwap = window.MapShine?.__v14ColdLoadSwapResync;
+      if (window.MapShine?.__v14ColdLoadResyncPending === true && typeof coldSwap === 'function') {
+        coldSwap();
+      }
+    } catch (_) {
+    }
   }, 'deferredIntroCompileRetry', Severity.DEGRADED);
+  try {
+    if (window.MapShine) window.MapShine.__pendingIntroCompileRetry = false;
+  } catch (_) {
+  }
+  _maybeStopLoadHiddenPump();
 }
 
 /**
@@ -738,23 +835,27 @@ function _recoverRenderingAfterTabFocus(reason = '', opts = {}) {
     const ms = window.MapShine;
     if (!ms) return;
 
+    _pumpCompositorFrames(3);
+
     const tc = threeCanvas;
     const rh = resizeHandler;
+    const needsDeferredViewport = ms.__msaDeferredViewportResize === true;
     if (tc && rh && typeof rh.resize === 'function') {
       const rect = tc.getBoundingClientRect?.();
       const w = Math.max(1, Math.round(Number(rect?.width) || 0));
       const h = Math.max(1, Math.round(Number(rect?.height) || 0));
       if (w >= 1 && h >= 1) {
         safeCall(() => rh.resize(w, h), 'recover.tabFocus.resize', Severity.COSMETIC);
+        if (needsDeferredViewport) ms.__msaDeferredViewportResize = false;
       }
     }
 
-    ms.renderLoop?.requestContinuousRender?.(2500);
+    ms.renderLoop?.requestContinuousRender?.(3000);
     ms.renderLoop?.requestRender?.();
     try {
       ms.renderer?.setRenderTarget?.(null);
     } catch (_) {}
-    ms.renderLoop?.pumpBackgroundLoadFrame?.();
+    _pumpCompositorFrames(2);
 
     if (runColdBgResync) {
       try {
@@ -765,8 +866,13 @@ function _recoverRenderingAfterTabFocus(reason = '', opts = {}) {
     }
 
     if (ms.__pendingIntroCompileRetry === true) {
-      ms.__pendingIntroCompileRetry = false;
       void _runDeferredIntroCompileRetry();
+    } else {
+      _maybeStopLoadHiddenPump();
+    }
+
+    if (_msaLoadHiddenPumpStillNeeded()) {
+      safeCall(() => _startLoadHiddenPump(), 'loadHiddenPump.recoverFocus', Severity.COSMETIC);
     }
 
     if (reason && window.MapShine?.__loadVisibilityDebug === true) {
@@ -6675,6 +6781,17 @@ async function createThreeCanvas(scene, createOptions = {}) {
       onError: () => renderer.setSize(viewport.width, viewport.height)
     });
 
+    safeCall(() => {
+      if (!window.MapShine) return;
+      const r = threeCanvas?.getBoundingClientRect?.();
+      const cw = Number(r?.width) || 0;
+      const ch = Number(r?.height) || 0;
+      const layoutReady = cw >= 1 && ch >= 1;
+      if (_msaIsDocumentHidden() && !layoutReady) {
+        window.MapShine.__msaDeferredViewportResize = true;
+      }
+    }, 'viewport.deferredHiddenAttach', Severity.COSMETIC);
+
     // Isolation baseline: stop after core canvas+renderer attach.
     if (isolateCanvasOnly) {
       _finishIsolation('Isolation mode: canvas-only ready');
@@ -7509,15 +7626,28 @@ async function createThreeCanvas(scene, createOptions = {}) {
             }
           };
           // Primary path: after two animation frames (layout + Foundry level settled).
-          requestAnimationFrame(() => {
-            requestAnimationFrame(runSwap);
-          });
+          // rAF does not run reliably while the tab is hidden — rely on timers instead.
+          if (!_msaIsDocumentHidden()) {
+            requestAnimationFrame(() => {
+              requestAnimationFrame(runSwap);
+            });
+          }
           // Backstop: rAF is throttled or not run while the tab is hidden during load.
           // Without this, swapBackgroundImage + forceRepopulate never run → stale/grey albedo.
           setTimeout(runSwap, 0);
           setTimeout(runSwap, 150);
           setTimeout(runSwap, 750);
           setTimeout(runSwap, 2500);
+          if (_msaIsDocumentHidden()) {
+            setTimeout(runSwap, 50);
+            setTimeout(runSwap, 400);
+            setTimeout(runSwap, 1200);
+            try {
+              queueMicrotask(() => runSwap());
+            } catch (_) {
+              setTimeout(runSwap, 1);
+            }
+          }
           try {
             if (window.MapShine) {
               window.MapShine.__v14ColdLoadResyncPending = true;
@@ -8771,6 +8901,9 @@ async function createThreeCanvas(scene, createOptions = {}) {
         dlp.event('renderLoop: STARTED ->-> first rAF frame queued (post-populate)');
       } catch (_) {}
       log.info('Render loop started (post compositor populate)');
+      if (_msaIsDocumentHidden()) {
+        _pumpLoadFramesWhileHidden(6);
+      }
       safeCall(() => _startLoadHiddenPump(), 'loadHiddenPump.start', Severity.COSMETIC);
     }
 
@@ -8804,6 +8937,9 @@ async function createThreeCanvas(scene, createOptions = {}) {
 
       // One render frame to force-submit any lazily-created materials to the GPU.
       await effectComposer.progressiveWarmup();
+      if (_msaIsDocumentHidden()) {
+        _pumpLoadFramesWhileHidden(3);
+      }
       await new Promise(r => setTimeout(r, 16));
 
       // Await non-blocking async compilation, polling KHR_parallel_shader_compile.
@@ -8820,6 +8956,17 @@ async function createThreeCanvas(scene, createOptions = {}) {
       }
       if (!compiled) {
         log.warn('fin.shaderCompile: warmupAsync timed out — some shaders will compile lazily on first frame');
+      }
+
+      if (!compiled || _msaIsDocumentHidden()) {
+        try {
+          if (window.MapShine) window.MapShine.__pendingIntroCompileRetry = true;
+        } catch (_) {
+        }
+        safeCall(() => _startLoadHiddenPump(), 'loadHiddenPump.shaderWarmup', Severity.COSMETIC);
+      }
+      if (_msaIsDocumentHidden()) {
+        _pumpLoadFramesWhileHidden(4);
       }
 
       // Open the time gate: all effects now start advancing from t=0 together.
@@ -9044,11 +9191,10 @@ async function createThreeCanvas(scene, createOptions = {}) {
               try { loadingOverlay.hide?.(); } catch (_) {}
             }, 'overlay.tabHidden.reveal', Severity.COSMETIC);
             safeCall(() => {
-              for (let i = 0; i < 5; i++) {
-                try { window.MapShine?.renderLoop?.pumpBackgroundLoadFrame?.(); } catch (_) {}
-              }
-              window.MapShine?.renderLoop?.requestContinuousRender?.(4000);
+              _pumpLoadFramesWhileHidden(6);
+              window.MapShine?.renderLoop?.requestContinuousRender?.(5000);
             }, 'overlay.tabHidden.postPump', Severity.COSMETIC);
+            safeCall(() => _startLoadHiddenPump(), 'loadHiddenPump.tabHiddenIntro', Severity.COSMETIC);
             return;
           }
 
@@ -9248,7 +9394,7 @@ async function createThreeCanvas(scene, createOptions = {}) {
   } finally {
     _createThreeCanvasRunning = false;
     safeCall(() => {
-      _stopLoadHiddenPump();
+      _maybeStopLoadHiddenPump();
       _stopLoadVisibilityDebugInterval();
     }, 'loadVisibility.cleanup', Severity.COSMETIC);
     try { if (_progressHeartbeatId) clearInterval(_progressHeartbeatId); } catch (_) {}

@@ -3,7 +3,11 @@
  */
 
 import { weatherController } from '../../core/WeatherController.js';
-import { computeSunDirection2D, clamp01 } from './SunDirection.js';
+import {
+  computeGoldenHourShadowLengthWeight,
+  computeSunDirection2D,
+  clamp01,
+} from './SunDirection.js';
 import { ShadowMaskBindings } from './ShadowMaskBindings.js';
 
 const safeNumber = (value, fallback = 0) => {
@@ -125,10 +129,18 @@ export class ShadowDriverState {
 
   _deriveTuning() {
     const cloud = this.weather.cloudCover;
-    const elevation01 = clamp01(this.sun.elevationDeg / 90.0, 0.5);
     const cloudDiffusionFactor = 3.0;
     const shadowSoftnessScale = 1.0 + (cloudDiffusionFactor - 1.0) * cloud;
-    const shadowLengthScale = 1.0 + (1.0 - elevation01) * 1.5;
+    let hour = 12.0;
+    let sunriseHour = 6.0;
+    try {
+      if (weatherController && typeof weatherController.timeOfDay === 'number') {
+        hour = weatherController.timeOfDay;
+      }
+      const envSunrise = this.weather?.environment?.sunrise;
+      if (Number.isFinite(Number(envSunrise))) sunriseHour = Number(envSunrise);
+    } catch (_) {}
+    const shadowLengthScale = computeGoldenHourShadowLengthWeight(hour, sunriseHour, 2.5);
     const shadowOpacityScale = Math.max(0.25, 1.0 - this.weather.effectiveDarkness * 0.25);
     return {
       cloudDiffusionFactor,

@@ -21,6 +21,7 @@ import { getFoundryTimePhaseHours } from '../core/foundry-time-phases.js';
 import { extendMsaLocalFlagWriteGuard, refreshMsaSameSceneRedrawPredict } from '../utils/msa-local-flag-guard.js';
 import { cloneAndSanitizeControlState, sanitizeControlStateInPlace } from '../settings/control-state-sanitize.js';
 import {
+  createDefaultPlayerLightAllowance,
   getGlobalPlayerLightModeAllowed,
   resolvePlayerLightModeAllowance
 } from '../core/player-light-allowance.js';
@@ -109,11 +110,7 @@ export class ControlPanelManager {
       tileMotionAutoPlayEnabled: true,
       tileMotionTimeFactorPercent: 100,
       tileMotionPaused: false,
-      playerLightAllowance: {
-        torch: 'global',
-        flashlight: 'global',
-        nightVision: 'global'
-      },
+      playerLightAllowance: createDefaultPlayerLightAllowance(),
       replicaOcclusionRadiusScale: 35.0,
       replicaOcclusionEdgeSoftness: 1.0
     };
@@ -3553,12 +3550,17 @@ export class ControlPanelManager {
     }
 
     if (!this.controlState.playerLightAllowance || typeof this.controlState.playerLightAllowance !== 'object') {
-      this.controlState.playerLightAllowance = {
-        torch: 'global',
-        flashlight: 'global',
-        nightVision: 'global'
-      };
+      this.controlState.playerLightAllowance = createDefaultPlayerLightAllowance();
     }
+
+    const playerLightModes = [
+      { key: 'torch', label: 'Torch' },
+      { key: 'flashlight', label: 'Flashlight' },
+      { key: 'nightVision', label: 'Night Vision' },
+      { key: 'lowLightVision', label: 'Low-light Vision' },
+      { key: 'infravision', label: 'Infravision' },
+      { key: 'activeIR', label: 'Active Infravision' }
+    ];
 
     const MODULE = 'map-shine-advanced';
     const clamp01 = (v) => Math.max(0, Math.min(1, Number(v) || 0));
@@ -3603,13 +3605,8 @@ export class ControlPanelManager {
       try {
         const scene = canvas?.scene ?? null;
         const lines = ['Effective for players on this scene:'];
-        const modes = [
-          ['torch', 'Torch'],
-          ['flashlight', 'Flashlight'],
-          ['nightVision', 'Night Vision']
-        ];
-        for (const [mode, label] of modes) {
-          const ok = resolvePlayerLightModeAllowance(mode, { scene, controlState: this.controlState });
+        for (const { key, label } of playerLightModes) {
+          const ok = resolvePlayerLightModeAllowance(key, { scene, controlState: this.controlState });
           lines.push(`• ${label}: ${ok ? 'Allowed' : 'Disallowed'}`);
         }
         summaryEl.textContent = lines.join('\n');
@@ -3619,13 +3616,12 @@ export class ControlPanelManager {
     };
     updateSummary();
 
-    const modes = [
-      { key: 'torch', label: 'Torch (scene)' },
-      { key: 'flashlight', label: 'Flashlight (scene)' },
-      { key: 'nightVision', label: 'Night Vision (scene)' }
-    ];
+    const sceneModes = playerLightModes.map(({ key, label }) => ({
+      key,
+      label: `${label} (scene)`
+    }));
 
-    for (const { key, label } of modes) {
+    for (const { key, label } of sceneModes) {
       lightsFolder.addBinding(this.controlState.playerLightAllowance, key, {
         label,
         options: {
@@ -3680,7 +3676,10 @@ export class ControlPanelManager {
     const globalDefaultsState = {
       torch: !!game.settings.get(MODULE, 'playerLightTorchAllowedDefault'),
       flashlight: !!game.settings.get(MODULE, 'playerLightFlashlightAllowedDefault'),
-      nightVision: getGlobalPlayerLightModeAllowed('nightVision')
+      nightVision: getGlobalPlayerLightModeAllowed('nightVision'),
+      lowLightVision: getGlobalPlayerLightModeAllowed('lowLightVision'),
+      infravision: getGlobalPlayerLightModeAllowed('infravision'),
+      activeIR: getGlobalPlayerLightModeAllowed('activeIR')
     };
 
     globalFolder.addBinding(globalDefaultsState, 'torch', { label: 'Torch' }).on('change', async (ev) => {
@@ -3715,6 +3714,45 @@ export class ControlPanelManager {
       try {
         await game.settings.set(MODULE, 'playerLightNightVisionAllowedDefault', v);
         await game.settings.set(MODULE, 'nightVisionAllowPlayers', v);
+      } catch (_) {}
+      updateSummary();
+      if (ev?.last) {
+        try {
+          ui?.controls?.render?.(true);
+        } catch (_) {}
+      }
+    });
+
+    globalFolder.addBinding(globalDefaultsState, 'lowLightVision', { label: 'Low-light Vision' }).on('change', async (ev) => {
+      globalDefaultsState.lowLightVision = !!ev.value;
+      try {
+        await game.settings.set(MODULE, 'playerLightLowLightVisionAllowedDefault', !!ev.value);
+      } catch (_) {}
+      updateSummary();
+      if (ev?.last) {
+        try {
+          ui?.controls?.render?.(true);
+        } catch (_) {}
+      }
+    });
+
+    globalFolder.addBinding(globalDefaultsState, 'infravision', { label: 'Infravision' }).on('change', async (ev) => {
+      globalDefaultsState.infravision = !!ev.value;
+      try {
+        await game.settings.set(MODULE, 'playerLightInfravisionAllowedDefault', !!ev.value);
+      } catch (_) {}
+      updateSummary();
+      if (ev?.last) {
+        try {
+          ui?.controls?.render?.(true);
+        } catch (_) {}
+      }
+    });
+
+    globalFolder.addBinding(globalDefaultsState, 'activeIR', { label: 'Active Infravision' }).on('change', async (ev) => {
+      globalDefaultsState.activeIR = !!ev.value;
+      try {
+        await game.settings.set(MODULE, 'playerLightActiveIRAllowedDefault', !!ev.value);
       } catch (_) {}
       updateSummary();
       if (ev?.last) {

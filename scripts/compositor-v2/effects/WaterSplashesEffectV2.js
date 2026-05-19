@@ -8,7 +8,8 @@
  *
  * Architecture:
  *   Owns a three.quarks BatchedRenderer added to the FloorRenderBus scene via
- *   addEffectOverlay(). For each tile with a `_Water` mask, scans the mask on
+ *   addEffectOverlay(). For each tile with a `_Water` mask (including V14 `shape`
+ *   anchors / texture scale — same placement as FloorRenderBus / WaterEffectV2), scans the mask on
  *   the CPU to build edge (shoreline) and interior spawn point lists, then
  *   creates foam plume + rain splash particle systems. Systems are grouped by
  *   floor index. All floors from ground through the active level (that have
@@ -66,6 +67,7 @@ import {
   effectUnderOverheadOrder,
 } from '../LayerOrderPolicy.js';
 import { resolveEffectWindWorld } from './resolve-effect-wind.js';
+import { getTileBusPlaneSizeAndMirror, getTileVisualCenterFoundryXY } from '../../scene/tile-manager.js';
 
 const log = createLogger('WaterSplashesV2');
 
@@ -1012,14 +1014,27 @@ export class WaterSplashesEffectV2 {
     const d = canvas?.dimensions;
     if (!d) { log.warn('populate: no canvas dimensions'); return; }
 
-    const sceneWidth = d.sceneWidth || d.width;
-    const sceneHeight = d.sceneHeight || d.height;
-    // Foundry scene origin (top-left, Y-down).
-    const foundrySceneX = d.sceneX || 0;
-    const foundrySceneY = d.sceneY || 0;
+    // Prefer SceneComposer `foundrySceneData` + `dimensions.sceneRect` so Foundry scene UVs match
+    // WaterEffectV2 mask compositing / FloorRenderBus (canvas padding vs inner scene rect).
+    const fd = foundrySceneData && typeof foundrySceneData === 'object' ? foundrySceneData : {};
+    const sceneRect = d.sceneRect ?? d;
+    const worldH = fd.height ?? d.height ?? 0;
+    const foundrySceneX = Number.isFinite(Number(fd.sceneX))
+      ? Number(fd.sceneX)
+      : (sceneRect?.x ?? d.sceneX ?? 0);
+    const foundrySceneY = Number.isFinite(Number(fd.sceneY))
+      ? Number(fd.sceneY)
+      : (sceneRect?.y ?? d.sceneY ?? 0);
+    const sceneWidth = (Number.isFinite(Number(fd.sceneWidth)) && fd.sceneWidth > 0)
+      ? Number(fd.sceneWidth)
+      : (sceneRect?.width ?? sceneRect?.sceneWidth ?? d.sceneWidth ?? d.width ?? 1);
+    const sceneHeight = (Number.isFinite(Number(fd.sceneHeight)) && fd.sceneHeight > 0)
+      ? Number(fd.sceneHeight)
+      : (sceneRect?.height ?? sceneRect?.sceneHeight ?? d.sceneHeight ?? d.height ?? 1);
+
     // Three.js scene origin (Y-up).
     const sceneX = foundrySceneX;
-    const sceneY = (d.height || sceneHeight) - foundrySceneY - sceneHeight;
+    const sceneY = worldH - foundrySceneY - sceneHeight;
 
     // Cache for per-frame shader uniform binding.
     this._sceneBounds = {
@@ -1128,12 +1143,23 @@ export class WaterSplashesEffectV2 {
       await ingestBackgroundWater(String(fallbackSrc || ''), fi);
     }
 
-    for (const tileDoc of tileDocs) {
+    // Match FloorRenderBus / WaterEffectV2 tile order (sort asc = back → front).
+    const sortedTileDocs = [...tileDocs].sort((a, b) => {
+      const sa = Number(a?.sort ?? a?.z);
+      const sb = Number(b?.sort ?? b?.z);
+      return (Number.isFinite(sa) ? sa : 0) - (Number.isFinite(sb) ? sb : 0);
+    });
+
+    for (const tileDoc of sortedTileDocs) {
       const src = tileDoc?.texture?.src ?? tileDoc?.img ?? '';
       if (!src) continue;
 
       const tileId = tileDoc.id ?? tileDoc._id;
       if (!tileId) continue;
+
+      const { cx, cy } = getTileVisualCenterFoundryXY(tileDoc);
+      const { dispW, dispH, signX, signY } = getTileBusPlaneSizeAndMirror(tileDoc);
+      if (dispW <= 0 || dispH <= 0) continue;
 
       const dotIdx = src.lastIndexOf('.');
       const basePath = dotIdx > 0 ? src.substring(0, dotIdx) : src;
@@ -1158,19 +1184,26 @@ export class WaterSplashesEffectV2 {
 
       if (!tileEdgePoints && !tileInteriorPoints) continue;
 
-      // Convert tile-local UVs → scene-global UVs.
-      const tileX = Number(tileDoc.x) || 0;
-      const tileY = Number(tileDoc.y) || 0;
-      const tileW = Number(tileDoc.width) || 1;
-      const tileH = Number(tileDoc.height) || 1;
+      // Convert mask-local UVs → scene-global UVs (V14 shape anchor + display size + flip).
+      const shape = tileDoc?.shape && typeof tileDoc.shape === 'object' ? tileDoc.shape : null;
+      const rotDeg = Number(shape?.rotation ?? tileDoc?.rotation) || 0;
+      const rad = (rotDeg * Math.PI) / 180;
+      const c = Math.cos(rad);
+      const s = Math.sin(rad);
 
       const convertToSceneUV = (localPoints) => {
         if (!localPoints) return null;
         const sceneGlobal = new Float32Array(localPoints.length);
         for (let i = 0; i < localPoints.length; i += 3) {
-          const foundryPx = tileX + localPoints[i] * tileW;
-          const foundryPy = tileY + localPoints[i + 1] * tileH;
-          sceneGlobal[i]     = (foundryPx - foundrySceneX) / sceneWidth;
+          const u = localPoints[i];
+          const vLoc = localPoints[i + 1];
+          const lx = (u - 0.5) * dispW * signX;
+          const ly = (vLoc - 0.5) * dispH * signY;
+          const rx = lx * c - ly * s;
+          const ry = lx * s + ly * c;
+          const foundryPx = cx + rx;
+          const foundryPy = cy + ry;
+          sceneGlobal[i] = (foundryPx - foundrySceneX) / sceneWidth;
           sceneGlobal[i + 1] = (foundryPy - foundrySceneY) / sceneHeight;
           sceneGlobal[i + 2] = localPoints[i + 2]; // strength/brightness unchanged
         }

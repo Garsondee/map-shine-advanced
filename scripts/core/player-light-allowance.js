@@ -8,10 +8,54 @@ import { isGmLike } from './gm-parity.js';
 
 export const MODULE_ID = 'map-shine-advanced';
 
-/** @typedef {'torch'|'flashlight'|'nightVision'} PlayerLightMode */
+/** @typedef {'torch'|'flashlight'|'nightVision'|'lowLightVision'|'infravision'|'activeIR'} PlayerLightMode */
 
-const VALID_MODES = new Set(['torch', 'flashlight', 'nightVision']);
+export const PLAYER_LIGHT_MODES = Object.freeze([
+  'torch',
+  'flashlight',
+  'nightVision',
+  'lowLightVision',
+  'infravision',
+  'activeIR'
+]);
+
+const VALID_MODES = new Set(PLAYER_LIGHT_MODES);
 const VALID_OVERRIDE = new Set(['global', 'allowed', 'disallowed']);
+
+/** Modes that use the night-vision post-pass without a visible flashlight cone. */
+export const NV_ONLY_PLAYER_LIGHT_MODES = Object.freeze([
+  'nightVision',
+  'lowLightVision',
+  'infravision'
+]);
+
+/** Modes that run the night-vision post-pass (includes Active-IR hybrid). */
+export const NV_POST_PLAYER_LIGHT_MODES = Object.freeze([
+  'nightVision',
+  'lowLightVision',
+  'infravision',
+  'activeIR'
+]);
+
+/** Modes that drive flashlight beam/cookie/light-source logic. */
+export const FLASHLIGHT_PLAYER_LIGHT_MODES = Object.freeze([
+  'flashlight',
+  'activeIR'
+]);
+
+/**
+ * @returns {{ torch: string, flashlight: string, nightVision: string, lowLightVision: string, infravision: string, activeIR: string }}
+ */
+export function createDefaultPlayerLightAllowance() {
+  return {
+    torch: 'global',
+    flashlight: 'global',
+    nightVision: 'global',
+    lowLightVision: 'global',
+    infravision: 'global',
+    activeIR: 'global'
+  };
+}
 
 /**
  * @param {*} mode
@@ -34,6 +78,12 @@ export function getPlayerLightAllowanceLabel(mode) {
       return 'Flashlight';
     case 'nightVision':
       return 'Night Vision';
+    case 'lowLightVision':
+      return 'Low-light Vision';
+    case 'infravision':
+      return 'Infravision';
+    case 'activeIR':
+      return 'Active Infravision';
     default:
       return 'Player Light';
   }
@@ -62,6 +112,15 @@ export function getGlobalPlayerLightModeAllowed(mode) {
       }
       return modern || legacy;
     }
+    if (mode === 'lowLightVision') {
+      return !!game.settings.get(MODULE_ID, 'playerLightLowLightVisionAllowedDefault');
+    }
+    if (mode === 'infravision') {
+      return !!game.settings.get(MODULE_ID, 'playerLightInfravisionAllowedDefault');
+    }
+    if (mode === 'activeIR') {
+      return !!game.settings.get(MODULE_ID, 'playerLightActiveIRAllowedDefault');
+    }
   } catch (_) {
   }
   return false;
@@ -79,16 +138,19 @@ export function normalizePlayerLightOverride(raw) {
 /**
  * Read playerLightAllowance from control state object safely.
  * @param {*} controlState
- * @returns {{ torch: string, flashlight: string, nightVision: string }}
+ * @returns {ReturnType<typeof createDefaultPlayerLightAllowance>}
  */
 export function getPlayerLightAllowanceFromControlState(controlState) {
-  const defaults = { torch: 'global', flashlight: 'global', nightVision: 'global' };
+  const defaults = createDefaultPlayerLightAllowance();
   const pa = controlState?.playerLightAllowance;
   if (!pa || typeof pa !== 'object') return { ...defaults };
   return {
     torch: normalizePlayerLightOverride(pa.torch),
     flashlight: normalizePlayerLightOverride(pa.flashlight),
-    nightVision: normalizePlayerLightOverride(pa.nightVision)
+    nightVision: normalizePlayerLightOverride(pa.nightVision),
+    lowLightVision: normalizePlayerLightOverride(pa.lowLightVision),
+    infravision: normalizePlayerLightOverride(pa.infravision),
+    activeIR: normalizePlayerLightOverride(pa.activeIR)
   };
 }
 

@@ -451,13 +451,37 @@ export class BloomEffectV2 {
    * @param {THREE.WebGLRenderTarget} inputRT
    * @param {THREE.WebGLRenderTarget} outputRT
    */
-  render(renderer, inputRT, outputRT) {
-    if (!this._initialized || !this._pass || !inputRT) return;
-    if (!this.params.enabled) return;
+  /**
+   * Copy input → output (used when bloom is disabled or strength is zero).
+   * @returns {boolean}
+   * @private
+   */
+  _passthrough(renderer, inputRT, outputRT) {
+    if (!this._copyMaterial || !inputRT?.texture || !outputRT) return false;
+    const prevTarget = renderer.getRenderTarget();
+    const prevAutoClear = renderer.autoClear;
+    try {
+      this._copyMaterial.map = inputRT.texture;
+      renderer.setRenderTarget(outputRT);
+      renderer.autoClear = true;
+      renderer.render(this._copyScene, this._copyCamera);
+      return true;
+    } finally {
+      renderer.autoClear = prevAutoClear;
+      renderer.setRenderTarget(prevTarget);
+    }
+  }
 
-    // Skip if bloom is effectively invisible
+  /**
+   * @returns {boolean} True when outputRT was written (bloom or passthrough).
+   */
+  render(renderer, inputRT, outputRT) {
+    if (!this._initialized || !this._pass || !inputRT || !outputRT) return false;
+
     const p = this.params;
-    if (!(p.strength > 1e-6) || !(p.blendOpacity > 1e-6)) return;
+    if (!this.params.enabled || !(p.strength > 1e-6) || !(p.blendOpacity > 1e-6)) {
+      return this._passthrough(renderer, inputRT, outputRT);
+    }
 
     const prevTarget = renderer.getRenderTarget();
     const prevAutoClear = renderer.autoClear;
@@ -510,6 +534,7 @@ export class BloomEffectV2 {
       renderer.autoClear = prevAutoClear;
       renderer.setRenderTarget(prevTarget);
     }
+    return true;
   }
 
   // ── Resize ────────────────────────────────────────────────────────────

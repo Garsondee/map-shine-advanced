@@ -1,6 +1,9 @@
 ﻿import { createLogger } from '../../core/log.js';
 import Coordinates from '../../utils/coordinates.js';
+import { LightingDirector } from '../../core/LightingDirector.js';
 import { weatherController } from '../../core/WeatherController.js';
+import { getPerspectiveElevation } from '../../foundry/elevation-context.js';
+import { hasV14NativeLevels } from '../../foundry/levels-scene-flags.js';
 import { VisionPolygonComputer } from '../../vision/VisionPolygonComputer.js';
 import { LightMesh } from '../../scene/LightMesh.js';
 
@@ -11,6 +14,8 @@ const log = createLogger('CandleFlamesEffectV2');
 // values (~120), they draw before tiles and get overwritten, making flames
 // appear invisible while glow/light flicker still works.
 const CANDLE_FLAME_RENDER_ORDER = 200100;
+
+const clamp01 = (v) => Math.max(0, Math.min(1, v));
 
 export class CandleFlamesEffectV2 {
   constructor() {
@@ -43,7 +48,7 @@ export class CandleFlamesEffectV2 {
       flameFlickerSpeedJitter: 0.45,
       flameFlickerStrengthJitter: 0.35,
       flameOvality: 0.31,
-      flameWobble: 0.24,
+      flameWobble: 0.0,
       flameWobbleSpeed: 5.95,
       draftiness: 0.12,
       outdoorWindInfluence: 0.66,
@@ -60,6 +65,12 @@ export class CandleFlamesEffectV2 {
       glowFlickerStrengthJitter: 0.75,
       glowFlickerSpeedJitter: 0.65,
       wallClipEnabled: true,
+
+      autoDayNightBalance: true,
+      dayIntensityScale: 0.32,
+      nightIntensityScale: 1.55,
+      dayNightCurve: 1.15,
+      indoorNightBoost: 0.45,
 
       indoorThreshold: 0.5,
       wallClipRadiusScale: 1.0,
@@ -135,6 +146,19 @@ export class CandleFlamesEffectV2 {
           ]
         },
         {
+          name: 'dayNight',
+          label: 'Day / Night',
+          type: 'folder',
+          expanded: false,
+          parameters: [
+            'autoDayNightBalance',
+            'dayIntensityScale',
+            'nightIntensityScale',
+            'dayNightCurve',
+            'indoorNightBoost',
+          ],
+        },
+        {
           name: 'glow',
           label: 'Glow',
           type: 'folder',
@@ -174,6 +198,49 @@ export class CandleFlamesEffectV2 {
         outdoorWindInfluence: { type: 'slider', min: 0, max: 1.0, step: 0.02, default: 0.66, label: 'Wind Influence (Outdoor)' },
         outdoorSway: { type: 'slider', min: 0, max: 0.25, step: 0.005, default: 0.25, label: 'Outdoor Sway' },
 
+        autoDayNightBalance: {
+          type: 'boolean',
+          default: true,
+          label: 'Auto Day/Night',
+          tooltip: 'Scales flame + glow with scene darkness so candles stay subtle by day and readable at night after Color Correction.',
+        },
+        dayIntensityScale: {
+          type: 'slider',
+          min: 0,
+          max: 1.5,
+          step: 0.01,
+          default: 0.32,
+          label: 'Day Scale',
+          tooltip: 'Multiplier at full daylight (master darkness ≈ 0).',
+        },
+        nightIntensityScale: {
+          type: 'slider',
+          min: 0.25,
+          max: 4,
+          step: 0.01,
+          default: 1.55,
+          label: 'Night Scale',
+          tooltip: 'Multiplier at full night (master darkness ≈ 1).',
+        },
+        dayNightCurve: {
+          type: 'slider',
+          min: 0.25,
+          max: 3,
+          step: 0.05,
+          default: 1.15,
+          label: 'Darkness Curve',
+          tooltip: 'Above 1 = candles stay dim longer into dusk; below 1 = ramp up earlier.',
+        },
+        indoorNightBoost: {
+          type: 'slider',
+          min: 0,
+          max: 2.5,
+          step: 0.01,
+          default: 0.45,
+          label: 'Indoor Night Boost',
+          tooltip: 'Extra glow indoors at night (roof mask). Helps when CC interior grades pull rooms darker than the candle HDR pass.',
+        },
+
         glowEnabled: { type: 'boolean', default: true, label: 'Enabled' },
         glowIntensity: { type: 'slider', min: 0, max: 2.5, step: 0.01, default: 0.42, label: 'Intensity' },
         glowFlickerStrength: { type: 'slider', min: 0, max: 10.0, step: 0.05, default: 2.25, label: 'Flicker Strength' },
@@ -205,7 +272,7 @@ export class CandleFlamesEffectV2 {
     }
 
     if (paramId === 'flameOpacity' && this._flameMaterial?.uniforms?.uOpacity) {
-      this._flameMaterial.uniforms.uOpacity.value = this.params.flameOpacity;
+      this._flameMaterial.uniforms.uOpacity.value = this.params.flameOpacity * this._computeDayNightIntensityMul();
     }
 
     if (paramId === 'flameFlickerSpeed' && this._flameMaterial?.uniforms?.uFlickerSpeed) {
@@ -431,7 +498,7 @@ export class CandleFlamesEffectV2 {
     }
 
     if (this._flameMaterial?.uniforms?.uOpacity) {
-      this._flameMaterial.uniforms.uOpacity.value = this.params.flameOpacity;
+      this._flameMaterial.uniforms.uOpacity.value = this.params.flameOpacity * this._computeDayNightIntensityMul();
     }
 
     if (this._flameMaterial?.uniforms?.uFlickerSpeed) {
@@ -617,6 +684,46 @@ export class CandleFlamesEffectV2 {
     return 1000;
   }
 
+  /**
+   * Darkness-driven scale for flames + glow (single static sliders cannot track CC interior grades).
+   * @returns {number}
+   */
+  _computeDayNightIntensityMul() {
+    if (!this.params.autoDayNightBalance) return 1.0;
+
+    const darkness = clamp01(LightingDirector.get().masterDarkness);
+    const day = Math.max(0, Number(this.params.dayIntensityScale) || 0);
+    const night = Math.max(0, Number(this.params.nightIntensityScale) || 0);
+    const curve = Math.max(0.05, Number(this.params.dayNightCurve) || 1);
+    const t = Math.pow(darkness, curve);
+    return day + (night - day) * t;
+  }
+
+  /** Extra glow indoors at night (uses per-bucket roof mask). */
+  _computeIndoorNightGlowBoost(outdoor01) {
+    if (!this.params.autoDayNightBalance) return 1.0;
+    const boost = Math.max(0, Number(this.params.indoorNightBoost) || 0);
+    if (boost <= 0) return 1.0;
+    const darkness = clamp01(LightingDirector.get().masterDarkness);
+    const indoor = 1.0 - clamp01(outdoor01);
+    return 1.0 + boost * indoor * darkness;
+  }
+
+  /** Clip glow to physical wall segments (blocks light-pass-through / window walls). */
+  _buildGlowWallClipOptions() {
+    const opts = { blockGeometry: true };
+    try {
+      if (hasV14NativeLevels(canvas?.scene)) {
+        const pe = getPerspectiveElevation();
+        if (Number.isFinite(pe?.losHeight)) {
+          opts.elevation = pe.losHeight;
+        }
+      }
+    } catch (_) {
+    }
+    return opts;
+  }
+
   _createFlameMesh() {
     const THREE = window.THREE;
     if (!THREE) return;
@@ -745,23 +852,6 @@ export class CandleFlamesEffectV2 {
         uniform float uHasFloorPresenceMap;
         uniform vec2 uResolution;
 
-        float hash21(vec2 p) {
-          p = fract(p * vec2(123.34, 456.21));
-          p += dot(p, p + 78.233);
-          return fract(p.x * p.y);
-        }
-
-        float smoothNoise(vec2 p) {
-          vec2 i = floor(p);
-          vec2 f = fract(p);
-          float a = hash21(i);
-          float b = hash21(i + vec2(1.0, 0.0));
-          float c = hash21(i + vec2(0.0, 1.0));
-          float d = hash21(i + vec2(1.0, 1.0));
-          vec2 u = f * f * (3.0 - 2.0 * f);
-          return mix(a, b, u.x) + (c - a) * u.y * (1.0 - u.x) + (d - b) * u.x * u.y;
-        }
-
         void main() {
           vec2 uv = vUv;
 
@@ -777,15 +867,6 @@ export class CandleFlamesEffectV2 {
           p.x *= (1.0 + oval);
           p.y *= (1.0 - 0.55 * oval);
 
-          float wobbleSpeed = uWobbleSpeed;
-          float wTime = uTime * wobbleSpeed + vPhase * 19.7;
-          float wAmp = uWobble * (0.35 + 0.65 * (0.5 + 0.5 * uWindSpeed));
-
-          vec2 wob = vec2(
-            sin(wTime * 1.31 + p.y * 6.0),
-            sin(wTime * 1.77 + p.x * 5.0)
-          );
-          p += wob * wAmp * (0.35 + 0.65 * p.y);
           float r = length(p) * 2.0;
 
           // Use vPhase (stable per candle) to vary flicker per-instance.
@@ -802,14 +883,10 @@ export class CandleFlamesEffectV2 {
           float flickerStrength = uFlickerStrength * strengthVar;
 
           float t = uTime * flickerSpeed + vPhase * 25.0;
-          float n = smoothNoise(p * 6.0 + vec2(t * 0.15, t * 0.11));
-          float wobble = mix(0.85, 1.25, n);
-          r *= wobble;
 
           float alpha = smoothstep(1.0, 0.0, r);
 
           float core = smoothstep(0.35, 0.0, r);
-          float mid = smoothstep(0.85, 0.25, r) * (1.0 - core);
 
           vec3 hot = vec3(1.0, 0.95, 0.85);
           vec3 warm = vec3(1.0, 0.65, 0.18);
@@ -820,10 +897,10 @@ export class CandleFlamesEffectV2 {
 
           col *= vColor;
 
-          float flickerBase = 0.9 + 0.1 * sin(t * 0.7 + vPhase * 2.0);
+          float flickerBase = 0.92 + 0.08 * sin(t * 0.7 + vPhase * 2.0);
           float flickerShape = sin(t) * 0.65 + sin(t * 1.73 + 2.0) * 0.35;
-          float flicker = flickerBase + flickerStrength * 0.35 * flickerShape;
-          flicker = max(0.55, flicker);
+          float flicker = flickerBase + flickerStrength * 0.12 * flickerShape;
+          flicker = max(0.78, flicker);
           float finalAlpha = alpha * uOpacity * clamp(vIntensity, 0.0, 3.0) * flicker;
 
           // Floor-presence gate: occlude candle flames under current-floor
@@ -1109,6 +1186,7 @@ export class CandleFlamesEffectV2 {
     const sceneH = d?.sceneHeight ?? d?.height ?? 1;
 
     const sceneBounds = { x: sceneX, y: sceneY, width: sceneW, height: sceneH };
+    const wallClipOptions = this._buildGlowWallClipOptions();
 
     for (const c of this._clusters) {
       if (!c) continue;
@@ -1120,7 +1198,13 @@ export class CandleFlamesEffectV2 {
       let foundryPoly = null;
       if (this.params.wallClipEnabled) {
         try {
-          foundryPoly = this._visionComputer.compute({ x: cxFoundry, y: cyFoundry }, radiusPx, walls, sceneBounds);
+          foundryPoly = this._visionComputer.compute(
+            { x: cxFoundry, y: cyFoundry },
+            radiusPx,
+            walls,
+            sceneBounds,
+            wallClipOptions
+          );
         } catch (_) {
           foundryPoly = null;
         }
@@ -1206,7 +1290,12 @@ export class CandleFlamesEffectV2 {
       const chaos = (0.55 * n1 + 0.30 * n2 + 0.15 * n3);
       const flicker = Math.max(0.05, 1.0 + (baseAmp * strength * Math.max(0.05, strengthVar)) * chaos);
 
-      const mult = Math.max(0.0, this.params.glowIntensity * Math.max(0.25, entry.intensity) * flicker);
+      const dayNightMul = this._computeDayNightIntensityMul();
+      const indoorMul = this._computeIndoorNightGlowBoost(outdoor);
+      const mult = Math.max(
+        0.0,
+        this.params.glowIntensity * Math.max(0.25, entry.intensity) * flicker * dayNightMul * indoorMul
+      );
 
       this._tempColor.copy(entry.baseColor).multiplyScalar(mult);
       u.uColor.value.copy(this._tempColor);

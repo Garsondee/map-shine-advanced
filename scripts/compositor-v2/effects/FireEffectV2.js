@@ -796,10 +796,21 @@ export class FireEffectV2 {
       arr.push(u, v, b);
     }
 
+    // Emission weight per bucket: √(pixel count) normalized across buckets.
+    // Linear weight (bucketCount/totalCount) starves sparse masks (torches = few dots)
+    // when the floor also has large fires — buckets approach zero emission and read as
+    // flickery on/off. Sqrt compresses dynamic range so small sources keep a steady stream.
+    let sumSqrtBucket = 0;
+    for (const [, arr] of buckets) {
+      if (arr.length < 3) continue;
+      sumSqrtBucket += Math.sqrt(arr.length / 3);
+    }
+
     for (const [, arr] of buckets) {
       if (arr.length < 3) continue;
       const bucketPoints = new Float32Array(arr);
-      const weight = totalCount > 0 ? (bucketPoints.length / 3 / totalCount) : 1.0;
+      const bucketN = bucketPoints.length / 3;
+      const weight = sumSqrtBucket > 0 ? Math.sqrt(bucketN) / sumSqrtBucket : 1.0;
       // V2 bus layering contract:
       // - Tiles are placed at Z = GROUND_Z + floorIndex
       // - Effects should follow the same scheme to avoid clipping / depth issues.

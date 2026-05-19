@@ -67,7 +67,7 @@ export class VisionPolygonComputer {
    * @param {number} radius - Vision radius in pixels
    * @param {Wall[]} walls - Array of wall placeables (optional, defaults to canvas.walls.placeables)
    * @param {{x: number, y: number, width: number, height: number}} [sceneBounds] - Optional scene bounds to clip vision
-   * @param {{sense?: 'sight'|'light', elevation?: number, forceClosedDoorWallIds?: Set<string>, skipDoorWallIds?: Set<string>, additionalSegments?: Array<{x0:number,y0:number,x1:number,y1:number}>}|null} [options] - Optional compute mode, viewer elevation, and door walls to treat as closed or replaced by animated blocker segments.
+   * @param {{sense?: 'sight'|'light', blockGeometry?: boolean, elevation?: number, forceClosedDoorWallIds?: Set<string>, skipDoorWallIds?: Set<string>, additionalSegments?: Array<{x0:number,y0:number,x1:number,y1:number}>}|null} [options] - Optional compute mode, viewer elevation, and door walls to treat as closed or replaced by animated blocker segments. When `blockGeometry` is true, every wall segment blocks (except open doors), ignoring Foundry sight/light/window threshold rules — for candle glow and similar effects.
    * @returns {number[]} Flat array [x0, y0, x1, y1, ...] in Foundry coordinates
    */
   compute(center, radius, walls = null, sceneBounds = null, options = null) {
@@ -79,6 +79,7 @@ export class VisionPolygonComputer {
     // Get walls from canvas if not provided
     const allWalls = walls ?? canvas?.walls?.placeables ?? [];
 
+    const blockGeometry = !!(options && options.blockGeometry);
     const sense = (options && options.sense === 'light') ? 'light' : 'sight';
     const elevation = (options && typeof options.elevation === 'number' && Number.isFinite(options.elevation))
       ? options.elevation : undefined;
@@ -99,11 +100,11 @@ export class VisionPolygonComputer {
     // include that elevation are skipped (MS-LVL-072).
     const segments = this._segmentsPool;
     segments.length = 0;
-    this.wallsToSegments(allWalls, center, radius, sense, segments, elevation, forceClosedDoorWallIds, skipDoorWallIds);
+    this.wallsToSegments(allWalls, center, radius, sense, segments, elevation, forceClosedDoorWallIds, skipDoorWallIds, blockGeometry);
     if (additionalSegments?.length) {
       this.appendAdditionalSegments(additionalSegments, center, radius, segments);
     }
-    if (sense === 'light') {
+    if (sense === 'light' || blockGeometry) {
       this.restrictLightTilesToSegments(center, radius, segments, elevation);
     }
 
@@ -212,9 +213,10 @@ export class VisionPolygonComputer {
    * @param {number|undefined} elevation - Viewer elevation for wall-height filtering (MS-LVL-072)
    * @param {Set<string>|null} [forceClosedDoorWallIds] - Wall document ids whose OPEN doors still emit LOS segments (door-fog seam base pass).
    * @param {Set<string>|null} [skipDoorWallIds] - Door wall document ids whose original wall segment is replaced by caller-supplied animated segments.
+   * @param {boolean} [blockGeometry=false] - When true, all wall segments block regardless of sight/light/window threshold.
    * @returns {Array<{a: {x: number, y: number}, b: {x: number, y: number}}>}
    */
-  wallsToSegments(walls, center, radius, sense = 'sight', outSegments = null, elevation = undefined, forceClosedDoorWallIds = null, skipDoorWallIds = null) {
+  wallsToSegments(walls, center, radius, sense = 'sight', outSegments = null, elevation = undefined, forceClosedDoorWallIds = null, skipDoorWallIds = null, blockGeometry = false) {
     const segments = outSegments ?? [];
     let writeIndex = segments.length;
     const radiusSq = radius * radius;
@@ -227,7 +229,8 @@ export class VisionPolygonComputer {
     // Walls whose midpoint falls within any such tile are forced to block
     // sight regardless of their wall type (overriding sight=0).
     let allBlockTileBounds = null;
-    if (sense === 'sight'
+    if (!blockGeometry
+        && sense === 'sight'
         && hasV14NativeLevels(canvas?.scene)) {
       const tiles = canvas?.scene?.tiles;
       if (tiles) {
@@ -261,31 +264,34 @@ export class VisionPolygonComputer {
       if (wid && Number(doc.door ?? 0) > 0 && skipDoorWallIds?.has(wid)) continue;
 
       // Inline filtering to avoid allocating a filtered walls array.
+      // blockGeometry: every placed wall segment blocks (windows, proximity walls, etc.).
       // MS-LVL-035: If a wall's midpoint falls within an allWallBlockSight
       // tile, skip the sight=0 check and force it to block.
-      if (sense === 'light') {
-        if (doc.light === 0) continue;
-      } else {
-        if (doc.sight === 0) {
-          // Check if this wall is overridden by allWallBlockSight tiles
-          if (allBlockTileBounds) {
-            const c = doc.c;
-            if (c && c.length >= 4) {
-              const mx = (c[0] + c[2]) * 0.5;
-              const my = (c[1] + c[3]) * 0.5;
-              let forced = false;
-              for (const b of allBlockTileBounds) {
-                if (mx >= b.x && mx <= b.x + b.w && my >= b.y && my <= b.y + b.h) {
-                  forced = true;
-                  break;
+      if (!blockGeometry) {
+        if (sense === 'light') {
+          if (doc.light === 0) continue;
+        } else {
+          if (doc.sight === 0) {
+            // Check if this wall is overridden by allWallBlockSight tiles
+            if (allBlockTileBounds) {
+              const c = doc.c;
+              if (c && c.length >= 4) {
+                const mx = (c[0] + c[2]) * 0.5;
+                const my = (c[1] + c[3]) * 0.5;
+                let forced = false;
+                for (const b of allBlockTileBounds) {
+                  if (mx >= b.x && mx <= b.x + b.w && my >= b.y && my <= b.y + b.h) {
+                    forced = true;
+                    break;
+                  }
                 }
+                if (!forced) continue;
+              } else {
+                continue;
               }
-              if (!forced) continue;
             } else {
               continue;
             }
-          } else {
-            continue;
           }
         }
       }
@@ -317,7 +323,7 @@ export class VisionPolygonComputer {
 
       // MS-LVL-073: Respect Foundry threshold wall semantics (proximity/distance)
       // for custom LOS paths so non-normal wall senses don't become unconditional.
-      if (!this._wallBlocksSenseWithThreshold(doc, sense, center, elevation)) continue;
+      if (!blockGeometry && !this._wallBlocksSenseWithThreshold(doc, sense, center, elevation)) continue;
 
       const ax = c[0];
       const ay = c[1];
@@ -326,8 +332,9 @@ export class VisionPolygonComputer {
 
       // Directional walls only block rays from one side. Match Foundry's orient2dFast
       // convention where a negative orientation means LEFT, positive means RIGHT.
+      // blockGeometry: treat every segment as a full barrier (candle glow vs windows).
       const dir = doc.dir ?? WALL_DIRECTION_BOTH;
-      if (dir !== WALL_DIRECTION_BOTH) {
+      if (!blockGeometry && dir !== WALL_DIRECTION_BOTH) {
         // orient2dFast(a, b, c) = (a.y - c.y) * (b.x - c.x) - (a.x - c.x) * (b.y - c.y)
         const orient = (ay - center.y) * (bx - center.x) - (ax - center.x) * (by - center.y);
         if (orient !== 0) {

@@ -12,6 +12,7 @@ import { applyWallV14LevelDefaults, getFiniteActiveLevelBand } from '../foundry/
 import { hasV14NativeLevels, isWallOnV14Level } from '../foundry/levels-scene-flags.js';
 import { OVERLAY_THREE_LAYER } from '../core/render-layers.js';
 import { flattenWallUpdateChanges, isWallDoorStateOnlyUpdate } from '../utils/wall-update-classify.js';
+import { getMaxTextureAnisotropy } from '../assets/texture-policies.js';
 
 const log = createLogger('WallManager');
 
@@ -915,7 +916,7 @@ export class WallManager {
                 tex.colorSpace = THREE.SRGBColorSpace;
               } catch (_) {}
             }
-            tex.anisotropy = 4;
+            tex.anisotropy = getMaxTextureAnisotropy();
             tex.minFilter = THREE.LinearMipmapLinearFilter;
             tex.magFilter = THREE.LinearFilter;
             tex.generateMipmaps = true;
@@ -1036,7 +1037,7 @@ export class WallManager {
             tex.colorSpace = THREE.SRGBColorSpace;
           } catch (_) {}
         }
-        tex.anisotropy = 4;
+        tex.anisotropy = getMaxTextureAnisotropy();
         tex.minFilter = THREE.LinearMipmapLinearFilter;
         tex.magFilter = THREE.LinearFilter;
         tex.generateMipmaps = true;

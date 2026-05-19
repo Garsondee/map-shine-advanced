@@ -141,16 +141,16 @@ export class LightingEffectV2 {
       lightIntensity: 2,
       /** Scales the minimum illumination floor under darkness (see compose shader). */
       minIlluminationScale: 0,
-      colorationStrength: 3.7,
+      colorationStrength: 2.75,
       /** Extra coupling of surface albedo luma into the tint path only. */
-      colorationReflectivity: 0.95,
+      colorationReflectivity: 0.75,
       /**
        * Pre-tint saturation on the RGB light buffer (0 = neutral, >0 richer chroma for tint).
        * Does not re-introduce white boost alone; achromatic lights stay gated by chroma weight.
        */
-      colorationSaturation: 0.4,
+      colorationSaturation: 0.1,
       /** Curve on chroma detection: >1 requires more saturated lights before full tint. */
-      colorationChromaCurve: 0.25,
+      colorationChromaCurve: 1.7,
       /**
        * Mix toward legacy behaviour: 0 = tint only from saturated (non-grey) RGB, 1 = ignore chroma gate
        * (old “full RGB” colouration, can double-count white with luminance).
@@ -1050,7 +1050,7 @@ export class LightingEffectV2 {
           min: 0,
           max: 8,
           step: 0.05,
-          default: 3.7,
+          default: 2.75,
           label: 'Tint strength',
           tooltip: 'How strongly saturated lamp colors tint surfaces. This is not exposure; white/neutral lights are excluded by default.',
         },
@@ -1059,7 +1059,7 @@ export class LightingEffectV2 {
           min: 0,
           max: 2,
           step: 0.05,
-          default: 0.95,
+          default: 0.75,
           label: 'Tint vs albedo',
           tooltip: 'Couples tint to surface brightness (albedo luma); lower flattens tint on dark pixels.',
         },
@@ -1068,7 +1068,7 @@ export class LightingEffectV2 {
           min: -1,
           max: 2,
           step: 0.05,
-          default: 0.4,
+          default: 0.1,
           label: 'Tint input saturation',
           tooltip: 'Pre-boosts chroma in the light buffer before tint (0 = as rendered).',
         },
@@ -1077,7 +1077,7 @@ export class LightingEffectV2 {
           min: 0.25,
           max: 4,
           step: 0.05,
-          default: 0.25,
+          default: 1.7,
           label: 'Chroma sharpness',
           tooltip: 'Higher values need more saturated lamp colours before tint reaches full strength.',
         },

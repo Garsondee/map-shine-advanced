@@ -24,6 +24,7 @@
  */
 
 import { createLogger } from '../core/log.js';
+import { loadImageTexture } from '../assets/image-texture-loader.js';
 import { DOOR_FLOOR_INDEX_GLOBAL } from '../scene/DoorMeshManager.js';
 import { TILE_FEATURE_LAYERS } from '../core/render-layers.js';
 import {
@@ -190,16 +191,6 @@ export class FloorRenderBus {
      */
     this._tiles = new Map();
 
-    /**
-     * Tile-albedo loader. `THREE.TextureLoader` is fine for tiles because
-     * `_configureTileAlbedoTexture` explicitly sets `tex.premultiplyAlpha = true`
-     * and the tile compositor uses premultiplied blending.
-     * Background images use `this._bgImageLoader` instead — see its
-     * JSDoc for why.
-     * @type {import('three').TextureLoader|null}
-     */
-    this._loader = null;
-
     /** @type {boolean} */
     this._initialized = false;
 
@@ -243,14 +234,8 @@ export class FloorRenderBus {
     const THREE = window.THREE;
     this._scene = new THREE.Scene();
     this._scene.name = 'FloorBusScene';
-    /**
-     * Primary loader for TILE albedo textures. Tiles go through
-     * `_configureTileAlbedoTexture` which expects an HTMLImageElement-backed
-     * texture and sets `premultiplyAlpha = true` on the texture itself —
-     * that path is unchanged.
-     */
-    this._loader = new THREE.TextureLoader();
-    // Background images do NOT use `this._loader` — see `_loadBgImageStraightAlpha`
+    // Tile albedos load via loadImageTexture (off-thread decode) — see _loadTileAlbedoFromUrl.
+    // Background images do NOT use TextureLoader — see `_loadBgImageStraightAlpha`
     // for the canvas → getImageData → DataTexture decode path used for
     // `__bg_image__*` entries. That path guarantees straight-alpha RGBA data
     // regardless of browser image-decode quirks.
@@ -424,18 +409,7 @@ export class FloorRenderBus {
         installBusMeshRadialOcclusionShader(entryRadial.material);
       }
 
-      // Load texture via THREE.TextureLoader — HTML <img>, straight alpha.
-      this._loader.load(src, (tex) => {
-        this._configureTileAlbedoTexture(tex);
-        const entry = this._tiles.get(tileId);
-        if (entry) {
-          entry.material.map = tex;
-          entry.material.needsUpdate = true;
-          log.debug(`FloorRenderBus: texture loaded for tile ${tileId} (floor ${floorIndex})`);
-        }
-      }, undefined, (err) => {
-        log.warn(`FloorRenderBus: failed to load texture for tile ${tileId}: ${src}`, err);
-      });
+      this._loadTileAlbedoFromUrl(tileId, src, floorIndex);
 
       tileCount++;
     }
@@ -663,7 +637,6 @@ export class FloorRenderBus {
   dispose() {
     this.clear();
     this._scene = null;
-    this._loader = null;
     this._initialized = false;
     log.info('FloorRenderBus disposed');
   }
@@ -2241,21 +2214,47 @@ export class FloorRenderBus {
    * @private
    */
   _loadTileTextureIntoEntry(tileId, src, floorIndex) {
-    if (!this._loader || !src || !tileId) return;
+    if (!src || !tileId) return;
+    this._loadTileAlbedoFromUrl(tileId, src, floorIndex);
+  }
 
-    this._loader.load(src, (tex) => {
-      const current = this._tiles.get(tileId);
-      if (!current || current.textureSrc !== src) return;
+  /**
+   * Load tile albedo via off-thread decode (createImageBitmap).
+   * @param {string} tileId
+   * @param {string} src
+   * @param {number} floorIndex
+   * @private
+   */
+  _loadTileAlbedoFromUrl(tileId, src, floorIndex) {
+    if (!src || !tileId) return;
+    const entry = this._tiles.get(tileId);
+    if (entry) entry.textureSrc = src;
+    loadImageTexture(src, { role: 'TILE_ALBEDO' })
+      .then((tex) => {
+        this._applyTileAlbedoTexture(tileId, src, tex);
+        log.debug(`FloorRenderBus: texture loaded for tile ${tileId} (floor ${floorIndex})`);
+      })
+      .catch((err) => {
+        log.warn(`FloorRenderBus: failed to load texture for tile ${tileId}: ${src}`, err);
+      });
+  }
 
-      this._configureTileAlbedoTexture(tex);
-
-      try { current.material?.map?.dispose?.(); } catch (_) {}
-      current.material.map = tex;
-      current.material.needsUpdate = true;
-      log.debug(`FloorRenderBus: texture loaded for tile ${tileId} (floor ${floorIndex})`);
-    }, undefined, (err) => {
-      log.warn(`FloorRenderBus: failed to load texture for tile ${tileId}: ${src}`, err);
-    });
+  /**
+   * @param {string} tileId
+   * @param {string} src
+   * @param {import('three').Texture} tex
+   * @private
+   */
+  _applyTileAlbedoTexture(tileId, src, tex) {
+    const entry = this._tiles.get(tileId);
+    if (!entry || entry.textureSrc !== src) {
+      try { tex?.dispose?.(); } catch (_) {}
+      return;
+    }
+    this._configureTileAlbedoTexture(tex);
+    try { entry.material?.map?.dispose?.(); } catch (_) {}
+    entry.material.map = tex;
+    entry.material.needsUpdate = true;
   }
 
   /**

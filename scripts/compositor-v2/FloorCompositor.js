@@ -659,6 +659,12 @@ export class FloorCompositor {
     this._postA = null;
     /** @type {THREE.WebGLRenderTarget|null} Post-processing ping-pong B */
     this._postB = null;
+    /**
+     * Post-bloom, pre–color-grade linear HDR composite for this frame.
+     * Fed to night vision so tube gain meters true scene luminance.
+     * @type {THREE.WebGLRenderTarget|null}
+     */
+    this._hdrScenePreGradeRT = null;
 
     /** @type {THREE.WebGLRenderTarget|null} Upper-floor occluder mask for water effect */
     this._waterOccluderRT = null;
@@ -3332,6 +3338,8 @@ export class FloorCompositor {
       return;
     }
 
+    this._hdrScenePreGradeRT = null;
+
     // Single source of truth for darkness / sun / time-of-day for the frame.
     // Computed once here so every downstream effect agrees on the same value;
     // see scripts/core/LightingDirector.js for the merge rules.
@@ -3568,6 +3576,20 @@ export class FloorCompositor {
       const effectiveDarkness01 = Number.isFinite(effectiveDarknessRaw)
         ? Math.max(0.0, Math.min(1.0, effectiveDarknessRaw))
         : undefined;
+      let todCameraTimelineActive = false;
+      let todCameraTintColor = { r: 1.0, g: 1.0, b: 1.0 };
+      try {
+        const tlGrade = this._colorCorrectionEffect?.getTimelineGradeState?.();
+        if (tlGrade?.enabled === true && tlGrade.global?.tintColor) {
+          todCameraTimelineActive = true;
+          const tc = tlGrade.global.tintColor;
+          todCameraTintColor = {
+            r: Number.isFinite(Number(tc.r)) ? Number(tc.r) : 1.0,
+            g: Number.isFinite(Number(tc.g)) ? Number(tc.g) : 1.0,
+            b: Number.isFinite(Number(tc.b)) ? Number(tc.b) : 1.0,
+          };
+        }
+      } catch (_) {}
       try {
         this._windowLightEffect?.setSkyState?.({
           skyTintColor: this._skyColorEffect?.currentSkyTintColor,
@@ -3577,6 +3599,8 @@ export class FloorCompositor {
           effectiveDarkness01,
           skyTintDarknessLightsEnabled: this._skyColorEffect?.params?.skyTintDarknessLightsEnabled,
           skyTintDarknessLightsIntensity: this._skyColorEffect?.params?.skyTintDarknessLightsIntensity,
+          todCameraTimelineActive,
+          todCameraTintColor,
         });
       } catch (_) {}
       try {
@@ -3600,6 +3624,16 @@ export class FloorCompositor {
         );
       } catch (_) {}
       this._profileEffectCall('filter', 'update', () => this._filterEffect.update(timeInfo), 'FilterEffectV2 update');
+      // Weather state drives atmospheric fog density; advance it even when
+      // WeatherParticlesV2 is disabled so fog does not freeze at zero.
+      this._profileEffectCall('weatherController', 'update', () => {
+        if (weatherController?.initialized !== true && typeof weatherController?.initialize === 'function') {
+          void weatherController.initialize();
+        }
+        if (typeof weatherController?.update === 'function') {
+          weatherController.update(timeInfo);
+        }
+      }, 'WeatherController update (fog driver)');
       this._profileEffectCall('atmosphericFog', 'update', () => this._atmosphericFogEffect.update(timeInfo), 'AtmosphericFogEffectV2 update');
       this._profileEffectCall('fogOfWar', 'update', () => this._fogEffect.update(timeInfo), 'FogOfWarEffectV2 update');
       this._profileEffectCall('bloom', 'update', () => this._bloomEffect.update(timeInfo), 'BloomEffectV2 update');
@@ -3656,6 +3690,7 @@ export class FloorCompositor {
     const _alphaIsoDebug = window.MapShine?.__alphaIsolationDebug ?? null;
     const _skipCloudPass = _alphaIsoDebug?.skipCloudPass === true;
     const _skipOverheadShadowPass = _alphaIsoDebug?.skipOverheadShadowPass === true;
+    const _overheadShadowEnabled = resolveEffectEnabled(this._overheadShadowEffect);
     const _skipBuildingShadowPass = _alphaIsoDebug?.skipBuildingShadowPass === true;
     const _disableOverheadInLighting = _alphaIsoDebug?.disableOverheadInLighting === true;
     const _disableRoofInLighting = _alphaIsoDebug?.disableRoofInLighting === true;
@@ -3720,14 +3755,14 @@ export class FloorCompositor {
     // Capture overhead tile alpha + compute soft shadow factor for lighting / ShadowManager.
     if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: overheadShadows.render'); } catch (_) {} }
     if (_profiling) _profileT0 = performance.now();
-    if (!_skipOverheadShadowPass) {
+    if (!_skipOverheadShadowPass && _overheadShadowEnabled) {
       this._profileEffectCall('overheadShadows', 'render', () => {
         this._overheadShadowEffect?.render?.(this.renderer, this._renderBus._scene, this.camera);
       }, 'OverheadShadowsEffectV2 render');
       try {
         const le = this._lightingEffect;
         const ov = this._overheadShadowEffect;
-        if (le && ov && !_disableRoofInLighting && resolveEffectEnabled(ov)) {
+        if (le && ov && !_disableRoofInLighting) {
           if (ov.lastRoofMaskCaptureReused) {
             le.preserveCeilingTransmittanceFromPreviousFrame?.();
           } else {
@@ -3863,11 +3898,14 @@ export class FloorCompositor {
       ? this._buildingShadowEffect.params.opacity : 0.75;
     const overheadShadowTexLegacy = (!_disableOverheadInLighting && resolveEffectEnabled(this._overheadShadowEffect))
       ? this._overheadShadowEffect.shadowFactorTexture : null;
-    const overheadRoofAlphaTex = _disableRoofInLighting ? null : (this._overheadShadowEffect?.roofAlphaTexture ?? null);
-    const overheadRoofBlockTex = _disableRoofInLighting ? null : (this._overheadShadowEffect?.roofBlockTexture ?? null);
-    const ceilingTransmittanceTex = (!_disableRoofInLighting && this._lightingEffect?.ceilingTransmittanceTextureForLighting)
+    const overheadRoofAlphaTex = (_disableRoofInLighting || !_overheadShadowEnabled)
+      ? null : (this._overheadShadowEffect?.roofAlphaTexture ?? null);
+    const overheadRoofBlockTex = (_disableRoofInLighting || !_overheadShadowEnabled)
+      ? null : (this._overheadShadowEffect?.roofBlockTexture ?? null);
+    const ceilingTransmittanceTex = (!_disableRoofInLighting && _overheadShadowEnabled && this._lightingEffect?.ceilingTransmittanceTextureForLighting)
       ? this._lightingEffect.ceilingTransmittanceTextureForLighting : null;
-    const overheadRoofRestrictLightTex = _disableRoofInLighting ? null : (this._overheadShadowEffect?.roofRestrictLightTexture ?? null);
+    const overheadRoofRestrictLightTex = (_disableRoofInLighting || !_overheadShadowEnabled)
+      ? null : (this._overheadShadowEffect?.roofRestrictLightTexture ?? null);
 
     // External-effects compositor (Sequencer / JB2A mirrors live in the bus
     // scene — sync transforms immediately before the per-level pipeline kicks
@@ -3996,7 +4034,13 @@ export class FloorCompositor {
       let wrote = false;
       this._profileEffectCall('playerLight', 'render', () => {
         wrote = withSceneScissor(this.renderer, () =>
-          this._playerLightEffect.renderNightVision(this.renderer, this.camera, currentInput, nvOutput)
+          this._playerLightEffect.renderNightVision(
+            this.renderer,
+            this.camera,
+            currentInput,
+            nvOutput,
+            this._hdrScenePreGradeRT,
+          )
         );
       }, 'PlayerLightEffectV2 renderNightVision');
       if (wrote) {
@@ -4876,8 +4920,8 @@ export class FloorCompositor {
           const compositor = window.MapShine?.sceneComposer?._sceneMaskCompositor;
           const waterFloorTex = (compositor && waterFloorKey)
             ? (
-              compositor.getFloorTexture?.(waterFloorKey, 'skyReach')
-              ?? compositor.getFloorTexture?.(waterFloorKey, 'outdoors')
+              compositor.getFloorTexture?.(waterFloorKey, 'outdoors')
+              ?? compositor.getFloorTexture?.(waterFloorKey, 'skyReach')
               ?? null
             )
             : null;
@@ -5018,6 +5062,7 @@ export class FloorCompositor {
       this._colorCorrectionEffect?.setOutdoorsMask?.(outdoorsTex);
       this._filterEffect?.setOutdoorsMask?.(outdoorsTex);
       this._atmosphericFogEffect?.setOutdoorsMask?.(outdoorsTex);
+      this._windowLightEffect?.setOutdoorsMask?.(outdoorsTex);
       this._overheadShadowEffect?.setOutdoorsMask?.(outdoorsTex);
       this._buildingShadowEffect?.setOutdoorsMask?.(outdoorsTex);
       this._paintedShadowEffect?.setOutdoorsMask?.(paintedOutdoorsTex);
@@ -5977,12 +6022,41 @@ export class FloorCompositor {
       } catch (_) {}
       return null;
     };
+
+    /**
+     * Water wave shelter sampling: prefer authored `_Outdoors` before `skyReach`.
+     * `skyReach` gates sky visibility — dark under overhead geometry — while water
+     * shelter should follow authored outdoor classification. Same-floor views use
+     * `_lastOutdoorsTexture` so we match `_syncOutdoorsMaskConsumers` (per-level water
+     * render no longer stomps sync with skyReach-first).
+     */
+    const resolveWaterShelterOutdoorsForFloor = (floorIndex) => {
+      try {
+        const idx = Number(floorIndex);
+        if (!Number.isFinite(idx)) return null;
+        const viewedIdx = Number(floorStack?.getActiveFloor?.()?.index ?? NaN);
+        if (Number.isFinite(viewedIdx) && viewedIdx === idx && this._lastOutdoorsTexture) {
+          return this._lastOutdoorsTexture;
+        }
+        const compositor = window.MapShine?.sceneComposer?._sceneMaskCompositor ?? null;
+        const floor = floorsByIndex.get(idx) ?? null;
+        const floorKey = floor?.compositorKey ?? null;
+        if (compositor && floorKey) {
+          return (
+            compositor.getFloorTexture?.(floorKey, 'outdoors')
+            ?? compositor.getFloorTexture?.(floorKey, 'skyReach')
+            ?? null
+          );
+        }
+      } catch (_) {}
+      return null;
+    };
     const restoreWaterOutdoorsForDataFloor = (dataFloorIndex) => {
       try {
         const idx = Number(dataFloorIndex);
         const ai = Number(floorStack?.getActiveFloor?.()?.index ?? 0);
         const bindIdx = Number.isFinite(idx) && idx >= 0 ? idx : ai;
-        const tex = resolveWaterOutdoorsForFloor(bindIdx);
+        const tex = resolveWaterShelterOutdoorsForFloor(bindIdx);
         if (tex) {
           this._waterEffect?.setOutdoorsMask?.(tex);
         } else if (visibleFloors.length > 1) {
@@ -6075,7 +6149,7 @@ export class FloorCompositor {
       // Lighting pass
       if (resolveEffectEnabled(this._lightingEffect)) {
         if (_profiling) _profileT0 = performance.now();
-        this._windowLightEffect?.setRenderFloorIndex?.(levelIndex);
+        this._windowLightEffect?.setRenderFloorIndex?.(levelIndex, true);
         const winScene = resolveEffectEnabled(this._windowLightEffect)
           ? this._windowLightEffect._scene : null;
         const shadowW = Number(combinedShadowRawTex?.image?.width) || levelSceneRT.width || 1;
@@ -6182,7 +6256,7 @@ export class FloorCompositor {
         }, 'WaterEffectV2 setLevelContext');
         this._profileEffectCall('water.perLevel.outdoorsMask', 'render', () => {
           try {
-            const perLevelWaterOutdoors = resolveWaterOutdoorsForFloor(waterDataFloorIndex);
+            const perLevelWaterOutdoors = resolveWaterShelterOutdoorsForFloor(waterDataFloorIndex);
             if (perLevelWaterOutdoors) {
               this._waterEffect.setOutdoorsMask?.(perLevelWaterOutdoors);
             } else if (visibleFloors.length > 1) {
@@ -6432,7 +6506,7 @@ export class FloorCompositor {
       }, 'WaterEffectV2 postMerge context');
       this._profileEffectCall('water.postMerge.outdoorsMask', 'render', () => {
         try {
-          const perLevelWaterOutdoors = resolveWaterOutdoorsForFloor(
+          const perLevelWaterOutdoors = resolveWaterShelterOutdoorsForFloor(
             Number.isFinite(dataFloor) && dataFloor >= 0 ? dataFloor : ai,
           );
           if (perLevelWaterOutdoors) {
@@ -6570,16 +6644,21 @@ export class FloorCompositor {
     // threshold may need tuning per scene (Phase rebalance task).
     if (resolveEffectEnabled(this._bloomEffect)) {
       const bloomOut = _pickOtherPost();
+      let bloomWrote = false;
       if (_profiling) _profileT0 = performance.now();
       this._profileEffectCall('bloom.postMerge', 'render', () => {
-        this._bloomEffect.render(this.renderer, mergedCompositeOut, bloomOut);
+        bloomWrote = !!this._bloomEffect.render(this.renderer, mergedCompositeOut, bloomOut);
       }, 'BloomEffectV2 postMerge render');
       if (_profiling) this._recordPassTiming('postMerge_bloom', _profileT0);
-      mergedCompositeOut = bloomOut;
+      if (bloomWrote) mergedCompositeOut = bloomOut;
     }
     // Now that bloom has consumed the water specular bloom texture (if any),
     // clear it so the next frame starts clean.
     try { this._bloomEffect?.setWaterSpecularBloomTexture?.(null); } catch (_) {}
+
+    // Night vision meters this buffer (linear HDR, post-bloom) while displaying
+    // the tone-mapped composite from the late pass chain.
+    this._hdrScenePreGradeRT = mergedCompositeOut;
 
     // Color correction (post-composite, single grade owner).
     if (resolveEffectEnabled(this._colorCorrectionEffect)) {

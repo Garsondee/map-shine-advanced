@@ -16,6 +16,7 @@
 
 import { resolveWallDoorAnimationDurationMs } from '../utils/wall-update-classify.js';
 import { createLogger } from '../core/log.js';
+import { applyVisibleTextureAnisotropy } from '../assets/texture-policies.js';
 import { readWallHeightFlags, resolveV14NativeDocFloorIndexMin } from '../foundry/levels-scene-flags.js';
 import { FLOOR_LAYERS } from '../compositor-v2/FloorLayerManager.js';
 import Coordinates from '../utils/coordinates.js';
@@ -739,6 +740,7 @@ export class DoorMeshManager {
         src,
         (texture) => {
           texture.colorSpace = THREE.SRGBColorSpace;
+          applyVisibleTextureAnisotropy(texture);
           resolve(texture);
         },
         undefined,

@@ -654,6 +654,110 @@ export class TileMotionManager {
     return ids;
   }
 
+  /**
+   * Whether tile motion playback is actively driving transforms this frame.
+   * @returns {boolean}
+   */
+  hasActiveAnimatedTiles() {
+    return this.state?.global?.playing === true
+      && this.state?.global?.paused !== true
+      && this._activeTileIds.size > 0;
+  }
+
+  /**
+   * Overhead shadow capture caches must not reuse stale masks while tiles animate.
+   * Stationary scenes (playback stopped or paused) may keep throttled reuse.
+   * @returns {boolean}
+   */
+  shouldBypassShadowCaptureCache() {
+    return this.hasActiveAnimatedTiles();
+  }
+
+  /**
+   * Whether a shadow-projection tile is actively animating this frame.
+   * @param {string} tileId
+   * @returns {boolean}
+   */
+  isShadowProjectionTileMoving(tileId) {
+    if (!tileId || !this.hasActiveAnimatedTiles()) return false;
+    const cfg = this.state?.tiles?.[tileId];
+    if (!cfg?.shadowProjectionEnabled) return false;
+    return this._activeTileIds.has(tileId);
+  }
+
+  /**
+   * True when any opted-in shadow projection tile is mid-animation.
+   * @returns {boolean}
+   */
+  hasActiveMovingShadowProjectionTiles() {
+    if (!this.hasActiveAnimatedTiles()) return false;
+    for (const tileId of this.getShadowProjectionTileIds()) {
+      if (this.isShadowProjectionTileMoving(tileId)) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Quantized live pose for one tile (prefer FloorRenderBus node used by capture).
+   * @param {string} tileId
+   * @returns {string}
+   * @private
+   */
+  _getTileMotionCaptureToken(tileId) {
+    const cfg = this.state?.tiles?.[tileId];
+    const busNode = this._getBusTransformNode(tileId);
+    const sprite = this._getTileData(tileId)?.sprite;
+    const node = busNode || sprite;
+    if (!node) return `${tileId}:missing`;
+
+    if (cfg?.mode === 'texture') {
+      const map = sprite?.material?.map;
+      if (map) {
+        const ou = Math.round(map.offset.x * 512) / 512;
+        const ov = Math.round(map.offset.y * 512) / 512;
+        const mr = Math.round(map.rotation * 256) / 256;
+        return `${tileId}:tex:${ou},${ov},${mr}`;
+      }
+    }
+
+    const px = Math.round(node.position.x * 4) / 4;
+    const py = Math.round(node.position.y * 4) / 4;
+    const rot = Math.round((node.rotation?.z ?? sprite?.material?.rotation ?? 0) * 128) / 128;
+    return `${tileId}:tr:${px},${py},${rot}`;
+  }
+
+  /**
+   * Quantized pose fingerprint for actively animated tiles (all motion types).
+   * @returns {string}
+   */
+  getActiveMotionCaptureSig() {
+    if (!this.hasActiveAnimatedTiles()) return '';
+    const parts = [];
+    for (const tileId of [...this._activeTileIds].sort()) {
+      parts.push(this._getTileMotionCaptureToken(tileId));
+    }
+    return parts.join(';');
+  }
+
+  /**
+   * Quantized pose fingerprint for shadow-projection tiles.
+   * @returns {string}
+   */
+  getShadowProjectionMotionSig() {
+    const ids = this.getShadowProjectionTileIds();
+    if (!ids.length) return '';
+
+    const parts = [];
+    for (const tileId of ids.sort()) {
+      if (this.isShadowProjectionTileMoving(tileId)) {
+        parts.push(this._getTileMotionCaptureToken(tileId));
+      } else {
+        parts.push(`${tileId}:static`);
+      }
+    }
+    return parts.join(';');
+  }
+
   isPlaying() {
     return this.state?.global?.playing === true;
   }

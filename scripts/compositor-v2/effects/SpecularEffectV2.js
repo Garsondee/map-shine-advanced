@@ -33,6 +33,8 @@
 import { createLogger } from '../../core/log.js';
 import { weatherController } from '../../core/WeatherController.js';
 import { probeMaskFile } from '../../assets/loader.js';
+import { loadImageTexture, VISUAL_MASK_MAX_SIZE } from '../../assets/image-texture-loader.js';
+import { createFallback1x1Texture } from '../../assets/texture-policies.js';
 import {
   tileHasLevelsRange,
   readTileLevelsFlags,
@@ -1338,8 +1340,8 @@ export class SpecularEffectV2 {
         // Dispose per-tile textures (albedo, specular).
         for (const key of ['uAlbedoMap', 'uSpecularMap']) {
           const tex = uniforms[key]?.value;
-          if (tex && tex !== this._fallbackBlack && tex !== this._fallbackWhite) {
-            tex.dispose();
+          if (this._shouldDisposeOverlayTexture(tex, tileId)) {
+            try { tex.dispose(); } catch (_) {}
           }
         }
       }
@@ -1368,7 +1370,7 @@ export class SpecularEffectV2 {
     if (uniforms) {
       for (const key of ['uAlbedoMap', 'uSpecularMap']) {
         const tex = uniforms[key]?.value;
-        if (tex && tex !== this._fallbackBlack && tex !== this._fallbackWhite) {
+        if (this._shouldDisposeOverlayTexture(tex, tileId)) {
           try { tex.dispose(); } catch (_) {}
         }
       }
@@ -1473,30 +1475,7 @@ export class SpecularEffectV2 {
       material = this._compiledBaseMaterial.clone();
       material.uniforms = newUniforms;
 
-      const loader = new THREE.TextureLoader();
-      if (albedoUrl) {
-        loader.load(albedoUrl, (tex) => {
-          tex.colorSpace = THREE.SRGBColorSpace;
-          tex.flipY = true;
-          tex.needsUpdate = true;
-          if (this._overlays.has(tileId)) {
-            material.uniforms.uAlbedoMap.value = tex;
-          } else {
-            try { tex.dispose?.(); } catch (_) {}
-          }
-        }, undefined, (err) => log.warn(`Failed to load albedo for ${tileId}:`, err));
-      }
-      if (specularUrl) {
-        loader.load(specularUrl, (tex) => {
-          tex.flipY = true;
-          tex.needsUpdate = true;
-          if (this._overlays.has(tileId)) {
-            material.uniforms.uSpecularMap.value = tex;
-          } else {
-            try { tex.dispose?.(); } catch (_) {}
-          }
-        }, undefined, (err) => log.warn(`Failed to load specular mask for ${tileId}:`, err));
-      }
+      void this._bindOverlayTileTextures(tileId, material.uniforms, { albedoUrl, specularUrl });
     } else {
       // DEFERRED: Use MeshBasicMaterial (no shader compile) initially.
       // Real ShaderMaterial with full GLSL will be created and swapped in later
@@ -1637,7 +1616,6 @@ export class SpecularEffectV2 {
       this._shaderCompilePending = false;
 
       // Upgrade all overlays with the new real shader material
-      const loader = new THREE.TextureLoader();
       for (const [tileId, overlay] of this._overlays) {
         const oldMat = overlay.material;
 
@@ -1656,30 +1634,9 @@ export class SpecularEffectV2 {
         overlay.mesh.material = newMat;
         overlay.material = newMat;
 
-        // Load textures now that shader is ready
         const albedoUrl = oldMat._tempAlbedoUrl;
         const specularUrl = oldMat._tempSpecularUrl;
-
-        if (albedoUrl) {
-          loader.load(albedoUrl, (tex) => {
-            tex.colorSpace = THREE.SRGBColorSpace;
-            tex.flipY = true;
-            tex.needsUpdate = true;
-            if (this._overlays.has(tileId)) {
-              newMat.uniforms.uAlbedoMap.value = tex;
-            }
-          }, undefined, (err) => log.warn(`Failed to load albedo for ${tileId}:`, err));
-        }
-
-        if (specularUrl) {
-          loader.load(specularUrl, (tex) => {
-            tex.flipY = true;
-            tex.needsUpdate = true;
-            if (this._overlays.has(tileId)) {
-              newMat.uniforms.uSpecularMap.value = tex;
-            }
-          }, undefined, (err) => log.warn(`Failed to load specular mask for ${tileId}:`, err));
-        }
+        await this._bindOverlayTileTextures(tileId, newMat.uniforms, { albedoUrl, specularUrl });
 
         // Dispose old MeshBasicMaterial
         oldMat.dispose();
@@ -1918,20 +1875,72 @@ export class SpecularEffectV2 {
 
   /** @private */
   _buildFallbackTextures() {
-    const THREE = window.THREE;
+    this._fallbackBlack = createFallback1x1Texture(0, 0, 0, 255);
+    this._fallbackWhite = createFallback1x1Texture(255, 255, 255, 255, { srgb: true });
+  }
 
-    const blackData = new Uint8Array([0, 0, 0, 255]);
-    this._fallbackBlack = new THREE.DataTexture(blackData, 1, 1, THREE.RGBAFormat);
-    this._fallbackBlack.needsUpdate = true;
-    this._fallbackBlack.minFilter = THREE.NearestFilter;
-    this._fallbackBlack.magFilter = THREE.NearestFilter;
+  /**
+   * Reuse FloorRenderBus albedo when the tile is already on the bus (avoids duplicate decode).
+   * @param {string} tileId
+   * @returns {import('three').Texture|null}
+   * @private
+   */
+  _resolveBusAlbedoTexture(tileId) {
+    if (!tileId || /^__bg_image__(?:|[1-9]\d*)$/.test(String(tileId))) return null;
+    return this._renderBus?._tiles?.get?.(tileId)?.material?.map ?? null;
+  }
 
-    const whiteData = new Uint8Array([255, 255, 255, 255]);
-    this._fallbackWhite = new THREE.DataTexture(whiteData, 1, 1, THREE.RGBAFormat);
-    this._fallbackWhite.needsUpdate = true;
-    this._fallbackWhite.colorSpace = THREE.SRGBColorSpace;
-    this._fallbackWhite.minFilter = THREE.NearestFilter;
-    this._fallbackWhite.magFilter = THREE.NearestFilter;
+  /**
+   * @param {import('three').Texture|null|undefined} tex
+   * @param {string} tileId
+   * @returns {boolean}
+   * @private
+   */
+  _shouldDisposeOverlayTexture(tex, tileId) {
+    if (!tex || tex === this._fallbackBlack || tex === this._fallbackWhite) return false;
+    const busAlbedo = this._resolveBusAlbedoTexture(tileId);
+    if (busAlbedo && tex === busAlbedo) return false;
+    return tex?.userData?.mapShineTextureOwned === true;
+  }
+
+  /**
+   * Bind per-tile albedo (bus reuse or off-thread load) and specular mask.
+   * @param {string} tileId
+   * @param {Record<string, { value: import('three').Texture }>} uniforms
+   * @param {{ albedoUrl?: string, specularUrl?: string }} urls
+   * @private
+   */
+  async _bindOverlayTileTextures(tileId, uniforms, { albedoUrl, specularUrl }) {
+    const busAlbedo = this._resolveBusAlbedoTexture(tileId);
+    if (busAlbedo) {
+      uniforms.uAlbedoMap.value = busAlbedo;
+    } else if (albedoUrl) {
+      try {
+        const tex = await loadImageTexture(albedoUrl, { role: 'TILE_ALBEDO' });
+        if (this._overlays.has(tileId)) {
+          uniforms.uAlbedoMap.value = tex;
+        } else {
+          try { tex.dispose(); } catch (_) {}
+        }
+      } catch (err) {
+        log.warn(`Failed to load albedo for ${tileId}:`, err);
+      }
+    }
+
+    if (!specularUrl) return;
+    try {
+      const tex = await loadImageTexture(specularUrl, {
+        role: 'OVERLAY_DATA_MASK',
+        maxSize: VISUAL_MASK_MAX_SIZE,
+      });
+      if (this._overlays.has(tileId)) {
+        uniforms.uSpecularMap.value = tex;
+      } else {
+        try { tex.dispose(); } catch (_) {}
+      }
+    } catch (err) {
+      log.warn(`Failed to load specular mask for ${tileId}:`, err);
+    }
   }
 
   // ── Private: Light management ──────────────────────────────────────────────

@@ -854,7 +854,7 @@ export class SkyReachShadowsEffectV2 {
 
     const u = this._projectMaterial.uniforms;
     const lenScale = Number.isFinite(Number(this._driverShadowLengthScale))
-      ? Math.max(0.25, Math.min(4.0, Number(this._driverShadowLengthScale)))
+      ? Math.max(0.0, Math.min(1.0, Number(this._driverShadowLengthScale)))
       : 1.0;
     u.uLength.value = this._getEffectiveRayLength() * lenScale;
     u.uSoftness.value = this.params.softness * (Number(this._driverShadowSoftnessScale) || 1.0);

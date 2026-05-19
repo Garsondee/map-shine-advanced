@@ -1,6 +1,7 @@
 import { createLogger } from '../core/log.js';
 import { weatherController } from '../core/WeatherController.js';
 import { OVERLAY_THREE_LAYER, ROPE_MASK_LAYER } from '../core/render-layers.js';
+import { applyVisibleTextureAnisotropy } from '../assets/texture-policies.js';
 
 const log = createLogger('PhysicsRopeManager');
 
@@ -224,13 +225,7 @@ class RopeInstance {
       tex.minFilter = THREE.LinearFilter;
       tex.magFilter = THREE.LinearFilter;
 
-      try {
-        const renderer = window.MapShine?.effectComposer?.renderer;
-        if (renderer?.capabilities?.getMaxAnisotropy) {
-          tex.anisotropy = renderer.capabilities.getMaxAnisotropy();
-        }
-      } catch (_) {
-      }
+      applyVisibleTextureAnisotropy(tex);
 
       tex.needsUpdate = true;
     }
@@ -788,9 +783,11 @@ export class PhysicsRopeManager {
       : 1.0;
     const envFactor = 1.0 - Math.max(0.0, Math.min(1.0, darkness * nightDimming));
 
-    const intensity = (typeof wle.params?.intensity === 'number' && Number.isFinite(wle.params.intensity))
-      ? Math.max(0.0, wle.params.intensity)
-      : 0.0;
+    const intensity = (typeof wle.getEffectiveIntensity === 'function')
+      ? Math.max(0.0, wle.getEffectiveIntensity())
+      : ((typeof wle.params?.intensity === 'number' && Number.isFinite(wle.params.intensity))
+        ? Math.max(0.0, wle.params.intensity)
+        : 0.0);
 
     const strength = shaped * indoorFactor * intensity * envFactor;
     if (strength <= 0.0001) return null;
@@ -869,13 +866,7 @@ export class PhysicsRopeManager {
           tex.magFilter = THREE.LinearFilter;
           tex.generateMipmaps = false;
 
-          try {
-            const renderer = window.MapShine?.effectComposer?.renderer;
-            if (renderer?.capabilities?.getMaxAnisotropy) {
-              tex.anisotropy = renderer.capabilities.getMaxAnisotropy();
-            }
-          } catch (_) {
-          }
+          applyVisibleTextureAnisotropy(tex);
           return tex;
         }
       }

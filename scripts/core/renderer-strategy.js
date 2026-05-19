@@ -4,6 +4,7 @@
  */
 
 import { createLogger } from './log.js';
+import { applyGlobalTextureAnisotropy } from '../assets/texture-policies.js';
 
 const log = createLogger('Renderer');
 
@@ -167,6 +168,8 @@ export function configure(renderer, options = {}) {
   if (THREE && THREE.NoToneMapping !== undefined) {
     renderer.toneMapping = THREE.NoToneMapping;
   }
+
+  applyGlobalTextureAnisotropy(renderer);
 
   log.debug(`Renderer configured: ${width}x${height}, pixelRatio: ${pixelRatio}, outputColorSpace: sRGB, ColorManagement: ${THREE?.ColorManagement?.enabled === true}`);
 }

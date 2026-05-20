@@ -50,7 +50,45 @@ export class ShadowManagerV2 {
     this._skyReachShadowTexture = null;
     this._treeBillboardShadowTexture = null;
     this._bushBillboardShadowTexture = null;
+    this._lightningBuildingTexture = null;
+    this._lightningSkyReachTexture = null;
+    this._lightningPaintedTexture = null;
+    this._lightningVegetationTexture = null;
+    this._landscapeLightningFlash01 = 0;
+    this._landscapeLightningShadowWeight = 0;
+    this._landscapeLightningShadowDarkness = 1.0;
     this._inputList = null;
+  }
+
+  /**
+   * Blend pre-baked landscape lightning shadow factors during active flash.
+   * @param {object} [opts]
+   * @param {number} [opts.flash01]
+   * @param {number} [opts.shadowWeight]
+   * @param {number} [opts.shadowDarkness] Lit-factor power (>1 = deeper lightning shadows).
+   * @param {THREE.Texture|null} [opts.building]
+   * @param {THREE.Texture|null} [opts.skyReach]
+   * @param {THREE.Texture|null} [opts.painted]
+   * @param {THREE.Texture|null} [opts.vegetation]
+   */
+  setLandscapeLightningBlend(opts = {}) {
+    const flash01 = Math.max(0, Math.min(1, Number(opts.flash01) || 0));
+    const shadowWeight = Math.max(0, Math.min(1, Number(opts.shadowWeight) || 0));
+    this._landscapeLightningFlash01 = flash01;
+    this._landscapeLightningShadowWeight = shadowWeight;
+    this._landscapeLightningShadowDarkness = Math.max(1, Number(opts.shadowDarkness) || 1);
+    const blend = flash01 * shadowWeight;
+    if (blend <= 0.0001) {
+      this._lightningBuildingTexture = null;
+      this._lightningSkyReachTexture = null;
+      this._lightningPaintedTexture = null;
+      this._lightningVegetationTexture = null;
+      return;
+    }
+    this._lightningBuildingTexture = opts.building ?? null;
+    this._lightningSkyReachTexture = opts.skyReach ?? null;
+    this._lightningPaintedTexture = opts.painted ?? null;
+    this._lightningVegetationTexture = opts.vegetation ?? null;
   }
 
   initialize(renderer, width, height) {
@@ -95,6 +133,16 @@ export class ShadowManagerV2 {
         uViewBounds: { value: new THREE.Vector4(0, 0, 1, 1) },
         uSceneDimensions: { value: new THREE.Vector2(1, 1) },
         uHasBuildingUvRemap: { value: 0.0 },
+        tLightningBuilding: { value: null },
+        tLightningSkyReach: { value: null },
+        tLightningPainted: { value: null },
+        tLightningVegetation: { value: null },
+        uHasLightningBuilding: { value: 0.0 },
+        uHasLightningSkyReach: { value: 0.0 },
+        uHasLightningPainted: { value: 0.0 },
+        uHasLightningVegetation: { value: 0.0 },
+        uLandscapeLightningBlend: { value: 0.0 },
+        uLandscapeLightningShadowDarkness: { value: 1.0 },
       },
       vertexShader: /* glsl */`
         varying vec2 vUv;
@@ -135,7 +183,26 @@ export class ShadowManagerV2 {
         uniform vec4 uViewBounds;
         uniform vec2 uSceneDimensions;
         uniform float uHasBuildingUvRemap;
+        uniform sampler2D tLightningBuilding;
+        uniform sampler2D tLightningSkyReach;
+        uniform sampler2D tLightningPainted;
+        uniform sampler2D tLightningVegetation;
+        uniform float uHasLightningBuilding;
+        uniform float uHasLightningSkyReach;
+        uniform float uHasLightningPainted;
+        uniform float uHasLightningVegetation;
+        uniform float uLandscapeLightningBlend;
+        uniform float uLandscapeLightningShadowDarkness;
         varying vec2 vUv;
+
+        float blendLightningLit(float liveLit, float lightningLit, float hasLightning) {
+          float b = clamp(uLandscapeLightningBlend, 0.0, 1.0) * step(0.5, hasLightning);
+          b = b * b * (3.0 - 2.0 * b);
+          float bolt = clamp(lightningLit, 0.0, 1.0);
+          float darkPow = max(1.0, uLandscapeLightningShadowDarkness);
+          if (darkPow > 1.001) bolt = pow(bolt, darkPow);
+          return mix(liveLit, bolt, b);
+        }
 
         vec2 smScreenUvToFoundry(vec2 screenUv) {
           float threeX = mix(uViewBounds.x, uViewBounds.z, screenUv.x);
@@ -193,29 +260,44 @@ export class ShadowManagerV2 {
         float readBuildingShadow() {
           if (uHasBuildingShadow < 0.5) return 1.0;
           vec2 sceneUv = smSceneUvForWorldTextures(vUv);
-          return clamp(texture2D(tBuildingShadow, sceneUv).r, 0.0, 1.0);
+          float liveV = clamp(texture2D(tBuildingShadow, sceneUv).r, 0.0, 1.0);
+          if (uHasLightningBuilding < 0.5) return liveV;
+          float boltV = clamp(texture2D(tLightningBuilding, sceneUv).r, 0.0, 1.0);
+          return blendLightningLit(liveV, boltV, uHasLightningBuilding);
         }
 
         float readPaintedShadow() {
           if (uHasPaintedShadow < 0.5) return 1.0;
           vec2 sceneUv = smSceneUvForWorldTextures(vUv);
-          return clamp(texture2D(tPaintedShadow, sceneUv).r, 0.0, 1.0);
+          float liveV = clamp(texture2D(tPaintedShadow, sceneUv).r, 0.0, 1.0);
+          if (uHasLightningPainted < 0.5) return liveV;
+          float boltV = clamp(texture2D(tLightningPainted, sceneUv).r, 0.0, 1.0);
+          return blendLightningLit(liveV, boltV, uHasLightningPainted);
         }
 
         float readSkyReachShadow() {
           if (uHasSkyReachShadow < 0.5) return 1.0;
           vec2 sceneUv = smSceneUvForWorldTextures(vUv);
-          return clamp(texture2D(tSkyReachShadow, sceneUv).r, 0.0, 1.0);
+          float liveV = clamp(texture2D(tSkyReachShadow, sceneUv).r, 0.0, 1.0);
+          if (uHasLightningSkyReach < 0.5) return liveV;
+          float boltV = clamp(texture2D(tLightningSkyReach, sceneUv).r, 0.0, 1.0);
+          return blendLightningLit(liveV, boltV, uHasLightningSkyReach);
         }
 
         float readTreeBillboardShadow() {
           if (uHasTreeBillboardShadow < 0.5) return 1.0;
-          return clamp(texture2D(tTreeBillboardShadow, vUv).r, 0.0, 1.0);
+          float liveV = clamp(texture2D(tTreeBillboardShadow, vUv).r, 0.0, 1.0);
+          if (uHasLightningVegetation < 0.5) return liveV;
+          float boltV = clamp(texture2D(tLightningVegetation, vUv).r, 0.0, 1.0);
+          return blendLightningLit(liveV, boltV, uHasLightningVegetation);
         }
 
         float readBushBillboardShadow() {
           if (uHasBushBillboardShadow < 0.5) return 1.0;
-          return clamp(texture2D(tBushBillboardShadow, vUv).r, 0.0, 1.0);
+          float liveV = clamp(texture2D(tBushBillboardShadow, vUv).r, 0.0, 1.0);
+          if (uHasLightningVegetation < 0.5) return liveV;
+          float boltV = clamp(texture2D(tLightningVegetation, vUv).r, 0.0, 1.0);
+          return blendLightningLit(liveV, boltV, uHasLightningVegetation);
         }
 
         void main() {
@@ -236,7 +318,10 @@ export class ShadowManagerV2 {
           float bushBb = mix(1.0, bushBillboardBase, clamp(uBushBillboardOpacity, 0.0, 1.0));
           float cw = clamp(uCloudWeight, 0.0, 1.0);
           float combined = overhead * building * painted * skyReach * treeBb * bushBb * mix(1.0, cloud, cw);
-          gl_FragColor = vec4(combined, combined, combined, 1.0);
+          // Raw RT: alpha carries overhead-only factor so LightingEffectV2 can keep
+          // porch/daylight lift from erasing stamp shadows outdoors (see uUseRawCloud).
+          float rawAlpha = (uUseRawCloud > 0.5) ? overhead : 1.0;
+          gl_FragColor = vec4(combined, combined, combined, rawAlpha);
         }
       `,
       depthWrite: false,
@@ -419,6 +504,19 @@ export class ShadowManagerV2 {
     u.tSkyReachShadow.value = this._skyReachShadowTexture;
     u.tTreeBillboardShadow.value = this._treeBillboardShadowTexture;
     u.tBushBillboardShadow.value = this._bushBillboardShadowTexture;
+    u.tLightningBuilding.value = this._lightningBuildingTexture;
+    u.tLightningSkyReach.value = this._lightningSkyReachTexture;
+    u.tLightningPainted.value = this._lightningPaintedTexture;
+    u.tLightningVegetation.value = this._lightningVegetationTexture;
+    u.uHasLightningBuilding.value = this._lightningBuildingTexture ? 1.0 : 0.0;
+    u.uHasLightningSkyReach.value = this._lightningSkyReachTexture ? 1.0 : 0.0;
+    u.uHasLightningPainted.value = this._lightningPaintedTexture ? 1.0 : 0.0;
+    u.uHasLightningVegetation.value = this._lightningVegetationTexture ? 1.0 : 0.0;
+    const rawBlend = Math.max(0, Math.min(1,
+      (Number(this._landscapeLightningFlash01) || 0) * (Number(this._landscapeLightningShadowWeight) || 0),
+    ));
+    u.uLandscapeLightningBlend.value = rawBlend;
+    u.uLandscapeLightningShadowDarkness.value = Math.max(1, Number(this._landscapeLightningShadowDarkness) || 1);
     u.uHasCloudShadow.value = this._cloudShadowTexture ? 1.0 : 0.0;
     u.uHasCloudShadowRaw.value = this._cloudShadowRawTexture ? 1.0 : 0.0;
     u.uHasOverheadShadow.value = this._overheadShadowTexture ? 1.0 : 0.0;

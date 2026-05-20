@@ -27,13 +27,13 @@ import { createLogger } from '../../core/log.js';
 import { weatherController } from '../../core/WeatherController.js';
 import { resolveCompositorOutdoorsTexture } from '../../masks/resolve-compositor-outdoors.js';
 import { FLOOR_ID_OUTDOORS_RECEIVER_GLSL } from '../shadow-system/DirectionalShadowProjector.js';
-import { getUnifiedShadowLatitudeScale } from '../shadow-system/SunDirection.js';
 import {
-  applyShadowSunDirection,
-  computeShadowSunDirection2D,
+  resolveEffectShadowSun2D,
+  writeEffectSunDir,
 } from '../shadow-system/ShadowSunDirection.js';
 import { collectOutdoorsTexturesByFloorIndex } from '../shadow-system/floor-outdoors-slots.js';
 import { resolveReceiverOutdoorsMaskTexture } from '../shadow-system/resolve-receiver-outdoors-mask.js';
+import { resolveBakeRayLength, resolveBakeSmear } from '../lightning/shadow-bake-override.js';
 
 const log = createLogger('BuildingShadowsEffectV2');
 
@@ -62,16 +62,16 @@ export class BuildingShadowsEffectV2 {
       shadowStrengthBoost: 1,
       length: 0.075,
       softness: 8,
-      smear: 0,
+      smear: 0.38,
       resolutionScale: 2,
-      penumbra: 0.5,
-      shadowCurve: 1.6,
-      blurRadius: 1.3,
+      penumbra: 0.68,
+      shadowCurve: 1.45,
+      blurRadius: 1.75,
       /** 1 = keep full strength at the caster contact; fringe still uses blurred field. 0 = legacy (uniform blur can eat the footprint edge). */
       contactShadowPreserve: 1,
       /** smoothstep(low,high,sharpStrength) — widens/narrows where the pre-blur field wins over blur. */
-      contactSharpBlendLow: 0.04,
-      contactSharpBlendHigh: 0.78,
+      contactSharpBlendLow: 0.06,
+      contactSharpBlendHigh: 0.58,
       /** Grow shadow coverage in shadow RT pixels (max-filter) to cover bright rim cracks at silhouette. */
       shadowEdgeInflatePx: 0.5,
       sunLatitude: 0.1,
@@ -122,8 +122,10 @@ export class BuildingShadowsEffectV2 {
     this._sunAzimuthDeg = null;
     this._sunElevationDeg = null;
     this._dynamicLightOverride = null;
-    /** @type {number} Echo of {@link ShadowDriverState#tuning.shadowLengthScale} (0 dawn/dusk peak, 0 noon/midnight) */
+    /** @type {number} Echo of {@link ShadowDriverState#tuning.shadowLengthScale} */
     this._driverShadowLengthScale = 1.0;
+    this._driverShadowSoftnessScale = 1.0;
+    this._driverShadowSmearScale = 1.0;
 
     /** @type {Promise<void>|null} Background floor-mask warmup in flight */
     this._floorPreloadPromise = null;
@@ -229,7 +231,8 @@ export class BuildingShadowsEffectV2 {
           min: 0.5,
           max: 8.0,
           step: 0.1,
-          default: 8
+          default: 8,
+          tooltip: 'Lateral spread per ray step; grows toward the shadow tip for a softer umbra away from walls.'
         },
         smear: {
           type: 'slider',
@@ -237,7 +240,8 @@ export class BuildingShadowsEffectV2 {
           min: 0.0,
           max: 1.0,
           step: 0.01,
-          default: 0
+          default: 0.38,
+          tooltip: 'Stretches and softens the shadow tail along the sun direction (higher = more smeared, painterly falloff).'
         },
         resolutionScale: {
           type: 'slider',
@@ -253,7 +257,8 @@ export class BuildingShadowsEffectV2 {
           min: 0.0,
           max: 1.0,
           step: 0.01,
-          default: 0.5
+          default: 0.68,
+          tooltip: 'How quickly the shadow softens and lightens along its length (away from the building).'
         },
         shadowCurve: {
           type: 'slider',
@@ -269,7 +274,7 @@ export class BuildingShadowsEffectV2 {
           min: 0.0,
           max: 4.0,
           step: 0.05,
-          default: 1.3
+          default: 1.75
         },
         contactShadowPreserve: {
           type: 'slider',
@@ -287,7 +292,7 @@ export class BuildingShadowsEffectV2 {
           min: 0.0,
           max: 0.35,
           step: 0.005,
-          default: 0.04,
+          default: 0.06,
           tooltip: 'Lower bound for where pre-blur strength starts to dominate (shadow strength gamma). Raise slightly if fringe looks too crunchy.'
         },
         contactSharpBlendHigh: {
@@ -296,7 +301,7 @@ export class BuildingShadowsEffectV2 {
           min: 0.2,
           max: 0.98,
           step: 0.01,
-          default: 0.78,
+          default: 0.58,
           tooltip: 'Upper bound toward full contact sharpness inside the silhouette. Lower to pull softness closer to walls.'
         },
         shadowEdgeInflatePx: {
@@ -512,33 +517,43 @@ export class BuildingShadowsEffectV2 {
           float receiverOutdoors = readReceiverOutdoorsMask(vUv);
           float receiverOutdoorGate = clamp(receiverOutdoors, 0.0, 1.0);
 
-          // Directional ray integration along projected sun direction.
-          // Lateral softening is handled by the separable Gaussian blur pass.
+          // Directional ray integration: lateral penumbra grows with distance along
+          // the tail; separable blur pass still softens the composite field.
+          vec2 ortho = vec2(-dir.y, dir.x);
           float smearAmount = clamp(uSmear, 0.0, 1.0);
+          float penumbraAmount = clamp(uPenumbra, 0.0, 1.0);
           float accum = 0.0;
           float weightSum = 0.0;
           float peakHit = 0.0;
-          float spreadBase = 0.45 + 0.4 * smearAmount;
+          float spreadBase = 0.28 + 0.62 * smearAmount;
 
-          const int RAY_STEPS = 8;
+          const int RAY_STEPS = 10;
           for (int i = 0; i < RAY_STEPS; i++) {
             float t = (float(i) + 0.5) / float(RAY_STEPS);
             float spreadT = mix(t, t * t, spreadBase);
+            spreadT = mix(spreadT, t * t * t, smearAmount * 0.42);
             vec2 centerUv = vUv + (baseOffsetUv * spreadT);
-            float distanceFade = mix(1.0, 0.55, t);
 
-            float stepHit = sampleCasterIndoor(centerUv, receiverOutdoorGate);
+            float sigma = max(uSoftness, 0.5) * mix(0.65, 3.4, (t * t) + (0.72 * penumbraAmount * t));
+            float lateral = sigma * maskTexel.x * mix(1.0, 2.25, penumbraAmount);
+            float distanceFade = mix(1.22, 0.34, pow(t, 0.82));
+
+            float c0 = sampleCasterIndoor(centerUv, receiverOutdoorGate);
+            float c1 = sampleCasterIndoor(centerUv + ortho * lateral, receiverOutdoorGate);
+            float c2 = sampleCasterIndoor(centerUv - ortho * lateral, receiverOutdoorGate);
+            float stepHit = c0 * 0.5 + c1 * 0.25 + c2 * 0.25;
             peakHit = max(peakHit, stepHit);
 
-            float stepWeight = mix(1.1, 0.7, t) * distanceFade;
+            float stepWeight = mix(1.38, 0.58, t) * distanceFade;
             accum += stepHit * stepWeight;
             weightSum += stepWeight;
           }
 
           float integrated = (weightSum > 0.0) ? (accum / weightSum) : 0.0;
-          float strength = mix(integrated, peakHit, 0.35 + 0.25 * smearAmount);
+          float strength = mix(integrated, peakHit, 0.2 + 0.5 * smearAmount);
           strength = smoothstep(0.0, 1.0, clamp(strength, 0.0, 1.0));
-          strength = pow(strength, max(uShadowCurve, 0.01));
+          float curve = max(uShadowCurve, 0.01);
+          strength = pow(strength, mix(curve * 1.12, curve * 0.78, penumbraAmount));
           if ((uHasDynamicLight > 0.5 || uHasWindowLight > 0.5) && uDynamicLightShadowOverrideEnabled > 0.5 && uHasDynSceneRect > 0.5) {
             vec2 dynUv = clamp(sceneUvToDynScreenUv(vUv), vec2(0.0), vec2(1.0));
             float dynI = 0.0;
@@ -800,9 +815,13 @@ export class BuildingShadowsEffectV2 {
     this._updateSunDirection();
 
     const u = this._projectMaterial.uniforms;
-    u.uLength.value = this._getEffectiveRayLength();
+    u.uLength.value = resolveBakeRayLength(this, this._getEffectiveRayLength());
     u.uSoftness.value = this.params.softness * (Number(this._driverShadowSoftnessScale) || 1.0);
-    u.uSmear.value = this.params.smear;
+    u.uSmear.value = resolveBakeSmear(
+      this,
+      Math.max(0, Number(this.params.smear) || 0)
+        * Math.max(0, Number(this._driverShadowSmearScale) || 1.0),
+    );
     u.uPenumbra.value = this.params.penumbra;
     u.uShadowCurve.value = this.params.shadowCurve;
     u.uZoom.value = this._getEffectiveZoom();
@@ -882,7 +901,7 @@ export class BuildingShadowsEffectV2 {
       iu.uShadowEdgeInflatePx.value = Number.isFinite(inf) ? Math.max(0.0, Math.min(32.0, inf)) : 0.0;
     }
     if (this._blurMaterial?.uniforms?.uRadius) {
-      this._blurMaterial.uniforms.uRadius.value = this.params.blurRadius;
+      this._blurMaterial.uniforms.uRadius.value = this._getEffectiveBlurRadius();
     }
   }
 
@@ -907,6 +926,9 @@ export class BuildingShadowsEffectV2 {
     if (Number.isFinite(Number(driverState.tuning?.shadowLengthScale))) {
       this._driverShadowLengthScale = Number(driverState.tuning.shadowLengthScale);
     }
+    if (Number.isFinite(Number(driverState.tuning?.shadowSmearScale))) {
+      this._driverShadowSmearScale = Number(driverState.tuning.shadowSmearScale);
+    }
   }
 
   /**
@@ -921,6 +943,19 @@ export class BuildingShadowsEffectV2 {
       ? Math.max(0.0, Math.min(1.0, Number(this._driverShadowLengthScale)))
       : 1.0;
     return BUILDING_SHADOW_PEAK_U_LENGTH * artistScale * timeW;
+  }
+
+  /**
+   * Post-projector blur radius; scales up when dawn/dusk lengthens shadows so the tail stays smooth.
+   * @returns {number}
+   */
+  _getEffectiveBlurRadius() {
+    const base = Number(this.params.blurRadius ?? 0);
+    if (!Number.isFinite(base) || base <= 0.01) return 0;
+    const effLen = this._getEffectiveRayLength();
+    const peak = BUILDING_SHADOW_PEAK_U_LENGTH;
+    const lenT = peak > 1e-6 ? Math.min(2.0, effLen / peak) : 0;
+    return Math.min(4.0, base * (1.0 + lenT * 0.45));
   }
 
   /**
@@ -1176,7 +1211,7 @@ export class BuildingShadowsEffectV2 {
       note: null,
     });
 
-    const blurRadius = Number(this.params.blurRadius ?? 0);
+    const blurRadius = this._getEffectiveBlurRadius();
     const useBlur = !!this._blurMaterial && !!this._blurTarget && blurRadius > 0.01;
     let finalStrengthTex = this._strengthTarget.texture;
 
@@ -1561,32 +1596,12 @@ export class BuildingShadowsEffectV2 {
   _updateSunDirection() {
     const THREE = window.THREE;
     if (!THREE) return;
-
-    const lat = getUnifiedShadowLatitudeScale(this.params.sunLatitude ?? 0.1);
-    let azimuthRad = 0.0;
-    if (Number.isFinite(this._sunAzimuthDeg)) {
-      azimuthRad = this._sunAzimuthDeg * (Math.PI / 180.0);
-    } else {
-      let hour = 12.0;
-      try {
-        if (weatherController && typeof weatherController.timeOfDay === 'number') {
-          hour = weatherController.timeOfDay;
-        }
-      } catch (err) {
-        void err;
-      }
-      const t = (hour % 24.0) / 24.0;
-      azimuthRad = (t - 0.5) * (Math.PI * 2.0);
-    }
-
-    const sun2d = computeShadowSunDirection2D({
-      azimuthRad,
+    const sun2d = resolveEffectShadowSun2D({
+      azimuthDeg: this._sunAzimuthDeg,
       elevationDeg: this._sunElevationDeg,
-      latitudeScale: lat,
       previousDir: this.sunDir,
     });
-    if (!this.sunDir) this.sunDir = new THREE.Vector2(sun2d.x, sun2d.y);
-    else applyShadowSunDirection(this.sunDir, sun2d);
+    this.sunDir = writeEffectSunDir(this.sunDir, sun2d, THREE);
   }
 
   _clearShadowTargetToWhite(renderer) {

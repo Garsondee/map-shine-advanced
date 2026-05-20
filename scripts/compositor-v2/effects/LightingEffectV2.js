@@ -36,6 +36,8 @@
  * ShadowManagerV2 into the combined shadow RT consumed as
  * `tUnifiedShadowFactor`; the compose pass dims ambient once. Painted shadow
  * is split back out so lift/influence apply only to non-painted terms.
+ * Overhead stamp + vegetation billboard terms are factored out before
+ * `dynamicShadowLiftCombined` so outdoor porch/daylight lift does not erase them.
  * Building shadow is also sampled separately (`tBuildingShadowLit`) so outdoor
  * daylight ambient can respect structural occlusion when unified shadow is lifted.
  * Legacy per-effect fallbacks (`tOverheadShadow`, cloud-only) were removed —
@@ -1351,6 +1353,12 @@ export class LightingEffectV2 {
         // Half-res T: roof visibility × blocker (built in {@link #renderCeilingTransmittancePass}).
         tCeilingLightTransmittance: { value: null },
         uHasCeilingLightTransmittance: { value: 0 },
+        uLandscapeLightningFlash01: { value: 0.0 },
+        uLandscapeLightningOutdoorGain: { value: 0.65 },
+        uLandscapeLightningShadowFloor: { value: 0.06 },
+        uLandscapeLightningShadowGamma: { value: 0.55 },
+        uLandscapeLightningFlashContrast: { value: 1.15 },
+        uLandscapeLightningFlashColor: { value: new THREE.Vector3(0.68, 0.82, 1.0) },
       },
       // IMPORTANT:
       // These shader sources are embedded in JS template literals (backticks).
@@ -1434,7 +1442,31 @@ export class LightingEffectV2 {
         uniform vec2 uOutdoorsForRoofLightTexelSize;
         uniform sampler2D tCeilingLightTransmittance;
         uniform float uHasCeilingLightTransmittance;
+        uniform float uLandscapeLightningFlash01;
+        uniform float uLandscapeLightningOutdoorGain;
+        uniform float uLandscapeLightningShadowFloor;
+        uniform float uLandscapeLightningShadowGamma;
+        uniform float uLandscapeLightningFlashContrast;
+        uniform vec3 uLandscapeLightningFlashColor;
         varying vec2 vUv;
+
+        float landscapeLightningShadowFlashGate(vec2 screenUv) {
+          if (uHasCombinedShadow < 0.5) return 1.0;
+          float sf = clamp(texture2D(tUnifiedShadowFactor, screenUv).r, 0.0, 1.0);
+          float g = max(0.08, uLandscapeLightningShadowGamma);
+          float floorV = clamp(uLandscapeLightningShadowFloor, 0.0, 1.0);
+          return mix(floorV, 1.0, pow(sf, g));
+        }
+
+        vec3 landscapeLightningFlashColorVec() {
+          return max(uLandscapeLightningFlashColor, vec3(0.001));
+        }
+
+        float landscapeLightningFlashWeight(vec2 screenUv) {
+          float llFlash = clamp(uLandscapeLightningFlash01, 0.0, 1.0);
+          float llGain = clamp(uLandscapeLightningOutdoorGain, 0.0, 16.0);
+          return llFlash * llGain * landscapeLightningShadowFlashGate(screenUv);
+        }
 
         float perceivedBrightness(vec3 c) {
           return dot(c, vec3(0.2126, 0.7152, 0.0722));
@@ -1689,6 +1721,9 @@ export class LightingEffectV2 {
           // sample the map border and smear interior classification (horizontal bands
           // in the grey margin). Match building-shadow guard.
           float isOutdoorForInteriorDimSafe = mix(1.0, isOutdoorForInteriorDim, inSceneBounds);
+          directLight += landscapeLightningFlashColorVec()
+            * landscapeLightningFlashWeight(vUv)
+            * isOutdoorForInteriorDimSafe;
           // Only apply interior-darkness where the mask confidently indicates
           // "indoors". This rejects low-level mask noise/seams that otherwise
           // become visible as broad banding when interior darkness is increased.
@@ -1707,6 +1742,12 @@ export class LightingEffectV2 {
           float interiorDarkLightSuppression = smoothstep(0.12, 0.65, lightTermI);
           float indoorConfidenceForDim = indoorConfidence * (1.0 - interiorDarkLightSuppression);
           ambientAfterDark *= max(0.0, 1.0 - uInteriorDarkness * indoorConfidenceForDim);
+
+          // Distant landscape lightning: cold outdoor ambient lift.
+          {
+            float llAmt = landscapeLightningFlashWeight(vUv) * isOutdoorForInteriorDimSafe;
+            ambientAfterDark += landscapeLightningFlashColorVec() * llAmt;
+          }
 
           // Building × painted lit texture (scene UV): shared by daylight ambient slice, direct HDR occlusion, additive tint path.
           float buildStructU = (uHasBuildingShadowLit > 0.5)
@@ -1737,6 +1778,7 @@ export class LightingEffectV2 {
             float rawMix;
             float vegetationLit;
             float vegetationSample;
+            float overheadLit;
             float structuralLit;
             float paintedEffective;
             float shadowFactorMix;
@@ -1762,7 +1804,12 @@ export class LightingEffectV2 {
               vegetationSample = clamp(texture2D(tVegetationBillboardShadow, vUv).r, 0.0, 1.0);
               vegetationLit = mix(1.0, vegetationSample, clamp(uVegetationBillboardOpacity, 0.0, 1.0));
             }
-            structuralLit = clamp(shadowFactor / max(vegetationLit, 0.001), 0.0, 1.0);
+            overheadLit = 1.0;
+            if (uHasShadowRaw > 0.5) {
+              overheadLit = clamp(texture2D(tUnifiedShadowRaw, vUv).a, 0.0, 1.0);
+            }
+            overheadLit = mix(1.0, overheadLit, clamp(uOverheadShadowAmbientInfluence, 0.0, 1.0));
+            structuralLit = clamp(shadowFactor / max(vegetationLit * overheadLit, 0.001), 0.0, 1.0);
             paintedEffective = 1.0;
             if (uPaintedShadowInCombined < 0.5 && uHasPaintedShadowLit > 0.5) {
               paintedApply = clamp(texture2D(tPaintedShadowLit, sceneUvFoundry).r, 0.0, 1.0);
@@ -1797,7 +1844,7 @@ export class LightingEffectV2 {
               shadowFactorMix = mix(shadowFactorMix, 1.0, dynamicShadowLiftCombined);
               shadowFactorMix *= paintedEffective;
             }
-            shadowFactorMix = clamp(shadowFactorMix * vegetationLit, 0.0, 1.0);
+            shadowFactorMix = clamp(shadowFactorMix * vegetationLit * overheadLit, 0.0, 1.0);
             shadowSunSlice = min(shadowFactorMix, coreStructLiftedGlobal);
             wSkySunSlice = clamp(
               (1.0 - baseDarknessLevel)
@@ -1814,6 +1861,25 @@ export class LightingEffectV2 {
             ambientShadowMixOut = shadowFactorMix;
           }
 
+          // Outdoor lightning fill after shadow combine — cold tint on illumination stack.
+          {
+            float llW2 = landscapeLightningFlashWeight(vUv) * isOutdoorForInteriorDimSafe;
+            vec3 llCol2 = landscapeLightningFlashColorVec();
+            totalIllumination += llCol2 * llW2;
+            float llContrast = clamp(uLandscapeLightningFlashContrast, 0.0, 3.0)
+              * clamp(uLandscapeLightningFlash01, 0.0, 1.0)
+              * isOutdoorForInteriorDimSafe;
+            if (llContrast > 0.001) {
+              vec3 llCenter = llCol2 * 0.42;
+              vec3 centered = totalIllumination - llCenter;
+              totalIllumination = mix(
+                totalIllumination,
+                centered * (1.0 + llContrast) + llCenter,
+                clamp(uLandscapeLightningFlash01, 0.0, 1.0) * isOutdoorForInteriorDimSafe
+              );
+            }
+          }
+
           // Minimum illumination floor (scaled down where unified shadow darkens ambient so penumbra survives).
           vec3 minIllum = mix(ambientDay, ambientNight, localDarknessLevel)
             * (0.1 * max(uMinIlluminationScale, 0.0));
@@ -1822,6 +1888,14 @@ export class LightingEffectV2 {
 
           // Apply illumination to albedo.
           vec3 litColor = baseColor.rgb * totalIllumination;
+
+          // Colored lightning screen flash (additive + hue mix — visible over neutral HDR lights).
+          {
+            float llW3 = landscapeLightningFlashWeight(vUv) * isOutdoorForInteriorDimSafe;
+            vec3 llCol3 = landscapeLightningFlashColorVec();
+            litColor += llCol3 * llW3 * 0.65;
+            litColor = mix(litColor, litColor * llCol3, clamp(llW3 * 0.42, 0.0, 0.82));
+          }
 
           // Colouration: only the chromatic part of the RGB light buffer tints albedo.
           // Luminance for neutral / uncoloured Foundry lights already comes from tLightSources.a
@@ -2379,6 +2453,49 @@ export class LightingEffectV2 {
     this.params.darknessLevel = sceneDarkness;
     u.uDarknessLevel.value = sceneDarkness;
     u.uCalendarDayWeight.value = clamp01(state.calendarDayWeight);
+  }
+
+  /**
+   * Distant landscape lightning outdoor ambient boost (interiors use window pass).
+   * @param {number} flash01
+   * @param {number} [outdoorGain]
+   */
+  setLandscapeLightningFlash(flash01, outdoorGain = 0.65, opts = {}) {
+    const cu = this._composeMaterial?.uniforms;
+    if (!cu?.uLandscapeLightningFlash01) return;
+    const f = Number(flash01);
+    cu.uLandscapeLightningFlash01.value = Number.isFinite(f) ? Math.max(0, Math.min(1, f)) : 0;
+    const g = Number(outdoorGain);
+    cu.uLandscapeLightningOutdoorGain.value = Number.isFinite(g) ? Math.max(0, Math.min(16, g)) : 0.65;
+    const floorV = Number(opts.shadowFlashFloor);
+    if (cu.uLandscapeLightningShadowFloor) {
+      cu.uLandscapeLightningShadowFloor.value = Number.isFinite(floorV)
+        ? Math.max(0, Math.min(1, floorV))
+        : 0.2;
+    }
+    const gammaV = Number(opts.shadowFlashGamma);
+    if (cu.uLandscapeLightningShadowGamma) {
+      cu.uLandscapeLightningShadowGamma.value = Number.isFinite(gammaV)
+        ? Math.max(0.08, Math.min(4, gammaV))
+        : 0.55;
+    }
+    const contrastV = Number(opts.flashContrast);
+    if (cu.uLandscapeLightningFlashContrast) {
+      cu.uLandscapeLightningFlashContrast.value = Number.isFinite(contrastV)
+        ? Math.max(0, Math.min(3, contrastV))
+        : 1.15;
+    }
+    if (cu.uLandscapeLightningFlashColor) {
+      const col = opts.flashColor ?? {};
+      const r = Number(col.r);
+      const g = Number(col.g);
+      const b = Number(col.b);
+      cu.uLandscapeLightningFlashColor.value.set(
+        Number.isFinite(r) ? Math.max(0, Math.min(4, r)) : 0.68,
+        Number.isFinite(g) ? Math.max(0, Math.min(4, g)) : 0.82,
+        Number.isFinite(b) ? Math.max(0, Math.min(4, b)) : 1.0,
+      );
+    }
   }
 
   // ── Per-frame update ──────────────────────────────────────────────────

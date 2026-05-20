@@ -36,12 +36,16 @@
  */
 
 import { createLogger } from '../../core/log.js';
-import { getUnifiedShadowLatitudeScale } from '../shadow-system/SunDirection.js';
+import {
+  resolveEffectShadowSun2D,
+  writeEffectSunDir,
+} from '../shadow-system/ShadowSunDirection.js';
 import { weatherController } from '../../core/WeatherController.js';
 import { loadTexture } from '../../assets/loader.js';
 import { FLOOR_ID_OUTDOORS_RECEIVER_GLSL } from '../shadow-system/DirectionalShadowProjector.js';
 import { collectOutdoorsTexturesByFloorIndex } from '../shadow-system/floor-outdoors-slots.js';
 import { resolveReceiverOutdoorsMaskTexture } from '../shadow-system/resolve-receiver-outdoors-mask.js';
+import { resolveBakeRayLength, resolveBakeSmear } from '../lightning/shadow-bake-override.js';
 
 const log = createLogger('SkyReachShadowsEffectV2');
 
@@ -174,8 +178,10 @@ export class SkyReachShadowsEffectV2 {
 
     /** @type {boolean} One-shot hint when multiply+multi-layer was coerced to max */
     this._loggedMultiplyUnionHint = false;
-    /** @type {number} Echo of {@link ShadowDriverState#tuning.shadowLengthScale} */
+    /** @type {number} Echo of {@link ShadowDriverState#tuning} */
     this._driverShadowLengthScale = 1.0;
+    this._driverShadowSoftnessScale = 1.0;
+    this._driverShadowSmearScale = 1.0;
 
     /**
      * Copy of {@link ShadowDriverState#masks} from the last {@link #setDriver}
@@ -853,12 +859,13 @@ export class SkyReachShadowsEffectV2 {
     this._updateSunDirection();
 
     const u = this._projectMaterial.uniforms;
-    const lenScale = Number.isFinite(Number(this._driverShadowLengthScale))
-      ? Math.max(0.0, Math.min(1.0, Number(this._driverShadowLengthScale)))
-      : 1.0;
-    u.uLength.value = this._getEffectiveRayLength() * lenScale;
+    u.uLength.value = resolveBakeRayLength(this, this._getEffectiveRayLength());
     u.uSoftness.value = this.params.softness * (Number(this._driverShadowSoftnessScale) || 1.0);
-    u.uSmear.value = this.params.smear;
+    u.uSmear.value = resolveBakeSmear(
+      this,
+      Math.max(0, Number(this.params.smear) || 0)
+        * Math.max(0, Number(this._driverShadowSmearScale) || 1.0),
+    );
     u.uPenumbra.value = this.params.penumbra;
     u.uShadowCurve.value = this.params.shadowCurve;
     u.uZoom.value = this._getEffectiveZoom();
@@ -937,6 +944,9 @@ export class SkyReachShadowsEffectV2 {
     }
     if (Number.isFinite(Number(driverState.tuning?.shadowLengthScale))) {
       this._driverShadowLengthScale = Number(driverState.tuning.shadowLengthScale);
+    }
+    if (Number.isFinite(Number(driverState.tuning?.shadowSmearScale))) {
+      this._driverShadowSmearScale = Number(driverState.tuning.shadowSmearScale);
     }
     const m = driverState.masks;
     this._driverMasksSnapshot = m
@@ -1918,7 +1928,13 @@ export class SkyReachShadowsEffectV2 {
   _getEffectiveRayLength() {
     const rawSlider = Number(this.params?.length);
     const base = Number.isFinite(rawSlider) ? rawSlider : 0.1;
-    return Math.max(SKY_REACH_MIN_EFFECTIVE_RAY_LENGTH, Math.min(SKY_REACH_LENGTH_SLIDER_MAX, base));
+    const timeW = Number.isFinite(Number(this._driverShadowLengthScale))
+      ? Math.max(0.0, Number(this._driverShadowLengthScale))
+      : 1.0;
+    return Math.max(
+      SKY_REACH_MIN_EFFECTIVE_RAY_LENGTH,
+      Math.min(SKY_REACH_LENGTH_SLIDER_MAX, base * timeW),
+    );
   }
 
   _computeRenderTargetSize(width, height) {
@@ -1950,44 +1966,12 @@ export class SkyReachShadowsEffectV2 {
   _updateSunDirection() {
     const THREE = window.THREE;
     if (!THREE) return;
-
-    const lat = getUnifiedShadowLatitudeScale(this.params.sunLatitude ?? 0.1);
-    let x = 0.0;
-    let y = -1.0 * lat;
-
-    if (Number.isFinite(this._sunAzimuthDeg)) {
-      const azimuthRad = this._sunAzimuthDeg * (Math.PI / 180.0);
-      x = -Math.sin(azimuthRad);
-      y = -Math.cos(azimuthRad) * lat;
-    } else {
-      let hour = 12.0;
-      try {
-        if (weatherController && typeof weatherController.timeOfDay === 'number') {
-          hour = weatherController.timeOfDay;
-        }
-      } catch (_) {}
-      const t = (hour % 24.0) / 24.0;
-      const azimuth = (t - 0.5) * (Math.PI * 2.0);
-      x = -Math.sin(azimuth);
-      y = -Math.cos(azimuth) * lat;
-    }
-
-    const dirLenSq = (x * x) + (y * y);
-    if (dirLenSq < 1e-8) {
-      const prevX = Number(this.sunDir?.x);
-      const prevY = Number(this.sunDir?.y);
-      const prevLenSq = (prevX * prevX) + (prevY * prevY);
-      if (Number.isFinite(prevLenSq) && prevLenSq > 1e-8) {
-        x = prevX;
-        y = prevY;
-      } else {
-        x = Math.cos(Number.isFinite(this._sunAzimuthDeg) ? (this._sunAzimuthDeg * (Math.PI / 180.0)) : 0.0) >= 0.0 ? -1.0 : 1.0;
-        y = 0.0;
-      }
-    }
-
-    if (!this.sunDir) this.sunDir = new THREE.Vector2(x, y);
-    else this.sunDir.set(x, y);
+    const sun2d = resolveEffectShadowSun2D({
+      azimuthDeg: this._sunAzimuthDeg,
+      elevationDeg: this._sunElevationDeg,
+      previousDir: this.sunDir,
+    });
+    this.sunDir = writeEffectSunDir(this.sunDir, sun2d, THREE);
   }
 
   _clearShadowTargetToWhite(renderer) {

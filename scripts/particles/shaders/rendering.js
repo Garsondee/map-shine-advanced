@@ -402,9 +402,10 @@ export function createParticleMaterial(THREE, buffers, texture, uniforms) {
           float halfHeight = 0.5;  // streak length
           float edgeSoftness = 0.03;
 
+          float maskAlong = smoothstep(halfHeight + edgeSoftness, halfHeight, abs(along));
           float maskAcross = smoothstep(halfWidth + edgeSoftness, halfWidth, abs(across));
-          col = vec4(fireCol, localAlpha);
-          */
+          float streakMask = maskAlong * maskAcross;
+          col = vec4(vColor.rgb, vColor.a * streakMask);
         } else {
           // Other types (smoke/magic): soft round sprites using a radial alpha
           // falloff so they appear as glowing discs instead of hard-edged

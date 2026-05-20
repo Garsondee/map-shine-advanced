@@ -102,13 +102,29 @@ export const FLAME_GRADIENT_HOT = [
   { t: 1.00, r: 0.60, g: 0.12, b: 0.02 },
 ];
 
+/**
+ * Linear-HDR pipeline compensation (Lighting Phase 0). Scene light is unclamped now;
+ * fire vertex RGB must sit above night ambient to bloom and read as hot flame.
+ */
+export const FIRE_HDR_LINEAR_GAIN = 2.75;
+
+/** Smoke emission tint scale vs flame (diffuse body stays subdued). */
+export const FIRE_SMOKE_HDR_EMISSION_GAIN = 1.35;
+
+/** @returns {number} HDR multiplier from pipeline gain × Environment lightIntensity (0–5 UI → 0–1). */
+function resolveFireHdrMultiplier(ownerEffect) {
+  const raw = Number(ownerEffect?.params?.lightIntensity);
+  const userGain = Number.isFinite(raw) && raw > 0 ? raw / 5.0 : 1.0;
+  return FIRE_HDR_LINEAR_GAIN * userGain;
+}
+
 // HDR emission multiplier curve — drives bloom.
 export const FLAME_EMISSION_STOPS = [
-  { t: 0.00, v: 2.50 },
-  { t: 0.12, v: 2.00 },
-  { t: 0.35, v: 1.20 },
-  { t: 0.55, v: 0.60 },
-  { t: 0.70, v: 0.15 },
+  { t: 0.00, v: 4.0 },
+  { t: 0.12, v: 3.2 },
+  { t: 0.35, v: 2.0 },
+  { t: 0.55, v: 1.0 },
+  { t: 0.70, v: 0.35 },
   { t: 1.00, v: 0.00 },
 ];
 
@@ -133,10 +149,10 @@ export const EMBER_COLOR_STOPS = [
 ];
 
 export const EMBER_EMISSION_STOPS = [
-  { t: 0.00, v: 3.0 },
-  { t: 0.10, v: 2.0 },
-  { t: 0.30, v: 1.0 },
-  { t: 0.60, v: 0.3 },
+  { t: 0.00, v: 5.0 },
+  { t: 0.10, v: 3.5 },
+  { t: 0.30, v: 1.8 },
+  { t: 0.60, v: 0.55 },
   { t: 1.00, v: 0.0 },
 ];
 
@@ -406,6 +422,7 @@ export class FlameLifecycleBehavior {
     this._colorStops = FLAME_GRADIENT_STANDARD.map(s => ({ ...s }));
     this._peakOpacity = 1.0;
     this._emissionScale = 2.5;
+    this._hdrGain = FIRE_HDR_LINEAR_GAIN;
     this._temperature = 0.5;
   }
 
@@ -427,7 +444,7 @@ export class FlameLifecycleBehavior {
     const brightness = Math.max(minBrightness, particle._flameBrightness ?? 1.0);
 
     const color = lerpColorStops(this._colorStops, t, _flameColorTemp);
-    const emission = lerpScalarStops(FLAME_EMISSION_STOPS, t) * heat * this._emissionScale;
+    const emission = lerpScalarStops(FLAME_EMISSION_STOPS, t) * heat * this._emissionScale * this._hdrGain;
     const alpha = lerpScalarStops(FLAME_ALPHA_STOPS, t) * this._peakOpacity;
 
     particle.color.x = color.r * emission * brightness;
@@ -438,7 +455,8 @@ export class FlameLifecycleBehavior {
 
   frameUpdate(delta) {
     const p = this.ownerEffect?.params;
-    this._emissionScale = p?.coreEmission ?? 2.5;
+    this._emissionScale = p?.coreEmission ?? 4.5;
+    this._hdrGain = resolveFireHdrMultiplier(this.ownerEffect);
     this._peakOpacity = p?.flamePeakOpacity ?? 0.9;
     this._temperature = p?.fireTemperature ?? 0.5;
     this._updateGradientsForTemperature(this._temperature);
@@ -478,6 +496,7 @@ export class EmberLifecycleBehavior {
     this.ownerEffect = ownerEffect;
     this._colorStops = EMBER_COLOR_STOPS.map(s => ({ ...s }));
     this._emissionScale = 1.0;
+    this._hdrGain = FIRE_HDR_LINEAR_GAIN;
     this._peakOpacity = 1.0;
     this._temperature = 0.5;
   }
@@ -497,7 +516,7 @@ export class EmberLifecycleBehavior {
     const brightness = Math.max(0.3, particle._flameBrightness ?? 1.0);
 
     const color = lerpColorStops(this._colorStops, t, _emberColorTemp);
-    const emission = lerpScalarStops(EMBER_EMISSION_STOPS, t) * heat * this._emissionScale;
+    const emission = lerpScalarStops(EMBER_EMISSION_STOPS, t) * heat * this._emissionScale * this._hdrGain;
     const alpha = lerpScalarStops(EMBER_ALPHA_STOPS, t) * this._peakOpacity;
 
     particle.color.x = color.r * emission * brightness;
@@ -508,7 +527,8 @@ export class EmberLifecycleBehavior {
 
   frameUpdate(delta) {
     const p = this.ownerEffect?.params;
-    this._emissionScale = p?.emberEmission ?? 2.0;
+    this._emissionScale = p?.emberEmission ?? 5.0;
+    this._hdrGain = resolveFireHdrMultiplier(this.ownerEffect);
     this._peakOpacity = p?.emberPeakOpacity ?? 0.9;
     this._temperature = p?.fireTemperature ?? 0.5;
     this._updateGradientsForTemperature(this._temperature);
@@ -531,7 +551,7 @@ export class EmberLifecycleBehavior {
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // SmokeLifecycleBehavior — smoke color/alpha/size over life (material uses NormalBlending;
-// emission is added then clamped to [0,1] per channel so smoke stays display-referred).
+// diffuse RGB stays ≤1; emission tint is linear HDR so hot smoke can bloom at night).
 // ═══════════════════════════════════════════════════════════════════════════════
 
 export class SmokeLifecycleBehavior {
@@ -552,6 +572,7 @@ export class SmokeLifecycleBehavior {
     // Emission uses same format: black = no glow, any colour = additive emission.
     this._colorGradient = null;
     this._emissionGradient = null;
+    this._smokeEmissionHdr = FIRE_SMOKE_HDR_EMISSION_GAIN * FIRE_HDR_LINEAR_GAIN;
   }
 
   initialize(particle) {
@@ -592,19 +613,19 @@ export class SmokeLifecycleBehavior {
       baseB = coolColor.b + (warmColor.b - coolColor.b) * w;
     }
 
-    // Emission is blended on top of diffuse smoke; clamp to display-referred [0,1]
-    // so bright stops tint toward white without HDR / bloom-driving vertex colours.
+    // Emission tint is linear HDR (unclamped); diffuse body stays display-referred.
     let emissionR = 0, emissionG = 0, emissionB = 0;
     if (this._emissionGradient) {
       const em = lerpColorStops(this._emissionGradient, t, _smokeEmissionTemp);
-      emissionR = em.r;
-      emissionG = em.g;
-      emissionB = em.b;
+      const emHdr = this._smokeEmissionHdr ?? FIRE_SMOKE_HDR_EMISSION_GAIN;
+      emissionR = em.r * emHdr;
+      emissionG = em.g * emHdr;
+      emissionB = em.b * emHdr;
     }
 
-    particle.color.x = clamp01(baseR * brightDark + emissionR);
-    particle.color.y = clamp01(baseG * brightDark + emissionG);
-    particle.color.z = clamp01(baseB * brightDark + emissionB);
+    particle.color.x = clamp01(baseR * brightDark) + emissionR;
+    particle.color.y = clamp01(baseG * brightDark) + emissionG;
+    particle.color.z = clamp01(baseB * brightDark) + emissionB;
 
     // Alpha: 3-point smoothstep envelope over normalized age t ∈ [0,1].
     // "Alpha Fade End" is the life fraction where opacity hits zero (not inclusive).
@@ -665,6 +686,7 @@ export class SmokeLifecycleBehavior {
     // Gradient is active whenever it has ≥2 valid stops; no separate toggle needed.
     this._colorGradient = normalizeColorStops(p?.smokeColorGradient);
     this._emissionGradient = normalizeColorStops(p?.smokeEmissionGradient);
+    this._smokeEmissionHdr = FIRE_SMOKE_HDR_EMISSION_GAIN * resolveFireHdrMultiplier(this.ownerEffect);
   }
 
   reset() {}

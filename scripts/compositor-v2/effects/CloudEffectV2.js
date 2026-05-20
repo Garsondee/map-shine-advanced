@@ -32,7 +32,7 @@
 import { createLogger } from '../../core/log.js';
 import { TILE_FEATURE_LAYERS } from '../../core/render-layers.js';
 import { weatherController } from '../../core/WeatherController.js';
-import { computeSunDirection2D } from '../shadow-system/SunDirection.js';
+import { resolveEffectShadowSun2D } from '../shadow-system/ShadowSunDirection.js';
 
 const log = createLogger('CloudEffectV2');
 
@@ -220,6 +220,8 @@ export class CloudEffectV2 {
 
     // ── Sun direction & time-of-day tint ─────────────────────────────
     this._sunDir      = null;
+    this._driverShadowSoftnessScale = 1.0;
+    this._driverShadowLengthScale = 1.0;
     this._shadeSunDir = null;
     this._tintNight   = null;
     this._tintSunrise = null;
@@ -512,7 +514,8 @@ export class CloudEffectV2 {
     const su   = this._shadowMat?.uniforms;
     if (su) {
       su.uShadowOpacity.value  = p.shadowOpacity;
-      su.uShadowSoftness.value = p.shadowSoftness;
+      su.uShadowSoftness.value = p.shadowSoftness
+        * (Number(this._driverShadowSoftnessScale) || 1.0);
       su.uMinBrightness.value  = p.minShadowBrightness;
       su.uSceneFadeSoftness.value = Math.max(0.0, Number(p.shadowSceneFadeSoftness ?? 0.025));
       su.uZoom.value           = zoom;
@@ -526,7 +529,8 @@ export class CloudEffectV2 {
       );
 
       // World-space shadow offset (sun-direction displacement)
-      const offW = p.shadowOffsetScale * 5000;
+      const offW = p.shadowOffsetScale * 5000
+        * Math.max(0.05, Number(this._driverShadowLengthScale) || 1.0);
       // Keep cast direction aligned with Building/Overhead conventions:
       // shadows project opposite the sun direction in world UV.
       su.uShadowOffsetWorld.value.set(-this._sunDir.x * offW, -this._sunDir.y * offW);
@@ -1192,28 +1196,39 @@ export class CloudEffectV2 {
   }
 
   /** @private */
-  _calcSunDir() {
-    // Keep cloud sun direction in lockstep with other V2 effects so shadow/light
-    // motion does not appear mirrored on one axis relative to trees/buildings.
-    let x = 0.0;
-    let y = -1.0;
-
-    const sky = window.MapShine?.effectComposer?._floorCompositorV2?._skyColorEffect;
-    const overhead = window.MapShine?.effectComposer?._floorCompositorV2?._overheadShadowEffect;
-    const latitude = Number(overhead?.params?.sunLatitude ?? 0.3);
-    const lat = Math.max(0.0, Math.min(1.0, latitude));
-
-    if (Number.isFinite(Number(sky?.currentSunAzimuthDeg))) {
-      const azimuthRad = Number(sky.currentSunAzimuthDeg) * (Math.PI / 180.0);
-      x = -Math.sin(azimuthRad);
-      y = -Math.cos(azimuthRad) * lat;
-    } else {
-      const sun = computeSunDirection2D(null, null, lat);
-      x = sun.x;
-      y = sun.y;
+  setDriver(driverState = null) {
+    if (!driverState) return;
+    const dir = driverState.sun?.dir;
+    const x = Number(dir?.x);
+    const y = Number(dir?.y);
+    if (Number.isFinite(x) && Number.isFinite(y) && this._sunDir) {
+      this._sunDir.set(x, y);
     }
+    if (Number.isFinite(Number(driverState.tuning?.shadowSoftnessScale))) {
+      this._driverShadowSoftnessScale = Number(driverState.tuning.shadowSoftnessScale);
+    }
+    if (Number.isFinite(Number(driverState.tuning?.shadowLengthScale))) {
+      this._driverShadowLengthScale = Number(driverState.tuning.shadowLengthScale);
+    }
+  }
 
-    this._sunDir.set(x, y);
+  _calcSunDir() {
+    if (!this._sunDir) return;
+    const driver = window.MapShine?.__shadowDriverState;
+    const d = driver?.sun?.dir;
+    const dx = Number(d?.x);
+    const dy = Number(d?.y);
+    if (Number.isFinite(dx) && Number.isFinite(dy)) {
+      this._sunDir.set(dx, dy);
+      return;
+    }
+    const sky = window.MapShine?.effectComposer?._floorCompositorV2?._skyColorEffect
+      ?? window.MapShine?.floorCompositorV2?._skyColorEffect;
+    const sun2d = resolveEffectShadowSun2D({
+      azimuthDeg: sky?.currentSunAzimuthDeg,
+      elevationDeg: sky?.currentSunElevationDeg,
+    });
+    this._sunDir.set(sun2d.x, sun2d.y);
   }
 
   /** @private */

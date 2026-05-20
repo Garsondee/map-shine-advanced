@@ -16,6 +16,7 @@ import { CinematicCameraManager } from './cinematic-camera-manager.js';
 import { EffectComposer } from '../effects/EffectComposer.js';
 import { CandleFlamesEffectV2 } from '../compositor-v2/effects/CandleFlamesEffectV2.js';
 import { LightningEffectV2 } from '../compositor-v2/effects/LightningEffectV2.js';
+import { WeatherLightningEffectV2 } from '../compositor-v2/effects/WeatherLightningEffectV2.js';
 import { MaskManager } from '../masks/MaskManager.js';
 import { ParticleSystem } from '../particles/ParticleSystem.js';
 // Effect wiring: capabilities registry + V2 class re-exports for static getControlSchema() calls
@@ -46,6 +47,7 @@ import { RenderLoop } from '../core/render-loop.js';
 import { TweakpaneManager } from '../ui/tweakpane-manager.js';
 import { normalizeEffectRgbParam } from '../ui/parameter-validator.js';
 import { ControlPanelManager } from '../ui/control-panel-manager.js';
+import { syncAtmosphericFogEffectFromControlState } from '../ui/atmospheric-fog-bridge.js';
 import { CameraPanelManager } from '../ui/camera-panel-manager.js';
 import { TokenManager } from '../scene/token-manager.js';
 import { VisibilityController } from '../vision/VisibilityController.js';
@@ -4833,6 +4835,10 @@ async function onUpdateScene(scene, changes, _options, _userId) {
                 cp._ensureDirectedCustomPreset();
               }
             }, 'controlPanel.ensureDirectedCustomPreset', Severity.COSMETIC);
+            safeCall(() => {
+              syncAtmosphericFogEffectFromControlState(cp.controlState);
+              cp.syncManualFogDomFromControlState?.();
+            }, 'controlPanel.syncManualFog', Severity.COSMETIC);
             safeCall(() => cp.pane?.refresh?.(), 'controlPanel.refresh', Severity.COSMETIC);
           }
         }, 'updateScene.controlState', Severity.DEGRADED);
@@ -8018,6 +8024,7 @@ async function createThreeCanvas(scene, createOptions = {}) {
             const newRev = weatherSchema.uiRevision ?? 0;
             if (oldRev === newRev) return;
             try {
+              uiManager.disposeEffectExternalFolders?.('weather');
               existingWeather.folder?.dispose?.();
             } catch (e) {
               log.warn('Weather Tweakpane folder dispose failed (rebuilding schema):', e);
@@ -8103,6 +8110,10 @@ async function createThreeCanvas(scene, createOptions = {}) {
                 rainGravityScale: 'gravityScale',
                 rainWindInfluence: 'windInfluence',
                 rainCurlStrength: 'curlStrength',
+                rainChaosStrength: 'chaosStrength',
+                rainTurbulenceStrength: 'turbulenceStrength',
+                rainBrightnessSpread: 'brightnessSpread',
+                rainLengthSpread: 'lengthSpread',
                 rainSplash1IntensityScale: 'splash1IntensityScale',
                 rainSplash1LifeMin: 'splash1LifeMin',
                 rainSplash1LifeMax: 'splash1LifeMax',
@@ -8264,6 +8275,13 @@ async function createThreeCanvas(scene, createOptions = {}) {
                     }
                     continue;
                   }
+                  if (
+                    (k === 'triggerSmallStrike' || k === 'triggerBigStrike' || k === 'triggerStrikeSeries')
+                    && typeof effect.applyParamChange === 'function'
+                  ) {
+                    effect.applyParamChange(k, v);
+                    continue;
+                  }
                   if (effect.params && Object.prototype.hasOwnProperty.call(effect.params, k)) {
                     // Skip NaN/Infinity — stale pending values from a previous
                     // session or corrupted scene flags must not poison params.
@@ -8383,6 +8401,11 @@ async function createThreeCanvas(scene, createOptions = {}) {
           uiManager.registerEffect('lightning', 'Lightning',
             LightningEffectV2.getControlSchema(), _makeV2Callback('_lightningEffect'), 'atmospheric');
         }, 'v2.registerLightningUI(V2)', Severity.DEGRADED);
+
+        safeCall(() => {
+          uiManager.registerEffect('weather-lightning', 'Landscape Lightning',
+            WeatherLightningEffectV2.getControlSchema(), _makeV2Callback('_weatherLightningEffect'), 'atmospheric');
+        }, 'v2.registerWeatherLightningUI(V2)', Severity.DEGRADED);
 
         safeCall(() => {
           uiManager.registerEffect('candle-flames', 'Candle Flames',

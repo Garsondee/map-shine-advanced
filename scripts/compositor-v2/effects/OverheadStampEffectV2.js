@@ -30,7 +30,7 @@ import { OverheadMaskCapturePass } from './overhead-stamp/OverheadMaskCapturePas
 import { createOverheadStampCompositeMaterial } from './overhead-stamp/OverheadStampCompositeShader.js';
 import {
   applyShadowSunDirection,
-  computeShadowSunDirection2D,
+  resolveEffectShadowSun2D,
 } from '../shadow-system/ShadowSunDirection.js';
 
 const log = createLogger('OverheadStampEffect');
@@ -389,6 +389,37 @@ export class OverheadStampEffectV2 {
     this._sunElevationDeg = Number.isFinite(Number(elevationDeg)) ? Number(elevationDeg) : null;
   }
 
+  /**
+   * Push ShadowDriverState sun + length scale into composite uniforms immediately.
+   * @private
+   */
+  _applyShadowDriverUniforms() {
+    if (!this.material?.uniforms) return;
+    const THREE = window.THREE;
+    if (!THREE) return;
+
+    const sun2d = resolveEffectShadowSun2D({
+      azimuthDeg: this._sunAzimuthDeg,
+      elevationDeg: this._sunElevationDeg,
+      latitudeScale: this.params.sunLatitude ?? 0.1,
+      previousDir: this.sunDir,
+    });
+    this._sunDirLengthSq = sun2d.lengthSq;
+    if (!this.sunDir) {
+      this.sunDir = new THREE.Vector2(sun2d.x, sun2d.y);
+    } else {
+      applyShadowSunDirection(this.sunDir, sun2d);
+    }
+    const u = this.material.uniforms;
+    if (u.uSunDir) u.uSunDir.value.copy(this.sunDir);
+    if (u.uSunDirLength) {
+      u.uSunDirLength.value = Math.sqrt(Math.max(sun2d.lengthSq, 0));
+    }
+    if (u.uShadowLengthScale) {
+      u.uShadowLengthScale.value = Math.max(0, Number(this._driverShadowLengthScale) || 1);
+    }
+  }
+
   setDriver(driverState = null) {
     if (!driverState) return;
     this.setSunAngles(driverState.sun?.azimuthDeg, driverState.sun?.elevationDeg);
@@ -399,6 +430,7 @@ export class OverheadStampEffectV2 {
     if (Number.isFinite(Number(driverState.tuning?.shadowLengthScale))) {
       this._driverShadowLengthScale = Number(driverState.tuning.shadowLengthScale);
     }
+    this._applyShadowDriverUniforms();
   }
 
   /**
@@ -1731,14 +1763,8 @@ export class OverheadStampEffectV2 {
     // effect.params; skipping update() made strength sliders appear to do nothing.
     this._lastUpdateHash = updateHash;
 
-    // Prefer ShadowDriverState/SkyColor sun. Fallback retains the previous
-    // 24h orbit only for cold-start frames before the driver publishes.
-    const azimuth = Number.isFinite(this._sunAzimuthDeg)
-      ? this._sunAzimuthDeg * (Math.PI / 180.0)
-      : (((hour % 24.0) / 24.0 - 0.5) * (Math.PI * 2.0));
-
-    const sun2d = computeShadowSunDirection2D({
-      azimuthRad: azimuth,
+    const sun2d = resolveEffectShadowSun2D({
+      azimuthDeg: this._sunAzimuthDeg,
       elevationDeg: this._sunElevationDeg,
       latitudeScale: this.params.sunLatitude ?? 0.1,
       previousDir: this.sunDir,

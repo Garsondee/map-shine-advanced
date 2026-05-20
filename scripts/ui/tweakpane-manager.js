@@ -37,6 +37,7 @@ import {
 } from './weather-param-bridge.js';
 import * as scenePresets from './scene-presets.js';
 import { DARKNESS_PRIORITY, LightingDirector } from '../core/LightingDirector.js';
+import { DEFAULT_SHADOW_SYSTEM_TUNING } from '../compositor-v2/shadow-system/SunDirection.js';
 
 const log = createLogger('UI');
 
@@ -113,6 +114,8 @@ export class TweakpaneManager {
       timeRate: 100, // 0-200%
       introZoomEnabled: true,
       sunLatitude: 0.1, // 0=flat east/west, 1=maximum north/south arc (single source of truth for all effects)
+      /** Unified time-of-day shadow tuning — read each frame by {@link ShadowDriverState}. */
+      shadowSystem: { ...DEFAULT_SHADOW_SYSTEM_TUNING },
       // Light authoring UI visibility toggles
       showLightTranslateGizmo: true,
       showLightRadiusRings: true,
@@ -2124,26 +2127,73 @@ export class TweakpaneManager {
   buildEnvironmentSection() {
     if (!this.pane) return;
 
-    const envFolder = this.ensureCategoryFolder('environment', 'Environment');
+    const sunFolder = this.ensureCategoryFolder('sunShadows', 'Sun & Shadows');
+    const ss = this.globalParams.shadowSystem;
+    if (!ss || typeof ss !== 'object') {
+      this.globalParams.shadowSystem = { ...DEFAULT_SHADOW_SYSTEM_TUNING };
+    }
 
-    // Sun Latitude slider — single authoritative value consumed by
-    // OverheadShadowsEffect, BuildingShadowsEffect, WindowLightEffect,
-    // LightingEffect, TreeEffect, and BushEffect.
+    const persistShadow = () => {
+      void this._markPresetCustom();
+      this.saveUIState();
+    };
+
     const onSunLatitudeChange = (ev) => {
       this.globalParams.sunLatitude = ev.value;
       this.onGlobalChange('sunLatitude', ev.value);
     };
     this._uiValidatorGlobalHandlers.sunLatitude = onSunLatitudeChange;
 
-    this._sunLatitudeBinding = envFolder.addBinding(this.globalParams, 'sunLatitude', {
-      label: 'Sun Latitude',
+    const dirFolder = sunFolder.addFolder({ title: 'Direction', expanded: true });
+    this._sunLatitudeBinding = dirFolder.addBinding(this.globalParams, 'sunLatitude', {
+      label: 'Sun latitude',
       min: 0.0,
       max: 1.0,
-      step: 0.01
+      step: 0.01,
     }).on('change', onSunLatitudeChange);
 
-    envFolder.on('fold', (ev) => {
-      this.accordionStates['cat_environment'] = ev.expanded;
+    const softFolder = sunFolder.addFolder({ title: 'Time-of-day softness', expanded: true });
+    const bindSoft = (key, label, min, max, step) => {
+      softFolder.addBinding(this.globalParams.shadowSystem, key, {
+        label,
+        min,
+        max,
+        step,
+      }).on('change', persistShadow);
+    };
+    bindSoft('softnessNoon', 'Noon (sharp)', 0.1, 1.5, 0.01);
+    bindSoft('softnessGolden', 'Golden hour (soft)', 0.5, 3.0, 0.05);
+    bindSoft('softnessMidnight', 'Midnight (moon)', 0.1, 1.5, 0.01);
+    bindSoft('goldenHourWidthHours', 'Golden hour width (h)', 0.5, 5.0, 0.1);
+    bindSoft('noonWidthHours', 'Noon peak width (h)', 0.5, 6.0, 0.1);
+    bindSoft('midnightWidthHours', 'Midnight peak width (h)', 0.5, 5.0, 0.1);
+
+    const lenFolder = sunFolder.addFolder({ title: 'Length & smear', expanded: false });
+    const bindLen = (key, label, min, max, step) => {
+      lenFolder.addBinding(this.globalParams.shadowSystem, key, {
+        label,
+        min,
+        max,
+        step,
+      }).on('change', persistShadow);
+    };
+    bindLen('lengthNoon', 'Noon length', 0.0, 1.0, 0.01);
+    bindLen('lengthGolden', 'Golden hour length', 0.0, 2.0, 0.05);
+    bindLen('lengthMidnight', 'Midnight length', 0.0, 1.5, 0.01);
+    bindLen('smearNoon', 'Noon smear', 0.0, 1.0, 0.01);
+    bindLen('smearGolden', 'Golden hour smear', 0.0, 2.0, 0.05);
+    bindLen('smearMidnight', 'Midnight smear', 0.0, 1.5, 0.01);
+
+    const cloudFolder = sunFolder.addFolder({ title: 'Weather', expanded: false });
+    cloudFolder.addBinding(this.globalParams.shadowSystem, 'cloudDiffusionFactor', {
+      label: 'Cloud softness boost',
+      min: 1.0,
+      max: 5.0,
+      step: 0.1,
+    }).on('change', persistShadow);
+
+    sunFolder.on('fold', (ev) => {
+      this.accordionStates['cat_sunShadows'] = ev.expanded;
       this.saveUIState();
     });
   }
@@ -3200,6 +3250,7 @@ export class TweakpaneManager {
     this.globalParams.mapMakerMode = false;
     this.globalParams.timeRate = 100;
     this.globalParams.sunLatitude = 0.1;
+    this.globalParams.shadowSystem = { ...DEFAULT_SHADOW_SYSTEM_TUNING };
     this.globalParams.maskDebugOverlayEnabled = false;
     this.globalParams.maskDebugOverlayMode = 'outdoors_current';
     this.globalParams.maskDebugOverlayOpacity = 0.35;
@@ -3378,6 +3429,10 @@ export class TweakpaneManager {
     this.globalParams.mapMakerMode = snapshot.globalParams.mapMakerMode;
     this.globalParams.timeRate = snapshot.globalParams.timeRate;
     this.globalParams.sunLatitude = snapshot.globalParams.sunLatitude ?? 0.1;
+    this.globalParams.shadowSystem = {
+      ...DEFAULT_SHADOW_SYSTEM_TUNING,
+      ...(snapshot.globalParams.shadowSystem ?? {}),
+    };
 
     // Restore UI scale
     this.uiScale = snapshot.uiScale ?? 1.0;
@@ -4378,12 +4433,117 @@ export class TweakpaneManager {
   }
 
   /**
+   * Stable accordion key for schema groups hosted outside the main effect folder.
+   * @param {string} effectId
+   * @param {object} group
+   * @returns {string}
+   * @private
+   */
+  _externalGroupAccordionKey(effectId, group) {
+    const raw = group?.id || group?.label || 'group';
+    const slug = String(raw)
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '') || 'group';
+    return `${effectId}__ext__${slug}`;
+  }
+
+  /**
+   * Dispose Tweakpane folders for schema groups hosted under another category.
+   * @param {string} effectId
+   */
+  disposeEffectExternalFolders(effectId) {
+    const effectData = this.effectFolders?.[effectId];
+    if (!effectData?.externalFolders?.length) return;
+
+    for (const entry of effectData.externalFolders) {
+      try {
+        entry.folder?.dispose?.();
+      } catch (e) {
+        log.warn(`Failed to dispose external folder for ${effectId}:`, e);
+      }
+    }
+    effectData.externalFolders = [];
+  }
+
+  /**
+   * Build schema groups that declare `categoryId` under that top-level category.
+   * Bindings still belong to `effectId` for persistence and callbacks.
+   * @private
+   */
+  _buildExternalEffectGroups(effectId, schema, updateCallback, savedParams) {
+    const effectData = this.effectFolders[effectId];
+    if (!effectData) return;
+    if (!effectData.externalFolders) effectData.externalFolders = [];
+
+    const categoryTitles = {
+      environment: 'Environment',
+      atmospheric: 'Atmospheric & Environmental',
+      surface: 'Surface & Material',
+      water: 'Water',
+      structure: 'Objects & Structures',
+      particle: 'Particles & VFX',
+      ash: 'Ash',
+      global: 'Global & Post',
+      debug: 'Debug'
+    };
+
+    for (const group of schema.groups || []) {
+      if (!group?.categoryId) continue;
+      if (group.type === 'mask-status') continue;
+
+      const categoryId = group.categoryId;
+      const parent = this.ensureCategoryFolder(
+        categoryId,
+        categoryTitles[categoryId] || categoryId
+      );
+
+      const accordionKey = this._externalGroupAccordionKey(effectId, group);
+      const targetContainer = parent.addFolder({
+        title: group.label,
+        expanded: this.accordionStates[accordionKey] ?? group.expanded ?? false
+      });
+
+      targetContainer.on('fold', (ev) => {
+        this.accordionStates[accordionKey] = ev.expanded;
+        this.saveUIState();
+      });
+
+      effectData.externalFolders.push({
+        id: accordionKey,
+        categoryId,
+        folder: targetContainer
+      });
+
+      for (const paramId of group.parameters || []) {
+        const paramDef = schema.parameters[paramId];
+        if (!paramDef) {
+          log.warn(`Parameter ${paramId} not found in schema`);
+          continue;
+        }
+
+        this.buildParameterControl(
+          effectId,
+          targetContainer,
+          paramId,
+          paramDef,
+          updateCallback,
+          savedParams
+        );
+      }
+    }
+  }
+
+  /**
    * Build effect controls based on schema groups or flat structure
    * @private
    */
   buildEffectControls(effectId, folder, schema, updateCallback, savedParams) {
     if (schema.groups) {
       for (const group of schema.groups) {
+        if (group.categoryId) continue;
+
         // Add separator before this group if requested
         if (group.separator) {
           folder.addBlade({ view: 'separator' });
@@ -4423,6 +4583,8 @@ export class TweakpaneManager {
           );
         }
       }
+
+      this._buildExternalEffectGroups(effectId, schema, updateCallback, savedParams);
     } else {
       // Fallback: flat structure (legacy compatibility)
       for (const [paramId, paramDef] of Object.entries(schema.parameters || {})) {
@@ -7788,6 +7950,14 @@ export class TweakpaneManager {
         // Backwards-compatible default for sunLatitude (added as global param)
         if (this.globalParams.sunLatitude === undefined) {
           this.globalParams.sunLatitude = 0.1;
+        }
+        if (!this.globalParams.shadowSystem || typeof this.globalParams.shadowSystem !== 'object') {
+          this.globalParams.shadowSystem = { ...DEFAULT_SHADOW_SYSTEM_TUNING };
+        } else {
+          this.globalParams.shadowSystem = {
+            ...DEFAULT_SHADOW_SYSTEM_TUNING,
+            ...this.globalParams.shadowSystem,
+          };
         }
 
         if (this.globalParams.introZoomEnabled === undefined) {

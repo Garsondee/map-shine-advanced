@@ -58,6 +58,7 @@ import {
 import { isTileOverhead } from '../../scene/tile-manager.js';
 import { weatherController, PrecipitationType } from '../../core/WeatherController.js';
 import { LightingDirector } from '../../core/LightingDirector.js';
+import { resolveEffectShadowSun2D } from '../shadow-system/ShadowSunDirection.js';
 import { GROUND_Z } from '../LayerOrderPolicy.js';
 
 const log = createLogger('WindowLightEffectV2');
@@ -157,6 +158,9 @@ export class WindowLightEffectV2 {
     this._normalizedOutdoorsTextures = new WeakSet();
 
     /** @type {{ skyTintColor: {r:number,g:number,b:number}, sunAzimuthDeg: number, skyIntensity01: number, sceneDarkness01: (number|null), effectiveDarkness01: (number|null), skyTintDarknessLightsEnabled: (boolean|null), skyTintDarknessLightsIntensity: (number|null), todCameraTimelineActive: boolean, todCameraTintColor: {r:number,g:number,b:number} }} */
+    this._driverSunDir = null;
+    this._driverShadowLengthScale = 1.0;
+
     this._skyState = {
       skyTintColor: { r: 1.0, g: 1.0, b: 1.0 },
       sunAzimuthDeg: 180.0,
@@ -764,16 +768,35 @@ export class WindowLightEffectV2 {
     if (!u) return;
 
     u.uEffectEnabled.value = !!this._enabled;
-    u.uIntensity.value = this.getEffectiveIntensity();
+    let landscapeWindowMul = 1.0;
+    let landscapeFlash01 = 0;
+    let llR = 0.68;
+    let llG = 0.82;
+    let llB = 1.0;
+    try {
+      const env = window.MapShine?.environment;
+      landscapeWindowMul = Number(env?.landscapeLightningWindowMul) || 1.0;
+      landscapeFlash01 = Math.max(0, Math.min(1, Number(env?.landscapeLightningFlash01) || 0));
+      llR = Number(env?.landscapeLightningFlashColorR);
+      llG = Number(env?.landscapeLightningFlashColorG);
+      llB = Number(env?.landscapeLightningFlashColorB);
+      if (!Number.isFinite(llR)) llR = 0.68;
+      if (!Number.isFinite(llG)) llG = 0.82;
+      if (!Number.isFinite(llB)) llB = 1.0;
+    } catch (_) {}
+    u.uIntensity.value = this.getEffectiveIntensity() * Math.max(0.0, landscapeWindowMul);
     u.uFalloff.value = Math.max(0.01, Number(this.params.falloff) || 1);
 
     const c = this.params.color;
     if (c && typeof c === 'object') {
-      // THREE.Color.set() takes a single arg; use setRGB for component-wise assignment.
+      const baseR = Number(c.r) || 0;
+      const baseG = Number(c.g) || 0;
+      const baseB = Number(c.b) || 0;
+      const tintW = landscapeFlash01 * 0.92;
       u.uColor.value.setRGB(
-        Number(c.r) || 0,
-        Number(c.g) || 0,
-        Number(c.b) || 0
+        baseR + (llR - baseR) * tintW,
+        baseG + (llG - baseG) * tintW,
+        baseB + (llB - baseB) * tintW,
       );
     }
 
@@ -830,11 +853,18 @@ export class WindowLightEffectV2 {
     const nightDimAmount = Math.min(1.0, darkness * nightDimming * 2.15);
     u.uNightFactor.value = Math.max(0.0, 1.0 - nightDimAmount);
 
-    const sunAzimuthDeg = Number(this._skyState.sunAzimuthDeg) || 180.0;
-    const sunAzimuthRad = sunAzimuthDeg * (Math.PI / 180.0);
-    u.uSunDir.value.set(-Math.sin(sunAzimuthRad), -Math.cos(sunAzimuthRad));
+    if (this._driverSunDir) {
+      u.uSunDir.value.set(this._driverSunDir.x, this._driverSunDir.y);
+    } else {
+      const sun2d = resolveEffectShadowSun2D({
+        azimuthDeg: Number(this._skyState.sunAzimuthDeg) || 180.0,
+        elevationDeg: null,
+      });
+      u.uSunDir.value.set(sun2d.x, sun2d.y);
+    }
     u.uSunTrackEnabled.value = this.params.sunLightEnabled ? 1.0 : 0.0;
-    u.uSunLightLength.value = Math.max(0.0, Number(this.params.sunLightLength) || 0.0);
+    u.uSunLightLength.value = Math.max(0.0, Number(this.params.sunLightLength) || 0.0)
+      * Math.max(0.05, Number(this._driverShadowLengthScale) || 1.0);
 
     const env = weatherController?.getEnvironment?.() ?? {};
     const overcastFactor = Math.max(0.0, Math.min(1.0, Number(env?.overcastFactor) || 0.0));
@@ -914,6 +944,20 @@ export class WindowLightEffectV2 {
    *   todCameraTintColor?: {r:number,g:number,b:number},
    * }} state
    */
+  setDriver(driverState = null) {
+    if (!driverState) return;
+    const dir = driverState.sun?.dir;
+    const x = Number(dir?.x);
+    const y = Number(dir?.y);
+    this._driverSunDir = (Number.isFinite(x) && Number.isFinite(y)) ? { x, y } : null;
+    if (Number.isFinite(Number(driverState.tuning?.shadowLengthScale))) {
+      this._driverShadowLengthScale = Number(driverState.tuning.shadowLengthScale);
+    }
+    if (Number.isFinite(Number(driverState.sun?.azimuthDeg))) {
+      this._skyState.sunAzimuthDeg = Number(driverState.sun.azimuthDeg);
+    }
+  }
+
   setSkyState(state = {}) {
     if (!state || typeof state !== 'object') return;
 

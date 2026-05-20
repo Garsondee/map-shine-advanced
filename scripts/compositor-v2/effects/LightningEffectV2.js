@@ -1,8 +1,17 @@
 import { createLogger } from '../../core/log.js';
+import {
+  effectAboveOverheadOrder,
+  motionAboveTokensOrder,
+} from '../LayerOrderPolicy.js';
 
 const log = createLogger('LightningEffectV2');
 
 const DEFAULT_GROUND_Z = 1000;
+
+/** Above elevated tokens in FLOOR_OVERHEAD_FX (token-manager uses intra 100 there). */
+const LIGHTNING_ABOVE_TOKEN_INTRA = 200;
+/** Slot within FLOOR_MOTION_TOP when drawing above overhead tiles. */
+const LIGHTNING_ABOVE_OVERHEAD_INTRA = 50;
 
 /**
  * V2 Lightning effect.
@@ -32,53 +41,53 @@ export class LightningEffectV2 {
       enabled: true,
 
       outsideFlashEnabled: true,
-      outsideFlashGain: 0.45,
+      outsideFlashGain: 3.55,
       outsideFlashAttackMs: 25,
       outsideFlashDecayMs: 650,
       outsideFlashCurve: 1.6,
-      outsideFlashFlickerAmount: 0.25,
+      outsideFlashFlickerAmount: 0.75,
       outsideFlashFlickerRate: 12.0,
       outsideFlashMaxClamp: 4.0,
 
       minDelayMs: 0,
       maxDelayMs: 10000,
 
-      burstMinStrikes: 1,
-      burstMaxStrikes: 5,
-      strikeDurationMs: 280,
-      strikeDelayMs: 105,
+      burstMinStrikes: 4,
+      burstMaxStrikes: 12,
+      strikeDurationMs: 570,
+      strikeDelayMs: 270,
 
       flickerChance: 1.0,
 
       outerColor: { r: 0.35, g: 0.65, b: 1.0 },
-      coreColor: { r: 1.0, g: 1.0, b: 1.0 },
-      brightness: 0.9,
+      coreColor: { r: 0.4873982394838432, g: 0.760220972691187, b: 1.0 },
+      brightness: 10,
 
-      width: 12.0,
-      taper: 0.72,
-      glowStrength: 1.0,
+      width: 8,
+      taper: 1,
+      glowStrength: 5,
 
-      zOffset: 2.0,
+      zOffset: 0,
 
       overheadOrder: 0,
 
       segments: 34,
-      curveAmount: 0.32,
-      macroDisplacement: 14.0,
-      microJitter: 3.0,
-      endPointRandomnessPx: 114.0,
+      curveAmount: 0.5,
+      macroDisplacement: 7,
+      microJitter: 5,
+      endPointRandomnessPx: 56,
 
-      textureScrollSpeed: 30.0,
+      textureScrollSpeed: 22.1,
 
       branchChance: 0.89,
-      branchMax: 3,
-      branchLengthMin: 0.18,
-      branchLengthMax: 0.54,
-      branchWidthScale: 0.55,
-      branchIntensityScale: 0.39,
-      branchDurationScale: 0.7,
-      branchForwardBias: 0.5,
-      branchPerpBias: 1.0,
+      branchMax: 6,
+      branchLengthMin: 0.15,
+      branchLengthMax: 0.38,
+      branchWidthScale: 0.81,
+      branchIntensityScale: 0.88,
+      branchDurationScale: 0.93,
+      branchForwardBias: 0.97,
+      branchPerpBias: 0.13,
 
       wildArcChance: 0.0,
 
@@ -164,30 +173,30 @@ export class LightningEffectV2 {
         enabled: { type: 'boolean', default: true, hidden: true },
 
         outsideFlashEnabled: { type: 'boolean', default: true, label: 'Flash Enabled' },
-        outsideFlashGain: { type: 'slider', min: 0, max: 5, step: 0.01, default: 0.45, label: 'Flash Gain' },
+        outsideFlashGain: { type: 'slider', min: 0, max: 5, step: 0.01, default: 3.55, label: 'Flash Gain' },
         outsideFlashAttackMs: { type: 'slider', min: 0, max: 150, step: 1, default: 25, label: 'Attack (ms)' },
         outsideFlashDecayMs: { type: 'slider', min: 50, max: 2500, step: 10, default: 650, label: 'Decay (ms)' },
         outsideFlashCurve: { type: 'slider', min: 0.25, max: 4, step: 0.01, default: 1.6, label: 'Decay Curve' },
-        outsideFlashFlickerAmount: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.25, label: 'Flicker Amount' },
+        outsideFlashFlickerAmount: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.75, label: 'Flicker Amount' },
         outsideFlashFlickerRate: { type: 'slider', min: 0, max: 40, step: 0.1, default: 12.0, label: 'Flicker Rate' },
         outsideFlashMaxClamp: { type: 'slider', min: 0, max: 10, step: 0.05, default: 4.0, label: 'Flash Clamp' },
 
         minDelayMs: { type: 'slider', min: 0, max: 5000, step: 50, default: 0, label: 'Min Delay (ms)' },
         maxDelayMs: { type: 'slider', min: 0, max: 10000, step: 50, default: 10000, label: 'Max Delay (ms)' },
 
-        burstMinStrikes: { type: 'slider', min: 1, max: 10, step: 1, default: 1, label: 'Burst Min Strikes' },
-        burstMaxStrikes: { type: 'slider', min: 1, max: 16, step: 1, default: 5, label: 'Burst Max Strikes' },
-        strikeDurationMs: { type: 'slider', min: 20, max: 800, step: 10, default: 280, label: 'Strike Duration (ms)' },
-        strikeDelayMs: { type: 'slider', min: 0, max: 500, step: 5, default: 105, label: 'Strike Spacing (ms)' },
+        burstMinStrikes: { type: 'slider', min: 1, max: 10, step: 1, default: 4, label: 'Burst Min Strikes' },
+        burstMaxStrikes: { type: 'slider', min: 1, max: 16, step: 1, default: 12, label: 'Burst Max Strikes' },
+        strikeDurationMs: { type: 'slider', min: 20, max: 800, step: 10, default: 570, label: 'Strike Duration (ms)' },
+        strikeDelayMs: { type: 'slider', min: 0, max: 500, step: 5, default: 270, label: 'Strike Spacing (ms)' },
         flickerChance: { type: 'slider', min: 0, max: 1, step: 0.01, default: 1.0, label: 'Flicker Chance' },
 
         outerColor: { type: 'color', default: { r: 0.35, g: 0.65, b: 1.0 }, label: 'Outer Color' },
-        coreColor: { type: 'color', default: { r: 1.0, g: 1.0, b: 1.0 }, label: 'Core Color' },
-        brightness: { type: 'slider', min: 0, max: 10, step: 0.05, default: 0.9, label: 'Brightness' },
-        width: { type: 'slider', min: 1, max: 120, step: 1, default: 12, label: 'Width (px-ish)' },
-        taper: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.72, label: 'Taper' },
-        glowStrength: { type: 'slider', min: 0, max: 5, step: 0.05, default: 1.0, label: 'Glow Strength' },
-        zOffset: { type: 'slider', min: 0, max: 50, step: 0.25, default: 2.0, label: 'Z Offset' },
+        coreColor: { type: 'color', default: { r: 0.4873982394838432, g: 0.760220972691187, b: 1.0 }, label: 'Core Color' },
+        brightness: { type: 'slider', min: 0, max: 10, step: 0.05, default: 10, label: 'Brightness' },
+        width: { type: 'slider', min: 1, max: 120, step: 1, default: 8, label: 'Width (px-ish)' },
+        taper: { type: 'slider', min: 0, max: 1, step: 0.01, default: 1, label: 'Taper' },
+        glowStrength: { type: 'slider', min: 0, max: 5, step: 0.05, default: 5, label: 'Glow Strength' },
+        zOffset: { type: 'slider', min: 0, max: 50, step: 0.25, default: 0, label: 'Z Offset' },
         overheadOrder: {
           type: 'list',
           label: 'Overhead Order',
@@ -195,25 +204,26 @@ export class LightningEffectV2 {
             'Below Overhead': 0,
             'Above Overhead': 1
           },
-          default: 0
+          default: 0,
+          tooltip: 'Always draws above tokens. Below Overhead = under roof tiles; Above Overhead = top motion band.'
         },
-        textureScrollSpeed: { type: 'slider', min: 0, max: 30, step: 0.1, default: 30.0, label: 'Texture Scroll Speed' },
+        textureScrollSpeed: { type: 'slider', min: 0, max: 30, step: 0.1, default: 22.1, label: 'Texture Scroll Speed' },
 
         segments: { type: 'slider', min: 4, max: 96, step: 1, default: 34, label: 'Segments' },
-        curveAmount: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.32, label: 'Curve Amount' },
-        macroDisplacement: { type: 'slider', min: 0, max: 400, step: 1, default: 14, label: 'Macro Displacement' },
-        microJitter: { type: 'slider', min: 0, max: 120, step: 1, default: 3, label: 'Micro Jitter' },
-        endPointRandomnessPx: { type: 'slider', min: 0, max: 400, step: 1, default: 114, label: 'Endpoint Randomness' },
+        curveAmount: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.5, label: 'Curve Amount' },
+        macroDisplacement: { type: 'slider', min: 0, max: 400, step: 1, default: 7, label: 'Macro Displacement' },
+        microJitter: { type: 'slider', min: 0, max: 120, step: 1, default: 5, label: 'Micro Jitter' },
+        endPointRandomnessPx: { type: 'slider', min: 0, max: 400, step: 1, default: 56, label: 'Endpoint Randomness' },
 
         branchChance: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.89, label: 'Branch Chance' },
-        branchMax: { type: 'slider', min: 0, max: 6, step: 1, default: 3, label: 'Branch Max' },
-        branchLengthMin: { type: 'slider', min: 0.05, max: 1, step: 0.01, default: 0.18, label: 'Branch Length Min' },
-        branchLengthMax: { type: 'slider', min: 0.05, max: 1.5, step: 0.01, default: 0.54, label: 'Branch Length Max' },
-        branchWidthScale: { type: 'slider', min: 0.05, max: 1, step: 0.01, default: 0.55, label: 'Branch Width Scale' },
-        branchIntensityScale: { type: 'slider', min: 0.05, max: 1, step: 0.01, default: 0.39, label: 'Branch Intensity Scale' },
-        branchDurationScale: { type: 'slider', min: 0.1, max: 1, step: 0.01, default: 0.7, label: 'Branch Duration Scale' },
-        branchForwardBias: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.5, label: 'Branch Forward Bias' },
-        branchPerpBias: { type: 'slider', min: 0, max: 2, step: 0.01, default: 1.0, label: 'Branch Perp Bias' },
+        branchMax: { type: 'slider', min: 0, max: 6, step: 1, default: 6, label: 'Branch Max' },
+        branchLengthMin: { type: 'slider', min: 0.05, max: 1, step: 0.01, default: 0.15, label: 'Branch Length Min' },
+        branchLengthMax: { type: 'slider', min: 0.05, max: 1.5, step: 0.01, default: 0.38, label: 'Branch Length Max' },
+        branchWidthScale: { type: 'slider', min: 0.05, max: 1, step: 0.01, default: 0.81, label: 'Branch Width Scale' },
+        branchIntensityScale: { type: 'slider', min: 0.05, max: 1, step: 0.01, default: 0.88, label: 'Branch Intensity Scale' },
+        branchDurationScale: { type: 'slider', min: 0.1, max: 1, step: 0.01, default: 0.93, label: 'Branch Duration Scale' },
+        branchForwardBias: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.97, label: 'Branch Forward Bias' },
+        branchPerpBias: { type: 'slider', min: 0, max: 2, step: 0.01, default: 0.13, label: 'Branch Perp Bias' },
 
         wildArcChance: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.0, label: 'Wild Arc Chance' },
 
@@ -332,6 +342,7 @@ export class LightningEffectV2 {
 
   setActiveLevelContext(context = null) {
     this._activeLevelContext = context ?? window.MapShine?.activeLevelContext ?? null;
+    this._applyOverheadOrderToMeshes();
     this._requestSourceRebuild();
   }
 
@@ -424,7 +435,7 @@ export class LightningEffectV2 {
   }
 
   onFloorChange(_maxFloorIndex) {
-    // Re-evaluate source groups against current level context.
+    // Re-evaluate source groups and render-order band for the active floor.
     this.setActiveLevelContext(window.MapShine?.activeLevelContext ?? null);
   }
 
@@ -662,8 +673,6 @@ export class LightningEffectV2 {
       const mesh = new THREE.Mesh(geometry, material);
       mesh.frustumCulled = false;
       mesh.visible = false;
-      mesh.renderOrder = 9;
-
       if (this.scene) {
         this.scene.add(mesh);
       }
@@ -687,16 +696,63 @@ export class LightningEffectV2 {
     }
   }
 
+  /**
+   * Active compositor floor for render-order bands (matches token-manager V2).
+   * @returns {number}
+   * @private
+   */
+  _resolveActiveFloorIndex() {
+    try {
+      const floorStack = window.MapShine?.effectComposer?._floorCompositorV2?.floorStack
+        ?? window.MapShine?.floorStack
+        ?? null;
+      const activeIdx = Number(floorStack?.getActiveFloor?.()?.index);
+      if (Number.isFinite(activeIdx)) return Math.max(0, activeIdx);
+
+      const ctx = this._activeLevelContext ?? window.MapShine?.activeLevelContext ?? null;
+      const floors = floorStack?.getFloors?.() ?? [];
+      if (!ctx || !Array.isArray(floors) || floors.length === 0) return 0;
+
+      const b = Number(ctx.bottom);
+      const t = Number(ctx.top);
+      if (!Number.isFinite(b)) return 0;
+
+      const hasFiniteTop = Number.isFinite(t);
+      const mid = hasFiniteTop ? ((b + t) / 2) : b;
+      let bestIdx = 0;
+      let foundExact = false;
+      for (let i = 0; i < floors.length; i++) {
+        const f = floors[i];
+        const fMin = Number(f?.elevationMin);
+        const fMax = Number(f?.elevationMax);
+        if (fMin === b && (!hasFiniteTop || fMax === t)) {
+          return i;
+        }
+        if (!foundExact && mid >= fMin && mid <= fMax) {
+          bestIdx = i;
+        }
+      }
+      return bestIdx;
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  /**
+   * Map overheadOrder to LayerOrderPolicy bands. Always above token sprites;
+   * "below overhead" sits in FLOOR_OVERHEAD_FX, "above overhead" in MOTION_TOP.
+   * @private
+   */
   _applyOverheadOrderToMeshes() {
+    const floorIndex = this._resolveActiveFloorIndex();
     const order = (this.params && typeof this.params.overheadOrder === 'number') ? this.params.overheadOrder : 0;
-    const overheadRenderOrder = 10;
-    const below = overheadRenderOrder - 1;
-    const above = overheadRenderOrder + 10;
-    const lightningOrder = order > 0.5 ? above : below;
+    const lightningOrder = order > 0.5
+      ? motionAboveTokensOrder(floorIndex, LIGHTNING_ABOVE_OVERHEAD_INTRA)
+      : effectAboveOverheadOrder(floorIndex, LIGHTNING_ABOVE_TOKEN_INTRA);
 
     for (let i = 0; i < this._strikePool.length; i++) {
       const s = this._strikePool[i];
-      if (s && s.mesh) {
+      if (s?.mesh) {
         s.mesh.renderOrder = lightningOrder;
       }
     }
@@ -868,7 +924,8 @@ export class LightningEffectV2 {
       transparent: true,
       side: THREE.DoubleSide,
       depthWrite: false,
-      depthTest: true,
+      // Strikes sit at map Z while tokens are higher; skip depth so renderOrder stacks above tokens.
+      depthTest: false,
       blending: THREE.AdditiveBlending
     });
 

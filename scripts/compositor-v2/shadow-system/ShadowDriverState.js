@@ -4,10 +4,15 @@
 
 import { weatherController } from '../../core/WeatherController.js';
 import {
-  computeGoldenHourShadowLengthWeight,
-  computeSunDirection2D,
+  computeShadowTimeTuning,
+  getShadowSystemTuning,
+  getUnifiedShadowLatitudeScale,
   clamp01,
 } from './SunDirection.js';
+import {
+  computeShadowSunDirection2D,
+  applyShadowSunDirection,
+} from './ShadowSunDirection.js';
 import { ShadowMaskBindings } from './ShadowMaskBindings.js';
 
 const safeNumber = (value, fallback = 0) => {
@@ -19,7 +24,12 @@ export class ShadowDriverState {
   constructor() {
     this.maskBindings = new ShadowMaskBindings();
     this.frame = 0;
-    this.sun = { azimuthDeg: 180, elevationDeg: 45, dir: { x: 0, y: 1 } };
+    this.sun = {
+      azimuthDeg: 180,
+      elevationDeg: 45,
+      dir: { x: 0, y: 1 },
+      dirLength: 1.0,
+    };
     this.weather = {
       cloudCover: 0,
       overcastFactor: 0,
@@ -41,8 +51,12 @@ export class ShadowDriverState {
       cloudDiffusionFactor: 3.0,
       shadowSoftnessScale: 1.0,
       shadowLengthScale: 1.0,
+      shadowSmearScale: 1.0,
       shadowOpacityScale: 1.0,
       shadowSharpenForSunPower: 1.0,
+      timeSoftnessScale: 1.0,
+      timeLengthScale: 1.0,
+      timeSmearScale: 1.0,
     };
   }
 
@@ -64,15 +78,24 @@ export class ShadowDriverState {
     const sunlightFactor = clamp01(env?.sunlightFactor ?? env?.skyIntensity ?? 1, 1);
     const overcastFactor = clamp01(env?.overcastFactor ?? cloudCover, cloudCover);
     const effectiveDarkness = clamp01(env?.effectiveDarkness ?? 0, 0);
-    const elevation = safeNumber(skyColorEffect?.currentSunElevationDeg, 45);
-    const latitudeScale = safeNumber(floorCompositor?._overheadShadowEffect?.params?.sunLatitude, 0.1);
+    const azimuthDeg = safeNumber(skyColorEffect?.currentSunAzimuthDeg, 180);
+    const elevationDeg = safeNumber(skyColorEffect?.currentSunElevationDeg, 45);
+    const latitudeScale = getUnifiedShadowLatitudeScale(
+      safeNumber(floorCompositor?._overheadShadowEffect?.params?.sunLatitude, 0.1),
+    );
     const prev = this.sun?.dir ?? null;
-    const sun = computeSunDirection2D(skyColorEffect?.currentSunAzimuthDeg, elevation, latitudeScale, prev);
+    const sun2d = computeShadowSunDirection2D({
+      azimuthRad: azimuthDeg * (Math.PI / 180.0),
+      elevationDeg,
+      latitudeScale,
+      previousDir: prev,
+    });
 
     this.sun = {
-      azimuthDeg: sun.azimuthDeg,
-      elevationDeg: sun.elevationDeg,
-      dir: { x: sun.x, y: sun.y },
+      azimuthDeg,
+      elevationDeg,
+      dir: { x: sun2d.x, y: sun2d.y },
+      dirLength: Math.sqrt(Math.max(sun2d.lengthSq, 0)),
     };
     this.weather = {
       cloudCover,
@@ -84,10 +107,6 @@ export class ShadowDriverState {
       environment: env,
       current: currentWeather,
     };
-    // Upper-floor masks & sky-reach casters use floors with index > receiverBaseIndex.
-    // This MUST track the viewed (active) band — not the lowest visible floor — or
-    // multi-level visibility keeps receiverBase pinned to ground while the camera
-    // shows a higher story; sky-reach then darkens the wrong sheet (ground shadow on middle).
     const receiverBaseIndex = this._resolveReceiverBaseIndex(activeFloorIndex);
     const upper = this.maskBindings.getUpperFloorAlphaStack({ receiverBaseIndex });
     this.masks = {
@@ -116,21 +135,16 @@ export class ShadowDriverState {
     }
   }
 
-  /**
-   * Active viewed floor index: floors strictly above this contribute to the upper
-   * `floorAlpha` stack (sky occlusion, sky-reach casters). Tied to
-   * {@link FloorCompositor#_activeFloorIndex}, not `min(visible)` — lower stories
-   * can stay visible in the stack while the user navigates upstairs; pinning to
-   * the lowest visible index mis-assigns the shadow receiver plane.
-   */
   _resolveReceiverBaseIndex(activeFloorIndex) {
     return Number.isFinite(Number(activeFloorIndex)) ? Number(activeFloorIndex) : 0;
   }
 
   _deriveTuning() {
+    const cfg = getShadowSystemTuning();
     const cloud = this.weather.cloudCover;
-    const cloudDiffusionFactor = 3.0;
-    const shadowSoftnessScale = 1.0 + (cloudDiffusionFactor - 1.0) * cloud;
+    const cloudDiffusionFactor = Number(cfg.cloudDiffusionFactor) || 3.0;
+    const cloudSoftnessMul = 1.0 + (cloudDiffusionFactor - 1.0) * cloud;
+
     let hour = 12.0;
     let sunriseHour = 6.0;
     try {
@@ -140,14 +154,27 @@ export class ShadowDriverState {
       const envSunrise = this.weather?.environment?.sunrise;
       if (Number.isFinite(Number(envSunrise))) sunriseHour = Number(envSunrise);
     } catch (_) {}
-    const shadowLengthScale = computeGoldenHourShadowLengthWeight(hour, sunriseHour, 2.5);
+
+    const time = computeShadowTimeTuning(hour, sunriseHour, cfg);
+    const elevationLengthMul = Math.max(0.15, this.sun.dirLength || 1.0);
+    const shadowSoftnessScale = time.softnessScale * cloudSoftnessMul;
+    const shadowLengthScale = time.lengthScale * elevationLengthMul;
+    const shadowSmearScale = time.smearScale;
     const shadowOpacityScale = Math.max(0.25, 1.0 - this.weather.effectiveDarkness * 0.25);
+
     return {
       cloudDiffusionFactor,
       shadowSoftnessScale,
       shadowLengthScale,
+      shadowSmearScale,
       shadowOpacityScale,
       shadowSharpenForSunPower: Math.pow(Math.max(0.0, this.weather.sunlightFactor), 1.0 / 2.2),
+      timeSoftnessScale: time.softnessScale,
+      timeLengthScale: time.lengthScale,
+      timeSmearScale: time.smearScale,
+      goldenFactor: time.goldenFactor,
+      noonFactor: time.noonFactor,
+      midnightFactor: time.midnightFactor,
     };
   }
 }

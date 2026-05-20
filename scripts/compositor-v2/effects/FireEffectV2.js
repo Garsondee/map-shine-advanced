@@ -40,6 +40,7 @@ import {
   hasV14NativeLevels,
 } from '../../foundry/levels-scene-flags.js';
 import { SmartWindBehavior } from '../../particles/SmartWindBehavior.js';
+import { SmartUpdraftBehavior } from '../../particles/SmartUpdraftBehavior.js';
 import {
   FireMaskShape,
   FixedCurlNoiseField,
@@ -172,7 +173,7 @@ export class FireEffectV2 {
       indoorLifeScale: 1,
       indoorTimeScale: 0.2,
       flamePeakOpacity: 1,
-      coreEmission: 2.3,
+      coreEmission: 4.5,
       flameBrightnessFloor: 0.75,
       emberEmission: 5,
       emberPeakOpacity: 1,
@@ -204,7 +205,7 @@ export class FireEffectV2 {
         { t: 0.24895833219800675, r: 0.36, g: 0.34, b: 0.32 },
         { t: 1, r: 0, g: 0, b: 0 },
       ],
-      // Emission is added to diffuse smoke RGB then clamped to [0,1] (display-referred, no HDR).
+      // Emission tint is linear HDR (see SmokeLifecycleBehavior); diffuse smoke RGB stays ≤1.
       smokeEmissionGradient: [
         { t: 0, r: 0, g: 0, b: 0 },
         { t: 0.09782565829710174, r: 1, g: 0.6197895136979354, b: 0 },
@@ -277,7 +278,15 @@ export class FireEffectV2 {
         fireHeight: { type: 'slider', label: 'Height', min: 1.0, max: 600.0, step: 1.0, default: 600 },
         fireTemperature: { type: 'slider', label: 'Temperature', min: 0.0, max: 1.0, step: 0.05, default: 0.9 },
         flamePeakOpacity: { type: 'slider', label: 'Peak Opacity', min: 0.0, max: 1.0, step: 0.01, default: 1 },
-        coreEmission: { type: 'slider', label: 'Core Emission (HDR)', min: 0.5, max: 5.0, step: 0.1, default: 2.3 },
+        coreEmission: {
+          type: 'slider',
+          label: 'Core Emission (HDR)',
+          min: 0.5,
+          max: 12.0,
+          step: 0.1,
+          default: 4.5,
+          tooltip: 'Linear HDR flame energy. Raised for the unclamped lighting pipeline — push higher if night fires look pale.',
+        },
         flameBrightnessFloor: { type: 'slider', label: 'Mask Brightness Floor', min: 0.0, max: 1.5, step: 0.01, default: 0.75 },
         fireSizeMin: { type: 'slider', label: 'Size Min', min: 1.0, max: 150.0, step: 1.0, default: 107 },
         fireSizeMax: { type: 'slider', label: 'Size Max', min: 1.0, max: 200.0, step: 1.0, default: 156 },
@@ -298,7 +307,15 @@ export class FireEffectV2 {
         flameTextureFlipX: { type: 'checkbox', label: 'Flip X', default: true },
         flameTextureFlipY: { type: 'checkbox', label: 'Flip Y', default: true },
         emberRate: { type: 'slider', label: 'Density', min: 0.0, max: 5.0, step: 0.1, default: 5 },
-        emberEmission: { type: 'slider', label: 'Emission (HDR)', min: 0.5, max: 5.0, step: 0.1, default: 5 },
+        emberEmission: {
+          type: 'slider',
+          label: 'Emission (HDR)',
+          min: 0.5,
+          max: 12.0,
+          step: 0.1,
+          default: 5,
+          tooltip: 'Linear HDR ember energy (vertex RGB, not alpha).',
+        },
         emberPeakOpacity: { type: 'slider', label: 'Peak Opacity', min: 0.0, max: 1.0, step: 0.01, default: 1 },
         emberSizeMin: { type: 'slider', label: 'Size Min', min: 1.0, max: 40.0, step: 1.0, default: 5 },
         emberSizeMax: { type: 'slider', label: 'Size Max', min: 1.0, max: 60.0, step: 1.0, default: 10 },
@@ -351,10 +368,18 @@ export class FireEffectV2 {
         smokeAlphaEnd: { type: 'slider', label: 'Opacity reaches zero at (life %)', min: 0.0, max: 1.0, step: 0.01, default: 1.0 },
         windInfluence: { type: 'slider', label: 'Wind Influence', min: 0.0, max: 5.0, step: 0.1, default: 3.9 },
         timeScale: { type: 'slider', label: 'Time Scale', min: 0.1, max: 3.0, step: 0.05, default: 3.0 },
-        lightIntensity: { type: 'slider', label: 'Light Intensity', min: 0.0, max: 5.0, step: 0.1, default: 5.0 },
+        lightIntensity: {
+          type: 'slider',
+          label: 'HDR Brightness',
+          min: 0.0,
+          max: 5.0,
+          step: 0.1,
+          default: 5.0,
+          tooltip: 'Scales linear HDR output for flames, embers, and smoke emission. 5 = full pipeline boost; lower to tame hot torches.',
+        },
         indoorLifeScale: { type: 'slider', label: 'Indoor Life Scale', min: 0.05, max: 1.0, step: 0.05, default: 1 },
         indoorTimeScale: { type: 'slider', label: 'Indoor Time Scale', min: 0.05, max: 1.0, step: 0.05, default: 0.2 },
-        weatherPrecipKill: { type: 'slider', label: 'Rain Kill Strength', min: 0.0, max: 5.0, step: 0.05, default: 0.5 },
+        weatherPrecipKill: { type: 'slider', label: 'Rain Kill Strength', min: 0.0, max: 5.0, step: 0.05, default: 0.5, tooltip: 'How strongly rain shortens outdoor flame life and suppresses outdoor updraft.' },
         weatherWindKill: { type: 'slider', label: 'Wind Kill Strength', min: 0.0, max: 5.0, step: 0.05, default: 0.5 },
         heatDistortionEnabled: { type: 'checkbox', label: 'Enable Heat Haze', default: true },
         heatDistortionIntensity: { type: 'slider', label: 'Intensity', min: 0.0, max: 0.05, step: 0.001, default: 0.019 },
@@ -853,6 +878,10 @@ export class FireEffectV2 {
       side: THREE.DoubleSide,
     });
     material.toneMapped = false;
+    const texBright = Math.max(0, Number(this.params.flameTextureBrightness) || 1);
+    const texOpacity = Math.max(0, Math.min(1, Number(this.params.flameTextureOpacity) ?? 1));
+    material.color.setRGB(texBright, texBright, texBright);
+    material.opacity = texOpacity;
 
     const p = this.params;
     const timeScale = Math.max(0.1, p.timeScale ?? 1.0);
@@ -867,6 +896,7 @@ export class FireEffectV2 {
       [new Bezier(1.1, 1.0, 0.7, 0.4), 0.5],
     ]));
     const buoyancy = new ApplyForce(new THREE.Vector3(0, 0, 1), new ConstantValue(p.fireHeight * 0.125));
+    const updraftBehavior = new SmartUpdraftBehavior();
     const windForce = new SmartWindBehavior();
     const turbulence = new FixedCurlNoiseField(
       new THREE.Vector3(150, 150, 50),
@@ -892,7 +922,7 @@ export class FireEffectV2 {
       vTileCount: 1,
       startTileIndex: new ConstantValue(0),
       startRotation: new IntervalValue(0, Math.PI * 2),
-      behaviors: [windForce, buoyancy, turbulence, new FireSpinBehavior(), sizeOverLife, flameLifecycle],
+      behaviors: [windForce, updraftBehavior, turbulence, new FireSpinBehavior(), sizeOverLife, flameLifecycle],
     });
 
     system.userData = {
@@ -925,6 +955,10 @@ export class FireEffectV2 {
       depthTest: false,
     });
     material.toneMapped = false;
+    const texBright = Math.max(0, Number(this.params.flameTextureBrightness) || 1);
+    const texOpacity = Math.max(0, Math.min(1, Number(this.params.flameTextureOpacity) ?? 1));
+    material.color.setRGB(texBright, texBright, texBright);
+    material.opacity = texOpacity;
 
     const p = this.params;
     const timeScale = Math.max(0.1, p.timeScale ?? 1.0);
@@ -935,6 +969,7 @@ export class FireEffectV2 {
 
     const emberLifecycle = new EmberLifecycleBehavior(this);
     const buoyancy = new ApplyForce(new THREE.Vector3(0, 0, 1), new ConstantValue(p.fireHeight * 0.4));
+    const updraftBehavior = new SmartUpdraftBehavior();
     const windForce = new SmartWindBehavior();
     const emberCurlStrength = new THREE.Vector3(150, 150, 50);
     const turbulence = new FixedCurlNoiseField(new THREE.Vector3(30, 30, 30), emberCurlStrength.clone(), 4.0);
@@ -960,7 +995,7 @@ export class FireEffectV2 {
       renderMode: RenderMode.BillBoard,
       renderOrder: this._computeParticleRenderOrder(floorIndex, 1),
       behaviors: [
-        new ParticleTimeScaledBehavior(buoyancy),
+        updraftBehavior,
         windForce,
         new ParticleTimeScaledBehavior(turbulence),
         emberSizeOverLife,
@@ -1012,6 +1047,7 @@ export class FireEffectV2 {
     const smokeLifecycle = new SmokeLifecycleBehavior(this);
     const smokeUpdraftMag = Math.max(0.0, p.smokeUpdraft ?? 2.5);
     const smokeUpdraft = new ApplyForce(new THREE.Vector3(0, 0, 1), new ConstantValue(smokeUpdraftMag));
+    const updraftBehavior = new SmartUpdraftBehavior();
     const windForce = new SmartWindBehavior();
     const smokeTurbMult = Math.max(0.0, p.smokeTurbulence ?? 1.0);
     const smokeCurlStrengthBase = new THREE.Vector3(200 * smokeTurbMult, 200 * smokeTurbMult, 80 * smokeTurbMult);
@@ -1037,7 +1073,7 @@ export class FireEffectV2 {
       startRotation: new IntervalValue(0, Math.PI * 2),
       behaviors: [
         windForce,
-        new ParticleTimeScaledBehavior(smokeUpdraft),
+        updraftBehavior,
         new ParticleTimeScaledBehavior(turbulence),
         new FireSpinBehavior(),
         smokeLifecycle,
@@ -1186,10 +1222,16 @@ export class FireEffectV2 {
   _updateSystemParams() {
     const p = this.params;
     const globalRate = Math.max(0.0, p.globalFireRate ?? 1.0);
+    const texBright = Math.max(0, Number(p.flameTextureBrightness) || 0);
+    const texOpacity = Math.max(0, Math.min(1, Number(p.flameTextureOpacity) ?? 1));
 
     for (const [, state] of this._floorStates) {
       // Fire systems.
       for (const sys of state.systems) {
+        if (sys?.material) {
+          if (sys.material.color) sys.material.color.setRGB(texBright, texBright, texBright);
+          if (typeof sys.material.opacity === 'number') sys.material.opacity = texOpacity;
+        }
         if (!sys?.userData) continue;
         const w = sys.userData._msEmissionScale ?? 1.0;
         if (sys.emissionOverTime) {
@@ -1211,6 +1253,10 @@ export class FireEffectV2 {
 
       // Ember systems.
       for (const sys of state.emberSystems) {
+        if (sys?.material) {
+          if (sys.material.color) sys.material.color.setRGB(texBright, texBright, texBright);
+          if (typeof sys.material.opacity === 'number') sys.material.opacity = texOpacity;
+        }
         if (!sys?.userData) continue;
         const w = sys.userData._msEmissionScale ?? 1.0;
         if (sys.emissionOverTime) {

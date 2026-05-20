@@ -23,6 +23,11 @@ import { getViewedLevelBackgroundSrc } from '../../foundry/levels-scene-flags.js
 import { getMaskTextureManifest, maskTextureManifestMatchesLoadContext } from '../../settings/mask-manifest-flags.js';
 import { collectCompositorFloorCandidateKeys, resolveCompositorFloorMaskTexture, resolveCompositorOutdoorsTexture } from '../../masks/resolve-compositor-outdoors.js';
 import { FLOOR_ID_OUTDOORS_RECEIVER_GLSL } from '../shadow-system/DirectionalShadowProjector.js';
+import {
+  resolveEffectShadowSun2D,
+  writeEffectSunDir,
+} from '../shadow-system/ShadowSunDirection.js';
+import { resolveBakeRayLength } from '../lightning/shadow-bake-override.js';
 
 const log = createLogger('PaintedShadowEffectV2');
 const MAX_PAINTED_SHADOW_EDGE_PX = 3072;
@@ -96,6 +101,8 @@ export class PaintedShadowEffectV2 {
     this._noShadowFallbackTex = null;
     /** @type {{ receiverBaseIndex?: number, activeFloorAlpha?: import('three').Texture|null, upperFloorAlphaCompositeTexture?: import('three').Texture|null, upperFloorAlphaTextures?: import('three').Texture[] }|null} */
     this._driverMasksSnapshot = null;
+    this._driverShadowLengthScale = 1.0;
+    this._driverShadowSoftnessScale = 1.0;
     /** @type {import('three').WebGLRenderTarget|null} */
     this._floorOcclusionTarget = null;
     /** @type {import('three').ShaderMaterial|null} */
@@ -319,6 +326,12 @@ export class PaintedShadowEffectV2 {
         upperFloorAlphaTextures: Array.isArray(m.upperFloorAlphaTextures) ? m.upperFloorAlphaTextures.slice() : [],
       }
       : null;
+    if (Number.isFinite(Number(driverState.tuning?.shadowSoftnessScale))) {
+      this._driverShadowSoftnessScale = Number(driverState.tuning.shadowSoftnessScale);
+    }
+    if (Number.isFinite(Number(driverState.tuning?.shadowLengthScale))) {
+      this._driverShadowLengthScale = Number(driverState.tuning.shadowLengthScale);
+    }
   }
 
   /**
@@ -1483,7 +1496,8 @@ export class PaintedShadowEffectV2 {
     this._quad.material = this._projectMaterial;
     renderer.render(this._scene, this._camera);
 
-    const blurRadius = Math.max(0.0, Number(this.params.blurRadius) || 0.0);
+    const blurRadius = Math.max(0.0, Number(this.params.blurRadius) || 0.0)
+      * Math.max(0.05, Number(this._driverShadowSoftnessScale) || 1.0);
     const useBlur =
       !!this._blurMaterial && !!this._blurTarget && blurRadius > 0.01;
     let finalStrengthTex = this._strengthTarget.texture;
@@ -1549,38 +1563,12 @@ export class PaintedShadowEffectV2 {
   _updateSunDirection() {
     const THREE = window.THREE;
     if (!THREE) return;
-    const lat = Math.max(0.0, Math.min(1.0, this.params.sunLatitude ?? 0.1));
-    let x = 0.0;
-    let y = -1.0 * lat;
-    if (Number.isFinite(this._sunAzimuthDeg)) {
-      const azimuthRad = this._sunAzimuthDeg * (Math.PI / 180.0);
-      x = -Math.sin(azimuthRad);
-      y = -Math.cos(azimuthRad) * lat;
-    } else {
-      let hour = 12.0;
-      try {
-        if (weatherController && typeof weatherController.timeOfDay === 'number') hour = weatherController.timeOfDay;
-      } catch (_) {}
-      const t = (hour % 24.0) / 24.0;
-      const azimuth = (t - 0.5) * (Math.PI * 2.0);
-      x = -Math.sin(azimuth);
-      y = -Math.cos(azimuth) * lat;
-    }
-    const dirLenSq = (x * x) + (y * y);
-    if (dirLenSq < 1e-8) {
-      const prevX = Number(this.sunDir?.x);
-      const prevY = Number(this.sunDir?.y);
-      const prevLenSq = (prevX * prevX) + (prevY * prevY);
-      if (Number.isFinite(prevLenSq) && prevLenSq > 1e-8) {
-        x = prevX;
-        y = prevY;
-      } else {
-        x = -1.0;
-        y = 0.0;
-      }
-    }
-    if (!this.sunDir) this.sunDir = new THREE.Vector2(x, y);
-    else this.sunDir.set(x, y);
+    const sun2d = resolveEffectShadowSun2D({
+      azimuthDeg: this._sunAzimuthDeg,
+      elevationDeg: this._sunElevationDeg,
+      previousDir: this.sunDir,
+    });
+    this.sunDir = writeEffectSunDir(this.sunDir, sun2d, THREE);
   }
 
   _requestLevelTexture(src) {
@@ -1929,7 +1917,11 @@ export class PaintedShadowEffectV2 {
         const b = Number(this.params.shadowStrengthBoost);
         pu.uShadowStrengthBoost.value = Number.isFinite(b) ? Math.max(1.0, Math.min(10.0, b)) : 1.0;
       }
-      pu.uLength.value = Math.max(0.0, Number(this.params.length) || 0.0);
+      pu.uLength.value = resolveBakeRayLength(
+        this,
+        Math.max(0.0, Number(this.params.length) || 0.0)
+          * Math.max(0.05, Number(this._driverShadowLengthScale) || 1.0),
+      );
       const dlo = this._dynamicLightOverride;
       const dynTex = dlo?.texture ?? null;
       const winTex = dlo?.windowTexture ?? null;

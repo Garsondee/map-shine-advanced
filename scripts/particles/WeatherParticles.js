@@ -60,6 +60,24 @@ const ROOF_DRIP_MAX_FLOOD_PIXELS = 4096 * 4096;
 const ROOF_DRIP_CPU_EDGE_WORK_MAX = 1024;
 /** Schema default for `rainDropSize`; scales min/max together so the master slider is visible. */
 const RAIN_DROP_SIZE_REF = 3.1;
+/** UI `rainBrightness` (0.1..12) mapped so ~5.7 default ≈ full particle alpha. */
+const RAIN_BRIGHTNESS_UI_FULL = 6.0;
+/** Overlay alpha headroom — scaled down at night in _getRainDayNightCoupling. */
+const RAIN_OVERLAY_ALPHA_BOOST = 1.25;
+/** Day: higher opacity + darker streak RGB (readable on bright post-processed frames). */
+const RAIN_DAY_ALPHA_MUL = 1.62;
+const RAIN_DAY_RGB_MUL = 0.5;
+/** Night: lower opacity + subdued RGB (avoid self-illuminated look on dark scenes). */
+const RAIN_NIGHT_ALPHA_MUL = 0.34;
+const RAIN_NIGHT_RGB_MUL = 0.24;
+/** Lightning strike flash boost (flash01 is 0..1 envelope). */
+const RAIN_LIGHTNING_ALPHA_BOOST = 6.0;
+const RAIN_LIGHTNING_RGB_BOOST = 4.0;
+/** Default ColorRange spread scalars (UI: rainBrightnessSpread / rainLengthSpread). */
+const RAIN_BRIGHTNESS_SPREAD_DEF = 1.0;
+const RAIN_LENGTH_SPREAD_DEF = 1.0;
+/** Maps rainStreakLength UI → Quarks speedFactor (lower = shorter streaks). */
+const RAIN_STREAK_SPEED_K = 0.0065;
 /** Max queued rain-hit splash bursts per frame (each may spawn 1–2 particles). */
 const RAIN_IMPACT_MAX_QUEUE = 512;
 const ROOF_DRIP_MAX_POINTS_PER_TILE = 4000;
@@ -1287,7 +1305,7 @@ class FoamFleckBehavior {
 class RainFadeInBehavior {
   constructor() {
     this.type = 'RainFadeIn';
-    this.fadeDuration = 1.0;
+    this.fadeDuration = 0.35;
   }
 
   initialize(particle, system) {
@@ -1314,6 +1332,122 @@ class RainFadeInBehavior {
   clone() {
     const b = new RainFadeInBehavior();
     b.fadeDuration = this.fadeDuration;
+    return b;
+  }
+
+  reset() { /* no-op */ }
+}
+
+/**
+ * Per-particle rain chaos: spawn velocity spread, dual-frequency lateral wobble,
+ * and slight gravity variation so streaks do not share one motion field.
+ */
+class RainChaosBehavior {
+  constructor() {
+    this.type = 'RainChaos';
+    this.strength = 1.0;
+    this.brightnessSpread = RAIN_BRIGHTNESS_SPREAD_DEF;
+    this.lengthSpread = RAIN_LENGTH_SPREAD_DEF;
+    this.extraGravityBase = 0;
+  }
+
+  initialize(particle) {
+    if (!particle) return;
+
+    const bSpread = Math.max(0, this.brightnessSpread);
+    const lSpread = Math.max(0, this.lengthSpread);
+
+    particle._rainGravMul = 0.72 + Math.random() * 0.76;
+    particle._rainPhase1 = Math.random() * Math.PI * 2;
+    particle._rainPhase2 = Math.random() * Math.PI * 2;
+    particle._rainFreq1 = 3.5 + Math.random() * 6.5;
+    particle._rainFreq2 = 0.9 + Math.random() * 2.8;
+    particle._rainAmp = 28 + Math.random() * 72;
+    particle._rainBiasY = (Math.random() - 0.5) * 0.35;
+    particle._rainGustSeed = Math.random() * 997.0;
+
+    // Per-drop brightness: skew toward mid-tones with occasional bright glints.
+    const brightT = Math.pow(Math.random(), 0.72);
+    const dimT = 1.0 - brightT;
+    const spreadK = 0.35 + 0.65 * bSpread;
+    const r = (0.52 + brightT * 0.46) * spreadK;
+    const g = (0.62 + brightT * 0.36) * spreadK;
+    const b = (0.88 + brightT * 0.12) * spreadK;
+    const alpha = (0.38 + brightT * 0.58 - dimT * 0.12 * spreadK);
+    particle._rainBrightMul = brightT;
+    if (particle.startColor && particle.color) {
+      particle.startColor.set(r, g, b, alpha);
+      particle.color.copy(particle.startColor);
+    } else if (particle.color) {
+      particle.color.set(r, g, b, alpha);
+    }
+
+    // Per-drop streak length: size (billboard avgSize) + velocity scale (stretched mode).
+    const lenT = Math.pow(Math.random(), 0.65);
+    const lenMul = (0.42 + lenT * 1.38) * (0.55 + 0.45 * lSpread);
+    particle._rainLenMul = lenMul;
+    if (particle.startSize && typeof particle.startSize.multiplyScalar === 'function') {
+      particle.startSize.multiplyScalar(lenMul);
+      if (particle.size && typeof particle.size.copy === 'function') {
+        particle.size.copy(particle.startSize);
+      }
+    } else if (typeof particle.startSize === 'number') {
+      particle.startSize *= lenMul;
+      if (typeof particle.size === 'number') particle.size = particle.startSize;
+    }
+
+    if (particle.velocity) {
+      const kick = 140 + Math.random() * 520;
+      particle.velocity.x += (Math.random() - 0.5) * kick;
+      particle.velocity.y += (Math.random() - 0.5) * kick;
+      particle.velocity.z -= (0.55 + Math.random() * 0.95) * kick * 0.42;
+      const spdMul = (0.55 + Math.random() * 0.95) * (0.6 + 0.4 * lenMul);
+      particle.velocity.multiplyScalar(spdMul);
+      if (typeof particle.startSpeed === 'number') {
+        particle.startSpeed *= spdMul;
+      }
+    }
+  }
+
+  update(particle, delta) {
+    if (!particle || typeof particle.age !== 'number' || !particle.position) return;
+
+    const s = Math.max(0, this.strength);
+    if (s <= 0) return;
+
+    const t = particle.age;
+    const amp = (particle._rainAmp ?? 50) * s;
+    const p1 = particle._rainPhase1 ?? 0;
+    const p2 = particle._rainPhase2 ?? 0;
+    const f1 = particle._rainFreq1 ?? 5;
+    const f2 = particle._rainFreq2 ?? 1.6;
+    const biasY = particle._rainBiasY ?? 0;
+
+    const osc1 = Math.sin(t * f1 + p1);
+    const osc2 = Math.sin(t * f2 + p2);
+    const sway = (osc1 * 0.72 + osc2 * 0.28) * amp * delta;
+
+    particle.position.x += sway;
+    particle.position.y += sway * (0.18 + biasY) + biasY * amp * delta * 0.12;
+
+    const gust = Math.sin(t * 11.0 + particle._rainGustSeed) * amp * 0.08 * delta;
+    particle.position.x += gust;
+    particle.position.y += gust * 0.4;
+
+    const gravMul = particle._rainGravMul ?? 1.0;
+    if (particle.velocity && this.extraGravityBase > 0 && Math.abs(gravMul - 1.0) > 0.02) {
+      particle.velocity.z -= this.extraGravityBase * (gravMul - 1.0) * delta;
+    }
+  }
+
+  frameUpdate() { /* no-op */ }
+
+  clone() {
+    const b = new RainChaosBehavior();
+    b.strength = this.strength;
+    b.brightnessSpread = this.brightnessSpread;
+    b.lengthSpread = this.lengthSpread;
+    b.extraGravityBase = this.extraGravityBase;
     return b;
   }
 
@@ -1995,6 +2129,9 @@ export class WeatherParticles {
     this._snowCurlBaseStrength = null;
     this._rainCurl = null;
     this._rainCurlBaseStrength = null;
+    this._rainTurbulence = null;
+    this._rainTurbulenceBaseMul = null;
+    this._rainChaos = null;
     this._roofDripCurl = null;
     this._roofDripCurlBaseStrength = null;
 
@@ -2068,6 +2205,10 @@ export class WeatherParticles {
       dropSizeMax: null,
       streakLength: null
     };
+    /** Cached flash multiplier applied to rain brightness (legacy probe). */
+    this._lastLightningRainMul = 1.0;
+    /** Signature for rain visual coupling (day/night + lightning). */
+    this._lastRainVisualSig = '';
 
     // PERFORMANCE FIX: Reuse Vector3 for wind direction calculations in update()
     // instead of allocating a new one every frame.
@@ -4720,17 +4861,19 @@ export class WeatherParticles {
       // event loop during loading. Rain fills in naturally within ~3s.
       prewarm: false,
       
-      // LIFE: Long enough that particles are culled by the world-volume floor instead of timing out mid-air.
-      startLife: new IntervalValue(3.0, 4.0),
+      // LIFE: wide spread so streaks desync (less "sheet" uniformity).
+      startLife: new IntervalValue(2.1, 5.4),
       
-      // SPEED: Tuned to give a readable fall rate at default gravity.
-      // Gravity will still accelerate them further, but base speed is lower.
-      startSpeed: new IntervalValue(2500, 3500), 
+      // SPEED: broad range — stretched billboards use velocity for streak length.
+      startSpeed: new IntervalValue(1400, 5200),
       
-      // SIZE: narrow streaks; actual visual width is mostly from texture.
-      startSize: new IntervalValue(1.2, 2.2), 
+      // SIZE: width + stretched length (via avgSize in billboard shader).
+      startSize: new IntervalValue(0.65, 3.6),
       
-      startColor: new ColorRange(new Vector4(0.6, 0.7, 1.0, 1.0), new Vector4(0.6, 0.7, 1.0, 1.0)),
+      startColor: new ColorRange(
+        new Vector4(0.96, 0.98, 1.0, 1.0),
+        new Vector4(0.48, 0.6, 0.88, 0.38)
+      ),
       worldSpace: true,
       maxParticles: 15000,
       emissionOverTime: new ConstantValue(0), 
@@ -4741,12 +4884,22 @@ export class WeatherParticles {
       // RENDER MODE: StretchedBillBoard
       // Uses velocity to stretch the quad.
       renderMode: RenderMode.StretchedBillBoard,
-      // speedFactor: Controls how "long" the rain streak is relative to speed.
-      // 4000 speed * 0.01 factor = 40 unit long streak.
-      speedFactor: 0.01, 
+      // speedFactor: streak length vs velocity (tuned from rainStreakLength each frame).
+      speedFactor: RAIN_STREAK_SPEED_K * 0.25,
       
       startRotation: new ConstantValue(0),
-      behaviors: [gravity, wind, rainColorOverLife, killBehavior, new RainFadeInBehavior()],
+      behaviors: [
+        gravity,
+        wind,
+        rainColorOverLife,
+        killBehavior,
+        (() => {
+          const chaos = new RainChaosBehavior();
+          this._rainChaos = chaos;
+          return chaos;
+        })(),
+        new RainFadeInBehavior()
+      ],
     });
      
     this.rainSystem.emitter.position.set(centerX, centerY, safeEmitterZ);
@@ -4878,14 +5031,23 @@ export class WeatherParticles {
        log.warn('Failed to patch roof-drip batch material for roof mask:', e);
      }
 
-     // --- RAIN CURL NOISE (shared for all rain particles) ---
+     // --- RAIN TURBULENCE (fine gusts + broad curl; decoupled from calm wind) ---
+    const rainTurbulence = new TurbulenceField(
+      new THREE.Vector3(360, 360, 680),
+      3,
+      new THREE.Vector3(110, 110, 22),
+      new THREE.Vector3(0.42, 0.36, 0.14)
+    );
+    this._rainTurbulence = rainTurbulence;
+    this._rainTurbulenceBaseMul = rainTurbulence.velocityMultiplier.clone();
+    this.rainSystem.behaviors.push(rainTurbulence);
+
     const rainCurl = new CurlNoiseField(
-      new THREE.Vector3(1400, 1400, 2000),   // larger cells than snow for broad gusts
-      new THREE.Vector3(80, 80, 20),         // relatively subtle swirl
-      0.08                                   // time scale
+      new THREE.Vector3(480, 480, 820),
+      new THREE.Vector3(145, 145, 38),
+      0.24
     );
 
-    // Attach curl as a behavior to the rain system
     this.rainSystem.behaviors.push(rainCurl);
 
     // --- SPLASHES ---
@@ -6541,6 +6703,165 @@ export class WeatherParticles {
     return 1.0 - 0.7 * sceneDarkness;
   }
 
+  /** @returns {number} Scene darkness 0 (day) .. 1 (night). */
+  _readSceneDarkness01() {
+    let sceneDarkness = 0;
+    try {
+      const le = window.MapShine?.lightingEffect;
+      if (le && typeof le.getEffectiveDarkness === 'function') {
+        sceneDarkness = le.getEffectiveDarkness();
+      } else if (typeof canvas !== 'undefined' && canvas?.scene?.environment?.darknessLevel !== undefined) {
+        sceneDarkness = canvas.scene.environment.darknessLevel;
+      }
+    } catch (e) {
+    }
+    return Math.max(0, Math.min(1, sceneDarkness));
+  }
+
+  /**
+   * Rain day/night appearance: decouple alpha (visibility) from RGB (emissive look).
+   * Day = darker tint + higher opacity; night = dim tint + lower opacity.
+   * @param {number} darkness
+   * @returns {{ alphaMul: number, rgbMul: number, overlayAlpha: number }}
+   */
+  _getRainDayNightCoupling(darkness) {
+    const THREE = window.THREE;
+    const d = THREE ? THREE.MathUtils.clamp(darkness, 0, 1) : Math.max(0, Math.min(1, darkness));
+    return {
+      alphaMul: THREE.MathUtils.lerp(RAIN_DAY_ALPHA_MUL, RAIN_NIGHT_ALPHA_MUL, d),
+      rgbMul: THREE.MathUtils.lerp(RAIN_DAY_RGB_MUL, RAIN_NIGHT_RGB_MUL, d),
+      overlayAlpha: THREE.MathUtils.lerp(RAIN_OVERLAY_ALPHA_BOOST, RAIN_OVERLAY_ALPHA_BOOST * 0.72, d)
+    };
+  }
+
+  /**
+   * Lightning flash coupling for rain (separate alpha vs RGB boost).
+   * @returns {{ alphaMul: number, rgbMul: number }}
+   */
+  _getRainLightningCoupling() {
+    try {
+      const flash01 = Number(window.MapShine?.environment?.landscapeLightningFlash01);
+      if (!Number.isFinite(flash01) || flash01 <= 0) {
+        return { alphaMul: 1.0, rgbMul: 1.0 };
+      }
+      const f = Math.max(0, Math.min(1, flash01));
+      const punch = f * f;
+      return {
+        alphaMul: 1.0 + punch * RAIN_LIGHTNING_ALPHA_BOOST,
+        rgbMul: 1.0 + punch * RAIN_LIGHTNING_RGB_BOOST
+      };
+    } catch (_) {
+      return { alphaMul: 1.0, rgbMul: 1.0 };
+    }
+  }
+
+  /**
+   * Unified rain material opacity + spawn ColorRange for day/night and lightning.
+   * NormalBlending on a bright PP frame needs darker RGB + higher alpha by day;
+   * at night, bright RGB reads self-illuminated — keep both RGB and alpha low until lightning.
+   * @private
+   */
+  _applyRainVisualCoupling() {
+    if (!this.rainSystem) return;
+
+    const THREE = window.THREE;
+    if (!THREE) return;
+
+    const rainTuning = weatherController?.rainTuning || {};
+    const rainBrightnessUi = rainTuning.brightness ?? RAIN_BRIGHTNESS_UI_FULL;
+    const darkness = this._readSceneDarkness01();
+    const dayNight = this._getRainDayNightCoupling(darkness);
+    const lightning = this._getRainLightningCoupling();
+
+    const baseAlpha = this._rainBrightnessToAlphaScale(rainBrightnessUi);
+    const alphaScaleRain = THREE.MathUtils.clamp(
+      baseAlpha * dayNight.alphaMul * lightning.alphaMul * dayNight.overlayAlpha,
+      0.06,
+      1.0
+    );
+    const targetOpacity = THREE.MathUtils.clamp(
+      baseAlpha * dayNight.alphaMul * lightning.alphaMul * 0.92,
+      0.04,
+      1.0
+    );
+
+    const sig = `${targetOpacity.toFixed(4)}|${alphaScaleRain.toFixed(4)}|${darkness.toFixed(3)}|${lightning.alphaMul.toFixed(3)}|${lightning.rgbMul.toFixed(3)}`;
+    const rainDbg = !!window.MapShine?.debugRainHighlight;
+    const bSpread = THREE.MathUtils.clamp(rainTuning.brightnessSpread ?? RAIN_BRIGHTNESS_SPREAD_DEF, 0.0, 2.0);
+    const rgbK = Math.min(1.15, dayNight.rgbMul * lightning.rgbMul);
+    const minA = 1.0 * alphaScaleRain;
+    const maxA = (0.32 + 0.6 * bSpread) * alphaScaleRain;
+
+    if (sig !== this._lastRainVisualSig) {
+      this._lastRainVisualSig = sig;
+      this._lastLightningRainMul = lightning.alphaMul;
+      if (this._rainMaterial) this._rainMaterial.opacity = targetOpacity;
+      if (this.rainSystem.material) this.rainSystem.material.opacity = targetOpacity;
+    }
+
+    // ColorRange endpoints: always refresh so lightning flash tracks every frame.
+    if (this.rainSystem.startColor?.a && this.rainSystem.startColor?.b) {
+      if (rainDbg) {
+        this.rainSystem.startColor.a.set(1.0, 0.0, 1.0, minA);
+        this.rainSystem.startColor.b.set(1.0, 0.0, 1.0, maxA);
+      } else {
+        const dim = (0.4 + 0.1 * (1.0 - bSpread)) * rgbK;
+        const hiR = 0.78 * rgbK;
+        const hiG = 0.84 * rgbK;
+        const hiB = 0.94 * rgbK;
+        this.rainSystem.startColor.a.set(hiR, hiG, hiB, minA);
+        this.rainSystem.startColor.b.set(dim, dim + 0.08, 0.88 * rgbK, maxA);
+      }
+    }
+
+    const applyMatTint = (mat) => {
+      if (!mat?.color) return;
+      if (rainDbg) {
+        mat.color.setHex(0xff00ff);
+        return;
+      }
+      mat.color.setRGB(
+        Math.min(1.0, 0.92 * rgbK),
+        Math.min(1.0, 0.96 * rgbK),
+        Math.min(1.0, 1.0 * rgbK)
+      );
+    };
+    applyMatTint(this._rainMaterial);
+    applyMatTint(this.rainSystem.material);
+    applyMatTint(this._rainBatchMaterial);
+
+    if (this._roofDripMaterial && this.rainSystem.material) {
+      this._roofDripMaterial.opacity = this.rainSystem.material.opacity;
+      if (this.roofDripSystem?.startColor?.a && this.roofDripSystem.startColor?.b) {
+        const topA = minA * 0.98;
+        const dim = 0.62 * rgbK;
+        this.roofDripSystem.startColor.a.set(0.72 * rgbK, 0.8 * rgbK, 0.92 * rgbK, topA);
+        this.roofDripSystem.startColor.b.set(dim, dim + 0.08, 0.85 * rgbK, 0.0);
+      }
+    }
+  }
+
+  /**
+   * @deprecated Use _applyRainVisualCoupling — kept as alias for call sites.
+   */
+  _applyLandscapeLightningRainBrightness() {
+    this._applyRainVisualCoupling();
+  }
+
+  /**
+   * Map WeatherController `rainTuning.brightness` (UI 0.1..12) to 0..1 alpha scale.
+   * @param {number} brightness
+   * @returns {number}
+   */
+  _rainBrightnessToAlphaScale(brightness) {
+    const THREE = window.THREE;
+    const b = THREE ? THREE.MathUtils.clamp(brightness, 0.1, 12.0) : Math.max(0.1, Math.min(12, brightness));
+    const span = Math.max(0.001, RAIN_BRIGHTNESS_UI_FULL - 0.1);
+    return THREE
+      ? THREE.MathUtils.clamp((b - 0.1) / span, 0.08, 1.0)
+      : Math.max(0.08, Math.min(1, (b - 0.1) / span));
+  }
+
   update(dt, sceneBoundsVec4) {
     // Global Weather checkbox kill-switch.
     // When weather is disabled we must:
@@ -6596,6 +6917,9 @@ export class WeatherParticles {
     // Rain impacts are spawned from `particleDied` events (after batch.update). Flush here
     // so splashes appear even when the control path below is throttled this frame.
     this._flushRainImpactSplashes();
+
+    // Landscape lightning flash doubles rain brightness — must track flash envelope every frame.
+    this._applyLandscapeLightningRainBrightness();
 
     // T2-A: Control-rate throttle — the expensive control path (emission bounds,
     // sizing, emission rates, uniform updates, mask lookups) only runs at _controlHz.
@@ -7484,58 +7808,18 @@ export class WeatherParticles {
           }
         }
 
-        // 2. Streak Length -> speedFactor
-        const currentStreakLen = rainTuning.streakLength ?? 1.0;
-        if (currentStreakLen !== this._lastRainTuning.streakLength) {
-          this._lastRainTuning.streakLength = currentStreakLen;
-          // Keep this in sync with the baseline speedFactor set in _initSystems.
-          // Smaller values (e.g. 0.25) now produce noticeably shorter streaks.
-          this.rainSystem.speedFactor = 0.02 * currentStreakLen;
+        // 2. Streak Length -> speedFactor (high gravity elongates streaks — compensate).
+        const currentStreakLen = rainTuning.streakLength ?? 0.25;
+        const rainGravForLen = Math.max(0.05, rainTuning.gravityScale ?? 1.0);
+        const streakKey = `${currentStreakLen}|${rainGravForLen}`;
+        if (streakKey !== this._lastRainTuning.streakLength) {
+          this._lastRainTuning.streakLength = streakKey;
+          const gravLenComp = 1.0 / Math.sqrt(rainGravForLen);
+          this.rainSystem.speedFactor = RAIN_STREAK_SPEED_K * currentStreakLen * gravLenComp;
         }
 
-        // 3. Brightness -> material opacity; RGB comes from per-frame block below (rain debug magenta).
-        const currentBrightness = (rainTuning.brightness ?? 1.0) * darknessBrightnessScale;
-        if (currentBrightness !== this._lastRainTuning.brightness &&
-            (this._rainMaterial || this.rainSystem.material)) {
-
-          this._lastRainTuning.brightness = currentBrightness;
-
-          const clampedB = THREE.MathUtils.clamp(currentBrightness, 0.0, 3.0);
-          const alphaScale = clampedB / 3.0; // 0 -> invisible, 1 -> full
-
-          // Material opacity
-          const targetOpacity = THREE.MathUtils.clamp(alphaScale * 1.2, 0.0, 1.0);
-          if (this._rainMaterial) {
-            this._rainMaterial.opacity = targetOpacity;
-          }
-          if (this.rainSystem.material) {
-            this.rainSystem.material.opacity = targetOpacity;
-          }
-        }
-
-        const rainDbg = !!window.MapShine?.debugRainHighlight;
-        const clampedBRain = THREE.MathUtils.clamp(currentBrightness, 0.0, 3.0);
-        const alphaScaleRain = clampedBRain / 3.0;
-        const minA = 1.0 * alphaScaleRain;
-        const maxA = 0.7 * alphaScaleRain;
-        if (this.rainSystem.startColor && this.rainSystem.startColor.a && this.rainSystem.startColor.b) {
-          if (rainDbg) {
-            this.rainSystem.startColor.a.set(1.0, 0.0, 1.0, minA);
-            this.rainSystem.startColor.b.set(1.0, 0.0, 1.0, maxA);
-          } else {
-            this.rainSystem.startColor.a.set(0.6, 0.7, 1.0, minA);
-            this.rainSystem.startColor.b.set(0.6, 0.7, 1.0, maxA);
-          }
-        }
-        if (this._rainMaterial && this._rainMaterial.color) {
-          this._rainMaterial.color.setHex(rainDbg ? 0xff00ff : 0xffffff);
-        }
-        if (this.rainSystem.material?.color) {
-          this.rainSystem.material.color.setHex(rainDbg ? 0xff00ff : 0xffffff);
-        }
-        if (this._rainBatchMaterial?.color) {
-          this._rainBatchMaterial.color.setHex(rainDbg ? 0xff00ff : 0xffffff);
-        }
+        // 3. Day/night + lightning visual coupling (opacity + spawn color range).
+        this._applyRainVisualCoupling();
         // Apply roof mask uniforms for rain (base material)
         if (this._rainMaterial && this._rainMaterial.userData && this._rainMaterial.userData.roofUniforms) {
           const uniforms = this._rainMaterial.userData.roofUniforms;
@@ -7689,13 +7973,6 @@ export class WeatherParticles {
       } else if (this._roofDripMaterial && this.rainSystem?.material) {
         this._roofDripMaterial.opacity = this.rainSystem.material.opacity;
         this._roofDripMaterial.color.setHex(0xffffff);
-        if (THREE && this.roofDripSystem.startColor?.a && this.roofDripSystem.startColor?.b) {
-          const rb = THREE.MathUtils.clamp((rainTuning.brightness ?? 1.0) * darknessBrightnessScale, 0.0, 3.0);
-          const as = rb / 3.0;
-          const topA = 1.0 * as * 0.98;
-          this.roofDripSystem.startColor.a.set(0.6, 0.7, 1.0, topA);
-          this.roofDripSystem.startColor.b.set(0.6, 0.7, 1.0, 0.0);
-        }
       }
 
       if (this._roofDripMaterial?.userData?.roofUniforms) {
@@ -8946,10 +9223,34 @@ export class WeatherParticles {
         }
       }
 
-      // Rain curl turbulence: ramps from low wind upward (no hard cliff at 0.5).
+      const rainChaosStrength = debugDisableWeatherBehaviors
+        ? 0.0
+        : (rainTuning.chaosStrength ?? 1.0);
+      if (this._rainChaos) {
+        this._rainChaos.strength = rainChaosStrength;
+        this._rainChaos.brightnessSpread = debugDisableWeatherBehaviors
+          ? 0.0
+          : (rainTuning.brightnessSpread ?? RAIN_BRIGHTNESS_SPREAD_DEF);
+        this._rainChaos.lengthSpread = debugDisableWeatherBehaviors
+          ? 0.0
+          : (rainTuning.lengthSpread ?? RAIN_LENGTH_SPREAD_DEF);
+        this._rainChaos.extraGravityBase = this._rainBaseGravity * (rainTuning.gravityScale ?? 1.0);
+      }
+
+      const rainTurbStrength = debugDisableWeatherBehaviors
+        ? 0.0
+        : (rainTuning.turbulenceStrength ?? 1.0);
+      if (this._rainTurbulence && this._rainTurbulenceBaseMul) {
+        const w = THREE.MathUtils.clamp(windSpeed, 0, 1);
+        const turbWind = 0.42 + 0.58 * w;
+        const turbScale = turbWind * rainTurbStrength;
+        this._rainTurbulence.velocityMultiplier.copy(this._rainTurbulenceBaseMul).multiplyScalar(turbScale);
+      }
+
+      // Rain curl: always-on base swirl + extra when wind picks up (calm rain still meanders).
       if (this._rainCurl && this._rainCurlBaseStrength) {
         const w = THREE.MathUtils.clamp(windSpeed, 0, 1);
-        const windTurbulenceFactor = 0.12 + 0.88 * THREE.MathUtils.clamp((w - 0.06) / 0.94, 0, 1);
+        const windTurbulenceFactor = 0.48 + 0.52 * THREE.MathUtils.clamp((w - 0.04) / 0.96, 0, 1);
 
         const curlStrength = debugDisableWeatherBehaviors ? 0.0 : (rainTuning.curlStrength ?? 1.0);
         const curlScale = windTurbulenceFactor * curlStrength;

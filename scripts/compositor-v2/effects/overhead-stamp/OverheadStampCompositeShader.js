@@ -172,17 +172,10 @@ export function getOverheadStampCompositeFragmentShader() {
         baseOffsetDeltaUv.y * baseOffsetScaleY
       );
 
-      float roofCoverageAlpha = clamp(texture2D(tRoof, clamp(roofUv, 0.0, 1.0)).a, 0.0, 1.0);
-      float roofVisibilityAlpha = roofCoverageAlpha;
-      if (uHasRoofVisibility > 0.5) {
-        roofVisibilityAlpha = clamp(texture2D(tRoofVisibility, clamp(screenUv, 0.0, 1.0)).a, 0.0, 1.0);
-      }
-      float roofBaseAlpha = roofVisibilityAlpha * (1.0 - clamp(uHoverRevealActive, 0.0, 1.0));
-
       bool tileProjectionEnabled = (uTileProjectionEnabled > 0.5 && uHasTileProjection > 0.5);
-      // Tile projection length is independent of outdoor/indoor receiver length scales
-      // (those gate roof stamp distance; tile casters carry their own length scale).
+      // Tile projection length is independent of outdoor/indoor receiver length scales.
       float projectedPixelLen = uLength * 1080.0 * max(uZoom, 0.0001) * sunLen * max(uTileProjectionLengthScale, 0.0);
+      float tilePixelLen = projectedPixelLen;
       vec2 projectedOffsetDeltaUv = screenDir * projectedPixelLen * uTexelSize * tileProjectionUvScale;
       float projectedOffsetScaleX = clamp(offsetScaleLimit(tileProjectionUv.x, projectedOffsetDeltaUv.x), 0.0, 1.0);
       float projectedOffsetScaleY = clamp(offsetScaleLimit(tileProjectionUv.y, projectedOffsetDeltaUv.y), 0.0, 1.0);
@@ -193,19 +186,29 @@ export function getOverheadStampCompositeFragmentShader() {
         projectedOffsetDeltaUv.y * projectedOffsetScaleY
       );
       float tileBaseAlpha = 0.0;
+      float depthTileProjectionMod = 1.0;
+      float roofCoverageAlpha = 0.0;
+      float roofVisibilityAlpha = 0.0;
+      float roofBaseAlpha = 0.0;
+
+      roofCoverageAlpha = clamp(texture2D(tRoof, clamp(roofUv, 0.0, 1.0)).a, 0.0, 1.0);
+      roofVisibilityAlpha = roofCoverageAlpha;
+      if (uHasRoofVisibility > 0.5) {
+        roofVisibilityAlpha = clamp(texture2D(tRoofVisibility, clamp(screenUv, 0.0, 1.0)).a, 0.0, 1.0);
+      }
+      roofBaseAlpha = roofVisibilityAlpha * (1.0 - clamp(uHoverRevealActive, 0.0, 1.0));
+
       if (uHasTileProjectionRaw > 0.5) {
         tileBaseAlpha = clamp(texture2D(tTileProjectionRaw, clamp(tileProjectionUv, 0.0, 1.0)).a, 0.0, 1.0);
-      } else {
+      } else if (uHasTileProjection > 0.5) {
         tileBaseAlpha = clamp(texture2D(tTileProjection, clamp(tileProjectionUv, 0.0, 1.0)).a, 0.0, 1.0);
       }
-
-      float depthTileProjectionMod = 1.0;
       if (uDepthEnabled > 0.5 && tileProjectionEnabled && sunLen > 1e-6) {
         float receiverDevice = texture2D(uDepthTexture, screenUv).r;
         if (receiverDevice < 0.9999) {
           float receiverLinear = msa_linearizeDepth(receiverDevice);
           float receiverHeight = uGroundDistance - receiverLinear;
-          vec2 tileCasterUv = screenUv + screenDir * projectedPixelLen * uTexelSize * min(projectedOffsetScaleX, projectedOffsetScaleY);
+          vec2 tileCasterUv = screenUv + screenDir * tilePixelLen * uTexelSize * min(projectedOffsetScaleX, projectedOffsetScaleY);
           float tileCasterDevice = texture2D(uDepthTexture, tileCasterUv).r;
           if (tileCasterDevice < 0.9999) {
             float tileCasterLinear = msa_linearizeDepth(tileCasterDevice);
@@ -218,8 +221,9 @@ export function getOverheadStampCompositeFragmentShader() {
 
       vec2 maskTexelSize = vec2(1.0) / max(uStampSceneSize, vec2(1.0));
       float maskOffsetPx = uLength * 1080.0 * receiverLengthScale * sunLen;
+      vec2 maskSunDir = sunLen > 1e-6 ? normalize(uSunDir) : vec2(0.0);
       vec2 foundryReceiver = stampFoundryFromScreen(screenUv);
-      vec2 foundryCaster = foundryReceiver + vec2(uSunDir.x, -uSunDir.y) * maskOffsetPx;
+      vec2 foundryCaster = foundryReceiver + maskSunDir * maskOffsetPx;
       vec2 maskOffsetUvBase = stampSceneUvFromFoundry(foundryCaster);
 
       float sUvValid = uvInBounds(offsetUv, uTexelSize * 0.05);

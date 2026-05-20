@@ -52,13 +52,108 @@ export const peakHour = (hour, center, widthHours) => {
  * @returns {number}
  */
 export function computeGoldenHourShadowLengthWeight(hourRaw, sunriseHour = 6, widthHours = 2.5) {
+  const cfg = getShadowSystemTuning();
+  const w = Number.isFinite(Number(cfg?.goldenHourWidthHours))
+    ? Number(cfg.goldenHourWidthHours)
+    : widthHours;
+  return computeShadowTimeTuning(hourRaw, sunriseHour, cfg).lengthScale;
+}
+
+/**
+ * Default unified shadow time-of-day tuning (overridden by Tweakpane `globalParams.shadowSystem`).
+ * @type {Readonly<Record<string, number>>}
+ */
+export const DEFAULT_SHADOW_SYSTEM_TUNING = Object.freeze({
+  goldenHourWidthHours: 2.5,
+  noonWidthHours: 3.0,
+  midnightWidthHours: 2.0,
+  /** Multiplier on per-effect base softness at solar noon (lower = sharper). */
+  softnessNoon: 0.42,
+  /** Multiplier at dawn/dusk (higher = more diffuse). */
+  softnessGolden: 1.85,
+  /** Multiplier near midnight — moon shadows, sharper than golden hour. */
+  softnessMidnight: 0.62,
+  softnessNeutral: 1.0,
+  /** Ray length / offset scale at noon (short underfoot shadows). */
+  lengthNoon: 0.12,
+  lengthGolden: 1.0,
+  lengthMidnight: 0.38,
+  lengthNeutral: 0.55,
+  /** Directional smear along sun vector (building/sky-reach ray march). */
+  smearNoon: 0.04,
+  smearGolden: 1.0,
+  smearMidnight: 0.32,
+  smearNeutral: 0.18,
+  cloudDiffusionFactor: 3.0,
+});
+
+/**
+ * Live tuning from Tweakpane / UI manager, merged over {@link DEFAULT_SHADOW_SYSTEM_TUNING}.
+ * @returns {Record<string, number>}
+ */
+export function getShadowSystemTuning() {
+  const ui = globalThis.window?.MapShine?.tweakpaneManager
+    ?? globalThis.window?.MapShine?.uiManager
+    ?? null;
+  const raw = ui?.globalParams?.shadowSystem;
+  if (!raw || typeof raw !== 'object') return { ...DEFAULT_SHADOW_SYSTEM_TUNING };
+  const out = { ...DEFAULT_SHADOW_SYSTEM_TUNING };
+  for (const key of Object.keys(DEFAULT_SHADOW_SYSTEM_TUNING)) {
+    const n = Number(raw[key]);
+    if (Number.isFinite(n)) out[key] = n;
+  }
+  return out;
+}
+
+/**
+ * Time-of-day multipliers shared by all shadow producers.
+ * Softness peaks at dawn/dusk, sharp at noon, moderately sharp at midnight (moon).
+ * Length and smear peak at golden hour for elongated diffuse shadows.
+ *
+ * @param {number} hourRaw
+ * @param {number} [sunriseHour=6]
+ * @param {Record<string, number>} [cfg]
+ * @returns {{ softnessScale:number, lengthScale:number, smearScale:number, goldenFactor:number, noonFactor:number, midnightFactor:number }}
+ */
+export function computeShadowTimeTuning(hourRaw, sunriseHour = 6, cfg = null) {
+  const c = cfg ?? getShadowSystemTuning();
   const hour = wrapHour24(hourRaw);
   const sunrise = wrapHour24(sunriseHour);
   const sunset = wrapHour24(sunrise + 12);
-  return Math.max(
-    peakHour(hour, sunrise, widthHours),
-    peakHour(hour, sunset, widthHours),
+  const goldenW = Math.max(0.25, Number(c.goldenHourWidthHours) || 2.5);
+  const golden = Math.max(
+    peakHour(hour, sunrise, goldenW),
+    peakHour(hour, sunset, goldenW),
   );
+  const noon = peakHour(hour, 12, Math.max(0.25, Number(c.noonWidthHours) || 3));
+  const midnight = peakHour(hour, 0, Math.max(0.25, Number(c.midnightWidthHours) || 2));
+
+  const blendPeak = (neutral, peakValue, factor) => (
+    neutral + (peakValue - neutral) * clamp01(factor)
+  );
+
+  let softnessScale = blendPeak(c.softnessNeutral, c.softnessGolden, golden);
+  softnessScale = blendPeak(softnessScale, c.softnessNoon, noon);
+  softnessScale = blendPeak(softnessScale, c.softnessMidnight, midnight);
+
+  let lengthScale = blendPeak(c.lengthNeutral, c.lengthGolden, golden);
+  lengthScale = blendPeak(lengthScale, c.lengthNoon, noon);
+  lengthScale = blendPeak(lengthScale, c.lengthMidnight, midnight);
+  lengthScale = Math.max(0.05, lengthScale);
+
+  let smearScale = blendPeak(c.smearNeutral, c.smearGolden, golden);
+  smearScale = blendPeak(smearScale, c.smearNoon, noon);
+  smearScale = blendPeak(smearScale, c.smearMidnight, midnight);
+  smearScale = Math.max(0, smearScale);
+
+  return {
+    softnessScale: Math.max(0.05, softnessScale),
+    lengthScale,
+    smearScale,
+    goldenFactor: golden,
+    noonFactor: noon,
+    midnightFactor: midnight,
+  };
 }
 
 /**
@@ -94,46 +189,6 @@ export function computeSunAnglesFromHour(hourRaw, sunriseHour = 6) {
  * @param {{x:number,y:number}|null} [fallback=null]
  * @returns {{x:number,y:number,azimuthDeg:number,elevationDeg:number}}
  */
-export function computeSunDirection2D(azimuthDeg, elevationDeg, latitudeScale = 0.1, fallback = null) {
-  let az = Number(azimuthDeg);
-  let elFromAngles = null;
-  if (!Number.isFinite(az)) {
-    let hour = 12.0;
-    try {
-      if (weatherController && typeof weatherController.timeOfDay === 'number') {
-        hour = weatherController.timeOfDay;
-      }
-    } catch (_) {}
-    const angles = computeSunAnglesFromHour(hour);
-    az = angles.azimuthDeg;
-    elFromAngles = angles.elevationDeg;
-  }
-
-  const el = Number.isFinite(Number(elevationDeg))
-    ? Number(elevationDeg)
-    : (Number.isFinite(elFromAngles) ? elFromAngles : 45.0);
-  const lat = Number.isFinite(Number(latitudeScale)) ? clamp(Number(latitudeScale), 0.0, 1.0) : 0.1;
-  const rad = az * (Math.PI / 180.0);
-  let x = -Math.sin(rad);
-  let y = -Math.cos(rad) * lat;
-
-  const lenSq = x * x + y * y;
-  if (lenSq < 1e-8) {
-    const fx = Number(fallback?.x);
-    const fy = Number(fallback?.y);
-    const fl = fx * fx + fy * fy;
-    if (Number.isFinite(fl) && fl > 1e-8) {
-      x = fx;
-      y = fy;
-    } else {
-      x = Math.cos(rad) >= 0.0 ? -1.0 : 1.0;
-      y = 0.0;
-    }
-  }
-
-  return { x, y, azimuthDeg: az, elevationDeg: el };
-}
-
 export { clamp01 };
 
 /**
@@ -144,7 +199,42 @@ export { clamp01 };
  * @param {number} [effectFallback=0.1] Used when overhead params are unavailable (unit tests / startup).
  */
 export function getUnifiedShadowLatitudeScale(effectFallback = 0.1) {
-  const raw = window.MapShine?.floorCompositorV2?._overheadShadowEffect?.params?.sunLatitude;
+  const ui = globalThis.window?.MapShine?.tweakpaneManager
+    ?? globalThis.window?.MapShine?.uiManager
+    ?? null;
+  const globalLat = Number(ui?.globalParams?.sunLatitude);
+  if (Number.isFinite(globalLat)) return clamp(globalLat, 0.0, 1.0);
+  const fc = globalThis.window?.MapShine?.effectComposer?._floorCompositorV2
+    ?? globalThis.window?.MapShine?.floorCompositorV2
+    ?? null;
+  const raw = fc?._overheadShadowEffect?.params?.sunLatitude;
   if (Number.isFinite(Number(raw))) return clamp(Number(raw), 0.0, 1.0);
   return clamp(Number(effectFallback), 0.0, 1.0);
+}
+
+/**
+ * Resolve azimuth/elevation in degrees from explicit values or current time of day.
+ * @param {number|null|undefined} azimuthDeg
+ * @param {number|null|undefined} elevationDeg
+ * @param {number} [sunriseHour=6]
+ * @returns {{ azimuthDeg: number, elevationDeg: number }}
+ */
+export function resolveShadowSunAnglesDeg(azimuthDeg, elevationDeg, sunriseHour = 6) {
+  let az = Number(azimuthDeg);
+  let el = Number(elevationDeg);
+  if (!Number.isFinite(az) || !Number.isFinite(el)) {
+    let hour = 12.0;
+    let sunrise = sunriseHour;
+    try {
+      if (weatherController && typeof weatherController.timeOfDay === 'number') {
+        hour = weatherController.timeOfDay;
+      }
+      const envSunrise = weatherController?.getEnvironment?.()?.sunrise;
+      if (Number.isFinite(Number(envSunrise))) sunrise = Number(envSunrise);
+    } catch (_) {}
+    const angles = computeSunAnglesFromHour(hour, sunrise);
+    if (!Number.isFinite(az)) az = angles.azimuthDeg;
+    if (!Number.isFinite(el)) el = angles.elevationDeg;
+  }
+  return { azimuthDeg: az, elevationDeg: el };
 }

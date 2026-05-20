@@ -157,7 +157,7 @@ export class AtmosphericFogEffectV2 {
         summary: [
           'Adds air depth, fog color, and weather-driven atmosphere on the merged linear HDR frame (before Camera Grade).',
           'Composites using aerial perspective (scene transmittance + scattered air radiance), not by boosting local brightness.',
-          'Fog density follows the weather control panel Fog slider and presets (Mist, Fog Dense). Manual Fog Density adds on top.',
+          'Fog density follows weather presets and Dynamic Weather when enabled. Map Shine Control → Fog adds manual haze in Directed mode.',
           'Macro shape creates large fog banks and clear gaps; swirls add fluid detail; rain breaks up fog during storms.',
           'Use Camera Grade for exposure and tone mapping — not this pass.'
         ].join('\n\n'),
@@ -177,7 +177,7 @@ export class AtmosphericFogEffectV2 {
           name: 'density',
           label: 'Density & Falloff',
           type: 'inline',
-          parameters: ['manualFogDensity', 'weatherFogInfluence', 'maxOpacity', 'falloffStart', 'falloffEnd'],
+          parameters: ['weatherFogInfluence', 'maxOpacity', 'falloffStart', 'falloffEnd'],
         },
         {
           name: 'color',
@@ -236,11 +236,6 @@ export class AtmosphericFogEffectV2 {
       ],
       parameters: {
         enabled: { type: 'boolean', default: true },
-        manualFogDensity: {
-          type: 'slider', min: 0, max: 1, step: 0.01, default: 0.0,
-          label: 'Manual Fog Density',
-          tooltip: 'Adds to weather fog density. Use for always-on haze when weather is off.',
-        },
         weatherFogInfluence: {
           type: 'slider', min: 0, max: 1, step: 0.05, default: 1.0,
           label: 'Weather Fog Influence',
@@ -1033,7 +1028,7 @@ export class AtmosphericFogEffectV2 {
     }
     const weatherFog = this._resolveWeatherFogDensity();
     const weatherInfluence = clamp01(this.params.weatherFogInfluence ?? 1.0);
-    const manualFog = clamp01(this.params.manualFogDensity ?? 0.0);
+    const manualFog = this._resolveManualFogDensity();
     const fogDensity = clamp01(weatherFog * weatherInfluence + manualFog);
     this._lastFogDensity = fogDensity;
     u.uFogDensity.value = fogDensity;
@@ -1334,7 +1329,7 @@ export class AtmosphericFogEffectV2 {
     if (uPre) {
       const d = clamp01(
         this._resolveWeatherFogDensity() * clamp01(this.params.weatherFogInfluence ?? 1.0)
-        + clamp01(this.params.manualFogDensity ?? 0.0),
+        + this._resolveManualFogDensity(),
       );
       this._lastFogDensity = d;
       uPre.uFogDensity.value = d;
@@ -1450,6 +1445,16 @@ export class AtmosphericFogEffectV2 {
     }
     this._initialized = false;
     log.info('AtmosphericFogEffectV2 disposed');
+  }
+
+  /**
+   * Map Shine Control manual fog — ignored while Dynamic Weather is active.
+   * @returns {number}
+   * @private
+   */
+  _resolveManualFogDensity() {
+    if (weatherController?.dynamicEnabled === true) return 0.0;
+    return clamp01(this.params.manualFogDensity ?? 0.0);
   }
 
   /**

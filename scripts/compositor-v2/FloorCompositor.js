@@ -86,6 +86,12 @@ import { SepiaEffectV2 } from './effects/SepiaEffectV2.js';
 import { LensEffectV2 } from './effects/LensEffectV2.js';
 import { DistortionManager, DistortionLayer } from './effects/DistortionManager.js';
 import { LightningEffectV2 } from './effects/LightningEffectV2.js';
+import { WeatherLightningEffectV2 } from './effects/WeatherLightningEffectV2.js';
+import {
+  applyShadowBakeOverride,
+  captureShadowBakeState,
+  restoreShadowBakeState,
+} from './lightning/shadow-bake-override.js';
 import { AtmosphericFogEffectV2 } from './effects/AtmosphericFogEffectV2.js';
 import { FogOfWarEffectV2 } from './effects/FogOfWarEffectV2.js';
 import { MovementPreviewEffectV2 } from './effects/MovementPreviewEffectV2.js';
@@ -105,6 +111,7 @@ import { ShadowDriverState } from './shadow-system/ShadowDriverState.js';
 import { UpperFloorAlphaCompositor } from './shadow-system/UpperFloorAlphaCompositor.js';
 import { SkyOcclusionPrimitive } from './shadow-system/SkyOcclusionPrimitive.js';
 import { VegetationBillboardShadowPass } from './shadow-system/VegetationBillboardShadowPass.js';
+import { resolveEffectShadowSun2D } from './shadow-system/ShadowSunDirection.js';
 import { resolveEffectEnabled, resolveOverlayEffectActive, resolveFloorEffectActive } from '../effects/resolve-effect-enabled.js';
 
 const log = createLogger('FloorCompositor');
@@ -387,6 +394,12 @@ export class FloorCompositor {
      * @type {LightningEffectV2}
      */
     this._lightningEffect = new LightningEffectV2();
+
+    /**
+     * Distant landscape lightning: pre-baked compass shadows + outdoor/window flash.
+     * @type {WeatherLightningEffectV2}
+     */
+    this._weatherLightningEffect = new WeatherLightningEffectV2();
 
     /**
      * V2 Candle Flames Effect: map-point-driven instanced flames + light-scene glow.
@@ -1704,6 +1717,14 @@ export class FloorCompositor {
     }
     _reportProgress('LightningEffectV2');
     await yieldToMain();
+    try {
+      this._weatherLightningEffect?.initialize?.();
+      this._weatherLightningEffect?.setFloorCompositor?.(this);
+    } catch (err) {
+      log.warn('FloorCompositor: WeatherLightningEffectV2 initialize failed:', err);
+    }
+    _reportProgress('WeatherLightningEffectV2');
+    await yieldToMain();
 
     // Candle flames render in bus scene and push glow into lighting lightScene.
     try {
@@ -2011,6 +2032,12 @@ export class FloorCompositor {
       const lightning = this._lightningEffect;
       if (resolveEffectEnabled(lightning) && lightning?.wantsContinuousRender?.()) {
         reason = 'lightning:wants-continuous';
+        if (window.MapShine) window.MapShine.__v2ContinuousRenderReason = reason;
+        return true;
+      }
+      const landscapeLightning = this._weatherLightningEffect;
+      if (resolveEffectEnabled(landscapeLightning) && landscapeLightning?.wantsContinuousRender?.()) {
+        reason = 'landscapeLightning:wants-continuous';
         if (window.MapShine) window.MapShine.__v2ContinuousRenderReason = reason;
         return true;
       }
@@ -2923,7 +2950,7 @@ export class FloorCompositor {
       '_filterEffect', '_atmosphericFogEffect', '_fogEffect', '_bloomEffect',
       '_sharpenEffect', '_cloudEffect', '_shadowManagerEffect', '_waterEffect', '_waterSplashesEffect',
       '_underwaterBubblesEffect', '_smellyFliesEffect',
-      '_lightningEffect', '_candleFlamesEffect', '_playerLightEffect',
+      '_lightningEffect', '_weatherLightningEffect', '_candleFlamesEffect', '_playerLightEffect',
       '_overheadShadowEffect', '_buildingShadowEffect', '_skyReachShadowEffect', '_dotScreenEffect',
       '_halftoneEffect', '_asciiEffect', '_dazzleOverlayEffect',
       '_visionModeEffect', '_invertEffect', '_sepiaEffect', '_lensEffect',
@@ -3179,6 +3206,28 @@ export class FloorCompositor {
 
     const treeEntries = this._treeEffect?.collectBillboardShadowOverlayEntries?.() ?? [];
     const bushEntries = this._bushEffect?.collectBillboardShadowOverlayEntries?.() ?? [];
+    const wl = this._weatherLightningEffect;
+    const wlTarget = wl?.getLightningShadowTarget?.() ?? null;
+    if (wlTarget && wl?.wantsLiveLightningShadowOverride?.() && window.THREE) {
+      const sun2d = resolveEffectShadowSun2D({
+        azimuthDeg: wlTarget.azimuthDeg,
+        elevationDeg: wlTarget.elevationDeg,
+      });
+      const sunVec = new window.THREE.Vector2(sun2d.x, sun2d.y);
+      const lengthMul = Math.max(1, Number(wlTarget.lengthMul) || 3);
+      for (const entry of [...treeEntries, ...bushEntries]) {
+        const ud = entry?.uniforms?.uSunDir?.value;
+        if (ud) ud.copy(sunVec);
+        const sl = entry?.uniforms?.uShadowLength;
+        if (sl) {
+          const base = Number(entry.__msLandscapeLightningShadowLenBase);
+          if (!Number.isFinite(base)) {
+            entry.__msLandscapeLightningShadowLenBase = Number(sl.value) || 0.01;
+          }
+          sl.value = entry.__msLandscapeLightningShadowLenBase * lengthMul;
+        }
+      }
+    }
     const treeEntriesWithMask = treeEntries.filter((e) => !!(e?.uniforms?.uTreeMask?.value));
     const bushEntriesWithMask = bushEntries.filter((e) => !!(e?.uniforms?.uBushMask?.value));
 
@@ -3220,7 +3269,88 @@ export class FloorCompositor {
   /**
    * @returns {boolean} Whether ShadowManagerV2 produced a fresh combined RT this call.
    */
+  _pushLandscapeLightningShadowOverride() {
+    const wl = this._weatherLightningEffect;
+    const target = wl?.getLightningShadowTarget?.() ?? null;
+    if (!target || !wl?.wantsLiveLightningShadowOverride?.()) {
+      this._landscapeLightningShadowSnapshots = null;
+      return;
+    }
+    const targets = [
+      this._buildingShadowEffect,
+      this._skyReachShadowEffect,
+      this._paintedShadowEffect,
+    ].filter(Boolean);
+    this._landscapeLightningShadowSnapshots = targets.map((effect) => ({
+      effect,
+      snap: captureShadowBakeState(effect),
+    }));
+    for (const { effect } of this._landscapeLightningShadowSnapshots) {
+      applyShadowBakeOverride(effect, target);
+      try { effect.update?.(null); } catch (_) {}
+    }
+  }
+
+  _popLandscapeLightningShadowOverride() {
+    const stack = this._landscapeLightningShadowSnapshots;
+    if (!stack?.length) return;
+    for (const { effect, snap } of stack) {
+      restoreShadowBakeState(effect, snap);
+      try { effect.update?.(null); } catch (_) {}
+    }
+    this._landscapeLightningShadowSnapshots = null;
+  }
+
+  _applyLandscapeLightningShadowBlend() {
+    const wl = this._weatherLightningEffect;
+    const sm = this._shadowManagerEffect;
+    const state = wl?.getFlashState?.() ?? null;
+    const light01 = state?.flash01 ?? 0;
+    const shadow01 = state?.shadowFlash01 ?? light01;
+    const env = window.MapShine?.environment;
+    const outdoorStr = Math.max(0, Number(env?.landscapeLightningOutdoorStrength) || 0);
+
+    try {
+      const flashColor = wl?.getLightningFlashColor?.() ?? {
+        r: env?.landscapeLightningFlashColorR,
+        g: env?.landscapeLightningFlashColorG,
+        b: env?.landscapeLightningFlashColorB,
+      };
+      this._lightingEffect?.setLandscapeLightningFlash?.(light01, outdoorStr, {
+        shadowFlashFloor: env?.landscapeLightningShadowFlashFloor,
+        shadowFlashGamma: env?.landscapeLightningShadowFlashGamma,
+        flashContrast: env?.landscapeLightningFlashContrast,
+        flashColor,
+      });
+    } catch (_) {}
+
+    if (!sm?.setLandscapeLightningBlend) return;
+
+    if (shadow01 <= 0) {
+      sm.setLandscapeLightningBlend({ flash01: 0 });
+      return;
+    }
+
+    const textures = wl?.getShadowBlendTextures?.() ?? state?.textures ?? null;
+    if (!textures || wl?.wantsLiveLightningShadowOverride?.()) {
+      // Live override already renders lightning into structural RTs; avoid double blend.
+      sm.setLandscapeLightningBlend({ flash01: 0 });
+      return;
+    }
+
+    sm.setLandscapeLightningBlend({
+      flash01: shadow01,
+      shadowWeight: state?.shadowWeight ?? 0.85,
+      shadowDarkness: env?.landscapeLightningShadowDarkness,
+      building: textures.building,
+      skyReach: textures.skyReach,
+      painted: textures.painted,
+      vegetation: textures.vegetation,
+    });
+  }
+
   _runShadowManagerCombinePass(cloudTex, cloudRawTex, disableOverheadInLighting) {
+    this._applyLandscapeLightningShadowBlend();
     const sm = this._shadowManagerEffect;
     if (!sm || typeof sm.setInputs !== 'function' || typeof sm.render !== 'function') return false;
     if (sm.enabled === false) return false;
@@ -3316,6 +3446,7 @@ export class FloorCompositor {
       this._paintedShadowEffect,
       this._bushEffect,
       this._treeEffect,
+      this._windowLightEffect,
     ]);
     try {
       if (window.MapShine) window.MapShine.__shadowDriverState = driver;
@@ -3576,13 +3707,19 @@ export class FloorCompositor {
       // Weather particles must update BEFORE the bus render so their BatchedRenderer
       // positions are current when the bus scene is drawn this frame.
       this._profileEffectCall('weatherParticles', 'update', () => this._weatherParticles?.update?.(timeInfo), 'WeatherParticlesV2 update');
-      this._profileEffectCall('water', 'update', () => this._waterEffect?.update?.(timeInfo), 'WaterEffectV2 update');
       try {
         this._skyColorEffect?.setColorCorrectionTimelineActive?.(
           this._colorCorrectionEffect?.params?.todTimelineEnabled === true
         );
       } catch (_) {}
       this._profileEffectCall('skyColor', 'update', () => this._skyColorEffect.update(timeInfo), 'SkyColorEffectV2 update');
+      try {
+        const sky = this._skyColorEffect;
+        if (sky && Number.isFinite(Number(sky.currentSunAzimuthDeg)) && Number.isFinite(Number(sky.currentSunElevationDeg))) {
+          this._waterEffect?.setSunAngles?.(sky.currentSunAzimuthDeg, sky.currentSunElevationDeg);
+        }
+      } catch (_) {}
+      this._profileEffectCall('water', 'update', () => this._waterEffect?.update?.(timeInfo), 'WaterEffectV2 update');
       const skyIntensity01 = Number(
         this._skyColorEffect?.currentSkyIntensity01
         ?? this._skyColorEffect?._composeMaterial?.uniforms?.uIntensity?.value
@@ -3677,6 +3814,7 @@ export class FloorCompositor {
     // and mask bindings; skipping the outer block used to freeze sliders until
     // unrelated params (sun hash) changed.
     if (timeInfo) {
+      this._profileEffectCall('weatherLightning', 'update', () => this._weatherLightningEffect?.update?.(timeInfo), 'WeatherLightningEffectV2 update');
       this._profileEffectCall('overheadShadows', 'update', () => this._overheadShadowEffect?.update?.(timeInfo), 'OverheadShadowsEffectV2 update');
       this._profileEffectCall('buildingShadows', 'update', () => this._buildingShadowEffect?.update?.(timeInfo), 'BuildingShadowsEffectV2 update');
       this._profileEffectCall('skyReachShadows', 'update', () => this._skyReachShadowEffect?.update?.(timeInfo), 'SkyReachShadowsEffectV2 update');
@@ -3806,37 +3944,46 @@ export class FloorCompositor {
     if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: buildingShadows.render'); } catch (_) {} }
     if (_profiling) _profileT0 = performance.now();
     if (!_skipBuildingShadowPass) {
-      this._profileEffectCall('buildingShadows', 'render', () => {
-        this._buildingShadowEffect?.render?.(this.renderer, this.camera);
-      }, 'BuildingShadowsEffectV2 render');
+      this._pushLandscapeLightningShadowOverride();
+      try {
+        this._profileEffectCall('buildingShadows', 'render', () => {
+          this._buildingShadowEffect?.render?.(this.renderer, this.camera);
+        }, 'BuildingShadowsEffectV2 render');
+        this._profileEffectCall('skyReachShadows', 'render', () => {
+          this._skyReachShadowEffect?.render?.(this.renderer, this.camera);
+        }, 'SkyReachShadowsEffectV2 render');
+        this._profileEffectCall('paintedShadows', 'render', () => {
+          this._paintedShadowEffect?.render?.(this.renderer);
+        }, 'PaintedShadowEffectV2 render');
+      } finally {
+        this._popLandscapeLightningShadowOverride();
+      }
     }
-    if (_profiling) this._recordPassTiming('buildingShadowsRender', _profileT0);
-    if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: buildingShadows.render DONE'); } catch (_) {} }
-
-    if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: skyReachShadows.render'); } catch (_) {} }
-    if (_profiling) _profileT0 = performance.now();
-    if (!_skipBuildingShadowPass) {
-      this._profileEffectCall('skyReachShadows', 'render', () => {
-        this._skyReachShadowEffect?.render?.(this.renderer, this.camera);
-      }, 'SkyReachShadowsEffectV2 render');
+    if (_profiling) {
+      this._recordPassTiming('buildingShadowsRender', _profileT0);
+      this._recordPassTiming('skyReachShadowsRender', _profileT0);
+      this._recordPassTiming('paintedShadowsRender', _profileT0);
     }
-    if (_profiling) this._recordPassTiming('skyReachShadowsRender', _profileT0);
-    if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: skyReachShadows.render DONE'); } catch (_) {} }
-
-    if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: paintedShadows.render'); } catch (_) {} }
-    if (_profiling) _profileT0 = performance.now();
-    if (!_skipBuildingShadowPass) {
-      this._profileEffectCall('paintedShadows', 'render', () => {
-        this._paintedShadowEffect?.render?.(this.renderer);
-      }, 'PaintedShadowEffectV2 render');
+    if (_dbgStages) {
+      try {
+        log.info('[V2 Frame] ✔ Stage: building/skyReach/painted shadows render DONE');
+      } catch (_) {}
     }
-    if (_profiling) this._recordPassTiming('paintedShadowsRender', _profileT0);
     if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: paintedShadows.render DONE'); } catch (_) {} }
 
     try {
       this._prepareVegetationBillboardShadowPasses();
     } catch (err) {
       log.warn('FloorCompositor: vegetation billboard shadow prep failed:', err);
+    }
+
+    try {
+      const wlCap = this._weatherLightningEffect;
+      if (wlCap?.wantsLiveLightningShadowOverride?.()) {
+        wlCap.captureStrikeShadowFromCompositor(this);
+      }
+    } catch (err) {
+      log.warn('FloorCompositor: landscape lightning strike shadow capture failed:', err);
     }
 
     // ShadowManagerV2 (required): combine previous-frame cloud + structural shadows
@@ -3938,6 +4085,10 @@ export class FloorCompositor {
       ? this._lightingEffect.ceilingTransmittanceTextureForLighting : null;
     const overheadRoofRestrictLightTex = (_disableRoofInLighting || !_overheadShadowEnabled)
       ? null : (this._overheadShadowEffect?.roofRestrictLightTexture ?? null);
+
+    try {
+      this._applyLandscapeLightningShadowBlend();
+    } catch (_) {}
 
     // External-effects compositor (Sequencer / JB2A mirrors live in the bus
     // scene — sync transforms immediately before the per-level pipeline kicks
@@ -5063,6 +5214,9 @@ export class FloorCompositor {
       if (cache.cloudTex2 !== cloudPerFloor[2]) { cache.cloudTex2 = cloudPerFloor[2]; signatureChanged = true; }
       if (cache.cloudTex3 !== cloudPerFloor[3]) { cache.cloudTex3 = cloudPerFloor[3]; signatureChanged = true; }
 
+      if (signatureChanged) {
+        try { this._weatherLightningEffect?.invalidateCache?.('outdoors-change'); } catch (_) {}
+      }
       if (!force && !signatureChanged) return;
       this._lastOutdoorsTexture = outdoorsTex;
       this._lastOutdoorsFloorKey = resolved.floorKey;
@@ -6831,6 +6985,7 @@ export class FloorCompositor {
     try { this._paintedShadowEffect?.dispose?.(); } catch (_) {}
     try { this._smellyFliesEffect?.dispose?.(); } catch (_) {}
     try { this._lightningEffect?.dispose?.(); } catch (_) {}
+    try { this._weatherLightningEffect?.dispose?.(); } catch (_) {}
     try { this._candleFlamesEffect?.dispose?.(); } catch (_) {}
     try { this._playerLightEffect?.dispose?.(); } catch (_) {}
     try { this._dotScreenEffect?.dispose?.(); } catch (_) {}

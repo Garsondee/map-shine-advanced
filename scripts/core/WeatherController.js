@@ -69,16 +69,16 @@ export class WeatherController {
 
     /** @type {WeatherState} */
     this.currentState = {
-      precipitation: 0.0,
-      precipType: PrecipitationType.NONE,
-      cloudCover: 0.0,
-      windSpeedMS: 0.44 * WeatherController.MAX_WIND_MS,
-      windSpeed: 0.44,
-      windDirection: { x: 1, y: 0 }, // 0deg, upgraded to Vector2 in initialize() (Y-down world)
-      fogDensity: 0.0,
+      precipitation: 0.34,
+      precipType: PrecipitationType.RAIN,
+      cloudCover: 0.53,
+      windSpeedMS: 0.1 * WeatherController.MAX_WIND_MS,
+      windSpeed: 0.1,
+      windDirection: { x: Math.cos((205.0 * Math.PI) / 180.0), y: Math.sin((205.0 * Math.PI) / 180.0) },
+      fogDensity: 0.35,
       wetness: 0.0,
       freezeLevel: 0.0,
-      ashIntensity: 0.0 // 0.0 (none) to 1.0 (heavy ash fall)
+      ashIntensity: 0.0
     };
 
     /**
@@ -101,14 +101,14 @@ export class WeatherController {
     };
 
     /** @type {WeatherState} */
-    this.targetState = { 
-      precipitation: 0.0,
-      precipType: PrecipitationType.NONE,
-      cloudCover: 0.0,
-      windSpeedMS: 0.44 * WeatherController.MAX_WIND_MS,
-      windSpeed: 0.44,
-      windDirection: { x: 1, y: 0 },
-      fogDensity: 0.0,
+    this.targetState = {
+      precipitation: 0.34,
+      precipType: PrecipitationType.RAIN,
+      cloudCover: 0.53,
+      windSpeedMS: 0.1 * WeatherController.MAX_WIND_MS,
+      windSpeed: 0.1,
+      windDirection: { x: Math.cos((205.0 * Math.PI) / 180.0), y: Math.sin((205.0 * Math.PI) / 180.0) },
+      fogDensity: 0.35,
       wetness: 0.0,
       freezeLevel: 0.0,
       ashIntensity: 0.0
@@ -118,7 +118,7 @@ export class WeatherController {
     this.startState = { ...this.currentState, windDirection: { ...this.currentState.windDirection } };
 
     // Transition tracking
-    this.transitionDuration = 13.3;
+    this.transitionDuration = 0.0;
     this.transitionElapsed = 0;
     this.isTransitioning = false;
 
@@ -285,15 +285,23 @@ export class WeatherController {
 
     // Per-system tuning parameters for precipitation visuals
     this.rainTuning = {
-      intensityScale: 1.0,
+      intensityScale: 2.0,
       streakLength: 0.25,
-      dropSize: 3.1,
-      dropSizeMin: 1.4,
-      dropSizeMax: 13.8,
-      brightness: 5.7,
-      gravityScale: 0.05,
-      windInfluence: 0.85,
-      curlStrength: 4.0,
+      dropSize: 5.55,
+      dropSizeMin: 9.4,
+      dropSizeMax: 10.1,
+      brightness: 12.0,
+      gravityScale: 2.35,
+      windInfluence: 2.3,
+      curlStrength: 11.35,
+      /** Per-particle wobble + spawn velocity spread (RainChaosBehavior). */
+      chaosStrength: 0.8,
+      /** Fine-scale TurbulenceField multiplier. */
+      turbulenceStrength: 0.5,
+      /** Per-drop brightness spread (RainChaosBehavior + ColorRange). */
+      brightnessSpread: 0.25,
+      /** Per-drop streak length spread (size + velocity). */
+      lengthSpread: 0.05,
 
       // Splash-specific tuning (rain splashes on the ground)
       splashIntensityScale: 10.0,  // Multiplier on base splash emission
@@ -346,15 +354,15 @@ export class WeatherController {
       emissionRainMult: 300,
       emissionTailMult: 260,
       tailDurationSec: 300,
-      lifeMin: 2.8,
-      lifeMax: 5.2,
-      sizeMin: 1.2,
-      sizeMax: 2.4,
+      lifeMin: 1.9,
+      lifeMax: 3.85,
+      sizeMin: 0.28,
+      sizeMax: 0.52,
       maxParticles: 22000
     };
 
     this.snowTuning = {
-      intensityScale: 1.0,
+      intensityScale: 3.0,
       flakeSize: 1.5,
       brightness: 1.0,
       gravityScale: 0.01,
@@ -2920,7 +2928,7 @@ export class WeatherController {
     return {
       enabled: true,
       /** Bump when adding/removing Tweakpane params so the Weather folder can rebuild (see canvas-replacement). */
-      uiRevision: 5,
+      uiRevision: 7,
       parameters: {
         presetTransitionDurationMinutes: {
           label: 'Preset Transition (min)',
@@ -3005,8 +3013,8 @@ export class WeatherController {
         // Transition Controls
         transitionDuration: {
           label: 'Transition Time (s)',
-          default: 13.3,
-          min: 0.1,
+          default: 0.0,
+          min: 0.0,
           max: 60.0,
           step: 0.1,
           group: 'transitions'
@@ -3024,7 +3032,7 @@ export class WeatherController {
         // State Override (Manual Control)
         precipitation: {
           label: 'Precipitation',
-          default: 0.0,
+          default: 0.34,
           min: 0.0,
           max: 1.0,
           step: 0.01,
@@ -3032,7 +3040,7 @@ export class WeatherController {
         },
         cloudCover: {
           label: 'Cloud Cover',
-          default: 0.0,
+          default: 0.53,
           min: 0.0,
           max: 1.0,
           step: 0.01,
@@ -3040,7 +3048,7 @@ export class WeatherController {
         },
         fogDensity: {
           label: 'Fog Density',
-          default: 0.0,
+          default: 0.35,
           min: 0.0,
           max: 1.0,
           step: 0.01,
@@ -3075,7 +3083,7 @@ export class WeatherController {
         // Rain tuning
         rainIntensityScale: {
           label: 'Rain Intensity Scale',
-          default: 1.0,
+          default: 2.0,
           min: 0.0,
           max: 6.0,
           step: 0.05,
@@ -3084,14 +3092,14 @@ export class WeatherController {
         rainStreakLength: {
           label: 'Rain Streak Length',
           default: 0.25,
-          min: 0.25,
+          min: 0.05,
           max: 2.5,
           step: 0.05,
           group: 'rain'
         },
         rainDropSize: {
           label: 'Rain Drop Size',
-          default: 3.1,
+          default: 5.55,
           min: 0.5,
           max: 16.0,
           step: 0.05,
@@ -3099,7 +3107,7 @@ export class WeatherController {
         },
         rainDropSizeMin: {
           label: 'Rain Drop Size Min',
-          default: 1.4,
+          default: 9.4,
           min: 0.5,
           max: 64.0,
           step: 0.1,
@@ -3107,7 +3115,7 @@ export class WeatherController {
         },
         rainDropSizeMax: {
           label: 'Rain Drop Size Max',
-          default: 13.8,
+          default: 10.1,
           min: 0.5,
           max: 64.0,
           step: 0.1,
@@ -3115,7 +3123,7 @@ export class WeatherController {
         },
         rainBrightness: {
           label: 'Rain Brightness',
-          default: 5.7,
+          default: 12.0,
           min: 0.1,
           max: 12.0,
           step: 0.05,
@@ -3123,7 +3131,7 @@ export class WeatherController {
         },
         rainGravityScale: {
           label: 'Rain Gravity Scale',
-          default: 0.05,
+          default: 2.35,
           min: 0.05,
           max: 6.0,
           step: 0.05,
@@ -3131,17 +3139,49 @@ export class WeatherController {
         },
         rainWindInfluence: {
           label: 'Rain Wind Influence',
-          default: 0.85,
+          default: 2.3,
           min: 0.0,
           max: 4.0,
           step: 0.05,
           group: 'rain'
         },
         rainCurlStrength: {
-          label: 'Rain Turbulence Strength',
-          default: 4.0,
+          label: 'Rain Curl Strength',
+          default: 11.35,
+          min: 0.0,
+          max: 12.0,
+          step: 0.05,
+          group: 'rain'
+        },
+        rainChaosStrength: {
+          label: 'Rain Chaos (per-drop)',
+          default: 0.8,
+          min: 0.0,
+          max: 3.0,
+          step: 0.05,
+          group: 'rain'
+        },
+        rainTurbulenceStrength: {
+          label: 'Rain Fine Turbulence',
+          default: 0.5,
           min: 0.0,
           max: 4.0,
+          step: 0.05,
+          group: 'rain'
+        },
+        rainBrightnessSpread: {
+          label: 'Rain Brightness Spread',
+          default: 0.25,
+          min: 0.0,
+          max: 2.0,
+          step: 0.05,
+          group: 'rain'
+        },
+        rainLengthSpread: {
+          label: 'Rain Length Spread',
+          default: 0.05,
+          min: 0.0,
+          max: 2.0,
           step: 0.05,
           group: 'rain'
         },
@@ -3288,7 +3328,7 @@ export class WeatherController {
         },
         roofDripLifeMin: {
           label: 'Particle Life Min (s)',
-          default: 2.8,
+          default: 1.9,
           min: 0.2,
           max: 12,
           step: 0.05,
@@ -3296,7 +3336,7 @@ export class WeatherController {
         },
         roofDripLifeMax: {
           label: 'Particle Life Max (s)',
-          default: 5.2,
+          default: 3.85,
           min: 0.2,
           max: 16,
           step: 0.05,
@@ -3320,7 +3360,7 @@ export class WeatherController {
         },
         roofDripSizeMin: {
           label: 'Drop Size Min',
-          default: 1.2,
+          default: 0.28,
           min: 0.02,
           max: 8,
           step: 0.02,
@@ -3328,7 +3368,7 @@ export class WeatherController {
         },
         roofDripSizeMax: {
           label: 'Drop Size Max',
-          default: 2.4,
+          default: 0.52,
           min: 0.02,
           max: 12,
           step: 0.02,
@@ -3781,18 +3821,28 @@ export class WeatherController {
         { label: 'Fog', type: 'folder', parameters: ['fogDensity'], expanded: true },
         { label: 'Manual Override', type: 'folder', parameters: ['precipitation', 'cloudCover', 'wetness', 'freezeLevel'], expanded: true },
         { label: 'Wetness', type: 'folder', parameters: ['wettingDuration', 'dryingDuration', 'precipThreshold'] },
-        { label: 'Rain', type: 'folder', parameters: [
-          'rainIntensityScale',
-          'rainStreakLength',
-          'rainDropSize',
-          'rainDropSizeMin',
-          'rainDropSizeMax',
-          'rainBrightness',
-          'rainGravityScale',
-          'rainWindInfluence',
-          'rainCurlStrength',
-          'debugRainHighlight'
-        ] },
+        {
+          id: 'rain-particles',
+          label: 'Rain Particles',
+          type: 'folder',
+          categoryId: 'particle',
+          parameters: [
+            'rainIntensityScale',
+            'rainStreakLength',
+            'rainDropSize',
+            'rainDropSizeMin',
+            'rainDropSizeMax',
+            'rainBrightness',
+            'rainGravityScale',
+            'rainWindInfluence',
+            'rainCurlStrength',
+            'rainChaosStrength',
+            'rainTurbulenceStrength',
+            'rainBrightnessSpread',
+            'rainLengthSpread',
+            'debugRainHighlight'
+          ]
+        },
         { label: 'Roof & tree drips', type: 'folder', expanded: false, parameters: [
           'roofDripEnabled',
           'roofDripEmissionRainMult',
@@ -3830,7 +3880,21 @@ export class WeatherController {
           'rainSplash4SizeMax',
           'rainSplash4OpacityPeak'
         ] },
-        { label: 'Snow', type: 'folder', parameters: ['snowIntensityScale', 'snowFlakeSize', 'snowBrightness', 'snowGravityScale', 'snowWindInfluence', 'snowCurlStrength', 'snowFlutterStrength'] },
+        {
+          id: 'snow-particles',
+          label: 'Snow Particles',
+          type: 'folder',
+          categoryId: 'particle',
+          parameters: [
+            'snowIntensityScale',
+            'snowFlakeSize',
+            'snowBrightness',
+            'snowGravityScale',
+            'snowWindInfluence',
+            'snowCurlStrength',
+            'snowFlutterStrength'
+          ]
+        },
         { label: 'Flurries', type: 'folder', parameters: [
           'precipFlurryVariability',
           'ashFlurryVariability',

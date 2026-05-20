@@ -75,7 +75,12 @@ export function createDefaultControlState() {
     /** V2 bus replica overhead occlusion: multiplies radial radius in buffer space (0.05–100). */
     replicaOcclusionRadiusScale: 35.0,
     /** Soft rim width 0–100 (1 = default; higher = wider smoothstep). */
-    replicaOcclusionEdgeSoftness: 1.0
+    replicaOcclusionEdgeSoftness: 1.0,
+    landscapeLightning: {
+      lightning: 1.0,
+    },
+    /** Manual atmospheric fog when not using Dynamic Weather (Map Shine Control → AtmosphericFogEffectV2). */
+    manualFogDensity: 0.0,
   };
 }
 
@@ -188,6 +193,27 @@ export function sanitizeControlStateInPlace(cs, options = {}) {
       cs.playerLightAllowance[key] = normalizePlayerLightOverride(cs.playerLightAllowance[key]);
     }
   }
+
+  const defLL = createDefaultControlState().landscapeLightning;
+  if (!cs.landscapeLightning || typeof cs.landscapeLightning !== 'object') {
+    cs.landscapeLightning = { ...defLL };
+  } else {
+    const finite01 = (v, fb) => {
+      const n = Number(v);
+      return Number.isFinite(n) ? Math.max(0, Math.min(1, n)) : fb;
+    };
+    const raw = cs.landscapeLightning;
+    if (!Number.isFinite(Number(raw.lightning)) && Number.isFinite(Number(raw.stormIntensity))) {
+      raw.lightning = finite01(raw.stormIntensity, defLL.lightning);
+    }
+    cs.landscapeLightning.lightning = finite01(raw.lightning, defLL.lightning);
+  }
+
+  const finite01Scalar = (v, fb) => {
+    const n = Number(v);
+    return Number.isFinite(n) ? Math.max(0, Math.min(1, n)) : fb;
+  };
+  cs.manualFogDensity = finite01Scalar(cs.manualFogDensity, createDefaultControlState().manualFogDensity);
 }
 
 /**
@@ -205,6 +231,9 @@ export function cloneAndSanitizeControlState(raw, options = {}) {
     }
     if (raw.playerLightAllowance && typeof raw.playerLightAllowance === 'object') {
       Object.assign(next.playerLightAllowance, raw.playerLightAllowance);
+    }
+    if (raw.landscapeLightning && typeof raw.landscapeLightning === 'object') {
+      Object.assign(next.landscapeLightning, raw.landscapeLightning);
     }
     if (!Number.isFinite(next.windSpeedMS)) {
       const legacy01 = Number(raw.windSpeed);

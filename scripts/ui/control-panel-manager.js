@@ -21,6 +21,20 @@ import { getFoundryTimePhaseHours } from '../core/foundry-time-phases.js';
 import { extendMsaLocalFlagWriteGuard, refreshMsaSameSceneRedrawPredict } from '../utils/msa-local-flag-guard.js';
 import { cloneAndSanitizeControlState, sanitizeControlStateInPlace } from '../settings/control-state-sanitize.js';
 import {
+  applyLightningIntensityToEffect,
+  readLightningIntensityFromControlState,
+  syncWeatherLightningEffectFromControlState,
+  triggerLandscapeLightningAction,
+  writeLightningIntensityToControlState,
+} from './landscape-lightning-bridge.js';
+import {
+  applyManualFogDensityToEffect,
+  readManualFogDensityFromControlState,
+  syncAtmosphericFogEffectFromControlState,
+  syncControlStateFromAtmosphericFogEffect,
+  writeManualFogDensityToControlState,
+} from './atmospheric-fog-bridge.js';
+import {
   createDefaultPlayerLightAllowance,
   getGlobalPlayerLightModeAllowed,
   resolvePlayerLightModeAllowance
@@ -112,7 +126,11 @@ export class ControlPanelManager {
       tileMotionPaused: false,
       playerLightAllowance: createDefaultPlayerLightAllowance(),
       replicaOcclusionRadiusScale: 35.0,
-      replicaOcclusionEdgeSoftness: 1.0
+      replicaOcclusionEdgeSoftness: 1.0,
+      landscapeLightning: {
+        lightning: 1.0,
+      },
+      manualFogDensity: 0.0,
     };
 
     this._suppressInitialWeatherApply = false;
@@ -857,6 +875,33 @@ export class ControlPanelManager {
         color: rgba(225, 242, 255, 0.95);
         box-sizing: border-box;
       }
+      #map-shine-control-panel .map-shine-live-wx-strike-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr 1fr;
+        gap: 3px;
+        padding: 2px 0 0;
+      }
+      #map-shine-control-panel .map-shine-live-wx-strike-lbl {
+        font-size: 10px;
+        color: rgba(150, 182, 225, 0.78);
+        padding: 4px 0 0;
+      }
+      #map-shine-control-panel .map-shine-live-wx-strike-btn {
+        padding: 5px 4px;
+        border-radius: 5px;
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        background: rgba(255, 255, 255, 0.06);
+        color: rgba(210, 232, 255, 0.90);
+        cursor: pointer;
+        font-size: 9.5px;
+        font-weight: 600;
+        font-family: inherit;
+        transition: background 0.12s, border-color 0.12s;
+      }
+      #map-shine-control-panel .map-shine-live-wx-strike-btn:hover {
+        background: rgba(80, 170, 255, 0.14);
+        border-color: rgba(80, 170, 255, 0.32);
+      }
     `;
     document.head.appendChild(style);
   }
@@ -910,6 +955,92 @@ export class ControlPanelManager {
       }
     } finally {
       this._suppressLiveWeatherDomEvents = false;
+    }
+  }
+
+  /**
+   * Dynamic Weather owns fog density; manual Map Shine Control fog is directed-only.
+   * @returns {boolean}
+   * @private
+   */
+  _isDynamicWeatherDrivingFog() {
+    return this.controlState?.weatherMode === 'dynamic' && this.controlState?.dynamicEnabled === true;
+  }
+
+  /**
+   * @param {number} value
+   * @param {{ save?: boolean }} [opts]
+   * @private
+   */
+  _commitManualFogDensity(value, opts = {}) {
+    if (this._suppressLiveWeatherDomEvents) return;
+    if (this._isDynamicWeatherDrivingFog()) return;
+
+    const v = Math.max(0, Math.min(1, Number(value) || 0));
+    writeManualFogDensityToControlState(this.controlState, v);
+    applyManualFogDensityToEffect(v);
+    this._mirrorManualFogDomPair(v);
+
+    if (opts.save) {
+      this.debouncedSave();
+    }
+  }
+
+  /**
+   * @param {number} value
+   * @private
+   */
+  _mirrorManualFogDomPair(value) {
+    this._mirrorLiveWeatherDomPair('manualFogDensity', value);
+  }
+
+  /** Sync Fog slider from `controlState.manualFogDensity` (safe before DOM build). */
+  syncManualFogDomFromControlState() {
+    const v = readManualFogDensityFromControlState(this.controlState);
+    this._mirrorManualFogDomPair(v);
+    this._updateManualFogControlAvailability();
+  }
+
+  /**
+   * @param {number} value
+   * @param {{ save?: boolean }} [opts]
+   * @private
+   */
+  _commitLiveLightningIntensity(value, opts = {}) {
+    if (this._suppressLiveWeatherDomEvents) return;
+
+    const v = Math.max(0, Math.min(1, Number(value) || 0));
+    writeLightningIntensityToControlState(this.controlState, v);
+    applyLightningIntensityToEffect(v);
+    this._mirrorLiveWeatherDomPair('lightning', v);
+
+    if (opts.save) {
+      this.debouncedSave();
+    }
+  }
+
+  /** Sync Lightning slider from `controlState.landscapeLightning.lightning`. */
+  syncLiveLightningDomFromControlState() {
+    const v = readLightningIntensityFromControlState(this.controlState);
+    this._mirrorLiveWeatherDomPair('lightning', v);
+  }
+
+  /**
+   * Enable/disable manual fog row when Dynamic Weather is active.
+   * @private
+   */
+  _updateManualFogControlAvailability() {
+    const row = this._liveWeatherOverrideDom?.rows?.manualFogDensity;
+    if (!row) return;
+    const locked = this._isDynamicWeatherDrivingFog();
+    const title = locked ? 'Fog — driven by Dynamic Weather' : 'Fog — manual atmospheric haze (Directed mode)';
+    row.range.disabled = locked;
+    row.number.disabled = locked;
+    row.range.title = title;
+    row.number.title = title;
+    if (row.label) {
+      row.label.style.opacity = locked ? '0.45' : '';
+      row.label.title = title;
     }
   }
 
@@ -1003,9 +1134,11 @@ export class ControlPanelManager {
     const rows = {};
 
     const specs = [
+      { id: 'manualFogDensity', label: 'Fog', min: 0, max: 1, step: 0.01, manualFog: true },
       { id: 'precipitation', label: 'Rain', min: 0, max: 1, step: 0.01 },
       { id: 'cloudCover', label: 'Clouds', min: 0, max: 1, step: 0.01 },
       { id: 'freezeLevel', label: 'Temp (Freeze)', min: 0, max: 1, step: 0.01 },
+      { id: 'lightning', label: 'Lightning', min: 0, max: 1, step: 0.01, manualLightning: true },
       { id: 'windSpeed', label: 'Wind', min: 0, max: 1, step: 0.01 },
       { id: 'windDirection', label: 'Wind Dir', min: 0, max: 359, step: 1 }
     ];
@@ -1035,46 +1168,120 @@ export class ControlPanelManager {
       num.setAttribute('aria-label', `${spec.label} value`);
 
       const pid = spec.id;
-      range.addEventListener('input', () => {
-        const v = range.valueAsNumber;
-        if (!Number.isFinite(v)) return;
-        this._commitLiveWeatherOverrideScalar(pid, v, { save: false });
-      });
-      range.addEventListener('change', () => {
-        this._skipNextControlStateSceneFlagPersist = true;
-        this.debouncedSave();
-      });
-
-      num.addEventListener('input', () => {
-        const v = parseFloat(num.value);
-        if (!Number.isFinite(v)) return;
-        this._commitLiveWeatherOverrideScalar(pid, v, { save: false });
-      });
-      num.addEventListener('change', () => {
-        const v = parseFloat(num.value);
-        if (Number.isFinite(v)) {
+      if (spec.manualFog) {
+        range.addEventListener('input', () => {
+          const v = range.valueAsNumber;
+          if (!Number.isFinite(v)) return;
+          this._commitManualFogDensity(v, { save: false });
+        });
+        range.addEventListener('change', () => {
+          const v = range.valueAsNumber;
+          if (Number.isFinite(v)) this._commitManualFogDensity(v, { save: false });
+          this.debouncedSave();
+        });
+        num.addEventListener('input', () => {
+          const v = parseFloat(num.value);
+          if (!Number.isFinite(v)) return;
+          this._commitManualFogDensity(v, { save: false });
+        });
+        num.addEventListener('change', () => {
+          const v = parseFloat(num.value);
+          if (Number.isFinite(v)) this._commitManualFogDensity(v, { save: false });
+          this.debouncedSave();
+        });
+      } else if (spec.manualLightning) {
+        range.addEventListener('input', () => {
+          const v = range.valueAsNumber;
+          if (!Number.isFinite(v)) return;
+          this._commitLiveLightningIntensity(v, { save: false });
+        });
+        range.addEventListener('change', () => {
+          const v = range.valueAsNumber;
+          if (Number.isFinite(v)) this._commitLiveLightningIntensity(v, { save: false });
+          this.debouncedSave();
+        });
+        num.addEventListener('input', () => {
+          const v = parseFloat(num.value);
+          if (!Number.isFinite(v)) return;
+          this._commitLiveLightningIntensity(v, { save: false });
+        });
+        num.addEventListener('change', () => {
+          const v = parseFloat(num.value);
+          if (Number.isFinite(v)) this._commitLiveLightningIntensity(v, { save: false });
+          this.debouncedSave();
+        });
+      } else {
+        range.addEventListener('input', () => {
+          const v = range.valueAsNumber;
+          if (!Number.isFinite(v)) return;
           this._commitLiveWeatherOverrideScalar(pid, v, { save: false });
-        }
-        this._skipNextControlStateSceneFlagPersist = true;
-        this.debouncedSave();
-      });
+        });
+        range.addEventListener('change', () => {
+          this._skipNextControlStateSceneFlagPersist = true;
+          this.debouncedSave();
+        });
+
+        num.addEventListener('input', () => {
+          const v = parseFloat(num.value);
+          if (!Number.isFinite(v)) return;
+          this._commitLiveWeatherOverrideScalar(pid, v, { save: false });
+        });
+        num.addEventListener('change', () => {
+          const v = parseFloat(num.value);
+          if (Number.isFinite(v)) {
+            this._commitLiveWeatherOverrideScalar(pid, v, { save: false });
+          }
+          this._skipNextControlStateSceneFlagPersist = true;
+          this.debouncedSave();
+        });
+      }
 
       rowEl.appendChild(lbl);
       rowEl.appendChild(range);
       rowEl.appendChild(num);
       root.appendChild(rowEl);
 
-      rows[pid] = { range, number: num };
+      rows[pid] = { range, number: num, label: lbl };
     }
 
+    const strikeLabel = document.createElement('div');
+    strikeLabel.className = 'map-shine-live-wx-strike-lbl';
+    strikeLabel.textContent = 'Lightning Strikes';
+    root.appendChild(strikeLabel);
+
+    const strikeGrid = document.createElement('div');
+    strikeGrid.className = 'map-shine-live-wx-strike-grid';
+    strikeGrid.dataset.msLiveWxStrikes = '1';
+
+    const makeStrikeBtn = (label, actionId) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'map-shine-live-wx-strike-btn';
+      btn.textContent = label;
+      btn.addEventListener('click', () => {
+        triggerLandscapeLightningAction(actionId);
+      });
+      return btn;
+    };
+
+    strikeGrid.appendChild(makeStrikeBtn('Small', 'small'));
+    strikeGrid.appendChild(makeStrikeBtn('Big', 'big'));
+    strikeGrid.appendChild(makeStrikeBtn('30s Series', 'series'));
+    root.appendChild(strikeGrid);
+
     contentEl.appendChild(root);
-    this._liveWeatherOverrideDom = { root, rows };
+    this._liveWeatherOverrideDom = { root, rows, strikeGrid };
     this._liveWeatherOverrideDomBuilt = true;
 
     try {
       hydrateControlPanelLiveOverridesFromController(resolveWeatherController());
     } catch (_) {}
+    syncControlStateFromAtmosphericFogEffect(this.controlState);
+    syncAtmosphericFogEffectFromControlState(this.controlState);
     this.syncLiveWeatherOverrideDomFromDirectedPreset();
+    this.syncManualFogDomFromControlState();
+    this.syncLiveLightningDomFromControlState();
+    syncWeatherLightningEffectFromControlState(this.controlState);
   }
 
   _forceDirectedCustomWeatherMode() {
@@ -1980,8 +2187,10 @@ export class ControlPanelManager {
     try {
       hydrateControlPanelLiveOverridesFromController(resolveWeatherController());
       this.syncLiveWeatherOverrideDomFromDirectedPreset();
+      this.syncManualFogDomFromControlState();
     } catch (_) {}
 
+    syncAtmosphericFogEffectFromControlState(this.controlState);
     void this._applyWindState();
 
     this._registerFoundryTimeHook();
@@ -3008,6 +3217,7 @@ export class ControlPanelManager {
     if (this._weatherDynamicFolder) this._weatherDynamicFolder.expanded = isDynamic;
     if (this._weatherDirectedFolder) this._weatherDirectedFolder.expanded = !isDynamic;
     this._refreshWeatherFolderTag();
+    this._updateManualFogControlAvailability();
   }
 
   /**
@@ -3826,6 +4036,15 @@ export class ControlPanelManager {
         }
       }
 
+      try {
+        syncWeatherLightningEffectFromControlState(this.controlState);
+        this.syncLiveLightningDomFromControlState();
+      } catch (_) {}
+      try {
+        syncAtmosphericFogEffectFromControlState(this.controlState);
+        this.syncManualFogDomFromControlState();
+      } catch (_) {}
+
       log.debug('Applied control state via StateApplier:', this.controlState);
     } catch (error) {
       log.error('Failed to apply control state:', error);
@@ -3982,7 +4201,11 @@ export class ControlPanelManager {
       tileMotionTimeFactorPercent: 100,
       tileMotionPaused: false,
       replicaOcclusionRadiusScale: 35.0,
-      replicaOcclusionEdgeSoftness: 1.0
+      replicaOcclusionEdgeSoftness: 1.0,
+      manualFogDensity: 0.0,
+      landscapeLightning: {
+        lightning: 1.0,
+      },
     };
     this._ensureDirectedCustomPreset();
     this._lastWeatherControlFingerprint = null;

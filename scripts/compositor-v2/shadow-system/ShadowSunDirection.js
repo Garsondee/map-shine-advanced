@@ -2,6 +2,11 @@
  * @fileoverview Shared screen-space sun direction for shadow stamp/projection effects.
  */
 
+import {
+  getUnifiedShadowLatitudeScale,
+  resolveShadowSunAnglesDeg,
+} from './SunDirection.js';
+
 const ZENITH_EPS = 0.02;
 const MIN_DIR_LEN_SQ = 1e-8;
 /** Minimum shadow length factor at high sun (short underfoot shadows, not off). */
@@ -99,4 +104,68 @@ export function computeShadowSunDirection2D({
  */
 export function applyShadowSunDirection(out, dir) {
   out.set(dir.x, dir.y);
+}
+
+/**
+ * Build the canonical 2D sun vector for any shadow consumer from azimuth/elevation.
+ * @param {object} opts
+ * @param {number|null|undefined} opts.azimuthDeg
+ * @param {number|null|undefined} opts.elevationDeg
+ * @param {number} [opts.latitudeScale]
+ * @param {{x:number,y:number}|null} [opts.previousDir]
+ * @returns {ReturnType<typeof computeShadowSunDirection2D> & { azimuthDeg: number, elevationDeg: number }}
+ */
+export function resolveEffectShadowSun2D({
+  azimuthDeg = null,
+  elevationDeg = null,
+  latitudeScale = null,
+  previousDir = null,
+} = {}) {
+  const angles = resolveShadowSunAnglesDeg(azimuthDeg, elevationDeg);
+  const lat = Number.isFinite(Number(latitudeScale))
+    ? Number(latitudeScale)
+    : getUnifiedShadowLatitudeScale();
+  const sun2d = computeShadowSunDirection2D({
+    azimuthRad: angles.azimuthDeg * (Math.PI / 180.0),
+    elevationDeg: angles.elevationDeg,
+    latitudeScale: lat,
+    previousDir,
+  });
+  return { ...sun2d, azimuthDeg: angles.azimuthDeg, elevationDeg: angles.elevationDeg };
+}
+
+/**
+ * Copy resolved sun direction into an effect's `sunDir` Vector2.
+ * @param {import('three').Vector2|null} sunDir
+ * @param {ReturnType<typeof resolveEffectShadowSun2D>} sun2d
+ * @param {typeof import('three')} THREE
+ */
+export function writeEffectSunDir(sunDir, sun2d, THREE) {
+  if (!THREE) return sunDir;
+  if (!sunDir) return new THREE.Vector2(sun2d.x, sun2d.y);
+  sunDir.set(sun2d.x, sun2d.y);
+  return sunDir;
+}
+
+/**
+ * Legacy alias — unified with {@link resolveEffectShadowSun2D}.
+ * @param {number|null|undefined} azimuthDeg
+ * @param {number|null|undefined} elevationDeg
+ * @param {number} [latitudeScale=0.1]
+ * @param {{x:number,y:number}|null} [fallback=null]
+ */
+export function computeSunDirection2D(azimuthDeg, elevationDeg, latitudeScale = 0.1, fallback = null) {
+  const sun2d = resolveEffectShadowSun2D({
+    azimuthDeg,
+    elevationDeg,
+    latitudeScale,
+    previousDir: fallback,
+  });
+  return {
+    x: sun2d.x,
+    y: sun2d.y,
+    azimuthDeg: sun2d.azimuthDeg,
+    elevationDeg: sun2d.elevationDeg,
+    lengthSq: sun2d.lengthSq,
+  };
 }

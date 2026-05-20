@@ -17,7 +17,7 @@ import {
   resolveV14BackgroundFloorIndexForSrc,
 } from '../../foundry/levels-scene-flags.js';
 import { weatherController } from '../../core/WeatherController.js';
-import { computeSunDirection2D } from '../shadow-system/SunDirection.js';
+import { resolveEffectShadowSun2D } from '../shadow-system/ShadowSunDirection.js';
 
 import {
   GROUND_Z,
@@ -1344,28 +1344,13 @@ export class TreeEffectV2 {
       this._sharedUniforms.uSunDir.value.set(this._driverSunDir.x, this._driverSunDir.y);
       return;
     }
-
-    let x = 0.0;
-    let y = -1.0;
-
     const sky = window.MapShine?.effectComposer?._floorCompositorV2?._skyColorEffect
       ?? window.MapShine?.floorCompositorV2?._skyColorEffect;
-    const overhead = window.MapShine?.effectComposer?._floorCompositorV2?._overheadShadowEffect
-      ?? window.MapShine?.floorCompositorV2?._overheadShadowEffect;
-    const latitude = Number(overhead?.params?.sunLatitude ?? 0.1);
-    const lat = Math.max(0.0, Math.min(1.0, latitude));
-
-    if (Number.isFinite(Number(sky?.currentSunAzimuthDeg))) {
-      const azimuthRad = Number(sky.currentSunAzimuthDeg) * (Math.PI / 180.0);
-      x = -Math.sin(azimuthRad);
-      y = -Math.cos(azimuthRad) * lat;
-    } else {
-      const sun = computeSunDirection2D(null, null, lat);
-      x = sun.x;
-      y = sun.y;
-    }
-
-    this._sharedUniforms.uSunDir.value.set(x, y);
+    const sun2d = resolveEffectShadowSun2D({
+      azimuthDeg: sky?.currentSunAzimuthDeg,
+      elevationDeg: sky?.currentSunElevationDeg,
+    });
+    this._sharedUniforms.uSunDir.value.set(sun2d.x, sun2d.y);
   }
 
   /**
@@ -1375,12 +1360,11 @@ export class TreeEffectV2 {
   _applyShadowDriverUniforms() {
     if (!this._sharedUniforms) return;
     this._syncSunDirectionUniform();
-    // Canopy offset is UV-scaled (not world projection); skip shadowLengthScale so
-    // golden-hour weighting does not zero the sample at solar noon.
     const opScale = Math.max(0.0, Number(this._driverShadowOpacityScale) || 1.0);
+    const lenScale = Math.max(0.05, Number(this._driverShadowLengthScale) || 1.0);
     const baseLen = Number(this.params.shadowLength ?? 0.01);
     const baseOp = Number(this.params.shadowOpacity ?? 0.5);
-    this._sharedUniforms.uShadowLength.value = baseLen;
+    this._sharedUniforms.uShadowLength.value = baseLen * lenScale;
     this._sharedUniforms.uShadowOpacity.value = Math.max(0.0, Math.min(1.0, baseOp * opScale));
   }
 
@@ -1394,6 +1378,9 @@ export class TreeEffectV2 {
     }
     if (Number.isFinite(Number(driverState?.tuning?.shadowOpacityScale))) {
       this._driverShadowOpacityScale = Number(driverState.tuning.shadowOpacityScale);
+    }
+    if (Number.isFinite(Number(driverState?.tuning?.shadowLengthScale))) {
+      this._driverShadowLengthScale = Number(driverState.tuning.shadowLengthScale);
     }
     this._applyShadowDriverUniforms();
   }

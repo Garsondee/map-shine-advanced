@@ -21,6 +21,7 @@ export class SeparableShadowBlur {
         uTexelSize: { value: new THREE.Vector2(1 / 1024, 1 / 1024) },
         uDirection: { value: new THREE.Vector2(1, 0) },
         uRadius: { value: 0.0 },
+        uSampleAlpha: { value: 0.0 },
       },
       vertexShader: /* glsl */`
         varying vec2 vUv;
@@ -34,7 +35,12 @@ export class SeparableShadowBlur {
         uniform vec2 uTexelSize;
         uniform vec2 uDirection;
         uniform float uRadius;
+        uniform float uSampleAlpha;
         varying vec2 vUv;
+        float readStrength(vec2 uv) {
+          vec4 t = texture2D(tInput, uv);
+          return mix(t.r, t.a, clamp(uSampleAlpha, 0.0, 1.0));
+        }
         void main() {
           float r = clamp(uRadius, 0.0, 4.0);
           vec2 stepUv = uDirection * uTexelSize * r;
@@ -43,16 +49,21 @@ export class SeparableShadowBlur {
           float w2 = 0.1216216;
           float w3 = 0.054054;
           float w4 = 0.016216;
-          float s = texture2D(tInput, vUv).r * w0;
-          s += texture2D(tInput, vUv + stepUv * 1.0).r * w1;
-          s += texture2D(tInput, vUv - stepUv * 1.0).r * w1;
-          s += texture2D(tInput, vUv + stepUv * 2.0).r * w2;
-          s += texture2D(tInput, vUv - stepUv * 2.0).r * w2;
-          s += texture2D(tInput, vUv + stepUv * 3.0).r * w3;
-          s += texture2D(tInput, vUv - stepUv * 3.0).r * w3;
-          s += texture2D(tInput, vUv + stepUv * 4.0).r * w4;
-          s += texture2D(tInput, vUv - stepUv * 4.0).r * w4;
-          gl_FragColor = vec4(vec3(clamp(s, 0.0, 1.0)), 1.0);
+          float s = readStrength(vUv) * w0;
+          s += readStrength(vUv + stepUv * 1.0) * w1;
+          s += readStrength(vUv - stepUv * 1.0) * w1;
+          s += readStrength(vUv + stepUv * 2.0) * w2;
+          s += readStrength(vUv - stepUv * 2.0) * w2;
+          s += readStrength(vUv + stepUv * 3.0) * w3;
+          s += readStrength(vUv - stepUv * 3.0) * w3;
+          s += readStrength(vUv + stepUv * 4.0) * w4;
+          s += readStrength(vUv - stepUv * 4.0) * w4;
+          s = clamp(s, 0.0, 1.0);
+          if (uSampleAlpha > 0.5) {
+            gl_FragColor = vec4(0.0, 0.0, 0.0, s);
+          } else {
+            gl_FragColor = vec4(vec3(s), 1.0);
+          }
         }
       `,
       depthWrite: false,
@@ -64,13 +75,25 @@ export class SeparableShadowBlur {
     this._scene.add(this._quad);
   }
 
-  render(renderer, inputTexture, tempTarget, outputTarget, radius = 0) {
+  /**
+   * @param {import('three').WebGLRenderer} renderer
+   * @param {import('three').Texture} inputTexture
+   * @param {import('three').WebGLRenderTarget} tempTarget
+   * @param {import('three').WebGLRenderTarget} outputTarget
+   * @param {number} [radius=0]
+   * @param {{ sampleAlpha?: boolean }} [opts]
+   * @returns {import('three').Texture|null}
+   */
+  render(renderer, inputTexture, tempTarget, outputTarget, radius = 0, opts = {}) {
     if (!renderer || !inputTexture || !tempTarget || !outputTarget) return inputTexture;
+    const r = Math.max(0, Number(radius) || 0);
+    if (r <= 0.0001) return inputTexture;
     this.initialize();
     if (!this._material) return inputTexture;
     const prev = renderer.getRenderTarget();
     try {
-      this._material.uniforms.uRadius.value = Math.max(0, Number(radius) || 0);
+      this._material.uniforms.uSampleAlpha.value = opts.sampleAlpha ? 1.0 : 0.0;
+      this._material.uniforms.uRadius.value = r;
       this._material.uniforms.uTexelSize.value.set(1 / Math.max(1, outputTarget.width), 1 / Math.max(1, outputTarget.height));
       this._material.uniforms.tInput.value = inputTexture;
       this._material.uniforms.uDirection.value.set(1, 0);

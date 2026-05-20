@@ -4681,6 +4681,12 @@ export class TweakpaneManager {
       // This is the single source of truth — individual effect sliders have been removed.
       const lat = typeof value === 'number' ? value : 0.1;
       const ms = window.MapShine;
+      const fc = ms?.effectComposer?._floorCompositorV2 ?? ms?.floorCompositorV2 ?? null;
+      if (fc?._overheadShadowEffect?.params) fc._overheadShadowEffect.params.sunLatitude = lat;
+      if (fc?._buildingShadowEffect?.params) fc._buildingShadowEffect.params.sunLatitude = lat;
+      if (fc?._skyReachShadowEffect?.params) fc._skyReachShadowEffect.params.sunLatitude = lat;
+      if (fc?._paintedShadowEffect?.params) fc._paintedShadowEffect.params.sunLatitude = lat;
+      // Legacy V1 scene-context instances (no-op when V2 compositor owns the effect)
       if (ms?.overheadShadowsEffect?.params) ms.overheadShadowsEffect.params.sunLatitude = lat;
       if (ms?.buildingShadowsEffect?.params) ms.buildingShadowsEffect.params.sunLatitude = lat;
       if (ms?.windowLightEffect?.params) ms.windowLightEffect.params.sunLightLatitude = lat;

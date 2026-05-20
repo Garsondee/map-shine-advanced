@@ -1274,6 +1274,9 @@ export class LightingEffectV2 {
         tUnifiedShadowRaw: { value: null },
         uHasShadowRaw: { value: 0 },
         uHasCombinedShadow: { value: 0 },
+        tVegetationBillboardShadow: { value: null },
+        uHasVegetationBillboardShadow: { value: 0 },
+        uVegetationBillboardOpacity: { value: 1.0 },
         // compose so dynamic-light lift / cloud ambient influence do not erase artistic shadow.
         tPaintedShadowLit: { value: null },
         uHasPaintedShadowLit: { value: 0 },
@@ -1372,6 +1375,9 @@ export class LightingEffectV2 {
         uniform sampler2D tUnifiedShadowRaw;
         uniform float uHasShadowRaw;
         uniform float uHasCombinedShadow;
+        uniform sampler2D tVegetationBillboardShadow;
+        uniform float uHasVegetationBillboardShadow;
+        uniform float uVegetationBillboardOpacity;
         uniform sampler2D tBuildingShadowLit;
         uniform float uHasBuildingShadowLit;
         uniform sampler2D tPaintedShadowLit;
@@ -1725,43 +1731,61 @@ export class LightingEffectV2 {
           // Unified shadow path: ShadowManagerV2 combine dims ambient here. The HDR direct
           // channel uses structuralDirectMul (building×painted); strong lights clear it.
           if (uHasCombinedShadow > 0.5) {
-            float shadowFactor = clamp(texture2D(tUnifiedShadowFactor, vUv).r, 0.0, 1.0);
+            float shadowFactor;
+            float rawShadowFactor;
+            float roofAlpha;
+            float rawMix;
+            float vegetationLit;
+            float vegetationSample;
+            float structuralLit;
+            float paintedEffective;
+            float shadowFactorMix;
+            float paintedApply;
+            float paintedBaked;
+            float nonPaintedShadow;
+            float shadowSunSlice;
+            float wSkySunSlice;
+            vec3 ambSkySunPortion;
+            vec3 ambRestPortion;
+            vec3 ambientPortionLit;
+
+            shadowFactor = clamp(texture2D(tUnifiedShadowFactor, vUv).r, 0.0, 1.0);
             if (uHasShadowRaw > 0.5 && uHasOverheadRoofAlpha > 0.5) {
-              float rawShadowFactor = clamp(texture2D(tUnifiedShadowRaw, vUv).r, 0.0, 1.0);
-              float roofAlpha = roofAlphaCached;
-              // Raw shadow has no outdoors / upper-floor masking. Interior pixels still
-              // get overhead roof alpha (ceiling capture); only blend raw on outdoor-classified
-              // pixels so multi-floor indoor rooms keep masked cloud shadow.
-              float rawMix = roofAlpha * isOutdoorForInteriorDimSafe;
+              rawShadowFactor = clamp(texture2D(tUnifiedShadowRaw, vUv).r, 0.0, 1.0);
+              roofAlpha = roofAlphaCached;
+              rawMix = roofAlpha * isOutdoorForInteriorDimSafe;
               shadowFactor = mix(shadowFactor, rawShadowFactor, rawMix);
             }
             shadowFactor = amplifyCombinedShadowLit(shadowFactor, uCombinedShadowEffectStrength);
-            // Multi-floor: painted is NOT in ShadowManager combine — apply per-level only.
-            // Single-floor: split painted out of combined for cloud lift / dynamic-light.
-            float paintedEffective = 1.0;
-            float shadowFactorMix;
+            vegetationLit = 1.0;
+            if (uHasVegetationBillboardShadow > 0.5) {
+              vegetationSample = clamp(texture2D(tVegetationBillboardShadow, vUv).r, 0.0, 1.0);
+              vegetationLit = mix(1.0, vegetationSample, clamp(uVegetationBillboardOpacity, 0.0, 1.0));
+            }
+            structuralLit = clamp(shadowFactor / max(vegetationLit, 0.001), 0.0, 1.0);
+            paintedEffective = 1.0;
             if (uPaintedShadowInCombined < 0.5 && uHasPaintedShadowLit > 0.5) {
-              float paintedApply = clamp(texture2D(tPaintedShadowLit, sceneUvFoundry).r, 0.0, 1.0);
+              paintedApply = clamp(texture2D(tPaintedShadowLit, sceneUvFoundry).r, 0.0, 1.0);
               paintedEffective = mix(1.0, paintedApply, clamp(uPaintedShadowMgrOpacity, 0.0, 1.0));
               shadowFactorMix = mix(
                 1.0,
-                shadowFactor,
+                structuralLit,
                 clamp(uCloudShadowAmbientInfluence, 0.0, 1.0)
               );
               shadowFactorMix = mix(shadowFactorMix, 1.0, dynamicShadowLiftCombined);
               shadowFactorMix *= paintedEffective;
             } else {
-              float paintedBaked = 1.0;
+              paintedBaked = 1.0;
               if (uHasPaintedShadowLit > 0.5) {
                 paintedBaked = clamp(texture2D(tPaintedShadowLit, sceneUvFoundry).r, 0.0, 1.0);
-                float paintedApply = paintedBaked;
+                paintedApply = paintedBaked;
                 if (uHasPaintedShadowAtAndAboveLit > 0.5 && uLightingPaintedFloorIndex > 0.5) {
                   paintedApply = clamp(texture2D(tPaintedShadowAtAndAboveLit, sceneUvFoundry).r, 0.0, 1.0);
                 }
                 paintedEffective = mix(1.0, paintedApply, clamp(uPaintedShadowMgrOpacity, 0.0, 1.0));
               }
-              float nonPaintedShadow = clamp(
-                shadowFactor / max(paintedBaked, 0.0001),
+              nonPaintedShadow = clamp(
+                structuralLit / max(paintedBaked, 0.0001),
                 0.0,
                 1.0
               );
@@ -1773,8 +1797,9 @@ export class LightingEffectV2 {
               shadowFactorMix = mix(shadowFactorMix, 1.0, dynamicShadowLiftCombined);
               shadowFactorMix *= paintedEffective;
             }
-            float shadowSunSlice = min(shadowFactorMix, coreStructLiftedGlobal);
-            float wSkySunSlice = clamp(
+            shadowFactorMix = clamp(shadowFactorMix * vegetationLit, 0.0, 1.0);
+            shadowSunSlice = min(shadowFactorMix, coreStructLiftedGlobal);
+            wSkySunSlice = clamp(
               (1.0 - baseDarknessLevel)
                 * calendarDayWeight
                 * isOutdoorForInteriorDimSafe
@@ -1782,9 +1807,9 @@ export class LightingEffectV2 {
               0.0,
               1.0
             );
-            vec3 ambSkySunPortion = ambientAfterDark * wSkySunSlice;
-            vec3 ambRestPortion = ambientAfterDark * (1.0 - wSkySunSlice);
-            vec3 ambientPortionLit = ambSkySunPortion * shadowSunSlice + ambRestPortion * shadowFactorMix;
+            ambSkySunPortion = ambientAfterDark * wSkySunSlice;
+            ambRestPortion = ambientAfterDark * (1.0 - wSkySunSlice);
+            ambientPortionLit = ambSkySunPortion * shadowSunSlice + ambRestPortion * shadowFactorMix;
             totalIllumination = ambientPortionLit + attenuatedDirect;
             ambientShadowMixOut = shadowFactorMix;
           }
@@ -2572,7 +2597,7 @@ export class LightingEffectV2 {
    * @param {number} [paintedShadowMgrOpacity=1] - ShadowManagerV2 `paintedOpacity`;
    *   must match combine pass when splitting painted from combined shadow.
    */
-  render(renderer, camera, sceneRT, outputRT, windowLightScene = null, cloudShadowTexture = null, cloudShadowRawTexture = null, buildingShadowTexture = null, overheadShadowTexture = null, buildingShadowOpacity = 0.75, overheadRoofAlphaTexture = null, overheadRoofBlockTexture = null, outdoorsMaskTexture = null, ceilingTransmittanceTexture = null, overheadRoofRestrictLightTexture = null, combinedShadowTexture = null, combinedShadowRawTexture = null, paintedShadowLitTexture = null, paintedShadowMgrOpacity = 1.0, paintedShadowAtAndAboveLitTexture = null, paintedShadowInCombined = true) {
+  render(renderer, camera, sceneRT, outputRT, windowLightScene = null, cloudShadowTexture = null, cloudShadowRawTexture = null, buildingShadowTexture = null, overheadShadowTexture = null, buildingShadowOpacity = 0.75, overheadRoofAlphaTexture = null, overheadRoofBlockTexture = null, outdoorsMaskTexture = null, ceilingTransmittanceTexture = null, overheadRoofRestrictLightTexture = null, combinedShadowTexture = null, combinedShadowRawTexture = null, paintedShadowLitTexture = null, paintedShadowMgrOpacity = 1.0, paintedShadowAtAndAboveLitTexture = null, paintedShadowInCombined = true, vegetationBillboardShadowTexture = null, vegetationBillboardOpacity = 1.0) {
     if (!this._initialized || !this._enabled || !sceneRT) return;
     if (!this._lightRT || !this._windowLightRT || !this._darknessRT || !this._composeMaterial) return;
     if (renderer) this._lastCompositorRenderer = renderer;
@@ -2725,6 +2750,15 @@ export class LightingEffectV2 {
       : 0;
     cu.uLightingPaintedFloorIndex.value = Math.max(0, litFloorIdx);
     cu.uPaintedShadowInCombined.value = paintedShadowInCombined === false ? 0.0 : 1.0;
+    if (vegetationBillboardShadowTexture) {
+      cu.tVegetationBillboardShadow.value = vegetationBillboardShadowTexture;
+      cu.uHasVegetationBillboardShadow.value = 1;
+    } else {
+      cu.tVegetationBillboardShadow.value = null;
+      cu.uHasVegetationBillboardShadow.value = 0;
+    }
+    const vbo = Number(vegetationBillboardOpacity);
+    cu.uVegetationBillboardOpacity.value = Number.isFinite(vbo) ? Math.max(0, Math.min(1, vbo)) : 1.0;
     // View→scene UV uniforms for compose (_Outdoors roof-light gate; building
     // shadow no longer sampled here — ShadowManagerV2 combines it upstream).
     this._syncViewSceneUniforms(camera);

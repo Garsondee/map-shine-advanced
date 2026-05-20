@@ -323,6 +323,8 @@ export class FloorCompositor {
     this._treeBillboardShadowTexture = null;
     /** @type {THREE.Texture|null} */
     this._bushBillboardShadowTexture = null;
+    /** @type {THREE.Texture|null} Tree×bush lit factor for lighting compose (one sampler). */
+    this._vegetationBillboardShadowTexture = null;
     /**
      * Cloud shadow textures from the previous frame — combined with current
      * overhead/building in ShadowManagerV2 before the bus draw so water splashes
@@ -332,6 +334,8 @@ export class FloorCompositor {
     this._shadowManagerPrevFrameCloudTex = null;
     /** @type {THREE.Texture|null} */
     this._shadowManagerPrevFrameCloudRawTex = null;
+    /** @type {boolean} True when ShadowManagerV2 combine ran successfully this frame. */
+    this._shadowManagerCombineSucceeded = false;
 
     /**
      * V2 Water Effect: fullscreen post-process surface driven by composited _Water
@@ -3154,6 +3158,7 @@ export class FloorCompositor {
     const THREE = window.THREE;
     this._treeBillboardShadowTexture = null;
     this._bushBillboardShadowTexture = null;
+    this._vegetationBillboardShadowTexture = null;
     if (!THREE || !this.renderer || !this.camera) return;
 
     try {
@@ -3174,23 +3179,34 @@ export class FloorCompositor {
 
     const treeEntries = this._treeEffect?.collectBillboardShadowOverlayEntries?.() ?? [];
     const bushEntries = this._bushEffect?.collectBillboardShadowOverlayEntries?.() ?? [];
+    const treeEntriesWithMask = treeEntries.filter((e) => !!(e?.uniforms?.uTreeMask?.value));
+    const bushEntriesWithMask = bushEntries.filter((e) => !!(e?.uniforms?.uBushMask?.value));
 
     try {
-      if (treeEntries.length) {
-        this._treeVegetationBillboardPass.render(this.renderer, this.camera, treeEntries);
+      if (treeEntriesWithMask.length) {
+        this._treeVegetationBillboardPass.render(this.renderer, this.camera, treeEntriesWithMask, { clear: true });
         this._treeBillboardShadowTexture = this._treeVegetationBillboardPass.texture ?? null;
+        this._vegetationBillboardShadowTexture = this._treeBillboardShadowTexture;
       }
-      if (bushEntries.length) {
-        this._bushVegetationBillboardPass.render(this.renderer, this.camera, bushEntries);
+      if (bushEntriesWithMask.length) {
+        this._bushVegetationBillboardPass.render(this.renderer, this.camera, bushEntriesWithMask, { clear: true });
         this._bushBillboardShadowTexture = this._bushVegetationBillboardPass.texture ?? null;
+        if (treeEntriesWithMask.length) {
+          this._treeVegetationBillboardPass.render(this.renderer, this.camera, bushEntriesWithMask, { clear: false });
+          this._vegetationBillboardShadowTexture = this._treeVegetationBillboardPass.texture ?? null;
+        } else {
+          this._vegetationBillboardShadowTexture = this._bushBillboardShadowTexture;
+        }
       }
     } catch (err) {
       log.warn('FloorCompositor: vegetation billboard shadow pass failed:', err);
     }
 
+    // Keep in-shader canopy fringe enabled; billboard RT feeds ShadowManager / lighting only.
+    // Disabling in-shader + outdoor dynamic-light lift used to erase all visible shadow outdoors.
     try {
-      if (treeEntries.length) this._treeEffect?.setBillboardShadowMode?.(true);
-      if (bushEntries.length) this._bushEffect?.setBillboardShadowMode?.(true);
+      this._treeEffect?.setBillboardShadowMode?.(false);
+      this._bushEffect?.setBillboardShadowMode?.(false);
     } catch (_) {}
   }
 
@@ -3201,13 +3217,17 @@ export class FloorCompositor {
    * @param {THREE.Texture|null} cloudRawTex
    * @param {boolean} disableOverheadInLighting
    */
+  /**
+   * @returns {boolean} Whether ShadowManagerV2 produced a fresh combined RT this call.
+   */
   _runShadowManagerCombinePass(cloudTex, cloudRawTex, disableOverheadInLighting) {
     const sm = this._shadowManagerEffect;
-    if (!sm || typeof sm.setInputs !== 'function' || typeof sm.render !== 'function') return;
-    const overheadTex = (!disableOverheadInLighting && this._overheadShadowEffect?.params?.enabled)
+    if (!sm || typeof sm.setInputs !== 'function' || typeof sm.render !== 'function') return false;
+    if (sm.enabled === false) return false;
+    const overheadTex = (!disableOverheadInLighting && resolveEffectEnabled(this._overheadShadowEffect))
       ? (this._overheadShadowEffect.shadowFactorTexture ?? null)
       : null;
-    const buildingTex = (this._buildingShadowEffect?.params?.enabled)
+    const buildingTex = resolveEffectEnabled(this._buildingShadowEffect)
       ? (this._buildingShadowEffect.shadowFactorTexture ?? null)
       : null;
     const sceneFloorCountForShadow = window.MapShine?.floorStack?.getFloors?.()?.length ?? 0;
@@ -3252,9 +3272,10 @@ export class FloorCompositor {
       }
     } catch (_) {}
     try {
-      sm.render(this.renderer, this.camera);
+      return sm.render(this.renderer, this.camera) === true;
     } catch (err) {
       log.warn('FloorCompositor: ShadowManagerV2 render failed:', err);
+      return false;
     }
   }
 
@@ -3821,8 +3842,9 @@ export class FloorCompositor {
     // ShadowManagerV2 (required): combine previous-frame cloud + structural shadows
     // for intermediate consumers. Splash/bubble shaders re-sync uniforms after the
     // post-cloud combine so they match the RT used for lighting this frame.
+    this._shadowManagerCombineSucceeded = false;
     try {
-      this._runShadowManagerCombinePass(
+      this._shadowManagerCombineSucceeded = this._runShadowManagerCombinePass(
         this._shadowManagerPrevFrameCloudTex,
         this._shadowManagerPrevFrameCloudRawTex ?? this._shadowManagerPrevFrameCloudTex,
         _disableOverheadInLighting
@@ -3851,7 +3873,11 @@ export class FloorCompositor {
         ? (this._cloudEffect.cloudShadowRawTexture ?? this._cloudEffect.cloudShadowTexture)
         : null;
       try {
-        this._runShadowManagerCombinePass(cloudTex, cloudRawTex, _disableOverheadInLighting);
+        this._shadowManagerCombineSucceeded = this._runShadowManagerCombinePass(
+          cloudTex,
+          cloudRawTex,
+          _disableOverheadInLighting
+        );
       } catch (err) {
         log.warn('FloorCompositor: post-cloud ShadowManagerV2 combine failed:', err);
       }
@@ -3875,9 +3901,17 @@ export class FloorCompositor {
       ? (this._cloudEffect.cloudShadowViewBounds ?? null) : null;
     const buildingShadowTex = resolveEffectEnabled(this._buildingShadowEffect)
       ? this._buildingShadowEffect.shadowFactorTexture : null;
-    const smCombinedTex = this._shadowManagerEffect?.combinedShadowTexture ?? null;
-    const combinedShadowTex = smCombinedTex ?? cloudShadowTexLegacy;
-    const combinedShadowRawTex = this._shadowManagerEffect?.combinedShadowRawTexture ?? combinedShadowTex;
+    const smCombinedTex = this._shadowManagerCombineSucceeded
+      ? (this._shadowManagerEffect?.combinedShadowTexture ?? null)
+      : null;
+    const overheadShadowTexLegacy = (!_disableOverheadInLighting && resolveEffectEnabled(this._overheadShadowEffect))
+      ? this._overheadShadowEffect.shadowFactorTexture : null;
+    // Phase 4 lighting reads only the unified combined RT. Fall back progressively
+    // when ShadowManager did not run so ambient shadow is not silently lost.
+    let combinedShadowTex = smCombinedTex ?? cloudShadowTexLegacy ?? overheadShadowTexLegacy ?? null;
+    let combinedShadowRawTex = this._shadowManagerCombineSucceeded
+      ? (this._shadowManagerEffect?.combinedShadowRawTexture ?? combinedShadowTex)
+      : (cloudShadowRawTexLegacy ?? combinedShadowTex);
     const omitPaintedFromCombined = (window.MapShine?.floorStack?.getFloors?.()?.length ?? 0) > 1;
     const paintedShadowEnabled = resolveEffectEnabled(this._paintedShadowEffect)
       && this._paintedShadowEffect?.params?.enabled;
@@ -3896,8 +3930,6 @@ export class FloorCompositor {
     const buildingShadowTexForLighting = buildingShadowTex;
     const buildingShadowOpacity = Number.isFinite(this._buildingShadowEffect?.params?.opacity)
       ? this._buildingShadowEffect.params.opacity : 0.75;
-    const overheadShadowTexLegacy = (!_disableOverheadInLighting && resolveEffectEnabled(this._overheadShadowEffect))
-      ? this._overheadShadowEffect.shadowFactorTexture : null;
     const overheadRoofAlphaTex = (_disableRoofInLighting || !_overheadShadowEnabled)
       ? null : (this._overheadShadowEffect?.roofAlphaTexture ?? null);
     const overheadRoofBlockTex = (_disableRoofInLighting || !_overheadShadowEnabled)
@@ -6206,6 +6238,15 @@ export class FloorCompositor {
               paintedForLevel, paintedShadowMgrOpacity,
               paintedShadowAtAndAboveLitTex,
               paintedShadowInCombined,
+              this._vegetationBillboardShadowTexture ?? null,
+              (() => {
+                const sm = this._shadowManagerEffect;
+                const to = Number(sm?.params?.treeBillboardOpacity ?? 1);
+                const bo = Number(sm?.params?.bushBillboardOpacity ?? 1);
+                const t = Number.isFinite(to) ? Math.max(0, Math.min(1, to)) : 1;
+                const b = Number.isFinite(bo) ? Math.max(0, Math.min(1, bo)) : 1;
+                return Math.min(t, b);
+              })(),
             );
           });
         }, 'LightingEffectV2 render');

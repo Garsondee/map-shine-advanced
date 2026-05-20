@@ -872,8 +872,6 @@ export class TreeEffectV2 {
       this._sharedUniforms.uFlutterIntensity.value = this.params.flutterIntensity;
       this._sharedUniforms.uFlutterSpeed.value = this.params.flutterSpeed;
       this._sharedUniforms.uFlutterScale.value = this.params.flutterScale;
-      this._sharedUniforms.uShadowOpacity.value = this.params.shadowOpacity;
-      this._sharedUniforms.uShadowLength.value = this.params.shadowLength;
       this._sharedUniforms.uShadowSoftness.value = this.params.shadowSoftness * (Number(this._driverShadowSoftnessScale) || 1.0);
 
       this._sharedUniforms.uExposure.value = this.params.exposure;
@@ -883,7 +881,7 @@ export class TreeEffectV2 {
       this._sharedUniforms.uTemperature.value = this.params.temperature;
       this._sharedUniforms.uTint.value = this.params.tint;
 
-      this._syncSunDirectionUniform();
+      this._applyShadowDriverUniforms();
       this._syncRoofMaskUniforms();
     }
 
@@ -1350,8 +1348,10 @@ export class TreeEffectV2 {
     let x = 0.0;
     let y = -1.0;
 
-    const sky = window.MapShine?.effectComposer?._floorCompositorV2?._skyColorEffect;
-    const overhead = window.MapShine?.effectComposer?._floorCompositorV2?._overheadShadowEffect;
+    const sky = window.MapShine?.effectComposer?._floorCompositorV2?._skyColorEffect
+      ?? window.MapShine?.floorCompositorV2?._skyColorEffect;
+    const overhead = window.MapShine?.effectComposer?._floorCompositorV2?._overheadShadowEffect
+      ?? window.MapShine?.floorCompositorV2?._overheadShadowEffect;
     const latitude = Number(overhead?.params?.sunLatitude ?? 0.1);
     const lat = Math.max(0.0, Math.min(1.0, latitude));
 
@@ -1368,6 +1368,22 @@ export class TreeEffectV2 {
     this._sharedUniforms.uSunDir.value.set(x, y);
   }
 
+  /**
+   * Push ShadowDriverState sun + tuning into shared uniforms (also called from setDriver).
+   * @private
+   */
+  _applyShadowDriverUniforms() {
+    if (!this._sharedUniforms) return;
+    this._syncSunDirectionUniform();
+    // Canopy offset is UV-scaled (not world projection); skip shadowLengthScale so
+    // golden-hour weighting does not zero the sample at solar noon.
+    const opScale = Math.max(0.0, Number(this._driverShadowOpacityScale) || 1.0);
+    const baseLen = Number(this.params.shadowLength ?? 0.01);
+    const baseOp = Number(this.params.shadowOpacity ?? 0.5);
+    this._sharedUniforms.uShadowLength.value = baseLen;
+    this._sharedUniforms.uShadowOpacity.value = Math.max(0.0, Math.min(1.0, baseOp * opScale));
+  }
+
   setDriver(driverState = null) {
     const dir = driverState?.sun?.dir;
     const x = Number(dir?.x);
@@ -1376,6 +1392,10 @@ export class TreeEffectV2 {
     if (Number.isFinite(Number(driverState?.tuning?.shadowSoftnessScale))) {
       this._driverShadowSoftnessScale = Number(driverState.tuning.shadowSoftnessScale);
     }
+    if (Number.isFinite(Number(driverState?.tuning?.shadowOpacityScale))) {
+      this._driverShadowOpacityScale = Number(driverState.tuning.shadowOpacityScale);
+    }
+    this._applyShadowDriverUniforms();
   }
 
   _createOverlay(tileId, floorIndex, opts) {

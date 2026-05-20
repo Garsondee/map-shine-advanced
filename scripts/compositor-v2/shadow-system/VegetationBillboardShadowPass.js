@@ -143,8 +143,9 @@ export class VegetationBillboardShadowPass {
    * @param {THREE.WebGLRenderer} renderer
    * @param {THREE.Camera} camera
    * @param {Iterable<{mesh: THREE.Mesh, uniforms: object}>} overlayEntries
+   * @param {{ clear?: boolean }} [options]
    */
-  render(renderer, camera, overlayEntries) {
+  render(renderer, camera, overlayEntries, options = {}) {
     const THREE = window.THREE;
     if (!renderer || !camera || !this._material || !this._target) return;
     const prevRt = renderer.getRenderTarget();
@@ -160,7 +161,9 @@ export class VegetationBillboardShadowPass {
     try {
       renderer.setRenderTarget(this._target);
       renderer.setClearColor(0xffffff, 1.0);
-      renderer.clear(true, true, true);
+      if (options?.clear !== false) {
+        renderer.clear(true, true, true);
+      }
       renderer.autoClear = false;
       const u = this._material.uniforms;
       for (const { mesh, uniforms } of overlayEntries) {

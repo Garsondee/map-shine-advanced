@@ -28,6 +28,10 @@ import { weatherController } from '../../core/WeatherController.js';
 import { resolveCompositorOutdoorsTexture } from '../../masks/resolve-compositor-outdoors.js';
 import { FLOOR_ID_OUTDOORS_RECEIVER_GLSL } from '../shadow-system/DirectionalShadowProjector.js';
 import { getUnifiedShadowLatitudeScale } from '../shadow-system/SunDirection.js';
+import {
+  applyShadowSunDirection,
+  computeShadowSunDirection2D,
+} from '../shadow-system/ShadowSunDirection.js';
 import { collectOutdoorsTexturesByFloorIndex } from '../shadow-system/floor-outdoors-slots.js';
 import { resolveReceiverOutdoorsMaskTexture } from '../shadow-system/resolve-receiver-outdoors-mask.js';
 
@@ -1559,49 +1563,30 @@ export class BuildingShadowsEffectV2 {
     if (!THREE) return;
 
     const lat = getUnifiedShadowLatitudeScale(this.params.sunLatitude ?? 0.1);
-    let x = 0.0;
-    let y = -1.0 * lat;
-
+    let azimuthRad = 0.0;
     if (Number.isFinite(this._sunAzimuthDeg)) {
-      const azimuthRad = this._sunAzimuthDeg * (Math.PI / 180.0);
-      x = -Math.sin(azimuthRad);
-      y = -Math.cos(azimuthRad) * lat;
+      azimuthRad = this._sunAzimuthDeg * (Math.PI / 180.0);
     } else {
       let hour = 12.0;
       try {
         if (weatherController && typeof weatherController.timeOfDay === 'number') {
           hour = weatherController.timeOfDay;
         }
-      } catch (_) {}
-      // Full 24h azimuth orbit:
-      // 12h (noon)   ->   0
-      //  6h (sunrise)-> -PI/2
-      // 18h (sunset) -> +PI/2
-      //  0h/24h      -> -PI (same direction as +PI, continuous wrap)
-      const t = (hour % 24.0) / 24.0;
-      const azimuth = (t - 0.5) * (Math.PI * 2.0);
-      x = -Math.sin(azimuth);
-      y = -Math.cos(azimuth) * lat;
-    }
-
-    // Prevent zero-length vectors from reaching shader normalize() when latitude
-    // is zero and azimuth crosses noon/midnight in full-orbit mode.
-    const dirLenSq = (x * x) + (y * y);
-    if (dirLenSq < 1e-8) {
-      const prevX = Number(this.sunDir?.x);
-      const prevY = Number(this.sunDir?.y);
-      const prevLenSq = (prevX * prevX) + (prevY * prevY);
-      if (Number.isFinite(prevLenSq) && prevLenSq > 1e-8) {
-        x = prevX;
-        y = prevY;
-      } else {
-        x = Math.cos(Number.isFinite(this._sunAzimuthDeg) ? (this._sunAzimuthDeg * (Math.PI / 180.0)) : 0.0) >= 0.0 ? -1.0 : 1.0;
-        y = 0.0;
+      } catch (err) {
+        void err;
       }
+      const t = (hour % 24.0) / 24.0;
+      azimuthRad = (t - 0.5) * (Math.PI * 2.0);
     }
 
-    if (!this.sunDir) this.sunDir = new THREE.Vector2(x, y);
-    else this.sunDir.set(x, y);
+    const sun2d = computeShadowSunDirection2D({
+      azimuthRad,
+      elevationDeg: this._sunElevationDeg,
+      latitudeScale: lat,
+      previousDir: this.sunDir,
+    });
+    if (!this.sunDir) this.sunDir = new THREE.Vector2(sun2d.x, sun2d.y);
+    else applyShadowSunDirection(this.sunDir, sun2d);
   }
 
   _clearShadowTargetToWhite(renderer) {

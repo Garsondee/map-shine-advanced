@@ -16,6 +16,22 @@ import { createLogger } from '../../core/log.js';
 import { weatherController } from '../../core/WeatherController.js';
 import { tileDocRestrictsLight } from '../../scene/tile-manager.js';
 import { resolveEffectEnabled } from '../../effects/resolve-effect-enabled.js';
+import {
+  hashCamera,
+  hashCasterLive,
+  hashRoofMaskCapture,
+  hashTileProjectionCapture,
+  hashTileProjectionIds,
+} from './overhead-stamp/cacheSignatures.js';
+import { SceneCaptureScope } from './overhead-stamp/SceneCaptureScope.js';
+import { OverheadMaskBlurPass } from './overhead-stamp/OverheadMaskBlurPass.js';
+import { OverheadTileProjectionPass } from './overhead-stamp/OverheadTileProjectionPass.js';
+import { OverheadMaskCapturePass } from './overhead-stamp/OverheadMaskCapturePass.js';
+import { createOverheadStampCompositeMaterial } from './overhead-stamp/OverheadStampCompositeShader.js';
+import {
+  applyShadowSunDirection,
+  computeShadowSunDirection2D,
+} from '../shadow-system/ShadowSunDirection.js';
 
 const log = createLogger('OverheadStampEffect');
 
@@ -30,7 +46,8 @@ function objectRestrictsLightForRoofCapture(object) {
   try {
     const doc = canvas?.scene?.tiles?.get?.(id);
     return tileDocRestrictsLight(doc);
-  } catch (_) {
+  } catch (err) {
+    log.debug('restrictsLight doc lookup failed', err);
     return false;
   }
 }
@@ -109,6 +126,8 @@ export class OverheadStampEffectV2 {
 
     /** @type {THREE.Vector2|null} */
     this.sunDir = null; // Screen-space sun direction, driven by TimeManager
+    /** @type {number} */
+    this._sunDirLengthSq = 1.0;
 
     /** @type {THREE.Mesh|null} */
     this.baseMesh = null; // Groundplane mesh
@@ -123,7 +142,7 @@ export class OverheadStampEffectV2 {
       opacity: 0.5,
       length: 0.1,
       softness: 5,
-      outdoorShadowLengthScale: 0,
+      outdoorShadowLengthScale: 1.0,
       indoorReceiverShadowLengthScale: 0.25,
       verticalOnly: true,  // v1: primarily vertical motion in screen space
       affectsLights: 0.75,
@@ -201,6 +220,13 @@ export class OverheadStampEffectV2 {
     this._sunAzimuthDeg = null;
     this._sunElevationDeg = null;
     this._driverShadowSoftnessScale = 1.0;
+    this._driverShadowLengthScale = 1.0;
+    /** @type {{ isValid: boolean, isOrtho: boolean, px: number, py: number, pz: number, qx: number, qy: number, qz: number, qw: number, zoom: number, groundZ: number, c00x: number, c00y: number, c10x: number, c10y: number, c01x: number, c01y: number, c11x: number, c11y: number }} */
+    this._stampViewCache = {
+      isValid: false, isOrtho: true,
+      px: 0, py: 0, pz: 0, qx: 0, qy: 0, qz: 0, qw: 1, zoom: 1, groundZ: 0,
+      c00x: 0, c00y: 0, c10x: 1, c10y: 0, c01x: 0, c01y: 1, c11x: 1, c11y: 1,
+    };
     this._treeRainMaskProbeLastKey = '';
     this._treeRainMaskProbeLastTs = 0;
     this._treeRainDebugHeartbeatLastTs = 0;
@@ -236,21 +262,35 @@ export class OverheadStampEffectV2 {
      * Roof / blocker / rain-occlusion capture cache. When camera, buffer size,
      * guard scale, and live caster fade state are unchanged, the ~8 scene
      * re-renders per frame are skipped and prior RT contents are reused.
-     * @type {{ valid: boolean, sig: string, capturedAtMs: number }}
+     * @type {{ valid: boolean, sigHash: number, capturedAtMs: number }}
      */
-    this._roofMaskCaptureCache = { valid: false, sig: '', capturedAtMs: 0 };
+    this._roofMaskCaptureCache = { valid: false, sigHash: 0, capturedAtMs: 0 };
 
     /**
      * Optional tile-projection capture cache (same invalidation as roof masks).
-     * @type {{ valid: boolean, sig: string, hasProjection: boolean, hasProjectionSort: boolean, hasReceiverSort: boolean }}
+     * @type {{ valid: boolean, sigHash: number, hasProjection: boolean, hasProjectionSort: boolean, hasReceiverSort: boolean }}
      */
     this._tileProjectionCaptureCache = {
       valid: false,
-      sig: '',
+      sigHash: 0,
       hasProjection: false,
       hasProjectionSort: false,
       hasReceiverSort: false,
     };
+
+    this._maskBlur = new OverheadMaskBlurPass();
+    this._tileProjectionPass = new OverheadTileProjectionPass();
+    this._maskCapturePass = new OverheadMaskCapturePass();
+    /** @type {Set<string>} */
+    this._tileProjectionIdSet = new Set();
+    this._tileProjectionIdsHash = 0;
+
+    /** @type {THREE.WebGLRenderTarget|null} */
+    this.roofBlurredTarget = null;
+    /** @type {THREE.WebGLRenderTarget|null} */
+    this.tileProjectionBlurredTarget = null;
+    /** @type {THREE.WebGLRenderTarget|null} */
+    this.fluidRoofBlurredTarget = null;
 
     /** @type {import('../../core/diagnostics/PerformanceRecorder.js').PerformanceRecorder|null} */
     this._activePerfRecorder = null;
@@ -294,14 +334,15 @@ export class OverheadStampEffectV2 {
       const mat = object.material;
       const hasRoofLayer = (layersMask & roofCaptureMaskBits) !== 0;
       const isTree = !!ud?.mapShineTreeTileId;
-      // Only keep entries relevant to overhead capture passes. Tile-projection
-      // sort/contributor passes (which scan all renderables) still build their
-      // own narrow caches; those passes are rare and gated by Tile Motion.
-      if (!hasRoofLayer && !isTree) return;
+      const tileId = this._resolveFoundryTileId(object);
+      const isFoundryTile = !!tileId;
+      const isTileRenderable = !!(object.isSprite || object.isMesh);
+      if (!hasRoofLayer && !isTree && !isFoundryTile) return;
       const uniforms = mat?.uniforms ?? null;
       const isFluidOverlay = !!uniforms?.tFluidMask;
       if (isFluidOverlay) fc.hasFluid = true;
       if (isTree) fc.hasTrees = true;
+      const sortKey = isFoundryTile ? this._getTileSortKey(object) : 0;
       list.push({
         object,
         mat: mat ?? null,
@@ -309,12 +350,15 @@ export class OverheadStampEffectV2 {
         hasRoofLayer,
         isTree,
         isFluidOverlay,
-        isFoundryTile: !!ud?.foundryTileId,
+        isFoundryTile,
         isBusTile: !!ud?.mapShineBusTile,
         isSprite: !!object.isSprite,
         isMesh: !!object.isMesh,
+        isTileRenderable,
         hasMaterial: !!mat,
         floorIndex: Number(ud?.floorIndex),
+        tileId,
+        sortKey,
       });
     });
     return list;
@@ -351,6 +395,9 @@ export class OverheadStampEffectV2 {
     this.setDynamicLightOverride(driverState.dynamicLightOverride ?? null);
     if (Number.isFinite(Number(driverState.tuning?.shadowSoftnessScale))) {
       this._driverShadowSoftnessScale = Number(driverState.tuning.shadowSoftnessScale);
+    }
+    if (Number.isFinite(Number(driverState.tuning?.shadowLengthScale))) {
+      this._driverShadowLengthScale = Number(driverState.tuning.shadowLengthScale);
     }
   }
 
@@ -764,6 +811,105 @@ export class OverheadStampEffectV2 {
   }
 
   /**
+   * Sync screen→scene UV uniforms for _Outdoors mask sampling in the stamp composite.
+   * @param {import('three').Camera|null} camera
+   * @private
+   */
+  _syncStampSceneUniforms(camera) {
+    const u = this.material?.uniforms;
+    if (!u || !camera) return;
+    const THREE = window.THREE;
+    const dims = globalThis.canvas?.dimensions;
+    if (!THREE || !dims) {
+      if (u.uHasStampViewMapping) u.uHasStampViewMapping.value = 0.0;
+      return;
+    }
+    const rect = dims.sceneRect ?? dims;
+    const sx = Number(rect?.x ?? dims.sceneX ?? 0);
+    const sy = Number(rect?.y ?? dims.sceneY ?? 0);
+    const sw = Number(rect?.width ?? dims.sceneWidth ?? dims.width ?? 1);
+    const sh = Number(rect?.height ?? dims.sceneHeight ?? dims.height ?? 1);
+    if (u.uStampSceneOrigin) u.uStampSceneOrigin.value.set(sx, sy);
+    if (u.uStampSceneSize) u.uStampSceneSize.value.set(sw, sh);
+    if (u.uSceneDimensions) u.uSceneDimensions.value.set(Number(dims.width ?? 1), Number(dims.height ?? 1));
+
+    const sc = window.MapShine?.sceneComposer;
+    const groundZ = sc?.basePlaneMesh?.position?.z ?? (sc?.groundZ ?? 0);
+    const q = camera.quaternion;
+    const cache = this._stampViewCache;
+    const isOrtho = camera.isOrthographicCamera === true;
+    const cameraChanged = !cache.isValid
+      || cache.isOrtho !== isOrtho
+      || cache.px !== camera.position.x || cache.py !== camera.position.y || cache.pz !== camera.position.z
+      || cache.qx !== (q?.x ?? 0) || cache.qy !== (q?.y ?? 0) || cache.qz !== (q?.z ?? 0) || cache.qw !== (q?.w ?? 1)
+      || cache.zoom !== camera.zoom
+      || cache.groundZ !== groundZ;
+
+    if (cameraChanged) {
+      let c00x = 0; let c00y = 0; let c10x = 1; let c10y = 0; let c01x = 0; let c01y = 1; let c11x = 1; let c11y = 1;
+      if (isOrtho) {
+        const zoom = Math.max(0.001, camera.zoom ?? 1.0);
+        const vMinX = camera.position.x + camera.left / zoom;
+        const vMinY = camera.position.y + camera.bottom / zoom;
+        const vMaxX = camera.position.x + camera.right / zoom;
+        const vMaxY = camera.position.y + camera.top / zoom;
+        c00x = vMinX; c00y = vMinY;
+        c10x = vMaxX; c10y = vMinY;
+        c01x = vMinX; c01y = vMaxY;
+        c11x = vMaxX; c11y = vMaxY;
+      } else {
+        const ndc = new THREE.Vector3();
+        const world = new THREE.Vector3();
+        const dir = new THREE.Vector3();
+        let minX = Infinity; let minY = Infinity; let maxX = -Infinity; let maxY = -Infinity;
+        const cX = [-1, 1, -1, 1];
+        const cY = [-1, -1, 1, 1];
+        for (let i = 0; i < 4; i++) {
+          ndc.set(cX[i], cY[i], 0.5);
+          world.copy(ndc).unproject(camera);
+          dir.copy(world).sub(camera.position);
+          const dz = dir.z;
+          if (dz > -1e-6 && dz < 1e-6) continue;
+          const t = (groundZ - camera.position.z) / dz;
+          if (!Number.isFinite(t) || t <= 0) continue;
+          const ix = camera.position.x + dir.x * t;
+          const iy = camera.position.y + dir.y * t;
+          if (ix < minX) minX = ix;
+          if (iy < minY) minY = iy;
+          if (ix > maxX) maxX = ix;
+          if (iy > maxY) maxY = iy;
+          if (i === 0) { c00x = ix; c00y = iy; }
+          else if (i === 1) { c10x = ix; c10y = iy; }
+          else if (i === 2) { c01x = ix; c01y = iy; }
+          else if (i === 3) { c11x = ix; c11y = iy; }
+        }
+        if (minX !== Infinity) {
+          c00x = minX; c00y = minY;
+          c10x = maxX; c10y = minY;
+          c01x = minX; c01y = maxY;
+          c11x = maxX; c11y = maxY;
+        }
+      }
+      cache.isValid = true;
+      cache.isOrtho = isOrtho;
+      cache.px = camera.position.x; cache.py = camera.position.y; cache.pz = camera.position.z;
+      cache.qx = q?.x ?? 0; cache.qy = q?.y ?? 0; cache.qz = q?.z ?? 0; cache.qw = q?.w ?? 1;
+      cache.zoom = camera.zoom ?? 1;
+      cache.groundZ = groundZ;
+      cache.c00x = c00x; cache.c00y = c00y;
+      cache.c10x = c10x; cache.c10y = c10y;
+      cache.c01x = c01x; cache.c01y = c01y;
+      cache.c11x = c11x; cache.c11y = c11y;
+    }
+
+    if (u.uStampViewCorner00) u.uStampViewCorner00.value.set(cache.c00x, cache.c00y);
+    if (u.uStampViewCorner10) u.uStampViewCorner10.value.set(cache.c10x, cache.c10y);
+    if (u.uStampViewCorner01) u.uStampViewCorner01.value.set(cache.c01x, cache.c01y);
+    if (u.uStampViewCorner11) u.uStampViewCorner11.value.set(cache.c11x, cache.c11y);
+    if (u.uHasStampViewMapping) u.uHasStampViewMapping.value = cache.isValid ? 1.0 : 0.0;
+  }
+
+  /**
    * Set base mesh for V2 integration
    * @param {THREE.Mesh} baseMesh
    */
@@ -861,16 +1007,8 @@ export class OverheadStampEffectV2 {
    */
   _applyUnifiedShadowStampShaderFlags(THREE) {
     void THREE;
-    const u = this.material?.uniforms;
-    if (!u) return;
-    const white = this._getWhiteMaskPlaceholder();
-    if (u.tUpperFloorComposite) {
-      u.tUpperFloorComposite.value = white;
-      u.uHasUpperFloorComposite.value = 0.0;
-    }
-    if (u.uIndoorShadowEnabled) u.uIndoorShadowEnabled.value = 0.0;
-    if (u.uSkyReachShadowEnabled) u.uSkyReachShadowEnabled.value = 0.0;
-    if (u.uUpperFloorTileShadowEnabled) u.uUpperFloorTileShadowEnabled.value = 0.0;
+    // Embedded building/sky-reach/upper-floor shadow branches removed from the
+    // composite shader to stay within MAX_TEXTURE_IMAGE_UNITS (16).
   }
 
   /**
@@ -953,24 +1091,6 @@ export class OverheadStampEffectV2 {
           parameters: ['outdoorShadowLengthScale', 'indoorReceiverShadowLengthScale']
         },
         {
-          name: 'indoorShadow',
-          label: 'Outdoor Building Shadow (_Outdoors)',
-          type: 'inline',
-          parameters: ['indoorShadowEnabled', 'outdoorBuildingShadowOpacity', 'outdoorBuildingShadowLengthScale', 'indoorShadowSoftness', 'indoorFluidShadowSoftness', 'indoorFluidShadowIntensityBoost', 'indoorFluidColorSaturation']
-        },
-        {
-          name: 'skyReachShadow',
-          label: 'Sky-Reach Shelter (derived mask)',
-          type: 'inline',
-          parameters: ['skyReachShadowEnabled', 'skyReachShadowOpacity']
-        },
-        {
-          name: 'upperFloorTileShadow',
-          label: 'Upper Floor Tile Shadow (floorAlpha)',
-          type: 'inline',
-          parameters: ['upperFloorTileShadowEnabled', 'upperFloorTileShadowOpacity', 'upperFloorTileShadowLengthScale', 'upperFloorTileCombineMode']
-        },
-        {
           name: 'debug',
           label: 'Debug',
           type: 'inline',
@@ -1008,8 +1128,8 @@ export class OverheadStampEffectV2 {
           min: 0.0,
           max: 30.0,
           step: 1.00,
-          default: 0,
-          tooltip: 'Scales projected overhead shadow distance on outdoor receivers'
+          default: 1.0,
+          tooltip: 'Scales projected overhead shadow distance on outdoor receivers (0 disables outdoor projection)'
         },
         indoorReceiverShadowLengthScale: {
           type: 'slider',
@@ -1026,7 +1146,8 @@ export class OverheadStampEffectV2 {
           min: 0.0,
           max: 1.0,
           step: 0.05,
-          default: 0.75
+          default: 0.75,
+          tooltip: 'Scales how strongly overhead roof shadows lift dynamic-light shadow regions (0 = no lift, 1 = full lift)'
         },
         fluidColorEnabled: {
           type: 'checkbox',
@@ -1101,7 +1222,7 @@ export class OverheadStampEffectV2 {
           max: 30.0,
           step: 0.01,
           default: 1.0,
-          tooltip: 'Scales projection distance for tile-projected shadows relative to roof shadows'
+          tooltip: 'Projection distance for tile shadows (independent of Outdoor/Indoor receiver length scales)'
         },
         tileProjectionSoftness: {
           type: 'slider',
@@ -1148,115 +1269,6 @@ export class OverheadStampEffectV2 {
           default: 1.0,
           tooltip: 'Additional multiplier applied to tile-projected shadow strength on indoor receivers'
         },
-        indoorShadowEnabled: {
-          type: 'checkbox',
-          label: 'Enable Outdoor Building Shadow',
-          default: true,
-          tooltip: 'Injects a projected building-shadow term from _Outdoors dark regions (outdoor receivers only)'
-        },
-        outdoorBuildingShadowOpacity: {
-          type: 'slider',
-          label: 'Outdoor Building Shadow Strength',
-          min: 0.0,
-          max: 1.0,
-          step: 0.01,
-          default: 1,
-          tooltip: 'Strength of projected _Outdoors dark-region contribution on outdoor receivers'
-        },
-        outdoorBuildingShadowLengthScale: {
-          type: 'slider',
-          label: 'Outdoor Building Shadow Length Scale',
-          min: 0.0,
-          max: 30.0,
-          step: 0.01,
-          default: 4.87,
-          tooltip: 'Scale factor for _Outdoors dark-region projection distance'
-        },
-        indoorShadowSoftness: {
-          type: 'slider',
-          label: 'Indoor Shadow Softness',
-          min: 0.5,
-          max: 5.0,
-          step: 0.1,
-          default: 2,
-          tooltip: 'Indoor blur radius for overhead, sky-reach shelter, and fluid shadow contributions'
-        },
-        skyReachShadowEnabled: {
-          type: 'checkbox',
-          label: 'Enable Sky-Reach Shelter Shadow',
-          default: true,
-          tooltip: 'Currently forced on in code (uniform always 1). Darkens outdoor receivers where derived skyReach is low.'
-        },
-        skyReachShadowOpacity: {
-          type: 'slider',
-          label: 'Sky-Reach Shelter Strength',
-          min: 0.0,
-          max: 1.0,
-          step: 0.01,
-          default: 1,
-          tooltip: 'How strongly low skyReach (occluded from sky by floors above) adds to the overhead shadow factor'
-        },
-        upperFloorTileShadowEnabled: {
-          type: 'checkbox',
-          label: 'Enable Upper Floor Tile Shadow',
-          default: true,
-          tooltip: 'Composites GPU floorAlpha from every level above the viewer, then projects and softens like building shadow (recommended for bridge decks)'
-        },
-        upperFloorTileShadowOpacity: {
-          type: 'slider',
-          label: 'Upper Floor Tile Shadow Strength',
-          min: 0.0,
-          max: 1.0,
-          step: 0.01,
-          default: 1,
-          tooltip: 'Strength of the projected upper-floor tile-alpha shadow on outdoor receivers'
-        },
-        upperFloorTileShadowLengthScale: {
-          type: 'slider',
-          label: 'Upper Floor Tile Shadow Length Scale',
-          min: 0.0,
-          max: 30.0,
-          step: 0.05,
-          default: 4.7,
-          tooltip: 'Projection distance scale for upper-floor tile shadows (same regime as Outdoor Building Shadow)'
-        },
-        upperFloorTileCombineMode: {
-          type: 'list',
-          label: 'Combine Upper Alphas',
-          options: {
-            Multiply: 'multiply',
-            MaxUnion: 'max'
-          },
-          default: 'multiply',
-          tooltip: 'multiply = Π alpha per pixel (strict). max = union — better when several upper bands overlap or have gaps'
-        },
-        indoorFluidShadowSoftness: {
-          type: 'slider',
-          label: 'Indoor Fluid Shadow Softness',
-          min: 0.5,
-          max: 10.0,
-          step: 0.1,
-          default: 3.1,
-          tooltip: 'Blur radius for FluidEffect tint on indoor receivers (up to 2x regular shadow softness range)'
-        },
-        indoorFluidShadowIntensityBoost: {
-          type: 'slider',
-          label: 'Indoor Fluid Shadow Intensity Boost',
-          min: 0.0,
-          max: 5.0,
-          step: 0.01,
-          default: 0.81,
-          tooltip: 'Boost multiplier for FluidEffect colour contribution on indoor receivers (up to 500%)'
-        },
-        indoorFluidColorSaturation: {
-          type: 'slider',
-          label: 'Indoor Fluid Colour Saturation',
-          min: 0.0,
-          max: 3.0,
-          step: 0.01,
-          default: 1.2,
-          tooltip: 'Saturation multiplier for FluidEffect tint on indoor receivers'
-        },
         debugView: {
           type: 'list',
           label: 'Debug View',
@@ -1267,8 +1279,7 @@ export class OverheadStampEffectV2 {
             RoofVisibility: 'roofVisibility',
             RoofBase: 'roofBase',
             RoofCombinedStrength: 'roofCombined',
-            TileProjectionStrength: 'tileCombined',
-            SkyReachShelter: 'skyReachShelter'
+            TileProjectionStrength: 'tileCombined'
           },
           default: 'final'
         }
@@ -1321,790 +1332,19 @@ export class OverheadStampEffectV2 {
       this.material = null;
     }
 
-    this.material = new THREE.ShaderMaterial({
-      uniforms: {
-        tRoof: { value: null },
-        tRoofVisibility: { value: null },
-        uHasRoofVisibility: { value: 0.0 },
-        uOpacity: { value: this.params.opacity },
-        uLength: { value: this.params.length },
-        uSoftness: { value: this.params.softness },
-        uOutdoorShadowLengthScale: { value: this.params.outdoorShadowLengthScale ?? 1.0 },
-        uIndoorReceiverShadowLengthScale: { value: this.params.indoorReceiverShadowLengthScale ?? 1.0 },
-        uTexelSize: { value: new THREE.Vector2(1 / 1024, 1 / 1024) },
-        uRoofUvScale: { value: 1.0 },
-        uTileProjectionUvScale: { value: 1.0 },
-        uSunDir: { value: new THREE.Vector2(0.0, 1.0) },
-        uResolution: { value: new THREE.Vector2(1024, 1024) },
-        uZoom: { value: 1.0 },
-        uHoverRevealActive: { value: 0.0 },
-        // Indoor shadow from _Outdoors mask
-        uOutdoorsMask: { value: null },
-        uHasOutdoorsMask: { value: 0.0 },
-        uOutdoorsMaskFlipY: { value: 0.0 },
-        tSkyReach: { value: whiteOb },
-        uHasSkyReach: { value: 0.0 },
-        uSkyReachFlipY: { value: 0.0 },
-        uSkyReachShadowEnabled: { value: 1.0 },
-        uSkyReachShadowOpacity: { value: this.params.skyReachShadowOpacity ?? 1.0 },
-        tUpperFloorComposite: { value: whiteOb },
-        uHasUpperFloorComposite: { value: 0.0 },
-        uUpperFloorCompositeFlipY: { value: 0.0 },
-        uUpperFloorTileShadowEnabled: { value: 1.0 },
-        uUpperFloorTileShadowOpacity: { value: this.params.upperFloorTileShadowOpacity ?? 1.0 },
-        uUpperFloorTileShadowLengthScale: { value: this.params.upperFloorTileShadowLengthScale ?? 4.7 },
-        // Upper-floor _Outdoors for Outdoor Building Shadow casters only (min across levels above).
-        uObUpperOutdoors0: { value: whiteOb },
-        uObUpperOutdoors1: { value: whiteOb },
-        uObUpperOutdoors2: { value: whiteOb },
-        uObUpperOutdoorsFlipY0: { value: 0.0 },
-        uObUpperOutdoorsFlipY1: { value: 0.0 },
-        uObUpperOutdoorsFlipY2: { value: 0.0 },
-        uObUpperCount: { value: 0.0 },
-        uIndoorShadowEnabled: { value: 0.0 },
-        uOutdoorBuildingShadowOpacity: { value: this.params.outdoorBuildingShadowOpacity ?? this.params.indoorShadowOpacity ?? 1.0 },
-        uOutdoorBuildingShadowLengthScale: { value: this.params.outdoorBuildingShadowLengthScale ?? this.params.indoorShadowLengthScale ?? 4.87 },
-        uIndoorShadowSoftness: { value: 3.0 },
-        uIndoorFluidShadowSoftness: { value: 3.0 },
-        uIndoorFluidShadowIntensityBoost: { value: 1.0 },
-        uIndoorFluidColorSaturation: { value: 1.2 },
-        uFluidColorEnabled: { value: 0.0 },
-        uFluidEffectTransparency: { value: 0.35 },
-        uFluidShadowIntensityBoost: { value: 1.0 },
-        uFluidShadowSoftness: { value: 3.0 },
-        uFluidColorBoost: { value: 1.5 },
-        uFluidColorSaturation: { value: 1.2 },
-        tFluidRoof: { value: null },
-        uHasFluidRoof: { value: 0.0 },
-        tTileProjection: { value: null },
-        uHasTileProjection: { value: 0.0 },
-        tTileProjectionSort: { value: null },
-        uHasTileProjectionSort: { value: 0.0 },
-        tTileReceiverAlpha: { value: null },
-        tTileReceiverSort: { value: null },
-        uHasTileReceiverSort: { value: 0.0 },
-        uTileProjectionEnabled: { value: 0.0 },
-        uTileProjectionOpacity: { value: 0.5 },
-        uTileProjectionLengthScale: { value: 1.0 },
-        uTileProjectionSoftness: { value: 3.0 },
-        uTileProjectionThreshold: { value: 0.05 },
-        uTileProjectionPower: { value: 1.0 },
-        uTileProjectionOutdoorOpacityScale: { value: 1.0 },
-        uTileProjectionIndoorOpacityScale: { value: 1.0 },
-        uTileProjectionSortBias: { value: 0.002 },
-        // Scene dimensions in world pixels for world-space mask UV conversion
-        uSceneDimensions: { value: new THREE.Vector2(1, 1) },
-        // Depth pass integration: height-based shadow modulation.
-        // Casters must be above receivers to cast shadows — prevents
-        // self-shadowing and upward-shadowing using per-pixel depth.
-        uDepthTexture: { value: null },
-        uDepthEnabled: { value: 0.0 },
-        uDepthCameraNear: { value: 800.0 },
-        uDepthCameraFar: { value: 1200.0 },
-        uGroundDistance: { value: 1000.0 }
-        ,
-        uDebugView: { value: 0.0 },
-        tDynamicLight: { value: null },
-        tWindowLight: { value: null },
-        uHasDynamicLight: { value: 0.0 },
-        uHasWindowLight: { value: 0.0 },
-        uDynamicLightShadowOverrideEnabled: { value: 1.0 },
-        uDynamicLightShadowOverrideStrength: { value: this.params.dynamicLightShadowOverrideStrength ?? 0.7 }
-      },
-      vertexShader: `
-        varying vec2 vUv;
-        void main() {
-          vUv = uv;
-          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-        }
-      `,
-      fragmentShader: `
-        uniform sampler2D tRoof;
-        uniform sampler2D tRoofVisibility;
-        uniform float uHasRoofVisibility;
-        uniform float uOpacity;
-        uniform float uLength;
-        uniform float uSoftness;
-        uniform float uOutdoorShadowLengthScale;
-        uniform float uIndoorReceiverShadowLengthScale;
-        uniform vec2 uTexelSize;
-        uniform float uRoofUvScale;
-        uniform float uTileProjectionUvScale;
-        uniform vec2 uSunDir;
-        uniform vec2 uResolution;
-        uniform float uZoom;
-        uniform float uHoverRevealActive;
-
-        // Indoor shadow from _Outdoors mask
-        uniform sampler2D uOutdoorsMask;
-        uniform float uHasOutdoorsMask;
-        uniform float uOutdoorsMaskFlipY;
-        uniform sampler2D tSkyReach;
-        uniform float uHasSkyReach;
-        uniform float uSkyReachFlipY;
-        uniform float uSkyReachShadowEnabled;
-        uniform float uSkyReachShadowOpacity;
-        uniform sampler2D tUpperFloorComposite;
-        uniform float uHasUpperFloorComposite;
-        uniform float uUpperFloorCompositeFlipY;
-        uniform float uUpperFloorTileShadowEnabled;
-        uniform float uUpperFloorTileShadowOpacity;
-        uniform float uUpperFloorTileShadowLengthScale;
-        uniform sampler2D uObUpperOutdoors0;
-        uniform sampler2D uObUpperOutdoors1;
-        uniform sampler2D uObUpperOutdoors2;
-        uniform float uObUpperOutdoorsFlipY0;
-        uniform float uObUpperOutdoorsFlipY1;
-        uniform float uObUpperOutdoorsFlipY2;
-        uniform float uObUpperCount;
-        uniform float uIndoorShadowEnabled;
-        uniform float uOutdoorBuildingShadowOpacity;
-        uniform float uOutdoorBuildingShadowLengthScale;
-        uniform float uIndoorShadowSoftness;
-        uniform float uIndoorFluidShadowSoftness;
-        uniform float uIndoorFluidShadowIntensityBoost;
-        uniform float uIndoorFluidColorSaturation;
-        uniform float uFluidColorEnabled;
-        uniform float uFluidEffectTransparency;
-        uniform float uFluidShadowIntensityBoost;
-        uniform float uFluidShadowSoftness;
-        uniform float uFluidColorBoost;
-        uniform float uFluidColorSaturation;
-        uniform sampler2D tFluidRoof;
-        uniform float uHasFluidRoof;
-        uniform sampler2D tTileProjection;
-        uniform float uHasTileProjection;
-        uniform sampler2D tTileProjectionSort;
-        uniform float uHasTileProjectionSort;
-        uniform sampler2D tTileReceiverAlpha;
-        uniform sampler2D tTileReceiverSort;
-        uniform float uHasTileReceiverSort;
-        uniform float uTileProjectionEnabled;
-        uniform float uTileProjectionOpacity;
-        uniform float uTileProjectionLengthScale;
-        uniform float uTileProjectionSoftness;
-        uniform float uTileProjectionThreshold;
-        uniform float uTileProjectionPower;
-        uniform float uTileProjectionOutdoorOpacityScale;
-        uniform float uTileProjectionIndoorOpacityScale;
-        uniform float uTileProjectionSortBias;
-        // Scene dimensions in world pixels for mask UV conversion
-        uniform vec2 uSceneDimensions;
-
-        // Depth pass integration
-        uniform sampler2D uDepthTexture;
-        uniform float uDepthEnabled;
-        uniform float uDepthCameraNear;
-        uniform float uDepthCameraFar;
-        uniform float uGroundDistance;
-        uniform float uDebugView;
-        uniform sampler2D tDynamicLight;
-        uniform sampler2D tWindowLight;
-        uniform float uHasDynamicLight;
-        uniform float uHasWindowLight;
-        uniform float uDynamicLightShadowOverrideEnabled;
-        uniform float uDynamicLightShadowOverrideStrength;
-
-        varying vec2 vUv;
-
-        // Linearize perspective device depth [0,1] → eye-space distance.
-        // Uses the tight depth camera's near/far (NOT main camera).
-        float msa_linearizeDepth(float d) {
-          float z_ndc = d * 2.0 - 1.0;
-          return (2.0 * uDepthCameraNear * uDepthCameraFar) /
-                 (uDepthCameraFar + uDepthCameraNear - z_ndc * (uDepthCameraFar - uDepthCameraNear));
-        }
-
-        // ClampToEdge + linear filtering can smear border texels when sampling
-        // exactly on the 0/1 boundary. Require taps to stay at least half a
-        // texel inside texture bounds to keep edge behavior stable.
-        float uvInBounds(vec2 uv, vec2 texelSize) {
-          // Keep a small safety inset to avoid border-smear taps, but do not
-          // reject too aggressively or projected shadows can disappear in a
-          // directional diagonal near screen edges.
-          vec2 safeMin = max(texelSize * 0.25, vec2(0.0));
-          vec2 safeMax = min(vec2(1.0) - texelSize * 0.25, vec2(1.0));
-          vec2 ge0 = step(safeMin, uv);
-          vec2 le1 = step(uv, safeMax);
-          return ge0.x * ge0.y * le1.x * le1.y;
-        }
-
-        float readOutdoorsMask(vec2 uv) {
-          vec2 suv = clamp(uv, 0.0, 1.0);
-          if (uOutdoorsMaskFlipY > 0.5) {
-            suv.y = 1.0 - suv.y;
-          }
-          // Per-floor outdoors masks can be sparse. Outside valid coverage, alpha
-          // may be 0 while RGB is black; interpret that as default outdoors (1.0).
-          vec4 m = texture2D(uOutdoorsMask, suv);
-          return clamp(mix(1.0, m.r, m.a), 0.0, 1.0);
-        }
-
-        float readObUpperSample(sampler2D samp, float flipY, vec2 uv) {
-          vec2 suv = clamp(uv, 0.0, 1.0);
-          if (flipY > 0.5) suv.y = 1.0 - suv.y;
-          vec4 m = texture2D(samp, suv);
-          return clamp(mix(1.0, m.r, m.a), 0.0, 1.0);
-        }
-
-        // Outdoor Building Shadow caster: combine _Outdoors from levels above the viewer.
-        // min() => treat as "indoor caster" if ANY upper level marks this world XY dark/indoor.
-        // When uObUpperCount < 0.5, fall back to the receiver mask (single-floor / top floor).
-        float readOutdoorBuildingCasterOutdoors(vec2 uv) {
-          if (uObUpperCount < 0.5) {
-            return readOutdoorsMask(uv);
-          }
-          float o = 1.0;
-          if (uObUpperCount > 0.5) {
-            o = min(o, readObUpperSample(uObUpperOutdoors0, uObUpperOutdoorsFlipY0, uv));
-          }
-          if (uObUpperCount > 1.5) {
-            o = min(o, readObUpperSample(uObUpperOutdoors1, uObUpperOutdoorsFlipY1, uv));
-          }
-          if (uObUpperCount > 2.5) {
-            o = min(o, readObUpperSample(uObUpperOutdoors2, uObUpperOutdoorsFlipY2, uv));
-          }
-          return o;
-        }
-
-        float readSkyReach(vec2 uv) {
-          if (uHasSkyReach < 0.5) {
-            return 1.0;
-          }
-          vec2 suv = clamp(uv, 0.0, 1.0);
-          if (uSkyReachFlipY > 0.5) {
-            suv.y = 1.0 - suv.y;
-          }
-          vec4 m = texture2D(tSkyReach, suv);
-          return clamp(mix(1.0, m.r, m.a), 0.0, 1.0);
-        }
-
-        float readUpperFloorComposite(vec2 uv) {
-          if (uHasUpperFloorComposite < 0.5) {
-            return 0.0;
-          }
-          vec2 suv = clamp(uv, 0.0, 1.0);
-          if (uUpperFloorCompositeFlipY > 0.5) {
-            suv.y = 1.0 - suv.y;
-          }
-          return clamp(texture2D(tUpperFloorComposite, suv).r, 0.0, 1.0);
-        }
-
-        // Compute how far we can travel along delta before leaving [0,1].
-        // Returned scale is clamped to [0,1], so callers can safely apply it
-        // to their intended offset vector.
-        float offsetScaleLimit(float origin, float delta) {
-          if (delta > 0.0) return (1.0 - origin) / delta;
-          if (delta < 0.0) return (0.0 - origin) / delta;
-          return 1e6;
-        }
-
-        float offsetTravelScale(vec2 origin, vec2 delta) {
-          float kx = offsetScaleLimit(origin.x, delta.x);
-          float ky = offsetScaleLimit(origin.y, delta.y);
-          return clamp(min(kx, ky), 0.0, 1.0);
-        }
-
-        void main() {
-          // Screen-space UV for this fragment, matching the roofTarget
-          // render that was produced with the same camera.
-          vec2 screenUv = gl_FragCoord.xy / uResolution;
-          // roofTarget/fluidRoofTarget may be captured with a guard-band
-          // expanded camera. Remap current screen UV into that larger capture.
-          float roofUvScale = max(uRoofUvScale, 0.0001);
-          vec2 roofUv = (screenUv - 0.5) * roofUvScale + 0.5;
-          float tileProjectionUvScale = max(uTileProjectionUvScale, 0.0001);
-          vec2 tileProjectionUv = (screenUv - 0.5) * tileProjectionUvScale + 0.5;
-
-          // Two direction vectors are needed because the roof sampling and
-          // indoor mask sampling operate in different UV spaces:
-          //
-          // Screen UV (gl_FragCoord / uResolution): Y=0 at the BOTTOM of the
-          //   viewport (south on the map).
-          // Mesh UV (vUv on basePlane with scale.y=-1 and flipY=false): V=0 at
-          //   the TOP of the mesh (north on the map).
-          //
-          // BuildingShadowsEffect's bake shader uses a standard-UV bake quad
-          // where V=0 also maps to north (flipY=false on the _Outdoors mask).
-          // So its +dir.y points north in its UV space. To get the same visual
-          // direction in screen UV we must negate Y, because screen Y=0 is south.
-          //
-          // dir        — mesh/mask UV space (V=0 = north, matches bake UV)
-          // screenDir  — screen UV space (Y=0 = south, needs Y flip)
-          vec2 dir = normalize(uSunDir);
-          vec2 screenDir = normalize(vec2(uSunDir.x, -uSunDir.y));
-
-          // Receiver-space classification (at the current fragment).
-          // White in _Outdoors = outdoors, black = indoors.
-          bool hasOutdoorsMask = (uHasOutdoorsMask > 0.5);
-          float receiverOutdoors = hasOutdoorsMask ? readOutdoorsMask(vUv) : 1.0;
-          float receiverIndoor = 1.0 - receiverOutdoors;
-          float receiverIsOutdoors = step(0.5, receiverOutdoors);
-          float receiverIsIndoor = 1.0 - receiverIsOutdoors;
-
-          // Scale length by zoom so the world-space band stays
-          // approximately constant as the camera zoom changes.
-          // We use a reference height of 1080px to convert the normalized uLength
-          // into a pixel distance. This ensures the shadow length is stable across
-          // different resolutions (resolution-independent) and aspect ratios.
-          // uLength (0.04) * 1080 ~= 43 pixels at Zoom 1.
-          float receiverLengthScale = mix(
-            max(uOutdoorShadowLengthScale, 0.0),
-            max(uIndoorReceiverShadowLengthScale, 0.0),
-            receiverIndoor
-          );
-          float pixelLen = uLength * 1080.0 * max(uZoom, 0.0001) * receiverLengthScale;
-
-          // Sample the roof mask at an offset along screenDir. We look for
-          // roof pixels in the +screenDir direction so shadow extends in
-          // -screenDir, matching BuildingShadowsEffect's visual convention.
-          vec2 baseOffsetDeltaUv = screenDir * pixelLen * uTexelSize * roofUvScale;
-          float baseOffsetScaleX = clamp(offsetScaleLimit(roofUv.x, baseOffsetDeltaUv.x), 0.0, 1.0);
-          float baseOffsetScaleY = clamp(offsetScaleLimit(roofUv.y, baseOffsetDeltaUv.y), 0.0, 1.0);
-          float baseOffsetScale = min(baseOffsetScaleX, baseOffsetScaleY);
-          float baseOffsetScaleAvg = 0.5 * (baseOffsetScaleX + baseOffsetScaleY);
-          // Smooth edge falloff: when we cannot travel full projection distance
-          // near viewport borders, fade contribution to avoid smear bands from
-          // heavily compressed sample neighborhoods.
-          // Keep a non-zero floor so projection degrades instead of vanishing.
-          // Keep stronger contribution near borders so overlap at the top/left
-          // of the viewport does not collapse into a directional diagonal cut.
-          float baseEdgeFade = mix(0.65, 1.0, smoothstep(0.0, 1.0, baseOffsetScaleAvg));
-          vec2 offsetUv = roofUv + vec2(
-            baseOffsetDeltaUv.x * baseOffsetScaleX,
-            baseOffsetDeltaUv.y * baseOffsetScaleY
-          );
-          // Suppress self-shadowing on the caster layer itself.
-          // Keep an unmodified receiver roof coverage mask so non-roof shadow
-          // contributions (e.g. Outdoor Building Shadow) stay below overhead tiles.
-          float roofCoverageAlpha = clamp(texture2D(tRoof, clamp(roofUv, 0.0, 1.0)).a, 0.0, 1.0);
-          // Building-shadow suppression should follow the runtime roof fade
-          // state (hover-reveal/visibility) rather than the forced-opacity
-          // caster capture in tRoof.
-          float roofVisibilityAlpha = roofCoverageAlpha;
-          if (uHasRoofVisibility > 0.5) {
-            roofVisibilityAlpha = clamp(texture2D(tRoofVisibility, clamp(screenUv, 0.0, 1.0)).a, 0.0, 1.0);
-          }
-          // Receiver-side self-mask baseline must follow runtime view-floor roof
-          // visibility (not the revealed caster capture). This allows upper-floor
-          // revealed casters to project onto lower floors without being canceled
-          // as if they were local receiver coverage.
-          float roofBaseAlpha = roofVisibilityAlpha;
-          // Tree-style unmasking behavior during hover reveal: keep caster
-          // projection active, but stop masking it out under the source roof.
-          roofBaseAlpha *= (1.0 - clamp(uHoverRevealActive, 0.0, 1.0));
-
-          bool tileProjectionEnabled = (uTileProjectionEnabled > 0.5 && uHasTileProjection > 0.5);
-          float tileProjectionLengthScale = max(uTileProjectionLengthScale, 0.0);
-          float projectedPixelLen = pixelLen * tileProjectionLengthScale;
-          vec2 projectedOffsetDeltaUv = screenDir * projectedPixelLen * uTexelSize * tileProjectionUvScale;
-          float projectedOffsetScaleX = clamp(offsetScaleLimit(tileProjectionUv.x, projectedOffsetDeltaUv.x), 0.0, 1.0);
-          float projectedOffsetScaleY = clamp(offsetScaleLimit(tileProjectionUv.y, projectedOffsetDeltaUv.y), 0.0, 1.0);
-          float projectedOffsetScale = min(projectedOffsetScaleX, projectedOffsetScaleY);
-          float projectedOffsetScaleAvg = 0.5 * (projectedOffsetScaleX + projectedOffsetScaleY);
-          // Keep a non-zero floor so tile projection degrades instead of vanishing.
-          float projectedEdgeFade = mix(0.65, 1.0, smoothstep(0.0, 1.0, projectedOffsetScaleAvg));
-          vec2 projectedOffsetUv = tileProjectionUv + vec2(
-            projectedOffsetDeltaUv.x * projectedOffsetScaleX,
-            projectedOffsetDeltaUv.y * projectedOffsetScaleY
-          );
-          // Same rule for tile projection casters: do not project onto the
-          // tile's own layer footprint at the receiver pixel.
-          float tileBaseAlpha = clamp(texture2D(tTileProjection, clamp(tileProjectionUv, 0.0, 1.0)).a, 0.0, 1.0);
-
-          // ---- Depth pass: height-based shadow modulation ----
-          // IMPORTANT: Keep depth gating only for tile projection shadows.
-          //
-          // Roof/indoor overhead shadow continuity intentionally does NOT use
-          // this gate, because hover-hidden roofs fade out of the main depth
-          // pass (depthWrite disabled near zero opacity) while we still need
-          // their captured roof mask to cast shadows. Applying depthMod there
-          // also suppresses _Outdoors dark-region contribution in outdoor space.
-          float depthTileProjectionMod = 1.0;
-          if (uDepthEnabled > 0.5 && tileProjectionEnabled) {
-            float receiverDevice = texture2D(uDepthTexture, screenUv).r;
-            if (receiverDevice < 0.9999) {
-              float receiverLinear = msa_linearizeDepth(receiverDevice);
-              float receiverHeight = uGroundDistance - receiverLinear;
-
-              // Tile projection caster height (uses projection-length offset)
-              vec2 tileCasterUv = screenUv + screenDir * projectedPixelLen * uTexelSize * projectedOffsetScale;
-              float tileCasterDevice = texture2D(uDepthTexture, tileCasterUv).r;
-              if (tileCasterDevice < 0.9999) {
-                float tileCasterLinear = msa_linearizeDepth(tileCasterDevice);
-                float tileCasterHeight = uGroundDistance - tileCasterLinear;
-                // Preserve projection for same-height casters (common for tile->tile
-                // projections) and only suppress clearly lower casters.
-                float tileHeightDiff = tileCasterHeight - receiverHeight;
-                depthTileProjectionMod = smoothstep(-2.0, -0.1, tileHeightDiff);
-              }
-            }
-          }
-
-          // Prepare indoor/outdoor mask sampling in world UV (mask space).
-          // We use this for two jobs:
-          // 1) Receiver/caster region matching (clip shadows that cross the
-          //    indoor/outdoor boundary)
-          // 2) Optional indoor-only shadow contribution
-          bool indoorEnabled = (uIndoorShadowEnabled > 0.5 && hasOutdoorsMask);
-          vec2 maskTexelSize = vec2(1.0) / max(uSceneDimensions, vec2(1.0));
-          // Keep _Outdoors dark-region taps projected with sun direction so
-          // building-shadow motion remains consistent with roof projection.
-          // _Outdoors dark-region projection is sampled in world/scene UV.
-          // Keep this path zoom-stable (do NOT scale by camera zoom).
-          float buildingMaskPixelLenBase = uLength * 1080.0;
-          float maskPixelLenBase = uLength * 1080.0 * receiverLengthScale;
-          float maskPixelLenIndoor = buildingMaskPixelLenBase * max(uOutdoorBuildingShadowLengthScale, 0.0);
-          float maskPixelLenProjected = maskPixelLenBase * tileProjectionLengthScale;
-          // Region matching and tile-projection region checks should use the same
-          // world-UV sampling direction as the roof projection path.
-          vec2 maskProjectDir = dir;
-          vec2 maskOffsetUvBase = vUv + maskProjectDir * maskPixelLenBase * maskTexelSize;
-          vec2 maskOffsetUvIndoor = vUv + maskProjectDir * maskPixelLenIndoor * maskTexelSize;
-          vec2 maskOffsetUvProjected = vUv + maskProjectDir * maskPixelLenProjected * maskTexelSize;
-          float upperTileMaskPixelLen = uLength * 1080.0 * max(uUpperFloorTileShadowLengthScale, 0.0);
-          vec2 maskOffsetUvUpperTile = vUv + maskProjectDir * upperTileMaskPixelLen * maskTexelSize;
-          vec2 upperTileMaskDelta = maskProjectDir * upperTileMaskPixelLen * maskTexelSize;
-          float upperTileTravelScale = offsetTravelScale(vUv, upperTileMaskDelta);
-          float upperTileEdgeFade = mix(0.65, 1.0, smoothstep(0.0, 1.0, upperTileTravelScale));
-          // World/mesh UV travel for _Outdoors building shadow only — do not tie
-          // this to screen-space roof projection (baseEdgeFade). Short roof
-          // projection or viewport clamping was incorrectly zeroing building shadow.
-          vec2 outdoorBuildingMaskDelta = maskProjectDir * maskPixelLenIndoor * maskTexelSize;
-          float outdoorBuildingTravelScale = offsetTravelScale(vUv, outdoorBuildingMaskDelta);
-          float outdoorBuildingEdgeFade = mix(0.65, 1.0, smoothstep(0.0, 1.0, outdoorBuildingTravelScale));
-
-          // Apply indoor/outdoor softness selection uniformly so all shadow
-          // components (roof, indoor mask, and fluid tint) blur consistently.
-          float blurSoftness = mix(uSoftness, uIndoorShadowSoftness, receiverIsIndoor);
-          // Keep blur footprint in the same zoom regime as projection length.
-          // Without this, shadows appear to sharpen/soften while zooming even
-          // when the caster offset is otherwise world-stable.
-          float zoomScale = max(uZoom, 0.0001);
-          vec2 stepUv = uTexelSize * blurSoftness * roofUvScale * zoomScale;
-          vec2 maskStepUv = maskTexelSize * blurSoftness * 4.0 * zoomScale;
-          // Indoor dark-region taps are world/scene-UV based, so keep their blur
-          // radius independent of camera zoom to avoid zoom-linked swim.
-          vec2 indoorMaskStepUv = maskTexelSize * blurSoftness * 4.0;
-          float fluidBlurSoftness = mix(uFluidShadowSoftness, uIndoorFluidShadowSoftness, receiverIndoor);
-          vec2 fluidStepUv = uTexelSize * fluidBlurSoftness * roofUvScale * zoomScale;
-          vec2 maskFluidStepUv = maskTexelSize * fluidBlurSoftness * 4.0 * zoomScale;
-
-          float accum = 0.0;
-          float weightSum = 0.0;
-          float skyReachAccum = 0.0;
-          for (int dy = -2; dy <= 2; dy++) {
-            for (int dx = -2; dx <= 2; dx++) {
-              vec2 sUv = offsetUv + vec2(float(dx), float(dy)) * stepUv;
-              // Edge handling: allow taps very close to the border to contribute.
-              // Hard validity clipping here can cause visible screen-edge cut lines
-              // when projected UVs are clamped near top/left.
-              float sUvValid = uvInBounds(sUv, uTexelSize * 0.05);
-              float wx = 1.0 - (abs(float(dx)) / 3.0);
-              float wy = 1.0 - (abs(float(dy)) / 3.0);
-              float w = max(wx * wy, 0.0001);
-              float wEffective = w * sUvValid;
-
-              // Roof tap (screen-space)
-              float roofTap = texture2D(tRoof, clamp(sUv, 0.0, 1.0)).a * sUvValid;
-              float roofProjectedOnlyTap = max(roofTap - roofBaseAlpha, 0.0);
-              float roofStrengthTap = clamp(roofProjectedOnlyTap * uOpacity, 0.0, 1.0);
-              roofStrengthTap *= baseEdgeFade;
-
-              // Region clipping (receiver floor _Outdoors only): mask-offset tap
-              // uses the VIEWED floor's mask at sun-offset UV — not the upstairs
-              // caster's classification. On outdoor ground under an upper slab,
-              // that offset often lands on "indoor" building footprint on the
-              // ground map while tRoof correctly captures the upper-floor caster;
-              // sameRegionTap would zero the stamp (felt like "upper mask" killing
-              // downstairs shadow). Skip offset clip for outdoor receivers; keep
-              // full clip for indoor receivers so overhead does not leak outdoors→indoors.
-              vec2 maskJitterUv = vec2(float(dx), float(dy)) * maskStepUv;
-              vec2 indoorMaskJitterUv = vec2(float(dx), float(dy)) * indoorMaskStepUv;
-              float sameRegionTap = hasOutdoorsMask ? 0.0 : 1.0;
-              if (hasOutdoorsMask) {
-                vec2 mUvBase = maskOffsetUvBase + maskJitterUv;
-                float mUvBaseValid = uvInBounds(mUvBase, maskTexelSize);
-                if (mUvBaseValid > 0.5) {
-                  float casterOutdoorsBase = readOutdoorsMask(mUvBase);
-                  float casterIsOutdoors = step(0.5, casterOutdoorsBase);
-                  float casterIsIndoor = 1.0 - casterIsOutdoors;
-                  // Explicit region split so indoor casters only project to
-                  // indoor receivers and outdoor casters only to outdoor receivers.
-                  sameRegionTap = receiverIsOutdoors * casterIsOutdoors + receiverIsIndoor * casterIsIndoor;
-                }
-                float roofRegionTap = (receiverIsOutdoors > 0.5) ? 1.0 : sameRegionTap;
-                roofStrengthTap *= roofRegionTap;
-              }
-              // Indoor dark regions (black in _Outdoors) should not receive
-              // overhead roof projection. This preserves independent control of
-              // interior darkness via dedicated indoor lighting/shadow systems.
-              roofStrengthTap *= receiverIsOutdoors;
-
-              // Dark-region tap (world-space _Outdoors mask)
-              // This is a separate projected building-shadow term sourced from
-              // indoor (_Outdoors dark) casters and applied to outdoor receivers.
-              float indoorStrengthTap = 0.0;
-              if (indoorEnabled) {
-                vec2 mUvIndoor = maskOffsetUvIndoor + indoorMaskJitterUv;
-                float mUvIndoorValid = uvInBounds(mUvIndoor, maskTexelSize);
-                if (mUvIndoorValid > 0.5) {
-                  float casterOutdoorsIndoor = readOutdoorBuildingCasterOutdoors(mUvIndoor);
-                  float casterIndoorsIndoor = 1.0 - casterOutdoorsIndoor;
-                  indoorStrengthTap = clamp(casterIndoorsIndoor * uOutdoorBuildingShadowOpacity * receiverIsOutdoors, 0.0, 1.0);
-                  // Keep outdoor-building contribution out from directly under
-                  // currently visible overhead coverage on the VIEWED floor.
-                  // Use roofVisibilityAlpha (view-floor state), not roofCoverageAlpha
-                  // (revealed caster capture), so masking differs correctly by
-                  // active level and does not inherit upper-floor reveal state.
-                  indoorStrengthTap *= (1.0 - roofVisibilityAlpha);
-                  indoorStrengthTap *= outdoorBuildingEdgeFade;
-                }
-              }
-
-              float skyReachStrengthTap = 0.0;
-              if (uSkyReachShadowEnabled > 0.5 && uHasSkyReach > 0.5) {
-                // Match upper-floor mask projection: sample skyReach along sun offset in mask UV.
-                vec2 skyUv = maskOffsetUvUpperTile + indoorMaskJitterUv;
-                float skyUvValid = uvInBounds(skyUv, maskTexelSize);
-                if (skyUvValid > 0.5) {
-                  float skyR = readSkyReach(skyUv);
-                  float shelter = receiverIsOutdoors * (1.0 - skyR) * max(uSkyReachShadowOpacity, 0.0) * upperTileEdgeFade;
-                  // Do NOT multiply by (1 - roofVisibilityAlpha) here. That gate is correct for the
-                  // _Outdoors building-shadow term (view-floor overhead coverage), but upper-floor
-                  // bridge slabs are revealed into tRoofVisibility during capture — under the deck,
-                  // roofVisibilityAlpha is often ~1 while skyReach encodes the desired shelter.
-                  // max(roofStrengthTap, skyReachStrengthTap) already avoids double-darkening.
-                  skyReachStrengthTap = clamp(shelter, 0.0, 1.0);
-                }
-              }
-
-              float upperFloorTileTap = 0.0;
-              if (uUpperFloorTileShadowEnabled > 0.5 && uHasUpperFloorComposite > 0.5) {
-                vec2 mUvUpper = maskOffsetUvUpperTile + indoorMaskJitterUv;
-                float mUvUpperValid = uvInBounds(mUvUpper, maskTexelSize);
-                if (mUvUpperValid > 0.5) {
-                  float ua = readUpperFloorComposite(mUvUpper);
-                  upperFloorTileTap = clamp(
-                    ua * max(uUpperFloorTileShadowOpacity, 0.0) * receiverIsOutdoors * upperTileEdgeFade,
-                    0.0,
-                    1.0
-                  );
-                }
-              }
-
-              // Combine BEFORE blur.
-              float combinedTap = max(roofStrengthTap, max(indoorStrengthTap, max(skyReachStrengthTap, upperFloorTileTap)));
-              accum += combinedTap * wEffective;
-              skyReachAccum += skyReachStrengthTap * wEffective;
-              weightSum += wEffective;
-            }
-          }
-
-          float combinedStrength = (weightSum > 0.0) ? (accum / weightSum) : 0.0;
-          float skyReachShelterAvg = (weightSum > 0.0) ? (skyReachAccum / weightSum) : 0.0;
-
-          float tileProjectedStrength = 0.0;
-          if (tileProjectionEnabled) {
-            float projectedSoftness = max(uTileProjectionSoftness, 0.5);
-            vec2 projectedStepUv = uTexelSize * projectedSoftness * tileProjectionUvScale * zoomScale;
-            float projectedAccum = 0.0;
-            float projectedWeightSum = 0.0;
-            float projectionReceiverScale = mix(max(uTileProjectionOutdoorOpacityScale, 0.0), max(uTileProjectionIndoorOpacityScale, 0.0), receiverIndoor);
-            bool hasTileSortOcclusion = (uHasTileProjectionSort > 0.5 && uHasTileReceiverSort > 0.5);
-            float receiverTileAlpha = hasTileSortOcclusion ? clamp(texture2D(tTileReceiverAlpha, screenUv).a, 0.0, 1.0) : 0.0;
-            float receiverTileSortEncoded = hasTileSortOcclusion ? clamp(texture2D(tTileReceiverSort, screenUv).a, 0.0, 1.0) : 0.0;
-            float receiverTileSortNorm = (receiverTileAlpha > 0.0001)
-              ? clamp(receiverTileSortEncoded / receiverTileAlpha, 0.0, 1.0)
-              : 0.0;
-
-            for (int pdy = -2; pdy <= 2; pdy++) {
-              for (int pdx = -2; pdx <= 2; pdx++) {
-                vec2 pUv = projectedOffsetUv + vec2(float(pdx), float(pdy)) * projectedStepUv;
-                float pUvValid = uvInBounds(pUv, uTexelSize * 0.05);
-                float pwx = 1.0 - (abs(float(pdx)) / 3.0);
-                float pwy = 1.0 - (abs(float(pdy)) / 3.0);
-                float pw = max(pwx * pwy, 0.0001);
-                float pwEffective = pw * pUvValid;
-
-                float tileAlphaTap = clamp(texture2D(tTileProjection, clamp(pUv, 0.0, 1.0)).a, 0.0, 1.0) * pUvValid;
-                float tileProjectedOnlyTap = max(tileAlphaTap - tileBaseAlpha, 0.0);
-                float thresholdDenom = max(1.0 - uTileProjectionThreshold, 0.0001);
-                float tileMaskedTap = clamp((tileProjectedOnlyTap - uTileProjectionThreshold) / thresholdDenom, 0.0, 1.0);
-                tileMaskedTap = pow(tileMaskedTap, max(uTileProjectionPower, 0.0001));
-
-                float sortGate = 1.0;
-                if (hasTileSortOcclusion && receiverTileAlpha > 0.0001 && tileAlphaTap > 0.0001) {
-                  float casterTileSortEncoded = clamp(texture2D(tTileProjectionSort, clamp(pUv, 0.0, 1.0)).a, 0.0, 1.0);
-                  float casterTileSortNorm = clamp(casterTileSortEncoded / tileAlphaTap, 0.0, 1.0);
-                  float requiredCasterSort = receiverTileSortNorm + max(uTileProjectionSortBias, 0.0);
-                  // Only allow projection when the caster sort is above the
-                  // currently visible receiver tile sort. This prevents tiles
-                  // from projecting shadows "onto" tiles layered above them.
-                  sortGate = step(requiredCasterSort, casterTileSortNorm);
-                }
-
-                // Tile projection is intentionally NOT clipped by _Outdoors region.
-                // This keeps projected tile shadows visible indoors and outdoors.
-                float sameProjectionRegionTap = 1.0;
-
-                float tileStrengthTap = clamp(tileMaskedTap * uTileProjectionOpacity * projectionReceiverScale * sameProjectionRegionTap * sortGate, 0.0, 1.0);
-                tileStrengthTap *= projectedEdgeFade;
-                projectedAccum += tileStrengthTap * pwEffective;
-                projectedWeightSum += pwEffective;
-              }
-            }
-
-            tileProjectedStrength = (projectedWeightSum > 0.0) ? (projectedAccum / projectedWeightSum) : 0.0;
-            // Depth-based height gate: suppress tile shadow when caster is not above receiver
-            tileProjectedStrength *= depthTileProjectionMod;
-          }
-
-          // Keep roof/indoor/fluid contribution separate from tile projection.
-          // LightingEffect can then route tile projection through its own path
-          // without inheriting roof/outdoor masking behavior.
-          float roofCombinedStrength = combinedStrength;
-          float tileOnlyStrength = tileProjectedStrength;
-
-          if ((uHasDynamicLight > 0.5 || uHasWindowLight > 0.5) && uDynamicLightShadowOverrideEnabled > 0.5) {
-            vec2 clampedUv = clamp(screenUv, vec2(0.0), vec2(1.0));
-            float dynI = 0.0;
-            if (uHasDynamicLight > 0.5) {
-              vec3 dyn = texture2D(tDynamicLight, clampedUv).rgb;
-              dynI = max(dynI, clamp(max(dyn.r, max(dyn.g, dyn.b)), 0.0, 1.0));
-            }
-            if (uHasWindowLight > 0.5) {
-              vec3 win = texture2D(tWindowLight, clampedUv).rgb;
-              dynI = max(dynI, clamp(max(win.r, max(win.g, win.b)), 0.0, 1.0));
-            }
-            float dynPresence = smoothstep(0.02, 0.30, dynI);
-            float dynLift = clamp(dynPresence * max(uDynamicLightShadowOverrideStrength, 0.0), 0.0, 1.0);
-            roofCombinedStrength = mix(roofCombinedStrength, 0.0, dynLift);
-            tileOnlyStrength = mix(tileOnlyStrength, 0.0, dynLift);
-          }
-
-          // Fluid tint gets its own softer blur path with larger 5x5 Gaussian
-          // kernel. This avoids harsh tint edges when the fluid softness sliders
-          // are pushed above regular shadow softness.
-          float fluidAccumA = 0.0;
-          vec3 fluidAccumRgb = vec3(0.0);
-          float fluidWeightSum = 0.0;
-          if (uFluidColorEnabled > 0.5 && uHasFluidRoof > 0.5) {
-            for (int fdy = -2; fdy <= 2; fdy++) {
-              for (int fdx = -2; fdx <= 2; fdx++) {
-                vec2 fUv = offsetUv + vec2(float(fdx), float(fdy)) * fluidStepUv;
-                float fUvValid = uvInBounds(fUv, uTexelSize * 0.05);
-                vec2 maskJitterFluidUv = vec2(float(fdx), float(fdy)) * maskFluidStepUv;
-                float wx = 1.0 - (abs(float(fdx)) / 3.0);
-                float wy = 1.0 - (abs(float(fdy)) / 3.0);
-                float fw = max(wx * wy, 0.0001);
-                float fwEffective = fw * fUvValid;
-
-                float sameRegionFluidTap = 1.0;
-                if (hasOutdoorsMask) {
-                  vec2 mUvFluid = maskOffsetUvBase + maskJitterFluidUv;
-                  float mUvFluidValid = uvInBounds(mUvFluid, maskTexelSize);
-                  if (mUvFluidValid > 0.5) {
-                    float casterOutdoorsFluid = readOutdoorsMask(mUvFluid);
-                    float casterIsOutdoorsFluid = step(0.5, casterOutdoorsFluid);
-                    sameRegionFluidTap = 1.0 - abs(casterIsOutdoorsFluid - receiverIsOutdoors);
-                  }
-                  if (receiverIsOutdoors > 0.5) {
-                    sameRegionFluidTap = 1.0;
-                  }
-                }
-
-                vec4 fluidTap = texture2D(tFluidRoof, clamp(fUv, 0.0, 1.0));
-                float fa = clamp(fluidTap.a, 0.0, 1.0) * sameRegionFluidTap;
-                fa *= fUvValid;
-                fa *= baseEdgeFade;
-                fluidAccumA += fa * fw;
-                // Fluid capture can be straight or premultiplied depending on
-                // renderer/material state. Reconstruct tap color from alpha so
-                // tint remains chromatic (instead of collapsing toward black).
-                vec3 fluidTapColor = (fluidTap.a > 0.0001)
-                  ? clamp(fluidTap.rgb / fluidTap.a, 0.0, 1.0)
-                  : vec3(0.0);
-                fluidAccumRgb += fluidTapColor * fa * fw;
-                fluidWeightSum += fwEffective;
-              }
-            }
-          }
-
-          // Encode shadow factor in the red channel (1.0 = fully lit,
-          // 0.0 = fully shadowed).
-          float shadowFactor = 1.0 - roofCombinedStrength;
-          float tileShadowFactor = 1.0 - tileOnlyStrength;
-          vec3 shadowRgb = vec3(shadowFactor);
-
-          if (uFluidColorEnabled > 0.5 && uHasFluidRoof > 0.5 && fluidAccumA > 0.0001) {
-            float fluidBlurAlpha = fluidAccumA / max(fluidWeightSum, 0.0001);
-            vec3 fluidBlurColor = fluidAccumRgb / max(fluidAccumA, 0.0001);
-            float fluidLuma = dot(fluidBlurColor, vec3(0.2126, 0.7152, 0.0722));
-            // Blend indoor/outdoor tint controls using the continuous indoor
-            // weight so partially covered pixels are not stuck on one branch.
-            float fluidSaturation = mix(max(uFluidColorSaturation, 0.0), max(uIndoorFluidColorSaturation, 0.0), receiverIndoor);
-            fluidBlurColor = mix(vec3(fluidLuma), fluidBlurColor, fluidSaturation);
-            fluidBlurColor = clamp(fluidBlurColor * max(uFluidColorBoost, 0.0), 0.0, 1.0);
-            float fluidIntensityBoost = mix(max(uFluidShadowIntensityBoost, 0.0), max(uIndoorFluidShadowIntensityBoost, 0.0), receiverIndoor);
-            // Root cause of subtle indoor tint: intensity boost previously only
-            // affected mix amount, while tint darkness stayed capped by a weak
-            // indoor combinedStrength. Apply boost to tint strength too.
-            float tintedStrength = clamp(combinedStrength * fluidIntensityBoost, 0.0, 1.0);
-            float fluidTintMix = clamp(fluidBlurAlpha * uFluidEffectTransparency * fluidIntensityBoost, 0.0, 1.0);
-            vec3 tintedShadow = 1.0 - tintedStrength * (1.0 - fluidBlurColor);
-            shadowRgb = mix(shadowRgb, tintedShadow, fluidTintMix);
-          }
-
-          // Debug visualizations for overhead-shadow masking stages.
-          // 0: final output (default)
-          // 1: receiverOutdoors
-          // 2: roofCoverageAlpha
-          // 3: roofVisibilityAlpha
-          // 4: roofBaseAlpha
-          // 5: roofCombinedStrength
-          // 6: tileOnlyStrength
-          // 7: skyReachShelterAvg (blurred sky-reach-only contribution)
-          if (uDebugView > 0.5) {
-            float d = 0.0;
-            if (uDebugView < 1.5) {
-              d = receiverOutdoors;
-            } else if (uDebugView < 2.5) {
-              d = roofCoverageAlpha;
-            } else if (uDebugView < 3.5) {
-              d = roofVisibilityAlpha;
-            } else if (uDebugView < 4.5) {
-              d = roofBaseAlpha;
-            } else if (uDebugView < 5.5) {
-              d = roofCombinedStrength;
-            } else if (uDebugView < 6.5) {
-              d = tileOnlyStrength;
-            } else {
-              d = skyReachShelterAvg;
-            }
-            gl_FragColor = vec4(vec3(clamp(d, 0.0, 1.0)), 1.0);
-            return;
-          }
-
-          // Encode dedicated tile-projection factor in alpha so compositing can
-          // apply it independently from roof/outdoor gating.
-          gl_FragColor = vec4(shadowRgb, tileShadowFactor);
-        }
-      `,
-      transparent: false
-    });
+    this.material = createOverheadStampCompositeMaterial(THREE, this.params);
+    if (this.material?.uniforms?.uOpacity) {
+      this.material.uniforms.uOpacity.value = this.params.opacity;
+    }
 
     this.shadowMesh = new THREE.Mesh(this.baseMesh.geometry, this.material);
     this.shadowMesh.position.copy(this.baseMesh.position);
     this.shadowMesh.rotation.copy(this.baseMesh.rotation);
     this.shadowMesh.scale.copy(this.baseMesh.scale);
-
-    // Ensure the shadow mesh is visible to cameras even when FloorCompositor
-    // is rendering with floor-isolated layer masks.
     this.shadowMesh.layers.set(0);
-
     this.shadowScene.add(this.shadowMesh);
   }
+
 
   onResize(width, height) {
     const THREE = window.THREE;
@@ -2262,6 +1502,21 @@ export class OverheadStampEffectV2 {
     } else {
       this.tileReceiverSortTarget.setSize(width, height);
     }
+
+    const blurOpts = {
+      minFilter: THREE.LinearFilter,
+      magFilter: THREE.LinearFilter,
+      format: THREE.RGBAFormat,
+      type: THREE.UnsignedByteType,
+      depthBuffer: false,
+      stencilBuffer: false,
+    };
+    for (const key of ['roofBlurredTarget', 'tileProjectionBlurredTarget', 'fluidRoofBlurredTarget']) {
+      if (!this[key]) this[key] = new THREE.WebGLRenderTarget(width, height, blurOpts);
+      else this[key].setSize(width, height);
+    }
+    this._maskBlur.ensureTargets(width, height);
+    this._maskCapturePass.ensureTargets(width, height);
   }
 
   /**
@@ -2447,7 +1702,6 @@ export class OverheadStampEffectV2 {
 
     // Optimization: Skip update if params haven't changed
     const camZoom = this._getEffectiveZoom();
-    const outdoorBuildingShadow = this._resolveOutdoorBuildingShadowParams();
     // Floor changes must invalidate this cache even when scalar params/camera are
     // unchanged, otherwise wall/roof occlusion uniforms can remain one floor behind
     // until a pan/zoom modifies camZoom and forces an update.
@@ -2468,14 +1722,9 @@ export class OverheadStampEffectV2 {
         : '';
       floorContextSig = `${activeIdx}:${activeKey}:${upperSig}`;
     } catch (_) {}
-    const updateHash = `${hour.toFixed(3)}_${this.params.sunLatitude}_${this.params.opacity}_${this.params.length}_${this.params.softness}_${this.params.outdoorShadowLengthScale}_${this.params.indoorReceiverShadowLengthScale}_${camZoom.toFixed(4)}_${this.params.indoorShadowEnabled}_${outdoorBuildingShadow.opacity}_${outdoorBuildingShadow.lengthScale}_${this.params.indoorShadowSoftness}_${this.params.indoorFluidShadowSoftness}_${this.params.indoorFluidShadowIntensityBoost}_${this.params.indoorFluidColorSaturation}_${this.params.tileProjectionEnabled}_${this.params.tileProjectionOpacity}_${this.params.tileProjectionLengthScale}_${this.params.tileProjectionSoftness}_${this.params.tileProjectionThreshold}_${this.params.tileProjectionPower}_${this.params.tileProjectionOutdoorOpacityScale}_${this.params.tileProjectionIndoorOpacityScale}_${this.params.tileProjectionSortBias}_${this.params.fluidColorEnabled}_${this.params.fluidEffectTransparency}_${this.params.fluidShadowIntensityBoost}_${this.params.fluidShadowSoftness}_${this.params.fluidColorBoost}_${this.params.fluidColorSaturation}_${this.params.skyReachShadowOpacity}_${this.params.upperFloorTileShadowEnabled}_${this.params.upperFloorTileShadowOpacity}_${this.params.upperFloorTileShadowLengthScale}_${this.params.upperFloorTileCombineMode}_${this.params.debugView}_${hoverRevealActive ? 1 : 0}_${floorContextSig}`;
+    const updateHash = `${hour.toFixed(3)}_${this.params.sunLatitude}_${this.params.opacity}_${this.params.length}_${this.params.softness}_${this.params.affectsLights}_${this.params.outdoorShadowLengthScale}_${this.params.indoorReceiverShadowLengthScale}_${camZoom.toFixed(4)}_${this.params.tileProjectionEnabled}_${this.params.tileProjectionOpacity}_${this.params.tileProjectionLengthScale}_${this.params.tileProjectionSoftness}_${this.params.tileProjectionThreshold}_${this.params.tileProjectionPower}_${this.params.tileProjectionOutdoorOpacityScale}_${this.params.tileProjectionIndoorOpacityScale}_${this.params.tileProjectionSortBias}_${this.params.fluidColorEnabled}_${this.params.fluidEffectTransparency}_${this.params.fluidShadowIntensityBoost}_${this.params.fluidShadowSoftness}_${this.params.fluidColorBoost}_${this.params.fluidColorSaturation}_${this.params.debugView}_${hoverRevealActive ? 1 : 0}_${floorContextSig}`;
 
     const receiverMask = this._resolveReceiverOutdoorsMaskTexture();
-    const receiverSkyReach = this._resolveReceiverSkyReachMaskTexture();
-    const upperObTextures = this._collectUpperFloorOutdoorsTextures();
-    const obUpperSig = upperObTextures.map((t) => t?.uuid ?? '').join('|');
-    const upperFloorAlphaTextures = this._collectUpperFloorFloorAlphaTextures();
-    const upperFloorAlphaSig = upperFloorAlphaTextures.map((t) => t?.uuid ?? '').join('|');
 
     // Floor/mask transitions can swap outdoorsMask without changing scalar params.
     // Do not early-return on unchanged updateHash: Tweakpane writes directly to
@@ -2488,98 +1737,83 @@ export class OverheadStampEffectV2 {
       ? this._sunAzimuthDeg * (Math.PI / 180.0)
       : (((hour % 24.0) / 24.0 - 0.5) * (Math.PI * 2.0));
 
-    // Sun direction MUST be identical to BuildingShadowsEffect so both
-    // effects follow the same daily arc. The shader projection sign (+dir)
-    // is what makes both shadow directions visually consistent.
-    let x = -Math.sin(azimuth);
-
-    const lat = Math.max(0.0, Math.min(1.0, this.params.sunLatitude ?? 0.5));
-    let y = -Math.cos(azimuth) * lat;
-
-    // Keep shader direction valid even when latitude is zero (or extremely low),
-    // where full-orbit noon/midnight can collapse to a near-zero vector.
-    const dirLenSq = (x * x) + (y * y);
-    if (dirLenSq < 1e-8) {
-      const prevX = Number(this.sunDir?.x);
-      const prevY = Number(this.sunDir?.y);
-      const prevLenSq = (prevX * prevX) + (prevY * prevY);
-      if (Number.isFinite(prevLenSq) && prevLenSq > 1e-8) {
-        x = prevX;
-        y = prevY;
-      } else {
-        // East/west fallback based on local azimuth trend.
-        x = Math.cos(azimuth) >= 0.0 ? -1.0 : 1.0;
-        y = 0.0;
-      }
-    }
-
+    const sun2d = computeShadowSunDirection2D({
+      azimuthRad: azimuth,
+      elevationDeg: this._sunElevationDeg,
+      latitudeScale: this.params.sunLatitude ?? 0.1,
+      previousDir: this.sunDir,
+    });
+    this._sunDirLengthSq = sun2d.lengthSq;
     if (!this.sunDir) {
-      this.sunDir = new THREE.Vector2(x, y);
+      this.sunDir = new THREE.Vector2(sun2d.x, sun2d.y);
     } else {
-      this.sunDir.set(x, y);
+      applyShadowSunDirection(this.sunDir, sun2d);
     }
-    if (this.material && this.material.uniforms.uSunDir) {
+    if (this.material?.uniforms?.uSunDir) {
       this.material.uniforms.uSunDir.value.copy(this.sunDir);
+    }
+    if (this.material?.uniforms?.uSunDirLength) {
+      this.material.uniforms.uSunDirLength.value = Math.sqrt(Math.max(sun2d.lengthSq, 0));
+    }
+    if (this.material?.uniforms?.uShadowLengthScale) {
+      this.material.uniforms.uShadowLengthScale.value = Math.max(0, Number(this._driverShadowLengthScale) || 1);
     }
 
     // Drive basic uniforms from params and camera zoom.
     if (this.material) {
       const u = this.material.uniforms;
-      const outdoorBuildingShadowOpacity = outdoorBuildingShadow.opacity;
-      const outdoorBuildingShadowLengthScale = outdoorBuildingShadow.lengthScale;
       if (u.uOpacity) u.uOpacity.value = this.params.opacity;
-      if (u.uLength)  u.uLength.value  = this.params.length;
-      if (u.uSoftness) u.uSoftness.value = this.params.softness * (Number(this._driverShadowSoftnessScale) || 1.0);
+      if (u.uLength) u.uLength.value = this.params.length;
       if (u.uHoverRevealActive) u.uHoverRevealActive.value = hoverRevealActive ? 1.0 : 0.0;
       if (u.uOutdoorShadowLengthScale) u.uOutdoorShadowLengthScale.value = this.params.outdoorShadowLengthScale ?? 1.0;
-      if (u.uIndoorReceiverShadowLengthScale) u.uIndoorReceiverShadowLengthScale.value = this.params.indoorReceiverShadowLengthScale ?? 1.0;
+      if (u.uIndoorReceiverShadowLengthScale) {
+        u.uIndoorReceiverShadowLengthScale.value = this.params.indoorReceiverShadowLengthScale ?? 1.0;
+      }
       if (u.uZoom && this.mainCamera) {
         u.uZoom.value = camZoom;
       }
-      // Outdoor Building Shadow: projected _Outdoors dark-region term (outdoor
-      // receivers) that helps visually connect overhead-only roof details
-      // (ornaments, floating elements) back to the building mass.
-      //
-      // NOTE: Keep this directly user-controlled even when
-      // BuildingShadowsEffectV2 is enabled; that effect cannot replace this
-      // per-overhead-layer continuity contribution in all scenes.
-      const outdoorBuildingContributionEnabled = !!this.params.indoorShadowEnabled;
-      if (u.uIndoorShadowEnabled) u.uIndoorShadowEnabled.value = outdoorBuildingContributionEnabled ? 1.0 : 0.0;
-      if (u.uOutdoorBuildingShadowOpacity) u.uOutdoorBuildingShadowOpacity.value = outdoorBuildingShadowOpacity;
-      if (u.uOutdoorBuildingShadowLengthScale) u.uOutdoorBuildingShadowLengthScale.value = outdoorBuildingShadowLengthScale;
-      if (u.uIndoorShadowSoftness) u.uIndoorShadowSoftness.value = this.params.indoorShadowSoftness;
-      if (u.uIndoorFluidShadowSoftness) u.uIndoorFluidShadowSoftness.value = this.params.indoorFluidShadowSoftness;
-      if (u.uIndoorFluidShadowIntensityBoost) u.uIndoorFluidShadowIntensityBoost.value = this.params.indoorFluidShadowIntensityBoost;
-      if (u.uIndoorFluidColorSaturation) u.uIndoorFluidColorSaturation.value = this.params.indoorFluidColorSaturation;
       const projectionIds = this._getTileProjectionIds();
       const hasTileProjection = Array.isArray(projectionIds) && projectionIds.length > 0;
-      if (u.uTileProjectionEnabled) u.uTileProjectionEnabled.value = (this.params.tileProjectionEnabled || hasTileProjection) ? 1.0 : 0.0;
+      if (u.uTileProjectionEnabled) {
+        u.uTileProjectionEnabled.value = (this.params.tileProjectionEnabled && hasTileProjection) ? 1.0 : 0.0;
+      }
       if (u.uTileProjectionOpacity) u.uTileProjectionOpacity.value = this.params.tileProjectionOpacity;
       if (u.uTileProjectionLengthScale) u.uTileProjectionLengthScale.value = this.params.tileProjectionLengthScale;
-      if (u.uTileProjectionSoftness) u.uTileProjectionSoftness.value = this.params.tileProjectionSoftness;
       if (u.uTileProjectionThreshold) u.uTileProjectionThreshold.value = this.params.tileProjectionThreshold;
       if (u.uTileProjectionPower) u.uTileProjectionPower.value = this.params.tileProjectionPower;
-      if (u.uTileProjectionOutdoorOpacityScale) u.uTileProjectionOutdoorOpacityScale.value = this.params.tileProjectionOutdoorOpacityScale;
-      if (u.uTileProjectionIndoorOpacityScale) u.uTileProjectionIndoorOpacityScale.value = this.params.tileProjectionIndoorOpacityScale;
+      if (u.uTileProjectionOutdoorOpacityScale) {
+        u.uTileProjectionOutdoorOpacityScale.value = this.params.tileProjectionOutdoorOpacityScale;
+      }
+      if (u.uTileProjectionIndoorOpacityScale) {
+        u.uTileProjectionIndoorOpacityScale.value = this.params.tileProjectionIndoorOpacityScale;
+      }
       if (u.uTileProjectionSortBias) u.uTileProjectionSortBias.value = this.params.tileProjectionSortBias;
       if (u.uFluidColorEnabled) u.uFluidColorEnabled.value = this.params.fluidColorEnabled ? 1.0 : 0.0;
       if (u.uFluidEffectTransparency) u.uFluidEffectTransparency.value = this.params.fluidEffectTransparency;
       if (u.uFluidShadowIntensityBoost) u.uFluidShadowIntensityBoost.value = this.params.fluidShadowIntensityBoost;
-      if (u.uFluidShadowSoftness) u.uFluidShadowSoftness.value = this.params.fluidShadowSoftness;
       if (u.uFluidColorBoost) u.uFluidColorBoost.value = this.params.fluidColorBoost;
       if (u.uFluidColorSaturation) u.uFluidColorSaturation.value = this.params.fluidColorSaturation;
+      if (u.uIndoorFluidShadowIntensityBoost) {
+        u.uIndoorFluidShadowIntensityBoost.value = this.params.indoorFluidShadowIntensityBoost;
+      }
+      if (u.uIndoorFluidColorSaturation) {
+        u.uIndoorFluidColorSaturation.value = this.params.indoorFluidColorSaturation;
+      }
       if (u.tDynamicLight) u.tDynamicLight.value = this._dynamicLightTexture ?? null;
       if (u.tWindowLight) u.tWindowLight.value = this._windowLightTexture ?? null;
       if (u.uHasDynamicLight) u.uHasDynamicLight.value = this._dynamicLightTexture ? 1.0 : 0.0;
       if (u.uHasWindowLight) u.uHasWindowLight.value = this._windowLightTexture ? 1.0 : 0.0;
       if (u.uDynamicLightShadowOverrideEnabled) {
-        u.uDynamicLightShadowOverrideEnabled.value = this.params.dynamicLightShadowOverrideEnabled === false ? 0.0 : 1.0;
+        const affects = Math.max(0.0, Math.min(1.0, Number(this.params.affectsLights ?? 0.75)));
+        const overrideAllowed = this.params.dynamicLightShadowOverrideEnabled !== false && affects > 0.001;
+        u.uDynamicLightShadowOverrideEnabled.value = overrideAllowed ? 1.0 : 0.0;
       }
       if (u.uDynamicLightShadowOverrideStrength) {
-        const dynStrength = Number.isFinite(Number(this._dynamicLightOverrideStrength))
+        const baseStrength = Number.isFinite(Number(this._dynamicLightOverrideStrength))
           ? this._dynamicLightOverrideStrength
           : Number(this.params.dynamicLightShadowOverrideStrength ?? 0.7);
-        u.uDynamicLightShadowOverrideStrength.value = Math.max(0.0, Math.min(1.0, dynStrength));
+        const affects = Math.max(0.0, Math.min(1.0, Number(this.params.affectsLights ?? 0.75)));
+        u.uDynamicLightShadowOverrideStrength.value = Math.max(0.0, Math.min(1.0, baseStrength * affects));
       }
       if (u.uDebugView) {
         const debugMap = {
@@ -2590,13 +1824,11 @@ export class OverheadStampEffectV2 {
           roofBase: 4.0,
           roofCombined: 5.0,
           tileCombined: 6.0,
-          skyReachShelter: 7.0
         };
         const key = String(this.params.debugView || 'final');
         u.uDebugView.value = Object.prototype.hasOwnProperty.call(debugMap, key) ? debugMap[key] : 0.0;
       }
 
-      // Scene dimensions for mask UV conversion (world-space mask offset)
       if (u.uSceneDimensions) {
         try {
           const dims = canvas?.dimensions;
@@ -2608,54 +1840,11 @@ export class OverheadStampEffectV2 {
         } catch (_) { /* canvas may not be ready */ }
       }
 
-      // Receiver + roof/fluid region clip: ACTIVE (viewed) floor _Outdoors only —
-      // keeps overhead / building contributions from leaking into current-level indoor.
       if (u.uOutdoorsMask) u.uOutdoorsMask.value = receiverMask;
       if (u.uHasOutdoorsMask) u.uHasOutdoorsMask.value = receiverMask ? 1.0 : 0.0;
       if (u.uOutdoorsMaskFlipY) u.uOutdoorsMaskFlipY.value = receiverMask?.flipY ? 1.0 : 0.0;
 
-      const whiteObBind = this._getWhiteMaskPlaceholder();
-      if (u.tSkyReach) u.tSkyReach.value = receiverSkyReach ?? whiteObBind;
-      if (u.uHasSkyReach) u.uHasSkyReach.value = receiverSkyReach ? 1.0 : 0.0;
-      if (u.uSkyReachFlipY) u.uSkyReachFlipY.value = receiverSkyReach?.flipY ? 1.0 : 0.0;
-      if (u.uSkyReachShadowEnabled) {
-        // Hard-wired on (ignore params.skyReachShadowEnabled / saved worlds).
-        u.uSkyReachShadowEnabled.value = 1.0;
-      }
-      if (u.uSkyReachShadowOpacity) {
-        u.uSkyReachShadowOpacity.value = Math.max(0.0, Math.min(1.0, Number(this.params.skyReachShadowOpacity) || 0.0));
-      }
-      if (u.uUpperFloorTileShadowEnabled) {
-        u.uUpperFloorTileShadowEnabled.value = this.params.upperFloorTileShadowEnabled !== false ? 1.0 : 0.0;
-      }
-      if (u.uUpperFloorTileShadowOpacity) {
-        u.uUpperFloorTileShadowOpacity.value = Math.max(0.0, Math.min(1.0, Number(this.params.upperFloorTileShadowOpacity) || 0.0));
-      }
-      if (u.uUpperFloorTileShadowLengthScale) {
-        u.uUpperFloorTileShadowLengthScale.value = Math.max(0.0, Number(this.params.upperFloorTileShadowLengthScale) || 0.0);
-      }
-
-      // Outdoor Building Shadow casters: combine _Outdoors from levels above the viewer
-      // (min = indoor on any upper level at this world XY). Slots unused → white sampler.
-      const whiteOb = this._getWhiteMaskPlaceholder();
-      if (u.uObUpperOutdoors0) u.uObUpperOutdoors0.value = upperObTextures[0] ?? whiteOb;
-      if (u.uObUpperOutdoors1) u.uObUpperOutdoors1.value = upperObTextures[1] ?? whiteOb;
-      if (u.uObUpperOutdoors2) u.uObUpperOutdoors2.value = upperObTextures[2] ?? whiteOb;
-      if (u.uObUpperOutdoorsFlipY0) {
-        u.uObUpperOutdoorsFlipY0.value = upperObTextures[0]?.flipY ? 1.0 : 0.0;
-      }
-      if (u.uObUpperOutdoorsFlipY1) {
-        u.uObUpperOutdoorsFlipY1.value = upperObTextures[1]?.flipY ? 1.0 : 0.0;
-      }
-      if (u.uObUpperOutdoorsFlipY2) {
-        u.uObUpperOutdoorsFlipY2.value = upperObTextures[2]?.flipY ? 1.0 : 0.0;
-      }
-      if (u.uObUpperCount) u.uObUpperCount.value = upperObTextures.length;
-
       this._lastOutdoorsMaskRef = receiverMask;
-      this._lastSkyReachMaskRef = receiverSkyReach;
-      this._lastUpperFloorAlphaSig = upperFloorAlphaSig;
-      this._lastObUpperSig = obUpperSig;
     }
   }
 
@@ -2702,10 +1891,10 @@ export class OverheadStampEffectV2 {
    */
   _invalidateRoofMaskCaptureCache() {
     this._roofMaskCaptureCache.valid = false;
-    this._roofMaskCaptureCache.sig = '';
+    this._roofMaskCaptureCache.sigHash = 0;
     this._roofMaskCaptureCache.capturedAtMs = 0;
     this._tileProjectionCaptureCache.valid = false;
-    this._tileProjectionCaptureCache.sig = '';
+    this._tileProjectionCaptureCache.sigHash = 0;
     this._tileProjectionCaptureCache.hasProjection = false;
     this._tileProjectionCaptureCache.hasProjectionSort = false;
     this._tileProjectionCaptureCache.hasReceiverSort = false;
@@ -2719,100 +1908,52 @@ export class OverheadStampEffectV2 {
    * @private
    */
   _computeCasterLiveSig(frameCasters) {
-    const list = frameCasters.list;
-    const n = list.length;
-    let flags = (frameCasters.hasFluid ? 1 : 0) | (frameCasters.hasTrees ? 2 : 0);
-    let fadeToken = '';
-    for (let i = 0; i < n; i++) {
-      const entry = list[i];
-      const mat = entry.mat;
-      if (mat && typeof mat.opacity === 'number' && mat.opacity < 0.999) {
-        fadeToken = `mo:${entry.object?.uuid ?? i}`;
-        break;
-      }
-      const uniforms = entry.uniforms;
-      const hf = uniforms?.uHoverFade?.value;
-      if (typeof hf === 'number' && hf < 0.999) {
-        fadeToken = `hf:${entry.object?.uuid ?? i}`;
-        break;
-      }
-      const uOpacity = uniforms?.uOpacity?.value;
-      if (typeof uOpacity === 'number' && uOpacity < 0.999) {
-        fadeToken = `uo:${entry.object?.uuid ?? i}`;
-        break;
-      }
-      const uTileOpacity = uniforms?.uTileOpacity?.value;
-      if (typeof uTileOpacity === 'number' && uTileOpacity < 0.999) {
-        fadeToken = `to:${entry.object?.uuid ?? i}`;
-        break;
-      }
-    }
-    let xor = (n ^ flags) | 0;
-    if (n > 0) {
-      const s0 = list[0].object?.uuid ?? '';
-      const s1 = list[n - 1].object?.uuid ?? '';
-      for (let i = 0; i < s0.length; i++) xor = ((xor << 5) - xor + s0.charCodeAt(i)) | 0;
-      for (let i = 0; i < s1.length; i++) xor = ((xor << 5) - xor + s1.charCodeAt(i)) | 0;
-    }
-    return `${n}|${flags}|${xor}|${fadeToken}`;
+    return hashCasterLive(frameCasters);
   }
 
   /**
    * @param {THREE.Vector2} size Drawing buffer size
    * @param {number} roofCaptureScale Guard-band scale from projection softness
    * @param {{ list: object[], hasFluid: boolean, hasTrees: boolean }} frameCasters
-   * @returns {string}
+   * @returns {number}
    * @private
    */
   _computeRoofMaskCaptureSig(size, roofCaptureScale, frameCasters) {
-    const cam = this.mainCamera;
-    let camSig = 'nocam';
-    if (cam) {
-      cam.updateMatrixWorld?.(true);
-      const p = cam.position;
-      const e = cam.projectionMatrix?.elements;
-      const pe = e
-        ? `${e[0].toFixed(5)}_${e[5].toFixed(5)}_${e[12].toFixed(3)}_${e[13].toFixed(3)}`
-        : 'nope';
-      camSig = [
-        p.x.toFixed(2),
-        p.y.toFixed(2),
-        p.z.toFixed(2),
-        Number(cam.zoom).toFixed(4),
-        this._getEffectiveZoom().toFixed(4),
-        pe,
-        cam.layers.mask,
-      ].join('|');
-    }
     const w = Math.floor(size.x);
     const h = Math.floor(size.y);
     const enabled = this.params.enabled ? 1 : 0;
-    const motionSig = this._tileMotionManager?.getActiveMotionCaptureSig?.() ?? '';
-    return [
-      'v1',
-      `${w}x${h}`,
-      roofCaptureScale.toFixed(5),
+    const motionStr = this._tileMotionManager?.getActiveMotionCaptureSig?.() ?? '';
+    let motionHash = 0;
+    for (let i = 0; i < motionStr.length; i++) {
+      motionHash = ((motionHash << 5) - motionHash + motionStr.charCodeAt(i)) | 0;
+    }
+    return hashRoofMaskCapture(
+      w,
+      h,
+      roofCaptureScale,
       enabled,
-      camSig,
-      this._computeCasterLiveSig(frameCasters),
-      motionSig,
-    ].join('|');
+      hashCamera(this.mainCamera, this._getEffectiveZoom()),
+      hashCasterLive(frameCasters),
+      motionHash,
+    );
   }
 
   /**
-   * @param {string} sig
+   * @param {number} sigHash
    * @param {boolean} hoverRevealActive
    * @returns {boolean}
    * @private
    */
-  _shouldReuseRoofMaskCaptures(sig, hoverRevealActive) {
+  _shouldReuseRoofMaskCaptures(sigHash, hoverRevealActive) {
     if (hoverRevealActive) return false;
     if (this._tileMotionManager?.shouldBypassShadowCaptureCache?.() === true) return false;
     try {
       if (window.MapShine?.__overheadShadowsForceRoofCaptureEveryFrame === true) return false;
-    } catch (_) {}
+    } catch (err) {
+      log.debug('OverheadStamp: roof capture force-flag probe failed', err);
+    }
     const cache = this._roofMaskCaptureCache;
-    if (!cache.valid || cache.sig !== sig) return false;
+    if (!cache.valid || cache.sigHash !== sigHash) return false;
     const maxAgeMs = Number(window.MapShine?.__overheadShadowsRoofCaptureMaxAgeMs);
     const ageLimit = Number.isFinite(maxAgeMs) ? maxAgeMs : 1500;
     if (ageLimit > 0 && (performance.now() - cache.capturedAtMs) > ageLimit) return false;
@@ -2820,13 +1961,30 @@ export class OverheadStampEffectV2 {
   }
 
   /**
-   * @param {string} sig
+   * @param {number} sigHash
    * @private
    */
-  _markRoofMaskCapturesFresh(sig) {
+  _markRoofMaskCapturesFresh(sigHash) {
     this._roofMaskCaptureCache.valid = true;
-    this._roofMaskCaptureCache.sig = sig;
+    this._roofMaskCaptureCache.sigHash = sigHash;
     this._roofMaskCaptureCache.capturedAtMs = performance.now();
+  }
+
+  /**
+   * @param {string[]} tileProjectionIds
+   * @returns {Set<string>}
+   * @private
+   */
+  _getTileProjectionIdSet(tileProjectionIds) {
+    const idsHash = hashTileProjectionIds(tileProjectionIds);
+    if (idsHash !== this._tileProjectionIdsHash) {
+      this._tileProjectionIdsHash = idsHash;
+      this._tileProjectionIdSet.clear();
+      for (let i = 0; i < tileProjectionIds.length; i++) {
+        this._tileProjectionIdSet.add(String(tileProjectionIds[i]));
+      }
+    }
+    return this._tileProjectionIdSet;
   }
 
   /**
@@ -2838,6 +1996,12 @@ export class OverheadStampEffectV2 {
     if (camera) this.mainCamera = camera;
 
     this._lastRoofMaskCaptureReused = false;
+
+    // Late populate: base plane may arrive after initialize().
+    if (!this.material && !this.baseMesh) {
+      const basePlaneMesh = window.MapShine?.sceneComposer?.basePlaneMesh ?? null;
+      if (basePlaneMesh) this.setBaseMesh(basePlaneMesh);
+    }
 
     // If not initialized, force a neutral (white) shadow target so
     // LightingEffectV2 doesn't multiply the scene to black.
@@ -2871,7 +2035,8 @@ export class OverheadStampEffectV2 {
     try {
       const recorder = window.MapShine?.performanceRecorder;
       this._activePerfRecorder = recorder?.enabled ? recorder : null;
-    } catch (_) {
+    } catch (err) {
+      log.debug('OverheadStamp: performance recorder probe failed', err);
       this._activePerfRecorder = null;
     }
 
@@ -2933,19 +2098,17 @@ export class OverheadStampEffectV2 {
       // Keep shader projection distance and capture guard computations in sync.
       this.material.uniforms.uZoom.value = zoom;
     }
-    const resolvedOutdoorBuildingShadow = this._resolveOutdoorBuildingShadowParams();
     const maxProjectionScale = Math.max(
       1.0,
-      Number(this.params.tileProjectionLengthScale) || 0.0,
-      Number(resolvedOutdoorBuildingShadow.lengthScale) || 0.0
+      Number(this.params.tileProjectionLengthScale) || 0.0
     );
+    const driverSoft = Math.max(0, Number(this._driverShadowSoftnessScale) || 1);
+    const driverLen = Math.max(0, Number(this._driverShadowLengthScale) || 1);
     const maxSoftness = Math.max(
       Number(this.params.softness) || 0.0,
-      Number(this.params.indoorShadowSoftness) || 0.0,
       Number(this.params.fluidShadowSoftness) || 0.0,
-      Number(this.params.indoorFluidShadowSoftness) || 0.0,
       Number(this.params.tileProjectionSoftness) || 0.0
-    );
+    ) * driverSoft;
     const baseProjectionPx = (Number(this.params.length) || 0.0) * 1080.0 * Math.max(zoom, 0.0001);
     const projectionPx = baseProjectionPx * maxProjectionScale;
     const blurPx = maxSoftness * 2.0;
@@ -2988,10 +2151,6 @@ export class OverheadStampEffectV2 {
     const roofCasterTreeVisibilityOverrides = [];
     const roofSpriteVisibilityOverrides = [];
     const roofUpperCasterVisibilityOverrides = [];
-    const tileProjectionVisibilityOverrides = [];
-    const tileProjectionOpacityOverrides = [];
-    const tileReceiverVisibilityOverrides = [];
-    const tileReceiverOpacityOverrides = [];
     const pushTreeUniformOverride = (uniforms, key, value) => {
       const u = uniforms?.[key];
       if (!u || typeof u.value !== 'number') return;
@@ -3230,9 +2389,6 @@ export class OverheadStampEffectV2 {
     // to roofVisibilityTarget because LightingEffect samples that texture in
     // direct screen UV space (vUv) without guard remap.
     const restoreRoofCaptureCamera = this._applyRoofCaptureGuardScale(roofCaptureScale);
-    if (this.material?.uniforms?.uRoofUvScale) {
-      this.material.uniforms.uRoofUvScale.value = 1.0 / Math.max(roofCaptureScale, 1.0);
-    }
     if (this.material?.uniforms?.uTileProjectionUvScale) {
       this.material.uniforms.uTileProjectionUvScale.value = 1.0;
     }
@@ -3549,9 +2705,10 @@ export class OverheadStampEffectV2 {
       }
     }
 
-    // IMPORTANT: restore camera layers before rendering the world-pinned
-    // shadow mesh so the base plane is visible to the camera again.
-    this.mainCamera.layers.mask = previousLayersMask;
+    // Guard-band UV remap must stay in sync even when roof/tile captures are cache-reused.
+    if (this.material?.uniforms?.uRoofUvScale) {
+      this.material.uniforms.uRoofUvScale.value = 1.0 / Math.max(roofCaptureScale, 1.0);
+    }
 
     // Pass 1.5: optional tile alpha projection pass.
     // Uses per-tile "Shadow Projection" flags from the injected V2
@@ -3560,220 +2717,113 @@ export class OverheadStampEffectV2 {
     let hasTileProjectionSort = false;
     let hasTileReceiverSort = false;
     const tileProjectionIds = this._getTileProjectionIds();
+    const tileProjectionActive = this.params.tileProjectionEnabled && tileProjectionIds.length > 0;
     const tileProjectionMotionSig = this._tileMotionManager?.getShadowProjectionMotionSig?.() ?? '';
     const bypassTileMotionShadowCache = this._tileMotionManager?.shouldBypassShadowCaptureCache?.() === true;
-    const tileProjectionSig = tileProjectionIds.length > 0
-      ? `${roofMaskCaptureSig}|tiles:${tileProjectionIds.map((id) => String(id)).sort().join(',')}|motion:${tileProjectionMotionSig}`
-      : '';
+    let motionHash = 0;
+    const motionStr = String(tileProjectionMotionSig);
+    for (let i = 0; i < motionStr.length; i++) {
+      motionHash = ((motionHash << 5) - motionHash + motionStr.charCodeAt(i)) | 0;
+    }
+    const tileProjectionSigHash = tileProjectionActive
+      ? hashTileProjectionCapture(roofMaskCaptureSig, hashTileProjectionIds(tileProjectionIds), motionHash)
+      : 0;
     const tileProjCache = this._tileProjectionCaptureCache;
-    // Tile projection has its own cache lane. Never reuse while tile motion is
-    // actively driving transforms — stale masks lag behind moving casters.
-    const reuseTileProjection = !bypassTileMotionShadowCache
-      && tileProjectionSig.length > 0
+    const reuseTileProjection = tileProjectionActive
+      && !bypassTileMotionShadowCache
+      && tileProjectionSigHash !== 0
       && tileProjCache.valid
-      && tileProjCache.sig === tileProjectionSig;
+      && tileProjCache.sigHash === tileProjectionSigHash;
     if (reuseTileProjection) {
       hasTileProjection = tileProjCache.hasProjection;
       hasTileProjectionSort = tileProjCache.hasProjectionSort;
       hasTileReceiverSort = tileProjCache.hasReceiverSort;
       const tileCacheHitToken = this._beginPerfSpan('tileProjectionCacheHit');
       this._endPerfSpan(tileCacheHitToken);
-    }
-    if (!reuseTileProjection
-      && tileProjectionIds.length > 0
-      && this.tileProjectionTarget
-      && this.tileProjectionSortTarget
-      && this.tileReceiverAlphaTarget
-      && this.tileReceiverSortTarget) {
+    } else if (tileProjectionActive) {
       perfToken = this._beginPerfSpan('tileProjectionTotal');
-      const idSet = new Set(tileProjectionIds.map((id) => String(id)));
-
-      // Build a dynamic sort normalization range from currently present tile
-      // sprites so projected-caster and receiver sort maps stay comparable.
-      let sortMin = Infinity;
-      let sortMax = -Infinity;
-      this.mainScene.traverse((object) => {
-        const isTileRenderable = !!(object?.isSprite || object?.isMesh);
-        if (!isTileRenderable || !object?.material) return;
-        if (!this._resolveFoundryTileId(object)) return;
-        const sortKey = this._getTileSortKey(object);
-        if (sortKey < sortMin) sortMin = sortKey;
-        if (sortKey > sortMax) sortMax = sortKey;
+      const tileResult = this._tileProjectionPass.render(this, renderer, {
+        size,
+        tileProjectionIds,
+        frameCasters: this._frameCasters,
+        baseProjectionPx,
+        tileProjectionIdSet: this._getTileProjectionIdSet(tileProjectionIds),
+        beginPerfSpan: (n) => this._beginPerfSpan(n),
+        endPerfSpan: (t) => this._endPerfSpan(t),
       });
-      if (!Number.isFinite(sortMin) || !Number.isFinite(sortMax)) {
-        sortMin = 0;
-        sortMax = 1;
-      }
-      const sortDelta = sortMax - sortMin;
-      // V2 bus tiles currently do not guarantee a stable, receiver-comparable
-      // sort signal across all tile render paths. Failing open avoids fully
-      // suppressing projection in scenes where sort encoding is inconsistent.
-      const canUseSortOcclusion = false;
-      const sortRange = canUseSortOcclusion ? sortDelta : 1.0;
+      hasTileProjection = tileResult.hasProjection;
+      hasTileProjectionSort = tileResult.hasProjectionSort;
+      hasTileReceiverSort = tileResult.hasReceiverSort;
+      tileProjCache.valid = true;
+      tileProjCache.sigHash = tileProjectionSigHash;
+      tileProjCache.hasProjection = hasTileProjection;
+      tileProjCache.hasProjectionSort = hasTileProjectionSort;
+      tileProjCache.hasReceiverSort = hasTileReceiverSort;
+      this._endPerfSpan(perfToken);
+    }
 
-      // Projection contributors need the same guard-band strategy as roof
-      // captures because projected lookups can sample opposite screen edges.
-      const tileProjectionPx = baseProjectionPx * Math.max(Number(this.params.tileProjectionLengthScale) || 0.0, 0.0);
-      const tileProjectionBlurPx = Math.max(Number(this.params.tileProjectionSoftness) || 0.0, 0.0) * 2.0;
+    // Guard-band UV remap must stay in sync even when tile capture is cache-reused
+    // (the pass that normally writes uTileProjectionUvScale is skipped on cache hit).
+    if (tileProjectionActive && this.material?.uniforms?.uTileProjectionUvScale) {
+      const tileProjectionPx = baseProjectionPx * Math.max(Number(this.params.tileProjectionLengthScale) || 0, 0);
+      const tileProjectionBlurPx = Math.max(Number(this.params.tileProjectionSoftness) || 0, 0) * 2.0 * driverSoft;
       const tileGuardPx = Math.max(24.0, tileProjectionPx + tileProjectionBlurPx + 2.0);
       const tileGuardScaleX = 1.0 + (2.0 * tileGuardPx / Math.max(size.x, 1));
       const tileGuardScaleY = 1.0 + (2.0 * tileGuardPx / Math.max(size.y, 1));
       const tileCaptureScale = Math.max(tileGuardScaleX, tileGuardScaleY);
-
-      // Receiver sort maps: capture currently visible top tile stacking so
-      // projected casters can be occluded by higher-sort receiver tiles.
-      const tilePrepToken = this._beginPerfSpan('tileProjectionPrep');
-      this.mainScene.traverse((object) => {
-        const isRenderable = !!(object.isSprite || object.isMesh || object.isPoints || object.isLine);
-        if (!isRenderable || typeof object.visible !== 'boolean') return;
-        tileReceiverVisibilityOverrides.push({ object, visible: object.visible });
-
-        const isTileRenderable = !!(object.isSprite || object.isMesh);
-        const tileId = this._resolveFoundryTileId(object);
-        const keepVisible = !!(object.visible && isTileRenderable && tileId && object.material);
-        object.visible = keepVisible;
-
-        if (keepVisible && typeof object.material?.opacity === 'number') {
-          tileReceiverOpacityOverrides.push({ object, opacity: object.material.opacity });
-        }
-      });
-      this._endPerfSpan(tilePrepToken);
-
-      // Receiver alpha pass (original alpha/opacity).
-      let tilePassToken = this._beginPerfSpan('tileReceiverAlpha');
-      this.mainCamera.layers.enableAll();
-      renderer.setRenderTarget(this.tileReceiverAlphaTarget);
-      renderer.setClearColor(0x000000, 0);
-      renderer.clear();
-      renderer.render(this.mainScene, this.mainCamera);
-      this._endPerfSpan(tilePassToken);
-
-      // Receiver sort pass (alpha multiplied by normalized sort).
-      // Skip when all tiles share the same sort, because there is no ordering
-      // signal to compare and a degenerate range would over-suppress shadows.
-      if (canUseSortOcclusion) {
-        for (const entry of tileReceiverOpacityOverrides) {
-          if (!entry.object?.material || typeof entry.opacity !== 'number') continue;
-          const sortKey = this._getTileSortKey(entry.object);
-          const sortNorm = this._encodeTileSort(sortKey, sortMin, sortRange);
-          entry.object.material.opacity = entry.opacity * sortNorm;
-        }
-
-        renderer.setRenderTarget(this.tileReceiverSortTarget);
-        renderer.setClearColor(0x000000, 0);
-        renderer.clear();
-        renderer.render(this.mainScene, this.mainCamera);
-        hasTileReceiverSort = true;
-      }
-
-      for (const entry of tileReceiverOpacityOverrides) {
-        if (!entry.object?.material || typeof entry.opacity !== 'number') continue;
-        entry.object.material.opacity = entry.opacity;
-      }
-      for (const entry of tileReceiverVisibilityOverrides) {
-        if (entry.object) entry.object.visible = entry.visible;
-      }
-
-      // Contributor alpha pass for selected projection caster tiles.
-      const tileContributorPrepToken = this._beginPerfSpan('tileContributorPrep');
-      this.mainScene.traverse((object) => {
-        const isRenderable = !!(object.isSprite || object.isMesh || object.isPoints || object.isLine);
-        if (!isRenderable || typeof object.visible !== 'boolean') return;
-        tileProjectionVisibilityOverrides.push({ object, visible: object.visible });
-
-        const tileId = this._resolveFoundryTileId(object);
-        const isTileRenderable = !!(object.isSprite || object.isMesh);
-        const keepVisible = !!(isTileRenderable && tileId && idSet.has(String(tileId)));
-        // Projection should still capture tiles that are currently hidden/faded
-        // by indoor roof reveal logic. Force selected contributors visible.
-        object.visible = keepVisible;
-
-        // Ignore runtime sprite opacity fades (e.g. hover/roof hide) so the
-        // projection pass captures the tile alpha silhouette consistently.
-        if (keepVisible && typeof object.material?.opacity === 'number') {
-          tileProjectionOpacityOverrides.push({ object, opacity: object.material.opacity });
-          object.material.opacity = 1.0;
-        }
-      });
-      this._endPerfSpan(tileContributorPrepToken);
-
-      // Tile projection can target any tile layer (not only ROOF_LAYER).
-      // We isolate contributors via visibility overrides, so enabling all
-      // camera layers here ensures selected tiles are always capturable.
-      const restoreTileCaptureCamera = this._applyRoofCaptureGuardScale(tileCaptureScale);
-      if (this.material?.uniforms?.uTileProjectionUvScale) {
-        this.material.uniforms.uTileProjectionUvScale.value = 1.0 / Math.max(tileCaptureScale, 1.0);
-      }
-      try {
-        this.mainCamera.layers.enableAll();
-
-        tilePassToken = this._beginPerfSpan('tileProjectionCapture');
-        renderer.setRenderTarget(this.tileProjectionTarget);
-        renderer.setClearColor(0x000000, 0);
-        renderer.clear();
-        renderer.render(this.mainScene, this.mainCamera);
-        this._endPerfSpan(tilePassToken);
-
-        // Contributor sort pass (same selected casters, alpha multiplied by
-        // normalized sort) for per-pixel sort occlusion in the projection shader.
-        if (canUseSortOcclusion) {
-          for (const entry of tileProjectionOpacityOverrides) {
-            if (!entry.object?.material || typeof entry.opacity !== 'number') continue;
-            const sortKey = this._getTileSortKey(entry.object);
-            const sortNorm = this._encodeTileSort(sortKey, sortMin, sortRange);
-            entry.object.material.opacity = sortNorm;
-          }
-
-          renderer.setRenderTarget(this.tileProjectionSortTarget);
-          renderer.setClearColor(0x000000, 0);
-          renderer.clear();
-          renderer.render(this.mainScene, this.mainCamera);
-          hasTileProjectionSort = true;
-        }
-      } finally {
-        restoreTileCaptureCamera();
-      }
-
-      hasTileProjection = true;
-      this._endPerfSpan(perfToken);
-      tileProjCache.valid = true;
-      tileProjCache.sig = tileProjectionSig;
-      tileProjCache.hasProjection = hasTileProjection;
-      tileProjCache.hasProjectionSort = hasTileProjectionSort;
-      tileProjCache.hasReceiverSort = hasTileReceiverSort;
+      this.material.uniforms.uTileProjectionUvScale.value = 1.0 / Math.max(tileCaptureScale, 1.0);
     }
 
+    // Restore camera layers after tile capture (pass uses layers.enableAll() internally).
+    // shadowCompositeDraw saves/restores its own layer mask for the groundplane mesh.
     this.mainCamera.layers.mask = previousLayersMask;
 
-    for (const entry of tileProjectionVisibilityOverrides) {
-      if (entry.object) entry.object.visible = entry.visible;
+    perfToken = this._beginPerfSpan('maskBlurPasses');
+    const roofBlurRadius = Math.max(0, Number(this.params.softness) || 0) * 0.5 * driverSoft;
+    const tileBlurRadius = Math.max(0, Number(this.params.tileProjectionSoftness) || 0) * 0.5 * driverSoft;
+    const fluidBlurRadius = Math.max(0, Number(this.params.fluidShadowSoftness) || 0) * 0.5 * driverSoft;
+    let roofBlurredTex = null;
+    let tileBlurredTex = null;
+    let fluidBlurredTex = null;
+    if (this.roofTarget?.texture && this.roofBlurredTarget) {
+      roofBlurredTex = this._maskBlur.blurAlpha(renderer, this.roofTarget.texture, this.roofBlurredTarget, roofBlurRadius);
     }
-    for (const entry of tileProjectionOpacityOverrides) {
-      if (entry.object?.material && typeof entry.opacity === 'number') {
-        entry.object.material.opacity = entry.opacity;
-      }
+    if (hasTileProjection && this.tileProjectionTarget?.texture && this.tileProjectionBlurredTarget) {
+      tileBlurredTex = this._maskBlur.blurAlpha(renderer, this.tileProjectionTarget.texture, this.tileProjectionBlurredTarget, tileBlurRadius);
     }
+    if (this.fluidRoofTarget?.texture && this.fluidRoofBlurredTarget) {
+      fluidBlurredTex = this._maskBlur.blurRGBA(renderer, this.fluidRoofTarget.texture, this.fluidRoofBlurredTarget, fluidBlurRadius);
+    }
+    this._endPerfSpan(perfToken);
 
     perfToken = this._beginPerfSpan('stampShadowChannelGates');
     this._applyUnifiedShadowStampShaderFlags(THREE);
     this._endPerfSpan(perfToken);
 
-    // Pass 2: build shadow texture from roofTarget using a world-pinned
-    // groundplane mesh that samples the roof mask in screen space.
     perfToken = this._beginPerfSpan('shadowCompositeUniforms');
     if (this.material && this.material.uniforms) {
-      this.material.uniforms.tRoof.value = this.roofTarget.texture;
-      this.material.uniforms.tRoofVisibility.value = this.roofVisibilityTarget?.texture || null;
-      this.material.uniforms.uHasRoofVisibility.value = this.roofVisibilityTarget?.texture ? 1.0 : 0.0;
-      this.material.uniforms.tFluidRoof.value = this.fluidRoofTarget?.texture || null;
-      this.material.uniforms.uHasFluidRoof.value = this.fluidRoofTarget?.texture ? 1.0 : 0.0;
-      this.material.uniforms.tTileProjection.value = hasTileProjection ? this.tileProjectionTarget?.texture : null;
-      this.material.uniforms.uHasTileProjection.value = hasTileProjection ? 1.0 : 0.0;
-      this.material.uniforms.tTileProjectionSort.value = hasTileProjectionSort ? this.tileProjectionSortTarget?.texture : null;
-      this.material.uniforms.uHasTileProjectionSort.value = hasTileProjectionSort ? 1.0 : 0.0;
-      this.material.uniforms.tTileReceiverAlpha.value = hasTileReceiverSort ? this.tileReceiverAlphaTarget?.texture : null;
-      this.material.uniforms.tTileReceiverSort.value = hasTileReceiverSort ? this.tileReceiverSortTarget?.texture : null;
-      this.material.uniforms.uHasTileReceiverSort.value = hasTileReceiverSort ? 1.0 : 0.0;
+      const u = this.material.uniforms;
+      u.tRoof.value = this.roofTarget.texture;
+      u.tRoofStamp.value = roofBlurredTex || this.roofTarget.texture;
+      u.tRoofVisibility.value = this.roofVisibilityTarget?.texture || null;
+      u.uHasRoofVisibility.value = this.roofVisibilityTarget?.texture ? 1.0 : 0.0;
+      u.tFluidRoof.value = fluidBlurredTex || this.fluidRoofTarget?.texture || null;
+      u.uHasFluidRoof.value = u.tFluidRoof.value ? 1.0 : 0.0;
+      u.tTileProjection.value = hasTileProjection
+        ? (tileBlurredTex || this.tileProjectionTarget?.texture)
+        : null;
+      u.uHasTileProjection.value = hasTileProjection ? 1.0 : 0.0;
+      if (u.tTileProjectionRaw) {
+        u.tTileProjectionRaw.value = hasTileProjection ? (this.tileProjectionTarget?.texture ?? null) : null;
+      }
+      if (u.uHasTileProjectionRaw) {
+        u.uHasTileProjectionRaw.value = (hasTileProjection && this.tileProjectionTarget?.texture) ? 1.0 : 0.0;
+      }
+      u.tTileProjectionSort.value = hasTileProjectionSort ? this.tileProjectionSortTarget?.texture : null;
+      u.uHasTileProjectionSort.value = hasTileProjectionSort ? 1.0 : 0.0;
+      u.tTileReceiverAlpha.value = hasTileReceiverSort ? this.tileReceiverAlphaTarget?.texture : null;
+      u.tTileReceiverSort.value = hasTileReceiverSort ? this.tileReceiverSortTarget?.texture : null;
+      u.uHasTileReceiverSort.value = hasTileReceiverSort ? 1.0 : 0.0;
       if (this.material.uniforms.uResolution) {
         this.material.uniforms.uResolution.value.set(size.x, size.y);
       }
@@ -3797,6 +2847,7 @@ export class OverheadStampEffectV2 {
     }
     this._endPerfSpan(perfToken);
 
+    this._syncStampSceneUniforms(this.mainCamera);
     perfToken = this._beginPerfSpan('shadowCompositeDraw');
     renderer.setRenderTarget(this.shadowTarget);
     renderer.setClearColor(0xffffff, 1);
@@ -3838,6 +2889,7 @@ export class OverheadStampEffectV2 {
     if (!renderer || !this.mainScene || !this.mainCamera
       || !this.rainOcclusionVisibilityTarget || !this.rainOcclusionBlockTarget) return;
 
+    const scope = new SceneCaptureScope();
     const overrides = [];
     const visUniformOverrides = [];
     const blockUniformOverrides = [];
@@ -3918,6 +2970,8 @@ export class OverheadStampEffectV2 {
     this._endPerfSpan(perfToken);
 
     const prevMask = this.mainCamera.layers.mask;
+    const prevTarget = renderer.getRenderTarget();
+    try {
     this.mainCamera.layers.set(roofLayer);
     this.mainCamera.layers.enable(weatherRoofLayer);
 
@@ -3928,7 +2982,6 @@ export class OverheadStampEffectV2 {
     renderer.render(this.mainScene, this.mainCamera);
     this._endPerfSpan(perfToken);
 
-    // Blocker pass: force opacity/fade to full so hiddenBlock can engage while fading.
     for (const entry of visUniformOverrides) {
       if (entry?.object && entry.key === 'opacity') entry.object.opacity = 1.0;
     }
@@ -3981,21 +3034,22 @@ export class OverheadStampEffectV2 {
     renderer.render(this.mainScene, this.mainCamera);
     this._endPerfSpan(perfToken);
 
-    perfToken = this._beginPerfSpan('rainOcclusionRestore');
-    for (const entry of blockUniformOverrides) {
-      if (entry?.object && entry.key === 'opacity') entry.object.opacity = entry.value;
-      if (entry?.uniform) entry.uniform.value = entry.value;
+    } finally {
+      for (const entry of blockUniformOverrides) {
+        if (entry?.object && entry.key === 'opacity') entry.object.opacity = entry.value;
+        if (entry?.uniform) entry.uniform.value = entry.value;
+      }
+      for (const entry of visUniformOverrides) {
+        if (entry?.object && entry.key === 'opacity') entry.object.opacity = entry.value;
+        if (entry?.uniform) entry.uniform.value = entry.value;
+      }
+      for (const entry of overrides) {
+        if (entry?.object) entry.object.visible = entry.visible;
+      }
+      scope.restore();
+      this.mainCamera.layers.mask = prevMask;
+      renderer.setRenderTarget(prevTarget);
     }
-    // Restore visibility-pass uniform edits.
-    for (const entry of visUniformOverrides) {
-      if (entry?.object && entry.key === 'opacity') entry.object.opacity = entry.value;
-      if (entry?.uniform) entry.uniform.value = entry.value;
-    }
-    for (const entry of overrides) {
-      if (entry?.object) entry.object.visible = entry.visible;
-    }
-    this.mainCamera.layers.mask = prevMask;
-    this._endPerfSpan(perfToken);
   }
 
   dispose() {
@@ -4051,6 +3105,15 @@ export class OverheadStampEffectV2 {
       this.tileReceiverSortTarget.dispose();
       this.tileReceiverSortTarget = null;
     }
+    for (const key of ['roofBlurredTarget', 'tileProjectionBlurredTarget', 'fluidRoofBlurredTarget']) {
+      if (this[key]) {
+        this[key].dispose();
+        this[key] = null;
+      }
+    }
+    this._maskBlur?.dispose?.();
+    this._tileProjectionPass?.dispose?.();
+    this._maskCapturePass?.dispose?.();
     if (this.material) {
       this.material.dispose();
       this.material = null;

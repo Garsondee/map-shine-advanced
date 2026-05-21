@@ -47,6 +47,10 @@ export class BushEffectV2 {
      * @type {Map<string, {mesh: THREE.Mesh, material: THREE.ShaderMaterial, floorIndex: number}>}
      */
     this._overlays = new Map();
+    /** @type {number|null} */
+    this._lastVisibilityFloorIndex = null;
+    /** @type {number|null} */
+    this._lastVisibilityFloorIndex = null;
 
     /** @type {Set<string>} */
     this._negativeCache = new Set();
@@ -759,11 +763,39 @@ export class BushEffectV2 {
     log.info(`BushEffectV2 populated: ${n} overlays`);
   }
 
+  /**
+   * Minimal uniform tick while the camera is panning — skips per-overlay visibility scans.
+   * @param {{ elapsed?: number, delta?: number, motionDelta?: number, time?: number }} timeInfo
+   */
+  updateNavigationLite(timeInfo) {
+    if (!this._enabled || !this._initialized) return;
+    const time = Number.isFinite(timeInfo?.elapsed)
+      ? Number(timeInfo.elapsed)
+      : Number(timeInfo?.time ?? 0);
+    const delta = Number.isFinite(timeInfo?.motionDelta)
+      ? Number(timeInfo.motionDelta)
+      : (Number.isFinite(timeInfo?.delta) ? Number(timeInfo.delta) : 0.016);
+    const phaseDelta = Math.min(0.25, Math.max(0.0, delta));
+    this._windFieldPhase += phaseDelta * 0.16;
+    this._wavePhase += phaseDelta * 0.2;
+    this._flutterPhase += phaseDelta * 0.3;
+    if (this._sharedUniforms) {
+      this._sharedUniforms.uTime.value = time;
+      this._sharedUniforms.uWindFieldPhase.value = this._windFieldPhase;
+      this._sharedUniforms.uWavePhase.value = this._wavePhase;
+      this._sharedUniforms.uFlutterPhase.value = this._flutterPhase;
+    }
+    this._lastFrameTime = time;
+  }
+
   update(timeInfo) {
     if (!this._enabled || !this._initialized) return;
 
-    // Clamp overlay visibility to active floor every frame to avoid transition flashes.
-    this._applyOverlayFloorVisibility();
+    const maxFloor = this._getSafeVisibleMaxFloorIndex();
+    if (maxFloor !== this._lastVisibilityFloorIndex) {
+      this._lastVisibilityFloorIndex = maxFloor;
+      this._applyOverlayFloorVisibility();
+    }
 
     const time = Number.isFinite(timeInfo?.elapsed)
       ? Number(timeInfo.elapsed)

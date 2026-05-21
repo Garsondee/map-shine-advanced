@@ -145,6 +145,14 @@ export class PerformanceRecorderDialog {
           <span class="msa-perf__status-value" data-bind="continuous">none</span>
         </div>
         <div class="msa-perf__status-row">
+          <span class="msa-perf__status-label">Presented / skipped</span>
+          <span class="msa-perf__status-value" data-bind="pacing">—</span>
+        </div>
+        <div class="msa-perf__status-row">
+          <span class="msa-perf__status-label">Target FPS</span>
+          <span class="msa-perf__status-value" data-bind="targetFps">—</span>
+        </div>
+        <div class="msa-perf__status-row">
           <span class="msa-perf__status-label">Decimation</span>
           <span class="msa-perf__status-value" data-bind="decimation">0%</span>
         </div>
@@ -485,6 +493,16 @@ export class PerformanceRecorderDialog {
       ? `${topReason} (${(topReasonShare * 100).toFixed(0)}%, idle ${(noneShare * 100).toFixed(0)}%)`
       : `idle ${(noneShare * 100).toFixed(0)}%`);
 
+    const pacing = snap.session.pacing || {};
+    set('pacing', pacing.ticksRecorded > 0
+      ? `${fmt(pacing.presentedPct, 0)}% / ${fmt(pacing.skippedPct, 0)}% skip`
+      : '—');
+    try {
+      const ps = window.MapShine?.__presentationState;
+      set('targetFps', ps?.targetFps ? `${fmt(ps.targetFps, 0)} (${ps.tier || '?'})` : '—');
+    } catch (_) {
+      set('targetFps', '—');
+    }
     set('decimation', `${fmt(snap.session.decimationActivePct, 1)}%`);
     set('drawsPerFrame', `${fmtInt(snap.session.avgDrawCallsPerFrame)} / ${fmtInt(snap.session.avgTrianglesPerFrame)}`);
     set('gpuDiag', `${snap.meta.gpuDisjointEvents} / ${snap.meta.gpuPoolStarvations}`);

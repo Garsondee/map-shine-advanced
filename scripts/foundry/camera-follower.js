@@ -20,6 +20,7 @@ import { isGmLike } from '../core/gm-parity.js';
 
 
 import { createLogger } from '../core/log.js';
+import { scheduleHudAlign } from './hud-align-scheduler.js';
 import { moveTrace } from '../core/movement-trace-log.js';
 import {
   readV14SceneLevels,
@@ -109,6 +110,10 @@ export class CameraFollower {
     // Floor-follow throttling
     this._lastFloorFollowCheckMs = 0;
     this._floorFollowCheckIntervalMs = 100;
+
+    /** EffectComposer camera pipeline: sync Three after PIXI pan/zoom. */
+    this.updatePhase = 'camera';
+    this.cameraPipelineOrder = 3;
   }
   
   /**
@@ -929,13 +934,8 @@ export class CameraFollower {
       }
     }
     
-    // Update HUD alignment to match PIXI stage.
-    // Foundry's canvas.pan() normally calls hud.align() after updating the stage,
-    // but Map Shine bypasses canvas.pan() by reading stage state directly.
-    // We must call align() here to keep the #hud container transform synchronized.
-    if (canvas?.hud?.rendered && canvas.hud.align) {
-      canvas.hud.align();
-    }
+    // Coalesce HUD alignment — canvas.pan() and CameraFollower can both request it.
+    scheduleHudAlign();
   }
   
   /**

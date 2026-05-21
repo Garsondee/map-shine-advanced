@@ -23,6 +23,8 @@ const MODULE_ID = 'map-shine-advanced';
 const SCENE_FLAG_KEY = 'advancedCameraState';
 const SOCKET_CHANNEL = `module.${MODULE_ID}`;
 const CAMERA_SOCKET_TYPE = 'advanced-camera-pan';
+const ENVIRONMENT_SOCKET_TYPE = 'advanced-camera-environment';
+const ENVIRONMENT_RELEASE_SOCKET_TYPE = 'advanced-camera-environment-release';
 
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
@@ -85,18 +87,31 @@ export class CinematicCameraManager {
     this._remotePanEpsilonWorld = 0.15;
     this._remotePanEpsilonScale = 0.0005;
 
+    /** @type {number} */
+    this._envRemoteSeq = 0;
+
+    /** @type {import('../ui/environment-control-api.js').EnvironmentSnapshot|null} */
+    this._playerPreEnvSnapshot = null;
+
+    /** @type {string|null} */
+    this._envRemoteSenderId = null;
+
+    /** @type {number} */
+    this._lastEnvRemoteSeqApplied = -1;
+
     this._boundsCache = null;
     this._boundsCacheMs = 500;
     this._persistTimeout = null;
     this._lastImpulse = null;
 
     this._lastExternalUpdateAt = 0;
-    this._selfUpdateRafId = null;
-    this._selfUpdateLastAt = 0;
-    this._selfUpdateBound = this._selfUpdateTick.bind(this);
 
     /** @type {number} */
     this._temporaryRuntimeSuspendCount = 0;
+
+    /** EffectComposer camera pipeline: remote follow / cohesion before CameraFollower. */
+    this.updatePhase = 'camera';
+    this.cameraPipelineOrder = 2;
   }
 
   _createDefaultSceneState() {
@@ -105,6 +120,7 @@ export class CinematicCameraManager {
       cinematicActive: false,
       lockPlayers: false,
       strictFollow: false,
+      letterboxEnabled: false,
       uiFade: 0.92,
       barHeightPct: 0.12,
       transitionMs: 450,
@@ -148,7 +164,6 @@ export class CinematicCameraManager {
     this._hydrateFromSceneFlag();
 
     this._initialized = true;
-    this._startSelfUpdateLoop();
     this._applyVisualState();
     this._emitStateChanged();
 
@@ -159,7 +174,6 @@ export class CinematicCameraManager {
     if (!this._initialized) return;
 
     this._unbindInputBridge();
-    this._stopSelfUpdateLoop();
 
     for (const [name, id] of this._hookIds) {
       try {
@@ -402,38 +416,57 @@ export class CinematicCameraManager {
     if (clearTarget) this._remotePanTarget = null;
   }
 
-  _startSelfUpdateLoop() {
-    if (this._selfUpdateRafId !== null) return;
-    this._selfUpdateLastAt = 0;
-    this._selfUpdateRafId = requestAnimationFrame(this._selfUpdateBound);
+  /**
+   * @returns {import('./camera-animator.js').CameraAnimator|null}
+   * @private
+   */
+  _getCameraAnimator() {
+    const animator = window.MapShine?.cameraPathService?.animator;
+    return animator && typeof animator.animateTo === 'function' ? animator : null;
   }
 
-  _stopSelfUpdateLoop() {
-    if (this._selfUpdateRafId === null) return;
-    cancelAnimationFrame(this._selfUpdateRafId);
-    this._selfUpdateRafId = null;
-    this._selfUpdateLastAt = 0;
-  }
+  /**
+   * Pan/zoom via compositor-driven CameraAnimator (stays in phase with Three render).
+   *
+   * @param {{x:number, y:number, scale?:number}} view
+   * @param {number} durationMs
+   * @returns {Promise<void>}
+   * @private
+   */
+  async _animateViewTo(view, durationMs) {
+    const dur = clamp(asNumber(durationMs, 350), 50, 5000);
+    const animator = this._getCameraAnimator();
+    const current = animator?.captureCurrentView?.()
+      || {
+        x: asNumber(canvas?.stage?.pivot?.x, 0),
+        y: asNumber(canvas?.stage?.pivot?.y, 0),
+        scale: asNumber(canvas?.stage?.scale?.x, 1),
+      };
 
-  _selfUpdateTick(nowMs) {
-    if (!this._initialized) {
-      this._selfUpdateRafId = null;
+    const target = {
+      x: asNumber(view.x, current.x),
+      y: asNumber(view.y, current.y),
+      scale: Number.isFinite(view.scale) ? view.scale : current.scale,
+    };
+
+    try {
+      window.MapShine?.renderLoop?.requestContinuousRender?.(dur + 250);
+    } catch (_) {}
+
+    if (!animator) {
+      try {
+        canvas?.pan?.({ x: target.x, y: target.y, scale: target.scale, duration: 0 });
+      } catch (_) {}
       return;
     }
 
-    const last = this._selfUpdateLastAt || nowMs;
-    this._selfUpdateLastAt = nowMs;
-
-    // Fallback update path for scenarios where external updatable loops are
-    // not driving this manager (e.g. temporarily missing effect composer link).
-    if ((Date.now() - this._lastExternalUpdateAt) > 250) {
-      const dt = clamp((nowMs - last) / 1000, 1 / 240, 0.1);
-      const fallbackTimeInfo = { delta: dt };
-      this._tickRemoteFollow(fallbackTimeInfo);
-      this._tickGroupCohesion();
-    }
-
-    this._selfUpdateRafId = requestAnimationFrame(this._selfUpdateBound);
+    await animator.animateTo({
+      x: target.x,
+      y: target.y,
+      scale: target.scale,
+      durationMs: dur,
+      easing: 'easeInOutCosine',
+    });
   }
 
   _hasMeaningfulViewDelta(a, b) {
@@ -513,6 +546,10 @@ export class CinematicCameraManager {
     this.sceneState.cinematicActive = this.sceneState.cinematicActive === true;
     this.sceneState.lockPlayers = this.sceneState.lockPlayers === true;
     this.sceneState.strictFollow = this.sceneState.strictFollow === true;
+    this.sceneState.letterboxEnabled = this.sceneState.letterboxEnabled === true;
+    if (!this.sceneState.cinematicActive) {
+      this.sceneState.letterboxEnabled = false;
+    }
     this.sceneState.playerBoundsEnabled = this.sceneState.playerBoundsEnabled === true;
     this.sceneState.cohesionEnabled = this.sceneState.cohesionEnabled === true;
     this.sceneState.cohesionAutoFit = this.sceneState.cohesionAutoFit === true;
@@ -566,7 +603,8 @@ export class CinematicCameraManager {
       && this.sceneState.strictFollow;
 
     const localCinematicActive = cinematicActive && (strictLockedLocally || !this.playerOptOut);
-    this._overlayRoot.classList.toggle('map-shine-cinematic-active', localCinematicActive);
+    const showLetterbox = localCinematicActive && this.sceneState.letterboxEnabled === true;
+    this._overlayRoot.classList.toggle('map-shine-cinematic-active', showLetterbox);
 
     const showToggle = cinematicActive;
     if (this._playerToggleButton) {
@@ -664,6 +702,7 @@ export class CinematicCameraManager {
       improvedModeEnabled: true,
       cinematicActive: true,
       lockPlayers: true,
+      letterboxEnabled: true,
     });
   }
 
@@ -673,6 +712,17 @@ export class CinematicCameraManager {
       lockPlayers: false,
       strictFollow: false,
     });
+  }
+
+  /**
+   * Apply presentation/runtime camera state without writing to the scene document.
+   * Use for short-lived tooling (camera path playback) so scene.setFlag does not
+   * trigger a Foundry canvas redraw / Map Shine full reinit.
+   *
+   * @param {object} patch
+   */
+  applyTransientState(patch) {
+    this._applySceneStatePatch(patch, { persist: false });
   }
 
   setLockPlayers(locked) {
@@ -752,11 +802,10 @@ export class CinematicCameraManager {
       return;
     }
 
-    void canvas.animatePan({
+    void this._animateViewTo({
       x: token.center.x,
       y: token.center.y,
-      duration: clamp(asNumber(duration, 350), 50, 5000),
-    });
+    }, duration);
   }
 
   focusControlledGroup(duration = 420) {
@@ -781,18 +830,57 @@ export class CinematicCameraManager {
     const maxScale = canvas?.dimensions?.scale?.max ?? 3.0;
     const targetScale = clamp(fitScale, minScale, maxScale);
 
-    void canvas.animatePan({
+    void this._animateViewTo({
       x: bounds.centerX,
       y: bounds.centerY,
       scale: targetScale,
-      duration: clamp(asNumber(duration, 420), 50, 5000),
-    });
+    }, duration);
   }
 
   _shouldBroadcastCameraState() {
     return isGmLike()
       && this.sceneState.cinematicActive
       && this.sceneState.lockPlayers;
+  }
+
+  _shouldBroadcastEnvironmentState() {
+    return this._shouldBroadcastCameraState();
+  }
+
+  /**
+   * @param {import('../ui/environment-control-api.js').EnvironmentSnapshot} snapshot
+   * @param {number} [t=0]
+   */
+  broadcastEnvironmentSnapshot(snapshot, t = 0) {
+    if (!this._shouldBroadcastEnvironmentState()) return;
+    if (!snapshot || typeof snapshot !== 'object') return;
+
+    try {
+      this._envRemoteSeq += 1;
+      game.socket.emit(SOCKET_CHANNEL, {
+        type: ENVIRONMENT_SOCKET_TYPE,
+        sceneId: canvas?.scene?.id,
+        snapshot,
+        t: Math.max(0, Math.min(1, Number(t) || 0)),
+        seq: this._envRemoteSeq,
+        senderId: game?.user?.id,
+      });
+    } catch (e) {
+      log.warn('Failed to broadcast environment snapshot', e);
+    }
+  }
+
+  broadcastEnvironmentRelease() {
+    if (!isGmLike()) return;
+    try {
+      game.socket.emit(SOCKET_CHANNEL, {
+        type: ENVIRONMENT_RELEASE_SOCKET_TYPE,
+        sceneId: canvas?.scene?.id,
+        senderId: game?.user?.id,
+      });
+    } catch (e) {
+      log.warn('Failed to broadcast environment release', e);
+    }
   }
 
   _broadcastCameraState(position, { force = false } = {}) {
@@ -839,8 +927,17 @@ export class CinematicCameraManager {
   }
 
   _onSocketMessage(payload) {
-    if (!payload || payload.type !== CAMERA_SOCKET_TYPE) return;
-    if (!payload.sceneId || payload.sceneId !== canvas?.scene?.id) return;
+    if (!payload?.sceneId || payload.sceneId !== canvas?.scene?.id) return;
+
+    if (payload.type === ENVIRONMENT_SOCKET_TYPE) {
+      this._onEnvironmentSocketMessage(payload);
+      return;
+    }
+    if (payload.type === ENVIRONMENT_RELEASE_SOCKET_TYPE) {
+      this._onEnvironmentReleaseSocketMessage(payload);
+      return;
+    }
+    if (payload.type !== CAMERA_SOCKET_TYPE) return;
     if (isGmLike()) return;
 
     const senderId = typeof payload.senderId === 'string' ? payload.senderId : null;
@@ -873,6 +970,57 @@ export class CinematicCameraManager {
     this._lastRemotePacketAt = Math.max(this._lastRemotePacketAt, packetTime || Date.now());
 
     this._applyRemotePan(payload);
+  }
+
+  _onEnvironmentSocketMessage(payload) {
+    if (isGmLike()) return;
+
+    const senderId = typeof payload.senderId === 'string' ? payload.senderId : null;
+    if (senderId && senderId === game.user?.id) return;
+
+    const api = window.MapShine?.environmentControlApi;
+    if (!api) return;
+
+    if (senderId && this._envRemoteSenderId && senderId !== this._envRemoteSenderId) {
+      api.endExternalDrive('camera-path-remote', { restore: true });
+      this._playerPreEnvSnapshot = null;
+      this._lastEnvRemoteSeqApplied = -1;
+    }
+    if (senderId) this._envRemoteSenderId = senderId;
+
+    const seq = Number(payload.seq);
+    if (Number.isFinite(seq) && seq <= this._lastEnvRemoteSeqApplied) return;
+    if (Number.isFinite(seq)) this._lastEnvRemoteSeqApplied = seq;
+
+    if (!this._playerPreEnvSnapshot) {
+      this._playerPreEnvSnapshot = api.captureSnapshot();
+      api.beginExternalDrive('camera-path-remote');
+    }
+
+    if (payload.snapshot && typeof payload.snapshot === 'object') {
+      void api.applySnapshot(payload.snapshot, {
+        persist: false,
+        syncUi: false,
+        applyDarkness: true,
+        syncFoundryTime: false,
+      });
+    }
+  }
+
+  _onEnvironmentReleaseSocketMessage(payload) {
+    if (isGmLike()) return;
+
+    const senderId = typeof payload.senderId === 'string' ? payload.senderId : null;
+    if (senderId && senderId === game.user?.id) return;
+    if (senderId && this._envRemoteSenderId && senderId !== this._envRemoteSenderId) return;
+
+    const api = window.MapShine?.environmentControlApi;
+    if (!api) return;
+
+    api.endExternalDrive('camera-path-remote', { restore: true });
+    this._playerPreEnvSnapshot = null;
+    this._envRemoteSenderId = null;
+    this._lastEnvRemoteSeqApplied = -1;
   }
 
   _applyRemotePan(payload) {

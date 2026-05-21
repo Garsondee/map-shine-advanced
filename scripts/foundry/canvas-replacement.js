@@ -12,6 +12,7 @@ import { wipeMapShineAdvancedFlagsFireAndForget } from '../settings/scene-msa-fl
 import { SceneComposer } from '../scene/composer.js';
 import { CameraFollower } from './camera-follower.js';
 import { PixiInputBridge } from './pixi-input-bridge.js';
+import { installHudAlignCoalescer } from './hud-align-scheduler.js';
 import { CinematicCameraManager } from './cinematic-camera-manager.js';
 import { EffectComposer } from '../effects/EffectComposer.js';
 import { CandleFlamesEffectV2 } from '../compositor-v2/effects/CandleFlamesEffectV2.js';
@@ -48,6 +49,7 @@ import { TweakpaneManager } from '../ui/tweakpane-manager.js';
 import { normalizeEffectRgbParam } from '../ui/parameter-validator.js';
 import { ControlPanelManager } from '../ui/control-panel-manager.js';
 import { syncAtmosphericFogEffectFromControlState } from '../ui/atmospheric-fog-bridge.js';
+import { flushLandscapeLightningWhenCompositorReady } from '../ui/landscape-lightning-bridge.js';
 import { CameraPanelManager } from '../ui/camera-panel-manager.js';
 import { TokenManager } from '../scene/token-manager.js';
 import { VisibilityController } from '../vision/VisibilityController.js';
@@ -124,6 +126,9 @@ import { hasV14NativeLevels, getViewedLevelBackgroundSrc, isLevelsEnabledForScen
 import { installSnapshotStoreHooks, getSnapshot as getLevelsSnapshot } from '../core/levels-import/LevelsSnapshotStore.js';
 import { ZoneManager } from './zone-manager.js';
 import { IntroZoomEffect } from './intro-zoom-effect.js';
+import { CameraPathService } from './camera-path-service.js';
+import { environmentPlaybackDriver } from './environment-playback-driver.js';
+import { environmentControlApi } from '../ui/environment-control-api.js';
 import { sceneTransitionCurtain } from '../scene/scene-transition-curtain.js';
 import { HealthEvaluatorService } from '../core/diagnostics/HealthEvaluatorService.js';
 import { BreakerBoxDialog } from '../ui/breaker-box-dialog.js';
@@ -613,6 +618,11 @@ let _loadVisibilityLifecycleHooksInstalled = false;
  */
 let _msaDocHiddenAtMs = 0;
 
+/** @type {ReturnType<typeof setTimeout>|null} */
+let _recoverRenderCoalesceTimer = null;
+/** @type {{ reason: string, opts: { runColdBgResync?: boolean } }|null} */
+let _recoverRenderPending = null;
+
 /** @returns {boolean} */
 function _msaIsDocumentHidden() {
   try {
@@ -831,13 +841,29 @@ async function _runDeferredIntroCompileRetry() {
  *   alt-tab after the scene has stabilized.
  * @private
  */
+/**
+ * Spread compositor pumps across rAF ticks instead of one long main-thread task.
+ * @param {number} count
+ * @private
+ */
+function _queueSpreadCompositorPumps(count = 1) {
+  const n = Math.max(0, Math.floor(Number(count) || 0));
+  if (n <= 0) return;
+  try {
+    const ms = window.MapShine;
+    if (!ms) return;
+    const prev = Number(ms.__msaDeferredPumpRemaining) || 0;
+    ms.__msaDeferredPumpRemaining = Math.max(prev, n);
+  } catch (_) {}
+}
+
 function _recoverRenderingAfterTabFocus(reason = '', opts = {}) {
   const runColdBgResync = opts.runColdBgResync === true;
   try {
     const ms = window.MapShine;
     if (!ms) return;
 
-    _pumpCompositorFrames(3);
+    _queueSpreadCompositorPumps(5);
 
     const tc = threeCanvas;
     const rh = resizeHandler;
@@ -852,12 +878,12 @@ function _recoverRenderingAfterTabFocus(reason = '', opts = {}) {
       }
     }
 
-    ms.renderLoop?.requestContinuousRender?.(3000);
+    const continuousMs = ms.__msaSceneLoading === true ? 2500 : 500;
+    ms.renderLoop?.requestContinuousRender?.(continuousMs);
     ms.renderLoop?.requestRender?.();
     try {
       ms.renderer?.setRenderTarget?.(null);
     } catch (_) {}
-    _pumpCompositorFrames(2);
 
     if (runColdBgResync) {
       try {
@@ -885,6 +911,30 @@ function _recoverRenderingAfterTabFocus(reason = '', opts = {}) {
 }
 
 /**
+ * Coalesce visibility + focus recovery into a single pass.
+ * @param {string} reason
+ * @param {{ runColdBgResync?: boolean }} [opts]
+ * @private
+ */
+function _scheduleRecoverRenderingAfterTabFocus(reason = '', opts = {}) {
+  _recoverRenderPending = { reason: String(reason || ''), opts: opts || {} };
+  try {
+    if (_recoverRenderCoalesceTimer != null) clearTimeout(_recoverRenderCoalesceTimer);
+  } catch (_) {}
+  _recoverRenderCoalesceTimer = setTimeout(() => {
+    _recoverRenderCoalesceTimer = null;
+    const pending = _recoverRenderPending;
+    _recoverRenderPending = null;
+    if (!pending) return;
+    safeCall(
+      () => _recoverRenderingAfterTabFocus(pending.reason, pending.opts),
+      'loadVisibility.recover.coalesced',
+      Severity.COSMETIC,
+    );
+  }, 50);
+}
+
+/**
  * visibilitychange / focus: compositor recovery when rAF was starved in background.
  * @private
  */
@@ -909,7 +959,7 @@ function _ensureLoadVisibilityLifecycleHooks() {
       const wasBackgrounded = _msaDocHiddenAtMs > 0;
       _msaDocHiddenAtMs = 0;
       safeCall(
-        () => _recoverRenderingAfterTabFocus('document.visibilitychange', { runColdBgResync: wasBackgrounded }),
+        () => _scheduleRecoverRenderingAfterTabFocus('document.visibilitychange', { runColdBgResync: wasBackgrounded }),
         'loadVisibility.visibility.visible',
         Severity.COSMETIC,
       );
@@ -928,9 +978,10 @@ function _ensureLoadVisibilityLifecycleHooks() {
         : Date.now();
       const t0 = _msaDocHiddenAtMs;
       const wasBackgrounded = t0 > 0 && perf - t0 > 50;
-      if (wasBackgrounded) _msaDocHiddenAtMs = 0;
+      if (!wasBackgrounded) return;
+      _msaDocHiddenAtMs = 0;
       safeCall(
-        () => _recoverRenderingAfterTabFocus('window.focus', { runColdBgResync: wasBackgrounded }),
+        () => _scheduleRecoverRenderingAfterTabFocus('window.focus', { runColdBgResync: true }),
         'loadVisibility.window.focus',
         Severity.COSMETIC,
       );
@@ -991,6 +1042,16 @@ let externalEffects = null;
 
 /** @type {IntroZoomEffect} - Singleton reused across scene loads (stateless between runs). */
 const introZoomEffect = new IntroZoomEffect();
+/** @type {CameraPathService} */
+const cameraPathService = new CameraPathService();
+try {
+  if (typeof window !== 'undefined') {
+    if (!window.MapShine) window.MapShine = {};
+    window.MapShine.cameraPathService = cameraPathService;
+    window.MapShine.environmentControlApi = environmentControlApi;
+    window.MapShine.environmentPlaybackDriver = environmentPlaybackDriver;
+  }
+} catch (_) {}
 
 /**
  * ESSENTIAL FEATURE:
@@ -4538,11 +4599,12 @@ function _msaSceneUpdateDeltaSkipsMapShineRebuild(changes) {
     ));
     if (
       msaKeysEarly.length > 0
-      && msaKeysEarly.every((k) => (
+      &&       msaKeysEarly.every((k) => (
         k === 'mapPointGroups'
         || k === 'mapPointGroupsInitialized'
         || k === 'controlState'
         || k === 'weather-snapshot'
+        || k === 'advancedCameraState'
       ))
       && !structuralTop
       && !gridGeomEarly
@@ -4558,6 +4620,7 @@ function _msaSceneUpdateDeltaSkipsMapShineRebuild(changes) {
       'weather-snapshot',
       'mapPointGroups',
       'mapPointGroupsInitialized',
+      'advancedCameraState',
     ]);
     const SAFE_TOP = new Set([
       'flags',
@@ -5270,20 +5333,26 @@ function _attachFrameCoordinatorPostPixiForV2() {
       const scale = Number(frameState?.zoom);
       const valid = Number.isFinite(x) && Number.isFinite(y) && Number.isFinite(scale);
 
-      try { rl.requestRender?.(); } catch (_) {}
-      if (!valid) return;
+      let moved = false;
+      if (valid) {
+        moved = (
+          Math.abs(x - lastX) > 0.001 ||
+          Math.abs(y - lastY) > 0.001 ||
+          Math.abs(scale - lastScale) > 0.000001
+        );
+        if (moved) {
+          lastX = x;
+          lastY = y;
+          lastScale = scale;
+        }
+      }
 
-      const moved = (
-        Math.abs(x - lastX) > 0.001 ||
-        Math.abs(y - lastY) > 0.001 ||
-        Math.abs(scale - lastScale) > 0.000001
-      );
-
+      const due = typeof rl.isPresentationDueNow === 'function' && rl.isPresentationDueNow();
       if (moved) {
-        lastX = x;
-        lastY = y;
-        lastScale = scale;
+        try { rl.requestRender?.(); } catch (_) {}
         try { rl.requestContinuousRender?.(120); } catch (_) {}
+      } else if (due) {
+        try { rl.requestRender?.(); } catch (_) {}
       }
     });
   }
@@ -5435,6 +5504,7 @@ async function _waitForFoundryCanvasReady({ timeoutMs = 15000 } = {}) {
  */
 async function onCanvasReady(canvas) {
   installFogSaveSafetyPatch();
+  safeCall(() => installHudAlignCoalescer(), 'canvasReady.installHudAlignCoalescer', Severity.COSMETIC);
   let skipNativeLevelSwitchOverlay = false;
   let nativeSameSceneRedrawAtReady = false;
   let nativeSameSceneLevelSwitchAtReady = false;
@@ -5953,6 +6023,7 @@ function onCanvasTearDown(canvas) {
   // Abort any in-flight intro zoom sequence and remove its white flash overlay
   // so it doesn't get stranded in the DOM if a scene change fires mid-sequence.
   safeDispose(() => introZoomEffect.dispose(), 'introZoomEffect.dispose');
+  safeDispose(() => cameraPathService.dispose(), 'cameraPathService.dispose');
 
   // CRITICAL: Pause time manager immediately to stop all animations (full scene teardown only).
   if (!lightNativeSameScenePath && effectComposer?.timeManager) {
@@ -7690,6 +7761,10 @@ async function createThreeCanvas(scene, createOptions = {}) {
     pixiInputBridge = new PixiInputBridge(threeCanvas);
     pixiInputBridge.initialize();
     safeCall(() => {
+      effectComposer?.removeUpdatable?.(pixiInputBridge);
+      effectComposer?.addUpdatable?.(pixiInputBridge);
+    }, 'pixiInputBridge.updatable', Severity.COSMETIC);
+    safeCall(() => {
       if (window.MapShine) {
         // Legacy alias used by several interaction paths to temporarily disable camera input while dragging.
         window.MapShine.cameraController = pixiInputBridge;
@@ -7697,6 +7772,18 @@ async function createThreeCanvas(scene, createOptions = {}) {
     }, 'exposeLegacyCameraControllerAlias', Severity.COSMETIC);
     if (isDebugLoad) dlp.end('manager.PixiInputBridge.init');
     log.info('PIXI input bridge initialized - pan/zoom updates PIXI stage');
+
+    safeCall(() => {
+      const camAnim = cameraPathService?.animator;
+      if (camAnim && effectComposer) {
+        effectComposer.removeUpdatable(camAnim);
+        effectComposer.addUpdatable(camAnim);
+      }
+      if (environmentPlaybackDriver && effectComposer) {
+        effectComposer.removeUpdatable(environmentPlaybackDriver);
+        effectComposer.addUpdatable(environmentPlaybackDriver);
+      }
+    }, 'cameraPathService.animator.updatable', Severity.COSMETIC);
     safeCall(() => loadingOverlay.setStage('scene.camera', 0.93, 'Setting up camera...', { keepAuto: true }), 'overlay.camera', Severity.COSMETIC);
 
     // Step 6a.5: Initialize cinematic camera manager
@@ -8007,6 +8094,11 @@ async function createThreeCanvas(scene, createOptions = {}) {
             performanceRecorderDialog.initialize();
             if (window.MapShine) window.MapShine.performanceRecorderDialog = performanceRecorderDialog;
           }
+          if (window.MapShine) {
+            window.MapShine.cameraPathService = cameraPathService;
+            window.MapShine.environmentControlApi = environmentControlApi;
+            window.MapShine.environmentPlaybackDriver = environmentPlaybackDriver;
+          }
         }, 'performanceRecorder.initialize', Severity.COSMETIC);
 
         // Weather should register before the GM control panel so `hydrateMainWeatherTweakpaneFromController`
@@ -8193,6 +8285,10 @@ async function createThreeCanvas(scene, createOptions = {}) {
           await new Promise(r => setTimeout(r, 0)); // yield
           if (window.MapShine) window.MapShine.controlPanel = controlPanel;
         }
+
+        safeCall(() => {
+          flushLandscapeLightningWhenCompositorReady();
+        }, 'v2.flushLandscapeLightning.postControlPanel', Severity.COSMETIC);
 
         if (!cinematicCameraManager) {
           cinematicCameraManager = new CinematicCameraManager();
@@ -8489,6 +8585,10 @@ async function createThreeCanvas(scene, createOptions = {}) {
             LensEffectV2.getControlSchema(), _makeV2Callback('_lensEffect'), 'global');
         }, 'v2.registerLensUI', Severity.DEGRADED);
         safeCall(() => loadingOverlay.setStage('final.controls', 1.0, 'Loading effect controls...', { keepAuto: true }), 'overlay.ui.p4', Severity.COSMETIC);
+
+        safeCall(() => {
+          flushLandscapeLightningWhenCompositorReady();
+        }, 'v2.flushLandscapeLightning.postEffectRegistration', Severity.COSMETIC);
 
         // Ash controls: in V2 mode WeatherController isn't constructed as an updatable, but
         // we still expose full ash tuning controls so users can keep it disabled and
@@ -9548,6 +9648,7 @@ function destroyThreeCanvas() {
     window.MapShine.breakerBoxHeaderIndicator = null;
     window.MapShine.performanceRecorder = null;
     window.MapShine.performanceRecorderDialog = null;
+    window.MapShine.cameraPathService = null;
   }, 'destroyThreeCanvas.clearHealthGlobals', Severity.COSMETIC);
 
   // Dispose Enhanced Light Inspector
@@ -9602,6 +9703,7 @@ function destroyThreeCanvas() {
 
   // Dispose camera follower
   if (cameraFollower) {
+    safeDispose(() => { if (effectComposer) effectComposer.removeUpdatable(cameraFollower); }, 'removeUpdatable(cameraFollower)');
     cameraFollower.dispose();
     cameraFollower = null;
     log.debug('Camera follower disposed');
@@ -9609,10 +9711,16 @@ function destroyThreeCanvas() {
 
   // Dispose PIXI input bridge
   if (pixiInputBridge) {
+    safeDispose(() => { if (effectComposer) effectComposer.removeUpdatable(pixiInputBridge); }, 'removeUpdatable(pixiInputBridge)');
     pixiInputBridge.dispose();
     pixiInputBridge = null;
     log.debug('PIXI input bridge disposed');
   }
+
+  safeDispose(() => {
+    const camAnim = cameraPathService?.animator;
+    if (camAnim && effectComposer) effectComposer.removeUpdatable(camAnim);
+  }, 'removeUpdatable(cameraAnimator)');
 
   // Dispose controls integration
   if (controlsIntegration) {

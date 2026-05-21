@@ -497,11 +497,10 @@ export class WeatherLightningEffectV2 {
   }
 
   /**
-   * Lightning strike sun target for structural / vegetation shadow passes.
    * @returns {object|null}
+   * @private
    */
-  getLightningShadowTarget() {
-    if (this._envShadowFlash01 <= 0) return null;
+  _buildLightningShadowTarget() {
     if (!Number.isFinite(Number(this._activeAzimuthDeg))) return null;
     return {
       azimuthDeg: this._activeAzimuthDeg,
@@ -511,6 +510,25 @@ export class WeatherLightningEffectV2 {
       lengthScale: 1.0,
       smearScale: 1.0,
     };
+  }
+
+  /**
+   * Lightning strike sun target for structural shadow passes and blend weighting.
+   * @returns {object|null}
+   */
+  getLightningShadowTarget() {
+    if (this._envShadowFlash01 <= 0) return null;
+    return this._buildLightningShadowTarget();
+  }
+
+  /**
+   * Lightning sun target for tree/bush billboard passes — held for the whole strike
+   * envelope (not gated on per-frame flicker dips in {@link #_envShadowFlash01}).
+   * @returns {object|null}
+   */
+  getVegetationLightningShadowTarget() {
+    if (this._flashStartMs < 0) return null;
+    return this._buildLightningShadowTarget();
   }
 
   /**
@@ -537,13 +555,18 @@ export class WeatherLightningEffectV2 {
 
   /**
    * Textures for ShadowManager blend: per-strike snapshot first, then compass bake cache.
+   * Vegetation is omitted — billboard shadows are screen-space and must stay live while
+   * the camera pans (see {@link wantsLiveVegetationLightningShadowOverride}).
    * @returns {{ building: THREE.Texture|null, skyReach: THREE.Texture|null, painted: THREE.Texture|null, vegetation: THREE.Texture|null }|null}
    */
   getShadowBlendTextures() {
     const snap = this._strikeSnapshot.getTextures();
-    if (snap) return snap;
-    if (this._bakeCache.state !== 'ready') return null;
-    return this._bakeCache.getBlendedTextures(this._activeAzimuthDeg);
+    const fromBake = this._bakeCache.state === 'ready'
+      ? this._bakeCache.getBlendedTextures(this._activeAzimuthDeg)
+      : null;
+    const base = snap ?? fromBake;
+    if (!base) return null;
+    return { ...base, vegetation: null };
   }
 
   /**
@@ -555,6 +578,15 @@ export class WeatherLightningEffectV2 {
     if (!this.getLightningShadowTarget()) return false;
     // After snapshot: fade via fixed lightning texture blend only (no sun-angle lerp).
     return !this._strikeSnapshot.hasCapture();
+  }
+
+  /**
+   * Tree/bush billboard shadows are rendered into screen-space RTs; keep lightning
+   * sun override live for the whole shadow flash so panning does not drag a frozen mask.
+   * @returns {boolean}
+   */
+  wantsLiveVegetationLightningShadowOverride() {
+    return !!this.getVegetationLightningShadowTarget();
   }
 
   triggerSmallStrike() {
@@ -1036,6 +1068,7 @@ export class WeatherLightningEffectV2 {
       this._flashValue = 0;
       this._envFlash01 = 0;
       this._envShadowFlash01 = 0;
+      this._strikeSnapshot.clear();
     }
 
     this._publishEnvironment(timeInfo);

@@ -309,7 +309,7 @@ export class WeatherController {
       splashLifeMax: 0.22,         // Seconds
       splashSizeMin: 8.0,          // World units/pixels
       splashSizeMax: 8.0,          // World units/pixels
-      splashOpacityPeak: 0.04,     // 0..1 peak alpha for SplashAlphaBehavior
+      splashOpacityPeak: 0.11,     // 0..1 peak alpha for SplashAlphaBehavior
 
       // Per-tile splash tuning (4 atlas tiles / splash archetypes)
       // Splash 1: Thin clean ring
@@ -318,7 +318,7 @@ export class WeatherController {
       splash1LifeMax: 0.35,
       splash1SizeMin: 8.0,
       splash1SizeMax: 16.0,
-      splash1OpacityPeak: 0.05,
+      splash1OpacityPeak: 0.14,
 
       // Splash 2: Thick broken ring
       splash2IntensityScale: 8.7,
@@ -326,7 +326,7 @@ export class WeatherController {
       splash2LifeMax: 0.22,
       splash2SizeMin: 2.0,
       splash2SizeMax: 3.0,
-      splash2OpacityPeak: 0.05,
+      splash2OpacityPeak: 0.14,
 
       // Splash 3: Droplets-only pattern
       splash3IntensityScale: 9.1,
@@ -334,7 +334,7 @@ export class WeatherController {
       splash3LifeMax: 0.79,
       splash3SizeMin: 6.0,
       splash3SizeMax: 27.0,
-      splash3OpacityPeak: 0.12,
+      splash3OpacityPeak: 0.33,
 
       // Splash 4: Inner puddle
       splash4IntensityScale: 9.25,
@@ -342,7 +342,7 @@ export class WeatherController {
       splash4LifeMax: 1.40,
       splash4SizeMin: 10.0,
       splash4SizeMax: 24.0,
-      splash4OpacityPeak: 0.02
+      splash4OpacityPeak: 0.08
     };
 
     /**
@@ -3497,9 +3497,9 @@ export class WeatherController {
         },
         rainSplash1OpacityPeak: {
           label: 'Splash 1 (Thin Ring) Peak Opacity',
-          default: 0.05,
+          default: 0.14,
           min: 0.0,
-          max: 0.6,
+          max: 1.0,
           step: 0.01,
           group: 'rain'
         },
@@ -3547,9 +3547,9 @@ export class WeatherController {
         },
         rainSplash2OpacityPeak: {
           label: 'Splash 2 (Broken Ring) Peak Opacity',
-          default: 0.05,
+          default: 0.14,
           min: 0.0,
-          max: 0.6,
+          max: 1.0,
           step: 0.01,
           group: 'rain'
         },
@@ -3597,9 +3597,9 @@ export class WeatherController {
         },
         rainSplash3OpacityPeak: {
           label: 'Splash 3 (Droplets) Peak Opacity',
-          default: 0.12,
+          default: 0.33,
           min: 0.0,
-          max: 0.6,
+          max: 1.0,
           step: 0.01,
           group: 'rain'
         },
@@ -3647,9 +3647,9 @@ export class WeatherController {
         },
         rainSplash4OpacityPeak: {
           label: 'Splash 4 (Puddle) Peak Opacity',
-          default: 0.02,
+          default: 0.08,
           min: 0.0,
-          max: 0.6,
+          max: 1.0,
           step: 0.01,
           group: 'rain'
         },

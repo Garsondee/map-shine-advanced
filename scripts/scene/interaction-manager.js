@@ -21,6 +21,7 @@ import { getTileOcclusionModeFlags } from './tile-manager.js';
 import { applyAmbientLightLevelDefaults, applyAmbientSoundLevelDefaults, applyTileLevelDefaults, applyWallLevelDefaults } from '../foundry/levels-create-defaults.js';
 import { getPerspectiveElevation } from '../foundry/elevation-context.js';
 import { moveTrace } from '../core/movement-trace-log.js';
+import { isCameraNavigationActive } from '../foundry/camera-navigation-state.js';
 
 const log = createLogger('InteractionManager');
 
@@ -797,6 +798,53 @@ export class InteractionManager {
     }
   }
 
+  /**
+   * True while the user is panning/zooming the scene camera (not object drag).
+   * @returns {boolean}
+   * @private
+   */
+  _isCameraNavigationActive() {
+    return isCameraNavigationActive();
+  }
+
+  /**
+   * Whether elementsFromPoint is worth the forced reflow cost for this event.
+   * pointermove and active camera pan only need composedPath (no layout read).
+   * @param {Event} event
+   * @returns {boolean}
+   * @private
+   */
+  _shouldProbeElementsFromPoint(event) {
+    const type = String(event?.type || '');
+    if (type === 'pointermove' || type === 'mousemove') return false;
+    try {
+      if (window.MapShine?.pixiInputBridge?.isCameraPanActive?.()) return false;
+    } catch (_) {
+    }
+    return true;
+  }
+
+  /**
+   * @param {Event} event
+   * @param {Element[]} elements - Mutable array to append probe results into.
+   * @private
+   */
+  _appendElementsFromPointProbe(event, elements) {
+    if (!this._shouldProbeElementsFromPoint(event)) return;
+    safeCall(() => {
+      const cx = event?.clientX;
+      const cy = event?.clientY;
+      if (Number.isFinite(cx) && Number.isFinite(cy) && typeof document?.elementsFromPoint === 'function') {
+        const stack = document.elementsFromPoint(cx, cy);
+        if (Array.isArray(stack) && stack.length) {
+          for (const el of stack) {
+            if (el instanceof Element) elements.push(el);
+          }
+        }
+      }
+    }, 'uiProbe.elementsFromPoint', Severity.COSMETIC);
+  }
+
   _isEventFromUI(event) {
     const target = event?.target;
     const path = (event && typeof event.composedPath === 'function') ? event.composedPath() : null;
@@ -820,22 +868,10 @@ export class InteractionManager {
     };
 
     // IMPORTANT:
-    // We listen on `window` in capture phase, so `event.target` can be unreliable in some
-    // cases (e.g. when other frameworks intercept/re-target events). To ensure we never
-    // treat UI clicks/drags (FilePicker, Dialogs, etc.) as scene interaction, also inspect
-    // the actual element stack under the pointer.
-    safeCall(() => {
-      const cx = event?.clientX;
-      const cy = event?.clientY;
-      if (Number.isFinite(cx) && Number.isFinite(cy) && typeof document?.elementsFromPoint === 'function') {
-        const stack = document.elementsFromPoint(cx, cy);
-        if (Array.isArray(stack) && stack.length) {
-          for (const el of stack) {
-            if (el instanceof Element) elements.push(el);
-          }
-        }
-      }
-    }, 'isOverUI.elementsFromPoint', Severity.COSMETIC);
+    // We listen on `window` in capture phase, so `event.target` can be unreliable on
+    // pointerdown/up. Skip elementsFromPoint on pointermove — it forces layout and
+    // runs on every pan tick; composedPath is sufficient while the pointer is down.
+    this._appendElementsFromPointProbe(event, elements);
 
     const uiRootSelector = '.window-app, .app.window-app, .application, foundry-application, dialog, .dialog, .filepicker, #sidebar, #navigation, #chat, #chat-log, #chat-controls, .chat-popout, .chat-message, .message-content, [data-message-id], [data-app-type="ChatMessage"]';
     const uiControlSelector = 'button, a, input, select, textarea, label, [role="button"], [data-action], [data-tooltip]';
@@ -897,18 +933,7 @@ export class InteractionManager {
 
     // Mirror _isEventFromUI stack probing so capture-phase retargeting does not
     // let Tweakpane sliders leak through to scene interactions.
-    safeCall(() => {
-      const cx = event?.clientX;
-      const cy = event?.clientY;
-      if (Number.isFinite(cx) && Number.isFinite(cy) && typeof document?.elementsFromPoint === 'function') {
-        const stack = document.elementsFromPoint(cx, cy);
-        if (Array.isArray(stack) && stack.length) {
-          for (const el of stack) {
-            if (el instanceof Element) elements.push(el);
-          }
-        }
-      }
-    }, 'hardUi.elementsFromPoint', Severity.COSMETIC);
+    this._appendElementsFromPointProbe(event, elements);
 
     const uiRootSelector = '.window-app, .app.window-app, .application, foundry-application, dialog, .dialog, .filepicker, #sidebar, #navigation, #chat, #chat-log, #chat-controls, .chat-popout, .chat-message, .message-content, [data-message-id], [data-app-type="ChatMessage"]';
     const uiControlSelector = 'button, a, input, select, textarea, label, [role="button"], [data-action], [data-tooltip]';
@@ -5476,6 +5501,8 @@ export class InteractionManager {
   onPointerMove(event) {
     try {
         const hardUiBlocker = this._isHardUIInteractionEvent(event);
+        const isFromUI = this._isEventFromUI(event);
+        const cameraNavActive = this._isCameraNavigationActive();
         // Drawings drag/preview lifecycle is owned by Foundry DrawingsLayer.
         if (this._isDrawingsContextActive()) {
           return;
@@ -5483,10 +5510,10 @@ export class InteractionManager {
 
         if (this._isTokensLayerGameplayPassthrough()) {
           // Roof/tree hover-hide is Three.js-owned even while Foundry handles tokens.
-          if (!hardUiBlocker && !this._isEventFromUI(event)) {
+          if (!hardUiBlocker && !isFromUI && !cameraNavActive) {
             safeCall(() => {
               const pointer = this.mouseStateManager?.updateFromEvent?.(event, {
-                isFromUI: this._isEventFromUI(event),
+                isFromUI,
               });
               if (pointer?.insideCanvas && !pointer?.isFromUI) {
                 this._lastPointerClientX = pointer.clientX;
@@ -5501,7 +5528,7 @@ export class InteractionManager {
         }
 
         if (
-          (hardUiBlocker || this._isEventFromUI(event)) &&
+          (hardUiBlocker || isFromUI) &&
           !this.dragState?.active &&
           !this.dragSelect?.active &&
           !this.wallDraw?.active &&
@@ -5517,34 +5544,37 @@ export class InteractionManager {
 
         // Update centralized pointer snapshot once per pointer event.
         // This is the authoritative mouse source for hover/paste/Foundry cursor sync.
-        safeCall(() => {
-          const pointer = this.mouseStateManager?.updateFromEvent?.(event, {
-            isFromUI: this._isEventFromUI(event),
-          }) || null;
-          if (pointer?.insideCanvas && !pointer?.isFromUI) {
-            this._lastPointerClientX = pointer.clientX;
-            this._lastPointerClientY = pointer.clientY;
+        // Skip world projection during camera pan/zoom — raycasts are wasted while the view moves.
+        if (!cameraNavActive) {
+          safeCall(() => {
+            const pointer = this.mouseStateManager?.updateFromEvent?.(event, {
+              isFromUI,
+            }) || null;
+            if (pointer?.insideCanvas && !pointer?.isFromUI) {
+              this._lastPointerClientX = pointer.clientX;
+              this._lastPointerClientY = pointer.clientY;
 
-            // WP-7: Sync canvas.mousePosition and broadcast cursor activity
-            // when Three.js owns input, mirroring ControlsLayer._onMouseMove.
-            const now = performance.now();
-            if (now - this._lastCursorBroadcastMs >= this._cursorBroadcastIntervalMs) {
-              this._lastCursorBroadcastMs = now;
-              if (Number.isFinite(pointer.foundryX) && Number.isFinite(pointer.foundryY)) {
-                const fp = { x: pointer.foundryX, y: pointer.foundryY };
-                // Keep canvas.mousePosition in sync so Foundry features
-                // (cursor display, ruler tooltips) that read it stay correct.
-                if (canvas?.mousePosition) {
-                  canvas.mousePosition.x = fp.x;
-                  canvas.mousePosition.y = fp.y;
-                }
-                if (game?.user?.hasPermission?.('SHOW_CURSOR')) {
-                  game.user.broadcastActivity({ cursor: fp });
+              // WP-7: Sync canvas.mousePosition and broadcast cursor activity
+              // when Three.js owns input, mirroring ControlsLayer._onMouseMove.
+              const now = performance.now();
+              if (now - this._lastCursorBroadcastMs >= this._cursorBroadcastIntervalMs) {
+                this._lastCursorBroadcastMs = now;
+                if (Number.isFinite(pointer.foundryX) && Number.isFinite(pointer.foundryY)) {
+                  const fp = { x: pointer.foundryX, y: pointer.foundryY };
+                  // Keep canvas.mousePosition in sync so Foundry features
+                  // (cursor display, ruler tooltips) that read it stay correct.
+                  if (canvas?.mousePosition) {
+                    canvas.mousePosition.x = fp.x;
+                    canvas.mousePosition.y = fp.y;
+                  }
+                  if (game?.user?.hasPermission?.('SHOW_CURSOR')) {
+                    game.user.broadcastActivity({ cursor: fp });
+                  }
                 }
               }
             }
-          }
-        }, 'pointerMove.trackPointer', Severity.COSMETIC);
+          }, 'pointerMove.trackPointer', Severity.COSMETIC);
+        }
 
         // PERFORMANCE: Skip expensive hover detection if mouse is not over the canvas.
         // This prevents raycasting when hovering over Tweakpane UI or other overlays.
@@ -5909,9 +5939,9 @@ export class InteractionManager {
 
         // Case 2: Hover (if not dragging object)
         // PERFORMANCE: Only do expensive hover raycasting if mouse is over the canvas.
-        // This prevents frame drops when hovering over Tweakpane UI.
+        // Skip during camera pan/zoom — handleHover raycasts fight presentation pacing.
         if ((!this.dragState.active || !this.dragState.object) && this.dragState.mode !== 'radiusEdit') {
-          if (isOverCanvas) {
+          if (isOverCanvas && !cameraNavActive) {
             this.handleHover(event);
           }
           return;

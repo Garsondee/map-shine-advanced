@@ -20,6 +20,7 @@ import {
   TILE_FEATURE_LAYERS,
 } from '../core/render-layers.js';
 import { FloorCompositor } from '../compositor-v2/FloorCompositor.js';
+import { flushLandscapeLightningWhenCompositorReady } from '../ui/landscape-lightning-bridge.js';
 
 const log = createLogger('EffectComposer');
 
@@ -472,6 +473,57 @@ export class EffectComposer {
   }
 
   /**
+   * Run updatables for a pipeline phase (`camera` or `default`).
+   * Camera phase runs before FrameState; default runs after.
+   *
+   * @param {'camera'|'default'} phase
+   * @param {number} schedulerDelta
+   * @param {object} timeInfo
+   * @param {boolean} doProfile
+   * @param {boolean} recording
+   * @param {object|null} profiler
+   * @param {object|null} perfRecorder
+   * @private
+   */
+  _runUpdatablesPhase(phase, schedulerDelta, timeInfo, doProfile, recording, profiler, perfRecorder) {
+    const list = [...this.updatables].filter((u) => {
+      const p = u?.updatePhase || 'default';
+      return p === phase;
+    });
+
+    if (phase === 'camera') {
+      list.sort((a, b) => (a.cameraPipelineOrder ?? 0) - (b.cameraPipelineOrder ?? 0));
+    }
+
+    for (const updatable of list) {
+      try {
+        const hz = updatable.updateHz;
+        if (hz > 0) {
+          const accum = (this._updatableAccum.get(updatable) || 0) + schedulerDelta;
+          const interval = 1.0 / hz;
+          if (accum < interval) {
+            this._updatableAccum.set(updatable, accum);
+            continue;
+          }
+          this._updatableAccum.set(updatable, accum % interval);
+        }
+        let t0 = 0;
+        const measure = doProfile || recording;
+        if (measure) t0 = performance.now();
+        updatable.update(timeInfo);
+        if (measure) {
+          const dt = performance.now() - t0;
+          const name = updatable?.constructor?.name || updatable?.id || 'updatable';
+          if (doProfile) profiler?.recordUpdatable?.(name, dt);
+          if (recording) perfRecorder?.recordUpdatable?.(name, dt);
+        }
+      } catch (error) {
+        log.error(`Error updating updatable (${phase}):`, error);
+      }
+    }
+  }
+
+  /**
    * Register an object to be updated every frame
    * @param {Object} updatable - Object with update(timeInfo) method
    */
@@ -543,16 +595,6 @@ export class EffectComposer {
 
     // Update centralized time (single source of truth)
     const timeInfo = this.timeManager.update();
-
-    // P3.2: Update frame-consistent camera state
-    // All screen-space effects should use this snapshot for consistent sampling
-    try {
-      const frameState = getGlobalFrameState();
-      const sceneComposer = window.MapShine?.sceneComposer;
-      frameState.update(this.camera, sceneComposer, canvas, timeInfo.frameCount, timeInfo.delta);
-    } catch (e) {
-      // Frame state update is non-critical; ignore errors
-    }
 
     const profiler = globalProfiler;
     const doProfile = !!profiler?.enabled;
@@ -656,39 +698,23 @@ export class EffectComposer {
         if (window.MapShine.__v2StartupTrace.length > 128) window.MapShine.__v2StartupTrace.shift();
       } catch (_) {}
     }
-    // ── Run updatables (camera, interaction, movement, etc.) ──────────
     // Sub-rate scheduling must use real frame time, not TimeManager.delta.
-    // Foundry pause drives TimeManager.delta to 0, but scene-graph managers
-    // still need cadence for visibility, texture, and parent/layer reconciliation.
     const schedulerDelta = Number.isFinite(deltaTime)
       ? Math.max(0, Math.min(deltaTime, 0.1))
       : Math.max(0, Number(timeInfo?.delta) || 0);
-    for (const updatable of this.updatables) {
-      try {
-        const hz = updatable.updateHz;
-        if (hz > 0) {
-          const accum = (this._updatableAccum.get(updatable) || 0) + schedulerDelta;
-          const interval = 1.0 / hz;
-          if (accum < interval) {
-            this._updatableAccum.set(updatable, accum);
-            continue;
-          }
-          this._updatableAccum.set(updatable, accum % interval);
-        }
-        let t0 = 0;
-        const measure = doProfile || recording;
-        if (measure) t0 = performance.now();
-        updatable.update(timeInfo);
-        if (measure) {
-          const dt = performance.now() - t0;
-          const name = updatable?.constructor?.name || updatable?.id || 'updatable';
-          if (doProfile) profiler.recordUpdatable(name, dt);
-          if (recording) perfRecorder.recordUpdatable(name, dt);
-        }
-      } catch (error) {
-        log.error('Error updating updatable (V2 path):', error);
-      }
+
+    // Camera pipeline: PIXI pan/zoom → Three sync, then FrameState snapshot.
+    this._runUpdatablesPhase('camera', schedulerDelta, timeInfo, doProfile, recording, profiler, perfRecorder);
+
+    try {
+      const frameState = getGlobalFrameState();
+      const sceneComposer = window.MapShine?.sceneComposer;
+      frameState.update(this.camera, sceneComposer, canvas, timeInfo.frameCount, timeInfo.delta);
+    } catch (e) {
+      // Frame state update is non-critical; ignore errors
     }
+
+    this._runUpdatablesPhase('default', schedulerDelta, timeInfo, doProfile, recording, profiler, perfRecorder);
     if (window.MapShine?.__v2StartupTraceEnabled === true && Number(timeInfo?.frameCount ?? 0) <= 8) {
       try {
         const ctx = window.MapShine?.activeLevelContext ?? null;
@@ -993,6 +1019,14 @@ export class EffectComposer {
         }
       } catch (err) {
         log.warn('FloorCompositor V2: param replay failed:', err);
+      }
+
+      // Map Shine Control landscape lightning is stored on controlState, not in
+      // Tweakpane effect folders — apply it now that WeatherLightningEffectV2 exists.
+      try {
+        flushLandscapeLightningWhenCompositorReady();
+      } catch (err) {
+        log.warn('FloorCompositor V2: landscape lightning sync failed:', err);
       }
 
       // NOTE: Do not force-enable effects here by default. Persisted params are

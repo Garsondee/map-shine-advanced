@@ -20,6 +20,7 @@ import { EffectStackUI } from './effect-stack.js';
 import { DiagnosticCenterManager } from './diagnostic-center.js';
 import { TileMotionDialog } from './tile-motion-dialog.js';
 import { TokenMovementDialog } from './token-movement-dialog.js';
+import { CameraPathDialog } from './camera-path-dialog.js';
 import { OVERLAY_THREE_LAYER, TILE_FEATURE_LAYERS } from '../core/render-layers.js';
 import { MASK_DEBUG_OVERLAY_MODE_OPTIONS } from '../compositor-v2/MaskDebugOverlayPass.js';
 import * as sceneSettings from '../settings/scene-settings.js';
@@ -35,6 +36,10 @@ import {
   hydrateControlPanelLiveOverridesFromController,
   resolveWeatherController
 } from './weather-param-bridge.js';
+import {
+  readLightningIntensityFromControlState,
+  syncWeatherLightningEffectFromControlState,
+} from './landscape-lightning-bridge.js';
 import * as scenePresets from './scene-presets.js';
 import { DARKNESS_PRIORITY, LightingDirector } from '../core/LightingDirector.js';
 import { DEFAULT_SHADOW_SYSTEM_TUNING } from '../compositor-v2/shadow-system/SunDirection.js';
@@ -236,6 +241,9 @@ export class TweakpaneManager {
 
     /** @type {TokenMovementDialog|null} */
     this.tokenMovementDialog = null;
+
+    /** @type {CameraPathDialog|null} */
+    this.cameraPathDialog = null;
 
     /** @type {number} UI scale factor */
     this.uiScale = 1.0;
@@ -1017,6 +1025,14 @@ export class TweakpaneManager {
       this.tokenMovementDialog = new TokenMovementDialog();
       await this.tokenMovementDialog.initialize();
       if (_isDbg) _dlp.end('tp.tokenMovementDialog.init');
+
+      if (_isDbg) _dlp.begin('tp.cameraPathDialog.init', 'finalize');
+      const cameraPathService = window.MapShine?.cameraPathService;
+      if (cameraPathService) {
+        this.cameraPathDialog = new CameraPathDialog(cameraPathService);
+        this.cameraPathDialog.initialize();
+      }
+      if (_isDbg) _dlp.end('tp.cameraPathDialog.init');
     }
 
     // Start hidden by default for release; can be opened via the scene control button.
@@ -1632,6 +1648,13 @@ export class TweakpaneManager {
     });
 
     if (isGmLike()) {
+      addGridButton('🎬 Camera Path', () => {
+        if (!this.cameraPathDialog) {
+          ui.notifications?.warn?.('Camera Path not available (Map Shine not fully initialized yet)');
+          return;
+        }
+        this.cameraPathDialog.toggle();
+      });
       addGridButton('🧱 Levels Authoring', () => {
         const dlg = window.MapShine?.levelsAuthoring;
         if (!dlg) {
@@ -4209,8 +4232,26 @@ export class TweakpaneManager {
         // and pushing UI defaults can clobber authoritative runtime values.
         if (def?.readonly === true) continue;
         if (def?.hidden === true && paramId !== 'enabled') continue;
+        // stormIntensity is owned by Map Shine Control (landscapeLightning.lightning).
+        if (effectId === 'weather-lightning' && paramId === 'stormIntensity') continue;
 
         initialCallback(effectId, paramId, value);
+      }
+    }
+
+    if (effectId === 'weather-lightning') {
+      try {
+        const cp = window.MapShine?.controlPanel?.controlState;
+        if (cp) {
+          const v = readLightningIntensityFromControlState(cp);
+          if (effectData?.params) effectData.params.stormIntensity = v;
+          try {
+            effectData?.bindings?.stormIntensity?.refresh?.();
+          } catch (_) {}
+          syncWeatherLightningEffectFromControlState(cp);
+        }
+      } catch (e) {
+        log.warn('weather-lightning hydrate from control panel failed:', e);
       }
     }
 
@@ -8235,6 +8276,11 @@ export class TweakpaneManager {
     if (this.tokenMovementDialog) {
       this.tokenMovementDialog.dispose();
       this.tokenMovementDialog = null;
+    }
+
+    if (this.cameraPathDialog) {
+      this.cameraPathDialog.destroy();
+      this.cameraPathDialog = null;
     }
 
     // Destroy any GradientEditor instances before wiping effectFolders.

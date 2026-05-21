@@ -49,6 +49,8 @@ export class TimeManager {
     this.scale = 1.0;
 
     this._userScale = 1.0;
+    /** @type {number} Temporary multiplier for camera-path playback (does not touch user/Tweakpane scale). */
+    this._playbackScale = 1.0;
     this._pauseFactor = 1.0;
     this._pauseTarget = 1.0;
     this._pauseFrom = 1.0;
@@ -115,7 +117,7 @@ export class TimeManager {
       this._pauseFactor = this._pauseTarget;
     }
 
-    this.scale = this._userScale * this._pauseFactor;
+    this.scale = this._userScale * this._pauseFactor * this._playbackScale;
     this.delta = realDelta * this.scale;
     this.elapsed += this.delta;
     this.frameCount++;
@@ -209,7 +211,7 @@ export class TimeManager {
       this._pauseT = 1.0;
       this._pauseDuration = 0.0;
       this._pauseFactor = target;
-      this.scale = this._userScale * this._pauseFactor;
+      this.scale = this._userScale * this._pauseFactor * this._playbackScale;
       this.delta = 0.0;
       this.paused = this.scale <= 0.000001;
       if (!wantPaused) {
@@ -228,6 +230,31 @@ export class TimeManager {
   }
 
   /**
+   * @returns {number} User-set time scale (excludes pause ramp and playback multiplier).
+   */
+  getUserScale() {
+    return this._userScale;
+  }
+
+  /**
+   * Temporary slow-motion multiplier for camera-path playback only.
+   * Does not modify the user/Tweakpane time scale.
+   *
+   * @param {number} scale
+   */
+  setPlaybackScale(scale) {
+    const n = Number(scale);
+    this._playbackScale = Number.isFinite(n) ? Math.max(0, n) : 1;
+    this.scale = this._userScale * this._pauseFactor * this._playbackScale;
+  }
+
+  /** Reset camera-path playback multiplier to normal speed. */
+  clearPlaybackScale() {
+    this._playbackScale = 1;
+    this.scale = this._userScale * this._pauseFactor * this._playbackScale;
+  }
+
+  /**
    * Set time scale
    * @param {number} scale - Time scale multiplier (1.0 = normal, 0.5 = half speed, etc.)
    */
@@ -237,6 +264,7 @@ export class TimeManager {
       scale = 0;
     }
     this._userScale = scale;
+    this.scale = this._userScale * this._pauseFactor * this._playbackScale;
     log.info(`Time scale set to ${scale.toFixed(2)}x`);
   }
 
@@ -255,6 +283,7 @@ export class TimeManager {
     this._pauseFrom = 1.0;
     this._pauseT = 1.0;
     this._pauseDuration = 0.0;
+    this._playbackScale = 1;
     this.paused = false;
     log.info('Time reset');
   }

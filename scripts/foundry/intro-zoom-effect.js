@@ -590,48 +590,29 @@ export class IntroZoomEffect {
         throw new Error('Invalid camera zoom arguments');
       }
 
-      // Arm the render loop into cinematic mode for the zoom duration so that
-      // every rAF fires a full Three.js render with no adaptive throttling.
       try {
         window.MapShine?.renderLoop?.startCinematicMode?.(durationMs + 1000);
       } catch (_) {}
 
-      const startX     = asNumber(canvas?.stage?.pivot?.x, x);
-      const startY     = asNumber(canvas?.stage?.pivot?.y, y);
-      const startScale = asNumber(canvas?.stage?.scale?.x, scale);
-      const startMs    = performance.now();
+      const animator = window.MapShine?.cameraPathService?.animator;
+      if (animator && typeof animator.animateTo === 'function') {
+        const getIsCancelled = () => !this._active;
+        await animator.animateTo({
+          x,
+          y,
+          scale,
+          durationMs,
+          easing: 'easeInOutCosine',
+          getIsCancelled,
+        });
+        return;
+      }
 
-      await new Promise((resolve) => {
-        const tick = () => {
-          // Abort cleanly if sequence was cancelled mid-animation.
-          if (!this._active) { resolve(); return; }
-
-          const nowMs  = performance.now();
-          const rawT   = (nowMs - startMs) / durationMs;
-          const t      = Math.min(1, rawT);
-          const te     = this._easeInOutCosine(t);
-
-          const cx = startX + (x - startX) * te;
-          const cy = startY + (y - startY) * te;
-          const cs = startScale + (scale - startScale) * te;
-
-          try { canvas.pan({ x: cx, y: cy, scale: cs }); } catch (_) {}
-
-          if (t < 1) {
-            requestAnimationFrame(tick);
-          } else {
-            try { canvas.pan({ x, y, scale }); } catch (_) {}
-            resolve();
-          }
-        };
-
-        requestAnimationFrame(tick);
-      });
-
+      // Fallback when path service is not wired yet.
+      try { canvas.pan({ x, y, scale }); } catch (_) {}
     } catch (err) {
       log.warn('IntroZoom: camera zoom animation failed', err);
     } finally {
-      // Ensure cinematic mode is released even if animation is cut short.
       try { window.MapShine?.renderLoop?.stopCinematicMode?.(); } catch (_) {}
     }
   }

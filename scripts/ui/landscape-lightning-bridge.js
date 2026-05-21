@@ -6,6 +6,9 @@
 /** @type {ReadonlyArray<string>} */
 export const LANDSCAPE_LIGHTNING_PARAM_IDS = Object.freeze(['lightning']);
 
+/** FloorCompositor property — matches `_makeV2Callback` in canvas-replacement.js */
+const WEATHER_LIGHTNING_FC_KEY = '_weatherLightningEffect';
+
 /**
  * @param {*} v
  * @param {number} [fb]
@@ -23,6 +26,7 @@ export function resolveWeatherLightningEffect() {
   try {
     const ms = window.MapShine;
     const fc = ms?.effectComposer?._floorCompositorV2
+      ?? ms?.floorCompositorV2
       ?? ms?.sceneComposer?.effectComposer?._floorCompositorV2
       ?? null;
     return fc?._weatherLightningEffect ?? null;
@@ -65,13 +69,61 @@ export function writeLightningIntensityToControlState(controlState, value) {
 }
 
 /**
+ * Queue storm intensity until FloorCompositorV2 exists (same pattern as `_propagateToV2`).
+ * @param {number} value 0..1
+ */
+function queuePendingStormIntensity(value) {
+  const v = clampScalar01(value, 0);
+  try {
+    const ms = window.MapShine;
+    if (!ms) return;
+    if (!ms.__pendingV2EffectParams) ms.__pendingV2EffectParams = {};
+    if (!ms.__pendingV2EffectParams[WEATHER_LIGHTNING_FC_KEY]) {
+      ms.__pendingV2EffectParams[WEATHER_LIGHTNING_FC_KEY] = {};
+    }
+    ms.__pendingV2EffectParams[WEATHER_LIGHTNING_FC_KEY].stormIntensity = v;
+  } catch (_) {}
+}
+
+function clearPendingStormIntensity() {
+  try {
+    const pend = window.MapShine?.__pendingV2EffectParams?.[WEATHER_LIGHTNING_FC_KEY];
+    if (pend && typeof pend === 'object') delete pend.stormIntensity;
+  } catch (_) {}
+}
+
+/**
  * Push live lightning intensity into the compositor (maps to effect stormIntensity).
  * @param {number} value 0..1
  */
 export function applyLightningIntensityToEffect(value) {
+  const v = clampScalar01(value, 0);
+  queuePendingStormIntensity(v);
   const effect = resolveWeatherLightningEffect();
   if (!effect?.applyParamChange) return;
-  effect.applyParamChange('stormIntensity', clampScalar01(value, 0));
+  effect.applyParamChange('stormIntensity', v);
+  clearPendingStormIntensity();
+}
+
+/**
+ * Apply saved control-panel lightning after FloorCompositorV2 is created.
+ */
+export function flushLandscapeLightningWhenCompositorReady() {
+  const effect = resolveWeatherLightningEffect();
+  if (!effect?.applyParamChange) return;
+
+  // Map Shine Control is authoritative for live storm intensity.
+  const cp = window.MapShine?.controlPanel?.controlState;
+  if (cp) {
+    syncWeatherLightningEffectFromControlState(cp);
+    return;
+  }
+
+  const pend = window.MapShine?.__pendingV2EffectParams?.[WEATHER_LIGHTNING_FC_KEY];
+  const pending = Number(pend?.stormIntensity);
+  if (Number.isFinite(pending)) {
+    applyLightningIntensityToEffect(pending);
+  }
 }
 
 /**

@@ -85,12 +85,12 @@ export class LightningStrikeShadowSnapshot {
     const building = fc._buildingShadowEffect?.shadowFactorTexture ?? null;
     const skyReach = fc._skyReachShadowEffect?.shadowFactorTexture ?? null;
     const painted = fc._paintedShadowEffect?.shadowFactorTexture ?? null;
-    const vegetation = fc._vegetationBillboardShadowTexture ?? null;
 
     this._building = this._copyInto(renderer, building, this._building, 'LandscapeLightningStrikeBuilding');
     this._skyReach = this._copyInto(renderer, skyReach, this._skyReach, 'LandscapeLightningStrikeSkyReach');
     this._painted = this._copyInto(renderer, painted, this._painted, 'LandscapeLightningStrikePainted');
-    this._vegetation = this._copyInto(renderer, vegetation, this._vegetation, 'LandscapeLightningStrikeVeg');
+    // Vegetation billboards are screen-space; they stay live during flash fade (see WeatherLightningEffectV2).
+    this._vegetation = null;
     this._azimuthDeg = Number.isFinite(Number(azimuthDeg)) ? Number(azimuthDeg) : null;
   }
 

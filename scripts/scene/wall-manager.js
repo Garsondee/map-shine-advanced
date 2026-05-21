@@ -52,6 +52,9 @@ export class WallManager {
     
     // Track selected walls
     this.selected = new Set();
+
+    /** When true, Three.js door control icons are forced hidden (e.g. camera path). */
+    this._doorControlsSuppressed = false;
     
     // Z-index for walls - will be updated in initialize() once groundZ is available
     this.wallGroup.position.z = 3.0; 
@@ -627,6 +630,30 @@ export class WallManager {
   }
 
   /**
+   * Suppress Three.js door control icons without tearing them down.
+   * Used by cinematic presentation modes that hide gameplay UI.
+   *
+   * @param {boolean} suppressed
+   */
+  setDoorControlsSuppressed(suppressed) {
+    this._doorControlsSuppressed = suppressed === true;
+    this.setVisibility(this._shouldShowWallLines());
+    this._syncFoundryDoorControlSuppression();
+  }
+
+  /** @returns {boolean} */
+  areDoorControlsSuppressed() {
+    return this._doorControlsSuppressed === true;
+  }
+
+  /** @private */
+  _syncFoundryDoorControlSuppression() {
+    try {
+      window.MapShine?.controlsIntegration?.refreshDoorControlVisibility?.();
+    } catch (_) {}
+  }
+
+  /**
    * Set explicit visibility for wall lines
    * @param {boolean} visible 
    */
@@ -664,7 +691,10 @@ export class WallManager {
         if (!type) continue;
 
         if (type === 'doorControl') {
-          child.visible = doorVisible;
+          const showDoor = !this._doorControlsSuppressed && doorVisible;
+          child.visible = showDoor;
+          const icon = child.userData?.icon;
+          if (icon) icon.visible = showDoor;
           continue;
         }
 

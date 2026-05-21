@@ -11,24 +11,23 @@ import { stateApplier } from './state-applier.js';
 import { weatherController as coreWeatherController } from '../core/WeatherController.js';
 import {
   applyDirectedCustomPresetToWeather,
-  applyWeatherManualParam,
   resolveWeatherController,
   hydrateControlPanelLiveOverridesFromController,
   LIVE_WEATHER_OVERRIDE_PARAM_IDS
 } from './weather-param-bridge.js';
+import { LIVE_WEATHER_PANEL_SPECS } from './environment-override-specs.js';
+import { environmentControlApi } from './environment-control-api.js';
 import { debugLoadingProfiler } from '../core/debug-loading-profiler.js';
 import { getFoundryTimePhaseHours } from '../core/foundry-time-phases.js';
 import { extendMsaLocalFlagWriteGuard, refreshMsaSameSceneRedrawPredict } from '../utils/msa-local-flag-guard.js';
 import { cloneAndSanitizeControlState, sanitizeControlStateInPlace } from '../settings/control-state-sanitize.js';
 import {
-  applyLightningIntensityToEffect,
   readLightningIntensityFromControlState,
   syncWeatherLightningEffectFromControlState,
   triggerLandscapeLightningAction,
   writeLightningIntensityToControlState,
 } from './landscape-lightning-bridge.js';
 import {
-  applyManualFogDensityToEffect,
   readManualFogDensityFromControlState,
   syncAtmosphericFogEffectFromControlState,
   syncControlStateFromAtmosphericFogEffect,
@@ -978,7 +977,11 @@ export class ControlPanelManager {
 
     const v = Math.max(0, Math.min(1, Number(value) || 0));
     writeManualFogDensityToControlState(this.controlState, v);
-    applyManualFogDensityToEffect(v);
+    void environmentControlApi.applyField('manualFogDensity', v, {
+      persist: false,
+      syncUi: false,
+      syncMainTweakpane: false,
+    });
     this._mirrorManualFogDomPair(v);
 
     if (opts.save) {
@@ -1011,7 +1014,11 @@ export class ControlPanelManager {
 
     const v = Math.max(0, Math.min(1, Number(value) || 0));
     writeLightningIntensityToControlState(this.controlState, v);
-    applyLightningIntensityToEffect(v);
+    void environmentControlApi.applyField('lightning', v, {
+      persist: false,
+      syncUi: false,
+      syncMainTweakpane: false,
+    });
     this._mirrorLiveWeatherDomPair('lightning', v);
 
     if (opts.save) {
@@ -1023,6 +1030,21 @@ export class ControlPanelManager {
   syncLiveLightningDomFromControlState() {
     const v = readLightningIntensityFromControlState(this.controlState);
     this._mirrorLiveWeatherDomPair('lightning', v);
+  }
+
+  /**
+   * Push landscape lightning + manual fog from control state into runtime effects.
+   * @private
+   */
+  _syncLandscapeLightningAndFogFromControlState() {
+    try {
+      syncWeatherLightningEffectFromControlState(this.controlState);
+      this.syncLiveLightningDomFromControlState();
+    } catch (_) {}
+    try {
+      syncAtmosphericFogEffectFromControlState(this.controlState);
+      this.syncManualFogDomFromControlState();
+    } catch (_) {}
   }
 
   /**
@@ -1061,13 +1083,14 @@ export class ControlPanelManager {
     const value = this._coerceLiveWeatherScalar(paramId, rawValue, preset[paramId]);
     preset[paramId] = value;
 
-    const wc = resolveWeatherController();
     this._applyingRapidOverrides = true;
     try {
       this._forceDirectedCustomWeatherMode();
-      if (wc) {
-        applyWeatherManualParam(wc, paramId, value, { syncMainTweakpane: true });
-      }
+      void environmentControlApi.applyField(paramId, value, {
+        persist: false,
+        syncUi: false,
+        syncMainTweakpane: true,
+      });
       this._lastWeatherControlFingerprint = this._weatherControlFingerprint();
       this._updateWeatherControls();
     } finally {
@@ -1083,7 +1106,7 @@ export class ControlPanelManager {
     this._refreshWindPaneBindings();
 
     this._mirrorLiveWeatherDomPair(paramId, value);
-    // tearDown skip is armed from `applyWeatherManualParam` (rain/cloud/wind scalars).
+    // tearDown skip is armed from environment API apply (rain/cloud/wind scalars).
     if (opts.save) {
       this._skipNextControlStateSceneFlagPersist = true;
       this.debouncedSave();
@@ -1133,15 +1156,15 @@ export class ControlPanelManager {
     /** @type {Record<string, { range: HTMLInputElement, number: HTMLInputElement }>} */
     const rows = {};
 
-    const specs = [
-      { id: 'manualFogDensity', label: 'Fog', min: 0, max: 1, step: 0.01, manualFog: true },
-      { id: 'precipitation', label: 'Rain', min: 0, max: 1, step: 0.01 },
-      { id: 'cloudCover', label: 'Clouds', min: 0, max: 1, step: 0.01 },
-      { id: 'freezeLevel', label: 'Temp (Freeze)', min: 0, max: 1, step: 0.01 },
-      { id: 'lightning', label: 'Lightning', min: 0, max: 1, step: 0.01, manualLightning: true },
-      { id: 'windSpeed', label: 'Wind', min: 0, max: 1, step: 0.01 },
-      { id: 'windDirection', label: 'Wind Dir', min: 0, max: 359, step: 1 }
-    ];
+    const specs = LIVE_WEATHER_PANEL_SPECS.map((spec) => ({
+      id: spec.id,
+      label: spec.label,
+      min: spec.min,
+      max: spec.max,
+      step: spec.step,
+      manualFog: spec.backend === 'fog',
+      manualLightning: spec.backend === 'lightning',
+    }));
 
     for (const spec of specs) {
       const rowEl = document.createElement('div');
@@ -2187,10 +2210,9 @@ export class ControlPanelManager {
     try {
       hydrateControlPanelLiveOverridesFromController(resolveWeatherController());
       this.syncLiveWeatherOverrideDomFromDirectedPreset();
-      this.syncManualFogDomFromControlState();
     } catch (_) {}
 
-    syncAtmosphericFogEffectFromControlState(this.controlState);
+    this._syncLandscapeLightningAndFogFromControlState();
     void this._applyWindState();
 
     this._registerFoundryTimeHook();
@@ -4008,6 +4030,7 @@ export class ControlPanelManager {
 
       if (this._suppressInitialWeatherApply) {
         this._suppressInitialWeatherApply = false;
+        this._syncLandscapeLightningAndFogFromControlState();
         return;
       }
 
@@ -4036,14 +4059,7 @@ export class ControlPanelManager {
         }
       }
 
-      try {
-        syncWeatherLightningEffectFromControlState(this.controlState);
-        this.syncLiveLightningDomFromControlState();
-      } catch (_) {}
-      try {
-        syncAtmosphericFogEffectFromControlState(this.controlState);
-        this.syncManualFogDomFromControlState();
-      } catch (_) {}
+      this._syncLandscapeLightningAndFogFromControlState();
 
       log.debug('Applied control state via StateApplier:', this.controlState);
     } catch (error) {
@@ -4427,6 +4443,7 @@ Current Weather:
     try {
       hydrateControlPanelLiveOverridesFromController(resolveWeatherController());
     } catch (_) {}
+    this._syncLandscapeLightningAndFogFromControlState();
 
     // Ensure status panel is up to date immediately.
     this._updateStatusPanel();

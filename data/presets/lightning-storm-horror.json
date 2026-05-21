@@ -1,8 +1,8 @@
 {
   "msaVersion": "scene-settings-v1",
-  "id": "old-fashioned",
-  "name": "Old Fashioned",
-  "description": "Moody overcast atmosphere with sepia tone, lens effects, and flashlight exploration",
+  "id": "lightning-storm-horror",
+  "name": "Lightning Storm Horror",
+  "description": "Oppressive lightning storm with heavy rain, near-black lighting, sepia dread, and landscape lightning flashes — tuned for horror atmosphere.",
   "enabled": true,
   "settings": {
     "mapMaker": {

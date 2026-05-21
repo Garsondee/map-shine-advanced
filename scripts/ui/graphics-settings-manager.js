@@ -82,6 +82,9 @@ const V2_EFFECT_KEY_BY_ID = Object.freeze({
  * @property {number} renderIdleFps
  * @property {number} renderActiveFps
  * @property {number} renderContinuousFps
+ * @property {number} renderPresentationFps
+ * @property {boolean} renderPresentationPacingEnabled
+ * @property {boolean} renderStrictSyncEnabled
  * @property {boolean} tokenDepthInteraction - P4-02: tokens participate in depth buffer when true
  * @property {number} particleSpawnTier - 0..6; 3 = Medium (100% spawn)
  * @property {Object<string, {enabled?: boolean}>} effectOverrides
@@ -108,10 +111,10 @@ export class GraphicsSettingsManager {
       renderIdleFps: 15,
       renderActiveFps: 60,
       renderContinuousFps: 30,
-      // Strict render sync: PIXI and Three.js compositor are phase-locked 1:1.
-      // Guarantees correctness (no dropped compositor frames, no stale masks)
-      // at the cost of some GPU work. Default ON — this is the fool-proof path.
-      renderStrictSyncEnabled: true,
+      renderPresentationFps: 30,
+      renderPresentationPacingEnabled: true,
+      // Strict sync: 1:1 PIXI↔compositor lockstep (debug / mask correctness). Off by default for smooth pacing.
+      renderStrictSyncEnabled: false,
       // P4-02: When true, token sprites use depthTest/depthWrite so elevated foreground
       // tiles correctly occlude them. Default false preserves legacy always-on-top behaviour.
       tokenDepthInteraction: false,
@@ -327,17 +330,33 @@ export class GraphicsSettingsManager {
   }
 
   /**
+   * @returns {number}
+   */
+  getRenderPresentationFps() {
+    const p = this.state?.renderPresentationFps;
+    if (Number.isFinite(p)) return this._coerceFps(p, 30, 5, 60);
+    return this.getRenderContinuousFps();
+  }
+
+  /**
+   * @returns {boolean}
+   */
+  getRenderPresentationPacingEnabled() {
+    return this.state?.renderPresentationPacingEnabled !== false;
+  }
+
+  /**
    * @returns {boolean} Whether strict render sync (PIXI↔compositor lockstep) is active.
    */
   getRenderStrictSyncEnabled() {
-    return this.state?.renderStrictSyncEnabled !== false;
+    return this.state?.renderStrictSyncEnabled === true;
   }
 
   /**
    * @param {boolean} enabled
    */
   setRenderStrictSyncEnabled(enabled) {
-    this.state.renderStrictSyncEnabled = enabled !== false;
+    this.state.renderStrictSyncEnabled = enabled === true;
     this.applyRenderPerformanceSettings();
     this.saveState();
   }
@@ -452,8 +471,76 @@ export class GraphicsSettingsManager {
    */
   setRenderContinuousFps(fps) {
     this.state.renderContinuousFps = this._coerceFps(fps, 30, 5, 120);
+    this.state.renderPresentationFps = this.state.renderContinuousFps;
     this.applyRenderPerformanceSettings();
     this.saveState();
+  }
+
+  /**
+   * @param {number} fps
+   */
+  setRenderPresentationFps(fps) {
+    this.state.renderPresentationFps = this._coerceFps(fps, 30, 5, 60);
+    this.state.renderContinuousFps = this.state.renderPresentationFps;
+    this.applyRenderPerformanceSettings();
+    this.saveState();
+  }
+
+  /**
+   * @param {boolean} enabled
+   */
+  setRenderPresentationPacingEnabled(enabled) {
+    this.state.renderPresentationPacingEnabled = enabled !== false;
+    this.applyRenderPerformanceSettings();
+    this.saveState();
+  }
+
+  /**
+   * Smooth 30fps presentation (recommended).
+   */
+  applySmooth30Preset() {
+    this.state.renderPresentationPacingEnabled = true;
+    this.state.renderAdaptiveFpsEnabled = true;
+    this.state.renderStrictSyncEnabled = false;
+    this.state.renderPresentationFps = 30;
+    this.state.renderContinuousFps = 30;
+    this.state.renderActiveFps = 60;
+    this.state.renderIdleFps = 15;
+    this.applyRenderPerformanceSettings();
+    this.saveState();
+    try { this.dialog?.refresh?.(); } catch (_) {}
+  }
+
+  /**
+   * Smooth 60fps presentation.
+   */
+  applySmooth60Preset() {
+    this.state.renderPresentationPacingEnabled = true;
+    this.state.renderAdaptiveFpsEnabled = true;
+    this.state.renderStrictSyncEnabled = false;
+    this.state.renderPresentationFps = 60;
+    this.state.renderContinuousFps = 60;
+    this.state.renderActiveFps = 60;
+    this.state.renderIdleFps = 15;
+    this.applyRenderPerformanceSettings();
+    this.saveState();
+    try { this.dialog?.refresh?.(); } catch (_) {}
+  }
+
+  /**
+   * Strict lockstep (debug / mask correctness).
+   */
+  applyStrictDebugPreset() {
+    this.state.renderPresentationPacingEnabled = false;
+    this.state.renderAdaptiveFpsEnabled = false;
+    this.state.renderStrictSyncEnabled = true;
+    this.state.renderPresentationFps = 60;
+    this.state.renderContinuousFps = 60;
+    this.state.renderActiveFps = 60;
+    this.state.renderIdleFps = 15;
+    this.applyRenderPerformanceSettings();
+    this.saveState();
+    try { this.dialog?.refresh?.(); } catch (_) {}
   }
 
   /**
@@ -467,6 +554,8 @@ export class GraphicsSettingsManager {
       ms.renderIdleFps = this.getRenderIdleFps();
       ms.renderActiveFps = this.getRenderActiveFps();
       ms.renderContinuousFps = this.getRenderContinuousFps();
+      ms.renderPresentationFps = this.getRenderPresentationFps();
+      ms.renderPresentationPacingEnabled = this.getRenderPresentationPacingEnabled();
       ms.renderStrictSyncEnabled = this.getRenderStrictSyncEnabled();
     } catch (e) {
       log.warn('Failed to apply render performance settings', e);
@@ -757,6 +846,14 @@ export class GraphicsSettingsManager {
       if (parsed.renderIdleFps !== undefined) this.state.renderIdleFps = this._coerceFps(parsed.renderIdleFps, 15, 5, 60);
       if (parsed.renderActiveFps !== undefined) this.state.renderActiveFps = this._coerceFps(parsed.renderActiveFps, 60, 5, 120);
       if (parsed.renderContinuousFps !== undefined) this.state.renderContinuousFps = this._coerceFps(parsed.renderContinuousFps, 30, 5, 120);
+      if (parsed.renderPresentationFps !== undefined) {
+        this.state.renderPresentationFps = this._coerceFps(parsed.renderPresentationFps, 30, 5, 60);
+      } else {
+        this.state.renderPresentationFps = this.state.renderContinuousFps;
+      }
+      if (typeof parsed.renderPresentationPacingEnabled === 'boolean') {
+        this.state.renderPresentationPacingEnabled = parsed.renderPresentationPacingEnabled;
+      }
       if (typeof parsed.tokenDepthInteraction === 'boolean') this.state.tokenDepthInteraction = parsed.tokenDepthInteraction;
       if (parsed.particleSpawnTier !== undefined) {
         this.state.particleSpawnTier = this._coerceParticleSpawnTier(parsed.particleSpawnTier);

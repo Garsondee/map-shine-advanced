@@ -45,6 +45,7 @@
  */
 
 import { createLogger } from '../core/log.js';
+import { isCameraNavigationActive } from '../foundry/camera-navigation-state.js';
 import { yieldToMain } from '../core/yield-to-main.js';
 import { OVERLAY_THREE_LAYER } from '../core/render-layers.js';
 import { FloorRenderBus } from './FloorRenderBus.js';
@@ -1950,47 +1951,8 @@ export class FloorCompositor {
   wantsContinuousRender() {
     try {
       let reason = 'none';
-      const hasVisibleOverlay = (effect) => {
-        const overlays = effect?._overlays;
-        if (!(overlays instanceof Map) || overlays.size <= 0) return false;
-        for (const entry of overlays.values()) {
-          const mesh = entry?.mesh;
-          if (mesh && mesh.visible !== false) return true;
-        }
-        return false;
-      };
-      // Animated shader overlay: if any fluid overlays exist, we need continuous
-      // render so uTime advances and the effect animates.
-      const fluid = this._fluidEffect;
-      if (resolveOverlayEffectActive(fluid)) {
-        reason = 'fluid:overlays';
-        if (window.MapShine) window.MapShine.__v2ContinuousRenderReason = reason;
-        return true;
-      }
-      const iridescence = this._iridescenceEffect;
-      if (resolveOverlayEffectActive(iridescence)) {
-        reason = 'iridescence:overlays';
-        if (window.MapShine) window.MapShine.__v2ContinuousRenderReason = reason;
-        return true;
-      }
-      const prism = this._prismEffect;
-      if (resolveOverlayEffectActive(prism)) {
-        reason = 'prism:overlays';
-        if (window.MapShine) window.MapShine.__v2ContinuousRenderReason = reason;
-        return true;
-      }
-      const bush = this._bushEffect;
-      if (resolveOverlayEffectActive(bush)) {
-        reason = 'bush:overlays';
-        if (window.MapShine) window.MapShine.__v2ContinuousRenderReason = reason;
-        return true;
-      }
-      const tree = this._treeEffect;
-      if (resolveOverlayEffectActive(tree)) {
-        reason = 'tree:overlays';
-        if (window.MapShine) window.MapShine.__v2ContinuousRenderReason = reason;
-        return true;
-      }
+      // Shader overlay effects (bush, tree, fluid, iridescence, prism) advance uTime on
+      // presented frames only — presentation pacing owns their steady-state rate.
       const fire = this._fireEffect;
       if (resolveFloorEffectActive(fire)) {
         reason = 'fire:active-floors';
@@ -3207,8 +3169,10 @@ export class FloorCompositor {
     const treeEntries = this._treeEffect?.collectBillboardShadowOverlayEntries?.() ?? [];
     const bushEntries = this._bushEffect?.collectBillboardShadowOverlayEntries?.() ?? [];
     const wl = this._weatherLightningEffect;
-    const wlTarget = wl?.getLightningShadowTarget?.() ?? null;
-    if (wlTarget && wl?.wantsLiveLightningShadowOverride?.() && window.THREE) {
+    const wlTarget = wl?.getVegetationLightningShadowTarget?.()
+      ?? wl?.getLightningShadowTarget?.()
+      ?? null;
+    if (wlTarget && wl?.wantsLiveVegetationLightningShadowOverride?.() && window.THREE) {
       const sun2d = resolveEffectShadowSun2D({
         azimuthDeg: wlTarget.azimuthDeg,
         elevationDeg: wlTarget.elevationDeg,
@@ -3345,7 +3309,7 @@ export class FloorCompositor {
       building: textures.building,
       skyReach: textures.skyReach,
       painted: textures.painted,
-      vegetation: textures.vegetation,
+      vegetation: null,
     });
   }
 
@@ -3676,29 +3640,42 @@ export class FloorCompositor {
       timeInfo = { ...timeInfo, delta: 0 };
     }
     if (!populateSlimRender && timeInfo) {
-      // Wind must advance before update() so accumulation is 1× per frame.
-      this._profileEffectCall('cloud', 'update', () => this._cloudEffect.advanceWind(timeInfo.delta ?? 0.016), 'CloudEffectV2 advanceWind');
-      this._profileEffectCall('specular', 'update', () => this._specularEffect.update(timeInfo), 'SpecularEffectV2 update');
-      this._profileEffectCall('fluid', 'update', () => this._fluidEffect.update(timeInfo), 'FluidEffectV2 update');
-      this._profileEffectCall('iridescence', 'update', () => this._iridescenceEffect.update(timeInfo), 'IridescenceEffectV2 update');
-      this._profileEffectCall('prism', 'update', () => this._prismEffect.update(timeInfo), 'PrismEffectV2 update');
-      this._profileEffectCall('bush', 'update', () => this._bushEffect.update(timeInfo), 'BushEffectV2 update');
-      this._profileEffectCall('tree', 'update', () => this._treeEffect.update(timeInfo), 'TreeEffectV2 update');
-      this._profileEffectCall('fire', 'update', () => this._fireEffect.update(timeInfo), 'FireEffectV2 update');
-      this._profileEffectCall('ashDisturbance', 'update', () => this._ashDisturbanceEffect?.update?.(timeInfo), 'AshDisturbanceEffectV2 update');
-      this._profileEffectCall('dust', 'update', () => this._dustEffect.update(timeInfo), 'DustEffectV2 update');
-      this._profileEffectCall('waterSplashes', 'update', () => this._waterSplashesEffect?.update?.(timeInfo), 'WaterSplashesEffectV2 update');
-      this._profileEffectCall('smellyFlies', 'update', () => this._smellyFliesEffect?.update?.(timeInfo), 'SmellyFliesEffect update');
-      this._profileEffectCall('lightning', 'update', () => {
-        this._lightningEffect?.ensureMeshesAttached?.(this._renderBus?._scene ?? null);
-        this._lightningEffect?.update?.(timeInfo);
-      }, 'LightningEffectV2 update');
-      this._profileEffectCall('candleFlames', 'update', () => {
-        this._candleFlamesEffect?.ensureMeshesAttached?.(this._renderBus?._scene ?? null);
-        this._candleFlamesEffect?.update?.(timeInfo);
-      }, 'CandleFlamesEffectV2 update');
-      this._profileEffectCall('playerLight', 'update', () => this._playerLightEffect?.update?.(timeInfo), 'PlayerLightEffectV2 update');
-      this._profileEffectCall('cloud', 'update', () => this._cloudEffect.update(timeInfo), 'CloudEffectV2 update');
+      const navigationLite = isCameraNavigationActive();
+      try {
+        if (window.MapShine) {
+          window.MapShine.__v2NavigationLiteUpdates = navigationLite;
+        }
+      } catch (_) {}
+
+      if (!navigationLite) {
+        // Wind must advance before update() so accumulation is 1× per frame.
+        this._profileEffectCall('cloud', 'update', () => this._cloudEffect.advanceWind(timeInfo.delta ?? 0.016), 'CloudEffectV2 advanceWind');
+        this._profileEffectCall('specular', 'update', () => this._specularEffect.update(timeInfo), 'SpecularEffectV2 update');
+        this._profileEffectCall('fluid', 'update', () => this._fluidEffect.update(timeInfo), 'FluidEffectV2 update');
+        this._profileEffectCall('iridescence', 'update', () => this._iridescenceEffect.update(timeInfo), 'IridescenceEffectV2 update');
+        this._profileEffectCall('prism', 'update', () => this._prismEffect.update(timeInfo), 'PrismEffectV2 update');
+        this._profileEffectCall('bush', 'update', () => this._bushEffect.update(timeInfo), 'BushEffectV2 update');
+        this._profileEffectCall('tree', 'update', () => this._treeEffect.update(timeInfo), 'TreeEffectV2 update');
+        this._profileEffectCall('fire', 'update', () => this._fireEffect.update(timeInfo), 'FireEffectV2 update');
+        this._profileEffectCall('ashDisturbance', 'update', () => this._ashDisturbanceEffect?.update?.(timeInfo), 'AshDisturbanceEffectV2 update');
+        this._profileEffectCall('dust', 'update', () => this._dustEffect.update(timeInfo), 'DustEffectV2 update');
+        this._profileEffectCall('waterSplashes', 'update', () => this._waterSplashesEffect?.update?.(timeInfo), 'WaterSplashesEffectV2 update');
+        this._profileEffectCall('smellyFlies', 'update', () => this._smellyFliesEffect?.update?.(timeInfo), 'SmellyFliesEffect update');
+        this._profileEffectCall('lightning', 'update', () => {
+          this._lightningEffect?.ensureMeshesAttached?.(this._renderBus?._scene ?? null);
+          this._lightningEffect?.update?.(timeInfo);
+        }, 'LightningEffectV2 update');
+        this._profileEffectCall('candleFlames', 'update', () => {
+          this._candleFlamesEffect?.ensureMeshesAttached?.(this._renderBus?._scene ?? null);
+          this._candleFlamesEffect?.update?.(timeInfo);
+        }, 'CandleFlamesEffectV2 update');
+        this._profileEffectCall('playerLight', 'update', () => this._playerLightEffect?.update?.(timeInfo), 'PlayerLightEffectV2 update');
+        this._profileEffectCall('cloud', 'update', () => this._cloudEffect.update(timeInfo), 'CloudEffectV2 update');
+      } else {
+        // Decorative overlays: uTime advances in shaders on present frames; skip CPU sim while panning.
+        this._profileEffectCall('bush', 'update', () => this._bushEffect.updateNavigationLite?.(timeInfo), 'BushEffectV2 navigationLite');
+      }
+
       this._profileEffectCall('lighting', 'update', () => this._lightingEffect.update(timeInfo), 'LightingEffectV2 update');
       try {
         const cs = Number(this._lightingEffect?.params?.combinedShadowEffectStrength);
@@ -3706,7 +3683,9 @@ export class FloorCompositor {
       } catch (_) {}
       // Weather particles must update BEFORE the bus render so their BatchedRenderer
       // positions are current when the bus scene is drawn this frame.
-      this._profileEffectCall('weatherParticles', 'update', () => this._weatherParticles?.update?.(timeInfo), 'WeatherParticlesV2 update');
+      if (!navigationLite) {
+        this._profileEffectCall('weatherParticles', 'update', () => this._weatherParticles?.update?.(timeInfo), 'WeatherParticlesV2 update');
+      }
       try {
         this._skyColorEffect?.setColorCorrectionTimelineActive?.(
           this._colorCorrectionEffect?.params?.todTimelineEnabled === true
@@ -3795,17 +3774,19 @@ export class FloorCompositor {
       this._profileEffectCall('atmosphericFog', 'update', () => this._atmosphericFogEffect.update(timeInfo), 'AtmosphericFogEffectV2 update');
       this._profileEffectCall('fogOfWar', 'update', () => this._fogEffect.update(timeInfo), 'FogOfWarEffectV2 update');
       this._profileEffectCall('bloom', 'update', () => this._bloomEffect.update(timeInfo), 'BloomEffectV2 update');
-      this._profileEffectCall('sharpen', 'update', () => this._sharpenEffect.update(timeInfo), 'SharpenEffectV2 update');
-      // Artistic post-processing effects
-      this._profileEffectCall('dotScreen', 'update', () => this._dotScreenEffect?.update?.(timeInfo), 'DotScreenEffectV2 update');
-      this._profileEffectCall('halftone', 'update', () => this._halftoneEffect?.update?.(timeInfo), 'HalftoneEffectV2 update');
-      this._profileEffectCall('ascii', 'update', () => this._asciiEffect?.update?.(timeInfo), 'AsciiEffectV2 update');
-      this._profileEffectCall('dazzleOverlay', 'update', () => this._dazzleOverlayEffect?.update?.(timeInfo), 'DazzleOverlayEffectV2 update');
-      this._profileEffectCall('visionMode', 'update', () => this._visionModeEffect?.update?.(timeInfo), 'VisionModeEffectV2 update');
-      this._profileEffectCall('invert', 'update', () => this._invertEffect?.update?.(timeInfo), 'InvertEffectV2 update');
-      this._profileEffectCall('sepia', 'update', () => this._sepiaEffect?.update?.(timeInfo), 'SepiaEffectV2 update');
-      this._profileEffectCall('lens', 'update', () => this._lensEffect?.update?.(timeInfo), 'LensEffectV2 update');
-      this._profileEffectCall('distortion', 'update', () => this._distortionEffect?.update?.(timeInfo), 'DistortionManager update');
+      if (!navigationLite) {
+        this._profileEffectCall('sharpen', 'update', () => this._sharpenEffect.update(timeInfo), 'SharpenEffectV2 update');
+        // Artistic post-processing effects
+        this._profileEffectCall('dotScreen', 'update', () => this._dotScreenEffect?.update?.(timeInfo), 'DotScreenEffectV2 update');
+        this._profileEffectCall('halftone', 'update', () => this._halftoneEffect?.update?.(timeInfo), 'HalftoneEffectV2 update');
+        this._profileEffectCall('ascii', 'update', () => this._asciiEffect?.update?.(timeInfo), 'AsciiEffectV2 update');
+        this._profileEffectCall('dazzleOverlay', 'update', () => this._dazzleOverlayEffect?.update?.(timeInfo), 'DazzleOverlayEffectV2 update');
+        this._profileEffectCall('visionMode', 'update', () => this._visionModeEffect?.update?.(timeInfo), 'VisionModeEffectV2 update');
+        this._profileEffectCall('invert', 'update', () => this._invertEffect?.update?.(timeInfo), 'InvertEffectV2 update');
+        this._profileEffectCall('sepia', 'update', () => this._sepiaEffect?.update?.(timeInfo), 'SepiaEffectV2 update');
+        this._profileEffectCall('lens', 'update', () => this._lensEffect?.update?.(timeInfo), 'LensEffectV2 update');
+        this._profileEffectCall('distortion', 'update', () => this._distortionEffect?.update?.(timeInfo), 'DistortionManager update');
+      }
 
     }
 
@@ -3813,7 +3794,7 @@ export class FloorCompositor {
     // the populate-slim gate above. These effects push Tweakpane-driven uniforms
     // and mask bindings; skipping the outer block used to freeze sliders until
     // unrelated params (sun hash) changed.
-    if (timeInfo) {
+    if (timeInfo && !isCameraNavigationActive()) {
       this._profileEffectCall('weatherLightning', 'update', () => this._weatherLightningEffect?.update?.(timeInfo), 'WeatherLightningEffectV2 update');
       this._profileEffectCall('overheadShadows', 'update', () => this._overheadShadowEffect?.update?.(timeInfo), 'OverheadShadowsEffectV2 update');
       this._profileEffectCall('buildingShadows', 'update', () => this._buildingShadowEffect?.update?.(timeInfo), 'BuildingShadowsEffectV2 update');
@@ -3827,10 +3808,19 @@ export class FloorCompositor {
       return;
     }
 
+    const navigationRenderLite = isCameraNavigationActive();
+    try {
+      if (window.MapShine) {
+        window.MapShine.__v2NavigationRenderLite = navigationRenderLite;
+      }
+    } catch (_) {}
+
     // ── Bind per-frame textures and camera to effects ────────────────────────
-    this._profileEffectCall('specular', 'render', () => this._specularEffect.render(this.renderer, this.camera), 'SpecularEffectV2 render');
-    this._profileEffectCall('iridescence', 'render', () => this._iridescenceEffect.render(this.renderer, this.camera), 'IridescenceEffectV2 render');
-    this._profileEffectCall('prism', 'render', () => this._prismEffect.render(this.renderer, this.camera), 'PrismEffectV2 render');
+    if (!navigationRenderLite) {
+      this._profileEffectCall('specular', 'render', () => this._specularEffect.render(this.renderer, this.camera), 'SpecularEffectV2 render');
+      this._profileEffectCall('iridescence', 'render', () => this._iridescenceEffect.render(this.renderer, this.camera), 'IridescenceEffectV2 render');
+      this._profileEffectCall('prism', 'render', () => this._prismEffect.render(this.renderer, this.camera), 'PrismEffectV2 render');
+    }
 
     // ShadowDriverState owns the single sun / weather / mask snapshot for all
     // shadow producers. It is published after the dynamic light override masks

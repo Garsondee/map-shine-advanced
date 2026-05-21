@@ -7,13 +7,14 @@
  * 
  * Input flow:
  * 1. User right-drags or scrolls on Three canvas
- * 2. This bridge updates canvas.stage.pivot / scale
- * 3. CameraFollower reads stage state and updates Three camera
+ * 2. This bridge updates canvas.stage.pivot / scale (via canvas.pan)
+ * 3. EffectComposer camera pipeline advances smoothing / CameraFollower syncs Three
  * 
  * @module foundry/pixi-input-bridge
  */
 
 import { createLogger } from '../core/log.js';
+import { flushHudAlign, scheduleHudAlign } from './hud-align-scheduler.js';
 
 const log = createLogger('PixiInputBridge');
 
@@ -73,12 +74,6 @@ export class PixiInputBridge {
     /** @type {'pan'|'zoom'|null} */
     this._smoothTargetSource = null;
 
-    /** @type {number|null} */
-    this._smoothRafId = null;
-
-    /** @type {number} */
-    this._smoothLastAt = 0;
-
     /** @type {number} */
     this._smoothEpsilonWorld = 0.05;
 
@@ -87,6 +82,9 @@ export class PixiInputBridge {
 
     /** @type {boolean} */
     this._applyingBridgePan = false;
+
+    /** @type {number} */
+    this._wheelZoomUntilMs = 0;
     
     // Bind handlers
     this._onMouseDown = this._onMouseDown.bind(this);
@@ -94,7 +92,10 @@ export class PixiInputBridge {
     this._onMouseUp = this._onMouseUp.bind(this);
     this._onWheel = this._onWheel.bind(this);
     this._onContextMenu = this._onContextMenu.bind(this);
-    this._tickSmoothing = this._tickSmoothing.bind(this);
+
+    /** EffectComposer camera pipeline (before CameraFollower / FrameState). */
+    this.updatePhase = 'camera';
+    this.cameraPipelineOrder = 0;
 
     /** @type {{name: string, id: number}[]} */
     this._hookIds = [];
@@ -145,7 +146,7 @@ export class PixiInputBridge {
       // External pan events (e.g. pull-ping/animatePan/cinematic pan) should win.
       // If we keep a stale smoothing target alive, it can snap the camera back.
       this._smoothTargetView = null;
-      this._stopSmoothingLoop();
+      this._smoothTargetSource = null;
     });
     this._hookIds.push({ name: 'canvasPan', id: panHookId });
   }
@@ -231,7 +232,7 @@ export class PixiInputBridge {
     this._motionSmoothingProvider = (typeof provider === 'function') ? provider : null;
     if (!this._isSmoothingEnabled()) {
       this._smoothTargetView = null;
-      this._stopSmoothingLoop();
+      this._smoothTargetSource = null;
     }
   }
 
@@ -370,11 +371,63 @@ export class PixiInputBridge {
   }
 
   /**
+   * True while the user is dragging or smoothing a pan gesture.
+   * @returns {boolean}
+   */
+  isCameraPanActive() {
+    const now = performance.now();
+    return this._isDragging
+      || (this._smoothTargetView != null && this._smoothTargetSource !== 'zoom')
+      || now < (this._wheelZoomUntilMs || 0);
+  }
+
+  /**
+   * During continuous pan, avoid canvas.pan() — it runs hud.align() (forced reflow)
+   * on every pointermove. Update the stage directly and coalesce HUD alignment.
+   * @private
+   * @returns {boolean}
+   */
+  _shouldUseFastPanPath() {
+    if (this._isDragging) return true;
+    if (this._smoothTargetView != null && this._smoothTargetSource === 'pan') return true;
+    return performance.now() < (this._wheelZoomUntilMs || 0);
+  }
+
+  /**
+   * @private
+   * @param {{x:number, y:number, scale:number}} view
+   */
+  _applyStageViewDirect(view) {
+    if (!view || !canvas?.stage?.pivot || !canvas?.stage?.scale || !canvas?.stage?.position) return;
+    canvas.stage.pivot.x = view.x;
+    canvas.stage.pivot.y = view.y;
+    canvas.stage.scale.set(view.scale, view.scale);
+    const vp = this._getViewportSize();
+    canvas.stage.position.x = vp.width * 0.5;
+    canvas.stage.position.y = vp.height * 0.5;
+
+    this._applyingBridgePan = true;
+    try {
+      Hooks.callAll('canvasPan', canvas, { x: view.x, y: view.y, scale: view.scale });
+    } catch (_) {
+    } finally {
+      this._applyingBridgePan = false;
+    }
+    scheduleHudAlign();
+  }
+
+  /**
    * @private
    * @param {{x:number, y:number, scale:number}} view
    */
   _applyView(view) {
     if (!view || !canvas?.stage?.pivot || !canvas?.stage?.scale || !canvas?.stage?.position) return;
+
+    if (this._shouldUseFastPanPath()) {
+      this._applyStageViewDirect(view);
+      return;
+    }
+
     // Use Foundry's pan pipeline so all dependent systems (masks, rulers,
     // highlights, HUD alignment) stay synchronized with camera movement.
     if (typeof canvas?.pan === 'function') {
@@ -387,41 +440,35 @@ export class PixiInputBridge {
       return;
     }
 
-    // Fallback for non-standard runtimes.
-    canvas.stage.pivot.x = view.x;
-    canvas.stage.pivot.y = view.y;
-    canvas.stage.scale.set(view.scale, view.scale);
-    const vp = this._getViewportSize();
-    canvas.stage.position.x = vp.width * 0.5;
-    canvas.stage.position.y = vp.height * 0.5;
+    this._applyStageViewDirect(view);
   }
 
   /**
+   * Keep the compositor rendering while the camera is moving.
+   * @param {number} [durationMs=150]
    * @private
    */
-  _startSmoothingLoop() {
-    if (this._smoothRafId !== null) return;
-    this._smoothLastAt = 0;
-    this._smoothRafId = requestAnimationFrame(this._tickSmoothing);
+  _bumpRenderLoop(durationMs = 150) {
+    try {
+      window.MapShine?.renderLoop?.requestContinuousRender?.(durationMs);
+    } catch (_) {}
   }
 
   /**
-   * @private
+   * Per-frame smoothing tick (EffectComposer camera pipeline).
+   * @param {object} timeInfo
    */
-  _stopSmoothingLoop() {
-    if (this._smoothRafId === null) return;
-    cancelAnimationFrame(this._smoothRafId);
-    this._smoothRafId = null;
-    this._smoothLastAt = 0;
+  update(timeInfo) {
+    const dt = clamp(Number(timeInfo?.delta) || 0, 0, 0.1);
+    if (dt <= 0) return;
+    this._advanceSmoothing(dt);
   }
 
   /**
+   * @param {number} dt - Seconds since last compositor frame.
    * @private
-   * @param {number} nowMs
    */
-  _tickSmoothing(nowMs) {
-    this._smoothRafId = null;
-
+  _advanceSmoothing(dt) {
     if (!this.enabled || this._isInputBlocked()) {
       this._smoothTargetView = null;
       this._smoothTargetSource = null;
@@ -446,8 +493,7 @@ export class PixiInputBridge {
       return;
     }
 
-    const dt = clamp((nowMs - (this._smoothLastAt || nowMs)) / 1000, 1 / 240, 0.1);
-    this._smoothLastAt = nowMs;
+    this._bumpRenderLoop(200);
 
     const isZoomTarget = this._smoothTargetSource === 'zoom';
     const alphaPan = clamp(1 - Math.exp(-cfg.panHz * dt), 0.04, 1);
@@ -469,10 +515,7 @@ export class PixiInputBridge {
       this._applyView(target);
       this._smoothTargetView = null;
       this._smoothTargetSource = null;
-      return;
     }
-
-    this._startSmoothingLoop();
   }
 
   /**
@@ -488,14 +531,14 @@ export class PixiInputBridge {
     if (!this._isSmoothingEnabled()) {
       this._smoothTargetView = null;
       this._smoothTargetSource = null;
-      this._stopSmoothingLoop();
       this._applyView(constrained);
+      this._bumpRenderLoop(120);
       return;
     }
 
     this._smoothTargetView = constrained;
     this._smoothTargetSource = (source === 'zoom') ? 'zoom' : 'pan';
-    this._startSmoothingLoop();
+    this._bumpRenderLoop(250);
   }
   
   /**
@@ -531,7 +574,7 @@ export class PixiInputBridge {
   _onMouseMove(event) {
     if (this._isInputBlocked()) {
       this._smoothTargetView = null;
-      this._stopSmoothingLoop();
+      this._smoothTargetSource = null;
       if (this._isDragging) this._onMouseUp(event);
       return;
     }
@@ -553,6 +596,7 @@ export class PixiInputBridge {
         this._isDragging = true;
         this._lastMousePos = { x: event.clientX, y: event.clientY };
         this.threeCanvas.style.cursor = 'grabbing';
+        this._bumpRenderLoop(500);
         event.preventDefault();
       } else {
         return;
@@ -584,6 +628,7 @@ export class PixiInputBridge {
     
     this._lastMousePos = { x: event.clientX, y: event.clientY };
     this._notifyUserInput('pan');
+    this._bumpRenderLoop(500);
     event.preventDefault();
   }
   
@@ -604,6 +649,7 @@ export class PixiInputBridge {
       if (this.threeCanvas) {
         this.threeCanvas.style.cursor = 'default';
       }
+      flushHudAlign();
     }
 
     this._pendingRightDrag = false;
@@ -664,6 +710,7 @@ export class PixiInputBridge {
     
     // After zoom, adjust pivot so world point stays under cursor
     // New pivot = worldPoint - (cursor offset from center) / newZoom
+    this._wheelZoomUntilMs = performance.now() + 180;
     this._setViewFromInput({
       x: worldX - (screenPosX - rect.width / 2) / newZoom,
       y: worldY - (screenPosY - rect.height / 2) / newZoom,
@@ -671,6 +718,7 @@ export class PixiInputBridge {
     }, 'zoom');
 
     this._notifyUserInput('zoom');
+    this._bumpRenderLoop(200);
   }
   
   /**
@@ -703,7 +751,6 @@ export class PixiInputBridge {
     this._rightDragStartPos = null;
     this._smoothTargetView = null;
     this._smoothTargetSource = null;
-    this._stopSmoothingLoop();
     if (this.threeCanvas) {
       this.threeCanvas.style.cursor = 'default';
     }

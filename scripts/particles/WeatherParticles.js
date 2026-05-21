@@ -73,6 +73,10 @@ const RAIN_NIGHT_RGB_MUL = 0.24;
 /** Lightning strike flash boost (flash01 is 0..1 envelope). */
 const RAIN_LIGHTNING_ALPHA_BOOST = 6.0;
 const RAIN_LIGHTNING_RGB_BOOST = 4.0;
+/** Ground splash peak-opacity scale — legacy tuning (0.02–0.12) reads too faint on the map. */
+const SPLASH_PEAK_OPACITY_BOOST = 2.75;
+/** Water-surface hit splashes (tile-locked); separate from per-archetype rain splashes. */
+const WATER_HIT_SPLASH_PEAK_OPACITY = 0.55;
 /** Default ColorRange spread scalars (UI: rainBrightnessSpread / rainLengthSpread). */
 const RAIN_BRIGHTNESS_SPREAD_DEF = 1.0;
 const RAIN_LENGTH_SPREAD_DEF = 1.0;
@@ -1708,7 +1712,7 @@ class SnowFloorBehavior {
 // world space after spawn. Kill volumes use that same space; SnowFloorBehavior must
 // not re-apply emitter.matrixWorld for those systems.
 
-// Custom behavior to handle 0 -> 10% -> 0% opacity over life
+// Custom behavior to handle 0 -> peak -> 0 opacity over life (peak from rain tuning × SPLASH_PEAK_OPACITY_BOOST).
 class SplashAlphaBehavior {
   constructor(peakOpacity = 0.1) {
     this.type = 'SplashAlpha';
@@ -2552,7 +2556,7 @@ export class WeatherParticles {
       sys.startSize.b = sizeMax;
     }
     const dbs = this._getDarknessBrightnessScale();
-    const peak = (rainTuning[keys.peak] ?? 0.10) * dbs;
+    const peak = Math.min(1.0, (rainTuning[keys.peak] ?? 0.10) * dbs * SPLASH_PEAK_OPACITY_BOOST);
     if (this._rainImpactSplashAlpha) {
       this._rainImpactSplashAlpha.peakOpacity = peak;
     }
@@ -5056,9 +5060,9 @@ export class WeatherParticles {
       transparent: true,
       depthWrite: false,
       depthTest: false,
-      blending: THREE.AdditiveBlending,
+      blending: THREE.NormalBlending,
       color: 0xffffff,
-      opacity: 0.8
+      opacity: 1.0
     });
 
     this._splashMaterial = splashMaterial;
@@ -8157,7 +8161,7 @@ export class WeatherParticles {
           }
 
           // --- Opacity Peak Tuning for this splash ---
-          const peak = (peakT ?? 0.10) * darknessBrightnessScale;
+          const peak = Math.min(1.0, (peakT ?? 0.10) * darknessBrightnessScale * SPLASH_PEAK_OPACITY_BOOST);
           if (alphaBehavior) {
             alphaBehavior.peakOpacity = peak;
           }
@@ -8257,7 +8261,10 @@ export class WeatherParticles {
         }
 
         if (entry.alphaBehavior) {
-          entry.alphaBehavior.peakOpacity = 0.27 * darknessBrightnessScale;
+          entry.alphaBehavior.peakOpacity = Math.min(
+            1.0,
+            WATER_HIT_SPLASH_PEAK_OPACITY * darknessBrightnessScale * SPLASH_PEAK_OPACITY_BOOST
+          );
         }
 
         // Allow turning off splash rendering entirely for A/B perf testing.

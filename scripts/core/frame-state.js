@@ -92,13 +92,29 @@ export class FrameState {
     this.timestamp = Date.now();
     this.deltaTime = deltaTime;
 
-    // Update camera position
+    // CameraFollower runs in the EffectComposer camera pipeline immediately before
+    // this update. Prefer live PIXI stage zoom (authoritative for pan/zoom); keep
+    // Three matrices/position for screen-space reconstruction.
+    const stage = canvas?.stage;
+    const pixiZoom = Number(stage?.scale?.x);
+    const worldHeight = sceneComposer?.foundrySceneData?.height
+      || canvas?.dimensions?.height
+      || 1000;
+
     if (camera) {
-      this.cameraX = camera.position.x;
-      this.cameraY = camera.position.y;
+      const pixiPivotX = Number(stage?.pivot?.x);
+      const pixiPivotY = Number(stage?.pivot?.y);
+
+      if (Number.isFinite(pixiPivotX) && Number.isFinite(pixiPivotY)) {
+        this.cameraX = pixiPivotX;
+        this.cameraY = worldHeight - pixiPivotY;
+      } else {
+        this.cameraX = camera.position.x;
+        this.cameraY = camera.position.y;
+      }
+
       this.cameraZ = camera.position.z;
-      
-      // Store camera matrices for screen-space reconstruction
+
       if (camera.projectionMatrix) {
         this.projectionMatrix = camera.projectionMatrix.clone();
       }
@@ -107,8 +123,12 @@ export class FrameState {
       }
     }
 
-    // Update zoom level
-    if (sceneComposer) {
+    if (Number.isFinite(pixiZoom) && pixiZoom > 0) {
+      this.zoom = pixiZoom;
+      if (sceneComposer) {
+        sceneComposer.currentZoom = pixiZoom;
+      }
+    } else if (sceneComposer) {
       this.zoom = sceneComposer.currentZoom ?? 1.0;
     }
 

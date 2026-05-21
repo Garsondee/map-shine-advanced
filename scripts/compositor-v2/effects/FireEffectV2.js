@@ -678,6 +678,10 @@ export class FireEffectV2 {
   update(timeInfo) {
     if (!this._initialized || !this._enabled) return;
 
+    try {
+      if (window.MapShine?.__v2NavigationLiteUpdates === true) return;
+    } catch (_) {}
+
     // Step WeatherController so weather state is current.
     try {
       if (weatherController && !weatherController.initialized && typeof weatherController.initialize === 'function') {

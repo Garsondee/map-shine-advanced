@@ -1596,6 +1596,27 @@ export const consoleHelpers = {
    *
    * @returns {object}
    */
+  presentationState() {
+    const ps = window?.MapShine?.__presentationState ?? null;
+    const rl = window?.MapShine?.renderLoop ?? null;
+    const snap = {
+      presentationState: ps,
+      continuousReason: window?.MapShine?.__v2ContinuousRenderReason ?? null,
+      presentationFps: window?.MapShine?.renderPresentationFps ?? null,
+      pacingEnabled: window?.MapShine?.renderPresentationPacingEnabled !== false,
+      strictSync: window?.MapShine?.renderStrictSyncEnabled === true,
+      loopPresentationFps: typeof rl?.getPresentationFPS === 'function' ? rl.getPresentationFPS() : null,
+      targetFps: typeof rl?.getTargetPresentationFps === 'function' ? rl.getTargetPresentationFps() : null,
+      dueNow: typeof rl?.isPresentationDueNow === 'function' ? rl.isPresentationDueNow() : null,
+      navigationLite: window?.MapShine?.__v2NavigationLiteUpdates === true,
+      navigationRenderLite: window?.MapShine?.__v2NavigationRenderLite === true,
+      bridgePanActive: window?.MapShine?.pixiInputBridge?.isCameraPanActive?.() ?? null,
+      hudAlignCoalesced: canvas?.hud?.__msaAlignCoalesced === true,
+    };
+    try { console.table(snap); } catch (_) {}
+    return snap;
+  },
+
   strictSyncStatus() {
     const ms = window?.MapShine ?? {};
     const fc = ms.frameCoordinator ?? null;

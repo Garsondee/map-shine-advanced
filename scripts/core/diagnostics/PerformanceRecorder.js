@@ -178,6 +178,23 @@ export class PerformanceRecorder {
     /** @type {number} */
     this._totalRecordedFrames = 0;
 
+    /** @type {Array<TickRecord>} rAF tick ring (includes skipped + presented). */
+    this._tickRecords = [];
+    /** @type {number} */
+    this._tickWriteIndex = 0;
+    /** @type {number} */
+    this._totalTickRecords = 0;
+    /** @type {number} */
+    this._presentedTickCount = 0;
+    /** @type {number} */
+    this._skippedTickCount = 0;
+    /** @type {number} */
+    this._judderTransitions = 0;
+    /** @type {boolean} */
+    this._lastTickPresented = false;
+    /** @type {Map<string, number>} */
+    this._skipReasonHistogram = new Map();
+
     /** @type {number} Performance-now ms at session start. */
     this._startedAtMs = 0;
     /** @type {number} Date.now() at session start, for export metadata. */
@@ -374,6 +391,14 @@ export class PerformanceRecorder {
     this._continuousReasons.clear();
     this._decimationFrames = 0;
     this._totalRecordedFrames = 0;
+    this._tickRecords.length = 0;
+    this._tickWriteIndex = 0;
+    this._totalTickRecords = 0;
+    this._presentedTickCount = 0;
+    this._skippedTickCount = 0;
+    this._judderTransitions = 0;
+    this._lastTickPresented = false;
+    this._skipReasonHistogram.clear();
 
     this._abortAllPendingQueries('reset');
 
@@ -386,6 +411,72 @@ export class PerformanceRecorder {
     if (!keepEnabled) {
       this.enabled = false;
     }
+  }
+
+  // ────────────────────────────────────────────────────────────────────────
+  // rAF tick hooks (called from RenderLoop every animation frame)
+  // ────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Begin an rAF tick record (runs even when compositor is skipped).
+   * @param {number} [nowMs]
+   * @returns {number|null} tick token
+   */
+  beginTick(nowMs = performance.now()) {
+    if (!this.enabled) return null;
+    return nowMs;
+  }
+
+  /**
+   * End an rAF tick record.
+   * @param {number|null} token - Value from {@link beginTick}
+   * @param {object} [meta]
+   */
+  endTick(token, meta = {}) {
+    if (!this.enabled || token == null) return;
+
+    const now = performance.now();
+    const presented = meta.presented === true;
+    const skipReason = typeof meta.skipReason === 'string' ? meta.skipReason : (presented ? 'none' : 'unknown');
+    const targetFps = Number(meta.targetFps) || 0;
+    const sinceLastPresentMs = Number(meta.sinceLastPresentMs) || 0;
+    const tickMs = now - token;
+
+    if (presented) this._presentedTickCount++;
+    else this._skippedTickCount++;
+    this._skipReasonHistogram.set(skipReason, (this._skipReasonHistogram.get(skipReason) || 0) + 1);
+
+    if (this._lastTickPresented !== presented) {
+      this._judderTransitions++;
+    }
+    this._lastTickPresented = presented;
+
+    /** @type {TickRecord} */
+    const record = {
+      tMs: now - this._startedAtMs,
+      tickMs,
+      presented,
+      skipReason,
+      targetFps,
+      sinceLastPresentMs,
+      renderPath: meta.renderPath ?? null,
+      continuousReason: meta.continuousReason ?? null,
+    };
+    this._pushTickRecord(record);
+    this._totalTickRecords++;
+  }
+
+  /**
+   * @param {TickRecord} record
+   * @private
+   */
+  _pushTickRecord(record) {
+    if (this._tickRecords.length < this.maxFrames) {
+      this._tickRecords.push(record);
+    } else {
+      this._tickRecords[this._tickWriteIndex] = record;
+    }
+    this._tickWriteIndex = (this._tickWriteIndex + 1) % this.maxFrames;
   }
 
   // ────────────────────────────────────────────────────────────────────────
@@ -976,6 +1067,15 @@ export class PerformanceRecorder {
       continuousReasons[reason] = n;
     }
 
+    const skipReasons = {};
+    for (const [reason, n] of this._skipReasonHistogram.entries()) {
+      skipReasons[reason] = n;
+    }
+    const tickTotal = Math.max(1, this._totalTickRecords);
+    const overBudgetTicks = this._tickRecords.filter((t) => t && t.presented && t.tickMs > 34).length;
+    const durationSec = Math.max(0.001, durationMs / 1000);
+    const judderPerSec = this._judderTransitions / durationSec;
+
     let v2PassTimings = null;
     try {
       v2PassTimings = window?.MapShine?.__v2PassTimings ?? null;
@@ -1032,6 +1132,17 @@ export class PerformanceRecorder {
           : 0,
         avgDrawCallsPerFrame,
         avgTrianglesPerFrame,
+        pacing: {
+          ticksRecorded: this._totalTickRecords,
+          presentedPct: (this._presentedTickCount / tickTotal) * 100,
+          skippedPct: (this._skippedTickCount / tickTotal) * 100,
+          judderTransitions: this._judderTransitions,
+          judderPerSec,
+          overBudgetPresentPct: this._presentedTickCount > 0
+            ? (overBudgetTicks / this._presentedTickCount) * 100
+            : 0,
+          skipReasons,
+        },
       },
       effects,
       updatables,
@@ -1054,6 +1165,7 @@ export class PerformanceRecorder {
     const payload = {
       ...snapshot,
       frames: this._frames.slice(),
+      ticks: this._tickRecords.slice(),
       generatedAtMs: Date.now(),
     };
     const json = JSON.stringify(payload, null, 2);
@@ -1165,6 +1277,26 @@ export class PerformanceRecorder {
         Number(data?.last ?? 0).toFixed(4),
         Number(data?.count ?? 0),
         Number(data?.total ?? 0).toFixed(4),
+      ].join(','));
+    }
+    lines.push('');
+
+    lines.push('## section,tick-timeline');
+    lines.push([
+      't_ms', 'tick_ms', 'presented', 'skip_reason', 'target_fps', 'since_last_present_ms',
+      'render_path', 'continuous_reason',
+    ].join(','));
+    for (const t of this._tickRecords) {
+      if (!t) continue;
+      lines.push([
+        t.tMs.toFixed(2),
+        t.tickMs.toFixed(3),
+        t.presented ? 1 : 0,
+        csvEscape(t.skipReason),
+        t.targetFps,
+        t.sinceLastPresentMs.toFixed(2),
+        csvEscape(t.renderPath ?? ''),
+        csvEscape(t.continuousReason ?? ''),
       ].join(','));
     }
     lines.push('');
@@ -1298,6 +1430,18 @@ function csvEscape(value) {
  * @property {number} points
  * @property {string} continuousReason
  * @property {boolean} decimationActive
+ */
+
+/**
+ * @typedef {Object} TickRecord
+ * @property {number} tMs
+ * @property {number} tickMs
+ * @property {boolean} presented
+ * @property {string} skipReason
+ * @property {number} targetFps
+ * @property {number} sinceLastPresentMs
+ * @property {string|null} renderPath
+ * @property {string|null} continuousReason
  */
 
 /**

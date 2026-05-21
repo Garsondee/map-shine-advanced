@@ -1,10 +1,11 @@
 /**
  * @fileoverview Render loop manager for three.js animation
- * Handles requestAnimationFrame loop with delta time tracking
+ * Handles requestAnimationFrame loop with presentation-first pacing
  * @module core/render-loop
  */
 
 import { createLogger } from './log.js';
+import { isCameraNavigationActive } from '../foundry/camera-navigation-state.js';
 
 const log = createLogger('RenderLoop');
 
@@ -16,6 +17,9 @@ const log = createLogger('RenderLoop');
  */
 const STRICT_HOLD_MAX_MS = 250;
 
+/** Max PIXI tokens to drain per present frame when strict sync + pacing coexist. */
+const STRICT_TOKEN_DRAIN_CAP = 8;
+
 /**
  * Render loop manager
  */
@@ -26,91 +30,61 @@ export class RenderLoop {
     this.camera = camera;
     this.effectComposer = effectComposer;
 
-    // PERFORMANCE: When the scene is visually static, rendering the full pipeline
-    // at 60fps is wasteful. We throttle rendering while idle, but still keep a
-    // low-frequency refresh so uniforms/state don't get stuck.
     this._forceNextRender = true;
+    this._presentationDueImmediately = true;
     this._lastComposerRenderTime = 0;
+    this._lastPresentationMs = 0;
     this._idleFps = 15;
     this._activeFps = 60;
     this._continuousFps = 30;
+    this._presentationFps = 30;
 
-    // PERF: Cache expensive composer continuous-render probes.
     this._cachedEffectWantsContinuous = false;
     this._lastEffectContinuousCheckMs = -Infinity;
 
-    // Camera snapshot for cheap motion detection.
     this._lastCamX = null;
     this._lastCamY = null;
     this._lastCamZ = null;
     this._lastCamZoom = null;
 
-    // Foundry/PIXI is the authoritative camera during pan/zoom.
-    // Using the Three camera here can introduce a 1-frame delay because the camera
-    // is synced from PIXI inside EffectComposer.render() via CameraFollower.
     this._lastPixiPivotX = null;
     this._lastPixiPivotY = null;
     this._lastPixiZoom = null;
 
-    // When set, we temporarily bypass idle frame skipping and render every RAF.
-    // This is used for time-critical animations (token movement, drags, etc.).
     this._continuousRenderUntilMs = 0;
-    
-    /** @type {number|null} */
+    this._cinematicModeUntilMs = 0;
+    this._cameraActiveUntilMs = 0;
+    this._cameraActiveHoldMs = 150;
+
     this.animationFrameId = null;
-    
-    /** @type {boolean} */
     this.isRunning = false;
-    
-    /** @type {number} */
     this.lastFrameTime = performance.now();
-    
-    /** @type {number} */
     this.frameCount = 0;
-    
-    /** @type {number} */
     this.fps = 0;
-    
-    /** @type {number} */
-    this.fpsUpdateInterval = 1000; // Update FPS every second
-    
-    /** @type {number} */
+    this.fpsUpdateInterval = 1000;
     this.lastFpsUpdate = performance.now();
-    
-    /** @type {number} */
     this.framesThisSecond = 0;
-    
-    // Track first-frame timing to diagnose residual shader compilation
+    this._presentedFramesThisSecond = 0;
+    this._lastPresentedFpsUpdate = performance.now();
+    this.presentationFps = 0;
+
     this._firstFrameLogged = false;
-
-    // Throttle context-lost logs so we don't spam console while the rAF loop keeps running.
     this._lastContextLostLogMs = -Infinity;
-
-    /** Compositor frames driven by load-time hidden-tab pump (rAF may not run when hidden). */
     this._loadPumpFrameCount = 0;
-
-    // OPTIMIZATION: Cache WebGL context to avoid cross-boundary lookups every frame
     this._glContext = null;
-
-    // OPTIMIZATION: Pre-allocated state object for Zero-GC strict holding
     this._strictHoldState = { active: false, reason: null, updatedAtMs: 0 };
 
-    // Bind render method to preserve context
     this.render = this.render.bind(this);
   }
 
-  /**
-   * Fast-path strict sync flag check
-   * @private
-   */
   _isStrictSyncEnabled() {
     return window?.MapShine?.renderStrictSyncEnabled === true;
   }
 
-  /**
-   * Updates and returns the pre-allocated strict hold state (Zero-GC)
-   * @private
-   */
+  _isPresentationPacingEnabled() {
+    return window?.MapShine?.renderPresentationPacingEnabled !== false;
+  }
+
   _getStrictHoldState() {
     const flag = window?.MapShine?.renderStrictHoldFrame;
     if (flag && flag.active === true) {
@@ -123,11 +97,6 @@ export class RenderLoop {
     return this._strictHoldState;
   }
 
-  /**
-   * Prefer FrameCoordinator snapshots when they are finite; NaN is not nullish
-   * for `??`, so never let bad coordinator values override the live stage.
-   * @private
-   */
   _pixiCameraFromCoordinator(fcState, stage) {
     const sx = stage?.pivot?.x;
     const sy = stage?.pivot?.y;
@@ -142,9 +111,213 @@ export class RenderLoop {
     };
   }
 
+  _clampFps(value, fallback, min = 5, max = 120) {
+    let n = +value;
+    if (n !== n) return fallback;
+    n = n | 0;
+    return n < min ? min : (n > max ? max : n);
+  }
+
+  _readRuntimeFps() {
+    const ms = window.MapShine;
+    const presentation = this._clampFps(
+      ms?.renderPresentationFps ?? ms?.renderContinuousFps,
+      this._presentationFps,
+      5,
+      60,
+    );
+    return {
+      idleFps: this._clampFps(ms?.renderIdleFps, this._idleFps, 5, 60),
+      activeFps: this._clampFps(ms?.renderActiveFps, this._activeFps, 5, 120),
+      presentationFps: presentation,
+      continuousFps: this._clampFps(ms?.renderContinuousFps, this._continuousFps, 5, 120),
+    };
+  }
+
+  _getEffectWantsContinuous(nowMs) {
+    if (!this.effectComposer?.wantsContinuousRender) return false;
+    const now = Number.isFinite(nowMs) ? nowMs : performance.now();
+    const pollIntervalMs = this._cachedEffectWantsContinuous ? 120 : 33;
+    if ((now - this._lastEffectContinuousCheckMs) < pollIntervalMs) {
+      return this._cachedEffectWantsContinuous;
+    }
+    this._lastEffectContinuousCheckMs = now;
+    try {
+      this._cachedEffectWantsContinuous = !!this.effectComposer.wantsContinuousRender();
+    } catch (_) {}
+    return this._cachedEffectWantsContinuous;
+  }
+
   /**
-   * Start the render loop
+   * Cheap camera motion probe (PIXI pivot/scale preferred).
+   * @private
    */
+  _detectCameraChanged() {
+    const stage = canvas?.stage;
+    let fcState = null;
+    try {
+      const fc = window.MapShine?.frameCoordinator;
+      if (fc?.initialized && fc.getFrameState) fcState = fc.getFrameState();
+    } catch (_) {}
+
+    const pixi = this._pixiCameraFromCoordinator(fcState, stage);
+    const pixiPivotX = pixi.x;
+    const pixiPivotY = pixi.y;
+    const pixiZoom = pixi.zoom;
+
+    let cameraChanged = false;
+    if (typeof pixiPivotX === 'number' && typeof pixiPivotY === 'number' && typeof pixiZoom === 'number') {
+      cameraChanged = (
+        pixiPivotX !== this._lastPixiPivotX ||
+        pixiPivotY !== this._lastPixiPivotY ||
+        pixiZoom !== this._lastPixiZoom
+      );
+    } else {
+      const cam = this.camera;
+      cameraChanged = (
+        cam?.position?.x !== this._lastCamX ||
+        cam?.position?.y !== this._lastCamY ||
+        cam?.position?.z !== this._lastCamZ ||
+        cam?.zoom !== this._lastCamZoom
+      );
+    }
+
+    return { cameraChanged, pixiPivotX, pixiPivotY, pixiZoom };
+  }
+
+  _cacheCameraState(pixiPivotX, pixiPivotY, pixiZoom) {
+    if (typeof pixiPivotX === 'number') this._lastPixiPivotX = pixiPivotX;
+    if (typeof pixiPivotY === 'number') this._lastPixiPivotY = pixiPivotY;
+    if (typeof pixiZoom === 'number') this._lastPixiZoom = pixiZoom;
+    const cam = this.camera;
+    if (cam) {
+      this._lastCamX = cam.position.x;
+      this._lastCamY = cam.position.y;
+      this._lastCamZ = cam.position.z;
+      this._lastCamZoom = cam.zoom;
+    }
+  }
+
+  /**
+   * Resolve target presentation FPS for this tick.
+   * @private
+   */
+  _resolveTargetPresentationFps(now, opts = {}) {
+    const { cameraChanged = false, inContinuousWindow = false, effectWantsContinuous = false } = opts;
+    const fps = this._readRuntimeFps();
+    const ms = window.MapShine;
+    const inCinematicMode = now < (this._cinematicModeUntilMs || 0);
+    const cameraActive = cameraChanged || now < (this._cameraActiveUntilMs || 0);
+
+    if (inCinematicMode) return { targetFps: 120, tier: 'cinematic' };
+
+    if (cameraActive || this._forceNextRender || this._presentationDueImmediately) {
+      // Rapid pan at 60 Active FPS often exceeds 16.6ms GPU budget (~18ms presents).
+      // Cap to Presentation FPS during navigation for steady spacing (e.g. 30Hz / 33ms).
+      if (isCameraNavigationActive()) {
+        const navCap = Math.min(fps.activeFps, fps.presentationFps);
+        return { targetFps: navCap, tier: 'navigation' };
+      }
+      return { targetFps: fps.activeFps, tier: 'active' };
+    }
+
+    if (inContinuousWindow || effectWantsContinuous) {
+      const preferred = this._clampFps(
+        this.effectComposer?.getPreferredContinuousFps?.(),
+        0,
+        0,
+        120,
+      );
+      const target = Math.max(fps.presentationFps, preferred > 0 ? preferred : 0);
+      return { targetFps: target, tier: 'presentation' };
+    }
+
+    return { targetFps: fps.idleFps, tier: 'idle' };
+  }
+
+  /**
+   * @returns {boolean} True if a compositor present is due this rAF (for postPixi hook).
+   */
+  isPresentationDueNow(nowMs = performance.now()) {
+    if (!this.isRunning || !this.effectComposer) return false;
+    if (!this._isPresentationPacingEnabled()) return true;
+    if (nowMs < (this._cinematicModeUntilMs || 0)) return true;
+    if (this._presentationDueImmediately || this._forceNextRender) return true;
+
+    const effectWantsContinuous = this._getEffectWantsContinuous(nowMs);
+    const inContinuousWindow = nowMs < (this._continuousRenderUntilMs || 0);
+    const { targetFps } = this._resolveTargetPresentationFps(nowMs, {
+      cameraChanged: false,
+      inContinuousWindow,
+      effectWantsContinuous,
+    });
+    const intervalMs = 1000 / Math.max(1, targetFps);
+    return (nowMs - (this._lastPresentationMs || 0)) >= intervalMs;
+  }
+
+  /**
+   * @returns {number} Last resolved target presentation FPS.
+   */
+  getTargetPresentationFps() {
+    return Number(window.MapShine?.__presentationState?.targetFps) || 0;
+  }
+
+  _publishPresentationState(state) {
+    try {
+      const ms = window.MapShine;
+      if (!ms) return;
+      ms.__presentationState = state;
+    } catch (_) {}
+  }
+
+  /**
+   * Presentation-first gate. Returns whether to run the compositor this rAF.
+   * @private
+   */
+  _evaluatePresentationGate(now) {
+    const sinceLastPresentMs = now - (this._lastPresentationMs || 0);
+    const inContinuousWindow = now < (this._continuousRenderUntilMs || 0);
+    const effectWantsContinuous = this._getEffectWantsContinuous(now);
+    const { cameraChanged, pixiPivotX, pixiPivotY, pixiZoom } = this._detectCameraChanged();
+
+    if (cameraChanged) {
+      this._cameraActiveUntilMs = now + this._cameraActiveHoldMs;
+    }
+
+    const { targetFps, tier } = this._resolveTargetPresentationFps(now, {
+      cameraChanged,
+      inContinuousWindow,
+      effectWantsContinuous,
+    });
+    const intervalMs = 1000 / Math.max(1, targetFps);
+    const dueByTime = sinceLastPresentMs >= intervalMs;
+    const shouldPresent = dueByTime || this._presentationDueImmediately || this._forceNextRender;
+
+    return {
+      shouldPresent,
+      skipReason: shouldPresent ? 'none' : 'presentation_gate',
+      targetFps,
+      tier,
+      sinceLastPresentMs,
+      cameraChanged,
+      effectWantsContinuous,
+      inContinuousWindow,
+      pixiPivotX,
+      pixiPivotY,
+      pixiZoom,
+      presentationDeltaSec: 1 / Math.max(1, targetFps),
+    };
+  }
+
+  _drainStrictPixiTokens(fc) {
+    if (!this._isStrictSyncEnabled()) return;
+    let drained = 0;
+    while (drained < STRICT_TOKEN_DRAIN_CAP && fc?.hasPendingPixiToken?.() === true) {
+      try { fc.consumePendingPixiToken?.(); } catch (_) {}
+      drained++;
+    }
+  }
+
   start() {
     if (this.isRunning) {
       log.warn('Render loop already running');
@@ -153,42 +326,36 @@ export class RenderLoop {
 
     log.info('Starting render loop');
     this.isRunning = true;
-    this.lastFrameTime = performance.now();
-    this.lastFpsUpdate = this.lastFrameTime;
+    const t = performance.now();
+    this.lastFrameTime = t;
+    this.lastFpsUpdate = t;
+    this._lastPresentedFpsUpdate = t;
     this.frameCount = 0;
     this.framesThisSecond = 0;
+    this._presentedFramesThisSecond = 0;
 
     this._forceNextRender = true;
+    this._presentationDueImmediately = true;
     this._firstFrameLogged = false;
     this._lastComposerRenderTime = 0;
+    this._lastPresentationMs = 0;
     this._lastCamX = null;
     this._lastCamY = null;
     this._lastCamZ = null;
     this._lastCamZoom = null;
-
     this._lastPixiPivotX = null;
     this._lastPixiPivotY = null;
     this._lastPixiZoom = null;
-
     this._cachedEffectWantsContinuous = false;
     this._lastEffectContinuousCheckMs = -Infinity;
-
     this._continuousRenderUntilMs = 0;
-
+    this._cinematicModeUntilMs = 0;
+    this._cameraActiveUntilMs = 0;
     this._loadPumpFrameCount = 0;
-
-    // Attempt early context cache
     this._glContext = this.renderer?.getContext?.() || null;
-
-    // Kick off the loop
     this.animationFrameId = requestAnimationFrame(this.render);
   }
 
-  /**
-   * Run one full {@link EffectComposer#render} without waiting for rAF.
-   * Chromium often does not run {@link requestAnimationFrame} while the tab is hidden,
-   * so {@link #requestRender} never takes effect; the load-time hidden-tab pump calls this instead.
-   */
   pumpBackgroundLoadFrame() {
     if (!this.isRunning || !this.effectComposer) return;
 
@@ -196,87 +363,55 @@ export class RenderLoop {
     if (this._glContext?.isContextLost?.()) return;
 
     const now = performance.now();
-    let deltaTime = (now - this.lastFrameTime) / 1000;
-    this.lastFrameTime = now;
-    if (deltaTime !== deltaTime || deltaTime < 0) deltaTime = 1 / 60; // Fast NaN check
-    if (deltaTime > 0.1) deltaTime = 0.1;
+    const { targetFps } = this._resolveTargetPresentationFps(now, {
+      effectWantsContinuous: this._getEffectWantsContinuous(now),
+    });
+    const deltaTime = 1 / Math.max(1, targetFps);
 
     try {
       this.effectComposer.render(deltaTime);
       this._lastComposerRenderTime = now;
-      this._forceNextRender = true;
+      this._lastPresentationMs = now;
+      this._forceNextRender = false;
+      this._presentationDueImmediately = false;
     } catch (err) {
       log.warn('pumpBackgroundLoadFrame: effectComposer.render failed', err);
       return;
     }
 
     const ms = window.MapShine;
-    const strictSync = this._isStrictSyncEnabled();
     const fc = ms?.frameCoordinator;
-
-    if (strictSync && fc?.hasPendingPixiToken?.()) {
-      try { fc.consumePendingPixiToken?.(); } catch (_) {}
+    if (this._isStrictSyncEnabled() && fc?.hasPendingPixiToken?.()) {
+      this._drainStrictPixiTokens(fc);
     }
 
     try {
-      const stage = canvas?.stage;
-      const fcState = fc?.getFrameState?.();
-      const pixi = this._pixiCameraFromCoordinator(fcState, stage);
-      const pixiPivotX = pixi.x;
-      const pixiPivotY = pixi.y;
-      const pixiZoom = pixi.zoom;
-
-      if (typeof pixiPivotX === 'number') this._lastPixiPivotX = pixiPivotX;
-      if (typeof pixiPivotY === 'number') this._lastPixiPivotY = pixiPivotY;
-      if (typeof pixiZoom === 'number') this._lastPixiZoom = pixiZoom;
-
-      const cam = this.camera;
-      if (cam) {
-        this._lastCamX = cam.position.x;
-        this._lastCamY = cam.position.y;
-        this._lastCamZ = cam.position.z;
-        this._lastCamZoom = cam.zoom;
-      }
+      const { pixiPivotX, pixiPivotY, pixiZoom } = this._detectCameraChanged();
+      this._cacheCameraState(pixiPivotX, pixiPivotY, pixiZoom);
     } catch (_) {}
 
     this._loadPumpFrameCount++;
   }
 
-  /**
-   * @returns {number} Compositor frames issued by {@link #pumpBackgroundLoadFrame} this session.
-   */
   getLoadPumpFrameCount() {
     return this._loadPumpFrameCount || 0;
   }
 
-  /**
-   * Enter cinematic mode for a fixed duration: bypasses ALL adaptive FPS throttling
-   * and forces every rAF callback to trigger a full render. Use this for high-quality
-   * camera animations (intro zoom, cutscenes) where frame drops are unacceptable.
-   *
-   * @param {number} durationMs - How long to stay in cinematic mode.
-   */
   startCinematicMode(durationMs) {
     const d = Math.max(0, Number(durationMs) || 0);
     this._cinematicModeUntilMs = performance.now() + d;
     this._forceNextRender = true;
+    this._presentationDueImmediately = true;
   }
 
-  /**
-   * Immediately exit cinematic mode before its natural expiry.
-   */
   stopCinematicMode() {
     this._cinematicModeUntilMs = 0;
   }
 
-  /**
-   * Temporarily bypass idle frame skipping.
-   * Useful for smooth movement animations where a low render rate looks "steppy".
-   * @param {number} durationMs
-   */
   requestContinuousRender(durationMs) {
     const d = Number(durationMs);
     if (!Number.isFinite(d) || d <= 0) {
+      this._presentationDueImmediately = true;
       this._forceNextRender = true;
       return;
     }
@@ -285,437 +420,338 @@ export class RenderLoop {
     if (!this._continuousRenderUntilMs || until > this._continuousRenderUntilMs) {
       this._continuousRenderUntilMs = until;
     }
-
-    // Ensure the very next frame renders even if we're currently idle-throttled.
+    this._presentationDueImmediately = true;
     this._forceNextRender = true;
   }
 
-  /**
-   * Ultra-fast integer clamp. Bypasses Math.max/min/floor overhead.
-   * @private
-   * @param {*} value
-   * @param {number} fallback
-   * @param {number} min
-   * @param {number} max
-   * @returns {number}
-   */
-  _clampFps(value, fallback, min = 5, max = 120) {
-    let n = +value; // Fast unary cast
-    if (n !== n) return fallback; // Fast NaN check (NaN !== NaN)
-    n = n | 0; // Fast bitwise truncate/floor
-    return n < min ? min : (n > max ? max : n);
-  }
-
-  /**
-   * Query EffectComposer.wantsContinuousRender() with a short cache window.
-   * This avoids scanning effects on every RAF when nothing changes.
-   *
-   * @private
-   * @param {number} nowMs
-   * @returns {boolean}
-   */
-  _getEffectWantsContinuous(nowMs) {
-    if (!this.effectComposer?.wantsContinuousRender) return false;
-
-    const now = Number.isFinite(nowMs) ? nowMs : performance.now();
-    const pollIntervalMs = this._cachedEffectWantsContinuous ? 120 : 33;
-    if ((now - this._lastEffectContinuousCheckMs) < pollIntervalMs) {
-      return this._cachedEffectWantsContinuous;
-    }
-
-    this._lastEffectContinuousCheckMs = now;
-    try {
-      this._cachedEffectWantsContinuous = !!this.effectComposer.wantsContinuousRender();
-    } catch (_) {
-    }
-    return this._cachedEffectWantsContinuous;
-  }
-
-  /**
-   * Stop the render loop
-   */
   stop() {
-    if (!this.isRunning) {
-      return;
-    }
-
+    if (!this.isRunning) return;
     log.info('Stopping render loop');
     this.isRunning = false;
-    
     if (this.animationFrameId !== null) {
       cancelAnimationFrame(this.animationFrameId);
       this.animationFrameId = null;
     }
   }
 
-  /**
-   * Main render method (called every frame)
-   * @private
-   */
   render() {
     if (!this.isRunning) return;
 
-    // Schedule next frame FIRST.
-    // Important: If the WebGL context is lost we still want the rAF loop to keep
-    // running so we can resume immediately when the context is restored.
     this.animationFrameId = requestAnimationFrame(this.render);
 
-    // Context caching logic removes massive WebGL cross-boundary lookup delays
+    const now = performance.now();
+
+    try {
+      const ms = window.MapShine;
+      const remaining = Number(ms?.__msaDeferredPumpRemaining) || 0;
+      if (remaining > 0 && typeof this.pumpBackgroundLoadFrame === 'function') {
+        this.pumpBackgroundLoadFrame();
+        ms.__msaDeferredPumpRemaining = Math.max(0, remaining - 1);
+      }
+    } catch (_) {}
+
+    const perfRecorder = (typeof window !== 'undefined') ? window?.MapShine?.performanceRecorder : null;
+    const tickToken = (perfRecorder?.enabled === true && typeof perfRecorder.beginTick === 'function')
+      ? perfRecorder.beginTick(now)
+      : null;
+
     if (!this._glContext) this._glContext = this.renderer?.getContext?.();
     if (this._glContext?.isContextLost?.()) {
-      const now = performance.now();
       if ((now - this._lastContextLostLogMs) > 2000) {
         this._lastContextLostLogMs = now;
         log.warn('WebGL context is lost — skipping render this frame (rAF loop continues)');
       }
+      this._publishPresentationState({
+        presented: false,
+        skipReason: 'context_lost',
+        targetFps: 0,
+        tier: 'none',
+        sinceLastPresentMs: now - (this._lastPresentationMs || 0),
+      });
+      if (tickToken != null) perfRecorder.endTick(tickToken, { presented: false, skipReason: 'context_lost' });
       return;
     }
 
-    // Calculate delta time
-    const now = performance.now();
-    const deltaTime = (now - this.lastFrameTime) / 1000; // Convert to seconds
-    this.lastFrameTime = now;
-
-    // Update frame counter
     this.frameCount++;
     this.framesThisSecond++;
 
-    // Update FPS counter
     if (now - this.lastFpsUpdate >= this.fpsUpdateInterval) {
       this.fps = this.framesThisSecond;
+      this.presentationFps = this._presentedFramesThisSecond;
       this.framesThisSecond = 0;
+      this._presentedFramesThisSecond = 0;
       this.lastFpsUpdate = now;
+      this._lastPresentedFpsUpdate = now;
     }
 
-    // When an EffectComposer is present, it owns the full render pipeline
     if (this.effectComposer) {
       try {
-        const inContinuousWindow = now < (this._continuousRenderUntilMs || 0);
-
-        // V2-only runtime: always render through the compositor.
-
-        // Idle throttling: if camera is not moving, render at a reduced rate.
-        // Prefer PIXI camera state (stage pivot/scale) to avoid 1-frame latency.
-        const stage = canvas?.stage;
-
-        // Avoid IIFE and deeply chained optional properties
-        let fcState = null;
-        try {
-          const fc = window.MapShine?.frameCoordinator;
-          if (fc?.initialized && fc.getFrameState) {
-            fcState = fc.getFrameState();
-          }
-        } catch (_) {}
-
-        // Prefer post-PIXI coordinated camera snapshots when available (finite only).
-        const pixi = this._pixiCameraFromCoordinator(fcState, stage);
-        const pixiPivotX = pixi.x;
-        const pixiPivotY = pixi.y;
-        const pixiZoom = pixi.zoom;
-
-        let cameraChanged = false;
-        if (typeof pixiPivotX === 'number' && typeof pixiPivotY === 'number' && typeof pixiZoom === 'number') {
-          cameraChanged = (
-            pixiPivotX !== this._lastPixiPivotX ||
-            pixiPivotY !== this._lastPixiPivotY ||
-            pixiZoom !== this._lastPixiZoom
-          );
-        } else {
-          const cam = this.camera;
-          cameraChanged = (
-            cam?.position?.x !== this._lastCamX ||
-            cam?.position?.y !== this._lastCamY ||
-            cam?.position?.z !== this._lastCamZ ||
-            cam?.zoom !== this._lastCamZoom
-          );
-        }
-
-        // Allow runtime tuning (primarily for perf testing).
-        // IMPORTANT: keep idle interval <= 100ms, otherwise TimeManager clamps delta
-        // and animations will slow down when the user re-enables them.
         const ms = window.MapShine;
-        // Strict sync pins rendering to the PIXI tick rate, so adaptive FPS
-        // skipping is disabled for correctness. Adaptive FPS still works in
-        // non-strict mode.
+        const pacingEnabled = this._isPresentationPacingEnabled();
+        const inCinematicMode = now < (this._cinematicModeUntilMs || 0);
         const strictSync = this._isStrictSyncEnabled();
-        const adaptiveFpsEnabled = strictSync ? false : (ms?.renderAdaptiveFpsEnabled !== false);
-
-        // Strict sync lockstep: if there's an unconsumed PIXI token we MUST
-        // render this rAF even if the camera hasn't moved. Pull the frame
-        // coordinator once; bypassing fast-path/adaptive skips below.
         const fc = ms?.frameCoordinator;
         const pendingPixiToken = strictSync && fc?.hasPendingPixiToken?.() === true;
-        const idleFps = this._clampFps(ms?.renderIdleFps, this._idleFps, 5, 60);
-        const activeFps = this._clampFps(ms?.renderActiveFps, this._activeFps, 5, 120);
-        const continuousFps = this._clampFps(ms?.renderContinuousFps, this._continuousFps, 5, 120);
-        const preferredContinuousFps = this._clampFps(
-          this.effectComposer?.getPreferredContinuousFps?.(),
-          0,
-          0,
-          120
-        );
-        const effectiveContinuousFps = Math.max(continuousFps, preferredContinuousFps);
-        const idleIntervalMs = 1000 / Math.max(1, idleFps);
 
-        // Cinematic mode: bypass ALL throttling so every rAF fires a full render.
-        // Used during intro zoom and other time-critical camera animations.
-        const inCinematicMode = now < (this._cinematicModeUntilMs || 0);
+        let gate = null;
+        if (pacingEnabled && !inCinematicMode) {
+          gate = this._evaluatePresentationGate(now);
+          this._publishPresentationState({
+            presented: false,
+            skipReason: gate.skipReason,
+            targetFps: gate.targetFps,
+            tier: gate.tier,
+            sinceLastPresentMs: gate.sinceLastPresentMs,
+            cameraChanged: gate.cameraChanged,
+            effectWantsContinuous: gate.effectWantsContinuous,
+          });
 
-        // Fast path: when adaptive mode is on, nothing can render faster than the
-        // highest configured mode cap. On high-refresh displays this avoids extra
-        // per-RAF work (camera checks + effect scans) between allowed render ticks.
-        // Strict sync mode bypasses this because every PIXI token must produce a
-        // compositor render.
-        if (adaptiveFpsEnabled && !inCinematicMode && !this._forceNextRender && !pendingPixiToken) {
-          const since = now - (this._lastComposerRenderTime || 0);
-          const fastestFps = Math.max(idleFps, activeFps, effectiveContinuousFps);
-          const minIntervalMs = 1000 / Math.max(1, fastestFps);
-          if (since < minIntervalMs) return;
+          if (!gate.shouldPresent && !pendingPixiToken) {
+            if (tickToken != null) {
+              perfRecorder.endTick(tickToken, {
+                presented: false,
+                skipReason: 'presentation_gate',
+                targetFps: gate.targetFps,
+                sinceLastPresentMs: gate.sinceLastPresentMs,
+                renderPath: null,
+              });
+            }
+            return;
+          }
+        } else if (!pacingEnabled) {
+          gate = this._evaluateLegacyAdaptivePath(now, ms, strictSync, fc, pendingPixiToken);
+          if (!gate.shouldPresent) {
+            if (tickToken != null) {
+              perfRecorder.endTick(tickToken, {
+                presented: false,
+                skipReason: gate.skipReason,
+                targetFps: gate.targetFps,
+                sinceLastPresentMs: gate.sinceLastPresentMs,
+                renderPath: null,
+              });
+            }
+            return;
+          }
+        } else {
+          gate = this._evaluatePresentationGate(now);
+          gate.shouldPresent = true;
+          gate.skipReason = 'none';
         }
 
-        // Effects may request continuous rendering while they are active
-        // (e.g. particle systems) so they don't animate at the idle FPS.
-        let effectWantsContinuous = inContinuousWindow;
-        if (!effectWantsContinuous) {
-          effectWantsContinuous = this._getEffectWantsContinuous(now);
+        if (!gate) {
+          gate = this._evaluatePresentationGate(now);
+          gate.shouldPresent = true;
         }
 
-        // Cinematic mode renders every rAF with no further checks.
-        // Strict sync always renders when a PIXI token is pending so the two
-        // systems stay lockstep (no dropped compositor frames).
-        let shouldRender = inCinematicMode || inContinuousWindow || effectWantsContinuous || this._forceNextRender || cameraChanged || pendingPixiToken;
-        if (!shouldRender) {
-          const since = now - (this._lastComposerRenderTime || 0);
-          if (since >= idleIntervalMs) shouldRender = true;
-        }
+        const presentationDelta = gate.presentationDeltaSec ?? ((now - this.lastFrameTime) / 1000);
+        this.lastFrameTime = now;
 
-        // Optional adaptive frame cap for smoother pacing under continuous load.
-        // Skipped in cinematic mode so every rAF produces a render.
-        // - active: camera/interactions/forced updates
-        // - continuous: ongoing animated effects requesting full-rate updates
-        // - idle: falls back to the existing idle throttle target
-        if (shouldRender && adaptiveFpsEnabled && !inCinematicMode) {
-          let targetFps = idleFps;
-          // Camera motion should always get activeFps priority; otherwise continuous
-          // effect requests (often 30fps) can under-sample pan/zoom updates.
-          if (this._forceNextRender || cameraChanged) targetFps = activeFps;
-          else if (inContinuousWindow || effectWantsContinuous) targetFps = effectiveContinuousFps;
-
-          const minIntervalMs = 1000 / Math.max(1, targetFps);
-          const since = now - (this._lastComposerRenderTime || 0);
-          if (since < minIntervalMs) shouldRender = false;
-        }
-
-        // Strict sync: never skip a pending PIXI token. This is an absolute
-        // override of the adaptive frame cap above so that the two systems
-        // remain phase-locked even when the adaptive path would have skipped.
-        if (strictSync && pendingPixiToken) {
-          shouldRender = true;
-        }
-
-        // Strict sync: if the FloorCompositor detected invalid frame inputs
-        // (e.g. a required mask is still being composed asynchronously), skip
-        // the compositor render so the last valid frame remains on screen.
-        // We still consume the PIXI token so the counters reflect coverage.
-        //
-        // Safety: we only honour the hold for STRICT_HOLD_MAX_MS so a stale
-        // flag can never permanently starve the compositor. When the cap
-        // trips we let the compositor run to re-validate and clear the flag.
-        // When strict sync is off, never reuse a stale hold object from a prior
-        // strict-sync session — that would suppress compositor.render() forever.
         if (!strictSync) this._strictHoldState.active = false;
         const holdFrame = strictSync ? this._getStrictHoldState() : this._strictHoldState;
         const holdAgeMs = holdFrame.active ? (now - holdFrame.updatedAtMs) : 0;
         const holdExpired = holdFrame.active && holdAgeMs > STRICT_HOLD_MAX_MS;
         if (holdFrame.active && !holdExpired) {
-          shouldRender = false;
+          this._publishPresentationState({
+            presented: false,
+            skipReason: 'strict_hold',
+            targetFps: gate.targetFps,
+            tier: gate.tier,
+            sinceLastPresentMs: gate.sinceLastPresentMs,
+            holdReason: holdFrame.reason,
+          });
           try {
             const counters = ms.__renderStrictCounters ?? (ms.__renderStrictCounters = {});
             counters.holdFrames = (counters.holdFrames || 0) + 1;
             counters.lastHoldReason = holdFrame.reason;
             counters.lastHoldAtMs = now;
           } catch (_) {}
-          // Consume the pending token so strict sync telemetry shows coverage
-          // even while held — otherwise "missed" would inflate during holds.
           try { fc?.consumePendingPixiToken?.(); } catch (_) {}
-        } else if (holdExpired) {
+          if (tickToken != null) {
+            perfRecorder.endTick(tickToken, {
+              presented: false,
+              skipReason: 'strict_hold',
+              targetFps: gate.targetFps,
+              sinceLastPresentMs: gate.sinceLastPresentMs,
+              renderPath: 'strict-hold',
+            });
+          }
+          return;
+        }
+
+        const _isFirstFrame = !this._firstFrameLogged;
+        const _t0 = _isFirstFrame ? performance.now() : 0;
+
+        this.effectComposer.render(presentationDelta);
+        this._lastComposerRenderTime = now;
+        this._lastPresentationMs = now;
+        this._forceNextRender = false;
+        this._presentationDueImmediately = false;
+        this._presentedFramesThisSecond++;
+
+        const renderPath = ms?.__v2CompositorRenderPath ?? 'full';
+        const continuousReason = ms?.__v2ContinuousRenderReason ?? 'none';
+
+        this._publishPresentationState({
+          presented: true,
+          skipReason: 'none',
+          targetFps: gate.targetFps,
+          tier: gate.tier,
+          sinceLastPresentMs: 0,
+          cameraChanged: gate.cameraChanged,
+          effectWantsContinuous: gate.effectWantsContinuous,
+          renderPath,
+          continuousReason,
+        });
+
+        if (strictSync) {
+          this._drainStrictPixiTokens(fc);
           try {
             const counters = ms.__renderStrictCounters ?? (ms.__renderStrictCounters = {});
-            counters.holdExpirations = (counters.holdExpirations || 0) + 1;
-            counters.lastHoldExpiryAtMs = now;
+            counters.compositorRenders = (counters.compositorRenders || 0) + 1;
           } catch (_) {}
-          shouldRender = true;
+        }
+
+        this._cacheCameraState(gate.pixiPivotX, gate.pixiPivotY, gate.pixiZoom);
+
+        if (tickToken != null) {
+          perfRecorder.endTick(tickToken, {
+            presented: true,
+            skipReason: 'none',
+            targetFps: gate.targetFps,
+            sinceLastPresentMs: gate.sinceLastPresentMs,
+            renderPath,
+            continuousReason,
+          });
         }
 
         if (window.MapShine?.__v2StartupTraceEnabled === true && this.frameCount <= 8) {
           try {
-            const ctx = window.MapShine?.activeLevelContext ?? null;
             const entry = {
-              phase: 'renderLoop.preComposer',
+              phase: 'renderLoop.postComposer',
               rafFrame: Number(this.frameCount ?? -1),
-              shouldRender: !!shouldRender,
-              forceNext: !!this._forceNextRender,
-              cameraChanged: !!cameraChanged,
-              inContinuousWindow: !!inContinuousWindow,
-              effectWantsContinuous: !!effectWantsContinuous,
-              activeLevel: {
-                index: Number.isFinite(Number(ctx?.index)) ? Number(ctx.index) : null,
-                bottom: Number.isFinite(Number(ctx?.bottom)) ? Number(ctx.bottom) : null,
-                top: Number.isFinite(Number(ctx?.top)) ? Number(ctx.top) : null,
-              },
+              targetFps: gate.targetFps,
+              tier: gate.tier,
+              compositorPath: renderPath,
             };
             if (!Array.isArray(window.MapShine.__v2StartupTrace)) window.MapShine.__v2StartupTrace = [];
             window.MapShine.__v2StartupTrace.push(entry);
             if (window.MapShine.__v2StartupTrace.length > 128) window.MapShine.__v2StartupTrace.shift();
           } catch (_) {}
         }
-        if (shouldRender) {
-          // Measure first-frame render time to detect residual shader compilation.
-          // If compileAsync() worked, this should be ~10-50ms. If it's hundreds of
-          // ms or seconds, shaders are still compiling on the first draw call.
-          const _isFirstFrame = !this._firstFrameLogged;
-          const _t0 = _isFirstFrame ? performance.now() : 0;
 
-          this.effectComposer.render(deltaTime);
-          this._lastComposerRenderTime = now;
-          this._forceNextRender = false;
-
-          // Strict sync lockstep consumption: ensure the PIXI token that
-          // triggered this render is marked as consumed so the coordinator
-          // can accurately report one-to-one PIXI→compositor coverage.
-          if (strictSync) {
-            try { fc?.consumePendingPixiToken?.(); } catch (_) {}
-            try {
-              const counters = ms.__renderStrictCounters ?? (ms.__renderStrictCounters = {});
-              counters.compositorRenders = (counters.compositorRenders || 0) + 1;
-            } catch (_) {}
-          }
-          if (window.MapShine?.__v2StartupTraceEnabled === true && this.frameCount <= 8) {
-            try {
-              const entry = {
-                phase: 'renderLoop.postComposer',
-                rafFrame: Number(this.frameCount ?? -1),
-                compositorPath: window.MapShine?.__v2CompositorRenderPath ?? null,
-                populateComplete: window.MapShine?.__v2PopulateComplete ?? null,
-              };
-              if (!Array.isArray(window.MapShine.__v2StartupTrace)) window.MapShine.__v2StartupTrace = [];
-              window.MapShine.__v2StartupTrace.push(entry);
-              if (window.MapShine.__v2StartupTrace.length > 128) window.MapShine.__v2StartupTrace.shift();
-            } catch (_) {}
-          }
-
-          if (_isFirstFrame) {
-            this._firstFrameLogged = true;
-            const _renderMs = performance.now() - _t0;
-            try {
-              const dlp = window.MapShine?.debugLoadingProfiler;
-              if (dlp?.event) {
-                const calls = this.renderer?.info?.render?.calls ?? '?';
-                const tris = this.renderer?.info?.render?.triangles ?? '?';
-                const progs = Array.isArray(this.renderer?.info?.programs)
-                  ? this.renderer.info.programs.length : '?';
-                dlp.event(`renderLoop: FIRST FRAME rendered in ${_renderMs.toFixed(1)}ms ` +
-                  `(calls=${calls}, tris=${tris}, programs=${progs})`);
-              }
-            } catch (_) {}
-            if (_renderMs > 100) {
-              log.warn(`First frame took ${_renderMs.toFixed(0)}ms — possible residual shader compilation`);
-            } else {
-              log.info(`First frame rendered in ${_renderMs.toFixed(0)}ms`);
-            }
-          }
-
-          // Cache camera state natively
-          if (typeof pixiPivotX === 'number') this._lastPixiPivotX = pixiPivotX;
-          if (typeof pixiPivotY === 'number') this._lastPixiPivotY = pixiPivotY;
-          if (typeof pixiZoom === 'number') this._lastPixiZoom = pixiZoom;
-
-          const cam = this.camera;
-          if (cam) {
-            this._lastCamX = cam.position.x;
-            this._lastCamY = cam.position.y;
-            this._lastCamZ = cam.position.z;
-            this._lastCamZoom = cam.zoom;
+        if (_isFirstFrame) {
+          this._firstFrameLogged = true;
+          const _renderMs = performance.now() - _t0;
+          if (_renderMs > 100) {
+            log.warn(`First frame took ${_renderMs.toFixed(0)}ms — possible residual shader compilation`);
+          } else {
+            log.info(`First frame rendered in ${_renderMs.toFixed(0)}ms (target ${gate.targetFps}fps)`);
           }
         }
       } catch (error) {
         log.error('Effect composer render error:', error);
+        if (tickToken != null) {
+          try { perfRecorder.endTick(tickToken, { presented: false, skipReason: 'composer_error' }); } catch (_) {}
+        }
       }
       return;
     }
 
-    // Fallback path: direct scene render with enforced clear color
-    try {
-      // CRITICAL: Enforce opaque black background every frame
-      if (this.renderer.setClearColor) {
-        this.renderer.setClearColor(0x000000, 1);
-      }
-      
-      // Ensure autoClear is enabled so the background is actually cleared
-      if (this.renderer.autoClear === false) {
-        this.renderer.autoClear = true;
-      }
+    const deltaTime = (now - this.lastFrameTime) / 1000;
+    this.lastFrameTime = now;
 
+    try {
+      if (this.renderer.setClearColor) this.renderer.setClearColor(0x000000, 1);
+      if (this.renderer.autoClear === false) this.renderer.autoClear = true;
       this.renderer.render(this.scene, this.camera);
-      
-      // Debug: Log first few renders
-      if (this.frameCount <= 3) {
-        log.debug(`Frame ${this.frameCount} rendered successfully (no composer)`);
-      }
     } catch (error) {
       log.error('Renderer error:', error);
-      log.error('Renderer state:', {
-        renderer: !!this.renderer,
-        scene: !!this.scene,
-        camera: !!this.camera,
-        sceneChildren: this.scene?.children?.length || 0
-      });
-      // Critical error - stop the loop
       this.stop();
     }
   }
 
   /**
-   * Get current FPS
-   * @returns {number} Frames per second
+   * Legacy adaptive path when presentation pacing is explicitly disabled.
+   * @private
    */
+  _evaluateLegacyAdaptivePath(now, ms, strictSync, fc, pendingPixiToken) {
+    const { cameraChanged, pixiPivotX, pixiPivotY, pixiZoom } = this._detectCameraChanged();
+    const adaptiveFpsEnabled = strictSync ? false : (ms?.renderAdaptiveFpsEnabled !== false);
+    const inContinuousWindow = now < (this._continuousRenderUntilMs || 0);
+    const effectWantsContinuous = inContinuousWindow || this._getEffectWantsContinuous(now);
+    const fps = this._readRuntimeFps();
+    const preferredContinuousFps = this._clampFps(
+      this.effectComposer?.getPreferredContinuousFps?.(),
+      0,
+      0,
+      120,
+    );
+    const effectiveContinuousFps = Math.max(fps.continuousFps, preferredContinuousFps);
+
+    let shouldRender = this._forceNextRender || cameraChanged || effectWantsContinuous || pendingPixiToken;
+    let targetFps = fps.idleFps;
+    let skipReason = 'none';
+
+    if (!shouldRender) {
+      const since = now - (this._lastComposerRenderTime || 0);
+      if (since >= 1000 / Math.max(1, fps.idleFps)) shouldRender = true;
+    }
+
+    if (shouldRender && adaptiveFpsEnabled) {
+      if (this._forceNextRender || cameraChanged) targetFps = fps.activeFps;
+      else if (effectWantsContinuous) targetFps = effectiveContinuousFps;
+      const since = now - (this._lastComposerRenderTime || 0);
+      if (since < 1000 / Math.max(1, targetFps)) {
+        shouldRender = false;
+        skipReason = 'legacy_adaptive_cap';
+      }
+    }
+
+    if (strictSync && pendingPixiToken) shouldRender = true;
+
+    return {
+      shouldPresent: shouldRender,
+      skipReason: shouldRender ? 'none' : skipReason,
+      targetFps,
+      tier: 'legacy',
+      sinceLastPresentMs: now - (this._lastPresentationMs || 0),
+      cameraChanged,
+      effectWantsContinuous,
+      inContinuousWindow,
+      pixiPivotX,
+      pixiPivotY,
+      pixiZoom,
+      presentationDeltaSec: shouldRender ? (1 / Math.max(1, targetFps)) : 0,
+    };
+  }
+
   getFPS() {
     return this.fps;
   }
 
-  /**
-   * Get total frame count
-   * @returns {number} Total frames rendered
-   */
+  getPresentationFPS() {
+    return this.presentationFps;
+  }
+
   getFrameCount() {
     return this.frameCount;
   }
 
-  /**
-   * Check if loop is running
-   * @returns {boolean}
-   */
   running() {
     return this.isRunning;
   }
 
-  /**
-   * Set effect composer
-   * @param {EffectComposer|null} composer
-   */
   setEffectComposer(composer) {
     this.effectComposer = composer;
     this._forceNextRender = true;
+    this._presentationDueImmediately = true;
     this._cachedEffectWantsContinuous = false;
     this._lastEffectContinuousCheckMs = -Infinity;
     log.debug('Effect composer set');
   }
 
-  /**
-   * Request a full render on the next animation frame.
-   * Use this from interactions/hooks that change visible state.
-   */
   requestRender() {
+    this._presentationDueImmediately = true;
     this._forceNextRender = true;
   }
 }

@@ -304,10 +304,67 @@ export class ControlsIntegration {
    * and toggles the controls.doors container with active token workflows.
    * In Three takeover mode we must re-assert this state because layer/input
    * transitions can leave the doors container hidden.
+   * @public
+   */
+  refreshDoorControlVisibility() {
+    this._refreshFoundryDoorControlVisibility();
+  }
+
+  /**
+   * @returns {boolean}
+   * @private
+   */
+  _areDoorControlsSuppressed() {
+    try {
+      const wm = window.MapShine?.wallManager
+        ?? window.MapShine?.interactionManager?.wallManager;
+      if (typeof wm?.areDoorControlsSuppressed === 'function') {
+        return wm.areDoorControlsSuppressed();
+      }
+      return wm?._doorControlsSuppressed === true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /**
+   * Force-hide every Foundry PIXI door control icon.
+   * @private
+   */
+  _hideAllFoundryDoorControls() {
+    try {
+      const controlsDoors = canvas?.controls?.doors;
+      if (controlsDoors) {
+        controlsDoors.visible = false;
+        controlsDoors.renderable = false;
+      }
+      for (const wall of canvas?.walls?.placeables || []) {
+        if (!wall?.isDoor && !wall?.document?.door) continue;
+        if (!wall.doorControl && typeof wall.createDoorControl === 'function') {
+          try { wall.createDoorControl(); } catch (_) {}
+        }
+        if (!wall.doorControl) continue;
+        wall.doorControl.visible = false;
+        wall.doorControl.renderable = false;
+        wall.doorControl.alpha = 0;
+        if (wall.doorControl.icon) {
+          wall.doorControl.icon.visible = false;
+          wall.doorControl.icon.renderable = false;
+        }
+      }
+    } catch (_) {}
+  }
+
+  /**
    * @private
    */
   _refreshFoundryDoorControlVisibility() {
     try {
+      if (this._areDoorControlsSuppressed()) {
+        this._hideAllFoundryDoorControls();
+        return;
+      }
+
       if (this._isWallsEditingMode()) {
         const controlsDoors = canvas?.controls?.doors;
         if (controlsDoors) {
@@ -1152,9 +1209,14 @@ export class ControlsIntegration {
       // Door controls: only show if the wall is on the current floor.
       // This prevents players from seeing/clicking doors on other floors.
       const onCurrentFloor = this._isWallOnCurrentFloor(wall);
+      const doorUiSuppressed = this._areDoorControlsSuppressed();
       if (wall.doorControl) {
-        wall.doorControl.visible = onCurrentFloor;
-        wall.doorControl.alpha = onCurrentFloor ? 1 : 0;
+        wall.doorControl.visible = !doorUiSuppressed && onCurrentFloor;
+        wall.doorControl.alpha = (!doorUiSuppressed && onCurrentFloor) ? 1 : 0;
+        if (wall.doorControl.icon) {
+          wall.doorControl.icon.visible = !doorUiSuppressed && onCurrentFloor;
+          wall.doorControl.icon.renderable = !doorUiSuppressed && onCurrentFloor;
+        }
       }
 
       wall.visible = true;
@@ -1348,6 +1410,15 @@ export class ControlsIntegration {
         if (wall.endpoints) {
           wall.endpoints.visible = false;
           wall.endpoints.alpha = 0;
+        }
+        if (this._areDoorControlsSuppressed() && wall.doorControl) {
+          wall.doorControl.visible = false;
+          wall.doorControl.renderable = false;
+          wall.doorControl.alpha = 0;
+          if (wall.doorControl.icon) {
+            wall.doorControl.icon.visible = false;
+            wall.doorControl.icon.renderable = false;
+          }
         }
       } catch (_) {
       }
